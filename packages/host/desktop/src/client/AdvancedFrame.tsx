@@ -1,5 +1,6 @@
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
-import { useCallback, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import type { PanelInfo } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from './contracts.ts'
 import type { DesktopClientPlatform } from './environment.ts'
@@ -22,18 +23,38 @@ export type AdvancedFrameProps = PropsRuntime<'root'>
   & AdvancedFrameInjected
 
 /**
+ * Selected main key alone: the selector is module-level so the standard
+ * `usePanelInfo` binding sees a stable projection (its equality is `Object.is`),
+ * and a geometry publish never re-renders the conversation column.
+ * @param info - root panel selection snapshot.
+ * @returns the registered main key, or null for the Conversation.
+ */
+function selectActivePanelId(info: PanelInfo): string | null {
+  return info.activePanelId
+}
+
+/**
  * Desktop-owned transparent frame around the unchanged product surfaces.
  *
  * Mirrors the rc.2 `ui-layout` AppFrame solve: the left column holds the
  * upstream sidebar, `main` renders the selected panel (the Conversation under
  * the reserved `conversation` key), and the right column is a track the right
  * Sidebar's occupant asks for through `ctx.layout.openRightbar`.
+ *
+ * Subscription granularity follows upstream: the frame itself reads the whole
+ * layout snapshot (it owns the grid tracks and the drag handles, so every
+ * measurement is its business), while `main` resolves its dispatch key from the
+ * root `usePanelInfo` source and memoizes the rendered element — panel
+ * selection, not geometry, is what re-renders the conversation column.
  */
-export function AdvancedFrame({ layout, platform, renderSlot }: AdvancedFrameProps) {
+export function AdvancedFrame({ layout, platform, renderSlot, usePanelInfo }: AdvancedFrameProps) {
   const subscribeLayout = useCallback((listener: () => void) => layout.subscribe(listener), [layout])
   const readLayout = useCallback(() => layout.getSnapshot(), [layout])
   const state = useSyncExternalStore(subscribeLayout, readLayout)
-  const { layoutInfo, panelInfo } = state
+  const { layoutInfo } = state
+  // The root standard source publishes panel selection on its own channel
+  // (`panelInfo.subscribe`), so this selector does not wake on drag geometry.
+  const activePanelId = usePanelInfo(selectActivePanelId)
   const frameRef = useRef<HTMLDivElement>(null)
 
   // Track the frame's own box (not the window): rAF-throttled ResizeObserver.
@@ -82,6 +103,19 @@ export function AdvancedFrame({ layout, platform, renderSlot }: AdvancedFramePro
     layoutInfo.rightbarTrack ? rightbarPreference : 0,
     collapsedWidth,
   )
+  // Element identity, not just render count: `main` re-dispatches only when the
+  // selected key changes, so a sidebar/rightbar drag leaves the conversation
+  // subtree untouched. The sidebar element follows the same rule for its two
+  // own parameters, and the overlay takes no parameters at all.
+  const main = useMemo(
+    () => renderSlot('main', {}, { entryKey: activePanelId ?? 'conversation' }),
+    [activePanelId, renderSlot],
+  )
+  const sidebar = useMemo(
+    () => renderSlot('sidebar', { collapsed: sidebarCollapsed, width: cols.sidebar }),
+    [cols.sidebar, renderSlot, sidebarCollapsed],
+  )
+  const overlays = useMemo(() => renderSlot('shell.overlay', {}), [renderSlot])
 
   return (
     <div
@@ -98,11 +132,11 @@ export function AdvancedFrame({ layout, platform, renderSlot }: AdvancedFramePro
       {platform === 'win32' && <div className="dshDesktopWindowsCaptionRow" aria-hidden="true" />}
       <aside className="dshDesktopSidebarSurface">
         <div className="dshDesktopUpstreamSidebar">
-          {renderSlot('sidebar', { collapsed: sidebarCollapsed, width: cols.sidebar })}
+          {sidebar}
         </div>
       </aside>
       <main className="dshDesktopConversationSurface">
-        {renderSlot('main', {}, { entryKey: panelInfo.activePanelId ?? 'conversation' })}
+        {main}
       </main>
       {/* The right column is root-scoped in rc.2: its occupant owns the Session
           binding (the right Sidebar renders `rightbar.session` itself), so the
@@ -115,7 +149,7 @@ export function AdvancedFrame({ layout, platform, renderSlot }: AdvancedFramePro
         })}
       </aside>
       <div className="dshDesktopOverlay" data-shell-overlay>
-        {renderSlot('shell.overlay', {})}
+        {overlays}
       </div>
       {!sidebarCollapsed && (
         <ResizeHandle

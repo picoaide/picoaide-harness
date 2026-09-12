@@ -1,6 +1,15 @@
 /** Fail-loud verification of the runtime entries sealed into Electron's app.asar. */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
@@ -25,6 +34,8 @@ export interface PackagedRuntimeContext {
     readonly appInfo: {
       readonly productFilename: string
     }
+    /** Launcher file name LinuxPackager pins (`dsh-plugin-desktop`); mac/win use `productFilename`. */
+    readonly executableName?: string
   }
 }
 
@@ -48,6 +59,10 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'build/app-icon-mac.png',
   'build/tray-iconTemplate.png',
   'build/tray-icon-blue.png',
+  // 品牌几何真源在包内的落点(`brand-prepare.mjs` 产出:官方构建 = brands/official/logo.svg
+  // 的逐字节副本,渠道构建 = 该渠道自己的 mark)。被服务的 favicon 曾经是上游鱼(P0-2),
+  // 这里同时断言"存在"与"内容不带上游特征"(见 assertBrandAssetSvg)。
+  'build/web-brand/favicon.svg',
   'node_modules/@deepseek-ai/dsh/package.json',
   // Upstream 0.1.2: shipped presets moved from @deepseek-ai/dsh/config to
   // the agent-presets package root `presets/` directory.
@@ -60,7 +75,7 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
 ] as const
 
 /** Physical entries that Electron cannot load from ASAR (native binaries). */
-const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
+export const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
   // process.dlopen (native .node) and child_process.execFile (binaries) land here.
   // smartUnpack unpacks whole package dirs containing them.
   // P2-52: 路径必须与真实产物一致(2026-09-08 在 dist/linux-unpacked 上逐条核对)。
@@ -77,7 +92,55 @@ const REQUIRED_UNPACKED_RUNTIME_ENTRIES = [
   // patched), so it must stay physical — the desktop asar-spawn rewrite
   // resolves the virtual path to this twin at spawn time.
   'node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/landlock-run',
+  // rc.2 的会话写入走 @deepseek-ai/node-addon-system 的 flock(dlopen 平台包里的
+  // system.node)。旧清单只列 landlock-run ⇒「启动器在、flock 模块缺」时家族断言
+  // 仍然通过,而会话写入会退化成"写失败 + 不可读的内部错误"(P1-5/P2-15)。
+  // linux 平台包同时带 glibc / musl 两个 libc 变体,两个都要在。
+  'node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/glibc/system.node',
+  'node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/musl/system.node',
 ] as const
+
+/**
+ * Brand geometry staged by `brand-prepare.mjs` (official build: a byte copy of
+ * `brands/official/logo.svg`; channel build: that channel's own mark, which is
+ * a completely different drawing — moka's mark has no `scale(1.25)`).
+ */
+export const PACKAGED_WEB_BRAND_FAVICON = 'build/web-brand/favicon.svg'
+
+/**
+ * Upstream-only markers the packaged brand asset must never carry.
+ *
+ * `48.8354` is a coordinate of the upstream DeepSeek fish path shipped by
+ * `@deepseek-ai/dsh-web-frontend/dist/favicon.svg`; the vendor names catch a
+ * text-level fallback. Measured 2026-09-12: upstream favicon contains the fish
+ * coordinate, `brands/official/logo.svg` contains neither.
+ */
+const FORBIDDEN_BRAND_MARKERS = [
+  { pattern: /48\.8354/u, label: '上游鱼形路径坐标' },
+  { pattern: /DeepSeek|deepseek-harness/iu, label: '上游厂商名' },
+] as const
+
+/**
+ * Assert one packaged brand asset is an SVG document without upstream markers
+ * (P0-2 的门禁半边:被服务的 favicon / PWA 图标曾经整体是上游品牌,而所有
+ * Electron 界面都显示我方品牌 —— 品牌层在构建期失效时必须在打包时拦住)。
+ * @param svg - 文件内容。
+ * @param where - 错误信息里的位置(档案路径或物理路径)。
+ * @returns Nothing; failure rejects with the offending marker.
+ */
+export function assertBrandAssetSvg(svg: string, where: string): void {
+  if (!/<svg[\s/>]/u.test(svg)) {
+    throw new Error(`dsh-plugin-desktop: packaged brand asset ${where} is not an SVG document`)
+  }
+  for (const { pattern, label } of FORBIDDEN_BRAND_MARKERS) {
+    if (pattern.test(svg)) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged brand asset ${where} carries ${label} (${String(pattern)}); `
+        + 'the brand layer failed at build time (brand-prepare.mjs) and the upstream mark would ship',
+      )
+    }
+  }
+}
 
 /** Prebuilt Node-API modules required when the Windows package skips native source rebuilds. */
 export const REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES = [
@@ -107,6 +170,61 @@ export function nativeAddonRequirement(electronPlatformName: string): NativeAddo
   if (electronPlatformName === 'linux') return 'family-and-launcher'
   if (electronPlatformName === 'darwin') return 'family'
   return 'none'
+}
+
+/**
+ * Physical files every platform package of `@deepseek-ai/node-addon-system` must
+ * ship. linux carries the spawned landlock launcher plus the dlopen'd flock
+ * module in both libc flavours; darwin carries the dlopen'd module only (its
+ * package has no `landlock-run`, which is a Linux-only launcher).
+ */
+const NATIVE_ADDON_PLATFORM_FILES: Record<string, readonly string[]> = {
+  linux: ['bin/landlock-run', 'bin/glibc/system.node', 'bin/musl/system.node'],
+  darwin: ['bin/system.node'],
+}
+
+/**
+ * Resolve the `node-addon-system` platform packages a packaged tree must carry,
+ * keyed by Electron Builder's arch enum (`0` ia32, `1` x64, `3` arm64,
+ * `4` universal).
+ *
+ * P2-16: the family check used to accept "any platform package with a
+ * landlock-run", which an x64 artifact satisfied through the linux-arm64 copy
+ * that `supportedArchitectures` also installs (measured in
+ * `dist/linux-unpacked`: both `node-addon-system-linux-x64` and
+ * `-linux-arm64` are present). The flock module is dlopen'd, so the CPU has to
+ * match or session writes fail at runtime.
+ * @param electronPlatformName - Electron's `process.platform` value.
+ * @param arch - Electron Builder target arch; undefined when the caller cannot know it.
+ * @returns required package names; empty means "no arch-specific requirement"
+ *   (legacy behaviour: any family member satisfies the family check).
+ */
+export function nativeAddonPlatformPackages(
+  electronPlatformName: string,
+  arch?: number,
+): readonly string[] {
+  const cpu = arch === 0 ? 'ia32' : arch === 1 ? 'x64' : arch === 3 ? 'arm64' : undefined
+  if (electronPlatformName === 'linux') {
+    // Upstream publishes linux-x64 / linux-arm64 only (optionalDependencies);
+    // there is no linux-ia32 platform package.
+    return cpu === 'x64' || cpu === 'arm64'
+      ? [`@deepseek-ai/node-addon-system-linux-${cpu}`]
+      : []
+  }
+  if (electronPlatformName === 'darwin') {
+    // A universal bundle carries both slices, so both platform packages must
+    // be physical; a single-arch build needs exactly its own.
+    if (arch === 4) {
+      return [
+        '@deepseek-ai/node-addon-system-darwin-arm64',
+        '@deepseek-ai/node-addon-system-darwin-x64',
+      ]
+    }
+    return cpu === 'x64' || cpu === 'arm64'
+      ? [`@deepseek-ai/node-addon-system-darwin-${cpu}`]
+      : []
+  }
+  return []
 }
 
 /** CPU-specific runtime assets that must coexist in a universal macOS application. */
@@ -350,6 +468,35 @@ function normalizeArchiveEntry(entry: string): string {
   return entry.replaceAll('\\', '/').replace(/^\/+/, '').replace(/\/+$/, '')
 }
 
+/**
+ * Read one package-relative entry out of a packaged root.
+ *
+ * `app.asar` needs Electron's archive reader; the physical (`asar: false`)
+ * layout is a real directory. The 4th parameter of {@link verifyPackagedRuntime}
+ * lets tests inject this seam (it is the only place the gate reads package
+ * *content* rather than listing entries).
+ */
+export type PackageEntryReader = (root: string, entry: string) => string
+
+/** Default entry reader (archive vs physical tree). */
+function readPackagedEntry(root: string, entry: string): string {
+  return root.endsWith('.asar')
+    ? extractFile(root, entry).toString('utf8')
+    : readFileSync(join(root, entry), 'utf8')
+}
+
+/**
+ * Verify the packaged brand geometry by reading it back out of the package
+ * (archive or physical tree) and asserting it is our SVG, not the upstream
+ * mark (P0-2/P0-3).
+ * @param read - reads one package-relative entry.
+ * @param where - location prefix for error messages.
+ * @returns Nothing; failure rejects an upstream/unreadable brand asset.
+ */
+function verifyWebBrandFavicon(read: (entry: string) => string, where: string): void {
+  assertBrandAssetSvg(read(PACKAGED_WEB_BRAND_FAVICON), `${where}:${PACKAGED_WEB_BRAND_FAVICON}`)
+}
+
 /** Try to list one archive; an absent archive is the physical-layout signal. */
 function tryListArchive(archivePath: string, list: ArchiveLister): ReadonlySet<string> | undefined {
   let entries: readonly string[]
@@ -435,13 +582,14 @@ function verifyUnpackedPackageResolution(
  * @param context - Electron Builder's afterPack context.
  * @param list - ASAR listing implementation.
  * @param exists - physical-file probe for the unpacked CLI dependency tree.
- * @param resolvePackage - package resolver anchored at the physical root manifest.
+ * @param readEntry - archive-entry reader used for content assertions (brand asset).
  * @returns Nothing; failure rejects the package before signing.
  */
 export function verifyPackagedRuntime(
   context: PackagedRuntimeContext,
   list: ArchiveLister = listPackage,
   exists: FileProbe = existsSync,
+  readEntry: PackageEntryReader = readPackagedEntry,
 ): void {
   const asarPath = resolvePackagedAsarPath(context)
   const asarEntries = tryListArchive(asarPath, list)
@@ -449,7 +597,7 @@ export function verifyPackagedRuntime(
     // Physical layout (asar: false): the runtime is a real file tree (the
     // layout the desktop ships so profile-relative resolution and preset
     // discovery disk checks see real files).
-    verifyPhysicalRuntime(resolvePackagedAppRoot(context), exists)
+    verifyPhysicalRuntime(resolvePackagedAppRoot(context), exists, readEntry)
     return
   }
   const unpackedRoot = resolvePackagedUnpackedRoot(context)
@@ -497,8 +645,47 @@ export function verifyPackagedRuntime(
         + '(the POSIX sandbox launcher and the flock module the session writer leases through)',
       )
     }
+    // P2-16: 家族断言必须**按架构**匹配。上游 supportedArchitectures 会在安装树里
+    // 同时放 x64 与 arm64 平台包(实测 x64 产物的 app.asar.unpacked 里
+    // node-addon-system-linux-arm64 也在),所以"任意一个平台包里有 landlock-run"
+    // 会被**另一个架构**的包满足;而 flock 是 dlopen 的,架构不匹配 = 会话写不了。
+    // 注意 family 里是目录名(无 scope),期望值用完整包名,比较前剥掉 scope。
+    const expectedPlatforms = nativeAddonPlatformPackages(context.electronPlatformName, context.arch)
+    const expectedDirs = expectedPlatforms.map(name => name.replace(/^@[^/]+\//u, ''))
+    const matched = expectedDirs.length === 0
+      ? family
+      : expectedDirs.filter(name => family.includes(name))
+    if (expectedDirs.length > 0 && matched.length === 0) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} ships ${family.join(', ')} `
+        + `but the ${context.electronPlatformName} target built for arch ${String(context.arch)} requires `
+        + `${expectedDirs.join(' or ')} (the flock module the session writer leases through is dlopen'd, `
+        + 'so the CPU must match)',
+      )
+    }
+    if (matched.length !== expectedDirs.length) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} is missing `
+        + `${expectedDirs.filter(name => !matched.includes(name)).join(', ')} `
+        + '(a universal bundle carries both architecture slices)',
+      )
+    }
+    // 每个匹配到的平台包都必须带齐自己的原生文件:flock 的 system.node(linux 双 libc
+    // 变体 / darwin 单文件)与 linux 的 landlock-run 启动器。缺一个都可能在启动期或
+    // 第一次写会话时才炸,而 afterPack 是最后一道能拦住它的门。
+    const requiredPlatformFiles = NATIVE_ADDON_PLATFORM_FILES[context.electronPlatformName] ?? []
+    const missingPlatformFiles = matched.flatMap(name => requiredPlatformFiles
+      .filter(file => !existsSync(join(addonScope, name, file)))
+      .map(file => `${name}/${file}`))
+    if (missingPlatformFiles.length > 0) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} is missing required native files in the `
+        + `@deepseek-ai/node-addon-system family: ${missingPlatformFiles.join(', ')} `
+        + '(the flock module is what makes sessions writable; verify build.asarUnpack ships the platform package)',
+      )
+    }
     if (addonRequirement === 'family-and-launcher'
-      && !family.some(name => existsSync(join(addonScope, name, 'bin', 'landlock-run')))) {
+      && !matched.some(name => existsSync(join(addonScope, name, 'bin', 'landlock-run')))) {
       throw new Error(
         `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} has no physical landlock-run launcher `
         + `(checked ${family.join(', ')}); verify the build.asarUnpack glob names the current package family`,
@@ -521,6 +708,9 @@ export function verifyPackagedRuntime(
     }
   }
   verifyUnpackedPackageResolution(asarPath, asarEntries)
+  // 品牌静态素材:存在性由 REQUIRED_PACKAGED_RUNTIME_ENTRIES 保证,这里把内容读出来
+  // 断言"是我方几何、不是上游鱼"(P0-2)。
+  verifyWebBrandFavicon(entry => readEntry(asarPath, entry), asarPath)
 }
 
 /**
@@ -549,11 +739,13 @@ function unpackedPackageDir(entry: string): string {
  * the sealed list).
  * @param appRoot - absolute path to the physical application root.
  * @param exists - physical-file probe.
+ * @param readEntry - package-entry reader (brand asset content assertion).
  * @returns Nothing; failure rejects the package before signing.
  */
 function verifyPhysicalRuntime(
   appRoot: string,
   exists: FileProbe,
+  readEntry: PackageEntryReader,
 ): void {
   const missing = REQUIRED_PACKAGED_RUNTIME_ENTRIES.filter(entry => !exists(join(appRoot, entry)))
   if (missing.length > 0) {
@@ -567,6 +759,7 @@ function verifyPhysicalRuntime(
       `dsh-plugin-desktop: packaged runtime at ${appRoot} is missing required package exports: ${missingExports.map(entry => entry.archivePath).join(', ')}`,
     )
   }
+  verifyWebBrandFavicon(entry => readEntry(appRoot, entry), appRoot)
 }
 
 /** Package names smartUnpack legitimately keeps physical (native binaries). */
@@ -614,15 +807,228 @@ function listUnpackedUnsafeJs(unpackedRoot: string): string[] {
   return found
 }
 
+/** Timeout for the packaged flock smoke (a hung Electron must not hang afterPack). */
+export const PACKAGED_FLOCK_SMOKE_TIMEOUT_MS = 10_000
+
+/** Success marker the embedded flock script prints; a silent exit 0 is a failure. */
+const FLOCK_SMOKE_OK = 'FLOCK-SMOKE-OK'
+
+/**
+ * Embedded flock smoke script.
+ *
+ * Runs inside the **packaged** launcher with `ELECTRON_RUN_AS_NODE=1`: only
+ * Electron's fs patch can read `app.asar`, so plain Node cannot load the module
+ * out of the sealed archive (the audit that found P1-5 verified the same path by
+ * hand). It resolves the flock entry the way the runtime does — through the
+ * package's `exports` map — takes a real exclusive lock on a temp file, and then
+ * proves the lock is real by failing to take it again from a second descriptor
+ * (POSIX flock is per open-file-description, so contention must raise
+ * EAGAIN/EWOULDBLOCK). It never touches `bin/landlock-run`.
+ */
+const FLOCK_SMOKE_SCRIPT = `import { createRequire } from 'node:module'
+import { closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+
+const appRoot = process.argv[2]
+const appRequire = createRequire(join(appRoot, 'package.json'))
+const flockUrl = pathToFileURL(appRequire.resolve('@deepseek-ai/node-addon-system/flock')).href
+const { tryLockExclusive } = await import(flockUrl)
+const dir = mkdtempSync(join(tmpdir(), 'dsh-flock-smoke-'))
+const lockFile = join(dir, 'session.lock')
+writeFileSync(lockFile, '')
+const fd = openSync(lockFile, 'r+')
+const contender = openSync(lockFile, 'r+')
+try {
+  await tryLockExclusive(fd)
+  let contended = false
+  try {
+    await tryLockExclusive(contender)
+  } catch (error) {
+    contended = error?.code === 'EAGAIN' || error?.code === 'EWOULDBLOCK'
+  }
+  if (!contended) {
+    throw new Error('a second descriptor acquired the same lock; the flock binding did not actually lock')
+  }
+  process.stdout.write('${FLOCK_SMOKE_OK}\\n')
+} finally {
+  closeSync(contender)
+  closeSync(fd)
+  rmSync(dir, { recursive: true, force: true })
+}
+`
+
+/** Result shape of one flock smoke launcher invocation (injectable in tests). */
+export interface FlockSmokeProcessResult {
+  readonly status: number | null
+  readonly stdout: string
+  readonly stderr: string
+  readonly error?: { readonly code?: string | undefined, readonly message?: string | undefined }
+}
+
+/** Injectable flock smoke launcher (tests). */
+export type FlockSmokeLauncher = (
+  executable: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+) => FlockSmokeProcessResult
+
+/** Default launcher: the packaged Electron in Node mode, hard timeout. */
+function runFlockSmokeProcess(
+  executable: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): FlockSmokeProcessResult {
+  const result = spawnSync(executable, [...args], {
+    env,
+    encoding: 'utf8',
+    timeout: PACKAGED_FLOCK_SMOKE_TIMEOUT_MS,
+  })
+  return {
+    status: result.status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+    ...(result.error === undefined
+      ? {}
+      : { error: { code: (result.error as NodeJS.ErrnoException).code, message: result.error.message } }),
+  }
+}
+
+/**
+ * Resolve the packaged launcher candidates (first existing wins).
+ * LinuxPackager names its launcher after the package (`dsh-plugin-desktop`);
+ * macOS/Windows use the product filename inside the bundle / with `.exe`.
+ * A directory scan is appended as a fallback so a renamed launcher (channel
+ * build, future Electron Builder change) still resolves instead of failing the
+ * gate for the wrong reason — the candidates are only used to *run* the
+ * packaged Node runtime, so a wrong candidate fails loudly on spawn.
+ * @param context - Electron Builder's afterPack context.
+ * @returns candidate absolute paths, most specific first.
+ */
+export function resolvePackagedLauncherCandidates(context: PackagedRuntimeContext): string[] {
+  const product = context.packager.appInfo.productFilename
+  if (context.electronPlatformName === 'darwin') {
+    const macosDir = join(context.appOutDir, `${product}.app`, 'Contents', 'MacOS')
+    const scanned = safeReaddir(macosDir).filter(name => !name.startsWith('.'))
+    return [...new Set([join(macosDir, product), ...scanned.map(name => join(macosDir, name))])]
+  }
+  const executableName = typeof context.packager.executableName === 'string' && context.packager.executableName !== ''
+    ? context.packager.executableName
+    : undefined
+  const names = [executableName, product].filter((name): name is string => name !== undefined)
+  const suffix = context.electronPlatformName === 'win32' ? '.exe' : ''
+  const named = [...new Set(names)].map(name => join(context.appOutDir, `${name}${suffix}`))
+  if (context.electronPlatformName !== 'linux') return named
+  const known = /^(?:chrome-sandbox|chrome_crashpad_handler|.*\.(?:so(?:\.\d+)*|pak|dat|bin|json|html|txt|png|yml))$/u
+  const scanned = safeReaddir(context.appOutDir)
+    .filter(name => !known.test(name))
+    .map(name => join(context.appOutDir, name))
+  return [...new Set([...named, ...scanned])]
+}
+
+/** List a directory defensively (packaging fixtures and absent bundles). */
+function safeReaddir(dir: string): string[] {
+  try {
+    return readdirSync(dir)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Smoke the packaged flock path end to end: run the sealed application's Node
+ * runtime, load `@deepseek-ai/node-addon-system/flock` from inside the package
+ * and take a real lock on a temp file.
+ *
+ * P1-5: `verifyPackagedRuntime` only proves the *files* exist; a module that
+ * dlopens the wrong libc variant, loses its `.node`, or silently degrades to
+ * read-only would still pass. This is the executable half of "sessions stay
+ * writable in the packaged app". Windows is skipped by design (flock is POSIX;
+ * Windows session locking uses the persistence package's kernel32 semaphores).
+ * @param context - Electron Builder's afterPack context.
+ * @param launch - process launcher (tests inject a stub).
+ * @returns Nothing; failure rejects with the captured process output.
+ */
+export function smokePackagedFlockLock(
+  context: PackagedRuntimeContext,
+  launch: FlockSmokeLauncher = runFlockSmokeProcess,
+): void {
+  if (context.electronPlatformName === 'win32') {
+    console.log(
+      'dsh-plugin-desktop: packaged flock smoke skipped on win32 '
+      + '(POSIX flock; Windows session locking uses kernel32 named semaphores)',
+    )
+    return
+  }
+  if (nativeAddonRequirement(context.electronPlatformName) === 'none') {
+    console.log(`dsh-plugin-desktop: packaged flock smoke skipped on ${context.electronPlatformName}`)
+    return
+  }
+  const asarPath = resolvePackagedAsarPath(context)
+  // Archive layout: the app root IS app.asar (only the Electron fs patch can read
+  // it). Physical layout (asar: false): the real application directory.
+  const appRoot = existsSync(asarPath) ? asarPath : resolvePackagedAppRoot(context)
+  const candidates = resolvePackagedLauncherCandidates(context)
+  const executable = candidates.find(candidate => existsSync(candidate))
+  if (executable === undefined) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged flock smoke cannot find the packaged launcher (tried ${candidates.join(', ')}); `
+      + 'the afterPack context must carry packager.executableName / appInfo.productFilename',
+    )
+  }
+  const root = mkdtempSync(join(tmpdir(), 'dsh-flock-smoke-'))
+  try {
+    const scriptPath = join(root, 'flock-smoke.mjs')
+    writeFileSync(scriptPath, FLOCK_SMOKE_SCRIPT)
+    const result = launch(executable, [scriptPath, appRoot], {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1',
+    })
+    if (result.error !== undefined) {
+      const code = result.error.code ?? ''
+      if (code === 'ETIMEDOUT' || code === 'ESRCH') {
+        throw new Error(
+          `dsh-plugin-desktop: packaged flock smoke timed out after ${String(PACKAGED_FLOCK_SMOKE_TIMEOUT_MS)}ms `
+          + `(${executable}) — the packaged launcher did not finish loading flock`,
+        )
+      }
+      throw new Error(
+        `dsh-plugin-desktop: packaged flock smoke could not start ${executable} (${code}: ${String(result.error.message)})`,
+      )
+    }
+    if (result.status !== 0) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged flock smoke failed (exit ${String(result.status)}) — `
+        + 'sessions would not be writable in this build (P2-15: it degrades to "write failed" with an unreadable internal error).\n'
+        + `  launcher: ${executable}\n  app root: ${appRoot}\n`
+        + `${result.stdout.trimEnd()}\n${result.stderr.trimEnd()}`,
+      )
+    }
+    if (!result.stdout.includes(FLOCK_SMOKE_OK)) {
+      throw new Error(
+        'dsh-plugin-desktop: packaged flock smoke exited 0 without reporting '
+        + `${FLOCK_SMOKE_OK} — the smoke script did not run to completion`,
+      )
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
 /**
  * Run the static packaged-runtime check as Electron Builder's afterPack hook.
  * @param context - Electron Builder's afterPack context.
+ * @param verify - static verification implementation (tests).
+ * @param smoke - packaged diagnostic worker smoke (tests).
+ * @param flockSmoke - packaged flock smoke (tests).
  * @returns A promise that rejects before signing when the runtime is incomplete.
  */
 export async function afterPack(
   context: PackagedRuntimeContext,
   verify: typeof verifyPackagedRuntime = verifyPackagedRuntime,
   smoke: PackagedDiagnosticWorkerSmoke = smokePackagedDiagnosticWorker,
+  flockSmoke: (context: PackagedRuntimeContext) => void = smokePackagedFlockLock,
 ): Promise<void> {
   verify(context)
   const asarPath = resolvePackagedAsarPath(context)
@@ -632,4 +1038,5 @@ export async function afterPack(
     ? resolvePackagedUnpackedRoot(context)
     : resolvePackagedAppRoot(context)
   await smoke(sourceRoot, undefined, asarPath)
+  flockSmoke(context)
 }

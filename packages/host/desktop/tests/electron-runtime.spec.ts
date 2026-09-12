@@ -1038,6 +1038,12 @@ describe('Electron compatibility runtime', () => {
     const csp = headers?.['Content-Security-Policy']?.[0]
     expect(csp).toBeDefined()
     expect(csp).toContain("img-src 'self' data: blob: http: https:")
+    // 2026-09-12（P0，打包版真机复现）：rc2 的附件上传与右栏 PDF 预览只用
+    // Blob-URL Worker；CSP3 的 worker 回退链是 worker-src→child-src→script-src→
+    // default-src，`script-src` 已声明时 `default-src` 的 blob: 不再参与回退 ——
+    // 少了这条指令，非图片附件必定上传失败（图片走 base64 不受影响）。
+    // 注意：这条测试只钉指令表；指令**能力**由 e2e 真机断言覆盖。
+    expect(csp).toContain("worker-src 'self' blob:")
     // 收紧的部分不能被顺手放开：脚本仍限本地。
     expect(csp).toContain("script-src 'self' 'unsafe-inline' 'unsafe-eval'")
     expect(csp).toContain("default-src 'self' data: blob: ws:")

@@ -28,6 +28,20 @@ const PRODUCT_NAME = packagedProductName()
  */
 const OFFICIAL_BRAND_NAME = 'PicoAide'
 
+/**
+ * 上游厂商标识：**任何构建**（含官方）都不得出现在品牌面上。
+ *
+ * 2026-09-12 修正：旧断言只查 `OFFICIAL_BRAND_NAME`（我方厂商名），于是它只能发现
+ * "渠道构建漏出我方品牌"，**永远发现不了上游品牌泄漏**（DeepSeek 鱼形 mark /
+ * 「DeepSeek Harness」/「DSH 本地构建」）；而且它只在官方构建跳过、只在登录页
+ * 时刻跑、只读 `innerText`（图形看不见）。现在：官方构建也跑，检查移到主界面
+ * 挂载之后，并同时查品牌槽的**归属**与被服务的 favicon/manifest 内容。
+ *
+ * 注意 `DeepSeek` 在**模型名**里是合法文案（模型选择器显示 DeepSeek-V4-Flash），
+ * 所以正文扫描限定在登录页与 `document.title`，界面正文不整体扫。
+ */
+const UPSTREAM_BRAND_TOKENS = ['DeepSeek', 'deepseek-harness', 'DSH', 'DSH 本地构建']
+
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const GATEWAY_PORT = 34567
 const CDP_PORT = 9223
@@ -260,21 +274,28 @@ async function main() {
   // 断言对齐**本次构建声明的产品名**（渠道构建下是客户名），不硬编码厂商名:
   // 旧写法把厂商名直接写进断言,渠道构建的 E2E 于是永远红。
   const titleOk = title.includes(PRODUCT_NAME)
-  // 白标不变量(2026-09-10):渠道构建下**界面上不得出现厂商品牌**。这条断言让
-  // E2E 自己成为白标的门禁 —— 侧边栏/标题/托盘文案任何一处漏出厂商名,这里就红
-  // (此前只在人工探针里查,CI 无从发现)。官方构建的品牌本来就是厂商名,跳过。
-  let brandLeak = ''
-  // `E2E_FORCE_BRAND_LEAK_CHECK=1` 只给"证明这条门禁真的会红"用:官方构建里
-  // 厂商名是合法文案,强制开启后应当失败(自测门禁本身)。
+  // 白标不变量（2026-09-10 起，2026-09-12 修正口径）：
+  //  · 渠道构建下**不得出现我方厂商名**（否则白标被洗掉）；
+  //  · **任何构建**下登录页与 `document.title` 不得出现**上游**厂商标识
+  //    （鱼形文案、「DeepSeek Harness」、「DSH 本地构建」）。
+  // 旧写法把"上游泄漏"这条漏掉了：它查的是 OFFICIAL_BRAND_NAME，官方构建还整条跳过。
   const channelBuild = !PRODUCT_NAME.toLowerCase().includes(OFFICIAL_BRAND_NAME.toLowerCase())
-  if (channelBuild || process.env.E2E_FORCE_BRAND_LEAK_CHECK === '1') {
-    const text = await evalSafe(cdp, `document.body.innerText + ' ' + document.title`)
-    if (typeof text === 'string' && text.includes(OFFICIAL_BRAND_NAME)) brandLeak = 'body/title contains the vendor brand'
+  const loginText = await evalSafe(cdp, `document.body.innerText + ' ' + document.title`)
+  const leaks = []
+  if (typeof loginText === 'string') {
+    if (channelBuild && loginText.includes(OFFICIAL_BRAND_NAME)) leaks.push(`vendor:${OFFICIAL_BRAND_NAME}`)
+    for (const token of UPSTREAM_BRAND_TOKENS) {
+      if (new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}\\b`, 'u').test(loginText)) leaks.push(`upstream:${token}`)
+    }
+    // `E2E_FORCE_BRAND_LEAK_CHECK=1`：官方构建也把厂商名当泄漏（用来证明门禁真的会红）。
+    if (process.env.E2E_FORCE_BRAND_LEAK_CHECK === '1' && loginText.includes(OFFICIAL_BRAND_NAME)) {
+      leaks.push(`forced-vendor:${OFFICIAL_BRAND_NAME}`)
+    }
   }
   reportStep(
-    '登录成功（mock gateway）',
-    titleOk && brandLeak === '',
-    `title=${title} expected=${PRODUCT_NAME}${brandLeak === '' ? '' : ` leak=${brandLeak}`}`,
+    '登录成功（mock gateway）且品牌面无厂商泄漏',
+    titleOk && leaks.length === 0,
+    `title=${title} expected=${PRODUCT_NAME}${leaks.length === 0 ? '' : ` leaks=${leaks.join(',')}`}`,
   )
   await screenshot(cdp, '01-login-main')
 
@@ -319,10 +340,33 @@ async function main() {
     await clickLabel(cdp, '关闭', 1000)
   }
 
-  // 7. Cron panel direct assert via the center view.
+  // 7. Cron panel: 断言**可见性与让位**，不是"元素存在"。
+  // 2026-09-12（P1-1，打包版真机复现）：`[data-dsh-cron-view]` 容器在未激活时也在
+  // DOM 里（样式表 `display:none`），所以旧的"存在即通过"是假绿 —— 当时面板确实
+  // 挂上了，但隐藏规则的选择器（`[data-pane='conversation']` / `[class*='centerCol']`）
+  // 在我们自持 frame 下全不匹配，会话区不让位，画面是 407/407 分屏。
+  // 现在同时断言：面板可见且**占满中列**、会话区子节点全部被抑制。
   await clickLabel(cdp, '定时任务', 3500)
-  const cronOk = await waitFor(cdp, `!!document.querySelector('[data-dsh-cron-view]')`)
-  reportStep('定时任务中心面板挂载', cronOk)
+  const cronLayout = await waitFor(cdp, `(() => {
+    const view = document.querySelector('[data-dsh-cron-view]')
+    const surface = document.querySelector('.dshDesktopConversationSurface')
+    if (view === null || surface === null) return false
+    const v = view.getBoundingClientRect()
+    const s = surface.getBoundingClientRect()
+    if (v.height <= 0 || getComputedStyle(view).display === 'none') return false
+    // 面板必须吃掉中列的绝大部分高度（>90%），而不是与会话区平分。
+    if (v.height < s.height * 0.9) return false
+    const others = [...surface.children].filter(el => !el.hasAttribute('data-dsh-cron-view'))
+    return others.every(el => getComputedStyle(el).display === 'none' || el.getBoundingClientRect().height === 0)
+  })()`, 15000, 300)
+  const cronDetail = await evalSafe(cdp, `(() => {
+    const view = document.querySelector('[data-dsh-cron-view]')
+    const surface = document.querySelector('.dshDesktopConversationSurface')
+    const v = view?.getBoundingClientRect(); const s = surface?.getBoundingClientRect()
+    return { view: v ? Math.round(v.height) : null, surface: s ? Math.round(s.height) : null }
+  })()`)
+  reportStep('定时任务中心面板占满中列（会话区已让位）', cronLayout,
+    `cronH=${cronDetail?.view} surfaceH=${cronDetail?.surface}`)
   await screenshot(cdp, '06-cron')
   // Leave the cron board: its "返回聊天" header button removes the activation attr.
   await evalSafe(cdp, `(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
@@ -358,6 +402,62 @@ async function main() {
     `slots=${slots.slice(0, 12).join(',')}`,
   )
   reportStep('会话主区已挂载且无槽位装配错误', slots.includes('main.conversation') && !slotErrors, `slotErrors=${slotErrors}`)
+
+  // 9c. Brand seats + served brand assets (2026-09-12)。此前白标门禁只查
+  // "登录页文案里有没有我方厂商名"，抓不到**上游**品牌：品牌槽的 fallback 是
+  // 上游带动画的鱼形 mark（`EmptyHero` 的 `conversation.hero.brand.mark` 兜底），
+  // 而被服务的 `/favicon.svg` 就是那条鱼、`/manifest.webmanifest` 写着
+  // `DeepSeek Harness`/`DSH`。这里逐槽断言**归属**（`data-brand-mark="app"`），
+  // 并对被服务的两个品牌文件做内容断言。
+  const brandSeats = await evalSafe(cdp, `(() => {
+    const seats = ['sidebar.brand.mark', 'sidebar.brand.name', 'conversation.hero.brand.mark']
+    return seats.map(name => {
+      const el = document.querySelector('[data-slot="' + name + '"]')
+      if (el === null) return { name, present: false }
+      const html = el.innerHTML
+      return {
+        name,
+        present: true,
+        owned: el.querySelector('[data-brand-mark="app"]') !== null || el.hasAttribute('data-brand-mark'),
+        text: (el.textContent ?? '').trim().slice(0, 40),
+        fishish: /48\\.8354|DeepSeek|deepseek-harness/i.test(html),
+      }
+    })
+  })()`)
+  const seats = Array.isArray(brandSeats) ? brandSeats : []
+  const seatFailures = seats.filter(s => s.present && (s.owned !== true || s.fishish === true))
+  const heroSeat = seats.find(s => s.name === 'conversation.hero.brand.mark')
+  reportStep(
+    '品牌槽位归属本产品（含 hero 槽，排除上游鱼形 mark）',
+    seatFailures.length === 0,
+    `seats=${seats.map(s => `${s.name}:${s.present ? (s.owned ? 'ours' : 'FOREIGN') : 'absent'}`).join(',')}`
+      + (heroSeat?.present === true ? '' : '（hero 槽不在屏，跳过其归属断言）'),
+  )
+  // 注意：本脚本的 evalSafe 不带 awaitPromise（Promise 会被 returnByValue 序列化成
+  // undefined），所以这里直接走 CDP 的 awaitPromise:true。
+  const servedBrandResult = await cdp.send('Runtime.evaluate', {
+    expression: `(async () => {
+      const favicon = await fetch('/favicon.svg').then(r => r.ok ? r.text() : '').catch(() => '')
+      const manifest = await fetch('/manifest.webmanifest').then(r => r.ok ? r.json() : null).catch(() => null)
+      return {
+        faviconIsSvg: favicon.trimStart().startsWith('<svg'),
+        faviconUpstream: /48\\.8354|DeepSeek|deepseek-harness|FISH_LOGO/i.test(favicon),
+        manifestName: manifest === null ? null : manifest.name,
+        manifestShort: manifest === null ? null : manifest.short_name,
+      }
+    })()`,
+    returnByValue: true,
+    awaitPromise: true,
+  })
+  const servedBrand = servedBrandResult?.result?.value ?? null
+  reportStep(
+    '被服务的 favicon/manifest 为本产品品牌（非上游鱼形/厂商名）',
+    servedBrand?.faviconIsSvg === true && servedBrand?.faviconUpstream === false
+      && servedBrand?.manifestName === PRODUCT_NAME
+      && String(servedBrand?.manifestShort ?? '') !== 'DSH',
+    `faviconSvg=${servedBrand?.faviconIsSvg} upstream=${servedBrand?.faviconUpstream} `
+      + `manifest=${JSON.stringify(servedBrand?.manifestName)}/${JSON.stringify(servedBrand?.manifestShort)}`,
+  )
 
   // 10. Workspace picker (native dialog path).
   const wsClicked = await clickLabel(cdp, '选择工作区', 2500)

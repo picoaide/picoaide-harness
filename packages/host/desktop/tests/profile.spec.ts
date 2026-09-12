@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, lstatSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, lstatSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -62,43 +63,69 @@ afterEach(() => {
 describe('desktop profile composition', {
   timeout: process.platform === 'win32' ? 10_000 : 5_000,
 }, () => {
-  it('reads packaged Cordis skills from the physical unpacked preset root', async () => {
+  it('resolves the shipped preset root from the preset package, not the CLI package', () => {
     const home = temporaryHome()
-    const resources = join(home, 'resources')
-    const archivedDsh = join(resources, 'app.asar', 'node_modules', '@deepseek-ai', 'dsh')
-    // Preset root lives with the dsh package inside the archive; ship the
-    // skill at the same (non-unpacked) path used by the resolver.
-    const archivedSkillPath = join(
-      archivedDsh,
-      'config',
-      'agent-presets',
-      'cordis',
-      'skills',
-      'cordis-plugin-development',
-      'SKILL.md',
-    )
-    mkdirSync(join(resources, 'app.asar', 'lib'), { recursive: true })
-    mkdirSync(archivedDsh, { recursive: true })
-    mkdirSync(dirname(archivedSkillPath), { recursive: true })
-    writeFileSync(join(archivedDsh, 'package.json'), JSON.stringify({
+    const lib = join(home, 'resources', 'app.asar', 'lib')
+    const modules = join(home, 'resources', 'app.asar', 'node_modules', '@deepseek-ai')
+    mkdirSync(lib, { recursive: true })
+    // Both packages are installed: the CLI package is what the retired anchor
+    // resolved, and its `config/agent-presets` decoy is what let a wrong path
+    // look right. The shipped compositions live in the preset package.
+    const cliDir = join(modules, 'dsh')
+    const decoy = join(cliDir, 'config', 'agent-presets', 'cordis', 'skills', 'cordis-plugin-development')
+    mkdirSync(decoy, { recursive: true })
+    writeFileSync(join(cliDir, 'package.json'), JSON.stringify({
       name: '@deepseek-ai/dsh',
       exports: { './package.json': './package.json' },
     }) + '\n')
-    writeFileSync(archivedSkillPath, '# Cordis plugin development\n')
+    writeFileSync(join(decoy, 'SKILL.md'), '# cli decoy\n')
+    const presetDir = join(modules, 'dsh-agent-presets')
+    mkdirSync(join(presetDir, 'presets', 'standard'), { recursive: true })
+    writeFileSync(join(presetDir, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh-agent-presets',
+      exports: { './package.json': './package.json' },
+    }) + '\n')
+    writeFileSync(join(presetDir, 'presets', 'standard', 'agent.cordis.yml'), '- id: fixture\n')
 
-    const moduleUrl = pathToFileURL(join(resources, 'app.asar', 'lib', 'profile.js')).href
+    const moduleUrl = pathToFileURL(join(lib, 'profile.js')).href
     const resolvedRoot = shippedPresetRoot(moduleUrl)
 
+    expect(resolvedRoot).toBe(join(presetDir, 'presets'))
+    expect(readFileSync(join(resolvedRoot, 'standard', 'agent.cordis.yml'), 'utf8')).toBe('- id: fixture\n')
     // Preset root resolves through the module graph (physical in dev, inside
     // app.asar when packaged) — never rewritten to the unpacked physical tree.
     expect(resolvedRoot).not.toContain('app.asar.unpacked')
-    expect(readFileSync(join(
-      resolvedRoot,
-      'cordis',
-      'skills',
-      'cordis-plugin-development',
-      'SKILL.md',
-    ), 'utf8')).toBe('# Cordis plugin development\n')
+  })
+
+  it('pins the shipped preset root to a directory that really exists', () => {
+    const root = shippedPresetRoot()
+
+    expect(root).toBe(join(
+      dirname(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-agent-presets/package.json')),
+      'presets',
+    ))
+    // The failure this guards: a root that composes without error but names a
+    // directory no install ever creates, leaving the roster to the upstream
+    // shipped root without anyone noticing.
+    expect(existsSync(root)).toBe(true)
+    expect(existsSync(join(root, 'standard', 'agent.cordis.yml'))).toBe(true)
+  })
+
+  it('falls back to the historical CLI-relative anchor without the preset package', () => {
+    const home = temporaryHome()
+    const lib = join(home, 'resources', 'app.asar', 'lib')
+    const cliDir = join(home, 'resources', 'app.asar', 'node_modules', '@deepseek-ai', 'dsh')
+    mkdirSync(lib, { recursive: true })
+    mkdirSync(join(cliDir, 'config', 'agent-presets'), { recursive: true })
+    writeFileSync(join(cliDir, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh',
+      exports: { './package.json': './package.json' },
+    }) + '\n')
+
+    // Composition must not throw over a redundant root; the roster's own
+    // shipped root still lists the presets.
+    expect(shippedPresetRoot(pathToFileURL(join(lib, 'profile.js')).href))
+      .toBe(join(cliDir, 'config', 'agent-presets'))
   })
 
   it('adds the Web surface before third-party bundles and removes the launcher bundle duplicate', async () => {

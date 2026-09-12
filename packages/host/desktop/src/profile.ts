@@ -317,9 +317,32 @@ export function ensureDesktopProfile(home: string = resolveDshHome()): string {
   return dir
 }
 
-/** Resolve the agent presets shipped by the matching dsh CLI dependency. */
+/**
+ * Resolve the shipped agent-preset root the profile pins as a `system` root.
+ *
+ * The presets travel inside `@deepseek-ai/dsh-agent-presets` (`presets/`, in its
+ * published `files`): this roster prepends that directory itself
+ * (`includeShippedRoot`), and the CLI package ships `lib/*.js` only — it has no
+ * `config/` directory, so the former `@deepseek-ai/dsh/config/agent-presets`
+ * anchor resolved to a path that never existed. The lookup is anchored on the
+ * preset package's manifest, resolved from the same module-graph base the rest
+ * of the profile uses. It falls back to that historical anchor only when the
+ * preset package or its `presets/` directory cannot be resolved at all, so
+ * profile composition never throws over a redundant root: the roster's own
+ * shipped root still lists the presets.
+ * @param moduleUrl - module whose resolution base anchors the lookup.
+ * @returns absolute path of the shipped preset root.
+ */
 export function shippedPresetRoot(moduleUrl: string = import.meta.url): string {
   const require = createRequire(moduleUrl)
+  try {
+    const shipped = join(dirname(require.resolve('@deepseek-ai/dsh-agent-presets/package.json')), 'presets')
+    if (existsSync(shipped)) return shipped
+  } catch {
+    // Swallows MODULE_NOT_FOUND and export-map rejections for the preset
+    // package: both mean this install cannot offer the root, and the fallback
+    // below still leaves profile composition working.
+  }
   return join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'config', 'agent-presets')
 }
 
