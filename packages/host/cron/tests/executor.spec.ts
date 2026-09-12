@@ -89,15 +89,10 @@ describe('HostCronExecutor agent action', () => {
     expect(sessionController.create).not.toHaveBeenCalled()
   })
 
-  it('applies /permission before the prompt', async () => {
-    const { deps, sessionController } = fakeDeps()
-    const executor = new HostCronExecutor(deps as never)
-    const result = await executor.execute(job({ permission: 'workspace-write' }))
-    expect(result.result).toBe('succeeded')
-    expect(sessionController.prompt).toHaveBeenCalledTimes(2)
-    const firstCall = (sessionController.prompt as ReturnType<typeof vi.fn>).mock.calls[0]![0]
-    expect(JSON.stringify(firstCall)).toContain('/permission workspace-write')
-  })
+  // FIX-17: the old regression here asserted the STRING '/permission X' was in
+  // the queued prompt — which stayed green while the preset was silently
+  // dropped (the prompt channel never parses slash commands). The behavioural
+  // replacement lives in the FIX-17 describe block below.
 
   it('reports failed when the session prompt is refused', async () => {
     const { deps, sessionController } = fakeDeps({
@@ -119,5 +114,89 @@ describe('HostCronExecutor agent action', () => {
     expect(result.result).toBe('failed')
     expect(result.error).toMatch(/rename failed/)
     expect(result.sessionId).toBe('sess-1')
+  })
+})
+
+describe('FIX-17: permission preset is applied through the permission service', () => {
+  interface PermissionCall { sessionId: string; preset: string }
+
+  function permissionDeps(state: {
+    names?: readonly string[]
+    apply?: (session: { id: string }, preset: string) => void
+    current?: (session: { id: string }) => string
+    missingSession?: boolean
+    missingService?: boolean
+  } = {}) {
+    const applied: PermissionCall[] = []
+    const base = fakeDeps()
+    const deps = base.deps as unknown as Record<string, unknown>
+    if (state.missingService !== true) {
+      const service = {
+        names: state.names ?? ['read-only', 'workspace-write'],
+        set: (session: { id: string }, preset: string) => {
+          applied.push({ sessionId: session.id, preset })
+          state.apply?.(session, preset)
+        },
+        current: state.current ?? (() => state.names?.[1] ?? 'workspace-write'),
+      }
+      deps.permissionPresets = () => service
+    } else {
+      deps.permissionPresets = () => undefined
+    }
+    if (state.missingSession !== true) {
+      deps.sessions = () => ({ get: (id: string) => ({ id }) })
+    } else {
+      deps.sessions = () => undefined
+    }
+    return { ...base, deps, applied }
+  }
+
+  it('applies the preset and never sends a /permission prompt', async () => {
+    const { deps, sessionController, applied } = permissionDeps()
+    const executor = new HostCronExecutor(deps as never)
+    const result = await executor.execute(job({ permission: 'workspace-write' }))
+
+    expect(result.result).toBe('succeeded')
+    // Behavioural assertion: the preset really reached the permission service.
+    expect(applied).toEqual([{ sessionId: 'sess-1', preset: 'workspace-write' }])
+    // Exactly one prompt — the task prompt. The old implementation queued a
+    // "/permission X" line that no channel ever parsed (silent no-op).
+    expect(sessionController.prompt).toHaveBeenCalledTimes(1)
+    const promptPayload = JSON.stringify((sessionController.prompt as ReturnType<typeof vi.fn>).mock.calls[0]![0])
+    expect(promptPayload).toContain('do the thing')
+    expect(promptPayload).not.toContain('/permission')
+  })
+
+  it('fails the run when the pinned preset is not in the roster', async () => {
+    const { deps, applied } = permissionDeps()
+    const executor = new HostCronExecutor(deps as never)
+    const result = await executor.execute(job({ permission: 'custom' }))
+    expect(result.result).toBe('failed')
+    expect(result.error).toMatch(/permission preset not found/)
+    expect(applied).toEqual([])
+  })
+
+  it('fails the run when no permission service is composed (never silently ignores)', async () => {
+    const { deps } = permissionDeps({ missingService: true })
+    const executor = new HostCronExecutor(deps as never)
+    const result = await executor.execute(job({ permission: 'workspace-write' }))
+    expect(result.result).toBe('failed')
+    expect(result.error).toMatch(/permission preset service unavailable/)
+  })
+
+  it('fails the run when the preset did not take effect on the session', async () => {
+    const { deps } = permissionDeps({ current: () => 'custom' })
+    const executor = new HostCronExecutor(deps as never)
+    const result = await executor.execute(job({ permission: 'workspace-write' }))
+    expect(result.result).toBe('failed')
+    expect(result.error).toMatch(/did not take effect/)
+  })
+
+  it('fails the run when the session cannot be resolved', async () => {
+    const { deps } = permissionDeps({ missingSession: true })
+    const executor = new HostCronExecutor(deps as never)
+    const result = await executor.execute(job({ permission: 'read-only' }))
+    expect(result.result).toBe('failed')
+    expect(result.error).toMatch(/session not found/)
   })
 })

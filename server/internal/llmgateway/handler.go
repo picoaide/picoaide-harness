@@ -424,6 +424,13 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 	body = redactSecrets(body, secrets)
 	if pt, ct, cch, ok, _ := parseUsage(body); ok {
 		if _, err := serverstore.RecordUsageKindCached(a.DB, userID, model, pt, ct, cch, "chat"); err != nil {
+			// FIX-05:余额结算失败必须**在交付响应体之前**拒绝 —— 事务已回滚,
+			// 继续 200 交付就是"上游花了钱、账上一分没扣"的无限免费调用。
+			if isBalanceSettlementFailure(err) {
+				log.Printf("gateway: insufficient balance, rejecting before delivery: user=%d model=%s", userID, model)
+				rejectBalanceSettlement(c)
+				return
+			}
 			log.Printf("gateway: record usage: %v", err)
 		}
 	}
@@ -536,6 +543,15 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 							log.Printf("gateway: parse usage line: %v", perr)
 						} else if ok && usageID > 0 {
 							if uerr := serverstore.UpdateUsageTokensCached(a.DB, usageID, pt, ct, cch); uerr != nil {
+								// FIX-05:流式回填结算失败 —— SSE 头已发,状态码
+								// 改不了;写一条 error 事件后终止泵送,不能继续 200。
+								if isBalanceSettlementFailure(uerr) {
+									log.Printf("gateway: insufficient balance, aborting stream: usage=%d", usageID)
+									if !clientGone {
+										abortBalanceSettlementStream(c, fl)
+									}
+									return
+								}
 								log.Printf("gateway: backfill usage: %v", uerr)
 							} else if pt+ct > 0 {
 								backfilled = true
@@ -604,7 +620,17 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 			estimated := forwardedBytes / 4 // 约 4 字节/token(保守下限)
 			if estimated > 0 {
 				if err := serverstore.UpdateUsageTokensCached(a.DB, usageID, 0, estimated, 0); err != nil {
-					log.Printf("gateway: estimated backfill: %v", err)
+					// FIX-05:这是流结束后的收尾结算——内容已经全部转发,
+					// 状态码与内容都无法收回。仍然**不能静默**:写一条 error
+					// 事件(客户端若还在读会看到),并按 ERROR 留痕。
+					if isBalanceSettlementFailure(err) {
+						log.Printf("gateway: insufficient balance, estimated settlement failed: usage=%d forwarded=%d", usageID, forwardedBytes)
+						if !clientGone {
+							abortBalanceSettlementStream(c, fl)
+						}
+					} else {
+						log.Printf("gateway: estimated backfill: %v", err)
+					}
 				}
 			} else if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
 				log.Printf("gateway: delete pending usage: %v", err)

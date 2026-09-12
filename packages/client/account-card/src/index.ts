@@ -91,6 +91,15 @@ export function apply(ctx: Context): void {
         return json(res, 401, { error: 'session changed' })
       }
       const snapshot = service.get()
+      // 审计 2026-09-12 P1-5:令牌已失效时**不再 200 交付旧余额**。
+      // usage-service 承诺过"the route layer maps it to a 401"但该映射
+      // 从未实现 —— 结果令牌过期后账号卡继续静默展示过期金额。这里补上:
+      // 401 + 清会话(与 bootstrap.ts:108-110 / auth-gate.ts:1727-1730 同款),
+      // 让渲染层隐藏卡片并回登录页。
+      if (snapshot.authExpired) {
+        ctx.picoSession.clear()
+        return json(res, 401, { error: 'auth expired' })
+      }
       json(res, 200, {
         data: snapshot.data,
         fetchedAt: snapshot.fetchedAt,

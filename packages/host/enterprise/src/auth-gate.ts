@@ -42,6 +42,12 @@ import {
   validatePresetId,
 } from './agent-preset-install.ts'
 
+/**
+ * Client-owned login surface served as the main window's first page when no
+ * session exists. The user fills the server address and logs in through the
+ * client's local API, which calls the gateway; on success the page reloads
+ * into the DSH Web app in the same window.
+ */
 const LOGIN_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -689,11 +695,80 @@ function escapeHtmlAttribute(value: string): string {
 }
 
 /**
- * Client-owned login surface served as the main window's first page when no
- * session exists. The user fills the server address and logs in through the
- * client's local API, which calls the gateway; on success the page reloads
- * into the DSH Web app in the same window.
+ * 上游 `connection` 服务(BrowserAuth 持有性检查)在本包内需要的**最小结构**。
+ *
+ * 刻意不 `import type {} from '@deepseek-ai/dsh-client-connection'`:那会给
+ * enterprise 增加一条依赖边(要改 package.json + lockfile),而这里只需要
+ * 一个方法。结构类型 + 运行时存在性判断已足够,并且能在服务缺席时明确降级。
  */
+interface ConnectionTrustFence {
+  /**
+   * Connection 的 Host/Origin 围栏 + BrowserAuth cookie 校验。
+   * @param request - 只用到 headers(Host / Cookie)。
+   * @returns 401/403 表示拒绝;undefined 表示通过。
+   */
+  requestRejection(request: { headers: IncomingMessage['headers'] }): 401 | 403 | undefined
+}
+
+/**
+ * 登录请求是否与**当前会话**冲突(审计 2026-09-12 P1-3/FIX-18)。
+ *
+ * 深链路径早已显式拒绝"已登录时静默换服务端"(`deep-link.ts:112-116`),
+ * 而 `POST /api/pico/auth/login` 会**无条件** `setSession` —— 同一个动作在
+ * 两条路径上判定相反,这就是缺陷本身。单服务端产品语义下,切换服务器必须
+ * 先显式登出;同一服务端上换账号(改密/换人)仍然允许。
+ * @param current - 当前会话(未登录为 null)。
+ * @param requestedServer - 请求体里的 server 原文。
+ * @returns true 表示必须拒绝(409)。
+ */
+export function loginServerSwitchConflict(current: Session | null, requestedServer: string): boolean {
+  if (current === null) return false
+  const target = normalizeServerURL(requestedServer)
+  // 非法/空地址交给 login() 去报它自己的错,这里不抢答。
+  if (target === '') return false
+  return current.serverURL !== target
+}
+
+/**
+ * 已装共享 Agent(preset)在磁盘上的版本号。
+ *
+ * 审计 2026-09-12 P1-6:能力中心的「更新到 vX」由客户端
+ * `CapabilityCenterPanel.hasUpdateFor()` 决定,而它要求
+ * `installedVersion !== undefined`。共享 Agent 侧的该字段此前**恒为
+ * undefined**(`kind === 'skill' ? … : undefined`,注释却写着"取 '1.0.0'
+ * 兜底"),于是本地已装 v1、远端已发布 v2 时也永不出现更新入口。
+ *
+ * 版本事实在磁盘上确实存在——`agent-preset-install.ts` 的安装器与技能走
+ * 同一套落盘:`.picoaide/release.json`(provenance),旧安装回落
+ * `.install-version` 标记。preset.yml 没有 version 字段,故没有第三层兜底:
+ * 读不到就返回 undefined,让客户端保守判 false(宁可不提示,不可误报)。
+ * @param presetDir - 一个已安装 preset 的目录。
+ * @returns 版本号,或 undefined(未安装 / 无版本信息)。
+ */
+export async function readInstalledPresetVersion(presetDir: string): Promise<string | undefined> {
+  const prov = await readProvenance(presetDir)
+  if (prov !== undefined && prov.version !== '') return prov.version
+  const marker = await readFile(join(presetDir, '.install-version'), 'utf8').then(s => s.trim()).catch(() => undefined)
+  return marker !== undefined && marker !== '' ? marker : undefined
+}
+
+/**
+ * 按 kind 选已装版本表(技能 / 共享 Agent)。
+ * @param kind - 目录行的 kind('skill' | 'agent')。
+ * @param name - 目录行名。
+ * @param skillVersions - 技能版本表。
+ * @param presetVersions - 共享 Agent 版本表。
+ * @returns 已装版本,或 undefined(未知)。
+ */
+export function installedVersionFor(
+  kind: string,
+  name: string,
+  skillVersions: ReadonlyMap<string, string | undefined>,
+  presetVersions: ReadonlyMap<string, string | undefined>,
+): string | undefined {
+  return kind === 'skill' ? skillVersions.get(name) : presetVersions.get(name)
+}
+
 /**
  * 组装期注入的品牌 → `/api/client/v2/channel` 形态的响应体。
  *
@@ -844,6 +919,47 @@ export function apply(ctx: Context, config: Config): void {
     return false
   }
 
+  // 只提醒一次(每次会话变更请求都刷日志会淹没真正的信号)。
+  let warnedMissingProofFence = false
+
+  /**
+   * 持有性证明(审计 2026-09-12 P1-3/FIX-18),**只给会话变更类路由**用。
+   *
+   * `guard()` 的注释已经自述其边界(`loopback.ts:60-64`):"a bare curl sends
+   * neither header and is refused, but a curl with a forged Origin passes this
+   * too"。也就是说:**本机任意进程**只要伪造 `Origin` 就能 `POST
+   * /api/pico/auth/login` 把整个会话换到攻击者服务端(员工后续的对话与工具
+   * 调用都会打到那台机器)。会话变更(login/password/logout)必须再要求一项
+   * 只有"由本进程服务、经 launch token 换过票的浏览器页面"才持有的东西——
+   * 即上游 `connection` 服务的 BrowserAuth cookie(`dsh-auth-<authority>`:
+   * HttpOnly + SameSite=Strict + HMAC,由 GET /?token=… 交换而来)。
+   *
+   * 复用上游机制,不新造:直接调 `connection.requestRejection()` —— 它做的正是
+   * "Host/Origin 围栏 + cookie 验签"两件事。组合里没有该服务(非 desktop 的
+   * 兼容组合)时明确降级为 `guard()` 并打一条 warn,而不是把登录整锁死。
+   * @param req - 本地 HTTP 请求(读 headers)。
+   * @param res - 拒绝时写响应体的对象。
+   * @returns true 表示可以继续处理。
+   */
+  const proofOfPossession = (req: IncomingMessage, res: ServerResponse): boolean => {
+    const fence = (ctx as unknown as { get?: (name: string) => unknown }).get?.('connection') as ConnectionTrustFence | undefined
+    if (fence === undefined || typeof fence.requestRejection !== 'function') {
+      if (!warnedMissingProofFence) {
+        warnedMissingProofFence = true
+        ctx.logger?.warn?.('pico: connection service unavailable; session-changing routes fall back to the loopback fence')
+      }
+      return true
+    }
+    const rejection = fence.requestRejection({ headers: req.headers })
+    if (rejection === undefined) return true
+    ctx.logger?.warn?.(`pico: refused a session-changing request without browser proof (${String(rejection)})`)
+    json(res, 403, {
+      error: 'browser session proof required',
+      hint: 'reopen the application window from its launch URL',
+    })
+    return false
+  }
+
   const gatewayError = (res: ServerResponse, cause: unknown): void => {
     const message = cause instanceof Error ? cause.message : String(cause)
     json(res, 502, { error: `gateway error: ${message}` })
@@ -908,6 +1024,8 @@ export function apply(ctx: Context, config: Config): void {
         handler: async (req: IncomingMessage, res: ServerResponse) => {
           if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
           if (!guard(req, res)) return
+          // FIX-18:会话变更类路由额外要求持有性证明(见 proofOfPossession)。
+          if (!proofOfPossession(req, res)) return
           // 审计 2026-08-25 P2-2:body 上限 64KB(登录表单远小于此)。
           const raw = await collectBody(req, 64 * 1024).catch(() => null)
           if (raw === null) return json(res, 413, { error: 'body too large' })
@@ -915,6 +1033,17 @@ export function apply(ctx: Context, config: Config): void {
           try { body = JSON.parse(raw.toString('utf8')) } catch { return json(res, 400, { error: 'bad json' }) }
           if (typeof body.server !== 'string' || typeof body.username !== 'string' || typeof body.password !== 'string') {
             return json(res, 400, { error: 'missing fields' })
+          }
+          // FIX-18:已登录时**拒绝静默换服务端**——与深链路径(deep-link.ts:112-116)
+          // 同一判定。此前 login 无条件 setSession,任意本机进程伪造 Origin 即可
+          // 把整个会话换到攻击者服务端。切换必须先显式登出;同服务端换账号照常。
+          const existing = session()
+          if (loginServerSwitchConflict(existing, body.server)) {
+            ctx.logger?.warn?.('pico: refused a server switch while signed in; sign out first')
+            return json(res, 409, {
+              error: 'already signed in to another server',
+              hint: 'sign out before switching servers',
+            })
           }
           try {
             const sess = await login(body.server, body.username, body.password)
@@ -934,6 +1063,8 @@ export function apply(ctx: Context, config: Config): void {
         handler: async (req: IncomingMessage, res: ServerResponse) => {
           if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
           if (!guard(req, res)) return
+          // FIX-18:改密同样是会话变更类操作,要求持有性证明。
+          if (!proofOfPossession(req, res)) return
           const raw = await collectBody(req, 64 * 1024).catch(() => null)
           if (raw === null) return json(res, 413, { error: 'body too large' })
           let body: { old_password?: unknown; new_password?: unknown }
@@ -985,6 +1116,9 @@ export function apply(ctx: Context, config: Config): void {
         handler: async (req: IncomingMessage, res: ServerResponse) => {
           if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
           if (!guard(req, res)) return
+          // FIX-18:登出也归"会话变更类"(防本机进程强制踢出)。产品内两个
+          // 调用点(登录页、账号卡)都从本进程服务的页面发起,cookie 恒在。
+          if (!proofOfPossession(req, res)) return
           // Revoke the gateway token server-side before clearing locally
           // (M1): the server token must not outlive the local session.
           const s = session()
@@ -1599,6 +1733,13 @@ export function apply(ctx: Context, config: Config): void {
             // installedVersion:优先读安装器写的 .install-version 标记
             // (可靠);否则退回 SKILL.md frontmatter 的 version(best-effort)。
             const localSkillVersions = new Map<string, string | undefined>()
+            // 审计 2026-09-12 P1-6:共享 Agent 的已装版本此前**恒为 undefined**
+            // (`kind === 'skill' ? localSkillVersions.get(name) : undefined`),而
+            // 客户端 `hasUpdateFor()` 一见 undefined 就返回 false ⇒ 能力中心
+            // 对共享 Agent 永远不显示「更新到 vX」。版本事实在磁盘上是有的:
+            // agent-preset-install.ts 的安装器与技能一样写了
+            // `.picoaide/release.json`(provenance),这里按 kind 选 map。
+            const localPresetVersions = new Map<string, string | undefined>()
             // 溯源(D6):优先读 .picoaide/release.json(应用 ID/渠道/版本 +
             // 安装时内容哈希),回退旧 .install-version 标记;并重算当前内容
             // 哈希判定「是否被本地修改过」。
@@ -1619,6 +1760,14 @@ export function apply(ctx: Context, config: Config): void {
               const marker = join(dir, '.install-version')
               const mv = await readFile(marker, 'utf8').then(s => s.trim()).catch(() => undefined)
               localSkillVersions.set(r.name, mv ?? r.version)
+            }
+            // 共享 Agent 同上:provenance(.picoaide/release.json)优先,回退
+            // `.install-version`。preset.yml 没有 version 字段,所以没有
+            // 「frontmatter 兜底」这一层——读不到就留 undefined,由客户端
+            // hasUpdateFor 保守判 false(宁可不提示,不可误报)。
+            for (const l of localPresets) {
+              const v = await readInstalledPresetVersion(join(presetsDir, l.name))
+              if (v !== undefined) localPresetVersions.set(l.name, v)
             }
 
             // 本地创作行(我的分区):磁盘上存在的技能/预设,带上传状态(若在
@@ -1682,6 +1831,15 @@ export function apply(ctx: Context, config: Config): void {
                     source: (i as { source?: string }).source ?? 'market',
                     displayName: ((i as { display_name?: string }).display_name ?? i.name) as string,
                     installed: true,
+                    // 审计 2026-09-12 P1-6:`?source=local` 的商店行此前**不带**
+                    // installedVersion ⇒ 面板 hasUpdateFor 恒 false,「更新到 vX」
+                    // 对已装共享 Agent 永不出现(与 enriched 分支同源修复)。
+                    installedVersion: installedVersionFor(
+                      (i as { kind?: string }).kind ?? '',
+                      (i as { name?: string }).name ?? '',
+                      localSkillVersions,
+                      localPresetVersions,
+                    ),
                     // 0059 官方字段透传(与 enriched 同构)。
                     official: (i as { official?: boolean }).official ?? false,
                     downloads: Number((i as { downloads?: number }).downloads ?? 0),
@@ -1693,14 +1851,15 @@ export function apply(ctx: Context, config: Config): void {
               return json(res, 200, { items: localRows })
             }
 
-            // 已装版本:best-effort(技能 metadata.yaml / frontmatter 的 version;
-            // preset 的 preset.yml 无 version 字段,取 '1.0.0' 兜底,hasUpdate 不精确时
-            // 以 approved 最高 ± 已装版本为准)。
+            // 已装版本:best-effort。技能 = provenance/.install-version →
+            // SKILL.md frontmatter;共享 Agent = provenance/.install-version
+            // (preset.yml 无 version 字段,故无 frontmatter 兜底)。客户端
+            // `hasUpdateFor()` 依赖这里的 installedVersion:undefined ⇒ 恒 false。
             const enriched = items.map(i => {
               const kind = i.kind as string
               const name = i.name as string
               const installed = kind === 'skill' ? installedSkills.has(name) : installedPresets.has(name)
-              const installedVersion = kind === 'skill' ? localSkillVersions.get(name) : undefined
+              const installedVersion = installedVersionFor(kind, name, localSkillVersions, localPresetVersions)
               return {
                 ...i,
                 // 服务端为 snake_case(display_name 等),客户端读驼峰

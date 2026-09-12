@@ -335,6 +335,32 @@ func UsageAggregateWithLedger(db *sql.DB, from, to time.Time, group string, opts
 	return mergeUsageRows(ledger, detailRows), nil
 }
 
+// ledgerWindowEmpty 探测日账表在 [from, to] 闭区间内**是否一行都没有**。
+// 只做一次 LIMIT 1 的存在性检查(走 idx_usage_daily_day 索引),不解聚合。
+// from/to 为零表示该侧无界(与本函数其余部分同一口径)。
+func ledgerWindowEmpty(db *sql.DB, from, to time.Time) (bool, error) {
+	q := "SELECT 1 FROM usage_daily WHERE 1=1"
+	args := []any{}
+	if !from.IsZero() {
+		q += " AND day >= ?::date"
+		args = append(args, from.Format(dateFmt))
+	}
+	if !to.IsZero() {
+		q += " AND day <= ?::date"
+		args = append(args, to.Format(dateFmt))
+	}
+	q += " LIMIT 1"
+	var one int
+	err := db.QueryRow(q, args...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 // UsageAggregateFromLedger 从永久日账 usage_daily 聚合(from/to 为闭区间日期,
 // from 为零 = 无下界)。全部维度都由日账归并——P1-16:此前默认分支把 group=model
 // 打成 month(所有模型合并成"每月一行")、group=week 退化成逐日,与明细口径不符。
@@ -345,12 +371,43 @@ func UsageAggregateFromLedger(db *sql.DB, from, to time.Time, group string, opts
 	}
 	// usage_daily.day 是 DATE 列(北京日期值),归一后与明细侧的日口径一致。
 	from, to = normalizeDayRange(from, to)
-	usernameFilter := ""
-	args := []any{}
-	if q.Username != "" {
-		usernameFilter = " AND ue.user_id = (SELECT id FROM users WHERE username = ?)"
-		args = append(args, q.Username)
+
+	// FIX-11(审计 2026-09-12,P1):kind 在日账里**没有对应列**
+	// (usage_daily 的主键是 user_id+model+day,0039),所以窗口跨保留边界时
+	// 账本段无法按 chat|embedding|search 过滤。此前 q.Kind 在本函数里零命中
+	// —— 过滤被静默忽略,账本段返回**全部** kind,与明细段相加后"统计徽标"
+	// 比明细表偏大(审计实测 ledger WithKind(embedding) → rows=2)。
+	//
+	// 但"不支持"必须**只在真的会算错时**才报错:账本窗口里一行都没有
+	// (尚未生成日账 / 该区间没有历史)时,不过滤与过滤的结果都是空集,
+	// 没有数字会被放大。若无条件报错,一个合法的空查询就会变成 400,
+	// 破坏调用方契约(G9 日志页:kind 过滤必须能给空结果 ——
+	// serverauth admin_test 的 TestAdminUsageAggregateModelKindFilter)。
+	//
+	// 所以先探一次"账本窗口是否为空":非空 → 明确失败(给出修复指引);
+	// 空 → 直接返回空集,与明细段合并后仍是正确结果。
+	if q.Kind != "" {
+		empty, eerr := ledgerWindowEmpty(db, from, to)
+		if eerr != nil {
+			return nil, eerr
+		}
+		if !empty {
+			return nil, fmt.Errorf("%w: 按类型(kind=%s)过滤的统计在窗口跨越用量保留边界时不可用:"+
+				"永久日账 usage_daily 没有 kind 列;请把区间收窄到保留期内,或去掉 kind 过滤",
+				ErrUnsupportedFilter, q.Kind)
+		}
+		return []UsageAggregateRow{}, nil
 	}
+
+	// FIX-10(审计 2026-09-12,P1):参数顺序必须与占位符顺序**逐一对齐**。
+	// 此前 `args = append(args, q.Username)` 写在函数开头,而占位符
+	// usernameFilter 拼在最后 —— 于是 PG 把用户名喂给 `?::date`,跨保留边界
+	// + 按用户必然 500(SQLSTATE 22007)。
+	//
+	// 修法不只是"把 append 挪个位置":这里改成**SQL 片段与它的参数紧挨着
+	// 追加**,让顺序错误在结构上不可能再出现(每段自己负责自己的占位符)。
+	args := []any{}
+
 	// 部门过滤:子树成员集合,与预算 enforcement 同口径(2026-09 用量中心)。
 	// P2-7:用子查询 + ANY(数组),避免成员数上万时拼 IN(?,?,…) 撞 PG 参数上限。
 	var deptFilter string
@@ -368,6 +425,17 @@ func UsageAggregateFromLedger(db *sql.DB, from, to time.Time, group string, opts
 		}
 		deptFilter = " AND ue.user_id IN (SELECT user_id FROM user_groups WHERE group_id = ANY(?::bigint[]))"
 		deptGroupIDs = sub
+	}
+	// FIX-11:model 过滤 —— usage_daily **有** model 列(0039:50,而且是主键
+	// 的一部分),所以这条过滤必须真的下推,不能像 kind 那样退化成不过滤。
+	var modelFilter string
+	if q.Model != "" {
+		modelFilter = " AND ue.model = ?"
+	}
+	// username 过滤(usernameFilter 与它的参数在这里成对定义)。
+	usernameFilter := ""
+	if q.Username != "" {
+		usernameFilter = " AND ue.user_id = (SELECT id FROM users WHERE username = ?)"
 	}
 	var labelExpr, groupExpr string
 	switch group {
@@ -406,7 +474,18 @@ func UsageAggregateFromLedger(db *sql.DB, from, to time.Time, group string, opts
 		qstr += deptFilter
 		args = append(args, pgInt64Array(deptGroupIDs))
 	}
-	qstr += usernameFilter + " GROUP BY " + groupExpr + " ORDER BY label"
+	// FIX-11:model 过滤(usage_daily 有该列)必须真的下推。
+	if q.Model != "" {
+		qstr += modelFilter
+		args = append(args, q.Model)
+	}
+	// FIX-10:usernameFilter 的占位符就在这里追加,参数紧跟着追加 —— 与
+	// 上面各段保持同一种「片段+参数成对」的写法,顺序天然对齐。
+	if q.Username != "" {
+		qstr += usernameFilter
+		args = append(args, q.Username)
+	}
+	qstr += " GROUP BY " + groupExpr + " ORDER BY label"
 	rows, err := db.Query(qstr, args...)
 	if err != nil {
 		return nil, err

@@ -35,6 +35,7 @@ import { realpath, readdir, readFile, writeFile, stat } from 'node:fs/promises'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, isAbsolute, sep, dirname } from 'node:path'
+import { localTrustFence } from './http-guard.js'
 
 /** Cap on a single readable text file (bytes). */
 const MAX_READ_BYTES = 512 * 1024
@@ -854,40 +855,14 @@ export function installSkillsManager(ctx, options = {}) {
         //      的权威(局域网 `dsh web --host 0.0.0.0` 的正常访问);
         //   3) sec-fetch-site=cross-site 拒绝;带 Origin 时必须与 Host 同源;
         //   4) 无 Origin 的本机脚本/CLI 放行(浏览器跨站请求必带 Origin)。
-        const remote = String(req.socket?.remoteAddress ?? '')
-        const loopbackRemote = remote === '::1' || remote === '::ffff:127.0.0.1' || /^127\./.test(remote)
-        const hostHeader = req.headers?.host
-        const hostIsLoopback = typeof hostHeader === 'string' &&
-          /^(127(\.\d{1,3}){3}|localhost|\[::1\])(:|$)/.test(hostHeader)
-        let trustedHosts = []
-        try {
-          const runtime = webCtx.get?.('webRuntime')
-          if (runtime && Array.isArray(runtime.trustedHosts)) trustedHosts = runtime.trustedHosts
-        } catch { /* 非 web 载体没有 webRuntime 服务 */ }
-        const hostTrusted = typeof hostHeader === 'string' && trustedHosts.some((entry) => {
-          const value = String(entry)
-          return value === hostHeader || value === hostHeader.replace(/:\d+$/, '')
-        })
-        if (!hostIsLoopback && !hostTrusted) {
-          sendJson(res, 403, { error: 'forbidden' })
+        //
+        // FIX-04(2026-09-12):这份手写副本搬到共享模块 lib/http-guard.js 的
+        // `localTrustFence` —— 同仓另有 8 个 sibling 注册点连守卫都没有,守卫
+        // 逻辑必须有唯一实现点,否则每加一个面就多一份会漂移的副本。
+        const denied = localTrustFence(req, webCtx)
+        if (denied !== null) {
+          sendJson(res, denied.status, denied.body)
           return
-        }
-        if (hostIsLoopback && !loopbackRemote) {
-          sendJson(res, 403, { error: 'forbidden' })
-          return
-        }
-        if (String(req.headers?.['sec-fetch-site'] ?? '') === 'cross-site') {
-          sendJson(res, 403, { error: 'forbidden' })
-          return
-        }
-        const originHeader = req.headers?.origin
-        if (typeof originHeader === 'string') {
-          let originHost = ''
-          try { originHost = new URL(originHeader).host } catch { originHost = '' }
-          if (originHost !== hostHeader) {
-            sendJson(res, 403, { error: 'forbidden' })
-            return
-          }
         }
         const url = new URL(req.url ?? '/', 'http://localhost')
         const pathname = url.pathname

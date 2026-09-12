@@ -23,6 +23,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import { HostCronService } from './host-service.ts'
 import { makeCronRoutes } from './host-routes.ts'
 import { registerCronTools } from './tools.ts'
+import type { CronPermissionPresets, CronSessionHandle } from './host-executor.ts'
 
 // Type-only: declare the enterprise session event so `ctx.on` resolves it.
 declare module '@deepseek-ai/cordis' {
@@ -69,10 +70,24 @@ export const Config: z<Config> = z.object({
  * edit takes effect without a restart.
  */
 export function apply(ctx: Context, config: Config): void {
+  /**
+   * FIX-17: the permission preset roster is the authority for a job's
+   * `permission` field — both the request validators (routes/tools) and the
+   * executor read it from the composed service. Resolved lazily so a service
+   * composed after this plugin is still honoured; an empty roster (service not
+   * composed) rejects every pinned permission instead of silently dropping it.
+   */
+  const permissionRoster = (): CronPermissionPresets | undefined => ctx.get('permissionPresets') as CronPermissionPresets | undefined
+  const permissionNames = (): readonly string[] => permissionRoster()?.names ?? []
+  const sessions = (): { get(id: string): CronSessionHandle | undefined } | undefined =>
+    ctx.get('sessions') as { get(id: string): CronSessionHandle | undefined } | undefined
+
   const host = new HostCronService({
     sessionController: ctx.sessionController,
     workspaceRegistry: ctx.workspaceRegistry,
     agentPresets: ctx.agentPresets,
+    permissionPresets: permissionRoster,
+    sessions,
   }, {})
   host.setConfiguration(config.enabled ?? true, config.catchUpMissed ?? false)
   host.start()
@@ -98,8 +113,8 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => {
     const disposers: Array<() => void> = [serviceDisposer]
     try {
-      for (const route of makeCronRoutes(host)) disposers.push(ctx.webServer.register(route))
-      disposers.push(registerCronTools(ctx, host))
+      for (const route of makeCronRoutes(host, { permissions: permissionNames })) disposers.push(ctx.webServer.register(route))
+      disposers.push(registerCronTools(ctx, host, { permissions: permissionNames }))
     } catch (error) {
       for (const dispose of disposers) dispose()
       host.dispose()

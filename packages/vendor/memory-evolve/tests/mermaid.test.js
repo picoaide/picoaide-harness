@@ -30,8 +30,11 @@ function fakeWebCtx() {
   }
 }
 
-/** 极简 req/res 桩：记录 writeHead/end，按 URL 分派 handler。 */
-function makeRequest(url) {
+/** 极简 req/res 桩：记录 writeHead/end，按 URL 分派 handler。
+ *
+ * FIX-04：注册点现在过统一请求守卫，桩要带浏览器形态的 headers（同源
+ * Origin + Host）才能走到路由层；GET 无 Origin 也会被守卫放行。 */
+function makeRequest(url, headers = { host: 'localhost', origin: 'http://localhost' }) {
   const res = {
     status: 0,
     body: '',
@@ -39,7 +42,7 @@ function makeRequest(url) {
     writeHead(status, headers) { this.status = status; this.headers = headers ?? {} },
     end(text) { this.body = text ?? '' },
   }
-  return { req: { method: 'GET', url }, res }
+  return { req: { method: 'GET', url, headers }, res }
 }
 
 function invoke(handler, url) {

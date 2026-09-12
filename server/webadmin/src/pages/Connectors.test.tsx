@@ -174,4 +174,24 @@ describe('Connectors 连接器目录页', () => {
       expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors/example-crm', { method: 'DELETE' })
     })
   })
+
+  // 审计 2026-09-12 P1-2(回归):非安全源(纯 HTTP + LAN IP,文档化部署形态)
+  // 没有 crypto.randomUUID,而 `emptyForm()` 在 useState 初始化期就调 uid()
+  // ⇒ 首渲染抛 TypeError、整页崩成白屏。
+  it('非安全源(crypto.randomUUID 缺失)下首渲染不崩,列表与新建弹窗仍可用', async () => {
+    vi.stubGlobal('crypto', {})
+    try {
+      render(<Connectors />)
+      expect(await screen.findByText('Moka HR 智能体')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: '新建连接器' }))
+      const dialog = within(await screen.findByRole('dialog'))
+      // 空表单里的每一行 keyId 都由 uid() 生成:没有回落这里就渲染不出来
+      expect(dialog.getByLabelText('字段 key 1')).toBeInTheDocument()
+      expect(dialog.getByLabelText('服务器名 serverName(名称空间,小写)')).toBeInTheDocument()
+      fireEvent.click(dialog.getByRole('button', { name: '添加请求头' }))
+      expect(dialog.getByLabelText('请求头 key 1-1')).toBeInTheDocument()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })

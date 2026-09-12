@@ -293,7 +293,9 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "GET", "/concurrency", serverauth.PermGatewayRead, d.Gateway.ConcurrencyStatus)
 
 	// 报表订阅(2026-09 P1):月度用量报表推送 webhook
-	serverauth.AdminRoute(authed, "GET", "/report-subscriptions", serverauth.PermUsageRead, d.Reports.List)
+	// 列表含 hook_url(凭据本体)⇒ 用独立的 report:read(不进 AuditorPermissions),
+	// 不再挂在 usage:read 上(审计 2026-09-12 P1-4)。
+	serverauth.AdminRoute(authed, "GET", "/report-subscriptions", serverauth.PermReportRead, d.Reports.List)
 	serverauth.AdminRoute(authed, "POST", "/report-subscriptions", serverauth.PermReportWrite, d.Reports.Create)
 	serverauth.AdminRoute(authed, "PUT", "/report-subscriptions/:id", serverauth.PermReportWrite, d.Reports.Update)
 	serverauth.AdminRoute(authed, "DELETE", "/report-subscriptions/:id", serverauth.PermReportWrite, d.Reports.Delete)

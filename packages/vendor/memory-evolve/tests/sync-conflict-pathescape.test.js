@@ -18,7 +18,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isMemoryFile } from '../lib/sync/filesets.js'
@@ -122,6 +122,115 @@ test('[P1-9] resolveConflict：子目录穿透（logs/sub/x.md）同样被拒', 
     assert.equal(outcome.ok, false)
     assert.match(outcome.message, /白名单/)
     assert.equal(existsSync(join(dir, 'logs')), false, '被拒的路径不应创建任何目录')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// -------------------------------------------------- FIX-22 (2026-09-12)
+
+test('[FIX-22] isMemoryFile：仓库内已存在的符号链接路径直接拒收', () => {
+  const root = tempRoot()
+  try {
+    const repo = join(root, 'repo')
+    const outside = join(root, 'outside')
+    mkdirSync(repo, { recursive: true })
+    mkdirSync(outside, { recursive: true })
+    // 仓库内 logs -> 仓库外目录（git 的 120000 条目，checkout 会实体化）
+    symlinkSync(outside, join(repo, 'logs'))
+    assert.equal(isMemoryFile('logs/x.md', 'project', repo), false, '符号链接目录下的路径必须被拒')
+    // 不给 rootDir 时保持纯模式校验（远端树路径本地不存在）
+    assert.equal(isMemoryFile('logs/x.md', 'project'), true)
+    // 普通目录不受影响
+    mkdirSync(join(repo, 'logs-real'))
+    assert.equal(isMemoryFile('logs-real/x.md', 'project', repo), false, 'logs-real 不在白名单内')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('[FIX-22] resolveConflict：仓库内 logs -> 仓库外目录时零写穿（改前 victim 被改写）', async () => {
+  const root = tempRoot()
+  const dir = join(root, 'repo')
+  const outside = join(root, 'outside')
+  const victim = join(outside, 'x.md')
+  try {
+    mkdirSync(dir, { recursive: true })
+    mkdirSync(outside, { recursive: true })
+    const original = '受害者原内容\n'
+    writeFileSync(victim, original)
+    // 前置：仓库内一个符号链接（与共享记忆分支里的 120000 条目同形）
+    symlinkSync(outside, join(dir, 'logs'))
+    writeFileSync(join(dir, 'CONFLICTS.md'), renderConflicts([{
+      entryKey: 'cccc2222',
+      file: 'logs/x.md',
+      reason: '符号链接写穿',
+      base: null,
+      ours: '[2026-09-12] 攻击者写入的内容',
+      theirs: null,
+    }]))
+
+    const outcome = await resolveConflict({ dir, index: 1, choice: 'ours' })
+    assert.equal(readFileSync(victim, 'utf8'), original, '仓库外文件绝不能被符号链接写穿')
+    assert.equal(outcome.ok, false, '符号链接落点必须被拒')
+    assert.match(outcome.message, /白名单/)
+    // 被拒的路径不消费冲突、不落盘
+    assert.equal(existsSync(join(dir, 'CONFLICTS.md')), true)
+    assert.equal(existsSync(join(outside, 'x.md.tmp')), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('[FIX-22] resolveConflict：目标文件本身是指向仓库外的符号链接同样被拒', async () => {
+  const root = tempRoot()
+  const dir = join(root, 'repo')
+  const outsideFile = join(root, 'outside-memory.md')
+  try {
+    mkdirSync(join(dir, 'logs'), { recursive: true })
+    const original = '[2026-01-01] 受害者文件原内容\n'
+    writeFileSync(outsideFile, original)
+    // logs/x.md 本身是符号链接（指向仓库外的 MEMORY 文件）
+    symlinkSync(outsideFile, join(dir, 'logs', 'x.md'))
+    writeFileSync(join(dir, 'CONFLICTS.md'), renderConflicts([{
+      entryKey: 'dddd3333',
+      file: 'logs/x.md',
+      reason: '文件级符号链接写穿',
+      base: null,
+      ours: '[2026-09-12] 攻击者写入的内容',
+      theirs: null,
+    }]))
+
+    const outcome = await resolveConflict({ dir, index: 1, choice: 'ours' })
+    assert.equal(readFileSync(outsideFile, 'utf8'), original, '仓库外文件不能被文件级符号链接改写')
+    assert.equal(outcome.ok, false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('[FIX-22] resolveConflict：仓库内的符号链接一律拒收（不区分指向，避免 120000 条目当写穿阶梯）', async () => {
+  const root = tempRoot()
+  const dir = join(root, 'repo')
+  try {
+    mkdirSync(dir, { recursive: true })
+    mkdirSync(join(dir, 'reallogs'), { recursive: true })
+    symlinkSync(join(dir, 'reallogs'), join(dir, 'logs'))
+    writeFileSync(join(dir, 'CONFLICTS.md'), renderConflicts([{
+      entryKey: 'eeee4444',
+      file: 'logs/x.md',
+      reason: '仓库内符号链接',
+      base: null,
+      ours: '[2026-09-12] 正常内容',
+      theirs: null,
+    }]))
+    const outcome = await resolveConflict({ dir, index: 1, choice: 'ours' })
+    // 本插件自己从不创建符号链接（写回只有 writeFileSync/renameSync），
+    // 仓库里出现的符号链接只可能来自共享分支的 120000 条目 ⇒ 一律拒收，
+    // 用户看到白名单错误而不是被静默穿透。
+    assert.equal(outcome.ok, false)
+    assert.match(outcome.message, /白名单/)
+    assert.equal(existsSync(join(dir, 'reallogs', 'x.md')), false, '被拒的落点不得写入任何位置')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

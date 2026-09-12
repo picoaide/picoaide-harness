@@ -43,20 +43,35 @@ type subReq struct {
 	Enabled *bool  `json:"enabled"`
 }
 
-func (r *subReq) validate() (string, string) {
-	name := strings.TrimSpace(r.Name)
-	url := strings.TrimSpace(r.HookURL)
+// validate 校验并**返回归一化后的值**(审计 2026-09-12 P1-5)。
+//
+// 旧实现 trim 后只用于校验、落库仍写 req.HookURL 原文:提交
+// `" https://x "` 会 201/200 成功,但 PushWebhook 用同一份原文
+// http.NewRequest ⇒ `parse " https://… ": first path segment in URL cannot
+// contain colon` ⇒ 订阅永久发不出去(且失败也写 last_run_at,当月不再重试)。
+// 现在校验与落库共用同一个归一化值。
+func (r *subReq) validate() (name, hookURL, msg string) {
+	name = strings.TrimSpace(r.Name)
+	hookURL = strings.TrimSpace(r.HookURL)
 	if name == "" {
-		return "", "订阅名称必填"
+		return "", "", "订阅名称必填"
 	}
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		return "", "hook_url 必须是 http(s) URL"
+	if !strings.HasPrefix(hookURL, "http://") && !strings.HasPrefix(hookURL, "https://") {
+		return "", "", "hook_url 必须是 http(s) URL"
 	}
 	// P2-19: SSRF——拒绝回环/私网/链路本地目标(解析结果逐 IP 校验)。
-	if err := validateHookURL(url); err != nil {
-		return "", "hook_url 不合法: " + err.Error()
+	if err := validateHookURL(hookURL); err != nil {
+		return "", "", "hook_url 不合法: " + err.Error()
 	}
-	return name, ""
+	return name, hookURL, ""
+}
+
+// auditDetail 审计 detail 只写订阅标识(name/id),不写 hook_url。
+// 审计 2026-09-12 P1-4:hook_url 是凭据本体,而 audit_logs 默认保留 180 天
+// 且经 /api/server/admin/audit(audit:read,auditor 也持有)下发——
+// 原样落 URL 等于给只读角色开了一条绕过列表脱敏的读回信道。
+func auditDetail(name string, id int64) string {
+	return name + " (id=" + strconv.FormatInt(id, 10) + ")"
 }
 
 func list(c *gin.Context, db *sql.DB) {
@@ -65,6 +80,7 @@ func list(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
+	// hook_url 由 ReportSubscription.MarshalJSON 统一脱敏(见 serverstore/reports.go)。
 	c.JSON(http.StatusOK, gin.H{"subscriptions": subs})
 }
 
@@ -74,7 +90,7 @@ func create(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 		return
 	}
-	name, msg := req.validate()
+	name, hookURL, msg := req.validate()
 	if msg != "" {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", msg)
 		return
@@ -83,12 +99,12 @@ func create(c *gin.Context, db *sql.DB) {
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	id, err := serverstore.CreateReportSubscription(db, name, req.HookURL, enabled)
+	id, err := serverstore.CreateReportSubscription(db, name, hookURL, enabled)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
 	}
-	_ = serverstore.AuditLog(db, actorName(c), "report_subscription_create", name+" "+req.HookURL)
+	_ = serverstore.AuditLog(db, actorName(c), "report_subscription_create", auditDetail(name, id))
 	c.JSON(http.StatusCreated, gin.H{"id": id})
 }
 
@@ -103,7 +119,9 @@ func update(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 		return
 	}
-	name, msg := req.validate()
+	// hook_url 留空(或回传哨兵 "***")= 保持现值:列表已不再回显明文,
+	// 管理端编辑弹窗也不预填(与 /auth 配置的密钥同一约定)。
+	name, hookURL, msg := req.validateUpdate()
 	if msg != "" {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", msg)
 		return
@@ -112,7 +130,7 @@ func update(c *gin.Context, db *sql.DB) {
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	if err := serverstore.UpdateReportSubscription(db, id, name, req.HookURL, enabled); err != nil {
+	if err := serverstore.UpdateReportSubscription(db, id, name, hookURL, enabled); err != nil {
 		if err == serverstore.ErrNotFound {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "订阅不存在")
 			return
@@ -120,8 +138,23 @@ func update(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
-	_ = serverstore.AuditLog(db, actorName(c), "report_subscription_update", name+" "+req.HookURL)
+	_ = serverstore.AuditLog(db, actorName(c), "report_subscription_update", auditDetail(name, id))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// validateUpdate 是更新路径的校验:name 必填;hook_url 可空(= 保持现值),
+// 非空时必须通过与新建同一套校验(且返回归一化值)。
+func (r *subReq) validateUpdate() (name, hookURL, msg string) {
+	name = strings.TrimSpace(r.Name)
+	if name == "" {
+		return "", "", "订阅名称必填"
+	}
+	raw := strings.TrimSpace(r.HookURL)
+	if raw == "" || raw == serverstore.MaskedHookURL {
+		return name, "", ""
+	}
+	r.HookURL = raw
+	return r.validate()
 }
 
 func remove(c *gin.Context, db *sql.DB) {

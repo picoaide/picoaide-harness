@@ -28,26 +28,20 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { translate, getLocale, COI2_DICT } from '../i18n.js'
+import { applyRequestGuard, readBody as sharedReadBody } from '../http-guard.js'
 
 /** Translate through COI2_DICT in the active host locale. */
 const cap2 = (key, params) => translate(COI2_DICT, key, params, getLocale())
 
-/** Read the JSON request body (capped). */
-async function readBody(req, maxBytes = 256 * 1024) {
-  const chunks = []
-  let total = 0
-  for await (const chunk of req) {
-    total += chunk.length
-    if (total > maxBytes) throw new Error('body too large')
-    chunks.push(chunk)
-  }
-  if (chunks.length === 0) return {}
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  } catch {
-    throw new Error('invalid JSON body')
-  }
-}
+/**
+ * Read the JSON request body (capped at 256 KiB).
+ *
+ * FIX-04：实现在共享守卫模块 `../http-guard.js`；统一前置守卫已解析过请求体
+ * 时会复用其缓存（自带副本会在守卫之后二次读流拿到 `{}`）。默认上限保持
+ * 256 KiB。
+ * @type {(req: import('node:http').IncomingMessage, maxBytes?: number) => Promise<object>}
+ */
+const readBody = (req, maxBytes = 256 * 1024) => sharedReadBody(req, maxBytes)
 
 function sendJson(res, status, body) {
   const text = JSON.stringify(body)
@@ -61,6 +55,9 @@ function sendJson(res, status, body) {
  */
 export function installCoiApi(ctx, svc) {
   const handler = async (req, res) => {
+    // FIX-04：统一前置守卫。此前本注册点零校验 → 任意网页可 POST /coi/tasks
+    // 让本机 dispatch 一个外部 CLI agent 任务（无预检的简单请求）。
+    if (await applyRequestGuard(req, res, 256 * 1024)) return
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
     const segments = path.split('/').filter(Boolean) // [memory-evolve, api, coi, ...]

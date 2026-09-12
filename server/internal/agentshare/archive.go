@@ -74,7 +74,12 @@ func ListArchiveContents(data []byte) ([]string, string, error) {
 
 // maxFilePreviewBytes caps the inline text returned by the per-file review
 // endpoint; larger files are flagged for archive download instead.
-const maxFilePreviewBytes = 1 << 20
+//
+// 审计 2026-09-12(FIX-01,P0):1 MB → 128 KB。与 sharedskills 同源:该常量
+// 同时是 preset.yml 进 skillmanifest.ParseAgent 的输入边界,1 MB 的 YAML
+// 深度炸弹会让解析器 `fatal error: out of memory`(不可 recover,进程级)。
+// 128 KB 与 skillmanifest.MaxSkillMDBytes 同值。合法 preset.yml 只有几十行。
+const maxFilePreviewBytes = 128 << 10
 
 // ExtractFileContent finds one archive entry by normalized path and returns
 // its text content. Binary (non-UTF-8) and oversized entries return flags

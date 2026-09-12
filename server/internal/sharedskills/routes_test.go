@@ -19,7 +19,18 @@ import (
 
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/skillmanifest"
 )
+
+// FIX-01(P0):审核预览上限同时是 SKILL.md 进 YAML 解析器的输入边界。
+// 两个常量分开定义在三个包里(sharedskills / agentshare / skillmanifest),
+// 一旦漂移回 1 MB,深度炸弹就又能在解析器里 `fatal error: out of memory`。
+func TestMaxFilePreviewBytesMatchesManifestGate(t *testing.T) {
+	if maxFilePreviewBytes != skillmanifest.MaxSkillMDBytes {
+		t.Fatalf("maxFilePreviewBytes = %d, want skillmanifest.MaxSkillMDBytes = %d",
+			maxFilePreviewBytes, skillmanifest.MaxSkillMDBytes)
+	}
+}
 
 func makeSkillArchive(t *testing.T, entries map[string]string) []byte {
 	t.Helper()

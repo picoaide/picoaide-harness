@@ -646,7 +646,16 @@ func preview(db *sql.DB, cacheDir string) gin.HandlerFunc {
 
 // maxFilePreviewBytes caps the inline text returned by the per-file review
 // endpoint; larger files are flagged for archive download instead.
-const maxFilePreviewBytes = 1 << 20
+//
+// 审计 2026-09-12(FIX-01,P0):上限从 1 MB 降到 128 KB。这个常量同时是
+// **解析入口的输入边界** —— ListArchiveContents 用它决定要不要把顶层
+// SKILL.md 的原文取出来交给 skillmanifest.Parse(超出即返回空串 → 归档判定为
+// 缺少 SKILL.md)。1 MB 上限等于允许 1 MB 的 YAML 深度炸弹进解析器,而
+// goccy/go-yaml 解析 `[`×65536 就会 `fatal error: out of memory`(不可
+// recover,直接打死服务端进程)。128 KB 与 skillmanifest.MaxSkillMDBytes 同值,
+// 两层给出同一个边界。合法 SKILL.md 是几 KB 量级(2026-09-01 实测线上 30 个
+// 技能),128 KB 留了两个数量级的余量。
+const maxFilePreviewBytes = 128 << 10
 
 // fileContent returns one file's content from a stored archive so admins can
 // review every uploaded file (审核查看全部内容)。Text (UTF-8) files are

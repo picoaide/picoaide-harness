@@ -114,6 +114,24 @@ export interface ConnectorState {
   connectedAt?: number | undefined
 }
 
+/**
+ * Local confirmation of a server-issued stdio command (FIX-02 P0): the first
+ * spawn of a `(command, args, env)` fingerprint must be approved on this
+ * machine. The request carries everything the user needs to judge it.
+ */
+export interface ConnectorMcpApproval {
+  /** `sha256` of the spawn tuple; the key persisted once approved. */
+  fingerprint: string
+  /** Executable the definition asks to run. */
+  command: string
+  /** Argument vector as the definition declares it. */
+  args: string[]
+  /** Env KEY names the definition declared (values are never shown here). */
+  envKeys: string[]
+  /** MCP server names this approval covers. */
+  servers: string[]
+}
+
 /** Runtime callbacks the UI observes. */
 export interface ConnectorAuthRequest {
   connectorId: string
@@ -127,4 +145,6 @@ export interface ConnectorAuthRequest {
   fields?: TokenField[]
   /** Transient progress text (e.g. "正在下载命令行工具…") while connecting. */
   message?: string
+  /** Present while a server-issued stdio command awaits local confirmation. */
+  approval?: ConnectorMcpApproval
 }

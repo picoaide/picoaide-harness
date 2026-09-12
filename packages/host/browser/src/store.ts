@@ -127,6 +127,31 @@ export function stripSensitiveUrl(raw: string): string {
   }
 }
 
+/** URL embedded in free text (a title, an op-log summary). Trailing sentence
+ * punctuation is peeled off by {@link stripSensitiveText} and re-appended. */
+const TEXT_URL_RE = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu
+
+/** Mask credential-shaped URLs **inside arbitrary text** (FIX-06, 2026-09-12).
+ *
+ * `stripSensitiveUrl` only handles a string that *is* a URL. Titles and
+ * summaries routinely embed one (`download: https://…`) or *are* a URL that no
+ * longer parses as a whole (`getTitle() || tab.url`), and those fields were
+ * persisted in cleartext while the sibling `url` field read `****` — the same
+ * value, two columns, one redacted. This is the single text-level redactor:
+ * the store write path (`addHistory`/`addBookmark`) and the runtime op-log
+ * (`runtime.maskBrowserSummary`) both call it, so no second copy can drift.
+ * Non-URL text is returned byte-identical. */
+export function stripSensitiveText(raw: string): string {
+  if (raw === '' || !raw.includes('://')) return raw
+  return raw.replace(TEXT_URL_RE, (match) => {
+    let end = match.length
+    while (end > 0 && (match[end - 1] === ')' || match[end - 1] === ',' || match[end - 1] === '.' || match[end - 1] === ';')) {
+      end -= 1
+    }
+    return `${stripSensitiveUrl(match.slice(0, end))}${match.slice(end)}`
+  })
+}
+
 /** BrowserStore (see module doc). */
 export class BrowserStore {
   private readonly history: HistoryEntry[] = []
@@ -224,7 +249,15 @@ export class BrowserStore {
   // ----------------------------------------------------------------- history
 
   addHistory(entry: Omit<HistoryEntry, 'seq'>): HistoryEntry {
-    const record: HistoryEntry = { ...entry, seq: ++this.historySeq, url: stripSensitiveUrl(entry.url) }
+    // Both fields can carry the same credential: `title` is frequently the URL
+    // itself (FIX-06 — `download: ${url}`, `getTitle() || tab.url`), so it gets
+    // the text-level redactor, not only the url field.
+    const record: HistoryEntry = {
+      ...entry,
+      seq: ++this.historySeq,
+      url: stripSensitiveUrl(entry.url),
+      title: stripSensitiveText(entry.title),
+    }
     this.history.push(record)
     this.append('history', record)
     this.pruneHistory()
@@ -271,9 +304,10 @@ export class BrowserStore {
     // SANITIZED url (the stored form) — a raw URL with sensitive params must
     // not re-add a duplicate whose stored url differs only by masking.
     const url = stripSensitiveUrl(entry.url)
+    const title = stripSensitiveText(entry.title)
     const existing = this.bookmarks.find((b) => b.url === url)
     if (existing !== undefined) {
-      existing.title = entry.title
+      existing.title = title
       existing.actor = entry.actor
       existing.group = entry.group
       existing.createdAt = Date.now()
@@ -283,7 +317,7 @@ export class BrowserStore {
       this.rewrite('bookmarks', this.bookmarks)
       return existing
     }
-    const record: BookmarkEntry = { ...entry, id: ++this.bookmarkSeq, createdAt: Date.now(), url }
+    const record: BookmarkEntry = { ...entry, id: ++this.bookmarkSeq, createdAt: Date.now(), url, title }
     this.bookmarks.push(record)
     this.append('bookmarks', record)
     this.pruneBookmarks()

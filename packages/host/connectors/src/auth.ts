@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { ConnectorAuthRequest, ConnectorDef, DeviceAuthConfig, OAuthAuthConfig } from './types.ts'
 import type { ConnectorCredential } from './store.ts'
+import { assertOutboundUrlAllowed } from './outbound.ts'
 
 /**
  * Auth orchestration, mirroring WorkBuddy's connector flow:
@@ -82,6 +83,9 @@ async function registerClient(
   registrationEndpoint: string,
   clientName: string,
 ): Promise<string> {
+  // FIX-20: the registration endpoint may come from a remote discovery
+  // document — never POST client metadata to a host outside the policy.
+  assertOutboundUrlAllowed(registrationEndpoint, 'OAuth 客户端注册端点')
   const response = await fetch(registrationEndpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -126,7 +130,9 @@ interface McpOAuthDiscovery {
  * authorization server.
  */
 async function discoverMcpOAuth(mcpUrl: string): Promise<McpOAuthDiscovery> {
-  const mcp = new URL(mcpUrl)
+  // FIX-20: the MCP endpoint itself is definition-supplied; every URL this
+  // function learns from the remote side is checked before it is fetched.
+  const mcp = assertOutboundUrlAllowed(mcpUrl, 'MCP 端点')
   const resource = mcp.origin + mcp.pathname.replace(/\/+$/, '')
 
   const probe = await fetch(mcpUrl, {
@@ -145,25 +151,35 @@ async function discoverMcpOAuth(mcpUrl: string): Promise<McpOAuthDiscovery> {
   ].filter((url): url is string => Boolean(url))
 
   for (const metadataUrl of [...new Set(resourceMetadataCandidates)]) {
+    // A blocked URL here is an active redirection attempt, not a typo to skip:
+    // fail the flow instead of quietly trying the next candidate.
+    assertOutboundUrlAllowed(metadataUrl, 'OAuth resource metadata')
     const metadataResponse = await fetch(metadataUrl, { headers: { Accept: 'application/json' } })
     if (!metadataResponse.ok) continue
     const resourceMetadata = (await metadataResponse.json()) as { authorization_servers?: string[] }
     const authorizationServer = resourceMetadata.authorization_servers?.[0]
     if (!authorizationServer) continue
 
-    const asUrl = new URL(authorizationServer)
+    const asUrl = assertOutboundUrlAllowed(authorizationServer, 'OAuth authorization server')
     asUrl.pathname = `${asUrl.pathname.replace(/\/+$/, '')}/.well-known/oauth-authorization-server`
     const metadataResponse2 = await fetch(asUrl, { headers: { Accept: 'application/json' } })
     if (!metadataResponse2.ok) continue
     const meta = (await metadataResponse2.json()) as OAuthServerMetadata
     if (!meta.authorization_endpoint || !meta.token_endpoint) continue
+    // The RFC 8414 document names the endpoints that will receive the
+    // authorization code and the PKCE verifier: check all three before use.
+    const authorizationEndpoint = assertOutboundUrlAllowed(meta.authorization_endpoint, 'OAuth 授权端点').toString()
+    const tokenEndpoint = assertOutboundUrlAllowed(meta.token_endpoint, 'OAuth token 端点').toString()
+    const registrationEndpoint = meta.registration_endpoint === undefined
+      ? undefined
+      : assertOutboundUrlAllowed(meta.registration_endpoint, 'OAuth 客户端注册端点').toString()
     const scopes = meta.scopes_supported?.includes('offline_access')
       ? 'offline_access'
       : meta.scopes_supported?.[0]
     return {
-      authorizationEndpoint: meta.authorization_endpoint,
-      tokenEndpoint: meta.token_endpoint,
-      ...(meta.registration_endpoint ? { registrationEndpoint: meta.registration_endpoint } : {}),
+      authorizationEndpoint,
+      tokenEndpoint,
+      ...(registrationEndpoint ? { registrationEndpoint } : {}),
       ...(scopes ? { scopes } : {}),
       resource,
     }
@@ -255,7 +271,10 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     : auth.clientId || ''
   if (!clientId) throw new Error('OAuth 服务器不支持动态客户端注册，且未配置固定 clientId')
   const codeChallengeMethod = auth.pkce ? 'S256' : undefined
-  const authorizeUrl = new URL(discovered?.authorizationEndpoint ?? auth.authorizeUrl)
+  const authorizeUrl = assertOutboundUrlAllowed(
+    discovered?.authorizationEndpoint ?? auth.authorizeUrl,
+    'OAuth 授权端点',
+  )
   authorizeUrl.searchParams.set('response_type', 'code')
   authorizeUrl.searchParams.set('client_id', clientId)
   authorizeUrl.searchParams.set('redirect_uri', redirectUri)
@@ -285,7 +304,12 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   }
 
   throwIfAborted(options.signal)
-  const tokenUrl = options.tokenUrlOverride ?? discovered?.tokenEndpoint ?? auth.tokenUrl
+  // FIX-20: the token exchange carries the authorization code AND the PKCE
+  // verifier — the last place the outbound policy must hold.
+  const tokenUrl = assertOutboundUrlAllowed(
+    options.tokenUrlOverride ?? discovered?.tokenEndpoint ?? auth.tokenUrl,
+    'OAuth token 端点',
+  ).toString()
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
@@ -335,6 +359,8 @@ export async function refreshOAuthToken(
     tokenUrl = discovered.tokenEndpoint ?? ''
   }
   if (!tokenUrl) return null
+  // FIX-20: a refresh POSTs the refresh token — same policy as the exchange.
+  tokenUrl = assertOutboundUrlAllowed(tokenUrl, 'OAuth token 端点').toString()
   const response = await fetch(tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },

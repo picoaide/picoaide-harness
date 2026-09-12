@@ -168,10 +168,15 @@ export class TodoStore {
    *   （sync 已初始化的项目 → projectId 目录；未启用项目 → projectHash 目录）。
    *   与 MemoryStore 同一注入：记忆同步迁移后项目待办必须与新目录一致，
    *   否则 TODOS.md 会落在旧目录、进不了 sync 仓库（2026-08-11 统一模式）。
+   * @param {object} [options] - FIX-26（2026-09-12）：与 MemoryStore 同款开关。
+   * @param {boolean} [options.injectionScan=true] - 提示注入扫描（add/update
+   *   的正文）。默认开：待办默认视图是**每轮必读**的 dtodo list 输出，注入
+   *   文本进入这里等于每轮回灌模型。
    */
-  constructor(dir, projectDirResolver = null) {
+  constructor(dir, projectDirResolver = null, options = {}) {
     this.dir = dir
     this.projectDirResolver = projectDirResolver
+    this.injectionScan = options.injectionScan ?? true
   }
 
   /** Resolve one track's file path; project requires the cwd, daily honors `date`. */
@@ -284,8 +289,10 @@ export class TodoStore {
   addTodo(target, content, meta = {}, cwd) {
     const text = String(content ?? '').trim()
     if (!text) return { ok: false, message: tmt('todomsg.emptyContent'), target }
-    const threat = scanThreat(text)
-    if (threat) return { ok: false, message: threat, target }
+    if (this.injectionScan) {
+      const threat = scanThreat(text)
+      if (threat) return { ok: false, message: threat, target }
+    }
     const id = newId()
     const item = {
       raw: stampTodoLine({
@@ -344,6 +351,18 @@ export class TodoStore {
     }
     const { target: t, item, day } = found
     const meta = parseTodoEntry(item.raw)
+    // FIX-26（2026-09-12）：update 是同一段文本进入待办的另一条入口 —— 护栏
+    // 此前只在 addTodo 上（记忆轨 updateEntryContent 有、待办 update 没有）。
+    // 同一条内容"新增被拒、改一下就能过"是安全护栏最典型的绕过形态，而
+    // 待办默认视图（dtodo list）正是每轮快照要求模型读取的输出。
+    if (patch.content !== undefined) {
+      const nextText = String(patch.content)
+      if (nextText.trim() === '') return { ok: false, message: tmt('todomsg.emptyContent'), target: t }
+      if (this.injectionScan) {
+        const threat = scanThreat(nextText)
+        if (threat) return { ok: false, message: threat, target: t }
+      }
+    }
     const nextStatus = patch.status ?? meta.status
     const doneAt = nextStatus === 'done' ? (meta.doneAt ?? nowStamp()) : null
     const raw = stampTodoLine({
