@@ -125,3 +125,52 @@ SSO 回调通过桌面壳闸门并进入 token 预验证（探针期间临时清
 4. **运维口径**：预发客户端升级后**不会**再看到正式客户端的登录态与历史会话（这是
    目的，不是回归）；需要在预发环境复用数据时，请手动从 `~/.picoaide-harness`
    复制到 `~/.picoaide-harness-beta`，且**不要**让两代客户端交替打开同一份拷贝。
+
+---
+
+## 修订（2026-09-12，二次）：beta 回到与 official 一致的数据根
+
+**结论（用户定案）**：预发版是正式版的**前置验证**，登录态、设置与会话必须与正式版
+延续 —— `picoaide/channels` 的 `channels/beta/channel.json` 把 `desktop.home_dir` 改回
+`.picoaide-harness`；CI 规则同步改成"**beta 必须与官方一致**，品牌渠道仍不得写官方
+目录"。上面那次"beta 独立数据根"的修订作废。
+
+**触发它的真实事故（同日下午）**：已装 `v2.7.2-beta.1/beta.2` 的用户直接升级到
+`beta.6` 后报"**所有对话都没了**"。原因不是跨版本，而是上面那条修订：
+
+- 随包 `build/channel.json` 的 `desktop.home_dir` 在 beta.2 里是 `.picoaide-harness`
+  （与官方共用），在 beta.3 起是 `.picoaide-harness-beta`（独立）—— 已用产物级证据确认
+  （从两次 CI 的 `desktop-Linux` artifact 解出 AppImage → `app.asar` →
+  `build/channel.json`：beta.2 = `.picoaide-harness`，beta.6 = `.picoaide-harness-beta`）；
+- DSH home 里装的是**对话本身**：`sessions/`、`storages/`、`settings.yaml`、
+  `.credentials.yaml`、`session.json`（企业登录 token）—— 换根 = 空会话列表 + 重新登录；
+- 旧数据没被删（仍在 `~/.picoaide-harness`），但客户端**没有任何迁移**，发布说明也
+  没写，所以对用户就是"数据丢了"。
+
+**机制根因（比这次配置更值得记）**：`scripts/ci-channels.sh` 每次构建都
+`git clone --depth 1` 私有渠道仓的 **origin/main（不 pin commit）**，所以同一个源码 tag
+可以打出数据根不同的客户端，而升级是"换包即生效"、中间没有任何迁移。 beta.2 的构建在
+`2026-09-12 11:11:54` 克隆渠道仓，改 `home_dir` 的 `5c6bde3` 是 `11:19:51` —— 相差 8 分钟，
+同一批 tag 里就出现了两种数据根。
+
+**新规则（唯一取值，显式且 fail-loud）**：
+
+1. `scripts/ci-channels.sh`：`desktop.home_dir` 仍对所有非 `official` 渠道必填；`beta`
+   必须**恰好**是 `.picoaide-harness`（写别的目录、含派生兜底 `.picoaide-harness-<渠道>`
+   一律中止）；品牌渠道仍**不得**写 `.picoaide-harness`。两个方向都拦，防止再次静默漂移。
+2. `scripts/verify-ci-scripts.mjs`：三条 beta 用例翻转 —— 写 `.picoaide-harness` 必须
+   **通过**、写自己的目录必须**失败**、缺字段必须失败。
+3. 运行期派生逻辑（`desktop-home.ts` 的 `channelDshHomeDir`）不变：显式声明一律采纳
+   （本来就允许渠道声明官方目录），变的只是渠道包与构建期守卫。
+
+**要认账的残留风险**：在正式线还是 v0 的窗口期（官方 stable ≤ v2.7.1 仍 pin
+`dsh-v0.1.2-rc.1`），两代客户端共用同一数据根仍然是上面第一次修订描述的那个场景 ——
+预发期新建的 v3 会话对正式客户端不可见、双边会话会被分别追加。缓解：正式线尽快升到
+0.1.5-rc.2（`v2.7.2` 转正即闭合窗口）；窗口期内不要在同一台机器上交替使用正式版与
+预发版客户端。
+
+**数据口径（已经装过 beta.3~beta.6 的机器）**：换回后，那段时间写在
+`~/.picoaide-harness-beta` 的会话在新客户端里看不到，需要人工合并一次：退出两个客户端
+后把 `~/.picoaide-harness-beta/` 的内容并入 `~/.picoaide-harness/`（两代 pin 的上游同一
+commit、会话格式同为 v3，直接拷即可；同名文件先备份）。只装过 beta.1/beta.2 的机器
+什么都不用做 —— 它们本来就在官方目录里。

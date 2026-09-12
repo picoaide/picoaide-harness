@@ -170,6 +170,8 @@ for id in "${SELECTED[@]}"; do
     const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
     const str = (v) => (typeof v === "string" && v.trim() !== "" ? v.trim() : undefined)
     const publicChannel = id === "official" || id === "beta"
+    // 官方正式版的数据目录名(desktop-home.ts 的 PRODUCT_DSH_HOME_DIR,编译期常量)。
+    const OFFICIAL_HOME_DIR = ".picoaide-harness"
     const missing = []
     const invalid = []
     const warnings = []
@@ -183,16 +185,15 @@ for id in "${SELECTED[@]}"; do
       if (str(cfg?.desktop?.app_id) === undefined) missing.push("desktop.app_id")
       if (str(cfg?.desktop?.deep_link_scheme) === undefined) missing.push("desktop.deep_link_scheme")
     }
-    // 数据目录(2026-09-11;2026-09-12 收紧):客户端里官方目录名是编译期常量,渠道
-    // 不显式声明就只能共用官方目录 —— 两个渠道共用一个数据根会共享登录
+    // 数据目录(2026-09-11;2026-09-12 两次修订):客户端里官方目录名是编译期常量,
+    // 渠道不显式声明就只能共用官方目录 —— 两个渠道共用一个数据根会共享登录
     // token/settings/会话(跨租户),并互相顶掉 Electron 的单实例锁。只能在构建期拦:
     // 装到客户机器上时数据已经共享了。
-    // **beta 也不再豁免**(2026-09-12):beta 曾经刻意与 official 共用
-    // `~/.picoaide-harness`("预发环境共用登录态更省事"),但两条线跑的**会话格式
-    // 世代不同**(official stable = v0,含 0.1.5-rc.2 的 beta = v3):rc1 只认无版本
-    // 文件名、对 `.vN` 世代静默跳过,同机两代客户端会各写一份 —— v3 会话对 official
-    // 永久不可见,双边会话被分别追加造成历史分叉;而两代客户端的 userData 不同,
-    // Electron 单实例锁挡不住。共用省下的是一次登录,代价是静默丢数据。
+    // **beta 相反(2026-09-12 用户定案)**:预发版是正式版的前置验证,必须与 official
+    // 用同一个数据根,否则装预发版的用户升级后看不到既有会话与登录态 —— 当天早些
+    // 时候改成独立目录 `.picoaide-harness-beta` 就是这么炸的(用户报"所有对话都没了":
+    // 旧数据留在官方目录,新客户端读的是新目录)。这条**显式且唯一**:写别的目录(含
+    // 派生兜底 `.picoaide-harness-<渠道>`)一律 fail-loud,免得哪天又静默漂移。
     if (str(cfg?.desktop?.home_dir) === undefined && id !== "official") missing.push("desktop.home_dir")
     // 数据目录名形状:`~` 下的**单段**目录名(点开头 + 小写字母/数字/连字符)。
     // 允许分隔符等于让渠道包把数据根挪到任意位置;大写会让同一个渠道在 Linux 与
@@ -201,9 +202,12 @@ for id in "${SELECTED[@]}"; do
     if (homeDir !== undefined && !/^\.[a-z0-9][a-z0-9-]{0,62}$/.test(homeDir)) {
       invalid.push("desktop.home_dir(须为点开头的单段小写目录名,如 .acme-harness)")
     }
-    // official 之外的任何渠道(含 beta)**不得**等于官方目录:渠道线与 official 的
-    // 会话格式世代可能不同,共用会静默分叉数据。official 自己的缺省就是该目录。
-    if (id !== "official" && homeDir === ".picoaide-harness") {
+    if (id === "beta" && homeDir !== OFFICIAL_HOME_DIR) {
+      invalid.push("desktop.home_dir(预发布渠道必须与官方正式版一致,写别的目录会让预发版用户升级后看不到既有会话与登录态)")
+    }
+    // 品牌渠道(official/beta 之外)**不得**等于官方目录:渠道线与 official 的
+    // 会话格式世代可能不同,共用会静默分叉数据;不同客户之间更不该共享数据根。
+    if (id !== "official" && id !== "beta" && homeDir === OFFICIAL_HOME_DIR) {
       invalid.push("desktop.home_dir(不得与官方渠道共用数据目录:渠道线与 official 的会话格式世代可能不同,共用会静默分叉数据;请用 .picoaide-harness-<渠道>)")
     }
     // 非法字段**只报字段名,不回显取值** —— 渠道包里 slug/app_id/scheme 的值就是

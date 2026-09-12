@@ -176,15 +176,19 @@ picoaide/channels  (私有仓)
 | `desktop.app_id` | bundle id / AppUserModelId 回落厂商值 —— 两个渠道的客户端在系统里变成"同一个 app" |
 | `desktop.deep_link_scheme` | 回落 `picoaide` —— 浏览器 SSO 回调的确认框里出现厂商名 |
 
-**`desktop.home_dir`（数据根）是硬性必填字段**（2026-09-11 加；2026-09-12 扩到
-"除 official 外每个渠道"）：它不是编译期品牌，而是运行期数据隔离 —— 缺了就与官方
-客户端共用数据根（共享登录 token/settings/会话），而且两条渠道线的**会话格式世代
-可能不同**（正式线 v0 / 含上游 0.1.5-rc.2 的预发线 v3），共用会让两代客户端各写一份、
-旧版静默看不到新版会话并造成历史分叉（详见
-`docs/decisions/2026-09-11-channel-scoped-data-roots.md` 的 2026-09-12 修订）。
-**beta 也必须写自己的目录**（`.picoaide-harness-beta`），CI 对任何写成
-`.picoaide-harness` 的渠道一律拦下。official 不需要（官方构建不随包分发渠道包，
-写了也不生效）。
+**`desktop.home_dir`（数据根）是硬性必填字段**（2026-09-11 加；2026-09-12 两次修订）：
+它不是编译期品牌，而是运行期数据隔离 —— 缺了就与官方客户端共用数据根（共享登录
+token/settings/会话），品牌渠道之间更不该共享（跨租户）。取值只有两种合法形状：
+
+- **`beta`（预发布渠道）必须与官方正式版一致**（`.picoaide-harness`）：预发版是正式版
+  的前置验证，登录态/设置/会话要与正式版延续；写成自己的目录会让已装预发版的用户
+  升级后看不到既有会话（2026-09-12 实测事故：beta.2 → beta.6 用户报"所有对话都没了"，
+  详见 `docs/decisions/2026-09-11-channel-scoped-data-roots.md` 的两次 2026-09-12 修订）。
+- **品牌渠道不得写 `.picoaide-harness`**：渠道线与 official 的会话格式世代可能不同
+  （正式线稳定版 v0 / 含上游 0.1.5-rc.2 的预发线 v3），共用会让两代客户端各写一份、
+  旧版静默看不到新版会话并造成历史分叉。
+
+official 不需要写（官方构建不随包分发渠道包，写了也不生效）。
 
 **渠道 logo 的格式约束**（`desktop/scripts/generate-tray-icons.mjs`）：托盘位图是
 **把方块色字符串替换成托盘变体色**渲染的，所以渠道 `logo.svg` 必须
