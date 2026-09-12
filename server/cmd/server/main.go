@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -450,9 +451,61 @@ func htmlEscape(s string) string {
 // registered BEFORE any route (gin snapshots the middleware chain per route):
 // access logging + panic recovery into the standard error envelope.
 func installAPIMiddleware(r *gin.Engine) {
-	r.Use(gin.Logger(), gin.CustomRecoveryWithWriter(gin.DefaultErrorWriter, func(c *gin.Context, _ any) {
+	r.Use(accessLogger(), gin.CustomRecoveryWithWriter(gin.DefaultErrorWriter, func(c *gin.Context, _ any) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "服务端内部错误")
 	}))
+}
+
+// accessLogger 是访问日志中间件:语义与 gin.Logger() 一致,但**丢弃查询串**。
+//
+// 为什么不能直接用 gin.Logger()(审计 2026-09-12):gin.Logger 用的是
+// c.Request.URL.RequestURI()(= path + "?" + query),而服务端有几个端点把
+// 凭据放在查询串里:
+//
+//   - GET /api/client/v2/auth/{oidc,openid}/callback?code=…&state=…
+//     OIDC/OpenID 回调把 IdP 的授权码与 login-CSRF state 放在 query 上;
+//     授权码写进容器日志 = 任何能读日志的人可重放换 token。
+//   - 入口的 next=/?token=…(若有)与任何未来的 query 凭据端点同理。
+//
+// 真实凭据一旦进日志就只能靠日志轮转与轮换密钥补救,而排障几乎不需要 query
+// (path 已足够定位端点)。故这里只记录 c.Request.URL.Path。
+//
+// 行格式与 gin 的 defaultLogFormatter 逐字段一致(颜色/耗时截断/字段宽度),
+// 只把 Path 换成不含 query 的 URL.Path —— 排障口径不变,凭据不再落盘。
+func accessLogger() gin.HandlerFunc { return accessLoggerTo(gin.DefaultWriter) }
+
+// accessLoggerTo 是 accessLogger 的显式 writer 版本(测试注入用:gin 的
+// LoggerWithConfig 在**构造时**捕获 writer,测试改 gin.DefaultWriter 无效)。
+func accessLoggerTo(w io.Writer) gin.HandlerFunc {
+	return gin.LoggerWithConfig(gin.LoggerConfig{
+		Output: w,
+		Formatter: func(param gin.LogFormatterParams) string {
+			var statusColor, methodColor, resetColor, latencyColor string
+			if param.IsOutputColor() {
+				statusColor = param.StatusCodeColor()
+				methodColor = param.MethodColor()
+				resetColor = param.ResetColor()
+				latencyColor = param.LatencyColor()
+			}
+			switch {
+			case param.Latency > time.Minute:
+				param.Latency = param.Latency.Truncate(time.Second * 10)
+			case param.Latency > time.Second:
+				param.Latency = param.Latency.Truncate(time.Millisecond * 10)
+			case param.Latency > time.Millisecond:
+				param.Latency = param.Latency.Truncate(time.Microsecond * 10)
+			}
+			return fmt.Sprintf("[GIN] %v |%s %3d %s|%s %8v %s| %15s |%s %-7s %s %#v\n%s",
+				param.TimeStamp.Format("2006/01/02 - 15:04:05"),
+				statusColor, param.StatusCode, resetColor,
+				latencyColor, param.Latency, resetColor,
+				param.ClientIP,
+				methodColor, param.Method, resetColor,
+				param.Request.URL.Path, // 丢弃 "?query":凭据不入日志
+				param.ErrorMessage,
+			)
+		},
+	})
 }
 
 // mountAPIGuards 装配 API JSON 契约的 NoRoute 护栏(审计 2026-09)。

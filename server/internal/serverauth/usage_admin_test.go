@@ -2,7 +2,10 @@ package serverauth
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
@@ -214,3 +217,48 @@ func TestAdminUsageOverview(t *testing.T) {
 // 2026-09-11:quota_change / dept_budget_change 两个审计动作随配额与部门预算
 // 下线一并移除(网关唯一闸门 = 余额,审计动作 = balance_adjust/balance_grant/
 // balance_settings)。
+
+// ---------------------------------------------------------------------------
+// 分页参数钳制(审计 2026-09-12):OFFSET = (page-1)*size 必须在任何输入下
+// 都是非负的 —— page 直接来自查询串,不设上界会在 int64 上回绕成负数,
+// 交给 PG 就是 "OFFSET must not be negative" 500(本可安全返回空页)。
+// ---------------------------------------------------------------------------
+
+func TestPaginateClampsAndNeverOverflows(t *testing.T) {
+	cases := []struct {
+		query           string
+		def, max        int
+		page, size, off int
+	}{
+		// 正常值原样通过
+		{"page=3&size=50", 20, 200, 3, 50, 100},
+		// 缺省
+		{"", 20, 200, 1, 20, 0},
+		// page 越界（下界/上界）与非法
+		{"page=0", 20, 200, 1, 20, 0},
+		{"page=-5", 20, 200, 1, 20, 0},
+		{"page=abc", 20, 200, 1, 20, 0},
+		{"page=999999999", 20, 200, maxPage, 20, (maxPage - 1) * 20},
+		// size 越界与非法 → 回落默认
+		{"size=0", 20, 200, 1, 20, 0},
+		{"size=99999", 20, 200, 1, 20, 0},
+		{"size=xyz", 20, 200, 1, 20, 0},
+		// 溢出场景:int64 上界与低于它的值都必须给出非负 offset
+		{"page=9223372036854775807&size=200", 20, 200, maxPage, 200, (maxPage - 1) * 200},
+		{"page=9223372036854775806&size=200", 20, 200, maxPage, 200, (maxPage - 1) * 200},
+		{"page=4611686018427387904&size=1", 20, 200, maxPage, 1, maxPage - 1},
+	}
+	for _, tc := range cases {
+		gin.SetMode(gin.TestMode)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodGet, "/?"+tc.query, nil)
+		page, size, off := paginate(c, tc.def, tc.max)
+		if page != tc.page || size != tc.size || off != tc.off {
+			t.Errorf("paginate(%q, def=%d, max=%d) = (%d,%d,%d), want (%d,%d,%d)",
+				tc.query, tc.def, tc.max, page, size, off, tc.page, tc.size, tc.off)
+		}
+		if off < 0 {
+			t.Errorf("paginate(%q) produced negative offset %d", tc.query, off)
+		}
+	}
+}

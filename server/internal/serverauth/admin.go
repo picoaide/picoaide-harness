@@ -584,20 +584,39 @@ func (a *AdminAPI) resetUserMFA(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-func (a *AdminAPI) listUsers(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
+// maxPage 是管理面分页的页码上限。
+//
+// 为什么需要:handler 用 (page-1)*size 算 OFFSET,而 page 直接来自查询串。
+// 只有下界钳制时,page=9223372036854775807 会让乘法在 int64 上回绕成负数,
+// OFFSET 变负 → PG 报 "OFFSET must not be negative" → 500(请求本可安全
+// 返回空页)。上界钳制到 maxPage 后,任何 page 都只能得到非负 OFFSET。
+//
+// 以"用户点不到"为准取上限:100000 页 × 最大 size 已远超任何真实数据集。
+const maxPage = 100000
+
+// paginate 是管理面分页参数的唯一收敛点(审计 2026-09-12)。
+//   - page:非法/越界(<1 或非数字)→ 1;> maxPage → maxPage
+//   - size:非法/越界(<1 或非数字)→ defaultSize;> maxSize → defaultSize
+//
+// 返回值是钳制后的页码、页大小,以及可直接交给 DAO 的 offset。
+func paginate(c *gin.Context, defaultSize, maxSize int) (page, size, offset int) {
+	page, _ = strconv.Atoi(c.DefaultQuery("page", "1"))
+	size, _ = strconv.Atoi(c.DefaultQuery("size", strconv.Itoa(defaultSize)))
 	if page < 1 {
 		page = 1
 	}
-	// 页数上限:超大 page 的 (page-1)*size 会 int 溢出/负偏移(审计2026-L9)
-	if page > 100000 {
-		page = 100000
+	if page > maxPage {
+		page = maxPage
 	}
-	if size < 1 || size > 200 {
-		size = 20
+	if size < 1 || size > maxSize {
+		size = defaultSize
 	}
-	users, total, err := serverstore.ListUsers(a.DB, (page-1)*size, size, c.Query("q"))
+	return page, size, (page - 1) * size
+}
+
+func (a *AdminAPI) listUsers(c *gin.Context) {
+	page, size, offset := paginate(c, 20, 200)
+	users, total, err := serverstore.ListUsers(a.DB, offset, size, c.Query("q"))
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
@@ -1018,15 +1037,8 @@ func (a *AdminAPI) usage(c *gin.Context) {
 // listAuditLogs 返回分页审计日志(新→旧),支持 action / username 过滤
 // (审计 M8),总数一并返回用于分页。
 func (a *AdminAPI) listAuditLogs(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	size, _ := strconv.Atoi(c.DefaultQuery("size", "50"))
-	if page < 1 {
-		page = 1
-	}
-	if size < 1 || size > 500 {
-		size = 50
-	}
-	logs, total, err := serverstore.ListAuditLogsPagedFiltered(a.DB, (page-1)*size, size,
+	_, size, offset := paginate(c, 50, 500)
+	logs, total, err := serverstore.ListAuditLogsPagedFiltered(a.DB, offset, size,
 		c.Query("action"), c.Query("username"))
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
@@ -1709,7 +1721,12 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 			results["message"] = "Issuer http 仅允许 localhost 回环"
 			break
 		}
-		client := &http.Client{Timeout: 10 * time.Second}
+		// 审计 2026-09-12(SSRF 纵深防御):issuerURLRe 只约束 scheme/host 字符集,
+		// 不拦 https://<link-local>;而本探针会带着管理会话发起真实出站请求。
+		// 装 SafeOutboundTransport 做**连接期 IP 复检**(与网关上游/余额查询同一
+		// 护栏):拦链路本地与云 metadata(含 DNS rebinding 场景),
+		// 私网照旧放行 —— 企业自建 IdP 常在 10.x/172.16.x,不能一刀切禁私网。
+		client := &http.Client{Timeout: 10 * time.Second, Transport: util.SafeOutboundTransport()}
 		r, err := client.Get(iu.String() + "/.well-known/openid-configuration")
 		if err != nil {
 			log.Printf("auth test oidc discovery: %v", err)
@@ -1841,8 +1858,9 @@ func (a *AdminAPI) userBalanceLedger(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
+	// 审计 2026-09-12:此处原先完全未钳制 page/size(直接透传查询串),既是
+	// 溢出 500 面也是"一次拉全表"的放大面;统一走 paginate(与其它分页端点同口径)。
+	page, size, _ := paginate(c, 20, 200)
 	items, total, err := serverstore.BalanceLedgerPage(a.DB, id, c.Query("kind"), page, size)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")

@@ -3,7 +3,6 @@ package serverauth
 import (
 	"net/http"
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -137,17 +136,10 @@ func (a *AdminAPI) usageRequests(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "kind 必须是 chat|embedding|search")
 		return
 	}
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
-	if page < 1 {
-		page = 1
-	}
-	if size < 1 {
-		size = 20
-	}
-	if size > 100 {
-		size = 100
-	}
+	// 审计 2026-09-12:改用 paginate(与其它管理面分页端点同口径)。
+	// 注意 serverstore.ListUsageRequests 的契约是 offset = (page-1)*size,
+	// 这里传钳制后的 page/size(该 DAO 内部自行算 offset)。
+	page, size, _ := paginate(c, 20, 100)
 	rows, total, err := serverstore.ListUsageRequests(a.DB, from, toEx,
 		c.Query("username"), c.Query("model"), kind, page, size)
 	if err != nil {
