@@ -175,35 +175,39 @@ try {
   check('进入桌面外壳（已登录）', shellReady)
   await shoot('01-shell')
 
-  // 1b. Patch verification: the branded mark must be OUR geometry.
-  // `dsh-client-ui-brand-official` is patched so the upstream mark never takes
-  // the single-occupancy brand seats; without the patch the sidebar shows the
-  // vendor fish and the channel/brand story breaks. The 1.25× transform around
-  // the canvas centre is unique to brands/official/logo.svg.
+  // 1b. 品牌槽位归属：单占位槽必须由**我们的品牌层**占用，而不是上游厂商 mark。
   //
-  // 异步竞态(2026-09-12):品牌槽位内容要等 channel/brand 解析完才渲染,单次取样
-  // 会在"外壳已挂载、品牌还没画出来"的那一拍读到 svgCount=0 而误判(同一提交两次
-  // 流水一绿一红;该步在 tag 发布流水里同样执行,会直接卡发布)。改为**有界等待**
-  // 同一判据 —— 断言不放宽:超时后仍必须满足官方几何 + 单一占位。
+  // 为什么这样断言（2026-09-12）：渠道会越来越多，每个渠道有自己的 logo ——
+  // 早先"槽位里的内联 svg 必须含 1.25× 缩放"只对**未配 logo** 的构建成立；渠道包
+  // 提供 logo 时（`stageChannelProfile()` 内联成 data: URI）槽位渲染 `<img>`，
+  // 于是同一提交在官方构建绿、渠道构建红，并会卡住 tag 发布流水（已实测两次）。
+  // 逐个枚举"合法图形"不可维护，因此改为**断言归属**：
+  // 槽位有且仅有一个占用者（svg 或 img），且它带 `data-brand-mark="app"`
+  // （只有 `BraceMark` 的产物带它，厂商 mark 没有）。渠道 logo 的具体图形由渠道包
+  // 与构建期校验负责；几何是否等于权威 logo 由 enterprise 的
+  // `tests/channel-geometry.spec.ts` 对着 brands/official/logo.svg 守卫。
+  //
+  // 保留**有界等待**：槽位内容随 channel/brand 解析异步出现，零等待会读到空槽。
   const brandExpr = `(() => {
     const mark = document.querySelector('[data-slot="sidebar.brand.mark"]')
     const name = document.querySelector('[data-slot="sidebar.brand.name"]')
-    if (!mark) return { found: false, ours: false, svgCount: 0, name: '' }
-    const html = mark.innerHTML
-    return {
-      found: true,
-      ours: html.includes('scale(1.25)'),
-      svgCount: mark.querySelectorAll('svg').length,
-      name: (name?.textContent ?? '').trim().slice(0, 40),
-    }
+    if (!mark) return { found: false, owned: false, occupants: 0, kind: 'none', name: '' }
+    const svgCount = mark.querySelectorAll('svg').length
+    const imgCount = mark.querySelectorAll('img').length
+    const occupants = svgCount + imgCount
+    const owned = mark.querySelector('[data-brand-mark="app"]') !== null
+    const kind = svgCount > 0 ? 'inline-svg' : imgCount > 0 ? 'channel-logo' : 'empty'
+    return { found: true, owned, occupants, kind, svgCount, imgCount, name: (name?.textContent ?? '').trim().slice(0, 40) }
   })()`
-  const brandOk = await waitFor(
-    `(() => { const r = ${brandExpr}; return r.found === true && r.ours === true && r.svgCount === 1 })()`,
-    15000, 300)
+  const brandOk = await waitFor(`(() => { const r = ${brandExpr}; return r.occupants === 1 && r.owned === true })()`, 15000, 300)
   const brand = await evaluate(brandExpr)
-  check('品牌补丁生效（侧栏为官方几何且单一占位）',
-    brandOk && brand.found && brand.ours && brand.svgCount === 1,
-    `found=${brand.found} ours=${brand.ours} svgs=${brand.svgCount} name=${JSON.stringify(brand.name)}`)
+  const brandFailHint = brand.found && brand.owned !== true && brand.occupants > 0
+    ? '（槽位被非本产品 mark 占用，疑似上游厂商图形/鲸鱼）'
+    : ''
+  check('品牌槽位由本产品品牌层占用（排除上游厂商 mark）',
+    brandOk && brand.found && brand.owned === true && brand.occupants === 1,
+    `found=${brand.found} owned=${brand.owned} kind=${brand.kind} occupants=${brand.occupants} ` +
+    `svgs=${brand.svgCount} imgs=${brand.imgCount} name=${JSON.stringify(brand.name)}${brandFailHint}`)
   await shoot('01b-brand')
 
   // 2. Workspace + session. Rerunnable: a probe run against an app that already
