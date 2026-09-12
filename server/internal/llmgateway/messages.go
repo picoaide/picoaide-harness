@@ -70,8 +70,11 @@ func anthropicUsage(raw []byte) (pt, ct, cache int64, ok bool, err error) {
 	// (含 cache_creation)按输入价——与 costOfAt 的「prompt 是含 cache 的
 	// 总量」口径对齐。此前只取 cache_read 且丢弃 cache_creation,导致
 	// cache_creation 完全不计费、cache_read 又被钳到 input_tokens。
-	cache = u.CacheReadInputTokens
-	return u.InputTokens + cache + u.CacheCreationInputTokens, u.OutputTokens, cache, true, nil
+	// P0-B(审计 2026-09-12):逐项归零 —— 负 token 会让费用变负,结算侧记成
+	// refund → 余额凭空增加;逐项(而非求和后)归零可避免负值抵消正值。
+	cache = clampTokensNonNeg(u.CacheReadInputTokens)
+	return clampTokensNonNeg(u.InputTokens) + cache + clampTokensNonNeg(u.CacheCreationInputTokens),
+		clampTokensNonNeg(u.OutputTokens), cache, true, nil
 }
 
 // serveAnthropicJSON passes a non-stream Anthropic Messages response through

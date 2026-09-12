@@ -2,9 +2,67 @@ package serverstore
 
 import (
 	"database/sql"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// P1-3(审计 2026-09-12):月分区并发创建竞态。
+// 写路径 = 「探测 relispartition」→「CREATE TABLE IF NOT EXISTS ... PARTITION OF」,
+// 两步之间无锁:并发请求(跨月实例在月界必然发生)会同时判定"分区不存在",
+// 后者报 42P07 relation already exists → 该请求整条 usage 不落账(未计费的 200)。
+// 名字被抢占即达到目的,42P07 必须视为成功(但要挡住 F11 的孤儿表)。
+func TestEnsureUsagePartitionConcurrent(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	// 测试库预建窗口是 [2026-01, now+6 月];取窗口外的远端月份,保证 16 个
+	// goroutine 的首次探测都是"分区不存在"。
+	month := time.Date(2031, 3, 1, 0, 0, 0, 0, time.UTC)
+	const n = 16
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			errs[i] = ensureUsagePartition(db, month)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("并发建分区失败(goroutine %d/%d): %v", i, n, err)
+		}
+	}
+	// 竞态兜底不得放过"同名孤儿表"(F11):真的建出了 usage 的分区才算成功。
+	var isPartition sql.NullBool
+	if err := db.QueryRow(`SELECT c.relispartition FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname = 'usage_203103' AND n.nspname = 'public'`).Scan(&isPartition); err != nil {
+		t.Fatalf("复检分区: %v", err)
+	}
+	if !isPartition.Valid || !isPartition.Bool {
+		t.Fatalf("并发建出的 usage_203103 不是分区: %+v", isPartition)
+	}
+}
+
+// 42P07 兜底不得盖住 F11:同名**孤儿表**(被 DETACH 未 DROP)仍须显式报错,
+// 否则该月所有写入会撞 "no partition of relation usage found for row"。
+func TestEnsureUsagePartitionRejectsStaleDetachedTable(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS usage_203105 (id BIGINT)`); err != nil {
+		t.Fatal(err)
+	}
+	err := ensureUsagePartition(db, time.Date(2031, 5, 1, 0, 0, 0, 0, time.UTC))
+	if err == nil || !strings.Contains(err.Error(), "is not a partition") {
+		t.Fatalf("err = %v, want stale detached table error", err)
+	}
+}
 
 func TestUsagePartitionInsertAndQuery(t *testing.T) {
 	db, cleanup := NewTestDB(t)

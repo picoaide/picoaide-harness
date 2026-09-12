@@ -15,6 +15,11 @@ picoaide-data/
 .picoaide-data/
 .worktrees/
 dev-data
+# 点开头变体(2026-09-12):`dev-data` 不匹配 `.dev-data-prod`,而该目录含
+# master.key(AES-GCM 主密钥)、服务端二进制与技能缓存 —— `git add server/`
+# 会把密钥与 260MB 产物一起提交。必须显式忽略点开头变体。
+.dev-data
+.dev-data-*
 webadmin/node_modules
 # 部署运行时文件(证书/凭据/数据,不进 git)
 .env

@@ -665,6 +665,17 @@ func readLineWithIdle(br *bufio.Reader, idle time.Duration) (string, error) {
 	}
 }
 
+// clampTokensNonNeg 把上游回报的 token 计数钳到非负。
+// P0-B(审计 2026-09-12):上游响应体可控(第三方中转 / 明文 http 上游的
+// MITM / 上游自身 bug),负 token 会让计费算出**负费用**,结算侧再把它当成
+// "费用向下修正"记成 refund → 员工余额凭空增加。解析边界是第一道入口。
+func clampTokensNonNeg(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
 // parseUsage extracts token counts from a chat completion response: a full
 // JSON body (non-stream) or an SSE "data:" line carrying usage.
 // 返回 cacheHit 为缓存命中的输入 token(DeepSeek prompt_cache_hit_tokens,
@@ -696,7 +707,8 @@ func parseUsage(raw []byte) (pt, ct, cacheHit int64, ok bool, err error) {
 			cacheHit = 0
 		}
 	}
-	return chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, cacheHit, true, nil
+	// P0-B:负值一律归零(计费侧 costOfAt 另有一层,纵深防御)。
+	return clampTokensNonNeg(chunk.Usage.PromptTokens), clampTokensNonNeg(chunk.Usage.CompletionTokens), clampTokensNonNeg(cacheHit), true, nil
 }
 
 // rateLimitPerMinute reads the configurable per-user limit from settings.

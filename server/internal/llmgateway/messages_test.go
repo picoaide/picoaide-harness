@@ -317,6 +317,24 @@ func TestAnthropicUsageParser(t *testing.T) {
 	}
 }
 
+// P0-B(审计 2026-09-12):解析边界必须把上游回报的负 token 归零。
+// 负 token → costOfAt 算出负费用 → 结算侧 delta=-cost>0 记 refund → 余额
+// 凭空增加;这里守住 Anthropic Messages 的解析入口。
+func TestAnthropicUsageClampsNegativeTokens(t *testing.T) {
+	pt, ct, cache, ok, err := anthropicUsage([]byte(`{"type":"message","usage":{"input_tokens":-1000000,"output_tokens":-1000000,"cache_read_input_tokens":-5,"cache_creation_input_tokens":-7}}`))
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if pt != 0 || ct != 0 || cache != 0 {
+		t.Fatalf("负 token 未归零: pt=%d ct=%d cache=%d, want 0/0/0", pt, ct, cache)
+	}
+	// 负分量不得抵消正分量(逐项归零,而不是求和后归零)
+	pt, ct, cache, ok, err = anthropicUsage([]byte(`{"type":"message","usage":{"input_tokens":100,"output_tokens":-3,"cache_read_input_tokens":-100}}`))
+	if err != nil || !ok || pt != 100 || ct != 0 || cache != 0 {
+		t.Fatalf("负分量抵消: got %d/%d/%d ok=%v err=%v (want 100/0/0)", pt, ct, cache, ok, err)
+	}
+}
+
 // compile-time check that json stays imported (used by test helpers above)
 var _ = context.Background
 
