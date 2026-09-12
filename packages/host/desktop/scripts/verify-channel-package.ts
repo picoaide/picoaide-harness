@@ -26,6 +26,7 @@
  */
 
 import { extractFile, listPackage } from '@electron/asar'
+import { normalizeAsarEntry, toAsarEntryPath } from './asar-entry-path.ts'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -166,19 +167,22 @@ export async function verifyChannelPackage(options: {
       const asarPath = join(options.appDir, 'resources', 'app.asar')
       assert(existsSync(asarPath), `找不到 ${asarPath}（--app-dir 应指向解包后的应用目录）`)
       // electron-builder 把包根打进 asar 根 → 包内路径即 `/build/<name>`。
-      // 注意 `listPackage` 回报带前导斜杠、`extractFile` 要求不带（@electron/asar v3 实测）。
-      const listed = new Set(listPackage(asarPath, { isPack: false }))
-      const listEntry = (name: string): string => `/build/${name}`
-      const readEntry = (name: string): string => `build/${name}`
+      // `listPackage` 的回报是 `path.join()` 拼的**平台原生**形状（Windows 是 `\` 且带
+      // 前导分隔符），而 `extractFile` 要求**不带前导**且按 `path.sep` 切分目录
+      // （@electron/asar v3 实测）—— 两侧都走下面的适配函数，否则 Windows 上
+      // "列举得到、读不出来"（2026-09-12 CI 实测）。
+      const listed = new Set(listPackage(asarPath, { isPack: false }).map(normalizeAsarEntry))
+      const listEntry = (name: string): string => `build/${name}`
+      const readEntry = (name: string): string => toAsarEntryPath(`build/${name}`)
       if (context.official) {
         assert(
           !listed.has(listEntry('channel.json')),
-          `${asarPath} 内不该有 ${listEntry('channel.json')}（官方包带上了渠道配置）`,
+          `${asarPath} 内不该有 /${listEntry('channel.json')}（官方包带上了渠道配置）`,
         )
       } else {
         assert(
           listed.has(listEntry('channel.json')),
-          `${asarPath} 内缺少 ${listEntry('channel.json')} —— 随包渠道配置没有真的进包`
+          `${asarPath} 内缺少 /${listEntry('channel.json')} —— 随包渠道配置没有真的进包`
           + '（electron-builder 的 build.files 必须含 build/channel.json）。',
         )
         const packed = extractFile(asarPath, readEntry('channel.json')).toString('utf8')
@@ -187,16 +191,16 @@ export async function verifyChannelPackage(options: {
           declared === context.channelId,
           `${asarPath} 内的 channel_id=${JSON.stringify(declared)} 与构建渠道 ${context.channelId} 不一致`,
         )
-        checked.push(`app.asar${listEntry('channel.json')}`)
+        checked.push(`app.asar/${listEntry('channel.json')}`)
       }
       for (const name of ['app-icon.png', 'tray-icon-blue.png']) {
-        assert(listed.has(listEntry(name)), `${asarPath} 内缺少 ${listEntry(name)}`)
+        assert(listed.has(listEntry(name)), `${asarPath} 内缺少 /${listEntry(name)}`)
         const packedHash = createHash('sha256').update(extractFile(asarPath, readEntry(name))).digest('hex')
         assert(
           packedHash === sha256(join(buildDir, name)),
           `${asarPath} 内的 ${name} 与 build/ 不一致`,
         )
-        checked.push(`app.asar${listEntry(name)}`)
+        checked.push(`app.asar/${listEntry(name)}`)
       }
     }
   } finally {

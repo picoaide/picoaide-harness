@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { extractFile, listPackage } from '@electron/asar'
 import AdmZip from 'adm-zip'
+import { normalizeAsarEntry, toAsarEntryPath } from './asar-entry-path.ts'
 import {
   FORBIDDEN_MACOS_NATIVE_ENTRIES,
   MACOS_ARM64_NATIVE_ENTRIES,
@@ -465,7 +466,7 @@ export function resolvePackagedAppRoot(context: PackagedRuntimeContext): string 
 
 /** Normalize the host-specific separators emitted by the ASAR reader. */
 function normalizeArchiveEntry(entry: string): string {
-  return entry.replaceAll('\\', '/').replace(/^\/+/, '').replace(/\/+$/, '')
+  return normalizeAsarEntry(entry)
 }
 
 /**
@@ -478,10 +479,16 @@ function normalizeArchiveEntry(entry: string): string {
  */
 export type PackageEntryReader = (root: string, entry: string) => string
 
-/** Default entry reader (archive vs physical tree). */
+/**
+ * Default entry reader (archive vs physical tree).
+ *
+ * `@electron/asar` v3 的 `getNode()` 按 `path.sep` 切分目录，所以传给它的归档内路径
+ * 必须是**平台分隔符**形状：Windows 上传 `'/'` 分隔的常量会整串当成一个目录名，
+ * 报 `"…" was not found in this archive`（2026-09-12 CI 实测：Linux 绿、Windows 红）。
+ */
 function readPackagedEntry(root: string, entry: string): string {
   return root.endsWith('.asar')
-    ? extractFile(root, entry).toString('utf8')
+    ? extractFile(root, toAsarEntryPath(entry)).toString('utf8')
     : readFileSync(join(root, entry), 'utf8')
 }
 
