@@ -98,7 +98,7 @@ export interface DesktopNotification {
 export interface DesktopUpdateSnapshot {
   /** Version reported available by the last completed check, if newer and downloadable. */
   readonly availableVersion: string | undefined
-  /** Version currently downloading (between confirm and installer handoff). */
+  /** Version currently downloading, including the wait between retry attempts. */
   readonly downloadingVersion: string | undefined
   /** Whether the running executable came from an Electron package. */
   readonly isPackaged: boolean
@@ -108,6 +108,16 @@ export interface DesktopUpdateSnapshot {
   readonly currentVersion: string
   /** Current download progress (bytes) while downloading; undefined otherwise. */
   readonly downloadProgress: UpdateDownloadProgressSnapshot | undefined
+  /** Version whose installer is fully downloaded and verified, ready to install. */
+  readonly readyVersion: string | undefined
+  /** Absolute path of the verified installer behind `readyVersion`. */
+  readonly readyPath: string | undefined
+  /** Installer transfer attempt in progress (1 = first try); 0 when idle. */
+  readonly retryAttempt: number
+  /** Total attempts one installer transfer may spend. */
+  readonly retryMaxAttempts: number
+  /** Milliseconds until the next automatic attempt; 0 while an attempt runs. */
+  readonly retryDelayMs: number
   /** Last user-visible check/download failure category; undefined when the last
    * check succeeded (P2-63: download causes are kept distinct). */
   readonly lastError: DesktopUpdateErrorCategory | undefined
@@ -142,20 +152,44 @@ export interface DesktopUpdateAdapter {
   readonly canDownload: boolean
   /** Installed desktop product version. */
   readonly currentVersion: string
+  /** Absolute Electron user-data directory that owns downloaded installers. */
+  readonly userDataPath: string
   /** Private file used for update-prompt history. */
   readonly statePath: string
   /** Request adapter backed by Electron's native network session. */
   readonly request: UpdateRequest
-  /** Ask whether one strictly newer version may be downloaded. */
-  confirmDownload(version: string): Promise<boolean>
-  /** Present the outcome of a user-triggered version check. */
+  /** Present the outcome of a user-triggered version check that found nothing to install. */
   showManualCheckResult(result: UpdateCheckResult | null): Promise<void>
   /**
-   * Download and hand one confirmed update to the platform installer.
+   * Download one available update into private storage and stop there.
+   *
+   * The coordinator runs this in the background for both scheduled and manual
+   * checks, and refuses to start a second transfer while one is running.
+   * @param version - canonical version the downloaded installer must match.
    * @param source - 本次下载使用的更新源（服务端清单地址 + 期望渠道）。
+   * @param signal - caller-owned cancellation.
    * @param onProgress - optional byte-progress callback while streaming.
+   * @returns absolute path of the completed, verified installer.
    */
-  downloadAndOpen(version: string, source: DesktopUpdateSource, signal: AbortSignal, onProgress?: (progress: UpdateDownloadProgressSnapshot) => void): Promise<void>
+  downloadUpdate(version: string, source: DesktopUpdateSource, signal: AbortSignal, onProgress?: (progress: UpdateDownloadProgressSnapshot) => void): Promise<string>
+  /**
+   * Tell the user that `version` is downloaded and waiting, once.
+   *
+   * Platform-owned: it never installs anything, so a background download cannot
+   * restart the application behind the user's back.
+   * @param version - canonical version whose installer is ready.
+   * @param installerPath - absolute path of the verified installer.
+   */
+  announceUpdateReady(version: string, installerPath: string): Promise<void>
+  /**
+   * Hand one already-downloaded installer to the platform installation flow.
+   *
+   * Windows starts the downloaded installer and exits; macOS opens the disk
+   * image; Linux reveals the AppImage the user has to replace manually.
+   * @param version - canonical version being installed.
+   * @param installerPath - absolute path of the verified installer.
+   */
+  installUpdate(version: string, installerPath: string): Promise<void>
   /** Present a native status notification without blocking the Host tree. */
   notify(notification: DesktopNotification): void
   /**
@@ -166,10 +200,12 @@ export interface DesktopUpdateAdapter {
   publishState?(snapshot: DesktopUpdateSnapshot): void
   /**
    * Optional renderer trigger: runs the same user-visible manual check as the
-   * tray "Check for Updates…" command (offers a download when available).
+   * tray "Check for Updates…" command, or installs one ready installer.
    * The coordinator installs it after its state machine settles.
    */
   checkNow?(): void
+  /** Optional renderer trigger: hand the ready installer to the platform installer. */
+  installNow?(): void
 }
 
 /** Values the desktop-shell plugin hands to the Electron adapter. */

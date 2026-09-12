@@ -1,6 +1,7 @@
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { serverManifestURL } from '../src/desktop-release.ts'
@@ -11,6 +12,7 @@ import type {
   DesktopUpdateSource,
 } from '../src/runtime.ts'
 import type { UpdateCheckResult, UpdateRequest } from '../src/update-checker.ts'
+import { UpdateDownloadError } from '../src/update-download.ts'
 import { apply, Config, inject, type Config as UpdateConfig } from '../src/updates.ts'
 
 // 客户端只从**它登录的那台服务端**取更新(2026-09-10 定案):每个检查用例都
@@ -19,9 +21,14 @@ const SERVER = 'https://server.test'
 
 const testConfig: UpdateConfig = {
   enabled: true,
+  backgroundDownload: true,
   initialDelayMs: 10,
   intervalMs: 1000,
   requestTimeoutMs: 1000,
+  // 退避延迟压到 1ms:测的是"有没有重试/重试几次",不是等多久。
+  checkRetryDelaysMs: [1, 1, 1],
+  transferRetryDelaysMs: [1, 1, 1, 1, 1],
+  retryJitterRatio: 0,
 }
 
 const OFFICIAL_MANIFEST_URL = serverManifestURL(SERVER)
@@ -66,31 +73,12 @@ function channelResponse(channelId = 'official'): Response {
 }
 
 /**
- * 按调用顺序依次返回清单响应的 request 替身。
- *
- * 不能直接用 `mockResolvedValueOnce` 队列:渠道探测会插进来打一次
- * `/api/client/v2/channel`,把队列里的第一个响应吃掉。这里按 URL 分流,
- * 队列只服务于清单请求。
+ * 渠道版本清单:更新源唯一入口,最新版本由 client.version 决定。
+ * @param version - 清单声明的客户端版本。
+ * @param digest - 安装包 SHA-256;复用安装包的用例必须给**真实**哈希(缺省是全 a 的占位)。
  */
-function sequencedManifestRequest(
-  ...responses: readonly (Response | Error)[]
-): RequestSpy {
-  let index = 0
-  const spy = vi.fn(async (url: string) => {
-    if (String(url).endsWith('/api/client/v2/channel')) return channelResponse()
-    const next = responses[Math.min(index, responses.length - 1)]
-    index += 1
-    if (next instanceof Error) throw next
-    if (next === undefined) throw new Error('no manifest response queued')
-    return next
-  })
-  return spy as unknown as RequestSpy
-}
-
-/** 渠道版本清单:更新源唯一入口,最新版本由 client.version 决定。 */
-function manifestResponse(version: unknown): Response {
+function manifestResponse(version: unknown, digest = 'a'.repeat(64)): Response {
   const releases = `${SERVER}/updates/client/${String(version)}`
-  const digest = 'a'.repeat(64)
   return Response.json({
     schema: 1,
     channel_id: 'official',
@@ -106,14 +94,78 @@ function manifestResponse(version: unknown): Response {
   })
 }
 
+/**
+ * 本平台的一份最小合法安装包夹具。
+ *
+ * 必须按平台给对容器格式:复用校验里有平台魔数检查,拿 DMG 冒充 AppImage
+ * 只会测出"不可复用"(2026-09-12 实测)。
+ */
+function installerArtifactFixture(): Uint8Array {
+  if (process.platform === 'darwin') {
+    const dmg = Buffer.alloc(1024, 0x5a)
+    dmg.write('koly', dmg.byteLength - 512, 'ascii')
+    return dmg
+  }
+  if (process.platform === 'win32') {
+    const pe = Buffer.alloc(512, 0)
+    pe.write('MZ', 0, 'ascii')
+    pe.writeUInt32LE(0x80, 0x3c)
+    pe.set([0x50, 0x45, 0x00, 0x00], 0x80)
+    return pe
+  }
+  const appImage = Buffer.alloc(512, 0)
+  appImage.set([0x7f, 0x45, 0x4c, 0x46], 0)
+  appImage.set([0x41, 0x49, 0x02], 8)
+  return appImage
+}
+
+/**
+ * 本平台在测试清单里的安装包文件名(与源码"按下载地址末段命名"的规则一致)。
+ * @param version - manifest version.
+ * @returns the artifact file name the downloader will use.
+ */
+function installerNameFor(version: string): string {
+  const url = new URL(manifestAssetURL(version))
+  return url.pathname.slice(url.pathname.lastIndexOf('/') + 1)
+}
+
+/** 测试清单里下载地址的前缀(与服务端镜像布局同形)。 */
+function manifestAssetURL(version: string): string {
+  return `${SERVER}/updates/client/${version}/PicoAide-Harness-${version}-${process.platform === 'darwin' ? 'mac.dmg' : process.platform === 'win32' ? 'x64-Setup.exe' : 'x86_64.AppImage'}`
+}
+
+/**
+ * 完成件的落地路径(与源码"版本目录 + 清单下载地址末段"的规则一致)。
+ * @param userDataPath - Electron user-data directory.
+ * @param version - canonical version.
+ * @returns absolute installer path.
+ */
+function installerPathFor(userDataPath: string, version: string): string {
+  return join(userDataPath, 'updates', version, installerNameFor(version))
+}
+
+/** 把一份合法安装包夹具写到某个版本目录,模拟"上一轮已经下载好"。 */
+async function writeInstallerFixture(userDataPath: string, version: string): Promise<void> {
+  const target = installerPathFor(userDataPath, version)
+  await mkdir(dirname(target), { recursive: true })
+  await writeFile(target, installerArtifactFixture())
+}
+
+/** 夹具字节的 SHA-256(小写十六进制)。 */
+function sha256Hex(value: Uint8Array): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
 interface Harness {
   readonly statePath: string
+  readonly userDataPath: string
   readonly tray: DesktopTrayItem
   readonly notifications: DesktopNotification[]
   readonly warnings: unknown[][]
-  readonly confirmDownload: ReturnType<typeof vi.fn>
   readonly showManualCheckResult: ReturnType<typeof vi.fn>
-  readonly downloadAndOpen: ReturnType<typeof vi.fn>
+  readonly downloadUpdate: ReturnType<typeof vi.fn>
+  readonly announceUpdateReady: ReturnType<typeof vi.fn>
+  readonly installUpdate: ReturnType<typeof vi.fn>
   readonly refresh: ReturnType<typeof vi.fn>
   readonly registrationDispose: ReturnType<typeof vi.fn>
   readonly publishedStates: ReturnType<typeof vi.fn>
@@ -129,17 +181,22 @@ async function createHarness(options: {
   readonly canDownload?: boolean
   readonly config?: UpdateConfig
   readonly request?: DesktopRuntime['updates']['request']
-  readonly confirmDownload?: (version: string) => Promise<boolean>
   readonly showManualCheckResult?: (result: UpdateCheckResult | null) => Promise<void>
-  readonly downloadAndOpen?: (version: string, source: DesktopUpdateSource, signal: AbortSignal) => Promise<void>
+  readonly downloadUpdate?: (version: string, source: DesktopUpdateSource, signal: AbortSignal) => Promise<string>
+  readonly announceUpdateReady?: (version: string, path: string) => Promise<void>
+  readonly installUpdate?: (version: string, path: string) => Promise<void>
   readonly notify?: (notification: DesktopNotification) => void
   readonly locale?: DesktopRuntime['locale']
   readonly state?: string
   /** 会话里的服务端地址;`null` = 未登录(默认 SERVER)。 */
   readonly serverURL?: string | null
+  /** 复用现成的 user-data 目录(重启复用安装包用);缺省新建临时目录。 */
+  readonly userDataRoot?: string
+  /** 覆盖状态文件路径(与 `userDataRoot` 搭配);缺省 `<root>/private/state.json`。 */
+  readonly statePath?: string
 } = {}): Promise<Harness> {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-updates-'))
-  const statePath = join(root, 'private', 'state.json')
+  const root = options.userDataRoot ?? await mkdtemp(join(tmpdir(), 'dsh-updates-'))
+  const statePath = options.statePath ?? join(root, 'private', 'state.json')
   if (options.state !== undefined) {
     await mkdir(join(root, 'private'), { recursive: true })
     await writeFile(statePath, options.state, { mode: 0o600 })
@@ -148,9 +205,10 @@ async function createHarness(options: {
   const warnings: unknown[][] = []
   const refresh = vi.fn()
   const registrationDispose = vi.fn()
-  const confirmDownload = vi.fn(options.confirmDownload ?? (async () => false))
   const showManualCheckResult = vi.fn(options.showManualCheckResult ?? (async () => {}))
-  const downloadAndOpen = vi.fn(options.downloadAndOpen ?? (async () => {}))
+  const downloadUpdate = vi.fn(options.downloadUpdate ?? (async () => '/tmp/picoaide-installer'))
+  const announceUpdateReady = vi.fn(options.announceUpdateReady ?? (async () => {}))
+  const installUpdate = vi.fn(options.installUpdate ?? (async () => {}))
   const publishedStates = vi.fn()
   let tray: DesktopTrayItem | undefined
   let disposer: (() => void | Promise<void>) | undefined
@@ -159,10 +217,12 @@ async function createHarness(options: {
     currentVersion: options.currentVersion ?? '2.0.0',
     statePath,
     canDownload: options.canDownload ?? true,
+    userDataPath: root,
     request: options.request ?? (async () => manifestResponse('2.0.0')),
-    confirmDownload,
     showManualCheckResult,
-    downloadAndOpen,
+    downloadUpdate,
+    announceUpdateReady,
+    installUpdate,
     notify: options.notify ?? ((notification: DesktopNotification) => { notifications.push(notification) }),
     publishState: publishedStates,
     checkNow: undefined as (() => void) | undefined,
@@ -202,12 +262,14 @@ async function createHarness(options: {
   if (tray === undefined) throw new Error('Update tray item was not registered.')
   return {
     statePath,
+    userDataPath: root,
     tray,
     notifications,
     warnings,
-    confirmDownload,
     showManualCheckResult,
-    downloadAndOpen,
+    downloadUpdate,
+    announceUpdateReady,
+    installUpdate,
     refresh,
     registrationDispose,
     publishedStates,
@@ -225,16 +287,23 @@ afterEach(() => {
 })
 
 describe('desktop update Host plugin', () => {
-  it('exposes the packaged 60-second and six-hour background policy', () => {
+  it('exposes the packaged 60-second and six-hour background download policy', () => {
     expect(inject).toEqual(['desktopRuntime'])
     expect(Config({} as UpdateConfig)).toEqual({
       enabled: true,
+      // 缺省后台静默下载:发现新版本就先下,下完再提示。
+      backgroundDownload: true,
       initialDelayMs: 60_000,
       intervalMs: 21_600_000,
       requestTimeoutMs: 15_000,
+      // 3 次检查尝试 / 5 次传输尝试(首次 + 每个延迟项一次重试)。
+      checkRetryDelaysMs: [2_000, 8_000, 20_000],
+      transferRetryDelaysMs: [2_000, 8_000, 20_000, 30_000, 30_000],
+      retryJitterRatio: 0.25,
     })
     expect(() => Config({ intervalMs: 0 } as UpdateConfig)).toThrow()
     expect(() => Config({ requestTimeoutMs: 0 } as UpdateConfig)).toThrow()
+    expect(() => Config({ retryJitterRatio: 1.5 } as UpdateConfig)).toThrow()
   })
 
   it('checks the manifest of the signed-in server', async () => {
@@ -253,7 +322,8 @@ describe('desktop update Host plugin', () => {
     expect(calls[0]).toBe(OFFICIAL_MANIFEST_URL)
     expect(calls).toContain(`${SERVER}/api/client/v2/channel`)
     expect(calls.every(url => sameOrigin(url, SERVER))).toBe(true)
-    expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0')
+    // 有可用版本就直接下载(后台静默),不再先问一句"要不要下载"。
+    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() })
     await harness.dispose()
   })
 
@@ -276,7 +346,7 @@ describe('desktop update Host plugin', () => {
     const harness = await createHarness({ packaged: false, request })
 
     await harness.tray.invoke()
-    expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0')
+    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() })
 
     // 切换服务端(或登出)必须清掉上一台的"有新版本",否则会把 A 服务端的
     // 版本提示成 B 服务端可升级。
@@ -317,25 +387,28 @@ describe('desktop update Host plugin', () => {
       currentVersion: '2.0.0',
       latestVersion: '2.0.0',
     })
-    expect(harness.confirmDownload).not.toHaveBeenCalled()
-    expect(harness.downloadAndOpen).not.toHaveBeenCalled()
+    expect(harness.downloadUpdate).not.toHaveBeenCalled()
+    expect(harness.announceUpdateReady).not.toHaveBeenCalled()
     expect(harness.notifications).toEqual([])
     expect(harness.warnings).toEqual([])
   })
 
-  it('prompts once for a background update and persists only state v2 prompt history', async () => {
+  it('downloads a background update silently and persists only state v2 history', async () => {
     vi.useFakeTimers()
     const request = vi.fn(async () => manifestResponse('2.1.0'))
     const harness = await createHarness({ request })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
-    await vi.waitFor(() => { expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0') })
-    expect(harness.downloadAndOpen).not.toHaveBeenCalled()
-    expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Available')
+    // 后台流程:先静默下载(不弹任何对话框),下完才通报一次"可安装"。
+    await vi.waitFor(() => { expect(harness.announceUpdateReady).toHaveBeenCalledWith('2.1.0', expect.any(String)) })
+    expect(harness.showManualCheckResult).not.toHaveBeenCalled()
+    expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install')
     await vi.waitFor(async () => {
       expect(JSON.parse(await readFile(harness.statePath, 'utf8'))).toEqual({
         version: 2,
         lastPromptedVersion: '2.1.0',
+        downloadedVersion: '2.1.0',
+        downloadedPath: expect.any(String),
       })
     })
     if (process.platform !== 'win32') {
@@ -344,54 +417,61 @@ describe('desktop update Host plugin', () => {
 
     await vi.advanceTimersByTimeAsync(testConfig.intervalMs)
     await vi.waitFor(() => { expect(manifestRequests(request)).toHaveLength(2) })
-    expect(harness.confirmDownload).toHaveBeenCalledOnce()
+    // 同一版本已经下好:第二次轮询不重复传输、也不重复通报。
+    expect(harness.downloadUpdate).toHaveBeenCalledOnce()
+    expect(harness.announceUpdateReady).toHaveBeenCalledOnce()
     expect(harness.notifications).toEqual([])
     expect(harness.warnings).toEqual([])
   })
 
-  it('downloads and opens only after confirmation', async () => {
+  it('downloads silently, then announces the ready installer', async () => {
     vi.useFakeTimers()
-    let resolveDownload!: () => void
-    const download = new Promise<void>(resolve => { resolveDownload = resolve })
+    let resolveDownload!: (path: string) => void
+    const download = new Promise<string>(resolve => { resolveDownload = resolve })
     const harness = await createHarness({
       request: async () => manifestResponse('2.1.0'),
-      confirmDownload: async () => true,
-      downloadAndOpen: async () => download,
+      downloadUpdate: async () => download,
     })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
-    await vi.waitFor(() => { expect(harness.downloadAndOpen).toHaveBeenCalledOnce() })
-    const [version, source, signal] = harness.downloadAndOpen.mock.calls[0] as [string, { manifestURL: string }, AbortSignal]
+    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() })
+    const [version, source, signal] = harness.downloadUpdate.mock.calls[0] as [string, { manifestURL: string }, AbortSignal]
     expect(version).toBe('2.1.0')
     // 更新源 = 登录的那台服务端(2026-09-10 定案),随下载请求下传。
     expect(source.manifestURL).toBe(OFFICIAL_MANIFEST_URL)
     expect(signal).toBeInstanceOf(AbortSignal)
     expect(signal.aborted).toBe(false)
     expect(harness.tray.label()).toBe('Downloading PicoAide Harness 2.1.0…')
+    // 下载期间绝不打断用户:没有对话框、没有系统通知。
+    expect(harness.announceUpdateReady).not.toHaveBeenCalled()
+    expect(harness.showManualCheckResult).not.toHaveBeenCalled()
     expect(harness.notifications).toEqual([])
 
-    resolveDownload()
-    await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Available') })
+    resolveDownload('/tmp/picoaide-installer')
+    await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') })
+    expect(harness.announceUpdateReady).toHaveBeenCalledWith('2.1.0', '/tmp/picoaide-installer')
     expect(harness.notifications).toEqual([])
-    expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Available')
   })
 
   it('keeps the precise download failure category instead of collapsing to network (P2-63)', async () => {
     vi.useFakeTimers()
     const harness = await createHarness({
       request: async () => manifestResponse('2.1.0'),
-      confirmDownload: async () => true,
-      downloadAndOpen: async () => {
-        throw Object.assign(new Error('digest mismatch'), { code: 'checksum-mismatch' })
+      downloadUpdate: async () => {
+        throw Object.assign(new UpdateDownloadError('checksum-mismatch', 'digest mismatch'), {
+          code: 'checksum-mismatch',
+        })
       },
     })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
-    await vi.waitFor(() => { expect(harness.downloadAndOpen).toHaveBeenCalledOnce() })
+    // 校验和不符属于"可重试":字节留在 .partial 里续传,预算内重试到底才报错。
     await vi.waitFor(() => {
       const last = harness.publishedStates.mock.calls.at(-1)?.[0] as { lastError?: string } | undefined
       expect(last?.lastError).toBe('checksum-mismatch')
     })
+    expect(harness.downloadUpdate).toHaveBeenCalledTimes(testConfig.transferRetryDelaysMs.length + 1)
+    expect(harness.announceUpdateReady).not.toHaveBeenCalled()
     await harness.dispose()
   })
 
@@ -399,71 +479,70 @@ describe('desktop update Host plugin', () => {
     vi.useFakeTimers()
     const harness = await createHarness({
       request: async () => manifestResponse('2.1.0'),
-      confirmDownload: async () => true,
-      downloadAndOpen: async () => { throw new Error('socket hang up') },
+      downloadUpdate: async () => { throw new Error('socket hang up') },
     })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
-    await vi.waitFor(() => { expect(harness.downloadAndOpen).toHaveBeenCalledOnce() })
     await vi.waitFor(() => {
       const last = harness.publishedStates.mock.calls.at(-1)?.[0] as { lastError?: string } | undefined
       expect(last?.lastError).toBe('network')
     })
+    expect(harness.downloadUpdate).toHaveBeenCalledTimes(testConfig.transferRetryDelaysMs.length + 1)
     await harness.dispose()
   })
 
-  it('treats a manual available-version selection as a fresh confirmation', async () => {
-    const confirmDownload = vi.fn()
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true)
+  it('installs the downloaded installer on the next manual action instead of re-downloading', async () => {
     const harness = await createHarness({
       packaged: false,
       request: async () => manifestResponse('2.1.0'),
-      confirmDownload,
+      downloadUpdate: async () => '/tmp/picoaide-installer',
     })
 
     await harness.tray.invoke()
-    expect(confirmDownload).toHaveBeenCalledOnce()
-    expect(harness.downloadAndOpen).not.toHaveBeenCalled()
-    expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Available')
+    await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') })
+    expect(harness.downloadUpdate).toHaveBeenCalledOnce()
 
+    // 第二个动作 = 安装(不是再下一次):已下载的文件被直接交给平台安装流程。
     await harness.tray.invoke()
-    expect(confirmDownload).toHaveBeenCalledTimes(2)
-    expect(harness.downloadAndOpen).toHaveBeenCalledOnce()
+    await vi.waitFor(() => { expect(harness.installUpdate).toHaveBeenCalledWith('2.1.0', '/tmp/picoaide-installer') })
+    expect(harness.downloadUpdate).toHaveBeenCalledOnce()
     expect(harness.showManualCheckResult).not.toHaveBeenCalled()
   })
 
-  it('rechecks the version after confirmation and skips a rotated download', async () => {
-    const request = sequencedManifestRequest(manifestResponse('2.1.0'), manifestResponse('2.2.0'))
-    const harness = await createHarness({
-      packaged: false,
-      request,
-      confirmDownload: async () => true,
-    })
+  it('reuses a downloadable installer across a restart without transferring it again', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-updates-reuse-'))
+    try {
+      // 上一轮已经下载好并记账:新进程启动后必须先认这份文件,而不是重新下载。
+      // 落地文件名由清单里的下载地址派生(渠道化产物名),这里照同一规则取。
+      const installer = join(root, 'updates', '2.1.0', installerNameFor('2.1.0'))
+      await mkdir(dirname(installer), { recursive: true })
+      await writeFile(installer, installerArtifactFixture())
+      await mkdir(join(root, 'private'), { recursive: true })
+      await writeFile(join(root, 'private', 'state.json'), JSON.stringify({
+        version: 2,
+        lastPromptedVersion: '2.1.0',
+        downloadedVersion: '2.1.0',
+        downloadedPath: installer,
+      }))
+      const artifact = installerArtifactFixture()
+      const request = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/client/v2/channel')) return channelResponse()
+        return manifestResponse('2.1.0', sha256Hex(artifact))
+      })
+      const harness = await createHarness({
+        packaged: false,
+        request,
+        userDataRoot: root,
+        statePath: join(root, 'private', 'state.json'),
+      })
 
-    await harness.tray.invoke()
-
-    expect(manifestRequests(request)).toHaveLength(2)
-    expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0')
-    expect(harness.downloadAndOpen).not.toHaveBeenCalled()
-    expect(harness.showManualCheckResult).not.toHaveBeenCalled()
-    expect(harness.tray.label()).toBe('PicoAide Harness 2.2.0 Available')
-  })
-
-  it('still downloads the confirmed version when the post-confirm re-check fails', async () => {
-    const request = sequencedManifestRequest(manifestResponse('2.1.0'), new TypeError('offline'))
-    const downloadAndOpen = vi.fn(async () => {})
-    const harness = await createHarness({
-      packaged: false,
-      request,
-      confirmDownload: async () => true,
-      downloadAndOpen,
-    })
-
-    await harness.tray.invoke()
-
-    // The user confirmed 2.1.0; a flaky re-check must not turn Download into a no-op.
-    expect(harness.downloadAndOpen).toHaveBeenCalledWith('2.1.0', expect.objectContaining({ manifestURL: OFFICIAL_MANIFEST_URL }), expect.any(AbortSignal), expect.any(Function))
+      await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') })
+      expect(harness.downloadUpdate).not.toHaveBeenCalled()
+      expect(harness.announceUpdateReady).not.toHaveBeenCalled()
+      await harness.dispose()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it.each([
@@ -478,8 +557,8 @@ describe('desktop update Host plugin', () => {
     await vi.waitFor(() => { expect(manifestRequests(requestSpy)).toHaveLength(1) })
 
     expect(harness.showManualCheckResult).not.toHaveBeenCalled()
-    expect(harness.confirmDownload).not.toHaveBeenCalled()
-    expect(harness.downloadAndOpen).not.toHaveBeenCalled()
+    expect(harness.downloadUpdate).not.toHaveBeenCalled()
+    expect(harness.announceUpdateReady).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -500,8 +579,8 @@ describe('desktop update Host plugin', () => {
     await harness.tray.invoke()
 
     expect(harness.showManualCheckResult).toHaveBeenCalledWith(expected)
-    expect(harness.confirmDownload).not.toHaveBeenCalled()
-    expect(harness.downloadAndOpen).not.toHaveBeenCalled()
+    expect(harness.downloadUpdate).not.toHaveBeenCalled()
+    expect(harness.announceUpdateReady).not.toHaveBeenCalled()
     expect(harness.notifications).toEqual([])
     expect(harness.warnings).toEqual([])
     expect(harness.tray.label()).toBe('Check for Updates…')
@@ -526,11 +605,13 @@ describe('desktop update Host plugin', () => {
 
     expect(harness.tray.label()).toBe('Check for Updates…')
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
-    await vi.waitFor(() => { expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0') })
+    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() })
     await vi.waitFor(async () => {
       expect(JSON.parse(await readFile(harness.statePath, 'utf8'))).toEqual({
         version: 2,
         lastPromptedVersion: '2.1.0',
+        downloadedVersion: '2.1.0',
+        downloadedPath: expect.any(String),
       })
     })
     expect(harness.warnings).toEqual([])
@@ -545,38 +626,63 @@ describe('desktop update Host plugin', () => {
 
     await harness.tray.invoke()
 
-    expect(harness.confirmDownload).not.toHaveBeenCalled()
+    expect(harness.downloadUpdate).not.toHaveBeenCalled()
     expect(harness.showManualCheckResult).toHaveBeenCalledWith({
       status: 'update-available',
       currentVersion: '2.0.0',
       latestVersion: '2.1.0',
     })
-    expect(harness.downloadAndOpen).not.toHaveBeenCalled()
+    expect(harness.announceUpdateReady).not.toHaveBeenCalled()
     expect(harness.notifications).toEqual([])
     expect(harness.tray.label()).toBe('Check for Updates…')
   })
 
-  it('shares one pending download and silently restores availability after failure', async () => {
-    let rejectDownload!: (cause: Error) => void
-    const download = new Promise<void>((_resolve, reject) => { rejectDownload = reject })
+  it('retries a transient transfer failure and succeeds on the next attempt', async () => {
+    const downloadUpdate = vi.fn()
+      .mockRejectedValueOnce(new Error('socket hang up'))
+      .mockResolvedValueOnce('/tmp/picoaide-installer')
     const harness = await createHarness({
       packaged: false,
       request: async () => manifestResponse('2.1.0'),
-      confirmDownload: async () => true,
-      downloadAndOpen: async () => download,
+      downloadUpdate,
+    })
+
+    await harness.tray.invoke()
+    await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') })
+
+    // 网络抖动不该让用户看到失败:重试一次就成功,并且中间态暴露了第几次尝试。
+    expect(downloadUpdate).toHaveBeenCalledTimes(2)
+    const states = harness.publishedStates.mock.calls.map(call => call[0] as { retryAttempt: number })
+    expect(states.some(state => state.retryAttempt === 2)).toBe(true)
+    expect(harness.announceUpdateReady).toHaveBeenCalledWith('2.1.0', '/tmp/picoaide-installer')
+    expect(harness.notifications).toEqual([])
+    expect(harness.warnings).toEqual([])
+  })
+
+  it('shares one pending download and keeps availability after the retry budget is spent', async () => {
+    let rejectDownload!: (cause: Error) => void
+    const download = new Promise<string>((_resolve, reject) => { rejectDownload = reject })
+    const harness = await createHarness({
+      packaged: false,
+      request: async () => manifestResponse('2.1.0'),
+      downloadUpdate: async () => download,
     })
 
     const first = harness.tray.invoke()
-    await vi.waitFor(() => { expect(harness.downloadAndOpen).toHaveBeenCalledOnce() })
+    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() })
     const second = harness.tray.invoke()
-    expect(harness.downloadAndOpen).toHaveBeenCalledOnce()
+    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() })
     rejectDownload(new Error('offline'))
     await Promise.all([first, second])
 
-    expect(harness.downloadAndOpen).toHaveBeenCalledOnce()
+    // 同一个版本同时只跑一次传输:第二个动作复用了进行中的下载。
+    expect(harness.downloadUpdate).toHaveBeenCalledTimes(testConfig.transferRetryDelaysMs.length + 1)
+    expect(harness.announceUpdateReady).not.toHaveBeenCalled()
     expect(harness.notifications).toEqual([])
     expect(harness.warnings).toEqual([])
+    // 传输失败后仍然"有可用新版本"(用户还能再点一次),但错误已可见。
     expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Available')
+    expect(harness.publishedStates).toHaveBeenLastCalledWith(expect.objectContaining({ lastError: 'network' }))
   })
 
   it('aborts checks and downloads and removes the tray item on effect disposal', async () => {
@@ -602,8 +708,7 @@ describe('desktop update Host plugin', () => {
     const downloading = await createHarness({
       packaged: false,
       request: async () => manifestResponse('2.1.0'),
-      confirmDownload: async () => true,
-      downloadAndOpen: async (_version, _source, signal) => new Promise<void>((_resolve, reject) => {
+      downloadUpdate: async (_version, _source, signal) => new Promise<string>((_resolve, reject) => {
         downloadSignal = signal
         signal.addEventListener('abort', () => {
           reject(new DOMException('disposed', 'AbortError'))
@@ -654,10 +759,14 @@ describe('desktop update Host plugin', () => {
     await vi.waitFor(() => { expect(manifestRequests(request)).toHaveLength(1) })
     expect(harness.tray.label()).toBe('Checking for Updates…')
     await vi.advanceTimersByTimeAsync(testConfig.requestTimeoutMs)
+    // 每次重试各自计时:一次 1ms 推进就把每一轮的"退避 → 下一次请求 → 再超时"
+    // 全部走完(advanceTimersByTimeAsync 会执行期间新排上的定时器)。
+    await vi.advanceTimersByTimeAsync(1)
+    await vi.advanceTimersByTimeAsync(1)
     await Promise.all([first, second])
 
     expect(signals[0]?.aborted).toBe(true)
-    expect(harness.confirmDownload).not.toHaveBeenCalled()
+    expect(harness.downloadUpdate).not.toHaveBeenCalled()
     expect(harness.showManualCheckResult).toHaveBeenCalledWith(null)
     expect(harness.notifications).toEqual([])
     expect(harness.warnings).toEqual([])
@@ -669,13 +778,14 @@ describe('desktop update Host plugin', () => {
     const harness = await createHarness({ request })
     // Initial static facts are published as soon as the state machine mounts.
     expect(harness.publishedStates).toHaveBeenCalled()
-    expect(harness.publishedStates).toHaveBeenLastCalledWith({
+    expect(harness.publishedStates).toHaveBeenLastCalledWith(expect.objectContaining({
       availableVersion: undefined,
       downloadingVersion: undefined,
+      readyVersion: undefined,
       isPackaged: true,
       canDownload: true,
       currentVersion: '2.0.0',
-    })
+    }))
 
     // An available version publishes a downloadable snapshot.
     await harness.tray.invoke()
@@ -690,9 +800,9 @@ describe('desktop update Host plugin', () => {
     const request = vi.fn(async () => manifestResponse('2.3.0'))
     const harness = await createHarness({ request })
     expect(typeof harness.checkNow).toBe('function')
-    // The trigger drives the same manual check (confirm dialog appears).
+    // The trigger drives the same manual flow: 检查 → 静默下载 → 可安装。
     harness.checkNow?.()
-    await vi.waitFor(() => { expect(harness.confirmDownload).toHaveBeenCalledWith('2.3.0') })
+    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledWith('2.3.0', expect.anything(), expect.any(AbortSignal), expect.any(Function)) })
   })
 })
 
@@ -706,37 +816,56 @@ describe('desktop update channel from the manifest (prerelease installs)', () =>
     const harness = await createHarness({ currentVersion: '2.1.0-rc.1', request })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
-    await vi.waitFor(() => { expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0-rc.2') })
-    expect(harness.downloadAndOpen).not.toHaveBeenCalled()
-    expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0-rc.2 Available')
+    await vi.waitFor(() => { expect(harness.announceUpdateReady).toHaveBeenCalledWith('2.1.0-rc.2', expect.any(String)) })
+    expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0-rc.2 Ready to Install')
     await vi.waitFor(async () => {
       expect(JSON.parse(await readFile(harness.statePath, 'utf8'))).toEqual({
         version: 2,
         lastPromptedVersion: '2.1.0-rc.2',
+        downloadedVersion: '2.1.0-rc.2',
+        downloadedPath: expect.any(String),
       })
     })
 
     await harness.dispose()
   })
 
-  it('accepts prerelease prompt history and does not prompt for it again', async () => {
+  it('keeps a recorded prerelease download ready across restarts without re-prompting', async () => {
     vi.useFakeTimers()
-    const request = vi.fn(async () => manifestResponse('2.1.0-rc.2'))
+    // 清单声明的哈希必须与磁盘上的完成件一致,复用校验才会通过。
+    const request = vi.fn(async () => manifestResponse('2.1.0-rc.2', sha256Hex(installerArtifactFixture())))
     const harness = await createHarness({
       currentVersion: '2.1.0-rc.1',
       request,
       state: JSON.stringify({ version: 2, lastPromptedVersion: '2.1.0-rc.2' }),
     })
-
-    await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
-    await vi.advanceTimersByTimeAsync(testConfig.intervalMs)
-    expect(harness.confirmDownload).not.toHaveBeenCalled()
-    // The availability snapshot stays visible (same as the stable flow after a
-    // dismissed prompt); only the re-prompt is suppressed by the persisted
-    // prerelease history.
-    expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0-rc.2 Available')
+    // 状态里记着"这一版已经下载好":把完成件真的放到版本目录里(名字按清单
+    // 下载地址派生),启动后必须直接复用,既不重下也不再提示。
+    await writeInstallerFixture(harness.userDataPath, '2.1.0-rc.2')
 
     await harness.dispose()
+    const restarted = await createHarness({
+      currentVersion: '2.1.0-rc.1',
+      request,
+      state: JSON.stringify({
+        version: 2,
+        lastPromptedVersion: '2.1.0-rc.2',
+        downloadedVersion: '2.1.0-rc.2',
+        downloadedPath: installerPathFor(harness.userDataPath, '2.1.0-rc.2'),
+      }),
+      userDataRoot: harness.userDataPath,
+    })
+
+    await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
+    // 复用校验要先读状态文件与磁盘(真实 I/O),再回落到"可安装"。
+    await vi.waitFor(() => { expect(restarted.tray.label()).toBe('PicoAide Harness 2.1.0-rc.2 Ready to Install') })
+    await vi.advanceTimersByTimeAsync(testConfig.intervalMs)
+    // 后续轮询看到"这一版已经在待安装位":不重下、也不再提示。
+    expect(restarted.downloadUpdate).not.toHaveBeenCalled()
+    expect(restarted.announceUpdateReady).not.toHaveBeenCalled()
+    expect(restarted.tray.label()).toBe('PicoAide Harness 2.1.0-rc.2 Ready to Install')
+
+    await restarted.dispose()
   })
 
   it('reports no update while the manifest still publishes the installed prerelease', async () => {
@@ -751,7 +880,7 @@ describe('desktop update channel from the manifest (prerelease installs)', () =>
       currentVersion: '2.1.0-rc.1',
       latestVersion: '2.1.0-rc.1',
     })
-    expect(harness.confirmDownload).not.toHaveBeenCalled()
+    expect(harness.downloadUpdate).not.toHaveBeenCalled()
 
     await harness.dispose()
   })
@@ -768,7 +897,7 @@ describe('desktop update channel from the manifest (prerelease installs)', () =>
       currentVersion: '2.0.0',
       latestVersion: '2.0.0',
     })
-    expect(harness.confirmDownload).not.toHaveBeenCalled()
+    expect(harness.downloadUpdate).not.toHaveBeenCalled()
 
     await harness.dispose()
   })

@@ -25,6 +25,25 @@ export async function handleDesktopUpdateRequest(
   finishJson(res, 200, readState())
 }
 
+/**
+ * 同源写入口的统一守卫。
+ *
+ * POST 由 renderer 页面发起时 Chromium 会带 Origin; 无 Origin 的场景(如本地
+ * 脚本)也放行, 跨站请求无法隐藏 Origin。
+ * @returns 请求可以继续时为 true;已写出错误响应时为 false。
+ */
+function acceptRendererPost(req: IncomingMessage, res: ServerResponse, expectedOrigin: string): boolean {
+  if (req.method !== 'POST') {
+    finishJson(res, 405, { error: 'method not allowed' })
+    return false
+  }
+  if (req.headers.origin !== undefined && req.headers.origin !== expectedOrigin) {
+    finishJson(res, 403, { error: 'forbidden' })
+    return false
+  }
+  return true
+}
+
 /** Serve a renderer-triggered manual update check (same flow as the tray command). */
 export async function handleDesktopUpdateCheckRequest(
   req: IncomingMessage,
@@ -32,12 +51,24 @@ export async function handleDesktopUpdateCheckRequest(
   expectedOrigin: string,
   checkNow: () => void,
 ): Promise<void> {
-  if (req.method !== 'POST') return finishJson(res, 405, { error: 'method not allowed' })
-  // 同上: POST 由 renderer 页面发起时 Chromium 会带 Origin; 无 Origin 的
-  // 场景(如本地脚本)也放行, 跨站请求无法隐藏 Origin。
-  if (req.headers.origin !== undefined && req.headers.origin !== expectedOrigin) {
-    return finishJson(res, 403, { error: 'forbidden' })
-  }
+  if (!acceptRendererPost(req, res, expectedOrigin)) return
   checkNow()
+  finishJson(res, 202, { accepted: true })
+}
+
+/**
+ * Serve a renderer-triggered installation of an already-downloaded installer.
+ *
+ * 与检查分成两条路由:检查会联网,安装只在本地动手(可能重启应用),对 UI 是
+ * 两个不同动作,共用一个"再检查一次"的入口会让安装点不动。
+ */
+export async function handleDesktopUpdateInstallRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  expectedOrigin: string,
+  installNow: () => void,
+): Promise<void> {
+  if (!acceptRendererPost(req, res, expectedOrigin)) return
+  installNow()
   finishJson(res, 202, { accepted: true })
 }

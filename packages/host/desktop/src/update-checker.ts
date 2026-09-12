@@ -113,10 +113,15 @@ export function compareSemVerVersions(left: string, right: string): number | nul
  * `unavailable` 与"没有新版本"必须分开：服务端推不出安全的对外地址时会**明确**
  * 说明原因（`client_unavailable`，见 server 的 `internal/clientrelease`）。把它
  * 当成"已是最新"就是审计里那条"界面永远显示已是最新、而链路其实断了"的静默故障。
+ *
+ * `transport` 与 `invalid` 也必须分开：请求抛错（连接重置/DNS/超时）与 5xx 是
+ * **可重试**的瞬时故障，而清单结构不符、schema 不匹配、版本号非法重试多少次都
+ * 一样 —— 协调器只对 `transport` 做退避重试（2026-09-12 更新健壮化）。
  */
 export type UpdateCheckOutcome =
   | { readonly kind: 'result'; readonly result: UpdateCheckResult }
   | { readonly kind: 'unavailable'; readonly reason: string }
+  | { readonly kind: 'transport'; readonly status?: number; readonly cause?: unknown }
   | { readonly kind: 'invalid' }
 
 /**
@@ -163,10 +168,20 @@ export async function checkForUpdateDetailed(
   }
 }
 
+/** 一次清单请求失败后是否值得重试：只有传输层失败是瞬时的。 */
+export function isRetriableManifestOutcome(outcome: UpdateCheckOutcome | ManifestOutcome): boolean {
+  if (outcome.kind === 'transport') {
+    // 5xx / 408 是服务端瞬时故障；其余带状态码的失败（4xx）重试没有意义。
+    return outcome.status === undefined || outcome.status >= 500 || outcome.status === 408
+  }
+  return false
+}
+
 /** 清单拉取的完整结果（内部类型：把"服务端说给不出地址"与"拉取失败"分开）。 */
 type ManifestOutcome =
   | { readonly kind: 'manifest'; readonly manifest: DesktopReleaseManifest }
   | { readonly kind: 'unavailable'; readonly reason: string }
+  | { readonly kind: 'transport'; readonly status?: number; readonly cause?: unknown }
   | { readonly kind: 'invalid' }
 
 /**
@@ -184,7 +199,7 @@ export async function fetchReleaseManifest(
 /**
  * `fetchReleaseManifest()` 的详细版:多一个"服务端明确给不出下载地址"的出口。
  * @param options - manifest URL, request adapter, and caller-owned cancellation.
- * @returns 清单 / 不可用原因 / 其它失败。
+ * @returns 清单 / 不可用原因 / 传输失败(可重试) / 其它失败。
  */
 export async function fetchReleaseManifestDetailed(
   options: Pick<UpdateCheckOptions, 'manifestURL' | 'request' | 'signal' | 'expectedChannel'>,
@@ -206,9 +221,10 @@ export async function fetchReleaseManifestDetailed(
   } catch (cause) {
     // 主动取消必须向上传播:吞掉会让"用户点了取消"显示成"网络错误"。
     if (options.signal?.aborted === true || isAbortFailure(cause)) throw cause
-    return { kind: 'invalid' }
+    // 请求抛错 = 传输失败(连接重置/DNS/超时)。这不是"清单不存在",协调器要据此重试。
+    return { kind: 'transport', cause }
   }
-  if (response.status !== 200) return { kind: 'invalid' }
+  if (response.status !== 200) return { kind: 'transport', status: response.status }
 
   let body: string
   try {
