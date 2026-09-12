@@ -440,6 +440,75 @@ try {
 
     }
 
+    // 7. 原生标题栏保留带（2026-09-12）：面板既不按自己的列定位（push 锚在 frame、
+    // fullscreen 锚在视口），也不认识网格第一行为原生标题栏预留的高度，于是它自己的
+    // strip（标签 + 分栏 / 全屏 / 收起右侧边栏 控件）会落进那条带里。Windows 上原生
+    // 最小化/最大化/关闭是浮在页面之上的透明 overlay，两套字形因此重叠 —— 位置最右的
+    // 「收起右侧边栏」正好落在「关闭」格子里（点它等于关窗口）。判据只能靠几何，
+    // 样式字符串断言抓不到。
+    //
+    // 保留带由 frame 自己的平台属性驱动（网格行与面板偏移共用它），所以 Linux 上翻转
+    // 该属性即可量到 Windows / macOS 的真实几何，无需 Windows 主机、也不必真的画出
+    // 窗口按钮；量完立刻复原属性。
+    const panelPresent = await evaluate(`!!document.querySelector('[data-sidebar-right-panel]')`)
+    if (!panelPresent) {
+      skip('右栏面板避开原生标题栏保留带', '面板未挂载（本轮未打开右栏）')
+    } else {
+      const bandProbe = await evaluate(`(async () => {
+        const frame = document.querySelector('.dshDesktopFrame')
+        const panel = document.querySelector('[data-sidebar-right-panel]')
+        if (!frame || !panel) return { error: 'frame or panel missing' }
+        // A timer, not requestAnimationFrame: the probe must not depend on a
+        // compositing window (an occluded one never fires rAF), and every read
+        // below forces its own style/layout flush anyway.
+        const settle = () => new Promise(resolve => setTimeout(resolve, 80))
+        const mainSurface = document.querySelector('.dshDesktopConversationSurface')
+        const measure = async (platform, band) => {
+          frame.setAttribute('data-desktop-platform', platform)
+          await settle()
+          const strip = panel.querySelector('[data-dockkit-strip]')
+          const chrome = panel.querySelector('[data-dockkit-strip-chrome]')
+          const top = (el) => el === null ? null : Math.round(el.getBoundingClientRect().top)
+          return {
+            platform,
+            band,
+            gridFirstRow: Math.round(Number.parseFloat(getComputedStyle(frame).gridTemplateRows) || 0),
+            panelTop: Math.round(panel.getBoundingClientRect().top),
+            stripTop: top(strip),
+            chromeTop: top(chrome),
+            mainSurfaceTop: top(mainSurface),
+          }
+        }
+        const original = frame.getAttribute('data-desktop-platform')
+        let out
+        try {
+          // 32px / 20px are the platform contracts this check pins (Electron's
+          // Windows caption overlay height and the macOS traffic-light strip,
+          // window-chrome.ts) — not values read back from the CSS under test.
+          out = [await measure('win32', 32), await measure('darwin', 20)]
+        }
+        finally {
+          frame.setAttribute('data-desktop-platform', original)
+          await settle()
+        }
+        return { original, out }
+      })()`)
+      const bands = Array.isArray(bandProbe?.out) ? bandProbe.out : []
+      if (bands.length === 0) check('右栏面板避开原生标题栏保留带', false, JSON.stringify(bandProbe))
+      for (const entry of bands) {
+        const inside = entry.stripTop !== null && entry.chromeTop !== null
+          && entry.stripTop >= entry.band && entry.chromeTop >= entry.band
+        // The conversation surface starts below the same band, so the panel's
+        // strip lines up with the main column once it carries the offset.
+        const aligned = entry.mainSurfaceTop === null || entry.mainSurfaceTop === entry.band
+        check(`右栏面板避开原生标题栏保留带（模拟 ${entry.platform}，${entry.band}px）`,
+          entry.gridFirstRow === entry.band && inside && aligned,
+          `gridRow=${entry.gridFirstRow} panelTop=${entry.panelTop} stripTop=${entry.stripTop} ` +
+          `chromeTop=${entry.chromeTop} mainSurfaceTop=${entry.mainSurfaceTop}`)
+      }
+      if (bands.length > 0) await shoot('08-caption-band')
+    }
+
     // Collapsing releases the frame track but keeps the occupant's content tree
     // mounted (upstream preserves per-session tab state), so the assertion is on
     // the frame's own presentation attribute — not on the subtree unmounting.
