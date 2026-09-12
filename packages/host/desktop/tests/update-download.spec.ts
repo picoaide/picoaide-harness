@@ -16,6 +16,21 @@ import {
 const SERVER = 'https://server.test'
 const MANIFEST_URL = serverManifestURL(SERVER)
 
+/**
+ * 取请求地址的**主机名**（不是子串匹配：`call.includes('api.github.com')`
+ * 对 `https://evil.example/?x=api.github.com` 也会命中，CodeQL
+ * js/incomplete-url-substring-sanitization）。
+ * @param url - 被检查的请求地址。
+ * @returns 主机名；无法解析时为 undefined。
+ */
+function hostOf(url: string): string | undefined {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return undefined
+  }
+}
+
 const temporaryRoots: string[] = []
 
 async function temporaryUserData(): Promise<string> {
@@ -550,7 +565,7 @@ describe('desktop update installer download', () => {
     expect(await readFile(result)).toEqual(Buffer.from(artifact))
     // 预发布版本同样只读版本清单,不再有"latest 排除预发布"的分支。
     expect(calls[0]).toBe(MANIFEST_URL)
-    expect(calls.some(call => call.includes('api.github.com'))).toBe(false)
+    expect(calls.some(call => hostOf(call) === 'api.github.com')).toBe(false)
     await expectNoPartialFiles(userDataPath, '2.8.0-rc.1')
   })
 

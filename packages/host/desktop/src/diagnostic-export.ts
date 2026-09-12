@@ -3,6 +3,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { Worker } from 'node:worker_threads'
+import { dshHomePath } from './desktop-home.ts'
 import type { DiagnosticExportWorkerResult } from './diagnostic-export-worker.ts'
 
 /** Bound both worker memory and the amount of potentially sensitive log history exported. */
@@ -20,6 +21,8 @@ export interface DiagnosticExportOptions {
   readonly crashDumpsDir?: string
   /** Active-run marker used to identify a launch that did not shut down cleanly. */
   readonly runStatePath?: string
+  /** Session root whose generation metadata becomes `session-inventory.json` (P1-12). */
+  readonly sessionsDir?: string
 }
 
 export interface DesktopDiagnosticExportOptions {
@@ -27,6 +30,8 @@ export interface DesktopDiagnosticExportOptions {
   /** Exact Electron Crashpad directory; defaults to the conventional user-data location. */
   readonly crashDumpsDir?: string
   readonly maxEvidenceBytes?: number
+  /** Session root override; defaults to `<DSH_HOME>/sessions`. */
+  readonly sessionsDir?: string
 }
 
 function workerEntryUrl(): URL {
@@ -96,6 +101,7 @@ export function exportDiagnosticsZip(
       maxEvidenceBytes,
       ...(options.crashDumpsDir === undefined ? {} : { crashDumpsDir: options.crashDumpsDir }),
       ...(options.runStatePath === undefined ? {} : { runStatePath: options.runStatePath }),
+      ...(options.sessionsDir === undefined ? {} : { sessionsDir: options.sessionsDir }),
     },
     resourceLimits: { maxOldGenerationSizeMb: 256 },
   })
@@ -113,6 +119,9 @@ export function exportDesktopDiagnostics(
     appVersion: options.appVersion,
     crashDumpsDir: options.crashDumpsDir ?? join(userDataDir, 'Crashpad'),
     runStatePath: join(userDataDir, 'crash-evidence', 'active-run.json'),
+    // P1-12: the session root is resolved once here (main thread) so the worker
+    // never has to re-derive DSH_HOME from the environment.
+    sessionsDir: options.sessionsDir ?? dshHomePath('sessions'),
     ...(options.maxEvidenceBytes === undefined ? {} : { maxEvidenceBytes: options.maxEvidenceBytes }),
   })
 }

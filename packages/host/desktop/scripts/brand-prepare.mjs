@@ -100,7 +100,17 @@ export async function prepareBrandAssets(options = {}) {
   // Tray bitmaps (mac template + fixed-color windows/linux).
   const trayFiles = await generateTrayIcons({ source: sources['logo.svg'], buildRoot: outputDir })
 
-  const files = ['app-icon.png', 'app-icon-mac.png', ...trayFiles]
+  // 浏览器面品牌资源（favicon 源文件）：客户端前端 dist 里那份 favicon 是上游
+  // DeepSeek 鱼形、manifest 写着厂商名 —— Electron 窗口图标挡住了，但 `dsh web`
+  // 标签页 / PWA「安装为应用」直接读它们。桌面 host 用 exact 路由覆盖
+  // `/favicon.svg` 与 `/manifest.webmanifest`（见 src/brand-web-route.ts）；
+  // 路由在打包产物里读不到仓库品牌目录，所以这里把**本次构建的品牌几何**
+  // 落盘成 build/web-brand/favicon.svg（渠道 logo 优先，缺失则官方 logo）。
+  const webBrandDir = join(outputDir, 'web-brand')
+  await mkdir(webBrandDir, { recursive: true })
+  await copyFile(sources['logo.svg'], join(webBrandDir, 'favicon.svg'))
+
+  const files = ['app-icon.png', 'app-icon-mac.png', 'web-brand/favicon.svg', ...trayFiles]
   if (assisted !== undefined) files.push('assistedMessages.yml')
   return { channelId: context.channelId, files }
 }

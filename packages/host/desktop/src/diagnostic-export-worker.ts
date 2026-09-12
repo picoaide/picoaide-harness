@@ -18,6 +18,7 @@ import { join } from 'node:path'
 import { isMainThread, parentPort, workerData } from 'node:worker_threads'
 import AdmZip from 'adm-zip'
 import { isDesktopLogFileName } from './log-files.ts'
+import { collectSessionInventory, type SessionInventory } from './session-inventory.ts'
 
 const DIAGNOSTIC_ARCHIVE = /^diagnostics-\d+(?:-[0-9a-f-]+)?\.zip$/u
 const MAX_DIAGNOSTIC_ARCHIVES = 3
@@ -30,6 +31,8 @@ interface DiagnosticExportWorkerData {
   readonly maxEvidenceBytes: number
   readonly crashDumpsDir?: string
   readonly runStatePath?: string
+  /** Session root whose generation metadata is inventoried; omitted → no inventory entry. */
+  readonly sessionsDir?: string
 }
 
 export type DiagnosticExportWorkerResult =
@@ -182,6 +185,20 @@ async function createDiagnosticsArchive(data: DiagnosticExportWorkerData): Promi
     if (entry.name.startsWith('crash-dumps/')) includedCrashDumps += 1
     else if (entry.name === 'crash-evidence/active-run.json') includedActiveRunMarker = true
   }
+  // P1-12 (2026-09-12): session generation metadata for "the session is gone"
+  // reports. This is a separate zip entry and never the session log itself —
+  // the owned-log whitelist above is deliberately not widened.
+  let sessionInventory: SessionInventory | undefined
+  let sessionInventoryError: string | undefined
+  if (data.sessionsDir !== undefined) {
+    try {
+      sessionInventory = collectSessionInventory(data.sessionsDir)
+      zip.addFile('session-inventory.json', Buffer.from(`${JSON.stringify(sessionInventory, null, 2)}\n`, 'utf8'))
+    } catch (cause) {
+      // A forensic extra must never break the export it is attached to.
+      sessionInventoryError = (cause instanceof Error ? cause.message : String(cause)).replace(/[\r\n]+/gu, ' ')
+    }
+  }
   const info = [
     'app: dsh-plugin-desktop',
     `desktop-version: ${data.appVersion}`,
@@ -198,7 +215,18 @@ async function createDiagnosticsArchive(data: DiagnosticExportWorkerData): Promi
     `included-active-run-marker: ${String(includedActiveRunMarker)}`,
     `omitted-active-run-marker: ${String(omittedActiveRunMarker)}`,
     `evidence-byte-limit: ${String(data.maxEvidenceBytes)}`,
-    'privacy: logs may contain local paths, workspace IDs, and session IDs; crash dumps may contain process memory',
+    `included-session-inventory: ${String(sessionInventory !== undefined)}`,
+    ...(sessionInventory === undefined
+      ? []
+      : [
+          `session-inventory-sessions: ${String(sessionInventory.totals.sessions)}`,
+          `session-inventory-files: ${String(sessionInventory.totals.files)}`,
+          `session-inventory-truncated: ${String(sessionInventory.truncated)}`,
+        ]),
+    ...(sessionInventoryError === undefined ? [] : [`session-inventory-error: ${sessionInventoryError}`]),
+    'privacy: logs may contain local paths, workspace IDs, and session IDs; crash dumps may contain process memory; '
+      + 'session-inventory.json carries session ids, project directory names, generation file names, sizes and '
+      + 'timestamps only, never session contents',
   ].join('\n')
   zip.addFile('system-info.txt', Buffer.from(`${info}\n`, 'utf8'))
 

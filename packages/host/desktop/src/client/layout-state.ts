@@ -75,6 +75,19 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 /**
+ * Right panel width preference before its first opening.
+ *
+ * The frame ratio is a preference, not a promise: a narrow frame must not save
+ * a width below the contract floor or the panel would open unusable (upstream
+ * `openRightbar`'s `Math.max(RIGHTBAR_MIN, …)`).
+ * @param viewport - current frame measurement in px.
+ * @returns the px preference to store at first opening.
+ */
+export function rightbarFirstOpenWidth(viewport: number): number {
+  return Math.max(RIGHTBAR_MIN, Math.round(viewport * RIGHTBAR_DEFAULT_RATIO))
+}
+
+/**
  * Resolve the three desktop columns without letting the right column squeeze the
  * conversation below its floor (upstream `computeColumns` semantics).
  * @param viewport - available frame width.
@@ -195,31 +208,53 @@ export class DesktopLayoutState implements ILayout {
 
   /** @returns the right column's width preference (its first-open default included). */
   rightbarPreference(): number {
+    // Unrounded by contract: this is the raw preference the frame solves from,
+    // and `openRightbar` rounds/clamps it only when it saves the px value.
     return this.layoutInfo.rightbar ?? this.layoutInfo.viewportWidth * RIGHTBAR_DEFAULT_RATIO
   }
 
   /** Toggle the wide sidebar and the platform-selected compact rail. */
   toggleSidebar(): void {
+    // A geometry action retires the fullscreen-exit transition suppression
+    // (upstream `toggleSidebar` clears `rightbarInstant` on both branches).
     if (this.layoutInfo.viewportWidth < SIDEBAR_AUTO_COLLAPSE) {
-      this.publishLayout({ narrowExpanded: !this.layoutInfo.narrowExpanded })
+      this.publishLayout({ narrowExpanded: !this.layoutInfo.narrowExpanded, rightbarInstant: false })
       return
     }
-    this.publishLayout({ sidebar: this.layoutInfo.sidebar === 0 ? SIDEBAR_DEFAULT : 0 })
+    this.publishLayout({
+      sidebar: this.layoutInfo.sidebar === 0 ? SIDEBAR_DEFAULT : 0,
+      rightbarInstant: false,
+    })
   }
 
   /**
    * Report the right panel's presentation without changing its expanded state.
+   *
+   * Opening on a narrow frame drops the manual rail override: showing the
+   * right panel is a left-column concession, and the narrow default is the
+   * collapsed rail — otherwise `canShow` would arrive false and the occupant
+   * would immediately collapse itself again (silently making the button inert).
+   *
    * @param track - whether the normal panel width reserves a grid track.
    * @param fullscreen - whether the panel covers the frame.
    */
   openRightbar(track: boolean, fullscreen: boolean): void {
-    const width = this.layoutInfo.rightbar ?? Math.round(this.layoutInfo.viewportWidth * RIGHTBAR_DEFAULT_RATIO)
+    const { rightbarShown, rightbarTrack, rightbarFullscreen, viewportWidth } = this.layoutInfo
+    const changed = !rightbarShown || rightbarTrack !== track || rightbarFullscreen !== fullscreen
+    // Transition suppression belongs to one transition only: a genuine
+    // presentation change suppresses its own animation when it is a fullscreen
+    // exit, and any other report leaves the flag alone (upstream `openRightbar`).
+    const rightbarInstant = changed ? rightbarFullscreen && !fullscreen : this.layoutInfo.rightbarInstant
+    // The first opening prefers 45% of the frame but never below the contract
+    // floor — a narrow frame would otherwise save an unusable preference.
+    const width = this.layoutInfo.rightbar ?? rightbarFirstOpenWidth(viewportWidth)
     this.publishLayout({
       rightbar: width,
       rightbarShown: true,
       rightbarTrack: track,
       rightbarFullscreen: fullscreen,
-      rightbarInstant: false,
+      rightbarInstant,
+      ...(!rightbarShown && viewportWidth < SIDEBAR_AUTO_COLLAPSE ? { narrowExpanded: false } : {}),
     })
   }
 
@@ -249,18 +284,29 @@ export class DesktopLayoutState implements ILayout {
   /** @param width - current frame measurement. */
   setViewportWidth(width: number): void {
     if (width <= 0 || width === this.layoutInfo.viewportWidth) return
-    this.publishLayout({ viewportWidth: width })
+    // Crossing the breakpoint in either direction drops the manual narrow
+    // override: the narrow default is auto-collapsed, the wide state is the
+    // width preference (upstream `setViewportWidth`).
+    const crossed = (this.layoutInfo.viewportWidth < SIDEBAR_AUTO_COLLAPSE) !== (width < SIDEBAR_AUTO_COLLAPSE)
+    this.publishLayout({
+      viewportWidth: width,
+      rightbarInstant: false,
+      ...(crossed ? { narrowExpanded: false } : {}),
+    })
   }
 
   /** @param width - requested sidebar width from a resize gesture. */
   setSidebar(width: number): void {
-    this.publishLayout({ sidebar: clamp(width, SIDEBAR_MIN, SIDEBAR_MAX) })
+    this.publishLayout({
+      sidebar: clamp(width, SIDEBAR_MIN, SIDEBAR_MAX),
+      rightbarInstant: false,
+    })
   }
 
   /** @param width - requested right panel width from a resize gesture. */
   setRightbar(width: number): void {
     const max = Math.max(RIGHTBAR_MIN, Math.round(this.layoutInfo.viewportWidth * RIGHTBAR_MAX_RATIO))
-    this.publishLayout({ rightbar: clamp(width, RIGHTBAR_MIN, max) })
+    this.publishLayout({ rightbar: clamp(width, RIGHTBAR_MIN, max), rightbarInstant: false })
   }
 
   /** Invalidate pending navigations when the owning fiber unloads. */
