@@ -20,6 +20,8 @@
     "@deepseek-ai/dsh-agent-presets@npm:0.1.5-rc.2": "patch:@deepseek-ai/dsh-agent-presets@npm%3A0.1.5-rc.2#./patches/dsh-agent-presets@0.1.5-rc.2.patch",
     "@deepseek-ai/dsh-plugin-package-inventory-deepseek@npm:0.1.5-rc.2": "patch:@deepseek-ai/dsh-plugin-package-inventory-deepseek@npm%3A0.1.5-rc.2#./patches/dsh-plugin-package-inventory-deepseek@0.1.5-rc.2.patch",
     "@deepseek-ai/dsh-win32-process@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-win32-process@npm%3A0.1.5-rc.2#./patches/dsh-win32-process@0.1.5-rc.2.patch",
+    "@deepseek-ai/dsh-subprocess-local@npm:0.1.5-rc.2": "patch:@deepseek-ai/dsh-subprocess-local@npm%3A0.1.5-rc.2#./patches/dsh-subprocess-local@0.1.5-rc.2.patch",
+    "@deepseek-ai/dsh-subprocess-local@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-subprocess-local@npm%3A0.1.5-rc.2#./patches/dsh-subprocess-local@0.1.5-rc.2.patch",
     "@deepseek-ai/dsh-client-ui-brand-official@npm:^0.1.5-rc.2": "patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.1.5-rc.2#./patches/dsh-client-ui-brand-official@0.1.5-rc.2.patch"
   },
   "dependenciesMeta": {
