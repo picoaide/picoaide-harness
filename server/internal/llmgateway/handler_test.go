@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -884,6 +885,68 @@ func TestProxyStreamNormalEOFWithoutUsageEstimatesTokens(t *testing.T) {
 	}
 	if ct <= 0 {
 		t.Fatalf("completion_tokens = %d, want > 0 (estimated from forwarded bytes)", ct)
+	}
+}
+
+// P0-B(审计 2026-09-12):解析边界必须把上游回报的负 token 归零。
+// 上游负 token(cache hit 字段同样)会让 costOfAt 算出负费用 → 结算当作
+// refund → 员工余额凭空增加。
+func TestParseUsageClampsNegativeTokenCounts(t *testing.T) {
+	pt, ct, cache, ok, err := parseUsage([]byte(`{"usage":{"prompt_tokens":-1000000,"completion_tokens":-1000000,"prompt_cache_hit_tokens":-5}}`))
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if pt != 0 || ct != 0 || cache != 0 {
+		t.Fatalf("负 token 未归零: pt=%d ct=%d cache=%d, want 0/0/0", pt, ct, cache)
+	}
+	// miss 推算路径同样不得产出负值
+	pt, ct, cache, ok, err = parseUsage([]byte(`{"usage":{"prompt_tokens":-100,"completion_tokens":-1,"prompt_cache_miss_tokens":10}}`))
+	if err != nil || !ok || pt != 0 || ct != 0 || cache != 0 {
+		t.Fatalf("miss 推算路径: got %d/%d/%d ok=%v err=%v", pt, ct, cache, ok, err)
+	}
+}
+
+// P0-B 端到端(真实 handler + 真实假上游 + 真 PG):
+// 上游回 `prompt_tokens:-1000000, completion_tokens:-1000000`、模型 1 元/1M
+// → 旧实现 cost=-1.00 → refund 1.00 → 余额 1.00 变 2.00。修复后余额不变,
+// 且不得出现 refund 流水、落库 cost/token 不得为负。
+func TestNegativeUpstreamUsageDoesNotRechargeBalance(t *testing.T) {
+	f := newFakeUpstream(t)
+	f.nonStream = `{"id":"x","object":"chat.completion","usage":{"prompt_tokens":-1000000,"completion_tokens":-1000000}}`
+	r, db, token := newGateway(t, f)
+	enableBalanceGate(t, db, true)
+	activateBalance(t, db, 1, 1) // 已开通,余额 1 元
+	if _, err := db.Exec(`UPDATE models SET input_price_per_1m = 1, output_price_per_1m = 1 WHERE name = 'deepseek-chat'`); err != nil {
+		t.Fatal(err)
+	}
+
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}`, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	u, err := serverstore.GetUserByID(db, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(u.BalanceMoney-1) > 1e-9 {
+		t.Fatalf("负 token 凭空充值: balance = %v, want 1", u.BalanceMoney)
+	}
+	items, _, err := serverstore.BalanceLedgerPage(db, 1, "", 1, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range items {
+		if e.Kind == serverstore.LedgerKindRefund {
+			t.Fatalf("负 token 产生 refund 流水: %+v", e)
+		}
+	}
+	var cost float64
+	var pt, ct int64
+	if err := db.QueryRow(`SELECT cost, prompt_tokens, completion_tokens FROM usage WHERE user_id = 1`).Scan(&cost, &pt, &ct); err != nil {
+		t.Fatal(err)
+	}
+	if cost < 0 || pt < 0 || ct < 0 {
+		t.Fatalf("usage 落库为负: cost=%v pt=%d ct=%d", cost, pt, ct)
 	}
 }
 

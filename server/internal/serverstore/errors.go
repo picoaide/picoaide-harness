@@ -18,6 +18,11 @@ var (
 	// ErrLastAdmin is returned when a delete would leave zero admin accounts
 	// (rolls back; see DeleteUser).
 	ErrLastAdmin = errors.New("cannot delete the last admin")
+	// ErrInsufficientBalance is returned when settling a usage cost would push
+	// an activated account's balance below zero(审计 2026-09-12 P0-C:并发
+	// 消费透支)。调用方必须回滚**整个事务**(usage 行与扣款同事务),不得
+	// 静默跳过 —— 与「未开通账户」的"不扣不记"语义严格区分。
+	ErrInsufficientBalance = errors.New("insufficient balance")
 )
 
 // ErrDepartmentInUse guards department deletion when members, children or
