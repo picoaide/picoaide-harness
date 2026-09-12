@@ -98,9 +98,10 @@ function fakeChannelRepo(ids, options = {}) {
       // 否则整条发布会被一条注释拦下(2026-09-10 CI 实测)。
       assets: { _note: '注解:渠道素材说明,不是文件名/路径' },
       ...(publicChannel
-        ? // beta 也要自己的数据根（2026-09-12 起，非 official 渠道一律必填）：
-          // 预发线与正式线的会话格式世代可能不同，共用会让两代客户端各写一份。
-          (id === 'beta' ? { desktop: { home_dir: '.beta-harness' } } : {})
+        ? // beta 必须显式声明**与官方正式版一致**的数据根（2026-09-12 用户定案）：
+          // 预发版是正式版的前置验证，登录态/设置/会话要与正式版延续；写成自己的
+          // 目录会让预发版用户升级后看不到既有会话（当天实测的"对话全没了"事故）。
+          (id === 'beta' ? { desktop: { home_dir: '.picoaide-harness' } } : {})
         : {
             desktop: {
               product_name: `${id} AI`,
@@ -383,10 +384,12 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
     check(bad.stderr.includes('desktop.home_dir'), `desktop.home_dir(${why})的失败信息应点名该字段`)
   }
 
-  // beta 也曾被豁免,但 2026-09-12 起**不再**豁免:预发线与正式线的会话格式世代
-  // 可能不同(官方稳定版 = v0,含上游 0.1.5-rc.2 的预发版 = v3),共用同一数据根
-  // 会让两代客户端各写一份、旧版静默看不到新版会话并可能造成历史分叉。因此 beta
-  // 显式写官方目录必须**失败**,而它自己的 `.picoaide-harness-beta` 必须通过。
+  // beta(2026-09-12 用户定案):预发版是正式版的前置验证,数据根**必须**与官方
+  // 正式版一致 —— 否则装预发版的用户升级后看不到既有会话与登录态(当天早些时候
+  // 改成独立目录 `.picoaide-harness-beta` 就是这么炸的:用户报"所有对话都没了",
+  // 旧数据留在官方目录、新客户端读的是新目录)。因此这里三条用例:写官方目录必须
+  // **通过**、写自己的目录必须**失败**、缺字段必须失败 —— 规则显式且唯一,防止
+  // 再次静默漂移。
   const betaShared = tempDir('ci-channels-beta-home-')
   mkdirSync(join(betaShared, 'channels', 'beta'), { recursive: true })
   const betaChannel = (homeDir) => JSON.stringify({
@@ -397,12 +400,12 @@ function runChannels({ source, refName = '', dest, list, env = {} }) {
   })
   writeFileSync(join(betaShared, 'channels', 'beta', 'channel.json'), betaChannel('.picoaide-harness'))
   const betaSharedRun = runChannels({ source: betaShared, refName: 'v2.7.0-beta.3', dest: 'channels', list: 'q.list' })
-  check(betaSharedRun.status !== 0, 'beta 共用官方数据目录必须失败（会话格式世代可能不同）')
-  check(betaSharedRun.stderr.includes('desktop.home_dir'), 'beta 共用数据目录的失败信息应点名 desktop.home_dir')
+  check(betaSharedRun.status === 0, 'beta 与官方正式版共用数据目录必须通过（预发版要延续既有会话与登录态）')
 
   writeFileSync(join(betaShared, 'channels', 'beta', 'channel.json'), betaChannel('.picoaide-harness-beta'))
   const betaOwnRun = runChannels({ source: betaShared, refName: 'v2.7.0-beta.3', dest: 'channels', list: 'q.list' })
-  check(betaOwnRun.status === 0, 'beta 使用自己的数据目录必须通过')
+  check(betaOwnRun.status !== 0, 'beta 写自己的数据目录必须失败（会让预发版用户升级后看不到既有会话）')
+  check(betaOwnRun.stderr.includes('desktop.home_dir'), 'beta 数据目录不一致的失败信息应点名 desktop.home_dir')
 
   writeFileSync(join(betaShared, 'channels', 'beta', 'channel.json'), betaChannel(undefined))
   const betaMissingRun = runChannels({ source: betaShared, refName: 'v2.7.0-beta.3', dest: 'channels', list: 'q.list' })
