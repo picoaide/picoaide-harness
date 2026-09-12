@@ -201,6 +201,18 @@ const balanceFloorEpsilon = 1e-9
 //   - 未开通余额账户 → 不扣不记,返回 nil(设计语义,事务照常提交);
 //   - 已开通但余额不足 → 返回 ErrInsufficientBalance,**调用方回滚整个
 //     事务**(usage 行与扣款同事务),不得静默跳过 —— 否则就是"记了账没扣钱"。
+//
+// FIX-05(审计 2026-09-12,P1,上一轮回归):回滚只是**一半**的修复。上面这段
+// 注释一度被读成"回滚即安全",但网关的调用点当时只 `log.Printf` 一行就继续
+// 把上游响应交付给客户端 —— 于是缺陷从"记了账没扣钱"变成了"**没记账也没扣
+// 钱**":客户端 200 拿到完整结果、上游被真调用一次、usage 0 行、余额不变,
+// 同一请求可无限重复(比修复前更强,连痕迹都没有)。
+//
+// 所以本函数的契约是**组合契约**:返回 ErrInsufficientBalance 时,调用方
+// **必须显式拒绝本次请求**(非流式 429 BALANCE_EXHAUSTED;流式写 error 事件
+// 后终止),不得 log 后继续。执行者见 internal/llmgateway/balance_settlement.go
+// (isBalanceSettlementFailure / rejectBalanceSettlement /
+// abortBalanceSettlementStream),回归锁见 llmgateway/settlement_reject_test.go。
 func settleUsageCostTx(tx *sql.Tx, usageID, userID int64, targetCost float64) error {
 	// P0-B(审计 2026-09-12):负的计费金额只能来自负 token / 异常定价,
 	// 绝不能变成 refund(delta = -targetCost > 0 → 余额凭空增加)。

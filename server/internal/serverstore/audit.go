@@ -5,10 +5,105 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// ---- FIX-12(审计 2026-09-12,P1):审计丢失必须可观测 + 不变式必须有执行者 ----
+//
+// 缺陷形态(两半):
+//  1. **丢失不被发现**:80 个调用点全是 `_ = serverstore.AuditLog(...)`,
+//     失败分支既不写日志也不计数;worker 里任何一条失败都会让整批回滚
+//     (20 条里坏 1 条 = 丢 20 条),而且不重试。安全审计里"静默丢条目"
+//     等价于"没有审计"。
+//  2. **不变式没有执行者**:VerifyAuditChain(链校验器)在生产代码里零调用
+//     —— 只有测试调它。哈希链算法是对的,但没有任何运行路径会去验证它。
+//
+// 这里补上三件事(按代价从低到高):
+//   - 每次失败都打 ERROR 日志(只记 action/username,**不记 detail** ——
+//     detail 里可能有敏感值,不能复制进日志)+ 进程内计数器;
+//   - worker 对失败条目做**有界重试**,批量写改成 SAVEPOINT 逐条隔离的
+//     「允许部分成功」;
+//   - 给 VerifyAuditChain 两个执行者:启动校验(cmd/server)+ admin 只读端点。
+//
+// 计数器是进程内的(不落库):它的用途是"让丢失立刻可见"——运维在日志里
+// 看到 ERROR、在 /server-info 与 /audit/verify 里看到非零计数。故意不落库,
+// 避免"审计写入失败时还要再写一次审计"的循环依赖。
+var (
+	// auditWriteFailures 累计失败的审计写入次数(含超时/入队失败/逐条失败)。
+	auditWriteFailures atomic.Int64
+	// auditDroppedEntries 累计**彻底没落库**的条目数(重试后仍失败)。
+	auditDroppedEntries atomic.Int64
+	// auditRetries 累计重试次数(可观测重试是否真的在发生)。
+	auditRetries atomic.Int64
+)
+
+// AuditWriteStats 返回进程内审计写入失败计数(FIX-12 可观测性)。
+// failures = 失败事件数,dropped = 彻底丢失的条目数,retries = 重试次数。
+func AuditWriteStats() (failures, dropped, retries int64) {
+	return auditWriteFailures.Load(), auditDroppedEntries.Load(), auditRetries.Load()
+}
+
+// auditWriteFailure 记录一次审计写入失败:ERROR 日志 + 计数。
+// 只记 action/username 与计数,detail 一律不进日志。
+func auditWriteFailure(reason, username, action string, dropped int64) {
+	failures := auditWriteFailures.Add(1)
+	if dropped > 0 {
+		auditDroppedEntries.Add(dropped)
+	}
+	log.Printf("ERROR audit: %s action=%q username=%q dropped_entries=%d total_failures=%d total_dropped=%d",
+		reason, action, username, dropped, failures, auditDroppedEntries.Load())
+}
+
+// ---- FIX-12:VerifyAuditChain 的执行者(启动校验 + 结果缓存) ----
+//
+// 链校验是对整个审计表的全表扫描,不能挂在每个请求上;而"启动时校验一次、
+// 结果对外可查"既给了不变式一个执行者,又不引入新路由(路由唯一真源是
+// internal/router,增删路由会让 test mirror 与生产路由表失配)。
+// 这里保存最近一次校验的结果,由已注册的 admin server-info 端点读出
+// (见 serverauth/sysinfo.go 的 auditHealth)。
+var (
+	auditChainMu      sync.Mutex
+	auditChainChecked bool
+	auditChainBroken  int64
+	auditChainAt      string
+	auditChainErr     string
+)
+
+// RecordAuditChainCheck 记录一次链校验结果(由启动路径调用;重复调用覆盖为
+// 最新结果)。
+func RecordAuditChainCheck(brokenID int64, err error) {
+	auditChainMu.Lock()
+	defer auditChainMu.Unlock()
+	auditChainChecked = true
+	auditChainBroken = brokenID
+	auditChainAt = time.Now().UTC().Format(time.RFC3339)
+	if err != nil {
+		auditChainErr = err.Error()
+	} else {
+		auditChainErr = ""
+	}
+}
+
+// AuditChainStatus 返回最近一次链校验的结果。checked=false 表示本进程还没
+// 校验过(例如测试直接构造 handler,或启动路径提前退出)。
+func AuditChainStatus() (checked bool, intact bool, brokenID int64, checkedAt, errMsg string) {
+	auditChainMu.Lock()
+	defer auditChainMu.Unlock()
+	intact = auditChainChecked && auditChainBroken == 0 && auditChainErr == ""
+	return auditChainChecked, intact, auditChainBroken, auditChainAt, auditChainErr
+}
+
+// RunAndRecordAuditChainCheck 执行一次链校验并记录结果(FIX-12 启动执行者)。
+// 返回 brokenID 与 error,便于调用方打日志。
+func RunAndRecordAuditChainCheck(db *sql.DB) (int64, error) {
+	brokenID, err := VerifyAuditChain(db)
+	RecordAuditChainCheck(brokenID, err)
+	return brokenID, err
+}
 
 // AuditLogEntry is one audit log row (sensitive admin operations).
 // json tag 必须是小写字段名:webadmin Audit.tsx 的 LogRow 读取
@@ -58,13 +153,21 @@ func AuditLog(db *sql.DB, username, action, detail string) error {
 	if !enqueue(w) {
 		// worker 可能恰在空闲退出;重取(必要时新建)后重试一次。
 		if !enqueue(auditWorkerFor(db)) {
+			auditWriteFailure("queue timeout", username, action, 1)
 			return errors.New("audit queue timeout")
 		}
 	}
 	select {
 	case err := <-req.done:
+		// FIX-12:失败已经由 worker 打点("entry dropped after retries",含
+		// action/username 与重试结果)。这里**不重复计数** —— 否则同一条丢失
+		// 会在 failures/dropped 上被记两次,计数器就不可信了。
 		return err
 	case <-time.After(15 * time.Second):
+		// worker 还没回话:这一条的结果未知(可能稍后写成功)。按"失败事件"
+		// 计数但**不**计入 dropped —— 宁可少报丢失,也不能虚报(虚报会掩盖
+		// 真实的丢失)。
+		auditWriteFailure("write timeout (outcome unknown)", username, action, 0)
 		return errors.New("audit write timeout")
 	}
 }
@@ -116,9 +219,14 @@ func (w *auditWorker) run() {
 					break collect
 				}
 			}
-			err := writeAuditBatch(w.db, batch)
-			for _, r := range batch {
-				r.done <- err
+			err := w.writeBatchWithRetry(batch)
+			for i, r := range batch {
+				if err[i] != nil {
+					// 权威的"丢失"打点在这里:worker 是唯一知道"重试过、
+					// 仍然失败"的地方,所以 dropped 计数只在这里 +1。
+					auditWriteFailure("entry dropped after retries", r.username, r.action, 1)
+				}
+				r.done <- err[i]
 			}
 			if !idle.Stop() {
 				select {
@@ -138,36 +246,103 @@ func (w *auditWorker) run() {
 	}
 }
 
+// auditWriteAttempts 是一批审计写失败后的额外重试轮数(FIX-12)。
+const auditWriteAttempts = 2
+
+// auditRetryBackoff 是重试之间的退避(连接类故障通常瞬时,给一点时间)。
+const auditRetryBackoff = 20 * time.Millisecond
+
+// writeBatchWithRetry 写一批审计条目,**只重试失败的那些**并返回逐条错误。
+//
+// 为什么只重试失败的行:writeAuditBatch 现在允许部分成功(见其注释),成功
+// 的行已经提交。若把整批重投,审计链里就会出现两条同样内容的记录 ——
+// 重复条目比丢失更难解释,也破坏了"一条操作一条审计"的语义。
+func (w *auditWorker) writeBatchWithRetry(batch []auditRequest) []error {
+	errs := writeAuditBatch(w.db, batch)
+	for attempt := 0; attempt < auditWriteAttempts; attempt++ {
+		var retry []auditRequest
+		var idx []int
+		for i, e := range errs {
+			if e != nil {
+				retry = append(retry, batch[i])
+				idx = append(idx, i)
+			}
+		}
+		if len(retry) == 0 {
+			return errs
+		}
+		auditRetries.Add(int64(len(retry)))
+		time.Sleep(auditRetryBackoff)
+		again := writeAuditBatch(w.db, retry)
+		for k, e := range again {
+			errs[idx[k]] = e
+		}
+	}
+	return errs
+}
+
 // writeAuditBatch 在一个事务内串行追加一批审计条目,保持哈希链不分叉。
 // advisory lock 仍保留(跨实例互斥),但每批只获取一次。
-func writeAuditBatch(db *sql.DB, batch []auditRequest) error {
+//
+// FIX-12:返回**逐条**错误(长度恒为 len(batch)),并且**允许部分成功** ——
+// 每条用 SAVEPOINT 隔离,单条失败只回滚它自己,其余照常提交。此前任何一条
+// 失败都走 `defer tx.Rollback()` 丢掉整批:一批最多 20 条,坏 1 条 = 丢 20 条。
+func writeAuditBatch(db *sql.DB, batch []auditRequest) []error {
+	errs := make([]error, len(batch))
+	failAll := func(e error, from int) []error {
+		for i := from; i < len(errs); i++ {
+			errs[i] = e
+		}
+		return errs
+	}
 	tx, err := db.Begin()
 	if err != nil {
-		return err
+		return failAll(err, 0)
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec("SELECT pg_advisory_xact_lock(?)", auditChainLockKey); err != nil {
-		return err
+		return failAll(err, 0)
 	}
 	var prevHash string
 	if err := tx.QueryRow("SELECT hash FROM audit_logs ORDER BY id DESC LIMIT 1").Scan(&prevHash); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
-			return err
+			return failAll(err, 0)
 		}
 		prevHash = ""
 	}
-	for _, r := range batch {
+	inserted := 0
+	for i, r := range batch {
+		// 保存点名固定:PG 里重名 SAVEPOINT 会替换旧的,ROLLBACK TO 之后
+		// 保存点仍然存在,可继续复用。
+		if _, err := tx.Exec("SAVEPOINT audit_row"); err != nil {
+			// 事务已不可用(通常是被 PG 判废):剩余条目一并失败。
+			return failAll(err, i)
+		}
 		now := time.Now().UTC().Format(time.RFC3339)
 		payload := prevHash + "|" + r.username + "|" + r.action + "|" + r.detail + "|" + now
 		sum := sha256.Sum256([]byte(payload))
 		hash := hex.EncodeToString(sum[:])
 		if _, err := tx.Exec("INSERT INTO audit_logs (username, action, detail, prev_hash, hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 			r.username, r.action, r.detail, prevHash, hash, now); err != nil {
-			return err
+			errs[i] = err
+			// 回滚这一条,保住此前已插入的条目;失败则整批作废。
+			if _, rbErr := tx.Exec("ROLLBACK TO SAVEPOINT audit_row"); rbErr != nil {
+				errs[i] = err
+				return failAll(rbErr, i+1)
+			}
+			continue
 		}
 		prevHash = hash
+		inserted++
 	}
-	return tx.Commit()
+	if inserted == 0 {
+		// 全部失败:交给 defer 的 Rollback,不必 Commit。
+		return errs
+	}
+	if err := tx.Commit(); err != nil {
+		return failAll(err, 0)
+	}
+	return errs
 }
 
 // auditHashPayload mirrors the payload used at write time (same layout).
