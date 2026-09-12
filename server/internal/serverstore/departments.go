@@ -36,10 +36,6 @@ type DepartmentInfo struct {
 	ChildCount  int64  `json:"child_count"`
 	// GrantedCount counts grant references (skill) — deletion guard.
 	GrantedCount int64 `json:"granted_count"`
-	// BudgetMoney 部门月度金额预算(元,0024);nil = 未配置(不限)。
-	BudgetMoney *float64 `json:"budget_money"`
-	// MonthlyCost 部门树当月累计费用 SUM(cost)(元,0024)。
-	MonthlyCost float64 `json:"monthly_cost"`
 }
 
 // ListDepartments returns every department with admin-view fields.
@@ -48,8 +44,7 @@ func ListDepartments(db *sql.DB) ([]DepartmentInfo, error) {
 		COALESCE(u.username, ''),
 		(SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id),
 		(SELECT COUNT(*) FROM groups c WHERE c.parent_id = g.id),
-		(SELECT COUNT(*) FROM app_grants sg WHERE sg.grantee_type = 'group' AND ` + ciColumnCmp("sg.grantee", "g.name") + `),
-		g.budget_money
+		(SELECT COUNT(*) FROM app_grants sg WHERE sg.grantee_type = 'group' AND ` + ciColumnCmp("sg.grantee", "g.name") + `)
 		FROM groups g LEFT JOIN users u ON u.id = g.leader_id
 		ORDER BY g.id`)
 	if err != nil {
@@ -59,32 +54,13 @@ func ListDepartments(db *sql.DB) ([]DepartmentInfo, error) {
 	var out []DepartmentInfo
 	for rows.Next() {
 		var d DepartmentInfo
-		var b sql.NullFloat64
 		if err := rows.Scan(&d.ID, &d.Name, &d.ParentID, &d.LeaderID, &d.Description,
-			&d.LeaderName, &d.MemberCount, &d.ChildCount, &d.GrantedCount, &b); err != nil {
+			&d.LeaderName, &d.MemberCount, &d.ChildCount, &d.GrantedCount); err != nil {
 			return nil, err
-		}
-		if b.Valid {
-			d.BudgetMoney = &b.Float64
 		}
 		out = append(out, d)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// 批量附部门树当月费用(单次查询,避免 N+1)
-	ids := make([]int64, 0, len(out))
-	for i := range out {
-		ids = append(ids, out[i].ID)
-	}
-	costs, err := DeptMonthlyCostBatch(db, ids)
-	if err != nil {
-		return nil, err
-	}
-	for i := range out {
-		out[i].MonthlyCost = costs[out[i].ID]
-	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // GroupByID returns one group.
@@ -134,18 +110,10 @@ func CreateDepartment(db *sql.DB, name string, parentID, leaderID int64, descrip
 // Guards: parent must exist and not be the department itself or a
 // descendant (cycle); leader must exist. Renames cascade to the grant
 // tables so existing grants keep resolving (授权按组名,改名不得静默失效).
+//
+// 2026-09-11:部门预算(budget_money)下线(钱只由余额闸门管),本函数不再带预算
+// 参数;数据库列保留但不再读写,避免破坏性迁移。
 func UpdateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int64, description string) error {
-	return updateDepartment(db, id, name, parentID, leaderID, description, nil)
-}
-
-// UpdateDepartmentWithBudget 与 UpdateDepartment 同语义,额外在同一事务内
-// 设置部门月度金额预算(budget nil = 不变,0 = 清除,>0 = 设置;负值 = ErrValidation)。
-// 预算与改名/改上级原子生效,失败整体回滚,不留半更新状态(审计 M2)。
-func UpdateDepartmentWithBudget(db *sql.DB, id int64, name string, parentID, leaderID int64, description string, budget *float64) error {
-	return updateDepartment(db, id, name, parentID, leaderID, description, budget)
-}
-
-func updateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int64, description string, budget *float64) error {
 	g, err := GroupByID(db, id)
 	if err != nil {
 		return err
@@ -204,19 +172,6 @@ func updateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int6
 			return ErrDuplicate
 		}
 		return err
-	}
-	// 预算并入同一事务(审计 M2):预算失败回滚整个部门更新
-	if budget != nil {
-		if *budget < 0 {
-			return ErrValidation
-		}
-		if *budget <= 0 {
-			if _, err := tx.Exec("UPDATE groups SET budget_money = NULL WHERE id = ?", id); err != nil {
-				return err
-			}
-		} else if _, err := tx.Exec("UPDATE groups SET budget_money = ? WHERE id = ?", *budget, id); err != nil {
-			return err
-		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err

@@ -3,7 +3,7 @@ title: 桌面客户端
 description: PicoAide Harness 桌面客户端的完整功能与操作指南：对话、能力中心、连接器、定时任务、浏览器、记忆与自动更新。
 ---
 
-桌面客户端是员工每天面对的产品表面。它把官方 DeepSeek Harness 的本地智能体运行时装进一个原生应用：窗口、托盘、终端、自动更新，**无需安装 Node.js 或执行任何命令**。
+桌面客户端是员工每天面对的产品表面。它把官方 DeepSeek Harness 的本地智能体运行时装进一个原生应用：窗口、托盘、自动更新，**无需安装 Node.js 或执行任何命令**。
 
 ## 主界面
 
@@ -125,7 +125,7 @@ Agent 驱动的内嵌浏览器位于**独立浏览器窗口**（2026-08-20 窗�
 - **操作日志**：op log 记录每次导航/点击/下载，可审计；
 - **关闭语义**：用户关窗只是隐藏；只有 Agent 的 `browser_close` 才真正销毁窗口。
 
-> 侧边栏工作台（dsh-better-sidebar，社区插件）自身的内嵌浏览器 tab 已被产品策略禁用——与产品全屏浏览器功能重叠且后者体验更优；用户仍可从侧边栏底部「浏览器」动作进入产品浏览器。
+> 右侧栏由官方 `ui-sidebar-right` 提供（每会话一份的停靠面：可拖拽/分栏/浮动的 tab 面板，随包的引导页、工作区文件树与文档预览）。它是**预览与文件**底座，不含代码编辑、交互式终端或 Git 面板；产品浏览器仍从侧边栏底部「浏览器」动作进入。
 
 ## 记忆（五轨记忆）
 
@@ -167,17 +167,21 @@ Agent 驱动的内嵌浏览器位于**独立浏览器窗口**（2026-08-20 窗�
 - **未签名说明**：Windows 安装器与 Linux AppImage 未签名（macOS 正式版签名 + 公证）；
   Windows SmartScreen 可能提示「未知发布者」。
 
-## 终端与插件管理
+## 插件管理
 
-插件管理从**系统 shell** 运行普通 `dsh plugin` 命令完成——应用固定运行 `desktop` profile，没有「打开 DSH 终端 / 切换 Profile / 模式切换」的托盘入口：
+应用固定运行 `desktop` profile，没有「打开 DSH 终端 / 切换 Profile / 模式切换」的托盘入口。
+上游自 0.1.5 起**保留该 profile 名**：`dsh --profile desktop` 与 `dsh plugin --profile desktop`
+都会被 CLI 直接拒绝（`profile "desktop" is managed exclusively by the Electron application`）。
+第三方插件改由 profile 的用户补丁层加入：编辑 `~/.picoaide-harness/cordis.patch.yml`，
+按 Loader patch 语法追加一行（应用每次启动都会合并该层）：
 
-```sh
-dsh plugin --profile desktop add <plugin>     # 安装插件（固定作用于 desktop profile）
-dsh plugin --profile desktop remove <plugin>  # 移除插件
-dsh plugin --profile desktop update           # 更新插件
+```yaml
+- insert:
+    - id: my-plugin
+      name: my-plugin-package
 ```
 
-显式 `--profile <name>` 指定目标。应用自带 DSH 依赖，不改系统全局 PATH 或 shell 配置。插件变更后需重启应用才进入 Loader 组合。
+应用自带 DSH 依赖，不改系统全局 PATH 或 shell 配置。插件变更后需重启应用才进入 Loader 组合。
 
 ## 排查
 

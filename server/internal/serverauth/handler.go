@@ -499,9 +499,11 @@ func (a *API) handleMe(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"user": userJSON(u)})
 }
 
-// handleUsageSummary 返回员工用量概览(客户端余额/统计展示):
-// 有效配额(个人覆盖→全局默认)、剩余(配额-本月已用,0/不限→null)、
-// 今日/昨日/本月/历史总 tokens 与费用、部门预算链、admin 豁免。
+// handleUsageSummary 返回员工用量概览(客户端账户卡/统计展示)。
+//
+// 2026-09-11 收敛:员工侧的"额度"只剩**账户余额** —— 部门预算、token 配额、
+// 金额配额全部下线(设计文档 docs/planning/2026-09-11-balance-quota-consolidation.md)。
+// 因此这里不再返回 quota_*/remaining_* 这类"月上限"字段,只返回余额与用量统计。
 func (a *API) handleUsageSummary(c *gin.Context) {
 	u := CurrentUser(c)
 	if u == nil {
@@ -513,62 +515,30 @@ func (a *API) handleUsageSummary(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "统计失败")
 		return
 	}
-	// 有效配额(admin 恒 0 = 豁免/不限)
-	quotaTokens, err := serverstore.EffectiveQuota(a.DB, u)
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, "INTERNAL", "配额查询失败")
-		return
-	}
-	quotaMoney, err := serverstore.EffectiveMoneyQuota(a.DB, u)
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, "INTERNAL", "配额查询失败")
-		return
-	}
-	// 剩余:配额-本月已用;0/不限 → null(前端显示「不限」)
-	var remainingTokens any
-	if quotaTokens > 0 {
-		remainingTokens = quotaTokens - s.MonthlyUsage
-	}
-	var remainingMoney any
-	if quotaMoney > 0 {
-		remainingMoney = quotaMoney - s.MonthlyCost
-	}
-	// 2026-09-08 P2-13:移除死字段 dept_budgets —— 客户端从不渲染,而每次刷新
-	// 都要为每个归属部门跑 EffectiveDeptBudget + DeptMonthlyCost(树内 SUM)。
 	balanceSettings, _ := serverstore.GetBalanceSettings(a.DB)
+	// 未开通余额账户(从未入账)时,客户端不展示余额行 —— 与网关闸门同判据
+	// (未开通不拦),避免出现"显示 ¥0.00 但能正常调用"的矛盾界面。
+	activated := !u.BalanceActivatedAt.IsZero()
 
 	c.JSON(http.StatusOK, gin.H{
-		// 0061 余额:存量口径(与 quota_money 的"月上限"正交);balance_enabled
-		// 表示网关是否以余额为硬闸门,客户端据此展示提示文案。
-		"balance_money":    u.BalanceMoney,
-		"balance_enabled":  balanceSettings.Enabled,
-		"balance_monthly":  balanceSettings.MonthlyAmount,
-		"balance_mode":     balanceSettings.MonthlyMode,
-		"is_admin":         u.IsAdmin,
-		"quota_tokens":     quotaTokens,
-		"quota_money":      quotaMoney,
-		"monthly_usage":    s.MonthlyUsage,
-		"monthly_cost":     s.MonthlyCost,
-		"remaining_tokens": remainingTokens,
-		"remaining_money":  remainingMoney,
-		"today_usage":      s.TodayUsage,
-		"today_cost":       s.TodayCost,
-		"yesterday_usage":  s.YesterdayUsage,
-		"yesterday_cost":   s.YesterdayCost,
-		"total_usage":      s.TotalUsage,
-		"total_cost":       s.TotalCost,
+		"balance_money":     serverstore.QuantizeMoney(u.BalanceMoney),
+		"balance_activated": activated,
+		"balance_enabled":   balanceSettings.Enabled,
+		"balance_monthly":   balanceSettings.MonthlyAmount,
+		"balance_mode":      balanceSettings.MonthlyMode,
+		"is_admin":          u.IsAdmin,
+		"monthly_usage":     s.MonthlyUsage,
+		"monthly_cost":      s.MonthlyCost,
+		"today_usage":       s.TodayUsage,
+		"today_cost":        s.TodayCost,
+		"yesterday_usage":   s.YesterdayUsage,
+		"yesterday_cost":    s.YesterdayCost,
+		"total_usage":       s.TotalUsage,
+		"total_cost":        s.TotalCost,
 	})
 }
 
 func userJSON(u *serverstore.User) gin.H {
-	var quota any
-	if u.QuotaTokens != nil {
-		quota = *u.QuotaTokens
-	}
-	var quotaMoney any
-	if u.QuotaMoney != nil {
-		quotaMoney = *u.QuotaMoney
-	}
 	return gin.H{
 		"id":       u.ID,
 		"username": u.Username,
@@ -578,13 +548,13 @@ func userJSON(u *serverstore.User) gin.H {
 		"email":        u.Email,
 		"is_admin":     u.IsAdmin,
 		// RBAC (v3b): role + permissions for the current user's role.
-		"role":         u.Role,
-		"permissions":  PermissionsOf(u.Role),
-		"status":       u.Status,
-		"quota_tokens": quota,      // null = follow global default, 0 = unlimited, >0 = capped
-		"quota_money":  quotaMoney, // null = follow global default, 0 = unlimited, >0 = capped (yuan)
-		// 0061 员工余额(元,存量):webadmin 用户列表/详情展示的数据源。
-		"balance_money": u.BalanceMoney,
+		"role":        u.Role,
+		"permissions": PermissionsOf(u.Role),
+		"status":      u.Status,
+		// 0061/0062 员工余额(元,存量,分位口径):webadmin 用户列表/详情的数据源。
+		// 2026-09-11:quota_tokens/quota_money 已下线,不再下发。
+		"balance_money":     serverstore.QuantizeMoney(u.BalanceMoney),
+		"balance_activated": !u.BalanceActivatedAt.IsZero(),
 		// 0057 密码/MFA: source 供客户端判断改密入口; password_changeable =
 		// 本地认证且启用的账号; password_must_change = 下次登录强制改密;
 		// mfa_enabled 供 webadmin 列表控制「重置 MFA」按钮。

@@ -78,14 +78,9 @@ func lastAudit(t *testing.T, db *sql.DB, action string) (string, bool) {
 func TestGatewayConfigAudit(t *testing.T) {
 	r, db, cookie, csrf := auditTestRouter(t)
 
-	// 全局设置:限流 + 默认配额(两类审计动作)
-	doJSON2(t, r, "PUT", "/api/server/admin/gateway", gin.H{"rate_limit": "120", "monthly_quota": "200000", "monthly_quota_money": "66"}, cookie, csrf)
+	// 全局设置:限流(2026-09-11:默认配额字段已下线,不再有 quota_default_change)
+	doJSON2(t, r, "PUT", "/api/server/admin/gateway", gin.H{"rate_limit": "120"}, cookie, csrf)
 
-	if _, ok := lastAudit(t, db, "quota_default_change"); !ok {
-		t.Fatal("missing quota_default_change")
-	} else if d, _ := lastAudit(t, db, "quota_default_change"); !strings.Contains(d, "默认token配额:") || !strings.Contains(d, "默认金额配额:") {
-		t.Fatalf("quota_default_change detail = %s", d)
-	}
 	d, ok := lastAudit(t, db, "gateway_config")
 	if !ok || !strings.Contains(d, "每用户限流:(空)→120") {
 		t.Fatalf("gateway_config detail = %q", d)

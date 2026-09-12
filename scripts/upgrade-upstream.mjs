@@ -119,16 +119,23 @@ function bumpManifest(manifest, from, to) {
         if (patched !== range) next = patched
       }
       if (next !== range) { deps[name] = next; changed += 1 }
-      // Patch resolutions carry the version in the key too (`@npm:V`,
-      // possibly caret-prefixed, e.g. `@npm:^0.1.0-rc.8`).
-      if (field === 'resolutions' && name.includes(`@npm:${from}`)) {
-        const nextKey = name
-          .replace(`@npm:^${from}`, `@npm:^${to}`)
-          .replace(`@npm:${from}`, `@npm:${to}`)
-        if (nextKey !== name) {
-          deps[nextKey] = deps[name]
-          delete deps[name]
-          changed += 1
+      // Patch resolutions carry the version in the key too (`@npm:V`, possibly
+      // caret-prefixed, e.g. `@npm:^0.1.0-rc.8`). Both forms must be renamed:
+      // the exact key covers our own pinned dependencies, the caret key covers
+      // the `^V` ranges upstream packages publish for their own dependencies —
+      // a caret key left behind silently stops patching transitive copies.
+      if (field === 'resolutions') {
+        const caretFrom = `@npm:^${from}`
+        const exactFrom = `@npm:${from}`
+        if (name.includes(caretFrom) || name.includes(exactFrom)) {
+          const nextKey = name
+            .replace(caretFrom, `@npm:^${to}`)
+            .replace(exactFrom, `@npm:${to}`)
+          if (nextKey !== name) {
+            deps[nextKey] = deps[name]
+            delete deps[name]
+            changed += 1
+          }
         }
       }
     }
@@ -183,7 +190,7 @@ function syncPlatformModules() {
   // 'react/jsx-runtime', ...), so collect every string literal in the
   // array body instead of filtering single-entry lines.
   const fmt = (body) => (body.match(/'[^']+'/gu) ?? [])
-    .map(entry => `  ${entry}`)
+    .map(entry => `  ${entry},`)
     .join('\n')
   const generated = `/**
  * Single source of truth for the upstream platform module table.

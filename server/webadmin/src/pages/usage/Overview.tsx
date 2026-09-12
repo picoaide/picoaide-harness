@@ -11,7 +11,7 @@ import { CircleDollarSign, Activity, Coins, Wallet, RefreshCw, Landmark } from '
 import { RangeFilter, defaultRange, sumRows, fmtY, type OverviewData, type ProviderInfo, type ProviderBalance } from './common'
 import { fmtTokens, fmtFull } from '../../lib/format'
 
-// 总览(主页面):企业整体消耗——渠道余额 + KPI + 近30天消耗趋势 + 模型 TOP10
+// 总览(主页面):企业整体消耗——上游账户余额 + KPI + 近30天消耗趋势 + 模型 TOP10
 export default function UsageOverview() {
   const init = defaultRange()
   const [from, setFrom] = useState(init.from)
@@ -55,7 +55,7 @@ export default function UsageOverview() {
       setProviders(list)
       setBalances({})
       list.forEach((p) => void loadBalance(p.id))
-    } catch { /* 渠道余额失败不阻塞总览 */ }
+    } catch { /* 上游账户余额失败不阻塞总览 */ }
   }, [loadBalance])
 
   useEffect(() => { void load(from, to) }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -97,16 +97,16 @@ export default function UsageOverview() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="用量总览" desc="企业整体消耗：渠道余额 / 本月、今日、区间费用 / 消耗趋势 / 模型排行" />
+      <PageHeader title="用量总览" desc="企业整体消耗:上游账户余额 / 本月、今日、区间费用 / 消耗趋势 / 模型排行" />
 
       <RangeFilter from={from} to={to} setFrom={setFrom} setTo={setTo} onQuery={() => void load(from, to)} />
 
       {error && <div className="text-sm text-destructive">{error}</div>}
 
-      {/* 渠道余额卡:账户级信息(DeepSeek 原生 /user/balance;其余渠道置灰说明) */}
+      {/* 上游账户余额卡:账户级信息(DeepSeek 原生 /user/balance;其余渠道置灰说明) */}
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
-          <CardTitle className="text-base">渠道余额</CardTitle>
+          <CardTitle className="text-base">上游账户余额</CardTitle>
           <Button size="sm" variant="outline" onClick={() => providers.forEach((p) => void loadBalance(p.id))}>
             <RefreshCw className="h-3.5 w-3.5" /> 刷新
           </Button>

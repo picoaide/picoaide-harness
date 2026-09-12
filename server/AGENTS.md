@@ -13,7 +13,8 @@
 1. **服务端是唯一控制面**——密钥只存服务端(AES-GCM + master key 文件);所有功能配置(模型/上游密钥/技能/凭证/配额/价格)由管理员在 webadmin 完成;登录后 `GET /api/client/v2/config/bootstrap` 统一下发(默认模型+建议清单)。
 2. **严格默认拒绝**——商城与共享内容(shared_skills/agent_presets)均为**审核 + 授权双门制**:上架/审核通过后**未授权用户一律不可见不可用**(404 不泄露存在性);授权对象 = 用户或部门组(组名大小写不敏感);admin 恒全量不落表;授权变更必审计(audit_logs);改密/降权/禁用自动吊销全部 API token。
 3. **部门(组)即金字塔组织架构**(迁移 0017)——`groups` 含 parent_id/leader_id:部门树任意层级、部门主管、员工**多部门归属**(2026-09:`PUT /api/server/admin/users/:id/department` 接受 `group_ids` 数组,兼容旧 `group_id` 单部门);权限继承:`UserEffectiveGroups` = 归属部门+祖先链(授权给部门覆盖子部门成员)+ 主管部门子树(主管向上继承)+ 隐式「全员」组(全员为保留名,禁建/删/改名);部门改名级联授权表(NOCASE)、删除须无成员/子部门/授权引用;LDAP 登录全量同步组(空组即回收)。
-4. **计量即金钱**——usage 表记录每次 LLM 调用的 token 与费用(`cost`,记录时按模型定价与峰谷窗口折算,0022/0023);配额体系三层:员工 token 配额、员工金额配额、部门预算(0024,归属链全部生效);任一超限网关 429 `QUOTA_EXCEEDED`(admin 豁免)。价格/峰谷窗口管理员可配置,改价只影响之后产生的费用。
+4. **计量即金钱**——usage 表记录每次 LLM 调用的 token 与费用(`cost`,记录时按模型定价与峰谷窗口折算,0022/0023)。员工侧的额度**只有账户余额一种**(0061/0062):存量、消费即扣(与 usage 同事务)、可逐笔对账;`settings balance.enabled=true` 时余额耗尽在网关 429 `BALANCE_EXHAUSTED`(admin 豁免,未开通余额账户的员工不受约束)。
+   2026-09-11 起**下线**了员工 token 配额、员工金额配额与部门预算(三套并行机制互相打架:手动充了钱仍被软配额拦住;只有余额是可对账的)——列与 settings 键保留在库中但不再读写,详见 docs/planning/2026-09-11-balance-quota-consolidation.md。价格/峰谷窗口管理员可配置,改价只影响之后产生的费用。
 5. **无状态优先**——服务端接口保持无状态(Bearer token / 管理端 session);客户端引擎概念(审批门控/CDP/本地沙盒)属于桌面客户端侧,不在服务端演进。
 
 ## 3. 不可违背的工程原则
@@ -78,18 +79,20 @@ data/                  # 服务端运行时数据(0700,gitignore);数据库在 P
 ### 7.1 REST 错误
 - **REST 错误**:`{"error":{"code":"ERR_CODE","message":"..."}}`;`AUTH_REQUIRED`/`AUTH_FAILED`/`FORBIDDEN`(管理端)/`NOT_FOUND`/`VALIDATION`/`UPSTREAM`/`RATE_LIMITED`/`INTERNAL`(健康探针与 404 NoRoute 同信封)
 - **bootstrap**:`{default_model, models, skills, web, connectors}`(接入方对 skills/web 缺省值兜底;connectors 为服务端连接器目录,0042 起)
-- **员工用量接口**:`GET /api/client/v2/auth/usage` → `{quota_tokens, quota_money, remaining_tokens/money(不限=null), today/yesterday/monthly/total usage+cost}`(余额与统计展示数据源)
-- **DB**:PostgreSQL 唯一,迁移 `internal/serverstore/migrations-pg/` 0001–0060(0034 shared_skills 多版本、0035 agent_presets 多版本、0036 共享授权、0037 quality、0039 usage 分区 + 日/月账本、0040/0041 归档直存 DB、0042 connectors、0043/0044 provider protocol、0045 glitchtip 下架、0046 rbac 角色、0048 审计哈希链)
+- **员工用量接口**:`GET /api/client/v2/auth/usage` → `{balance_money, balance_activated, balance_enabled, balance_monthly, balance_mode, is_admin, today/yesterday/monthly/total usage+cost}`(账户卡的数据源;字段集合是**跨语言契约**,由 `server/internal/serverauth/usage_contract_test.go` 与 `packages/client/account-card/src/usage-contract.ts` 对拍)
+- **DB**:PostgreSQL 唯一,迁移 `internal/serverstore/migrations-pg/` 0001–0062(0034 shared_skills 多版本、0035 agent_presets 多版本、0036 共享授权、0037 quality、0039 usage 分区 + 日/月账本、0040/0041 归档直存 DB、0042 connectors、0043/0044 provider protocol、0045 glitchtip 下架、0046 rbac 角色、0048 审计哈希链、0057 管理员 MFA、0061/0062 员工余额与账本)
 - **审计契约**:`GET /api/server/admin/audit?page=&size=&action=&username=`(敏感操作留痕;默认保留 180 天,settings `audit.retention_days` 可配;0048 起哈希链防篡改)
-- **费用/配额口径**:cost 记录时按 输入×input_price/1e6 + 输出×output_price/1e6(缓存命中另按 `cache_input_price_per_1m`,0029),高峰窗口(settings `usage.peak_windows`,北京时间)外 × `offpeak_discount`;配额链 = 员工 token → 员工金额 → 部门预算(归属+祖先,树内 SUM(cost));剩余 = 配额 − 本月已用(不限=null)
+- **费用口径**:cost 记录时按 输入×input_price/1e6 + 输出×output_price/1e6(缓存命中另按 `cache_input_price_per_1m`,0029),高峰窗口(settings `usage.peak_windows`,北京时间)外 × `offpeak_discount`;员工侧不再有"配额/剩余"概念(见上条),拦截只看账户余额
 
-- **员工余额(0061,2026-09-11)**:`users.balance_money` 是**存量余额**(元),与 `quota_money` 的"月度流量上限"正交。
-  - 消费:`RecordUsage*`/`UpdateUsageTokens*` 在写入 usage 的**同一事务**内按 cost 原子扣减余额(微元精度,不按分抹零);
-  - 闸门:`settings balance.enabled=true` 时余额 ≤ 0 的请求在网关 429 `QUOTA_EXCEEDED`(管理员豁免);默认关闭,避免存量部署升级后全员被拦;
-  - 管理:`POST /api/server/admin/users/:id/balance {mode:add|deduct|set,amount,reason}`(审计 `balance_adjust`)、`GET/PUT /api/server/admin/balance`(配置:enabled/monthly_amount/monthly_mode=add|cover)、`POST /api/server/admin/balance/grant`(手动发放,幂等);
-  - 月度发放:`internal/balance` 调度器每小时检查,每北京月首次达到条件即按配置向全部启用普通员工发放一次;幂等锚 `balance_grants.month` 主键,跨实例/重启/重入不重复加钱;停机跨月后自动补发;
-  - 员工侧:`GET /api/client/v2/auth/usage` 返回 `balance_money/balance_enabled/balance_monthly/balance_mode`,账户卡在启用时以余额为主数字。
-  - 审计修复(2026-09-11)见 `docs/decisions/2026-09-11-balance-and-audit-fixes.md`。
+- **员工余额(0061/0062,2026-09-11 收敛)**:`users.balance_money` 是**账户余额**(元,存量)——员工唯一可花的钱。
+  - 开通语义:`users.balance_activated_at` 在**首次入账**(发放或人工充值)时置位;未开通用户既不扣余额也不被闸门拦截(存量部署开启闸门不会误拦全员,关闭期间的消费也不会产生欠款);
+  - 消费:已开通用户的消费**始终**扣减(`settleUsageCostTx` 与 usage 落账同事务,按该行"已计费金额"结算差额:重复回填不重复扣、费用下调自动记 `refund`);闸门开关只决定"拦不拦",不决定"记不记";
+  - 账本:`balance_ledger` 追加型流水,**不变量** `users.balance_money == SUM(balance_ledger.amount)`;消费/回补带 `usage_id`;
+  - 闸门:`settings balance.enabled=true` 且已开通 且 `QuantizeMoney(余额) <= 0` → 429 `BALANCE_EXHAUSTED`(管理员豁免,查询失败 fail-closed);精度三层同源:记账微元 1e-6 / 判定与展示都走 `serverstore.QuantizeMoney`(分位);
+  - 管理:`POST /api/server/admin/users/:id/balance {mode:add|deduct|set|clear,amount,reason}`(审计 `balance_adjust`)、`GET /api/server/admin/users/:id/balance/ledger`(流水 + `ledger_sum` 对账)、`GET/PUT /api/server/admin/balance`(enabled/monthly_amount/monthly_mode=add|cover)、`POST /api/server/admin/balance/grant`(补发本月,逐人幂等);
+  - 月度发放:`internal/balance` 调度器每 10 分钟检查,幂等锚是 `balance_grant_items(user_id, month)`(**逐人·月**,不再是整月单锚)——新入职/漏发/重新启用的员工会被下一轮自动补齐;`cover` 模式把清零差额记成 `reset` 流水(抹掉的手工充值可追溯);发放与闸门**解耦**(额度 > 0 就发,是否拦截由 enabled 单独决定);
+  - 员工侧:`GET /api/client/v2/auth/usage` 返回 `balance_money/balance_activated/balance_enabled/balance_monthly/balance_mode`;未开通时客户端不渲染余额行;
+  - 整体设计与审计问题清单:`docs/planning/2026-09-11-balance-quota-consolidation.md`;初版余额与第一轮修正见 `docs/decisions/2026-09-11-balance-and-audit-fixes.md`。
 
 ## 8. 常用命令
 

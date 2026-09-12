@@ -632,14 +632,7 @@ func (a *AdminAPI) listUsers(c *gin.Context) {
 		}
 		uj["monthly_usage"] = usageByUser[u.ID] // tokens used this calendar month (0 when none)
 		uj["monthly_cost"] = costByUser[u.ID]   // yuan spent this calendar month (0 when none)
-		// 生效配额(审计 M7):跟随默认时展示全局值,0 = 不限,admin 恒 0。
-		// 与员工侧 GET /api/auth/usage 同口径(EffectiveQuota/EffectiveMoneyQuota)。
-		if eq, err := serverstore.EffectiveQuota(a.DB, &u); err == nil {
-			uj["effective_quota_tokens"] = eq
-		}
-		if em, err := serverstore.EffectiveMoneyQuota(a.DB, &u); err == nil {
-			uj["effective_quota_money"] = em
-		}
+		// 2026-09-11:生效配额字段已下线(网关唯一闸门 = 余额);用量仅作展示。
 		out = append(out, uj)
 	}
 	c.JSON(http.StatusOK, gin.H{"users": out, "total": total, "page": page, "size": size})
@@ -761,8 +754,6 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		return
 	}
 	// 配额审计基线(2026-09 P1):变更后写 quota_change(旧值→新值)
-	wasTokens := u.QuotaTokens
-	wasMoney := u.QuotaMoney
 	var req struct {
 		DisplayName *string `json:"display_name"`
 		Email       *string `json:"email"`
@@ -841,26 +832,8 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 	if req.Status != nil {
 		u.Status = *req.Status
 	}
-	if req.QuotaClear {
-		u.QuotaTokens = nil
-	} else if req.QuotaTokens != nil {
-		if *req.QuotaTokens < 0 {
-			writeError(c, http.StatusBadRequest, "VALIDATION", "quota_tokens 不能为负数")
-			return
-		}
-		q := *req.QuotaTokens
-		u.QuotaTokens = &q
-	}
-	if req.QuotaMoneyClear {
-		u.QuotaMoney = nil
-	} else if req.QuotaMoney != nil {
-		if *req.QuotaMoney < 0 {
-			writeError(c, http.StatusBadRequest, "VALIDATION", "quota_money 不能为负数")
-			return
-		}
-		q := *req.QuotaMoney
-		u.QuotaMoney = &q
-	}
+	// 2026-09-11:token/金额配额字段已下线(网关唯一闸门 = 余额);
+	// 请求体里的 quota_* 字段被忽略,存量数据保留不动。
 	// 权限敏感变更:改密 / 降权(role 降级或取消管理员) / 禁用 → 吊销全部
 	// API token,旧凭证立即失效(防已登录客户端继续以旧权限访问)。
 	// 与用户更新同事务(审计2026-L16):更新成功但吊销失败不再留下旧凭证
@@ -883,13 +856,6 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "role_change", u.Username+"@"+wasRole+"→"+u.Role)
 	} else {
 		_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_update", u.Username)
-	}
-	// 配额变更审计(2026-09 P1):null=跟随全局默认,0=不限
-	if !quotaPtrEq(wasTokens, u.QuotaTokens) || !quotaMoneyPtrEq(wasMoney, u.QuotaMoney) {
-		_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "quota_change",
-			fmt.Sprintf("%s: token %s→%s, money %s→%s",
-				u.Username, quotaLabel(wasTokens), quotaLabel(u.QuotaTokens),
-				quotaMoneyLabel(wasMoney), quotaMoneyLabel(u.QuotaMoney)))
 	}
 	c.JSON(http.StatusOK, gin.H{"user": userJSON(u)})
 }
@@ -1476,8 +1442,6 @@ type deptReq struct {
 	ParentID    int64  `json:"parent_id"`
 	LeaderID    int64  `json:"leader_id"`
 	Description string `json:"description"`
-	// BudgetMoney 部门月度金额预算(元,0024):nil = 不变,0 = 清除(不限),>0 = 预算。
-	BudgetMoney *float64 `json:"budget_money"`
 }
 
 // listDepartments 返回部门树平铺(含主管/成员数/子部门数/授权引用数)。
@@ -1499,11 +1463,6 @@ func (a *AdminAPI) createDepartment(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "部门名称必填")
 		return
 	}
-	// 预算负值先于创建校验,避免创建成功后再失败留下无预算部门
-	if req.BudgetMoney != nil && *req.BudgetMoney < 0 {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "budget_money 不能为负数")
-		return
-	}
 	id, err := serverstore.CreateDepartment(a.DB, strings.TrimSpace(req.Name), req.ParentID, req.LeaderID, req.Description)
 	if err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
@@ -1516,13 +1475,6 @@ func (a *AdminAPI) createDepartment(c *gin.Context) {
 		}
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
-	}
-	// 消费 budget_money(审计 H4:创建对话框提交的预算此前被静默丢弃)
-	if req.BudgetMoney != nil {
-		if err := serverstore.SetDeptBudget(a.DB, id, *req.BudgetMoney); err != nil {
-			writeError(c, http.StatusInternalServerError, "INTERNAL", "保存预算失败")
-			return
-		}
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_create", req.Name)
 	c.JSON(http.StatusCreated, gin.H{"department": gin.H{"id": id, "name": req.Name}}) // L6:创建返回 201
@@ -1544,16 +1496,9 @@ func (a *AdminAPI) updateDepartment(c *gin.Context) {
 		writeError(c, http.StatusNotFound, "NOT_FOUND", "部门不存在")
 		return
 	}
-	if req.BudgetMoney != nil && *req.BudgetMoney < 0 {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "budget_money 不能为负数")
-		return
-	}
-	// 预算审计基线:须在更新前捕获(UpdateDepartmentWithBudget 事务内已写新值)
-	oldBudget, _ := serverstore.GetDeptBudget(a.DB, id)
-	// 预算与部门更新同一事务(审计 M2):预算失败整体回滚,不留半更新状态
-	if err := serverstore.UpdateDepartmentWithBudget(a.DB, id, strings.TrimSpace(req.Name), req.ParentID, req.LeaderID, req.Description, req.BudgetMoney); err != nil {
+	if err := serverstore.UpdateDepartment(a.DB, id, strings.TrimSpace(req.Name), req.ParentID, req.LeaderID, req.Description); err != nil {
 		if errors.Is(err, serverstore.ErrValidation) {
-			writeError(c, http.StatusBadRequest, "VALIDATION", "上级部门不能是自身或子部门,或预算非法")
+			writeError(c, http.StatusBadRequest, "VALIDATION", "上级部门不能是自身或子部门")
 			return
 		}
 		if errors.Is(err, serverstore.ErrDuplicate) {
@@ -1569,15 +1514,7 @@ func (a *AdminAPI) updateDepartment(c *gin.Context) {
 	}
 	detail := fmt.Sprintf("%s→%s parent:%d→%d leader:%d→%d",
 		before.Name, req.Name, before.ParentID, req.ParentID, before.LeaderID, req.LeaderID)
-	if req.BudgetMoney != nil {
-		detail += fmt.Sprintf(" budget:%.2f", *req.BudgetMoney)
-	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_update", detail)
-	// 部门预算独立审计(2026-09 P1):预算口径单列动作,便于审计检索
-	if req.BudgetMoney != nil && *req.BudgetMoney != oldBudget {
-		_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_budget_change",
-			fmt.Sprintf("%s: 预算 %s→%s", req.Name, deptBudgetLabel(oldBudget), deptBudgetLabel(*req.BudgetMoney)))
-	}
 	// L6:返回资源对象,与 createDepartment 响应结构一致
 	c.JSON(http.StatusOK, gin.H{"department": gin.H{"id": id, "name": req.Name}})
 }
@@ -1796,63 +1733,15 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 }
 
 // ---------------------------------------------------------------------------
-// 配额/预算审计辅助(2026-09 P1)
-// ---------------------------------------------------------------------------
-
-// quotaPtrEq 指针配额相等(nil = 跟随全局默认,0 = 不限)。
-func quotaPtrEq(a, b *int64) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
-}
-
-// quotaLabel 配额可读标签:null=跟随默认,0=不限,其余原值。
-func quotaLabel(v *int64) string {
-	if v == nil {
-		return "默认"
-	}
-	if *v == 0 {
-		return "0(不限)"
-	}
-	return strconv.FormatInt(*v, 10)
-}
-
-// deptBudgetLabel 部门预算可读标签:unset=未配置(不限),0=清除,其余金额。
-func deptBudgetLabel(v float64) string {
-	if v <= 0 {
-		return "unset"
-	}
-	return fmt.Sprintf("%.2f", v)
-}
-
-// quotaMoneyPtrEq 金额配额指针相等(nil = 跟随全局默认,0 = 不限)。
-func quotaMoneyPtrEq(a, b *float64) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
-}
-
-// quotaMoneyLabel 金额配额可读标签。
-func quotaMoneyLabel(v *float64) string {
-	if v == nil {
-		return "默认"
-	}
-	if *v == 0 {
-		return "0(不限)"
-	}
-	return fmt.Sprintf("%.2f", *v)
-}
-
-// ---------------------------------------------------------------------------
-// 员工余额管理(0061)
+// 员工余额管理(0061/0062)
 //
-// 语义:余额是**存量**(充值/发放/消费/手动调整),与 quota_* 的"月度流量
-// 上限"正交。balance.enabled 决定网关是否以余额为硬闸门。
+// 语义(2026-09-11 收敛):余额是员工唯一可花的钱 —— 存量、可充可扣、
+// 消费即减(与 usage 同事务),闸门开启且余额耗尽时网关 429 BALANCE_EXHAUSTED。
+// 部门预算、员工 token/金额配额已全部下线(设计文档
+// docs/planning/2026-09-11-balance-quota-consolidation.md)。
 // ---------------------------------------------------------------------------
 
-// balanceReq 手动调整余额(mode: add | deduct | set)。
+// balanceReq 手动调整余额(mode: add | deduct | set | clear)。
 type balanceReq struct {
 	Mode   string  `json:"mode"`
 	Amount float64 `json:"amount"`
@@ -1882,41 +1771,99 @@ func (a *AdminAPI) adjustUserBalance(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
-	if req.Amount <= 0 || req.Amount > maxBalanceAmount {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "金额必须大于 0 且不超过 1 亿元")
-		return
-	}
 	if len([]rune(req.Reason)) > 200 {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "备注最多 200 字")
 		return
 	}
-	old := u.BalanceMoney
+	mode := req.Mode
+	if mode == "" {
+		mode = "add"
+	}
+	// set/clear 允许 0(清零是合法操作);add/deduct 必须为正数。
+	if mode == "clear" {
+		req.Amount = 0
+	} else if req.Amount > maxBalanceAmount {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "金额不能超过 1 亿元")
+		return
+	} else if mode != "set" && req.Amount <= 0 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "金额必须大于 0")
+		return
+	} else if mode == "set" && req.Amount < 0 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "金额不能为负数")
+		return
+	}
+	actor := currentAdminUsername(c)
+	old := serverstore.QuantizeMoney(u.BalanceMoney)
 	var next float64
-	switch req.Mode {
-	case "add", "":
-		next, err = serverstore.AdjustUserBalance(a.DB, id, req.Amount)
+	switch mode {
+	case "add":
+		next, err = serverstore.AdjustUserBalance(a.DB, id, req.Amount, req.Reason, actor)
 	case "deduct":
-		next, err = serverstore.AdjustUserBalance(a.DB, id, -req.Amount)
-	case "set":
-		next, err = serverstore.SetUserBalance(a.DB, id, req.Amount)
+		next, err = serverstore.AdjustUserBalance(a.DB, id, -req.Amount, req.Reason, actor)
+	case "set", "clear":
+		next, err = serverstore.SetUserBalance(a.DB, id, req.Amount, req.Reason, actor)
 	default:
-		writeError(c, http.StatusBadRequest, "VALIDATION", "mode 只能是 add/deduct/set")
+		writeError(c, http.StatusBadRequest, "VALIDATION", "mode 只能是 add/deduct/set/clear")
 		return
 	}
 	if errors.Is(err, serverstore.ErrValidation) {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "扣减金额超过当前余额")
+		writeError(c, http.StatusBadRequest, "VALIDATION", "扣减金额超过当前余额(如需归零请用「清零」)")
+		return
+	}
+	if errors.Is(err, serverstore.ErrNotFound) {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "用户不存在")
 		return
 	}
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "余额调整失败")
 		return
 	}
-	detail := fmt.Sprintf("%s: %.2f→%.2f mode=%s", u.Username, old, next, req.Mode)
+	next = serverstore.QuantizeMoney(next)
+	detail := fmt.Sprintf("%s(#%d): %.2f→%.2f mode=%s", u.Username, id, old, next, mode)
 	if req.Reason != "" {
 		detail += " reason=" + req.Reason
 	}
-	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "balance_adjust", detail)
+	_ = serverstore.AuditLog(a.DB, actor, "balance_adjust", detail)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "user_id": id, "balance_money": next})
+}
+
+// userBalanceLedger 单个用户的余额流水(账本,分页)。
+func (a *AdminAPI) userBalanceLedger(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "非法用户 ID")
+		return
+	}
+	if _, err := serverstore.GetUserByID(a.DB, id); errors.Is(err, serverstore.ErrNotFound) {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "用户不存在")
+		return
+	} else if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
+	items, total, err := serverstore.BalanceLedgerPage(a.DB, id, c.Query("kind"), page, size)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	sum, _ := serverstore.BalanceLedgerSum(a.DB, id)
+	c.JSON(http.StatusOK, gin.H{
+		"items": items, "total": total, "page": page, "size": size,
+		// 账本对账:sum 应恒等于该用户当前余额(不变量 I1)。
+		"ledger_sum":    serverstore.QuantizeMoney(sum),
+		"balance_money": serverstore.QuantizeMoney(u2BalanceMoney(a, id)),
+	})
+}
+
+// u2BalanceMoney 读取用户当前余额(账本对账面用;查询失败返回 0)。
+func u2BalanceMoney(a *AdminAPI, id int64) float64 {
+	u, err := serverstore.GetUserByID(a.DB, id)
+	if err != nil {
+		return 0
+	}
+	return u.BalanceMoney
 }
 
 // getBalance 管理端余额总览:配置 + 最近/当月发放 + 人数与余额合计。
@@ -1930,6 +1877,10 @@ func (a *AdminAPI) getBalance(c *gin.Context) {
 }
 
 // putBalance 保存月度余额发放配置。
+//
+// 保存后立即补发本月**尚未领取**的员工(逐人·月幂等):否则从保存到调度器
+// 下一 tick 之间,刚开启的闸门会把余额为 0 的员工直接拦下。
+// 发放与闸门开关解耦 —— 额度 > 0 就发放,是否拦截由 Enabled 单独决定。
 func (a *AdminAPI) putBalance(c *gin.Context) {
 	var req struct {
 		Enabled       bool    `json:"enabled"`
@@ -1953,31 +1904,28 @@ func (a *AdminAPI) putBalance(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 		return
 	}
-	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "balance_settings",
+	actor := currentAdminUsername(c)
+	_ = serverstore.AuditLog(a.DB, actor, "balance_settings",
 		fmt.Sprintf("enabled=%v amount=%.2f mode=%s", req.Enabled, req.MonthlyAmount, req.MonthlyMode))
-	// 复核修正(2026-09-11):保存后若闸门开启、额度 > 0 且**本月尚未发放**,
-	// 立即补发一次 —— 否则从保存到调度器下一个 tick(最长 1 小时)之间,
-	// 全员余额为 0 会被刚开启的闸门直接拦截。GrantMonthlyBalance 以
-	// balance_grants.month 幂等,本月已发放时自动 no-op,不会重复加钱。
-	autoGranted := false
-	var grant *serverstore.BalanceGrant
-	if req.Enabled && req.MonthlyAmount > 0 {
-		actor := currentAdminUsername(c)
-		g, ok, gerr := serverstore.GrantMonthlyBalance(a.DB, req.MonthlyMode, req.MonthlyAmount, actor, time.Now())
+	var run *serverstore.GrantRun
+	if req.MonthlyAmount > 0 {
+		g, gerr := serverstore.GrantMonthlyBalance(a.DB, req.MonthlyMode, req.MonthlyAmount, actor, time.Now(), 0)
 		if gerr != nil {
 			log.Printf("balance settings saved but auto-grant failed: %v", gerr)
-		} else if ok {
-			autoGranted = true
-			grant = g
-			_ = serverstore.AuditLog(a.DB, actor, "balance_grant",
-				fmt.Sprintf("auto month=%s mode=%s amount=%.2f affected=%d", g.Month, g.Mode, g.Amount, g.Affected))
+		} else {
+			run = g
+			if g.Granted > 0 {
+				_ = serverstore.AuditLog(a.DB, actor, "balance_grant",
+					fmt.Sprintf("auto month=%s mode=%s amount=%.2f granted=%d", g.Month, g.Mode, g.Amount, g.Granted))
+			}
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "settings": s2, "auto_grant": autoGranted, "grant": grant})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "settings": s2, "auto_grant": run != nil && run.Granted > 0, "run": run})
 }
 
-// grantBalance 手动执行一次本月发放(幂等:当月已发放则返回 already=true,
-// 不会重复加钱)。定时任务与手动按钮共用同一幂等锚 balance_grants.month。
+// grantBalance 手动补发本月额度:只给**本月尚未领取**的启用员工发放
+// (逐人·月幂等锚 balance_grant_items),因此反复点击不会重复加钱,而新入职/
+// 重新启用的员工能被立即补上。与定时任务共用同一实现。
 func (a *AdminAPI) grantBalance(c *gin.Context) {
 	settings, err := serverstore.GetBalanceSettings(a.DB)
 	if err != nil {
@@ -1989,16 +1937,14 @@ func (a *AdminAPI) grantBalance(c *gin.Context) {
 		return
 	}
 	actor := currentAdminUsername(c)
-	grant, granted, err := serverstore.GrantMonthlyBalance(a.DB, settings.MonthlyMode, settings.MonthlyAmount, actor, time.Now())
+	run, err := serverstore.GrantMonthlyBalance(a.DB, settings.MonthlyMode, settings.MonthlyAmount, actor, time.Now(), 0)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "发放失败")
 		return
 	}
-	if !granted {
-		c.JSON(http.StatusOK, gin.H{"ok": true, "already": true, "grant": grant})
-		return
+	if run.Granted > 0 {
+		_ = serverstore.AuditLog(a.DB, actor, "balance_grant",
+			fmt.Sprintf("month=%s mode=%s amount=%.2f granted=%d", run.Month, run.Mode, run.Amount, run.Granted))
 	}
-	_ = serverstore.AuditLog(a.DB, actor, "balance_grant",
-		fmt.Sprintf("month=%s mode=%s amount=%.2f affected=%d", grant.Month, grant.Mode, grant.Amount, grant.Affected))
-	c.JSON(http.StatusOK, gin.H{"ok": true, "already": false, "grant": grant})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "already": run.Granted == 0, "run": run})
 }

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { t } from './locales.ts'
+import type { UsagePayload } from '../usage-contract.ts'
 
 /** `/api/pico/auth/state` body (enterprise auth-gate). */
 interface AuthState {
@@ -11,22 +12,10 @@ interface AuthState {
   serverURL?: string
 }
 
-/** `/api/pico/account/usage` body (this plugin's host route). */
+/** `/api/pico/account/usage` body (this plugin's host route).
+ *  data 的类型来自唯一契约 usage-contract.ts(不再就地重复声明)。 */
 interface UsageResponse {
-  data: {
-    is_admin: boolean
-    quota_tokens: number
-    quota_money: number
-    monthly_usage: number
-    monthly_cost: number
-    remaining_tokens: number | null
-    remaining_money: number | null
-    today_usage: number
-    today_cost: number
-    /** 0061 员工余额(元)与闸门开关。 */
-    balance_money?: number
-    balance_enabled?: boolean
-  } | null
+  data: UsagePayload | null
   fetchedAt: number
   state: 'idle' | 'loading' | 'error'
   error: string | null
@@ -37,10 +26,6 @@ const FOOT_AREA_SELECTOR = '[class$="_footArea"]'
 
 /** Client polling cadence; the host refreshes the cache after every agent loop. */
 const POLL_MS = 10_000
-
-/** Warn (orange) once the remaining quota drops to 20%; danger (red) at 5%. */
-const WARN_RATIO = 0.2
-const DANGER_RATIO = 0.05
 
 // ---- design tokens (official DSH alias set; adapts to light/dark) ----
 
@@ -135,12 +120,6 @@ const BALANCE_CAPTION: React.CSSProperties = {
   color: 'var(--dsw-alias-label-caption)',
 }
 
-const BAR_TRACK: React.CSSProperties = {
-  height: 4,
-  borderRadius: 2,
-  background: 'var(--dsw-alias-bg-layer-3)',
-  overflow: 'hidden',
-}
 
 const META_ROW: React.CSSProperties = {
   display: 'flex',
@@ -199,10 +178,6 @@ function isMoney(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v)
 }
 
-/** Format a token count with thousands separators. */
-function formatTokens(value: number): string {
-  return value.toLocaleString('en-US')
-}
 
 /**
  * Bottom sidebar account card: username + logout + live gateway balance.
@@ -313,48 +288,15 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
 
   // ---- wide card: username + logout + balance ----
 
-  // Balance resolution: money quota first, then token quota, then unlimited.
-  // 审计修复: 接口异常时 usageBody.data 可能是 {error:...} 或字段缺省,
-  // 必须用 != null + Number.isFinite 防御,否则 formatMoney(undefined) 崩溃
-  // 导致整个 sidebar.footer.action slot 崩溃(账户卡不渲染)。
-  const remainingMoney = data !== null && isMoney(data.remaining_money) ? data.remaining_money : null
-  const remainingTokens = data !== null && isMoney(data.remaining_tokens) ? data.remaining_tokens : null
+  // 余额解析(2026-09-11 收敛:员工唯一可花的钱 = 账户余额)。
+  //  /auth/usage 的形状已由 usage-contract.parseUsagePayload 校验过,这里只需
+  //  区分"未开通余额账户"(不渲染余额行)与"已开通"。
+  //  未开通 = 从未入账 → 网关闸门也不约束他,展示"未开通"而不是 ¥0.00
+  //  (否则会出现"显示 0 却能用"的矛盾界面)。
   const admin = data?.is_admin === true
-  // 0061:余额闸门开启时,主数字展示**账户余额**(存量),与月度配额(流量
-  // 上限)语义不同。字段缺失/非法一律按未启用处理,保持旧卡片行为。
-  const balanceMoney = data !== null && data.balance_enabled === true && isMoney(data.balance_money)
-    ? data.balance_money
-    : null
-
-  let amount: string | null = null
-  let quota: number | null = null
-  let used: number | null = null
-  let unit: string | null = null
-  if (remainingMoney !== null) {
-    amount = formatMoney(remainingMoney)
-    quota = isMoney(data!.quota_money) ? data!.quota_money : null
-    used = isMoney(data!.monthly_cost) ? data!.monthly_cost : null
-    unit = null
-  } else if (remainingTokens !== null) {
-    amount = formatTokens(remainingTokens)
-    quota = isMoney(data!.quota_tokens) ? data!.quota_tokens : null
-    used = isMoney(data!.monthly_usage) ? data!.monthly_usage : null
-    unit = t('account.tokens')
-  }
-
-  const ratio = quota !== null && quota > 0 && used !== null ? used / quota : null
-  const danger = ratio !== null && 1 - ratio <= DANGER_RATIO
-  const warn = ratio !== null && 1 - ratio <= WARN_RATIO
-  const fillColor = danger
-    ? 'var(--dsw-alias-state-error-primary)'
-    : warn
-      ? 'var(--dsw-alias-state-warn-primary)'
-      : 'var(--dsw-alias-brand-primary)'
-  const amountColor = danger
-    ? 'var(--dsw-alias-state-error-primary)'
-    : warn
-      ? 'var(--dsw-alias-state-warn-primary)'
-      : 'var(--dsw-alias-label-primary)'
+  const activated = data !== null && data.balance_activated === true
+  const balanceMoney = activated && isMoney(data!.balance_money) ? data!.balance_money : null
+  const monthly = data !== null && isMoney(data.balance_monthly) ? data.balance_monthly : 0
 
   const metaParts: string[] = []
   if (data !== null) {
@@ -383,43 +325,23 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
             </span>
             <span style={BALANCE_CAPTION}>{t('account.balance')}</span>
           </div>
-          {balanceMoney <= 0 && (
+          {balanceMoney <= 0 ? (
             <div style={{ fontSize: 11, color: 'var(--dsw-alias-state-error-primary)' }}>{t('account.lowBalance')}</div>
-          )}
-        </>
-      ) : admin || amount === null ? (
-        <div style={BALANCE_ROW}>
-          <span style={BALANCE_AMOUNT}>{t('account.unlimited')}</span>
-          {/* 区分语义:admin「管理员不限」;普通用户 remaining_money=null=服务
-              端无金额配额(非数据缺失——缺失在 318 行 isMoney 已归 null) */}
-          <span style={BALANCE_CAPTION}>{admin ? t('account.admin') : t('account.noQuota')}</span>
-        </div>
-      ) : (
-        <>
-          <div style={BALANCE_ROW}>
-            <span style={{ ...BALANCE_AMOUNT, color: amountColor }}>
-              {amount}{unit !== null ? ` ${unit}` : ''}
-            </span>
-            {quota !== null && quota > 0 && (
-              <span style={BALANCE_CAPTION}>{t('account.budget')} {formatMoney(quota)}</span>
-            )}
-          </div>
-          {ratio !== null && (
-            <div style={BAR_TRACK} role="progressbar" aria-valuenow={Math.min(100, Math.max(0, Math.round(ratio * 100)))} aria-valuemin={0} aria-valuemax={100}>
-              <div style={{ height: '100%', width: `${Math.min(100, ratio * 100)}%`, background: fillColor }} />
+          ) : monthly > 0 ? (
+            <div style={{ fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}>
+              {t('account.monthlyGrant')} {formatMoney(monthly)}
             </div>
-          )}
-          {warn && !danger && (
-            <div style={{ fontSize: 11, color: 'var(--dsw-alias-state-warn-primary)' }}>{t('account.lowBalance')}</div>
-          )}
-          {danger && (
-            <div style={{ fontSize: 11, color: 'var(--dsw-alias-state-error-primary)' }}>{t('account.lowBalance')}</div>
-          )}
+          ) : null}
         </>
+      ) : (
+        <div style={BALANCE_ROW}>
+          <span style={{ ...BALANCE_AMOUNT, color: 'var(--dsw-alias-label-secondary)' }}>—</span>
+          <span style={BALANCE_CAPTION}>{admin ? t('account.admin') : t('account.notActivated')}</span>
+        </div>
       )}
       <div style={META_ROW}>
         <span style={META_TEXT}>
-          {metaParts.length > 0 ? metaParts.join(' · ') : (stale || data === null ? ' ' : t('account.unlimited'))}
+          {metaParts.length > 0 ? metaParts.join(' · ') : ' '}
         </span>
         <button
           type="button"

@@ -45,7 +45,7 @@ const GUARDS = [
  * 依赖来源(2026-09-10 用 git/grep 实测):
  *   enterprise / connectors / cron 的 tsc 读 desktop 的 lib/types;
  *   account-card 读 enterprise 的 lib/types;browser 读 connectors 的 lib/types;
- *   branding / better-sidebar / community-fabric 无本地构建依赖。
+ *   branding / community-fabric 无本地构建依赖。
  * desktop 之外的 devDeps 边(desktop → 六个插件包)是**运行时/profile 依赖**,
  * 由 verify:profile 内部的 prebuild 保证,不作为调度边——否则 desktop ↔ enterprise
  * 成环,且会让 desktop 的 profile 冒烟与那些包的构建互相踩。
@@ -56,7 +56,6 @@ const PACKAGES = [
   { name: '@picoaide/dsh-connectors', dir: 'packages/host/connectors', needs: ['dsh-plugin-desktop'] },
   { name: '@picoaide/dsh-cron', dir: 'packages/host/cron', needs: ['dsh-plugin-desktop'] },
   { name: '@picoaide/dsh-branding', dir: 'packages/client/branding', needs: [] },
-  { name: 'dsh-better-sidebar', dir: 'packages/client/better-sidebar', needs: [] },
   { name: 'dsh-community-fabric', dir: 'community/fabric', needs: [] },
   { name: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', needs: ['@picoaide/dsh-enterprise'] },
   { name: '@picoaide/dsh-browser', dir: 'packages/host/browser', needs: ['@picoaide/dsh-connectors'] },
@@ -70,7 +69,6 @@ const PATH_OWNERS = [
   ['packages/host/enterprise/', '@picoaide/dsh-enterprise'],
   ['packages/client/account-card/', '@picoaide/dsh-account-card'],
   ['packages/client/branding/', '@picoaide/dsh-branding'],
-  ['packages/client/better-sidebar/', 'dsh-better-sidebar'],
   ['packages/host/connectors/', '@picoaide/dsh-connectors'],
   ['packages/host/browser/', '@picoaide/dsh-browser'],
   ['packages/host/cron/', '@picoaide/dsh-cron'],

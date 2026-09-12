@@ -7,6 +7,7 @@ import {
   afterPack,
   REQUIRED_PACKAGED_RUNTIME_ENTRIES,
   REQUIRED_MACOS_UNIVERSAL_ENTRIES,
+  nativeAddonRequirement,
   REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES,
   resolvePackagedAsarPath,
   resolvePackagedUnpackedRoot,
@@ -162,6 +163,18 @@ describe('packaged desktop runtime verification', () => {
     expect(list).toHaveBeenCalledOnce()
     expect(list).toHaveBeenCalledWith(expectedPath, { isPack: false })
     expect(resolvePackagedUnpackedRoot(context('/build', platform))).toBe(`${expectedPath}.unpacked`)
+  })
+
+  it('requires the POSIX native addon family only where upstream publishes it', () => {
+    // @deepseek-ai/node-addon-system ships darwin + linux platform packages and
+    // its `flock` entry throws on Windows; Windows session locking is the
+    // persistence package's own kernel32 semaphore path. A Windows packaging run
+    // therefore legitimately has no family directory — demanding one there broke
+    // the Windows installer job on the 0.1.5 upgrade PR.
+    expect(nativeAddonRequirement('linux')).toBe('family-and-launcher')
+    expect(nativeAddonRequirement('darwin')).toBe('family')
+    expect(nativeAddonRequirement('win32')).toBe('none')
+    expect(nativeAddonRequirement('mas')).toBe('none')
   })
 
   it('rejects an unsupported platform instead of guessing an archive layout', () => {

@@ -284,120 +284,6 @@ func TestChannelsListDetailed(t *testing.T) {
 	}
 }
 
-func TestAdminModelsAndDefaultModel(t *testing.T) {
-	r, db, hdr := adminTestSetup(t)
-	defer db.Close()
-
-	if w, _ := adminReq(t, r, "POST", "/api/server/admin/providers",
-		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"k","models":["deepseek-chat"]}`, hdr); w.Code != http.StatusOK {
-		t.Fatal("create provider failed")
-	}
-	// provider models are synced into the models table, so a model is
-	// immediately visible and selectable as default (no double source)
-	w, out := adminReq(t, r, "GET", "/api/server/admin/models", "", hdr)
-	if w.Code != http.StatusOK || len(out["models"].([]any)) != 1 {
-		t.Fatalf("models not synced from provider: %d %v", w.Code, out)
-	}
-	// default model must be in enabled models
-	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"default_model":"bogus-model"}`, hdr)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("bogus default model accepted: %d", w.Code)
-	}
-	// default_thinking_level:非法值拒绝,合法值写入并读回
-	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"default_thinking_level":"ultra"}`, hdr); w.Code != http.StatusBadRequest {
-		t.Fatalf("invalid default_thinking_level accepted: %d", w.Code)
-	}
-	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"default_thinking_level":"max"}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("set default_thinking_level: %d %s", w.Code, w.Body.String())
-	}
-	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
-	if w.Code != http.StatusOK || out["default_thinking_level"] != "max" {
-		t.Fatalf("default_thinking_level not persisted: %d %v", w.Code, out)
-	}
-	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"default_model":"deepseek-chat"}`, hdr)
-	if w.Code != http.StatusOK {
-		t.Fatalf("set default model: %d %s", w.Code, w.Body.String())
-	}
-	v, ok, _ := serverstore.GetSetting(db, "gateway.default_model")
-	if !ok || v != "deepseek-chat" {
-		t.Fatalf("default_model = %q ok=%v", v, ok)
-	}
-	// read back
-	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
-	if w.Code != http.StatusOK || out["default_model"] != "deepseek-chat" {
-		t.Fatalf("gateway config: %d %v", w.Code, out)
-	}
-	// 2026-09:allow_private/search_endpoint 已删除,不读不回显
-	if out["allow_private"] != nil || out["search_endpoint"] != nil {
-		t.Fatalf("removed fields still in gateway config: %v", out)
-	}
-	// server_base_url:对外 HTTPS 地址,webadmin 配置并读回
-	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"server_base_url":"https://picoaide.example.com"}`, hdr)
-	if w.Code != http.StatusOK {
-		t.Fatalf("set server_base_url: %d %s", w.Code, w.Body.String())
-	}
-	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
-	if w.Code != http.StatusOK || out["server_base_url"] != "https://picoaide.example.com" {
-		t.Fatalf("server_base_url not persisted: %d %v", w.Code, out)
-	}
-	// monthly_quota:全局默认员工月配额,读写并拒绝负数
-	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"monthly_quota":"-5"}`, hdr); w.Code != http.StatusBadRequest {
-		t.Fatalf("negative monthly_quota accepted: %d", w.Code)
-	}
-	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"monthly_quota":"100000"}`, hdr)
-	if w.Code != http.StatusOK {
-		t.Fatalf("set monthly_quota: %d %s", w.Code, w.Body.String())
-	}
-	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
-	if w.Code != http.StatusOK || out["monthly_quota"] != "100000" {
-		t.Fatalf("monthly_quota not persisted: %d %v", w.Code, out)
-	}
-	// 未配置时 GET 返回 "0"(不限)
-	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"monthly_quota":"0"}`, hdr)
-	if w.Code != http.StatusOK {
-		t.Fatalf("reset monthly_quota: %d", w.Code)
-	}
-	// delete model
-	if w, _ := adminReq(t, r, "DELETE", "/api/server/admin/models/1", "", hdr); w.Code != http.StatusOK {
-		t.Fatalf("delete model: %d", w.Code)
-	}
-}
-
-// 审计修复 2026-P (B2): rate_limit/monthly_quota/monthly_quota_money
-// 接受 JSON 数字或字符串(第三方直连 API 按业务直觉传数字不 400)。
-func TestAdminGatewayFlexibleNumericFields(t *testing.T) {
-	r, db, hdr := adminTestSetup(t)
-	defer db.Close()
-
-	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"rate_limit":60,"monthly_quota":100000,"monthly_quota_money":50.5}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("numeric fields rejected: %d %s", w.Code, w.Body.String())
-	}
-	v, ok, _ := serverstore.GetSetting(db, "gateway.rate_limit")
-	if !ok || v != "60" {
-		t.Fatalf("rate_limit = %q ok=%v (want 60)", v, ok)
-	}
-	v, ok, _ = serverstore.GetSetting(db, serverstore.MonthlyQuotaSetting)
-	if !ok || v != "100000" {
-		t.Fatalf("monthly_quota = %q ok=%v (want 100000)", v, ok)
-	}
-	v, ok, _ = serverstore.GetSetting(db, serverstore.MonthlyMoneyQuotaSetting)
-	if !ok || v != "50.5" {
-		t.Fatalf("monthly_quota_money = %q ok=%v (want 50.5)", v, ok)
-	}
-	// 字符串输入同样兼容(前端形式)
-	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"rate_limit":"30"}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("string field rejected: %d %s", w.Code, w.Body.String())
-	}
-	v, _, _ = serverstore.GetSetting(db, "gateway.rate_limit")
-	if v != "30" {
-		t.Fatalf("rate_limit = %q (want 30)", v)
-	}
-	// 非法值仍拒绝
-	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"rate_limit":-5}`, hdr); w.Code != http.StatusBadRequest {
-		t.Fatalf("negative rate_limit accepted: %d", w.Code)
-	}
-}
-
 // 禁用开关:enabled=false 后 provider 不再参与路由
 func TestProviderEnableToggle(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
@@ -426,31 +312,6 @@ func TestProviderEnableToggle(t *testing.T) {
 	ups, err = MatchModels(db, "m1")
 	if err != nil || len(ups) != 1 {
 		t.Fatalf("re-enabled provider not routable: %+v %v", ups, err)
-	}
-}
-
-// TestAdminGatewayMoneyQuota: 全局默认金额配额读写 + 拒绝负数。
-func TestAdminGatewayMoneyQuota(t *testing.T) {
-	r, db, hdr := adminTestSetup(t)
-	defer db.Close()
-
-	// 未配置时 GET 返回 "0"(不限)
-	w, out := adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
-	if w.Code != http.StatusOK || out["monthly_quota_money"] != "0" {
-		t.Fatalf("default monthly_quota_money: %d %v", w.Code, out)
-	}
-	// 负数拒绝
-	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"monthly_quota_money":"-5"}`, hdr); w.Code != http.StatusBadRequest {
-		t.Fatalf("negative monthly_quota_money accepted: %d", w.Code)
-	}
-	// 写入并读回
-	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"monthly_quota_money":"500"}`, hdr)
-	if w.Code != http.StatusOK {
-		t.Fatalf("set monthly_quota_money: %d %s", w.Code, w.Body.String())
-	}
-	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
-	if w.Code != http.StatusOK || out["monthly_quota_money"] != "500" {
-		t.Fatalf("monthly_quota_money not persisted: %d %v", w.Code, out)
 	}
 }
 
@@ -713,41 +574,6 @@ func TestAdminGatewayPeakWindowsClear(t *testing.T) {
 	w, out := adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK || out["peak_windows"] != "" {
 		t.Fatalf("peak_windows after clear = %v (%d), want empty", out["peak_windows"], w.Code)
-	}
-}
-
-// 审计修复 M1:PUT /gateway 部分更新语义——未传字段不覆盖,显式空串清空。
-// 2026-09:allow_private/search_endpoint 已随客户端 web 工具链路调整删除,
-// server_base_url / default_model 保持"显式空串清空"语义。
-func TestAdminGatewayPartialUpdate(t *testing.T) {
-	r, db, hdr := adminTestSetup(t)
-	defer db.Close()
-
-	// 先全量设置
-	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{
-		"default_model":"","rate_limit":"60","monthly_quota":"0","monthly_quota_money":"0",
-		"peak_windows":"","server_base_url":"https://picoaide.example.com"
-	}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("full set: %d", w.Code)
-	}
-	// 只提交 rate_limit:其它字段必须保持原值
-	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"rate_limit":"120"}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("partial update: %d", w.Code)
-	}
-	w, out := adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
-	if w.Code != http.StatusOK {
-		t.Fatalf("get: %d", w.Code)
-	}
-	if out["rate_limit"] != "120" || out["server_base_url"] != "https://picoaide.example.com" {
-		t.Fatalf("partial update clobbered fields: %v", out)
-	}
-	// 显式空串清空 server_base_url / default_model
-	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"server_base_url":"","default_model":""}`, hdr); w.Code != http.StatusOK {
-		t.Fatalf("clear fields: %d", w.Code)
-	}
-	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
-	if w.Code != http.StatusOK || out["server_base_url"] != "" || out["default_model"] != "" {
-		t.Fatalf("clear not applied: %v", out)
 	}
 }
 
@@ -1032,5 +858,81 @@ func TestCreateProviderProtocolValidation(t *testing.T) {
 	}
 	if p["api_key"] != "***" {
 		t.Fatalf("api_key must be masked, got %v", p["api_key"])
+	}
+}
+
+// 2026-09-11 删除(默认 token/金额配额下线,网关唯一闸门=余额):
+//   - TestAdminModelsAndDefaultModel
+//   - TestAdminGatewayFlexibleNumericFields
+//   - TestAdminGatewayMoneyQuota
+//   - TestAdminGatewayPartialUpdate
+//
+// TestAdminModelsAndDefaultModel 覆盖模型目录与网关默认配置(2026-09-11:
+// 默认 token/金额配额字段已下线,本用例不再断言它们)。
+func TestAdminModelsAndDefaultModel(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/providers",
+		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"k","models":["deepseek-chat"]}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("create provider failed")
+	}
+	// provider models are synced into the models table, so a model is
+	// immediately visible and selectable as default (no double source)
+	w, out := adminReq(t, r, "GET", "/api/server/admin/models", "", hdr)
+	if w.Code != http.StatusOK || len(out["models"].([]any)) != 1 {
+		t.Fatalf("models not synced from provider: %d %v", w.Code, out)
+	}
+	// default model must be in enabled models
+	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"default_model":"bogus-model"}`, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bogus default model accepted: %d", w.Code)
+	}
+	// default_thinking_level:非法值拒绝,合法值写入并读回
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"default_thinking_level":"ultra"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid default_thinking_level accepted: %d", w.Code)
+	}
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"default_thinking_level":"max"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("set default_thinking_level: %d %s", w.Code, w.Body.String())
+	}
+	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK || out["default_thinking_level"] != "max" {
+		t.Fatalf("default_thinking_level not persisted: %d %v", w.Code, out)
+	}
+	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"default_model":"deepseek-chat"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("set default model: %d %s", w.Code, w.Body.String())
+	}
+	v, ok, _ := serverstore.GetSetting(db, "gateway.default_model")
+	if !ok || v != "deepseek-chat" {
+		t.Fatalf("default_model = %q ok=%v", v, ok)
+	}
+	// read back
+	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK || out["default_model"] != "deepseek-chat" {
+		t.Fatalf("gateway config: %d %v", w.Code, out)
+	}
+	// 2026-09:allow_private/search_endpoint 已删除,不读不回显
+	if out["allow_private"] != nil || out["search_endpoint"] != nil {
+		t.Fatalf("removed fields still in gateway config: %v", out)
+	}
+	// server_base_url:对外 HTTPS 地址,webadmin 配置并读回
+	w, _ = adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"server_base_url":"https://picoaide.example.com"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("set server_base_url: %d %s", w.Code, w.Body.String())
+	}
+	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK || out["server_base_url"] != "https://picoaide.example.com" {
+		t.Fatalf("server_base_url not persisted: %d %v", w.Code, out)
+	}
+	// rate_limit:每用户限流,非法值拒绝、合法值持久化
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"rate_limit":"-3"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("negative rate_limit accepted: %d", w.Code)
+	}
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"rate_limit":"120"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("set rate_limit: %d %s", w.Code, w.Body.String())
+	}
+	if v, ok, _ := serverstore.GetSetting(db, "gateway.rate_limit"); !ok || v != "120" {
+		t.Fatalf("rate_limit = %q ok=%v, want 120", v, ok)
 	}
 }

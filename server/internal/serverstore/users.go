@@ -34,8 +34,12 @@ type User struct {
 	// monthly-grant target, and deducted by usage.cost. When balance.enabled
 	// is on, a non-positive balance blocks gateway requests.
 	BalanceMoney float64
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// BalanceActivatedAt is when the balance account was opened (0062: set on
+	// the first credit). Zero = never credited: the user is neither charged
+	// nor blocked by the balance gate (设计文档 §4.3 开通语义).
+	BalanceActivatedAt time.Time
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 	// PasswordChangedAt is the last password set/reset time (0057).
 	// Zero = never changed (created with an initial password).
 	PasswordChangedAt time.Time
@@ -68,7 +72,7 @@ func IsAdminRole(role string) bool {
 }
 
 // userCols is the canonical user column list (kept in sync with scanUser).
-const userCols = "id, username, display_name, email, password_hash, source, is_admin, role, status, created_at, updated_at, quota_tokens, quota_money, password_changed_at, password_must_change, totp_secret, totp_enabled, balance_money"
+const userCols = "id, username, display_name, email, password_hash, source, is_admin, role, status, created_at, updated_at, quota_tokens, quota_money, password_changed_at, password_must_change, totp_secret, totp_enabled, balance_money, balance_activated_at"
 
 // CreateUserWithPassword creates a local user, hashing the plaintext password.
 func CreateUserWithPassword(db *sql.DB, username, password string) (int64, error) {
@@ -114,8 +118,9 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var quota sql.NullInt64
 	var quotaMoney, balanceMoney sql.NullFloat64
 	var createdAt, updatedAt, passwordChangedAt any
+	var balanceActivatedAt any
 	var mustChange, totpEnabled int
-	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &role, &status, &createdAt, &updatedAt, &quota, &quotaMoney, &passwordChangedAt, &mustChange, &totpSecret, &totpEnabled, &balanceMoney); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &role, &status, &createdAt, &updatedAt, &quota, &quotaMoney, &passwordChangedAt, &mustChange, &totpSecret, &totpEnabled, &balanceMoney, &balanceActivatedAt); err != nil {
 		return nil, err
 	}
 	u.CreatedAt = parseSQLTime(createdAt)
@@ -145,6 +150,7 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	if balanceMoney.Valid {
 		u.BalanceMoney = balanceMoney.Float64
 	}
+	u.BalanceActivatedAt = parseSQLTime(balanceActivatedAt)
 	u.PasswordChangedAt = parseSQLTime(passwordChangedAt)
 	u.PasswordMustChange = mustChange == 1
 	u.TotpSecret = totpSecret.String

@@ -103,6 +103,22 @@ function ChannelLogo({ url, size, alt, radius, fallback }: {
 }
 
 /**
+ * 品牌槽位的**归属标记**：本组件渲染的每一个占用者都带它，上游厂商 mark 没有。
+ *
+ * 为什么需要它（2026-09-12）：自动化只能用 DOM 判断"这个单占位品牌槽是谁占的"。
+ * 早先的断言写成"槽位里的内联 svg 必须含 1.25× 缩放"——那只在**未配渠道 logo**
+ * 时成立；渠道包一旦提供 logo（`stageChannelProfile()` 内联成 data: URI），
+ * 槽位渲染的是 `<img>`，于是同一个提交在官方构建绿、渠道构建红，直接卡住发布。
+ * 渠道会越来越多，逐个枚举合法图形不可维护，所以改为**断言归属**：
+ * 有且仅有一个占用者，且它来自我们的品牌层（带本属性）。
+ * 图形本身是否等于权威 logo 由 `tests/channel-geometry.spec.ts` 对着
+ * `brands/official/logo.svg` 守卫，渠道素材由渠道包与构建期校验负责。
+ */
+export const BRAND_SEAT_ATTR = 'data-brand-mark'
+/** 归属标记的取值（消费方：`scripts/e2e-right-sidebar.mjs` 与单测）。 */
+export const BRAND_SEAT_OWNER = 'app'
+
+/**
  * The brace-mark tile; `className` rides along (upstream slot geometry).
  * When a server logo_url is provided (dynamic channel content), an <img> is
  * rendered instead of the brace artwork; failures fall back to the brace.
@@ -112,12 +128,14 @@ export function BraceMark({ size, className }: { size: number; className?: strin
   const logoUrl = resolveClientLogo(channel)
   const name = resolveClientName(channel)
   const radius = Math.max(4, Math.round(size * BRAND_TILE_RADIUS_RATIO))
+  const seat = { [BRAND_SEAT_ATTR]: BRAND_SEAT_OWNER } as const
   // 内置品牌图形（权威 brands/official/logo.svg 的几何，见 channel-geometry.ts）：
   // 既是"渠道没配 logo"时的显示内容，也是 logo 加载失败时的兜底 —— 两者同款。
   const tile = createElement(
     'span',
     {
       className,
+      ...seat,
       style: {
         display: 'inline-flex',
         flex: 'none',
@@ -137,6 +155,7 @@ export function BraceMark({ size, className }: { size: number; className?: strin
       'span',
       {
         className,
+        ...seat,
         style: { display: 'inline-flex', flex: 'none', alignItems: 'center', justifyContent: 'center', width: size, height: size },
       },
       createElement(ChannelLogo, { url: logoUrl, size, alt: name, radius, fallback: () => tile }),

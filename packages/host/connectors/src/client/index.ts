@@ -78,7 +78,9 @@ export function apply(ctx: ClientContext): void {
       if (connector.status !== 'connected' || commandDisposers.has(connector.id)) continue
       commandDisposers.set(connector.id, commandUi.register({
         name: connector.id,
-        description: `${connector.name}（已连接）`,
+        // rc.2 resolves the menu row copy lazily, so the description is a
+        // thunk (the row reads it on every candidate request).
+        description: () => `${connector.name}（已连接）`,
         available: () => true,
         ui: {
           kind: 'popupSelect',

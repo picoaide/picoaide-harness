@@ -264,7 +264,40 @@ func TestBootstrapAdmin(t *testing.T) {
 	}
 }
 
-// TestUsageSummaryEndpoint: GET /api/auth/usage 返回配额/余额/统计字段。
+// ---------------------------------------------------------------------------
+// 北京日夹具(2026-09-10 时区缺陷修复):
+// 一律以"北京日"为基准构造**绝对瞬时**,不再用 time.Now().Format("2006-01-02")
+// 这类"本机日期"(本机日 ≠ 北京日时用例必然查空:每天 8 小时窗口)。
+// ---------------------------------------------------------------------------
+
+// bjToday 返回北京日期值(今天)。
+func bjToday() time.Time { return serverstore.BeijingDay(time.Now()) }
+
+// bjDay 返回"北京日(今天 - daysAgo)"的日期值(查询边界用)。
+func bjDay(daysAgo int) time.Time { return bjToday().AddDate(0, 0, -daysAgo) }
+
+// fixtureAt 返回"北京日(今天 - daysAgo)的 hour:00"对应的绝对瞬时(写库夹具用)。
+func fixtureAt(daysAgo, hour int) time.Time { return serverstore.BeijingDayAt(bjDay(daysAgo), hour) }
+
+// setUsageAt 把用量行的 created_at 回填为给定绝对瞬时(timestamptz 参数,
+// 与 PG 会话时区无关)。
+func setUsageAt(t *testing.T, db *sql.DB, id int64, at time.Time) {
+	t.Helper()
+	if _, err := db.Exec("UPDATE usage SET created_at = ? WHERE id = ?", at, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustUID(t *testing.T, db *sql.DB, username string) int64 {
+	t.Helper()
+	u, err := serverstore.GetUserByUsername(db, username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.ID
+}
+
+// TestUsageSummaryEndpoint: GET /api/auth/usage 返回余额/统计字段。
 // 跨月安全(2026-09 修复):「昨日」记录与「今日」若跨月(每月 1 号),
 // monthly_usage 只含本月(今日)部分,断言按实际日期动态计算——
 // 此前用固定期望 150 万,月初运行必然失败(经典时间边界 bug)。
@@ -301,16 +334,8 @@ func TestUsageSummaryEndpoint(t *testing.T) {
 		monthlyCost = 3.0
 	}
 
-	// 个人配额:token 100000、金额 100
-	q := int64(100000)
-	m := 100.0
-	u, err := serverstore.GetUserByID(db, uid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	u.QuotaTokens = &q
-	u.QuotaMoney = &m
-	if err := serverstore.UpdateUser(db, u); err != nil {
+	// 2026-09-11:员工侧只剩余额口径 —— 开通并给 250 元余额。
+	if _, err := serverstore.SetUserBalance(db, uid, 250, "test", "tester"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -322,23 +347,19 @@ func TestUsageSummaryEndpoint(t *testing.T) {
 	if out["is_admin"] != false {
 		t.Fatalf("is_admin = %v", out["is_admin"])
 	}
-	if out["quota_tokens"].(float64) != 100000 || out["quota_money"].(float64) != 100 {
-		t.Fatalf("quota = %v/%v", out["quota_tokens"], out["quota_money"])
+	if out["balance_money"].(float64) != 250 || out["balance_activated"] != true {
+		t.Fatalf("balance = %v activated=%v, want 250/true", out["balance_money"], out["balance_activated"])
+	}
+	for _, dead := range []string{"quota_tokens", "quota_money", "remaining_tokens", "remaining_money"} {
+		if _, ok := out[dead]; ok {
+			t.Fatalf("已下线的额度字段仍在下发: %s", dead)
+		}
 	}
 	if out["monthly_usage"].(float64) != float64(monthlyUsage) {
 		t.Fatalf("monthly_usage = %v, want %d", out["monthly_usage"], monthlyUsage)
 	}
-	// 剩余 = 配额 - 本月已用(超额为负)
-	wantRemaining := float64(q) - float64(monthlyUsage)
-	if out["remaining_tokens"].(float64) != wantRemaining {
-		t.Fatalf("remaining_tokens = %v, want %v", out["remaining_tokens"], wantRemaining)
-	}
 	if out["monthly_cost"].(float64) != monthlyCost {
 		t.Fatalf("monthly_cost = %v, want %v", out["monthly_cost"], monthlyCost)
-	}
-	wantRemainingMoney := 100.0 - monthlyCost
-	if out["remaining_money"].(float64) != wantRemainingMoney {
-		t.Fatalf("remaining_money = %v, want %v", out["remaining_money"], wantRemainingMoney)
 	}
 	if out["today_usage"].(float64) != 1_000_000 || out["today_cost"].(float64) != 2.0 {
 		t.Fatalf("today = %v/%v", out["today_usage"], out["today_cost"])
@@ -362,8 +383,9 @@ func TestUsageSummaryEndpoint(t *testing.T) {
 	}
 }
 
-// TestUsageSummaryUnlimitedAndAdmin: 无限配额 → remaining null;admin → 豁免。
-func TestUsageSummaryUnlimitedAndAdmin(t *testing.T) {
+// TestUsageSummaryUnactivatedBalance: 未开通余额账户 → balance_activated=false
+// 且余额为 0(客户端据此不渲染余额行);管理员同样返回其真实余额。
+func TestUsageSummaryUnactivatedBalance(t *testing.T) {
 	r, db, cleanup := newTestAPI(t)
 	defer cleanup()
 	createUser(t, db, "alice", "Alice@123", false)
@@ -374,57 +396,7 @@ func TestUsageSummaryUnlimitedAndAdmin(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("usage status = %d", w.Code)
 	}
-	// 无配额配置 → remaining null
-	if v, present := out["remaining_tokens"]; !present || v != nil {
-		t.Fatalf("unlimited remaining_tokens = %v (present=%v), want null", v, present)
-	}
-	if v, present := out["remaining_money"]; !present || v != nil {
-		t.Fatalf("unlimited remaining_money = %v (present=%v), want null", v, present)
-	}
-
-	// admin:is_admin=true 且配额 0(豁免)
-	token2 := loginToken(t, r, "boss", "Boss@123")
-	w, out = doJSON(t, r, "GET", "/api/client/v2/auth/usage", "", map[string]string{"Authorization": "Bearer " + token2})
-	if w.Code != http.StatusOK {
-		t.Fatalf("admin usage status = %d", w.Code)
-	}
-	if out["is_admin"] != true {
-		t.Fatalf("admin is_admin = %v", out["is_admin"])
-	}
-	if v := out["remaining_tokens"]; v != nil {
-		t.Fatalf("admin remaining_tokens = %v, want null(豁免)", v)
-	}
-}
-
-func mustUID(t *testing.T, db *sql.DB, username string) int64 {
-	t.Helper()
-	u, err := serverstore.GetUserByUsername(db, username)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return u.ID
-}
-
-// ---------------------------------------------------------------------------
-// 时区安全用量夹具(2026-09-10 修复时区依赖缺陷):
-// 一律以"北京日"为基准构造**绝对瞬时**,不再用 time.Now().Format("2006-01-02")
-// 这类"本机日期"(本机日 ≠ 北京日时用例必然查空:每天 8 小时窗口)。
-// ---------------------------------------------------------------------------
-
-// bjToday 返回北京日期值(今天)。
-func bjToday() time.Time { return serverstore.BeijingDay(time.Now()) }
-
-// bjDay 返回"北京日(今天 - daysAgo)"的日期值(查询边界用)。
-func bjDay(daysAgo int) time.Time { return bjToday().AddDate(0, 0, -daysAgo) }
-
-// fixtureAt 返回"北京日(今天 - daysAgo)的 hour:00"对应的绝对瞬时(写库夹具用)。
-func fixtureAt(daysAgo, hour int) time.Time { return serverstore.BeijingDayAt(bjDay(daysAgo), hour) }
-
-// setUsageAt 把用量行的 created_at 回填为给定绝对瞬时(timestamptz 参数,
-// 与 PG 会话时区无关)。
-func setUsageAt(t *testing.T, db *sql.DB, id int64, at time.Time) {
-	t.Helper()
-	if _, err := db.Exec("UPDATE usage SET created_at = ? WHERE id = ?", at, id); err != nil {
-		t.Fatal(err)
+	if out["balance_activated"] != false || out["balance_money"].(float64) != 0 {
+		t.Fatalf("未开通 = %v/%v, want false/0", out["balance_activated"], out["balance_money"])
 	}
 }

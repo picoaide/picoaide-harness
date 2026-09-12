@@ -116,75 +116,8 @@ describe('Users 用户管理页', () => {
     expect(dialog.queryByText('该用户暂无令牌')).not.toBeInTheDocument()
   })
 
-  it('跟随默认配额展示全局默认值(中7)', async () => {
-    mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {
-      if (path.startsWith('/api/server/admin/users?page=')) {
-        return {
-          users: [{
-            id: 1, username: 'alice', is_admin: false, status: 1, groups: ['研发部'],
-            quota_tokens: null, effective_quota_tokens: 100000, monthly_usage: 5000,
-            quota_money: null, effective_quota_money: 50, monthly_cost: 1,
-          }],
-          total: 1, page: 1, size: 20,
-        }
-      }
-      if (path === '/api/server/admin/departments') return { departments: depts }
-      return {}
-    })
-    render(<MemoryRouter><Users /></MemoryRouter>)
-    // 跟随默认 + 全局值
-    expect(await screen.findByText(/跟随默认\(100K\/月\)/)).toBeInTheDocument()
-    expect(screen.getByText(/跟随默认\(¥50\.00\/月\)/)).toBeInTheDocument()
-    // 生效配额下使用率徽标可见(5%)
-    expect(screen.getByText('5%')).toBeInTheDocument()
-  })
 
-  it('配额概览:生效 token 配额非 0 时显示数值,0 才显示「不限」(P2-40)', async () => {
-    // 原 bug:`a ?? 0 === 0` 按优先级解析为 `a ?? false` → 恒真 → 500000 也显示「不限」
-    mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {
-      if (path.startsWith('/api/server/admin/users?page=')) {
-        return {
-          users: [{
-            id: 1, username: 'alice', is_admin: false, status: 1, groups: [],
-            quota_tokens: null, effective_quota_tokens: 500000,
-            quota_money: null, effective_quota_money: 50, monthly_usage: 0, monthly_cost: 0,
-          }],
-          total: 1, page: 1, size: 20,
-        }
-      }
-      if (path === '/api/server/admin/departments') return { departments: depts }
-      return {}
-    })
-    render(<MemoryRouter><Users /></MemoryRouter>)
-    await screen.findByText('alice')
-    fireEvent.click(screen.getByRole('button', { name: '配额' }))
-    const dialog = within(await screen.findByRole('dialog'))
-    expect(dialog.getByText('500K')).toBeInTheDocument()
-    expect(dialog.getByText('¥50.00')).toBeInTheDocument()
-    expect(dialog.queryByText('不限')).not.toBeInTheDocument()
-  })
 
-  it('配额概览:生效配额为 0(不限)时两栏都显示「不限」(P2-40)', async () => {
-    mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {
-      if (path.startsWith('/api/server/admin/users?page=')) {
-        return {
-          users: [{
-            id: 1, username: 'alice', is_admin: false, status: 1, groups: [],
-            quota_tokens: null, effective_quota_tokens: 0,
-            quota_money: null, effective_quota_money: 0, monthly_usage: 0, monthly_cost: 0,
-          }],
-          total: 1, page: 1, size: 20,
-        }
-      }
-      if (path === '/api/server/admin/departments') return { departments: depts }
-      return {}
-    })
-    render(<MemoryRouter><Users /></MemoryRouter>)
-    await screen.findByText('alice')
-    fireEvent.click(screen.getByRole('button', { name: '配额' }))
-    const dialog = within(await screen.findByRole('dialog'))
-    expect(dialog.getAllByText('不限')).toHaveLength(2)
-  })
 
   it('过期令牌显示「已过期」(L12)', async () => {
     mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {
@@ -204,13 +137,6 @@ describe('Users 用户管理页', () => {
     expect(await dialog.findByText('已过期')).toBeInTheDocument()
   })
 
-  it('管理员配额按钮禁用(L9)', async () => {
-    render(<MemoryRouter><Users /></MemoryRouter>)
-    await screen.findByText('boss')
-    // boss 是 admin → 配额按钮禁用
-    const row = screen.getByText('boss').closest('tr')!
-    expect(within(row).getByRole('button', { name: '配额' })).toBeDisabled()
-  })
 
   it('用户列表空态(L8)', async () => {
     mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {
@@ -222,16 +148,6 @@ describe('Users 用户管理页', () => {
     expect(await screen.findByText(/暂无匹配用户/)).toBeInTheDocument()
   })
 
-  it('配额概览:只读展示生效配额并跳转用量中心(G8 单入口)', async () => {
-    render(<MemoryRouter><Users /></MemoryRouter>)
-    await screen.findByText('alice')
-    fireEvent.click(screen.getAllByRole('button', { name: '配额' })[0])
-    const dialog = within(await screen.findByRole('dialog'))
-    // 只读概览(生效配额) + 跳转入口; 不发任何 PUT
-    expect(dialog.getByText(/生效 token 配额/)).toBeInTheDocument()
-    expect(dialog.getByRole('link', { name: /去用量中心调整/ })).toBeInTheDocument()
-    expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/users/1', expect.objectContaining({ method: 'PUT' }))
-  })
 
   it('多部门用户:部门对话框显示全部当前归属并提示预算同时生效', async () => {
     mockRequest.mockImplementation(async (path: string, _init?: RequestInit) => {

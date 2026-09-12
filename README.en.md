@@ -20,7 +20,7 @@
 
 PicoAide Harness packages DeepSeek Harness local agents, the Host service, its plugin system, and enterprise-grade administration into one platform:
 
-- **Desktop client**: native windows, system tray, terminal, automatic updates, no Node.js or command-line setup required;
+- **Desktop client**: native windows, system tray, automatic updates, no Node.js or command-line setup required;
 - **Local service**: automatically starts, stops, and restores the local Harness service while keeping data on your machine;
 - **Admin console**: a web-based console covering users, departments, gateway, usage, marketplace, and the Capability Hub (shared-content approvals), and audit;
 - **Plugin ecosystem**: the official DeepSeek Harness runs unchanged at a pinned version; the desktop shell and business plugins compose through the official mechanism.
@@ -125,7 +125,7 @@ Ordinary users should start at the [official wiki](https://www.picoaide.com/en/d
 
 Plugins are extension packages that add abilities to DSH — models, tools, interfaces, and workflows can all be plugins, composed like building blocks.
 
-PicoAide Harness does not fork upstream source or hard-code a fixed shell. The official DeepSeek Harness runs unchanged at a pinned version; the desktop shell — windows, tray, terminal, updates, workspaces — is itself a legitimate DSH plugin composed into the same runtime through the official plugin mechanism. From the core agent to the desktop shell, the whole product follows one rule: "everything is a plugin". Official ecosystem plugins work as-is, and desktop abilities are composed, replaced, and evolved the same way.
+PicoAide Harness does not fork upstream source or hard-code a fixed shell. The official DeepSeek Harness runs unchanged at a pinned version; the desktop shell — windows, tray, updates, workspaces — is itself a legitimate DSH plugin composed into the same runtime through the official plugin mechanism. From the core agent to the desktop shell, the whole product follows one rule: "everything is a plugin". Official ecosystem plugins work as-is, and desktop abilities are composed, replaced, and evolved the same way.
 
 ## Relationship with the official project
 
@@ -133,7 +133,7 @@ This project is built on deepseek-ai/deepseek-harness.
 
 The official project provides the core agent abilities, plugin system, and Web UI. This project is responsible for:
 
-- Desktop application packaging (windows, tray, terminal, updates, workspaces)
+- Desktop application packaging (windows, tray, updates, workspaces)
 - Local service start, stop, and recovery
 - Enterprise admin console (users, departments, gateway, usage, marketplace, audit)
 - macOS, Windows, and Linux installer builds and releases
@@ -151,7 +151,6 @@ Thanks also to Cordis for the plugin foundation, and to the Koishi.js project an
 
 Thanks to the following community plugins for their contributions to the product experience:
 
-- dsh-better-sidebar (DSH sidebar workbench): VSCode-style explorer, editor, terminal, Git, and browser views
 - dsh-memory-evolve (layered memory and self-evolution): global, user, project, branch, and daily memory, plus skill and todo management for DSH
 - Connector, task, scheduled-task, and browser capability providers across the DeepSeek Harness plugin ecosystem
 

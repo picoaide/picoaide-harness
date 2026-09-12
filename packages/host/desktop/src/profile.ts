@@ -34,7 +34,15 @@ import {
   readDesktopDisabledBundles,
 } from './desktop-plugins.ts'
 
-/** Persistent profile managed by the desktop launcher and the ordinary dsh plugin command. */
+/**
+ * Persistent profile owned exclusively by the desktop launcher.
+ *
+ * Upstream 0.1.5 reserves this name: the CLI rejects both `dsh --profile
+ * desktop` and `dsh plugin --profile desktop` with "profile \"desktop\" is
+ * managed exclusively by the Electron application". Third-party rows reach the
+ * profile through its patch layers (`cordis.patch.yml`), which is also what the
+ * product's own bundle overlays use.
+ */
 export const DESKTOP_PROFILE_NAME = 'desktop'
 
 /** Standalone package name inserted through the launcher-owned desktop layer. */
@@ -55,7 +63,6 @@ const CONNECTORS_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolv
 const BROWSER_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-browser/package.json')), 'cordis.patch.yml')
 const MEMORY_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('dsh-memory-evolve/package.json')), 'cordis.patch.yml')
 const CRON_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-cron/package.json')), 'cordis.patch.yml')
-const BETTER_SIDEBAR_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('dsh-better-sidebar/package.json')), 'cordis.patch.yml')
 const DIRECTORY_PICKER_ROW_ID = 'directory-picker'
 const AUTO_PICKER_PACKAGE = '@deepseek-ai/dsh-host-directory-picker-auto'
 const BROWSE_PICKER_BACKEND = '@deepseek-ai/dsh-host-directory-picker-browse'
@@ -489,7 +496,6 @@ export async function prepareDesktopProfile(
   const browserPatches = loadOverlayPatches(BIN_NAME, BROWSER_PATCH_PATH)
   const memoryPatches = loadOverlayPatches(BIN_NAME, MEMORY_PATCH_PATH)
   const cronPatches = loadOverlayPatches(BIN_NAME, CRON_PATCH_PATH)
-  const betterSidebarPatches = loadOverlayPatches(BIN_NAME, BETTER_SIDEBAR_PATCH_PATH)
   const bundlePatches: PatchOptions[] = []
   let desktopLayerInserted = false
   for (const layer of activeDesktopProfileLayers(profile, disabledBundles)) {
@@ -503,11 +509,10 @@ export async function prepareDesktopProfile(
     bundlePatches.push(...connectorsPatches)
     bundlePatches.push(...browserPatches)
     bundlePatches.push(...memoryPatches)
-    // Workbench: cron (scheduled jobs, now the single workbench surface),
-    // then the right-panel sidebar. The sidebar's own cordis.patch.yml
-    // carries the aggregate double-mount guard.
+    // Workbench: cron (scheduled jobs, now the single workbench surface).
+    // The right column is the official right Sidebar (ui-sidebar-right), which
+    // the web bundle already mounts; the vendored third-party sidebar is gone.
     bundlePatches.push(...cronPatches)
-    bundlePatches.push(...betterSidebarPatches)
     desktopLayerInserted = true
   }
   if (!desktopLayerInserted) {
@@ -558,7 +563,7 @@ export async function prepareDesktopProfile(
       // Advanced desktop owns the root frame itself: ui-layout's client row
       // is disabled so its AppFrame/child-slot declarations and `layout`
       // service provider never activate (0.1.2 forbids a second declaration
-      // of the sidebar/conversation/details slots and a duplicate service).
+      // of the sidebar/main/rightbar slots and a duplicate service).
       // The desktop shell provides the `layout` service and registers the
       // root frame with the child declarations instead (advanced-shell.ts).
       { id: 'ui-layout', disabled: true },

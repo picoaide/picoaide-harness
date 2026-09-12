@@ -4,8 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -15,13 +13,14 @@ import (
 // 解释(2026-09-10 时区缺陷),不得再进入 SQL 参数。
 const pgTimeFmt = "2006-01-02 15:04:05"
 
-// MonthlyQuotaSetting is the settings key for the default per-user monthly
-// traffic quota in tokens (absent / "0" = unlimited).
-const MonthlyQuotaSetting = "usage.monthly_quota"
-
-// MonthlyMoneyQuotaSetting is the settings key for the default per-user
-// monthly traffic quota in yuan (absent / "0" = unlimited).
-const MonthlyMoneyQuotaSetting = "usage.monthly_quota_money"
+// 2026-09-11:员工 token 配额与员工金额配额已下线 —— 网关唯一的"钱"闸门是
+// 账户余额(见 docs/planning/2026-09-11-balance-quota-consolidation.md)。
+// 两个 settings 键仍可能存在于历史数据库(不再读写,不做破坏性清理),常量
+// 仅留给迁移/文档引用,代码不得再用它们做判定。
+const (
+	LegacyMonthlyQuotaSetting      = "usage.monthly_quota"
+	LegacyMonthlyMoneyQuotaSetting = "usage.monthly_quota_money"
+)
 
 // PeakWindowsSetting 高峰时段配置(settings 键,JSON 字符串):
 //
@@ -222,8 +221,10 @@ func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptToken
 	// created_at 显式 = now(请求时刻):与 cost 计费时点同源,回填时使用该
 	// 时刻折价(审计修复 2026-P M4:跨高峰/空闲边界的流式请求按发起时点计价)。
 	//
-	// 0061: usage 落账与余额扣减在同一事务 —— 「记了账一定扣了钱」,
+	// 0061/0062: usage 落账与余额扣减在同一事务 —— 「记了账一定扣了钱」,
 	// 崩溃/并发下不会出现费用已入账而余额未扣(或反之)的半提交。
+	// 0062:扣减收敛为「把该行的计费金额结算到 cost」(settleUsageCostTx),
+	// 未开通余额账户的用户不扣不记(闸门关闭期间同样记账,开关只管拦不拦)。
 	tx, err := db.Begin()
 	if err != nil {
 		return 0, err
@@ -234,12 +235,8 @@ func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptToken
 		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost, now).Scan(&id); err != nil {
 		return 0, err
 	}
-	// 复核修正:未启用余额闸门时不扣余额(余额=纯充值池);启用后消费才
-	// 与账务联动,避免"启用瞬间全员负余额"。
-	if BalanceBillingEnabled(db) {
-		if err := deductBalance(tx, userID, cost); err != nil {
-			return 0, err
-		}
+	if err := settleUsageCostTx(tx, id, userID, cost); err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -270,9 +267,8 @@ func updateUsageTokensAt(db *sql.DB, id, promptTokens, completionTokens int64, n
 func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, now time.Time) error {
 	var userID int64
 	var model string
-	var oldCost float64
 	var createdAt any
-	if err := db.QueryRow("SELECT user_id, model, cost, created_at FROM usage WHERE id = ?", id).Scan(&userID, &model, &oldCost, &createdAt); err != nil {
+	if err := db.QueryRow("SELECT user_id, model, created_at FROM usage WHERE id = ?", id).Scan(&userID, &model, &createdAt); err != nil {
 		return err
 	}
 	// created_at(SQLite localtime 字符串 / PG TIMESTAMPTZ)解析回本地时刻;
@@ -284,22 +280,24 @@ func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, c
 	in, out, off := ModelPrices(db, model)
 	cacheIn := ModelCachePrice(db, model)
 	cost := costOfAt(billAt, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
-	// 0061: 回填与余额扣减同事务,只扣差额(pending 行旧 cost 通常为 0;
-	// 重复回填/修正时不会重复扣款)。
+	// 0061/0062: 回填与余额结算同事务。0062 起由 settleUsageCostTx 把该行的
+	// 计费金额**收敛到 cost**(按流水已计费额算差额):重复回填不重复扣,
+	// 费用向下修正自动记 refund 回补(此前只减不补,余额会永久偏离)。
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	// 锁住 usage 行:并发回填按行串行,避免同一行的差额被算两次。
+	if _, err := tx.Exec("SELECT id FROM usage WHERE id = ? FOR UPDATE", id); err != nil {
+		return err
+	}
 	if _, err := tx.Exec("UPDATE usage SET prompt_tokens = ?, completion_tokens = ?, cache_prompt_tokens = ?, cost = ? WHERE id = ?",
 		promptTokens, completionTokens, cacheTokens, cost, id); err != nil {
 		return err
 	}
-	// 复核修正:同上 —— 仅闸门开启时流式回填才扣余额差额。
-	if BalanceBillingEnabled(db) {
-		if err := deductBalance(tx, userID, cost-oldCost); err != nil {
-			return err
-		}
+	if err := settleUsageCostTx(tx, id, userID, cost); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -361,30 +359,6 @@ func UserMonthlyUsageBatch(db *sql.DB, userIDs []int64) (map[int64]int64, error)
 	return out, rows.Err()
 }
 
-// EffectiveQuota returns a user's monthly traffic quota in tokens: a per-user
-// override wins, otherwise the global default (settings usage.monthly_quota).
-// 0 = unlimited. Admins are always unlimited.
-func EffectiveQuota(db *sql.DB, user *User) (int64, error) {
-	if user.IsAdmin {
-		return 0, nil
-	}
-	if user.QuotaTokens != nil {
-		return *user.QuotaTokens, nil
-	}
-	v, ok, err := GetSetting(db, MonthlyQuotaSetting)
-	if err != nil {
-		return 0, err
-	}
-	if !ok {
-		return 0, nil
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(v))
-	if err != nil || n < 0 {
-		return 0, nil
-	}
-	return int64(n), nil
-}
-
 // UserMonthlyCost returns the user's total cost (yuan) in the current
 // calendar month (SUM of denormalized usage.cost, 0022). 月窗口同
 // UserMonthlyUsage(北京月界,与环境时区无关)。
@@ -393,42 +367,6 @@ func UserMonthlyCost(db *sql.DB, userID int64) (float64, error) {
 	err := db.QueryRow(`SELECT COALESCE(SUM(cost),0) FROM usage WHERE user_id = ? AND created_at >= ?::timestamptz`,
 		userID, pgInstantArg(BeijingMonthInstant(time.Now()))).Scan(&total)
 	return total, err
-}
-
-// MonthUsageByUser 用户在当月的 token 与金额用量。
-type MonthUsageByUser struct {
-	Tokens int64
-	Cost   float64
-}
-
-// MonthUsageByUsers 一次查询返回一批用户当月的 tokens+cost 用量
-// (按 user_id 分组;无用量用户不在结果中)。供配额校验合并使用:
-// 服务端每请求的 quotaBlocked 需要 用户用量 + 部门成员用量,
-// 以前是 3 次独立 SUM 查询,这里一次 GROUP BY 搞定。
-func MonthUsageByUsers(db *sql.DB, userIDs []int64) (map[int64]MonthUsageByUser, error) {
-	out := map[int64]MonthUsageByUser{}
-	if len(userIDs) == 0 {
-		return out, nil
-	}
-	// P2-7:数组参数,见 UserMonthlyUsageBatch 注释。
-	rows, err := db.Query(`SELECT user_id,
-		COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0) AS t,
-		COALESCE(SUM(cost),0) AS c
-		FROM usage WHERE created_at >= ?::timestamptz AND user_id = ANY(?::bigint[]) GROUP BY user_id`,
-		pgInstantArg(BeijingMonthInstant(time.Now())), pgInt64Array(userIDs))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var uid int64
-		var m MonthUsageByUser
-		if err := rows.Scan(&uid, &m.Tokens, &m.Cost); err != nil {
-			return nil, err
-		}
-		out[uid] = m
-	}
-	return out, rows.Err()
 }
 
 // UserMonthlyCostBatch returns a map of user_id → cost (yuan) this calendar
@@ -455,30 +393,6 @@ func UserMonthlyCostBatch(db *sql.DB, userIDs []int64) (map[int64]float64, error
 		out[uid] = c
 	}
 	return out, rows.Err()
-}
-
-// EffectiveMoneyQuota returns a user's monthly traffic quota in yuan: a
-// per-user override wins, otherwise the global default (settings
-// usage.monthly_quota_money). 0 = unlimited. Admins are always unlimited.
-func EffectiveMoneyQuota(db *sql.DB, user *User) (float64, error) {
-	if user.IsAdmin {
-		return 0, nil
-	}
-	if user.QuotaMoney != nil {
-		return *user.QuotaMoney, nil
-	}
-	v, ok, err := GetSetting(db, MonthlyMoneyQuotaSetting)
-	if err != nil {
-		return 0, err
-	}
-	if !ok {
-		return 0, nil
-	}
-	n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-	if err != nil || n < 0 {
-		return 0, nil
-	}
-	return n, nil
 }
 
 // UsageAggregateRow is one aggregated usage row.

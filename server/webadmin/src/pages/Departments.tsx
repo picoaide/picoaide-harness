@@ -13,7 +13,6 @@ import { UserSearchSelect } from '../components/user-search-select'
 import { Network } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { deptSubtreeIds, deptTreeOptions } from '../lib/utils'
-import { fmtMoney, fmtMoneyFull, moneyPercent, moneyOver } from '../lib/format'
 
 interface Department {
   id: number
@@ -25,7 +24,6 @@ interface Department {
   member_count: number
   child_count: number
   granted_count: number
-  budget_money?: number | null // 0024:月度金额预算(元),nil = 未配置
   monthly_cost?: number // 0024:部门树当月费用(元)
 }
 
@@ -34,7 +32,7 @@ export default function Departments() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false) // L10:提交/删除双击守卫
   const [deptDialog, setDeptDialog] = useState(false)
-  const [deptForm, setDeptForm] = useState({ id: 0, name: '', parent_id: '0', leader_id: '0', description: '', budget_money: '' })
+  const [deptForm, setDeptForm] = useState({ id: 0, name: '', parent_id: '0', leader_id: '0', description: '' })
   // 对话框内联错误(UX 改进):保存失败信息显示在对话框内,而非页面顶部
   const [deptErr, setDeptErr] = useState('')
   // P1-8: 请求序号防乱序——保存/删除后重拉与手动刷新竞态时只认最新响应
@@ -55,23 +53,6 @@ export default function Departments() {
 
   useEffect(() => { load() }, [load])
 
-  // 中6:沿祖先链找第一个配置了预算的部门(继承预算语义:
-  // 部门预算约束其全部子部门成员,子部门自身无预算 ≠ 不限)。
-  function inheritedBudget(d: Department): { name: string; budget: number } | undefined {
-    let pid = d.parent_id
-    let guard = 0
-    while (pid !== 0 && guard < 100) {
-      guard++
-      const p = depts.find((x) => x.id === pid)
-      if (!p) return undefined
-      if (p.budget_money !== null && p.budget_money !== undefined && p.budget_money > 0) {
-        return { name: p.name, budget: p.budget_money }
-      }
-      pid = p.parent_id
-    }
-    return undefined
-  }
-
   function openDeptEdit(d?: Department) {
     setDeptErr('')
     setDeptForm({
@@ -80,7 +61,6 @@ export default function Departments() {
       parent_id: String(d?.parent_id ?? 0),
       leader_id: String(d?.leader_id ?? 0),
       description: d?.description ?? '',
-      budget_money: d?.budget_money === null || d?.budget_money === undefined ? '' : String(d.budget_money),
     })
     setDeptDialog(true)
   }
@@ -95,8 +75,6 @@ export default function Departments() {
       leader_id: Number(deptForm.leader_id),
       description: deptForm.description,
     }
-    // 预算:留空 = 不变;0 = 清除(不限);>0 = 月度金额预算
-    if (deptForm.budget_money.trim() !== '') payload.budget_money = Number(deptForm.budget_money)
     const body = JSON.stringify(payload)
     setBusy(true)
     try {
@@ -132,7 +110,7 @@ export default function Departments() {
     <div className="space-y-4">
       <PageHeader
         title="部门管理"
-        desc="金字塔架构:部门树(可嵌套)→ 部门主管 → 员工;授权给部门覆盖其子部门,主管自动继承部门及下级授权;「全员」为内置保留部门;月度预算按月实时统计,每月 1 日自动重置,超限自动拦截"
+        desc="金字塔架构:部门树(可嵌套)→ 部门主管 → 员工;授权给部门覆盖其子部门,主管自动继承部门及下级授权;「全员」为内置保留部门。员工可花的钱统一由「用量中心 → 余额」管理"
         actions={<Button onClick={() => openDeptEdit()}>新建部门</Button>}
       />
       {error && <div className="text-sm text-destructive">{error}</div>}
@@ -145,7 +123,6 @@ export default function Departments() {
             <TableHead>部门主管</TableHead>
             <TableHead>成员</TableHead>
             <TableHead>子部门</TableHead>
-            <TableHead className="w-44 whitespace-nowrap">月度金额预算</TableHead>
             <TableHead className="text-right">操作</TableHead>
           </TableRow>
         </TableHeader>
@@ -169,40 +146,6 @@ export default function Departments() {
                 <TableCell>{d.leader_name || '—'}</TableCell>
                 <TableCell className="font-mono text-xs">{d.member_count}</TableCell>
                 <TableCell className="font-mono text-xs">{d.child_count}</TableCell>
-                <TableCell>
-                  {d.budget_money === null || d.budget_money === undefined || d.budget_money <= 0 ? (
-                    // 中6:本部门无预算 ≠ 不限——祖先部门预算仍约束其成员
-                    (() => {
-                      const ib = inheritedBudget(d)
-                      return ib ? (
-                        <span className="text-xs text-muted-foreground" title={`受 ${ib.name} 部门预算约束`}>继承上级({ib.name} ¥{fmtMoney(ib.budget)})</span>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">不限</span>
-                      )
-                    })()
-                  ) : (
-                    <div className="space-y-0.5">
-                      <div className="text-xs">
-                        <span className="font-medium tabular-nums">¥{fmtMoney(d.monthly_cost ?? 0)}</span>
-                        <span className="text-muted-foreground"> / ¥{fmtMoney(d.budget_money)}</span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={moneyPercent(d.monthly_cost ?? 0, d.budget_money) ?? 0} aria-valuemin={0} aria-valuemax={100} aria-label={`${d.name} 预算占用`}>
-                          <div
-                            className={`h-full rounded-full ${moneyOver(d.monthly_cost ?? 0, d.budget_money) ? 'bg-destructive' : moneyPercent(d.monthly_cost ?? 0, d.budget_money)! >= 80 ? 'bg-amber-500' : 'bg-primary'}`}
-                            style={{ width: `${Math.min(100, moneyPercent(d.monthly_cost ?? 0, d.budget_money) ?? 0)}%` }}
-                          />
-                        </div>
-                        <span
-                          className={`text-[10px] tabular-nums ${moneyOver(d.monthly_cost ?? 0, d.budget_money) ? 'text-destructive' : ''}`}
-                          title={fmtMoneyFull(d.monthly_cost ?? 0)}
-                        >
-                          {moneyPercent(d.monthly_cost ?? 0, d.budget_money)}%
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                </TableCell>
                 <TableCell className="text-right space-x-2">
                   <Button size="sm" variant="outline" onClick={() => openDeptEdit(d)}>编辑</Button>
                   <Button size="sm" variant="destructive" disabled={busy} onClick={() => removeDept(d)}>删除</Button>
@@ -269,22 +212,6 @@ export default function Departments() {
             <div className="space-y-1">
               <Label htmlFor="dept-desc">描述(可选)</Label>
               <Input id="dept-desc" value={deptForm.description} onChange={(e) => setDeptForm({ ...deptForm, description: e.target.value })} />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="dept-budget">月度金额预算(元,可选)</Label>
-              <Input
-                id="dept-budget"
-                type="number"
-                min={0}
-                step="0.01"
-                placeholder="留空 = 不变;0 = 不限;>0 = 部门树月度费用上限"
-                value={deptForm.budget_money}
-                onChange={(e) => setDeptForm({ ...deptForm, budget_money: e.target.value })}
-              />
-              <p className="text-xs text-muted-foreground">
-                预算约束该部门及全部子部门成员:树内当月累计费用超限即拦截(与员工个人金额配额叠加生效)。
-                子部门成员同时受其上级部门预算约束。
-              </p>
             </div>
             <Button className="w-full" disabled={!deptForm.name.trim() || busy} onClick={saveDeptForm}>{busy ? '处理中…' : '保存'}</Button>
           </div>

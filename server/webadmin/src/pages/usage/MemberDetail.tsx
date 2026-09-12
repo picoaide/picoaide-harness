@@ -10,7 +10,7 @@ import { Skeleton } from '../../components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table'
 import { PageHeader } from '../../components/page-header'
 import { ArrowLeft } from 'lucide-react'
-import { RangeFilter, defaultRange, fetchUsageList, chatTokens, sumRows, downloadCsv, effectiveQuotaMoney, effectiveQuotaTokens, fmtY, type UsageRow, type UsageRequestRow, type UserInfo } from './common'
+import { RangeFilter, defaultRange, fetchUsageList, chatTokens, sumRows, downloadCsv, fmtY, type UsageRow, type UsageRequestRow, type UserInfo } from './common'
 import { fmtTokens, fmtFull, fmtMoney } from '../../lib/format'
 
 // 成员详情(独立二级页):该成员近30天趋势 + 模型构成 + 最近请求 + 导出
@@ -91,9 +91,10 @@ export default function UsageMemberDetail() {
             <Badge variant="outline">部门: {(user.groups ?? []).filter((g) => g !== '全员').join(', ') || '未分配'}</Badge>
             <Badge variant="secondary">本月消耗 {fmtY(user.monthly_cost)}</Badge>
             <Badge variant="secondary">本月 tokens {fmtTokens(user.monthly_usage)}</Badge>
-            {/* P2-45: 生效配额(服务端折算;跟随全局默认的用户此前被误报「不限」) */}
-            <Badge variant="outline">金额配额 {effectiveQuotaMoney(user) ? fmtY(effectiveQuotaMoney(user)!) : '不限'}</Badge>
-            <Badge variant="outline">token 配额 {effectiveQuotaTokens(user) ? fmtTokens(effectiveQuotaTokens(user)!) : '不限'}</Badge>
+            {/* 2026-09-11:员工唯一可花的钱 = 账户余额(配额已下线) */}
+            <Badge variant={user.balance_activated ? 'outline' : 'secondary'}>
+              {user.balance_activated ? `账户余额 ${fmtY(user.balance_money ?? 0)}` : '余额未开通'}
+            </Badge>
           </>
         ) : loading ? <Skeleton className="h-6 w-48" /> : null}
       </div>
