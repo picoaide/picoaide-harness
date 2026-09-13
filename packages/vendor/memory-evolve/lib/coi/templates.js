@@ -2,9 +2,9 @@
  * COI 任务模板 — 常用任务预设，一键发起（GUI/命令/API 通用）。
  * 模板字段：{ id, name, adapterId?, prompt, scope?, note? }
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { translate, getLocale, COI_DICT } from '../i18n.js'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
 
 /** 内置默认模板（用户可覆盖同 id）。name 是显示名的 zh 源；list() 按活跃
  * 语言本地化（custom 覆盖与用户自建模板原样保留）。 */
@@ -38,10 +38,8 @@ export class TemplateStore {
   }
 
   #save() {
-    mkdirSync(dirname(this.file), { recursive: true })
-    const tmp = `${this.file}.tmp.${process.pid}`
-    writeFileSync(tmp, JSON.stringify(this.custom, null, 2) + '\n')
-    renameSync(tmp, this.file)
+    // FIX-27（2026-09-13）：自锚定安全原子写（tmp 落点同样断言 + O_EXCL）
+    writeFileAtomicSafeAt(this.file, JSON.stringify(this.custom, null, 2) + '\n')
   }
 
   list() {

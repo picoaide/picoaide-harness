@@ -3,7 +3,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { Worker } from 'node:worker_threads'
-import { dshHomePath } from './desktop-home.ts'
+import { dshHome } from './desktop-home.ts'
 import type { DiagnosticExportWorkerResult } from './diagnostic-export-worker.ts'
 
 /** Bound both worker memory and the amount of potentially sensitive log history exported. */
@@ -30,8 +30,16 @@ export interface DesktopDiagnosticExportOptions {
   /** Exact Electron Crashpad directory; defaults to the conventional user-data location. */
   readonly crashDumpsDir?: string
   readonly maxEvidenceBytes?: number
-  /** Session root override; defaults to `<DSH_HOME>/sessions`. */
+  /** Session root override; defaults to `<this installation's home>/sessions`. */
   readonly sessionsDir?: string
+  /**
+   * 本安装的数据根（渠道包 → 渠道 `desktop.home_dir`；官方构建与 npm 启动器不传）。
+   *
+   * `--export-diagnostics` 的早退分支在 `start()` 写回 `DSH_HOME` **之前**运行，
+   * 所以渠道构建必须显式给出自己的根（desktop-3）；缺省按 `DSH_HOME`/官方默认
+   * 解析，官方行为逐字节不变。
+   */
+  readonly installHomeDir?: string
 }
 
 function workerEntryUrl(): URL {
@@ -114,14 +122,19 @@ export function exportDesktopDiagnostics(
   options: DesktopDiagnosticExportOptions,
 ): Promise<string> {
   const logsDir = join(userDataDir, 'logs')
-  mkdirSync(logsDir, { recursive: true })
+  // 私有目录口径:诊断包含崩溃转储,userData/logs 由导出路径自己创建时同样 0700
+  // (Electron 已建好的 userData 不受影响;此前这里建出的是 0755)。
+  mkdirSync(logsDir, { recursive: true, mode: 0o700 })
   return exportDiagnosticsZip(logsDir, userDataDir, {
     appVersion: options.appVersion,
     crashDumpsDir: options.crashDumpsDir ?? join(userDataDir, 'Crashpad'),
     runStatePath: join(userDataDir, 'crash-evidence', 'active-run.json'),
     // P1-12: the session root is resolved once here (main thread) so the worker
-    // never has to re-derive DSH_HOME from the environment.
-    sessionsDir: options.sessionsDir ?? dshHomePath('sessions'),
+    // never has to re-derive DSH_HOME from the environment. desktop-3: this
+    // installation's own root (channel-aware) wins over the process
+    // environment — the `--export-diagnostics` early branch runs before
+    // `start()` writes DSH_HOME back.
+    sessionsDir: options.sessionsDir ?? join(options.installHomeDir ?? dshHome(), 'sessions'),
     ...(options.maxEvidenceBytes === undefined ? {} : { maxEvidenceBytes: options.maxEvidenceBytes }),
   })
 }

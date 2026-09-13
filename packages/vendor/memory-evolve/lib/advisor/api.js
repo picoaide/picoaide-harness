@@ -17,33 +17,20 @@
  *
  * 安全（双审 MAJOR-9）：写接口强制 application/json + Origin/Host 同源 +
  * body ≤64KB；错误统一 { ok:false, code, error } + 恰当状态码；未知端点
- * 404。同源校验模式复制自 lib/api.js sameOriginGuard（本地副本，注释保留）。
+ * 404。请求策略自 2026-09-13（FIX-27 / me-3）起走**共享实现**
+ * lib/http-guard.js（guardRequestReasoned）——此前这里是第 10 份手写副本，
+ * 缺共享实现的读侧策略（跨站 GET → 403）且无体 content-type 规则不等价；
+ * 本地只保留"reason → advisor 自己的 400/403/413/415 契约"的映射。
  *
  * @module dsh-memory-evolve/advisor/api
  */
 
 import { URL } from 'node:url'
+import { guardRequestReasoned, readBody } from '../http-guard.js'
 
 const BASE = '/memory-evolve/api/advisor'
 const BODY_MAX_BYTES = 64 * 1024
 const EVENTS_MAX_LIMIT = 200
-
-/** 读 JSON body（有上限；非法 JSON 抛错）。 */
-async function readBody(req, maxBytes = BODY_MAX_BYTES) {
-  const chunks = []
-  let total = 0
-  for await (const chunk of req) {
-    total += chunk.length
-    if (total > maxBytes) throw new Error('body too large')
-    chunks.push(chunk)
-  }
-  if (chunks.length === 0) return {}
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  } catch {
-    throw new Error('invalid JSON body')
-  }
-}
 
 function sendJson(res, status, body) {
   const text = JSON.stringify(body)
@@ -57,37 +44,34 @@ function sendError(res, status, code, error) {
 }
 
 /**
- * 同源校验（写操作）：带 body 的请求要求 Content-Type 精确 JSON + Origin
- * 与 Host 一致。无 body 的写操作（DELETE）跳过 content-type 检查（浏览器
- * 无 body fetch 不带该头），Origin 校验仍强制。返回错误文案或 null。
- * 模式复制自 lib/api.js（保持本项目同款防护）。
+ * 共享守卫（lib/http-guard.js）的拒绝结果 → **advisor 自有错误契约**。
+ *
+ * advisor 的写接口按失败原因分状态码（MAJOR-8 复审口径：content-type 非
+ * JSON → 415；缺/跨站 Origin → 403；body 非对象/非法 JSON → 400；超限 →
+ * 413），与其余注册点"统一 400 bad-request"不同。策略必须只有一份，所以这里
+ * 只做映射，不复制任何判定（reason 由共享实现给出）。
+ *
+ * @param {{status: number, reason: string, body: {code: string, error: string}}} denied
+ * @returns {[number, string, string]} [status, code, message]
  */
-/**
- * 同源校验（写操作）：返回 [status, code, message] 或 null。
- * MAJOR-8（复审）：带 body 的请求 content-type 非 JSON → 415；缺/跨站
- * Origin → 403；body 非对象 → 400。无 body 的写操作（DELETE）跳过
- * content-type 检查（浏览器无 body fetch 不带该头）。
- */
-function sameOriginGuard(req, body) {
-  const hasBody = String(req.headers['content-length'] ?? '0') !== '0' || req.method === 'POST' || req.method === 'PATCH'
-  if (hasBody) {
-    const contentType = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
-    if (contentType !== 'application/json') return [415, 'UNSUPPORTED_MEDIA_TYPE', '请求必须为 application/json']
+function guardDenialToContract(denied) {
+  switch (denied.reason) {
+    case 'cross-site': // 读侧跨站：共享守卫响应体与 advisor 契约同形，原样透传
+      return [denied.status, denied.body.code, denied.body.error]
+    case 'origin-missing':
+    case 'origin-cross':
+      return [403, 'FORBIDDEN', denied.body.error]
+    case 'content-type':
+      return [415, 'UNSUPPORTED_MEDIA_TYPE', denied.body.error]
+    case 'body-too-large':
+      return [413, 'PAYLOAD_TOO_LARGE', denied.body.error]
+    case 'bad-json':
+      return [400, 'BAD_JSON', denied.body.error]
+    case 'body-not-object':
+      return [400, 'BAD_BODY', denied.body.error]
+    default:
+      return [denied.status, 'BAD_REQUEST', denied.body.error]
   }
-  const host = String(req.headers.host ?? '')
-  const origin = String(req.headers.origin ?? '')
-  if (origin === '') return [403, 'FORBIDDEN', '缺少 Origin 头，已拒绝（写操作必须由 Web UI 发起）']
-  let originHost = ''
-  try {
-    originHost = new URL(origin).host
-  } catch {
-    return [403, 'FORBIDDEN', '跨站请求已拒绝']
-  }
-  if (originHost !== host) return [403, 'FORBIDDEN', '跨站请求已拒绝']
-  if (body === undefined || body === null || typeof body !== 'object' || Array.isArray(body)) {
-    return [400, 'BAD_BODY', '请求体必须是 JSON 对象']
-  }
-  return null
 }
 
 /** 会话存在性校验（无效 sessionId 返回 null，避免制造孤儿状态）。 */
@@ -117,6 +101,16 @@ export function installAdvisorApi(ctx, ctrl) {
         || (req.method === 'PUT' && ['/scopes'].includes(sub))
       )
       if (!known) return sendError(res, 404, 'NOT_FOUND', `未知端点: ${req.method} ${path}`)
+
+      // 统一前置守卫（共享实现；FIX-27 / me-3）：读侧拒绝浏览器标注的跨站
+      // GET（Sec-Fetch-Site: cross-site → 403），写侧强制 Origin 同源 +
+      // JSON content-type + JSON 对象体（含无体请求声明非 JSON 的规则）。
+      // 拒绝结果按 advisor 自己的契约映射（见 guardDenialToContract）。
+      const denied = await guardRequestReasoned(req, BODY_MAX_BYTES)
+      if (denied !== null) {
+        const [status, code, message] = guardDenialToContract(denied)
+        return sendError(res, status, code, message)
+      }
 
       // ---- 读操作 ----
       if (req.method === 'GET' && sub === '/status') {
@@ -171,7 +165,7 @@ export function installAdvisorApi(ctx, ctrl) {
         return sendJson(res, 200, { ok: true, scopes: ctrl.scopesOf(sessionId) })
       }
 
-      // ---- 写操作（同源防护 + 413/415）----
+      // ---- 写操作（守卫已在上方通过；body 由守卫解析并缓存）----
       let body
       try {
         body = await readBody(req)
@@ -181,8 +175,6 @@ export function installAdvisorApi(ctx, ctrl) {
         }
         return sendError(res, 400, 'BAD_JSON', '请求体不是合法 JSON')
       }
-      const guard = sameOriginGuard(req, body)
-      if (guard !== null) return sendError(res, guard[0], guard[1], guard[2])
 
       if (req.method === 'POST' && sub === '/instructions') {
         const { sessionId, text } = body

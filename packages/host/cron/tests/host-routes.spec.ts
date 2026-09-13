@@ -20,8 +20,18 @@ function fakeService(): FakeService {
   }
 }
 
+/**
+ * R4-RV3a：写面（`action`）要一份 BrowserAuth 持有性证明，替身与上游
+ * `connection.requestRejection()` 同判据（无本 authority 的 cookie ⇒ 401）。
+ */
+const PROOF_COOKIE = 'dsh-auth-localhost:43120=v1.signature'
+const fence = {
+  requestRejection: (request: { headers: Record<string, unknown> }): 401 | undefined =>
+    request.headers['cookie'] === PROOF_COOKIE ? undefined : 401,
+}
+
 function route(kind: 'state' | 'action' | 'events') {
-  return makeCronRoutes(fakeService() as unknown as HostCronService).find(r => r.path === `${CRON_API_PREFIX}/${kind}`)!
+  return makeCronRoutes(fakeService() as unknown as HostCronService, { fence: () => fence }).find(r => r.path === `${CRON_API_PREFIX}/${kind}`)!
 }
 
 function request(partial: {
@@ -31,11 +41,13 @@ function request(partial: {
   origin?: string
   contentType?: string
   body?: string
+  cookie?: string
 }): IncomingMessage {
   const headers: Record<string, string> = {}
   if (partial.host !== undefined) headers.host = partial.host
   if (partial.origin !== undefined) headers.origin = partial.origin
   if (partial.contentType !== undefined) headers['content-type'] = partial.contentType
+  if (partial.cookie !== undefined) headers.cookie = partial.cookie
   const req = {
     method: partial.method ?? 'GET',
     headers,
@@ -97,20 +109,35 @@ describe('cron host routes', () => {
     const res = response()
     const body = JSON.stringify({ requestId: 'req-1', action: { kind: 'delete', jobId: 'job-1' } })
     await route('action').handler(
-      request({ method: 'POST', host: 'localhost:43120', origin: 'http://localhost:43120', contentType: 'application/json', body }),
+      request({ method: 'POST', host: 'localhost:43120', origin: 'http://localhost:43120', contentType: 'application/json', body, cookie: PROOF_COOKIE }),
       res,
     )
     expect(res.statusCode).toBe(200)
     expect(JSON.parse(res.body).revision).toBe(2)
   })
 
+  it('action refuses a forged local write that carries no browser proof', async () => {
+    const service = fakeService()
+    const action = makeCronRoutes(service as unknown as HostCronService, { fence: () => fence })
+      .find(r => r.path === `${CRON_API_PREFIX}/action`)!
+    const res = response()
+    const body = JSON.stringify({ requestId: 'req-1', action: { kind: 'delete', jobId: 'job-1' } })
+    await action.handler(
+      request({ method: 'POST', host: 'localhost:43120', origin: 'http://localhost:43120', contentType: 'application/json', body }),
+      res,
+    )
+    expect(res.statusCode).toBe(403)
+    expect(JSON.parse(res.body)).toMatchObject({ ok: false, error: 'browser session proof required' })
+    expect(service.apply).not.toHaveBeenCalled()
+  })
+
   it('action rejects wrong method, missing JSON content-type, and invalid payloads', async () => {
     const cases: Array<{ req: IncomingMessage; status: number; error: string }> = [
       { req: request({ method: 'GET', host: 'localhost:43120' }), status: 405, error: 'method-not-allowed' },
       { req: request({ method: 'POST', host: 'example.com', contentType: 'application/json', body: '{}' }), status: 403, error: 'forbidden' },
-      { req: request({ method: 'POST', host: 'localhost:43120', origin: 'http://localhost:43120', contentType: 'text/plain', body: '{}' }), status: 415, error: 'json-required' },
-      { req: request({ method: 'POST', host: 'localhost:43120', origin: 'http://localhost:43120', contentType: 'application/json', body: '{"requestId":"r","action":{"kind":"nope"}}' }), status: 400, error: 'invalid-action' },
-      { req: request({ method: 'POST', host: 'localhost:43120', origin: 'http://localhost:43120', contentType: 'application/json', body: '{oops' }), status: 400, error: 'JSON' },
+      { req: request({ method: 'POST', host: 'localhost:43120', origin: 'http://localhost:43120', contentType: 'text/plain', body: '{}', cookie: PROOF_COOKIE }), status: 415, error: 'json-required' },
+      { req: request({ method: 'POST', host: 'localhost:43120', origin: 'http://localhost:43120', contentType: 'application/json', body: '{"requestId":"r","action":{"kind":"nope"}}', cookie: PROOF_COOKIE }), status: 400, error: 'invalid-action' },
+      { req: request({ method: 'POST', host: 'localhost:43120', origin: 'http://localhost:43120', contentType: 'application/json', body: '{oops', cookie: PROOF_COOKIE }), status: 400, error: 'JSON' },
     ]
     for (const c of cases) {
       const res = response()
@@ -126,7 +153,7 @@ describe('cron host routes', () => {
     const res = response()
     const big = JSON.stringify({ requestId: 'req-1', action: { kind: 'delete', jobId: 'x' }, pad: 'a'.repeat(70 * 1024) })
     await route('action').handler(
-      request({ method: 'POST', host: 'localhost:43120', origin: 'http://localhost:43120', contentType: 'application/json', body: big }),
+      request({ method: 'POST', host: 'localhost:43120', origin: 'http://localhost:43120', contentType: 'application/json', body: big, cookie: PROOF_COOKIE }),
       res,
     )
     expect(res.statusCode).toBe(413)

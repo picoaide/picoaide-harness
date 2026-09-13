@@ -25,10 +25,12 @@
  */
 import { URL } from 'node:url'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { translate, getLocale, COI2_DICT } from '../i18n.js'
 import { applyRequestGuard, readBody as sharedReadBody } from '../http-guard.js'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
+import { isSafeSkillName } from './skills-sync.js'
 
 /** Translate through COI2_DICT in the active host locale. */
 const cap2 = (key, params) => translate(COI2_DICT, key, params, getLocale())
@@ -75,17 +77,26 @@ export function installCoiApi(ctx, svc) {
         const adapter = svc.adapters.upsert(body.def ?? body)
         // 可选：同时提供技能内容 → 技能文件不存在时自动创建（AI 使用指南）
         let skillMessage = null
-        if (adapter.skillName && typeof body.skillContent === 'string' && body.skillContent.trim() !== '') {
-          const file = join(svc.config.skillDir ?? '', adapter.skillName, 'SKILL.md')
+        // NF-1：skillName 参与路径拼接（`join(skillDir, skillName, 'SKILL.md')`）。
+        // 适配器定义里可能存着白名单上线之前的旧值（store 里的 skillName 不受
+        // validateAdapter 回溯校验），所以落点前必须再验一次 kebab-case——
+        // `join(skillDir, '../../../tmp/x', 'SKILL.md')` 否则能越出技能库。
+        const skillName = adapter.skillName
+        if (skillName && !isSafeSkillName(skillName)) {
+          skillMessage = cap2('coi2.skillCreateFailed', { detail: `非法技能名：${skillName}（须为 kebab-case）` })
+        } else if (skillName && typeof body.skillContent === 'string' && body.skillContent.trim() !== '') {
+          const skillDir = svc.config.skillDir ?? ''
+          const file = join(skillDir, skillName, 'SKILL.md')
           if (existsSync(file)) {
-            skillMessage = cap2('coi2.skillExistsUnchanged', { skill: adapter.skillName })
+            skillMessage = cap2('coi2.skillExistsUnchanged', { skill: skillName })
           } else {
             try {
               const { normalizeSkillText } = await import('./skills-sync.js')
-              const text = normalizeSkillText(body.skillContent, adapter.skillName, adapter.name)
-              mkdirSync(join(svc.config.skillDir ?? '', adapter.skillName), { recursive: true })
-              writeFileSync(file, text)
-              skillMessage = cap2('coi2.skillAutoCreated', { skill: adapter.skillName })
+              const text = normalizeSkillText(body.skillContent, skillName, adapter.name)
+              // 落点断言（同 skills-sync）：预置的文件/目录符号链接不得把技能
+              // 正文写到技能库之外，被拒时如实报失败（第一轮这里是裸写 + 报成功）。
+              writeFileAtomicSafeAt(file, text, { anchorDir: skillDir })
+              skillMessage = cap2('coi2.skillAutoCreated', { skill: skillName })
             } catch (error) {
               skillMessage = cap2('coi2.skillCreateFailed', { detail: error.message })
             }
@@ -306,7 +317,8 @@ export function installCoiApi(ctx, svc) {
         child.stderr.on('data', guard)
         child.on('close', () => {
           clearTimeout(exportTimer)
-          try { writeFileSync(outFile, Buffer.concat(chunks).toString()) } catch { /* 忽略 */ }
+          // NF-1 同族：导出落点同样要过断言（预置同名链接即写穿目录外）。
+          try { writeFileAtomicSafeAt(outFile, Buffer.concat(chunks).toString()) } catch { /* 忽略 */ }
         })
         return sendJson(res, 200, { ok: true, message: cap2('coi2.exportStartedApi', { outFile }) })
       }

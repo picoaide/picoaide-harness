@@ -17,7 +17,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { ArchiveStore, MemoryStore, SuggestionQueue, extractEntryDate, gitBranch, gitBranchList, parseEntryBranches, parseEntryDshOnly, parseEntrySummary, autoSummary, stripEntrySummary, todayStamp } from './store.js'
@@ -29,6 +29,7 @@ import { installApi } from './api.js'
 import { installSkillsManager } from './skills-manager.js'
 import { TodoStore, createTodoController } from './todo.js'
 import { installMemorySync, makeProjectDirResolver } from './sync/index.js'
+import { registerManagedRoot, unregisterManagedRoot, writeFileAtomicSafeAt } from './sync/filesets.js'
 import { createSearchDocsController, searchDocsCommand } from './search-docs.js'
 import { installBroadcast, installCoi } from './coi/index.js'
 import { installNotify, installChannelSend, installSessionImages } from './notify.js'
@@ -398,10 +399,14 @@ function loadState(stateFile) {
   }
 }
 
-/** Atomically persist runtime overrides. */
+/**
+ * Atomically persist runtime overrides.
+ * FIX-27（2026-09-13）：自锚定安全原子写（`<stateFile>.tmp.<pid>` 是可预置的
+ * 写落点；预置同名符号链接即写穿到状态目录外）。落点被拒时抛错——调用方
+ * （applyRuntimePatch）据此整批回滚，绝不把"没落盘"当成成功。
+ */
 function saveState(stateFile, state) {
-  writeFileSync(`${stateFile}.tmp.${process.pid}`, JSON.stringify(state, null, 2) + '\n')
-  renameSync(`${stateFile}.tmp.${process.pid}`, stateFile)
+  writeFileAtomicSafeAt(stateFile, JSON.stringify(state, null, 2) + '\n')
 }
 
 const POSITIVE_NUMBER_KEYS = [
@@ -1544,6 +1549,13 @@ export function apply(ctx, rawConfig = {}) {
       if (ns === 'locale') setLocale(resolveLocale(ctx))
     })
   }, 'dsh-memory-evolve: locale watcher')
+  // NF-3（2026-09-13 第八轮）：登记受管记忆仓库根——写原语据此区分
+  // 「仓库内状态文件（共享分支可实体化 120000 链接）保持拒收」与
+  // 「用户显式配置到仓库外的状态文件（stow/chezmoi 合法布局）容忍链接」。
+  ctx.effect(() => {
+    registerManagedRoot(config.memoryDir)
+    return () => unregisterManagedRoot(config.memoryDir)
+  }, 'dsh-memory-evolve: managed memory root')
   const store = new MemoryStore(config.memoryDir, {
     ...config,
     // 记忆同步接线（施工图 §4.2/§6）：entryIdMode 随 syncEnabled 动态开关

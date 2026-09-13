@@ -36,9 +36,10 @@
  *    测试同款写法：await next() 后合并返回）。
  */
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { dirname, join, resolve as pathResolve } from 'node:path'
 import { translate, getLocale, COI2_DICT } from '../i18n.js'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
 
 /** Translate through COI2_DICT in the active host locale. */
 const cw2 = (key, params) => translate(COI2_DICT, key, params, getLocale())
@@ -127,10 +128,9 @@ export class WsCoordStore {
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null
       try {
-        mkdirSync(this.dir, { recursive: true })
-        const tmp = `${this.file}.${process.pid}.tmp`
-        writeFileSync(tmp, JSON.stringify({ version: 1, locks: this.locks }, null, 2), 'utf8')
-        renameSync(tmp, this.file)
+        // FIX-27（2026-09-13）：自锚定安全原子写（`<file>.<pid>.tmp` 同样是
+        // 可预置的写落点）
+        writeFileAtomicSafeAt(this.file, JSON.stringify({ version: 1, locks: this.locks }, null, 2))
       } catch { /* 写盘失败不影响内存使用（下次再试） */ }
     }, SAVE_DEBOUNCE_MS)
   }

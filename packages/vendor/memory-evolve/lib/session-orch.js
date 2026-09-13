@@ -27,10 +27,11 @@ import { translate, getLocale, SESSION_DICT } from './i18n.js'
 
 /** Translate through SESSION_DICT in the active host locale. */
 const set_ = (key, params) => translate(SESSION_DICT, key, params, getLocale())
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { gitBranch } from './store.js'
+import { writeFileAtomicSafeAt } from './sync/filesets.js'
 
 // ── Agent 预设（Preset）roster 定位 ─────────────────────────────────────────
 // DSH 260810 起会话由「agent preset」组装（目录 + agent.cordis.yml 决定一个
@@ -144,10 +145,9 @@ export class SessionOrchStore {
 
   #save() {
     try {
-      mkdirSync(this.dir, { recursive: true })
-      const tmp = `${this.file}.tmp.${process.pid}`
-      writeFileSync(tmp, JSON.stringify(this.records, null, 2) + '\n')
-      renameSync(tmp, this.file)
+      // FIX-27（2026-09-13）：自锚定安全原子写（tmp 落点同样断言 + O_EXCL，
+      // 预置同名符号链接拒收）
+      writeFileAtomicSafeAt(this.file, JSON.stringify(this.records, null, 2) + '\n')
     } catch (error) {
       console.warn(`[dsh-memory-evolve] 会话编排记录保存失败（忽略）: ${error.message}`)
     }

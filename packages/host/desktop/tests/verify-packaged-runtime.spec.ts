@@ -436,7 +436,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       expect(() => assertBrandAssetSvg('<svg><title>DeepSeek Harness</title></svg>', 'x'))
         .toThrow(/上游厂商名/)
       expect(() => assertBrandAssetSvg('{"name":"DeepSeek"}', 'x')).toThrow(/is not an SVG document/)
-      // 渠道 logo 允许与官方几何不同(moka 没有 scale(1.25)),只拦"上游特征"。
+      // 渠道 logo 允许与官方几何不同(白标标记没有 scale(1.25)),只拦"上游特征"。
       expect(() => assertBrandAssetSvg('<svg><rect fill="#006AFF"/><path d="M 0 0"/></svg>', 'x'))
         .not.toThrow()
     })
@@ -529,13 +529,13 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-launcher-'))
       const macosDir = join(appOutDir, 'PicoAide Harness.app', 'Contents', 'MacOS')
       mkdirSync(macosDir, { recursive: true })
-      writeFileSync(join(macosDir, 'Moka Harness'), '#!/bin/sh\n')
+      writeFileSync(join(macosDir, 'White Label Harness'), '#!/bin/sh\n')
       const candidates = resolvePackagedLauncherCandidates({
         appOutDir,
         electronPlatformName: 'darwin',
         packager: { appInfo: { productFilename: 'PicoAide Harness' } },
       })
-      expect(candidates).toContain(join(macosDir, 'Moka Harness'))
+      expect(candidates).toContain(join(macosDir, 'White Label Harness'))
 
       const linuxDir = mkdtempSync(join(tmpdir(), 'dsh-launcher-linux-'))
       writeFileSync(join(linuxDir, 'chrome-sandbox'), 'x')

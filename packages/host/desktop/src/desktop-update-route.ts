@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { DesktopUpdateStateResponse } from './desktop-update-contract.ts'
+import { acceptWriteProof, type WriteProofDeps } from './write-proof.ts'
 
 function finishJson(res: ServerResponse, statusCode: number, value: object): void {
   res.statusCode = statusCode
@@ -26,13 +27,19 @@ export async function handleDesktopUpdateRequest(
 }
 
 /**
- * 同源写入口的统一守卫。
+ * 同源写入口的统一守卫：方法 → Origin → 持有性证明（R4-RV3a）。
  *
- * POST 由 renderer 页面发起时 Chromium 会带 Origin; 无 Origin 的场景(如本地
- * 脚本)也放行, 跨站请求无法隐藏 Origin。
+ * POST 由 renderer 页面发起时 Chromium 会带 Origin；但 Origin 缺失/同值都是
+ * 本机任意进程可以伪造的，因此写面真正判据是最后一步 BrowserAuth 证明：证明
+ * 机制缺席或 `proof` 未接线 ⇒ fail-closed，绝不单独依赖 Origin。
  * @returns 请求可以继续时为 true;已写出错误响应时为 false。
  */
-function acceptRendererPost(req: IncomingMessage, res: ServerResponse, expectedOrigin: string): boolean {
+function acceptRendererPost(
+  req: IncomingMessage,
+  res: ServerResponse,
+  expectedOrigin: string,
+  proof: WriteProofDeps | undefined,
+): boolean {
   if (req.method !== 'POST') {
     finishJson(res, 405, { error: 'method not allowed' })
     return false
@@ -41,7 +48,7 @@ function acceptRendererPost(req: IncomingMessage, res: ServerResponse, expectedO
     finishJson(res, 403, { error: 'forbidden' })
     return false
   }
-  return true
+  return acceptWriteProof(req, res, proof)
 }
 
 /** Serve a renderer-triggered manual update check (same flow as the tray command). */
@@ -50,8 +57,9 @@ export async function handleDesktopUpdateCheckRequest(
   res: ServerResponse,
   expectedOrigin: string,
   checkNow: () => void,
+  proof: WriteProofDeps | undefined,
 ): Promise<void> {
-  if (!acceptRendererPost(req, res, expectedOrigin)) return
+  if (!acceptRendererPost(req, res, expectedOrigin, proof)) return
   checkNow()
   finishJson(res, 202, { accepted: true })
 }
@@ -67,8 +75,9 @@ export async function handleDesktopUpdateInstallRequest(
   res: ServerResponse,
   expectedOrigin: string,
   installNow: () => void,
+  proof: WriteProofDeps | undefined,
 ): Promise<void> {
-  if (!acceptRendererPost(req, res, expectedOrigin)) return
+  if (!acceptRendererPost(req, res, expectedOrigin, proof)) return
   installNow()
   finishJson(res, 202, { accepted: true })
 }
