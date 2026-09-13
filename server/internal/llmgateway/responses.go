@@ -125,7 +125,7 @@ func (a *API) handleResponses(c *gin.Context) {
 		return
 	}
 	if req.Stream {
-		a.serveStream(c, resp, usageID, respSecrets)
+		a.serveStream(c, resp, usageID, respSecrets, raw, promptEstimateCapForModel(a.DB, req.Model))
 		return
 	}
 	a.serveJSON(c, resp, user.ID, req.Model, respSecrets, billingKindResponses)

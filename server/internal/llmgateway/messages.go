@@ -147,7 +147,7 @@ func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int
 // Anthropic 流式 usage 是分散的:input_tokens 只在 message_start 出现,
 // output_tokens 在 message_delta 出现(累积语义),因此按行合并(非零覆盖)
 // 再回填,不能像 OpenAI 那样整行覆盖。secrets: 上游官方 key(行/头脱敏)。
-func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID int64, secrets []string) {
+func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID int64, secrets []string, requestBody []byte, promptTokenCap int64) {
 	defer resp.Body.Close()
 	// upstream 4xx: no SSE to stream, the pending row is dropped
 	if resp.StatusCode >= 400 {
@@ -181,7 +181,17 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 	// message_start=输入、message_delta=输出(累积),按行"非零覆盖"合并)。
 	// 三者全 0 = 上游从未回报任何 usage(G12 的形态)⇒ 收尾必须走字节估算兜底。
 	var forwardedBytes int64
+	// deliveredContentBytes/Chunks 是**正文内容**口径(r7 r7f1-2):只有
+	// content_block_delta(正文/thinking/tool 参数)才算"内容真的交付过"。
+	var deliveredContentBytes, deliveredContentChunks int64
+	// contentTracker 按 SSE 事件边界累积正文(rc3-3):Anthropic 的
+	// `event:` + `data:` 两行结构、以及规范允许的多条 data: 行都在这里拼好再
+	// 解析。旧实现逐行解析 data: 行,`event:` 行携带的类型信息被丢掉,正文形态
+	// 一变就被判成"0 正文字节" ⇒ 整条流免单。
+	var contentTracker streamContentTracker
 	var pt, ct, cache int64
+	// ptSeen/ctSeen = 收到过**可用**的输入/输出侧计量(>0 才算;r7 r7f1-4)。
+	var ptSeen, ctSeen bool
 	for {
 		// 5#9/5#10: stop pumping once the client context is gone
 		if c.Request.Context().Err() != nil {
@@ -198,12 +208,15 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 				} else if ok {
 					if lpt > 0 {
 						pt = lpt
+						ptSeen = true
 					}
 					if lct > 0 {
 						ct = lct
+						ctSeen = true
 					}
 					if lcache > 0 {
 						cache = lcache
+						ptSeen = true // 缓存命中属于输入侧计量
 					}
 					if usageID > 0 {
 						if uerr := updateUsageTokensSettled(a.DB, usageID, pt, ct, cache, false); uerr != nil {
@@ -220,6 +233,10 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 				}
 			}
 			forwardedBytes += int64(len(line))
+			if n, isContent := contentTracker.observe(line); isContent {
+				deliveredContentChunks++
+				deliveredContentBytes += n
+			}
 			if _, werr := c.Writer.WriteString(line); werr != nil {
 				clientGone = true
 				stopReason = "client_write_failed"
@@ -242,19 +259,39 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 			break
 		}
 	}
+	// 未以空行收尾的尾部事件也要落地(rc3-3)。
+	if n, isContent := contentTracker.flush(); isContent {
+		deliveredContentChunks++
+		deliveredContentBytes += n
+	}
 	// 收尾结算(G12,审计 2026-09-13):此前这里**无条件删除** pending 行 ——
 	// 上游不报 usage 时整条流分文不取(客户端中途断开时同样白送)。现在与
-	// chat 流式的兜底口径同源(同一个 settleStreamFallback:按已转发字节估算
-	// completion,约 4 字节/token):只要**任一侧缺失/为 0**就走兜底(含
-	// message_start 报了 input_tokens、message_delta 之前就断流 —— N1,审计
-	// r3 第四轮:旧前置条件 `pt == 0 && ct == 0` 把这种流整段免单),由
-	// settleStreamFallback 内部只补 completion 那一半 —— 已上报的 pt/cache
-	// 原样带出,绝不被估算覆盖;真的一个字节都没转发才删行。结算失败一律
+	// chat 流式的兜底口径同源(同一个 settleStreamFallback:按已交付的**正文
+	// 内容字节**估算 completion,约 4 字节/token):只要**任一侧缺失/为 0**就
+	// 走兜底(含 message_start 报了 input_tokens、message_delta 之前就断流 ——
+	// N1,审计 r3 第四轮:旧前置条件 `pt == 0 && ct == 0` 把这种流整段免单),
+	// 由 settleStreamFallback 内部只补 completion 那一半 —— 已上报的 pt/cache
+	// 原样带出,绝不被估算覆盖;没有可用的输入侧计量时(r7 srvbill-2)输入侧
+	// 也按请求体补估;只有 data: [DONE]/error 事件、正文一个字节都没交付时才
+	// 删行(r7 r7f1-2:闸门是正文内容,不是"转发过任意一行")。结算失败一律
 	// fail-closed(G5b)。
 	if usageID > 0 && (pt <= 0 || ct <= 0) {
-		settled, serr := settleStreamFallback(a.DB, usageID, forwardedBytes, pt, ct, cache)
-		log.Printf("gateway: anthropic stream with missing/zero usage side, fallback settlement: usage=%d stop=%s forwarded=%d pt=%d ct=%d settled=%v err=%v",
-			usageID, stopReason, forwardedBytes, pt, ct, settled, serr)
+		settleIn := streamSettlement{
+			usageID:          usageID,
+			requestBody:      requestBody,
+			promptTokenCap:   promptTokenCap,
+			deliveredBody:    forwardedBytes,
+			contentBytes:     deliveredContentBytes,
+			contentChunks:    deliveredContentChunks,
+			promptTokens:     pt,
+			completionTokens: ct,
+			cacheTokens:      cache,
+			promptSeen:       ptSeen,
+			completionSeen:   ctSeen,
+		}
+		settled, serr := settleStreamFallback(a.DB, settleIn)
+		log.Printf("gateway: anthropic stream with missing/zero usage side, fallback settlement: usage=%d stop=%s forwarded=%d content=%d pt=%d ct=%d settled=%v err=%v",
+			usageID, stopReason, forwardedBytes, deliveredContentBytes, pt, ct, settled, serr)
 		if serr != nil {
 			if !clientGone {
 				abortSettlementFailureStream(c, fl, serr, "anthropic stream fallback")
@@ -353,7 +390,7 @@ func (a *API) handleMessages(c *gin.Context) {
 		return
 	}
 	if req.Stream {
-		a.serveAnthropicStream(c, resp, usageID, respSecrets)
+		a.serveAnthropicStream(c, resp, usageID, respSecrets, raw, promptEstimateCapForModel(a.DB, req.Model))
 		return
 	}
 	a.serveAnthropicJSON(c, resp, user.ID, req.Model, respSecrets)

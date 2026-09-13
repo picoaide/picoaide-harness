@@ -274,7 +274,7 @@ func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptToken
 		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost, now, estimated).Scan(&id); err != nil {
 		return 0, err
 	}
-	if err := settleUsageCostTx(tx, id, userID, cost); err != nil {
+	if err := settleUsageCostTx(tx, id, userID, cost, false); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -296,20 +296,30 @@ func UpdateUsageTokensCached(db *sql.DB, id, promptTokens, completionTokens, cac
 
 // UpdateUsageTokensCachedEstimated 是回填的估算标记版本(0063):estimated=true
 // 表示回填进去的 token 至少有一侧来自服务端字节估算(settleStreamFallback)。
+// 余额下限语义:**非交付**(或尚未交付)路径使用 —— 余额不足返回
+// ErrInsufficientBalance 并整笔回滚。
 func UpdateUsageTokensCachedEstimated(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, estimated bool) error {
-	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, cacheTokens, estimated, time.Now())
+	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, cacheTokens, estimated, false, time.Now())
+}
+
+// UpdateUsageTokensCachedEstimatedOverdraft 是**流式**回填的结算入口
+// (审计 r7 srvbill-1):此刻内容已经交付给客户端(SSE 的 usage chunk 在流末尾),
+// 「先交付后结算」在语义上就是后付费 —— 欠款必须如实落账,而不是因为余额不够
+// 就整笔回滚成零落账零扣费。见 settleUsageCostTx 的 allowOverdraft 说明。
+func UpdateUsageTokensCachedEstimatedOverdraft(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, estimated bool) error {
+	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, cacheTokens, estimated, true, time.Now())
 }
 
 // updateUsageTokensAt 是 UpdateUsageTokens 的时间注入版本(测试固定时刻)。
 func updateUsageTokensAt(db *sql.DB, id, promptTokens, completionTokens int64, now time.Time) error {
-	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, 0, false, now)
+	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, 0, false, false, now)
 }
 
-// updateUsageTokensAtCached 带缓存命中数与估算标记的回填(时间注入)。
+// updateUsageTokensAtCached 带缓存命中数、估算标记与透支许可的回填(时间注入)。
 // 审计修复 2026-P (M4): 计费时刻取该行 created_at(pending 行 = 请求发起
 // 时刻插入),而非回填时刻 time.Now()——跨高峰/空闲边界的流式请求不再因
 // 流结束时点计价,与「低谷窗口按记录时刻判定」的设计一致。
-func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, estimated bool, now time.Time) error {
+func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, estimated, allowOverdraft bool, now time.Time) error {
 	// P0-B:回填路径同样归零(流式 usage 行 / 估算回填都可能带负值)。
 	promptTokens, completionTokens, cacheTokens = clampTokens(promptTokens, completionTokens, cacheTokens)
 	var userID int64
@@ -343,7 +353,7 @@ func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, c
 		promptTokens, completionTokens, cacheTokens, cost, estimated, id); err != nil {
 		return err
 	}
-	if err := settleUsageCostTx(tx, id, userID, cost); err != nil {
+	if err := settleUsageCostTx(tx, id, userID, cost, allowOverdraft); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -363,6 +373,12 @@ func DeleteUsage(db *sql.DB, id int64) error {
 // (集合见 UsageKindPendingCleanup —— 新增流式端点必须同步登记)。
 // cutoff 是绝对瞬时,按会话时区无关的瞬时字面量比较(裸墙钟字符串会被按
 // PG 会话时区解释 → 进程 TZ 与会话时区不同时差 8 小时)。
+//
+// 只有"一个字节都没交付"的空流才允许被清掉:内容已交付的流式请求要么回填了
+// 上游上报的用量、要么走字节估算(settleStreamFallback),两者都让
+// prompt/completion 至少一侧 > 0 —— 于是**不会**命中这里的 0-token 条件。
+// 审计 r7 srvbill-1 的旧形态(余额不足 → 整笔回滚 → 留下 0-token 行)会连
+// 排障线索一起被删,现在流式结算允许透支欠款如实落账,这类行不再出现。
 func CleanupPendingUsage(db *sql.DB, cutoff time.Time) error {
 	kinds := make([]string, 0, len(UsageKindPendingCleanup))
 	for _, k := range UsageKindPendingCleanup {

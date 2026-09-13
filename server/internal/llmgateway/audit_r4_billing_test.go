@@ -117,7 +117,8 @@ func TestR4ChatStreamCompletionOnlyUsageKeepsReportedValue(t *testing.T) {
 		"data: [DONE]\n\n")
 	r, db, uid, token := newAuditR3Gateway(t, u, 100, 2, 8, 0.2)
 
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"r3-model","messages":[],"stream":true}`, token, nil)
+	const reqBody = `{"model":"r3-model","messages":[],"stream":true}`
+	w := doPost(t, r, "/v1/chat/completions", reqBody, token, nil)
 	rows := r4Rows(t, db, uid)
 	s := auditR3Snapshot(t, db, uid)
 	if w.Code != http.StatusOK || len(rows) != 1 {
@@ -128,11 +129,15 @@ func TestR4ChatStreamCompletionOnlyUsageKeepsReportedValue(t *testing.T) {
 	if got.Completion != 500 {
 		t.Fatalf("已上报的 completion_tokens 被估算改写: %d, want 500", got.Completion)
 	}
-	if got.Prompt != 0 {
-		t.Fatalf("prompt 侧没有被上报,必须保持 0(响应字节推不出输入): %d", got.Prompt)
+	// r7 r7f1-4:判据**按侧独立** —— 这条流只有 completion_tokens,没有可用的
+	// 输入侧计量,因此输入侧按**请求体**字节补估(不是从响应字节推,与 srvbill-2
+	// 同源)。旧行为用"收到过任何 usage 行"当总开关 ⇒ prompt 恒记 0(少收)。
+	wantPT := int64(len(reqBody)) / 4
+	if got.Prompt != wantPT {
+		t.Fatalf("输入侧没有可用计量时必须按请求体补估: prompt=%d, want %d", got.Prompt, wantPT)
 	}
-	if want := 500 * 8 / 1e6; got.Cost != want {
-		t.Fatalf("cost=%.9f, want %.9f(只按已上报的 completion 计一次)", got.Cost, want)
+	if want := (float64(wantPT)*2 + 500*8) / 1e6; got.Cost != want {
+		t.Fatalf("cost=%.9f, want %.9f(输入侧补估 + 已上报的 completion 照收)", got.Cost, want)
 	}
 	checkLedgerInvariant(t, s, "N1 chat 只报 ct")
 }
