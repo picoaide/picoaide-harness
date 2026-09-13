@@ -3,10 +3,14 @@ package llmgateway
 import (
 	"database/sql"
 	"net/http"
+	"os"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/util"
 )
@@ -104,4 +108,76 @@ func newUpstreamTransport() *http.Transport {
 	t := util.SafeOutboundTransport()
 	t.ResponseHeaderTimeout = 120 * time.Second
 	return t
+}
+
+// ---------------------------------------------------------------------------
+// P2-11(审计 2026-09-13):网关请求的**单用户并发准入**
+// ---------------------------------------------------------------------------
+//
+// 背景:网关此前只有"每模型 in-flight 计数"(供管理端展示),没有任何准入闸门。
+// 一个员工用脚本并发打满上游连接/内存即可拖垮整个实例(仓库既有实测:
+// 单实例 ~1500 并发流式即 healthz 无响应)。这里按**用户**限制在跑的网关请求
+// 数:单个员工的失控客户端被 429 挡住,其他员工不受影响(全局/按模型硬限流会
+// 在正常高峰误伤全员,产品形态上不可取)。
+//
+// 上限取 32:远高于任何正常桌面客户端的并发(客户端同一时刻通常 1-3 条流),
+// 又足以把"单员工打满全站"变成不可能。PICOAI_GATEWAY_MAX_INFLIGHT_PER_USER
+// 可覆盖(压测/特殊集成场景)。
+
+const defaultMaxInflightPerUser = 32
+
+func maxInflightPerUser() int {
+	if v := os.Getenv("PICOAI_GATEWAY_MAX_INFLIGHT_PER_USER"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultMaxInflightPerUser
+}
+
+type userInflightLimiter struct {
+	mu     sync.Mutex
+	active map[int64]int
+}
+
+var gatewayInflight = &userInflightLimiter{active: map[int64]int{}}
+
+// acquire 记一次在跑请求;超出上限返回 ok=false。
+func (l *userInflightLimiter) acquire(userID int64, max int) (release func(), ok bool) {
+	l.mu.Lock()
+	if l.active[userID] >= max {
+		l.mu.Unlock()
+		return nil, false
+	}
+	l.active[userID]++
+	l.mu.Unlock()
+	return func() {
+		l.mu.Lock()
+		if l.active[userID] <= 1 {
+			delete(l.active, userID) // 归零即删键:表不随用户数无限增长
+		} else {
+			l.active[userID]--
+		}
+		l.mu.Unlock()
+	}, true
+}
+
+// InFlightGuard 是网关路由的并发准入中间件(必须挂在 BearerAuth **之后**,
+// 以便拿到已认证用户)。超限返回 429 RATE_LIMITED。
+func InFlightGuard() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		u := serverauth.CurrentUser(c)
+		if u == nil {
+			// 未经认证的请求由 BearerAuth 处理;这里不做二次拒绝(不改变错误语义)。
+			c.Next()
+			return
+		}
+		release, ok := gatewayInflight.acquire(u.ID, maxInflightPerUser())
+		if !ok {
+			serverauth.WriteError(c, http.StatusTooManyRequests, "RATE_LIMITED", "并发请求过多,请稍后再试")
+			return
+		}
+		defer release()
+		c.Next()
+	}
 }

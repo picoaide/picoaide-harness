@@ -327,3 +327,66 @@ func TestAgentPresetArchiveDB(t *testing.T) {
 		t.Fatalf("after clear = %q err=%v", got, err)
 	}
 }
+
+// TestAgentPresetVisibleFilterHidesDisabledApp(P2-1,审计 2026-09-13):
+// apps.enabled=0(下架)的智能体必须从员工可见面消失——「作者本人」与
+// 「已授权员工」两种身份都不能把下架内容拉回清单,与不存在同语义。
+func TestAgentPresetVisibleFilterHidesDisabledApp(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	mustCreate := func(name, author string, status AgentPresetStatus) {
+		t.Helper()
+		p := newAgentPreset(name, author)
+		p.Status = status
+		if _, err := CreateAgentPreset(db, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustCreate("live-one", "alice", AgentPresetApproved)
+	mustCreate("pulled-one", "alice", AgentPresetApproved)
+	if err := SetAppEnabled(db, AppKindAgent, "pulled-one", false); err != nil {
+		t.Fatal(err)
+	}
+
+	// alice 既是作者又是被授权者:下架行仍不得出现。
+	visAlice, err := ListVisibleAgentPresets(db, "alice", []string{"live-one", "pulled-one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, p := range visAlice {
+		names[p.Name] = true
+	}
+	if names["pulled-one"] {
+		t.Fatal("下架 App 仍出现在作者/被授权者的可见清单里")
+	}
+	if !names["live-one"] {
+		t.Fatal("上架 App 必须仍然可见")
+	}
+
+	// 仅被授权的其他员工同样看不到。
+	visCarol, err := ListVisibleAgentPresets(db, "carol", []string{"live-one", "pulled-one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range visCarol {
+		if p.Name == "pulled-one" {
+			t.Fatal("下架 App 仍出现在被授权员工(carol)的可见清单里")
+		}
+	}
+
+	// 重新上架后恢复可见(下架是开关,不是删除)。
+	if err := SetAppEnabled(db, AppKindAgent, "pulled-one", true); err != nil {
+		t.Fatal(err)
+	}
+	visBack, err := ListVisibleAgentPresets(db, "carol", []string{"pulled-one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(visBack) != 1 || visBack[0].Name != "pulled-one" {
+		t.Fatalf("重新上架后 visCarol = %+v, want pulled-one", visBack)
+	}
+}

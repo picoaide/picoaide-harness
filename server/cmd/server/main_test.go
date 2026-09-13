@@ -46,7 +46,7 @@ import (
 func buildRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	r := gin.New()
+	r := newEngine() // 与生产同一构造函数(P3-1:RedirectTrailingSlash=false 也在此)
 	// 与生产同序(P1-2):中间件必须在路由注册之前安装,否则 panic 不返回
 	// JSON 信封、也没有访问日志。
 	installAPIMiddleware(r)
@@ -577,5 +577,38 @@ func TestAccessLoggerDropsQueryString(t *testing.T) {
 	}
 	if strings.Contains(logged, "?") {
 		t.Fatalf("query separator must not appear in access log: %q", logged)
+	}
+}
+
+// TestAuditFixTrailingSlashNoRedirect(P3-1,审计 2026-09-13):
+// 尾斜杠请求不得再走 gin 的 307 分支 —— 那条分支不执行路由中间件
+// (实测 1MB bodyLimitMiddleware 完全没跑)。现在统一落到 NoRoute 的 JSON 404。
+func TestAuditFixTrailingSlashNoRedirect(t *testing.T) {
+	r := buildRouter(t)
+	// 与 TestAPIJSONContract 同序:NoRoute 护栏是 404 JSON 契约的提供者。
+	dist, _ := fs.Sub(webadmin.FS, "dist")
+	mountAPIGuards(r, nil, http.FileServer(http.FS(dist)), dist)
+	for _, tc := range []struct{ method, path string }{
+		{"POST", "/api/client/v2/auth/login/"},
+		{"POST", "/api/server/admin/login/"},
+		{"GET", "/api/client/v2/config/bootstrap/"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code == http.StatusTemporaryRedirect || w.Code == http.StatusMovedPermanently {
+			t.Fatalf("%s %s 仍返回重定向 %d(跳过中间件链)", tc.method, tc.path, w.Code)
+		}
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("%s %s = %d, want 404 JSON", tc.method, tc.path, w.Code)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s %s 非 JSON: %s", tc.method, tc.path, w.Body.String())
+		}
+		if _, ok := body["error"]; !ok {
+			t.Fatalf("%s %s 缺少错误信封: %s", tc.method, tc.path, w.Body.String())
+		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/picoaide/picoaide/internal/llmgateway/channels"
@@ -77,7 +78,23 @@ func SyncProvider(db *sql.DB, ch channels.Channel, p *serverstore.GatewayProvide
 	if f == nil {
 		f = httpFetch15s(key)
 	}
-	models, err := ch.FetchModels(context.Background(), key, f)
+	// P2-5(审计 2026-09-13):同步必须打到**该 provider 自己的 base_url**。
+	// 旧实现一律用渠道的硬编码 URL(如 api.deepseek.com),而 admin.go 允许
+	// "channel=deepseek + 自定义 base_url" ⇒ 自建代理的 key 会被每小时自动
+	// 发往厂商端点。只有 provider 未配 base_url(或与渠道默认一致)时才用
+	// 渠道实现(它的解析/默认能力才适用)。
+	var models []channels.ModelInfo
+	var err error
+	customBase := strings.TrimRight(strings.TrimSpace(p.BaseURL), "/")
+	if customBase != "" && customBase != strings.TrimRight(ch.BaseURL(), "/") {
+		var raw []byte
+		raw, err = f(customBase + "/models")
+		if err == nil {
+			models, err = channels.ParseOAIModels(raw)
+		}
+	} else {
+		models, err = ch.FetchModels(context.Background(), key, f)
+	}
 	if err != nil {
 		return SyncResult{Provider: p.Name, Error: err.Error()}
 	}
@@ -137,11 +154,18 @@ func SyncProvider(db *sql.DB, ch channels.Channel, p *serverstore.GatewayProvide
 	return SyncResult{Provider: p.Name, Added: added, Removed: removed}
 }
 
+// pendingUsageRetention 是流式 pending 行的保留时长(P2-8)。
+const pendingUsageRetention = 6 * time.Hour
+
 // SyncIteration runs one model sync plus pending-usage cleanup (C-9): stale
 // zero-token rows from interrupted streams are purged on every tick, not
 // only at startup.
 func SyncIteration(db *sql.DB, fetchFn func(url string) ([]byte, error)) ([]SyncResult, error) {
-	if err := serverstore.CleanupPendingUsage(db, time.Now().Add(-time.Hour)); err != nil {
+	// P2-8(审计 2026-09-13):清理阈值必须**远超**流式请求的真实上限。
+	// 旧值 1 小时:停留 >1h 的流(长报告/慢上游/客户端挂住)其 pending 行会被
+	// 删除,之后回填必然失败 ⇒ 已转发内容整段零计费。流本身有 90s 空闲超时,
+	// 正常流不会接近 6h;这里留足余量,同时仍能回收真正的中断残留。
+	if err := serverstore.CleanupPendingUsage(db, time.Now().Add(-pendingUsageRetention)); err != nil {
 		log.Printf("gateway: cleanup pending usage: %v", err)
 	}
 	return SyncOnce(db, fetchFn)

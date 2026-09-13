@@ -251,7 +251,9 @@ func TestR5ZeroPrimaryTokenFallsBackToAlternateFieldName(t *testing.T) {
 		{"prompt_tokens=5000 + input_tokens=0(chat 优先,语义不变)", `{"prompt_tokens":5000,"input_tokens":0,"completion_tokens":7}`, 5000},
 		{"只有 input_tokens=5000(Responses 形态)", `{"input_tokens":5000,"output_tokens":7}`, 5000},
 		{"两套都给正值(chat 优先)", `{"prompt_tokens":7,"input_tokens":900000,"completion_tokens":9}`, 7},
-		{"两套都是 0", `{"prompt_tokens":0,"input_tokens":0,"completion_tokens":7}`, 0},
+		// P0-1:两套都为 0 = 输入侧"未上报" ⇒ 按客户端原始请求体兜底估算,
+		// 期望值在用例内计算(见下 wantPrompt 分支)。
+		{"两套都是 0", `{"prompt_tokens":0,"input_tokens":0,"completion_tokens":7}`, -1},
 		{"compl=0 + output=9(输出侧同样回落)", `{"prompt_tokens":100,"completion_tokens":0,"output_tokens":9}`, 100},
 	}
 	for _, c := range cases {
@@ -259,18 +261,23 @@ func TestR5ZeroPrimaryTokenFallsBackToAlternateFieldName(t *testing.T) {
 			u := newAuditR3Upstream(t)
 			u.setNon(`{"id":"p","choices":[{"message":{"content":"ok"}}],"usage":` + c.usage + `}`)
 			r, db, uid, token := newAuditR3Gateway(t, u, 100, 2, 8, 0.2)
-			doPost(t, r, "/v1/chat/completions", `{"model":"r3-model","messages":[]}`, token, nil)
+			reqBody := `{"model":"r3-model","messages":[]}`
+			doPost(t, r, "/v1/chat/completions", reqBody, token, nil)
 			rows := r5UsageRows(t, db, uid)
 			if len(rows) != 1 {
 				t.Fatalf("rows=%d", len(rows))
 			}
+			wantPrompt := c.wantPrompt
+			if wantPrompt < 0 { // 两套都为 0 ⇒ 请求体兜底
+				wantPrompt, _ = estimatePromptFallback(0, int64(len(reqBody)))
+			}
 			t.Logf("%s → prompt=%d completion=%d cost=%.6f estimated=%v",
 				c.name, rows[0].Prompt, rows[0].Completion, rows[0].Cost, rows[0].Estimated)
-			if rows[0].Prompt != c.wantPrompt {
-				t.Fatalf("prompt=%d, want %d(0/缺失必须回落到另一套字段名)", rows[0].Prompt, c.wantPrompt)
+			if rows[0].Prompt != wantPrompt {
+				t.Fatalf("prompt=%d, want %d(0/缺失必须回落到另一套字段名;全 0 时按请求体兜底)", rows[0].Prompt, wantPrompt)
 			}
-			if c.wantPrompt > 0 {
-				want := float64(c.wantPrompt) * 2 / 1e6
+			if wantPrompt > 0 {
+				want := float64(wantPrompt) * 2 / 1e6
 				if rows[0].Cost < want-1e-9 {
 					t.Fatalf("输入侧未计费: cost=%.9f < 输入部分 %.9f", rows[0].Cost, want)
 				}

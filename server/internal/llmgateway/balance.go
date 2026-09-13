@@ -27,7 +27,15 @@ import (
 // ---------------------------------------------------------------------------
 
 // balanceHTTPClient 余额查询客户端(测试可替换:httptest 本地地址)。
-var balanceHTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: util.SafeOutboundTransport()}
+var balanceHTTPClient = &http.Client{
+	Timeout:   10 * time.Second,
+	Transport: util.SafeOutboundTransport(),
+	// P3-3(审计 2026-09-13):与报表 webhook 同口径 —— 拒绝重定向。
+	// 此前跟随 302/307:管理员配置的"deepseek 系"上游(或其被劫持的响应)
+	// 可让服务端带副作用地对内网地址发盲请求。ErrUseLastResponse 把 3xx
+	// 原样交回调用方(不跟随),由调用方按非 200 处理。
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
 
 // maxBalanceBody 上限余额响应体(P3:上游异常/被投毒时不得无限读进内存)。
 const maxBalanceBody = 1 << 20

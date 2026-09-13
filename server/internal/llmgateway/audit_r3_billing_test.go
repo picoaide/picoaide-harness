@@ -447,12 +447,17 @@ func TestAnthropicStreamWithoutUsageStillBilled(t *testing.T) {
 	sb.WriteString("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 	streamBody := sb.String()
 	wantTokens := int64(len(streamBody)) / 4
+	// P0-1(审计 2026-09-13):prompt 侧也兜底估算(客户端原始请求体 / 4),
+	// 因此总 token = 已转发字节估算 + 请求体估算。两条流式路径必须同源。
+	reqBody := `{"model":"r3-model","messages":[],"stream":true}`
+	wantPrompt, _ := estimatePromptFallback(0, int64(len(reqBody)))
+	wantTotal := wantTokens + wantPrompt
 
 	t.Run("anthropic无usage仍计费", func(t *testing.T) {
 		u := newAuditR3Upstream(t)
 		u.setStream(streamBody)
 		r, db, uid, token := newAuditR3Gateway(t, u, 100, 1, 1, 1)
-		w := doPost(t, r, "/v1/messages", `{"model":"r3-model","messages":[],"stream":true}`, token, nil)
+		w := doPost(t, r, "/v1/messages", reqBody, token, nil)
 		s := auditR3Snapshot(t, db, uid)
 		t.Logf("G12 anthropic status=%d delivered=%d usage_rows=%d tokens=%d (want %d) cost=%.6f balance=%.6f kinds=%v",
 			w.Code, w.Body.Len(), s.usageRows, s.tokens, wantTokens, s.cost, s.balance, s.kinds)
@@ -462,8 +467,8 @@ func TestAnthropicStreamWithoutUsageStillBilled(t *testing.T) {
 		if s.usageRows != 1 || s.tokens <= 0 {
 			t.Fatalf("usage 缺失的 Anthropic 流仍然免费: rows=%d tokens=%d (pending 行被删除、零扣费)", s.usageRows, s.tokens)
 		}
-		if s.tokens != wantTokens {
-			t.Fatalf("估算 token = %d, want %d (已转发字节 %d / 4)", s.tokens, wantTokens, len(streamBody))
+		if s.tokens != wantTotal {
+			t.Fatalf("估算 token = %d, want %d (已转发字节 %d / 4 + 请求体估算 %d)", s.tokens, wantTotal, len(streamBody), wantPrompt)
 		}
 		if s.cost <= 0 || math.Abs(s.balance-(100-s.cost)) > 1e-9 {
 			t.Fatalf("未扣费: cost=%.6f balance=%.6f", s.cost, s.balance)
@@ -478,12 +483,12 @@ func TestAnthropicStreamWithoutUsageStillBilled(t *testing.T) {
 		u := newAuditR3Upstream(t)
 		u.setStream(streamBody)
 		r, db, uid, token := newAuditR3Gateway(t, u, 100, 1, 1, 1)
-		w := doPost(t, r, "/v1/chat/completions", `{"model":"r3-model","messages":[],"stream":true}`, token, nil)
+		w := doPost(t, r, "/v1/chat/completions", reqBody, token, nil)
 		s := auditR3Snapshot(t, db, uid)
 		t.Logf("G12 chat 对照 status=%d delivered=%d usage_rows=%d tokens=%d (want %d) cost=%.6f",
 			w.Code, w.Body.Len(), s.usageRows, s.tokens, wantTokens, s.cost)
-		if s.tokens != wantTokens {
-			t.Fatalf("chat 估算 token = %d, want %d —— 两条流式路径口径必须同源", s.tokens, wantTokens)
+		if s.tokens != wantTotal {
+			t.Fatalf("chat 估算 token = %d, want %d —— 两条流式路径口径必须同源", s.tokens, wantTotal)
 		}
 	})
 }

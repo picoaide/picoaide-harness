@@ -2,15 +2,19 @@ package serverauth
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 // loginRateLimit bounds login attempts per key (ip+username).
@@ -45,6 +49,16 @@ func (l *loginLimiter) limit() int {
 // 登录——同一出口 NAT 下的整个办公室共用 IP,且只对失败回调计数)。
 const callbackLimiterMaxAttempts = 60
 
+// loginIPMaxAttempts 是**单 IP 登录失败预算**(审计 2026-09-13 P1-2)。
+//
+// 为什么必须有这一维:账号桶(u:<username> 与 ip|username)都以用户名为键,
+// 攻击者**每次换一个随机用户名**即可完全不触发限流。而未认证登录每次要跑一次
+// argon2id(64MiB/t=3)—— 实测 30 次随机用户名登录全部 401、单次约 87ms,
+// 数百并发即数十 GB 峰值(进程级 OOM,全站不可用)。IP 桶把"同一来源的失败
+// 总数"也纳入预算;阈值取 60/5min(与 OIDC 回调同量级:正常用户 5 分钟内
+// 失败 60 次已远超任何真实场景,而 NAT 出口的整间办公室仍有余量)。
+const loginIPMaxAttempts = 60
+
 // sharedLoginLimiter 是**全服务端共享**的登录失败限流器(F17,审计
 // 2026-09-11):此前客户端面与管理面各持一个实例,同一账号可从两个入口
 // 各消耗一份失败预算(实际阈值翻倍)。PICOAI_LOGIN_MAX_ATTEMPTS 仍在首次
@@ -57,6 +71,18 @@ func sharedLoginLimiter() *loginLimiter {
 		sharedLoginLimiterVal = newLoginLimiter()
 	})
 	return sharedLoginLimiterVal
+}
+
+// sharedLoginIPLimiter 是单 IP 失败预算的共享单例(客户端面/管理面/登录方式
+// 探测共用同一张表;键带命名空间前缀区分用途)。
+var sharedLoginIPLimiterOnce sync.Once
+var sharedLoginIPLimiterVal *loginLimiter
+
+func sharedLoginIPLimiter() *loginLimiter {
+	sharedLoginIPLimiterOnce.Do(func() {
+		sharedLoginIPLimiterVal = newRateLimiter(loginIPMaxAttempts)
+	})
+	return sharedLoginIPLimiterVal
 }
 
 func newLoginLimiter() *loginLimiter {
@@ -169,17 +195,22 @@ func (l *loginLimiter) reset(key string) {
 	delete(l.attempts, key)
 }
 
+// loginHost 返回连接来源主机(RemoteAddr 的 host 部分,不含端口)。
+func loginHost(c *gin.Context) string {
+	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+	if err != nil {
+		host = c.Request.RemoteAddr
+	}
+	return host
+}
+
 // loginKey builds a rate-limit key from the connection IP and username.
 // RemoteAddr 是安全默认(审计 C-1):X-Forwarded-For 攻击者可控,伪造头不得
 // 重置 per-IP 预算。反代部署时 RemoteAddr 会坍缩为代理 IP(审计 2026-08-25
 // F-02)导致单账号 DoS——因此 allow 额外维护一个 per-username 桶(见
 // allowLogin),反代下攻击者炸同一用户名仍会在 username 桶被限。
 func loginKey(c *gin.Context, username string) string {
-	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
-	if err != nil {
-		host = c.Request.RemoteAddr
-	}
-	return host + "|" + username
+	return loginHost(c) + "|" + username
 }
 
 // dbLimiterScope 把限流键按 DB 实例隔离(F17 复核):生产单 DB 的
@@ -190,43 +221,48 @@ func dbLimiterScope(db *sql.DB) string {
 }
 
 // clientIPKey is the IP-only rate-limit key (OIDC callbacks).
+//
+// 审计 2026-09-13 P1-3:此前用 **RemoteAddr**,而反代(生产 compose 的 Caddy)
+// 部署下所有用户共享同一个代理 IP ⇒ 一个未认证者用 60 次失败回调即可把
+// **全组织**的 SSO 回调打成 429(实测:第 61 个请求即便来自不同
+// X-Forwarded-For 也照样 429)。改用 gin 的 ClientIP():SetTrustedProxies
+// 已把可信代理限定为环回+显式配置,只有来自可信代理的 XFF 才会被采纳。
 func clientIPKey(c *gin.Context) string {
-	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
-	if err != nil {
-		host = c.Request.RemoteAddr
-	}
-	return "ip:" + host
+	return "ip:" + c.ClientIP()
 }
 
-// loginAllowed guards one login attempt through BOTH buckets: ip|username
-// (安全默认,防单 IP 爆破) and username (防账号级 DoS——反代坍缩/分布式
-// 爆破下,同一用户名跨 IP 的尝试总数仍受限)。审计 2026-08-25 F-02。
+// loginAllowed guards one login attempt through **three** buckets:
+// ip|username(防单 IP 爆破)、username(防账号级 DoS——反代坍缩/分布式
+// 爆破下,同一用户名跨 IP 的尝试总数仍受限)、以及 ip(防"随机用户名"
+// 绕过前两桶做 argon2 放大,P1-2)。审计 2026-08-25 F-02 / 2026-09-13 P1-2。
 func (a *API) loginAllowed(c *gin.Context, username string) bool {
 	scope := dbLimiterScope(a.DB)
-	if !a.limiter.allow(scope + loginKey(c, username)) {
-		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
-		return false
-	}
-	if !a.limiter.allow(scope + "u:" + username) {
+	ipKey := scope + "ip:" + loginHost(c)
+	if !a.limiter.allow(scope+loginKey(c, username)) ||
+		!a.limiter.allow(scope+"u:"+username) ||
+		!a.loginIPLimiter.allow(ipKey) {
 		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 		return false
 	}
 	return true
 }
 
-// loginFailed records a failed authentication against both login buckets.
+// loginFailed records a failed authentication against all three buckets.
 func (a *API) loginFailed(c *gin.Context, username string) {
 	scope := dbLimiterScope(a.DB)
 	a.limiter.record(scope + loginKey(c, username))
 	a.limiter.record(scope + "u:" + username)
+	a.loginIPLimiter.record(scope + "ip:" + loginHost(c))
 }
 
-// loginSucceeded clears both login buckets after a successful authentication
-// (a legitimate login must not consume the failure budget).
+// loginSucceeded clears the buckets after a successful authentication
+// (a legitimate login must not consume the failure budget). IP 桶同样清空:
+// 成功即证明该来源不是爆破流量,避免误伤同 NAT 的正常用户。
 func (a *API) loginSucceeded(c *gin.Context, username string) {
 	scope := dbLimiterScope(a.DB)
 	a.limiter.reset(scope + loginKey(c, username))
 	a.limiter.reset(scope + "u:" + username)
+	a.loginIPLimiter.reset(scope + "ip:" + loginHost(c))
 }
 
 // oidcCallbackAllowed guards one OIDC callback through a dedicated IP-only
@@ -247,4 +283,66 @@ func (a *API) oidcCallbackFailed(c *gin.Context) {
 // oidcCallbackSucceeded clears the callback bucket for this IP.
 func (a *API) oidcCallbackSucceeded(c *gin.Context) {
 	a.callbackLimiter.reset(clientIPKey(c))
+}
+
+// ---------------------------------------------------------------------------
+// 密码校验并发闸(审计 2026-09-13 P1-2)
+// ---------------------------------------------------------------------------
+
+// passwordVerifyMaxConcurrent 是**同时在跑**的 argon2id 校验上限。
+//
+// 每次校验按 argon2id 参数(m=64MiB,t=3,p=2)分配 64MiB,未认证者可以用
+// "随机用户名 + 无限并发"把内存推到数十 GB(实测单次 87ms/64MiB、零限流)。
+// 限流桶解决"总量",这里解决"瞬时并发":超出的请求最多等 500ms,仍拿不到
+// 槽位即返回 429 —— 内存峰值被硬性限制在 slots×64MiB(4 核 ≈ 1GiB)。
+func passwordVerifyMaxConcurrent() int {
+	n := runtime.NumCPU() * 4
+	if n < 8 {
+		n = 8
+	}
+	if n > 32 {
+		n = 32
+	}
+	return n
+}
+
+// passwordVerifySlots 是进程级共享槽位(客户端面/管理面/改密/MFA 自助共用;
+// 任何入口都无法单独放宽)。
+var passwordVerifySlots = make(chan struct{}, passwordVerifyMaxConcurrent())
+
+// errPasswordVerifyBusy 表示密码校验并发闸已满(调用方映射 429,与"密码错误"
+// 严格区分 —— 否则攻击期间正常用户会看到"密码错误"这种误导性结论)。
+var errPasswordVerifyBusy = errors.New("password verify concurrency gate is full")
+
+// passwordVerifyWait 是排队等槽位的上限:短于用户可感知的"卡住",长于正常
+// 校验耗时(87ms 级),把突发流量削峰而不是直接拒绝。
+const passwordVerifyWait = 500 * time.Millisecond
+
+// acquirePasswordVerify 取得一个密码校验槽位。
+// @returns release 必须 defer 调用;ok=false = 过载(调用方回 429)。
+func acquirePasswordVerify() (release func(), ok bool) {
+	select {
+	case passwordVerifySlots <- struct{}{}:
+		return func() { <-passwordVerifySlots }, true
+	default:
+	}
+	t := time.NewTimer(passwordVerifyWait)
+	defer t.Stop()
+	select {
+	case passwordVerifySlots <- struct{}{}:
+		return func() { <-passwordVerifySlots }, true
+	case <-t.C:
+		return nil, false
+	}
+}
+
+// verifyPasswordGated 是"带并发闸的密码校验"唯一入口:过载时返回 ok=false
+// (上层按认证失败/429 处理),避免每个调用点各写一遍 acquire/release。
+func verifyPasswordGated(hash, password string) (matched, ok bool) {
+	release, ok := acquirePasswordVerify()
+	if !ok {
+		return false, false
+	}
+	defer release()
+	return util.VerifyPassword(hash, password), true
 }

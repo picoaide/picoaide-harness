@@ -190,3 +190,88 @@ func TestUpsertAppAndCreateReleaseAtomic(t *testing.T) {
 		t.Fatalf("app title = %q, want unchanged (事务回滚)", app.Title)
 	}
 }
+
+// TestAppEnabledLookupAndBatchMap(P2-1,审计 2026-09-13):下架是 App 级状态,
+// 读取侧需要「单个查询」与「一次批量」两种形态——批量形态供清单过滤,
+// 避免逐行 N+1;App 不存在与下架同语义(false),不泄露存在性。
+func TestAppEnabledLookupAndBatchMap(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	t.Cleanup(cleanup)
+
+	for _, a := range []*App{
+		{Kind: AppKindAgent, AppID: "live-agent", Channel: AppChannelOrg, Enabled: 1},
+		{Kind: AppKindAgent, AppID: "pulled-agent", Channel: AppChannelMarket, Enabled: 0},
+		{Kind: AppKindSkill, AppID: "live-skill", Channel: AppChannelMarket, Enabled: 1},
+	} {
+		if err := UpsertApp(db, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct {
+		kind, appID string
+		want        bool
+	}{
+		{AppKindAgent, "live-agent", true},
+		{AppKindAgent, "pulled-agent", false},
+		{AppKindSkill, "live-agent", false}, // kind 隔离:同名 skill 不存在
+	} {
+		got, err := AppEnabled(db, tc.kind, tc.appID)
+		if err != nil {
+			t.Fatalf("AppEnabled(%s,%s): %v", tc.kind, tc.appID, err)
+		}
+		if got != tc.want {
+			t.Fatalf("AppEnabled(%s,%s) = %v, want %v", tc.kind, tc.appID, got, tc.want)
+		}
+	}
+
+	agents, err := EnabledAppIDs(db, AppKindAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !agents["live-agent"] || agents["pulled-agent"] {
+		t.Fatalf("EnabledAppIDs(agent) = %v, want 只有 live-agent", agents)
+	}
+	skills, err := EnabledAppIDs(db, AppKindSkill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !skills["live-skill"] || len(skills) != 1 {
+		t.Fatalf("EnabledAppIDs(skill) = %v, want 只有 live-skill", skills)
+	}
+}
+
+// TestSetAppTitleKeepsOwnershipAndFlags(P2-6,审计 2026-09-13):发布后回写
+// 包内展示名只允许改 title——owner/官方属性/渠道/上下架都不受触碰
+// (owner 只认登录态,包内 author 是不可信输入)。
+func TestSetAppTitleKeepsOwnershipAndFlags(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	t.Cleanup(cleanup)
+
+	if err := UpsertApp(db, &App{Kind: AppKindAgent, AppID: "official-agent",
+		Title: "旧名", Description: "旧描述", Owner: "bob",
+		Channel: AppChannelMarket, Enabled: 0}); err != nil {
+		t.Fatal(err)
+	}
+	// 官方属性挂 App 级且不由 UpsertApp 写入:转官方 = official=1 + owner=''。
+	if err := SetAppOfficial(db, AppKindAgent, "official-agent", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetAppTitle(db, AppKindAgent, "official-agent", "包内新名"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetApp(db, AppKindAgent, "official-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "包内新名" {
+		t.Fatalf("title = %q, want 包内新名", got.Title)
+	}
+	if got.Owner != "" || got.Official != 1 || got.Description != "旧描述" ||
+		got.Channel != AppChannelMarket || got.Enabled != 0 {
+		t.Fatalf("SetAppTitle 触碰了非展示名字段: %+v", got)
+	}
+	if err := SetAppTitle(db, AppKindAgent, "missing", "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing app err = %v, want ErrNotFound", err)
+	}
+}
