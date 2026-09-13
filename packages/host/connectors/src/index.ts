@@ -21,8 +21,10 @@ import {
   streamableHttpUrl,
 } from './policy.ts'
 import {
+  claimMcpTransportFenceTargetWarning,
   ensureMcpTransportRedirectFence,
   McpTransportFenceUnavailableError,
+  mcpTransportFenceTargetWarning,
 } from './mcp-transport-fence.ts'
 import type {
   ConnectorAuthRequest,
@@ -533,6 +535,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     if (httpServers.length > 0) {
       try {
         await ensureMcpTransportRedirectFence()
+        // The seam is fenced and behaviourally verified; the identity of the
+        // two resolutions could not be settled (see the fence module). The
+        // connection proceeds — the path pair goes to the log once, so a field
+        // report carries the spellings instead of only the refusal text.
+        if (claimMcpTransportFenceTargetWarning()) {
+          ctx.logger?.warn(`pico-connectors: ${def.id} streamable-http 传输身份校验未定论，仍按加固后的传输连接（${mcpTransportFenceTargetWarning() ?? ''}）`)
+        }
       } catch (error) {
         httpFenceError = error instanceof McpTransportFenceUnavailableError
           ? error.message
