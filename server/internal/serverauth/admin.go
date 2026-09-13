@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -97,12 +98,37 @@ func validateIssuerURL(issuer string) error {
 	if u.Scheme == "http" && u.Hostname() != "localhost" && u.Hostname() != "127.0.0.1" {
 		return errors.New("http 仅允许 localhost 回环")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := util.CheckOutboundTarget(ctx, u.Hostname()); err != nil {
+	if issuerHostBlocked(u.Hostname()) {
 		return errors.New("指向受限地址(链路本地/云 metadata)已拒绝")
 	}
 	return nil
+}
+
+// issuerHostBlocked 报告 issuer 主机是否属于**链路本地/云 metadata**。
+//
+// 与网关上游的保存校验同口径(newUpstreamTransport 注释):保存时**解析失败
+// 一律放行** —— 离线、内网 split-horizon DNS、CI 无 DNS 都不该让配置存不下去;
+// 真正的拦截在连接期由 SafeOutboundTransport 完成(DNS rebinding 也由它覆盖)。
+// 这里只拦"确定有问题"的目标:IP 字面量落在受限段,或解析成功且候选里有受限 IP。
+func issuerHostBlocked(host string) bool {
+	if ip := net.ParseIP(host); ip != nil {
+		return util.IsBlockedOutboundIP(ip)
+	}
+	if util.IsBlockedOutboundHost(host) {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return false // 解析不了 → 交给连接期护栏(不允许"DNS 抖动"变成"配置存不下")
+	}
+	for _, ipa := range ips {
+		if util.IsBlockedOutboundIP(ipa.IP) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateLDAPServerURL 校验 LDAP 目录地址(审计 2026-09-13 P2-7)。

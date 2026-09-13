@@ -256,7 +256,14 @@ func TestAuditFixIssuerValidationRejectsMetadataAndBadSchemes(t *testing.T) {
 			t.Fatalf("issuer %q 未被拒绝", issuer)
 		}
 	}
-	good := []string{"https://idp.example.com", "https://idp.example.com/realms/x", "http://localhost:5556/dex"}
+	good := []string{
+		"https://idp.example.com",
+		"https://idp.example.com/realms/x",
+		"http://localhost:5556/dex",
+		// 解析失败必须放行(CI/离线/内网 split-horizon DNS):保存期只拦
+		// "确定有问题"的目标,真正的拦截在连接期护栏。
+		"https://idp-does-not-resolve.invalid",
+	}
 	for _, issuer := range good {
 		if err := validateIssuerURL(issuer); err != nil {
 			t.Fatalf("issuer %q 被误拒: %v", issuer, err)
