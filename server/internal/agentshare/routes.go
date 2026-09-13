@@ -265,8 +265,17 @@ func listVisible(db *sql.DB) gin.HandlerFunc {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
 			}
+			// P2-1(审计 2026-09-13):客户端面只呈现**上架**内容——App 级
+			// 下架(apps.enabled=0)与不存在同语义,管理员在客户端面也不该
+			// 看到可点但下载必 404 的行(管理面清单仍全量,见 listAll)。
+			enabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindAgent)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
 			for _, p := range all {
-				if p.Status == serverstore.AgentPresetApproved && org[p.Name] {
+				// 两个闸门都要:渠道(只列组织共享面)+ 上架(apps.enabled)。
+				if p.Status == serverstore.AgentPresetApproved && org[p.Name] && enabled[p.Name] {
 					list = append(list, p)
 				}
 			}
@@ -915,21 +924,28 @@ func downloadVersioned(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc 
 // one resolved row; it writes the error response on any refusal.
 // 审计 2026-08-25 D-1:文件路径用 p.Version(与上传一致),不再硬编码
 // "1.0.0"(多版本下载曾必然 500「归档文件缺失」)。
+//
+// admin=false 的两条路由 = 客户端(员工)面,三重闸门(审核状态 / App 级
+// 上下架 / 授权)任一不过都与「不存在」同 404;admin=true 的管理面只读归档,
+// 便于审核与排查已下架内容。
 func serveArchive(c *gin.Context, db *sql.DB, cacheDir string, p *serverstore.AgentPreset, admin bool) {
 	if !admin && p.Status != serverstore.AgentPresetApproved {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
 		return
 	}
 	// agentshare-2:员工下载是市场智能体唯一的安装通路(CapabilityCenterPanel
-	// 的 installEndpoint),因此两种渠道都服务;但**市场下架必须生效**
-	// (enabled=0 → 404),这是「下架不生效」的根因。
+	// 的 installEndpoint),因此共享面的下载端点**两种渠道都服务**(清单/审核
+	// 等其它共享面端点则只服务 org,见 orgAgentNames)。
+	// P2-1(审计 2026-09-13):apps.enabled=0(下架)即不可下载——此前只查
+	// 审核状态与授权,管理员下架后员工仍能按名字取下归档。单个 App 一次
+	// 查询,不引入逐行 N+1。两个闸门合起来即「市场下架必须生效」。
 	if !admin {
-		ok, err := employeePresetDownloadable(db, p.Name)
-		if err != nil && !errors.Is(err, serverstore.ErrNotFound) {
+		enabled, aerr := serverstore.AppEnabled(db, serverstore.AppKindAgent, p.Name)
+		if aerr != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
-		if !ok || errors.Is(err, serverstore.ErrNotFound) {
+		if !enabled {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
 			return
 		}

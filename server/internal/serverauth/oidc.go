@@ -22,6 +22,7 @@ import (
 	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 // errOIDCState is returned by HandleCallback for unknown or reused state.
@@ -46,6 +47,33 @@ const (
 	oidcFlowTTL  = 10 * time.Minute
 	oidcMaxFlows = 1000
 )
+
+// errOIDCFlowTableFull 表示在途登录流程已满:此时**拒绝新流程**(fail-closed)
+// 而不是驱逐最旧的一条 —— 旧实现驱逐最旧会让攻击者用 1000 次匿名 GET 把
+// 正在登录的真人流程挤掉,回调时只得到"state 无效或已过期"(审计 2026-09-13 P2-4)。
+var errOIDCFlowTableFull = errors.New("oidc: too many in-flight login flows")
+
+// oidcOutboundClient 是 OIDC discovery / token / JWKS 的**统一出站 client**
+// (审计 2026-09-13 P1-4)。
+//
+// go-oidc / oauth2 默认走 http.DefaultClient:无 IP 复检、默认跟随重定向、
+// 无超时。而 issuer 是管理员在认证配置里填的地址(保存路径此前零校验),
+// 一旦填成内网/link-local 目标,discovery(保存时触发)与 callback 期的
+// token/JWKS 请求都会打到那里 —— SSRF 纵深护栏(FIX-09)此前只装在"测试连接"
+// 按钮上。这里通过 oidc.ClientContext 注入带连接期 IP 复检的 client:
+//   - 私网照旧放行(企业自建 IdP 常在 10.x/172.16.x,产品主场景);
+//   - 链路本地 / 云 metadata(含 DNS rebinding)被拦;
+//   - 重定向逐跳复检,至多 5 跳。
+var oidcOutboundClient = &http.Client{
+	Timeout:   20 * time.Second,
+	Transport: util.SafeOutboundTransport(),
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("oidc: too many redirects")
+		}
+		return util.CheckOutboundTarget(req.Context(), req.URL.Hostname())
+	},
+}
 
 // oidcExchangeTimeout bounds the IdP code exchange (C-14); a hung IdP token
 // endpoint must not hold the callback goroutine forever. Test-injectable.
@@ -80,6 +108,8 @@ func (p *OIDCProvider) Configure(cfg map[string]string) error {
 	// 失败视为 OIDC 未配置(降级,不阻断启动)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// P1-4:discovery 走受护栏的 client(而不是 http.DefaultClient)。
+	ctx = oidc.ClientContext(ctx, oidcOutboundClient)
 	provider, err := oidc.NewProvider(ctx, issuer)
 	if err != nil {
 		return err
@@ -111,15 +141,11 @@ func (p *OIDCProvider) AuthURL(state, returnServer string) (string, error) {
 	verifier := oauth2.GenerateVerifier()
 	p.mu.Lock()
 	p.sweepFlowsLocked(time.Now())
-	if len(p.flows) >= oidcMaxFlows { // still full: evict the oldest flow
-		var oldest string
-		var oldestAt time.Time
-		for s, f := range p.flows {
-			if oldest == "" || f.createdAt.Before(oldestAt) {
-				oldest, oldestAt = s, f.createdAt
-			}
-		}
-		delete(p.flows, oldest)
+	if len(p.flows) >= oidcMaxFlows {
+		// 满了就明确拒绝:驱逐在途流程会把真人登录挤掉(P2-4)。回调期
+		// 无需再判空(表只会被消费/过期清理,不会无限增长)。
+		p.mu.Unlock()
+		return "", errOIDCFlowTableFull
 	}
 	p.flows[state] = &oidcFlow{verifier: verifier, nonce: nonce, createdAt: time.Now(), returnServer: returnServer}
 	p.mu.Unlock()
@@ -150,6 +176,8 @@ func (p *OIDCProvider) HandleCallback(code, state string) (UserInfo, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), oidcExchangeTimeout)
 	defer cancel()
+	// P1-4:token 交换与 JWKS 拉取同样走受护栏的 client。
+	ctx = oidc.ClientContext(ctx, oidcOutboundClient)
 	tok, err := p.cfg.Exchange(ctx, code, oauth2.VerifierOption(flow.verifier))
 	if err != nil {
 		return UserInfo{}, err
@@ -163,12 +191,12 @@ func (p *OIDCProvider) HandleCallback(code, state string) (UserInfo, error) {
 		return UserInfo{}, err
 	}
 	var claims struct {
-		Sub               string   `json:"sub"`
-		PreferredUsername string   `json:"preferred_username"`
-		Email             string   `json:"email"`
-		Name              string   `json:"name"`
-		Nonce             string   `json:"nonce"`
-		Groups            []string `json:"groups"`
+		Sub               string    `json:"sub"`
+		PreferredUsername string    `json:"preferred_username"`
+		Email             string    `json:"email"`
+		Name              string    `json:"name"`
+		Nonce             string    `json:"nonce"`
+		Groups            *[]string `json:"groups"` // 指针:区分"未下发"与"空数组"(P2-9)
 	}
 	if err := idt.Claims(&claims); err != nil {
 		return UserInfo{}, err
@@ -183,12 +211,22 @@ func (p *OIDCProvider) HandleCallback(code, state string) (UserInfo, error) {
 	if username == "" {
 		username = claims.Sub
 	}
+	groups := []string{}
+	groupsPresent := claims.Groups != nil
+	if groupsPresent {
+		groups = *claims.Groups
+	}
 	return UserInfo{
-		Username:    username,
-		DisplayName: claims.Name,
-		Email:       claims.Email,
-		Groups:      claims.Groups,
-		Source:      "external",
+		Username:      username,
+		DisplayName:   claims.Name,
+		Email:         claims.Email,
+		Groups:        groups,
+		GroupsPresent: groupsPresent,
+		// P2-9:OIDC 的稳定主体标识是 sub(用户名/邮箱都可能被改),外部身份
+		// 绑定到 sub,避免同名接管。
+		ExternalID:     claims.Sub,
+		Source:         "external",
+		ExternalSource: p.Name(),
 	}, nil
 }
 
@@ -203,6 +241,15 @@ const oidcStateCookieName = "picoaide_oidc_state"
 // the callback deep link so the desktop client knows which server to attach.
 func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// P2-4:未认证的 /auth/{oidc,openid}/login 是"流程表 + 出站 discovery"
+		// 的双重放大器,必须限流(IP 桶,与回调桶同量级)。
+		ipKey := "oidc-login-ip:" + c.ClientIP()
+		if !a.loginIPLimiter.allow(ipKey) {
+			_ = serverstore.AuditLog(a.DB, "oidc-login", "login_fail", "rate_limited ip="+c.ClientIP())
+			writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录请求过于频繁,请稍后再试")
+			return
+		}
+		a.loginIPLimiter.record(ipKey)
 		state, err := randomHex(16)
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "状态生成失败")
@@ -235,6 +282,11 @@ func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 		}
 		authURL, err := p.AuthURL(state, returnServer)
 		if err != nil {
+			if errors.Is(err, errOIDCFlowTableFull) {
+				// 在途流程已满:明确 429(不驱逐真人在途流程)。
+				writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录请求过于频繁,请稍后再试")
+				return
+			}
 			writeError(c, http.StatusBadGateway, "UPSTREAM", "OIDC 服务不可用")
 			return
 		}
@@ -304,6 +356,10 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 		}
 		a.oidcCallbackSucceeded(c)
 		user, err := a.provisionUser(ui)
+		if errors.Is(err, serverstore.ErrIdentityConflict) {
+			writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "该用户名已绑定到其它身份源账号,请联系管理员")
+			return
+		}
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "用户创建失败")
 			return

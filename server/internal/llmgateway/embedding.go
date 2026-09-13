@@ -63,12 +63,15 @@ type Embedder struct {
 	client *http.Client
 }
 
+// embedHTTPClient 是 embedding 出站 client 的**单例**(P2-11,审计 2026-09-13)。
+//
+// 旧实现每次 NewEmbedder/每次请求都新建 http.Client —— 连接池不复用,
+// 高频 embedding 调用会持续新建 TCP/TLS 连接(单员工即可放大成上游连接风暴)。
+// 同时保留 P1-4 的拨号期 IP 复检(与 chat/sse 同一套 transport)。
+var embedHTTPClient = &http.Client{Timeout: 60 * time.Second, Transport: newUpstreamTransport()}
+
 func NewEmbedder(db *sql.DB) *Embedder {
-	// P1-4(审计 2026-09-12):出站 client 必须装**拨号期 IP 复检**,与
-	// chat/sse 用同一套 transport(handlers.go:61/64)。此前 Transport==nil
-	// → http.DefaultTransport:保存 provider 时的静态校验挡不住 DNS
-	// rebinding,带 provider API key 的请求会被发往云 metadata(169.254.169.254)。
-	return &Embedder{db: db, client: &http.Client{Timeout: 60 * time.Second, Transport: newUpstreamTransport()}}
+	return &Embedder{db: db, client: embedHTTPClient}
 }
 
 // Embed returns one vector per input text (order preserved). Failover:

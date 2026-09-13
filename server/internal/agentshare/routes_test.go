@@ -791,3 +791,135 @@ func TestLegacyRejectTargetsLatestPending(t *testing.T) {
 		t.Fatalf("v3 status = %s, want approved", v3.Status)
 	}
 }
+
+// TestDisabledPresetHiddenFromEmployeeSurface(P2-1,审计 2026-09-13):
+// 管理员下架(App 级 apps.enabled=0)后,员工面必须「列不出 + 下不下来」——
+// 作者身份与已授权身份都不能绕过;失败语义与「不存在」逐字一致(不泄露
+// 存在性);管理面(审核/排查)不受影响,重新上架即恢复。
+func TestDisabledPresetHiddenFromEmployeeSurface(t *testing.T) {
+	r, db, adminHdr, aliceHdr, bobHdr := setup(t)
+	defer db.Close()
+
+	do := func(method, path, body string, hdr map[string]string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		r.ServeHTTP(w, req)
+		return w
+	}
+
+	archive := makeArchive(t, map[string]string{
+		"agent.cordis.yml": testComposition,
+		"preset.yml":       presetMeta("下架测试预设", "1.0.0"),
+	})
+	if w := do("POST", "/api/client/v2/agent-presets",
+		uploadBody("pulled-preset", "下架测试", "下架测试预设", archive), aliceHdr); w.Code != http.StatusCreated {
+		t.Fatalf("upload = %d %s", w.Code, w.Body.String())
+	}
+	if w := do("POST", "/api/server/admin/agent-presets/pulled-preset/approve", "", adminHdr); w.Code != http.StatusOK {
+		t.Fatalf("approve = %d %s", w.Code, w.Body.String())
+	}
+	if err := serverstore.GrantApp(db, serverstore.AppKindAgent, "pulled-preset", "bob", string(serverstore.GranteeUser)); err != nil {
+		t.Fatal(err)
+	}
+
+	// 下架前:bob(已授权)既能列出也能从两个入口下载。
+	if w := do("GET", "/api/client/v2/agent-presets", "", bobHdr); !strings.Contains(w.Body.String(), "pulled-preset") {
+		t.Fatalf("bob 看不到已授权预设: %s", w.Body.String())
+	}
+	if w := do("GET", "/api/client/v2/agent-presets/pulled-preset/archive", "", bobHdr); w.Code != http.StatusOK {
+		t.Fatalf("下架前最新版下载 = %d, want 200", w.Code)
+	}
+	if w := do("GET", "/api/client/v2/agent-presets/pulled-preset/1.0.0/archive", "", bobHdr); w.Code != http.StatusOK {
+		t.Fatalf("下架前多版本下载 = %d, want 200", w.Code)
+	}
+
+	// 管理员下架(DELETE /api/server/admin/agents/:name 的落库效果)。
+	if err := serverstore.SetAppEnabled(db, serverstore.AppKindAgent, "pulled-preset", false); err != nil {
+		t.Fatal(err)
+	}
+
+	// 员工面:作者(alice)、被授权者(bob)、以及走客户端面的管理员都不再列出。
+	for _, tc := range []struct {
+		who string
+		hdr map[string]string
+	}{{"alice(作者)", aliceHdr}, {"bob(已授权)", bobHdr}, {"boss(管理员)", adminHdr}} {
+		if w := do("GET", "/api/client/v2/agent-presets", "", tc.hdr); strings.Contains(w.Body.String(), "pulled-preset") {
+			t.Fatalf("%s 仍能看到下架预设: %s", tc.who, w.Body.String())
+		}
+	}
+
+	// 员工面:两个下载入口都 404,且响应与「不存在」逐字一致。
+	pulled := do("GET", "/api/client/v2/agent-presets/pulled-preset/archive", "", bobHdr)
+	if pulled.Code != http.StatusNotFound {
+		t.Fatalf("下架后最新版下载 = %d, want 404", pulled.Code)
+	}
+	pulledV := do("GET", "/api/client/v2/agent-presets/pulled-preset/1.0.0/archive", "", bobHdr)
+	if pulledV.Code != http.StatusNotFound {
+		t.Fatalf("下架后多版本下载 = %d, want 404", pulledV.Code)
+	}
+	missing := do("GET", "/api/client/v2/agent-presets/no-such-preset/archive", "", bobHdr)
+	if pulled.Code != missing.Code || pulled.Body.String() != missing.Body.String() {
+		t.Fatalf("下架与不存在的响应不一致: %d %s vs %d %s",
+			pulled.Code, pulled.Body.String(), missing.Code, missing.Body.String())
+	}
+
+	// 管理面不受影响(审核/排查仍需可取归档),重新上架后员工面恢复。
+	if w := do("GET", "/api/server/admin/agent-presets/pulled-preset/archive", "", adminHdr); w.Code != http.StatusOK {
+		t.Fatalf("管理员下载被下架拦截 = %d, want 200", w.Code)
+	}
+	if err := serverstore.SetAppEnabled(db, serverstore.AppKindAgent, "pulled-preset", true); err != nil {
+		t.Fatal(err)
+	}
+	if w := do("GET", "/api/client/v2/agent-presets/pulled-preset/archive", "", bobHdr); w.Code != http.StatusOK {
+		t.Fatalf("重新上架后下载 = %d, want 200", w.Code)
+	}
+
+	// 市场智能体(管理员上架、DELETE /api/server/admin/agents/:name 下架的
+	// 那类 App)走同一套员工面语义:下架后同样列不出、下不下来。
+	if err := serverstore.UpsertApp(db, &serverstore.App{
+		Kind: serverstore.AppKindAgent, AppID: "market-agent", Title: "市场智能体",
+		Owner: "boss", Channel: serverstore.AppChannelMarket, Enabled: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.CreateRelease(db, &serverstore.Release{
+		Kind: serverstore.AppKindAgent, AppID: "market-agent", Version: "1.0.0",
+		Title: "市场智能体", Author: "tester", Publisher: "boss", Checksum: "deadbeef",
+		Archive: archive, Status: serverstore.ReleaseStatusApproved,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.GrantApp(db, serverstore.AppKindAgent, "market-agent", "bob", string(serverstore.GranteeUser)); err != nil {
+		t.Fatal(err)
+	}
+	if w := do("GET", "/api/client/v2/agent-presets/market-agent/archive", "", bobHdr); w.Code != http.StatusOK {
+		t.Fatalf("市场智能体下架前下载 = %d, want 200", w.Code)
+	}
+	if err := serverstore.SetAppEnabled(db, serverstore.AppKindAgent, "market-agent", false); err != nil {
+		t.Fatal(err)
+	}
+	if w := do("GET", "/api/client/v2/agent-presets", "", bobHdr); strings.Contains(w.Body.String(), "market-agent") {
+		t.Fatalf("下架的市场智能体仍出现在员工清单: %s", w.Body.String())
+	}
+	if w := do("GET", "/api/client/v2/agent-presets/market-agent/archive", "", bobHdr); w.Code != http.StatusNotFound {
+		t.Fatalf("下架的市场智能体仍可下载 = %d, want 404", w.Code)
+	}
+	// 管理员走客户端面同样不得绕过下架(管理面归档入口不受影响,见上);
+	// 客户端面只认 Bearer,所以给 boss 单独签一个 token。
+	boss, err := serverstore.GetUserByUsername(db, "boss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bossToken, err := serverauth.IssueToken(db, boss.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bossHdr := map[string]string{"Authorization": "Bearer " + bossToken}
+	if w := do("GET", "/api/client/v2/agent-presets/market-agent/archive", "", bossHdr); w.Code != http.StatusNotFound {
+		t.Fatalf("管理员在客户端面绕过下架 = %d, want 404", w.Code)
+	}
+}

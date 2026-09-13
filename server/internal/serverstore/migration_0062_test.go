@@ -30,6 +30,9 @@ func TestMigration0062BackfillKeepsLedgerInvariant(t *testing.T) {
 		t.Fatal("0062 迁移未找到")
 	}
 	testMigrationHook = func() []migration { return pre }
+	// t.Cleanup(而非 defer):本用例中途 t.Fatal 时 hook 也必须复位 —— 旧写法
+	// 把 defer 放在中段,失败会泄漏 hook 并让同包后续用例整片级联失败。
+	t.Cleanup(func() { testMigrationHook = nil })
 	// --- 1) 造一个"升级前"的库:只应用 <= 0061 ---
 	db, cleanup := NewTestDB(t)
 	defer cleanup()
@@ -69,7 +72,6 @@ func TestMigration0062BackfillKeepsLedgerInvariant(t *testing.T) {
 
 	// --- 3) 应用 0062 ---
 	testMigrationHook = func() []migration { return post }
-	defer func() { testMigrationHook = nil }()
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatalf("apply 0062: %v", err)
 	}
@@ -195,9 +197,15 @@ func TestMigration0062Idempotent(t *testing.T) {
 }
 
 // mustUser 建一个启用的普通员工(名字唯一化,避免与同库其它用例撞唯一索引)。
+//
+// 注意:本用例的库是**只应用到 0061 的存量库**,因此不能用当前 CreateUser ——
+// 它按最新列集插入(如 0067 的 external_id),在旧库上必然 "column does not
+// exist"。存量的"造数据"必须走当时就存在的列集(这里只列 0061 及更早的列)。
 func mustUser(t *testing.T, db *sql.DB, name string) int64 {
 	t.Helper()
-	id, err := CreateUser(db, &User{Username: name, Source: "local", Status: 1})
+	var id int64
+	err := db.QueryRow(`INSERT INTO users (username, source, is_admin, role, status, created_at, updated_at)
+		VALUES (?, 'local', 0, 'user', 1, now(), now()) RETURNING id`, name).Scan(&id)
 	if err != nil {
 		t.Fatal(err)
 	}

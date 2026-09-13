@@ -187,14 +187,14 @@ func uploadAgentArchiveAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "发布失败")
 		return
 	}
-	// 包内展示名回写 App(技能同语义)。marketplace-3:Description 必须带上
-	// 包内描述 —— UpsertApp 的 ON CONFLICT 会无条件覆写 description,此前
-	// 这里留空把管理员登记时填的描述清成了 ""(技能侧保留包内描述)。
-	_ = serverstore.UpsertApp(db, &serverstore.App{
-		Kind: serverstore.AppKindAgent, AppID: name, Title: man.Title,
-		Description: man.Description,
-		Owner:       man.Author, Channel: serverstore.AppChannelMarket,
-	})
+	// 包内展示名回写 App(技能同语义)。只写展示名:
+	//   - marketplace-3(R7):不能用留空的 UpsertApp 覆写 Description —— 管理员
+	//     登记时填的描述必须保留(技能侧同样保留);
+	//   - P2-6(审计 2026-09-13):owner 只认登录态占名(appstore.Publish 按发布
+	//     账号写),包内 author 是**不可信输入** —— 用它回写会把官方 App 刻意
+	//     保留的空归属(蓝标语义)改写成个人,非官方 App 的描述也会被清空。
+	// 因此走只更新标题的 SetAppTitle,不碰 Description/Owner/Channel。
+	_ = serverstore.SetAppTitle(db, serverstore.AppKindAgent, name, man.Title)
 	_ = serverstore.AuditLog(db, adminUsername(c), "agent_update",
 		fmtAgentUploadAudit(name, res.Version, man.Title, checksum))
 	c.JSON(http.StatusOK, gin.H{"ok": true, "version": res.Version, "checksum": checksum})

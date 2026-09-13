@@ -1,0 +1,15 @@
+-- 0065: usage 记录**实际命中的 provider**(审计 2026-09-13 P1-6)。
+--
+-- 背景:models 的唯一键是 (provider_id, name)(0011),同名模型可以挂在多个
+-- provider 下(failover 是既有设计)。而计费取价只按 `WHERE name = ?`
+-- (无 ORDER BY)⇒ 取物理首行:实测一次 UPDATE(每小时渠道同步的
+-- ON CONFLICT DO UPDATE 就是 UPDATE)就让同一模型的单价从 1.00 变成 100.00,
+-- 未定价的同名行更会让该模型整体 0 元。
+--
+-- 修法:落账时把**实际服务的那个 provider**写进 usage.provider_id,
+-- 取价优先按 (provider_id, name);0 = 未知(历史行/无 provider 场景)时回退
+-- 到 name 口径(此时按 provider_id 排序取确定的首行,不再随物理序漂移)。
+--
+-- 注:usage 是按 created_at 的分区表,ADD COLUMN 会自动传播到所有分区与
+-- 后续新建分区(PG11+ 语义),因此这里只改主表。
+ALTER TABLE usage ADD COLUMN provider_id BIGINT NOT NULL DEFAULT 0;

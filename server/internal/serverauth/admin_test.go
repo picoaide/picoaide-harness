@@ -56,7 +56,7 @@ func TestAdminSession(t *testing.T) {
 		t.Fatal("csrf accepted wrong key")
 	}
 	// expire
-	_, err = db.Exec("UPDATE admin_sessions SET expires_at = ? WHERE id = ?", time.Now().Add(-time.Hour).UTC().Format(time.RFC3339), sess.ID)
+	_, err = db.Exec("UPDATE admin_sessions SET expires_at = ? WHERE secret_hash = ?", time.Now().Add(-time.Hour).UTC().Format(time.RFC3339), sessionSecretHash(sess.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1011,7 +1011,7 @@ func TestAdminAuthConfig(t *testing.T) {
 
 	// 1. 保存 ldap 模式(带密码)
 	w, _ = doJSON(t, r, "PUT", "/api/server/admin/auth",
-		`{"mode":"ldap","ldap":{"server_url":"ldap://x:389","bind_dn":"cn=admin","bind_password":"s3cret","base_dn":"dc=x","user_filter":"(uid=%s)"},"oidc":{}}`, hdr)
+		`{"mode":"ldap","ldap":{"server_url":"ldaps://x:636","bind_dn":"cn=admin","bind_password":"s3cret","base_dn":"dc=x","user_filter":"(uid=%s)"},"oidc":{}}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("save ldap: %d %s", w.Code, w.Body.String())
 	}
@@ -1024,7 +1024,7 @@ func TestAdminAuthConfig(t *testing.T) {
 		t.Fatalf("mode = %v", a["mode"])
 	}
 	ld := a["ldap"].(map[string]any)
-	if ld["server_url"].(string) != "ldap://x:389" || ld["bind_password"].(string) != MaskSecret {
+	if ld["server_url"].(string) != "ldaps://x:636" || ld["bind_password"].(string) != MaskSecret {
 		t.Fatalf("ldap = %v (password must be masked)", ld)
 	}
 	// P1-1:落库值必须是 AES-GCM 密文,且能解回原文(此前明文入库)。
@@ -1038,7 +1038,7 @@ func TestAdminAuthConfig(t *testing.T) {
 
 	// 2. 掩码回传 = 保持密码;改 base_dn 后密码不变
 	w, _ = doJSON(t, r, "PUT", "/api/server/admin/auth",
-		`{"mode":"ldap","ldap":{"server_url":"ldap://x:389","bind_dn":"cn=admin","bind_password":"***","base_dn":"dc=y"},"oidc":{}}`, hdr)
+		`{"mode":"ldap","ldap":{"server_url":"ldaps://x:636","bind_dn":"cn=admin","bind_password":"***","base_dn":"dc=y"},"oidc":{}}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("update ldap: %d", w.Code)
 	}
@@ -1050,7 +1050,7 @@ func TestAdminAuthConfig(t *testing.T) {
 
 	// 3. 显式清空密码(空串覆盖)→ 回读无掩码(未配置)
 	w, _ = doJSON(t, r, "PUT", "/api/server/admin/auth",
-		`{"mode":"ldap","ldap":{"server_url":"ldap://x:389","bind_dn":"cn=admin","bind_password":"","base_dn":"dc=y"},"oidc":{}}`, hdr)
+		`{"mode":"ldap","ldap":{"server_url":"ldaps://x:636","bind_dn":"cn=admin","bind_password":"","base_dn":"dc=y"},"oidc":{}}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("clear ldap pw: %d", w.Code)
 	}
@@ -1062,7 +1062,7 @@ func TestAdminAuthConfig(t *testing.T) {
 
 	// 4. 切回 local → configuration 独立保留(前端全量回传各方式配置)
 	w, _ = doJSON(t, r, "PUT", "/api/server/admin/auth",
-		`{"mode":"local","ldap":{"server_url":"ldap://x:389","bind_dn":"cn=admin","bind_password":"***","base_dn":"dc=y","user_filter":"(uid=%s)"},"oidc":{}}`, hdr)
+		`{"mode":"local","ldap":{"server_url":"ldaps://x:636","bind_dn":"cn=admin","bind_password":"***","base_dn":"dc=y","user_filter":"(uid=%s)"},"oidc":{}}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("switch local: %d", w.Code)
 	}
@@ -1072,7 +1072,7 @@ func TestAdminAuthConfig(t *testing.T) {
 	}
 	ld = a["ldap"].(map[string]any)
 	od := a["oidc"].(map[string]any)
-	if ld["server_url"].(string) != "ldap://x:389" || ld["base_dn"].(string) != "dc=y" {
+	if ld["server_url"].(string) != "ldaps://x:636" || ld["base_dn"].(string) != "dc=y" {
 		t.Fatalf("ldap config should be kept after local switch: ldap=%v", ld)
 	}
 	if ld["bind_password"].(string) != "" {

@@ -29,6 +29,29 @@ func genTOTPCode(t *testing.T, secret string) string {
 	return code
 }
 
+// useFakeTOTPClock 把 TOTP 校验时间源换成可控时钟,并返回 advance()(推进 30s)。
+// 审计 2026-09-13 P2-3 起同一 (user, step) 只能成功一次,测试里的多次
+// "消费动态码"操作必须跨步,否则会被重放防护正确拒绝。
+func useFakeTOTPClock(t *testing.T) func() {
+	t.Helper()
+	base := time.Now()
+	orig := nowFn
+	cur := base
+	nowFn = func() time.Time { return cur }
+	t.Cleanup(func() { nowFn = orig })
+	return func() { cur = cur.Add(30 * time.Second) }
+}
+
+// genTOTPCodeFor 生成"当前(假)时钟"下的动态码。
+func genTOTPCodeFor(t *testing.T, secret string) string {
+	t.Helper()
+	code, err := totp.GenerateCode(secret, nowFn())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return code
+}
+
 // ensureTestMasterKey 让 util.GetMasterKey 可用(main 里的 EnsureMasterKey 等价)。
 func ensureTestMasterKey(t *testing.T) {
 	t.Helper()
@@ -201,6 +224,7 @@ func adminSessionHeaders(t *testing.T, db *sql.DB, username string) (map[string]
 }
 
 func TestMFALifecycle(t *testing.T) {
+	advance := useFakeTOTPClock(t)
 	r, db := adminRouter(t)
 	ensureTestMasterKey(t)
 	hdr, uid := adminSessionHeaders(t, db, "boss")
@@ -234,7 +258,8 @@ func TestMFALifecycle(t *testing.T) {
 		t.Fatalf("verify wrong code: %d", w.Code)
 	}
 	// verify: 正确码
-	w, _ = doAdmin(t, r, "POST", "/api/server/admin/me/mfa/verify", fmt.Sprintf(`{"ticket":%q,"code":%q}`, ticket, genTOTPCode(t, secret)), hdr)
+	advance()
+	w, _ = doAdmin(t, r, "POST", "/api/server/admin/me/mfa/verify", fmt.Sprintf(`{"ticket":%q,"code":%q}`, ticket, genTOTPCodeFor(t, secret)), hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("verify: %d %s", w.Code, w.Body.String())
 	}
@@ -243,7 +268,7 @@ func TestMFALifecycle(t *testing.T) {
 		t.Fatalf("mfa not persisted: %+v", u)
 	}
 	// 重放同一 ticket → 失效
-	w, _ = doAdmin(t, r, "POST", "/api/server/admin/me/mfa/verify", fmt.Sprintf(`{"ticket":%q,"code":%q}`, ticket, genTOTPCode(t, secret)), hdr)
+	w, _ = doAdmin(t, r, "POST", "/api/server/admin/me/mfa/verify", fmt.Sprintf(`{"ticket":%q,"code":%q}`, ticket, genTOTPCodeFor(t, secret)), hdr)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("ticket replay: %d", w.Code)
 	}
@@ -259,7 +284,8 @@ func TestMFALifecycle(t *testing.T) {
 		t.Fatalf("login/mfa wrong code: %d", w.Code)
 	}
 	// 正确码 → session cookie
-	w, _ = doAdmin(t, r, "POST", "/api/server/admin/login/mfa", fmt.Sprintf(`{"mfa_ticket":%q,"code":%q}`, mfaTicket, genTOTPCode(t, secret)), nil)
+	advance()
+	w, _ = doAdmin(t, r, "POST", "/api/server/admin/login/mfa", fmt.Sprintf(`{"mfa_ticket":%q,"code":%q}`, mfaTicket, genTOTPCodeFor(t, secret)), nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("login/mfa: %d %s", w.Code, w.Body.String())
 	}
@@ -267,17 +293,18 @@ func TestMFALifecycle(t *testing.T) {
 		t.Fatalf("no session cookie: %v", w.Header())
 	}
 	// 重放 → 失效
-	w, _ = doAdmin(t, r, "POST", "/api/server/admin/login/mfa", fmt.Sprintf(`{"mfa_ticket":%q,"code":%q}`, mfaTicket, genTOTPCode(t, secret)), nil)
+	w, _ = doAdmin(t, r, "POST", "/api/server/admin/login/mfa", fmt.Sprintf(`{"mfa_ticket":%q,"code":%q}`, mfaTicket, genTOTPCodeFor(t, secret)), nil)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("login/mfa replay: %d", w.Code)
 	}
 	// 关闭: 主密码+动态码双验; 先给错密码
-	w, _ = doAdmin(t, r, "POST", "/api/server/admin/me/mfa/disable", fmt.Sprintf(`{"password":"wrong","code":%q}`, genTOTPCode(t, secret)), hdr)
+	w, _ = doAdmin(t, r, "POST", "/api/server/admin/me/mfa/disable", fmt.Sprintf(`{"password":"wrong","code":%q}`, genTOTPCodeFor(t, secret)), hdr)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("disable wrong password: %d", w.Code)
 	}
 	// 正确关闭
-	w, _ = doAdmin(t, r, "POST", "/api/server/admin/me/mfa/disable", fmt.Sprintf(`{"password":"pw123456","code":%q}`, genTOTPCode(t, secret)), hdr)
+	advance()
+	w, _ = doAdmin(t, r, "POST", "/api/server/admin/me/mfa/disable", fmt.Sprintf(`{"password":"pw123456","code":%q}`, genTOTPCodeFor(t, secret)), hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("disable: %d %s", w.Code, w.Body.String())
 	}

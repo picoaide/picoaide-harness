@@ -65,21 +65,8 @@ func requireOrgAgent(c *gin.Context, db *sql.DB, name string) bool {
 	return true
 }
 
-// employeePresetDownloadable 报告非管理员能否下载该行。
-//
-// org 行沿用共享库规则(approved + 授权)。market 行归市场端点,但**归档下载**
-// 必须保留:桌面能力中心的市场智能体安装走的正是
-// /api/client/v2/agent-presets/:name/archive(CapabilityCenterPanel
-// 的 installEndpoint),市场侧没有对员工开放的归档端点。市场「下架」在这里
-// 必须生效(enabled=0 → 404)—— 这正是此前「市场下架后共享面仍可下载」的根因
-// (appstore.VisibleReleases 看 enabled,ListVisibleAgentPresets 不看)。
-func employeePresetDownloadable(db *sql.DB, name string) (bool, error) {
-	a, err := serverstore.GetApp(db, serverstore.AppKindAgent, name)
-	if err != nil {
-		return false, err
-	}
-	if a.Channel == serverstore.AppChannelOrg {
-		return true, nil
-	}
-	return a.Enabled == 1, nil
-}
+// 归档下载的渠道口径说明:共享面的清单/审核等端点只服务 org(见 orgAgentNames),
+// 但**归档下载**两种渠道都服务 —— 桌面能力中心的市场智能体安装走的正是
+// /api/client/v2/agent-presets/:name/archive(CapabilityCenterPanel 的
+// installEndpoint),市场侧没有对员工开放的归档端点。市场「下架」在上架闸门
+// (apps.enabled)处统一生效,见 serveArchive。
