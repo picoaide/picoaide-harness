@@ -386,6 +386,12 @@ describe('R5-P1: ordinary streamable-http connectors keep working', () => {
     const config = await registerThroughPlugin(front.url)
     const chain = await openSpecChain(transportFromRegisteredConfig(config))
     const tools = await chain.tools()
+    // The SSE GET is fired by the transport on its own line *after* the POST
+    // handshake, so it can land on the front a moment after `listTools()`
+    // resolves — especially under the gate's 4-way parallel load. Poll for it
+    // like the redirect cases above do; asserting immediately made this the one
+    // racy test in the file (CI: `front saw = ["POST","POST","POST"]`).
+    await waitFor(() => front.seen.some(hit => hit.method === 'GET'), 3000)
     console.log(`[R5-positive] tools = ${JSON.stringify(tools)} | front saw = ${JSON.stringify(front.seen.map(hit => hit.method))} | errors = ${JSON.stringify(chain.errors)}`)
     expect(tools).toEqual(['front_tool'])
     expect(front.seen.some(hit => hit.method === 'GET')).toBe(true)
