@@ -29,6 +29,49 @@ export interface AuthRunOptions {
    * 缺省是中性名 —— 仓库里不留厂商品牌描述。
    */
   clientName?: string
+  /**
+   * Deadline for the outbound requests this flow performs (conn-1). Defaults
+   * to {@link OUTBOUND_REQUEST_TIMEOUT_MS}; the plugin passes its own option
+   * through, tests pass a short one.
+   */
+  outboundTimeoutMs?: number
+}
+
+/**
+ * Everything an outbound call inside this module needs besides its own
+ * arguments (conn-1): the flow's cancel signal and the deadline override.
+ *
+ * Both are passed EXPLICITLY to every call site so discovery and dynamic client
+ * registration are cancelable and bounded like the token exchange already was —
+ * a user who cancels a connect, or a logout that supersedes a restore, must not
+ * be parked on a socket that never answers.
+ */
+interface OutboundCallOptions {
+  signal?: AbortSignal | undefined
+  timeoutMs?: number | undefined
+}
+
+/** Build `outboundFetch`'s init + options from one flow's outbound knobs. */
+function outboundCall(
+  init: RequestInit,
+  outbound: OutboundCallOptions,
+): { init: RequestInit; options: { timeoutMs?: number } } {
+  return {
+    init: outbound.signal === undefined ? init : { ...init, signal: outbound.signal },
+    // `exactOptionalPropertyTypes`: only attach the override when it is set.
+    options: outbound.timeoutMs === undefined ? {} : { timeoutMs: outbound.timeoutMs },
+  }
+}
+
+/**
+ * The outbound knobs of one authorization flow (conn-1): its cancel signal and
+ * the caller's deadline override.
+ */
+function flowOutboundOptions(options: AuthRunOptions): OutboundCallOptions {
+  return {
+    signal: options.signal,
+    ...(options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs }),
+  }
 }
 
 /**
@@ -82,11 +125,12 @@ async function registerClient(
   redirectUri: string,
   registrationEndpoint: string,
   clientName: string,
+  outbound: OutboundCallOptions = {},
 ): Promise<string> {
   // FIX-20: the registration endpoint may come from a remote discovery
   // document — never POST client metadata to a host outside the policy, and
   // never follow a redirect out of it (residual C).
-  const response = await outboundFetch(registrationEndpoint, 'OAuth 客户端注册端点', {
+  const call = outboundCall({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -96,7 +140,8 @@ async function registerClient(
       response_types: ['code'],
       token_endpoint_auth_method: auth.publicClient ? 'none' : 'client_secret_basic',
     }),
-  })
+  }, outbound)
+  const response = await outboundFetch(registrationEndpoint, 'OAuth 客户端注册端点', call.init, call.options)
   if (!response.ok) throw new Error(`OAuth 客户端注册失败: HTTP ${response.status}`)
   const data = (await response.json()) as { client_id?: string }
   if (!data.client_id) throw new Error('OAuth 客户端注册响应缺少 client_id')
@@ -129,15 +174,14 @@ interface McpOAuthDiscovery {
  * `/.well-known/oauth-protected-resource`), then RFC 8414 metadata at the
  * authorization server.
  */
-async function discoverMcpOAuth(mcpUrl: string): Promise<McpOAuthDiscovery> {
+async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOptions = {}): Promise<McpOAuthDiscovery> {
   // FIX-20: the MCP endpoint itself is definition-supplied; every URL this
   // function learns from the remote side is checked before it is fetched.
   const mcp = assertOutboundUrlAllowed(mcpUrl, 'MCP 端点')
   const resource = mcp.origin + mcp.pathname.replace(/\/+$/, '')
 
-  const probe = await outboundFetch(mcpUrl, 'MCP 端点', {
-    headers: { Accept: 'text/event-stream', 'MCP-Protocol-Version': '2025-06-18' },
-  })
+  const probeCall = outboundCall({ headers: { Accept: 'text/event-stream', 'MCP-Protocol-Version': '2025-06-18' } }, outbound)
+  const probe = await outboundFetch(mcpUrl, 'MCP 端点', probeCall.init, probeCall.options)
   if (probe.status >= 200 && probe.status < 300) return { publicMcp: true, resource }
   if (probe.status !== 401 && probe.status !== 403) {
     throw new Error(`MCP 端点响应异常: HTTP ${probe.status}`)
@@ -154,9 +198,8 @@ async function discoverMcpOAuth(mcpUrl: string): Promise<McpOAuthDiscovery> {
     // A blocked URL here is an active redirection attempt, not a typo to skip:
     // fail the flow instead of quietly trying the next candidate.
     assertOutboundUrlAllowed(metadataUrl, 'OAuth resource metadata')
-    const metadataResponse = await outboundFetch(metadataUrl, 'OAuth resource metadata', {
-      headers: { Accept: 'application/json' },
-    })
+    const metadataCall = outboundCall({ headers: { Accept: 'application/json' } }, outbound)
+    const metadataResponse = await outboundFetch(metadataUrl, 'OAuth resource metadata', metadataCall.init, metadataCall.options)
     if (!metadataResponse.ok) continue
     const resourceMetadata = (await metadataResponse.json()) as { authorization_servers?: string[] }
     const authorizationServer = resourceMetadata.authorization_servers?.[0]
@@ -164,9 +207,8 @@ async function discoverMcpOAuth(mcpUrl: string): Promise<McpOAuthDiscovery> {
 
     const asUrl = assertOutboundUrlAllowed(authorizationServer, 'OAuth authorization server')
     asUrl.pathname = `${asUrl.pathname.replace(/\/+$/, '')}/.well-known/oauth-authorization-server`
-    const metadataResponse2 = await outboundFetch(asUrl.toString(), 'OAuth authorization server metadata', {
-      headers: { Accept: 'application/json' },
-    })
+    const asCall = outboundCall({ headers: { Accept: 'application/json' } }, outbound)
+    const metadataResponse2 = await outboundFetch(asUrl.toString(), 'OAuth authorization server metadata', asCall.init, asCall.options)
     if (!metadataResponse2.ok) continue
     const meta = (await metadataResponse2.json()) as OAuthServerMetadata
     if (!meta.authorization_endpoint || !meta.token_endpoint) continue
@@ -194,7 +236,11 @@ async function discoverMcpOAuth(mcpUrl: string): Promise<McpOAuthDiscovery> {
 /** Run an oauth2 authorization-code flow with PKCE and a loopback callback. */
 async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
   const auth = def.auth as OAuthAuthConfig
-  const discovered = auth.discoveryUrl ? await discoverMcpOAuth(auth.discoveryUrl) : undefined
+  // conn-1: discovery is the FIRST outbound hop of this flow and used to
+  // ignore the flow's cancel signal (and any deadline) entirely — a user who
+  // clicked cancel stayed parked on the socket.
+  const flowOutbound = flowOutboundOptions(options)
+  const discovered = auth.discoveryUrl ? await discoverMcpOAuth(auth.discoveryUrl, flowOutbound) : undefined
   if (discovered?.publicMcp) return { updatedAt: Date.now() } as Partial<ConnectorCredential>
   const callbackHost = options.callbackHost ?? '127.0.0.1'
   const { verifier, challenge } = pkce()
@@ -271,7 +317,13 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   const redirectUri = `http://${callbackHost}:${port}/callback`
   const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint
   const clientId = registrationEndpoint
-    ? await registerClient(auth, redirectUri, registrationEndpoint, options.clientName ?? DEFAULT_OAUTH_CLIENT_NAME)
+    ? await registerClient(
+      auth,
+      redirectUri,
+      registrationEndpoint,
+      options.clientName ?? DEFAULT_OAUTH_CLIENT_NAME,
+      flowOutbound,
+    )
     : auth.clientId || ''
   if (!clientId) throw new Error('OAuth 服务器不支持动态客户端注册，且未配置固定 clientId')
   const codeChallengeMethod = auth.pkce ? 'S256' : undefined
@@ -322,12 +374,13 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   })
   if (discovered?.resource) body.set('resource', discovered.resource)
   if (auth.pkce) body.set('code_verifier', verifier)
-  const response = await outboundFetch(tokenUrl, 'OAuth token 端点', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-    signal: AbortSignal.any([options.signal, AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS)]),
-  })
+  // The exchange keeps its own (longer) 60 s budget: `outboundFetch` composes
+  // the deadline with the flow signal, so a caller can still only shorten it.
+  const tokenCall = outboundCall(
+    { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body },
+    { ...flowOutbound, timeoutMs: TOKEN_REQUEST_TIMEOUT_MS },
+  )
+  const response = await outboundFetch(tokenUrl, 'OAuth token 端点', tokenCall.init, tokenCall.options)
   if (!response.ok) throw new Error(`OAuth token 换取失败: HTTP ${response.status}`)
   const data = (await response.json()) as Record<string, unknown>
   const accessToken = String(data.access_token ?? '')
@@ -343,10 +396,14 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
 export async function refreshOAuthToken(
   def: ConnectorDef,
   credential: ConnectorCredential,
-  options: { tokenUrlOverride?: string } = {},
+  options: { tokenUrlOverride?: string; signal?: AbortSignal; outboundTimeoutMs?: number } = {},
 ): Promise<Partial<ConnectorCredential> | null> {
   if (def.authMode !== 'oauth' || !credential.refreshToken) return null
   const auth = def.auth as OAuthAuthConfig
+  const outbound: OutboundCallOptions = {
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs }),
+  }
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
     refresh_token: credential.refreshToken,
@@ -359,7 +416,9 @@ export async function refreshOAuthToken(
   }
   let tokenUrl = options.tokenUrlOverride ?? auth.tokenUrl
   if (!tokenUrl && auth.discoveryUrl) {
-    const discovered = await discoverMcpOAuth(auth.discoveryUrl)
+    // conn-1: this is the hop that used to park a logout/switch behind the
+    // restore (no deadline, no signal, `tokenUrl` absent).
+    const discovered = await discoverMcpOAuth(auth.discoveryUrl, outbound)
     tokenUrl = discovered.tokenEndpoint ?? ''
   }
   if (!tokenUrl) return null
@@ -374,8 +433,8 @@ export async function refreshOAuthToken(
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
-      signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
-    })
+      ...(outbound.signal === undefined ? {} : { signal: outbound.signal }),
+    }, { timeoutMs: outbound.timeoutMs ?? TOKEN_REQUEST_TIMEOUT_MS })
   } catch (error) {
     if (error instanceof OutboundUrlBlockedError) return null
     throw error
@@ -393,9 +452,17 @@ export async function refreshOAuthToken(
 /** Device-code flow: surface verification URL + user code, poll until connected. */
 async function runDevice(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
   const auth = def.auth as DeviceAuthConfig
+  // conn-4: `verificationUrl` is definition-supplied (the server-issued
+  // catalog carries it) and the client renders it as a clickable `<a href>`.
+  // It was the ONLY definition-controlled URL in this package that skipped the
+  // outbound policy — `javascript:alert(document.domain)//` reached the panel
+  // verbatim. Check it exactly like its sibling `authorizeUrl`, and fail the
+  // connect loudly (a device row whose verification page is unusable must not
+  // silently report "connected").
+  const verificationUrl = assertOutboundUrlAllowed(auth.verificationUrl, '设备授权验证地址').toString()
   options.onRequest({
     connectorId: def.id,
-    verificationUrl: auth.verificationUrl,
+    verificationUrl,
   })
   return pollUntilConnected(createProbe(def, options), auth.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, auth.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS, options.signal)
 }

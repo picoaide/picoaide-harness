@@ -522,8 +522,13 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       // 口令的模型面出口。只擦模型看到的这一份：按编号点击走 `resolveTarget` 内部
       // 的未擦除快照，交互不受影响（拿被擦除的 selector 当 CSS 选择器会失败，
       // 属可接受代价）。
+      //
+      // R7 续（2026-09-13）：selector 是机器串不是散文，按 verbatim 口径擦——否则
+      // 短口令（`abc123`）在 `#abc123` 里既不是 assignment 也不是带键名的引号值，
+      // 会被散文规则放过，而同一 selector 在交互错误文案里（verbatim）已经打码：
+      // 同一个出口两套口径。verbatim 的整 token 规则不会误伤 `/test-report`。
       const safeElements = elements.map((element) => {
-        const selector = runtime.redactTabSecrets(tabId, element.selector)
+        const selector = runtime.redactTabSecrets(tabId, element.selector, { verbatim: true })
         return selector === element.selector ? element : { ...element, selector }
       })
       return { elements: safeElements, url: state.url, title: state.title }

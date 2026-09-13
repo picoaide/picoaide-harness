@@ -102,6 +102,17 @@ export interface BrowserToolOptions {
   screenshotQuality?: number
   /** Directory for programmatic downloads (default '.picoaide-downloads'). */
   downloadDir?: string
+  /**
+   * Upper bound (ms) on the ORIGIN-scoped credential-activity window created by
+   * `browser_fill_credentials` (default 300000 = 5 minutes; F-3, 2026-09-13
+   * round 2). While the window is open, `browser_eval` / `browser_screenshot`
+   * are refused on every tab showing that origin — the storage channel a sibling
+   * tab could read the injected value from. The INJECTING tab is not affected by
+   * this bound: it stays refused until its own main-frame navigation, because
+   * the value is in its document. A non-positive or non-finite value falls back
+   * to the default.
+   */
+  credentialWindowTtlMs?: number
 }
 
 /** Credential lookup for the login-form injection (connectors store). */

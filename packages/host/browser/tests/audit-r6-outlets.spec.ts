@@ -269,10 +269,19 @@ describe('R-6 F3/F7：URL 出口值级脱敏（页面自选键、裸 fragment、
     const child = h.adapter.views.at(-1)!
     child.url = `https://app.example/popup?pw=${SECRET}`
     h.runtime['updateTabState'](h.runtime['tab'](2))
-    // 子 tab 不在凭据窗口内（没被注入过），但 URL 出口照旧值级擦除。
-    expect(h.runtime.credentialWindowOpen(2)).toBe(false)
+    // 子 tab 的 URL 出口照旧值级擦除。
     expect(h.runtime.tabState(2).url).toBe('https://app.example/popup?pw=****')
     expect(h.runtime.tab(2).filledSecrets).toEqual([SECRET])
+    // R7（2026-09-13）：同源子 tab 连活性窗口一起继承——它和注入方共享
+    // localStorage/cookie（R-5 自己的威胁模型），r7c-3 的独立复现就是从这个
+    // 同源 tab 里把值读回来的。原 R-6 断言"子 tab 不在窗口内"是 tab 级口径，
+    // 已被 R7 的 origin 级口径取代（更严：不改一点数据，只是不许 eval/截图）。
+    expect(h.runtime.credentialWindowOpen(2)).toBe(true)
+    // 对照：跨源 popup 只继承值集合（R-5 F7），不继承窗口（新 origin 没有记账）。
+    opener.windowOpenHandler?.({ url: 'https://other.example/popup' })
+    await vi.waitFor(() => { expect(h.adapter.views.length).toBeGreaterThan(2) })
+    expect(h.runtime.credentialWindowOpen(3)).toBe(false)
+    expect(h.runtime.tab(3).filledSecrets).toEqual([SECRET])
   })
 })
 
@@ -325,15 +334,24 @@ describe('R-6 F5/F6：主帧导航出窗后，值集合按 tab 生命周期保�
     expect(JSON.stringify(search)).not.toContain(SECRET)
   })
 
-  it('tab 关闭后值集合随之消失（生命周期就是 tab）', async () => {
+  it('tab 关闭后值集合按 origin 保留（新 tab 仍擦除；窗口随持有者结束）', async () => {
     const h = track(makeHarness(async () => ({ password: SECRET })))
     await h.runtime.open('https://app.example/login')
     await injectCredentials(h, SECRET)
     await h.runtime.closeTab(1)
     expect(h.runtime.listTabs()).toHaveLength(0)
-    // 新 tab 不继承已关闭 tab 的值集合。
+    // R7（2026-09-13）：值集合记在 origin 上而不是单个 tab 上——页面把注入值存进
+    // localStorage/cookie 之后，**后开的**同源 tab 一样能读回来，所以擦除必须留着
+    // （fail-closed：只会多擦，不会漏）。原 R-6 的"tab 关闭即消失"口径被 r7c-3 的
+    // 跨 tab 复现推翻。
     await h.runtime.open('https://app.example/free')
-    expect(h.runtime.tab(2).filledSecrets).toEqual([])
+    expect(h.runtime.tab(2).filledSecrets).toEqual([SECRET])
+    // 窗口由注入它的那个 tab 持有：持有者关闭后窗口结束，eval/截图恢复（值集合仍在）。
+    expect(h.runtime.credentialWindowOpen(2)).toBe(false)
+    // 记账按 origin 隔离：另一个 origin 的新 tab 什么也不继承。
+    await h.runtime.open('https://elsewhere.example/free')
+    expect(h.runtime.tab(3).filledSecrets).toEqual([])
+    expect(h.runtime.credentialWindowOpen(3)).toBe(false)
   })
 })
 
