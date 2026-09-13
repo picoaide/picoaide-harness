@@ -26,7 +26,7 @@ import { translate, getLocale, SYNC_REPO_DICT } from '../i18n.js'
 /** Translate through SYNC_REPO_DICT in the active host locale. */
 const srt = (key, params) => translate(SYNC_REPO_DICT, key, params, getLocale())
 import { spawn } from 'node:child_process'
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isCanonical, isStaleLock, parseEntries, serializeEntries, withLock } from '../store.js'
 import { ENTRY_DELIMITER } from '../store.js'
@@ -419,7 +419,9 @@ export async function ensureMemoryRepo({ dir, memoryDir, cwd, projectId, display
     '!CONFLICTS.md', '!TODOS.md', '!logs/', '!logs/**', '!.gitattributes', '',
   ].join('\n')
   if (!existsSync(gitignorePath) || readFileSync(gitignorePath, 'utf8') !== gitignoreContent) {
-    writeFileSync(gitignorePath, gitignoreContent)
+    if (writeFileAtomicSafe(dir, gitignorePath, gitignoreContent).ok !== true) {
+      return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitignore' }), committed: false, backfilled: 0, migratedFrom: null, remoteBranchExists: null }
+    }
   }
 
   // ── 3b. .gitattributes + core.autocrlf false（Windows 换行事故修复，
@@ -432,7 +434,9 @@ export async function ensureMemoryRepo({ dir, memoryDir, cwd, projectId, display
     return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitattributes' }), committed: false, backfilled: 0, migratedFrom: null, remoteBranchExists: null }
   }
   if (!existsSync(gitattributesPath) || readFileSync(gitattributesPath, 'utf8') !== GITATTRIBUTES_CONTENT) {
-    writeFileSync(gitattributesPath, GITATTRIBUTES_CONTENT)
+    if (writeFileAtomicSafe(dir, gitattributesPath, GITATTRIBUTES_CONTENT).ok !== true) {
+      return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitattributes' }), committed: false, backfilled: 0, migratedFrom: null, remoteBranchExists: null }
+    }
   }
   await runGit(dir, ['config', 'core.autocrlf', 'false'])
 
@@ -474,7 +478,9 @@ export async function ensureMemoryRepo({ dir, memoryDir, cwd, projectId, display
       tracks: { project: true },
     }
     if (report.migratedFrom) meta.migratedFrom = report.migratedFrom
-    writeFileSync(provenancePath, `${JSON.stringify(meta)}\n`)
+    if (writeFileAtomicSafe(dir, provenancePath, `${JSON.stringify(meta)}\n`).ok !== true) {
+      return { ok: false, message: srt('syncr.symlinkRefused', { path: 'PROVENANCE' }), committed: false, backfilled: 0, migratedFrom: null, remoteBranchExists: null }
+    }
   }
 
   // ── 6. 首次提交（无变化跳过；allowlist stage——审查 P1-12）──
@@ -701,7 +707,9 @@ export async function ensureGlobalRepo({ dir, url }) {
     '!TODOS-life.md', '!TODOS-work.md', '!daily/', '!daily/**', '',
   ].join('\n')
   if (!existsSync(gitignorePath) || readFileSync(gitignorePath, 'utf8') !== gitignoreContent) {
-    writeFileSync(gitignorePath, gitignoreContent)
+    if (writeFileAtomicSafe(dir, gitignorePath, gitignoreContent).ok !== true) {
+      return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitignore' }), committed: false, backfilled: report.backfilled }
+    }
   }
 
   // ── 3b. .gitattributes + core.autocrlf false（Windows 换行事故修复，
@@ -712,7 +720,9 @@ export async function ensureGlobalRepo({ dir, url }) {
     return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitattributes' }), committed: false, backfilled: report.backfilled }
   }
   if (!existsSync(gitattributesPath) || readFileSync(gitattributesPath, 'utf8') !== GITATTRIBUTES_CONTENT) {
-    writeFileSync(gitattributesPath, GITATTRIBUTES_CONTENT)
+    if (writeFileAtomicSafe(dir, gitattributesPath, GITATTRIBUTES_CONTENT).ok !== true) {
+      return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitattributes' }), committed: false, backfilled: report.backfilled }
+    }
   }
   await runGit(dir, ['config', 'core.autocrlf', 'false'])
 
@@ -736,7 +746,9 @@ export async function ensureGlobalRepo({ dir, url }) {
       // daily=每日日志、todo=生活/工作/每日待办
       tracks: { memory: false, user: false, daily: false, todo: false },
     }
-    writeFileSync(provenancePath, `${JSON.stringify(meta)}\n`)
+    if (writeFileAtomicSafe(dir, provenancePath, `${JSON.stringify(meta)}\n`).ok !== true) {
+      return { ok: false, message: srt('syncr.symlinkRefused', { path: 'PROVENANCE' }), committed: false, backfilled: report.backfilled }
+    }
   }
 
   // ── 5. entryId 补发（锁内）：全局记忆文件（MEMORY/USER/归档/daily/*.md）
@@ -796,7 +808,7 @@ export async function ensureGlobalRepo({ dir, url }) {
           meta.projectId = createHash('sha1').update(urlKey).digest('hex').slice(0, 12)
           meta.displayName = safeUrl
           meta.url = safeUrl
-          writeFileSync(provPath, `${JSON.stringify(meta)}\n`)
+          writeFileAtomicSafe(dir, provPath, `${JSON.stringify(meta)}\n`)
         } catch { /* PROVENANCE 损坏：跳过身份更新（由后续校验报错暴露） */ }
       }
     }
@@ -880,8 +892,12 @@ function backfillEntryIds(dir, fileset = 'project') {
     // parseEntries 会把回车符留在条目里，补发后条目边界被破坏。备份 + 跳过，
     // 等人工整理后再同步。
     if (!isCanonical(text)) {
+      // FIX-27（me-2，2026-09-13）：备份落点同样走安全原子写 ——
+      // `${file}.bak.<Date.now()>` 是可预置的写落点（毫秒时间戳可枚举，
+      // 符号链接农场能让"备份"写到仓库外）。被拒（符号链接/越界/预置同名
+      // 条目）即不写；原文件本就不重写（跳过），数据不受影响。
       try {
-        copyFileSync(file, `${file}.bak.${Date.now()}`)
+        writeFileAtomicSafe(dir, `${file}.bak.${Date.now()}`, readFileSync(file))
       } catch { /* 备份失败不阻断跳过 */ }
       skipped += 1
       continue
@@ -907,19 +923,51 @@ function backfillEntryIds(dir, fileset = 'project') {
 /**
  * 文件级递归移动 srcDir 的全部内容到 dstDir（审查 P0-1 修复）。
  *   - 子目录递归；.memory.lock 跳过（锁文件不属于数据）；
+ *   - **符号链接一律原地跳过**（FIX-27 / me-5，2026-09-13）：`statSync` 会
+ *     跟随链接，把"指向仓库外的符号链接目录"当成子目录递归，随后 renameSync
+ *     把仓外文件搬进仓库（源处删除）——同一函数的兄弟步骤 backfillEntryIds
+ *     早已拒符号链接，步骤 0 是修复不完整留下的破坏性出口。跳过即"不读、
+ *     不搬、不删"，链接与其仓外目标都原地保留；
+ *   - 目标落点同样断言（resolveSafeRepoTarget：逐层 lstat + realpath 包含性，
+ *     兼容"记忆目录本身是符号链接"的合法布局）——目标同名项是符号链接时
+ *     rename 会顺着它把文件落到仓库外，同样跳过；
  *   - 同名冲突：源文件改 `<名>.pre-migrate` 后缀保留**双份**，绝不覆盖；
- *   - 全部落地后才删除源目录（核验即"移动成功即落地"——同盘 rename 原子）。
- * @param {string} srcDir - 源目录（迁移后被删除）。
+ *   - 全部落地后才删除源目录（核验即"移动成功即落地"——同盘 rename 原子）；
+ *     仍有跳过项时保留源目录（那几个条目没有落地，下一次迁移再跳过一次，
+ *     幂等）。
+ * @param {string} srcDir - 源目录（内容全部落地后被删除）。
  * @param {string} dstDir - 目标目录（必须已存在）。
- * @returns {number} 冲突备份数。
+ * @returns {number} 冲突/跳过计数。
  */
 function moveTreeInto(srcDir, dstDir) {
   let conflicts = 0
+  // 源根本身是符号链接（指向仓库外）：整树不搬（下面的逐项 lstat 只覆盖
+  // 子项，根要单独判一次——递归不会走到这里第二次）。
+  try {
+    if (lstatSync(srcDir).isSymbolicLink()) return 0
+  } catch {
+    return 0 // 不可判定：不搬（数据留在原地）
+  }
   for (const name of readdirSync(srcDir)) {
     if (name === '.memory.lock') continue
     const src = join(srcDir, name)
-    const dst = join(dstDir, name)
-    if (statSync(src).isDirectory()) {
+    let st
+    try {
+      st = lstatSync(src) // 不跟随链接：符号链接目录不得被当成子目录递归
+    } catch {
+      conflicts += 1 // 竞态里消失/不可判定：不搬，交由源目录保留
+      continue
+    }
+    if (st.isSymbolicLink()) {
+      conflicts += 1
+      continue
+    }
+    const dst = resolveSafeRepoTarget(dstDir, name)
+    if (dst === null) {
+      conflicts += 1 // 目标落点不安全（符号链接/越界）：跳过
+      continue
+    }
+    if (st.isDirectory()) {
       mkdirSync(dst, { recursive: true })
       conflicts += moveTreeInto(src, dst)
     } else if (existsSync(dst)) {
@@ -932,8 +980,14 @@ function moveTreeInto(srcDir, dstDir) {
       renameSync(src, dst)
     }
   }
-  // 全部文件已落地 → 删源目录（此时只剩空壳）
-  rmSync(srcDir, { recursive: true, force: true })
+  // 全部文件已落地 → 删源目录（此时只剩空壳）；有跳过项时保留源目录
+  let leftovers
+  try {
+    leftovers = readdirSync(srcDir).filter((entry) => entry !== '.memory.lock')
+  } catch {
+    return conflicts // 源目录已被并发移除/不可读：无残留可判，视为完成
+  }
+  if (leftovers.length === 0) rmSync(srcDir, { recursive: true, force: true })
   return conflicts
 }
 

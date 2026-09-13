@@ -13,7 +13,9 @@ import (
 func agentArchive(t *testing.T, version, title string) []byte {
 	t.Helper()
 	return makeZip(t, map[string]string{
-		"agent.cordis.yml": "# composition\nentry: []\n",
+		// archupd-1②:编排必须是上游可挂载的插件行列表(旧夹具是映射,
+		// 发布期已按闸门拒收)。
+		"agent.cordis.yml": "- id: persona\n  name: '@deepseek-ai/dsh-persona'\n",
 		"preset.yml": `name: ` + title + `
 version: ` + version + `
 description: 一个用于演示市场智能体管理的测试智能体
@@ -66,10 +68,14 @@ func TestAdminAgentsCRUD(t *testing.T) {
 	// 预览:file 清单 + composition
 	if w, out := mreq(t, r, "GET", "/api/server/admin/agents/ppt-gen/preview", "", hdr); w.Code != http.StatusOK {
 		t.Fatalf("preview: %d %s", w.Code, w.Body.String())
-	} else if len(out["files"].([]any)) != 2 || !strings.Contains(out["composition"].(string), "entry") {
+	} else if len(out["files"].([]any)) != 2 || !strings.Contains(out["composition"].(string), "dsh-persona") {
 		t.Fatalf("preview = %v", out)
 	}
-	// 授权:用户直授 + 组授权,清单可见
+	// 授权:用户直授 + 组授权,清单可见。单条授权会校验主体存在性
+	// (marketplace-5),先建出被授权用户。
+	if _, err := serverstore.CreateUserWithPassword(db, "carol", "carolpw"); err != nil {
+		t.Fatal(err)
+	}
 	if w, _ := mreq(t, r, "PUT", "/api/server/admin/agents/ppt-gen/grant", `{"username":"carol"}`, hdr); w.Code != http.StatusOK {
 		t.Fatal("grant user failed")
 	}

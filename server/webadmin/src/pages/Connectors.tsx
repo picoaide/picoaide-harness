@@ -113,7 +113,21 @@ interface ConnectorForm {
   tokenFields: TokenFieldRow[]
   examples: string
   mcp: McpRow[]
+  // 表单**未建模**的字段(审计 R7 branding-2):服务端把 definition 整列替换,
+  // 而 `settings`(客户端据此弹预连接表单/注入 env)与 `icon` 等都是协议里的
+  // 一等公民,只是本页表单没建它们。编辑一次就静默丢掉属于数据丢失,所以这里
+  // 原样透传:顶层未建模键 + auth 里未建模的子键。
+  raw: Record<string, unknown>
+  rawAuth: Record<string, unknown>
 }
+
+/** 表单已建模的顶层键(buildDefinition 会覆盖它们;其余原样透传)。 */
+const MODELED_TOP_KEYS = new Set(['authMode', 'auth', 'tokenFields', 'examples', 'mcp'])
+/** 表单已建模的 auth 子键(其余原样透传 —— 客户端/服务端可能比本页知道得多)。 */
+const MODELED_AUTH_KEYS = new Set([
+  'discoveryUrl', 'authorizeUrl', 'tokenUrl', 'registrationEndpoint', 'clientId', 'scopes',
+  'redirectUri', 'pkce', 'publicClient', 'verificationUrl', 'pollIntervalMs', 'pollTimeoutMs',
+])
 
 function emptyForm(): ConnectorForm {
   return {
@@ -136,6 +150,8 @@ function emptyForm(): ConnectorForm {
     tokenFields: [{ keyId: uid(), key: '', label: '', type: 'password', required: true, defaultValue: '' }],
     examples: '',
     mcp: [{ keyId: uid(), serverName: '', transport: 'streamable-http', url: '', command: '', args: '', env: [], headers: [] }],
+    raw: {},
+    rawAuth: {},
   }
 }
 
@@ -164,11 +180,14 @@ const TEMPLATES: { label: string; name: string; description: string; authMode: A
   },
 ]
 
-/** 表单 → 定义 JSON(过滤空值,保持精简;authMode 一并写入,便于 JSON 独立使用)。 */
+/** 表单 → 定义 JSON(过滤空值,保持精简;authMode 一并写入,便于 JSON 独立使用)。
+ *
+ *  未建模字段(settings/icon/未来新增键以及 auth 下未建模的子键)原样透传:
+ *  服务端 UpdateConnector 是整列替换,表单没建模 ≠ 可以丢(审计 R7 branding-2)。 */
 function buildDefinition(form: ConnectorForm): string {
-  const def: Record<string, unknown> = { authMode: form.authMode }
+  const def: Record<string, unknown> = { authMode: form.authMode, ...form.raw }
   if (form.authMode === 'oauth') {
-    const a: Record<string, unknown> = { pkce: form.pkce, publicClient: form.publicClient }
+    const a: Record<string, unknown> = { ...form.rawAuth, pkce: form.pkce, publicClient: form.publicClient }
     if (form.discoveryUrl.trim()) a.discoveryUrl = form.discoveryUrl.trim()
     if (form.authorizeUrl.trim()) a.authorizeUrl = form.authorizeUrl.trim()
     if (form.tokenUrl.trim()) a.tokenUrl = form.tokenUrl.trim()
@@ -178,7 +197,7 @@ function buildDefinition(form: ConnectorForm): string {
     if (form.redirectUri.trim()) a.redirectUri = form.redirectUri.trim()
     def.auth = a
   } else if (form.authMode === 'device') {
-    const a: Record<string, unknown> = {}
+    const a: Record<string, unknown> = { ...form.rawAuth }
     if (form.verificationUrl.trim()) a.verificationUrl = form.verificationUrl.trim()
     if (form.pollIntervalMs.trim()) a.pollIntervalMs = Number(form.pollIntervalMs.trim())
     if (form.pollTimeoutMs.trim()) a.pollTimeoutMs = Number(form.pollTimeoutMs.trim())
@@ -194,6 +213,9 @@ function buildDefinition(form: ConnectorForm): string {
       })
     if (fields.length > 0) def.tokenFields = fields
   }
+  // 非 oauth/device 模式:表单不产出 auth,但原定义里若有未建模的 auth 子键,
+  // 仍要保留(否则切换认证方式或保存一次就丢)。
+  if (def.auth === undefined && Object.keys(form.rawAuth).length > 0) def.auth = { ...form.rawAuth }
   const examples = form.examples.split('\n').map((s) => s.trim()).filter(Boolean)
   if (examples.length > 0) def.examples = examples
   def.mcp = form.mcp.map((m) => {
@@ -265,9 +287,24 @@ function parseDefinition(def: string, fallbackMode: AuthMode): ConnectorForm {
       }))
     : []
   const form = emptyForm()
+  // 未建模字段收集:解析一次就把"表单管不到的键"留在表单里,保存时原样写回。
+  const rawTop: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(raw)) {
+    if (!MODELED_TOP_KEYS.has(k)) rawTop[k] = v
+  }
+  const rawAuth: Record<string, unknown> = {}
+  const authEditedByForm = authMode === 'oauth' || authMode === 'device'
+  for (const [k, v] of Object.entries(oauth as Record<string, unknown>)) {
+    // oauth/device 模式下 auth 由表单接管(只透传它没建模的子键);这两种模式
+    // 之外表单根本不编辑 auth,整份原样保留 —— 否则"模式与 auth 同时存在"的
+    // 定义(或切换模式后)保存一次就丢。
+    if (!authEditedByForm || !MODELED_AUTH_KEYS.has(k)) rawAuth[k] = v
+  }
   return {
     ...form,
     authMode: authMode as AuthMode,
+    raw: rawTop,
+    rawAuth,
     discoveryUrl: typeof oauth.discoveryUrl === 'string' ? oauth.discoveryUrl : '',
     authorizeUrl: typeof oauth.authorizeUrl === 'string' ? oauth.authorizeUrl : '',
     tokenUrl: typeof oauth.tokenUrl === 'string' ? oauth.tokenUrl : '',
@@ -324,6 +361,11 @@ export default function Connectors() {
   const setCopied = (v: boolean) => { flashCopied(v ? '已复制' : '') }
 
   const definition = useMemo(() => buildDefinition(form), [form])
+  // 表单管不到、但会原样写回的字段(仅用于在界面上明示,不让"保留"变成隐形行为)。
+  const unmodeledKeys = useMemo(
+    () => [...Object.keys(form.raw), ...Object.keys(form.rawAuth).map((k) => `auth.${k}`)],
+    [form.raw, form.rawAuth],
+  )
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -844,6 +886,12 @@ export default function Connectors() {
             <Textarea id="conn-def" rows={10} readOnly spellCheck={false} aria-label="定义 JSON(与客户端 ConnectorDef 对齐,实时生成)"
               className="font-mono text-xs"
               value={definition} />
+            {unmodeledKeys.length > 0 && (
+              // 明示而不是静默:这些键表单不编辑,但保存时会原样写回。
+              <p className="text-xs text-muted-foreground">
+                该定义还包含表单未建模的字段({unmodeledKeys.join('、')}),保存时原样保留。
+              </p>
+            )}
             {showImport && (
               <div className="space-y-2 rounded-md border border-dashed p-3">
                 {editing === 'new' ? (

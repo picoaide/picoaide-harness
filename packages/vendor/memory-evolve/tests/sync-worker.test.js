@@ -13,7 +13,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -332,6 +332,44 @@ test('CRLF 自愈：手工编辑的真·坏格式仍中止（备份 + 不重写�
     // 原文件应被备份（.bak 存在）
     const baks = readdirSync(B.dir).filter((n) => n.includes('.bak.'))
     assert.ok(baks.length > 0, '坏格式文件应备份')
+  } finally {
+    clean(root)
+  }
+})
+
+/**
+ * me-2 回归（P2，R7 审计）：坏格式备份的落点 `<file>.bak.<Date.now()>` 从未
+ * 断言——预铺一小片同名符号链接农场（指向仓外受害文件）即可让 copyFileSync
+ * 跟随链接把「备份」写到仓库外。改前：仓外文件被写成坏格式正文（本用例红）；
+ * 改后：备份走安全原子写（O_EXCL + 落点断言），落点被拒即不写，仓外零字节。
+ */
+test('me-2：坏格式备份落点被预置符号链接农场劫持时必须拒写（仓外零字节）', { skip }, async () => {
+  const root = tempDir()
+  try {
+    const { bare, devices } = setupDevices(root, 'https://example.com/acme/alpha.git')
+    const B = devices.B
+    await deviceABootstrap({ bare, devices, keyLines: ['[id:aaaa0000] [2026-08-10] 原始内容'] })
+    await deviceBConnect({ dir: B.dir, remoteUrl: bare, remoteBranch: RB })
+    const keyPath = join(B.dir, 'KEY.md')
+    const bad = '条目A\r\n§\r\n条目B\n更多\r孤立'
+    writeFileSync(keyPath, bad)
+    const outside = join(root, 'outside-victim.txt')
+    writeFileSync(outside, 'ORIGINAL-OUTSIDE-CONTENT\n')
+    const t0 = Date.now()
+    let seeded = 0
+    for (let t = t0; t <= t0 + 5000; t += 1) {
+      try { symlinkSync(outside, join(B.dir, `KEY.md.bak.${t}`)); seeded += 1 } catch { /* 已存在 */ }
+    }
+    assert.ok(seeded > 0, '符号链接农场未铺出')
+
+    const r = await runSync({ dir: B.dir, remoteBranch: RB })
+
+    assert.equal(r.ok, false)
+    assert.equal(r.code, 3)
+    assert.equal(readFileSync(outside, 'utf8'), 'ORIGINAL-OUTSIDE-CONTENT\n', '备份沿符号链接农场写到了仓库外')
+    assert.equal(readFileSync(keyPath, 'utf8'), bad, '坏格式原文件不得被重写')
+    const hijacked = readdirSync(B.dir).filter((n) => n.startsWith('KEY.md.bak.') && lstatSync(join(B.dir, n)).isSymbolicLink())
+    assert.ok(hijacked.length > 0, '预置的符号链接不应被写穿/改名')
   } finally {
     clean(root)
   }

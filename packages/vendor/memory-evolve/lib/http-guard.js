@@ -68,34 +68,48 @@ export async function readBody(req, maxBytes = 64 * 1024) {
  * 同源校验（保护本地写端点）：要求 Content-Type 精确为 JSON 媒体类型
  * （子串匹配会放过 text/plain;charset=json 之类，CodeX 复审 P1-5）；
  * 写操作强制要求 Origin 头存在且 host 与 Host 一致——跨站表单/脚本
- * 无法构造 JSON 体、且同源 fetch 必然携带 Origin。返回错误文案或 null。
+ * 无法构造 JSON 体、且同源 fetch 必然携带 Origin。
+ *
+ * 返回 `{reason, error}`（reason 是机器可读的失败分类，供自有错误契约的
+ * 模块做映射；`guardRequest` 对外仍然只吐 `{ok:false, code, error}`）。
  *
  * @param {object} req - node http 请求。
  * @param {object} body - 已解析的请求体（无体请求传 {}）。
  * @param {boolean} [bodyless] - 请求确实没有体（如浏览器发的 DELETE 不带
  *   Content-Type）时允许缺省 content-type；声明了就必须是 JSON。
- * @returns {string | null} 错误文案；null = 放行。
+ * @returns {{reason: string, error: string} | null} null = 放行。
  */
 function sameOriginGuard(req, body, bodyless = false) {
   const headers = req.headers ?? {}
   const contentType = String(headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
   if (contentType !== 'application/json' && !(bodyless && contentType === '')) {
-    return '请求必须为 application/json'
+    return { reason: 'content-type', error: '请求必须为 application/json' }
   }
   const host = String(headers.host ?? '')
   const origin = String(headers.origin ?? '')
-  if (origin === '') return '缺少 Origin 头，已拒绝（写操作必须由 Web UI 发起）'
+  if (origin === '') return { reason: 'origin-missing', error: '缺少 Origin 头，已拒绝（写操作必须由 Web UI 发起）' }
   let originHost = ''
   try {
     originHost = new URL(origin).host
   } catch {
-    return '跨站请求已拒绝'
+    return { reason: 'origin-cross', error: '跨站请求已拒绝' }
   }
-  if (originHost !== host) return '跨站请求已拒绝'
+  if (originHost !== host) return { reason: 'origin-cross', error: '跨站请求已拒绝' }
   if (body === undefined || body === null || typeof body !== 'object' || Array.isArray(body)) {
-    return '请求体必须是 JSON 对象'
+    return { reason: 'body-not-object', error: '请求体必须是 JSON 对象' }
   }
   return null
+}
+
+/** 守卫拒绝结果（公共响应体与既有契约逐字节一致；`reason` 供映射用）。 */
+function guardDenial(status, reason, error) {
+  return {
+    status,
+    reason,
+    body: reason === 'cross-site'
+      ? { ok: false, code: 'cross-site', error }
+      : { ok: false, code: 'bad-request', error },
+  }
 }
 
 /**
@@ -111,6 +125,30 @@ function sameOriginGuard(req, body, bodyless = false) {
  * @returns {Promise<{status: number, body: object} | null>} null = 放行。
  */
 export async function guardRequest(req, maxBytes = 64 * 1024) {
+  const denied = await guardRequestReasoned(req, maxBytes)
+  if (denied === null) return null
+  return { status: denied.status, body: denied.body }
+}
+
+/**
+ * 带**失败分类**的守卫（FIX-27 / me-3，2026-09-13）。
+ *
+ * 语义与 {@link guardRequest} **完全同一份实现**，只是拒绝时多返回一个机器
+ * 可读的 `reason`：`cross-site` / `content-type` / `origin-missing` /
+ * `origin-cross` / `body-too-large` / `bad-json` / `body-not-object`。
+ *
+ * 为什么需要它：`lib/advisor/api.js` 有自己的错误契约（按失败原因分
+ * 400/403/413/415，MAJOR-8 复审口径）。此前它靠**本地第 10 份手写副本**维持
+ * 那套契约，于是共享守卫的读侧策略（跨站 GET → 403）与无体 content-type
+ * 规则都传不到它 —— 同一份策略两处漂移，下一轮加固必然漏改。现在策略只此
+ * 一份，自有契约的模块按 reason 做映射即可。
+ *
+ * @param {object} req - node http 请求。
+ * @param {number} [maxBytes] - 有体请求的解析上限（默认 64 KiB）。
+ * @returns {Promise<{status: number, reason: string, body: object} | null>}
+ *   null = 放行。
+ */
+export async function guardRequestReasoned(req, maxBytes = 64 * 1024) {
   // 守卫现在挂在每个注册点上，而 handler 可能由测试桩/非标准载体调用；
   // 缺 headers 时按"全部缺省"处理（写请求会因缺少 Origin 被拒，GET 放行），
   // 而不是抛 TypeError 变成 500。
@@ -119,7 +157,7 @@ export async function guardRequest(req, maxBytes = 64 * 1024) {
   if (method === 'GET' || method === 'HEAD') {
     const site = String(headers['sec-fetch-site'] ?? '').trim().toLowerCase()
     if (site === 'cross-site') {
-      return { status: 403, body: { ok: false, code: 'cross-site', error: '跨站请求已拒绝' } }
+      return guardDenial(403, 'cross-site', '跨站请求已拒绝')
     }
     return null
   }
@@ -134,12 +172,14 @@ export async function guardRequest(req, maxBytes = 64 * 1024) {
     try {
       body = await readBody(req, maxBytes)
     } catch (error) {
-      const detail = error instanceof Error && error.message === 'body too large' ? '请求体过大' : '请求体不是合法 JSON'
-      return { status: 400, body: { ok: false, code: 'bad-request', error: detail } }
+      const tooLarge = error instanceof Error && error.message === 'body too large'
+      return tooLarge
+        ? guardDenial(400, 'body-too-large', '请求体过大')
+        : guardDenial(400, 'bad-json', '请求体不是合法 JSON')
     }
   }
-  const message = sameOriginGuard(req, body, !hasBody)
-  if (message !== null) return { status: 400, body: { ok: false, code: 'bad-request', error: message } }
+  const denied = sameOriginGuard(req, body, !hasBody)
+  if (denied !== null) return guardDenial(400, denied.reason, denied.error)
   if (hasBody) req[GUARDED_BODY] = body
   return null
 }

@@ -287,7 +287,8 @@ func listAll(db *sql.DB) gin.HandlerFunc {
 func decide(db *sql.DB, status serverstore.SharedSkillStatus, auditAction string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name, version := c.Param("name"), c.Param("version")
-		if _, err := serverstore.GetSharedSkill(db, name, version); err != nil {
+		row, err := serverstore.GetSharedSkill(db, name, version)
+		if err != nil {
 			if errors.Is(err, serverstore.ErrNotFound) {
 				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 				return
@@ -327,7 +328,36 @@ func decide(db *sql.DB, status serverstore.SharedSkillStatus, auditAction string
 				return
 			}
 		}
-		if err := serverstore.SetSharedSkillStatus(db, name, version, status, reason); err != nil {
+		// agentshare-3:共享库只审核组织渠道行。放在跨源冲突检测之后,让
+		// 「approve 一个市场同名行」保持原有的 409 CONFLICT 语义(两者都是
+		// 拒绝,只是码不同);reject 没有冲突检测,直接由这里 404。
+		if !requireOrgSkill(c, db, name) {
+			return
+		}
+		// F2-N3 / N-4:与 agentshare 侧同一条不变量 —— 审核通过意味着版本对
+		// 员工可见可安装,必须有归档字节。拒绝已把字节释放(agentshare-5 的
+		// 存储上界),再点「通过」只会得到 status=approved + archive_bytes=0
+		// 的坏行:员工清单可见、下载 500、管理员预览 404。
+		//
+		// N-4:这个「先读归档长度、再写状态」的判定是 check-then-act,两个
+		// 管理员并发 approve/reject 时它会交错出坏行(实测 12 轮里 6~7 轮)。
+		// 这里保留它只是为了**顺序路径**的友好 409 文案;并发下的真正防线是
+		// serverstore.SetReleaseStatus 的条件 UPDATE(见 apps.go),写入返回
+		// ErrReleaseArchiveCleared 时下面同样回 409 而不是 500。
+		// 拒绝不再单独调用 DeleteSharedSkillArchive:拒绝与释放归档已经在
+		// 同一条 UPDATE 里完成(否则「置 rejected」与「清 archive」之间仍有
+		// 一个可被并发 approve 穿过的窗口)。
+		if status == serverstore.SharedSkillApproved && len(row.Archive) == 0 {
+			serverauth.WriteError(c, http.StatusConflict, "ARCHIVE_CLEARED",
+				"该版本归档已在拒绝时清理,无法再通过审核(拒绝即释放存储):请让作者上传新版本")
+			return
+		}
+		if err := serverstore.SetReleaseStatusForReview(db, serverstore.AppKindSkill, name, version, string(status), reason); err != nil {
+			if errors.Is(err, serverstore.ErrReleaseArchiveCleared) {
+				serverauth.WriteError(c, http.StatusConflict, "ARCHIVE_CLEARED",
+					"该版本归档已在拒绝时清理,无法再通过审核(拒绝即释放存储):请让作者上传新版本")
+				return
+			}
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 			return
 		}
@@ -338,6 +368,9 @@ func decide(db *sql.DB, status serverstore.SharedSkillStatus, auditAction string
 func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name, version := c.Param("name"), c.Param("version")
+		if !requireOrgSkill(c, db, name) {
+			return
+		}
 		if err := serverstore.DeleteSharedSkill(db, name, version); err != nil {
 			if errors.Is(err, serverstore.ErrNotFound) {
 				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
@@ -385,6 +418,9 @@ func grantSubject(req grantReq) (string, serverstore.GranteeType, bool) {
 func listGrants(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
+		if !requireOrgSkill(c, db, name) {
+			return
+		}
 		grants, err := serverstore.ListSharedResourceGrants(db, serverstore.SharedSkillGrantTable, name)
 		if err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
@@ -402,6 +438,9 @@ func listGrants(db *sql.DB) gin.HandlerFunc {
 func replaceGrants(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
+		if !requireOrgSkill(c, db, name) {
+			return
+		}
 		var req struct {
 			Groups []string `json:"groups"`
 		}
@@ -428,6 +467,9 @@ func replaceGrants(db *sql.DB) gin.HandlerFunc {
 func setQuality(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name, version := c.Param("name"), c.Param("version")
+		if !requireOrgSkill(c, db, name) {
+			return
+		}
 		var req struct {
 			Quality string `json:"quality"`
 		}
@@ -460,6 +502,9 @@ func setQuality(db *sql.DB) gin.HandlerFunc {
 func setGrant(db *sql.DB, grant bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
+		if !requireOrgSkill(c, db, name) {
+			return
+		}
 		var req grantReq
 		if err := c.ShouldBindJSON(&req); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
@@ -515,6 +560,11 @@ func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 		name, version := c.Param("name"), c.Param("version")
 		if !skillNameRe.MatchString(name) || !versionRe.MatchString(version) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "参数不合法")
+			return
+		}
+		// agentshare-3:共享技能库的下载只服务组织渠道(市场技能走
+		// /api/client/v2/marketplace/skills/:name/archive,客户端按来源路由)。
+		if !requireOrgSkill(c, db, name) {
 			return
 		}
 		s, err := serverstore.GetSharedSkill(db, name, version)
@@ -608,6 +658,9 @@ func preview(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "参数不合法")
 			return
 		}
+		if !requireOrgSkill(c, db, name) {
+			return
+		}
 		s, err := serverstore.GetSharedSkill(db, name, version)
 		if err != nil {
 			if errors.Is(err, serverstore.ErrNotFound) {
@@ -678,6 +731,9 @@ func fileContent(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "文件路径不合法")
 			return
 		}
+		if !requireOrgSkill(c, db, name) {
+			return
+		}
 		s, gerr := serverstore.GetSharedSkill(db, name, version)
 		if gerr != nil {
 			if errors.Is(gerr, serverstore.ErrNotFound) {
@@ -742,7 +798,9 @@ func ValidateSkillArchive(data []byte) (string, error) {
 	case errors.Is(err, archiveutil.ErrUnsafe):
 		return "", ErrUnsafeArchive
 	case errors.Is(err, archiveutil.ErrDuplicateEntry):
-		return "", ErrDuplicateArchive
+		// F2-N7:把「被判为同一个文件」的两个条目名留在错误链里,HTTP 层
+		// 回显给上传者(installerKey 的折叠是宁严勿宽,用户需要知道改哪个名)。
+		return "", errors.Join(ErrDuplicateArchive, err)
 	case errors.Is(err, archiveutil.ErrInvalid), errors.Is(err, archiveutil.ErrTooMany):
 		return "", ErrArchiveInvalid
 	default:
@@ -763,7 +821,16 @@ func archiveErrorMessage(err error) string {
 	case errors.Is(err, ErrUnsafeArchive):
 		return "归档内容不安全(路径越界或链接文件)"
 	case errors.Is(err, ErrDuplicateArchive):
+		// F2-N7:列出被判为同一个文件的两个名字 —— installerKey 的折叠
+		// (大小写/尾随点空格/NTFS 危险折叠)宁严勿宽,不点名的话用户无从改名。
+		if first, second, ok := archiveutil.DuplicateEntryNames(err); ok {
+			return fmt.Sprintf("归档含重复条目:%s 与 %s 在安装端是同一个文件(大小写/尾随点空格折叠),请改名后重新打包", first, second)
+		}
 		return "归档含重复条目(同一文件出现多次,大小写不敏感)"
+	case errors.Is(err, archiveutil.ErrCorrupt):
+		return "归档内容损坏(条目解压或 CRC 校验失败)"
+	case errors.Is(err, archiveutil.ErrPathConflict):
+		return "归档中同一路径既是文件又是目录"
 	case errors.Is(err, ErrArchiveInvalid):
 		return "归档过大或结构非法"
 	default:

@@ -18,7 +18,7 @@ import { TabPool } from './pool.ts'
 import { BrowserStore, stripSensitiveText, stripSensitiveUrl, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
 import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
 import { SENSITIVE_KEY_PATTERN } from './sensitive.ts'
-import { browserError, BrowserError } from './errors.ts'
+import { browserError, BrowserError, type BrowserErrorCode } from './errors.ts'
 import { isFrameOrderProblem, orderFramesByDom, frameOrderErrorMessage, SRCDOC_URL, type FrameCandidate, type FrameOrderProblem } from './frames.ts'
 import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
@@ -47,6 +47,51 @@ const SCREENSHOT_PRIMARY_BUDGET_MS = 8_000
 const SCREENSHOT_FALLBACK_RESERVE_MS = 5_000
 /** Op-log ring size. */
 const OP_LOG_LIMIT = 200
+/**
+ * Op-log summary caps (F-2, 2026-09-13 round 2).
+ *
+ * `record(..., summaryLimit)` applies these AFTER the value-level redaction, so
+ * a credential that straddles the cut is masked instead of being clipped into a
+ * plaintext head fragment. The limits keep the previous model-facing lengths:
+ * the navigate summary showed a 200-character URL, and so on.
+ */
+const NAVIGATE_SUMMARY_LIMIT = 200 + 'navigate: '.length
+const EVAL_SUMMARY_LIMIT = 60 + 'eval: '.length
+const PAGE_STATE_SUMMARY_LIMIT = 120 + 'after-change: '.length
+const SCREENSHOT_FALLBACK_SUMMARY_LIMIT = 120 + 'capturePage unavailable (); captured via CDP fromSurface:false'.length
+const SELECT_VALUE_SUMMARY_LIMIT = 80
+/** Cap on the model-facing `wait_for` failure reason (F-2: applied after the
+ * redaction — the page/CDP message is cut at the call site otherwise). */
+const WAIT_FOR_REASON_LIMIT = 240
+/**
+ * Upper bound on the ORIGIN-scoped credential-activity window (R7, 2026-09-13
+ * round 2 — F-3). R-4's window on the injecting TAB is unchanged: it stays shut
+ * until that tab's own main-frame navigation, because the value is physically in
+ * that document and eval could read it straight back. The origin-scoped mirror
+ * only covers the storage channel (a sibling tab reading localStorage/cookies),
+ * and R7 made it last for the whole session — an unrelated tab opened later on
+ * the same origin could never eval/screenshot again. It is therefore bounded:
+ * the immediate read-back is still refused (the window starts when the value is
+ * injected), while the origin cannot be blocked forever. Configurable through
+ * `BrowserToolOptions.credentialWindowTtlMs`.
+ */
+const CREDENTIAL_ORIGIN_WINDOW_TTL_MS = 5 * 60_000
+/**
+ * Hard cap on retained origin credential records (F-4, 2026-09-13 round 2).
+ *
+ * R7 kept one record — including the cleartext password — for every origin ever
+ * filled, for the whole session; the adversarial re-check measured 40 records
+ * after 40 fill+close cycles and flagged the unbounded growth (memory AND
+ * plaintext residency) as P3. Deleting a record as soon as its last tab closes
+ * was rejected on purpose: round-1's `audit-r6-outlets.spec.ts` locks the
+ * fail-closed retention (a page can stash the value in localStorage and a LATER
+ * tab of that origin then reads it back, so the value set must survive the tab).
+ * The retention is therefore BOUNDED instead: past this many records the
+ * least-recently-used one whose origin has no live tab is evicted. Eviction
+ * order never touches an origin a live tab is showing — that would drop r7c-3's
+ * protection — so the effective bound is `max(32, live origins)`.
+ */
+const MAX_CREDENTIAL_ORIGIN_RECORDS = 32
 /** Cap on remembered redacted download display paths (R-5): the store keeps the
  * truthful handle, this map only holds the model-facing variant, and the
  * download list itself is pruned by `downloadLimit`. */
@@ -119,6 +164,38 @@ interface EvalResult {
   exceptionDetails?: unknown
 }
 
+/**
+ * Origin-scoped credential accounting (R7, 2026-09-13).
+ *
+ * `BrowserTab.filledSecrets` / `.credentialWindow` remain the per-tab mirrors
+ * every text funnel reads; this record is the authority for the scope those
+ * mirrors are derived from — the ORIGIN, which is the scope of the storage a
+ * page can stash an injected value in.
+ */
+interface OriginCredentialRecord {
+  /** Injected values seen on this origin (password only, like the tab list). */
+  secrets: string[]
+  /**
+   * Deadline (epoch ms) of the origin's credential-activity window, or
+   * `undefined` when it is closed (F-3, 2026-09-13 round 2).
+   *
+   * R7 made the window origin-scoped but *session-permanent*: an unrelated tab
+   * the user opened later on the same origin could never `browser_eval` or
+   * `browser_screenshot` again, because the injecting tab happened to stay on
+   * its document (SPA login). The window still covers the immediate read-back
+   * (localStorage/cookies) — it simply has an upper bound now; see
+   * {@link CREDENTIAL_ORIGIN_WINDOW_TTL_MS}.
+   */
+  windowUntil: number | undefined
+  /** Tab that owns the open window (the one the credential was injected into):
+   * its main-frame navigation ends the window (R-4 semantics), a sibling tab's
+   * does not. */
+  holder: number | undefined
+  /** Last time a tab touched this origin (injection or arrival); the LRU key
+   * for {@link MAX_CREDENTIAL_ORIGIN_RECORDS} (F-4, 2026-09-13 round 2). */
+  lastUsed: number
+}
+
 /** Wait-for condition spec. */
 /**
  * 浏览器窗口/标签标题的中性缺省值。
@@ -168,6 +245,15 @@ export interface RuntimeDeps {
 export class BrowserRuntime {
   private readonly tabs = new Map<number, BrowserTab>()
   private nextTabId = 1
+  /**
+   * Credential accounting keyed by ORIGIN (R7, 2026-09-13): the value set and
+   * the activity window a `browser_fill_credentials` created, scoped to what
+   * they actually protect (origin-shared storage: localStorage, cookies,
+   * sessionStorage). Every tab on that origin inherits both, and the record
+   * outlives the tab so a tab opened later still gets the value set — bounded
+   * by the window TTL (F-3) and by {@link MAX_CREDENTIAL_ORIGIN_RECORDS} (F-4).
+   */
+  private readonly credentialOrigins = new Map<string, OriginCredentialRecord>()
   private readonly ops: BrowserOpLogEntry[] = []
   private opSeq = 0
   /** Redacted display paths of downloads, keyed by download id (R-5). The store
@@ -215,6 +301,9 @@ export class BrowserRuntime {
       screenshotMaxWidth: options.screenshotMaxWidth ?? 1280,
       screenshotQuality: options.screenshotQuality ?? 70,
       downloadDir: options.downloadDir ?? '.picoaide-downloads',
+      credentialWindowTtlMs: Number.isFinite(options.credentialWindowTtlMs) && (options.credentialWindowTtlMs ?? 0) > 0
+        ? options.credentialWindowTtlMs as number
+        : CREDENTIAL_ORIGIN_WINDOW_TTL_MS,
     }
     this.guard = new BrowserGuard(adapter)
     this.partition = partition ?? BROWSER_PARTITION
@@ -804,8 +893,28 @@ export class BrowserRuntime {
 
   // ------------------------------------------------------------------- state
 
-  private record(tool: string, tab: number, summary: string, failed = false, actor: RecordActor = 'ai'): void {
+  /**
+   * Append one op-log entry.
+   *
+   * `summaryLimit` (F-2, 2026-09-13 round 2): several callers cap the summary
+   * themselves (a URL, a fallback reason, a page value). Doing that cut at the
+   * call site put it BEFORE the value-level redaction below, so an injected
+   * credential straddling the cut could survive as a head fragment — and the
+   * R7 tail heuristic that used to paper over it also rewrote untruncated prose.
+   * Callers now pass the full text plus the cap they want; the cap is applied
+   * here, after `maskBrowserSummary` and after the tab's value set.
+   */
+  private record(tool: string, tab: number, summary: string, failed = false, actor: RecordActor = 'ai', summaryLimit?: number): void {
     const tabEntry = this.tabs.get(tab)
+    // Key-level first (credential-shaped names), then the tab's value set:
+    // a summary embeds the page URL verbatim (`navigate: …`), and that URL
+    // can carry an injected value under a page-chosen name (R-5). The op log
+    // is model-facing through the /ops route and the shell's activity panel.
+    // Redact first, cut second (F-2): the other order leaks a head fragment.
+    const masked = maskBrowserSummary(summary)
+    const redacted = tabEntry === undefined
+      ? masked
+      : redactFilledSecretsText(tabEntry, masked, { verbatim: true })
     this.ops.push({
       seq: ++this.opSeq,
       time: Date.now(),
@@ -814,13 +923,7 @@ export class BrowserRuntime {
       group: '',
       session: tabEntry?.ownerSession ?? '',
       actor,
-      // Key-level first (credential-shaped names), then the tab's value set:
-      // a summary embeds the page URL verbatim (`navigate: …`), and that URL
-      // can carry an injected value under a page-chosen name (R-5). The op log
-      // is model-facing through the /ops route and the shell's activity panel.
-      summary: tabEntry === undefined
-        ? maskBrowserSummary(summary)
-        : redactFilledSecretsText(tabEntry, maskBrowserSummary(summary), { verbatim: true }),
+      summary: summaryLimit === undefined ? redacted : redacted.slice(0, summaryLimit),
       failed,
     })
     if (this.ops.length > OP_LOG_LIMIT) this.ops.shift()
@@ -875,17 +978,188 @@ export class BrowserRuntime {
    * window, not the value list, is the eval/screenshot contract: inside it those
    * two channels are refused (see those methods), outside it they work again —
    * with value redaction still applied to whatever they return.
+   *
+   * R7 (2026-09-13): the tab's own flag is only half of the answer — see
+   * {@link tabInCredentialWindow} and {@link credentialOrigins}. F-3
+   * (2026-09-13 round 2): only the TAB half is tied to the document's lifetime;
+   * the origin mirror the flag opens for sibling tabs has a deadline
+   * ({@link CREDENTIAL_ORIGIN_WINDOW_TTL_MS}), so an unrelated tab on the same
+   * origin cannot be blocked for the rest of the session.
    */
   credentialWindowOpen(tabId: number): boolean {
     const tab = this.tabs.get(tabId)
-    return tab !== undefined && tab.credentialWindow
+    return tab !== undefined && this.tabInCredentialWindow(tab)
   }
 
   /** Close the window (idempotent): called on every main-frame navigation, and
    * by nothing else — the window must never close while its document is up.
-   * `filledSecrets` is deliberately left alone (tab-scoped retention, R-5). */
+   * `filledSecrets` is deliberately left alone (R-5 retention; R7 scopes it to
+   * the origin, so a sibling tab keeps the scrubbing too). */
   private exitCredentialWindow(tab: BrowserTab): void {
     tab.credentialWindow = false
+    // R7: the origin-scoped mirror follows the tab the credential was injected
+    // into. When THAT tab performs the main-frame navigation, the window ends
+    // (R-4) — a sibling tab that merely inherited the window must not end it,
+    // and this tab leaving an origin it only visited must not either.
+    for (const record of this.credentialOrigins.values()) {
+      if (record.holder !== tab.id) continue
+      record.windowUntil = undefined
+      record.holder = undefined
+    }
+  }
+
+  /** Origin of a URL; `undefined` for opaque origins (`about:blank`, `data:`,
+   * `file:` — none of which can carry a login form worth injecting into). */
+  private originOf(url: string): string | undefined {
+    if (url === '') return undefined
+    try {
+      const origin = new URL(url).origin
+      return origin === '' || origin === 'null' ? undefined : origin
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The origin-scoped credential record for a URL, when one exists. */
+  private credentialRecordFor(url: string): OriginCredentialRecord | undefined {
+    const origin = this.originOf(url)
+    return origin === undefined ? undefined : this.credentialOrigins.get(origin)
+  }
+
+  /**
+   * Is this tab inside the credential-activity window?
+   *
+   * Two sources, because the leak is origin-scoped: the tab's own flag (it
+   * received the injection) and the window of the ORIGIN it is currently
+   * showing (a sibling tab that can read the value back out of localStorage /
+   * a cookie — the storage R-5's own threat model names). Security-relevant
+   * ordering: this is the predicate `eval`/`screenshot` judge inside the
+   * critical section.
+   *
+   * F-3 (2026-09-13 round 2): the tab's own flag has NO deadline — the value is
+   * in that document until its main-frame navigation (R-4). The origin mirror
+   * HAS one ({@link CREDENTIAL_ORIGIN_WINDOW_TTL_MS}), so an unrelated tab on
+   * the same origin is not blocked for the rest of the session.
+   */
+  private tabInCredentialWindow(tab: BrowserTab): boolean {
+    if (tab.credentialWindow) return true
+    return this.originWindowOpen(this.credentialRecordFor(tab.url))
+  }
+
+  /** Whether an origin record's credential window is currently open (F-3). */
+  private originWindowOpen(record: OriginCredentialRecord | undefined): boolean {
+    return record?.windowUntil !== undefined && Date.now() < record.windowUntil
+  }
+
+  /**
+   * Remember an injected credential at its ORIGIN scope (R7, 2026-09-13).
+   *
+   * `filledSecrets`/`credentialWindow` used to be booked per TAB, but the
+   * storage a hostile page uses to survive a navigation (localStorage,
+   * sessionStorage, cookies) is ORIGIN-scoped: a second tab on the same origin —
+   * the ordinary `browser_open` path, which does not inherit from an opener —
+   * read the stashed value back in cleartext (eval) and unmasked (get_text)
+   * while the injecting tab was refused and scrubbed. Booking the value set and
+   * the window on the origin is what covers the scope of the leak: every live
+   * tab on that origin gets the value (every text funnel masks it) and the
+   * window (eval/screenshot are refused while the credential is live there).
+   *
+   * The record also outlives its tab, so a tab opened later on the same origin
+   * still inherits the value set (see {@link adoptOriginCredentials}); redaction
+   * is fail-closed, so keeping values longer can only mask more. Two bounds keep
+   * that retention from being unbounded: the origin WINDOW expires (F-3,
+   * {@link CREDENTIAL_ORIGIN_WINDOW_TTL_MS}) and the record MAP is capped (F-4,
+   * {@link pruneCredentialOrigins}).
+   */
+  private rememberOriginCredential(tab: BrowserTab, secret: string): void {
+    const origin = this.originOf(tab.url)
+    if (origin === undefined) return
+    const record = this.credentialOrigins.get(origin) ?? { secrets: [], windowUntil: undefined, holder: undefined, lastUsed: Date.now() }
+    // F-3: the origin window is bounded. The immediate read-back is still shut
+    // (it opens here, with the injection), and it cannot outlive the TTL.
+    record.windowUntil = Date.now() + this.options.credentialWindowTtlMs
+    record.holder = tab.id
+    record.lastUsed = Date.now()
+    if (secret !== '' && !record.secrets.includes(secret)) record.secrets.push(secret)
+    this.credentialOrigins.set(origin, record)
+    // Fan the value out to the tabs already sitting on that origin: they can
+    // read the same storage the injecting tab just wrote to.
+    for (const other of this.tabs.values()) {
+      if (this.originOf(other.url) !== origin) continue
+      if (secret !== '' && !other.filledSecrets.includes(secret)) other.filledSecrets.push(secret)
+    }
+    this.pruneCredentialOrigins()
+  }
+
+  /**
+   * Bound the retained origin records (F-4, 2026-09-13 round 2).
+   *
+   * Within {@link MAX_CREDENTIAL_ORIGIN_RECORDS} nothing is dropped: round-1's
+   * fail-closed retention — a later tab on an origin whose tab is gone still
+   * inherits the value set — is kept on purpose. Past the cap the
+   * least-recently-used record whose origin has NO live tab is evicted (oldest
+   * `lastUsed` first), so the map stops growing with the number of origins a
+   * session visits. A live origin is never evicted: that would undo r7c-3.
+   */
+  private pruneCredentialOrigins(): void {
+    if (this.credentialOrigins.size <= MAX_CREDENTIAL_ORIGIN_RECORDS) return
+    const live = new Set<string>()
+    for (const tab of this.tabs.values()) {
+      const origin = this.originOf(tab.url)
+      if (origin !== undefined) live.add(origin)
+    }
+    const evictable = [...this.credentialOrigins.entries()]
+      .filter(([origin]) => !live.has(origin))
+      .sort((a, b) => a[1].lastUsed - b[1].lastUsed)
+    for (const [origin] of evictable) {
+      if (this.credentialOrigins.size <= MAX_CREDENTIAL_ORIGIN_RECORDS) break
+      this.credentialOrigins.delete(origin)
+    }
+  }
+
+  /**
+   * Model-facing interaction failure (R7, 2026-09-13).
+   *
+   * The selector an interaction fails on is NOT necessarily model-authored: a
+   * snapshot NUMBER is resolved by `tools.resolveTarget` through the RAW page
+   * snapshot (the runtime deliberately keeps the truthful selector there so the
+   * interaction still finds the element). That raw selector is page-controlled —
+   * a page that writes the credential into `el.id` yields `#<credential>` — so
+   * the failure text used to hand the injected value back verbatim while the
+   * `browser_get_snapshot` copy of the same selector was already masked.
+   *
+   * R7 closes this at the ONE place the message is built rather than at each
+   * caller: every interaction error goes through the tab's value redactor.
+   */
+  private interactionError(tab: BrowserTab, code: BrowserErrorCode, message: string): BrowserError {
+    return browserError(code, redactFilledSecretsText(tab, message, { verbatim: true }))
+  }
+
+  /**
+   * Adopt the credential accounting of the origin a tab is ENTERING (R7).
+   *
+   * Called from `updateTabState` with the URL the tab showed before the refresh,
+   * so a same-origin navigation is not an entry: a window this tab already left
+   * (R-4: the next main-frame navigation closes it) does not reopen — only a tab
+   * ARRIVING on an origin whose window is still held open inherits it.
+   *
+   * F-3 (2026-09-13 round 2): the arriving tab no longer latches its own
+   * `credentialWindow` flag. That flag has no deadline (it is cleared only by
+   * this tab's own main-frame navigation), so latching it made the origin window
+   * permanent for every tab that ever touched the origin. The origin record's
+   * deadline is consulted directly by {@link tabInCredentialWindow} instead.
+   */
+  private adoptOriginCredentials(tab: BrowserTab, previousUrl: string): void {
+    const origin = this.originOf(tab.url)
+    if (origin === undefined || this.originOf(previousUrl) === origin) return
+    const record = this.credentialOrigins.get(origin)
+    if (record === undefined) return
+    for (const secret of record.secrets) {
+      if (!tab.filledSecrets.includes(secret)) tab.filledSecrets.push(secret)
+    }
+    // F-4: arriving here counts as a use, so the LRU keeps the origins that are
+    // actually being visited.
+    record.lastUsed = Date.now()
   }
 
   /**
@@ -927,7 +1201,12 @@ export class BrowserRuntime {
   private updateTabState(tab: BrowserTab): void {
     const wc = tab.view.webContents
     if (wc.isDestroyed()) return
+    const previousUrl = tab.url
     tab.url = wc.getURL()
+    // R7: entering an origin that holds credential accounting adopts it (value
+    // set + window). Placed before the pool/UI fan-out so the very first
+    // projection of the new document is already scoped.
+    this.adoptOriginCredentials(tab, previousUrl)
     // FIX-06 (2026-09-12): the page title frequently *is* a URL (no `<title>`,
     // a guard-rejected navigation, an Electron title fallback) and it feeds the
     // persisted history, the native window caption and the model-facing
@@ -1042,7 +1321,7 @@ export class BrowserRuntime {
       await this.waitForLoad(wc, waitUntil)(Math.min(budget, Math.max(0, this.options.loadTimeoutMs)))
     }
     this.updateTabState(tab)
-    this.record('browser_navigate', id, `navigate: ${url.slice(0, 200)}`, false, actor)
+    this.record('browser_navigate', id, `navigate: ${url}`, false, actor, NAVIGATE_SUMMARY_LIMIT)
     // R-5 (2026-09-13): the persisted history is a model-facing exit
     // (`browser_history_search`, the shell's history panel, `<dir>/history.jsonl`),
     // so it gets BOTH layers: the store's key-level rule and this tab's value set
@@ -1181,6 +1460,16 @@ export class BrowserRuntime {
     // Drop the registry entry even when no view exists (restored ledger tabs
     // in a failed-materialization state must never become un-closable).
     this.pool.removeTab(id)
+    // R7: a destroyed tab cannot hold an origin's credential window any more.
+    // F-4 (2026-09-13 round 2): the record itself is KEPT (round-1 fail-closed
+    // retention: a later tab on that origin must still be scrubbed), but the
+    // map is bounded — evicting is LRU-based and never drops a live origin.
+    for (const record of this.credentialOrigins.values()) {
+      if (record.holder !== id) continue
+      record.windowUntil = undefined
+      record.holder = undefined
+    }
+    this.pruneCredentialOrigins()
   }
 
   /** Close everything (session switch / shell 清除). */
@@ -1191,6 +1480,12 @@ export class BrowserRuntime {
       this.materializeEpoch++
       this.pendingLedgerTabs = []
       for (const id of [...this.tabs.keys()]) this.destroyTab(id)
+      // R7: closing EVERYTHING ends the session's origin accounting (account
+      // switch / shell 清除). Destroying one tab deliberately keeps its origin's
+      // value set (a later tab on that origin must still be scrubbed); this is
+      // the boundary where the previous account's values must not survive into
+      // the next one.
+      this.credentialOrigins.clear()
       this.pool.clear()
       this.relayout()
       this.record('browser_close', 0, 'close browser (all tabs)', false, user ? 'user' : 'ai')
@@ -1214,7 +1509,15 @@ export class BrowserRuntime {
     const resolved = this.resolveTab(tabId)
     const elements = await this.agentRun('browser_get_snapshot', async () => {
       const tab = this.tab(resolved)
-      const snapshot = await extractSnapshot((m, p) => tab.cdp.send(m, p), this.options.snapshotLimit)
+      // R7 (2026-09-13): the redactor runs on the WHOLE element text and the
+      // 80-char model-facing cap is applied after it — the probe used to cut
+      // first, so a credential straddling the cap came back as a plaintext
+      // fragment (`Audit note: …S3cr3tPass`).
+      const snapshot = await extractSnapshot(
+        (m, p) => tab.cdp.send(m, p),
+        this.options.snapshotLimit,
+        (elementText) => redactFilledSecretsText(tab, elementText),
+      )
       // P0-A depth layer: scrub values this tab received through credential
       // injection, whatever source produced the text (the probe today, a future
       // field/attribute dump tomorrow). Value-exact matching keeps ordinary page
@@ -1230,13 +1533,21 @@ export class BrowserRuntime {
     const resolved = this.resolveTab(tabId)
     const text = await this.agentRun('browser_get_text', async () => {
       const tab = this.tab(resolved)
-      const raw = await extractText((m, p) => tab.cdp.send(m, p), selector, this.options.textLimit)
       // R-1 (2026-09-13): page text is a model-facing exit too. innerText of a
       // password input is empty, but a page that *echoes* what was typed
       // ("your password abc123 is weak", a confirmation screen, a debug dump)
       // hands the injected credential back verbatim. Same value-level redactor
       // as the snapshot/eval funnels — one implementation, three exits.
-      return redactFilledSecretsText(tab, raw)
+      //
+      // R7 (2026-09-13): same order as the snapshot funnel — redact, then apply
+      // the 32KiB cap. Slicing first turned a credential straddling the cap into
+      // a plaintext head fragment.
+      return await extractText(
+        (m, p) => tab.cdp.send(m, p),
+        selector,
+        this.options.textLimit,
+        (raw) => redactFilledSecretsText(tab, raw),
+      )
     }, signal)
     this.record('browser_get_text', resolved, selector === undefined ? `page text: ${text.length} chars` : `element text: ${text.length} chars`)
     return text
@@ -1246,7 +1557,9 @@ export class BrowserRuntime {
     const resolved = this.resolveTab(tabId)
     // R-4 credential-activity window: checked BEFORE the capture `try`, so the
     // policy refusal below is not rewritten into the generic "screenshot failed"
-    // wrapper (which would hide both the code and the reason).
+    // wrapper (which would hide both the code and the reason). This lock-free
+    // check is only a cheap early-out — the authoritative one runs INSIDE the
+    // critical section below (R7).
     if (this.credentialWindowOpen(resolved)) {
       this.record('browser_screenshot', resolved, 'refused: credential window open', true)
       throw browserError('policy', CREDENTIAL_WINDOW_SCREENSHOT_REFUSAL)
@@ -1255,6 +1568,19 @@ export class BrowserRuntime {
     try {
       data = await this.agentRun('browser_screenshot', async () => {
         const tab = this.tab(resolved)
+        // R7 (2026-09-13): the window must be judged in the SAME critical
+        // section as the capture, exactly like `eval` does. `agentRun` queues on
+        // the global pool mutex, and `browser_fill_credentials` runs on that
+        // same mutex — so the lock-free check above can read a pre-queue
+        // snapshot (`credentialWindow === false`) while this call waits behind a
+        // fill that is already injecting (a 30s `wait_for` budget, a slow
+        // navigation or a wedged CDP round-trip is enough to hold the mutex).
+        // Without this re-check the screenshot then captures the page with the
+        // credential in it, bypassing the refusal the module advertises.
+        if (this.tabInCredentialWindow(tab)) {
+          this.record('browser_screenshot', resolved, 'refused: credential window open', true)
+          throw browserError('policy', CREDENTIAL_WINDOW_SCREENSHOT_REFUSAL)
+        }
         let primary: string
         try {
           return await withScreenshotBudget(
@@ -1275,7 +1601,7 @@ export class BrowserRuntime {
             this.options.screenshotMaxWidth,
             this.options.screenshotQuality,
           )
-          this.record('browser_screenshot', resolved, `capturePage unavailable (${primary.slice(0, 120)}); captured via CDP fromSurface:false`)
+          this.record('browser_screenshot', resolved, `capturePage unavailable (${primary}); captured via CDP fromSurface:false`, false, 'ai', SCREENSHOT_FALLBACK_SUMMARY_LIMIT)
           return fallback
         } catch (cause) {
           const secondary = cause instanceof Error ? cause.message : String(cause)
@@ -1285,6 +1611,11 @@ export class BrowserRuntime {
         }
       }, signal)
     } catch (cause) {
+      // A policy refusal (the credential window just above, or a future policy
+      // decision inside the capture path) is NOT a capture failure: rethrowing
+      // it unchanged keeps `code: 'policy'` and its actionable text instead of
+      // rewriting both into the generic "screenshot failed" wrapper (R7).
+      if (cause instanceof BrowserError && cause.code === 'policy') throw cause
       // An empty capture (hidden window / background tab / zero-sized view)
       // must be a visible failure, never a silent 0-byte "screenshot" (P2-31).
       const message = cause instanceof Error ? cause.message : String(cause)
@@ -1344,8 +1675,10 @@ export class BrowserRuntime {
       const tab = this.tab(resolved)
       // R-4 credential-activity window: while the injected credentials are still
       // in this page, `browser_eval` is refused outright — the read-back itself
-      // is a channel (see the class doc above).
-      if (tab.credentialWindow) {
+      // is a channel (see the class doc above). R7: the predicate also covers the
+      // ORIGIN's window, so a sibling tab on the same origin (which can read the
+      // value out of localStorage/cookies) is refused too.
+      if (this.tabInCredentialWindow(tab)) {
         this.record('browser_eval', resolved, 'refused: credential window open', true)
         throw browserError('policy', CREDENTIAL_WINDOW_EVAL_REFUSAL)
       }
@@ -1384,9 +1717,19 @@ export class BrowserRuntime {
       // `filledSecrets` is empty here on every tab that can reach it. The call
       // is kept as the value-exact backstop for any future path that runs page
       // JS without being behind the window.
-      return redactFilledSecretsText(tab, serializeEvalResult(evalResult.result?.value))
+      //
+      // F-5 (2026-09-13 round 2): the projection is handed to
+      // `serializeEvalResult` itself, so it runs on every string value and key
+      // BEFORE `maskString`'s 4 KB cap and the 8 KB serialized cap — those two
+      // cuts used to run first, and a password straddling either one came back
+      // as a plaintext head fragment. The outer pass stays as the backstop for
+      // anything the per-value projection cannot see (it is cheap: ≤ 8 KB).
+      return redactFilledSecretsText(
+        tab,
+        serializeEvalResult(evalResult.result?.value, (text) => redactFilledSecretsText(tab, text)),
+      )
     }, signal)
-    this.record('browser_eval', resolved, `eval: ${expression.slice(0, 60)}`)
+    this.record('browser_eval', resolved, `eval: ${expression}`, false, 'ai', EVAL_SUMMARY_LIMIT)
     return result
   }
 
@@ -1402,12 +1745,20 @@ export class BrowserRuntime {
    * the list is non-empty only inside the credential window, where eval itself
    * is refused — this is a backstop, not the enforcement point.
    *
+   * R7 (2026-09-13): `verbatim: true` for a machine-shaped string that cannot be
+   * prose — a CSS selector is the case that matters (`#<credential>` from a page
+   * that writes the value into `el.id`). Without it a SHORT id-safe value
+   * (`abc123`) stayed verbatim in the snapshot's selector exit while the
+   * interaction-error exit — which is verbatim — already masked it: same
+   * selector, two rules. The token rule masks the whole occurrence, so a short
+   * value cannot be confused with a neighbouring word (`/test-report` stays).
+   *
    * Same honest boundary as `eval()`: this is not an egress firewall.
    */
-  redactTabSecrets(tabId: number, text: string): string {
+  redactTabSecrets(tabId: number, text: string, options: { verbatim?: boolean } = {}): string {
     const tab = this.tabs.get(tabId)
     if (tab === undefined || tab.filledSecrets.length === 0) return text
-    return redactFilledSecretsText(tab, text)
+    return redactFilledSecretsText(tab, text, options)
   }
 
   /**
@@ -1659,10 +2010,10 @@ export class BrowserRuntime {
       })
       const value = result.result?.value as { x?: number; y?: number; error?: string } | undefined
       if (value === undefined || value.error !== undefined) {
-        throw browserError('not-found', `browser: cannot locate element ${selector}${value?.error !== undefined ? ` (${value.error})` : ''}`)
+        throw this.interactionError(tab, 'not-found', `browser: cannot locate element ${selector}${value?.error !== undefined ? ` (${value.error})` : ''}`)
       }
       if (typeof value.x !== 'number' || typeof value.y !== 'number') {
-        throw browserError('not-found', `browser: cannot locate element ${selector}`)
+        throw this.interactionError(tab, 'not-found', `browser: cannot locate element ${selector}`)
       }
       return { x: value.x, y: value.y }
     }, signal)
@@ -1758,7 +2109,7 @@ export class BrowserRuntime {
     await this.agentRun('browser_type', async () => {
       const tab = this.tab(resolved)
       const before = await this.textFieldState(tab, selector)
-      if (before === null) throw browserError('not-found', `browser: cannot locate element ${selector}`)
+      if (before === null) throw this.interactionError(tab, 'not-found', `browser: cannot locate element ${selector}`)
       await tab.cdp.send('Runtime.evaluate', {
         expression: `
           (() => {
@@ -1790,7 +2141,7 @@ export class BrowserRuntime {
         outcome !== 'typed',
       )
       if (outcome !== 'typed') {
-        throw browserError('not-found', `browser: cannot type into ${selector} (${outcome})`)
+        throw this.interactionError(tab, 'not-found', `browser: cannot type into ${selector} (${outcome})`)
       }
       await this.afterChangeSummary(tab)
     }, signal)
@@ -1881,7 +2232,7 @@ export class BrowserRuntime {
         returnByValue: true,
       })
       const value = result.result?.value
-      if (typeof value === 'string') this.record('browser_page_state', tab.id, `after-change: ${value.slice(0, 120)}`)
+      if (typeof value === 'string') this.record('browser_page_state', tab.id, `after-change: ${value}`, false, 'ai', PAGE_STATE_SUMMARY_LIMIT)
     } catch { /* best effort */ }
   }
 
@@ -1976,10 +2327,10 @@ export class BrowserRuntime {
         returnByValue: true,
       })
       if (result.result?.value !== undefined && (result.result.value as { error?: string }).error !== undefined) {
-        throw browserError('not-found', `browser: select failed — ${(result.result.value as { error: string }).error}`)
+        throw this.interactionError(tab, 'not-found', `browser: select failed — ${(result.result.value as { error: string }).error}`)
       }
     }, signal)
-    this.record('browser_select', resolved, `select ${selector} = ${value.slice(0, 80)}`)
+    this.record('browser_select', resolved, `select ${selector} = ${value}`, false, 'ai', `select ${selector} = `.length + SELECT_VALUE_SUMMARY_LIMIT)
   }
 
   async scroll(tabId: number, deltaY: number, selector: string | undefined, signal?: AbortSignal): Promise<void> {
@@ -2043,11 +2394,17 @@ export class BrowserRuntime {
       // still a credential in the DOM — while `filledSecrets` (the redaction
       // list) only ever holds passwords: a short username is an ordinary word
       // and masking it in page text would corrupt facts (R-3).
+      //
+      // R7 (2026-09-13): booked on the ORIGIN, not just this tab — a sibling tab
+      // on the same origin can read the value back out of localStorage/cookies,
+      // so it must inherit both the redaction list and the window. The TAB flag
+      // set here has no deadline (this document holds the value until it
+      // navigates, R-4); the origin mirror it opens is bounded (F-3).
       tab.credentialWindow = true
-      if (value.password === true && typeof credential.password === 'string' && credential.password !== ''
-        && !tab.filledSecrets.includes(credential.password)) {
-        tab.filledSecrets.push(credential.password)
-      }
+      this.rememberOriginCredential(
+        tab,
+        value.password === true && typeof credential.password === 'string' ? credential.password : '',
+      )
       return { username: value.username === true, password: value.password === true }
     }, signal)
     this.record('browser_fill_credentials', resolved, `fill credentials for ${connectorId}`)
@@ -2191,9 +2548,11 @@ export class BrowserRuntime {
           // Keep the underlying failure: a navigation destroys the execution
           // context mid-poll, and swallowing that into a constant "page not
           // ready" made a real-device timeout indistinguishable from "the URL
-          // never changed" (report 2026-09-12).
+          // never changed" (report 2026-09-12). F-2: no cut here — the reason is
+          // capped AFTER the redaction below, so a credential straddling the cap
+          // cannot survive as a head fragment.
           const message = cause instanceof Error ? cause.message : String(cause)
-          lastReason = `page not ready: ${message.slice(0, 200)}`
+          lastReason = `page not ready: ${message}`
         }
         await sleep(Math.min(250, Math.max(50, deadline - Date.now())))
       }
@@ -2203,7 +2562,9 @@ export class BrowserRuntime {
       // the current URL, so the whole string goes through the text redactor.
       // R-6: plus this tab's value set — a page-chosen URL (`?pw=<value>`) is
       // not credential-shaped, so the key vocabulary alone would let it through.
-      return { ok: false, reason: redactFilledSecretsText(tab, stripSensitiveText(`wait_for ${options.condition} timed out — ${urlChanged}`), { verbatim: true }) }
+      // F-2: the cap runs after BOTH redaction passes.
+      const reason = redactFilledSecretsText(tab, stripSensitiveText(`wait_for ${options.condition} timed out — ${urlChanged}`), { verbatim: true })
+      return { ok: false, reason: reason.slice(0, WAIT_FOR_REASON_LIMIT) }
     }, signal)
   }
 
@@ -2332,14 +2693,21 @@ export class BrowserRuntime {
     }
   }
 
-  /** Union of the live tabs' injected-value sets (downloads/bookmarks have no
-   * single owning tab). Empty when nothing was injected in this browser. */
+  /** Union of the injected-value sets (downloads/bookmarks have no single owning
+   * tab). R7 (2026-09-13): the origin records are included, so the union does not
+   * silently shrink when the tab that received the credential is closed while a
+   * sibling tab on that origin (or a later download) still needs the scrubbing.
+   * Empty when nothing was injected in this browser. */
   private liveSecrets(): string[] {
     const out: string[] = []
+    const add = (secret: string): void => {
+      if (secret !== '' && !out.includes(secret)) out.push(secret)
+    }
+    for (const record of this.credentialOrigins.values()) {
+      for (const secret of record.secrets) add(secret)
+    }
     for (const tab of this.tabs.values()) {
-      for (const secret of tab.filledSecrets) {
-        if (secret !== '' && !out.includes(secret)) out.push(secret)
-      }
+      for (const secret of tab.filledSecrets) add(secret)
     }
     return out
   }
@@ -2809,8 +3177,23 @@ function maskShortSecretTokens(text: string, secret: string): string {
  * Exact-value matching: a page string that merely *talks* about passwords is
  * untouched, while an injected secret can never leave through a snapshot or the
  * page text — no matter which probe/field/expression produced it. A text that is
- * a truncated head of a longer secret (the probe caps text at 80 chars) is
- * redacted as a whole.
+ * a truncated head of a longer secret is redacted as a whole.
+ *
+ * F-2 (2026-09-13 round 2): R7 additionally guessed at head fragments sitting at
+ * the tail of a text (`maskTruncatedSecretTail`: "the text ends with ≥8
+ * characters that are a prefix of some injected value"). It did not require the
+ * text to have been truncated at all, so with a password starting with a common
+ * word (`Security123!`) the ordinary phrase `Privacy and Security` became
+ * `Privacy and ****` — and, worse, the *persisted* history URL / op-log summary
+ * / tab address `https://app.example/help/Security` became `/help/****` for the
+ * rest of the session. That is not "less information", it is wrong information.
+ * The guess is gone. Truncation is now always handled by ORDER instead: every
+ * producer redacts the FULL text and only then applies its cap
+ * (`extractSnapshot` / `extractText` / `serializeEvalResult` / the op-log
+ * `record` summary), so no exit can produce a fragment. The one remaining cut
+ * this function cannot see is the PAGE-side snapshot probe's own
+ * `ELEMENT_TEXT_CAP`; its tail lies beyond the 80-character model-facing window,
+ * so it is not an exit — and guessing at it is exactly what F-2 removed.
  *
  * `verbatim: true` (R-5) is for strings that cannot be prose: a URL, a download
  * name/path, a file name. Short secrets used to be masked on EVERY occurrence
@@ -2853,6 +3236,11 @@ function redactSecretsText(secrets: readonly string[], text: string, options: { 
     //    `/test-report` 不会），散文语境仍走"值形态"判定（`password=test` 会擦）。
     if (secret.length >= MIN_EMBEDDED_SECRET_LENGTH) {
       if (out.includes(secret)) out = out.split(secret).join(MASK)
+      // F-2 (2026-09-13 round 2): no tail-fragment heuristic here. Guessing
+      // "the text ends with a prefix of a value, therefore it must have been
+      // truncated" rewrote untruncated prose and persisted the wrong fact
+      // (`/help/Security` → `/help/****`). A fragment can no longer exist:
+      // every producer redacts before it cuts.
       continue
     }
     out = options.verbatim === true ? maskShortSecretTokens(out, secret) : maskShortSecretOccurrences(out, secret)

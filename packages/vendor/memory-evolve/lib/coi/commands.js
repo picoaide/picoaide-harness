@@ -5,7 +5,8 @@
  * 终止确认：/de_coi stop <id> 需要 --force 二次确认；--all 更严格（需 --force --all）。
  */
 import { spawn } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
 import { join } from 'node:path'
 import { translate, getLocale, COI_DICT, HELP_EXTRA } from '../i18n.js'
 
@@ -253,7 +254,11 @@ async function handle(svc, sub, rest, invocation) {
       child.stderr.on('data', guard)
       child.on('close', (code) => {
         clearTimeout(exportTimer)
-        writeFileSync(outFile, Buffer.concat(chunks).toString())
+        // NF-1 同族：导出落点过断言（预置同名链接即写穿目录外），且不得
+        // 让落点被拒穿透成 close 回调里的未捕获异常。
+        try {
+          writeFileAtomicSafeAt(outFile, Buffer.concat(chunks).toString())
+        } catch { /* 落点被拒/写失败：导出任务本身已返回，静默 */ }
       })
       return { kind: 'success', text: cmt('coicmd.exportStarted', { cmd: `${adapter.binary} ${cmd.join(' ')} ${sessionId}`, outFile }) }
     }

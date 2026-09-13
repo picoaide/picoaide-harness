@@ -18,8 +18,9 @@
  * 事件只增不删（prune 截断旧事件）；水位推进 = 消费，**不依赖模型真的
  * 生成**——渲染时刻就是送达时刻（快照 diff 变了必注入）。
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
 
 /** 队列保留的事件条数（超出丢弃最旧——实时协作不看历史）。 */
 const RECENT = 50
@@ -54,13 +55,13 @@ export class DynamicsStore {
     }
   }
 
-  /** 原子写盘（tmp + rename；失败只告警不影响内存状态）。 */
+  /**
+   * 原子写盘（FIX-27：自锚定安全原子写——tmp 落点同样断言 + O_EXCL；
+   * 失败只告警不影响内存状态）。
+   */
   #save() {
     try {
-      mkdirSync(this.dir, { recursive: true })
-      const tmp = `${this.file}.tmp.${process.pid}`
-      writeFileSync(tmp, JSON.stringify({ seq: this.seq, events: this.events, cursors: this.cursors }) + '\n')
-      renameSync(tmp, this.file)
+      writeFileAtomicSafeAt(this.file, JSON.stringify({ seq: this.seq, events: this.events, cursors: this.cursors }) + '\n')
     } catch (error) {
       console.warn(`[dsh-memory-evolve] dynamics 保存失败（忽略）: ${error.message}`)
     }

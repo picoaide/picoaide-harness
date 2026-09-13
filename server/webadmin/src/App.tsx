@@ -4,7 +4,7 @@ import { LogOut, Globe, ShieldCheck, KeyRound, ChevronRight, SearchX, Menu, X, L
 import { me, logout, request, setOnUnauthorized, ADMIN_API } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
-import { isAuditor, roleLabel, type MeUser } from './lib/rbac'
+import { isAuditor, roleLabel, setCurrentAdmin, type MeUser } from './lib/rbac'
 // P2-43: 导航声明与可见性过滤收敛到 lib/nav(按服务端 permissions 过滤)。
 import { visibleNav as visibleNavFor, landingPath as landingPathFor } from './lib/nav'
 import { NEUTRAL_ADMIN_TITLE, adminLogoURL, adminSiteName, useChannel } from './lib/channel'
@@ -124,22 +124,36 @@ export default function App() {
     setOnUnauthorized(() => {
       setAuthed(false)
       setForceChange(false)
+      setCurrentAdmin(null)
     })
     return () => setOnUnauthorized(null)
   }, [])
 
+  /**
+   * 拉取当前管理员并写入 App 状态 + 能力快照(lib/rbac 的 currentAdmin)。
+   *
+   * 审计 R7 残余(R7-RV-2):挂载时这次 /me 在未登录状态下是 401,所以登录
+   * 成功后**必须再拉一次** —— 否则整树沿用挂载期的失败结果:
+   * meUser=null ⇒ visibleNav([]) 给出空侧栏,而 hasPermission() 对"未知权限"
+   * 默认放行 ⇒ 只读角色登录首屏看到全套写按钮(全部注定 403)。刷新页面才正确,
+   * 而登录正是管理员进入后台最常见的方式。
+   * @returns 拉取到的用户(失败时 null,并原地回登录态)。
+   */
+  const refreshMe = async (): Promise<void> => {
+    const body = await me()
+    const u = (body?.user as MeUser) ?? null
+    setMeUser(u)
+    setCurrentAdmin(u)
+    setAdminName(u?.display_name || u?.username || '管理员')
+    // 0057: 管理员重置密码后强制改密拦截(完成前业务端点均被 403)。
+    if (u?.password_must_change) setForceChange(true)
+  }
+
   useEffect(() => {
-    me().then(
-      async (body) => {
-        setAuthed(true)
-        const u = body?.user as MeUser | undefined
-        setMeUser(u ?? null)
-        setAdminName(u?.display_name || u?.username || '管理员')
-        // 0057: 管理员重置密码后强制改密拦截(完成前业务端点均被 403)。
-        if (u?.password_must_change) setForceChange(true)
-      },
-      () => setAuthed(false)
-    )
+    // 会话过期(401)时回到登录态:这里失败只翻转 authed,不再清能力快照
+    // (快照已由 setOnUnauthorized 的同一路径清空)。
+    refreshMe().then(() => setAuthed(true), () => setAuthed(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // 可见 nav: 按服务端下发的 permissions 过滤(P2-43;体验层,服务端 RequirePermission 为护栏)。
@@ -157,7 +171,22 @@ export default function App() {
 
   if (authed === null) return <div className="flex h-screen items-center justify-center text-muted-foreground">加载中…</div>
 
-  if (!authed) return <Login onLoggedIn={() => setAuthed(true)} />
+  if (!authed) {
+    return (
+      <Login onLoggedIn={async () => {
+        // R7-RV-2:登录成功先刷新 /me(能力快照),再进应用壳 —— 登录前那次
+        // /me 是 401,拿它当能力依据会让只读角色看到全套写入口与空导航。
+        // 刷新失败(极端:登录成功但立刻 401)按未登录处理,不放大可见面。
+        try {
+          await refreshMe()
+        } catch {
+          setAuthed(false)
+          return
+        }
+        setAuthed(true)
+      }} />
+    )
+  }
 
   return (
     <BrowserRouter basename="/admin">
@@ -357,7 +386,11 @@ export default function App() {
       />
       <MFASettingsDialog open={mfaOpen} onOpenChange={setMfaOpen} onChanged={() => {
         // MFA 状态变化后刷新自身信息(安全设置菜单旁的徽章等)
-        me().then((b) => setMeUser((b?.user as MeUser) ?? null)).catch(() => { /* ignore */ })
+        me().then((b) => {
+          const u = (b?.user as MeUser) ?? null
+          setMeUser(u)
+          setCurrentAdmin(u)
+        }).catch(() => { /* ignore */ })
       }} />
       {/* 强制改密拦截(不可关闭): 完成改密后服务端吊销当前会话 → 回登录页 */}
       {forceChange && (

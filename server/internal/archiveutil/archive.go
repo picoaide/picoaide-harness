@@ -73,31 +73,168 @@ var (
 	// 客户端按序写盘最后一个生效 → 审核看到的内容 ≠ 员工安装的内容,
 	// 双 SKILL.md 可夹带(P2-11),因此一律拒绝。
 	ErrDuplicateEntry = errors.New("archive has duplicate entries")
+	// ErrCorrupt: 必填条目的解压/CRC 校验失败(声明尺寸与真实字节不符、
+	// deflate 流损坏)。客户端安装必抛,上传闸门必须先拒(archupd-3)。
+	ErrCorrupt = errors.New("archive entry is corrupt")
+	// ErrPathConflict: 同一(归一化、大小写不敏感)路径既是文件又是目录
+	// (SKILL.md 与 SKILL.md/child) —— 客户端解包必抛 EISDIR。
+	ErrPathConflict = errors.New("archive path is both a file and a directory")
 )
 
-// dupEntrySet 记录已见条目名(小写归一:大小写碰撞同样视为重复)。
-type dupEntrySet map[string]bool
+// dupEntrySet 记录已见条目名(按 installerKey 归一:大小写/尾随点空格/
+// NTFS $UpCase 危险折叠都视为同一路径)。值是该键**第一次**出现时的原样
+// 条目名 —— F2-N7:拒绝时必须能告诉上传者是哪两个名字被判成了同一个文件
+// (如 aſb.txt 与 asb.txt),否则用户无从改名。
+type dupEntrySet map[string]string
 
-// add 记录一个条目名;重复(含仅大小写不同)返回 ErrDuplicateEntry。
+// add 记录一个条目名;与已见条目在安装端等价即返回 *DuplicateEntryError
+// (errors.Is(err, ErrDuplicateEntry) 为真,同时携带两个冲突名字)。
 func (s dupEntrySet) add(name string) error {
-	key := strings.ToLower(name)
-	if s[key] {
-		return ErrDuplicateEntry
+	key := installerKey(name)
+	if first, ok := s[key]; ok {
+		return &DuplicateEntryError{First: first, Second: name}
 	}
-	s[key] = true
+	s[key] = name
 	return nil
 }
 
-// checkZipDuplicates 扫描 zip 条目头,拒绝重复的非目录条目(不解压)。
+// DuplicateEntryError 指出归档里被判为「同一个文件」的两个条目名。
+//
+// installerKey 是**宁严勿宽**的安装端等价键:大小写、尾随点/空格、NTFS
+// 危险折叠(NTFS/macOS 上 aſb.txt 与 asb.txt 是同一个文件)全都算重复。
+// 代价是大小写敏感文件系统(ext4/APFS 大小写敏感)上合法的一对文件会被
+// 误杀 —— 这是有意的取舍,但错误信息必须把两个名字都列出来,让作者能改名
+// (F2-N7);只说「归档含重复条目」的话,用户根本不知道该改哪个。
+type DuplicateEntryError struct {
+	First  string // 先出现的条目名
+	Second string // 与它等价的另一个条目名
+}
+
+func (e *DuplicateEntryError) Error() string {
+	return fmt.Sprintf("archive has duplicate entries: %q and %q map to the same file", e.First, e.Second)
+}
+
+// Unwrap 让 errors.Is(err, ErrDuplicateEntry) 继续成立(调用方既有映射不变)。
+func (e *DuplicateEntryError) Unwrap() error { return ErrDuplicateEntry }
+
+// DuplicateEntryNames 从错误链里取出被判重复的两个条目名(供 HTTP 层
+// 回显给上传者)。第二个返回值为 false 时表示错误里没有名字(旧路径)。
+func DuplicateEntryNames(err error) (first, second string, ok bool) {
+	var de *DuplicateEntryError
+	if errors.As(err, &de) {
+		return de.First, de.Second, true
+	}
+	return "", "", false
+}
+
+// ntfsDangerousFold 是 NTFS $UpCase 里与 Unicode 简单小写不同的危险映射
+// (Go/JS 的 ToLower 都不做这一步):这些码位在 Windows/macOS 上会折成 ASCII
+// 字母,与同目录下的 ASCII 名落进同一个文件。
+var ntfsDangerousFold = map[rune]rune{
+	0x017F: 's', // ſ LATIN SMALL LETTER LONG S
+	0x0131: 'i', // ı LATIN SMALL LETTER DOTLESS I
+	0x212A: 'k', // K KELVIN SIGN
+}
+
+// installerKey 计算「安装端文件系统等价键」,用于查重与文件/目录冲突判定:
+//
+//  1. Unicode 简单小写(Go 的 strings.ToLower 是逐码位简单映射,与 JS
+//     toLowerCase 在常见输入上一致);
+//  2. NTFS $UpCase 危险折叠(ſ→s、ı→i、K→k);
+//  3. 每个路径分量去掉结尾的点与空格(Win32 路径归一化会剥离,
+//     `SKILL.md.` 与 `SKILL.md` 在 Windows 上落到同一个文件)。
+//
+// 为什么不只做 ToLower:审"两个实现必须一致"的防线时,运行环境也是实现之一。
+// 服务端按 ToLower 判"不同名",客户端按序写盘,而 Windows/macOS 的文件系统
+// 把两者当成同一个文件 —— 审核所见(良性 SKILL.md)≠ 员工所装(末条 EVIL)。
+// 完整的 NTFS $UpCase 表与真实 Win32 行为未建(本容器无法执行验证,见
+// TASKS.md 记录),但服务端**宁严勿宽**:凡在安装端可能等价的路径一律拒绝,
+// 客户端侧的同款防线(archive-util.ts assertNoDuplicateEntry)需要同一份口径。
+func installerKey(name string) string {
+	lowered := strings.ToLower(name)
+	parts := strings.Split(lowered, "/")
+	var b strings.Builder
+	b.Grow(len(lowered))
+	for i, part := range parts {
+		if i > 0 {
+			b.WriteByte('/')
+		}
+		trimmed := strings.TrimRight(part, ". ")
+		for _, r := range trimmed {
+			if folded, ok := ntfsDangerousFold[r]; ok {
+				r = folded
+			}
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// pathKinds 记录每个(小写归一)路径的角色:显式目录条目、普通文件条目,
+// 以及被「a/b」这类子条目隐含为目录的祖先路径。archupd-3:zip 里只有
+// 「SKILL.md」与「SKILL.md/child.md」两个文件条目、没有任何 "SKILL.md/"
+// 目录条目时,同一路径已经既是文件又是目录,客户端解包必抛 EISDIR ——
+// 只查「同名条目重复」的旧实现完全看不见这种冲突。
+type pathKinds struct {
+	files map[string]bool // 普通文件条目路径
+	dirs  map[string]bool // 目录条目路径 + 由子条目隐含的祖先路径
+}
+
+func newPathKinds() *pathKinds {
+	return &pathKinds{files: map[string]bool{}, dirs: map[string]bool{}}
+}
+
+// add 记录一个条目;返回 ErrPathConflict 表示该路径已作为另一种角色出现。
+func (k *pathKinds) add(name string, isDir bool) error {
+	key := installerKey(name)
+	if isDir {
+		if k.files[key] {
+			return ErrPathConflict
+		}
+		k.dirs[key] = true
+		return nil
+	}
+	if k.dirs[key] {
+		return ErrPathConflict
+	}
+	// 祖先路径一旦被登记为文件,本条目就把该文件同时当成了目录。
+	for _, ancestor := range ancestorPaths(key) {
+		if k.files[ancestor] {
+			return ErrPathConflict
+		}
+		k.dirs[ancestor] = true
+	}
+	k.files[key] = true
+	return nil
+}
+
+// ancestorPaths 返回 path 的全部上级路径(不含自身)。
+func ancestorPaths(path string) []string {
+	var out []string
+	for i := 0; i < len(path); i++ {
+		if path[i] == '/' && i > 0 {
+			out = append(out, path[:i])
+		}
+	}
+	return out
+}
+
+// checkZipDuplicates 扫描 zip 条目头,拒绝重复的非目录条目(不解压),
+// 并拒绝「同一路径既是文件又是目录」的归档。
 func checkZipDuplicates(zr *zip.Reader) error {
 	seen := dupEntrySet{}
+	kinds := newPathKinds()
 	for _, zf := range zr.File {
-		if strings.HasSuffix(zf.Name, "/") {
-			continue // 目录条目不携带内容
-		}
+		isDir := strings.HasSuffix(zf.Name, "/")
 		name, err := NormalizePath(zf.Name)
 		if err != nil || name == "" {
 			continue // 越界/空名交由各路径原有的 ErrUnsafe 处理
+		}
+		if err := kinds.add(name, isDir); err != nil {
+			return err
+		}
+		if isDir {
+			continue // 目录条目不携带内容
 		}
 		if err := seen.add(name); err != nil {
 			return err
@@ -214,19 +351,38 @@ func validateZip(data []byte, lim Limits) error {
 		return err
 	}
 	hasRequired := false
+	// F2-N6:逐个条目完整解压校 CRC,而不是只查必填文件 —— 非必填条目损坏
+	// (references/broken.md 之类)此前能 201 上传、审核通过,员工安装时才抛
+	// BAD_CRC(故障落在最远端)。
+	//
+	// 预算按**实际解压字节**累计(walkZip 里的 UncompressedSize64 是声明值,
+	// 上传者可撒谎成 0):总额以 lim.MaxUnpackedBytes 封顶,于是「一万个条目
+	// 各声明 0 字节、实际各解压 64MiB」不会变成无界 CPU —— 一旦真实解压总量
+	// 超限即 ErrInvalid。合法归档的总解压量本来就被 walkZip 的声明值检查
+	// 限制在同一上限内,所以不会误伤。
+	budget := lim.MaxUnpackedBytes
 	err = walkZip(data, lim, func(zf *zip.File, name string, isDir bool, mode fs.FileMode) (bool, error) {
+		// archupd-5:符号链接检查必须在 isDir 之前 —— 「名字以 / 结尾、模式
+		// 却是 S_IFLNK」的条目被 zipList/zipExtract/zipReadAll 判 ErrUnsafe,
+		// 旧 Validate 把 isDir 分支放在前面,于是同一份归档「上传放行、
+		// 预览/解包拒绝」。四个入口必须给出一致结论。
+		if mode&fs.ModeSymlink != 0 {
+			return false, ErrUnsafe
+		}
 		if isDir {
 			return true, nil
 		}
 		if name == "" {
 			return false, ErrUnsafe
 		}
-		if mode&fs.ModeSymlink != 0 {
-			return false, ErrUnsafe
-		}
 		if name == lim.RequiredFile {
 			hasRequired = true
 		}
+		n, verr := verifyZipEntry(zf, budget)
+		if verr != nil {
+			return false, verr
+		}
+		budget -= n
 		return true, nil
 	})
 	if err != nil {
@@ -236,6 +392,52 @@ func validateZip(data []byte, lim Limits) error {
 		return ErrNoRequired
 	}
 	return nil
+}
+
+// verifyZipEntry 完整解压一个条目(内容丢弃)以触发 CRC/deflate 校验,返回
+// **实际**解压字节数。读取量以 remaining+1 封顶:连 remaining 字节都读得完
+// 说明该条目超过了整个归档剩余的解压预算(声明尺寸不可信),按 ErrInvalid 拒绝。
+func verifyZipEntry(zf *zip.File, remaining int64) (int64, error) {
+	rc, err := zf.Open()
+	if err != nil {
+		return 0, ErrCorrupt
+	}
+	defer rc.Close()
+	n, err := io.CopyN(io.Discard, rc, remaining+1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, ErrCorrupt
+	}
+	if n > remaining {
+		return n, ErrInvalid
+	}
+	return n, nil
+}
+
+// readZipEntry 解压一个条目,返回前 maxPreview 字节与**真实**解压长度。
+//
+// archupd-1/archupd-4:zip 头里的 UncompressedSize64 是上传者可任意伪造的
+// 声明值。按声明值决定「要不要读原文」会让任何真实超过预览上限的编排静默
+// 降级成空串(err=nil,审核面变瞎);按声明值回 size 会让逐文件审核接口报出
+// 假长度。长度一律以实际解压字节为准;超过 maxPreview 时继续读到条目末尾
+// 取真实长度(上限 MaxUnpackedBytes)。
+func readZipEntry(zf *zip.File, maxPreview int64) (head []byte, size int64, tooLarge bool, err error) {
+	rc, err := zf.Open()
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer rc.Close()
+	head, err = io.ReadAll(io.LimitReader(rc, maxPreview+1))
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if int64(len(head)) > maxPreview {
+		rest, cerr := io.Copy(io.Discard, io.LimitReader(rc, MaxUnpackedBytes))
+		if cerr != nil {
+			return nil, 0, false, cerr
+		}
+		return nil, int64(len(head)) + rest, true, nil
+	}
+	return head, int64(len(head)), false, nil
 }
 
 func zipList(data []byte, lim Limits, maxPreview int64) ([]string, string, error) {
@@ -270,17 +472,15 @@ func zipList(data []byte, lim Limits, maxPreview int64) ([]string, string, error
 		if name == "" {
 			continue
 		}
-		if name == lim.RequiredFile && required == "" && zf.UncompressedSize64 <= uint64(maxPreview) {
-			rc, rerr := zf.Open()
+		// archupd-1:必填文件是否可读、长度多少,只看真实解压结果,不看声明值。
+		if name == lim.RequiredFile && required == "" {
+			buf, _, tooLarge, rerr := readZipEntry(zf, maxPreview)
 			if rerr != nil {
-				return nil, "", ErrInvalid
+				return nil, "", ErrCorrupt
 			}
-			buf, rerr := io.ReadAll(io.LimitReader(rc, maxPreview+1))
-			rc.Close()
-			if rerr != nil {
-				return nil, "", ErrInvalid
+			if !tooLarge {
+				required = string(buf)
 			}
-			required = string(buf)
 		}
 		if !set[name] {
 			set[name] = true
@@ -301,10 +501,14 @@ func zipExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 	if err := checkZipDuplicates(zr); err != nil {
 		return "", 0, false, false, false, err
 	}
+	// archupd-5:符号链接条目一律拒绝,且必须在命中目标之前检查 ——
+	// 「命中即返回」会让排在目标之后的链接条目逃过检查,结论随条目顺序变化。
 	for _, zf := range zr.File {
 		if zf.Mode()&fs.ModeSymlink != 0 {
 			return "", 0, false, false, false, ErrUnsafe
 		}
+	}
+	for _, zf := range zr.File {
 		name, nerr := NormalizePath(zf.Name)
 		if nerr != nil || name == "" || strings.HasSuffix(zf.Name, "/") {
 			continue
@@ -312,24 +516,16 @@ func zipExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 		if name != target {
 			continue
 		}
-		size := int64(zf.UncompressedSize64)
-		if size > maxPreview {
+		// archupd-4:size 必须是真实解压长度(声明值可伪造:HTTP 200
+		// size=1048576 而真实内容 56 字节会把审核人引向错误的结论)。
+		buf, size, tooLarge, rerr := readZipEntry(zf, maxPreview)
+		if rerr != nil {
+			// archupd-4:声明尺寸与真实字节不符(可伪造)时明确报损坏,
+			// 绝不把伪造的声明值当成 size 返回给审核面。
+			return "", size, true, false, false, ErrCorrupt
+		}
+		if tooLarge {
 			return "", size, true, false, true, nil
-		}
-		rc, rerr := zf.Open()
-		if rerr != nil {
-			return "", size, true, false, false, ErrInvalid
-		}
-		// 声明大小可伪造(小声明+高压缩比 = zip 炸弹):按实际解压字节设
-		// 硬上限,超出即按 tooLarge 返回——与 zipList 的 LimitReader 一致
-		// (2026-09-01 审计:此前信任 UncompressedSize64,管理端预览 OOM)。
-		buf, rerr := io.ReadAll(io.LimitReader(rc, maxPreview+1))
-		rc.Close()
-		if rerr != nil {
-			return "", size, true, false, false, ErrInvalid
-		}
-		if int64(len(buf)) > maxPreview {
-			return "", int64(len(buf)), true, false, true, nil
 		}
 		if !utf8.Valid(buf) {
 			return "", size, true, true, false, nil
@@ -360,6 +556,7 @@ func validateTar(data []byte, lim Limits) error {
 	// 即「审核所见 ≠ 员工所装」。语义与 zip 完全对齐:同一(归一化、大小写
 	// 不敏感)路径出现两次即 ErrDuplicateEntry;目录条目不携带内容,不计入。
 	seen := dupEntrySet{}
+	kinds := newPathKinds()
 	var total int64
 	entries := 0
 	hasRequired := false
@@ -379,14 +576,22 @@ func validateTar(data []byte, lim Limits) error {
 		if err != nil {
 			return ErrUnsafe
 		}
-		if hdr.Typeflag == tar.TypeDir {
-			continue
-		}
 		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
 			return ErrUnsafe
 		}
+		isDir := hdr.Typeflag == tar.TypeDir
 		if name == "" {
+			if isDir {
+				continue
+			}
 			return ErrUnsafe
+		}
+		// archupd-3:与 zip 侧同口径 —— 同一路径既是文件又是目录即拒。
+		if err := kinds.add(name, isDir); err != nil {
+			return err
+		}
+		if isDir {
+			continue
 		}
 		if err := seen.add(name); err != nil {
 			return err
@@ -397,6 +602,13 @@ func validateTar(data []byte, lim Limits) error {
 		}
 		if name == lim.RequiredFile {
 			hasRequired = true
+		}
+		// archupd-3(tar 侧)/ F2-N6:每个非目录条目都完整读一遍,gzip/deflate
+		// 损坏(含条目内容与 CRC 不匹配)在上传期暴露,而不是等员工安装时才炸。
+		// tar 头部的 Size 是权威值(外层 gzip 只负责压缩),上面的 total 已按它
+		// 封顶,因此这里不会引入额外的无界解压。
+		if _, cerr := io.CopyN(io.Discard, tr, hdr.Size+1); cerr != nil && !errors.Is(cerr, io.EOF) {
+			return ErrCorrupt
 		}
 	}
 	if !hasRequired {
@@ -416,6 +628,7 @@ func tarList(data []byte, lim Limits, maxPreview int64) ([]string, string, error
 	// FIX-24:与 zipList 的 checkZipDuplicates 同语义 —— 重复条目一律拒绝,
 	// 不做"第一个生效"的静默挑选。四个入口必须给出一致的结论。
 	seen := dupEntrySet{}
+	kinds := newPathKinds()
 	var required string
 	var order []string
 	entries := 0
@@ -431,15 +644,25 @@ func tarList(data []byte, lim Limits, maxPreview int64) ([]string, string, error
 		if entries > lim.MaxEntries {
 			return nil, "", ErrTooMany
 		}
-		if hdr.Typeflag == tar.TypeDir || hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
-			continue
-		}
 		name, err := NormalizePath(hdr.Name)
 		if err != nil {
 			return nil, "", ErrUnsafe
 		}
 		if name == "" {
 			continue
+		}
+		if hdr.Typeflag == tar.TypeDir {
+			// archupd-3:与 zip 侧同口径 —— 同一路径既是文件又是目录即拒。
+			if err := kinds.add(name, true); err != nil {
+				return nil, "", err
+			}
+			continue
+		}
+		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+			continue
+		}
+		if err := kinds.add(name, false); err != nil {
+			return nil, "", err
 		}
 		if err := seen.add(name); err != nil {
 			return nil, "", err
@@ -481,6 +704,7 @@ func tarExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 	// validateTar/tarReadAll 同源:包内默认 MaxArchiveEntries /
 	// MaxUnpackedBytes,越界即拒(目录/链接条目不计体积,与 validateTar 一致)。
 	seen := dupEntrySet{}
+	kinds := newPathKinds()
 	var (
 		outContent string
 		outSize    int64
@@ -502,12 +726,21 @@ func tarExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 		if entries > MaxArchiveEntries {
 			return "", 0, false, false, false, ErrTooMany
 		}
-		if hdr.Typeflag == tar.TypeDir || hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
-			continue
-		}
 		name, nerr := NormalizePath(hdr.Name)
 		if nerr != nil || name == "" {
 			continue
+		}
+		if hdr.Typeflag == tar.TypeDir {
+			if derr := kinds.add(name, true); derr != nil {
+				return "", 0, false, false, false, derr
+			}
+			continue
+		}
+		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+			continue
+		}
+		if derr := kinds.add(name, false); derr != nil {
+			return "", 0, false, false, false, derr
 		}
 		if derr := seen.add(name); derr != nil {
 			return "", 0, false, false, false, derr
@@ -590,6 +823,10 @@ func ErrorText(err error, requiredName string, maxArchiveMB int) string {
 		return "归档条目过多"
 	case errors.Is(err, ErrDuplicateEntry):
 		return "归档含重复条目(同一文件出现多次,大小写不敏感)"
+	case errors.Is(err, ErrCorrupt):
+		return "归档内容损坏(必填文件解压或校验失败)"
+	case errors.Is(err, ErrPathConflict):
+		return "归档中同一路径既是文件又是目录"
 	case errors.Is(err, ErrInvalid):
 		return fmt.Sprintf("归档过大或结构非法(上限 %dMB)", maxArchiveMB)
 	default:
@@ -672,6 +909,7 @@ func tarReadAll(data []byte, lim Limits) (map[string][]byte, error) {
 	// 于是双 SKILL.md 的归档在审核页显示 benign、在 ReadAll(市场规范化重
 	// 打包)里是 EVIL。
 	seen := dupEntrySet{}
+	kinds := newPathKinds()
 	var total int64
 	entries := 0
 	for {
@@ -694,7 +932,15 @@ func tarReadAll(data []byte, lim Limits) (map[string][]byte, error) {
 			return nil, ErrUnsafe
 		}
 		if name == "" || hdr.Typeflag == tar.TypeDir {
+			if name != "" {
+				if derr := kinds.add(name, true); derr != nil {
+					return nil, derr
+				}
+			}
 			continue
+		}
+		if derr := kinds.add(name, false); derr != nil {
+			return nil, derr
 		}
 		if derr := seen.add(name); derr != nil {
 			return nil, derr

@@ -17,10 +17,11 @@
  * @module dsh-memory-evolve/bookmarks
  */
 
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { applyRequestGuard, readBody as sharedReadBody } from './http-guard.js'
+import { writeFileAtomicSafeAt } from './sync/filesets.js'
 
 /** 书签标签名最大字符数（过长会撑爆列表行，前端也做同等截断）。 */
 export const BOOKMARK_LABEL_MAX = 80
@@ -181,16 +182,15 @@ export class BookmarkStore {
   }
 
   /**
-   * 原子写回磁盘（先写临时文件再 rename；同 pid 清理残留 tmp）。
+   * 原子写回磁盘（FIX-27：自锚定安全原子写——临时落点同样断言 + O_EXCL，
+   * 预置的同名符号链接一律拒收，绝不跟随）。
    * @param {BookmarkFile} data
    */
   save(data) {
-    const path = this.filePath
-    mkdirSync(dirname(path), { recursive: true })
-    const tmpPath = `${path}.tmp.${process.pid}`
-    try { unlinkSync(tmpPath) } catch { /* 无残留，忽略 */ }
-    writeFileSync(tmpPath, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
-    renameSync(tmpPath, path)
+    // FIX-27（2026-09-13）：改走**自锚定安全原子写**（tmp 落点同样断言 +
+    // O_EXCL 按 fd 写入 + rename 前后复检）——预置同名符号链接即写穿到目录外，
+    // 曾被静默当成"写成功"。
+    writeFileAtomicSafeAt(this.filePath, `${JSON.stringify(data, null, 2)}\n`)
     this._cache = data
   }
 

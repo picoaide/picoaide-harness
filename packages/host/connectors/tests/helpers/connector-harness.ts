@@ -49,6 +49,28 @@ export interface Harness {
   readonly prompts: Array<Record<string, unknown>>
   readonly emitSession: (session: { username?: string } | null) => void
   readonly dispose: () => void
+  /** 上游 `connection` 服务替身被问过几次（R7-RV-3：证明必须真的被检查）。 */
+  readonly fence: { seen: number }
+}
+
+/**
+ * 上游 `connection.requestRejection()` 的行为替身（`rpc-host.ts:97-100`）：
+ * Host/Origin 围栏之后，只有持 `dsh-auth-*` cookie 的页面才通过。
+ *
+ * R7-RV-3 后连接器的写面要这份证明：产品里的调用点（`ConnectorsSection.tsx`）
+ * 跑在主应用窗口里、经 launch token 换过票，cookie 恒在；测试里的
+ * {@link callRoute} 因此**默认带上 cookie**（模拟真页面），
+ * {@link callRouteForged} 不带（模拟本机任意进程伪造 Origin）。
+ */
+export function browserFence(): { seen: number, requestRejection: (r: { headers: Record<string, unknown> }) => 401 | undefined } {
+  const fence = {
+    seen: 0,
+    requestRejection: (request: { headers: Record<string, unknown> }) => {
+      fence.seen += 1
+      return request.headers['cookie'] === undefined ? (401 as const) : undefined
+    },
+  }
+  return fence
 }
 
 /** Drive the real plugin `apply()` with a faked cordis context. */
@@ -76,10 +98,17 @@ export function createHarness(
     return callerApproval === undefined ? true : callerApproval(request)
   }
 
+  // `connectionFence: null` = 服务缺席（走 fail-closed 分支）；缺省 = 真页面替身。
+  const fence = options.connectionFence === null
+    ? undefined
+    : (options.connectionFence as ReturnType<typeof browserFence> | undefined) ?? browserFence()
+
   const ctx = {
-    get: (name: string) => name === 'picoSession'
-      ? { getSession: () => (username === null ? null : { username }) }
-      : undefined,
+    get: (name: string) => {
+      if (name === 'picoSession') return { getSession: () => (username === null ? null : { username }) }
+      if (name === 'connection') return fence
+      return undefined
+    },
     on: (event: string, handler: (next: unknown) => void) => {
       if (event === 'pico/session-changed') sessionHandlers.push(handler)
       return () => {}
@@ -112,6 +141,7 @@ export function createHarness(
     fibers,
     routes,
     prompts,
+    fence: fence ?? { seen: 0 },
     emitSession: (session) => {
       username = session?.username ?? null
       for (const handler of [...sessionHandlers]) handler(session)
@@ -120,11 +150,16 @@ export function createHarness(
   }
 }
 
-function request(method: string, url: string): IncomingMessage {
+function request(method: string, url: string, cookie = true): IncomingMessage {
   return {
     method,
     url,
-    headers: { host: 'localhost:43120', origin: 'http://localhost:43120' },
+    headers: {
+      host: 'localhost:43120',
+      origin: 'http://localhost:43120',
+      // R7-RV-3：真页面持有 BrowserAuth cookie；伪造进程拿不出（见 callRouteForged）。
+      ...(cookie ? { cookie: 'dsh-auth-localhost:43120=v1.signature' } : {}),
+    },
     socket: { remoteAddress: '127.0.0.1' },
   } as unknown as IncomingMessage
 }
@@ -146,11 +181,32 @@ export async function callRoute(
   path: string,
   method = 'POST',
 ): Promise<{ status: number; body: string }> {
+  return await routeCall(harness, path, method, true)
+}
+
+/**
+ * Call one route the way a **forged local process** would: same-origin headers
+ * without the BrowserAuth cookie (R7-RV-3 regression face).
+ */
+export async function callRouteForged(
+  harness: Harness,
+  path: string,
+  method = 'POST',
+): Promise<{ status: number; body: string }> {
+  return await routeCall(harness, path, method, false)
+}
+
+async function routeCall(
+  harness: Harness,
+  path: string,
+  method: string,
+  cookie: boolean,
+): Promise<{ status: number; body: string }> {
   const res = response()
   for (const route of harness.routes) {
     const matches = route.kind === 'exact' ? route.path === path : path.startsWith(route.path)
     if (!matches) continue
-    await route.handler(request(method, path), res)
+    await route.handler(request(method, path, cookie), res)
     return { status: res.statusCode, body: res.body }
   }
   throw new Error(`no route registered for ${path}`)

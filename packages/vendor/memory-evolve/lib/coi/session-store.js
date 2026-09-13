@@ -10,9 +10,9 @@
  * 并发锁：同一会话同时只能跑一个任务（两个任务同时恢复同一 session id
  * 会串上下文）。activeTaskId 记录占用者，任务完成/取消时释放。
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { translate, getLocale, COI2_DICT } from '../i18n.js'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
 
 /** Translate through COI2_DICT in the active host locale. */
 const cs2 = (key, params) => translate(COI2_DICT, key, params, getLocale())
@@ -39,10 +39,9 @@ export class SessionStore {
   }
 
   #save() {
-    mkdirSync(dirname(this.file), { recursive: true })
-    const tmp = `${this.file}.tmp.${process.pid}`
-    writeFileSync(tmp, JSON.stringify(this.items, null, 2) + '\n')
-    renameSync(tmp, this.file)
+    // FIX-27（2026-09-13）：自锚定安全原子写（tmp 落点同样断言 + O_EXCL，
+    // 预置同名符号链接拒收，绝不跟随）
+    writeFileAtomicSafeAt(this.file, JSON.stringify(this.items, null, 2) + '\n')
   }
 
   /**

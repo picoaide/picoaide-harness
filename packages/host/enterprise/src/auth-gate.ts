@@ -7,6 +7,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ApiError, AuthError, assertServerURLAllowed, changePassword, fetchJSON, gatewayFetch, login, normalizeServerURL } from './server-connector/auth.ts'
 import { applyPinnedFingerprintsFromEnv, defaultTlsStorePath, installCertificateVerification } from './server-connector/tls.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
+import { clearBrowserLoginPending, noteBrowserLoginStarted, noteLoginPageWired, pendingBrowserLoginServer } from './deep-link.ts'
 import {
   computeSkillContentHash,
   installSkillArchive,
@@ -386,6 +387,11 @@ const LOGIN_HTML = `<!DOCTYPE html>
   }
 
   function resetBrowserLogin() {
+    // srvcore-1 客户端一半(审计 R7 F3-N1):复位时清除宿主进程登记的"待登录
+    // 服务端" —— 取消授权/轮询超时/返回上一步之后,迟到或伪造的回跳深链不再
+    // 被接受。本页脚本跑在**渲染进程**(window-options.ts: contextIsolation=true、
+    // nodeIntegration=false、sandbox=true),够不到宿主模块,只能走本地 HTTP 面。
+    try { fetch('/api/pico/auth/browser-login', { method: 'DELETE' }).catch(function () {}) } catch (e6) {}
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
     pollAttempts = 0
     browserBtn.disabled = false
@@ -402,6 +408,28 @@ const LOGIN_HTML = `<!DOCTYPE html>
     browserBtn.disabled = true
     var name = currentMethod
     var base = trimServer(server)
+    // srvcore-1 客户端一半(审计 R7 F3-N1):window.open 打开的是**远端** SSO 地址,
+    // 不经过本地路由;而回跳深链的守卫(deep-link.ts 的 noteBrowserLoginStarted)
+    // 在宿主进程。所以必须先经本地 HTTP 面登记"本机登录页正在等待这台服务端",
+    // 否则守卫永远收不到登记(判定分支不可达),伪造的 picoaide://auth?…
+    // server=https://attacker.example 会把真 token 发给攻击者并采纳其会话。
+    // 登记失败就不打开浏览器:否则员工在浏览器里授权成功后,回跳会因为"没有
+    // 等待目标"被拒绝,表现为"授权完成却一直登不进去"。
+    // 这里 await 一个同源本地请求(~毫秒级)不会让 window.open 被弹窗拦截:
+    // Chromium 的 transient user activation 保留约 5 秒且 fetch 不消耗它。
+    try {
+      var reg = await fetch('/api/pico/auth/browser-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ server: server }),
+      })
+      if (!reg.ok) throw new Error('register failed')
+    } catch (e7) {
+      waiting.style.display = 'none'
+      browserBtn.disabled = false
+      err2.textContent = '无法登记浏览器登录，请重试'
+      return
+    }
     window.open(base + '/api/client/v2/auth/' + name + '/login?server=' + encodeURIComponent(server), '_blank')
     startPoll()
   }
@@ -800,6 +828,25 @@ function builtInChannel(brand: BrandConfig | undefined): ChannelConfig {
 const BACK_BUTTON_HTML = '<button type="button" class="back" id="back-btn">← 修改服务端地址</button>'
 
 export function apply(ctx: Context, config: Config): void {
+  // srvcore-1 客户端一半(R3-F3-N1a/N1b,2026-09-13):深链守卫必须在**本进程
+  // 任何深链可能到达之前**就进入严格模式,而且是**无条件**的 —— 包括没有预置
+  // 服务端地址的官方构建(configuredServer === '')。
+  //
+  // 为什么放在 apply() 的最前面:① 「未接线/无预置地址」不再是放行条件
+  // (R3-N1a:官方渠道包 brands/official/brand.json 的 server_url 是空串,旧
+  // 逻辑下严格模式永不开启,伪造深链把真 token 发往攻击者域名且零告警);
+  // ② configuredServer 是编译期常量(渠道包 build/channel.json 或组装配置),
+  // 此刻就是权威值,等"首个登录页请求"再武装会留下启动窗口 —— 深链作为启动
+  // 参数/second-instance/open-url 恰好落在这个窗口里(R3-N1b)。
+  //
+  // 语义:noteLoginPageWired() 打开严格模式;有预置地址时登记为"正在等待的
+  // 那台",没有预置地址时 pending 保持 null ⇒ 未登录且未登记(员工没点过
+  // "使用浏览器登录")的深链一律拒绝。密码登录不经深链;OIDC 部署必然先在
+  // 登录页 `browserLogin()` 里登记,故不受影响(见 deep-link.ts)。
+  const configuredServer = (config.defaultServer ?? '').trim()
+  noteLoginPageWired()
+  if (configuredServer !== '') noteBrowserLoginStarted(configuredServer)
+
   // F13(审计 2026-09-11):接线 TLS 校验 —— 系统 CA 信任的证书直接放行;
   // 自签名/私有 CA 只有在 PICOAI_TLS_PINS 预置或历史 pin 指纹匹配时才接受,
   // 未知/不匹配一律拒绝(此前该模块从未被调用,文档宣称的 TOFU 保护是死代码)。
@@ -825,7 +872,7 @@ export function apply(ctx: Context, config: Config): void {
   // 会直接落进 `value="…"` 属性 —— 必须做属性转义,否则一个带引号的地址就能
   // 从属性里逃逸。渠道包是自家产物,但登录页是认证前唯一的 HTML 面,
   // 这里按不可信输入处理(与页面内 esc() 同一口径)。
-  const configuredServer = (config.defaultServer ?? '').trim()
+  // (configuredServer 在 apply() 开头已算好并用于同步武装深链守卫。)
   const defaultServer = escapeHtmlAttribute(configuredServer)
   // 品牌名进 `<title>` 是 HTML 文本位,进页面脚本是 JS 字面量位 —— 两种上下文
   // 各用各自的转义。渠道名里一个 `</title>` / `</script>` 都能逃逸,所以
@@ -987,6 +1034,24 @@ export function apply(ctx: Context, config: Config): void {
     return false
   }
 
+  /**
+   * r7c-6(P2):本地**写**路由的持有性证明。
+   *
+   * `guard()` 只证明"回环 socket + 回环 Host + 同源标记",而它自述的边界正是
+   * "伪造 Origin 的 curl 也能过"。此前技能/预设/共享技能/能力的 install、
+   * upload、uninstall 只调 `guard()` —— 同一份伪造头打 login 被 403,打技能
+   * 安装却穿过围栏,以用户令牌出站到网关、把技能落进本地技能根、把本地产物
+   * 上传到组织共享库(本地进程与 login 围栏是同一前提:能在本机执行代码)。
+   *
+   * 口径与 login 一致:`required`(高危写面,fence 缺席时 fail-closed 503);
+   * 读面(GET)维持 `guard()` —— 只读目录/归档不改盘、不换会话。
+   * @param req - 本地 HTTP 请求(读 method/headers)。
+   * @param res - 拒绝时写响应体的对象。
+   * @returns true 表示可以继续处理。
+   */
+  const requireWriteProof = (req: IncomingMessage, res: ServerResponse): boolean =>
+    req.method === 'GET' || proofOfPossession(req, res, 'required')
+
   const gatewayError = (res: ServerResponse, cause: unknown): void => {
     const message = cause instanceof Error ? cause.message : String(cause)
     json(res, 502, { error: `gateway error: ${message}` })
@@ -1010,6 +1075,26 @@ export function apply(ctx: Context, config: Config): void {
 })()
 <\/script>`
 
+  /**
+   * 登录页被下发时,用渠道预置的服务端地址**重新**武装深链守卫(srvcore-1
+   * 客户端一半)。
+   *
+   * 真正的首次武装已在 `apply()` 同步完成(见那里的说明);这里是页面重载路径
+   * 上的兜底:用户在登录页取消/超时后(`clearBrowserLoginPending()` 清空了等待
+   * 目标),下一次登录页请求把预置地址放回去。
+   *
+   * 只用它武装、且**不覆盖**进行中的登记:用户点过浏览器登录(或填了别的地址)
+   * 之后,登记以那次点击为准 —— 页面重载/被再次请求不得把等待目标改回默认值。
+   *
+   * 没配默认地址的构建(官方/本地)在这里**不登记任何目标**,但严格模式已经在
+   * `apply()` 里打开:未登录且没点过浏览器登录的深链一律拒绝(R3-N1a),而不是
+   * 回落成"没有预置地址就放行"。
+   */
+  const armPendingBrowserLoginFromLoginPage = (): void => {
+    if (configuredServer === '' || pendingBrowserLoginServer() !== null) return
+    noteBrowserLoginStarted(configuredServer)
+  }
+
   ctx.effect(() => {
     const disposers = [
       // The main window's first page: the login form while logged out, the
@@ -1025,13 +1110,18 @@ export function apply(ctx: Context, config: Config): void {
       // 0057: 会话带强制改密标记(管理员重置密码) → 一律回强制改密页,
       // 即使应用重启后仍在(业务 API 在改密完成前也被服务端 403)。
       if (restored !== null && restored.mustChangePassword === true) return CHANGE_PASSWORD_HTML
-      if (!ctx.picoSession.isLoggedIn()) return loginHTML
+      if (!ctx.picoSession.isLoggedIn()) {
+        // 未登录 ⇒ 这一页就是登录页:顺手用预置服务端武装深链守卫(见上)。
+        armPendingBrowserLoginFromLoginPage()
+        return loginHTML
+      }
       return html.replace('</head>', SESSION_LOST_SCRIPT + '</head>')
       }),
 
       ctx.webServer.register({
         kind: 'exact', path: '/login',
         handler: (_req: IncomingMessage, res: ServerResponse) => {
+          armPendingBrowserLoginFromLoginPage()
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
           res.end(loginHTML)
         },
@@ -1194,6 +1284,50 @@ export function apply(ctx: Context, config: Config): void {
         },
       }),
 
+      // srvcore-1 客户端一半(审计 R7 F3-N1):登录页的浏览器 SSO 目标登记面。
+      //
+      // 为什么需要一条路由:登录页 HTML 由宿主进程下发,但页面脚本在**渲染进程**
+      // 执行(contextIsolation/nodeIntegration 全关,见 desktop/src/window-options.ts),
+      // 够不到宿主模块作用域的 `noteBrowserLoginStarted`;`window.open` 打开的又是
+      // **远端** SSO 地址,不经过本地路由。没有这条面,`pendingBrowserLogin` 的
+      // 判定分支永远不可达 —— 未登录时只剩 `assertServerURLAllowed`(https 域名
+      // 一律放行),伪造深链就能把会话指向攻击者服务端且零告警。
+      //
+      // 口径与 login 相同(`required` 持有性证明):登记决定了后续深链允许采纳
+      // 哪台服务端,若允许伪造 Origin 的本地进程登记,攻击者只要先登记自己的
+      // 域名再触发深链,守卫反而成了帮凶。真页面(登录表单同口径)持有 dsh-auth-*
+      // cookie,产品内调用方只有登录页。
+      ctx.webServer.register({
+        kind: 'exact', path: '/api/pico/auth/browser-login',
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          if (req.method !== 'POST' && req.method !== 'DELETE') return json(res, 405, { error: 'method not allowed' })
+          if (!guard(req, res)) return
+          if (!proofOfPossession(req, res, 'required')) return
+          if (req.method === 'DELETE') {
+            clearBrowserLoginPending()
+            json(res, 200, { ok: true, pending: false })
+            return
+          }
+          const raw = await collectBody(req, 8 * 1024).catch(() => null)
+          if (raw === null) return json(res, 413, { error: 'body too large' })
+          let body: { server?: unknown }
+          try { body = JSON.parse(raw.toString('utf8')) } catch { return json(res, 400, { error: 'bad json' }) }
+          if (typeof body.server !== 'string' || body.server.trim() === '') {
+            return json(res, 400, { error: 'missing server' })
+          }
+          const target = body.server.trim()
+          // 与深链路径同一 scheme 校验:不合规的地址登记了也没用(identity=null),
+          // 但在这里就拒掉能让登录页给出可读错误,而不是"授权完成却登不进去"。
+          try {
+            assertServerURLAllowed(target)
+          } catch (error) {
+            return json(res, 400, { error: error instanceof Error ? error.message : 'unsafe server' })
+          }
+          noteBrowserLoginStarted(target)
+          json(res, 200, { ok: true, pending: true })
+        },
+      }),
+
       // v3b: 登录页渠道代理(公开, 无需 token): ?server=<url> 转发服务端
       // /api/client/v2/channel; 未传 server 且无 session 时回退**随包品牌**
       // (builtInChannel()) —— 登录页与客户端界面在服务端不可达时也得显示
@@ -1244,6 +1378,8 @@ export function apply(ctx: Context, config: Config): void {
         kind: 'prefix', path: '/api/pico/skills',
         handler: async (req: IncomingMessage, res: ServerResponse) => {
           if (!guard(req, res)) return
+          // r7c-6(P2):写面(install/upload/uninstall)要求持有性证明,与 login 同口径。
+          if (!requireWriteProof(req, res)) return
           const s = session()
           if (s === null) return json(res, 401, { error: 'not logged in' })
           if (req.method !== 'GET' && !writeGuard()) {
@@ -1399,6 +1535,8 @@ export function apply(ctx: Context, config: Config): void {
         kind: 'prefix', path: '/api/pico/agent-presets',
         handler: async (req: IncomingMessage, res: ServerResponse) => {
           if (!guard(req, res)) return
+          // r7c-6(P2):写面(install/upload/uninstall)要求持有性证明,与 login 同口径。
+          if (!requireWriteProof(req, res)) return
           const s = session()
           if (s === null) return json(res, 401, { error: 'not logged in' })
           if (req.method !== 'GET' && !writeGuard()) {
@@ -1592,6 +1730,8 @@ export function apply(ctx: Context, config: Config): void {
         kind: 'prefix', path: '/api/pico/shared-skills',
         handler: async (req: IncomingMessage, res: ServerResponse) => {
           if (!guard(req, res)) return
+          // r7c-6(P2):写面(install/upload/uninstall)要求持有性证明,与 login 同口径。
+          if (!requireWriteProof(req, res)) return
           const s = session()
           if (s === null) return json(res, 401, { error: 'not logged in' })
           if (req.method !== 'GET' && !writeGuard()) {
@@ -1735,6 +1875,8 @@ export function apply(ctx: Context, config: Config): void {
         kind: 'prefix', path: '/api/pico/capabilities',
         handler: async (req: IncomingMessage, res: ServerResponse) => {
           if (!guard(req, res)) return
+          // r7c-6(P2):写面(install/upload/uninstall)要求持有性证明,与 login 同口径。
+          if (!requireWriteProof(req, res)) return
           const s = session()
           if (s === null) return json(res, 401, { error: 'not logged in' })
           if (req.method !== 'GET' && !writeGuard()) {

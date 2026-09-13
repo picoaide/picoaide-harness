@@ -31,11 +31,12 @@
  * so the plugin also loads harmlessly on surfaces without httpServer (e.g.
  * the TUI) and without the skills service.
  */
-import { realpath, readdir, readFile, writeFile, stat } from 'node:fs/promises'
-import { readFileSync, writeFileSync, renameSync } from 'node:fs'
+import { realpath, readdir, readFile, stat } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, isAbsolute, sep, dirname } from 'node:path'
 import { localTrustFence } from './http-guard.js'
+import { writeFileAtomicSafeAt } from './sync/filesets.js'
 
 /** Cap on a single readable text file (bytes). */
 const MAX_READ_BYTES = 512 * 1024
@@ -116,11 +117,13 @@ function loadState(stateFile, legacyStateFiles) {
   return state
 }
 
-/** Persist the disable state atomically (tmp + rename). */
+/**
+ * Persist the disable state atomically. FIX-27（2026-09-13）：改走自锚定安全
+ * 原子写——原先的临时名 `${stateFile}.tmp` 连 pid 都没有，任何人都能预置同名
+ * 符号链接把状态写到目录外。
+ */
 function saveState(stateFile, state) {
-  const tmp = `${stateFile}.tmp`
-  writeFileSync(tmp, JSON.stringify(state, null, 2))
-  renameSync(tmp, stateFile)
+  writeFileAtomicSafeAt(stateFile, JSON.stringify(state, null, 2))
 }
 
 /** Extensions treated as text even when the sniffing heuristics are inconclusive. */
@@ -336,9 +339,10 @@ function toggleDisableFlag(text, disabled) {
  * @param {string} content - 新内容。
  */
 function writeSkillFile(file, content) {
-  const tmp = `${file}.tmp.${process.pid}`
-  writeFileSync(tmp, content)
-  renameSync(tmp, file)
+  // FIX-27（2026-09-13）：自锚定安全原子写（tmp 落点同样断言 + O_EXCL）。
+  // NF-3 收敛后缺省会跟随「落点文件本身是符号链接」的合法布局；技能内容不是
+  // 状态文件——预置链接一律拒收（保持第一轮的判据）。
+  writeFileAtomicSafeAt(file, content, { followFileSymlink: false })
 }
 
 /**
@@ -1105,7 +1109,9 @@ export function installSkillsManager(ctx, options = {}) {
               sendJson(res, 400, { error: 'target is not a file' })
               return
             }
-            await writeFile(file, buffer, { encoding: 'utf8' })
+            // NF-1 同族：技能内容落点必须过断言（`followFileSymlink:false` =
+            // 预置的 SKILL.md 符号链接一律拒收，绝不把用户内容写到链接目标）。
+            writeFileAtomicSafeAt(file, buffer, { followFileSymlink: false })
             const after = await stat(file)
             sendJson(res, 200, { ok: true, path: file, size: after.size, mtime: after.mtimeMs })
           } catch (error) {

@@ -205,31 +205,20 @@ func TestApplyStreamUsageRequest(t *testing.T) {
 		t.Fatalf("non-stream body mutated: %s", out2)
 	}
 
-	// 审计 2026-09-13 P0-1:客户端显式 include_usage=false **必须被覆盖为 true**
-	// (旧行为"尊重客户端"会让输入侧永久 0 计费;反向断言见这里)。
+	// client set include_usage=false -> **必须被覆盖成 true**(审计 r7 srvbill-2:
+	// 计量开关只能由服务端持有;尊重显式 false 等于让被计费方一行 JSON 关掉自己
+	// 的计量表 —— 上游据此不发 usage chunk → 输入侧免费 + completion 估算截顶)。
 	explicitFalse := []byte(`{"model":"m","stream":true,"stream_options":{"include_usage":false}}`)
 	out3, err := applyStreamUsageRequest(explicitFalse)
 	if err != nil {
 		t.Fatal(err)
 	}
-	json.Unmarshal(out3, &m)
-	opts3, ok := m["stream_options"].(map[string]any)
-	if !ok {
-		t.Fatalf("stream_options missing after override: %s", out3)
-	}
-	if opts3["include_usage"] != true {
-		t.Fatalf("client-supplied include_usage=false was NOT overridden: %s", out3)
-	}
-
-	// stream_options 非对象形态(畸形输入)同样被替换成合法对象
-	brokenOpts := []byte(`{"model":"m","stream":true,"stream_options":"off"}`)
-	out3b, err := applyStreamUsageRequest(brokenOpts)
-	if err != nil {
+	var m3 map[string]any
+	if err := json.Unmarshal(out3, &m3); err != nil {
 		t.Fatal(err)
 	}
-	json.Unmarshal(out3b, &m)
-	if opts3b, ok := m["stream_options"].(map[string]any); !ok || opts3b["include_usage"] != true {
-		t.Fatalf("malformed stream_options not normalized: %s", out3b)
+	if got := m3["stream_options"].(map[string]any)["include_usage"]; got != true {
+		t.Fatalf("include_usage = %v, want true(客户端显式 false 必须被服务端覆盖): %s", got, out3)
 	}
 
 	// client set include_usage=true already -> merged without duplication
@@ -671,7 +660,7 @@ func TestServeJSONDropsUntrustedHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.serveJSON(c, resp, uid, 0, "m", nil, billingKindChat, 0)
+	a.serveJSON(c, resp, uid, 0, "m", nil, billingKindChat, nil)
 	if got := w.Body.String(); got != `{"ok":true}` {
 		t.Fatalf("上游响应体必须原样透传(否则本用例没走到白名单分支): %q", got)
 	}
@@ -735,7 +724,7 @@ func TestProxyStreamBackfilledThenDisconnectKeepsUsage(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		a := &API{DB: db}
-		a.serveStream(c, resp, usageID, nil, 0)
+		a.serveStream(c, resp, usageID, nil, nil, 0)
 		close(done)
 	}()
 	<-body.blocked // usage chunk read + backfilled; stream is now holding
@@ -836,7 +825,7 @@ func TestServeJSONRedactsUpstreamKeyEcho(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.serveJSON(c, resp, uid, 0, "m", []string{secret}, billingKindChat, 0)
+	a.serveJSON(c, resp, uid, 0, "m", []string{secret}, billingKindChat, nil)
 	body := w.Body.String()
 	if !strings.Contains(body, "echo ***") {
 		t.Fatalf("响应体必须透传且已脱敏(否则本用例没走到交付分支): %s", body)
@@ -866,7 +855,7 @@ func TestServeStreamRedactsUpstreamKeyEcho(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.serveStream(c, resp, 0, []string{secret}, 0)
+	a.serveStream(c, resp, 0, []string{secret}, nil, 0)
 	body := w.Body.String()
 	if strings.Contains(body, secret) {
 		t.Fatalf("secret leaked in stream: %s", body)
@@ -892,7 +881,7 @@ func TestServeStreamRedactsErrorBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.serveStream(c, resp, 0, []string{secret}, 0)
+	a.serveStream(c, resp, 0, []string{secret}, nil, 0)
 	body := w.Body.String()
 	if strings.Contains(body, secret) {
 		t.Fatalf("secret leaked in error body: %s", body)
@@ -957,7 +946,8 @@ func TestNegativeUpstreamUsageDoesNotRechargeBalance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}`, token, nil)
+	reqBody := `{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}`
+	w := doPost(t, r, "/v1/chat/completions", reqBody, token, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -966,17 +956,24 @@ func TestNegativeUpstreamUsageDoesNotRechargeBalance(t *testing.T) {
 		t.Fatal(err)
 	}
 	// N1/N2(审计 r3 第四轮)起,负 token 归零后该侧等于"没有可用用量" ⇒ 走
-	// **已交付字节**估算兜底:只可能产生以已交付字节/4 为上限的极小正向费用,
-	// 绝不可能变成"余额凭空增加"(refund)。subject 仍是"不得凭空充值":断言
-	// 余额不增加 + 扣费被字节上限约束(而不是"一分不扣")。
+	// **已交付字节/请求体字节**估算兜底:两侧都只可能产生以"字节/4"为上限的
+	// 极小正向费用,绝不可能变成"余额凭空增加"(refund)。subject 仍是"不得凭空
+	// 充值":断言余额不增加 + 扣费被字节上限约束(而不是"一分不扣")。
+	//
+	// R7 srvbill-2 起**输入侧也要兜底**(上游漏报 prompt 时按请求体估算),
+	// 否则"关掉用量上报"就是一条输入侧永久免费的通道 —— 因此上限必须把
+	// 输入侧一并计入,单价各取其档(此处都是 1 元/1M)。
 	if u.BalanceMoney > 1+1e-9 {
 		t.Fatalf("负 token 凭空充值: balance = %v, want <= 1", u.BalanceMoney)
 	}
-	reqBody := `{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}`
-	wantPrompt, _ := estimatePromptFallback(0, int64(len(reqBody)))
-	maxCharge := float64(wantPrompt)/1e6 + float64(len(f.nonStream))/4/1e6 // 输入兜底(单价 1 元/1M) + 已交付字节/4
+	maxCharge := (float64(len(f.nonStream))/4 + float64(len(reqBody))/4) / 1e6 * 1
 	if charge := 1 - u.BalanceMoney; charge > maxCharge+1e-9 {
-		t.Fatalf("负 token 触发超上限扣费: charge=%.9f max=%.9f(已交付 %d 字节)", charge, maxCharge, len(f.nonStream))
+		t.Fatalf("负 token 触发超上限扣费: charge=%.9f max=%.9f(已交付 %d 字节 + 请求体 %d 字节)",
+			charge, maxCharge, len(f.nonStream), len(reqBody))
+	}
+	// 正向:两侧都真的计了费(输入侧不再恒 0)。
+	if charge := 1 - u.BalanceMoney; charge < 1e-9 {
+		t.Fatalf("负 token 归零后两侧都未计费(charge=%.9f):输入侧兜底没生效", charge)
 	}
 	items, _, err := serverstore.BalanceLedgerPage(db, 1, "", 1, 50)
 	if err != nil {

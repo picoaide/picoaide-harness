@@ -43,6 +43,48 @@ export class OutboundUrlBlockedError extends Error {
 }
 
 /**
+ * Thrown when a connector-controlled request outlived its deadline (conn-1,
+ * audit R7 P1).
+ *
+ * A deadline breach is NOT a policy refusal: call sites that keep working with
+ * a stale credential on an `OutboundUrlBlockedError` (`refreshOAuthToken`) must
+ * still see a timeout, and the lifecycle task that awaits them must unwind
+ * rather than stay parked on a socket. The message names the flow step and the
+ * deadline so the row's error text is diagnosable.
+ */
+export class OutboundTimeoutError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'OutboundTimeoutError'
+  }
+}
+
+/**
+ * Deadline of ONE connector outbound request, in milliseconds.
+ *
+ * Before this existed the request had no deadline at all, so an endpoint that
+ * accepted the TCP connection and never answered parked the request until
+ * undici's own `headersTimeout` — measured at **300 798 ms**. Because the
+ * plugin's lifecycle (boot restore / logout / user switch) is ONE serial chain,
+ * a logout queued behind such a request did not run for up to ~5 minutes: the
+ * previous user's MCP servers stayed registered and every later operation
+ * stacked up. 30 s is far below that window and still generous for a metadata
+ * document or a token exchange (the OAuth code exchange keeps its own 60 s
+ * budget by passing `timeoutMs` explicitly).
+ */
+export const OUTBOUND_REQUEST_TIMEOUT_MS = 30_000
+
+/** Optional outbound knobs. `timeoutMs` must be a positive, finite number. */
+export interface OutboundFetchOptions {
+  /**
+   * Deadline override (tests, and a deployment that knows its endpoints are
+   * slower). Never fed from a connector definition: a definition must not be
+   * able to widen or shorten its own deadline.
+   */
+  timeoutMs?: number
+}
+
+/**
  * Non-public IPv4/IPv6 ranges. Loopback is handled separately: it is the one
  * non-public range the policy deliberately allows over http (local development
  * servers), matching the enterprise rule.
@@ -254,16 +296,51 @@ function describeRedirect(response: Response): string {
  * Fetch a connector-controlled URL with the outbound policy AND the redirect
  * fence applied in one place, so no call site can perform one without the
  * other.
+ *
+ * Every request also carries a deadline (conn-1): `init.signal` can only
+ * SHORTEN it (the abort fires when either the caller's signal or the deadline
+ * fires), never extend it, so a hung endpoint cannot park the caller's serial
+ * lifecycle chain. A breach throws {@link OutboundTimeoutError} — the ordinary
+ * failure path, so the caller reports it instead of silently continuing.
  * @param rawUrl - the URL as the remote side supplied it.
  * @param what - the flow step naming the URL in the error (e.g. `OAuth token 端点`).
  * @param init - request options; `redirect` is forced to `manual`.
+ * @param options - deadline override (defaults to {@link OUTBOUND_REQUEST_TIMEOUT_MS}).
  * @returns the response, which is guaranteed not to be a redirect.
  * @throws {OutboundUrlBlockedError} when the URL is outside the policy or the
  *   remote side answered with a redirect.
+ * @throws {OutboundTimeoutError} when the request outlived its deadline.
  */
-export async function outboundFetch(rawUrl: string, what: string, init: RequestInit = {}): Promise<Response> {
+export async function outboundFetch(
+  rawUrl: string,
+  what: string,
+  init: RequestInit = {},
+  options: OutboundFetchOptions = {},
+): Promise<Response> {
   const target = assertOutboundUrlAllowed(rawUrl, what)
-  const response = await fetch(target, { ...init, redirect: OUTBOUND_REDIRECT_POLICY })
+  const deadlineMs = options.timeoutMs ?? OUTBOUND_REQUEST_TIMEOUT_MS
+  // `AbortSignal.timeout` answers a bare RangeError for these; name the option
+  // instead so a misconfigured deployment sees what to fix.
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) {
+    throw new RangeError(`出站请求截止时间非法（timeoutMs=${String(deadlineMs)}），必须为正数`)
+  }
+  const deadline = AbortSignal.timeout(deadlineMs)
+  const caller = init.signal ?? null
+  let response: Response
+  try {
+    response = await fetch(target, {
+      ...init,
+      redirect: OUTBOUND_REDIRECT_POLICY,
+      signal: caller === null ? deadline : AbortSignal.any([caller, deadline]),
+    })
+  } catch (cause) {
+    // A caller abort (user cancel, teardown) is that caller's own outcome and
+    // keeps its own error; only the deadline becomes a deadline report.
+    if (deadline.aborted && !(caller?.aborted ?? false)) {
+      throw new OutboundTimeoutError(`${what} 出站请求超时（${deadlineMs}ms 内未完成），已中止: ${target.host}`)
+    }
+    throw cause
+  }
   if (isRedirectResponse(response)) {
     throw new OutboundUrlBlockedError(
       `${what} 返回重定向（${describeRedirect(response)}），按出站策略拒绝跟随: ${target.host}`,

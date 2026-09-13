@@ -1,6 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { describe, expect, it, vi } from 'vitest'
 import { handleDesktopDirectoryPickerRequest } from '../src/directory-picker-route.ts'
+import type { WriteProofDeps } from '../src/write-proof.ts'
+
+/** R4-RV3a：这些用例只覆盖 Origin/方法/失败路径，证明闸由写面回归套件单测。 */
+const ALLOWING_PROOF: WriteProofDeps = { fence: () => ({ requestRejection: () => undefined }), label: 'test' }
 
 function request(origin = 'http://127.0.0.1:43120', method = 'POST'): IncomingMessage {
   return { method, headers: { origin } } as IncomingMessage
@@ -30,6 +34,7 @@ describe('desktop directory picker route', () => {
       res,
       'http://127.0.0.1:43120',
       pick,
+      ALLOWING_PROOF,
     )
 
     expect(pick).toHaveBeenCalledOnce()
@@ -46,6 +51,7 @@ describe('desktop directory picker route', () => {
       res,
       'http://127.0.0.1:43120',
       async () => null,
+      ALLOWING_PROOF,
     )
 
     expect(res.statusCode).toBe(200)
@@ -57,7 +63,7 @@ describe('desktop directory picker route', () => {
 
     for (const req of [request('https://example.com'), request(undefined, 'GET')]) {
       const res = response()
-      await handleDesktopDirectoryPickerRequest(req, res, 'http://127.0.0.1:43120', pick)
+      await handleDesktopDirectoryPickerRequest(req, res, 'http://127.0.0.1:43120', pick, ALLOWING_PROOF)
       expect(res.statusCode).toBe(req.method === 'GET' ? 405 : 403)
     }
     expect(pick).not.toHaveBeenCalled()
@@ -71,6 +77,7 @@ describe('desktop directory picker route', () => {
       res,
       'http://127.0.0.1:43120',
       async () => { throw new Error('private native failure') },
+      ALLOWING_PROOF,
     )
 
     expect(res.statusCode).toBe(500)
