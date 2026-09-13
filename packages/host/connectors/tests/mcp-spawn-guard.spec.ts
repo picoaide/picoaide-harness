@@ -79,10 +79,15 @@ function createHarness(defs: ConnectorDef[], dir: string, options: Record<string
   const sessionHandlers: Array<(next: unknown) => void> = []
   const effectDisposers: Array<() => void> = []
   let username: string | null = 'user-a'
+  // R7-RV-3：写面要一份 BrowserAuth 持有性证明（`connection.requestRejection`）。
+  // 本替身与上游 `rpc-host.ts:97-100` 同形：无 cookie ⇒ 401。
+  const fence = { requestRejection: (request: { headers: Record<string, unknown> }) => (request.headers['cookie'] === undefined ? (401 as const) : undefined) }
   const ctx = {
-    get: (name: string) => name === 'picoSession'
-      ? { getSession: () => (username === null ? null : { username }) }
-      : undefined,
+    get: (name: string) => {
+      if (name === 'picoSession') return { getSession: () => (username === null ? null : { username }) }
+      if (name === 'connection') return fence
+      return undefined
+    },
     on: (event: string, handler: (next: unknown) => void) => {
       if (event === 'pico/session-changed') sessionHandlers.push(handler)
       return () => {}
@@ -119,7 +124,12 @@ function request(method: string): IncomingMessage {
   return {
     method,
     url: '/api/pico/connectors/evil/approve',
-    headers: { host: 'localhost:43120', origin: 'http://localhost:43120' },
+    headers: {
+      host: 'localhost:43120',
+      origin: 'http://localhost:43120',
+      // 真页面（ConnectorsSection 跑在主应用窗口里）持有 BrowserAuth cookie。
+      cookie: 'dsh-auth-localhost:43120=v1.signature',
+    },
     socket: { remoteAddress: '127.0.0.1' },
   } as unknown as IncomingMessage
 }

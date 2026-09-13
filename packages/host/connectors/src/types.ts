@@ -133,6 +133,15 @@ export interface ConnectorMcpApprovalCommand {
    * — see {@link ConnectorMcpApproval.envKeys} for the "may" part.
    */
   envKeys: string[]
+  /**
+   * The definition-supplied VALUE of every pair THIS server's child will
+   * receive (conn-5): a name alone is not a decision — `GIT_EXTERNAL_DIFF` is
+   * opaque, its value is the shell command that will run. Scope is the
+   * definition's own `mcp[].env`; values that come from the user's credentials
+   * (and the framework's token keys) are never redisplayed — their names are
+   * disclosed through `envKeys`.
+   */
+  envValues?: Record<string, string>
 }
 
 /**
@@ -156,6 +165,17 @@ export interface ConnectorMcpApproval {
    * never be injected (residual A). This is the UNION over `commands`.
    */
   envKeys: string[]
+  /**
+   * The definition-supplied VALUE of every env pair any covered child will
+   * receive, keyed by name (conn-5, audit R7), UNION over `commands`.
+   *
+   * Disclosure only: it makes an unknown command-hook name (`GIT_EXTERNAL_DIFF`,
+   * `EDITOR`, …) judgeable instead of opaque. Scope is the definition's own
+   * `mcp[].env` — credential-derived and framework token values are never
+   * redisplayed. Optional so a prompt produced by an older host build stays
+   * readable.
+   */
+  envValues?: Record<string, string>
   /** MCP server names this approval covers. */
   servers: string[]
   /**
