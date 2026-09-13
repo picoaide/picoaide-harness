@@ -32,6 +32,32 @@ type Limits struct {
 	RequiredFile     string
 }
 
+// 包内默认边界(16MB 原始 / 64MB 解包 / 10000 条目)。这是全仓唯一的一份数字:
+// sharedskills 与 agentshare 的 ArchiveLimits() 都从这里取,不各自硬编码。
+const (
+	// MaxArchiveBytes: raw archive size cap.
+	MaxArchiveBytes = 16 << 20
+	// MaxUnpackedBytes: total unpacked payload cap.
+	MaxUnpackedBytes = 64 << 20
+	// MaxArchiveEntries: entry-count cap.
+	MaxArchiveEntries = 10000
+)
+
+// DefaultLimits 返回包内默认边界(requiredFile 由调用方给出)。
+//
+// ExtractFileContent 的签名没有 Limits 参数(调用方只关心预览上限),但它必须
+// **扫完整个归档**才能发现位于目标之后的重复条目,所以 tar 分支在函数内用这套
+// 默认边界给自己封顶(2026-09-13:为查重改成全量遍历后曾一次上限都没有,
+// 10 万条目实测 372ms,且归档来自上传者,条目数可任意)。
+func DefaultLimits(requiredFile string) Limits {
+	return Limits{
+		MaxArchiveBytes:  MaxArchiveBytes,
+		MaxUnpackedBytes: MaxUnpackedBytes,
+		MaxEntries:       MaxArchiveEntries,
+		RequiredFile:     requiredFile,
+	}
+}
+
 var (
 	// ErrInvalid: the archive failed structural validation (too large / bad
 	// container / not the required format).
@@ -448,6 +474,12 @@ func tarExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 	// 的廉价预扫,而"命中即 return"会让位于目标**之后**的重复条目逃过检查
 	// (双 SKILL.md 时预览 benign、tarReadAll 却是 EVIL —— 正是本条审计的
 	// 现场)。归档有 MaxEntries/MaxUnpackedBytes 上限,完整扫描代价可控。
+	//
+	// 2026-09-13(复核残留 2):上面那句"归档有上限"必须由**本函数自己**保证
+	// —— 此前这里一个计数都没有(改全量遍历时只加了查重),任何跳过 Validate
+	// 直接调 ExtractFileContent 的调用方都会继承一次无界扫描。口径与
+	// validateTar/tarReadAll 同源:包内默认 MaxArchiveEntries /
+	// MaxUnpackedBytes,越界即拒(目录/链接条目不计体积,与 validateTar 一致)。
 	seen := dupEntrySet{}
 	var (
 		outContent string
@@ -456,6 +488,8 @@ func tarExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 		outBinary  bool
 		outTooBig  bool
 	)
+	entries := 0
+	var total int64
 	for {
 		hdr, herr := tr.Next()
 		if herr == io.EOF {
@@ -463,6 +497,10 @@ func tarExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 		}
 		if herr != nil {
 			return "", 0, false, false, false, ErrUnsafe
+		}
+		entries++
+		if entries > MaxArchiveEntries {
+			return "", 0, false, false, false, ErrTooMany
 		}
 		if hdr.Typeflag == tar.TypeDir || hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
 			continue
@@ -473,6 +511,10 @@ func tarExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 		}
 		if derr := seen.add(name); derr != nil {
 			return "", 0, false, false, false, derr
+		}
+		total += hdr.Size
+		if total > MaxUnpackedBytes {
+			return "", 0, false, false, false, ErrInvalid
 		}
 		if name != target || outFound {
 			continue
@@ -573,6 +615,13 @@ func zipReadAll(data []byte, lim Limits) (map[string][]byte, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, ErrInvalid
+	}
+	// FIX-24 残留 1(审计 2026-09-13):四个入口口径一致 —— 这里此前是唯一
+	// 不查重的入口(Validate/zipList/zipExtract 都调 checkZipDuplicates),
+	// 双 SKILL.md 的 zip 在 ReadAll 里返回末条覆盖的 EVIL 且 err=nil。复用
+	// 同一个 checkZipDuplicates,不写第二份实现。
+	if err := checkZipDuplicates(zr); err != nil {
+		return nil, err
 	}
 	out := map[string][]byte{}
 	var total int64

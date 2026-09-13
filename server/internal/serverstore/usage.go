@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -218,17 +219,35 @@ func RecordUsageKind(db *sql.DB, userID int64, model string, promptTokens, compl
 
 // RecordUsageKindCached 与 RecordUsageKind 相同,额外携带缓存命中输入 token
 // 数(DeepSeek 缓存计费,0029/0030):命中部分按 cache_input_price_per_1m 计费。
+// estimated 固定 false(上游上报口径)。
 func RecordUsageKindCached(db *sql.DB, userID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string) (int64, error) {
-	return recordUsageKindAtCached(db, userID, model, promptTokens, completionTokens, cacheTokens, kind, time.Now())
+	return RecordUsageKindCachedEstimated(db, userID, model, promptTokens, completionTokens, cacheTokens, kind, false)
+}
+
+// RecordUsageKindEstimated 是 RecordUsageKind 的估算标记版本(embedding 输入侧
+// 估算用;无缓存命中数)。
+func RecordUsageKindEstimated(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64, kind string, estimated bool) (int64, error) {
+	return recordUsageKindAtCached(db, userID, model, promptTokens, completionTokens, 0, kind, estimated, time.Now())
+}
+
+// RecordUsageKindCachedEstimated 是落账的**唯一入口**:estimated=true 表示这一行
+// 至少有一侧 token 是服务端按字节估算的(fallbackCompletionTokens /
+// estimateEmbeddingPromptTokens),而不是上游上报值。
+//
+// 为什么必须可区分(P2,审计 r5 §1 缺口 3):估算与上报写进同一列同一形态时,
+// 日账/月账/报表(RebuildUsageLedger 直接 SUM)事后无法判断哪些行是估算的,
+// 既解释不了异常行,也评估不了估算口径的影响面。列见迁移 0063。
+func RecordUsageKindCachedEstimated(db *sql.DB, userID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string, estimated bool) (int64, error) {
+	return recordUsageKindAtCached(db, userID, model, promptTokens, completionTokens, cacheTokens, kind, estimated, time.Now())
 }
 
 // recordUsageKindAt 是 RecordUsageKind 的时间注入版本(测试固定时刻)。
 func recordUsageKindAt(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64, kind string, now time.Time) (int64, error) {
-	return recordUsageKindAtCached(db, userID, model, promptTokens, completionTokens, 0, kind, now)
+	return recordUsageKindAtCached(db, userID, model, promptTokens, completionTokens, 0, kind, false, now)
 }
 
-// recordUsageKindAtCached 带缓存命中数的记录(时间注入)。
-func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string, now time.Time) (int64, error) {
+// recordUsageKindAtCached 带缓存命中数与估算标记的记录(时间注入)。
+func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string, estimated bool, now time.Time) (int64, error) {
 	// P0-B:负 token 既不进费用也不落库(月用量/报表/对账都会被负数污染)。
 	promptTokens, completionTokens, cacheTokens = clampTokens(promptTokens, completionTokens, cacheTokens)
 	in, out, off := ModelPrices(db, model)
@@ -251,8 +270,8 @@ func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptToken
 	}
 	defer tx.Rollback()
 	var id int64
-	if err := tx.QueryRow(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost, now).Scan(&id); err != nil {
+	if err := tx.QueryRow(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost, created_at, estimated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost, now, estimated).Scan(&id); err != nil {
 		return 0, err
 	}
 	if err := settleUsageCostTx(tx, id, userID, cost); err != nil {
@@ -270,21 +289,27 @@ func UpdateUsageTokens(db *sql.DB, id, promptTokens, completionTokens int64) err
 	return updateUsageTokensAt(db, id, promptTokens, completionTokens, time.Now())
 }
 
-// UpdateUsageTokensCached 带缓存命中数的回填版本(0030)。
+// UpdateUsageTokensCached 带缓存命中数的回填版本(0030)。estimated 固定 false。
 func UpdateUsageTokensCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64) error {
-	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, cacheTokens, time.Now())
+	return UpdateUsageTokensCachedEstimated(db, id, promptTokens, completionTokens, cacheTokens, false)
+}
+
+// UpdateUsageTokensCachedEstimated 是回填的估算标记版本(0063):estimated=true
+// 表示回填进去的 token 至少有一侧来自服务端字节估算(settleStreamFallback)。
+func UpdateUsageTokensCachedEstimated(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, estimated bool) error {
+	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, cacheTokens, estimated, time.Now())
 }
 
 // updateUsageTokensAt 是 UpdateUsageTokens 的时间注入版本(测试固定时刻)。
 func updateUsageTokensAt(db *sql.DB, id, promptTokens, completionTokens int64, now time.Time) error {
-	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, 0, now)
+	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, 0, false, now)
 }
 
-// updateUsageTokensAtCached 带缓存命中数的回填(时间注入)。
+// updateUsageTokensAtCached 带缓存命中数与估算标记的回填(时间注入)。
 // 审计修复 2026-P (M4): 计费时刻取该行 created_at(pending 行 = 请求发起
 // 时刻插入),而非回填时刻 time.Now()——跨高峰/空闲边界的流式请求不再因
 // 流结束时点计价,与「低谷窗口按记录时刻判定」的设计一致。
-func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, now time.Time) error {
+func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, estimated bool, now time.Time) error {
 	// P0-B:回填路径同样归零(流式 usage 行 / 估算回填都可能带负值)。
 	promptTokens, completionTokens, cacheTokens = clampTokens(promptTokens, completionTokens, cacheTokens)
 	var userID int64
@@ -314,8 +339,8 @@ func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, c
 	if _, err := tx.Exec("SELECT id FROM usage WHERE id = ? FOR UPDATE", id); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("UPDATE usage SET prompt_tokens = ?, completion_tokens = ?, cache_prompt_tokens = ?, cost = ? WHERE id = ?",
-		promptTokens, completionTokens, cacheTokens, cost, id); err != nil {
+	if _, err := tx.Exec("UPDATE usage SET prompt_tokens = ?, completion_tokens = ?, cache_prompt_tokens = ?, cost = ?, estimated = ? WHERE id = ?",
+		promptTokens, completionTokens, cacheTokens, cost, estimated, id); err != nil {
 		return err
 	}
 	if err := settleUsageCostTx(tx, id, userID, cost); err != nil {
@@ -334,10 +359,17 @@ func DeleteUsage(db *sql.DB, id int64) error {
 // CleanupPendingUsage deletes zero-token chat/search rows older than cutoff
 // (stale pending rows left by interrupted streaming requests). Run at server
 // startup. 0043: search(kind='search') 的流式残留行同样清理。
+// 2026-09-13 P3: completions/responses 也是流式端点(pending 行同源),一并清理
+// (集合见 UsageKindPendingCleanup —— 新增流式端点必须同步登记)。
 // cutoff 是绝对瞬时,按会话时区无关的瞬时字面量比较(裸墙钟字符串会被按
 // PG 会话时区解释 → 进程 TZ 与会话时区不同时差 8 小时)。
 func CleanupPendingUsage(db *sql.DB, cutoff time.Time) error {
-	_, err := db.Exec(`DELETE FROM usage WHERE kind IN ('chat','search') AND prompt_tokens = 0 AND completion_tokens = 0 AND created_at < ?::timestamptz`,
+	kinds := make([]string, 0, len(UsageKindPendingCleanup))
+	for _, k := range UsageKindPendingCleanup {
+		kinds = append(kinds, "'"+k+"'")
+	}
+	_, err := db.Exec(`DELETE FROM usage WHERE kind IN (`+strings.Join(kinds, ",")+
+		`) AND prompt_tokens = 0 AND completion_tokens = 0 AND created_at < ?::timestamptz`,
 		pgInstantArg(cutoff))
 	return err
 }

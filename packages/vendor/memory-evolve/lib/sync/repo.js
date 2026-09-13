@@ -33,7 +33,7 @@ import { ENTRY_DELIMITER } from '../store.js'
 import { ensureEntryIds } from './entryid.js'
 import { locateLegacyDir, normalizeRemoteUrl, sanitizeRemoteUrl } from './identity.js'
 import { TODO_HEADER } from '../todo.js'
-import { filesetSpec, isMemoryFile, isTodoPath, GLOBAL_FILESET_KEYS, globalBranchFor } from './filesets.js'
+import { filesetSpec, hasSymlinkComponent, isMemoryFile, isTodoPath, GLOBAL_FILESET_KEYS, globalBranchFor, isSymlinkFreeRepoTarget, openExclusiveSafe, removeCreatedFile, resolveSafeRepoTarget, writeFileAtomicSafe } from './filesets.js'
 
 /** 网络命令超时（30s，GIT_TERMINAL_PROMPT=0 防凭证卡死）。 */
 const NETWORK_TIMEOUT_MS = 30_000
@@ -405,7 +405,13 @@ export async function ensureMemoryRepo({ dir, memoryDir, cwd, projectId, display
 
   // ── 3. .gitignore（先于 add；审查 P1-12——deny-all + 白名单放行：
   //    TODOS.md 等外部模块文件永不入库，git status 也不显示）──
-  const gitignorePath = join(dir, '.gitignore')
+  // FIX-22（2026-09-13）：固定名元数据同样是**被跟踪**的名字——共享分支里
+  // 一个 120000 条目就能让 checkout 把它们实体化成符号链接，随后 writeFileSync
+  // 会顺着链接改写仓库外的文件。与 runSync/resolveConflict 同源断言。
+  const gitignorePath = resolveSafeRepoTarget(dir, '.gitignore')
+  if (gitignorePath === null) {
+    return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitignore' }), committed: false, backfilled: 0, migratedFrom: null, remoteBranchExists: null }
+  }
   const gitignoreContent = [
     '.memory.lock', '*.tmp.*', '',
     '# 同步白名单（deny-all）：只有下列文件进入记忆仓库', '*',
@@ -421,7 +427,10 @@ export async function ensureMemoryRepo({ dir, memoryDir, cwd, projectId, display
   //   LF 全转 CRLF → 记忆文件分隔符被破坏、格式预检拦截同步）。`* -text`
   //   让任何设备 checkout 都不做换行转换；仓库级 config 双保险（覆盖
   //   用户全局/系统设置）。.gitattributes 经 STAGE_META 入库随仓库传播。──
-  const gitattributesPath = join(dir, '.gitattributes')
+  const gitattributesPath = resolveSafeRepoTarget(dir, '.gitattributes')
+  if (gitattributesPath === null) {
+    return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitattributes' }), committed: false, backfilled: 0, migratedFrom: null, remoteBranchExists: null }
+  }
   if (!existsSync(gitattributesPath) || readFileSync(gitattributesPath, 'utf8') !== GITATTRIBUTES_CONTENT) {
     writeFileSync(gitattributesPath, GITATTRIBUTES_CONTENT)
   }
@@ -440,7 +449,10 @@ export async function ensureMemoryRepo({ dir, memoryDir, cwd, projectId, display
   // ── 5. PROVENANCE：一行 JSON（合并前校验 projectId 用，施工图 §9）──
   // 已存在时解析校验（审查 P1-10）：projectId 不一致 = 目录被误用/接错，
   // 绝不继续（防 A 项目记忆并进 B 项目）。
-  const provenancePath = join(dir, 'PROVENANCE')
+  const provenancePath = resolveSafeRepoTarget(dir, 'PROVENANCE')
+  if (provenancePath === null) {
+    return { ok: false, message: srt('syncr.symlinkRefused', { path: 'PROVENANCE' }), committed: false, backfilled: 0, migratedFrom: null, remoteBranchExists: null }
+  }
   const existing = existsSync(provenancePath) ? readFileSync(provenancePath, 'utf8').trim() : ''
   if (existing !== '') {
     let meta = null
@@ -676,7 +688,11 @@ export async function ensureGlobalRepo({ dir, url }) {
 
   // ── 3. .gitignore（deny-all + 全局记忆文件白名单；projects/ 等内部目录
   //    不入库——项目记忆在各自的 projects/<id>/.git 仓库里）──
-  const gitignorePath = join(dir, '.gitignore')
+  // FIX-22（2026-09-13）：固定名元数据落点断言（同 ensureMemoryRepo）
+  const gitignorePath = resolveSafeRepoTarget(dir, '.gitignore')
+  if (gitignorePath === null) {
+    return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitignore' }), committed: false, backfilled: report.backfilled }
+  }
   const gitignoreContent = [
     '.memory.lock', '*.tmp.*', '',
     '# 全局记忆同步白名单（deny-all）：只放行全局记忆文件', '*',
@@ -691,7 +707,10 @@ export async function ensureGlobalRepo({ dir, url }) {
   // ── 3b. .gitattributes + core.autocrlf false（Windows 换行事故修复，
   //   与 ensureMemoryRepo 同款——全局记忆仓库同样不能允许 checkout 把
   //   LF 转 CRLF，否则四个全局轨的合并/格式预检全部被 \r 破坏）。──
-  const gitattributesPath = join(dir, '.gitattributes')
+  const gitattributesPath = resolveSafeRepoTarget(dir, '.gitattributes')
+  if (gitattributesPath === null) {
+    return { ok: false, message: srt('syncr.symlinkRefused', { path: '.gitattributes' }), committed: false, backfilled: report.backfilled }
+  }
   if (!existsSync(gitattributesPath) || readFileSync(gitattributesPath, 'utf8') !== GITATTRIBUTES_CONTENT) {
     writeFileSync(gitattributesPath, GITATTRIBUTES_CONTENT)
   }
@@ -702,7 +721,10 @@ export async function ensureGlobalRepo({ dir, url }) {
   // **凭证安全（Codex 二轮 P0-1）**：PROVENANCE 是被跟踪文件、会进入远端
   // git 历史——原始 URL（可能含 token）绝不能写进去。displayName/url 一律
   // 存 sanitizeRemoteUrl 后的无凭证 URL；projectId 用归一化键（本就无凭证）。
-  const provenancePath = join(dir, 'PROVENANCE')
+  const provenancePath = resolveSafeRepoTarget(dir, 'PROVENANCE')
+  if (provenancePath === null) {
+    return { ok: false, message: srt('syncr.symlinkRefused', { path: 'PROVENANCE' }), committed: false, backfilled: report.backfilled }
+  }
   const safeUrl = sanitizeRemoteUrl(url)
   if (!existsSync(provenancePath)) {
     const key = normalizeRemoteUrl(url) ?? safeUrl
@@ -766,8 +788,8 @@ export async function ensureGlobalRepo({ dir, url }) {
       const set = await runGit(dir, ['remote', 'set-url', 'origin', sanitizeRemoteUrl(url)])
       if (!set.ok) return { ok: false, message: srt('syncr.globalRemoteSetFail', { detail: set.stderr.trim().split('\n')[0] ?? '' }), committed: false, backfilled: report.backfilled }
       // 更新 PROVENANCE 身份（新 URL 指纹；轨开关保留）
-      const provPath = join(dir, 'PROVENANCE')
-      if (existsSync(provPath)) {
+      const provPath = resolveSafeRepoTarget(dir, 'PROVENANCE')
+      if (provPath !== null && existsSync(provPath)) {
         try {
           const meta = JSON.parse(readFileSync(provPath, 'utf8').trim())
           const safeUrl = sanitizeRemoteUrl(url)
@@ -830,8 +852,21 @@ function backfillEntryIds(dir, fileset = 'project') {
   const files = []
   const { memory } = resolveFilesetFiles(dir, fileset)
   for (const rel of memory) {
-    const p = join(dir, rel)
-    if (existsSync(p) && statSync(p).isFile()) files.push(p)
+    // FIX-22（2026-09-13，第三处写回出口）：本函数在 checkout 之后运行
+    // （ensureMemoryRepo / ensureGlobalRepo），枚举结果里的符号链接路径
+    // （共享分支 120000 条目 checkout 的结果，如 `logs -> <仓库外>`）会被
+    // statSync 跟随并整文件重写——同样写穿仓库外。与 runSync/resolveConflict
+    // 同源断言：逐层 lstat 拒符号链接 + realpath 包含性，拒收即跳过。
+    //
+    // FIX-26（第六轮）：改用写侧同一份 resolveSafeRepoTarget 解析落点（realpath
+    // 基准）——原先的 `join(dir, rel)` 在"记忆目录本身是符号链接"的合法布局下
+    // 不在 realpath(root) 之下，会被下面的写入原语误判为越界而拒收。
+    const p = resolveSafeRepoTarget(dir, rel)
+    if (p === null || !existsSync(p) || !statSync(p).isFile()) {
+      skipped += 1
+      continue
+    }
+    files.push(p)
   }
   for (const file of files) {
     let text
@@ -854,9 +889,14 @@ function backfillEntryIds(dir, fileset = 'project') {
     const { entries, backfilled: n } = ensureEntryIds(parseEntries(text))
     if (n === 0) continue
     // 原子写回（与 store.js write 同款：tmp + rename）
-    const tmp = `${file}.tmp.${process.pid}`
-    writeFileSync(tmp, serializeEntries(entries))
-    renameSync(tmp, file)
+    // FIX-26（第六轮）：临时落点同样断言 + O_EXCL 按 fd 写入 + rename 前后复检
+    // （第五轮 4a：`<file>.tmp.<pid>` 被预置真符号链接时 writeFileSync 跟随链接
+    // 写穿仓库外）。被拒（符号链接/预置同名条目）→ 跳过该文件，不整批中断。
+    const written = writeFileAtomicSafe(dir, file, serializeEntries(entries))
+    if (written.ok !== true) {
+      skipped += 1
+      continue
+    }
     backfilled += n
   }
   return { backfilled, skipped }
@@ -1028,21 +1068,25 @@ export async function asyncSyncLock(dir, fn) {
   mkdirSync(dir, { recursive: true })
   const deadline = Date.now() + 30000 // sync 含网络 fetch，给足 30s
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  let lockStat = null
   for (;;) {
-    let acquired = false
-    try {
-      const fd = openSync(lockPath, 'wx')
+    // FIX-26（第六轮）：与 store.withLock 同款——O_EXCL + 打开后校验 + 按 fd
+    // 写入锁内容（原先打开后按**路径**写，祖先目录被换成符号链接时锁 JSON
+    // 会落在仓库外）；逃逸落点由原语回收。
+    const opened = openExclusiveSafe(dir, lockPath, 'lock')
+    if (opened.ok === true) {
       try {
-        writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: Date.now() }))
+        writeFileSync(opened.fd, JSON.stringify({ pid: process.pid, at: Date.now() }))
       } finally {
-        closeSync(fd)
+        closeSync(opened.fd)
       }
-      acquired = true
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error
+      lockStat = opened.stat
+      break
     }
-    if (acquired) break
-    if (isStaleLock(lockPath)) rmSync(lockPath, { force: true })
+    if (opened.reason !== 'exists') {
+      throw new Error(srt('syncr.symlinkRefused', { path: '.sync.lock' }))
+    }
+    if (isStaleLock(lockPath) && isSymlinkFreeRepoTarget(dir, lockPath)) rmSync(lockPath, { force: true })
     if (Date.now() >= deadline) {
       throw new Error('dsh-memory-evolve: timed out waiting for the sync lock')
     }
@@ -1051,7 +1095,8 @@ export async function asyncSyncLock(dir, fn) {
   try {
     return await fn()
   } finally {
-    rmSync(lockPath, { force: true })
+    // 只删我们自己创建的那个 inode（祖先被换走时不误删仓库外同名文件）
+    removeCreatedFile(lockPath, lockStat)
   }
 }
 
@@ -1060,23 +1105,26 @@ export async function asyncWithLock(dir, fn) {
   mkdirSync(dir, { recursive: true })
   const deadline = Date.now() + 5000 // 与 store.js LOCK_TIMEOUT_MS 对齐
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  let lockStat = null
   for (;;) {
-    let acquired = false
-    try {
-      const fd = openSync(lockPath, 'wx')
+    // FIX-26（第六轮）：同上（这条是 .memory.lock 的异步变体，与 store.withLock
+    // 共用同一个锁文件，写法必须一致）。
+    const opened = openExclusiveSafe(dir, lockPath, 'lock')
+    if (opened.ok === true) {
       try {
-        writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: Date.now() }))
+        writeFileSync(opened.fd, JSON.stringify({ pid: process.pid, at: Date.now() }))
       } finally {
-        closeSync(fd)
+        closeSync(opened.fd)
       }
-      acquired = true
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error
+      lockStat = opened.stat
+      break
     }
-    if (acquired) break
+    if (opened.reason !== 'exists') {
+      throw new Error(srt('syncr.symlinkRefused', { path: '.memory.lock' }))
+    }
     // stale 判断与主进程同源（isStaleLock）：mtime 超时或 pid 已死
     // （断电中断残留）→ 立即清除，不等 10s
-    if (isStaleLock(lockPath)) rmSync(lockPath, { force: true })
+    if (isStaleLock(lockPath) && isSymlinkFreeRepoTarget(dir, lockPath)) rmSync(lockPath, { force: true })
     if (Date.now() >= deadline) {
       throw new Error('dsh-memory-evolve: timed out waiting for the memory lock')
     }
@@ -1085,6 +1133,7 @@ export async function asyncWithLock(dir, fn) {
   try {
     return await fn()
   } finally {
-    rmSync(lockPath, { force: true })
+    // 只删我们自己创建的那个 inode（同上）
+    removeCreatedFile(lockPath, lockStat)
   }
 }

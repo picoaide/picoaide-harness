@@ -63,20 +63,25 @@ func TestCheckPrereleaseCurrentReportsUpdate(t *testing.T) {
 	}
 }
 
-// TestCheckPrereleaseCurrentNoDowngradePrompt 是防误伤:core 没变大(或更小)
-// 时**不得**提示更新 —— 修复不能让 beta 用户被反复提示"升级"到同版本。
+// TestCheckPrereleaseCurrentNoDowngradePrompt 是防误伤:目标版本不比当前新时
+// **不得**提示更新 —— 修复不能让 beta 用户被反复提示"升级"到同版本或更旧版本。
+//
+// FIX-23-r3(审计 2026-09-13):「2.7.2-beta.7 → 2.7.2-beta.8」原本被归到这一类
+// (core 相等 ⇒ 不提示),恰恰是缺陷本体 —— beta 渠道最常见的同 core 递增就是
+// 2.7.2-beta.7 → 2.7.2-beta.8,它必须提示(见 audit_r3_prerelease_test.go)。
+// 这里保留的只有"目标真的不比当前新"的形态。
 func TestCheckPrereleaseCurrentNoDowngradePrompt(t *testing.T) {
 	cases := []struct{ current, latest string }{
 		{"2.7.2-beta.7", "2.7.2-beta.7"}, // 同版本
-		{"2.7.2-beta.7", "2.7.2-beta.8"}, // 同 core 的更高预发布
-		{"2.7.2-beta.7", "2.7.2"},        // 同 core 的正式版
+		{"2.7.2-beta.8", "2.7.2-beta.7"}, // 目标更低的预发布
+		{"2.7.2", "2.7.2-beta.8"},        // 稳定版当前,目标是同 core 预发布(更旧)⇒ 不提示
 		{"2.7.2-beta.7", "2.7.1"},        // 目标更旧
 		{"2.8.0", "2.7.2-beta.7"},        // 稳定版当前,目标是更旧预发布
 	}
 	for _, tc := range cases {
 		res := checkWithCurrent(t, manifestWith(tc.latest), tc.current)
 		if res.UpdateAvailable {
-			t.Errorf("cur=%s latest=%s → UpdateAvailable=true, want false(core 未变大)", tc.current, tc.latest)
+			t.Errorf("cur=%s latest=%s → UpdateAvailable=true, want false(目标不比当前新)", tc.current, tc.latest)
 		}
 	}
 }

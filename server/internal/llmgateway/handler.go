@@ -123,11 +123,12 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 
 	// streaming path: insert a pending usage row first, backfilled on the
 	// final SSE chunk; a client disconnect leaves it pending (no rollback).
+	// 写不进去就拒绝(不调用上游):usageID=0 一路跑下去整条流没有计量痕迹。
 	var usageID int64
 	if req.Stream {
-		usageID, err = serverstore.RecordUsage(a.DB, user.ID, req.Model, 0, 0)
-		if err != nil {
-			log.Printf("gateway: record pending usage: %v", err)
+		var ok bool
+		if usageID, ok = a.beginStreamUsage(c, user.ID, req.Model, billingKindChat); !ok {
+			return
 		}
 	}
 
@@ -183,7 +184,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		a.serveStream(c, resp, usageID, respSecrets)
 		return
 	}
-	a.serveJSON(c, resp, user.ID, req.Model, respSecrets)
+	a.serveJSON(c, resp, user.ID, req.Model, respSecrets, billingKindChat)
 }
 
 // maxOutputFromDefaultParams 从模型 default_params JSON 读取 max_output。
@@ -392,7 +393,8 @@ func redactHeaderValue(value string, secrets []string) string {
 
 // serveJSON passes a non-stream upstream response through and records usage.
 // secrets: 本次请求使用的上游官方 key——上游若在响应中回显,透传前脱敏。
-func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model string, secrets []string) {
+// kind: 端点标识(计费 kind,见 billingKind*),不再硬编码 "chat"。
+func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model string, secrets []string, kind string) {
 	defer resp.Body.Close()
 	type readResult struct {
 		body []byte
@@ -422,16 +424,32 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 		return
 	}
 	body = redactSecrets(body, secrets)
-	if pt, ct, cch, ok, _ := parseUsage(body); ok {
-		if _, err := serverstore.RecordUsageKindCached(a.DB, userID, model, pt, ct, cch, "chat"); err != nil {
-			// FIX-05:余额结算失败必须**在交付响应体之前**拒绝 —— 事务已回滚,
+	// N2(审计 r3 第四轮):非流式交付**任何**形态都要有账 —— 上游 usage 缺失 /
+	// null / 空对象 / 只有 total_tokens(未知字段)时,此前直接跳过 RecordUsage,
+	// 内容 200 交付却零落账(embeddings 同族)。现在与流式**同源**兜底:
+	// 缺/0 的 completion 侧按已交付字节估算(estimateCompletionFallback,与
+	// settleStreamFallback 同一个实现,带业务上限 maxEstimatedCompletionTokens),
+	// prompt 侧不估算(响应字节推不出输入),一次交付永远只落一行。
+	//
+	// 4xx(含 4xx 错误体里**带 usage 对象**的形态)一律不落账、不扣费 —— 与
+	// 流式 4xx 同源(P2,审计 r5 §1 缺口 1)。此前条件是 `delivered || uok`,
+	// uok 让"上游 400 + 错误体带 usage"照扣:同一个上游 400,stream=true 零扣费、
+	// stream=false 扣全额,计费取决于客户端用哪种模式;上游(或中转)只要在**未
+	// 交付**的失败响应里塞一个 usage 就能收费。5xx 在 forward 层已 failover/丢弃。
+	pt, ct, cch, _, perr := parseUsage(body)
+	if perr != nil {
+		// 解析失败不是"没有用量":留痕便于定位上游报文异常。
+		log.Printf("gateway: parse usage from json body: %v", perr)
+	}
+	if resp.StatusCode < 400 {
+		var estimated bool
+		ct, estimated = estimateCompletionFallback(pt, ct, int64(len(body)))
+		if _, err := serverstore.RecordUsageKindCachedEstimated(a.DB, userID, model, pt, ct, cch, kind, estimated); err != nil {
+			// FIX-05 + G5b(审计 r3):**任何**结算失败都不得交付 —— 事务已回滚,
 			// 继续 200 交付就是"上游花了钱、账上一分没扣"的无限免费调用。
-			if isBalanceSettlementFailure(err) {
-				log.Printf("gateway: insufficient balance, rejecting before delivery: user=%d model=%s", userID, model)
-				rejectBalanceSettlement(c)
-				return
-			}
-			log.Printf("gateway: record usage: %v", err)
+			// 余额不足 → 429 BALANCE_EXHAUSTED;其它错误 → 503 METERING_FAILED。
+			rejectSettlementFailure(c, err, kind+" json")
+			return
 		}
 	}
 	c.Status(resp.StatusCode)
@@ -487,8 +505,12 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	idleTimedOut := false
 	lineTooLong := false
 	lineEOF := false
-	backfilled := false // usage row received real tokens (must not be dropped)
 	var forwardedBytes int64
+	// reportedPT/CT/cache 是上游**回报过的**用量:按侧取最大值合并(上游可能
+	// 分段/累积上报,后续更小的值或显式 0 不得把已上报的用量抹掉 —— 与
+	// anthropic 流式的"非零覆盖"同一语义;每收到一条 usage 行就幂等回填,
+	// 流中断也不会丢已上报的部分)。
+	var reportedPT, reportedCT, reportedCache int64
 
 	// 读行 goroutine(单 goroutine 常驻,零 per-line 分配)。stopRead 用于
 	// 主循环提前退出时解除阻塞;客户端断开**不**停止读取(F4:继续 drain
@@ -542,19 +564,25 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 						if pt, ct, cch, ok, perr := parseUsage([]byte(s)); perr != nil {
 							log.Printf("gateway: parse usage line: %v", perr)
 						} else if ok && usageID > 0 {
-							if uerr := serverstore.UpdateUsageTokensCached(a.DB, usageID, pt, ct, cch); uerr != nil {
-								// FIX-05:流式回填结算失败 —— SSE 头已发,状态码
-								// 改不了;写一条 error 事件后终止泵送,不能继续 200。
-								if isBalanceSettlementFailure(uerr) {
-									log.Printf("gateway: insufficient balance, aborting stream: usage=%d", usageID)
-									if !clientGone {
-										abortBalanceSettlementStream(c, fl)
-									}
-									return
+							if pt > reportedPT {
+								reportedPT = pt
+							}
+							if ct > reportedCT {
+								reportedCT = ct
+							}
+							if cch > reportedCache {
+								reportedCache = cch
+							}
+							if uerr := updateUsageTokensSettled(a.DB, usageID, reportedPT, reportedCT, reportedCache, false); uerr != nil {
+								// FIX-05 + G5b:流式回填结算失败 —— SSE 头已发,
+								// 状态码改不了;写一条 error 事件后**终止泵送**,
+								// 不能继续 200 把余下内容白送出去。
+								if !clientGone {
+									abortSettlementFailureStream(c, fl, uerr, "chat stream backfill")
+								} else {
+									log.Printf("gateway: settlement failed after client gone: usage=%d err=%v", usageID, uerr)
 								}
-								log.Printf("gateway: backfill usage: %v", uerr)
-							} else if pt+ct > 0 {
-								backfilled = true
+								return
 							}
 						}
 					}
@@ -611,32 +639,22 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	case <-time.After(time.Second):
 	}
 	// 结算:
-	//   - 已回填真实 usage → 保留(计费已完成);
-	//   - 未回填但已向下游/上游读过内容 → 按输出字节估算 completion tokens
-	//     并回填(F4:客户端中途断开不再免费;输入 token 无法得知,保守为 0);
+	//   - 上游回报的用量已在收到 usage 行时幂等回填(计费已完成);
+	//   - **只要有一侧缺失/为 0**(含"只回报了输入侧":pt>0 且 ct==0 —— N1,
+	//     审计 r3 第四轮)就走 fallback:由 settleStreamFallback 内部只补
+	//     completion 那一半(已上报的 pt/cache 原样带出,**绝不**被估算覆盖);
 	//   - 完全没有任何内容(连接失败/4xx 分支之外) → 删除 pending。
-	if usageID > 0 && !backfilled {
-		if forwardedBytes > 0 {
-			estimated := forwardedBytes / 4 // 约 4 字节/token(保守下限)
-			if estimated > 0 {
-				if err := serverstore.UpdateUsageTokensCached(a.DB, usageID, 0, estimated, 0); err != nil {
-					// FIX-05:这是流结束后的收尾结算——内容已经全部转发,
-					// 状态码与内容都无法收回。仍然**不能静默**:写一条 error
-					// 事件(客户端若还在读会看到),并按 ERROR 留痕。
-					if isBalanceSettlementFailure(err) {
-						log.Printf("gateway: insufficient balance, estimated settlement failed: usage=%d forwarded=%d", usageID, forwardedBytes)
-						if !clientGone {
-							abortBalanceSettlementStream(c, fl)
-						}
-					} else {
-						log.Printf("gateway: estimated backfill: %v", err)
-					}
-				}
-			} else if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
-				log.Printf("gateway: delete pending usage: %v", err)
+	// 估算与回填走 settleStreamFallback(与 anthropic 流式**同一个实现**)。
+	if usageID > 0 && (reportedPT <= 0 || reportedCT <= 0) {
+		if _, serr := settleStreamFallback(a.DB, usageID, forwardedBytes, reportedPT, reportedCT, reportedCache); serr != nil {
+			// FIX-05 + G5b:收尾结算失败同样不能静默 —— 内容虽然已全部转发,
+			// 但客户端若还在读必须看到失败信号(不能当成"反正流结束了")。
+			if !clientGone {
+				abortSettlementFailureStream(c, fl, serr, "chat stream estimated")
+			} else {
+				log.Printf("gateway: estimated settlement failed after client gone: usage=%d forwarded=%d err=%v",
+					usageID, forwardedBytes, serr)
 			}
-		} else if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
-			log.Printf("gateway: delete pending usage: %v", err)
 		}
 	}
 }
@@ -702,39 +720,142 @@ func clampTokensNonNeg(v int64) int64 {
 	return v
 }
 
-// parseUsage extracts token counts from a chat completion response: a full
-// JSON body (non-stream) or an SSE "data:" line carrying usage.
+// satAddTokensNonNeg 是 token 计数的**饱和加法**:溢出时取上限而不是回绕。
+// G5a(审计 2026-09-13):Anthropic 的总输入 = input + cache_read + cache_creation
+// 三个 int64 相加,逐项 clamp 只保证每一项非负,**求和本身仍会溢出** ——
+// MaxInt64 + 1 回绕成 MinInt64,再被 clampTokensNonNeg 归零,于是上游声称
+// 9.2e18 输入 token 的响应计费 ¥0(巨额用量反而免费)。取上限后金额会大到
+// 结算侧直接拒绝(或按真实天价扣),绝不会变成 0。
+//
+// 只在正向溢出上取上限:入参都已 clamp 到非负,负向分支仅为防御性完整。
+func satAddTokensNonNeg(a, b int64) int64 {
+	if b > 0 && a > math.MaxInt64-b {
+		log.Printf("gateway: token count overflow saturated at MaxInt64 (a=%d b=%d)", a, b)
+		return math.MaxInt64
+	}
+	if b < 0 && a < math.MinInt64-b {
+		return math.MinInt64
+	}
+	return a + b
+}
+
+// usageTokenDetails 是上游 usage 里的 "*_tokens_details" 明细对象。
+// N3(审计 r3 第四轮):OpenAI Chat 的 prompt_tokens_details 与 Responses 的
+// input_tokens_details **共用这一份结构**(同一个缓存字段 cached_tokens),
+// 不再各写一份匿名结构。
+type usageTokenDetails struct {
+	CachedTokens *int64 `json:"cached_tokens"`
+}
+
+// usageFields 是上游 usage 对象的**两套字段名**视图:
+//   - OpenAI Chat Completions:prompt_tokens / completion_tokens /
+//     prompt_cache_hit_tokens / prompt_cache_miss_tokens /
+//     prompt_tokens_details.cached_tokens;
+//   - OpenAI Responses:input_tokens / output_tokens /
+//     input_tokens_details.cached_tokens。
+//
+// 用指针区分"字段缺失"与"显式 0":字段缺失时回落到另一套字段名,显式 0
+// 保持原语义(chat 的 0 不会被 Responses 字段覆盖)。
+type usageFields struct {
+	PromptTokens     *int64 `json:"prompt_tokens"`
+	CompletionTokens *int64 `json:"completion_tokens"`
+	PromptCacheHit   *int64 `json:"prompt_cache_hit_tokens"`
+	PromptCacheMiss  *int64 `json:"prompt_cache_miss_tokens"`
+
+	InputTokens  *int64 `json:"input_tokens"`
+	OutputTokens *int64 `json:"output_tokens"`
+
+	// 缓存明细:两套字段名都映射到同一个结构(同一份实现)。
+	PromptTokensDetails *usageTokenDetails `json:"prompt_tokens_details"`
+	InputTokensDetails  *usageTokenDetails `json:"input_tokens_details"`
+}
+
+// detailsCachedTokens 从缓存明细里取命中数(唯一实现,两个字段名共用):
+// 先 chat 的 prompt_tokens_details,再 Responses 的 input_tokens_details;
+// 都没有该键 → ok=false(与"显式 0"区分开)。
+func (u *usageFields) detailsCachedTokens() (int64, bool) {
+	for _, d := range []*usageTokenDetails{u.PromptTokensDetails, u.InputTokensDetails} {
+		if d != nil && d.CachedTokens != nil {
+			return *d.CachedTokens, true
+		}
+	}
+	return 0, false
+}
+
+// usageValue 取两套字段名里"有值的那个":chat 字段**正值**优先(保持既有语义
+// 不变),缺失或 0 时回落到 Responses 字段名;两者都不可用 → 0(与"字段缺失即
+// 0"的旧语义一致)。
+//
+// P2(审计 r5 §1 缺口 3):此前是"primary 非 nil 就采信",于是
+// `{"prompt_tokens":0,"input_tokens":5000}` 取 0 —— 而 prompt 侧**不估算**
+// (响应字节推不出输入),整个输入侧免费;上游可控时这是稳定的少收通道。
+// 现在:primary>0 才优先,0/缺失/负值都回落另一套字段名;两者都 ≤0 才是 0。
+// 两套字段名同时给正值时仍以 chat 字段为准(既有语义不变)。
+func usageValue(primary, fallback *int64) int64 {
+	if primary != nil && *primary > 0 {
+		return *primary
+	}
+	if fallback != nil && *fallback > 0 {
+		return *fallback
+	}
+	return 0
+}
+
+// parseUsage extracts token counts from a chat completion / Responses response:
+// a full JSON body (non-stream) or an SSE "data:" line carrying usage.
 // 返回 cacheHit 为缓存命中的输入 token(DeepSeek prompt_cache_hit_tokens,
 // 0029/0030 缓存计费);0 = 未报告/未命中。
+//
+// G7(审计 2026-09-13,P0):此前只认 chat 字段名(prompt_tokens/completion_tokens),
+// 上游按 **Responses 官方字段名**(input_tokens/output_tokens)上报时 tokens=0、
+// cost=0 —— /v1/responses 整条路径零计费。现在同一个解析器兼容两套字段名,
+// 并支持 Responses 流式事件里 usage 嵌在 `response.usage` 的形状
+// (response.completed),以及两套缓存明细字段(cached_tokens)。
+//
+// 语义边界(审计 r3 第四轮核对):`total_tokens` 单字段不算任何一侧的用量
+// (不拆成 pt/ct,避免凭空多扣);两套字段名同时存在时 chat 优先;显式 0 与
+// 缺失都返回 0(由计费侧的字节估算兜底决定是否补 —— 见 fallbackCompletionTokens)。
 func parseUsage(raw []byte) (pt, ct, cacheHit int64, ok bool, err error) {
 	data := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte("data:")))
 	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
 		return 0, 0, 0, false, nil
 	}
 	var chunk struct {
-		Usage *struct {
-			PromptTokens     int64 `json:"prompt_tokens"`
-			CompletionTokens int64 `json:"completion_tokens"`
-			PromptCacheHit   int64 `json:"prompt_cache_hit_tokens"`
-			PromptCacheMiss  int64 `json:"prompt_cache_miss_tokens"`
-		} `json:"usage"`
+		Usage    *usageFields `json:"usage"`
+		Response *struct {
+			Usage *usageFields `json:"usage"`
+		} `json:"response"`
 	}
 	if err := json.Unmarshal(data, &chunk); err != nil {
 		return 0, 0, 0, false, err
 	}
-	if chunk.Usage == nil {
+	u := chunk.Usage
+	if u == nil && chunk.Response != nil {
+		// Responses 流式事件(data: {"type":"response.completed","response":{…,"usage":{…}}})
+		u = chunk.Response.Usage
+	}
+	if u == nil {
 		return 0, 0, 0, false, nil
 	}
-	// 兼容两种上游:优先 prompt_cache_hit_tokens;仅有 miss 时用 prompt-miss 推算。
-	cacheHit = chunk.Usage.PromptCacheHit
-	if cacheHit <= 0 && chunk.Usage.PromptCacheMiss > 0 {
-		cacheHit = chunk.Usage.PromptTokens - chunk.Usage.PromptCacheMiss
-		if cacheHit < 0 {
-			cacheHit = 0
+	pt = usageValue(u.PromptTokens, u.InputTokens)
+	ct = usageValue(u.CompletionTokens, u.OutputTokens)
+	// 缓存命中:优先 chat 的 prompt_cache_hit_tokens;仅有 miss 时用 prompt-miss
+	// 推算(原有语义);两者都缺时用明细对象的 cached_tokens —— OpenAI Chat 的
+	// prompt_tokens_details.cached_tokens 与 Responses 的
+	// input_tokens_details.cached_tokens 走**同一份**取值实现(N3,审计 r3
+	// 第四轮:此前只认 Responses 那一套 ⇒ 第三方中转的缓存命中按全价多扣)。
+	switch {
+	case u.PromptCacheHit != nil && *u.PromptCacheHit > 0:
+		cacheHit = *u.PromptCacheHit
+	case u.PromptCacheMiss != nil && *u.PromptCacheMiss > 0:
+		cacheHit = pt - *u.PromptCacheMiss
+	default:
+		if cached, has := u.detailsCachedTokens(); has {
+			cacheHit = cached
 		}
 	}
 	// P0-B:负值一律归零(计费侧 costOfAt 另有一层,纵深防御)。
-	return clampTokensNonNeg(chunk.Usage.PromptTokens), clampTokensNonNeg(chunk.Usage.CompletionTokens), clampTokensNonNeg(cacheHit), true, nil
+	return clampTokensNonNeg(pt), clampTokensNonNeg(ct), clampTokensNonNeg(cacheHit), true, nil
 }
 
 // rateLimitPerMinute reads the configurable per-user limit from settings.

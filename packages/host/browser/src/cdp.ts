@@ -16,9 +16,14 @@ export interface CdpTransport {
   isAttached(): boolean
   attach(protocolVersion: string): void
   detach(): void
-  sendCommand(method: string, params?: Record<string, unknown>): Promise<unknown>
-  on(event: 'message', listener: (event: unknown, method: string, params: unknown) => void): unknown
-  removeListener(event: 'message', listener: (event: unknown, method: string, params: unknown) => void): unknown
+  /** Send one command. `sessionId` addresses a flat (out-of-process iframe)
+   * session obtained through `Target.setAutoAttach({flatten:true})` — Electron's
+   * `Debugger.sendCommand(method, params, sessionId)` passes it through, and a
+   * mock transport that ignores the third argument simply never sees OOPIFs
+   * (the runtime then fails loud instead of guessing). */
+  sendCommand(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<unknown>
+  on(event: 'message', listener: (event: unknown, method: string, params: unknown, sessionId?: string) => void): unknown
+  removeListener(event: 'message', listener: (event: unknown, method: string, params: unknown, sessionId?: string) => void): unknown
 }
 
 /**
@@ -35,20 +40,20 @@ export interface CdpSessionOptions {
 
 /** One established CDP session over a transport. */
 export class CdpSession {
-  private readonly listeners = new Map<string, Set<(params: unknown) => void>>()
-  private readonly messageListener: (event: unknown, method: string, params: unknown) => void
+  private readonly listeners = new Map<string, Set<(params: unknown, sessionId?: string) => void>>()
+  private readonly messageListener: (event: unknown, method: string, params: unknown, sessionId?: string) => void
   private closed = false
 
   constructor(
     private readonly transport: CdpTransport,
     private readonly options: CdpSessionOptions = {},
   ) {
-    this.messageListener = (_event, method, params) => {
+    this.messageListener = (_event, method, params, sessionId) => {
       const set = this.listeners.get(method)
       if (set === undefined) return
       for (const handler of [...set]) {
         try {
-          handler(params)
+          handler(params, sessionId)
         } catch {
           // A listener must never break the CDP fan-out.
         }
@@ -73,15 +78,21 @@ export class CdpSession {
   async send<T>(
     method: string,
     params: Record<string, unknown> = {},
-    callOptions: { timeoutMs?: number; signal?: AbortSignal } = {},
+    callOptions: { timeoutMs?: number; signal?: AbortSignal; sessionId?: string } = {},
   ): Promise<T> {
     if (this.closed) throw new Error(`browser: CDP session closed (${method})`)
     const timeoutMs = callOptions.timeoutMs ?? this.options.timeoutMs ?? CDP_CALL_TIMEOUT_MS
-    return await withTimeout(this.transport.sendCommand(method, params), timeoutMs, method, callOptions.signal) as T
+    const wire = callOptions.sessionId === undefined
+      ? this.transport.sendCommand(method, params)
+      : this.transport.sendCommand(method, params, callOptions.sessionId)
+    return await withTimeout(wire, timeoutMs, method, callOptions.signal) as T
   }
 
-  /** Subscribe to one CDP method; returns a disposer. */
-  on(method: string, handler: (params: unknown) => void): () => void {
+  /** Subscribe to one CDP method; returns a disposer. `sessionId` (second
+   * argument) is the flat session the event came from, or `undefined` for the
+   * page session — required to keep per-session state apart (R-4: an OOPIF's
+   * default-world contexts only exist in that OOPIF's own session). */
+  on(method: string, handler: (params: unknown, sessionId?: string) => void): () => void {
     let set = this.listeners.get(method)
     if (set === undefined) {
       set = new Set()

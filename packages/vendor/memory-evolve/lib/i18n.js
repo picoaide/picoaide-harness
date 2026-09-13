@@ -1157,6 +1157,7 @@ export const SYNC_DICT = {
   'sync.workerParen': ['（{detail}）', ' ({detail})'],
   'sync.workerUnparseable': ['worker 输出无法解析：{line}', 'Worker output could not be parsed: {line}'],
   'sync.projectOn': ['本项目已启用同步', 'Sync is enabled for this project'],
+  'sync.symlinkRefused': ['仓库内 {path} 是符号链接（或越出仓库边界）——已拒绝写入（仓库内符号链接一律拒收，请删除该符号链接后重试）', '{path} inside the repo is a symlink (or escapes the repo boundary) — write refused (symlinks inside the repo are always rejected; remove the symlink and retry)'],
   'sync.projectOff': ['本项目已停用同步（记忆完整保留，可随时重新启用）', 'Sync is disabled for this project (memory fully retained; re-enable any time)'],
   'sync.notInitialized': ['项目尚未初始化——先启用本项目同步', 'The project is not initialized — enable sync for this project first'],
   'sync.badGlobalTrack': ['未知全局轨 "{track}"（应为 memory/user/daily/todo）', 'Unknown global track "{track}" (expected memory/user/daily/todo)'],
@@ -1249,6 +1250,7 @@ export const SYNC_REPO_DICT = {
   'syncr.globalCommitFail': ['全局记忆仓库首次提交失败：{detail}', 'Global memory repo initial commit failed: {detail}'],
   'syncr.globalRemoteAddFail': ['全局记忆仓库 remote 挂载失败：{detail}', 'Global memory repo remote attach failed: {detail}'],
   'syncr.globalRemoteSetFail': ['全局记忆仓库 remote 切换失败：{detail}', 'Global memory repo remote switch failed: {detail}'],
+  'syncr.symlinkRefused': ['仓库内固定名文件 {path} 是符号链接（或越出仓库边界）——已拒绝写入（仓库内符号链接一律拒收，请删除该符号链接后重试）', 'Repo file {path} is a symlink (or escapes the repo boundary) — write refused (symlinks inside the repo are always rejected; remove the symlink and retry)'],
 }
 
 /** Memory-sync worker messages (lib/sync/worker.js). */
@@ -1281,6 +1283,7 @@ export const SYNC_WORKER_DICT = {
   'syncw.resolveUsage': ['用法：conflict resolve <编号> ours | theirs | both', 'Usage: conflict resolve <number> ours | theirs | both'],
   'syncw.choiceUnavailable': ['冲突 {index} 没有可用的 {choice} 版本（该侧为空/删除）', 'Conflict {index} has no {choice} side available (that side is empty/deleted)'],
   'syncw.fileNotWhitelisted': ['冲突 {index} 的目标文件不在同步白名单内（{file}）——已拒绝写入', "Conflict {index}'s target file is not in the sync whitelist ({file}) — write refused"],
+  'syncw.symlinkRefused': ['同步落点 {path} 位于仓库内的符号链接之下（或越出仓库边界）——已拒绝写入（本次同步未提交，被拒落点未写入任何文件）。仓库内符号链接一律拒收：请删除该符号链接（或恢复真实目录）后重试', 'Sync target {path} sits under a symlink inside the repo (or escapes the repo boundary) — write refused (this sync committed nothing; the refused target was not written). Symlinks inside the repo are always rejected: remove the symlink (or restore a real directory) and retry'],
   'syncw.treeStepFail': ['解决冲突时 {error}（目标条目已写回，可重试）', '{error} while resolving the conflict (the target entry is written back; safe to retry)'],
   'syncw.commitTreeFail': ['解决冲突时 commit-tree 失败：{detail}（目标条目已写回且写回幂等，可直接重试）', 'commit-tree failed while resolving: {detail} (the target entry is written back idempotently; retry directly)'],
   'syncw.updateRefFail': ['解决冲突时 update-ref 失败：{detail}。提交已生成但 ref 未更新——侧车仍在，写回幂等，请重试', 'update-ref failed while resolving: {detail}. The commit exists but the ref was not updated — the sidecar remains, writes are idempotent; retry'],

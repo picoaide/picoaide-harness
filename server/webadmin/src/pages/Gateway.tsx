@@ -6,7 +6,7 @@ import { Label } from '../components/ui/label'
 import { Switch } from '../components/ui/switch'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Badge } from '../components/ui/badge'
 import { Skeleton } from '../components/ui/skeleton'
@@ -149,6 +149,13 @@ export default function Gateway() {
   // 禁止把空列表当成「清空」写回去(那是静默破坏计费口径)。管理员显式
   // 添加/预设出非空时段后即可正常保存(那次提交是有内容的新值,不是清空)。
   const [peakParseFailed, setPeakParseFailed] = useState(false)
+  // 审计 2026-09-13(三轮残留③):管理员必须能在 UI 里**显式**清空不可解析的存量。
+  // 上一轮只做了「拒绝保存」,于是管理员被锁死在页面里(编辑区空 ⇒ 保存被拒,
+  // 又没法把服务端那串坏 JSON 变成合法空值)。现在给一条二次确认的清空路径:
+  // 只有走过确认对话框,才允许把空列表写回 `peak_windows: ''` —— 且页面会常驻
+  // 标出「已确认清空」,让这次写入的来源可追溯,而不是静默发生。
+  const [peakClearConfirmed, setPeakClearConfirmed] = useState(false)
+  const [peakClearDialog, setPeakClearDialog] = useState(false)
   const [error, setError] = useState('')
   // P3: flash 定时器由 useFlash 统一清理。
   const [okMsg, setOkMsg] = useFlash(2000)
@@ -224,8 +231,10 @@ export default function Gateway() {
     // 审计 2026-09-12 P1-2:服务端已存的 peak_windows 无法解析 + 本次编辑区为空
     // ⇒ 提交等于用空串覆盖它(静默清空峰谷窗口、破坏计费口径)。拒绝提交,
     // 而不是照旧写 `peak_windows: ''` 再弹「已保存」。
-    if (peakParseFailed && peakList.length === 0) {
-      setError('高峰时段配置无法解析(服务端存量不是本页认得的 JSON 数组):为避免静默清空计费口径,已拒绝保存。请用「添加时段」或预设按钮显式重建峰谷窗口后再保存。')
+    // 审计 2026-09-13(三轮残留③):唯一例外是管理员已通过二次确认**显式**
+    // 选择了「清空高峰时段配置」——那时的空值是用户的决定,不是页面的静默行为。
+    if (peakParseFailed && peakList.length === 0 && !peakClearConfirmed) {
+      setError('高峰时段配置无法解析(服务端存量不是本页认得的 JSON 数组):为避免静默清空计费口径,已拒绝保存。请用「添加时段」或预设按钮显式重建峰谷窗口后再保存;若确认要放弃这份存量,请用「清空高峰时段配置」并二次确认。')
       return
     }
     if (peakList.some((w) => !w.start || !w.end || w.start >= w.end)) {
@@ -240,6 +249,10 @@ export default function Gateway() {
       const body = { ...cfg, peak_windows: peaked.length ? JSON.stringify(peaked) : '' }
       await request(`${ADMIN_API}/gateway`, { method: 'PUT', body: JSON.stringify(body) })
       setError('')
+      // 本次写入已落库,本地编辑区就是服务端现值 ⇒ 解析失败标记与「已确认清空」
+      // 都不再成立(否则第二次保存会带着过期判定继续拒绝/继续清空)。
+      setPeakParseFailed(false)
+      setPeakClearConfirmed(false)
       flash('已保存')
     } catch (err: any) {
       setError(err.message)
@@ -572,13 +585,19 @@ export default function Gateway() {
     }
   }
 
-  const addPeak = () => setPeakList((l) => [...l, { keyId: `pk-${uid()}`, start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] }])
+  const addPeak = () => {
+    setPeakClearConfirmed(false) // 有内容 = 本次提交不再是「清空」,确认作废
+    setPeakList((l) => [...l, { keyId: `pk-${uid()}`, start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] }])
+  }
   const removePeak = (i: number) => setPeakList((l) => l.filter((_, idx) => idx !== i)) // keyId 保证 DOM 稳定,index 仅定位数据
   // DeepSeek 官方当前政策(2026-08 起):高峰 = 北京时间周一至周五 09:00-12:00、14:00-18:00。
-  const presetPeak = () => setPeakList([
-    { keyId: `pk-${uid()}`, start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] },
-    { keyId: `pk-${uid()}`, start: '14:00', end: '18:00', weekdays: [1, 2, 3, 4, 5] },
-  ])
+  const presetPeak = () => {
+    setPeakClearConfirmed(false)
+    setPeakList([
+      { keyId: `pk-${uid()}`, start: '09:00', end: '12:00', weekdays: [1, 2, 3, 4, 5] },
+      { keyId: `pk-${uid()}`, start: '14:00', end: '18:00', weekdays: [1, 2, 3, 4, 5] },
+    ])
+  }
   const updatePeak = (i: number, field: 'start' | 'end', v: string) =>
     setPeakList((l) => l.map((w, idx) => (idx === i ? { ...w, [field]: v } : w)))
   const togglePeakDay = (i: number, d: number) =>
@@ -816,7 +835,13 @@ export default function Gateway() {
               {peakParseFailed && (
                 <div className="rounded border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
                   服务端已存的高峰时段配置无法解析(不是本页认得的 JSON 数组)。编辑区已置空,保存会被拒绝 ——
-                  直接用空列表覆盖会静默清空峰谷窗口、改变计费口径。请用下方「添加时段」或预设按钮显式重建后再保存。
+                  直接用空列表覆盖会静默清空峰谷窗口、改变计费口径。请用下方「添加时段」或预设按钮显式重建后再保存;
+                  若确认要放弃这份存量,请用「清空高峰时段配置」并二次确认。
+                </div>
+              )}
+              {peakParseFailed && peakClearConfirmed && (
+                <div className="rounded border border-amber-400/60 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  已确认清空高峰时段:点击「保存」后服务端将写入空配置(无峰谷价,全天标准价)。
                 </div>
               )}
               {peakList.map((w, i) => (
@@ -865,6 +890,17 @@ export default function Gateway() {
                 <Button size="sm" variant="outline" type="button" onClick={presetPeak}>DeepSeek 当前政策(工作日)</Button>
                 {peakList.length > 0 && (
                   <Button size="sm" variant="ghost" type="button" onClick={() => setPeakList([])}>清空(无峰谷价)</Button>
+                )}
+                {/* 三轮残留③:存量不可解析时唯一能走出去的路径 —— 显式清空 + 二次确认。 */}
+                {peakParseFailed && !peakClearConfirmed && (
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    type="button"
+                    onClick={() => setPeakClearDialog(true)}
+                  >
+                    清空高峰时段配置
+                  </Button>
                 )}
               </div>
               <ul className="space-y-1 text-xs text-muted-foreground">
@@ -1272,6 +1308,38 @@ export default function Gateway() {
               DeepSeek 官方:高峰 = 北京 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。
             </p>
             <Button className="w-full" disabled={busy !== null} onClick={saveModelPricing}>{busy === 'save-model-pricing' ? '处理中…' : '保存'}</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 三轮残留③:不可解析存量的显式清空 —— 二次确认是「空值来自用户决定」的证据。 */}
+      <Dialog open={peakClearDialog} onOpenChange={setPeakClearDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>确认清空高峰时段配置?</DialogTitle>
+            <DialogDescription>
+              服务端当前保存的高峰时段配置无法被本页解析(可能是旧版本写入或人工改动过)。
+              清空后保存会把峰谷窗口写成空值 —— 即<strong>没有高峰时段,全天按标准价计费</strong>。
+              这个操作会改变计费口径,且原配置在这里显示不出来、无法还原。
+            </DialogDescription>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            如果只是想继续用峰谷价,请点「取消」,改用「添加时段」或「DeepSeek 当前政策(工作日)」重建后再保存。
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" type="button" onClick={() => setPeakClearDialog(false)}>取消</Button>
+            <Button
+              variant="destructive"
+              type="button"
+              onClick={() => {
+                setPeakList([])
+                setPeakClearConfirmed(true)
+                setPeakClearDialog(false)
+                setError('')
+              }}
+            >
+              确认清空
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

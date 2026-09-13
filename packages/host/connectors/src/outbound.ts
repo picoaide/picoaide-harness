@@ -16,6 +16,12 @@
  * multicast / reserved) for BOTH protocols, because a discovery document may
  * name an address the protocol check alone would let through.
  *
+ * Residual C adds the second half of the rule: checking the URL is not enough
+ * while `fetch` follows redirects. Every request goes through
+ * {@link outboundFetch}, which pins `redirect: 'manual'` and refuses a 3xx
+ * answer instead of delivering the body (code + PKCE verifier) to a host the
+ * policy would have refused as an initial URL.
+ *
  * Cross-package note: the enterprise guard is owned by another workstream and
  * lives in a package this one must not depend on (the dependency direction
  * would be new and the file is out of scope). The semantics above are therefore
@@ -120,9 +126,21 @@ type AddressClass = 'name' | 'loopback' | 'blocked' | 'public'
 
 /** Classify a URL hostname (IP literal or DNS name). */
 function classifyHost(hostname: string): AddressClass {
-  const bare = bareHostname(hostname).toLowerCase()
+  // 去掉 FQDN 的根点(`metadata.google.internal.` 与 `localhost.` 都是绝对名):
+  // 不归一的话,末尾一个点就能同时绕过元数据主机名单与回环名单
+  // (2026-09-13 审计 R3;Go 侧 connectorURLAllowed 同款 TrimSuffix)。
+  const bare = bareHostname(hostname).toLowerCase().replace(/\.$/u, '')
   const family = isIP(bare)
-  if (family === 0) return METADATA_HOSTNAMES.has(bare) ? 'blocked' : 'name'
+  if (family === 0) {
+    if (METADATA_HOSTNAMES.has(bare)) return 'blocked'
+    // `localhost` / `*.localhost` 是 RFC 6761 保留名,按回环处理:与 Go 侧
+    // `connectorURLAllowed` 的 `EqualFold(host,"localhost") || HasSuffix(".localhost")`
+    // 同口径(2026-09-13 审计 R3)。此前这里直接返回 'name',于是
+    // `http://localhost:PORT/mcp` 被下面"http 但主机不是回环"判掉 —— 管理员能在
+    // webadmin 保存,客户端却静默丢弃,一条合法的本地 MCP 连接器永远连不上。
+    if (isLoopbackLiteral(bare)) return 'loopback'
+    return 'name'
+  }
   if (isLoopbackLiteral(bare)) return 'loopback'
   const type = family === 4 ? 'ipv4' : 'ipv6'
   if (BLOCKED_ADDRESSES.check(bare, type)) return 'blocked'
@@ -171,7 +189,7 @@ export function assertOutboundUrlAllowed(rawUrl: string, what: string): URL {
   if (isHttp && kind !== 'loopback') {
     throw new OutboundUrlBlockedError(`${what} 使用 http 但主机不是回环地址: ${parsed.host}`)
   }
-  if (kind === 'name' && parsed.hostname.toLowerCase() === osHostname().toLowerCase()) {
+  if (kind === 'name' && parsed.hostname.toLowerCase().replace(/\.$/u, '') === osHostname().toLowerCase()) {
     // The local machine's own name resolves to a local interface in most
     // deployments; treat it as non-public rather than trusting DNS here.
     throw new OutboundUrlBlockedError(`${what} 指向本机主机名，已拒绝: ${parsed.host}`)
@@ -192,4 +210,64 @@ export function isOutboundUrlAllowed(rawUrl: string): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * Redirect policy every connector-controlled request must use (residual C).
+ *
+ * Checking the URL the plugin *asks* for is not enough: `fetch` follows
+ * redirects by default, so an endpoint that passes the policy could answer
+ * `307` with a `Location` the policy refuses and still receive the POST body —
+ * the OAuth authorization code and the PKCE `code_verifier` included. Requests
+ * therefore never follow a redirect: the URL that was checked is the only URL
+ * that may receive the payload.
+ */
+export const OUTBOUND_REDIRECT_POLICY = 'manual' as const
+
+/**
+ * Whether a response is a redirect this policy refused to follow. Node's
+ * undici returns the real 3xx response for `redirect: 'manual'` (the
+ * `opaqueredirect` filtered form of the browser spec has status 0), so both
+ * shapes are recognized.
+ * @param response - the response to classify.
+ * @returns true for a redirect, or for an opaque redirect answer.
+ */
+export function isRedirectResponse(response: Response): boolean {
+  if (response.type === 'opaqueredirect') return true
+  return response.status >= 300 && response.status < 400
+}
+
+/** Human-readable redirect detail for error messages (never echoes the body). */
+function describeRedirect(response: Response): string {
+  let location = ''
+  try {
+    location = response.headers.get('location') ?? ''
+  } catch {
+    location = ''
+  }
+  const status = response.status === 0 ? 'opaqueredirect' : String(response.status)
+  const target = location === '' ? '' : ` -> ${location.slice(0, 200)}`
+  return `${status}${target}`
+}
+
+/**
+ * Fetch a connector-controlled URL with the outbound policy AND the redirect
+ * fence applied in one place, so no call site can perform one without the
+ * other.
+ * @param rawUrl - the URL as the remote side supplied it.
+ * @param what - the flow step naming the URL in the error (e.g. `OAuth token 端点`).
+ * @param init - request options; `redirect` is forced to `manual`.
+ * @returns the response, which is guaranteed not to be a redirect.
+ * @throws {OutboundUrlBlockedError} when the URL is outside the policy or the
+ *   remote side answered with a redirect.
+ */
+export async function outboundFetch(rawUrl: string, what: string, init: RequestInit = {}): Promise<Response> {
+  const target = assertOutboundUrlAllowed(rawUrl, what)
+  const response = await fetch(target, { ...init, redirect: OUTBOUND_REDIRECT_POLICY })
+  if (isRedirectResponse(response)) {
+    throw new OutboundUrlBlockedError(
+      `${what} 返回重定向（${describeRedirect(response)}），按出站策略拒绝跟随: ${target.host}`,
+    )
+  }
+  return response
 }
