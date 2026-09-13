@@ -294,6 +294,101 @@ for id in "${SELECTED[@]}"; do
     // 用),也允许将来新增字段 —— 拿"所有非 accent 的键都是文件名"去套,
     // 会把注解误判成非法文件名而中止整条发布(2026-09-10 CI 实测踩到)。
     // 未知字段只告警(很可能是把 logo 拼错成 logoo),不拦发布。
+    //
+    // 2026-09-13 审计 R7(webadmin-branding-1)加严:SVG 素材**禁止脚本特征**。
+    // 服务端与客户端都按图片消费素材(<img>),但顶层导航到素材 URL(钓鱼链接)
+    // 时浏览器会把它当 SVG 文档执行 —— 内联 <script>/onload= 就在服务端源上跑,
+    // 还能带上 HttpOnly 的会话 cookie 读同源管理接口。服务端运行时已按不可信
+    // 输入加沙箱 CSP(server/internal/channel/handlers.go),但那只是纵深防御:
+    // 内容本身必须在进入镜像**之前**拦掉,这里(渠道包校验)是唯一上游门禁。
+    //
+    // 2026-09-13 复核(R7-RV-4 / R7-RV-5)修正两处:
+    //   - **按结构判定**,不再在整份正文上跑正则:注释、<desc>/文本节点、CDATA 里
+    //     写 "导出时不要出现 onload= / javascript: URL" 只是说明文字,旧写法会把
+    //     这类合法素材判成脚本素材、把整条渠道发布打回(fail-loud 误伤) 。现在先
+    //     跳过注释/CDATA/处理指令,只在**标签内部**看事件处理属性与 URL 属性,只在
+    //     元素名位置看 script/foreignObject。
+    //   - **按内容嗅探**,不再只看扩展名:素材的 Content-Type 是按文件名定的,把带
+    //     脚本的 SVG 命名成 logo.png 就能同时绕过扩展名检查与下发类型,所以凡
+    //     "内容像 XML/SVG 文档"(或 UTF-16 编码的同名文档)的素材一律按 SVG 检查,
+    //     不管扩展名;.svg 扩展名照旧必查。
+    // 命中只报**字段名 + 特征种类**(元素/属性名),不回显文件内容与品牌取值。
+    // 不引入第三方依赖:手写扫描器足够。
+    const SVG_URL_ATTRS = /^(?:xlink:)?href$|^src$|^data$|^action$|^formaction$|^style$|^(?:values|from|to|by)$/
+    // SVG 动画元素能把 script-ish 值"写"进别的属性(`<set attributeName="onload"
+    // to="alert(1)"/>` 是已知的 SVG XSS 姿势),这一族按元素名 + attributeName 判定。
+    const SVG_ANIM_TAGS = new Set(["set", "animate", "animatetransform", "animatemotion"])
+    // XML 数字字符引用会被解析器还原(`&#106;avascript:` = `javascript:`),
+    // 判定 URL 属性前先解码,否则换个写法就绕过了。
+    const safeCodePoint = (code, fallback) => {
+      if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return fallback
+      try { return String.fromCodePoint(code) } catch { return fallback }
+    }
+    const decodeCharRefs = (v) => v
+      .replace(/&#x([0-9a-f]{1,6});?/gi, (whole, hex) => safeCodePoint(parseInt(hex, 16), whole))
+      .replace(/&#([0-9]{1,7});?/g, (whole, dec) => safeCodePoint(parseInt(dec, 10), whole))
+      .replace(/&colon;/gi, ":")
+    // scriptishSvg 返回命中的特征(元素名/属性名);空数组 = 未发现脚本特征。
+    const scriptishSvg = (src) => {
+      const hits = []
+      const n = src.length
+      let i = 0
+      while (i < n) {
+        const lt = src.indexOf("<", i)
+        if (lt < 0) break
+        // 注释 / CDATA / 处理指令 / DOCTYPE:其中的字样是文本,不是标记。
+        if (src.startsWith("<!--", lt)) { const end = src.indexOf("-->", lt + 4); i = end < 0 ? n : end + 3; continue }
+        if (src.startsWith("<![CDATA[", lt)) { const end = src.indexOf("]]>", lt + 9); i = end < 0 ? n : end + 3; continue }
+        if (src.startsWith("<?", lt) || src.startsWith("<!", lt)) { const end = src.indexOf(">", lt + 2); i = end < 0 ? n : end + 1; continue }
+        // 标签体扫到 `>` 为止,但尊重引号(属性值里可以出现 `>`)。
+        let j = lt + 1
+        let quote = ""
+        while (j < n) {
+          const ch = src[j]
+          if (quote !== "") { if (ch === quote) quote = "" }
+          else if (ch === "\"" || ch === "\x27") quote = ch
+          else if (ch === ">") break
+          j++
+        }
+        const body = src.slice(lt + 1, j)
+        i = j + 1
+        if (body.startsWith("/")) continue // 闭合标签
+        // 元素名(允许命名空间前缀):只在标签名位置认 script/foreignObject。
+        const nameMatch = /^(?:[A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]*)/.exec(body)
+        const tag = (nameMatch === null ? "" : nameMatch[1]).toLowerCase()
+        if (tag === "script" || tag === "foreignobject") { hits.push("<" + tag + ">"); continue }
+        // 属性:事件处理属性(on*=)、动画写事件属性、URL 属性里的 javascript: 协议。
+        const attrRe = /([A-Za-z_:][-\w:.]*)\s*=\s*(?:"([^"]*)"|\x27([^\x27]*)\x27|([^\s"\x27>]+))/g
+        let m
+        while ((m = attrRe.exec(body)) !== null) {
+          const attr = m[1].toLowerCase()
+          if (/^on[a-z]+$/.test(attr)) { hits.push(attr + "="); continue }
+          const rawValue = m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : (m[4] === undefined ? "" : m[4]))
+          if (SVG_ANIM_TAGS.has(tag) && attr === "attributename" && /^on[a-z]+$/i.test(rawValue.trim())) {
+            hits.push(tag + "@" + rawValue.trim().toLowerCase())
+            continue
+          }
+          if (SVG_URL_ATTRS.test(attr) && /javascript\s*:/i.test(decodeCharRefs(rawValue))) hits.push(attr + "=javascript:")
+        }
+      }
+      return hits
+    }
+    // 内容像 XML/SVG 文档?跳过 BOM 与空白后第一个字节是 `<`。
+    const looksLikeMarkup = (buf) => {
+      let i = buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf ? 3 : 0
+      while (i < buf.length && (buf[i] === 0x20 || buf[i] === 0x09 || buf[i] === 0x0a || buf[i] === 0x0d)) i++
+      return i < buf.length && buf[i] === 0x3c
+    }
+    // 素材文本:UTF-16 BOM 也要能扫(否则同一份恶意 SVG 换个编码就绕过嗅探)。
+    const decodeAsset = (buf) => {
+      if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return buf.toString("utf16le")
+      if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff && buf.length % 2 === 0) {
+        const swapped = Buffer.from(buf)
+        swapped.swap16()
+        return swapped.toString("utf16le")
+      }
+      return buf.toString("utf8")
+    }
     const KNOWN_ASSET_KEYS = ["logo", "logo_dark", "favicon"]
     for (const [key, value] of Object.entries(cfg?.assets ?? {})) {
       if (key === "accent" || key.startsWith("_")) continue
@@ -307,7 +402,19 @@ for id in "${SELECTED[@]}"; do
         continue
       }
       if (name.includes("/") || name.includes("\\")) { invalid.push("assets." + key + "(必须是单段文件名)"); continue }
-      if (!fs.existsSync(path.join(dir, name))) invalid.push("assets." + key + "(渠道目录里没有这个文件)")
+      if (!fs.existsSync(path.join(dir, name))) { invalid.push("assets." + key + "(渠道目录里没有这个文件)"); continue }
+      // 素材的脚本特征检查:先嗅探内容(不看扩展名),.svg 扩展名照旧必查。
+      // 内容不进日志:只报字段名与特征种类(元素/属性名)。
+      const assetBuf = fs.readFileSync(path.join(dir, name))
+      const utf16 = assetBuf.length >= 2
+        && ((assetBuf[0] === 0xff && assetBuf[1] === 0xfe) || (assetBuf[0] === 0xfe && assetBuf[1] === 0xff))
+      if (looksLikeMarkup(assetBuf) || utf16 || /\.svg$/i.test(name)) {
+        const hits = scriptishSvg(decodeAsset(assetBuf))
+        if (hits.length > 0) {
+          invalid.push("assets." + key + "(素材是 SVG/XML 文档且含脚本特征:" + [...new Set(hits)].slice(0, 3).join("/")
+            + " —— 素材会被原样下发给浏览器,顶层打开即可执行脚本,请用图形工具重新导出为纯图形 SVG)")
+        }
+      }
     }
     // mac 图标管线要求:1024×1024、RGBA16、带 ICC(见 generate-mac-app-icon.mjs)。
     const iconPath = path.join(dir, "app-icon.png")

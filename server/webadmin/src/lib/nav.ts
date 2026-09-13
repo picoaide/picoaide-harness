@@ -11,19 +11,25 @@ import {
   Users, Settings2, KeyRound, BarChart3, Store, ScrollText, Network, Server, Bug, Plug,
   type LucideIcon,
 } from 'lucide-react'
-import type { MeUser } from './rbac'
+import {
+  PERM_AUDIT_READ,
+  PERM_AUTH_READ,
+  PERM_CAP_READ,
+  PERM_CONNECTOR_READ,
+  PERM_DEPT_READ,
+  PERM_GATEWAY_READ,
+  PERM_MARKET_READ,
+  PERM_SERVERINFO_READ,
+  PERM_USAGE_READ,
+  PERM_USER_READ,
+  type MeUser,
+} from './rbac'
 
-// 权限点常量(与服务端 serverauth/rbac.go 对齐; 前端仅作导航可见性)。
-export const PERM_USER_READ = 'user:read'
-export const PERM_DEPT_READ = 'dept:read'
-export const PERM_AUTH_READ = 'auth:read'
-export const PERM_GATEWAY_READ = 'gateway:read'
-export const PERM_USAGE_READ = 'usage:read'
-export const PERM_MARKET_READ = 'market:read'
-export const PERM_CAP_READ = 'capability:read'
-export const PERM_CONNECTOR_READ = 'connector:read'
-export const PERM_SERVERINFO_READ = 'server-info:read'
-export const PERM_AUDIT_READ = 'audit:read'
+// 权限点常量(唯一真源在 lib/rbac.ts;这里原样转出,既有引用不受影响)。
+export {
+  PERM_USER_READ, PERM_DEPT_READ, PERM_AUTH_READ, PERM_GATEWAY_READ, PERM_USAGE_READ,
+  PERM_MARKET_READ, PERM_CAP_READ, PERM_CONNECTOR_READ, PERM_SERVERINFO_READ, PERM_AUDIT_READ,
+} from './rbac'
 
 export interface NavEntry {
   to: string

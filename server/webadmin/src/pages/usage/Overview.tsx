@@ -10,6 +10,7 @@ import { PageHeader } from '../../components/page-header'
 import { CircleDollarSign, Activity, Coins, Wallet, RefreshCw, Landmark } from 'lucide-react'
 import { RangeFilter, defaultRange, sumRows, fmtY, type OverviewData, type ProviderInfo, type ProviderBalance } from './common'
 import { fmtTokens, fmtFull } from '../../lib/format'
+import { PERM_GATEWAY_READ, hasPermission } from '../../lib/rbac'
 
 // 总览(主页面):企业整体消耗——上游账户余额 + KPI + 近30天消耗趋势 + 模型 TOP10
 export default function UsageOverview() {
@@ -23,6 +24,10 @@ export default function UsageOverview() {
   const [error, setError] = useState('')
   // P2-46: 请求序号防乱序——快速切换区间时只有最新请求的响应能写 state。
   const loadSeq = useRef(0)
+  // 上游渠道(及其账户余额)是网关配置面:GET /providers 要 gateway:read。
+  // 审计 R7 残余(R7-RV-1):原来这个 403 被 `catch {}` 静默吞掉 —— 区块永远
+  // 显示"未配置上游渠道",把"没有权限"说成了"没有配置"(运维据此白排查)。
+  const canReadGateway = hasPermission(PERM_GATEWAY_READ)
 
   const loadBalance = useCallback(async (id: number) => {
     setBalances((prev) => ({ ...prev, [id]: 'loading' }))
@@ -48,6 +53,7 @@ export default function UsageOverview() {
     } finally {
       if (current === loadSeq.current) setLoading(false)
     }
+    if (!canReadGateway) return
     try {
       const pl = await request<{ providers: ProviderInfo[] }>(`${ADMIN_API}/providers`)
       if (current !== loadSeq.current) return
@@ -56,7 +62,7 @@ export default function UsageOverview() {
       setBalances({})
       list.forEach((p) => void loadBalance(p.id))
     } catch { /* 上游账户余额失败不阻塞总览 */ }
-  }, [loadBalance])
+  }, [loadBalance, canReadGateway])
 
   useEffect(() => { void load(from, to) }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -112,7 +118,12 @@ export default function UsageOverview() {
           </Button>
         </CardHeader>
         <CardContent>
-          {providers.length === 0 ? (
+          {!canReadGateway ? (
+            // 没有 gateway:read 时不请求、也不把"没有权限"说成"没有配置"。
+            <div className="text-sm text-muted-foreground">
+              上游账户余额需要网关配置读取权限(gateway:read):当前账号不可见。其余用量数据不受影响。
+            </div>
+          ) : providers.length === 0 ? (
             <div className="text-sm text-muted-foreground">未配置上游渠道</div>
           ) : (
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
