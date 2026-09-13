@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 )
@@ -471,7 +472,8 @@ func ModelPrices(db *sql.DB, name string) (inputPer1M, outputPer1M, offpeak floa
 		return p[0], p[1], p[2]
 	}
 	var in, out, off sql.NullFloat64
-	err := db.QueryRow(`SELECT input_price_per_1m, output_price_per_1m, offpeak_discount FROM models WHERE name = ?`, name).Scan(&in, &out, &off)
+	// P1-6:同名多 provider 时必须确定性取价(物理行序会随 UPSERT 漂移)。
+	err := db.QueryRow(`SELECT input_price_per_1m, output_price_per_1m, offpeak_discount FROM models WHERE name = ? ORDER BY provider_id LIMIT 1`, name).Scan(&in, &out, &off)
 	if err != nil {
 		return 0, 0, 0
 	}
@@ -489,6 +491,63 @@ func ModelPrices(db *sql.DB, name string) (inputPer1M, outputPer1M, offpeak floa
 	return r[0], r[1], r[2]
 }
 
+// ModelPricesForProvider 按**实际命中的 provider** 取价(P1-6,审计 2026-09-13):
+// 优先 (provider_id, name);该组合不存在(模型被迁移/删除)或 providerID==0
+// (历史行)时回退到 name 口径(ModelPrices 自身已带确定性排序,不再随物理行序漂移)。
+func ModelPricesForProvider(db *sql.DB, providerID int64, name string) (inputPer1M, outputPer1M, offpeak float64) {
+	if providerID <= 0 {
+		return ModelPrices(db, name)
+	}
+	key := fmt.Sprintf("pprice:%d:%s", providerID, name)
+	if v := modelConfigCache.get(db, key); v != nil {
+		p := v.([3]float64)
+		return p[0], p[1], p[2]
+	}
+	var in, out, off sql.NullFloat64
+	err := db.QueryRow(`SELECT input_price_per_1m, output_price_per_1m, offpeak_discount
+		FROM models WHERE provider_id = ? AND name = ?`, providerID, name).Scan(&in, &out, &off)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ModelPrices(db, name) // 该 provider 下无此模型行 → 回退 name 口径
+	}
+	if err != nil {
+		return 0, 0, 0
+	}
+	r := [3]float64{}
+	if in.Valid {
+		r[0] = in.Float64
+	}
+	if out.Valid {
+		r[1] = out.Float64
+	}
+	if off.Valid {
+		r[2] = off.Float64
+	}
+	modelConfigCache.set(db, key, r)
+	return r[0], r[1], r[2]
+}
+
+// ModelCachePriceForProvider 是 ModelCachePrice 的 provider 维度版本(P1-6)。
+func ModelCachePriceForProvider(db *sql.DB, providerID int64, name string) float64 {
+	if providerID <= 0 {
+		return ModelCachePrice(db, name)
+	}
+	key := fmt.Sprintf("pcache:%d:%s", providerID, name)
+	if v := modelConfigCache.get(db, key); v != nil {
+		return v.(float64)
+	}
+	var cache sql.NullFloat64
+	err := db.QueryRow(`SELECT cache_input_price_per_1m FROM models WHERE provider_id = ? AND name = ?`,
+		providerID, name).Scan(&cache)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ModelCachePrice(db, name)
+	}
+	if err != nil || !cache.Valid {
+		return 0
+	}
+	modelConfigCache.set(db, key, cache.Float64)
+	return cache.Float64
+}
+
 // ModelCachePrice returns the cache-hit input price (yuan per 1M tokens,
 // 0029). 0 = 未配置缓存价(命中按输入价计费)。
 func ModelCachePrice(db *sql.DB, name string) float64 {
@@ -496,7 +555,8 @@ func ModelCachePrice(db *sql.DB, name string) float64 {
 		return v.(float64)
 	}
 	var cache sql.NullFloat64
-	err := db.QueryRow(`SELECT cache_input_price_per_1m FROM models WHERE name = ?`, name).Scan(&cache)
+	// P1-6:同上,确定性取价。
+	err := db.QueryRow(`SELECT cache_input_price_per_1m FROM models WHERE name = ? ORDER BY provider_id LIMIT 1`, name).Scan(&cache)
 	if err != nil || !cache.Valid {
 		if err == nil {
 			modelConfigCache.set(db, "cache:"+name, 0.0)

@@ -265,6 +265,30 @@ func estimateCompletionFallback(promptTokens, completionTokens, deliveredBytes i
 	return estimatedTokens, true
 }
 
+// estimatePromptFallback 是**输入侧缺失时的兜底估算**(审计 2026-09-13 P0-1)。
+//
+// 触发条件:上游没有回报 prompt 侧用量(客户端曾可关闭 include_usage,或上游
+// 忽略该选项、或流在 usage 之前中断)。旧口径对 prompt 侧**完全不估算**,
+// 于是一个请求体字段就能让输入免费 —— 输入是长上下文场景的账单大头。
+//
+// 口径:按**实际发往上游的请求体字节**折算(与 completion 侧同一个
+// estimateTokensFromBytes,4 字节/token),非空请求体至少 1 token(与 embedding
+// 输入侧 estimateEmbeddingPromptTokens 同口径)。对中文等 UTF-8 文本这是
+// **低估**(3 字节/字、约 1 token/字 ⇒ 估值约为真实值的 3/4 甚至更低),
+// 保持项目"宁可少收也不凭空多扣"的方向,同时杜绝"整侧免费"。
+//
+// 返回 (tokens, true) 表示发生了估算(estimated 标记必须落库,便于对账区分)。
+func estimatePromptFallback(promptTokens, requestBytes int64) (int64, bool) {
+	if promptTokens > 0 || requestBytes <= 0 {
+		return promptTokens, false
+	}
+	n := estimateTokensFromBytes(requestBytes)
+	if n <= 0 {
+		n = 1
+	}
+	return n, true
+}
+
 // settleStreamFallback 是流式收尾兜底结算的**唯一实现**(G12,审计 2026-09-13)。
 //
 // 上游没有回报 usage、或只回报了输入侧(例如 Anthropic 流在 message_start
@@ -277,9 +301,24 @@ func estimateCompletionFallback(promptTokens, completionTokens, deliveredBytes i
 //
 // 返回 settled=false 且 err==nil 表示这次流没有任何可计费内容(pending 行已删除)。
 // 返回 err != nil 时调用方必须 fail-closed(abortSettlementFailureStream)。
-func settleStreamFallback(db *sql.DB, usageID, forwardedBytes, promptTokens, completionTokens, cacheTokens int64) (bool, error) {
+//
+// requestBytes 是**实际发往上游的请求体字节数**(P0-1 起用于 prompt 侧兜底估算)。
+func settleStreamFallback(db *sql.DB, usageID, forwardedBytes, requestBytes, promptTokens, completionTokens, cacheTokens int64) (bool, error) {
 	var estimated bool
-	completionTokens, estimated = estimateCompletionFallback(promptTokens, completionTokens, forwardedBytes)
+	// 输入侧兜底的门槛:这条流**真的交付过内容**(forwardedBytes>0)。上游一个
+	// 字节都没给(首行超限/空闲超时/空流)时不能凭空计一笔输入费 —— 与
+	// "零计费内容删行"的既有语义一致。客户端明确拿到内容(含 P0-1 的
+	// include_usage=false 形态)必然 forwardedBytes>0。
+	if forwardedBytes > 0 {
+		if pt, ok := estimatePromptFallback(promptTokens, requestBytes); ok {
+			promptTokens, estimated = pt, true
+			log.Printf("gateway: prompt usage missing, estimated from request bytes: usage=%d request_bytes=%d est_prompt=%d",
+				usageID, requestBytes, promptTokens)
+		}
+	}
+	var completionEstimated bool
+	completionTokens, completionEstimated = estimateCompletionFallback(promptTokens, completionTokens, forwardedBytes)
+	estimated = estimated || completionEstimated
 	if promptTokens <= 0 && completionTokens <= 0 && cacheTokens <= 0 {
 		// 一个字节都没转发(连接失败/空流):删除 pending 行,不留痕迹。
 		return false, serverstore.DeleteUsage(db, usageID)

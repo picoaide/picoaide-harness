@@ -201,6 +201,28 @@ func RequestOrigin(c *gin.Context) Origin {
 	})
 }
 
+// PublicBaseResolver 返回**服务端配置的对外地址**(settings: server.base_url),
+// 由 main 注入(缺省 nil = 未配置)。P3-5(审计 2026-09-13):此前来源判定完全
+// 依赖请求的 Host/X-Forwarded-Proto ⇒ 攻击者可控的 Host 会被拼进下发的下载
+// URL(no-store 已挡住缓存投毒,但配置了对外地址时应以配置为权威)。
+var PublicBaseResolver func() string
+
+// configuredBaseURL 读取显式配置的对外地址(只接受 https/回环 http)。
+func configuredBaseURL() string {
+	if PublicBaseResolver == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(PublicBaseResolver())
+	if raw == "" {
+		return ""
+	}
+	base, ok := normalizeBaseURL(raw)
+	if !ok || !isSecureBase(base) {
+		return ""
+	}
+	return base
+}
+
 // originInput 是来源判定所需的请求事实(与 gin 解耦,便于表驱动测试)。
 type originInput struct {
 	// ForwardedProto 反代声明的协议(X-Forwarded-Proto)。
@@ -224,6 +246,10 @@ func resolveOrigin(in originInput) Origin {
 		if !isSecureBase(base) {
 			return Origin{Reason: PublicBaseURLEnv + " must be https (the client rejects non-https download URLs)"}
 		}
+		return Origin{Base: base}
+	}
+	// 服务端显式配置的对外地址优先于请求头(P3-5)。
+	if base := configuredBaseURL(); base != "" {
 		return Origin{Base: base}
 	}
 	if in.Host == "" {

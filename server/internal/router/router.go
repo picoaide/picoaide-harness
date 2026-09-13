@@ -201,7 +201,9 @@ func registerClientV2(cli *gin.RouterGroup, d Deps) {
 func registerGatewayV1(r *gin.Engine, d Deps) {
 	// OpenAI/Anthropic 兼容形态(OpenAI SDK base_url=server 自动补 /v1;
 	// Anthropic SDK base_url=server/anthropic 用 /v1/messages)。
-	v1 := r.Group("/v1", serverauth.BearerAuth(d.DB))
+	// P2-11(审计 2026-09-13):单用户在跑的网关请求上限(防止单员工打满全站)。
+	// 必须排在 BearerAuth 之后(中间件按声明顺序执行,准入需要已认证用户)。
+	v1 := r.Group("/v1", serverauth.BearerAuth(d.DB), llmgateway.InFlightGuard())
 	v1.POST("/chat/completions", d.Gateway.ChatCompletions)
 	v1.POST("/embeddings", d.Gateway.Embeddings)
 	v1.POST("/messages", d.Gateway.Messages)
@@ -210,7 +212,7 @@ func registerGatewayV1(r *gin.Engine, d Deps) {
 	v1.GET("/models", d.Gateway.Models)
 
 	// 官方原生端点(base_url=server, 无 /v1 前缀)。
-	gw := r.Group("", serverauth.BearerAuth(d.DB))
+	gw := r.Group("", serverauth.BearerAuth(d.DB), llmgateway.InFlightGuard())
 	gw.POST("/chat/completions", d.Gateway.ChatCompletions)
 	gw.POST("/embeddings", d.Gateway.Embeddings)
 	gw.POST("/completions", d.Gateway.Completions)

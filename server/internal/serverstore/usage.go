@@ -227,7 +227,7 @@ func RecordUsageKindCached(db *sql.DB, userID int64, model string, promptTokens,
 // RecordUsageKindEstimated 是 RecordUsageKind 的估算标记版本(embedding 输入侧
 // 估算用;无缓存命中数)。
 func RecordUsageKindEstimated(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64, kind string, estimated bool) (int64, error) {
-	return recordUsageKindAtCached(db, userID, model, promptTokens, completionTokens, 0, kind, estimated, time.Now())
+	return recordUsageKindAtCached(db, userID, 0, model, promptTokens, completionTokens, 0, kind, estimated, time.Now())
 }
 
 // RecordUsageKindCachedEstimated 是落账的**唯一入口**:estimated=true 表示这一行
@@ -238,20 +238,39 @@ func RecordUsageKindEstimated(db *sql.DB, userID int64, model string, promptToke
 // 日账/月账/报表(RebuildUsageLedger 直接 SUM)事后无法判断哪些行是估算的,
 // 既解释不了异常行,也评估不了估算口径的影响面。列见迁移 0063。
 func RecordUsageKindCachedEstimated(db *sql.DB, userID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string, estimated bool) (int64, error) {
-	return recordUsageKindAtCached(db, userID, model, promptTokens, completionTokens, cacheTokens, kind, estimated, time.Now())
+	return recordUsageKindAtCached(db, userID, 0, model, promptTokens, completionTokens, cacheTokens, kind, estimated, time.Now())
+}
+
+// RecordUsageKindCachedEstimatedForProvider 与 RecordUsageKindCachedEstimated
+// 相同,但把**实际命中的 provider** 一并落库并按它取价(审计 2026-09-13 P1-6)。
+// providerID=0 时语义与旧入口完全一致(按 name 取价)。
+func RecordUsageKindCachedEstimatedForProvider(db *sql.DB, userID, providerID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string, estimated bool) (int64, error) {
+	return recordUsageKindAtCached(db, userID, providerID, model, promptTokens, completionTokens, cacheTokens, kind, estimated, time.Now())
+}
+
+// SetUsageProvider 把已存在的 usage 行(流式 pending 行)绑定到实际命中的
+// provider:Pending 行在**调用上游之前**插入(失败即拒绝,保证有账),
+// provider 在 failover 成功后才确定,因此在成功后补一次绑定。
+func SetUsageProvider(db *sql.DB, id, providerID int64) error {
+	if id <= 0 || providerID <= 0 {
+		return nil
+	}
+	_, err := db.Exec(`UPDATE usage SET provider_id = ? WHERE id = ?`, providerID, id)
+	return err
 }
 
 // recordUsageKindAt 是 RecordUsageKind 的时间注入版本(测试固定时刻)。
 func recordUsageKindAt(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64, kind string, now time.Time) (int64, error) {
-	return recordUsageKindAtCached(db, userID, model, promptTokens, completionTokens, 0, kind, false, now)
+	return recordUsageKindAtCached(db, userID, 0, model, promptTokens, completionTokens, 0, kind, false, now)
 }
 
 // recordUsageKindAtCached 带缓存命中数与估算标记的记录(时间注入)。
-func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string, estimated bool, now time.Time) (int64, error) {
+func recordUsageKindAtCached(db *sql.DB, userID, providerID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string, estimated bool, now time.Time) (int64, error) {
 	// P0-B:负 token 既不进费用也不落库(月用量/报表/对账都会被负数污染)。
 	promptTokens, completionTokens, cacheTokens = clampTokens(promptTokens, completionTokens, cacheTokens)
-	in, out, off := ModelPrices(db, model)
-	cacheIn := ModelCachePrice(db, model)
+	// P1-6:按实际命中的 provider 取价(providerID=0 时回退 name 口径)。
+	in, out, off := ModelPricesForProvider(db, providerID, model)
+	cacheIn := ModelCachePriceForProvider(db, providerID, model)
 	cost := costOfAt(now, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
 	// 分区写路径:确保 now 所属月份分区存在(幂等 CREATE TABLE IF NOT EXISTS)。
 	if err := ensureUsagePartition(db, now); err != nil {
@@ -270,8 +289,8 @@ func recordUsageKindAtCached(db *sql.DB, userID int64, model string, promptToken
 	}
 	defer tx.Rollback()
 	var id int64
-	if err := tx.QueryRow(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost, created_at, estimated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-		userID, model, promptTokens, completionTokens, cacheTokens, kind, cost, now, estimated).Scan(&id); err != nil {
+	if err := tx.QueryRow(`INSERT INTO usage (user_id, model, provider_id, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost, created_at, estimated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+		userID, model, providerID, promptTokens, completionTokens, cacheTokens, kind, cost, now, estimated).Scan(&id); err != nil {
 		return 0, err
 	}
 	if err := settleUsageCostTx(tx, id, userID, cost); err != nil {
@@ -312,10 +331,11 @@ func updateUsageTokensAt(db *sql.DB, id, promptTokens, completionTokens int64, n
 func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, estimated bool, now time.Time) error {
 	// P0-B:回填路径同样归零(流式 usage 行 / 估算回填都可能带负值)。
 	promptTokens, completionTokens, cacheTokens = clampTokens(promptTokens, completionTokens, cacheTokens)
-	var userID int64
+	var userID, providerID int64
 	var model string
 	var createdAt any
-	if err := db.QueryRow("SELECT user_id, model, created_at FROM usage WHERE id = ?", id).Scan(&userID, &model, &createdAt); err != nil {
+	if err := db.QueryRow("SELECT user_id, model, created_at, provider_id FROM usage WHERE id = ?", id).
+		Scan(&userID, &model, &createdAt, &providerID); err != nil {
 		return err
 	}
 	// created_at(SQLite localtime 字符串 / PG TIMESTAMPTZ)解析回本地时刻;
@@ -324,8 +344,9 @@ func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, c
 	if t := parseSQLTime(createdAt); !t.IsZero() {
 		billAt = t
 	}
-	in, out, off := ModelPrices(db, model)
-	cacheIn := ModelCachePrice(db, model)
+	// P1-6:回填也按该行绑定的 provider 取价(前端已 SetUsageProvider)。
+	in, out, off := ModelPricesForProvider(db, providerID, model)
+	cacheIn := ModelCachePriceForProvider(db, providerID, model)
 	cost := costOfAt(billAt, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
 	// 0061/0062: 回填与余额结算同事务。0062 起由 settleUsageCostTx 把该行的
 	// 计费金额**收敛到 cost**(按流水已计费额算差额):重复回填不重复扣,

@@ -237,6 +237,56 @@ func boolToInt(b bool) int {
 	return 0
 }
 
+// EnabledAppIDs 返回某 kind 下全部**上架**(enabled=1)的 app_id 集合。
+// 读取侧一次取回后按名过滤,替代逐行查 apps 的 N+1(与 AppOfficialMap 同形):
+// 清单里漏掉一个下架行,与漏掉一个不存在的行同语义。
+func EnabledAppIDs(db *sql.DB, kind string) (map[string]bool, error) {
+	rows, err := db.Query(`SELECT app_id FROM apps WHERE kind = ? AND enabled = 1`, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+// AppEnabled 报告一个 App 是否上架(enabled=1),单个查询(下载/详情入口用)。
+// App 不存在返回 false:nil 错误 + false 与「不存在」同语义,调用方无需区分
+// (不泄露资源存在性)。
+func AppEnabled(db *sql.DB, kind, appID string) (bool, error) {
+	var enabled int
+	err := db.QueryRow(`SELECT enabled FROM apps WHERE kind = ? AND app_id = ?`, kind, appID).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return enabled == 1, nil
+}
+
+// SetAppTitle 只更新展示名(App 的展示元数据回写路径);owner、官方属性、
+// 渠道与上下架一律不受触碰——包内 author 是不可信输入,归属只认登录态
+// (P2-6,审计 2026-09-13:官方 App 的 owner 曾被包内 author 回写成个人)。
+func SetAppTitle(db *sql.DB, kind, appID, title string) error {
+	res, err := db.Exec(`UPDATE apps SET title = ?, updated_at = `+NowExpr()+`
+		WHERE kind = ? AND app_id = ?`, title, kind, appID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetAppOwner 归属转移(管理员指定,2026-09-02):apps.owner 是归属人的唯一
 // 真源——转移后旧归属者发布的后续版本请求一律 404,新归属者获得续传权。
 func SetAppOwner(db *sql.DB, kind, appID, owner string) error {

@@ -203,8 +203,16 @@ func ListAgentPresets(db *sql.DB, status string) ([]AgentPreset, error) {
 }
 
 // ListVisibleAgentPresets 员工可见清单:approved 且已授权 + 自己上传的全部状态。
+//
+// P2-1(审计 2026-09-13):App 级下架(apps.enabled=0)在员工面等同于不存在——
+// 此前只按状态 + 授权/作者过滤,管理员下架后员工仍能列出并下载。上架集合
+// 一次批量取回(EnabledAppIDs),不逐行查 apps。
 func ListVisibleAgentPresets(db *sql.DB, author string, granted []string) ([]AgentPreset, error) {
 	list, err := ListReleasesByStatus(db, AppKindAgent, "")
+	if err != nil {
+		return nil, err
+	}
+	enabled, err := EnabledAppIDs(db, AppKindAgent)
 	if err != nil {
 		return nil, err
 	}
@@ -214,6 +222,9 @@ func ListVisibleAgentPresets(db *sql.DB, author string, granted []string) ([]Age
 	}
 	out := []AgentPreset{}
 	for _, r := range list {
+		if !enabled[r.AppID] {
+			continue
+		}
 		if r.Publisher == author || (r.Status == ReleaseStatusApproved && ok[r.AppID]) {
 			out = append(out, releaseToPreset(r))
 		}

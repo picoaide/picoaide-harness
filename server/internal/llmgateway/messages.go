@@ -3,6 +3,7 @@ package llmgateway
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,7 +84,8 @@ func anthropicUsage(raw []byte) (pt, ct, cache int64, ok bool, err error) {
 // serveAnthropicJSON passes a non-stream Anthropic Messages response through
 // and records usage (kind "search" so admin usage pages can split it).
 // secrets: 本次请求使用的上游官方 key(响应回显脱敏)。
-func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int64, model string, secrets []string) {
+// requestBytes: 实际发往上游的请求体字节数(P0-1:prompt 侧兜底估算用)。
+func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID, providerID int64, model string, secrets []string, requestBytes int64) {
 	defer resp.Body.Close()
 	type readResult struct {
 		body []byte
@@ -120,10 +122,18 @@ func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int
 	// 里带了 usage 对象(P2,审计 r5 §1 缺口 1:此前 `delivered || ok` 让 4xx 也照扣,
 	// 与流式 4xx 零扣费的行为分叉)。
 	pt, ct, cache, _, _ := anthropicUsage(body)
-	if resp.StatusCode < 400 {
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var estimated bool
-		ct, estimated = estimateCompletionFallback(pt, ct, int64(len(body)))
-		if _, err := serverstore.RecordUsageKindCachedEstimated(a.DB, userID, model, pt, ct, cache, billingKindSearch, estimated); err != nil {
+		if len(body) > 0 {
+			if pt2, ok := estimatePromptFallback(pt, requestBytes); ok {
+				pt, estimated = pt2, true
+				log.Printf("gateway: prompt usage missing (anthropic), estimated from request bytes: request_bytes=%d est_prompt=%d", requestBytes, pt)
+			}
+		}
+		var completionEstimated bool
+		ct, completionEstimated = estimateCompletionFallback(pt, ct, int64(len(body)))
+		estimated = estimated || completionEstimated
+		if _, err := serverstore.RecordUsageKindCachedEstimatedForProvider(a.DB, userID, providerID, model, pt, ct, cache, billingKindSearch, estimated); err != nil {
 			// FIX-05 + G5b:与 /v1/chat/completions 同源 —— **任何**结算失败都
 			// 必须在交付响应体之前拒绝,不能 log 后继续 200(事务已回滚)。
 			rejectSettlementFailure(c, err, "anthropic json")
@@ -139,6 +149,11 @@ func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int
 			c.Writer.Header().Add(k, redactHeaderValue(v, secrets))
 		}
 	}
+	if resp.StatusCode >= 400 {
+		// P2-10:上游错误体收敛后再下发(只留 message/type/code)。
+		c.Writer.Write(sanitizeUpstreamError(body, secrets))
+		return
+	}
 	c.Writer.Write(body)
 }
 
@@ -147,7 +162,7 @@ func (a *API) serveAnthropicJSON(c *gin.Context, resp *http.Response, userID int
 // Anthropic 流式 usage 是分散的:input_tokens 只在 message_start 出现,
 // output_tokens 在 message_delta 出现(累积语义),因此按行合并(非零覆盖)
 // 再回填,不能像 OpenAI 那样整行覆盖。secrets: 上游官方 key(行/头脱敏)。
-func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID int64, secrets []string) {
+func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID int64, secrets []string, requestBytes int64) {
 	defer resp.Body.Close()
 	// upstream 4xx: no SSE to stream, the pending row is dropped
 	if resp.StatusCode >= 400 {
@@ -166,7 +181,7 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 			}
 		}
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		c.Writer.Write(redactSecrets(errBody, secrets))
+		c.Writer.Write(sanitizeUpstreamError(redactSecrets(errBody, secrets), secrets))
 		return
 	}
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
@@ -252,7 +267,7 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 	// 原样带出,绝不被估算覆盖;真的一个字节都没转发才删行。结算失败一律
 	// fail-closed(G5b)。
 	if usageID > 0 && (pt <= 0 || ct <= 0) {
-		settled, serr := settleStreamFallback(a.DB, usageID, forwardedBytes, pt, ct, cache)
+		settled, serr := settleStreamFallback(a.DB, usageID, forwardedBytes, requestBytes, pt, ct, cache)
 		log.Printf("gateway: anthropic stream with missing/zero usage side, fallback settlement: usage=%d stop=%s forwarded=%d pt=%d ct=%d settled=%v err=%v",
 			usageID, stopReason, forwardedBytes, pt, ct, settled, serr)
 		if serr != nil {
@@ -333,11 +348,20 @@ func (a *API) handleMessages(c *gin.Context) {
 
 	// Failover across Anthropic-protocol providers (same policy as chat).
 	var resp *http.Response
-	var respSecrets []string // 成功 provider 的官方 key(响应脱敏用)
+	var respSecrets []string   // 成功 provider 的官方 key(响应脱敏用)
+	var requestBytes int64     // 客户端原始请求体字节(prompt 侧兜底估算基准)
+	var chosenProviderID int64 // 实际命中的 provider(计费取价用,P1-6)
 	for i := range ups {
 		resp, err = a.forwardAnthropic(c, &ups[i], raw, req.Stream)
 		if err == nil {
 			respSecrets = []string{ups[i].APIKey}
+			requestBytes = int64(len(raw))
+			chosenProviderID = ups[i].ID
+			if usageID > 0 {
+				if serr := serverstore.SetUsageProvider(a.DB, usageID, ups[i].ID); serr != nil {
+					log.Printf("gateway: bind usage %d to provider %d failed: %v", usageID, ups[i].ID, serr)
+				}
+			}
 			break
 		}
 		log.Printf("gateway: anthropic model %s provider %q failed: %v",
@@ -353,10 +377,10 @@ func (a *API) handleMessages(c *gin.Context) {
 		return
 	}
 	if req.Stream {
-		a.serveAnthropicStream(c, resp, usageID, respSecrets)
+		a.serveAnthropicStream(c, resp, usageID, respSecrets, requestBytes)
 		return
 	}
-	a.serveAnthropicJSON(c, resp, user.ID, req.Model, respSecrets)
+	a.serveAnthropicJSON(c, resp, user.ID, chosenProviderID, req.Model, respSecrets, requestBytes)
 }
 
 // anthropicBaseURL 推导 Anthropic 兼容端点基址:
@@ -387,7 +411,14 @@ func (a *API) forwardAnthropic(c *gin.Context, up *Upstream, raw []byte, stream 
 	if stream {
 		client = a.sse
 	}
-	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, url, bytes.NewReader(raw))
+	// P1-5(审计 2026-09-13):流式请求的 context 与客户端断开解耦 —— 与
+	// forward()(chat 路径)同源。旧实现沿用客户端 context,客户端在 usage 行
+	// 之前断连会取消上游请求 → 永远拿不到 usage → 输入侧 0 计费。
+	reqCtx := c.Request.Context()
+	if stream {
+		reqCtx = context.WithoutCancel(reqCtx)
+	}
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
 		return nil, err
 	}

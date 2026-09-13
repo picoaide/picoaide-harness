@@ -1,12 +1,16 @@
 package serverauth
 
 import (
+	"context"
 	"errors"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
+
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 // ldapTimeout bounds every LDAP connection (C-7): connect, bind and search.
@@ -78,6 +82,18 @@ func (p *LDAPProvider) Configure(cfg map[string]string) error {
 func (p *LDAPProvider) dialConn() (ldapConn, error) {
 	if p.dial != nil {
 		return p.dial(p.ServerURL)
+	}
+	// P2-7(审计 2026-09-13):LDAP 出站同样做连接期 IP 复检(与网关上游/
+	// OIDC/余额查询同一护栏):目录地址由管理员配置且运行期可能被 DNS
+	// rebinding 指向链路本地/云 metadata。私网照旧放行(企业目录常在 10.x)。
+	u, err := url.Parse(p.ServerURL)
+	if err != nil || u.Hostname() == "" {
+		return nil, errors.New("ldap: invalid server_url")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), ldapTimeout)
+	defer cancel()
+	if err := util.CheckOutboundTarget(ctx, u.Hostname()); err != nil {
+		return nil, err
 	}
 	conn, err := ldap.DialURL(p.ServerURL, ldap.DialWithDialer(&net.Dialer{Timeout: ldapTimeout}))
 	if err != nil {
@@ -323,6 +339,12 @@ func (p *LDAPProvider) Authenticate(username, password string) (UserInfo, error)
 		DisplayName: ldapDisplayName(entry),
 		Email:       entry.GetAttributeValue("mail"),
 		Source:      "external",
+		// P2-9:DN 是目录内的稳定主体标识(用户名可能被改名/复用)。
+		ExternalID:     entry.DN,
+		ExternalSource: "ldap",
+		// 目录是组的权威源:即使这次没查到任何组也要回收(空组即回收),
+		// 所以这里恒为 true。
+		GroupsPresent: true,
 	}
 	if p.GroupFilter != "" {
 		groups, err := p.groupsOfEntry(conn, entry.DN)

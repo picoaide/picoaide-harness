@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -59,6 +60,9 @@ type UpdateChecker interface {
 	Check(ctx context.Context, current string) (*updatecheck.Result, error)
 }
 
+// ipLimiter 返回登录单 IP 失败预算桶(共享单例;与客户端面同源)。
+func (a *AdminAPI) ipLimiter() *loginLimiter { return sharedLoginIPLimiter() }
+
 // AdminAPI holds the admin web handlers.
 type AdminAPI struct {
 	DB *sql.DB
@@ -68,6 +72,69 @@ type AdminAPI struct {
 	// ReloadAuth 让运行中的客户端认证 API 按新配置重建 provider(F2)。
 	// main 注入;测试自建路由树为 nil 时跳过(仅启动时快照)。
 	ReloadAuth func() error
+}
+
+// validateIssuerURL 是 OIDC/OpenID issuer 的**唯一校验入口**(保存与测试连接
+// 共用同一份判定,避免"测试按钮拦、保存不拦"的口径分叉 —— 审计 2026-09-13 P1-4)。
+//
+// 三层:
+//  1. 形态:issuerURLRe(https://<host>[:port]/… 或 http://localhost|127.0.0.1/…);
+//  2. 目标:util.CheckOutboundTarget 对**每个候选 IP** 复检,拒绝链路本地/云
+//     metadata(DNS rebinding 也覆盖);私网照旧放行(企业自建 IdP 常在 10.x);
+//  3. 空值视为"不配置/停用",由调用方决定是否跳过。
+func validateIssuerURL(issuer string) error {
+	issuer = strings.TrimRight(strings.TrimSpace(issuer), "/")
+	if issuer == "" {
+		return errors.New("issuer 不能为空")
+	}
+	if !issuerURLRe.MatchString(issuer) {
+		return errors.New("必须是合法 https URL(或 http://localhost)")
+	}
+	u, err := url.Parse(issuer)
+	if err != nil || u.Hostname() == "" {
+		return errors.New("格式错误")
+	}
+	if u.Scheme == "http" && u.Hostname() != "localhost" && u.Hostname() != "127.0.0.1" {
+		return errors.New("http 仅允许 localhost 回环")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := util.CheckOutboundTarget(ctx, u.Hostname()); err != nil {
+		return errors.New("指向受限地址(链路本地/云 metadata)已拒绝")
+	}
+	return nil
+}
+
+// validateLDAPServerURL 校验 LDAP 目录地址(审计 2026-09-13 P2-7)。
+//
+// 出站 IP 复检在 ldap.go 的连接层强制(所有入口生效);这里额外在**保存时**
+// 拒绝明文 ldap:// 的非回环地址 —— bind 密码会以明文过网。为兼容存量内网
+// 未启 TLS 的目录,显式设置 PICOAI_LDAP_ALLOW_PLAINTEXT=1 可放行(仅影响
+// 新保存/修改的配置,存量配置不因升级而失效)。
+func validateLDAPServerURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return errors.New("必须是 ldap:// 或 ldaps:// 地址")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "ldaps":
+		return nil
+	case "ldap":
+		if u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1" {
+			return nil
+		}
+		if v := strings.TrimSpace(os.Getenv("PICOAI_LDAP_ALLOW_PLAINTEXT")); v == "1" || strings.EqualFold(v, "true") {
+			log.Printf("auth config: 允许明文 ldap://(PICOAI_LDAP_ALLOW_PLAINTEXT 已开启)host=%s —— bind 密码将明文过网", u.Hostname())
+			return nil
+		}
+		return errors.New("明文 ldap:// 会以明文传输 bind 密码;请改用 ldaps://,或显式设置 PICOAI_LDAP_ALLOW_PLAINTEXT=1 后重试")
+	default:
+		return errors.New("仅支持 ldap:// 或 ldaps://")
+	}
 }
 
 // issuerURLRe 校验测试连接 issuer(§1.2 SSRF; CodeQL regexp barrier):
@@ -241,20 +308,35 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 	// username 桶防反代坍缩/分布式下的账号级 DoS。
 	// 2026-09-08 P1-3:只有失败尝试计数(allow 不再记账),成功即清空。
 	lim := adminLoginLimiter()
-	ipKey, userKey := loginKey(c, req.Username), "u:"+req.Username
-	if !lim.allow(ipKey) || !lim.allow(userKey) {
+	// P3-2(审计 2026-09-13):键必须与客户端面**同一命名空间**(db scope 前缀),
+	// 否则"共享同一失败预算"只是共享了实例 —— 同一账号仍可在两个入口各消耗
+	// 一份 10 次预算(实测:客户端 3 次失败后第 4 次 429,管理面仍可继续尝试)。
+	scope := dbLimiterScope(a.DB)
+	ipKey, userKey := scope+loginKey(c, req.Username), scope+"u:"+req.Username
+	// P1-2:IP 桶(随机用户名绕过账号桶做 argon2 放大的入口)。
+	srcIPKey := scope + "ip:" + loginHost(c)
+	if !lim.allow(ipKey) || !lim.allow(userKey) || !a.ipLimiter().allow(srcIPKey) {
 		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 		return
 	}
+	// P1-2:密码校验并发闸(64MiB/次)。
+	release, gateOK := acquirePasswordVerify()
+	if !gateOK {
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录请求过于频繁,请稍后再试")
+		return
+	}
 	u, err := AuthenticateConfiguredAdmin(a.DB, req.Username, req.Password)
+	release()
 	if err != nil || !u.HasManagementAccess() {
 		lim.record(ipKey)
 		lim.record(userKey)
+		a.ipLimiter().record(srcIPKey)
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误或非管理员")
 		return
 	}
 	lim.reset(ipKey)
 	lim.reset(userKey)
+	a.ipLimiter().reset(srcIPKey)
 	// 0057: MFA 已开启 → 不建会话, 签发 5 分钟一次性挑战, 前端进入两步登录。
 	if u.TotpEnabled {
 		ticket, err := createMFAChallenge(a.DB, u.ID, "login", "", mfaTicketTTL)
@@ -280,9 +362,20 @@ func (a *AdminAPI) handleLoginMFA(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 		return
 	}
-	// 挑战校验(未过期/未消费/未超次); 任何失败消息一致, 不泄露状态。
-	ch, err := getMFAChallenge(a.DB, req.MFATicket)
-	if err != nil || ch.Kind != "login" || ch.Attempts >= mfaChallengeMaxFailed || time.Now().After(ch.ExpiresAt) {
+	// P1-1(审计 2026-09-13):第二步必须自带限流。旧实现完全无限流 —— 密码正确
+	// 即无限重签票据(每票 5 次),配合下面的原子占用修复前还可并发放大,
+	// 使"已知密码即可爆破 TOTP"。这里用与密码入口同一实例的**独立键**:
+	// ip:<ip>|mfa(防单机并发爆破)+ u:<user>|mfa(跨 IP 防账号级爆破)。
+	lim := adminLoginLimiter()
+	mfaIPKey := "mfa-ip:" + loginHost(c)
+	if !lim.allow(mfaIPKey) {
+		_ = serverstore.AuditLog(a.DB, "mfa", "login_fail", "rate_limited ip="+c.ClientIP())
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "验证尝试过于频繁,请稍后再试")
+		return
+	}
+	// 挑战校验与"占用一次尝试"合并为一条原子 UPDATE(未过期/未消费/未超次)。
+	ch, err := reserveMFAChallenge(a.DB, req.MFATicket, "login")
+	if err != nil {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "验证请求已失效,请重新登录")
 		return
 	}
@@ -291,9 +384,16 @@ func (a *AdminAPI) handleLoginMFA(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "验证请求已失效,请重新登录")
 		return
 	}
+	mfaUserKey := "u:" + u.Username + "|mfa"
+	if !lim.allow(mfaUserKey) {
+		_ = serverstore.AuditLog(a.DB, u.Username, "login_fail", "rate_limited mfa user ip="+c.ClientIP())
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "验证尝试过于频繁,请稍后再试")
+		return
+	}
 	secret, err := decryptMFASecret(u.TotpSecret)
-	if err != nil || !totpValid(secret, req.Code) {
-		_ = bumpMFAChallengeAttempts(a.DB, req.MFATicket)
+	if err != nil || !verifyAndConsumeTOTP(a.DB, u.ID, secret, req.Code) {
+		lim.record(mfaIPKey)
+		lim.record(mfaUserKey)
 		_ = serverstore.AuditLog(a.DB, u.Username, "admin_mfa_login", "fail ip="+c.ClientIP())
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "动态码错误或已失效")
 		return
@@ -303,6 +403,8 @@ func (a *AdminAPI) handleLoginMFA(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "验证请求已失效,请重新登录")
 		return
 	}
+	lim.reset(mfaIPKey)
+	lim.reset(mfaUserKey)
 	_ = serverstore.AuditLog(a.DB, u.Username, "admin_mfa_login", "success ip="+c.ClientIP())
 	a.issueAdminSession(c, u)
 }
@@ -394,11 +496,19 @@ func (a *AdminAPI) handleMePassword(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "外部认证用户的密码由企业 IdP 管理,不能在此修改")
 		return
 	}
-	if !util.VerifyPassword(u.PasswordHash, req.OldPassword) {
+	matched, ok := verifyPasswordGated(u.PasswordHash, req.OldPassword)
+	if !ok {
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁,请稍后再试")
+		return
+	}
+	if !matched {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "原密码错误")
 		return
 	}
-	if util.VerifyPassword(u.PasswordHash, req.NewPassword) {
+	if same, ok := verifyPasswordGated(u.PasswordHash, req.NewPassword); !ok {
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁,请稍后再试")
+		return
+	} else if same {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "新密码不能与原密码相同")
 		return
 	}
@@ -441,7 +551,14 @@ func (a *AdminAPI) enableMyMFA(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 		return
 	}
-	if u.Source != "local" || u.PasswordHash == "" || !util.VerifyPassword(u.PasswordHash, req.Password) {
+	if u.Source != "local" || u.PasswordHash == "" {
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "主密码错误")
+		return
+	}
+	if matched, ok := verifyPasswordGated(u.PasswordHash, req.Password); !ok {
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁,请稍后再试")
+		return
+	} else if !matched {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "主密码错误")
 		return
 	}
@@ -479,14 +596,13 @@ func (a *AdminAPI) verifyMyMFA(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 		return
 	}
-	ch, err := getMFAChallenge(a.DB, req.Ticket)
-	if err != nil || ch.Kind != "enable" || ch.Attempts >= mfaChallengeMaxFailed || time.Now().After(ch.ExpiresAt) {
+	ch, err := reserveMFAChallenge(a.DB, req.Ticket, "enable")
+	if err != nil {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "验证请求已失效,请重新开启")
 		return
 	}
 	secret, err := decryptMFASecret(ch.Secret)
-	if err != nil || !totpValid(secret, req.Code) {
-		_ = bumpMFAChallengeAttempts(a.DB, req.Ticket)
+	if err != nil || !verifyAndConsumeTOTP(a.DB, u.ID, secret, req.Code) {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "动态码错误")
 		return
 	}
@@ -501,7 +617,7 @@ func (a *AdminAPI) verifyMyMFA(c *gin.Context) {
 	// 开启即排除旧会话(防绕过 MFA 的存量登录继续使用)。
 	if sid, ok := c.Get("admin_session"); ok {
 		if s, ok := sid.(string); ok {
-			_, _ = a.DB.Exec("DELETE FROM admin_sessions WHERE user_id = ? AND id <> ?", u.ID, s)
+			_, _ = a.DB.Exec("DELETE FROM admin_sessions WHERE user_id = ? AND secret_hash <> ?", u.ID, sessionSecretHash(s))
 		}
 	}
 	_ = serverstore.AuditLog(a.DB, u.Username, "admin_mfa_enable", "self")
@@ -528,12 +644,20 @@ func (a *AdminAPI) disableMyMFA(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "MFA 未开启")
 		return
 	}
-	if u.Source != "local" || u.PasswordHash == "" || !util.VerifyPassword(u.PasswordHash, req.Password) {
+	if u.Source != "local" || u.PasswordHash == "" {
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "主密码错误")
+		return
+	}
+	if matched, ok := verifyPasswordGated(u.PasswordHash, req.Password); !ok {
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁,请稍后再试")
+		return
+	} else if !matched {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "主密码错误")
 		return
 	}
 	secret, err := decryptMFASecret(u.TotpSecret)
-	if err != nil || !totpValid(secret, req.Code) {
+	if err != nil || !verifyAndConsumeTOTP(a.DB, u.ID, secret, req.Code) {
+		// 已用过的步也算"动态码错误"(重放防护;审计 2026-09-13 P2-3)。
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "动态码错误")
 		return
 	}
@@ -543,7 +667,7 @@ func (a *AdminAPI) disableMyMFA(c *gin.Context) {
 	}
 	if sid, ok := c.Get("admin_session"); ok {
 		if s, ok := sid.(string); ok {
-			_, _ = a.DB.Exec("DELETE FROM admin_sessions WHERE user_id = ? AND id <> ?", u.ID, s)
+			_, _ = a.DB.Exec("DELETE FROM admin_sessions WHERE user_id = ? AND secret_hash <> ?", u.ID, sessionSecretHash(s))
 		}
 	}
 	_ = serverstore.AuditLog(a.DB, u.Username, "admin_mfa_disable", "self")
@@ -1247,6 +1371,22 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 			return
 		}
 	}
+	// P1-4/P2-7(审计 2026-09-13):issuer 与 LDAP 地址在**写库前**校验。
+	// 旧实现 issuer 只做 TrimSpace,保存即触发 discovery(SSRF 面);
+	// 且明文 ldap:// 会把 bind 密码明文送出去。
+	for _, kv := range [][2]string{{"oidc", req.OIDC.Issuer}, {"openid", req.OpenID.Issuer}} {
+		if strings.TrimSpace(kv[1]) == "" {
+			continue // 空 = 不配置/停用
+		}
+		if err := validateIssuerURL(kv[1]); err != nil {
+			writeError(c, http.StatusBadRequest, "VALIDATION", kv[0]+".issuer "+err.Error())
+			return
+		}
+	}
+	if err := validateLDAPServerURL(req.LDAP.ServerURL); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "ldap.server_url "+err.Error())
+		return
+	}
 	// 凭据先加密(纯计算,失败时尚未动 DB)。
 	ldapSecret, oidcSecret, openIDSecret := "", "", ""
 	if req.LDAP.BindPassword != MaskSecret {
@@ -1725,23 +1865,16 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 			break
 		}
 		issuer := strings.TrimRight(req.OIDC.Issuer, "/")
-		// §1.2 SSRF 防护(CodeQL 认可的 regexp barrier guard):
-		// issuer 整体与白名单匹配: 仅 https://<host>/ 或 http://localhost/ 形态,
-		// host 段仅允许字母数字./-: 的 URL 字符(不包含 @, 防 userinfo 注入)。
-		if !issuerURLRe.MatchString(issuer) {
+		// §1.2 SSRF 防护:与"保存"共用同一校验器(单一真源,P1-4)。
+		if verr := validateIssuerURL(issuer); verr != nil {
 			results["ok"] = false
-			results["message"] = "Issuer 必须是合法 https URL(或 http://localhost)"
+			results["message"] = "Issuer " + verr.Error()
 			break
 		}
 		iu, err := url.Parse(issuer)
 		if err != nil || iu.Hostname() == "" {
 			results["ok"] = false
 			results["message"] = "Issuer 格式错误"
-			break
-		}
-		if iu.Scheme == "http" && iu.Hostname() != "localhost" && iu.Hostname() != "127.0.0.1" {
-			results["ok"] = false
-			results["message"] = "Issuer http 仅允许 localhost 回环"
 			break
 		}
 		// 审计 2026-09-12(SSRF 纵深防御):issuerURLRe 只约束 scheme/host 字符集,

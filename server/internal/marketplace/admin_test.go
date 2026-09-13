@@ -23,6 +23,14 @@ import (
 
 func marketAdminSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 	t.Helper()
+	r, db, hdr, _ := marketAdminSetupWithCache(t)
+	return r, db, hdr
+}
+
+// marketAdminSetupWithCache 与 marketAdminSetup 相同,但把磁盘缓存目录交给
+// 调用方——磁盘回退路径的越界用例需要在 cacheDir 之外布置诱饵文件(P3-4)。
+func marketAdminSetupWithCache(t *testing.T) (http.Handler, *sql.DB, map[string]string, string) {
+	t.Helper()
 	// 登录限流器(10/5min/ip+user)是惰性单例:多个测试各自 login 同一账号
 	// 会触发 429。测试环境按 ratelimit.go 约定放宽(首次 login 前设置生效,
 	// 单例在整个测试二进制生命周期内保持该配置)。
@@ -41,7 +49,8 @@ func marketAdminSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	serverauth.RegisterAdminRoutes(r, db)
-	RegisterAdminRoutes(r, db, t.TempDir())
+	cacheDir := t.TempDir()
+	RegisterAdminRoutes(r, db, cacheDir)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/server/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
@@ -57,7 +66,7 @@ func marketAdminSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 		}
 	}
 	hdr := map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
-	return r, db, hdr
+	return r, db, hdr, cacheDir
 }
 
 func mreq(t *testing.T, r http.Handler, method, path, body string, hdr map[string]string) (*httptest.ResponseRecorder, map[string]any) {

@@ -176,11 +176,11 @@ func uploadAgentArchiveAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "发布失败")
 		return
 	}
-	// 包内展示名回写 App(技能同语义)。
-	_ = serverstore.UpsertApp(db, &serverstore.App{
-		Kind: serverstore.AppKindAgent, AppID: name, Title: man.Title,
-		Owner: man.Author, Channel: serverstore.AppChannelMarket,
-	})
+	// 包内展示名回写 App(技能同语义)。只写展示名:owner 只认登录态占名
+	// (appstore.Publish 按发布账号写),包内 author 是**不可信输入**——
+	// P2-6(审计 2026-09-13):此前这里用 author 回写 owner,把官方 App
+	// 刻意保留的空归属(蓝标语义)改写成个人,非官方 App 的描述也会被清空。
+	_ = serverstore.SetAppTitle(db, serverstore.AppKindAgent, name, man.Title)
 	_ = serverstore.AuditLog(db, adminUsername(c), "agent_update",
 		fmtAgentUploadAudit(name, res.Version, man.Title, checksum))
 	c.JSON(http.StatusOK, gin.H{"ok": true, "version": res.Version, "checksum": checksum})
