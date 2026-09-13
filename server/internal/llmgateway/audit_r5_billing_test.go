@@ -269,7 +269,7 @@ func TestR5ZeroPrimaryTokenFallsBackToAlternateFieldName(t *testing.T) {
 			}
 			wantPrompt := c.wantPrompt
 			if wantPrompt < 0 { // 两套都为 0 ⇒ 请求体兜底
-				wantPrompt, _ = estimatePromptFallback(0, int64(len(reqBody)))
+				wantPrompt, _ = estimatePromptFallback(0, false, []byte(reqBody), 0)
 			}
 			t.Logf("%s → prompt=%d completion=%d cost=%.6f estimated=%v",
 				c.name, rows[0].Prompt, rows[0].Completion, rows[0].Cost, rows[0].Estimated)

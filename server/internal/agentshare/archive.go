@@ -40,7 +40,7 @@ var presetLimits = archiveutil.Limits{
 	MaxArchiveBytes:  MaxArchiveBytes,
 	MaxUnpackedBytes: MaxUnpackedBytes,
 	MaxEntries:       MaxArchiveEntries,
-	RequiredFile:     "agent.cordis.yml",
+	RequiredFile:     CompositionFile,
 }
 
 // ValidatePresetArchive lists an archive without extracting it, refusing
@@ -57,7 +57,9 @@ func ValidatePresetArchive(data []byte) (string, error) {
 	case errors.Is(err, archiveutil.ErrTooMany):
 		return "", ErrEntryLimit
 	case errors.Is(err, archiveutil.ErrDuplicateEntry):
-		return "", ErrDuplicateEntry
+		// F2-N7:把「被判为同一个文件」的两个条目名留在错误链里,HTTP 层
+		// 回显给上传者(installerKey 的折叠是宁严勿宽,用户需要知道改哪个名)。
+		return "", errors.Join(ErrDuplicateEntry, err)
 	case errors.Is(err, archiveutil.ErrInvalid):
 		return "", ErrArchiveTooLarge
 	default:

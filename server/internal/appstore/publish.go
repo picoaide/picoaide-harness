@@ -7,11 +7,13 @@
 package appstore
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/skillmanifest"
@@ -26,6 +28,20 @@ const (
 	CodeOfficialLocked       = "OFFICIAL_LOCKED"
 	CodeNameTaken            = "NAME_TAKEN"
 	CodePendingLimit         = "PENDING_LIMIT"
+	// CodePublishBusy:同名发布排队超时(抢锁预算用尽),请调用方重试。
+	CodePublishBusy = "PUBLISH_BUSY"
+)
+
+// 发布串行化的抢锁参数(F2-N2):总预算 + 退避间隔。等待者不占连接,
+// 因此退避间隔只影响锁释放后的接续延迟,不影响连接池。
+const (
+	publishLockWait = 10 * time.Second
+	publishLockPoll = 20 * time.Millisecond
+	// publishTxBudget 是「抢锁 + 落库」整个事务的墙钟上界(含大归档的
+	// INSERT)。它比抢锁预算宽得多:抢锁超时应回 503 让调用方重试,而落库
+	// 慢只说明这次写确实要那么久 —— 两者不能共用一个预算,否则一个大归档
+	// 会被误判成「同名排队超时」。
+	publishTxBudget = 60 * time.Second
 )
 
 // Error 是发布失败的结构化结果:HTTP 状态 + 稳定错误码 + 面向用户的中文说明。
@@ -116,7 +132,37 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 			req.DeclaredVersion, req.Manifest.Version)
 	}
 
+	// agentshare-4 / marketplace-4:把同一 (kind, app_id) 的发布串行化。
+	//
+	// 下面这一整段是「读归属/渠道/历史版本 → 写」的 check-then-act,跨多次
+	// DB 往返;两个员工同时首次发布同一个新名字时,双方都能通过全部检查
+	// (复核实测 18/20,本仓并发用例 20/20 双 201),后写者还会用无守卫
+	// 的 `ON CONFLICT DO UPDATE SET title/description = excluded.*` 覆写赢家
+	// 的展示名(owner 有 COALESCE 守卫,title/description 没有)。
+	//
+	// 按名字哈希取的事务级咨询锁把同名发布串行化:第二个请求等第一个提交后
+	// 再读,于是看到赢家的 owner/版本并返回 409 NAME_TAKEN —— 落败的那次发布
+	// 整体不落库,不存在「并入对手 App」或覆写元数据的窗口。
+	//
+	// N-2(2026-09-13 三轮,生产级死锁的真正修复):锁与落库**同一条连接、
+	// 同一个事务**。
+	//   - R2 的会话级锁虽然让「等锁者不占连接」,但**持锁者需要两条连接**
+	//     (一条 hold 锁直到 Publish 结束,一条给落库事务)。池里同时坐着 N 个
+	//     **不同名**的持锁者时池被占满且无人推进 —— 而不同名并发上传在生产里
+	//     是正常负载(多人/多任务同时上传),不需要攻击者刻意制造同名竞争。
+	//     实测 pool=2 两个不同名 → 3/3 轮死锁;pool=90 conc=100 → 20s 只完成
+	//     10/100。
+	//   - 现在用 `pg_advisory_xact_lock` 变体:锁属于**事务**,提交/回滚即释放
+	//     (连 unlock 都不需要,也不可能把锁泄漏给池里的下一位使用者),而
+	//     事务的每条读/写都在同一条连接上 ⇒ 连接需求恒为 1。
+	//   - 等待者仍然**不占连接**:抢不到锁就立刻回滚(连接还回池)再退避重试,
+	//     与 R2 的改进一致。抢锁总预算 10s,超时明确 503 而不是永久挂起;
+	//     全部 DB 调用都带 ctx 超时(此前是 context.Background(),请求断开
+	//     也不会取消)。
 	// 锁定:被锁定的名字只能由管理员发布,员工命中即明确拒绝并回显理由。
+	// 这一读必须在**取发布锁之前**完成:持锁期间连接需求必须恒为 1(任何
+	// 走 db 池的读都要第二条连接,pool=1 时直接死锁 —— 见 beginPublishTx)。
+	// 它与发布串行化无关:管理员加锁与发布之间本来也没有互斥。
 	if !req.AdminPublish {
 		if lock, err := serverstore.GetCapabilityLock(db, req.Kind, req.AppID); err == nil {
 			msg := "该能力已被管理员锁定,仅管理员可发布"
@@ -129,7 +175,23 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 		}
 	}
 
-	existingApp, appErr := serverstore.GetApp(db, req.Kind, req.AppID)
+	// 说明:整个事务(含落库)受 publishTxBudget 约束,而「抢锁」另受
+	// publishLockWait 约束 —— 两者分开,见 beginPublishTx。
+	ctx, cancel := context.WithTimeout(context.Background(), publishTxBudget)
+	defer cancel()
+	tx, lerr := beginPublishTx(ctx, publishLockWait, db, req.Kind, req.AppID)
+	if lerr != nil {
+		// 抢锁超时不是「查询失败」:同名发布排队过久,应让调用方稍后重试,
+		// 而不是回一个语义不明、也无法自助恢复的 500。
+		if errors.Is(lerr, context.DeadlineExceeded) || errors.Is(lerr, context.Canceled) {
+			return nil, newErr(http.StatusServiceUnavailable, CodePublishBusy,
+				"同名内容正在发布,排队超时,请稍后重试")
+		}
+		return nil, newErr(http.StatusInternalServerError, "INTERNAL", "查询失败")
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	existingApp, appErr := serverstore.GetAppOn(tx, req.Kind, req.AppID)
 	if appErr != nil && !errors.Is(appErr, serverstore.ErrNotFound) {
 		return nil, newErr(http.StatusInternalServerError, "INTERNAL", "查询失败")
 	}
@@ -152,7 +214,7 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 			"名称已被占用，无法上传：请更换名称或联系管理员")
 	}
 
-	history, err := serverstore.ListReleases(db, req.Kind, req.AppID)
+	history, err := serverstore.ListReleasesOn(tx, req.Kind, req.AppID)
 	if err != nil {
 		return nil, newErr(http.StatusInternalServerError, "INTERNAL", "查询失败")
 	}
@@ -183,7 +245,7 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 
 	// 待审配额(仅员工发布)。
 	if !req.AdminPublish && req.PendingCap > 0 {
-		n, err := serverstore.PendingReleaseCount(db, req.Publisher)
+		n, err := serverstore.PendingReleaseCountOn(tx, req.Publisher)
 		if err != nil {
 			return nil, newErr(http.StatusInternalServerError, "INTERNAL", "查询失败")
 		}
@@ -215,7 +277,7 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 	}
 	// P2-3:占名 + 建版本在同一事务内完成,CreateRelease 失败不会留下
 	// 「占名无版本」的悬挂 App(名称被永久占用却无任何版本)。
-	if _, err := serverstore.UpsertAppAndCreateRelease(db, &serverstore.App{
+	if _, err := serverstore.UpsertAppAndCreateReleaseOn(tx, &serverstore.App{
 		Kind: req.Kind, AppID: req.AppID, Title: req.Manifest.Title,
 		Description: req.Manifest.Description, Owner: owner, Channel: req.Channel, Enabled: enabled,
 	}, &serverstore.Release{
@@ -233,7 +295,67 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 		}
 		return nil, newErr(http.StatusInternalServerError, "INTERNAL", "保存失败")
 	}
+	// 提交即释放事务级咨询锁(N-2);提交失败时 defer 的 Rollback 兜底。
+	if err := tx.Commit(); err != nil {
+		return nil, newErr(http.StatusInternalServerError, "INTERNAL", "保存失败")
+	}
 	return &Result{Version: req.Manifest.Version, Status: status, Checksum: req.Checksum}, nil
+}
+
+// beginPublishTx 取「发布串行化锁 + 落库」共用的那个事务(N-2)。
+//
+// 语义:成功返回的事务**已持有**该 (kind, app_id) 的事务级咨询锁,调用方在
+// 同一事务里读归属/历史版本、写 app + release,提交时锁自动释放;失败返回
+// nil + 错误(调用方据 context.DeadlineExceeded 回 503 PUBLISH_BUSY)。
+//
+// 为什么是事务级而不是会话级(这是 R2 → R3 的关键差别):
+//   - 会话级锁必须由持锁连接显式 unlock,持锁者因此需要**两条**连接(锁一条、
+//     落库一条):池里 N 个不同名的持锁者就把池占满且无人推进(实测 pool=2
+//     两个不同名 → 3/3 轮死锁;pool=90 conc=100 → 20s 只完成 10/100)。
+//   - 事务级锁连接需求恒为 1,提交/回滚即释放,也**不可能**把锁泄漏回池。
+//
+// 为什么等待者要「回滚 + 退避重试」而不是阻塞在锁上:阻塞等待会占着连接
+// (同名风暴时池会被等待者坐满),而回滚后连接立刻还回池 —— 等待者零占用。
+func beginPublishTx(ctx context.Context, lockBudget time.Duration, db *sql.DB, kind, appID string) (*sql.Tx, error) {
+	key := publishLockKey(kind, appID)
+	lockDeadline := time.Now().Add(lockBudget)
+	for {
+		// ctx 有比 lockBudget 更宽的预算(publishTxBudget):它同时约束
+		// 「等池里放出连接」与「拿到事务后的一整段读写」。
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		var locked bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))`, key).Scan(&locked); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		if locked {
+			return tx, nil
+		}
+		// 关键:等待期间不占连接(否则同名风暴会把池坐满)。
+		_ = tx.Rollback()
+		if !time.Now().Before(lockDeadline) {
+			return nil, context.DeadlineExceeded
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(publishLockPoll):
+		}
+	}
+}
+
+// publishLockKey 是咨询锁的键。
+//
+// F2-N9:此前锁键是 `pg_advisory_xact_lock(hashtext($1), hashtext($2))` ——
+// 两段 32 位 hashtext 碰撞是真实存在的(实测 "app-1481649" 与 "app-16327"
+// 同键),无关的发布会被互相串行(叠加 F2-N2 时还会拉高死锁概率)。整键交给
+// 64 位的 hashtextextended,碰撞概率降到可忽略。
+func publishLockKey(kind, appID string) string {
+	return "picoaide:publish:" + kind + "/" + appID
 }
 
 func channelLabel(channel string) string {

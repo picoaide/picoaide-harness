@@ -25,10 +25,11 @@
  *   2. installNotifyWebApi —— 宿主端 API（未读数/列表/已读/全部已读/删除/
  *      全文/附件下载），web 渠道关闭时**不挂载**（前端探测 404 即不注入铃铛）。
  */
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { translate, getLocale, MISC2_DICT } from './i18n.js'
 import { applyRequestGuard, readBody as sharedReadBody } from './http-guard.js'
+import { writeFileAtomicSafeAt } from './sync/filesets.js'
 
 /** Translate through MISC2_DICT in the active host locale. */
 const nt2 = (key, params) => translate(MISC2_DICT, key, params, getLocale())
@@ -89,12 +90,18 @@ export class NotificationStore {
     }
   }
 
-  /** 原子落盘（写临时文件后 rename，避免半写损坏 JSON）。 */
+  /**
+   * 原子落盘（FIX-27：自锚定安全原子写——临时落点同样断言 + O_EXCL，
+   * 预置的同名符号链接一律拒收，避免半写损坏 JSON，也避免写穿目录外）。
+   */
   #save() {
-    mkdirSync(this.dir, { recursive: true })
-    const tmp = `${this.file}.tmp.${process.pid}`
-    writeFileSync(tmp, JSON.stringify({ items: this.items }, null, 2) + '\n')
-    renameSync(tmp, this.file)
+    // FIX-27（2026-09-13）：改走**自锚定安全原子写**（tmp 落点同样断言 +
+    // O_EXCL 按 fd 写入 + rename 前后复检）——预置同名符号链接即写穿到目录外，
+    // 曾被静默当成"写成功"。
+    // NF-3：落点被拒（悬空链接/越界/预置同名条目）时**同步抛**，由 add() 转成
+    // `{ok:false,message}`；绝不让它在 async add() 里变成未处理的 Promise 拒绝
+    // （通知链路的调用方只看 added.ok，穿透会成为无人处理的 rejection）。
+    writeFileAtomicSafeAt(this.file, JSON.stringify({ items: this.items }, null, 2) + '\n')
   }
 
   /**
@@ -118,8 +125,7 @@ export class NotificationStore {
     let bodyFile = null
     if (content.length > INLINE_MAX) {
       bodyFile = join(this.dir, `${newNotificationId()}.txt`)
-      mkdirSync(this.dir, { recursive: true })
-      writeFileSync(bodyFile, content, 'utf8')
+      writeFileAtomicSafeAt(bodyFile, content)
       stored = content.slice(0, 200)
     }
     // 附件落盘（图片专用；失败清理已写文件，原子不留孤儿）。
@@ -138,7 +144,14 @@ export class NotificationStore {
     const id = newNotificationId()
     this.items.unshift({ id, sender, semantic, subject, content: stored, bodyFile, attachments, createdAt: Date.now(), read: false })
     this.#prune()
-    this.#save()
+    try {
+      this.#save()
+    } catch (error) {
+      // NF-3：落盘被拒 = 如实失败（通知未落盘），且不把 rejection 漏给调用方。
+      this.items = this.items.filter((item) => item.id !== id)
+      if (bodyFile) { try { rmSync(bodyFile, { force: true }) } catch { /* 忽略 */ } }
+      return { ok: false, message: String(error?.message ?? error) }
+    }
     return { ok: true, id }
   }
 

@@ -72,6 +72,10 @@ func preview(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
+		// agentshare-2:审核预览只服务组织共享库。
+		if !requireOrgAgent(c, db, p.Name) {
+			return
+		}
 		// 0041:归档直存 DB;pre-0041 行的磁盘回退(read-only)。
 		var raw []byte
 		dbRaw, aerr := serverstore.GetAgentPresetArchive(db, p.Name, p.Version)
@@ -139,6 +143,10 @@ func presetFileContent(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				return
 			}
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		// agentshare-2:逐文件审核只服务组织共享库。
+		if !requireOrgAgent(c, db, p.Name) {
 			return
 		}
 		// 0041:归档直存 DB;pre-0041 行的磁盘回退(read-only)。
@@ -241,6 +249,14 @@ func listVisible(db *sql.DB) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 			return
 		}
+		// agentshare-2:共享面只列组织渠道。市场渠道智能体由能力中心
+		// (capabilities, source=market)呈现,不能在这里被当成「组织共享」
+		// 内容(来源标注错误 + 市场下架失效)。
+		org, oerr := orgAgentNames(db)
+		if oerr != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
 		var list []serverstore.AgentPreset
 		if u.IsAdmin {
 			// 管理员恒全量(不落授权表);仅已审核通过的进入员工可见清单位。
@@ -258,7 +274,8 @@ func listVisible(db *sql.DB) gin.HandlerFunc {
 				return
 			}
 			for _, p := range all {
-				if p.Status == serverstore.AgentPresetApproved && enabled[p.Name] {
+				// 两个闸门都要:渠道(只列组织共享面)+ 上架(apps.enabled)。
+				if p.Status == serverstore.AgentPresetApproved && org[p.Name] && enabled[p.Name] {
 					list = append(list, p)
 				}
 			}
@@ -273,10 +290,15 @@ func listVisible(db *sql.DB) gin.HandlerFunc {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
 			}
-			list, err = serverstore.ListVisibleAgentPresets(db, u.Username, granted)
+			visible, err := serverstore.ListVisibleAgentPresets(db, u.Username, granted)
 			if err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
+			}
+			for _, p := range visible {
+				if org[p.Name] {
+					list = append(list, p)
+				}
 			}
 		}
 		out := make([]gin.H, 0, len(list))
@@ -344,9 +366,16 @@ func upload(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		// 2026-09-01:智能体对齐技能标准——展示元数据一律来自包内 preset.yml
 		// (「包内即真相」),此前靠请求体手填,导致卡片只能显示目录名、版本
 		// 永远是兜底的 1.0.0。
-		entries, _, listErr := ListArchiveContents(raw)
+		entries, composition, listErr := ListArchiveContents(raw)
 		if listErr != nil {
 			serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", archiveErrorMessage(listErr))
+			return
+		}
+		// archupd-1②:编排必须可读(非空且在上限内)且可解析才能进入审核队列。
+		// 此前 composition 被 `_` 丢弃,任何真实超过预览上限的编排都能发布成功,
+		// 而管理员审核页只能看到空串——审核这一门形同虚设。
+		if cerr := ValidateAgentComposition(composition); cerr != nil {
+			serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", cerr.Error())
 			return
 		}
 		presetYML, _, found, _, _, xerr := archiveutil.ExtractFileContent(raw, skillmanifest.PresetMetaFile, maxFilePreviewBytes)
@@ -404,8 +433,19 @@ func listAll(db *sql.DB) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
+		// agentshare-2:审批队列是共享库的队列 —— 市场渠道行由市场端点审核,
+		// 混进来会让 webadmin 用 agentshare 的 base_path 渲染删除/审核按钮,
+		// 一次点击即可销毁市场内容。
+		org, oerr := orgAgentNames(db)
+		if oerr != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
 		out := make([]gin.H, 0, len(list))
 		for _, p := range list {
+			if !org[p.Name] {
+				continue
+			}
 			out = append(out, presetJSON(p))
 		}
 		c.JSON(http.StatusOK, gin.H{"presets": out})
@@ -435,11 +475,21 @@ func decide(db *sql.DB, status serverstore.AgentPresetStatus, auditAction string
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
+		if !requireOrgAgent(c, db, p.Name) {
+			return
+		}
 		if !decideBody(c, status) {
 			return
 		}
-		if err := serverstore.SetAgentPresetStatusByVersion(db, p.Name, p.Version, status, reasonOf(c)); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+		// F2-N3 / N-4:拒绝已经释放了该版本的归档字节,再把它置成 approved
+		// 只会得到「员工看得见、下载 500」的坏行。这里的预检只为了让**顺序**
+		// 复现(误拒后点通过)拿到友好的 409 文案;真正的不变量由 DAO 的
+		// 条件 UPDATE 保证(见 approveNeedsArchive 与 SetReleaseStatus)。
+		if !approveNeedsArchive(c, db, status, p.Name, p.Version) {
+			return
+		}
+		if err := serverstore.SetReleaseStatusForReview(db, serverstore.AppKindAgent, p.Name, p.Version, string(status), reasonOf(c)); err != nil {
+			writeDecideError(c, err)
 			return
 		}
 		_ = serverstore.AuditLog(db, adminUsername(c), auditAction, p.Name+"@"+p.Version)
@@ -465,11 +515,19 @@ func decideVersioned(db *sql.DB, status serverstore.AgentPresetStatus, auditActi
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
+		if !requireOrgAgent(c, db, name) {
+			return
+		}
 		if !decideBody(c, status) {
 			return
 		}
-		if err := serverstore.SetAgentPresetStatusByVersion(db, name, version, status, reasonOf(c)); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+		// F2-N3 / N-4:与 decide 同守卫 —— 没有归档字节的版本不能置为 approved
+		// (预检给友好文案,DAO 的条件 UPDATE 才是并发下的真正防线)。
+		if !approveNeedsArchive(c, db, status, name, version) {
+			return
+		}
+		if err := serverstore.SetReleaseStatusForReview(db, serverstore.AppKindAgent, name, version, string(status), reasonOf(c)); err != nil {
+			writeDecideError(c, err)
 			return
 		}
 		_ = serverstore.AuditLog(db, adminUsername(c), auditAction, name+"@"+version)
@@ -514,6 +572,78 @@ func reasonOf(c *gin.Context) string {
 	return ""
 }
 
+// approveNeedsArchive 是「通过审核」不变量的**顺序路径**守卫(F2-N3):
+// 审核通过意味着这个版本要对员工可见、可安装,因此必须有归档字节。拒绝会
+// 在 DAO 里把归档一并释放(agentshare-5 的存储上界),而 webadmin 对
+// rejected 行同样渲染「通过」按钮 —— 没有这道守卫时,误拒后改判通过会得到
+// status=approved + archive_bytes=0 的坏行:员工清单可见(授权仍在)、
+// 下载 500「归档数据缺失」、管理员预览 404。
+//
+// N-4(2026-09-13):这个「先读归档长度、再写状态」的判定**不能**是唯一防线
+// ——它是 check-then-act,两个管理员并发 approve/reject 时(实测 12 轮里
+// 6~7 轮)会交错出坏行。这里只负责给出友好的 409 文案(顺序误拒后点通过,
+// 用户看到的仍是 ARCHIVE_CLEARED 而不是 500);**并发下的真正防线是
+// serverstore.SetReleaseStatus 的条件 UPDATE**(approved 与 archive 非空
+// 在同一条语句里判定),写入失败时调用方经 writeDecideError 回同一个 409。
+//
+// 注意必须按版本取一份**带归档**的行来判断:审核清单走的 ListReleases 用
+// releaseListColumns(不含 archive blob,清单查询不加载全部归档),拿它判断
+// 会把刚上传的 pending 行误判成「没有归档」而挡住正常审核。
+//
+// 返回 false 表示已写出错误响应,调用方必须直接返回。
+func approveNeedsArchive(c *gin.Context, db *sql.DB, status serverstore.AgentPresetStatus, name, version string) bool {
+	if status != serverstore.AgentPresetApproved {
+		return true
+	}
+	row, err := serverstore.GetAgentPresetByVersion(db, name, version)
+	if err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
+			return false
+		}
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return false
+	}
+	if len(row.Archive) > 0 {
+		return true
+	}
+	serverauth.WriteError(c, http.StatusConflict, "ARCHIVE_CLEARED",
+		"该版本归档已在拒绝时清理,无法再通过审核(拒绝即释放存储):请让作者上传新版本")
+	return false
+}
+
+// writeDecideError 把审核写入的错误映射成稳定的 HTTP 语义。N-4 的关键一条:
+// 两个管理员并发 approve/reject 时,后来者可能在 DAO 的条件 UPDATE 上发现
+// 「归档已经在上一个事务里被释放」—— 那不是服务器错误,而是「该版本已不可
+// 通过」,必须回 409 ARCHIVE_CLEARED(与预检同码同文案),而不是 500。
+func writeDecideError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, serverstore.ErrReleaseArchiveCleared):
+		serverauth.WriteError(c, http.StatusConflict, "ARCHIVE_CLEARED",
+			"该版本归档已在拒绝时清理,无法再通过审核(拒绝即释放存储):请让作者上传新版本")
+	case errors.Is(err, serverstore.ErrNotFound):
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
+	default:
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+	}
+}
+
+// softDeleteAllPresetVersions 在**一条语句**里软删该 name 的全部未软删
+// 版本,返回被删行数。name 级删除的契约就是「删全版本」(统一存储前是
+// DELETE ... WHERE name=?),而 DAO 只有按版本软删:逐行调用一旦中途失败
+// 就会留下「半删除」僵尸 approved 行(`DeleteAgentPreset` 只删最高 approved
+// 一行),员工自视图与下载各自看到不同结论(agentshare-1)。单条 UPDATE
+// 天然原子:全删或全不删。
+func softDeleteAllPresetVersions(db *sql.DB, name string) (int64, error) {
+	res, err := db.Exec(`UPDATE app_releases SET deleted_at = `+serverstore.NowExpr()+`, archive = NULL,
+		updated_at = `+serverstore.NowExpr()+`
+		WHERE kind = ? AND app_id = ? AND deleted_at IS NULL`, serverstore.AppKindAgent, name)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // remove deletes ALL rows of a name plus every archive file of that name
 // (审计 2026-08-25 D-1:旧实现只删 1.0.0,遗留其它版本孤儿归档)。
 func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
@@ -521,6 +651,10 @@ func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		name := c.Param("name")
 		if !presetIDRe.MatchString(name) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "预设名不合法")
+			return
+		}
+		// agentshare-2:共享面的删除只作用于组织共享库,不能销毁市场内容。
+		if !requireOrgAgent(c, db, name) {
 			return
 		}
 		rows, err := serverstore.ListAgentPresets(db, "")
@@ -538,18 +672,18 @@ func remove(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
 			return
 		}
-		if err := serverstore.DeleteAgentPreset(db, name); err != nil {
-			if errors.Is(err, serverstore.ErrNotFound) {
-				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
-				return
-			}
+		deleted, derr := softDeleteAllPresetVersions(db, name)
+		if derr != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 			return
 		}
-		// Best-effort archive cleanup: every version (DB 行已删,归档列随之;
-		// 磁盘回退缓存仅清理旧文件)。
+		if deleted == 0 {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
+			return
+		}
+		// Best-effort archive cleanup:DB 归档列已由软删清空,这里只清磁盘
+		// 回退缓存(pre-0041 行遗留的 tar.gz 文件)。
 		for _, v := range versions {
-			_ = serverstore.ClearAgentPresetArchive(db, name, v)
 			_ = os.Remove(filepath.Join(cacheDir, safeName(name, v)))
 		}
 		// 硬删全部行后清理该 name 的全部授权(资源级联;旧授权不复活重建资源)。
@@ -565,6 +699,9 @@ func removeVersioned(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		name, version := c.Param("name"), c.Param("version")
 		if !presetIDRe.MatchString(name) || !versionRe.MatchString(version) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "参数不合法")
+			return
+		}
+		if !requireOrgAgent(c, db, name) {
 			return
 		}
 		if err := serverstore.DeleteAgentPresetByVersion(db, name, version); err != nil {
@@ -601,6 +738,11 @@ func grantSubject(req grantReq) (string, serverstore.GranteeType, bool) {
 // listPresetGrants returns the grants on one shared agent preset (by name).
 func listPresetGrants(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// agentshare-2:授权读也只服务组织共享库(市场授权在 app_grants 里
+		// 与共享库同名同 kind,不过滤渠道就会读出市场 ACL)。
+		if !requireOrgAgent(c, db, c.Param("name")) {
+			return
+		}
 		grants, err := serverstore.ListSharedResourceGrants(db, serverstore.SharedPresetGrantTable, c.Param("name"))
 		if err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
@@ -617,6 +759,9 @@ func listPresetGrants(db *sql.DB) gin.HandlerFunc {
 func replacePresetGrants(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
+		if !requireOrgAgent(c, db, name) {
+			return
+		}
 		var req struct {
 			Groups []string `json:"groups"`
 		}
@@ -643,6 +788,9 @@ func replacePresetGrants(db *sql.DB) gin.HandlerFunc {
 func setPresetQuality(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name, version := c.Param("name"), c.Param("version")
+		if !requireOrgAgent(c, db, name) {
+			return
+		}
 		var req struct {
 			Quality string `json:"quality"`
 		}
@@ -675,6 +823,9 @@ func setPresetQuality(db *sql.DB) gin.HandlerFunc {
 func setPresetGrant(db *sql.DB, grant bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
+		if !requireOrgAgent(c, db, name) {
+			return
+		}
 		var req grantReq
 		if err := c.ShouldBindJSON(&req); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
@@ -782,9 +933,12 @@ func serveArchive(c *gin.Context, db *sql.DB, cacheDir string, p *serverstore.Ag
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
 		return
 	}
+	// agentshare-2:员工下载是市场智能体唯一的安装通路(CapabilityCenterPanel
+	// 的 installEndpoint),因此共享面的下载端点**两种渠道都服务**(清单/审核
+	// 等其它共享面端点则只服务 org,见 orgAgentNames)。
 	// P2-1(审计 2026-09-13):apps.enabled=0(下架)即不可下载——此前只查
 	// 审核状态与授权,管理员下架后员工仍能按名字取下归档。单个 App 一次
-	// 查询,不引入逐行 N+1。
+	// 查询,不引入逐行 N+1。两个闸门合起来即「市场下架必须生效」。
 	if !admin {
 		enabled, aerr := serverstore.AppEnabled(db, serverstore.AppKindAgent, p.Name)
 		if aerr != nil {
@@ -874,7 +1028,16 @@ func archiveErrorMessage(err error) string {
 	case errors.Is(err, ErrEntryLimit):
 		return "归档条目过多"
 	case errors.Is(err, ErrDuplicateEntry):
+		// F2-N7:列出被判为同一个文件的两个名字 —— installerKey 的折叠
+		// (大小写/尾随点空格/NTFS 危险折叠)宁严勿宽,不点名的话用户无从改名。
+		if first, second, ok := archiveutil.DuplicateEntryNames(err); ok {
+			return fmt.Sprintf("归档含重复条目:%s 与 %s 在安装端是同一个文件(大小写/尾随点空格折叠),请改名后重新打包", first, second)
+		}
 		return "归档含重复条目(同一文件出现多次,大小写不敏感)"
+	case errors.Is(err, archiveutil.ErrCorrupt):
+		return "归档内容损坏(条目解压或 CRC 校验失败)"
+	case errors.Is(err, archiveutil.ErrPathConflict):
+		return "归档中同一路径既是文件又是目录"
 	default:
 		return "归档校验失败"
 	}

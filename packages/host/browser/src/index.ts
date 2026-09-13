@@ -50,6 +50,55 @@ declare module '@deepseek-ai/cordis' {
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'pico-browser'
 
+/**
+ * 上游 `connection` 服务（BrowserAuth 持有性检查）在本包内需要的**最小结构**。
+ *
+ * 与 `packages/host/enterprise/src/auth-gate.ts` 的 `ConnectionTrustFence` 同形：
+ * 刻意不 `import type {} from '@deepseek-ai/dsh-client-connection'`（那会给本包
+ * 增加一条依赖边），只要运行时存在性判断 + 一个方法。
+ */
+interface ConnectionTrustFence {
+  /**
+   * Connection 的 Host/Origin 围栏 + BrowserAuth cookie 校验。
+   * @param request - 只用到 headers(Host / Cookie)。
+   * @returns 401/403 表示拒绝；undefined 表示通过。
+   */
+  requestRejection(request: { headers: IncomingMessage['headers'] }): 401 | 403 | undefined
+}
+
+/** BrowserAuth cookie 前缀（上游 `client-connection/browser-auth.ts`）。 */
+const BROWSER_AUTH_COOKIE_PREFIX = 'dsh-auth-'
+
+/**
+ * `require('electron')` 在本模块内需要的**最小结构**（只用于 cookie 交接）。
+ *
+ * 同 `electron-adapter.ts` 的理由：`electron` 是 peerDependency、只在
+ * Electron 宿主里可用，类型面刻意收窄到用到的两个 session 入口。
+ */
+interface ElectronCookieLike {
+  name: string
+  value: string
+  path?: string
+  httpOnly?: boolean
+  secure?: boolean
+  sameSite?: 'unspecified' | 'no_restriction' | 'lax' | 'strict'
+  expirationDate?: number
+}
+
+interface ElectronSessionLike {
+  cookies: {
+    get(filter: { url: string }): Promise<ElectronCookieLike[]>
+    set(details: Record<string, unknown>): Promise<void>
+  }
+}
+
+interface ElectronLike {
+  session?: {
+    defaultSession?: ElectronSessionLike
+    fromPartition?(partition: string): ElectronSessionLike
+  }
+}
+
 /** Services required by the embedded browser. */
 export const inject = ['webServer', 'tools', 'systemPrompt', 'attachments']
 
@@ -228,7 +277,86 @@ export function apply(ctx: Context, config: Config = {}): void {
     browserPartitionFor(currentUser()),
     { pool, store, currentUsername: currentUser },
   )
-  runtime.setShellOrigin(`http://127.0.0.1:${String(ctx.webServer.port)}`)
+  const shellOrigin = `http://127.0.0.1:${String(ctx.webServer.port)}`
+  runtime.setShellOrigin(shellOrigin)
+
+  /**
+   * R7-RV-3 证明交接：本插件自己服务的两个页面（`/browser-shell` 与
+   * `/browser-overlay`）里的写操作也必须带上 BrowserAuth cookie，否则接管
+   * 按钮、隐藏窗口、书签、下载打开这些正常按钮会在 `requireWriteProof` 下
+   * 变成 403（那是"修好漏洞、弄坏产品"）。
+   *
+   * shell 窗口与主应用窗口同用默认 Electron session，token 换票后天然持有
+   * cookie；**overlay（mask view）跑在 `persist:agent-browser-<user>` 分区里，
+   * 是另一个 cookie jar**。这里把应用 session 里回环源的 `dsh-auth-*` cookie
+   * 镜像进浏览器分区：两个页面都由本插件在同一回环源上服务，cookie 保持
+   * HttpOnly + SameSite=Strict（浏览器分区里的任意站点读不到它，跨站请求也
+   * 带不出去），本机其它进程更无法凭空造出 HMAC 签名。
+   *
+   * 开机时序：prewarm 建 overlay 与主窗口 load 是并发的，cookie 可能还没换出来
+   * ——所以交接**反复尝试到成功一次**（首次成功即停表），用户切换分区时重来。
+   * 两次尝试之间的间隔按 1s→2s→…→30s 退避（登录可能晚于开机很久）。
+   * 非 Electron 宿主（headless loader / 单测）里 `require('electron')` 直接抛错，
+   * 交接是 no-op，路由仍由 fence 决定（缺席即 fail-closed 503）。
+   */
+  const mirrorBrowserAuthCookies = async (): Promise<boolean> => {
+    let electron: ElectronLike | undefined
+    try {
+      electron = createRequire(import.meta.url)('electron') as ElectronLike
+    } catch {
+      return false // 非 Electron 宿主：无需交接
+    }
+    const from = electron.session?.defaultSession
+    const to = electron.session?.fromPartition?.(browserPartitionFor(currentUser()))
+    if (from === undefined || to === undefined) return false
+    const cookies = await from.cookies.get({ url: shellOrigin })
+    const auth = cookies.filter((cookie) => cookie.name.startsWith(BROWSER_AUTH_COOKIE_PREFIX))
+    if (auth.length === 0) return false
+    for (const cookie of auth) {
+      await to.cookies.set({
+        url: shellOrigin,
+        name: cookie.name,
+        value: cookie.value,
+        path: cookie.path ?? '/',
+        httpOnly: cookie.httpOnly ?? true,
+        secure: cookie.secure ?? false,
+        ...(cookie.sameSite === undefined ? {} : { sameSite: cookie.sameSite }),
+        ...(cookie.expirationDate === undefined ? {} : { expirationDate: cookie.expirationDate }),
+      })
+    }
+    return true
+  }
+
+  let cookieHandoffTimer: ReturnType<typeof setTimeout> | undefined
+  let cookieHandoffDelayMs = 1000
+  const stopCookieHandoff = (): void => {
+    if (cookieHandoffTimer !== undefined) {
+      clearTimeout(cookieHandoffTimer)
+      cookieHandoffTimer = undefined
+    }
+  }
+  const startCookieHandoff = (): void => {
+    stopCookieHandoff()
+    // 没有 connection 服务 = 本部署根本不要持有性证明（读写都走 guard）：
+    // 交接无从谈起，别开表。
+    const fence = (ctx as unknown as { get?: (name: string) => unknown }).get?.('connection')
+    if (fence === undefined) return
+    cookieHandoffDelayMs = 1000
+    const attempt = (): void => {
+      cookieHandoffTimer = undefined
+      void mirrorBrowserAuthCookies().then((mirrored) => {
+        if (mirrored) return // 首次成功即停表：分区里已经有本 authority 的签名 cookie
+        cookieHandoffDelayMs = Math.min(cookieHandoffDelayMs * 2, 30_000)
+        cookieHandoffTimer = setTimeout(attempt, cookieHandoffDelayMs)
+      }).catch((cause: unknown) => {
+        ctx.logger?.warn?.('pico-browser: browser-auth cookie handoff failed', cause)
+        cookieHandoffDelayMs = Math.min(cookieHandoffDelayMs * 2, 30_000)
+        cookieHandoffTimer = setTimeout(attempt, cookieHandoffDelayMs)
+      })
+    }
+    attempt()
+  }
+
   // Restore the persisted tab ledger; keep it fresh on every tab change (ops/
   // busy events never change the ledger — persisting on them would sync-write
   // the file on every operation).
@@ -262,6 +390,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       runtime.clearOps()
       runtime.setPartition(browserPartitionFor(user))
       switchStoreForUser(user)
+      // R7-RV-3：新用户的分区是另一个 cookie jar —— 交接重来一次。
+      startCookieHandoff()
       await runtime.prewarm()
     })().catch((cause: unknown) => {
       ctx.logger?.error('pico-browser: session change handling failed', cause)
@@ -274,7 +404,57 @@ export function apply(ctx: Context, config: Config = {}): void {
     'pico-browser: tool suite',
   )
 
+  // R7-RV-3：开机即开始把应用 session 的 BrowserAuth cookie 交接进浏览器分区
+  // （overlay 页在 prewarm 时就会加载，早于主窗口换票完成）。
   ctx.effect(() => {
+    startCookieHandoff()
+    return stopCookieHandoff
+  }, 'pico browser: browser-auth cookie handoff')
+
+  ctx.effect(() => {
+    /**
+     * `guard()` 之上再要一份持有性证明（第三轮 R7-RV-3；与 enterprise
+     * `auth-gate.ts` 的 r7c-6 同一口径、同一机制）。
+     *
+     * `loopback.ts:60-64` 自述的边界就是"伪造 Origin 的 curl 也能过"：本机任意
+     * 进程伪造 `Origin`/`Host`/`Sec-Fetch-Site` 就能 `POST /api/pico/browser/eval`
+     * 以用户已登录身份操作任意站点、`clear-data` 抹掉用户浏览器数据。证明 =
+     * 上游 `connection` 服务的 BrowserAuth cookie（`dsh-auth-<authority>`：
+     * HttpOnly + SameSite=Strict + HMAC，只能由本进程服务、经 launch token 换票
+     * 的页面持有），直接复用 `connection.requestRejection()`，不新造机制。
+     *
+     * 口径与 login/enterprise 写面一致：fence 缺席 ⇒ fail-closed 503（退回
+     * `guard()` 等于把"伪造 Origin 即可"重新放进来）；读面（GET）维持 `guard()`。
+     */
+    const proofOfPossession = (req: IncomingMessage, res: ServerResponse): boolean => {
+      const fence = (ctx as unknown as { get?: (name: string) => unknown }).get?.('connection') as ConnectionTrustFence | undefined
+      if (fence === undefined || typeof fence.requestRejection !== 'function') {
+        ctx.logger?.warn?.('pico-browser: connection service unavailable; refusing a local write (fail-closed)')
+        json(res, 503, {
+          error: 'browser session proof unavailable',
+          hint: 'reopen the application window from its launch URL',
+        })
+        return false
+      }
+      let rejection: 401 | 403 | undefined
+      try {
+        rejection = fence.requestRejection({ headers: req.headers })
+      } catch (err) {
+        // 校验器自身抛错 = 无法证明 ⇒ 按拒绝处理（不把异常泄漏成 500）。
+        ctx.logger?.warn?.(`pico-browser: browser proof check failed (${err instanceof Error ? err.message : String(err)})`)
+        rejection = 403
+      }
+      if (rejection === undefined) return true
+      ctx.logger?.warn?.(`pico-browser: refused a local write without browser proof (${String(rejection)})`)
+      json(res, 403, {
+        error: 'browser session proof required',
+        hint: 'reopen the application window from its launch URL',
+      })
+      return false
+    }
+    const requireWriteProof = (req: IncomingMessage, res: ServerResponse): boolean =>
+      req.method === 'GET' || proofOfPossession(req, res)
+
     const guard = (req: IncomingMessage, res: ServerResponse): boolean => {
       if (browserSameOriginMarker(req) && isLoopbackRequest(req)) return true
       json(res, 403, { error: 'forbidden' })
@@ -298,6 +478,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const handleAction = async (actionName: string | null, req: IncomingMessage, res: ServerResponse): Promise<void> => {
       if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
       if (!guard(req, res)) return
+      if (!requireWriteProof(req, res)) return
       const raw = await readJson(req)
       const body = (raw !== null && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
 
@@ -425,6 +606,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     const bookmarksPost: JsonHandler = async (req, res) => {
       if (!guard(req, res)) return
+      if (!requireWriteProof(req, res)) return
       const body = await readJson(req) as { title?: string } | null
       const tab = runtime.currentTabId()
       if (tab === undefined) return json(res, 400, { error: 'no tab open to bookmark' })
@@ -433,6 +615,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     const bookmarksDelete: JsonHandler = (req, res) => {
       if (!guard(req, res)) return
+      if (!requireWriteProof(req, res)) return
       const url = new URL(req.url ?? '/', 'http://localhost')
       const id = num(url.searchParams.get('id'), undefined)
       if (id === undefined) return json(res, 400, { error: 'id is required' })
@@ -466,6 +649,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     const downloadsDelete: JsonHandler = (req, res) => {
       if (!guard(req, res)) return
+      if (!requireWriteProof(req, res)) return
       const url = new URL(req.url ?? '/', 'http://localhost')
       const id = num(url.searchParams.get('id'), undefined)
       if (id === undefined) return json(res, 400, { error: 'id is required' })
@@ -475,6 +659,15 @@ export function apply(ctx: Context, config: Config = {}): void {
     const html = (content: string): JsonHandler => (_req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
       res.end(content)
+    }
+
+    /**
+     * 本插件自己的两个页面：加载即再交接一次 cookie（交接可能在开机竞态里
+     * 刚开始播表，页面加载是一个自然的"该有了"时点）。
+     */
+    const page = (content: string): JsonHandler => (req, res) => {
+      startCookieHandoff()
+      html(content)(req, res)
     }
 
     const disposers = [
@@ -500,6 +693,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         void (async () => {
           if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
           if (!guard(req, res)) return
+          if (!requireWriteProof(req, res)) return
           const body = await readJson(req) as { id?: number } | null
           const id = body !== null && typeof body.id === 'number' ? body.id : undefined
           if (id === undefined) return json(res, 400, { error: 'id is required' })
@@ -510,8 +704,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           }
         })().catch((cause: unknown) => json(res, 400, { error: cause instanceof Error ? cause.message : String(cause) }))
       } }),
-      ctx.webServer.register({ kind: 'exact', path: '/browser-shell', handler: html(BROWSER_SHELL_HTML) }),
-      ctx.webServer.register({ kind: 'exact', path: '/browser-overlay', handler: html(BROWSER_OVERLAY_HTML) }),
+      ctx.webServer.register({ kind: 'exact', path: '/browser-shell', handler: page(BROWSER_SHELL_HTML) }),
+      ctx.webServer.register({ kind: 'exact', path: '/browser-overlay', handler: page(BROWSER_OVERLAY_HTML) }),
     ]
     return () => {
       for (const dispose of disposers) dispose()

@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
+import { acceptWriteProof, type WriteProofDeps } from './write-proof.ts'
 
 export { RENDERER_BOOT_REPORT_PATH } from './renderer-boot-contract.ts'
 export type { RendererBootReport } from './renderer-boot-contract.ts'
@@ -51,15 +52,22 @@ function finish(res: ServerResponse, statusCode: number): void {
   res.end()
 }
 
-/** Validate and forward one same-origin renderer Loader outcome. */
+/**
+ * Validate and forward one same-origin renderer Loader outcome.
+ *
+ * R4-RV3a：这是 renderer 的写面（把 Loader 结果写进 Host 诊断），除 Origin 检查
+ * 外还要一份 BrowserAuth 持有性证明；`proof` 未接线 ⇒ fail-closed。
+ */
 export async function handleRendererBootRequest(
   req: IncomingMessage,
   res: ServerResponse,
   expectedOrigin: string,
   report: (value: RendererBootReport) => void,
+  proof: WriteProofDeps | undefined,
 ): Promise<void> {
   if (req.method !== 'POST') return finish(res, 405)
   if (req.headers.origin !== undefined && req.headers.origin !== expectedOrigin) return finish(res, 403)
+  if (!acceptWriteProof(req, res, proof)) return
   if (req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
     return finish(res, 415)
   }

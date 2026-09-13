@@ -31,6 +31,9 @@ const config: DesktopConfig = {
   minHeight: 640,
 }
 
+/** R4-RV3a：写路由要一份 BrowserAuth cookie；合法 renderer 持有它。 */
+const PROOF_COOKIE = 'dsh-auth-127.0.0.1:43120=v1.signature'
+
 afterEach(() => { vi.useRealTimers() })
 
 interface PluginHarness {
@@ -61,6 +64,11 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
   const rendererBoot = vi.fn<(report: RendererBootReport) => void>()
   const pickDirectory = vi.fn(async () => null)
   const routes = new Map<string, WebRoute>()
+  // R4-RV3a：写面的 BrowserAuth 持有性证明替身（与上游 requestRejection 同判据）。
+  const fence = {
+    requestRejection: (request: { headers: Record<string, unknown> }): 401 | undefined =>
+      request.headers['cookie'] === PROOF_COOKIE ? undefined : 401,
+  }
   const settingsUpdated = new Set<(namespace: unknown, next: unknown) => void>()
   let localePreference: LocaleId | undefined
   let themePreference: ThemePreference = 'system'
@@ -134,7 +142,11 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     settings,
     connection: { authenticatedUrl: (url: string) => url },
     logger: { warn: vi.fn(), error: vi.fn() },
-    get: vi.fn((key: unknown) => String(key) === 'desktopRuntime' ? runtime : () => {}),
+    get: vi.fn((key: unknown) => {
+      if (String(key) === 'desktopRuntime') return runtime
+      if (String(key) === 'connection') return fence
+      return () => {}
+    }),
     effect: vi.fn((register: () => unknown) => register()),
     on: vi.fn((event: string, listener: (namespace: unknown, next: unknown) => void) => {
       if (event === 'settings/updated') settingsUpdated.add(listener)
@@ -266,6 +278,7 @@ describe('desktop Host plugin', () => {
       headers: {
         origin: 'http://127.0.0.1:43120',
         'content-type': 'application/json',
+        cookie: PROOF_COOKIE,
       },
       async * [Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(report)) },
     } as unknown as IncomingMessage
@@ -288,7 +301,7 @@ describe('desktop Host plugin', () => {
     }))
     const req = {
       method: 'POST',
-      headers: { origin: 'http://127.0.0.1:43120' },
+      headers: { origin: 'http://127.0.0.1:43120', cookie: PROOF_COOKIE },
     } as unknown as IncomingMessage
     let body = ''
     const res = {

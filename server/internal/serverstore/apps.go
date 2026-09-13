@@ -140,6 +140,57 @@ func upsertApp(ex queryer, a *App) error {
 	return err
 }
 
+// Queryer 是 *sql.DB / *sql.Tx / *sql.Conn 的公共子集(groups.go 的内部
+// queryer 只含 QueryRow/Exec,这里因为要读版本清单,把 Query 一并列出)。
+//
+// 2026-09-13(N-2):发布路径必须把咨询锁与全部读写放在**同一条连接**上 ——
+// 「持锁连接 + 干活连接」的方案在连接需求 > 池上限时会死锁,而不同名并发
+// 上传在生产里是正常负载。因此这些 DAO 需要「在调用方给定的事务里执行」
+// 的变体(后缀 On)。
+type Queryer interface {
+	QueryRow(query string, args ...any) *sql.Row
+	Query(query string, args ...any) (*sql.Rows, error)
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// GetAppOn 是 GetApp 的 executor 版本(可在 *sql.Tx 上执行)。
+func GetAppOn(ex Queryer, kind, appID string) (*App, error) {
+	a, err := scanApp(ex.QueryRow(`SELECT `+appColumns+` FROM apps WHERE kind = ? AND app_id = ?`, kind, appID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return a, err
+}
+
+// ListReleasesOn 是 ListReleases 的 executor 版本(可在 *sql.Tx 上执行)。
+func ListReleasesOn(ex Queryer, kind, appID string) ([]Release, error) {
+	rows, err := ex.Query(`SELECT `+releaseListColumns+` FROM app_releases
+		WHERE kind = ? AND app_id = ? ORDER BY created_at`, kind, appID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectReleases(rows)
+}
+
+// PendingReleaseCountOn 是 PendingReleaseCount 的 executor 版本。
+func PendingReleaseCountOn(ex Queryer, publisher string) (int, error) {
+	var n int
+	err := ex.QueryRow(`SELECT count(*) FROM app_releases
+		WHERE publisher = ? AND status = 'pending' AND deleted_at IS NULL`, publisher).Scan(&n)
+	return n, err
+}
+
+// UpsertAppAndCreateReleaseOn 在**调用方提供的事务**里完成「占名 + 建版本」
+// (N-2:发布锁已在该事务上,落库不能再开第二条连接)。调用方负责 Commit;
+// 任一步失败由调用方 Rollback,原子性与 UpsertAppAndCreateRelease 相同。
+func UpsertAppAndCreateReleaseOn(ex Queryer, a *App, r *Release) (int64, error) {
+	if err := upsertApp(ex, a); err != nil {
+		return 0, err
+	}
+	return createRelease(ex, r)
+}
+
 // UpsertAppAndCreateRelease 在同一事务内「占名 + 建版本」(P2-3)。
 // 此前 appstore.Publish 先 UpsertApp 再 CreateRelease,两步之间失败会留下
 // 「占名无版本」的悬挂 App(名称被永久占用、员工无法再发布、管理员须手工清理)。
@@ -150,10 +201,7 @@ func UpsertAppAndCreateRelease(db *sql.DB, a *App, r *Release) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	if err := upsertApp(tx, a); err != nil {
-		return 0, err
-	}
-	id, err := createRelease(tx, r)
+	id, err := UpsertAppAndCreateReleaseOn(tx, a, r)
 	if err != nil {
 		return 0, err
 	}
@@ -165,11 +213,7 @@ func UpsertAppAndCreateRelease(db *sql.DB, a *App, r *Release) (int64, error) {
 
 // GetApp 按 (kind, app_id) 取 App;不存在返回 ErrNotFound。
 func GetApp(db *sql.DB, kind, appID string) (*App, error) {
-	a, err := scanApp(db.QueryRow(`SELECT `+appColumns+` FROM apps WHERE kind = ? AND app_id = ?`, kind, appID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return a, err
+	return GetAppOn(db, kind, appID)
 }
 
 // ListApps 列出全部 App(管理端视图),可按 kind/channel 过滤(空 = 不过滤)。
@@ -359,13 +403,7 @@ func GetRelease(db *sql.DB, kind, appID, version string) (*Release, error) {
 // ListReleases 列出一个 App 的全部版本(不含归档),含被拒与软删——
 // 版本号一经使用即永久占位(决策 D3),判重必须看到全部历史。
 func ListReleases(db *sql.DB, kind, appID string) ([]Release, error) {
-	rows, err := db.Query(`SELECT `+releaseListColumns+` FROM app_releases
-		WHERE kind = ? AND app_id = ? ORDER BY created_at`, kind, appID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return collectReleases(rows)
+	return ListReleasesOn(db, kind, appID)
 }
 
 // ListReleasesByKind 列出某 kind 的全部版本(按 app_id, created_at 排序),
@@ -413,8 +451,19 @@ func collectReleases(rows *sql.Rows) ([]Release, error) {
 	return out, rows.Err()
 }
 
+// ErrReleaseArchiveCleared 表示「该版本已被拒绝、归档字节已释放」,因此不能
+// 再被置为 approved(N-4:审核通过意味着版本对员工可见可安装,必须有归档字节)。
+// 定义在 apps.go 而不是 errors.go,因为它是本文件审核不变量的一部分。
+var ErrReleaseArchiveCleared = errors.New("release archive cleared")
+
 // SetReleaseStatus 审核:approved/rejected(rejected 必须带理由,由调用方保证)。
-// 只改状态位,绝不触碰内容——这是「快照」与「审核」得以共存的关键。
+// 只改状态位,绝不触碰内容或归档——这是「快照」与「审核」得以共存的关键。
+//
+// 注意:这是**通用原语**,不含 F2-N3/N-4 的审核不变量(见
+// SetReleaseStatusForReview)。产品的审核路径(agentshare / sharedskills 的
+// admin approve|reject)必须走 ForReview 变体,因为「通过审核」意味着版本对
+// 员工可见可安装,必须有归档字节 —— 这一点只能在**写入时**原子判定,不能由
+// 调用方先读后写(check-then-act 会被并发绕过)。
 func SetReleaseStatus(db *sql.DB, kind, appID, version, status, reason string) error {
 	res, err := db.Exec(`UPDATE app_releases SET status = ?, reason = ?,
 		quality = CASE WHEN ? = 'approved' THEN quality ELSE '' END, updated_at = `+NowExpr()+`
@@ -427,6 +476,66 @@ func SetReleaseStatus(db *sql.DB, kind, appID, version, status, reason string) e
 		return ErrNotFound
 	}
 	return nil
+}
+
+// SetReleaseStatusForReview 是**审核路径专用**的状态写入(F2-N3 + N-4):
+//
+//   - approved:条件 UPDATE(`archive IS NOT NULL AND deleted_at IS NULL`),
+//     与「归档非空」在同一语句里判定。条件不满足时区分「行不存在」
+//     (ErrNotFound)与「归档已被拒绝释放」(ErrReleaseArchiveCleared),
+//     调用方据此回 404 / 409。
+//     `status <> 'rejected'` 的例外:从未被拒过的行(历史/播种数据)archive
+//     列为 NULL 时仍允许通过审核 —— 「归档被释放」这件事**只**发生在下面的
+//     rejected 转换里,所以 `status='rejected' AND archive IS NULL` 与「被
+//     释放过」等价;这条例外让迁移前的存量行不受影响(它们仍走串行审核)。
+//   - rejected:拒绝与释放归档在**同一条 UPDATE**里完成(agentshare-5 的
+//     存储上界:拒绝即释放,否则员工可无限循环「上传 → 被拒」堆字节)。
+//     调用方不需要、也不应该再补一次清归档 —— 「置 rejected」与「清 archive」
+//     分成两条语句时,中间那段窗口恰好就是被并发 approve 穿过的窗口。
+//
+// 为什么这就是 N-4 的修复:两个管理员并发 approve/reject 时,PostgreSQL 在
+// READ COMMITTED 下用行级锁串行化两条 UPDATE,后到的那条会**重新求值**
+// WHERE(EPQ),因此它看到的一定是先提交者的结果 —— 要么 approve 先提交而
+// reject 把它改成 rejected+已释放,要么 reject 先提交而 approve 的条件不再
+// 成立而拒绝。任何交错都产不出 `approved + archive IS NULL` 的坏行。
+func SetReleaseStatusForReview(db *sql.DB, kind, appID, version, status, reason string) error {
+	switch status {
+	case ReleaseStatusApproved:
+		res, err := db.Exec(`UPDATE app_releases SET status = ?, reason = '',
+			updated_at = `+NowExpr()+`
+			WHERE kind = ? AND app_id = ? AND version = ? AND deleted_at IS NULL
+			  AND (archive IS NOT NULL OR status <> 'rejected')`,
+			status, kind, appID, version)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			var exists bool
+			if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM app_releases
+				WHERE kind = ? AND app_id = ? AND version = ?)`, kind, appID, version).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				return ErrNotFound
+			}
+			return ErrReleaseArchiveCleared
+		}
+		return nil
+	case ReleaseStatusRejected:
+		res, err := db.Exec(`UPDATE app_releases SET status = ?, reason = ?, quality = '',
+			archive = NULL, size = 0, updated_at = `+NowExpr()+`
+			WHERE kind = ? AND app_id = ? AND version = ?`,
+			status, reason, kind, appID, version)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	default:
+		return SetReleaseStatus(db, kind, appID, version, status, reason)
+	}
 }
 
 // SetReleaseQuality 质量标记(”|official|featured),仅 approved 版本可设置。
@@ -466,10 +575,7 @@ func IncrementReleaseDownload(db *sql.DB, kind, appID, version string) error {
 
 // PendingReleaseCount 某发布者的待审数量(配额)。
 func PendingReleaseCount(db *sql.DB, publisher string) (int, error) {
-	var n int
-	err := db.QueryRow(`SELECT count(*) FROM app_releases
-		WHERE publisher = ? AND status = 'pending' AND deleted_at IS NULL`, publisher).Scan(&n)
-	return n, err
+	return PendingReleaseCountOn(db, publisher)
 }
 
 // ---------------------------------------------------------------------------

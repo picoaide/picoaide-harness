@@ -10,9 +10,10 @@
  * 悬停/括号可见（AI 发消息仍需要 ID）。
  * 修改 = 覆盖；清空/删除 = 移除别名。
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { translate, getLocale, MISC2_DICT } from './i18n.js'
+import { writeFileAtomicSafeAt } from './sync/filesets.js'
 
 /** Translate through MISC2_DICT in the active host locale. */
 const alt = (key, params) => translate(MISC2_DICT, key, params, getLocale())
@@ -44,10 +45,10 @@ export class AliasStore {
   }
 
   #save() {
-    mkdirSync(dirname(this.file), { recursive: true })
-    const tmp = `${this.file}.tmp.${process.pid}`
-    writeFileSync(tmp, JSON.stringify(this.aliases, null, 2) + '\n')
-    renameSync(tmp, this.file)
+    // FIX-27（2026-09-13）：改走**自锚定安全原子写**（tmp 落点同样断言 +
+    // O_EXCL 按 fd 写入 + rename 前后复检）——预置同名符号链接即写穿到目录外，
+    // 曾被静默当成"写成功"。
+    writeFileAtomicSafeAt(this.file, JSON.stringify(this.aliases, null, 2) + '\n')
   }
 
   /** 取别名；无返回 undefined。 */
@@ -57,6 +58,8 @@ export class AliasStore {
 
   /**
    * 设置别名（覆盖；空串/纯空格 = 清除）。
+   * 落盘被拒（悬空链接/越界/预置同名条目）如实返回 `{ok:false}` 并回滚内存态——
+   * 第一轮把拒绝直接抛出 `set()`，调用方（HTTP/命令面）只能拿到 500 且原因不可读。
    * @param {string} sessionId
    * @param {string} name
    * @returns {{ok:boolean, message:string}}
@@ -68,16 +71,29 @@ export class AliasStore {
     if (text === '') {
       // 清空 = 移除别名
       if (this.aliases[sid] !== undefined) {
+        const previous = this.aliases[sid]
         delete this.aliases[sid]
-        this.#save()
+        try {
+          this.#save()
+        } catch (error) {
+          this.aliases[sid] = previous
+          return { ok: false, message: alt('alias.saveFail', { detail: error?.message ?? String(error) }) }
+        }
       }
       return { ok: true, message: alt('alias.cleared') }
     }
     if (text.length > ALIAS_MAX_LEN) {
       return { ok: false, message: alt('alias.tooLong', { max: ALIAS_MAX_LEN, len: text.length }) }
     }
+    const previous = this.aliases[sid]
     this.aliases[sid] = text
-    this.#save()
+    try {
+      this.#save()
+    } catch (error) {
+      if (previous === undefined) delete this.aliases[sid]
+      else this.aliases[sid] = previous
+      return { ok: false, message: alt('alias.saveFail', { detail: error?.message ?? String(error) }) }
+    }
     return { ok: true, message: alt('alias.set', { alias: text }) }
   }
 

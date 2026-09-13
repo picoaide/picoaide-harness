@@ -11,8 +11,15 @@ import { PageHeader } from '../../components/page-header'
 import { RangeFilter, defaultRange, fetchUsageList, chatTokens, downloadCsv, fmtY, type UsageRow, type DeptInfo } from './common'
 import { fmtTokens } from '../../lib/format'
 import { cn } from '../../lib/utils'
+import { PERM_DEPT_READ, hasPermission } from '../../lib/rbac'
 
 // 部门用量:部门树总表(费用/成员) + 选中部门详情(趋势/成员排行/模型拆分)
+//
+// 审计 R7 webadmin-branding-3:组织树 GET /departments 要 dept:read,而用量行
+// (group=dept)只要 usage:read。原来的 Promise.all 把两者绑在一起 → auditor
+// (有 usage:read、没有 dept:read)打开本页首屏整块失效,连它有权读的用量行
+// 也一起消失。现在没有 dept:read 就不请求组织树,直接用用量行按部门列消耗,
+// 并说明组织架构(层级/成员数)需要更高权限。
 export default function UsageDepartments() {
   const init = defaultRange()
   const [from, setFrom] = useState(init.from)
@@ -27,6 +34,8 @@ export default function UsageDepartments() {
   const [error, setError] = useState('')
   // P2-46: 请求序号防乱序——快速切换区间时只有最新请求的响应能写 state。
   const loadSeq = useRef(0)
+  // 组织架构树(层级/成员数/主管)的读权限;没有就退化成"按用量口径的部门列表"。
+  const canReadDepts = hasPermission(PERM_DEPT_READ)
 
   const load = useCallback(async (f: string, t: string) => {
     const current = ++loadSeq.current
@@ -34,7 +43,10 @@ export default function UsageDepartments() {
     setError('')
     try {
       const [d, rows] = await Promise.all([
-        request<{ departments: DeptInfo[] }>(`${ADMIN_API}/departments`),
+        // 没有 dept:read 时**不发**这个注定 403 的请求(服务端 RequirePermission)。
+        canReadDepts
+          ? request<{ departments: DeptInfo[] }>(`${ADMIN_API}/departments`)
+          : Promise.resolve({ departments: [] as DeptInfo[] }),
         fetchUsageList({ group: 'dept', from: f, to: t }),
       ])
       if (current !== loadSeq.current) return // P2-46: 过期响应丢弃
@@ -46,7 +58,7 @@ export default function UsageDepartments() {
     } finally {
       if (current === loadSeq.current) setLoading(false)
     }
-  }, [])
+  }, [canReadDepts])
 
   useEffect(() => { void load(from, to) }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -71,6 +83,20 @@ export default function UsageDepartments() {
     for (const r of deptRows) m.set(r.label, r)
     return m
   }, [deptRows])
+
+  // 左侧列表的行源:有 dept:read 时用组织树(带层级与成员数),否则退化成
+  // 用量行本身(label 就是部门名),这样有权读的用量数据不会被权限之外的东西挡住。
+  const listRows = useMemo(() => {
+    if (canReadDepts) {
+      return depts.map((d) => ({
+        key: `dept-${d.id}`,
+        name: d.name,
+        depth: depth.get(d.id) ?? 0,
+        memberCount: d.member_count as number | null,
+      }))
+    }
+    return deptRows.map((r) => ({ key: `usage-${r.label}`, name: r.label, depth: 0, memberCount: null }))
+  }, [canReadDepts, depts, deptRows, depth])
 
   const openDetail = useCallback(async (name: string) => {
     setSelected(name)
@@ -124,38 +150,57 @@ export default function UsageDepartments() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">部门列表</CardTitle>
-            <CardDescription>费用为所选区间口径(默认近 30 天)</CardDescription>
+            <CardDescription>
+              {canReadDepts
+                ? '费用为所选区间口径(默认近 30 天)'
+                : '费用为所选区间口径(默认近 30 天);当前账号没有组织架构读取权限(dept:read),仅显示有消耗的部门'}
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {loading ? <Skeleton className="h-80 w-full" /> : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>部门</TableHead>
-                    <TableHead className="text-right">区间费用</TableHead>
-                    <TableHead className="text-right">成员</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {depts.map((d) => {
-                    const rangeCost = rowOf.get(d.name)?.cost ?? 0
-                    return (
-                      <TableRow
-                        key={d.id}
-                        className={cn('cursor-pointer', selected === d.name && 'bg-accent')}
-                        onClick={() => void openDetail(d.name)}
-                      >
-                        <TableCell>
-                          <span style={{ paddingLeft: `${(depth.get(d.id) ?? 0) * 14}px` }} className="font-medium">{d.name}</span>
+              <>
+                {!canReadDepts && (
+                  <p className="mb-3 text-xs text-muted-foreground">
+                    这个视图按用量口径列出各部门消耗(需要 usage:read);部门层级、成员数与主管信息需要组织架构读取权限(dept:read),当前账号没有该权限,因此不显示,也不会请求该接口。
+                  </p>
+                )}
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>部门</TableHead>
+                      <TableHead className="text-right">区间费用</TableHead>
+                      {canReadDepts && <TableHead className="text-right">成员</TableHead>}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {listRows.map((row) => {
+                      const rangeCost = rowOf.get(row.name)?.cost ?? 0
+                      return (
+                        <TableRow
+                          key={row.key}
+                          className={cn('cursor-pointer', selected === row.name && 'bg-accent')}
+                          onClick={() => void openDetail(row.name)}
+                        >
+                          <TableCell>
+                            <span style={{ paddingLeft: `${row.depth * 14}px` }} className="font-medium">{row.name}</span>
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">{fmtY(rangeCost)}</TableCell>
+                          {canReadDepts && (
+                            <TableCell className="text-right tabular-nums">{row.memberCount}</TableCell>
+                          )}
+                        </TableRow>
+                      )
+                    })}
+                    {listRows.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={canReadDepts ? 3 : 2} className="text-center text-muted-foreground">
+                          暂无部门
                         </TableCell>
-                        <TableCell className="text-right tabular-nums">{fmtY(rangeCost)}</TableCell>
-                        <TableCell className="text-right tabular-nums">{d.member_count}</TableCell>
                       </TableRow>
-                    )
-                  })}
-                  {depts.length === 0 && <TableRow><TableCell colSpan={3} className="text-center text-muted-foreground">暂无部门</TableCell></TableRow>}
-                </TableBody>
-              </Table>
+                    )}
+                  </TableBody>
+                </Table>
+              </>
             )}
           </CardContent>
         </Card>

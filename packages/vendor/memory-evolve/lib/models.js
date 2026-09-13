@@ -37,9 +37,10 @@
  *   }
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { isSymlinkFreeRepoTarget, symlinkRefusedError, writeFileAtomicSafe } from './store.js'
+import { writeFileAtomicSafeAt } from './sync/filesets.js'
 
 /** 插件模型配置文件（相对 memoryDir）。 */
 const MODELS_FILE = 'models.json'
@@ -79,7 +80,10 @@ function load(file, rootDir) {
   } catch (error) {
     if (error.code !== 'ENOENT') {
       // 损坏的配置文件：备份后重建，避免配置永久丢失。
-      try { writeFileSync(`${file}.corrupt-${Date.now()}`, readFileSync(file)) } catch { /* 忽略 */ }
+      // FIX-27（2026-09-13）：备份落点同样走自锚定安全原子写 ——
+      // `<file>.corrupt-<Date.now()>` 是可预置的写落点（毫秒时间戳可枚举，
+      // 预置同名符号链接即把"备份"写到目录外）。
+      try { writeFileAtomicSafeAt(`${file}.corrupt-${Date.now()}`, readFileSync(file)) } catch { /* 忽略 */ }
     }
   }
   return { version: 1, models: {} }

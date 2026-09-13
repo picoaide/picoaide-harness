@@ -1,8 +1,9 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
 import Users from './Users'
 import { MemoryRouter } from 'react-router-dom'
 import { request } from '../api'
+import { setCurrentAdmin } from '../lib/rbac'
 
 const mockRequest = vi.mocked(request)
 const confirmSpy = vi.fn(() => true)
@@ -236,5 +237,50 @@ describe('Users 0057 密码/MFA 操作', () => {
     render(<MemoryRouter><Users /></MemoryRouter>)
     await screen.findByText('ldap1')
     expect(screen.getByRole('button', { name: '重置密码' })).toBeDisabled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 审计 R7 webadmin-branding-3:只读角色(auditor)打开用户页必须能看到用户列表。
+//
+// 服务端权限面:GET /users 要 user:read、GET /departments 要 dept:read、
+// 全部写操作要 user:write —— auditor 只有第一个。原实现把用户列表与部门树绑在
+// 一个 Promise.all 里,部门树 403 直接让**整页变成空表 + 报错**(App 横幅却
+// 承诺「可查看…用户列表」);而且 auditor 会看到一排注定 403 的写按钮。
+// 修法:部门树改为打开「部门归属」对话框时按需拉取;写入口按权限隐藏。
+// ---------------------------------------------------------------------------
+describe('审计员只读访问(R7 branding-3)', () => {
+  afterEach(() => setCurrentAdmin(null))
+
+  const auditor = { role: 'auditor' as const, permissions: ['audit:read', 'usage:read', 'user:read'] }
+
+  it('用户列表照常渲染:不请求需要 dept:read 的部门树,也不出现注定 403 的写操作', async () => {
+    setCurrentAdmin(auditor)
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/server/admin/users?page=')) {
+        return {
+          users: [{ id: 1, username: 'alice', is_admin: false, status: 1, groups: ['研发部'], role: 'user' }],
+          total: 1, page: 1, size: 20,
+        }
+      }
+      if (path === '/api/server/admin/departments') {
+        // 真实服务端:RequirePermission(dept:read) → 403,auditor 没有该点。
+        throw Object.assign(new Error('没有权限执行该操作'), { status: 403, code: 'FORBIDDEN' })
+      }
+      return {}
+    })
+    render(<MemoryRouter><Users /></MemoryRouter>)
+
+    expect(await screen.findByText('alice')).toBeInTheDocument()
+    expect(screen.queryByText('没有权限执行该操作')).toBeNull()
+    const paths = mockRequest.mock.calls.map(([p]) => String(p))
+    expect(paths.some((p) => p === '/api/server/admin/departments')).toBe(false)
+    // 只读:说明文案在,写入口不在。
+    expect(screen.getByText(/只读视图/)).toBeInTheDocument()
+    for (const name of ['新建用户', '部门', '角色', '重置密码', '禁用', '删除']) {
+      expect(screen.queryByRole('button', { name })).toBeNull()
+    }
+    // 仍可读的能力保留(令牌列表走 user:read)。
+    expect(screen.getByRole('button', { name: '令牌' })).toBeInTheDocument()
   })
 })

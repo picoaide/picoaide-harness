@@ -23,10 +23,11 @@
  *
  * 清理：30 天自动过期（prune 调用）+ 手动删除（发送方或任一接收方可删）。
  */
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, extname, join } from 'node:path'
 import { readAliases } from '../aliases.js'
 import { translate, getLocale, BROADCAST_DICT } from '../i18n.js'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
 
 /** Translate through BROADCAST_DICT in the active host locale. */
 const bt = (key, params) => translate(BROADCAST_DICT, key, params, getLocale())
@@ -145,7 +146,7 @@ export async function resolveAttachments(dir, messageId, raw) {
       }
       // —— 落盘：文件名 = <messageId>-<序号><魔数扩展名>（安全可控）——
       const file = join(attDir, `${messageId}-${i}${sniff.ext}`)
-      writeFileSync(file, buf)
+      writeFileAtomicSafeAt(file, buf)
       resolved.push({
         file,
         name: safeDisplayName(item.fileName),
@@ -211,10 +212,8 @@ export class RoomStore {
   }
 
   #save() {
-    mkdirSync(this.dir, { recursive: true })
-    const tmp = `${this.file}.tmp.${process.pid}`
-    writeFileSync(tmp, JSON.stringify(this.rooms, null, 2) + '\n')
-    renameSync(tmp, this.file)
+    // FIX-27（2026-09-13）：自锚定安全原子写（tmp 落点同样断言 + O_EXCL）
+    writeFileAtomicSafeAt(this.file, JSON.stringify(this.rooms, null, 2) + '\n')
   }
 
   /** 按 id 取房间（含已解散，面板追溯用）；不存在返回 undefined。 */
@@ -418,10 +417,8 @@ export class BroadcastStore {
   }
 
   #save() {
-    mkdirSync(this.dir, { recursive: true })
-    const tmp = `${this.file}.tmp.${process.pid}`
-    writeFileSync(tmp, JSON.stringify(this.items, null, 2) + '\n')
-    renameSync(tmp, this.file)
+    // FIX-27（2026-09-13）：自锚定安全原子写（tmp 落点同样断言 + O_EXCL）
+    writeFileAtomicSafeAt(this.file, JSON.stringify(this.items, null, 2) + '\n')
   }
 
   /** 长内容落文件目录。 */
@@ -523,8 +520,7 @@ export class BroadcastStore {
     let bodyFile = null
     if (content.length > INLINE_MAX) {
       bodyFile = this.bodyPath(id)
-      mkdirSync(dirname(bodyFile), { recursive: true })
-      writeFileSync(bodyFile, content, 'utf8')
+      writeFileAtomicSafeAt(bodyFile, content)
       const preview = content.slice(0, 200)
       stored = `（完整内容已写入文件 ${bodyFile}）\n${preview}`
     }

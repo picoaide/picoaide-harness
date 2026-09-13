@@ -22,12 +22,15 @@ func withLimits(t *testing.T, perUser, perSkill int) {
 }
 
 // P2-20 回归:同一用户超过每分钟上限后 429,且不再累加 calls(刷榜无效)。
+// srvcore-2 起写侧要求计数目标对调用者可见,故先把技能授权给 alice ——
+// 本用例考的是限流,不是授权。
 func TestSkillCallRateLimitedPerUser(t *testing.T) {
 	r, db, token := newTestEnv(t)
 	withLimits(t, 2, 100)
 	if _, err := serverstore.AddSkill(db, &serverstore.Skill{Name: "codeql", Version: "1.0.0", Enabled: 1, Archive: []byte("pkg")}); err != nil {
 		t.Fatal(err)
 	}
+	grantSkill(t, db, "codeql", "alice")
 
 	for i := 0; i < 2; i++ {
 		if w := post(r, token, "/api/client/v2/telemetry/skill-call", `{"name":"codeql"}`); w.Code != http.StatusOK {
@@ -58,6 +61,7 @@ func TestSkillCallRateLimitedPerSkill(t *testing.T) {
 		if _, err := serverstore.AddSkill(db, &serverstore.Skill{Name: name, Version: "1.0.0", Enabled: 1, Archive: []byte("pkg")}); err != nil {
 			t.Fatal(err)
 		}
+		grantSkill(t, db, name, "alice")
 	}
 	if w := post(r, token, "/api/client/v2/telemetry/skill-call", `{"name":"skill-a"}`); w.Code != http.StatusOK {
 		t.Fatalf("skill-a first = %d", w.Code)

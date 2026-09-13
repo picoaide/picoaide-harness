@@ -35,13 +35,26 @@ interface ConnectorEntry {
       args: string[]
       /** UNION over `commands`: every name any covered child may receive. */
       envKeys: string[]
+      /**
+       * conn-5: the definition-supplied VALUE of every pair a covered child
+       * will receive (framework token keys excluded). A name alone is not a
+       * decision — `GIT_EXTERNAL_DIFF` is opaque, its value is the shell
+       * command that would run.
+       */
+      envValues?: Record<string, string>
       servers: string[]
       /**
        * Audit R3 N1: one answer approves every pending stdio server, so each
        * one is shown with its own command, args and key set. Absent only for a
        * prompt produced by an older host build.
        */
-      commands?: { serverName: string; command: string; args: string[]; envKeys: string[] }[]
+      commands?: {
+        serverName: string
+        command: string
+        args: string[]
+        envKeys: string[]
+        envValues?: Record<string, string>
+      }[]
     }
   } | null
 }
@@ -345,6 +358,11 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       {entry.request?.approval && (() => {
         const approval = entry.request.approval
         const commands = approval.commands ?? []
+        // conn-5: the definition-supplied pairs, name = value. Rendered as its
+        // own line so an unknown hook name cannot hide behind a harmless-
+        // looking command line.
+        const envPairs = (values: Record<string, string> | undefined): Array<[string, string]> =>
+          Object.entries(values ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         // Audit R3 N1: one answer approves every pending stdio server, so each
         // one gets its own block. The flat fields are the older-host fallback.
         return (
@@ -362,6 +380,16 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
                     {command.envKeys.length > 0 && (
                       <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.env')}<code>{command.envKeys.join(', ')}</code></p>
                     )}
+                    {envPairs(command.envValues).length > 0 && (
+                      <div style={{ ...LABEL, wordBreak: 'break-all' }}>
+                        <p style={{ margin: 0 }}>{t('approval.envValues')}</p>
+                        <ul style={{ margin: '2px 0 0', paddingLeft: 16 }}>
+                          {envPairs(command.envValues).map(([key, value]) => (
+                            <li key={key}><code>{`${key}=${value}`}</code></li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                   </div>
                 ))
               : (
@@ -372,6 +400,16 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
                     )}
                     {approval.envKeys.length > 0 && (
                       <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.env')}<code>{approval.envKeys.join(', ')}</code></p>
+                    )}
+                    {envPairs(approval.envValues).length > 0 && (
+                      <div style={{ ...LABEL, wordBreak: 'break-all' }}>
+                        <p style={{ margin: 0 }}>{t('approval.envValues')}</p>
+                        <ul style={{ margin: '2px 0 0', paddingLeft: 16 }}>
+                          {envPairs(approval.envValues).map(([key, value]) => (
+                            <li key={key}><code>{`${key}=${value}`}</code></li>
+                          ))}
+                        </ul>
+                      </div>
                     )}
                   </>
                 )}

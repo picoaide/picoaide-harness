@@ -4,8 +4,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // 本文件是 usage 家族**所有**分区创建的唯一实现。
@@ -23,8 +27,10 @@ import (
 // 8 小时的计量写入落到该分区之外(23514 `no partition of relation`),R3 之后
 // 表现为 503 METERING_FAILED,而且**永不自愈**(探测永远认为已就绪)。
 // ensureRangePartition 现在额外校验 pg_get_expr(relpartbound, oid) 的
-// FROM/TO 是否与期望区间语义相等(比对见 verifyPartitionBound);不匹配即
+// FROM/TO 是否**覆盖**期望区间(比对见 verifyPartitionBound);不覆盖即
 // fail-loud 并把「人工处置」写进错误消息 —— **绝不自动 DROP 别人的表**。
+// (第四轮一度用"语义相等"作判据,把**更宽但完整覆盖**的合法分区也判成错界;
+// 修正见下方 r7 条目。)
 //
 // 2026-09-13 P1/P2(第五轮独立复核 §2,本轮修复):
 //   - **P1 可用性回归**:pg_get_expr 的渲染受**会话 DateStyle** 影响
@@ -37,6 +43,12 @@ import (
 //     "DROP 该分区让服务端重建"这类会诱导管理员删掉正确分区的行动指引。
 //   - **P2 二级分区漏网**:探测增加 relkind 判据,只接受叶子分区 'r';'p'
 //     (自身又是分区父表)边界再对也不算「已就绪」。
+//
+// 2026-09-13 r7 srvbill-3(P2,第七轮审计复核;R4 引入的回归):边界判据从
+// 「语义相等」改成「**区间覆盖**」—— 危害是"期望窗口没被完整覆盖",判据必须
+// 与危害同构。更宽但完整覆盖期望窗口的同名分区(DBA 按季度预建)在 R4 之前
+// 是被接受的、写入本就能正确路由;旧判据把这类**合法配置**判成故障,导致该月
+// 每一次 RecordUsage/账本重算都失败(网关 503 METERING_FAILED)且不自愈。
 
 // partitionSpec 描述一次"幂等建范围分区"请求:父表、分区 key 与边界字面量。
 //
@@ -189,10 +201,23 @@ func subPartitionedErr(spec partitionSpec, probe partitionProbe) error {
 //
 //  1. 先做廉价 catalog 探测(热路径不跑 DDL),同时取回边界表达式;
 //  2. 已存在:真分区 → **校验边界**(N4);孤儿表 → staleDetachedTableErr;
-//  3. 缺失才 CREATE TABLE IF NOT EXISTS ... PARTITION OF;
+//  3. 缺失时先按**区间**扫一遍既有分区(r7 r7f1-3):期望窗口已被别的分区
+//     (季度/年度预建)完整覆盖就直接复用、**跳过 CREATE**;否则才建;
 //  4. 42P07(IF NOT EXISTS 的存在性检查用语句快照,挡不住"另一会话刚提交同名
 //     分区")视为需要复检 —— 复检同样要过"真分区 + 边界正确"两道闸,不能把
-//     F11 的同名孤儿表或并发建出的错界分区一起吞掉。
+//     F11 的同名孤儿表或并发建出的错界分区一起吞掉;
+//  5. 42P17(与既有分区 overlap)与 **23514**(DEFAULT/MINVALUE..MAXVALUE 分区
+//     里已有该窗口的行)都翻译成含人工处置指引的可诊断错误,不抛裸 PG
+//     错误(r7 r7f1-3;23514 见 rc3-4:该布局可写,只是不能再建窄分区)。
+//
+// rc3-4(第三轮复核 §2 P2):第 3 步的覆盖探测此前只认**可解析的区间字面量**,
+// `DEFAULT` 与 `FOR VALUES FROM (MINVALUE) TO (MAXVALUE)` 这两种"最宽的覆盖"
+// 被归入"读不懂" ⇒ 该布局下每月首写都去 CREATE:分区为空时建出不必要的月分区,
+// 分区里已有行时直接吃 23514(裸错误、无指引、每月首写永久 503 且不自愈)。
+// 现在 scanUsagePartitions 把这两种形态显式识别为"覆盖一切"(partitionBoundCoversEverything),
+// 命中即复用、跳过 CREATE;CREATE 真的撞上 23514 时也有同级的人工处置指引。
+// 注意分工:同名关系(probe.Exists)仍走 verifyPartitionBound 的「读不懂 ⇒
+// 人工核对」契约(审计 r5 §2),本轮的放宽只作用于**异名覆盖分区**的扫描。
 func ensureRangePartition(db *sql.DB, spec partitionSpec) error {
 	rel := spec.relation()
 	probe, probeErr := probeUsagePartition(db, rel)
@@ -202,18 +227,177 @@ func ensureRangePartition(db *sql.DB, spec partitionSpec) error {
 	if probe.Exists {
 		return partitionReadyErr(spec, probe)
 	}
+	// r7 r7f1-3(P2):同名关系不存在 ≠ 期望窗口没被覆盖。覆盖判据是**区间语义**,
+	// 入口不能只有"同名关系":季度分区覆盖 8 月时,usage_209908 不存在,但窗口
+	// 已被 usage_209909 覆盖 —— 再建月分区必然 overlap(42P17),RecordUsage /
+	// RebuildUsageLedger 全挂、该月 503 且不自愈。
+	if scan, serr := scanUsagePartitions(db, spec); serr != nil {
+		return serr
+	} else if scan.Covering != "" {
+		logPartitionWindowCovered(spec, scan.Covering)
+		return nil
+	}
 	stmt := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s PARTITION OF %s
 		FOR VALUES FROM ('%s') TO ('%s')`, rel, spec.parent, spec.from, spec.to)
 	_, err := db.Exec(stmt)
-	if err != nil && isDuplicateRelationErr(err) {
-		// 并发竞态:另一会话已建好同名分区。复检确认(READ COMMITTED 下新
-		// 语句拿新快照,能看到对方已提交的分区);确认不了就保留原始错误。
-		again, perr := probeUsagePartition(db, rel)
-		if perr == nil && again.Exists {
-			return partitionReadyErr(spec, again)
+	if err != nil {
+		// rc3-4:DEFAULT 分区(或 MINVALUE..MAXVALUE 分区)里已经有本窗口的行时,
+		// PG 报 **23514**(不是 42P17):"updated partition constraint for default
+		// partition … would be violated by some row"。该布局本身完全可写(写入会
+		// 路由进 DEFAULT 分区),只是不能再加窄分区 —— 必须翻译成同级的可诊断
+		// 结论,而不是把裸 SQLSTATE 抛给计量热路径(管理员只看到 503)。
+		if isDefaultPartitionViolationErr(err) {
+			scan, serr := scanUsagePartitions(db, spec)
+			if serr == nil && scan.Covering != "" {
+				logPartitionWindowCovered(spec, scan.Covering)
+				return nil
+			}
+			if serr != nil {
+				log.Printf("usage partition: rescan after default-partition violation failed: %v", serr)
+			}
+			return coveredByDefaultPartitionErr(spec, err)
+		}
+		if isOverlapPartitionErr(err) {
+			// CREATE 与扫描之间有人建了覆盖窗口的分区(并发),或者只存在**部分
+			// 重叠**的既有分区。复扫一次拿最新布局,再给管理员可诊断的结论。
+			scan, serr := scanUsagePartitions(db, spec)
+			if serr == nil && scan.Covering != "" {
+				logPartitionWindowCovered(spec, scan.Covering)
+				return nil
+			}
+			if serr != nil {
+				log.Printf("usage partition: rescan after overlap failed: %v", serr)
+			}
+			return overlappingPartitionErr(spec, scan.Overlapping, err)
+		}
+		if isDuplicateRelationErr(err) {
+			// 并发竞态:另一会话已建好同名分区。复检确认(READ COMMITTED 下新
+			// 语句拿新快照,能看到对方已提交的分区);确认不了就保留原始错误。
+			again, perr := probeUsagePartition(db, rel)
+			if perr == nil && again.Exists {
+				return partitionReadyErr(spec, again)
+			}
 		}
 	}
 	return err
+}
+
+// partitionSkipLogged 记录已经记过"窗口已被更宽分区覆盖"日志的 (parent,key)。
+// 这**不是判定缓存**(判定每次调用都重新探测),只是防止热路径上同一窗口每次
+// 计量写入都打一行日志。
+var partitionSkipLogged sync.Map
+
+// logPartitionWindowCovered 记录一次"同名关系不存在但窗口已被别的分区覆盖"
+// (r7 r7f1-3):这是季度/年度预建布局被正常复用的诊断线索,同一窗口只记一次。
+func logPartitionWindowCovered(spec partitionSpec, covering string) {
+	key := spec.parent + "." + spec.key
+	if _, loaded := partitionSkipLogged.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	log.Printf("usage partition: %s not present but its window FROM '%s' TO '%s' of %s is already covered by partition %s; reusing it (no monthly partition created)",
+		spec.relation(), spec.from, spec.to, spec.parent, covering)
+}
+
+// usagePartitionScan 是一次"期望窗口 vs spec.parent 现有分区"的扫描结果
+// (r7 r7f1-3,P2):判据是**区间覆盖/重叠**,入口不再只有同名关系。
+type usagePartitionScan struct {
+	// Covering 非空 = 该分区完整覆盖期望窗口(可直接复用,不得再建月/年分区)。
+	Covering string
+	// Overlapping 非空 = 该分区与期望窗口部分重叠(再建必然 42P17)。
+	Overlapping string
+}
+
+// scanUsagePartitions 扫 spec.parent 的所有**叶子**分区,用 partitionBoundCoverage
+// 的同一比较器找出覆盖/重叠期望窗口的那个。
+//
+// 只接受叶子分区(relkind='r'):二级分区('p')的覆盖范围无法用一次往返证明
+// (与 partitionReadyErr 的判据同源,不允许再分叉)。
+//
+// rc3-4:`DEFAULT` 与 `MINVALUE..MAXVALUE` 由 partitionBoundCoversEverything
+// 在进入字面量比较器**之前**识别为"覆盖一切",命中 Covering 分支、跳过
+// CREATE —— 否则该布局下每月首写都要 CREATE 并吃 23514/42P17。
+func scanUsagePartitions(db *sql.DB, spec partitionSpec) (usagePartitionScan, error) {
+	// 只读事务:固定会话渲染(见 partitionProbeDateStyle),读完即回滚。
+	tx, err := db.Begin()
+	if err != nil {
+		return usagePartitionScan{}, err
+	}
+	defer tx.Rollback() //nolint:errcheck // 只读事务,回滚失败无副作用
+	if _, err := tx.Exec(partitionProbeDateStyle); err != nil {
+		return usagePartitionScan{}, fmt.Errorf("fix partition probe session rendering (%s): %w", partitionProbeDateStyle, err)
+	}
+	rows, err := tx.Query(`SELECT c.relname, pg_get_expr(c.relpartbound, c.oid)
+FROM pg_inherits i
+JOIN pg_class c ON c.oid = i.inhrelid
+JOIN pg_class p ON p.oid = i.inhparent
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE p.relname = ? AND n.nspname = 'public' AND c.relkind = 'r'`, spec.parent)
+	if err != nil {
+		return usagePartitionScan{}, err
+	}
+	defer rows.Close()
+	var out usagePartitionScan
+	for rows.Next() {
+		var rel, bound string
+		if err := rows.Scan(&rel, &bound); err != nil {
+			return usagePartitionScan{}, err
+		}
+		if rel == spec.relation() {
+			continue // 同名关系由 probeUsagePartition 判(错误分类更精确)
+		}
+		// rc3-4:最宽的两类覆盖在这里先认 —— DEFAULT / MINVALUE..MAXVALUE 没有
+		// 可解析的字面量,但对**异名**分区来说它们完整覆盖一切(写入经 PG 路由
+		// 正确落进该分区),必须命中 Covering 而跳过 CREATE(否则该布局下每月
+		// 首写都要 CREATE 并吃 23514/42P17)。
+		if partitionBoundCoversEverything(bound) {
+			out.Covering = rel
+			break
+		}
+		covered, _, readable := partitionBoundCoverage(spec, bound)
+		if !readable {
+			continue // 读不懂的边界不参与判定(交给同名探测/人工)
+		}
+		if covered {
+			out.Covering = rel
+			break
+		}
+		if out.Overlapping == "" && partitionBoundOverlaps(spec, bound) {
+			out.Overlapping = rel
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return usagePartitionScan{}, err
+	}
+	return out, nil
+}
+
+// overlappingPartitionErr 把 PG 的 42P17(partition would overlap)翻译成与
+// misboundedPartitionErr 同级的可诊断错误(r7 r7f1-3,P2)。
+//
+// 文案纪律与 misboundedPartitionErr 一致:只描述"需要人看什么",不替管理员
+// 决定 DROP/改写任何既有分区。
+func overlappingPartitionErr(spec partitionSpec, overlapping string, cause error) error {
+	who := fmt.Sprintf("该窗口与 %s 的既有分区重叠(无法确定是哪一个)", spec.parent)
+	if overlapping != "" {
+		who = fmt.Sprintf("该窗口与既有分区 %q 部分重叠(它既不完整覆盖本窗口,也不允许再建本窗口的分区)", overlapping)
+	}
+	return fmt.Errorf("%s cannot be created: %s (want FOR VALUES FROM ('%s') TO ('%s') of %s); upstream error: %v — "+
+		"需人工处置(manual intervention):请人工核对上面那个分区的实际边界;"+
+		"若窗口本就被更宽的分区完整覆盖,计量写入会正常路由,不要为该窗口单独建分区(服务端不会自动 DROP/改写)",
+		spec.relation(), who, spec.from, spec.to, spec.parent, cause)
+}
+
+// isOverlapPartitionErr 报告 err 是否为 PG 42P17(分区边界与既有分区重叠)。
+// 与 isDuplicateRelationErr 同一实现形态:先认 *pgconn.PgError,再退回错误串。
+func isOverlapPartitionErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "42P17"
+	}
+	return strings.Contains(err.Error(), "42P17")
 }
 
 // partitionReadyErr 判定"已存在的关系能否直接当作目标分区使用"。
@@ -235,7 +419,7 @@ func partitionReadyErr(spec partitionSpec, probe partitionProbe) error {
 	return verifyPartitionBound(spec, probe.Bound)
 }
 
-// verifyPartitionBound 校验已存在分区的边界是否与期望区间一致(N4)。
+// verifyPartitionBound 校验已存在分区的边界是否**覆盖期望区间**(N4 + r7 srvbill-3)。
 //
 // 比对对象是 pg_get_expr(relpartbound, oid) 的原文,但**不做字符串直比**:
 // PG 按**会话 TimeZone** 渲染 timestamptz 字面量(UTC 下 `+00`、
@@ -243,35 +427,146 @@ func partitionReadyErr(spec partitionSpec, probe partitionProbe) error {
 // UTC 偏移(pgInstantArg)。因此先按字面量类型解析成"日期值"或"绝对瞬时",
 // 再语义比较。
 //
-// 三种结果分开(审计 r5 §2,P1):
-//   - 一致 → 就绪;
-//   - **确实不一致** → misboundedPartitionErr(fail-loud);
-//   - **读不懂**(MINVALUE/MAXVALUE/LIST/DEFAULT/手工表达式/解析不了的字面量)
-//     → partitionBoundUnreadableErr:单独一类,不再冒充"错界"。第四轮把这两种
-//     混成一条,导致任何渲染/形态变化都被当成"分区错了"。
+// 判据是**区间覆盖**,不是语义相等(P2,审计 r7 srvbill-3):本校验要防的危害
+// 是「期望窗口没有被完整覆盖」(更窄/错位 → 窗口边缘的写入 23514 且永不自愈),
+// 判据必须与危害同构。第四轮用了 `Equal`,于是一个边界更宽、**完整覆盖**期望
+// 窗口的同名分区(DBA 按季度预建的 usage_<本月>)被判错界 → 该月每一次计量
+// 写入与账本重算都失败(网关 503 METERING_FAILED)且不自愈;而它在 R4 之前
+// 是被接受的、写入本就能正确路由。现在:
+//
+//	actualFrom <= wantFrom 且 actualTo >= wantTo → 就绪;
+//	不覆盖(更窄/错位) → misboundedPartitionErr(fail-loud);
+//	读不懂(MINVALUE/MAXVALUE/LIST/DEFAULT/手工表达式/解析不了的字面量)
+//	→ partitionBoundUnreadableErr:单独一类,不冒充"错界"。
 func verifyPartitionBound(spec partitionSpec, bound string) error {
+	covered, detail, readable := partitionBoundCoverage(spec, bound)
+	if !readable {
+		return partitionBoundUnreadableErr(spec, bound, detail)
+	}
+	if !covered {
+		return misboundedPartitionErr(spec, bound, detail)
+	}
+	return nil
+}
+
+// partitionBoundCoverage 是"实际边界是否**完整覆盖**期望窗口"的**唯一判据**
+// (verifyPartitionBound 与 scanUsagePartitions 共用,不允许再分叉):
+//
+//	covered=true,  readable=true  → 覆盖(就绪)
+//	covered=false, readable=true  → 确实不覆盖(detail 说明是哪一侧)
+//	readable=false                → 读不懂(不得判错界;detail 说明原因)
+//
+// rc3-4(第三轮复核 §2 P2):`DEFAULT` 与 `FROM (MINVALUE) TO (MAXVALUE)` 是
+// **最宽**的覆盖,但它们不是"可解析的区间字面量",所以**这个比较器**仍然按
+// 「读不懂」处理(与审计 r5 §2 的契约一致:同名关系读不懂 ⇒ fail-loud + 人工
+// 核对)。异名分区的覆盖判定在 scanUsagePartitions —— 那里 DEFAULT 是标准 DBA
+// 布局,必须先按 partitionBoundCoversEverything 判"覆盖一切"(见该函数)。
+func partitionBoundCoverage(spec partitionSpec, bound string) (covered bool, detail string, readable bool) {
 	from, to, ok := splitRangeBound(bound)
 	if !ok {
-		return partitionBoundUnreadableErr(spec, bound, "分区边界不是 RANGE 的 FROM/TO 字面量形态")
+		return false, "分区边界不是 RANGE 的 FROM/TO 字面量形态", false
 	}
 	for _, side := range []struct {
 		name     string
 		want     string
 		got      string
+		upper    bool // 上界要求实际值不早于期望;下界要求不晚于期望
 		mismatch string
 	}{
-		{"下界", spec.from, from, "下界与期望不一致"},
-		{"上界", spec.to, to, "上界与期望不一致"},
+		{"下界", spec.from, from, false, "实际下界晚于期望下界:窗口前段未被覆盖"},
+		{"上界", spec.to, to, true, "实际上界早于期望上界:窗口后段未被覆盖"},
 	} {
-		same, readable := comparePartitionBoundLiteral(side.want, side.got)
+		order, readable := comparePartitionBoundOrder(side.want, side.got)
 		if !readable {
-			return partitionBoundUnreadableErr(spec, bound, side.name+"字面量无法解析")
+			return false, side.name + "字面量无法解析", false
 		}
-		if !same {
-			return misboundedPartitionErr(spec, bound, side.mismatch)
+		covers := order <= 0 // 实际 <= 期望
+		if side.upper {
+			covers = order >= 0 // 实际 >= 期望
+		}
+		if !covers {
+			return false, side.mismatch, true
 		}
 	}
-	return nil
+	return true, "", true
+}
+
+// partitionBoundOverlaps 判定实际边界与期望窗口是否**部分重叠**
+// (actualFrom < wantTo && actualTo > wantFrom)。读不懂一律返回 false:
+// 判据不能建立在对边界的猜测上。
+//
+// 覆盖一切(DEFAULT/MINVALUE..MAXVALUE)不由这里判定:scanUsagePartitions 会
+// 先用 partitionBoundCoversEverything 命中覆盖分支,走不到 overlap。读不懂仍然
+// 一律 false(判据不建立在对边界的猜测上)。
+func partitionBoundOverlaps(spec partitionSpec, bound string) bool {
+	from, to, ok := splitRangeBound(bound)
+	if !ok {
+		return false
+	}
+	beforeUpper, ok1 := comparePartitionBoundOrder(spec.to, from) // from vs wantTo
+	afterLower, ok2 := comparePartitionBoundOrder(spec.from, to)  // to vs wantFrom
+	if !ok1 || !ok2 {
+		return false
+	}
+	return beforeUpper < 0 && afterLower > 0
+}
+
+// partitionBoundCoversEverything 判定边界是否是"覆盖一切"的两种形态
+// (rc3-4):
+//
+//	DEFAULT                                  — PG 的默认分区
+//	FROM (MINVALUE) TO (MAXVALUE)            — 显式无限区间(等价 DEFAULT)
+//
+// 判据只做**形态归一化后的前缀/包含**比较(去掉空白、大小写不敏感),不解析
+// 字面量:这两种边界本来就没有字面量可解析。返回 false 时调用方仍按原有
+// 字面量路径判定,语义不允许再分叉。
+//
+// 只被 scanUsagePartitions(异名分区扫描)与 23514 的复扫使用:同名关系的
+// verifyPartitionBound 仍把 DEFAULT 当"读不懂"(审计 r5 §2 的契约 —— 一个
+// 名字是月分区、边界却是 DEFAULT 的手工对象要求人工核对)。
+func partitionBoundCoversEverything(bound string) bool {
+	b := strings.ToUpper(strings.TrimSpace(bound))
+	if b == "" {
+		return false
+	}
+	if strings.HasPrefix(b, "DEFAULT") {
+		return true
+	}
+	// 归一化:去掉全部空白与多余括号,得到 FROM(MINVALUE)TO(MAXVALUE)。
+	compact := strings.NewReplacer(" ", "", "\t", "", "\n", "", "\r", "").Replace(b)
+	compact = strings.TrimSuffix(compact, ";")
+	return compact == "FORVALUESFROM(MINVALUE)TO(MAXVALUE)" ||
+		strings.Contains(compact, "FROM(MINVALUE)TO(MAXVALUE)")
+}
+
+// isDefaultPartitionViolationErr 报告 err 是否为 PG 23514 —— "往 DEFAULT 分区
+// 表加新分区会让既有行违反分区约束"(rc3-4)。它与 42P17(overlap)是同一族的
+// 两种 PG 拒绝形态:布局本身完全可写,只是**不能再加窄分区**。
+//
+// 与 isOverlapPartitionErr 同一实现形态:先认 *pgconn.PgError,再退回错误串。
+func isDefaultPartitionViolationErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23514"
+	}
+	return strings.Contains(err.Error(), "23514")
+}
+
+// coveredByDefaultPartitionErr 把 23514 翻译成与 overlappingPartitionErr 同级
+// 的可诊断错误(rc3-4):布局本身可写(DEFAULT / MINVALUE..MAXVALUE 分区吞下
+// 了该窗口的行),服务端**不该**再为这个窗口建窄分区。
+//
+// 文案纪律与 overlappingPartitionErr 一致:只描述"需要人看什么",不替管理员
+// 决定 DROP/改写任何既有分区。
+func coveredByDefaultPartitionErr(spec partitionSpec, cause error) error {
+	return fmt.Errorf("%s cannot be created: %s 的 DEFAULT 分区(或 MINVALUE..MAXVALUE 分区)已经含有本窗口的行,新增分区会让它们违反分区约束"+
+		"(want FOR VALUES FROM ('%s') TO ('%s')); upstream error: %v — "+
+		"计量写入本就会正常路由进那个分区,不要为本窗口单独建分区;"+
+		"需人工处置(manual intervention):请人工确认父表 %s 确实存在覆盖本窗口的分区(DEFAULT / MINVALUE..MAXVALUE),服务端不会自动 DROP/改写任何既有分区",
+		spec.relation(), spec.parent, spec.from, spec.to, cause, spec.parent)
 }
 
 // splitRangeBound 从 `FOR VALUES FROM ('x') TO ('y')` 取出两个字面量内容。
@@ -323,16 +618,17 @@ func extractPartitionLiteral(raw string) (string, bool) {
 	return "", false // 引号没闭合
 }
 
-// comparePartitionBoundLiteral 语义比较两个字面量,并区分「不一致」与
-// 「读不懂」:先按字节(最常见:边界就是会话时区无关的裸日期),再按解析出的
-// 日期/绝对瞬时比较。返回 (same, readable):
+// comparePartitionBoundOrder 语义比较两个字面量的时间先后,并区分「读不懂」:
+// 先按字节(最常见:边界就是会话时区无关的裸日期),再按解析出的日期/绝对瞬时
+// 比较。返回 (order, readable):
 //
-//	same=true               → 一致
-//	same=false, readable=true   → **确实不一致**(可以判错界)
-//	same=false, readable=false  → 读不懂(不得判错界,见 partitionBoundUnreadableErr)
-func comparePartitionBoundLiteral(want, got string) (same, readable bool) {
+//	order<0   → got 早于 want(下界方向 = 覆盖到了窗口之前)
+//	order==0  → 同一时刻
+//	order>0   → got 晚于 want
+//	readable=false → 读不懂(不得判错界,见 partitionBoundUnreadableErr)
+func comparePartitionBoundOrder(want, got string) (order int, readable bool) {
 	if want == got {
-		return true, true
+		return 0, true
 	}
 	wantKind, wantTime, okWant := parsePartitionBoundLiteral(want)
 	gotKind, gotTime, okGot := parsePartitionBoundLiteral(got)
@@ -340,9 +636,9 @@ func comparePartitionBoundLiteral(want, got string) (same, readable bool) {
 		// 期望字面量是我们自己生成的(pgInstantArg/裸日期),正常永远可解析;
 		// 走到这里说明**实际边界**的形态读不懂(或类型种类对不上),按"读不懂"
 		// 处理 —— 宁可要求人工核对,也不把可能正确的分区判成错界。
-		return false, false
+		return 0, false
 	}
-	return wantTime.Equal(gotTime), true
+	return gotTime.Compare(wantTime), true
 }
 
 // partitionBoundDateLayout / partitionBoundInstantLayouts 覆盖 PG 的渲染形态:

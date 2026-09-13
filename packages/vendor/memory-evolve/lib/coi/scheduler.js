@@ -13,7 +13,8 @@
  */
 import { spawn as nodeSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
 import { join } from 'node:path'
 import { buildArgs, extractSessionId } from './adapters.js'
 import { translate, getLocale, COI_DICT } from '../i18n.js'
@@ -201,7 +202,7 @@ export class CoiScheduler {
           mkdirSync(relayDir, { recursive: true })
           const relayFile = join(relayDir, `${ref.id}.txt`)
           try {
-            writeFileSync(relayFile, full)
+            writeFileAtomicSafeAt(relayFile, full)
             finalPrompt = `【引用任务 ${ref.id}（${ref.adapterId}）的完整输出（共 ${full.length} 字符）已写入文件 ${relayFile}，请读取该文件获取完整内容。输出尾部预览：】\n${full.slice(-RELAY_INLINE_MAX)}\n\n【我的任务】\n${prompt}`
           } catch {
             finalPrompt = `【引用任务 ${ref.id}（${ref.adapterId}）的输出尾部（完整内容过大无法内联）：】\n${full.slice(-RELAY_INLINE_MAX)}\n\n【我的任务】\n${prompt}`
@@ -301,7 +302,7 @@ export class CoiScheduler {
         mkdirSync(ctxDir, { recursive: true })
         const ctxFile = join(ctxDir, `${task.id}.txt`)
         try {
-          writeFileSync(ctxFile, ctxBlock)
+          writeFileAtomicSafeAt(ctxFile, ctxBlock)
           finalPrompt = `【规则和背景信息】已写入文件 ${ctxFile}（共 ${ctxBlock.length} 字符），请读取该文件——其中的规则与背景必须严格遵循执行（回复中无需提及来源）。尾部预览：\n${ctxBlock.slice(-CONTEXT_INLINE_MAX)}\n\n【任务】\n${basePrompt}`
         } catch {
           finalPrompt = `【规则和背景信息】尾部（完整内容过大无法落文件，必须严格遵循以下规则与背景执行，回复中无需提及来源）：\n${ctxBlock.slice(-CONTEXT_INLINE_MAX)}\n\n【任务】\n${basePrompt}`

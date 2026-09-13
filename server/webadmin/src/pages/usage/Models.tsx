@@ -9,7 +9,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { PageHeader } from '../../components/page-header'
 import { RangeFilter, defaultRange, fetchUsageList, chatTokens, sumRows, downloadCsv, fmtY, type UsageRow, type ModelInfo } from './common'
 import { fmtTokens, isModelPriced } from '../../lib/format'
+import { PERM_GATEWAY_READ, hasPermission } from '../../lib/rbac'
 // 模型分析:模型明细(含单价) + 金额占比 + 渠道消耗
+//
+// 审计 R7 残余(R7-RV-1):本页只要求 usage:read,但首屏原来用 Promise.all 把
+// GET /models(要 gateway:read,见 internal/router/router.go:285)和两个用量
+// 请求绑在一起 —— auditor(有 usage:read、没有 gateway:read)打开本页时一个
+// 403 把整页打掉,连它有权读的模型/渠道用量行也一起消失,只剩一句错误。
+// 修法与 branding-3 已修的两条路径同口径:**前端不请求**注定 403 的接口,
+// 用量数据照常渲染,并把"单价/模型名需要 gateway:read"讲清楚;不动 rbac.go
+// (auditor 的最小权限三元组是刻意设计,PermReportRead 同样被刻意排除)。
 export default function UsageModels() {
   const init = defaultRange()
   const [from, setFrom] = useState(init.from)
@@ -21,6 +30,8 @@ export default function UsageModels() {
   const [error, setError] = useState('')
   // P2-46: 请求序号防乱序——快速切换区间时只有最新请求的响应能写 state。
   const loadSeq = useRef(0)
+  // 模型目录(名称/单价)是网关配置面:没有 gateway:read 就不发这个必然 403 的请求。
+  const canReadGateway = hasPermission(PERM_GATEWAY_READ)
 
   const load = useCallback(async (f: string, t: string) => {
     const current = ++loadSeq.current
@@ -30,7 +41,9 @@ export default function UsageModels() {
       const [mr, pr, ml] = await Promise.all([
         fetchUsageList({ group: 'model', from: f, to: t }),
         fetchUsageList({ group: 'provider', from: f, to: t }),
-        request<{ models: ModelInfo[] }>(`${ADMIN_API}/models`),
+        canReadGateway
+          ? request<{ models: ModelInfo[] }>(`${ADMIN_API}/models`)
+          : Promise.resolve({ models: [] as ModelInfo[] }),
       ])
       if (current !== loadSeq.current) return // P2-46: 过期响应丢弃
       setRows(mr)
@@ -42,7 +55,7 @@ export default function UsageModels() {
     } finally {
       if (current === loadSeq.current) setLoading(false)
     }
-  }, [])
+  }, [canReadGateway])
 
   useEffect(() => { void load(from, to) }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -70,6 +83,14 @@ export default function UsageModels() {
       <PageHeader title="模型分析" desc="哪些模型消耗了多少：单价、tokens、费用占比与渠道分布" />
       <RangeFilter from={from} to={to} setFrom={setFrom} setTo={setTo} onQuery={(f, t) => void load(f, t)} />
       {error && <div className="text-sm text-destructive">{error}</div>}
+      {!canReadGateway && (
+        // 服务端:GET /models(网关模型目录)要 gateway:read,本页主体(用量)
+        // 只要 usage:read —— 只读角色在这里必须看到"能看什么、为什么没有单价",
+        // 而不是整页 403 或一排空荡荡的 "—"。
+        <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          当前账号没有网关配置读取权限(gateway:read):模型消耗、费用与渠道分布照常显示,但模型目录与单价不可见(单价列显示「—」,不代表免费)。
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <Card>
@@ -162,7 +183,7 @@ export default function UsageModels() {
         </CardContent>
       </Card>
 
-      {(!models.some((m) => isModelPriced(m))) && rows.length > 0 && (
+      {canReadGateway && (!models.some((m) => isModelPriced(m))) && rows.length > 0 && (
         <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
           存在未配置价格的模型:其费用按 0 计,金额口径可能被低估(在网关「模型管理」中配置单价)。
         </div>

@@ -1,6 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { describe, expect, it, vi } from 'vitest'
 import { handleRendererBootRequest } from '../src/renderer-boot.ts'
+import type { WriteProofDeps } from '../src/write-proof.ts'
+
+/** R4-RV3a：这些用例只覆盖 Origin/内容校验，证明闸由写面回归套件单测。 */
+const ALLOWING_PROOF: WriteProofDeps = { fence: () => ({ requestRejection: () => undefined }), label: 'test' }
 
 function request(body: string, origin = 'http://127.0.0.1:43120'): IncomingMessage {
   return {
@@ -35,6 +39,7 @@ describe('desktop renderer boot route', () => {
       res,
       'http://127.0.0.1:43120',
       notify,
+      ALLOWING_PROOF,
     )
 
     expect(notify).toHaveBeenCalledWith(report)
@@ -51,6 +56,7 @@ describe('desktop renderer boot route', () => {
       res,
       'http://127.0.0.1:43120',
       notify,
+      ALLOWING_PROOF,
     )
 
     expect(notify).not.toHaveBeenCalled()

@@ -19,7 +19,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isProjectSyncEnabled, projectHash, readProvenance, withLock } from '../store.js'
@@ -44,8 +44,13 @@ const sxt = (key, params) => translate(SYNC_DICT, key, params, getLocale())
 function writeProvenanceSafe(dir, meta) {
   const target = resolveSafeRepoTarget(dir, 'PROVENANCE')
   if (target === null) return false
-  writeFileSync(target, `${JSON.stringify(meta)}\n`)
-  return true
+  // FIX-27（me-1，2026-09-13）：改走安全原子写（tmp 落点同样断言 + O_EXCL 按
+  // fd 写入 + rename 前后复检）。原先这里 `writeFileSync(target, …)` 是非原子
+  // 写；而 updateGlobalTracks/updateGlobalEnabled 另有一份手写的
+  // `${target}.tmp.${pid}` —— 预置同名真符号链接即跟随链接写穿仓库外，再把
+  // 链接 rename 成 PROVENANCE（git 记成 120000 同步出去），命令仍报 success。
+  const written = writeFileAtomicSafe(dir, target, `${JSON.stringify(meta)}\n`)
+  return written.ok === true
 }
 
 /** 拒收 PROVENANCE 落点时的统一错误结果。 */
@@ -55,7 +60,7 @@ function symlinkRefusedResult() {
 import { locateLegacyDir, normalizeRemoteUrl, resolveMainRemote, resolveProjectId, sanitizeRemoteUrl } from './identity.js'
 import { countConflicts, CONFLICTS_FILE, parseConflicts, resolveConflict } from './worker.js'
 import { deviceBConnect, ensureMemoryRepo, MODE_A_BRANCH, resolveFilesetFiles, sharedBranchFor } from './repo.js'
-import { GLOBAL_FILESET_KEYS, conflictsFileFor, globalBranchFor, resolveSafeRepoTarget } from './filesets.js'
+import { GLOBAL_FILESET_KEYS, conflictsFileFor, globalBranchFor, resolveSafeRepoTarget, writeFileAtomicSafe } from './filesets.js'
 
 /** 全局轨 fileset ↔ 用户可见轨名映射（memory/user/daily/todo）。 */
 const GLOBAL_TRACK_NAMES = { 'memory-global': 'memory', 'user-global': 'user', 'daily-global': 'daily', 'todo-global': 'todo' }
@@ -577,9 +582,10 @@ function updateGlobalTracks(memoryDir, mutate) {
       return
     }
     gMeta.tracks = mutate({ ...(gMeta.tracks ?? {}) })
-    const tmp = `${provPath}.tmp.${process.pid}`
-    writeFileSync(tmp, `${JSON.stringify(gMeta)}\n`)
-    renameSync(tmp, provPath)
+    if (!writeProvenanceSafe(memoryDir, gMeta)) {
+      result = { ok: false, message: sxt('sync.symlinkRefused', { path: 'PROVENANCE' }) }
+      return
+    }
     result = { ok: true, message: 'ok' }
   })
   return result
@@ -605,9 +611,10 @@ function updateGlobalEnabled(memoryDir, enabled) {
       return
     }
     gMeta.enabled = enabled === true
-    const tmp = `${provPath}.tmp.${process.pid}`
-    writeFileSync(tmp, `${JSON.stringify(gMeta)}\n`)
-    renameSync(tmp, provPath)
+    if (!writeProvenanceSafe(memoryDir, gMeta)) {
+      result = { ok: false, message: sxt('sync.symlinkRefused', { path: 'PROVENANCE' }) }
+      return
+    }
     result = { ok: true, message: 'ok' }
   })
   return result

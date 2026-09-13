@@ -93,7 +93,6 @@ func (a *API) handleCompletions(c *gin.Context) {
 
 	var resp *http.Response
 	var respSecrets []string
-	var requestBytes int64     // 客户端原始请求体字节(prompt 侧兜底估算基准)
 	var chosenProviderID int64 // 实际命中的 provider(计费取价用,P1-6)
 	for i := range ups {
 		body := raw
@@ -118,7 +117,6 @@ func (a *API) handleCompletions(c *gin.Context) {
 		resp, err = a.forwardEndpoint(c, &ups[i], body, req.Stream, "/completions")
 		if err == nil {
 			respSecrets = []string{ups[i].APIKey}
-			requestBytes = int64(len(raw))
 			chosenProviderID = ups[i].ID
 			if usageID > 0 {
 				if serr := serverstore.SetUsageProvider(a.DB, usageID, ups[i].ID); serr != nil {
@@ -139,10 +137,10 @@ func (a *API) handleCompletions(c *gin.Context) {
 		return
 	}
 	if req.Stream {
-		a.serveStream(c, resp, usageID, respSecrets, requestBytes)
+		a.serveStream(c, resp, usageID, respSecrets, raw, promptEstimateCapForModel(a.DB, req.Model))
 		return
 	}
-	a.serveJSON(c, resp, user.ID, chosenProviderID, req.Model, respSecrets, billingKindCompletions, requestBytes)
+	a.serveJSON(c, resp, user.ID, chosenProviderID, req.Model, respSecrets, billingKindCompletions, raw)
 }
 
 // forwardEndpoint forwards raw body to an upstream OpenAI-style endpoint

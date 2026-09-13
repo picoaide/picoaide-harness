@@ -43,6 +43,33 @@ export const CONNECTOR_AUTH_MODES: readonly string[] = ['oauth', 'device', 'toke
  * (`DSH_*`, `ELECTRON_*`). `HTTP(S)_PROXY` is included because the host's own
  * outbound guard is proxy-aware: a definition that could set the proxy could
  * route every later request through a host it chooses.
+ *
+ * conn-5 (audit R7): the COMMAND-HOOK family is included as well. These are not
+ * loader hooks — they are values that make an already-approved, innocuous
+ * command line shell out on its own (`git diff` with `GIT_EXTERNAL_DIFF`, a
+ * JVM/Dotnet/Perl/Ruby child with `JAVA_TOOL_OPTIONS` / `DOTNET_STARTUP_HOOKS` /
+ * `PERL5OPT` / `RUBYOPT`, `GCONV_PATH` for any glibc child). Measured in R7:
+ * approving `git diff` executed the shell payload in `GIT_EXTERNAL_DIFF`. This
+ * list can never be exhaustive (the prompt also discloses the VALUES, which is
+ * the root fix), but it removes the family a definition would reach for first.
+ *
+ * F-6 (audit R7 round 2): the pager/editor "selector" family is deliberately NOT
+ * in this list — see `CONFIRMATION_ONLY_ENV_KEYS` below. Denying it was measured
+ * to be worse than the harm: `sanitizeMcpEnv` dropped those keys SILENTLY on the
+ * local-injection path and the catalog parser dropped the whole row, so a
+ * legitimate connector became unusable and the user never learned why.
+ *
+ * N-3 (audit R7 round 3): "not denied by NAME" is not "not dangerous" — the same
+ * family is a real command hook (`EDITOR` / `GIT_EDITOR` shell out with NO TTY,
+ * which is exactly how an MCP stdio child runs; measured end to end). The tier is
+ * therefore only open to a single plain program name: see
+ * `isCommandTemplateEnvKey` / `isSafeCommandTemplateValue`. A value that would be
+ * concatenated into a shell command line, or that names an interpreter, is
+ * refused exactly like a denied key.
+ *
+ * The two lists must stay DISJOINT and every change to either one must be
+ * mirrored by the server (`server/internal/serverstore/connectors.go`), which the
+ * repo-side drift guard pins for both tiers.
  */
 export const DENIED_ENV_KEYS: ReadonlySet<string> = new Set([
   'PATH',
@@ -63,10 +90,204 @@ export const DENIED_ENV_KEYS: ReadonlySet<string> = new Set([
   'NO_PROXY',
   'NODE_TLS_REJECT_UNAUTHORIZED',
   'NODE_EXTRA_CA_CERTS',
+  // ---- command-hook family (conn-5) ----
+  'GIT_EXTERNAL_DIFF',
+  'GIT_SSH',
+  'GIT_SSH_COMMAND',
+  'GIT_SSH_VARIANT',
+  'GIT_ASKPASS',
+  'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_PARAMETERS',
+  // `BROWSER` is the one selector that stays denied: its value is a command
+  // TEMPLATE (with `%s` substitution) that consumers such as Python's
+  // `webbrowser` and the `xdg-open` family EXECUTE, i.e. a command hook in
+  // disguise — and a headless MCP child has no browser to select.
+  'BROWSER',
+  // `LESSOPEN` / `LESSCLOSE` are the same shape of hook one `less` invocation
+  // away: `less` runs them as a command template (`%s` / `%t` substitution)
+  // before/after reading a FILE argument. Measured (R7 round 3, N-3 equivalent
+  // channel): `LESSOPEN='|sh -c "id > flag" %s' less <file>` executes in a
+  // piped, TTY-less process — i.e. in the exact shape of an MCP stdio child —
+  // so this is NOT a pager selector that F-6's value tier could cover; it is a
+  // hard command hook like `BROWSER`.
+  'LESSOPEN',
+  'LESSCLOSE',
+  'PERL5OPT',
+  'PERL5LIB',
+  'RUBYOPT',
+  'RUBYLIB',
+  'JAVA_TOOL_OPTIONS',
+  '_JAVA_OPTIONS',
+  'JDK_JAVA_OPTIONS',
+  'DOTNET_STARTUP_HOOKS',
+  'GCONV_PATH',
+  'MAVEN_OPTS',
+  'GRADLE_OPTS',
+  'SBT_OPTS',
+  'NODE_REPL_EXTERNAL_MODULE',
 ])
 
-/** Denied env-key prefixes (product-owned namespaces). */
-const DENIED_ENV_PREFIXES: readonly string[] = ['DSH_', 'ELECTRON_', 'PICOAIDE_']
+/**
+ * Denied env-key prefixes (product-owned namespaces).
+ *
+ * `GIT_CONFIG_KEY_` / `GIT_CONFIG_VALUE_` are indexed (`_0` … `_N`) and are the
+ * documented way to inject arbitrary git configuration into a child — including
+ * `core.sshCommand` and `core.pager`, which are command hooks. A prefix covers
+ * every index (conn-5).
+ *
+ * Keep this list ALPHABETICAL: the repo-side drift guard compares it against the
+ * server's copy positionally (`TestConnectorDeniedEnvKeysMatchClientPolicy` sorts
+ * only the server side), so a non-alphabetical order here reads as drift.
+ */
+const DENIED_ENV_PREFIXES: readonly string[] = ['DSH_', 'ELECTRON_', 'GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_', 'PICOAIDE_']
+
+/**
+ * Env keys that are NOT denied but are handed to the LOCAL confirmation with
+ * their VALUES disclosed — the "selector" family (F-6, audit R7 round 2).
+ *
+ * Each of these names a program the child would show output with (`PAGER`,
+ * `GIT_PAGER`) or edit a file with (`EDITOR`, `VISUAL`, `GIT_EDITOR`,
+ * `GIT_SEQUENCE_EDITOR`). They are ordinary CLI configuration — `GIT_PAGER=cat`
+ * is the standard way to keep a git child non-interactive — and the harm of
+ * denying them is asymmetric: the definition is dropped silently, so the user's
+ * connector disappears with no explanation instead of getting a decision to
+ * make. The channel is covered by FIX-02's local confirmation, whose value
+ * disclosure (conn-5) shows exactly what the child will receive.
+ *
+ * Membership here is a *commitment*, machine-checked on both sides:
+ *  - nothing in this list may appear in `DENIED_ENV_KEYS` (the two tiers are
+ *    disjoint — see `tests/connector-env-selector-keys.spec.ts`);
+ *  - the server mirrors this list (`connectorConfirmationOnlyEnvKeys`), so a
+ *    denylist edit cannot silently move a key between tiers.
+ */
+export const CONFIRMATION_ONLY_ENV_KEYS: ReadonlySet<string> = new Set([
+  'PAGER',
+  'GIT_PAGER',
+  'EDITOR',
+  'VISUAL',
+  'GIT_EDITOR',
+  'GIT_SEQUENCE_EDITOR',
+])
+
+/**
+ * Characters a command-template VALUE may consist of (N-3, audit R7 round 3).
+ *
+ * The pager/editor tier above was opened on the theory that these names select a
+ * PROGRAM. That is only true for a value that IS one program name: every consumer
+ * of `EDITOR` / `GIT_EDITOR` / `GIT_SEQUENCE_EDITOR` (and of `PAGER`, once a TTY
+ * exists) runs the value through `sh -c`, so `EDITOR=sh -c "…"` is a shell
+ * command line in disguise and no amount of key-level disclosure changes that
+ * (the NAME looks like harmless editor configuration). The gate is therefore on
+ * the VALUE:
+ *
+ *  - ASCII letters/digits plus `_ . / \ : + -` only — no whitespace of any kind
+ *    (space, tab, newline, NBSP, U+2000…), and none of `; $ | & < > ( ) { } [ ]`
+ *    `* ? ! ~ # %` backtick or quote. Whitespace is what turns one argv[0] into a
+ *    command LINE (`vim -c …`, `sh -c …`, `sh ''`), `%` is the `%s` template
+ *    substitution, and `; | & $ \`` are the shell's own operators.
+ *  - the basename (after the last `/` or `\`) must not be a known command
+ *    INTERPRETER: `EDITOR=sh` is still a single plain token, but git then runs
+ *    the file it "edits" through the shell, so the approved command executes
+ *    attacker-writable CONTENT instead of an editor. Nobody configures a pager or
+ *    editor as `sh`/`python`; refusing those basenames costs no real use case.
+ *
+ * Consequences on both paths, deliberately fail-loud rather than silent:
+ *  - server catalog: `mcpDefinitionProblem` refuses the whole definition with a
+ *    message naming the key and the value (the admin sees why);
+ *  - local injection: `sanitizeMcpEnv` reports the key in `rejected`.
+ *
+ * The server mirrors this constant exactly (`connectorCommandTemplateAllowedChars`
+ * in `server/internal/serverstore/connectors.go`), pinned by
+ * `TestConnectorCommandTemplatePolicyMatchesClientPolicy`.
+ */
+export const SELECTOR_VALUE_ALLOWED_CHARS =
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./\\:+-'
+
+/**
+ * Program basenames that INTERPRET a file/stdin as code (N-3 layer 2).
+ *
+ * These pass the character gate (they are one plain token) but are never a
+ * legitimate pager/editor: `GIT_EDITOR=sh` makes the approved `git commit` run
+ * the edited file as a shell script. Kept as a small, explicit list (same list
+ * on the server, machine-checked) — the character gate is the real boundary; this
+ * only closes the "single token that is an interpreter" spelling.
+ */
+export const SELECTOR_INTERPRETER_TOKENS: readonly string[] = [
+  'sh', 'bash', 'dash', 'zsh', 'ksh', 'ash', 'csh', 'tcsh', 'fish', 'busybox',
+  'cmd', 'powershell', 'pwsh', 'wscript', 'cscript', 'mshta', 'rundll32', 'regsvr32',
+  'python', 'perl', 'ruby', 'node', 'nodejs', 'php', 'lua', 'tclsh', 'osascript',
+]
+
+/**
+ * Whether one lowercased basename is a known interpreter (N-3 layer 2).
+ *
+ * Matched on the name WITHOUT a Windows `.exe` suffix and with an optional
+ * version suffix (`python3.12`, `bash5`, `perl5.36`, `lua5.4`, `node.exe`) —
+ * those spellings are the same interpreter, and an exact-match list would be the
+ * "change one character and it walks through" mistake this round is about.
+ * @param base - lowercased basename of the value.
+ * @returns true when the value names an interpreter.
+ */
+function isInterpreterBasename(base: string): boolean {
+  const name = base.endsWith('.exe') ? base.slice(0, -'.exe'.length) : base
+  return SELECTOR_INTERPRETER_TOKENS.some(token =>
+    name === token || (name.startsWith(token) && /^[0-9.]*$/.test(name.slice(token.length))))
+}
+
+/**
+ * Whether one env key names something whose VALUE a consumer executes as a
+ * command (rather than a value that merely configures one).
+ *
+ * The explicit tier is honoured first, then the whole `*PAGER` / `*EDITOR`
+ * spelling family: enumerating six keys was the round-2 mistake — the same hook
+ * exists as `MANPAGER` / `SYSTEMD_PAGER` / `SVN_EDITOR` / `HGEDITOR` / …
+ * (measured: `MANPAGER='sh -c "…"' man ls` executes once a TTY exists), so the
+ * gate follows the SHAPE of the name, not a list that the next spelling escapes.
+ * @param key - environment variable name as the definition declared it.
+ * @returns true when the value must be a single plain program name.
+ */
+export function isCommandTemplateEnvKey(key: string): boolean {
+  const upper = normalizeEnvKey(key).toUpperCase()
+  if (upper === '') return false
+  if (CONFIRMATION_ONLY_ENV_KEYS.has(upper)) return true
+  return upper.endsWith('PAGER') || upper.endsWith('EDITOR')
+}
+
+/**
+ * Basename of a program value, lowercased (`C:\tools\Vim.EXE` → `vim.exe`).
+ * @param value - the declared value.
+ * @returns the last path segment.
+ */
+function commandTemplateBaseName(value: string): string {
+  const cut = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\'))
+  return (cut >= 0 ? value.slice(cut + 1) : value).toLowerCase()
+}
+
+/**
+ * Whether a value may be handed to a command-template key (N-3).
+ * @param value - the definition-supplied value.
+ * @returns true only for one plain program name.
+ */
+export function isSafeCommandTemplateValue(value: string): boolean {
+  if (value === '') return false
+  for (const char of value) {
+    if (!SELECTOR_VALUE_ALLOWED_CHARS.includes(char)) return false
+  }
+  const base = commandTemplateBaseName(value)
+  return base !== '' && !isInterpreterBasename(base)
+}
+
+/**
+ * Whether one `mcp[].env` pair is refused: a denied name, or a command-template
+ * name carrying a value that is not a single plain program (N-3).
+ * @param key - environment variable name.
+ * @param value - the paired value (already known to be a string).
+ * @returns true when the pair must not reach a child.
+ */
+export function isDeniedEnvEntry(key: string, value: string): boolean {
+  if (isDeniedEnvKey(key)) return true
+  return isCommandTemplateEnvKey(key) && !isSafeCommandTemplateValue(value)
+}
 
 /**
  * Normalize one environment key name before it is compared with the denylist.
@@ -107,6 +328,16 @@ export function normalizeEnvKey(key: string): string {
  * local approval prompt, which lists key NAMES. Both the server catalog parser
  * (reject the definition, fail-loud) and the runtime whitelist (drop the key)
  * go through this one predicate.
+ *
+ * A name containing NUL is refused too (conn-6, audit R7). Node rejects a whole
+ * env map whose key carries a null byte
+ * (`ERR_INVALID_ARG_VALUE … must be a string without null bytes`), so the
+ * pre-fix behaviour was a definition-triggered, self-inflicted registration
+ * failure: the key passed the parser, the whitelist and the prompt, and then
+ * blew up `spawn`. Not RCE (libuv copies `NAME=VALUE` with `strlen`, so a NUL
+ * cannot split off a second variable), but an impossible name must never reach
+ * a child. Refused BEFORE the invisible-character stripper runs, so the check
+ * cannot be defeated by a normalizer that happens to drop the byte.
  * @param key - environment variable name.
  * @returns true when the key must be dropped (or the definition rejected).
  */
@@ -115,6 +346,7 @@ export function isDeniedEnvKey(key: string): boolean {
   const upper = normalized.toUpperCase()
   if (upper === '') return true
   if (normalized.includes('=')) return true
+  if (normalized.includes('\0')) return true
   return DENIED_ENV_KEYS.has(upper) || DENIED_ENV_PREFIXES.some(prefix => upper.startsWith(prefix))
 }
 
@@ -139,7 +371,9 @@ export function sanitizeMcpEnv(raw: unknown): SanitizedEnv {
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     // Blank/whitespace-only and denied names both land here: `isDeniedEnvKey`
     // trims before it compares, so `"PATH "` cannot become a second spelling.
-    if (typeof value !== 'string' || isDeniedEnvKey(key)) {
+    // N-3: a command-template key whose value is a shell command line lands here
+    // too — the name is reported in `rejected`, so the drop is never silent.
+    if (typeof value !== 'string' || isDeniedEnvEntry(key, value)) {
       rejected.push(key)
       continue
     }
@@ -231,6 +465,18 @@ export function credentialFieldProblem(def: Pick<ConnectorDef, 'tokenFields' | '
  *
  * Denied names never reach this function: callers pass the sanitized env and
  * the denylist-filtered credential keys.
+ *
+ * A plain fast digest is correct here and must NOT be replaced by a slow KDF
+ * (bcrypt/scrypt/PBKDF2/Argon2). This is an equality/change-detection token,
+ * not password storage: nothing secret is being protected by its one-wayness.
+ * Every hashed input is a definition field the user is shown verbatim in the
+ * approval prompt, and the digest only ever decides "is this the same spawn
+ * request the user already approved?". A slow KDF would buy no attacker cost
+ * while making every approval check (and every re-render of the connector
+ * panel) computationally expensive, and changing the input encoding would
+ * invalidate existing approvals and re-prompt every user for an unchanged
+ * command. Static analysers flag this line by name heuristic; that is a false
+ * positive (see the `js/insufficient-password-hash` dismissal on the PR).
  * @param command - executable.
  * @param args - argument vector.
  * @param env - sanitized definition env.
@@ -295,7 +541,15 @@ export function mcpServerProblem(server: unknown, options: { denyProtectedEnv?: 
     if (env !== undefined) {
       if (env === null || typeof env !== 'object' || Array.isArray(env)) return 'env 必须是字符串映射'
       for (const [key, value] of Object.entries(env as Record<string, unknown>)) {
-        if (options.denyProtectedEnv === true && isDeniedEnvKey(key)) return `env 键不被允许（受保护或为空）: ${JSON.stringify(key)}`
+        if (options.denyProtectedEnv === true) {
+          if (isDeniedEnvKey(key)) return `env 键不被允许（受保护或为空）: ${JSON.stringify(key)}`
+          // N-3: the selector tier is only open to a single plain program name.
+          // The whole definition is refused (fail-loud) with the reason naming
+          // both the key and the value, instead of silently dropping the pair.
+          if (typeof value === 'string' && !isSafeCommandTemplateValue(value) && isCommandTemplateEnvKey(key)) {
+            return `env.${key} 的值不是单个程序名（含空白/shell 元字符或命令解释器，会被当作命令模板执行）: ${JSON.stringify(value)}`
+          }
+        }
         if (typeof value !== 'string') return `env.${key} 必须是字符串`
       }
     }

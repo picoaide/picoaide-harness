@@ -121,6 +121,42 @@ function hasSdkMarker(path: string, foldCase = process.platform === 'win32'): bo
 }
 
 /**
+ * Whether this spelling is a Windows path, i.e. one where `\` really is a
+ * separator rather than an ordinary filename byte.
+ *
+ * Only these may be folded (conn-3, audit R7). On POSIX `\` is a legal
+ * filename character: folding it unconditionally let ONE real file whose name
+ * contains the SDK tail canonicalise onto a DIFFERENT real file's path, so
+ * `sameFile` answered true for two readable, different files and the fence
+ * installed silently.
+ *
+ * The shapes accepted are the ones the packaged/Windows product produces:
+ * a drive-letter path (`C:\…` / `C:/…`), a UNC or extended-length prefix
+ * (`\\?\`, `\\server\share`, `//?/`, `//server/share`), a rooted backslash path
+ * (`\tmp\x`, i.e. "the current drive"), or — only when `foldCase` says this
+ * really is Windows — any relative path containing `\`.
+ *
+ * All of those start with something a RESOLVED POSIX path never starts with:
+ * `resolveTarget` only ever sees `fileURLToPath` output, which is absolute and
+ * therefore begins with `/`. A POSIX path whose FILE NAME merely contains
+ * backslashes (`/opt/app/node_modules\@modelcontextprotocol\sdk`) is not a
+ * Windows shape and is left alone — that is the conn-3 distinction.
+ */
+function isWindowsPathShape(value: string, foldCase: boolean): boolean {
+  // `\\?\C:…`, `\\?\UNC\…`, both slash spellings.
+  if (/^[\\/]{2}[.?][\\/]/u.test(value)) return true
+  // `C:\…` / `C:/…`
+  if (/^[A-Za-z]:[\\/]/u.test(value)) return true
+  // `\\server\share` / `//server/share` (UNC without the `?\` prefix).
+  if (/^[\\/]{2}[^\\/]/u.test(value)) return true
+  // A rooted backslash path names the current drive on Windows; POSIX has no
+  // such spelling (an absolute POSIX path starts with `/`).
+  if (value.startsWith('\\')) return true
+  // A relative Windows spelling only exists on Windows, where `foldCase` is on.
+  return foldCase && value.includes('\\')
+}
+
+/**
  * Make two spellings of one file compare equal — and only those.
  *
  * The identity check compares a path this module resolved with one mcp-client
@@ -141,9 +177,14 @@ function hasSdkMarker(path: string, foldCase = process.platform === 'win32'): bo
  * offline). A spelling the rules do not cover still counts as different —
  * {@link describeTargets} then says so, and the caller decides between refusing
  * (proven different file) and warning (unreadable path).
+ *
+ * Separator folding is applied only where the separator IS a separator
+ * (conn-3): a Windows-shaped input, or any input at all when `foldCase` says
+ * the platform folds path case (Windows). POSIX paths are therefore compared
+ * byte for byte, which is what keeps two different files distinguishable.
  */
 export function canonicalMcpTargetPath(path: string, foldCase = process.platform === 'win32'): string {
-  let value = path.replace(/\\/g, '/')
+  let value = foldCase || isWindowsPathShape(path, foldCase) ? path.replace(/\\/g, '/') : path
   // `\\?\C:/x` and `//?/C:/x` both name `C:/x`
   if (value.startsWith('//?/')) value = value.slice(4)
   if (foldCase) value = value.toLowerCase()
@@ -177,8 +218,32 @@ function errorCodeOf(cause: unknown): string {
   return String(cause)
 }
 
-/** Whether both sides name the same file — string compare of canonical forms. */
-function sameFile(a: TargetResolution, b: TargetResolution): boolean {
+/**
+ * Whether both sides name the same file (conn-3).
+ *
+ * The resolved bytes decide first: when both sides could be read, an exact
+ * `realpath` match is the same file, and two POSIX spellings that differ are two
+ * different files — folding the canonical form first, as before, made a POSIX
+ * filename containing backslashes compare equal to a different file.
+ *
+ * Two exceptions have to stay open, because both name ONE file while resolving
+ * to different bytes:
+ *
+ * - a Windows-shaped spelling (drive letter, UNC / extended-length prefix,
+ *   rooted backslash path — see {@link isWindowsPathShape});
+ * - anything at all on a case-folding platform (`foldCase`).
+ *
+ * The canonical comparison is otherwise the fallback for a path this process
+ * cannot stat (the `app.asar` / EPERM shape), exactly as before.
+ */
+function sameFile(a: TargetResolution, b: TargetResolution, foldCase: boolean): boolean {
+  if (a.realpath !== null && b.realpath !== null) {
+    if (a.realpath === b.realpath) return true
+    const spellingOnly = foldCase
+      || isWindowsPathShape(a.realpath, foldCase)
+      || isWindowsPathShape(b.realpath, foldCase)
+    if (!spellingOnly) return false
+  }
   return a.canonical === b.canonical
 }
 
@@ -291,7 +356,7 @@ function decideTargets(ours: TargetResolution, theirs: TargetResolution, foldCas
     // We are not even looking at an installed SDK copy (inlined build).
     return { kind: 'inconclusive', ours, theirs }
   }
-  if (sameFile(ours, theirs)) return { kind: 'ok', ours, theirs }
+  if (sameFile(ours, theirs, foldCase)) return { kind: 'ok', ours, theirs }
   return ours.realpath !== null && theirs.realpath !== null
     ? { kind: 'proven-other', ours, theirs }
     : { kind: 'inconclusive', ours, theirs }
