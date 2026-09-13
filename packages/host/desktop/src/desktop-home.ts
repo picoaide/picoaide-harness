@@ -164,15 +164,39 @@ export function dshHomeSafe(
   options: {
     configured?: string
     env?: Record<string, string | undefined>
+    /** `~` 展开用的 home 目录（测试 seam，与 `resolveDshHome` 的第三个参数同义）。 */
+    home?: string | undefined
     /** 渠道数据目录名（见 `channelDshHomeDir`）；缺省官方目录。 */
     productDir?: string | undefined
   } = {},
 ): string {
-  const resolved = resolveDshHome(options.configured, options.env, undefined, options.productDir)
+  const resolved = resolveDshHome(options.configured, options.env, options.home, options.productDir)
   if (!isSafeDshHome(resolved)) {
     const source = options.env?.[DSH_HOME_ENV] ?? options.configured
     throw new Error(`unsafe DSH_HOME: ${String(source ?? resolved)} resolves into a system directory`)
   }
+  return resolved
+}
+
+/**
+ * 解析**本次安装**的数据根并写回 `DSH_HOME`（渠道构建 → 渠道目录）。
+ *
+ * 桌面启动（`main.ts` 的 `start()`）与 `--export-diagnostics` 的早退分支都必须
+ * 走这里，两条路径的口径才会一致：早退分支在 `start()` **之前**运行，此前没有
+ * 这一步，于是渠道包的支持包会去数**官方**数据根里的会话（desktop-3）。
+ * @param options - 渠道包的 `desktop.home_dir`、环境映射与 home 测试 seam。
+ * @returns 已解析的绝对数据根（同时已写入 `env[DSH_HOME]`）。
+ */
+export function applyInstallDshHome(
+  options: {
+    readonly productDir?: string | undefined
+    readonly env?: Record<string, string | undefined>
+    readonly home?: string | undefined
+  } = {},
+): string {
+  const env = options.env ?? process.env
+  const resolved = dshHomeSafe({ productDir: options.productDir, env, home: options.home })
+  env[DSH_HOME_ENV] = resolved
   return resolved
 }
 

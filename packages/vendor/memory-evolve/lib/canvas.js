@@ -25,14 +25,14 @@
  */
 
 import {
-  createReadStream, existsSync, mkdirSync, readFileSync, realpathSync,
-  renameSync, statSync, writeFileSync,
+  createReadStream, existsSync, readFileSync, realpathSync, statSync,
 } from 'node:fs'
 import { spawn as spawnProcess } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { translate, getLocale, MISC2_DICT } from './i18n.js'
 import { applyRequestGuard, readBody as sharedReadBody } from './http-guard.js'
+import { writeFileAtomicSafeAt } from './sync/filesets.js'
 
 /** Translate through MISC2_DICT in the active host locale. */
 const ct2 = (key, params) => translate(MISC2_DICT, key, params, getLocale())
@@ -223,11 +223,9 @@ export function writeCanvas(config, patch, rev) {
     viewMode: patch.viewMode ?? current.viewMode,
     lastAiNodeId: patch.lastAiNodeId === undefined ? current.lastAiNodeId : patch.lastAiNodeId,
   }
-  const dir = canvasDir(config)
-  mkdirSync(dir, { recursive: true })
-  const tmp = join(dir, `boards.json.tmp.${process.pid}`)
-  writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n')
-  renameSync(tmp, canvasPath(config))
+  // FIX-27（2026-09-13）：自锚定安全原子写（`boards.json.tmp.<pid>` 是
+  // 可预置的写落点——预置同名符号链接即写穿到画板目录外）
+  writeFileAtomicSafeAt(canvasPath(config), JSON.stringify(next, null, 2) + '\n')
   return next.rev
 }
 

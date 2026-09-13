@@ -5,6 +5,10 @@ import {
   handleDesktopUpdateRequest,
 } from '../src/desktop-update-route.ts'
 import { emptyDesktopUpdateState } from '../src/desktop-update-contract.ts'
+import type { WriteProofDeps } from '../src/write-proof.ts'
+
+/** R4-RV3a：这些用例只覆盖徽章读面与写面的 Origin/方法校验；证明闸由写面回归套件单测。 */
+const ALLOWING_PROOF: WriteProofDeps = { fence: () => ({ requestRejection: () => undefined }), label: 'test' }
 
 function request(method = 'GET', origin: string | undefined = 'http://127.0.0.1:43120'): IncomingMessage {
   return { method, headers: origin === undefined ? {} : { origin } } as IncomingMessage
@@ -87,7 +91,7 @@ describe('desktop update badge route', () => {
   it('triggers the manual check for an allowed same-origin POST', async () => {
     const checkNow = vi.fn()
     const res = response()
-    await handleDesktopUpdateCheckRequest(request('POST'), res, 'http://127.0.0.1:43120', checkNow)
+    await handleDesktopUpdateCheckRequest(request('POST'), res, 'http://127.0.0.1:43120', checkNow, ALLOWING_PROOF)
 
     expect(checkNow).toHaveBeenCalledOnce()
     expect(res.statusCode).toBe(202)
@@ -102,6 +106,7 @@ describe('desktop update badge route', () => {
       cross,
       'http://127.0.0.1:43120',
       checkNow,
+      ALLOWING_PROOF,
     )
     expect(cross.statusCode).toBe(403)
     expect(checkNow).not.toHaveBeenCalled()
@@ -112,6 +117,7 @@ describe('desktop update badge route', () => {
       badMethod,
       'http://127.0.0.1:43120',
       checkNow,
+      ALLOWING_PROOF,
     )
     expect(badMethod.statusCode).toBe(405)
   })

@@ -27,12 +27,13 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import {
-  closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync,
+  closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync,
 } from 'node:fs'
-import { readdir, rename, stat, writeFile } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, dirname, extname, join, resolve } from 'node:path'
+import { basename, extname, join, resolve } from 'node:path'
 import { translate, getLocale, MISC2_DICT } from './i18n.js'
+import { writeFileAtomicSafeAtAsync } from './sync/filesets.js'
 
 /** Translate through MISC2_DICT in the active host locale. */
 const sdt = (key, params) => translate(MISC2_DICT, key, params, getLocale())
@@ -487,11 +488,11 @@ function createWalkProvider(config) {
       next.roots[root] = Date.now()
     }
     try {
-      mkdirSync(dirname(cacheFile), { recursive: true })
       // 大缓存必须异步写：同步 stringify+写盘几十万条会阻塞主进程数秒
-      //（曾把 DSH 主进程卡死）。
-      await writeFile(`${cacheFile}.tmp.${process.pid}`, JSON.stringify(next))
-      await rename(`${cacheFile}.tmp.${process.pid}`, cacheFile)
+      //（曾把 DSH 主进程卡死）。FIX-27（2026-09-13）：改用异步版自锚定安全
+      // 原子写（打开前断言 + O_EXCL + 按 fd 写入 + rename 前后复检），
+      // `cache.tmp.<pid>` 被预置符号链接时拒写而不是写穿缓存目录外。
+      await writeFileAtomicSafeAtAsync(cacheFile, JSON.stringify(next))
     } catch {
       // 缓存写失败不致命：本次结果仍然可用
     }

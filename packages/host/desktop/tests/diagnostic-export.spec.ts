@@ -4,12 +4,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { describe, expect, it } from 'vitest'
 import AdmZip from 'adm-zip'
@@ -18,6 +19,12 @@ import {
   exportDiagnosticsZip,
   waitForDiagnosticExportWorker,
 } from '../src/diagnostic-export.ts'
+import {
+  DSH_HOME_ENV,
+  PRODUCT_DSH_HOME_DIR,
+  applyInstallDshHome,
+  channelDshHomeDir,
+} from '../src/desktop-home.ts'
 
 const APP_VERSION = '2.0.1-test'
 
@@ -111,6 +118,74 @@ describe('exportDiagnosticsZip', () => {
     expect(info).toContain('session-inventory-truncated: false')
     expect(zip.readAsText('session-inventory.json')).not.toContain('private-v0-session-body')
     expect(zip.readAsText('session-inventory.json')).not.toContain('private-v3-session-body')
+  })
+
+  it('inventories only this installation\'s sessions for the channel --export-diagnostics path', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-dx-install-'))
+    const channelRoot = join(home, '.acme-harness')
+    // 同机两套安装:官方根与渠道根各有自己的会话。
+    const officialSession = join(home, PRODUCT_DSH_HOME_DIR, 'sessions', 'official-project', 'sess-official-1')
+    const channelSession = join(channelRoot, 'sessions', 'channel-project', 'sess-channel-1')
+    mkdirSync(officialSession, { recursive: true })
+    mkdirSync(channelSession, { recursive: true })
+    writeFileSync(join(officialSession, 'session.jsonl'), '{"type":"message"}\n')
+    writeFileSync(join(channelSession, 'session.jsonl'), '{"type":"message"}\n')
+
+    // 早退分支与 start() 同一口径:按渠道包的 desktop.home_dir 解析本安装的数据根。
+    const env: Record<string, string | undefined> = {}
+    expect(applyInstallDshHome({
+      productDir: channelDshHomeDir('acme', { slug: 'Acme-Harness' }),
+      env,
+      home,
+    })).toBe(channelRoot)
+    expect(env[DSH_HOME_ENV]).toBe(channelRoot)
+
+    // 导出时进程环境里没有 DSH_HOME(渠道客户端正常启动前就是这样,start() 还没
+    // 写回):修复前导出器会回落到官方根,把另一套安装的会话列进支持包。
+    const previousHome = process.env.HOME
+    const previousDshHome = process.env.DSH_HOME
+    process.env.HOME = home
+    delete process.env.DSH_HOME
+    try {
+      const userData = join(home, 'config', 'Acme Harness (acme)')
+      const archive = await exportDesktopDiagnostics(userData, {
+        appVersion: APP_VERSION,
+        crashDumpsDir: join(userData, 'Crashpad'),
+        installHomeDir: channelRoot,
+      })
+      const inventory = JSON.parse(new AdmZip(archive).readAsText('session-inventory.json')) as {
+        available: boolean
+        sessions: Array<{ id: string }>
+      }
+      expect(inventory.available).toBe(true)
+      expect(inventory.sessions.map(session => session.id)).toEqual(['sess-channel-1'])
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME
+      else process.env.HOME = previousHome
+      if (previousDshHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousDshHome
+    }
+  })
+
+  it('keeps the diagnostics archive and its directories owner-only (0600/0700) under a permissive umask', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dx-mode-'))
+    // 宽松 umask 是默认环境:归档权限不能跟着 umask 走(adm-zip 会显式 chmod)。
+    const previousUmask = process.umask(0o022)
+    try {
+      const userData = join(root, 'never-launched', 'PicoAide Harness')
+      const archive = await exportDesktopDiagnostics(userData, {
+        appVersion: APP_VERSION,
+        sessionsDir: join(root, 'sessions'),
+      })
+      expect(existsSync(archive)).toBe(true)
+      expect(statSync(archive).mode & 0o777).toBe(0o600)
+      expect(statSync(dirname(archive)).mode & 0o777).toBe(0o700)
+      // 导出路径自己创建的 userData/logs 同样必须是私有目录。
+      expect(statSync(join(userData, 'logs')).mode & 0o777).toBe(0o700)
+      expect(statSync(userData).mode & 0o777).toBe(0o700)
+    } finally {
+      process.umask(previousUmask)
+    }
   })
 
   it('includes local Crashpad minidumps but excludes unrelated crash files', async () => {

@@ -6,11 +6,12 @@
  * 的交互仅通过 deps.memoryStore（写摘要）这一个薄接口——未来拆成独立
  * 插件时替换该回调即可，模块内部零改动。
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { translate, getLocale, COI2_DICT, NOTIFY_DICT } from '../i18n.js'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
 
 /** Translate through NOTIFY_DICT in the active host locale. */
 const cnt = (key, params) => translate(NOTIFY_DICT, key, params, getLocale())
@@ -30,7 +31,7 @@ import { BroadcastStore, messageToolDefinition } from './broadcast.js'
 import { installBroadcastApi } from './broadcast-api.js'
 import { PresenceTracker } from './presence.js'
 import { readAliases } from '../aliases.js'
-import { normalizeSkillText, syncBuiltinSkills } from './skills-sync.js'
+import { normalizeSkillText, isSafeSkillName, syncBuiltinSkills } from './skills-sync.js'
 
 /** 插件包内 skills/ 目录（内置技能源头）。 */
 const PLUGIN_SKILLS_DIR = fileURLToPath(new URL('../../skills/', import.meta.url))
@@ -60,10 +61,8 @@ function loadRuntime(file) {
 }
 
 function saveRuntime(file, runtime) {
-  mkdirSync(dirname(file), { recursive: true })
-  const tmp = `${file}.tmp.${process.pid}`
-  writeFileSync(tmp, JSON.stringify(runtime, null, 2) + '\n')
-  renameSync(tmp, file)
+  // FIX-27（2026-09-13）：自锚定安全原子写（tmp 落点同样断言 + O_EXCL）
+  writeFileAtomicSafeAt(file, JSON.stringify(runtime, null, 2) + '\n')
 }
 
 /** 校验一个 COI 运行时配置补丁；非法抛错。 */
@@ -308,6 +307,8 @@ export function installCoi(ctx, config, deps) {
       if (!adapter) return { ok: false, message: cix2('coi2.adapterUnknown', { id: adapterId }) }
       const skillName = adapter.skillName
       if (!skillName) return { ok: false, message: cix2('coi2.adapterNoSkill', { id: adapterId }) }
+      // 技能名参与路径拼接：未校验时 `../../x` 可读到技能库之外（NF-1 同族）。
+      if (!isSafeSkillName(skillName)) return { ok: false, message: cix2('coi2.skillReadFailed', { detail: `非法技能名：${skillName}（须为 kebab-case）` }) }
       const file = join(config.skillDir, skillName, 'SKILL.md')
       try {
         const content = readFileSync(file, 'utf8')
@@ -320,6 +321,10 @@ export function installCoi(ctx, config, deps) {
     /**
      * 写适配器关联技能的 SKILL.md（编辑保存；保留 frontmatter 版本，
      * 同步逻辑见 skills-sync——用户编辑后内置版本不变则不覆盖）。
+     *
+     * 落点（NF-1）：改为自锚定安全原子写 + `anchorDir=技能库根`——预置的
+     * 符号链接（文件或目录）不得把技能正文写到技能库之外，落点被拒时如实
+     * 返回 ok:false（第一轮这里是裸 writeFileSync，写穿且报成功）。
      * @param {string} adapterId
      * @param {string} content
      * @returns {{ok:boolean, message?:string}}
@@ -329,6 +334,9 @@ export function installCoi(ctx, config, deps) {
       if (!adapter) return { ok: false, message: cix2('coi2.adapterUnknown', { id: adapterId }) }
       const skillName = adapter.skillName
       if (!skillName) return { ok: false, message: cix2('coi2.adapterNoSkill', { id: adapterId }) }
+      if (!isSafeSkillName(skillName)) {
+        return { ok: false, message: cix2('coi2.skillSaveFailed', { detail: `非法技能名：${skillName}（须为 kebab-case）` }) }
+      }
       let text
       try {
         text = normalizeSkillText(content, skillName, adapter.name)
@@ -337,8 +345,7 @@ export function installCoi(ctx, config, deps) {
       }
       const file = join(config.skillDir, skillName, 'SKILL.md')
       try {
-        mkdirSync(dirname(file), { recursive: true })
-        writeFileSync(file, text)
+        writeFileAtomicSafeAt(file, text, { anchorDir: config.skillDir })
         return { ok: true, message: cix2('coi2.skillSaved', { skill: skillName }) }
       } catch (error) {
         return { ok: false, message: cix2('coi2.skillSaveFailed', { detail: error.message }) }

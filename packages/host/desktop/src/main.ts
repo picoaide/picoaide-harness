@@ -12,7 +12,7 @@ import {
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import { DEFAULT_DEEP_LINK_SCHEME, OFFICIAL_PRODUCT_NAME, readDesktopChannelProfile } from './desktop-channel.ts'
-import { DSH_HOME_ENV, dshHomeSafe, isSystemWorkingDirectory } from './desktop-home.ts'
+import { applyInstallDshHome, isSystemWorkingDirectory } from './desktop-home.ts'
 import { desktopUserDataDirectoryName } from './desktop-user-data.ts'
 import { desktopProductVersion, ElectronDesktopRuntime } from './electron-runtime.ts'
 import {
@@ -284,8 +284,7 @@ async function start(): Promise<void> {
   // system directory must abort startup (the surrounding try/catch logs it and
   // exits 1) instead of silently writing user data there. This is the same
   // `isSafeDshHome` check the enterprise installers enforce.
-  const homeDir = dshHomeSafe({ productDir: CHANNEL_PROFILE?.homeDir })
-  process.env[DSH_HOME_ENV] = homeDir
+  const homeDir = applyInstallDshHome({ productDir: CHANNEL_PROFILE?.homeDir })
   const windowsVolumeConcerns = diagnoseWindowsVolumes(process.platform, [
     { label: 'application install', path: process.execPath },
     { label: 'desktop user data', path: app.getPath('userData') },
@@ -385,9 +384,14 @@ async function run(): Promise<void> {
   if (process.argv.includes('--export-diagnostics')) {
     try {
       await app.whenReady()
+      // desktop-3: 早退分支不经过 start(),数据根必须在这里按**同一口径**确定
+      // (渠道包 → 渠道目录)并写回 DSH_HOME;否则支持包里的 session-inventory
+      // 会走官方数据根,把另一套安装的会话 id/项目目录名带给厂商。
+      const homeDir = applyInstallDshHome({ productDir: CHANNEL_PROFILE?.homeDir })
       const path = await exportDesktopDiagnostics(app.getPath('userData'), {
         appVersion: desktopProductVersion(),
         crashDumpsDir: app.getPath('crashDumps'),
+        installHomeDir: homeDir,
       })
       await new Promise<void>((resolve, reject) => {
         process.stdout.write(`${path}\n`, error => {

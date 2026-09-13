@@ -21,7 +21,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { isCanonical, isProjectSyncEnabled, parseEntries, serializeEntries, readProvenance } from '../store.js'
 import { genEntryId, extractEntryId, extractTodoId, TODO_ID_RE } from './entryid.js'
@@ -204,8 +204,12 @@ async function runSyncInner({ dir, remoteBranch, push = false, fileset = 'projec
       for (const inv of ours.invalid) {
         const bakTarget = resolveFilesetTarget(dir, inv.path, fileset)
         if (bakTarget === null) continue // 落点不安全（符号链接/越界）：跳过备份，本次同步已中止
+        // FIX-27（me-2，2026-09-13）：备份落点同样走安全原子写 ——
+        // `${bakTarget}.bak.<Date.now()>` 是可预置的写落点（毫秒时间戳可枚举，
+        // 符号链接农场能让"备份"落到仓库外）。按原始字节读回再按 fd 写入
+        // （避免编码往返）；落点被拒即不写，原文件本就不重写。
         try {
-          copyFileSync(bakTarget, `${bakTarget}.bak.${Date.now()}`)
+          writeFileAtomicSafe(dir, `${bakTarget}.bak.${Date.now()}`, readFileSync(bakTarget))
         } catch { /* 备份失败不阻断中止 */ }
       }
       return { fatal: `本地记忆文件格式异常（${ours.invalid[0].path}：${ours.invalid[0].reason}）——已备份原文件并停止同步，请整理后重试` }

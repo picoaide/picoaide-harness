@@ -192,23 +192,35 @@ export function apply(ctx: Context, config: Config): void {
     let lastError: DesktopUpdateErrorCategory | undefined
     let state: UpdateStateV2 = EMPTY_STATE
     let pollTimer: ReturnType<typeof setTimeout> | undefined
-    let requestTimer: ReturnType<typeof setTimeout> | undefined
     let retryTimer: ReturnType<typeof setTimeout> | undefined
-    let requestController: AbortController | undefined
+    /**
+     * 所有在飞的清单/渠道探测请求。
+     *
+     * 2026-09-13 (desktop-1): 这里曾经是**单槽** `requestTimer`/`requestController`
+     * —— 后启动的操作会 `clearTimeout` 掉先启动操作的保护，先结束的操作又会把后
+     * 启动的定时器清掉。检查在飞时来一次会话切换（登录/登出/换服务端）就能让检查
+     * 永久失去超时：`startCheck` 的 promise 永不 settle，此后"检查更新"静默无反应，
+     * 连 dispose 都 abort 不到它。现在每个请求持有**自己的**控制器与定时器。
+     */
+    const inFlightRequests = new Set<AbortController>()
     let downloadController: AbortController | undefined
     let inFlight: Promise<CheckOutcome> | undefined
     let manualTask: Promise<void> | undefined
     let downloadTask: Promise<void> | undefined
     let refreshTray = (): void => {}
 
-    /** 清单请求的单次超时(每次重试各自计时)。 */
-    const beginRequestTimer = (controller: AbortController): void => {
-      if (requestTimer !== undefined) clearTimeout(requestTimer)
-      requestTimer = setTimeout(() => { controller.abort() }, config.requestTimeoutMs)
-    }
-    const endRequestTimer = (): void => {
-      if (requestTimer !== undefined) clearTimeout(requestTimer)
-      requestTimer = undefined
+    /**
+     * 为一次请求装自己的超时并登记到在飞集合。
+     * @param controller - 本次请求专属的控制器。
+     * @returns 收尾函数：只清**这一个**定时器并从在飞集合摘除。
+     */
+    const beginRequestTimer = (controller: AbortController): (() => void) => {
+      inFlightRequests.add(controller)
+      const timer = setTimeout(() => { controller.abort() }, config.requestTimeoutMs)
+      return () => {
+        clearTimeout(timer)
+        inFlightRequests.delete(controller)
+      }
     }
 
     /** 等待一次退避;返回 false 表示等待期间被销毁(调用方必须停止)。 */
@@ -306,7 +318,8 @@ export function apply(ctx: Context, config: Config): void {
       channelResolved = true
       const target = serverURL
       const controller = new AbortController()
-      requestController = controller
+      // 探测自己计时:绝不占用清单请求的超时预算,也不抢走它的控制器。
+      const endProbe = beginRequestTimer(controller)
       void (async () => {
         try {
           const response = await adapter.request(serverChannelURL(target), {
@@ -327,7 +340,7 @@ export function apply(ctx: Context, config: Config): void {
         } catch {
           // 渠道内容取不到不是失败:省略比对即可。
         } finally {
-          if (requestController === controller) requestController = undefined
+          endProbe()
         }
       })()
     }
@@ -400,7 +413,7 @@ export function apply(ctx: Context, config: Config): void {
       const source = currentSource()
       if (source === null) return null
       const controller = new AbortController()
-      beginRequestTimer(controller)
+      const endRequest = beginRequestTimer(controller)
       try {
         const outcome = await fetchReleaseManifestDetailed({
           manifestURL: source.manifestURL,
@@ -412,7 +425,7 @@ export function apply(ctx: Context, config: Config): void {
       } catch {
         return null
       } finally {
-        endRequestTimer()
+        endRequest()
       }
     }
 
@@ -519,8 +532,7 @@ export function apply(ctx: Context, config: Config): void {
         for (let attempt = 1; attempt <= checkRetry.maxAttempts; attempt += 1) {
           if (disposed) return { kind: 'failed', error: 'network' }
           const controller = new AbortController()
-          requestController = controller
-          beginRequestTimer(controller)
+          const endRequest = beginRequestTimer(controller)
           let retriable = false
           try {
             // 清单请求先发:渠道探测只是可选对账,与它并行即可,绝不排在它前面
@@ -552,8 +564,7 @@ export function apply(ctx: Context, config: Config): void {
           } catch {
             retriable = true
           } finally {
-            endRequestTimer()
-            if (requestController === controller) requestController = undefined
+            endRequest()
           }
           if (!retryTransient || !retriable || attempt >= checkRetry.maxAttempts) break
           const delayMs = updateRetryDelayMs(checkRetry, attempt, 'check')
@@ -561,7 +572,6 @@ export function apply(ctx: Context, config: Config): void {
         }
         return { kind: 'failed', error: 'network' }
       })().finally(() => {
-        endRequestTimer()
         inFlight = undefined
         checking = false
         refreshTray()
@@ -838,7 +848,9 @@ export function apply(ctx: Context, config: Config): void {
       disposed = true
       if (pollTimer !== undefined) clearTimeout(pollTimer)
       if (retryTimer !== undefined) clearTimeout(retryTimer)
-      requestController?.abort()
+      // 每一个在飞请求都要被 abort:只 abort 最后一个会让 teardown 一直等
+      // 那个被抢走保护的请求(desktop-1 实测:dispose 永不 settle)。
+      for (const controller of inFlightRequests) controller.abort()
       downloadController?.abort()
       registration.dispose()
       // Native dialogs are not cancellable. Await only file state and the abortable requests.

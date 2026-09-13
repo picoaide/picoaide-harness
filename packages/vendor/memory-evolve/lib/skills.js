@@ -25,7 +25,7 @@
  * @module dsh-memory-evolve/skills
  */
 
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { translate, getLocale, SKILL_DICT, SKILL_MSG_DICT } from './i18n.js'
 
 /** Translate through the SKILL_DICT dictionary in the active locale. */
@@ -33,6 +33,7 @@ const skt = (key, params) => translate(SKILL_DICT, key, params)
 /** Translate through SKILL_MSG_DICT in the active host locale. */
 const smt = (key, params) => translate(SKILL_MSG_DICT, key, params, getLocale())
 import { join } from 'node:path'
+import { resolveSafeRepoTarget, writeFileAtomicSafeAt } from './sync/filesets.js'
 
 /** Skill name grammar (matches DSH's isSkillName; kebab-case rules out traversal). */
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
@@ -161,11 +162,18 @@ export function approvePendingSkill(pendingDir, skillDir, name) {
   if (!existsSync(join(from, 'SKILL.md'))) {
     return { ok: false, message: smt('skillmsg.pendingMissing', { name }) }
   }
-  const to = join(skillDir, name)
+  mkdirSync(skillDir, { recursive: true })
+  // NF-1 自查（第三轮，判据 = 落点是否被断言）：`to` 是 renameSync/cpSync 的
+  // **写入落点**，此前只有一个 `existsSync(join(to,'SKILL.md'))` 的字符串判等
+  // ——技能库里预置一条 `<name>` 符号链接（指向任意目录）就能让 rename/cp 的
+  // 覆盖写到技能库之外。改走唯一的落点解析原语：逐层 lstat 拒符号链接 +
+  // realpath 包含性（技能库本身是符号链接的合法布局不受影响：基准取
+  // realpath(skillDir)）。
+  const to = resolveSafeRepoTarget(skillDir, name)
+  if (to === null) return { ok: false, message: smt('skillmsg.landingRefused', { name }) }
   if (existsSync(join(to, 'SKILL.md'))) {
     return { ok: false, message: smt('skillmsg.alreadyInLib', { name }) }
   }
-  mkdirSync(skillDir, { recursive: true })
   try {
     renameSync(from, to)
   } catch (error) {
@@ -231,14 +239,15 @@ export function readSkill(dir, name) {
   }
 }
 
-/** Atomically write one skill's SKILL.md (creates the directory). */
+/**
+ * Atomically write one skill's SKILL.md (creates the directory).
+ * FIX-27（2026-09-13）：自锚定安全原子写（`SKILL.md.tmp.<pid>` 是可预置的
+ * 写落点，预置同名符号链接即写穿到技能目录外）。
+ */
 function writeSkill(dir, name, content) {
-  const target = join(dir, name)
-  mkdirSync(target, { recursive: true })
-  const path = join(target, 'SKILL.md')
-  const tmp = `${path}.tmp.${process.pid}`
-  writeFileSync(tmp, content)
-  renameSync(tmp, path)
+  // NF-3 收敛后 writeFileAtomicSafeAt 缺省会跟随「落点文件本身是符号链接」
+  // 的合法布局；技能内容不是状态文件——预置链接一律拒收（保持第一轮的判据）。
+  writeFileAtomicSafeAt(join(dir, name, 'SKILL.md'), content, { followFileSymlink: false })
 }
 
 /**

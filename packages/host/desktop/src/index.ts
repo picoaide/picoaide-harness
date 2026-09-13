@@ -46,6 +46,7 @@ import {
   handleBrandAssetRequest,
 } from './brand-web-route.ts'
 import { readDesktopChannelProfile } from './desktop-channel.ts'
+import type { ConnectionTrustFence, WriteProofDeps } from './write-proof.ts'
 import type { DesktopLocale, DesktopShellMode } from './runtime.ts'
 import type {} from './runtime.ts'
 
@@ -206,6 +207,16 @@ export function apply(ctx: Context, config: Config): void {
   runtime.setSessionOpenRequestHandler?.(sessionId => {
     loopNotifySession = { sessionId, requestedAt: Date.now() }
   })
+  /**
+   * R4-RV3a：写面路由的 BrowserAuth 持有性证明依赖（由各写路由自己在方法/Origin
+   * 检查之后强制执行；服务缺席 ⇒ fail-closed 503）。GET 读面（更新徽章 / 循环
+   * 通知跳转 / 品牌资源）不消费它。
+   */
+  const proofDeps: WriteProofDeps = {
+    fence: (): ConnectionTrustFence | undefined => ctx.get('connection') as ConnectionTrustFence | undefined,
+    label: 'dsh-plugin-desktop',
+    warn: (message: string) => { ctx.logger?.warn?.(message) },
+  }
   ctx.effect(
     () => ctx.webServer.register({
       kind: 'exact',
@@ -248,6 +259,7 @@ export function apply(ctx: Context, config: Config): void {
         res,
         rendererOrigin,
         () => { runtime.updates?.checkNow?.() },
+        proofDeps,
       ),
     }),
     'dsh-plugin-desktop: update badge check route',
@@ -261,6 +273,7 @@ export function apply(ctx: Context, config: Config): void {
         res,
         rendererOrigin,
         () => { runtime.updates?.installNow?.() },
+        proofDeps,
       ),
     }),
     'dsh-plugin-desktop: update install route',
@@ -274,6 +287,7 @@ export function apply(ctx: Context, config: Config): void {
         res,
         rendererOrigin,
         report => { runtime.reportRendererBoot(report) },
+        proofDeps,
       ),
     }),
     'dsh-plugin-desktop: renderer boot report route',
@@ -321,6 +335,7 @@ export function apply(ctx: Context, config: Config): void {
           res,
           rendererOrigin,
           () => runtime.pickDirectory(),
+          proofDeps,
           cause => {
             ctx.logger.error(`dsh-plugin-desktop: native directory picker failed: ${cause instanceof Error ? cause.message : String(cause)}`)
           },

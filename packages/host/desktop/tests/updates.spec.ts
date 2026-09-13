@@ -773,6 +773,62 @@ describe('desktop update Host plugin', () => {
     expect(harness.tray.label()).toBe('Check for Updates…')
   })
 
+  it('keeps one request timeout per in-flight manifest request so a session change cannot wedge the check', async () => {
+    vi.useFakeTimers()
+    const root = await mkdtemp(join(tmpdir(), 'dsh-updates-timeout-race-'))
+    try {
+      // 每个请求按**发起它的操作**打标签:两个操作都会请求同一份清单,只有标签
+      // 才能把"被观测对象"认对(未知标签的并发复现会把归属搞反)。
+      let phase = 'boot'
+      const requested: Array<{ url: string, phase: string, signal?: AbortSignal }> = []
+      const request = vi.fn((url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        const signal = init.signal as AbortSignal
+        requested.push({ url: String(url), phase, signal })
+        signal.addEventListener('abort', () => {
+          reject(new DOMException('timed out', 'AbortError'))
+        }, { once: true })
+      }))
+      // 记录里有一份"已下载待安装"的安装包 ⇒ 启动与每次会话变化都会立刻再发一次
+      // 复用校验请求(fetchReusableManifest),与在飞的检查请求并发。
+      const harness = await createHarness({
+        packaged: false,
+        request,
+        userDataRoot: root,
+        state: JSON.stringify({
+          version: 2,
+          downloadedVersion: '2.1.0',
+          downloadedPath: join(root, 'updates', '2.1.0', installerNameFor('2.1.0')),
+        }),
+      })
+      const manifests = (of: string): typeof requested =>
+        requested.filter(call => call.phase === of && call.url.endsWith('/updates/manifest'))
+
+      await vi.waitFor(() => { expect(manifests('boot')).toHaveLength(1) })
+      // 检查在飞时用户切换服务端(登录/登出/换服务端):第三个操作插入同一条
+      // 清单请求路径 —— 共享定时器槽时代它会把检查请求已经装好的超时清掉。
+      phase = 'check'
+      const check = harness.tray.invoke()
+      await vi.waitFor(() => { expect(manifests('check')).toHaveLength(1) })
+      phase = 'session-change'
+      harness.emitSession({ serverURL: 'https://other.test' })
+      await vi.waitFor(() => { expect(manifests('session-change')).toHaveLength(1) })
+      const checkSignal = manifests('check')[0]?.signal
+      expect(manifests('check')[0]?.url).toBe(OFFICIAL_MANIFEST_URL)
+
+      await vi.advanceTimersByTimeAsync(testConfig.requestTimeoutMs)
+      // 检查请求必须被**它自己的**超时中止,而不是被并发操作取消保护。
+      expect(checkSignal?.aborted).toBe(true)
+      await check
+      expect(harness.showManualCheckResult).toHaveBeenCalledWith(null)
+      // 收尾后托盘回到空闲态:否则"检查更新"会永久停在"正在检查更新…",
+      // 再点也是静默无操作。
+      expect(harness.tray.label()).toBe('Check for Updates…')
+      await harness.dispose()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('publishes renderer snapshots on initial state and observable transitions', async () => {
     const request = vi.fn(async () => manifestResponse('2.3.0'))
     const harness = await createHarness({ request })

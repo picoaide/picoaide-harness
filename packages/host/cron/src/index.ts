@@ -23,6 +23,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import { HostCronService } from './host-service.ts'
 import { makeCronRoutes } from './host-routes.ts'
 import { registerCronTools } from './tools.ts'
+import type { ConnectionTrustFence } from './write-proof.ts'
 import type { CronPermissionPresets, CronSessionHandle } from './host-executor.ts'
 
 // Type-only: declare the enterprise session event so `ctx.on` resolves it.
@@ -113,7 +114,15 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => {
     const disposers: Array<() => void> = [serviceDisposer]
     try {
-      for (const route of makeCronRoutes(host, { permissions: permissionNames })) disposers.push(ctx.webServer.register(route))
+      // R4-RV3a：写面（`POST /api/cron/action`）的持有性证明来自上游 `connection`
+      // 服务（BrowserAuth cookie，只能由本进程服务的页面持有）。与 browser/
+      // connectors 第三轮同一形状：服务缺席 ⇒ fail-closed，不退回弱 guard。
+      const fence = (): ConnectionTrustFence | undefined => ctx.get('connection') as ConnectionTrustFence | undefined
+      for (const route of makeCronRoutes(host, {
+        permissions: permissionNames,
+        fence,
+        warn: (message: string) => { ctx.logger?.warn?.(message) },
+      })) disposers.push(ctx.webServer.register(route))
       disposers.push(registerCronTools(ctx, host, { permissions: permissionNames }))
     } catch (error) {
       for (const dispose of disposers) dispose()

@@ -40,6 +40,7 @@
 
 import { execFile, spawnSync } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, realpathSync } from 'node:fs'
+import { writeFileAtomicSafeAt } from './sync/filesets.js'
 import { dirname, join } from 'node:path'
 import { translate, getLocale, MISC2_DICT } from './i18n.js'
 
@@ -247,12 +248,13 @@ export function readJson(path, makeDefault) {
   return { value: makeDefault(), corrupt: true }
 }
 
-/** 原子写 JSON（同目录唯一临时文件 + rename）。 */
+/**
+ * 原子写 JSON。FIX-27（2026-09-13）：改走自锚定安全原子写——
+ * `<path>.tmp-<pid>` 是可预置的写落点（pid 本机可见），预置同名符号链接即
+ * 写穿到状态目录外。
+ */
 export function writeState(path, value) {
-  mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.tmp-${process.pid}`
-  writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8')
-  renameSync(tmp, path)
+  writeFileAtomicSafeAt(path, JSON.stringify(value, null, 2))
 }
 
 /** 解析 git 管理目录（兼容 .git 目录与 .git 文件式 worktree）。 */

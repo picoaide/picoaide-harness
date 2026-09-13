@@ -19,8 +19,9 @@
  * 逻辑，merge.js 等模块可安全 import）。
  */
 
-import { closeSync, existsSync, fstatSync, lstatSync, openSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { open as openAsync, rename as renameAsync, unlink as unlinkAsync } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /**
  * 项目级文件集规格（memory=记忆格式文件、todo=TODO 格式文件、
@@ -489,6 +490,318 @@ export function writeFileAtomicSafe(rootDir, targetAbs, data) {
  */
 export function isTodoPath(path) {
   return path === 'TODOS.md' || path === 'TODOS-life.md' || path === 'TODOS-work.md' || DAILY_TODO_RE.test(path)
+}
+
+/* ---------------- 自锚定原子写（仓库外配置/状态文件的唯一入口） ----------------
+ *
+ * 同一根因族的收口（R7 审计 me-1/me-2 横向排查，2026-09-13 第七轮）：手写的
+ * `<file>.tmp.<process.pid>`（以及 `.tmp`、`.bak.<Date.now()>`、`.tmp-<pid>`）
+ * 落点**从不经过断言**。pid 在本机 /proc 可见、时间戳/nonce 可枚举，预置同名
+ * 真符号链接即可让 `writeFileSync`/`copyFileSync` 跟随链接写穿到任意路径，
+ * 而调用方仍报成功。这与 `writeFileAtomicSafe`（仓库内写回）是同一个缺陷形态，
+ * 差别只是这些文件没有"仓库根"概念。
+ */
+
+/**
+ * **受管记忆仓库根**登记表（第八轮 NF-3：把"仓库内"这一概念送到写原语）。
+ *
+ * 为什么需要它：这些状态存储（aliases / notifications / coi/* / advisor/* /
+ * plugin-state）构造时只拿到一个路径，没有"仓库根"参数；把 root 逐个穿透
+ * 十几个 store 构造函数既啰嗦又容易漏。安装期登记一次，写原语据此区分
+ * 两种落点策略（见 {@link resolveSelfAnchoredTarget}）：
+ *   - 文件在受管仓库内 → **整条路径链（含各级目录与落点文件自身）** 任一符号
+ *     链接一律拒收，且真实路径必须留在仓库根内：共享记忆分支的一个 120000
+ *     条目就能让 checkout 把状态文件**或整个状态目录**实体化成指向仓库外的
+ *     链接（第九轮 NF-3：目录级形态此前被"用落点父目录当基准"短路）；
+ *   - 文件在受管仓库外（用户显式配置的 stateFile / coiDataDir / 技能库 …）
+ *     → 跟随"链接指向已存在的普通文件"的合法布局（stow/chezmoi）。
+ *
+ * 进程内单例插件语义：`apply()` 登记，卸载时注销。
+ */
+const MANAGED_ROOTS = new Set()
+
+/**
+ * 登记一个受管仓库根（幂等）。
+ * @param {string} dir - 记忆仓库目录（`config.memoryDir`）。
+ * @returns {void}
+ */
+export function registerManagedRoot(dir) {
+  if (typeof dir === 'string' && dir !== '') MANAGED_ROOTS.add(resolve(dir))
+}
+
+/**
+ * 注销一个受管仓库根（幂等）。
+ * @param {string} dir - 记忆仓库目录。
+ * @returns {void}
+ */
+export function unregisterManagedRoot(dir) {
+  if (typeof dir === 'string' && dir !== '') MANAGED_ROOTS.delete(resolve(dir))
+}
+
+/**
+ * 命中落点的**受管仓库根**（含根自身；多层嵌套时取最深的那个）。
+ *
+ * 判定只用**字符串层**的 `resolve()`：落点是符号链接、其父链是符号链接都不
+ * 影响"这个落点在哪个受管仓库之下"这一事实（真实路径包含性由后续的
+ * `resolveSafeRepoTarget` 负责）。NF-3：写原语必须拿到这个根当断言基准，
+ * 否则会出现"用落点自己的父目录当根 ⇒ realpath(父) 自己变成根 ⇒ 包含性
+ * 断言恒真"的短路（目录级 120000 链接写穿仓库外）。
+ *
+ * @param {string} file - 绝对/相对落点。
+ * @returns {string | null} 命中的受管根（resolve 后的形式）；不在任何受管根下为 null。
+ */
+export function managedRootOf(file) {
+  let abs
+  try {
+    abs = resolve(file)
+  } catch {
+    return null
+  }
+  let best = null
+  for (const root of MANAGED_ROOTS) {
+    if (!(abs === root || isInsideRoot(root, abs))) continue
+    if (best === null || root.length > best.length) best = root
+  }
+  return best
+}
+
+/**
+ * 落点是否位于任一受管仓库根之下（含根自身）。
+ * @param {string} file - 绝对/相对落点。
+ * @returns {boolean}
+ */
+export function isInsideManagedRoot(file) {
+  return managedRootOf(file) !== null
+}
+
+/** 自锚定落点被拒时的统一异常（fail-loud：绝不"静默不写"）。 */
+export function writeTargetRefusedError(abs) {
+  return new Error(`dsh-memory-evolve: write target ${abs} is a symlink or escapes its directory — write refused (pre-placed symlinks at atomic-write landing spots are rejected; remove the symlink and retry)`)
+}
+
+/**
+ * **自锚定落点解析**（`writeFileAtomicSafeAt` / `writeFileAtomicSafeAtAsync` /
+ * `appendFileSafeAt` 的共用入口，2026-09-13 第八轮 NF-3 收敛）。
+ *
+ * 判据与危害同构（复核报告 NF-3）：
+ *   - **危害** = 落点被引到调用方意图之外（写到目录/仓库外、覆盖任意文件）；
+ *   - **不是危害** = 状态文件本身是符号链接、但写的是它指向的那个真实文件
+ *     （stow/chezmoi 一类「把单个文件软链到位」的合法布局；第一轮把它一律
+ *     判成故障，属于判据严于危害的误伤，且 `NotificationStore.add` 还会以
+ *     未处理的 Promise 拒绝形式穿透）。
+ *
+ * 因此（2026-09-13 第九轮：档位顺序按"受管仓库优先"重排，见 NF3-1）：
+ *   0) 落点在**受管记忆仓库**之下（{@link registerManagedRoot}）——无论调用方
+ *      有没有给 `anchorDir`，一律以**登记的仓库根**为断言基准：整条链（含落点
+ *      文件自身、含各级目录）逐层 lstat，任一符号链接即拒收，真实路径必须留在
+ *      仓库内。共享分支的一个 120000 条目就能把状态文件**或整个状态目录**实体
+ *      化成指向仓库外的链接，所以这里保持第一轮的"仓库内一律拒收"。
+ *   1) 以 `options.anchorDir`（调用方声明的受管根，如技能库根）为准时——
+ *      从根到落点的整条路径链不得出现符号链接、真实路径必须留在根内。
+ *      **插件自有的内容落点**（内置技能同步 / 适配器技能）用这一档：预置的
+ *      链接不得把技能正文写到技能库之外（NF-1）。
+ *   2) 缺省（仓库外的状态文件）——落点文件**自身**是符号链接且指向一个**已存在
+ *      的普通文件**时，按真实目标写入（保留链接本身，stow/chezmoi 合法布局）；
+ *      悬空链接、目录目标、父链越界等"能写到目录外/写到新位置"的形态仍然
+ *      fail-loud 拒收。
+ *   3) `options.followFileSymlink === false` —— 严格档：落点文件是符号链接
+ *      一律拒收（技能内容编辑等"改的是我们自己的文件"的场景）。
+ *
+ * 无论哪一档，**临时落点**始终 `O_EXCL` + 断言（me-1/me-2 的防护不变）。
+ *
+ * @param {string} file - 目标文件绝对路径（父目录不存在时自动创建）。
+ * @param {{anchorDir?: string, followFileSymlink?: boolean}} [options]
+ * @returns {{dir: string, target: string}} 写入目录（断言基准）+ 真实落点。
+ * @throws {Error} 落点被拒。
+ */
+function resolveSelfAnchoredTarget(file, options = {}) {
+  const dir = dirname(file)
+  mkdirSync(dir, { recursive: true })
+  const base = basename(file)
+  // NF-3（第三轮对抗复核）：**受管记忆仓库内的落点一律先走仓库级断言**，基准
+  // 是登记的那个根，不是落点自己的父目录。
+  //
+  // 用父目录当基准是恒真的：`resolveSafeRepoTarget(dir, base)` 里 realpath(dir)
+  // 自己变成"包含性根"，于是 `hasSymlinkComponent` 只看 base 这一层、包含性
+  // 断言永远为真 —— 一条**目录级** 120000 条目（共享分支里
+  // `<memoryDir>/coi` = 120000，git 的链接条目不区分"文件用/目录用"）就能让该
+  // 目录下的全部状态写入实体化到仓库外，而下面的 `managedRootOf` 那一关因为
+  // 提前 return 永远走不到（第三轮 NF3-1 实测：NotificationStore / TaskStore /
+  // writeFileAtomicSafeAt 三种调用方全部写穿）。
+  //
+  // 判据：整条链（含落点文件自身）逐层 lstat，任一符号链接即拒收；真实路径
+  // 必须留在受管根内（`resolveSafeRepoTarget` 的 realpath 包含性 + 目标文件
+  // realpath 复检）。这与第一轮"仓库内落点是符号链接一律拒收"同一条口径，
+  // 只是把判定基准从"落点父目录"抬到"受管仓库根"。
+  const managedRoot = managedRootOf(file)
+  if (managedRoot !== null) {
+    const rel = relative(resolve(managedRoot), resolve(file))
+    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) throw writeTargetRefusedError(file)
+    const relPosix = rel.split(sep).join('/')
+    if (hasSymlinkComponent(managedRoot, relPosix)) throw writeTargetRefusedError(file)
+    const anchored = resolveSafeRepoTarget(managedRoot, relPosix)
+    if (anchored === null) throw writeTargetRefusedError(file)
+    return { dir: dirname(anchored), target: anchored }
+  }
+  if (typeof options.anchorDir === 'string' && options.anchorDir !== '') {
+    const anchor = options.anchorDir
+    const rel = relative(resolve(anchor), resolve(file))
+    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) throw writeTargetRefusedError(file)
+    const relPosix = rel.split(sep).join('/')
+    if (hasSymlinkComponent(anchor, relPosix)) throw writeTargetRefusedError(file)
+    const anchored = resolveSafeRepoTarget(anchor, relPosix)
+    if (anchored === null) throw writeTargetRefusedError(file)
+    return { dir: dirname(anchored), target: anchored }
+  }
+  const target = resolveSafeRepoTarget(dir, base)
+  if (target !== null) return { dir, target }
+  if (options.followFileSymlink === false) throw writeTargetRefusedError(file)
+  // 落点文件本身是符号链接：跟随到已存在的普通文件目标（写链接目标、保留链接）。
+  // 受管仓库内**到不了这里**（上面已按仓库级断言拒收一切符号链接），所以这一段
+  // 只服务"用户显式配置在仓库外的状态文件"（stow/chezmoi 一类合法布局）。
+  let realDir
+  try {
+    realDir = realpathSync(resolve(dir))
+  } catch {
+    throw writeTargetRefusedError(file)
+  }
+  const abs = join(realDir, base)
+  let linkReal
+  try {
+    if (!lstatSync(abs).isSymbolicLink()) throw new Error('not-a-file-symlink')
+    linkReal = realpathSync(abs)
+    if (!statSync(linkReal).isFile()) throw new Error('not-a-regular-file')
+  } catch {
+    // 悬空链接 / 目录目标 / 其它越界形态：写进去等于在调用方意图之外
+    // 创建或改写文件 → 仍拒收。
+    throw writeTargetRefusedError(file)
+  }
+  return { dir: dirname(linkReal), target: linkReal }
+}
+
+/**
+ * **自锚定**的原子写（tmp + rename）：以目标文件所在目录为断言基准，供不在
+ * 同步仓库内的配置/状态文件使用（`~/.dsh/**`、技能目录、COI 各状态存储 …）。
+ *
+ * 与 {@link writeFileAtomicSafe} 的落点规则一致：
+ *   1) 目标文件与临时落点都过 `assertSafeRepoTarget`（逐层 lstat 拒符号链接
+ *      + realpath 包含性）；落点文件的符号链接按 {@link resolveSelfAnchoredTarget}
+ *      的三档策略处理（缺省跟随到已存在的真实文件，`followFileSymlink:false`
+ *      或 `anchorDir` 则拒收）；
+ *   2) 临时落点 `O_EXCL` 打开（预置的同名符号链接/文件 → 拒收，绝不跟随），
+ *      "普通文件 = 崩溃残留"时断言后清理重试一次；
+ *   3) 按 fd 写入，rename 前后各复检一次。
+ *
+ * @param {string} file - 目标文件绝对路径（父目录不存在时自动创建）。
+ * @param {string | Buffer} data - 正文。
+ * @param {{anchorDir?: string, followFileSymlink?: boolean}} [options] - 见
+ *   {@link resolveSelfAnchoredTarget}。
+ * @returns {string} 落点绝对路径。
+ * @throws {Error} 落点被拒（符号链接/越界/预置同名条目）——调用方必须把它
+ *   当失败处理，不得吞成"写成功"。
+ */
+export function writeFileAtomicSafeAt(file, data, options) {
+  const { dir, target } = resolveSelfAnchoredTarget(file, options)
+  const written = writeFileAtomicSafe(dir, target, data)
+  if (written.ok !== true) throw writeTargetRefusedError(written.refusedPath ?? file)
+  return written.path
+}
+
+/**
+ * 自锚定**追加**写（`appendFileSafeAt`）：落盘语义要求目标可已存在，因此
+ * 不能用 `O_EXCL`（见 {@link writeFileAtomicSafe}）。做法：写前断言落点 +
+ * `open(target,'a')` + **只按 fd 写入** + 打开后按 inode/路径复检；预置的
+ * 同名符号链接在写前断言就被拒（打开窗口内的翻转由打开后复检兜住）。
+ *
+ * @param {string} file - 目标文件绝对路径（父目录不存在时自动创建）。
+ * @param {string | Buffer} data - 追加内容。
+ * @param {{anchorDir?: string, followFileSymlink?: boolean}} [options] - 见
+ *   {@link resolveSelfAnchoredTarget}。
+ * @returns {string} 落点绝对路径。
+ * @throws {Error} 落点被拒。
+ */
+export function appendFileSafeAt(file, data, options) {
+  const { dir, target } = resolveSelfAnchoredTarget(file, options)
+  let fd
+  try {
+    fd = openSync(target, 'a')
+  } catch (error) {
+    if (error && error.code === 'EISDIR') throw writeTargetRefusedError(target)
+    throw error
+  }
+  try {
+    const opened = fstatSync(fd)
+    let same = false
+    try {
+      const viaPath = statSync(target)
+      same = viaPath.dev === opened.dev && viaPath.ino === opened.ino
+    } catch {
+      same = false
+    }
+    if (!same || !assertSafeRepoTarget(dir, target)) throw writeTargetRefusedError(target)
+    writeFileSync(fd, data) // 按 fd 写入：关闭前不再按路径解析
+  } finally {
+    try { closeSync(fd) } catch { /* 已关闭 */ }
+  }
+  return target
+}
+
+/**
+ * {@link writeFileAtomicSafeAt} 的异步版：给必须异步落盘的大文件用
+ * （同步 stringify+写盘几十万条会阻塞主进程数秒）。
+ *
+ * 安全性不因异步而放宽：打开前断言 + `open(tmp,'wx')`（O_EXCL 绝不跟随预置
+ * 链接）+ **按 fd 写入**（`FileHandle.writeFile`，关闭前不再按路径解析）+
+ * rename 前后复检。
+ *
+ * @param {string} file - 目标文件绝对路径（父目录不存在时自动创建）。
+ * @param {string | Buffer} data - 正文。
+ * @param {{anchorDir?: string, followFileSymlink?: boolean}} [options] - 见
+ *   {@link resolveSelfAnchoredTarget}。
+ * @returns {Promise<string>} 落点绝对路径。
+ * @throws {Error} 落点被拒。
+ */
+export async function writeFileAtomicSafeAtAsync(file, data, options) {
+  const { dir, target } = resolveSelfAnchoredTarget(file, options)
+  const tmp = `${target}.tmp.${process.pid}`
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (!assertSafeRepoTarget(dir, tmp)) throw writeTargetRefusedError(tmp)
+    let handle
+    try {
+      handle = await openAsync(tmp, 'wx') // O_EXCL：预置的同名链接/文件 → EEXIST
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error
+      let st
+      try {
+        st = lstatSync(tmp)
+      } catch {
+        continue // 竞态里刚好消失：重试
+      }
+      if (!st.isFile()) throw writeTargetRefusedError(tmp)
+      if (!assertSafeRepoTarget(dir, tmp)) throw writeTargetRefusedError(tmp)
+      try {
+        await unlinkAsync(tmp)
+      } catch {
+        throw writeTargetRefusedError(tmp)
+      }
+      continue
+    }
+    try {
+      await handle.writeFile(data) // 按 fd 写入，绝不按路径二次解析
+    } catch (error) {
+      try { await handle.close() } catch { /* 已关闭 */ }
+      throw error
+    }
+    await handle.close()
+    if (!assertSafeRepoTarget(dir, tmp) || !assertSafeRepoTarget(dir, target)) {
+      try { await unlinkAsync(tmp) } catch { /* 已被移走 */ }
+      throw writeTargetRefusedError(target)
+    }
+    await renameAsync(tmp, target)
+    if (!assertSafeRepoTarget(dir, target)) throw writeTargetRefusedError(target)
+    return target
+  }
+  throw writeTargetRefusedError(tmp)
 }
 
 /**

@@ -753,6 +753,10 @@ export const TODO_MSG_DICT = {
 export const SKILL_MSG_DICT = {
   'skillmsg.invalidNameShort': ['无效技能名 "{name}"', 'Invalid skill name "{name}"'],
   'skillmsg.pendingMissing': ['待确认技能 "{name}" 不存在', 'Pending skill "{name}" does not exist'],
+  'skillmsg.landingRefused': [
+    '技能库中的落点 "{name}" 是符号链接或越出技能库，已拒绝采纳',
+    'Skill landing "{name}" is a symlink or escapes the skill library; adoption refused',
+  ],
   'skillmsg.alreadyInLib': [
     '技能 "{name}" 已存在于技能库，请先处理再采纳',
     'Skill "{name}" already exists in the library; resolve it before adopting',
@@ -946,6 +950,7 @@ export const MISC2_DICT = {
   'alias.cleared': ['已清除会话别名', 'Session alias cleared'],
   'alias.tooLong': ['别名最多 {max} 个字（当前 {len} 字）', 'Alias is limited to {max} chars (got {len})'],
   'alias.set': ['会话别名已设为「{alias}」', 'Session alias set to "{alias}"'],
+  'alias.saveFail': ['会话别名落盘失败：{detail}', 'Persisting the session alias failed: {detail}'],
   'api.syncNotAssembled': ['同步模块未装配', 'Sync module is not assembled'],
   'api.archivedOk': ['已归档（{target}：归档文件现有 {count} 条；{detail}）', 'Archived ({target}: the archive file now holds {count} entries; {detail})'],
   'canvas.failed': ['画板操作失败：{detail}', 'Canvas operation failed: {detail}'],
