@@ -49,6 +49,13 @@
  * verification is what keeps a future SDK build from silently disabling the
  * fence.
  *
+ * The identity check that guards the build coupling is deliberately NOT
+ * fail-closed on a path-spelling difference: it refuses when both resolutions
+ * are readable and name different files (the measured R5 failure), and only
+ * warns when one of them cannot be read at all — see
+ * {@link verifyTargetsTheMcpClientSdk} for the field report that produced that
+ * split.
+ *
  * Build coupling: `@modelcontextprotocol/sdk` must stay EXTERNAL in this
  * package's bundle (it is a declared dependency, and `tsdown.config.ts` lists
  * it explicitly). An inlined copy is a different class object from the one
@@ -101,15 +108,103 @@ const PROBE_URL = 'http://127.0.0.1:1/mcp'
 
 type Proto = Record<string, unknown>
 
-/** The installed package directory a resolved SDK file belongs to ('' when unknown). */
-function sdkPackageRoot(path: string): string {
-  const index = path.lastIndexOf(SDK_PACKAGE_MARKER)
-  return index < 0 ? '' : path.slice(0, index + SDK_PACKAGE_MARKER.length)
+/**
+ * Whether the marker is present in ANY spelling of `path`.
+ *
+ * Windows answers `fileURLToPath` with backslashes, and an extended-length or
+ * UNC install adds a `\\?\` prefix, so a marker search on the raw string alone
+ * can report "unknown package" for the very file it is looking at. The
+ * canonical form (below) is the one all comparisons use.
+ */
+function hasSdkMarker(path: string, foldCase = process.platform === 'win32'): boolean {
+  return path.includes(SDK_PACKAGE_MARKER) || canonicalMcpTargetPath(path, foldCase).includes(SDK_PACKAGE_MARKER)
 }
 
 /**
- * Refuse to patch unless the class in this module is the class
- * `dsh-mcp-client` will use.
+ * Make two spellings of one file compare equal — and only those.
+ *
+ * The identity check compares a path this module resolved with one mcp-client
+ * resolved. Both go through the SAME Node ESM resolver and the same
+ * `fileURLToPath`, so on a normal install they are already byte-identical; but
+ * the packaged product (Electron + `app.asar`) and Windows add spellings that
+ * differ while naming one file: `/` vs `\`, `\\?\C:` vs `C:`, 8.3 short names
+ * (`PROGRA~1`) on one side only, and case. Comparing raw strings turned any of
+ * those into a hard refusal — a customer's connector stopped registering for a
+ * path-spelling difference (2026-09-13, Moka `streamable-http`), which is why
+ * the comparison is canonical: separators normalised, extended-length prefix
+ * stripped, and case folded where the platform folds it.
+ *
+ * Canonical is deliberately NOT aggressive: no symlink following is invented
+ * here (`fs.realpathSync` is tried first and its answer is what gets
+ * canonicalised), no short-name expansion (Windows only does that through
+ * `fs.realpathSync.native`, whose case behaviour cannot be reasoned about
+ * offline). A spelling the rules do not cover still counts as different —
+ * {@link describeTargets} then says so, and the caller decides between refusing
+ * (proven different file) and warning (unreadable path).
+ */
+export function canonicalMcpTargetPath(path: string, foldCase = process.platform === 'win32'): string {
+  let value = path.replace(/\\/g, '/')
+  // `\\?\C:/x` and `//?/C:/x` both name `C:/x`
+  if (value.startsWith('//?/')) value = value.slice(4)
+  if (foldCase) value = value.toLowerCase()
+  return value
+}
+
+/** A resolution attempt: the path, plus the form used for comparison. */
+export interface TargetResolution {
+  path: string
+  canonical: string
+  realpath: string | null
+  error: string | null
+}
+
+function resolveTarget(path: string, foldCase = process.platform === 'win32'): TargetResolution {
+  let realpath: string | null = null
+  let error: string | null = null
+  try {
+    realpath = realpathSync(path)
+  } catch (cause) {
+    error = errorCodeOf(cause)
+  }
+  return { path, canonical: canonicalMcpTargetPath(realpath ?? path, foldCase), realpath, error }
+}
+
+/** Short, stable error code (`ENOENT`, `EPERM`, …) for diagnostics. */
+function errorCodeOf(cause: unknown): string {
+  if (typeof cause === 'object' && cause !== null && typeof (cause as { code?: unknown }).code === 'string') {
+    return (cause as { code: string }).code
+  }
+  return String(cause)
+}
+
+/** Whether both sides name the same file — string compare of canonical forms. */
+function sameFile(a: TargetResolution, b: TargetResolution): boolean {
+  return a.canonical === b.canonical
+}
+
+/**
+ * One log line with everything needed to tell the three failure shapes apart
+ * without another round trip: the raw spellings, the canonical ones that were
+ * compared, and whether each path was readable at all.
+ */
+function describeTargets(ours: TargetResolution | null, theirs: TargetResolution | null): string {
+  const side = (label: string, value: TargetResolution | null): string =>
+    value === null
+      ? `${label}=<resolve failed>`
+      : `${label}=${value.path} [canonical ${value.canonical}${value.error === null ? '' : ` unreadable:${value.error}`}]`
+  return `${side('本包', ours)} / ${side('mcp-client', theirs)}`
+}
+
+/** What the runtime identity check concluded. */
+export type TargetVerdict =
+  | { kind: 'ok'; ours: TargetResolution; theirs: TargetResolution }
+  | { kind: 'unresolved'; detail: string }
+  | { kind: 'proven-other'; ours: TargetResolution; theirs: TargetResolution }
+  | { kind: 'inconclusive'; ours: TargetResolution | null; theirs: TargetResolution | null }
+
+/**
+ * Check that the class this module patches is the class `dsh-mcp-client` will
+ * use — without turning a path SPELLING into a refusal.
  *
  * The identity is what makes the fence real: `createTransport` in
  * `dsh-mcp-client` builds `StreamableHTTPClientTransport` from its OWN import
@@ -124,22 +219,82 @@ function sdkPackageRoot(path: string): string {
  * the unfenced ESM one. The parent URL is mcp-client's own entry, so the second
  * resolution runs the ESM resolver over mcp-client's import conditions — the
  * same answer its static `import` gets at runtime.
+ *
+ * Three outcomes, because "the two strings differ" is not the same statement as
+ * "two different files":
+ *
+ * - `ok` — same file once both spellings are canonical;
+ * - `proven-other` — BOTH paths are readable and they are different files
+ *   (the CJS twin, a nested duplicate): refuse, loudly. This verdict has a
+ *   witness that outlives path spelling, so `isMcpTransportFenceTargetMismatch`
+ *   reports it as the remembered failure reason;
+ * - `inconclusive` — one side could not be read (EPERM/ENOENT inside an
+ *   `app.asar`, an install the runtime cannot stat). Proceeding is safe: the
+ *   behavioural verification that follows patches and probes the real class, and
+ *   a genuinely foreign target fails it. Refusing here is what took a
+ *   customer's connector offline.
  */
-function assertTargetsTheMcpClientSdk(): void {
-  let ours = ''
-  let theirs = ''
+function verifyTargetsTheMcpClientSdk(): TargetVerdict {
+  let oursPath = ''
+  let theirsPath = ''
   try {
-    ours = fileURLToPath(import.meta.resolve(SDK_TRANSPORT_SUBPATH))
+    oursPath = fileURLToPath(import.meta.resolve(SDK_TRANSPORT_SUBPATH))
     const mcpEntry = import.meta.resolve(MCP_CLIENT_PACKAGE)
-    theirs = fileURLToPath(resolveFromParent(SDK_TRANSPORT_SUBPATH, mcpEntry))
+    theirsPath = fileURLToPath(resolveFromParent(SDK_TRANSPORT_SUBPATH, mcpEntry))
   } catch (error) {
-    throw new McpTransportFenceUnavailableError(`无法定位 MCP streamable-http 传输实现: ${String(error)}`)
+    return { kind: 'unresolved', detail: String(error) }
   }
-  if (sdkPackageRoot(ours) === '' || realpathOf(ours) !== realpathOf(theirs)) {
-    throw new McpTransportFenceUnavailableError(
-      `MCP streamable-http 传输加固目标与 mcp-client 不一致（本包 ${ours} / mcp-client ${theirs}），拒绝注册`,
-    )
+  return judgeTargets(oursPath, theirsPath)
+}
+
+/**
+ * The verdict for two resolved spellings, with no resolution of its own.
+ *
+ * Split out because the interesting inputs cannot be produced on the machine
+ * that runs the tests: a Windows spelling of an `app.asar` path, a nested
+ * duplicate install, a path the process may not stat. The test seam below feeds
+ * them in, so the policy (canonicalise, then demand readability before
+ * refusing) is asserted instead of merely intended.
+ */
+function judgeTargets(oursPath: string, theirsPath: string): TargetVerdict {
+  return decideTargets(
+    resolveTarget(oursPath),
+    resolveTarget(theirsPath),
+    process.platform === 'win32',
+  )
+}
+
+/**
+ * The decision, with BOTH sides already resolved and the platform supplied.
+ *
+ * Pure on purpose: the interesting inputs are a Windows spelling of an
+ * `app.asar` path and the 8.3/EPERM shapes, none of which can be produced on
+ * the Linux runner that gates the change. The regression drives this function
+ * with `win32` and with `linux` so the rule that broke in the field (a marker
+ * written with `/`, a path spelled with `\`) is asserted on every platform
+ * instead of only on the one that failed.
+ * @param ours - the resolution this module performed.
+ * @param theirs - the resolution taken from mcp-client's entry.
+ * @param foldCase - whether the platform folds path case (Windows does).
+ * @returns the verdict the install path acts on.
+ */
+export function decideMcpTargets(
+  ours: TargetResolution,
+  theirs: TargetResolution,
+  foldCase: boolean,
+): TargetVerdict {
+  return decideTargets(ours, theirs, foldCase)
+}
+
+function decideTargets(ours: TargetResolution, theirs: TargetResolution, foldCase: boolean): TargetVerdict {
+  if (!hasSdkMarker(ours.path, foldCase)) {
+    // We are not even looking at an installed SDK copy (inlined build).
+    return { kind: 'inconclusive', ours, theirs }
   }
+  if (sameFile(ours, theirs)) return { kind: 'ok', ours, theirs }
+  return ours.realpath !== null && theirs.realpath !== null
+    ? { kind: 'proven-other', ours, theirs }
+    : { kind: 'inconclusive', ours, theirs }
 }
 
 /**
@@ -154,20 +309,17 @@ function resolveFromParent(specifier: string, parent: string): string {
   return resolve(specifier, parent)
 }
 
-/** Physical path, so a symlinked install cannot make one file look like two. */
-function realpathOf(path: string): string {
-  try {
-    return realpathSync(path)
-  } catch {
-    return path
-  }
-}
-
 let patched = false
 let verified = false
 let pendingVerification: Promise<void> | null = null
 let failure: McpTransportFenceUnavailableError | null = null
 let restorePatched: (() => void) | null = null
+/** Set when the two resolutions disagreed in a way that could not be settled. */
+let targetWarning: string | null = null
+/** Set when the resolutions named two readable, different files. */
+let targetMismatch = false
+/** One warning per install: connectors re-register on every session change. */
+let targetWarningLogged = false
 
 function protoOf(): Proto {
   return StreamableHTTPClientTransport.prototype as unknown as Proto
@@ -406,14 +558,62 @@ async function settleProbe(reached: () => boolean, turns = 20): Promise<void> {
  * disposer exists for the regression's negative control (it must be able to
  * show the unfenced construction still follows a redirect, so the test cannot
  * pass vacuously).
+ * @param targets - test seam: the two paths the identity check should judge.
+ *   Windows spellings, nested duplicate installs and unreadable paths cannot be
+ *   produced on the Linux test runner, so the regression injects them here
+ *   rather than mocking module resolution.
  * @returns a function restoring the SDK's original property descriptors.
  */
-export function installMcpTransportRedirectFence(): () => void {
+export function installMcpTransportRedirectFence(targets?: { ours: string; theirs: string }): () => void {
   if (patched) return () => {}
-  assertTargetsTheMcpClientSdk()
+  const verdict = targets === undefined
+    ? verifyTargetsTheMcpClientSdk()
+    : judgeTargets(targets.ours, targets.theirs)
+  if (verdict.kind === 'unresolved') {
+    throw new McpTransportFenceUnavailableError(`无法定位 MCP streamable-http 传输实现: ${verdict.detail}`)
+  }
+  if (verdict.kind === 'proven-other') {
+    targetMismatch = true
+    throw new McpTransportFenceUnavailableError(
+      `MCP streamable-http 传输加固目标与 mcp-client 不一致（${describeTargets(verdict.ours, verdict.theirs)}），拒绝注册`,
+    )
+  }
+  if (verdict.kind === 'inconclusive') {
+    // One side could not be read, so "different strings" is not evidence: the
+    // behavioural verification below is the real gate. Keep the report — a
+    // connector that later fails to fence must not look like a clean install.
+    targetWarning = describeTargets(verdict.ours, verdict.theirs)
+  }
   restorePatched = patchTransportClass()
   patched = true
   return uninstallMcpTransportRedirectFence
+}
+
+/**
+ * The inconclusive-identity report, or null when the resolutions agreed.
+ *
+ * `registerMcp` logs it once per install: the connection is allowed to proceed,
+ * so the operator has to be able to find out afterwards which spellings were
+ * compared (and that is the difference between a diagnosable field report and
+ * this one, where the refusal threw the paths away).
+ */
+export function mcpTransportFenceTargetWarning(): string | null {
+  return targetWarning
+}
+
+/** Whether the two resolutions named two readable, different files (refusal). */
+export function isMcpTransportFenceTargetMismatch(): boolean {
+  return targetMismatch
+}
+
+/**
+ * Claim the one-shot warning for the current install.
+ * @returns true for the first caller, false afterwards.
+ */
+export function claimMcpTransportFenceTargetWarning(): boolean {
+  if (targetWarning === null || targetWarningLogged) return false
+  targetWarningLogged = true
+  return true
 }
 
 /** Whether the seam has been behaviourally verified (not just patched). */
@@ -438,6 +638,9 @@ export function uninstallMcpTransportRedirectFence(): void {
   verified = false
   pendingVerification = null
   failure = null
+  targetWarning = null
+  targetMismatch = false
+  targetWarningLogged = false
 }
 
 /**
