@@ -51,6 +51,10 @@ type User struct {
 	TotpSecret string
 	// TotpEnabled reports whether MFA is active for this admin (webadmin login).
 	TotpEnabled bool
+	// ExternalID 是 IdP 主体标识(OIDC sub / LDAP DN);external_source 是哪套
+	// IdP(ldap/oidc/openid)。空 = 未绑定(存量行首登时认领)。审计 2026-09-13 P2-9。
+	ExternalID     string
+	ExternalSource string
 }
 
 // Role constants (RBAC, design v3b).
@@ -72,7 +76,7 @@ func IsAdminRole(role string) bool {
 }
 
 // userCols is the canonical user column list (kept in sync with scanUser).
-const userCols = "id, username, display_name, email, password_hash, source, is_admin, role, status, created_at, updated_at, quota_tokens, quota_money, password_changed_at, password_must_change, totp_secret, totp_enabled, balance_money, balance_activated_at"
+const userCols = "id, username, display_name, email, password_hash, source, is_admin, role, status, created_at, updated_at, quota_tokens, quota_money, password_changed_at, password_must_change, totp_secret, totp_enabled, balance_money, balance_activated_at, external_id, external_source"
 
 // CreateUserWithPassword creates a local user, hashing the plaintext password.
 func CreateUserWithPassword(db *sql.DB, username, password string) (int64, error) {
@@ -114,13 +118,13 @@ func AuthenticateLocal(db *sql.DB, username, password string) (User, error) {
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var u User
 	var isAdmin, status int
-	var displayName, email, passwordHash, role, totpSecret sql.NullString
+	var displayName, email, passwordHash, role, totpSecret, externalID, externalSource sql.NullString
 	var quota sql.NullInt64
 	var quotaMoney, balanceMoney sql.NullFloat64
 	var createdAt, updatedAt, passwordChangedAt any
 	var balanceActivatedAt any
 	var mustChange, totpEnabled int
-	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &role, &status, &createdAt, &updatedAt, &quota, &quotaMoney, &passwordChangedAt, &mustChange, &totpSecret, &totpEnabled, &balanceMoney, &balanceActivatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &role, &status, &createdAt, &updatedAt, &quota, &quotaMoney, &passwordChangedAt, &mustChange, &totpSecret, &totpEnabled, &balanceMoney, &balanceActivatedAt, &externalID, &externalSource); err != nil {
 		return nil, err
 	}
 	u.CreatedAt = parseSQLTime(createdAt)
@@ -155,6 +159,8 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	u.PasswordMustChange = mustChange == 1
 	u.TotpSecret = totpSecret.String
 	u.TotpEnabled = totpEnabled == 1
+	u.ExternalID = externalID.String
+	u.ExternalSource = externalSource.String
 	return &u, nil
 }
 
@@ -195,11 +201,11 @@ func CreateUser(db *sql.DB, u *User) (int64, error) {
 		return 0, err
 	}
 	role := resolveRole(u.Role, u.IsAdmin)
-	id, err := InsertID(db, `INSERT INTO users (username, display_name, email, password_hash, source, is_admin, role, status, quota_tokens, quota_money, balance_money)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	id, err := InsertID(db, `INSERT INTO users (username, display_name, email, password_hash, source, is_admin, role, status, quota_tokens, quota_money, balance_money, external_id, external_source)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		username, nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
 		u.Source, boolInt(u.IsAdmin), role, u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney),
-		roundMoney(u.BalanceMoney))
+		roundMoney(u.BalanceMoney), u.ExternalID, u.ExternalSource)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
@@ -588,4 +594,45 @@ func DeleteUser(db *sql.DB, id int64) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// BindExternalIdentity 把本地行绑定到 IdP 主体(审计 2026-09-13 P2-9)。
+// 仅当该行尚未绑定(external_id=”)或绑定值一致时成功;不一致返回 ErrConflictLike
+// 由调用方拒绝登录(绝不静默改写别人的绑定)。
+func BindExternalIdentity(db *sql.DB, userID int64, externalID, externalSource string) error {
+	if externalID == "" {
+		return nil
+	}
+	res, err := db.Exec(`UPDATE users SET external_id = ?, external_source = ?, updated_at = `+NowExpr()+`
+		WHERE id = ? AND (external_id = '' OR external_id = ?)`, externalID, externalSource, userID, externalID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		// 已被其它 IdP 主体占用 → 调用方拒绝登录(专用哨兵,便于映射 401 而非 500)。
+		return ErrIdentityConflict
+	}
+	return nil
+}
+
+// ConsumeTOTPStep 原子占用一个 TOTP 时间步(重放防护,审计 2026-09-13 P2-3)。
+//
+// 语义:仅当该步**新于**该用户已成功使用过的最大步时才成功(单条 UPDATE 即
+// check-and-set)。并发重放同一 (user, step) 只会有一次 RowsAffected=1。
+// @returns true = 本次占用成功(动态码首次使用);false = 该步或更早的步已用过。
+func ConsumeTOTPStep(db *sql.DB, userID, step int64) (bool, error) {
+	res, err := db.Exec(`UPDATE users SET last_totp_step = ? WHERE id = ? AND last_totp_step < ?`,
+		step, userID, step)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }

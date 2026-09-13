@@ -119,7 +119,7 @@ func main() {
 	}
 
 	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
+	r := newEngine()
 	// 2026-09-08 P1-2:Logger/Recovery 必须在任何路由注册之前挂载。gin 在
 	// 注册路由时快照当前中间件链,此前 mountAPIGuards 在 router.Register 之后
 	// 才 r.Use(...),导致 162 条 API 路由 panic 时不返回 JSON 信封(直接断连)
@@ -144,6 +144,12 @@ func main() {
 
 	if _, err := util.EnsureMasterKey(*dataDir); err != nil {
 		log.Fatalf("master key: %v", err)
+	}
+	// P3-5(审计 2026-09-13):客户端下载/门户 URL 的来源判定以管理员配置的
+	// "对外地址"(settings server.base_url)为权威;未配置才回落到请求头。
+	clientrelease.PublicBaseResolver = func() string {
+		v, _, _ := serverstore.GetSetting(db, "server.base_url")
+		return v
 	}
 	// 渠道在启动时**解析一次**并贯穿全局(清单、门户页脚、渠道一致性校验):
 	// 三处各解析一次会让同一台服务器对外报出不同的渠道身份。
@@ -478,6 +484,19 @@ const adminCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsaf
 func htmlEscape(s string) string {
 	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;")
 	return r.Replace(s)
+}
+
+// newEngine 构造生产 HTTP 引擎(唯一真源:main 与契约测试共用)。
+//
+// P3-1(审计 2026-09-13):关闭尾斜杠自动重定向。gin 的 TSR 分支直接写出
+// 307/301,**不执行任何路由中间件**(中间件链随路由匹配结果构建)—— 实测
+// POST /api/client/v2/auth/login/ 返回 307 时命名空间的 1MB
+// bodyLimitMiddleware 完全没跑。API 客户端一律走 canonical 路径,关掉后
+// 带尾斜杠的请求得到 404 JSON 信封(NoRoute),语义可预测且与限体一致。
+func newEngine() *gin.Engine {
+	r := gin.New()
+	r.RedirectTrailingSlash = false
+	return r
 }
 
 // installAPIMiddleware installs the JSON-contract middleware that must be

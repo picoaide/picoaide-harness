@@ -122,3 +122,79 @@ func TestAdminAgentArchiveValidation(t *testing.T) {
 		t.Fatalf("missing preset.yml accepted: %d", w.Code)
 	}
 }
+
+// agentArchiveDescription 是 agentArchive 内 preset.yml 的描述原文(包内即
+// 真相:发布内核会把它写进 apps.description)。
+const agentArchiveDescription = "一个用于演示市场智能体管理的测试智能体"
+
+// TestAdminAgentUploadKeepsOwnerFromLoginState(P2-6,审计 2026-09-13):
+// 发布后的「包内展示名回写」只允许改展示名——包内 author 是不可信输入,
+// 绝不能写进 apps.owner:官方 App 的 owner 恒为空串(蓝标语义),非官方 App 的归属
+// 只认登录态占名(Publish 按发布账号写),首次上传仍正常占名。
+func TestAdminAgentUploadKeepsOwnerFromLoginState(t *testing.T) {
+	r, db, hdr := marketAdminSetup(t)
+	defer db.Close()
+
+	upload := func(name, version, title string) {
+		t.Helper()
+		body := `{"version":"` + version + `","archive":"` +
+			base64.StdEncoding.EncodeToString(agentArchive(t, version, title)) + `"}`
+		if w, _ := mreq(t, r, "POST", "/api/server/admin/agents/"+name+"/archive", body, hdr); w.Code != http.StatusOK {
+			t.Fatalf("upload %s: %d %s", name, w.Code, w.Body.String())
+		}
+	}
+
+	// 1) 官方 App:owner 必须保持空串,包内 author("bob")不得改写归属。
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/agents",
+		`{"name":"official-agent","description":"官方描述","author":"boss"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create official agent: %d %s", w.Code, w.Body.String())
+	}
+	if err := serverstore.SetAppOfficial(db, serverstore.AppKindAgent, "official-agent", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	upload("official-agent", "1.0.0", "官方智能体")
+	official, err := serverstore.GetApp(db, serverstore.AppKindAgent, "official-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if official.Official != 1 || official.Owner != "" {
+		t.Fatalf("官方 App 归属被包内 author 回写: %+v", official)
+	}
+	// 展示名仍按包内清单更新,包内描述不得被回写清空。
+	if official.Title != "官方智能体" || official.Description != agentArchiveDescription {
+		t.Fatalf("官方 App 元数据 = %+v", official)
+	}
+
+	// 2) 非官方 App:归属保持登录态,包内 author 不得覆盖。
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/agents",
+		`{"name":"plain-agent","description":"普通描述","author":"boss"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create plain agent: %d %s", w.Code, w.Body.String())
+	}
+	upload("plain-agent", "1.0.0", "普通智能体")
+	plain, err := serverstore.GetApp(db, serverstore.AppKindAgent, "plain-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Owner != "boss" {
+		t.Fatalf("非官方 App 归属 = %q, want boss(登录态占名,包内 author=bob 不得改写)", plain.Owner)
+	}
+	if plain.Description != agentArchiveDescription {
+		t.Fatalf("非官方 App 描述 = %q, want 包内清单描述", plain.Description)
+	}
+
+	// 3) 历史空归属的非官方 App:上传时应由登录账号占名,而不是包内 author。
+	if err := serverstore.UpsertApp(db, &serverstore.App{
+		Kind: serverstore.AppKindAgent, AppID: "legacy-agent", Title: "legacy-agent",
+		Owner: "", Channel: serverstore.AppChannelMarket, Enabled: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	upload("legacy-agent", "1.0.0", "历史智能体")
+	legacy, err := serverstore.GetApp(db, serverstore.AppKindAgent, "legacy-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Owner != "boss" {
+		t.Fatalf("空归属 App 上传后 owner = %q, want boss(登录态占名,bob 是包内不可信 author)", legacy.Owner)
+	}
+}

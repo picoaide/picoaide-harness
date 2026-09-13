@@ -30,9 +30,23 @@ type AdminSession struct {
 	LastUsedAt time.Time
 }
 
-// CreateAdminSession stores a session and returns its id and a CSRF token.
+// sessionSecretHash 返回 cookie 值的 SHA-256(库中只存哈希,P2-2)。
+func sessionSecretHash(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
+}
+
+// CreateAdminSession stores a session and returns it (ID = cookie 值) plus a
+// CSRF token.
+//
+// P2-2(审计 2026-09-13):下发给浏览器的 cookie 值**不再原样入库** —— 库中只存
+// SHA-256(secret_hash),id 退回为纯内部主键。任何读到 DB 的人拿不到可用会话。
 func CreateAdminSession(db *sql.DB, userID int64) (*AdminSession, string, error) {
-	id, err := randomHex(24)
+	rowID, err := randomHex(24)
+	if err != nil {
+		return nil, "", err
+	}
+	secret, err := randomHex(24)
 	if err != nil {
 		return nil, "", err
 	}
@@ -40,24 +54,26 @@ func CreateAdminSession(db *sql.DB, userID int64) (*AdminSession, string, error)
 	if err != nil {
 		return nil, "", err
 	}
-	s := &AdminSession{ID: id, UserID: userID, CSRFKey: csrfKey, ExpiresAt: time.Now().Add(AdminSessionTTL), LastUsedAt: time.Now()}
+	s := &AdminSession{ID: secret, UserID: userID, CSRFKey: csrfKey, ExpiresAt: time.Now().Add(AdminSessionTTL), LastUsedAt: time.Now()}
 	// C-15: sweep already-expired sessions on every login so the table cannot
 	// grow without bound from abandoned logins.
 	if _, err := db.Exec("DELETE FROM admin_sessions WHERE expires_at < ?", time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return nil, "", err
 	}
-	if _, err := db.Exec(`INSERT INTO admin_sessions (id, user_id, csrf_key, expires_at, last_used_at) VALUES (?, ?, ?, ?, ?)`,
-		id, userID, csrfKey, s.ExpiresAt.UTC().Format(time.RFC3339), s.LastUsedAt.UTC().Format(time.RFC3339)); err != nil {
+	if _, err := db.Exec(`INSERT INTO admin_sessions (id, user_id, csrf_key, expires_at, last_used_at, secret_hash) VALUES (?, ?, ?, ?, ?, ?)`,
+		rowID, userID, csrfKey, s.ExpiresAt.UTC().Format(time.RFC3339), s.LastUsedAt.UTC().Format(time.RFC3339),
+		sessionSecretHash(secret)); err != nil {
 		return nil, "", err
 	}
-	return s, IssueSessionCSRF(csrfKey, id), nil
+	return s, IssueSessionCSRF(csrfKey, secret), nil
 }
 
-// GetAdminSession loads a session row.
-func GetAdminSession(db *sql.DB, id string) (*AdminSession, error) {
+// GetAdminSession loads a session row **by cookie value**(内部按哈希查,P2-2)。
+func GetAdminSession(db *sql.DB, cookieSecret string) (*AdminSession, error) {
 	var s AdminSession
 	var expiresAt, lastUsedAt string
-	err := db.QueryRow(`SELECT id, user_id, csrf_key, expires_at, last_used_at FROM admin_sessions WHERE id = ?`, id).
+	err := db.QueryRow(`SELECT id, user_id, csrf_key, expires_at, last_used_at FROM admin_sessions WHERE secret_hash = ?`,
+		sessionSecretHash(cookieSecret)).
 		Scan(&s.ID, &s.UserID, &s.CSRFKey, &expiresAt, &lastUsedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, serverstore.ErrNotFound
@@ -74,14 +90,15 @@ func GetAdminSession(db *sql.DB, id string) (*AdminSession, error) {
 	return &s, nil
 }
 
-// DeleteAdminSession removes a session.
-func DeleteAdminSession(db *sql.DB, id string) error {
-	_, err := db.Exec("DELETE FROM admin_sessions WHERE id = ?", id)
+// DeleteAdminSession removes a session **by cookie value**(内部按哈希定位,P2-2)。
+func DeleteAdminSession(db *sql.DB, cookieSecret string) error {
+	_, err := db.Exec("DELETE FROM admin_sessions WHERE secret_hash = ?", sessionSecretHash(cookieSecret))
 	return err
 }
 
 // ValidateAdminSession checks expiry (hard TTL + idle timeout) and that the
 // user has management access (super_admin or auditor; plain user is rejected).
+// 入参是 **cookie 值**(内部按哈希定位,P2-2)。
 func ValidateAdminSession(db *sql.DB, id string) (*serverstore.User, error) {
 	s, err := GetAdminSession(db, id)
 	if err != nil {
@@ -102,8 +119,8 @@ func ValidateAdminSession(db *sql.DB, id string) (*serverstore.User, error) {
 		return nil, errors.New("not an active admin")
 	}
 	// Sliding idle window: refresh last_used_at on each validated use.
-	if _, err := db.Exec("UPDATE admin_sessions SET last_used_at = ? WHERE id = ?",
-		time.Now().UTC().Format(time.RFC3339), id); err != nil {
+	if _, err := db.Exec("UPDATE admin_sessions SET last_used_at = ? WHERE secret_hash = ?",
+		time.Now().UTC().Format(time.RFC3339), sessionSecretHash(id)); err != nil {
 		return nil, err
 	}
 	return u, nil

@@ -1454,13 +1454,24 @@ type streamSettlement struct {
 // 返回 settled=false 且 err==nil 表示这次流没有任何可计费内容(pending 行已删除)。
 // 返回 err != nil 时调用方必须 fail-closed(abortSettlementFailureStream)。
 func settleStreamFallback(db *sql.DB, in streamSettlement) (bool, error) {
-	// 输入侧补估的前提是**正文真的交付过**(r7 r7f1-2):上游协议错误(单行
-	// 过大)/空流/只回一条 error 事件时,客户端一个正文字节都没拿到 —— 既不能
-	// 计费,也不能把 pending 行留成账单(下面按全 0 删除)。判据是"解析到过
-	// 正文/工具调用增量",不是"转发过任意一行"(data: [DONE]/event:/error 事件
-	// 都不算)。
+	// 输入侧补估的前提是**这条流确实产生了可计费的工作**,判据有两条(任一成立):
+	//
+	//   ① 正文真的交付过(r7 r7f1-2):解析到过正文/工具调用增量。上游协议错误
+	//      (单行过大)/空流/只回一条 error 事件时,客户端一个正文字节都没拿到 ——
+	//      既不能计费,也不能把 pending 行留成账单(下面按全 0 删除)。判据是
+	//      "解析到过正文",不是"转发过任意一行"(data: [DONE]/event:/error 事件
+	//      都不算)。
+	//   ② **上游自己报了输出侧用量**(completion/cache > 0):这是"请求确实被
+	//      执行、模型确实产出了 token"的直接证据。此时即使正文没能解析出来
+	//      (上游流形态不在识别面内),输入侧也不该白送 —— 只报 output_tokens
+	//      而不报 input_tokens 是上游的常见残缺报文。
+	//
+	// 两者都不成立(纯 error-only / [DONE]-only / 空流,且上游一个用量都没报)
+	// 时不计费,由下面按全 0 删除 pending 行。
+	billableWorkSeen := in.contentChunks > 0 || in.contentBytes > 0 ||
+		in.completionTokens > 0 || in.cacheTokens > 0
 	var promptEstimated bool
-	if in.contentChunks > 0 || in.contentBytes > 0 {
+	if billableWorkSeen {
 		in.promptTokens, promptEstimated = estimatePromptFallback(in.promptTokens, in.promptSeen, in.requestBody, in.promptTokenCap)
 	}
 	// completion 估算的基数同样只认**正文内容字节**:SSE 帧、usage 行、[DONE]

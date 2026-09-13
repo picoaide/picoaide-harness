@@ -1,0 +1,12 @@
+-- 0064: TOTP 动态码重放防护(审计 2026-09-13 P2-3)。
+--
+-- 背景:admin_mfa_challenges 的 attempts 门只限制"同一票据的失败次数",
+-- 而 6 位 TOTP 在 ±1 步容差内同时有 3 个码有效、且没有任何"已用步"记录 ——
+-- 实测同一个动态码可用于两个不同票据(登录 → 再登录)。票据可无限重签,
+-- 于是"知道密码"即可离线爆破第二因子(见 P1-1)。
+--
+-- 这里给 users 增加"最后一次成功使用的时间步"(Unix/30):
+--   * 0 = 从未使用(新用户/从未开 MFA);
+--   * 校验成功时以 UPDATE ... WHERE last_totp_step < ? 原子占用(并发重放只放行一个);
+--   * 同一 (user, step) 只能成功一次 ⇒ 已观察到的码在有效窗口内不可重放。
+ALTER TABLE users ADD COLUMN last_totp_step BIGINT NOT NULL DEFAULT 0;

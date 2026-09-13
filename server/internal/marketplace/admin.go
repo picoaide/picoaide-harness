@@ -455,12 +455,22 @@ func replaceSkillGrants(c *gin.Context, db *sql.DB) {
 }
 
 // maxFilePreviewBytes caps the inline text returned by the per-file review
-// endpoint (与共享技能审核面一致)。
-const maxFilePreviewBytes = 1 << 20
+// endpoint. 真源 = skillmanifest.MaxSkillMDBytes(128 KB):sharedskills /
+// agentshare / 解析入口同值,marketplace 曾是第 4 份独立拷贝(1 MB)——
+// P2-5(审计 2026-09-13)。四处同值由 preview_limit_single_source_test.go
+// 锁定;统一后「审核预览」语义不变:超过 128 KB 的条目仍标记 too_large
+// 提示管理员下载归档查看,而不是让接口失去响应边界。
+const maxFilePreviewBytes = skillmanifest.MaxSkillMDBytes
 
 // skillArchiveForReview resolves the reviewable archive bytes of one market
 // skill: 上传模式直接取 DB 归档;git 模式取磁盘上已构建的包(未构建则明确
 // 告知,不静默回空)。
+//
+// P3-4(审计 2026-09-13):磁盘回退用 s.Version 拼文件名,而 legacy 行的
+// version 可能含 `..`/分隔符(前者可读 cacheDir 之外的文件)。这里与
+// agentshare.safeName 同级加固:两段都必须是合法单段路径,且 Clean 后的
+// 结果必须仍在 cacheDir 之内;不合法一律当作「归档缺失」(调用方原有
+// 404 语义,不新增响应形态)。
 func skillArchiveForReview(s *serverstore.Skill, cacheDir string) ([]byte, string) {
 	if len(s.Archive) > 0 {
 		return s.Archive, ""
@@ -468,8 +478,15 @@ func skillArchiveForReview(s *serverstore.Skill, cacheDir string) ([]byte, strin
 	if !util.SafePathSegment(s.Name) {
 		return nil, "技能名不合法"
 	}
+	if !util.SafePathSegment(s.Version) {
+		return nil, "该技能尚未上传归档,暂无法预览"
+	}
+	base := filepath.Clean(cacheDir)
 	for _, ext := range []string{".zip", ".tar.gz"} {
-		p := filepath.Join(cacheDir, s.Name+"-"+s.Version+ext)
+		p := filepath.Clean(filepath.Join(base, s.Name+"-"+s.Version+ext))
+		if !strings.HasPrefix(p, base+string(os.PathSeparator)) {
+			continue // 越界路径按「归档缺失」处理,绝不读 cacheDir 之外
+		}
 		if raw, err := os.ReadFile(p); err == nil {
 			return raw, ""
 		}

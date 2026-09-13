@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -148,8 +147,18 @@ func TestAgentUploadKeepsDescription(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(a.Description) == "" {
-		t.Fatalf("App description cleared by upload (want the package description, skills keep it)")
+	// marketplace-3:上传归档**不得把 App 级描述清成空串** —— 原缺陷是处理器的
+	// 第二次 UpsertApp 带着零值 Description 覆写,把描述清成 ""。
+	//
+	// 正确口径与**技能侧一致**:App 级描述取自**包内**(appstore.Publish 按
+	// req.Manifest.Description 写),所以这里断言它等于包内描述,而不是管理员
+	// 登记时随手填的那句。断言"非空"是最低要求,断言"等于包内"才能区分
+	// 「被清空」与「被正确覆盖」两种形态。
+	// R7 audit 2026-09-13 P2-6 进一步收紧:回写只走 SetAppTitle —— 包内 author
+	// 是不可信输入,不能用来覆盖 owner(官方 App 的空归属=蓝标语义)。
+	const pkgDescription = "一个用于演示市场智能体管理的测试智能体"
+	if a.Description != pkgDescription {
+		t.Fatalf("App description = %q, want 包内描述 %q(上传不得清空/改写为其它值)", a.Description, pkgDescription)
 	}
 	if a.Title != "描述测试智能体" {
 		t.Fatalf("App title = %q, want the package title", a.Title)

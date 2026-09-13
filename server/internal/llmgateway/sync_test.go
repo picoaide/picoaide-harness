@@ -141,8 +141,10 @@ func TestSyncIterationCleansPendingUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// P2-8(审计 2026-09-13):保留阈值从 1h 提到 pendingUsageRetention(6h),
+	// "过期"的构造必须超过该阈值(旧的 2h 现在属于"仍在途",刻意不清理)。
 	if _, err := db.Exec("UPDATE usage SET created_at = ? WHERE id = ?",
-		time.Now().Add(-2*time.Hour).Format("2006-01-02 15:04:05"), id); err != nil {
+		time.Now().Add(-(pendingUsageRetention + time.Hour)).Format("2006-01-02 15:04:05"), id); err != nil {
 		t.Fatal(err)
 	}
 	fetchFn := func(url string) ([]byte, error) { return []byte(`{"data":[]}`), nil }

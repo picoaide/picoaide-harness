@@ -86,6 +86,10 @@ func LoadUpstreams(db *sql.DB) ([]Upstream, error) {
 
 // Upstream is an enabled LLM provider (OpenAI-compatible, or Anthropic-compatible when Protocol == "anthropic").
 type Upstream struct {
+	// ID 是 gateway_providers.id:计费取价必须按**实际命中的 provider**
+	// (P1-6,审计 2026-09-13 —— 同名模型挂多 provider 时按 name 取价会随
+	// 物理行序漂移,可命中 0 价行)。
+	ID       int64
 	Name     string
 	BaseURL  string
 	APIKey   string
@@ -113,6 +117,7 @@ func loadUpstreamsDB(db *sql.DB) ([]Upstream, error) {
 			log.Printf("gateway: skip provider %s: decrypt api key: %v", u.Name, err)
 			continue
 		}
+		u.ID = id
 		u.APIKey = key
 		if u.Protocol != "anthropic" && u.Protocol != "openai" && u.Protocol != "both" {
 			// 未知协议(防御):不参与任何路由,与损坏 key 同档处理

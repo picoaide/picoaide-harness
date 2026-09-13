@@ -88,6 +88,7 @@ func (a *API) handleResponses(c *gin.Context) {
 
 	var resp *http.Response
 	var respSecrets []string
+	var chosenProviderID int64 // 实际命中的 provider(计费取价用,P1-6)
 	for i := range ups {
 		body := raw
 		if ups[i].Channel != "" {
@@ -111,6 +112,12 @@ func (a *API) handleResponses(c *gin.Context) {
 		resp, err = a.forwardEndpoint(c, &ups[i], body, req.Stream, "/responses")
 		if err == nil {
 			respSecrets = []string{ups[i].APIKey}
+			chosenProviderID = ups[i].ID
+			if usageID > 0 {
+				if serr := serverstore.SetUsageProvider(a.DB, usageID, ups[i].ID); serr != nil {
+					log.Printf("gateway: bind usage %d to provider %d failed: %v", usageID, ups[i].ID, serr)
+				}
+			}
 			break
 		}
 		log.Printf("gateway: model %s provider %q responses failed: %v", safeModelForLog(req.Model), ups[i].Name, err)
@@ -128,5 +135,5 @@ func (a *API) handleResponses(c *gin.Context) {
 		a.serveStream(c, resp, usageID, respSecrets, raw, promptEstimateCapForModel(a.DB, req.Model))
 		return
 	}
-	a.serveJSON(c, resp, user.ID, req.Model, respSecrets, billingKindResponses)
+	a.serveJSON(c, resp, user.ID, chosenProviderID, req.Model, respSecrets, billingKindResponses, raw)
 }

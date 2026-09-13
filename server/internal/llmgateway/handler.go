@@ -137,7 +137,8 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 	// 渠道 override 与 max_tokens 注入按候选独立计算(从原始 body 出发):
 	// failover 时第二个 provider 不得收到首个 provider 的渠道参数污染。
 	var resp *http.Response
-	var respSecrets []string // 成功 provider 的官方 key(响应脱敏用)
+	var respSecrets []string   // 成功 provider 的官方 key(响应脱敏用)
+	var chosenProviderID int64 // 实际命中的 provider(计费取价用,P1-6)
 	for i := range ups {
 		body := raw
 		if ups[i].Channel != "" {
@@ -164,6 +165,14 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		resp, err = a.forward(c, &ups[i], body, req.Stream)
 		if err == nil {
 			respSecrets = []string{ups[i].APIKey}
+			chosenProviderID = ups[i].ID
+			// P1-6:pending 行在调用上游前插入(失败即拒绝),provider 此刻才
+			// 确定 —— 补一次绑定,让回填结算按实际 provider 取价。
+			if usageID > 0 {
+				if serr := serverstore.SetUsageProvider(a.DB, usageID, ups[i].ID); serr != nil {
+					log.Printf("gateway: bind usage %d to provider %d failed: %v", usageID, ups[i].ID, serr)
+				}
+			}
 			break
 		}
 		log.Printf("gateway: model %s provider %q failed: %v", safeModelForLog(req.Model), ups[i].Name, err)
@@ -184,7 +193,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		a.serveStream(c, resp, usageID, respSecrets, raw, promptEstimateCapForModel(a.DB, req.Model))
 		return
 	}
-	a.serveJSON(c, resp, user.ID, req.Model, respSecrets, billingKindChat)
+	a.serveJSON(c, resp, user.ID, chosenProviderID, req.Model, respSecrets, billingKindChat, raw)
 }
 
 // maxOutputFromDefaultParams 从模型 default_params JSON 读取 max_output。
@@ -390,7 +399,8 @@ func redactHeaderValue(value string, secrets []string) string {
 // serveJSON passes a non-stream upstream response through and records usage.
 // secrets: 本次请求使用的上游官方 key——上游若在响应中回显,透传前脱敏。
 // kind: 端点标识(计费 kind,见 billingKind*),不再硬编码 "chat"。
-func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model string, secrets []string, kind string) {
+// requestBytes: 实际发往上游的请求体字节数(P0-1:prompt 侧兜底估算用)。
+func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID, providerID int64, model string, secrets []string, kind string, requestBody []byte) {
 	defer resp.Body.Close()
 	type readResult struct {
 		body []byte
@@ -437,10 +447,19 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 		// 解析失败不是"没有用量":留痕便于定位上游报文异常。
 		log.Printf("gateway: parse usage from json body: %v", perr)
 	}
-	if resp.StatusCode < 400 {
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var estimated bool
-		ct, estimated = estimateCompletionFallback(pt, ct, int64(len(body)))
-		if _, err := serverstore.RecordUsageKindCachedEstimated(a.DB, userID, model, pt, ct, cch, kind, estimated); err != nil {
+		// 输入侧兜底:必须真的交付了响应体(len(body)>0),空响应不凭空计输入费。
+		if len(body) > 0 {
+			if pt2, ok := estimatePromptFallback(pt, false, requestBody, promptEstimateCapForModel(a.DB, model)); ok {
+				pt, estimated = pt2, true
+				log.Printf("gateway: prompt usage missing, estimated from request bytes: request_bytes=%d est_prompt=%d", len(requestBody), pt)
+			}
+		}
+		var completionEstimated bool
+		ct, completionEstimated = estimateCompletionFallback(pt, ct, int64(len(body)))
+		estimated = estimated || completionEstimated
+		if _, err := serverstore.RecordUsageKindCachedEstimatedForProvider(a.DB, userID, providerID, model, pt, ct, cch, kind, estimated); err != nil {
 			// FIX-05 + G5b(审计 r3):**任何**结算失败都不得交付 —— 事务已回滚,
 			// 继续 200 交付就是"上游花了钱、账上一分没扣"的无限免费调用。
 			// 余额不足 → 429 BALANCE_EXHAUSTED;其它错误 → 503 METERING_FAILED。
@@ -457,7 +476,63 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 			c.Writer.Header().Add(k, redactHeaderValue(v, secrets))
 		}
 	}
+	if resp.StatusCode >= 400 {
+		// P2-10(审计 2026-09-13):上游错误体只透传 error 信封的
+		// message/type/code 三个字段,其余(内部主机名/栈/请求 id/自有字段)
+		// 一律不下发;非 JSON 错误体替换为固定文案。
+		c.Writer.Write(sanitizeUpstreamError(body, secrets))
+		return
+	}
 	c.Writer.Write(body)
+}
+
+// sanitizeUpstreamError 收敛上游错误体(审计 2026-09-13 P2-10)。
+//
+// 旧实现把上游 4xx 的原始 body(≤1MB)直接透传给员工:中转/上游的内部错误
+// 信息(内网主机名、栈、配额提示、自有字段)会随之外泄。这里只保留错误信封的
+// 可展示三字段(message/type/code),长度截断到 2KB,并照旧做 key 脱敏;
+// 非 JSON 或结构不符时给固定文案。
+func sanitizeUpstreamError(body []byte, secrets []string) []byte {
+	const maxErrMessage = 2000
+	var parsed struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    any    `json:"code"`
+		} `json:"error"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return []byte(`{"error":{"code":"UPSTREAM_ERROR","message":"上游请求失败"}}`)
+	}
+	msg := strings.TrimSpace(parsed.Error.Message)
+	if msg == "" {
+		msg = strings.TrimSpace(parsed.Message)
+	}
+	if msg == "" {
+		msg = "上游请求失败"
+	}
+	if len(msg) > maxErrMessage {
+		msg = msg[:maxErrMessage]
+	}
+	msg = string(redactSecrets([]byte(msg), secrets))
+	out := map[string]any{"message": msg}
+	if t := strings.TrimSpace(parsed.Error.Type); t != "" {
+		out["type"] = t
+	}
+	switch c := parsed.Error.Code.(type) {
+	case string:
+		if strings.TrimSpace(c) != "" {
+			out["code"] = strings.TrimSpace(c)
+		}
+	case float64:
+		out["code"] = c
+	}
+	enc, err := json.Marshal(map[string]any{"error": out})
+	if err != nil {
+		return []byte(`{"error":{"code":"UPSTREAM_ERROR","message":"上游请求失败"}}`)
+	}
+	return enc
 }
 
 // serveStream passes an SSE response through line by line, preserving
@@ -487,9 +562,9 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 				c.Writer.Header().Add(k, redactHeaderValue(v, secrets))
 			}
 		}
-		// 4xx body 限小读,透传前脱敏(错误体同样可能回显 key)
+		// 4xx body 限小读;透传前做 key 脱敏 + 错误体收敛(P2-10)。
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		c.Writer.Write(redactSecrets(errBody, secrets))
+		c.Writer.Write(sanitizeUpstreamError(redactSecrets(errBody, secrets), secrets))
 		return
 	}
 	c.Writer.Header().Set("Content-Type", "text/event-stream")

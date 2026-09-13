@@ -1,8 +1,10 @@
 package serverauth
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -53,12 +55,58 @@ func genTOTPSecret(accountName string) (secret, otpauthURL string, err error) {
 	return key.Secret(), key.URL(), nil
 }
 
+// nowFn 是 TOTP 校验的时间源(生产 = time.Now;测试可覆盖以跨越 30s 步长,
+// 否则重放防护会让同一窗口内的第二次操作无法测试)。
+var nowFn = time.Now
+
 // totpValid 校验 6 位动态码(默认 ±1 步容差, 即 ±30s 时钟漂移容忍)。
 func totpValid(secret, code string) bool {
-	if secret == "" || code == "" {
+	_, ok := totpStepValid(secret, code, nowFn())
+	return ok
+}
+
+// totpStepValid 返回**匹配到的时间步**(±1 步容差内)与是否有效。
+//
+// 为什么需要步号(审计 2026-09-13 P2-3):pquerna 的 Validate 只回 bool,
+// 无法知道这次命中的是哪个 30s 步 ⇒ 无法做重放防护(实测同一动态码在窗口内
+// 可重复用于两个票据)。这里显式枚举 -1/0/+1 三个步并用常量时间比较,把步号
+// 交给调用方落库(totp_replay 表),同一 (user, step) 只能成功一次。
+//
+// 校验完成后立即"占用"该步(serverstore.ConsumeTOTPStep),因此并发重放只会有
+// 一个请求成功。
+func totpStepValid(secret, code string, at time.Time) (int64, bool) {
+	code = strings.TrimSpace(code)
+	if secret == "" || len(code) != 6 {
+		return 0, false
+	}
+	current := at.Unix() / 30
+	for _, delta := range []int64{-1, 0, 1} {
+		step := current + delta
+		want, err := totp.GenerateCode(secret, time.Unix(step*30, 0))
+		if err != nil {
+			continue
+		}
+		if subtle.ConstantTimeCompare([]byte(want), []byte(code)) == 1 {
+			return step, true
+		}
+	}
+	return 0, false
+}
+
+// verifyAndConsumeTOTP 是登录/关闭/开启 MFA 三个入口共用的校验:验证动态码并
+// 原子占用其时间步(重放防护 + 并发只放行一个)。
+// @returns ok=false 表示动态码错误、或该步已被使用过(重放)。
+func verifyAndConsumeTOTP(db *sql.DB, userID int64, secret, code string) bool {
+	step, ok := totpStepValid(secret, code, nowFn())
+	if !ok {
 		return false
 	}
-	return totp.Validate(code, secret)
+	consumed, err := serverstore.ConsumeTOTPStep(db, userID, step)
+	if err != nil {
+		log.Printf("mfa: consume totp step failed user=%d step=%d: %v", userID, step, err)
+		return false
+	}
+	return consumed
 }
 
 // encryptMFASecret / decryptMFASecret 用 master key(AES-GCM)封装 TOTP 密钥。
@@ -76,6 +124,35 @@ func decryptMFASecret(cipher string) (string, error) {
 		return "", err
 	}
 	return util.Decrypt(key, cipher)
+}
+
+// reserveMFAChallenge 原子地"占用一次尝试":未消费、未过期、未超次时才把
+// attempts+1,并把该行的 user_id/secret 一并返回。
+//
+// 审计 2026-09-13 P1-1:旧实现是 getMFAChallenge(SELECT) → 判 attempts<5 →
+// 失败后 bumpMFAChallengeAttempts(UPDATE),**检查与自增分离** —— 并发请求
+// 都读到 attempts=0,实测同一票据 40 并发有 10 个穿过"最多 5 次"的门。
+// 现在一条 UPDATE ... RETURNING 完成"检查+占用",上限是硬的。
+func reserveMFAChallenge(db *sql.DB, id, kind string) (*mfaChallenge, error) {
+	var m mfaChallenge
+	var secret sql.NullString
+	var expiresAt any
+	err := db.QueryRow(`UPDATE admin_mfa_challenges
+		SET attempts = attempts + 1
+		WHERE id = ? AND kind = ? AND used_at IS NULL AND expires_at > now() AND attempts < ?
+		RETURNING user_id, secret, expires_at`, id, kind, mfaChallengeMaxFailed).
+		Scan(&m.UserID, &secret, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, serverstore.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	m.ID = id
+	m.Kind = kind
+	m.Secret = secret.String
+	m.ExpiresAt = parseChallengeTime(expiresAt)
+	return &m, nil
 }
 
 // ---- admin_mfa_challenges DAO ----
@@ -131,12 +208,6 @@ func parseChallengeTime(v any) time.Time {
 		return t
 	}
 	return time.Time{}
-}
-
-// bumpMFAChallengeAttempts 失败计数+1。
-func bumpMFAChallengeAttempts(db *sql.DB, id string) error {
-	_, err := db.Exec("UPDATE admin_mfa_challenges SET attempts = attempts + 1 WHERE id = ?", id)
-	return err
 }
 
 // consumeMFAChallenge 消费挑战(幂等: 已消费/过期/作废返回 ErrNotFound)。

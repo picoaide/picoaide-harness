@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 )
@@ -174,8 +175,14 @@ func TestDuplicateEntryErrorNamesBothCollidingEntries(t *testing.T) {
 	if !ok {
 		t.Fatalf("拒绝信息没有携带冲突的两个条目名: %v", err)
 	}
-	if first != "a\u017fb.txt" || second != "asb.txt" {
-		t.Fatalf("names = (%q, %q), want (aſb.txt, asb.txt)", first, second)
+	// 顺序不敏感:两个名字**都**要点到名,但先出现哪个取决于归档条目顺序,
+	// 而条目顺序来自 makeZip 的 map 迭代(Go 故意随机化)。早期版本按固定
+	// 顺序断言,导致 ~1/6 的运行假红(本地实测 12 次红 2 次)。
+	got := []string{first, second}
+	sort.Strings(got)
+	want := []string{"asb.txt", "a\u017fb.txt"}
+	if got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("names = (%q, %q), want (aſb.txt, asb.txt) 的顺序无关集合", first, second)
 	}
 	// 大小写折叠同理:两个名字都要出现。
 	raw2 := makeZip(t, map[string][]byte{
