@@ -191,14 +191,14 @@ func TestAdminSessionIdleExpired(t *testing.T) {
 		t.Fatal(err)
 	}
 	past := time.Now().Add(-5 * time.Hour).UTC().Format(time.RFC3339)
-	if _, err := db.Exec("UPDATE admin_sessions SET last_used_at = ? WHERE id = ?", past, sess.ID); err != nil {
+	if _, err := db.Exec("UPDATE admin_sessions SET last_used_at = ? WHERE secret_hash = ?", past, sessionSecretHash(sess.ID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ValidateAdminSession(db, sess.ID); err == nil {
 		t.Fatal("idle session must be rejected")
 	}
 	fresh := time.Now().UTC().Format(time.RFC3339)
-	if _, err := db.Exec("UPDATE admin_sessions SET last_used_at = ? WHERE id = ?", fresh, sess.ID); err != nil {
+	if _, err := db.Exec("UPDATE admin_sessions SET last_used_at = ? WHERE secret_hash = ?", fresh, sessionSecretHash(sess.ID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ValidateAdminSession(db, sess.ID); err != nil {

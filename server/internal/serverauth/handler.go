@@ -30,6 +30,8 @@ const CtxTokenKey = "auth_token"
 type API struct {
 	DB      *sql.DB
 	limiter *loginLimiter
+	// loginIPLimiter:登录/回调的单 IP 失败预算桶(P1-2/P1-3 审计 2026-09-13)。
+	loginIPLimiter *loginLimiter
 	// callbackLimiter:OIDC 回调专用 IP 桶(2026-09-08 P0-2)。
 	callbackLimiter *loginLimiter
 
@@ -44,6 +46,7 @@ func New(db *sql.DB) *API {
 	return &API{
 		DB:               db,
 		limiter:          sharedLoginLimiter(),
+		loginIPLimiter:   sharedLoginIPLimiter(),
 		callbackLimiter:  newCallbackLimiter(),
 		providers:        map[string]PasswordProvider{},
 		browsers:         map[string]BrowserProvider{},
@@ -261,6 +264,10 @@ func (a *API) handleLogin(c *gin.Context) {
 		return
 	}
 	ui, err := a.authenticate(req.Username, req.Password)
+	if errors.Is(err, errPasswordVerifyBusy) {
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录请求过于频繁,请稍后再试")
+		return
+	}
 	if err != nil {
 		// 2026-09-08 P1-3:只有失败尝试才计入限流预算(此前成功也计数,
 		// 正常用户第 11 次登录会被 429)。
@@ -274,6 +281,12 @@ func (a *API) handleLogin(c *gin.Context) {
 	a.loginSucceeded(c, req.Username)
 
 	user, err := a.provisionUser(ui)
+	if errors.Is(err, serverstore.ErrIdentityConflict) {
+		// P2-9:同名但 IdP 主体不同 —— 明确的认证失败(不泄露对方身份细节),
+		// 由管理员人工核对,绝不静默复用他人账号行。
+		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "该用户名已绑定到其它身份源账号,请联系管理员")
+		return
+	}
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "用户创建失败")
 		return
@@ -333,11 +346,19 @@ func (a *API) handleChangePassword(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "外部认证用户的密码由企业 IdP 管理,不能在此修改")
 		return
 	}
-	if !util.VerifyPassword(u.PasswordHash, req.OldPassword) {
+	matched, ok := verifyPasswordGated(u.PasswordHash, req.OldPassword)
+	if !ok {
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁,请稍后再试")
+		return
+	}
+	if !matched {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "原密码错误")
 		return
 	}
-	if util.VerifyPassword(u.PasswordHash, req.NewPassword) {
+	if same, ok := verifyPasswordGated(u.PasswordHash, req.NewPassword); !ok {
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁,请稍后再试")
+		return
+	} else if same {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "新密码不能与原密码相同")
 		return
 	}
@@ -408,13 +429,26 @@ func (a *API) authenticate(username, password string) (UserInfo, error) {
 		} else {
 			p = a.passwordProvider(name)
 		}
-		if p != nil {
-			ui, err := p.Authenticate(username, password)
-			if err == nil {
-				return ui, nil
-			}
-			lastErr = err
+		if p == nil {
+			continue
 		}
+		// P1-2:本地 argon2id 校验(64MiB/次)过并发闸;LDAP bind 不在闸内
+		// (它不吃内存,且大所早高峰的并发 bind 不应被本闸误伤成 429)。
+		ui, err := func() (UserInfo, error) {
+			if name != "local" {
+				return p.Authenticate(username, password)
+			}
+			release, ok := acquirePasswordVerify()
+			if !ok {
+				return UserInfo{}, errPasswordVerifyBusy
+			}
+			defer release()
+			return p.Authenticate(username, password)
+		}()
+		if err == nil {
+			return ui, nil
+		}
+		lastErr = err
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no provider")
@@ -438,11 +472,13 @@ func provisionUser(db *sql.DB, ui UserInfo) (*serverstore.User, error) {
 	u, err := serverstore.GetUserByUsername(db, ui.Username)
 	if errors.Is(err, serverstore.ErrNotFound) {
 		id, err := serverstore.CreateUser(db, &serverstore.User{
-			Username:    ui.Username,
-			DisplayName: ui.DisplayName,
-			Email:       ui.Email,
-			Source:      ui.Source,
-			Status:      1,
+			Username:       ui.Username,
+			DisplayName:    ui.DisplayName,
+			Email:          ui.Email,
+			Source:         ui.Source,
+			Status:         1,
+			ExternalID:     ui.ExternalID,
+			ExternalSource: ui.ExternalSource,
 		})
 		if err != nil {
 			if !errors.Is(err, serverstore.ErrDuplicate) {
@@ -472,9 +508,21 @@ func provisionUser(db *sql.DB, ui UserInfo) (*serverstore.User, error) {
 	if ui.Source == "external" && u.Source != "external" {
 		return nil, errors.New("username belongs to a local account")
 	}
-	// 同步组:外部(LDAP)身份每次登录全量对齐——组被移除或清空后,
-	// user_groups 必须同步回收,否则 skill 组授权永久生效
-	if ui.Source == "external" {
+	// P2-9(审计 2026-09-13):外部身份必须绑定到 **IdP 主体**(OIDC sub /
+	// LDAP DN),而不是只按用户名 —— 否则两套 IdP 之间(或允许自选用户名的
+	// IdP 内)同名身份会互相接管本地行(余额/授权/归属/用量历史)。
+	//   1. 行未绑定(external_id='')⇒ 首次登录认领(存量行平滑迁移);
+	//   2. 已绑定且与本次主体一致 ⇒ 正常登录;
+	//   3. 已绑定但与本次主体不一致 ⇒ 拒绝(绝不静默改写别人的绑定)。
+	if ui.Source == "external" && ui.ExternalID != "" {
+		if err := serverstore.BindExternalIdentity(db, u.ID, ui.ExternalID, ui.ExternalSource); err != nil {
+			return nil, err // ErrIdentityConflict → 上层映射 401
+		}
+	}
+	// 同步组:仅当本次认证**确实拿到了组声明**(LDAP 恒真:目录是组的权威源,
+	// 空组即回收;OIDC 只在 IdP 下发了 groups claim 时同步 —— 缺失声明时清空
+	// 会误删 LDAP 同步来的组,审计 2026-09-13 P2-9)。
+	if ui.Source == "external" && ui.GroupsPresent {
 		if err := serverstore.SyncUserGroups(db, u.ID, ui.Groups); err != nil {
 			return nil, err
 		}

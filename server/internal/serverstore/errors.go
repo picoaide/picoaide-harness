@@ -3,8 +3,11 @@ package serverstore
 import "errors"
 
 var (
-	ErrNotFound  = errors.New("not found")
-	ErrDuplicate = errors.New("duplicate")
+	// ErrIdentityConflict 表示该用户名已绑定到**另一个 IdP 主体**(审计
+	// 2026-09-13 P2-9):属于身份冲突,调用方应拒绝登录(401),不得静默复用该行。
+	ErrIdentityConflict = errors.New("username is bound to another identity provider subject")
+	ErrNotFound         = errors.New("not found")
+	ErrDuplicate        = errors.New("duplicate")
 	// ErrConflict is returned when a resource name collides across the
 	// marketplace skills and the shared-skill store (决策 2026-08-25:
 	// 市场与组织合并为「市场」后，同名技能跨源互斥，上传/上架/approve 阻断)。

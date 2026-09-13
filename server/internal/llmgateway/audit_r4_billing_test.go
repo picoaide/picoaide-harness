@@ -117,7 +117,8 @@ func TestR4ChatStreamCompletionOnlyUsageKeepsReportedValue(t *testing.T) {
 		"data: [DONE]\n\n")
 	r, db, uid, token := newAuditR3Gateway(t, u, 100, 2, 8, 0.2)
 
-	w := doPost(t, r, "/v1/chat/completions", `{"model":"r3-model","messages":[],"stream":true}`, token, nil)
+	reqBody := `{"model":"r3-model","messages":[],"stream":true}`
+	w := doPost(t, r, "/v1/chat/completions", reqBody, token, nil)
 	rows := r4Rows(t, db, uid)
 	s := auditR3Snapshot(t, db, uid)
 	if w.Code != http.StatusOK || len(rows) != 1 {
@@ -128,11 +129,14 @@ func TestR4ChatStreamCompletionOnlyUsageKeepsReportedValue(t *testing.T) {
 	if got.Completion != 500 {
 		t.Fatalf("已上报的 completion_tokens 被估算改写: %d, want 500", got.Completion)
 	}
-	if got.Prompt != 0 {
-		t.Fatalf("prompt 侧没有被上报,必须保持 0(响应字节推不出输入): %d", got.Prompt)
+	// P0-1(审计 2026-09-13):prompt 侧未上报时必须按**客户端原始请求体**兜底
+	// 估算 —— 旧行为保持 0 让"关闭 usage 回报"变成一个请求体字段即可白嫖输入。
+	wantPrompt, _ := estimatePromptFallback(0, int64(len(reqBody)))
+	if got.Prompt != wantPrompt {
+		t.Fatalf("prompt 侧兜底估算 = %d, want %d(客户端原始请求体 %d 字节 / 4)", got.Prompt, wantPrompt, len(reqBody))
 	}
-	if want := 500 * 8 / 1e6; got.Cost != want {
-		t.Fatalf("cost=%.9f, want %.9f(只按已上报的 completion 计一次)", got.Cost, want)
+	if want := float64(wantPrompt)*2/1e6 + 500*8/1e6; got.Cost != want {
+		t.Fatalf("cost=%.9f, want %.9f(输入兜底 + 已上报 completion)", got.Cost, want)
 	}
 	checkLedgerInvariant(t, s, "N1 chat 只报 ct")
 }
@@ -174,7 +178,8 @@ func TestR4AnthropicStreamCompletionOnlyUsageKeepsReportedValue(t *testing.T) {
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 	r, db, uid, token := newAuditR3Gateway(t, u, 100, 2, 8, 0.2)
 
-	w := doPost(t, r, "/v1/messages", `{"model":"r3-model","messages":[],"stream":true}`, token, nil)
+	reqBody := `{"model":"r3-model","messages":[],"stream":true}`
+	w := doPost(t, r, "/v1/messages", reqBody, token, nil)
 	rows := r4Rows(t, db, uid)
 	s := auditR3Snapshot(t, db, uid)
 	if w.Code != http.StatusOK || len(rows) != 1 {
@@ -185,7 +190,11 @@ func TestR4AnthropicStreamCompletionOnlyUsageKeepsReportedValue(t *testing.T) {
 	if got.Completion != 700 {
 		t.Fatalf("已上报的 output_tokens 被估算改写: %d, want 700", got.Completion)
 	}
-	if want := 700 * 8 / 1e6; got.Cost != want {
+	wantPrompt, _ := estimatePromptFallback(0, int64(len(reqBody)))
+	if got.Prompt != wantPrompt {
+		t.Fatalf("prompt 侧兜底估算 = %d, want %d", got.Prompt, wantPrompt)
+	}
+	if want := float64(wantPrompt)*2/1e6 + 700*8/1e6; got.Cost != want {
 		t.Fatalf("cost=%.9f, want %.9f", got.Cost, want)
 	}
 	checkLedgerInvariant(t, s, "N1 anthropic 只报 ct")
@@ -213,7 +222,8 @@ func TestR4NonStreamMissingUsageStillBilled(t *testing.T) {
 			u.setNon(body)
 			r, db, uid, token := newAuditR3Gateway(t, u, 100, 2, 8, 0.2)
 
-			w := doPost(t, r, "/v1/responses", `{"model":"r3-model","input":"hi"}`, token, nil)
+			reqBody := `{"model":"r3-model","input":"hi"}`
+			w := doPost(t, r, "/v1/responses", reqBody, token, nil)
 			rows := r4Rows(t, db, uid)
 			s := auditR3Snapshot(t, db, uid)
 			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "R4_PAID_CONTENT") {
@@ -226,13 +236,15 @@ func TestR4NonStreamMissingUsageStillBilled(t *testing.T) {
 			want := r4Estimate(len(body))
 			t.Logf("N2 %s: prompt=%d completion=%d cost=%.6f wantCompletion=%d balance=%.6f",
 				tc.name, got.Prompt, got.Completion, got.Cost, want, s.balance)
-			if got.Prompt != 0 {
-				t.Fatalf("prompt 侧不该被估算(响应字节推不出输入): %d", got.Prompt)
+			// P0-1:prompt 侧未上报 ⇒ 按客户端原始请求体兜底估算(非响应字节)
+			wantPrompt, _ := estimatePromptFallback(0, int64(len(reqBody)))
+			if got.Prompt != wantPrompt {
+				t.Fatalf("prompt 侧兜底估算 = %d, want %d", got.Prompt, wantPrompt)
 			}
 			if got.Completion != want {
 				t.Fatalf("估算 completion = %d, want %d(已交付 %d 字节 / 4,确定性)", got.Completion, want, len(body))
 			}
-			if wantCost := float64(want) * 8 / 1e6; got.Cost != wantCost {
+			if wantCost := float64(wantPrompt)*2/1e6 + float64(want)*8/1e6; got.Cost != wantCost {
 				t.Fatalf("cost = %.9f, want %.9f", got.Cost, wantCost)
 			}
 			if s.kinds[ledgerKindConsume] != 1 {
@@ -468,7 +480,8 @@ func TestR4UsageShapesNoDoubleCharge(t *testing.T) {
 			u := newAuditR3Upstream(t)
 			u.setNon(body)
 			r, db, uid, token := newAuditR3Gateway(t, u, 100, 2, 8, 0.2)
-			w := doPost(t, r, "/v1/chat/completions", `{"model":"r3-model","messages":[]}`, token, nil)
+			reqBody := `{"model":"r3-model","messages":[]}`
+			w := doPost(t, r, "/v1/chat/completions", reqBody, token, nil)
 			rows := r4Rows(t, db, uid)
 			s := auditR3Snapshot(t, db, uid)
 			if w.Code != http.StatusOK || len(rows) != 1 {
@@ -479,16 +492,21 @@ func TestR4UsageShapesNoDoubleCharge(t *testing.T) {
 			if wantCompletion < 0 {
 				wantCompletion = r4Estimate(len(body))
 			}
+			// P0-1:prompt 侧未上报(0/缺失/负值)时按客户端原始请求体兜底估算
+			wantPrompt := tc.wantPrompt
+			if wantPrompt == 0 {
+				wantPrompt, _ = estimatePromptFallback(0, int64(len(reqBody)))
+			}
 			t.Logf("形态 %s: prompt=%d completion=%d cost=%.9f (want %d/%d) balance=%.6f",
-				tc.name, got.Prompt, got.Completion, got.Cost, tc.wantPrompt, wantCompletion, s.balance)
-			if got.Prompt != tc.wantPrompt {
-				t.Fatalf("prompt = %d, want %d(total_tokens/另一套字段名不得被拆成输入侧)", got.Prompt, tc.wantPrompt)
+				tc.name, got.Prompt, got.Completion, got.Cost, wantPrompt, wantCompletion, s.balance)
+			if got.Prompt != wantPrompt {
+				t.Fatalf("prompt = %d, want %d(total_tokens/另一套字段名不得被拆成输入侧;未上报时按请求体兜底)", got.Prompt, wantPrompt)
 			}
 			if got.Completion != wantCompletion {
 				t.Fatalf("completion = %d, want %d", got.Completion, wantCompletion)
 			}
 			// 金额必须精确等于「已采信的上报值 + 缺失侧的估算」,叠加/双计都会超。
-			wantCost := float64(tc.wantPrompt)*2/1e6 + float64(wantCompletion)*8/1e6
+			wantCost := float64(wantPrompt)*2/1e6 + float64(wantCompletion)*8/1e6
 			if diff := got.Cost - wantCost; diff > 1e-9 || diff < -1e-9 {
 				t.Fatalf("cost = %.9f, want %.9f(疑似重复计费或凭空多扣)", got.Cost, wantCost)
 			}
@@ -518,10 +536,12 @@ func TestR4NegativeUsageCannotInflateCharge(t *testing.T) {
 		t.Fatalf("status=%d rows=%d", w.Code, len(rows))
 	}
 	got := rows[0]
-	max := float64(r4Estimate(len(body))) * 8 / 1e6
+	reqBody := `{"model":"r3-model","messages":[]}`
+	wantPrompt, _ := estimatePromptFallback(0, int64(len(reqBody)))
+	max := float64(wantPrompt)*2/1e6 + float64(r4Estimate(len(body)))*8/1e6
 	t.Logf("负 token: prompt=%d completion=%d cost=%.9f 上限=%.9f balance=%.6f", got.Prompt, got.Completion, got.Cost, max, s.balance)
-	if got.Prompt != 0 || got.Completion != r4Estimate(len(body)) {
-		t.Fatalf("负值必须归零后按缺失侧估算: %+v", got)
+	if got.Prompt != wantPrompt || got.Completion != r4Estimate(len(body)) {
+		t.Fatalf("负值必须归零后按缺失侧估算(prompt 按请求体兜底): %+v want prompt=%d", got, wantPrompt)
 	}
 	if got.Cost > max+1e-9 || got.Cost < 0 {
 		t.Fatalf("负 token 产生超上限费用: cost=%.9f max=%.9f", got.Cost, max)
