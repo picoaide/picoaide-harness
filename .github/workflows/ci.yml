@@ -557,8 +557,11 @@ jobs:
       # 已公证的官方 DMG 里 app 带 staple 票据(Contents/CodeResources,s8ch 头 +
       # Apple Software Ticket Signing 链),而 sign-only 的渠道 DMG 里没有。
       #
-      # 预发 tag(名字含 '-')的渠道列表只有 beta,维持只签名不公证:公证排队
-      # 1–5 小时的代价不该压在每次内测上(与官方预发同策,见上面三步的分支)。
+      # 预发 tag(名字含 '-')的渠道列表只有 beta。beta 渠道包**仍然公证**
+      # (2026-09-13 定案):它也是要装到别人 Mac 上的交付物,内测同学没有理由
+      # 去"右键打开/系统设置里放行";代价可控 —— 预发只构建 beta 一个渠道,最多
+      # 多排一次队,而官方预发那条路径仍只签名,不把公证排队压在每次内测上。
+      # 正式 tag 上全部渠道与官方走同一条签名+公证+staple 链(2026-09-11 修复)。
       #
       # 渠道构建**不输出日志**(用户定策),渠道 id 全程 ::add-mask::;排障看官方
       # 那一份 —— 渠道与官方跑同一套打包脚本,只换 DSH_BUILD_CHANNEL。
@@ -575,19 +578,21 @@ jobs:
           cp packages/host/desktop/dist/mac-release/*.dmg client-assets/official/
           ls -1 client-assets/official/
       - name: Package brand-channel DMGs (quiet, signed + notarized)
+        # 预发 tag 上也跑:此时渠道列表只有 beta,而 beta 的 mac 包同样要公证
+        # (见上方注释)。官方预发的只签名分支在上面,与这里无关。
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         env:
           MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
-          # 公证三元组:正式 tag 的渠道包必须公证(见上方注释)。预发 tag 走
-          # --sign-only 分支,preflight 允许 absence(notarizationOptional)。
+          # 公证三元组:渠道包一律公证(见上方注释),所以预发 tag 也要带上;
+          # 走 --sign-only 分支的时代已经不在了,preflight 不再允许 absence。
           APPLE_API_KEY: ${{ runner.temp }}/notary/AuthKey.p8
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          # 纯 vX.Y.Z(正式 tag)=签名+公证+staple;含 '-' 的预发 tag=只签名。
-          # 判据与上面官方三条 step 的 if 完全一致,只有一个真源。
-          CHANNEL_NOTARIZE: ${{ !contains(github.ref_name, '-') }}
+          # 渠道包一律签名+公证+staple(正式 tag 全渠道、预发 tag 的 beta)。
+          # 唯一真源:渠道包是交付物,不含"只签名"的例外。
+          CHANNEL_NOTARIZE: 'true'
         run: |
           bash scripts/ci-package-clients.sh --skip-official \
             --dist packages/host/desktop/dist/mac-release \
