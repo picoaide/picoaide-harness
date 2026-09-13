@@ -70,8 +70,13 @@ func createAgentAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "名称必填")
 		return
 	}
-	if !util.SafePathSegment(req.Name) {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "智能体名不合法")
+	// marketplace-9:登记与上传必须同一套名字口径。上传走 appstore.Publish
+	// 的 skillmanifest.IsAppID;此处若只做 SafePathSegment,就会登记出
+	// `My_Agent`/中文名这类**永远无法上传内容**的空壳 App(releases=0,
+	// enabled=1,且没有硬删除入口)。
+	if !skillmanifest.IsAppID(req.Name) {
+		serverauth.WriteError(c, http.StatusBadRequest, skillmanifest.CodeInvalidAppID,
+			"名称不合法:必须是小写 kebab-case(如 my-agent)")
 		return
 	}
 	// 与市场技能同语义:组织共享库已存在同名(任意状态)时跨源互斥。
@@ -136,9 +141,15 @@ func uploadAgentArchiveAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "归档校验失败: "+err.Error())
 		return
 	}
-	entries, _, listErr := agentshare.ListArchiveContents(raw)
+	entries, composition, listErr := agentshare.ListArchiveContents(raw)
 	if listErr != nil {
 		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", "归档校验失败: "+listErr.Error())
+		return
+	}
+	// archupd-1②:编排必须可读(非空且在上限内)且可解析才能发布 —— 与员工
+	// 上传路径同一闸门,否则审核面同样只能看到空编排。
+	if cerr := agentshare.ValidateAgentComposition(composition); cerr != nil {
+		serverauth.WriteError(c, http.StatusUnprocessableEntity, "ARCHIVE_INVALID", cerr.Error())
 		return
 	}
 	presetYML, err := archEntryText(raw, skillmanifest.PresetMetaFile)
@@ -176,10 +187,13 @@ func uploadAgentArchiveAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "发布失败")
 		return
 	}
-	// 包内展示名回写 App(技能同语义)。
+	// 包内展示名回写 App(技能同语义)。marketplace-3:Description 必须带上
+	// 包内描述 —— UpsertApp 的 ON CONFLICT 会无条件覆写 description,此前
+	// 这里留空把管理员登记时填的描述清成了 ""(技能侧保留包内描述)。
 	_ = serverstore.UpsertApp(db, &serverstore.App{
 		Kind: serverstore.AppKindAgent, AppID: name, Title: man.Title,
-		Owner: man.Author, Channel: serverstore.AppChannelMarket,
+		Description: man.Description,
+		Owner:       man.Author, Channel: serverstore.AppChannelMarket,
 	})
 	_ = serverstore.AuditLog(db, adminUsername(c), "agent_update",
 		fmtAgentUploadAudit(name, res.Version, man.Title, checksum))
@@ -340,7 +354,10 @@ func listAgentGrants(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"grants": grantsJSON(grants)})
+	// marketplace-2:与技能侧同形状(单层 {"grants":[...]})。多包一层会让
+	// webadmin 授权弹窗 data.grants.filter 抛异常,并在保存时发出
+	// {"groups":[]} 把全部授权清空。
+	c.JSON(http.StatusOK, grantsJSON(grants))
 }
 
 func applyAgentGrant(c *gin.Context, db *sql.DB, grant bool) {
@@ -355,9 +372,27 @@ func applyAgentGrant(c *gin.Context, db *sql.DB, grant bool) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "username 与 group 必须指定其一")
 		return
 	}
+	// 资源存在性先判(404),与技能侧 setSkillGrant → applyGrant 的顺序一致。
 	if _, err := serverstore.GetApp(db, serverstore.AppKindAgent, name); err != nil {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
 		return
+	}
+	// marketplace-5:与技能侧 applyGrant 同口径 —— 单条授权也要剥掉 webadmin
+	// 发来的 '@' 前缀(整组替换本来就会剥,同文件两种口径会落库一条永远匹配
+	// 不上的死授权),并校验主体存在性,防拼错用户名/部门名静默落库。
+	if t == serverstore.GranteeGroup {
+		subject = strings.TrimPrefix(subject, "@")
+	}
+	if t == serverstore.GranteeUser {
+		if _, err := serverstore.GetUserByUsername(db, subject); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "用户不存在: "+subject)
+			return
+		}
+	} else {
+		if _, err := serverstore.GroupByName(db, subject); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "部门不存在: "+subject)
+			return
+		}
 	}
 	var err error
 	if grant {
@@ -369,11 +404,18 @@ func applyAgentGrant(c *gin.Context, db *sql.DB, grant bool) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "操作失败")
 		return
 	}
-	_ = serverstore.AuditLog(db, adminUsername(c), "agent_grant", name+" grant="+subject)
+	// marketplace-7:撤销必须记 revoke(技能侧 skill_grant/skill_revoke 成对,
+	// 此前无论授权还是撤销都写 agent_grant,审计页无法区分)。
+	action := "agent_grant"
+	if !grant {
+		action = "agent_revoke"
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), action, name+" "+string(t)+":"+subject)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// replaceAgentGrants 整组替换授权(与技能 replaceSkillGrants 同语义)。
+// replaceAgentGrants 整组替换智能体的**部门**授权(原子;用户级授权保留),
+// 与技能侧 replaceSkillGrants/ReplaceSkillGroupGrants 同语义。
 func replaceAgentGrants(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
 	if _, err := serverstore.GetApp(db, serverstore.AppKindAgent, name); err != nil {
@@ -381,47 +423,68 @@ func replaceAgentGrants(c *gin.Context, db *sql.DB) {
 		return
 	}
 	var req struct {
-		Groups    []string `json:"groups"`
-		Usernames []string `json:"usernames"`
+		Groups []string `json:"groups"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
+	// 审计 A5-M7 同源(marketplace-1 放大器):未知字段必须报错而非静默忽略
+	// —— 此前误传 {departments:[...]} 的请求在智能体侧是「200 + 授权清空」,
+	// 技能侧同请求 400。
+	if err := strictBindJSON(c, &req); err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误(仅接受 groups 字段)")
 		return
 	}
-	revoke := func(subject string, t serverstore.GranteeType) error {
-		return serverstore.RevokeApp(db, serverstore.AppKindAgent, name, subject, string(t))
-	}
-	// 保留当前全部授权以做差量:直接清空重放(与技能实现一致的安全边界:
-	// 整组替换 = 以提交清单为准,未列入者全部撤销)。
-	list, err := serverstore.ListAppGrants(db, serverstore.AppKindAgent, name)
-	if err != nil {
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+	if err := replaceAgentGroupGrants(db, name, req.Groups); err != nil {
+		if errors.Is(err, serverstore.ErrValidation) || errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "存在不认识的部门名称")
+			return
+		}
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "操作失败")
 		return
 	}
-	for _, g := range list {
-		if err := revoke(g.Grantee, g.GranteeType); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "操作失败")
-			return
-		}
-	}
-	for _, g := range req.Groups {
-		if g == "" {
-			continue
-		}
-		if err := serverstore.GrantApp(db, serverstore.AppKindAgent, name, strings.TrimPrefix(g, "@"), string(serverstore.GranteeGroup)); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "操作失败")
-			return
-		}
-	}
-	for _, u := range req.Usernames {
-		if u == "" {
-			continue
-		}
-		if err := serverstore.GrantApp(db, serverstore.AppKindAgent, name, u, string(serverstore.GranteeUser)); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "操作失败")
-			return
-		}
-	}
-	_ = serverstore.AuditLog(db, adminUsername(c), "agent_grants", name+" replace")
+	_ = serverstore.AuditLog(db, adminUsername(c), "agent_grants", name+" "+strings.Join(req.Groups, ","))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// replaceAgentGroupGrants 在一个事务里把「智能体」的部门授权替换为给定集合,
+// 用户级授权原样保留。
+//
+// 为什么不复用 serverstore.ReplaceSkillGroupGrants:那份实现的 kind='skill'
+// 是硬编码的,智能体侧没有对偶 DAO(marketplace 无法新增 serverstore 函数)。
+// 为什么必须事务化(marketplace-6):旧实现先逐条 RevokeApp(遍历**全部**
+// 授权,含用户级)再逐条 GrantApp,中途失败会留下半套授权
+// (复核实测 [group:研发部 user:eve] → 500 后只剩 [group:人事部],
+// 技能侧同请求整组回滚)。部门存在性校验放在同一事务内,消除 TOCTOU。
+func replaceAgentGroupGrants(db *sql.DB, appID string, groups []string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	normalized := make([]string, 0, len(groups))
+	seen := map[string]bool{}
+	for _, g := range groups {
+		g = strings.TrimPrefix(g, "@")
+		if g == "" || seen[g] {
+			return serverstore.ErrValidation
+		}
+		seen[g] = true
+		var n int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM groups WHERE "+serverstore.CaseInsensitiveCmp("name"), g).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			return serverstore.ErrNotFound
+		}
+		normalized = append(normalized, g)
+	}
+	if _, err := tx.Exec("DELETE FROM app_grants WHERE kind = ? AND app_id = ? AND grantee_type = ?",
+		serverstore.AppKindAgent, appID, serverstore.GranteeGroup); err != nil {
+		return err
+	}
+	for _, g := range normalized {
+		if _, err := tx.Exec("INSERT INTO app_grants (kind, app_id, grantee_type, grantee) VALUES (?, ?, ?, ?)",
+			serverstore.AppKindAgent, appID, serverstore.GranteeGroup, g); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

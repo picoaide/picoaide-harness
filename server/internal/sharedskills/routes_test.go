@@ -453,6 +453,14 @@ func TestVisibility(t *testing.T) {
 func TestReplaceGrantsUnknownGroup(t *testing.T) {
 	r, db, adminHdr, _, _ := setup(t)
 	defer db.Close()
+	// 2026-09-13(agentshare-3):共享库端点先做渠道/存在性闸门,授权整组
+	// 替换不再对不存在的技能名工作 —— 这里先把被测技能登记出来,保持本用例
+	// 的原意(不认识的部门名 → 400,而不是 500)。
+	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{
+		Name: "any", Version: "1.0.0", Author: "boss", Status: serverstore.SharedSkillApproved,
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	put := func(body string) int {
 		w := httptest.NewRecorder()
