@@ -115,24 +115,10 @@ export function sumRows(rows: UsageRow[]): { cost: number; tokens: number; reque
   return { cost, tokens: prompt + completion - embed, requests, prompt, completion, cache, embed }
 }
 
-// 导出 CSV(带 BOM;公式注入转义,与旧用量页一致)
-function csvCell(v: string | number): string {
-  let s = String(v)
-  if (/^[=+\-@]/.test(s)) s = "'" + s
-  if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"'
-  return s
-}
-
-export function downloadCsv(filename: string, head: string[], lines: (string | number)[][]) {
-  const csv = '\uFEFF' + [head.join(','), ...lines.map((l) => l.map((v) => csvCell(v)).join(','))].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
+// 导出 CSV(带 BOM;公式注入转义)。2026-09-13 起实现收敛到 lib/csv.ts:
+// 审计日志页原来自己手写了一份**没有**转义/BOM 的版本(R7 branding-4),
+// 同一仓库两套口径。这里只做转发,调用方签名不变。
+export { csvCell, buildCsv, downloadCsv } from '../../lib/csv'
 
 export function fmtY(n: number | null | undefined): string {
   if (n == null || !isFinite(n)) return '—'
