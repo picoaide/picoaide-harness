@@ -463,6 +463,17 @@ func portalDownloads(c *gin.Context, settings map[string]string) ([]portal.Platf
 	return platforms, note
 }
 
+// adminCSP 管理台 SPA(/admin/*)的 CSP。
+//
+// 与门户(零脚本)不同,管理台是 Vite 构建的 React SPA:入口 HTML 只有
+// 同源的 module script 与内容哈希样式表,因此 script-src 只需 'self';
+// 样式额外允许内联(React 组件的 style 属性与 VChart 运行时注入都是内联样式,
+// 禁掉会白屏);img/worker 允许 data:/blob:(图表),其余按最小权限收敛。
+// 不放开 eval、不放开任何第三方来源。
+const adminCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; " +
+	"worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+
 // htmlEscape escapes a string for safe embedding in HTML text/attributes.
 func htmlEscape(s string) string {
 	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;")
@@ -563,6 +574,16 @@ func mountAPIGuards(r *gin.Engine, db *sql.DB, fileServer http.Handler, dist fs.
 			if rel == "" {
 				rel = "/"
 			}
+			// 管理台是与门户同级的 HTML 会话面,必须与门户一样先设基础安全头
+			// (审计 R7 webadmin-branding-1:此前该分支只设 Cache-Control +
+			// Content-Type,四个头全缺席,而全仓唯一 CSP 只在门户 /)。
+			// 管理台是 Vite 构建的 React SPA,所以 CSP 与门户(零脚本)不同:
+			// 必须放行**同源**脚本与样式(否则白屏),但不放开 eval/任何来源;
+			// 管理台持有管理员会话,frame-ancestors/X-Frame-Options 防点击劫持。
+			c.Header("X-Content-Type-Options", "nosniff")
+			c.Header("Referrer-Policy", "no-referrer")
+			c.Header("X-Frame-Options", "DENY")
+			c.Header("Content-Security-Policy", adminCSP)
 			if strings.HasPrefix(rel, "/assets/") {
 				// 性能优化 2026-P: assets 含内容哈希,内容变则文件名变,
 				// 浏览器缓存 1 年不重新校验(回访首屏零下载)。

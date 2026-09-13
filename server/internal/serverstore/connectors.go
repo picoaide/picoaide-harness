@@ -79,6 +79,18 @@ var (
 	// (mcp__<serverName>__<tool>),限小写字母数字连字符。
 	connectorServerNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 	// connectorDeniedEnvKeys: 进程引导/加载器钩子与代理键,连接器定义不得覆盖。
+	//
+	// 2026-09-13(R7 第二轮复核 F-1):第一轮 conn-5 只把客户端 policy.ts 的
+	// DENIED_ENV_KEYS 从 18 键扩到 45 键,服务端这份**没同步**,防漂移守卫
+	// TestConnectorDeniedEnvKeysMatchClientPolicy 直接变红,运行期则是"管理台保存
+	// 成功的连接器在员工端静默消失"(服务端 validateConnector 放行 GIT_EXTERNAL_DIFF
+	// 等定义,客户端 parseServerConnectors 对同一份定义返回空数组)。现已与客户端
+	// 逐条对齐:命令钩子族(git 钩子 / 解释器注入 / 构建器 OPTS)+ GCONV_PATH。
+	//
+	// F-6:分页器/编辑器"选择器"族(PAGER/GIT_PAGER/EDITOR/VISUAL/GIT_EDITOR/
+	// GIT_SEQUENCE_EDITOR)**不在**此表 —— 见 connectorConfirmationOnlyEnvKeys。
+	// BROWSER 保留拒绝:它的取值是带 %s 替换的**命令模板**(Python webbrowser /
+	// xdg-open 一族会执行),不是"选一个程序"。
 	connectorDeniedEnvKeys = map[string]bool{
 		"PATH": true, "NODE_OPTIONS": true, "NODE_PATH": true,
 		"LD_PRELOAD": true, "LD_LIBRARY_PATH": true, "LD_AUDIT": true,
@@ -86,9 +98,62 @@ var (
 		"ENV": true, "SHELL": true, "COMSPEC": true,
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true, "NO_PROXY": true,
 		"NODE_TLS_REJECT_UNAUTHORIZED": true, "NODE_EXTRA_CA_CERTS": true,
+		// ---- 命令钩子族(conn-5;第一轮漏同步) ----
+		"GIT_EXTERNAL_DIFF": true, "GIT_SSH": true, "GIT_SSH_COMMAND": true,
+		"GIT_SSH_VARIANT": true, "GIT_ASKPASS": true,
+		"GIT_CONFIG_COUNT": true, "GIT_CONFIG_PARAMETERS": true,
+		"BROWSER": true,
+		// LESSOPEN/LESSCLOSE:less 会把它们当**命令模板**执行(%s/%t 替换),
+		// 且在无 TTY 的管道进程里同样执行(R7 第三轮 N-3 等价通道实测:
+		// `LESSOPEN='|sh -c "id > flag" %s' less <file>` 落地)。形状与 BROWSER
+		// 完全一致(命令模板,不是"选一个程序"),故硬拒绝。
+		"LESSOPEN": true, "LESSCLOSE": true,
+		"PERL5OPT": true, "PERL5LIB": true, "RUBYOPT": true, "RUBYLIB": true,
+		"JAVA_TOOL_OPTIONS": true, "_JAVA_OPTIONS": true, "JDK_JAVA_OPTIONS": true,
+		"DOTNET_STARTUP_HOOKS": true, "GCONV_PATH": true,
+		"MAVEN_OPTS": true, "GRADLE_OPTS": true, "SBT_OPTS": true,
+		"NODE_REPL_EXTERNAL_MODULE": true,
 	}
-	// connectorDeniedEnvPrefixes: 产品自有命名空间。
-	connectorDeniedEnvPrefixes = []string{"DSH_", "ELECTRON_", "PICOAIDE_"}
+	// connectorDeniedEnvPrefixes: 产品自有命名空间 + 带索引的 git 配置注入
+	// (GIT_CONFIG_KEY_0=core.sshCommand 是命令钩子,前缀覆盖所有索引;conn-5)。
+	connectorDeniedEnvPrefixes = []string{"DSH_", "ELECTRON_", "PICOAIDE_", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"}
+	// connectorConfirmationOnlyEnvKeys: **不拒绝**、交给本地审批提示(其值会被
+	// 披露,conn-5)让用户判断的"选择器"族(F-6 / R7 第二轮)。
+	//
+	// 这些键命名的是子进程用来分页/编辑的程序,属于 CLI 正常配置(GIT_PAGER=cat
+	// 是让 git 子进程保持非交互的标准写法);一刀切拒绝 + 客户端静默丢弃会让合法
+	// 连接器不可用,而且用户看不到任何解释 —— 判据严于危害。与
+	// connectorDeniedEnvKeys **互斥**,两侧列表由客户端 policy.ts 的
+	// CONFIRMATION_ONLY_ENV_KEYS 防漂移守卫逐条对齐。
+	//
+	// N-3(R7 第三轮):"不按键拒绝"只对**值恰好是一个程序名**成立 —— 这一族的
+	// 值是命令模板,必须再过 connectorCommandTemplateValueAllowed(见下)。
+	connectorConfirmationOnlyEnvKeys = map[string]bool{
+		"PAGER": true, "GIT_PAGER": true,
+		"EDITOR": true, "VISUAL": true,
+		"GIT_EDITOR": true, "GIT_SEQUENCE_EDITOR": true,
+	}
+	// connectorCommandTemplateAllowedChars / connectorCommandTemplateInterpreters
+	// 是客户端 policy.ts 的 SELECTOR_VALUE_ALLOWED_CHARS /
+	// SELECTOR_INTERPRETER_TOKENS 的逐字镜像,由
+	// TestConnectorCommandTemplatePolicyMatchesClientPolicy 守卫防漂移。
+	//
+	// 判据(R7 第三轮 N-3):上面那一族**不是"选程序",值是命令模板**。
+	// GIT_EDITOR/EDITOR 在无 TTY(正是 MCP stdio 子进程的形态,拿到的是管道不是
+	// pty)下会被 git 交给 `sh -c` 执行 —— 实测 `GIT_EDITOR='sh -c "id > f"'`
+	// 以子进程权限落地;GIT_SEQUENCE_EDITOR 同理。所以"允许"只对**值**成立:
+	// 单个程序名(无任何空白/元字符、basename 不是命令解释器)才放行,其余一律
+	// 与受保护键同等拒绝(管理端保存即报错,不是静默丢弃)。
+	//
+	// 白名单字符集刻意只收 ASCII 字母数字 + `_ . / \ : + -`:空白会把"一个
+	// argv[0]"变成一整条命令行(`vim -c … `、`sh -c …`),`%` 是 %s 模板替换,
+	// `; | & $ \x60 < > ( ) { } [ ] * ? ! ~ #` 与引号都是 shell 自己的语法。
+	connectorCommandTemplateAllowedChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./\\:+-"
+	connectorCommandTemplateInterpreters = []string{
+		"sh", "bash", "dash", "zsh", "ksh", "ash", "csh", "tcsh", "fish", "busybox",
+		"cmd", "powershell", "pwsh", "wscript", "cscript", "mshta", "rundll32", "regsvr32",
+		"python", "perl", "ruby", "node", "nodejs", "php", "lua", "tclsh", "osascript",
+	}
 	// connectorMetadataHosts: 按名字指向云元数据服务的常见主机名。
 	connectorMetadataHosts = map[string]bool{
 		"metadata": true, "metadata.google.internal": true, "metadata.goog": true,
@@ -109,8 +174,14 @@ var (
 // denylist 的语义("服务端下发的定义绝不能设置这些变量名")被击穿;Node 侧因为
 // 值被加了 `=` 前缀而丢弃选项(实测未达成 RCE),但对非 Node 子进程/包装脚本
 // 依然有效。'=' 不是合法的环境变量名字符,拒绝它零可用性损失。
+//
+// conn-6(R7 第二轮复核 F-1):含 NUL 的键同样一律拒绝,与客户端
+// isDeniedEnvKey 的 `normalized.includes('\0')` 并列。Node 会因
+// `ERR_INVALID_ARG_VALUE … must be a string without null bytes` 拒绝整个 env 映射,
+// 所以修复前"服务端放行、客户端丢弃"的分叉还有第二重后果;NUL 不是合法名字符,
+// 判在归一化之前(归一化既不剥 NUL 也不影响它,放这里与客户端口径一致且更直白)。
 func connectorEnvKeyAllowed(key string) bool {
-	if strings.ContainsRune(key, '=') {
+	if strings.ContainsRune(key, '=') || strings.ContainsRune(key, 0) {
 		return false
 	}
 	upper := strings.ToUpper(connectorEnvKeyNormalize(key))
@@ -126,6 +197,84 @@ func connectorEnvKeyAllowed(key string) bool {
 		}
 	}
 	return true
+}
+
+// connectorCommandTemplateKey 判定"其值会被消费方当命令执行"的键名族(N-3):
+// 显式的"分页器/编辑器"层,加上**整个 `*PAGER` / `*EDITOR` 拼写族**。
+//
+// 为什么按**形状**而不只按名单:第二轮只把 6 个键移出 denylist,而同一个钩子
+// 还有 MANPAGER / SYSTEMD_PAGER / SVN_EDITOR / HGEDITOR 等拼写(实测 MANPAGER
+// 在有 TTY 时会执行);只封名单里的拼写正是"换个写法就穿透"的形态。
+func connectorCommandTemplateKey(key string) bool {
+	upper := strings.ToUpper(connectorEnvKeyNormalize(key))
+	if upper == "" {
+		return false
+	}
+	if connectorConfirmationOnlyEnvKeys[upper] {
+		return true
+	}
+	return strings.HasSuffix(upper, "PAGER") || strings.HasSuffix(upper, "EDITOR")
+}
+
+// connectorCommandTemplateBaseName 取程序值的 basename 并转小写
+// (`C:\tools\Vim.EXE` → `vim.exe`),与客户端 commandTemplateBaseName 同规则。
+func connectorCommandTemplateBaseName(value string) string {
+	if i := strings.LastIndexAny(value, `/\`); i >= 0 {
+		value = value[i+1:]
+	}
+	return strings.ToLower(value)
+}
+
+// connectorCommandTemplateIsInterpreter 判定 basename 是否是已知命令解释器
+// (N-3 第二层):剥掉 Windows 的 `.exe` 后缀后,允许一个版本后缀
+// (`python3.12` / `bash5` / `perl5.36` / `lua5.4` / `node.exe`)——
+// 只做精确匹配就是"改一个字符就穿透"的形态,而这正是本轮要消灭的。
+// 与客户端 isInterpreterBasename 同规则(版本后缀 = 纯数字与点)。
+func connectorCommandTemplateIsInterpreter(base string) bool {
+	name := strings.TrimSuffix(base, ".exe")
+	for _, token := range connectorCommandTemplateInterpreters {
+		if name == token {
+			return true
+		}
+		if strings.HasPrefix(name, token) && connectorIsVersionSuffix(name[len(token):]) {
+			return true
+		}
+	}
+	return false
+}
+
+// connectorIsVersionSuffix 判定版本后缀(纯数字与点,可为空)。
+func connectorIsVersionSuffix(suffix string) bool {
+	for _, r := range suffix {
+		if (r < '0' || r > '9') && r != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+// connectorCommandTemplateValueAllowed 判定命令模板键的值是否可以放行:
+// 单个"程序名"(字符合集见 connectorCommandTemplateAllowedChars)且 basename
+// 不是命令解释器。空值判拒(空 EDITOR 没有任何合法场景,fail-closed)。
+//
+// 键不属于该族时恒为 true(普通 env 值的形状不归本判据管)。
+func connectorCommandTemplateValueAllowed(key, value string) bool {
+	if !connectorCommandTemplateKey(key) {
+		return true
+	}
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if !strings.ContainsRune(connectorCommandTemplateAllowedChars, r) {
+			return false
+		}
+	}
+	base := connectorCommandTemplateBaseName(value)
+	if base == "" {
+		return false
+	}
+	return !connectorCommandTemplateIsInterpreter(base)
 }
 
 // connectorEnvKeyTrimCutset 是 **JS String.prototype.trim()** 会剥掉的空白集合
@@ -196,8 +345,8 @@ var connectorCredentialFieldLists = []string{"tokenFields", "settings"}
 
 // validateConnectorCredentialFields 校验 tokenFields[] / settings[] 的元素形状,
 // 并拒绝任何 key 命中受保护环境键(denylist 与客户端 policy.ts 的
-// DENIED_ENV_KEYS + DSH_/ELECTRON_/PICOAIDE_ 前缀逐条对齐,由
-// TestConnectorDeniedEnvKeysMatchClientPolicy 守卫防漂移)。
+// DENIED_ENV_KEYS + DSH_/ELECTRON_/PICOAIDE_/GIT_CONFIG_KEY_/GIT_CONFIG_VALUE_
+// 前缀逐条对齐,由 TestConnectorDeniedEnvKeysMatchClientPolicy 守卫防漂移)。
 //
 // 为什么必须在这里拦:客户端把"定义里声明过的字段名"当成可信白名单
 // (declaredCredentialKeys → buildStdioEnv 的 env[key] = value),所以声明
@@ -622,7 +771,13 @@ func validateStdioServer(m map[string]any) error {
 			if !connectorEnvKeyAllowed(key) {
 				return ErrValidation
 			}
-			if _, ok := value.(string); !ok {
+			text, ok := value.(string)
+			if !ok {
+				return ErrValidation
+			}
+			// N-3:命令模板键(分页器/编辑器族)的值只允许单个程序名;
+			// 与客户端 isDeniedEnvEntry 同判,避免"管理端保存成功、员工端静默丢弃"。
+			if !connectorCommandTemplateValueAllowed(key, text) {
 				return ErrValidation
 			}
 		}

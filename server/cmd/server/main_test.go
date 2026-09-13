@@ -11,14 +11,18 @@ package main
 // 即可构建路由树做完整性断言。
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -41,6 +45,85 @@ import (
 	"github.com/picoaide/picoaide/internal/updatecheck"
 	"github.com/picoaide/picoaide/webadmin"
 )
+
+// ---------------------------------------------------------------------------
+// 真实数据库用例的门禁(R7 srvcore-6)。
+//
+// 原来这两条用例写的是 `if os.Getenv("PG_DSN_TEST") == "" { t.Skip(...) }`:
+// 本机 PostgreSQL 明明可用(serverstore.PgTestDSN 的默认 DSN 就是本机测试库),
+// 只要没设 env 就 --- SKIP,而 `ok github.com/…/cmd/server` 会把 SKIP 盖成绿 ——
+// 于是"门户转义 + 安全头"与"登录闭环"这两条回归在本地 `go test ./...` 里一次
+// 都没跑过(CI 是 job 级 env,所以 CI 里其实会跑,问题在本地信任)。
+//
+// 现在与 serverstore.requireTestPG 同口径(探测式):
+//   - 库可达 → 必须真跑(不再看 env);
+//   - 库不可达且**没有**显式配置 DSN → 跳过,但把原因与 DSN 主机打出来;
+//   - 库不可达但**显式**配了 PG_DSN_TEST → 直接失败(配置事故不许静默降级)。
+// ---------------------------------------------------------------------------
+
+// realDBGate 是门禁决策(抽成纯函数以便单测三种情形,见 TestRealDBGate...)。
+type realDBGate int
+
+const (
+	// realDBRun 库可达:真实库用例必须执行。
+	realDBRun realDBGate = iota
+	// realDBSkip 库不可达且未显式配置:跳过(打印原因)。
+	realDBSkip
+	// realDBFail 显式配置了 DSN 却不可达:失败(不静默降级)。
+	realDBFail
+)
+
+func realDBGateFor(explicitDSN, reachable bool) realDBGate {
+	switch {
+	case reachable:
+		return realDBRun
+	case explicitDSN:
+		return realDBFail
+	default:
+		return realDBSkip
+	}
+}
+
+// postgresReachable 探测 DSN 指向的 PostgreSQL 是否可用(3 秒超时)。
+func postgresReachable(dsn string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	return db.PingContext(ctx) == nil
+}
+
+// dsnTarget 只回显主机与库名(DSN 里可能有口令,不能进日志)。
+func dsnTarget(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "(DSN 无法解析)"
+	}
+	return u.Host + u.Path
+}
+
+// requireRealDB 返回一个隔离的真实测试库;不可用时按实情跳过或失败。
+func requireRealDB(t *testing.T) *sql.DB {
+	t.Helper()
+	dsn := serverstore.PgTestDSN()
+	explicit := os.Getenv("PG_DSN_TEST") != ""
+	switch realDBGateFor(explicit, postgresReachable(dsn)) {
+	case realDBRun:
+		// 继续往下建库。
+	case realDBFail:
+		t.Fatalf("PG_DSN_TEST 指向的 PostgreSQL 不可达(%s):显式配置了真实数据库就不能静默跳过,请启动数据库或清掉该变量", dsnTarget(dsn))
+		return nil
+	default:
+		t.Skipf("PostgreSQL 不可达(%s):跳过真实数据库用例;库可用时会自动执行(不再需要 PG_DSN_TEST)", dsnTarget(dsn))
+		return nil
+	}
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+	return db
+}
 
 // buildRouter 用与 main 相同的 Deps 组装完整路由树(nil DB)。
 func buildRouter(t *testing.T) *gin.Engine {
@@ -143,6 +226,109 @@ func TestHTMLEscapes(t *testing.T) {
 	}
 }
 
+// 管理台 /admin/* 是与门户同级的 HTML 面,必须带上同级基础安全头。
+//
+// 缺陷语义(审计 R7 webadmin-branding-1):该分支此前只设 Cache-Control +
+// Content-Type —— CSP / nosniff / X-Frame-Options / Referrer-Policy 四个头
+// 全缺席(全仓唯一的 CSP 只在门户 /)。管理台是已登录管理员的会话面:
+// 没有 frame-ancestors/X-Frame-Options 就可被跨站 iframe 套用(点击劫持),
+// 没有 nosniff 则内容嗅探可执行伪装资源。
+//
+// 与门户不同,管理台是 React SPA:CSP 必须放行**同源脚本/样式**(否则白屏),
+// 但不得放开 eval / 任意来源 / 内联脚本来源。
+func TestAdminResponsesCarrySecurityHeaders(t *testing.T) {
+	r := buildRouter(t)
+	dist, err := fs.Sub(webadmin.FS, "dist")
+	if err != nil {
+		t.Fatalf("webadmin dist: %v", err)
+	}
+	fileServer := http.FileServer(http.FS(dist))
+	mountAPIGuards(r, nil, fileServer, dist)
+
+	// 构建产物名带内容哈希,不能写死;dist 未构建(CI 的 go test 早于
+	// npm run build,只有 .gitkeep)时跳过该分支。
+	assetPath := ""
+	if entries, err := fs.ReadDir(dist, "assets"); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				assetPath = "/admin/assets/" + e.Name()
+				break
+			}
+		}
+	}
+	preview, _ := dist.Open("index.html")
+	distBuilt := preview != nil
+	if preview != nil {
+		preview.Close()
+	}
+
+	check := func(t *testing.T, w *httptest.ResponseRecorder, path string) {
+		t.Helper()
+		h := w.Header()
+		if got := h.Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("GET %s X-Content-Type-Options = %q, want nosniff", path, got)
+		}
+		if got := h.Get("X-Frame-Options"); got != "DENY" {
+			t.Errorf("GET %s X-Frame-Options = %q, want DENY(防点击劫持)", path, got)
+		}
+		if got := h.Get("Referrer-Policy"); got != "no-referrer" {
+			t.Errorf("GET %s Referrer-Policy = %q, want no-referrer", path, got)
+		}
+		csp := h.Get("Content-Security-Policy")
+		if csp == "" {
+			t.Fatalf("GET %s 缺 Content-Security-Policy", path)
+		}
+		// SPA 需要同源脚本/样式;但不许放开 eval、任意来源或内联脚本来源。
+		for _, want := range []string{"default-src 'self'", "script-src 'self'", "frame-ancestors 'none'", "object-src 'none'"} {
+			if !strings.Contains(csp, want) {
+				t.Errorf("GET %s CSP = %q, 缺 %q", path, csp, want)
+			}
+		}
+		for _, banned := range []string{"unsafe-eval", "script-src *", "script-src 'unsafe-inline'"} {
+			if strings.Contains(csp, banned) {
+				t.Errorf("GET %s CSP = %q 不得包含 %q", path, csp, banned)
+			}
+		}
+	}
+
+	// SPA 入口与前端路由回退:无论 dist 是否构建,安全头都必须先于内容设置。
+	for _, path := range []string{"/admin/", "/admin/usage/balance"} {
+		t.Run(path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+			if distBuilt {
+				if w.Code != http.StatusOK {
+					t.Fatalf("GET %s = %d, want 200(webadmin 已构建); body=%s", path, w.Code, w.Body.String())
+				}
+				if cc := w.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+					t.Errorf("GET %s Cache-Control = %q, want no-store(部署后立即生效)", path, cc)
+				}
+			} else {
+				t.Logf("dist 未构建:GET %s 返回 %d(仅断言安全头)", path, w.Code)
+			}
+			check(t, w, path)
+		})
+	}
+
+	t.Run("assets", func(t *testing.T) {
+		if assetPath == "" {
+			if distBuilt {
+				t.Fatal("dist 已构建但 assets/ 为空")
+			}
+			t.Skip("dist 未构建,webadmin npm run build 后覆盖此分支")
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, assetPath, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200", assetPath, w.Code)
+		}
+		if cc := w.Header().Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+			t.Errorf("GET %s Cache-Control = %q, want immutable(内容哈希)", assetPath, cc)
+		}
+		check(t, w, assetPath)
+	})
+}
+
 // TestAPIJSONContract: 未匹配的 API 前缀(新命名空间)路径一律 JSON 错误信封。
 func TestAPIJSONContract(t *testing.T) {
 	r := buildRouter(t)
@@ -216,11 +402,7 @@ func TestAPIJSONContract(t *testing.T) {
 //
 // 同时验证门户**不再读取**数据库里的 brand.* 设置(旧来源已下线)。
 func TestPortalEscaping(t *testing.T) {
-	if os.Getenv("PG_DSN_TEST") == "" {
-		t.Skip("PG_DSN_TEST not set; skipping real-DB test")
-	}
-	db, cleanup := serverstore.NewTestDB(t)
-	defer cleanup()
+	db := requireRealDB(t)
 	// 旧来源:即便有人在 settings 里塞了脚本,门户也不再读它
 	if err := serverstore.SetSetting(db, "brand.login.display_name", `<script>alert(1)</script>`); err != nil {
 		t.Fatal(err)
@@ -247,13 +429,9 @@ func TestPortalEscaping(t *testing.T) {
 	}
 }
 
-// 依赖 PG_DSN_TEST, 无 PG 时跳过。
+// 真实 PG 用例:库可达时必跑,不可达时按 realDBGateFor 的口径跳过/失败。
 func TestV2RealDB(t *testing.T) {
-	if os.Getenv("PG_DSN_TEST") == "" {
-		t.Skip("PG_DSN_TEST not set; skipping real-DB test")
-	}
-	db, cleanup := serverstore.NewTestDB(t)
-	defer cleanup()
+	db := requireRealDB(t)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -577,5 +755,38 @@ func TestAccessLoggerDropsQueryString(t *testing.T) {
 	}
 	if strings.Contains(logged, "?") {
 		t.Fatalf("query separator must not appear in access log: %q", logged)
+	}
+}
+
+// 门禁决策的永久回归(R7 srvcore-6):库可达时**永远不能**跳过。
+//
+// 这是缺陷语义的最小固化:原来"跳过"只看 env 是否存在,与本机库是否可用无关,
+// 于是本地 `go test ./...` 全绿而两条真库回归从未执行(`ok` 掩盖 SKIP)。
+func TestRealDBGateNeverSilentlySkipsWhenReachable(t *testing.T) {
+	cases := []struct {
+		name        string
+		explicitDSN bool
+		reachable   bool
+		want        realDBGate
+	}{
+		{"库可达 + 未设 env:必须真跑(旧行为是 SKIP)", false, true, realDBRun},
+		{"库可达 + 设了 env:真跑", true, true, realDBRun},
+		{"库不可达 + 设了 env:显式失败,不静默降级", true, false, realDBFail},
+		{"库不可达 + 未设 env:跳过(打印原因)", false, false, realDBSkip},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := realDBGateFor(tc.explicitDSN, tc.reachable); got != tc.want {
+				t.Fatalf("realDBGateFor(explicit=%v, reachable=%v) = %v, want %v", tc.explicitDSN, tc.reachable, got, tc.want)
+			}
+		})
+	}
+	// 跳过的理由必须带上 DSN 主机与库名(排障),且不得回显口令。
+	got := dsnTarget("postgres://user:s3cret@db.example.com:5432/picoaide_test?sslmode=disable")
+	if got != "db.example.com:5432/picoaide_test" {
+		t.Fatalf("dsnTarget = %q, want 主机+库名", got)
+	}
+	if strings.Contains(got, "s3cret") {
+		t.Fatal("dsnTarget 回显了口令")
 	}
 }

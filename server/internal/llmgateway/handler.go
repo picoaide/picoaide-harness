@@ -181,7 +181,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		return
 	}
 	if req.Stream {
-		a.serveStream(c, resp, usageID, respSecrets)
+		a.serveStream(c, resp, usageID, respSecrets, raw, promptEstimateCapForModel(a.DB, req.Model))
 		return
 	}
 	a.serveJSON(c, resp, user.ID, req.Model, respSecrets, billingKindChat)
@@ -231,8 +231,13 @@ func applyMaxTokensDefault(raw []byte, defaultParams string) ([]byte, error) {
 // streaming chat request (P1-1, metering gap). Without it, upstreams omit the
 // final usage chunk in SSE responses by default, so the streaming path could
 // never backfill tokens — quota/budget enforcement was silently bypassed for
-// every streamed conversation. Only adds the option when the caller did not
-// already set it (a client-supplied stream_options is preserved).
+// every streamed conversation.
+//
+// 审计 r7 srvbill-2(P1):计量开关**只能由服务端持有**。旧实现尊重客户端显式
+// include_usage=false 并原样转发,而上游按 OpenAI 规范就不发 usage chunk ⇒
+// 收尾只能走字节估算(prompt 侧恒记 0,completion 侧被 maxEstimatedCompletionTokens
+// 截顶),被计费方可以一行 JSON 精确关掉自己的计量表。现在无条件写 true
+// (客户端已给的其它 stream_options 键保留),与 P1-1 的本意一致。
 func applyStreamUsageRequest(raw []byte) ([]byte, error) {
 	var body map[string]any
 	if err := json.Unmarshal(raw, &body); err != nil {
@@ -242,18 +247,9 @@ func applyStreamUsageRequest(raw []byte) ([]byte, error) {
 	if !stream {
 		return raw, nil
 	}
-	if opts, ok := body["stream_options"]; ok {
-		// Already present: merge include_usage=true unless it is explicitly
-		// disabled by the client (respect an explicit false).
-		if m, isMap := opts.(map[string]any); isMap {
-			if v, has := m["include_usage"]; has {
-				if b, isBool := v.(bool); isBool && !b {
-					return raw, nil
-				}
-			}
-			m["include_usage"] = true
-			return json.Marshal(body)
-		}
+	if m, isMap := body["stream_options"].(map[string]any); isMap {
+		m["include_usage"] = true
+		return json.Marshal(body)
 	}
 	body["stream_options"] = map[string]any{"include_usage": true}
 	return json.Marshal(body)
@@ -473,7 +469,7 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 // 在拿到真实 usage chunk 与不过度占用上游资源之间折中。
 const streamDrainTimeout = 2 * time.Minute
 
-func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, secrets []string) {
+func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, secrets []string, requestBody []byte, promptTokenCap int64) {
 	defer resp.Body.Close()
 	// upstream 4xx: no SSE to stream, the pending row is dropped
 	if resp.StatusCode >= 400 {
@@ -506,11 +502,24 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	lineTooLong := false
 	lineEOF := false
 	var forwardedBytes int64
+	// deliveredContentBytes/Chunks 是**正文内容**口径(r7 r7f1-2,P2):只有解析到
+	// 正文/工具调用增量才累加,data: [DONE]/event:/注释/纯 usage 行/上游 error
+	// 事件都不算"内容真的交付过"。补估闸门与 completion 估算只认它。
+	var deliveredContentBytes, deliveredContentChunks int64
+	// contentTracker 按 SSE 事件边界累积正文(r7 r7f1-2 + rc3-3):同一事件的多条
+	// `data:` 行先拼再解析,非 SSE 的整包 JSON 行也识别;判据保守(见
+	// streamContentTracker)。旧实现只按单行解析,正文形态一变(数组 content、
+	// 转义/多行 data、整包 JSON)就被判成"0 正文字节" ⇒ 整条流免单。
+	var contentTracker streamContentTracker
 	// reportedPT/CT/cache 是上游**回报过的**用量:按侧取最大值合并(上游可能
 	// 分段/累积上报,后续更小的值或显式 0 不得把已上报的用量抹掉 —— 与
 	// anthropic 流式的"非零覆盖"同一语义;每收到一条 usage 行就幂等回填,
 	// 流中断也不会丢已上报的部分)。
 	var reportedPT, reportedCT, reportedCache int64
+	// ptSeen/ctSeen = 整条流是否收到过**可用**的输入/输出侧计量(>0 才算;
+	// r7 r7f1-4):一条 `data: {"usage":{}}`(parseUsage 返回 ok=true、全 0)
+	// 不足以关掉输入侧补估(旧判据 usageSeen 会被它击穿 ⇒ prompt 记 0 少收)。
+	var ptSeen, ctSeen bool
 
 	// 读行 goroutine(单 goroutine 常驻,零 per-line 分配)。stopRead 用于
 	// 主循环提前退出时解除阻塞;客户端断开**不**停止读取(F4:继续 drain
@@ -559,35 +568,56 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 			lastLineAt = time.Now()
 			if len(r.line) > 0 {
 				line := string(redactSecrets([]byte(r.line), secrets))
-				if s := strings.TrimSpace(line); strings.HasPrefix(s, "data:") {
+				// usage 行有两个来源:SSE 的 `data:` 行,以及**忽略 stream 的上游**
+				// 直接回的整包 JSON(rc3-3 的 D 形态)。后者同样可能带着上游如实
+				// 上报的 usage —— 不解析它就只能按字节估算,把"真值"换成"估算"
+				// (prompt 侧方向是多收)。parseUsage 自己会去掉 data: 前缀。
+				if s := strings.TrimSpace(line); strings.HasPrefix(s, "data:") || strings.HasPrefix(s, "{") {
 					if strings.Contains(s, `"usage"`) {
 						if pt, ct, cch, ok, perr := parseUsage([]byte(s)); perr != nil {
 							log.Printf("gateway: parse usage line: %v", perr)
-						} else if ok && usageID > 0 {
-							if pt > reportedPT {
-								reportedPT = pt
+						} else if ok {
+							if pt > 0 {
+								ptSeen = true
 							}
-							if ct > reportedCT {
-								reportedCT = ct
+							if ct > 0 {
+								ctSeen = true
 							}
-							if cch > reportedCache {
-								reportedCache = cch
-							}
-							if uerr := updateUsageTokensSettled(a.DB, usageID, reportedPT, reportedCT, reportedCache, false); uerr != nil {
-								// FIX-05 + G5b:流式回填结算失败 —— SSE 头已发,
-								// 状态码改不了;写一条 error 事件后**终止泵送**,
-								// 不能继续 200 把余下内容白送出去。
-								if !clientGone {
-									abortSettlementFailureStream(c, fl, uerr, "chat stream backfill")
-								} else {
-									log.Printf("gateway: settlement failed after client gone: usage=%d err=%v", usageID, uerr)
+							// r7 r7f1-4 + rc3-6:缓存命中数**不**等于"输入侧有可用计量"。
+							// OpenAI Chat/Responses 的 prompt_tokens/input_tokens 是必填
+							// 字段,只回缓存字段属**残缺报文**;把它当输入侧口径会让
+							// 400KB 请求只落 pt=0(少收)。Anthropic 路径相反(那里
+							// input_tokens 不含 cache,见 messages.go),语义确实完整。
+							if usageID > 0 {
+								if pt > reportedPT {
+									reportedPT = pt
 								}
-								return
+								if ct > reportedCT {
+									reportedCT = ct
+								}
+								if cch > reportedCache {
+									reportedCache = cch
+								}
+								if uerr := updateUsageTokensSettled(a.DB, usageID, reportedPT, reportedCT, reportedCache, false); uerr != nil {
+									// FIX-05 + G5b:流式回填结算失败 —— SSE 头已发,
+									// 状态码改不了;写一条 error 事件后**终止泵送**,
+									// 不能继续 200 把余下内容白送出去。
+									if !clientGone {
+										abortSettlementFailureStream(c, fl, uerr, "chat stream backfill")
+									} else {
+										log.Printf("gateway: settlement failed after client gone: usage=%d err=%v", usageID, uerr)
+									}
+									return
+								}
 							}
 						}
 					}
 				}
 				forwardedBytes += int64(len(line))
+				if n, isContent := contentTracker.observe(line); isContent {
+					deliveredContentChunks++
+					deliveredContentBytes += n
+				}
 				if !clientGone {
 					if _, werr := c.Writer.WriteString(line); werr != nil {
 						clientGone = true
@@ -638,22 +668,43 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	case <-readGone:
 	case <-time.After(time.Second):
 	}
+	// 未以空行收尾的尾部事件也要落地(rc3-3):少一次 flush 就可能把"已交付的
+	// 正文"判成没交付 ⇒ 整条流零落账。
+	if n, isContent := contentTracker.flush(); isContent {
+		deliveredContentChunks++
+		deliveredContentBytes += n
+	}
 	// 结算:
 	//   - 上游回报的用量已在收到 usage 行时幂等回填(计费已完成);
 	//   - **只要有一侧缺失/为 0**(含"只回报了输入侧":pt>0 且 ct==0 —— N1,
 	//     审计 r3 第四轮)就走 fallback:由 settleStreamFallback 内部只补
 	//     completion 那一半(已上报的 pt/cache 原样带出,**绝不**被估算覆盖);
-	//   - 完全没有任何内容(连接失败/4xx 分支之外) → 删除 pending。
+	//     整条流没有可用的输入侧计量时(r7 srvbill-2)输入侧也按请求体补估;
+	//   - 完全没有任何**正文内容**(连接失败/空流/只回一条 error 事件) → 删除
+	//     pending(r7 r7f1-2:闸门是正文内容,不是"转发过任意一行")。
 	// 估算与回填走 settleStreamFallback(与 anthropic 流式**同一个实现**)。
 	if usageID > 0 && (reportedPT <= 0 || reportedCT <= 0) {
-		if _, serr := settleStreamFallback(a.DB, usageID, forwardedBytes, reportedPT, reportedCT, reportedCache); serr != nil {
+		settleIn := streamSettlement{
+			usageID:          usageID,
+			requestBody:      requestBody,
+			promptTokenCap:   promptTokenCap,
+			deliveredBody:    forwardedBytes,
+			contentBytes:     deliveredContentBytes,
+			contentChunks:    deliveredContentChunks,
+			promptTokens:     reportedPT,
+			completionTokens: reportedCT,
+			cacheTokens:      reportedCache,
+			promptSeen:       ptSeen,
+			completionSeen:   ctSeen,
+		}
+		if _, serr := settleStreamFallback(a.DB, settleIn); serr != nil {
 			// FIX-05 + G5b:收尾结算失败同样不能静默 —— 内容虽然已全部转发,
 			// 但客户端若还在读必须看到失败信号(不能当成"反正流结束了")。
 			if !clientGone {
 				abortSettlementFailureStream(c, fl, serr, "chat stream estimated")
 			} else {
-				log.Printf("gateway: estimated settlement failed after client gone: usage=%d forwarded=%d err=%v",
-					usageID, forwardedBytes, serr)
+				log.Printf("gateway: estimated settlement failed after client gone: usage=%d forwarded=%d content=%d err=%v",
+					usageID, forwardedBytes, deliveredContentBytes, serr)
 			}
 		}
 	}
@@ -856,6 +907,395 @@ func parseUsage(raw []byte) (pt, ct, cacheHit int64, ok bool, err error) {
 	}
 	// P0-B:负值一律归零(计费侧 costOfAt 另有一层,纵深防御)。
 	return clampTokensNonNeg(pt), clampTokensNonNeg(ct), clampTokensNonNeg(cacheHit), true, nil
+}
+
+// ---------------------------------------------------------------------------
+// 流式正文识别(r7 r7f1-2 的闸门 + rc3-3 的形态完备性)
+// ---------------------------------------------------------------------------
+//
+// 闸门语义:只有"模型产出真的交付给了客户端"的流才能计费(r7f1-2:0 正文字节
+// 的失败流不得计费)。判据必须与**交付**同构,而不是与"实现恰好认识的形态"
+// 同构 —— rc3-3 的教训是:正文以 streamContentDelta 不认得的形状交付(数组
+// content、多行 data、整包 JSON、response.completed 全文)时,客户端收到了
+// 内容却被判成"0 正文字节" ⇒ usage 行被删、整条流零落账(完全免费,比少收
+// 更糟:事后对账看不到这笔调用)。
+//
+// 因此判据是**保守的**:拿不准的形态倾向判"交付过"(宁可计费,也不要留一条
+// 可被反复利用的免费通道),但**明确的非正文**(data: [DONE]、error 事件、
+// 空 delta、只有 role/finish_reason 的元数据块、usage-only 行)仍然不计费。
+
+// streamContentKeys 是"字段值承载模型产出正文"的键白名单(递归匹配)。
+var streamContentKeys = map[string]bool{
+	"content":           true, // OpenAI chat delta.content / message.content(含数组形态的 text part)
+	"text":              true, // completions choices[].text / Anthropic text_delta / Responses output_text
+	"reasoning_content": true, // DeepSeek reasoner
+	"thinking":          true, // Anthropic thinking_delta
+	"partial_json":      true, // Anthropic input_json_delta
+	"arguments":         true, // tool_calls[].function.arguments / function_call.arguments
+	"output_text":       true, // Responses 的 output_text 明细
+	"input_text":        true,
+	"summary_text":      true, // Responses reasoning summary
+	"refusal":           true,
+}
+
+// streamDeltaMetadataKeys 是 delta 对象里**元数据**字段:它们出现不代表有正文
+// (role/finish_reason/stop_reason 等收尾标记)。只有这些字段的 delta 必须判
+// "未交付",否则 role-only 首块 + 上游断开会把 0 正文字节的失败流算成已交付。
+var streamDeltaMetadataKeys = map[string]bool{
+	"role": true, "finish_reason": true, "stop_reason": true, "stop_sequence": true,
+	"index": true, "type": true, "id": true, "object": true, "model": true,
+	"created": true, "usage": true, "logprobs": true, "system_fingerprint": true,
+	"service_tier": true, "obfuscation": true,
+}
+
+// streamContentParse 是一次事件解析的结果。
+type streamContentParse struct {
+	bytes     int64
+	delivered bool
+	// parseable = 载荷是合法 JSON 对象(解析失败时才能启用"保守按已交付"
+	// 兜底;解析成功但没有正文的事件是"确定没交付")。
+	parseable bool
+	// incremental = 这次事件是"增量"(delta 形态),用于避免把 response.completed
+	// 这类**聚合**事件里的全文与之前的增量重复计费。
+	incremental bool
+}
+
+// streamContentTracker 按 SSE 事件边界累积正文(rc3-3)。
+//
+// SSE 规范允许同一个事件由多条 `data:` 行组成(空行才是事件边界);Anthropic
+// 还要求 `event:` 行先于 `data:`。逐行解析会把这类事件的 JSON 拆碎,于是
+// "客户端收到了正文、服务端没算到"。
+//
+//	observe(line) —— 喂一行(含换行),返回该行触发的正文字节/是否交付
+//	flush()      —— 流结束时把未闭合的事件落地(上游直接断开)
+type streamContentTracker struct {
+	event          string
+	data           []byte
+	sawIncremental bool
+}
+
+// maxStreamEventBytes 是单个 SSE 事件的累积上限(防御上游用无限 data: 行撑内存;
+// 超过即按"已交付"保守处理并重置,不再继续累积)。
+const maxStreamEventBytes = 8 << 20
+
+// streamContentDelta 是**单行**形态的兼容入口(回归表/探针按行验证形态矩阵):
+// 等价于"用一个新的 tracker 观察这一行并立即 flush"。
+func streamContentDelta(line string) (contentBytes int64, delivered bool) {
+	var t streamContentTracker
+	n, ok := t.observe(line)
+	if n2, ok2 := t.flush(); ok2 {
+		n += n2
+		ok = true
+	}
+	return n, ok
+}
+
+// observe 喂入一行 SSE 行(或非 SSE 的整包 JSON 行)。
+func (t *streamContentTracker) observe(line string) (contentBytes int64, delivered bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return t.flush() // 空行 = 事件边界
+	}
+	switch {
+	case strings.HasPrefix(trimmed, ":"):
+		return 0, false // 注释/心跳
+	case strings.HasPrefix(trimmed, "event:"):
+		t.event = strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
+		return 0, false
+	case strings.HasPrefix(trimmed, "data:"):
+		payload := strings.TrimPrefix(trimmed, "data:")
+		payload = strings.TrimPrefix(payload, " ")
+		if len(t.data) > 0 {
+			t.data = append(t.data, '\n') // SSE:同一事件的多条 data: 行以换行拼接
+		}
+		t.data = append(t.data, payload...)
+		if len(t.data) > maxStreamEventBytes {
+			// 病态事件:按"已交付"保守处理并重置(不让上游用事件累积撑内存)。
+			n := int64(len(t.data))
+			t.reset()
+			return n, true
+		}
+		return 0, false
+	case strings.HasPrefix(trimmed, "id:"), strings.HasPrefix(trimmed, "retry:"):
+		return 0, false
+	}
+	// 非 SSE 前缀:上游忽略了 stream 参数,整行就是一个 JSON 响应体
+	// (rc3-3 的 D 形态)。只认对象形态,其它行(乱码/HTML 错误页)不当正文。
+	if strings.HasPrefix(trimmed, "{") {
+		parse := parseStreamContentEvent(t.event, []byte(trimmed), t.sawIncremental)
+		if parse.incremental {
+			t.sawIncremental = true
+		}
+		return parse.bytes, parse.delivered
+	}
+	return 0, false
+}
+
+// flush 把当前累积的事件落地(空行或流结束时调用)。
+func (t *streamContentTracker) flush() (contentBytes int64, delivered bool) {
+	if len(t.data) == 0 {
+		t.reset()
+		return 0, false
+	}
+	data := t.data
+	event := t.event
+	t.reset()
+	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+		return 0, false
+	}
+	parse := parseStreamContentEvent(event, data, t.sawIncremental)
+	if !parse.delivered && !parse.parseable {
+		// 保守兜底(rc3-3):**解析不了**但看起来是 JSON 报文(上游截断/未知新
+		// 形态)⇒ 按"已交付"计。判据拿不准时宁可计费,也不留一条可被反复利用
+		// 的免费通道。解析成功且确认没有正文的事件(usage/心跳/role-only)不受
+		// 影响 —— 那是"确定没交付",不是"拿不准"。
+		if n, ok := looksLikeJSONPayload(data); ok {
+			parse = streamContentParse{bytes: n, delivered: true, incremental: true}
+		}
+	}
+	if parse.incremental {
+		t.sawIncremental = true
+	}
+	return parse.bytes, parse.delivered
+}
+
+// looksLikeJSONPayload 判定一段读不懂的事件载荷是否"看起来是 JSON 报文"
+// (截断的对象/数组)。是则按已交付保守处理,字节数取载荷长度。
+func looksLikeJSONPayload(data []byte) (int64, bool) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) < 2 {
+		return 0, false
+	}
+	if trimmed[0] != '{' && trimmed[0] != '[' {
+		return 0, false
+	}
+	return int64(len(trimmed)), true
+}
+
+// reset 清空一个事件的状态(sawIncremental 是**整条流**的记忆,不在此清)。
+func (t *streamContentTracker) reset() {
+	t.event = ""
+	t.data = t.data[:0]
+}
+
+// parseStreamContentEvent 解析一个完整 SSE 事件(或整包 JSON)的正文交付。
+//
+// 三层:
+//  1. **白名单递归**:JSON 树里白名单键的字符串值(含数组/嵌套)都是正文
+//     (content / text / reasoning_content / thinking / partial_json /
+//     arguments …),覆盖数组 content、嵌套 delta、工具调用参数等形态;
+//  2. **delta 形态**:`delta` 为字符串(Responses 的 response.*.delta)直接计;
+//     为对象时按白名单计,并检查是否有"非元数据的未知字段";
+//  3. **保守兜底**:delta 对象里有非元数据字段但白名单没匹配到(上游扩展了
+//     新的正文形态)⇒ 按"已交付"计,字节数取该事件的 JSON 长度。宁可计费,
+//     也不把未知形态当免费通道。
+//
+// 聚合事件(response.completed / *.done / 整包 message)在**已经交付过增量**时
+// 不重复计费(避免同一段文本被算两次)。
+func parseStreamContentEvent(eventType string, data []byte, sawIncremental bool) streamContentParse {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return streamContentParse{}
+	}
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return streamContentParse{}
+	}
+	aggregate := isAggregateStreamEvent(eventType, obj)
+	if aggregate && sawIncremental {
+		return streamContentParse{parseable: true}
+	}
+	out := streamContentParse{parseable: true}
+	out.bytes = contentBytesFromJSON(obj)
+	if out.bytes > 0 {
+		out.delivered = true
+	}
+	// delta 形态:字符串 delta 与 delta 对象(含 choices[].delta)。
+	// 注意 delta 路径**单独**统计:contentBytesFromJSON 跳过 `delta` 键,
+	// 否则同一段文本会被算两次。
+	for _, delta := range collectStreamDeltas(obj) {
+		if n := deltaContentBytes(delta, 0); n > 0 {
+			out.bytes += n
+			out.delivered = true
+			out.incremental = true
+		}
+	}
+	// 保守兜底:delta 存在且带非元数据的未知字段。
+	if !out.delivered {
+		if n, ok := unknownDeltaBytes(obj); ok {
+			out.bytes = n
+			out.delivered = true
+			out.incremental = true
+		}
+	}
+	if out.delivered && !aggregate {
+		out.incremental = true
+	}
+	return out
+}
+
+// isAggregateStreamEvent 判定事件是否是"聚合/收尾"形态(可能重复之前的增量):
+// Responses 的 response.completed / *.done、chat 的 choices[].message(整包)、
+// Anthropic 的 message_stop。
+//
+// 事件类型有两个来源:SSE 的 `event:` 行(Anthropic)与 JSON 体里的 `type`
+// 字段(OpenAI Responses 用它)。两者都看,否则 `data: {"type":"response.completed"}`
+// 会被当成增量、把同一段文本算两次。
+func isAggregateStreamEvent(eventType string, obj map[string]any) bool {
+	t := eventType
+	if s, ok := obj["type"].(string); ok && s != "" {
+		t = s
+	}
+	if t == "response.completed" || t == "message_stop" || strings.HasSuffix(t, ".done") {
+		return true
+	}
+	if _, hasDelta := obj["delta"]; hasDelta {
+		return false
+	}
+	if choices, ok := obj["choices"].([]any); ok {
+		for _, c := range choices {
+			if cm, ok := c.(map[string]any); ok {
+				if _, hasDelta := cm["delta"]; hasDelta {
+					return false
+				}
+				if _, hasMessage := cm["message"]; hasMessage {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// collectStreamDeltas 收集事件里的 delta 值:顶层 `delta` 与 `choices[].delta`。
+func collectStreamDeltas(obj map[string]any) []any {
+	var out []any
+	if d, ok := obj["delta"]; ok {
+		out = append(out, d)
+	}
+	if choices, ok := obj["choices"].([]any); ok {
+		for _, c := range choices {
+			if cm, ok := c.(map[string]any); ok {
+				if d, ok := cm["delta"]; ok {
+					out = append(out, d)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// contentBytesFromJSON 递归统计 JSON 树里白名单键的字符串字节数。
+//
+// **跳过 `delta` 键**:delta 由 deltaContentBytes 单独统计(那里还要处理
+// 裸字符串 delta 与嵌套 delta),否则 `{"delta":{"content":"x"}}` 会被
+// contentBytesFromJSON 与 delta 两条路径各算一次。
+func contentBytesFromJSON(v any) int64 {
+	switch t := v.(type) {
+	case map[string]any:
+		var n int64
+		for k, val := range t {
+			if k == "delta" {
+				continue
+			}
+			if streamContentKeys[k] {
+				n += contentBytesFromJSON(val)
+				continue
+			}
+			// 元数据键(usage/index/role…)不下探:它们不承载正文,下探只会
+			// 把计数算重。
+			if streamDeltaMetadataKeys[k] {
+				continue
+			}
+			switch val.(type) {
+			case map[string]any, []any:
+				n += contentBytesFromJSON(val)
+			}
+		}
+		return n
+	case []any:
+		var n int64
+		for _, item := range t {
+			n += contentBytesFromJSON(item)
+		}
+		return n
+	case string:
+		return int64(len(t))
+	}
+	return 0
+}
+
+// deltaContentBytes 统计一个 delta 值的正文字节:
+//   - 字符串:Responses 的 response.*.delta 直接计长度;
+//   - 对象:白名单键递归(数组 content / tool_calls 参数 / Anthropic 的
+//     text|thinking|partial_json 都在里面);
+//   - 嵌套 delta(非标准但真实存在的封装)最多下探 maxNestedDeltaDepth 层。
+func deltaContentBytes(delta any, depth int) int64 {
+	switch d := delta.(type) {
+	case string:
+		return int64(len(d))
+	case map[string]any:
+		n := contentBytesFromJSON(d)
+		if depth < maxNestedDeltaDepth {
+			if inner, ok := d["delta"]; ok {
+				n += deltaContentBytes(inner, depth+1)
+			}
+		}
+		return n
+	case []any:
+		var n int64
+		for _, item := range d {
+			n += deltaContentBytes(item, depth)
+		}
+		return n
+	}
+	return 0
+}
+
+// maxNestedDeltaDepth 是嵌套 delta 的最大下探层数(防御病态深度)。
+const maxNestedDeltaDepth = 4
+
+// unknownDeltaBytes 保守判据:delta 对象里有非元数据字段但白名单没认出来
+// (上游扩展了新的正文形态)⇒ 返回该事件的 JSON 字节数并按已交付处理。
+func unknownDeltaBytes(obj map[string]any) (int64, bool) {
+	for _, delta := range collectStreamDeltas(obj) {
+		d, ok := delta.(map[string]any)
+		if !ok || len(d) == 0 {
+			continue
+		}
+		for k, v := range d {
+			if streamDeltaMetadataKeys[k] {
+				continue
+			}
+			if isEmptyJSONValue(v) {
+				continue
+			}
+			raw, err := json.Marshal(v)
+			if err != nil {
+				return 1, true
+			}
+			if n := int64(len(raw)); n > 0 {
+				return n, true
+			}
+			return 1, true
+		}
+	}
+	return 0, false
+}
+
+// isEmptyJSONValue 判定 JSON 值是否"空"(null/空串/空对象/空数组)。
+func isEmptyJSONValue(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case string:
+		return len(t) == 0
+	case map[string]any:
+		return len(t) == 0
+	case []any:
+		return len(t) == 0
+	}
+	return false
 }
 
 // rateLimitPerMinute reads the configurable per-user limit from settings.

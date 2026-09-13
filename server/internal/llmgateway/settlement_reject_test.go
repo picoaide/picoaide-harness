@@ -3,6 +3,7 @@ package llmgateway
 import (
 	"database/sql"
 	"encoding/json"
+	"math"
 	"net/http"
 	"strings"
 	"testing"
@@ -32,6 +33,13 @@ import (
 //
 // 定这个测试的口径:断言「429 + 不交付响应体 + usage 0 行 + 余额不变 +
 // 可重复(不会因为重试而漏拦)」。
+//
+// 审计 r7 srvbill-1(P1)修正了流式那一半的**结算语义**:usage chunk 在流末尾,
+// 拦截只能拦住后续字节,拦不住已交付的正文 —— "余额不足就整笔回滚"让这次真实
+// 消费变成零落账零扣费,而闸门只看分位余额 > 0 ⇒ 同一请求可无限重复。流式现在
+// 走 allowOverdraft 后付费(欠款如实落账,后续请求被闸门拦下),见
+// TestBalanceSettlementOverdraftChargesStream;本文件上半部分(非流式 + 其它
+// 结算错误的 fail-closed)不变。
 
 // seedExpensiveModel 把模型单价抬到「一次调用必然超过余额」。
 // 上游固定回 usage{prompt:8, completion:3}:输入 2e5 元/1M → 1.60 元,
@@ -100,10 +108,15 @@ func TestBalanceSettlementFailureRejectsNonStream(t *testing.T) {
 	assertNoUsageAndBalanceIntact(t, db, smallBalance)
 }
 
-// TestBalanceSettlementFailureAbortsStream 是流式路径的回归锁:SSE 头已经
-// 发出,状态码改不了,唯一合法的做法是写一条 error 事件并终止,而不是
-// 把剩余内容继续泵给客户端。
-func TestBalanceSettlementFailureAbortsStream(t *testing.T) {
+// TestBalanceSettlementOverdraftChargesStream 是流式路径的回归锁(审计 r7
+// srvbill-1 起口径变更):SSE 的 usage chunk 出现在流的**末尾**,读到它时全部
+// 正文早已交付给客户端 —— "余额不够就整笔回滚"对这次调用等于零落账零扣费,
+// 而闸门只看分位余额 > 0 ⇒ 余额 1 分钱的账户可以无限重复拿到完整回答。
+//
+// 现在流式结算走 allowOverdraft(先交付后结算 = 后付费):欠款如实落账
+// (balance_money 走负 + consume 流水,账本 I1 成立),该用户**后续**请求被
+// BalanceBlocked 拦下。非流式仍然在交付前拒绝(见上一条用例)。
+func TestBalanceSettlementOverdraftChargesStream(t *testing.T) {
 	f := newFakeUpstream(t)
 	r, db, token := newGateway(t, f)
 	enableBalanceGate(t, db, true)
@@ -113,25 +126,54 @@ func TestBalanceSettlementFailureAbortsStream(t *testing.T) {
 	w := doPost(t, r, "/v1/chat/completions",
 		`{"model":"deepseek-chat","stream":true,"messages":[{"role":"user","content":"hi"}]}`, token, nil)
 
-	// 流式:状态码在 SSE 头写出时已定(200),只能靠 error 事件表达失败。
-	if w.Code != http.StatusOK {
-		t.Logf("status = %d (SSE 头已发,允许 200)", w.Code)
-	}
 	out := w.Body.String()
-	if !strings.Contains(out, "BALANCE_EXHAUSTED") {
-		t.Fatalf("流式结算失败必须写 error 事件,实际响应体 = %q", out)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200(body=%s)", w.Code, bodyHead(w))
 	}
-	// 上游的 usage chunk(带真实 token)不得在 error 事件之后再被转发。
-	if idx := strings.Index(out, "BALANCE_EXHAUSTED"); idx >= 0 {
-		if after := out[idx:]; strings.Contains(after, `"usage"`) {
-			t.Fatalf("error 事件之后仍有内容被转发: %q", after)
-		}
+	// 上游内容必须完整交付(结算成功 ⇒ 不写 error 事件、不终止泵送)。
+	if !strings.Contains(out, `"content":"hi"`) || !strings.Contains(out, "[DONE]") {
+		t.Fatalf("上游内容未完整交付: %q", out)
 	}
-	assertBalanceIntact(t, db, smallBalance)
-	// 流式路径在转发前会插一条 pending usage 行(成本 0);结算失败后它仍是
-	// 0 成本(不是"扣了钱"),余额不得变化。pending 行的清理由
-	// CleanupPendingUsage 负责,不属于 FIX-05。
-	assertNoChargedUsage(t, db)
+	if strings.Contains(out, "BALANCE_EXHAUSTED") {
+		t.Fatalf("流式结算已允许透支欠款,不应再报余额不足: %q", out)
+	}
+	// 欠款如实落账:上游上报 pt=10 / ct=5 @ 2e5 元/1M → 3.00 元。
+	var pt, ct int64
+	var cost float64
+	if err := db.QueryRow(`SELECT prompt_tokens, completion_tokens, cost FROM usage`).Scan(&pt, &ct, &cost); err != nil {
+		t.Fatalf("已交付的流式请求没有落账(零落账): %v", err)
+	}
+	if pt != 10 || ct != 5 || math.Abs(cost-3.0) > 1e-9 {
+		t.Fatalf("落账数据不符: pt=%d ct=%d cost=%.9f, want 10/5/3.0", pt, ct, cost)
+	}
+	var balance, ledgerSum float64
+	if err := db.QueryRow(`SELECT balance_money FROM users WHERE id = 1`).Scan(&balance); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM balance_ledger WHERE user_id = 1`).Scan(&ledgerSum); err != nil {
+		t.Fatal(err)
+	}
+	if want := smallBalance - cost; math.Abs(balance-want) > 1e-9 {
+		t.Fatalf("balance = %.9f, want %.9f(欠款必须走负,而不是整笔回滚)", balance, want)
+	}
+	if balance >= 0 {
+		t.Fatalf("balance = %.9f, want < 0(先交付后结算 = 后付费)", balance)
+	}
+	if math.Abs(balance-ledgerSum) > 1e-6 {
+		t.Fatalf("I1 被破坏: balance=%.9f SUM(ledger)=%.9f", balance, ledgerSum)
+	}
+	// 上限已经被这次欠款校验过,后续请求必须在**调用上游之前**被闸门拦下。
+	if n := f.requests.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1", n)
+	}
+	w2 := doPost(t, r, "/v1/chat/completions",
+		`{"model":"deepseek-chat","stream":true,"messages":[{"role":"user","content":"hi"}]}`, token, nil)
+	if w2.Code != http.StatusTooManyRequests {
+		t.Fatalf("欠款账户的后续请求 status = %d, want 429", w2.Code)
+	}
+	if n := f.requests.Load(); n != 1 {
+		t.Fatalf("欠款账户的后续请求仍打到上游: calls = %d, want 1", n)
+	}
 }
 
 // TestBalanceSettlementFailureAnthropicNonStream 覆盖 /v1/messages 的同一处
@@ -206,19 +248,6 @@ func assertBalanceIntact(t *testing.T, db *sql.DB, want float64) {
 	}
 	if diff := u.BalanceMoney - want; diff > 1e-9 || diff < -1e-9 {
 		t.Fatalf("balance = %v, want %v(拒绝路径不得改动余额)", u.BalanceMoney, want)
-	}
-}
-
-// assertNoChargedUsage 断言没有任何 usage 行留下**非零**费用(流式 pending
-// 行允许存在,但它必须是 0 成本)。
-func assertNoChargedUsage(t *testing.T, db *sql.DB) {
-	t.Helper()
-	var charged int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM usage WHERE cost <> 0`).Scan(&charged); err != nil {
-		t.Fatal(err)
-	}
-	if charged != 0 {
-		t.Fatalf("charged usage rows = %d, want 0", charged)
 	}
 }
 

@@ -205,14 +205,20 @@ func TestApplyStreamUsageRequest(t *testing.T) {
 		t.Fatalf("non-stream body mutated: %s", out2)
 	}
 
-	// client already set include_usage=false -> respected (no injection)
+	// client set include_usage=false -> **必须被覆盖成 true**(审计 r7 srvbill-2:
+	// 计量开关只能由服务端持有;尊重显式 false 等于让被计费方一行 JSON 关掉自己
+	// 的计量表 —— 上游据此不发 usage chunk → 输入侧免费 + completion 估算截顶)。
 	explicitFalse := []byte(`{"model":"m","stream":true,"stream_options":{"include_usage":false}}`)
 	out3, err := applyStreamUsageRequest(explicitFalse)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(out3) != string(explicitFalse) {
-		t.Fatalf("explicit include_usage=false was overridden: %s", out3)
+	var m3 map[string]any
+	if err := json.Unmarshal(out3, &m3); err != nil {
+		t.Fatal(err)
+	}
+	if got := m3["stream_options"].(map[string]any)["include_usage"]; got != true {
+		t.Fatalf("include_usage = %v, want true(客户端显式 false 必须被服务端覆盖): %s", got, out3)
 	}
 
 	// client set include_usage=true already -> merged without duplication
@@ -718,7 +724,7 @@ func TestProxyStreamBackfilledThenDisconnectKeepsUsage(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		a := &API{DB: db}
-		a.serveStream(c, resp, usageID, nil)
+		a.serveStream(c, resp, usageID, nil, nil, 0)
 		close(done)
 	}()
 	<-body.blocked // usage chunk read + backfilled; stream is now holding
@@ -849,7 +855,7 @@ func TestServeStreamRedactsUpstreamKeyEcho(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.serveStream(c, resp, 0, []string{secret})
+	a.serveStream(c, resp, 0, []string{secret}, nil, 0)
 	body := w.Body.String()
 	if strings.Contains(body, secret) {
 		t.Fatalf("secret leaked in stream: %s", body)
@@ -875,7 +881,7 @@ func TestServeStreamRedactsErrorBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.serveStream(c, resp, 0, []string{secret})
+	a.serveStream(c, resp, 0, []string{secret}, nil, 0)
 	body := w.Body.String()
 	if strings.Contains(body, secret) {
 		t.Fatalf("secret leaked in error body: %s", body)
