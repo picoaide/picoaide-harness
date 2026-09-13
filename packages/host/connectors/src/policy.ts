@@ -465,6 +465,18 @@ export function credentialFieldProblem(def: Pick<ConnectorDef, 'tokenFields' | '
  *
  * Denied names never reach this function: callers pass the sanitized env and
  * the denylist-filtered credential keys.
+ *
+ * A plain fast digest is correct here and must NOT be replaced by a slow KDF
+ * (bcrypt/scrypt/PBKDF2/Argon2). This is an equality/change-detection token,
+ * not password storage: nothing secret is being protected by its one-wayness.
+ * Every hashed input is a definition field the user is shown verbatim in the
+ * approval prompt, and the digest only ever decides "is this the same spawn
+ * request the user already approved?". A slow KDF would buy no attacker cost
+ * while making every approval check (and every re-render of the connector
+ * panel) computationally expensive, and changing the input encoding would
+ * invalidate existing approvals and re-prompt every user for an unchanged
+ * command. Static analysers flag this line by name heuristic; that is a false
+ * positive (see the `js/insufficient-password-hash` dismissal on the PR).
  * @param command - executable.
  * @param args - argument vector.
  * @param env - sanitized definition env.
