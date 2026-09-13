@@ -301,6 +301,21 @@ export function checkWorkflow(name) {
               + '(只 sign-only 的渠道包没有公证票据,客户 Mac 首次打开会被 Gatekeeper 拦下)',
           })
         }
+        // run 里"有公证命令"不等于"每次都会公证":分支开关可以是 tag 形态派生的
+        // 表达式(2026-09-13 前正是 `!contains(github.ref_name, '-')`,于是预发 tag
+        // 上的 beta mac 包悄悄退化成只签名)。要求它**写死为 true** —— 渠道包没有
+        // "只签名"的例外:预发 tag 的渠道列表只有 beta,而它同样是交付物。
+        const notarizeSwitch = env.CHANNEL_NOTARIZE
+        if (typeof notarizeSwitch !== 'string' || notarizeSwitch.trim() !== 'true') {
+          failures.push({
+            name,
+            line: 0,
+            detail: `job ${jobId} 的渠道 DMG 打包 step 的 CHANNEL_NOTARIZE 必须写死为 'true'`
+              + `(当前: ${typeof notarizeSwitch === 'string' ? notarizeSwitch : '未设置'})`
+              + ' —— 由 tag 形态派生的开关会让预发 tag 上的 beta mac 包退化成只签名,'
+              + '内测同学的 Mac 首次打开仍被 Gatekeeper 拦',
+          })
+        }
       }
       // GitHub Release 的「名字」与「说明」(2026-09-11 定案):
       //   - Release 名必须是 tag 本身。Releases 页左侧列表宽度固定,
