@@ -46,6 +46,29 @@ export const SENSITIVE_TERMS = [
 /** Matches credential-shaped key/parameter NAMES (substring, case-insensitive). */
 export const SENSITIVE_KEY_PATTERN = new RegExp(SENSITIVE_TERMS.join('|'), 'iu')
 
+/**
+ * True when the key's own vocabulary is a credential term, rather than a term
+ * merely buried inside a longer word (R-5, 2026-09-13).
+ *
+ * The substring semantics above are right for a delimiter that only ever
+ * separates a key from a value (`=`, `&#61;`, `＝`): `accessToken=…` must hit.
+ * They are NOT right for `:`, which is also ordinary prose punctuation:
+ * `encoded: 0` contains `code`, `decoder: x` contains `code`, `keyboard: y`
+ * starts with `key`, `consider: z` contains `sid`. A colon therefore counts
+ * only when the key IS a term (`password:`, `token:`, `code:`) or when the term
+ * opens a word part (`Authorization:`, `X-Amz-Signature:`). Quoted JSON keys
+ * (`"accessToken": …`) are unambiguous by shape and do not need this gate.
+ */
+export function isExactSensitiveKey(key: string): boolean {
+  const normalized = key.toLowerCase()
+  return SENSITIVE_TERMS.some((term) => {
+    const at = normalized.indexOf(term)
+    if (at < 0) return false
+    if (at === 0) return true
+    return !/[a-z0-9]/.test(normalized[at - 1]!)
+  })
+}
+
 /** Credential shapes that are unambiguous enough for free-form text/values. */
 export const SECRET_VALUE_TERMS = [
   'token',

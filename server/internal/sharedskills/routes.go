@@ -28,10 +28,15 @@ import (
 
 // Limits: the raw gzipped tar a client may upload, the total unpacked tree
 // size, entry count, and the request body ceiling (base64 inflation).
+//
+// 2026-09-13:三个归档边界改为引用 archiveutil 的规范常量(全仓唯一一份数字,
+// 见 archiveutil.DefaultLimits)。此前 sharedskills/agentshare/archiveutil
+// 各写一份 16MB/64MB/10000,任一处调整都会让"四入口口径一致"悄悄失效 ——
+// 现在由 TestArchiveLimitsSingleSource 锁住三处同值。
 const (
-	MaxArchiveBytes   = 16 << 20
-	MaxUnpackedBytes  = 64 << 20
-	MaxArchiveEntries = 10000
+	MaxArchiveBytes   = archiveutil.MaxArchiveBytes
+	MaxUnpackedBytes  = archiveutil.MaxUnpackedBytes
+	MaxArchiveEntries = archiveutil.MaxArchiveEntries
 	MaxBodyBytes      = 24 << 20
 )
 
@@ -52,13 +57,8 @@ var (
 	ErrDuplicateArchive = errors.New("archive has duplicate entries")
 )
 
-// archiveLimits: 归档校验边界(与 archiveutil 共享常量语义;zip/tar.gz 双格式)。
-var archiveLimits = archiveutil.Limits{
-	MaxArchiveBytes:  MaxArchiveBytes,
-	MaxUnpackedBytes: MaxUnpackedBytes,
-	MaxEntries:       MaxArchiveEntries,
-	RequiredFile:     "SKILL.md",
-}
+// archiveLimits: 归档校验边界(取自 archiveutil 的规范常量;zip/tar.gz 双格式)。
+var archiveLimits = archiveutil.DefaultLimits("SKILL.md")
 
 // skillNameRe matches a single safe directory segment (mirrors the client
 // installer's SKILL_NAME_PATTERN).

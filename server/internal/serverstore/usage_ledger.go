@@ -29,22 +29,6 @@ func yearKey(t time.Time) string {
 	return t.Format("2006")
 }
 
-// usageRelationIsPartition 探测 public.usage_<key> 的 pg_class 记录:
-// Valid=false = 不存在;Bool=true = 是 usage 的真分区;Bool=false = 同名孤儿表
-// (F11:被 DETACH 但未 DROP,探测必须与真分区区分)。
-func usageRelationIsPartition(db *sql.DB, key string) (sql.NullBool, error) {
-	var isPartition sql.NullBool
-	err := db.QueryRow(`SELECT c.relispartition FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relname = ? AND n.nspname = 'public'`, "usage_"+key).Scan(&isPartition)
-	return isPartition, err
-}
-
-// staleDetachedTableErr 是同名孤儿表的固定错误(F11)。
-func staleDetachedTableErr(key string) error {
-	return fmt.Errorf("usage_%s exists but is not a partition (stale detached table); drop it manually", key)
-}
-
 // ensureUsagePartition 幂等创建某月的 usage 分区(如 usage_202608)。
 // 写路径(RecordUsage*)与账本生成均先调用,保证当月分区存在。
 // ensureUsagePartition guarantees the month partition exists before a usage
@@ -70,37 +54,21 @@ func ensureUsagePartition(db *sql.DB, month time.Time) error {
 	// 旧实现只看 to_regclass:若某月分区被 DETACH 成功但 DROP 失败,孤儿表
 	// 仍在 catalog 中,探测会误判"已存在"而不再建分区,该月所有计量写入
 	// 直接报 "no partition of relation usage found for row"。
-	isPartition, probeErr := usageRelationIsPartition(db, key)
-	if probeErr == nil && isPartition.Valid {
-		if isPartition.Bool {
-			return nil
-		}
-		return staleDetachedTableErr(key)
-	}
-	if probeErr != nil && !errors.Is(probeErr, sql.ErrNoRows) {
-		return probeErr
-	}
+	//
+	// P1-3(审计 2026-09-12)/年分区同族(2026-09-13):探测→建表的竞态与
+	// 42P07 兜底复检统一在 partitions.go 的 ensureRangePartition 里实现,
+	// 年分区 ensureUsageDailyPartition 走同一个 helper。
 	start := dayKey(month)
 	end := start.AddDate(0, 1, 0)
 	// 分区边界用**显式 UTC 偏移**的瞬时字面量:分区范围(timestamptz)不随 PG
 	// 会话时区漂移(裸日期 '2026-09-01' 会被按会话时区解析,UTC 会话下建出的
 	// 分区范围与北京月错开 8 小时)。
-	stmt := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS usage_%s PARTITION OF usage
-		FOR VALUES FROM ('%s') TO ('%s')`, key,
-		pgInstantArg(BeijingDayInstant(start)), pgInstantArg(BeijingDayInstant(end)))
-	_, err := db.Exec(stmt)
-	if err != nil && isDuplicateRelationErr(err) {
-		// 并发竞态:另一会话已建好同名分区。复检确认(READ COMMITTED 下新
-		// 语句拿新快照,能看到对方已提交的分区);确认不了就保留原始错误。
-		again, perr := usageRelationIsPartition(db, key)
-		if perr == nil && again.Valid {
-			if again.Bool {
-				return nil
-			}
-			return staleDetachedTableErr(key)
-		}
-	}
-	return err
+	return ensureRangePartition(db, partitionSpec{
+		parent: "usage",
+		key:    key,
+		from:   pgInstantArg(BeijingDayInstant(start)),
+		to:     pgInstantArg(BeijingDayInstant(end)),
+	})
 }
 
 func dayKey(t time.Time) time.Time {
@@ -108,14 +76,20 @@ func dayKey(t time.Time) time.Time {
 }
 
 // ensureUsageDailyPartition 幂等创建某年的 usage_daily 分区(如 usage_daily_2026)。
+// 2026-09-13 P1-3 同族修复:此前只有一条裸 CREATE TABLE IF NOT EXISTS,缺少月
+// 分区那样的 42P07 兜底复检(16 并发首写实证 5–15/16 报
+// `relation "usage_daily_2027" already exists`)。现在与月分区共用
+// partitions.go 的 ensureRangePartition —— 同一 helper,不允许再分叉。
 func ensureUsageDailyPartition(db *sql.DB, year time.Time) error {
-	key := yearKey(year)
 	start := time.Date(year.Year(), 1, 1, 0, 0, 0, 0, time.UTC)
 	end := start.AddDate(1, 0, 0)
-	stmt := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS usage_daily_%s PARTITION OF usage_daily
-		FOR VALUES FROM ('%s') TO ('%s')`, key, start.Format("2006-01-02"), end.Format("2006-01-02"))
-	_, err := db.Exec(stmt)
-	return err
+	return ensureRangePartition(db, partitionSpec{
+		parent: "usage_daily",
+		key:    yearKey(year),
+		// day 是 DATE 列,分区边界沿用既有裸日期口径。
+		from: start.Format("2006-01-02"),
+		to:   end.Format("2006-01-02"),
+	})
 }
 
 // RebuildUsageLedger 从 usage 明细 UPSERT 日账/月账(幂等,可重复执行)。

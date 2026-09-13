@@ -21,11 +21,12 @@
  * @module dsh-memory-evolve/prompts
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { translate, getLocale, PROMPT_DICT } from './i18n.js'
 import { applyRequestGuard, readBody as sharedReadBody } from './http-guard.js'
+import { isSymlinkFreeRepoTarget, symlinkRefusedError, writeFileAtomicSafe } from './store.js'
 
 /** Translate through PROMPT_DICT in the active host locale. */
 const pt = (key, params) => translate(PROMPT_DICT, key, params, getLocale())
@@ -87,13 +88,20 @@ export const SEED_VERSION = (() => {
  * 单进程内串行调用即可，无需锁。
  */
 class JsonFile {
-  /** @param {string} file - JSON 文件绝对路径。 */
+  /** @param {string} file - JSON 文件绝对路径（<memoryDir>/…）。 */
   constructor(file) {
     this.file = file
+    // FIX-26（2026-09-13 第六轮）：读侧/写侧的符号链接断言以记忆仓库根为基准。
+    // prompts.json / prompt-injections.json 都在记忆根下，而 injections 的正文
+    // 会**注入模型上下文**——跟随共享分支 120000 条目送来的链接读，会把仓库外
+    // 文件内容变成注入正文（与 KEY.md / 归档轨同一条信息外泄链）。
+    this.dir = dirname(file)
   }
 
   /** 读取并解析；文件不存在或损坏时返回 fallback（不抛错，可自愈）。 */
   read(fallback) {
+    // 落点是符号链接/越界 → 不读（返回 fallback，与"损坏自愈"同一形状）
+    if (!isSymlinkFreeRepoTarget(this.dir, this.file)) return fallback
     try {
       const text = readFileSync(this.file, 'utf8')
       const data = JSON.parse(text)
@@ -105,10 +113,12 @@ class JsonFile {
 
   /** 原子写：先写临时文件再 rename，避免写一半崩溃留下损坏文件。 */
   write(data) {
-    mkdirSync(dirname(this.file), { recursive: true })
-    const tmp = `${this.file}.tmp`
-    writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8')
-    renameSync(tmp, this.file)
+    mkdirSync(this.dir, { recursive: true })
+    // FIX-26：原实现用**固定名** `<file>.tmp` + 按路径写——预置同名真符号链接
+    // 即可写穿仓库外（比 pid 形态更好猜）。改走唯一写回原语（临时落点断言 +
+    // O_EXCL 按 fd 写 + rename 前后复检）。
+    const written = writeFileAtomicSafe(this.dir, this.file, JSON.stringify(data, null, 2))
+    if (written.ok !== true) throw symlinkRefusedError(written.refusedPath)
   }
 }
 

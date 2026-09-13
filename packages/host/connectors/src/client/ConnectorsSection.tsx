@@ -33,8 +33,15 @@ interface ConnectorEntry {
       fingerprint: string
       command: string
       args: string[]
+      /** UNION over `commands`: every name any covered child may receive. */
       envKeys: string[]
       servers: string[]
+      /**
+       * Audit R3 N1: one answer approves every pending stdio server, so each
+       * one is shown with its own command, args and key set. Absent only for a
+       * prompt produced by an older host build.
+       */
+      commands?: { serverName: string; command: string; args: string[]; envKeys: string[] }[]
     }
   } | null
 }
@@ -335,28 +342,51 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
         </div>
       )}
 
-      {entry.request?.approval && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 10, borderRadius: 8, border: '1px solid var(--dsw-alias-state-warn-primary)' }}>
-          <p style={{ ...LABEL, color: 'var(--dsw-alias-state-warn-primary)', fontWeight: 600 }}>{t('approval.title')}</p>
-          <p style={LABEL}>{t('approval.hint', { target: entry.request.approval.servers.join(', ') })}</p>
-          <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.command')}<code>{entry.request.approval.command}</code></p>
-          {entry.request.approval.args.length > 0 && (
-            <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.args')}<code>{entry.request.approval.args.join(' ')}</code></p>
-          )}
-          {entry.request.approval.envKeys.length > 0 && (
-            <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.env')}<code>{entry.request.approval.envKeys.join(', ')}</code></p>
-          )}
-          <p style={LABEL}>{t('approval.once')}</p>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button type="button" style={BUTTON} disabled={busy === 'submit'} onClick={() => { void decideApproval(true) }} aria-label={`${t('action.allow')} ${entry.name}`}>
-              {busy === 'submit' ? t('action.deciding') : t('action.allow')}
-            </button>
-            <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)' }} disabled={busy === 'submit'} onClick={() => { void decideApproval(false) }} aria-label={`${t('action.deny')} ${entry.name}`}>
-              {t('action.deny')}
-            </button>
+      {entry.request?.approval && (() => {
+        const approval = entry.request.approval
+        const commands = approval.commands ?? []
+        // Audit R3 N1: one answer approves every pending stdio server, so each
+        // one gets its own block. The flat fields are the older-host fallback.
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 10, borderRadius: 8, border: '1px solid var(--dsw-alias-state-warn-primary)' }}>
+            <p style={{ ...LABEL, color: 'var(--dsw-alias-state-warn-primary)', fontWeight: 600 }}>{t('approval.title')}</p>
+            <p style={LABEL}>{t('approval.hint', { target: approval.servers.join(', ') })}</p>
+            {commands.length > 0
+              ? commands.map(command => (
+                  <div key={command.serverName} style={{ display: 'flex', flexDirection: 'column', gap: 2, paddingLeft: 8, borderLeft: '2px solid var(--dsw-alias-state-warn-primary)' }}>
+                    <p style={{ ...LABEL, fontWeight: 600 }}>{command.serverName}</p>
+                    <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.command')}<code>{command.command}</code></p>
+                    {command.args.length > 0 && (
+                      <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.args')}<code>{command.args.join(' ')}</code></p>
+                    )}
+                    {command.envKeys.length > 0 && (
+                      <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.env')}<code>{command.envKeys.join(', ')}</code></p>
+                    )}
+                  </div>
+                ))
+              : (
+                  <>
+                    <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.command')}<code>{approval.command}</code></p>
+                    {approval.args.length > 0 && (
+                      <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.args')}<code>{approval.args.join(' ')}</code></p>
+                    )}
+                    {approval.envKeys.length > 0 && (
+                      <p style={{ ...LABEL, wordBreak: 'break-all' }}>{t('approval.env')}<code>{approval.envKeys.join(', ')}</code></p>
+                    )}
+                  </>
+                )}
+            <p style={LABEL}>{t('approval.once')}</p>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button type="button" style={BUTTON} disabled={busy === 'submit'} onClick={() => { void decideApproval(true) }} aria-label={`${t('action.allow')} ${entry.name}`}>
+                {busy === 'submit' ? t('action.deciding') : t('action.allow')}
+              </button>
+              <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)' }} disabled={busy === 'submit'} onClick={() => { void decideApproval(false) }} aria-label={`${t('action.deny')} ${entry.name}`}>
+                {t('action.deny')}
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       {downloading && entry.request?.message && <p style={LABEL}>{entry.request.message}</p>}
       {polling && <p style={LABEL}>{t('auth.waiting')}</p>}

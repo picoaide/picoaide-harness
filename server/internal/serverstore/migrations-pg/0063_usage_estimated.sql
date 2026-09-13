@@ -1,0 +1,24 @@
+-- 0063: usage.estimated —— 区分「上游上报的 token」与「服务端估算的 token」。
+--
+-- 背景(P2,第五轮独立复核 §1 缺口 3 / B8):第四轮把字节估算兜底从"流式专属"
+-- 扩到"非流式交付"(N2),于是估算出来的 completion_tokens 与上游真实上报值写进
+-- **同一列、同一形态**,日账/月账/报表(RebuildUsageLedger 直接 SUM)口径完全
+-- 一致 —— 事后无法从数据判断哪些行是估算的:既解释不了异常行(谁把 1 MiB 填充
+-- 算成了 26 万 token),也评估不了估算口径的影响面。
+--
+-- 语义:estimated = true 表示该行**至少有一侧** token 来自服务端按字节估算
+-- (内部实现唯一的两个估算入口:fallbackCompletionTokens /
+-- estimateEmbeddingPromptTokens),而不是上游上报值。上游上报优先(估算只在
+-- 该侧缺失/为 0 时启动),所以 estimated = false 的行一定是上游口径。
+--
+-- 写入方:serverstore.RecordUsageKindCachedEstimated /
+-- RecordUsageKindEstimated / UpdateUsageTokensCachedEstimated;旧入口
+-- (RecordUsageKindCached / UpdateUsageTokensCached)一律写 false。
+--
+-- 回滚影响(迁移是**加列**,不做数据改写):
+--   * 向后兼容:旧二进制(INSERT 不含该列)照常工作,新行取默认 false;
+--     已写入的标记列保留,旧版本 SELECT 不引用它,报表口径不变;
+--   * 前向兼容:新二进制在旧库上不会启动失败 —— 迁移随启动自动应用;
+--   * 需要彻底回滚时:ALTER TABLE usage DROP COLUMN estimated(可逆,只丢
+--     "这一行是估算的"这一标记,不丢 token/金额)。
+ALTER TABLE IF EXISTS usage ADD COLUMN IF NOT EXISTS estimated BOOLEAN NOT NULL DEFAULT false;

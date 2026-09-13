@@ -152,7 +152,14 @@ func (e *Embedder) Embed(ctx context.Context, model string, texts []string) ([][
 		}
 		// P0-B(审计 2026-09-12):上游回报的负 token 归零(否则负费用 →
 		// refund → 余额凭空增加;响应体回显的 usage 也会是负数)。
-		return out, clampTokensNonNeg(er.Usage.TotalTokens), nil
+		// N2(审计 r3 第四轮):embedding 的用量就是输入侧 —— 只报
+		// prompt_tokens(没有 total_tokens)时同样采信,不得退化成"没有用量"
+		// 而少收(两侧都缺失才由调用方按输入字节估算)。
+		tokens := er.Usage.TotalTokens
+		if tokens == 0 {
+			tokens = er.Usage.PromptTokens
+		}
+		return out, clampTokensNonNeg(tokens), nil
 	}
 	return nil, 0, lastErr
 }
@@ -214,16 +221,26 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游服务不可用")
 		return
 	}
-	if _, err := serverstore.RecordUsageKind(a.DB, user.ID, req.Model, tokens, 0, "embedding"); err != nil {
-		// FIX-05:embedding 走同一条结算事务(RecordUsageKind → settleUsageCostTx)。
-		// 余额不足时事务已回滚,必须在 c.JSON 交付向量之前拒绝 —— 否则向量
-		// 白拿、账上一分不扣。
-		if isBalanceSettlementFailure(err) {
-			log.Printf("gateway: insufficient balance, rejecting embedding before delivery: user=%d model=%s", user.ID, req.Model)
-			rejectBalanceSettlement(c)
-			return
+	// N2(审计 r3 第四轮):embedding 没有 completion 侧,上游省略 usage 时
+	// (或报 0/负值)按**请求输入字节**估算 prompt tokens —— 否则向量照常 200
+	// 交付、账上一行零费用(零落账)。口径与流式/非流式的字节估算是同一份
+	// estimateTokensFromBytes(4 字节/token),确定性且一次交付只落一行。
+	// estimated 标记(0063)必须如实写上:这一行的 token 是估算的,不是上游口径。
+	estimated := false
+	if tokens <= 0 {
+		if est := estimateEmbeddingPromptTokens(inputs); est > 0 {
+			log.Printf("gateway: embedding upstream reported no usage, byte-estimated prompt tokens: model=%s inputs=%d est=%d",
+				safeModelForLog(req.Model), len(inputs), est)
+			tokens = est
+			estimated = true
 		}
-		log.Printf("gateway: record embed usage: %v", err)
+	}
+	if _, err := serverstore.RecordUsageKindEstimated(a.DB, user.ID, req.Model, tokens, 0, billingKindEmbedding, estimated); err != nil {
+		// FIX-05 + G5b:embedding 走同一条结算事务(RecordUsageKind →
+		// settleUsageCostTx)。**任何**结算失败都必须在这里拒绝 —— 事务已回滚,
+		// 继续 c.JSON 交付向量就是向量白拿、账上一分不扣。
+		rejectSettlementFailure(c, err, "embedding json")
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",

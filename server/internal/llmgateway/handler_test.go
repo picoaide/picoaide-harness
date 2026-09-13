@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -638,7 +637,16 @@ func TestServeJSONDropsUntrustedHeaders(t *testing.T) {
 	}))
 	t.Cleanup(up.Close)
 	body := `{"model":"m","messages":[]}`
-	var a API
+	// N2(审计 r3 第四轮)起非流式交付**必然**落一行 usage(缺 usage 时按字节
+	// 估算兜底),所以这个交付型用例需要一张真库账本 + 真实用户:否则结算
+	// 失败会走 503 分支,透传/白名单根本没被执行(假绿)。
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "hdr", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &API{DB: db}
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest("POST", "/", strings.NewReader(body))
@@ -646,7 +654,10 @@ func TestServeJSONDropsUntrustedHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.serveJSON(c, resp, 1, "m", nil)
+	a.serveJSON(c, resp, uid, "m", nil, billingKindChat)
+	if got := w.Body.String(); got != `{"ok":true}` {
+		t.Fatalf("上游响应体必须原样透传(否则本用例没走到白名单分支): %q", got)
+	}
 	for k := range w.Header() {
 		if strings.EqualFold(k, "Set-Cookie") || strings.EqualFold(k, "X-Upstream-Key") {
 			t.Fatalf("untrusted header leaked: %s", k)
@@ -794,6 +805,12 @@ func TestServeJSONRedactsUpstreamKeyEcho(t *testing.T) {
 	t.Cleanup(up.Close)
 	db, cleanup := serverstore.NewTestDB(t)
 	t.Cleanup(cleanup)
+	// 交付路径必须真的走到:真实用户 → 结算成功 → 响应体透传(否则 503 分支
+	// 里既没有 key 也没有 echo,断言会假绿 —— N2 起非流式交付必落账)。
+	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "redact", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
 	a := API{DB: db}
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -802,8 +819,11 @@ func TestServeJSONRedactsUpstreamKeyEcho(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.serveJSON(c, resp, 1, "m", []string{secret})
+	a.serveJSON(c, resp, uid, "m", []string{secret}, billingKindChat)
 	body := w.Body.String()
+	if !strings.Contains(body, "echo ***") {
+		t.Fatalf("响应体必须透传且已脱敏(否则本用例没走到交付分支): %s", body)
+	}
 	if strings.Contains(body, secret) {
 		t.Fatalf("secret leaked in body: %s", body)
 	}
@@ -928,8 +948,16 @@ func TestNegativeUpstreamUsageDoesNotRechargeBalance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if math.Abs(u.BalanceMoney-1) > 1e-9 {
-		t.Fatalf("负 token 凭空充值: balance = %v, want 1", u.BalanceMoney)
+	// N1/N2(审计 r3 第四轮)起,负 token 归零后该侧等于"没有可用用量" ⇒ 走
+	// **已交付字节**估算兜底:只可能产生以已交付字节/4 为上限的极小正向费用,
+	// 绝不可能变成"余额凭空增加"(refund)。subject 仍是"不得凭空充值":断言
+	// 余额不增加 + 扣费被字节上限约束(而不是"一分不扣")。
+	if u.BalanceMoney > 1+1e-9 {
+		t.Fatalf("负 token 凭空充值: balance = %v, want <= 1", u.BalanceMoney)
+	}
+	maxCharge := float64(len(f.nonStream)) / 4 / 1e6 * 1 // ≤ 已交付字节/4 个 token,输出单价 1 元/1M
+	if charge := 1 - u.BalanceMoney; charge > maxCharge+1e-9 {
+		t.Fatalf("负 token 触发超上限扣费: charge=%.9f max=%.9f(已交付 %d 字节)", charge, maxCharge, len(f.nonStream))
 	}
 	items, _, err := serverstore.BalanceLedgerPage(db, 1, "", 1, 50)
 	if err != nil {

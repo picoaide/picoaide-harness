@@ -11,14 +11,26 @@ import { userScopePath } from './user-scope.ts'
 import { ConnectorApprovalStore } from './approvals.ts'
 import {
   CONNECTOR_ID_PATTERN,
+  credentialFieldProblem,
   declaredCredentialKeys,
+  isDeniedEnvKey,
   mcpDefinitionProblem,
   mcpServerProblem,
   sanitizeMcpEnv,
   stdioApprovalFingerprint,
   streamableHttpUrl,
 } from './policy.ts'
-import type { ConnectorAuthRequest, ConnectorDef, ConnectorMcp, ConnectorMcpApproval, ConnectorState } from './types.ts'
+import {
+  ensureMcpTransportRedirectFence,
+  McpTransportFenceUnavailableError,
+} from './mcp-transport-fence.ts'
+import type {
+  ConnectorAuthRequest,
+  ConnectorDef,
+  ConnectorMcp,
+  ConnectorMcpApproval,
+  ConnectorState,
+} from './types.ts'
 import type { ConnectorCredential } from './store.ts'
 
 // Type-only: declare the enterprise session event so `ctx.on` resolves it.
@@ -86,10 +98,11 @@ export interface ServerConnectorItem {
  * single bad row never blanks the whole catalog.
  *
  * FIX-02: this is a TRUST BOUNDARY, not a convenience mapper. The row's id
- * shape, the `mcp[]` entries (serverName/transport/command/args/env/url) are
- * all validated here, so a definition that would hand `spawn` an unchecked
- * executable, a protected env key, or a non-public URL never enters the
- * catalog at all.
+ * shape, the `mcp[]` entries (serverName/transport/command/args/env/url) and
+ * the credential-field declarations (`tokenFields`/`settings`, whose keys end
+ * up in the child environment) are all validated here, so a definition that
+ * would hand `spawn` an unchecked executable, a protected env key, or a
+ * non-public URL never enters the catalog at all.
  */
 export function parseServerConnectors(items: ServerConnectorItem[]): ConnectorDef[] {
   const out: ConnectorDef[] = []
@@ -102,7 +115,7 @@ export function parseServerConnectors(items: ServerConnectorItem[]): ConnectorDe
     try {
       const raw = JSON.parse(item.definition) as ConnectorDef
       if (!raw?.mcp?.length) continue
-      const problem = mcpDefinitionProblem(raw.mcp)
+      const problem = mcpDefinitionProblem(raw.mcp) ?? credentialFieldProblem(raw)
       if (problem !== null) {
         console.warn(`[dsh-connectors] dropped connector ${item.id}: ${problem}`)
         continue
@@ -177,6 +190,16 @@ function exact(handler: JsonHandler): (req: IncomingMessage, res: ServerResponse
 }
 
 export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
+  // N3: the MCP streamable-http transport is constructed inside
+  // `dsh-mcp-client` with its own `fetch`, so the redirect fence must be on the
+  // SDK class before the first instance exists. Installing it here keeps the
+  // window closed for every path (restore, panel approve, headless hook);
+  // `registerMcp` re-checks and refuses a streamable-http server when the fence
+  // is unavailable, so a failure here is loud, not silent.
+  void ensureMcpTransportRedirectFence().catch((error: unknown) => {
+    ctx.logger?.error('pico-connectors: MCP streamable-http 重定向栅栏安装失败，将拒绝注册此类连接器', error)
+  })
+
   // 连接器目录(0042):服务端为准——bootstrap 下发 connectors[](定义 JSON),
   // 客户端无内置定义,仅保留 options.connectors 作为开发/测试注入。
   let defs: ConnectorDef[] = [...(options.connectors ?? [])]
@@ -242,9 +265,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     rejected: string[]
   }
 
-  /** Pending local confirmation: the prompt plus every fingerprint it covers. */
+  /**
+   * Pending local confirmation: the prompt plus the exact ledger record of
+   * every command one answer approves (audit R3 N1 — a union of key sets would
+   * misattribute one server's keys to another server's record).
+   */
   interface PendingApproval extends ConnectorMcpApproval {
-    fingerprints: string[]
+    entries: Array<{ fingerprint: string; command: string; args: string[]; envKeys: string[] }>
   }
 
   /** Drop all MCP registrations and reset in-memory state (user switch). */
@@ -339,53 +366,120 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /**
-   * Child env for one stdio MCP server (FIX-19). Two whitelists apply:
-   * the definition's own env (protected bootstrap keys are dropped) and the
-   * credential fields (only the keys the connector declared in
-   * `tokenFields`/`settings` are injected — an arbitrary stored field must not
-   * reach the child). The framework's own keys are written last so a
-   * definition can never shadow them.
+   * Child env for one stdio MCP server (FIX-19, residual A). Two whitelists
+   * apply: the definition's own env (protected bootstrap keys are dropped) and
+   * the credential fields (only the keys the connector declared in
+   * `tokenFields`/`settings` are injected — and only those whose name survives
+   * the same denylist, so a declared `NODE_OPTIONS`/`PATH` can never set a
+   * loader hook). The framework's own keys are written last so a definition can
+   * never shadow them.
+   *
+   * `declared` (the sanitized `mcp[].env`) and `credentialKeys` (the injectable
+   * field names) are the definition-controlled part of the approval
+   * fingerprint; `env` is the complete key set the child will receive, which is
+   * exactly what the local confirmation discloses.
    */
   const buildStdioEnv = (
     def: ConnectorDef,
     server: ConnectorMcp,
     credential: ConnectorCredential | null,
-  ): { declared: Record<string, string>; env: Record<string, string> } => {
+  ): { declared: Record<string, string>; credentialKeys: string[]; env: Record<string, string> } => {
     const { env: declared } = sanitizeMcpEnv(server.env)
     const env: Record<string, string> = { ...declared }
     const declaredKeys = declaredCredentialKeys(def)
     for (const [key, value] of Object.entries(credential?.fields ?? {})) {
       if (!declaredKeys.has(key) || typeof value !== 'string') continue
+      // INJECTION side of the same denylist: the declaration side already
+      // filtered, this re-check keeps a future caller from re-opening the hole.
+      if (isDeniedEnvKey(key)) continue
       env[key] = value
     }
     if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = '1'
     if (credential?.accessToken) env.PICOAIDE_CONNECTOR_ACCESS_TOKEN = credential.accessToken
     if (credential?.refreshToken) env.PICOAIDE_CONNECTOR_REFRESH_TOKEN = credential.refreshToken
-    return { declared, env }
+    return { declared, credentialKeys: [...declaredKeys].sort(), env }
   }
 
-  /** Local-confirmation prompt for every stdio server of one connector. */
+  /**
+   * Framework-owned env names a stdio child can receive no matter what the
+   * definition declares. Listed in every disclosure so a token that only
+   * appears later (the auth flow may store one after approval) was still shown
+   * to the user before it could ever be injected (audit R3 N2).
+   */
+  const FRAMEWORK_STDIO_ENV_KEYS = ['PICOAIDE_CONNECTOR_ACCESS_TOKEN', 'PICOAIDE_CONNECTOR_REFRESH_TOKEN'] as const
+
+  /**
+   * The names a child of this server may EVER receive: what is injected now,
+   * the declared credential field names (a value may be stored later — the
+   * fingerprint pins the NAME set, not the values) and the framework's own keys.
+   */
+  const stdioDisclosureKeys = (env: Record<string, string>, credentialKeys: readonly string[]): string[] => {
+    const keys = new Set<string>(Object.keys(env))
+    for (const key of credentialKeys) keys.add(key)
+    for (const key of FRAMEWORK_STDIO_ENV_KEYS) keys.add(key)
+    if (process.versions.electron) keys.add('ELECTRON_RUN_AS_NODE')
+    return [...keys].sort()
+  }
+
+  /**
+   * Local-confirmation prompt for every stdio server of one connector.
+   *
+   * ONE answer approves every pending stdio server, so the prompt discloses
+   * every one of them (audit R3 N1): `commands` carries each server's own
+   * command/args/envKeys, `envKeys` is their UNION (an older single-answer UI
+   * that only renders the flat fields still sees every name), and `servers`
+   * lists them all.
+   *
+   * `envKeys` is the set of names the child may receive, not only the ones with
+   * a value right now (audit R3 N2): a declared-but-empty credential field can
+   * be filled in later, and that value is injected under the same fingerprint
+   * (the fingerprint pins the declared key NAMES, which is what a definition
+   * change moves). Disclosing the potential set is what keeps "shown at
+   * approval" = "ever injected" true.
+   */
   const checkStdioApproval = async (
     def: ConnectorDef,
     servers: ConnectorMcp[],
+    credential: ConnectorCredential | null,
   ): Promise<{ pending: ConnectorMcpApproval } | { denied: true } | null> => {
-    const unapproved: Array<{ server: ConnectorMcp; fingerprint: string; declared: Record<string, string> }> = []
+    const unapproved: Array<{
+      server: ConnectorMcp
+      fingerprint: string
+      command: string
+      args: string[]
+      envKeys: string[]
+    }> = []
     for (const server of servers) {
       // Shape problems are reported by the registration loop itself; the
       // approval gate only covers structurally usable entries.
       if (mcpServerProblem(server) !== null) continue
-      const { declared } = buildStdioEnv(def, server, null)
-      const fingerprint = stdioApprovalFingerprint(server.command ?? '', server.args ?? [], declared)
-      if (!(await approvals.isApproved(fingerprint))) unapproved.push({ server, fingerprint, declared })
+      const { declared, credentialKeys, env } = buildStdioEnv(def, server, credential)
+      const fingerprint = stdioApprovalFingerprint(server.command ?? '', server.args ?? [], declared, credentialKeys)
+      if (!(await approvals.isApproved(fingerprint))) {
+        unapproved.push({
+          server,
+          fingerprint,
+          command: server.command ?? '',
+          args: server.args ?? [],
+          envKeys: stdioDisclosureKeys(env, credentialKeys),
+        })
+      }
     }
     if (unapproved.length === 0) return null
     const first = unapproved[0]!
+    const unionKeys = [...new Set(unapproved.flatMap(item => item.envKeys))].sort()
     const prompt: ConnectorMcpApproval = {
       fingerprint: first.fingerprint,
-      command: first.server.command ?? '',
-      args: first.server.args ?? [],
-      envKeys: Object.keys(first.declared).sort(),
+      command: first.command,
+      args: first.args,
+      envKeys: unionKeys,
       servers: unapproved.map(item => item.server.serverName),
+      commands: unapproved.map(item => ({
+        serverName: item.server.serverName,
+        command: item.command,
+        args: item.args,
+        envKeys: item.envKeys,
+      })),
     }
     if (options.requestApproval !== undefined) {
       const granted = await options.requestApproval(prompt)
@@ -393,9 +487,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       for (const item of unapproved) {
         await approvals.approve({
           fingerprint: item.fingerprint,
-          command: item.server.command ?? '',
-          args: item.server.args ?? [],
-          envKeys: Object.keys(item.declared).sort(),
+          command: item.command,
+          args: item.args,
+          envKeys: item.envKeys,
         })
       }
       return null
@@ -403,7 +497,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // No headless hook: the request is answered through the local panel.
     const pending: PendingApproval = {
       ...prompt,
-      fingerprints: unapproved.map(item => item.fingerprint),
+      entries: unapproved.map(item => ({
+        fingerprint: item.fingerprint,
+        command: item.command,
+        args: item.args,
+        envKeys: item.envKeys,
+      })),
     }
     pendingApprovals.set(def.id, pending)
     emitRequest({ connectorId: def.id, approval: prompt })
@@ -415,7 +514,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const credential = await store.readCredential(def.id)
     const rejected: string[] = []
     const stdioServers = def.mcp.filter(server => (server.transport ?? 'stdio') === 'stdio')
-    const gate = await checkStdioApproval(def, stdioServers)
+    const gate = await checkStdioApproval(def, stdioServers, credential)
     if (gate !== null) {
       if ('denied' in gate) return { rejected: ['用户拒绝了本地执行确认，未启动本地命令'] }
       // Nothing is spawned while ANY stdio server of this connector is
@@ -423,11 +522,33 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // than a row that simply waits for the user's decision.
       return { pendingApproval: gate.pending, rejected }
     }
+    // N3: the streamable-http transport builds its own fetch inside
+    // `dsh-mcp-client`, so the redirect fence has to be in place on the SDK
+    // class BEFORE any such server is registered. Fail closed: when the seam
+    // cannot be fenced (or verified), these servers are refused instead of
+    // connecting with a transport that follows redirects.
+    const httpServers = def.mcp.filter(server =>
+      server.transport === 'streamable-http' && mcpServerProblem(server) === null)
+    let httpFenceError: string | null = null
+    if (httpServers.length > 0) {
+      try {
+        await ensureMcpTransportRedirectFence()
+      } catch (error) {
+        httpFenceError = error instanceof McpTransportFenceUnavailableError
+          ? error.message
+          : String(error)
+        ctx.logger?.error(`pico-connectors: ${def.id} streamable-http 传输未加固，已拒绝注册`, error)
+      }
+    }
     const { apply: applyMcpClient } = await import('@deepseek-ai/dsh-mcp-client')
     for (const server of def.mcp) {
       const problem = mcpServerProblem(server)
       if (problem !== null) {
         rejected.push(`${server?.serverName ?? '?'}: ${problem}`)
+        continue
+      }
+      if (server.transport === 'streamable-http' && httpFenceError !== null) {
+        rejected.push(`${server.serverName}: streamable-http 出站重定向栅栏不可用，拒绝连接（${httpFenceError}）`)
         continue
       }
       const config = server.transport === 'streamable-http'
@@ -768,12 +889,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       if (!def) return json(res, 404, { error: `unknown connector: ${id}` })
       const pending = pendingApprovals.get(id)
       if (pending === undefined) return json(res, 409, { error: 'no pending local approval' })
-      for (const fingerprint of pending.fingerprints) {
+      for (const entry of pending.entries) {
         await approvals.approve({
-          fingerprint,
-          command: pending.command,
-          args: pending.args,
-          envKeys: pending.envKeys,
+          fingerprint: entry.fingerprint,
+          command: entry.command,
+          args: entry.args,
+          envKeys: entry.envKeys,
         })
       }
       pendingApprovals.delete(id)

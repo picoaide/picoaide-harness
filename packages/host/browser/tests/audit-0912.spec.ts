@@ -274,11 +274,11 @@ describe('P0-A 快照不得回传注入的凭证密码', () => {
 
 // -------------------------------------------------- FIX-03 (2026-09-12)
 
-describe('FIX-03 browser_eval 不得把注入过的凭证读回模型', () => {
+describe('FIX-03 / R-4 注入过的凭证不得被读回模型', () => {
   // 同上：口令不含任何 secret 形状关键词 ⇒ 只有值级擦除能挡住。
   const SECRET = 'hunter2-xyz9-quartz'
 
-  it('runtime.eval 的返回值擦除本 tab 注入过的凭证值（P0-A 的等价信道）', async () => {
+  it('runtime.eval 在凭据窗口内整体被拒（P0-A 的等价信道被关闭，不是被擦除）', async () => {
     const { runtime, adapter, dir } = makeRuntime(async (id) => (id === 'corp-sso' ? { username: 'alice', password: SECRET } : null))
     opened.push({ runtime, dir })
     await runtime.open('https://login.example')
@@ -292,9 +292,16 @@ describe('FIX-03 browser_eval 不得把注入过的凭证读回模型', () => {
     }
     expect(await runtime.fillCredentials(1, 'corp-sso')).toEqual({ username: true, password: true })
 
-    const out = await runtime.eval(1, "document.querySelector('#pw').value")
-    expect(out).not.toContain(SECRET)
-    expect(out).toBe('"****"')
+    // R-4 (2026-09-13): 值级擦除被证伪（btoa/slice/跨 realm），窗口内一律拒绝。
+    const err = await runtime.eval(1, "document.querySelector('#pw').value").catch((e: unknown) => e)
+    expect((err as { code?: string }).code).toBe('policy')
+    expect(String((err as Error).message)).toMatch(/credential window/u)
+    // 一次都没下发到页面
+    const evalCommands = adapter.lastView().transport.commands.filter((command) => command.method === 'Runtime.evaluate')
+    expect(evalCommands.some((command) => String(command.params?.expression ?? '').includes('#pw'))).toBe(false)
+    // 文本出口（值级擦除仍在的那条路）不含口令
+    const text = await runtime.text(1, undefined)
+    expect(text).not.toContain(SECRET)
   })
 
   it('口令嵌在更大文本里也只擦该段（值级精确匹配，不误伤其它文本）', async () => {
@@ -308,7 +315,7 @@ describe('FIX-03 browser_eval 不得把注入过的凭证读回模型', () => {
       return { result: { value: `logged in as alice with ${SECRET} at 12:00` } }
     }
     await runtime.fillCredentials(1, 'corp-sso')
-    const out = await runtime.eval(1, 'document.body.innerText')
+    const out = await runtime.text(1, undefined)
     expect(out).not.toContain(SECRET)
     expect(out).toContain('logged in as alice with **** at 12:00')
   })
@@ -341,10 +348,14 @@ describe('FIX-03 browser_eval 不得把注入过的凭证读回模型', () => {
     const exec = { agent: undefined, signal: new AbortController().signal }
 
     await tools.get('browser_fill_credentials')!.execute({ connectorId: 'corp-sso' }, exec)
-    const evalTool = tools.get('browser_eval')!
-    const value = await evalTool.execute({ expression: "document.querySelector('#pw').value" }, exec)
-    const rendered = evalTool.output.render({}, value).map((part) => part.text).join('\n')
-
+    // eval 出口：窗口内直接拒绝，错误文本里也不能带出口令。
+    const evalError = await tools.get('browser_eval')!.execute({ expression: "document.querySelector('#pw').value" }, exec).catch((e: unknown) => e)
+    expect((evalError as { code?: string }).code).toBe('policy')
+    expect(String((evalError as Error).message)).not.toContain(SECRET)
+    // 文本出口：返回值与 render 文本都不含口令（纵深）。
+    const textTool = tools.get('browser_get_text')!
+    const value = await textTool.execute({}, exec)
+    const rendered = textTool.output.render({}, value).map((part) => part.text).join('\n')
     expect(JSON.stringify(value)).not.toContain(SECRET)
     expect(rendered).not.toContain(SECRET)
     expect(rendered).toContain('****')
@@ -419,14 +430,22 @@ describe('P1-5 op log 的 URL fragment 与 history 同款脱敏', () => {
 // ------------------------------------------------------------------- P1-7
 
 describe('P1-7 browser_eval(frame>0) 跑目标 frame 的默认世界', () => {
-  const FRAME_TREE = { frameTree: { frame: { id: 'MAIN' }, childFrames: [{ frame: { id: 'IFRAME-1' } }] } }
+  // R-4 (2026-09-13): `frame: N` 现在是"DOM 位置"。解析索引前 runtime 会先问每个
+  // 文档"你有几个 iframe/frame 属主、URL 是什么"（同源子帧必须能和
+  // Page.getFrameTree 的子帧一一对上），所以 fixture 的子帧要有 URL、DOM 探针
+  // 要回同样的 URL 列表——这正是真实 CDP 上的形状。
+  const FRAME_URL = 'https://pay.example/frame'
+  const FRAME_TREE = { frameTree: { frame: { id: 'MAIN' }, childFrames: [{ frame: { id: 'IFRAME-1', url: FRAME_URL } }] } }
+  const isDomProbe = (expression: unknown): boolean => String(expression ?? '').includes("querySelectorAll('iframe,frame')")
+  // 主文档有 1 个 iframe 属主；子帧文档里没有 iframe（真实形状）。
+  const domProbeValue = (params: Record<string, unknown> | undefined): string[] => (params?.['contextId'] === undefined ? [FRAME_URL] : [])
 
   it('frame 1 用默认世界 contextId 求值（页面 JS 全局可见），不建隔离世界', async () => {
     const { runtime, adapter, dir } = makeRuntime()
     opened.push({ runtime, dir })
     await runtime.open('https://a.example')
     const view = adapter.lastView()
-    view.transport.handler = (method) => {
+    view.transport.handler = (method, params) => {
       if (method === 'Page.getFrameTree') return FRAME_TREE
       if (method === 'Runtime.enable') {
         // 真实 CDP：enable 的响应与"既有 context"通知竞争，通知可能晚一拍。
@@ -437,12 +456,16 @@ describe('P1-7 browser_eval(frame>0) 跑目标 frame 的默认世界', () => {
         }, 5)
         return {}
       }
-      if (method === 'Runtime.evaluate') return { result: { value: 'FROM-IFRAME-SCRIPT' } }
+      if (method === 'Runtime.evaluate') {
+        if (isDomProbe(params?.expression)) return { result: { value: domProbeValue(params) } }
+        return { result: { value: 'FROM-IFRAME-SCRIPT' } }
+      }
       return {}
     }
 
     await expect(runtime.eval(1, 'window.__APP__.token', 1)).resolves.toBe('"FROM-IFRAME-SCRIPT"')
-    const evaluate = view.transport.commands.find((c) => c.method === 'Runtime.evaluate')
+    // 真正求值的那条（带 contextId 的那条），DOM 探针不算。
+    const evaluate = view.transport.commands.find((c) => c.method === 'Runtime.evaluate' && c.params?.contextId !== undefined)
     expect(evaluate?.params?.contextId).toBe(42)
     expect(view.transport.commands.map((c) => c.method)).not.toContain('Page.createIsolatedWorld')
   })
@@ -452,15 +475,19 @@ describe('P1-7 browser_eval(frame>0) 跑目标 frame 的默认世界', () => {
     opened.push({ runtime, dir })
     await runtime.open('https://a.example')
     const view = adapter.lastView()
-    view.transport.handler = (method) => {
+    view.transport.handler = (method, params) => {
       if (method === 'Page.getFrameTree') return FRAME_TREE
-      if (method === 'Runtime.evaluate') return { result: { value: 'SHOULD-NOT-RUN' } }
+      if (method === 'Runtime.evaluate') {
+        if (isDomProbe(params?.expression)) return { result: { value: domProbeValue(params) } }
+        return { result: { value: 'SHOULD-NOT-RUN' } }
+      }
       return {}
     }
     const err = await runtime.eval(1, 'window.__APP__', 1).catch((e: unknown) => e)
     expect((err as { code?: string }).code).toBe('not-found')
     expect(view.transport.commands.map((c) => c.method)).not.toContain('Page.createIsolatedWorld')
-    expect(view.transport.commands.map((c) => c.method)).not.toContain('Runtime.evaluate')
+    // 用户的表达式一次都没执行（只有 DOM 结构探针跑过）。
+    expect(view.transport.commands.filter((c) => c.method === 'Runtime.evaluate' && !isDomProbe(c.params?.expression))).toHaveLength(0)
   })
 
   it('frame 0 依旧不带 contextId（语义不变）', async () => {
@@ -475,11 +502,23 @@ describe('P1-7 browser_eval(frame>0) 跑目标 frame 的默认世界', () => {
     expect(view.transport.commands.map((c) => c.method)).not.toContain('Page.getFrameTree')
   })
 
-  it('frame 越界仍然报 not-found', async () => {
+  it('frame 越界仍然报 not-found（并报出真实帧数）', async () => {
     const { runtime, adapter, dir } = makeRuntime()
     opened.push({ runtime, dir })
     await runtime.open('https://a.example')
-    adapter.lastView().transport.handler = (method) => (method === 'Page.getFrameTree' ? FRAME_TREE : {})
+    const view = adapter.lastView()
+    view.transport.handler = (method, params) => {
+      if (method === 'Page.getFrameTree') return FRAME_TREE
+      if (method === 'Runtime.enable') {
+        setTimeout(() => {
+          view.transport.emitNotification('Runtime.executionContextCreated', { context: { id: 7, auxData: { frameId: 'MAIN', isDefault: true } } })
+          view.transport.emitNotification('Runtime.executionContextCreated', { context: { id: 42, auxData: { frameId: 'IFRAME-1', isDefault: true } } })
+        }, 5)
+        return {}
+      }
+      if (method === 'Runtime.evaluate' && isDomProbe(params?.expression)) return { result: { value: domProbeValue(params) } }
+      return {}
+    }
     const err = await runtime.eval(1, 'window.__APP__', 9).catch((e: unknown) => e)
     expect((err as { code?: string }).code).toBe('not-found')
     expect((err as Error).message).toContain('does not exist')

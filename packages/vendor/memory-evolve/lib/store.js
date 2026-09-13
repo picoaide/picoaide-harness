@@ -24,19 +24,84 @@
  */
 
 import { createHash } from 'node:crypto'
-import { getLocale, translate, STORE_DICT, STORE_TAIL_DICT } from './i18n.js'
+import { getLocale, translate, STORE_DICT, STORE_TAIL_DICT, SYNC_DICT } from './i18n.js'
 
 /** Translate through STORE_DICT in the active host locale. */
 const st = (key, params) => translate(STORE_DICT, key, params, getLocale())
 /** Translate through STORE_TAIL_DICT in the active host locale. */
 const stt = (key, params) => translate(STORE_TAIL_DICT, key, params, getLocale())
+/** Translate through SYNC_DICT in the active host locale. */
+const sxt = (key, params) => translate(SYNC_DICT, key, params, getLocale())
 import { spawnSync } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { closeSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { extractEntryId, genEntryId, legacyIdFor, stripEntryId } from './sync/entryid.js'
+import { assertSafeRepoTarget, isInsideRoot, isSymlinkFreeRepoTarget, openExclusiveSafe, removeCreatedFile, resolveSafeRepoTarget, writeFileAtomicSafe } from './sync/filesets.js'
 
 /** Entry delimiter, byte-compatible with Hermes MEMORY.md / USER.md. */
 export const ENTRY_DELIMITER = '\n§\n'
+
+/**
+ * 记忆落点安全断言（FIX-22 同源实现，2026-09-13）。
+ *
+ * store / todo / archive 的写回都是 `tmp + rename`：当**最终组件**是符号链接时
+ * rename 会替换链接本身（不穿透）；但当**祖先目录**是符号链接时（共享记忆分支
+ * 里一个 120000 条目即可让 checkout 把 `daily/` 或 `logs/` 变成指向仓库外的
+ * 链接），`dir/<file>.tmp.<pid>` 与 `dir/<file>` 都会被 OS 解析到仓库外，写盘
+ * 直接穿透——与 runSync 三路合并写回同一个机制、同一套断言。
+ *
+ * 行为收紧要登记：仓库内任何符号链接一律拒收（严格性换安全）。
+ *
+ * @param {string} rootDir - 记忆仓库根目录。
+ * @param {string} abs - 目标文件绝对路径。
+ * @returns {string | null} 安全落点；null = 拒收（符号链接 / 越出根目录）。
+ */
+export function safeStoreTarget(rootDir, abs) {
+  const rel = relative(resolve(rootDir), resolve(abs))
+  if (rel === '' || rel.startsWith('..')) return null
+  return resolveSafeRepoTarget(rootDir, rel.split(sep).join('/'))
+}
+
+/** 落点被拒时的统一异常（与 store.js 既有的 dsh-memory-evolve: 内部异常同款）。 */
+export function symlinkRefusedError(abs) {
+  return new Error(`dsh-memory-evolve: memory write target ${abs} sits under a symlink inside the memory repo (or escapes it) — write refused (symlinks inside the repo are always rejected; remove the symlink and retry)`)
+}
+
+/**
+ * 落点被拒时的**统一文案**（FIX-22 同源，2026-09-13 第四轮）。
+ *
+ * 与同步层共用**同一条** i18n 条目 `sync.symlinkRefused`（不新造第二套措辞，
+ * 且随宿主语言自动切换）：worker/repo 写回、归档轨读写、记忆锁、store/todo
+ * 读侧全部用这一份。`path` 用仓库相对路径（更可读），越界/无法相对化时回落
+ * 绝对路径。
+ *
+ * @param {string} rootDir - 记忆仓库根目录。
+ * @param {string} abs - 被拒的绝对落点。
+ * @returns {string} 面向用户/模型的拒绝文案。
+ */
+export function symlinkRefusedMessage(rootDir, abs) {
+  const root = resolve(rootDir)
+  const rel = relative(root, resolve(abs))
+  const shown = rel === '' || rel.startsWith('..') || isAbsolute(rel) ? abs : rel.split(sep).join('/')
+  return sxt('sync.symlinkRefused', { path: shown })
+}
+
+/**
+ * 读侧/锁侧的落点断言：**唯一实现**在 `sync/filesets.js`
+ * （`isSymlinkFreeRepoTarget`，与写侧的 resolveSafeRepoTarget /
+ * assertSafeRepoTarget 同一份逐层 lstat）。这里转出，供 todo.js 等同族模块
+ * 以同一条依赖路径取用，避免出现第二份实现。
+ */
+export { isSymlinkFreeRepoTarget }
+
+/**
+ * 原子写回原语（FIX-26 唯一实现）同样转出：todo.js 等模块走**同一条依赖
+ * 路径**取用（不各自 import，也不各自实现）。
+ */
+export { writeFileAtomicSafe }
+
+/** 字符串层包含性判定（记忆 Tab 区分"仓库内落点"与 DSH_HOME 的 AGENTS.md）。 */
+export { isInsideRoot }
 
 /** A lock file older than this is considered abandoned (stale). */
 const STALE_LOCK_MS = 10_000
@@ -269,6 +334,11 @@ export function splitEntryHead(entry, target) {
  */
 export function readProvenance(dir) {
   const p = join(dir, 'PROVENANCE')
+  // FIX-26 读侧断言（第六轮）：PROVENANCE 也在记忆仓库里（项目目录），共享分支
+  // 的 120000 条目同样能把它变成指向仓库外的链接——跟随读会把仓库外 JSON 当成
+  // 项目身份（displayName/projectId/tracks 都会被上层展示与判断）。被拒 → null
+  // （与"不存在/损坏"同一形状：该项目按未启用同步处理）。
+  if (!isSymlinkFreeRepoTarget(dir, p)) return null
   if (!existsSync(p)) return null
   try {
     return JSON.parse(readFileSync(p, 'utf8').trim())
@@ -433,36 +503,92 @@ export function isStaleLock(lockPath) {
 }
 
 /**
+ * 锁落点断言（FIX-22 同源，2026-09-13 第四轮）。
+ *
+ * `.memory.lock` 是**被跟踪名的近邻**——共享记忆分支里一个 120000 条目就能让
+ * checkout 在本机把它实体化成真符号链接（`init.defaultBranch` 那份 .gitignore
+ * 只防误加，防不住 `git add -f`）。此时 `openSync(lockPath, 'wx')` 对**已存在
+ * 的符号链接**恒返回 EEXIST，锁**永远**拿不到：必须立即 fail-loud，不能空转
+ * 5s 后抛"等锁超时"（那是持久 DoS + 误导，且 stale 分支里的
+ * `rmSync(lockPath)` 还会把仓库里被跟踪的那条 120000 条目删掉）。
+ *
+ * @param {string} rootDir - 断言用的仓库根（缺省 = dir 自身，只查叶子）。
+ * @param {string} dir - 取锁目录。
+ * @throws {Error} 锁落点是符号链接/越界时，带统一 i18n 文案抛出。
+ */
+export function assertLockTargetSafe(rootDir, dir) {
+  const lockPath = join(dir, '.memory.lock')
+  if (!isSymlinkFreeRepoTarget(rootDir, lockPath)) {
+    throw new Error(symlinkRefusedMessage(rootDir, lockPath))
+  }
+}
+
+/**
+ * 记忆写族的取锁入口（带仓库根）：先做锁落点断言（祖先符号链接/越界一律
+ * fail-loud），再走 withLock。MemoryStore / TodoStore / ArchiveStore 共用。
+ *
+ * @param {string} rootDir - 记忆仓库根目录。
+ * @param {string} dir - 取锁目录（记忆根 / daily / 项目目录）。
+ * @param {() => T} fn - 临界区。
+ * @returns {T} 临界区返回值。
+ * @template T
+ */
+export function withRepLock(rootDir, dir, fn) {
+  return withLock(dir, fn, rootDir)
+}
+
+/**
  * Acquire the directory lock exclusively (cross-process), run `fn`, release.
  * Reentrant within this process: a nested withLock on the same directory
  * proceeds directly (all mutations are synchronous, so the outer section is
  * still exclusive against other processes).
  * @param {string} dir - the directory whose lock to take.
  * @param {() => T} fn - the critical section.
+ * @param {string} [rootDir] - 记忆仓库根（给了就按仓库断言锁路径；缺省=dir 自身，
+ *   仍拒绝"锁文件本身是符号链接"的形态）。
  * @returns {T} the section's return value.
  * @template T
  */
-export function withLock(dir, fn) {
+export function withLock(dir, fn, rootDir) {
   if (heldLocks.has(dir)) return fn()
+  const root = rootDir ?? dir
+  // 锁落点断言（FIX-22 同源）：符号链接形态的锁拿不到也不会等待——立即拒。
+  assertLockTargetSafe(root, dir)
   const lockPath = join(dir, '.memory.lock')
   mkdirSync(dir, { recursive: true })
   const deadline = Date.now() + LOCK_TIMEOUT_MS
+  let lockStat = null
   for (;;) {
+    // 每轮重试前复检（FIX-26，第六轮）：等锁期间祖先目录可以被换成符号链接，
+    // 一次性断言覆盖不了 5s 的等待窗口。
+    assertLockTargetSafe(root, dir)
+    // FIX-26：锁文件同样走 O_EXCL + 打开后校验 + 按 fd 写入。原先
+    // `openSync(lockPath,'wx')` 之后按**路径**写锁内容，打开→写入之间祖先目录
+    // 被换成符号链接时锁 JSON 会落到仓库外（第五轮 4b/4c 实测 404,785 次里
+    // 2,028 次逃逸）。这里逃逸落点会被回收并 fail-loud。
+    const opened = openExclusiveSafe(root, lockPath, 'lock')
     let acquired = false
-    try {
-      const fd = openSync(lockPath, 'wx')
+    if (opened.ok === true) {
       try {
-        writeFileSync(lockPath, LOCK_JSON())
+        writeFileSync(opened.fd, LOCK_JSON()) // 按 fd 写入：关闭前不按路径解析
       } finally {
-        closeSync(fd)
+        closeSync(opened.fd)
       }
+      lockStat = opened.stat
       acquired = true
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error
+    } else if (opened.reason === 'unsafe') {
+      throw new Error(symlinkRefusedMessage(root, lockPath))
     }
     if (acquired) break
-    if (isStaleLock(lockPath)) rmSync(lockPath, { force: true })
+    if (isStaleLock(lockPath)) {
+      // 残留锁清理只对**真实文件**形态生效：路径不安全（符号链接/越界）时绝不
+      // rmSync——rmSync 对符号链接只删链接本身，会把仓库里被跟踪的那条 120000
+      // 条目从工作树里悄悄删掉。这种锁拿不到，由下方断言 fail-loud。
+      if (isSymlinkFreeRepoTarget(root, lockPath)) rmSync(lockPath, { force: true })
+    }
     if (Date.now() >= deadline) {
+      // 等待期间锁路径才被换成符号链接的竞态：超时前再断言一次，给准确文案
+      assertLockTargetSafe(root, dir)
       throw new Error('dsh-memory-evolve: timed out waiting for the memory lock')
     }
     sleep(LOCK_RETRY_MS)
@@ -472,7 +598,10 @@ export function withLock(dir, fn) {
     return fn()
   } finally {
     heldLocks.delete(dir)
-    rmSync(lockPath, { force: true })
+    // FIX-26：释放锁也只删**我们自己创建的那个 inode**。原先无条件
+    // `rmSync(lockPath)` 在祖先目录被换成符号链接的竞态里会删掉仓库外同名
+    // 文件，也会删掉仓库里被换成符号链接的那条被跟踪条目。
+    removeCreatedFile(lockPath, lockStat)
   }
 }
 
@@ -763,19 +892,27 @@ export class MemoryStore {
       // 跨日期查询：枚举 daily/ 目录中范围内的文件（按日期升序收集）
       const dir = join(this.dir, 'daily')
       let days = []
-      try {
-        days = readdirSync(dir)
-          .filter((name) => /^\d{4}-\d{2}-\d{2}\.md$/.test(name))
-          .map((name) => name.slice(0, 10))
-          .sort()
-      } catch {
-        days = [] // daily 目录尚不存在
+      // `daily` 目录本身是符号链接时不枚举（读侧同源断言；枚举会把仓库外
+      // 文件名当成本机日志名）
+      if (isSymlinkFreeRepoTarget(this.dir, dir)) {
+        try {
+          days = readdirSync(dir)
+            .filter((name) => /^\d{4}-\d{2}-\d{2}\.md$/.test(name))
+            .map((name) => name.slice(0, 10))
+            .sort()
+        } catch {
+          days = [] // daily 目录尚不存在
+        }
       }
       for (const day of days) {
         if ((since !== undefined && day < since) || (until !== undefined && day > until)) continue
+        // FIX-22 读侧断言（2026-09-13 第四轮）：逐日跨文件读同样不跟随符号链接
+        // （`daily` 目录或某个 `daily/<日期>.md` 是共享分支 120000 条目送来的链接）
+        const dayPath = join(dir, `${day}.md`)
+        if (!isSymlinkFreeRepoTarget(this.dir, dayPath)) continue
         let text
         try {
-          text = readFileSync(join(dir, `${day}.md`), 'utf8')
+          text = readFileSync(dayPath, 'utf8')
         } catch {
           continue
         }
@@ -810,9 +947,20 @@ export class MemoryStore {
     return rows.map((row) => row.text)
   }
 
-  /** Read the raw file; a missing file reads as an empty store. */
+  /**
+   * Read the raw file; a missing file reads as an empty store.
+   *
+   * FIX-22 读侧断言（2026-09-13 第四轮）：落点是符号链接/越界时**不读**
+   * （`refused` = 被拒的绝对路径）。跟随链接读的后果不是"多读一个文件"：
+   * `KEY.md` 被共享分支的 120000 条目变成指向仓库外的链接时，仓库外文件内容
+   * 会被当成项目关键记忆**注入上下文**。这里返回空文本而不是抛异常——本方法
+   * 同时服务每轮快照（抛异常会打断会话）；**破坏性操作**由 reload 转成
+   * fail-loud 的 {ok:false}（见各调用点）。
+   * @returns {{text: string, size: number, refused?: string}}
+   */
   readRaw(target, agent) {
     const path = this.pathOf(target, agent)
+    if (!isSymlinkFreeRepoTarget(this.dir, path)) return { text: '', size: 0, refused: path }
     try {
       return { text: readFileSync(path, 'utf8'), size: statSync(path).size }
     } catch (error) {
@@ -823,10 +971,12 @@ export class MemoryStore {
 
   /**
    * Reload one target under the caller's lock.
-   * @returns {{kind:'ok', entries: string[]} | {kind:'read-failed'} | {kind:'drift', backup: string}}
+   * @returns {{kind:'ok', entries: string[]} | {kind:'refused', path: string} | {kind:'read-failed'} | {kind:'drift', backup: string}}
    */
   reload(target, agent) {
-    const { text, size } = this.readRaw(target, agent)
+    const { text, size, refused } = this.readRaw(target, agent)
+    // 读侧被拒（符号链接/越界）：破坏性操作一律 fail-loud（同源文案）
+    if (refused !== undefined) return { kind: 'refused', path: refused }
     // Only a truly unreadable file is refused (non-empty size yet zero bytes
     // read back — e.g. a broken encoding). A whitespace-only file is a normal
     // empty store: rewriting it cannot wipe history.
@@ -838,12 +988,18 @@ export class MemoryStore {
     // "删一条 = 删全文"的不可恢复路径也不会重新打开。
     const entries = parseEntries(text)
     if (suspectedMergedEntries(entries)) {
-      const backup = `${this.pathOf(target, agent)}.bak.${Date.now()}`
+      const path = this.pathOf(target, agent)
+      const safe = safeStoreTarget(this.dir, path)
+      if (safe === null) return { kind: 'read-failed' }
+      const backup = `${safe}.bak.${Date.now()}`
       writeFileSync(backup, text)
       return { kind: 'drift', backup }
     }
     if (!isCanonical(text)) {
-      const backup = `${this.pathOf(target, agent)}.bak.${Date.now()}`
+      const path = this.pathOf(target, agent)
+      const safe = safeStoreTarget(this.dir, path)
+      if (safe === null) return { kind: 'read-failed' }
+      const backup = `${safe}.bak.${Date.now()}`
       writeFileSync(backup, text)
       return { kind: 'drift', backup }
     }
@@ -853,9 +1009,15 @@ export class MemoryStore {
   /** Atomically write entries to one target's file. */
   write(target, entries, agent) {
     const path = this.pathOf(target, agent)
-    const tmp = `${path}.tmp.${process.pid}`
-    writeFileSync(tmp, serializeEntries(entries))
-    renameSync(tmp, path)
+    // FIX-22 同源断言（2026-09-13）：祖先目录是符号链接时 tmp+rename 会整条
+    // 穿透到仓库外（`daily -> <仓库外>` 已实测写穿）——一律拒收，fail closed
+    const safe = safeStoreTarget(this.dir, path)
+    if (safe === null) throw symlinkRefusedError(path)
+    // FIX-26（2026-09-13 第六轮）：临时落点同样断言 + O_EXCL 按 fd 写入 +
+    // rename 前后复检——原先只断言 `safe`，`<safe>.tmp.<pid>` 被预置同名真符号
+    // 链接时 writeFileSync 会跟随链接写穿仓库外（第五轮 4a 实测 ok:true）。
+    const written = writeFileAtomicSafe(this.dir, safe, serializeEntries(entries))
+    if (written.ok !== true) throw symlinkRefusedError(written.refusedPath)
   }
 
   /**
@@ -865,10 +1027,11 @@ export class MemoryStore {
    * (rewriting it would wipe history). A whitespace-only file is a normal
    * empty store — only a file that exists with a size yet reads back as the
    * empty string is treated as unreadable.
-   * @returns {{kind:'ok', entries: string[]} | {kind:'read-failed'}}
+   * @returns {{kind:'ok', entries: string[]} | {kind:'refused', path: string} | {kind:'read-failed'}}
    */
   reloadForAppend(target, agent) {
-    const { text, size } = this.readRaw(target, agent)
+    const { text, size, refused } = this.readRaw(target, agent)
+    if (refused !== undefined) return { kind: 'refused', path: refused }
     if (text === '' && size > 0) return { kind: 'read-failed' }
     return { kind: 'ok', entries: parseEntries(text) }
   }
@@ -889,8 +1052,13 @@ export class MemoryStore {
       if (threat) return { ok: false, message: threat, target }
     }
     const stamped = this.stampEntry(target, text, agent)
-    return withLock(loc.dir, () => {
+    return withRepLock(this.dir, loc.dir, () => {
       const reload = this.reloadForAppend(target, agent)
+      // FIX-22 读侧断言（2026-09-13 第四轮）：落点是符号链接/越界 → fail-loud，
+      // 文案与同步层同一条 i18n（不新造第二套措辞）
+      if (reload.kind === 'refused') {
+        return { ok: false, message: symlinkRefusedMessage(this.dir, reload.path), target }
+      }
       if (reload.kind === 'read-failed') {
         return { ok: false, message: st('store.fileUnreadableWrite'), target }
       }
@@ -943,7 +1111,7 @@ export class MemoryStore {
       const threat = scanThreat(newContent)
       if (threat) return { ok: false, message: threat, target }
     }
-    return withLock(loc.dir, () => {
+    return withRepLock(this.dir, loc.dir, () => {
       const reload = this.reload(target, agent)
       if (reload.kind === 'drift') {
         return {
@@ -951,6 +1119,11 @@ export class MemoryStore {
           message: st('store.driftGuardWrite', { file: loc.file, backup: reload.backup }),
           target, backup: reload.backup,
         }
+      }
+      // FIX-22 读侧断言（2026-09-13 第四轮）：落点是符号链接/越界 → fail-loud，
+      // 文案与同步层同一条 i18n（不新造第二套措辞）
+      if (reload.kind === 'refused') {
+        return { ok: false, message: symlinkRefusedMessage(this.dir, reload.path), target }
       }
       if (reload.kind === 'read-failed') {
         return { ok: false, message: st('store.fileUnreadableWrite'), target }
@@ -1007,7 +1180,7 @@ export class MemoryStore {
     const loc = this.resolveTarget(target, agent)
     const oldText = String(match ?? '').trim()
     if (!oldText) return { ok: false, message: st('store.emptyMatch'), target }
-    return withLock(loc.dir, () => {
+    return withRepLock(this.dir, loc.dir, () => {
       const reload = this.reload(target, agent)
       if (reload.kind === 'drift') {
         return {
@@ -1015,6 +1188,11 @@ export class MemoryStore {
           message: st('store.driftGuardOp', { file: loc.file, backup: reload.backup }),
           target, backup: reload.backup,
         }
+      }
+      // FIX-22 读侧断言（2026-09-13 第四轮）：落点是符号链接/越界 → fail-loud，
+      // 文案与同步层同一条 i18n（不新造第二套措辞）
+      if (reload.kind === 'refused') {
+        return { ok: false, message: symlinkRefusedMessage(this.dir, reload.path), target }
       }
       if (reload.kind === 'read-failed') {
         return { ok: false, message: st('store.fileUnreadableWrite'), target }
@@ -1059,7 +1237,7 @@ export class MemoryStore {
     const loc = this.resolveTarget(target, agent)
     const oldText = String(match ?? '').trim()
     if (!oldText) return { ok: false, message: st('store.emptyMatch'), target }
-    return withLock(loc.dir, () => {
+    return withRepLock(this.dir, loc.dir, () => {
       const reload = this.reload(target, agent)
       if (reload.kind === 'drift') {
         return {
@@ -1067,6 +1245,10 @@ export class MemoryStore {
           message: st('store.driftGuardOp', { file: loc.file, backup: reload.backup }),
           target, backup: reload.backup,
         }
+      }
+      // FIX-22 读侧断言（2026-09-13 第四轮）：落点是符号链接/越界 → fail-loud
+      if (reload.kind === 'refused') {
+        return { ok: false, message: symlinkRefusedMessage(this.dir, reload.path), target }
       }
       if (reload.kind === 'read-failed') {
         return { ok: false, message: st('store.fileUnreadableOp'), target }
@@ -1100,7 +1282,7 @@ export class MemoryStore {
     const loc = this.resolveTarget(target, agent)
     const exact = String(entry ?? '').trim()
     if (!exact) return { ok: false, message: st('store.emptyEntry'), target }
-    return withLock(loc.dir, () => {
+    return withRepLock(this.dir, loc.dir, () => {
       const reload = this.reload(target, agent)
       if (reload.kind === 'drift') {
         return {
@@ -1108,6 +1290,10 @@ export class MemoryStore {
           message: st('store.driftGuardOp', { file: loc.file, backup: reload.backup }),
           target, backup: reload.backup,
         }
+      }
+      // FIX-22 读侧断言（2026-09-13 第四轮）：落点是符号链接/越界 → fail-loud
+      if (reload.kind === 'refused') {
+        return { ok: false, message: symlinkRefusedMessage(this.dir, reload.path), target }
       }
       if (reload.kind === 'read-failed') {
         return { ok: false, message: st('store.fileUnreadableOp'), target }
@@ -1136,7 +1322,7 @@ export class MemoryStore {
     const loc = this.resolveTarget(target, agent)
     const exact = String(entry ?? '').trim()
     if (!exact) return { ok: false, message: st('store.emptyEntry'), target }
-    return withLock(loc.dir, () => {
+    return withRepLock(this.dir, loc.dir, () => {
       const reload = this.reload(target, agent)
       if (reload.kind === 'drift') {
         return {
@@ -1144,6 +1330,11 @@ export class MemoryStore {
           message: st('store.driftGuardOp', { file: loc.file, backup: reload.backup }),
           target, backup: reload.backup,
         }
+      }
+      // FIX-22 读侧断言（2026-09-13 第四轮）：落点是符号链接/越界 → fail-loud，
+      // 文案与同步层同一条 i18n（不新造第二套措辞）
+      if (reload.kind === 'refused') {
+        return { ok: false, message: symlinkRefusedMessage(this.dir, reload.path), target }
       }
       if (reload.kind === 'read-failed') {
         return { ok: false, message: st('store.fileUnreadableWrite'), target }
@@ -1188,7 +1379,7 @@ export class MemoryStore {
       .map((b) => String(b).trim())
       .filter((b) => b.length > 0)
     const tag = list.length > 0 ? `[branch:${list.join(',')}] ` : ''
-    return withLock(loc.dir, () => {
+    return withRepLock(this.dir, loc.dir, () => {
       const reload = this.reload(target, agent)
       if (reload.kind === 'drift') {
         return {
@@ -1196,6 +1387,11 @@ export class MemoryStore {
           message: st('store.driftGuardOp', { file: loc.file, backup: reload.backup }),
           target, backup: reload.backup,
         }
+      }
+      // FIX-22 读侧断言（2026-09-13 第四轮）：落点是符号链接/越界 → fail-loud，
+      // 文案与同步层同一条 i18n（不新造第二套措辞）
+      if (reload.kind === 'refused') {
+        return { ok: false, message: symlinkRefusedMessage(this.dir, reload.path), target }
       }
       if (reload.kind === 'read-failed') {
         return { ok: false, message: st('store.fileUnreadableWrite'), target }
@@ -1247,7 +1443,7 @@ export class MemoryStore {
     if (target !== 'memory' && target !== 'user' && target !== 'key') {
       return { ok: false, message: stt('storetail.dshOnlyTrackLimit'), target }
     }
-    return withLock(loc.dir, () => {
+    return withRepLock(this.dir, loc.dir, () => {
       const reload = this.reload(target, agent)
       if (reload.kind === 'drift') {
         return {
@@ -1255,6 +1451,11 @@ export class MemoryStore {
           message: st('store.driftGuardOp', { file: loc.file, backup: reload.backup }),
           target, backup: reload.backup,
         }
+      }
+      // FIX-22 读侧断言（2026-09-13 第四轮）：落点是符号链接/越界 → fail-loud，
+      // 文案与同步层同一条 i18n（不新造第二套措辞）
+      if (reload.kind === 'refused') {
+        return { ok: false, message: symlinkRefusedMessage(this.dir, reload.path), target }
       }
       if (reload.kind === 'read-failed') {
         return { ok: false, message: st('store.fileUnreadableWrite'), target }
@@ -1307,7 +1508,7 @@ export class MemoryStore {
       const threat = scanThreat(newContent)
       if (threat) return { ok: false, message: threat, target }
     }
-    return withLock(loc.dir, () => {
+    return withRepLock(this.dir, loc.dir, () => {
       const reload = this.reload(target, agent)
       if (reload.kind === 'drift') {
         return {
@@ -1315,6 +1516,11 @@ export class MemoryStore {
           message: st('store.driftGuardWrite', { file: loc.file, backup: reload.backup }),
           target, backup: reload.backup,
         }
+      }
+      // FIX-22 读侧断言（2026-09-13 第四轮）：落点是符号链接/越界 → fail-loud，
+      // 文案与同步层同一条 i18n（不新造第二套措辞）
+      if (reload.kind === 'refused') {
+        return { ok: false, message: symlinkRefusedMessage(this.dir, reload.path), target }
       }
       if (reload.kind === 'read-failed') {
         return { ok: false, message: st('store.fileUnreadableWrite'), target }
@@ -1358,10 +1564,17 @@ export class SuggestionQueue {
    */
   constructor(file) {
     this.file = file
+    // 记忆仓库根：队列文件就在记忆根下（<memoryDir>/SUGGESTIONS.jsonl），
+    // 读侧/写侧的符号链接断言以它为基准（FIX-26，第六轮）。
+    this.dir = dirname(file)
   }
 
   /** Read all suggestions; a missing file reads as empty. */
   read() {
+    // FIX-26 读侧断言（与 ArchiveStore.entriesOf / memory-tab 同源）：落点是
+    // 符号链接/越界时不读——跟随链接会把仓库外文件内容当"建议"返回给 GUI
+    // （`GET /memory-evolve/api/suggestions` 是它的出口）。
+    if (!isSymlinkFreeRepoTarget(this.dir, this.file)) return []
     try {
       const text = readFileSync(this.file, 'utf8')
       return text
@@ -1376,10 +1589,10 @@ export class SuggestionQueue {
 
   /** Atomically write the full suggestion list. */
   write(entries) {
-    mkdirSync(dirname(this.file), { recursive: true })
-    const tmp = `${this.file}.tmp.${process.pid}`
-    writeFileSync(tmp, entries.map((entry) => JSON.stringify(entry)).join('\n') + (entries.length > 0 ? '\n' : ''))
-    renameSync(tmp, this.file)
+    mkdirSync(this.dir, { recursive: true })
+    // FIX-26：与 MemoryStore.write 同款（临时落点断言 + O_EXCL 按 fd 写 + rename 前后复检）
+    const written = writeFileAtomicSafe(this.dir, this.file, entries.map((entry) => JSON.stringify(entry)).join('\n') + (entries.length > 0 ? '\n' : ''))
+    if (written.ok !== true) throw symlinkRefusedError(written.refusedPath)
   }
 
   /** Append one suggestion under the directory lock. */
@@ -1448,10 +1661,44 @@ export class ArchiveStore {
     throw new Error(`dsh-memory-evolve: 无效的归档轨 "${target}"`)
   }
 
-  /** Read one archive track's entries; a missing file reads as empty. */
+  /**
+   * 归档落点的安全解析（FIX-22 同源，2026-09-13 第四轮）。
+   *
+   * 归档轨此前是**唯一没接断言**的记忆写回路径（第三轮复核 M-2）：共享记忆
+   * 分支里一个 120000 条目就能让 checkout 把 `KEY-archive.md` /
+   * `MEMORY-archive.md` 变成指向仓库外的真符号链接，归档的 tmp+rename 会把
+   * 链接**静默替换**成仓库内文件、内容 = 仓库外文件内容（读侧 readFileSync
+   * 跟随链接），随后的同步/push 就把仓库外内容搬上了共享分支。
+   *
+   * 与其它写路径共用**同一份**实现：`safeStoreTarget` →
+   * `sync/filesets.js` 的 `resolveSafeRepoTarget`（逐层 lstat + realpath
+   * 包含性 + 白名单外无例外）。
+   *
+   * @param {string} target - 归档轨（memory/user/key/todo-*）。
+   * @param {string} [cwd] - key 轨必需的会话工作目录。
+   * @returns {{path: string, safe: string} | {path: string, safe: null}}
+   *   原始落点与安全落点（safe=null 表示拒收）。
+   */
+  targetOf(target, cwd) {
+    const path = this.fileOf(target, cwd)
+    return { path, safe: safeStoreTarget(this.dir, path) }
+  }
+
+  /**
+   * Read one archive track's entries; a missing file reads as empty.
+   *
+   * 读侧断言（FIX-22 同源）：落点是符号链接/越界时**绝不读**——跟随链接读会
+   * 把仓库外文件内容当归档条目返回（记忆 Tab 展示 / 模型 `list archived` 都
+   * 是它的出口）。这里 fail-loud 抛错（调用方是工具/HTTP 出口，不是每轮快照，
+   * 静默空列表会掩盖攻击）。
+   *
+   * @throws {Error} 落点被拒时（文案 = sync.symlinkRefused 同一条 i18n）。
+   */
   entriesOf(target, cwd) {
+    const { path, safe } = this.targetOf(target, cwd)
+    if (safe === null) throw new Error(symlinkRefusedMessage(this.dir, path))
     try {
-      return parseEntries(readFileSync(this.fileOf(target, cwd), 'utf8'))
+      return parseEntries(readFileSync(safe, 'utf8'))
     } catch (error) {
       if (error.code === 'ENOENT') return []
       throw error
@@ -1479,24 +1726,80 @@ export class ArchiveStore {
     return dirname(this.fileOf(target, cwd))
   }
 
+  /**
+   * 三个写方法（append/remove/removeExact）的统一入口：**写前断言**
+   * （FIX-22 同源）+ 落点解析（只解析一次——key 轨的 projectDirResolver
+   * 会跑本地 git 查询，重复解析既浪费又可能拿到不同结果）。
+   *
+   * @param {string} target - 归档轨（memory/user/key/todo-*）。
+   * @param {string} [cwd] - key 轨必需的会话工作目录。
+   * @returns {{ok: true, path: string, safe: string} | {ok: false, message: string}}
+   *   `ok:false` = 落点是符号链接/越界，拒绝写入（fail-loud，不写盘）。
+   */
+  resolveWrite(target, cwd) {
+    const { path, safe } = this.targetOf(target, cwd)
+    if (safe === null) return this.refusedResult(path)
+    return { ok: true, path, safe }
+  }
+
+  /** 落点被拒的统一结果（TOCTOU 复检失败复用同一文案，不新造措辞）。 */
+  refusedResult(path) {
+    return { ok: false, message: symlinkRefusedMessage(this.dir, path) }
+  }
+
+  /**
+   * 锁/读侧异常 → 统一拒收结果（FIX-26，2026-09-13 第六轮）。
+   *
+   * 第五轮 4c(ii)：同一种"祖先目录被换成符号链接"的条件在 ArchiveStore 上有
+   * 两种失败形态——写前断言给出 `{ok:false}`，而取锁/读侧抛出的异常则**逃出**
+   * `append`（调用方 index.js / review.js 只判 `outcome.ok`，无 try/catch）。
+   * 这里把锁内抛出统一收敛为拒收结果（异常文案原样透传，不新造措辞），
+   * 使同一条件只有一种失败形态。
+   *
+   * 正常并发下的语义不变：取不到锁时仍是"等锁超时"报错（文案不变），只是
+   * 由抛异常改为 `{ok:false, message}` 返回。
+   */
+  lockRefused(error) {
+    return { ok: false, message: String(error?.message ?? error) }
+  }
+
+  /** ArchiveStore 三个写方法的统一临界区入口（锁异常 → 拒收结果）。 */
+  underWriteLock(lockDir, fn) {
+    try {
+      return withRepLock(this.dir, lockDir, fn)
+    } catch (error) {
+      return this.lockRefused(error)
+    }
+  }
+
   /** Append one entry under the directory lock (atomic write). */
   append(target, content, cwd) {
+    // 写前断言（第一层，FIX-22 同源）：落点是符号链接/越界 → 立即拒，绝不写
+    const plan = this.resolveWrite(target, cwd)
+    if (plan.ok !== true) return plan
     // 锁文件所在目录（key 归档=项目目录，与主轨写/合并互斥；全局归档=记忆根）
-    return withLock(this.archiveLockDir(target, cwd), () => {
+    return this.underWriteLock(this.archiveLockDir(target, cwd), () => {
       const entries = this.entriesOf(target, cwd)
       entries.push(content)
-      const path = this.fileOf(target, cwd)
-      const tmp = `${path}.tmp.${process.pid}`
-      mkdirSync(dirname(path), { recursive: true })
-      writeFileSync(tmp, serializeEntries(entries))
-      renameSync(tmp, path)
+      // 建目录本身也会穿透符号链接祖先：建目录前先复检（TOCTOU 第二层）
+      if (!assertSafeRepoTarget(this.dir, plan.safe)) return this.refusedResult(plan.path)
+      mkdirSync(dirname(plan.safe), { recursive: true })
+      // TOCTOU 复检（第二层，与 runSync/resolveConflict 同一份 assertSafeRepoTarget）：
+      // 校验与写盘之间另一进程可以把落点换成符号链接
+      if (!assertSafeRepoTarget(this.dir, plan.safe)) return this.refusedResult(plan.path)
+      // FIX-26：临时落点同样断言 + O_EXCL 按 fd 写入 + rename 前后复检
+      // （第五轮 4a：`<落点>.tmp.<pid>` 被预置真符号链接 → 写穿仓库外且返回 ok）
+      const written = writeFileAtomicSafe(this.dir, plan.safe, serializeEntries(entries))
+      if (written.ok !== true) return this.refusedResult(written.refusedPath)
       return { ok: true, total: entries.length }
     })
   }
 
   /** Remove the single entry containing the unique substring `match`. */
   remove(target, match, cwd) {
-    return withLock(this.archiveLockDir(target, cwd), () => {
+    const plan = this.resolveWrite(target, cwd)
+    if (plan.ok !== true) return plan
+    return this.underWriteLock(this.archiveLockDir(target, cwd), () => {
       const entries = this.entriesOf(target, cwd)
       const matches = entries.filter((entry) => entry.includes(match))
       if (matches.length === 0) return { ok: false, message: stt('storetail.archiveNoMatch', { match }) }
@@ -1504,18 +1807,22 @@ export class ArchiveStore {
         return { ok: false, message: stt('storetail.archiveMultiMatch', { match, count: matches.length }) }
       }
       const next = entries.filter((entry) => !entry.includes(match))
-      const path = this.fileOf(target, cwd)
-      const tmp = `${path}.tmp.${process.pid}`
-      writeFileSync(tmp, serializeEntries(next))
-      renameSync(tmp, path)
+      // 建目录本身也会穿透符号链接祖先：建目录前先复检（TOCTOU 第二层）
+      if (!assertSafeRepoTarget(this.dir, plan.safe)) return this.refusedResult(plan.path)
+      mkdirSync(dirname(plan.safe), { recursive: true })
+      if (!assertSafeRepoTarget(this.dir, plan.safe)) return this.refusedResult(plan.path)
+      const written = writeFileAtomicSafe(this.dir, plan.safe, serializeEntries(next))
+      if (written.ok !== true) return this.refusedResult(written.refusedPath)
       return { ok: true, removed: matches[0] }
     })
   }
 
   /** Remove the entry that EXACTLY equals `content` (whole-entry match). */
   removeExact(target, content, cwd) {
+    const plan = this.resolveWrite(target, cwd)
+    if (plan.ok !== true) return plan
     // 与 append/remove 同一锁域（P1-8；此前误用 this.dir → key 轨丢更新）
-    return withLock(this.archiveLockDir(target, cwd), () => {
+    return this.underWriteLock(this.archiveLockDir(target, cwd), () => {
       const entries = this.entriesOf(target, cwd)
       const index = entries.indexOf(content)
       if (index === -1) {
@@ -1523,10 +1830,12 @@ export class ArchiveStore {
       }
       const next = [...entries]
       next.splice(index, 1)
-      const path = this.fileOf(target, cwd)
-      const tmp = `${path}.tmp.${process.pid}`
-      writeFileSync(tmp, serializeEntries(next))
-      renameSync(tmp, path)
+      // 建目录本身也会穿透符号链接祖先：建目录前先复检（TOCTOU 第二层）
+      if (!assertSafeRepoTarget(this.dir, plan.safe)) return this.refusedResult(plan.path)
+      mkdirSync(dirname(plan.safe), { recursive: true })
+      if (!assertSafeRepoTarget(this.dir, plan.safe)) return this.refusedResult(plan.path)
+      const written = writeFileAtomicSafe(this.dir, plan.safe, serializeEntries(next))
+      if (written.ok !== true) return this.refusedResult(written.refusedPath)
       return { ok: true, removed: content }
     })
   }

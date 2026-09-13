@@ -477,7 +477,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_get_snapshot',
-    description: '[读取] List the numbered interactable elements of your tab (links, buttons, inputs, selects, textareas) plus page header info (url/title). Numbers are the targets for click/type/select/scroll. Password fields are listed (number/selector usable) but never expose their value: the text reads the field label or "(password field)".',
+    description: '[读取] List the numbered interactable elements of your tab (links, buttons, inputs, selects, textareas) plus page header info (url/title). Numbers are the targets for click/type/select/scroll. Password fields are listed (number/selector usable) but never expose their value: the text reads the field label or "(password field)". On a tab that received credentials through browser_fill_credentials, the injected values are masked (****) in the element text, url and title — VERBATIM occurrences only (a value the page transformed is not covered).',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
     },
@@ -517,13 +517,22 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       const elements = await runtime.snapshot(tabId, exec.signal)
       exec.signal.throwIfAborted()
       const state = runtime.tabState(tabId)
-      return { elements, url: state.url, title: state.title }
+      // R7（2026-09-13）P0：`selector` 由页面可控的 id/class 拼成（`el.id = password`
+      // 时就是 `#<口令>`），必须与 text 同口径做值级擦除，否则它是唯一还能逐字回传
+      // 口令的模型面出口。只擦模型看到的这一份：按编号点击走 `resolveTarget` 内部
+      // 的未擦除快照，交互不受影响（拿被擦除的 selector 当 CSS 选择器会失败，
+      // 属可接受代价）。
+      const safeElements = elements.map((element) => {
+        const selector = runtime.redactTabSecrets(tabId, element.selector)
+        return selector === element.selector ? element : { ...element, selector }
+      })
+      return { elements: safeElements, url: state.url, title: state.title }
     },
   }))
 
   register(defineTool({
     name: 'browser_get_text',
-    description: '[读取] Extract the visible text of your tab, or of one element (CSS selector). Bounded output.',
+    description: '[读取] Extract the visible text of your tab, or of one element (CSS selector). Bounded output. On a tab that received credentials through browser_fill_credentials, the injected values are masked (****) in the returned text for the rest of that tab\'s life — VERBATIM occurrences only: text the page derived from the value (base64, reversed, character-split, an image) is not covered, and this tool is not a security boundary against a hostile page.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       selector: { type: 'string', description: 'Optional CSS selector; without it the whole page text is returned.' },
@@ -548,7 +557,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_screenshot',
-    description: '[读取] Capture the visible page of your tab as a JPEG image. Use sparingly — snapshots and text are cheaper.',
+    description: '[读取] Capture the visible page of your tab as a JPEG image. Use sparingly — snapshots and text are cheaper. REFUSED on a tab inside the credential window (after browser_fill_credentials and before that tab navigates): a page can render an injected credential as text or a barcode, and no image redaction can undo that; the window ends on the next navigation of that tab.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
     },
@@ -648,11 +657,11 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_eval',
-    description: '[执行/请求] Evaluate one JavaScript expression in your tab and return its resolved value (promise results are awaited) — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests. A heuristic guardrail accepts a single expression and rejects statements/assignments plus eval/Function and DOM-write APIs; network requests (fetch/XHR/WebSocket) are allowed. It is a misuse guardrail, not a security boundary.',
+    description: '[执行/请求] Evaluate one JavaScript expression in your tab and return its resolved value (promise results are awaited) — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests. A heuristic guardrail accepts a single expression and rejects statements/assignments plus eval/Function and DOM-write APIs; network requests (fetch/XHR/WebSocket) are allowed on ordinary tabs. REFUSED on a tab inside the credential window (after browser_fill_credentials and before that tab navigates): while the injected credential is still in the page any read-back can be a channel, so there is no eval at all until the tab navigates — submit the form with browser_click instead. After that window closes eval works again and the returned value is masked against the values injected into that tab (verbatim occurrences only — a script that returns the value transformed is not covered). It is a misuse guardrail, not a security boundary.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
-      expression: { type: 'string', required: true, description: 'One expression (no statements/assignments; fetch/XHR/WebSocket allowed; eval/Function rejected). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
-      frame: { type: 'integer', description: 'Frame index (0 = main frame, default; 1 = first subframe…). The expression runs in that frame\'s own JavaScript world, exactly like frame 0 — page globals are visible.' },
+      expression: { type: 'string', required: true, description: 'One expression (no statements/assignments; fetch/XHR/WebSocket allowed except on credential tabs; eval/Function rejected). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
+      frame: { type: 'integer', description: 'Frame index in DOM order (0 = main frame, default; 1 = first iframe in the page, including cross-origin ones). The expression runs in that frame\'s own JavaScript world, exactly like frame 0 — page globals are visible. If the page contains a frame the index cannot map 1:1, the call fails with an explicit error instead of using a neighbouring frame.' },
     },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string' } } },
@@ -925,7 +934,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_fill_credentials',
-    description: '[控制] Fill the login form of your tab with credentials stored for a connector (shown to the user; never submitted automatically).',
+    description: '[控制] Fill the login form of your tab with credentials stored for a connector (shown to the user; never submitted automatically). IMPORTANT: this opens the tab\'s credential window — from now until that tab navigates, browser_eval and browser_screenshot are refused there (a value still in the page can be read back in ways no masking can undo). Read the page with browser_get_snapshot / browser_get_text, submit with browser_click, and eval/screenshots resume automatically on the next document. The injected value stays masked in every text exit of this tab for the rest of the tab\'s life (page text, titles, URLs, history, downloads) — VERBATIM occurrences only: a page that renders the value transformed (base64, reversed, character-split) is not covered by any value-level rule. Treat this as a bound on accidents, not on a hostile page.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       connectorId: { type: 'string', required: true, description: 'The connector id whose stored credentials to use.' },

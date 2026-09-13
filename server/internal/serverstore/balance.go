@@ -229,10 +229,16 @@ func settleUsageCostTx(tx *sql.Tx, usageID, userID int64, targetCost float64) er
 	}
 	// 条件更新在行锁下原子判定:已开通 且(扣减后不低于下限 或 本次为正值)。
 	// 差额为正(refund)时不受下限约束 —— 历史欠款账户的回补不能被下限卡住。
+	//
+	// `?::numeric` 是必需的(2026-09-13 审计 R3):裸 `? >= 0` 会让 PG 把该参数
+	// 推断成 int4,而这里传的是 float64 元金额 —— 单笔差额超过 2^31(约 21.4 亿)
+	// 时 pgx 直接编码失败(`unable to encode … into binary format for int4`),
+	// 结算整体报错(修好前是静默免费,现在是 503,但都不该发生)。显式 numeric
+	// 与 balance_money 同类型,金额口径不受影响。
 	var after float64
 	err := tx.QueryRow(`UPDATE users SET balance_money = balance_money + ?, updated_at = `+NowExpr()+`
 WHERE id = ? AND balance_activated_at IS NOT NULL
-  AND (balance_money + ? >= ? OR ? >= 0)
+  AND (balance_money + ? >= ? OR ?::numeric >= 0)
 RETURNING balance_money`, delta, userID, delta, -balanceFloorEpsilon, delta).Scan(&after)
 	if errors.Is(err, sql.ErrNoRows) {
 		// 0 行:区分「未开通余额账户」与「余额不足」。开通位一旦置位不会回退,
