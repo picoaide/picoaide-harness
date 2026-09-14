@@ -431,13 +431,30 @@ export function wrapEvalExpression(expression: string, options: { denyEgress?: b
   })()`
 }
 
+/**
+ * Value-level projection of one string on its way into the serialized result
+ * (F-5, 2026-09-13 round 2).
+ *
+ * The runtime passes its injected-credential redactor here so that the
+ * value-exact masking of {@link maskString} and the size caps below happen in
+ * the order that cannot leave a fragment: **project, then cut**. Before this,
+ * `maskString` sliced a >4 KB value at 4096 and `serializeEvalResult` sliced
+ * the serialized text at 8 KB, and the runtime's redactor only saw the result
+ * — a password straddling either cut came back as a plaintext head fragment.
+ */
+export type EvalValueProjection = (text: string) => string
+
 /** Redact secret-shaped string values inside an arbitrary JSON value (deep).
  * Values under secret-shaped KEYS are masked regardless of the value's own
- * text (a session id value need not contain the word "token"). */
-export function maskEvalResult(value: unknown, depth = 0): unknown {
+ * text (a session id value need not contain the word "token").
+ *
+ * `project` (F-5) runs on every string that survives the depth/width caps —
+ * values AND object keys, because a page-chosen key is page-controlled text
+ * too — BEFORE the 4 KB per-value cap (see {@link maskString}). */
+export function maskEvalResult(value: unknown, depth = 0, project?: EvalValueProjection): unknown {
   if (depth > MAX_EVAL_RESULT_DEPTH) return '[depth-limit]'
-  if (typeof value === 'string') return maskString(value)
-  if (Array.isArray(value)) return value.slice(0, 64).map((item) => maskEvalResult(item, depth + 1))
+  if (typeof value === 'string') return maskString(value, project)
+  if (Array.isArray(value)) return value.slice(0, 64).map((item) => maskEvalResult(item, depth + 1, project))
   if (typeof value === 'object' && value !== null) {
     const out: Record<string, unknown> = {}
     let count = 0
@@ -447,8 +464,11 @@ export function maskEvalResult(value: unknown, depth = 0): unknown {
       count++
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const inner = (value as Record<string, unknown>)[key]
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      out[key] = SECRET_VALUE.test(key) ? MASK : maskEvalResult(inner, depth + 1)
+      // The KEY is projected before it is cut away with the rest of the text
+      // (F-5): a page-chosen key longer than the serialized cap used to be
+      // truncated by `serializeEvalResult` with the credential still in it.
+      const safeKey = project === undefined ? key : project(key)
+      out[safeKey] = SECRET_VALUE.test(key) ? MASK : maskEvalResult(inner, depth + 1, project)
     }
     return out
   }
@@ -482,21 +502,30 @@ function looksLikeCookieString(value: string): boolean {
   return SESSION_COOKIE_NAME.test(first.slice(0, first.indexOf('=')))
 }
 
-function maskString(value: string): string {
+function maskString(value: string, project?: EvalValueProjection): string {
   if (value.length === 0) return value
   // Detect BEFORE truncating: a >4 KB value (a routine cookie jar, a long
   // response body) used to be sliced and returned with its credential in the
   // clear — the P1-18 cookie-shape detector never ran (2026-09-11 audit).
   if (SECRET_VALUE.test(value) && value.length >= 6) return MASK
   if (looksLikeCookieString(value)) return MASK
-  if (value.length > 4096) return `${value.slice(0, 4096)}…`
-  return value
+  // F-5 (2026-09-13 round 2): the caller's value-level projection runs BEFORE
+  // the cap. The other order (slice, then let `runtime.eval` redact the
+  // serialized text) left the head of a credential that straddled the cut in
+  // the clear, followed by `…` so the R7 tail backstop could not see it either.
+  const projected = project === undefined ? value : project(value)
+  if (projected.length > 4096) return `${projected.slice(0, 4096)}…`
+  return projected
 }
 
 /** Serialize an eval result: size + depth caps applied, secrets masked.
- * Never throws. */
-export function serializeEvalResult(value: unknown): string {
-  const masked = maskEvalResult(value)
+ * Never throws.
+ *
+ * `project` (F-5, 2026-09-13 round 2) is the caller's value-level projection,
+ * applied to every string value/key BEFORE the per-value and total caps, so a
+ * credential straddling a cut is masked instead of clipped into a fragment. */
+export function serializeEvalResult(value: unknown, project?: EvalValueProjection): string {
+  const masked = maskEvalResult(value, 0, project)
   let text: string
   try {
     text = JSON.stringify(masked, null, 0) ?? 'null'

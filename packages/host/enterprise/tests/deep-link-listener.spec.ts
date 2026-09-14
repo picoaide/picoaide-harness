@@ -39,9 +39,33 @@ function stubFetchOk() {
   })))
 }
 
+/**
+ * fetch 打桩 + **取证**:记录每次请求的 URL 与 Authorization 头。
+ *
+ * srvcore-1 的教训:旧单测用 `vi.stubGlobal('fetch', …恒 200…)` 把预验证这一步
+ * 一起替掉了,于是"token 被发往攻击者服务端"这条信道在测试里根本不存在 ——
+ * 测试自己写了 `server=https://evil.example`,却只断言 applied 为空。
+ * 断言必须落在"token 发去了哪里"上,而不是只落在本地状态上。
+ */
+function stubFetchCapturing() {
+  const calls: { url: string; authorization: string | null }[] = []
+  vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: { headers?: Record<string, string> }) => {
+    const headers = init?.headers ?? {}
+    calls.push({
+      url: String(input),
+      authorization: headers.Authorization ?? headers.authorization ?? null,
+    })
+    return new Response('{"user":{"username":"alice"}}', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }))
+  return calls
+}
+
 describe('installDeepLinkListener 会话切换防护 (F12)', () => {
-  it('已登录时拒绝把会话静默切换到另一台服务端', async () => {
-    stubFetchOk()
+  it('refuses a silent server switch and sends no token before the switch guard (srvcore-1)', async () => {
+    const calls = stubFetchCapturing()
     const { ctx, warns, fire } = stubCtx()
     const applied: Session[] = []
     installDeepLinkListener(ctx, (s) => applied.push(s), () => A, SCHEME)
@@ -49,6 +73,9 @@ describe('installDeepLinkListener 会话切换防护 (F12)', () => {
     await new Promise((r) => setTimeout(r, 30))
     expect(applied).toHaveLength(0)
     expect(warns.join(' ')).toContain('refused server switch')
+    // 关键:换端判定必须早于预验证 fetch —— 旧顺序先 fetch(带 `Bearer attacker`)
+    // 再判定,深链里的 token(服务端真实签发时就是员工的真 token)已经发出去了。
+    expect(calls).toEqual([])
     vi.unstubAllGlobals()
   })
 

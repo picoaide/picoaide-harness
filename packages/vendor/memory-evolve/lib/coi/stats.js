@@ -1,8 +1,8 @@
 /**
  * COI 用量统计 — 从任务仓库聚合各 COI 的调用次数与耗时。
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
 
 /** 适配器平均耗时统计文件名（coiDataDir 下）。 */
 export const ADAPTER_STATS_FILE = 'stats.json'
@@ -52,10 +52,8 @@ export function recordAdapterStats(file, adapterId, ms) {
     const bucket = (stats[adapterId] ??= { count: 0, totalMs: 0 })
     bucket.count += 1
     bucket.totalMs += Math.max(0, ms)
-    mkdirSync(dirname(file), { recursive: true })
-    const tmp = `${file}.tmp.${process.pid}`
-    writeFileSync(tmp, JSON.stringify(stats, null, 2) + '\n')
-    renameSync(tmp, file)
+    // FIX-27（2026-09-13）：自锚定安全原子写（tmp 落点同样断言 + O_EXCL）
+    writeFileAtomicSafeAt(file, JSON.stringify(stats, null, 2) + '\n')
   } catch {
     /* 统计写失败不影响任务 */
   }

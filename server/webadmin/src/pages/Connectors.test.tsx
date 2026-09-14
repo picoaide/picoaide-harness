@@ -195,3 +195,83 @@ describe('Connectors 连接器目录页', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// 审计 R7 webadmin-branding-2:连接器定义的编辑/导入都是**有损**的。
+//
+// 服务端把 definition 整列替换(serverstore.UpdateConnector),客户端
+// packages/host/connectors 也把 `settings` 当一等公民(决定是否弹预连接表单、
+// 参与 env 注入白名单),`icon` 等字段同理 —— 但本页表单只建模
+// authMode/auth/tokenFields/examples/mcp,编辑一次就把其余字段静默丢掉
+// (保存后无任何提示)。导入框走同一个 parseDefinition,同样有损。
+// 修法:表单未建模的顶层键与 auth 子键原样透传,保存/导入都保留。
+// ---------------------------------------------------------------------------
+describe('未建模字段透传(R7 branding-2)', () => {
+  const FULL = {
+    authMode: 'token',
+    tokenFields: [{ key: 'GLITCHTIP_TOKEN', label: 'Token', type: 'password', required: true }],
+    settings: [{ key: 'GLITCHTIP_BASE_URL', label: '服务地址', type: 'text' }],
+    icon: 'https://cdn.example.com/glitchtip.png',
+    futureKey: { nested: [1, 2, 3] },
+    examples: ['查询 issue'],
+    auth: { clientId: 'keep-me', customAuthKey: 'also-keep' },
+    mcp: [{ serverName: 'glitchtip', transport: 'stdio', command: 'npx', args: ['-y', 'glitchtip-mcp'] }],
+  }
+  const row = {
+    id: 'glitchtip', name: 'GlitchTip', description: '错误追踪', auth_mode: 'token',
+    definition: JSON.stringify(FULL), enabled: true,
+    updated_at: '2026-08-28T10:00:00+08:00', created_at: '2026-08-28T10:00:00+08:00',
+  }
+  // 取最后一次写请求里的 definition(服务端整列替换,PUT body 就是最终值)
+  function savedDefinition(method: 'POST' | 'PUT'): any {
+    const call = [...mockRequest.mock.calls].reverse().find(([p, init]) =>
+      init?.method === method && String(p).endsWith('/connectors') || (init?.method === method && String(p).endsWith('/connectors/glitchtip')))
+    return JSON.parse(JSON.parse(String(call?.[1]?.body)).definition)
+  }
+
+  beforeEach(() => {
+    mockRequest.mockReset()
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/server/admin/connectors') return { connectors: [row] }
+      return {}
+    })
+  })
+
+  it('编辑保存:未建模字段(settings/icon/未来键/未建模 auth 子键)原样保留', async () => {
+    render(<Connectors />)
+    await screen.findByText('GlitchTip')
+    fireEvent.click(screen.getAllByTitle('编辑')[0]!)
+    const nameInput = await screen.findByLabelText('名称')
+    fireEvent.change(nameInput, { target: { value: 'GlitchTip v2' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors/glitchtip', expect.objectContaining({ method: 'PUT' })))
+    const def = savedDefinition('PUT')
+    expect(def.settings).toEqual(FULL.settings)
+    expect(def.icon).toBe(FULL.icon)
+    expect(def.futureKey).toEqual(FULL.futureKey)
+    expect(def.auth.clientId).toBe('keep-me')
+    expect(def.auth.customAuthKey).toBe('also-keep')
+    // 建模字段照旧由表单决定
+    expect(def.tokenFields[0].key).toBe('GLITCHTIP_TOKEN')
+    expect(def.mcp[0].serverName).toBe('glitchtip')
+  })
+
+  it('JSON 导入:未建模字段同样保留(导入不是丢数据的旁路)', async () => {
+    render(<Connectors />)
+    await screen.findByText('GlitchTip')
+    fireEvent.click(screen.getByRole('button', { name: '新建连接器' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    fireEvent.change(dialog.getByLabelText('编号(不可改,客户端按 id 匹配凭证)'), { target: { value: 'glitchtip' } })
+    fireEvent.change(dialog.getByLabelText('名称'), { target: { value: 'GlitchTip' } })
+    fireEvent.click(dialog.getByRole('button', { name: '从 JSON 导入' }))
+    fireEvent.change(dialog.getByLabelText('JSON'), { target: { value: JSON.stringify(FULL) } })
+    fireEvent.click(dialog.getByRole('button', { name: '解析导入' }))
+    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/connectors', expect.objectContaining({ method: 'POST' })))
+    const def = savedDefinition('POST')
+    expect(def.settings).toEqual(FULL.settings)
+    expect(def.icon).toBe(FULL.icon)
+    expect(def.futureKey).toEqual(FULL.futureKey)
+    expect(def.auth.customAuthKey).toBe('also-keep')
+  })
+})

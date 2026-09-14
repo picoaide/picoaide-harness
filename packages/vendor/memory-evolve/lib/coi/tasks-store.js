@@ -6,9 +6,10 @@
  * 留档：任务输出增量追加到日志文件（上限 maxLogBytes，溢出截断并标记），
  * 历史任务可检索、可回看、可清理。
  */
-import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { translate, getLocale, COI2_DICT } from '../i18n.js'
+import { writeFileAtomicSafeAt, appendFileSafeAt } from '../sync/filesets.js'
 
 /** Translate through COI2_DICT in the active host locale. */
 const ctk2 = (key, params) => translate(COI2_DICT, key, params, getLocale())
@@ -46,10 +47,9 @@ export class TaskStore {
   }
 
   #save() {
-    mkdirSync(this.dir, { recursive: true })
-    const tmp = join(this.dir, `tasks.json.tmp.${process.pid}`)
-    writeFileSync(tmp, JSON.stringify(this.tasks, null, 2) + '\n')
-    renameSync(tmp, join(this.dir, 'tasks.json'))
+    // FIX-27（2026-09-13）：自锚定安全原子写（`tasks.json.tmp.<pid>` 同样
+    // 是可预置的写落点）
+    writeFileAtomicSafeAt(join(this.dir, 'tasks.json'), JSON.stringify(this.tasks, null, 2) + '\n')
   }
 
   /** 新建任务记录并落盘；返回带 id 的完整记录。 */
@@ -205,7 +205,7 @@ export class TaskStore {
         this.update(id, { logTruncated: true })
         return
       }
-      appendFileSync(path, text)
+      appendFileSafeAt(path, text)
       // 单次大块写入可能越过上限：标记截断（内容保留，后续不再追加）
       if (statSync(path).size > this.maxLogBytes) {
         this.update(id, { logTruncated: true })

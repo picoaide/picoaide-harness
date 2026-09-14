@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
@@ -168,10 +169,17 @@ func postLogin(t *testing.T, r http.Handler, username, password string) string {
 // browserLoginFlow 走一遍 OIDC/OpenID 登录:login→fakeIdP→callback。
 func browserLoginFlow(t *testing.T, r http.Handler, idp *fakeIDP, name string, api *API) string {
 	t.Helper()
-	// login(带 server 参数)
+	// login(带 server 参数)。
+	// srvcore-1(P0,2026-09-13):`?server=` 必须命中**服务端配置**声明的对外来源;
+	// R7-F3-N3(复核 2026-09-13)起请求 Host 不再参与判定,故这里为测试部署声明
+	// 对外地址(真实部署由 PICOAI_PUBLIC_BASE_URL 或 OIDC redirect_url 提供);
+	// 深链里仍必须带回该地址,下面照旧断言。
+	t.Setenv(clientrelease.PublicBaseURLEnv, "https://gw.example.com")
 	w := httptest.NewRecorder()
 	loginPath := "/api/client/v2/auth/" + name + "/login?server=https%3A%2F%2Fgw.example.com"
-	r.ServeHTTP(w, httptest.NewRequest("GET", loginPath, nil))
+	loginReq := httptest.NewRequest("GET", loginPath, nil)
+	loginReq.Host = "gw.example.com"
+	r.ServeHTTP(w, loginReq)
 	if w.Code != http.StatusFound {
 		t.Fatalf("%s login status = %d body=%s", name, w.Code, w.Body.String())
 	}

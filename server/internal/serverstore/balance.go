@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strconv"
 	"strings"
@@ -213,7 +214,17 @@ const balanceFloorEpsilon = 1e-9
 // 后终止),不得 log 后继续。执行者见 internal/llmgateway/balance_settlement.go
 // (isBalanceSettlementFailure / rejectBalanceSettlement /
 // abortBalanceSettlementStream),回归锁见 llmgateway/settlement_reject_test.go。
-func settleUsageCostTx(tx *sql.Tx, usageID, userID int64, targetCost float64) error {
+//
+// allowOverdraft(审计 r7 srvbill-1,P1)是**流式**路径的后付费语义:SSE 的
+// usage chunk 按协议出现在流的末尾,结算发生在**全部正文早已 Flush 给客户端**
+// 之后 —— 上面那条"余额不足就回滚整笔事务(含 usage 行)"对已交付的调用等于
+// 零落账零扣费,而闸门只看分位余额 > 0 ⇒ 同一请求可无限重复、上游持续真花钱。
+// 流式调用点因此传 true:不设余额下限,balance_money 允许走负,欠款如实写进
+// balance_ledger(账本不变量 I1 依然成立),随后 BalanceBlocked 用
+// QuantizeMoney(余额) <= 0 自然拦下该用户的**后续**请求。
+//
+// 非流式保持 false:响应体尚未交付,拒绝即可,不产生欠款(未交付 ⇒ 不欠款)。
+func settleUsageCostTx(tx *sql.Tx, usageID, userID int64, targetCost float64, allowOverdraft bool) error {
 	// P0-B(审计 2026-09-12):负的计费金额只能来自负 token / 异常定价,
 	// 绝不能变成 refund(delta = -targetCost > 0 → 余额凭空增加)。
 	if targetCost < 0 || math.IsNaN(targetCost) || math.IsInf(targetCost, 0) {
@@ -229,6 +240,7 @@ func settleUsageCostTx(tx *sql.Tx, usageID, userID int64, targetCost float64) er
 	}
 	// 条件更新在行锁下原子判定:已开通 且(扣减后不低于下限 或 本次为正值)。
 	// 差额为正(refund)时不受下限约束 —— 历史欠款账户的回补不能被下限卡住。
+	// allowOverdraft=true(流式:内容已交付)时**不设下限**,余额允许走负。
 	//
 	// `?::numeric` 是必需的(2026-09-13 审计 R3):裸 `? >= 0` 会让 PG 把该参数
 	// 推断成 int4,而这里传的是 float64 元金额 —— 单笔差额超过 2^31(约 21.4 亿)
@@ -236,13 +248,21 @@ func settleUsageCostTx(tx *sql.Tx, usageID, userID int64, targetCost float64) er
 	// 结算整体报错(修好前是静默免费,现在是 503,但都不该发生)。显式 numeric
 	// 与 balance_money 同类型,金额口径不受影响。
 	var after float64
-	err := tx.QueryRow(`UPDATE users SET balance_money = balance_money + ?, updated_at = `+NowExpr()+`
+	var err error
+	if allowOverdraft {
+		err = tx.QueryRow(`UPDATE users SET balance_money = balance_money + ?, updated_at = `+NowExpr()+`
+WHERE id = ? AND balance_activated_at IS NOT NULL
+RETURNING balance_money`, delta, userID).Scan(&after)
+	} else {
+		err = tx.QueryRow(`UPDATE users SET balance_money = balance_money + ?, updated_at = `+NowExpr()+`
 WHERE id = ? AND balance_activated_at IS NOT NULL
   AND (balance_money + ? >= ? OR ?::numeric >= 0)
 RETURNING balance_money`, delta, userID, delta, -balanceFloorEpsilon, delta).Scan(&after)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		// 0 行:区分「未开通余额账户」与「余额不足」。开通位一旦置位不会回退,
-		// 故这里的复检不存在竞态误判。
+		// 故这里的复检不存在竞态误判。(allowOverdraft 路径没有下限,0 行只可能
+		// 是未开通 —— 复检同样给出正确结论。)
 		var activated bool
 		qerr := tx.QueryRow(`SELECT balance_activated_at IS NOT NULL FROM users WHERE id = ?`, userID).Scan(&activated)
 		if errors.Is(qerr, sql.ErrNoRows) {
@@ -434,6 +454,14 @@ type GrantRun struct {
 	Granted int64   `json:"granted"` // 本次实际入账人数
 	Skipped int64   `json:"skipped"` // 本月已有锚而跳过的人数
 	Actor   string  `json:"actor"`
+
+	// CoverDebtUsers/CoverDebtAmount 是 **cover 模式**下本次被"抹平"的欠款
+	// (审计 r7 r7f1-6,P2):流式后付费允许余额走负,而 cover 月度发放会把
+	// 欠款直接重置成当月额度 ⇒ 欠款从账面上消失、账号每月重新武装。这两个
+	// 字段让"这个月抹掉了多少欠款"在管理端响应里可见(逐笔明细仍在
+	// balance_ledger 的 reset 流水里,这里给的是汇总)。
+	CoverDebtUsers  int64   `json:"cover_debt_users"`
+	CoverDebtAmount float64 `json:"cover_debt_amount"`
 }
 
 // GrantRunEmpty 供无候选/未配置时返回(便于 handler 统一响应形状)。
@@ -515,9 +543,18 @@ ON CONFLICT (user_id, month) DO NOTHING RETURNING user_id`, claimArgs...)
 		if end > len(claimed) {
 			end = len(claimed)
 		}
-		if err := grantBatchTx(tx, claimed[start:end], mode, amount, actor, month); err != nil {
-			return nil, err
+		coveredUsers, coveredDebt, gerr := grantBatchTx(tx, claimed[start:end], mode, amount, actor, month)
+		if gerr != nil {
+			return nil, gerr
 		}
+		run.CoverDebtUsers += coveredUsers
+		run.CoverDebtAmount = roundMicro(run.CoverDebtAmount + coveredDebt)
+	}
+	if run.CoverDebtUsers > 0 {
+		// 欠款可见性(审计 r7 r7f1-6,P2):流式后付费会把余额走负,cover 模式的
+		// 月度发放又把欠款抹平 —— 至少让"这个月抹掉了多少欠款"不再无声。
+		log.Printf("balance: cover grant cleared overdraft for %d user(s), total debt %.4f CNY (month=%s actor=%s)",
+			run.CoverDebtUsers, run.CoverDebtAmount, month, actor)
 	}
 
 	// 批次台账(affected = 本月累计已发放人数,幂等重算)。
@@ -534,7 +571,10 @@ ON CONFLICT (month) DO UPDATE SET affected = excluded.affected, mode = excluded.
 }
 
 // grantBatchTx 给一批用户入账(行锁 + 批量更新 + 批量流水)。
-func grantBatchTx(tx *sql.Tx, ids []int64, mode string, amount float64, actor, month string) error {
+//
+// 返回 (coveredUsers, coveredDebt):cover 模式下本次抹平的**欠款**(余额 < 0)
+// 人数与总额(正数)。add 模式恒为 0(r7 r7f1-6 的欠款可见性)。
+func grantBatchTx(tx *sql.Tx, ids []int64, mode string, amount float64, actor, month string) (coveredUsers int64, coveredDebt float64, err error) {
 	arg := pgInt64Array(ids)
 	reason := "月度发放"
 	if mode == BalanceModeCover {
@@ -544,7 +584,7 @@ func grantBatchTx(tx *sql.Tx, ids []int64, mode string, amount float64, actor, m
 		// 覆盖模式:先取旧余额,写 reset 流水(-旧余额),再置为新额度。
 		rows, err := tx.Query(`SELECT id, balance_money FROM users WHERE id = ANY(?::bigint[]) FOR UPDATE`, arg)
 		if err != nil {
-			return err
+			return 0, 0, err
 		}
 		var oldIDs []int64
 		var oldAmounts []float64
@@ -554,30 +594,34 @@ func grantBatchTx(tx *sql.Tx, ids []int64, mode string, amount float64, actor, m
 			var bal float64
 			if err := rows.Scan(&id, &bal); err != nil {
 				rows.Close()
-				return err
+				return 0, 0, err
 			}
 			oldByID[id] = bal
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			return err
+			return 0, 0, err
 		}
 		for _, id := range ids {
 			if old := roundMicro(oldByID[id]); old != 0 {
 				oldIDs = append(oldIDs, id)
 				oldAmounts = append(oldAmounts, -old)
+				if old < 0 {
+					coveredUsers++
+					coveredDebt = roundMicro(coveredDebt - old)
+				}
 			}
 		}
 		if _, err := tx.Exec(`UPDATE users SET balance_money = ?,
 balance_activated_at = COALESCE(balance_activated_at, `+NowExpr()+`), updated_at = `+NowExpr()+`
 WHERE id = ANY(?::bigint[])`, amount, arg); err != nil {
-			return err
+			return 0, 0, err
 		}
 		if len(oldIDs) > 0 {
 			if _, err := tx.Exec(`INSERT INTO balance_ledger (user_id, kind, amount, balance_after, reason, actor, month)
 SELECT u, ?, a, 0, ?, ?, ? FROM unnest(?::bigint[], ?::double precision[]) AS t(u, a)`,
 				LedgerKindReset, reason, actor, month, pgInt64Array(oldIDs), pgFloat64Array(oldAmounts)); err != nil {
-				return err
+				return 0, 0, err
 			}
 		}
 		// grant 流水(余额即 amount,balance_after = amount)。
@@ -588,7 +632,7 @@ SELECT u, ?, a, 0, ?, ?, ? FROM unnest(?::bigint[], ?::double precision[]) AS t(
 		_, err = tx.Exec(`INSERT INTO balance_ledger (user_id, kind, amount, balance_after, reason, actor, month)
 SELECT u, ?, a, ?, ?, ?, ? FROM unnest(?::bigint[], ?::double precision[]) AS t(u, a)`,
 			LedgerKindGrant, amount, reason, actor, month, arg, pgFloat64Array(amounts))
-		return err
+		return coveredUsers, coveredDebt, err
 	}
 
 	// add 模式:一条批量更新 + 一条批量流水(RETURNING 给出逐人 balance_after)。
@@ -596,7 +640,7 @@ SELECT u, ?, a, ?, ?, ?, ? FROM unnest(?::bigint[], ?::double precision[]) AS t(
 balance_activated_at = COALESCE(balance_activated_at, `+NowExpr()+`), updated_at = `+NowExpr()+`
 WHERE id = ANY(?::bigint[]) RETURNING id, balance_money`, amount, arg)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	var afterIDs []int64
 	var afterAmounts []float64
@@ -605,17 +649,17 @@ WHERE id = ANY(?::bigint[]) RETURNING id, balance_money`, amount, arg)
 		var bal float64
 		if err := rows.Scan(&id, &bal); err != nil {
 			rows.Close()
-			return err
+			return 0, 0, err
 		}
 		afterIDs = append(afterIDs, id)
 		afterAmounts = append(afterAmounts, bal)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return 0, 0, err
 	}
 	if len(afterIDs) == 0 {
-		return nil
+		return 0, 0, nil
 	}
 	grants := make([]float64, len(afterIDs))
 	for i := range grants {
@@ -624,7 +668,7 @@ WHERE id = ANY(?::bigint[]) RETURNING id, balance_money`, amount, arg)
 	_, err = tx.Exec(`INSERT INTO balance_ledger (user_id, kind, amount, balance_after, reason, actor, month)
 SELECT u, ?, a, b, ?, ?, ? FROM unnest(?::bigint[], ?::double precision[], ?::double precision[]) AS t(u, a, b)`,
 		LedgerKindGrant, reason, actor, month, pgInt64Array(afterIDs), pgFloat64Array(grants), pgFloat64Array(afterAmounts))
-	return err
+	return 0, 0, err
 }
 
 // GrantStatus 当月发放状态(管理端展示)。
@@ -760,6 +804,15 @@ type BalanceSummary struct {
 	Status     GrantStatus     `json:"status"`
 	Users      int64           `json:"users"`
 	Total      float64         `json:"total_balance"`
+
+	// OverdrawnUsers/OverdrawnDebt 是**欠款可见性**(审计 r7 r7f1-6,P2):
+	// 流式后付费允许余额走负(usage chunk 在流末尾,结算发生在正文交付之后),
+	// 而闸门只在请求入口看一次余额 ⇒ 同一瞬间在途的 N 个并发请求可以一起透支,
+	// 单次突发能把小额账户打到负几十元;cover 模式的月度发放又把这个欠款
+	// 直接重置成当月额度 ⇒ 账号每月重新武装。这里把"有多少人欠款、共欠多少"
+	// 暴露在管理端总览里(总额是正数口径的欠款额),不再只有逐笔流水可查。
+	OverdrawnUsers int64   `json:"overdrawn_users"`
+	OverdrawnDebt  float64 `json:"overdrawn_debt"`
 }
 
 // GetBalanceSummary 读取配置 + 发放状态 + 全员余额合计(输出 quantize 到分)。
@@ -785,5 +838,12 @@ WHERE status = 1 AND role = ?`, RoleUser).Scan(&out.Users, &out.Total); err != n
 		return nil, err
 	}
 	out.Total = QuantizeMoney(out.Total)
+	// 欠款(余额 < 0)单独聚合:欠款额按**正数**输出,与 total_balance 分开看。
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(-SUM(balance_money),0) FROM users
+WHERE status = 1 AND role = ? AND balance_money < 0`, RoleUser).
+		Scan(&out.OverdrawnUsers, &out.OverdrawnDebt); err != nil {
+		return nil, err
+	}
+	out.OverdrawnDebt = QuantizeMoney(out.OverdrawnDebt)
 	return out, nil
 }

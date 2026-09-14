@@ -21,7 +21,8 @@
  * 与 ImageBlock 机制——进程未重启时服务不存在，会如实报错提示换 path/url
  * 或重启后重试；path/url 来源无此依赖，随时可用。
  */
-import { mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, statSync } from 'node:fs'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
 import { basename, extname, join } from 'node:path'
 import { translate, getLocale, COI2_DICT } from '../i18n.js'
 
@@ -152,7 +153,12 @@ export async function resolveAttachments(attachments, { outputDir, tag, attachme
       } catch (error) {
         return { ok: false, message: ca2('coi2.attachDownloadFail', { n: i + 1, detail: error?.message ?? String(error) }) }
       }
-      writeFileSync(target, buffer)
+      try {
+        // NF-1 同族：附件落点同样过断言（预置同名链接即写穿附件目录外）
+        writeFileAtomicSafeAt(target, buffer)
+      } catch (error) {
+        return { ok: false, message: ca2('coi2.attachDownloadFail', { n: i + 1, detail: error?.message ?? String(error) }) }
+      }
       files.push({
         localPath: target,
         name: fileName ?? (basename(urlSrc.split('?')[0]) || `image-${i + 1}${extname(target)}`),
@@ -187,7 +193,11 @@ export async function resolveAttachments(attachments, { outputDir, tag, attachme
       const mediaType = stored?.ref?.mediaType ?? ref.mediaType
       const ext = `.${(mediaType.split('/')[1] ?? 'png').replace('jpeg', 'jpg')}`
       const target = join(outputDir, `${tag}-${i + 1}${ext}`)
-      writeFileSync(target, Buffer.from(data))
+      try {
+        writeFileAtomicSafeAt(target, Buffer.from(data))
+      } catch (error) {
+        return { ok: false, message: ca2('coi2.attachSessionReadFail', { n: i + 1, detail: error?.message ?? String(error) }) }
+      }
       files.push({
         localPath: target,
         name: fileName ?? ref.name ?? `image-${i + 1}${ext}`,

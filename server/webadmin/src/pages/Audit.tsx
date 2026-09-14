@@ -9,7 +9,19 @@ import { PageHeader } from '../components/page-header'
 import { EmptyState } from '../components/empty-state'
 import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
 import { Card } from '../components/ui/card'
+import { downloadCsv } from '../lib/csv'
+import { hasPermission } from '../lib/rbac'
 import { ScrollText, RefreshCw, Download } from 'lucide-react'
+
+/**
+ * 审计保留策略的写权限点(与服务端 `serverauth.PermAuditRetention` 对齐)。
+ *
+ * 刻意不在 `lib/rbac.ts` 的常量表里新增 export:本批次只拥有本文件,共享常量
+ * 由 rbac.ts 的所有者统一加(已写入 cross_batch_needs)。这里用字面量 + 本注释
+ * 钉住同一个字符串,值一旦漂移,服务端 RequirePermission 会 403 而测试用例
+ * (`Audit.test.tsx` 的 auditor 控制项缺席断言)会同时暴露。
+ */
+const PERM_AUDIT_RETENTION_WRITE = 'audit:retention:write'
 
 interface LogRow {
   id: number
@@ -112,6 +124,14 @@ export default function Audit() {
   const [retentionDays, setRetentionDays] = useState(180)
   const [retentionBusy, setRetentionBusy] = useState(false)
 
+  // 体验层能力判定(护栏在服务端 RequirePermission):
+  //   GET /audit/settings 只需 audit:read —— auditor 能读保留天数;
+  //   PUT /audit/settings 需 audit:retention:write —— **刻意不进 AuditorPermissions**
+  //   (serverauth/rbac.go),auditor 每次点「保存策略」都是 403。
+  // R7-RV-2 残留:此前输入框可编辑、按钮可点,与 App 的"所有修改已禁用"横幅
+  // 直接矛盾;这里改成只读展示 + 说明,导出 CSV / 筛选(audit:read)保持可用。
+  const canWriteRetention = hasPermission(PERM_AUDIT_RETENTION_WRITE)
+
   const load = useCallback(async (p: number, action: string, username: string) => {
     const current = ++loadSeq.current
     try {
@@ -161,21 +181,22 @@ export default function Audit() {
   const pages = Math.max(1, Math.ceil(total / 50))
 
   // CSV 导出(当前页数据; 轻量版 v3b, 不调服务端)
+  //
+  // R7 branding-4:这里原来手写 `"${v}"` 拼串 —— 没有公式注入转义也没有 BOM,
+  // 而审计行的 username/detail 来自**匿名可写**输入(登录失败即记录请求里的
+  // 用户名,服务端只限长度不校验字符集),导出后管理员在 Excel/LibreOffice
+  // 打开会执行以 = + - @ 开头的单元格。改用与用量中心同一份 lib/csv.ts。
   const exportCSV = () => {
     const header = ['id', 'username', 'action', 'detail', 'created_at']
-    const lines = [header.join(',')]
-    for (const l of logs) {
-      lines.push([l.id, l.username, l.action, l.detail, l.created_at].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
-    }
-    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `audit-${new Date().toISOString().slice(0, 10)}.csv`
-    a.click()
-    URL.revokeObjectURL(a.href)
+    downloadCsv(
+      `audit-${new Date().toISOString().slice(0, 10)}.csv`,
+      header,
+      logs.map((l) => [l.id, l.username, l.action, l.detail, l.created_at]),
+    )
   }
 
   const saveRetention = async () => {
+    if (!canWriteRetention) return
     if (retentionBusy) return
     if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650) {
       setError('保留天数必须是 1~3650 的整数')
@@ -223,12 +244,22 @@ export default function Audit() {
           className="h-8 w-28"
           aria-label="审计保留天数"
           value={retentionDays}
+          readOnly={!canWriteRetention}
+          disabled={!canWriteRetention}
           onChange={(e) => setRetentionDays(Number(e.target.value))}
         />
         <span className="text-xs text-muted-foreground">天(1~3650; 保存后立即清理更旧日志)</span>
-        <Button size="sm" variant="outline" disabled={retentionBusy} onClick={() => { void saveRetention() }}>
-          {retentionBusy ? '保存中…' : '保存策略'}
-        </Button>
+        {canWriteRetention ? (
+          <Button size="sm" variant="outline" disabled={retentionBusy} onClick={() => { void saveRetention() }}>
+            {retentionBusy ? '保存中…' : '保存策略'}
+          </Button>
+        ) : (
+          // 服务端 PUT /audit/settings 要 audit:retention:write(刻意不给 auditor):
+          // 只读角色看到的是数值 + 一句"为什么不能改",而不是一个注定 403 的按钮。
+          <span className="text-xs text-muted-foreground">
+            (当前账号只读:修改保留策略需要 audit:retention:write 权限)
+          </span>
+        )}
       </div>
       {/* M8: 筛选条 */}
       <div className="flex flex-wrap items-center gap-2">

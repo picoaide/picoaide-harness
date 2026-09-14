@@ -189,9 +189,38 @@ func GetAgentPresetByVersion(db *sql.DB, name, version string) (*AgentPreset, er
 	return &out, nil
 }
 
-// ListAgentPresets 管理端清单(status 为空 = 全部)。
+// orgAgentReleases 取组织渠道智能体的全部版本(排除软删)。
+//
+// 与技能侧 orgSkillReleases 同源(agentshare-2/N4):渠道过滤必须落在 DAO 层,
+// 否则任何新的消费者(如 internal/capabilities 的能力中心与审批队列)都会
+// 重新把市场渠道的行当成"组织共享"——第一轮只在 agentshare 的每个端点上
+// 加闸门,capabilities 这条同根因落点没人负责,市场下架(enabled=0)后仍以
+// source=org 出现在员工清单里。
+func orgAgentReleases(db *sql.DB, status string) ([]Release, error) {
+	all, err := ListReleasesByStatus(db, AppKindAgent, status)
+	if err != nil {
+		return nil, err
+	}
+	apps, err := ListApps(db, AppKindAgent, AppChannelOrg)
+	if err != nil {
+		return nil, err
+	}
+	org := map[string]bool{}
+	for _, a := range apps {
+		org[a.AppID] = true
+	}
+	out := []Release{}
+	for _, r := range all {
+		if org[r.AppID] {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// ListAgentPresets 管理端清单(status 为空 = 全部;仅组织渠道)。
 func ListAgentPresets(db *sql.DB, status string) ([]AgentPreset, error) {
-	list, err := ListReleasesByStatus(db, AppKindAgent, status)
+	list, err := orgAgentReleases(db, status)
 	if err != nil {
 		return nil, err
 	}
@@ -202,13 +231,16 @@ func ListAgentPresets(db *sql.DB, status string) ([]AgentPreset, error) {
 	return out, nil
 }
 
-// ListVisibleAgentPresets 员工可见清单:approved 且已授权 + 自己上传的全部状态。
+// ListVisibleAgentPresets 员工可见清单:approved 且已授权 + 自己上传的全部状态(仅组织渠道)。
 //
 // P2-1(审计 2026-09-13):App 级下架(apps.enabled=0)在员工面等同于不存在——
 // 此前只按状态 + 授权/作者过滤,管理员下架后员工仍能列出并下载。上架集合
 // 一次批量取回(EnabledAppIDs),不逐行查 apps。
+//
+// R7 agentshare-2:渠道过滤在 DAO 层(orgAgentReleases)完成——共享库只服务
+// channel=org,市场行不进员工清单(技能侧同层过滤)。
 func ListVisibleAgentPresets(db *sql.DB, author string, granted []string) ([]AgentPreset, error) {
-	list, err := ListReleasesByStatus(db, AppKindAgent, "")
+	list, err := orgAgentReleases(db, "")
 	if err != nil {
 		return nil, err
 	}

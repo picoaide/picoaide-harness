@@ -27,9 +27,11 @@
  *   guide         string   内置使用指南（markdown，GUI 可查看）
  *   testCmd       string[] 测试按钮执行命令（如 ["-p","只回答数字：1+1"]）
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { translate, getLocale, COI2_DICT } from '../i18n.js'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
+import { isSafeSkillName } from './skills-sync.js'
 
 /** Translate through COI2_DICT in the active host locale. */
 const cat2 = (key, params) => translate(COI2_DICT, key, params, getLocale())
@@ -228,8 +230,13 @@ export function validateAdapter(def) {
       throw new Error('image.mode=flag 时必须提供 image.flag（CLI 图片参数名，如 -i）')
     }
   }
+  // skillName 参与路径拼接（`join(skillDir, skillName, 'SKILL.md')`）——必须是
+  // kebab-case 白名单，否则 `../../../x` 可把技能读写落点带出技能库（NF-1 同族）。
   if (def.skillName !== undefined && (typeof def.skillName !== 'string' || def.skillName.trim() === '')) {
     throw new Error('skillName 必须是非空字符串')
+  }
+  if (def.skillName !== undefined && !isSafeSkillName(String(def.skillName).trim())) {
+    throw new Error('skillName 必须是小写字母数字连字符（kebab-case，如 my-cli-skill）')
   }
   if (def.useCase !== undefined && (typeof def.useCase !== 'string' || def.useCase.trim() === '')) {
     throw new Error('useCase 必须是非空字符串')
@@ -264,10 +271,8 @@ export class AdapterStore {
   }
 
   #save() {
-    mkdirSync(dirname(this.file), { recursive: true })
-    const tmp = `${this.file}.tmp.${process.pid}`
-    writeFileSync(tmp, JSON.stringify(this.custom, null, 2) + '\n')
-    renameSync(tmp, this.file)
+    // FIX-27（2026-09-13）：自锚定安全原子写（tmp 落点同样断言 + O_EXCL）
+    writeFileAtomicSafeAt(this.file, JSON.stringify(this.custom, null, 2) + '\n')
   }
 
   #rebuildIndex() {

@@ -13,6 +13,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { PageHeader } from '../../components/page-header'
 import { employeeCountText, fmtY, type UserInfo } from './common'
 import { fmtTokens } from '../../lib/format'
+import { PERM_USER_WRITE, hasPermission } from '../../lib/rbac'
 import { cn } from '../../lib/utils'
 import { Coins, Gift, Check, Loader2, Wallet, ScrollText } from 'lucide-react'
 
@@ -107,6 +108,14 @@ export default function UsageBalance() {
   const [searchParams] = useSearchParams()
   const presetUser = searchParams.get('user') ?? ''
 
+  // 体验层能力判定(护栏在服务端 RequirePermission):本页所有写操作 ——
+  // 发放策略 PUT /balance、补发 POST /balance/grant、单人调整
+  // POST /users/:id/balance —— 都要 user:write;读取(user:read)与流水
+  // (user:read)对 auditor 仍然开放。只读角色不再看到注定 403 的按钮/输入框
+  // (R7-RV-2 残留:此前 auditor 能看到"立即补发本月/保存/调整"并点进金额对话框,
+  // 每次点击都是 403,与 App 的"所有修改已禁用"横幅直接矛盾)。
+  const canWrite = hasPermission(PERM_USER_WRITE)
+
   const loadSummary = useCallback(async () => {
     try {
       const s: BalanceSummary = await request(`${ADMIN_API}/balance`)
@@ -148,14 +157,16 @@ export default function UsageBalance() {
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ?user= 预填后自动打开该用户的调整弹窗(用户管理页「余额」按钮跳转入口)
+  // ?user= 预填后自动打开该用户的调整弹窗(用户管理页「余额」按钮跳转入口)。
+  // 无 user:write 时不开:那个弹窗整体是写入口。
   useEffect(() => {
-    if (!presetUser || target || users.length === 0) return
+    if (!canWrite || !presetUser || target || users.length === 0) return
     const hit = users.find((u) => u.username.toLowerCase() === presetUser.toLowerCase())
     if (hit) openAdjust(hit)
   }, [users]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function saveSettings() {
+    if (!canWrite) return
     if (saving) return
     const n = draftAmount.trim() === '' ? 0 : Number(draftAmount)
     if (!Number.isFinite(n) || n < 0) { setError('每人每月额度必须是不小于 0 的数字'); return }
@@ -181,6 +192,7 @@ export default function UsageBalance() {
   }
 
   async function grantNow() {
+    if (!canWrite) return
     if (saving) return
     setSaving(true)
     setError('')
@@ -201,6 +213,7 @@ export default function UsageBalance() {
   }
 
   function openAdjust(u: UserInfo) {
+    if (!canWrite) return
     setTarget(u)
     setMode('add')
     setAmount('')
@@ -227,6 +240,7 @@ export default function UsageBalance() {
     : !Number.isNaN(parsed) && (mode === 'set' ? parsed >= 0 : parsed > 0) && (mode !== 'deduct' || (preview ?? -1) >= 0)
 
   async function saveAdjust() {
+    if (!canWrite) return
     if (!target || busy) return
     if (!valid) { setDialogErr(mode === 'deduct' ? '扣减金额不能超过当前余额' : '请输入有效金额'); return }
     setBusy(true)
@@ -272,6 +286,14 @@ export default function UsageBalance() {
       <PageHeader title="余额" desc="员工的账户余额与按月发放:余额是唯一的消费闸门,花完即停" />
       {error && <div className="text-sm text-destructive">{error}</div>}
       {notice && <div className="text-sm text-emerald-600">{notice}</div>}
+      {!canWrite && (
+        // 服务端:GET /balance 与 GET /users/:id/balance/ledger 只需 user:read,
+        // 写操作需 user:write。只读角色要看到"能看什么、不能做什么",而不是
+        // 一排点下去报 403 的写控件。
+        <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          当前账号为只读视图(无 user:write 权限):可查看发放策略、员工余额与余额流水,不能修改发放策略、补发本月或调整任何员工的余额。
+        </div>
+      )}
 
       {/* 发放策略:启用闸门 / 发放方式 / 每人额度 / 立即发放 */}
       <Card>
@@ -286,20 +308,22 @@ export default function UsageBalance() {
               </CardDescription>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={grantNow} disabled={saving || monthly <= 0}>
-              <Gift className="mr-1 h-4 w-4" />立即补发本月
-            </Button>
-            <Button onClick={saveSettings} disabled={saving}>
-              {saving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Check className="mr-1 h-4 w-4" />}保存
-            </Button>
-          </div>
+          {canWrite && (
+            <div className="flex items-center gap-2">
+              <Button variant="outline" onClick={grantNow} disabled={saving || monthly <= 0}>
+                <Gift className="mr-1 h-4 w-4" />立即补发本月
+              </Button>
+              <Button onClick={saveSettings} disabled={saving}>
+                {saving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Check className="mr-1 h-4 w-4" />}保存
+              </Button>
+            </div>
+          )}
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-3">
           <div className="rounded-md border p-3">
             <div className="flex items-center justify-between">
               <Label htmlFor="bal-enabled" className="text-sm font-medium">余额闸门</Label>
-              <Switch id="bal-enabled" checked={draftEnabled} onCheckedChange={setDraftEnabled} />
+              <Switch id="bal-enabled" checked={draftEnabled} disabled={!canWrite} onCheckedChange={setDraftEnabled} />
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
               {draftEnabled
@@ -310,13 +334,13 @@ export default function UsageBalance() {
           <div className="rounded-md border p-3">
             <div className="text-sm font-medium">发放方式</div>
             <div className="mt-2 grid grid-cols-2 gap-2">
-              <button type="button" onClick={() => setDraftMode('add')}
-                className={cn('rounded-md border p-2 text-left text-xs', draftMode === 'add' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50')}>
+              <button type="button" disabled={!canWrite} onClick={() => setDraftMode('add')}
+                className={cn('rounded-md border p-2 text-left text-xs', draftMode === 'add' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50', !canWrite && 'cursor-not-allowed opacity-60')}>
                 <div className="text-sm font-medium">累加</div>
                 <div className="text-muted-foreground">余额 + 月额度</div>
               </button>
-              <button type="button" onClick={() => setDraftMode('cover')}
-                className={cn('rounded-md border p-2 text-left text-xs', draftMode === 'cover' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50')}>
+              <button type="button" disabled={!canWrite} onClick={() => setDraftMode('cover')}
+                className={cn('rounded-md border p-2 text-left text-xs', draftMode === 'cover' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50', !canWrite && 'cursor-not-allowed opacity-60')}>
                 <div className="text-sm font-medium">覆盖</div>
                 <div className="text-muted-foreground">清零后重置为月额度</div>
               </button>
@@ -328,13 +352,16 @@ export default function UsageBalance() {
           <div className="rounded-md border p-3">
             <Label htmlFor="bal-amount" className="text-sm font-medium">每人每月额度(元)</Label>
             <Input id="bal-amount" className="mt-2" inputMode="decimal" placeholder="例如 100"
-              value={draftAmount} onChange={(e) => setDraftAmount(e.target.value)} />
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {[50, 100, 200, 500].map((v) => (
-                <Button key={v} type="button" size="sm" variant="outline" className="h-7 px-2 text-xs"
-                  onClick={() => setDraftAmount(String(v))}>¥{v}</Button>
-              ))}
-            </div>
+              value={draftAmount} readOnly={!canWrite} disabled={!canWrite}
+              onChange={(e) => setDraftAmount(e.target.value)} />
+            {canWrite && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {[50, 100, 200, 500].map((v) => (
+                  <Button key={v} type="button" size="sm" variant="outline" className="h-7 px-2 text-xs"
+                    onClick={() => setDraftAmount(String(v))}>¥{v}</Button>
+                ))}
+              </div>
+            )}
           </div>
         </CardContent>
         {st && (
@@ -398,9 +425,11 @@ export default function UsageBalance() {
                       <TableCell className="text-right tabular-nums text-muted-foreground">{fmtTokens(u.monthly_usage ?? 0)}</TableCell>
                       <TableCell>
                         <div className="flex gap-2">
-                          <Button size="sm" variant="outline" onClick={() => openAdjust(u)}>
-                            <Wallet className="mr-1 h-3.5 w-3.5" />调整
-                          </Button>
+                          {canWrite && (
+                            <Button size="sm" variant="outline" onClick={() => openAdjust(u)}>
+                              <Wallet className="mr-1 h-3.5 w-3.5" />调整
+                            </Button>
+                          )}
                           <Button size="sm" variant="ghost" onClick={() => void openLedger(u)}>
                             <ScrollText className="mr-1 h-3.5 w-3.5" />流水
                           </Button>
@@ -418,8 +447,8 @@ export default function UsageBalance() {
         </CardContent>
       </Card>
 
-      {/* 单人调整:充值 / 扣减 / 设为 / 清零 */}
-      <Dialog open={!!target} onOpenChange={(o) => { if (!o) setTarget(null) }}>
+      {/* 单人调整:充值 / 扣减 / 设为 / 清零 —— 无 user:write 时整个写入口不可达 */}
+      <Dialog open={canWrite && !!target} onOpenChange={(o) => { if (!o) setTarget(null) }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>调整余额 · {target?.username}</DialogTitle>

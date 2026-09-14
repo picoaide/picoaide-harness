@@ -2,6 +2,7 @@
 
 import { randomUUID } from 'node:crypto'
 import {
+  chmodSync,
   closeSync,
   constants,
   fstatSync,
@@ -22,6 +23,13 @@ import { collectSessionInventory, type SessionInventory } from './session-invent
 
 const DIAGNOSTIC_ARCHIVE = /^diagnostics-\d+(?:-[0-9a-f-]+)?\.zip$/u
 const MAX_DIAGNOSTIC_ARCHIVES = 3
+/**
+ * 诊断包是桌面产物里最敏感的一份（日志 + Crashpad 内存转储），权限必须与
+ * 本包其它私有状态（0600/0700）一致：`adm-zip` 的 `writeZip` 会显式
+ * `chmod(path, attr || 0o666)` —— 不传 `perm` 就是 0666，且**绕过 umask**。
+ */
+const DIAGNOSTIC_DIRECTORY_MODE = 0o700
+const DIAGNOSTIC_FILE_MODE = 0o600
 const SKIPPABLE_FILE_ERRORS = new Set(['EACCES', 'EBUSY', 'ELOOP', 'ENOENT', 'ENOTDIR', 'EPERM'])
 
 interface DiagnosticExportWorkerData {
@@ -151,7 +159,7 @@ async function createDiagnosticsArchive(data: DiagnosticExportWorkerData): Promi
     throw new Error('dsh-plugin-desktop: refusing linked log directory')
   }
   const outDir = join(data.userDataDir, 'diagnostics')
-  mkdirSync(outDir, { recursive: true })
+  mkdirSync(outDir, { recursive: true, mode: DIAGNOSTIC_DIRECTORY_MODE })
   const outputStats = lstatSync(outDir)
   if (outputStats.isSymbolicLink() || !outputStats.isDirectory()) {
     throw new Error('dsh-plugin-desktop: refusing linked diagnostics directory')
@@ -233,7 +241,10 @@ async function createDiagnosticsArchive(data: DiagnosticExportWorkerData): Promi
   const outPath = join(outDir, `diagnostics-${Date.now()}-${randomUUID()}.zip`)
   const temporaryPath = `${outPath}.tmp`
   try {
-    await zip.writeZipPromise(temporaryPath)
+    await zip.writeZipPromise(temporaryPath, { perm: DIAGNOSTIC_FILE_MODE })
+    // `perm` 已交给 adm-zip,但它是第三方实现(且这里是"给厂商的支持包",
+    // 值得兜底):落盘时按本包的私有文件口径再收紧一次。
+    chmodSync(temporaryPath, DIAGNOSTIC_FILE_MODE)
     renameSync(temporaryPath, outPath)
   } catch (cause) {
     try {

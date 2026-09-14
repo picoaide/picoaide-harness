@@ -3,12 +3,17 @@
  * SSE events. All three share one trust fence: a browser same-origin marker
  * plus the loopback socket/Host/origin-equality checks. No lenient CORS
  * headers are ever returned.
+ *
+ * R4-RV3a：`guard()` 只能挡裸 curl，自述边界就是"伪造 Origin 的 curl 也能过"。
+ * 因此写入面（`action`）在 `guard()` 之上再要一份 BrowserAuth 持有性证明
+ * （见 `write-proof.ts`）；读面（`state` / `events`）维持 `guard()`。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { HostCronService } from './host-service.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { parseActionEnvelope, CRON_API_PREFIX } from './protocol.ts'
+import { WRITE_PROOF_HINT, requireWriteProof, type ConnectionTrustFence, type WriteProofDeps } from './write-proof.ts'
 
 const ACTION_LIMIT = 64 * 1024
 const HEARTBEAT_MS = 15_000
@@ -33,10 +38,16 @@ async function readBody(req: IncomingMessage, limit: number): Promise<{ raw: str
 
 /**
  * Host-side collaborators of the routes. `permissions` returns the composed
- * permission-preset roster for request validation (FIX-17).
+ * permission-preset roster for request validation (FIX-17). `fence` supplies
+ * the BrowserAuth proof-of-possession source for write routes; a missing fence
+ * fails closed (503), never falls back to `guard()`.
  */
 export interface CronRouteOptions {
   permissions?: () => readonly string[]
+  /** 写面证明来源（`ctx.get('connection')`）；缺省 = 证明机制缺席 ⇒ 写面 503。 */
+  fence?: () => ConnectionTrustFence | undefined
+  /** 证明拒绝的插件日志。 */
+  warn?: (message: string) => void
 }
 
 export function makeCronRoutes(service: HostCronService, options: CronRouteOptions = {}): WebRoute[] {
@@ -44,6 +55,11 @@ export function makeCronRoutes(service: HostCronService, options: CronRouteOptio
     if (browserSameOriginMarker(req) && isLoopbackRequest(req)) return true
     json(res, 403, { ok: false, error: 'forbidden' })
     return false
+  }
+  const proofDeps: WriteProofDeps = {
+    fence: options.fence ?? ((): undefined => undefined),
+    label: 'pico-cron',
+    ...(options.warn === undefined ? {} : { warn: options.warn }),
   }
   const state: WebRoute = {
     kind: 'exact',
@@ -60,6 +76,12 @@ export function makeCronRoutes(service: HostCronService, options: CronRouteOptio
     handler: async (req, res): Promise<void> => {
       if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method-not-allowed' })
       if (!guard(req, res)) return
+      // R4-RV3a：拿不到持有性证明就不进校验/解析/service.apply——伪造头的本机
+      // 进程既写不了 ledger，也触发不了 run。
+      const proof = requireWriteProof(req, proofDeps)
+      if (!proof.ok) {
+        return json(res, proof.status, { ok: false, error: proof.error, hint: WRITE_PROOF_HINT })
+      }
       if (!(req.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
         return json(res, 415, { ok: false, error: 'json-required' })
       }

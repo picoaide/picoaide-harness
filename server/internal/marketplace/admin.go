@@ -216,8 +216,12 @@ func createSkillAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "名称必填")
 		return
 	}
-	if !util.SafePathSegment(req.Name) {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
+	// marketplace-9:登记与上传同一套名字口径(上传走 appstore.Publish 的
+	// skillmanifest.IsAppID)。此前只做 SafePathSegment,`My_Skill`/中文名
+	// 能登记成功却永远无法上传内容(releases=0/enabled=1,无硬删除入口)。
+	if !skillmanifest.IsAppID(req.Name) {
+		serverauth.WriteError(c, http.StatusBadRequest, skillmanifest.CodeInvalidAppID,
+			"技能名不合法:必须是小写 kebab-case(如 my-skill)")
 		return
 	}
 	// 0052:git 源模式已移除——创建只登记名称与元数据,内容一律由
@@ -381,6 +385,13 @@ func updateSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 
 func deleteSkillAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
+	// marketplace-8:市场端点只上下架市场渠道技能。org 渠道行此前被这里
+	// 置成 enabled=0(200),而智能体侧同请求是 404 —— 越渠道写 + 审计
+	// 记成 skill_disable。先断言渠道,再动 enabled。
+	if a, err := serverstore.GetApp(db, serverstore.AppKindSkill, name); err != nil || a.Channel != serverstore.AppChannelMarket {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+		return
+	}
 	// 下架 = 置 enabled=0(不删行,bootstrap 建议清单过滤)
 	if _, err := serverstore.SetSkillEnabled(db, name, false); err != nil {
 		if errors.Is(err, serverstore.ErrNotFound) {
@@ -398,6 +409,11 @@ func deleteSkillAdmin(c *gin.Context, db *sql.DB) {
 // enableSkillAdmin 重新上架技能(审计 A5-M1):enabled=1,恢复员工建议清单可见性。
 func enableSkillAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
+	// marketplace-8:同上,重新上架同样只作用于市场渠道行。
+	if a, err := serverstore.GetApp(db, serverstore.AppKindSkill, name); err != nil || a.Channel != serverstore.AppChannelMarket {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+		return
+	}
 	if _, err := serverstore.SetSkillEnabled(db, name, true); err != nil {
 		if errors.Is(err, serverstore.ErrNotFound) {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")

@@ -6,6 +6,8 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -136,11 +138,67 @@ func openPG(dsn string) (*sql.DB, error) {
 	// 2026-08-31 实测（100tok/s 长流 2000 并发）: 池 200 时流式回填风暴
 	// 打满池 -> database/sql 连接饥饿全站僵死(1490 goroutine 卡 waitForConn)。
 	// 上调 400 + 短 IdleTime 淘汰半死连接(僵死元凶是"坏连接占池位不可复用")。
-	db.SetMaxOpenConns(400)
+	//
+	// 2026-09-13(N-2③):400 是**愿望值**,而 PG 侧的硬上限是
+	// max_connections - superuser_reserved_connections(默认 100-3)。池超过
+	// 这个数时,database/sql 会真的去开第 N+1 条连接,PG 直接回
+	// "too many clients"——请求**报错而不是排队**,而拿到连接的那部分请求
+	// 也未必能推进。这里按服务端实际可授予量收紧(留 4 条给运维/迁移/其它
+	// 实例),并把连接获取失败变成排队;探测失败则回落到保守的 90。
+	db.SetMaxOpenConns(pgPoolMax(db))
 	db.SetMaxIdleConns(100)
 	db.SetConnMaxLifetime(30 * time.Minute)
 	db.SetConnMaxIdleTime(5 * time.Minute)
 	return db, nil
+}
+
+// pgPoolMaxWithProbe / pgPoolMaxWithoutProbe:pgPoolMax 的两个分支常量。
+const (
+	pgPoolMaxCeiling    = 400 // 历史愿望值(见 openPG 注释)
+	pgPoolMaxFallback   = 90  // 探测失败时的保守值(PG 默认 max_connections=100)
+	pgPoolReservedSlots = 4   // 留给运维连接/迁移/同库的其它实例
+)
+
+// pgPoolMax 返回应用连接池上限:min(400, 服务端可授予量, 显式覆盖)。
+// PICOAI_DB_MAX_OPEN_CONNS 可显式指定(多实例部署/托管 PG 时按实际配额下调)。
+func pgPoolMax(db *sql.DB) int {
+	max := pgPoolMaxCeiling
+	if usable, err := pgUsableConnections(db); err != nil {
+		log.Printf("serverstore: SHOW max_connections failed (%v); capping pool at %d", err, pgPoolMaxFallback)
+		max = pgPoolMaxFallback
+	} else if usable < max {
+		max = usable
+	}
+	if v := strings.TrimSpace(os.Getenv("PICOAI_DB_MAX_OPEN_CONNS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n < max {
+				max = n
+			}
+		} else {
+			log.Printf("serverstore: ignoring invalid PICOAI_DB_MAX_OPEN_CONNS=%q", v)
+		}
+	}
+	if max < 2 { // 发布路径的最小可用池:同一时刻 1 条连接即可,但 2 是安全地板
+		max = 2
+	}
+	return max
+}
+
+// pgUsableConnections 是 PG 实际能授予普通连接的条数(总连接数减去超级用户
+// 保留位与给运维留的余量)。
+func pgUsableConnections(db *sql.DB) (int, error) {
+	var maxConn, reserved int
+	if err := db.QueryRow(`SHOW max_connections`).Scan(&maxConn); err != nil {
+		return 0, err
+	}
+	if err := db.QueryRow(`SHOW superuser_reserved_connections`).Scan(&reserved); err != nil {
+		return 0, err
+	}
+	usable := maxConn - reserved - pgPoolReservedSlots
+	if usable < 2 {
+		usable = 2
+	}
+	return usable, nil
 }
 
 // ---------------------------------------------------------------------------

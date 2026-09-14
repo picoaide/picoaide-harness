@@ -46,6 +46,9 @@ func TestReportSkillCall(t *testing.T) {
 	if _, err := serverstore.AddSkill(db, &serverstore.Skill{Name: "codeql", Version: "1.0.0", Enabled: 1, Archive: []byte("pkg")}); err != nil {
 		t.Fatal(err)
 	}
+	// srvcore-2 起写侧复用读侧可见性(未授权技能 404 且不计数),
+	// 故先把 codeql 授权给 alice,再验证计数链路本身。
+	grantSkill(t, db, "codeql", "alice")
 	// 市场技能:name-only 上报命中。
 	w := post(r, token, "/api/client/v2/telemetry/skill-call", `{"name":"codeql"}`)
 	if w.Code != http.StatusOK {

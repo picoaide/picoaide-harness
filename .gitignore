@@ -33,6 +33,10 @@ packages/host/desktop/build/channel.json
 # 渠道构建专用的 electron-builder 配置(同样由打包脚本生成,含渠道名/appId/
 # 协议 scheme)。
 packages/host/desktop/build/channel-electron-builder.cjs
+# 第三方厂商 CLI 二进制(旧 prefetch-cli.mjs 的预取产物,每个约 10 MB × 8 个):
+# 预取脚本已在 90463530be 移除、`build/cli` 不再生成,但历史工作树里仍会残留
+# 这 96 MB —— 公开仓里 `git add -A` 会把它们连同再分发许可风险一起提交。
+packages/host/desktop/build/cli/
 # CI 渠道脚本的中间产物(scripts/ci-channels.sh 等本地跑时会产生)
 channels.list
 channels-context/

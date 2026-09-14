@@ -62,6 +62,22 @@ declare module '@deepseek-ai/cordis' {
 export const name = 'pico-connectors'
 export const inject = ['webServer']
 
+/**
+ * 上游 `connection` 服务（BrowserAuth 持有性检查）在本包内需要的**最小结构**。
+ *
+ * 与 `packages/host/enterprise/src/auth-gate.ts` 的 `ConnectionTrustFence` 同形：
+ * 只用到 `requestRejection`（Host/Origin 围栏 + `dsh-auth-*` cookie 验签），
+ * 结构类型 + 运行时存在性判断已足够，服务缺席时明确 fail-closed。
+ */
+interface ConnectionTrustFence {
+  /**
+   * Connection 的 Host/Origin 围栏 + BrowserAuth cookie 校验。
+   * @param request - 只用到 headers(Host / Cookie)。
+   * @returns 401/403 表示拒绝；undefined 表示通过。
+   */
+  requestRejection(request: { headers: IncomingMessage['headers'] }): 401 | 403 | undefined
+}
+
 export interface ConnectorsOptions {
   /** Extra connector definitions to register. */
   connectors?: ConnectorDef[]
@@ -80,6 +96,12 @@ export interface ConnectorsOptions {
    * programmatically — returning false denies the spawn.
    */
   requestApproval?: (request: ConnectorMcpApproval) => boolean | Promise<boolean>
+  /**
+   * Deadline for one connector outbound request (conn-1). Defaults to
+   * `OUTBOUND_REQUEST_TIMEOUT_MS` (30 s); tests inject a short value. Never
+   * fed from a connector definition.
+   */
+  outboundTimeoutMs?: number
 }
 
 type JsonHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void
@@ -260,11 +282,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   /**
    * Register one connector's MCP servers. `pendingApproval` means nothing was
    * spawned because a server-issued stdio command still needs local
-   * confirmation; `rejected` lists definitions/urls this plugin refuses.
+   * confirmation; `rejected` lists definitions/urls this plugin refuses;
+   * `superseded` means a teardown (logout / user switch) landed while the
+   * registration was awaiting and NOTHING else may be spawned for it.
    */
   interface McpRegistrationOutcome {
     pendingApproval?: ConnectorMcpApproval
     rejected: string[]
+    superseded?: boolean
   }
 
   /**
@@ -273,11 +298,25 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * misattribute one server's keys to another server's record).
    */
   interface PendingApproval extends ConnectorMcpApproval {
-    entries: Array<{ fingerprint: string; command: string; args: string[]; envKeys: string[] }>
+    entries: Array<{
+      fingerprint: string
+      command: string
+      args: string[]
+      envKeys: string[]
+      envValues: Record<string, string>
+    }>
   }
+
+  /**
+   * Aborted by `teardownAll` and replaced immediately after (conn-1): a
+   * registration that is already awaiting must stop spawning rather than
+   * resurrect the previous user's MCP servers after the teardown ran.
+   */
+  let teardownController = new AbortController()
 
   /** Drop all MCP registrations and reset in-memory state (user switch). */
   const teardownAll = async (): Promise<void> => {
+    teardownController.abort(new Error('用户已切换，连接器注册中止'))
     for (const dispose of mcpDisposers.values()) {
       try { dispose() } catch { /* teardown never throws */ }
     }
@@ -287,6 +326,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     pendingRequests.clear()
     pendingApprovals.clear()
     states.clear()
+    // A NEW controller for the tasks the new session enqueues: the signal above
+    // must stay aborted for everything that captured it.
+    teardownController = new AbortController()
   }
 
   /**
@@ -329,10 +371,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   // current server directory (defs are server-issued now).
   ctx.on('pico/session-changed', (next: unknown) => {
     void runLifecycle(async () => {
+      const epoch = lifecycleEpoch
       await teardownAll()
       await syncServerDefs()
       reconfigureUser()
-      if (next !== null) await restoreAll()
+      if (next !== null) await restoreAll(epoch)
     }).catch((cause: unknown) => {
       ctx.logger?.error('pico-connectors: session change handling failed', cause)
     })
@@ -424,6 +467,32 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /**
+   * The definition-supplied VALUE of every env pair a child will receive
+   * (conn-5, audit R7).
+   *
+   * The prompt used to disclose key NAMES only, and a name is not a decision:
+   * approving "run `git diff`" approved an opaque `GIT_EXTERNAL_DIFF` whose
+   * value shelled out (measured: the payload ran while the user only ever saw a
+   * harmless-looking command line). Showing the pair makes an unknown hook name
+   * judgeable.
+   *
+   * Scope is the definition's own `mcp[].env` (already sanitized) — that is the
+   * only channel where the SERVER picks both the name and the value. Values that
+   * come from the user's own credentials are deliberately not redisplayed (the
+   * framework's token keys are excluded for the same reason), and their NAMES
+   * stay in `envKeys`, which is what the fingerprint pins (audit R3 N2).
+   */
+  const stdioDisclosureValues = (declared: Record<string, string>): Record<string, string> => {
+    const values: Record<string, string> = {}
+    for (const [key, value] of Object.entries(declared)) {
+      if ((FRAMEWORK_STDIO_ENV_KEYS as readonly string[]).includes(key)) continue
+      if (key === 'ELECTRON_RUN_AS_NODE') continue
+      values[key] = value
+    }
+    return values
+  }
+
+  /**
    * Local-confirmation prompt for every stdio server of one connector.
    *
    * ONE answer approves every pending stdio server, so the prompt discloses
@@ -450,6 +519,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       command: string
       args: string[]
       envKeys: string[]
+      envValues: Record<string, string>
     }> = []
     for (const server of servers) {
       // Shape problems are reported by the registration loop itself; the
@@ -464,23 +534,27 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           command: server.command ?? '',
           args: server.args ?? [],
           envKeys: stdioDisclosureKeys(env, credentialKeys),
+          envValues: stdioDisclosureValues(declared),
         })
       }
     }
     if (unapproved.length === 0) return null
     const first = unapproved[0]!
     const unionKeys = [...new Set(unapproved.flatMap(item => item.envKeys))].sort()
+    const unionValues = Object.assign({}, ...unapproved.map(item => item.envValues)) as Record<string, string>
     const prompt: ConnectorMcpApproval = {
       fingerprint: first.fingerprint,
       command: first.command,
       args: first.args,
       envKeys: unionKeys,
+      envValues: unionValues,
       servers: unapproved.map(item => item.server.serverName),
       commands: unapproved.map(item => ({
         serverName: item.server.serverName,
         command: item.command,
         args: item.args,
         envKeys: item.envKeys,
+        envValues: item.envValues,
       })),
     }
     if (options.requestApproval !== undefined) {
@@ -504,6 +578,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         command: item.command,
         args: item.args,
         envKeys: item.envKeys,
+        envValues: item.envValues,
       })),
     }
     pendingApprovals.set(def.id, pending)
@@ -512,11 +587,21 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /** Register the connector's MCP servers through the mcp-client plugin. */
-  const registerMcp = async (def: ConnectorDef): Promise<McpRegistrationOutcome> => {
+  const registerMcp = async (
+    def: ConnectorDef,
+    outbound: { signal?: AbortSignal } = {},
+  ): Promise<McpRegistrationOutcome> => {
+    /** A teardown landed: spawn nothing more, let the caller unwind quietly. */
+    const superseded = (): boolean => outbound.signal?.aborted === true
+    // conn-1: a logout/user switch that lands while this registration is
+    // awaiting must not resurrect the previous user's MCP servers.
+    if (superseded()) return { rejected: [], superseded: true }
     const credential = await store.readCredential(def.id)
+    if (superseded()) return { rejected: [], superseded: true }
     const rejected: string[] = []
     const stdioServers = def.mcp.filter(server => (server.transport ?? 'stdio') === 'stdio')
     const gate = await checkStdioApproval(def, stdioServers, credential)
+    if (superseded()) return { rejected: [], superseded: true }
     if (gate !== null) {
       if ('denied' in gate) return { rejected: ['用户拒绝了本地执行确认，未启动本地命令'] }
       // Nothing is spawned while ANY stdio server of this connector is
@@ -550,7 +635,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       }
     }
     const { apply: applyMcpClient } = await import('@deepseek-ai/dsh-mcp-client')
+    if (superseded()) return { rejected: [], superseded: true }
     for (const server of def.mcp) {
+      if (superseded()) return { rejected: [], superseded: true }
       const problem = mcpServerProblem(server)
       if (problem !== null) {
         rejected.push(`${server?.serverName ?? '?'}: ${problem}`)
@@ -583,6 +670,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         { inject: ['tools'], apply: applyMcpClient, name: 'mcp-client' },
         config,
       )
+      // conn-1: a teardown may have landed WHILE this registration was
+      // starting. Retire the fiber it just created instead of recording it —
+      // otherwise the disposer would outlive the teardown that cleared the map
+      // (and nothing would ever dispose this one).
+      if (superseded()) {
+        try { void fiber?.dispose?.() } catch { /* teardown never throws */ }
+        return { rejected: [], superseded: true }
+      }
       // P2-23: re-registering the same server key must retire the previous
       // registration first — the old `set()` overwrote the disposer, leaving
       // the first fiber (and its tools) alive forever.
@@ -635,6 +730,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         signal: controller.signal,
         ...(existing?.fields ? { fields: existing.fields } : {}),
         ...(options.clientName === undefined ? {} : { clientName: options.clientName }),
+        ...(options.outboundTimeoutMs === undefined ? {} : { outboundTimeoutMs: options.outboundTimeoutMs }),
       })
       // Token-form flows finish on auth-submit; runAuth only emitted the fields.
       if (def.authMode === 'token') {
@@ -643,7 +739,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       }
       const current = await store.readCredential(id)
       await store.updateCredential(id, { ...current, ...patch })
-      const outcome = await registerMcp(def)
+      // conn-1: the flow may have been overtaken (logout / user switch) while
+      // the token round-trip was in flight — never register for a session that
+      // is already gone.
+      if (controller.signal.aborted) return
+      const outcome = await registerMcp(def, { signal: teardownController.signal })
+      if (outcome.superseded === true || controller.signal.aborted) return
       if (outcome.pendingApproval !== undefined) {
         // FIX-02: the credential is stored, but the server-issued stdio
         // command still needs a local decision — nothing was spawned and the
@@ -690,7 +791,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const current = await store.readCredential(id)
     await store.updateCredential(id, { fields: { ...(current?.fields ?? {}), ...fields } })
     if (def.authMode === 'token') {
-      const outcome = await registerMcp(def)
+      const outcome = await registerMcp(def, { signal: teardownController.signal })
+      if (outcome.superseded === true) return
       if (outcome.pendingApproval !== undefined) {
         setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
         return
@@ -724,17 +826,34 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     pendingApprovals.delete(id)
   }
 
-  /** Restore all connector MCP registrations for the CURRENT user. */
-  const restoreAll = async (): Promise<void> => {
+  /**
+   * Restore all connector MCP registrations for the CURRENT user.
+   *
+   * conn-1: every await in here can be overtaken by a logout/user switch, so
+   * the task's epoch is re-checked after every one of them — a restore that is
+   * no longer the newest transition must stop instead of registering (or
+   * reporting) anything for the previous user.
+   */
+  const restoreAll = async (epoch: number): Promise<void> => {
+    /** True once a NEWER lifecycle transition superseded this task. */
+    const stale = (): boolean => epoch !== lifecycleEpoch
     for (const def of defs) {
       try {
+        if (stale()) return
         const credential = await store.readCredential(def.id)
+        if (stale()) return
         if (!credential) continue
         // Refresh OAuth tokens before restoring, then register the MCP servers.
-        const refreshed = await refreshOAuthToken(def, credential)
+        const refreshed = await refreshOAuthToken(def, credential, {
+          signal: teardownController.signal,
+          ...(options.outboundTimeoutMs === undefined ? {} : { outboundTimeoutMs: options.outboundTimeoutMs }),
+        })
+        if (stale()) return
         const effective = refreshed ? await store.updateCredential(def.id, refreshed) : credential
+        if (stale()) return
         if (effective.accessToken) {
-          const outcome = await registerMcp(def)
+          const outcome = await registerMcp(def, { signal: teardownController.signal })
+          if (stale() || outcome.superseded === true) return
           if (outcome.pendingApproval !== undefined) {
             // FIX-02: an unapproved server-issued command never reaches spawn;
             // the row waits for the user's local decision.
@@ -748,6 +867,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           setState(def.id, { status: 'connected', everConnected: true })
         }
       } catch (error) {
+        if (stale()) return
         // A restore failure (network, missing dependency, MCP connect) must
         // not become an unhandled rejection: the host treats those as fatal
         // and exits the whole app. Surface it on the connector row instead.
@@ -763,6 +883,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // Supersede any queued/running lifecycle task: a restore that resolves
       // after teardown must not re-register MCP servers (P2-23).
       lifecycleEpoch++
+      // conn-1: …and a registration already awaiting must stop spawning.
+      teardownController.abort(new Error('插件卸载，连接器注册中止'))
       for (const dispose of mcpDisposers.values()) dispose()
       mcpDisposers.clear()
       // P0-1: teardown must abort any in-flight authorization flow — a
@@ -908,7 +1030,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       }
       pendingApprovals.delete(id)
       pendingRequests.delete(id)
-      const outcome = await registerMcp(def)
+      // conn-1: a teardown may have landed while the user was deciding — the
+      // captured signal stops the spawn instead of resurrecting the row.
+      const outcome = await registerMcp(def, { signal: teardownController.signal })
+      if (outcome.superseded === true) return json(res, 200, { ok: true })
       if (outcome.pendingApproval !== undefined) {
         setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
         return json(res, 409, { error: 'approval did not settle every pending command' })
@@ -941,6 +1066,52 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       return false
     }
 
+    /**
+     * R7-RV-3（第三轮）：`guard()` 之上再要一份持有性证明——口径与
+     * `packages/host/enterprise/src/auth-gate.ts` 的 r7c-6 逐条一致。
+     *
+     * `loopback.ts` 自述的边界就是"伪造 Origin 的 curl 也能过"：本机任意进程
+     * 伪造 `Origin`/`Host`/`Sec-Fetch-Site` 即可 `POST /api/pico/connectors/
+     * <id>/auth-submit` 把攻击者 token 写进**本地连接器凭据库**（实测落盘
+     * glitchtip.json，后续连接器出站就带攻击者凭据），或 `POST …/approve` 往
+     * `.mcp-approvals.json` 写入持久化的「允许在本机执行 <command> <args>」审批
+     * （跨重启生效，绕过本地命令必须用户确认的闸门）。
+     *
+     * 证明 = 上游 `connection` 服务的 BrowserAuth cookie（`dsh-auth-<authority>`：
+     * HttpOnly + SameSite=Strict + HMAC，只能由本进程服务、经 launch token 换票
+     * 的页面持有），直接复用 `connection.requestRejection()`，不新造机制。
+     * fence 缺席 ⇒ fail-closed 503（退回 `guard()` 等于把伪造 Origin 重新放进来）；
+     * 读面（GET，如 `/…/state` 状态轮询）维持 `guard()`。
+     */
+    const proofOfPossession = (req: IncomingMessage, res: ServerResponse): boolean => {
+      const fence = (ctx as unknown as { get?: (name: string) => unknown }).get?.('connection') as ConnectionTrustFence | undefined
+      if (fence === undefined || typeof fence.requestRejection !== 'function') {
+        ctx.logger?.warn?.('pico-connectors: connection service unavailable; refusing a local write (fail-closed)')
+        json(res, 503, {
+          error: 'browser session proof unavailable',
+          hint: 'reopen the application window from its launch URL',
+        })
+        return false
+      }
+      let rejection: 401 | 403 | undefined
+      try {
+        rejection = fence.requestRejection({ headers: req.headers })
+      } catch (err) {
+        // 校验器自身抛错 = 无法证明 ⇒ 按拒绝处理（不把异常泄漏成 500）。
+        ctx.logger?.warn?.(`pico-connectors: browser proof check failed (${err instanceof Error ? err.message : String(err)})`)
+        rejection = 403
+      }
+      if (rejection === undefined) return true
+      ctx.logger?.warn?.(`pico-connectors: refused a local write without browser proof (${String(rejection)})`)
+      json(res, 403, {
+        error: 'browser session proof required',
+        hint: 'reopen the application window from its launch URL',
+      })
+      return false
+    }
+    const requireWriteProof = (req: IncomingMessage, res: ServerResponse): boolean =>
+      req.method === 'GET' || proofOfPossession(req, res)
+
     const disposers = [
       ctx.webServer.register({ kind: 'exact', path: '/api/pico/connectors', handler: (req, res) => {
         if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
@@ -960,6 +1131,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           deny: exact(deny),
         }
         if (!guard(req, res)) return
+        // R7-RV-3：拿不到持有性证明就不进任何 handler（凭据/审批/handler 都不会
+        // 被执行）。GET 只服务 `state` 轮询，维持 guard()。
+        if (!requireWriteProof(req, res)) return
         const method = req.method ?? 'GET'
         const allowedMethods: Record<string, string> = {
           connect: 'POST',
@@ -989,8 +1163,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   // serialized lifecycle queue so a login that lands during boot supersedes
   // this restore instead of racing it.
   void runLifecycle(async () => {
+    const epoch = lifecycleEpoch
     await syncServerDefs()
-    await restoreAll()
+    await restoreAll(epoch)
   }).catch((cause: unknown) => {
     ctx.logger?.error('pico-connectors: initial restore failed', cause)
   })

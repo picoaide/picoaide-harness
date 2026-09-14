@@ -131,7 +131,7 @@ func TestR4ChatStreamCompletionOnlyUsageKeepsReportedValue(t *testing.T) {
 	}
 	// P0-1(审计 2026-09-13):prompt 侧未上报时必须按**客户端原始请求体**兜底
 	// 估算 —— 旧行为保持 0 让"关闭 usage 回报"变成一个请求体字段即可白嫖输入。
-	wantPrompt, _ := estimatePromptFallback(0, int64(len(reqBody)))
+	wantPrompt, _ := estimatePromptFallback(0, false, []byte(reqBody), 0)
 	if got.Prompt != wantPrompt {
 		t.Fatalf("prompt 侧兜底估算 = %d, want %d(客户端原始请求体 %d 字节 / 4)", got.Prompt, wantPrompt, len(reqBody))
 	}
@@ -190,7 +190,7 @@ func TestR4AnthropicStreamCompletionOnlyUsageKeepsReportedValue(t *testing.T) {
 	if got.Completion != 700 {
 		t.Fatalf("已上报的 output_tokens 被估算改写: %d, want 700", got.Completion)
 	}
-	wantPrompt, _ := estimatePromptFallback(0, int64(len(reqBody)))
+	wantPrompt, _ := estimatePromptFallback(0, false, []byte(reqBody), 0)
 	if got.Prompt != wantPrompt {
 		t.Fatalf("prompt 侧兜底估算 = %d, want %d", got.Prompt, wantPrompt)
 	}
@@ -237,7 +237,7 @@ func TestR4NonStreamMissingUsageStillBilled(t *testing.T) {
 			t.Logf("N2 %s: prompt=%d completion=%d cost=%.6f wantCompletion=%d balance=%.6f",
 				tc.name, got.Prompt, got.Completion, got.Cost, want, s.balance)
 			// P0-1:prompt 侧未上报 ⇒ 按客户端原始请求体兜底估算(非响应字节)
-			wantPrompt, _ := estimatePromptFallback(0, int64(len(reqBody)))
+			wantPrompt, _ := estimatePromptFallback(0, false, []byte(reqBody), 0)
 			if got.Prompt != wantPrompt {
 				t.Fatalf("prompt 侧兜底估算 = %d, want %d", got.Prompt, wantPrompt)
 			}
@@ -495,7 +495,7 @@ func TestR4UsageShapesNoDoubleCharge(t *testing.T) {
 			// P0-1:prompt 侧未上报(0/缺失/负值)时按客户端原始请求体兜底估算
 			wantPrompt := tc.wantPrompt
 			if wantPrompt == 0 {
-				wantPrompt, _ = estimatePromptFallback(0, int64(len(reqBody)))
+				wantPrompt, _ = estimatePromptFallback(0, false, []byte(reqBody), 0)
 			}
 			t.Logf("形态 %s: prompt=%d completion=%d cost=%.9f (want %d/%d) balance=%.6f",
 				tc.name, got.Prompt, got.Completion, got.Cost, wantPrompt, wantCompletion, s.balance)
@@ -537,7 +537,7 @@ func TestR4NegativeUsageCannotInflateCharge(t *testing.T) {
 	}
 	got := rows[0]
 	reqBody := `{"model":"r3-model","messages":[]}`
-	wantPrompt, _ := estimatePromptFallback(0, int64(len(reqBody)))
+	wantPrompt, _ := estimatePromptFallback(0, false, []byte(reqBody), 0)
 	max := float64(wantPrompt)*2/1e6 + float64(r4Estimate(len(body)))*8/1e6
 	t.Logf("负 token: prompt=%d completion=%d cost=%.9f 上限=%.9f balance=%.6f", got.Prompt, got.Completion, got.Cost, max, s.balance)
 	if got.Prompt != wantPrompt || got.Completion != r4Estimate(len(body)) {

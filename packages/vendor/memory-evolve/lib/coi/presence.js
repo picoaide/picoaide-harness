@@ -17,8 +17,9 @@
  * 成员仍能显示上次活动时间与状态，而不是全部退化成 unknown——
  * 真正的 unknown 只表示"这个会话从未在当前进程活跃过"。
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
 
 /** 事件后防抖写盘间隔（ms）：status 切换频繁，没必要每次事件都写盘。 */
 const SAVE_DEBOUNCE_MS = 2000
@@ -110,14 +111,14 @@ export class PresenceTracker {
     this.saveTimer.unref?.()
   }
 
-  /** 原子写盘（tmp + rename；失败只告警不影响内存状态）。 */
+  /**
+   * 原子写盘（FIX-27：自锚定安全原子写——tmp 落点同样断言 + O_EXCL；
+   * 失败只告警不影响内存状态）。
+   */
   _save() {
     if (!this.storageFile) return
     try {
-      mkdirSync(dirname(this.storageFile), { recursive: true })
-      const tmp = `${this.storageFile}.tmp.${process.pid}`
-      writeFileSync(tmp, JSON.stringify(Object.fromEntries(this.agents)) + '\n')
-      renameSync(tmp, this.storageFile)
+      writeFileAtomicSafeAt(this.storageFile, JSON.stringify(Object.fromEntries(this.agents)) + '\n')
     } catch (error) {
       console.warn(`[dsh-memory-evolve] presence 保存失败（忽略）: ${error.message}`)
     }

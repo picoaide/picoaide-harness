@@ -18,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
@@ -405,9 +406,15 @@ func TestOIDCLoginServerParam(t *testing.T) {
 	r := gin.New()
 	api.RegisterRoutes(r)
 
-	// 带 server 参数发起 login
+	// 带 server 参数发起 login。
+	// srvcore-1(P0,2026-09-13):`?server=` 必须命中**服务端配置**声明的对外来源
+	// (否则 400)。R7-F3-N3(复核 2026-09-13)起不再把请求 Host 当作来源证明,
+	// 故这里显式声明部署的对外地址 —— 这正是单域名/反代部署里运维配的那一项。
+	t.Setenv(clientrelease.PublicBaseURLEnv, "https://server.example.com")
+	loginReq := httptest.NewRequest("GET", "/api/client/v2/auth/oidc/login?server=https%3A%2F%2Fserver.example.com", nil)
+	loginReq.Host = "server.example.com"
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/client/v2/auth/oidc/login?server=https%3A%2F%2Fserver.example.com", nil))
+	r.ServeHTTP(w, loginReq)
 	if w.Code != http.StatusFound {
 		t.Fatalf("login status = %d body=%s", w.Code, w.Body.String())
 	}

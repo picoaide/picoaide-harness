@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -126,18 +127,40 @@ func setup(t *testing.T) (http.Handler, *sql.DB, map[string]string, map[string]s
 	RegisterAdminRoutes(r, db, cacheDir)
 
 	// Admin login (session + CSRF).
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/server/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
-	req.Header.Set("Content-Type", "application/json")
-	r.ServeHTTP(w, req)
-	var out map[string]any
-	_ = json.Unmarshal(w.Body.Bytes(), &out)
-	csrf, _ := out["csrf_token"].(string)
-	sess := ""
-	for _, ck := range w.Result().Cookies() {
-		if ck.Name == "picoaide_session" {
-			sess = ck.Value
+	//
+	// 测试夹具硬化(2026-09-13,N-4 回归测试暴露):此前这里**不检查**登录响应。
+	// 一旦登录因环境原因失败(例如同一台 PG 上多包并发把连接吃满,认证查询
+	// 报错 → 401 且没有会话 cookie),adminHdr 会静默变成空凭据,后续所有
+	// admin 调用都返回 401 —— 表现成被测逻辑失败,实际是夹具失败。现在重试
+	// 并在最终失败时明确报出登录状态码与响应体。
+	login := func() (sess, csrf string, code int, body string) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/server/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		csrf, _ = out["csrf_token"].(string)
+		for _, ck := range w.Result().Cookies() {
+			if ck.Name == "picoaide_session" {
+				sess = ck.Value
+			}
 		}
+		return sess, csrf, w.Code, w.Body.String()
+	}
+	var sess, csrf string
+	var loginCode int
+	var loginBody string
+	for attempt := 0; attempt < 3; attempt++ {
+		sess, csrf, loginCode, loginBody = login()
+		if loginCode == http.StatusOK && sess != "" && csrf != "" {
+			break
+		}
+		t.Logf("测试夹具:admin 登录第 %d 次未建立会话 (code=%d body=%.200s)", attempt+1, loginCode, loginBody)
+		time.Sleep(200 * time.Millisecond)
+	}
+	if loginCode != http.StatusOK || sess == "" || csrf == "" {
+		t.Fatalf("测试夹具失败:管理员登录未建立会话 (code=%d body=%.200s)—— 与被测逻辑无关", loginCode, loginBody)
 	}
 	adminHdr := map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
 

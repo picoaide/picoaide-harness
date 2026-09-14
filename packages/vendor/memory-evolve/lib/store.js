@@ -991,19 +991,37 @@ export class MemoryStore {
       const path = this.pathOf(target, agent)
       const safe = safeStoreTarget(this.dir, path)
       if (safe === null) return { kind: 'read-failed' }
-      const backup = `${safe}.bak.${Date.now()}`
-      writeFileSync(backup, text)
-      return { kind: 'drift', backup }
+      return this.#driftBackup(safe, text)
     }
     if (!isCanonical(text)) {
       const path = this.pathOf(target, agent)
       const safe = safeStoreTarget(this.dir, path)
       if (safe === null) return { kind: 'read-failed' }
-      const backup = `${safe}.bak.${Date.now()}`
-      writeFileSync(backup, text)
-      return { kind: 'drift', backup }
+      return this.#driftBackup(safe, text)
     }
     return { kind: 'ok', entries }
+  }
+
+  /**
+   * drift 前的**安全备份**（FIX-27 / me-2，2026-09-13）。
+   *
+   * 备份落点 `<file>.bak.<Date.now()>` 此前由字符串拼接后直接 writeFileSync
+   * ——落点从未断言。时间戳可枚举/可猜，攻击者预铺一小片同名符号链接农场
+   * （指向同一个仓外受害文件）即可在毫秒窗口内让"备份"把字节写到仓库外，
+   * 而调用方仍报"已备份到 <仓库内路径>"。这里改走安全原子写：tmp 落点同样
+   * 断言 + O_EXCL 按 fd 写入 + rename 前后复检；落点被拒（符号链接/越界/
+   * 预置同名条目）→ fail-loud 返回 `refused`（破坏性操作只认 ok 分支，
+   * "备份没做成"绝不能被当成 drift 放行）。
+   *
+   * @param {string} safe - 已过 safeStoreTarget 的规范落点。
+   * @param {string} text - 原文件全文。
+   * @returns {{kind:'drift', backup: string} | {kind:'refused', path: string}}
+   */
+  #driftBackup(safe, text) {
+    const backup = `${safe}.bak.${Date.now()}`
+    const written = writeFileAtomicSafe(this.dir, backup, text)
+    if (written.ok !== true) return { kind: 'refused', path: written.refusedPath ?? backup }
+    return { kind: 'drift', backup }
   }
 
   /** Atomically write entries to one target's file. */

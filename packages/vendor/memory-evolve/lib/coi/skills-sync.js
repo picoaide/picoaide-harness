@@ -10,8 +10,9 @@
  * 禁用状态由技能管理 Tab 的 shadow 机制管理（skills-state.json），
  * 与本同步互不影响——被禁用的技能文件仍存在，只是不注入模型。
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { writeFileAtomicSafeAt } from '../sync/filesets.js'
 
 /** 插件内置的适配器技能清单（目录名 = 技能名）。 */
 export const BUILTIN_SKILLS = [
@@ -20,6 +21,21 @@ export const BUILTIN_SKILLS = [
   'grok-cli-calling',
   'hermes-cli-calling',
 ]
+
+/**
+ * 技能名白名单（kebab-case，与 dsh-skill 的公开规则一致）。
+ * 技能名直接参与路径拼接（`join(skillDir, name, 'SKILL.md')`），
+ * 未校验时 `../../x` 可把读写落点带出技能库。
+ */
+export const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+
+/**
+ * @param {unknown} name
+ * @returns {boolean} 是否是合法技能名。
+ */
+export function isSafeSkillName(name) {
+  return typeof name === 'string' && SKILL_NAME_RE.test(name)
+}
 
 /** 从 SKILL.md frontmatter 读 x-version；缺省 0。 */
 function skillVersion(text) {
@@ -62,9 +78,17 @@ export function normalizeSkillText(raw, skillName, displayName) {
  * 同步内置技能到用户技能库。
  * 覆盖策略（保护用户编辑）：目标缺失 → 复制；目标存在但内置版本更高 →
  * 覆盖（插件升级）；否则不动（用户可能编辑过，x-version 未变不覆盖）。
+ *
+ * 落点（NF-1）：`<userSkillsDir>/<name>/SKILL.md` 是本插件**自有内容**的固定
+ * 落点，必须先过断言——`anchorDir` 保证从技能库根到落点的整条链没有符号链接、
+ * 真实路径留在库内。第一轮这里是裸 `writeFileSync`：预置一个同名符号链接就能
+ * 把库外任意文件覆盖成内置技能正文，而函数仍返回 `action:"synced"`（成功），
+ * 且这条路径在插件启动时无条件执行，无需用户动作。
+ * 单个技能落点被拒只记 `refused`，不阻塞其余技能同步。
+ *
  * @param {string} pluginSkillsDir - 插件包内 skills/ 目录的绝对路径。
  * @param {string} userSkillsDir - 用户技能库目录（~/.agents/skills）。
- * @returns {Array<{name:string, action:'synced'|'unchanged'|'missing'}>}
+ * @returns {Array<{name:string, action:'synced'|'unchanged'|'missing'|'refused', message?:string}>}
  */
 export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
   const results = []
@@ -78,14 +102,21 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
     const destFile = join(destDir, 'SKILL.md')
     const srcText = readFileSync(srcFile, 'utf8')
     let action = 'unchanged'
+    let message
     const needsCopy = !existsSync(destFile)
       || skillVersion(srcText) > skillVersion(readFileSync(destFile, 'utf8'))
     if (needsCopy) {
-      mkdirSync(destDir, { recursive: true })
-      writeFileSync(destFile, srcText)
-      action = 'synced'
+      try {
+        writeFileAtomicSafeAt(destFile, srcText, { anchorDir: userSkillsDir })
+        action = 'synced'
+      } catch (error) {
+        // fail-loud 但可感知：绝不把"没写成/写到库外"报成 synced。
+        action = 'refused'
+        message = String(error?.message ?? error)
+        console.warn(`[dsh-memory-evolve] 内置技能 ${name} 落点被拒（跳过）：${message}`)
+      }
     }
-    results.push({ name, action })
+    results.push(message === undefined ? { name, action } : { name, action, message })
   }
   return results
 }

@@ -23,13 +23,13 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { appendFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { mkdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { translate, getLocale, MISC2_DICT } from '../i18n.js'
 
 /** Translate through MISC2_DICT in the active host locale. */
 const adt = (key, params) => translate(MISC2_DICT, key, params, getLocale())
+import { appendFileSafeAt, writeFileAtomicSafeAt } from '../sync/filesets.js'
 import { AdvisorRuntime } from './runtime.js'
 import { AdvisorConversation } from './conversation.js'
 import { ScopeStore } from './scopes.js'
@@ -107,14 +107,14 @@ function safeId(sessionId) {
   return String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '_')
 }
 
-/** 原子写（temp+rename，temp 名含递增 nonce 防串写；temp 放目标文件同目录）。 */
+/**
+ * 原子写（temp+rename）。FIX-27（2026-09-13）：改走自锚定安全原子写 ——
+ * 原先的 `.tmp-<pid>-<nonce>` 临时名同样可预置（pid 本机可见、nonce 递增可
+ * 枚举），预置同名符号链接即写穿到数据目录外。
+ */
 function atomicWriteFactory() {
-  let nonce = 0
   return (path, data) => {
-    nonce += 1
-    const tmp = join(dirname(path), `.tmp-${process.pid}-${nonce}`)
-    writeFileSync(tmp, data)
-    renameSync(tmp, path)
+    writeFileAtomicSafeAt(path, data)
   }
 }
 
@@ -123,7 +123,6 @@ function atomicWriteFactory() {
  * 文件结构 { epoch, messages, scopeText? }——scopeText 是评审会话约束
  * （四层级第 4 层），conversation 每次写入时保留它（reset 时自然清除）。
  */
-const conversationNonce = { n: 0 }
 const conversationFileOf = (dataDir, sessionId) => join(dataDir, 'conversations', `${safeId(sessionId)}.json`)
 const readConversation = (dataDir, sessionId) => {
   try {
@@ -134,11 +133,11 @@ const readConversation = (dataDir, sessionId) => {
   }
 }
 const writeConversation = (dataDir, sessionId, epoch, messages, scopeText = '') => {
-  conversationNonce.n += 1
-  const file = conversationFileOf(dataDir, sessionId)
-  const tmp = join(dirname(file), `.tmp-${process.pid}-${conversationNonce.n}`)
-  writeFileSync(tmp, JSON.stringify({ epoch, messages, ...(scopeText !== '' ? { scopeText } : {}) }))
-  renameSync(tmp, file)
+  // FIX-27（2026-09-13）：自锚定安全原子写（原 `.tmp-<pid>-<nonce>` 可预置）
+  writeFileAtomicSafeAt(
+    conversationFileOf(dataDir, sessionId),
+    JSON.stringify({ epoch, messages, ...(scopeText !== '' ? { scopeText } : {}) }),
+  )
 }
 
 /**
@@ -184,9 +183,15 @@ export function installAdvisor(ctx, config, deps = {}) {
   })
 
   // ---- 存储与指令 ----
+  // NF-1 残留（第三轮对抗复核 NF1-1）：`records.jsonl` 在 `<memoryDir>/advisor/`
+  // 之下，属**受管记忆仓库内**的落点。这里此前透传 `node:fs/promises` 的
+  // `appendFile(path, data)`（按路径、无任何落点断言）——共享分支把 `advisor`
+  // 做成一条 120000 目录链接，评审终态记录就整行追加到仓库外，而 ring 里照样
+  // publish（调用方无从感知）。改用唯一的断言版追加原语（写前落点断言 +
+  // O_EXCL 打开 + 按 fd 写入 + 打开后 inode/路径复检）。
   const store = new ReviewStore({
     recordsFile: join(dataDir, 'records.jsonl'),
-    appendFile: (path, data) => appendFile(path, data),
+    appendFile: (path, data) => appendFileSafeAt(path, data),
     onStorageError: (event) => {
       // MAJOR-2：存储失败转 runtime-status（前端 live union 只认识三类
       // 事件）；带 reviewId 的失败归属到对应会话

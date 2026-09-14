@@ -126,6 +126,14 @@ func (u *auditR3Upstream) lastPath() string {
 // cachePrice<=0 表示未配置缓存价(按输入价计)。
 func newAuditR3Gateway(t *testing.T, u *auditR3Upstream, balance, inPrice, outPrice, cachePrice float64) (*gin.Engine, *sql.DB, int64, string) {
 	t.Helper()
+	return newAuditR3GatewayAt(t, u.srv.URL, balance, inPrice, outPrice, cachePrice)
+}
+
+// newAuditR3GatewayAt 与 newAuditR3Gateway 同一张路由树/同一个余额账户夹具,
+// 但上游用 URL 传入 —— 需要自定义上游行为(按 include_usage 应答、记录转发体)
+// 的用例复用同一套装载,不再抄第二份。
+func newAuditR3GatewayAt(t *testing.T, upstreamURL string, balance, inPrice, outPrice, cachePrice float64) (*gin.Engine, *sql.DB, int64, string) {
+	t.Helper()
 	DecryptSecret = func(s string) (string, error) { return s, nil }
 	InvalidateUpstreams()
 	db, cleanup := serverstore.NewTestDB(t)
@@ -141,7 +149,7 @@ func newAuditR3Gateway(t *testing.T, u *auditR3Upstream, balance, inPrice, outPr
 	}
 	// protocol=both:一个上游同时服务 openai(chat/responses/embeddings)
 	// 与 anthropic(messages)路由 —— 与真实部署里的 "both" 上游一致。
-	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, protocol) VALUES ('r3p', ?, 'sk-r3', '["r3-model"]', 'both')`, u.srv.URL); err != nil {
+	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, protocol) VALUES ('r3p', ?, 'sk-r3', '["r3-model"]', 'both')`, upstreamURL); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, input_price_per_1m, output_price_per_1m, cache_input_price_per_1m) VALUES ('r3-model', 1, 'R3', ?, ?, ?)`,
@@ -434,24 +442,31 @@ func TestResponsesBillingCountsInputOutputTokens(t *testing.T) {
 
 // TestAnthropicStreamWithoutUsageStillBilled 是 G12 的端到端回归:上游只发
 // 内容事件、从不报 usage,流式请求仍必须计费,且估算口径与 chat 流式**同源**
-// (同一个实现:已转发字节 / 4)。测试同时把同一段字节喂给 chat 路径做对照,
-// 断言两条路径估算出的 token 数完全相等 —— 防"第二份实现"。
+// (同一个实现:已交付的**正文内容**字节 ÷ 4)。测试同时把同一段字节喂给 chat
+// 路径做对照,断言两条路径估算出的 token 数完全相等 —— 防"第二份实现"。
+//
+// r7 srvbill-2 ② 起口径补全:**整条流一个 usage 都没收到**时,输入侧也要按
+// 已提交的请求体字节补估(此前 prompt 侧恒记 0 = 输入侧完全免费)。所以期望值
+// = (请求体字节 + 正文内容字节) / 4;两条流式路径用同一把尺子,等式仍然成立。
+//
+// r7 r7f1-2 收紧了"交付量"口径:completion 估算的基数是正文内容字节
+// (content_block_delta 的 text),SSE 帧/message_start/message_stop 都不算。
 func TestAnthropicStreamWithoutUsageStillBilled(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteString("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\"}}\n\n")
+	contentBytes := 0
 	for i := 0; i < 50; i++ {
+		text := strings.Repeat("y", 200)
 		sb.WriteString("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"")
-		sb.WriteString(strings.Repeat("y", 200))
+		sb.WriteString(text)
 		sb.WriteString("\"}}\n\n")
+		contentBytes += len(text)
 	}
 	sb.WriteString("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 	streamBody := sb.String()
-	wantTokens := int64(len(streamBody)) / 4
-	// P0-1(审计 2026-09-13):prompt 侧也兜底估算(客户端原始请求体 / 4),
-	// 因此总 token = 已转发字节估算 + 请求体估算。两条流式路径必须同源。
-	reqBody := `{"model":"r3-model","messages":[],"stream":true}`
-	wantPrompt, _ := estimatePromptFallback(0, int64(len(reqBody)))
-	wantTotal := wantTokens + wantPrompt
+	// 两条路径用**同一个请求体字面量**(prompt 估算都以它的字节数为准)。
+	const reqBody = `{"model":"r3-model","messages":[],"stream":true}`
+	wantTokens := int64(contentBytes+len(reqBody)) / 4
 
 	t.Run("anthropic无usage仍计费", func(t *testing.T) {
 		u := newAuditR3Upstream(t)
@@ -467,8 +482,9 @@ func TestAnthropicStreamWithoutUsageStillBilled(t *testing.T) {
 		if s.usageRows != 1 || s.tokens <= 0 {
 			t.Fatalf("usage 缺失的 Anthropic 流仍然免费: rows=%d tokens=%d (pending 行被删除、零扣费)", s.usageRows, s.tokens)
 		}
-		if s.tokens != wantTotal {
-			t.Fatalf("估算 token = %d, want %d (已转发字节 %d / 4 + 请求体估算 %d)", s.tokens, wantTotal, len(streamBody), wantPrompt)
+		if s.tokens != wantTokens {
+			t.Fatalf("估算 token = %d, want %d (请求体 %d + 流字节 %d,各 / 4)",
+				s.tokens, wantTokens, len(reqBody), len(streamBody))
 		}
 		if s.cost <= 0 || math.Abs(s.balance-(100-s.cost)) > 1e-9 {
 			t.Fatalf("未扣费: cost=%.6f balance=%.6f", s.cost, s.balance)
@@ -487,8 +503,8 @@ func TestAnthropicStreamWithoutUsageStillBilled(t *testing.T) {
 		s := auditR3Snapshot(t, db, uid)
 		t.Logf("G12 chat 对照 status=%d delivered=%d usage_rows=%d tokens=%d (want %d) cost=%.6f",
 			w.Code, w.Body.Len(), s.usageRows, s.tokens, wantTokens, s.cost)
-		if s.tokens != wantTotal {
-			t.Fatalf("chat 估算 token = %d, want %d —— 两条流式路径口径必须同源", s.tokens, wantTotal)
+		if s.tokens != wantTokens {
+			t.Fatalf("chat 估算 token = %d, want %d —— 两条流式路径口径必须同源", s.tokens, wantTokens)
 		}
 	})
 }

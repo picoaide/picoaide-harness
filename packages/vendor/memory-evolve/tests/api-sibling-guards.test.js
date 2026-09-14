@@ -216,10 +216,10 @@ function walkJs(dir) {
 }
 
 /**
- * 守卫调用点（共享模块的三个入口；advisor 的本地副本另计，见断言）。
+ * 守卫调用点（共享模块的四个入口；advisor 2026-09-13 起也用共享实现）。
  * 只匹配真正的调用（名字后跟 `(`），不匹配 import 列表或注释里的提及。
  */
-const GUARD_CALL_RE = /\b(?:applyRequestGuard|guardRequest|localTrustFence)\s*\(/g
+const GUARD_CALL_RE = /\b(?:applyRequestGuard|guardRequest|guardRequestReasoned|localTrustFence)\s*\(/g
 /** 注册点：`.webServer.register(`（tools/skills/slots 的 register 不算）。 */
 const REGISTER_RE = /\.webServer\.register\s*\(/g
 
@@ -237,12 +237,12 @@ test('[FIX-04] 结构性对拍：lib/** 每个 webServer.register 注册点都�
   // 而不是让哨兵"只看被测模块"。
   assert.equal(total, 11, `webServer.register 注册点数量变化（现 ${total}）：请同步本哨兵`)
   const unguarded = sites.filter((site) => site.guards < site.registrations).map((site) => site.file)
-  assert.deepEqual(
-    unguarded,
-    ['advisor/api.js'],
-    '除 advisor（自有 sameOriginGuard 本地副本，FIX-04 范围外）外，所有注册点必须调用共享守卫',
-  )
-  // 例外不能悄悄腐烂：advisor 的本地副本必须仍在（否则它就成了真裸奔）。
+  // FIX-27（me-3，2026-09-13）：最后一份例外（advisor 的本地同源守卫副本）已
+  // 收编到共享实现 —— 现在**没有任何**注册点可以不接共享守卫。
+  assert.deepEqual(unguarded, [], '所有注册点必须调用共享守卫（applyRequestGuard / guardRequest / guardRequestReasoned / localTrustFence）')
+  // 收编不能靠"删掉守卫"来达成：advisor 必须真的调用共享实现，且不得再长出
+  // 本地副本（副本与共享实现不等价 = 策略再次漂移）。
   const advisor = readFileSync(join(LIB_DIR, 'advisor', 'api.js'), 'utf8')
-  assert.match(advisor, /sameOriginGuard\s*\(/, 'advisor 的本地同源守卫被删掉了：要么接共享守卫，要么更新本例外')
+  assert.match(advisor, /guardRequestReasoned\s*\(/, 'advisor 必须调用共享守卫的带因版本（策略只有一份，本地只做契约映射）')
+  assert.doesNotMatch(advisor, /function\s+sameOriginGuard\s*\(/, 'advisor 不得再保留本地同源守卫副本')
 })

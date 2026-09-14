@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { request, ADMIN_API } from '../api'
 import { fmtTokens, fmtMoney } from '../lib/format'
 import { deptTreeOptions, cn } from '../lib/utils'
+import { PERM_DEPT_WRITE, PERM_USER_WRITE, hasPermission } from '../lib/rbac'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
@@ -108,14 +109,16 @@ export default function Users() {
     try {
       const params = new URLSearchParams({ page: String(p), size: '20' })
       if (search) params.set('q', search)
-      const [u, d] = await Promise.all([
-        request(`${ADMIN_API}/users?${params}`),
-        request(`${ADMIN_API}/departments`),
-      ])
+      // 审计 R7 webadmin-branding-3:这里**不再**随列表一起拉 /departments。
+      // 该接口要 dept:read,而本页只要 user:read —— auditor(审计员)正是
+      // "有 user:read、没有 dept:read"的角色,原来用 Promise.all 把部门树
+      // 和用户列表绑在一起,部门树 403 就让**整个用户列表变成空页 + 报错**
+      // (App 横幅却承诺「可查看…用户列表」)。部门树只在「部门归属」对话框
+      // 里用得到,而那个操作要 dept:write —— 改成打开对话框时按需拉取。
+      const u = await request(`${ADMIN_API}/users?${params}`)
       if (current !== loadSeq.current) return // P1-8: 过期响应丢弃
       setUsers(u.users)
       setTotal(u.total)
-      setDepts(d.departments ?? [])
       setPage(p)
       setError('') // 成功后清空页面级错误(中3)
     } catch (err: any) {
@@ -224,10 +227,23 @@ export default function Users() {
   async function openDept(u: User) {
     setDeptUser(u)
     setDeptErr('')
+    // 部门树按需拉取(见 load 的注释):只读角色没有 dept:read,打开不了这个
+    // 对话框(入口也被隐藏),所以这里失败时只需在对话框内报错。
+    let tree = depts
+    if (tree.length === 0) {
+      try {
+        const d = await request(`${ADMIN_API}/departments`)
+        tree = d.departments ?? []
+        setDepts(tree)
+      } catch (err: any) {
+        setDeptErr(err.message)
+        return
+      }
+    }
     // 只取在部门树中的组作为当前归属(不在部门树的组可能是 LDAP 授权组)
     const groups = u.groups ?? []
-    const deptNames = groups.filter((g) => depts.some((d) => d.name === g))
-    const ids = depts.filter((d) => deptNames.includes(d.name)).map((d) => String(d.id))
+    const deptNames = groups.filter((g) => tree.some((d) => d.name === g))
+    const ids = tree.filter((d) => deptNames.includes(d.name)).map((d) => String(d.id))
     setDeptSelect(ids)
     if (deptNames.length > 1) {
       setDeptNote(`当前归属 ${deptNames.length} 个部门(${deptNames.join('、')});保存保留为多部门,预算按全部所属部门同时生效(任一超限即拦)。`)
@@ -338,6 +354,13 @@ export default function Users() {
 
   const pages = Math.max(1, Math.ceil(total / 20))
 
+  // 体验层能力判定(护栏在服务端 RequirePermission):
+  //   user:write — 新建/改角色/重置密码/重置 MFA/禁用启用/删除/撤销令牌
+  //   dept:write — 部门归属对话框
+  // 只读角色(如 auditor)不再看到注定 403 的按钮,页面在首屏就说明自己是只读视图。
+  const canWrite = hasPermission(PERM_USER_WRITE)
+  const canAssignDept = hasPermission(PERM_DEPT_WRITE)
+
   return (
     <div className="space-y-5">
       <PageHeader
@@ -356,11 +379,18 @@ export default function Users() {
               />
             </div>
             <Button variant="outline" onClick={() => load(1, q)}>搜索</Button>
-            <Button onClick={() => setCreateOpen(true)}>新建用户</Button>
+            {canWrite && <Button onClick={() => setCreateOpen(true)}>新建用户</Button>}
           </>
         }
       />
       {error && <div className="text-sm text-destructive">{error}</div>}
+      {!canWrite && (
+        // 服务端:GET /users 只需 user:read,写操作需 user:write。只读角色在这里
+        // 必须看到"能看什么、不能做什么"的说明,而不是一排点下去报 403 的按钮。
+        <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          当前账号为只读视图(无 user:write 权限):可查看用户列表、部门归属与令牌,不能新建、改角色、重置密码/双重验证、禁用或删除用户。
+        </div>
+      )}
       <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
         余额的发放策略与单人调整/流水已统一到「<Link to="/usage/balance" className="text-primary hover:underline">用量中心 → 余额</Link>」。
         本页余额列只读,点击行内「余额」按钮可直接跳到该员工的调整界面。
@@ -424,27 +454,33 @@ export default function Users() {
               <TableCell className="text-right">
                 <div className="flex justify-end gap-2 whitespace-nowrap">
                   <Button size="sm" variant="outline" onClick={() => openTokens(u)}>令牌</Button>
-                  <Button size="sm" variant="outline" onClick={() => openDept(u)}>部门</Button>
+                  {canAssignDept && <Button size="sm" variant="outline" onClick={() => openDept(u)}>部门</Button>}
                   <Button size="sm" variant="outline" title="调整余额 / 充值(跳到余额页)" onClick={() => openBalance(u)}>
                     <Wallet className="mr-1 h-3.5 w-3.5" />余额
                   </Button>
-                  <Button size="sm" variant="outline" title="修改角色(G3)" onClick={() => openRoleEdit(u)}>角色</Button>
+                  {canWrite && <Button size="sm" variant="outline" title="修改角色(G3)" onClick={() => openRoleEdit(u)}>角色</Button>}
                   {/* 0057: 重置密码(local 用户; external 由 IdP 管理) */}
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={u.source === 'external'}
-                    title={u.source === 'external' ? '外部认证(LDAP/OIDC)用户的密码由企业 IdP 管理' : '重置后将吊销其全部会话,对方下次登录须改密'}
-                    onClick={() => openResetPw(u)}
-                  >重置密码</Button>
+                  {canWrite && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={u.source === 'external'}
+                      title={u.source === 'external' ? '外部认证(LDAP/OIDC)用户的密码由企业 IdP 管理' : '重置后将吊销其全部会话,对方下次登录须改密'}
+                      onClick={() => openResetPw(u)}
+                    >重置密码</Button>
+                  )}
                   {/* 0057: 重置他人 MFA(仅对已开启者显示; 不显示自己不在此页判定,服务端 400 兜底) */}
-                  {u.mfa_enabled && (
+                  {canWrite && u.mfa_enabled && (
                     <Button size="sm" variant="outline" onClick={() => void resetMFA(u)}>重置MFA</Button>
                   )}
-                  <Button size="sm" variant="outline" onClick={() => toggleUser(u)}>
-                    {u.status === 1 ? '禁用' : '启用'}
-                  </Button>
-                  <Button size="sm" variant="destructive" onClick={() => remove(u)}>删除</Button>
+                  {canWrite && (
+                    <>
+                      <Button size="sm" variant="outline" onClick={() => toggleUser(u)}>
+                        {u.status === 1 ? '禁用' : '启用'}
+                      </Button>
+                      <Button size="sm" variant="destructive" onClick={() => remove(u)}>删除</Button>
+                    </>
+                  )}
                 </div>
               </TableCell>
             </TableRow>
@@ -455,7 +491,7 @@ export default function Users() {
                 <EmptyState
                   icon={<UsersIcon className="h-5 w-5 text-muted-foreground" />}
                   title="暂无匹配用户"
-                  desc="调整搜索条件或点击「新建用户」创建成员账号"
+                  desc={canWrite ? '调整搜索条件或点击「新建用户」创建成员账号' : '调整搜索条件后重试'}
                 />
               </TableCell>
             </TableRow>
