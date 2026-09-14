@@ -358,7 +358,14 @@ describe('R3-N3: the fence patches the SDK build mcp-client actually loads', () 
     expect(source).toContain('new StreamableHTTPClientTransport(')
     // …from the very specifier our fence patches (ESM), so both share one module.
     expect(source).toContain('from \"@modelcontextprotocol/sdk/client/streamableHttp.js\"')
-    expect(source).toMatch(/new StreamableHTTPClientTransport\(new URL\(config\.url\), \{ requestInit: \{ headers: config\.headers \} \}\)/)
+    // Whitespace-tolerant: the desktop patch adds an optional `authProvider`
+    // to these transport options (MCP 授权规范), so the constructor is now
+    // multi-line. What must NOT change is that the headers still come from the
+    // config and that nothing else (no `redirect`, no `fetch`) is set here —
+    // the redirect policy belongs to this package's fence.
+    expect(source).toMatch(
+      /new StreamableHTTPClientTransport\(new URL\(config\.url\), \{\s*requestInit: \{ headers: config\.headers \}/,
+    )
     expect(source.includes('redirect')).toBe(false)
     expect(dirname(MCP_CLIENT_ENTRY)).toContain('@deepseek-ai/dsh-mcp-client')
     // …and the plugin never registers a streamable-http server unwarned.

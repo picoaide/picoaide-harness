@@ -1,0 +1,51 @@
+diff --git a/lib/index.js b/lib/index.js
+index b2f16b4a2b5eaca1ab66b1c4750454daf3e92a90..15c84630764948073c1552ad8691f68142573a13 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -45,7 +45,13 @@ function createTransport(config) {
+ 			env: buildChildEnv(config.env),
+ 			cwd: config.cwd
+ 		});
+-		case "streamable-http": return new StreamableHTTPClientTransport(new URL(config.url), { requestInit: { headers: config.headers } });
++		case "streamable-http": return new StreamableHTTPClientTransport(new URL(config.url), {
++			requestInit: { headers: config.headers },
++			// Desktop patch (PicoAide Harness): MCP 授权规范（2025-06-18）的
++			// OAuthClientProvider。SDK 会在 401 时用它刷新令牌、持久化轮换结果并
++			// 重试请求；不传则连接器只能拿一次性 header，令牌一过期就再也调不通。
++			...config.authProvider === undefined ? {} : { authProvider: config.authProvider }
++		});
+ 	}
+ }
+ //#endregion
+@@ -755,6 +761,9 @@ const Config = z.union([z.object({
+ 	serverName: z.string().required().pattern(SERVER_NAME_PATTERN),
+ 	url: z.string().required(),
+ 	headers: z.dict(String).default({}),
++	// Desktop patch (PicoAide Harness): MCP 授权规范要求把官方 OAuthClientProvider
++	// 交给传输层；本字段原样透传（z.any 不做归一化，函数值才会活到 createTransport）。
++	authProvider: z.any(),
+ 	toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
+ 	failOnStartupError: z.boolean().default(false),
+ 	reconnect: Reconnect
+diff --git a/lib/types/index.d.ts b/lib/types/index.d.ts
+index f8d553acbab2e8447ac344e960876bc88b2f662f..6851d42848b00c18d34ea58b9d10463437d2587f 100644
+--- a/lib/types/index.d.ts
++++ b/lib/types/index.d.ts
+@@ -1,3 +1,4 @@
++import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
+ /**
+  * MCP client bridge plugin: connects to an external MCP server and registers
+  * its tools on `ctx.tools` under server-qualified public names
+@@ -60,6 +61,12 @@ export interface StreamableHttpConfig {
+     url: string;
+     /** Additional headers attached to MCP requests. */
+     headers: Record<string, string>;
++    /**
++     * Desktop patch (PicoAide Harness): official MCP authorization provider.
++     * The SDK uses it to attach the bearer token, refresh it on 401, persist the
++     * rotation and retry the request.
++     */
++    authProvider?: OAuthClientProvider;
+     /** Per-tool-call timeout in milliseconds. */
+     toolCallTimeoutMs: number;
+     /** Fail plugin activation when the initial connection or tool synchronization fails. */

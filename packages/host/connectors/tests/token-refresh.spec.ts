@@ -1,0 +1,502 @@
+/**
+ * Token refresh regressions (2026-09-14).
+ *
+ * The mechanism is the OFFICIAL MCP authorization implementation: the SDK's
+ * `auth()` orchestrator performs RFC 9728 / RFC 8414 discovery, the RFC 6749 §6
+ * refresh grant and the token persistence, and we only supply the storage side
+ * of `OAuthClientProvider`. These tests pin the three properties a connector
+ * actually depends on:
+ *
+ *  1. an expired token is renewed through the discovered metadata endpoint, and
+ *     `expires_in` becomes an absolute `expiresAt`;
+ *  2. a definition with static endpoints (no published metadata) refreshes too;
+ *  3. a dead grant (`invalid_grant`) is reported as "authorize again" and
+ *     NEVER opens a browser, while a 5xx stays retryable and leaves the stored
+ *     credential untouched.
+ *
+ * The fake authorization server is a real HTTP server, so discovery, the token
+ * request and the JSON handling all run for real.
+ */
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+// The real bridge spawns/connects for real; this suite exercises the config the
+// plugin hands it (the auth provider), exactly like the other connector suites.
+vi.mock('@deepseek-ai/dsh-mcp-client', () => ({ apply: () => {} }))
+import { refreshCredentialTokens, TokenRefresher } from '../src/mcp-oauth-provider.ts'
+import type { OAuthTarget } from '../src/mcp-oauth-provider.ts'
+import { ConnectorStore } from '../src/store.ts'
+import type { ConnectorCredential } from '../src/store.ts'
+import { callRoute, createHarness, seedCredential, waitFor } from './helpers/connector-harness.ts'
+import type { ConnectorDef } from '../src/types.ts'
+
+interface FakeAuthServer {
+  origin: string
+  /** Grant types the token endpoint has answered, in order. */
+  readonly grants: string[]
+  /** Bodies of every token request. */
+  readonly tokenBodies: URLSearchParams[]
+  /** Set to make the token endpoint refuse the refresh grant. */
+  failGrant: 'invalid_grant' | 'server_error' | null
+  close: () => Promise<void>
+}
+
+/** A real OAuth server: protected-resource metadata, AS metadata, token endpoint. */
+async function fakeAuthServer(options: { expiresIn?: number, rotateRefresh?: boolean } = {}): Promise<FakeAuthServer> {
+  const state: { failGrant: FakeAuthServer['failGrant'] } = { failGrant: null }
+  const grants: string[] = []
+  const tokenBodies: URLSearchParams[] = []
+  let issued = 0
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    if (url.pathname === '/mcp') {
+      // An MCP endpoint that requires authorization: 401 + the RFC 9728
+      // resource-metadata pointer the discovery path follows.
+      res.writeHead(401, {
+        'content-type': 'application/json',
+        'www-authenticate': `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource"`,
+      })
+      res.end(JSON.stringify({ error: 'invalid_token' }))
+      return
+    }
+    if (url.pathname === '/.well-known/oauth-protected-resource' || url.pathname.startsWith('/.well-known/oauth-protected-resource/')) {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ resource: `${origin}/mcp`, authorization_servers: [origin] }))
+      return
+    }
+    if (url.pathname.startsWith('/.well-known/oauth-authorization-server')) {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        issuer: origin,
+        authorization_endpoint: `${origin}/oauth/authorize`,
+        token_endpoint: `${origin}/oauth/token`,
+        registration_endpoint: `${origin}/oauth/register`,
+        response_types_supported: ['code'],
+        grant_types_supported: ['authorization_code', 'refresh_token'],
+        token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
+      }))
+      return
+    }
+    if (url.pathname === '/oauth/register') {
+      res.writeHead(201, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ client_id: 'dyn-1', token_endpoint_auth_method: 'none' }))
+      return
+    }
+    if (url.pathname === '/oauth/token') {
+      let body = ''
+      req.on('data', (chunk) => { body += chunk })
+      req.on('end', () => {
+        const params = new URLSearchParams(body)
+        tokenBodies.push(params)
+        const grant = params.get('grant_type') ?? ''
+        grants.push(grant)
+        if (state.failGrant === 'server_error') {
+          res.writeHead(503, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'temporarily_unavailable' }))
+          return
+        }
+        if (state.failGrant === 'invalid_grant') {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'invalid_grant' }))
+          return
+        }
+        const access = `at-${++issued}`
+        if (grant !== 'refresh_token') {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'unsupported_grant_type' }))
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          access_token: access,
+          token_type: 'Bearer',
+          expires_in: options.expiresIn ?? 3600,
+          ...(options.rotateRefresh === true ? { refresh_token: `rt-${issued}` } : {}),
+        }))
+      })
+      return
+    }
+    res.writeHead(404, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not_found' }))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  return {
+    origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    grants,
+    tokenBodies,
+    get failGrant() { return state.failGrant },
+    set failGrant(value) { state.failGrant = value },
+    close: () => new Promise<void>((resolve) => { server.close(() => resolve()) }),
+  }
+}
+
+const servers: FakeAuthServer[] = []
+afterEach(async () => {
+  while (servers.length > 0) await servers.pop()?.close()
+})
+
+async function startServer(options?: { expiresIn?: number, rotateRefresh?: boolean }): Promise<FakeAuthServer> {
+  const server = await fakeAuthServer(options)
+  servers.push(server)
+  return server
+}
+
+function discoveryTarget(origin: string): OAuthTarget {
+  return { discoveryUrl: `${origin}/mcp`, scope: 'offline_access' }
+}
+
+function credential(patch: Partial<ConnectorCredential> = {}): ConnectorCredential {
+  return { accessToken: 'at-stale', refreshToken: 'rt-1', clientId: 'dyn-1', updatedAt: 0, ...patch }
+}
+
+describe('refreshCredentialTokens (official SDK refresh flow)', () => {
+  it('renews through discovered metadata and reports an absolute expiry', async () => {
+    const server = await startServer({ expiresIn: 120 })
+    const outcome = await refreshCredentialTokens(credential(), discoveryTarget(server.origin))
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.tokens.accessToken).toBe('at-1')
+    // Kept when the server does not rotate it.
+    expect(outcome.tokens.refreshToken).toBe('rt-1')
+    const lifetime = outcome.tokens.expiresAt - Date.now()
+    expect(lifetime).toBeGreaterThan(100_000)
+    expect(lifetime).toBeLessThanOrEqual(120_000)
+    expect(server.grants).toEqual(['refresh_token'])
+    // RFC 6749 §6 grant shape, RFC 8707 resource indicator included.
+    expect(server.tokenBodies[0]?.get('refresh_token')).toBe('rt-1')
+    expect(server.tokenBodies[0]?.get('client_id')).toBe('dyn-1')
+    expect(server.tokenBodies[0]?.get('resource')).toBe(`${server.origin}/mcp`)
+  })
+
+  it('stores a rotated refresh token instead of the consumed one', async () => {
+    const server = await startServer({ rotateRefresh: true })
+    const outcome = await refreshCredentialTokens(credential(), discoveryTarget(server.origin))
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.tokens.refreshToken).toBe('rt-1')
+    expect(outcome.tokens.accessToken).toBe('at-1')
+  })
+
+  it('refreshes a definition with static endpoints and no published metadata', async () => {
+    const server = await startServer()
+    const outcome = await refreshCredentialTokens(
+      credential(),
+      // Exactly the sales-easy shape: no discoveryUrl, only endpoints. The
+      // target still names the MCP resource, like the connector does.
+      {
+        tokenUrl: `${server.origin}/oauth/token`,
+        authorizeUrl: `${server.origin}/oauth/authorize`,
+        resourceUrl: `${server.origin}/mcp`,
+        scope: 'offline_access',
+      },
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(server.grants).toEqual(['refresh_token'])
+    expect(server.tokenBodies[0]?.get('scope')).toBe('offline_access')
+    // RFC 8707 binding is preserved even without published metadata: the MCP
+    // resource URL the definition declares is what the grant is bound to.
+    expect(server.tokenBodies[0]?.get('resource')).toBe(`${server.origin}/mcp`)
+  })
+
+  it('reports a dead grant as reauthorize and never touches the credential', async () => {
+    const server = await startServer()
+    server.failGrant = 'invalid_grant'
+    const outcome = await refreshCredentialTokens(credential(), discoveryTarget(server.origin))
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.reason).toBe('reauthorize')
+    expect(outcome.message).toContain('重新授权')
+  })
+
+  it('keeps a 5xx retryable instead of demanding re-authorization', async () => {
+    const server = await startServer()
+    server.failGrant = 'server_error'
+    const outcome = await refreshCredentialTokens(credential(), discoveryTarget(server.origin))
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.reason).toBe('transient')
+  })
+
+  it('does nothing for a credential without a refresh token', async () => {
+    const outcome = await refreshCredentialTokens(credential({ refreshToken: undefined }), { tokenUrl: 'https://example.com/token' })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.reason).toBe('not-applicable')
+  })
+})
+
+describe('TokenRefresher', () => {
+  function harnessFor(server: FakeAuthServer, store: ConnectorStore): TokenRefresher {
+    return new TokenRefresher({
+      read: (id) => store.readCredential(id),
+      write: (id, patch) => store.updateCredential(id, patch),
+      target: () => discoveryTarget(server.origin),
+    })
+  }
+
+  function tempStore(): { dir: string, store: ConnectorStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'conn-refresh-'))
+    return { dir, store: new ConnectorStore({ baseDir: dir, username: null }) }
+  }
+
+  it('single-flights concurrent refreshes (one grant, one rotation)', async () => {
+    const server = await startServer({ rotateRefresh: true })
+    const { store } = tempStore()
+    await store.writeCredential('example-a', credential({ expiresAt: Date.now() - 1000 }))
+    const refresher = harnessFor(server, store)
+    const outcomes = await Promise.all([
+      refresher.refresh('example-a'),
+      refresher.refresh('example-a'),
+      refresher.refresh('example-a'),
+    ])
+    expect(outcomes.every(outcome => outcome.ok)).toBe(true)
+    // One token request for three callers: the second refresh would have
+    // consumed the rotated refresh token the first one just stored.
+    expect(server.grants).toEqual(['refresh_token'])
+    const stored = await store.readCredential('example-a')
+    expect(stored?.accessToken).toBe('at-1')
+    expect(stored?.refreshToken).toBe('rt-1')
+    expect(stored?.expiresAt).toBeGreaterThan(Date.now())
+  })
+
+  it('skips the round trip while the stored token is still fresh', async () => {
+    const server = await startServer()
+    const { store } = tempStore()
+    await store.writeCredential('example-a', credential({ expiresAt: Date.now() + 10 * 60 * 1000 }))
+    const refresher = harnessFor(server, store)
+    const outcome = await refresher.refresh('example-a')
+    expect(outcome.ok).toBe(true)
+    expect(server.grants).toEqual([])
+  })
+
+  it('leaves the stored credential untouched when the refresh is retryable', async () => {
+    const server = await startServer()
+    server.failGrant = 'server_error'
+    const { store } = tempStore()
+    await store.writeCredential('example-a', credential({ expiresAt: Date.now() - 1000 }))
+    const refresher = harnessFor(server, store)
+    const outcome = await refresher.refresh('example-a', { force: true })
+    expect(outcome.ok).toBe(false)
+    const stored = await store.readCredential('example-a')
+    expect(stored?.accessToken).toBe('at-stale')
+    expect(stored?.refreshToken).toBe('rt-1')
+  })
+
+  it('refreshes a credential with no recorded expiry exactly once per sweep', async () => {
+    const server = await startServer()
+    const { store } = tempStore()
+    // No expiresAt (credential written by an older build): read as "possibly
+    // stale", so the first sweep asks — and then the recorded expiry stops it.
+    await store.writeCredential('example-a', credential())
+    const refresher = harnessFor(server, store)
+    const first = await refresher.refresh('example-a')
+    const second = await refresher.refresh('example-a')
+    expect(first.ok && second.ok).toBe(true)
+    expect(server.grants).toEqual(['refresh_token'])
+  })
+})
+
+describe('refresh route + panel metadata', () => {
+  it('refreshes through the real route and exposes the new expiry', async () => {
+    const server = await startServer({ expiresIn: 900 })
+    const def: ConnectorDef = {
+      id: 'example-a',
+      name: 'Example-A',
+      description: 'x',
+      authMode: 'oauth',
+      auth: {
+        authorizeUrl: `${server.origin}/oauth/authorize`,
+        tokenUrl: `${server.origin}/oauth/token`,
+        clientId: '',
+        redirectUri: 'http://127.0.0.1/callback',
+        pkce: true,
+        publicClient: true,
+        discoveryUrl: `${server.origin}/mcp`,
+        scopes: 'offline_access',
+      },
+      mcp: [{ serverName: 'example-a', transport: 'streamable-http', url: `${server.origin}/mcp` }],
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'conn-route-'))
+    // The credential exists BEFORE the plugin restores it: this is the real
+    // sequence (a stored token from an earlier session), and it is what makes
+    // the row report the manual-refresh affordance.
+    await seedCredential(dir, 'example-a', {
+      accessToken: 'at-stale',
+      refreshToken: 'rt-1',
+      clientId: 'dyn-1',
+      // Still fresh on restore, so the startup path does not spend a round trip
+      // here — the manual route below is the subject. The server rejects the
+      // token, which is exactly what a manual refresh is for.
+      expiresAt: Date.now() + 10 * 60 * 1000,
+    })
+    const h = createHarness([def], dir, { refreshSweepIntervalMs: 0 })
+    const before = (JSON.parse((await callRoute(h, '/api/pico/connectors', 'GET')).body) as
+      { connectors: Array<{ id: string, status: string }> }).connectors.find(item => item.id === 'example-a')
+    expect(before?.status).toBe('disconnected')
+
+    const refreshed = await callRoute(h, '/api/pico/connectors/example-a/refresh', 'POST')
+    expect(refreshed.status).toBe(200)
+    const payload = JSON.parse(refreshed.body) as { ok: boolean, expiresAt: number }
+    expect(payload.ok).toBe(true)
+    expect(payload.expiresAt).toBeGreaterThan(Date.now())
+
+    const after = (JSON.parse((await callRoute(h, '/api/pico/connectors', 'GET')).body) as
+      { connectors: Array<{ id: string, status: string, expiresAt: number | null }> }).connectors.find(item => item.id === 'example-a')
+    expect(after?.status).toBe('connected')
+    expect(after?.expiresAt).toBeGreaterThan(Date.now())
+    // No token material ever leaves the host through the list route.
+    expect(refreshed.body).not.toContain('rt-1')
+    expect(refreshed.body).not.toContain('dyn-1')
+    expect(server.grants).toEqual(['refresh_token'])
+    h.dispose()
+  })
+
+  it('rejects a manual refresh for a connector with no OAuth target', async () => {
+    const def: ConnectorDef = {
+      id: 'glitchtip',
+      name: 'GlitchTip',
+      description: 'x',
+      authMode: 'token',
+      tokenFields: [{ key: 'token', label: 'Token', type: 'password' }],
+      mcp: [{ serverName: 'glitchtip', transport: 'streamable-http', url: 'https://example.com/mcp' }],
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'conn-route-token-'))
+    const h = createHarness([def], dir, { refreshSweepIntervalMs: 0 })
+    await seedCredential(dir, 'glitchtip', { fields: { token: 'fixed' } })
+    const res = await callRoute(h, '/api/pico/connectors/glitchtip/refresh', 'POST')
+    expect(res.status).toBe(400)
+    h.dispose()
+  })
+})
+
+describe('MCP registration receives the official auth provider', () => {
+  function oauthDef(origin: string): ConnectorDef {
+    return {
+      id: 'sales-easy',
+      name: 'Sales Easy',
+      description: 'x',
+      authMode: 'oauth',
+      auth: {
+        authorizeUrl: `${origin}/oauth/authorize`,
+        tokenUrl: `${origin}/oauth/token`,
+        clientId: '',
+        redirectUri: 'http://127.0.0.1/callback',
+        pkce: true,
+        publicClient: true,
+        discoveryUrl: `${origin}/mcp`,
+        scopes: 'offline_access',
+      },
+      mcp: [{ serverName: 'neo-crm', transport: 'streamable-http', url: `${origin}/mcp` }],
+    }
+  }
+
+  it('hands the transport an OAuthClientProvider carrying the stored tokens', async () => {
+    const server = await startServer()
+    const dir = mkdtempSync(join(tmpdir(), 'conn-provider-'))
+    const h = createHarness([oauthDef(server.origin)], dir, { refreshSweepIntervalMs: 0 })
+    // A credential the plugin restores: registration must attach a provider so
+    // the SDK (not a one-shot header) owns the bearer token from then on.
+    await seedCredential(dir, 'sales-easy', {
+      accessToken: 'at-live',
+      refreshToken: 'rt-1',
+      clientId: 'dyn-1',
+      expiresAt: Date.now() + 30 * 60 * 1000,
+    })
+    h.emitSession({ username: 'user-a' })
+    await waitFor(() => h.configs.length === 1)
+    const config = h.configs[0] as unknown as {
+      transport: string
+      headers?: Record<string, string>
+      authProvider?: { tokens: () => { access_token?: string } | undefined }
+    }
+    expect(config.transport).toBe('streamable-http')
+    expect(typeof config.authProvider?.tokens).toBe('function')
+    expect(config.authProvider?.tokens()?.access_token).toBe('at-live')
+    h.dispose()
+  })
+
+  it('re-registers a STDIO connector after its credential is refreshed', async () => {
+    // The child receives its token in `env` at spawn time, so a refresh is only
+    // real for it once the server is registered again.
+    const server = await startServer()
+    const def = oauthDef(server.origin)
+    def.id = 'stdio-crm'
+    def.mcp = [{ serverName: 'stdio-crm', transport: 'stdio', command: process.execPath, args: ['-e', ''] }]
+    const dir = mkdtempSync(join(tmpdir(), 'conn-reregister-'))
+    const h = createHarness([def], dir, { refreshSweepIntervalMs: 0, requestApproval: () => true })
+    await seedCredential(dir, 'stdio-crm', {
+      accessToken: 'at-first',
+      refreshToken: 'rt-1',
+      clientId: 'dyn-1',
+      expiresAt: Date.now() + 30 * 60 * 1000,
+    })
+    h.emitSession({ username: 'user-a' })
+    await waitFor(() => h.configs.length === 1)
+    expect(h.configs[0]?.env?.PICOAIDE_CONNECTOR_ACCESS_TOKEN).toBe('at-first')
+
+    // The refresh engine writes a new token and announces it on the host bus.
+    const store = new ConnectorStore({ baseDir: dir })
+    await store.updateCredential('stdio-crm', { accessToken: 'at-second', expiresAt: Date.now() + 30 * 60 * 1000 })
+    h.emit('pico/connector-credentials-changed', { id: 'stdio-crm' })
+
+    await waitFor(() => h.configs.length === 2)
+    expect(h.configs[1]?.env?.PICOAIDE_CONNECTOR_ACCESS_TOKEN).toBe('at-second')
+    expect(server.grants).toEqual([])
+    h.dispose()
+  })
+})
+
+describe('background sweep (stdio connectors cannot re-read a token)', () => {
+  it('refreshes a lapsed credential and re-registers the server without any tool call', async () => {
+    const server = await startServer({ expiresIn: 3600 })
+    // sales-easy shape: no discoveryUrl, only endpoints — refresh works through
+    // the declared token endpoint alone.
+    const def: ConnectorDef = {
+      id: 'stdio-crm',
+      name: 'Stdio CRM',
+      description: 'x',
+      authMode: 'oauth',
+      auth: {
+        authorizeUrl: `${server.origin}/oauth/authorize`,
+        tokenUrl: `${server.origin}/oauth/token`,
+        clientId: '',
+        redirectUri: 'http://127.0.0.1/callback',
+        pkce: true,
+        publicClient: true,
+        scopes: 'offline_access',
+      },
+      mcp: [{ serverName: 'stdio-crm', transport: 'stdio', command: process.execPath, args: ['-e', ''] }],
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'conn-sweep-'))
+    const h = createHarness([def], dir, { refreshSweepIntervalMs: 60, requestApproval: () => true })
+    await seedCredential(dir, 'stdio-crm', {
+      accessToken: 'at-first',
+      refreshToken: 'rt-1',
+      clientId: 'dyn-1',
+      // Fresh on restore so the startup path does not spend a round trip; the
+      // sweep below is the subject.
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    })
+    h.emitSession({ username: 'user-a' })
+    await waitFor(() => h.configs.length === 1)
+    expect(h.configs[0]?.env?.PICOAIDE_CONNECTOR_ACCESS_TOKEN).toBe('at-first')
+
+    // The token lapses while the app keeps running: nothing calls the server,
+    // so only the sweep can notice.
+    const store = new ConnectorStore({ baseDir: dir })
+    await store.updateCredential('stdio-crm', { expiresAt: Date.now() - 1000 })
+
+    await waitFor(() => server.grants.length === 1, 8000)
+    await waitFor(() => h.configs.length === 2, 8000)
+    expect(h.configs[1]?.env?.PICOAIDE_CONNECTOR_ACCESS_TOKEN).toBe('at-1')
+    const stored = await store.readCredential('stdio-crm')
+    expect(stored?.expiresAt).toBeGreaterThan(Date.now())
+    h.dispose()
+  })
+})
