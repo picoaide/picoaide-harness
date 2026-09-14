@@ -29,6 +29,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import { CookieHandoff } from './cookie-handoff.ts'
 import { browserPartitionFor, createRealElectronAdapter } from './electron-adapter.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { BrowserRuntime } from './runtime.ts'
@@ -327,35 +328,20 @@ export function apply(ctx: Context, config: Config = {}): void {
     return true
   }
 
-  let cookieHandoffTimer: ReturnType<typeof setTimeout> | undefined
-  let cookieHandoffDelayMs = 1000
-  const stopCookieHandoff = (): void => {
-    if (cookieHandoffTimer !== undefined) {
-      clearTimeout(cookieHandoffTimer)
-      cookieHandoffTimer = undefined
-    }
-  }
-  const startCookieHandoff = (): void => {
-    stopCookieHandoff()
-    // 没有 connection 服务 = 本部署根本不要持有性证明（读写都走 guard）：
-    // 交接无从谈起，别开表。
-    const fence = (ctx as unknown as { get?: (name: string) => unknown }).get?.('connection')
-    if (fence === undefined) return
-    cookieHandoffDelayMs = 1000
-    const attempt = (): void => {
-      cookieHandoffTimer = undefined
-      void mirrorBrowserAuthCookies().then((mirrored) => {
-        if (mirrored) return // 首次成功即停表：分区里已经有本 authority 的签名 cookie
-        cookieHandoffDelayMs = Math.min(cookieHandoffDelayMs * 2, 30_000)
-        cookieHandoffTimer = setTimeout(attempt, cookieHandoffDelayMs)
-      }).catch((cause: unknown) => {
-        ctx.logger?.warn?.('pico-browser: browser-auth cookie handoff failed', cause)
-        cookieHandoffDelayMs = Math.min(cookieHandoffDelayMs * 2, 30_000)
-        cookieHandoffTimer = setTimeout(attempt, cookieHandoffDelayMs)
-      })
-    }
-    attempt()
-  }
+  /**
+   * 票据交接表：反复把应用 session 的 BrowserAuth 证明镜像进**当前**浏览器分区，
+   * 直到成功一次（分区里有票即停）。退避重试与"fence 缺席也要排队"的口径见
+   * `cookie-handoff.ts` —— 2026-09-15 恢复型启动 P0 就是这里一次判死造成的。
+   */
+  const cookieHandoff = new CookieHandoff({
+    fenceAvailable: () => (ctx as unknown as { get?: (name: string) => unknown }).get?.('connection') !== undefined,
+    mirror: mirrorBrowserAuthCookies,
+    schedule: (run, delayMs) => setTimeout(run, delayMs),
+    cancel: (handle) => { clearTimeout(handle as ReturnType<typeof setTimeout>) },
+    warn: (message, cause) => { ctx.logger?.warn?.(message, cause) },
+  })
+  const startCookieHandoff = (): void => { cookieHandoff.start() }
+  const stopCookieHandoff = (): void => { cookieHandoff.stop() }
 
   // Restore the persisted tab ledger; keep it fresh on every tab change (ops/
   // busy events never change the ledger — persisting on them would sync-write
