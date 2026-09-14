@@ -219,7 +219,7 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 
 | 路径 | 说明 |
 |------|------|
-| `/`、`/portal` | 门户首页(品牌 + 三平台客户端下载,`portal.public` 控制开放性;产品 HTML 面) |
+| `/`、`/portal` | 门户首页(首屏 = 三平台客户端下载,其后是客户端功能说明;**管理后台入口只在页脚**一行低调文字链接,`portal.public` 控制开放性;产品 HTML 面) |
 | `/admin/` | webadmin SPA(未构建返回 "webadmin 未构建") |
 | `/healthz` | 健康探针(JSON,DB Ping,503=DB 不可用) |
 | `/api/client/v2/brand`、`/api/client/v2/brand/logo/:name`、`/api/client/v2/portal` | 品牌/门户公开端点(未认证) |

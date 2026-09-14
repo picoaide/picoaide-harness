@@ -221,8 +221,11 @@ func assetExists(name string) bool {
 }
 
 // LogoPath 返回要下发的 logo 文件的绝对路径(不存在则返回空)。
-// 暗色场景优先 logo_dark(客户端按主题二选一,这里给浅色版:门户与登录页
-// 背景都是亮色,深色版留给客户端界面自行处理)。
+// dark=true 且渠道配了 logo_dark 时给暗色版,否则给浅色版。
+//
+// 别拿"门户背景是亮色"当作默认发浅色版的理由:门户跟随系统深浅色
+// (prefers-color-scheme),由模板里的 <picture><source media=...> 在
+// 本端点与 LogoDarkPath 之间二选一 —— 服务端不知道访客用哪个主题。
 func LogoPath(dark bool) string {
 	cfg := Load()
 	name := cfg.Assets.Logo
