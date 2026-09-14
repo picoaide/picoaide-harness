@@ -191,12 +191,18 @@ export function createOAuthProvider(
     },
     // RFC 6749 §6 refresh grant in the SDK's own parameter object — the
     // endpoint comes from the discovered metadata, not from a URL we build.
-    prepareTokenRequest: (scope?: string) => {
+    prepareTokenRequest: () => {
       if (tokens?.refresh_token === undefined) throw new Error(REAUTHORIZE_REQUIRED)
+      // RFC 6749 §6: a refresh request MAY carry `scope`, but omitting it means
+      // "keep the originally granted scope" — and only that form is
+      // interoperable. Measured against a real authorization server
+      // (2026-09-14): echoing the configured scope back (the SDK passes the
+      // client-metadata scope into this hook) got the refresh rejected with
+      // `invalid_scope` — "refresh scope 超出原授权范围" — which turned into an
+      // endless 401 → refresh-fails → backoff loop on the MCP transport.
       return new URLSearchParams({
         grant_type: 'refresh_token',
         refresh_token: tokens.refresh_token,
-        ...(scope === undefined ? {} : { scope }),
         ...(options.resource === undefined ? {} : { resource: options.resource }),
       })
     },
