@@ -381,10 +381,10 @@ func servePortal(c *gin.Context, db *sql.DB) {
 		Tagline:      ch.Identity.Tagline,
 		Welcome:      ch.Copy.PortalWelcome,
 		LogoURL:      channelLogoURL(),
+		LogoDarkURL:  channelLogoDarkURL(),
 		AdminURL:     "/admin/",
 		DownloadNote: downloadNote,
 		Version:      version,
-		Channel:      resolvedChannel,
 		Downloads:    downloads,
 	}
 
@@ -404,6 +404,18 @@ func channelLogoURL() string {
 		return ""
 	}
 	return "/api/client/v2/channel/logo"
+}
+
+// channelLogoDarkURL 返回**暗色版** logo 的下发地址;渠道未配暗色版时返回空。
+//
+// 门户自己跟随系统深浅色(prefers-color-scheme),所以标记也要跟着换:
+// 浅色版是黑底白 mark,贴在深色背景上几乎看不见。不回落浅色版 —— 渠道确实
+// 没做暗色版时,模板会退化成"深色下仍用浅色版"(与改造前一致),而不是给一个 404。
+func channelLogoDarkURL() string {
+	if channel.LogoDarkPath() == "" {
+		return ""
+	}
+	return "/api/client/v2/channel/logo-dark"
 }
 
 // portalDownloads 组装三平台下载项与下载区说明。
@@ -455,7 +467,9 @@ func portalDownloads(c *gin.Context, settings map[string]string) ([]portal.Platf
 
 	platforms := []portal.Platform{
 		item("Windows", "x64 · .exe 安装程序", settings["portal.client_download_win"], "win-x64"),
-		item("macOS", "Universal · .dmg 磁盘映像", settings["portal.client_download_mac"], "mac-universal"),
+		// macOS 只出 Apple 芯片(arm64)包(见 desktop package.json 的 build.mac.arch):
+		// 文案必须写明,否则 Intel Mac 用户会下到一个装不上的包。
+		item("macOS", "Apple 芯片 (M 系列) · .dmg 磁盘映像", settings["portal.client_download_mac"], "mac-universal"),
 		item("Linux", "x64 · .AppImage / .deb", settings["portal.client_download_linux"], "linux-x64"),
 	}
 
