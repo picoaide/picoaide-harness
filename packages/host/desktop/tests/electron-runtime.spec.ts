@@ -1068,13 +1068,17 @@ describe('Electron compatibility runtime', () => {
   })
 
   it('grants the clipboard permission to the app UI document only (2026-09-14 复制按钮 P0)', async () => {
-    // Electron 把异步 Clipboard API 的**读写两个方向**都报成同一个
-    // `clipboard-read` 权限（43.4.0 最小探针实测），而聊天区所有「复制」按钮
-    // （消息操作栏 / 代码块 / diff / 终端输出 / JSON 树）都走
+    // 聊天区所有「复制」按钮（消息操作栏 / 代码块 / diff / 终端输出 / JSON 树）都走
     // `navigator.clipboard.writeText`。P1-4 的一刀切 false 让写入被判
     // `NotAllowedError: Write permission denied` —— 按钮既不进剪贴板也不显示
     // "已复制"的勾，现场表现就是"点复制没反应"。
-    // 这里钉住双向口径：只放行**本应用回环源的顶层文档**，其余一切照旧拒绝。
+    //
+    // Electron 43 对**同一句 writeText** 按调用路径报**两个不同的权限名**
+    // （43.4.0 最小探针 temp/perm-probe/main4.cjs 实测）：
+    //   · 脚本 / 自动化调用（无用户手势）→ `clipboard-read`
+    //   · 用户真按在按钮上（有用户手势）  → `clipboard-sanitized-write`
+    // 只放行其一会造成"探针绿、真人点不动"（beta.2 的真实事故）：本用例因此对
+    // **两个权限名**都断言放行，另外钉住来源 / 框架层级 / 其它权限三条闸。
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
     const release = runtime.schedule(spec)
@@ -1095,16 +1099,22 @@ describe('Electron compatibility runtime', () => {
       return granted === true
     }
 
-    // 应用自己的文档（主框架）→ 放行（消息/代码块复制靠它）。
+    // 应用自己的文档（主框架）→ 两个权限名都放行：
+    //  · clipboard-read             —— 脚本路径（实测 writeText/readText 无手势时走它）
+    //  · clipboard-sanitized-write  —— 用户真点按钮的路径（少了它现场就是"点了没反应"）
     expect(grantedByRequest('clipboard-read', { isMainFrame: true, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(true)
+    expect(grantedByRequest('clipboard-sanitized-write', { isMainFrame: true, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(true)
     // 检查通道给的是 embeddingOrigin（实测 requestingUrl 为空）：两条通道口径一致。
     expect(check!(undefined, 'clipboard-read', '', { isMainFrame: true, embeddingOrigin: 'http://127.0.0.1:43120/' })).toBe(true)
+    expect(check!(undefined, 'clipboard-sanitized-write', '', { isMainFrame: true, embeddingOrigin: 'http://127.0.0.1:43120/' })).toBe(true)
 
     // 收紧的部分不能被顺手放开：来源、框架层级、权限名三道闸都要成立。
-    expect(grantedByRequest('clipboard-read', { isMainFrame: true, requestingUrl: 'https://evil.example/' })).toBe(false)
-    expect(grantedByRequest('clipboard-read', { isMainFrame: false, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(false)
-    expect(grantedByRequest('clipboard-read', {})).toBe(false)
-    expect(grantedByRequest('clipboard-read', undefined)).toBe(false)
+    for (const permission of ['clipboard-read', 'clipboard-sanitized-write']) {
+      expect(grantedByRequest(permission, { isMainFrame: true, requestingUrl: 'https://evil.example/' })).toBe(false)
+      expect(grantedByRequest(permission, { isMainFrame: false, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(false)
+      expect(grantedByRequest(permission, {})).toBe(false)
+      expect(grantedByRequest(permission, undefined)).toBe(false)
+    }
     expect(grantedByRequest('media', { isMainFrame: true, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(false)
     expect(grantedByRequest('geolocation', { isMainFrame: true, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(false)
     expect(grantedByRequest('display-capture', { isMainFrame: true, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(false)
