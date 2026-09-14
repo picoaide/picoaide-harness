@@ -1067,6 +1067,53 @@ describe('Electron compatibility runtime', () => {
     await release()
   })
 
+  it('grants the clipboard permission to the app UI document only (2026-09-14 复制按钮 P0)', async () => {
+    // Electron 把异步 Clipboard API 的**读写两个方向**都报成同一个
+    // `clipboard-read` 权限（43.4.0 最小探针实测），而聊天区所有「复制」按钮
+    // （消息操作栏 / 代码块 / diff / 终端输出 / JSON 树）都走
+    // `navigator.clipboard.writeText`。P1-4 的一刀切 false 让写入被判
+    // `NotAllowedError: Write permission denied` —— 按钮既不进剪贴板也不显示
+    // "已复制"的勾，现场表现就是"点复制没反应"。
+    // 这里钉住双向口径：只放行**本应用回环源的顶层文档**，其余一切照旧拒绝。
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule(spec)
+    await runtime.mountScheduled()
+
+    const request = electron.webContents.session.setPermissionRequestHandler.mock.calls[0]?.[0] as
+      | ((wc: unknown, permission: string, cb: (granted: boolean) => void, details?: unknown) => void)
+      | undefined
+    const check = electron.webContents.session.setPermissionCheckHandler.mock.calls[0]?.[0] as
+      | ((wc: unknown, permission: string, origin: string, details?: unknown) => boolean)
+      | undefined
+    expect(request, 'mount 必须安装权限请求处理器').toBeDefined()
+    expect(check, 'mount 必须安装权限检查处理器').toBeDefined()
+
+    const grantedByRequest = (permission: string, details: unknown): boolean => {
+      let granted: boolean | undefined
+      request!(undefined, permission, (value) => { granted = value }, details)
+      return granted === true
+    }
+
+    // 应用自己的文档（主框架）→ 放行（消息/代码块复制靠它）。
+    expect(grantedByRequest('clipboard-read', { isMainFrame: true, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(true)
+    // 检查通道给的是 embeddingOrigin（实测 requestingUrl 为空）：两条通道口径一致。
+    expect(check!(undefined, 'clipboard-read', '', { isMainFrame: true, embeddingOrigin: 'http://127.0.0.1:43120/' })).toBe(true)
+
+    // 收紧的部分不能被顺手放开：来源、框架层级、权限名三道闸都要成立。
+    expect(grantedByRequest('clipboard-read', { isMainFrame: true, requestingUrl: 'https://evil.example/' })).toBe(false)
+    expect(grantedByRequest('clipboard-read', { isMainFrame: false, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(false)
+    expect(grantedByRequest('clipboard-read', {})).toBe(false)
+    expect(grantedByRequest('clipboard-read', undefined)).toBe(false)
+    expect(grantedByRequest('media', { isMainFrame: true, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(false)
+    expect(grantedByRequest('geolocation', { isMainFrame: true, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(false)
+    expect(grantedByRequest('display-capture', { isMainFrame: true, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(false)
+    expect(check!(undefined, 'media', '', { isMainFrame: true, embeddingOrigin: 'http://127.0.0.1:43120/' })).toBe(false)
+    expect(check!(undefined, 'clipboard-read', '', { isMainFrame: true, embeddingOrigin: 'https://evil.example/' })).toBe(false)
+
+    await release()
+  })
+
   it('validates deep links against the channel scheme, not the vendor default', async () => {
     // 2026-09-11 真机复现：渠道构建（scheme=acmeai/probeharness 之类）的
     // 浏览器 SSO 回调在 shell 的严格闸门被当成畸形链接丢掉，因为 receiveDeepLink

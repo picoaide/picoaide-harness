@@ -729,10 +729,36 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     // auto-grants camera/mic/geolocation etc. when no handler is set, which
     // an untrusted web surface must never receive. The embedded browser
     // (dsh-browser) manages its own partition and permission policy.
-    window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => {
-      callback(false)
+    //
+    // 例外（2026-09-14 现场 P0）：**本应用自己的文档**需要剪贴板权限。Electron
+    // 把异步 Clipboard API 的**读写两个方向**都报成同一个 `clipboard-read`
+    // 权限（Electron 43.4.0 最小探针实测：writeText/readText 各触发一次
+    // `request:clipboard-read`），而聊天区所有「复制」按钮（消息操作栏、代码块、
+    // diff、终端输出、JSON 树）都走 `navigator.clipboard.writeText` —— 一刀切
+    // false 时写入被判 `NotAllowedError: Write permission denied`，按钮既不进
+    // 剪贴板也不显示"已复制"的勾，表现为"点了没反应"。放行范围严格限定为
+    // **本安装回环源的顶层文档**；其余权限、其它来源与内嵌浏览器分区维持拒绝。
+    const isAppDocument = (url: unknown): boolean => {
+      if (typeof url !== 'string' || url.length === 0) return false
+      try {
+        return new URL(url).origin === origin
+      } catch {
+        return false
+      }
+    }
+    const clipboardForAppUi = (details: { isMainFrame?: boolean, requestingUrl?: string, embeddingOrigin?: string } | undefined): boolean => {
+      if (details?.isMainFrame !== true) return false
+      // 请求路径给 requestingUrl；检查路径给 embeddingOrigin（实测 requestingUrl 为空）。
+      const candidate = typeof details.requestingUrl === 'string' && details.requestingUrl.length > 0
+        ? details.requestingUrl
+        : details.embeddingOrigin
+      return isAppDocument(candidate)
+    }
+    window.webContents.session.setPermissionRequestHandler((_wc, permission, callback, details) => {
+      callback(permission === 'clipboard-read' && clipboardForAppUi(details))
     })
-    window.webContents.session.setPermissionCheckHandler(() => false)
+    window.webContents.session.setPermissionCheckHandler((_wc, permission, _origin, details) =>
+      permission === 'clipboard-read' && clipboardForAppUi(details))
     // P1-4: a Content-Security-Policy for the app surface. The DSH web bundle
     // is fully local (no CDN/external scripts); the strict policy keeps any
     // injected content from reaching out. The embedded browser partition is
