@@ -87,6 +87,8 @@ export function createHarness(
   const prompts: Array<Record<string, unknown>> = []
   const sessionHandlers: Array<(next: unknown) => void> = []
   const eventHandlers = new Map<string, Array<(...args: unknown[]) => void>>()
+  /** serverNames a live (not yet disposed) plugin instance owns. */
+  const liveServerNames = new Set<string>()
   const effectDisposers: Array<() => void> = []
   let username: string | null = 'user-a'
 
@@ -125,9 +127,23 @@ export function createHarness(
     emit: (event: string, ...args: unknown[]) => {
       for (const handler of eventHandlers.get(event) ?? []) handler(...args)
     },
+    // The REAL bridge fails a load when another live instance owns the same
+    // `serverName` (upstream mcp-client reserves it for the plugin lifetime:
+    // `mcp-client: serverName "…" is already in use by another mcp-client
+    // instance`). The fake must reproduce that contract, otherwise a
+    // re-registration bug is invisible here while failing in the field
+    // (2026-09-14: exactly that happened on Windows).
     plugin: vi.fn(async (_plugin: unknown, config: CapturedConfig) => {
+      if (liveServerNames.has(config.serverName)) {
+        throw new Error(
+          `mcp-client: serverName "${config.serverName}" is already in use by another mcp-client instance — pick a unique serverName in cordis.yml`,
+        )
+      }
+      liveServerNames.add(config.serverName)
       configs.push(config)
-      const fiber = { dispose: vi.fn() }
+      const fiber = {
+        dispose: vi.fn(() => { liveServerNames.delete(config.serverName) }),
+      }
       fibers.push(fiber)
       return fiber
     }),
@@ -165,8 +181,17 @@ export function createHarness(
   }
 }
 
-function request(method: string, url: string, cookie = true): IncomingMessage {
+function request(method: string, url: string, cookie = true, jsonBody?: unknown): IncomingMessage {
+  // Handlers that read a JSON body (auth-submit) iterate the request; a plain
+  // object has no async iterator, so provide one over the encoded payload.
+  const payload = jsonBody === undefined ? '' : JSON.stringify(jsonBody)
+  const body = {
+    async *[Symbol.asyncIterator]() {
+      if (payload !== '') yield Buffer.from(payload, 'utf8')
+    },
+  }
   return {
+    ...body,
     method,
     url,
     headers: {
@@ -195,8 +220,9 @@ export async function callRoute(
   harness: Harness,
   path: string,
   method = 'POST',
+  jsonBody?: unknown,
 ): Promise<{ status: number; body: string }> {
-  return await routeCall(harness, path, method, true)
+  return await routeCall(harness, path, method, true, jsonBody)
 }
 
 /**
@@ -216,6 +242,7 @@ async function routeCall(
   path: string,
   method: string,
   cookie: boolean,
+  jsonBody?: unknown,
 ): Promise<{ status: number; body: string }> {
   const res = response()
   for (const route of harness.routes) {
@@ -225,7 +252,7 @@ async function routeCall(
     // token-lifetime fields): await it, like the real HTTP server does, so the
     // response body is complete before it is read.
     await (route.handler as unknown as (req: IncomingMessage, res: ServerResponse) => unknown)(
-      request(method, path, cookie),
+      request(method, path, cookie, jsonBody),
       res,
     )
     return { status: res.statusCode, body: res.body }

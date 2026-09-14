@@ -198,7 +198,8 @@ describe('refreshCredentialTokens (official SDK refresh flow)', () => {
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return
     expect(server.grants).toEqual(['refresh_token'])
-    expect(server.tokenBodies[0]?.get('scope')).toBe('offline_access')
+    // RFC 6749 §6: the refresh grant omits `scope` (keep the original grant).
+    expect(server.tokenBodies[0]?.get('scope')).toBeNull()
     // RFC 8707 binding is preserved even without published metadata: the MCP
     // resource URL the definition declares is what the grant is bound to.
     expect(server.tokenBodies[0]?.get('resource')).toBe(`${server.origin}/mcp`)
@@ -221,6 +222,21 @@ describe('refreshCredentialTokens (official SDK refresh flow)', () => {
     expect(outcome.ok).toBe(false)
     if (outcome.ok) return
     expect(outcome.reason).toBe('transient')
+  })
+
+  it('sends no `scope` on refresh (echoing it back is rejected by real servers)', async () => {
+    const server = await startServer()
+    const outcome = await refreshCredentialTokens(
+      credential(),
+      // The connector definition carries scopes; the refresh grant must still
+      // omit them (2026-09-14: a real authorization server answered
+      // `invalid_scope` — "refresh scope 超出原授权范围" — when we echoed it).
+      { ...discoveryTarget(server.origin), scope: 'offline_access' },
+    )
+    expect(outcome.ok).toBe(true)
+    expect(server.grants).toEqual(['refresh_token'])
+    expect(server.tokenBodies[0]?.get('scope')).toBeNull()
+    expect(server.tokenBodies[0]?.get('grant_type')).toBe('refresh_token')
   })
 
   it('does nothing for a credential without a refresh token', async () => {
@@ -371,6 +387,60 @@ describe('refresh route + panel metadata', () => {
     await seedCredential(dir, 'glitchtip', { fields: { token: 'fixed' } })
     const res = await callRoute(h, '/api/pico/connectors/glitchtip/refresh', 'POST')
     expect(res.status).toBe(400)
+    h.dispose()
+  })
+})
+
+describe('re-registration must not collide with the live MCP instance', () => {
+  /**
+   * The upstream mcp-client reserves `serverName` for the LIFETIME of the plugin
+   * instance: loading a second instance while the first is alive throws
+   * `mcp-client: serverName "…" is already in use`. Every re-registration path
+   * therefore has to retire the previous instance first — otherwise the row ends
+   * up "连接失败" exactly like the field report from 2026-09-14 (Windows,
+   * v2.7.3-beta.2: the manual refresh route re-registered while the old instance
+   * was still retrying).
+   */
+  it('re-registers from the manual refresh route while the old instance is live', async () => {
+    const server = await startServer({ expiresIn: 900 })
+    const def: ConnectorDef = {
+      id: 'example-a',
+      name: 'Example-A',
+      description: 'x',
+      authMode: 'oauth',
+      auth: {
+        authorizeUrl: `${server.origin}/oauth/authorize`,
+        tokenUrl: `${server.origin}/oauth/token`,
+        clientId: '',
+        redirectUri: 'http://127.0.0.1/callback',
+        pkce: true,
+        publicClient: true,
+        discoveryUrl: `${server.origin}/mcp`,
+        scopes: 'offline_access',
+      },
+      mcp: [{ serverName: 'example-a', transport: 'streamable-http', url: `${server.origin}/mcp` }],
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'conn-rereg-http-'))
+    const h = createHarness([def], dir, { refreshSweepIntervalMs: 0 })
+    await seedCredential(dir, 'example-a', {
+      accessToken: 'at-1',
+      refreshToken: 'rt-1',
+      clientId: 'dyn-1',
+      expiresAt: Date.now() + 30 * 60 * 1000,
+    })
+    h.emitSession({ username: 'user-a' })
+    await waitFor(() => h.configs.length === 1)
+    const first = h.fibers[0]?.dispose
+    expect(first).toBeDefined()
+
+    // Refresh + re-register without a teardown in between: the live instance
+    // still owns "example-a" at this moment.
+    const refreshed = await callRoute(h, '/api/pico/connectors/example-a/refresh', 'POST')
+    expect(refreshed.status).toBe(200)
+    await waitFor(() => h.configs.length === 2)
+    // The previous instance was retired, not leaked.
+    expect(first).toHaveBeenCalled()
+    expect(h.fibers.length).toBeGreaterThanOrEqual(2)
     h.dispose()
   })
 })
