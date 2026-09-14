@@ -356,11 +356,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         credential,
         target,
         onPersist: (patch: Partial<ConnectorCredential>) => {
-          void store.updateCredential(def.id, patch)
-            .then(() => { ctx.emit('pico/connector-credentials-changed', { id: def.id }) })
-            .catch((cause: unknown) => {
-              ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
-            })
+          const changed = persistAndMaybeAnnounce(def.id, patch)
+          void changed.catch((cause: unknown) => {
+            ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
+          })
         },
       })
       return { authProvider: provider }
@@ -541,6 +540,37 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * credential is read or written, so the panel's poll never touches the disk
    * and still shows "valid until …" / the manual-refresh affordance.
    */
+  /**
+   * Persist a credential patch written by an SDK provider, and announce it ONCE
+   * PER NEW ACCESS TOKEN.
+   *
+   * The announcement is what re-registers a server so it stops using a stale
+   * token, but a re-registration builds a new provider whose `saveTokens` fires
+   * again — announcing every save would loop forever. Comparing the token makes
+   * the announcement idempotent: the second save changes nothing and stays quiet.
+   */
+  const lastAnnouncedToken = new Map<string, string>()
+  const persistAndMaybeAnnounce = async (id: string, patch: Partial<ConnectorCredential>): Promise<void> => {
+    const current = await store.readCredential(id)
+    // A save that changes no credential material is a NO-OP. The SDK re-saves
+    // tokens on every 401 handshake, and a blind write would bump `updatedAt`,
+    // re-announce the connector and restart its MCP transport each time — a
+    // reconnect storm that looks like "the connector keeps flashing".
+    const tokenChanged = patch.accessToken !== undefined && patch.accessToken !== current?.accessToken
+    const refreshChanged = patch.refreshToken !== undefined && patch.refreshToken !== current?.refreshToken
+    const clientChanged = patch.clientId !== undefined && patch.clientId !== current?.clientId
+    if (!tokenChanged && !refreshChanged && !clientChanged) {
+      noteCredential(id, current)
+      return
+    }
+    const saved = await store.updateCredential(id, patch)
+    noteCredential(id, saved)
+    const token = saved.accessToken ?? ''
+    if (token === '' || lastAnnouncedToken.get(id) === token) return
+    lastAnnouncedToken.set(id, token)
+    ctx.emit('pico/connector-credentials-changed', { id })
+  }
+
   const noteCredential = (id: string, credential: ConnectorCredential | null): void => {
     // Live set, so the list route can still report the manual-refresh
     // affordance while the row is idle (state is only written on transitions).
@@ -840,10 +870,41 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             toolCallTimeoutMs: 120_000,
             failOnStartupError: false,
           }
-      const fiber = await ctx.plugin(
-        { inject: ['tools'], apply: applyMcpClient, name: 'mcp-client' },
-        config,
+      // The serverName is a per-scope reservation owned by the LIVE fibre: the
+      // upstream plugin throws "serverName \"...\" is already in use" when a
+      // second instance loads while the first is still alive. A re-registration
+      // (credential refresh, token changed) therefore has to retire the old
+      // fibre BEFORE loading the new one — doing it after (the old order) made
+      // every re-registration fail, and the row showed "连接失败".
+      const retire = (): void => {
+        const disposer = mcpDisposers.get(server.serverName)
+        if (disposer === undefined) return
+        try { disposer() } catch { /* teardown never throws */ }
+        mcpDisposers.delete(server.serverName)
+      }
+      retire()
+      // `ctx.plugin` returns `Fiber & PromiseLike<Fiber>` (not a real Promise),
+      // so it is wrapped before the failure hook is attached.
+      const load = (): Promise<Awaited<ReturnType<typeof ctx.plugin>>> => Promise.resolve(
+        ctx.plugin({ inject: ['tools'], apply: applyMcpClient, name: 'mcp-client' }, config),
       )
+      let fiber = await load().catch(async (cause: unknown) => {
+        const message = String(cause instanceof Error ? cause.message : cause)
+        // An authorization rejection during registration is not a crash: the
+        // connector simply has no usable credential yet (first connect, or a
+        // revoked grant). Say what the user has to do instead of leaking the
+        // transport's raw "Error POSTing to endpoint: {\"error\":\"invalid_token\"}".
+        if (/401|invalid_token|Unauthorized/iu.test(message)) {
+          throw new Error('需要先完成授权：当前凭据被服务端拒绝（点击「连接」重新授权）', { cause })
+        }
+        // Defensive: a name held by an instance we do not own (HMR leftovers, a
+        // previous generation). Retire whatever this plugin knows about and try
+        // exactly once more; a second failure is the caller's to report.
+        if (!message.includes('already in use')) throw cause
+        ctx.logger?.warn(`pico-connectors: ${def.id} 的 MCP 名被占用，先注销旧实例再重试一次`)
+        await unregisterMcp(def)
+        return await load()
+      })
       // conn-1: a teardown may have landed WHILE this registration was
       // starting. Retire the fiber it just created instead of recording it —
       // otherwise the disposer would outlive the teardown that cleared the map
@@ -852,14 +913,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         try { void fiber?.dispose?.() } catch { /* teardown never throws */ }
         return { rejected: [], superseded: true }
       }
-      // P2-23: re-registering the same server key must retire the previous
-      // registration first — the old `set()` overwrote the disposer, leaving
-      // the first fiber (and its tools) alive forever.
-      const previous = mcpDisposers.get(server.serverName)
-      if (previous !== undefined) {
-        try { previous() } catch { /* teardown never throws */ }
-        mcpDisposers.delete(server.serverName)
-      }
+      // P2-23 kept: the map holds at most one disposer per server key, so the
+      // fiber recorded here is the only live instance for that name.
       mcpDisposers.set(server.serverName, () => { void fiber?.dispose?.() })
     }
     return { rejected }
@@ -873,6 +928,25 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         mcpDisposers.delete(server.serverName)
       }
     }
+  }
+
+  /**
+   * Fields the definition declares as required that the credential does not yet
+   * carry. Used by BOTH the pre-connect settings gate and the post-flow check:
+   * a flow that finishes without the credential its tools need must not report
+   * "connected" — that state guarantees every tool call fails silently.
+   */
+  const missingDeclaredFields = (
+    def: ConnectorDef,
+    credential: ConnectorCredential | null | undefined,
+  ): NonNullable<ConnectorDef['tokenFields']> =>
+    (def.tokenFields ?? []).filter(field =>
+      field.required === true && (credential?.fields?.[field.key]?.trim() ?? '') === '')
+
+  /** Publish a field form for the panel and leave the row waiting for it. */
+  const requestDeclaredFields = (id: string, def: ConnectorDef): void => {
+    emitRequest({ connectorId: id, fields: def.tokenFields ?? [] })
+    setState(id, { status: 'connecting', error: undefined })
   }
 
   /** Start the auth flow for a connector (background for poll-based modes). */
@@ -912,11 +986,25 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         return
       }
       const current = await store.readCredential(id)
-      await store.updateCredential(id, { ...current, ...patch })
+      const merged = await store.updateCredential(id, { ...current, ...patch })
+      // A stateless flow (device / server-side) can finish without the
+      // credential the definition requires: surface the field form and stay in
+      // 'connecting' rather than registering MCP servers that cannot work.
+      if (missingDeclaredFields(def, merged).length > 0) {
+        requestDeclaredFields(id, def)
+        return
+      }
       // conn-1: the flow may have been overtaken (logout / user switch) while
       // the token round-trip was in flight — never register for a session that
       // is already gone.
       if (controller.signal.aborted) return
+      // Retire the PREVIOUS registration only now that the new authorization
+      // succeeded: doing it before the flow meant a failed re-authorization
+      // (server unreachable, user cancelled the browser step) silently removed
+      // a working connector's tools. registerMcp also retires it internally, so
+      // this only covers the case where the new credential cannot register
+      // (e.g. stdio approval pending) and keeps the old one from lingering
+      // across users.
       const outcome = await registerMcp(def, { signal: teardownController.signal })
       if (outcome.superseded === true || controller.signal.aborted) return
       if (outcome.pendingApproval !== undefined) {
@@ -964,6 +1052,23 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     if (!def) throw new Error(`unknown connector: ${id}`)
     const current = await store.readCredential(id)
     await store.updateCredential(id, { fields: { ...(current?.fields ?? {}), ...fields } })
+    // Device/server-side flows that asked for fields after the stateless probe:
+    // once they arrive, register the MCP servers.
+    if (def.authMode !== 'token' && missingDeclaredFields(def, await store.readCredential(id)).length === 0) {
+      const outcome = await registerMcp(def, { signal: teardownController.signal })
+      if (outcome.superseded === true) return
+      if (outcome.pendingApproval !== undefined) {
+        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+        return
+      }
+      if (outcome.rejected.length > 0) {
+        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        return
+      }
+      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
+      pendingRequests.delete(id)
+      return
+    }
     if (def.authMode === 'token') {
       const outcome = await registerMcp(def, { signal: teardownController.signal })
       if (outcome.superseded === true) return
@@ -995,7 +1100,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       new Error('用户在连接过程中断开了连接'),
     )
     await store.clearCredential(id)
-    setState(id, { status: 'disconnected', everConnected: false, error: undefined, connectedAt: undefined })
+    // The card renders "有效期至 …" from these facts: a disconnected connector
+    // must not keep advertising the token it no longer has.
+    refreshable.delete(id)
+    lastAnnouncedToken.delete(id)
+    setState(id, {
+      status: 'disconnected', everConnected: false, error: undefined, connectedAt: undefined,
+      expiresAt: undefined, refreshedAt: undefined, refreshToken: undefined,
+    })
     pendingRequests.delete(id)
     pendingApprovals.delete(id)
   }
@@ -1017,7 +1129,15 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         const credential = await store.readCredential(def.id)
         if (stale()) return
         noteCredential(def.id, credential)
-        if (!credential) continue
+        if (!credential) {
+          // No credential for THIS user: clear the token facts the previous user
+          // left on the row (states survive a session change; the store does
+          // not). The STATUS is deliberately not forced to 'disconnected' —
+          // 'unauthorized' is how a failed authorization reports itself and must
+          // survive the restore pass.
+          setState(def.id, { expiresAt: undefined, refreshedAt: undefined, refreshToken: undefined })
+          continue
+        }
         // Refresh OAuth tokens before restoring (official SDK refresh flow),
         // then register the MCP servers.
         const effective = credential.refreshToken === undefined
@@ -1120,7 +1240,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     void runLifecycle(async () => {
       const def = defs.find(entry => entry.id === payload.id)
       if (!def) return
-      if (!def.mcp.some(server => (server.transport ?? 'stdio') === 'stdio')) return
+      // stdio children got the token in `env` at spawn time; an http transport
+      // baked it into its request headers. Both only see a refreshed token after
+      // a re-registration (the provider reads the store on the NEXT request, but
+      // the header it was constructed with is what gets sent first).
+      if (def.mcp.length === 0) return
       if (states.get(def.id)?.status !== 'connected') return
       const outcome = await registerMcp(def, { signal: teardownController.signal })
       if (outcome.superseded === true) return
