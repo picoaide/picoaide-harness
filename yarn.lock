@@ -2296,7 +2296,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-mcp-client@npm:0.1.5-rc.2, @deepseek-ai/dsh-mcp-client@npm:^0.1.5-rc.2":
+"@deepseek-ai/dsh-mcp-client@npm:0.1.5-rc.2":
   version: 0.1.5-rc.2
   resolution: "@deepseek-ai/dsh-mcp-client@npm:0.1.5-rc.2"
   dependencies:
@@ -2312,6 +2312,25 @@ __metadata:
     "@deepseek-ai/dsh-timeout": ^0.1.5-rc.2
     "@deepseek-ai/dsh-tools": ^0.1.5-rc.2
   checksum: 10c0/38ba58c6ee92b679aca7b37858c684c4608ec06d4acb731e128f2eb061c6cbfe35ecde50e414b4241dead7a1a2d6e0f311ee97403e47897948bc48a6c821b67e
+  languageName: node
+  linkType: hard
+
+"@deepseek-ai/dsh-mcp-client@patch:@deepseek-ai/dsh-mcp-client@npm%3A0.1.5-rc.2#./patches/dsh-mcp-client@0.1.5-rc.2.patch::locator=picoaide-harness%40workspace%3A.":
+  version: 0.1.5-rc.2
+  resolution: "@deepseek-ai/dsh-mcp-client@patch:@deepseek-ai/dsh-mcp-client@npm%3A0.1.5-rc.2#./patches/dsh-mcp-client@0.1.5-rc.2.patch::version=0.1.5-rc.2&hash=30b48a&locator=picoaide-harness%40workspace%3A."
+  dependencies:
+    "@deepseek-ai/schemastery": "npm:^3.18.2"
+    "@modelcontextprotocol/sdk": "npm:^1.12.0"
+    zod: "npm:^4.4.3"
+  peerDependencies:
+    "@deepseek-ai/cordis": ^4.0.2
+    "@deepseek-ai/dsh-attachment": ^0.1.5-rc.2
+    "@deepseek-ai/dsh-llm": ^0.1.5-rc.2
+    "@deepseek-ai/dsh-scope": ^0.1.5-rc.2
+    "@deepseek-ai/dsh-subprocess": ^0.1.5-rc.2
+    "@deepseek-ai/dsh-timeout": ^0.1.5-rc.2
+    "@deepseek-ai/dsh-tools": ^0.1.5-rc.2
+  checksum: 10c0/57f1f846e1fb5cf01d7f6315159fc91660a03915526557f89a31a73e5c9e3b7310cafa352a91323217fad9a5a94baa6911772b0935119f4e972b761fba38a549
   languageName: node
   linkType: hard
 

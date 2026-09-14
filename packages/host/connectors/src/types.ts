@@ -112,6 +112,16 @@ export interface ConnectorState {
   /** True once the user ever completed auth for this connector. */
   everConnected: boolean
   connectedAt?: number | undefined
+  /**
+   * Absolute access-token expiry (epoch ms) of the stored credential, when the
+   * authorization server told us one. Mirrored here so the panel's list route
+   * never has to read the credential store on its 2s poll.
+   */
+  expiresAt?: number | undefined
+  /** When the stored credential's token was last refreshed (epoch ms). */
+  refreshedAt?: number | undefined
+  /** Whether the stored credential carries a refresh token (manual refresh affordance). */
+  refreshToken?: boolean | undefined
 }
 
 /**

@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net'
 import type { ConnectorAuthRequest, ConnectorDef, DeviceAuthConfig, OAuthAuthConfig } from './types.ts'
 import type { ConnectorCredential } from './store.ts'
 import { assertOutboundUrlAllowed, OutboundUrlBlockedError, outboundFetch } from './outbound.ts'
+import { expiryFromResponse } from './token-lifetime.ts'
 
 /**
  * Auth orchestration, mirroring WorkBuddy's connector flow:
@@ -157,8 +158,10 @@ interface OAuthServerMetadata {
 }
 
 /** MCP OAuth discovery result (spec 2025-06-18): public endpoint or the resolved OAuth endpoints. */
-interface McpOAuthDiscovery {
+export interface McpOAuthDiscovery {
   publicMcp?: boolean
+  /** RFC 8414 issuer / authorization server identifier (metadata `issuer`, else the discovered origin). */
+  authorizationServerUrl?: string
   authorizationEndpoint?: string
   tokenEndpoint?: string
   registrationEndpoint?: string
@@ -174,7 +177,7 @@ interface McpOAuthDiscovery {
  * `/.well-known/oauth-protected-resource`), then RFC 8414 metadata at the
  * authorization server.
  */
-async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOptions = {}): Promise<McpOAuthDiscovery> {
+export async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOptions = {}): Promise<McpOAuthDiscovery> {
   // FIX-20: the MCP endpoint itself is definition-supplied; every URL this
   // function learns from the remote side is checked before it is fetched.
   const mcp = assertOutboundUrlAllowed(mcpUrl, 'MCP 端点')
@@ -223,6 +226,7 @@ async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOptions = 
       ? 'offline_access'
       : meta.scopes_supported?.[0]
     return {
+      authorizationServerUrl: asUrl.origin,
       authorizationEndpoint,
       tokenEndpoint,
       ...(registrationEndpoint ? { registrationEndpoint } : {}),
@@ -388,6 +392,9 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   return {
     accessToken,
     clientId,
+    // The panel shows this and the sweep refreshes before it lapses; without
+    // it the token is treated as "possibly stale" on the next restore.
+    expiresAt: expiryFromResponse(data),
     ...(typeof data.refresh_token === 'string' ? { refreshToken: data.refresh_token } : {}),
   }
 }
@@ -445,6 +452,7 @@ export async function refreshOAuthToken(
   if (!accessToken) return null
   return {
     accessToken,
+    expiresAt: expiryFromResponse(data),
     ...(typeof data.refresh_token === 'string' ? { refreshToken: data.refresh_token } : {}),
   }
 }

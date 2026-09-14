@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -6,7 +7,10 @@ import { join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { ConnectorStore } from './store.ts'
-import { runAuth, refreshOAuthToken } from './auth.ts'
+import { runAuth } from './auth.ts'
+import { createOAuthProvider, resolveAuthorizationServer, TokenRefresher, tokenNeedsRefresh } from './mcp-oauth-provider.ts'
+import type { OAuthTarget } from './mcp-oauth-provider.ts'
+import { REFRESH_LEAD_MS, REFRESH_SWEEP_INTERVAL_MS } from './token-lifetime.ts'
 import { userScopePath } from './user-scope.ts'
 import { ConnectorApprovalStore } from './approvals.ts'
 import {
@@ -41,6 +45,13 @@ import type { ConnectorCredential } from './store.ts'
 declare module '@deepseek-ai/cordis' {
   interface Events {
     'pico/session-changed'(session: { username?: string; token?: string; serverURL?: string } | null): void
+    /**
+     * A connector credential moved (refreshed token, rotated refresh token).
+     * HTTP MCP servers pick it up on the next request through their auth
+     * provider; stdio servers receive the token in the child environment and
+     * are re-registered by this plugin in response.
+     */
+    'pico/connector-credentials-changed'(payload: { id: string }): void
   }
 }
 
@@ -102,6 +113,13 @@ export interface ConnectorsOptions {
    * fed from a connector definition.
    */
   outboundTimeoutMs?: number
+  /**
+   * Interval of the background token sweep (stdio MCP servers receive their
+   * token in the child environment at spawn time and cannot recover from a 401
+   * by themselves, so they must be re-registered before the token lapses).
+   * Defaults to `REFRESH_SWEEP_INTERVAL_MS`; 0 disables the sweep (tests).
+   */
+  refreshSweepIntervalMs?: number
 }
 
 type JsonHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void
@@ -205,11 +223,13 @@ function exact(handler: JsonHandler): (req: IncomingMessage, res: ServerResponse
   // 等 async handler 抛错会成为 unhandledRejection——Node≥15 默认直接退出
   // 整个 Electron 主进程(browser 的 action handler 有 .catch,这里缺失)。
   // 修复:统一捕获并回 500(同步 handler 的返回值是 void,Promise.resolve 归一)。
-  return (req, res) => {
-    void Promise.resolve(handler(req, res)).catch(error => {
+  return async (req, res) => {
+    try {
+      await handler(req, res)
+    } catch (error) {
       console.error('[dsh-connectors] handler failed', error)
       if (!res.headersSent) json(res, 500, { error: 'internal error' })
-    })
+    }
   }
 }
 
@@ -272,6 +292,136 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   // Per-user local-approval ledger for server-issued stdio commands (FIX-02).
   let approvals = new ConnectorApprovalStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : { username: currentUser() })
   const states = new Map<string, ConnectorState>()
+  /** Ids whose STORED credential currently carries a refresh token. */
+  const refreshable = new Set<string>()
+
+  /**
+   * The refresh target of one connector: only the OAuth facts a refresh needs.
+   * Kept in one place so a future MCP credential source can supply the same
+   * shape without touching the engine.
+   */
+  const oauthTargetOf = (def: ConnectorDef): OAuthTarget | null => {
+    if (def.authMode !== 'oauth') return null
+    // The MCP endpoint doubles as the RFC 8707 resource the SDK validates
+    // against; prefer a streamable-http URL when the definition has one.
+    // Prefer the streamable-http endpoint; a stdio-only connector still has an
+    // MCP identity, and its bearer token belongs to the same resource.
+    const resourceUrl = (def.mcp.find(server => server.transport === 'streamable-http' && typeof server.url === 'string')
+      ?? def.mcp.find(server => typeof server.url === 'string'))?.url
+    const auth = def.auth as {
+      discoveryUrl?: string
+      tokenUrl?: string
+      authorizeUrl?: string
+      clientId?: string
+      publicClient?: boolean
+      scopes?: string
+      redirectUri?: string
+    } | undefined
+    if (!auth) return null
+    return {
+      ...(resourceUrl === undefined ? {} : { resourceUrl }),
+      ...(auth.discoveryUrl === undefined ? {} : { discoveryUrl: auth.discoveryUrl }),
+      ...(auth.tokenUrl === undefined ? {} : { tokenUrl: auth.tokenUrl }),
+      ...(auth.authorizeUrl === undefined ? {} : { authorizeUrl: auth.authorizeUrl }),
+      ...(auth.clientId === undefined ? {} : { clientId: auth.clientId }),
+      ...(auth.scopes === undefined ? {} : { scope: auth.scopes }),
+      ...(auth.redirectUri === undefined ? {} : { redirectUri: auth.redirectUri }),
+    }
+  }
+
+  /**
+   * The official `OAuthClientProvider` for one streamable-http registration.
+   *
+   * Discovery is resolved here (through the same policy-checked routine the
+   * refresh engine uses) and handed to the SDK as saved discovery state, so
+   * the SDK's 401 path refreshes through the metadata-named token endpoint
+   * without a second, unfenced discovery round trip.
+   */
+  const mcpAuthProvider = async (
+    def: ConnectorDef,
+    credential: ConnectorCredential | null,
+  ): Promise<{ authProvider?: OAuthClientProvider }> => {
+    const target = oauthTargetOf(def)
+    if (target === null || credential?.accessToken === undefined) return {}
+    // Registration must not depend on a discovery round trip: when the token is
+    // still valid and the definition already names its token endpoint, the
+    // provider can refresh on 401 through that endpoint alone (the SDK calls
+    // the grant; the URL is ours, not discovered).
+    if (
+      credential.expiresAt !== undefined
+      && credential.expiresAt - Date.now() > REFRESH_LEAD_MS
+      && target.tokenUrl !== undefined
+    ) {
+      const { provider } = createOAuthProvider({
+        credential,
+        target,
+        onPersist: (patch: Partial<ConnectorCredential>) => {
+          void store.updateCredential(def.id, patch)
+            .then(() => { ctx.emit('pico/connector-credentials-changed', { id: def.id }) })
+            .catch((cause: unknown) => {
+              ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
+            })
+        },
+      })
+      return { authProvider: provider }
+    }
+    try {
+      const resolved = await resolveAuthorizationServer(
+        target,
+        options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs },
+      )
+      if (resolved.failure) {
+        // No refresh material: keep the token we have. A 401 then surfaces as
+        // an ordinary tool error instead of a silent dead grant.
+        ctx.logger?.warn(`pico-connectors: ${def.id} 无法解析令牌端点（${resolved.failure.message}）`)
+        return {}
+      }
+      const { provider } = createOAuthProvider({
+        credential,
+        target,
+        discovery: resolved.discovery,
+        ...(resolved.resource === undefined ? {} : { resource: resolved.resource }),
+        onPersist: (patch: Partial<ConnectorCredential>) => {
+          // The SDK's persistence point: a rotated refresh token or a new
+          // access token must reach the store, or the next process (or the
+          // next registration) would refresh with a dead grant.
+          void store.updateCredential(def.id, patch)
+            .then(() => { ctx.emit('pico/connector-credentials-changed', { id: def.id }) })
+            .catch((cause: unknown) => {
+              ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
+            })
+        },
+      })
+      return { authProvider: provider }
+    } catch (error) {
+      // A policy-blocked URL is an active redirection attempt: register
+      // without the provider (the SDK will report 401 plainly) and log loudly.
+      ctx.logger?.error(`pico-connectors: ${def.id} 令牌端点解析被拒绝`, error)
+      return {}
+    }
+  }
+
+  /**
+   * One refresh engine for every connector. `pico/connector-credentials-changed`
+   * is how the rest of the host learns that a token moved: HTTP MCP servers
+   * pick the new token up on the next request (their auth provider reads the
+   * store), while stdio servers must be re-registered to receive it.
+   */
+  const tokenRefresher = new TokenRefresher({
+    read: (id) => store.readCredential(id),
+    write: (id, patch) => store.updateCredential(id, patch),
+    target: (id) => {
+      const def = defs.find(entry => entry.id === id)
+      return def ? oauthTargetOf(def) : null
+    },
+    onRefreshed: (id, tokens) => {
+      // The engine just wrote the credential; mirror it so the panel shows the
+      // new expiry without a disk read, then tell the rest of the host.
+      setState(id, { expiresAt: tokens.expiresAt, refreshedAt: Date.now(), refreshToken: true })
+      ctx.emit('pico/connector-credentials-changed', { id })
+    },
+    ...(options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs }),
+  })
   const pendingRequests = new Map<string, ConnectorAuthRequest>()
   /** Server-issued stdio commands waiting for a local decision, keyed by connector id. */
   const pendingApprovals = new Map<string, PendingApproval>()
@@ -384,6 +534,23 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const setState = (id: string, patch: Partial<ConnectorState>): void => {
     const current = states.get(id) ?? { status: 'disconnected', everConnected: false }
     states.set(id, { ...current, ...patch })
+  }
+
+  /**
+   * Mirror a credential's token facts onto the row state. Called wherever a
+   * credential is read or written, so the panel's poll never touches the disk
+   * and still shows "valid until …" / the manual-refresh affordance.
+   */
+  const noteCredential = (id: string, credential: ConnectorCredential | null): void => {
+    // Live set, so the list route can still report the manual-refresh
+    // affordance while the row is idle (state is only written on transitions).
+    if (credential?.refreshToken === undefined) refreshable.delete(id)
+    else refreshable.add(id)
+    setState(id, {
+      expiresAt: credential?.expiresAt,
+      refreshedAt: credential?.refreshedAt,
+      refreshToken: credential?.refreshToken !== undefined,
+    })
   }
 
   const getDef = (id: string): ConnectorDef | undefined => defs.find((def) => def.id === id)
@@ -597,6 +764,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // awaiting must not resurrect the previous user's MCP servers.
     if (superseded()) return { rejected: [], superseded: true }
     const credential = await store.readCredential(def.id)
+    // Mirror the token facts onto the row (the panel's poll reads state only).
+    noteCredential(def.id, credential)
     if (superseded()) return { rejected: [], superseded: true }
     const rejected: string[] = []
     const stdioServers = def.mcp.filter(server => (server.transport ?? 'stdio') === 'stdio')
@@ -653,6 +822,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             serverName: server.serverName,
             url: streamableHttpUrl(server).toString(),
             headers: renderHeaders(server, credential),
+            // MCP authorization spec: the transport is handed the official
+            // `OAuthClientProvider`, so the SDK injects the bearer token,
+            // refreshes it when the server answers 401, persists the rotation
+            // and retries the call. No hand-rolled fetch and no header rewriting.
+            ...(await mcpAuthProvider(def, credential)),
             toolCallTimeoutMs: 120_000,
             failOnStartupError: false,
           }
@@ -842,14 +1016,24 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         if (stale()) return
         const credential = await store.readCredential(def.id)
         if (stale()) return
+        noteCredential(def.id, credential)
         if (!credential) continue
-        // Refresh OAuth tokens before restoring, then register the MCP servers.
-        const refreshed = await refreshOAuthToken(def, credential, {
-          signal: teardownController.signal,
-          ...(options.outboundTimeoutMs === undefined ? {} : { outboundTimeoutMs: options.outboundTimeoutMs }),
-        })
-        if (stale()) return
-        const effective = refreshed ? await store.updateCredential(def.id, refreshed) : credential
+        // Refresh OAuth tokens before restoring (official SDK refresh flow),
+        // then register the MCP servers.
+        const effective = credential.refreshToken === undefined
+          ? credential
+          : await (async () => {
+              const outcome = await tokenRefresher.refresh(def.id)
+              if (stale()) return credential
+              if (!outcome.ok && outcome.reason === 'reauthorize') {
+                // The grant is gone: say so on the row instead of registering
+                // MCP servers that are guaranteed to 401.
+                setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message })
+                return null
+              }
+              return await store.readCredential(def.id) ?? credential
+            })()
+        if (stale() || effective === null) continue
         if (stale()) return
         if (effective.accessToken) {
           const outcome = await registerMcp(def, { signal: teardownController.signal })
@@ -895,6 +1079,63 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     }
   }, 'pico connectors: restore + cleanup')
 
+  /**
+   * Background token sweep.
+   *
+   * The 401 path (SDK auth provider) is the safety net; this is what keeps a
+   * token from ever reaching that point — and it is the ONLY recovery for
+   * stdio MCP servers, whose token is placed in the child environment at spawn
+   * time and cannot be re-read later. A refreshed credential re-registers the
+   * connector's stdio servers (`registerMcp` retires the previous fibers).
+   */
+  ctx.effect(() => {
+    const intervalMs = options.refreshSweepIntervalMs ?? REFRESH_SWEEP_INTERVAL_MS
+    if (intervalMs <= 0) return () => {}
+    const timer = setInterval(() => {
+      void runLifecycle(async () => {
+        for (const def of defs) {
+          const state = states.get(def.id)
+          if (state?.status !== 'connected' && state?.status !== 'unauthorized') continue
+          const credential = await store.readCredential(def.id)
+          if (!credential || !tokenNeedsRefresh(credential)) continue
+          const outcome = await tokenRefresher.refresh(def.id)
+          if (!outcome.ok && outcome.reason === 'reauthorize') {
+            setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message })
+          }
+        }
+      }).catch((cause: unknown) => {
+        ctx.logger?.warn('pico-connectors: token sweep failed', cause)
+      })
+    }, intervalMs)
+    return () => { clearInterval(timer) }
+  }, 'pico connectors: token sweep')
+
+  /**
+   * A refreshed (or re-rotated) credential must reach the running MCP servers
+   * that cannot read it lazily: stdio children get their token in `env` at
+   * spawn. `registerMcp` is idempotent per server key, so re-registering is
+   * the supported way to hand a child the new value.
+   */
+  ctx.on('pico/connector-credentials-changed', (payload: { id: string }) => {
+    void runLifecycle(async () => {
+      const def = defs.find(entry => entry.id === payload.id)
+      if (!def) return
+      if (!def.mcp.some(server => (server.transport ?? 'stdio') === 'stdio')) return
+      if (states.get(def.id)?.status !== 'connected') return
+      const outcome = await registerMcp(def, { signal: teardownController.signal })
+      if (outcome.superseded === true) return
+      if (outcome.pendingApproval !== undefined) {
+        setState(def.id, { status: 'unauthorized', everConnected: true, error: undefined })
+        return
+      }
+      if (outcome.rejected.length > 0) {
+        setState(def.id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+      }
+    }).catch((cause: unknown) => {
+      ctx.logger?.warn(`pico-connectors: ${payload.id} 令牌更新后重注册失败`, cause)
+    })
+  })
+
   ctx.effect(() => {
     const list: JsonHandler = (_req, res) => {
       const body = defs.map((def) => {
@@ -907,10 +1148,44 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           authMode: def.authMode,
           examples: def.examples ?? [],
           request: pendingRequests.get(def.id) ?? null,
+          // Token lifetime is carried on the state (written whenever a
+          // credential is read or refreshed): the list route stays synchronous,
+          // so a slow disk never delays the panel's 2s poll.
+          expiresAt: state.expiresAt ?? null,
+          refreshedAt: state.refreshedAt ?? null,
+          canRefresh: (refreshable.has(def.id) || state.refreshToken === true) && oauthTargetOf(def) !== null,
+          refreshing: tokenRefresher.isRefreshing(def.id),
           ...state,
         }
       })
       json(res, 200, { connectors: body })
+    }
+
+    /**
+     * Manual refresh (panel button). Runs the official SDK refresh flow and
+     * reports the new expiry; a dead grant flips the row to `unauthorized` so
+     * the user is told to authorize again instead of silently staying
+     * "connected" with a token that no longer works.
+     */
+    const refreshTokens: JsonHandler = async (req, res) => {
+      const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
+      if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
+      const id = rawId
+      const def = getDef(id)
+      if (!def) return json(res, 404, { error: `unknown connector: ${id}` })
+      if (oauthTargetOf(def) === null) return json(res, 400, { error: '该连接器不支持令牌刷新' })
+      const outcome = await tokenRefresher.refresh(id, { force: true })
+      if (!outcome.ok) {
+        if (outcome.reason === 'reauthorize') {
+          setState(id, { status: 'unauthorized', everConnected: true, error: outcome.message })
+        } else if (outcome.reason === 'transient') {
+          setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: outcome.message })
+        }
+        return json(res, outcome.reason === 'not-applicable' ? 400 : 409, { error: outcome.message, reason: outcome.reason })
+      }
+      noteCredential(id, await store.readCredential(id))
+      setState(id, { status: 'connected', everConnected: true, error: undefined })
+      json(res, 200, { ok: true, expiresAt: outcome.tokens.expiresAt })
     }
 
     const connect: JsonHandler = (req, res) => {
@@ -1118,7 +1393,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         if (!guard(req, res)) return
         list(req, res)
       } }),
-      ctx.webServer.register({ kind: 'prefix', path: '/api/pico/connectors', handler: (req, res) => {
+      ctx.webServer.register({ kind: 'prefix', path: '/api/pico/connectors', handler: async (req, res) => {
         const segments = req.url?.split('/') ?? []
         const action = segments[5]?.split('?')[0]
         const handlers: Record<string, JsonHandler> = {
@@ -1129,6 +1404,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           disconnect: exact(disconnectHandler),
           approve: exact(approve),
           deny: exact(deny),
+          refresh: exact(refreshTokens),
         }
         if (!guard(req, res)) return
         // R7-RV-3：拿不到持有性证明就不进任何 handler（凭据/审批/handler 都不会
@@ -1143,14 +1419,19 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           disconnect: 'POST',
           approve: 'POST',
           deny: 'POST',
+          refresh: 'POST',
         }
         const expected = action ? allowedMethods[action] : undefined
         if (expected !== undefined && method !== expected) {
           return json(res, 405, { error: 'method not allowed' })
         }
         const handler = action ? handlers[action] : undefined
-        if (handler) handler(req, res)
-        else json(res, 404, { error: 'not found' })
+        // AWAIT the handler: the async ones (connect / refresh / approve) write
+        // their response after a network round trip, and an unawaited promise
+        // would both return an empty body to a caller that awaits this handler
+        // and surface as an unhandled rejection when it throws.
+        if (handler) return await handler(req, res)
+        json(res, 404, { error: 'not found' })
       } }),
     ]
     return () => { for (const dispose of disposers) dispose() }

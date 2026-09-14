@@ -39,6 +39,13 @@ export const zh = {
   'action.allow': '允许执行',
   'action.deny': '拒绝',
   'action.deciding': '处理中…',
+  'action.refreshToken': '刷新令牌',
+  'action.refreshingToken': '刷新中…',
+  'action.refreshTokenHint': '立即用 refresh token 换取新的访问令牌（不会重新打开授权页）',
+  'token.expiresAt': '令牌有效期至 {time}',
+  'token.expired': '令牌已过期，正在自动续期',
+  'token.refreshedAt': '上次刷新 {time}',
+  'token.refreshFailed': '令牌刷新失败：{message}',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -78,6 +85,13 @@ export const en: Record<keyof typeof zh, string> = {
   'action.allow': 'Allow',
   'action.deny': 'Deny',
   'action.deciding': 'Working…',
+  'action.refreshToken': 'Refresh token',
+  'action.refreshingToken': 'Refreshing…',
+  'action.refreshTokenHint': 'Exchange the refresh token for a new access token now (no authorization page)',
+  'token.expiresAt': 'Token valid until {time}',
+  'token.expired': 'Token expired — renewing automatically',
+  'token.refreshedAt': 'Last refreshed {time}',
+  'token.refreshFailed': 'Token refresh failed: {message}',
 }
 
 export type ConnectorsKey = keyof typeof zh
