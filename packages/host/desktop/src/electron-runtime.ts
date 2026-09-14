@@ -730,14 +730,26 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     // an untrusted web surface must never receive. The embedded browser
     // (dsh-browser) manages its own partition and permission policy.
     //
-    // 例外（2026-09-14 现场 P0）：**本应用自己的文档**需要剪贴板权限。Electron
-    // 把异步 Clipboard API 的**读写两个方向**都报成同一个 `clipboard-read`
-    // 权限（Electron 43.4.0 最小探针实测：writeText/readText 各触发一次
-    // `request:clipboard-read`），而聊天区所有「复制」按钮（消息操作栏、代码块、
-    // diff、终端输出、JSON 树）都走 `navigator.clipboard.writeText` —— 一刀切
-    // false 时写入被判 `NotAllowedError: Write permission denied`，按钮既不进
-    // 剪贴板也不显示"已复制"的勾，表现为"点了没反应"。放行范围严格限定为
-    // **本安装回环源的顶层文档**；其余权限、其它来源与内嵌浏览器分区维持拒绝。
+    // 例外（2026-09-14 现场 P0，两轮才修对）：**本应用自己的文档**需要剪贴板权限，
+    // 聊天区所有「复制」按钮（消息操作栏、代码块、diff、终端输出、JSON 树）都走
+    // `navigator.clipboard.writeText`。
+    //
+    // Electron 43 对**同一句 writeText** 按调用路径报**两个不同的权限名**
+    // （最小探针 temp/perm-probe/main4.cjs 实测）：
+    //   · 脚本 / 自动化调用（无用户手势）→ `clipboard-read`
+    //   · 用户真按在按钮上（有用户手势）  → `clipboard-sanitized-write`
+    // 第一版只放行了 `clipboard-read`：结果"探针绿、真人点不动"——CDP/脚本写入
+    // 成功，用户点复制仍被判 `NotAllowedError: Write permission denied`（2026-09-14
+    // 真机端到端复现，temp/real-e2e-probe.mjs 的插桩日志逐字抓到）。两个权限名
+    // 必须都放行。
+    //
+    // 放行范围仍严格限定为**本安装回环源的顶层文档**（request 通道读
+    // details.requestingUrl，check 通道实测为空、读 details.embeddingOrigin，
+    // 两者 isMainFrame 必须为 true）；其余权限、其它来源与内嵌浏览器分区维持拒绝。
+    const APP_CLIPBOARD_PERMISSIONS: ReadonlySet<string> = new Set([
+      'clipboard-read',
+      'clipboard-sanitized-write',
+    ])
     const isAppDocument = (url: unknown): boolean => {
       if (typeof url !== 'string' || url.length === 0) return false
       try {
@@ -755,10 +767,10 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       return isAppDocument(candidate)
     }
     window.webContents.session.setPermissionRequestHandler((_wc, permission, callback, details) => {
-      callback(permission === 'clipboard-read' && clipboardForAppUi(details))
+      callback(APP_CLIPBOARD_PERMISSIONS.has(permission) && clipboardForAppUi(details))
     })
     window.webContents.session.setPermissionCheckHandler((_wc, permission, _origin, details) =>
-      permission === 'clipboard-read' && clipboardForAppUi(details))
+      APP_CLIPBOARD_PERMISSIONS.has(permission) && clipboardForAppUi(details))
     // P1-4: a Content-Security-Policy for the app surface. The DSH web bundle
     // is fully local (no CDN/external scripts); the strict policy keeps any
     // injected content from reaching out. The embedded browser partition is
