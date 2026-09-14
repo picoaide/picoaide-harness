@@ -121,6 +121,25 @@ function oauthDef(origin: string, transport: 'stdio' | 'streamable-http' = 'stre
   }
 }
 
+/** Poll the connector list until a row satisfies the predicate. */
+async function awaitRow(
+  h: ReturnType<typeof createHarness>,
+  id: string,
+  predicate: (row: { status: string, error?: string, request?: { fields?: unknown[] } | null }) => boolean,
+  timeoutMs = 6000,
+): Promise<{ status: string, error?: string, request?: { fields?: unknown[] } | null }> {
+  const deadline = Date.now() + timeoutMs
+  let last: { status: string, error?: string, request?: { fields?: unknown[] } | null } = { status: '?' }
+  while (Date.now() < deadline) {
+    const listed = JSON.parse((await callRoute(h, '/api/pico/connectors', 'GET')).body) as
+      { connectors: Array<{ id: string, status: string, error?: string, request?: { fields?: unknown[] } | null }> }
+    last = listed.connectors.find(c => c.id === id) ?? last
+    if (predicate(last)) return last
+    await new Promise(r => setTimeout(r, 20))
+  }
+  throw new Error(`row ${id} never matched; last=${JSON.stringify(last)}`)
+}
+
 describe('audit: refresh failure must not park the connector forever', () => {
   it('PROBE A: a transient refresh failure recovers on the next sweep', async () => {
     const server = await start({ expiresIn: 3600 })
@@ -168,9 +187,9 @@ describe('audit: reconnect paths', () => {
     server.fail = 'server_error'
     const connect = await callRoute(h, '/api/pico/connectors/moka/connect', 'POST')
     expect(connect.status).toBe(200)
-    // give the failed flow time to settle: the previous registration must not
-    // be retired while it cannot be replaced
-    await new Promise(r => setTimeout(r, 300))
+    // Wait until the row reports the failure (the flow ended), then assert the
+    // previous registration survived it.
+    await awaitRow(h, 'moka', row => row.status === 'error' || row.status === 'unauthorized')
     expect(h.configs.length).toBe(1)
     expect(firstDisposer?.mock.calls.length).toBe(0)
     h.dispose()
@@ -253,7 +272,8 @@ describe('audit: state and announcement hygiene', () => {
     // the SDK re-saves the same token (e.g. a 401 handshake where the server
     // answered with the identical value): must be a no-op for registration
     for (let i = 0; i < 5; i++) await provider?.saveTokens?.({ access_token: 'at-live' })
-    await new Promise(r => setTimeout(r, 150))
+    // give any (wrong) re-registration a chance to appear before asserting
+    await new Promise(r => setTimeout(r, 300))
     expect(h.configs.length).toBe(1)
     h.dispose()
   })
@@ -307,11 +327,9 @@ describe('audit: auth flows other than OAuth', () => {
     // what must not survive is the ROW state from the previous session.
     await new ConnectorStore({ baseDir: dir }).clearCredential('moka')
     h.emitSession({ username: 'user-b' })
-    await new Promise(r => setTimeout(r, 150))
-    const row = (JSON.parse((await callRoute(h, '/api/pico/connectors', 'GET')).body) as
-      { connectors: Array<{ id: string, status: string, expiresAt: number | null }> }).connectors.find(c => c.id === 'moka')
-    expect(row?.status).toBe('disconnected')
-    expect(row?.expiresAt ?? null).toBeNull()
+    const row = await awaitRow(h, 'moka', r => r.status === 'disconnected')
+    expect(row.status).toBe('disconnected')
+    expect((row as { expiresAt?: number | null }).expiresAt ?? null).toBeNull()
     h.dispose()
   })
 
@@ -342,17 +360,15 @@ describe('audit: device-code connectors', () => {
     const h = createHarness([def], dir, { refreshSweepIntervalMs: 0, requestApproval: () => true })
     const connect = await callRoute(h, '/api/pico/connectors/dev-conn/connect', 'POST')
     expect(connect.status).toBe(200)
-    await new Promise(r => setTimeout(r, 150))
 
     const store = new ConnectorStore({ baseDir: dir })
-    const listed = JSON.parse((await callRoute(h, '/api/pico/connectors', 'GET')).body) as
-      { connectors: Array<{ id: string, status: string, request?: { fields?: unknown[] } | null }> }
-    const before = listed.connectors.find(c => c.id === 'dev-conn')
+    // The stateless flow finishes quickly, then the missing-credential check
+    // publishes the field form. Wait for THAT state (a fixed sleep flaked on CI).
+    const before = await awaitRow(h, 'dev-conn', row => Array.isArray(row.request?.fields) && row.request!.fields!.length > 0)
     // A connector whose definition requires a credential must not end up
     // "connected" with an empty one (every tool call would fail silently).
-    expect(before?.status).not.toBe('connected')
-    expect(before?.status).toBe('connecting')
-    expect(before?.request?.fields).toBeDefined()
+    expect(before.status).not.toBe('connected')
+    expect(before.status).toBe('connecting')
     expect(h.configs.length).toBe(0)
 
     // the user fills the form: now it may connect
