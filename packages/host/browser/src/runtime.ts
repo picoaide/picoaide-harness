@@ -278,6 +278,13 @@ export class BrowserRuntime {
   private windowClosedDisposer: (() => void) | null = null
   private disposed = false
   private partition: string
+  /**
+   * Partition the LIVE mask view was created with (undefined = no view yet).
+   * Electron fixes a WebContents's session at creation, so this must be
+   * compared against {@link partition} on every user switch — see
+   * {@link remountOverlay}.
+   */
+  private overlayPartition: string | undefined
   private readonly listeners = new Set<(event: BrowserStreamEvent) => void>()
   private shellOrigin: string | undefined
   private lastAgentId = ''
@@ -521,9 +528,20 @@ export class BrowserRuntime {
     this.store.saveGroupLedger(tabs === undefined ? ledger : { ...ledger, tabs })
   }
 
-  /** Swap the partition used by NEW tab views (user switch) and the store. */
+  /**
+   * Swap the partition used by NEW tab views (user switch) and the store.
+   *
+   * The mask overlay is the one view that can NOT be left behind: it owns the
+   * 「我来操作」pill, whose POST needs the BrowserAuth write proof that
+   * `index.ts` mirrors into the CURRENT browser partition. A view created
+   * before the switch keeps writing into the previous user's cookie jar, so
+   * every takeover click is refused (403 / logged 401) for the rest of the run
+   * (2026-09-14 现场 P0: Windows 客户机登录后「我来操作」完全没反应).
+   */
   setPartition(partition: string): void {
+    if (this.partition === partition) return
     this.partition = partition
+    if (this.overlayPartition !== undefined && this.overlayPartition !== partition) this.remountOverlay()
   }
 
   /** Switch the per-user store (session change): re-point ledger/stores. */
@@ -805,6 +823,53 @@ export class BrowserRuntime {
   }
 
   /**
+   * Mount the mask overlay onto the CURRENT partition (create + attach + load
+   * the overlay page + re-apply bounds/z-order).
+   *
+   * Keep this the ONLY place that builds the mask view: the view's partition is
+   * fixed at creation and must always equal {@link partition}, which is what
+   * the cookie handoff in `index.ts` targets.
+   */
+  private mountOverlay(win: NativeBrowserWindow, origin: string | undefined): void {
+    const overlay = this.adapter.createMaskView(this.partition)
+    this.overlay = overlay
+    this.overlayPartition = this.partition
+    overlay.attach(win, this.overlayBounds('capsule'))
+    if (origin !== undefined) {
+      void overlay.webContents.loadURL(`${origin}/browser-overlay`).catch((cause: unknown) => {
+        void overlay.webContents.loadURL(`${origin}/browser-overlay`).catch(() => {
+          console.error('[dsh-browser] overlay page failed to load', cause)
+        })
+      })
+    }
+    this.applyOverlay()
+  }
+
+  /**
+   * Rebuild the live mask overlay after a partition switch (user switch).
+   *
+   * Electron cannot re-point a WebContents at another session, so the stale
+   * view is destroyed and a fresh one is mounted on the new partition (the
+   * reload also re-triggers the cookie handoff through the page GET).
+   */
+  private remountOverlay(): void {
+    const stale = this.overlay
+    const win = this.window
+    this.overlay = null
+    this.overlayPartition = undefined
+    if (stale !== null) {
+      try {
+        stale.detach()
+        stale.destroy()
+      } catch {
+        // Teardown must never throw.
+      }
+    }
+    if (win === null || win.isDestroyed()) return
+    this.mountOverlay(win, this.shellOrigin)
+  }
+
+  /**
    * Create (or return) the browser window. `show` is opt-in (2026-09-08
    * product decision): agent paths — boot prewarm, ledger restore, AI tab
    * creation — must never pop the window to the front after the user closed
@@ -819,22 +884,14 @@ export class BrowserRuntime {
     const win = this.adapter.createBrowserWindow()
     if (show) win.show()
     this.window = win
-    const overlay = this.adapter.createMaskView(this.partition)
-    this.overlay = overlay
-    overlay.attach(win, this.overlayBounds('capsule'))
+    this.mountOverlay(win, origin)
     if (origin !== undefined) {
       void win.loadURL(`${origin}/browser-shell`).catch((cause: unknown) => {
         void win.loadURL(`${origin}/browser-shell`).catch(() => {
           console.error('[dsh-browser] shell page failed to load', cause)
         })
       })
-      void overlay.webContents.loadURL(`${origin}/browser-overlay`).catch((cause: unknown) => {
-        void overlay.webContents.loadURL(`${origin}/browser-overlay`).catch(() => {
-          console.error('[dsh-browser] overlay page failed to load', cause)
-        })
-      })
     }
-    this.applyOverlay()
     this.windowResizeDisposer = win.onResize(() => { this.relayout() })
     this.windowClosedDisposer = win.onClosed(() => {
       for (const tab of this.tabs.values()) {
@@ -852,6 +909,7 @@ export class BrowserRuntime {
       this.tabs.clear()
       this.pool.clear()
       this.overlay = null
+      this.overlayPartition = undefined
       this.windowResizeDisposer?.()
       this.windowClosedDisposer?.()
       this.windowResizeDisposer = null
@@ -2817,6 +2875,7 @@ export class BrowserRuntime {
     if (this.window !== null && !this.window.isDestroyed()) this.window.close()
     this.window = null
     this.overlay = null
+    this.overlayPartition = undefined
     this.pool.dispose()
     this.listeners.clear()
   }

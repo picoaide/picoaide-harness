@@ -445,7 +445,11 @@ export function apply(ctx: Context, config: Config = {}): void {
         rejection = 403
       }
       if (rejection === undefined) return true
-      ctx.logger?.warn?.(`pico-browser: refused a local write without browser proof (${String(rejection)})`)
+      // 诊断口径（2026-09-14）：日志必须说清**是哪个页面的哪条路由**被拒——
+      // 现场只看到 "refused a local write without browser proof (401)" 时，无法
+      // 区分 shell 页（默认 session，天然持票）与 overlay 蒙版页（浏览器分区，
+      // 靠 cookie 交接）。只记 pathname，丢掉 query（可能带用户数据）。
+      ctx.logger?.warn?.(`pico-browser: refused a local write without browser proof (${String(rejection)}) [${req.method ?? 'POST'} ${(req.url ?? '').split('?')[0] ?? ''}]`)
       json(res, 403, {
         error: 'browser session proof required',
         hint: 'reopen the application window from its launch URL',
@@ -552,6 +556,10 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
         case 'clear-data': {
           await runtime.clearData(true)
+          // 交接表在首次成功后停表（见 startCookieHandoff），而「清除全部数据」
+          // 会连 cookie 一起清掉：蒙版页持有的 BrowserAuth 证明随之消失，此后
+          // 接管/面板按钮全部 403。清完立刻再交接一次，把票据补回分区。
+          startCookieHandoff()
           json(res, 200, { ok: true })
           return
         }
