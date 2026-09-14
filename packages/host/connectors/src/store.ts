@@ -26,6 +26,17 @@ export interface ConnectorCredential {
   clientSecret?: string
   /** Token-form field values (password fields stored as-is; plaintext on disk is the price of the lazy design). */
   fields?: Record<string, string>
+  /**
+   * Absolute expiry of `accessToken` (epoch ms), derived from the token
+   * endpoint's `expires_in` at exchange/refresh time. Optional: a credential
+   * written by an older build, or by a server that omits `expires_in`, has no
+   * recorded expiry — refresh correctness never depends on it (the 401 path is
+   * the safety net); it drives the proactive sweep and the panel's
+   * "valid until …" line.
+   */
+  expiresAt?: number
+  /** When the last successful token refresh happened (epoch ms). */
+  refreshedAt?: number
   updatedAt: number
 }
 
@@ -82,7 +93,16 @@ export class ConnectorStore {
       const value: unknown = JSON.parse(content)
       if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
       if (typeof (value as { updatedAt?: unknown }).updatedAt !== 'number') return null
-      return value as ConnectorCredential
+      // A hand-edited (or truncated) timestamp must not poison the refresh
+      // cadence: only a finite positive number is a usable `expiresAt`.
+      const record = value as ConnectorCredential
+      if (record.expiresAt !== undefined && (!Number.isFinite(record.expiresAt) || record.expiresAt <= 0)) {
+        delete record.expiresAt
+      }
+      if (record.refreshedAt !== undefined && !Number.isFinite(record.refreshedAt)) {
+        delete record.refreshedAt
+      }
+      return record
     } catch {
       return null
     }

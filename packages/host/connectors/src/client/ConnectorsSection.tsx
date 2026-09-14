@@ -19,6 +19,14 @@ interface ConnectorEntry {
   status: 'disconnected' | 'connecting' | 'connected' | 'unauthorized' | 'error'
   error?: string
   everConnected: boolean
+  /** Absolute access-token expiry (epoch ms) when the server told us one. */
+  expiresAt?: number | null
+  /** Last successful refresh (epoch ms). */
+  refreshedAt?: number | null
+  /** Whether a manual refresh can do anything (refresh token + OAuth target). */
+  canRefresh?: boolean
+  /** True while the host is refreshing this connector's token right now. */
+  refreshing?: boolean
   request?: {
     authorizeUrl?: string
     verificationUrl?: string
@@ -144,6 +152,18 @@ const statusColor: Record<string, string> = {
   error: 'var(--dsw-alias-state-error-primary)',
 }
 
+/**
+ * Render an epoch-ms instant in the user's locale. The panel polls every 2s,
+ * so the formatter is created once per render pass rather than per card.
+ */
+function formatInstant(ms: number): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'medium' }).format(new Date(ms))
+  } catch {
+    return new Date(ms).toLocaleString()
+  }
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init)
   if (!res.ok) {
@@ -156,7 +176,7 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged: () => void }) {
   const [formValues, setFormValues] = useState<Record<string, string>>({})
   const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState<'connect' | 'submit' | 'disconnect' | null>(null)
+  const [busy, setBusy] = useState<'connect' | 'submit' | 'disconnect' | 'refresh' | null>(null)
   const activePopup = useRef<Window | null>(null)
 
   // The authorize URL is produced asynchronously by the flow; open it once
@@ -264,6 +284,25 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       onChanged()
     } catch (e) {
       setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }, [busy, entry.id, onChanged])
+
+  /**
+   * Manual token refresh: the host runs the official MCP OAuth refresh flow
+   * against the discovered token endpoint; no authorization page is opened.
+   */
+  const refreshToken = useCallback(async (): Promise<void> => {
+    if (busy !== null) return
+    setError(null)
+    setBusy('refresh')
+    try {
+      await fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/refresh`, { method: 'POST' })
+      onChanged()
+    } catch (e) {
+      const message = e instanceof Error ? friendlyConnectorError(e.message) : String(e)
+      setError(t('token.refreshFailed', { message }))
     } finally {
       setBusy(null)
     }
@@ -426,12 +465,36 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
         )
       })()}
 
+      {(entry.expiresAt != null || entry.refreshedAt != null) && (
+        <p style={LABEL}>
+          {entry.expiresAt != null && entry.expiresAt <= Date.now()
+            ? t('token.expired')
+            : entry.expiresAt != null
+              ? t('token.expiresAt', { time: formatInstant(entry.expiresAt) })
+              : entry.refreshedAt != null
+                ? t('token.refreshedAt', { time: formatInstant(entry.refreshedAt) })
+                : ''}
+        </p>
+      )}
+
       {downloading && entry.request?.message && <p style={LABEL}>{entry.request.message}</p>}
       {polling && <p style={LABEL}>{t('auth.waiting')}</p>}
       {entry.error && !isConnected && <p style={{ ...STATUS, color: statusColor.error }}>{friendlyConnectorError(entry.error)}</p>}
       {error && <p style={{ ...STATUS, color: statusColor.error }}>{error}</p>}
 
-      <div style={{ marginTop: 'auto', paddingTop: 4 }}>
+      <div style={{ marginTop: 'auto', paddingTop: 4, display: 'flex', gap: 8 }}>
+        {isConnected && entry.canRefresh === true ? (
+          <button
+            type="button"
+            style={{ ...BUTTON, background: 'var(--dsw-alias-bg-layer-3)', color: 'var(--dsw-alias-label-primary)', border: '1px solid var(--dsw-alias-border-l2)' }}
+            disabled={busy === 'refresh' || entry.refreshing === true}
+            onClick={() => { void refreshToken() }}
+            title={t('action.refreshTokenHint')}
+            aria-label={`${t('action.refreshToken')} ${entry.name}`}
+          >
+            {busy === 'refresh' || entry.refreshing === true ? t('action.refreshingToken') : t('action.refreshToken')}
+          </button>
+        ) : null}
         {isConnected ? (
           <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)' }} disabled={busy === 'disconnect'} onClick={() => { void disconnect() }} aria-label={`${t('action.disconnect')} ${entry.name}`}>
             {busy === 'disconnect' ? t('action.disconnecting') : t('action.disconnect')}

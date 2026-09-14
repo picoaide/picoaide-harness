@@ -48,6 +48,8 @@ export interface Harness {
   /** Local-confirmation prompts the plugin raised, in order. */
   readonly prompts: Array<Record<string, unknown>>
   readonly emitSession: (session: { username?: string } | null) => void
+  /** Fire a host event (the plugin's own listeners run synchronously). */
+  readonly emit: (event: string, ...args: unknown[]) => void
   readonly dispose: () => void
   /** 上游 `connection` 服务替身被问过几次（R7-RV-3：证明必须真的被检查）。 */
   readonly fence: { seen: number }
@@ -84,6 +86,7 @@ export function createHarness(
   const routes: WebRoute[] = []
   const prompts: Array<Record<string, unknown>> = []
   const sessionHandlers: Array<(next: unknown) => void> = []
+  const eventHandlers = new Map<string, Array<(...args: unknown[]) => void>>()
   const effectDisposers: Array<() => void> = []
   let username: string | null = 'user-a'
 
@@ -111,7 +114,16 @@ export function createHarness(
     },
     on: (event: string, handler: (next: unknown) => void) => {
       if (event === 'pico/session-changed') sessionHandlers.push(handler)
+      const list = eventHandlers.get(event) ?? []
+      list.push(handler as (...args: unknown[]) => void)
+      eventHandlers.set(event, list)
       return () => {}
+    },
+    // The plugin emits `pico/connector-credentials-changed` after a refresh so
+    // that stdio servers (whose token lives in the child environment) are
+    // re-registered. The real host bus runs these listeners synchronously.
+    emit: (event: string, ...args: unknown[]) => {
+      for (const handler of eventHandlers.get(event) ?? []) handler(...args)
     },
     plugin: vi.fn(async (_plugin: unknown, config: CapturedConfig) => {
       configs.push(config)
@@ -145,6 +157,9 @@ export function createHarness(
     emitSession: (session) => {
       username = session?.username ?? null
       for (const handler of [...sessionHandlers]) handler(session)
+    },
+    emit: (event: string, ...args: unknown[]) => {
+      for (const handler of eventHandlers.get(event) ?? []) handler(...args)
     },
     dispose: () => { for (const dispose of effectDisposers) dispose() },
   }
@@ -206,7 +221,13 @@ async function routeCall(
   for (const route of harness.routes) {
     const matches = route.kind === 'exact' ? route.path === path : path.startsWith(route.path)
     if (!matches) continue
-    await route.handler(request(method, path, cookie), res)
+    // Handlers may be async (the list route reads the credential store for the
+    // token-lifetime fields): await it, like the real HTTP server does, so the
+    // response body is complete before it is read.
+    await (route.handler as unknown as (req: IncomingMessage, res: ServerResponse) => unknown)(
+      request(method, path, cookie),
+      res,
+    )
     return { status: res.statusCode, body: res.body }
   }
   throw new Error(`no route registered for ${path}`)
