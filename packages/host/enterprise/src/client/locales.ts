@@ -183,6 +183,7 @@ export const zh = {
   'update.downloadingAction': '下载中…',
   'update.check': '检查更新',
   'update.about': '关于',
+  'settings.account': '账号',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -314,7 +315,7 @@ export const en: Record<keyof typeof zh, string> = {
   'agent.install': 'Install',
   'agent.installing': 'Installing…',
   'agent.installed': 'Installed {name}',
-  'agent.installDone': 'Installed {name}; see Settings · 创造模式',
+  'agent.installDone': 'Installed {name}; see Settings · Creator mode',
   'agent.installFail': 'Install failed: {error}',
   'agent.uninstall': 'Uninstall',
   'agent.uninstalling': 'Uninstalling…',
@@ -325,7 +326,7 @@ export const en: Record<keyof typeof zh, string> = {
   'agent.empty': 'No shared agents yet; upload one and wait for admin review',
   'agent.loadError': 'Failed to load',
   'agent.retry': 'Retry',
-  'agent.emptyLocal': 'No local agents (create one in 创造模式 first)',
+  'agent.emptyLocal': 'No local agents (create one in Creator mode first)',
   'agent.author': 'by {author}',
   'agent.version': 'v{version}',
   'agent.update': 'Update to v{version}',
@@ -357,6 +358,7 @@ export const en: Record<keyof typeof zh, string> = {
   'update.downloadingAction': 'Downloading…',
   'update.check': 'Check for updates',
   'update.about': 'About',
+  'settings.account': 'Account',
 }
 
 export type EnterpriseKey = keyof typeof zh

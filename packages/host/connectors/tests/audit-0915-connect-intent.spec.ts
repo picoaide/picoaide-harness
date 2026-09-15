@@ -132,35 +132,103 @@ describe('BUG-02: a connect intent must not outlive a cancel', () => {
   it('a disconnect during the credential write leaves no credential behind', async () => {
     const dir = await tempDir('pico-intent-write-')
     const store = new ConnectorStore({ baseDir: dir })
-    // Park INSIDE updateCredential, before the bytes reach the file: this is the
-    // window in which the old code wrote a credential after the user's
-    // disconnect had already cleared it.
+    // Park INSIDE updateCredential, after the pre-write liveness check passed:
+    // this is the window in which the old code wrote a credential after the
+    // user's disconnect had already cleared it.
     const original = ConnectorStore.prototype.updateCredential
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
-    let held = false
+    let parked = false
     vi.spyOn(ConnectorStore.prototype, 'updateCredential').mockImplementation(async function (
       this: ConnectorStore,
       id: string,
       patch: Parameters<ConnectorStore['updateCredential']>[1],
     ) {
-      if (!held) {
-        held = true
+      if (!parked) {
+        parked = true
         await gate
       }
       return await original.call(this, id, patch)
     })
 
     const h = createHarness([tokenDef()], dir)
-    await callRoute(h, '/api/pico/connectors/tok/auth-submit', 'POST', { fields: { apiKey: 'secret' } })
+    void callRoute(h, '/api/pico/connectors/tok/auth-submit', 'POST', { fields: { apiKey: 'secret' } })
+    // 确定性：必须等到写真的进入 park（否则用例走的是"写前检查"那条路，
+    // 补偿代码根本不会被执行 —— 2026-09-15 复核实测到的假绿）。
+    await waitFor(() => parked, 5000)
     await callRoute(h, '/api/pico/connectors/tok/disconnect', 'POST')
     release()
     await new Promise(resolve => setTimeout(resolve, 80))
 
-    // Without the compensating cleanup the late write recreated the file and the
-    // next restore registered a connector the user had just disconnected.
     expect(await store.readCredential('tok')).toBeNull()
     expect(h.configs).toHaveLength(0)
+    h.dispose()
+  })
+
+  it('a disconnect followed by a NEW attempt still leaves no stale credential (复核实测窗口)', async () => {
+    const dir = await tempDir('pico-intent-write-newer-')
+    const store = new ConnectorStore({ baseDir: dir })
+    const original = ConnectorStore.prototype.updateCredential
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let parked = false
+    vi.spyOn(ConnectorStore.prototype, 'updateCredential').mockImplementation(async function (
+      this: ConnectorStore,
+      id: string,
+      patch: Parameters<ConnectorStore['updateCredential']>[1],
+    ) {
+      if (!parked) {
+        parked = true
+        await gate
+      }
+      return await original.call(this, id, patch)
+    })
+
+    const h = createHarness([tokenDef()], dir)
+    void callRoute(h, '/api/pico/connectors/tok/auth-submit', 'POST', { fields: { apiKey: 'STALE-A' } })
+    await waitFor(() => parked, 5000)
+    await callRoute(h, '/api/pico/connectors/tok/disconnect', 'POST')
+    // 断开之后又来一次连接：它建立了**更新的意图**（复核的复现序列）。
+    // 旧实现以"存在更新的意图"为免做条件，于是迟到写入留在磁盘上。
+    await callRoute(h, '/api/pico/connectors/tok/connect', 'POST')
+    release()
+    await new Promise(resolve => setTimeout(resolve, 120))
+
+    expect(await store.readCredential('tok')).toBeNull()
+    h.dispose()
+  })
+
+  it('a newer write that already landed is never replaced by stale bytes', async () => {
+    const dir = await tempDir('pico-intent-write-invariant-')
+    const store = new ConnectorStore({ baseDir: dir })
+    const original = ConnectorStore.prototype.updateCredential
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let parked = false
+    vi.spyOn(ConnectorStore.prototype, 'updateCredential').mockImplementation(async function (
+      this: ConnectorStore,
+      id: string,
+      patch: Parameters<ConnectorStore['updateCredential']>[1],
+    ) {
+      if (!parked) {
+        parked = true
+        await gate
+      }
+      return await original.call(this, id, patch)
+    })
+
+    const h = createHarness([tokenDef()], dir)
+    void callRoute(h, '/api/pico/connectors/tok/auth-submit', 'POST', { fields: { apiKey: 'STALE-A' } })
+    await waitFor(() => parked, 5000)
+    await callRoute(h, '/api/pico/connectors/tok/disconnect', 'POST')
+    // 更新的意图**真的写了盘**（第二次 updateCredential 不再被 park）。
+    await callRoute(h, '/api/pico/connectors/tok/auth-submit', 'POST', { fields: { apiKey: 'FRESH-B' } })
+    release()
+    await new Promise(resolve => setTimeout(resolve, 120))
+
+    // 不变式：磁盘上绝不能是那份迟到的旧凭据（要么已被清掉，要么是新的）。
+    const onDisk = await store.readCredential('tok')
+    expect(onDisk?.fields?.['apiKey']).not.toBe('STALE-A')
     h.dispose()
   })
 })

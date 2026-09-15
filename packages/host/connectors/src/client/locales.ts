@@ -51,6 +51,10 @@ export const zh = {
   'error.exitCode': '登录命令失败：请确认已安装对应命令行工具并完成登录，然后重试',
   'error.commandMissing': '未找到登录命令：请先安装对应命令行工具',
   'error.generic': '连接失败：{message}',
+  'error.refreshStale': '刷新失败，显示上次数据',
+  'command.connected': '{name}（已连接）',
+  'command.info': '查看连接器信息',
+  'command.infoPrompt': '{name}（已连接）。模型可直接调用其注入工具（mcp__*），例如：{examples}',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -100,6 +104,10 @@ export const en: Record<keyof typeof zh, string> = {
   'error.exitCode': 'Login command failed: make sure the corresponding CLI is installed and signed in, then retry',
   'error.commandMissing': 'Login command not found: install the corresponding CLI first',
   'error.generic': 'Connection failed: {message}',
+  'error.refreshStale': 'Refresh failed — showing the last known data',
+  'command.connected': '{name} (connected)',
+  'command.info': 'View connector information',
+  'command.infoPrompt': '{name} (connected). The model can call its injected tools (mcp__*), for example: {examples}',
 }
 
 export type ConnectorsKey = keyof typeof zh

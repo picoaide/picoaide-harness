@@ -26,9 +26,9 @@ export const SIDEBAR_AUTO_COLLAPSE = 1024
 /** Right column drag clamp floor. */
 export const RIGHTBAR_MIN = 300
 /** Maximum normal right panel width as a fraction of the frame. */
-export const RIGHTBAR_MAX_RATIO = 0.7
+const RIGHTBAR_MAX_RATIO = 0.7
 /** First-open right panel preference as a fraction of the frame. */
-export const RIGHTBAR_DEFAULT_RATIO = 0.45
+const RIGHTBAR_DEFAULT_RATIO = 0.45
 /** Center width protected while the normal right column is open. */
 const CENTER_MIN = 400
 

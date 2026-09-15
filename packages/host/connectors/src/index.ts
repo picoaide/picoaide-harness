@@ -538,22 +538,41 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
 
   /**
    * Compensate a credential write that lost its race with a cancel/disconnect
-   * (the write started before the invalidation landed and completed after).
-   * Two safety rules keep the compensation from destroying good state: never
-   * touch the file when a NEWER intent already owns the connector (it may have
-   * written its own credential), and never touch a store that is no longer the
-   * active one (a user switch happened mid-write; those bytes belong to the
-   * previous user's directory).
+   * (the check before the write passed, the invalidation landed while the write
+   * was in flight, and the bytes reached the disk afterwards).
+   *
+   * 2026-09-15 复核修正：**不能**以"存在更新的意图"为免做条件 —— 断开之后紧接一次
+   * 新提交/新连接（哪怕只是建了意图、还没写盘）就会让补偿直接放弃，迟到的旧凭据留在
+   * 磁盘上，下次启动 `restoreAll` 又把它复活（复核探针实测：断开后文件里重新出现
+   * `{"apiKey":"STALE-A"}`）。现在的判据是**内容比对**：磁盘上仍是我们这次写下的
+   * 那一份时才回滚；更新的意图若已经写过自己的凭据，比对必然不等，自然放手。
+   *
+   * 用户切换（store 实例已更换）时不动：那份字节落在上一个用户的目录里，无法在不
+   * 破坏他人数据的前提下判断归属。
    */
-  const undoStaleCredentialWrite = async (id: string, intent: ConnectIntent): Promise<void> => {
-    if (supersededByNewerIntent(id, intent)) return
+  const undoStaleCredentialWrite = async (
+    id: string,
+    intent: ConnectIntent,
+    written: ConnectorCredential,
+  ): Promise<void> => {
     if (intent.store !== store) return
     try {
+      const onDisk = await intent.store.readCredential(id)
+      if (onDisk === null || !sameCredential(onDisk, written)) return
       await intent.store.clearCredential(id)
     } catch (cause) {
       ctx.logger?.warn(`pico-connectors: ${id} 竞态凭据写入回滚失败`, cause)
     }
   }
+
+  /** 结构比对（逐字段，不用 JSON 字符串以免受键序影响）。 */
+  const sameCredential = (a: ConnectorCredential, b: ConnectorCredential): boolean =>
+    a.updatedAt === b.updatedAt
+    && a.accessToken === b.accessToken
+    && a.refreshToken === b.refreshToken
+    && a.expiresAt === b.expiresAt
+    && a.publicMcp === b.publicMcp
+    && JSON.stringify(a.fields ?? {}) === JSON.stringify(b.fields ?? {})
 
   /**
    * Register one connector's MCP servers. `pendingApproval` means nothing was
@@ -1200,7 +1219,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       if (!intentLive(id, intent) || intent.store !== store) return
       const merged = await store.updateCredential(id, { ...current, ...patch })
       if (!intentLive(id, intent)) {
-        await undoStaleCredentialWrite(id, intent)
+        await undoStaleCredentialWrite(id, intent, merged)
         return
       }
       // A stateless flow (device / server-side) can finish without the
@@ -1286,9 +1305,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       pendingFieldRequestKind.delete(id)
       const current = await store.readCredential(id)
       if (!intentLive(id, intent) || intent.store !== store) return
-      await store.updateCredential(id, { fields: { ...(current?.fields ?? {}), ...fields } })
+      const written = await store.updateCredential(id, { fields: { ...(current?.fields ?? {}), ...fields } })
       if (!intentLive(id, intent)) {
-        await undoStaleCredentialWrite(id, intent)
+        await undoStaleCredentialWrite(id, intent, written)
         return
       }
       const merged = await store.readCredential(id)

@@ -95,7 +95,7 @@ interface OriginAwareCredentialResolver {
 }
 
 /** Refuse the injection when the tab's origin is not the connector's origin. */
-async function assertCredentialOrigin(runtime: BrowserRuntime, tabId: number, connectorId: string): Promise<void> {
+async function assertCredentialOrigin(runtime: BrowserRuntime, tabId: number, connectorId: string): Promise<string> {
   const resolver = (runtime as unknown as { credentials?: OriginAwareCredentialResolver }).credentials
   const lookup = resolver?.originOf ?? resolver?.urlOf
   // fail-closed（BUG-03）：能力缺席**不再**等于"放行"。旧实现在部署没注入 origin
@@ -115,6 +115,7 @@ async function assertCredentialOrigin(runtime: BrowserRuntime, tabId: number, co
   if (actual !== expected) {
     throw browserError('policy', `browser_fill_credentials refused: this tab is on ${actual} but connector ${JSON.stringify(connectorId)} is bound to ${expected}. Credentials are only injected into their own site — a look-alike page must not receive them; navigate the tab to ${expected} first.`)
   }
+  return expected
 }
 
 /** Result meta projection helpers. */
@@ -1057,8 +1058,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       noteAgent(runtime, exec.agent)
       const tabId = await tabOf(tab)
       // 2026-09-15 审计 P2：注入前先做站点绑定（见 assertCredentialOrigin）。
-      await assertCredentialOrigin(runtime, tabId, connectorId.trim())
-      return await runtime.fillCredentials(tabId, connectorId.trim(), exec.signal)
+      const expectedOrigin = await assertCredentialOrigin(runtime, tabId, connectorId.trim())
+      // 把基准带进临界区再复核一次（TOCTOU 收口）。
+      return await runtime.fillCredentials(tabId, connectorId.trim(), exec.signal, expectedOrigin)
     },
   }))
 
