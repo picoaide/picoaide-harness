@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { friendlyConnectorError, t } from './locales.ts'
+import { friendlyConnectorError, t, type ConnectorsKey } from './locales.ts'
 
 
 /**
@@ -135,12 +135,21 @@ const FILTER_BUTTON: React.CSSProperties = {
 
 const FILTER_ACTIVE: React.CSSProperties = { ...FILTER_BUTTON, background: 'var(--dsw-alias-bg-layer-3)', color: 'var(--dsw-alias-label-primary)' }
 
-const statusText: Record<string, string> = {
-  disconnected: t('status.disconnected'),
-  connecting: t('status.connecting'),
-  connected: t('status.connected'),
-  unauthorized: t('status.unauthorized'),
-  error: t('status.error'),
+/**
+ * 状态标签（2026-09-15 审计 BUG-07）：以前这里是**模块级常量**，`t()` 在模块求值
+ * 时（apply 之前）就把 zh 文案捕获死了，切成英文后状态列仍然中文。改成渲染期查表。
+ */
+const STATUS_KEYS = {
+  disconnected: 'status.disconnected',
+  connecting: 'status.connecting',
+  connected: 'status.connected',
+  unauthorized: 'status.unauthorized',
+  error: 'status.error',
+} as const
+
+function statusLabel(status: string): string {
+  const key = (STATUS_KEYS as Record<string, ConnectorsKey | undefined>)[status]
+  return key === undefined ? status : t(key)
 }
 
 // Design-token colors: adapt automatically to the light and dark themes.
@@ -369,7 +378,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
     <div style={CARD}>
       <div style={HEAD}>
         <p style={TITLE} title={entry.name}>{entry.name}</p>
-        <p style={{ ...STATUS, color: statusColor[entry.status] ?? '#c9ccd3' }}>{statusText[entry.status] ?? entry.status}</p>
+        <p style={{ ...STATUS, color: statusColor[entry.status] ?? '#c9ccd3' }}>{statusLabel(entry.status)}</p>
       </div>
       <p style={DESC} title={entry.description}>{entry.description}</p>
 
