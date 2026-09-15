@@ -350,6 +350,10 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "GET", "/shared-skills/:name/grants", serverauth.PermCapabilityRead, d.Shared.ListGrants)
 	serverauth.AdminRoute(authed, "PUT", "/shared-skills/:name/grants", serverauth.PermCapabilityWrite, d.Shared.ReplaceGrants)
 	serverauth.AdminRoute(authed, "PUT", "/shared-skills/:name/grant", serverauth.PermCapabilityWrite, d.Shared.SetGrant)
+	// 组织共享技能上下架(2026-09-15):与市场技能同一语义(apps.enabled),但作用于
+	// org 渠道行;员工可见性与下载都由该标志闸住(见 serverstore.ListVisibleSharedSkills
+	// 与 sharedskills.download)。市场技能仍走 marketplace 的 /skills/:name 端点。
+	serverauth.AdminRoute(authed, "PUT", "/shared-skills/:name/enabled", serverauth.PermCapabilityWrite, d.Shared.SetEnabled)
 	serverauth.AdminRoute(authed, "DELETE", "/shared-skills/:name/grant", serverauth.PermCapabilityWrite, d.Shared.RemoveGrant)
 
 	// 共享 Agent 管理

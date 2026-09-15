@@ -95,6 +95,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	serverauth.AdminRoute(g, "PUT", "/:name/grants", serverauth.PermCapabilityWrite, replaceGrants(db))
 	serverauth.AdminRoute(g, "PUT", "/:name/grant", serverauth.PermCapabilityWrite, setGrant(db, true))
 	serverauth.AdminRoute(g, "DELETE", "/:name/grant", serverauth.PermCapabilityWrite, setGrant(db, false))
+	// 组织共享技能上下架(与生产路由树同一路径,见 internal/router)。
+	serverauth.AdminRoute(g, "PUT", "/:name/enabled", serverauth.PermCapabilityWrite, setEnabled(db))
 
 	// 能力锁定(D4)挂在另一个基路径,与生产路由树一致(AGENTS.md:测试自建
 	// 路由树的前缀必须与生产相同,否则测不出路径不匹配)。
@@ -167,9 +169,17 @@ func listVisible(db *sql.DB) gin.HandlerFunc {
 				return
 			}
 		}
+		// 上下架状态（App 级）：管理端要据此渲染「已下架」与切换按钮，一次批量取。
+		enabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindSkill)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
 		out := make([]gin.H, 0, len(list))
 		for _, s := range list {
-			out = append(out, rowJSON(s))
+			row := rowJSON(s)
+			row["enabled"] = enabled[s.Name]
+			out = append(out, row)
 		}
 		c.JSON(http.StatusOK, gin.H{"skills": out})
 	}
@@ -274,9 +284,18 @@ func listAll(db *sql.DB) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
+		// 上下架状态（App 级，2026-09-15）：管理端要据此渲染「已下架」与切换按钮，
+		// 一次批量取，不逐行查 apps。
+		enabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindSkill)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
 		out := make([]gin.H, 0, len(list))
 		for _, s := range list {
-			out = append(out, rowJSON(s))
+			row := rowJSON(s)
+			row["enabled"] = enabled[s.Name]
+			out = append(out, row)
 		}
 		c.JSON(http.StatusOK, gin.H{"skills": out})
 	}
@@ -550,6 +569,50 @@ func setGrant(db *sql.DB, grant bool) gin.HandlerFunc {
 		}
 		_ = serverstore.AuditLog(db, adminUsername(c), action, name+"@"+string(t)+":"+subject)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// setEnabled 组织共享技能上下架（2026-09-15）。语义与市场技能的
+// marketplace /skills/:name 上下架完全一致（apps.enabled），但**只作用于
+// 组织渠道行** —— 市场渠道行由 marketplace 端点管理，那边同样拒绝跨渠道写
+// （marketplace-8），避免两个入口互相把对方的行置成下架。
+//
+// 效果（三处闸门都已就位）：员工目录不可见（ListVisibleSharedSkills 按
+// EnabledAppIDs 过滤）、员工下载 404（download 的第三道闸门）、管理端照旧可
+// 审核与预览。下架不删数据，重新上架即恢复。
+func setEnabled(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name := c.Param("name")
+		if !skillNameRe.MatchString(name) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "参数不合法")
+			return
+		}
+		var req struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil || req.Enabled == nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", `请求体格式错误(需要 {"enabled": true|false})`)
+			return
+		}
+		if !requireOrgSkill(c, db, name) {
+			return
+		}
+		if err := serverstore.SetAppEnabled(db, serverstore.AppKindSkill, name, *req.Enabled); err != nil {
+			if errors.Is(err, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "切换失败")
+			return
+		}
+		// 可见性变更必审计（与市场技能的 skill_disable/skill_enable 同精神，
+		// 动作名带 shared_ 前缀以便与市场域区分）。
+		action := "shared_skill_disable"
+		if *req.Enabled {
+			action = "shared_skill_enable"
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), action, name)
+		c.JSON(http.StatusOK, gin.H{"ok": true, "enabled": *req.Enabled})
 	}
 }
 

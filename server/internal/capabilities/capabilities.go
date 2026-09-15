@@ -642,6 +642,9 @@ type ApprovalRow struct {
 	Conflict bool `json:"conflict"`
 	// Official 官方属性(0059, App 级,与来源无关): 管理端渲染蓝标与归属语义。
 	Official bool `json:"official"`
+	// Enabled 上下架状态(2026-09-15, App 级): 审批页据此渲染「已下架」与切换
+	// 按钮;组织共享技能走 PUT /shared-skills/:name/enabled。
+	Enabled bool `json:"enabled"`
 }
 
 // listApprovals 归并 shared-skills 与 agent-presets 的列表(默认 pending,
@@ -665,6 +668,8 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			}
 			// 归属映射(2026-09-02):owner 是 App 级,与版本无关,一次查询覆盖。
 			skillOwners := appOwnerMap(db, serverstore.AppKindSkill, "")
+			// 上下架状态(App 级,2026-09-15):同上,一次批量取。
+			skillEnabled, _ := serverstore.EnabledAppIDs(db, serverstore.AppKindSkill)
 			skillOfficials, _ := serverstore.AppOfficialMap(db, serverstore.AppKindSkill)
 			for _, s := range rows {
 				// 决策 2026-08-25:跨源同名(市场技能表已有同名)标记冲突,
@@ -686,6 +691,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					Downloads:   s.Downloads,
 					Calls:       s.Calls,
 					Official:    skillOfficials[s.Name],
+					Enabled:     skillEnabled[s.Name],
 					BasePath:    "/api/server/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version),
 					GrantsBase:  "/api/server/admin/shared-skills/" + pathEscape(s.Name),
 					PreviewPath: "/api/server/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version) + "/preview",
