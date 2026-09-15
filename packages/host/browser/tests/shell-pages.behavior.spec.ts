@@ -317,6 +317,30 @@ describe('浏览器本地页面：失败必须可见、状态必须真实（2026
       expect(toasts(page, 'otoast')).toContain('浏览器会话凭据尚未就绪')
     })
 
+    it('交回方向的 pending 文案是「正在交还…」（2026-09-15 P3：旧实现两个方向都写「正在接管…」）', async () => {
+      let releaseTakeover: ((reply: Reply) => void) | undefined
+      const page = openOverlay((call) => {
+        if (call.path === 'takeover') return new Promise<Reply>((resolve) => { releaseTakeover = resolve })
+        if (call.path === 'state') return { json: overlayState({ controlled: true, ui: { mode: 'capsule' } }) }
+        if (call.path === 'ops') return { json: { ops: [] } }
+        return undefined
+      })
+      await page.settle()
+
+      const aiTake = page.$('ai-take')
+      expect(aiTake.textContent).toBe('交给 AI')
+      page.fire(aiTake, 'click')
+      await page.settle()
+
+      expect(page.calls.find((c) => c.path === 'takeover')?.body?.active).toBe(false)
+      expect(aiTake.disabled).toBe(true)
+      expect(aiTake.textContent).toBe('正在交还…')
+
+      releaseTakeover?.({ json: { ok: true } })
+      await page.settle()
+      expect(aiTake.textContent).toBe('交给 AI')
+    })
+
     it('接管成功：胶囊按服务端状态切成「交给 AI」（成功路径不被误伤）', async () => {
       let controlled = false
       const page = openOverlay((call) => {

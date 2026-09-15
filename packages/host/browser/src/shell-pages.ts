@@ -807,7 +807,9 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     if (!btn || btn.disabled) return
     const label = btn.textContent
     btn.disabled = true
-    btn.textContent = '正在接管…'
+    // 方向文案（2026-09-15 审计 P3）：旧实现不论接管还是交回都说「正在接管…」，
+    // 用户点「交给 AI」时看到的是相反方向的动作。
+    btn.textContent = active ? '正在接管…' : '正在交还…'
     const r = await post('takeover', { active })
     btn.disabled = false
     btn.textContent = label

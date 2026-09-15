@@ -503,7 +503,17 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       submit: { type: 'boolean', description: 'Submit the enclosing form after filling (default false).' },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { filled: { type: 'integer' }, submitted: { type: 'boolean' } } },
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          filled: { type: 'integer' },
+          submitted: { type: 'boolean' },
+          // 逐字段结果（2026-09-15 审计 BUG-04）：没匹配上、或写了但读回不一致
+          // 的字段名。旧的"盲计数"让模型以为整批都填好了。
+          missed: { type: 'array', items: { type: 'string' } },
+        },
+      },
       render: (_args, value) => [{ type: 'text', text: formatFillForm(value) }],
       presentationMeta: (_args, value) => metaFrom(value),
     },
@@ -1172,8 +1182,9 @@ function formatTabs(value: unknown): string {
 }
 
 function formatFillForm(value: unknown): string {
-  const v = value as { filled?: number; submitted?: boolean }
-  return `Filled ${String(v.filled ?? 0)} field(s)${v.submitted === true ? ' and submitted the form' : ''}.`
+  const v = value as { filled?: number; submitted?: boolean; missed?: string[] }
+  const unmatched = Array.isArray(v.missed) && v.missed.length > 0 ? ` Unmatched field(s): ${v.missed.join(', ')}.` : ''
+  return `Filled ${String(v.filled ?? 0)} field(s)${v.submitted === true ? ' and submitted the form' : ''}.${unmatched}`
 }
 
 function formatWait(value: unknown): string {
