@@ -46,6 +46,11 @@ export const zh = {
   'token.expired': '令牌已过期，正在自动续期',
   'token.refreshedAt': '上次刷新 {time}',
   'token.refreshFailed': '令牌刷新失败：{message}',
+  // 错误兜底文案（2026-09-15 审计 BUG-07）：以前这三条硬编码中文，
+  // 英文界面下连接失败提示仍是中文。
+  'error.exitCode': '登录命令失败：请确认已安装对应命令行工具并完成登录，然后重试',
+  'error.commandMissing': '未找到登录命令：请先安装对应命令行工具',
+  'error.generic': '连接失败：{message}',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -92,6 +97,9 @@ export const en: Record<keyof typeof zh, string> = {
   'token.expired': 'Token expired — renewing automatically',
   'token.refreshedAt': 'Last refreshed {time}',
   'token.refreshFailed': 'Token refresh failed: {message}',
+  'error.exitCode': 'Login command failed: make sure the corresponding CLI is installed and signed in, then retry',
+  'error.commandMissing': 'Login command not found: install the corresponding CLI first',
+  'error.generic': 'Connection failed: {message}',
 }
 
 export type ConnectorsKey = keyof typeof zh
@@ -116,13 +124,13 @@ export function t(key: ConnectorsKey, params?: Record<string, string>): string {
 
 /** Map raw connector/CLI errors to user-facing copy (P3-6). */
 export function friendlyConnectorError(raw: string): string {
-  if (raw.includes('退出码')) return '登录命令失败：请确认已安装对应命令行工具并完成登录，然后重试'
+  if (raw.includes('退出码')) return t('error.exitCode')
   // The node side names the missing binary and its install command; show it
   // verbatim so the user knows what to install (e.g. npm install -g beisen-cli).
   if (raw.includes('未找到命令')) return raw
   // Download-on-demand errors carry specific detail; surface them verbatim.
   if (raw.includes('下载')) return raw
-  if (raw.includes('ENOENT')) return '未找到登录命令：请先安装对应命令行工具'
+  if (raw.includes('ENOENT')) return t('error.commandMissing')
   if (raw.includes('token') || raw.includes('授权') || raw.includes('登录')) return raw
-  return `连接失败：${raw}`
+  return t('error.generic', { message: raw })
 }

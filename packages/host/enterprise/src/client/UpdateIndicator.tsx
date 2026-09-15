@@ -2,6 +2,7 @@
 
 import { createElement, useCallback, useSyncExternalStore } from 'react'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import { t } from './locales.ts'
 
 /**
  * 宿主更新快照。
@@ -111,43 +112,43 @@ export function downloadingStatusText(state: UpdateState): string {
   const delay = state.retryDelayMs ?? 0
   const percent = progressPercent(state)
   if (delay > 0) {
-    return `下载中断，${String(Math.ceil(delay / 1000))} 秒后重试（第 ${String(attempt)}/${String(max)} 次）…`
+    return t('update.interrupted', { seconds: String(Math.ceil(delay / 1000)), attempt: String(attempt), max: String(max) })
   }
   if (attempt > 1) {
-    return `正在重试下载 ${version}（第 ${String(attempt)}/${String(max)} 次）${percent !== undefined ? ` ${percent}` : ''}…`
+    return t('update.retrying', { version, attempt: String(attempt), max: String(max), percent: percent !== undefined ? ` ${percent}` : '' })
   }
-  return `正在下载 ${version}…${percent !== undefined ? ` ${percent}` : ''}`
+  return t('update.downloading', { version, percent: percent !== undefined ? ` ${percent}` : '' })
 }
 
 /** 「关于」页的状态行文案(与侧边栏指示器同源,不再各写一套判断)。 */
 export function updateStatusText(state: UpdateState | null): string {
   // A missing update service (compatibility mode / service not composed) is
   // not "up to date": saying so hides a broken update path.
-  if (state === null) return '更新服务不可用'
-  if (state.readyVersion !== undefined) return `新版本 ${state.readyVersion} 已下载，点击「安装更新」完成升级`
+  if (state === null) return t('update.serviceUnavailable')
+  if (state.readyVersion !== undefined) return t('update.ready', { version: state.readyVersion })
   if (state.downloadingVersion !== undefined) return downloadingStatusText(state)
-  if (state.availableVersion !== undefined) return `发现新版本 ${state.availableVersion}，正在准备下载…`
+  if (state.availableVersion !== undefined) return t('update.available', { version: state.availableVersion })
   switch (state.lastError) {
     case 'not-signed-in':
       // 客户端只从它登录的那台服务端取更新:未登录就没有更新源。
-      return '请先登录后再检查更新'
+      return t('update.notSignedIn')
     case 'network':
-      return '检查更新失败：网络不可达（已自动重试），请稍后再试'
+      return t('update.network')
     case 'release-missing':
-      return '检查更新失败：最新版本缺少可下载安装包'
+      return t('update.releaseMissing')
     case 'checksum-mismatch':
-      return '更新下载失败：安装包校验不一致（已自动重试），请稍后再试'
+      return t('update.checksumMismatch')
     case 'invalid-artifact':
-      return '更新下载失败：安装包格式不正确，请联系管理员'
+      return t('update.invalidArtifact')
     case 'server-unavailable':
       // 服务端连得上、清单也拿到了,只是它推不出安全的对外地址:
       // 这是部署配置问题(需管理员配 PICOAI_PUBLIC_BASE_URL 或反代的
       // X-Forwarded-Proto),不能显示成"已是最新"把故障藏起来。
-      return '检查更新失败：服务端未配置对外可用的 https 地址，请联系管理员'
+      return t('update.serverUnavailable')
     case 'unsupported':
-      return '当前平台不支持自动更新'
+      return t('update.unsupported')
     default:
-      return '已是最新版本'
+      return t('update.upToDate')
   }
 }
 
@@ -166,16 +167,16 @@ export function UpdateIndicator({ state }: { state?: UpdateState | null }): JSX.
 
   const percent = progressPercent(snapshot)
   const label = ready !== undefined
-    ? `可安装 ${ready}`
+    ? t('update.readyShort', { version: ready })
     : downloading !== undefined
       ? `${downloading}${percent !== undefined ? ` ${percent}` : ''}`
       : available ?? ''
   const color = ready !== undefined ? '#16a34a' : downloading !== undefined ? '#f59e0b' : '#3b82f6'
   const title = ready !== undefined
-    ? `新版本 ${ready} 已下载，点击安装`
+    ? t('update.readyTitle', { version: ready })
     : downloading !== undefined
       ? downloadingStatusText(snapshot)
-      : `新版本 ${available ?? ''} 可用，点击检查更新`
+      : t('update.availableTitle', { version: available ?? '' })
 
   return createElement(
     'button',
@@ -214,14 +215,17 @@ export function UpdateIndicator({ state }: { state?: UpdateState | null }): JSX.
 
 /** 「关于」页按钮文案:检查更新 / 安装更新 / 下载中。 */
 export function updateActionLabel(state: UpdateState | null, checking: boolean): string {
-  if (checking) return '检查中…'
-  if (state?.readyVersion !== undefined) return '安装更新'
-  if (state?.downloadingVersion !== undefined) return '下载中…'
-  return '检查更新'
+  if (checking) return t('update.checking')
+  if (state?.readyVersion !== undefined) return t('update.install')
+  if (state?.downloadingVersion !== undefined) return t('update.downloadingAction')
+  return t('update.check')
 }
 
 /** 按钮是否应禁用(下载中或已在检查)。 */
 export function updateActionDisabled(state: UpdateState | null, checking: boolean): boolean {
+  // 2026-09-15 审计 P3：没有更新服务（state === null）时状态行写着"更新服务不可用"，
+  // 按钮却仍可点、点了没有任何反应 —— 死按钮。服务缺席即禁用。
+  if (state === null) return true
   return checking || state?.downloadingVersion !== undefined
 }
 

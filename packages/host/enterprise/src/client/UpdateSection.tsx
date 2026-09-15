@@ -13,6 +13,7 @@ import {
   updateStatusText,
   useUpdateState,
 } from './UpdateIndicator.tsx'
+import { t } from './locales.ts'
 
 const ROW: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 8 }
 const LABEL: React.CSSProperties = { fontSize: 13, margin: 0, color: 'var(--dsw-alias-label-caption)' }
@@ -45,7 +46,7 @@ function UpdateSection(_props: PropsRuntime<'settings.section'>): JSX.Element {
   return createElement(
     'div',
     { style: ROW },
-    createElement('p', { style: LABEL }, '关于'),
+    createElement('p', { style: LABEL }, t('update.about')),
     // 「关于」里的产品名走渠道内容(渠道构建下即渠道名),不在文案里硬编码厂商名。
     createElement(
       'p',
@@ -79,7 +80,7 @@ export function applyUpdateSection(ctx: ClientContext): void {
       name: 'settings.section',
       id: 'update',
       order: 1000,
-      label: '关于',
+      label: t('update.about'),
     }, UpdateSection)),
     'enterprise: settings update section',
   )
