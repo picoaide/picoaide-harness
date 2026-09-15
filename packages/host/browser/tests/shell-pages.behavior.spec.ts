@@ -206,9 +206,16 @@ describe('两个页面的内联脚本本身必须可解析（模板字符串事�
     ['shell', BROWSER_SHELL_HTML],
     ['overlay', BROWSER_OVERLAY_HTML],
   ])('%s 页恰好一个 <script> 且能通过 JS 解析', (_name, html) => {
-    const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gu)]
-    expect(scripts).toHaveLength(1)
-    const body = scripts[0]?.[1] ?? ''
+    // 按字面量切分而不写正则：这里只是取"我们自己生成的页面"里的那一段脚本，
+    // 而 CodeQL 的 js/bad-tag-filter 会把任何 `<script>…</script>` 正则当成
+    // HTML 过滤/消毒逻辑并报高危（code scanning 的 1 high alert 就是它）。
+    const open = '<script>'
+    const close = '</script>'
+    const parts = html.split(open)
+    expect(parts).toHaveLength(2) // 多一个 <script> 就会多一段
+    const afterOpen = parts[1] as string
+    expect(afterOpen.split(close)).toHaveLength(2) // 有且只有一个闭合标签
+    const body = afterOpen.slice(0, afterOpen.indexOf(close))
     expect(body.length).toBeGreaterThan(1000)
     expect(() => new Function(body)).not.toThrow()
   })
