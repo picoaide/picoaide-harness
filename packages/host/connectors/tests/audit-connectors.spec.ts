@@ -312,6 +312,28 @@ describe('audit: auth flows other than OAuth', () => {
     h.dispose()
   })
 
+  it('PROBE J: pre-connect settings submission continues OAuth instead of registering MCP directly', async () => {
+    const server = await start({ expiresIn: 3600 })
+    const connector = oauthDef(server.origin)
+    connector.auth = { ...(connector.auth as Record<string, unknown>), clientId: 'static-client' } as typeof connector.auth
+    connector.settings = [{ key: 'tenant', label: 'Tenant', type: 'text', required: true }]
+    const dir = mkdtempSync(join(tmpdir(), 'audit-j-'))
+    const h = createHarness([connector], dir, { refreshSweepIntervalMs: 0 })
+    await callRoute(h, '/api/pico/connectors/moka/connect', 'POST')
+
+    // The pre-connect settings form is shown, before any OAuth flow starts.
+    const settingsRow = await awaitRow(h, 'moka', (r) => Array.isArray(r.request?.fields) && r.request!.fields!.length === 1)
+    expect(settingsRow.request!.fields![0]!.key).toBe('tenant')
+
+    await callRoute(h, '/api/pico/connectors/moka/auth-submit', 'POST', { fields: { tenant: 'acme' } })
+    // After settings are submitted the real authorization flow must start (an
+    // authorize URL appears) and nothing may register yet.
+    const authorizeRow = await awaitRow(h, 'moka', (r) => typeof r.request?.authorizeUrl === 'string')
+    expect(authorizeRow.request!.authorizeUrl).toContain('/oauth/authorize')
+    expect(h.configs).toHaveLength(0)
+    h.dispose()
+  }, 20_000)
+
   it('PROBE G: switching user clears the previous user\'s row facts', async () => {
     const server = await start({ expiresIn: 3600 })
     const dir = mkdtempSync(join(tmpdir(), 'audit-g-'))

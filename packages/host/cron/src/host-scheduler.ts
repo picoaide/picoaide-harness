@@ -10,7 +10,7 @@
  * With `catchUpMissed` enabled, the single most recent missed occurrence is
  * fired instead of skipped.
  */
-import { nextRunAtMs } from './cron.ts'
+import { lastRunAtMs } from './cron.ts'
 import type { HostCronLedger } from './host-ledger.ts'
 import { HostCronExecutor } from './host-executor.ts'
 import type { JobRecord } from './jobs.ts'
@@ -72,14 +72,18 @@ export class HostCronScheduler {
     this.tickInFlight = true
     try {
       const now = this.now()
-      const recovered = first || (this.lastTickAt !== undefined && now - this.lastTickAt > RESUME_GAP_MS)
+      const previousTick = this.lastTickAt
+      const recovered = first || (previousTick !== undefined && now - previousTick > RESUME_GAP_MS)
       this.lastTickAt = now
       // A successful tick also clears a previously recorded scheduler error
       // (transient failures must not stay visible forever).
       this.ledger.setScheduler({ lastTickAt: now, error: undefined })
       if (recovered) {
-        if (this.catchUpMissed && this.lastTickAt !== undefined) {
-          this.catchUp(now)
+        // First tick after boot has no in-memory previousTick; catch-up is
+        // still meaningful there (the persisted nextRunAt is the anchor), so
+        // fall back to `now` and let lastMatchAt use its own lower bound.
+        if (this.catchUpMissed) {
+          this.catchUp(previousTick ?? now, now)
         } else {
           this.ledger.skipMissed(now)
         }
@@ -110,12 +114,11 @@ export class HostCronScheduler {
    * instant inside the missed window, then roll forward. Bounded: the window
    * scan walks at most 100 matches.
    */
-  private catchUp(now: number): void {
-    const lastTick = this.lastTickAt ?? now
+  private catchUp(windowStart: number, now: number): void {
     for (const job of this.ledger.state().jobs) {
       if (!this.visible(job)) continue
       if (!job.enabled || job.nextRunAt === undefined || job.nextRunAt > now) continue
-      const lastMatch = this.lastMatchAt(job, lastTick, now)
+      const lastMatch = this.lastMatchAt(job, windowStart, now)
       if (lastMatch === undefined) continue
       const opened = this.ledger.openScheduled(job.id, `catchup-${crypto.randomUUID()}`, lastMatch)
       if (opened !== undefined) void this.fire(opened.job, opened.execution)
@@ -125,16 +128,15 @@ export class HostCronScheduler {
   }
 
   private lastMatchAt(job: JobRecord, windowStart: number, now: number): number | undefined {
-    let cursor = job.nextRunAt ?? windowStart
-    let last: number | undefined
-    for (let guard = 0; guard < 100; guard += 1) {
-      if (cursor > now) break
-      last = cursor
-      const next = nextRunAtMs(job.cron, cursor)
-      if (next === undefined) break
-      cursor = next
-    }
-    return last
+    void windowStart
+    if (job.nextRunAt === undefined || job.nextRunAt > now) return undefined
+    // Most recent matching minute at/before now, not the 100th match walked
+    // forward from nextRunAt. `job.nextRunAt` is the last-known due instant;
+    // the returned match must not precede it, otherwise skipMissed already
+    // rolled past that occurrence.
+    const latest = lastRunAtMs(job.cron, now)
+    if (latest === undefined || latest < job.nextRunAt) return undefined
+    return latest
   }
 
   /**

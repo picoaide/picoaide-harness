@@ -56,6 +56,23 @@ describe('gateway-model', () => {
     }))
   })
 
+  it('syncs an already-restored session on apply (startup race)', async () => {
+    // SessionService.restore() can finish before this plugin's apply(); the
+    // first session-changed event is then already gone. apply() must sample
+    // the restored session itself.
+    const f = ctxFixture()
+    ;(f.ctx as unknown as { picoSession: unknown }).picoSession = {
+      isRestored: () => true,
+      getSession: () => SESSION,
+    }
+    apply(f.ctx)
+    await vi.waitFor(() => expect(f.set).toHaveBeenCalledWith(expect.anything(), 'tok-1'))
+    await vi.waitFor(() => expect(f.update).toHaveBeenCalledWith(expect.anything(), {
+      baseURL: 'https://gateway.example/v1',
+      apiKeyEnv: TOKEN_ENV,
+    }))
+  })
+
   it('strips trailing slashes from the server URL', async () => {
     const f = ctxFixture()
     apply(f.ctx)

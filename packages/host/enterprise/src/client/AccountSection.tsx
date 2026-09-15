@@ -80,6 +80,7 @@ export function AccountSection(_props: PropsRuntime<'settings.section'>) {
   const [state, setState] = useState<AuthState | null>(null)
   const [failed, setFailed] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
+  const [logoutError, setLogoutError] = useState('')
   // 0057 改密表单状态
   const [pwOpen, setPwOpen] = useState(false)
   const [oldPassword, setOldPassword] = useState('')
@@ -114,10 +115,18 @@ export function AccountSection(_props: PropsRuntime<'settings.section'>) {
   const logout = async (): Promise<void> => {
     if (loggingOut) return
     setLoggingOut(true)
+    setLogoutError('')
     try {
-      await fetch('/api/pico/auth/logout', { method: 'POST' })
-    } finally {
+      const response = await fetch('/api/pico/auth/logout', { method: 'POST' })
+      if (!response.ok) {
+        setLogoutError(t('account.logoutFailed', { error: `HTTP ${String(response.status)}` }))
+        setLoggingOut(false)
+        return
+      }
       location.reload()
+    } catch (cause) {
+      setLogoutError(t('account.logoutFailed', { error: cause instanceof Error ? cause.message : 'network' }))
+      setLoggingOut(false)
     }
   }
 
@@ -212,6 +221,7 @@ export function AccountSection(_props: PropsRuntime<'settings.section'>) {
           <p style={HINT}>{t('account.password.external')}</p>
         )
       )}
+      {logoutError !== '' && <p style={ERROR}>{logoutError}</p>}
       <button
         type="button"
         style={loggingOut ? BUTTON_DISABLED : BUTTON}

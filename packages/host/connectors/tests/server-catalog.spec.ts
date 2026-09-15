@@ -74,6 +74,23 @@ describe('parseServerConnectors', () => {
     expect(defs[0]!.name).toBe('') // 目录行 name 为空 → 原样(定义内没有 name)
   })
 
+  it('drops a row with an unsupported auth_mode instead of silently registering it', () => {
+    const defs = parseServerConnectors([
+      { id: 'legacy-cli', name: 'Legacy CLI', description: '', auth_mode: 'cli', definition: MOKA_DEF },
+      { id: 'good', name: 'Good', description: '', auth_mode: 'oauth', definition: MOKA_DEF },
+    ])
+    expect(defs.map(d => d.id)).toEqual(['good'])
+  })
+
+  it('never emits an undefined name (the settings panel calls name.toLowerCase on search)', () => {
+    const defs = parseServerConnectors([
+      { id: 'nameless', name: undefined as unknown as string, description: undefined as unknown as string, auth_mode: 'oauth', definition: MOKA_DEF },
+    ])
+    expect(defs).toHaveLength(1)
+    expect(typeof defs[0]!.name).toBe('string')
+    expect(typeof defs[0]!.description).toBe('string')
+  })
+
   it('服务端合成 defaultValue 能透传到 tokenFields', () => {
     const def = JSON.parse(GLITCHTIP_DEF) as Record<string, unknown>
     const fields = (def.tokenFields as Array<Record<string, unknown>>).map((f) => (

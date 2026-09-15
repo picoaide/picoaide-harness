@@ -6,7 +6,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { CommandUiContract } from '@deepseek-ai/dsh-client-ui-commands/client'
 import { ConnectorTrigger } from './ConnectorTrigger.tsx'
-import { en, type ConnectorsKey, zh } from './locales.ts'
+import { en, setActiveLocale, type ConnectorsKey, zh } from './locales.ts'
 
 /**
  * Connectors client half: registers the connector center foot action in the
@@ -44,6 +44,25 @@ export function apply(ctx: ClientContext): void {
     const off = ctx.locale.register(LOCALE_NS, { zh, en })
     return () => { off() }
   }, 'connectors: client dictionaries')
+
+  // Follow the active locale so the module-level `t()` (used by components
+  // that do not receive PropsLocale) renders in English when that is the
+  // user's choice, instead of always reading the zh key source.
+  ctx.effect(() => {
+    const locale = ctx.locale as unknown as {
+      getLocale?: () => { active?: unknown }
+      subscribe?: (listener: () => void) => () => void
+    }
+    const sync = (): void => {
+      try {
+        const active = locale.getLocale?.()?.active
+        if (typeof active === 'string') setActiveLocale(active)
+      } catch { /* keep the last known locale */ }
+    }
+    sync()
+    if (typeof locale.subscribe !== 'function') return () => {}
+    return locale.subscribe(sync)
+  }, 'follow active locale')
 
   // Hover feedback matching the skill center trigger (P3-11).
   ctx.effect(() => {

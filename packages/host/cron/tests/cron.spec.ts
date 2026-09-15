@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isValidCron, nextRunAtMs, parseCron } from '../src/cron.ts'
+import { isValidCron, lastRunAtMs, nextRunAtMs, parseCron } from '../src/cron.ts'
 
 describe('parseCron', () => {
   it('parses a plain five-field expression', () => {
@@ -36,6 +36,18 @@ describe('parseCron', () => {
     expect(parseCron('0 9 1-31 * *')).not.toBeNull()
     expect(parseCron('a 9 * * *')).toBeNull()
     expect(parseCron('0 9 */x * *')).toBeNull()
+  })
+
+  it('treats */n as a wildcard for day/weekday OR semantics (standard cron)', () => {
+    const schedule = parseCron('0 0 */1 * 1')!
+    expect(schedule.dayWildcard).toBe(true)
+    expect(schedule.weekdayWildcard).toBe(false)
+    // Every day is a match of */1, so only the weekday field is restricted:
+    // the next run must be a Monday, not tomorrow (whichever day that is).
+    const from = new Date(2026, 8, 8, 0, 0, 0).getTime()
+    const next = nextRunAtMs('0 0 */1 * 1', from)!
+    expect(new Date(next).getDay()).toBe(1)
+    expect(next).toBeGreaterThan(from)
   })
 
   it('isValidCron agrees with parseCron', () => {
@@ -81,6 +93,21 @@ describe('nextRunAtMs', () => {
     const date = new Date(next!)
     expect(date.getMonth()).toBe(1)
     expect(date.getDate()).toBe(29)
+  })
+
+  it('lastRunAtMs returns the most recent match at/before fromMs', () => {
+    const from = new Date(2026, 8, 20, 10, 0, 0).getTime()
+    const daily = lastRunAtMs('0 9 * * *', from)!
+    const date = new Date(daily)
+    expect(date.getHours()).toBe(9)
+    expect(date.getDate()).toBe(20)
+
+    // A long gap must still return the LATEST match, not a capped forward walk
+    // (regression: the old catch-up could fire the 100th match after nextRunAt).
+    const old = new Date(2026, 7, 19, 9, 0, 0).getTime()
+    const latest = lastRunAtMs('* * * * *', from)!
+    expect(latest).toBeGreaterThan(old)
+    expect(from - latest).toBeLessThan(60_000)
   })
 
   it('never returns a time at or before fromMs', () => {
