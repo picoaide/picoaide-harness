@@ -311,3 +311,24 @@ describe('ConnectorStore.clearCredentialIfUnchanged：原子 compare-and-delete'
     expect(sameCredential(base, { updatedAt: 6, fields: base.fields })).toBe(false)
   })
 })
+
+describe('ConnectorStore：独占区与比较的两条收尾护栏（第三轮复核建议）', () => {
+  it('sameCredential 对含 NUL 的字段值不再误判（长度前缀）', () => {
+    expect(sameCredential({ updatedAt: 1, fields: { a: 'x', b: 'y' } }, { updatedAt: 1, fields: { a: 'x\u0000b=y' } }))
+      .toBe(false)
+    expect(sameCredential({ updatedAt: 1, fields: { 'a\u0000b': 'x' } }, { updatedAt: 1, fields: { a: 'x', b: 'y' } }))
+      .toBe(false)
+  })
+
+  it('独占区非重入：在独占任务里调公开写方法是显式异常，而不是无声挂死', async () => {
+    const dir = await tempDir('pico-store-reentrant-')
+    const store = new ConnectorStore({ baseDir: dir })
+    await store.writeCredential('c', { updatedAt: 1, fields: { apiKey: 'A' } })
+    // 直接在独占任务里调用公开写方法（模拟误用）：AsyncLocalStorage 判定为
+    // "独占任务内" ⇒ 显式异常，而不是排到自己后面无声挂死。
+    const exclusive = (store as unknown as { exclusive: (task: () => Promise<void>) => Promise<void> }).exclusive.bind(store)
+    await expect(exclusive(async () => { await store.clearCredential('c') })).rejects.toThrow(/not re-entrant/u)
+    // 凭据链路没有被挂死：后续正常写读照常工作。
+    expect((await store.readCredential('c'))?.fields?.['apiKey']).toBe('A')
+  })
+})
