@@ -270,7 +270,10 @@ export async function seedCredential(
   await store.writeCredential(id, { updatedAt: Date.now(), ...credential } as never)
 }
 
-export async function waitFor(check: () => boolean, timeoutMs = 5000): Promise<void> {
+// 默认预算 15s（原 5s）：这些用例等的是**后台轮询 / 子进程回传 / 真实 socket 往返**，
+// 在 CI（4 vCPU + 多包并发）上被调度拉开到 5s 以上是常态，而不是被测行为出错。
+// 2026-09-15 实测：4 路并发下 `h.configs.length === 1` 这类注册等待也会撞满 5s。
+export async function waitFor(check: () => boolean, timeoutMs = 15_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (check()) return
@@ -279,7 +282,7 @@ export async function waitFor(check: () => boolean, timeoutMs = 5000): Promise<v
   if (!check()) throw new Error('condition not reached in time')
 }
 
-export async function waitForFile(path: string, timeoutMs = 5000): Promise<string> {
+export async function waitForFile(path: string, timeoutMs = 15_000): Promise<string> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (existsSync(path)) return await readFile(path, 'utf8')

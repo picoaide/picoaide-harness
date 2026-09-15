@@ -177,7 +177,9 @@ async function realSpawn(config: CapturedConfig): Promise<void> {
   await transport.close()
 }
 
-async function waitFor(check: () => boolean, timeoutMs = 5000): Promise<void> {
+// 与 tests/helpers/connector-harness.ts 同口径：默认预算 15s（原 5s），
+// 等的是后台轮询与真实子进程回传，CI 负载下 5s 会被调度吃满。
+async function waitFor(check: () => boolean, timeoutMs = 15_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (check()) return
@@ -186,7 +188,7 @@ async function waitFor(check: () => boolean, timeoutMs = 5000): Promise<void> {
   if (!check()) throw new Error('condition not reached in time')
 }
 
-async function waitForFile(path: string, timeoutMs = 5000): Promise<string> {
+async function waitForFile(path: string, timeoutMs = 15_000): Promise<string> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (existsSync(path)) return await readFile(path, 'utf8')
