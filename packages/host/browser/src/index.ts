@@ -220,12 +220,19 @@ export interface SessionSwitchSteps {
  * @param steps - 四个步骤 + 告警出口。
  */
 export async function runSessionSwitch(steps: SessionSwitchSteps): Promise<void> {
-  steps.applyUserScope()
+  // Close the PREVIOUS account's tabs while the old store/partition is still
+  // current. If this order is reversed, `applyUserScope()` first restores the
+  // NEW account's ledger into the pool and `closeAll()` then clears the pool
+  // and its tab events persist an EMPTY ledger back through the new store —
+  // silently deleting the new account's saved tabs before prewarm can restore
+  // them (2026-09-15 audit regression).
   try {
     await steps.closeAll()
   } catch (cause) {
+    // One failed teardown must not skip the identity/scope switch below.
     steps.warn('pico-browser: closing tabs during the user switch failed', cause)
   }
+  steps.applyUserScope()
   steps.clearOps()
   await steps.prewarm()
 }
@@ -680,6 +687,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
 
     const historyGet: JsonHandler = (req, res) => {
+      if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
       if (!guard(req, res)) return
       const url = new URL(req.url ?? '/', 'http://localhost')
       json(res, 200, {

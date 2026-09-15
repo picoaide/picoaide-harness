@@ -209,9 +209,16 @@ export async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOpt
     if (!authorizationServer) continue
 
     const asUrl = assertOutboundUrlAllowed(authorizationServer, 'OAuth authorization server')
-    asUrl.pathname = `${asUrl.pathname.replace(/\/+$/, '')}/.well-known/oauth-authorization-server`
+    // RFC 8414 §3: the well-known segment is inserted BETWEEN the host and the
+    // issuer path (`https://host/.well-known/oauth-authorization-server/path`),
+    // not appended after the path. Keeping the issuer path matters for
+    // multi-tenant authorization servers; the previous spelling only worked
+    // for root issuers.
+    const issuerPath = asUrl.pathname.replace(/\/+$/, '')
+    const wellKnownUrl = new URL(asUrl.origin)
+    wellKnownUrl.pathname = `/.well-known/oauth-authorization-server${issuerPath}`
     const asCall = outboundCall({ headers: { Accept: 'application/json' } }, outbound)
-    const metadataResponse2 = await outboundFetch(asUrl.toString(), 'OAuth authorization server metadata', asCall.init, asCall.options)
+    const metadataResponse2 = await outboundFetch(wellKnownUrl.toString(), 'OAuth authorization server metadata', asCall.init, asCall.options)
     if (!metadataResponse2.ok) continue
     const meta = (await metadataResponse2.json()) as OAuthServerMetadata
     if (!meta.authorization_endpoint || !meta.token_endpoint) continue
@@ -226,7 +233,9 @@ export async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOpt
       ? 'offline_access'
       : meta.scopes_supported?.[0]
     return {
-      authorizationServerUrl: asUrl.origin,
+      // The issuer identifier includes its path; returning only the origin
+      // would make the SDK treat a path-based issuer as a different server.
+      authorizationServerUrl: `${asUrl.origin}${issuerPath}`,
       authorizationEndpoint,
       tokenEndpoint,
       ...(registrationEndpoint ? { registrationEndpoint } : {}),
@@ -517,9 +526,12 @@ async function runToken(def: ConnectorDef, options: AuthRunOptions): Promise<Par
 /** Server-side flow: fetch the managed token through the injected callback. */
 async function runServerSide(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
   void def
-  const auth = def.auth as { fetchToken: () => Promise<string> }
+  const auth = def.auth as { fetchToken?: unknown }
   options.onRequest({ connectorId: def.id })
-  const accessToken = await auth.fetchToken()
+  if (typeof auth.fetchToken !== 'function') {
+    throw new Error('服务端连接器定义缺少 fetchToken 回调')
+  }
+  const accessToken = await (auth.fetchToken as () => Promise<string>)()
   if (!accessToken) throw new Error('服务端未返回 token')
   return { accessToken }
 }

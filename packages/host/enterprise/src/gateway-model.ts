@@ -36,5 +36,21 @@ export function apply(ctx: Context): void {
     })
   }
 
+  // SessionService.restore() starts in its constructor and may complete before
+  // this plugin's apply(), in which case the first SESSION_CHANGED_EVENT is
+  // already gone (session-service.ts documents the race). Sample the restored
+  // session once here; the event subscription then covers later transitions.
+  const sampleRestoredSession = (): void => {
+    try {
+      const service = (ctx as unknown as {
+        picoSession?: { isRestored?: () => boolean, getSession?: () => Session | null }
+      }).picoSession
+      if (service?.isRestored?.() !== true) return
+      void sync(service.getSession?.() ?? null).catch((cause) => ctx.logger.error(cause))
+    } catch (cause) {
+      ctx.logger.error(cause)
+    }
+  }
+  sampleRestoredSession()
   ctx.on(SESSION_CHANGED_EVENT, (session) => { void sync(session).catch((cause) => ctx.logger.error(cause)) })
 }

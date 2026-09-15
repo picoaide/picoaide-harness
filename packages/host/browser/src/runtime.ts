@@ -649,6 +649,11 @@ export class BrowserRuntime {
       const bounds = this.contentBounds()
       view.attach(win, bounds)
       this.relayout()
+      // Checkpoint: a takeover that landed while the window/attach was awaited
+      // must abort this tab creation (the catch below tears the view down).
+      // The user's own + / address-bar path is allowed to create/load tabs
+      // while they hold control; only agent/restore work is interruptible.
+      if (actor !== 'user') this.assertAgentStillAllowed('browser_open')
 
       // `target=_blank` / window.open must not silently vanish (P2-30): open
       // the URL as a new tab through the normal path (quota, gate, navigation
@@ -1354,6 +1359,19 @@ export class BrowserRuntime {
    * `lastAgentId`. Snapshot the id at call time and restore it inside the
    * critical section so ops/tabs are attributed to the agent that issued them.
    */
+/**
+   * Run one store/window mutation under the SAME global user gate as page
+   * operations. Tools that only touch bookmarks/downloads/session storage used
+   * to bypass the mutex, so the model could still delete data while the user
+   * was operating the page.
+   * @param tool - tool name for busy attribution/logging.
+   * @param work - mutation body.
+   * @param signal - caller cancellation signal.
+   */
+  async runGated<T>(tool: string, work: () => Promise<T> | T, signal?: AbortSignal): Promise<T> {
+    return await this.agentRun(tool, async () => await work(), signal)
+  }
+
   private async withAgentAttribution<T>(tool: string, body: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const callerAgent = this.lastAgentId
     return await this.pool.withOperation(tool, async () => {
@@ -1396,17 +1414,23 @@ export class BrowserRuntime {
     const tab = this.tab(id)
     const wc = tab.view.webContents
     const started = Date.now()
+    if (actor !== 'user') this.assertAgentStillAllowed('browser_navigate')
+    let loadError: unknown
     const outcome = await Promise.race([
       wc.loadURL(url).then(
         () => 'loaded' as const,
-        () => 'failed' as const,
+        (cause: unknown) => { loadError = cause; return 'failed' as const },
       ),
       sleep(this.options.loadTimeoutMs).then(() => 'pending' as const),
     ])
+    // A user takeover while loadURL was pending wins over the load result:
+    // the operation is reported as interrupted, not as a successful navigation
+    // to whatever page happens to be left in the view. (The user's own
+    // address-bar navigation is exempt from the gate.)
+    if (actor !== 'user') this.assertAgentStillAllowed('browser_navigate')
     if (outcome === 'failed') {
-      if (!wc.isLoading() && wc.getURL() === '') {
-        throw browserError('network', 'browser: navigation failed to load')
-      }
+      const detail = loadError instanceof Error ? loadError.message : String(loadError ?? 'unknown error')
+      throw browserError('network', `browser: navigation failed — ${stripSensitiveUrl(detail).slice(0, 200)}`)
     }
     if (waitUntil !== 'domcontentloaded') {
       // 'load' settles on did-finish-load (or immediately when already done);
@@ -1573,17 +1597,23 @@ export class BrowserRuntime {
       // must not resurrect tabs after the pool was cleared).
       this.materializeEpoch++
       this.pendingLedgerTabs = []
-      for (const id of [...this.tabs.keys()]) this.destroyTab(id)
-      // R7: closing EVERYTHING ends the session's origin accounting (account
-      // switch / shell 清除). Destroying one tab deliberately keeps its origin's
-      // value set (a later tab on that origin must still be scrubbed); this is
-      // the boundary where the previous account's values must not survive into
-      // the next one.
-      this.credentialOrigins.clear()
-      this.pool.clear()
-      this.relayout()
-      this.record('browser_close', 0, 'close browser (all tabs)', false, user ? 'user' : 'ai')
-      this.hideWindow()
+      try {
+        for (const id of [...this.tabs.keys()]) this.destroyTab(id)
+        // R7: closing EVERYTHING ends the session's origin accounting (account
+        // switch / shell 清除). Destroying one tab deliberately keeps its origin's
+        // value set (a later tab on that origin must still be scrubbed); this is
+        // the boundary where the previous account's values must not survive into
+        // the next one.
+        this.credentialOrigins.clear()
+        this.pool.clear()
+      } finally {
+        // A window that is already destroyed must not abort the identity
+        // switch before the pool is empty (cross-account browse leak); the
+        // best-effort UI steps below are cosmetic.
+        try { this.relayout() } catch { /* window gone */ }
+        try { this.record('browser_close', 0, 'close browser (all tabs)', false, user ? 'user' : 'ai') } catch { /* log must not break switch */ }
+        try { this.hideWindow() } catch { /* window gone */ }
+      }
     }
     if (user) {
       // 2026-09-15 审计 P1-1：这里原本用 `already` 短路 —— 用户正拿着控制权
@@ -1818,6 +1848,9 @@ export class BrowserRuntime {
         // on the TRANSPORT (third argument), not as a command parameter.
         ...(target?.contextId === undefined ? {} : { contextId: target.contextId }),
       }, target?.sessionId === undefined ? {} : { sessionId: target.sessionId })
+      // A long awaited promise may resolve after the user took over; discard
+      // the result instead of handing it to the model as a live page read.
+      this.assertAgentStillAllowed('browser_eval')
       if (evalResult.exceptionDetails !== undefined) {
         throw browserError('eval-policy', 'browser: page script failed (exception)')
       }
@@ -2646,6 +2679,7 @@ export class BrowserRuntime {
       const payload = waitForPayload(options, startUrl)
       while (Date.now() < deadline) {
         if (signal !== undefined && signal.aborted) throw browserError('interrupted', 'browser: wait aborted')
+        this.assertAgentStillAllowed('browser_wait_for')
         try {
           const state = await tab.cdp.send<EvalResult>('Runtime.callFunctionOn', {
             functionDeclaration: WAIT_FOR_FUNCTION_DECLARATION,
@@ -2697,6 +2731,27 @@ export class BrowserRuntime {
 
   // -------------------------------------------------------------- user gate
 
+  /**
+   * Cooperative abort checkpoint for long-running operations whose work is
+   * already inside the global mutex: `PoolMutex.run` only gates operations
+   * BEFORE `work()` starts, so a user takeover must also be observed between
+   * the steps of an in-flight operation. Throwing `window-controlled` from
+   * here gives the model an actionable failure instead of letting it keep
+   * clicking/typing while the user is operating the same page.
+   * @param operation - tool name for the error text.
+   */
+  private assertAgentStillAllowed(operation: string): void {
+    if (!this.pool.controlled) return
+    throw browserError('window-controlled', `browser: 用户已接管浏览器，AI 操作已中止（${operation}）`)
+  }
+
+  /** Stop pending page loads when the user takes over (navigation is not cancellable via a JS signal). */
+  private stopPendingLoads(): void {
+    for (const tab of this.tabs.values()) {
+      try { tab.view.webContents.stop?.() } catch { /* teardown never throws */ }
+    }
+  }
+
   /** User takeover / release (whole window). Actor: 'user' on shell/button
    * paths, 'ai' for the browser_takeover/browser_release tools. No-op changes
    * are not recorded (the gate is idempotent). */
@@ -2705,6 +2760,7 @@ export class BrowserRuntime {
     this.pool.setUserControl(active)
     if (was === this.pool.controlled) return
     if (active) {
+      this.stopPendingLoads()
       this.record('browser_takeover', 0, 'user took over the browser', false, actor)
     } else {
       this.record('browser_release', 0, 'user released browser control', false, actor)

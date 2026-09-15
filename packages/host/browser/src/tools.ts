@@ -808,8 +808,10 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     presentCall: present('Bookmark page'),
     async execute(args, exec) {
       noteAgent(runtime, exec.agent)
-      const tabId = await tabOf((args as { tab?: number }).tab)
-      return runtime.addBookmark(tabId, (args as { title?: string }).title)
+      return await runtime.runGated('browser_bookmarks_add', async () => {
+        const tabId = await tabOf((args as { tab?: number }).tab)
+        return runtime.addBookmark(tabId, (args as { title?: string }).title)
+      }, exec.signal)
     },
   }))
 
@@ -865,7 +867,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     presentCall: present('Remove bookmark'),
     async execute(args, exec) {
       noteAgent(runtime, exec.agent)
-      return { ok: runtime.removeBookmark((args as { id: number }).id) }
+      return await runtime.runGated('browser_bookmarks_remove', () => ({ ok: runtime.removeBookmark((args as { id: number }).id) }), exec.signal)
     },
   }))
 
@@ -989,7 +991,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     presentCall: present('Remove download'),
     async execute(args, exec) {
       noteAgent(runtime, exec.agent)
-      return { ok: runtime.removeDownload((args as { id: number }).id) }
+      return await runtime.runGated('browser_downloads_remove', () => ({ ok: runtime.removeDownload((args as { id: number }).id) }), exec.signal)
     },
   }))
 
@@ -1112,7 +1114,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
         throw browserError('policy', 'browser: clear_data all-data requires a user confirmation in the browser window menu — use the ⋮ menu → 清除数据')
       }
       noteAgent(runtime, exec.agent)
-      await runtime.clearData(false)
+      await runtime.runGated('browser_clear_data', () => runtime.clearData(false), exec.signal)
       exec.signal.throwIfAborted()
       return { ok: true }
     },

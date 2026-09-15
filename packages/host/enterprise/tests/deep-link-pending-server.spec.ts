@@ -88,11 +88,10 @@ describe('installDeepLinkListener 只接受本机登录页等待的服务端 (sr
     mod.noteBrowserLoginStarted('https://real-corp.example')
 
     fire(`${SCHEME}://auth?token=REAL-EMPLOYEE-TOKEN&server=` + encodeURIComponent('https://evil.example') + '&user=eve')
-    await new Promise((r) => setTimeout(r, 30))
+    await vi.waitFor(() => { expect(warns.join(' ')).toContain('no local login is waiting') })
 
     expect(calls).toEqual([])
     expect(applied).toHaveLength(0)
-    expect(warns.join(' ')).toContain('no local login is waiting')
     vi.unstubAllGlobals()
   })
 
@@ -105,10 +104,10 @@ describe('installDeepLinkListener 只接受本机登录页等待的服务端 (sr
     mod.noteBrowserLoginStarted('https://real-corp.example/')
 
     fire(`${SCHEME}://auth?token=tok-real&server=` + encodeURIComponent('https://REAL-CORP.example') + '&user=alice')
-    await new Promise((r) => setTimeout(r, 30))
-
-    expect(applied).toHaveLength(1)
-    expect(calls).toHaveLength(1)
+    await vi.waitFor(() => {
+      expect(applied).toHaveLength(1)
+      expect(calls).toHaveLength(1)
+    })
     expect(new URL(calls[0]!.url).hostname).toBe('real-corp.example')
     expect(calls[0]!.authorization).toBe('Bearer tok-real')
     vi.unstubAllGlobals()
@@ -124,11 +123,10 @@ describe('installDeepLinkListener 只接受本机登录页等待的服务端 (sr
     mod.clearBrowserLoginPending()
 
     fire(`${SCHEME}://auth?token=tok-late&server=` + encodeURIComponent('https://real-corp.example') + '&user=alice')
-    await new Promise((r) => setTimeout(r, 30))
+    await vi.waitFor(() => { expect(warns.join(' ')).toContain('no local login is waiting') })
 
     expect(calls).toEqual([])
     expect(applied).toHaveLength(0)
-    expect(warns.join(' ')).toContain('no local login is waiting')
     vi.unstubAllGlobals()
   })
 
@@ -145,19 +143,18 @@ describe('installDeepLinkListener 只接受本机登录页等待的服务端 (sr
     mod.noteLoginPageWired()
     expect(mod.pendingBrowserLoginServer()).toBeNull()
     fire(`${SCHEME}://auth?token=REAL-EMPLOYEE-TOKEN&server=` + encodeURIComponent('https://evil.example') + '&user=eve')
-    await new Promise((r) => setTimeout(r, 30))
+    await vi.waitFor(() => { expect(warns.join(' ')).toContain('no local login is waiting') })
 
     expect(calls, '未登记 ⇒ 一个字节都不外发').toEqual([])
     expect(applied).toHaveLength(0)
-    expect(warns.join(' ')).toContain('no local login is waiting')
 
     // 登记之后同一台服务端才被接受(登记先于深链的顺序语义不变)。
     mod.noteBrowserLoginStarted('https://real-corp.example')
     fire(`${SCHEME}://auth?token=tok-real&server=` + encodeURIComponent('https://real-corp.example') + '&user=alice')
-    await new Promise((r) => setTimeout(r, 30))
-
-    expect(applied).toHaveLength(1)
-    expect(calls).toHaveLength(1)
+    await vi.waitFor(() => {
+      expect(applied).toHaveLength(1)
+      expect(calls).toHaveLength(1)
+    })
     vi.unstubAllGlobals()
   })
 })

@@ -121,7 +121,9 @@ export function downloadingStatusText(state: UpdateState): string {
 
 /** 「关于」页的状态行文案(与侧边栏指示器同源,不再各写一套判断)。 */
 export function updateStatusText(state: UpdateState | null): string {
-  if (state === null) return '已是最新版本'
+  // A missing update service (compatibility mode / service not composed) is
+  // not "up to date": saying so hides a broken update path.
+  if (state === null) return '更新服务不可用'
   if (state.readyVersion !== undefined) return `新版本 ${state.readyVersion} 已下载，点击「安装更新」完成升级`
   if (state.downloadingVersion !== undefined) return downloadingStatusText(state)
   if (state.availableVersion !== undefined) return `发现新版本 ${state.availableVersion}，正在准备下载…`

@@ -96,6 +96,15 @@ export function makeCronRoutes(service: HostCronService, options: CronRouteOptio
       }
     },
   }
+  const permissions: WebRoute = {
+    kind: 'exact',
+    path: `${CRON_API_PREFIX}/permissions`,
+    handler: (req, res): void => {
+      if (req.method !== 'GET') return json(res, 405, { ok: false, error: 'method-not-allowed' })
+      if (!guard(req, res)) return
+      json(res, 200, { permissions: [...(options.permissions?.() ?? [])] })
+    },
+  }
   const events: WebRoute = {
     kind: 'exact',
     path: `${CRON_API_PREFIX}/events`,
@@ -126,5 +135,5 @@ export function makeCronRoutes(service: HostCronService, options: CronRouteOptio
       push()
     },
   }
-  return [state, action, events]
+  return [state, action, events, permissions]
 }

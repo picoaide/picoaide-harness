@@ -55,17 +55,22 @@ export function parseCron(expr: string): CronSchedule | null {
   }
   const weekdays = new Set<number>()
   for (const day of sets[4]!) weekdays.add(day === 7 ? 0 : day)
+  // Standard cron treats a step-from-wildcard ('*/n') as unrestricted too:
+  // Vixie's parser sets its DOM_STAR/DOW_STAR flag when the field starts with
+  // '*'. Treating '*/1' as restricted made `0 0 */1 * 1` run every day instead
+  // of Mondays, and similarly for explicit step expressions.
+  const wildcardField = (field: string): boolean => /^\*(?:\/\d+)?$/u.test(field)
   return {
     minutes: sets[0]!,
     hours: sets[1]!,
     days: sets[2]!,
     months: sets[3]!,
     weekdays,
-    // Only the literal '*' marks a field unrestricted: an explicit full
-    // enumeration such as '1-31' is a restricted field and must not collapse
-    // into the wildcard (it participates in day/weekday OR semantics).
-    dayWildcard: fields[2] === '*',
-    weekdayWildcard: fields[4] === '*',
+    // Only a wildcard field (including '*/n') marks a field unrestricted: an
+    // explicit full enumeration such as '1-31' is restricted and participates
+    // in day/weekday OR semantics.
+    dayWildcard: wildcardField(fields[2]!),
+    weekdayWildcard: wildcardField(fields[4]!),
   }
 }
 
@@ -138,6 +143,49 @@ export function nextRunAtMs(expr: string, fromMs: number): number | undefined {
   return undefined
 }
 
+/**
+ * Compute the most recent matching instant at or before `fromMs` (minute
+ * granularity). Used by the scheduler's catch-up path: the previous
+ * forward-only helper could only walk a bounded number of matches from the
+ * last-known `nextRunAt`, so a long sleep fired an old occurrence instead of
+ * the latest missed one.
+ * @param expr - 5-field cron expression.
+ * @param fromMs - upper bound (ms epoch).
+ * @returns the matching minute start, or undefined when the calendar can never match.
+ */
+export function lastRunAtMs(expr: string, fromMs: number): number | undefined {
+  const schedule = parseCron(expr)
+  if (schedule === null || !hasPossibleCalendarDay(schedule)) return undefined
+  const from = new Date(fromMs)
+  // Walk whole days backwards (bounded by the same five-year rule as
+  // nextRunAtMs) and, on a matching day, pick the latest matching hour/minute
+  // from the parsed sets. Minute-by-minute scanning would be correct but could
+  // block the scheduler tick for millions of iterations after a long sleep.
+  const dayLimit = new Date(fromMs - 5 * 366 * 24 * 60 * 60 * 1000)
+  const sortedHours = [...schedule.hours].sort((a, b) => b - a)
+  const sortedMinutes = [...schedule.minutes].sort((a, b) => b - a)
+  let cursor = new Date(from.getFullYear(), from.getMonth(), from.getDate())
+  while (cursor.getTime() >= dayLimit.getTime()) {
+    if (schedule.months.has(cursor.getMonth() + 1) && dayCandidate(schedule, cursor)) {
+      const sameDay = cursor.getFullYear() === from.getFullYear()
+        && cursor.getMonth() === from.getMonth()
+        && cursor.getDate() === from.getDate()
+      const maxHour = sameDay ? from.getHours() : 23
+      for (const hour of sortedHours) {
+        if (hour > maxHour) continue
+        const maxMinute = sameDay && hour === from.getHours() ? from.getMinutes() : 59
+        for (const minute of sortedMinutes) {
+          if (minute > maxMinute) continue
+          const candidate = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate(), hour, minute, 0, 0)
+          if (candidate.getTime() <= fromMs) return candidate.getTime()
+        }
+      }
+    }
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1)
+  }
+  return undefined
+}
+
 /** Day/weekday OR gate shared by {@link matches} and the candidate scan. */
 function dayCandidate(schedule: CronSchedule, date: Date): boolean {
   const dayMatches = schedule.days.has(date.getDate())
@@ -169,7 +217,9 @@ function parseField(field: string, min: number, max: number, out: Set<number>): 
   }
   for (const part of field.split(',')) {
     if (part === '') return false
-    const [rangeRaw, stepRaw] = part.split('/')
+    const slashParts = part.split('/')
+    if (slashParts.length > 2) return false
+    const [rangeRaw, stepRaw] = slashParts
     const range = rangeRaw ?? ''
     let low: number
     let high: number

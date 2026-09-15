@@ -102,6 +102,7 @@ export const zh = {
   'account.unknown': '未知',
   'account.logout': '退出登录',
   'account.loggingOut': '退出中…',
+  'account.logoutFailed': '退出失败：{error}，请重试',
   'account.notLoggedIn': '未登录',
   'account.stateFailed': '无法获取登录状态',
   'account.loading': '加载中…',
@@ -253,6 +254,7 @@ export const en: Record<keyof typeof zh, string> = {
   'account.unknown': 'Unknown',
   'account.logout': 'Log out',
   'account.loggingOut': 'Logging out…',
+  'account.logoutFailed': 'Log out failed: {error}. Please retry.',
   'account.notLoggedIn': 'Not logged in',
   'account.stateFailed': 'Could not fetch login state',
   'account.loading': 'Loading…',
@@ -313,9 +315,16 @@ export const en: Record<keyof typeof zh, string> = {
 
 export type EnterpriseKey = keyof typeof zh
 
+/** Active UI locale, kept in sync by the client plugin from ctx.locale. */
+let activeLocale: 'zh' | 'en' = 'zh'
+/** Adopt the active locale (called by the client plugin; unknown ids fall back to Chinese). */
+export function setActiveLocale(id: string): void {
+  activeLocale = id.toLowerCase().startsWith('en') ? 'en' : 'zh'
+}
+
 /** Translate a key (zh key source; en mirrors the full key set). */
 export function t(key: EnterpriseKey, params?: Record<string, string>): string {
-  let text: string = zh[key] as string
+  let text: string = (activeLocale === 'en' ? en[key] : zh[key]) as string
   if (params !== undefined) {
     for (const [name, value] of Object.entries(params)) {
       text = text.replaceAll(`{${name}}`, value)
