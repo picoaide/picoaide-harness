@@ -42,7 +42,7 @@ export interface WriteProofDeps {
 }
 
 /** 证明闸结论：`ok` 为 false 时给出拒绝状态码与机器可读错误码。 */
-export type WriteProofOutcome =
+type WriteProofOutcome =
   | { ok: true }
   | {
     ok: false
@@ -51,7 +51,7 @@ export type WriteProofOutcome =
   }
 
 /** 拒绝响应的提示文案（与 browser/connectors 逐字一致）。 */
-export const WRITE_PROOF_HINT = 'reopen the application window from its launch URL'
+const WRITE_PROOF_HINT = 'reopen the application window from its launch URL'
 
 /**
  * 写面持有性证明闸：GET 读面豁免，其余方法必须持本进程签发的 BrowserAuth cookie。
@@ -59,7 +59,7 @@ export const WRITE_PROOF_HINT = 'reopen the application window from its launch U
  * @param deps - fence 来源与诊断前缀。
  * @returns 通过，或 403（证明不足）/ 503（证明机制缺席）的拒绝结论。
  */
-export function requireWriteProof(req: IncomingMessage, deps: WriteProofDeps): WriteProofOutcome {
+function requireWriteProof(req: IncomingMessage, deps: WriteProofDeps): WriteProofOutcome {
   if (req.method === 'GET') return { ok: true }
   const warn = deps.warn ?? ((): void => {})
   const fence = deps.fence()

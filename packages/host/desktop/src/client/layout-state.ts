@@ -83,7 +83,7 @@ function clamp(value: number, min: number, max: number): number {
  * @param viewport - current frame measurement in px.
  * @returns the px preference to store at first opening.
  */
-export function rightbarFirstOpenWidth(viewport: number): number {
+function rightbarFirstOpenWidth(viewport: number): number {
   return Math.max(RIGHTBAR_MIN, Math.round(viewport * RIGHTBAR_DEFAULT_RATIO))
 }
 

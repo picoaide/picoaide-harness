@@ -27,7 +27,7 @@ export interface UpdateState {
 }
 
 /** 失败类别(与宿主契约同集)。 */
-export type UpdateErrorCategory =
+type UpdateErrorCategory =
   | 'network'
   | 'not-signed-in'
   | 'release-missing'
@@ -88,11 +88,6 @@ export function useUpdateState(): UpdateState | null {
  */
 export async function triggerUpdateAction(): Promise<void> {
   await updateService()?.act()
-}
-
-/** 已下载待安装的版本(没有则为 undefined)。 */
-export function readyVersionOf(state: UpdateState | null): string | undefined {
-  return state?.readyVersion
 }
 
 /** 下载进度百分比文本(无进度信息时为 undefined)。 */
@@ -229,14 +224,3 @@ export function updateActionDisabled(state: UpdateState | null, checking: boolea
   return checking || state?.downloadingVersion !== undefined
 }
 
-/** Test seam: re-resolve the service after a test swaps the client context. */
-export function resetUpdateServiceForTests(): void {
-  clientContext = undefined
-  resolvedService = undefined
-}
-
-/** 供测试注入替身服务(生产路径只走 applyUpdateService)。 */
-export function setUpdateServiceForTests(service: DesktopUpdateService | undefined): void {
-  resolvedService = service
-  clientContext = undefined
-}

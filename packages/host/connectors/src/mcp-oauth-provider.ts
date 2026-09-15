@@ -69,7 +69,7 @@ export interface RefreshedTokens {
   expiresAt: number
 }
 
-export type RefreshFailureReason =
+type RefreshFailureReason =
   /** The authorization server rejected the grant: only a new authorization helps. */
   | 'reauthorize'
   /** Network / 5xx / malformed response: retry later with the same credential. */

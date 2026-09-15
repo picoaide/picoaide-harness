@@ -52,7 +52,7 @@ export class OutboundUrlBlockedError extends Error {
  * rather than stay parked on a socket. The message names the flow step and the
  * deadline so the row's error text is diagnosable.
  */
-export class OutboundTimeoutError extends Error {
+class OutboundTimeoutError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'OutboundTimeoutError'
@@ -264,7 +264,7 @@ export function isOutboundUrlAllowed(rawUrl: string): boolean {
  * therefore never follow a redirect: the URL that was checked is the only URL
  * that may receive the payload.
  */
-export const OUTBOUND_REDIRECT_POLICY = 'manual' as const
+const OUTBOUND_REDIRECT_POLICY = 'manual' as const
 
 /**
  * Whether a response is a redirect this policy refused to follow. Node's
@@ -274,7 +274,7 @@ export const OUTBOUND_REDIRECT_POLICY = 'manual' as const
  * @param response - the response to classify.
  * @returns true for a redirect, or for an opaque redirect answer.
  */
-export function isRedirectResponse(response: Response): boolean {
+function isRedirectResponse(response: Response): boolean {
   if (response.type === 'opaqueredirect') return true
   return response.status >= 300 && response.status < 400
 }

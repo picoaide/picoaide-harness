@@ -3293,7 +3293,7 @@ function maskBrowserSummary(summary: string): string {
  * shipped`, `Ref "abc123" noted`: R-4 closed that last residual by requiring a
  * credential key name in front of a bracket/quote before it counts as a value).
  */
-export const MIN_EMBEDDED_SECRET_LENGTH = 8
+const MIN_EMBEDDED_SECRET_LENGTH = 8
 
 /** Characters that make a short occurrence look like a *value* on its left, on
  * their own: `key=value`, `key: value`, `user:pass@host`. */

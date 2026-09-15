@@ -54,7 +54,7 @@ export interface TabReservation {
   readonly id: number
 }
 
-export const POOL_DEFAULTS = {
+const POOL_DEFAULTS = {
   maxTabs: 16,
   userGateTimeoutMs: 300_000,
   waitTimeoutMs: 60_000,

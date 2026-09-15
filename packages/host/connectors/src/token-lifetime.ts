@@ -28,7 +28,7 @@ export const REFRESH_SWEEP_INTERVAL_MS = 60_000
 export const DEFAULT_TOKEN_LIFETIME_MS = 60 * 60 * 1000
 
 /** `expires_in` may be a number or a numeric string; anything else is ignored. */
-export function expiresInMs(data: Record<string, unknown>): number {
+function expiresInMs(data: Record<string, unknown>): number {
   const raw = data.expires_in
   const seconds = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : DEFAULT_TOKEN_LIFETIME_MS

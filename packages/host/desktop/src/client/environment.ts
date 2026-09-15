@@ -20,7 +20,7 @@ const PLATFORMS = new Set<DesktopClientPlatform>(['darwin', 'win32', 'linux'])
  * @param search - URL search string, including or omitting the leading question mark.
  * @returns the validated desktop renderer environment, or undefined outside the desktop shell.
  */
-export const DESKTOP_ENV_STORAGE_KEY = 'dsh-desktop-env'
+const DESKTOP_ENV_STORAGE_KEY = 'dsh-desktop-env'
 
 export function parseDesktopClientEnvironment(search: string): DesktopClientEnvironment | undefined {
   let source = search
