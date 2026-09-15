@@ -452,12 +452,17 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
     expect(error.message).toMatch(/no usable http\(s\) site URL/u)
   })
 
-  it('部署没有暴露 origin 能力时维持现状（本轮生产形态，不误杀）', async () => {
+  it('部署没暴露 origin 能力 ⇒ fail-closed 拒绝（BUG-03：旧的"维持现状"就是漏洞本身）', async () => {
     const resolver = (async () => ({ username: 'alice', password: SECRET })) as CredentialResolverLike
     const harness = track(makeHarness({}, resolver))
     await harness.runtime.open('https://anywhere.example/')
-    harness.adapter.lastView().transport.handler = fillHandler
-    await expect(harness.call('browser_fill_credentials', { connectorId: 'corp' })).resolves.toEqual({ username: true, password: true })
+    const view = harness.adapter.lastView()
+    view.transport.handler = fillHandler
+    const error = await fail(harness.call('browser_fill_credentials', { connectorId: 'corp' }))
+    expect(error.code).toBe('policy')
+    expect(error.message).toMatch(/no connector site URL/u)
+    // 一个字节都没注入
+    expect(view.transport.commands.some((command) => String(command.params?.['expression'] ?? '').includes('passField'))).toBe(false)
   })
 
   it('描述文案写明站点绑定（对外契约同步）', () => {
@@ -498,6 +503,13 @@ describe('2026-09-15 P1：短凭据的散文擦除（模型面文本出口）', 
     await harness.call('browser_fill_credentials', { connectorId: 'corp' })
   }
 
+  /** 站点绑定（BUG-03）之后，注入前必须能解析出连接器自己的 origin。 */
+  function boundResolver(): CredentialResolverLike {
+    const resolver = (async () => ({ username: 'alice', password: SHORT })) as unknown as CredentialResolverLike
+    resolver.originOf = async () => 'https://login.example'
+    return resolver
+  }
+
   function textStub(harness: Harness, text: string): void {
     harness.adapter.lastView().transport.handler = (method, params) => {
       if (method !== 'Runtime.evaluate') return {}
@@ -506,7 +518,7 @@ describe('2026-09-15 P1：短凭据的散文擦除（模型面文本出口）', 
   }
 
   it('散文里紧跟凭据键名的短口令被擦除（审计实测：your password abc123 is wrong）', async () => {
-    const resolver = (async () => ({ username: 'alice', password: SHORT })) as CredentialResolverLike
+    const resolver = boundResolver()
     const harness = track(makeHarness({}, resolver))
     await harness.runtime.open('https://login.example/form')
     await injectShortPassword(harness)
@@ -517,7 +529,7 @@ describe('2026-09-15 P1：短凭据的散文擦除（模型面文本出口）', 
   })
 
   it('非凭据键名的散文不误伤（order abc123 confirmed 逐字节不变）', async () => {
-    const resolver = (async () => ({ username: 'alice', password: SHORT })) as CredentialResolverLike
+    const resolver = boundResolver()
     const harness = track(makeHarness({}, resolver))
     await harness.runtime.open('https://login.example/form')
     await injectShortPassword(harness)
@@ -536,7 +548,7 @@ describe('2026-09-15 P1：短凭据的散文擦除（模型面文本出口）', 
   })
 
   it('值位形态照旧擦除（= / : / 键名+括号 / 换行结尾）', async () => {
-    const resolver = (async () => ({ username: 'alice', password: SHORT })) as CredentialResolverLike
+    const resolver = boundResolver()
     const harness = track(makeHarness({}, resolver))
     await harness.runtime.open('https://login.example/form')
     await injectShortPassword(harness)
@@ -557,7 +569,7 @@ describe('2026-09-15 P1：短凭据的散文擦除（模型面文本出口）', 
   })
 
   it('快照元素文本走同一把尺子（值位键名后的短口令）', async () => {
-    const resolver = (async () => ({ username: 'alice', password: SHORT })) as CredentialResolverLike
+    const resolver = boundResolver()
     const harness = track(makeHarness({}, resolver))
     await harness.runtime.open('https://login.example/form')
     await injectShortPassword(harness)

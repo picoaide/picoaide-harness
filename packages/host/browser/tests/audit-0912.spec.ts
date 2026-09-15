@@ -158,6 +158,11 @@ function makeRuntime(credentials?: (id: string) => Promise<{ username?: string; 
   const dir = join(process.cwd(), 'tests', `.audit0912-store-${Math.random().toString(36).slice(2)}`)
   mkdirSync(dir, { recursive: true })
   const store = new BrowserStore({ dir })
+  // 站点绑定（2026-09-15 审计 BUG-03）：注入前工具层必须能解析出连接器自己的
+  // origin，否则 fail-closed 拒绝。这些用例验的是"注入值不得回传模型"，把基准
+  // 固定成页面所在的 https://login.example 即可。
+  const resolver = credentials as (typeof credentials & { originOf?: () => Promise<string> }) | undefined
+  if (resolver !== undefined) resolver.originOf = async () => 'https://login.example'
   const runtime = new BrowserRuntime(adapter as never, {}, credentials as never, undefined, { store })
   return { runtime, adapter, store, dir }
 }

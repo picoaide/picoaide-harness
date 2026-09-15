@@ -16,6 +16,7 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { BrowserRuntime, type WaitForOptions } from './runtime.ts'
 import { browserError } from './errors.ts'
+import { httpOriginOf } from './credential-site.ts'
 import { snapshotNote } from './snapshot.ts'
 import type { BrowserWaitUntil } from './types.ts'
 
@@ -75,42 +76,34 @@ function assertNoFailedOp(runtime: BrowserRuntime, tabId: number, tool: string, 
 }
 
 /**
- * 站点绑定（2026-09-15 审计 P2）。
+ * 站点绑定（2026-09-15 审计 BUG-03）。
  *
  * 现场：`browser_fill_credentials` 只按 connectorId 解析就把用户名/口令写进
  * **当前文档**——模型可以先把标签页开到任意站点再注入，凭据就落进了另一个
  * origin 的登录框（钓鱼页天然受益）。
  *
- * 这里在调用 runtime 之前把 `new URL(tab.url).origin` 与 connector 记录里的
- * origin 比对；不一致、或记录里根本没有可用 URL，一律拒绝并说明原因。
+ * 这里在调用 runtime 之前把 `new URL(tab.url).origin` 与 connector 的站点
+ * origin 比对；不一致、记录里没有可用 URL、或部署没提供基准，一律拒绝。
  *
- * 结构性扩展：能力挂在凭证解析器上（与既有的 `resolver.list` 同一形状：
- * `resolveCredentials.originOf = …` / `urlOf = …`），由部署侧注入（index.ts）。
- * **本轮 index.ts 冻结**，生产上还没有这个能力 ⇒ 此时维持现状、不误杀
- * （见审计报告 C3：还需 index.ts 注入 + connectors 侧暴露站点 URL 才真正生效）。
+ * 基准挂在凭证解析器上（与既有的 `resolver.list` 同一形状：
+ * `resolveCredentials.originOf = …` / `urlOf = …`），由 index.ts 注入，取值
+ * 逻辑唯一实现在 credential-site.ts（显式配置 → 凭据字段里的地址）。
  */
 interface OriginAwareCredentialResolver {
   originOf?: (connectorId: string) => Promise<string | null | undefined> | string | null | undefined
   urlOf?: (connectorId: string) => Promise<string | null | undefined> | string | null | undefined
 }
 
-/** http/https 的 origin；其它一律 `null`（`about:blank` 的 origin 是字符串
- * `"null"`，不能当成可比对的站点）。 */
-function httpOriginOf(value: string | null | undefined): string | null {
-  if (typeof value !== 'string' || value.trim() === '') return null
-  try {
-    const url = new URL(value.trim())
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : null
-  } catch {
-    return null
-  }
-}
-
 /** Refuse the injection when the tab's origin is not the connector's origin. */
 async function assertCredentialOrigin(runtime: BrowserRuntime, tabId: number, connectorId: string): Promise<void> {
   const resolver = (runtime as unknown as { credentials?: OriginAwareCredentialResolver }).credentials
   const lookup = resolver?.originOf ?? resolver?.urlOf
-  if (resolver === undefined || lookup === undefined) return
+  // fail-closed（BUG-03）：能力缺席**不再**等于"放行"。旧实现在部署没注入 origin
+  // 能力时直接 return，工具对外宣称的 SITE-BOUND 就只是文档承诺 —— 模型把标签页
+  // 开到钓鱼页即可拿到连接器凭据。现在拿不到基准就拒绝，并在错误里说明怎么登记站点。
+  if (resolver === undefined || lookup === undefined) {
+    throw browserError('policy', 'browser_fill_credentials refused: this deployment exposes no connector site URL, so the credential injection cannot be bound to an origin. Add the connector\'s site address to its stored credential fields (a base-URL field) or declare it in the browser plugin\'s credentialSites config, then retry — or type the value with browser_type instead.')
+  }
   const expected = httpOriginOf(await lookup.call(resolver, connectorId))
   if (expected === null) {
     throw browserError('policy', `browser_fill_credentials refused: the stored connector record for ${JSON.stringify(connectorId)} has no usable http(s) site URL, so the injection cannot be bound to an origin. Register the connector's site URL, or enter the value with browser_type instead.`)
