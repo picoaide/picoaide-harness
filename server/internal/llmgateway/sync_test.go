@@ -137,7 +137,7 @@ func TestSyncIterationCleansPendingUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := serverstore.RecordUsage(db, uid, "m", 0, 0)
+	id, err := serverstore.RecordUsageKind(db, uid, "m", 0, 0, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}

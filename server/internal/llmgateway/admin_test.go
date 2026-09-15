@@ -298,7 +298,7 @@ func TestProviderEnableToggle(t *testing.T) {
 	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/server/admin/providers/%d", id), `{"enabled":false}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("disable provider: %d %s", w.Code, w.Body.String())
 	}
-	ups, err := MatchModels(db, "m1")
+	ups, err := MatchModelsByProtocol(db, "m1", "openai")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +309,7 @@ func TestProviderEnableToggle(t *testing.T) {
 	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/server/admin/providers/%d", id), `{"enabled":true}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("enable provider: %d %s", w.Code, w.Body.String())
 	}
-	ups, err = MatchModels(db, "m1")
+	ups, err = MatchModelsByProtocol(db, "m1", "openai")
 	if err != nil || len(ups) != 1 {
 		t.Fatalf("re-enabled provider not routable: %+v %v", ups, err)
 	}
@@ -624,7 +624,7 @@ func TestAdminModelRenameProtection(t *testing.T) {
 		t.Fatalf("rename manual model without usage = %d", w.Code)
 	}
 	// 有用量记录后拒绝改名
-	if _, err := serverstore.RecordUsage(db, 1, "m1-renamed", 10, 10); err != nil {
+	if _, err := serverstore.RecordUsageKind(db, 1, "m1-renamed", 10, 10, "chat"); err != nil {
 		t.Fatal(err)
 	}
 	if w, out := adminReq(t, r, "PUT", fmt.Sprintf("/api/server/admin/models/%d", mid), `{"name":"m1-again"}`, hdr); w.Code != http.StatusBadRequest {

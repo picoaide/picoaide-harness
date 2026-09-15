@@ -72,9 +72,6 @@ func BeijingMonthInstant(d time.Time) time.Time {
 // BeijingNow 返回当前时刻的北京日期值(等价北京时区的"今天")。
 func BeijingNow() time.Time { return BeijingDay(time.Now()) }
 
-// BeijingMonthNow 返回当前时刻所在北京月的月首日期值。
-func BeijingMonthNow() time.Time { return BeijingMonth(time.Now()) }
-
 // BeijingDayAt 返回北京日期值 d 当天 hour:00 的绝对瞬时(夹具/边界构造用)。
 func BeijingDayAt(d time.Time, hour int) time.Time {
 	return BeijingDayInstant(d).Add(time.Duration(hour) * time.Hour)

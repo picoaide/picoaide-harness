@@ -494,12 +494,6 @@ const adminCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsaf
 	"img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; " +
 	"worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 
-// htmlEscape escapes a string for safe embedding in HTML text/attributes.
-func htmlEscape(s string) string {
-	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;")
-	return r.Replace(s)
-}
-
 // newEngine 构造生产 HTTP 引擎(唯一真源:main 与契约测试共用)。
 //
 // P3-1(审计 2026-09-13):关闭尾斜杠自动重定向。gin 的 TSR 分支直接写出

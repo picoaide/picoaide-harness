@@ -191,26 +191,6 @@ func UpsertAppAndCreateReleaseOn(ex Queryer, a *App, r *Release) (int64, error) 
 	return createRelease(ex, r)
 }
 
-// UpsertAppAndCreateRelease 在同一事务内「占名 + 建版本」(P2-3)。
-// 此前 appstore.Publish 先 UpsertApp 再 CreateRelease,两步之间失败会留下
-// 「占名无版本」的悬挂 App(名称被永久占用、员工无法再发布、管理员须手工清理)。
-// 返回新版本行 id;任一步失败整体回滚。
-func UpsertAppAndCreateRelease(db *sql.DB, a *App, r *Release) (int64, error) {
-	tx, err := db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	id, err := UpsertAppAndCreateReleaseOn(tx, a, r)
-	if err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return id, nil
-}
-
 // GetApp 按 (kind, app_id) 取 App;不存在返回 ErrNotFound。
 func GetApp(db *sql.DB, kind, appID string) (*App, error) {
 	return GetAppOn(db, kind, appID)
@@ -331,20 +311,6 @@ func SetAppTitle(db *sql.DB, kind, appID, title string) error {
 	return nil
 }
 
-// SetAppOwner 归属转移(管理员指定,2026-09-02):apps.owner 是归属人的唯一
-// 真源——转移后旧归属者发布的后续版本请求一律 404,新归属者获得续传权。
-func SetAppOwner(db *sql.DB, kind, appID, owner string) error {
-	res, err := db.Exec(`UPDATE apps SET owner = ?, updated_at = `+NowExpr()+`
-		WHERE kind = ? AND app_id = ?`, owner, kind, appID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
 // SetAppEnabled 上下架(保留数据)。
 func SetAppEnabled(db *sql.DB, kind, appID string, enabled bool) error {
 	res, err := db.Exec(`UPDATE apps SET enabled = ?, updated_at = `+NowExpr()+`
@@ -404,18 +370,6 @@ func GetRelease(db *sql.DB, kind, appID, version string) (*Release, error) {
 // 版本号一经使用即永久占位(决策 D3),判重必须看到全部历史。
 func ListReleases(db *sql.DB, kind, appID string) ([]Release, error) {
 	return ListReleasesOn(db, kind, appID)
-}
-
-// ListReleasesByKind 列出某 kind 的全部版本(按 app_id, created_at 排序),
-// 供 VisibleReleases 一次取回后分组,替代逐 App 的 N+1 查询(2026-09-08 P2-10)。
-func ListReleasesByKind(db *sql.DB, kind string) ([]Release, error) {
-	rows, err := db.Query(`SELECT `+releaseListColumns+` FROM app_releases
-		WHERE kind = ? ORDER BY app_id, created_at`, kind)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return collectReleases(rows)
 }
 
 // ListReleasesByStatus 列出全部 App 的版本(管理端审核队列),status 为空 = 全部。
@@ -571,11 +525,6 @@ func IncrementReleaseDownload(db *sql.DB, kind, appID, version string) error {
 	_, err := db.Exec(`UPDATE app_releases SET downloads = downloads + 1
 		WHERE kind = ? AND app_id = ? AND version = ?`, kind, appID, version)
 	return err
-}
-
-// PendingReleaseCount 某发布者的待审数量(配额)。
-func PendingReleaseCount(db *sql.DB, publisher string) (int, error) {
-	return PendingReleaseCountOn(db, publisher)
 }
 
 // ---------------------------------------------------------------------------

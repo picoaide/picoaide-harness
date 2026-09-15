@@ -3,6 +3,7 @@ package serverstore
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 // R3(2026-09-13 审计):结算 SQL 里的 `? >= 0` 曾让 PG 把金额参数推断成 int4,
@@ -17,11 +18,11 @@ func TestSettlementBeyondInt4Range(t *testing.T) {
 	if _, err := SetUserBalance(db, uid, 1e10, "", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	pend, err := RecordUsage(db, uid, "int4-model", 0, 0)
+	pend, err := RecordUsageKind(db, uid, "int4-model", 0, 0, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := UpdateUsageTokens(db, pend, 1_000_000, 0); err != nil {
+	if err := updateUsageTokensAt(db, pend, 1_000_000, 0, time.Now()); err != nil {
 		t.Fatalf("大额结算失败(参数类型推断回归?): %v", err)
 	}
 	u, err := GetUserByID(db, uid)
@@ -44,15 +45,15 @@ func TestRefundBeyondInt4Range(t *testing.T) {
 	if _, err := SetUserBalance(db, uid, 1e10, "", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	pend, err := RecordUsage(db, uid, "int4-refund-model", 0, 0)
+	pend, err := RecordUsageKind(db, uid, "int4-refund-model", 0, 0, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := UpdateUsageTokens(db, pend, 1_000_000, 0); err != nil {
+	if err := updateUsageTokensAt(db, pend, 1_000_000, 0, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	// 费用下调(回填更小的 token) → 差额为正 → 走 refund 分支。
-	if err := UpdateUsageTokens(db, pend, 0, 0); err != nil {
+	if err := updateUsageTokensAt(db, pend, 0, 0, time.Now()); err != nil {
 		t.Fatalf("大额 refund 失败: %v", err)
 	}
 	u, err := GetUserByID(db, uid)

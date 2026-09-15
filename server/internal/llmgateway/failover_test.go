@@ -295,7 +295,7 @@ func TestMatchModelsReturnsAllCandidates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ups, err := MatchModels(db, "m")
+	ups, err := MatchModelsByProtocol(db, "m", "openai")
 	if err != nil {
 		t.Fatal(err)
 	}

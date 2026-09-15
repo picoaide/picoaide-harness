@@ -70,7 +70,7 @@ func TestUsagePartitionInsertAndQuery(t *testing.T) {
 	db.Exec("TRUNCATE TABLE usage RESTART IDENTITY CASCADE")
 	uid := mustUserID(t, db)
 	// 插入当前月(分区应自动建)
-	id, err := RecordUsage(db, uid, "m", 10, 5)
+	id, err := RecordUsageKind(db, uid, "m", 10, 5, "chat")
 	if err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
@@ -92,10 +92,10 @@ func TestRebuildUsageLedger(t *testing.T) {
 	db.Exec("TRUNCATE TABLE usage RESTART IDENTITY CASCADE")
 	uid := mustUserID(t, db)
 	// 两条今日明细
-	if _, err := RecordUsage(db, uid, "m1", 10, 5); err != nil {
+	if _, err := RecordUsageKind(db, uid, "m1", 10, 5, "chat"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordUsage(db, uid, "m1", 20, 10); err != nil {
+	if _, err := RecordUsageKind(db, uid, "m1", 20, 10, "chat"); err != nil {
 		t.Fatal(err)
 	}
 	// 一个跨月行(上月 15 日)
@@ -143,7 +143,7 @@ func TestCleanupUsageRetention(t *testing.T) {
 	// 上月-1(北京 2 个月前)一条:保留 1 个月 → 该月分区会被 DROP。
 	// bjMonth 直接取北京月首(不依赖进程 TZ,也不会像 AddDate 在月末溢出)。
 	older := bjMonth(2)
-	id, err := RecordUsage(db, uid, "m-old", 1, 1)
+	id, err := RecordUsageKind(db, uid, "m-old", 1, 1, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestUsageAggregateManyMembersArrayParam(t *testing.T) {
 	db.Exec("TRUNCATE TABLE usage RESTART IDENTITY CASCADE")
 	uid := mustUserID(t, db)
 	dept := mustDept(t, db, "大部门", 0)
-	if _, err := RecordUsage(db, uid, "m1", 42, 0); err != nil {
+	if _, err := RecordUsageKind(db, uid, "m1", 42, 0, "chat"); err != nil {
 		t.Fatal(err)
 	}
 	// 6.6 万个成员(user_groups 无外键,批量插入即可)
@@ -347,12 +347,19 @@ func TestUsageAggregateManyMembersArrayParam(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)`, uid, dept); err != nil {
 		t.Fatal(err)
 	}
-	ids, err := DeptUserIDsByName(db, "大部门")
+	sub, err := deptSubtreeIDs(db, "大部门")
 	if err != nil {
-		t.Fatalf("DeptUserIDsByName: %v", err)
+		t.Fatalf("deptSubtreeIDs: %v", err)
 	}
-	if len(ids) != 66001 {
-		t.Fatalf("members = %d, want 66001", len(ids))
+	if len(sub) != 1 || sub[0] != dept {
+		t.Fatalf("subtree = %v, want [%d]", sub, dept)
+	}
+	var members int
+	if err := db.QueryRow(`SELECT COUNT(DISTINCT user_id) FROM user_groups WHERE group_id = $1`, dept).Scan(&members); err != nil {
+		t.Fatalf("count members: %v", err)
+	}
+	if members != 66001 {
+		t.Fatalf("members = %d, want 66001", members)
 	}
 	// 部门聚合过滤(展示层 WithDept;成员集合走数组参数,不撞 PG 参数上限)
 	rows, err := UsageAggregateWithLedger(db, bjDay(1), bjDay(0), "model", WithDept("大部门"))
@@ -410,7 +417,7 @@ func TestCleanupUsageRetentionDropsOrphanDetachedTable(t *testing.T) {
 	}
 	uid := mustUserID(t, db)
 	older := bjMonth(2)
-	id, err := RecordUsage(db, uid, "m-orphan", 1, 1)
+	id, err := RecordUsageKind(db, uid, "m-orphan", 1, 1, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}

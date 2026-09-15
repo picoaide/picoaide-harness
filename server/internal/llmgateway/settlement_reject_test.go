@@ -261,7 +261,7 @@ func TestBalanceFloorEnforcedForFullYuanCharge(t *testing.T) {
 	seedExpensiveModel(t, db)
 	activateBalance(t, db, 1, smallBalance)
 
-	_, err := serverstore.RecordUsage(db, 1, "deepseek-chat", 8, 3)
+	_, err := serverstore.RecordUsageKind(db, 1, "deepseek-chat", 8, 3, "chat")
 	if !isBalanceSettlementFailure(err) {
 		t.Fatalf("err = %v, want ErrInsufficientBalance(余额下限未生效)", err)
 	}

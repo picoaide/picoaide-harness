@@ -120,7 +120,7 @@ func TestDeleteUserWithReferencedRows(t *testing.T) {
 	if _, err := CreateToken(db, id, "raw-token", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordUsage(db, id, "m", 1, 2); err != nil {
+	if _, err := RecordUsageKind(db, id, "m", 1, 2, "chat"); err != nil {
 		t.Fatal(err)
 	}
 	adminSessID := "session-" + time.Now().Format("150405")

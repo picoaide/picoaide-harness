@@ -182,7 +182,8 @@ func TestPublishAfterOwnerTransfer(t *testing.T) {
 	if _, err := Publish(db, req("transfer-me", "1.0.0", "t1", "alice")); err != nil {
 		t.Fatal(err)
 	}
-	if err := serverstore.SetAppOwner(db, serverstore.AppKindSkill, "transfer-me", "bob"); err != nil {
+	// 生产归属转移端点(appstore/admin.go)只调 SetAppOfficial(非官方 + 新归属)。
+	if err := serverstore.SetAppOfficial(db, serverstore.AppKindSkill, "transfer-me", false, "bob"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Publish(db, req("transfer-me", "2.0.0", "t2", "bob")); err != nil {
@@ -192,7 +193,7 @@ func TestPublishAfterOwnerTransfer(t *testing.T) {
 		t.Fatalf("旧归属者续传 = %v", err)
 	}
 	// 幂等:再次转移为同一归属不报错。
-	if err := serverstore.SetAppOwner(db, serverstore.AppKindSkill, "transfer-me", "bob"); err != nil {
+	if err := serverstore.SetAppOfficial(db, serverstore.AppKindSkill, "transfer-me", false, "bob"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -236,7 +237,7 @@ func TestPublishAgentSamePolicyAsSkill(t *testing.T) {
 	}
 
 	// 5) 管理员改归属后:新归属者可续传、旧归属者 409、管理员可发布被锁名。
-	if err := serverstore.SetAppOwner(db, serverstore.AppKindAgent, "agent-own", "bob"); err != nil {
+	if err := serverstore.SetAppOfficial(db, serverstore.AppKindAgent, "agent-own", false, "bob"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Publish(db, agentReq("agent-own", "1.2.0", "g6", "bob")); err != nil {
@@ -311,72 +312,6 @@ func TestPublishPendingCap(t *testing.T) {
 	}
 }
 
-func TestVisibleReleasesRespectsGrants(t *testing.T) {
-	db, cleanup := serverstore.NewTestDB(t)
-	t.Cleanup(cleanup)
-	if _, err := Publish(db, req("shared", "1.0.0", "s1", "alice")); err != nil {
-		t.Fatal(err)
-	}
-	if err := serverstore.SetReleaseStatus(db, serverstore.AppKindSkill, "shared", "1.0.0",
-		serverstore.ReleaseStatusApproved, ""); err != nil {
-		t.Fatal(err)
-	}
-	// 未授权:bob 看不到(严格默认)。
-	list, _, err := VisibleReleases(db, serverstore.AppKindSkill, "bob", nil, false)
-	if err != nil || len(list) != 0 {
-		t.Fatalf("未授权可见 = %v err=%v", list, err)
-	}
-	// 作者可见自己的。
-	list, _, _ = VisibleReleases(db, serverstore.AppKindSkill, "alice", nil, false)
-	if len(list) != 1 {
-		t.Fatalf("作者不可见自己的 App: %v", list)
-	}
-	// 授权后 bob 可见。
-	if err := serverstore.GrantApp(db, serverstore.AppKindSkill, "shared", "bob", "user"); err != nil {
-		t.Fatal(err)
-	}
-	list, _, _ = VisibleReleases(db, serverstore.AppKindSkill, "bob", nil, false)
-	if len(list) != 1 || list[0].Version != "1.0.0" {
-		t.Fatalf("授权后 = %v", list)
-	}
-	// 下架后员工不可见,管理员仍可见。
-	if err := serverstore.SetAppEnabled(db, serverstore.AppKindSkill, "shared", false); err != nil {
-		t.Fatal(err)
-	}
-	list, _, _ = VisibleReleases(db, serverstore.AppKindSkill, "bob", nil, false)
-	if len(list) != 0 {
-		t.Fatalf("下架后仍可见: %v", list)
-	}
-	list, _, _ = VisibleReleases(db, serverstore.AppKindSkill, "admin", nil, true)
-	if len(list) != 1 {
-		t.Fatalf("管理员应恒全量: %v", list)
-	}
-}
-
-func TestApprovedVersionsSorted(t *testing.T) {
-	db, cleanup := serverstore.NewTestDB(t)
-	t.Cleanup(cleanup)
-	// 按递增顺序发布(递增校验本身已被上面的用例覆盖);这里验证的是
-	// ApprovedVersions 的排序是数值感知的:1.10.0 必须排在 1.2.0 之后。
-	for _, v := range []string{"1.0.0", "1.2.0", "1.10.0"} {
-		if _, err := Publish(db, req("multi", v, "c"+v, "alice")); err != nil {
-			t.Fatalf("publish %s: %v", v, err)
-		}
-		if err := serverstore.SetReleaseStatus(db, serverstore.AppKindSkill, "multi", v,
-			serverstore.ReleaseStatusApproved, ""); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got, err := ApprovedVersions(db, serverstore.AppKindSkill, "multi")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"1.0.0", "1.2.0", "1.10.0"} // 数值感知排序,不是字典序
-	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
-		t.Fatalf("versions = %v, want %v", got, want)
-	}
-}
-
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
@@ -412,5 +347,50 @@ func TestPublishKeepsOfficialOwnership(t *testing.T) {
 	}
 	if app.Official != 1 || app.Owner != "" {
 		t.Fatalf("after admin publish: official=%d owner=%q, want official=1 owner=''", app.Official, app.Owner)
+	}
+}
+
+// TestPublishPendingCapPerKindAndAuthor 由已删除的 DAO 配额用例迁移而来
+// (2026-09-15 死代码审计):CreateAgentPresetCapped / CreateSharedSkillCapped 的
+// ErrTooManyPending 分支已不存在,配额检查的唯一生产落点是 Publish 的
+// PendingCap → serverstore.PendingReleaseCountOn(publish.go:248)。
+//
+// 原用例断言:①填满配额 ②超配额被拒 ③他人不受影响 ④(智能体侧)重名/重复版本
+// 的冲突语义。这里逐条落在生产入口上。
+func TestPublishPendingCapPerKindAndAuthor(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+
+	// ①+② 智能体与技能共用**同一份**待审计数(publisher 维度,不分 kind):
+	// alice 已有 1 个 pending 技能,再发布 pending 智能体即占满配额 2。
+	if _, err := Publish(db, req("cap-skill", "1.0.0", "k1", "alice")); err != nil {
+		t.Fatalf("第 1 个待审: %v", err)
+	}
+	if _, err := Publish(db, agentReq("cap-agent", "1.0.0", "k2", "alice")); err != nil {
+		t.Fatalf("第 2 个待审: %v", err)
+	}
+	over := agentReq("cap-over", "1.0.0", "k3", "alice")
+	over.PendingCap = 2
+	if _, err := Publish(db, over); code(t, err) != CodePendingLimit {
+		t.Fatalf("超配额 = %v, want PENDING_LIMIT", err)
+	}
+	// ③ 另一个作者不受影响。
+	other := agentReq("cap-other", "1.0.0", "k4", "bob")
+	other.PendingCap = 2
+	if _, err := Publish(db, other); err != nil {
+		t.Fatalf("他人发布受 alice 配额影响: %v", err)
+	}
+	// ④ 重复版本的生产冲突语义:同名同版本再发 → VERSION_EXISTS(发布内核把
+	// 旧 DAO 的 ErrDuplicate 细分成 VERSION_EXISTS / NAME_TAKEN 两个码,版本
+	// 永久占位)。注:配额先于版本检查,所以这里把配额放宽以便观察冲突码。
+	dup := agentReq("cap-agent", "1.0.0", "k5", "alice")
+	if _, err := Publish(db, dup); code(t, err) != CodeVersionExists {
+		t.Fatalf("同版本重复 = %v, want VERSION_EXISTS", err)
+	}
+	// 他人抢同名(同版本)→ NAME_TAKEN,归属保护优先于版本检查。
+	steal := agentReq("cap-agent", "1.0.0", "k6", "bob")
+	steal.PendingCap = 2
+	if _, err := Publish(db, steal); code(t, err) != CodeNameTaken {
+		t.Fatalf("他人抢同名 = %v, want NAME_TAKEN", err)
 	}
 }

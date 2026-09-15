@@ -220,19 +220,6 @@ func estimateEmbeddingPromptTokens(texts []string) int64 {
 	return 1
 }
 
-// fallbackCompletionTokens 是"补 completion 缺失那一半"的**唯一实现**:
-// 上游没有给出可用的 completion 侧(字段缺失、显式 0、负数)时,按**已交付
-// 字节**估算(同一个 estimateTokensFromBytes);已经上报的**正值原样保留**
-// —— 估算永远不会叠加到真实值上、也永远不会覆盖 prompt 侧(输入 token 无法
-// 由响应字节推知,宁可少收也不凭空多扣)。
-//
-// 饱和保护(G5a 同源):估算不得让 prompt+completion 越过 MaxInt64 ——
-// 落库列是 BIGINT,求和回绕/越界会让聚合与对账查询报错。
-func fallbackCompletionTokens(promptTokens, completionTokens, deliveredBytes int64) int64 {
-	n, _ := estimateCompletionFallback(promptTokens, completionTokens, deliveredBytes)
-	return n
-}
-
 // maxEstimatedCompletionTokens 是**估算**的业务上限(P2,审计 r5 §1 缺口 2:
 // 「估算无上限、可被上游双向操纵」)。
 //

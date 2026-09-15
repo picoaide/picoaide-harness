@@ -203,11 +203,6 @@ func costOfAt(now time.Time, promptTokens, completionTokens, cacheTokens int64, 
 	return base * offpeakFactor(now, offpeak, windows)
 }
 
-// RecordUsage inserts a chat usage row and returns its id.
-func RecordUsage(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64) (int64, error) {
-	return RecordUsageKind(db, userID, model, promptTokens, completionTokens, "chat")
-}
-
 // RecordUsageKind inserts a usage row with an explicit kind (chat | embedding).
 // embedding 行的 0-token(上游省略 usage)是真实请求计数,不得被
 // CleanupPendingUsage 当作流中断残留清除(审计2026-M16)。
@@ -217,28 +212,10 @@ func RecordUsageKind(db *sql.DB, userID int64, model string, promptTokens, compl
 	return recordUsageKindAt(db, userID, model, promptTokens, completionTokens, kind, time.Now())
 }
 
-// RecordUsageKindCached 与 RecordUsageKind 相同,额外携带缓存命中输入 token
-// 数(DeepSeek 缓存计费,0029/0030):命中部分按 cache_input_price_per_1m 计费。
-// estimated 固定 false(上游上报口径)。
-func RecordUsageKindCached(db *sql.DB, userID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string) (int64, error) {
-	return RecordUsageKindCachedEstimated(db, userID, model, promptTokens, completionTokens, cacheTokens, kind, false)
-}
-
 // RecordUsageKindEstimated 是 RecordUsageKind 的估算标记版本(embedding 输入侧
 // 估算用;无缓存命中数)。
 func RecordUsageKindEstimated(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64, kind string, estimated bool) (int64, error) {
 	return recordUsageKindAtCached(db, userID, 0, model, promptTokens, completionTokens, 0, kind, estimated, time.Now())
-}
-
-// RecordUsageKindCachedEstimated 是落账的**唯一入口**:estimated=true 表示这一行
-// 至少有一侧 token 是服务端按字节估算的(fallbackCompletionTokens /
-// estimateEmbeddingPromptTokens),而不是上游上报值。
-//
-// 为什么必须可区分(P2,审计 r5 §1 缺口 3):估算与上报写进同一列同一形态时,
-// 日账/月账/报表(RebuildUsageLedger 直接 SUM)事后无法判断哪些行是估算的,
-// 既解释不了异常行,也评估不了估算口径的影响面。列见迁移 0063。
-func RecordUsageKindCachedEstimated(db *sql.DB, userID int64, model string, promptTokens, completionTokens, cacheTokens int64, kind string, estimated bool) (int64, error) {
-	return recordUsageKindAtCached(db, userID, 0, model, promptTokens, completionTokens, cacheTokens, kind, estimated, time.Now())
 }
 
 // RecordUsageKindCachedEstimatedForProvider 与 RecordUsageKindCachedEstimated
@@ -300,25 +277,6 @@ func recordUsageKindAtCached(db *sql.DB, userID, providerID int64, model string,
 		return 0, err
 	}
 	return id, nil
-}
-
-// UpdateUsageTokens backfills token counts on an existing usage row (pending
-// row) and recomputes cost from the row's model pricing (0022/0023).
-func UpdateUsageTokens(db *sql.DB, id, promptTokens, completionTokens int64) error {
-	return updateUsageTokensAt(db, id, promptTokens, completionTokens, time.Now())
-}
-
-// UpdateUsageTokensCached 带缓存命中数的回填版本(0030)。estimated 固定 false。
-func UpdateUsageTokensCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64) error {
-	return UpdateUsageTokensCachedEstimated(db, id, promptTokens, completionTokens, cacheTokens, false)
-}
-
-// UpdateUsageTokensCachedEstimated 是回填的估算标记版本(0063):estimated=true
-// 表示回填进去的 token 至少有一侧来自服务端字节估算(settleStreamFallback)。
-// 余额下限语义:**非交付**(或尚未交付)路径使用 —— 余额不足返回
-// ErrInsufficientBalance 并整笔回滚。
-func UpdateUsageTokensCachedEstimated(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, estimated bool) error {
-	return updateUsageTokensAtCached(db, id, promptTokens, completionTokens, cacheTokens, estimated, false, time.Now())
 }
 
 // UpdateUsageTokensCachedEstimatedOverdraft 是**流式**回填的结算入口

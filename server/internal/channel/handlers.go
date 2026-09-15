@@ -2,9 +2,6 @@ package channel
 
 import (
 	"net/http"
-	"os"
-	"path/filepath"
-	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -71,21 +68,4 @@ func assetNotFound(c *gin.Context, message string) {
 		"code":    "NOT_FOUND",
 		"message": message,
 	}})
-}
-
-// AssetPath 返回渠道目录内某素材的绝对路径(供构建期校验/测试)。
-func AssetPath(name string) (string, error) {
-	if !assetExists(name) {
-		return "", os.ErrNotExist
-	}
-	return filepath.Join(Dir, name), nil
-}
-
-// Age 渠道目录的修改时间(排查用:确认镜像里的渠道配置是本次构建的)。
-func Age() time.Time {
-	st, err := os.Stat(filepath.Join(Dir, "channel.json"))
-	if err != nil {
-		return time.Time{}
-	}
-	return st.ModTime()
 }
