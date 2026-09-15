@@ -555,6 +555,10 @@ func setGrant(db *sql.DB, grant bool) gin.HandlerFunc {
 
 // download serves the stored archive. Employees may download only approved
 // rows; admins any row.
+//
+// 员工面三重闸门(与 agentshare.serveArchive 同口径,技能侧 2026-09-15 补齐):
+// 审核状态 / App 级上下架 / 授权,任一不过都与"不存在"同 404(不泄露存在性)。
+// 管理面(admin=true)只读归档,便于审核与排查已下架内容。
 func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name, version := c.Param("name"), c.Param("version")
@@ -579,6 +583,20 @@ func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 		if !admin && s.Status != serverstore.SharedSkillApproved {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 			return
+		}
+		// P2-1(2026-09-13 智能体面 / 2026-09-15 技能面):apps.enabled=0(下架)
+		// 即不可下载——此前只查审核状态与授权,下架后员工仍能按名字取下归档。
+		// 单个 App 一次查询,不引入逐行 N+1。
+		if !admin {
+			enabled, aerr := serverstore.AppEnabled(db, serverstore.AppKindSkill, name)
+			if aerr != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			if !enabled {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+				return
+			}
 		}
 		// 授权检查:非 admin 下载须已授权(或为作者本人)。
 		if !admin {
