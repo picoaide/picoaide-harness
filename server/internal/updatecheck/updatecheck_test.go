@@ -258,27 +258,6 @@ func TestCompareSemVer(t *testing.T) {
 	}
 }
 
-func TestIsStableSemVer(t *testing.T) {
-	cases := []struct {
-		in   string
-		want bool
-	}{
-		{"2.5.1", true},
-		{"v2.5.1", true},
-		{"2.5", false},
-		{"2.5.1-rc.1", false},
-		{"2.5.1+build", true},
-		{"2.05.1", false},
-		{"dev", false},
-		{"", false},
-	}
-	for _, tc := range cases {
-		if got := IsStableSemVer(tc.in); got != tc.want {
-			t.Errorf("IsStableSemVer(%q) = %v, want %v", tc.in, got, tc.want)
-		}
-	}
-}
-
 func TestIsSemVer(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -315,21 +294,6 @@ func TestNormalizeVersion(t *testing.T) {
 	for _, tc := range cases {
 		if got := NormalizeVersion(tc.in); got != tc.want {
 			t.Errorf("NormalizeVersion(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
-func TestParseCanonicalStable(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"v2.5.1", "2.5.1"},
-		{"2.5.1", "2.5.1"},
-		{"2.5.1-rc.1", ""},
-		{"2.5", ""},
-		{"dev", ""},
-	}
-	for _, tc := range cases {
-		if got := ParseCanonicalStable(tc.in); got != tc.want {
-			t.Errorf("ParseCanonicalStable(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }

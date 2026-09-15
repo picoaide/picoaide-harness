@@ -321,8 +321,12 @@ func TestDeleteProviderClearsDefaultModel(t *testing.T) {
 	}
 }
 
-// 渠道同步排除名单(审计修复 H2):增删查与幂等。
-func TestExcludedModelsCRUD(t *testing.T) {
+// 渠道同步排除名单(审计修复 H2):单向排除是**既定产品行为**——删除渠道同步
+// 模型后进名单,此后同步不会把它带回来(webadmin Gateway 页明确提示「删除后
+// 同步不会自动恢复,如需恢复请重新添加」)。因此名单只增不减,没有"移出名单"
+// 的接口:RemoveExcludedModel 已随 2026-09-15 死代码审计删除,本用例覆盖
+// 添加幂等、读取、以及删除上游时随行清理。
+func TestExcludedModelsAddAndProviderCleanup(t *testing.T) {
 	db := openTestDB(t)
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatal(err)
@@ -343,27 +347,22 @@ func TestExcludedModelsCRUD(t *testing.T) {
 	if err != nil || len(names) != 1 || names[0] != "deepseek-chat" {
 		t.Fatalf("excluded = %v %v, want [deepseek-chat]", names, err)
 	}
-	// 移除后名单清空(删除 setting)
-	if err := RemoveExcludedModel(db, pid, "deepseek-chat"); err != nil {
-		t.Fatal(err)
-	}
-	names, _ = GetExcludedModels(db, pid)
-	if len(names) != 0 {
-		t.Fatalf("excluded after remove = %v, want empty", names)
-	}
-	_, ok, _ := GetSetting(db, excludedModelsKey(pid))
-	if ok {
-		t.Fatal("excluded setting should be deleted when empty")
+	// 名单确实落库为 setting(下面「随上游删除清理」的断言因此不是空的)。
+	if _, ok, _ := GetSetting(db, excludedModelsKey(pid)); !ok {
+		t.Fatal("excluded setting missing after add")
 	}
 	// 删除上游清理排除名单
 	if err := AddExcludedModel(db, pid, "m1"); err != nil {
 		t.Fatal(err)
 	}
+	names, _ = GetExcludedModels(db, pid)
+	if len(names) != 2 {
+		t.Fatalf("excluded = %v, want 2 entries", names)
+	}
 	if err := DeleteGatewayProvider(db, pid); err != nil {
 		t.Fatal(err)
 	}
-	_, ok, _ = GetSetting(db, excludedModelsKey(pid))
-	if ok {
+	if _, ok, _ := GetSetting(db, excludedModelsKey(pid)); ok {
 		t.Fatal("excluded setting should be cleaned up with provider")
 	}
 }
@@ -390,7 +389,7 @@ func TestModelHasUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordUsage(db, uid, "used", 10, 10); err != nil {
+	if _, err := RecordUsageKind(db, uid, "used", 10, 10, "chat"); err != nil {
 		t.Fatal(err)
 	}
 	has, err = ModelHasUsage(db, "used")

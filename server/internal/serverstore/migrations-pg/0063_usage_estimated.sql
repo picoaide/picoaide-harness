@@ -11,9 +11,10 @@
 -- estimateEmbeddingPromptTokens),而不是上游上报值。上游上报优先(估算只在
 -- 该侧缺失/为 0 时启动),所以 estimated = false 的行一定是上游口径。
 --
--- 写入方:serverstore.RecordUsageKindCachedEstimated /
--- RecordUsageKindEstimated / UpdateUsageTokensCachedEstimated;旧入口
--- (RecordUsageKindCached / UpdateUsageTokensCached)一律写 false。
+-- 写入方(2026-09-15 死代码清理后的现状):serverstore.RecordUsageKindCachedEstimatedForProvider /
+-- RecordUsageKindEstimated / UpdateUsageTokensCachedEstimatedOverdraft;无 provider 归因的
+-- 旧入口(RecordUsageKindCachedEstimated / UpdateUsageTokensCachedEstimated / UpdateUsageTokens)
+-- 已随死代码删除,历史行照旧保留。
 --
 -- 回滚影响(迁移是**加列**,不做数据改写):
 --   * 向后兼容:旧二进制(INSERT 不含该列)照常工作,新行取默认 false;

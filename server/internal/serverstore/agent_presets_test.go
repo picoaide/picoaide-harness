@@ -1,7 +1,7 @@
 package serverstore
 
 import (
-	"fmt"
+	"errors"
 	"testing"
 )
 
@@ -36,7 +36,7 @@ func TestAgentPresetCRUD(t *testing.T) {
 		t.Fatalf("duplicate = %v, want ErrDuplicate", err)
 	}
 
-	if err := SetAgentPresetStatus(db, "coding-agent", AgentPresetApproved, ""); err != nil {
+	if err := SetReleaseStatusForReview(db, AppKindAgent, "coding-agent", "1.0.0", string(AgentPresetApproved), ""); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	p, _ = GetAgentPreset(db, "coding-agent")
@@ -45,14 +45,23 @@ func TestAgentPresetCRUD(t *testing.T) {
 	}
 
 	// Rejection stores the admin's reason; approving clears it.
-	if err := SetAgentPresetStatus(db, "coding-agent", AgentPresetRejected, "缺少 skills/"); err != nil {
+	if err := SetReleaseStatusForReview(db, AppKindAgent, "coding-agent", "1.0.0", string(AgentPresetRejected), "缺少 skills/"); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
 	p, _ = GetAgentPreset(db, "coding-agent")
 	if p.Status != AgentPresetRejected || p.Reason != "缺少 skills/" {
 		t.Fatalf("rejected row = %+v", p)
 	}
-	if err := SetAgentPresetStatus(db, "coding-agent", AgentPresetApproved, ""); err != nil {
+	// 拒绝即释放归档(SetReleaseStatusForReview 的 N-3/N-4 守卫):此时直接
+	// approve 必须被拒——不能凭一条归档已被释放的行重新上架。
+	if err := SetReleaseStatusForReview(db, AppKindAgent, "coding-agent", "1.0.0", string(AgentPresetApproved), ""); !errors.Is(err, ErrReleaseArchiveCleared) {
+		t.Fatalf("approve rejected-without-archive = %v, want ErrReleaseArchiveCleared", err)
+	}
+	// 重提(生产路径 = 作者重新上传,归档一并回来;此处用播种 API 复原归档)。
+	if err := SetAgentPresetArchive(db, "coding-agent", "1.0.0", []byte("PK\x03\x04")); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetReleaseStatusForReview(db, AppKindAgent, "coding-agent", "1.0.0", string(AgentPresetApproved), ""); err != nil {
 		t.Fatalf("approve again: %v", err)
 	}
 	p, _ = GetAgentPreset(db, "coding-agent")
@@ -60,13 +69,16 @@ func TestAgentPresetCRUD(t *testing.T) {
 		t.Fatalf("reason not cleared on approve: %q", p.Reason)
 	}
 
-	if err := DeleteAgentPreset(db, "coding-agent"); err != nil {
+	// 生产删除入口:agentshare removeVersioned → DeleteAgentPresetByVersion
+	// (整名删除 softDeleteAllPresetVersions 是 agentshare 包内函数;本用例只有
+	// 单版本,两者结果一致)。
+	if err := DeleteAgentPresetByVersion(db, "coding-agent", "1.0.0"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if _, err := GetAgentPreset(db, "coding-agent"); err != ErrNotFound {
 		t.Fatalf("after delete = %v, want ErrNotFound", err)
 	}
-	if err := DeleteAgentPreset(db, "coding-agent"); err != ErrNotFound {
+	if err := DeleteAgentPresetByVersion(db, "coding-agent", "1.0.0"); err != ErrNotFound {
 		t.Fatalf("delete missing = %v, want ErrNotFound", err)
 	}
 }
@@ -81,7 +93,7 @@ func TestAgentPresetResubmit(t *testing.T) {
 	if _, err := CreateAgentPreset(db, p); err != nil {
 		t.Fatal(err)
 	}
-	if err := SetAgentPresetStatus(db, "resubmit-me", AgentPresetRejected, "测试拒绝"); err != nil {
+	if err := SetReleaseStatusForReview(db, AppKindAgent, "resubmit-me", "1.0.0", string(AgentPresetRejected), "测试拒绝"); err != nil {
 		t.Fatal(err)
 	}
 	if err := UpdateAgentPresetResubmit(db, "resubmit-me", "新标题", "新描述", "abc123"); err != nil {
@@ -187,36 +199,6 @@ func TestAgentPresetVisibleFilter(t *testing.T) {
 	}
 }
 
-func TestAgentPresetCappedAtomically(t *testing.T) {
-	db := openTestDB(t)
-	defer db.Close()
-	if err := ApplyMigrations(db); err != nil {
-		t.Fatal(err)
-	}
-	// Fill to cap.
-	for i := 0; i < 2; i++ {
-		p := newAgentPreset(fmt.Sprintf("cap-%d", i), "alice")
-		if _, err := CreateAgentPresetCapped(db, p, 2); err != nil {
-			t.Fatalf("create %d: %v", i, err)
-		}
-	}
-	// At cap: the INSERT must refuse without erroring (0 rows).
-	p := newAgentPreset("cap-over", "alice")
-	if _, err := CreateAgentPresetCapped(db, p, 2); err != ErrTooManyPending {
-		t.Fatalf("over cap = %v, want ErrTooManyPending", err)
-	}
-	// Another author is unaffected.
-	b := newAgentPreset("bob-one", "bob")
-	if _, err := CreateAgentPresetCapped(db, b, 2); err != nil {
-		t.Fatalf("bob create: %v", err)
-	}
-	// Duplicate name surfaces as ErrDuplicate.
-	d := newAgentPreset("cap-0", "bob")
-	if _, err := CreateAgentPresetCapped(db, d, 2); err != ErrDuplicate {
-		t.Fatalf("duplicate = %v, want ErrDuplicate", err)
-	}
-}
-
 func TestAgentPresetStatusValidate(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
@@ -250,7 +232,7 @@ func TestAgentPresetQuality(t *testing.T) {
 	if err := SetAgentPresetQuality(db, "qual", "1.0.0", "featured"); err != ErrNotFound {
 		t.Fatalf("quality on pending = %v, want ErrNotFound", err)
 	}
-	if err := SetAgentPresetStatusByVersion(db, "qual", "1.0.0", AgentPresetApproved, ""); err != nil {
+	if err := SetReleaseStatusForReview(db, AppKindAgent, "qual", "1.0.0", string(AgentPresetApproved), ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := SetAgentPresetQuality(db, "qual", "1.0.0", "featured"); err != nil {
@@ -275,7 +257,7 @@ func TestAgentPresetQuality(t *testing.T) {
 	}
 }
 
-// TestAgentPresetArchiveDB: 0041 — CreateAgentPresetCapped stores the archive
+// TestAgentPresetArchiveDB: 0041 — CreateAgentPreset stores the archive
 // blob; SetAgentPresetArchive updates it; GetAgentPresetArchive reads it;
 // IncrementAgentPresetDownload bumps the counter; list views exclude the blob.
 func TestAgentPresetArchiveDB(t *testing.T) {
@@ -286,7 +268,7 @@ func TestAgentPresetArchiveDB(t *testing.T) {
 	}
 	blob := []byte("gz-tar-preset")
 	p := &AgentPreset{Name: "arch", Version: "1.0.0", Author: "alice", Status: AgentPresetPending, Archive: blob, Checksum: "sum1"}
-	if _, err := CreateAgentPresetCapped(db, p, 10); err != nil {
+	if _, err := CreateAgentPreset(db, p); err != nil {
 		t.Fatal(err)
 	}
 	got, err := GetAgentPresetArchive(db, "arch", "1.0.0")

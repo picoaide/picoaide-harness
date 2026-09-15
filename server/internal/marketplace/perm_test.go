@@ -198,7 +198,7 @@ func TestAdminGrantAPI(t *testing.T) {
 		t.Fatalf("after revoke grants = %v", out["grants"])
 	}
 	// audit trail written for grant + revoke
-	logs, err := serverstore.ListAuditLogs(db, 10)
+	logs, _, err := serverstore.ListAuditLogsPagedFiltered(db, 0, 10, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestAdminReplaceGrantsAPI(t *testing.T) {
 		t.Fatalf("unknown dept = %d, want 400", w.Code)
 	}
 	// 审计
-	logs, err := serverstore.ListAuditLogs(db, 5)
+	logs, _, err := serverstore.ListAuditLogsPagedFiltered(db, 0, 5, "", "")
 	if err != nil || logs[0].Action != "skill_grants_replace" {
 		t.Fatalf("audit = %+v %v", logs, err)
 	}

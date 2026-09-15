@@ -237,7 +237,7 @@ func TestUploadApproveFlow(t *testing.T) {
 		t.Fatalf("v2 upload = %d", w2.Code)
 	}
 	// Audit rows exist.
-	n, _ := serverstore.ListAuditLogs(db, 10)
+	n, _, _ := serverstore.ListAuditLogsPagedFiltered(db, 0, 10, "", "")
 	if len(n) < 2 {
 		t.Fatalf("audit = %d rows, want >= 2", len(n))
 	}

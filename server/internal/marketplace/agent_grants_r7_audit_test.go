@@ -233,7 +233,7 @@ func TestAgentRevokeIsAuditedAsRevoke(t *testing.T) {
 	if w, _ := mreq(t, r, "DELETE", "/api/server/admin/agents/bot-f/grant", `{"username":"carol"}`, hdr); w.Code != http.StatusOK {
 		t.Fatal("revoke failed")
 	}
-	logs, err := serverstore.ListAuditLogs(db, 50)
+	logs, _, err := serverstore.ListAuditLogsPagedFiltered(db, 0, 50, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

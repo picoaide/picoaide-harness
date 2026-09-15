@@ -12,7 +12,12 @@ import (
 // seedMarketAgent 播种一个市场渠道的已上架智能体，并授权给 alice。
 func seedMarketAgent(t *testing.T, db *sql.DB, name string) {
 	t.Helper()
-	if _, err := serverstore.UpsertAppAndCreateRelease(db, &serverstore.App{
+	// 生产入口 UpsertAppAndCreateReleaseOn 需调用方事务(N-2:与发布锁同事务)。
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.UpsertAppAndCreateReleaseOn(tx, &serverstore.App{
 		Kind: serverstore.AppKindAgent, AppID: name, Title: "市场智能体",
 		Owner: "boss", Channel: serverstore.AppChannelMarket, Enabled: 1,
 	}, &serverstore.Release{
@@ -20,6 +25,10 @@ func seedMarketAgent(t *testing.T, db *sql.DB, name string) {
 		Author: "boss", Publisher: "boss", Status: string(serverstore.AgentPresetApproved),
 		Archive: []byte("PK\x03\x04"),
 	}); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	if err := serverstore.GrantApp(db, serverstore.AppKindAgent, name, "alice", "user"); err != nil {

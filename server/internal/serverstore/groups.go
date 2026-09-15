@@ -133,17 +133,3 @@ func SyncUserGroups(db *sql.DB, userID int64, names []string) error {
 	InvalidateGroupTree() // F3: 成员归属变更立即影响授权/预算链
 	return nil
 }
-
-// AddUserGroup adds a single group membership (department assignment),
-// preserving existing memberships. Used by tests and budget chain setup.
-func AddUserGroup(db *sql.DB, userID, groupID int64) error {
-	if _, err := GroupByID(db, groupID); err != nil {
-		return err
-	}
-	stmt := "INSERT INTO user_groups (user_id, group_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
-	if _, err := db.Exec(stmt, userID, groupID); err != nil {
-		return err
-	}
-	InvalidateGroupTree() // F3
-	return nil
-}

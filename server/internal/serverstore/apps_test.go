@@ -150,24 +150,41 @@ func TestAppMarketProjection(t *testing.T) {
 
 // TestUpsertAppAndCreateReleaseAtomic 覆盖 P2-3:占名 + 建版本必须原子。
 // CreateRelease 失败时不得留下「占名无版本」的悬挂 App。
+//
+// 生产入口是 UpsertAppAndCreateReleaseOn(与发布锁同事务,N-2);这里用显式
+// 事务复刻调用方的 Commit/Rollback,原子性断言与旧 db 版逐条对应。
 func TestUpsertAppAndCreateReleaseAtomic(t *testing.T) {
 	db, cleanup := NewTestDB(t)
 	defer cleanup()
 	// 1) 版本插入失败(status 违反 CHECK 约束)→ 占名也必须回滚
-	_, err := UpsertAppAndCreateRelease(db, &App{
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = UpsertAppAndCreateReleaseOn(tx, &App{
 		Kind: AppKindSkill, AppID: "ghost", Title: "ghost", Owner: "alice", Channel: AppChannelOrg, Enabled: 1,
 	}, &Release{Kind: AppKindSkill, AppID: "ghost", Version: "1.0.0", Publisher: "alice", Status: "bogus"})
 	if err == nil {
+		_ = tx.Rollback()
 		t.Fatal("want release insert error, got nil")
 	}
+	_ = tx.Rollback()
 	if _, err := GetApp(db, AppKindSkill, "ghost"); err != ErrNotFound {
 		t.Fatalf("dangling app left after rollback (err=%v)", err)
 	}
 	// 2) 成功路径:App 与版本都在
-	if _, err := UpsertAppAndCreateRelease(db, &App{
+	tx2, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UpsertAppAndCreateReleaseOn(tx2, &App{
 		Kind: AppKindSkill, AppID: "atomic", Title: "atomic", Owner: "alice", Channel: AppChannelOrg, Enabled: 1,
 	}, &Release{Kind: AppKindSkill, AppID: "atomic", Version: "1.0.0", Publisher: "alice"}); err != nil {
+		_ = tx2.Rollback()
 		t.Fatalf("atomic publish: %v", err)
+	}
+	if err := tx2.Commit(); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := GetApp(db, AppKindSkill, "atomic"); err != nil {
 		t.Fatalf("app missing after atomic publish: %v", err)
@@ -176,9 +193,14 @@ func TestUpsertAppAndCreateReleaseAtomic(t *testing.T) {
 		t.Fatalf("release missing after atomic publish: %v", err)
 	}
 	// 3) 版本唯一冲突 → 占名侧的标题更新一并回滚
-	_, err = UpsertAppAndCreateRelease(db, &App{
+	tx3, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = UpsertAppAndCreateReleaseOn(tx3, &App{
 		Kind: AppKindSkill, AppID: "atomic", Title: "改了标题", Owner: "alice", Channel: AppChannelOrg, Enabled: 1,
 	}, &Release{Kind: AppKindSkill, AppID: "atomic", Version: "1.0.0", Publisher: "alice"})
+	_ = tx3.Rollback()
 	if !errors.Is(err, ErrDuplicate) {
 		t.Fatalf("err = %v, want ErrDuplicate", err)
 	}

@@ -220,11 +220,11 @@ func isLegacyPath(p string) bool {
 	return false
 }
 
-func TestHTMLEscapes(t *testing.T) {
-	if got := htmlEscape(`<script>alert("x")</script>`); got != "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;" {
-		t.Fatalf("escape = %s", got)
-	}
-}
+// 说明(2026-09-15 死代码审计):原 TestHTMLEscapes 断言的是 cmd/server 里
+// 手写的 htmlEscape;门户 HTML 自 e972df79ed(2026-09-10 渠道配置承接对外
+// 内容)起改由 internal/portal 的 html/template 渲染,转义是模板引擎的职责,
+// 该断言与实现一起删除。门户转义回归见 internal/portal/portal_test.go
+// (TestRenderEscapesChannelContent:文本/属性两个上下文分别断言)。
 
 // 管理台 /admin/* 是与门户同级的 HTML 面,必须带上同级基础安全头。
 //

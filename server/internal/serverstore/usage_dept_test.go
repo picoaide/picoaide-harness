@@ -34,7 +34,6 @@ func TestDeptGrouping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = fgID
 	if err := SyncUserGroups(db, u1, []string{"研发部"}); err != nil {
 		t.Fatal(err)
 	}
@@ -46,25 +45,34 @@ func TestDeptGrouping(t *testing.T) {
 	}
 
 	// 用量:u1 100 tokens, u2 300 tokens, u3 500 tokens
-	if _, err := RecordUsage(db, u1, "m1", 100, 0); err != nil {
+	if _, err := RecordUsageKind(db, u1, "m1", 100, 0, "chat"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordUsage(db, u2, "m1", 300, 0); err != nil {
+	if _, err := RecordUsageKind(db, u2, "m1", 300, 0, "chat"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordUsage(db, u3, "m1", 500, 0); err != nil {
+	if _, err := RecordUsageKind(db, u3, "m1", 500, 0, "chat"); err != nil {
 		t.Fatal(err)
 	}
 
-	// 1) DeptUserIDsByName:研发部 = {u1,u2}(子树)
-	ids, err := DeptUserIDsByName(db, "研发部")
+	// 1) deptSubtreeIDs:研发部子树 = {研发部, 前研一组}——它正是生产侧
+	// WithDept/UsageAggregateWithLedger 过滤部门时交给 SQL 的 group id 集合;
+	// 成员解析(u1+u2)由下面 2)~4) 的聚合断言覆盖。
+	sub, err := deptSubtreeIDs(db, "研发部")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ids) != 2 {
-		t.Fatalf("DeptUserIDsByName(研发部) = %v, want 2 members", ids)
+	if len(sub) != 2 {
+		t.Fatalf("deptSubtreeIDs(研发部) = %v, want 2 group ids", sub)
 	}
-	if _, err := DeptUserIDsByName(db, "不存在的部门"); err != ErrNotFound {
+	inSub := map[int64]bool{}
+	for _, id := range sub {
+		inSub[id] = true
+	}
+	if !inSub[rdID] || !inSub[fgID] {
+		t.Fatalf("deptSubtreeIDs(研发部) = %v, want 含 %d(研发部) 与 %d(前研一组)", sub, rdID, fgID)
+	}
+	if _, err := deptSubtreeIDs(db, "不存在的部门"); err != ErrNotFound {
 		t.Fatalf("unknown dept: %v, want ErrNotFound", err)
 	}
 
@@ -149,7 +157,7 @@ func TestDeptGroupingSharedAncestorCountedOnce(t *testing.T) {
 	if err := SyncUserGroups(db, uid, []string{"A组", "B组"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordUsage(db, uid, "m1", 100, 0); err != nil {
+	if _, err := RecordUsageKind(db, uid, "m1", 100, 0, "chat"); err != nil {
 		t.Fatal(err)
 	}
 

@@ -89,28 +89,10 @@ func AddExcludedModel(db *sql.DB, providerID int64, name string) error {
 	return SetSetting(db, excludedModelsKey(providerID), string(b))
 }
 
-// RemoveExcludedModel 从排除名单移除模型名(幂等;名单清空后删除 setting)。
-func RemoveExcludedModel(db *sql.DB, providerID int64, name string) error {
-	names, err := GetExcludedModels(db, providerID)
-	if err != nil {
-		return err
-	}
-	out := names[:0]
-	for _, n := range names {
-		if n != name {
-			out = append(out, n)
-		}
-	}
-	if len(out) == 0 {
-		_, err := db.Exec("DELETE FROM settings WHERE key = ?", excludedModelsKey(providerID))
-		if err == nil {
-			settingsCache.invalidateAll() // 直写 settings 需同步失效缓存
-		}
-		return err
-	}
-	b, _ := json.Marshal(out)
-	return SetSetting(db, excludedModelsKey(providerID), string(b))
-}
+// 说明:排除名单是**单向**的(2026-09-15 死代码审计)——删除渠道同步模型后
+// 进名单,此后同步不会把它带回来(webadmin Gateway 页文案:「删除后同步不会
+// 自动恢复,如需恢复请重新添加」)。不存在"移出名单"的接口,原先设计但从未
+// 接线的 RemoveExcludedModel 已删除。
 
 func scanProvider(scan interface{ Scan(...any) error }) (*GatewayProvider, error) {
 	var p GatewayProvider

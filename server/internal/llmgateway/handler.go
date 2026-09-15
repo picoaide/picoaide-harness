@@ -1053,18 +1053,6 @@ type streamContentTracker struct {
 // 超过即按"已交付"保守处理并重置,不再继续累积)。
 const maxStreamEventBytes = 8 << 20
 
-// streamContentDelta 是**单行**形态的兼容入口(回归表/探针按行验证形态矩阵):
-// 等价于"用一个新的 tracker 观察这一行并立即 flush"。
-func streamContentDelta(line string) (contentBytes int64, delivered bool) {
-	var t streamContentTracker
-	n, ok := t.observe(line)
-	if n2, ok2 := t.flush(); ok2 {
-		n += n2
-		ok = true
-	}
-	return n, ok
-}
-
 // observe 喂入一行 SSE 行(或非 SSE 的整包 JSON 行)。
 func (t *streamContentTracker) observe(line string) (contentBytes int64, delivered bool) {
 	trimmed := strings.TrimSpace(line)

@@ -397,40 +397,6 @@ func VerifyAuditChain(db *sql.DB) (int64, error) {
 	return 0, rows.Err()
 }
 
-// ListAuditLogs returns the most recent audit entries (limit <= 0: 50).
-func ListAuditLogs(db *sql.DB, limit int) ([]AuditLogEntry, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	logs, _, err := ListAuditLogsPaged(db, 0, limit)
-	return logs, err
-}
-
-// ListAuditLogsPaged returns one page of audit entries (newest first) and the
-// total count.
-func ListAuditLogsPaged(db *sql.DB, offset, limit int) ([]AuditLogEntry, int64, error) {
-	var total int64
-	if err := db.QueryRow("SELECT COUNT(*) FROM audit_logs").Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	rows, err := db.Query("SELECT id, username, action, detail, prev_hash, hash, created_at FROM audit_logs ORDER BY id DESC LIMIT ? OFFSET ?", limit, offset)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-	var out []AuditLogEntry
-	for rows.Next() {
-		var l AuditLogEntry
-		var created any
-		if err := rows.Scan(&l.ID, &l.Username, &l.Action, &l.Detail, &l.PrevHash, &l.Hash, &created); err != nil {
-			return nil, 0, err
-		}
-		l.CreatedAt = parseSQLTime(created)
-		out = append(out, l)
-	}
-	return out, total, rows.Err()
-}
-
 // ListAuditLogsPagedFiltered returns one page of audit entries (newest
 // first) optionally filtered by action/username (审计 M8), plus the total
 // for the filtered set.

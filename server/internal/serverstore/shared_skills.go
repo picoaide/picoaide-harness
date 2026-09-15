@@ -157,11 +157,6 @@ func IncrementSharedSkillDownload(db *sql.DB, name, version string) (bool, error
 	return true, nil
 }
 
-// SetSharedSkillStatus 审核(只改状态位,不碰内容)。
-func SetSharedSkillStatus(db *sql.DB, name, version string, status SharedSkillStatus, reason string) error {
-	return SetReleaseStatus(db, AppKindSkill, name, version, string(status), reason)
-}
-
 // DeleteSharedSkill 删除一个版本 = 软删(版本号永久占位,不可复用)。
 func DeleteSharedSkill(db *sql.DB, name, version string) error {
 	return SoftDeleteRelease(db, AppKindSkill, name, version)
@@ -229,20 +224,6 @@ func CreateSharedSkill(db *sql.DB, s *SharedSkill) (int64, error) {
 		return 0, ErrDuplicate
 	}
 	return id, err
-}
-
-// CreateSharedSkillCapped 同上,附带每作者待审配额(超出返回 ErrTooManyPending)。
-func CreateSharedSkillCapped(db *sql.DB, s *SharedSkill, pendingCap int) (int64, error) {
-	if pendingCap > 0 {
-		n, err := PendingReleaseCount(db, s.Author)
-		if err != nil {
-			return 0, err
-		}
-		if n >= pendingCap {
-			return 0, ErrTooManyPending
-		}
-	}
-	return CreateSharedSkill(db, s)
 }
 
 // SetSharedSkillArchive 覆盖某版本的归档。

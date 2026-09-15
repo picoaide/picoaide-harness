@@ -1,7 +1,6 @@
 package serverstore
 
 import (
-	"fmt"
 	"testing"
 )
 
@@ -37,7 +36,7 @@ func TestSharedSkillCRUD(t *testing.T) {
 		t.Fatalf("duplicate = %v, want ErrDuplicate", err)
 	}
 
-	if err := SetSharedSkillStatus(db, "codeql-audit", "1.0.0", SharedSkillApproved, ""); err != nil {
+	if err := SetReleaseStatusForReview(db, AppKindSkill, "codeql-audit", "1.0.0", string(SharedSkillApproved), ""); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	s, _ = GetSharedSkill(db, "codeql-audit", "1.0.0")
@@ -45,7 +44,7 @@ func TestSharedSkillCRUD(t *testing.T) {
 		t.Fatalf("status = %q", s.Status)
 	}
 	// Reject stores reason; approve clears it.
-	if err := SetSharedSkillStatus(db, "codeql-audit", "1.1.0", SharedSkillRejected, "缺 SKILL.md"); err != nil {
+	if err := SetReleaseStatusForReview(db, AppKindSkill, "codeql-audit", "1.1.0", string(SharedSkillRejected), "缺 SKILL.md"); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
 	s, _ = GetSharedSkill(db, "codeql-audit", "1.1.0")
@@ -133,34 +132,6 @@ func TestSharedSkillVisibleFilter(t *testing.T) {
 	}
 }
 
-func TestSharedSkillCappedAtomically(t *testing.T) {
-	db := openTestDB(t)
-	defer db.Close()
-	if err := ApplyMigrations(db); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 2; i++ {
-		s := newSharedSkill(fmt.Sprintf("cap-%d", i), "1.0.0", "alice")
-		if _, err := CreateSharedSkillCapped(db, s, 2); err != nil {
-			t.Fatalf("create %d: %v", i, err)
-		}
-	}
-	s := newSharedSkill("cap-over", "1.0.0", "alice")
-	if _, err := CreateSharedSkillCapped(db, s, 2); err != ErrTooManyPending {
-		t.Fatalf("over cap = %v, want ErrTooManyPending", err)
-	}
-	// Same name new version not blocked by cap (different row keys).
-	s2 := newSharedSkill("cap-over", "1.1.0", "alice")
-	if _, err := CreateSharedSkillCapped(db, s2, 2); err != ErrTooManyPending {
-		t.Fatalf("second row same author = %v, want ErrTooManyPending", err)
-	}
-	// Another author unaffected.
-	b := newSharedSkill("bob-one", "1.0.0", "bob")
-	if _, err := CreateSharedSkillCapped(db, b, 2); err != nil {
-		t.Fatalf("bob create: %v", err)
-	}
-}
-
 func TestSharedSkillQuality(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
@@ -176,7 +147,7 @@ func TestSharedSkillQuality(t *testing.T) {
 	if err := SetSharedSkillQuality(db, "qual", "1.0.0", "featured"); err != ErrNotFound {
 		t.Fatalf("quality on pending = %v, want ErrNotFound", err)
 	}
-	if err := SetSharedSkillStatus(db, "qual", "1.0.0", SharedSkillApproved, ""); err != nil {
+	if err := SetReleaseStatusForReview(db, AppKindSkill, "qual", "1.0.0", string(SharedSkillApproved), ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := SetSharedSkillQuality(db, "qual", "1.0.0", "featured"); err != nil {
@@ -222,7 +193,7 @@ func TestCrossSourceSkillNameConflict(t *testing.T) {
 	if _, err := CreateSharedSkill(db, newSharedSkill("codeql-audit", "1.0.0", "alice")); err != ErrConflict {
 		t.Fatalf("shared upload under market name = %v, want ErrConflict", err)
 	}
-	if _, err := CreateSharedSkillCapped(db, newSharedSkill("codeql-audit", "1.0.0", "alice"), 10); err != ErrConflict {
+	if _, err := CreateSharedSkill(db, newSharedSkill("codeql-audit", "1.0.0", "alice")); err != ErrConflict {
 		t.Fatalf("shared upload capped under market name = %v, want ErrConflict", err)
 	}
 
@@ -249,7 +220,7 @@ func TestCrossSourceSkillNameConflict(t *testing.T) {
 	}
 }
 
-// TestSharedSkillArchiveDB: 0040 — CreateSharedSkillCapped stores the archive
+// TestSharedSkillArchiveDB: 0040 — CreateSharedSkill stores the archive
 // blob; SetSharedSkillArchive updates it; GetSharedSkillArchive reads it;
 // IncrementSharedSkillDownload bumps the counter; list views exclude the blob.
 func TestSharedSkillArchiveDB(t *testing.T) {

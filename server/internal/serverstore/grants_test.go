@@ -80,7 +80,9 @@ func TestSkillGrantsLifecycle(t *testing.T) {
 	}
 
 	// delete cascades (no resurrection on re-create)
-	if err := DeleteSkillGrants(db, "data-extract"); err != nil {
+	// 生产级联删除入口是泛化的 DeleteSharedResourceGrants(按 kind 限定);
+	// DeleteSkillGrants 是它 kind='skill' 的旧包装(2026-09-15 审计删除)。
+	if err := DeleteSharedResourceGrants(db, SharedSkillGrantTable, "data-extract"); err != nil {
 		t.Fatal(err)
 	}
 	grants, _ = ListSkillGrants(db, "data-extract")
