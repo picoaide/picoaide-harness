@@ -319,7 +319,10 @@ describe('P2-29 tool registrations are fiber-scoped', () => {
     expect(registered).toEqual([])
 
     const all = applyBrowserTools(ctx, runtime)
-    expect(registered.length).toBe(32)
+    // 2026-09-15 审计 P1：`browser_release` 已从模型工具面移除（控制权只能由用户的
+    // 「交给 AI」按钮交回，模型不能单方面撤销用户闸），所以是 31 而不是 32。
+    expect(registered.length).toBe(31)
+    expect(registered).not.toContain('browser_release')
     all()
     expect(registered).toEqual([])
     runtime.dispose(); rmSync(dir, { recursive: true, force: true })
