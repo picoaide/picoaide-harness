@@ -138,10 +138,56 @@ describe('TabPool — quota', () => {
 
   it('tryReserveTab is fail-fast', () => {
     const pool = new TabPool({ maxTabs: 1 })
-    expect(pool.tryReserveTab()).toBe(true)
-    expect(pool.tryReserveTab()).toBe(false)
+    expect(pool.tryReserveTab()).toBeDefined()
+    expect(pool.tryReserveTab()).toBeUndefined()
     pool.releaseReservation()
-    expect(pool.tryReserveTab()).toBe(true)
+    expect(pool.tryReserveTab()).toBeDefined()
+  })
+
+  it('用户接管后 agent 操作不再无限期挂住（2026-09-15 审计 P0-1）', async () => {
+    // 暂停是产品意图，但必须有预算：否则用户点「我来操作」后一直不点「交给 AI」，
+    // 模型回合会无声地永远挂着。超时以明确错误结束这次调用（不抢控制权）。
+    const pool = new TabPool({ userGateTimeoutMs: 60 })
+    pool.setUserControl(true)
+    const started = Date.now()
+    const err = await pool.withOperation('browser_open', async () => 'never').catch((cause: unknown) => cause)
+    const waited = Date.now() - started
+    expect((err as { code?: string }).code).toBe('window-controlled')
+    expect(String((err as Error).message)).toContain('等待用户交还浏览器超时')
+    expect(waited).toBeGreaterThanOrEqual(50)
+    // 用户交还后队列恢复可用
+    pool.setUserControl(false)
+    await expect(pool.withOperation('browser_open', async () => 'ok')).resolves.toBe('ok')
+  })
+
+  it('预留令牌一次性：导航失败后的兜底释放不能把容量吃掉（2026-09-15 P0）', () => {
+    // 现场形态：open() 预留 → createTabReal 里 registerTab（兑现预留）→
+    // navigateInternal 抛 navigation-blocked → catch 里 removeTab，调用方再
+    // releaseReservation 一次。旧实现只有计数器，第二次释放会把这一次预留
+    // 凭空抹掉 ⇒ 池子静默缩容，最终"再也开不出新标签页"，只能重启客户端。
+    const pool = new TabPool({ maxTabs: 1 })
+    const reservation = pool.tryReserveTab()
+    expect(reservation).toBeDefined()
+    pool.registerTab(7, '', '', reservation) // 兑现
+    pool.removeTab(7)                        // 导航失败：视图销毁、tab 移除
+    pool.releaseReservation(reservation)     // 调用方兜底释放 → 必须是 no-op
+    // 容量 1 仍然可用：池子没有被静默缩容
+    expect(pool.tryReserveTab()).toBeDefined()
+  })
+
+  it('预留令牌：重复退还是 no-op，未兑现的预留可以正常退还', () => {
+    const pool = new TabPool({ maxTabs: 1 })
+    const first = pool.tryReserveTab()
+    expect(first).toBeDefined()
+    pool.releaseReservation(first)
+    pool.releaseReservation(first) // 重复退还：no-op
+    const second = pool.tryReserveTab()
+    expect(second).toBeDefined()
+    pool.registerTab(1, '', '', second)
+    // 已兑现的令牌再退也不能把 tab 的槽位算掉
+    pool.releaseReservation(second)
+    pool.removeTab(1)
+    expect(pool.tryReserveTab()).toBeDefined()
   })
 })
 

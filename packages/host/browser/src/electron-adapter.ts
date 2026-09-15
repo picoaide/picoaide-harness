@@ -40,6 +40,13 @@ export interface NativeView {
   readonly webContents: NativeWebContents
   /** Destroy the underlying view. */
   destroy(): void
+  /**
+   * 把键盘焦点交给这个视图（可选：测试/非 Electron 适配器可以省略）。
+   *
+   * 2026-09-15 审计 P2-7：蒙版只挡鼠标 —— 用户点过页面输入框后 AI 进入 mask，
+   * 焦点仍在下面的 tab 视图上，键盘输入会绕开"窗口已锁定"的模型。
+   */
+  focus?(): void
 }
 
 /** Bounds in DIP relative to the window's content area. */
@@ -351,6 +358,14 @@ export function createRealElectronAdapter(electronModule?: ElectronModuleLike): 
         detach() {
           // WebContentsView removes itself from its parent on close; nothing
           // to do here beyond releasing the reference (the window owns it).
+        },
+        focus() {
+          // 蒙版上锁时把键盘焦点拿过来（审计 P2-7）：否则键盘输入直入下面的页面。
+          try {
+            if (!wc.isDestroyed()) wc.focus()
+          } catch {
+            // 视图销毁竞态下 focus 可能抛：焦点问题不该升级成插件失败。
+          }
         },
         moveToTop(win) {
           // Re-attach the NATIVE view so it lands on top of every sibling.
