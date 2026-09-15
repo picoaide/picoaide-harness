@@ -18,9 +18,21 @@
  * - forbidden writes/side-effect APIs (called or member-accessed):
  *   setItem (storage), document.write, form submit, window.open, alerts,
  *   print, history/replaceState, location assignment, cookie assignment,
- *   DOM mutation, in-place array/object mutation, media/presentation side
- *   effects. Network-outbound APIs (fetch/XMLHttpRequest/WebSocket/
- *   EventSource/sendBeacon) are NOT forbidden (2026-09-08 product decision).
+ *   DOM mutation, page-state mutation, media/presentation side effects.
+ *   Network-outbound APIs (fetch/XMLHttpRequest/WebSocket/EventSource/
+ *   sendBeacon) are NOT forbidden (2026-09-08 product decision).
+ * - the matched NAME alone is not the verdict for a handful of names whose
+ *   meaning depends on the RECEIVER (2026-09-15 audit, both directions):
+ *   `String.prototype.replace` is a pure function while `location.replace` is a
+ *   navigation, and `Array.prototype.sort/fill/push/…` only mutate page state
+ *   when the receiver is page state rather than a value this expression built.
+ *   Pure receivers are allowed; everything unprovable stays refused.
+ * - reflection is checked as well (2026-09-15 audit): `Reflect.construct` is the
+ *   `new` operator under another name (always refused) and `Reflect.apply` is
+ *   judged against the function object it is handed, so a write API reached
+ *   through it is refused exactly like a direct call. Computed member names made
+ *   of concatenated string literals (`localStorage['set'+'Item']`) are folded
+ *   before that judgement instead of reading as "dynamic, therefore data".
  * - a whitelist of read helper globals is injected into the executed
  *   expression (readText/readAttr/readJson/readVar) and must not be shadowed.
  *
@@ -129,6 +141,66 @@ const WRITE_APIS = new Set([
   'requestFullscreen',
   'exitFullscreen',
 ])
+
+/**
+ * Names whose verdict depends on the RECEIVER (2026-09-15 审计 P2「双向失真」）。
+ *
+ * 审计实测两个方向同时错：
+ * - 误杀：`document.body.innerText.replace(/\s+/g,' ')` 被按名字拒绝，可它是
+ *   `String.prototype.replace`——**纯函数**，不碰页面状态；
+ * - 漏放：`Reflect.apply(localStorage['set'+'Item'], localStorage, [...])` 真的
+ *   写进了 storage（名字匹配既没看见 `setItem`，也没看见调用关系）。
+ *
+ * 豁免只给**真正是纯函数的同名方法**：`replace` 在字符串接收者上不改动任何
+ * 东西。`sort`/`fill`/`push`/`splice` 这些**同名物都是原地改动**（`Array.prototype`
+ * 的 `sort`/`fill` 直接改接收者本身），谈不上"纯函数"，因此照旧一律拒绝——
+ * `[1,2,3].push(4)` / `[1].sort()` 的既有回归断言（tests/audit-fixes.spec.ts）
+ * 也要求它们保持被拒。`map` 本来就允许（返回新数组，不在写 API 表里）。
+ */
+const RECEIVER_AWARE_WRITE_APIS = new Set([
+  // String.prototype.replace ↔ Location.replace（导航）
+  'replace',
+])
+
+/** 返回字符串的内建成员方法（接收者还不是写宿主时，其返回值可证明是字符串）。
+ * `replace`/`replaceAll` 也在内：链式 `a.replace(x,y).replace(z,w)` 的接收者
+ * 是前一次替换的结果，按"返回值是字符串"才能继续豁免（`location.replace` 在
+ * 外层已被名字规则拒掉）。 */
+const STRING_RESULT_METHODS = new Set([
+  'toString', 'toLocaleString', 'join', 'split', 'slice', 'substring', 'substr',
+  'trim', 'trimStart', 'trimEnd', 'toLowerCase', 'toUpperCase',
+  'toLocaleLowerCase', 'toLocaleUpperCase', 'concat', 'charAt', 'charCodeAt',
+  'codePointAt', 'padStart', 'padEnd', 'repeat', 'match', 'matchAll', 'search',
+  'normalize', 'startsWith', 'endsWith', 'includes', 'indexOf', 'lastIndexOf',
+  'localeCompare', 'at', 'replace', 'replaceAll',
+])
+
+/** 返回字符串的元素属性（读页面的文字，不会写页面）。 */
+const STRING_YIELDING_PROPERTIES = new Set([
+  'innerText', 'textContent', 'outerText', 'innerHTML', 'outerHTML', 'value',
+  'title', 'href', 'src', 'placeholder', 'name', 'id', 'className', 'alt',
+  'label', 'content', 'text',
+])
+
+/** 直接返回字符串的全局调用。 */
+const STRING_GLOBAL_CALLS = new Set([
+  'String', 'readText', 'readAttr', 'encodeURIComponent', 'decodeURIComponent',
+])
+
+/** 写宿主：接收者是这些（或其点号路径）时不做任何"纯函数"豁免。 */
+const WRITE_HOST_ROOTS = new Set([
+  'location', 'history', 'localStorage', 'sessionStorage', 'document', 'window',
+  'globalThis', 'navigator', 'top', 'parent', 'self', 'frames', 'this',
+])
+
+/** `Reflect` 的调用型方法：`construct` ≡ `new`（一律拒绝），`apply` 按目标函数判定。 */
+const REFLECT_APPLY = 'apply'
+const REFLECT_CONSTRUCT = 'construct'
+
+/** 写 API 名字集合（含 receiver-aware 的那批），供反射路径复用同一判定。 */
+function isWriteApiName(name: string): boolean {
+  return WRITE_APIS.has(name)
+}
 
 interface AnyNode {
   type: string
@@ -273,16 +345,24 @@ function findViolation(node: AnyNode, source: string): string | null {
       if (name === undefined) {
         return 'dynamic call target is not allowed (guardrail: single expression, literal callee)'
       }
-      if (name !== null && (WRITE_APIS.has(name) || name === 'eval' || name === 'Function')) {
-        return `call to ${name} is not allowed (guardrail: code-execution/side-effect API)`
+      if (name !== null && (name === 'eval' || name === 'Function')) {
+        return `call to ${name} is not allowed (guardrail: code-execution API)`
       }
+      if (name !== null) {
+        const blocked = blockedWriteCall(name, callee)
+        if (blocked !== null) return blocked
+      }
+      const reflection = reflectViolation(current)
+      if (reflection !== null) return reflection
     }
     if (type === 'MemberExpression') {
       const name = memberName(current)
-      if (name === undefined) {
-        // Non-literal computed READ is allowed (data access like data[key]).
-      } else if (name !== null && WRITE_APIS.has(name)) {
-        return `access to ${name} is not allowed (guardrail: side-effect API)`
+      // `undefined` = 非字面量计算属性（数据访问如 data[key]，允许读取）。
+      if (name !== undefined && name !== null) {
+        const blocked = blockedWriteAccess(name, current)
+        if (blocked !== null) return blocked
+        const reflection = reflectMemberViolation(current, name)
+        if (reflection !== null) return reflection
       }
     }
     if (type === 'Identifier') {
@@ -337,7 +417,11 @@ function callTargetName(callee: AnyNode | undefined): string | null | undefined 
 /** Resolve the dotted member name of a callee/member (a.b.c → 'c').
  * String-literal computed access (`window['fetch']`) resolves to its value;
  * non-literal computed access yields `undefined` (unverifiable); non-member
- * callees yield `null`. */
+ * callees yield `null`.
+ *
+ * 2026-09-15 审计 P2：拼接出来的常量属性名（`localStorage['set'+'Item']`）也
+ * 要折叠出来 —— 它此前被当成"非字面量计算属性 = 数据访问"放过，于是
+ * `Reflect.apply(localStorage['set'+'Item'], …)` 真的写进了 storage。 */
 function memberName(node: AnyNode | undefined): string | null | undefined {
   if (node === undefined) return null
   if (node.type === 'Identifier') return (node as { name?: string }).name ?? null
@@ -350,9 +434,200 @@ function memberName(node: AnyNode | undefined): string | null | undefined {
     if (property !== undefined && property.type === 'Literal' && typeof property.value === 'string') {
       return property.value
     }
-    return undefined
+    const folded = foldStringConcat(property)
+    return folded === undefined ? undefined : folded
   }
   return null
+}
+
+/** Fold an expression made only of string literals / literal template strings
+ * joined by `+` into its value; `undefined` when anything is dynamic. */
+function foldStringConcat(node: AnyNode | undefined): string | undefined {
+  if (node === undefined) return undefined
+  if (node.type === 'Literal') {
+    return typeof (node as { value?: unknown }).value === 'string' ? (node as unknown as { value: string }).value : undefined
+  }
+  if (node.type === 'TemplateLiteral') {
+    const expressions = (node as { expressions?: AnyNode[] }).expressions ?? []
+    if (expressions.length !== 0) return undefined
+    const quasis = (node as { quasis?: Array<{ value?: { cooked?: string } }> }).quasis ?? []
+    return quasis.map((quasi) => quasi.value?.cooked ?? '').join('')
+  }
+  if (node.type === 'ParenthesizedExpression') return foldStringConcat((node as { expression?: AnyNode }).expression)
+  if (node.type === 'BinaryExpression' && (node as { operator?: string }).operator === '+') {
+    const left = foldStringConcat((node as { left?: AnyNode }).left)
+    const right = foldStringConcat((node as { right?: AnyNode }).right)
+    if (left === undefined || right === undefined) return undefined
+    return left + right
+  }
+  return undefined
+}
+
+/** Static dotted path of an expression (`document.body.innerText`), or
+ * `undefined` when any hop is dynamic. */
+function staticPath(node: AnyNode | undefined): string | undefined {
+  if (node === undefined) return undefined
+  if (node.type === 'Identifier') return (node as { name?: string }).name
+  if (node.type === 'ThisExpression') return 'this'
+  if (node.type === 'ChainExpression') return staticPath((node as { expression?: AnyNode }).expression)
+  if (node.type === 'MemberExpression') {
+    const base = staticPath((node as { object?: AnyNode }).object)
+    const property = memberName(node)
+    if (base === undefined || property === undefined || property === null) return undefined
+    return `${base}.${property}`
+  }
+  return undefined
+}
+
+/** Is this receiver a page/write host (`location`, `history`, `localStorage`,
+ * `document.location`, …)? Such a receiver never gets the pure-function
+ * exemption. */
+function isWriteHostReceiver(node: AnyNode | undefined): boolean {
+  if (node === undefined) return false
+  if (node.type === 'ThisExpression') return true
+  const path = staticPath(node)
+  if (path === undefined) return false
+  if (WRITE_HOST_ROOTS.has(path)) return true
+  return WRITE_HOST_ROOTS.has(path.slice(path.lastIndexOf('.') + 1))
+}
+
+/** Can this expression be proven to evaluate to a STRING (so a `replace` on it
+ * is `String.prototype.replace` rather than `Location.replace`)? Fail-closed:
+ * anything unprovable returns false and keeps the old by-name refusal. */
+function provablyString(node: AnyNode | undefined): boolean {
+  if (node === undefined) return false
+  switch (node.type) {
+    case 'Literal':
+      return typeof (node as { value?: unknown }).value === 'string'
+    case 'TemplateLiteral':
+      return true
+    case 'BinaryExpression':
+      if ((node as { operator?: string }).operator !== '+') return false
+      return provablyString((node as { left?: AnyNode }).left) || provablyString((node as { right?: AnyNode }).right)
+    case 'ChainExpression':
+      return provablyString((node as { expression?: AnyNode }).expression)
+    case 'MemberExpression': {
+      const property = memberName(node)
+      return property !== undefined && property !== null && STRING_YIELDING_PROPERTIES.has(property)
+    }
+    case 'CallExpression': {
+      const callee = (node as { callee?: AnyNode }).callee
+      if (callee === undefined) return false
+      if (callee.type === 'Identifier') {
+        const name = (callee as { name?: string }).name
+        return name !== undefined && STRING_GLOBAL_CALLS.has(name)
+      }
+      if (callee.type === 'MemberExpression') {
+        const property = memberName(callee)
+        if (property === undefined || property === null) return false
+        if (property === 'stringify' && staticPath((callee as { object?: AnyNode }).object) === 'JSON') return true
+        if (!STRING_RESULT_METHODS.has(property)) return false
+        return !isWriteHostReceiver((callee as { object?: AnyNode }).object)
+      }
+      return false
+    }
+    default:
+      return false
+  }
+}
+
+/** The receiver of a member expression / of a member callee. */
+function receiverOf(node: AnyNode | undefined): AnyNode | undefined {
+  if (node === undefined) return undefined
+  if (node.type === 'ChainExpression') return receiverOf((node as { expression?: AnyNode }).expression)
+  if (node.type === 'MemberExpression') return (node as { object?: AnyNode }).object
+  return undefined
+}
+
+/** The 2026-09-15 audit's receiver-aware exemption: a receiver-dependent name is
+ * allowed only when the receiver is provably a string (`replace`) or provably a
+ * fresh value (`sort`/`fill`/`push`/…). */
+function receiverExempt(name: string, receiver: AnyNode | undefined): boolean {
+  if (!RECEIVER_AWARE_WRITE_APIS.has(name)) return false
+  if (isWriteHostReceiver(receiver)) return false
+  // 只有"接收者可证明是字符串"时才豁免：此时 `replace` 必然是
+  // String.prototype.replace（纯函数）。证明不了就维持旧的名字拒绝（fail-closed）。
+  return provablyString(receiver)
+}
+
+function blockedWriteCall(name: string, callee: AnyNode | undefined): string | null {
+  if (!isWriteApiName(name)) return null
+  if (receiverExempt(name, receiverOf(callee))) return null
+  return `call to ${name} is not allowed (guardrail: code-execution/side-effect API)`
+}
+
+function blockedWriteAccess(name: string, member: AnyNode): string | null {
+  if (!isWriteApiName(name)) return null
+  if (receiverExempt(name, receiverOf(member))) return null
+  return `access to ${name} is not allowed (guardrail: side-effect API)`
+}
+
+/** The statically-known `Reflect.<method>` name of a callee, `undefined` when
+ * the callee is not a `Reflect` member (`''` = dynamic property name). */
+function reflectMethodOf(callee: AnyNode | undefined): string | undefined {
+  let node = callee
+  if (node !== undefined && node.type === 'ChainExpression') node = (node as { expression?: AnyNode }).expression
+  if (node === undefined || node.type !== 'MemberExpression') return undefined
+  if (staticPath((node as { object?: AnyNode }).object) !== 'Reflect') return undefined
+  const name = memberName(node)
+  if (name === undefined) return ''
+  return name === null ? undefined : name
+}
+
+/** 2026-09-15 审计 P2：反射调用不得成为写 API 的替代入口。
+ * - `Reflect.construct` ≡ `new`（本来就是被拒的代码执行）；
+ * - `Reflect.apply(fn, …)`：fn 必须是**静态可解析的点号函数对象**，且不能是
+ *   写 API、也不能挂在写宿主上（`localStorage['set'+'Item']` 折叠后即命中）；
+ * - `Reflect.get(target, key)`：key 折叠出写 API 名 ⇒ 拒；key 动态且目标不明 ⇒
+ *   拒（证明不了它不是写 API）。 */
+function reflectViolation(call: AnyNode): string | null {
+  const method = reflectMethodOf((call as { callee?: AnyNode }).callee)
+  if (method === undefined) return null
+  if (method === '') return 'Reflect with a computed method name is not allowed (guardrail: reflection)'
+  const args = (call as { arguments?: AnyNode[] }).arguments ?? []
+  if (method === REFLECT_CONSTRUCT) {
+    return 'Reflect.construct is not allowed (guardrail: construction is code execution, like `new`)'
+  }
+  if (method === REFLECT_APPLY) {
+    const target = args[0]
+    if (target === undefined || target.type !== 'MemberExpression' || staticPath(target) === undefined) {
+      return 'Reflect.apply needs a statically known function object (guardrail: a dynamic target can hide a write API)'
+    }
+    const path = staticPath(target)!
+    const name = path.slice(path.lastIndexOf('.') + 1)
+    if (isWriteApiName(name)) {
+      return `Reflect.apply to ${name} is not allowed (guardrail: reflection must not smuggle a side-effect API)`
+    }
+    const root = path.slice(0, path.indexOf('.') < 0 ? path.length : path.indexOf('.'))
+    if (WRITE_HOST_ROOTS.has(root)) {
+      return `Reflect.apply on ${root} is not allowed (guardrail: reflection must not smuggle a side-effect API)`
+    }
+    return null
+  }
+  if (method === 'get') {
+    const target = args[0]
+    const key = foldStringConcat(args[1])
+    if (key !== undefined && isWriteApiName(key)) {
+      return `Reflect.get(...['${key}']) is not allowed (guardrail: reflection must not smuggle a side-effect API)`
+    }
+    const path = staticPath(target)
+    if (path !== undefined && (WRITE_HOST_ROOTS.has(path) || WRITE_HOST_ROOTS.has(path.slice(0, path.indexOf('.') < 0 ? path.length : path.indexOf('.'))))) {
+      return `Reflect.get on ${path} is not allowed (guardrail: reflection must not smuggle a side-effect API)`
+    }
+    if (key === undefined) {
+      return 'Reflect.get with a computed key is not allowed (guardrail: the key can name a write API)'
+    }
+    return null
+  }
+  return null
+}
+
+/** `Reflect.construct` read as a value (`Reflect.construct.call(...)` is the
+ * obvious smuggling shape) is refused for the same reason a call is. */
+function reflectMemberViolation(member: AnyNode, name: string): string | null {
+  if (name !== REFLECT_CONSTRUCT) return null
+  if (staticPath((member as { object?: AnyNode }).object) !== 'Reflect') return null
+  return 'Reflect.construct is not allowed (guardrail: construction is code execution, like `new`)'
 }
 
 /** Validate an eval expression (throws BrowserError 'eval-policy'). */

@@ -112,11 +112,12 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
 <script>
   const $ = (id) => document.getElementById(id)
   const state = { tabs: [], controlled: false, busy: false, busyTool: '', uiMode: 'capsule' }
-  let sseOk = false
-
-  const post = (action, body) => fetch('/api/pico/browser/' + action, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}),
-  }).then((r) => r.json()).catch(() => ({ ok: false }))
+  // 2026-09-15 审计（P2）：原来是一个单向布尔 sseOk（onopen=true / onerror=false）。
+  // EventSource 自己会重连，"连接开着但服务端不再推事件"时它恒为 true ⇒ 1.5s 兜底
+  // 轮询永远不启动 ⇒ tab 条/前进后退按钮冻结（现场表现为"浏览器界面卡住"）。
+  // 改判"最后一次收到事件的时间"，超过阈值即轮询。
+  const SSE_STALE_MS = 4000
+  let lastSseAt = 0
 
   const esc = (s) => String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 
@@ -128,15 +129,42 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
     if (toastTimer !== null) clearTimeout(toastTimer)
     toastTimer = setTimeout(() => t.classList.remove('show'), 3200)
   }
-  /** post + refresh + surface server-side errors as a transient toast. */
-  const postErr = (action, body) => post(action, body).then((r) => {
-    if (r && typeof r.error === 'string') showToast(r.error)
-    refresh()
-  })
+
+  /** 失败文案的唯一出处。401/403 就是 2026-09-15 现场主机日志里那条
+   * 「refused a local write without browser proof」：浏览器分区还没拿到 BrowserAuth
+   * 票据（蒙版页加载早于 cookie 交接）。打包版用户看不到 console，页面必须自己把
+   * 话说清楚 —— 否则就是「点了『我来操作』整轮没反应、现场零证据」。 */
+  const failureText = (status, data) => {
+    if (status === 401 || status === 403) return '操作失败：浏览器会话凭据尚未就绪，请重试'
+    if (status === 503) return '操作失败：浏览器服务尚未就绪，请重试'
+    if (data && typeof data.error === 'string' && data.error !== '') return '操作失败：' + data.error
+    if (status === 0) return '操作失败：无法连接到浏览器服务，请重试'
+    return '操作失败（HTTP ' + status + '），请重试'
+  }
+
+  /** 读 JSON：4xx（代理异常时甚至是 HTML）一律不抛给调用点。 */
+  const readJson = (r) => r.json().catch(() => null)
+
+  /** 写操作的唯一出口（2026-09-15 审计 P1：页面按钮把所有失败都吞掉）：
+   * 永远 resolve 成 { ok, status, data }，失败就地 toast。调用点靠 r.ok 决定要不要
+   * 改动本地状态，杜绝"界面已经变了但服务端没接受"。 */
+  const post = (action, body) => fetch('/api/pico/browser/' + action, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}),
+  }).then(
+    (r) => readJson(r).then((data) => ({ ok: r.ok === true, status: r.status, data })),
+    () => ({ ok: false, status: 0, data: null }),
+  ).then((r) => { if (!r.ok) showToast(failureText(r.status, r.data)); return r })
+
+  /** post + refresh；失败文案由 post 统一 toast。 */
+  const postErr = (action, body) => post(action, body).then(refresh)
 
   async function refresh() {
     try {
-      const next = await fetch('/api/pico/browser/state').then((r) => r.json())
+      const res = await fetch('/api/pico/browser/state')
+      // 读面失败（403/代理 HTML）保持上一次状态：原来的 r.json() 抛错虽然被 catch，
+      // 但一条 500 的 JSON 错误体会把 tab 条清空成"没有标签页"。
+      if (res.ok !== true) return
+      const next = await res.json()
       state.tabs = Array.isArray(next.tabs) ? next.tabs : []
       state.controlled = next.controlled === true
       state.busy = next.busy === true
@@ -144,6 +172,16 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
       state.uiMode = next.ui && typeof next.ui.mode === 'string' ? next.ui.mode : 'capsule'
       render()
     } catch { /* keep last state */ }
+  }
+
+  /** 只有 http(s) 与 data:image/ 能进 img.src（见 render() 里的说明）。
+   * 注意：本页脚本本体是 TS 模板字符串，正则里的转义斜杠会被外层模板吃掉 ——
+   * 这里用 startsWith 判前缀，避免再踩一次（2026-09-15 自测抓到过）。 */
+  const safeFavicon = (u) => {
+    if (typeof u !== 'string') return ''
+    const lower = u.toLowerCase()
+    if (lower.startsWith('http:') || lower.startsWith('https:') || lower.startsWith('data:image/')) return u
+    return ''
   }
 
   function render() {
@@ -156,16 +194,20 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
       const busy = state.busy && tab.visible
       el.innerHTML = '<img class="favicon" alt=""><span class="t">' + esc(tab.title || tab.url || '新标签') + (tab.loading ? '…' : '') + '</span>' + (busy ? '<span class="ai-dot"></span>' : '') + '<span class="x" title="关闭标签">×</span>'
       const icon = el.querySelector('.favicon')
-      icon.src = typeof tab.favicon === 'string' && tab.favicon !== '' ? tab.favicon : ''
-      icon.style.display = icon.src === '' ? 'none' : ''
+      // 2026-09-15 审计（P2）：tab.favicon 是页面/服务端给的字符串，原来直接落进
+      // img.src —— javascript:/file: 这类 scheme 也照设不误。只放行 http(s) 与
+      // data:image/，其余（含空串）回落成空图标。
+      const favicon = safeFavicon(tab.favicon)
+      if (favicon === '') { icon.removeAttribute('src'); icon.style.display = 'none' }
+      else { icon.src = favicon; icon.style.display = '' }
       el.addEventListener('click', (e) => {
         if (e.target.className === 'x') return
-        if (!tab.visible) post('switch-tab', { tab: tab.id }).then(refresh)
+        if (!tab.visible) postErr('switch-tab', { tab: tab.id })
       })
       el.addEventListener('auxclick', (e) => {
-        if (e.button === 1) { e.preventDefault(); post('close-tab', { tab: tab.id }).then(refresh) }
+        if (e.button === 1) { e.preventDefault(); postErr('close-tab', { tab: tab.id }) }
       })
-      el.querySelector('.x').addEventListener('click', (e) => { e.stopPropagation(); post('close-tab', { tab: tab.id }).then(refresh) })
+      el.querySelector('.x').addEventListener('click', (e) => { e.stopPropagation(); postErr('close-tab', { tab: tab.id }) })
       strip.appendChild(el)
     }
     $('empty').hidden = state.tabs.length > 0
@@ -190,7 +232,10 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
   $('bm').addEventListener('click', async () => {
     const cur = state.tabs.find((t) => t.visible)
     if (!cur) { alert('当前没有可收藏的页面'); return }
-    await fetch('/api/pico/browser/bookmarks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url: cur.url, title: cur.title }) })
+    // 2026-09-15 审计（P1）：原来不看返回状态就把星星点亮 —— 403（写证明缺失）时
+    // 用户以为收藏成功，实际什么都没发生。现在只有服务端确认才给黄色反馈。
+    const r = await post('bookmarks', { url: cur.url, title: cur.title })
+    if (!r.ok) return
     $('bm').style.color = 'var(--warning)'
     setTimeout(() => { $('bm').style.color = '' }, 900)
   })
@@ -212,14 +257,14 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
   })
   // ⋮ toggles the floating menu in the ALWAYS-ON-TOP overlay view — the shell
   // page cannot show popups above the tab views. A second click closes it.
-  $('menu-btn').addEventListener('click', () => post('overlay', { mode: state.uiMode === 'menu' ? 'capsule' : 'menu' }))
+  $('menu-btn').addEventListener('click', () => { void post('overlay', { mode: state.uiMode === 'menu' ? 'capsule' : 'menu' }) })
 
   document.addEventListener('keydown', (e) => {
     // While masked the whole window is locked (我来操作 is the only entry).
     if (!state.controlled && e.key !== 'Escape') return
     if (e.ctrlKey && e.key.toLowerCase() === 'l') { e.preventDefault(); $('addr').focus(); $('addr').select() }
     if (e.ctrlKey && e.key.toLowerCase() === 't') { e.preventDefault(); postErr('open') }
-    if (e.ctrlKey && e.key.toLowerCase() === 'w') { e.preventDefault(); const t = state.tabs.find((x) => x.visible); if (t) post('close-tab', { tab: t.id }).then(refresh) }
+    if (e.ctrlKey && e.key.toLowerCase() === 'w') { e.preventDefault(); const t = state.tabs.find((x) => x.visible); if (t) postErr('close-tab', { tab: t.id }) }
     if (e.ctrlKey && e.key.toLowerCase() === 'r') { e.preventDefault(); postErr('reload') }
     if (e.ctrlKey && e.key === 'Tab') {
       e.preventDefault()
@@ -227,32 +272,32 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
       if (tabs.length > 1) {
         const idx = tabs.findIndex((x) => x.visible)
         const next = tabs[(idx + 1 + tabs.length) % tabs.length]
-        if (next) post('switch-tab', { tab: next.id }).then(refresh)
+        if (next) postErr('switch-tab', { tab: next.id })
       }
     }
-    if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); post('back').then(refresh) }
-    if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); post('forward').then(refresh) }
-    if (e.ctrlKey && e.key.toLowerCase() === 'a' && e.shiftKey) { e.preventDefault(); post('overlay', { mode: state.uiMode === 'panel' ? 'capsule' : 'panel' }) }
+    if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); postErr('back') }
+    if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); postErr('forward') }
+    if (e.ctrlKey && e.key.toLowerCase() === 'a' && e.shiftKey) { e.preventDefault(); void post('overlay', { mode: state.uiMode === 'panel' ? 'capsule' : 'panel' }) }
     if (e.key === 'Escape') {
       // Close the floating surface only — Esc never releases control to the AI
       // (the 交给 AI button is the single way back; 2026-09-11).
-      post('overlay', { mode: 'capsule' })
+      void post('overlay', { mode: 'capsule' })
     }
   })
 
   function connectStream() {
     try {
       const es = new EventSource('/api/pico/browser/stream')
-      es.onopen = () => { sseOk = true }
-      es.onerror = () => { sseOk = false }
+      // onopen/onerror 不再翻状态标志：重连由 EventSource 自己负责，页面只关心
+      // "最近一次真的有事件推过来是什么时候"（见 SSE_STALE_MS）。
       for (const ev of ['tab', 'tab-meta', 'busy', 'takeover', 'release', 'ops', 'state']) {
-        es.addEventListener(ev, () => refresh())
+        es.addEventListener(ev, () => { lastSseAt = Date.now(); refresh() })
       }
-    } catch { sseOk = false }
+    } catch { /* 连不上就纯靠兜底轮询 */ }
   }
   connectStream()
   refresh()
-  setInterval(() => { if (!sseOk) refresh() }, 1500)
+  setInterval(() => { if (Date.now() - lastSseAt > SSE_STALE_MS) refresh() }, 1500)
 </script>
 </body>
 </html>`
@@ -421,8 +466,12 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   const $ = (id) => document.getElementById(id)
   const state = { controlled: false, busy: false, busyTool: '', ops: [] }
   let mode = 'capsule'
-  let sseOk = false
   let viewerKind = ''
+  // 2026-09-15 审计（P2）：原来是一个单向布尔 sseOk（onopen=true / onerror=false）。
+  // EventSource 自己会重连，"连接开着但服务端不再推事件"时它恒为 true ⇒ 1.5s 兜底
+  // 轮询永不启动 ⇒ 胶囊/面板状态冻结。改判"最后一次收到事件的时间"，超时即轮询。
+  const SSE_STALE_MS = 4000
+  let lastSseAt = 0
 
   const TOOL_LABELS = {
     'browser_open': '打开标签页', 'browser_navigate': '打开网页', 'browser_reload': '刷新页面',
@@ -437,9 +486,44 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     'browser_page_state': '页面变化', 'browser_page_crash': '页面恢复', 'browser_close': '关闭浏览器',
   }
 
-  const post = (action, body) => fetch('/api/pico/browser/' + action, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}),
-  }).then((r) => r.json()).catch(() => ({ ok: false }))
+  /** 失败文案的唯一出处。401/403 就是 2026-09-15 现场主机日志里那条
+   * 「refused a local write without browser proof」：本页跑在浏览器分区，靠 cookie
+   * 交接拿到 BrowserAuth 票据，交接没完成时所有写操作都被拒。打包版用户看不到
+   * console —— 页面必须自己说出来，否则就是「点了『我来操作』整轮没反应、零证据」。 */
+  const failureText = (status, data) => {
+    if (status === 401 || status === 403) return '操作失败：浏览器会话凭据尚未就绪，请重试'
+    if (status === 503) return '操作失败：浏览器服务尚未就绪，请重试'
+    if (data && typeof data.error === 'string' && data.error !== '') return '操作失败：' + data.error
+    if (status === 0) return '操作失败：无法连接到浏览器服务，请重试'
+    return '操作失败（HTTP ' + status + '），请重试'
+  }
+
+  /** 读 JSON：4xx（代理异常时甚至是 HTML）一律不抛给调用点。 */
+  const readJson = (r) => r.json().catch(() => null)
+
+  /** 所有写操作（POST 与 DELETE 共用）的唯一出口（2026-09-15 审计 P1：页面按钮把
+   * 所有失败都吞掉）。永远 resolve 成 { ok, status, data }，失败就地 toast；调用点
+   * 靠 r.ok 决定要不要改本地状态，杜绝"界面已经变了但服务端没接受"。 */
+  const request = (method, path, body) => {
+    const init = { method }
+    if (body !== undefined) {
+      init.headers = { 'content-type': 'application/json' }
+      init.body = JSON.stringify(body || {})
+    }
+    return fetch('/api/pico/browser/' + path, init).then(
+      (r) => readJson(r).then((data) => ({ ok: r.ok === true, status: r.status, data })),
+      () => ({ ok: false, status: 0, data: null }),
+    ).then((r) => { if (!r.ok) showToast(failureText(r.status, r.data)); return r })
+  }
+  const post = (action, body) => request('POST', action, body === undefined ? {} : body)
+  const del = (query) => request('DELETE', query)
+
+  /** 读面：非 2xx 直接抛，由调用点的 try/catch 变成页面上的可见文案。 */
+  const getJson = async (path) => {
+    const r = await fetch('/api/pico/browser/' + path)
+    if (r.ok !== true) throw new Error('HTTP ' + r.status)
+    return await r.json()
+  }
 
   const labelOf = (tool) => TOOL_LABELS[tool] || tool || '操作'
   const fmtTime = (t) => {
@@ -466,7 +550,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     document.body.dataset.mode = mode
     if (mode === 'mask') renderMask()
     if (mode === 'menu') renderMenu()
-    if (mode === 'viewer') renderViewer(viewerKind, $('viewer-search').value || '')
+    if (mode === 'viewer') void renderViewer(viewerKind, $('viewer-search').value || '').catch(() => {})
   }
 
   /** Mask pill: the pill BUTTON is the ONLY browser entry while masked —
@@ -476,13 +560,14 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   function renderMask() {
     $('txt').textContent = state.busy ? 'AI 正在操作 · ' + labelOf(state.busyTool) : 'AI 空闲'
     const take = $('pill-take')
-    take.textContent = '我来操作'
+    // 正在接管中不要被一次并发的 refresh 把 pending 文案冲掉（见 takeControl）。
+    if (!take.disabled) take.textContent = '我来操作'
     take.title = state.busy ? '暂停 AI，自己操作' : '自己操作浏览器'
   }
 
   async function refresh() {
     try {
-      const next = await fetch('/api/pico/browser/state').then((r) => r.json())
+      const next = await getJson('state')
       state.controlled = next.controlled === true
       state.busy = next.busy === true
       state.busyTool = next.busyTool || ''
@@ -492,7 +577,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
       renderStream()
     } catch { /* keep last state */ }
     try {
-      const o = await fetch('/api/pico/browser/ops').then((r) => r.json())
+      const o = await getJson('ops')
       if (Array.isArray(o.ops)) state.ops = o.ops
       renderStream()
     } catch { /* ignore */ }
@@ -501,29 +586,41 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   function renderCapsule() {
     const dot = $('ai-dot')
     const take = $('ai-take')
+    let label = '我来操作'
+    let title = '自己操作浏览器'
     if (state.controlled) {
       dot.className = 'dot paused'
       $('ai-label').textContent = '你正在操作'
-      take.textContent = '交给 AI'
-      take.title = '交回给 AI 继续操作'
+      label = '交给 AI'
+      title = '交回给 AI 继续操作'
       take.style.background = 'var(--accent)'; take.style.borderColor = 'var(--accent)'
     } else if (state.busy) {
       dot.className = 'dot busy'
       $('ai-label').textContent = 'AI 操作中 · ' + labelOf(state.busyTool)
-      take.textContent = '我来操作'
-      take.title = '暂停 AI，自己操作'
+      title = '暂停 AI，自己操作'
       take.style.background = ''; take.style.borderColor = ''
     } else {
       dot.className = 'dot'
       $('ai-label').textContent = 'AI'
-      take.textContent = '我来操作'
-      take.title = '自己操作浏览器'
       take.style.background = ''; take.style.borderColor = ''
     }
+    // 接管请求还在飞的时候保留「正在接管…」（见 takeControl），其余情况按状态刷新。
+    if (!take.disabled) { take.textContent = label; take.title = title }
   }
 
+  let streamSig = ''
   function renderStream() {
     const stream = $('stream')
+    const ops = state.ops.slice(0, 40)
+    // 2026-09-15 审计（P2）：原来每个 tick 都整表重建（textContent = '' 会把
+    // scrollTop 打回 0）—— 用户往上翻一点就会被拽走，正在增长的 AI 时间线根本读不了。
+    // 内容签名不变就一个节点都不动。
+    const sig = JSON.stringify([state.busy, state.busyTool, ops])
+    if (sig === streamSig) return
+    // 贴底才自动跟随（新动作滚进视野）；用户已经翻上去看历史时就保住他的位置。
+    const follow = stream.scrollTop + stream.clientHeight >= stream.scrollHeight - 4
+    const prevScroll = stream.scrollTop
+    streamSig = sig
     stream.textContent = ''
     if (state.busy) {
       const line = document.createElement('div')
@@ -531,7 +628,6 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
       line.innerHTML = '<span class="time"></span><div class="what"><span class="tool">正在执行：' + esc(labelOf(state.busyTool)) + '</span></div>'
       stream.appendChild(line)
     }
-    const ops = state.ops.slice(0, 40)
     if (ops.length === 0 && !state.busy) {
       const line = document.createElement('div')
       line.className = 'op'
@@ -546,6 +642,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
       line.innerHTML = '<span class="time">' + fmtTime(op.time) + '</span>' + who + '<div class="what"><span class="' + cls + '">' + esc(labelOf(op.tool)) + '</span> ' + esc(op.summary) + '</div>'
       stream.appendChild(line)
     }
+    stream.scrollTop = follow ? stream.scrollHeight : prevScroll
   }
 
   function renderMenu() {
@@ -557,16 +654,19 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     // capsule). post() returns the fetch promise, so awaiting it serializes
     // the calls.
     const items = [
-      { label: '浏览历史', action: async () => { viewerKind = 'history'; await post('overlay', { mode: 'viewer' }) } },
-      { label: '书签', action: async () => { viewerKind = 'bookmarks'; await post('overlay', { mode: 'viewer' }) } },
-      { label: '下载', action: async () => { viewerKind = 'downloads'; await post('overlay', { mode: 'viewer' }) } },
+      { label: '浏览历史', action: async () => { await openViewer('history') } },
+      { label: '书签', action: async () => { await openViewer('bookmarks') } },
+      { label: '下载', action: async () => { await openViewer('downloads') } },
       { sep: true },
       {
         label: '清除数据…',
         danger: true,
         action: async () => {
           if (!confirm('清除全部浏览数据（含登录状态）？')) return
-          await post('clear-data')
+          // 失败就留在菜单里：原来无论成败都关面板，用户以为已经清完
+          // （而 403 时一个字节都没删）。失败文案由 post 统一 toast。
+          const r = await post('clear-data')
+          if (!r.ok) return
           await post('overlay', { mode: 'capsule' })
         },
       },
@@ -586,24 +686,55 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     setTimeout(() => { menu.querySelector('.mi')?.focus() }, 0)
   }
 
+  /** 打开查看器（⋮ 菜单的三个入口）。2026-09-15 审计：原来只发 POST 不看结果，
+   * 模式切换被拒（403）时本地 kind 已经改掉，后续 1.5s 轮询会把一个并不存在的
+   * 查看器内容拉出来。现在失败就回退 kind，并靠 post 的 toast 告知用户。 */
+  async function openViewer(kind) {
+    viewerKind = kind
+    const r = await post('overlay', { mode: 'viewer' })
+    if (!r.ok) viewerKind = ''
+  }
+
+  let viewerSig = ''
   async function renderViewer(kind, q) {
     viewerKind = kind
     const title = { bookmarks: '书签', history: '浏览历史', downloads: '下载' }[kind]
     $('viewer-title').textContent = title
     $('viewer-search').hidden = kind !== 'history' && kind !== 'bookmarks'
     const list = $('viewer-list')
-    list.textContent = ''
+    const prevScroll = list.scrollTop
     let rows = []
-    if (kind === 'bookmarks') {
-      const res = await fetch('/api/pico/browser/bookmarks?q=' + encodeURIComponent(q)).then((r) => r.json())
-      rows = (res.bookmarks || []).map((b) => ({ main: b.title, sub: b.url, meta: fmtTime(b.createdAt), openUrl: b.url, rm: '删除', rmAction: () => fetch('/api/pico/browser/bookmarks?id=' + b.id, { method: 'DELETE' }) }))
-    } else if (kind === 'history') {
-      const res = await fetch('/api/pico/browser/history?q=' + encodeURIComponent(q) + '&limit=200').then((r) => r.json())
-      rows = (res.entries || []).map((h) => ({ main: h.title || h.url, sub: h.url, meta: (h.actor === 'user' ? '你 · ' : 'AI · ') + fmtTime(h.time), openUrl: h.url }))
-    } else {
-      const res = await fetch('/api/pico/browser/downloads?limit=200').then((r) => r.json())
-      rows = (res.downloads || []).map((d) => ({ main: d.fileName, sub: d.path || d.url, meta: d.status, open: d.status === 'done' && d.path ? '打开' : undefined, openAction: () => fetch('/api/pico/browser/downloads/open', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: d.id }) }).then((r) => r.json()).then((j) => { if (j && j.error) showToast(j.error); if (j && j.ok) showToast('已用系统默认程序打开') }), rm: '删除', rmAction: () => fetch('/api/pico/browser/downloads?id=' + d.id, { method: 'DELETE' }) }))
+    try {
+      if (kind === 'bookmarks') {
+        const res = await getJson('bookmarks?q=' + encodeURIComponent(q))
+        rows = (res.bookmarks || []).map((b) => ({ main: b.title, sub: b.url, meta: fmtTime(b.createdAt), openUrl: b.url, rm: '删除', rmAction: () => del('bookmarks?id=' + b.id) }))
+      } else if (kind === 'history') {
+        const res = await getJson('history?q=' + encodeURIComponent(q) + '&limit=200')
+        rows = (res.entries || []).map((h) => ({ main: h.title || h.url, sub: h.url, meta: (h.actor === 'user' ? '你 · ' : 'AI · ') + fmtTime(h.time), openUrl: h.url }))
+      } else {
+        const res = await getJson('downloads?limit=200')
+        rows = (res.downloads || []).map((d) => ({ main: d.fileName, sub: d.path || d.url, meta: d.status, open: d.status === 'done' && d.path ? '打开' : undefined, openAction: () => post('downloads/open', { id: d.id }).then((r) => { if (r.ok) showToast('已用系统默认程序打开') }), rm: '删除', rmAction: () => del('downloads?id=' + d.id) }))
+      }
+    } catch {
+      // 2026-09-15 审计（P1）：原来这个 async 函数没有 try/catch，4xx 或非 JSON
+      // （代理异常会回一整页 HTML）时 r.json() 抛异常，而 setInterval 既不 await 也
+      // 不 catch ⇒ 未处理拒绝打断该 tick 的兜底轮询，现场表现为"查看器停在旧内容 /
+      // 删除按钮点了没反应"。现在失败就地变成列表区文案，1.5s 轮询会继续重试。
+      viewerSig = ''
+      list.textContent = ''
+      const fail = document.createElement('div')
+      fail.style.color = 'var(--danger)'
+      fail.style.padding = '20px 0'
+      fail.textContent = '加载失败，请重试'
+      list.appendChild(fail)
+      return
     }
+    // 内容没变就不重建（2026-09-15 审计 P2）：整表重建会把滚动位置打回顶部，
+    // 下载进度那种每秒都在变的面板根本没法看。
+    const sig = JSON.stringify([kind, rows.map((r) => [r.main, r.sub, r.meta, r.open || '', r.rm || '', r.openUrl || ''])])
+    if (sig === viewerSig && list.childElementCount > 0) { list.scrollTop = prevScroll; return }
+    viewerSig = sig
+    list.textContent = ''
     if (rows.length === 0) { list.innerHTML = '<div style="color:var(--text-muted);padding:20px 0">暂无记录</div>'; return }
     for (const row of rows) {
       const el = document.createElement('div')
@@ -614,8 +745,8 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
         main.style.cursor = 'pointer'
         main.title = '在新标签页打开：' + row.openUrl
         main.addEventListener('click', () => {
-          post('overlay', { mode: 'capsule' })
-          post('navigate', { url: row.openUrl })
+          void post('overlay', { mode: 'capsule' })
+          void post('navigate', { url: row.openUrl })
         })
       }
       if (row.open) {
@@ -627,35 +758,57 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
       if (row.rm) {
         const b = document.createElement('button')
         b.className = 'rm danger'; b.textContent = row.rm
-        b.addEventListener('click', async () => { await row.rmAction(); await renderViewer(kind, q) })
+        b.addEventListener('click', async () => {
+          // 删除失败（403/503）就不重绘：保留原行才是服务端状态的真相，失败文案
+          // 由 del() 统一 toast —— 原来不看状态就重绘，用户以为删掉了。
+          const r = await row.rmAction()
+          if (r && r.ok === false) return
+          await renderViewer(kind, q)
+        })
         el.appendChild(b)
       }
       list.appendChild(el)
     }
+    list.scrollTop = prevScroll
   }
 
   // ---- interactions ----
   $('capsule').addEventListener('click', (e) => {
     if (e.target.id === 'ai-take') return
-    post('overlay', { mode: 'panel' })
-    refresh()
+    void post('overlay', { mode: 'panel' }).then((r) => { if (r.ok) refresh() })
   })
-  $('ai-take').addEventListener('click', (e) => { e.stopPropagation(); toggleControl() })
+  $('ai-take').addEventListener('click', (e) => { e.stopPropagation(); void takeControl('ai-take', !state.controlled) })
   // ONE control toggle, both directions: the mask pill's 我来操作 and the
   // capsule's 交给 AI are the same button in its two states. No sidebar /
   // panel / Esc path may hand the browser back to the AI (2026-09-11).
-  function toggleControl() {
-    const active = !state.controlled
-    post('takeover', { active }).then(() => refresh())
+  /**
+   * 控制权切换（我来操作 / 交给 AI 同一个按钮的两个状态）。
+   *
+   * 2026-09-15 现场 P0：客户点「我来操作」整轮没反应，主机日志里只有一条
+   * 「refused a local write without browser proof」—— 写证明还没交接完时，页面
+   * 既不判状态也不给反馈。现在：点击期间按钮进 pending/disabled（防连点 +
+   * 「正在接管…」反馈），失败由 post 统一 toast 出可读文案，且**不改本地状态**
+   * （只有 refresh() 拿到服务端的 controlled 才切文案）。
+   */
+  async function takeControl(btnId, active) {
+    const btn = $(btnId)
+    if (!btn || btn.disabled) return
+    const label = btn.textContent
+    btn.disabled = true
+    btn.textContent = '正在接管…'
+    const r = await post('takeover', { active })
+    btn.disabled = false
+    btn.textContent = label
+    if (r.ok) await refresh()
   }
   $('pill-take').addEventListener('click', (e) => {
     e.stopPropagation()
-    post('takeover', { active: true }).then(() => refresh())
+    void takeControl('pill-take', true)
   })
-  $('panel-close').addEventListener('click', () => post('overlay', { mode: 'capsule' }))
-  $('hide-btn').addEventListener('click', () => post('hide'))
-  $('viewer-close').addEventListener('click', () => post('overlay', { mode: 'capsule' }))
-  $('viewer-search').addEventListener('input', (e) => renderViewer(viewerKind, e.target.value))
+  $('panel-close').addEventListener('click', () => { void post('overlay', { mode: 'capsule' }) })
+  $('hide-btn').addEventListener('click', () => { void post('hide') })
+  $('viewer-close').addEventListener('click', () => { void post('overlay', { mode: 'capsule' }) })
+  $('viewer-search').addEventListener('input', (e) => { void renderViewer(viewerKind, e.target.value).catch(() => {}) })
   // The mask scrim is deliberately INERT: only #pill-take grants control.
 
   // Forward the browser shortcuts when keyboard focus lives in the overlay
@@ -665,7 +818,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     // Escape only closes the floating surface. It must NEVER hand the browser
     // back to the AI: control changes only via the 我来操作/交给 AI button.
     if (e.key === 'Escape') {
-      post('overlay', { mode: 'capsule' })
+      void post('overlay', { mode: 'capsule' })
       return
     }
     // While masked the window is locked and the pill button is the only entry;
@@ -673,14 +826,14 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     if (!state.controlled) {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault()
-        post('takeover', { active: true }).then(() => refresh())
+        void takeControl('pill-take', true)
       }
       return
     }
-    if (e.ctrlKey && e.key.toLowerCase() === 'l') { e.preventDefault(); post('overlay', { mode: 'capsule' }) }
-    if (e.ctrlKey && e.key.toLowerCase() === 't') { e.preventDefault(); post('open').then(refresh) }
-    if (e.ctrlKey && e.key.toLowerCase() === 'w') { e.preventDefault(); fetch('/api/pico/browser/state').then((r) => r.json()).then((s) => { const t = (s.tabs || []).find((x) => x.visible); if (t) post('close-tab', { tab: t.id }).then(refresh) }) }
-    if (e.ctrlKey && e.key.toLowerCase() === 'r') { e.preventDefault(); post('reload').then(refresh) }
+    if (e.ctrlKey && e.key.toLowerCase() === 'l') { e.preventDefault(); void post('overlay', { mode: 'capsule' }) }
+    if (e.ctrlKey && e.key.toLowerCase() === 't') { e.preventDefault(); void post('open').then((r) => { if (r.ok) refresh() }) }
+    if (e.ctrlKey && e.key.toLowerCase() === 'w') { e.preventDefault(); void getJson('state').then((s) => { const t = (s.tabs || []).find((x) => x.visible); if (t) void post('close-tab', { tab: t.id }).then((r) => { if (r.ok) refresh() }) }).catch(() => {}) }
+    if (e.ctrlKey && e.key.toLowerCase() === 'r') { e.preventDefault(); void post('reload').then((r) => { if (r.ok) refresh() }) }
   })
 
   // Menu auto-close: a bounds-based menu never sees outside clicks — release
@@ -700,21 +853,23 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   function connectStream() {
     try {
       const es = new EventSource('/api/pico/browser/stream')
-      es.onopen = () => { sseOk = true }
-      es.onerror = () => { sseOk = false }
+      // onopen/onerror 不再翻状态标志：重连由 EventSource 自己负责，页面只关心
+      // "最近一次真的有事件推过来是什么时候"（见 SSE_STALE_MS）。
       for (const ev of ['tab', 'tab-meta', 'busy', 'takeover', 'release', 'ops', 'state']) {
-        es.addEventListener(ev, () => refresh())
+        es.addEventListener(ev, () => { lastSseAt = Date.now(); refresh() })
       }
-    } catch { sseOk = false }
+    } catch { /* 连不上就纯靠兜底轮询 */ }
   }
   connectStream()
   refresh()
   setInterval(() => {
-    if (!sseOk) refresh()
+    if (Date.now() - lastSseAt > SSE_STALE_MS) refresh()
     // Live-refresh open viewers (downloads progress) without stealing the
-    // search input's focus.
+    // search input's focus. renderViewer 自己 catch 了读面失败（并在列表区显示
+    // 「加载失败，请重试」）；这里的 catch 是第二道保险：绝不能让一条未处理拒绝
+    // 打断整个 tick 的兜底轮询（2026-09-15 审计 P1）。
     if (mode === 'viewer' && document.activeElement !== $('viewer-search')) {
-      renderViewer(viewerKind, $('viewer-search').value || '')
+      void renderViewer(viewerKind, $('viewer-search').value || '').catch(() => {})
     }
   }, 1500)
 </script>

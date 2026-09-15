@@ -183,6 +183,53 @@ function resolveUserDataDir(): string | undefined {
  * @param ctx - Cordis context carrying webServer/tools/systemPrompt/attachments.
  * @param config - runtime caps and enablement.
  */
+/**
+ * fence（交互证明闸）是否处于"能用"状态。
+ *
+ * 闸门（`proofOfPossession`）与票据交接表（`CookieHandoff.fenceAvailable`）**必须**
+ * 用同一判据（2026-09-15 审计 F3）：只看"服务在不在"会让交接在
+ * `requestRejection` 缺失时"假成功即停表"，之后每次写都被 503 拒且不再重试。
+ * @param service - `ctx.get('connection')` 的返回值（任意宿主形状）。
+ * @returns 服务存在且 `requestRejection` 可用时为 true。
+ */
+export function connectionFenceReady(service: unknown): service is ConnectionTrustFence {
+  return service !== undefined && service !== null
+    && typeof (service as { requestRejection?: unknown }).requestRejection === 'function'
+}
+
+/** 用户切换的四个步骤（导出以便确定性单测顺序与容错）。 */
+export interface SessionSwitchSteps {
+  /** 身份相关：分区 + store + 票据交接（**必须**执行，失败即串账号）。 */
+  applyUserScope: () => void
+  /** 破坏性清理：关掉上一个账号的标签页（可能因窗口销毁竞态抛错）。 */
+  closeAll: () => Promise<void>
+  /** 审计轨迹按账号隔离。 */
+  clearOps: () => void
+  /** 重建隐藏窗口，让 agent 保持可驱动的 CDP 面。 */
+  prewarm: () => Promise<void>
+  /** 清理失败的告警出口。 */
+  warn: (message: string, cause: unknown) => void
+}
+
+/**
+ * 执行一次用户切换（2026-09-15 审计 F2 的修复形态）。
+ *
+ * 顺序：**先切身份，再做清理**。旧实现把 `closeAll` 放在链首，它一旦抛错
+ * （窗口/视图销毁竞态）就被 catch 吞掉后面的全部步骤：界面已换账号、浏览器却
+ * 还在旧账号的分区与书签/历史上，交接也不重来。
+ * @param steps - 四个步骤 + 告警出口。
+ */
+export async function runSessionSwitch(steps: SessionSwitchSteps): Promise<void> {
+  steps.applyUserScope()
+  try {
+    await steps.closeAll()
+  } catch (cause) {
+    steps.warn('pico-browser: closing tabs during the user switch failed', cause)
+  }
+  steps.clearOps()
+  await steps.prewarm()
+}
+
 export function apply(ctx: Context, config: Config = {}): void {
   // 2026-08-26 product decision: browser actions run with no user-approval
   // prompt; browser use is granted through the workspace permission and the
@@ -334,7 +381,11 @@ export function apply(ctx: Context, config: Config = {}): void {
    * `cookie-handoff.ts` —— 2026-09-15 恢复型启动 P0 就是这里一次判死造成的。
    */
   const cookieHandoff = new CookieHandoff({
-    fenceAvailable: () => (ctx as unknown as { get?: (name: string) => unknown }).get?.('connection') !== undefined,
+    // 判据必须与真正的闸门**同口径**（2026-09-15 审计 F3）：闸门在服务缺席
+    // **或** `requestRejection` 不是函数时 fail-closed 503。只看"服务在不在"
+    // 会让交接"假成功即停表"，随后每次写都被 503 拒且不再重试 —— 正是现场
+    // "只有 refuse、没有 handoff"的镜像形态。
+    fenceAvailable: () => connectionFenceReady((ctx as unknown as { get?: (name: string) => unknown }).get?.('connection')),
     mirror: mirrorBrowserAuthCookies,
     schedule: (run, delayMs) => setTimeout(run, delayMs),
     cancel: (handle) => { clearTimeout(handle as ReturnType<typeof setTimeout>) },
@@ -360,26 +411,36 @@ export function apply(ctx: Context, config: Config = {}): void {
     runtime.saveLedger()
   }
 
-  // User switch: close every tab, point new tabs at the new user's partition
-  // and swap the per-user browser store (bookmarks/history/downloads/ledger).
+  /**
+   * 把"当前用户作用域"切到 `user`：分区 + 书签/历史/下载 store + 票据交接。
+   *
+   * 幂等、可从任意路径重复调用（`setPartition` 同值短路、交接表可重启），因此
+   * 它同时服务三个入口：启动期补采样、`pico/session-changed`、以及失败重试。
+   */
+  const applyUserScope = (user: string | null): void => {
+    runtime.setPartition(browserPartitionFor(user))
+    switchStoreForUser(user)
+    startCookieHandoff()
+  }
+
+  // User switch: point new tabs at the new user's partition and swap the
+  // per-user browser store (bookmarks/history/downloads/ledger), then close the
+  // previous account's tabs and prewarm HIDDEN so the agent keeps a live CDP
+  // surface without any user action.
   ctx.on('pico/session-changed', (next) => {
     const username = (next as { username?: string } | null)?.username ?? null
     const user = username !== null && username !== undefined && username.length > 0 ? username : null
-    void (async () => {
-      // Login switch / logout destroys background tabs (2026-09-08 product
-      // decision), then prewarms the new user's browser HIDDEN so the agent
-      // keeps a live CDP surface without any user action.
-      await runtime.closeAll(true)
+    void runSessionSwitch({
+      applyUserScope: () => { applyUserScope(user) },
+      // Login switch / logout destroys background tabs (2026-09-08 decision).
+      closeAll: async () => { await runtime.closeAll(true) },
       // P1-19: the op log (hosts, paths, token-bearing URLs) is per-account —
       // the new user must never read the previous account's trail via the
       // activity panel or GET /ops.
-      runtime.clearOps()
-      runtime.setPartition(browserPartitionFor(user))
-      switchStoreForUser(user)
-      // R7-RV-3：新用户的分区是另一个 cookie jar —— 交接重来一次。
-      startCookieHandoff()
-      await runtime.prewarm()
-    })().catch((cause: unknown) => {
+      clearOps: () => { runtime.clearOps() },
+      prewarm: async () => { await runtime.prewarm() },
+      warn: (message, cause) => { ctx.logger?.warn?.(message, cause) },
+    }).catch((cause: unknown) => {
       ctx.logger?.error('pico-browser: session change handling failed', cause)
     })
   })
@@ -414,8 +475,10 @@ export function apply(ctx: Context, config: Config = {}): void {
      */
     const proofOfPossession = (req: IncomingMessage, res: ServerResponse): boolean => {
       const fence = (ctx as unknown as { get?: (name: string) => unknown }).get?.('connection') as ConnectionTrustFence | undefined
-      if (fence === undefined || typeof fence.requestRejection !== 'function') {
-        ctx.logger?.warn?.('pico-browser: connection service unavailable; refusing a local write (fail-closed)')
+      if (!connectionFenceReady(fence)) {
+        // 与 401/403 分支同口径带上路由（2026-09-15 审计 F5）：现场若 fence 缺席，
+        // 只有一句 "connection service unavailable" 同样指不到是哪个页面的哪个请求。
+        ctx.logger?.warn?.(`pico-browser: connection service unavailable; refusing a local write (fail-closed) [${req.method ?? 'POST'} ${(req.url ?? '').split('?')[0] ?? ''}]`)
         json(res, 503, {
           error: 'browser session proof unavailable',
           hint: 'reopen the application window from its launch URL',
@@ -706,13 +769,41 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }, 'pico browser: panel api')
 
+  /**
+   * 等"持久会话已恢复"再建浏览器窗口（2026-09-15 审计 F1 的保守修法）。
+   *
+   * 为什么不是"恢复完成后再补一次采样"：`usernameForStore` 与 `currentUser()` 同源，
+   * 补采样永远相等、是死代码（本轮实测证伪了"补采样"这个方向）。真正的窗口在
+   * **恢复还没回来**的那段时间里：`currentUser()` 为 null ⇒ 分区与书签/历史 store
+   * 先落在匿名桶上，登录态慢（例如要等一次服务端校验）时这个窗口能到秒级。
+   * 修法就是**别急着建**：`isRestored()` 一到就建（正常路径只多等一次 token 文件
+   * 读取，毫秒级）；超时（缺 picoSession 的宿主 / 恢复卡住）照常建，行为与旧版一致。
+   */
+  const waitForSessionRestored = async (budgetMs = 15_000): Promise<boolean> => {
+    const pico = ctx.get('picoSession') as { isRestored?: () => boolean } | undefined
+    if (typeof pico?.isRestored !== 'function') return true
+    const deadline = Date.now() + budgetMs
+    while (pico.isRestored() !== true && Date.now() < deadline) {
+      await new Promise((resolve) => { setTimeout(resolve, 50) })
+    }
+    return pico.isRestored() === true
+  }
+
   // Boot prewarm (2026-09-08 product decision): the browser window, the
   // restored ledger tabs and their CDP sessions come up at client start —
   // HIDDEN. The agent can therefore drive the browser with no user action,
   // and the shell's 浏览器 button merely shows the already-running window.
-  void runtime.prewarm().catch((cause: unknown) => {
-    ctx.logger?.warn('pico-browser: prewarm failed', cause)
-  })
+  ctx.effect(() => {
+    let cancelled = false
+    void (async () => {
+      const restored = await waitForSessionRestored()
+      if (!restored) ctx.logger?.warn?.('pico-browser: session restore did not finish in 15s; prewarming with the current scope')
+      if (!cancelled) await runtime.prewarm()
+    })().catch((cause: unknown) => {
+      ctx.logger?.warn('pico-browser: prewarm failed', cause)
+    })
+    return () => { cancelled = true }
+  }, 'pico browser: boot prewarm')
 
   ctx.effect(() => {
     return () => {

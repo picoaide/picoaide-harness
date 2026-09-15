@@ -12,12 +12,12 @@
 import { CdpSession } from './cdp.ts'
 import { BROWSER_PARTITION, BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, type NativeBrowserWindow, type NativeSession, type NativeView } from './electron-adapter.ts'
 import { BrowserGuard, installPermissionGuard } from './guard.ts'
-import { extractSnapshot, extractText } from './snapshot.ts'
+import { extractSnapshotWithMeta, extractTextWithMeta, type SnapshotExtractionMeta } from './snapshot.ts'
 import { captureScreenshot, captureScreenshotViaCdp } from './shots.ts'
-import { TabPool } from './pool.ts'
+import { TabPool, type TabReservation } from './pool.ts'
 import { BrowserStore, stripSensitiveText, stripSensitiveUrl, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
 import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
-import { SENSITIVE_KEY_PATTERN } from './sensitive.ts'
+import { SENSITIVE_KEY_PATTERN, isExactProseSensitiveKey } from './sensitive.ts'
 import { browserError, BrowserError, type BrowserErrorCode } from './errors.ts'
 import { isFrameOrderProblem, orderFramesByDom, frameOrderErrorMessage, SRCDOC_URL, type FrameCandidate, type FrameOrderProblem } from './frames.ts'
 import { realpathSync } from 'node:fs'
@@ -424,6 +424,12 @@ export class BrowserRuntime {
    * pop the window at app boot or on a session switch.
    */
   restoreLedger(): void {
+    // 换账本 = 换归属（启动恢复 / 用户切换）：让**在飞**的 materialize 立刻作废。
+    // 只靠循环顶部的代际检查不够 —— 已经进到 createTabReal 的那一个 tab 会跑完，
+    // 把上一个账号的 URL/标题写进新账号的 ops/history/ledger（2026-09-15 审计 P1-2）。
+    // 注意必须放在 `ledger === undefined` 早退**之前**：新账号的空账本同样要让
+    // 上一个账号的在飞恢复作废。
+    this.materializeEpoch++
     const ledger = this.store.getGroupLedger()
     if (ledger === undefined) return
     const ledgerTabs = ledger.tabs ?? []
@@ -472,12 +478,25 @@ export class BrowserRuntime {
             // remaining tabs STAY PENDING and are retried on the next
             // materialization attempt — restore never exceeds maxTabs.
             const created = await this.pool.withOperation('browser_restore', async () => {
-              if (!this.pool.tryReserveTab()) return false
+              // 进临界区后再校验一次代际（2026-09-15 审计 P1-2）：等待互斥锁/用户闸
+              // 期间可能已经发生过一次 restoreLedger/closeAll（会话切换），此时 item
+              // 属于**上一个账号**的账本 —— 继续建 tab 会把它的 URL/标题写进新账号的
+              // history/ledger，并在新账号的分区里真的把页面加载起来。
+              if (epoch !== this.materializeEpoch) return false
+              const reservation = this.pool.tryReserveTab()
+              if (reservation === undefined) return false
               try {
-                await this.createTabReal(item.url, undefined, item.tabId, 'restore')
+                const tab = await this.createTabReal(item.url, undefined, item.tabId, 'restore', undefined, reservation)
+                if (epoch !== this.materializeEpoch) {
+                  // 建完才发现代际变了（加载期间用户切换）：销毁刚建出来的 tab。
+                  // 互斥锁保证新账号的恢复还没开始建 tab（不会误杀它的同 id tab）。
+                  this.destroyTab(tab.id)
+                  return false
+                }
                 return true
               } catch (error) {
-                this.pool.releaseReservation()
+                // 令牌是幂等的：registerTab 已兑现时这里是 no-op（P0-2 修复）。
+                this.pool.releaseReservation(reservation)
                 throw error
               }
             })
@@ -497,12 +516,18 @@ export class BrowserRuntime {
         this.materializing = false
       }
       if (!this.disposed && epoch === this.materializeEpoch) {
-        const ledger = this.store.getGroupLedger()
-        if (ledger !== undefined && ledger.activeTabId !== undefined && this.pool.has(ledger.activeTabId)) {
-          this.pool.setActiveTab(ledger.activeTabId)
+        // relayout() 会碰窗口/视图：窗口销毁竞态下可能抛 —— 这里是最外层
+        // `void (async () => …)()` 的尾部，抛出去就是未处理拒绝（审计 P2-4）。
+        try {
+          const ledger = this.store.getGroupLedger()
+          if (ledger !== undefined && ledger.activeTabId !== undefined && this.pool.has(ledger.activeTabId)) {
+            this.pool.setActiveTab(ledger.activeTabId)
+          }
+          this.relayout()
+          this.saveLedger()
+        } catch (cause) {
+          console.error('[dsh-browser] post-restore relayout failed', cause)
         }
-        this.relayout()
-        this.saveLedger()
       }
     })()
   }
@@ -572,28 +597,31 @@ export class BrowserRuntime {
   async open(url: string | undefined, signal?: AbortSignal, user = false, inheritSecretsFrom?: number): Promise<BrowserTabState> {
     if (this.disposed) throw new Error('browser: runtime disposed')
     if (user) {
-      if (!this.pool.tryReserveTab()) {
+      const reservation = this.pool.tryReserveTab()
+      if (reservation === undefined) {
         throw browserError('quota', 'browser: tab limit reached — close a tab first')
       }
       try {
-        return await this.createTabReal(url, signal, undefined, 'user', inheritSecretsFrom)
+        return await this.createTabReal(url, signal, undefined, 'user', inheritSecretsFrom, reservation)
       } catch (error) {
-        this.pool.releaseReservation()
+        // 令牌幂等：导航失败时 createTabReal 已经 removeTab（槽位还回去了），
+        // 这里再退一次不能把预留计数也抹掉（否则池子静默缩容，P0-2）。
+        this.pool.releaseReservation(reservation)
         throw error
       }
     }
     return await this.withAgentAttribution('browser_open', async () => {
-      await this.pool.reserveTab(signal)
+      const reservation = await this.pool.reserveTab(signal)
       try {
-        return await this.createTabReal(url, signal, undefined, 'ai', inheritSecretsFrom)
+        return await this.createTabReal(url, signal, undefined, 'ai', inheritSecretsFrom, reservation)
       } catch (error) {
-        this.pool.releaseReservation()
+        this.pool.releaseReservation(reservation)
         throw error
       }
     }, signal)
   }
 
-  private async createTabReal(url: string | undefined, signal: AbortSignal | undefined, fixedId: number | undefined, actor: RecordActor, inheritSecretsFrom?: number): Promise<BrowserTabState> {
+  private async createTabReal(url: string | undefined, signal: AbortSignal | undefined, fixedId: number | undefined, actor: RecordActor, inheritSecretsFrom?: number, reservation?: TabReservation): Promise<BrowserTabState> {
     const id = fixedId ?? this.nextTabId++
     const view = this.adapter.createView(this.partition)
     // Every CDP command is bounded by the tool budget: a wedged renderer
@@ -612,7 +640,7 @@ export class BrowserRuntime {
       if (opener !== undefined) tab.filledSecrets.push(...opener.filledSecrets)
     }
     this.tabs.set(id, tab)
-    this.pool.registerTab(id, '', '')
+    this.pool.registerTab(id, '', '', reservation)
 
     try {
       // User-created tabs (shell ＋) surface the window; agent-created tabs
@@ -730,14 +758,19 @@ export class BrowserRuntime {
     }
   }
 
-  releaseReservation(): void {
-    this.pool.releaseReservation()
+  releaseReservation(reservation?: TabReservation): void {
+    this.pool.releaseReservation(reservation)
   }
 
   // ---------------------------------------------------------------- window
 
   private contentBounds(): { x: number; y: number; width: number; height: number } {
-    const size = this.window?.getContentSize() ?? { width: 0, height: 0 }
+    // 2026-09-15 审计 P2-4：这是全文件唯一一处不判 isDestroyed() 就读窗口的地方。
+    // closed 回调把它置空前存在"已销毁但 this.window 非 null"的窗口期，此时
+    // getContentSize() 会抛 `Object has been destroyed`；await 之后走这条路的
+    // prewarm/materialize 尾部会把异常变成未处理拒绝 ⇒ 桌面 fail-loud 直接退出。
+    const win = this.window
+    const size = win === null || win.isDestroyed() ? { width: 0, height: 0 } : win.getContentSize()
     return {
       x: 0,
       y: BROWSER_SHELL_TOOLBAR_HEIGHT,
@@ -805,6 +838,9 @@ export class BrowserRuntime {
     const mode = this.effectiveOverlayMode()
     this.overlay.setBounds(this.overlayBounds(mode))
     this.overlay.moveToTop(this.window)
+    // 2026-09-15 审计 P2-7：mask 是"整窗锁定"状态，必须同时拿键盘焦点 ——
+    // 只挡鼠标时，用户先前点过的页面输入框仍会收到键盘输入。
+    if (mode === 'mask') this.overlay.focus?.()
   }
 
   /** User-driven overlay mode switch (panel/menu/viewer/capsule). The mode is
@@ -1550,12 +1586,17 @@ export class BrowserRuntime {
       this.hideWindow()
     }
     if (user) {
-      const already = this.pool.controlled
-      if (!already) this.pool.setUserControl(true)
+      // 2026-09-15 审计 P1-1：这里原本用 `already` 短路 —— 用户正拿着控制权
+      // («我来操作») 时来一次会话切换（token 过期 → auth-gate clear、登出、改密
+      // 都会发 pico/session-changed），finally 就不会把控制权交还：`controlled`
+      // 永久为 true ⇒ 蒙版不再上锁、用户闸对 agent 失效、胶囊反而显示「交给 AI」。
+      // 关闭浏览器这个动作本身就要结束"用户持有"状态，所以无条件交还。
+      const wasControlled = this.pool.controlled
+      if (!wasControlled) this.pool.setUserControl(true)
       try {
         return await body()
       } finally {
-        if (!already) this.pool.setUserControl(false)
+        this.pool.setUserControl(false)
       }
     }
     return await this.agentRun('browser_close', body)
@@ -1564,32 +1605,49 @@ export class BrowserRuntime {
   // ----------------------------------------------------------- interactions
 
   async snapshot(tabId: number, signal?: AbortSignal): Promise<BrowserSnapshotElement[]> {
+    // 2026-09-15 审计 P2：命中总数 + 截断/盲区统计必须离开本函数（模型面出口在
+    // tools.ts，而 `snapshot()` 的 `BrowserSnapshotElement[]` 返回类型被大量
+    // 既有调用点/测试钉死）。所以新增 `snapshotWithMeta()` 承载元数据，
+    // `snapshot()` 委托它、返回类型不变（与 `text`/`textWithMeta` 同一形状）。
+    return (await this.snapshotWithMeta(tabId, signal)).elements
+  }
+
+  /** {@link snapshot} plus the extraction counts/blind-spot metadata (2026-09-15
+   * 审计 P2: `browser_get_snapshot` must be able to say "another N elements were
+   * not listed; M sub-frames / shadow roots are not included").
+   *
+   * 值级擦除（P0-A depth layer）留在这条漏斗里：无论文本来自探针还是未来别的
+   * 取值来源，`runtime.snapshot` 的每个调用方都被覆盖。R7 的顺序也不动 —— 先
+   * 在**整段**元素文本上擦除，再做 80 字符的模型面截断，否则跨界的口令会被切成
+   * 任何值规则都认不出的明文残片。 */
+  async snapshotWithMeta(tabId: number, signal?: AbortSignal): Promise<{ elements: BrowserSnapshotElement[]; meta: SnapshotExtractionMeta }> {
     const resolved = this.resolveTab(tabId)
-    const elements = await this.agentRun('browser_get_snapshot', async () => {
+    const out = await this.agentRun('browser_get_snapshot', async () => {
       const tab = this.tab(resolved)
-      // R7 (2026-09-13): the redactor runs on the WHOLE element text and the
-      // 80-char model-facing cap is applied after it — the probe used to cut
-      // first, so a credential straddling the cap came back as a plaintext
-      // fragment (`Audit note: …S3cr3tPass`).
-      const snapshot = await extractSnapshot(
+      const snapshot = await extractSnapshotWithMeta(
         (m, p) => tab.cdp.send(m, p),
         this.options.snapshotLimit,
-        (elementText) => redactFilledSecretsText(tab, elementText),
+        (elementText, textContext) => redactFilledSecretsText(tab, elementText, { tailMayBeTruncated: textContext.truncated }),
       )
-      // P0-A depth layer: scrub values this tab received through credential
-      // injection, whatever source produced the text (the probe today, a future
-      // field/attribute dump tomorrow). Value-exact matching keeps ordinary page
-      // text untouched. Placed in the runtime funnel — not only in tools.ts —
-      // so every `runtime.snapshot` caller is covered.
-      return redactFilledSecrets(tab, snapshot)
+      return { elements: redactFilledSecrets(tab, snapshot.elements), meta: snapshot.meta }
     }, signal)
-    this.record('browser_get_snapshot', resolved, `snapshot: ${elements.length} elements`)
-    return elements
+    this.record('browser_get_snapshot', resolved, `snapshot: ${out.elements.length} elements`)
+    return out
   }
 
   async text(tabId: number, selector: string | undefined, signal?: AbortSignal): Promise<string> {
+    return (await this.textWithMeta(tabId, selector, signal)).text
+  }
+
+  /** {@link text} plus the REAL truncation flag (2026-09-15 审计 P2).
+   *
+   * 现场：`browser_get_text` 的 `truncated` 由工具用 `text.length >=
+   * runtime.options.textLimit` 推算，而实际生效上限是 `min(textLimit, 32KiB)`
+   * ——`textLimit=65536` 时工具拿着 65536 去比一条早被 32KiB 截断的文本，标记
+   * 完全失真。长度只有这里（投影之后、截断之前）知道，所以判定也必须在这里。 */
+  async textWithMeta(tabId: number, selector: string | undefined, signal?: AbortSignal): Promise<{ text: string; truncated: boolean }> {
     const resolved = this.resolveTab(tabId)
-    const text = await this.agentRun('browser_get_text', async () => {
+    const out = await this.agentRun('browser_get_text', async () => {
       const tab = this.tab(resolved)
       // R-1 (2026-09-13): page text is a model-facing exit too. innerText of a
       // password input is empty, but a page that *echoes* what was typed
@@ -1600,15 +1658,15 @@ export class BrowserRuntime {
       // R7 (2026-09-13): same order as the snapshot funnel — redact, then apply
       // the 32KiB cap. Slicing first turned a credential straddling the cap into
       // a plaintext head fragment.
-      return await extractText(
+      return await extractTextWithMeta(
         (m, p) => tab.cdp.send(m, p),
         selector,
         this.options.textLimit,
         (raw) => redactFilledSecretsText(tab, raw),
       )
     }, signal)
-    this.record('browser_get_text', resolved, selector === undefined ? `page text: ${text.length} chars` : `element text: ${text.length} chars`)
-    return text
+    this.record('browser_get_text', resolved, selector === undefined ? `page text: ${out.text.length} chars` : `element text: ${out.text.length} chars`)
+    return { text: out.text, truncated: out.truncated }
   }
 
   async screenshot(tabId: number, signal?: AbortSignal): Promise<string> {
@@ -3149,6 +3207,31 @@ function keyVocabularyBefore(text: string, delimiterIndex: number): boolean {
 }
 
 /**
+ * R-8 (2026-09-15 审计 P1，安全)：散文里紧挨在值前面的**凭据键名**判定。
+ *
+ * 现场：`your password abc123 is wrong` 原样回给了模型。旧口径只认"值位"——
+ * 左邻必须是 `=`/`:`，或是被括号/引号包住且前面有键名；散文里 `password` 与
+ * `abc123` 之间是一个空格、`abc123` 右边是 `i`（is），两个条件都不成立，于是
+ * 短口令在散文语境里**完全不擦除**。而"页面把用户刚输入的口令回显在一句话里"
+ * （`your password … is weak`）恰恰是最常见的泄漏形态。
+ *
+ * 与 {@link keyVocabularyBefore}（URL 键名表，含 `key`/`code`/`sid` 这类普通英文
+ * 词）不同，这里用散文强凭据词表 {@link isExactProseSensitiveKey}：散文字符串里
+ * `keyboard`/`order code` 这类片段不能把普通文本改坏（2026-09-15 另一条审计结论，
+ * 见 sensitive.ts 的 PROSE_SENSITIVE_TERMS）。`order abc123 confirmed` 因此保持
+ * 原样，而 `your password abc123 is wrong` 会被擦除。
+ *
+ * 扫描边界仍是 {@link KEY_STOP}（不含空格，好让"键名 + 空格 + 值"连起来），
+ * 括号/引号处停下——`Item (abc123) shipped`、`Ref "abc123" noted` 不误伤（R-4）。
+ */
+function proseKeyBefore(text: string, at: number): boolean {
+  let start = at
+  const floor = Math.max(0, at - KEY_LOOKBACK)
+  while (start > floor && !KEY_STOP.has(text[start - 1]!)) start--
+  return start < at && isExactProseSensitiveKey(text.slice(start, at))
+}
+
+/**
  * Redact the occurrences of a SHORT secret that are *value-shaped*:
  * `password=abc123`, `"pw":"abc123"`, `user:abc123@host`, `?token=abc123&x=1`,
  * `token=[abc123]`. Prose keeps its text (`order abc123 confirmed`,
@@ -3215,6 +3298,13 @@ function maskShortSecretTokens(text: string, secret: string): string {
   // that merely starts with the value (`x=abc123y`) is over-masked in the same
   // step: fail-closed, and the visible tail is recoverable from the page.
   if (left !== undefined && VALUE_LEFT_STRONG.has(left)) return true
+  // R-8 (2026-09-15 审计 P1，安全)：**键名判定必须在"右侧必须是值结束符"之前**。
+  // 旧顺序先看右邻字符，于是散文里的 `your password abc123 is wrong`（右邻是
+  // `i`）在这里 return false，前面那个凭据键名根本没被咨询过 —— 短口令在散文
+  // 语境里等于完全不擦除。键名从**未经跳空白**的位置 `at` 起算，好让
+  // "键名 + 空格 + 值"的散文形态被识别；`order abc123 confirmed` 因 `order` 不是
+  // 凭据键名而保持原样（散文词表，见 proseKeyBefore）。
+  if (proseKeyBefore(text, at)) return true
   const right = at + length >= text.length ? undefined : nearestRight(text, at + length)
   if (right !== undefined && !VALUE_RIGHT.has(right)) return false
   if (left === undefined) return true
@@ -3249,10 +3339,16 @@ function maskShortSecretTokens(text: string, secret: string): string {
  * The guess is gone. Truncation is now always handled by ORDER instead: every
  * producer redacts the FULL text and only then applies its cap
  * (`extractSnapshot` / `extractText` / `serializeEvalResult` / the op-log
- * `record` summary), so no exit can produce a fragment. The one remaining cut
- * this function cannot see is the PAGE-side snapshot probe's own
- * `ELEMENT_TEXT_CAP`; its tail lies beyond the 80-character model-facing window,
- * so it is not an exit — and guessing at it is exactly what F-2 removed.
+ * `record` summary), so no exit can produce a fragment.
+ *
+ * 2026-09-15 审计 P1（`>1024 的长凭据只剩头部`）——F-2 之后残留的那一个例外：
+ * 快照探针在**页面侧**按 `ELEMENT_TEXT_CAP`（1 KiB）先切一刀，主机拿到的是切过的
+ * 文本。旧注释断言"它的尾部落在 80 字符窗口之外，所以不是出口"——**这个断言是错的**：
+ * 只要值在切点之前就开始（`Token: <900 字符的值头>…` 被切在第 1024 字符），值的
+ * 头部就落在窗口内，而它既不是完整值也不是整段文本，任何值规则都认不出。
+ * 现在由生产者把"这一刀确实切了"作为事实告诉本函数（
+ * {@link RedactOptions.tailMayBeTruncated}，唯一来源是 `extractSnapshot`），
+ * 只在这种情况下做尾部值头匹配——判据从"看起来像截断"变成"上游确实截断"。
  *
  * `verbatim: true` (R-5) is for strings that cannot be prose: a URL, a download
  * name/path, a file name. Short secrets used to be masked on EVERY occurrence
@@ -3271,14 +3367,48 @@ function maskShortSecretTokens(text: string, secret: string): string {
  * this function cannot recognize; that residual is declared in the tool
  * descriptions and asserted by `tests/probes/r6-outlet-probe.mjs`.
  */
-function redactFilledSecretsText(tab: BrowserTab, text: string, options: { verbatim?: boolean } = {}): string {
+function redactFilledSecretsText(tab: BrowserTab, text: string, options: RedactOptions = {}): string {
   return redactSecretsText(tab.filledSecrets, text, options)
+}
+
+/** Options shared by the redaction funnels (module-internal shape). */
+interface RedactOptions {
+  /** Verbatim context (URL / path / file name) — see {@link redactSecretsText}. */
+  verbatim?: boolean
+  /**
+   * The producer cut this text at its own cap, so it may end in the HEAD of a
+   * value (2026-09-15 审计 P1). Only set by callers that really did cut
+   * (`extractSnapshot`'s page-side `ELEMENT_TEXT_CAP`); never inferred.
+   */
+  tailMayBeTruncated?: boolean
+}
+
+/**
+ * Length of the longest prefix of `secret` that is a SUFFIX of `text` (0 when
+ * there is none) — how much of a value a cap would have left behind.
+ *
+ * Only consulted when the producer says the text was cut (see
+ * {@link RedactOptions.tailMayBeTruncated}); guessing this from the text alone
+ * is exactly what F-2 (2026-09-13) removed after it rewrote ordinary prose.
+ * Bounded by construction: the caller's text is at most one element's page-side
+ * cap (1 KiB), and the scan stops at the first match, skipping lengths whose
+ * last character cannot match.
+ */
+function truncatedHeadLength(text: string, secret: string): number {
+  const max = Math.min(text.length, secret.length - 1)
+  if (max < MIN_EMBEDDED_SECRET_LENGTH) return 0
+  const last = text.charCodeAt(text.length - 1)
+  for (let k = max; k >= MIN_EMBEDDED_SECRET_LENGTH; k--) {
+    if (secret.charCodeAt(k - 1) !== last) continue
+    if (text.endsWith(secret.slice(0, k))) return k
+  }
+  return 0
 }
 
 /** Secrets-array core of {@link redactFilledSecretsText}: also usable for exits
  * with no single owning tab (a download is a session event, so its redaction set
  * is the union of the live tabs' sets). */
-function redactSecretsText(secrets: readonly string[], text: string, options: { verbatim?: boolean } = {}): string {
+function redactSecretsText(secrets: readonly string[], text: string, options: RedactOptions = {}): string {
   if (secrets.length === 0) return text
   let out = text
   for (const secret of secrets) {
@@ -3295,11 +3425,20 @@ function redactSecretsText(secrets: readonly string[], text: string, options: { 
     //    `/test-report` 不会），散文语境仍走"值形态"判定（`password=test` 会擦）。
     if (secret.length >= MIN_EMBEDDED_SECRET_LENGTH) {
       if (out.includes(secret)) out = out.split(secret).join(MASK)
-      // F-2 (2026-09-13 round 2): no tail-fragment heuristic here. Guessing
-      // "the text ends with a prefix of a value, therefore it must have been
-      // truncated" rewrote untruncated prose and persisted the wrong fact
-      // (`/help/Security` → `/help/****`). A fragment can no longer exist:
-      // every producer redacts before it cuts.
+      // F-2 (2026-09-13 round 2): no tail-fragment heuristic here **unless the
+      // producer says it cut**. Guessing "the text ends with a prefix of a value,
+      // therefore it must have been truncated" rewrote untruncated prose and
+      // persisted the wrong fact (`/help/Security` → `/help/****`). Every host
+      // funnel redacts before it cuts — the ONE exception is the snapshot probe's
+      // page-side `ELEMENT_TEXT_CAP`, which cuts before the host can redact
+      // (2026-09-15 审计 P1: a credential longer than that cap survived as a
+      // plaintext head no rule could recognize). `extractSnapshot` marks exactly
+      // that case, so the premise here is "the upstream really did cut", not
+      // "this looks truncated".
+      if (options.tailMayBeTruncated === true) {
+        const head = truncatedHeadLength(out, secret)
+        if (head >= MIN_EMBEDDED_SECRET_LENGTH) out = `${out.slice(0, out.length - head)}${MASK}`
+      }
       continue
     }
     out = options.verbatim === true ? maskShortSecretTokens(out, secret) : maskShortSecretOccurrences(out, secret)

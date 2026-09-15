@@ -45,7 +45,14 @@ const LABEL: React.CSSProperties = { overflow: 'hidden', whiteSpace: 'nowrap' }
  */
 export function BrowserTrigger(props: PropsRuntime<'sidebar.footer.action'>) {
   const wake = (): void => {
-    void fetch('/api/pico/browser/show', { method: 'POST' }).catch(() => {})
+    // 2026-09-15 审计 F6：这是写面（需持有性证明 cookie）。失败时旧实现静默吞掉，
+    // 用户看到的正是"点了按钮没反应"，而主机日志与客户端控制台都不留痕。
+    void fetch('/api/pico/browser/show', { method: 'POST' }).then(
+      (response) => {
+        if (!response.ok) console.warn('[pico-browser] show rejected', response.status)
+      },
+      (cause: unknown) => { console.warn('[pico-browser] show request failed', cause) },
+    )
   }
 
   return (

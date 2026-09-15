@@ -508,3 +508,72 @@ describe('FIX-06 history/bookmark 的 title 落盘前脱敏', () => {
     expect(b.title).toBe('Example — Home')
   })
 })
+
+// ------------------------------------------------- 2026-09-15 审计 P2：脱敏分档
+
+/**
+ * 审计实测：`maskSensitiveKeyValueText` 的词表含 `key`/`code`/`sid`，于是
+ * `搜索 “key=value” 的含义` 被写成 `搜索 “key=**** 的含义`——**写入即不可逆**。
+ * 现在按字段/形态分档：`url` 字段与 URL/查询串形态的文本保持键名级强度，散文
+ * （标题/摘要）只对强凭据键打码。安全侧的兜底是 URL 面：标题里以 URL/查询串
+ * 形态出现的凭据照旧打码。
+ */
+describe('2026-09-15 审计 P2：散文标题不再被脱敏写坏', () => {
+  let dir: string
+  let store: BrowserStore
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('散文标题里的 key=value 逐字节保留（历史/书签两条写路径 + 落盘）', () => {
+    dir = freshDir()
+    store = new BrowserStore({ dir })
+    const prose = '搜索 “key=value” 的含义'
+    const history = store.addHistory({ time: Date.now(), url: 'https://example.com/a', title: prose, actor: 'ai', group: '' })
+    const bookmark = store.addBookmark({ url: 'https://example.com/a', title: prose, actor: 'ai', group: '' })
+    expect(history.title).toBe(prose)
+    expect(bookmark.title).toBe(prose)
+    expect(readFileSync(store.pathOf('history'), 'utf8')).toContain(prose)
+    expect(readFileSync(store.pathOf('bookmarks'), 'utf8')).toContain(prose)
+  })
+
+  it('普通词 key/code/sid 不再打码，强凭据键照旧打码', () => {
+    dir = freshDir()
+    store = new BrowserStore({ dir })
+    const add = (title: string): string =>
+      store.addHistory({ time: Date.now(), url: 'https://example.com/x', title, actor: 'ai', group: '' }).title
+    expect(add('see code=404 and sid=7 for key=value')).toBe('see code=404 and sid=7 for key=value')
+    expect(add('password=hunter2')).toBe('password=****')
+    expect(add('token=T12')).toBe('token=****')
+    expect(add('pwd=hunter2')).toBe('pwd=****')
+    expect(add('cookie=abc123')).toBe('cookie=****')
+    expect(add('client_secret=s3cr3t')).toBe('client_secret=****')
+    expect(add('Authorization: Bearer abc')).toBe('Authorization: **** abc')
+  })
+
+  it('URL/查询串形态的自由文本保持原强度（审计的 URL 面兜底）', () => {
+    dir = freshDir()
+    store = new BrowserStore({ dir })
+    const add = (title: string): string =>
+      store.addHistory({ time: Date.now(), url: 'https://example.com/x', title, actor: 'ai', group: '' }).title
+    expect(add('Login failed: code=T14&state=x')).toBe('Login failed: code=****&state=x')
+    expect(add('Sign in /cb?%73id=T11')).toBe('Sign in /cb?%73id=****')
+    expect(add('https://h/cb?X-Amz-Signature=SIG&token=TOK')).toBe('https://h/cb?X-Amz-Signature=****&token=****')
+  })
+
+  it('url 字段行为不变（分档只影响自由文本）', () => {
+    dir = freshDir()
+    store = new BrowserStore({ dir })
+    const entry = store.addHistory({
+      time: Date.now(),
+      url: 'https://example.com/s?token=abc&q=hello&code=9',
+      title: 't',
+      actor: 'ai',
+      group: '',
+    })
+    expect(entry.url).toBe('https://example.com/s?token=****&q=hello&code=****')
+    const bookmark = store.addBookmark({ url: 'https://example.com/cb?session=x&id=1', title: 'b', actor: 'ai', group: '' })
+    expect(bookmark.url).toBe('https://example.com/cb?session=****&id=1')
+  })
+})
