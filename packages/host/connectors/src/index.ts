@@ -465,6 +465,97 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /**
+   * Per-connect intent token (2026-09-15 audit, BUG-02). Connecting is a
+   * multi-await operation whose side effects — publishing a form, flipping the
+   * row to 'connecting', writing a credential, spawning MCP servers — must not
+   * survive a user cancel, a disconnect, a newer connect, or a user switch. The
+   * token carries every fact needed to answer "is this work still wanted?": the
+   * generation at entry, its own abort signal, the store instance it may write
+   * to, and the teardown controller it started under.
+   */
+  interface ConnectIntent {
+    generation: number
+    controller: AbortController
+    store: ConnectorStore
+    teardown: AbortController
+  }
+  const connectIntents = new Map<string, ConnectIntent>()
+
+  /** Register a new intent, superseding (and aborting) whatever was in flight. */
+  const beginIntent = (id: string): ConnectIntent => {
+    connectIntents.get(id)?.controller.abort(new Error('连接意图已被更新的请求取代'))
+    const intent: ConnectIntent = {
+      generation: currentGeneration(id),
+      controller: new AbortController(),
+      store,
+      teardown: teardownController,
+    }
+    connectIntents.set(id, intent)
+    return intent
+  }
+
+  /** True while this exact intent is still the live, unaborted work of the connector. */
+  const intentLive = (id: string, intent: ConnectIntent): boolean =>
+    connectIntents.get(id) === intent
+    && intent.generation === currentGeneration(id)
+    && !intent.controller.signal.aborted
+    && intent.teardown === teardownController
+    && !intent.teardown.signal.aborted
+
+  /** True once a NEWER connect/submit took the connector over. */
+  const supersededByNewerIntent = (id: string, intent: ConnectIntent): boolean => {
+    const newer = connectIntents.get(id)
+    return newer !== undefined && newer !== intent
+  }
+
+  const endIntent = (id: string, intent: ConnectIntent): void => {
+    if (connectIntents.get(id) === intent) connectIntents.delete(id)
+  }
+
+  /**
+   * Invalidate every in-flight connect/submit for a connector: bump the
+   * generation (registerMcp re-checks it) and abort the intent signal so work
+   * parked on an await unwinds instead of finishing.
+   */
+  const invalidateIntent = (id: string, reason: Error): void => {
+    bumpGeneration(id)
+    const intent = connectIntents.get(id)
+    if (intent === undefined) return
+    intent.controller.abort(reason)
+    connectIntents.delete(id)
+  }
+
+  /**
+   * Aborted by EITHER a lifecycle teardown or this intent dying, so a
+   * registration parked inside registerMcp stops spawning at its next await.
+   */
+  const intentSignal = (intent: ConnectIntent): AbortSignal => {
+    const combine = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any
+    return typeof combine === 'function'
+      ? combine.call(AbortSignal, [intent.teardown.signal, intent.controller.signal])
+      : intent.teardown.signal
+  }
+
+  /**
+   * Compensate a credential write that lost its race with a cancel/disconnect
+   * (the write started before the invalidation landed and completed after).
+   * Two safety rules keep the compensation from destroying good state: never
+   * touch the file when a NEWER intent already owns the connector (it may have
+   * written its own credential), and never touch a store that is no longer the
+   * active one (a user switch happened mid-write; those bytes belong to the
+   * previous user's directory).
+   */
+  const undoStaleCredentialWrite = async (id: string, intent: ConnectIntent): Promise<void> => {
+    if (supersededByNewerIntent(id, intent)) return
+    if (intent.store !== store) return
+    try {
+      await intent.store.clearCredential(id)
+    } catch (cause) {
+      ctx.logger?.warn(`pico-connectors: ${id} 竞态凭据写入回滚失败`, cause)
+    }
+  }
+
+  /**
    * Register one connector's MCP servers. `pendingApproval` means nothing was
    * spawned because a server-issued stdio command still needs local
    * confirmation; `rejected` lists definitions/urls this plugin refuses;
@@ -508,6 +599,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     mcpDisposers.clear()
     for (const flow of pendingFlows.values()) flow.abort(new Error('用户已切换，连接流程中止'))
     pendingFlows.clear()
+    // BUG-02: connect/submit intents started under the previous session must
+    // not publish a form, flip a row or write a credential for the new one.
+    for (const intent of connectIntents.values()) intent.controller.abort(new Error('用户已切换，连接流程中止'))
+    connectIntents.clear()
     pendingRequests.clear()
     pendingApprovals.clear()
     pendingFieldRequestKind.clear()
@@ -1009,6 +1104,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     if (credential === null || credential === undefined) return false
     if (missingDeclaredFields(def, credential).length > 0) return false
     if (def.authMode === 'token' || def.authMode === 'device') return true
+    // A public MCP endpoint answers without an authorization challenge, so the
+    // discovery result is the whole credential: requiring an accessToken here
+    // dropped its tools on every restart (2026-09-15 audit, BUG-06).
+    if (credential.publicMcp === true) return true
     return typeof credential.accessToken === 'string' && credential.accessToken !== ''
   }
 
@@ -1027,54 +1126,64 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // a flow is in flight must not start a duplicate authorization flow
     // (two callback ports, two browser windows, credential writeback race).
     if (pendingFlows.has(id)) return
-    const generation = currentGeneration(id)
-    const existing = await store.readCredential(id)
-    setState(id, { status: 'connecting', everConnected: Boolean(existing) || Boolean(states.get(id)?.everConnected) })
-
-    // Pre-connect settings: if required fields are missing, emit the form and
-    // wait for auth-submit before starting the actual auth flow.
-    if (def.settings?.length) {
-      const missing = def.settings.filter((field) => {
-        const value = existing?.fields?.[field.key]
-        return field.required === true && (typeof value !== 'string' || value.trim() === '')
-      })
-      if (missing.length > 0) {
-        pendingFieldRequestKind.set(id, 'settings')
-        emitRequest({ connectorId: id, fields: def.settings })
-        return
-      }
-    }
-    // Token connectors never run an authorization flow: once the declared
-    // fields are present they register directly (settings above are only a
-    // pre-connect gate). This also guarantees the token form is shown when a
-    // required field is missing, even when settings and tokenFields coexist.
-    if (def.authMode === 'token') {
-      if (missingDeclaredFields(def, existing).length > 0) {
-        requestDeclaredFields(id, def)
-        return
-      }
-      if (generation !== currentGeneration(id)) return
-      const outcome = await registerMcp(def, { signal: teardownController.signal })
-      if (outcome.superseded === true) return
-      if (outcome.pendingApproval !== undefined) {
-        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
-        return
-      }
-      if (outcome.rejected.length > 0) {
-        pendingRequests.delete(id)
-        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
-        return
-      }
-      pendingRequests.delete(id)
-      pendingFieldRequestKind.delete(id)
-      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
-      return
-    }
-    pendingFieldRequestKind.delete(id)
-    pendingRequests.delete(id)
-    const controller = new AbortController()
-    pendingFlows.set(id, controller)
+    // BUG-02: the intent is registered BEFORE the first await, so a cancel or
+    // disconnect that lands while this call is parked in the credential read
+    // invalidates it instead of letting it publish a form for a dead request.
+    const intent = beginIntent(id)
     try {
+      const existing = await store.readCredential(id)
+      if (!intentLive(id, intent)) return
+      setState(id, { status: 'connecting', everConnected: Boolean(existing) || Boolean(states.get(id)?.everConnected) })
+
+      // Pre-connect settings: if required fields are missing, emit the form and
+      // wait for auth-submit before starting the actual auth flow.
+      if (def.settings?.length) {
+        const missing = def.settings.filter((field) => {
+          const value = existing?.fields?.[field.key]
+          return field.required === true && (typeof value !== 'string' || value.trim() === '')
+        })
+        if (missing.length > 0) {
+          if (!intentLive(id, intent)) return
+          pendingFieldRequestKind.set(id, 'settings')
+          emitRequest({ connectorId: id, fields: def.settings })
+          return
+        }
+      }
+      // Token connectors never run an authorization flow: once the declared
+      // fields are present they register directly (settings above are only a
+      // pre-connect gate). This also guarantees the token form is shown when a
+      // required field is missing, even when settings and tokenFields coexist.
+      if (def.authMode === 'token') {
+        if (missingDeclaredFields(def, existing).length > 0) {
+          if (!intentLive(id, intent)) return
+          requestDeclaredFields(id, def)
+          return
+        }
+        if (!intentLive(id, intent)) return
+        const outcome = await registerMcp(def, { signal: intentSignal(intent) })
+        if (outcome.superseded === true) return
+        if (outcome.pendingApproval !== undefined) {
+          setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+          return
+        }
+        if (outcome.rejected.length > 0) {
+          pendingRequests.delete(id)
+          setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+          return
+        }
+        pendingRequests.delete(id)
+        pendingFieldRequestKind.delete(id)
+        setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
+        return
+      }
+      // The auth flow reuses the intent's controller: /cancel, disconnect and a
+      // newer connect all have exactly one signal to abort (BUG-02).
+      pendingFieldRequestKind.delete(id)
+      pendingRequests.delete(id)
+      if (!intentLive(id, intent)) return
+      const controller = intent.controller
+      pendingFlows.set(id, controller)
+      try {
       const patch = await runAuth(def, {
         onRequest: emitRequest,
         signal: controller.signal,
@@ -1083,8 +1192,17 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         ...(options.outboundTimeoutMs === undefined ? {} : { outboundTimeoutMs: options.outboundTimeoutMs }),
       })
       // Token mode returned above; only OAuth/device/server-side reach this.
+      // BUG-02: the credential write is the point of no return for a cancelled
+      // flow, so the intent is re-checked immediately before it (and compensated
+      // after it) — a disconnect that landed during the token round-trip must
+      // not leave a fresh credential behind for the next restore to resurrect.
       const current = await store.readCredential(id)
+      if (!intentLive(id, intent) || intent.store !== store) return
       const merged = await store.updateCredential(id, { ...current, ...patch })
+      if (!intentLive(id, intent)) {
+        await undoStaleCredentialWrite(id, intent)
+        return
+      }
       // A stateless flow (device / server-side) can finish without the
       // credential the definition requires: surface the field form and stay in
       // 'connecting' rather than registering MCP servers that cannot work.
@@ -1095,8 +1213,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // conn-1: the flow may have been overtaken (logout / user switch) while
       // the token round-trip was in flight — never register for a session that
       // is already gone.
-      if (controller.signal.aborted) return
-      if (generation !== currentGeneration(id)) return
+      if (!intentLive(id, intent)) return
       // Retire the PREVIOUS registration only now that the new authorization
       // succeeded: doing it before the flow meant a failed re-authorization
       // (server unreachable, user cancelled the browser step) silently removed
@@ -1104,8 +1221,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // this only covers the case where the new credential cannot register
       // (e.g. stdio approval pending) and keeps the old one from lingering
       // across users.
-      const outcome = await registerMcp(def, { signal: teardownController.signal })
-      if (outcome.superseded === true || controller.signal.aborted) return
+      const outcome = await registerMcp(def, { signal: intentSignal(intent) })
+      if (outcome.superseded === true || !intentLive(id, intent)) return
       if (outcome.pendingApproval !== undefined) {
         // FIX-02: the credential is stored, but the server-issued stdio
         // command still needs a local decision — nothing was spawned and the
@@ -1127,6 +1244,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // sees the stale URL as "new"). Drop it so terminal states stay clean.
       pendingRequests.delete(id)
     } catch (error) {
+      // A newer connect took over: it owns the row now, so this unwinding flow
+      // must not stamp 'disconnected' or an error over its 'connecting' state.
+      if (supersededByNewerIntent(id, intent)) return
       const message = error instanceof Error ? error.message : String(error)
       const unauthorized = message.includes('授权') || message.includes('token') || message.includes('登录')
       // A user-initiated abort maps to the neutral 'disconnected' state, not
@@ -1144,53 +1264,74 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // 的 controller,使 /cancel、disconnect 找不到活流程(2026-09-01 深挖)。
       if (pendingFlows.get(id) === controller) pendingFlows.delete(id)
     }
+    } finally {
+      // Every exit path (settings form, token form, success, failure) drops the
+      // intent: after this call returns there is nothing left to invalidate, and
+      // a later submit/cancel starts from a fresh generation.
+      endIntent(id, intent)
+    }
   }
 
   const submitAuth = async (id: string, fields: Record<string, string>): Promise<void> => {
     const def = getDef(id)
     if (!def) throw new Error(`unknown connector: ${id}`)
-    const generation = currentGeneration(id)
-    const kind = pendingFieldRequestKind.get(id)
-    pendingFieldRequestKind.delete(id)
-    const current = await store.readCredential(id)
-    await store.updateCredential(id, { fields: { ...(current?.fields ?? {}), ...fields } })
-    if (generation !== currentGeneration(id)) return
-    const merged = await store.readCredential(id)
-    // A pre-connect settings form was just completed on an OAuth/device
-    // connector: continue the REAL authorization flow first. Registering MCP
-    // here would mark the row connected without ever starting OAuth; asking
-    // for tokenFields before OAuth would dead-end the authorization too.
-    if (kind === 'settings' && def.authMode !== 'token') {
-      await startConnect(id)
-      return
-    }
-    // A required declared field is still missing (user submitted a partial
-    // token form): show it again instead of registering an MCP server that
-    // cannot authenticate (token mode used to skip this check).
-    if (missingDeclaredFields(def, merged).length > 0) {
-      requestDeclaredFields(id, def)
-      return
-    }
-    const outcome = await registerMcp(def, { signal: teardownController.signal })
-    if (outcome.superseded === true) return
-    if (outcome.pendingApproval !== undefined) {
-      setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
-      return
-    }
-    if (outcome.rejected.length > 0) {
+    // BUG-02: submitting a form is its own intent, registered before the first
+    // await. The credential write below is the operation a late submit used to
+    // sneak past a disconnect: the old code checked the generation only AFTER
+    // updateCredential, so the file was already back on disk ("disconnect
+    // silently undone" on the next restore).
+    const intent = beginIntent(id)
+    try {
+      const kind = pendingFieldRequestKind.get(id)
+      pendingFieldRequestKind.delete(id)
+      const current = await store.readCredential(id)
+      if (!intentLive(id, intent) || intent.store !== store) return
+      await store.updateCredential(id, { fields: { ...(current?.fields ?? {}), ...fields } })
+      if (!intentLive(id, intent)) {
+        await undoStaleCredentialWrite(id, intent)
+        return
+      }
+      const merged = await store.readCredential(id)
+      if (!intentLive(id, intent)) return
+      // A pre-connect settings form was just completed on an OAuth/device
+      // connector: continue the REAL authorization flow first. Registering MCP
+      // here would mark the row connected without ever starting OAuth; asking
+      // for tokenFields before OAuth would dead-end the authorization too.
+      if (kind === 'settings' && def.authMode !== 'token') {
+        await startConnect(id)
+        return
+      }
+      // A required declared field is still missing (user submitted a partial
+      // token form): show it again instead of registering an MCP server that
+      // cannot authenticate (token mode used to skip this check).
+      if (missingDeclaredFields(def, merged).length > 0) {
+        requestDeclaredFields(id, def)
+        return
+      }
+      const outcome = await registerMcp(def, { signal: intentSignal(intent) })
+      if (outcome.superseded === true || !intentLive(id, intent)) return
+      if (outcome.pendingApproval !== undefined) {
+        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+        return
+      }
+      if (outcome.rejected.length > 0) {
+        pendingRequests.delete(id)
+        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        return
+      }
+      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
       pendingRequests.delete(id)
-      setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
-      return
+    } finally {
+      endIntent(id, intent)
     }
-    setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
-    pendingRequests.delete(id)
   }
 
   const disconnect = async (id: string): Promise<void> => {
     // Invalidate every in-flight registration/submission intent BEFORE
     // clearing the credential: their next await observes the bump and stops
-    // instead of spawning MCP servers for a disconnected connector.
-    bumpGeneration(id)
+    // instead of spawning MCP servers for a disconnected connector. The abort
+    // also cancels a flow that has not reached its first await yet (BUG-02).
+    invalidateIntent(id, new Error('用户在连接过程中断开了连接'))
     const def = getDef(id)
     if (def) await unregisterMcp(def)
     // P0-1: a disconnect must also abort any in-flight authorization flow —
@@ -1302,6 +1443,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // (on a later disconnect) could write back credentials after teardown.
       for (const flow of pendingFlows.values()) flow.abort(new Error('插件卸载，连接流程中止'))
       pendingFlows.clear()
+      for (const intent of connectIntents.values()) intent.controller.abort(new Error('插件卸载，连接流程中止'))
+      connectIntents.clear()
     }
   }, 'pico connectors: restore + cleanup')
 
@@ -1437,6 +1580,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         pendingFlows.delete(id)
         pendingRequests.delete(id)
       }
+      // A stale pre-connect form belongs to the superseded attempt: clear the
+      // marker so a late submit of the old form cannot skip the new flow.
+      pendingFieldRequestKind.delete(id)
       const request: ConnectorAuthRequest = { connectorId: id }
       emitRequest(request)
       void startConnect(id).catch((error: unknown) => {
@@ -1456,10 +1602,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // P0-1: explicit user cancel of an in-flight authorization flow. The
       // flow's abort listener closes the callback server and rejects the
       // code promise; startConnect's catch maps the abort to 'disconnected'.
-      const flow = pendingFlows.get(id)
-      if (flow) flow.abort(new Error('用户取消了连接'))
+      // BUG-02: cancelling must invalidate the WHOLE connect intent, not only a
+      // flow that already registered itself in pendingFlows — a connect parked
+      // in its first credential read (or waiting for the settings form) used to
+      // keep going and put the row back to "connecting" after the cancel.
+      invalidateIntent(id, new Error('用户取消了连接'))
       setState(id, { status: 'disconnected', everConnected: Boolean(states.get(id)?.everConnected), error: undefined })
       pendingRequests.delete(id)
+      pendingFieldRequestKind.delete(id)
       json(res, 200, { ok: true })
     }
 

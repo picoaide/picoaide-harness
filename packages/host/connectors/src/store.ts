@@ -37,6 +37,14 @@ export interface ConnectorCredential {
   expiresAt?: number
   /** When the last successful token refresh happened (epoch ms). */
   refreshedAt?: number
+  /**
+   * The MCP endpoint answered without an authorization challenge during
+   * discovery (spec 2025-06-18 "public" server), so no token exists or is ever
+   * issued. Persisted so a restart can tell "no credential needed" apart from
+   * "authorization pending": without the marker the oauth-mode check demanded
+   * an accessToken and the connector silently disappeared from every restart.
+   */
+  publicMcp?: boolean
   updatedAt: number
 }
 
