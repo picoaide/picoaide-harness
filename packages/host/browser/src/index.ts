@@ -30,6 +30,7 @@ import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { CookieHandoff } from './cookie-handoff.ts'
+import { credentialSiteOrigin } from './credential-site.ts'
 import { browserPartitionFor, createRealElectronAdapter } from './electron-adapter.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { BrowserRuntime } from './runtime.ts'
@@ -116,6 +117,85 @@ export interface Config {
   waitTimeoutMs?: number
   downloadDir?: string
   toolGroups?: string[]
+  /**
+   * 每个连接器自己的站点地址（origin 或完整 URL），用于 `browser_fill_credentials`
+   * 的站点绑定（2026-09-15 审计 BUG-03）。缺省时基准取自凭据字段里的地址；两者
+   * 都拿不到就**拒绝注入**（fail-closed，工具描述对外承诺的即此）。这是部署侧配置，
+   * 模型/页面输入永远不参与。
+   */
+  credentialSites?: Record<string, string>
+}
+
+/**
+ * 构造 `browser_fill_credentials` 用的凭据解析器（导出以便单测：站点绑定基准
+ * 必须与工具侧闸门同源，2026-09-15 审计 BUG-03）。
+ *
+ * `@picoaide/dsh-connectors` 用 `createRequire` 惰性解析：本插件在没有连接器包
+ * 的宿主里也必须能加载（此时返回 undefined，工具侧对 fill_credentials 一律
+ * fail-closed 拒绝）。
+ * @param options.currentUser - 当前登录用户名（scoping 凭据库）。
+ * @param options.credentialSites - 部署显式声明的连接器站点地址。
+ */
+export function createCredentialResolver(options: {
+  currentUser: () => string | null
+  credentialSites?: Record<string, string>
+}): CredentialResolver | undefined {
+  try {
+    const require = createRequire(import.meta.url)
+    const { ConnectorStore } = require('@picoaide/dsh-connectors/store') as typeof import('@picoaide/dsh-connectors/store')
+    const resolveCredentials = async (connectorId: string): Promise<{ username?: string; password?: string } | null> => {
+      const store = new ConnectorStore({ username: options.currentUser() })
+      const credential = await store.readCredential(connectorId)
+      if (credential === null) return null
+      const fields = credential.fields ?? {}
+      const username = typeof fields.username === 'string' ? fields.username : undefined
+      const password = typeof fields.password === 'string' ? fields.password : undefined
+      return {
+        ...username !== undefined ? { username } : {},
+        ...password !== undefined ? { password } : {},
+      }
+    }
+    resolveCredentials.list = async (): Promise<Array<{ id: string; username?: string }>> => {
+      try {
+        const { userScopePath } = require('@picoaide/dsh-connectors/user-scope') as typeof import('@picoaide/dsh-connectors/user-scope')
+        const dir = join(userScopePath(options.currentUser()), 'connectors')
+        const names: string[] = []
+        try {
+          for (const file of readdirSync(dir)) {
+            if (file.endsWith('.json')) names.push(file.slice(0, -5))
+          }
+        } catch {
+          return []
+        }
+        const store = new ConnectorStore({ username: options.currentUser() })
+        const out: Array<{ id: string; username?: string }> = []
+        for (const id of names) {
+          const credential = await store.readCredential(id)
+          const username = typeof credential?.fields?.username === 'string' ? credential.fields.username : undefined
+          out.push({ id, ...username !== undefined ? { username } : {} })
+        }
+        return out
+      } catch {
+        return []
+      }
+    }
+    /**
+     * 站点绑定基准：显式配置优先，其次凭据字段里的地址；都没有返回 null，
+     * 工具侧拒绝注入（fail-closed）。派生规则见 credential-site.ts。
+     */
+    resolveCredentials.originOf = async (connectorId: string): Promise<string | null> => {
+      try {
+        const store = new ConnectorStore({ username: options.currentUser() })
+        const credential = await store.readCredential(connectorId)
+        return credentialSiteOrigin(credential?.fields, options.credentialSites?.[connectorId])
+      } catch {
+        return null
+      }
+    }
+    return resolveCredentials
+  } catch {
+    return undefined
+  }
 }
 
 export const Config: z<Config> = z.object({
@@ -130,6 +210,7 @@ export const Config: z<Config> = z.object({
   waitTimeoutMs: z.number(),
   downloadDir: z.string(),
   toolGroups: z.array(z.string()),
+  credentialSites: z.dict(z.string()),
 })
 
 /** Cap on browser API request bodies. */
@@ -251,51 +332,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }
 
-  const credentialResolver: CredentialResolver | undefined = (() => {
-    try {
-      const require = createRequire(import.meta.url)
-      const { ConnectorStore } = require('@picoaide/dsh-connectors/store') as typeof import('@picoaide/dsh-connectors/store')
-      const resolveCredentials = async (connectorId: string): Promise<{ username?: string; password?: string } | null> => {
-        const store = new ConnectorStore({ username: currentUser() })
-        const credential = await store.readCredential(connectorId)
-        if (credential === null) return null
-        const fields = credential.fields ?? {}
-        const username = typeof fields.username === 'string' ? fields.username : undefined
-        const password = typeof fields.password === 'string' ? fields.password : undefined
-        return {
-          ...username !== undefined ? { username } : {},
-          ...password !== undefined ? { password } : {},
-        }
-      }
-      resolveCredentials.list = async (): Promise<Array<{ id: string; username?: string }>> => {
-        try {
-          const { userScopePath } = require('@picoaide/dsh-connectors/user-scope') as typeof import('@picoaide/dsh-connectors/user-scope')
-          const dir = join(userScopePath(currentUser()), 'connectors')
-          const names: string[] = []
-          try {
-            for (const file of readdirSync(dir)) {
-              if (file.endsWith('.json')) names.push(file.slice(0, -5))
-            }
-          } catch {
-            return []
-          }
-          const store = new ConnectorStore({ username: currentUser() })
-          const out: Array<{ id: string; username?: string }> = []
-          for (const id of names) {
-            const credential = await store.readCredential(id)
-            const username = typeof credential?.fields?.username === 'string' ? credential.fields.username : undefined
-            out.push({ id, ...username !== undefined ? { username } : {} })
-          }
-          return out
-        } catch {
-          return []
-        }
-      }
-      return resolveCredentials
-    } catch {
-      return undefined
-    }
-  })()
+  const credentialResolver: CredentialResolver | undefined = createCredentialResolver({
+    currentUser,
+    ...(config.credentialSites === undefined ? {} : { credentialSites: config.credentialSites }),
+  })
 
   const userDataDir = resolveUserDataDir()
   const usernameForStore = currentUser() ?? 'anonymous'
