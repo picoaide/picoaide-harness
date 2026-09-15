@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { friendlyConnectorError } from '../src/client/friendly-error.ts'
 import { setActiveLocale, t } from '../src/client/locales.ts'
+import { statusLabel } from '../src/client/status-label.ts'
 
 afterEach(() => { setActiveLocale('zh') })
 
@@ -36,5 +37,23 @@ describe('2026-09-15 BUG-07：英文界面下不再残留中文', () => {
   it('中文界面保持原文案（默认语言不回归）', () => {
     expect(friendlyConnectorError('boom')).toBe('连接失败：boom')
     expect(t('status.connected')).toBe('已连接')
+  })
+})
+
+describe('2026-09-15 BUG-07：状态列文案在渲染期取（判别力用例）', () => {
+  it('切语言后状态标签立刻跟随（回退成模块级常量即红）', () => {
+    setActiveLocale('zh')
+    expect(statusLabel('connected')).toBe('已连接')
+    expect(statusLabel('unauthorized')).toBe('需要授权')
+    setActiveLocale('en')
+    // 旧实现的根因就在这里：标签在模块求值期被捕获，切 en 后仍是中文。
+    expect(statusLabel('connected')).toBe('Connected')
+    expect(statusLabel('unauthorized')).toBe('Authorization required')
+    expect(statusLabel('connecting')).toBe('Connecting…')
+  })
+
+  it('未知状态原样透出（不吞信息）', () => {
+    setActiveLocale('en')
+    expect(statusLabel('brand-new-state')).toBe('brand-new-state')
   })
 })

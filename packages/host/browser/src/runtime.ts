@@ -19,6 +19,7 @@ import { BrowserStore, stripSensitiveText, stripSensitiveUrl, type DownloadEntry
 import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
 import { SENSITIVE_KEY_PATTERN, isExactProseSensitiveKey } from './sensitive.ts'
 import { browserError, BrowserError, type BrowserErrorCode } from './errors.ts'
+import { httpOriginOf } from './credential-site.ts'
 import { isFrameOrderProblem, orderFramesByDom, frameOrderErrorMessage, SRCDOC_URL, type FrameCandidate, type FrameOrderProblem } from './frames.ts'
 import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
@@ -2537,7 +2538,7 @@ export class BrowserRuntime {
     this.record('browser_scroll', resolved, selector === undefined || selector === '' ? `scroll ${Math.round(deltaY)}px` : `scroll to ${selector}`)
   }
 
-  async fillCredentials(tabId: number, connectorId: string, signal?: AbortSignal): Promise<{ username: boolean; password: boolean }> {
+  async fillCredentials(tabId: number, connectorId: string, signal?: AbortSignal, expectedOrigin?: string): Promise<{ username: boolean; password: boolean }> {
     if (this.credentials === undefined) {
       throw browserError('policy', 'browser: credential injection is not available in this deployment')
     }
@@ -2548,6 +2549,12 @@ export class BrowserRuntime {
     const resolved = this.resolveTab(tabId)
     const outcome = await this.agentRun('browser_fill_credentials', async () => {
       const tab = this.tab(resolved)
+      // TOCTOU 收口（2026-09-15 复核）：工具层的站点绑定检查发生在排队之前，注入
+      // 发生在拿到全局互斥之后 —— 中间标签页可以导航走。写入 DOM 之前用**同一个**
+      // expectedOrigin 再比一次。
+      if (expectedOrigin !== undefined && httpOriginOf(tab.url) !== expectedOrigin) {
+        throw browserError('policy', `browser_fill_credentials refused: the tab left ${expectedOrigin} before the injection ran (now ${tab.url}); credentials are only injected into their own site`)
+      }
       const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
         expression: `
           (() => {

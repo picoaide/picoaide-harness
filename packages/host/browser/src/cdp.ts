@@ -31,7 +31,7 @@ export interface CdpTransport {
  * global browser mutex forever — before 2026-09-08 a single never-settling
  * `sendCommand` left every later browser_* call hanging (audit P0-4).
  */
-export const CDP_CALL_TIMEOUT_MS = 30_000
+const CDP_CALL_TIMEOUT_MS = 30_000
 
 export interface CdpSessionOptions {
   /** Per-command timeout in ms (default CDP_CALL_TIMEOUT_MS). */

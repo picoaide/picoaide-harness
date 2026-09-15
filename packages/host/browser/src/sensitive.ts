@@ -74,7 +74,7 @@ export const SENSITIVE_KEY_PATTERN = new RegExp(SENSITIVE_TERMS.join('|'), 'iu')
  *   URL 面保持现有强度、逐字节不动），所以 `?pwd=x` 在 **url 字段**里仍不打码；
  *   自由文本里则按 {@link URL_SHAPED_TEXT_TERMS} 的并集处理。
  */
-export const PROSE_SENSITIVE_TERMS = [
+const PROSE_SENSITIVE_TERMS = [
   'token',
   'access_token',
   'refresh_token',

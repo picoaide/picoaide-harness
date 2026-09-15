@@ -7,6 +7,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { CommandUiContract } from '@deepseek-ai/dsh-client-ui-commands/client'
 import { ConnectorTrigger } from './ConnectorTrigger.tsx'
 import { en, setActiveLocale, type ConnectorsKey, zh } from './locales.ts'
+import { t } from './locales.ts'
 
 /**
  * Connectors client half: registers the connector center foot action in the
@@ -99,7 +100,7 @@ export function apply(ctx: ClientContext): void {
         name: connector.id,
         // rc.2 resolves the menu row copy lazily, so the description is a
         // thunk (the row reads it on every candidate request).
-        description: () => `${connector.name}（已连接）`,
+        description: () => t('command.connected', { name: connector.name }),
         available: () => true,
         ui: {
           kind: 'popupSelect',
@@ -107,14 +108,14 @@ export function apply(ctx: ClientContext): void {
             const examples = connector.examples ?? []
             return [
               ...examples.map((example, index) => ({ id: `example-${index}`, label: example })),
-              { id: 'info', label: '查看连接器信息' },
+              { id: 'info', label: t('command.info') },
             ]
           },
           onSelect: async (option, session) => {
             const live = sessions.binding(session.sessionId)?.session
             if (live === undefined) return
             const text = option.id === 'info'
-              ? `${connector.name}（已连接）。模型可直接调用其注入工具（mcp__*），例如：${(connector.examples ?? []).join('、')}`
+              ? t('command.infoPrompt', { name: connector.name, examples: (connector.examples ?? []).join('、') })
               : option.label
             await live.prompt([{ type: 'text', text }], 'queue')
           },

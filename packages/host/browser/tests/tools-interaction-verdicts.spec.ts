@@ -468,6 +468,28 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
     expect(view.transport.commands.some((command) => String(command.params?.['expression'] ?? '').includes('passField'))).toBe(false)
   })
 
+  it('检查与注入之间标签页导航走 ⇒ 临界区内复核后拒绝（TOCTOU 收口）', async () => {
+    let harness: Harness | undefined
+    const resolver = (async (id: string) => {
+      // 工具层的 origin 检查已经通过；就在"取凭据"这一步把同一标签页的 URL 改掉，
+      // 模拟排队/取凭据期间发生的导航（旧实现会照常把凭据注入新页面）。
+      // 真的走一次导航（会更新 runtime 内部的 tab.url，两条检查读的都是它）
+      if (harness !== undefined) await harness.runtime.navigate(1, 'https://login.example.evil.test/', 'domcontentloaded')
+      return id === 'corp' ? { username: 'alice', password: SECRET } : null
+    }) as CredentialResolverLike
+    resolver.originOf = async () => 'https://login.example'
+    const bound = track(makeHarness({}, resolver))
+    harness = bound
+    await bound.runtime.open('https://login.example/login')
+    const view = bound.adapter.lastView()
+    view.transport.handler = fillHandler
+
+    const error = await fail(bound.call('browser_fill_credentials', { connectorId: 'corp' }))
+    expect(error.code).toBe('policy')
+    expect(error.message).toMatch(/left https:\/\/login\.example before the injection/u)
+    expect(view.transport.commands.some((command) => String(command.params?.['expression'] ?? '').includes('passField'))).toBe(false)
+  })
+
   it('描述文案写明站点绑定（对外契约同步）', () => {
     const harness = track(makeHarness())
     expect(harness.tools.get('browser_fill_credentials')!.description).toMatch(/SITE-BOUND/u)
