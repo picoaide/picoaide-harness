@@ -204,8 +204,24 @@ func uploadSkill(t *testing.T, r *gin.Engine, hdr map[string]string, version str
 	}
 }
 
+// toggleSkillEnabled 走管理端上下架端点（员工可见性/下载的开关）。
+func toggleSkillEnabled(t *testing.T, r *gin.Engine, adminHdr map[string]string, name string, enabled bool) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]bool{"enabled": enabled})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("PUT", "/api/server/admin/shared-skills/"+name+"/enabled", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range adminHdr {
+		req.Header.Set(k, v)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("set enabled=%v = %d %s", enabled, w.Code, w.Body.String())
+	}
+}
+
 func TestSkillLifecycleUploadApproveInstall(t *testing.T) {
-	r, db, adminHdr, aliceHdr, bobHdr := setupSkillLifecycle(t)
+	r, _, adminHdr, aliceHdr, bobHdr := setupSkillLifecycle(t)
 
 	// 1) 员工上传 → pending（作者自己能在「我的」看到，组织面不可见）。
 	uploadSkill(t, r, aliceHdr, "1.0.0")
@@ -283,10 +299,8 @@ func TestSkillLifecycleUploadApproveInstall(t *testing.T) {
 		t.Fatalf("授权后下载 = %d, want 200", code)
 	}
 
-	// 5) 下架（apps.enabled=0）→ 员工面不可见、不可下载；作者本人同样按员工处理。
-	if _, err := serverstore.SetSkillEnabled(db, skillLifecycleName, false); err != nil {
-		t.Fatal(err)
-	}
+	// 5) 管理员上下架端点下架 → 员工面不可见、不可下载；作者本人同样按员工处理。
+	toggleSkillEnabled(t, r, adminHdr, skillLifecycleName, false)
 	if hasSkillVersion(capabilityItems(t, r, bobHdr, "market"), "1.0.0", "org") {
 		t.Fatal("下架后同事仍能看到组织技能（市场下架必须生效，对齐智能体面 P2-1）")
 	}
@@ -311,9 +325,7 @@ func TestSkillLifecycleUploadApproveInstall(t *testing.T) {
 	}
 
 	// 6) 重新上架 → 可见性恢复（证明闸门是开关而不是单向删除）。
-	if _, err := serverstore.SetSkillEnabled(db, skillLifecycleName, true); err != nil {
-		t.Fatal(err)
-	}
+	toggleSkillEnabled(t, r, adminHdr, skillLifecycleName, true)
 	if !hasSkillVersion(capabilityItems(t, r, bobHdr, "market"), "1.0.0", "org") {
 		t.Fatal("重新上架后同事应恢复可见")
 	}
@@ -474,5 +486,140 @@ func TestSkillLifecycleMultiVersion(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("两个版本都通过后组织面应有该技能")
+	}
+}
+
+// 管理端上下架端点（2026-09-15）：渠道守卫、入参校验、审计留痕、员工面效果。
+func TestSkillAdminEnabledEndpoint(t *testing.T) {
+	r, db, adminHdr, aliceHdr, bobHdr := setupSkillLifecycle(t)
+	uploadSkill(t, r, aliceHdr, "1.0.0")
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/server/admin/shared-skills/"+skillLifecycleName+"/1.0.0/approve", nil)
+	for k, v := range adminHdr {
+		req.Header.Set(k, v)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("approve = %d", w.Code)
+	}
+
+	// 管理端清单带 enabled 状态（前端据此渲染「已下架」与切换按钮）。
+	listEnabled := func() bool {
+		wl := httptest.NewRecorder()
+		rl := httptest.NewRequest("GET", "/api/server/admin/shared-skills", nil)
+		for k, v := range adminHdr {
+			rl.Header.Set(k, v)
+		}
+		r.ServeHTTP(wl, rl)
+		var body struct {
+			Skills []struct {
+				Name    string `json:"name"`
+				Enabled bool   `json:"enabled"`
+			} `json:"skills"`
+		}
+		if err := json.Unmarshal(wl.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range body.Skills {
+			if s.Name == skillLifecycleName {
+				return s.Enabled
+			}
+		}
+		t.Fatalf("管理端清单里找不到 %s", skillLifecycleName)
+		return false
+	}
+	if !listEnabled() {
+		t.Fatal("新审批通过的技能应处于上架状态")
+	}
+
+	toggleSkillEnabled(t, r, adminHdr, skillLifecycleName, false)
+	if listEnabled() {
+		t.Fatal("下架后管理端清单的 enabled 应为 false")
+	}
+	if code := downloadSkill(t, r, aliceHdr, "1.0.0"); code != http.StatusNotFound {
+		t.Fatalf("下架后作者下载 = %d, want 404", code)
+	}
+
+	// 审计留痕：可见性变更必须可追溯（与市场技能的 skill_disable 同精神）。
+	rows, _, err := serverstore.ListAuditLogsPagedFiltered(db, 0, 50, "shared_skill_disable", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range rows {
+		if strings.Contains(row.Detail, skillLifecycleName) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("下架未留下 shared_skill_disable 审计: %+v", rows)
+	}
+
+	toggleSkillEnabled(t, r, adminHdr, skillLifecycleName, true)
+	if !listEnabled() {
+		t.Fatal("重新上架后 enabled 应为 true")
+	}
+	if code := downloadSkill(t, r, bobHdr, "1.0.0"); code != http.StatusNotFound {
+		// bob 仍未授权：上架恢复的是"可见性开关"，不是"授权"（双门制）。
+		t.Fatalf("未授权同事在重新上架后下载 = %d, want 404（授权门不受上下架影响）", code)
+	}
+	if !hasSkillVersion(capabilityItems(t, r, aliceHdr, "market"), "1.0.0", "org") {
+		t.Fatal("重新上架后作者应恢复可见")
+	}
+}
+
+// 端点自身的守卫：入参、未知技能、跨渠道（市场技能不由本端点管）。
+func TestSkillAdminEnabledEndpointGuards(t *testing.T) {
+	r, db, adminHdr, _, _ := setupSkillLifecycle(t)
+
+	// 入参缺失/非法。
+	for _, body := range []string{`{}`, `{"enabled":"yes"}`, `not-json`} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("PUT", "/api/server/admin/shared-skills/nope/enabled", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range adminHdr {
+			req.Header.Set(k, v)
+		}
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("body %q = %d, want 400", body, w.Code)
+		}
+	}
+
+	// 未知技能 → 404。
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("PUT", "/api/server/admin/shared-skills/ghost/enabled", strings.NewReader(`{"enabled":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range adminHdr {
+		req.Header.Set(k, v)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("未知技能 = %d, want 404", w.Code)
+	}
+
+	// 市场渠道技能：本端点不碰（跨渠道写由 marketplace-8 同向阻断）。
+	if err := serverstore.UpsertApp(db, &serverstore.App{
+		Kind: serverstore.AppKindSkill, AppID: "market-only", Title: "market-only",
+		Channel: serverstore.AppChannelMarket, Enabled: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wM := httptest.NewRecorder()
+	reqM := httptest.NewRequest("PUT", "/api/server/admin/shared-skills/market-only/enabled", strings.NewReader(`{"enabled":false}`))
+	reqM.Header.Set("Content-Type", "application/json")
+	for k, v := range adminHdr {
+		reqM.Header.Set(k, v)
+	}
+	r.ServeHTTP(wM, reqM)
+	if wM.Code != http.StatusNotFound {
+		t.Fatalf("市场渠道技能 = %d, want 404（本端点只服务组织库）", wM.Code)
+	}
+	app, err := serverstore.GetApp(db, serverstore.AppKindSkill, "market-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Enabled != 1 {
+		t.Fatal("跨渠道请求不得改动市场技能的 enabled")
 	}
 }

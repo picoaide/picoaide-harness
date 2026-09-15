@@ -141,6 +141,43 @@ describe('Capabilities 能力中心(统一审批)', () => {
     expect(screen.getByTitle('授权')).toBeInTheDocument()
   })
 
+  it('已通过技能行：下架按钮 PUT enabled=false，已下架行显示徽标与上架按钮', async () => {
+    const u = userEvent.setup()
+    const live = { ...SKILL_ROWS[0]!, status: 'approved' as const, enabled: true }
+    const off = { ...SKILL_ROWS[0]!, name: 'legacy', display_name: 'Legacy 审计', status: 'approved' as const, enabled: false,
+      base_path: '/api/server/admin/shared-skills/legacy/1.0.0',
+      grants_base: '/api/server/admin/shared-skills/legacy' }
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/server/admin/capabilities/approvals?status=approved') return { approvals: [live, off] }
+      if (path === '/api/server/admin/departments') return { departments: [] }
+      return {}
+    })
+    render(<Capabilities />)
+    await u.click(screen.getByRole('tab', { name: '已通过（0）' }))
+    await screen.findByText('CodeQL 审计')
+
+    // 已上架 → 给「下架」；已下架 → 给「上架」+ 徽标。
+    expect(screen.getByRole('button', { name: '下架' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新上架' })).toBeInTheDocument()
+    expect(screen.getByText('已下架')).toBeInTheDocument()
+
+    await u.click(screen.getByRole('button', { name: '下架' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith(
+        '/api/server/admin/shared-skills/codeql/enabled',
+        { method: 'PUT', body: JSON.stringify({ enabled: false }) },
+      )
+    })
+
+    await u.click(screen.getByRole('button', { name: '重新上架' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith(
+        '/api/server/admin/shared-skills/legacy/enabled',
+        { method: 'PUT', body: JSON.stringify({ enabled: true }) },
+      )
+    })
+  })
+
   it('归属列显示 apps.owner(与上传者可不同)', async () => {
     render(<Capabilities />)
     await screen.findByText('CodeQL 审计')
