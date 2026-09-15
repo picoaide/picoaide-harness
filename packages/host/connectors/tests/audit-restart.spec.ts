@@ -187,7 +187,16 @@ describe('restart lifecycle: 第二天打开还能不能用', () => {
     }
     const refreshed = server.stats.grants.filter(g => g === 'refresh_token').length
     expect(refreshed).toBeGreaterThan(grantsBefore)
-    const stored = await store.readCredential('moka')
+    // 等「落盘」而不是等「grant 计数」：grant 在 token 端点应答的那一刻就计数，
+    // 而轮换后的凭据是客户端处理完应答才写回 store。负载高时（CI 4 vCPU + 多包并发）
+    // 两者之间会被调度拉开，紧跟着读到的还是种子里的 `now - 60s`，断言必红（实测差值
+    // 恰为 60_037ms）——所以轮询到新过期时间可见为止。
+    let stored = await store.readCredential('moka')
+    const persistedDeadline = Date.now() + 8000
+    while (Date.now() < persistedDeadline && !((stored?.expiresAt ?? 0) > Date.now())) {
+      await new Promise(r => setTimeout(r, 25))
+      stored = await store.readCredential('moka')
+    }
     expect(stored?.expiresAt).toBeGreaterThan(Date.now())
     next.dispose()
   }, 30_000)
