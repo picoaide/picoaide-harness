@@ -254,7 +254,12 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   // clicked cancel stayed parked on the socket.
   const flowOutbound = flowOutboundOptions(options)
   const discovered = auth.discoveryUrl ? await discoverMcpOAuth(auth.discoveryUrl, flowOutbound) : undefined
-  if (discovered?.publicMcp) return { updatedAt: Date.now() } as Partial<ConnectorCredential>
+  // The endpoint is public: no token is issued, but the successful discovery is
+  // itself the result and must be persisted. Without the `publicMcp` marker a
+  // restart could not tell this credential apart from a half-finished one
+  // (credentialUsable demands an accessToken for oauth connectors) and every
+  // tool vanished until the user manually reconnected (2026-09-15 audit).
+  if (discovered?.publicMcp) return { updatedAt: Date.now(), publicMcp: true } satisfies Partial<ConnectorCredential>
   const callbackHost = options.callbackHost ?? '127.0.0.1'
   const { verifier, challenge } = pkce()
   // RFC 6749 §10.12: bind the loopback callback to this flow. A callback
