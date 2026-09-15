@@ -118,7 +118,7 @@ function pkce(): { verifier: string; challenge: string } {
  * 刻意不含厂商品牌：仓库里不留任何品牌描述，渠道化时由渠道包注入自己的名字
  * （客户在自家 IdP 的授权同意页上应该看到自己公司的产品名）。
  */
-export const DEFAULT_OAUTH_CLIENT_NAME = 'Enterprise AI Connector'
+const DEFAULT_OAUTH_CLIENT_NAME = 'Enterprise AI Connector'
 
 /** RFC 7591 dynamic client registration; returns the issued client id. */
 async function registerClient(

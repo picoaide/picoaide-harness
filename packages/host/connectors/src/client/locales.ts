@@ -122,15 +122,3 @@ export function t(key: ConnectorsKey, params?: Record<string, string>): string {
   return text
 }
 
-/** Map raw connector/CLI errors to user-facing copy (P3-6). */
-export function friendlyConnectorError(raw: string): string {
-  if (raw.includes('退出码')) return t('error.exitCode')
-  // The node side names the missing binary and its install command; show it
-  // verbatim so the user knows what to install (e.g. npm install -g beisen-cli).
-  if (raw.includes('未找到命令')) return raw
-  // Download-on-demand errors carry specific detail; surface them verbatim.
-  if (raw.includes('下载')) return raw
-  if (raw.includes('ENOENT')) return t('error.commandMissing')
-  if (raw.includes('token') || raw.includes('授权') || raw.includes('登录')) return raw
-  return t('error.generic', { message: raw })
-}

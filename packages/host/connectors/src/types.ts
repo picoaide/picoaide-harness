@@ -131,7 +131,7 @@ export interface ConnectorState {
  * them, so the disclosure has to name each command and each key set rather
  * than the first one.
  */
-export interface ConnectorMcpApprovalCommand {
+interface ConnectorMcpApprovalCommand {
   /** `mcp[].serverName` this command belongs to. */
   serverName: string
   /** Executable this server asks to run. */

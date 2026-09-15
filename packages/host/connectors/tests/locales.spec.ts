@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { friendlyConnectorError, setActiveLocale, t } from '../src/client/locales.ts'
+import { friendlyConnectorError } from '../src/client/friendly-error.ts'
+import { setActiveLocale, t } from '../src/client/locales.ts'
 
 afterEach(() => { setActiveLocale('zh') })
 

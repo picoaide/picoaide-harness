@@ -100,7 +100,7 @@ export const PROSE_SENSITIVE_KEY_PATTERN = new RegExp(PROSE_SENSITIVE_TERMS.join
  * 表里，两边都认。逐字节的 URL 面行为不受影响：`stripSensitiveUrl` /
  * `maskSensitiveKeyValueText` 仍只用 {@link SENSITIVE_KEY_PATTERN}。
  */
-export const URL_SHAPED_TEXT_TERMS = [...SENSITIVE_TERMS, 'pwd', 'cookie'] as const
+const URL_SHAPED_TEXT_TERMS = [...SENSITIVE_TERMS, 'pwd', 'cookie'] as const
 
 /** Matches credential-shaped key names in URL/query-shaped free text. */
 export const URL_SHAPED_TEXT_KEY_PATTERN = new RegExp(URL_SHAPED_TEXT_TERMS.join('|'), 'iu')

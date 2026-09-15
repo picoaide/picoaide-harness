@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { friendlyConnectorError, t, type ConnectorsKey } from './locales.ts'
+import { friendlyConnectorError } from './friendly-error.ts'
+import { t, type ConnectorsKey } from './locales.ts'
 
 
 /**

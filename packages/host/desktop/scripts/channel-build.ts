@@ -368,7 +368,7 @@ export function packagedProductName(buildDir?: string): string {
  * 协议 scheme）。官方构建继承任何一样都属于"官方包带上客户品牌"，比"没生效"更糟。
  * @param buildDir - `packages/host/desktop/build` 目录。
  */
-export function clearChannelResidue(buildDir: string): void {
+function clearChannelResidue(buildDir: string): void {
   rmSync(join(buildDir, 'channel.json'), { force: true })
   rmSync(join(buildDir, 'channel-electron-builder.cjs'), { force: true })
 }

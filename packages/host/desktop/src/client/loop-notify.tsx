@@ -61,7 +61,7 @@ async function pollLoopNotifySession(
  * in-memory `seenAt` dies with the renderer; without persistence a reload
  * re-opens the session the user just visited (P2-24).
  */
-export const LOOP_NOTIFY_SEEN_AT_KEY = 'pico.desktop.loop-notify.seenAt'
+const LOOP_NOTIFY_SEEN_AT_KEY = 'pico.desktop.loop-notify.seenAt'
 
 /** Read the persisted high-water mark (0 when storage is unavailable). */
 export function readLoopNotifySeenAt(): number {
@@ -75,7 +75,7 @@ export function readLoopNotifySeenAt(): number {
 }
 
 /** Persist the high-water mark (best effort; private mode may throw). */
-export function writeLoopNotifySeenAt(value: number): void {
+function writeLoopNotifySeenAt(value: number): void {
   try {
     globalThis.sessionStorage?.setItem(LOOP_NOTIFY_SEEN_AT_KEY, String(value))
   } catch {
