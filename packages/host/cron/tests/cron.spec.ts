@@ -82,6 +82,44 @@ describe('nextRunAtMs', () => {
     expect([date.getDate(), date.getDay()]).toEqual([31, 1])
   })
 
+  it('keeps */n day-of-month steps when the weekday field is a wildcard', () => {
+    // 2026-09-15 13:31 local. */9 matches days 1,10,19,28, so the next run is
+    // the 19th. Returning the weekday set alone (the old behaviour) made the
+    // next run tomorrow, i.e. every day.
+    const from = new Date(2026, 8, 15, 13, 31, 0).getTime()
+    const next = nextRunAtMs('0 0 */9 * *', from)!
+    const date = new Date(next)
+    expect([date.getDate(), date.getHours(), date.getMinutes()]).toEqual([19, 0, 0])
+
+    // */2 inside a 31-day month is odd days: 15th -> 17th, never the 16th.
+    const everyOther = nextRunAtMs('0 0 */2 * *', from)!
+    expect(new Date(everyOther).getDate()).toBe(17)
+
+    // The catch-up path must agree with the forward scan.
+    const previous = lastRunAtMs('0 0 */9 * *', from)!
+    expect(new Date(previous).getDate()).toBe(10)
+  })
+
+  it('ANDs a stepped day-of-month with a restricted weekday', () => {
+    // Star flag on the day field -> AND: odd days that are Mondays. From
+    // 2026-09-10 the next Monday is the 14th, but 14 is even and must be
+    // skipped; the run lands on 2026-09-21 instead.
+    const from = new Date(2026, 8, 10, 0, 0, 0).getTime()
+    const next = nextRunAtMs('0 0 */2 * 1', from)!
+    const date = new Date(next)
+    expect([date.getDate(), date.getDay()]).toEqual([21, 1])
+  })
+
+  it('ORs an explicit day list with a restricted weekday', () => {
+    // Neither field carries the star flag -> OR. From 2026-09-15 the list
+    // matches the 19th (Saturday) before any Monday, so the 19th wins; an AND
+    // interpretation would have skipped to 2026-09-28 (a listed Monday).
+    const from = new Date(2026, 8, 15, 13, 31, 0).getTime()
+    const next = nextRunAtMs('0 0 1,10,19,28 * 1', from)!
+    const date = new Date(next)
+    expect([date.getDate(), date.getDay()]).toEqual([19, 6])
+  })
+
   it('returns undefined for impossible calendar dates', () => {
     expect(nextRunAtMs('0 0 30 2 *', Date.UTC(2026, 0, 1))).toBeUndefined()
   })
