@@ -170,9 +170,18 @@ function initial(username: string | undefined): string {
   return (username ?? '?').slice(0, 1).toUpperCase()
 }
 
-/** Format a money amount (`¥1,234.50`). */
+/** Format a money amount using the active UI locale (currency is CNY). */
 function formatMoney(value: number): string {
-  return `¥${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: 'CNY',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(value)
+  } catch {
+    return `¥${value.toFixed(2)}`
+  }
 }
 
 /** Guard: value is a finite number (excludes null/undefined/NaN/Infinity). */
@@ -196,6 +205,7 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [usage, setUsage] = useState<UsageResponse | null>(null)
   const [loggingOut, setLoggingOut] = useState(false)
+  const [logoutError, setLogoutError] = useState('')
   const [refreshing, setRefreshing] = useState(false)
 
   // Locate the sidebar foot area; retry briefly (the sidebar mounts before
@@ -254,10 +264,18 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
   const logout = async (): Promise<void> => {
     if (loggingOut) return
     setLoggingOut(true)
+    setLogoutError('')
     try {
-      await fetch('/api/pico/auth/logout', { method: 'POST' })
-    } finally {
+      const response = await fetch('/api/pico/auth/logout', { method: 'POST' })
+      if (!response.ok) {
+        setLogoutError(t('account.logoutFailed', { error: `HTTP ${String(response.status)}` }))
+        setLoggingOut(false)
+        return
+      }
       location.reload()
+    } catch (cause) {
+      setLogoutError(t('account.logoutFailed', { error: cause instanceof Error ? cause.message : 'network' }))
+      setLoggingOut(false)
     }
   }
 
@@ -368,6 +386,9 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
         </button>
       </div>
       <div style={DIVIDER} />
+      {logoutError !== '' && (
+        <div style={{ fontSize: 11, color: 'var(--dsw-alias-state-error-primary)' }}>{logoutError}</div>
+      )}
       {/* 用户信息行:用户名 + 退出登录 置于卡片底部(刷新按钮之下) */}
       <div style={HEAD}>
         <div style={USER}>

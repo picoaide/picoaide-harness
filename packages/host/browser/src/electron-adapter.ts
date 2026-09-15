@@ -72,6 +72,8 @@ export interface NativeWebContents {
   getURL(): string
   getTitle(): string
   isLoading(): boolean
+  /** Optional: ask the renderer to stop this document's pending load (user takeover). */
+  stop?(): void
   on(event: string, listener: (...args: unknown[]) => void): void
   removeListener(event: string, listener: (...args: unknown[]) => void): void
   session: NativeSession

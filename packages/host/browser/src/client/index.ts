@@ -4,7 +4,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { BrowserTrigger } from './BrowserTrigger.tsx'
-import { en, type BrowserKey, zh } from './locales.ts'
+import { en, setActiveLocale, type BrowserKey, zh } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -32,6 +32,25 @@ export function apply(ctx: ClientContext): void {
     const off = ctx.locale.register(LOCALE_NS, { zh, en })
     return () => { off() }
   }, 'browser: client dictionaries')
+
+  // Follow the active locale so the module-level `t()` (used by components
+  // that do not receive PropsLocale) renders in English when that is the
+  // user's choice, instead of always reading the zh key source.
+  ctx.effect(() => {
+    const locale = ctx.locale as unknown as {
+      getLocale?: () => { active?: unknown }
+      subscribe?: (listener: () => void) => () => void
+    }
+    const sync = (): void => {
+      try {
+        const active = locale.getLocale?.()?.active
+        if (typeof active === 'string') setActiveLocale(active)
+      } catch { /* keep the last known locale */ }
+    }
+    sync()
+    if (typeof locale.subscribe !== 'function') return () => {}
+    return locale.subscribe(sync)
+  }, 'follow active locale')
   // Hover feedback matching the skill center trigger (P3-11).
   ctx.effect(() => {
     const style = document.createElement('style')

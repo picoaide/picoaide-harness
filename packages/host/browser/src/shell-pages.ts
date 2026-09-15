@@ -148,7 +148,13 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
   /** 写操作的唯一出口（2026-09-15 审计 P1：页面按钮把所有失败都吞掉）：
    * 永远 resolve 成 { ok, status, data }，失败就地 toast。调用点靠 r.ok 决定要不要
    * 改动本地状态，杜绝"界面已经变了但服务端没接受"。 */
-  const post = (action, body) => fetch('/api/pico/browser/' + action, {
+  /** Fetch with a deadline: a hung loopback request must not leave a button disabled forever. */
+  const fetchWithTimeout = (url, init) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 8000)
+    return fetch(url, Object.assign({}, init, { signal: controller.signal })).finally(() => clearTimeout(timer))
+  }
+  const post = (action, body) => fetchWithTimeout('/api/pico/browser/' + action, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}),
   }).then(
     (r) => readJson(r).then((data) => ({ ok: r.ok === true, status: r.status, data })),
@@ -504,13 +510,19 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   /** 所有写操作（POST 与 DELETE 共用）的唯一出口（2026-09-15 审计 P1：页面按钮把
    * 所有失败都吞掉）。永远 resolve 成 { ok, status, data }，失败就地 toast；调用点
    * 靠 r.ok 决定要不要改本地状态，杜绝"界面已经变了但服务端没接受"。 */
+  /** Fetch with a deadline: a hung loopback request must not leave a button disabled forever. */
+  const fetchWithTimeout = (url, init) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 8000)
+    return fetch(url, Object.assign({}, init, { signal: controller.signal })).finally(() => clearTimeout(timer))
+  }
   const request = (method, path, body) => {
     const init = { method }
     if (body !== undefined) {
       init.headers = { 'content-type': 'application/json' }
       init.body = JSON.stringify(body || {})
     }
-    return fetch('/api/pico/browser/' + path, init).then(
+    return fetchWithTimeout('/api/pico/browser/' + path, init).then(
       (r) => readJson(r).then((data) => ({ ok: r.ok === true, status: r.status, data })),
       () => ({ ok: false, status: 0, data: null }),
     ).then((r) => { if (!r.ok) showToast(failureText(r.status, r.data)); return r })
@@ -520,7 +532,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
 
   /** 读面：非 2xx 直接抛，由调用点的 try/catch 变成页面上的可见文案。 */
   const getJson = async (path) => {
-    const r = await fetch('/api/pico/browser/' + path)
+    const r = await fetchWithTimeout('/api/pico/browser/' + path)
     if (r.ok !== true) throw new Error('HTTP ' + r.status)
     return await r.json()
   }

@@ -117,8 +117,9 @@ describe('用户切换链的容错与顺序（审计 F2）', () => {
       prewarm: async () => { calls.push('rebuild') },
       warn,
     })
-    // 身份切换必须发生在清理之前，且清理失败后其余步骤照做
-    expect(calls).toEqual(['scope', 'close', 'ops', 'rebuild'])
+    // 清理必须先于新账号 ledger 恢复（否则空账本会覆盖新账号标签页），
+    // 且清理失败后其后的身份切换/预热必须照做。
+    expect(calls).toEqual(['close', 'scope', 'ops', 'rebuild'])
     expect(warn).toHaveBeenCalledWith(
       'pico-browser: closing tabs during the user switch failed',
       expect.any(Error),
@@ -135,7 +136,7 @@ describe('用户切换链的容错与顺序（审计 F2）', () => {
       prewarm: async () => { calls.push('rebuild') },
       warn,
     })
-    expect(calls).toEqual(['scope', 'close', 'ops', 'rebuild'])
+    expect(calls).toEqual(['close', 'scope', 'ops', 'rebuild'])
     expect(warn).not.toHaveBeenCalled()
   })
 })

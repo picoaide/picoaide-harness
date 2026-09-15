@@ -58,7 +58,30 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
   const [workspaceId, setWorkspaceId] = useState(job?.action.kind === 'agent' ? (job.action.workspaceId ?? '') : '')
   const [agentPreset, setAgentPreset] = useState(job?.action.kind === 'agent' ? (job.action.agentPreset ?? '') : '')
   const [permission, setPermission] = useState(job?.action.kind === 'agent' ? (job.action.permission ?? '') : '')
+  const [permissionOptions, setPermissionOptions] = useState<string[]>([])
   const [error, setError] = useState<string | undefined>()
+
+  // Permission roster comes from the Host (deployment-configured names), not
+  // from a hardcoded list: the Host validator rejects unknown names, so a
+  // built-in `read-only` option used to fail with an opaque HTTP 400.
+  useEffect(() => {
+    let alive = true
+    void fetch('/api/cron/permissions', { headers: { accept: 'application/json' } }).then(async (res) => {
+      if (!res.ok) return
+      const body = (await res.json()) as { permissions?: unknown }
+      if (!alive || !Array.isArray(body.permissions)) return
+      setPermissionOptions(body.permissions.filter((name): name is string => typeof name === 'string' && name !== ''))
+    }).catch(() => { /* leave the roster empty; the "none" option still works */ })
+    return () => { alive = false }
+  }, [])
+
+  const permissionLabel = (value: string): string => {
+    if (value === 'read-only') return t('job.permissionRead')
+    if (value === 'workspace-write') return t('job.permissionWrite')
+    if (value === 'danger-full-access') return t('job.permissionFull')
+    return value
+  }
+  const shownPermissionOptions = [...new Set(permissionOptions.concat(permission === '' ? [] : [permission]))]
 
   // Project picker: '' = current project (default).
   const workspaceOptions = useWorkspaceOptions(workspaces)
@@ -95,6 +118,10 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
       ...(workspaceId === '' ? {} : { workspaceId }),
       ...(agentPreset === '' ? {} : { agentPreset }),
       ...(permission === '' ? {} : { permission }),
+    }
+    if (permission !== '' && permissionOptions.length > 0 && !permissionOptions.includes(permission)) {
+      setError(t('job.permissionUnknown', { name: permission, available: permissionOptions.join(', ') }))
+      return
     }
     if (!isCronJobAction(action)) {
       setError(t('job.promptTextRequired'))
@@ -201,9 +228,9 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
             onChange={(event) => { setPermission(event.target.value) }}
           >
             <option value="">{t('job.permissionNone')}</option>
-            <option value="read-only">{t('job.permissionRead')}</option>
-            <option value="workspace-write">{t('job.permissionWrite')}</option>
-            <option value="danger-full-access">{t('job.permissionFull')}</option>
+            {shownPermissionOptions.map(name => (
+              <option key={name} value={name}>{permissionLabel(name)}</option>
+            ))}
           </select>
         </div>
         <div style={styles.field}>

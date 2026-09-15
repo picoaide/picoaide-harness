@@ -179,6 +179,26 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
   const [busy, setBusy] = useState<'connect' | 'submit' | 'disconnect' | 'refresh' | null>(null)
   const activePopup = useRef<Window | null>(null)
 
+  // Prefill server-provided defaults as soon as the form request arrives on
+  // the poll (the /connect response only carries {connectorId}; the real
+  // `fields` payload lands one render later). Never overwrite user input.
+  useEffect(() => {
+    const fields = entry.request?.fields
+    if (fields === undefined || fields.length === 0) return
+    setFormValues((previous) => {
+      let changed = false
+      const next = { ...previous }
+      for (const field of fields) {
+        if (field.defaultValue === undefined || field.defaultValue === null) continue
+        if (next[field.key] === undefined || next[field.key] === '') {
+          next[field.key] = field.defaultValue
+          changed = true
+        }
+      }
+      return changed ? next : previous
+    })
+  }, [entry.id, entry.request?.fields])
+
   // The authorize URL is produced asynchronously by the flow; open it once
   // when it appears (popup blockers tolerate a click-adjacent open).
   // P0-1: when the user closes the authorization popup, the in-flight flow
@@ -557,7 +577,7 @@ export function ConnectorsList() {
       if (statusFilter === 'connected' && c.status !== 'connected') return false
       if (statusFilter === 'disconnected' && c.status === 'connected') return false
       if (!q) return true
-      return c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q)
+      return (c.name ?? '').toLowerCase().includes(q) || (c.description ?? '').toLowerCase().includes(q)
     })
   }, [connectors, query, statusFilter])
 

@@ -65,8 +65,8 @@ describe('update status copy', () => {
     expect(updateStatusText(base)).toBe('已是最新版本')
   })
 
-  it('treats a missing snapshot as up to date', () => {
-    expect(updateStatusText(null)).toBe('已是最新版本')
+  it('reports a missing update service instead of claiming up to date', () => {
+    expect(updateStatusText(null)).toBe('更新服务不可用')
     expect(updateActionLabel(null, false)).toBe('检查更新')
     expect(progressPercent(null)).toBeUndefined()
   })
