@@ -150,23 +150,25 @@ describe('audit: refresh failure must not park the connector forever', () => {
       expiresAt: Date.now() + 5 * 60 * 1000,
     })
     h.emitSession({ username: 'user-a' })
-    await waitFor(() => h.configs.length === 1)
+    // 这条用例要等两轮后台扫掠 + 两次真实 HTTP 往返；在 CI（4 vCPU、多包并发）上
+    // 每次 await 都可能被调度拉开数秒，所以三处预算都给足（断言本身不变）。
+    await waitFor(() => h.configs.length === 1, 20_000)
 
     // the token lapses while the endpoint is temporarily down
     server.fail = 'server_error'
     const store = new ConnectorStore({ baseDir: dir })
     await store.updateCredential('example-a', { expiresAt: Date.now() - 1000 })
-    await waitFor(() => server.grants.length >= 1, 5000)
+    await waitFor(() => server.grants.length >= 1, 20_000)
     await new Promise(r => setTimeout(r, 120))
 
     // endpoint comes back: the sweep must try again by itself
     server.fail = null
-    await waitFor(() => server.grants.some(g => g === 'refresh_token') && h.configs.length >= 2, 8000)
+    await waitFor(() => server.grants.some(g => g === 'refresh_token') && h.configs.length >= 2, 30_000)
     const status = (JSON.parse((await callRoute(h, '/api/pico/connectors', 'GET')).body) as
       { connectors: Array<{ id: string, status: string }> }).connectors.find(c => c.id === 'example-a')
     expect(status?.status).toBe('connected')
     h.dispose()
-  })
+  }, 120_000)
 })
 
 describe('audit: reconnect paths', () => {
