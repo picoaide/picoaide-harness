@@ -103,7 +103,22 @@ export function apply(ctx: Context, config: Config): void {
       return null
     }
   }
+  // Startup race: SessionService.restore() may complete before this plugin's
+  // apply() (its own docs warn about exactly this), so the session-changed
+  // event can be missed. When restoration is already done, sample the current
+  // username now; otherwise the event will arrive later.
+  const sampleSessionUsername = (): void => {
+    try {
+      const pico = ctx.get('picoSession') as
+        | { isRestored?: () => boolean, getSession?: () => { username?: string } | null }
+        | undefined
+      if (pico?.isRestored?.() === true) host.setUsername(pico.getSession?.()?.username ?? null)
+    } catch {
+      // Keep the null/legacy scope; the event path still recovers later.
+    }
+  }
   host.setUsername(currentUser())
+  sampleSessionUsername()
   ctx.on('pico/session-changed', (next: unknown) => {
     host.setUsername((next as { username?: string } | null)?.username ?? null)
   })

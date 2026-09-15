@@ -63,7 +63,8 @@ interface DisclosurePrompt {
 }
 
 /** Poll an async condition (the panel request only appears once the flow runs). */
-async function waitForAsync(check: () => Promise<boolean>, timeoutMs = 5_000): Promise<void> {
+// 默认预算 15s（原 5s），与 tests/helpers/connector-harness.ts 同口径。
+async function waitForAsync(check: () => Promise<boolean>, timeoutMs = 15_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (await check()) return

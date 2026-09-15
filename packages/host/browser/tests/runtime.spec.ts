@@ -446,6 +446,34 @@ describe('BrowserRuntime v4.2 — flat pool', () => {
     cleanup()
   })
 
+  it('user takeover aborts an in-flight waitFor (cooperative checkpoint)', async () => {
+    const { runtime, adapter, cleanup } = makeRuntime()
+    await runtime.open('https://a.example')
+    const id = runtime.currentTabId()!
+    const view = adapter.lastView()
+    view.transport.handler = (method) => method === 'Runtime.callFunctionOn' ? { result: { value: false } } : {}
+    const pending = runtime.waitFor(id, { condition: 'element-present', selector: '#never', timeoutMs: 10_000 })
+      .catch((cause: unknown) => cause)
+    await sleep(180)
+    runtime.setUserControl(true, 'user')
+    const error = await pending as { code?: string }
+    expect(error.code).toBe('window-controlled')
+    runtime.setUserControl(false, 'user')
+    cleanup()
+  })
+
+  it('navigation failure with a previous page is reported, not swallowed', async () => {
+    const { runtime, adapter, cleanup } = makeRuntime()
+    await runtime.open('https://old.example')
+    const view = adapter.lastView()
+    view.loadURL.mockRejectedValueOnce(new Error('ERR_NAME_NOT_RESOLVED'))
+    const error = await runtime.navigate(runtime.currentTabId()!, 'https://bad.example')
+      .catch((cause: unknown) => cause) as { code?: string, message?: string }
+    expect(error.code).toBe('network')
+    expect(String(error.message)).toContain('navigation failed')
+    cleanup()
+  })
+
   it('shellState exposes tabs/busy/controlled/latestOp', async () => {
     const { runtime, cleanup } = makeRuntime()
     await runtime.open('https://a.example')

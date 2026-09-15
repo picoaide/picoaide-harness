@@ -12,6 +12,7 @@ export const zh = {
   'account.monthlyGrant': '每月发放',
   'account.logout': '退出登录',
   'account.loggingOut': '退出中…',
+  'account.logoutFailed': '退出失败：{error}',
   'account.refresh': '刷新',
   'account.balance': '账户余额',
   'account.lowBalance': '余额不足',
@@ -27,6 +28,7 @@ export const en: Record<keyof typeof zh, string> = {
   'account.monthlyGrant': 'Monthly grant',
   'account.logout': 'Log out',
   'account.loggingOut': 'Logging out…',
+  'account.logoutFailed': 'Log out failed: {error}',
   'account.refresh': 'Refresh',
   'account.balance': 'Balance',
   'account.lowBalance': 'Low balance',
@@ -38,8 +40,20 @@ export const en: Record<keyof typeof zh, string> = {
 export type AccountKey = keyof typeof zh
 
 const dict = zh as Record<AccountKey, string>
+const enDict = en as Record<AccountKey, string>
+
+/** Active UI locale, kept in sync by the client plugin from ctx.locale. */
+let activeLocale: 'zh' | 'en' = 'zh'
+/** Adopt the active locale (called by the client plugin; unknown ids fall back to Chinese). */
+export function setActiveLocale(id: string): void {
+  activeLocale = id.toLowerCase().startsWith('en') ? 'en' : 'zh'
+}
 
 /** Resolve a zh-source key; `en` mirror is registered for the locale service. */
-export function t(key: AccountKey): string {
-  return dict[key]
+export function t(key: AccountKey, params?: Record<string, string>): string {
+  let text = (activeLocale === 'en' ? enDict : dict)[key]
+  if (params !== undefined) {
+    for (const [name, value] of Object.entries(params)) text = text.replaceAll(`{${name}}`, value)
+  }
+  return text
 }

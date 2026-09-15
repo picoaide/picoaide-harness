@@ -14,6 +14,7 @@ import { REFRESH_LEAD_MS, REFRESH_SWEEP_INTERVAL_MS } from './token-lifetime.ts'
 import { userScopePath } from './user-scope.ts'
 import { ConnectorApprovalStore } from './approvals.ts'
 import {
+  CONNECTOR_AUTH_MODES,
   CONNECTOR_ID_PATTERN,
   credentialFieldProblem,
   declaredCredentialKeys,
@@ -162,7 +163,7 @@ export function parseServerConnectors(items: ServerConnectorItem[]): ConnectorDe
         console.warn(`[dsh-connectors] dropped connector ${item.id}: ${problem}`)
         continue
       }
-      let authMode = (item.auth_mode || raw.authMode || '') as ConnectorDef['authMode']
+      let authMode = (item.auth_mode || raw.authMode || '') as string
       if (!authMode) {
         // 回退推断:定义 JSON 的结构决定模式(tokenFields → token,
         // auth 配置 → oauth;其余按 device 保守处理)。
@@ -170,12 +171,23 @@ export function parseServerConnectors(items: ServerConnectorItem[]): ConnectorDe
         else if (raw.auth) authMode = 'oauth'
         else authMode = 'device'
       }
+      if (!CONNECTOR_AUTH_MODES.includes(authMode)) {
+        console.warn(`[dsh-connectors] dropped connector ${item.id}: unsupported auth_mode ${JSON.stringify(authMode)}`)
+        continue
+      }
+      // Preserve the historical empty-string fallback, but never emit
+      // undefined: the settings list calls `name.toLowerCase()` while
+      // searching, so a catalog row without a name used to crash the panel.
+      const itemName = typeof item.name === 'string' ? item.name : ''
+      const rawName = typeof raw.name === 'string' ? raw.name : ''
+      const itemDescription = typeof item.description === 'string' ? item.description : ''
+      const rawDescription = typeof raw.description === 'string' ? raw.description : ''
       out.push({
         ...raw,
         id: item.id,
-        name: item.name !== '' ? item.name : raw.name ?? '',
-        description: item.description !== '' ? item.description : raw.description ?? '',
-        authMode,
+        name: itemName !== '' ? itemName : rawName,
+        description: itemDescription !== '' ? itemDescription : rawDescription,
+        authMode: authMode as ConnectorDef['authMode'],
       })
     } catch {
       // 单条定义非法:跳过,不影响其他连接器。
@@ -256,8 +268,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const pico = ctx.get('picoSession') as { getSession?: () => { serverURL?: string; token?: string } | null } | undefined
       const session = pico?.getSession?.()
       if (!session?.serverURL || !session?.token) return
+      // This runs inside the serial lifecycle queue: a black-holed gateway
+      // must not park a logout/user switch for undici's default header
+      // timeout (minutes). The bootstrap catalogue is optional; 30s is ample.
       const res = await fetch(`${session.serverURL.replace(/\/+$/, '')}/api/client/v2/config/bootstrap`, {
         headers: { Authorization: `Bearer ${session.token}` },
+        signal: AbortSignal.timeout(30_000),
       })
       if (!res.ok) return
       const cfg = (await res.json()) as { connectors?: ServerConnectorItem[] }
@@ -427,6 +443,26 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const mcpDisposers = new Map<string, () => void>()
   /** In-flight auth flows keyed by connector id: disconnect/cancel aborts them. */
   const pendingFlows = new Map<string, AbortController>()
+  /**
+   * Which form produced the current `pendingRequests` entry: pre-connect
+   * `settings` or post-connect `tokenFields`. submitAuth must know this to
+   * continue the OAuth/device flow instead of short-circuiting into an
+   * unauthenticated MCP registration (2026-09-15 audit).
+   */
+  const pendingFieldRequestKind = new Map<string, 'settings' | 'tokenFields'>()
+  /**
+   * Per-connector intent generation. `disconnect()` bumps it; any
+   * `registerMcp`/`submitAuth` that started before the bump observes the
+   * mismatch after its next await and aborts instead of resurrecting a
+   * disconnected connector.
+   */
+  const connectorGenerations = new Map<string, number>()
+  const currentGeneration = (id: string): number => connectorGenerations.get(id) ?? 0
+  const bumpGeneration = (id: string): number => {
+    const next = currentGeneration(id) + 1
+    connectorGenerations.set(id, next)
+    return next
+  }
 
   /**
    * Register one connector's MCP servers. `pendingApproval` means nothing was
@@ -474,6 +510,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     pendingFlows.clear()
     pendingRequests.clear()
     pendingApprovals.clear()
+    pendingFieldRequestKind.clear()
     states.clear()
     // A NEW controller for the tasks the new session enqueues: the signal above
     // must stay aborted for everything that captured it.
@@ -788,8 +825,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     def: ConnectorDef,
     outbound: { signal?: AbortSignal } = {},
   ): Promise<McpRegistrationOutcome> => {
-    /** A teardown landed: spawn nothing more, let the caller unwind quietly. */
-    const superseded = (): boolean => outbound.signal?.aborted === true
+    // Capture the intent generation up-front: a disconnect (or a newer
+    // registration request) bumps it, and every await below re-checks this
+    // closure so the old registration cannot spawn after the bump.
+    const generation = currentGeneration(def.id)
+    /** A teardown/disconnect landed: spawn nothing more, let the caller unwind quietly. */
+    const superseded = (): boolean =>
+      outbound.signal?.aborted === true || generation !== currentGeneration(def.id)
     // conn-1: a logout/user switch that lands while this registration is
     // awaiting must not resurrect the previous user's MCP servers.
     if (superseded()) return { rejected: [], superseded: true }
@@ -870,6 +912,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             toolCallTimeoutMs: 120_000,
             failOnStartupError: false,
           }
+      // A disconnect/user-switch may have landed while mcpAuthProvider was
+      // awaiting discovery; do not retire the old transport or spawn the new
+      // one after that intent was invalidated.
+      if (superseded()) return { rejected: [], superseded: true }
       // The serverName is a per-scope reservation owned by the LIVE fibre: the
       // upstream plugin throws "serverName \"...\" is already in use" when a
       // second instance loads while the first is still alive. A re-registration
@@ -940,11 +986,35 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     def: ConnectorDef,
     credential: ConnectorCredential | null | undefined,
   ): NonNullable<ConnectorDef['tokenFields']> =>
-    (def.tokenFields ?? []).filter(field =>
-      field.required === true && (credential?.fields?.[field.key]?.trim() ?? '') === '')
+    (def.tokenFields ?? []).filter((field) => {
+      const value = credential?.fields?.[field.key]
+      return field.required === true && (typeof value !== 'string' || value.trim() === '')
+    })
+
+  /**
+   * Whether a stored credential can be registered on startup.
+   *
+   * OAuth/server-side credentials authenticate with `accessToken`; token and
+   * device connectors store only declared fields (an API key/token in
+   * `fields`). The old `if (effective.accessToken)` check therefore dropped
+   * every fields-only connector on restart (2026-09-15 audit).
+   * @param def - connector definition.
+   * @param credential - stored credential.
+   * @returns true when the credential is sufficient to register the MCP servers.
+   */
+  const credentialUsable = (
+    def: ConnectorDef,
+    credential: ConnectorCredential | null | undefined,
+  ): boolean => {
+    if (credential === null || credential === undefined) return false
+    if (missingDeclaredFields(def, credential).length > 0) return false
+    if (def.authMode === 'token' || def.authMode === 'device') return true
+    return typeof credential.accessToken === 'string' && credential.accessToken !== ''
+  }
 
   /** Publish a field form for the panel and leave the row waiting for it. */
   const requestDeclaredFields = (id: string, def: ConnectorDef): void => {
+    pendingFieldRequestKind.set(id, 'tokenFields')
     emitRequest({ connectorId: id, fields: def.tokenFields ?? [] })
     setState(id, { status: 'connecting', error: undefined })
   }
@@ -957,18 +1027,50 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // a flow is in flight must not start a duplicate authorization flow
     // (two callback ports, two browser windows, credential writeback race).
     if (pendingFlows.has(id)) return
+    const generation = currentGeneration(id)
     const existing = await store.readCredential(id)
     setState(id, { status: 'connecting', everConnected: Boolean(existing) || Boolean(states.get(id)?.everConnected) })
 
     // Pre-connect settings: if required fields are missing, emit the form and
     // wait for auth-submit before starting the actual auth flow.
     if (def.settings?.length) {
-      const missing = def.settings.filter((field) => field.required && !existing?.fields?.[field.key]?.trim())
+      const missing = def.settings.filter((field) => {
+        const value = existing?.fields?.[field.key]
+        return field.required === true && (typeof value !== 'string' || value.trim() === '')
+      })
       if (missing.length > 0) {
+        pendingFieldRequestKind.set(id, 'settings')
         emitRequest({ connectorId: id, fields: def.settings })
         return
       }
     }
+    // Token connectors never run an authorization flow: once the declared
+    // fields are present they register directly (settings above are only a
+    // pre-connect gate). This also guarantees the token form is shown when a
+    // required field is missing, even when settings and tokenFields coexist.
+    if (def.authMode === 'token') {
+      if (missingDeclaredFields(def, existing).length > 0) {
+        requestDeclaredFields(id, def)
+        return
+      }
+      if (generation !== currentGeneration(id)) return
+      const outcome = await registerMcp(def, { signal: teardownController.signal })
+      if (outcome.superseded === true) return
+      if (outcome.pendingApproval !== undefined) {
+        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+        return
+      }
+      if (outcome.rejected.length > 0) {
+        pendingRequests.delete(id)
+        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        return
+      }
+      pendingRequests.delete(id)
+      pendingFieldRequestKind.delete(id)
+      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
+      return
+    }
+    pendingFieldRequestKind.delete(id)
     pendingRequests.delete(id)
     const controller = new AbortController()
     pendingFlows.set(id, controller)
@@ -980,11 +1082,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         ...(options.clientName === undefined ? {} : { clientName: options.clientName }),
         ...(options.outboundTimeoutMs === undefined ? {} : { outboundTimeoutMs: options.outboundTimeoutMs }),
       })
-      // Token-form flows finish on auth-submit; runAuth only emitted the fields.
-      if (def.authMode === 'token') {
-        setState(id, { status: 'connecting' })
-        return
-      }
+      // Token mode returned above; only OAuth/device/server-side reach this.
       const current = await store.readCredential(id)
       const merged = await store.updateCredential(id, { ...current, ...patch })
       // A stateless flow (device / server-side) can finish without the
@@ -998,6 +1096,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // the token round-trip was in flight — never register for a session that
       // is already gone.
       if (controller.signal.aborted) return
+      if (generation !== currentGeneration(id)) return
       // Retire the PREVIOUS registration only now that the new authorization
       // succeeded: doing it before the flow meant a failed re-authorization
       // (server unreachable, user cancelled the browser step) silently removed
@@ -1050,46 +1149,48 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const submitAuth = async (id: string, fields: Record<string, string>): Promise<void> => {
     const def = getDef(id)
     if (!def) throw new Error(`unknown connector: ${id}`)
+    const generation = currentGeneration(id)
+    const kind = pendingFieldRequestKind.get(id)
+    pendingFieldRequestKind.delete(id)
     const current = await store.readCredential(id)
     await store.updateCredential(id, { fields: { ...(current?.fields ?? {}), ...fields } })
-    // Device/server-side flows that asked for fields after the stateless probe:
-    // once they arrive, register the MCP servers.
-    if (def.authMode !== 'token' && missingDeclaredFields(def, await store.readCredential(id)).length === 0) {
-      const outcome = await registerMcp(def, { signal: teardownController.signal })
-      if (outcome.superseded === true) return
-      if (outcome.pendingApproval !== undefined) {
-        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
-        return
-      }
-      if (outcome.rejected.length > 0) {
-        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
-        return
-      }
-      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
-      pendingRequests.delete(id)
+    if (generation !== currentGeneration(id)) return
+    const merged = await store.readCredential(id)
+    // A pre-connect settings form was just completed on an OAuth/device
+    // connector: continue the REAL authorization flow first. Registering MCP
+    // here would mark the row connected without ever starting OAuth; asking
+    // for tokenFields before OAuth would dead-end the authorization too.
+    if (kind === 'settings' && def.authMode !== 'token') {
+      await startConnect(id)
       return
     }
-    if (def.authMode === 'token') {
-      const outcome = await registerMcp(def, { signal: teardownController.signal })
-      if (outcome.superseded === true) return
-      if (outcome.pendingApproval !== undefined) {
-        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
-        return
-      }
-      if (outcome.rejected.length > 0) {
-        pendingRequests.delete(id)
-        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
-        return
-      }
-      setState(id, { status: "connected", everConnected: true, connectedAt: Date.now(), error: undefined })
-      pendingRequests.delete(id)
+    // A required declared field is still missing (user submitted a partial
+    // token form): show it again instead of registering an MCP server that
+    // cannot authenticate (token mode used to skip this check).
+    if (missingDeclaredFields(def, merged).length > 0) {
+      requestDeclaredFields(id, def)
       return
     }
-    // Device/cli/oauth flows continue after the settings form is submitted.
-    await startConnect(id)
+    const outcome = await registerMcp(def, { signal: teardownController.signal })
+    if (outcome.superseded === true) return
+    if (outcome.pendingApproval !== undefined) {
+      setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+      return
+    }
+    if (outcome.rejected.length > 0) {
+      pendingRequests.delete(id)
+      setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+      return
+    }
+    setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
+    pendingRequests.delete(id)
   }
 
   const disconnect = async (id: string): Promise<void> => {
+    // Invalidate every in-flight registration/submission intent BEFORE
+    // clearing the credential: their next await observes the bump and stops
+    // instead of spawning MCP servers for a disconnected connector.
+    bumpGeneration(id)
     const def = getDef(id)
     if (def) await unregisterMcp(def)
     // P0-1: a disconnect must also abort any in-flight authorization flow —
@@ -1110,6 +1211,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     })
     pendingRequests.delete(id)
     pendingApprovals.delete(id)
+    pendingFieldRequestKind.delete(id)
   }
 
   /**
@@ -1155,7 +1257,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             })()
         if (stale() || effective === null) continue
         if (stale()) return
-        if (effective.accessToken) {
+        if (credentialUsable(def, effective)) {
           const outcome = await registerMcp(def, { signal: teardownController.signal })
           if (stale() || outcome.superseded === true) return
           if (outcome.pendingApproval !== undefined) {
@@ -1169,6 +1271,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             continue
           }
           setState(def.id, { status: 'connected', everConnected: true })
+        } else if (def.authMode === 'token' || def.authMode === 'device') {
+          // Fields-only connector whose required fields were removed/truncated:
+          // ask for them again instead of silently staying disconnected.
+          requestDeclaredFields(def.id, def)
         }
       } catch (error) {
         if (stale()) return
@@ -1362,13 +1468,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
       const id = rawId
       const raw = await readJson(req)
-      if (!raw || typeof raw !== 'object' || typeof (raw as { fields?: unknown }).fields !== 'object') {
+      const candidateFields = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+        ? (raw as { fields?: unknown }).fields
+        : undefined
+      if (candidateFields === null || typeof candidateFields !== 'object' || Array.isArray(candidateFields)) {
         return json(res, 400, { error: 'missing fields' })
       }
       // P0-1/P2-17: only string values are meaningful for auth headers; a
       // number/object/array would crash renderHeaders on the MCP registration
       // path with an obscure TypeError.
-      const fields = (raw as { fields: Record<string, unknown> }).fields
+      const fields = candidateFields as Record<string, unknown>
       for (const [key, value] of Object.entries(fields)) {
         if (typeof value !== 'string') return json(res, 400, { error: `field '${key}' must be a string` })
       }

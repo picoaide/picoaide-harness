@@ -585,6 +585,27 @@ describe('2026-09-15 P1：短凭据的散文擦除（模型面文本出口）', 
 
 // ------------------------------------------- watch: 事件语义不回归
 
+describe('2026-09-15：mutating store tools respect the user gate', () => {
+  it('browser_bookmarks_remove waits for the user to hand control back', async () => {
+    const harness = track(makeHarness())
+    await harness.runtime.open('https://a.example')
+    const tabId = harness.runtime.currentTabId()!
+    const bookmark = harness.runtime.addBookmark(tabId, 'blocked-while-controlled')
+    harness.runtime.setUserControl(true, 'user')
+
+    let settled = false
+    const pending = harness.call('browser_bookmarks_remove', { id: bookmark.id }).then(
+      (value) => { settled = true; return value },
+      (error) => { settled = true; throw error },
+    )
+    await new Promise((resolve) => { setTimeout(resolve, 120) })
+    expect(settled, 'mutation must not run while the user controls the browser').toBe(false)
+
+    harness.runtime.setUserControl(false, 'user')
+    await expect(pending).resolves.toEqual({ ok: true })
+  })
+})
+
 describe('2026-09-15：takeover 仍走用户闸（回归护栏）', () => {
   it('browser_takeover 让 agent 操作排队等待', async () => {
     const harness = track(makeHarness())

@@ -33,7 +33,7 @@ export function registerCronTools(ctx: Context, service: HostCronService, option
       prompt: { type: 'string', required: true, description: '执行时发送给智能体会话的提示词内容（必填，非空）' },
       workspaceId: { type: 'string', description: '要钉住的工作区 id（缺省=当前工作区）' },
       agentPreset: { type: 'string', description: '要使用的智能体预设 id（缺省=部署默认）' },
-      permission: { type: 'string', description: '可选权限预设：read-only / workspace-write / danger-full-access' },
+      permission: { type: 'string', description: '可选权限预设名称；以本机部署配置的 roster 为准（未知名称会被拒绝）' },
       enabled: { type: 'boolean', description: '是否立即启用（默认 false）' },
     },
     output: {

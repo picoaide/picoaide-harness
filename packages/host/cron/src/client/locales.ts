@@ -32,6 +32,7 @@ export const zh = {
   'job.permissionRead': '只读',
   'job.permissionWrite': '工作区可写',
   'job.permissionFull': '完全访问',
+  'job.permissionUnknown': '未知的权限预设：{name}（可用：{available}）',
   'job.nameRequired': '请填写任务名称',
   'job.promptTextRequired': '请填写执行内容（发送给智能体的提示词）',
   'job.promptText': '执行内容（提示词）',
@@ -91,6 +92,7 @@ export const en: Record<CronKey, string> = {
   'job.permissionRead': 'Read only',
   'job.permissionWrite': 'Workspace write',
   'job.permissionFull': 'Full access',
+  'job.permissionUnknown': 'Unknown permission preset: {name} (available: {available})',
   'job.nameRequired': 'Please enter a name',
   'job.promptTextRequired': 'Please enter the prompt text sent to the agent',
   'job.promptText': 'Prompt text',
@@ -117,9 +119,16 @@ export const en: Record<CronKey, string> = {
   'board.close': 'Back to chat',
 }
 
+/** Active UI locale, kept in sync by the client plugin from ctx.locale. */
+let activeLocale: 'zh' | 'en' = 'zh'
+/** Adopt the active locale (called by the client plugin; unknown ids fall back to Chinese). */
+export function setActiveLocale(id: string): void {
+  activeLocale = id.toLowerCase().startsWith('en') ? 'en' : 'zh'
+}
+
 /** Translate a key with optional {name} params. */
 export function t(key: CronKey, params?: Record<string, string>): string {
-  let text: string = (zh[key] ?? key) as string
+  let text: string = ((activeLocale === 'en' ? en[key] : zh[key]) ?? key) as string
   if (params !== undefined) {
     for (const [name, value] of Object.entries(params)) {
       text = text.replaceAll(`{${name}}`, value)

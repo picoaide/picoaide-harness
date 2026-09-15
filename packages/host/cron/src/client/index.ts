@@ -42,7 +42,7 @@ import { CronJobTab } from './CronJobTab.tsx'
 import { CronSettingsCard, CronSettingsCardController, type CronSettings } from './CronSettingsCard.tsx'
 import { CronTrigger } from './CronTrigger.tsx'
 import { mountCronPanel } from './panel-mount.tsx'
-import { en, t, zh } from './locales.ts'
+import { en, setActiveLocale, t, zh } from './locales.ts'
 
 // Required services only: the right Sidebar's tab registry is NOT here. It is
 // provided by the rc.2 `ui-sidebar-right` row, and a hard `inject` on a service
@@ -79,6 +79,25 @@ export function apply(ctx: ClientContext): void {
     const offZh = ctx.locale.register(LOCALE_NS, { zh, en })
     return () => { offZh() }
   }, 'dsh-cron: dictionaries')
+
+  // Follow the active locale so the module-level `t()` (used by components
+  // that do not receive PropsLocale) renders in English when that is the
+  // user's choice, instead of always reading the zh key source.
+  ctx.effect(() => {
+    const locale = ctx.locale as unknown as {
+      getLocale?: () => { active?: unknown }
+      subscribe?: (listener: () => void) => () => void
+    }
+    const sync = (): void => {
+      try {
+        const active = locale.getLocale?.()?.active
+        if (typeof active === 'string') setActiveLocale(active)
+      } catch { /* keep the last known locale */ }
+    }
+    sync()
+    if (typeof locale.subscribe !== 'function') return () => {}
+    return locale.subscribe(sync)
+  }, 'follow active locale')
 
   // Browser cron face: sibling plugins reach schedules through this client
   // service (the Host half's picoCronService is not visible to the browser).

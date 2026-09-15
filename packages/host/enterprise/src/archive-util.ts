@@ -205,6 +205,7 @@ export async function assertArchiveSafe(archive: Buffer): Promise<void> {
  */
 export async function extractZip(archive: Buffer, destDir: string): Promise<void> {
   const z = new AdmZip(archive)
+  let writtenBytes = 0
   for (const entry of z.getEntries()) {
     const rel = posixNormalize(entry.entryName)
     if (rel === '' && entry.isDirectory) continue
@@ -215,6 +216,14 @@ export async function extractZip(archive: Buffer, destDir: string): Promise<void
     }
     await mkdir(join(target, '..'), { recursive: true })
     const content = entry.getData()
+    // `scanZip` trusts the central-directory size, which a crafted archive can
+    // understate. Re-check the ACTUAL decompressed bytes before writing: the
+    // previous code could OOM the host process on a zip bomb that declared a
+    // small size but expanded far past MAX_UNPACKED_BYTES.
+    writtenBytes += content.byteLength
+    if (writtenBytes > MAX_UNPACKED_BYTES) {
+      throw new Error(`unpacked archive too large (${writtenBytes} bytes)`)
+    }
     const unix = entry.attr >>> 16
     const mode = (unix & 0o777) === 0 ? 0o600 : unix & 0o777
     await writeFile(target, content, { mode })

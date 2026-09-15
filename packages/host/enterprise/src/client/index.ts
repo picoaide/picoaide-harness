@@ -28,7 +28,7 @@ import { installFavicon } from './favicon.ts'
 import { channelTitle } from '../channel-content.ts'
 import { startChannelStore, readChannelSync, subscribeChannel } from './channel-store.ts'
 import { CapabilityCenterTrigger } from './CapabilityCenterTrigger.tsx'
-import { en, type EnterpriseKey, zh } from './locales.ts'
+import { en, setActiveLocale, type EnterpriseKey, zh } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -133,6 +133,25 @@ export function apply(ctx: ClientContext): void {
     const off = ctx.locale.register(LOCALE_NS, { zh, en })
     return () => { off() }
   }, 'enterprise: client dictionaries')
+
+  // Follow the active locale so the module-level `t()` (used by components
+  // that do not receive PropsLocale) renders in English when that is the
+  // user's choice, instead of always reading the zh key source.
+  ctx.effect(() => {
+    const locale = ctx.locale as unknown as {
+      getLocale?: () => { active?: unknown }
+      subscribe?: (listener: () => void) => () => void
+    }
+    const sync = (): void => {
+      try {
+        const active = locale.getLocale?.()?.active
+        if (typeof active === 'string') setActiveLocale(active)
+      } catch { /* keep the last known locale */ }
+    }
+    sync()
+    if (typeof locale.subscribe !== 'function') return () => {}
+    return locale.subscribe(sync)
+  }, 'follow active locale')
 
   // Upstream brand slots (single/root). The official occupant is suppressed
   // by the desktop patch on @deepseek-ai/dsh-client-ui-brand-official, so
