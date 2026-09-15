@@ -1,6 +1,7 @@
 /** Per-user connector credential store under the product home. */
 
 import { promises as fs } from 'node:fs'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, join, resolve } from 'node:path'
 import { userScopePath } from './user-scope.ts'
@@ -14,8 +15,14 @@ const MAX_CREDENTIAL_BYTES = 64 * 1024
  * 逐字段比，不做 JSON 字符串比较——那会受键序影响而漏判。
  */
 export function sameCredential(a: ConnectorCredential, b: ConnectorCredential): boolean {
+  // 规范化：键排序 + **长度前缀**（纯 `k=v` 用 NUL 连接时，值里含 NUL 会让两份不同
+  // 凭据判成相同 —— 2026-09-15 第三轮复核给出的反例：{a:'x',b:'y'} 与
+  // {a:'x\u0000b=y'}。长度前缀让拼接无歧义）。
   const fields = (value: ConnectorCredential): string =>
-    Object.entries(value.fields ?? {}).sort(([x], [y]) => x.localeCompare(y)).map(([k, v]) => `${k}=${v}`).join('\u0000')
+    Object.entries(value.fields ?? {})
+      .sort(([x], [y]) => x.localeCompare(y))
+      .map(([k, v]) => `${String(k.length)}:${k}=${String(v.length)}:${v}`)
+      .join('|')
   return a.updatedAt === b.updatedAt
     && a.accessToken === b.accessToken
     && a.refreshToken === b.refreshToken
@@ -205,8 +212,22 @@ export class ConnectorStore {
 
   /** 进程内串行化：凭据的读-改-写与比较-删除都排在同一条链上。 */
   private chain: Promise<unknown> = Promise.resolve()
+  /**
+   * 独占区**非重入**（2026-09-15 第三轮复核）：在独占任务里再调用公开写方法
+   * （`writeCredential`/`updateCredential`/`clearCredential`/`clearCredentialIfUnchanged`）
+   * 会排到自己后面，凭据链路**无声挂死**（无报错、无超时）。内部实现一律用
+   * `*Unlocked` 变体；这里用 AsyncLocalStorage 把误用变成显式异常 —— 并发的
+   * 外部调用者不在同一 async 上下文里，不受影响。
+   */
+  private static readonly exclusiveScope = new AsyncLocalStorage<true>()
   private async exclusive<T>(task: () => Promise<T>): Promise<T> {
-    const run = this.chain.then(task, task)
+    if (ConnectorStore.exclusiveScope.getStore() === true) {
+      throw new Error('ConnectorStore: exclusive section is not re-entrant — use the *Unlocked internals')
+    }
+    const run = this.chain.then(
+      () => ConnectorStore.exclusiveScope.run(true, task),
+      () => ConnectorStore.exclusiveScope.run(true, task),
+    )
     this.chain = run.then(() => undefined, () => undefined)
     return await run
   }
