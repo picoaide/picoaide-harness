@@ -16,6 +16,7 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { BrowserRuntime, type WaitForOptions } from './runtime.ts'
 import { browserError } from './errors.ts'
+import { snapshotNote } from './snapshot.ts'
 import type { BrowserWaitUntil } from './types.ts'
 
 /** Cooperative tool-call timeout budget for every browser tool (ms). */
@@ -31,7 +32,7 @@ const BROWSER_GUIDANCE = `You have an embedded browser shared with the user. Rul
 1. Start with browser_open (url optional), then browser_navigate. browser_get_snapshot lists numbered interactable elements; target them by number or CSS selector.
 2. After navigation or any page change, take a fresh snapshot — pages re-render and renumber.
 3. browser_screenshot only for visual confirmation; snapshots/text are cheaper. browser_eval runs one expression (a heuristic guardrail rejects statements/assignments and eval/Function; fetch/XHR and any page JS are allowed) and returns its resolved value — promise results are awaited.
-4. The user may take over at any time (按钮: 我来操作). Your queued actions then wait; release continues them — do not fight the user.
+4. The user may take over at any time (按钮: 我来操作). Your queued actions then wait; only the user gives control back (交给 AI) — never ask for it back, there is no tool for that, so do not fight the user.
 5. Use wait_for before acting on dynamic pages (SPAs) instead of sleeping.
 6. Bookmarks/history/downloads are shared with the user; save important pages with bookmarks_add; check your results via downloads_list (paths are usable by file tools).
 7. Close tabs you no longer need with browser_close_tab. Tabs are GLOBAL: every session and the user share one tab pool.`
@@ -54,6 +55,73 @@ async function resolveTarget(runtime: BrowserRuntime, tabId: number, target: num
 /** Present a pending browser operation as a generic card. */
 function present(title: string): (args: unknown) => GenericCallView {
   return (args) => ({ card: 'generic', kind: 'other', title, rawInput: args as Record<string, unknown> })
+}
+
+/**
+ * Read the verdict of the operation that just finished back out of the runtime's
+ * own op log (2026-09-15 审计 P2).
+ *
+ * `browser_press` 的页内兜底脚本在"没有任何元素能接收按键"时只返回 'none'，
+ * 而 `runtime.pressKey` 不把这个结果交给调用方：它写进 op log 的 `failed` 标记，
+ * 工具却无条件回 `{ok:true}` —— 模型据此认为按键生效了，oplog/活动面板也记成功。
+ * 这里按 `browser_type` 的读回口径把这个页内否定结果变成明确的失败。
+ *
+ * `runtime.opLog` 是**最新在前**的，所以 `find` 拿到的就是本次调用刚写的那条；
+ * 工具调用在全局互斥里串行，中间不会插进同一 tool+tab 的记录。
+ */
+function assertNoFailedOp(runtime: BrowserRuntime, tabId: number, tool: string, message: string): void {
+  const entry = runtime.opLog.find((op) => op.tool === tool && op.tab === tabId)
+  if (entry !== undefined && entry.failed === true) throw browserError('not-found', message)
+}
+
+/**
+ * 站点绑定（2026-09-15 审计 P2）。
+ *
+ * 现场：`browser_fill_credentials` 只按 connectorId 解析就把用户名/口令写进
+ * **当前文档**——模型可以先把标签页开到任意站点再注入，凭据就落进了另一个
+ * origin 的登录框（钓鱼页天然受益）。
+ *
+ * 这里在调用 runtime 之前把 `new URL(tab.url).origin` 与 connector 记录里的
+ * origin 比对；不一致、或记录里根本没有可用 URL，一律拒绝并说明原因。
+ *
+ * 结构性扩展：能力挂在凭证解析器上（与既有的 `resolver.list` 同一形状：
+ * `resolveCredentials.originOf = …` / `urlOf = …`），由部署侧注入（index.ts）。
+ * **本轮 index.ts 冻结**，生产上还没有这个能力 ⇒ 此时维持现状、不误杀
+ * （见审计报告 C3：还需 index.ts 注入 + connectors 侧暴露站点 URL 才真正生效）。
+ */
+interface OriginAwareCredentialResolver {
+  originOf?: (connectorId: string) => Promise<string | null | undefined> | string | null | undefined
+  urlOf?: (connectorId: string) => Promise<string | null | undefined> | string | null | undefined
+}
+
+/** http/https 的 origin；其它一律 `null`（`about:blank` 的 origin 是字符串
+ * `"null"`，不能当成可比对的站点）。 */
+function httpOriginOf(value: string | null | undefined): string | null {
+  if (typeof value !== 'string' || value.trim() === '') return null
+  try {
+    const url = new URL(value.trim())
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : null
+  } catch {
+    return null
+  }
+}
+
+/** Refuse the injection when the tab's origin is not the connector's origin. */
+async function assertCredentialOrigin(runtime: BrowserRuntime, tabId: number, connectorId: string): Promise<void> {
+  const resolver = (runtime as unknown as { credentials?: OriginAwareCredentialResolver }).credentials
+  const lookup = resolver?.originOf ?? resolver?.urlOf
+  if (resolver === undefined || lookup === undefined) return
+  const expected = httpOriginOf(await lookup.call(resolver, connectorId))
+  if (expected === null) {
+    throw browserError('policy', `browser_fill_credentials refused: the stored connector record for ${JSON.stringify(connectorId)} has no usable http(s) site URL, so the injection cannot be bound to an origin. Register the connector's site URL, or enter the value with browser_type instead.`)
+  }
+  const actual = httpOriginOf(runtime.tabState(tabId).url)
+  if (actual === null) {
+    throw browserError('policy', `browser_fill_credentials refused: this tab has no http(s) origin, while connector ${JSON.stringify(connectorId)} is bound to ${expected}. Navigate the tab to that site first.`)
+  }
+  if (actual !== expected) {
+    throw browserError('policy', `browser_fill_credentials refused: this tab is on ${actual} but connector ${JSON.stringify(connectorId)} is bound to ${expected}. Credentials are only injected into their own site — a look-alike page must not receive them; navigate the tab to ${expected} first.`)
+  }
 }
 
 /** Result meta projection helpers. */
@@ -87,7 +155,9 @@ function uploadAllowDirs(runtime: BrowserRuntime, session: AgentProjectInfo['ses
 }
 
 /**
- * Register the full browser tool suite (v4, 32 tools).
+ * Register the full browser tool suite (v4, 31 tools: `browser_release` was
+ * removed by the 2026-09-15 audit — only the user's 交给 AI button may end the
+ * user gate).
  * @param ctx - context whose `tools` and `systemPrompt` registries receive the
  *   registrations.
  * @param runtime - the grouped embedded browser runtime.
@@ -361,7 +431,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_press',
-    description: '[交互] Press a key in your tab (Enter, Tab, Escape, Backspace, Delete, Arrows, Home, End, PageUp, PageDown, space).',
+    description: '[交互] Press a key in your tab (Enter, Tab, Escape, Backspace, Delete, Arrows, Home, End, PageUp, PageDown, space). Fails (not-found) when the page had no element able to receive the key, so a "pressed" result always means the key reached the document.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       key: { type: 'string', required: true, description: 'The key to press.' },
@@ -380,13 +450,14 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       const tabId = await tabOf(tab)
       await runtime.pressKey(tabId, key, exec.signal)
       exec.signal.throwIfAborted()
+      assertNoFailedOp(runtime, tabId, 'browser_press', `browser: the key press was not delivered — the page had no element to receive "${key}" (nothing was focused and there is no body)`)
       return { ok: true }
     },
   }))
 
   register(defineTool({
     name: 'browser_scroll',
-    description: '[交互] Scroll your tab by a vertical delta, or bring a snapshot element into view.',
+    description: '[交互] Scroll your tab by a vertical delta, or bring a snapshot element into view. A target that does not exist on the page fails (not-found) instead of reporting a successful scroll.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       deltaY: { type: 'integer', description: 'Vertical scroll amount in pixels (negative scrolls up).' },
@@ -404,6 +475,15 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       noteAgent(runtime, exec.agent)
       const tabId = await tabOf(tab)
       const selector = target === undefined ? undefined : await resolveTarget(runtime, tabId, target, exec.signal)
+      // 2026-09-15 审计 P2：`runtime.scroll` 的页内脚本在元素不存在时只返回
+      // 'not found'，而 runtime 丢弃了这个返回值、照常记一条成功——工具于是回
+      // {ok:true}，模型以为滚过去了。工具层用一次与 browser_type 同口径的真实
+      // DOM 读回（locateElement 就是 `document.querySelector` + 判定，且顺带做了
+      // 它要求的 scrollIntoView）把否定结果变成明确的 not-found 失败。
+      //
+      // 诚实边界：读回之后元素若恰好消失，runtime 那一层仍会静默成功——要彻底
+      // 关掉得让 `runtime.scroll` 返回页内判定（runtime 生命周期文件本轮冻结）。
+      if (selector !== undefined) await runtime.locateElement(tabId, selector, exec.signal)
       await runtime.scroll(tabId, deltaY ?? 0, selector, exec.signal)
       exec.signal.throwIfAborted()
       return { ok: true }
@@ -477,7 +557,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_get_snapshot',
-    description: '[读取] List the numbered interactable elements of your tab (links, buttons, inputs, selects, textareas) plus page header info (url/title). Numbers are the targets for click/type/select/scroll. Password fields are listed (number/selector usable) but never expose their value: the text reads the field label or "(password field)". On a tab that received credentials through browser_fill_credentials, the injected values are masked (****) in the element text, url and title — VERBATIM occurrences only (a value the page transformed is not covered).',
+    description: '[读取] List the numbered interactable elements of your tab (links, buttons, inputs, selects, textareas) plus page header info (url/title). Numbers are the targets for click/type/select/scroll. Password fields are listed (number/selector usable) but never expose their value: the text reads the field label or "(password field)". On a tab that received credentials through browser_fill_credentials, the injected values are masked (****) in the element text, url and title — VERBATIM occurrences only (a value the page transformed is not covered). The list is bounded: when it was cut, or when the page contains sub-frames / shadow roots whose content this snapshot does NOT include, `truncated`/`total`/`note` say so — an absent element is not proof it does not exist.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
     },
@@ -503,6 +583,11 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
           },
           url: { type: 'string' },
           title: { type: 'string' },
+          // 2026-09-15 审计 P2：截断/盲区必须对模型可见（旧实现到上限直接
+          // break，输出既没有命中总数也没有截断标记，模型会把不完整的列表当完整）。
+          truncated: { type: 'boolean', description: 'The element list itself was cut at the limit — the note also reports sub-frames/shadow roots that are not included at all (those do not set this flag).' },
+          total: { type: 'integer', description: 'Interactable elements found on the page (a lower bound when the note says "at least").' },
+          note: { type: 'string', description: 'Readable explanation of any truncation/blind spot, when present.' },
         },
       },
       render: (_args, value) => [{ type: 'text', text: formatSnapshot(value) }],
@@ -514,7 +599,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     async execute(args, exec) {
       noteAgent(runtime, exec.agent)
       const tabId = await tabOf((args as { tab?: number }).tab)
-      const elements = await runtime.snapshot(tabId, exec.signal)
+      const { elements, meta } = await runtime.snapshotWithMeta(tabId, exec.signal)
       exec.signal.throwIfAborted()
       const state = runtime.tabState(tabId)
       // R7（2026-09-13）P0：`selector` 由页面可控的 id/class 拼成（`el.id = password`
@@ -531,7 +616,15 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
         const selector = runtime.redactTabSecrets(tabId, element.selector, { verbatim: true })
         return selector === element.selector ? element : { ...element, selector }
       })
-      return { elements: safeElements, url: state.url, title: state.title }
+      const note = snapshotNote(meta)
+      return {
+        elements: safeElements,
+        url: state.url,
+        title: state.title,
+        truncated: meta.truncated,
+        total: meta.total,
+        ...(note === undefined ? {} : { note }),
+      }
     },
   }))
 
@@ -554,9 +647,12 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       const { tab, selector } = args as { tab?: number; selector?: string }
       noteAgent(runtime, exec.agent)
       const tabId = await tabOf(tab)
-      const text = await runtime.text(tabId, selector, exec.signal)
+      // 2026-09-15 审计 P2：`truncated` 由 runtime 的文字漏斗（投影前长度 vs 生效
+      // 上限 `min(textLimit, 32KiB)`）给出，工具不再用 `runtime.options.textLimit`
+      // 自行推算——那会把一条已被 32KiB 截断的文本拿去和 65536 比。
+      const { text, truncated } = await runtime.textWithMeta(tabId, selector, exec.signal)
       exec.signal.throwIfAborted()
-      return { text, truncated: text.length >= runtime.options.textLimit }
+      return { text, truncated }
     },
   }))
 
@@ -630,13 +726,13 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_wait_for',
-    description: '[读取] Wait for a page condition (element/text/url/network-idle/settled) before acting — use instead of sleeping on dynamic pages.',
+    description: '[读取] Wait for a page condition (element/text/url/network-idle/settled) before acting — use instead of sleeping on dynamic pages. timeoutMs is clamped to the call budget: this tool is bounded at 40000 ms, so that is the longest wait that can actually complete (the runtime accepts up to 120000 ms, but a call that long is cut off by the tool budget first).',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       condition: { type: 'string', enum: WAIT_CONDITIONS, required: true, description: 'What to wait for.' },
       selector: { type: 'string', description: 'CSS selector (element-present / element-visible).' },
       text: { type: 'string', description: 'Text to appear (text-appear).' },
-      timeoutMs: { type: 'integer', description: 'Budget in ms (default 30000).' },
+      timeoutMs: { type: 'integer', description: 'Budget in ms (default 30000; effective maximum 40000 — the tool call budget).' },
     },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' }, reason: { type: 'string' } } },
@@ -662,10 +758,10 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_eval',
-    description: '[执行/请求] Evaluate one JavaScript expression in your tab and return its resolved value (promise results are awaited) — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests. A heuristic guardrail accepts a single expression and rejects statements/assignments plus eval/Function and DOM-write APIs; network requests (fetch/XHR/WebSocket) are allowed on ordinary tabs. REFUSED on a tab inside the credential window (after browser_fill_credentials and before that tab navigates): while the injected credential is still in the page any read-back can be a channel, so there is no eval at all until the tab navigates — submit the form with browser_click instead. After that window closes eval works again and the returned value is masked against the values injected into that tab (verbatim occurrences only — a script that returns the value transformed is not covered). It is a misuse guardrail, not a security boundary.',
+    description: '[执行/请求] Evaluate one JavaScript expression in your tab and return its resolved value (promise results are awaited) — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests. A heuristic guardrail accepts a single expression and rejects statements/assignments plus eval/Function and page-writing APIs; the refusal is receiver-aware, so pure data shaping is fine (String.prototype.replace such as document.body.innerText.replace(/\\s+/g, \' \'), trim/split/join, and in-place methods like sort/fill on an array the expression itself built) while navigation and page state changes stay refused (location.replace, history.replaceState, localStorage.setItem, click/submit/write/open) — including when they are reached through Reflect (Reflect.construct is refused like `new`, and Reflect.apply/get must name a statically known function, so localStorage[\'set\'+\'Item\'] is caught); network requests (fetch/XHR/WebSocket) are allowed on ordinary tabs. REFUSED on a tab inside the credential window (after browser_fill_credentials and before that tab navigates): while the injected credential is still in the page any read-back can be a channel, so there is no eval at all until the tab navigates — submit the form with browser_click instead. After that window closes eval works again and the returned value is masked against the values injected into that tab (verbatim occurrences only — a script that returns the value transformed is not covered). It is a misuse guardrail, not a security boundary.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
-      expression: { type: 'string', required: true, description: 'One expression (no statements/assignments; fetch/XHR/WebSocket allowed except on credential tabs; eval/Function rejected). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
+      expression: { type: 'string', required: true, description: 'One expression (no statements/assignments; pure data shaping on strings/arrays is allowed; fetch/XHR/WebSocket allowed except on credential tabs; eval/Function rejected). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
       frame: { type: 'integer', description: 'Frame index in DOM order (0 = main frame, default; 1 = first iframe in the page, including cross-origin ones). The expression runs in that frame\'s own JavaScript world, exactly like frame 0 — page globals are visible. If the page contains a frame the index cannot map 1:1, the call fails with an explicit error instead of using a neighbouring frame.' },
     },
     output: {
@@ -901,7 +997,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_takeover',
-    description: '[控制] Hand control to the user (pauses ALL browser actions until release). Usually the user clicks 我来操作; this tool exists for guided flows.',
+    description: '[控制] Hand control to the user (pauses ALL browser actions until the user gives control back). Usually the user clicks 我来操作; this tool exists for guided flows. There is deliberately NO model-side counterpart: control returns to you only when the user chooses it (the 交给 AI button), never because the model asked for it back.',
     parameters: {},
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' } } },
@@ -918,28 +1014,17 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     },
   }))
 
-  register(defineTool({
-    name: 'browser_release',
-    description: '[控制] Release control back to the session (resumes queued actions).',
-    parameters: {},
-    output: {
-      schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' } } },
-      render: () => [{ type: 'text', text: 'Control released.' }],
-    },
-    timeoutMs: BROWSER_TOOL_TIMEOUT_MS,
-    isConcurrencySafe: () => false,
-    presentCall: present('Release control'),
-    async execute(_args, exec) {
-      noteAgent(runtime, exec.agent)
-      runtime.setUserControl(false, 'ai')
-      exec.signal.throwIfAborted()
-      return { ok: true }
-    },
-  }))
+  // 2026-09-15 审计 P1（控制权定案 A 方案）：`browser_release` 已从模型工具面
+  // **移除**。用户的闸是用户的安全边界，模型能单方面撤销它等于这条边界不存在
+  // （实测：模型一次 browser_release 就能在自己忙时把闸关掉继续点页面）。
+  // 恢复只能由用户点「交给 AI」（shell 的胶囊按钮）——即 agent 侧拿不到任何
+  // 解除路径。runtime 的 `setUserControl(false, …)` 能力**保留**：用户按钮、
+  // 关闭浏览器、会话切换都还在用它（runtime.ts 的 setUserControl / shell-pages）。
+  // 同族口径见 CLAUDE/审计记录「只有那个按钮能改变控制权」。
 
   register(defineTool({
     name: 'browser_fill_credentials',
-    description: '[控制] Fill the login form of your tab with credentials stored for a connector (shown to the user; never submitted automatically). IMPORTANT: this opens the tab\'s credential window — from now until that tab navigates, browser_eval and browser_screenshot are refused there (a value still in the page can be read back in ways no masking can undo). Read the page with browser_get_snapshot / browser_get_text, submit with browser_click, and eval/screenshots resume automatically on the next document. The injected value stays masked in every text exit of this tab for the rest of the tab\'s life (page text, titles, URLs, history, downloads) — VERBATIM occurrences only: a page that renders the value transformed (base64, reversed, character-split) is not covered by any value-level rule. Treat this as a bound on accidents, not on a hostile page.',
+    description: '[控制] Fill the login form of your tab with credentials stored for a connector (shown to the user; never submitted automatically). SITE-BOUND: the tab must be on the connector\'s own origin — a tab on any other site (or a connector record without a site URL) is refused, so navigate to the real login page first. IMPORTANT: this opens the tab\'s credential window — from now until that tab navigates, browser_eval and browser_screenshot are refused there (a value still in the page can be read back in ways no masking can undo). Read the page with browser_get_snapshot / browser_get_text, submit with browser_click, and eval/screenshots resume automatically on the next document. The injected value stays masked in every text exit of this tab for the rest of the tab\'s life (page text, titles, URLs, history, downloads) — VERBATIM occurrences only: a page that renders the value transformed (base64, reversed, character-split) is not covered by any value-level rule. Treat this as a bound on accidents, not on a hostile page.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       connectorId: { type: 'string', required: true, description: 'The connector id whose stored credentials to use.' },
@@ -966,6 +1051,8 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       }
       noteAgent(runtime, exec.agent)
       const tabId = await tabOf(tab)
+      // 2026-09-15 审计 P2：注入前先做站点绑定（见 assertCredentialOrigin）。
+      await assertCredentialOrigin(runtime, tabId, connectorId.trim())
       return await runtime.fillCredentials(tabId, connectorId.trim(), exec.signal)
     },
   }))
@@ -1032,7 +1119,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
   }))
 
   // P2-29: the tool registry disposers are collected and returned so the
-  // plugin fiber can unregister all 32 tools (+ the guidance section) when the
+  // plugin fiber can unregister every tool (+ the guidance section) when the
   // browser plugin is disposed — otherwise they keep pointing at a disposed
   // runtime.
   return () => { for (const dispose of disposers) dispose() }
@@ -1059,18 +1146,21 @@ function formatNavigation(value: unknown): string {
 }
 
 function formatSnapshot(value: unknown): string {
-  const v = value as { elements?: Array<{ index: number; kind: string; text: string; selector: string; visible: boolean; disabled: boolean }>; url?: string; title?: string }
+  const v = value as { elements?: Array<{ index: number; kind: string; text: string; selector: string; visible: boolean; disabled: boolean }>; url?: string; title?: string; note?: string }
   const elements = v.elements ?? []
   const header = [v.title !== undefined && v.title !== '' ? String(v.title) : '', v.url !== undefined ? String(v.url) : ''].filter(Boolean).join(' · ')
   const head = header === '' ? '' : `Page: ${header}\n`
+  // 2026-09-15 审计 P2：截断/盲区提示必须出现在模型真正读到的那段文本里
+  // （只放进 JSON 字段等于没提示——模型读的是 render 的输出）。
+  const note = v.note === undefined || v.note === '' ? '' : `\n${String(v.note)}`
   if (elements.length === 0) {
-    return `${head}No interactable elements found.`
+    return `${head}No interactable elements found.${note}`
   }
   const lines = elements.map((e) => {
     const flags = `${e.visible ? '' : ' (off-screen)'}${e.disabled ? ' (disabled)' : ''}`
     return `${e.index}: [${e.kind}] ${e.text || '(no text)'}${flags}`
   })
-  return `${head}Interactable elements:\n${lines.join('\n')}`
+  return `${head}Interactable elements:\n${lines.join('\n')}${note}`
 }
 
 function formatText(value: unknown): string {
@@ -1147,7 +1237,7 @@ const GROUP_OF: Record<string, 'navigate' | 'interact' | 'read' | 'write' | 'mem
   browser_bookmarks_add: 'memory', browser_bookmarks_list: 'memory',
   browser_bookmarks_remove: 'memory', browser_history_search: 'memory',
   browser_download: 'artifacts', browser_downloads_list: 'artifacts', browser_downloads_remove: 'artifacts',
-  browser_takeover: 'control', browser_release: 'control', browser_fill_credentials: 'control',
+  browser_takeover: 'control', browser_fill_credentials: 'control',
   browser_clear_data: 'control', browser_credentials_list: 'control',
 }
 

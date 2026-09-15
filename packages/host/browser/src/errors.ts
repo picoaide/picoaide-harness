@@ -12,6 +12,9 @@ export type BrowserErrorCode =
   | 'timeout'
   | 'not-found'
   | 'navigation-blocked'
+  // 2026-09-15 审计 F4：下面 6 个码在 v4.2 单池实现里**没有任何构造点**（组/血缘/
+  // 会话隔离子系统已不存在），保留仅为不破坏已发布的类型面。新增代码不要再使用；
+  // 需要"跨 tab/跨会话拒绝"时请用现有的 not-found / window-controlled / quota。
   | 'auth-expired'
   | 'interrupted'
   | 'no-session'

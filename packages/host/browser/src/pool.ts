@@ -33,10 +33,30 @@ export interface PoolOptions {
   maxTabs?: number
   /** Quota wait budget ms (default 60000). */
   waitTimeoutMs?: number
+  /**
+   * 用户接管（「我来操作」）后，agent 操作等待交还的上限（ms，缺省 300000）。
+   *
+   * 2026-09-15 审计 P0-1：暂停本身是产品意图（"人操作时 loop 暂停"），但**无限期**
+   * 等待会让模型回合永远挂着、无任何可见原因，用户只能手动停止回合。超时以明确
+   * 错误结束这次工具调用（**不抢控制权**），让模型与客户端都能看到发生了什么。
+   */
+  userGateTimeoutMs?: number
+}
+
+/**
+ * 一次 tab 槽位预留的凭证（2026-09-15 P0 修复）：预留只能被**兑现**（registerTab
+ * 消耗）或**退还**（releaseReservation）一次 —— 两者都幂等。此前预留只是个计数器，
+ * "占位成功但导航失败"的路径会 `registerTab`（扣一次）后又在 catch 里
+ * `releaseReservation`（再扣一次），把一次预留凭空抹掉：池子远未满也会让后续所有
+ * 开页请求等到 60s 超时，只能重启客户端恢复（静默缩容）。
+ */
+export interface TabReservation {
+  readonly id: number
 }
 
 export const POOL_DEFAULTS = {
   maxTabs: 16,
+  userGateTimeoutMs: 300_000,
   waitTimeoutMs: 60_000,
 } as const
 
@@ -53,7 +73,13 @@ interface QueueTicket {
 class PoolMutex {
   private tail: Promise<void> = Promise.resolve()
 
-  async run(work: () => Promise<void>, gate: () => boolean, signal?: AbortSignal): Promise<void> {
+  async run(
+    work: () => Promise<void>,
+    gate: () => boolean,
+    signal?: AbortSignal,
+    /** 用户闸等待预算（ms，<=0 表示不设限）。 */
+    gateBudgetMs = 0,
+  ): Promise<void> {
     const prev = this.tail
     let release!: () => void
     this.tail = new Promise<void>((resolve) => { release = resolve })
@@ -61,9 +87,18 @@ class PoolMutex {
       // Waiting for the previous operation must be cancellable too: a wedged
       // predecessor used to block every later call forever (2026-09-08 P0-4).
       await raceAbort(prev, gate, signal)
+      const gateStartedAt = Date.now()
       while (gate()) {
         if (signal !== undefined && signal.aborted) {
           throw browserError('window-controlled', 'browser: agent was stopped while you control the browser')
+        }
+        // 2026-09-15 审计 P0-1：用户接管后不能无限期挂住模型回合。
+        if (gateBudgetMs > 0 && Date.now() - gateStartedAt >= gateBudgetMs) {
+          const seconds = Math.round(gateBudgetMs / 1000)
+          throw browserError(
+            'window-controlled',
+            `browser: 等待用户交还浏览器超时（${String(seconds)}s）—— 用户点「交给 AI」后可重试`,
+          )
         }
         await sleep(120)
       }
@@ -117,6 +152,9 @@ export class TabPool {
   private busyTool = ''
   private busyDepth = 0
   private reserved = 0
+  /** 尚未兑现/退还的预留令牌（所有权凭证，防止重复释放）。 */
+  private readonly outstandingReservations = new Set<number>()
+  private nextReservationId = 1
   /** Restored ledger ids whose view is not materialized yet. They appear in
    * `tabs` (the shell lists them) but must NOT consume a live-view slot until
    * they materialize (P2-26 quota semantics). */
@@ -181,7 +219,12 @@ export class TabPool {
     this.emit('busy')
     try {
       let result!: T
-      await this.mutex.run(async () => { result = await work() }, () => this.windowControlled, signal)
+      await this.mutex.run(
+        async () => { result = await work() },
+        () => this.windowControlled,
+        signal,
+        this.options.userGateTimeoutMs,
+      )
       return result
     } finally {
       this.busyDepth--
@@ -201,10 +244,9 @@ export class TabPool {
   }
 
   /** Reserve a tab slot (flat cap; waits FIFO, cancellable, timed). */
-  async reserveTab(signal?: AbortSignal): Promise<void> {
+  async reserveTab(signal?: AbortSignal): Promise<TabReservation> {
     if (this.liveTabs() + this.reserved < this.options.maxTabs) {
-      this.reserved++
-      return
+      return this.grantReservation()
     }
     await new Promise<void>((resolve, reject) => {
       const ticket: QueueTicket = { resolve, reject, signal, onAbort: undefined, settled: false }
@@ -232,13 +274,22 @@ export class TabPool {
       this.tabWaiters.push(ticket)
       this.pumpWaiters()
     })
+    // pumpWaiters 已经为本票 `reserved++`，这里补发一次性令牌。
+    return this.grantReservation({ alreadyCounted: true })
   }
 
-  /** Fail-fast reservation (user paths): true when a slot is free. */
-  tryReserveTab(): boolean {
-    if (this.liveTabs() + this.reserved >= this.options.maxTabs) return false
-    this.reserved++
-    return true
+  /** 发一张预留令牌（`alreadyCounted` = 计数已在 pumpWaiters 里加过）。 */
+  private grantReservation(options: { alreadyCounted?: boolean } = {}): TabReservation {
+    if (options.alreadyCounted !== true) this.reserved++
+    const id = this.nextReservationId++
+    this.outstandingReservations.add(id)
+    return { id }
+  }
+
+  /** Fail-fast reservation (user paths): a token when a slot is free. */
+  tryReserveTab(): TabReservation | undefined {
+    if (this.liveTabs() + this.reserved >= this.options.maxTabs) return undefined
+    return this.grantReservation()
   }
 
   private pumpWaiters(): void {
@@ -252,19 +303,31 @@ export class TabPool {
     }
   }
 
-  releaseReservation(): void {
+  /**
+   * 退还一次预留。带令牌时**幂等**：已被 registerTab 兑现（或已退过一次）的令牌
+   * 再退是 no-op —— 这正是 2026-09-15 P0 的修复点。
+   */
+  releaseReservation(reservation?: TabReservation): void {
+    if (reservation !== undefined) {
+      if (!this.outstandingReservations.delete(reservation.id)) return
+    } else if (this.outstandingReservations.size > 0) {
+      // 无令牌的旧调用点（含测试）：退最早的一张，保持既有语义。
+      const oldest = this.outstandingReservations.values().next().value
+      if (oldest !== undefined) this.outstandingReservations.delete(oldest)
+    }
     if (this.reserved > 0) this.reserved--
     this.pumpWaiters()
   }
 
   /** Register a created tab (consumes the reservation); a NEW tab becomes the
    * pool's active tab (browser convention; the shell/tools may switch). */
-  registerTab(tabId: number, url: string, title: string): void {
+  registerTab(tabId: number, url: string, title: string, reservation?: TabReservation): void {
     this.tabs.set(tabId, { tabId, url, title })
     // The view now exists: the restored entry consumes a live slot.
     this.pendingIds.delete(tabId)
     this.activeTabId = tabId
-    this.releaseReservation()
+    // 兑现这次预留：带令牌时只兑现自己的那张（幂等），不带令牌时沿用旧语义。
+    this.releaseReservation(reservation)
     this.emit('tab')
   }
 
@@ -336,6 +399,7 @@ export class TabPool {
     this.pendingIds.clear()
     this.activeTabId = undefined
     this.reserved = 0
+    this.outstandingReservations.clear()
     for (const ticket of this.tabWaiters) {
       ticket.settled = true
       if (ticket.timer !== undefined) clearTimeout(ticket.timer)

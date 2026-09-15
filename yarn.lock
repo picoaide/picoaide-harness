@@ -5611,6 +5611,7 @@ __metadata:
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
     electron: "npm:43.4.0"
+    jsdom: "npm:^25.0.0"
     react: "npm:18.3.1"
     tsdown: "npm:0.22.2"
     typescript: "npm:6.0.3"

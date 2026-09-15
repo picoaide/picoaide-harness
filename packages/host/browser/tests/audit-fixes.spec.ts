@@ -62,6 +62,8 @@ class MockView implements NativeView {
   canGoForward = vi.fn(() => false)
   capturePage = vi.fn(async () => ({ getSize: () => ({ width: 100, height: 100 }), resize: (o: unknown) => o, toJPEG: () => Buffer.from('x') }) as never)
   setWindowOpenHandler = vi.fn()
+  /** 2026-09-15 审计 P2-7：mask 上锁时必须把键盘焦点交给蒙版。 */
+  focus = vi.fn()
   attach(win: { contentView: { addChildView: (v: unknown) => void } }, bounds: NativeBounds): void { this.attached = true; this.bounds = bounds; win.contentView.addChildView(this) }
   setBounds(b: NativeBounds): void { this.bounds = b }
   setVisible(v: boolean): void { this.visible = v }
@@ -115,7 +117,12 @@ class MockAdapter implements ElectronAdapter {
       isDestroyed: () => w.destroyed,
       close: () => { w.destroyed = true },
       setTitle: (t: string) => { w.title = t },
-      getContentSize: () => ({ width: 1100, height: 780 }),
+      // 2026-09-15 审计 P2-4：真实 Electron 对已销毁窗口调 getContentSize() 会抛
+      // `Object has been destroyed`；mock 复刻这一语义，才能测出"缺 isDestroyed 判断"。
+      getContentSize: () => {
+        if (w.destroyed) throw new Error('Object has been destroyed')
+        return { width: 1100, height: 780 }
+      },
       contentView: { addChildView: () => {}, removeChildView: () => {} },
       onResize: () => () => {},
       onClosed: () => () => {},
@@ -463,6 +470,103 @@ describe('audit fixes: op-log actor + store switching', () => {
     expect(releases.length).toBe(1)
     cleanup()
   })
+  it('恢复中途换账号：上一个账号的账本 tab 不会留在新账号里（2026-09-15 审计 P1-2）', async () => {
+    // materialize 在飞（单个 tab 的 loadURL 有 20s 预算）× 期间一次会话切换
+    // （token 过期/登出/再登录）—— 旧实现只在循环顶部校验代际，已经进到
+    // createTabReal 的那个 tab 会跑完：旧账号的 URL/标题写进新账号的 ops/history/
+    // ledger，并在新账号的分区里真的加载该页面；新账号同 id 的恢复 tab 还会被它顶掉。
+    const adapter = new MockAdapter()
+    const dir = join(process.cwd(), 'tests', `.epoch-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(dir, { recursive: true })
+    const store = new BrowserStore({ dir })
+    store.saveGroupLedger({ tabs: [{ tabId: 7, url: 'https://old.example', title: 'old account tab' }], activeTabId: 7 })
+    const runtime = new BrowserRuntime(adapter as never, {}, undefined, undefined, { store })
+    try {
+      // 让恢复出来的第一个 tab 的加载"挂住"
+      let releaseLoad: (() => void) | undefined
+      const original = adapter.createView.bind(adapter)
+      adapter.createView = (() => {
+        const view = original() as unknown as { loadURL: unknown }
+        view.loadURL = vi.fn(() => new Promise<void>((resolve) => { releaseLoad = () => { resolve() } }))
+        return view as never
+      }) as never
+
+      runtime.restoreLedger()
+      // 触发物化（真实路径：prewarm/打开浏览器时才会把账本 tab 变成真视图）
+      void runtime.prewarm()
+      await new Promise((resolve) => { setTimeout(resolve, 40) })
+      // 会话切换：store 换成新账号（空账本）→ restoreLedger 递增代际
+      // （真实链路：applyUserScope → switchStoreForUser → restoreLedger）
+      const nextStore = new BrowserStore({ dir: join(dir, 'next') })
+      runtime.setStore(nextStore)
+      runtime.restoreLedger()
+      releaseLoad?.()
+      await new Promise((resolve) => { setTimeout(resolve, 80) })
+
+      expect(runtime.listTabs()).toHaveLength(0)
+    } finally {
+      runtime.dispose()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('蒙版上锁时把键盘焦点交给蒙版（2026-09-15 审计 P2-7）', async () => {
+    const { runtime, adapter, cleanup } = makeRuntime()
+    await runtime.prewarm()
+    const overlay = adapter.overlays[0]!
+    // 用户接管 → 蒙版让位；交还 → 蒙版重新上锁，此时必须拿回键盘焦点
+    runtime.setUserControl(true, 'user')
+    overlay.focus.mockClear()
+    runtime.setUserControl(false, 'user')
+    expect(overlay.focus).toHaveBeenCalled()
+    cleanup()
+  })
+
+  it('closeAll(user) 之后控制权必须交还（2026-09-15 审计 P1-1）', async () => {
+    // 用户正拿着控制权（「我来操作」）时来一次会话切换（token 过期 → auth-gate
+    // clear、登出、改密都会发 pico/session-changed）⇒ 旧实现用 already 短路，
+    // controlled 永久为 true：蒙版不再上锁、用户闸对 agent 失效、胶囊显示「交给 AI」。
+    const { runtime, cleanup } = makeRuntime()
+    runtime.setUserControl(true, 'user')
+    expect(runtime.shellState().controlled).toBe(true)
+    await runtime.closeAll(true)
+    expect(runtime.shellState().controlled).toBe(false)
+    cleanup()
+  })
+
+  it('窗口已销毁时 relayout/prewarm 不再把异常抛成未处理拒绝（2026-09-15 审计 P2-4）', async () => {
+    const { runtime, adapter, cleanup } = makeRuntime()
+    await runtime.open('https://a.example')
+    // 模拟"已销毁但引用还在"的窗口期：closed 回调尚未把它置空
+    adapter.windows[0]!.destroyed = true
+    expect(() => { runtime.relayout() }).not.toThrow()
+    await runtime.prewarm().catch(() => undefined)
+    cleanup()
+  })
+
+  it('导航失败的 browser_open 不再吃掉一个 tab 名额（2026-09-15 P0-2 回归）', async () => {
+    // 现场形态：createTabReal 里 registerTab 已经兑现了这次预留，随后
+    // navigateInternal 抛 navigation-blocked，catch 里 removeTab，调用方再
+    // releaseReservation 一次 —— 旧实现只有计数器，于是这一次预留被抹掉：
+    // 池子静默缩容，最终"再也开不出新标签页"，只能重启客户端。
+    const adapter = new MockAdapter()
+    const dir = join(process.cwd(), 'tests', `.quota-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(dir, { recursive: true })
+    const store = new BrowserStore({ dir })
+    const runtime = new BrowserRuntime(adapter as never, { maxTabs: 1 }, undefined, undefined, { store })
+    try {
+      const err = await runtime.open('file:///etc/passwd').catch((cause: unknown) => cause)
+      expect((err as { code?: string }).code).toBe('navigation-blocked')
+      // 容量 1 仍然可用（旧实现这里会是 quota 失败）
+      const tab = await runtime.open('https://ok.example')
+      expect(tab.id).toBeGreaterThan(0)
+      expect(runtime.listTabs()).toHaveLength(1)
+    } finally {
+      runtime.dispose()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('downloadUrl refuses non-http(s) schemes', async () => {
     const { runtime, cleanup } = makeRuntime()
     await runtime.open('https://a.example')

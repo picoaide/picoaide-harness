@@ -26,6 +26,21 @@ export const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 /** Default downloads directory (overridden by the runtime wiring). */
 export const DEFAULT_DOWNLOAD_DIR = '.picoaide-downloads'
 
+/**
+ * Windows 保留设备名（含带扩展名/结尾点的变体）。
+ *
+ * 2026-09-15 审计 P2-6：`join(dir, 'NUL')` 在 Windows 上被解析成 NUL 设备 ——
+ * 下载"成功"但盘上零字节、下载列表却记 done+path，「打开」也打不开。Linux 没有这个
+ * 语义，属典型"Linux 上碰巧成立"。这里不区分平台：在任何平台给保留名加 `_` 前缀，
+ * 保证同一份下载文件名跨平台一致（也让 CI 能测）。
+ */
+const WINDOWS_RESERVED_STEM = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/iu
+
+/** 去掉 Windows 会静默裁掉的结尾点与空格（`foo.` → `foo`，否则会覆盖已存在的 foo）。 */
+function trimWindowsTrailing(value: string): string {
+  return value.replace(/[. ]+$/u, '')
+}
+
 /** Resolve a conflict-free absolute path inside `dir` for `filename`. */
 export function resolveDownloadPath(dir: string, filename: string): string {
   try {
@@ -34,12 +49,16 @@ export function resolveDownloadPath(dir: string, filename: string): string {
     // dir may be created by the save itself; best effort.
   }
   const safeName = basename(filename || 'download').replace(/[\\/:*?"<>|]/g, '_')
-  const ext = extname(safeName)
-  const stem = safeName.slice(0, safeName.length - ext.length)
-  let candidate = join(dir, safeName)
+  const ext = trimWindowsTrailing(extname(safeName))
+  const rawStem = trimWindowsTrailing(safeName.slice(0, safeName.length - extname(safeName).length))
+  // 空 stem（例如文件名就叫 "…" 或全是空格）必须留下可用的名字
+  const fallbackStem = rawStem.length > 0 ? rawStem : 'download'
+  const stem = WINDOWS_RESERVED_STEM.test(fallbackStem) ? `_${fallbackStem}` : fallbackStem
+  const normalized = `${stem}${ext}`
+  let candidate = join(dir, normalized)
   let n = 1
   while (existsSync(candidate)) {
-    candidate = join(dir, `${stem}-${n}${ext}`)
+    candidate = join(dir, `${stem}-${String(n)}${ext}`)
     n++
     if (n > 999) return join(dir, `${stem}-${Date.now()}${ext}`)
   }
