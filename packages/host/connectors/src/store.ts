@@ -10,6 +10,24 @@ const FILE_MODE = 0o600
 const MAX_CREDENTIAL_BYTES = 64 * 1024
 
 /**
+ * 凭据结构比对（唯一实现）：写后补偿用它判断"盘上还是不是我写的那一份"。
+ * 逐字段比，不做 JSON 字符串比较——那会受键序影响而漏判。
+ */
+export function sameCredential(a: ConnectorCredential, b: ConnectorCredential): boolean {
+  const fields = (value: ConnectorCredential): string =>
+    Object.entries(value.fields ?? {}).sort(([x], [y]) => x.localeCompare(y)).map(([k, v]) => `${k}=${v}`).join('\u0000')
+  return a.updatedAt === b.updatedAt
+    && a.accessToken === b.accessToken
+    && a.refreshToken === b.refreshToken
+    && a.clientId === b.clientId
+    && a.clientSecret === b.clientSecret
+    && a.expiresAt === b.expiresAt
+    && a.refreshedAt === b.refreshedAt
+    && a.publicMcp === b.publicMcp
+    && fields(a) === fields(b)
+}
+
+/**
  * Connector ids come from marketplace-derived definitions, so they are
  * validated before crossing into the filesystem (no separators, no dot
  * segments, no NUL, bounded length).
@@ -117,6 +135,10 @@ export class ConnectorStore {
   }
 
   async writeCredential(id: string, credential: ConnectorCredential): Promise<void> {
+    await this.exclusive(() => this.writeCredentialUnlocked(id, credential))
+  }
+
+  private async writeCredentialUnlocked(id: string, credential: ConnectorCredential): Promise<void> {
     await ensurePrivateDirectory(this.dir)
     const file = this.path(id)
     const temporary = join(this.dir, `.${basename(file)}.${process.pid}.${randomUUID()}.tmp`)
@@ -138,18 +160,55 @@ export class ConnectorStore {
   }
 
   async updateCredential(id: string, patch: Partial<ConnectorCredential>): Promise<ConnectorCredential> {
-    const current = (await this.readCredential(id)) ?? { updatedAt: 0 }
-    const next: ConnectorCredential = { ...current, ...patch, updatedAt: Date.now() }
-    await this.writeCredential(id, next)
-    return next
+    // 读-改-写必须在同一段独占区里：否则两个并发 update 会互相覆盖（写后补偿的
+    // 复核把这条竞态也一并暴露出来）。
+    return await this.exclusive(async () => {
+      const current = (await this.readCredential(id)) ?? { updatedAt: 0 }
+      const next: ConnectorCredential = { ...current, ...patch, updatedAt: Date.now() }
+      await this.writeCredentialUnlocked(id, next)
+      return next
+    })
   }
 
   async clearCredential(id: string): Promise<void> {
+    await this.exclusive(() => this.clearCredentialUnlocked(id))
+  }
+
+  private async clearCredentialUnlocked(id: string): Promise<void> {
     try {
       await fs.unlink(this.path(id))
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause
     }
+  }
+
+  /**
+   * 原子 compare-and-delete（2026-09-15 复核实测的"读→清"竞态）。
+   *
+   * 场景：写后补偿原先在 store 外面做 `readCredential → 比对 → clearCredential`，
+   * 读与清之间没有任何原子性 —— 更新的写入若恰好落在这个窗口里，就会被旧补偿
+   * **删掉**（不是覆盖，是消失；用户新提交的凭据静默丢失、下次启动不上线）。
+   * 把比较与删除放进同一段独占区，窗口即关闭。
+   *
+   * 并发边界（认账）：独占区是**本实例**的（同一进程内），跨进程写入不在保护范围；
+   * 产品里连接器凭据只有本插件写，故此处足够。
+   * @returns 真的删掉了返回 true；磁盘内容已经被别的写入换掉时返回 false。
+   */
+  async clearCredentialIfUnchanged(id: string, expected: ConnectorCredential): Promise<boolean> {
+    return await this.exclusive(async () => {
+      const current = await this.readCredential(id)
+      if (current === null || !sameCredential(current, expected)) return false
+      await this.clearCredentialUnlocked(id)
+      return true
+    })
+  }
+
+  /** 进程内串行化：凭据的读-改-写与比较-删除都排在同一条链上。 */
+  private chain: Promise<unknown> = Promise.resolve()
+  private async exclusive<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.chain.then(task, task)
+    this.chain = run.then(() => undefined, () => undefined)
+    return await run
   }
 
   async hasCredential(id: string): Promise<boolean> {

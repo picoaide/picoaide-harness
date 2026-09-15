@@ -557,22 +557,15 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   ): Promise<void> => {
     if (intent.store !== store) return
     try {
-      const onDisk = await intent.store.readCredential(id)
-      if (onDisk === null || !sameCredential(onDisk, written)) return
-      await intent.store.clearCredential(id)
+      // 原子 compare-and-delete（2026-09-15 第二轮复核）：比较与删除必须在 store
+      // 的同一段独占区里 —— 在插件侧"先读后删"时，更新的写入若落在读与清之间会被
+      // 旧补偿删掉（复核用强制交错探针实测到）。
+      await intent.store.clearCredentialIfUnchanged(id, written)
     } catch (cause) {
       ctx.logger?.warn(`pico-connectors: ${id} 竞态凭据写入回滚失败`, cause)
     }
   }
 
-  /** 结构比对（逐字段，不用 JSON 字符串以免受键序影响）。 */
-  const sameCredential = (a: ConnectorCredential, b: ConnectorCredential): boolean =>
-    a.updatedAt === b.updatedAt
-    && a.accessToken === b.accessToken
-    && a.refreshToken === b.refreshToken
-    && a.expiresAt === b.expiresAt
-    && a.publicMcp === b.publicMcp
-    && JSON.stringify(a.fields ?? {}) === JSON.stringify(b.fields ?? {})
 
   /**
    * Register one connector's MCP servers. `pendingApproval` means nothing was
