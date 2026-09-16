@@ -1653,7 +1653,7 @@ function MemoryTabView(props) {
                 className: "mt-item-edit",
                 rows: 3,
                 value: editDraft,
-                onChange: (event) => setEditDraft(event.target.value.replaceAll("\xA7", ""))
+                onChange: (event) => setEditDraft(event.target.value.replaceAll("\xA7",() => ("")))
               }
             ),
             /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-entry-edit-row", children: [
@@ -4786,7 +4786,7 @@ function TasksPane({ t: tt, dsSessionId }) {
     }
   }, []);
   const removeTask = async (id) => {
-    if (!window.confirm(t("coi.tasks.confirmDelete").replace("{id}", id))) return;
+    if (!window.confirm(t("coi.tasks.confirmDelete").replace("{id}",() => (id)))) return;
     try {
       const res = await deleteJson(`/tasks/${encodeURIComponent(id)}`);
       if (res.ok !== true) {
@@ -8248,11 +8248,11 @@ function EffectHint(props) {
   if (e === 0) {
     text = D("prompt.effectOnce");
   } else if (r === 0) {
-    text = e === 1 ? D("prompt.effectInfinite") : D("prompt.effectInfiniteCadence").replace("{n}", String(e));
+    text = e === 1 ? D("prompt.effectInfinite") : D("prompt.effectInfiniteCadence").replace("{n}",() => (String(e)));
   } else if (r === 1) {
     text = D("prompt.effectOnce");
   } else {
-    text = e === 1 ? D("prompt.effectFinite").replace("{n}", String(r)) : D("prompt.effectFiniteCadence").replace("{n}", String(r)).replace("{m}", String(e));
+    text = e === 1 ? D("prompt.effectFinite").replace("{n}",() => (String(r))) : D("prompt.effectFiniteCadence").replace("{n}",() => (String(r))).replace("{m}",() => (String(e)));
   }
   return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-effect-hint", children: text });
 }
@@ -8333,7 +8333,7 @@ function PromptView(props) {
       setInjections(i.injections);
       setCategories(c.categories);
     } catch (err) {
-      showError(say("prompt.loadFailed").replace("{message}", errText3(err)));
+      showError(say("prompt.loadFailed").replace("{message}",() => (errText3(err))));
     }
   }, [showError]);
   (0, import_react17.useEffect)(() => {
@@ -8410,7 +8410,7 @@ function PromptView(props) {
   };
   const deletePrompt = async () => {
     if (selectedId === null) return;
-    const text = say("prompt.deleteConfirm").replace("{name}", selected?.name ?? "");
+    const text = say("prompt.deleteConfirm").replace("{name}",() => (selected?.name ?? ""));
     if (!window.confirm(text)) return;
     try {
       await api4(`/memory-evolve/api/prompts/${encodeURIComponent(selectedId)}`, { method: "DELETE" });
@@ -8422,10 +8422,10 @@ function PromptView(props) {
     }
   };
   const afterInjected = async (injection) => {
-    const times = injection.roundsLeft === null ? say("prompt.injectInfiniteShort") : injection.roundsLeft === 1 ? say("prompt.onceOnly") : say("prompt.injectRound").replace("{n}", String(injection.roundsLeft));
-    const cadence = injection.every === 0 || injection.roundsLeft === 1 ? "" : (injection.every ?? 1) === 1 ? say("prompt.everyTurnParen") : say("prompt.injectCadenceParen").replace("{n}", String(injection.every));
+    const times = injection.roundsLeft === null ? say("prompt.injectInfiniteShort") : injection.roundsLeft === 1 ? say("prompt.onceOnly") : say("prompt.injectRound").replace("{n}",() => (String(injection.roundsLeft)));
+    const cadence = injection.every === 0 || injection.roundsLeft === 1 ? "" : (injection.every ?? 1) === 1 ? say("prompt.everyTurnParen") : say("prompt.injectCadenceParen").replace("{n}",() => (String(injection.every)));
     const ending = injection.every === 0 || injection.roundsLeft === 1 ? say("prompt.injectedOnceEnding") : injection.roundsLeft === null ? say("prompt.injectedInfiniteEnding") : say("prompt.injectedFiniteEnding");
-    showNotice(say("prompt.injected").replace("{name}", injection.title).replace("{rounds}", times).replace("{cadence}", cadence).replace("{ending}", ending));
+    showNotice(say("prompt.injected").replace("{name}",() => (injection.title)).replace("{rounds}",() => (times)).replace("{cadence}",() => (cadence)).replace("{ending}",() => (ending)));
     await load();
     setShowInjections(true);
     window.dispatchEvent(new CustomEvent("dsh-memory-evolve:badge-change"));
@@ -8468,7 +8468,7 @@ function PromptView(props) {
         { method: "POST", body: JSON.stringify({ immediate: true, sessionId: props.sessionId }) }
       );
       const name2 = data.injection.title;
-      showNotice(data.steered ? say("prompt.injectedNow").replace("{name}", name2) : say("prompt.injectedNowFallback").replace("{name}", name2));
+      showNotice(data.steered ? say("prompt.injectedNow").replace("{name}",() => (name2)) : say("prompt.injectedNowFallback").replace("{name}",() => (name2)));
       await load();
       setShowInjections(true);
       window.dispatchEvent(new CustomEvent("dsh-memory-evolve:badge-change"));
@@ -8518,7 +8518,7 @@ function PromptView(props) {
       );
       if (immediate) {
         const name2 = data.injection.title;
-        showNotice(data.steered ? say("prompt.injectedNow").replace("{name}", name2) : say("prompt.injectedNowFallback").replace("{name}", name2));
+        showNotice(data.steered ? say("prompt.injectedNow").replace("{name}",() => (name2)) : say("prompt.injectedNowFallback").replace("{name}",() => (name2)));
       } else {
         await afterInjected(data.injection);
       }
@@ -8542,9 +8542,9 @@ function PromptView(props) {
   const activeInjectionOf = (promptId) => injections.find((i) => i.sourcePromptId === promptId);
   const cadenceLabel = (inj) => {
     if (inj.every === 0) return say("prompt.onceOnly");
-    return (inj.every ?? 1) === 1 ? say("prompt.everyTurn") : say("prompt.injectCadence").replace("{n}", String(inj.every));
+    return (inj.every ?? 1) === 1 ? say("prompt.everyTurn") : say("prompt.injectCadence").replace("{n}",() => (String(inj.every)));
   };
-  const remainingLabel = (inj) => inj.roundsLeft === null ? say("prompt.injectInfinite") : say("prompt.injectRound").replace("{n}", String(inj.roundsLeft));
+  const remainingLabel = (inj) => inj.roundsLeft === null ? say("prompt.injectInfinite") : say("prompt.injectRound").replace("{n}",() => (String(inj.roundsLeft)));
   const addCategory = async () => {
     const name2 = newCategoryName.trim();
     if (!name2) return;
@@ -8557,7 +8557,7 @@ function PromptView(props) {
       setCategory(name2);
       setNewCategoryName("");
       setAddingCategory(false);
-      if (data.alreadyExists) showNotice(say("prompt.categoryExists").replace("{name}", name2));
+      if (data.alreadyExists) showNotice(say("prompt.categoryExists").replace("{name}",() => (name2)));
     } catch (err) {
       showError(errText3(err));
     }
@@ -8579,16 +8579,16 @@ function PromptView(props) {
       setRenamingCategory(null);
       setRenameValue("");
       await load();
-      const suffix = data.renamed > 0 ? say("prompt.categoryRenamedSuffix").replace("{count}", String(data.renamed)) : "";
-      showNotice(`${say("prompt.categoryRenamed").replace("{from}", from).replace("{to}", to).replace("{renamed}", "")}${suffix}`);
+      const suffix = data.renamed > 0 ? say("prompt.categoryRenamedSuffix").replace("{count}",() => (String(data.renamed))) : "";
+      showNotice(`${say("prompt.categoryRenamed").replace("{from}",() => (from)).replace("{to}",() => (to)).replace("{renamed}",() => (""))}${suffix}`);
     } catch (err) {
       showError(errText3(err));
     }
   };
   const removeCategory = async (name2) => {
     const count = prompts.filter((p) => p.category === name2).length;
-    const hint = count > 0 ? say("prompt.categoryMoved").replace("{count}", String(count)) : "";
-    const confirmText = say("prompt.deleteCategoryConfirm").replace("{name}", name2).replace("{hint}", hint);
+    const hint = count > 0 ? say("prompt.categoryMoved").replace("{count}",() => (String(count))) : "";
+    const confirmText = say("prompt.deleteCategoryConfirm").replace("{name}",() => (name2)).replace("{hint}",() => (hint));
     if (!window.confirm(confirmText)) return;
     try {
       const data = await api4(
@@ -8599,8 +8599,8 @@ function PromptView(props) {
       setCategories(cats.categories);
       if (category === name2) setCategory("\u5168\u90E8");
       await load();
-      const moved = data.moved > 0 ? say("prompt.categoryMoved").replace("{count}", String(data.moved)) : "";
-      showNotice(`${say("prompt.categoryDeleted").replace("{name}", name2)}${moved}`);
+      const moved = data.moved > 0 ? say("prompt.categoryMoved").replace("{count}",() => (String(data.moved))) : "";
+      showNotice(`${say("prompt.categoryDeleted").replace("{name}",() => (name2))}${moved}`);
     } catch (err) {
       showError(errText3(err));
     }
@@ -8715,7 +8715,7 @@ function PromptView(props) {
         injections.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-overlay-empty", children: say("prompt.noInjection") }),
         injections.map((inj) => /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-overlay-item", children: [
           /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-overlay-item-main", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-overlay-item-title", children: say("prompt.quotedTitle").replace("{name}", inj.title) }),
+            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-overlay-item-title", children: say("prompt.quotedTitle").replace("{name}",() => (inj.title)) }),
             /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-overlay-item-sub", children: [
               remainingLabel(inj),
               " \xB7 ",
@@ -8862,12 +8862,12 @@ function PromptView(props) {
                     /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-name", children: p.name }),
                     /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-badge", children: p.category }),
                     p.enabled === false && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-badge pm-item-badge-off", title: say("prompt.disabledHint"), children: say("prompt.enabledOff") }),
-                    active !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-badge pm-item-badge-active", title: say("prompt.injectHint"), children: active.roundsLeft === null ? say("prompt.injectingBadgeInfinite") : say("prompt.injectingBadge").replace("{n}", String(active.roundsLeft)) })
+                    active !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-badge pm-item-badge-active", title: say("prompt.injectHint"), children: active.roundsLeft === null ? say("prompt.injectingBadgeInfinite") : say("prompt.injectingBadge").replace("{n}",() => (String(active.roundsLeft))) })
                   ] }),
                   /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-item-summary", children: summaryLine(p) }),
                   /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-item-row3", children: [
-                    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-usage", children: say("prompt.usage").replace("{n}", String(p.usageCount ?? 0)) }),
-                    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-used", children: p.lastUsedAt !== null ? say("prompt.lastUsed").replace("{time}", formatTime4(p.lastUsedAt)) : say("prompt.neverUsed") })
+                    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-usage", children: say("prompt.usage").replace("{n}",() => (String(p.usageCount ?? 0))) }),
+                    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-used", children: p.lastUsedAt !== null ? say("prompt.lastUsed").replace("{time}",() => (formatTime4(p.lastUsedAt))) : say("prompt.neverUsed") })
                   ] })
                 ]
               },
@@ -9102,7 +9102,7 @@ function PromptView(props) {
                 if (active !== void 0) {
                   return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(import_jsx_runtime18.Fragment, { children: [
                     /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { className: "pm-inject-status", children: [
-                      active.roundsLeft === null ? say("prompt.injectingBadgeInfinite") : say("prompt.injectingBadge").replace("{n}", String(active.roundsLeft)),
+                      active.roundsLeft === null ? say("prompt.injectingBadgeInfinite") : say("prompt.injectingBadge").replace("{n}",() => (String(active.roundsLeft))),
                       " ",
                       "\xB7 ",
                       cadenceLabel(active)
@@ -12139,7 +12139,7 @@ function createSessionFilter(texts) {
       const need = collapsed && matched !== null && matched.running > 0;
       const badge = row.querySelector(".dsh-ui-ws-run-badge");
       if (need) {
-        const label = texts.runningLabel.replace("{count}", String(matched.running));
+        const label = texts.runningLabel.replace("{count}",() => (String(matched.running)));
         if (badge !== null) {
           if (badge.textContent !== label) badge.textContent = label;
         } else {

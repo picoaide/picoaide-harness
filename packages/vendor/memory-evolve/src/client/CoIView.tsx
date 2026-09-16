@@ -447,7 +447,7 @@ function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string 
   const removeTask = async (id: string): Promise<void> => {
     // 稳定版复审 P1-6：文案里的 {id} 占位符必须替换成真实任务 id，
     // 否则对话框显示字面量 {id}（旧版未替换，用户不知道删的是哪个任务）
-    if (!window.confirm(t('coi.tasks.confirmDelete').replace('{id}', id))) return
+    if (!window.confirm(t('coi.tasks.confirmDelete').replace('{id}',() => (id)))) return
     try {
       const res = await deleteJson<{ ok: boolean; message?: string }>(`/tasks/${encodeURIComponent(id)}`)
       if (res.ok !== true) {
