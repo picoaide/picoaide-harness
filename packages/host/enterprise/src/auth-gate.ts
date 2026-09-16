@@ -479,7 +479,7 @@ export function renderLoginPage(locale: HostLocale): string {
     document.getElementById('btn').style.display = isPassword ? '' : 'none'
     f2.style.display = isPassword ? '' : 'none'
     browserBtn.style.display = isPassword ? 'none' : ''
-    browserBtn.textContent = T.signInWith.replace('{method}', methodLabel(currentMethod))
+    browserBtn.textContent = T.signInWith.replace('{method}',() => (methodLabel(currentMethod)))
     waiting.style.display = 'none'
   }
 
@@ -601,7 +601,7 @@ export function renderLoginPage(locale: HostLocale): string {
       }
       var data = await res.json().catch(function () { return {} })
       var raw = String(data.error && data.error.message ? data.error.message : (data.error || ''))
-      var msg = friendlyLoginError(raw) || T.signInFailed.replace('{status}', res.status)
+      var msg = friendlyLoginError(raw) || T.signInFailed.replace('{status}',() => (res.status))
       // 开放问题2: auditor 拒绝时提供「打开管理后台」入口。
       if (raw.toLowerCase().indexOf('auditor_not_allowed') >= 0) {
         var server = trimServer(document.getElementById('server').value.trim())
@@ -1164,13 +1164,13 @@ export function apply(ctx: Context, config: Config): void {
    * @returns 可直接写进响应的 HTML。
    */
   const loginPage = (locale: HostLocale): string => renderLoginPage(locale)
-    .replaceAll('__DEFAULT_SERVER__', defaultServer)
+    .replaceAll('__DEFAULT_SERVER__',() => (defaultServer))
     // 只有**确实配了**域名才打标记 —— 页面脚本据此决定要不要自动连接。
-    .replaceAll('__DEFAULT_SERVER_MARK__', configuredServer === '' ? '' : 'data-default-server="1"')
+    .replaceAll('__DEFAULT_SERVER_MARK__',() => (configuredServer === '' ? '' : 'data-default-server="1"'))
     // 内置了地址就不再提供"返回修改服务端地址"（见 backButtonHtml 的说明）。
-    .replaceAll('__BACK_BUTTON__', configuredServer === '' ? backButtonHtml(locale) : '')
-    .replaceAll('__BRAND_NAME__', brandTitle)
-    .replaceAll('__BRAND_JSON__', brandScriptLiteral(brand))
+    .replaceAll('__BACK_BUTTON__',() => (configuredServer === '' ? backButtonHtml(locale) : ''))
+    .replaceAll('__BRAND_NAME__',() => (brandTitle))
+    .replaceAll('__BRAND_JSON__',() => (brandScriptLiteral(brand)))
 
   /**
    * 组装会话恢复过渡页（`__BRAND_NAME__` 替换同登录页）。
@@ -1178,7 +1178,7 @@ export function apply(ctx: Context, config: Config): void {
    * @returns 可直接写进响应的 HTML。
    */
   const restoringPage = (locale: HostLocale): string =>
-    renderRestoringPage(locale).replaceAll('__BRAND_NAME__', brandTitle)
+    renderRestoringPage(locale).replaceAll('__BRAND_NAME__',() => (brandTitle))
 
   const json = (res: ServerResponse, code: number, body: unknown): void => {
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' })
@@ -1409,7 +1409,7 @@ export function apply(ctx: Context, config: Config): void {
         armPendingBrowserLoginFromLoginPage()
         return loginPage(locale)
       }
-      return html.replace('</head>', SESSION_LOST_SCRIPT + '</head>')
+      return html.replace('</head>',() => (SESSION_LOST_SCRIPT + '</head>'))
       }),
 
       ctx.webServer.register({
