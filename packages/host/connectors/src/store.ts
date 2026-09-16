@@ -184,6 +184,38 @@ export class ConnectorStore {
     })
   }
 
+  /**
+   * Compare-and-update: apply `patch` only while the stored credential is still
+   * exactly the snapshot `expected` describes.
+   *
+   * Refresh writes must go through this. A refresh reads a credential, spends up
+   * to the outbound budget on the network, and would otherwise overwrite a newer
+   * interactive re-authorization (stale tokens winning the write order) or
+   * resurrect a credential the user disconnected in the meantime (the file is
+   * deleted, yet `updateCredential` recreates it from `{updatedAt:0}`). Called on
+   * a different user's store the comparison also fails, so a refresh that
+   * outlives a user switch cannot write one account's tokens into another's.
+   * @param id - connector id.
+   * @param expected - the credential snapshot the refresh started from.
+   * @param patch - fields to merge when the snapshot still holds.
+   * @returns the persisted credential, or null when nothing was written.
+   */
+  async updateCredentialIfUnchanged(
+    id: string,
+    expected: ConnectorCredential,
+    patch: Partial<ConnectorCredential>,
+  ): Promise<ConnectorCredential | null> {
+    return await this.exclusive(async () => {
+      const current = await this.readCredential(id)
+      if (current === null || !sameCredential(current, expected)) return null
+      const now = Date.now()
+      const updatedAt = now > current.updatedAt ? now : current.updatedAt + 1
+      const next: ConnectorCredential = { ...current, ...patch, updatedAt }
+      await this.writeCredentialUnlocked(id, next)
+      return next
+    })
+  }
+
   async clearCredential(id: string): Promise<void> {
     await this.exclusive(() => this.clearCredentialUnlocked(id))
   }
