@@ -18,6 +18,7 @@ import {
   net,
   Notification,
   shell,
+  systemPreferences,
   Tray,
 } from 'electron'
 import { spawn } from 'node:child_process'
@@ -231,6 +232,38 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (window.isMinimized()) window.restore()
     window.show()
     window.focus()
+  }
+
+  /**
+   * macOS 标题栏双击：按**系统偏好**缩放或最小化窗口。
+   *
+   * 为什么应用要自己做（2026-09-16 用户报"左边无法双击扩大或缩小窗口"）：
+   * 我们用 `titleBarStyle: 'hiddenInset'` + 自绘的 `-webkit-app-region: drag` 拖拽条，
+   * 而 Electron **不会**为自定义拖拽区补原生双击行为（electron#16385，维护者给的
+   * 结论就是"应用自己实现"，官方 recipe 即下面这套 `AppleActionOnDoubleClick`）。
+   * 系统偏好有三个取值（系统设置 → 桌面与程序坞 → 双击窗口的标题栏以）：
+   * `Maximize`（缩放，默认）/ `Minimize` / `None`；读不到时按默认的缩放走。
+   */
+  performTitleBarDoubleClick(): void {
+    if (this.platform !== 'darwin') return
+    const window = this.window
+    if (window === undefined || window.isDestroyed()) return
+    // 全屏时系统自己接管双击，别在这里再切一次状态。
+    if (window.isFullScreen()) return
+    let action = 'Maximize'
+    try {
+      action = systemPreferences.getUserDefault('AppleActionOnDoubleClick', 'string')
+    } catch {
+      // 读不到偏好（老系统/受限环境）⇒ 保持系统默认语义：缩放。
+    }
+    if (action === 'None') return
+    if (action === 'Minimize') {
+      window.minimize()
+      return
+    }
+    // 'Maximize' 与任何未知取值：切换"缩放"状态（不是全屏）。
+    if (window.isMaximized()) window.unmaximize()
+    else window.maximize()
   }
 
   /** Whether the mounted native window currently holds keyboard focus. */

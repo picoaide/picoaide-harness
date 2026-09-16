@@ -116,6 +116,14 @@ const electron = vi.hoisted(() => {
     readonly restore = vi.fn()
     readonly show = vi.fn()
     readonly focus = vi.fn()
+    // 2026-09-16 标题栏双击（macOS）：缩放态与最小化面。
+    maximize = vi.fn(() => { this.maximized = true })
+    unmaximize = vi.fn(() => { this.maximized = false })
+    readonly minimize = vi.fn()
+    maximized = false
+    fullScreen = false
+    readonly isMaximized = vi.fn(() => this.maximized)
+    readonly isFullScreen = vi.fn(() => this.fullScreen)
     readonly on = browserWindowOn
     readonly off = browserWindowOff
     readonly once = vi.fn()
@@ -196,6 +204,10 @@ const electron = vi.hoisted(() => {
       openPath: vi.fn(async () => ''),
       showItemInFolder: vi.fn(),
     },
+    // 2026-09-16 标题栏双击：系统偏好读数（缺省 = macOS 默认的"缩放"）。
+    systemPreferences: {
+      getUserDefault: vi.fn((_key: string, _type: string) => 'Maximize'),
+    },
     templateIcon,
     Tray,
     trays,
@@ -213,6 +225,7 @@ vi.mock('electron', () => ({
   net: electron.net,
   Notification: electron.Notification,
   shell: electron.shell,
+  systemPreferences: electron.systemPreferences,
   Tray: electron.Tray,
 }))
 
@@ -258,6 +271,67 @@ describe('Electron compatibility runtime', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  describe('performTitleBarDoubleClick（macOS 标题栏双击）', () => {
+    /** 装好窗口后返回 runtime 与假窗口（`platform` 由 process.platform 决定）。 */
+    async function mounted(): Promise<{ runtime: import('../src/electron-runtime.ts').ElectronDesktopRuntime, window: InstanceType<typeof electron.BrowserWindow> }> {
+      const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+      const runtime = new ElectronDesktopRuntime(async () => {})
+      runtime.schedule(spec)
+      await runtime.mountScheduled()
+      return { runtime, window: electron.browserWindows.at(-1)! }
+    }
+
+    it('偏好 = 缩放：未缩放时缩放、已缩放时还原', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+      electron.systemPreferences.getUserDefault.mockReturnValue('Maximize')
+      const { runtime, window } = await mounted()
+
+      runtime.performTitleBarDoubleClick()
+      expect(window.maximize).toHaveBeenCalledOnce()
+
+      window.maximized = true
+      runtime.performTitleBarDoubleClick()
+      expect(window.unmaximize).toHaveBeenCalledOnce()
+      expect(window.minimize).not.toHaveBeenCalled()
+    })
+
+    it('偏好 = 最小化：最小化而不是缩放', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+      electron.systemPreferences.getUserDefault.mockReturnValue('Minimize')
+      const { runtime, window } = await mounted()
+
+      runtime.performTitleBarDoubleClick()
+
+      expect(window.minimize).toHaveBeenCalledOnce()
+      expect(window.maximize).not.toHaveBeenCalled()
+    })
+
+    it('偏好 = 无动作 / 全屏中：什么都不做', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+      electron.systemPreferences.getUserDefault.mockReturnValue('None')
+      const { runtime, window } = await mounted()
+      runtime.performTitleBarDoubleClick()
+      expect(window.maximize).not.toHaveBeenCalled()
+      expect(window.minimize).not.toHaveBeenCalled()
+
+      electron.systemPreferences.getUserDefault.mockReturnValue('Maximize')
+      window.fullScreen = true
+      runtime.performTitleBarDoubleClick()
+      expect(window.maximize).not.toHaveBeenCalled()
+    })
+
+    it('非 macOS 平台是 no-op', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+      electron.systemPreferences.getUserDefault.mockReturnValue('Maximize')
+      const { runtime, window } = await mounted()
+
+      runtime.performTitleBarDoubleClick()
+
+      expect(window.maximize).not.toHaveBeenCalled()
+      expect(window.minimize).not.toHaveBeenCalled()
+    })
   })
 
   it('uses the native macOS advanced frame, Dock icon, and template tray image', async () => {
