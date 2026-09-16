@@ -48,6 +48,11 @@ type Handlers struct {
 	// ConcurrencyStatus 返回各模型当前并发(内存快照)+ 90 天历史峰值(DB),
 	// 供服务器信息页展示与扩容申请(2026-08-31)。
 	ConcurrencyStatus gin.HandlerFunc
+	// TestErrorReporting 由服务端代发一条测试事件到错误上报 DSN(2026-09-16
+	// P0-4/D3),让管理员点一下就知道"客户端 → GlitchTip"这一跳通不通。
+	TestErrorReporting gin.HandlerFunc
+	// ErrorReportingClients 返回客户端上报状态聚合(P1-3/D7)。
+	ErrorReportingClients gin.HandlerFunc
 }
 
 // NewHandlers 返回网关 handler 集合(db 注入)。
@@ -96,6 +101,8 @@ func NewHandlers(db *sql.DB) *Handlers {
 		ConcurrencyStatus: func(c *gin.Context) {
 			concurrencyStatus(c, db, api.conc)
 		},
+		TestErrorReporting:    func(c *gin.Context) { testErrorReporting(c, db) },
+		ErrorReportingClients: func(c *gin.Context) { errorReportingClients(c, db) },
 	}
 }
 

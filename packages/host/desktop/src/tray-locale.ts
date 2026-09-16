@@ -53,6 +53,8 @@ export interface DesktopDiagnosticsPrivacyCopy {
   readonly detail: string
   readonly confirm: string
   readonly cancel: string
+  /** Title of the `showErrorBox` shown when the export itself fails. */
+  readonly errorTitle: string
 }
 
 const diagnosticsPrivacyCopy: Record<DesktopLocale, DesktopDiagnosticsPrivacyCopy> = {
@@ -62,6 +64,7 @@ const diagnosticsPrivacyCopy: Record<DesktopLocale, DesktopDiagnosticsPrivacyCop
     detail: 'The archive contains recent application logs, local crash dumps, and system information. Logs may contain local paths, workspace IDs, and session IDs. Crash dumps may contain fragments of process memory. Authentication credentials are masked in logs when recognized, but you should still review the archive before uploading it publicly.',
     confirm: 'Export',
     cancel: 'Cancel',
+    errorTitle: 'Unable to Export Diagnostics',
   },
   zh: {
     title: '导出诊断信息',
@@ -69,6 +72,7 @@ const diagnosticsPrivacyCopy: Record<DesktopLocale, DesktopDiagnosticsPrivacyCop
     detail: '诊断包包含最近的应用日志、本地崩溃转储和系统信息。日志可能包含本地路径、工作区 ID 和会话 ID，崩溃转储可能包含进程内存片段。系统会对日志中可识别的认证凭据进行脱敏，但公开上传前仍应检查诊断包。',
     confirm: '导出',
     cancel: '取消',
+    errorTitle: '无法导出诊断信息',
   },
 }
 
@@ -128,6 +132,26 @@ export interface DesktopUpdateDialogCopy {
   readonly downloadedMessage: (version: string, product: string) => string
   /** Linux AppImage replacement instruction. */
   readonly downloadedDetail: (installerPath: string) => string
+  /** macOS: the disk image opened — how to finish the install. */
+  readonly darwinOpenedDetail: (product: string) => string
+  /** Windows: confirm restarting into the NSIS installer. */
+  readonly winInstallDetail: (product: string) => string
+  /** Windows: affirmative button of that dialog. */
+  readonly winRestart: string
+  /** Windows: negative button of that dialog. */
+  readonly winLater: string
+  /** Manual "check for updates" failure dialog. */
+  readonly checkFailedTitle: (product: string) => string
+  readonly checkFailedMessage: (product: string) => string
+  readonly checkFailedDetail: string
+  /** Manual check: nothing newer. */
+  readonly upToDateTitle: (product: string) => string
+  readonly upToDateMessage: (product: string) => string
+  readonly upToDateDetail: (version: string) => string
+  /** Manual check: an update exists but this build cannot download it. */
+  readonly availableTitle: (product: string) => string
+  readonly availableMessage: (version: string, product: string) => string
+  readonly availableDetail: string
   /** Affirmative button label. */
   readonly confirm: string
 }
@@ -145,6 +169,19 @@ const updateDialogCopy: Record<DesktopLocale, DesktopUpdateDialogCopy> = {
     downloadedMessage: (version, product) => `${product} ${version} is ready to install.`,
     downloadedDetail: installerPath =>
       `The new AppImage has been downloaded to: ${installerPath}\n\nQuit this application, replace the current AppImage with that file, then run it again.`,
+    darwinOpenedDetail: product => `The disk image has opened. Replace ${product} in Applications, then reopen it.`,
+    winInstallDetail: product => `Restart ${product} and run the installer now?`,
+    winRestart: 'Restart and Install',
+    winLater: 'Later',
+    checkFailedTitle: () => 'Unable to Check for Updates',
+    checkFailedMessage: product => `${product} could not check for updates.`,
+    checkFailedDetail: 'Please try again later.',
+    upToDateTitle: product => `${product} Is Up to Date`,
+    upToDateMessage: product => `No newer version of ${product} is available.`,
+    upToDateDetail: version => `Installed version: ${version}`,
+    availableTitle: product => `${product} Update Available`,
+    availableMessage: (version, product) => `${product} ${version} is available.`,
+    availableDetail: 'Installer downloads are unavailable in this build.',
     confirm: 'OK',
   },
   zh: {
@@ -159,6 +196,19 @@ const updateDialogCopy: Record<DesktopLocale, DesktopUpdateDialogCopy> = {
     downloadedMessage: (version, product) => `${product} ${version} 已可安装。`,
     downloadedDetail: installerPath =>
       `新版本 AppImage 已下载到: ${installerPath}\n\n请关闭本程序, 用该文件替换当前 AppImage 后重新运行。`,
+    darwinOpenedDetail: product => `磁盘映像已打开。请用新版本替换「应用程序」里的 ${product}，然后重新打开。`,
+    winInstallDetail: product => `现在重启 ${product} 并运行安装程序吗？`,
+    winRestart: '重启并安装',
+    winLater: '稍后',
+    checkFailedTitle: () => '无法检查更新',
+    checkFailedMessage: product => `${product} 无法检查更新。`,
+    checkFailedDetail: '请稍后重试。',
+    upToDateTitle: product => `${product} 已是最新版本`,
+    upToDateMessage: product => `没有比 ${product} 更新的版本。`,
+    upToDateDetail: version => `当前版本：${version}`,
+    availableTitle: product => `${product} 有可用更新`,
+    availableMessage: (version, product) => `${product} ${version} 已可用。`,
+    availableDetail: '此构建不提供安装包下载。',
     confirm: '确定',
   },
 }
@@ -166,6 +216,62 @@ const updateDialogCopy: Record<DesktopLocale, DesktopUpdateDialogCopy> = {
 /** Resolve the copy for the native update dialogs. */
 export function desktopUpdateDialogCopy(locale: DesktopLocale): DesktopUpdateDialogCopy {
   return updateDialogCopy[locale]
+}
+
+/**
+ * Copy for the remaining user-visible native surfaces (2026-09-16 R9 audit).
+ *
+ * The i18n pass localized the update flow and the crash page but left the plugin
+ * recovery dialog and the two startup notifications hard-coded English, even
+ * though the tray entries that lead to them are localized.
+ */
+export interface DesktopStartupCopy {
+  /** Plugin-recovery dialog (a client plugin failed to load). */
+  readonly pluginRecoveryTitle: string
+  readonly pluginRecoveryMessage: (product: string) => string
+  readonly pluginRecoveryDetail: (plugins: string, error: string, product: string) => string
+  readonly pluginRecoveryRestart: (product: string) => string
+  readonly pluginRecoveryDismiss: string
+  /** Notification: an optional UI plugin of the profile is not installed. */
+  readonly skippedPluginTitle: string
+  readonly skippedPluginBody: (name: string, suffix: string) => string
+  /** Notification: a configured path sits on a volume that may break sandboxing. */
+  readonly volumeTitle: string
+  readonly volumeBody: (label: string) => string
+}
+
+const startupCopy: Record<DesktopLocale, DesktopStartupCopy> = {
+  en: {
+    pluginRecoveryTitle: 'Plugin Recovery',
+    pluginRecoveryMessage: product => `${product} could not load all plugins.`,
+    pluginRecoveryDetail: (plugins, error, product) =>
+      `Failed plugins:\n${plugins}\n\n${error}\n\nRestart ${product} after resolving the failing plugin.`,
+    pluginRecoveryRestart: product => `Restart ${product}`,
+    pluginRecoveryDismiss: 'Dismiss',
+    skippedPluginTitle: 'Skipped Unavailable UI Plugin',
+    skippedPluginBody: (name, suffix) => `${name} is not installed in this profile${suffix}.`,
+    volumeTitle: 'Storage May Be Unsupported',
+    volumeBody: label => `${label} is on a volume that may break sandboxed commands or plugin installs.`,
+  },
+  zh: {
+    pluginRecoveryTitle: '插件恢复',
+    pluginRecoveryMessage: product => `${product} 未能加载全部插件。`,
+    pluginRecoveryDetail: (plugins, error, product) =>
+      `加载失败的插件:\n${plugins}\n\n${error}\n\n请先处理失败的插件，然后重启 ${product}。`,
+    pluginRecoveryRestart: product => `重启 ${product}`,
+    pluginRecoveryDismiss: '忽略',
+    skippedPluginTitle: '已跳过不可用的界面插件',
+    // suffix 以「 等 N 个」开头，必须插在动词前（插在句尾会变成
+    // 「foo 未安装在此配置中 等 2 个。」—— 2026-09-16 R2 审计）。
+    skippedPluginBody: (name, suffix) => `${name}${suffix}未安装在此配置中。`,
+    volumeTitle: '存储位置可能不受支持',
+    volumeBody: label => `${label} 所在的卷可能导致沙箱命令或插件安装失败。`,
+  },
+}
+
+/** Resolve the copy for the remaining native surfaces. */
+export function desktopStartupCopy(locale: DesktopLocale): DesktopStartupCopy {
+  return startupCopy[locale]
 }
 
 /**

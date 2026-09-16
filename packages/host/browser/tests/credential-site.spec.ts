@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { credentialSiteOrigin, httpOriginOf, siteOriginFromFields } from '../src/credential-site.ts'
+import { bareHostOrigin, credentialSiteOrigin, httpOriginOf, siteOriginFromFields } from '../src/credential-site.ts'
 import { createCredentialResolver } from '../src/index.ts'
 import { ConnectorStore } from '@picoaide/dsh-connectors/store'
 
@@ -43,6 +43,37 @@ describe('httpOriginOf', () => {
       expect(httpOriginOf(value as string | null | undefined), String(value)).toBeNull()
     }
   })
+
+  it('stays strict about scheme-less hostnames (the bare-host normalization is opt-in per key)', () => {
+    expect(httpOriginOf('app.glitchtip.com')).toBeNull()
+  })
+})
+
+describe('bareHostOrigin: 用户按内置模板只填主机名', () => {
+  it('normalizes address-shaped values the GlitchTip template asks for', () => {
+    expect(bareHostOrigin('app.glitchtip.com')).toBe('https://app.glitchtip.com')
+    expect(bareHostOrigin('glitchtip.corp.example/api')).toBe('https://glitchtip.corp.example')
+    expect(bareHostOrigin('glitchtip.corp.example:8443/x')).toBe('https://glitchtip.corp.example:8443')
+    expect(bareHostOrigin('localhost:8000')).toBe('http://localhost:8000')
+    // Self-hosted addresses the template also asks for: IP, intranet single
+    // label, IDN. Private/loopback/single-label default to http.
+    expect(bareHostOrigin('127.0.0.1:8000')).toBe('http://127.0.0.1:8000')
+    expect(bareHostOrigin('10.0.0.5:8000')).toBe('http://10.0.0.5:8000')
+    // IP literals default to http (CGNAT / benchmark / public addresses alike):
+    // guessing https made http intranet services permanently unbindable.
+    expect(bareHostOrigin('100.64.0.7')).toBe('http://100.64.0.7')
+    expect(bareHostOrigin('198.18.0.9')).toBe('http://198.18.0.9')
+    expect(bareHostOrigin('203.0.113.9:8080')).toBe('http://203.0.113.9:8080')
+    expect(bareHostOrigin('[2001:db8::1]')).toBe('http://[2001:db8::1]')
+    expect(bareHostOrigin('glitchtip:8000')).toBe('http://glitchtip:8000')
+    expect(bareHostOrigin('例子.中国')).toBe('https://xn--fsqu00a.xn--fiqs8s')
+  })
+
+  it('refuses values that are not host-shaped', () => {
+    for (const value of ['not a host', 'https://x.example', 'javascript:alert(1)', '', undefined, 'x.y/z z']) {
+      expect(bareHostOrigin(value as string | undefined), String(value)).toBeNull()
+    }
+  })
 })
 
 describe('siteOriginFromFields', () => {
@@ -66,6 +97,181 @@ describe('siteOriginFromFields', () => {
     expect(a).toBe(b)
     expect(a).toBe('https://a.example')
   })
+
+  it('recognizes camelCase address keys as well as snake_case', () => {
+    expect(siteOriginFromFields({ serverUrl: 'app.glitchtip.com' })).toBe('https://app.glitchtip.com')
+    expect(siteOriginFromFields({ apiEndpoint: 'glitchtip.corp.example' })).toBe('https://glitchtip.corp.example')
+    expect(siteOriginFromFields({ plain: 'app.glitchtip.com' })).toBeNull()
+  })
+
+  it('normalizes a bare hostname only when the field name is address-shaped', () => {
+    // The built-in GlitchTip template tells users to type `app.glitchtip.com`.
+    expect(siteOriginFromFields({ GLITCHTIP_BASE_URL: 'app.glitchtip.com' })).toBe('https://app.glitchtip.com')
+    // An unrelated field value without a scheme must not become an origin.
+    expect(siteOriginFromFields({ note: 'app.glitchtip.com' })).toBeNull()
+  })
+
+  // 2026-09-16 R9 审计：关键词表放宽成裸子串后，非地址字段（`security` 里含
+  // `uri`、`website`/`siteName` 里含 `site`）也参与竞争，且裸主机归一让它们的
+  // 值变成 origin —— 一个口令形状的值就顶掉了连接器真正的站点。
+  it('does not let a non-address key hijack the binding', () => {
+    expect(siteOriginFromFields({ SECURITY_TOKEN: 'abc123def456', SITE_URL: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ siteName: 'staging', URL: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ website: 'staging', url: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ note: 'staging', url: 'https://real.example' }))
+      .toBe('https://real.example')
+  })
+
+  it('prefers the key that names the site over a camelCase flow URL', () => {
+    // `callbackUrl` is the OAuth redirect, not the connector's own site.
+    expect(siteOriginFromFields({ callbackUrl: 'https://sso.example/cb', url: 'https://app.example' }))
+      .toBe('https://app.example')
+  })
+
+  it('prefers an explicit scheme over a scheme-less guess regardless of key order', () => {
+    // base 只认带 scheme 的值；裸主机是新增能力，不得改写既有判定。
+    expect(siteOriginFromFields({ host: 'staging', url: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ hostname: 'staging', siteUrl: 'https://real.example' }))
+      .toBe('https://real.example')
+    // 没有任何显式地址时，地址形状键上的裸主机仍然生效（E1 的新能力）。
+    expect(siteOriginFromFields({ username: 'alice', hostname: 'glitchtip.corp.example' }))
+      .toBe('https://glitchtip.corp.example')
+  })
+
+  // 2026-09-16 R2 复核：把 `hostname` 并进 base 的地址键档、或把 `_` 放宽成 `[_-]`，
+  // 会让两个 base 地址键之间的取舍翻转 —— 同一份凭据的绑定基准被静默换主机。
+  it('keeps base’s choice between two address keys (no silent rebinding)', () => {
+    expect(siteOriginFromFields({ hostname: 'https://a.example', url: 'https://b.example' }))
+      .toBe('https://b.example')
+    expect(siteOriginFromFields({ server_url: 'https://real.example', 'callback-url': 'https://sso.example/cb' }))
+      .toBe('https://real.example')
+    // 两个 base 地址键两两对拍（110 组）见 temp/audit-r9/my-probe/site-diff.mjs。
+    expect(siteOriginFromFields({ SITE_URL: 'https://a.example', API_ENDPOINT: 'https://b.example' }))
+      .toBe('https://b.example')
+  })
+
+  it('does not let a placeholder in an address key beat a real URL elsewhere', () => {
+    // 2026-09-16 R3 审计：`n/a`/`changeme`/`TODO`/`-` 都能被裸主机归一成
+    // `http://n` 这类 origin，早期实现让它压过真站点，拒绝文案还会把该主机
+    // 当成指令告诉模型。单标签猜测必须排在显式地址之后。
+    expect(siteOriginFromFields({ api_url: 'n/a', homepage: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ server_url: 'changeme', docs: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ address: 'TODO', note: 'https://real.example' }))
+      .toBe('https://real.example')
+    // 明确像主机的裸值（含点 / IP / 私网）仍然赢过无关键上的 URL。
+    expect(siteOriginFromFields({ server_url: 'glitchtip.corp.example', docs: 'https://real.example' }))
+      .toBe('https://glitchtip.corp.example')
+    expect(siteOriginFromFields({ server_url: '10.0.0.5:8000', docs: 'https://real.example' }))
+      .toBe('http://10.0.0.5:8000')
+    // 没有别的候选时，单标签内网值仍可用（E1 能力）。
+    expect(siteOriginFromFields({ server_url: 'glitchtip:8000' })).toBe('http://glitchtip:8000')
+  })
+
+  it('recognizes env-style HOSTNAME and camelCase hostName keys', () => {
+    expect(siteOriginFromFields({ HOSTNAME: 'glitchtip.corp.example' })).toBe('https://glitchtip.corp.example')
+    expect(siteOriginFromFields({ hostName: 'glitchtip.corp.example' })).toBe('https://glitchtip.corp.example')
+    // 词边界仍然成立：非地址键的单键形态不得凭空造出 origin。
+    expect(siteOriginFromFields({ SECURITY_TOKEN: 'abc123def456' })).toBeNull()
+    expect(siteOriginFromFields({ siteName: 'staging' })).toBeNull()
+    expect(siteOriginFromFields({ website: 'staging' })).toBeNull()
+  })
+
+  // 2026-09-16 R4 复核：`bareHostOrigin` 会把纯数字当成整数 IPv4
+  // （`134744072` → `8.8.8.8`）、也会接受尾点/一位 TLD/带路径的单标签，
+  // 这些"文字上不像主机"的值不得进入绑定基准（实测曾落到公网 IPv4 字面量）。
+  it('rejects values whose TEXT is not a host (numeric IPv4 coercion, placeholders)', () => {
+    expect(siteOriginFromFields({ host: '134744072', homepage: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ host: '134744072' })).toBeNull()
+    expect(siteOriginFromFields({ server_url: '3232235777', docs: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ server_url: 'changeme.', docs: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ server_url: 'n.a', docs: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ server_url: 'example.com', docs: 'https://real.example' }))
+      .toBe('https://real.example')
+    // solo 形态同样不得凭空造出 origin（base 也是 null）。
+    expect(siteOriginFromFields({ server_url: 'n/a' })).toBeNull()
+    expect(siteOriginFromFields({ server_url: '-' })).toBeNull()
+    expect(siteOriginFromFields({ server_url: 'changeme' })).toBeNull()
+    expect(siteOriginFromFields({ server_url: 'TODO' })).toBeNull()
+  })
+
+  // 2026-09-16 R5 复核：前导零的 IPv4 会被 WHATWG 按八进制重读（`010.0.0.1` →
+  // `8.0.0.1`），带点占位符与保留示例域则整个绕过"单标签否表"。
+  it('rejects normalized-away IPv4 spellings, reserved domains and dotted placeholders', () => {
+    const real = 'https://real.example'
+    for (const value of [
+      '010.0.0.1', '01.2.3.4', '1.02.3.4', '127.000.000.001', '0177.0.0.1',
+      'placeholder.com', 'your-domain.com', 'changeme.example', 'secret.com', 'host.com', 'todo.com',
+      'example.com', 'www.example.org', '0.0.0.0',
+      // A trailing dot is stripped by the gate but kept by the normalizer, so the
+      // derived origin could never equal a page origin — refuse it instead.
+      'glitchtip.corp.example.',
+    ]) {
+      expect(siteOriginFromFields({ server_url: value, homepage: real }), value).toBe(real)
+    }
+    expect(siteOriginFromFields({ server_url: 'tools.example' })).toBe('https://tools.example')
+    expect(siteOriginFromFields({ server_url: '例子.中国' })).toBe('https://xn--fsqu00a.xn--fiqs8s')
+  })
+
+  // 2026-09-16 R6 复核：否表若只在**原文**上跑，全角/零宽/软连字符拼写会 IDNA
+  // 折叠成保留词后劫持真站点；数值/十六进制与百分号编码则会被 URL 解析改写成
+  // 另一台主机（`0x08080808` → `8.8.8.8`）。两者都必须被挡在绑定之外。
+  it('runs the denylist on the IDNA form and rejects numeric/encoded single labels', () => {
+    const real = 'https://real.example'
+    for (const value of [
+      'ｐｌａｃｅｈｏｌｄｅｒ.com', 'place\u200Bholder.com', 'place\u00ADholder.com', 'ｃｈａｎｇｅｍｅ.com',
+      '0x08080808', '0x7f000001', '010%2e0%2e0e1', 'x.changeme.com', 'your.domain.com',
+      `${'x'.repeat(255)}.com`, 'example.org.cn', 'example.co.uk',
+    ]) {
+      expect(siteOriginFromFields({ server_url: value, homepage: real }), value).toBe(real)
+    }
+    expect(siteOriginFromFields({ server_url: '0x08080808' })).toBeNull()
+    // `localhost` 是真实回环名而非占位符，不能从否表里误伤。
+    expect(siteOriginFromFields({ server_url: 'localhost:8000' })).toBe('http://localhost:8000')
+  })
+
+  // 2026-09-16 R7 复核：`localhost` 只在**单标签**形态是真实回环名；作为点分名的
+  // 一级（`localhost.com` 等 8 个真实注册域、`x.localhost`）是占位符，会压过真实
+  // 站点 URL。反斜杠截断、百分号编码与 IDNA 句点同形字同样要拒。
+  it('keeps placeholder shapes of localhost and encoded hosts out of the binding', () => {
+    const real = 'https://real.example'
+    for (const value of [
+      'localhost.net', 'localhost.com', 'x.localhost', 'localhost.localdomain',
+      'evil\\real.com', '%2e%2e.com', 'a%2E%2Eb.com', 'exam。ple.com', `${'é'.repeat(63)}.com`,
+    ]) {
+      expect(siteOriginFromFields({ SERVER_URL: value, homepage: real }), value).toBe(real)
+    }
+    // 单标签回环名仍然可用（且只有它是唯一候选时）。
+    expect(siteOriginFromFields({ server_url: 'localhost:8000' })).toBe('http://localhost:8000')
+    expect(siteOriginFromFields({ server_url: 'localhost', docs: real })).toBe(real)
+  })
+
+  it('prefers the base address key’s typed host over a camelCase flow URL', () => {
+    // base 地址键上的裸主机（第 2 遍）优先于扩展拼法键上的显式 URL（第 4 遍）：
+    // `callbackUrl` 是 OAuth 回调，不是连接器站点（R4 复核）。
+    expect(siteOriginFromFields({ base_url: 'glitchtip.corp.example', callbackUrl: 'https://sso.example/cb' }))
+      .toBe('https://glitchtip.corp.example')
+    // 但同一形态里"显式 vs 显式"必须与 base 一致：裸单标签不做承诺，显式 URL 赢。
+    expect(siteOriginFromFields({ url: 'staging', HOSTNAME: 'https://real.example' }))
+      .toBe('https://real.example')
+  })
+
+  it('does not let a URL under an unrelated key beat the address key’s bare host', () => {
+    // DSN / 文档链接这类字段里带 URL，但它们不是连接器的站点。
+    expect(siteOriginFromFields({ base_url: 'glitchtip.corp.example', sentry_dsn: 'https://abc123@9f1.sentry.io/1' }))
+      .toBe('https://glitchtip.corp.example')
+    expect(siteOriginFromFields({ host: 'glitchtip.corp.example', docs: 'https://docs.example/start' }))
+      .toBe('https://glitchtip.corp.example')
+  })
 })
 
 describe('credentialSiteOrigin', () => {
@@ -77,6 +283,10 @@ describe('credentialSiteOrigin', () => {
   it('falls back to the credential fields when the declaration is missing or unusable', () => {
     expect(credentialSiteOrigin({ baseUrl: 'https://from-field.example' }, undefined)).toBe('https://from-field.example')
     expect(credentialSiteOrigin({ baseUrl: 'https://from-field.example' }, 'not-a-url')).toBe('https://from-field.example')
+    // A dotted bare host is a usable declaration; a single-label one is not
+    // (typo guard: fall through to the credential fields).
+    expect(credentialSiteOrigin(undefined, 'glitchtip.corp.example')).toBe('https://glitchtip.corp.example')
+    expect(credentialSiteOrigin(undefined, 'glitchtip')).toBeNull()
   })
 
   it('returns null when nothing can be bound (the tool then refuses)', () => {

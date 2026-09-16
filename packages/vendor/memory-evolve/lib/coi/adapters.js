@@ -360,11 +360,13 @@ export class AdapterStore {
  * 'prompt' 的适配器不插参数（图片路径由调度器写进任务文本）。
  */
 export function buildArgs(adapter, { task, cwd, model, sessionId, mode, images }) {
+  // Single pass: the values are DATA. A chained replaceAll would let user text
+  // inserted for {task} be re-scanned as a template and silently rewrite a
+  // literal `{workdir}` / `{model}` / `{sessionId}` inside the prompt
+  // (2026-09-16 audit R4-F1).
+  const fillValues = { task: task ?? '', workdir: cwd ?? '', model: model ?? '', sessionId: sessionId ?? '' }
   const fill = (args) => args.map((arg) => String(arg)
-    .replaceAll('{task}', task ?? '')
-    .replaceAll('{workdir}', cwd ?? '')
-    .replaceAll('{model}', model ?? '')
-    .replaceAll('{sessionId}', sessionId ?? ''))
+    .replaceAll(/\{(task|workdir|model|sessionId)\}/gu, (match, key) => (Object.hasOwn(fillValues, key) ? String(fillValues[key]) : match)))
   // flag 模式图片参数：`-i /path/a.png -i /path/b.png`，插在含 {task} 的
   // 参数之前（commander 类 CLI 普遍接受 options 在前；对 resume.args 同样适用）
   const imageArgs = adapter.image?.mode === 'flag' && Array.isArray(images) && images.length > 0

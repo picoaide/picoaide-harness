@@ -173,7 +173,7 @@ export function createSessionFilter(texts: SessionFilterTexts): {
       const need = collapsed && matched !== null && matched.running > 0
       const badge = row.querySelector<HTMLElement>('.dsh-ui-ws-run-badge')
       if (need) {
-        const label = texts.runningLabel.replace('{count}', String(matched!.running))
+        const label = texts.runningLabel.replace('{count}',() => (String(matched!.running)))
         if (badge !== null) {
           if (badge.textContent !== label) badge.textContent = label
         } else {

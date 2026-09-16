@@ -84,9 +84,8 @@ export function isValidCron(expr: string): boolean {
  * Compute the next matching instant after `fromMs` (ms epoch), in local time,
  * at minute granularity, strictly greater than `fromMs`. Returns the ms epoch
  * of the matching minute's start, or undefined when the calendar constraint
- * can never match (for example `0 0 30 2 *`). The five-year horizon includes
- * a full leap cycle, so a valid February 29 schedule remains reachable from
- * every non-leap year.
+ * can never match (for example `0 0 30 2 *`). The eight-year horizon covers the
+ * 2100 century leap gap, so a valid February 29 schedule stays reachable.
  *
  * Walks candidate year/month/day/hour/minute values straight from the parsed
  * field sets instead of scanning every minute. Wall-clock field construction
@@ -99,7 +98,10 @@ export function nextRunAtMs(expr: string, fromMs: number): number | undefined {
   if (schedule === null) return undefined
   if (!hasPossibleCalendarDay(schedule)) return undefined
   const from = new Date(fromMs)
-  const limitMs = fromMs + 5 * 366 * 24 * 60 * 60 * 1000
+  // Eight years, not five: the 2100 century is not a leap year, so a valid
+  // `0 0 29 2 *` schedule can be up to ~7 years away (2097→2104) and a 5-year
+  // horizon declared it impossible (2026-09-16 audit R3-J).
+  const limitMs = fromMs + 8 * 366 * 24 * 60 * 60 * 1000
 
   const sortedMinutes = [...schedule.minutes].sort((a, b) => a - b)
   const sortedHours = [...schedule.hours].sort((a, b) => a - b)
@@ -149,7 +151,8 @@ export function nextRunAtMs(expr: string, fromMs: number): number | undefined {
  * granularity). Used by the scheduler's catch-up path: the previous
  * forward-only helper could only walk a bounded number of matches from the
  * last-known `nextRunAt`, so a long sleep fired an old occurrence instead of
- * the latest missed one.
+ * the latest missed one. The backwards horizon is eight years (century leap
+ * gap included).
  * @param expr - 5-field cron expression.
  * @param fromMs - upper bound (ms epoch).
  * @returns the matching minute start, or undefined when the calendar can never match.
@@ -158,31 +161,67 @@ export function lastRunAtMs(expr: string, fromMs: number): number | undefined {
   const schedule = parseCron(expr)
   if (schedule === null || !hasPossibleCalendarDay(schedule)) return undefined
   const from = new Date(fromMs)
-  // Walk whole days backwards (bounded by the same five-year rule as
+  // Walk whole days backwards (bounded by the same eight-year rule as
   // nextRunAtMs) and, on a matching day, pick the latest matching hour/minute
   // from the parsed sets. Minute-by-minute scanning would be correct but could
   // block the scheduler tick for millions of iterations after a long sleep.
-  const dayLimit = new Date(fromMs - 5 * 366 * 24 * 60 * 60 * 1000)
+  const dayLimit = new Date(fromMs - 8 * 366 * 24 * 60 * 60 * 1000)
   const sortedHours = [...schedule.hours].sort((a, b) => b - a)
   const sortedMinutes = [...schedule.minutes].sort((a, b) => b - a)
   let cursor = new Date(from.getFullYear(), from.getMonth(), from.getDate())
   while (cursor.getTime() >= dayLimit.getTime()) {
     if (schedule.months.has(cursor.getMonth() + 1) && dayCandidate(schedule, cursor)) {
-      const sameDay = cursor.getFullYear() === from.getFullYear()
-        && cursor.getMonth() === from.getMonth()
-        && cursor.getDate() === from.getDate()
-      const maxHour = sameDay ? from.getHours() : 23
+      const year = cursor.getFullYear()
+      const month = cursor.getMonth()
+      const day = cursor.getDate()
+      // Collect every candidate instant of this day FIRST, then take the
+      // latest one <= fromMs. Short-circuiting inside the wall-clock-descending
+      // loops is wrong under a rollback: a larger wall clock's FIRST pass can
+      // be earlier than a smaller wall clock's SECOND pass (Antarctica/Troll
+      // 01:59 first pass = 23:59Z, 01:30 second pass = 01:30Z), so the old
+      // first-match return recorded a time up to the rollback length in the
+      // "past" (or even later than the wake-up wall clock). 2026-09-16 audit R5.
+      let best: number | undefined
       for (const hour of sortedHours) {
-        if (hour > maxHour) continue
-        const maxMinute = sameDay && hour === from.getHours() ? from.getMinutes() : 59
         for (const minute of sortedMinutes) {
-          if (minute > maxMinute) continue
-          const candidate = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate(), hour, minute, 0, 0)
-          if (candidate.getTime() <= fromMs) return candidate.getTime()
+          // Wall clock can repeat (DST fall-back) or vanish (spring-forward).
+          // `new Date` only ever yields the FIRST instance of a repeated hour;
+          // enumerate every minute within +180 (Lord Howe 30m, most zones 60m,
+          // Troll 2h, Casey 3h) whose wall clock still matches.
+          const first = new Date(year, month, day, hour, minute, 0, 0)
+          if (first.getHours() !== hour || first.getMinutes() !== minute) continue
+          // Only pay for the repeat-probe walk when this wall clock is close to
+          // a DST offset change; ordinary minutes have exactly one instance.
+          const repeated = new Date(first.getTime() + 180 * 60 * 1000).getTimezoneOffset() !== first.getTimezoneOffset()
+          const maxDelta = repeated ? 180 * 60 * 1000 : 0
+          for (let delta = 0; delta <= maxDelta; delta += 60 * 1000) {
+            const probe = new Date(first.getTime() + delta)
+            if (probe.getFullYear() !== year || probe.getMonth() !== month || probe.getDate() !== day
+              || probe.getHours() !== hour || probe.getMinutes() !== minute) continue
+            const time = probe.getTime()
+            if (time > fromMs) continue
+            if (!matches(schedule, probe)) continue
+            if (best === undefined || time > best) best = time
+          }
         }
       }
+      if (best !== undefined) return best
     }
-    cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1)
+    // A local calendar day that does not exist (a date-line skip such as
+    // Pacific/Apia's 2011-12-30) normalizes FORWARD, so `new Date(y, m, d - 1)`
+    // can land on the day we are already on — the loop would then spin forever.
+    // This runs synchronously inside a scheduler tick, so the hang would leave
+    // `tickInFlight` set and stop every job.
+    //
+    // Falling back to an absolute 24h step (instead of breaking out) keeps both
+    // properties: the walk always progresses AND every match before the skipped
+    // day is still visited — `break` was measured to drop the legitimate
+    // 2011-12-25 occurrence for `TZ=Pacific/Apia` (2026-09-16 R9/R3 audit; the
+    // 8-year backwards horizon widened the reachable window, the defect itself
+    // is older).
+    let previous = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1)
+    if (previous.getTime() >= cursor.getTime()) previous = new Date(cursor.getTime() - 86_400_000)
+    cursor = previous
   }
   return undefined
 }

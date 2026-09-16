@@ -45,9 +45,27 @@ export interface LocaleBearingRuntime {
   readonly locale?: unknown
 }
 
-/** Narrow any runtime value to a shipped host locale. */
+/**
+ * Narrow any runtime value to a shipped host locale, or `undefined` when the
+ * value names a language this product does not ship.
+ *
+ * Prefix matching keeps region subtags working (`zh-CN`/`en_US`); an
+ * unsupported id returns `undefined` (rather than the default) so
+ * {@link hostLocaleFrom} can keep looking at the request header.
+ * @param value - raw runtime or platform language tag.
+ * @returns the shipped locale, or undefined.
+ */
+export function tryNormalizeHostLocale(value: unknown): HostLocale | undefined {
+  if (typeof value !== 'string') return undefined
+  const primary = value.trim().toLowerCase().split(/[-_]/u)[0] ?? ''
+  if (primary === 'en') return 'en'
+  if (primary === 'zh') return 'zh'
+  return undefined
+}
+
+/** Narrow any runtime value to a shipped host locale (defaults to zh). */
 export function normalizeHostLocale(value: unknown): HostLocale {
-  return typeof value === 'string' && value.toLowerCase().startsWith('en') ? 'en' : DEFAULT_HOST_LOCALE
+  return tryNormalizeHostLocale(value) ?? DEFAULT_HOST_LOCALE
 }
 
 /**
@@ -64,7 +82,11 @@ export function hostLocaleFrom(
   runtime: LocaleBearingRuntime | undefined,
   acceptLanguage?: string | undefined,
 ): HostLocale {
-  if (typeof runtime?.locale === 'string') return normalizeHostLocale(runtime.locale)
+  // Only a SHIPPED runtime locale wins. An empty or unsupported tag (a future
+  // language pack, a half-written setting) must not shadow the request header —
+  // it falls through to Accept-Language, then the product default.
+  const fromRuntime = tryNormalizeHostLocale(runtime?.locale)
+  if (fromRuntime !== undefined) return fromRuntime
   return preferredLocaleFromAcceptLanguage(acceptLanguage) ?? DEFAULT_HOST_LOCALE
 }
 

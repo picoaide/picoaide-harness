@@ -40,10 +40,15 @@ vi.mock('../api', () => ({
   ApiError: class extends Error {
     code: string
     status: number
-    constructor(status = 0, code = 'INTERNAL', message = '') {
+    // 2026-09-16:真实 ApiError 增加了可选 detail 段(错误上报测试事件的
+    // DNS/CONNECT/TLS/TIMEOUT/HTTP_4XX/HTTP_5XX 分类放在这里)。替身必须与
+    // 真源同形,否则页面里 `err.detail.kind` 永远 undefined,失败分类静默丢失。
+    detail?: Record<string, unknown>
+    constructor(status = 0, code = 'INTERNAL', message = '', detail?: Record<string, unknown>) {
       super(message)
       this.status = status
       this.code = code
+      this.detail = detail
     }
   },
 }))

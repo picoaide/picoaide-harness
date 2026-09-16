@@ -69,6 +69,15 @@ jobs:
             ~/.cache/electron-builder
           key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
       - run: yarn install --immutable
+      # 渲染进程错误采集门禁(verify:renderer-capture,2026-09-16)是**图形**门禁:
+      # 要真起 Electron 并在页面主世界抛错。runner 镜像通常自带 xvfb,这里仍与
+      # desktop-linux job 一样做防御式安装 —— 该门禁在无 DISPLAY 且无 xvfb-run 时
+      # **故意 fail-loud**(不静默跳过),所以装不上会红,而不是悄悄变绿。
+      - name: Ensure xvfb for the graphical gate
+        run: |
+          if ! command -v xvfb-run >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y xvfb
+          fi
       # 根 check(2026-09-06 重排):desktop check 最前(一次构建产出桌面 lib/types,
       # 其余包 tsc 依赖),随后其余包 check,全程每包只构建一次。
       - run: yarn check

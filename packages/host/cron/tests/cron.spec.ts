@@ -1,5 +1,84 @@
+import { execFileSync } from 'node:child_process'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { isValidCron, lastRunAtMs, nextRunAtMs, parseCron } from '../src/cron.ts'
+
+/**
+ * Run cron assertions in a CHILD process with a fixed TZ.
+ *
+ * Mutating process.env.TZ at runtime proved inconsistent for Date (V8 caches
+ * the timezone), which made the DST regressions flaky; a fresh process reads
+ * TZ before the first Date is constructed.
+ */
+function assertWithTz(tz: string, body: string): void {
+  const moduleUrl = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../src/cron.ts')).href
+  const script = `import assert from 'node:assert/strict'\nimport { lastRunAtMs, nextRunAtMs } from ${JSON.stringify(moduleUrl)}\n${body}`
+  // A regression in the walk can HANG (e.g. a day-cursor that stops moving).
+  // Without this inner deadline the synchronous execFileSync defeats vitest's
+  // testTimeout and the whole suite hangs until the CI job times out with no
+  // assertion message (2026-09-16 R4 audit).
+  execFileSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script], {
+    env: { ...process.env, TZ: tz },
+    stdio: 'pipe',
+    timeout: 20_000,
+    killSignal: 'SIGKILL',
+  })
+}
+
+describe('DST/catch-up 一致性（2026-09-16 审计 E4/R2-E2）', () => {
+  it('lastRunAtMs 不返回春季跳变中被归一化、表达式不匹配的瞬间', () => {
+    assertWithTz('America/New_York', `
+      const from = Date.UTC(2026, 2, 8, 7, 30) // 当地 03:30 EDT，02:xx 不存在
+      const last = lastRunAtMs('0 2 * * *', from)
+      assert.ok(last !== undefined, 'there is always a previous matching instant')
+      assert.equal(new Date(last).getHours(), 2)
+      assert.equal(nextRunAtMs('0 2 * * *', last - 1), last)
+    `)
+  })
+
+  it('世纪闰年缺口：2100 不是闰年，2 月 29 日仍须可达', () => {
+    assertWithTz('UTC', `
+      const next = nextRunAtMs('0 0 29 2 *', Date.UTC(2097, 0, 1))
+      assert.equal(next, Date.UTC(2104, 1, 29))
+    `)
+  })
+
+  it('2 小时回拨跨 (时,分) 候选取最近瞬间，而不是墙钟降序的第一个', () => {
+    assertWithTz('Antarctica/Troll', `
+      const from = Date.UTC(2026, 9, 25, 1, 30) // 本地 01:30（第二遍）
+      assert.equal(lastRunAtMs('* 1 * * *', from), from)
+      assert.equal(lastRunAtMs('30,31 1 * * *', from), from)
+    `)
+  })
+
+  it('2 小时回拨（Antarctica/Troll）：重复区间取第二遍', () => {
+    assertWithTz('Antarctica/Troll', `
+      const last = lastRunAtMs('45 1 * * *', Date.UTC(2026, 9, 25, 1, 50))
+      assert.equal(last, Date.UTC(2026, 9, 25, 1, 45))
+    `)
+  })
+
+  it('30 分钟回拨（Lord Howe）：重复区间取第二遍', () => {
+    assertWithTz('Australia/Lord_Howe', `
+      const last = lastRunAtMs('45 1 * * *', Date.UTC(2026, 3, 4, 15, 20))
+      assert.equal(last, Date.UTC(2026, 3, 4, 15, 15))
+    `)
+  })
+
+  it('秋季回拨：重复小时里已发生的匹配不得被整日跳过', () => {
+    // Expected epochs come from an independent minute-by-minute scanner (the
+    // agent's counterexample); nextRunAtMs is not a reference here because it
+    // deliberately does not enumerate the repeated hour's second pass.
+    assertWithTz('America/New_York', `
+      const last0130 = lastRunAtMs('30 1 * * *', Date.UTC(2026, 10, 1, 6, 10)) // 01:10 EST
+      assert.equal(last0130, Date.UTC(2026, 10, 1, 5, 30)) // 第一遍 01:30 EDT
+
+      const last0100 = lastRunAtMs('0 1 * * *', Date.UTC(2026, 10, 1, 6, 30)) // 01:30 EST
+      assert.equal(last0100, Date.UTC(2026, 10, 1, 6, 0)) // 第二遍 01:00 EST
+    `)
+  })
+})
 
 describe('parseCron', () => {
   it('parses a plain five-field expression', () => {
@@ -124,7 +203,7 @@ describe('nextRunAtMs', () => {
     expect(nextRunAtMs('0 0 30 2 *', Date.UTC(2026, 0, 1))).toBeUndefined()
   })
 
-  it('reaches a February 29 schedule within the five-year horizon', () => {
+  it('reaches a February 29 schedule within the eight-year horizon', () => {
     const from = new Date(2026, 0, 1).getTime()
     const next = nextRunAtMs('0 0 29 2 *', from)
     expect(next).toBeDefined()
@@ -152,5 +231,58 @@ describe('nextRunAtMs', () => {
     const from = new Date(2026, 7, 19, 9, 0, 0).getTime()
     const next = nextRunAtMs('0 9 * * *', from)!
     expect(next).toBeGreaterThan(from)
+  })
+})
+
+/**
+ * 2026-09-16 R9 审计：`lastRunAtMs` 的按日回退游标落在**整日不存在**的本地日
+ * （跨日界线的跳日，如 Pacific/Apia 的 2011-12-30）时，`new Date(y, m, d - 1)`
+ * 会被归一化回当天 ⇒ 死循环。该函数在调度器 tick 里同步调用，卡住就等于所有
+ * 定时任务永久停摆（`tickInFlight` 不复位）。8 年回退视野把这个窗口从 5 年放大
+ * 到 8 年，所以本轮一并加守卫。
+ */
+describe('按日回退游标不会因"跳日"原地打转（R9 审计）', () => {
+  it('terminates on a skipped local calendar day', () => {
+    assertWithTz('Pacific/Apia', `
+      // 2011-12-30 在当地不存在（跨日界线跳到 12-31）；表达式在 2004/2032 之间
+      // 没有命中日，游标会一路退到那个跳日。
+      const last = lastRunAtMs('0 0 29 2 */7', Date.UTC(2017, 5, 1))
+      assert.equal(last, undefined)
+    `)
+  })
+
+  it('still finds a match that lies BEFORE the skipped day', () => {
+    assertWithTz('Pacific/Apia', `
+      // 2011-12-30 不存在；2011-12-25 是周日 03:00，必须仍被找到
+      // （早期实现遇到跳日直接 break，会丢掉它 —— R3 审计）。
+      const last = lastRunAtMs('0 3 * * 0', new Date('2011-12-31T23:59:00').getTime())
+      assert.ok(last !== undefined, 'the Sunday before the skipped day must be found')
+      const d = new Date(last)
+      assert.equal(d.getDate(), 25)
+      assert.equal(d.getHours(), 3)
+      assert.equal(d.getDay(), 0)
+    `)
+  })
+
+  it('walks back by LOCAL days (a midnight DST day must not be skipped)', () => {
+    assertWithTz('America/Havana', `
+      // 2020-03-08 当地 00:00→01:00 跳变：若把"上一日"算成绝对 -24h，
+      // 2020-03-09 00:00 -04:00 会落到 03-07 23:00 -05:00，整个 03-08 被跳过。
+      const last = lastRunAtMs('0 3 * * 0', new Date('2020-03-15T00:30:00').getTime())
+      assert.ok(last !== undefined)
+      const d = new Date(last)
+      assert.equal(d.getDate(), 8, 'the Sunday 2020-03-08 must be found')
+      assert.equal(d.getHours(), 3)
+    `)
+  })
+
+  it('still walks past ordinary days', () => {
+    assertWithTz('Pacific/Apia', `
+      const last = lastRunAtMs('0 0 29 2 *', Date.UTC(2017, 5, 1))
+      assert.ok(last !== undefined, 'an earlier February 29 exists inside the horizon')
+      const d = new Date(last)
+      assert.equal(d.getMonth(), 1)
+      assert.equal(d.getDate(), 29)
+    `)
   })
 })

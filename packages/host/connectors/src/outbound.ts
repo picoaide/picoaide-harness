@@ -53,7 +53,7 @@ export class OutboundUrlBlockedError extends Error {
  * rather than stay parked on a socket. The message names the flow step and the
  * deadline so the row's error text is diagnosable.
  */
-class OutboundTimeoutError extends Error {
+export class OutboundTimeoutError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'OutboundTimeoutError'

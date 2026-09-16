@@ -349,7 +349,11 @@ export async function refreshCredentialTokens(
   try {
     resolved = await resolveAuthorizationServer(target, options)
   } catch (error) {
-    if (error instanceof OutboundUrlBlockedError) throw error
+    // A blocked URL must stay visible as a policy refusal, never be retried
+    // against the throwaway endpoint. Discovery re-classifies the authorize /
+    // token step as `auth-required`, so the original refusal rides along as the
+    // `cause` (2026-09-16 R9 audit).
+    if (error instanceof OutboundUrlBlockedError || (error as { cause?: unknown } | null)?.cause instanceof OutboundUrlBlockedError) throw error
     return { ok: false, reason: 'transient', message: hostT(locale, 'refresh.authorizationServerResolveFailed', { message: error instanceof Error ? error.message : String(error) }) }
   }
   if (resolved.failure) return resolved.failure
@@ -426,9 +430,33 @@ export class TokenRefresher {
     private readonly deps: {
       read: (id: string) => Promise<ConnectorCredential | null>
       write: CredentialWriter
+      /**
+       * Compare-and-update used for the refresh result when provided.
+       *
+       * Receives the credential this refresh read at the start and returns null
+       * when the store no longer matches it (disconnect / interactive
+       * re-authorization / another user's store). A null result means the
+       * refresh MUST NOT publish its tokens: they are stale or belong to an
+       * authorization that no longer exists.
+       */
+      writeIfUnchanged?: ((id: string, expected: ConnectorCredential, patch: Partial<ConnectorCredential>) => Promise<ConnectorCredential | null>) | undefined
+      /**
+       * Account scope the read/write pair currently points at (e.g. the store's
+       * resolved directory). Captured when the refresh starts: a CAS miss on
+       * another scope means a user switch, which must stay a silent no-op.
+       */
+      scope?: (() => string) | undefined
       target: (id: string) => OAuthTarget | null
-      /** Called after a refresh actually changed the stored credential. */
-      onRefreshed?: ((id: string, tokens: RefreshedTokens) => void) | undefined
+      /**
+       * Called after a refresh actually changed the stored credential.
+       *
+       * The third argument is the credential as **persisted** (with the store's
+       * `updatedAt`), so callers that mirror the refresh into live providers can
+       * tell "my refresh is newer than the snapshot this provider was built
+       * from" apart from "an interactive re-authorization has since replaced
+       * it" without guessing from `expiresAt`.
+       */
+      onRefreshed?: ((id: string, tokens: RefreshedTokens, persisted: ConnectorCredential) => void) | undefined
       timeoutMs?: number | undefined
       /**
        * Locale of the failure text, resolved by the caller for the request that
@@ -461,6 +489,11 @@ export class TokenRefresher {
   private async perform(id: string, force: boolean, locale: HostLocale): Promise<RefreshOutcome> {
     const credential = await this.deps.read(id)
     if (!credential) return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.notConnected', { id }) }
+    // Snapshot the account scope at the SAME point as the credential read; the
+    // CAS below must compare against the scope this refresh started on, not the
+    // one current at write time (capturing it next to the CAS made the
+    // cross-account branch unreachable — 2026-09-16 audit R3-B).
+    const scopeAtStart = this.deps.scope?.()
     if (!force && !tokenNeedsRefresh(credential)) {
       return {
         ok: true,
@@ -489,13 +522,44 @@ export class TokenRefresher {
       return { ok: false, reason: 'transient', message: hostT(locale, 'refresh.outboundBlocked', { message: error instanceof Error ? error.message : String(error) }) }
     }
     if (!outcome.ok) return outcome
-    await this.deps.write(id, {
+    const patch = {
       accessToken: outcome.tokens.accessToken,
       ...(outcome.tokens.refreshToken === undefined ? {} : { refreshToken: outcome.tokens.refreshToken }),
       expiresAt: outcome.tokens.expiresAt,
       refreshedAt: Date.now(),
-    })
-    this.deps.onRefreshed?.(id, outcome.tokens)
+    }
+    let persisted: ConnectorCredential
+    if (this.deps.writeIfUnchanged !== undefined) {
+      const cas = await this.deps.writeIfUnchanged(id, credential, patch)
+      if (cas === null) {
+        // The credential moved underfoot while the refresh was on the wire.
+        // Never publish the stale result; but distinguish the benign cases so
+        // the panel does not turn a successful outcome into a red error row:
+        //  - another account's store: silent no-op;
+        //  - no credential anymore (disconnect): not-applicable;
+        //  - a NEWER credential on the same account (interactive re-auth or an
+        //    SDK self-heal won the write order): mirror THAT credential into the
+        //    live providers instead of the one this refresh obtained.
+        if (this.deps.scope !== undefined && scopeAtStart !== this.deps.scope()) {
+          return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.notConnected', { id }) }
+        }
+        const current = await this.deps.read(id)
+        if (current === null) {
+          return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.notConnected', { id }) }
+        }
+        const tokens: RefreshedTokens = {
+          accessToken: current.accessToken ?? outcome.tokens.accessToken,
+          ...(current.refreshToken === undefined ? {} : { refreshToken: current.refreshToken }),
+          expiresAt: current.expiresAt ?? Date.now() + DEFAULT_TOKEN_LIFETIME_MS,
+        }
+        this.deps.onRefreshed?.(id, tokens, current)
+        return { ok: true, tokens }
+      }
+      persisted = cas
+    } else {
+      persisted = await this.deps.write(id, patch)
+    }
+    this.deps.onRefreshed?.(id, outcome.tokens, persisted)
     return outcome
   }
 }

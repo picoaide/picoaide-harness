@@ -1,10 +1,20 @@
 export class ApiError extends Error {
   code: string
   status: number
-  constructor(status: number, code: string, message: string) {
+  /**
+   * 结构化错误详情(2026-09-16):错误信封之外的可选 `detail` 段。
+   *
+   * 目前唯一消费方是「错误上报 → 发送测试事件」:AC3 要求把失败原因区分为
+   * DNS/CONNECT/TLS/TIMEOUT/HTTP_4XX/HTTP_5XX,该分类在
+   * `{"error":{...},"detail":{"kind":...}}` 的 detail 里,而不是 message 里。
+   * 缺省 undefined,既有调用方行为不变。
+   */
+  detail?: Record<string, unknown>
+  constructor(status: number, code: string, message: string, detail?: Record<string, unknown>) {
     super(message)
     this.code = code
     this.status = status
+    this.detail = detail
   }
 }
 
@@ -76,10 +86,16 @@ export async function request<T = any>(path: string, init: RequestInit = {}, ret
   if (!res.ok) {
     let code = 'INTERNAL'
     let message = fallbackMessage(res.status)
+    let detail: Record<string, unknown> | undefined
     try {
       const body = await res.json()
       code = body?.error?.code ?? code
       message = body?.error?.message ?? message
+      // 失败分类(如错误上报测试事件的 DNS/CONNECT/TLS/TIMEOUT/HTTP_4XX/HTTP_5XX)
+      // 由服务端放在 detail 段;带上它页面才能给出可读原因。
+      if (body?.detail && typeof body.detail === 'object') {
+        detail = body.detail as Record<string, unknown>
+      }
     } catch {
       /* keep the Chinese fallback */
     }
@@ -93,7 +109,7 @@ export async function request<T = any>(path: string, init: RequestInit = {}, ret
       await refreshCsrf()
       return request<T>(path, init, true)
     }
-    throw new ApiError(res.status, code, message)
+    throw new ApiError(res.status, code, message, detail)
   }
   return res.json() as Promise<T>
 }

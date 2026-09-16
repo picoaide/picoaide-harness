@@ -124,16 +124,31 @@ test('A1 标记被消费且只告知一次（快照注入 → 二次启动不再
   // **读一次即删**并注入快照（模型据此提示用户）；下一次启动不再重复告知。
   const dir = tempDir()
   try {
-    // 第一次：损坏 → 留档（此时写标记；同一次 apply 已把它消费掉）
+    // 第一次：损坏 → 留档并写标记。apply 不消费标记：用户可能开一眼就退出，
+    // 或先渲染的是子代理快照 —— 必须等带会话视角的快照真正看到才删。
     writeFileSync(join(dir, 'plugin-state.json'), '{ bad json')
-    apply(fakeCtx(), { memoryDir: dir })
+    const ctx1 = fakeCtx()
+    apply(ctx1, { memoryDir: dir })
     const marker = join(dir, 'plugin-state.json.quarantined.json')
-    assert.equal(existsSync(marker), false, '标记应在同一次启动里被消费（读一次即删）')
+    assert.equal(existsSync(marker), true, 'apply 阶段不得提前消费标记')
+    // 子代理是真实会话（有 session.id 且 header.origin='subagent'）：它的快照
+    // 先渲染时不得吞掉用户可见的那次告知。
+    const subagent = String(ctx1.state.contexts.find(c => c.name === 'memory:snapshot').text({
+      agent: { id: 'sub', session: { id: 'sub-1', header: { origin: 'subagent' } } },
+    }))
+    assert.match(subagent, /记忆设置曾被重置/)
+    assert.equal(existsSync(marker), true, '子代理会话不得消费告知')
+    const snapshot1 = renderSnap(ctx1, dir)
+    assert.match(snapshot1, /记忆设置曾被重置/, '会话视角快照必须看到一次性告知')
+    assert.equal(existsSync(marker), false, '会话视角渲染后才消费标记')
+    // 快照每轮组装都会重渲染：同一次 apply 的第二次渲染不得再带这段。
+    assert.doesNotMatch(renderSnap(ctx1, dir), /记忆设置曾被重置/, '同一进程内只告知一次')
 
-    // 第二次：再损坏一次 → apply 必须把"设置被重置"告知模型
+    // 第二次：再损坏一次、apply 后不渲染就"退出" → 标记必须还在，下次启动还能告知。
     writeFileSync(join(dir, 'plugin-state.json'), '{ bad again')
     const ctx2 = fakeCtx()
     apply(ctx2, { memoryDir: dir })
+    assert.equal(existsSync(marker), true, '没有会话视角渲染过，标记不得丢')
     const snapshot = renderSnap(ctx2, dir)
     assert.match(snapshot, /记忆设置曾被重置/, '快照必须一次性告知模型（用户可感知的状态变化）')
     assert.match(snapshot, /corrupt-/, '告知里要给备份文件名')

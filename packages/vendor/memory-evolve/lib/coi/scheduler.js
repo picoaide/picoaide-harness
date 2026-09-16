@@ -343,8 +343,13 @@ export class CoiScheduler {
       // flag 模式适配器（codex -i / hermes --image）：图片本地路径数组
       images: Array.isArray(task.attachments) ? task.attachments.map((a) => a.localPath).filter(Boolean) : [],
     })
-    if (args.some((arg) => arg.includes('{sessionId}')) && mode === 'resume') {
-      // 占位符未被替换 = sessionId 缺失，报错终止
+    const rawSessionId = task.sessionId === undefined || task.sessionId === null ? '' : String(task.sessionId).trim()
+    if (mode === 'resume' && (rawSessionId === '' || rawSessionId.includes('{sessionId}'))) {
+      // Resume needs a real session id. Checking the FILLED argv for a literal
+      // `{sessionId}` was a false positive once buildArgs stopped re-scanning
+      // inserted values: a task text mentioning the placeholder is data, not an
+      // unreplaced template. Only the SESSION ID field is judged here
+      // (2026-09-16 audit R5).
       this.#finish(task, { status: 'failed', error: '缺少 sessionId 无法恢复会话' })
       return
     }

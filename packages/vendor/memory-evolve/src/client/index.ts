@@ -1620,7 +1620,7 @@ export const en: Record<MemoryEvolveKey, string> = {
   'broadcast.settings.wsCoord.enabled': 'Enable workspace coordination',
   'broadcast.settings.wsCoord.enabled.hint': 'Registers de_ws_declare / de_ws_status / de_ws_release tools + write-conflict detection listeners + the activity snapshot section. Depends on the "Session broadcast" master switch (unavailable while broadcast is off). Off by default',
   'broadcast.settings.wsCoord.snapshot': 'Activity snapshot section',
-  'broadcast.settings.wsCoord.snapshot.hint': 'When ≥2 sessions are active in the workspace, inject one 【Workspace activity】 line into the per-turn snapshot (with the current time and what each session is doing); zero cost with 0-1 active sessions',
+  'broadcast.settings.wsCoord.snapshot.hint': 'When ≥2 sessions are active in the workspace, inject one [Workspace activity] line into the per-turn snapshot (with the current time and what each session is doing); zero cost with 0-1 active sessions',
   'broadcast.settings.wsCoord.enforce': 'Hard-block mode',
   'broadcast.settings.wsCoord.enforce.hint': 'Off by default (soft mode: trust the AI — conflicts warn but never block); when on, writes to files occupied by other sessions are denied at the tool layer (deny), and the AI sees the reason and adjusts on its own',
   'broadcast.guide.intro.title': 'What is Session Broadcast',

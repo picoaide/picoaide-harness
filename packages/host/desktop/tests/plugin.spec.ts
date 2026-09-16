@@ -43,6 +43,7 @@ interface PluginHarness {
   update: ReturnType<typeof vi.fn<(patch: object) => Promise<void>>>
   restart: ReturnType<typeof vi.fn<() => Promise<void>>>
   setLocalePreference: ReturnType<typeof vi.fn<(locale: LocaleId | undefined) => void>>
+  emit: ReturnType<typeof vi.fn<(event: string, payload?: unknown) => void>>
   setThemeSource: ReturnType<typeof vi.fn<(source: ThemePreference) => void>>
   rendererBoot: ReturnType<typeof vi.fn<(report: RendererBootReport) => void>>
   pickDirectory: ReturnType<typeof vi.fn<() => Promise<string | null>>>
@@ -60,6 +61,7 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
   const update = vi.fn(async (_patch: object) => {})
   const restart = vi.fn(async () => {})
   const setLocalePreference = vi.fn<(locale: LocaleId | undefined) => void>()
+  const emit = vi.fn<(event: string, payload?: unknown) => void>()
   const setThemeSource = vi.fn<(source: ThemePreference) => void>()
   const rendererBoot = vi.fn<(report: RendererBootReport) => void>()
   const pickDirectory = vi.fn(async () => null)
@@ -153,10 +155,16 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
       if (event === 'settings/updated') settingsUpdated.add(listener)
       return () => { settingsUpdated.delete(listener) }
     }),
+    emit,
   } as unknown as Context
+  // 真实 runtime 的 setLocalePreference 会改 `runtime.locale`（同值早退）；
+  // `pico/locale-changed` 的发射条件依赖这个语义。
+  // `DesktopRuntime.locale` is readonly in the interface; the mock mutates it.
+  setLocalePreference.mockImplementation((locale) => { (runtime as { locale: string }).locale = locale ?? 'en' })
   return {
     ctx,
     runtime,
+    emit,
     shell: () => shell,
     update,
     restart,
@@ -371,6 +379,24 @@ describe('desktop Host plugin', () => {
 
     harness.notifyLocale(undefined)
     expect(harness.setLocalePreference).toHaveBeenLastCalledWith(undefined)
+  })
+
+  it('announces a REAL language change so open host-rendered pages can re-serve', () => {
+    // 2026-09-16 R9 审计：浏览器 chrome 两页是按请求渲染的，已经开着的窗口不会
+    // 再请求一次 —— 宿主必须在语言真变化时发信号（同值写入不得触发重载）。
+    const harness = createHarness()
+    apply(harness.ctx, config)
+    harness.emit.mockClear()
+
+    harness.notifyLocale('zh')
+    expect(harness.emit).toHaveBeenCalledWith('pico/locale-changed', 'zh')
+
+    harness.emit.mockClear()
+    harness.notifyLocale('zh')
+    expect(harness.emit).not.toHaveBeenCalled()
+
+    harness.notifyLocale('en')
+    expect(harness.emit).toHaveBeenCalledWith('pico/locale-changed', 'en')
   })
 
   it('requires the desktop Web carrier to remain loopback-only', () => {

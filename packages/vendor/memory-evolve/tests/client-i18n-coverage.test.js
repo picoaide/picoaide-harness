@@ -86,6 +86,22 @@ test('迁移后的客户端文件：代码态不得再出现硬编码中文', ()
   )
 })
 
+test('动态模板键的字典族必须存在（scope.${s} 这类漏改会被抓住）', () => {
+  const dictionarySource = readFileSync(join(CLIENT_ROOT, 'index.ts'), 'utf8')
+  const keys = new Set([...dictionarySource.matchAll(/'([A-Za-z][\w.]*)':/gu)].map((match) => match[1]))
+  const offenders = []
+  for (const relative of Object.keys(MIGRATED)) {
+    const code = codeOnly(readFileSync(join(CLIENT_ROOT, relative), 'utf8'))
+    for (const match of code.matchAll(/t\(`([A-Za-z][\w.]*)\.\$\{/gu)) {
+      const family = match[1]
+      if (![...keys].some((key) => key.startsWith(`${family}.`))) {
+        offenders.push(`${relative}: t(\`${family}.\${...}\`) has no dictionary family`)
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], `动态模板键缺少字典族（会渲染出原始键名）：\n${offenders.join('\n')}`)
+})
+
 test('非文案的解析/匹配模式必须保留（翻了就会坏）', () => {
   // 通知铃铛：解析邮件头，必须同时认中文与英文标签
   const bell = readFileSync(join(CLIENT_ROOT, 'notification-bell.tsx'), 'utf8')
