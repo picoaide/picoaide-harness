@@ -417,6 +417,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           })
         },
       })
+      adoptLatestRefresh(def.id, handle, credential.expiresAt)
       liveProviders.set(def.id, handle)
       return { authProvider: handle.provider }
     }
@@ -447,6 +448,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             })
         },
       })
+      adoptLatestRefresh(def.id, handle, credential.expiresAt)
       liveProviders.set(def.id, handle)
       return { authProvider: handle.provider }
     } catch (error) {
@@ -464,6 +466,40 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * for an id can still be in use, and the stale handle is unreachable anyway.
    */
   const liveProviders = new Map<string, { adopt: (tokens: RefreshedTokens) => void }>()
+
+  /**
+   * The most recent credential **our own** refresher produced, per connector.
+   *
+   * `registerMcp` reads the credential once and builds the provider from that
+   * snapshot only later (after discovery / the outbound fence), so a refresh
+   * landing in between left the new transport holding the consumed token —
+   * `onRefreshed` had no handle yet to feed, and the provider was born stale.
+   * Keeping the last result lets a registration that started too early catch up
+   * before it goes live; the expiry guard makes the catch-up a no-op when the
+   * snapshot is already the newer of the two (e.g. an interactive
+   * re-authorization, which is newer than our last background refresh).
+   */
+  const latestRefresh = new Map<string, RefreshedTokens>()
+
+  /**
+   * Bring a freshly built provider up to the newest credential we know of.
+   * @param id - connector id the provider belongs to.
+   * @param handle - the provider created for the current registration.
+   * @param snapshotExpiresAt - expiry of the credential that provider was built
+   *   from; the catch-up is skipped when that snapshot is already newer.
+   */
+  function adoptLatestRefresh(
+    id: string,
+    handle: { adopt: (tokens: RefreshedTokens) => void },
+    snapshotExpiresAt: number | undefined,
+  ): void {
+    const latest = latestRefresh.get(id)
+    // Only when our refresh is the newer of the two: `expiresAt` advances on
+    // every grant, so an interactive re-authorization (which produced a later
+    // expiry) must not be overwritten by an earlier background refresh.
+    if (latest === undefined || latest.expiresAt <= (snapshotExpiresAt ?? 0)) return
+    handle.adopt(latest)
+  }
 
   /**
    * One refresh engine for every connector. `pico/connector-credentials-changed`
@@ -492,6 +528,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // the grant, so the connector silently needs re-authorization. Feed the
       // live provider the credential we just persisted. Regression:
       // tests/token-refresh-live-provider.spec.ts.
+      latestRefresh.set(id, tokens)
       liveProviders.get(id)?.adopt(tokens)
       ctx.emit('pico/connector-credentials-changed', { id })
     },
@@ -666,6 +703,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const teardownAll = async (): Promise<void> => {
     teardownController.abort(new Error(copy('flow.userSwitchedRegistration')))
     liveProviders.clear()
+    latestRefresh.clear()
     for (const dispose of mcpDisposers.values()) {
       try { dispose() } catch { /* teardown never throws */ }
     }
@@ -1520,6 +1558,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // conn-1: …and a registration already awaiting must stop spawning.
       teardownController.abort(new Error(copy('flow.pluginUnloadRegistration')))
       liveProviders.clear()
+      latestRefresh.clear()
       for (const dispose of mcpDisposers.values()) dispose()
       mcpDisposers.clear()
       // P0-1: teardown must abort any in-flight authorization flow — a
