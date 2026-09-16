@@ -49,7 +49,7 @@ const zh = {
   'tool.notTriggered': '定时任务未能触发',
   // ---- tool errors the user reads in the transcript ----------------------
   'tool.invalidCron': 'cron 表达式无效: {cron}',
-  'tool.cronNoMatch': 'cron 表达式在五年内无匹配时刻: {cron}',
+  'tool.cronNoMatch': 'cron 表达式在八年内无匹配时刻: {cron}',
   'tool.promptRequired': '必须提供 prompt（执行时发送给智能体会话的提示词）',
   'tool.permissionUnavailable': '权限预设服务不可用，无法指定 permission',
   'tool.unknownPermission': '未知的权限预设: {permission}（可用：{available}）',
@@ -68,7 +68,7 @@ const en: Record<keyof typeof zh, string> = {
   'tool.triggered': 'The scheduled job was triggered',
   'tool.notTriggered': 'The scheduled job could not be triggered',
   'tool.invalidCron': 'invalid cron expression: {cron}',
-  'tool.cronNoMatch': 'the cron expression has no matching instant within five years: {cron}',
+  'tool.cronNoMatch': 'the cron expression has no matching instant within eight years: {cron}',
   'tool.promptRequired': 'prompt is required (the text sent to the agent session when the job runs)',
   'tool.permissionUnavailable': 'The permission preset service is unavailable, so permission cannot be pinned',
   'tool.unknownPermission': 'Unknown permission preset: {permission} (available: {available})',
