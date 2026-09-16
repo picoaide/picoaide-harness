@@ -373,7 +373,6 @@
       "!*.tsx",
       "!**/node_modules/dsh-memory-evolve/src/**",
       "!**/node_modules/dsh-memory-evolve/docs/**",
-      "!**/node_modules/dsh-memory-evolve/skills/**",
       "!**/node_modules/dsh-memory-evolve/tests/**",
       "!**/node_modules/dsh-memory-evolve/node_modules/**",
       "!**/node_modules/shiki/**",
