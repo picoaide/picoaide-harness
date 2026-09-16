@@ -165,7 +165,12 @@ const electron = vi.hoisted(() => {
     throw new Error(`unexpected image path ${path}`)
   })
 
+  // P0-6/D8:宿主在 mount 时用 ipcMain 装渲染进程错误通道;替身必须提供它
+  // (否则"忘了在 mock 里跟上 Electron 面"会让整组用例假红)。
+  const ipcMain = { on: vi.fn(), removeListener: vi.fn() }
+
   return {
+    ipcMain,
     app: {
       dock: { setIcon: vi.fn() },
       getLocale: vi.fn(() => 'en-US'),
@@ -219,6 +224,7 @@ const electron = vi.hoisted(() => {
 vi.mock('electron', () => ({
   app: electron.app,
   BrowserWindow: electron.BrowserWindow,
+  ipcMain: electron.ipcMain,
   dialog: electron.dialog,
   Menu: electron.Menu,
   nativeImage: electron.nativeImage,
@@ -250,6 +256,8 @@ const spec: DesktopShellSpec = {
 
 describe('Electron compatibility runtime', () => {
   beforeEach(() => {
+    electron.ipcMain.on.mockClear()
+    electron.ipcMain.removeListener.mockClear()
     electron.app.isPackaged = false
     electron.browserWindowOptions.length = 0
     electron.browserWindowThemeSources.length = 0
@@ -357,6 +365,8 @@ describe('Electron compatibility runtime', () => {
         nodeIntegration: false,
         sandbox: true,
         webSecurity: true,
+        // P0-6/D8:沙箱 preload 承载渲染进程错误转发;缺了它渲染采集静默失效。
+        preload: expect.stringContaining('preload/renderer-error.cjs'),
       },
       titleBarStyle: 'hiddenInset',
       transparent: true,

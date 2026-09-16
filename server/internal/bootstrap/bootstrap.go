@@ -26,6 +26,12 @@ type WebConfig struct {
 	ErrorReportingEnabled bool `json:"error_reporting_enabled"`
 	// 上报等级阈值(2026-08): error|warning|info|debug;>= 阈值才上报。
 	ErrorReportingLevel string `json:"error_reporting_level"`
+	// 正向心跳开关(2026-09-16,D4):true 时客户端每次进程启动发一条带
+	// `picoaide.heartbeat` tag 的 info 事件,**只对该 tag 绕过**上面的等级阈值
+	// (error_reporting_level 语义未改变);默认 false = 与历史行为完全一致。
+	// 用途:让管理员有办法证明「客户端 → GlitchTip」这一跳活着 ——
+	// 否则 level=error 下健康链路在后台也一条都没有,与"坏掉"不可区分。
+	ErrorReportingHeartbeat bool `json:"error_reporting_heartbeat"`
 	// GlitchTip 连接器配置(统一分发 2026-08):服务端下发地址/组织,
 	// 客户端连接器预填,用户只需填 token。空 = 不预填。
 	GlitchTipBaseURL      string `json:"glitchtip_base_url"`
@@ -166,6 +172,8 @@ func Build(db *sql.DB, user *serverstore.User) (*Response, error) {
 	} else {
 		web.ErrorReportingLevel = "error"
 	}
+	// 心跳开关(2026-09-16,D4):仅显式 "true" 打开;缺省 false(零回归)。
+	web.ErrorReportingHeartbeat = settings["web.error_reporting_heartbeat"] == "true"
 	// 统一分发(2026-08):GlitchTip 连接器地址/组织由服务端下发
 	web.GlitchTipBaseURL = settings["web.glitchtip_base_url"]
 	web.GlitchTipOrganization = settings["web.glitchtip_organization"]

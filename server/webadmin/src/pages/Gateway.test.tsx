@@ -418,3 +418,63 @@ describe('Gateway 网关配置页', () => {
       expect(String(puts[0]!.peak_windows)).toContain('"start":"09:00"')
     })
   })
+
+// ---------------------------------------------------------------------------
+// 修复轮 1(F-07):本页只提交自己的字段
+// ---------------------------------------------------------------------------
+
+describe('Gateway 保存面(F-07)', () => {
+  /** 模拟"库里存着别的域(错误监控)字段"的服务端 GET 响应。 */
+  function storeWithForeignFields() {
+    const puts: Array<Record<string, unknown>> = []
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/gateway' && init?.method === 'PUT') {
+        puts.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+        return { ok: true, warnings: [] }
+      }
+      if (path === '/api/server/admin/gateway') {
+        return {
+          default_model: 'deepseek-chat',
+          rate_limit: '60',
+          peak_windows: '',
+          retention_months: '6',
+          default_thinking_level: 'max',
+          server_base_url: '',
+          // 「网关」页没有这些输入框,但 GET 会下发它们(错误监控域)。
+          error_reporting_dsn: 'http://key@localhost:8000/1',
+          error_reporting_enabled: true,
+          error_reporting_level: 'error',
+          error_reporting_heartbeat: false,
+          glitchtip_base_url: 'https://glitchtip.example.com',
+          glitchtip_organization: 'picoaide',
+        }
+      }
+      return baseImpl(path, init)
+    })
+    return puts
+  }
+
+  it('提交体只含本页字段,不回写错误监控域的字段', async () => {
+    // 事故:F-07 —— 本页 GET 整份配置后 `{ ...cfg }` 原样回提交,把别的域的
+    // (可能已被新校验拒绝的)DSN 带回服务端,导致保存无关配置被 400 拦住。
+    const puts = storeWithForeignFields()
+    render(<Gateway />)
+    await screen.findByText('全局设置')
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存')
+
+    expect(puts.length).toBe(1)
+    const body = puts[0]!
+    expect(Object.keys(body).sort()).toEqual([
+      'default_model',
+      'default_thinking_level',
+      'peak_windows',
+      'rate_limit',
+      'retention_months',
+      'server_base_url',
+    ])
+    for (const foreign of ['error_reporting_dsn', 'error_reporting_enabled', 'error_reporting_level', 'error_reporting_heartbeat', 'glitchtip_base_url', 'glitchtip_organization']) {
+      expect(body[foreign]).toBeUndefined()
+    }
+  })
+})

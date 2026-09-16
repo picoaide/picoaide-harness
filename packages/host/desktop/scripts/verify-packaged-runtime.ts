@@ -45,6 +45,10 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'package.json',
   'cordis.patch.yml',
   'lib/main.js',
+  // Sandboxed preload (P0-6/D8):渲染进程未捕获错误经它转给主进程。缺了它,
+  // 渲染进程采集会**静默**失效(窗口照常工作、错误一条都进不了 GlitchTip)——
+  // 所以它必须在打包断言里逐条钉住。
+  'lib/preload/renderer-error.cjs',
   'lib/client.js',
   'lib/index.js',
   'lib/profile.js',
@@ -583,6 +587,9 @@ const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   { specifier: 'dsh-plugin-desktop/updates', archivePath: 'lib/updates.js' },
   { specifier: 'dsh-plugin-desktop/windows-agent-presets', archivePath: 'lib/windows-agent-presets.js' },
   { specifier: 'dsh-plugin-desktop/windows-pwsh-sandbox', archivePath: 'lib/windows-pwsh-sandbox.js' },
+  // P0-6/D8(2026-09-16):渲染进程错误契约。preload 与宿主都用它做载荷校验/IPC 通道名;
+  // 它掉出 asar ⇒ 渲染进程采集静默失效(窗口照常工作、错误一条都进不了 GlitchTip)。
+  { specifier: 'dsh-plugin-desktop/renderer-error-contract', archivePath: 'lib/renderer-error-contract.js' },
   { specifier: '@deepseek-ai/dsh-base/package.json', archivePath: 'node_modules/@deepseek-ai/dsh-base/package.json' },
   { specifier: '@deepseek-ai/dsh-web-app/package.json', archivePath: 'node_modules/@deepseek-ai/dsh-web-app/package.json' },
   { specifier: '@picoaide/dsh-enterprise/session-service', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/session-service.js' },
@@ -590,6 +597,16 @@ const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   { specifier: '@picoaide/dsh-enterprise/gateway-model', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/gateway-model.js' },
   { specifier: '@picoaide/dsh-enterprise/bootstrap', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/bootstrap.js' },
   { specifier: '@picoaide/dsh-enterprise/client', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/client.js' },
+  // P1-1(2026-09-16):error-reporting 静态 import `@sentry/node`(enterprise 的 tsdown 把它
+  // 标为 external,运行时才解析)。这个模块一旦掉出 app.asar,Cordis 加载整个插件模块时
+  // 失败且**零日志**(GlitchTip 采集静默整体失效)。存在性由这里钉住,真实加载由下面的
+  // `smokePackagedErrorReporting` 在打包版 Electron 里证明 —— 两层缺一不可。
+  { specifier: '@picoaide/dsh-enterprise/error-reporting', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/error-reporting.js' },
+  // 同批补漏的三个兄弟导出:它们都已在 `exports` 里发布、lib/ 也有产物,只是此前没进清单
+  // (清单是"允许失败"的唯一真源,少一条就少一道门)。
+  { specifier: '@picoaide/dsh-enterprise/skill-telemetry', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/skill-telemetry.js' },
+  { specifier: '@picoaide/dsh-enterprise/channel-sync', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/channel-sync.js' },
+  { specifier: '@picoaide/dsh-enterprise/invariant', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/invariant.js' },
   { specifier: '@picoaide/dsh-enterprise/package.json', archivePath: 'node_modules/@picoaide/dsh-enterprise/package.json' },
   { specifier: '@picoaide/dsh-connectors/client', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/client.js' },
   { specifier: '@picoaide/dsh-connectors/package.json', archivePath: 'node_modules/@picoaide/dsh-connectors/package.json' },
@@ -1062,12 +1079,163 @@ export function smokePackagedFlockLock(
   }
 }
 
+/** Timeout for the packaged error-reporting smoke (a hung Electron must not hang afterPack). */
+export const PACKAGED_SENTRY_SMOKE_TIMEOUT_MS = 10_000
+
+/** Success marker the embedded error-reporting script prints; a silent exit 0 is a failure. */
+const SENTRY_SMOKE_OK = 'SENTRY-SMOKE-OK'
+
+/**
+ * Embedded error-reporting smoke script (P1-1).
+ *
+ * Runs inside the **packaged** launcher with `ELECTRON_RUN_AS_NODE=1`: only
+ * Electron's fs patch can read `app.asar`, so plain Node cannot load the module
+ * out of the sealed archive. It resolves `@sentry/node` the way the enterprise
+ * `lib/error-reporting.js` static import does (through the app root's
+ * `node_modules`), then dynamically imports the built error-reporting module and
+ * asserts the Cordis plugin surface. If `@sentry/node` or the module itself
+ * falls out of the package, the plugin module fails to load **with zero logs**
+ * (the composition loads plugins lazily), which nothing else in the gate would
+ * catch — the static entry list only proves a path exists, not that it loads.
+ */
+const SENTRY_SMOKE_SCRIPT = `import { createRequire } from 'node:module'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+
+const appRoot = process.argv[2]
+const appRequire = createRequire(join(appRoot, 'package.json'))
+// Static import target of the enterprise error-reporting module (external in its
+// tsdown build, so this resolves at runtime, not at build time).
+appRequire.resolve('@sentry/node')
+const sentry = appRequire('@sentry/node')
+if (typeof sentry.init !== 'function') {
+  throw new Error('@sentry/node loaded from the package does not expose init()')
+}
+const reportingUrl = pathToFileURL(appRequire.resolve('@picoaide/dsh-enterprise/error-reporting')).href
+const reporting = await import(reportingUrl)
+for (const key of ['apply', 'initSentry', 'name']) {
+  if (!(key in reporting)) {
+    throw new Error('@picoaide/dsh-enterprise/error-reporting does not expose ' + key)
+  }
+}
+process.stdout.write('${SENTRY_SMOKE_OK}\\n')
+`
+
+/** Result shape of one error-reporting smoke launcher invocation (injectable in tests). */
+export interface SentrySmokeProcessResult {
+  readonly status: number | null
+  readonly stdout: string
+  readonly stderr: string
+  readonly error?: { readonly code?: string | undefined, readonly message?: string | undefined }
+}
+
+/** Injectable error-reporting smoke launcher (tests). */
+export type SentrySmokeLauncher = (
+  executable: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+) => SentrySmokeProcessResult
+
+/** Default launcher: the packaged Electron in Node mode, hard timeout. */
+function runSentrySmokeProcess(
+  executable: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): SentrySmokeProcessResult {
+  const result = spawnSync(executable, [...args], {
+    env,
+    encoding: 'utf8',
+    timeout: PACKAGED_SENTRY_SMOKE_TIMEOUT_MS,
+  })
+  return {
+    status: result.status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+    ...(result.error === undefined
+      ? {}
+      : { error: { code: (result.error as NodeJS.ErrnoException).code, message: result.error.message } }),
+  }
+}
+
+/**
+ * Smoke the packaged error-reporting path end to end: run the sealed
+ * application's Node runtime, require `@sentry/node` from inside the package and
+ * import the built `@picoaide/dsh-enterprise/error-reporting` entry.
+ *
+ * P1-1: `verifyPackagedRuntime` only proves the *files* exist; a module whose
+ * static `@sentry/node` import no longer resolves would still pass the static
+ * list while the whole plugin module throws at load time with zero logs.
+ *
+ * Unlike the flock smoke this runs on **every** platform: `@sentry/node` is pure
+ * JS, so win32 has no excuse to skip, and a missing launcher is a hard failure
+ * rather than a silent skip.
+ * @param context - Electron Builder's afterPack context.
+ * @param launch - process launcher (tests inject a stub).
+ * @returns Nothing; failure rejects with the captured process output.
+ */
+export function smokePackagedErrorReporting(
+  context: PackagedRuntimeContext,
+  launch: SentrySmokeLauncher = runSentrySmokeProcess,
+): void {
+  const asarPath = resolvePackagedAsarPath(context)
+  // Archive layout: the app root IS app.asar (only the Electron fs patch can read
+  // it). Physical layout (asar: false): the real application directory.
+  const appRoot = existsSync(asarPath) ? asarPath : resolvePackagedAppRoot(context)
+  const candidates = resolvePackagedLauncherCandidates(context)
+  const executable = candidates.find(candidate => existsSync(candidate))
+  if (executable === undefined) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged error-reporting smoke cannot find the packaged launcher (tried ${candidates.join(', ')}); `
+      + 'the afterPack context must carry packager.executableName / appInfo.productFilename',
+    )
+  }
+  const root = mkdtempSync(join(tmpdir(), 'dsh-sentry-smoke-'))
+  try {
+    const scriptPath = join(root, 'sentry-smoke.mjs')
+    writeFileSync(scriptPath, SENTRY_SMOKE_SCRIPT)
+    const result = launch(executable, [scriptPath, appRoot], {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1',
+    })
+    if (result.error !== undefined) {
+      const code = result.error.code ?? ''
+      if (code === 'ETIMEDOUT' || code === 'ESRCH') {
+        throw new Error(
+          `dsh-plugin-desktop: packaged error-reporting smoke timed out after ${String(PACKAGED_SENTRY_SMOKE_TIMEOUT_MS)}ms `
+          + `(${executable}) — the packaged launcher did not finish loading @sentry/node`,
+        )
+      }
+      throw new Error(
+        `dsh-plugin-desktop: packaged error-reporting smoke could not start ${executable} (${code}: ${String(result.error.message)})`,
+      )
+    }
+    if (result.status !== 0) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged error-reporting smoke failed (exit ${String(result.status)}) — `
+        + 'the enterprise error-reporting plugin would fail to load inside the packaged app with zero logs '
+        + '(GlitchTip error collection would be silently dead).\n'
+        + `  launcher: ${executable}\n  app root: ${appRoot}\n`
+        + `${result.stdout.trimEnd()}\n${result.stderr.trimEnd()}`,
+      )
+    }
+    if (!result.stdout.includes(SENTRY_SMOKE_OK)) {
+      throw new Error(
+        'dsh-plugin-desktop: packaged error-reporting smoke exited 0 without reporting '
+        + `${SENTRY_SMOKE_OK} — the smoke script did not run to completion`,
+      )
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
 /**
  * Run the static packaged-runtime check as Electron Builder's afterPack hook.
  * @param context - Electron Builder's afterPack context.
  * @param verify - static verification implementation (tests).
  * @param smoke - packaged diagnostic worker smoke (tests).
  * @param flockSmoke - packaged flock smoke (tests).
+ * @param errorReportingSmoke - packaged error-reporting smoke (tests).
  * @returns A promise that rejects before signing when the runtime is incomplete.
  */
 export async function afterPack(
@@ -1075,6 +1243,7 @@ export async function afterPack(
   verify: typeof verifyPackagedRuntime = verifyPackagedRuntime,
   smoke: PackagedDiagnosticWorkerSmoke = smokePackagedDiagnosticWorker,
   flockSmoke: (context: PackagedRuntimeContext) => void = smokePackagedFlockLock,
+  errorReportingSmoke: (context: PackagedRuntimeContext) => void = smokePackagedErrorReporting,
 ): Promise<void> {
   verify(context)
   const asarPath = resolvePackagedAsarPath(context)
@@ -1085,4 +1254,5 @@ export async function afterPack(
     : resolvePackagedAppRoot(context)
   await smoke(sourceRoot, undefined, asarPath)
   flockSmoke(context)
+  errorReportingSmoke(context)
 }

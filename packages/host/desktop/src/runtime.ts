@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
+import type { RendererErrorReport } from './renderer-error-contract.ts'
 import type { DesktopUpdateErrorCategory } from './desktop-update-contract.ts'
 import type { UpdateCheckResult, UpdateRequest } from './update-checker.ts'
 
@@ -290,6 +291,20 @@ export interface DesktopRuntime {
 
   /** Accept the terminal client Loader outcome for the mounted generation. */
   reportRendererBoot(report: RendererBootReport): void
+
+  /**
+   * 注册渲染进程错误报告落点(P0-6/D8)。
+   *
+   * 渲染进程(preload)把未捕获错误与未处理 rejection 经 IPC 交给宿主,宿主
+   * 归一化(IPC 是不可信边界)后转给这里的落点;`render-process-gone` 也走同
+   * 一落点。落点由拥有 Sentry 实例的企业插件注册 —— desktop 包不依赖 Sentry。
+   *
+   * 可选:无头组合(loader smoke、测试替身)没有该能力时,调用方必须容忍。
+   *
+   * @param sink - 接收归一化报告的落点。
+   * @returns 幂等 disposer。
+   */
+  setRendererErrorSink?(sink: (report: RendererErrorReport) => void): () => void
 
   /** Apply an explicit locale, or fall back to Electron's application locale. */
   setLocalePreference(preference: DesktopLocale | undefined): void

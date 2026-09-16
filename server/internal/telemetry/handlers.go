@@ -14,12 +14,14 @@ import (
 // Handlers 遥测端点 handler 集合(客户端面 Bearer 认证由 router 包挂载)。
 type Handlers struct {
 	// 客户端面 /api/client/v2/telemetry
-	ReportSkillCall gin.HandlerFunc // POST /skill-call
+	ReportSkillCall      gin.HandlerFunc // POST /skill-call
+	ReportErrorReporting gin.HandlerFunc // POST /error-reporting(0068 客户端错误上报状态)
 }
 
 // NewHandlers 返回遥测 handler 集合(db 注入)。
 func NewHandlers(db *sql.DB) *Handlers {
 	return &Handlers{
-		ReportSkillCall: reportSkillCall(db),
+		ReportSkillCall:      reportSkillCall(db),
+		ReportErrorReporting: reportErrorReporting(db),
 	}
 }
