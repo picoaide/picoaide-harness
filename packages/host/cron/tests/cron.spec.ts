@@ -1,6 +1,25 @@
 import { describe, expect, it } from 'vitest'
 import { isValidCron, lastRunAtMs, nextRunAtMs, parseCron } from '../src/cron.ts'
 
+describe('DST/catch-up 一致性（2026-09-16 审计 E4）', () => {
+  it('lastRunAtMs 不返回春季跳变中被归一化、表达式不匹配的瞬间', () => {
+    const previous = process.env.TZ
+    process.env.TZ = 'America/New_York'
+    try {
+      // 2026-03-08 当地 02:xx 不存在；旧实现把构造出的 03:00 直接当命中返回。
+      const from = new Date(2026, 2, 8, 3, 30).getTime()
+      const last = lastRunAtMs('0 2 * * *', from)
+      expect(last, 'there is always a previous matching instant').toBeDefined()
+      // 用正向扫描交叉验证：该瞬间必须真的是表达式的下一跳。
+      expect(nextRunAtMs('0 2 * * *', (last as number) - 1)).toBe(last)
+      expect(new Date(last as number).getHours()).toBe(2)
+    } finally {
+      if (previous === undefined) delete process.env.TZ
+      else process.env.TZ = previous
+    }
+  })
+})
+
 describe('parseCron', () => {
   it('parses a plain five-field expression', () => {
     const schedule = parseCron('0 9 * * 1')

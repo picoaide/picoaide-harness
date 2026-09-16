@@ -105,6 +105,10 @@ const DEPENDENTS = {
 const GLOBAL_PREFIXES = [
   'package.json', 'yarn.lock', '.yarnrc.yml', 'patches/', 'scripts/', '.github/',
   'brands/', 'tsconfig', 'deepseek-harness', 'AGENTS.md', 'CLAUDE.md',
+  // upstream.json is an input of check:layout (submodule URL/commit/version):
+  // without it a pin-only change selected zero packages and the early exit
+  // skipped every root guard — a false-green fast gate.
+  'upstream.json',
 ]
 
 function parseArgs(argv) {

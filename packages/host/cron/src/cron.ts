@@ -178,7 +178,12 @@ export function lastRunAtMs(expr: string, fromMs: number): number | undefined {
         for (const minute of sortedMinutes) {
           if (minute > maxMinute) continue
           const candidate = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate(), hour, minute, 0, 0)
-          if (candidate.getTime() <= fromMs) return candidate.getTime()
+          // DST spring-forward: a nonexistent wall time is normalized by the
+          // Date constructor (02:00 → 03:00). Returning that instant would hand
+          // the scheduler a moment the expression does not match. Verify the
+          // constructed fields and the full schedule instead.
+          if (candidate.getHours() !== hour || candidate.getMinutes() !== minute) continue
+          if (candidate.getTime() <= fromMs && matches(schedule, candidate)) return candidate.getTime()
         }
       }
     }
