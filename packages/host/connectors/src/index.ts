@@ -408,11 +408,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const registrationScope = store.dir
     // The credential snapshot this provider was built from; every SDK
     // `saveTokens` write is compare-and-updated against it (advanced after each
-    // successful write). Without this, a 401 refresh already on the wire when
-    // the user disconnects (or re-authorizes) writes its stale result after the
-    // fact: it resurrects a deleted credential file or overwrites the newer
-    // grant (2026-09-16 audit R3-A).
-    let expected = credential
+    // successful write, and by syncBaseline when tokens are adopted). Without
+    // this, a 401 refresh already on the wire when the user disconnects (or
+    // re-authorizes) writes its stale result after the fact: it resurrects a
+    // deleted credential file or overwrites the newer grant (R3-A).
     // Registration must not depend on a discovery round trip: when the token is
     // still valid and the definition already names its token endpoint, the
     // provider can refresh on 401 through that endpoint alone (the SDK calls
@@ -422,19 +421,24 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       && credential.expiresAt - Date.now() > REFRESH_LEAD_MS
       && target.tokenUrl !== undefined
     ) {
-      const handle = createOAuthProvider({
+      const baseline: { current: ConnectorCredential } = { current: credential }
+      const created = createOAuthProvider({
         credential,
         target,
         onPersist: (patch: Partial<ConnectorCredential>) => {
           if (registrationScope !== store.dir) return
-          void persistAndMaybeAnnounce(def.id, patch, expected)
-            .then((saved) => { if (saved !== null) expected = saved })
+          void persistAndMaybeAnnounce(def.id, patch, baseline.current)
+            .then((saved) => { if (saved !== null) baseline.current = saved })
             .catch((cause: unknown) => {
               ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
             })
         },
       })
-      return { authProvider: handle.provider, handle }
+      const handle: LiveProviderHandle = {
+        adopt: (tokens) => created.adopt(tokens),
+        syncBaseline: (next) => { baseline.current = next },
+      }
+      return { authProvider: created.provider, handle }
     }
     try {
       const resolved = await resolveAuthorizationServer(
@@ -447,7 +451,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         ctx.logger?.warn(`pico-connectors: ${def.id} 无法解析令牌端点（${resolved.failure.message}）`)
         return {}
       }
-      const handle = createOAuthProvider({
+      const baseline: { current: ConnectorCredential } = { current: credential }
+      const created = createOAuthProvider({
         credential,
         target,
         discovery: resolved.discovery,
@@ -458,10 +463,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           // next registration) would refresh with a dead grant. Never through
           // a store that a user switch has replaced in the meantime.
           if (registrationScope !== store.dir) return
-          void store.updateCredentialIfUnchanged(def.id, expected, patch)
+          void store.updateCredentialIfUnchanged(def.id, baseline.current, patch)
             .then((saved) => {
               if (saved === null) return
-              expected = saved
+              baseline.current = saved
               ctx.emit('pico/connector-credentials-changed', { id: def.id })
             })
             .catch((cause: unknown) => {
@@ -469,7 +474,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             })
         },
       })
-      return { authProvider: handle.provider, handle }
+      const handle: LiveProviderHandle = {
+        adopt: (tokens) => created.adopt(tokens),
+        syncBaseline: (next) => { baseline.current = next },
+      }
+      return { authProvider: created.provider, handle }
     } catch (error) {
       // A policy-blocked URL is an active redirection attempt: register
       // without the provider (the SDK will report 401 plainly) and log loudly.
@@ -485,6 +494,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    */
   interface LiveProviderHandle {
     adopt: (tokens: RefreshedTokens) => void
+    /**
+     * Advance the provider's CAS baseline after tokens are adopted from a
+     * write that bypassed it (our own refresher / another registration). The
+     * SDK's next `saveTokens` must compare against the credential currently in
+     * memory, otherwise its rotation is rejected as "stale" and the consumed
+     * token is left on disk (2026-09-16 audit R4).
+     */
+    syncBaseline: (credential: ConnectorCredential) => void
   }
 
   /**
@@ -533,7 +550,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * (or manual credential replacement) has a larger `updatedAt` and is never
    * overwritten, while a refresh that landed mid-registration is adopted.
    */
-  const latestRefresh = new Map<string, { tokens: RefreshedTokens; updatedAt: number }>()
+  const latestRefresh = new Map<string, { tokens: RefreshedTokens; updatedAt: number; credential: ConnectorCredential }>()
 
   /**
    * Bring a freshly built provider up to the newest credential we know of.
@@ -558,6 +575,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     if (latest === undefined) return
     if (latest.updatedAt <= (snapshot?.updatedAt ?? 0)) return
     handle.adopt(latest.tokens)
+    // The provider in memory now holds the newer credential: its CAS baseline
+    // must move with it, or the SDK's own next rotation compares against the
+    // stale registration snapshot and is dropped (2026-09-16 audit R4).
+    handle.syncBaseline(latest.credential)
   }
 
   /**
@@ -594,8 +615,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // tests/token-refresh-live-provider.spec.ts.
       // The persisted write's `updatedAt` is what makes the catch-up in
       // adoptLatestRefresh decide correctly against a later re-authorization.
-      latestRefresh.set(id, { tokens, updatedAt: persisted.updatedAt })
-      for (const handle of liveHandlesOf(id)) handle.adopt(tokens)
+      latestRefresh.set(id, { tokens, updatedAt: persisted.updatedAt, credential: persisted })
+      for (const handle of liveHandlesOf(id)) {
+        handle.adopt(tokens)
+        handle.syncBaseline(persisted)
+      }
       ctx.emit('pico/connector-credentials-changed', { id })
     },
     ...(options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs }),
