@@ -151,20 +151,23 @@ describe('restart lifecycle: 第二天打开还能不能用', () => {
     await authorizeOnce(dir, server)
 
     // day 2: token lapsed, reopen, use it
+    // 预算（2026-09-16）：本用例要跑两次"重开 + 真实续期 + 工具调用"，CI
+    // （4 vCPU、多包并发）下每一步都被调度拉开；30s 总预算曾是偶发红线
+    // （本地 8 进程压测复现 1/64）。断言一字未改，只给足时间。
     server.expireAccessTokens()
     const day2 = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
-    await waitFor(() => day2.configs.length === 1, 8000)
+    await waitFor(() => day2.configs.length === 1, 20_000)
     expect((await callToolVia(day2, server)).text).toBe('echo:day-2')
     day2.dispose()
 
     // day 3: again with the rotated refresh token that must have been persisted
     server.expireAccessTokens()
     const day3 = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
-    await waitFor(() => day3.configs.length === 1, 8000)
+    await waitFor(() => day3.configs.length === 1, 20_000)
     expect((await callToolVia(day3, server)).text).toBe('echo:day-2')
     expect(server.stats.revokedRefreshReuse).toBe(0)
     day3.dispose()
-  }, 30_000)
+  }, 60_000)
 
   it('本地记录的过期时间已过（关机超过一小时）→ 重开时主动续期，而不是先撞 401', async () => {
     const server = await startRealMcpServer()

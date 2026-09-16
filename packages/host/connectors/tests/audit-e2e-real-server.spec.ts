@@ -183,21 +183,32 @@ describe('live public MCP endpoints (network)', () => {
     const results: string[] = []
     for (const target of publicTargets) {
       const client = new Client({ name: 'picoaide-audit', version: '1.0.0' }, { capabilities: {} })
-      const transport = new StreamableHTTPClientTransport(new URL(target.url), { requestInit: { headers: {} } })
+      // 每个目标一份**单次预算**（2026-09-16）：本用例声明"离线 CI 不算失败"，
+      // 但此前只看错误类型——链路慢/被丢包时 connect 会一直挂着，把 60s 的测试
+      // 预算吃光后以超时失败（CI 实测 60_006ms），把"没网"误报成产品缺陷。
+      // 现在超时与断网同样归入 offline（两者都不提供产品信号）。
+      const controller = new AbortController()
+      const perTarget = setTimeout(() => controller.abort(), 12_000)
+      const transport = new StreamableHTTPClientTransport(new URL(target.url), {
+        requestInit: { headers: {}, signal: controller.signal },
+      })
       try {
         await client.connect(transport)
         const tools = await client.listTools()
         results.push(`${target.name}=${tools.tools.length}`)
         expect(tools.tools.length).toBeGreaterThan(0)
       } catch (error) {
-        // a sandboxed/offline CI box must not fail the suite: report and move on
+        // a sandboxed/offline/slow CI box must not fail the suite: report and move on
         const message = String((error as Error)?.message ?? error)
-        if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|fetch failed|network/iu.test(message)) {
+        const offline = /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT|fetch failed|network|abort/iu.test(message)
+          || (error as Error)?.name === 'AbortError'
+        if (offline) {
           results.push(`${target.name}=offline`)
           continue
         }
         throw error
       } finally {
+        clearTimeout(perTarget)
         await client.close().catch(() => {})
       }
     }
