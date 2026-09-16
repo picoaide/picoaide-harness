@@ -18,7 +18,12 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BROWSER_OVERLAY_HTML, BROWSER_SHELL_HTML } from '../src/shell-pages.ts'
+import { browserOverlayHtml, browserShellHtml } from '../src/shell-pages.ts'
+
+// 行为断言跑在中文页上（zh 是源语言，页面按 locale 现渲染；英文侧的断言见
+// `shell-pages-locale.spec.ts`）。
+const BROWSER_SHELL_HTML = browserShellHtml('zh')
+const BROWSER_OVERLAY_HTML = browserOverlayHtml('zh')
 
 /* ------------------------------------------------------------------ *
  * jsdom：按候选目录解析（本包【已声明】→ cron → webadmin），失败即 fail-loud

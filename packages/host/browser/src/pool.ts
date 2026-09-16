@@ -9,6 +9,7 @@
  * @module @picoaide/dsh-browser
  */
 
+import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import { browserError } from './errors.ts'
 import type { BrowserError } from './errors.ts'
 import { USER_GATE_TIMEOUT_MS } from './budgets.ts'
@@ -48,6 +49,12 @@ export interface PoolOptions {
    * 现在取自 budgets.ts，并且必须始终小于工具预算。
    */
   userGateTimeoutMs?: number
+  /**
+   * Locale provider for the user-gate refusals (model-facing AND echoed into
+   * the activity panel the user reads). A provider, not a value: the language
+   * can change while the app runs, and these messages are produced per call.
+   */
+  locale?: () => HostLocale
 }
 
 /**
@@ -65,16 +72,32 @@ const POOL_DEFAULTS = {
   maxTabs: 16,
   userGateTimeoutMs: USER_GATE_TIMEOUT_MS,
   waitTimeoutMs: 60_000,
+  locale: (): HostLocale => DEFAULT_HOST_LOCALE,
 } as const
 
 /**
- * 用户持有控制权时，agent 调用被拒的统一文案（模型面）：必须说清**怎么解开**。
+ * 用户持有控制权时，agent 调用被拒的统一文案（模型面 + 活动面板）：必须说清
+ * **怎么解开**。
  *
  * 2026-09-16 现场（会话 session-88502514）：模型只看到 `tool call timed out after
  * 30000ms`，既不知道是用户拿着控制权，也没有"请用户点交给 AI"的指令，于是把
  * 浏览器判成卡死、连试十几次，最后绕道用户自己的 Chrome 取数。
+ *
+ * 按 locale 取值（调用点现取，不缓存）：这段文案既进模型上下文，也进用户看得见的
+ * 活动时间线（`noteControlBlock` / 工具错误），所以它必须跟界面语言一致。
  */
-const GATE_REFUSAL = '用户正在操作浏览器（我来操作）—— 请在浏览器窗口点「交给 AI」交还控制权后重试'
+function gateRefusal(locale: HostLocale): string {
+  return hostCopy(
+    locale,
+    '用户正在操作浏览器（我来操作）—— 请在浏览器窗口点「交给 AI」交还控制权后重试',
+    'The user is operating the browser (take-over) — click "Hand back to AI" in the browser window to return control, then retry',
+  )
+}
+
+/** {@link gateRefusal} plus a trailing reason (both sides per locale). */
+function gateRefusalWith(locale: HostLocale, reasonZh: string, reasonEn: string): string {
+  return hostCopy(locale, `${gateRefusal('zh')}${reasonZh}`, `${gateRefusal('en')}${reasonEn}`)
+}
 
 interface QueueTicket {
   resolve: () => void
@@ -89,6 +112,12 @@ interface QueueTicket {
 class PoolMutex {
   private tail: Promise<void> = Promise.resolve()
 
+  /**
+   * @param locale - locale provider for the gate refusals this queue throws
+   * (called per throw, never captured).
+   */
+  constructor(private readonly locale: () => HostLocale) {}
+
   async run(
     work: () => Promise<void>,
     gate: () => boolean,
@@ -102,20 +131,25 @@ class PoolMutex {
     try {
       // Waiting for the previous operation must be cancellable too: a wedged
       // predecessor used to block every later call forever (2026-09-08 P0-4).
-      await raceAbort(prev, gate, signal)
+      await raceAbort(prev, gate, signal, this.locale)
       const gateStartedAt = Date.now()
       while (gate()) {
         if (signal !== undefined && signal.aborted) {
-          throw browserError('window-controlled', `${GATE_REFUSAL}（这次调用已被停止）`)
+          throw browserError('window-controlled', gateRefusalWith(
+            this.locale(),
+            '（这次调用已被停止）',
+            ' (this call was stopped)',
+          ))
         }
         // 2026-09-15 审计 P0-1：用户接管后不能无限期挂住模型回合。
         // 2026-09-16：预算必须短于工具预算，否则这段文案永远到不了模型面前。
         if (gateBudgetMs > 0 && Date.now() - gateStartedAt >= gateBudgetMs) {
           const seconds = Math.round(gateBudgetMs / 1000)
-          throw browserError(
-            'window-controlled',
-            `browser: 等待用户交还浏览器超时（${String(seconds)}s）—— ${GATE_REFUSAL}`,
-          )
+          throw browserError('window-controlled', hostCopy(
+            this.locale(),
+            `browser: 等待用户交还浏览器超时（${String(seconds)}s）—— ${gateRefusal('zh')}`,
+            `browser: timed out waiting for the user to hand back the browser (${String(seconds)}s) — ${gateRefusal('en')}`,
+          ))
         }
         await sleep(120)
       }
@@ -129,10 +163,19 @@ class PoolMutex {
 /** Await a promise, rejecting as soon as `signal` aborts. The rejection code
  * mirrors the gate loop: an abort while the user holds the browser reports
  * `window-controlled`, otherwise the operation was merely queued (`interrupted`). */
-function raceAbort(promise: Promise<void>, gate: () => boolean, signal?: AbortSignal): Promise<void> {
+function raceAbort(
+  promise: Promise<void>,
+  gate: () => boolean,
+  signal: AbortSignal | undefined,
+  locale: () => HostLocale,
+): Promise<void> {
   if (signal === undefined) return promise
   const abortError = (): BrowserError => gate()
-    ? browserError('window-controlled', `browser: ${GATE_REFUSAL}（这次调用已被停止）`)
+    ? browserError('window-controlled', `browser: ${gateRefusalWith(
+      locale(),
+      '（这次调用已被停止）',
+      ' (this call was stopped)',
+    )}`)
     : browserError('interrupted', 'browser: operation aborted while queued')
   if (signal.aborted) return Promise.reject(abortError())
   return new Promise<void>((resolve, reject) => {
@@ -162,7 +205,7 @@ function sleep(ms: number): Promise<void> {
 export class TabPool {
   readonly options: Required<PoolOptions>
   private readonly tabs = new Map<number, PoolTabMeta>()
-  private readonly mutex = new PoolMutex()
+  private readonly mutex: PoolMutex
   private windowControlled = false
   private activeTabId: number | undefined
   private readonly listeners = new Set<(event: string) => void>()
@@ -181,6 +224,7 @@ export class TabPool {
 
   constructor(options: PoolOptions = {}) {
     this.options = { ...POOL_DEFAULTS, ...options }
+    this.mutex = new PoolMutex(this.options.locale)
   }
 
   onChange(listener: (event: string) => void): () => void {

@@ -1,24 +1,172 @@
 /**
  * The v4.2 browser chrome pages.
  *
- * `BROWSER_SHELL_HTML` — the BrowserWindow base page: toolbar only (tab strip
- * + omnibox + empty state). Everything that must float ABOVE the tab
+ * `browserShellHtml(locale)` — the BrowserWindow base page: toolbar only (tab
+ * strip + omnibox + empty state). Everything that must float ABOVE the tab
  * WebContentsViews (AI indicator capsule, activity panel, ⋮ menu, viewers,
- * busy mask pill) lives in `BROWSER_OVERLAY_HTML`, which is loaded in a
+ * busy mask pill) lives in `browserOverlayHtml(locale)`, which is loaded in a
  * separate, transparent, always-on-top WebContentsView whose bounds ARE the
  * layout: the host switches the view rectangle per overlay mode (capsule →
  * panel rail → menu rect → full content), so the overlay page simply fills
  * its viewport with the active surface. Native child views render above the
  * window webContents in Electron, so shell-page fixed elements would be
  * hidden behind the tabs — this split is what keeps the AI UI visible.
+ *
+ * Both pages are BUILT PER CALL from the locale the host resolved for that
+ * request (`dsh-plugin-desktop/host-locale`), because the language can change
+ * while the app runs: a module-level table selected once would freeze the
+ * copy the page was first served with.
  * @module @picoaide/dsh-browser
  */
 
-export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
-<html lang="zh-CN">
+import type { HostLocale } from 'dsh-plugin-desktop/host-locale'
+
+/**
+ * Failure copy shared by BOTH pages: each page's `failureText` maps a failed
+ * loopback request to the same toast. It lives in one table so the two pages
+ * cannot drift apart (a page embedding only its own subset renders `undefined`
+ * in the toast).
+ */
+interface BrowserFailureCopy {
+  /** Write refused: the browser partition has no BrowserAuth proof yet. */
+  readonly failCredentials: string
+  /** Write refused: the browser service is not ready yet. */
+  readonly failService: string
+  /** Prefix of the server-reported failure message. */
+  readonly failPrefix: string
+  /** The loopback fetch itself failed. */
+  readonly failNetwork: string
+  /** Any other HTTP status; `{status}` is replaced at runtime. */
+  readonly failHttp: string
+}
+
+const FAILURE_COPY: Readonly<Record<HostLocale, BrowserFailureCopy>> = {
+  zh: {
+    failCredentials: '操作失败：浏览器会话凭据尚未就绪，请重试',
+    failService: '操作失败：浏览器服务尚未就绪，请重试',
+    failPrefix: '操作失败：',
+    failNetwork: '操作失败：无法连接到浏览器服务，请重试',
+    failHttp: '操作失败（HTTP {status}），请重试',
+  },
+  en: {
+    failCredentials: 'Action failed: the browser session credentials are not ready yet, please retry',
+    failService: 'Action failed: the browser service is not ready yet, please retry',
+    failPrefix: 'Action failed: ',
+    failNetwork: 'Action failed: cannot reach the browser service, please retry',
+    failHttp: 'Action failed (HTTP {status}), please retry',
+  },
+}
+
+/**
+ * User-visible copy of the toolbar shell page (`/browser-shell`).
+ *
+ * The table is looked up per call, never captured: the host re-serves the
+ * page on every request and the language can change while the app runs
+ * (the frozen-module-constant bug class documented in
+ * `dsh-connectors/src/client/status-label.ts`). zh is the source locale and
+ * stays byte-identical to the copy that shipped before i18n.
+ */
+interface BrowserShellCopy extends BrowserFailureCopy {
+  /** Value of the document `<html lang>` attribute. */
+  readonly lang: string
+  /** Document title (the window title itself is set natively by the host). */
+  readonly title: string
+  /** Tooltip of the new-tab button. */
+  readonly newTab: string
+  /** Tooltip of the back button. */
+  readonly back: string
+  /** Tooltip of the forward button. */
+  readonly forward: string
+  /** Tooltip of the reload button. */
+  readonly reload: string
+  /** Address-bar placeholder, also re-applied by `render()` when no tab is open. */
+  readonly addrPlaceholder: string
+  /** Accessible name of the address bar. */
+  readonly addrLabel: string
+  /** Tooltip of the bookmark button. */
+  readonly bookmark: string
+  /** Tooltip of the overflow (⋮) button. */
+  readonly more: string
+  /** Empty state. Authored markup: it carries the `<br/>` the layout expects. */
+  readonly empty: string
+  /** Title shown for a tab that has neither a title nor a URL yet. */
+  readonly tabFallback: string
+  /** Tooltip of the per-tab close button. */
+  readonly closeTab: string
+  /** `alert()` when the bookmark button has no page to act on. */
+  readonly nothingToBookmark: string
+}
+
+const SHELL_COPY: Readonly<Record<HostLocale, BrowserShellCopy>> = {
+  zh: {
+    ...FAILURE_COPY.zh,
+    lang: 'zh-CN',
+    title: 'AI 浏览器',
+    newTab: '新建标签页 (Ctrl+T)',
+    back: '后退 (Alt+←)',
+    forward: '前进 (Alt+→)',
+    reload: '刷新 (Ctrl+R)',
+    addrPlaceholder: '输入网址，回车访问（例如 https://example.com）',
+    addrLabel: '地址栏',
+    bookmark: '收藏到书签',
+    more: '更多',
+    empty: '打开浏览器，AI 会在需要时自动打开网页。<br/>你也可以点右上角 ＋ 先自己逛起来。',
+    tabFallback: '新标签',
+    closeTab: '关闭标签',
+    nothingToBookmark: '当前没有可收藏的页面',
+  },
+  en: {
+    ...FAILURE_COPY.en,
+    lang: 'en',
+    title: 'AI Browser',
+    newTab: 'New tab (Ctrl+T)',
+    back: 'Back (Alt+←)',
+    forward: 'Forward (Alt+→)',
+    reload: 'Reload (Ctrl+R)',
+    addrPlaceholder: 'Enter a URL and press Enter (for example https://example.com)',
+    addrLabel: 'Address bar',
+    bookmark: 'Bookmark this page',
+    more: 'More',
+    empty: 'Open the browser: the AI opens pages here automatically when it needs to.<br/>You can also click ＋ in the top right to start browsing on your own.',
+    tabFallback: 'New tab',
+    closeTab: 'Close tab',
+    nothingToBookmark: 'There is no page to bookmark right now',
+  },
+}
+
+/** Escape copy for HTML text/attribute positions (copy is data, never markup). */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/"/gu, '&quot;')
+}
+
+/**
+ * Serialize the inline-script copy. `<` is escaped so that no copy string can
+ * close the surrounding `<script>` element, whatever a translation contains.
+ */
+function scriptCopy(value: object): string {
+  return JSON.stringify(value).replace(/</gu, '\\u003c')
+}
+
+/**
+ * Render the toolbar shell page for one locale.
+ *
+ * The locale is a PARAMETER: the page is re-served per request, so the
+ * caller resolves it from the live runtime/request instead of freezing it at
+ * plugin-apply time.
+ * @param locale - locale to render the chrome copy in.
+ * @returns the standalone HTML document served at `/browser-shell`.
+ */
+export function browserShellHtml(locale: HostLocale): string {
+  const c = SHELL_COPY[locale]
+  return `<!DOCTYPE html>
+<html lang="${c.lang}">
 <head>
 <meta charset="utf-8">
-<title>AI 浏览器</title>
+<title>${escapeHtml(c.title)}</title>
 <style>
   :root {
     --surface: #f4f5f7;
@@ -102,21 +250,23 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
   <div id="toast" role="status" aria-live="polite"></div>
   <div id="tabstrip">
     <div id="tabs" style="display:flex;align-items:center;gap:4px;min-width:0;"></div>
-    <button id="newtab" class="icon" title="新建标签页 (Ctrl+T)"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+    <button id="newtab" class="icon" title="${escapeHtml(c.newTab)}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
   </div>
   <div id="omnibox">
-    <button id="go-back" class="icon" title="后退 (Alt+←)"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M9.5 3.5L5 8l4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-    <button id="go-forward" class="icon" title="前进 (Alt+→)"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6.5 3.5L11 8l-4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-    <button id="reload" class="icon" title="刷新 (Ctrl+R)"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 3v2.5h-2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-    <input id="addr" type="text" placeholder="输入网址，回车访问（例如 https://example.com）" spellcheck="false" autocomplete="off" aria-label="地址栏"/>
-    <button id="bm" class="icon" title="收藏到书签"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2.5l1.7 3.5 3.8.5-2.8 2.7.7 3.8L8 11.4l-3.4 1.6.7-3.8L2.5 6.5l3.8-.5L8 2.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></button>
-    <button id="menu-btn" class="icon" title="更多"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="3" cy="8" r="1.2" fill="currentColor"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="13" cy="8" r="1.2" fill="currentColor"/></svg></button>
+    <button id="go-back" class="icon" title="${escapeHtml(c.back)}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M9.5 3.5L5 8l4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <button id="go-forward" class="icon" title="${escapeHtml(c.forward)}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6.5 3.5L11 8l-4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <button id="reload" class="icon" title="${escapeHtml(c.reload)}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 3v2.5h-2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <input id="addr" type="text" placeholder="${escapeHtml(c.addrPlaceholder)}" spellcheck="false" autocomplete="off" aria-label="${escapeHtml(c.addrLabel)}"/>
+    <button id="bm" class="icon" title="${escapeHtml(c.bookmark)}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2.5l1.7 3.5 3.8.5-2.8 2.7.7 3.8L8 11.4l-3.4 1.6.7-3.8L2.5 6.5l3.8-.5L8 2.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></button>
+    <button id="menu-btn" class="icon" title="${escapeHtml(c.more)}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="3" cy="8" r="1.2" fill="currentColor"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="13" cy="8" r="1.2" fill="currentColor"/></svg></button>
   </div>
   <div id="empty" hidden>
     <div class="hero">◎</div>
-    <div class="msg">打开浏览器，AI 会在需要时自动打开网页。<br/>你也可以点右上角 ＋ 先自己逛起来。</div>
+    <div class="msg">${c.empty}</div>
   </div>
 <script>
+  // Per-locale copy for this page (see browserShellHtml).
+  const COPY = ${scriptCopy(c)}
   const $ = (id) => document.getElementById(id)
   const state = { tabs: [], controlled: false, busy: false, busyTool: '', uiMode: 'capsule' }
   // 2026-09-15 审计（P2）：原来是一个单向布尔 sseOk（onopen=true / onerror=false）。
@@ -142,11 +292,11 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
    * 票据（蒙版页加载早于 cookie 交接）。打包版用户看不到 console，页面必须自己把
    * 话说清楚 —— 否则就是「点了『我来操作』整轮没反应、现场零证据」。 */
   const failureText = (status, data) => {
-    if (status === 401 || status === 403) return '操作失败：浏览器会话凭据尚未就绪，请重试'
-    if (status === 503) return '操作失败：浏览器服务尚未就绪，请重试'
-    if (data && typeof data.error === 'string' && data.error !== '') return '操作失败：' + data.error
-    if (status === 0) return '操作失败：无法连接到浏览器服务，请重试'
-    return '操作失败（HTTP ' + status + '），请重试'
+    if (status === 401 || status === 403) return COPY.failCredentials
+    if (status === 503) return COPY.failService
+    if (data && typeof data.error === 'string' && data.error !== '') return COPY.failPrefix + data.error
+    if (status === 0) return COPY.failNetwork
+    return COPY.failHttp.replace('{status}', String(status))
   }
 
   /** 读 JSON：4xx（代理异常时甚至是 HTML）一律不抛给调用点。 */
@@ -205,7 +355,7 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
       el.className = 'tab' + (tab.visible ? ' active' : '')
       el.title = tab.url || tab.title
       const busy = state.busy && tab.visible
-      el.innerHTML = '<img class="favicon" alt=""><span class="t">' + esc(tab.title || tab.url || '新标签') + (tab.loading ? '…' : '') + '</span>' + (busy ? '<span class="ai-dot"></span>' : '') + '<span class="x" title="关闭标签">×</span>'
+      el.innerHTML = '<img class="favicon" alt=""><span class="t">' + esc(tab.title || tab.url || COPY.tabFallback) + (tab.loading ? '…' : '') + '</span>' + (busy ? '<span class="ai-dot"></span>' : '') + '<span class="x" title="' + esc(COPY.closeTab) + '">×</span>'
       const icon = el.querySelector('.favicon')
       // 2026-09-15 审计（P2）：tab.favicon 是页面/服务端给的字符串，原来直接落进
       // img.src —— javascript:/file: 这类 scheme 也照设不误。只放行 http(s) 与
@@ -227,7 +377,7 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
 
     const cur = state.tabs.find((t) => t.visible)
     $('addr').value = document.activeElement === $('addr') ? $('addr').value : (cur ? cur.url : '')
-    $('addr').placeholder = cur ? '' : '输入网址，回车访问（例如 https://example.com）'
+    $('addr').placeholder = cur ? '' : COPY.addrPlaceholder
     if (cur) {
       try { $('addr').classList.toggle('secure', new URL(cur.url).protocol === 'https:') } catch { $('addr').classList.remove('secure') }
     } else {
@@ -244,7 +394,7 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
   $('reload').addEventListener('click', () => postErr('reload'))
   $('bm').addEventListener('click', async () => {
     const cur = state.tabs.find((t) => t.visible)
-    if (!cur) { alert('当前没有可收藏的页面'); return }
+    if (!cur) { alert(COPY.nothingToBookmark); return }
     // 2026-09-15 审计（P1）：原来不看返回状态就把星星点亮 —— 403（写证明缺失）时
     // 用户以为收藏成功，实际什么都没发生。现在只有服务端确认才给黄色反馈。
     const r = await post('bookmarks', { url: cur.url, title: cur.title })
@@ -314,6 +464,7 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
 </script>
 </body>
 </html>`
+}
 
 /** The AI overlay page. Rendered inside the transparent always-on-top view;
  * the view's bounds (host-controlled per mode) define the viewport — each
@@ -321,8 +472,253 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
  * (活动面板), menu (⋮ 菜单), viewer (书签/历史/下载), mask (AI 操作中拦截遮罩,
  * 其中只有 pill 上的「我来操作」按钮可交互 — 点遮罩其他地方不会夺取控制权).
  * The 我来操作 / 交给 AI button is the ONE control toggle in both directions. */
-export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
-<html lang="zh-CN">
+/**
+ * User-visible copy of the always-on-top overlay page (`/browser-overlay`):
+ * the AI indicator capsule, the activity panel, the ⋮ menu, the viewers and
+ * the busy mask. Same per-call lookup rule as {@link SHELL_COPY}.
+ */
+interface BrowserOverlayCopy extends BrowserFailureCopy {
+  /** Value of the document `<html lang>` attribute. */
+  readonly lang: string
+  /** Tooltip of the capsule (opens the activity panel). */
+  readonly capsuleTitle: string
+  /** Control toggle while the AI holds the browser (「我来操作」). */
+  readonly takeOver: string
+  /** The same toggle once the user holds the browser (「交给 AI」). */
+  readonly handBack: string
+  /** Tooltip of the toggle in its take-over state. */
+  readonly takeOverHint: string
+  /** Tooltip of the toggle in its hand-back state. */
+  readonly handBackHint: string
+  /** Tooltip of the toggle while an agent action is running. */
+  readonly pauseHint: string
+  /** Capsule label while the user holds control. */
+  readonly youInControl: string
+  /** Busy-mask pill text (also the pill's initial markup). */
+  readonly aiBusy: string
+  /** Busy-mask pill prefix when a tool is running. */
+  readonly aiBusyPrefix: string
+  /** Capsule label prefix while a tool is running. */
+  readonly aiWorkingPrefix: string
+  /** Busy-mask pill text when the AI is idle but the window is locked. */
+  readonly aiIdle: string
+  /** Activity-panel heading. */
+  readonly activity: string
+  /** Panel/menu action that hides the browser window. */
+  readonly hideWindow: string
+  /** Viewer search input placeholder. */
+  readonly searchPlaceholder: string
+  /** Timeline prefix of the tool currently running. */
+  readonly running: string
+  /** Timeline empty state. */
+  readonly noOps: string
+  /** Actor label for the user. */
+  readonly you: string
+  /** History-viewer actor prefix for the user. */
+  readonly actorYou: string
+  /** History-viewer actor prefix for the AI. */
+  readonly actorAi: string
+  /** ⋮ menu: open the history viewer. */
+  readonly menuHistory: string
+  /** ⋮ menu: open the bookmarks viewer. */
+  readonly menuBookmarks: string
+  /** ⋮ menu: open the downloads viewer. */
+  readonly menuDownloads: string
+  /** ⋮ menu: destructive clear-data entry. */
+  readonly menuClearData: string
+  /** ⋮ menu: close the menu surface. */
+  readonly menuClose: string
+  /** `confirm()` before clearing every partition. */
+  readonly clearDataConfirm: string
+  /** Viewer heading for bookmarks. */
+  readonly viewerBookmarks: string
+  /** Viewer heading for history. */
+  readonly viewerHistory: string
+  /** Viewer heading for downloads. */
+  readonly viewerDownloads: string
+  /** Viewer row action removing a record. */
+  readonly rowDelete: string
+  /** Viewer row action opening a downloaded file. */
+  readonly rowOpen: string
+  /** Toast after a download was handed to the OS. */
+  readonly openedWithSystem: string
+  /** Viewer list when the read failed. */
+  readonly loadFailed: string
+  /** Viewer list when there is nothing to show. */
+  readonly noRecords: string
+  /** Viewer row tooltip prefix. */
+  readonly openInNewTab: string
+  /** Toggle label while the take-over request is in flight. */
+  readonly takingOver: string
+  /** Toggle label while the hand-back request is in flight. */
+  readonly handingBack: string
+  /** Timeline label for a tool without a mapped label. */
+  readonly actionFallback: string
+  /** BCP-47 id used for timeline timestamps. */
+  readonly timeLocale: string
+  /** Timeline labels per `browser_*` tool. */
+  readonly toolLabels: Readonly<Record<string, string>>
+}
+
+const OVERLAY_COPY: Readonly<Record<HostLocale, BrowserOverlayCopy>> = {
+  zh: {
+    ...FAILURE_COPY.zh,
+    lang: 'zh-CN',
+    capsuleTitle: '点击查看 AI 活动',
+    takeOver: '我来操作',
+    handBack: '交给 AI',
+    takeOverHint: '自己操作浏览器',
+    handBackHint: '交回给 AI 继续操作',
+    pauseHint: '暂停 AI，自己操作',
+    youInControl: '你正在操作',
+    aiBusy: 'AI 正在操作',
+    aiBusyPrefix: 'AI 正在操作 · ',
+    aiWorkingPrefix: 'AI 操作中 · ',
+    aiIdle: 'AI 空闲',
+    activity: 'AI 活动',
+    hideWindow: '隐藏窗口',
+    searchPlaceholder: '搜索…',
+    running: '正在执行：',
+    noOps: '暂无操作记录',
+    you: '你',
+    actorYou: '你 · ',
+    actorAi: 'AI · ',
+    menuHistory: '浏览历史',
+    menuBookmarks: '书签',
+    menuDownloads: '下载',
+    menuClearData: '清除数据…',
+    menuClose: '关闭',
+    clearDataConfirm: '清除全部浏览数据（含登录状态）？',
+    viewerBookmarks: '书签',
+    viewerHistory: '浏览历史',
+    viewerDownloads: '下载',
+    rowDelete: '删除',
+    rowOpen: '打开',
+    openedWithSystem: '已用系统默认程序打开',
+    loadFailed: '加载失败，请重试',
+    noRecords: '暂无记录',
+    openInNewTab: '在新标签页打开：',
+    takingOver: '正在接管…',
+    handingBack: '正在交还…',
+    actionFallback: '操作',
+    timeLocale: 'zh-CN',
+    toolLabels: {
+      'browser_open': '打开标签页',
+      'browser_navigate': '打开网页',
+      'browser_reload': '刷新页面',
+      'browser_go_back': '后退',
+      'browser_go_forward': '前进',
+      'browser_click': '点击',
+      'browser_type': '输入文字',
+      'browser_press': '按键',
+      'browser_select': '选择下拉项',
+      'browser_scroll': '滚动页面',
+      'browser_screenshot': '截图',
+      'browser_get_snapshot': '读取页面元素',
+      'browser_get_text': '读取页面文字',
+      'browser_list_tabs': '查看标签页',
+      'browser_switch_tab': '切换标签页',
+      'browser_close_tab': '关闭标签页',
+      'browser_eval': '读取页面数据',
+      'browser_fill_credentials': '填写登录表单',
+      'browser_takeover': '交给用户',
+      'browser_release': '恢复控制',
+      'browser_download': '下载文件',
+      'browser_clear_data': '清除数据',
+      'browser_wait_for': '等待页面',
+      'browser_fill_form': '填写表单',
+      'browser_upload_file': '上传文件',
+      'browser_bookmarks_add': '收藏页面',
+      'browser_page_state': '页面变化',
+      'browser_page_crash': '页面恢复',
+      'browser_close': '关闭浏览器',
+    },
+  },
+  en: {
+    ...FAILURE_COPY.en,
+    lang: 'en',
+    capsuleTitle: 'Click to view AI activity',
+    takeOver: 'Take over',
+    handBack: 'Hand back to AI',
+    takeOverHint: 'Take over the browser yourself',
+    handBackHint: 'Hand control back to the AI',
+    pauseHint: 'Pause the AI and take over',
+    youInControl: 'You are in control',
+    aiBusy: 'AI is working',
+    aiBusyPrefix: 'AI is working · ',
+    aiWorkingPrefix: 'AI is working · ',
+    aiIdle: 'AI is idle',
+    activity: 'AI activity',
+    hideWindow: 'Hide window',
+    searchPlaceholder: 'Search…',
+    running: 'Running: ',
+    noOps: 'No activity yet',
+    you: 'You',
+    actorYou: 'You · ',
+    actorAi: 'AI · ',
+    menuHistory: 'History',
+    menuBookmarks: 'Bookmarks',
+    menuDownloads: 'Downloads',
+    menuClearData: 'Clear browsing data…',
+    menuClose: 'Close',
+    clearDataConfirm: 'Clear all browsing data (including sign-in state)?',
+    viewerBookmarks: 'Bookmarks',
+    viewerHistory: 'History',
+    viewerDownloads: 'Downloads',
+    rowDelete: 'Delete',
+    rowOpen: 'Open',
+    openedWithSystem: 'Opened with the system default application',
+    loadFailed: 'Failed to load, please retry',
+    noRecords: 'No records',
+    openInNewTab: 'Open in a new tab: ',
+    takingOver: 'Taking over…',
+    handingBack: 'Handing back…',
+    actionFallback: 'Action',
+    timeLocale: 'en-US',
+    toolLabels: {
+      'browser_open': 'Open tab',
+      'browser_navigate': 'Open page',
+      'browser_reload': 'Reload page',
+      'browser_go_back': 'Back',
+      'browser_go_forward': 'Forward',
+      'browser_click': 'Click',
+      'browser_type': 'Type text',
+      'browser_press': 'Key press',
+      'browser_select': 'Select option',
+      'browser_scroll': 'Scroll page',
+      'browser_screenshot': 'Screenshot',
+      'browser_get_snapshot': 'Read page elements',
+      'browser_get_text': 'Read page text',
+      'browser_list_tabs': 'List tabs',
+      'browser_switch_tab': 'Switch tab',
+      'browser_close_tab': 'Close tab',
+      'browser_eval': 'Read page data',
+      'browser_fill_credentials': 'Fill login form',
+      'browser_takeover': 'Hand to user',
+      'browser_release': 'Resume control',
+      'browser_download': 'Download file',
+      'browser_clear_data': 'Clear data',
+      'browser_wait_for': 'Wait for page',
+      'browser_fill_form': 'Fill form',
+      'browser_upload_file': 'Upload file',
+      'browser_bookmarks_add': 'Bookmark page',
+      'browser_page_state': 'Page change',
+      'browser_page_crash': 'Page recovery',
+      'browser_close': 'Close browser',
+    },
+  },
+}
+
+/**
+ * Render the AI overlay page for one locale (same per-call locale rule as
+ * {@link browserShellHtml}).
+ * @param locale - locale to render the overlay copy in.
+ * @returns the standalone HTML document served at `/browser-overlay`.
+ */
+export function browserOverlayHtml(locale: HostLocale): string {
+  const c = OVERLAY_COPY[locale]
+  return `<!DOCTYPE html>
+<html lang="${c.lang}">
 <head>
 <meta charset="utf-8">
 <style>
@@ -444,18 +840,18 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
 <body data-mode="capsule">
   <div id="otoast" role="status" aria-live="polite"></div>
   <!-- capsule -->
-  <div class="surface s-capsule" id="capsule" title="点击查看 AI 活动">
+  <div class="surface s-capsule" id="capsule" title="${escapeHtml(c.capsuleTitle)}">
     <span class="dot" id="ai-dot"></span>
     <span class="label" id="ai-label" aria-live="polite">AI</span>
-    <button class="take" id="ai-take">我来操作</button>
+    <button class="take" id="ai-take">${escapeHtml(c.takeOver)}</button>
   </div>
 
   <!-- panel -->
   <div class="surface s-panel" id="panel">
-    <h2>AI 活动 <button class="close" id="panel-close">×</button></h2>
+    <h2>${escapeHtml(c.activity)} <button class="close" id="panel-close">×</button></h2>
     <div id="stream"></div>
     <div id="panel-bottom">
-      <button id="hide-btn">隐藏窗口</button>
+      <button id="hide-btn">${escapeHtml(c.hideWindow)}</button>
     </div>
   </div>
 
@@ -464,7 +860,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
 
   <!-- viewer -->
   <div class="surface s-viewer" id="viewer">
-    <h2><span id="viewer-title"></span><input id="viewer-search" placeholder="搜索…" hidden/><button id="viewer-close" class="icon" style="margin-left:auto">×</button></h2>
+    <h2><span id="viewer-title"></span><input id="viewer-search" placeholder="${escapeHtml(c.searchPlaceholder)}" hidden/><button id="viewer-close" class="icon" style="margin-left:auto">×</button></h2>
     <div id="viewer-list" class="list"></div>
   </div>
 
@@ -474,12 +870,14 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   <div class="surface s-mask" id="mask">
     <div id="pill">
       <span class="dot"></span>
-      <span id="txt">AI 正在操作</span>
-      <button id="pill-take" type="button">我来操作</button>
+      <span id="txt">${escapeHtml(c.aiBusy)}</span>
+      <button id="pill-take" type="button">${escapeHtml(c.takeOver)}</button>
     </div>
   </div>
 
 <script>
+  // Per-locale copy for this page (see browserOverlayHtml).
+  const COPY = ${scriptCopy(c)}
   const $ = (id) => document.getElementById(id)
   const state = { controlled: false, busy: false, busyTool: '', ops: [] }
   let mode = 'capsule'
@@ -490,29 +888,18 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   const SSE_STALE_MS = 4000
   let lastSseAt = 0
 
-  const TOOL_LABELS = {
-    'browser_open': '打开标签页', 'browser_navigate': '打开网页', 'browser_reload': '刷新页面',
-    'browser_go_back': '后退', 'browser_go_forward': '前进', 'browser_click': '点击',
-    'browser_type': '输入文字', 'browser_press': '按键', 'browser_select': '选择下拉项',
-    'browser_scroll': '滚动页面', 'browser_screenshot': '截图', 'browser_get_snapshot': '读取页面元素',
-    'browser_get_text': '读取页面文字', 'browser_list_tabs': '查看标签页', 'browser_switch_tab': '切换标签页',
-    'browser_close_tab': '关闭标签页', 'browser_eval': '读取页面数据', 'browser_fill_credentials': '填写登录表单',
-    'browser_takeover': '交给用户', 'browser_release': '恢复控制', 'browser_download': '下载文件',
-    'browser_clear_data': '清除数据', 'browser_wait_for': '等待页面', 'browser_fill_form': '填写表单',
-    'browser_upload_file': '上传文件', 'browser_bookmarks_add': '收藏页面',
-    'browser_page_state': '页面变化', 'browser_page_crash': '页面恢复', 'browser_close': '关闭浏览器',
-  }
+  const TOOL_LABELS = COPY.toolLabels
 
   /** 失败文案的唯一出处。401/403 就是 2026-09-15 现场主机日志里那条
    * 「refused a local write without browser proof」：本页跑在浏览器分区，靠 cookie
    * 交接拿到 BrowserAuth 票据，交接没完成时所有写操作都被拒。打包版用户看不到
    * console —— 页面必须自己说出来，否则就是「点了『我来操作』整轮没反应、零证据」。 */
   const failureText = (status, data) => {
-    if (status === 401 || status === 403) return '操作失败：浏览器会话凭据尚未就绪，请重试'
-    if (status === 503) return '操作失败：浏览器服务尚未就绪，请重试'
-    if (data && typeof data.error === 'string' && data.error !== '') return '操作失败：' + data.error
-    if (status === 0) return '操作失败：无法连接到浏览器服务，请重试'
-    return '操作失败（HTTP ' + status + '），请重试'
+    if (status === 401 || status === 403) return COPY.failCredentials
+    if (status === 503) return COPY.failService
+    if (data && typeof data.error === 'string' && data.error !== '') return COPY.failPrefix + data.error
+    if (status === 0) return COPY.failNetwork
+    return COPY.failHttp.replace('{status}', String(status))
   }
 
   /** 读 JSON：4xx（代理异常时甚至是 HTML）一律不抛给调用点。 */
@@ -548,13 +935,13 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     return await r.json()
   }
 
-  const labelOf = (tool) => TOOL_LABELS[tool] || tool || '操作'
+  const labelOf = (tool) => TOOL_LABELS[tool] || tool || COPY.actionFallback
   const fmtTime = (t) => {
     try {
       const d = new Date(t)
       const today = new Date()
       const sameDay = d.getFullYear() === today.getFullYear() && d.getMonth() === today.getMonth() && d.getDate() === today.getDate()
-      const time = d.toLocaleTimeString('zh-CN', { hour12: false })
+      const time = d.toLocaleTimeString(COPY.timeLocale, { hour12: false })
       return sameDay ? time : (d.getMonth() + 1) + '/' + d.getDate() + ' ' + time
     } catch { return '' }
   }
@@ -581,11 +968,11 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
    * button in the capsule) are the one and only control toggle. The scrim
    * itself is inert: clicking elsewhere must never steal the browser. */
   function renderMask() {
-    $('txt').textContent = state.busy ? 'AI 正在操作 · ' + labelOf(state.busyTool) : 'AI 空闲'
+    $('txt').textContent = state.busy ? COPY.aiBusyPrefix + labelOf(state.busyTool) : COPY.aiIdle
     const take = $('pill-take')
     // 正在接管中不要被一次并发的 refresh 把 pending 文案冲掉（见 takeControl）。
-    if (!take.disabled) take.textContent = '我来操作'
-    take.title = state.busy ? '暂停 AI，自己操作' : '自己操作浏览器'
+    if (!take.disabled) take.textContent = COPY.takeOver
+    take.title = state.busy ? COPY.pauseHint : COPY.takeOverHint
   }
 
   async function refresh() {
@@ -609,20 +996,20 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   function renderCapsule() {
     const dot = $('ai-dot')
     const take = $('ai-take')
-    let label = '我来操作'
-    let title = '自己操作浏览器'
+    let label = COPY.takeOver
+    let title = COPY.takeOverHint
     if (state.controlled) {
       dot.className = 'dot paused'
-      $('ai-label').textContent = '你正在操作'
-      label = '交给 AI'
-      title = '交回给 AI 继续操作'
+      $('ai-label').textContent = COPY.youInControl
+      label = COPY.handBack
+      title = COPY.handBackHint
       take.style.background = 'var(--accent)'; take.style.borderColor = 'var(--accent)'
       // 填充换成强调色时文字色必须一起换（暗色 --accent 是浅蓝，白字只有 2.71:1）。
       take.style.color = 'var(--on-accent)'
     } else if (state.busy) {
       dot.className = 'dot busy'
-      $('ai-label').textContent = 'AI 操作中 · ' + labelOf(state.busyTool)
-      title = '暂停 AI，自己操作'
+      $('ai-label').textContent = COPY.aiWorkingPrefix + labelOf(state.busyTool)
+      title = COPY.pauseHint
       take.style.background = ''; take.style.borderColor = ''; take.style.color = ''
     } else {
       dot.className = 'dot'
@@ -650,20 +1037,20 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     if (state.busy) {
       const line = document.createElement('div')
       line.className = 'op'
-      line.innerHTML = '<span class="time"></span><div class="what"><span class="tool">正在执行：' + esc(labelOf(state.busyTool)) + '</span></div>'
+      line.innerHTML = '<span class="time"></span><div class="what"><span class="tool">' + esc(COPY.running) + esc(labelOf(state.busyTool)) + '</span></div>'
       stream.appendChild(line)
     }
     if (ops.length === 0 && !state.busy) {
       const line = document.createElement('div')
       line.className = 'op'
-      line.innerHTML = '<div class="what" style="color:var(--text-muted)">暂无操作记录</div>'
+      line.innerHTML = '<div class="what" style="color:var(--text-muted)">' + esc(COPY.noOps) + '</div>'
       stream.appendChild(line)
     }
     for (const op of ops) {
       const line = document.createElement('div')
       line.className = 'op'
       const cls = op.failed ? 'fail' : (op.tool === 'browser_takeover' || op.tool === 'browser_release') ? 'pause' : ''
-      const who = op.actor === 'user' ? '<span class="who">你</span>' : ''
+      const who = op.actor === 'user' ? '<span class="who">' + esc(COPY.you) + '</span>' : ''
       line.innerHTML = '<span class="time">' + fmtTime(op.time) + '</span>' + who + '<div class="what"><span class="' + cls + '">' + esc(labelOf(op.tool)) + '</span> ' + esc(op.summary) + '</div>'
       stream.appendChild(line)
     }
@@ -679,15 +1066,15 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     // capsule). post() returns the fetch promise, so awaiting it serializes
     // the calls.
     const items = [
-      { label: '浏览历史', action: async () => { await openViewer('history') } },
-      { label: '书签', action: async () => { await openViewer('bookmarks') } },
-      { label: '下载', action: async () => { await openViewer('downloads') } },
+      { label: COPY.menuHistory, action: async () => { await openViewer('history') } },
+      { label: COPY.menuBookmarks, action: async () => { await openViewer('bookmarks') } },
+      { label: COPY.menuDownloads, action: async () => { await openViewer('downloads') } },
       { sep: true },
       {
-        label: '清除数据…',
+        label: COPY.menuClearData,
         danger: true,
         action: async () => {
-          if (!confirm('清除全部浏览数据（含登录状态）？')) return
+          if (!confirm(COPY.clearDataConfirm)) return
           // 失败就留在菜单里：原来无论成败都关面板，用户以为已经清完
           // （而 403 时一个字节都没删）。失败文案由 post 统一 toast。
           const r = await post('clear-data')
@@ -695,8 +1082,8 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
           await post('overlay', { mode: 'capsule' })
         },
       },
-      { label: '隐藏窗口', action: async () => { await post('overlay', { mode: 'capsule' }); await post('hide') } },
-      { label: '关闭', action: async () => { await post('overlay', { mode: 'capsule' }) } },
+      { label: COPY.hideWindow, action: async () => { await post('overlay', { mode: 'capsule' }); await post('hide') } },
+      { label: COPY.menuClose, action: async () => { await post('overlay', { mode: 'capsule' }) } },
     ]
     for (const item of items) {
       if (item.sep) { const sep = document.createElement('div'); sep.className = 'sep'; menu.appendChild(sep); continue }
@@ -723,7 +1110,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   let viewerSig = ''
   async function renderViewer(kind, q) {
     viewerKind = kind
-    const title = { bookmarks: '书签', history: '浏览历史', downloads: '下载' }[kind]
+    const title = { bookmarks: COPY.viewerBookmarks, history: COPY.viewerHistory, downloads: COPY.viewerDownloads }[kind]
     $('viewer-title').textContent = title
     $('viewer-search').hidden = kind !== 'history' && kind !== 'bookmarks'
     const list = $('viewer-list')
@@ -732,13 +1119,13 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     try {
       if (kind === 'bookmarks') {
         const res = await getJson('bookmarks?q=' + encodeURIComponent(q))
-        rows = (res.bookmarks || []).map((b) => ({ main: b.title, sub: b.url, meta: fmtTime(b.createdAt), openUrl: b.url, rm: '删除', rmAction: () => del('bookmarks?id=' + b.id) }))
+        rows = (res.bookmarks || []).map((b) => ({ main: b.title, sub: b.url, meta: fmtTime(b.createdAt), openUrl: b.url, rm: COPY.rowDelete, rmAction: () => del('bookmarks?id=' + b.id) }))
       } else if (kind === 'history') {
         const res = await getJson('history?q=' + encodeURIComponent(q) + '&limit=200')
-        rows = (res.entries || []).map((h) => ({ main: h.title || h.url, sub: h.url, meta: (h.actor === 'user' ? '你 · ' : 'AI · ') + fmtTime(h.time), openUrl: h.url }))
+        rows = (res.entries || []).map((h) => ({ main: h.title || h.url, sub: h.url, meta: (h.actor === 'user' ? COPY.actorYou : COPY.actorAi) + fmtTime(h.time), openUrl: h.url }))
       } else {
         const res = await getJson('downloads?limit=200')
-        rows = (res.downloads || []).map((d) => ({ main: d.fileName, sub: d.path || d.url, meta: d.status, open: d.status === 'done' && d.path ? '打开' : undefined, openAction: () => post('downloads/open', { id: d.id }).then((r) => { if (r.ok) showToast('已用系统默认程序打开') }), rm: '删除', rmAction: () => del('downloads?id=' + d.id) }))
+        rows = (res.downloads || []).map((d) => ({ main: d.fileName, sub: d.path || d.url, meta: d.status, open: d.status === 'done' && d.path ? COPY.rowOpen : undefined, openAction: () => post('downloads/open', { id: d.id }).then((r) => { if (r.ok) showToast(COPY.openedWithSystem) }), rm: COPY.rowDelete, rmAction: () => del('downloads?id=' + d.id) }))
       }
     } catch {
       // 2026-09-15 审计（P1）：原来这个 async 函数没有 try/catch，4xx 或非 JSON
@@ -750,7 +1137,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
       const fail = document.createElement('div')
       fail.style.color = 'var(--danger)'
       fail.style.padding = '20px 0'
-      fail.textContent = '加载失败，请重试'
+      fail.textContent = COPY.loadFailed
       list.appendChild(fail)
       return
     }
@@ -760,7 +1147,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     if (sig === viewerSig && list.childElementCount > 0) { list.scrollTop = prevScroll; return }
     viewerSig = sig
     list.textContent = ''
-    if (rows.length === 0) { list.innerHTML = '<div style="color:var(--text-muted);padding:20px 0">暂无记录</div>'; return }
+    if (rows.length === 0) { list.innerHTML = '<div style="color:var(--text-muted);padding:20px 0">' + esc(COPY.noRecords) + '</div>'; return }
     for (const row of rows) {
       const el = document.createElement('div')
       el.className = 'vrow'
@@ -768,7 +1155,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
       if (row.openUrl) {
         const main = el.querySelector('.main')
         main.style.cursor = 'pointer'
-        main.title = '在新标签页打开：' + row.openUrl
+        main.title = COPY.openInNewTab + row.openUrl
         main.addEventListener('click', () => {
           void post('overlay', { mode: 'capsule' })
           void post('navigate', { url: row.openUrl })
@@ -822,7 +1209,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     btn.disabled = true
     // 方向文案（2026-09-15 审计 P3）：旧实现不论接管还是交回都说「正在接管…」，
     // 用户点「交给 AI」时看到的是相反方向的动作。
-    btn.textContent = active ? '正在接管…' : '正在交还…'
+    btn.textContent = active ? COPY.takingOver : COPY.handingBack
     const r = await post('takeover', { active })
     btn.disabled = false
     btn.textContent = label
@@ -902,3 +1289,4 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
 </script>
 </body>
 </html>`
+}

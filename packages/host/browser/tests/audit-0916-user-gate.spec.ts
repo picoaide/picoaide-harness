@@ -70,7 +70,7 @@ describe('浏览器预算不变量（2026-09-16）', () => {
 })
 
 describe('browser_list_tabs 报告控制权（2026-09-16）', () => {
-  it('用户持有控制权时，模型面输出直接说明要按「交给 AI」', async () => {
+  it('用户持有控制权时，模型面输出直接说明要交还控制权（2026-09-16 i18n：模型面统一英文，按功能描述按钮而非写死某个语言的按钮名）', async () => {
     const tool = registerListTabs(
       { controlled: true, busy: false, busyTool: '', awaitingRelease: true, awaitingReleaseTool: 'browser_eval' },
       [{ id: 3, url: 'https://crm.example/home', title: '首页', loading: false, visible: true }],
@@ -79,7 +79,10 @@ describe('browser_list_tabs 报告控制权（2026-09-16）', () => {
     expect(value.control).toMatchObject({ controlled: true, awaitingRelease: true, awaitingReleaseTool: 'browser_eval' })
     const text = render(tool, value)
     expect(text).toContain('USER HOLDS CONTROL')
-    expect(text).toContain('交给 AI')
+    expect(text).toContain('hands control back from the browser window')
+    // 模型面不许再写死某个语言的按钮名（英文界面下那是错的）
+    expect(text).not.toContain('交给 AI')
+    expect(text).not.toContain('我来操作')
     // 已经被拒过的那次调用要被点名，模型才知道"别瞎重试"
     expect(text).toContain('browser_eval')
     // 标签页信息本身不受影响

@@ -31,7 +31,7 @@ const BROWSER_GUIDANCE = `You have an embedded browser shared with the user. Rul
 1. Start with browser_open (url optional), then browser_navigate. browser_get_snapshot lists numbered interactable elements; target them by number or CSS selector.
 2. After navigation or any page change, take a fresh snapshot — pages re-render and renumber.
 3. browser_screenshot only for visual confirmation; snapshots/text are cheaper. browser_eval runs one expression (a heuristic guardrail rejects statements/assignments and eval/Function; fetch/XHR and any page JS are allowed) and returns its resolved value — promise results are awaited.
-4. The user may take over at any time (按钮: 我来操作). Your queued actions then wait; only the user gives control back (交给 AI) — never ask for it back, there is no tool for that, so do not fight the user. While the user holds control your browser actions fail with '用户正在操作浏览器' / '等待用户交还浏览器超时': that is NOT a broken page — ask the user to press 交给 AI in the browser window, then retry (browser_list_tabs reports the same state).
+4. The user may take over the browser at any time from the browser window. Your queued actions then wait; only the user gives control back — never ask for it back, there is no tool for that, so do not fight the user. While the user holds control your browser actions fail with a 'window-controlled' error saying the user is operating the browser: that is NOT a broken page — ask the user to hand control back from the browser window, then retry (browser_list_tabs reports the same state).
 5. Use wait_for before acting on dynamic pages (SPAs) instead of sleeping.
 6. Bookmarks/history/downloads are shared with the user; save important pages with bookmarks_add; check your results via downloads_list (paths are usable by file tools).
 7. Close tabs you no longer need with browser_close_tab. Tabs are GLOBAL: every session and the user share one tab pool.`
@@ -180,7 +180,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_open',
-    description: '[导航] Open the browser (shared single tab pool) and optionally navigate a new tab to a URL. Use this as the first browser action.',
+    description: '[navigate] Open the browser (shared single tab pool) and optionally navigate a new tab to a URL. Use this as the first browser action.',
     parameters: {
       url: { type: 'string', description: 'Optional URL to open in the new tab.' },
     },
@@ -207,7 +207,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_navigate',
-    description: '[导航] Navigate a tab of your session to a URL (http/https only).',
+    description: '[navigate] Navigate a tab of your session to a URL (http/https only).',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       url: { type: 'string', required: true, description: 'The URL to navigate to.' },
@@ -239,7 +239,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_reload',
-    description: '[导航] Reload a tab of your session.',
+    description: '[navigate] Reload a tab of your session.',
     parameters: { tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' } },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { url: { type: 'string' } } },
@@ -259,7 +259,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_go_back',
-    description: '[导航] Navigate back in a tab of your session.',
+    description: '[navigate] Navigate back in a tab of your session.',
     parameters: { tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' } },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { url: { type: 'string' } } },
@@ -279,7 +279,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_go_forward',
-    description: '[导航] Navigate forward in a tab of your session.',
+    description: '[navigate] Navigate forward in a tab of your session.',
     parameters: { tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' } },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { url: { type: 'string' } } },
@@ -299,7 +299,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_list_tabs',
-    description: '[导航] List ALL tabs of the shared browser pool (every session and the user share one pool) with ids, urls, titles and the active marker. Also reports whether the USER currently holds control (我来操作): while they do, every other browser tool of yours is refused — ask the user to press 交给 AI instead of retrying.',
+    description: '[navigate] List ALL tabs of the shared browser pool (every session and the user share one pool) with ids, urls, titles and the active marker. Also reports whether the USER currently holds control: while they do, every other browser tool of yours is refused — ask the user to hand control back from the browser window instead of retrying.',
     parameters: {},
     output: {
       schema: {
@@ -328,10 +328,10 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
             type: 'object',
             additionalProperties: false,
             properties: {
-              controlled: { type: 'boolean', description: 'The user holds control (我来操作): your other browser tools are refused until they press 交给 AI.' },
+              controlled: { type: 'boolean', description: 'The user holds control: your other browser tools are refused until the user hands control back from the browser window.' },
               busy: { type: 'boolean', description: 'A browser operation (yours or the user\'s) is running right now.' },
               busyTool: { type: 'string', description: 'Name of the running tool (empty when idle).' },
-              awaitingRelease: { type: 'boolean', description: 'One of your browser calls was already refused because the user holds control — the user must press 交给 AI before you can continue.' },
+              awaitingRelease: { type: 'boolean', description: 'One of your browser calls was already refused because the user holds control — the user must hand control back from the browser window before you can continue.' },
               awaitingReleaseTool: { type: 'string', description: 'The tool whose call was refused (empty when nothing is waiting).' },
             },
           },
@@ -355,7 +355,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_switch_tab',
-    description: '[导航] Make a tab of your session its active tab.',
+    description: '[navigate] Make a tab of your session its active tab.',
     parameters: { tab: { type: 'integer', required: true, description: 'Your tab id to activate.' } },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { tab: { type: 'integer' }, url: { type: 'string' } } },
@@ -375,7 +375,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_close_tab',
-    description: '[导航] Close a tab of the shared pool (defaults to your active tab).',
+    description: '[navigate] Close a tab of the shared pool (defaults to your active tab).',
     parameters: { tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' } },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' } } },
@@ -401,13 +401,13 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     description: string
     run: (r: BrowserRuntime, id: number, sel: string, signal: AbortSignal | undefined, args: Record<string, unknown>) => Promise<unknown> | unknown
   }> = [
-    { name: 'browser_click', title: 'Click', description: '[交互] Click an element of your tab (snapshot number or CSS selector).', run: (r, id, sel, signal) => (async () => {
+    { name: 'browser_click', title: 'Click', description: '[interact] Click an element of your tab (snapshot number or CSS selector).', run: (r, id, sel, signal) => (async () => {
       const point = await r.locateElement(id, sel, signal)
       await r.clickAt(id, point, signal)
       return { ok: true }
     })() },
-    { name: 'browser_type', title: 'Type', description: '[交互] Type text into an input of your tab (snapshot number or CSS selector); clears the field first by default.', run: (r, id, sel, signal, args) => r.typeInto(id, sel, String((args as { text: string }).text), (args as { clear?: boolean }).clear !== false, signal) },
-    { name: 'browser_select', title: 'Select option', description: '[交互] Select an option in a dropdown of your tab (snapshot number or CSS selector).', run: (r, id, sel, signal, args) => r.selectOption(id, sel, (args as { value: string }).value, signal) },
+    { name: 'browser_type', title: 'Type', description: '[interact] Type text into an input of your tab (snapshot number or CSS selector); clears the field first by default.', run: (r, id, sel, signal, args) => r.typeInto(id, sel, String((args as { text: string }).text), (args as { clear?: boolean }).clear !== false, signal) },
+    { name: 'browser_select', title: 'Select option', description: '[interact] Select an option in a dropdown of your tab (snapshot number or CSS selector).', run: (r, id, sel, signal, args) => r.selectOption(id, sel, (args as { value: string }).value, signal) },
   ]
   for (const spec of interactSpecs) {
     register(defineTool({
@@ -439,7 +439,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_press',
-    description: '[交互] Press a key in your tab (Enter, Tab, Escape, Backspace, Delete, Arrows, Home, End, PageUp, PageDown, space). Fails (not-found) when the page had no element able to receive the key, so a "pressed" result always means the key reached the document.',
+    description: '[interact] Press a key in your tab (Enter, Tab, Escape, Backspace, Delete, Arrows, Home, End, PageUp, PageDown, space). Fails (not-found) when the page had no element able to receive the key, so a "pressed" result always means the key reached the document.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       key: { type: 'string', required: true, description: 'The key to press.' },
@@ -465,7 +465,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_scroll',
-    description: '[交互] Scroll your tab by a vertical delta, or bring a snapshot element into view. A target that does not exist on the page fails (not-found) instead of reporting a successful scroll.',
+    description: '[interact] Scroll your tab by a vertical delta, or bring a snapshot element into view. A target that does not exist on the page fails (not-found) instead of reporting a successful scroll.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       deltaY: { type: 'integer', description: 'Vertical scroll amount in pixels (negative scrolls up).' },
@@ -500,7 +500,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_fill_form',
-    description: '[交互] Fill a form of your tab by field names/labels/placeholders (batch) and optionally submit. Prefer over multiple type calls.',
+    description: '[interact] Fill a form of your tab by field names/labels/placeholders (batch) and optionally submit. Prefer over multiple type calls.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       fields: {
@@ -549,7 +549,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_upload_file',
-    description: '[交互] Upload local files through the page file input (default first input[type=file]; no dialogs). Only paths inside the downloads dir or the current workspace are allowed.',
+    description: '[interact] Upload local files through the page file input (default first input[type=file]; no dialogs). Only paths inside the downloads dir or the current workspace are allowed.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       paths: { type: 'array', required: true, items: { type: 'string' }, description: 'Absolute paths to upload (allowed: downloads dir + current workspace).' },
@@ -575,7 +575,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_get_snapshot',
-    description: '[读取] List the numbered interactable elements of your tab (links, buttons, inputs, selects, textareas) plus page header info (url/title). Numbers are the targets for click/type/select/scroll. Password fields are listed (number/selector usable) but never expose their value: the text reads the field label or "(password field)". On a tab that received credentials through browser_fill_credentials, the injected values are masked (****) in the element text, url and title — VERBATIM occurrences only (a value the page transformed is not covered). The list is bounded: when it was cut, or when the page contains sub-frames / shadow roots whose content this snapshot does NOT include, `truncated`/`total`/`note` say so — an absent element is not proof it does not exist.',
+    description: '[read] List the numbered interactable elements of your tab (links, buttons, inputs, selects, textareas) plus page header info (url/title). Numbers are the targets for click/type/select/scroll. Password fields are listed (number/selector usable) but never expose their value: the text reads the field label or "(password field)". On a tab that received credentials through browser_fill_credentials, the injected values are masked (****) in the element text, url and title — VERBATIM occurrences only (a value the page transformed is not covered). The list is bounded: when it was cut, or when the page contains sub-frames / shadow roots whose content this snapshot does NOT include, `truncated`/`total`/`note` say so — an absent element is not proof it does not exist.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
     },
@@ -648,7 +648,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_get_text',
-    description: '[读取] Extract the visible text of your tab, or of one element (CSS selector). Bounded output. On a tab that received credentials through browser_fill_credentials, the injected values are masked (****) in the returned text for the rest of that tab\'s life — VERBATIM occurrences only: text the page derived from the value (base64, reversed, character-split, an image) is not covered, and this tool is not a security boundary against a hostile page.',
+    description: '[read] Extract the visible text of your tab, or of one element (CSS selector). Bounded output. On a tab that received credentials through browser_fill_credentials, the injected values are masked (****) in the returned text for the rest of that tab\'s life — VERBATIM occurrences only: text the page derived from the value (base64, reversed, character-split, an image) is not covered, and this tool is not a security boundary against a hostile page.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       selector: { type: 'string', description: 'Optional CSS selector; without it the whole page text is returned.' },
@@ -676,7 +676,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_screenshot',
-    description: '[读取] Capture the visible page of your tab as a JPEG image. Use sparingly — snapshots and text are cheaper. REFUSED on a tab inside the credential window (after browser_fill_credentials and before that tab navigates): a page can render an injected credential as text or a barcode, and no image redaction can undo that; the window ends on the next navigation of that tab.',
+    description: '[read] Capture the visible page of your tab as a JPEG image. Use sparingly — snapshots and text are cheaper. REFUSED on a tab inside the credential window (after browser_fill_credentials and before that tab navigates): a page can render an injected credential as text or a barcode, and no image redaction can undo that; the window ends on the next navigation of that tab.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
     },
@@ -744,7 +744,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_wait_for',
-    description: '[读取] Wait for a page condition (element/text/url/network-idle/settled) before acting — use instead of sleeping on dynamic pages. timeoutMs is clamped to the call budget: this tool is bounded at 40000 ms, so that is the longest wait that can actually complete (the runtime accepts up to 120000 ms, but a call that long is cut off by the tool budget first).',
+    description: '[read] Wait for a page condition (element/text/url/network-idle/settled) before acting — use instead of sleeping on dynamic pages. timeoutMs is clamped to the call budget: this tool is bounded at 40000 ms, so that is the longest wait that can actually complete (the runtime accepts up to 120000 ms, but a call that long is cut off by the tool budget first).',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       condition: { type: 'string', enum: WAIT_CONDITIONS, required: true, description: 'What to wait for.' },
@@ -776,7 +776,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_eval',
-    description: '[执行/请求] Evaluate one JavaScript expression in your tab and return its resolved value (promise results are awaited) — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests. A heuristic guardrail accepts a single expression and rejects statements/assignments plus eval/Function and page-writing APIs; the refusal is receiver-aware, so pure data shaping is fine (String.prototype.replace such as document.body.innerText.replace(/\\s+/g, \' \'), trim/split/join, and in-place methods like sort/fill on an array the expression itself built) while navigation and page state changes stay refused (location.replace, history.replaceState, localStorage.setItem, click/submit/write/open) — including when they are reached through Reflect (Reflect.construct is refused like `new`, and Reflect.apply/get must name a statically known function, so localStorage[\'set\'+\'Item\'] is caught); network requests (fetch/XHR/WebSocket) are allowed on ordinary tabs. REFUSED on a tab inside the credential window (after browser_fill_credentials and before that tab navigates): while the injected credential is still in the page any read-back can be a channel, so there is no eval at all until the tab navigates — submit the form with browser_click instead. After that window closes eval works again and the returned value is masked against the values injected into that tab (verbatim occurrences only — a script that returns the value transformed is not covered). It is a misuse guardrail, not a security boundary.',
+    description: '[write] Evaluate one JavaScript expression in your tab and return its resolved value (promise results are awaited) — for non-explicit page data (SSR globals, hidden fields, datasets) or page-authored requests. A heuristic guardrail accepts a single expression and rejects statements/assignments plus eval/Function and page-writing APIs; the refusal is receiver-aware, so pure data shaping is fine (String.prototype.replace such as document.body.innerText.replace(/\\s+/g, \' \'), trim/split/join, and in-place methods like sort/fill on an array the expression itself built) while navigation and page state changes stay refused (location.replace, history.replaceState, localStorage.setItem, click/submit/write/open) — including when they are reached through Reflect (Reflect.construct is refused like `new`, and Reflect.apply/get must name a statically known function, so localStorage[\'set\'+\'Item\'] is caught); network requests (fetch/XHR/WebSocket) are allowed on ordinary tabs. REFUSED on a tab inside the credential window (after browser_fill_credentials and before that tab navigates): while the injected credential is still in the page any read-back can be a channel, so there is no eval at all until the tab navigates — submit the form with browser_click instead. After that window closes eval works again and the returned value is masked against the values injected into that tab (verbatim occurrences only — a script that returns the value transformed is not covered). It is a misuse guardrail, not a security boundary.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       expression: { type: 'string', required: true, description: 'One expression (no statements/assignments; pure data shaping on strings/arrays is allowed; fetch/XHR/WebSocket allowed except on credential tabs; eval/Function rejected). Helpers: readText(sel)/readAttr(sel,name)/readJson(sel)/readVar(path).' },
@@ -812,7 +812,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_bookmarks_add',
-    description: '[记忆] Bookmark a tab of your session (shared work-set; same URL is idempotent).',
+    description: '[memory] Bookmark a tab of your session (shared work-set; same URL is idempotent).',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       title: { type: 'string', description: 'Optional custom title.' },
@@ -835,7 +835,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_bookmarks_list',
-    description: '[记忆] List bookmarks (shared with the user), newest first.',
+    description: '[memory] List bookmarks (shared with the user), newest first.',
     parameters: {
       q: { type: 'string', description: 'Search text in url/title.' },
       limit: { type: 'integer', description: 'Max entries (default 200).' },
@@ -874,7 +874,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_bookmarks_remove',
-    description: '[记忆] Remove a bookmark by id.',
+    description: '[memory] Remove a bookmark by id.',
     parameters: { id: { type: 'integer', required: true, description: 'Bookmark id from browser_bookmarks_list.' } },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' } } },
@@ -891,7 +891,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_history_search',
-    description: '[记忆] Search the shared visit history (your session + the user\'s), newest first.',
+    description: '[memory] Search the shared visit history (your session + the user\'s), newest first.',
     parameters: {
       q: { type: 'string', description: 'Search text in url/title.' },
       limit: { type: 'integer', description: 'Max entries (default 100).' },
@@ -933,7 +933,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_download',
-    description: '[产物] Trigger a download of a URL through your session (saved to the programmatic downloads dir; no dialogs).',
+    description: '[artifacts] Trigger a download of a URL through your session (saved to the programmatic downloads dir; no dialogs).',
     parameters: {
       url: { type: 'string', required: true, description: 'Direct download URL.' },
     },
@@ -956,7 +956,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_downloads_list',
-    description: '[产物] List downloads (shared) with paths usable by file tools; newest first.',
+    description: '[artifacts] List downloads (shared) with paths usable by file tools; newest first.',
     parameters: {
       status: { type: 'string', enum: ['in-progress', 'done', 'cancelled', 'rejected'], description: 'Filter by status.' },
       limit: { type: 'integer', description: 'Max entries (default 100).' },
@@ -998,7 +998,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_downloads_remove',
-    description: '[产物] Remove a download record by id.',
+    description: '[artifacts] Remove a download record by id.',
     parameters: { id: { type: 'integer', required: true, description: 'Download id from downloads_list.' } },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' } } },
@@ -1017,7 +1017,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_takeover',
-    description: '[控制] Hand control to the user (pauses ALL browser actions until the user gives control back). Usually the user clicks 我来操作; this tool exists for guided flows. There is deliberately NO model-side counterpart: control returns to you only when the user chooses it (the 交给 AI button), never because the model asked for it back.',
+    description: '[control] Hand control to the user (pauses ALL browser actions until the user gives control back). Usually the user takes over from the browser window; this tool exists for guided flows. There is deliberately NO model-side counterpart: control returns to you only when the user chooses it (the hand-back control in the browser window), never because the model asked for it back.',
     parameters: {},
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' } } },
@@ -1044,7 +1044,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_fill_credentials',
-    description: '[控制] Fill the login form of your tab with credentials stored for a connector (shown to the user; never submitted automatically). SITE-BOUND: the tab must be on the connector\'s own origin — a tab on any other site (or a connector record without a site URL) is refused, so navigate to the real login page first. IMPORTANT: this opens the tab\'s credential window — from now until that tab navigates, browser_eval and browser_screenshot are refused there (a value still in the page can be read back in ways no masking can undo). Read the page with browser_get_snapshot / browser_get_text, submit with browser_click, and eval/screenshots resume automatically on the next document. The injected value stays masked in every text exit of this tab for the rest of the tab\'s life (page text, titles, URLs, history, downloads) — VERBATIM occurrences only: a page that renders the value transformed (base64, reversed, character-split) is not covered by any value-level rule. Treat this as a bound on accidents, not on a hostile page.',
+    description: '[control] Fill the login form of your tab with credentials stored for a connector (shown to the user; never submitted automatically). SITE-BOUND: the tab must be on the connector\'s own origin — a tab on any other site (or a connector record without a site URL) is refused, so navigate to the real login page first. IMPORTANT: this opens the tab\'s credential window — from now until that tab navigates, browser_eval and browser_screenshot are refused there (a value still in the page can be read back in ways no masking can undo). Read the page with browser_get_snapshot / browser_get_text, submit with browser_click, and eval/screenshots resume automatically on the next document. The injected value stays masked in every text exit of this tab for the rest of the tab\'s life (page text, titles, URLs, history, downloads) — VERBATIM occurrences only: a page that renders the value transformed (base64, reversed, character-split) is not covered by any value-level rule. Treat this as a bound on accidents, not on a hostile page.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       connectorId: { type: 'string', required: true, description: 'The connector id whose stored credentials to use.' },
@@ -1080,7 +1080,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_credentials_list',
-    description: '[控制] List available stored credentials (connector id + username only; never secrets).',
+    description: '[control] List available stored credentials (connector id + username only; never secrets).',
     parameters: {},
     output: {
       schema: {
@@ -1114,7 +1114,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_clear_data',
-    description: '[控制] Clear site data (storage/cache) for your tabs. Clearing EVERYTHING incl. cookies (all-data) requires the user to confirm in the browser window menu — the tool refuses it.',
+    description: '[control] Clear site data (storage/cache) for your tabs. Clearing EVERYTHING incl. cookies (all-data) requires the user to confirm in the browser window menu — the tool refuses it.',
     parameters: {
       scope: { type: 'string', enum: ['group', 'all-data'], description: 'What to clear (default group).' },
     },
@@ -1130,7 +1130,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       if (scope === 'all-data') {
         // Design §7.3-4: all-data needs the USER's shell confirmation — the
         // tool surface refuses; users clear everything via the browser menu.
-        throw browserError('policy', 'browser: clear_data all-data requires a user confirmation in the browser window menu — use the ⋮ menu → 清除数据')
+        throw browserError('policy', 'browser: clear_data all-data requires a user confirmation in the browser window menu — use the ⋮ menu → Clear browsing data')
       }
       noteAgent(runtime, exec.agent)
       await runtime.runGated('browser_clear_data', () => runtime.clearData(false), exec.signal)
@@ -1205,7 +1205,7 @@ function formatTabs(value: unknown): string {
   if (control?.controlled === true) {
     const blocked = control.awaitingRelease === true
     lines.push(
-      'USER HOLDS CONTROL (我来操作): your other browser tools are refused until the user presses 交给 AI in the browser window.'
+      'USER HOLDS CONTROL: your other browser tools are refused until the user hands control back from the browser window.'
       + (blocked
         ? ` An earlier call was already refused${control.awaitingReleaseTool ? ` (${control.awaitingReleaseTool})` : ''} — ask the user to hand control back, do NOT retry blindly.`
         : ''),
