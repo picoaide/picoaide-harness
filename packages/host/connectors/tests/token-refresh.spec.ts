@@ -282,6 +282,30 @@ describe('TokenRefresher', () => {
     expect(stored?.expiresAt).toBeGreaterThan(Date.now())
   })
 
+  it('drops the result when the credential moved underfoot (disconnect / reauth / user switch)', async () => {
+    const server = await startServer({ rotateRefresh: true })
+    const { store } = tempStore()
+    const before = credential({ expiresAt: Date.now() - 1000 })
+    await store.writeCredential('example-a', before)
+    const announced: string[] = []
+    const refresher = new TokenRefresher({
+      read: (id) => store.readCredential(id),
+      write: (id, patch) => store.updateCredential(id, patch),
+      // Simulates the CAS losing to a newer write made while the refresh was
+      // on the wire (interactive re-authorization / disconnect / user switch).
+      writeIfUnchanged: () => Promise.resolve(null),
+      target: () => discoveryTarget(server.origin),
+      onRefreshed: (id) => { announced.push(id) },
+    })
+    const outcome = await refresher.refresh('example-a', { force: true })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.reason).toBe('transient')
+    // No state mirror / provider fan-out, and the newer credential is intact.
+    expect(announced).toEqual([])
+    expect((await store.readCredential('example-a'))?.accessToken).toBe(before.accessToken)
+  })
+
   it('skips the round trip while the stored token is still fresh', async () => {
     const server = await startServer()
     const { store } = tempStore()

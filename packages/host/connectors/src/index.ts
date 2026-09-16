@@ -398,6 +398,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   ): Promise<{ authProvider?: OAuthClientProvider; handle?: LiveProviderHandle }> => {
     const target = oauthTargetOf(def)
     if (target === null || credential?.accessToken === undefined) return {}
+    // The provider (and any SDK 401 self-heal it drives) belongs to the store
+    // that was current when this registration was built. A user switch replaces
+    // `store`; persisting through the *new* one would write this account's
+    // tokens into the next user's directory (2026-09-16 audit E5).
+    const registrationStore = store
     // Registration must not depend on a discovery round trip: when the token is
     // still valid and the definition already names its token endpoint, the
     // provider can refresh on 401 through that endpoint alone (the SDK calls
@@ -411,6 +416,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         credential,
         target,
         onPersist: (patch: Partial<ConnectorCredential>) => {
+          if (registrationStore !== store) return
           const changed = persistAndMaybeAnnounce(def.id, patch)
           void changed.catch((cause: unknown) => {
             ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
@@ -438,8 +444,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         onPersist: (patch: Partial<ConnectorCredential>) => {
           // The SDK's persistence point: a rotated refresh token or a new
           // access token must reach the store, or the next process (or the
-          // next registration) would refresh with a dead grant.
-          void store.updateCredential(def.id, patch)
+          // next registration) would refresh with a dead grant. Never through
+          // a store that a user switch has replaced in the meantime.
+          if (registrationStore !== store) return
+          void registrationStore.updateCredential(def.id, patch)
             .then(() => { ctx.emit('pico/connector-credentials-changed', { id: def.id }) })
             .catch((cause: unknown) => {
               ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
@@ -546,6 +554,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const tokenRefresher = new TokenRefresher({
     read: (id) => store.readCredential(id),
     write: (id, patch) => store.updateCredential(id, patch),
+    // Refresh writes are compare-and-update against the credential the refresh
+    // read: a disconnect, a newer interactive re-authorization, or a user
+    // switch must make the stale result a no-op (2026-09-16 audit E5/E6).
+    writeIfUnchanged: (id, expected, patch) => store.updateCredentialIfUnchanged(id, expected, patch),
     target: (id) => {
       const def = defs.find(entry => entry.id === id)
       return def ? oauthTargetOf(def) : null
@@ -832,7 +844,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    */
   const lastAnnouncedToken = new Map<string, string>()
   const persistAndMaybeAnnounce = async (id: string, patch: Partial<ConnectorCredential>): Promise<void> => {
-    const current = await store.readCredential(id)
+    // Capture the store this save belongs to before the first await: a user
+    // switch while the write is in flight must not redirect it into the next
+    // user's directory (2026-09-16 audit E5).
+    const target = store
+    const current = await target.readCredential(id)
     // A save that changes no credential material is a NO-OP. The SDK re-saves
     // tokens on every 401 handshake, and a blind write would bump `updatedAt`,
     // re-announce the connector and restart its MCP transport each time — a
@@ -844,7 +860,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       noteCredential(id, current)
       return
     }
-    const saved = await store.updateCredential(id, patch)
+    const saved = await target.updateCredential(id, patch)
     noteCredential(id, saved)
     const token = saved.accessToken ?? ''
     if (token === '' || lastAnnouncedToken.get(id) === token) return

@@ -426,6 +426,16 @@ export class TokenRefresher {
     private readonly deps: {
       read: (id: string) => Promise<ConnectorCredential | null>
       write: CredentialWriter
+      /**
+       * Compare-and-update used for the refresh result when provided.
+       *
+       * Receives the credential this refresh read at the start and returns null
+       * when the store no longer matches it (disconnect / interactive
+       * re-authorization / another user's store). A null result means the
+       * refresh MUST NOT publish its tokens: they are stale or belong to an
+       * authorization that no longer exists.
+       */
+      writeIfUnchanged?: ((id: string, expected: ConnectorCredential, patch: Partial<ConnectorCredential>) => Promise<ConnectorCredential | null>) | undefined
       target: (id: string) => OAuthTarget | null
       /**
        * Called after a refresh actually changed the stored credential.
@@ -497,12 +507,26 @@ export class TokenRefresher {
       return { ok: false, reason: 'transient', message: hostT(locale, 'refresh.outboundBlocked', { message: error instanceof Error ? error.message : String(error) }) }
     }
     if (!outcome.ok) return outcome
-    const persisted = await this.deps.write(id, {
+    const patch = {
       accessToken: outcome.tokens.accessToken,
       ...(outcome.tokens.refreshToken === undefined ? {} : { refreshToken: outcome.tokens.refreshToken }),
       expiresAt: outcome.tokens.expiresAt,
       refreshedAt: Date.now(),
-    })
+    }
+    let persisted: ConnectorCredential
+    if (this.deps.writeIfUnchanged !== undefined) {
+      const cas = await this.deps.writeIfUnchanged(id, credential, patch)
+      if (cas === null) {
+        // The credential moved underfoot while the refresh was on the wire
+        // (disconnect, a newer interactive re-authorization, or a user switch).
+        // Publishing the old result would undo that newer write; report a
+        // transient failure so the next sweep starts from the current store.
+        return { ok: false, reason: 'transient', message: hostT(locale, 'refresh.credentialChanged') }
+      }
+      persisted = cas
+    } else {
+      persisted = await this.deps.write(id, patch)
+    }
     this.deps.onRefreshed?.(id, outcome.tokens, persisted)
     return outcome
   }

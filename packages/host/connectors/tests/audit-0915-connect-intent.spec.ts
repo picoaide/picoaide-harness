@@ -302,6 +302,20 @@ describe('ConnectorStore.clearCredentialIfUnchanged：原子 compare-and-delete'
     }
   })
 
+  it('updateCredentialIfUnchanged：快照变了 / 文件没了都不写（断开不复活）', async () => {
+    const dir = await tempDir('pico-store-cas-update-')
+    const store = new ConnectorStore({ baseDir: dir })
+    const first = await store.updateCredential('c', { accessToken: 'a1', fields: { apiKey: 'A' } })
+    expect((await store.updateCredentialIfUnchanged('c', first, { accessToken: 'a2' }))?.accessToken).toBe('a2')
+    // 期望快照已经过期（盘上是 a2 的那次写）⇒ 不再覆盖更新结果
+    expect(await store.updateCredentialIfUnchanged('c', first, { accessToken: 'a3' })).toBeNull()
+    const second = await store.readCredential('c')
+    // 断开（文件被清）后迟到的刷新写入不得复活凭据
+    await store.clearCredential('c')
+    expect(await store.updateCredentialIfUnchanged('c', second!, { accessToken: 'a4' })).toBeNull()
+    expect(await store.readCredential('c')).toBeNull()
+  })
+
   it('updateCredential 的 updatedAt 严格递增（同毫秒也不重复）', async () => {
     const dir = await tempDir('pico-store-updatedat-')
     const store = new ConnectorStore({ baseDir: dir })
