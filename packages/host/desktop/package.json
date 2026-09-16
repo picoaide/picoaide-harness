@@ -312,6 +312,7 @@
     "productName": "PicoAide Harness",
     "electronLanguages": [
       "zh-CN",
+      "zh_CN",
       "en-US"
     ],
     "protocols": [
