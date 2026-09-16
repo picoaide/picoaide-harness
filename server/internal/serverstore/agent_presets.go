@@ -124,20 +124,6 @@ func CreateAgentPreset(db *sql.DB, p *AgentPreset) (int64, error) {
 	return id, err
 }
 
-// CreateAgentPresetCapped 同上,附带每作者待审配额。
-func CreateAgentPresetCapped(db *sql.DB, p *AgentPreset, pendingCap int) (int64, error) {
-	if pendingCap > 0 {
-		n, err := PendingReleaseCount(db, p.Author)
-		if err != nil {
-			return 0, err
-		}
-		if n >= pendingCap {
-			return 0, ErrTooManyPending
-		}
-	}
-	return CreateAgentPreset(db, p)
-}
-
 // GetAgentPreset 取展示版本(含归档)。
 func GetAgentPreset(db *sql.DB, name string) (*AgentPreset, error) {
 	r, err := latestPresetRelease(db, name)
@@ -264,29 +250,6 @@ func ListVisibleAgentPresets(db *sql.DB, author string, granted []string) ([]Age
 	return out, nil
 }
 
-// SetAgentPresetStatus 审核展示版本。
-func SetAgentPresetStatus(db *sql.DB, name string, status AgentPresetStatus, reason string) error {
-	r, err := latestPresetRelease(db, name)
-	if err != nil {
-		return err
-	}
-	return SetReleaseStatus(db, AppKindAgent, name, r.Version, string(status), reason)
-}
-
-// SetAgentPresetStatusByVersion 审核指定版本。
-func SetAgentPresetStatusByVersion(db *sql.DB, name, version string, status AgentPresetStatus, reason string) error {
-	return SetReleaseStatus(db, AppKindAgent, name, version, string(status), reason)
-}
-
-// DeleteAgentPreset 删除展示版本(软删:版本号永久占位)。
-func DeleteAgentPreset(db *sql.DB, name string) error {
-	r, err := latestPresetRelease(db, name)
-	if err != nil {
-		return err
-	}
-	return SoftDeleteRelease(db, AppKindAgent, name, r.Version)
-}
-
 // DeleteAgentPresetByVersion 删除指定版本(软删)。
 func DeleteAgentPresetByVersion(db *sql.DB, name, version string) error {
 	return SoftDeleteRelease(db, AppKindAgent, name, version)
@@ -350,21 +313,6 @@ func UpdateAgentPresetResubmitByVersion(db *sql.DB, name, version, displayName, 
 		publisher = ?, status = 'pending', reason = '', quality = '', updated_at = `+NowExpr()+`
 		WHERE kind = ? AND app_id = ? AND version = ?`,
 		displayName, description, checksum, author, AppKindAgent, name, version)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// UpdateAgentPresetResubmitByVersionWithArchive 同上并覆盖归档。
-func UpdateAgentPresetResubmitByVersionWithArchive(db *sql.DB, name, version, displayName, description, checksum, author string, archive []byte) error {
-	res, err := db.Exec(`UPDATE app_releases SET title = ?, description = ?, checksum = ?,
-		publisher = ?, archive = ?, size = ?, status = 'pending', reason = '', quality = '',
-		updated_at = `+NowExpr()+` WHERE kind = ? AND app_id = ? AND version = ?`,
-		displayName, description, checksum, author, archive, len(archive), AppKindAgent, name, version)
 	if err != nil {
 		return err
 	}

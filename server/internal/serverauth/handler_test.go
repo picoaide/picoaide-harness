@@ -318,10 +318,10 @@ func TestUsageSummaryEndpoint(t *testing.T) {
 	}
 	// 北京日口径:夹具与"今日/昨日"边界同源(进程 TZ=UTC 时北京 00:00-08:00
 	// 也不会把今日算成昨日)。
-	id, _ := serverstore.RecordUsage(db, uid, "m1", 1_000_000, 0)
+	id, _ := serverstore.RecordUsageKind(db, uid, "m1", 1_000_000, 0, "chat")
 	setUsageAt(t, db, id, fixtureAt(0, 9))
 	// 昨日记录(可能跨月:北京 8/31 23:00)
-	id2, _ := serverstore.RecordUsage(db, uid, "m1", 500_000, 0)
+	id2, _ := serverstore.RecordUsageKind(db, uid, "m1", 500_000, 0, "chat")
 	setUsageAt(t, db, id2, fixtureAt(1, 23))
 
 	today, yesterday := bjDay(0), bjDay(1)

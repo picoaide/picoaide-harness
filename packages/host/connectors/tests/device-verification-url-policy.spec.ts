@@ -88,7 +88,10 @@ describe('conn-4: a refused verification address fails the connect instead of co
     const harness = createHarness([deviceDef('javascript:alert(document.domain)//')], dir, {
       requestApproval: () => true,
     })
-    harness.emitSession({ username: 'user-a' })
+    // 不做会话切换：harness 默认已报 user-a，且传了 storeBaseDir 时 store 恒定
+    // 指向 dir（reconfigureUser 不会改它），emitSession 只是排队一次 teardownAll。
+    // 用例紧接着同步发起 connect，那次 connect 属于「切换前的旧会话」，会被
+    // BUG-02 的意图令牌正确地作废 —— 测到的就不是 verification URL 策略了。
 
     const response = await new Promise<string>(resolve => {
       let body = ''

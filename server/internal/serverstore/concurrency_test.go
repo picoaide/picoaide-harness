@@ -26,19 +26,18 @@ func TestRecordConcurrencySampleAndPeaks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	peaks, err := ModelConcurrencyPeaks(db, now.AddDate(0, 0, -90))
+	// 服务器信息页的生产入口是 PeakConcurrencyByModel(返回 model→峰值;
+	// 富字段版 ModelConcurrencyPeaks 已随死代码删除,展示层不再消费排序)。
+	peaks, err := PeakConcurrencyByModel(db, now.AddDate(0, 0, -90))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(peaks) != 2 {
 		t.Fatalf("peaks = %d models, want 2", len(peaks))
 	}
-	// 排序:按 90 天峰值降序 → flash(2500) 在前
-	if peaks[0].Model != "deepseek-v4-flash" || peaks[0].Peak90Day != 2500 {
-		t.Errorf("flash peak = %+v, want peak 2500", peaks[0])
-	}
-	if peaks[1].Model != "deepseek-v4-pro" || peaks[1].Peak90Day != 400 {
-		t.Errorf("pro peak = %+v, want peak 400", peaks[1])
+	// 同日多次采样只保留最大值(GREATEST):flash 的 100/2500/1800 收敛到 2500。
+	if peaks["deepseek-v4-flash"] != 2500 || peaks["deepseek-v4-pro"] != 400 {
+		t.Errorf("peaks = %v, want flash=2500 pro=400", peaks)
 	}
 }
 

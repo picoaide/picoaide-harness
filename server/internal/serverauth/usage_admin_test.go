@@ -56,7 +56,7 @@ func TestAdminUsageDept(t *testing.T) {
 	}
 	_ = rdID
 	for _, u := range []int64{u1, u2} {
-		if _, err := serverstore.RecordUsage(db, u, "m1", 10, 5); err != nil {
+		if _, err := serverstore.RecordUsageKind(db, u, "m1", 10, 5, "chat"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -128,10 +128,10 @@ func TestAdminUsageProvider(t *testing.T) {
 	if _, err := serverstore.AddModel(db, &serverstore.Model{Name: "deepseek-chat", ProviderID: p1, InputPricePer1M: &one, OutputPricePer1M: &two}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := serverstore.RecordUsage(db, 1, "deepseek-chat", 10, 5); err != nil {
+	if _, err := serverstore.RecordUsageKind(db, 1, "deepseek-chat", 10, 5, "chat"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := serverstore.RecordUsage(db, 1, "no-map-model", 3, 3); err != nil {
+	if _, err := serverstore.RecordUsageKind(db, 1, "no-map-model", 3, 3, "chat"); err != nil {
 		t.Fatal(err)
 	}
 	// 今日 = 北京日(唯一真源):本机日期在 UTC 容器下会指向前一天。

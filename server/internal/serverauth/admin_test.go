@@ -572,7 +572,7 @@ func cookieHttpOnly(cookies []*http.Cookie) bool {
 
 func recordUsage(t *testing.T, db *sql.DB, userID int64, model string, pt, ct int64) {
 	t.Helper()
-	_, err := serverstore.RecordUsage(db, userID, model, pt, ct)
+	_, err := serverstore.RecordUsageKind(db, userID, model, pt, ct, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -694,7 +694,7 @@ func TestAdminUserGroupsAPI(t *testing.T) {
 		t.Fatalf("unknown user = %d, want 404", w.Code)
 	}
 	// 审计记录
-	logs, err := serverstore.ListAuditLogs(db, 5)
+	logs, _, err := serverstore.ListAuditLogsPagedFiltered(db, 0, 5, "", "")
 	if err != nil || len(logs) == 0 || logs[0].Action != "user_dept" {
 		t.Fatalf("audit = %+v %v", logs, err)
 	}
@@ -785,7 +785,7 @@ func TestAdminDepartmentsAPI(t *testing.T) {
 		t.Fatalf("delete with child = %d, want 400", w.Code)
 	}
 	// 审计
-	logs, err := serverstore.ListAuditLogs(db, 10)
+	logs, _, err := serverstore.ListAuditLogsPagedFiltered(db, 0, 10, "", "")
 	if err != nil || len(logs) == 0 || logs[0].Action != "user_dept" {
 		t.Fatalf("audit = %+v %v", logs, err)
 	}
@@ -877,7 +877,7 @@ func TestAdminUsageCost(t *testing.T) {
 	if _, err := serverstore.AddModel(db, &serverstore.Model{Name: "priced-model", ProviderID: pid, InputPricePer1M: &in, OutputPricePer1M: &out2}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := serverstore.RecordUsage(db, id, "priced-model", 1_000_000, 500_000); err != nil {
+	if _, err := serverstore.RecordUsageKind(db, id, "priced-model", 1_000_000, 500_000, "chat"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -893,16 +893,6 @@ func TestAdminUsageCost(t *testing.T) {
 	if c := rows[0].(map[string]any)["cost"].(float64); c != 6.0 {
 		t.Fatalf("usage row cost = %v, want 6.0", c)
 	}
-}
-
-func findUser(out map[string]any, name string) map[string]any {
-	for _, u := range out["users"].([]any) {
-		um := u.(map[string]any)
-		if um["username"] == name {
-			return um
-		}
-	}
-	return nil
 }
 
 // 创建端点 REST 语义(审计 L6):POST 返回 201;updateDepartment 返回资源对象。
@@ -1194,10 +1184,10 @@ func TestAdminUsageAggregateModelKindFilter(t *testing.T) {
 		t.Fatalf("create user: %d", w.Code)
 	}
 	uid := int64(out["user"].(map[string]any)["id"].(float64))
-	if _, err := serverstore.RecordUsage(db, uid, "text-model", 1000, 500); err != nil {
+	if _, err := serverstore.RecordUsageKind(db, uid, "text-model", 1000, 500, "chat"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := serverstore.RecordUsage(db, uid, "vision-model", 2000, 800); err != nil {
+	if _, err := serverstore.RecordUsageKind(db, uid, "vision-model", 2000, 800, "chat"); err != nil {
 		t.Fatal(err)
 	}
 	// 无过滤:两模型都有(group=model 无补零桶)

@@ -42,6 +42,8 @@ interface ApprovalRow {
   grants_base: string
   preview_path: string
   conflict?: boolean
+  /** 上下架状态（App 级，2026-09-15）：仅技能行的组织库上下架开关使用。 */
+  enabled?: boolean
 }
 
 interface Dept {
@@ -168,6 +170,21 @@ export default function Capabilities() {
     }
   }
 
+  /** 组织共享技能上下架（2026-09-15）：apps.enabled 级开关，员工可见性与下载同时受控。 */
+  const setEnabled = async (row: ApprovalRow, enabled: boolean) => {
+    if (busy) return
+    setBusy(row.name + row.version + 'enabled')
+    setError('')
+    try {
+      await request(`${row.grants_base}/enabled`, { method: 'PUT', body: JSON.stringify({ enabled }) })
+      await load(tab, typeFilter)
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setBusy('')
+    }
+  }
+
   const setQuality = async (row: ApprovalRow, quality: '' | 'featured') => {
     if (row.status !== 'approved') return
     setBusy(row.name + row.version + 'quality')
@@ -286,7 +303,12 @@ export default function Capabilities() {
                     <TableCell title="归属人(谁能续传新版本;与作者可不同)">
                       {row.owner || '—'}
                     </TableCell>
-                    <TableCell><Badge variant={meta.variant}>{meta.label}</Badge></TableCell>
+                    <TableCell>
+                      <Badge variant={meta.variant}>{meta.label}</Badge>
+                      {row.status === 'approved' && row.kind === 'skill' && row.enabled === false && (
+                        <Badge variant="destructive" className="ml-1" title="已下架：员工目录不可见且不可下载（数据保留）">已下架</Badge>
+                      )}
+                    </TableCell>
                     <TableCell>
                       {row.status === 'approved' ? (
                         <Select
@@ -329,6 +351,21 @@ export default function Capabilities() {
                           <Button size="sm" variant="outline" disabled={isBusy} onClick={() => { setGrantName(row.name); setGrantBase(row.grants_base) }} title="授权" aria-label="授权">
                             <ShieldCheck className="h-4 w-4" />
                           </Button>
+                        )}
+                        {row.status === 'approved' && row.kind === 'skill' && (
+                          row.enabled === false ? (
+                            <Button size="sm" variant="outline" disabled={isBusy}
+                              onClick={() => { void setEnabled(row, true) }}
+                              title="重新上架（员工可见可下载）" aria-label="重新上架">
+                              上架
+                            </Button>
+                          ) : (
+                            <Button size="sm" variant="outline" disabled={isBusy}
+                              onClick={() => { void setEnabled(row, false) }}
+                              title="下架（员工不可见、不可下载；数据保留）" aria-label="下架">
+                              下架
+                            </Button>
+                          )
                         )}
                         {row.status !== 'approved' && (
                           <Button size="sm" disabled={isBusy} onClick={() => { setConfirm(row); setConfirmKind('approve') }}>通过</Button>

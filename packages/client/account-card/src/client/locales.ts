@@ -57,3 +57,12 @@ export function t(key: AccountKey, params?: Record<string, string>): string {
   }
   return text
 }
+
+/**
+ * BCP-47 tag of the **UI** locale（2026-09-15 审计 BUG-07）：`Intl.NumberFormat`
+ * 要的是标签而不是内部枚举，而且必须与界面语言一致 —— 传 `undefined` 会退回
+ * 运行时/系统 locale，系统 en + 界面 zh 时金额会显示成 `CN¥`。
+ */
+export function activeLocaleTag(): string {
+  return activeLocale === 'en' ? 'en-US' : 'zh-CN'
+}

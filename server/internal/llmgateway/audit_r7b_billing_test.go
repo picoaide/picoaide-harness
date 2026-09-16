@@ -163,12 +163,6 @@ func (u *r7bUpstream) deliveredContentBytes() int64 {
 	return n
 }
 
-func (u *r7bUpstream) callCount() int {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	return u.calls
-}
-
 // r7bVisionImageTokenCap 是**平台自己的视觉计费口径**(单图 prompt token 上限),
 // 与 completions_test.go 的 TestVisionImageTokenBilling 同源。刻意在测试里写死
 // 字面量而不是引用实现常量:这样本文件在修复前的树上也能编译、并以断言失败的

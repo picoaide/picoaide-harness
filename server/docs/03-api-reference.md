@@ -157,9 +157,9 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/client/v2/shared-skills` | 可见清单:approved 且**已授权** + 自己上传的全部状态;返回 `{skills:[{name, display_name, version, description, author, status, reason, downloads, calls, created_at}]}` |
+| GET | `/api/client/v2/shared-skills` | 可见清单:approved 且**已授权** 且**已上架**(apps.enabled=1) + 自己上传的全部状态(同样受上下架约束);返回 `{skills:[{name, display_name, version, description, author, status, reason, downloads, calls, created_at}]}` |
 | POST | `/api/client/v2/shared-skills` | 上传:body `{name, display_name?, version, description?, archive(base64 zip)}` → 201 `{skill:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `SKILL.md`、拒绝越界/链接;归档直存 DB(0040);UNIQUE(name, version) 多版本并存;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
-| GET | `/api/client/v2/shared-skills/:name/:version/archive` | 下载归档(仅 approved 且已授权);附 `X-Skill-Checksum` / `X-Skill-Version` |
+| GET | `/api/client/v2/shared-skills/:name/:version/archive` | 下载归档(三重闸门:approved + 已上架 + 已授权/作者本人,任一不过同 404);附 `X-Skill-Checksum` / `X-Skill-Version` |
 
 ### 管理端(Admin)
 
@@ -176,6 +176,7 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 | GET | `/api/server/admin/shared-skills/:name/grants` | 授权清单(按 name,同名多版本共享) |
 | PUT | `/api/server/admin/shared-skills/:name/grants` | 整组替换部门授权(body `{groups:[...]}`) |
 | PUT/DELETE | `/api/server/admin/shared-skills/:name/grant` | 增/删单条授权(body `{username}` 或 `{group}`) |
+| PUT | `/api/server/admin/shared-skills/:name/enabled` | 组织共享技能上下架(2026-09-15):body `{enabled: true\|false}` → `{ok, enabled}`;语义同市场技能(apps.enabled),但**只作用于 org 渠道行**(市场行由 marketplace 端点管,跨渠道写 404);下架后员工目录不可见、归档下载 404,管理端仍可审核/预览/下载核查;审计 `shared_skill_enable` / `shared_skill_disable` |
 
 ## 8c. 能力中心(统一目录与审批队列)
 
@@ -193,7 +194,7 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/server/admin/capabilities/approvals?status=&type=` | 归并 shared-skills 与 agent-presets 的队列 `{approvals:[ApprovalRow]}`;`status` 缺省=`pending`,`all`=全量,或 `pending\|approved\|rejected`;`type=skill\|agent`(缺省全部);行含 `kind/name/version/display_name/description/author/status/reason/quality/downloads/calls(技能)/created_at/conflict` 与 `base_path`/`preview_path`(原域端点,均为 `/api/server/admin/*` 前缀);`conflict=true` = 该共享技能与市场 skills 同名(approve 将被 409 阻断) |
+| GET | `/api/server/admin/capabilities/approvals?status=&type=` | 归并 shared-skills 与 agent-presets 的队列 `{approvals:[ApprovalRow]}`;`status` 缺省=`pending`,`all`=全量,或 `pending\|approved\|rejected`;`type=skill\|agent`(缺省全部);行含 `kind/name/version/display_name/description/author/status/reason/quality/downloads/calls(技能)/created_at/conflict/enabled`(技能行,上下架状态) 与 `base_path`/`preview_path`/`grants_base`(原域端点,均为 `/api/server/admin/*` 前缀);`conflict=true` = 该共享技能与市场 skills 同名(approve 将被 409 阻断) |
 
 ## 9. Bootstrap
 

@@ -236,7 +236,10 @@ describe('2026-09-15 P2：browser_press / browser_scroll 不得静默成功', ()
     await harness.runtime.open('https://a.example')
     harness.adapter.lastView().transport.handler = (method, params) => {
       if (method !== 'Runtime.evaluate') return {}
-      return String(params?.['expression'] ?? '').includes('KeyboardEvent') ? { result: { value: 'dispatched' } } : {}
+      const expression = String(params?.['expression'] ?? '')
+      // 接收判定（P3）：可见/隐藏两条路径都要先读"谁在接收"。
+      if (expression.includes('activeElement')) return { result: { value: 'INPUT' } }
+      return expression.includes('KeyboardEvent') ? { result: { value: 'dispatched' } } : {}
     }
     await expect(harness.call('browser_press', { key: 'Enter' })).resolves.toEqual({ ok: true })
     expect(harness.runtime.opLog.find((entry) => entry.tool === 'browser_press')?.failed).toBe(false)
@@ -452,12 +455,39 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
     expect(error.message).toMatch(/no usable http\(s\) site URL/u)
   })
 
-  it('部署没有暴露 origin 能力时维持现状（本轮生产形态，不误杀）', async () => {
+  it('部署没暴露 origin 能力 ⇒ fail-closed 拒绝（BUG-03：旧的"维持现状"就是漏洞本身）', async () => {
     const resolver = (async () => ({ username: 'alice', password: SECRET })) as CredentialResolverLike
     const harness = track(makeHarness({}, resolver))
     await harness.runtime.open('https://anywhere.example/')
-    harness.adapter.lastView().transport.handler = fillHandler
-    await expect(harness.call('browser_fill_credentials', { connectorId: 'corp' })).resolves.toEqual({ username: true, password: true })
+    const view = harness.adapter.lastView()
+    view.transport.handler = fillHandler
+    const error = await fail(harness.call('browser_fill_credentials', { connectorId: 'corp' }))
+    expect(error.code).toBe('policy')
+    expect(error.message).toMatch(/no connector site URL/u)
+    // 一个字节都没注入
+    expect(view.transport.commands.some((command) => String(command.params?.['expression'] ?? '').includes('passField'))).toBe(false)
+  })
+
+  it('检查与注入之间标签页导航走 ⇒ 临界区内复核后拒绝（TOCTOU 收口）', async () => {
+    let harness: Harness | undefined
+    const resolver = (async (id: string) => {
+      // 工具层的 origin 检查已经通过；就在"取凭据"这一步把同一标签页的 URL 改掉，
+      // 模拟排队/取凭据期间发生的导航（旧实现会照常把凭据注入新页面）。
+      // 真的走一次导航（会更新 runtime 内部的 tab.url，两条检查读的都是它）
+      if (harness !== undefined) await harness.runtime.navigate(1, 'https://login.example.evil.test/', 'domcontentloaded')
+      return id === 'corp' ? { username: 'alice', password: SECRET } : null
+    }) as CredentialResolverLike
+    resolver.originOf = async () => 'https://login.example'
+    const bound = track(makeHarness({}, resolver))
+    harness = bound
+    await bound.runtime.open('https://login.example/login')
+    const view = bound.adapter.lastView()
+    view.transport.handler = fillHandler
+
+    const error = await fail(bound.call('browser_fill_credentials', { connectorId: 'corp' }))
+    expect(error.code).toBe('policy')
+    expect(error.message).toMatch(/left https:\/\/login\.example before the injection/u)
+    expect(view.transport.commands.some((command) => String(command.params?.['expression'] ?? '').includes('passField'))).toBe(false)
   })
 
   it('描述文案写明站点绑定（对外契约同步）', () => {
@@ -498,6 +528,13 @@ describe('2026-09-15 P1：短凭据的散文擦除（模型面文本出口）', 
     await harness.call('browser_fill_credentials', { connectorId: 'corp' })
   }
 
+  /** 站点绑定（BUG-03）之后，注入前必须能解析出连接器自己的 origin。 */
+  function boundResolver(): CredentialResolverLike {
+    const resolver = (async () => ({ username: 'alice', password: SHORT })) as unknown as CredentialResolverLike
+    resolver.originOf = async () => 'https://login.example'
+    return resolver
+  }
+
   function textStub(harness: Harness, text: string): void {
     harness.adapter.lastView().transport.handler = (method, params) => {
       if (method !== 'Runtime.evaluate') return {}
@@ -506,7 +543,7 @@ describe('2026-09-15 P1：短凭据的散文擦除（模型面文本出口）', 
   }
 
   it('散文里紧跟凭据键名的短口令被擦除（审计实测：your password abc123 is wrong）', async () => {
-    const resolver = (async () => ({ username: 'alice', password: SHORT })) as CredentialResolverLike
+    const resolver = boundResolver()
     const harness = track(makeHarness({}, resolver))
     await harness.runtime.open('https://login.example/form')
     await injectShortPassword(harness)
@@ -517,7 +554,7 @@ describe('2026-09-15 P1：短凭据的散文擦除（模型面文本出口）', 
   })
 
   it('非凭据键名的散文不误伤（order abc123 confirmed 逐字节不变）', async () => {
-    const resolver = (async () => ({ username: 'alice', password: SHORT })) as CredentialResolverLike
+    const resolver = boundResolver()
     const harness = track(makeHarness({}, resolver))
     await harness.runtime.open('https://login.example/form')
     await injectShortPassword(harness)
@@ -536,7 +573,7 @@ describe('2026-09-15 P1：短凭据的散文擦除（模型面文本出口）', 
   })
 
   it('值位形态照旧擦除（= / : / 键名+括号 / 换行结尾）', async () => {
-    const resolver = (async () => ({ username: 'alice', password: SHORT })) as CredentialResolverLike
+    const resolver = boundResolver()
     const harness = track(makeHarness({}, resolver))
     await harness.runtime.open('https://login.example/form')
     await injectShortPassword(harness)
@@ -557,7 +594,7 @@ describe('2026-09-15 P1：短凭据的散文擦除（模型面文本出口）', 
   })
 
   it('快照元素文本走同一把尺子（值位键名后的短口令）', async () => {
-    const resolver = (async () => ({ username: 'alice', password: SHORT })) as CredentialResolverLike
+    const resolver = boundResolver()
     const harness = track(makeHarness({}, resolver))
     await harness.runtime.open('https://login.example/form')
     await injectShortPassword(harness)
@@ -613,5 +650,216 @@ describe('2026-09-15：takeover 仍走用户闸（回归护栏）', () => {
     await expect(harness.call('browser_takeover', {})).resolves.toEqual({ ok: true })
     expect(harness.runtime.controlled).toBe(true)
     expect(harness.runtime.opLog.find((entry) => entry.tool === 'browser_takeover')?.actor).toBe('ai')
+  })
+})
+
+// ------------------------------------------- BUG-04: fill_form 的真实页内行为
+
+/**
+ * 2026-09-15 审计 BUG-04 的行为回归。
+ *
+ * 与上面的桩式断言不同，这里把 runtime 真正下发的页内脚本**在 jsdom 里执行**
+ * （页面上有两个 form、一个受控输入、一个未知选项的 select、一个 checkbox），
+ * 断言的是"页面上真的发生了什么"：
+ *   · submit 只能提交**所填字段所属**的表单（旧实现取 document.querySelector('form')
+ *     = 页面第一个表单，多表单页面会误提交无关表单）；
+ *   · 写入必须读回校验（受控组件吞掉赋值 ⇒ 记 missed，不再盲计数）；
+ *   · 未知 select 选项 / 填不进去的字段同样进 missed；
+ *   · 提交目标不唯一/不存在 ⇒ 明确失败。
+ */
+const JSDOM_CANDIDATES = [join(process.cwd(), 'tests'), join(process.cwd(), '..', 'cron'), join(process.cwd(), '..', '..', '..', 'server', 'webadmin')]
+function loadJsdomCtor(): new (html: string, options: Record<string, unknown>) => { window: any } {
+  const { createRequire } = require('node:module') as typeof import('node:module')
+  for (const base of JSDOM_CANDIDATES) {
+    try {
+      const requireFrom = createRequire(join(base, '__fill_form_behavior__.cjs'))
+      const mod = requireFrom('jsdom') as { JSDOM?: new (html: string, options: Record<string, unknown>) => { window: any } }
+      if (typeof mod.JSDOM === 'function') return mod.JSDOM
+    } catch { /* 换下一个候选目录 */ }
+  }
+  throw new Error(`fill_form 行为测试需要 jsdom；已尝试：${JSDOM_CANDIDATES.join(', ')}`)
+}
+const JSDOM = loadJsdomCtor()
+
+const FILL_FORM_HTML = `<!doctype html><html><body>
+  <form id="search"><input name="q" placeholder="search"><button type="submit" id="search-submit">Search</button></form>
+  <form id="login">
+    <input id="user" name="user">
+    <input id="pwd" name="pwd" type="password">
+    <input id="remember" name="remember" type="checkbox">
+    <select id="plan" name="plan"><option value="free">Free</option><option value="pro">Pro</option></select>
+    <button type="submit" id="login-submit">Sign in</button>
+  </form>
+</body></html>`
+
+interface DomRun {
+  window: any
+  submitted: string[]
+  /** 页内脚本最后一次返回的值。 */
+  value: unknown
+}
+
+/** 让 runtime 下发的页内脚本真的在 jsdom 文档里跑，并记录提交事件。 */
+function domRun(): DomRun {
+  const dom = new JSDOM(FILL_FORM_HTML, { runScripts: 'dangerously' })
+  const state: DomRun = { window: dom.window, submitted: [], value: undefined }
+  for (const id of ['search', 'login']) {
+    const form = dom.window.document.getElementById(id) as { addEventListener: (t: string, h: (e: unknown) => void) => void }
+    form.addEventListener('submit', (event: unknown) => {
+      (event as { preventDefault?: () => void }).preventDefault?.()
+      state.submitted.push(id)
+    })
+  }
+  return state
+}
+
+/** 把页内脚本接到 runtime 的 CDP 求值口上（只处理 Runtime.evaluate）。 */
+function attachDom(harness: Harness, run: DomRun): void {
+  harness.adapter.lastView().transport.handler = (method, params) => {
+    if (method !== 'Runtime.evaluate') return {}
+    const expression = String(params?.['expression'] ?? '')
+    const value = run.window.eval(expression) as unknown
+    run.value = value
+    return { result: { value } }
+  }
+}
+
+describe('2026-09-15 BUG-04：browser_fill_form 的提交目标与受控写入', () => {
+  it('submit 提交的是所填字段所属的表单，不是页面第一个表单', async () => {
+    const harness = track(makeHarness())
+    await harness.runtime.open('https://a.example')
+    const run = domRun()
+    attachDom(harness, run)
+
+    await expect(harness.runtime.fillForm(1, [
+      { field: 'user', value: 'alice' },
+      { field: 'pwd', value: 's3cret' },
+    ], true)).resolves.toEqual({ filled: 2, submitted: true, missed: [] })
+
+    expect(run.submitted).toEqual(['login'])
+    expect(run.window.document.getElementById('user').value).toBe('alice')
+    expect(run.window.document.querySelector('input[name=q]').value).toBe('')
+  })
+
+  it('受控组件吞掉赋值 ⇒ 该字段记 missed，不再报告"已填"', async () => {
+    const harness = track(makeHarness())
+    await harness.runtime.open('https://a.example')
+    const run = domRun()
+    const pwd = run.window.document.getElementById('pwd')
+    // React 式受控输入：实例上的 value 访问器吞掉写入、读回是旧值。
+    let stored = ''
+    Object.defineProperty(pwd, 'value', {
+      configurable: true,
+      get: () => stored,
+      set: () => { /* swallowed: 页面状态没变 */ },
+    })
+    attachDom(harness, run)
+
+    await expect(harness.runtime.fillForm(1, [
+      { field: 'user', value: 'alice' },
+      { field: 'pwd', value: 's3cret' },
+    ], false)).resolves.toEqual({ filled: 1, submitted: false, missed: ['pwd'] })
+    expect(stored).toBe('')
+  })
+
+  it('未知 select 选项与不可写字段都进 missed；checkbox 用 checked 语义', async () => {
+    const harness = track(makeHarness())
+    await harness.runtime.open('https://a.example')
+    const run = domRun()
+    attachDom(harness, run)
+
+    const outcome = await harness.runtime.fillForm(1, [
+      { field: 'plan', value: 'enterprise' }, // 选项不存在
+      { field: 'remember', value: 'yes' },
+      { field: 'nope', value: 'x' }, // 页面上没有
+    ], false)
+    expect(outcome.filled).toBe(1)
+    expect(outcome.missed).toEqual(expect.arrayContaining(['plan', 'nope']))
+    expect(run.window.document.getElementById('remember').checked).toBe(true)
+  })
+
+  it('所填字段横跨两个表单 ⇒ 拒绝猜测提交目标，明确失败', async () => {
+    const harness = track(makeHarness())
+    await harness.runtime.open('https://a.example')
+    const run = domRun()
+    attachDom(harness, run)
+
+    const error = await fail(harness.runtime.fillForm(1, [
+      { field: 'user', value: 'alice' },
+      { field: 'q', value: 'picoaide' },
+    ], true))
+    expect(error.message).toMatch(/ambiguous/u)
+    expect(run.submitted).toEqual([])
+  })
+
+  it('字段不在任何表单里却要求提交 ⇒ 明确失败（不静默 submitted:false）', async () => {
+    const harness = track(makeHarness())
+    await harness.runtime.open('https://a.example')
+    const run = domRun()
+    run.window.document.body.insertAdjacentHTML('beforeend', '<input id="loose" name="loose">')
+    attachDom(harness, run)
+
+    const error = await fail(harness.runtime.fillForm(1, [{ field: 'loose', value: 'x' }], true))
+    expect(error.message).toMatch(/not inside a form/u)
+    expect(run.submitted).toEqual([])
+  })
+})
+
+// ------------------------------------------- BUG-05: 接管检查点
+
+describe('2026-09-15 BUG-05：用户接管必须中止已在跑的长操作', () => {
+  /** 让"加载完成"发生在用户接管之后：模拟一次已经在跑的操作被接管打断。 */
+  function takeoverDuringLoad(harness: Harness): void {
+    const view = harness.adapter.lastView()
+    view.reload = vi.fn(() => { harness.runtime.setUserControl(true); view.emit('did-finish-load') }) as never
+    view.goBack = vi.fn(() => { harness.runtime.setUserControl(true); view.emit('did-finish-load') }) as never
+    view.goForward = vi.fn(() => { harness.runtime.setUserControl(true); view.emit('did-finish-load') }) as never
+  }
+
+  it('reload / goBack / goForward 在接管后报 window-controlled', async () => {
+    for (const op of ['reload', 'goBack', 'goForward'] as const) {
+      const harness = track(makeHarness())
+      await harness.runtime.open('https://a.example')
+      takeoverDuringLoad(harness)
+      const error = await fail(harness.runtime[op](1))
+      expect(error.code, op).toBe('window-controlled')
+      expect(harness.runtime.opLog.some((entry) => entry.tool === `browser_${op === 'goBack' ? 'go_back' : op === 'goForward' ? 'go_forward' : 'reload'}` && entry.failed !== true)).toBe(false)
+    }
+  })
+
+  it('screenshot 在渲染期间被接管 ⇒ 拒绝把画面交给模型', async () => {
+    const harness = track(makeHarness())
+    await harness.runtime.open('https://a.example')
+    const view = harness.adapter.lastView()
+    view.capturePage = vi.fn(async () => {
+      harness.runtime.setUserControl(true)
+      return { getSize: () => ({ width: 10, height: 10 }), resize: () => ({}), toJPEG: () => Buffer.from('x') }
+    }) as never
+    const error = await fail(harness.runtime.screenshot(1))
+    expect(error.code).toBe('window-controlled')
+  })
+
+  it('用户路径（user=true）不受接管检查点影响', async () => {
+    const harness = track(makeHarness())
+    await harness.runtime.open('https://a.example')
+    takeoverDuringLoad(harness)
+    await expect(harness.runtime.reload(1, undefined, true)).resolves.toBeUndefined()
+  })
+})
+
+// ------------------------------------------- P3: press 的读回与 scroll 的页内判定
+
+describe('2026-09-15 P3：scroll 的页内判定', () => {
+  it('runtime.scroll 的页内判定为 not found ⇒ 抛 not-found，而不是记一条成功', async () => {
+    const harness = track(makeHarness())
+    await harness.runtime.open('https://a.example')
+    harness.adapter.lastView().transport.handler = (method, params) => {
+      if (method !== 'Runtime.evaluate') return {}
+      const expression = String(params?.['expression'] ?? '')
+      return expression.includes('scrollIntoView') ? { result: { value: 'not found' } } : { result: { value: 'ok' } }
+    }
+    const error = await fail(harness.runtime.scroll(1, 0, '#nope'))
+    expect(error.code).toBe('not-found')
+    expect(harness.runtime.opLog.some((entry) => entry.tool === 'browser_scroll')).toBe(false)
   })
 })

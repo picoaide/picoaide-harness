@@ -28,7 +28,7 @@ import { installFavicon } from './favicon.ts'
 import { channelTitle } from '../channel-content.ts'
 import { startChannelStore, readChannelSync, subscribeChannel } from './channel-store.ts'
 import { CapabilityCenterTrigger } from './CapabilityCenterTrigger.tsx'
-import { en, setActiveLocale, type EnterpriseKey, zh } from './locales.ts'
+import { en, setActiveLocale, t, type EnterpriseKey, zh } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -208,7 +208,7 @@ export function apply(ctx: ClientContext): void {
       name: 'settings.section',
       id: 'account',
       order: 999,
-      label: '账号',
+      label: t('settings.account'),
     }, AccountSection)),
     'enterprise: account section',
   )

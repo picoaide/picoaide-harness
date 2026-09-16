@@ -19,16 +19,6 @@ import (
 
 // ---- 0057 密码/MFA 全链路测试 ----
 
-// genTOTPCode 生成当前时间步的动态码(测试用; 依赖与生产同一 pquerna/otp)。
-func genTOTPCode(t *testing.T, secret string) string {
-	t.Helper()
-	code, err := totp.GenerateCode(secret, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return code
-}
-
 // useFakeTOTPClock 把 TOTP 校验时间源换成可控时钟,并返回 advance()(推进 30s)。
 // 审计 2026-09-13 P2-3 起同一 (user, step) 只能成功一次,测试里的多次
 // "消费动态码"操作必须跨步,否则会被重放防护正确拒绝。

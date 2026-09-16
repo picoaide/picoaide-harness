@@ -5,7 +5,7 @@
  * 三个展示面(侧边栏、设置-关于、会话头部徽标)因此不会各写一套判断而给出
  * 互相矛盾的结论(2026-09-12 用户报"两处不同步")。
  */
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   downloadingStatusText,
   progressPercent,
@@ -14,6 +14,9 @@ import {
   updateStatusText,
   type UpdateState,
 } from '../src/client/UpdateIndicator.tsx'
+import { setActiveLocale } from '../src/client/locales.ts'
+
+afterEach(() => { setActiveLocale('zh') })
 
 const base: UpdateState = {
   availableVersion: undefined,
@@ -69,5 +72,21 @@ describe('update status copy', () => {
     expect(updateStatusText(null)).toBe('更新服务不可用')
     expect(updateActionLabel(null, false)).toBe('检查更新')
     expect(progressPercent(null)).toBeUndefined()
+  })
+  it('英文界面下更新文案不再是中文（2026-09-15 审计 BUG-07）', () => {
+    setActiveLocale('en')
+    expect(updateStatusText(null)).toBe('Update service unavailable')
+    expect(updateStatusText(base)).toBe('Already up to date')
+    expect(updateStatusText({ ...base, lastError: 'network' })).toContain('network unreachable')
+    expect(updateActionLabel(base, false)).toBe('Check for updates')
+    expect(updateActionLabel({ ...base, readyVersion: '2.8.0' }, false)).toBe('Install update')
+    expect(downloadingStatusText({ ...base, downloadingVersion: '2.8.0', retryAttempt: 0, retryMaxAttempts: 5, retryDelayMs: 0 })).toContain('Downloading 2.8.0')
+  })
+
+  it('没有更新服务时按钮必须禁用（2026-09-15 P3：状态行说不可用、按钮却能点）', () => {
+    expect(updateActionDisabled(null, false)).toBe(true)
+    // 服务在场时行为不变
+    expect(updateActionDisabled(base, false)).toBe(false)
+    expect(updateActionDisabled(base, true)).toBe(true)
   })
 })

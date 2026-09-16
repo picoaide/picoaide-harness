@@ -296,6 +296,7 @@
     "@deepseek-ai/dsh-client-connection": "0.1.5-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "0.1.5-rc.2",
     "@electron/asar": "3.4.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "^22.20.0",
     "@types/react": "^18",
     "electron": "43.4.0",
@@ -303,7 +304,8 @@
     "sharp": "0.35.3",
     "tsdown": "0.22.2",
     "typescript": "6.0.3",
-    "vitest": "4.1.8"
+    "vitest": "4.1.8",
+    "ws": "^8.21.3"
   },
   "build": {
     "appId": "ai.deepseek.dsh.desktop",

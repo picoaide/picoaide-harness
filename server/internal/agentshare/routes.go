@@ -1017,29 +1017,39 @@ func serveArchive(c *gin.Context, db *sql.DB, cacheDir string, p *serverstore.Ag
 }
 
 // archiveErrorMessage maps validation refusals to the client-facing message.
+//
+// 文案的**单一真源**是 archiveutil.ErrorText(archive.go:816):本函数只保留
+// 两处特例,其余分支一律经 ErrorText 生成 ——
+//   - ErrArchiveTooLarge:本域把 ErrInvalid(空/超大)收敛成"过大",文案与
+//     ErrorText 的 ErrInvalid 分支("归档过大或结构非法(上限 NMB)")不同;
+//   - ErrCorrupt:本域按"条目解压或 CRC"描述,与 ErrorText 的"必填文件解压
+//     或校验失败"不同,保留原文案。
+//
+// 其余本域哨兵(ErrNoComposition/ErrUnsafeArchive/ErrEntryLimit/
+// ErrDuplicateEntry)不包装 archiveutil 哨兵,因此在这里显式映射到对应的
+// archiveutil 哨兵再交给 ErrorText(输出与改前逐字相同);重复条目仍先用
+// DuplicateEntryNames 点出两个折叠同名的条目(F2-N7),点不出来才用通用文案。
 func archiveErrorMessage(err error) string {
 	switch {
 	case errors.Is(err, ErrArchiveTooLarge):
 		return fmt.Sprintf("归档过大(上限 %dMB)", MaxArchiveBytes>>20)
-	case errors.Is(err, ErrUnsafeArchive):
-		return "归档内容不安全(路径越界或链接文件)"
 	case errors.Is(err, ErrNoComposition):
-		return "归档缺少 agent.cordis.yml"
+		return archiveutil.ErrorText(archiveutil.ErrNoRequired, CompositionFile, MaxArchiveBytes>>20)
+	case errors.Is(err, ErrUnsafeArchive):
+		return archiveutil.ErrorText(archiveutil.ErrUnsafe, CompositionFile, MaxArchiveBytes>>20)
 	case errors.Is(err, ErrEntryLimit):
-		return "归档条目过多"
+		return archiveutil.ErrorText(archiveutil.ErrTooMany, CompositionFile, MaxArchiveBytes>>20)
 	case errors.Is(err, ErrDuplicateEntry):
 		// F2-N7:列出被判为同一个文件的两个名字 —— installerKey 的折叠
 		// (大小写/尾随点空格/NTFS 危险折叠)宁严勿宽,不点名的话用户无从改名。
 		if first, second, ok := archiveutil.DuplicateEntryNames(err); ok {
 			return fmt.Sprintf("归档含重复条目:%s 与 %s 在安装端是同一个文件(大小写/尾随点空格折叠),请改名后重新打包", first, second)
 		}
-		return "归档含重复条目(同一文件出现多次,大小写不敏感)"
+		return archiveutil.ErrorText(archiveutil.ErrDuplicateEntry, CompositionFile, MaxArchiveBytes>>20)
 	case errors.Is(err, archiveutil.ErrCorrupt):
 		return "归档内容损坏(条目解压或 CRC 校验失败)"
-	case errors.Is(err, archiveutil.ErrPathConflict):
-		return "归档中同一路径既是文件又是目录"
 	default:
-		return "归档校验失败"
+		return archiveutil.ErrorText(err, CompositionFile, MaxArchiveBytes>>20)
 	}
 }
 

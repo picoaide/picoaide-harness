@@ -52,7 +52,7 @@ export const MAX_EVAL_EXPRESSION = 8192
 export const MAX_EVAL_RESULT_BYTES = 8 * 1024
 
 /** Max result JSON depth. */
-export const MAX_EVAL_RESULT_DEPTH = 6
+const MAX_EVAL_RESULT_DEPTH = 6
 
 /** Read-only helper globals injected into the eval sandbox expression. */
 export const EVAL_HELPERS = ['readText', 'readAttr', 'readJson', 'readVar'] as const

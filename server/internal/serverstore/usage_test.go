@@ -31,7 +31,7 @@ func TestRecordUsageReturnsID(t *testing.T) {
 	defer cleanup()
 	uid := mustUserID(t, db)
 
-	id, err := RecordUsage(db, uid, "deepseek-chat", 10, 5)
+	id, err := RecordUsageKind(db, uid, "deepseek-chat", 10, 5, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,13 +48,13 @@ func TestRecordUsageReturnsID(t *testing.T) {
 	}
 }
 
-func TestUpdateUsageTokens(t *testing.T) {
+func TestUpdateUsageTokensCachedEstimatedOverdraft(t *testing.T) {
 	db, cleanup := newUsageDB(t)
 	defer cleanup()
 	uid := mustUserID(t, db)
 
-	id, _ := RecordUsage(db, uid, "deepseek-chat", 0, 0)
-	if err := UpdateUsageTokens(db, id, 42, 7); err != nil {
+	id, _ := RecordUsageKind(db, uid, "deepseek-chat", 0, 0, "chat")
+	if err := UpdateUsageTokensCachedEstimatedOverdraft(db, id, 42, 7, 0, false); err != nil {
 		t.Fatal(err)
 	}
 	var pt, ct int64
@@ -71,9 +71,9 @@ func TestCleanupPendingUsage(t *testing.T) {
 	defer cleanup()
 	uid := mustUserID(t, db)
 
-	pending, _ := RecordUsage(db, uid, "deepseek-chat", 0, 0)     // zero tokens
-	keptPending, _ := RecordUsage(db, uid, "deepseek-chat", 0, 0) // zero tokens, recent
-	complete, _ := RecordUsage(db, uid, "deepseek-chat", 10, 5)   // has tokens, old
+	pending, _ := RecordUsageKind(db, uid, "deepseek-chat", 0, 0, "chat")     // zero tokens
+	keptPending, _ := RecordUsageKind(db, uid, "deepseek-chat", 0, 0, "chat") // zero tokens, recent
+	complete, _ := RecordUsageKind(db, uid, "deepseek-chat", 10, 5, "chat")   // has tokens, old
 	setCreatedAt(t, db, pending, "2026-07-01 09:00:00")
 	setCreatedAt(t, db, keptPending, "2026-08-02 09:00:00")
 	setCreatedAt(t, db, complete, "2026-07-01 09:00:00")
@@ -126,11 +126,11 @@ func TestUserMonthlyUsage(t *testing.T) {
 	lastMonth := bjMonth(1).AddDate(0, 0, 15)
 
 	for _, ts := range []time.Time{thisMonth, thisMonth, lastMonth} {
-		id, _ := RecordUsage(db, uid, "m", 10, 5)
+		id, _ := RecordUsageKind(db, uid, "m", 10, 5, "chat")
 		setCreatedAt(t, db, id, ts.Format(pgTimeFmt))
 	}
 	// pending row this month must not count
-	pending, _ := RecordUsage(db, uid, "m", 0, 0)
+	pending, _ := RecordUsageKind(db, uid, "m", 0, 0, "chat")
 	setCreatedAt(t, db, pending, thisMonth.Format(pgTimeFmt))
 
 	total, err := UserMonthlyUsage(db, uid)
@@ -149,11 +149,11 @@ func TestUserMonthlyUsageBatch(t *testing.T) {
 	b := mustUserID(t, db)
 	thisMonth := bjMonth(0).AddDate(0, 0, 5)
 
-	id, _ := RecordUsage(db, a, "m", 10, 5)
+	id, _ := RecordUsageKind(db, a, "m", 10, 5, "chat")
 	setCreatedAt(t, db, id, thisMonth.Format(pgTimeFmt))
-	id, _ = RecordUsage(db, a, "m", 2, 0)
+	id, _ = RecordUsageKind(db, a, "m", 2, 0, "chat")
 	setCreatedAt(t, db, id, thisMonth.Format(pgTimeFmt))
-	id, _ = RecordUsage(db, b, "m", 7, 7)
+	id, _ = RecordUsageKind(db, b, "m", 7, 7, "chat")
 	setCreatedAt(t, db, id, thisMonth.Format(pgTimeFmt))
 
 	got, err := UserMonthlyUsageBatch(db, []int64{a, b})
@@ -185,7 +185,7 @@ func TestUsageAggregateUserJoinsUsername(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rowID, err := RecordUsage(db, uid, "m", 1, 1)
+	rowID, err := RecordUsageKind(db, uid, "m", 1, 1, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestUsageAggregateUserJoinsUsername(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordUsage(db, other, "m", 2, 2); err != nil {
+	if _, err := RecordUsageKind(db, other, "m", 2, 2, "chat"); err != nil {
 		t.Fatal(err)
 	}
 	if err := DeleteUser(db, other); err != nil {
@@ -245,7 +245,7 @@ func TestUsageAggregateZeroFill(t *testing.T) {
 	uid := mustUserID(t, db)
 
 	for _, ts := range []string{"2026-08-10 09:00:00", "2026-08-12 09:00:00"} {
-		id, _ := RecordUsage(db, uid, "m", 10, 5)
+		id, _ := RecordUsageKind(db, uid, "m", 10, 5, "chat")
 		setCreatedAt(t, db, id, ts)
 	}
 	from := bjDate(t, "2026-08-10")
@@ -279,7 +279,7 @@ func TestUsageAggregateWeekMonth(t *testing.T) {
 
 	// 2026-08-10(周一)与 2026-08-17(下周一)分属两个周桶
 	for _, ts := range []string{"2026-08-10 09:00:00", "2026-08-17 09:00:00", "2026-08-18 09:00:00"} {
-		id, _ := RecordUsage(db, uid, "m", 10, 5)
+		id, _ := RecordUsageKind(db, uid, "m", 10, 5, "chat")
 		setCreatedAt(t, db, id, ts)
 	}
 	from := bjDate(t, "2026-08-10")
@@ -323,7 +323,7 @@ func TestUsageAggregateKindSplit(t *testing.T) {
 	defer cleanup()
 	uid := mustUserID(t, db)
 
-	if _, err := RecordUsage(db, uid, "m", 10, 5); err != nil { // chat
+	if _, err := RecordUsageKind(db, uid, "m", 10, 5, "chat"); err != nil { // chat
 		t.Fatal(err)
 	}
 	if _, err := RecordUsageKind(db, uid, "embed-m", 30, 0, "embedding"); err != nil {
@@ -351,9 +351,9 @@ func TestUsageAggregateMonthOverflow(t *testing.T) {
 	db, cleanup := newUsageDB(t)
 	defer cleanup()
 	uid := mustUserID(t, db)
-	id, _ := RecordUsage(db, uid, "m", 10, 5)
+	id, _ := RecordUsageKind(db, uid, "m", 10, 5, "chat")
 	setCreatedAt(t, db, id, "2026-08-31 09:00:00")
-	id, _ = RecordUsage(db, uid, "m", 20, 5)
+	id, _ = RecordUsageKind(db, uid, "m", 20, 5, "chat")
 	setCreatedAt(t, db, id, "2026-09-15 09:00:00")
 
 	from := bjDate(t, "2026-08-31")
@@ -385,8 +385,8 @@ func TestUsageAggregateUserFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = RecordUsage(db, a, "m", 10, 5)
-	_, _ = RecordUsage(db, b, "m", 99, 1)
+	_, _ = RecordUsageKind(db, a, "m", 10, 5, "chat")
+	_, _ = RecordUsageKind(db, b, "m", 99, 1, "chat")
 
 	rows, err := UsageAggregate(db, time.Time{}, time.Time{}, "day", WithUsername("alice"))
 	if err != nil {
@@ -428,7 +428,7 @@ func TestRecordUsageComputesCost(t *testing.T) {
 	uid := mustUserID(t, db)
 	mustPricedModel(t, db, "priced-model", 2.0, 8.0) // 2元/1M in, 8元/1M out
 
-	id, err := RecordUsage(db, uid, "priced-model", 1_000_000, 500_000)
+	id, err := RecordUsageKind(db, uid, "priced-model", 1_000_000, 500_000, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestRecordUsageUnpricedModelCostZero(t *testing.T) {
 	db, cleanup := newUsageDB(t)
 	defer cleanup()
 	uid := mustUserID(t, db)
-	id, err := RecordUsage(db, uid, "no-such-model", 1_000_000, 1_000_000)
+	id, err := RecordUsageKind(db, uid, "no-such-model", 1_000_000, 1_000_000, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,13 +461,13 @@ func TestRecordUsageUnpricedModelCostZero(t *testing.T) {
 }
 
 // TestUpdateUsageTokensRecomputesCost: 流式 pending 行回填 token 后 cost 必须重算。
-func TestUpdateUsageTokensRecomputesCost(t *testing.T) {
+func TestUpdateUsageTokensCachedEstimatedOverdraftRecomputesCost(t *testing.T) {
 	db, cleanup := newUsageDB(t)
 	defer cleanup()
 	uid := mustUserID(t, db)
 	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
 
-	id, err := RecordUsage(db, uid, "priced-model", 0, 0) // pending
+	id, err := RecordUsageKind(db, uid, "priced-model", 0, 0, "chat") // pending
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +478,7 @@ func TestUpdateUsageTokensRecomputesCost(t *testing.T) {
 	if cost != 0 {
 		t.Fatalf("pending cost = %v, want 0", cost)
 	}
-	if err := UpdateUsageTokens(db, id, 1_000_000, 500_000); err != nil {
+	if err := UpdateUsageTokensCachedEstimatedOverdraft(db, id, 1_000_000, 500_000, 0, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id).Scan(&cost); err != nil {
@@ -496,12 +496,12 @@ func TestUserMonthlyCost(t *testing.T) {
 	uid := mustUserID(t, db)
 	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
 
-	id, err := RecordUsage(db, uid, "priced-model", 1_000_000, 500_000)
+	id, err := RecordUsageKind(db, uid, "priced-model", 1_000_000, 500_000, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
 	setCreatedAt(t, db, id, "2000-01-01 10:00:00") // 上月
-	id2, err := RecordUsage(db, uid, "priced-model", 500_000, 0)
+	id2, err := RecordUsageKind(db, uid, "priced-model", 500_000, 0, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -523,7 +523,7 @@ func TestUserMonthlyCostBatch(t *testing.T) {
 	uid := mustUserID(t, db)
 	uid2 := mustUserID(t, db)
 	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
-	if _, err := RecordUsage(db, uid, "priced-model", 1_000_000, 0); err != nil {
+	if _, err := RecordUsageKind(db, uid, "priced-model", 1_000_000, 0, "chat"); err != nil {
 		t.Fatal(err)
 	}
 	costs, err := UserMonthlyCostBatch(db, []int64{uid, uid2, 9999})
@@ -547,7 +547,7 @@ func TestUsageAggregateCost(t *testing.T) {
 	uid := mustUserID(t, db)
 	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
 
-	id, err := RecordUsage(db, uid, "priced-model", 1_000_000, 500_000)
+	id, err := RecordUsageKind(db, uid, "priced-model", 1_000_000, 500_000, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,13 +758,13 @@ func TestUserDayUsageCost(t *testing.T) {
 	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
 
 	// 今天 09:00:1M prompt → cost 2
-	id, err := RecordUsage(db, uid, "priced-model", 1_000_000, 0)
+	id, err := RecordUsageKind(db, uid, "priced-model", 1_000_000, 0, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
 	setCreatedAtAt(t, db, id, fixtureAt(0, 9))
 	// 昨天 23:00:500K prompt → cost 1
-	id2, err := RecordUsage(db, uid, "priced-model", 500_000, 0)
+	id2, err := RecordUsageKind(db, uid, "priced-model", 500_000, 0, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -795,9 +795,9 @@ func TestUserTotalUsageCost(t *testing.T) {
 	uid := mustUserID(t, db)
 	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
 
-	id, _ := RecordUsage(db, uid, "priced-model", 1_000_000, 0)
+	id, _ := RecordUsageKind(db, uid, "priced-model", 1_000_000, 0, "chat")
 	setCreatedAt(t, db, id, "2020-01-01 10:00:00") // 历史
-	id2, _ := RecordUsage(db, uid, "priced-model", 500_000, 0)
+	id2, _ := RecordUsageKind(db, uid, "priced-model", 500_000, 0, "chat")
 	setCreatedAt(t, db, id2, "2020-06-15 10:00:00")
 
 	usage, cost, err := UserTotalUsageCost(db, uid)
@@ -820,10 +820,10 @@ func TestUserUsageSummary(t *testing.T) {
 
 	// 北京日口径:夹具("今天 09:00"/"昨天 23:00")与"今天/昨天"边界同源,
 	// 进程 TZ 为 UTC 时(北京 00:00-08:00)也不会错位。
-	id, _ := RecordUsage(db, uid, "priced-model", 1_000_000, 0)
+	id, _ := RecordUsageKind(db, uid, "priced-model", 1_000_000, 0, "chat")
 	setCreatedAtAt(t, db, id, fixtureAt(0, 9))
 	// 昨天(可能跨月:8/31 23:00)
-	id2, _ := RecordUsage(db, uid, "priced-model", 500_000, 0)
+	id2, _ := RecordUsageKind(db, uid, "priced-model", 500_000, 0, "chat")
 	setCreatedAtAt(t, db, id2, fixtureAt(1, 23))
 
 	today, yesterday := bjDay(0), bjDay(1)
@@ -869,7 +869,7 @@ func TestRecordUsageCacheCost(t *testing.T) {
 	}
 
 	// 1M 输入全命中:100 万命中 → 1 元
-	id, err := RecordUsageKindCached(db, uid, "cache-model", 1_000_000, 0, 1_000_000, "chat")
+	id, err := RecordUsageKindCachedEstimatedForProvider(db, uid, 0, "cache-model", 1_000_000, 0, 1_000_000, "chat", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -882,7 +882,7 @@ func TestRecordUsageCacheCost(t *testing.T) {
 	}
 
 	// 混合:50 万命中 + 50 万未命中 + 25 万输出 = 0.5*1 + 0.5*2 + 0.25*8 = 3.5
-	id2, err := RecordUsageKindCached(db, uid, "cache-model", 1_000_000, 250_000, 500_000, "chat")
+	id2, err := RecordUsageKindCachedEstimatedForProvider(db, uid, 0, "cache-model", 1_000_000, 250_000, 500_000, "chat", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -900,7 +900,7 @@ func TestRecordUsageCacheFallsBackToInput(t *testing.T) {
 	defer cleanup()
 	uid := mustUserID(t, db)
 	mustPricedModel(t, db, "no-cache-model", 2.0, 8.0) // 无 CacheInputPricePer1M
-	id, err := RecordUsageKindCached(db, uid, "no-cache-model", 1_000_000, 0, 1_000_000, "chat")
+	id, err := RecordUsageKindCachedEstimatedForProvider(db, uid, 0, "no-cache-model", 1_000_000, 0, 1_000_000, "chat", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -929,7 +929,7 @@ func TestRecordUsageCacheOverflowNoNegativeCost(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 输入 10 万,命中 100 万(异常)→ miss 钳为 0,费用 = 1M × 1 元/1M = 1.0
-	id, err := RecordUsageKindCached(db, uid, "clamp-model", 100_000, 0, 1_000_000, "chat")
+	id, err := RecordUsageKindCachedEstimatedForProvider(db, uid, 0, "clamp-model", 100_000, 0, 1_000_000, "chat", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -965,7 +965,7 @@ func TestRecordUsageAnthropicCacheBilling(t *testing.T) {
 	}
 	const input, cacheRead, cacheCreation, output = 8, 1000, 500, 2
 	prompt := int64(input + cacheRead + cacheCreation) // messages.go 的 prompt 口径
-	id, err := RecordUsageKindCached(db, uid, "claude-x", prompt, output, cacheRead, "search")
+	id, err := RecordUsageKindCachedEstimatedForProvider(db, uid, 0, "claude-x", prompt, output, cacheRead, "search", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -984,16 +984,6 @@ func TestRecordUsageAnthropicCacheBilling(t *testing.T) {
 }
 
 func ptrFloat(v float64) *float64 { return &v }
-
-// effBudgetsHasSmaller 检查任意预算 ≤ 给定值(证明不是只取最高)。
-func effBudgetsHasSmaller(budgets map[string]float64, limit float64) bool {
-	for _, v := range budgets {
-		if v <= limit {
-			return true
-		}
-	}
-	return false
-}
 
 // TestUserDayUsageCostBeijingDayBoundary 覆盖 P2-5:今日/昨日按北京时间日界,
 // 与服务器本地时区无关。旧实现取 day.Location()(服务器本地日界),UTC 容器
@@ -1057,7 +1047,7 @@ func TestUsageRangePredicatePrunesPartitions(t *testing.T) {
 	db, cleanup := NewTestDB(t)
 	defer cleanup()
 	// 窗口按北京月取(唯一真源,不依赖进程 TZ)。
-	month := BeijingMonthNow()
+	month := BeijingMonth(time.Now())
 	from, to := month, month.AddDate(0, 1, -1)
 	target := "usage_" + month.Format("200601")
 	prev := "usage_" + month.AddDate(0, -1, 0).Format("200601")
@@ -1100,14 +1090,14 @@ func TestUsageDayWindowIndependentOfTimezone(t *testing.T) {
 	uid := mustUserID(t, db)
 
 	// 北京"今天 00:30"与"今天 23:30":日界两侧的极值点,最容易被时区错切。
-	idEarly, _ := RecordUsage(db, uid, "m", 11, 0)
+	idEarly, _ := RecordUsageKind(db, uid, "m", 11, 0, "chat")
 	setCreatedAtAt(t, db, idEarly, fixtureAt(0, 0).Add(30*time.Minute))
-	idLate, _ := RecordUsage(db, uid, "m", 22, 0)
+	idLate, _ := RecordUsageKind(db, uid, "m", 22, 0, "chat")
 	setCreatedAtAt(t, db, idLate, fixtureAt(0, 23).Add(30*time.Minute))
 	// 北京"昨天 23:30"与"明天 00:30":必须落在别的日窗口
-	idPrev, _ := RecordUsage(db, uid, "m", 100, 0)
+	idPrev, _ := RecordUsageKind(db, uid, "m", 100, 0, "chat")
 	setCreatedAtAt(t, db, idPrev, fixtureAt(1, 23).Add(30*time.Minute))
-	idNext, _ := RecordUsage(db, uid, "m", 200, 0)
+	idNext, _ := RecordUsageKind(db, uid, "m", 200, 0, "chat")
 	setCreatedAtAt(t, db, idNext, fixtureAt(-1, 0).Add(30*time.Minute))
 
 	// 1) 进程 TZ 维度:把"同一绝对时刻"用不同时区表达,窗口必须一致。

@@ -27,10 +27,10 @@
 export const CHANNEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/u
 
 /** 服务端下发客户端安装包清单的路径（公开端点，登录前也可取）。 */
-export const SERVER_UPDATE_MANIFEST_PATH = '/api/client/v2/updates/manifest'
+const SERVER_UPDATE_MANIFEST_PATH = '/api/client/v2/updates/manifest'
 
 /** 服务端下发渠道内容（渠道 id / 名称 / 标语）的路径（公开端点）。 */
-export const SERVER_CHANNEL_PATH = '/api/client/v2/channel'
+const SERVER_CHANNEL_PATH = '/api/client/v2/channel'
 
 /**
  * 去掉 URL 末尾的斜杠（兼容写入时带斜杠的服务端地址）。
@@ -63,7 +63,7 @@ export function serverChannelURL(serverURL: string): string {
 }
 
 /** 清单协议版本；不匹配即拒绝，避免旧客户端误读新结构。 */
-export const UPDATE_MANIFEST_SCHEMA = 1
+const UPDATE_MANIFEST_SCHEMA = 1
 
 /** 客户端安装包支持的平台标识。 */
 export type DesktopReleasePlatform = 'darwin' | 'win32' | 'linux'
@@ -91,13 +91,13 @@ export interface DesktopReleaseManifest {
 }
 
 /** 清单 assets 的键（与服务端 manifest 同源，独立类型以便索引收窄）。 */
-export type DesktopReleaseAssetKey = 'mac-universal' | 'win-x64' | 'linux-x64'
+type DesktopReleaseAssetKey = 'mac-universal' | 'win-x64' | 'linux-x64'
 
 /**
  * 平台 → 清单 assets 的键。
  * 与服务端 `GET /api/client/v2/updates/manifest` 使用同一套键名。
  */
-export const PLATFORM_ASSET_KEYS: Readonly<Record<DesktopReleasePlatform, DesktopReleaseAssetKey>> = {
+const PLATFORM_ASSET_KEYS: Readonly<Record<DesktopReleasePlatform, DesktopReleaseAssetKey>> = {
   darwin: 'mac-universal',
   win32: 'win-x64',
   linux: 'linux-x64',

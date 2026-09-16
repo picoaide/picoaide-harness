@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { ConnectorPanel } from './ConnectorPanel.tsx'
+import { t } from './locales.ts'
 
 const TRIGGER_WIDE: React.CSSProperties = {
   flex: 'none',
@@ -82,7 +83,7 @@ export function ConnectorTrigger(props: PropsRuntime<'sidebar.footer.action'>) {
           <rect x="2.5" y="6.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>
           <path d="M6 6.5V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1.5M6 10.5h2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
         </svg>
-        {props.wide && <span style={LABEL}>连接器</span>}
+        {props.wide && <span style={LABEL}>{t('panel.title')}</span>}
       </button>
       {open && <ConnectorPanel onClose={() => { setOpen(false) }} />}
     </>

@@ -464,11 +464,6 @@ type GrantRun struct {
 	CoverDebtAmount float64 `json:"cover_debt_amount"`
 }
 
-// GrantRunEmpty 供无候选/未配置时返回(便于 handler 统一响应形状)。
-func GrantRunEmpty(mode string, amount float64, now time.Time) *GrantRun {
-	return &GrantRun{Month: monthKey(BeijingMonth(now)), Mode: normalizeGrantMode(mode), Amount: roundMoney(amount)}
-}
-
 func normalizeGrantMode(mode string) string {
 	if mode == BalanceModeCover {
 		return BalanceModeCover
@@ -701,29 +696,6 @@ FROM users u WHERE u.status = 1 AND u.role = ?`, month, RoleUser).
 	return out, nil
 }
 
-// EnsureUserMonthlyGrant 给单个用户补发当月额度(新建/启用/登录时调用)。
-// 未配置额度(=0)时静默跳过。返回 nil 表示无需发放或已发放。
-func EnsureUserMonthlyGrant(db *sql.DB, userID int64, now time.Time) (*GrantRun, error) {
-	s, err := GetBalanceSettings(db)
-	if err != nil {
-		return nil, err
-	}
-	if s.MonthlyAmount <= 0 {
-		return nil, nil
-	}
-	run, err := GrantMonthlyBalance(db, s.MonthlyMode, s.MonthlyAmount, "system", now, userID)
-	if err != nil {
-		if errors.Is(err, ErrValidation) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if run.Granted == 0 {
-		return nil, nil
-	}
-	return run, nil
-}
-
 // ---------------------------------------------------------------------------
 // 发放批次台账(0061 表,0062 起作为批次汇总)
 // ---------------------------------------------------------------------------
@@ -767,15 +739,6 @@ func queryBalanceGrant(db *sql.DB, q string, args ...any) (*BalanceGrant, error)
 // ---------------------------------------------------------------------------
 // 闸门与总览
 // ---------------------------------------------------------------------------
-
-// BalanceBillingEnabled 报告当前是否处于"余额闸门"状态。
-//
-// 语义(2026-09-11 重构后):闸门只决定**拦不拦**。消费扣减对已开通用户
-// 始终发生(见 settleUsageCostTx),否则余额不是账、无法对账。
-func BalanceBillingEnabled(db *sql.DB) bool {
-	s, err := GetBalanceSettings(db)
-	return err == nil && s.Enabled
-}
 
 // BalanceBlocked 报告该用户是否应被余额闸门拦截:
 // 已开通 且 分位口径下的余额 <= 0。未开通(从未入账)不拦。

@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"sort"
 	"strconv"
-	"strings"
 )
 
 // ---------------------------------------------------------------------------
@@ -98,35 +97,6 @@ func RegroupByDept(db *sql.DB, rows []UsageAggregateRow) ([]UsageAggregateRow, e
 		return oi < oj
 	})
 	return out, nil
-}
-
-// DeptUserIDsByName 部门名(含其子树)的成员 user_id 集合——与 DeptMemberIDs 同语义,
-// 供 SQL 过滤(WithDept)使用。
-func DeptUserIDsByName(db *sql.DB, dept string) ([]int64, error) {
-	sub, err := deptSubtreeIDs(db, dept)
-	if err != nil {
-		return nil, err
-	}
-	placeholders := strings.Repeat("?,", len(sub))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, 0, len(sub))
-	for _, id := range sub {
-		args = append(args, id)
-	}
-	rows, err := db.Query(`SELECT DISTINCT user_id FROM user_groups WHERE group_id IN (`+placeholders+`)`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []int64
-	for rows.Next() {
-		var uid int64
-		if err := rows.Scan(&uid); err != nil {
-			return nil, err
-		}
-		out = append(out, uid)
-	}
-	return out, rows.Err()
 }
 
 // deptSubtreeIDs 返回部门名对应的子树 group id 列表(含自身)。

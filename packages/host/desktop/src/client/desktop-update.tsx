@@ -9,7 +9,6 @@ import {
   DESKTOP_UPDATE_PATH,
   DESKTOP_UPDATE_CHECK_PATH,
   DESKTOP_UPDATE_INSTALL_PATH,
-  type DesktopUpdateErrorCategory,
   type DesktopUpdateStateResponse,
 } from '../desktop-update-contract.ts'
 
@@ -351,4 +350,4 @@ export function resetDesktopUpdateStoreForTests(): void {
   actionInFlight = undefined
 }
 
-export type { DesktopUpdateErrorCategory, DesktopUpdateStateResponse }
+export type { DesktopUpdateStateResponse }

@@ -5203,7 +5203,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@modelcontextprotocol/sdk@npm:^1.12.0":
+"@modelcontextprotocol/sdk@npm:^1.12.0, @modelcontextprotocol/sdk@npm:^1.30.0":
   version: 1.30.0
   resolution: "@modelcontextprotocol/sdk@npm:1.30.0"
   dependencies:
@@ -7991,6 +7991,7 @@ __metadata:
     "@deepseek-ai/dsh-workspace": "npm:0.1.5-rc.2"
     "@deepseek-ai/schemastery": "npm:^3.18.2"
     "@electron/asar": "npm:3.4.1"
+    "@modelcontextprotocol/sdk": "npm:^1.30.0"
     "@picoaide/dsh-account-card": "workspace:*"
     "@picoaide/dsh-browser": "workspace:*"
     "@picoaide/dsh-connectors": "workspace:*"
@@ -8010,6 +8011,7 @@ __metadata:
     tsdown: "npm:0.22.2"
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
+    ws: "npm:^8.21.3"
     yaml: "npm:^2.9.0"
   peerDependencies:
     electron: 43.4.0
@@ -12139,7 +12141,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"ws@npm:^8.18.0, ws@npm:^8.21.0":
+"ws@npm:^8.18.0, ws@npm:^8.21.0, ws@npm:^8.21.3":
   version: 8.21.3
   resolution: "ws@npm:8.21.3"
   peerDependencies:

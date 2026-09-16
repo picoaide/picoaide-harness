@@ -20,10 +20,10 @@ import { join, sep } from 'node:path'
 export const SESSION_INVENTORY_SCHEMA_VERSION = 1
 
 /** File name of the JSONL backend's write lease inside one session directory. */
-export const SESSION_LOCK_FILENAME = 'session.lock'
+const SESSION_LOCK_FILENAME = 'session.lock'
 
 /** Every bound is a truncation point, never an error. */
-export interface SessionInventoryLimits {
+interface SessionInventoryLimits {
   /** Maximum number of session directories described in one inventory. */
   readonly maxSessions: number
   /** Maximum number of generation files listed per session directory. */
@@ -33,14 +33,14 @@ export interface SessionInventoryLimits {
 }
 
 /** Default bounds: ample for a real install, small enough for one zip entry. */
-export const DEFAULT_SESSION_INVENTORY_LIMITS: SessionInventoryLimits = {
+const DEFAULT_SESSION_INVENTORY_LIMITS: SessionInventoryLimits = {
   maxSessions: 2_000,
   maxFilesPerSession: 64,
   maxScannedBytes: 64 * 1024 * 1024,
 }
 
 /** One immutable session generation artifact. */
-export interface SessionInventoryFile {
+interface SessionInventoryFile {
   /** File name inside the session directory, e.g. `session.jsonl.zstd`. */
   readonly name: string
   /** Parsed format generation (`session.jsonl[.zstd]` is 0); omitted for odonyms. */

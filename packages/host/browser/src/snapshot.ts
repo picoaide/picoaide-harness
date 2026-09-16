@@ -29,7 +29,7 @@ const TEXT_LIMIT = 32 * 1024
 export const MAX_TEXT_LIMIT = TEXT_LIMIT
 
 /** The character cap {@link extractText} actually applies (single source). */
-export function effectiveTextLimit(textLimit: number): number {
+function effectiveTextLimit(textLimit: number): number {
   return Math.max(1, Math.min(textLimit, TEXT_LIMIT))
 }
 

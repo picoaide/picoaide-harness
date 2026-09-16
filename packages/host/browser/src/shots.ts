@@ -15,7 +15,7 @@ const SCREENSHOT_QUALITY = 70
 const SCREENSHOT_MIN_SCALE = 0.05
 
 /** Clamp a requested quality into the 1..100 range Electron/CDP accept. */
-export function clampQuality(quality: number): number {
+function clampQuality(quality: number): number {
   return Math.max(1, Math.min(100, quality))
 }
 
