@@ -222,6 +222,23 @@ describe('siteOriginFromFields', () => {
     expect(siteOriginFromFields({ server_url: '例子.中国' })).toBe('https://xn--fsqu00a.xn--fiqs8s')
   })
 
+  // 2026-09-16 R6 复核：否表若只在**原文**上跑，全角/零宽/软连字符拼写会 IDNA
+  // 折叠成保留词后劫持真站点；数值/十六进制与百分号编码则会被 URL 解析改写成
+  // 另一台主机（`0x08080808` → `8.8.8.8`）。两者都必须被挡在绑定之外。
+  it('runs the denylist on the IDNA form and rejects numeric/encoded single labels', () => {
+    const real = 'https://real.example'
+    for (const value of [
+      'ｐｌａｃｅｈｏｌｄｅｒ.com', 'place\u200Bholder.com', 'place\u00ADholder.com', 'ｃｈａｎｇｅｍｅ.com',
+      '0x08080808', '0x7f000001', '010%2e0%2e0e1', 'x.changeme.com', 'your.domain.com',
+      `${'x'.repeat(255)}.com`, 'example.org.cn', 'example.co.uk',
+    ]) {
+      expect(siteOriginFromFields({ server_url: value, homepage: real }), value).toBe(real)
+    }
+    expect(siteOriginFromFields({ server_url: '0x08080808' })).toBeNull()
+    // `localhost` 是真实回环名而非占位符，不能从否表里误伤。
+    expect(siteOriginFromFields({ server_url: 'localhost:8000' })).toBe('http://localhost:8000')
+  })
+
   it('prefers the base address key’s typed host over a camelCase flow URL', () => {
     // base 地址键上的裸主机（第 2 遍）优先于扩展拼法键上的显式 URL（第 4 遍）：
     // `callbackUrl` 是 OAuth 回调，不是连接器站点（R4 复核）。
