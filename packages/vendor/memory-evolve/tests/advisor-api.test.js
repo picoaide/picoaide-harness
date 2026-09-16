@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { installAdvisor } from '../lib/advisor/index.js'
-import { DEFAULT_ADVISOR_SYSTEM_PROMPT } from '../lib/advisor/prompt.js'
+import { defaultAdvisorSystemPrompt } from '../lib/advisor/prompt.js'
 import { validateRuntimePatch } from '../lib/index.js'
 
 let seq = 0
@@ -473,7 +473,7 @@ test('Q5：config GET 返回默认提示词全文 + 新配置字段；PATCH 校�
   const { server, base, request } = await makeServer(rig.ctx)
   t.after(() => server.close())
   const cfg = await request('GET', '/memory-evolve/api/advisor/config')
-  assert.equal(cfg.json.config.defaultSystemPrompt, DEFAULT_ADVISOR_SYSTEM_PROMPT)
+  assert.equal(cfg.json.config.defaultSystemPrompt, defaultAdvisorSystemPrompt())
   assert.equal(cfg.json.config.advisorInfoInject, false)
   // PATCH 新字段
   const patched = await request('PATCH', '/memory-evolve/api/advisor/config', { patch: { advisorInfoInject: true } })
@@ -684,4 +684,42 @@ test('复审高1：in-flight 评审 + 排队评审 + tell → 问答仍精确拿
   assert.equal(rig.ctrl.instructionsOf('session-1').length, 0) // 已消费
   // 2026-08-12 用户反馈：回答不注入主会话（面板展示）
   assert.equal(agent.injects.length, 0)
+})
+
+test('issue #49: 新宿主 Session 无 .events（0.1.2-alpha.4+）时 advisor 监听器不抛错', (t) => {
+  const rig = rigFor(t)
+  // DSH 0.1.2-alpha.4 起 Session 不再暴露 .events 数组（改经 ownEvents() 访问）。
+  // 旧接线读 session.events 得到 undefined → observer.findLastMessageTurnEnd
+  // 对 undefined 做 for...of → TypeError: events is not iterable，每个可评审
+  // 回合报一次（与 #38/#42 同源：review.js 已修、advisor 漏改）。
+  const { agent, session, events } = stubAgent('session-alpha')
+  delete session.events // 模拟新宿主：不再暴露 .events
+  session.ownEvents = () => events
+  // 必须走真实注册链路（agent/created → ensureRuntime + opt-in），否则
+  // 监听器会因 session 未注册而提前返回，测不到 events 取值这条路径
+  rig.agents.set('session-alpha', agent)
+  rig.listeners['agent/created']?.[0]?.({ agent })
+  rig.ctrl.setSessionOverride('session-alpha', true)
+  const push = (type, data, surfaceOp) => {
+    const ev = { type, seq: nextSeq(), data, surfaceOp }
+    events.push(ev)
+    assert.doesNotThrow(() => {
+      rig.listeners['session/event']?.forEach((fn) => fn(session, ev))
+    }, `新宿主形状（仅 ownEvents()）下处理 ${type} 不得抛错`)
+  }
+  push('user/message', { id: 'm1', role: 'user', content: [{ type: 'text', text: '帮我看看' }], source: { kind: 'user' } }, 'append')
+  push('step/start', { turn: 1 })
+  push('assistant/message', { message: { id: 'm2', role: 'assistant', content: [{ type: 'text', text: '好的' }], source: { kind: 'model' } } }, 'append')
+  push('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+  // 老宿主（<= 0.1.1-rc）仍走 .events 回退，行为不回归
+  const legacy = { ...stubAgent('session-legacy').agent, session: { id: 'session-legacy', header: { cwd: '/proj/legacy' }, events: [] } }
+  assert.doesNotThrow(() => {
+    rig.listeners['session/event']?.forEach((fn) => fn(legacy.session, { type: 'turn/end', seq: nextSeq(), data: { turn: 1 } }))
+  }, '老宿主回退 .events 不得回归')
+  // 两者都拿不到时给空数组：宁可本回合无可评审内容，也不能让监听器抛错
+  const bare = { id: 'session-bare', header: { cwd: '/proj/bare' } }
+  assert.doesNotThrow(() => {
+    rig.listeners['session/event']?.forEach((fn) => fn(bare, { type: 'turn/end', seq: nextSeq(), data: { turn: 1 } }))
+  }, '无 events 来源时不得抛错')
 })

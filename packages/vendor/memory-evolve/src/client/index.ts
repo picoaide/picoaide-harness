@@ -54,6 +54,7 @@ import { createInputSheetEnhance } from './mobile-input-sheet'
 import { createNotificationBell } from './notification-bell.tsx'
 import { createTodoTabLifecycle, RUNTIME_CONFIG_CHANGED } from './todo-tab-lifecycle.js'
 import notificationStyles from './notification-styles.css'
+import { setClientLocaleResolver } from '../../lib/i18n.js'
 
 /** Locale namespace owned by this plugin. */
 const NS = 'memory-evolve'
@@ -818,6 +819,8 @@ export const zh = {
   'panel.config.perTurnDailyWrites.hint': '要求模型每个回合结束前主动检查并记录当天进展；关闭后每日日志仅按需读取。⚠️ 依赖 LLM 指令遵循，弱遵循的模型不一定会执行',
   'panel.config.perTurnKeyWrites': '每回合检查项目关键记忆',
   'panel.config.perTurnKeyWrites.hint': '要求模型每个回合结束前判断是否出现重要项目事实（长期约定/决策/架构/踩坑），有则写入 target=key（自动注入上下文），没有就跳过；关闭后 key 仅保留手动添加与读取。⚠️ 依赖 LLM 指令遵循',
+  'panel.config.keyBranchFilter': 'key 轨分支过滤',
+  'panel.config.keyBranchFilter.hint': '开启（默认）时，key 轨条目按**当前 git 分支**过滤：无分支标记的条目对所有分支可见，带 [branch:x] 标记的只在该分支可见——系统提示词注入、expand、list 三处同一规则。关掉后三处都不再过滤（诊断用；会让别的分支的条目也出现在列表里）',
   'panel.config.keyProgressiveDisclosure': 'key 轨渐进式披露',
   'panel.config.keyProgressiveDisclosure.hint': '控制 key 轨记忆的注入方式：auto = 小数据量全量注入、大数据量摘要注入；off = 始终全量注入（默认）；on = 始终摘要注入（节省 token）',
   'panel.config.keyProgressiveDisclosure.auto': '自动',
@@ -1633,6 +1636,8 @@ export const en: Record<MemoryEvolveKey, string> = {
   'panel.config.perTurnDailyWrites.hint': 'Require the model to check at the end of every turn and record the day\'s progress; when off, the daily log is read on demand only. ⚠️ Relies on LLM instruction following — weaker models may not comply',
   'panel.config.perTurnKeyWrites': 'Per-turn key-fact check',
   'panel.config.perTurnKeyWrites.hint': 'Require the model to judge at the end of every turn whether an important project fact emerged (long-lived convention/decision/architecture/pitfall); if so, write it to target=key (injected into the context), otherwise skip. When off, key facts are only added manually or read. ⚠️ Relies on LLM instruction following',
+  'panel.config.keyBranchFilter': 'Key-track branch filter',
+  'panel.config.keyBranchFilter.hint': 'When on (default), key-track entries are filtered by the **current git branch**: untagged entries are visible everywhere, entries tagged [branch:x] only on that branch — the same rule for snapshot injection, expand and list. Turn it off to disable filtering in all three (diagnostics; other branches\' entries will then show up in the list)',
   'panel.config.keyProgressiveDisclosure': 'Key-track progressive disclosure',
   'panel.config.keyProgressiveDisclosure.hint': 'Control how key-track memories are injected: auto = full injection for small data, summary injection for large data; off = always full injection (default); on = always summary injection (saves tokens)',
   'panel.config.keyProgressiveDisclosure.auto': 'Auto',
@@ -1758,6 +1763,20 @@ export function apply(ctx: Context): void {
   const t = ctx.locale.bind(NS) as unknown as Translate
 
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'memory-evolve: dictionaries')
+
+  // S4（2026-09-16）：把**当前界面语言**交给宿主模块侧的私有字典解析器。
+  // 随包客户端里有几处自带 zh/en 双语的私有字典（CoIView / PromptView /
+  // BroadcastView / AdvisorPanel / MemoryQueueView / TodoView / SyncView），
+  // 它们此前读 `navigator.language`（= 操作系统语言、模块加载期求值一次）⇒
+  // 用户在设置里切语言时那些界面不跟随。这里注册一个**调用期**解析器
+  // （读 locale 快照，语言一变即生效）。
+  ctx.effect(() => {
+    setClientLocaleResolver(() => {
+      const active = ctx.locale.getSnapshot().active
+      return active === 'zh' || active === 'en' ? active : undefined
+    })
+    return () => setClientLocaleResolver(null)
+  }, 'memory-evolve: private-dictionary locale resolver')
 
   ctx.effect(() => {
     if (typeof document === 'undefined') return () => {}

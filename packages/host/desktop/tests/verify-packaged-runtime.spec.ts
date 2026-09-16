@@ -1,6 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import AdmZip from 'adm-zip'
 import {
@@ -68,6 +69,23 @@ const REQUIRED_ASAR_EXPORT_PATHS = [
 function completeArchiveEntries(separator = '/'): string[] {
   return [...REQUIRED_PACKAGED_RUNTIME_ENTRIES, ...REQUIRED_ASAR_EXPORT_PATHS]
     .map(entry => `${separator}${entry.replaceAll('/', separator)}`)
+}
+
+/** 递归列出目录下所有普通文件(相对路径,'/'-分隔);目录不存在 = 空列表。 */
+function listFilesRel(dir: string, prefix = ''): string[] {
+  let entries
+  try {
+    entries = readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const files: string[] = []
+  for (const entry of entries) {
+    const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+    if (entry.isDirectory()) files.push(...listFilesRel(join(dir, entry.name), rel))
+    else if (entry.isFile()) files.push(rel)
+  }
+  return files
 }
 
 /** 我方品牌 SVG(内容断言由专门的用例覆盖,其余用例只关心条目/导出逻辑)。 */
@@ -351,6 +369,9 @@ describe('packaged desktop runtime verification', () => {
     'lib/diagnostic-export-worker.js',
     'lib/update-download.js',
     'lib/windows-agent-presets.js',
+    // P1(2026-09-16):内置技能辅助文件同理——整目录同步靠它,少一个该技能就残缺。
+    'node_modules/dsh-memory-evolve/skills/memory-consolidate/SKILL.md',
+    'node_modules/dsh-memory-evolve/skills/memory-consolidate/scripts/scan_memory.mjs',
   ])('fails loud when required runtime entry %s is absent', (missing) => {
     const entries = completeArchiveEntries().filter(entry => entry !== `/${missing}`)
 
@@ -474,6 +495,27 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       // P1-12:官方兜底也是运行时真的会读的一份(src/index.ts 的 officialLogoPath),
       // 少了它打包态就没有兜底 —— 渠道图形不可信时标签页回落到上游厂商图形。
       expect([...REQUIRED_PACKAGED_RUNTIME_ENTRIES]).toContain(PACKAGED_WEB_BRAND_OFFICIAL)
+    })
+
+    it('ships every built-in plugin skill the vendored package carries', () => {
+      // P1(2026-09-16):`dsh-memory-evolve` 启动时从包内 `skills/` 把内置技能同步到
+      // 用户技能库(lib/coi/index.js 的 PLUGIN_SKILLS_DIR);2026-09-03 的瘦身提交把
+      // `!**/node_modules/dsh-memory-evolve/skills/**` 写进 files,产物里没有这个目录,
+      // 同步对每个技能返回 action:"missing" 且只在成功时打日志 —— 静默失效。
+      // 期望清单取自**构建工作区的源目录**(桌面 node_modules 里是本包的 workspace 软链),
+      // 因此上游新增技能/辅助文件时这条会失败,提示补齐清单而不是让产物悄悄少文件。
+      const skillsRoot = join(
+        dirname(fileURLToPath(import.meta.url)), '..', 'node_modules', 'dsh-memory-evolve', 'skills',
+      )
+      const files = listFilesRel(skillsRoot)
+      expect(files.length).toBeGreaterThan(0)
+      const manifest = new Set<string>(REQUIRED_PACKAGED_RUNTIME_ENTRIES)
+      const prefix = 'node_modules/dsh-memory-evolve/skills/'
+      expect(files.filter(rel => !manifest.has(`${prefix}${rel}`))).toEqual([])
+      // 反向:清单里不得留下源目录已不存在的死条目(技能改名/删除后忘了同步)。
+      expect([...manifest]
+        .filter(entry => entry.startsWith(prefix))
+        .filter(entry => !files.includes(entry.slice(prefix.length)))).toEqual([])
     })
   })
 

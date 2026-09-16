@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { RUNTIME_CONFIG_CHANGED } from './todo-tab-lifecycle.js'
+import { clientLang } from '../../lib/i18n.js'
 
 /** Which feature sub-tab is active. */
 export type MemoryFeature = 'guide' | 'suggestions' | 'todo-suggestions' | 'skills' | 'config'
@@ -131,6 +132,9 @@ interface RuntimeConfig {
   keyFullInjectThreshold: number
   /** auto 模式下字符数阈值：总字符数 ≤ 此值时全量注入。 */
   keyFullInjectCharLimit: number
+  /** key 轨分支作用域过滤（默认开，2026-09-16 对抗复核后可从面板关闭）：
+   *  关掉后 list/快照/expand 都不再按当前 git 分支过滤（诊断用逃生口）。 */
+  keyBranchFilter: boolean
   /** 记忆写入看门狗（用户拍板 2026-09-04：默认关——根源是模型指令遵循
    *  能力，强模型不需要；打开后连续 N 轮未写 daily/project 快照会置顶提醒）。 */
   perTurnWriteGuard: boolean
@@ -166,7 +170,7 @@ function formatTime(iso: string): string {
 
 /** The three feature panels (suggestions / skills / config). */
 /** English browser → English inline text. */
-const isEn = (): boolean => typeof navigator !== 'undefined' && navigator.language?.toLowerCase().startsWith('en')
+const isEn = (): boolean => clientLang() === 'en'
 
 export function MemoryQueueView(props: MemoryQueueViewProps): JSX.Element {
   const { t, feature, onChanged } = props
@@ -289,6 +293,7 @@ export function MemoryQueueView(props: MemoryQueueViewProps): JSX.Element {
       keyProgressiveDisclosure: draft.keyProgressiveDisclosure,
       keyFullInjectThreshold: draft.keyFullInjectThreshold,
       keyFullInjectCharLimit: draft.keyFullInjectCharLimit,
+      keyBranchFilter: draft.keyBranchFilter,
     }
     void api<{ config: RuntimeConfig }>('/api/config', {
       method: 'POST',
@@ -767,6 +772,20 @@ export function MemoryQueueView(props: MemoryQueueViewProps): JSX.Element {
                     <option value="off">{t('panel.config.keyProgressiveDisclosure.off')}</option>
                     <option value="on">{t('panel.config.keyProgressiveDisclosure.on')}</option>
                   </select>
+                </label>
+                {/* key 轨分支过滤开关（对抗复核 A2，2026-09-16）：
+                    此前这个逃生口只有 cordis 行 config 能改，桌面分发里用户够不到。 */}
+                <label className="me-field">
+                  <span className="me-field-label">
+                    {t('panel.config.keyBranchFilter')}
+                    <em className="me-field-hint">{t('panel.config.keyBranchFilter.hint')}</em>
+                  </span>
+                  <input
+                    type="checkbox"
+                    className="me-switch"
+                    checked={draft.keyBranchFilter !== false}
+                    onChange={(event) => patchDraft({ keyBranchFilter: event.target.checked })}
+                  />
                 </label>
                 <label className="me-field">
                   <span className="me-field-label">

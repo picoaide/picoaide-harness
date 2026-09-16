@@ -387,6 +387,12 @@ export class CoiScheduler {
     child.on('error', (error) => {
       this.#finish(internal, { status: 'failed', error: `进程错误: ${error.message}` })
     })
+    // 流式解码（同 sync/runGit 的修复）：任务输出里中文很多，逐块 toString()
+    // 会把跨管道分块边界的字符变成 U+FFFD 落进任务日志（用户直接看日志）。
+    // 注入的假子进程（测试桩）可能没有 setEncoding，此时退回 Buffer 路径——
+    // #onOutput 对字符串与 Buffer 两种入参都兼容。
+    if (typeof child.stdout?.setEncoding === 'function') child.stdout.setEncoding('utf8')
+    if (typeof child.stderr?.setEncoding === 'function') child.stderr.setEncoding('utf8')
     child.stdout?.on('data', (chunk) => this.#onOutput(internal, 'stdout', chunk))
     child.stderr?.on('data', (chunk) => this.#onOutput(internal, 'stderr', chunk))
     child.on('close', (code, signal) => {
@@ -412,7 +418,9 @@ export class CoiScheduler {
   /** 增量输出：入缓冲、提取 session id、解析进度、定时落盘。 */
   #onOutput(internal, source, chunk) {
     if (this.running.get(internal.id) !== internal) return
-    const text = chunk.toString()
+    // setEncoding('utf8') 后 chunk 已是字符串；这里兼容直接传 Buffer 的调用方
+    // （测试/其他路径），两者都不会破坏多字节字符。
+    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
     // 2026-08-17 修复：stdout 与 stderr 统一汇入 buffer，随 FLUSH_MS 定时落盘。
     // 此前 stderr 单独累积进 stderrBuffer 且从未被 flush 写入日志文件，导致
     // CLI 的过程输出（qwen38_agent 的 [agent]/[tool] 轮次与流式内容、codex 的
@@ -797,6 +805,12 @@ export class CoiScheduler {
     internal.process = child
     try { child.stdin?.end() } catch { /* 忽略 */ }
     child.on('error', (error) => this.#finish(internal, { status: 'failed', error: `进程错误: ${error.message}` }))
+    // 流式解码（同 sync/runGit 的修复）：任务输出里中文很多，逐块 toString()
+    // 会把跨管道分块边界的字符变成 U+FFFD 落进任务日志（用户直接看日志）。
+    // 注入的假子进程（测试桩）可能没有 setEncoding，此时退回 Buffer 路径——
+    // #onOutput 对字符串与 Buffer 两种入参都兼容。
+    if (typeof child.stdout?.setEncoding === 'function') child.stdout.setEncoding('utf8')
+    if (typeof child.stderr?.setEncoding === 'function') child.stderr.setEncoding('utf8')
     child.stdout?.on('data', (chunk) => this.#onOutput(internal, 'stdout', chunk))
     child.stderr?.on('data', (chunk) => this.#onOutput(internal, 'stderr', chunk))
     child.on('close', (code) => {

@@ -77,6 +77,21 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@deepseek-ai/dsh/lib/bin.js',
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
   'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
+  // 内置 COI 技能必须随包（P1，2026-09-16）：`dsh-memory-evolve` 启动时把包内
+  // `skills/` 目录同步到用户技能库（`lib/coi/index.js` 的 PLUGIN_SKILLS_DIR，
+  // `coiSyncSkills` 默认 true，用户开 COI 时执行）。2026-09-03 的瘦身提交
+  // （70be3aa0db）把 `!**/node_modules/dsh-memory-evolve/skills/**` 和 src/tests/docs
+  // 一起写进 `files`，于是产物里没有这个目录：同步对每个技能返回 `action:"missing"`，
+  // 而同步路径只在成功时打日志 ⇒ 打包版"用户打开 COI 后内置技能一个都装不上"是静默的。
+  // 修法=删掉那条排除；这里逐条钉住，别再排除（上游新增技能时先跑
+  // tests/verify-packaged-runtime.spec.ts 的「清单覆盖源目录」用例，它会要求补齐）。
+  'node_modules/dsh-memory-evolve/skills/kimi-cli-calling/SKILL.md',
+  'node_modules/dsh-memory-evolve/skills/codex-cli-calling/SKILL.md',
+  'node_modules/dsh-memory-evolve/skills/grok-cli-calling/SKILL.md',
+  'node_modules/dsh-memory-evolve/skills/hermes-cli-calling/SKILL.md',
+  'node_modules/dsh-memory-evolve/skills/memory-consolidate/SKILL.md',
+  // 技能辅助文件（上游 v26091501 起技能按整目录同步，scripts/ 要跟着走）。
+  'node_modules/dsh-memory-evolve/skills/memory-consolidate/scripts/scan_memory.mjs',
 ] as const
 
 /** Physical entries that Electron cannot load from ASAR (native binaries). */

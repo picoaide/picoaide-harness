@@ -15,6 +15,7 @@ import { applyUpdateBadge, applyUpdateStore } from './desktop-update.tsx'
 import { installDesktopDirectoryPickerBridge } from './directory-picker.ts'
 import { parseDesktopClientEnvironment } from './environment.ts'
 import { applyLoopNotifyClient } from './loop-notify.tsx'
+import { applyLegacyThemeTokens } from './legacy-theme-tokens.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
 export {
@@ -69,6 +70,13 @@ export function apply(ctx: ClientContext): void {
     )
   }
   applyLoopNotifyClient(ctx)
+  // vendored memory-evolve 的旧色板适配层（见 legacy-theme-tokens.ts 的模块注释）：
+  // 41 个上游不存在的 `--dsw-*` 名字在这里获得真实取值 —— 否则它们永远走 fallback
+  // （37 条声明直接失效、其余颜色不随主题变化）。层是 effect 作用域：卸载即摘掉。
+  ctx.effect(
+    () => applyLegacyThemeTokens(ctx) ?? (() => { /* 主题服务缺席（最小启动）：无层可摘 */ }),
+    'dsh-plugin-desktop: vendored legacy theme tokens',
+  )
   // 更新快照是**一个窗口一份**的共享状态:三个展示面(侧边栏、设置「关于」、
   // 会话头部徽标)都从这里取,不再各起一个轮询(2026-09-12 用户报"两处不同步")。
   applyUpdateStore(ctx)

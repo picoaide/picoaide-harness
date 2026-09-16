@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import { clientLang } from '../../lib/i18n.js'
 
 const API = '/memory-evolve/memory-sync'
 
@@ -98,7 +99,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 /** 截断长文本（冲突三方片段展示用）。 */
 function clamp(text: string | null, max = 60): string {
   if (text === null) {
-    return typeof navigator !== 'undefined' && navigator.language?.toLowerCase().startsWith('en') ? '(none)' : '（无）'
+    return clientLang() === 'en' ? '(none)' : '（无）'
   }
   const flat = text.replace(/\s+/g, ' ')
   return flat.length > max ? `${flat.slice(0, max)}…` : flat

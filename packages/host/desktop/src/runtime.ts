@@ -266,6 +266,16 @@ export interface DesktopRuntime {
   show(): void
 
   /**
+   * 执行一次 macOS 标题栏双击动作（按系统偏好缩放或最小化窗口）。
+   *
+   * 自定义拖拽区（`-webkit-app-region: drag`）拿不到原生双击行为
+   * （electron#16385），由 renderer 判定命中后经
+   * `POST /api/pico/desktop/window/titlebar-double-click` 请宿主执行；
+   * 非 macOS 平台与无窗口时是 no-op。
+   */
+  performTitleBarDoubleClick(): void
+
+  /**
    * Contribute one command to the native tray for the current Cordis lifetime.
    * @param item - dynamic label, state, and invocation owned by the caller.
    * @returns a refreshable, idempotent registration handle.

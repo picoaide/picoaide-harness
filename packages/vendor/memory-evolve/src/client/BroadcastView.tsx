@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { TabGuideView } from './TabGuideView.tsx'
+import { clientLang } from '../../lib/i18n.js'
 
 const API = '/memory-evolve/api/broadcast'
 const PAGE_SIZE = 20
@@ -199,7 +200,7 @@ function WsCoordSettings({ t }: { t: Translate }): JSX.Element {
 }
 
 /** English browser → English inline text. */
-const isEn = (): boolean => typeof navigator !== 'undefined' && navigator.language?.toLowerCase().startsWith('en')
+const isEn = (): boolean => clientLang() === 'en'
 
 export function BroadcastView(props: ConvViewProps & { t: Translate }): JSX.Element {
   const { t, sessionId } = props

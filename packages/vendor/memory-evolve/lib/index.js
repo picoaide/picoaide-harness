@@ -17,9 +17,9 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { ArchiveStore, MemoryStore, SuggestionQueue, extractEntryDate, gitBranch, gitBranchList, parseEntryBranches, parseEntryDshOnly, parseEntrySummary, autoSummary, stripEntrySummary, todayStamp } from './store.js'
 import { stripEntryId, extractEntryId, legacyIdFor } from './sync/entryid.js'
 import { readAliases } from './aliases.js'
@@ -37,7 +37,7 @@ import { buildWsCoordBlock, installWsCoord } from './coi/ws-coord.js'
 import { installSession } from './session-orch.js'
 import { AliasStore } from './aliases.js'
 import { installSessionSearch } from './search/index.js'
-import { installPrompts } from './prompts.js'
+import { installPrompts, sanitizeSnapshotBody } from './prompts.js'
 import { installModels, buildModelsSnapshotAsync } from './models.js'
 import { installUiSettings } from './ui-settings.js'
 import { installMermaid } from './mermaid.js'
@@ -271,6 +271,9 @@ export const RUNTIME_KEYS = [
   'perTurnProjectWrites', 'perTurnDailyWrites', 'perTurnKeyWrites',
   'perTurnWriteGuard', 'writeGuardThreshold',
   'keyProgressiveDisclosure', 'keyFullInjectThreshold', 'keyFullInjectCharLimit',
+  // 对抗复核 A2（2026-09-16）：这个逃生开关原先只有 cordis 行 config 能改，
+  // 桌面分发里用户/管理员都够不到 —— 放进运行时键后设置面板可切换、且落盘。
+  'keyBranchFilter',
   'searchDocsEnabled', 'coiEnabled', 'broadcastEnabled', 'promptsEnabled',
   'sessionSearchEnabled', 'sessionEnabled', 'modelsEnabled', 'uiSettingsEnabled',
   'bookmarkEnabled', 'searchDocsMode', 'todoEnabled',
@@ -324,6 +327,7 @@ export function validateRuntimePatch(key, value) {
     case 'sessionImageQueryEnabled':
     case 'syncEnabled':
     case 'canvasEnabled':
+    case 'keyBranchFilter':
       if (typeof value !== 'boolean') throw new Error(`dsh-memory-evolve: ${key} 必须是布尔值`)
       return
     case 'reviewInterval':
@@ -387,16 +391,142 @@ export function validateRuntimePatch(key, value) {
   }
 }
 
-/** Load persisted runtime overrides (stateFile); a missing file is empty. */
-function loadState(stateFile) {
+/**
+ * Load persisted runtime overrides (stateFile).
+ *
+ * P1-A（2026-09-16，**启动级**）：此前只容忍 `ENOENT`，其余读取/解析失败一律
+ * rethrow —— 而本函数在 `apply()`（插件装载路径）里被调用，抛错会让 cordis 报
+ * `plugin tree failed to load: failed to apply loader entry dsh-memory-evolve`，
+ * 宿主据此直接退出：**`plugin-state.json` 坏一个字节，整个桌面应用起不来**
+ * （用户看不到任何界面，只能手删文件自救）。同族损坏在本插件其它 sidecar
+ * （SUGGESTIONS.jsonl / skills-state.json / aliases.json …）上都被优雅吸收，
+ * 只有这一处致命。
+ *
+ * 现改为 fail-soft：损坏文件**改名留档**（`.corrupt-<ts>.bak`，不静默丢用户
+ * 覆盖项）后按空状态继续装载；连留档都失败也照样返回空状态，绝不抛错。
+ * @param {string} stateFile - 状态文件路径。
+ * @param {object} [deps] - 可选注入（测试用）。
+ * @param {(message: string, meta?: object) => void} [deps.onCorrupt] - 损坏回调（默认 console.warn）。
+ * @returns {object} 解析出的覆盖项；缺失/损坏时为 `{}`。
+ */
+function loadState(stateFile, deps = {}) {
+  // NF-A6（2026-09-16 对抗复核）：第二参对象不会被 console.warn 插值，实打印成
+  // `[object Object]`、诊断信息全丢；这里统一内联进首参（与 session-orch.js 同风格）。
+  const warn = deps.onCorrupt ?? ((message, meta) => {
+    console.warn(`[dsh-memory-evolve] ${message}${meta === undefined ? '' : ` ${JSON.stringify(meta)}`}`)
+  })
+  let text
   try {
-    const text = readFileSync(stateFile, 'utf8')
-    const parsed = JSON.parse(text)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    text = readFileSync(stateFile, 'utf8')
   } catch (error) {
-    if (error.code === 'ENOENT') return {}
-    throw error
+    if (error.code !== 'ENOENT') {
+      // 权限 / IO / 目录占位（EISDIR）等：按空状态继续，不阻断插件装载。
+      warn(`plugin-state.json 不可读（${error.code}），本次按空状态启动`, { stateFile })
+    }
+    return {}
   }
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    warn(`plugin-state.json 解析失败（${error.message}），已留档并按空状态启动`, { stateFile })
+    quarantineState(stateFile, warn)
+    return {}
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    warn('plugin-state.json 顶层不是对象，已留档并按空状态启动', { stateFile })
+    quarantineState(stateFile, warn)
+    return {}
+  }
+  return parsed
+}
+
+/**
+ * 一次性"状态曾留档"告知（对抗复核 A1，2026-09-16）。
+ *
+ * 为什么需要它：`plugin-state.json` 损坏后我们 fail-soft 启动（应用能起来），
+ * 但**用户的运行时开关与界面设置被重置成默认**——这是用户可感知的状态变化，
+ * 而桌面壳里 `console.warn` 与目录里多出的 `.bak` 都不足以让用户知道。
+ * 于是留档时写一个标记文件，`apply()` 启动时读一次、注入系统提示词快照一次，
+ * 使模型能在第一条回复里告知用户"设置被重置了、备份在哪"，随后删除标记
+ * （避免反复拿陈旧信息打扰）。
+ * @type {object|null}
+ */
+let quarantineNotice = null
+
+/**
+ * Read and consume the quarantine marker（读一次即删）。
+ * @param {string} stateFile - 状态文件路径。
+ * @returns {object|null} 标记内容；不存在/不可读时为 null。
+ */
+function readQuarantineNotice(stateFile) {
+  const marker = stateQuarantineMarker(stateFile)
+  try {
+    const parsed = JSON.parse(readFileSync(marker, 'utf8'))
+    unlinkSync(marker)
+    return parsed !== null && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Move a corrupt state file aside so the next `saveState` starts clean while the
+ * user's bytes stay recoverable. Never throws（P1-A：装载路径必须 fail-soft）。
+ * @param {string} stateFile - 损坏的状态文件。
+ * @param {(message: string, meta?: object) => void} warn - 告警回调。
+ */
+function quarantineState(stateFile, warn) {
+  const backup = `${stateFile}.corrupt-${Date.now()}.bak`
+  let archived = false
+  try {
+    renameSync(stateFile, backup)
+    archived = true
+    warn(`已把损坏的状态文件留档到 ${backup}`)
+  } catch (error) {
+    warn(`损坏状态文件留档失败（${error.code}）——继续以空状态运行`, { stateFile })
+  }
+  // 用户可感知的后果是"我的开关被重置成默认了"——写一个标记文件，
+  // 让记忆 Tab / 记忆工具能据此提示，而不是只留一个没人知道的 .bak。
+  try {
+    // 落点必须走自锚定安全写（结构哨兵 R-NF1：lib/** 不得有按路径的裸 fs 写）
+    writeFileAtomicSafeAt(stateQuarantineMarker(stateFile), `${JSON.stringify({
+      at: new Date().toISOString(),
+      stateFile,
+      archived,
+      backup: archived ? backup : null,
+      effect: 'plugin-state.json 损坏，本次启动已按默认配置运行（运行时开关与界面设置被重置）',
+    }, null, 2)}\n`)
+  } catch { /* 标记写不进去也不影响装载（只读 home / 落点被拒） */ }
+  pruneQuarantineBackups(stateFile)
+}
+
+/**
+ * 留档标记文件路径（与 stateFile 同目录）。
+ * @param {string} stateFile - 状态文件路径。
+ * @returns {string} 标记文件路径。
+ */
+export function stateQuarantineMarker(stateFile) {
+  return `${stateFile}.quarantined.json`
+}
+
+/**
+ * 只保留最近 3 份损坏留档：反复损坏时不让备份无限堆积（对抗复核 A1）。
+ * @param {string} stateFile - 状态文件路径。
+ */
+function pruneQuarantineBackups(stateFile) {
+  try {
+    const dir = dirname(stateFile)
+    const prefix = `${basename(stateFile)}.corrupt-`
+    const backups = readdirSync(dir)
+      .filter(name => name.startsWith(prefix) && name.endsWith('.bak'))
+      .sort()
+    for (const stale of backups.slice(0, Math.max(0, backups.length - 3))) {
+      try {
+        unlinkSync(join(dir, stale))
+      } catch { /* 删不掉就留着 */ }
+    }
+  } catch { /* 目录读不到就不清理 */ }
 }
 
 /**
@@ -547,6 +677,10 @@ export function resolveConfig(raw) {
  */
 export function renderSnapshot(config, store, agent, counter, sessionTitleService = null, writeGap = null) {
   const parts = []
+  // NF-A1：状态留档告知（一次性）。放在最前，确保模型在第一条回复就能告知用户。
+  if (quarantineNotice !== null && quarantineNotice !== undefined) {
+    parts.push(st('snap.stateQuarantined', { at: String(quarantineNotice.at ?? '') }))
+  }
   // 会话 ID 段（快照最前面的独立输出端，常驻注入，不随任何模块开关）：
   // AI 始终知道"我是谁"——广播消息判断 sender/recipients 谁是谁、回复时
   // 把此 ID 告知对方，以及未来其他模块的消费者都要用它。固定文本（会话
@@ -760,7 +894,26 @@ ${tail}${dueWarning}${writeWarning}`)
   // 记忆同步（2026-08-13 用户拍板）：**无 AI 侧入口**——命令组与快照状态
   // 行均已删除。记忆同步完全由用户在 Web GUI（记忆同步 Tab）主动操作，
   // AI 不参与执行，快照不再显示同步状态。
-  return parts.join('\n\n')
+  //
+  // 修复（issue #53，2026-09-14）：整段快照在离开插件前必须净化 `{{...}}`。
+  // 宿主（@deepseek-ai/dsh-system-prompt）的段渲染器把段正文里的 `{{name}}`
+  // 当模板变量解析，**未注册变量直接 throw**（宿主只注册 provider/model/cwd，
+  // memory:snapshot 段不注册任何变量）→ 整段渲染失败 = preStep 失败 = 该会话
+  // 每一步、每一轮都起不来，且**无法用 memory 工具自救**（工具调用需要回合，
+  // 而回合已经起不来），只能手改记忆文件。
+  //
+  // 记忆正文由模型/用户写入，天然可能包含 `{{xxx}}`（真实案例：记录
+  // 「x-opencode-session: {{session}}」这条事实）。此前净化只做在
+  // `prompt:injections` 轨（lib/prompts.js 的 renderInjectionSnapshot），
+  // 而本函数把会话标题/别名、memory/user 轨、项目 KEY 轨（全量与摘要两种
+  // 模式）的**原文**直接拼进同一段——这条注入路径没有任何净化，构成单点：
+  // 记忆里出现一个 `{{` 就等价于给所有注入该轨的会话埋雷。
+  //
+  // 用 expand:false 只降级不展开：记忆里的 `{{date}}` 是字面事实（不是待
+  // 展开的模板），展开会篡改内容；降级为 `{date}` 既保留语义又让宿主不再
+  // 解析。插件自身静态文案用的是单花括号（`{branch}`/`{title}`），不含
+  // `{{` 字面量，故整段净化零语义损失。
+  return sanitizeSnapshotBody(parts.join('\n\n'), { expand: false })
 }
 
 /**
@@ -1173,7 +1326,10 @@ export function memoryTool(ctx, config, store, queue, getRuntime, archive, write
       // 不需要顶层 target），其他操作缺 target 时给出明确错误而非底层报错。
       const isEntriesAdd = action === 'add' && Array.isArray(args.entries) && args.entries.length > 0
       if (!target && !isEntriesAdd) {
-        return { ok: false, message: mt('msg.missingTarget') }
+        // P3-A（2026-09-16）：expand 只支持 key 轨，快照提示又写作
+        // 「action=expand+id」——模型照做时会撞上"缺少 target"这条与 add
+        // 批量写强相关的文案，误导性极强。按 action 分派文案。
+        return { ok: false, message: action === 'expand' ? mt('msg.expandNeedsTarget') : mt('msg.missingTarget') }
       }
       let result
       try {
@@ -1259,13 +1415,25 @@ export function memoryTool(ctx, config, store, queue, getRuntime, archive, write
             const total = allEntries.length
             const earliest = dates.length > 0 ? dates.reduce((a, b) => (a < b ? a : b)) : ''
             const latest = dates.length > 0 ? dates.reduce((a, b) => (a > b ? a : b)) : ''
-            // key 轨的 branch 过滤：只看该分支可见的条目（无标记=全部 + 标记含该分支）
-            if (target === 'key' && args.branch !== undefined && String(args.branch).trim() !== '') {
-              const b = String(args.branch).trim()
-              entries = entries.filter((entry) => {
-                const scope = parseEntryBranches(entry)
-                return scope === null || scope.includes(b)
-              })
+            // key 轨的 branch 过滤（P3-B，2026-09-16）：与快照注入 / expand
+            // 同一规则——**缺省就按当前分支过滤**（未显式传 branch 时从会话
+            // cwd 取 `git branch --show-current`）。此前只有显式传 branch 才
+            // 过滤，模型 `list target=key` 会看到仅限其它分支的条目：那些条目
+            // 既不会注入、也 expand 不出来，属于"看得见用不上"的越界视图。
+            // 非 git 仓库 / 取不到分支 / keyBranchFilter=false → 不过滤（与
+            // 注入侧同样保守：宁可多给，不静默隐藏）。
+            if (target === 'key' && config.keyBranchFilter !== false) {
+              const explicit = args.branch !== undefined && String(args.branch).trim() !== ''
+                ? String(args.branch).trim()
+                : undefined
+              const cwd = exec?.agent?.session?.header?.cwd
+              const branch = explicit ?? (cwd ? gitBranch(cwd) : undefined)
+              if (branch !== undefined) {
+                entries = entries.filter((entry) => {
+                  const scope = parseEntryBranches(entry)
+                  return scope === null || scope.includes(branch)
+                })
+              }
             }
             let message = `${target}：${entries.length} 条匹配`
             if (protectedView) {
@@ -1576,7 +1744,21 @@ export function apply(ctx, rawConfig = {}) {
 
   // Runtime configuration: cordis config (static defaults) overlaid with the
   // persisted state file, which the Web settings panel updates live.
-  const state = loadState(stateFile)
+  // NF-A1（2026-09-16 对抗复核）：留档告警必须进**宿主日志**，不能只 console.warn ——
+  // 桌面壳的 stdout 用户看不到，而"运行时覆盖项被重置成默认"是用户可感知的状态变化。
+  // 同步在记忆目录留一个标记文件，记忆 Tab 可据此提示（见 stateQuarantineMarker）。
+  const stateWarn = (message, meta) => {
+    const line = meta === undefined ? message : `${message} ${JSON.stringify(meta)}`
+    try {
+      if (typeof ctx.logger === 'function') ctx.logger('memory-evolve')?.warn?.(line)
+      else ctx.logger?.warn?.(line)
+    } catch { /* 日志失败绝不影响装载 */ }
+    console.warn(`[dsh-memory-evolve] ${line}`)
+  }
+  const state = loadState(stateFile, { onCorrupt: stateWarn })
+  // 上次启动是否发生过状态留档（用户可感知：运行时开关与界面设置被重置）。
+  // 读一次、注入快照一次即删——避免模型反复拿陈旧信息打扰用户。
+  quarantineNotice = readQuarantineNotice(stateFile)
   const runtime = { ...config }
   // 记忆同步模块引用（声明提前：installApi 的 deps 对象在 apply 前部构造，
   // 而 syncCtrl 在尾部装配——TDZ 约束，2026-08-11 实测）
