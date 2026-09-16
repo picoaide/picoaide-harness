@@ -537,12 +537,16 @@ export const SNAPSHOT_DICT = {
     '- Todos (dtodo): at turn end call dtodo list to check what is due (default view: due-today/overdue first, max 8 items) — if unfinished due items exist, remind the user at the end of your reply; never expand the whole todo list unprompted; usage details (target categories, past/expired queries) live in the dtodo tool description.',
   ],
   'snap.turnEndHead': [
-    '- 每轮收尾（先输出完整回复文本，再在文本之后附带工具调用，严禁先调工具）必须：',
-    '- End of every turn (output your complete reply text FIRST, then attach tool calls AFTER it; calling tools first is strictly forbidden), you must:',
+    // 文案里**不出现 dtodo 字样**：本行不受 todoEnabled 控制，而项目契约要求
+    // 「todoEnabled=false 时整个快照不出现 dtodo」（模型看不到该工具、也不该被
+    // 要求调用，见 tests/todo.test.js 的 todo disabled 用例）。待办的收尾指导
+    // 由受控的 snap.todoHint 单独承担，这里只写「写入工具」总纲即可。
+    '- 每轮收尾分两步（不要把完整回复和写入工具调用放进同一条消息——带工具调用的消息结束不了 turn，会逼出多余收尾）：① 本条消息只发写入工具调用（memory 等，不写正文）；② 下一条消息输出完整回复（无工具调用，结束 turn）。',
+    '- End of every turn in two steps (do NOT put the complete reply and the write tool calls in the same message — a message with tool calls cannot end the turn, which forces an extra closing step): ① this message carries ONLY the write tool calls (memory and friends, no prose); ② the next message outputs the complete reply (no tool calls, ends the turn).',
   ],
   'snap.subagentTurnEndHead': [
-    '- 收尾（先输出完整回复文本，再在文本之后附带工具调用，严禁先调工具）：',
-    '- Turn end (output your complete reply text FIRST, then attach tool calls AFTER it; calling tools first is strictly forbidden):',
+    '- 收尾分两步（不要把完整回复和写入工具调用放进同一条消息）：① 本条消息只发写入工具调用（不写正文）；② 下一条消息输出完整回复（无工具调用，结束 turn）。',
+    '- Turn end in two steps (do NOT put the complete reply and the write tool calls in the same message): ① this message carries ONLY the write tool calls (no prose); ② the next message outputs the complete reply (no tool calls, ends the turn).',
   ],
   'snap.subagentWrite': [
     '仅在完成**独立成果**时（一项实质产出、一个关键决策或踩坑结论），用 memory 工具一次调用（entries 数组）向 {targets} 写入 1 条，保持简洁',

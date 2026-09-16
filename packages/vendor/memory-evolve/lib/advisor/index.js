@@ -400,7 +400,14 @@ export function installAdvisor(ctx, config, deps = {}) {
 
   // ---- 事件接线（全 {global:true}：隔离作用域下也必须收到全部会话事件）----
   disposers.push(ctx.on('session/event', (session, event) => {
-    observer.handleEvent(session.id, session.ownEvents?.() ?? session.events, event)
+    // issue #49（上游 v26091501 修复；本地 2026-09-13 已先行同源修复，此处
+    // 合入上游的第三档兜底）：DSH 0.1.2-alpha.4+ 的 Session 不再暴露
+    // `.events` 数组（改经 `ownEvents()` 访问），读旧字段得到 undefined，
+    // observer → findLastMessageTurnEnd 对 undefined 做 for...of 立刻抛
+    // `TypeError: events is not iterable`，每个可评审回合报一次。
+    // 新宿主走 ownEvents()，老宿主回退 `.events`，两者都拿不到时给空数组
+    // （宁可本回合无可评审内容，也不能让监听器抛错）。
+    observer.handleEvent(session.id, session.ownEvents?.() ?? session.events ?? [], event)
   }, { global: true }))
   disposers.push(ctx.on('agent/created', ({ agent }) => {
     delivery.registerAgent(agent)

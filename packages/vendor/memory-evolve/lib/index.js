@@ -37,7 +37,7 @@ import { buildWsCoordBlock, installWsCoord } from './coi/ws-coord.js'
 import { installSession } from './session-orch.js'
 import { AliasStore } from './aliases.js'
 import { installSessionSearch } from './search/index.js'
-import { installPrompts } from './prompts.js'
+import { installPrompts, sanitizeSnapshotBody } from './prompts.js'
 import { installModels, buildModelsSnapshotAsync } from './models.js'
 import { installUiSettings } from './ui-settings.js'
 import { installMermaid } from './mermaid.js'
@@ -760,7 +760,26 @@ ${tail}${dueWarning}${writeWarning}`)
   // 记忆同步（2026-08-13 用户拍板）：**无 AI 侧入口**——命令组与快照状态
   // 行均已删除。记忆同步完全由用户在 Web GUI（记忆同步 Tab）主动操作，
   // AI 不参与执行，快照不再显示同步状态。
-  return parts.join('\n\n')
+  //
+  // 修复（issue #53，2026-09-14）：整段快照在离开插件前必须净化 `{{...}}`。
+  // 宿主（@deepseek-ai/dsh-system-prompt）的段渲染器把段正文里的 `{{name}}`
+  // 当模板变量解析，**未注册变量直接 throw**（宿主只注册 provider/model/cwd，
+  // memory:snapshot 段不注册任何变量）→ 整段渲染失败 = preStep 失败 = 该会话
+  // 每一步、每一轮都起不来，且**无法用 memory 工具自救**（工具调用需要回合，
+  // 而回合已经起不来），只能手改记忆文件。
+  //
+  // 记忆正文由模型/用户写入，天然可能包含 `{{xxx}}`（真实案例：记录
+  // 「x-opencode-session: {{session}}」这条事实）。此前净化只做在
+  // `prompt:injections` 轨（lib/prompts.js 的 renderInjectionSnapshot），
+  // 而本函数把会话标题/别名、memory/user 轨、项目 KEY 轨（全量与摘要两种
+  // 模式）的**原文**直接拼进同一段——这条注入路径没有任何净化，构成单点：
+  // 记忆里出现一个 `{{` 就等价于给所有注入该轨的会话埋雷。
+  //
+  // 用 expand:false 只降级不展开：记忆里的 `{{date}}` 是字面事实（不是待
+  // 展开的模板），展开会篡改内容；降级为 `{date}` 既保留语义又让宿主不再
+  // 解析。插件自身静态文案用的是单花括号（`{branch}`/`{title}`），不含
+  // `{{` 字面量，故整段净化零语义损失。
+  return sanitizeSnapshotBody(parts.join('\n\n'), { expand: false })
 }
 
 /**

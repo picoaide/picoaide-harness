@@ -594,10 +594,16 @@ export function expandVars(text, vars = {}) {
  *      由兜底规则把剩余 {{ 降级为 {，保证快照段绝不携带宿主可解析的
  *      {{ 序列。
  * @param {string} content - 注入正文（可能含未展开变量）。
+ * @param {{expand?: boolean}} [options] - expand=true（默认）先展开内置变量
+ *   （`{{date}}`/`{{time}}`），适用于**提示词注入轨**——用户写的就是模板；
+ *   expand=false 只降级不展开，适用于**记忆正文/整段快照**——那里的
+ *   `{{date}}` 是用户记录的**字面事实**（例如「配置里写 {{date}}」），展开
+ *   会篡改内容，只需保证宿主渲染器不再解析即可（issue #53）。
  * @returns {string} 可安全进入快照段的文本。
  */
-function sanitizeSnapshotBody(content) {
-  return expandVars(content)
+export function sanitizeSnapshotBody(content, { expand = true } = {}) {
+  const text = expand ? expandVars(content) : String(content)
+  return text
     .replace(/\{\{\s*([\w.-]+)\s*\}\}/g, '{$1}') // 合规残留变量去一层大括号
     .replace(/\{\{/g, '{') // 兜底 malformed/字面残留：剩余 {{ 全部降级
 }

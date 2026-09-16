@@ -617,7 +617,7 @@ test('skills sync: version-gated copy protects user edits', async () => {
   mkdirSync(join(pluginSkills, 'kimi-cli-calling'), { recursive: true })
   writeFileSync(join(pluginSkills, 'kimi-cli-calling', 'SKILL.md'), '---\nx-version: 1\n---\n# kimi v1\n')
   const { syncBuiltinSkills, BUILTIN_SKILLS } = await import('../lib/coi/skills-sync.js')
-  assert.deepEqual(BUILTIN_SKILLS, ['kimi-cli-calling', 'codex-cli-calling', 'grok-cli-calling', 'hermes-cli-calling'])
+  assert.deepEqual(BUILTIN_SKILLS, ['kimi-cli-calling', 'codex-cli-calling', 'grok-cli-calling', 'hermes-cli-calling', 'memory-consolidate'])
   const results = syncBuiltinSkills(pluginSkills, userSkills)
   assert.equal(results.find((r) => r.name === 'kimi-cli-calling').action, 'synced')
   assert.equal(results.find((r) => r.name === 'codex-cli-calling').action, 'missing')
@@ -634,6 +634,34 @@ test('skills sync: version-gated copy protects user edits', async () => {
   const upgraded = syncBuiltinSkills(pluginSkills, userSkills)
   assert.equal(upgraded.find((r) => r.name === 'kimi-cli-calling').action, 'synced')
   assert.equal(readFileSync(join(userSkills, 'kimi-cli-calling', 'SKILL.md'), 'utf8').includes('# kimi v2'), true)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('skills sync: directory skills (scripts/) copy as a whole folder', async () => {
+  const dir = tempDir()
+  const pluginSkills = join(dir, 'plugin-skills')
+  const userSkills = join(dir, 'user-skills')
+  mkdirSync(join(pluginSkills, 'memory-consolidate', 'scripts'), { recursive: true })
+  writeFileSync(join(pluginSkills, 'memory-consolidate', 'SKILL.md'), '---\nname: memory-consolidate\nx-version: 1\ndescription: 记忆合并梳理\n---\n# v1\n')
+  writeFileSync(join(pluginSkills, 'memory-consolidate', 'scripts', 'scan_memory.mjs'), 'export const v = 1\n')
+  const { syncBuiltinSkills } = await import('../lib/coi/skills-sync.js')
+  // 首次同步：SKILL.md 与 scripts/ 辅助文件一起落地
+  const first = syncBuiltinSkills(pluginSkills, userSkills)
+  assert.equal(first.find((r) => r.name === 'memory-consolidate').action, 'synced')
+  assert.equal(readFileSync(join(userSkills, 'memory-consolidate', 'scripts', 'scan_memory.mjs'), 'utf8'), 'export const v = 1\n')
+  // 版本不变 → 用户编辑受保护
+  writeFileSync(join(userSkills, 'memory-consolidate', 'SKILL.md'), '---\nx-version: 1\n---\n# 用户改过\n')
+  const again = syncBuiltinSkills(pluginSkills, userSkills)
+  assert.equal(again.find((r) => r.name === 'memory-consolidate').action, 'unchanged')
+  assert.equal(readFileSync(join(userSkills, 'memory-consolidate', 'SKILL.md'), 'utf8').includes('用户改过'), true)
+  // 版本升级 → 整目录覆盖，且目标里的陈旧辅助文件被清掉
+  writeFileSync(join(pluginSkills, 'memory-consolidate', 'SKILL.md'), '---\nname: memory-consolidate\nx-version: 2\ndescription: 记忆合并梳理\n---\n# v2\n')
+  writeFileSync(join(userSkills, 'memory-consolidate', 'scripts', 'stale-old.mjs'), 'export const stale = true\n')
+  const bump = syncBuiltinSkills(pluginSkills, userSkills)
+  assert.equal(bump.find((r) => r.name === 'memory-consolidate').action, 'synced')
+  assert.equal(readFileSync(join(userSkills, 'memory-consolidate', 'SKILL.md'), 'utf8').includes('# v2'), true)
+  assert.equal(existsSync(join(userSkills, 'memory-consolidate', 'scripts', 'stale-old.mjs')), false)
+  assert.equal(readFileSync(join(userSkills, 'memory-consolidate', 'scripts', 'scan_memory.mjs'), 'utf8'), 'export const v = 1\n')
   rmSync(dir, { recursive: true, force: true })
 })
 

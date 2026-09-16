@@ -4,6 +4,35 @@
 
 > [English](CHANGELOG.en.md)
 
+## 2026-09-15
+
+### 修复
+
+- **记忆正文被同步链路持续损坏成 U+FFFD 替换字符（根因，阻塞级）**：MEMORY.md 与 daily 日志里长出 `�`（线上实证 45 处、跨四天静默累积；本机 4 个 daily 文件 11 处），格式预检（`isCanonical`/parse→serialize 往返）**照样放行**，所以一直没人发现。根因在**同步读路径**：`runGit()`（`lib/sync/repo.js`）收集子进程输出用的是裸 `String(chunk)` —— Buffer 的 `String(chunk)` 等价于 `chunk.toString('utf8')`，即**每个管道分块各自独立解码**；git 大对象按 32 KiB 块写管道，任何跨块边界的多字节字符（汉字 3 字节、emoji 4 字节）都被切成两段无效序列、各解码成一个 U+FFFD。传播链：`readTreeFiles()`（读远端 theirs / merge-base base）→ 损坏文本进场 → `mergeEntries` → 写回 → 提交 → 下次同步再把损坏读回来继续切，**逐轮累积**。法证：损坏文件所在提交的两个父提交都是 0 处损坏，合并结果却有 2 处，下一轮 2 → 3；4 个损坏文件的干净版本里，损坏字符起始字节偏移为 32766 / 32767 / 32766 / 81913 ——前三个**恰好跨越字节 32768**。修复：改为 `setEncoding('utf8')` 流式解码（Node 内部 StringDecoder 在分块边界保留半截序列、由下一块补齐）。同款问题一并修掉三处：`lib/sync/index.js`（worker 子进程 stdout/stderr，stdout 末行是 JSON，损坏会导致解析失败）、`lib/search-docs.js`（文档检索 `out += chunk`，损坏字符进检索结果）、`lib/coi/scheduler.js`（COI 任务日志，启动/恢复两条路径，损坏字符直接落进用户看的日志）。`runGit()` 顺带新增 `opts.spawnFn` 注入点（测试用，使"分块边界"可确定性复现）。
+- **文档检索输出上限改按 UTF-8 字节计**：`lib/search-docs.js` 的 `maxBytes` 保护此前用 `out.length + chunk.length`（字符串 UTF-16 单元与 Buffer 字节混用）。改用 `setEncoding` 后 chunk 是字符串，沿用 `.length` 会把中文按 1/3 字节少算，故改为独立累计 `Buffer.byteLength(chunk, 'utf8')`。
+
+### 测试
+
+- 新增 `tests/sync-utf8-stream.test.js`（14 例）：注入假 spawn + 手动 `push` 的 Readable，把 2 / 3 / 4 字节字符在**每一个内部切点**分成两次投递（stdout、stderr 各 6 例），加逐字节最坏分块与真实子进程冒烟。每例都带"同一分块序列交给旧的逐块解码必然损坏"的**前提自检**，切点失效会直接失败而不是假绿。已验证：回退解码修复后 14/14 必失败。（第一版回归用真实子进程 + 60 ms 定时分写，经外援复核证伪为**可假绿**——父进程稍慢，两段就被合并成一个 data 事件，已改写为注入式。）
+
+---
+
+## 2026-09-14
+
+### 修复
+
+- **记忆正文里的 `{{...}}` 会把会话「毒死」（issue #53，阻塞级）**：宿主的系统提示词段渲染器把段正文里的 `{{name}}` 当模板变量解析，**未注册变量直接 throw**（宿主只注册 `provider`/`model`/`cwd`）。而 `memory:snapshot` 段把会话标题/别名、`memory`/`user` 轨、项目 KEY 轨的**原文**直接拼进去，此前只对提示词注入轨做了净化——于是记忆里出现一个字面量 `{{xxx}}`（真实案例：记录 `x-opencode-session: {{session}}` 这条事实）就等价于给所有注入该轨的会话埋雷：**该会话每一步、每一轮都起不来，且无法用 memory 工具自救**（工具调用需要回合，而回合已经起不来），只能手改记忆文件。现改为**整段快照在离开插件前统一净化**：`sanitizeSnapshotBody` 新增 `expand` 选项——注入轨保持 `expand=true`（用户写的就是待展开模板），记忆轨与整段快照用 `expand=false` **只降级不展开**（记忆里的 `{{date}}` 是用户记录的字面事实，展开会篡改内容；降级为 `{date}` 既保语义又让宿主不再解析）。`buildMemoryContext`（只喂外部 COI 执行器、不经过宿主渲染器）不做净化。渲染侧净化意味着**升级插件后已中毒会话自动恢复**，无需改动用户数据文件。
+- **advisor 启用后每回合报 `TypeError: events is not iterable`（issue #49）**：与 issue #42 / PR #38 同源——DSH 0.1.2-alpha.4+ 的 `Session` 不再暴露 `.events` 数组，当时修了 `lib/review.js` 却漏了 advisor 装配层的 `session/event` 接线，监听器把 `undefined` 转给 observer，`findLastMessageTurnEnd` 对其做 `for...of` 即抛错。现沿用同款三档兜底 `session.ownEvents?.() ?? session.events ?? []`（新宿主走 `ownEvents()`，老宿主回退 `.events`，都拿不到时给空数组）。
+
+### 新增
+
+- **内置技能 memory-consolidate：记忆合并梳理（外部 PR #50）**：把随时间累积出的重复条目、新旧并存版本、相近分散表述，按七条标准（覆盖更新 / 相近合并 / 字面去重 / 冲突裁决 / 项目经验下沉 / 过期状态清理 / 跨轨归位）整合归档。硬边界：只走 memory 工具（`replace`/`archive`/`add`，禁直改 `.md`、禁 `remove`，保证可逆）、daily 日志与待办不参与合并、key 轨新增仍走用户确认队列。附带零依赖只读预扫脚本 `scripts/scan_memory.mjs`（`§` 条目解析 + CJK 二元组 TF-IDF 相似度 + 覆盖线索 + 冲突极性聚簇），只做候选发现、不做裁决与写操作。
+
+### 变更
+
+- **收尾规则改为两步式：先记记忆、再输出完整回复（外部 PR #52）**：原规则要求把完整回复与 memory 工具调用放进同一条消息，但 DSH 中**带工具调用的消息结束不了 turn**，必然逼出一条多余的收尾消息；而 `transcriptView` 默认 `compact`（折叠已完成 turn 的过程、突出最终输出）高亮的是**最后一条**消息，于是高亮到的是那条无意义收尾而不是完整回复。现改为：① 本条消息只发写入工具调用（不写正文）→ ② 下一条消息输出完整回复（无工具调用，结束 turn）。完整回复因此成为最后一条、被 compact 正确高亮。注意 `snap.turnEndHead` 文案里不出现 dtodo 字样——该行不受 `todoEnabled` 控制，待办的收尾指导由受控的 `snap.todoHint` 单独承担。
+- **内置技能同步升级为「整目录复制」（外部 PR #50）**：此前同步只复制 `SKILL.md`，现改为整目录（`scripts/` 等辅助文件随技能一起分发），版本门控与用户编辑保护语义不变（目标 `x-version` 不低于内置时不覆盖）。**行为变更**：版本升级时目标目录会被先清空再复制，用户自加在内置技能目录里的文件会被删除。
+
 ---
 
 ## 2026-09-12
