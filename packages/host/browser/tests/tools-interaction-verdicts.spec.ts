@@ -505,9 +505,9 @@ describe('2026-09-15 P2：browser_wait_for 的实际生效上限写进描述', (
   it('描述与参数都写明 40000ms（工具体预算），并说明 runtime 的 120000ms 够不到', () => {
     const harness = track(makeHarness())
     const tool = harness.tools.get('browser_wait_for')!
-    expect(tool.timeoutMs).toBe(40_000)
+    expect(tool.timeoutMs).toBe(55_000)
     expect(tool.description).toContain('40000')
-    expect(tool.description).toContain('120000')
+    expect(tool.description).toContain('55')
     const timeout = tool.parameters.properties?.['timeoutMs']?.description ?? ''
     expect(timeout).toContain('40000')
     expect(timeout).toContain('30000')

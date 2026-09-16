@@ -55,10 +55,16 @@ describe('bareHostOrigin: 用户按内置模板只填主机名', () => {
     expect(bareHostOrigin('glitchtip.corp.example/api')).toBe('https://glitchtip.corp.example')
     expect(bareHostOrigin('glitchtip.corp.example:8443/x')).toBe('https://glitchtip.corp.example:8443')
     expect(bareHostOrigin('localhost:8000')).toBe('http://localhost:8000')
+    // Self-hosted addresses the template also asks for: IP, intranet single
+    // label, IDN. Private/loopback/single-label default to http.
+    expect(bareHostOrigin('127.0.0.1:8000')).toBe('http://127.0.0.1:8000')
+    expect(bareHostOrigin('10.0.0.5:8000')).toBe('http://10.0.0.5:8000')
+    expect(bareHostOrigin('glitchtip:8000')).toBe('http://glitchtip:8000')
+    expect(bareHostOrigin('例子.中国')).toBe('https://xn--fsqu00a.xn--fiqs8s')
   })
 
   it('refuses values that are not host-shaped', () => {
-    for (const value of ['abc', 'not a host', 'https://x.example', '', undefined, 'x.y/z z']) {
+    for (const value of ['not a host', 'https://x.example', 'javascript:alert(1)', '', undefined, 'x.y/z z']) {
       expect(bareHostOrigin(value as string | undefined), String(value)).toBeNull()
     }
   })
@@ -86,6 +92,12 @@ describe('siteOriginFromFields', () => {
     expect(a).toBe('https://a.example')
   })
 
+  it('recognizes camelCase address keys as well as snake_case', () => {
+    expect(siteOriginFromFields({ serverUrl: 'app.glitchtip.com' })).toBe('https://app.glitchtip.com')
+    expect(siteOriginFromFields({ apiEndpoint: 'glitchtip.corp.example' })).toBe('https://glitchtip.corp.example')
+    expect(siteOriginFromFields({ plain: 'app.glitchtip.com' })).toBeNull()
+  })
+
   it('normalizes a bare hostname only when the field name is address-shaped', () => {
     // The built-in GlitchTip template tells users to type `app.glitchtip.com`.
     expect(siteOriginFromFields({ GLITCHTIP_BASE_URL: 'app.glitchtip.com' })).toBe('https://app.glitchtip.com')
@@ -103,6 +115,10 @@ describe('credentialSiteOrigin', () => {
   it('falls back to the credential fields when the declaration is missing or unusable', () => {
     expect(credentialSiteOrigin({ baseUrl: 'https://from-field.example' }, undefined)).toBe('https://from-field.example')
     expect(credentialSiteOrigin({ baseUrl: 'https://from-field.example' }, 'not-a-url')).toBe('https://from-field.example')
+    // A dotted bare host is a usable declaration; a single-label one is not
+    // (typo guard: fall through to the credential fields).
+    expect(credentialSiteOrigin(undefined, 'glitchtip.corp.example')).toBe('https://glitchtip.corp.example')
+    expect(credentialSiteOrigin(undefined, 'glitchtip')).toBeNull()
   })
 
   it('returns null when nothing can be bound (the tool then refuses)', () => {

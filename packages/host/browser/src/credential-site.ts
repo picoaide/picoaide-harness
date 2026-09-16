@@ -18,8 +18,14 @@
  * 就是 "a connector record without a site URL is refused"。
  */
 
-/** 凭据里可能是"站点地址"的字段名（决定同名多值时的优先级）。 */
-const SITE_FIELD_HINT = /(?:^|_)(?:base_?)?(?:url|uri|site|host|origin|endpoint|address)(?:$|_)/iu
+/**
+ * 凭据里可能是"站点地址"的字段名（决定同名多值时的优先级）。
+ *
+ * Covers snake_case and camelCase (`GLITCHTIP_BASE_URL`, `serverUrl`,
+ * `apiEndpoint`, `hostname`): the old underscore-only boundary missed the
+ * camelCase spellings our own config samples use (2026-09-16 audit R2-E3).
+ */
+const SITE_FIELD_HINT = /(?:base.?url|url|uri|site|host|origin|endpoint|address)/iu
 
 /** http/https 的 origin；其它一律 `null`（`about:blank` 的 origin 是字符串
  * `"null"`，不能当成可比对的站点）。裸主机名不在这里归一 —— 见
@@ -45,18 +51,45 @@ export function httpOriginOf(value: string | null | undefined): string | null {
  * @param value - 字段原值。
  * @returns 归一后的 origin，或 null。
  */
-export function bareHostOrigin(value: string | null | undefined): string | null {
+export function bareHostOrigin(
+  value: string | null | undefined,
+  options: { singleLabel?: boolean } = {},
+): string | null {
   if (typeof value !== 'string') return null
-  const match = /^(?<host>(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}|localhost)(?::(?<port>\d{1,5}))?(?:\/\S*)?$/iu.exec(value.trim())
-  const host = match?.groups?.['host']?.toLowerCase()
-  if (host === undefined) return null
-  const port = match?.groups?.['port']
-  const scheme = host === 'localhost' ? 'http' : 'https'
+  const trimmed = value.trim()
+  if (trimmed === '' || /\s/u.test(trimmed)) return null
+  // A scheme-less value only; explicit schemes, protocol-relative URLs and
+  // userinfo are either handled by httpOriginOf or must be refused. The scheme
+  // check requires `://` (or a known opaque scheme) so `host:8443` — a port, not
+  // a scheme — is still accepted.
+  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed) || /^(?:javascript|data|file|about|mailto):/iu.test(trimmed)
+    || trimmed.startsWith('//') || trimmed.includes('@')) return null
+  let url: URL
   try {
-    return new URL(`${scheme}://${host}${port === undefined ? '' : `:${port}`}`).origin
+    url = new URL(`https://${trimmed}`)
   } catch {
     return null
   }
+  const host = url.hostname.toLowerCase()
+  if (host === '' || !/^[a-z0-9.\-:\[\]]+$/u.test(host)) return null
+  // A single-label name is an intranet host in the field case; a deployment
+  // declaration must look unambiguous, so nonsense like `not-a-url` falls
+  // through to the credential fields.
+  const singleLabel = !host.includes('.') && !isPrivateHost(host)
+  if (singleLabel && options.singleLabel === false) return null
+  // `new URL` gives IDN/IPv4/IPv6/single-label a hostname; private/loopback/
+  // single-label intranet names default to http, public names to https. The
+  // refusal message tells the user what to do when the real service uses the
+  // other scheme (scheme-less input cannot encode that choice).
+  const scheme = isPrivateHost(host) || singleLabel ? 'http' : 'https'
+  return `${scheme}://${url.host.toLowerCase()}`
+}
+
+/** Loopback/private/link-local hosts, where plain http is the likely service. */
+function isPrivateHost(host: string): boolean {
+  return host === 'localhost' || host.endsWith('.localhost') || host === '[::1]'
+    || /^127\./u.test(host) || /^10\./u.test(host) || /^192\.168\./u.test(host)
+    || /^172\.(?:1[6-9]|2\d|3[01])\./u.test(host) || /^169\.254\./u.test(host)
 }
 
 /**
@@ -90,5 +123,10 @@ export function credentialSiteOrigin(
   credentialFields: Record<string, string> | undefined,
   configured: string | null | undefined,
 ): string | null {
-  return httpOriginOf(configured) ?? siteOriginFromFields(credentialFields)
+  // A deployment declaration is user/operator written too: accept the same bare
+  // host form there, otherwise the refusal message recommends `credentialSites`
+  // while this function silently ignores exactly that value.
+  return httpOriginOf(configured)
+    ?? bareHostOrigin(configured, { singleLabel: false })
+    ?? siteOriginFromFields(credentialFields)
 }
