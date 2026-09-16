@@ -171,7 +171,14 @@ export class ConnectorStore {
     // 复核把这条竞态也一并暴露出来）。
     return await this.exclusive(async () => {
       const current = (await this.readCredential(id)) ?? { updatedAt: 0 }
-      const next: ConnectorCredential = { ...current, ...patch, updatedAt: Date.now() }
+      // Strictly increasing per id: two writes inside one millisecond must still
+      // be ordered, because `adoptLatestRefresh` compares this value to decide
+      // whether a refresh is newer than a registration's credential snapshot.
+      // `Date.now()` alone collides at ms resolution and would make that
+      // comparison skip a genuine catch-up (or, with `>=`, adopt a stale one).
+      const now = Date.now()
+      const updatedAt = now > current.updatedAt ? now : current.updatedAt + 1
+      const next: ConnectorCredential = { ...current, ...patch, updatedAt }
       await this.writeCredentialUnlocked(id, next)
       return next
     })

@@ -302,6 +302,18 @@ describe('ConnectorStore.clearCredentialIfUnchanged：原子 compare-and-delete'
     }
   })
 
+  it('updateCredential 的 updatedAt 严格递增（同毫秒也不重复）', async () => {
+    const dir = await tempDir('pico-store-updatedat-')
+    const store = new ConnectorStore({ baseDir: dir })
+    const first = await store.updateCredential('c', { accessToken: 'a1' })
+    const second = await store.updateCredential('c', { accessToken: 'a2' })
+    const third = await store.updateCredential('c', { accessToken: 'a3' })
+    // adoptLatestRefresh relies on this ordering when a refresh and an
+    // interactive re-authorization land in the same millisecond.
+    expect(second.updatedAt).toBeGreaterThan(first.updatedAt)
+    expect(third.updatedAt).toBeGreaterThan(second.updatedAt)
+  })
+
   it('sameCredential 逐字段比较（含 clientId/clientSecret/refreshedAt，且不受 fields 键序影响）', async () => {
     const base = { updatedAt: 5, fields: { a: '1', b: '2' } }
     expect(sameCredential(base, { updatedAt: 5, fields: { b: '2', a: '1' } })).toBe(true)
