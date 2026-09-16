@@ -144,14 +144,33 @@ test('P3-B list target=key 缺省按当前分支过滤（与注入/expand 同规
   }
 })
 
-test('P3-B keyBranchFilter=false：list 也不过分支滤（保守开关仍然有效）', async () => {
+test('P3-B keyBranchFilter=false：list 也不过分支滤（保守开关仍然有效）', async (t) => {
+  // NF-A4（2026-09-16 对抗复核）：这一条原先在**非 git 目录**上跑，只断言 ok=true
+  // —— 非 git 下本来就不过滤，删掉被修逻辑照样绿（假绿）。改为**真 git 仓库**上
+  // 构造"其它分支才可见的条目"，断言开关关掉时它**确实出现**。
+  const { spawnSync } = await import('node:child_process')
+  const { writeFileSync, mkdirSync } = await import('node:fs')
+  const { projectHash } = await import('../lib/store.js')
   const dir = tempDir()
   try {
+    const init = spawnSync('git', ['init', '-q', '-b', 'main', dir], { stdio: 'ignore' })
+    if (init.status !== 0) return t.skip('git 不可用')
+    spawnSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-q', '-m', 'init'], { cwd: dir, stdio: 'ignore' })
+
     const ctx = fakeCtx()
     apply(ctx, { memoryDir: dir, keyBranchFilter: false })
     const tool = ctx.state.tools.find((t) => t.name === 'memory')
-    const result = await tool.execute({ action: 'list', target: 'key' }, execCwd(dir))
-    assert.equal(result.ok, true)
+    const keyDir = join(dir, 'projects', projectHash(dir))
+    mkdirSync(keyDir, { recursive: true })
+    writeFileSync(join(keyDir, 'KEY.md'), '§\n[2026-09-16] [branch:other-branch] 仅其它分支可见的条目\n')
+
+    const listed = await tool.execute({ action: 'list', target: 'key' }, execCwd(dir))
+    assert.equal(listed.ok, true)
+    assert.match(
+      listed.entries.join('\n'),
+      /仅其它分支可见的条目/,
+      'keyBranchFilter=false 时必须不过滤（否则这条用例在非 git 目录上是假绿）',
+    )
   } finally {
     clean(dir)
   }

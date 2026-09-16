@@ -534,6 +534,11 @@ export const SKILL_DICT = {
 
 /** Snapshot injection strings (renderSnapshot / buildMemoryContext in lib/index.js). */
 export const SNAPSHOT_DICT = {
+  // 对抗复核 A1（2026-09-16）：状态文件损坏留档后的一次性告知（模型据此提示用户）
+  'snap.stateQuarantined': [
+    '## 记忆设置曾被重置（{at}）\n上一次启动时 `plugin-state.json` 损坏，已留档为同目录下的 `.corrupt-*.bak`，本次按**默认配置**运行——运行时开关与界面设置可能与你之前的设置不同。请转告用户：设置被重置了、备份文件在哪，需要的话让用户重新设置（记忆正文与各轨内容不受影响）。',
+    '## Memory settings were reset ({at})\nOn the previous launch `plugin-state.json` was corrupt; it was archived as a `.corrupt-*.bak` file next to it and this run uses **default settings** — runtime switches and UI settings may differ from what you had. Tell the user: their settings were reset, where the backup is, and that they can configure them again if needed (memory tracks and content are unaffected).',
+  ],
   'snap.sessionNamed': [
     '## 你的会话（用名称/别名/ID 与各模块消息里的 session id 比对判断是谁；回复时把名称/别名与 ID 告知对方）',
     '## Your session (match the name/alias/ID against session ids inside module messages to tell who is who; when replying, tell the other party the name/alias and ID)',

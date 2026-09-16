@@ -17,9 +17,9 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { ArchiveStore, MemoryStore, SuggestionQueue, extractEntryDate, gitBranch, gitBranchList, parseEntryBranches, parseEntryDshOnly, parseEntrySummary, autoSummary, stripEntrySummary, todayStamp } from './store.js'
 import { stripEntryId, extractEntryId, legacyIdFor } from './sync/entryid.js'
 import { readAliases } from './aliases.js'
@@ -271,6 +271,9 @@ export const RUNTIME_KEYS = [
   'perTurnProjectWrites', 'perTurnDailyWrites', 'perTurnKeyWrites',
   'perTurnWriteGuard', 'writeGuardThreshold',
   'keyProgressiveDisclosure', 'keyFullInjectThreshold', 'keyFullInjectCharLimit',
+  // 对抗复核 A2（2026-09-16）：这个逃生开关原先只有 cordis 行 config 能改，
+  // 桌面分发里用户/管理员都够不到 —— 放进运行时键后设置面板可切换、且落盘。
+  'keyBranchFilter',
   'searchDocsEnabled', 'coiEnabled', 'broadcastEnabled', 'promptsEnabled',
   'sessionSearchEnabled', 'sessionEnabled', 'modelsEnabled', 'uiSettingsEnabled',
   'bookmarkEnabled', 'searchDocsMode', 'todoEnabled',
@@ -324,6 +327,7 @@ export function validateRuntimePatch(key, value) {
     case 'sessionImageQueryEnabled':
     case 'syncEnabled':
     case 'canvasEnabled':
+    case 'keyBranchFilter':
       if (typeof value !== 'boolean') throw new Error(`dsh-memory-evolve: ${key} 必须是布尔值`)
       return
     case 'reviewInterval':
@@ -406,7 +410,11 @@ export function validateRuntimePatch(key, value) {
  * @returns {object} 解析出的覆盖项；缺失/损坏时为 `{}`。
  */
 function loadState(stateFile, deps = {}) {
-  const warn = deps.onCorrupt ?? ((message, meta) => console.warn(`[dsh-memory-evolve] ${message}`, meta ?? ''))
+  // NF-A6（2026-09-16 对抗复核）：第二参对象不会被 console.warn 插值，实打印成
+  // `[object Object]`、诊断信息全丢；这里统一内联进首参（与 session-orch.js 同风格）。
+  const warn = deps.onCorrupt ?? ((message, meta) => {
+    console.warn(`[dsh-memory-evolve] ${message}${meta === undefined ? '' : ` ${JSON.stringify(meta)}`}`)
+  })
   let text
   try {
     text = readFileSync(stateFile, 'utf8')
@@ -434,6 +442,35 @@ function loadState(stateFile, deps = {}) {
 }
 
 /**
+ * 一次性"状态曾留档"告知（对抗复核 A1，2026-09-16）。
+ *
+ * 为什么需要它：`plugin-state.json` 损坏后我们 fail-soft 启动（应用能起来），
+ * 但**用户的运行时开关与界面设置被重置成默认**——这是用户可感知的状态变化，
+ * 而桌面壳里 `console.warn` 与目录里多出的 `.bak` 都不足以让用户知道。
+ * 于是留档时写一个标记文件，`apply()` 启动时读一次、注入系统提示词快照一次，
+ * 使模型能在第一条回复里告知用户"设置被重置了、备份在哪"，随后删除标记
+ * （避免反复拿陈旧信息打扰）。
+ * @type {object|null}
+ */
+let quarantineNotice = null
+
+/**
+ * Read and consume the quarantine marker（读一次即删）。
+ * @param {string} stateFile - 状态文件路径。
+ * @returns {object|null} 标记内容；不存在/不可读时为 null。
+ */
+function readQuarantineNotice(stateFile) {
+  const marker = stateQuarantineMarker(stateFile)
+  try {
+    const parsed = JSON.parse(readFileSync(marker, 'utf8'))
+    unlinkSync(marker)
+    return parsed !== null && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * Move a corrupt state file aside so the next `saveState` starts clean while the
  * user's bytes stay recoverable. Never throws（P1-A：装载路径必须 fail-soft）。
  * @param {string} stateFile - 损坏的状态文件。
@@ -441,12 +478,55 @@ function loadState(stateFile, deps = {}) {
  */
 function quarantineState(stateFile, warn) {
   const backup = `${stateFile}.corrupt-${Date.now()}.bak`
+  let archived = false
   try {
     renameSync(stateFile, backup)
+    archived = true
     warn(`已把损坏的状态文件留档到 ${backup}`)
   } catch (error) {
     warn(`损坏状态文件留档失败（${error.code}）——继续以空状态运行`, { stateFile })
   }
+  // 用户可感知的后果是"我的开关被重置成默认了"——写一个标记文件，
+  // 让记忆 Tab / 记忆工具能据此提示，而不是只留一个没人知道的 .bak。
+  try {
+    // 落点必须走自锚定安全写（结构哨兵 R-NF1：lib/** 不得有按路径的裸 fs 写）
+    writeFileAtomicSafeAt(stateQuarantineMarker(stateFile), `${JSON.stringify({
+      at: new Date().toISOString(),
+      stateFile,
+      archived,
+      backup: archived ? backup : null,
+      effect: 'plugin-state.json 损坏，本次启动已按默认配置运行（运行时开关与界面设置被重置）',
+    }, null, 2)}\n`)
+  } catch { /* 标记写不进去也不影响装载（只读 home / 落点被拒） */ }
+  pruneQuarantineBackups(stateFile)
+}
+
+/**
+ * 留档标记文件路径（与 stateFile 同目录）。
+ * @param {string} stateFile - 状态文件路径。
+ * @returns {string} 标记文件路径。
+ */
+export function stateQuarantineMarker(stateFile) {
+  return `${stateFile}.quarantined.json`
+}
+
+/**
+ * 只保留最近 3 份损坏留档：反复损坏时不让备份无限堆积（对抗复核 A1）。
+ * @param {string} stateFile - 状态文件路径。
+ */
+function pruneQuarantineBackups(stateFile) {
+  try {
+    const dir = dirname(stateFile)
+    const prefix = `${basename(stateFile)}.corrupt-`
+    const backups = readdirSync(dir)
+      .filter(name => name.startsWith(prefix) && name.endsWith('.bak'))
+      .sort()
+    for (const stale of backups.slice(0, Math.max(0, backups.length - 3))) {
+      try {
+        unlinkSync(join(dir, stale))
+      } catch { /* 删不掉就留着 */ }
+    }
+  } catch { /* 目录读不到就不清理 */ }
 }
 
 /**
@@ -597,6 +677,10 @@ export function resolveConfig(raw) {
  */
 export function renderSnapshot(config, store, agent, counter, sessionTitleService = null, writeGap = null) {
   const parts = []
+  // NF-A1：状态留档告知（一次性）。放在最前，确保模型在第一条回复就能告知用户。
+  if (quarantineNotice !== null && quarantineNotice !== undefined) {
+    parts.push(st('snap.stateQuarantined', { at: String(quarantineNotice.at ?? '') }))
+  }
   // 会话 ID 段（快照最前面的独立输出端，常驻注入，不随任何模块开关）：
   // AI 始终知道"我是谁"——广播消息判断 sender/recipients 谁是谁、回复时
   // 把此 ID 告知对方，以及未来其他模块的消费者都要用它。固定文本（会话
@@ -1660,7 +1744,21 @@ export function apply(ctx, rawConfig = {}) {
 
   // Runtime configuration: cordis config (static defaults) overlaid with the
   // persisted state file, which the Web settings panel updates live.
-  const state = loadState(stateFile)
+  // NF-A1（2026-09-16 对抗复核）：留档告警必须进**宿主日志**，不能只 console.warn ——
+  // 桌面壳的 stdout 用户看不到，而"运行时覆盖项被重置成默认"是用户可感知的状态变化。
+  // 同步在记忆目录留一个标记文件，记忆 Tab 可据此提示（见 stateQuarantineMarker）。
+  const stateWarn = (message, meta) => {
+    const line = meta === undefined ? message : `${message} ${JSON.stringify(meta)}`
+    try {
+      if (typeof ctx.logger === 'function') ctx.logger('memory-evolve')?.warn?.(line)
+      else ctx.logger?.warn?.(line)
+    } catch { /* 日志失败绝不影响装载 */ }
+    console.warn(`[dsh-memory-evolve] ${line}`)
+  }
+  const state = loadState(stateFile, { onCorrupt: stateWarn })
+  // 上次启动是否发生过状态留档（用户可感知：运行时开关与界面设置被重置）。
+  // 读一次、注入快照一次即删——避免模型反复拿陈旧信息打扰用户。
+  quarantineNotice = readQuarantineNotice(stateFile)
   const runtime = { ...config }
   // 记忆同步模块引用（声明提前：installApi 的 deps 对象在 apply 前部构造，
   // 而 syncCtrl 在尾部装配——TDZ 约束，2026-08-11 实测）

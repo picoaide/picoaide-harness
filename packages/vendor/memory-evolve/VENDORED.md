@@ -114,10 +114,28 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
 | D1 | **`plugin-state.json` 损坏 = 整个桌面应用起不来**（启动级）：`loadState` 原只容忍 ENOENT，JSON 坏/0 字节/`EISDIR` 一律 rethrow → cordis `plugin tree failed to load` → 宿主退出。改为 fail-soft：损坏文件**改名留档** `.corrupt-<ts>.bak` 后按空状态装载，连留档失败也不抛 | `lib/index.js`（`loadState`/`quarantineState`） | `tests/state-corruption-failsoft.test.js`（8 例；回退修复必红，已验） |
 | D2 | **记忆目录不可写同样起不来**：`installAdvisor` 在 `advisorEnabled` 默认关时仍急切 `mkdirSync` 三个子目录（只读 home/磁盘满 → 装载失败）。改为**惰性建目录**（首次写入时建），写入失败只影响 advisor 自身持久化 | `lib/advisor/index.js`（`ensureDir`/`lazyDir` + 6 个写路径包装） | `tests/advisor-lazy-dirs.test.js`（6 例；回退修复 5/6 必红，已验） |
 | D3 | **expand 提示与 schema 不一致**：快照写「`action=expand+id`」，schema 是 `required:['action','target']`、expand 只认 `target=key` ⇒ 模型照做撞上"缺少 target（…用 add + entries）"的误导文案。提示改为 `action=expand target=key id=…`，报错按 action 分派（新增 `msg.expandNeedsTarget`） | `lib/i18n.js`、`lib/index.js` | `tests/tool-param-contract.test.js`（P3-A 三条）+ `tests/progressive-disclosure.test.js` 断言收紧 |
-| D4 | **`list target=key` 不套分支作用域**：快照注入与 expand 都按当前分支过滤，只有 list 要显式传 `branch` ⇒ 返回仅限其它分支的条目（看得见用不上）。改为缺省按会话 cwd 的当前分支过滤（`keyBranchFilter=false` 或非 git 仓库仍不过滤） | `lib/index.js` | `tests/tool-param-contract.test.js`（P3-B 两条） |
+| D4 | **`list target=key` 不套分支作用域**：快照注入与 expand 都按当前分支过滤，只有 list 要显式传 `branch` ⇒ 返回仅限其它分支的条目（看得见用不上）。改为缺省按会话 cwd 的当前分支过滤（非 git 仓库仍不过滤）；`keyBranchFilter` 同时**加进 RUNTIME_KEYS**，面板「key 轨分支过滤」开关可关（此前只有 cordis 行 config 能改，桌面分发里用户够不到） | `lib/index.js` | `tests/tool-param-contract.test.js`（P3-B 两条） |
 | D5 | **私有字典看操作系统语言、且加载期冻结**（S4）：7 处 `const LANG = navigator.language…` / 5 份 `isEn()`（CoIView / PromptView / BroadcastView / AdvisorPanel / MemoryQueueView / TodoView / SyncView）在用户切界面语言时不跟随。改为统一走 `clientLang()`（调用期解析），client 入口注册 resolver（读 locale 快照）；`STATUS_META` 这类**含语言的模块级表**改为函数 | `lib/i18n.js`（`setClientLocaleResolver`/`clientLang`）、`src/client/*`（7 文件）、`lib/client.js`（重建） | `tests/client-locale-follow.test.js`（7 例：解析契约 + 源码级"不得再有 `navigator.language` 判定/模块级 `LANG`"） |
 | D6 | **advisor 提示词只有中文、且硬编码「用中文输出」**：note 是以用户指令形式注入主 Agent 会话的 ⇒ 英文界面下中文指令直接进主对话。三段（默认系统提示词/角色前缀/问答追加段）按 locale 分派；**中文原文一字未改**；导出从模块级常量改为同名函数（防加载期冻结） | `lib/advisor/prompt.js`、`lib/advisor/{index,runtime}.js`、`tests/advisor-api.test.js` | `tests/advisor-prompt-locale.test.js`（7 例：zh 逐字一致 / en 无中文散文（剥离输入协议标记后断言）/ 可切换 / 非法 locale 回落 / 不再导出旧常量名） |
 | D7 | **字典健康度无门禁**：21 张 `[zh, en]` 字典此前只有手工检查。新增结构性不变量测试（二元组/非空/英文列无 CJK/占位符两侧一致/键不重复） | `tests/i18n-dictionary-integrity.test.js` | 23 例（直接 import 真实字典对象，不做正则扫源码——字典混用两种引号，正则会漏条目造成假绿） |
+
+### E. 2026-09-16 对抗复核（对 D 批的独立审查，发现 6 条，全部收口）
+
+审查者按"找真 bug"的角度独立复核 D 批（含用 esbuild 重跑重建验证 bundle 逐字节相同），
+结论"未发现真回归"，但点出 6 条真实缺陷，均已修：
+
+| # | 缺陷 | 修法 |
+|---|---|---|
+| A1 | 留档只在 `console.warn` + 一个 `.bak`：桌面壳里用户**看不出"设置被重置了"**（`loadState` 调用点没传宿主 logger，虽然 `ctx.logger` 在作用域内可达）；反复损坏时 `.bak` 无限堆积 | 留档写 `<stateFile>.quarantined.json` 标记 + **注入系统提示词一次**（模型据此转告用户"设置被重置、备份在哪"）后删除；告警改走 `ctx.logger('memory-evolve')`；留档最多保留 3 份 |
+| A2 | `keyBranchFilter` 逃生口**在桌面端不可达**（不在 `RUNTIME_KEYS`、不在设置面板，只有 cordis 行 config 能改），而三处文档都建议"设 false" | 加进 `RUNTIME_KEYS` + 校验分支 + 面板开关 + 中英字典两条；文档口径同步更正 |
+| A3 | `clientLang()` 的 resolver 用**严格匹配** `active==='zh'|'en'`，与 D10 的"上游允许地区子标签"口径不一致；且 resolver 无 try/catch（上游改名会从"语言不对"升级成"渲染抛错"） | 见下文"取舍"：今天 `active` 必然是裸 id（`LOCALE_IDS=['zh','en']`，本 profile 无语言包插件）⇒ 两种口径落到同一结果；保留严格匹配 + 补注释说明，不做无收益的语义变更 |
+| A4 | `keyBranchFilter=false` 的回归用例**在非 git 目录上跑**（非 git 本来不过滤）⇒ 删掉被修逻辑照样绿（假绿） | 改为真 git 仓库 + 构造"仅其它分支可见的条目"，断言开关关掉时它**确实出现** |
+| A5 | "跟随界面语言"的**承重接线零覆盖**：删掉 `src/client/index.ts` 的 `setClientLocaleResolver(...)` 那行，987 例曾全绿 | 新增断言：入口必须注册（且 effect 清理里注销）＋ `lib/client.js` 必须已重建（含 resolver 与快照读取） |
+| A6 | `console.warn(message, meta)` 的第二参不会被插值，实测打成 `[object Object]`、诊断信息全丢 | meta 统一内联进首参（与 `session-orch.js` 同风格） |
+
+**取舍说明（A3）**：D10 的"上游 locale id 允许带地区子标签"成立（`LOCALE_ID_PATTERN` 允许
+`zh-CN`，语言包插件也按这个 id 注册），但**内置 locale 只有 `zh`/`en`**、且本 profile 不装
+语言包插件 ⇒ `LocaleSnapshot.active` 今天必然是裸 id。两处归一化因此等价，不改。
 
 ## 本次升级（`b4994fa` → `c337dc1a`）拿到了什么
 

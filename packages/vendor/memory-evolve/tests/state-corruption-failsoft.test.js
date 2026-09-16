@@ -17,7 +17,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../lib/index.js'
@@ -113,6 +113,66 @@ test('P1-A 目录占位状态文件（EISDIR）：apply 不抛', () => {
     const ctx = fakeCtx()
     assert.doesNotThrow(() => apply(ctx, { memoryDir: dir }))
     assert.ok(ctx.state.tools.some((t) => t.name === 'memory'))
+  } finally {
+    clean(dir)
+  }
+})
+
+test('A1 标记被消费且只告知一次（快照注入 → 二次启动不再重复）', async () => {
+  // 对抗复核 A1（2026-09-16）：只留一个 .bak + console.warn，用户看不出
+  // "我的设置被重置了"。改为写 <stateFile>.quarantined.json，apply() 启动时
+  // **读一次即删**并注入快照（模型据此提示用户）；下一次启动不再重复告知。
+  const dir = tempDir()
+  try {
+    // 第一次：损坏 → 留档（此时写标记；同一次 apply 已把它消费掉）
+    writeFileSync(join(dir, 'plugin-state.json'), '{ bad json')
+    apply(fakeCtx(), { memoryDir: dir })
+    const marker = join(dir, 'plugin-state.json.quarantined.json')
+    assert.equal(existsSync(marker), false, '标记应在同一次启动里被消费（读一次即删）')
+
+    // 第二次：再损坏一次 → apply 必须把"设置被重置"告知模型
+    writeFileSync(join(dir, 'plugin-state.json'), '{ bad again')
+    const ctx2 = fakeCtx()
+    apply(ctx2, { memoryDir: dir })
+    const snapshot = renderSnap(ctx2, dir)
+    assert.match(snapshot, /记忆设置曾被重置/, '快照必须一次性告知模型（用户可感知的状态变化）')
+    assert.match(snapshot, /corrupt-/, '告知里要给备份文件名')
+
+    // 第三次：正常启动 → 不再出现该段（不反复用陈旧信息打扰）
+    const ctx3 = fakeCtx()
+    apply(ctx3, { memoryDir: dir })
+    const snapshot3 = renderSnap(ctx3, dir)
+    assert.doesNotMatch(snapshot3, /记忆设置曾被重置/, '第二次启动不得再提示')
+
+    // 留档备份确实存在
+    const backups = readdirSync(dir).filter(f => f.includes('.corrupt-') && f.endsWith('.bak'))
+    assert.ok(backups.length >= 1, '必须留下可恢复的备份')
+  } finally {
+    clean(dir)
+  }
+})
+
+/** 用 apply 注册的快照上下文渲染一次快照（走真实渲染路径，不是手拼字符串）。 */
+function renderSnap(ctx, memoryDir) {
+  const context = ctx.state.contexts.find(c => c.name === 'memory:snapshot')
+  assert.ok(context, 'snapshot context registered')
+  return String(context.text({
+    agent: { id: 'a', session: { id: 's1', header: { cwd: memoryDir } } },
+  }))
+}
+
+test('A1 反复损坏时留档文件最多保留 3 份（不让备份无限堆积）', () => {
+  const dir = tempDir()
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      writeFileSync(join(dir, 'plugin-state.json'), `{ bad ${i}`)
+      apply(fakeCtx(), { memoryDir: dir })
+      // 让时间戳不同（同毫秒会重名，实际不会，但测试里要保证可区分）
+      const wait = Date.now() + 2
+      while (Date.now() < wait) { /* spin */ }
+    }
+    const backups = readdirSync(dir).filter(f => f.includes('.corrupt-') && f.endsWith('.bak'))
+    assert.ok(backups.length <= 3, `留档应 ≤3 份，实际 ${backups.length}：${backups.join(', ')}`)
   } finally {
     clean(dir)
   }
