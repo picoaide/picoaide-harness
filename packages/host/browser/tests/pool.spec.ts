@@ -160,6 +160,23 @@ describe('TabPool — quota', () => {
     await expect(pool.withOperation('browser_open', async () => 'ok')).resolves.toBe('ok')
   })
 
+  it('闸门预算计入排队时间（2026-09-16 审计 E2）', async () => {
+    const pool = new TabPool({ userGateTimeoutMs: 200 })
+    // 前一个操作占住互斥 150ms；用户在此期间持有控制权。
+    const first = pool.withOperation('browser_navigate', async () => { await sleep(150) })
+    await sleep(10)
+    pool.setUserControl(true)
+    const started = Date.now()
+    const err = await pool.withOperation('browser_open', async () => 'never').catch((cause: unknown) => cause)
+    const waited = Date.now() - started
+    expect((err as { code?: string }).code).toBe('window-controlled')
+    // 旧行为：排队 ~140ms 后再借回完整 200ms ⇒ 总时长 >300ms。新行为按调用
+    // 入口计时，预算耗尽即抛明确错误（约 260ms 内）。
+    expect(waited, 'queue time must count against the gate budget').toBeLessThan(300)
+    pool.setUserControl(false)
+    await first
+  })
+
   it('闸门拒绝的文案必须告诉模型怎么解开（2026-09-16）', async () => {
     // 现场：只看到 timeout-policy 的 "tool call timed out after 30000ms"，模型
     // 把"用户正拿着控制权"误判成页面卡死。凡是被闸门拒绝的出口，都要说清

@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { credentialSiteOrigin, httpOriginOf, siteOriginFromFields } from '../src/credential-site.ts'
+import { bareHostOrigin, credentialSiteOrigin, httpOriginOf, siteOriginFromFields } from '../src/credential-site.ts'
 import { createCredentialResolver } from '../src/index.ts'
 import { ConnectorStore } from '@picoaide/dsh-connectors/store'
 
@@ -43,6 +43,25 @@ describe('httpOriginOf', () => {
       expect(httpOriginOf(value as string | null | undefined), String(value)).toBeNull()
     }
   })
+
+  it('stays strict about scheme-less hostnames (the bare-host normalization is opt-in per key)', () => {
+    expect(httpOriginOf('app.glitchtip.com')).toBeNull()
+  })
+})
+
+describe('bareHostOrigin: 用户按内置模板只填主机名', () => {
+  it('normalizes address-shaped values the GlitchTip template asks for', () => {
+    expect(bareHostOrigin('app.glitchtip.com')).toBe('https://app.glitchtip.com')
+    expect(bareHostOrigin('glitchtip.corp.example/api')).toBe('https://glitchtip.corp.example')
+    expect(bareHostOrigin('glitchtip.corp.example:8443/x')).toBe('https://glitchtip.corp.example:8443')
+    expect(bareHostOrigin('localhost:8000')).toBe('http://localhost:8000')
+  })
+
+  it('refuses values that are not host-shaped', () => {
+    for (const value of ['abc', 'not a host', 'https://x.example', '', undefined, 'x.y/z z']) {
+      expect(bareHostOrigin(value as string | undefined), String(value)).toBeNull()
+    }
+  })
 })
 
 describe('siteOriginFromFields', () => {
@@ -65,6 +84,13 @@ describe('siteOriginFromFields', () => {
     const b = siteOriginFromFields({ aaa: 'https://a.example', zzz: 'https://b.example' })
     expect(a).toBe(b)
     expect(a).toBe('https://a.example')
+  })
+
+  it('normalizes a bare hostname only when the field name is address-shaped', () => {
+    // The built-in GlitchTip template tells users to type `app.glitchtip.com`.
+    expect(siteOriginFromFields({ GLITCHTIP_BASE_URL: 'app.glitchtip.com' })).toBe('https://app.glitchtip.com')
+    // An unrelated field value without a scheme must not become an origin.
+    expect(siteOriginFromFields({ note: 'app.glitchtip.com' })).toBeNull()
   })
 })
 

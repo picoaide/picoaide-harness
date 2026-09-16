@@ -22,12 +22,38 @@
 const SITE_FIELD_HINT = /(?:^|_)(?:base_?)?(?:url|uri|site|host|origin|endpoint|address)(?:$|_)/iu
 
 /** http/https 的 origin；其它一律 `null`（`about:blank` 的 origin 是字符串
- * `"null"`，不能当成可比对的站点）。 */
+ * `"null"`，不能当成可比对的站点）。裸主机名不在这里归一 —— 见
+ * {@link bareHostOrigin}，它只用于键名明确像地址的字段。 */
 export function httpOriginOf(value: string | null | undefined): string | null {
   if (typeof value !== 'string' || value.trim() === '') return null
   try {
     const url = new URL(value.trim())
     return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 裸主机名 / 主机名+端口 / 主机名+路径 → origin。
+ *
+ * 用户在"服务地址"类字段里经常只填 `app.glitchtip.com`（内置 GlitchTip 模板
+ * 与 webadmin 提示都这么教），`httpOriginOf` 会判 null，站点绑定因此永远失败、
+ * `browser_fill_credentials` 对这类连接器永久不可用（2026-09-16 审计 E1）。
+ * 只对**键名像地址**的字段做这次归一（调用点决定），且要求主机名至少含一个点
+ * 或是 localhost —— 免得把 `abc` 这类普通 token 值当主机。
+ * @param value - 字段原值。
+ * @returns 归一后的 origin，或 null。
+ */
+export function bareHostOrigin(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null
+  const match = /^(?<host>(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}|localhost)(?::(?<port>\d{1,5}))?(?:\/\S*)?$/iu.exec(value.trim())
+  const host = match?.groups?.['host']?.toLowerCase()
+  if (host === undefined) return null
+  const port = match?.groups?.['port']
+  const scheme = host === 'localhost' ? 'http' : 'https'
+  try {
+    return new URL(`${scheme}://${host}${port === undefined ? '' : `:${port}`}`).origin
   } catch {
     return null
   }
@@ -46,7 +72,10 @@ export function siteOriginFromFields(fields: Record<string, string> | undefined)
     .map(([key, value]) => ({ key, value, hinted: SITE_FIELD_HINT.test(key) ? 0 : 1 }))
     .sort((a, b) => (a.hinted - b.hinted) || a.key.localeCompare(b.key))
   for (const entry of ranked) {
+    // Bare hostnames are only normalized for address-shaped keys: a URL-looking
+    // value under an unrelated key still has to carry an explicit scheme.
     const origin = httpOriginOf(entry.value)
+      ?? (entry.hinted === 0 ? bareHostOrigin(entry.value) : null)
     if (origin !== null) return origin
   }
   return null

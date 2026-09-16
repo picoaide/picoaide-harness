@@ -100,11 +100,11 @@ async function assertCredentialOrigin(runtime: BrowserRuntime, tabId: number, co
   // 能力时直接 return，工具对外宣称的 SITE-BOUND 就只是文档承诺 —— 模型把标签页
   // 开到钓鱼页即可拿到连接器凭据。现在拿不到基准就拒绝，并在错误里说明怎么登记站点。
   if (resolver === undefined || lookup === undefined) {
-    throw browserError('policy', 'browser_fill_credentials refused: this deployment exposes no connector site URL, so the credential injection cannot be bound to an origin. Add the connector\'s site address to its stored credential fields (a base-URL field) or declare it in the browser plugin\'s credentialSites config, then retry — or type the value with browser_type instead.')
+    throw browserError('policy', 'browser_fill_credentials refused: this deployment exposes no connector site URL, so the credential injection cannot be bound to an origin. Enter the value with browser_type instead, and ask the user (or the deployment) to record the connector\'s site address as a base-URL field or a credentialSites entry.')
   }
   const expected = httpOriginOf(await lookup.call(resolver, connectorId))
   if (expected === null) {
-    throw browserError('policy', `browser_fill_credentials refused: the stored connector record for ${JSON.stringify(connectorId)} has no usable http(s) site URL, so the injection cannot be bound to an origin. Register the connector's site URL, or enter the value with browser_type instead.`)
+    throw browserError('policy', `browser_fill_credentials refused: the stored connector record for ${JSON.stringify(connectorId)} has no usable http(s) site URL, so the injection cannot be bound to an origin. Enter the value with browser_type instead, and ask the user to record the connector's site address (a base-URL field) or declare it in the browser plugin's credentialSites config.`)
   }
   const actual = httpOriginOf(runtime.tabState(tabId).url)
   if (actual === null) {
