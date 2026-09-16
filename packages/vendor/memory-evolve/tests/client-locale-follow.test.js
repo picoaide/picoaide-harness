@@ -130,15 +130,16 @@ test('client 入口**注册**了解析器（承重接线，删掉即静默回退
   assert.ok(bundle.includes('getSnapshot()'), 'lib/client.js 里应有 locale 快照读取')
 })
 
-test('每个私有字典文件都 import 了 clientLang', () => {
+test('仍带私有字典的文件都 import 了 clientLang', () => {
+  // 2026-09-16 i18n 收敛：CoIView / PromptView / AdvisorPanel 的私有字典已
+  // **迁入注册字典**（src/client/index.ts 的 zh/en，键前缀 coi./prompt./advisor.）
+  // 并经 slot 注入的 t 取值，不再需要 clientLang。剩下的这 4 个文件仍自带
+  // zh/en 私有字典，必须经 clientLang 跟随界面语言（S4 契约）。
   const dictionaryFiles = [
-    'CoIView.tsx',
-    'PromptView.tsx',
     'BroadcastView.tsx',
     'MemoryQueueView.tsx',
     'TodoView.tsx',
     'SyncView.tsx',
-    join('advisor', 'AdvisorPanel.tsx'),
   ]
   for (const relative of dictionaryFiles) {
     const source = readFileSync(join(CLIENT_ROOT, relative), 'utf8')
@@ -148,4 +149,64 @@ test('每个私有字典文件都 import 了 clientLang', () => {
       `${relative} 必须 import clientLang`,
     )
   }
+})
+
+test('已迁入注册字典的视图：无私有 DICT、键带前缀、经注入的 t 取值', () => {
+  // 迁移必须留下可复查的痕迹，否则"绕开 ctx.locale 的第二份真源"会悄悄回来。
+  // ⚠️ 断言只看**代码**：迁移说明的注释里会点名旧实现（DICT / LEVEL_LABEL），
+  // 拿整份源码断言会自己绊自己。
+  const codeOnly = (source) => source
+    .replace(/\/\*[\s\S]*?\*\//gu, '')
+    .split('\n')
+    .filter((line) => !/^\s*\/\//u.test(line))
+    .join('\n')
+  const migrated = [
+    { file: 'CoIView.tsx', prefix: 'coi.' },
+    { file: 'PromptView.tsx', prefix: 'prompt.' },
+    { file: join('advisor', 'AdvisorPanel.tsx'), prefix: 'advisor.' },
+    { file: join('advisor', 'advisor-store.ts'), prefix: 'advisor.' },
+  ]
+  for (const { file, prefix } of migrated) {
+    const source = codeOnly(readFileSync(join(CLIENT_ROOT, file), 'utf8'))
+    assert.doesNotMatch(source, /^const DICT = \{/mu, `${file} 不应再有私有 DICT 字典`)
+    assert.doesNotMatch(source, /LEVEL_LABEL|OUTCOME_ZH|OUTCOME_EN/u, `${file} 不应再留模块级标签常量`)
+    assert.match(
+      source,
+      new RegExp(`'${prefix.replace('.', '\\.')}[A-Za-z0-9_.]+'`, 'u'),
+      `${file} 的字典键必须带 '${prefix}' 前缀（真源在 src/client/index.ts）`,
+    )
+  }
+})
+
+test('字典真源（index.ts）：zh/en 键集完全一致、en 列无 CJK 残留', () => {
+  // en: Record<MemoryEvolveKey, string> 只在 tsc 下成立，而本包门禁是 node --test
+  // （不做类型检查）—— 这里补一条运行期断言，防止"改了 zh 忘了 en"静默漂移。
+  const entry = readFileSync(join(CLIENT_ROOT, 'index.ts'), 'utf8')
+  const lines = entry.split('\n')
+  const zhStart = lines.findIndex((line) => line.startsWith('export const zh = {'))
+  const enStart = lines.findIndex((line) => line.startsWith('export const en: Record<MemoryEvolveKey, string> = {'))
+  assert.ok(zhStart > 0 && enStart > zhStart, '必须能定位 zh / en 两个字典块（改名即红）')
+  const blockEnd = (from) => {
+    for (let i = from + 1; i < lines.length; i += 1) if (lines[i] === '}') return i
+    throw new Error('字典块未见结束大括号')
+  }
+  const zhEnd = blockEnd(zhStart)
+  const enEnd = blockEnd(enStart)
+  const keysOf = (from, to) => lines
+    .slice(from + 1, to)
+    .map((line) => /^ {2}'([^']+)':/u.exec(line))
+    .filter((match) => match !== null)
+    .map((match) => match[1])
+  const zhKeys = keysOf(zhStart, zhEnd)
+  const enKeys = keysOf(enStart, enEnd)
+  assert.ok(zhKeys.length > 900, `zh 字典键数异常（${zhKeys.length}），疑似解析失效`)
+  assert.deepEqual([...zhKeys].sort(), [...enKeys].sort(), 'zh/en 必须一一对应（键集完全相同）')
+  const CJK = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/u
+  const offenders = lines
+    .slice(enStart + 1, enEnd)
+    .filter((line) => /^ {2}'[^']+':/u.test(line))
+    .filter((line) => CJK.test(line.replace(/\\n/gu, ' ')))
+    // 唯一的例外：workspace 快照提示里的【Workspace activity】中文标记是刻意保留的
+    .filter((line) => !line.includes("broadcast.settings.wsCoord.snapshot.hint"))
+  assert.deepEqual(offenders, [], `en 列不得残留中文：\n${offenders.join('\n')}`)
 })

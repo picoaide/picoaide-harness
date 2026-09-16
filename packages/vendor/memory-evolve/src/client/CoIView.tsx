@@ -4,12 +4,18 @@
  * 统一调度 kimi/codex/grok/hermes 等 CLI 代理的 Web 面板：顶部六个子 Tab
  * （任务/会话/适配器/模板/统计/配置）。数据全部来自 host 的
  * /memory-evolve/api/coi 路由；样式在 coi-styles.css（coi- 前缀，
- * 由 index.ts 注入）。组件内部自带中英文案（默认中文），不接全局 locale。
+ * 由 index.ts 注入）。
+ *
+ * i18n（2026-09-16）：本文件原先自带一份 180 键的 zh/en 私有字典、
+ * 按 `navigator.language` 选语言（后经 clientLang 修成跟随界面语言），
+ * 但它**绕开了注册字典**（ctx.locale）——等于第二份真源。现在全部文案
+ * 并入 src/client/index.ts 的 zh/en（键前缀 'coi.'），经 slot 注入的 t
+ * 在**调用期**取当前语言；键类型用 MemoryEvolveKey 收窄，漏键编译期即报。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
-import { clientLang } from '../../lib/i18n.js'
+import type { MemoryEvolveKey } from '../index.ts'
 
 /* ------------------------------------------------------------------ */
 /* 类型（与 host API 响应形状一致）                                      */
@@ -103,394 +109,23 @@ interface Notice {
   text: string
 }
 
-/* ------------------------------------------------------------------ */
-/* 内部字典（默认中文，无需语言切换 UI）                                 */
-/* ------------------------------------------------------------------ */
-
-const DICT = {
-  zh: {
-    tab: 'CLI调度',
-    guide: '指南',
-    'guide.title': 'COI 调度使用指南',
-    'guide.intro': 'COI 调度 = 把任务派给外部 AI 代理（kimi / codex / grok / hermes 等）的「外援调度台」：后台异步执行、不卡当前会话；实时看进度和日志；会话分层管理、可一键恢复继续；任务还能跨代理接力；结果自动留档并沉淀到记忆。默认关闭——在「Memory Evolve 设置」Tab 的「配置」里打开「COI 调度」开关。',
-    'guide.use.title': '怎么发起任务',
-    'guide.use.desc': '三种入口，任选其一：',
-    'guide.use.ai': '对 AI 说：',
-    'guide.use.aiDesc': '直接说「派给 kimi 做 XX / 让 codex 修复测试」——AI 用 de_coi_dispatch 工具发起，后台异步跑，完成后结果摘要自动写进项目日志和今日日志。',
-    'guide.use.slash': '终端命令：',
-    'guide.use.slashDesc': '/de_coi run "任务" --coi kimi（查看全部子命令：/de_coi help）。',
-    'guide.use.tab': '本 Tab：',
-    'guide.use.tabDesc': '「任务」页填适配器、任务内容、层级，可选恢复会话 / 任务模板 / 接力引用；还能勾选「注入 DSH 记忆」让外援带上你的项目约定，或附加上下文文本、带图分析；点发起，进度与输出实时可见。',
-    'guide.scope.title': '会话分层（谁能看到）',
-    'guide.scope.desc': '任务与会话按层级归属，决定谁能看到、能否恢复：',
-    'guide.scope.temp': '仅发起它的那个会话可见，一次性任务（测试适配器用这个）。',
-    'guide.scope.session': '仅发起它的那个会话可见，会话内可恢复。',
-    'guide.scope.project': '该项目（相同工作目录）的所有会话可见，可挂 git 分支。',
-    'guide.scope.global': '所有会话可见，长期保留。',
-    'guide.skill.title': '适配器与技能',
-    'guide.skill.desc': '每个适配器对应一个技能（AI 的使用指南，注入模型上下文）：内置四家开箱即用；自定义 CLI 可在「适配器」页添加（含普通命令 plain-cli），填技能名与内容后 AI 即学会调用它。技能可在「技能管理」Tab 禁用，可在适配器页「技能」按钮编辑。',
-    'guide.tips.title': '最佳实践',
-    'guide.tips.1': '分工：前端→kimi，复杂后端→codex，快速任务→grok。',
-    'guide.tips.2': '接力链：codex 写代码 → kimi review（发起时选「接力引用」）。',
-    'guide.tips.3': '重要会话记得备注（会话页点备注），恢复时按名字找。',
-    'guide.tips.4': '任务结束可推送通知（配置页填通知命令，如 hermes send 推微信）。',
-    'guide.tips.5': '派活时勾选「注入 DSH 记忆」，外援会带着你的全局规则、用户偏好与本项目关键记忆干活（按分支过滤，与 DSH 注入同规则）；派活也能带图——截图直接发给外援分析（codex / kimi / hermes 支持读图，zcode 纯文本会明确拒绝）。',
-    'guide.loop': '闭环：派任务 → 实时看进度 → 拿结果留档 → 摘要沉淀记忆 → 会话可恢复再接力。',
-    tasks: '任务',
-    sessions: '会话',
-    adapters: '适配器',
-    templates: '模板',
-    stats: '统计',
-    config: '配置',
-    loading: '加载中…',
-    refresh: '刷新',
-    all: '全部',
-    none: '（无）',
-    'launch.title': '发起任务',
-    'launch.expand': '展开',
-    'launch.collapse': '收起',
-    'launch.adapter': '适配器',
-    'launch.prompt': '任务内容',
-    'launch.promptPh': '例如：修复 tests/store.test.js 中失败的用例并验证',
-    'launch.scope': '范围',
-    'launch.session': '恢复会话',
-    'launch.sessionNone': '（新会话）',
-    'launch.sessionEmpty': '（当前适配器暂无会话）',
-    'launch.template': '模板',
-    'launch.templateNone': '（不用模板）',
-    'launch.ref': '接力引用',
-    'launch.refNone': '（不引用）',
-    'launch.submit': '发起',
-    'launch.injectTracks': '注入 DSH 记忆（可选）',
-    'launch.injectTracksHint': '自主选择要带给 COI 的记忆轨（与层级 scope 无关，任何层级都可注入）：长期记忆=全局事实、用户档案=你的偏好、项目关键记忆=本工作区项目按分支过滤（不含 AGENTS.md）。内容会发给外部 COI 服务，注意隐私；留空=不注入',
-    'launch.ctxText': '附加上下文文本（可选）',
-    'launch.ctxTextPh': '自己拼接的上下文：如项目进展、相关日志要点…（超 32KB 自动写文件并把路径告诉 COI）',
-    'launch.needPrompt': '任务内容不能为空',
-    'launch.ok': '已发起',
-    'tasks.empty': '暂无任务',
-    'tasks.selectHint': '点击左侧任务查看详情与输出',
-    'tasks.kill': '终止',
-    'tasks.confirmKill': '确认终止该任务？',
-    'tasks.killed': '已终止',
-    'tasks.retry': '重试',
-    'tasks.retried': '已重新发起',
-    'tasks.copy': '复制',
-    'tasks.copied': '已复制',
-    'tasks.copyFail': '复制失败',
-    'tasks.log': '输出日志',
-    'tasks.logEmpty': '（暂无输出）',
-    'tasks.logFull': '放大',
-    'tasks.prompt': '任务内容',
-    'tasks.searchPh': '搜索任务（内容/任务 id）…',
-    'tasks.pager.prev': '上一页',
-    'tasks.pager.next': '下一页',
-    'tasks.pager.total': '共',
-    'tasks.delete': '删除',
-    'tasks.confirmDelete': '删除该任务？将移除任务记录与输出留档（已沉淀到记忆的摘要不受影响；被接力引用的任务删除后，新接力会提示任务不存在）。\n\n{id}',
-    'tasks.status': '状态',
-    'tasks.adapter': '适配器',
-    'tasks.scope': '范围',
-    'tasks.branch': '分支',
-    'tasks.sessionId': '会话 ID',
-    'tasks.created': '创建时间',
-    'tasks.duration': '耗时',
-    'tasks.lastOutput': '最后输出',
-    'tasks.exitCode': '退出码',
-    'tasks.error': '错误',
-    'sessions.filterScope': '范围过滤',
-    'sessions.searchPh': '搜索…',
-    'sessions.note': '备注',
-    'sessions.save': '保存',
-    'sessions.delete': '删除',
-    'sessions.confirmDelete': '确认删除该会话记录？',
-    'sessions.empty': '暂无会话',
-    'sessions.locked': '有任务占用中',
-    'sessions.lastSeen': '最近活跃',
-    'adapters.guide': '指南',
-    'adapters.test': '测试',
-    'adapters.testOk': '测试任务已发起',
-    'adapters.skill': '技能',
-    'adapters.skillHint': '该适配器的使用指南所在技能：它是同步注入的真实有效技能（来源=用户技能库，注入每个会话的系统提示词），AI 每次会话都能看到；禁用请到「技能管理」Tab',
-    'adapters.skillBtn': '技能',
-    'adapters.editSkillTitle': '编辑技能（AI 使用指南）',
-    'adapters.editSkillHint': '技能 = AI 的使用指南：本技能已同步注入用户技能库（~/.agents/skills），每个会话的系统提示词里都能看到它，AI 据此正确调用本适配器。在这里编辑即更新 SKILL.md；插件重启时内置版本未变不会覆盖你的编辑；禁用入口在「技能管理」Tab。',
-    'adapters.saveSkill': '保存',
-    'adapters.skillSaved': '技能已保存',
-    'adapters.skillName': '技能名（可选）',
-    'adapters.skillNamePh': '如 my-cli-skill（该技能的 SKILL.md 将注入 AI 上下文，AI 据此学会调用此 CLI）',
-    'adapters.useCase': '适用场景',
-    'adapters.useCasePh': '告诉 AI 什么任务适合用这个 CLI，如：复杂后端逻辑/测试修复…',
-    'adapters.useCaseEmpty': '（未填写适用场景）',
-    'adapters.editUseCase': '编辑场景',
-    'adapters.saveUseCase': '保存',
-    'adapters.skillContent': '技能内容（SKILL.md）',
-    'adapters.skillContentPh': '# 技能正文\n\n告诉 AI 如何调用这个 CLI：命令格式、参数、会话恢复方式、注意事项…（frontmatter 的 name/description 会自动补全）',
-    'adapters.skillContentHint': '留空 = 只关联技能名（技能文件需另外创建，可添加后到「技能」按钮里编辑）；填写 = 技能不存在时自动创建',
-    'cancel': '取消',
-    'saving': '保存中…',
-    'adapters.addTitle': '添加自定义适配器',
-    'adapters.name': '名称',
-    'adapters.type': '类型',
-    'adapters.binary': '可执行文件',
-    'adapters.args': '参数',
-    'adapters.argsPh': '逗号分隔，如：-p, {task}',
-    'adapters.add': '添加',
-    'adapters.delete': '删除',
-    'adapters.enable': '启用',
-    'adapters.disable': '禁用',
-    'adapters.disabledHint': '已禁用：AI 调度此适配器会被拒绝并提示换用其他可用项',
-    'adapters.confirmDelete': '确认删除该自定义适配器？',
-    'adapters.builtin': '内置',
-    'adapters.custom': '自定义',
-    'adapters.resumeSection': '会话恢复配置（ai-cli 必填）',
-    'adapters.resumeSectionHint': 'ai-cli 类型必须有指定会话恢复能力；没有恢复能力的 CLI 请选 plain-cli 类型',
-    'adapters.resumeKind': '恢复方式',
-    'adapters.resumeKindFlag': 'flag 模式（恢复参数插在基础参数前）',
-    'adapters.resumeKindArgs': 'args 模式（完整恢复命令）',
-    'adapters.resumeFlag': '恢复 flag',
-    'adapters.resumeFlagPh': '如 -S / -r / --resume',
-    'adapters.resumeArg': '会话参数',
-    'adapters.resumeArgPh': '含 {sessionId} 占位符，如 {sessionId}',
-    'adapters.resumeArgs': '恢复命令参数',
-    'adapters.resumeArgsPh': '逗号分隔，含 {sessionId}（及可选 {task}），如 exec, resume, {sessionId}, {task}',
-    'adapters.continueFlag': '最近会话恢复 flag（可选）',
-    'adapters.continueFlagPh': '如 -c；留空 = 不支持"最近会话"恢复',
-    'adapters.extractSection': '会话 ID 自动提取（可选）',
-    'adapters.extractSource': '输出流',
-    'adapters.extractRegex': '提取正则',
-    'adapters.extractRegexPh': '捕获组 1 为会话 ID，如 To resume this session: kimi -r (session_\\S+)',
-    'adapters.resumeMissing': 'ai-cli 类型必须填写会话恢复配置（resume）',
-    'templates.addTitle': '添加模板',
-    'templates.name': '名称',
-    'templates.prompt': '任务内容',
-    'templates.adapterOpt': '适配器（可选）',
-    'templates.idOpt': 'ID（可选，不填自动）',
-    'templates.add': '添加',
-    'templates.delete': '删除',
-    'templates.confirmDelete': '确认删除该模板？',
-    'templates.builtinKeep': '内置模板不可删除',
-    'templates.empty': '暂无模板',
-    'stats.total': '总任务数',
-    'stats.count': '任务数',
-    'stats.hours': '累计时长',
-    'stats.byStatus': '状态分布',
-    'stats.empty': '暂无统计数据',
-    'config.notify': '通知命令',
-    'config.notifyHint': '任务结束时执行；占位符：{taskId} {coi} {status} {summary}',
-    'config.retention': '任务保留天数',
-    'config.timeout': '任务超时',
-    'config.timeoutHours': '小时',
-    'config.timeoutMinutes': '分钟',
-    'config.timeoutHint': '超时仅作兜底防线（AI 任务可能数小时无输出属正常）；留空 = 不修改',
-    'config.timeoutBad': '超时格式不正确',
-    'config.save': '保存',
-    'config.saved': '已保存',
-    'scope.temporary': '临时',
-    'scope.session': '会话',
-    'scope.project': '项目',
-    'scope.global': '全局',
-  },
-  en: {
-    tab: 'CLI Dispatch',
-    guide: 'Guide',
-    'guide.title': 'COI Dispatch Guide',
-    'guide.intro': 'COI Dispatch = the "external helper console" for handing tasks to external AI agents (kimi / codex / grok / hermes…): tasks run in the background without blocking your session; progress and logs are live; sessions are tiered and resumable in one click; tasks can chain across agents; results are archived and distilled into memory. Off by default — enable "COI dispatch" under Config in the Memory Evolve Settings tab.',
-    'guide.use.title': 'How to launch a task',
-    'guide.use.desc': 'Three entries, pick any:',
-    'guide.use.ai': 'Tell the AI:',
-    'guide.use.aiDesc': 'Say "dispatch XX to kimi / have codex fix the tests" — the AI launches it via de_coi_dispatch, it runs in the background, and on completion the summary is automatically written into the project log and daily log.',
-    'guide.use.slash': 'Terminal command:',
-    'guide.use.slashDesc': '/de_coi run "task" --coi kimi (see all subcommands: /de_coi help).',
-    'guide.use.tab': 'This tab:',
-    'guide.use.tabDesc': 'In the Tasks page fill in the adapter, prompt and scope; optionally resume a session / use a template / chain a reference task; you can also tick "inject DSH memory" so the helper carries your project conventions, attach context text or images; hit launch and watch progress and output live.',
-    'guide.scope.title': 'Session tiers (who can see)',
-    'guide.scope.desc': 'Tasks and sessions belong to a tier, which decides who can see and resume them:',
-    'guide.scope.temp': 'Visible only to the launching session; one-off (use for testing an adapter).',
-    'guide.scope.session': 'Visible only to the launching session; resumable within it.',
-    'guide.scope.project': 'Visible to all sessions of the project (same working directory); can carry a git branch.',
-    'guide.scope.global': 'Visible to every session; kept long-term.',
-    'guide.skill.title': 'Adapters & skills',
-    'guide.skill.desc': 'Every adapter maps to a skill (the AI usage guide, injected into the model context): the four built-ins work out of the box; custom CLIs can be added in the Adapters page (plain-cli included) — fill the skill name and content and the AI learns to drive it. Skills can be disabled in the Skill Manager tab and edited via the Skill button on the adapter page.',
-    'guide.tips.title': 'Best practices',
-    'guide.tips.1': 'Division of labor: frontend→kimi, complex backend→codex, quick tasks→grok.',
-    'guide.tips.2': 'Chaining: codex writes code → kimi reviews (pick "reference task" when launching).',
-    'guide.tips.3': 'Note important sessions (the note button in the sessions page) so you can find them by name when resuming.',
-    'guide.tips.4': 'Tasks can push a notification on completion (set the notify command in the config page, e.g. hermes send to WeChat).',
-    'guide.tips.5': 'Tick "inject DSH memory" when dispatching and the helper works with your global rules, profile and this project key facts (branch-filtered, same rules as DSH injection); tasks can also carry images — send a screenshot for analysis (codex / kimi / hermes read images; zcode is text-only and will refuse clearly).',
-    'guide.loop': 'The loop: dispatch → watch progress live → archive the result → distill the summary into memory → resume and chain the session.',
-    tasks: 'Tasks',
-    sessions: 'Sessions',
-    adapters: 'Adapters',
-    templates: 'Templates',
-    stats: 'Stats',
-    config: 'Config',
-    loading: 'Loading…',
-    refresh: 'Refresh',
-    all: 'All',
-    none: '(none)',
-    'launch.title': 'Launch task',
-    'launch.expand': 'Expand',
-    'launch.collapse': 'Collapse',
-    'launch.adapter': 'Adapter',
-    'launch.prompt': 'Prompt',
-    'launch.promptPh': 'e.g. fix the failing cases in tests/store.test.js and verify',
-    'launch.scope': 'Scope',
-    'launch.session': 'Resume session',
-    'launch.sessionNone': '(new session)',
-    'launch.sessionEmpty': '(no sessions for this adapter)',
-    'launch.template': 'Template',
-    'launch.templateNone': '(no template)',
-    'launch.ref': 'Relay ref',
-    'launch.refNone': '(none)',
-    'launch.submit': 'Launch',
-    'launch.injectTracks': 'Inject DSH memory (optional)',
-    'launch.injectTracksHint': 'Pick which memory tracks to hand to the COI (independent of scope — any tier can inject): long-term memory=global facts, user profile=your preferences, project key=this workspace\'s key facts (branch-filtered; no AGENTS.md). Content is sent to external COI services — mind privacy; empty = no injection',
-    'launch.ctxText': 'Extra context text (optional)',
-    'launch.ctxTextPh': 'Your own context: project progress, log highlights… (over 32KB it is written to a file and the path is given to the COI)',
-    'launch.needPrompt': 'Prompt must not be empty',
-    'launch.ok': 'Launched',
-    'tasks.empty': 'No tasks yet',
-    'tasks.selectHint': 'Click a task on the left to view details and output',
-    'tasks.kill': 'Kill',
-    'tasks.confirmKill': 'Kill this task?',
-    'tasks.killed': 'Killed',
-    'tasks.retry': 'Retry',
-    'tasks.retried': 'Re-launched',
-    'tasks.copy': 'Copy',
-    'tasks.copied': 'Copied',
-    'tasks.copyFail': 'Copy failed',
-    'tasks.log': 'Output log',
-    'tasks.logEmpty': '(no output yet)',
-    'tasks.logFull': 'Expand',
-    'tasks.prompt': 'Task prompt',
-    'tasks.searchPh': 'Search tasks (content / task id)…',
-    'tasks.pager.prev': 'Prev',
-    'tasks.pager.next': 'Next',
-    'tasks.pager.total': 'of',
-    'tasks.delete': 'Delete',
-    'tasks.confirmDelete': 'Delete this task? Its record and output archive will be removed (memory summaries are unaffected; relay references to it will fail afterwards).\n\n{id}',
-    'tasks.status': 'Status',
-    'tasks.adapter': 'Adapter',
-    'tasks.scope': 'Scope',
-    'tasks.branch': 'Branch',
-    'tasks.sessionId': 'Session ID',
-    'tasks.created': 'Created',
-    'tasks.duration': 'Duration',
-    'tasks.lastOutput': 'Last output',
-    'tasks.exitCode': 'Exit code',
-    'tasks.error': 'Error',
-    'sessions.filterScope': 'Scope filter',
-    'sessions.searchPh': 'Search…',
-    'sessions.note': 'Note',
-    'sessions.save': 'Save',
-    'sessions.delete': 'Delete',
-    'sessions.confirmDelete': 'Delete this session record?',
-    'sessions.empty': 'No sessions',
-    'sessions.locked': 'Occupied by a task',
-    'sessions.lastSeen': 'Last seen',
-    'adapters.guide': 'Guide',
-    'adapters.test': 'Test',
-    'adapters.testOk': 'Test task launched',
-    'adapters.skill': 'Skill',
-    'adapters.skillHint': 'The skill holding this adapter\'s usage guide: a real injected skill (source = user skill library, injected into every session\'s system prompt); disable it via the Skill Manager tab',
-    'adapters.skillBtn': 'Skill',
-    'adapters.editSkillTitle': 'Edit skill (AI usage guide)',
-    'adapters.editSkillHint': 'The skill IS the AI usage guide: it is synced into the user skill library (~/.agents/skills) and injected into every session\'s system prompt, so the AI knows how to drive this adapter. Editing here updates that SKILL.md; plugin restarts will not overwrite your edits while the built-in version is unchanged; disable it via the Skill Manager tab.',
-    'adapters.saveSkill': 'Save',
-    'adapters.skillSaved': 'Skill saved',
-    'adapters.skillName': 'Skill name (optional)',
-    'adapters.skillNamePh': 'e.g. my-cli-skill (that SKILL.md will be injected into the AI context so the AI learns how to use this CLI)',
-    'adapters.useCase': 'Use case',
-    'adapters.useCasePh': 'Tell the AI which tasks suit this CLI, e.g. complex backend logic / test fixes…',
-    'adapters.useCaseEmpty': '(no use case set)',
-    'adapters.editUseCase': 'Edit',
-    'adapters.saveUseCase': 'Save',
-    'adapters.skillContent': 'Skill content (SKILL.md)',
-    'adapters.skillContentPh': '# Skill body\n\nTell the AI how to drive this CLI: command format, args, session resume, caveats… (frontmatter name/description are auto-completed)',
-    'adapters.skillContentHint': 'Leave empty = link the skill name only (create the file later via the Skill button); filled = the skill is auto-created when missing',
-    'cancel': 'Cancel',
-    'saving': 'Saving…',
-    'adapters.addTitle': 'Add custom adapter',
-    'adapters.name': 'Name',
-    'adapters.type': 'Type',
-    'adapters.binary': 'Binary',
-    'adapters.args': 'Args',
-    'adapters.argsPh': 'comma separated, e.g.: -p, {task}',
-    'adapters.add': 'Add',
-    'adapters.delete': 'Delete',
-    'adapters.enable': 'Enable',
-    'adapters.disable': 'Disable',
-    'adapters.disabledHint': 'Disabled: dispatching to this adapter is rejected with a hint to use another one',
-    'adapters.confirmDelete': 'Delete this custom adapter?',
-    'adapters.builtin': 'builtin',
-    'adapters.custom': 'custom',
-    'adapters.resumeSection': 'Session resume (required for ai-cli)',
-    'adapters.resumeSectionHint': 'ai-cli must support resuming a named session; CLIs without resume support should use plain-cli',
-    'adapters.resumeKind': 'Resume mode',
-    'adapters.resumeKindFlag': 'flag mode (resume flag + arg prepended to base args)',
-    'adapters.resumeKindArgs': 'args mode (full resume command)',
-    'adapters.resumeFlag': 'Resume flag',
-    'adapters.resumeFlagPh': 'e.g. -S / -r / --resume',
-    'adapters.resumeArg': 'Session arg',
-    'adapters.resumeArgPh': 'with {sessionId} placeholder, e.g. {sessionId}',
-    'adapters.resumeArgs': 'Resume command args',
-    'adapters.resumeArgsPh': 'comma separated, with {sessionId} (and optional {task}), e.g. exec, resume, {sessionId}, {task}',
-    'adapters.continueFlag': 'Continue-last flag (optional)',
-    'adapters.continueFlagPh': 'e.g. -c; leave empty = no “continue last session” support',
-    'adapters.extractSection': 'Auto session-ID extraction (optional)',
-    'adapters.extractSource': 'Output stream',
-    'adapters.extractRegex': 'Extract regex',
-    'adapters.extractRegexPh': 'capture group 1 = session ID, e.g. To resume this session: kimi -r (session_\\S+)',
-    'adapters.resumeMissing': 'ai-cli requires a session resume config',
-    'templates.addTitle': 'Add template',
-    'templates.name': 'Name',
-    'templates.prompt': 'Prompt',
-    'templates.adapterOpt': 'Adapter (optional)',
-    'templates.idOpt': 'ID (optional, auto if empty)',
-    'templates.add': 'Add',
-    'templates.delete': 'Delete',
-    'templates.confirmDelete': 'Delete this template?',
-    'templates.builtinKeep': 'Builtin templates cannot be deleted',
-    'templates.empty': 'No templates',
-    'stats.total': 'Total tasks',
-    'stats.count': 'Tasks',
-    'stats.hours': 'Total time',
-    'stats.byStatus': 'By status',
-    'stats.empty': 'No stats yet',
-    'config.notify': 'Notify command',
-    'config.notifyHint': 'Runs when a task finishes; placeholders: {taskId} {coi} {status} {summary}',
-    'config.retention': 'Retention days',
-    'config.timeout': 'Task timeout',
-    'config.timeoutHours': 'hours',
-    'config.timeoutMinutes': 'minutes',
-    'config.timeoutHint': 'Timeout is a safety net only (AI agents may stay quiet for hours); leave empty to keep current',
-    'config.timeoutBad': 'Bad timeout format',
-    'config.save': 'Save',
-    'config.saved': 'Saved',
-    'scope.temporary': 'temporary',
-    'scope.session': 'session',
-    'scope.project': 'project',
-    'scope.global': 'global',
-  },
-} as const
-
-type DictKey = keyof (typeof DICT)['zh']
-
-/** 当前语言：浏览器为英文时用 en，否则 zh（与 PromptView 同规则）。 */
 /**
- * 当前界面语言。S4（2026-09-16）：此前是模块加载期求值一次的
- * `navigator.language` 常量 —— 用户在设置里切语言时这些私有字典文案不跟随
- * （看不到任何报错）。改为**每次取值时**向宿主 locale 解析器要（client 入口
- * 注册，见 lib/i18n.js 的 clientLang），未注册时回落 navigator.language。
+ * 本视图的字典键域名（'coi.' 前缀；真源 = src/client/index.ts 的 zh/en）。
+ *
+ * 2026-09-16：此前这里是模块内的 `DICT = { zh, en }` 私有字典 + `lang()`
+ * 读 navigator.language —— 现在只保留键，取值一律经注册字典的 t。
  */
-function lang(): keyof typeof DICT {
-  return clientLang()
-}
+type DictKey = Extract<MemoryEvolveKey, `coi.${string}`>
 
-/** 字典查询：当前语言 → en 兜底 → key 本身。 */
-function t(key: DictKey): string {
-  const active = lang()
-  return DICT[active][key] ?? DICT.en[key] ?? key
+/**
+ * 造一个「本视图键 → 当前语言文案」的查询函数。
+ *
+ * ⚠️ 必须是每个组件各持一份（`const t = dict(props.t)`），**不得**再退回
+ * 模块级常量/闭包：模块求值早于插件 apply，那时 t 只能拿到默认语言，
+ * 等于把界面语言钉死。
+ */
+function dict(t: Translate): (key: DictKey) => string {
+  return (key) => t(key)
 }
 
 /* ------------------------------------------------------------------ */
@@ -521,9 +156,9 @@ function deleteJson<T>(path: string): Promise<T> {
 }
 
 /** unknown → 可读错误文本；空信息兜底，绝不渲染空红框。 */
-function errText(err: unknown): string {
+function errText(err: unknown, t: (key: DictKey) => string): string {
   const text = err instanceof Error ? err.message : String(err)
-  return text !== undefined && text.trim() !== '' ? text : '操作失败（无错误详情）'
+  return text !== undefined && text.trim() !== '' ? text : t('coi.error.noDetail')
 }
 
 /** 后端 message 兜底：空串/缺失时用 fallback。 */
@@ -542,17 +177,17 @@ function fmtTime(ts: number | null | undefined): string {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
 }
 
-/** 时间戳 → 相对时间（'刚刚' / '5 秒前' / '3 分钟前' / '2 小时前'）。 */
-function fmtAgo(ts: number | null | undefined): string {
+/** 时间戳 → 相对时间（当次渲染语言）。 */
+function fmtAgo(ts: number | null | undefined, t: (key: DictKey) => string): string {
   if (ts === null || ts === undefined) return '—'
   const delta = Math.max(0, Date.now() - ts)
-  if (delta < 5000) return lang() === 'zh' ? '刚刚' : 'just now'
+  if (delta < 5000) return t('coi.ago.justNow')
   const s = Math.floor(delta / 1000)
-  if (s < 60) return lang() === 'zh' ? `${s} 秒前` : `${s}s ago`
+  if (s < 60) return t('coi.ago.seconds', { count: s })
   const m = Math.floor(s / 60)
-  if (m < 60) return lang() === 'zh' ? `${m} 分钟前` : `${m}m ago`
+  if (m < 60) return t('coi.ago.minutes', { count: m })
   const h = Math.floor(m / 60)
-  return lang() === 'zh' ? `${h} 小时前` : `${h}h ago`
+  return t('coi.ago.hours', { count: h })
 }
 
 /** 毫秒 → '500ms' / '42s' / '3m 5s' / '1h 2m'。 */
@@ -578,20 +213,28 @@ function trunc(text: string, n = 40): string {
  * S4（2026-09-16）：**必须是函数**——表里含 `lang()`，写成模块级常量会让文案
  * 在模块加载那一刻就被钉死（与上面 `LANG` 常量同一个坑）。
  */
-function statusMeta(status: string): { icon: string; label: string; cls: string } {
-  const zh = lang() === 'zh'
+function statusMeta(status: string, t: (key: DictKey) => string): { icon: string; label: string; cls: string } {
   const meta: Record<string, { icon: string; label: string; cls: string }> = {
-    queued: { icon: '⏳', label: zh ? '排队中' : 'Queued', cls: 'coi-status-queued' },
-    running: { icon: '⏳', label: zh ? '运行中' : 'Running', cls: 'coi-status-running' },
-    completed: { icon: '✅', label: zh ? '已完成' : 'Completed', cls: 'coi-status-completed' },
-    failed: { icon: '❌', label: zh ? '失败' : 'Failed', cls: 'coi-status-failed' },
-    killed: { icon: '🛑', label: zh ? '已终止' : 'Killed', cls: 'coi-status-killed' },
-    interrupted: { icon: '⚠️', label: zh ? '中断' : 'Interrupted', cls: 'coi-status-interrupted' },
+    queued: { icon: '⏳', label: t('coi.status.queued'), cls: 'coi-status-queued' },
+    running: { icon: '⏳', label: t('coi.status.running'), cls: 'coi-status-running' },
+    completed: { icon: '✅', label: t('coi.status.completed'), cls: 'coi-status-completed' },
+    failed: { icon: '❌', label: t('coi.status.failed'), cls: 'coi-status-failed' },
+    killed: { icon: '🛑', label: t('coi.status.killed'), cls: 'coi-status-killed' },
+    interrupted: { icon: '⚠️', label: t('coi.status.interrupted'), cls: 'coi-status-interrupted' },
   }
   return meta[status] ?? { icon: '❔', label: status, cls: '' }
 }
 
 const SCOPES = ['temporary', 'session', 'project', 'global'] as const
+
+/**
+ * 归属层级徽标：已知层级查字典（coi.scope.*），未知值原样透出。
+ * 原先写的是 `t(动态 scope 键) ?? scope` —— 但 t 永不返回 nullish，
+ * 未知值实际渲染成键名（'scope.foo'），`??` 从不生效；这里按原意兜底。
+ */
+function scopeLabel(scope: string, t: (key: DictKey) => string): string {
+  return (SCOPES as readonly string[]).includes(scope) ? t(`coi.scope.${scope}` as DictKey) : scope
+}
 
 /** 内置适配器 id（host 不返回内置标记，前端据此隐藏删除按钮；与 lib/coi/adapters.js 对齐）。 */
 const BUILTIN_ADAPTER_IDS = new Set(['kimi', 'codex', 'grok', 'hermes'])
@@ -627,22 +270,23 @@ function ErrorLine(props: { error: string | null }): JSX.Element | null {
 type SubTab = 'guide' | 'tasks' | 'sessions' | 'adapters' | 'templates' | 'stats' | 'config'
 
 export interface CoIViewProps {
-  /** slot 注入的全局翻译（本组件按 SPEC 使用内部字典，忽略之）。 */
-  t?: Translate
+  /** slot 注入的插件 locale 翻译（文案一律经它取；键域 'coi.'）。 */
+  t: Translate
 }
 
 export function CoIView(props: ConvViewProps & CoIViewProps): JSX.Element {
+  const t = dict(props.t)
   // 当前 DSH 会话 id：层级可见性依据（临时/会话层级仅本会话可见）
   const sessionId = (props as { sessionId?: string }).sessionId
   const [sub, setSub] = useState<SubTab>('tasks')
   const tabs: { id: SubTab; key: DictKey }[] = [
-    { id: 'guide', key: 'guide' },
-    { id: 'tasks', key: 'tasks' },
-    { id: 'sessions', key: 'sessions' },
-    { id: 'adapters', key: 'adapters' },
-    { id: 'templates', key: 'templates' },
-    { id: 'stats', key: 'stats' },
-    { id: 'config', key: 'config' },
+    { id: 'guide', key: 'coi.guide' },
+    { id: 'tasks', key: 'coi.tasks' },
+    { id: 'sessions', key: 'coi.sessions' },
+    { id: 'adapters', key: 'coi.adapters' },
+    { id: 'templates', key: 'coi.templates' },
+    { id: 'stats', key: 'coi.stats' },
+    { id: 'config', key: 'coi.config' },
   ]
   return (
     <div className="coi-root">
@@ -661,13 +305,13 @@ export function CoIView(props: ConvViewProps & CoIViewProps): JSX.Element {
         ))}
       </div>
       <div className="coi-body">
-        {sub === 'guide' && <GuidePane />}
-        {sub === 'tasks' && <TasksPane dsSessionId={sessionId} />}
-        {sub === 'sessions' && <SessionsPane dsSessionId={sessionId} />}
-        {sub === 'adapters' && <AdaptersPane />}
-        {sub === 'templates' && <TemplatesPane />}
-        {sub === 'stats' && <StatsPane />}
-        {sub === 'config' && <ConfigPane />}
+        {sub === 'guide' && <GuidePane t={props.t} />}
+        {sub === 'tasks' && <TasksPane t={props.t} dsSessionId={sessionId} />}
+        {sub === 'sessions' && <SessionsPane t={props.t} dsSessionId={sessionId} />}
+        {sub === 'adapters' && <AdaptersPane t={props.t} />}
+        {sub === 'templates' && <TemplatesPane t={props.t} />}
+        {sub === 'stats' && <StatsPane t={props.t} />}
+        {sub === 'config' && <ConfigPane t={props.t} />}
       </div>
     </div>
   )
@@ -677,46 +321,47 @@ export function CoIView(props: ConvViewProps & CoIViewProps): JSX.Element {
 /* 使用指南                                                             */
 /* ------------------------------------------------------------------ */
 
-function GuidePane(): JSX.Element {
+function GuidePane({ t: tt }: { t: Translate }): JSX.Element {
+  const t = dict(tt)
   return (
     <div className="coi-pane">
       <div className="coi-card">
-        <div className="coi-card-title">{t('guide.title')}</div>
-        <p className="coi-muted">{t('guide.intro')}</p>
+        <div className="coi-card-title">{t('coi.guide.title')}</div>
+        <p className="coi-muted">{t('coi.guide.intro')}</p>
       </div>
       <div className="coi-card">
-        <div className="coi-card-title">🚀 {t('guide.use.title')}</div>
-        <p className="coi-muted">{t('guide.use.desc')}</p>
+        <div className="coi-card-title">🚀 {t('coi.guide.use.title')}</div>
+        <p className="coi-muted">{t('coi.guide.use.desc')}</p>
         <ul className="coi-guide-list">
-          <li><strong>{t('guide.use.ai')}</strong>{t('guide.use.aiDesc')}</li>
-          <li><strong>{t('guide.use.slash')}</strong>{t('guide.use.slashDesc')}</li>
-          <li><strong>{t('guide.use.tab')}</strong>{t('guide.use.tabDesc')}</li>
+          <li><strong>{t('coi.guide.use.ai')}</strong>{t('coi.guide.use.aiDesc')}</li>
+          <li><strong>{t('coi.guide.use.slash')}</strong>{t('coi.guide.use.slashDesc')}</li>
+          <li><strong>{t('coi.guide.use.tab')}</strong>{t('coi.guide.use.tabDesc')}</li>
         </ul>
       </div>
       <div className="coi-card">
-        <div className="coi-card-title">🗂️ {t('guide.scope.title')}</div>
-        <p className="coi-muted">{t('guide.scope.desc')}</p>
+        <div className="coi-card-title">🗂️ {t('coi.guide.scope.title')}</div>
+        <p className="coi-muted">{t('coi.guide.scope.desc')}</p>
         <ul className="coi-guide-list">
-          <li><strong>{t('scope.temporary')}</strong>：{t('guide.scope.temp')}</li>
-          <li><strong>{t('scope.session')}</strong>：{t('guide.scope.session')}</li>
-          <li><strong>{t('scope.project')}</strong>：{t('guide.scope.project')}</li>
-          <li><strong>{t('scope.global')}</strong>：{t('guide.scope.global')}</li>
+          <li><strong>{t('coi.scope.temporary')}</strong>{t('coi.sep.colon')}{t('coi.guide.scope.temp')}</li>
+          <li><strong>{t('coi.scope.session')}</strong>{t('coi.sep.colon')}{t('coi.guide.scope.session')}</li>
+          <li><strong>{t('coi.scope.project')}</strong>{t('coi.sep.colon')}{t('coi.guide.scope.project')}</li>
+          <li><strong>{t('coi.scope.global')}</strong>{t('coi.sep.colon')}{t('coi.guide.scope.global')}</li>
         </ul>
       </div>
       <div className="coi-card">
-        <div className="coi-card-title">🧭 {t('guide.skill.title')}</div>
-        <p className="coi-muted">{t('guide.skill.desc')}</p>
+        <div className="coi-card-title">🧭 {t('coi.guide.skill.title')}</div>
+        <p className="coi-muted">{t('coi.guide.skill.desc')}</p>
       </div>
       <div className="coi-card">
-        <div className="coi-card-title">💡 {t('guide.tips.title')}</div>
+        <div className="coi-card-title">💡 {t('coi.guide.tips.title')}</div>
         <ul className="coi-guide-list">
-          <li>{t('guide.tips.1')}</li>
-          <li>{t('guide.tips.2')}</li>
-          <li>{t('guide.tips.3')}</li>
-          <li>{t('guide.tips.4')}</li>
+          <li>{t('coi.guide.tips.1')}</li>
+          <li>{t('coi.guide.tips.2')}</li>
+          <li>{t('coi.guide.tips.3')}</li>
+          <li>{t('coi.guide.tips.4')}</li>
         </ul>
       </div>
-      <p className="coi-muted coi-pad">{t('guide.loop')}</p>
+      <p className="coi-muted coi-pad">{t('coi.guide.loop')}</p>
     </div>
   )
 }
@@ -725,7 +370,8 @@ function GuidePane(): JSX.Element {
 /* 任务视图：发起表单 + 列表 + 详情/日志                                  */
 /* ------------------------------------------------------------------ */
 
-function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
+function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string }): JSX.Element {
+  const t = dict(tt)
   /** 可见性 query：带 DSH 会话 id 时后端按层级过滤（临时/会话=本会话，项目=本会话 cwd）。 */
   const visQs = (dsSessionId ?? '') !== '' ? `&sessionId=${encodeURIComponent(String(dsSessionId))}` : ''
   const [adapters, setAdapters] = useState<Adapter[]>([])
@@ -785,7 +431,7 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
       setTotal(data.total)
       setError(null)
     } catch (err) {
-      setError(errText(err))
+      setError(errText(err, t))
     }
   }, [searchQ, page])
 
@@ -794,26 +440,26 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
       const data = await fetchJson<{ ok: boolean; task: CoiTask }>(`/tasks/${encodeURIComponent(id)}`)
       setDetail(data.task)
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     }
   }, [])
 
   const removeTask = async (id: string): Promise<void> => {
     // 稳定版复审 P1-6：文案里的 {id} 占位符必须替换成真实任务 id，
     // 否则对话框显示字面量 {id}（旧版未替换，用户不知道删的是哪个任务）
-    if (!window.confirm(t('tasks.confirmDelete').replace('{id}', id))) return
+    if (!window.confirm(t('coi.tasks.confirmDelete').replace('{id}', id))) return
     try {
       const res = await deleteJson<{ ok: boolean; message?: string }>(`/tasks/${encodeURIComponent(id)}`)
       if (res.ok !== true) {
-        setNotice({ kind: 'error', text: msgOr(res.message, '删除失败') })
+        setNotice({ kind: 'error', text: msgOr(res.message, t('coi.tasks.deleteFailed')) })
         return
       }
       setSelectedId(null)
       setDetail(null)
       void loadTasks()
-      setNotice({ kind: 'ok', text: res.message ?? '已删除' })
+      setNotice({ kind: 'ok', text: res.message ?? t('coi.tasks.deleted') })
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     }
   }
 
@@ -823,7 +469,7 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
       setLog(data.text)
       setLogError(null)
     } catch (err) {
-      setLogError(errText(err))
+      setLogError(errText(err, t))
     }
   }, [])
 
@@ -902,7 +548,7 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
 
   const launch = async (): Promise<void> => {
     if (prompt.trim() === '') {
-      setNotice({ kind: 'error', text: t('launch.needPrompt') })
+      setNotice({ kind: 'error', text: t('coi.launch.needPrompt') })
       return
     }
     setLaunching(true)
@@ -917,7 +563,7 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
         injectTracks: injectTracks.length > 0 ? injectTracks : undefined,
         contextText: ctxText.trim() === '' ? undefined : ctxText,
       })
-      setNotice({ kind: 'ok', text: `${t('launch.ok')}${res.taskId !== undefined ? `：${res.taskId}` : ''}` })
+      setNotice({ kind: 'ok', text: `${t('coi.launch.ok')}${res.taskId !== undefined ? `${t('coi.sep.colon')}${res.taskId}` : ''}` })
       setPrompt('')
       setTemplateId('')
       setRefTaskId('')
@@ -925,7 +571,7 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
       // 通知宿主层重查 COI Tab 红点（新任务立即可见，不等 30s 轮询）。
       window.dispatchEvent(new CustomEvent('dsh-memory-evolve:badge-change'))
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     } finally {
       setLaunching(false)
     }
@@ -933,26 +579,26 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
 
   const kill = async (): Promise<void> => {
     if (detail === null) return
-    if (!window.confirm(t('tasks.confirmKill'))) return
+    if (!window.confirm(t('coi.tasks.confirmKill'))) return
     try {
       // 稳定版复审 P1-6：先发 force:false——host 对「正在写文件」等任务
       // 会返回确认提示而不是直接终止（跳过它会绕过安全检查）；被拒时
       // 把服务端提示原样给用户二次确认后再带 force 重发（catch 分支）。
       await postJson(`/tasks/${encodeURIComponent(detail.id)}/cancel`, { force: false })
-      setNotice({ kind: 'ok', text: t('tasks.killed') })
+      setNotice({ kind: 'ok', text: t('coi.tasks.killed') })
       void loadTasks()
       void loadDetail(detail.id)
     } catch (err) {
       // host 要求二次确认时：把确认提示原样透出，再带 force 重发。
-      const msg = errText(err)
+      const msg = errText(err, t)
       if (window.confirm(msg)) {
         try {
           await postJson(`/tasks/${encodeURIComponent(detail.id)}/cancel`, { force: true })
-          setNotice({ kind: 'ok', text: t('tasks.killed') })
+          setNotice({ kind: 'ok', text: t('coi.tasks.killed') })
           void loadTasks()
           void loadDetail(detail.id)
         } catch (err2) {
-          setNotice({ kind: 'error', text: errText(err2) })
+          setNotice({ kind: 'error', text: errText(err2, t) })
         }
       }
     }
@@ -962,10 +608,10 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
     if (detail === null) return
     try {
       const res = await postJson<{ ok: boolean; taskId?: string; message?: string }>(`/tasks/${encodeURIComponent(detail.id)}/retry`)
-      setNotice({ kind: 'ok', text: res.message ?? `${t('tasks.retried')}${res.taskId !== undefined ? `：${res.taskId}` : ''}` })
+      setNotice({ kind: 'ok', text: res.message ?? `${t('coi.tasks.retried')}${res.taskId !== undefined ? `${t('coi.sep.colon')}${res.taskId}` : ''}` })
       void loadTasks()
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     }
   }
 
@@ -975,7 +621,7 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch {
-      setNotice({ kind: 'error', text: t('tasks.copyFail') })
+      setNotice({ kind: 'error', text: t('coi.tasks.copyFail') })
     }
   }
 
@@ -990,17 +636,17 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
     <div className="coi-pane coi-tasks">
       <div className="coi-card">
         <div className="coi-card-head">
-          <span className="coi-card-title">{t('launch.title')}</span>
+          <span className="coi-card-title">{t('coi.launch.title')}</span>
           <span className="coi-grow" />
           <button type="button" className="coi-btn coi-btn-mini" onClick={() => setLaunchOpen(!launchOpen)}>
-            {launchOpen ? t('launch.collapse') : t('launch.expand')}
+            {launchOpen ? t('coi.launch.collapse') : t('coi.launch.expand')}
           </button>
         </div>
         {launchOpen && (
         <>
         <div className="coi-form-grid">
           <label className="coi-field">
-            <span className="coi-label">{t('launch.adapter')}</span>
+            <span className="coi-label">{t('coi.launch.adapter')}</span>
             <select
               className="coi-select"
               value={adapterId}
@@ -1015,13 +661,13 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
               }}
             >
               {adapters.map((a) => (
-                <option key={a.id} value={a.id}>{a.name}（{a.id}）</option>
+                <option key={a.id} value={a.id}>{a.name}{t('coi.sep.paren', { value: a.id })}</option>
               ))}
               {adapters.length === 0 && <option value={adapterId}>{adapterId}</option>}
             </select>
           </label>
           <label className="coi-field">
-            <span className="coi-label">{t('launch.scope')}</span>
+            <span className="coi-label">{t('coi.launch.scope')}</span>
             <select className="coi-select" value={scope} onChange={(e) => setScope(e.target.value)}>
               {SCOPES.map((s) => (
                 <option key={s} value={s}>{t(`scope.${s}`)}</option>
@@ -1030,34 +676,34 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
           </label>
           {scope !== 'temporary' && (
             <label className="coi-field">
-              <span className="coi-label">{t('launch.session')}</span>
+              <span className="coi-label">{t('coi.launch.session')}</span>
               {/* 会话属于某个适配器：只列当前适配器的会话（跨适配器恢复必然失败） */}
               <select className="coi-select" value={sessionId} onChange={(e) => setSessionId(e.target.value)}>
-                <option value="">{t('launch.sessionNone')}</option>
+                <option value="">{t('coi.launch.sessionNone')}</option>
                 {sessions.filter((s) => s.adapterId === adapterId).map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.id}（{s.adapterId}{s.note !== null && s.note !== '' ? ` · ${trunc(s.note, 12)}` : ''}）
+                    {s.id}{t('coi.sep.paren', { value: `${s.adapterId}${s.note !== null && s.note !== '' ? ` · ${trunc(s.note, 12)}` : ''}` })}
                   </option>
                 ))}
                 {sessions.filter((s) => s.adapterId === adapterId).length === 0 && (
-                  <option value="" disabled>{t('launch.sessionEmpty')}</option>
+                  <option value="" disabled>{t('coi.launch.sessionEmpty')}</option>
                 )}
               </select>
             </label>
           )}
           <label className="coi-field">
-            <span className="coi-label">{t('launch.template')}</span>
+            <span className="coi-label">{t('coi.launch.template')}</span>
             <select className="coi-select" value={templateId} onChange={(e) => applyTemplate(e.target.value)}>
-              <option value="">{t('launch.templateNone')}</option>
+              <option value="">{t('coi.launch.templateNone')}</option>
               {templates.map((tpl) => (
-                <option key={tpl.id} value={tpl.id}>{tpl.name}（{tpl.id}）</option>
+                <option key={tpl.id} value={tpl.id}>{tpl.name}{t('coi.sep.paren', { value: tpl.id })}</option>
               ))}
             </select>
           </label>
           <label className="coi-field">
-            <span className="coi-label">{t('launch.ref')}</span>
+            <span className="coi-label">{t('coi.launch.ref')}</span>
             <select className="coi-select" value={refTaskId} onChange={(e) => setRefTaskId(e.target.value)}>
-              <option value="">{t('launch.refNone')}</option>
+              <option value="">{t('coi.launch.refNone')}</option>
               {refTasks.map((task) => (
                 <option key={task.id} value={task.id}>{task.id} · {trunc(task.prompt, 24)}</option>
               ))}
@@ -1065,20 +711,20 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
           </label>
         </div>
         <label className="coi-field">
-          <span className="coi-label">{t('launch.prompt')}</span>
+          <span className="coi-label">{t('coi.launch.prompt')}</span>
           <textarea
             className="coi-textarea coi-textarea-lg"
             rows={6}
-            placeholder={t('launch.promptPh')}
+            placeholder={t('coi.launch.promptPh')}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
           />
         </label>
         <label className="coi-field coi-field-wide">
           <span className="coi-field-check">
-            <span className="coi-label">{t('launch.injectTracks')}</span>
+            <span className="coi-label">{t('coi.launch.injectTracks')}</span>
           </span>
-          <span className="coi-muted coi-small">{t('launch.injectTracksHint')}</span>
+          <span className="coi-muted coi-small">{t('coi.launch.injectTracksHint')}</span>
         </label>
         <label className="coi-field coi-field-wide coi-inject-track-line">
           {(['memory', 'user', 'key'] as const).map((track) => (
@@ -1098,19 +744,19 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
         </label>
         {injectTracks.length > 0 && (
           <label className="coi-field coi-field-wide">
-            <span className="coi-label">{t('launch.ctxText')}</span>
+            <span className="coi-label">{t('coi.launch.ctxText')}</span>
             <textarea
               className="coi-textarea"
               rows={4}
               value={ctxText}
               onChange={(e) => setCtxText(e.target.value)}
-              placeholder={t('launch.ctxTextPh')}
+              placeholder={t('coi.launch.ctxTextPh')}
             />
           </label>
         )}
         <div className="coi-form-actions">
           <button type="button" className="coi-btn coi-btn-primary" disabled={launching} onClick={() => void launch()}>
-            {t('launch.submit')}
+            {t('coi.launch.submit')}
           </button>
         </div>
         </>
@@ -1122,7 +768,7 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
       <div className="coi-task-toolbar">
         <input
           className="coi-input"
-          placeholder={t('tasks.searchPh')}
+          placeholder={t('coi.tasks.searchPh')}
           value={searchQ}
           onChange={(e) => {
             setSearchQ(e.target.value)
@@ -1135,10 +781,10 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
       <div className="coi-split">
         <div className="coi-task-list">
           <ErrorLine error={error} />
-          {tasks === null && error === null && <div className="coi-muted coi-pad">{t('loading')}</div>}
-          {tasks !== null && tasks.length === 0 && <div className="coi-muted coi-pad">{t('tasks.empty')}</div>}
+          {tasks === null && error === null && <div className="coi-muted coi-pad">{t('coi.loading')}</div>}
+          {tasks !== null && tasks.length === 0 && <div className="coi-muted coi-pad">{t('coi.tasks.empty')}</div>}
           {tasks?.map((task) => {
-            const meta = statusMeta(task.status)
+            const meta = statusMeta(task.status, t)
             return (
               <button
                 key={task.id}
@@ -1150,7 +796,7 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
                 <span className="coi-mono coi-task-id">{task.id}</span>
                 <span className="coi-task-adapter">{task.adapterId}</span>
                 <span className="coi-task-prompt" title={task.prompt}>{trunc(task.prompt)}</span>
-                <span className="coi-badge">{t('scope.' + task.scope) ?? task.scope}</span>
+                <span className="coi-badge">{scopeLabel(task.scope, t)}</span>
                 <span className="coi-muted coi-task-time">{fmtTime(task.createdAt)}</span>
               </button>
             )
@@ -1165,10 +811,10 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
               >
-                ‹ {t('tasks.pager.prev')}
+                ‹ {t('coi.tasks.pager.prev')}
               </button>
               <span className="coi-pager-info">
-                {page} / {Math.max(1, Math.ceil(total / TASK_LIMIT))} · {t('tasks.pager.total')} {total}
+                {page} / {Math.max(1, Math.ceil(total / TASK_LIMIT))} · {t('coi.tasks.pager.total')} {total}
               </span>
               <button
                 type="button"
@@ -1176,64 +822,64 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
                 disabled={page >= Math.max(1, Math.ceil(total / TASK_LIMIT))}
                 onClick={() => setPage((p) => p + 1)}
               >
-                {t('tasks.pager.next')} ›
+                {t('coi.tasks.pager.next')} ›
               </button>
             </div>
           )}
         </div>
 
         <div className="coi-detail">
-          {selectedId === null && <div className="coi-muted coi-pad">{t('tasks.selectHint')}</div>}
-          {selectedId !== null && detail === null && <div className="coi-muted coi-pad">{t('loading')}</div>}
+          {selectedId === null && <div className="coi-muted coi-pad">{t('coi.tasks.selectHint')}</div>}
+          {selectedId !== null && detail === null && <div className="coi-muted coi-pad">{t('coi.loading')}</div>}
           {detail !== null && (
             <>
               <div className="coi-detail-meta">
                 <div className="coi-meta-row">
-                  <span className="coi-label">{t('tasks.status')}</span>
-                  <span className={statusMeta(detail.status).cls}>
-                    {statusMeta(detail.status).icon} {statusMeta(detail.status).label}
+                  <span className="coi-label">{t('coi.tasks.status')}</span>
+                  <span className={statusMeta(detail.status, t).cls}>
+                    {statusMeta(detail.status, t).icon} {statusMeta(detail.status, t).label}
                   </span>
                 </div>
                 <div className="coi-meta-row">
-                  <span className="coi-label">{t('tasks.adapter')}</span>
+                  <span className="coi-label">{t('coi.tasks.adapter')}</span>
                   <span>{detail.adapterId}</span>
                 </div>
                 <div className="coi-meta-row">
-                  <span className="coi-label">{t('tasks.scope')}</span>
-                  <span className="coi-badge">{t('scope.' + detail.scope) ?? detail.scope}</span>
+                  <span className="coi-label">{t('coi.tasks.scope')}</span>
+                  <span className="coi-badge">{scopeLabel(detail.scope, t)}</span>
                 </div>
                 {detail.branch !== null && (
                   <div className="coi-meta-row">
-                    <span className="coi-label">{t('tasks.branch')}</span>
+                    <span className="coi-label">{t('coi.tasks.branch')}</span>
                     <span className="coi-mono">{detail.branch}</span>
                   </div>
                 )}
                 {detail.sessionId !== null && (
                   <div className="coi-meta-row">
-                    <span className="coi-label">{t('tasks.sessionId')}</span>
+                    <span className="coi-label">{t('coi.tasks.sessionId')}</span>
                     <span className="coi-mono coi-small">{detail.sessionId}</span>
                     <button type="button" className="coi-btn coi-btn-mini" onClick={() => void copySession(detail.sessionId ?? '')}>
-                      {copied ? t('tasks.copied') : t('tasks.copy')}
+                      {copied ? t('coi.tasks.copied') : t('coi.tasks.copy')}
                     </button>
                   </div>
                 )}
                 <div className="coi-meta-row">
-                  <span className="coi-label">{t('tasks.created')}</span>
+                  <span className="coi-label">{t('coi.tasks.created')}</span>
                   <span>{fmtTime(detail.createdAt)}</span>
                 </div>
                 <div className="coi-meta-row">
-                  <span className="coi-label">{t('tasks.duration')}</span>
+                  <span className="coi-label">{t('coi.tasks.duration')}</span>
                   <span>{fmtDur(detailDur(detail))}</span>
                 </div>
                 {running && detail.lastOutputAt != null && (
                   <div className="coi-meta-row">
-                    <span className="coi-label">{t('tasks.lastOutput')}</span>
-                    <span>{fmtAgo(detail.lastOutputAt)}</span>
+                    <span className="coi-label">{t('coi.tasks.lastOutput')}</span>
+                    <span>{fmtAgo(detail.lastOutputAt, t)}</span>
                   </div>
                 )}
                 {detail.exitCode !== null && (
                   <div className="coi-meta-row">
-                    <span className="coi-label">{t('tasks.exitCode')}</span>
+                    <span className="coi-label">{t('coi.tasks.exitCode')}</span>
                     <span className="coi-mono">{detail.exitCode}</span>
                   </div>
                 )}
@@ -1241,36 +887,36 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
               <div className="coi-detail-actions">
                 {running && (
                   <button type="button" className="coi-btn coi-btn-danger" onClick={() => void kill()}>
-                    🛑 {t('tasks.kill')}
+                    🛑 {t('coi.tasks.kill')}
                   </button>
                 )}
                 {!running && (
                   <button type="button" className="coi-btn" onClick={() => void retry()}>
-                    ↻ {t('tasks.retry')}
+                    ↻ {t('coi.tasks.retry')}
                   </button>
                 )}
                 {!running && (
                   <button type="button" className="coi-btn coi-btn-danger" onClick={() => void removeTask(detail.id)}>
-                    🗑 {t('tasks.delete')}
+                    🗑 {t('coi.tasks.delete')}
                   </button>
                 )}
               </div>
               {detail.error !== null && detail.error !== '' && (
                 <div className="coi-error">
-                  {t('tasks.error')}：{detail.error}
+                  {t('coi.tasks.error')}{t('coi.sep.colon')}{detail.error}
                 </div>
               )}
               <div className="coi-log-head">
-                <span className="coi-label coi-log-title">{t('tasks.prompt')}</span>
-                <button type="button" className="coi-btn coi-btn-mini" onClick={() => setFullPrompt(true)}>⛶ {t('tasks.logFull')}</button>
+                <span className="coi-label coi-log-title">{t('coi.tasks.prompt')}</span>
+                <button type="button" className="coi-btn coi-btn-mini" onClick={() => setFullPrompt(true)}>⛶ {t('coi.tasks.logFull')}</button>
               </div>
               <pre className="coi-prompt-view">{detail.prompt}</pre>
               <div className="coi-log-head">
-                <span className="coi-label coi-log-title">{t('tasks.log')}</span>
-                <button type="button" className="coi-btn coi-btn-mini" onClick={() => setFullLog(true)}>⛶ {t('tasks.logFull')}</button>
+                <span className="coi-label coi-log-title">{t('coi.tasks.log')}</span>
+                <button type="button" className="coi-btn coi-btn-mini" onClick={() => setFullLog(true)}>⛶ {t('coi.tasks.logFull')}</button>
               </div>
               {logError !== null && <div className="coi-error">{logError}</div>}
-              <pre ref={logRef} className="coi-log">{log === '' ? t('tasks.logEmpty') : log}</pre>
+              <pre ref={logRef} className="coi-log">{log === '' ? t('coi.tasks.logEmpty') : log}</pre>
             </>
           )}
         </div>
@@ -1279,7 +925,7 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
         <div className="coi-modal" onClick={() => setFullPrompt(false)}>
           <div className="coi-modal-box" onClick={(e) => e.stopPropagation()}>
             <div className="coi-modal-head">
-              <span className="coi-mono coi-small">{t('tasks.prompt')} — {detail.id}</span>
+              <span className="coi-mono coi-small">{t('coi.tasks.prompt')} — {detail.id}</span>
               <button type="button" className="coi-btn coi-btn-mini" onClick={() => setFullPrompt(false)}>✕</button>
             </div>
             <pre className="coi-log coi-log-full coi-prompt-view-full">{detail.prompt}</pre>
@@ -1290,10 +936,10 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
         <div className="coi-modal" onClick={() => setFullLog(false)}>
           <div className="coi-modal-box" onClick={(e) => e.stopPropagation()}>
             <div className="coi-modal-head">
-              <span className="coi-mono coi-small">{t('tasks.log')} — {detail.id}（{detail.adapterId} {t('scope.' + detail.scope) ?? detail.scope}）</span>
+              <span className="coi-mono coi-small">{t('coi.tasks.log')} — {t('coi.sep.paren', { value: `${detail.id} ${detail.adapterId} ${scopeLabel(detail.scope, t)}` })}</span>
               <button type="button" className="coi-btn coi-btn-mini" onClick={() => setFullLog(false)}>✕</button>
             </div>
-            <pre ref={fullLogRef} className="coi-log coi-log-full">{log === '' ? t('tasks.logEmpty') : log}</pre>
+            <pre ref={fullLogRef} className="coi-log coi-log-full">{log === '' ? t('coi.tasks.logEmpty') : log}</pre>
           </div>
         </div>
       )}
@@ -1305,7 +951,8 @@ function TasksPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
 /* 会话视图                                                             */
 /* ------------------------------------------------------------------ */
 
-function SessionsPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
+function SessionsPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string }): JSX.Element {
+  const t = dict(tt)
   const visQs = (dsSessionId ?? '') !== '' ? `&sessionId=${encodeURIComponent(String(dsSessionId))}` : ''
   const [sessions, setSessions] = useState<CoiSession[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -1318,13 +965,13 @@ function SessionsPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
   const load = useCallback(async (): Promise<void> => {
     try {
       const params = new URLSearchParams()
-      if (scopeFilter !== '') params.set('scope', scopeFilter)
-      if (q.trim() !== '') params.set('q', q.trim())
+      if (scopeFilter !== '') params.set('coi.scope', scopeFilter)
+      if (q.trim() !== '') params.set('coi.q', q.trim())
       const data = await fetchJson<{ sessions: CoiSession[] }>(`/sessions?${params.toString()}${visQs}`)
       setSessions(data.sessions)
       setError(null)
     } catch (err) {
-      setError(errText(err))
+      setError(errText(err, t))
     }
   }, [scopeFilter, q])
 
@@ -1336,55 +983,55 @@ function SessionsPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
     try {
       await postJson('/sessions/note', { id, note: noteDraft })
       setEditId(null)
-      setNotice({ kind: 'ok', text: t('config.saved') })
+      setNotice({ kind: 'ok', text: t('coi.config.saved') })
       void load()
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     }
   }
 
   const remove = async (id: string): Promise<void> => {
-    if (!window.confirm(t('sessions.confirmDelete'))) return
+    if (!window.confirm(t('coi.sessions.confirmDelete'))) return
     try {
       await deleteJson(`/sessions/${encodeURIComponent(id)}`)
       void load()
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     }
   }
 
   return (
     <div className="coi-pane">
       <div className="coi-toolbar">
-        <select className="coi-select" value={scopeFilter} onChange={(e) => setScopeFilter(e.target.value)} title={t('sessions.filterScope')}>
-          <option value="">{t('all')}</option>
+        <select className="coi-select" value={scopeFilter} onChange={(e) => setScopeFilter(e.target.value)} title={t('coi.sessions.filterScope')}>
+          <option value="">{t('coi.all')}</option>
           {SCOPES.map((s) => (
             <option key={s} value={s}>{t(`scope.${s}`)}</option>
           ))}
         </select>
         <input
           className="coi-input"
-          placeholder={t('sessions.searchPh')}
+          placeholder={t('coi.sessions.searchPh')}
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
-        <button type="button" className="coi-btn" onClick={() => void load()}>{t('refresh')}</button>
+        <button type="button" className="coi-btn" onClick={() => void load()}>{t('coi.refresh')}</button>
       </div>
       <NoticeLine notice={notice} />
       <ErrorLine error={error} />
-      {sessions === null && error === null && <div className="coi-muted coi-pad">{t('loading')}</div>}
-      {sessions !== null && sessions.length === 0 && <div className="coi-muted coi-pad">{t('sessions.empty')}</div>}
+      {sessions === null && error === null && <div className="coi-muted coi-pad">{t('coi.loading')}</div>}
+      {sessions !== null && sessions.length === 0 && <div className="coi-muted coi-pad">{t('coi.sessions.empty')}</div>}
       {sessions?.map((s) => (
         <div key={s.id} className="coi-row">
           <div className="coi-row-line">
             <span className="coi-mono coi-small">{s.id}</span>
             {s.activeTaskId !== null && s.activeTaskId !== '' && (
-              <span title={`${t('sessions.locked')}：${s.activeTaskId}`}>🔒</span>
+              <span title={`${t('coi.sessions.locked')}${t('coi.sep.colon')}${s.activeTaskId}`}>🔒</span>
             )}
-            <span className="coi-badge">{t('scope.' + s.scope) ?? s.scope}</span>
+            <span className="coi-badge">{scopeLabel(s.scope, t)}</span>
             <span>{s.adapterId}</span>
             {s.branch !== null && <span className="coi-muted coi-mono coi-small">{s.branch}</span>}
-            <span className="coi-muted coi-small">{t('sessions.lastSeen')} {fmtTime(s.lastSeen)}</span>
+            <span className="coi-muted coi-small">{t('coi.sessions.lastSeen')} {fmtTime(s.lastSeen)}</span>
           </div>
           <div className="coi-row-line">
             {editId === s.id ? (
@@ -1393,9 +1040,9 @@ function SessionsPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
                   className="coi-input coi-grow"
                   value={noteDraft}
                   onChange={(e) => setNoteDraft(e.target.value)}
-                  placeholder={t('sessions.note')}
+                  placeholder={t('coi.sessions.note')}
                 />
-                <button type="button" className="coi-btn coi-btn-mini" onClick={() => void saveNote(s.id)}>{t('sessions.save')}</button>
+                <button type="button" className="coi-btn coi-btn-mini" onClick={() => void saveNote(s.id)}>{t('coi.sessions.save')}</button>
               </>
             ) : (
               <>
@@ -1408,12 +1055,12 @@ function SessionsPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
                     setNoteDraft(s.note ?? '')
                   }}
                 >
-                  {t('sessions.note')}
+                  {t('coi.sessions.note')}
                 </button>
               </>
             )}
             <button type="button" className="coi-btn coi-btn-mini coi-btn-danger" onClick={() => void remove(s.id)}>
-              {t('sessions.delete')}
+              {t('coi.sessions.delete')}
             </button>
           </div>
         </div>
@@ -1426,7 +1073,8 @@ function SessionsPane({ dsSessionId }: { dsSessionId?: string }): JSX.Element {
 /* 适配器视图                                                           */
 /* ------------------------------------------------------------------ */
 
-function AdaptersPane(): JSX.Element {
+function AdaptersPane({ t: tt }: { t: Translate }): JSX.Element {
+  const t = dict(tt)
   const [adapters, setAdapters] = useState<Adapter[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
@@ -1466,7 +1114,7 @@ function AdaptersPane(): JSX.Element {
       setAdapters(data.adapters)
       setError(null)
     } catch (err) {
-      setError(errText(err))
+      setError(errText(err, t))
     }
   }, [])
 
@@ -1477,14 +1125,14 @@ function AdaptersPane(): JSX.Element {
   const test = async (id: string): Promise<void> => {
     try {
       const res = await postJson<{ ok: boolean; taskId?: string; message?: string }>('/adapters/test', { id })
-      setNotice({ kind: 'ok', text: `${t('adapters.testOk')}${res.taskId !== undefined ? `：${res.taskId}` : ''}${res.message !== undefined ? `（${res.message}）` : ''}` })
+      setNotice({ kind: 'ok', text: `${t('coi.adapters.testOk')}${res.taskId !== undefined ? `${t('coi.sep.colon')}${res.taskId}` : ''}${res.message !== undefined ? t('coi.sep.paren', { value: res.message }) : ''}` })
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     }
   }
 
   const remove = async (id: string): Promise<void> => {
-    if (!window.confirm(t('adapters.confirmDelete'))) return
+    if (!window.confirm(t('coi.adapters.confirmDelete'))) return
     try {
       const res = await deleteJson<{ ok: boolean; message?: string }>(`/adapters/${encodeURIComponent(id)}`)
       if (res.ok === false) {
@@ -1493,7 +1141,7 @@ function AdaptersPane(): JSX.Element {
       }
       void load()
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     }
   }
 
@@ -1504,13 +1152,13 @@ function AdaptersPane(): JSX.Element {
       const def = { ...a, useCase: useCaseDraft.trim() }
       const res = await postJson<{ ok: boolean; message?: string }>('/adapters', { def })
       if (res.ok !== true) {
-        setNotice({ kind: 'error', text: msgOr(res.message, '保存失败') })
+        setNotice({ kind: 'error', text: msgOr(res.message, t('coi.adapters.saveFailed')) })
         return
       }
       setUseCaseEditId(null)
       void load()
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     }
   }
 
@@ -1519,12 +1167,12 @@ function AdaptersPane(): JSX.Element {
       const next = a.enabled === false
       const res = await postJson<{ ok: boolean; message?: string }>(`/adapters/${encodeURIComponent(a.id)}/enabled`, { enabled: next })
       if (res.ok !== true) {
-        setNotice({ kind: 'error', text: msgOr(res.message, '操作失败') })
+        setNotice({ kind: 'error', text: msgOr(res.message, t('coi.adapters.opFailed')) })
         return
       }
       void load()
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     }
   }
 
@@ -1537,13 +1185,13 @@ function AdaptersPane(): JSX.Element {
     try {
       const res = await fetchJson<{ ok: boolean; skillName?: string; exists?: boolean; content?: string; message?: string }>(`/adapters/${encodeURIComponent(a.id)}/skill`)
       if (res.ok !== true) {
-        setSkillError(msgOr(res.message, '读取失败'))
+        setSkillError(msgOr(res.message, t('coi.adapters.readFailed')))
         return
       }
       setSkillEditName(res.skillName ?? '')
       setSkillContent(res.content ?? '')
     } catch (err) {
-      setSkillError(errText(err))
+      setSkillError(errText(err, t))
     }
   }
 
@@ -1558,14 +1206,14 @@ function AdaptersPane(): JSX.Element {
         body: JSON.stringify({ content: skillContent }),
       })
       if (res.ok !== true) {
-        setSkillError(msgOr(res.message, '保存失败'))
+        setSkillError(msgOr(res.message, t('coi.adapters.saveFailed')))
         return
       }
-      setNotice({ kind: 'ok', text: res.message ?? t('adapters.skillSaved') })
+      setNotice({ kind: 'ok', text: res.message ?? t('coi.adapters.skillSaved') })
       setSkillEditId(null)
       setSkillContent('')
     } catch (err) {
-      setSkillError(errText(err))
+      setSkillError(errText(err, t))
     } finally {
       setSkillSaving(false)
     }
@@ -1576,7 +1224,7 @@ function AdaptersPane(): JSX.Element {
     if (fType === 'ai-cli') {
       const resumeEmpty = fResumeKind === 'flag' ? fResumeFlag.trim() === '' : fResumeArgs.trim() === ''
       if (resumeEmpty) {
-        setNotice({ kind: 'error', text: t('adapters.resumeMissing') })
+        setNotice({ kind: 'error', text: t('coi.adapters.resumeMissing') })
         return
       }
     }
@@ -1605,10 +1253,10 @@ function AdaptersPane(): JSX.Element {
       const skillContent = fSkill.trim() !== '' && fSkillContent.trim() !== '' ? fSkillContent : undefined
       const res = await postJson<{ ok: boolean; message?: string; skillMessage?: string }>('/adapters', { def, skillContent })
       if (res.ok !== true) {
-        setNotice({ kind: 'error', text: msgOr(res.message, '保存失败') })
+        setNotice({ kind: 'error', text: msgOr(res.message, t('coi.adapters.saveFailed')) })
         return
       }
-      setNotice({ kind: 'ok', text: res.skillMessage !== undefined ? res.skillMessage : t('config.saved') })
+      setNotice({ kind: 'ok', text: res.skillMessage !== undefined ? res.skillMessage : t('coi.config.saved') })
       setFId('')
       setFName('')
       setFBinary('')
@@ -1622,7 +1270,7 @@ function AdaptersPane(): JSX.Element {
       setFExtractRegex('')
       void load()
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     } finally {
       setAdding(false)
     }
@@ -1632,7 +1280,7 @@ function AdaptersPane(): JSX.Element {
     <div className="coi-pane">
       <NoticeLine notice={notice} />
       <ErrorLine error={error} />
-      {adapters === null && error === null && <div className="coi-muted coi-pad">{t('loading')}</div>}
+      {adapters === null && error === null && <div className="coi-muted coi-pad">{t('coi.loading')}</div>}
       <div className="coi-cards">
         {adapters?.map((a) => {
           const builtin = BUILTIN_ADAPTER_IDS.has(a.id)
@@ -1642,16 +1290,16 @@ function AdaptersPane(): JSX.Element {
                 <span className="coi-strong">{a.name}</span>
                 <span className="coi-mono coi-small coi-muted">{a.id}</span>
                 <span className="coi-badge">{a.type}</span>
-                <span className="coi-badge">{builtin ? t('adapters.builtin') : t('adapters.custom')}</span>
+                <span className="coi-badge">{builtin ? t('coi.adapters.builtin') : t('coi.adapters.custom')}</span>
                 <span className="coi-grow" />
                 {a.skillName !== undefined && a.skillName !== '' && (
-                  <span className="coi-muted coi-small coi-skill-tag" title={t('adapters.skillHint')}>
-                    {t('adapters.skill')}：{a.skillName}
+                  <span className="coi-muted coi-small coi-skill-tag" title={t('coi.adapters.skillHint')}>
+                    {t('coi.adapters.skill')}{t('coi.sep.colon')}{a.skillName}
                   </span>
                 )}
                 {a.skillName !== undefined && a.skillName !== '' && (
                   <button type="button" className="coi-btn coi-btn-mini" onClick={() => void openSkillEdit(a)}>
-                    {t('adapters.skillBtn')}
+                    {t('coi.adapters.skillBtn')}
                   </button>
                 )}
                 <button
@@ -1659,14 +1307,14 @@ function AdaptersPane(): JSX.Element {
                   className={`coi-btn coi-btn-mini${a.enabled === false ? ' coi-btn-danger' : ''}`}
                   onClick={() => void toggleEnabled(a)}
                 >
-                  {a.enabled === false ? t('adapters.enable') : t('adapters.disable')}
+                  {a.enabled === false ? t('coi.adapters.enable') : t('coi.adapters.disable')}
                 </button>
                 <button type="button" className="coi-btn coi-btn-mini" onClick={() => void test(a.id)}>
-                  {t('adapters.test')}
+                  {t('coi.adapters.test')}
                 </button>
                 {!builtin && (
                   <button type="button" className="coi-btn coi-btn-mini coi-btn-danger" onClick={() => void remove(a.id)}>
-                    {t('adapters.delete')}
+                    {t('coi.adapters.delete')}
                   </button>
                 )}
               </div>
@@ -1675,8 +1323,8 @@ function AdaptersPane(): JSX.Element {
                 {a.args.length > 0 && <span className="coi-mono">{a.args.join(' ')}</span>}
                 {/* 平均完成耗时（有完成记录才显示）：分钟一位小数，与工具 render 同格式 */}
                 {a.avgMs !== undefined && a.avgMs > 0 && (
-                  <span className="coi-avg-ms" title="历史 completed 任务的平均耗时（de_coi_adapters 同源）">
-                    ⏱ 均耗时 {(a.avgMs / 60000).toFixed(1)} 分钟
+                  <span className="coi-avg-ms" title={t('coi.adapters.avgMsTitle')}>
+                    {t('coi.adapters.avgMs', { minutes: (a.avgMs / 60000).toFixed(1) })}
                   </span>
                 )}
               </div>
@@ -1688,27 +1336,27 @@ function AdaptersPane(): JSX.Element {
                       className="coi-input coi-grow"
                       value={useCaseDraft}
                       onChange={(e) => setUseCaseDraft(e.target.value)}
-                      placeholder={t('adapters.useCasePh')}
+                      placeholder={t('coi.adapters.useCasePh')}
                     />
-                    <button type="button" className="coi-btn coi-btn-mini coi-btn-primary" onClick={() => void saveUseCase(a)}>{t('adapters.saveUseCase')}</button>
-                    <button type="button" className="coi-btn coi-btn-mini" onClick={() => setUseCaseEditId(null)}>{t('cancel')}</button>
+                    <button type="button" className="coi-btn coi-btn-mini coi-btn-primary" onClick={() => void saveUseCase(a)}>{t('coi.adapters.saveUseCase')}</button>
+                    <button type="button" className="coi-btn coi-btn-mini" onClick={() => setUseCaseEditId(null)}>{t('coi.cancel')}</button>
                   </>
                 ) : (
                   <>
-                    <span className="coi-grow">🎯 {a.useCase !== undefined && a.useCase !== '' ? a.useCase : t('adapters.useCaseEmpty')}</span>
+                    <span className="coi-grow">🎯 {a.useCase !== undefined && a.useCase !== '' ? a.useCase : t('coi.adapters.useCaseEmpty')}</span>
                     <button
                       type="button"
                       className="coi-btn coi-btn-mini"
                       onClick={() => { setUseCaseEditId(a.id); setUseCaseDraft(a.useCase ?? '') }}
                     >
-                      {t('adapters.editUseCase')}
+                      {t('coi.adapters.editUseCase')}
                     </button>
                   </>
                 )}
               </div>
               {a.enabled === false && (
                 <div className="coi-row-line coi-error">
-                  <span>⛔ {t('adapters.disabledHint')}</span>
+                  <span>⛔ {t('coi.adapters.disabledHint')}</span>
                 </div>
               )}
               {guideOpen === a.id && a.guide !== undefined && <pre className="coi-guide">{a.guide}</pre>}
@@ -1718,80 +1366,80 @@ function AdaptersPane(): JSX.Element {
       </div>
 
       <div className="coi-card">
-        <div className="coi-card-title">{t('adapters.addTitle')}</div>
+        <div className="coi-card-title">{t('coi.adapters.addTitle')}</div>
         <div className="coi-form-grid">
           <label className="coi-field">
             <span className="coi-label">id</span>
             <input className="coi-input" value={fId} onChange={(e) => setFId(e.target.value)} placeholder="my-cli" />
           </label>
           <label className="coi-field">
-            <span className="coi-label">{t('adapters.name')}</span>
+            <span className="coi-label">{t('coi.adapters.name')}</span>
             <input className="coi-input" value={fName} onChange={(e) => setFName(e.target.value)} />
           </label>
           <label className="coi-field">
-            <span className="coi-label">{t('adapters.type')}</span>
+            <span className="coi-label">{t('coi.adapters.type')}</span>
             <select className="coi-select" value={fType} onChange={(e) => setFType(e.target.value as 'ai-cli' | 'plain-cli')}>
               <option value="ai-cli">ai-cli</option>
               <option value="plain-cli">plain-cli</option>
             </select>
           </label>
           <label className="coi-field">
-            <span className="coi-label">{t('adapters.binary')}</span>
+            <span className="coi-label">{t('coi.adapters.binary')}</span>
             <input className="coi-input" value={fBinary} onChange={(e) => setFBinary(e.target.value)} placeholder="/usr/local/bin/my-cli" />
           </label>
           <label className="coi-field coi-field-wide">
-            <span className="coi-label">{t('adapters.args')}</span>
-            <input className="coi-input" value={fArgs} onChange={(e) => setFArgs(e.target.value)} placeholder={t('adapters.argsPh')} />
+            <span className="coi-label">{t('coi.adapters.args')}</span>
+            <input className="coi-input" value={fArgs} onChange={(e) => setFArgs(e.target.value)} placeholder={t('coi.adapters.argsPh')} />
           </label>
           <label className="coi-field coi-field-wide">
-            <span className="coi-label">{t('adapters.skillName')}</span>
-            <input className="coi-input" value={fSkill} onChange={(e) => setFSkill(e.target.value)} placeholder={t('adapters.skillNamePh')} />
+            <span className="coi-label">{t('coi.adapters.skillName')}</span>
+            <input className="coi-input" value={fSkill} onChange={(e) => setFSkill(e.target.value)} placeholder={t('coi.adapters.skillNamePh')} />
           </label>
           <label className="coi-field coi-field-wide">
-            <span className="coi-label">{t('adapters.useCase')}</span>
-            <input className="coi-input" value={fUseCase} onChange={(e) => setFUseCase(e.target.value)} placeholder={t('adapters.useCasePh')} />
+            <span className="coi-label">{t('coi.adapters.useCase')}</span>
+            <input className="coi-input" value={fUseCase} onChange={(e) => setFUseCase(e.target.value)} placeholder={t('coi.adapters.useCasePh')} />
           </label>
           {fType === 'ai-cli' && (
             <>
               {/* ai-cli 会话恢复配置：后端 validateAdapter 强制 ai-cli 必须有 resume，
                   这里提供对应输入，避免"手动添加 AI 适配器保存被拒" */}
               <div className="coi-field coi-field-wide coi-resume-section">
-                <span className="coi-label">{t('adapters.resumeSection')}</span>
-                <span className="coi-muted coi-small">{t('adapters.resumeSectionHint')}</span>
+                <span className="coi-label">{t('coi.adapters.resumeSection')}</span>
+                <span className="coi-muted coi-small">{t('coi.adapters.resumeSectionHint')}</span>
               </div>
               <label className="coi-field">
-                <span className="coi-label">{t('adapters.resumeKind')}</span>
+                <span className="coi-label">{t('coi.adapters.resumeKind')}</span>
                 <select className="coi-select" value={fResumeKind} onChange={(e) => setFResumeKind(e.target.value as 'flag' | 'args')}>
-                  <option value="flag">{t('adapters.resumeKindFlag')}</option>
-                  <option value="args">{t('adapters.resumeKindArgs')}</option>
+                  <option value="flag">{t('coi.adapters.resumeKindFlag')}</option>
+                  <option value="args">{t('coi.adapters.resumeKindArgs')}</option>
                 </select>
               </label>
               {fResumeKind === 'flag' ? (
                 <>
                   <label className="coi-field">
-                    <span className="coi-label">{t('adapters.resumeFlag')}</span>
-                    <input className="coi-input" value={fResumeFlag} onChange={(e) => setFResumeFlag(e.target.value)} placeholder={t('adapters.resumeFlagPh')} />
+                    <span className="coi-label">{t('coi.adapters.resumeFlag')}</span>
+                    <input className="coi-input" value={fResumeFlag} onChange={(e) => setFResumeFlag(e.target.value)} placeholder={t('coi.adapters.resumeFlagPh')} />
                   </label>
                   <label className="coi-field">
-                    <span className="coi-label">{t('adapters.resumeArg')}</span>
-                    <input className="coi-input" value={fResumeArg} onChange={(e) => setFResumeArg(e.target.value)} placeholder={t('adapters.resumeArgPh')} />
+                    <span className="coi-label">{t('coi.adapters.resumeArg')}</span>
+                    <input className="coi-input" value={fResumeArg} onChange={(e) => setFResumeArg(e.target.value)} placeholder={t('coi.adapters.resumeArgPh')} />
                   </label>
                 </>
               ) : (
                 <label className="coi-field coi-field-wide">
-                  <span className="coi-label">{t('adapters.resumeArgs')}</span>
-                  <input className="coi-input" value={fResumeArgs} onChange={(e) => setFResumeArgs(e.target.value)} placeholder={t('adapters.resumeArgsPh')} />
+                  <span className="coi-label">{t('coi.adapters.resumeArgs')}</span>
+                  <input className="coi-input" value={fResumeArgs} onChange={(e) => setFResumeArgs(e.target.value)} placeholder={t('coi.adapters.resumeArgsPh')} />
                 </label>
               )}
               <label className="coi-field coi-field-wide">
-                <span className="coi-label">{t('adapters.continueFlag')}</span>
-                <input className="coi-input" value={fContinueFlag} onChange={(e) => setFContinueFlag(e.target.value)} placeholder={t('adapters.continueFlagPh')} />
+                <span className="coi-label">{t('coi.adapters.continueFlag')}</span>
+                <input className="coi-input" value={fContinueFlag} onChange={(e) => setFContinueFlag(e.target.value)} placeholder={t('coi.adapters.continueFlagPh')} />
               </label>
               <div className="coi-field coi-field-wide coi-resume-section">
-                <span className="coi-label">{t('adapters.extractSection')}</span>
+                <span className="coi-label">{t('coi.adapters.extractSection')}</span>
               </div>
               <label className="coi-field">
-                <span className="coi-label">{t('adapters.extractSource')}</span>
+                <span className="coi-label">{t('coi.adapters.extractSource')}</span>
                 <select className="coi-select" value={fExtractSource} onChange={(e) => setFExtractSource(e.target.value as 'stdout' | 'stderr' | 'any' | 'none')}>
                   <option value="none">none</option>
                   <option value="stdout">stdout</option>
@@ -1801,23 +1449,23 @@ function AdaptersPane(): JSX.Element {
               </label>
               {fExtractSource !== 'none' && (
                 <label className="coi-field coi-field-wide">
-                  <span className="coi-label">{t('adapters.extractRegex')}</span>
-                  <input className="coi-input" value={fExtractRegex} onChange={(e) => setFExtractRegex(e.target.value)} placeholder={t('adapters.extractRegexPh')} />
+                  <span className="coi-label">{t('coi.adapters.extractRegex')}</span>
+                  <input className="coi-input" value={fExtractRegex} onChange={(e) => setFExtractRegex(e.target.value)} placeholder={t('coi.adapters.extractRegexPh')} />
                 </label>
               )}
             </>
           )}
           {fSkill.trim() !== '' && (
             <label className="coi-field coi-field-wide">
-              <span className="coi-label">{t('adapters.skillContent')}</span>
+              <span className="coi-label">{t('coi.adapters.skillContent')}</span>
               <textarea
                 className="coi-textarea"
                 rows={5}
                 value={fSkillContent}
                 onChange={(e) => setFSkillContent(e.target.value)}
-                placeholder={t('adapters.skillContentPh')}
+                placeholder={t('coi.adapters.skillContentPh')}
               />
-              <span className="coi-muted coi-small">{t('adapters.skillContentHint')}</span>
+              <span className="coi-muted coi-small">{t('coi.adapters.skillContentHint')}</span>
             </label>
           )}
         </div>
@@ -1833,7 +1481,7 @@ function AdaptersPane(): JSX.Element {
               || (fType === 'ai-cli' && (fResumeKind === 'flag' ? fResumeFlag.trim() === '' : fResumeArgs.trim() === ''))}
             onClick={() => void add()}
           >
-            {t('adapters.add')}
+            {t('coi.adapters.add')}
           </button>
         </div>
       </div>
@@ -1843,11 +1491,11 @@ function AdaptersPane(): JSX.Element {
         <div className="coi-modal" onClick={() => setSkillEditId(null)}>
           <div className="coi-modal-box" onClick={(e) => e.stopPropagation()}>
             <div className="coi-modal-head">
-              <span className="coi-small">{t('adapters.editSkillTitle')}：{skillEditName}</span>
+              <span className="coi-small">{t('coi.adapters.editSkillTitle')}{t('coi.sep.colon')}{skillEditName}</span>
               <button type="button" className="coi-btn coi-btn-mini" onClick={() => setSkillEditId(null)}>✕</button>
             </div>
             {skillError !== null && <div className="coi-error coi-pad">{skillError}</div>}
-            <div className="coi-pad coi-muted coi-small">{t('adapters.editSkillHint')}</div>
+            <div className="coi-pad coi-muted coi-small">{t('coi.adapters.editSkillHint')}</div>
             <textarea
               className="coi-textarea coi-skill-editor"
               value={skillContent}
@@ -1855,9 +1503,9 @@ function AdaptersPane(): JSX.Element {
               placeholder="# SKILL.md"
             />
             <div className="coi-modal-head">
-              <button type="button" className="coi-btn coi-btn-mini" onClick={() => setSkillEditId(null)}>{t('cancel')}</button>
+              <button type="button" className="coi-btn coi-btn-mini" onClick={() => setSkillEditId(null)}>{t('coi.cancel')}</button>
               <button type="button" className="coi-btn coi-btn-primary coi-btn-mini" disabled={skillSaving} onClick={() => void saveSkill()}>
-                {skillSaving ? t('saving') : t('adapters.saveSkill')}
+                {skillSaving ? t('coi.saving') : t('coi.adapters.saveSkill')}
               </button>
             </div>
           </div>
@@ -1871,7 +1519,8 @@ function AdaptersPane(): JSX.Element {
 /* 模板视图                                                             */
 /* ------------------------------------------------------------------ */
 
-function TemplatesPane(): JSX.Element {
+function TemplatesPane({ t: tt }: { t: Translate }): JSX.Element {
+  const t = dict(tt)
   const [templates, setTemplates] = useState<CoiTemplate[] | null>(null)
   const [adapters, setAdapters] = useState<Adapter[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -1889,7 +1538,7 @@ function TemplatesPane(): JSX.Element {
       setTemplates(data.templates)
       setError(null)
     } catch (err) {
-      setError(errText(err))
+      setError(errText(err, t))
     }
   }, [])
 
@@ -1902,15 +1551,15 @@ function TemplatesPane(): JSX.Element {
 
   const remove = async (id: string): Promise<void> => {
     if (BUILTIN_TEMPLATE_IDS.has(id)) {
-      setNotice({ kind: 'error', text: t('templates.builtinKeep') })
+      setNotice({ kind: 'error', text: t('coi.templates.builtinKeep') })
       return
     }
-    if (!window.confirm(t('templates.confirmDelete'))) return
+    if (!window.confirm(t('coi.templates.confirmDelete'))) return
     try {
       await deleteJson(`/templates/${encodeURIComponent(id)}`)
       void load()
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     }
   }
 
@@ -1921,14 +1570,14 @@ function TemplatesPane(): JSX.Element {
       if (fId.trim() !== '') def.id = fId.trim()
       if (fAdapterId !== '') def.adapterId = fAdapterId
       await postJson('/templates', { def })
-      setNotice({ kind: 'ok', text: t('config.saved') })
+      setNotice({ kind: 'ok', text: t('coi.config.saved') })
       setFId('')
       setFName('')
       setFPrompt('')
       setFAdapterId('')
       void load()
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     } finally {
       setAdding(false)
     }
@@ -1938,18 +1587,18 @@ function TemplatesPane(): JSX.Element {
     <div className="coi-pane">
       <NoticeLine notice={notice} />
       <ErrorLine error={error} />
-      {templates === null && error === null && <div className="coi-muted coi-pad">{t('loading')}</div>}
-      {templates !== null && templates.length === 0 && <div className="coi-muted coi-pad">{t('templates.empty')}</div>}
+      {templates === null && error === null && <div className="coi-muted coi-pad">{t('coi.loading')}</div>}
+      {templates !== null && templates.length === 0 && <div className="coi-muted coi-pad">{t('coi.templates.empty')}</div>}
       {templates?.map((tpl) => (
         <div key={tpl.id} className="coi-row">
           <div className="coi-row-line">
             <span className="coi-strong">{tpl.name}</span>
             <span className="coi-mono coi-small coi-muted">{tpl.id}</span>
             {tpl.adapterId !== undefined && <span className="coi-badge">{tpl.adapterId}</span>}
-            {BUILTIN_TEMPLATE_IDS.has(tpl.id) && <span className="coi-badge">{t('adapters.builtin')}</span>}
+            {BUILTIN_TEMPLATE_IDS.has(tpl.id) && <span className="coi-badge">{t('coi.adapters.builtin')}</span>}
             <span className="coi-grow" />
             <button type="button" className="coi-btn coi-btn-mini coi-btn-danger" onClick={() => void remove(tpl.id)}>
-              {t('templates.delete')}
+              {t('coi.templates.delete')}
             </button>
           </div>
           <div className="coi-row-line coi-muted" title={tpl.prompt}>{trunc(tpl.prompt, 80)}</div>
@@ -1957,33 +1606,33 @@ function TemplatesPane(): JSX.Element {
       ))}
 
       <div className="coi-card">
-        <div className="coi-card-title">{t('templates.addTitle')}</div>
+        <div className="coi-card-title">{t('coi.templates.addTitle')}</div>
         <div className="coi-form-grid">
           <label className="coi-field">
-            <span className="coi-label">{t('templates.name')}</span>
+            <span className="coi-label">{t('coi.templates.name')}</span>
             <input className="coi-input" value={fName} onChange={(e) => setFName(e.target.value)} />
           </label>
           <label className="coi-field">
-            <span className="coi-label">{t('templates.adapterOpt')}</span>
+            <span className="coi-label">{t('coi.templates.adapterOpt')}</span>
             <select className="coi-select" value={fAdapterId} onChange={(e) => setFAdapterId(e.target.value)}>
-              <option value="">{t('none')}</option>
+              <option value="">{t('coi.none')}</option>
               {adapters.map((a) => (
                 <option key={a.id} value={a.id}>{a.id}</option>
               ))}
             </select>
           </label>
           <label className="coi-field coi-field-wide">
-            <span className="coi-label">{t('templates.idOpt')}</span>
+            <span className="coi-label">{t('coi.templates.idOpt')}</span>
             <input className="coi-input" value={fId} onChange={(e) => setFId(e.target.value)} placeholder="my-template" />
           </label>
         </div>
         <label className="coi-field">
-          <span className="coi-label">{t('templates.prompt')}</span>
+          <span className="coi-label">{t('coi.templates.prompt')}</span>
           <textarea className="coi-textarea" rows={3} value={fPrompt} onChange={(e) => setFPrompt(e.target.value)} />
         </label>
         <div className="coi-form-actions">
           <button type="button" className="coi-btn coi-btn-primary" disabled={adding || fName.trim() === '' || fPrompt.trim() === ''} onClick={() => void add()}>
-            {t('templates.add')}
+            {t('coi.templates.add')}
           </button>
         </div>
       </div>
@@ -1995,7 +1644,8 @@ function TemplatesPane(): JSX.Element {
 /* 统计视图                                                             */
 /* ------------------------------------------------------------------ */
 
-function StatsPane(): JSX.Element {
+function StatsPane({ t: tt }: { t: Translate }): JSX.Element {
+  const t = dict(tt)
   const [stats, setStats] = useState<CoiStats | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -2005,7 +1655,7 @@ function StatsPane(): JSX.Element {
       setStats(data)
       setError(null)
     } catch (err) {
-      setError(errText(err))
+      setError(errText(err, t))
     }
   }, [])
 
@@ -2016,16 +1666,16 @@ function StatsPane(): JSX.Element {
   return (
     <div className="coi-pane">
       <div className="coi-toolbar">
-        <button type="button" className="coi-btn" onClick={() => void load()}>{t('refresh')}</button>
+        <button type="button" className="coi-btn" onClick={() => void load()}>{t('coi.refresh')}</button>
       </div>
       <ErrorLine error={error} />
-      {stats === null && error === null && <div className="coi-muted coi-pad">{t('loading')}</div>}
+      {stats === null && error === null && <div className="coi-muted coi-pad">{t('coi.loading')}</div>}
       {stats !== null && (
         <>
           <div className="coi-stat-grid">
             <div className="coi-stat-card">
               <div className="coi-stat-num">{stats.total}</div>
-              <div className="coi-muted">{t('stats.total')}</div>
+              <div className="coi-muted">{t('coi.stats.total')}</div>
             </div>
           </div>
           <div className="coi-stat-grid">
@@ -2034,11 +1684,11 @@ function StatsPane(): JSX.Element {
                 <div className="coi-strong">{id}</div>
                 <div className="coi-stat-num">{bucket.count}</div>
                 <div className="coi-muted coi-small">
-                  {t('stats.count')} · {t('stats.hours')} {(bucket.totalMs / 3600000).toFixed(2)}h
+                  {t('coi.stats.count')} · {t('coi.stats.hours')} {(bucket.totalMs / 3600000).toFixed(2)}h
                 </div>
                 <div className="coi-row-line coi-small">
                   {Object.entries(bucket.byStatus).map(([status, count]) => {
-                    const meta = statusMeta(status)
+                    const meta = statusMeta(status, t)
                     return (
                       <span key={status} className={meta.cls} title={meta.label}>
                         {meta.icon} {count}
@@ -2049,7 +1699,7 @@ function StatsPane(): JSX.Element {
               </div>
             ))}
           </div>
-          {Object.keys(stats.byAdapter).length === 0 && <div className="coi-muted coi-pad">{t('stats.empty')}</div>}
+          {Object.keys(stats.byAdapter).length === 0 && <div className="coi-muted coi-pad">{t('coi.stats.empty')}</div>}
         </>
       )}
     </div>
@@ -2060,7 +1710,8 @@ function StatsPane(): JSX.Element {
 /* 配置视图                                                             */
 /* ------------------------------------------------------------------ */
 
-function ConfigPane(): JSX.Element {
+function ConfigPane({ t: tt }: { t: Translate }): JSX.Element {
+  const t = dict(tt)
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
@@ -2080,7 +1731,7 @@ function ConfigPane(): JSX.Element {
         setTimeoutM(String(Math.round((ms % 3600000) / 60000)))
         setLoaded(true)
       })
-      .catch((err) => setError(errText(err)))
+      .catch((err) => setError(errText(err, t)))
   }, [])
 
   const save = async (): Promise<void> => {
@@ -2093,13 +1744,13 @@ function ConfigPane(): JSX.Element {
       if (retention.trim() !== '' && Number.isFinite(days)) patch.coiRetentionDays = days
       if (timeoutH.trim() !== '' || timeoutM.trim() !== '') {
         const totalMinutes = (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0)
-        if (!Number.isFinite(totalMinutes) || totalMinutes < 0) throw new Error(t('config.timeoutBad'))
+        if (!Number.isFinite(totalMinutes) || totalMinutes < 0) throw new Error(t('coi.config.timeoutBad'))
         patch.coiTaskTimeoutMs = totalMinutes * 60000
       }
       await postJson('/config', { patch })
-      setNotice({ kind: 'ok', text: t('config.saved') })
+      setNotice({ kind: 'ok', text: t('coi.config.saved') })
     } catch (err) {
-      setNotice({ kind: 'error', text: errText(err) })
+      setNotice({ kind: 'error', text: errText(err, t) })
     } finally {
       setSaving(false)
     }
@@ -2109,31 +1760,31 @@ function ConfigPane(): JSX.Element {
     <div className="coi-pane">
       <NoticeLine notice={notice} />
       <ErrorLine error={error} />
-      {!loaded && error === null && <div className="coi-muted coi-pad">{t('loading')}</div>}
+      {!loaded && error === null && <div className="coi-muted coi-pad">{t('coi.loading')}</div>}
       {loaded && (
         <div className="coi-card">
           <label className="coi-field">
-            <span className="coi-label">{t('config.notify')}</span>
+            <span className="coi-label">{t('coi.config.notify')}</span>
             <input className="coi-input" value={notify} onChange={(e) => setNotify(e.target.value)} />
-            <span className="coi-muted coi-small">{t('config.notifyHint')}</span>
+            <span className="coi-muted coi-small">{t('coi.config.notifyHint')}</span>
           </label>
           <label className="coi-field">
-            <span className="coi-label">{t('config.retention')}</span>
+            <span className="coi-label">{t('coi.config.retention')}</span>
             <input className="coi-input" type="number" min={0} value={retention} onChange={(e) => setRetention(e.target.value)} />
           </label>
           <label className="coi-field">
-            <span className="coi-label">{t('config.timeout')}</span>
+            <span className="coi-label">{t('coi.config.timeout')}</span>
             <div className="coi-inline">
               <input className="coi-input" type="number" min={0} value={timeoutH} onChange={(e) => setTimeoutH(e.target.value)} placeholder="0" />
-              <span className="coi-muted coi-small">{t('config.timeoutHours')}</span>
+              <span className="coi-muted coi-small">{t('coi.config.timeoutHours')}</span>
               <input className="coi-input" type="number" min={0} max={59} value={timeoutM} onChange={(e) => setTimeoutM(e.target.value)} placeholder="0" />
-              <span className="coi-muted coi-small">{t('config.timeoutMinutes')}</span>
+              <span className="coi-muted coi-small">{t('coi.config.timeoutMinutes')}</span>
             </div>
-            <span className="coi-muted coi-small">{t('config.timeoutHint')}</span>
+            <span className="coi-muted coi-small">{t('coi.config.timeoutHint')}</span>
           </label>
           <div className="coi-form-actions">
             <button type="button" className="coi-btn coi-btn-primary" disabled={saving} onClick={() => void save()}>
-              {t('config.save')}
+              {t('coi.config.save')}
             </button>
           </div>
         </div>

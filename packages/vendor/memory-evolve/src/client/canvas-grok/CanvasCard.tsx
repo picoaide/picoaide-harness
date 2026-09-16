@@ -6,12 +6,15 @@
  * 位置用 left/top 写世界坐标，由外层世界层做 transform，卡片本身不跟视口重排。
  */
 import { memo, useCallback, type PointerEvent as ReactPointerEvent } from 'react'
-import { TYPE_GLYPH, TYPE_LABEL } from './constants.ts'
+import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import { TYPE_GLYPH, typeLabel } from './constants.ts'
 import { placeholderHue, scopeBadgeText } from './helpers.ts'
 import type { CanvasNode } from './types.ts'
 import { fileProxyUrl } from './api-client.ts'
 
 export interface CanvasCardProps {
+  /** 插件 locale 翻译函数（i18n：文案一律经它取，不再硬编码中文）。 */
+  t: Translate
   node: CanvasNode
   /** 当前是否处于低细节档。变化才让 memo 失效。 */
   lod: boolean
@@ -54,8 +57,8 @@ function extOf(path?: string): string {
   return base.slice(i + 1).toUpperCase().slice(0, 6)
 }
 
-function CardBody(props: { node: CanvasNode; backendReady: boolean; onChangeContent: CanvasCardProps['onChangeContent'] }): JSX.Element {
-  const { node, backendReady, onChangeContent } = props
+function CardBody(props: { t: Translate; node: CanvasNode; backendReady: boolean; onChangeContent: CanvasCardProps['onChangeContent'] }): JSX.Element {
+  const { t, node, backendReady, onChangeContent } = props
   const hue = placeholderHue(node.id)
 
   if (node.type === 'markdown' || node.type === 'plainText') {
@@ -65,7 +68,7 @@ function CardBody(props: { node: CanvasNode; backendReady: boolean; onChangeCont
         <textarea
           className="cg-editor"
           value={node.content ?? ''}
-          placeholder={node.type === 'markdown' ? '写一段 Markdown…' : '写一段纯文本…'}
+          placeholder={node.type === 'markdown' ? t('canvas.card.editorMarkdown') : t('canvas.card.editorPlain')}
           onPointerDown={(e) => e.stopPropagation()}
           onWheel={(e) => e.stopPropagation()}
           onChange={(e) => onChangeContent(node.id, e.target.value)}
@@ -99,7 +102,7 @@ function CardBody(props: { node: CanvasNode; backendReady: boolean; onChangeCont
             }}
           >
             🖼
-            <small>图片预览</small>
+            <small>{t('canvas.card.imagePreview')}</small>
           </div>
         )}
         {node.path ? <div className="cg-card-path" title={node.path}>{node.path}</div> : null}
@@ -130,7 +133,7 @@ function CardBody(props: { node: CanvasNode; backendReady: boolean; onChangeCont
             }}
           >
             ▶
-            <small>{isAudio ? '音频' : '视频'}</small>
+            <small>{isAudio ? t('canvas.card.audio') : t('canvas.card.video')}</small>
           </div>
         )}
         {node.path ? <div className="cg-card-path" title={node.path}>{node.path}</div> : null}
@@ -143,7 +146,7 @@ function CardBody(props: { node: CanvasNode; backendReady: boolean; onChangeCont
       <>
         <div className="cg-ph" style={{ fontSize: 32, minHeight: 56 }}>📁</div>
         {node.path ? <div className="cg-card-path" title={node.path}>{node.path}</div> : null}
-        <div className="cg-card-meta">{node.meta?.size ?? '文件夹'} · 暂不支持内嵌浏览</div>
+        <div className="cg-card-meta">{node.meta?.size ?? t('canvas.type.folder')}{t('canvas.card.folderNoBrowse')}</div>
       </>
     )
   }
@@ -153,7 +156,7 @@ function CardBody(props: { node: CanvasNode; backendReady: boolean; onChangeCont
       <span className="cg-file-ext">{extOf(node.path)}</span>
       {node.path ? <div className="cg-card-path" title={node.path}>{node.path}</div> : null}
       <div className="cg-card-meta">
-        {[node.meta?.size, node.meta?.mtime].filter(Boolean).join(' · ') || TYPE_LABEL[node.type]}
+        {[node.meta?.size, node.meta?.mtime].filter(Boolean).join(' · ') || typeLabel(node.type, t)}
       </div>
     </>
   )
@@ -205,13 +208,13 @@ function CanvasCardInner(props: CanvasCardProps): JSX.Element {
     >
       <header className="cg-card-head" onPointerDown={onHeadPointerDown}>
         <span className="cg-drag" aria-hidden>⋮⋮</span>
-        <span className="cg-type-glyph" title={TYPE_LABEL[node.type]}>{TYPE_GLYPH[node.type]}</span>
+        <span className="cg-type-glyph" title={typeLabel(node.type, props.t)}>{TYPE_GLYPH[node.type]}</span>
         <strong className="cg-card-title" title={node.title}>{node.title}</strong>
         <span className="cg-badges">
-          {node.aiPlaced ? <span className="cg-badge cg-badge-ai">AI 放置</span> : null}
-          {node.unverified ? <span className="cg-badge cg-badge-warn">未验证</span> : null}
-          <span className="cg-badge" title={scopeBadgeText(node, props.currentSessionId)}>
-            {scopeBadgeText(node, props.currentSessionId)}
+          {node.aiPlaced ? <span className="cg-badge cg-badge-ai">{props.t('canvas.card.aiPlaced')}</span> : null}
+          {node.unverified ? <span className="cg-badge cg-badge-warn">{props.t('canvas.card.unverified')}</span> : null}
+          <span className="cg-badge" title={scopeBadgeText(node, props.currentSessionId, props.t)}>
+            {scopeBadgeText(node, props.currentSessionId, props.t)}
           </span>
         </span>
       </header>
@@ -224,32 +227,32 @@ function CanvasCardInner(props: CanvasCardProps): JSX.Element {
       ) : (
         <>
           <div className="cg-card-body">
-            <CardBody node={node} backendReady={props.backendReady} onChangeContent={props.onChangeContent} />
+            <CardBody t={props.t} node={node} backendReady={props.backendReady} onChangeContent={props.onChangeContent} />
           </div>
           <footer className="cg-card-foot">
-            <button type="button" onClick={() => props.onPreview(node.id)}>预览</button>
+            <button type="button" onClick={() => props.onPreview(node.id)}>{props.t('canvas.card.preview')}</button>
             {(node.type === 'markdown' || node.type === 'plainText') && node.content
               ? (
-                <button type="button" className="cg-open" onClick={() => props.onSave(node.id)} title="保存内容到本机文件">保存</button>
+                <button type="button" className="cg-open" onClick={() => props.onSave(node.id)} title={props.t('canvas.card.saveTitle')}>{props.t('canvas.card.save')}</button>
               ) : null}
             {node.path ? (
-              <button type="button" className="cg-open" onClick={() => props.onOpen(node.id)} title="用系统默认应用打开">打开</button>
+              <button type="button" className="cg-open" onClick={() => props.onOpen(node.id)} title={props.t('canvas.card.openTitle')}>{props.t('canvas.card.open')}</button>
             ) : null}
             {node.path ? (
-              <button type="button" className="cg-open" onClick={() => props.onOpenFolder(node.id)} title="在系统文件管理器中打开该文件所在的文件夹（Finder / 资源管理器）">所在文件夹</button>
+              <button type="button" className="cg-open" onClick={() => props.onOpenFolder(node.id)} title={props.t('canvas.card.openFolderTitle')}>{props.t('canvas.card.openFolder')}</button>
             ) : null}
-            <button type="button" onClick={() => props.onMigrate(node.id)} title="迁移节点归属（本会话/本项目/所有项目可见）">归属</button>
+            <button type="button" onClick={() => props.onMigrate(node.id)} title={props.t('canvas.card.migrateTitle')}>{props.t('canvas.card.migrate')}</button>
             {props.openSession && node.scope === 'session' && node.sessionId && node.sessionId !== props.currentSessionId
               ? (
-                <button type="button" className="cg-open" onClick={() => props.openSession?.(node.sessionId!)} title="跳转到该节点所属会话">
-                  跳转
+                <button type="button" className="cg-open" onClick={() => props.openSession?.(node.sessionId!)} title={props.t('canvas.card.jumpTitle')}>
+                  {props.t('canvas.card.jump')}
                 </button>
               ) : null}
-            <button type="button" onClick={() => props.onCopy(node.id, 'id')}>复制 ID</button>
-            <button type="button" onClick={() => props.onCopy(node.id, 'title')}>复制标题</button>
-            <button type="button" onClick={() => props.onCopy(node.id, 'path')} disabled={!node.path}>复制路径</button>
-            <button type="button" onClick={() => props.onCopy(node.id, 'ref')}>引用</button>
-            <button type="button" className="cg-danger" onClick={() => props.onAskRemove(node.id)}>移除</button>
+            <button type="button" onClick={() => props.onCopy(node.id, 'id')}>{props.t('canvas.card.copyId')}</button>
+            <button type="button" onClick={() => props.onCopy(node.id, 'title')}>{props.t('canvas.card.copyTitle')}</button>
+            <button type="button" onClick={() => props.onCopy(node.id, 'path')} disabled={!node.path}>{props.t('canvas.card.copyPath')}</button>
+            <button type="button" onClick={() => props.onCopy(node.id, 'ref')}>{props.t('canvas.card.copyRef')}</button>
+            <button type="button" className="cg-danger" onClick={() => props.onAskRemove(node.id)}>{props.t('canvas.card.remove')}</button>
           </footer>
         </>
       )}
@@ -258,8 +261,8 @@ function CanvasCardInner(props: CanvasCardProps): JSX.Element {
       <button
         type="button"
         className="cg-resize-handle"
-        aria-label="拖动调整卡片大小"
-        title="拖动调整大小"
+        aria-label={props.t('canvas.card.resizeAria')}
+        title={props.t('canvas.card.resizeTitle')}
         onPointerDown={onResizePointerDown}
       />
     </article>

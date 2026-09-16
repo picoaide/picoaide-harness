@@ -1,11 +1,16 @@
 /**
- * 画板常量：尺寸、LOD 阈值、存储键、模拟数据、当前「会话/项目」身份。
+ * 画板常量：尺寸、LOD 阈值、存储键、类型字典键、当前「会话/项目」身份。
  * 全部集中在这里，方便后续接宿主时整块替换模拟身份。
+ *
+ * i18n（2026-09-16）：类型展示名此前是模块级常量 `TYPE_LABEL`
+ * （`{ folder: '文件夹', … }`）—— 模块求值早于插件 apply，那时 `t()` 只会
+ * 拿到默认语言，等于把语言钉死在中文。现在这里只保留**字典键**
+ * （TYPE_LABEL_KEYS）并导出 `typeLabel(type, t)`，由渲染点在调用期求值。
+ * 画板内搜索匹配另走 TYPE_SEARCH_TERMS（不随界面语言变化，见下）。
  */
+import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
-  CanvasNode,
   CanvasNodeType,
-  CanvasPersistState,
   CanvasPlacement,
   CanvasViewport,
 } from './types.ts'
@@ -45,15 +50,12 @@ export const PERSIST_DEBOUNCE_MS = 220
 /**
  * 模拟「当前会话 / 当前项目」。
  * 纯前端一期写死；主会话接入后改为从 ConvViewProps / sessions 读取。
+ * 注：会话/项目**显示名**不在这里（它们要跟随界面语言，见 CanvasView 的
+ * canvas.scope.* 字典键与后端下发的 currentProjectLabel）。
  */
 export const CURRENT_SESSION_ID = 'sess-demo-current'
-export const CURRENT_SESSION_LABEL = '当前会话'
-export const OTHER_SESSION_ID = 'sess-demo-other'
-export const OTHER_SESSION_LABEL = '上周评审会'
 export const CURRENT_PROJECT_ID = 'proj-demo'
 export const CURRENT_PROJECT_LABEL = 'dsh-memory-evolve'
-export const OTHER_PROJECT_ID = 'proj-other'
-export const OTHER_PROJECT_LABEL = '客户合同库'
 
 /** AI 投放区（世界坐标）。AI 新节点只落在这里，用户再拖走。 */
 export const AI_ZONE = { x: 80, y: 40, width: 560, height: 300 } as const
@@ -68,14 +70,39 @@ export const DEFAULT_SIZE: Record<CanvasNodeType, { width: number; height: numbe
   file: { width: 260, height: 170 },
 }
 
-/** 类型展示名。 */
-export const TYPE_LABEL: Record<CanvasNodeType, string> = {
-  folder: '文件夹',
-  markdown: 'Markdown',
-  plainText: '纯文本',
-  image: '图片',
-  media: '音视频',
-  file: '文件',
+/**
+ * 类型展示名的**字典键**。渲染点用 `typeLabel(type, t)` 取当前语言文案
+ * （模块级不能再存中文常量：求值早于 apply，会钉死语言）。
+ */
+export const TYPE_LABEL_KEYS: Record<CanvasNodeType, string> = {
+  folder: 'canvas.type.folder',
+  markdown: 'canvas.type.markdown',
+  plainText: 'canvas.type.plainText',
+  image: 'canvas.type.image',
+  media: 'canvas.type.media',
+  file: 'canvas.type.file',
+}
+
+/** 类型展示名（当次渲染的语言）。 */
+export function typeLabel(type: CanvasNodeType, t: Translate): string {
+  return t(TYPE_LABEL_KEYS[type])
+}
+
+/**
+ * 画板内搜索的**匹配词表**（每种类型可命中的别名）。
+ *
+ * ⚠️ 这是"匹配模式"而非界面文案：中文与英文同时收录，用户在哪国语言下
+ * 输入「文件夹」或「folder」都能命中同一张卡。显示名走 TYPE_LABEL_KEYS
+ * 的字典（会随语言变），但匹配词表**必须与界面语言无关**——否则切语言会
+ * 改变搜索结果（历史行为：中文标签可命中；这里保留中文并补英文）。
+ */
+export const TYPE_SEARCH_TERMS: Record<CanvasNodeType, readonly string[]> = {
+  folder: ['文件夹', 'folder', '目录', 'directory'],
+  markdown: ['markdown', 'md'],
+  plainText: ['纯文本', 'plain text', 'plaintext', 'txt', 'text'],
+  image: ['图片', 'image', 'picture', 'photo'],
+  media: ['音视频', 'media', 'audio', 'video'],
+  file: ['文件', 'file'],
 }
 
 /** LOD / 卡片标题栏用的类型符号。 */
@@ -129,67 +156,12 @@ export function defaultPlacement(
   return { x, y, width: size.width, height: size.height, zIndex }
 }
 
-/** 首次打开（无 localStorage）时预置的 4 张示例卡，覆盖三层归属 + 一条「其他会话」。 */
-export function createSeedNodes(now: number): CanvasNode[] {
-  return [
-    {
-      id: 'canvas_seed_global',
-      type: 'file',
-      title: '团队共享规范.pdf',
-      scope: 'global',
-      scopeLabel: '全局',
-      path: '~/Shared/团队共享规范.pdf',
-      placement: defaultPlacement('file', 720, 80, 1),
-      meta: { size: '860 KB', mtime: '2026-08-01' },
-      createdAt: now - 86_400_000,
-    },
-    {
-      id: 'canvas_seed_project',
-      type: 'folder',
-      title: '本仓库 docs-local',
-      scope: 'project',
-      scopeLabel: CURRENT_PROJECT_LABEL,
-      projectId: CURRENT_PROJECT_ID,
-      path: '/Users/edgar/.dsh/plugins/dsh-memory-evolve/docs-local',
-      placement: defaultPlacement('folder', 720, 280, 2),
-      meta: { size: '12 项', mtime: '2026-08-13' },
-      createdAt: now - 3_600_000,
-    },
-    {
-      id: 'canvas_seed_session',
-      type: 'markdown',
-      title: '本次会话备忘',
-      scope: 'session',
-      scopeLabel: CURRENT_SESSION_LABEL,
-      sessionId: CURRENT_SESSION_ID,
-      projectId: CURRENT_PROJECT_ID,
-      content: '画板一期要验收：平移缩放、LOD、三种上板、视角筛选、搜索闪烁、复制引用、AI 投放。',
-      placement: defaultPlacement('markdown', 720, 490, 3),
-      createdAt: now - 600_000,
-    },
-    {
-      id: 'canvas_seed_other_session',
-      type: 'image',
-      title: '上周评审白板',
-      scope: 'session',
-      scopeLabel: OTHER_SESSION_LABEL,
-      sessionId: OTHER_SESSION_ID,
-      projectId: CURRENT_PROJECT_ID,
-      path: '~/Pictures/评审白板.png',
-      placement: defaultPlacement('image', 1000, 280, 2),
-      meta: { size: '2.1 MB', mtime: '2026-08-06' },
-      createdAt: now - 6_000_000,
-    },
-  ]
-}
-
-export function createSeedState(): CanvasPersistState {
-  const now = Date.now()
-  return {
-    version: 1,
-    nodes: createSeedNodes(now),
-    viewport: { ...DEFAULT_VIEWPORT },
-    viewMode: 'session',
-    lastAiNodeId: null,
-  }
-}
+/**
+ * 2026-09-16：这里原有 `createSeedNodes(now)` / `createSeedState()`——首次
+ * 打开时预置 4 张中文示例卡（团队共享规范.pdf / 本次会话备忘 / 上周评审白板
+ * 等）。它们只被 `store.ts` 的 `loadCanvasState()` 引用，而 `loadCanvasState`
+ * 全仓**零调用点**（画板自 2026-08-14 起"只走后端"：CanvasView 只 import
+ * createDebouncedSaver，Tab 能出现即 canvasEnabled 已开）。即整块预置数据
+ * 是死代码 —— 按 i18n 审计口径**直接删除**而不是把中文示例翻译成双语
+ * （翻译死代码＝白背一份维护面）。`loadCanvasState` 一并删除。
+ */

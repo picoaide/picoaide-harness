@@ -6,18 +6,32 @@
  * 不自行保存第二份服务端状态，避免面板折叠/Tab 切换后出现数据分叉。
  */
 import { useEffect, useMemo, useSyncExternalStore } from 'react'
+import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 
 /** index.ts 将 DSH 的 connection/reset 桥接为这个浏览器事件。 */
 export const ADVISOR_CONNECTION_RESET_EVENT = 'dsh-memory-evolve:advisor-connection-reset'
 
 const API = '/memory-evolve/api/advisor'
 
-/** 约束层级显示名（面板约束 Tab）。 */
-export const LEVEL_LABEL: Record<'global' | 'project' | 'session' | 'conversation', string> = {
-  conversation: '本次评审会话约束',
-  session: '本会话约束',
-  project: '本项目约束',
-  global: '全局约束',
+/**
+ * 约束层级的**字典键**（面板约束 Tab）。
+ *
+ * i18n（2026-09-16）：这里此前是模块级常量
+ * `LEVEL_LABEL = { conversation: '本次评审会话约束', … }` —— 模块求值早于
+ * 插件 apply，`t()` 在那时只能拿到默认语言（语言被钉死）。现在只保留键，
+ * 由 `levelLabel(level, t)` 在调用期求值（参考实现：
+ * packages/host/connectors/src/client/status-label.ts）。
+ */
+export const LEVEL_KEYS = {
+  conversation: 'advisor.level.conversation',
+  session: 'advisor.level.session',
+  project: 'advisor.level.project',
+  global: 'advisor.level.global',
+} as const
+
+/** 约束层级显示名（当次渲染的语言）。 */
+export function levelLabel(level: keyof typeof LEVEL_KEYS, t: Translate): string {
+  return t(LEVEL_KEYS[level])
 }
 const POLL_MS = 1_000
 const LIVE_LIMIT = 100
@@ -283,9 +297,9 @@ function deleteJson<T>(path: string): Promise<T> {
   return fetchJson<T>(path, { method: 'DELETE' })
 }
 
-function errorText(error: unknown): string {
+function errorText(error: unknown, t: Translate): string {
   const text = error instanceof Error ? error.message : String(error)
-  return text.trim() === '' ? '操作失败（无错误详情）' : text
+  return text.trim() === '' ? t('advisor.error.noDetail') : text
 }
 
 function recordsPath(
@@ -329,9 +343,26 @@ export class AdvisorSessionStore {
   private recordsAbort: AbortController | null = null
   /** reset 后首次 after=0 是重放而非新到达，不能把旧卡片重复计入未读。 */
   private suppressUnreadUntilSynced = false
+  /**
+   * 插件 locale 翻译函数。
+   *
+   * i18n（2026-09-16）选择**注入 t**而不是让 store 只存 `{ key, params }`：
+   * store 自己产出的文案不止静态键（还有 `实时游标已过期，历史重建失败：{msg}`
+   * 这类模板，以及 `errorText()` 的空消息兜底），而宿主/网络错误文本必须
+   * **原样透传**、不能拿去查字典 —— 若只存键，面板就得同时维护"键"与"原文"
+   * 两条渲染路径，任何新文案都可能漏翻。t 是 `ctx.locale.bind(NS)` 的调用期
+   * 绑定（语言一变，之后产出的文案即跟随），故不冻结语言。
+   */
+  private t: Translate
 
-  constructor(sessionId: string) {
+  constructor(sessionId: string, t: Translate) {
     this.snapshot = initialSnapshot(sessionId)
+    this.t = t
+  }
+
+  /** 热重载/多实例下把最新的 locale 绑定交给 store（身份通常稳定）。 */
+  setTranslate(t: Translate): void {
+    this.t = t
   }
 
   /** useSyncExternalStore 所需的稳定函数引用。 */
@@ -371,7 +402,7 @@ export class AdvisorSessionStore {
   }
 
   private readonly handleConnectionReset = (): void => {
-    this.resetCursorAndLive('连接已恢复，正在重新同步 Advisor 事件…')
+    this.resetCursorAndLive(this.t('advisor.notice.reconnected'))
   }
 
   private installBrowserResetListeners(): void {
@@ -451,7 +482,7 @@ export class AdvisorSessionStore {
       this.patch({ eventsLoading: false, ...(rebuildSucceeded ? { eventsError: null } : {}) })
     } catch (error) {
       if (!controller.signal.aborted && generation === this.generation) {
-        this.patch({ eventsLoading: false, eventsError: errorText(error) })
+        this.patch({ eventsLoading: false, eventsError: errorText(error, this.t) })
       }
     } finally {
       if (this.pollAbort === controller) this.pollAbort = null
@@ -475,7 +506,7 @@ export class AdvisorSessionStore {
     } catch (error) {
       if (generation !== this.generation) return false
       // 重建失败时仍让后续 live 事件进入，错误明确展示并允许用户重试。
-      this.patch({ reviews: [], eventsError: `实时游标已过期，历史重建失败：${errorText(error)}` })
+      this.patch({ reviews: [], eventsError: this.t('advisor.error.rebuildFailed', { message: errorText(error, this.t) }) })
       return false
     }
   }
@@ -564,7 +595,7 @@ export class AdvisorSessionStore {
       this.patch({ status, statusLoading: false, statusError: null })
     } catch (error) {
       if (sessionId !== this.snapshot.sessionId) return
-      this.patch({ statusLoading: false, statusError: errorText(error) })
+      this.patch({ statusLoading: false, statusError: errorText(error, this.t) })
     }
   }
 
@@ -579,7 +610,7 @@ export class AdvisorSessionStore {
       this.patch({ pending: data.pending, instructionsLoading: false, instructionsError: null })
     } catch (error) {
       if (sessionId !== this.snapshot.sessionId) return
-      this.patch({ instructionsLoading: false, instructionsError: errorText(error) })
+      this.patch({ instructionsLoading: false, instructionsError: errorText(error, this.t) })
     }
   }
 
@@ -596,13 +627,13 @@ export class AdvisorSessionStore {
         pending: data.pending,
         instructionMutating: false,
         // Q4：指令入队后立即触发问答评审（回答注入会话流），不再是"等待下一轮"
-        notice: { kind: 'ok', text: '指令已发送，Advisor 正在回答（回答会直接注入会话流）' },
+        notice: { kind: 'ok', text: this.t('advisor.notice.instructionSent') },
       })
     } catch (error) {
       this.patch({
         instructionMutating: false,
-        instructionsError: errorText(error),
-        notice: { kind: 'error', text: errorText(error) },
+        instructionsError: errorText(error, this.t),
+        notice: { kind: 'error', text: errorText(error, this.t) },
       })
     }
   }
@@ -616,7 +647,7 @@ export class AdvisorSessionStore {
       })
       this.patch({
         instructionMutating: false,
-        notice: { kind: 'ok', text: `已新建评审会话（#${data.epoch}）——可在第一条指令中告知评审员背景信息` },
+        notice: { kind: 'ok', text: this.t('advisor.notice.conversationReset', { epoch: data.epoch }) },
       })
       // 2026-08-13 用户反馈：新建评审会话后实时流应清空（旧评审活动属于
       // 上一评审会话，已落盘 records.jsonl 在「记录」Tab 可查）——重置
@@ -626,8 +657,8 @@ export class AdvisorSessionStore {
     } catch (error) {
       this.patch({
         instructionMutating: false,
-        instructionsError: errorText(error),
-        notice: { kind: 'error', text: errorText(error) },
+        instructionsError: errorText(error, this.t),
+        notice: { kind: 'error', text: errorText(error, this.t) },
       })
     }
   }
@@ -641,13 +672,13 @@ export class AdvisorSessionStore {
       await this.refreshInstructions()
       this.patch({
         instructionMutating: false,
-        notice: { kind: 'ok', text: `已清空 ${data.cleared} 条待消费指令` },
+        notice: { kind: 'ok', text: this.t('advisor.notice.instructionsCleared', { count: data.cleared }) },
       })
     } catch (error) {
       this.patch({
         instructionMutating: false,
-        instructionsError: errorText(error),
-        notice: { kind: 'error', text: errorText(error) },
+        instructionsError: errorText(error, this.t),
+        notice: { kind: 'error', text: errorText(error, this.t) },
       })
     }
   }
@@ -663,13 +694,13 @@ export class AdvisorSessionStore {
       this.patch({
         status,
         statusLoading: false,
-        notice: { kind: 'ok', text: enabled ? '本会话 Advisor 已启用' : '本会话 Advisor 已停用' },
+        notice: { kind: 'ok', text: enabled ? this.t('advisor.notice.sessionEnabled') : this.t('advisor.notice.sessionDisabled') },
       })
     } catch (error) {
       this.patch({
         statusLoading: false,
-        statusError: errorText(error),
-        notice: { kind: 'error', text: errorText(error) },
+        statusError: errorText(error, this.t),
+        notice: { kind: 'error', text: errorText(error, this.t) },
       })
     }
   }
@@ -680,7 +711,7 @@ export class AdvisorSessionStore {
       const data = await fetchJson<{ config: AdvisorConfig }>('/config')
       this.patch({ config: data.config, configLoading: false, configError: null })
     } catch (error) {
-      this.patch({ configLoading: false, configError: errorText(error) })
+      this.patch({ configLoading: false, configError: errorText(error, this.t) })
     }
   }
 
@@ -691,14 +722,14 @@ export class AdvisorSessionStore {
       this.patch({
         config: data.config,
         configSaving: false,
-        notice: { kind: 'ok', text: 'Advisor 设置已保存并生效' },
+        notice: { kind: 'ok', text: this.t('advisor.notice.configSaved') },
       })
       await this.refreshStatus()
     } catch (error) {
       this.patch({
         configSaving: false,
-        configError: errorText(error),
-        notice: { kind: 'error', text: errorText(error) },
+        configError: errorText(error, this.t),
+        notice: { kind: 'error', text: errorText(error, this.t) },
       })
     }
   }
@@ -715,7 +746,7 @@ export class AdvisorSessionStore {
       this.patch({ scopes: data.scopes, scopesLoading: false, scopesError: null })
     } catch (error) {
       if (sessionId !== this.snapshot.sessionId) return
-      this.patch({ scopesLoading: false, scopesError: errorText(error) })
+      this.patch({ scopesLoading: false, scopesError: errorText(error, this.t) })
     }
   }
 
@@ -730,13 +761,13 @@ export class AdvisorSessionStore {
       this.patch({
         scopes: data.scopes,
         scopesSaving: false,
-        notice: { kind: 'ok', text: `${LEVEL_LABEL[level]}已保存，下次评审立即生效` },
+        notice: { kind: 'ok', text: this.t('advisor.notice.scopeSaved', { level: levelLabel(level, this.t) }) },
       })
     } catch (error) {
       this.patch({
         scopesSaving: false,
-        scopesError: errorText(error),
-        notice: { kind: 'error', text: errorText(error) },
+        scopesError: errorText(error, this.t),
+        notice: { kind: 'error', text: errorText(error, this.t) },
       })
     }
   }
@@ -771,7 +802,7 @@ export class AdvisorSessionStore {
       })
     } catch (error) {
       if (!controller.signal.aborted) {
-        this.patch({ recordsLoading: false, recordsError: errorText(error) })
+        this.patch({ recordsLoading: false, recordsError: errorText(error, this.t) })
       }
     } finally {
       if (this.recordsAbort === controller) this.recordsAbort = null
@@ -788,11 +819,14 @@ export class AdvisorSessionStore {
 }
 
 /** React 绑定：sessionId 变化即创建新 store，旧 store 的请求在 cleanup 中全部取消。 */
-export function useAdvisorSessionStore(sessionId: string): {
+export function useAdvisorSessionStore(sessionId: string, t: Translate): {
   store: AdvisorSessionStore
   snapshot: AdvisorStoreSnapshot
 } {
-  const store = useMemo(() => new AdvisorSessionStore(sessionId), [sessionId])
+  const store = useMemo(() => new AdvisorSessionStore(sessionId, t), [sessionId])
+  // t 由 apply() 绑定一次、身份稳定，故不进 useMemo 依赖（否则会重建 store、
+  // 丢掉游标与未读计数）；这里只做热重载/多实例下的最新值同步。
+  useEffect(() => { store.setTranslate(t) }, [store, t])
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   // 轮询启停（稳定版复审 P1-1）：config 明确关闭总闸（advisorEnabled=false）
   // 时停掉 1s 事件轮询——status 恒不可用，空转浪费请求；config 未知时先

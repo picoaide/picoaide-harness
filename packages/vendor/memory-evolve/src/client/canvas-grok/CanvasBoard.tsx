@@ -15,6 +15,7 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
+import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { CanvasCard } from './CanvasCard.tsx'
 import { AI_ZONE, MAX_SCALE, MIN_SCALE, VIRT_PAD, ZOOM_STEP } from './constants.ts'
 import {
@@ -26,6 +27,8 @@ import {
 import type { CanvasNode, CanvasViewport } from './types.ts'
 
 export interface CanvasBoardProps {
+  /** 插件 locale 翻译函数（i18n：文案一律经它取，不再硬编码中文）。 */
+  t: Translate
   nodes: CanvasNode[]
   viewport: CanvasViewport
   lod: boolean
@@ -326,11 +329,12 @@ export function CanvasBoard(props: CanvasBoardProps): JSX.Element {
             height: AI_ZONE.height,
           }}
         >
-          <span className="cg-ai-zone-label">AI 便签区 · AI 新放的便签落在这里，可拖走</span>
+          <span className="cg-ai-zone-label">{props.t('canvas.board.aiZone')}</span>
         </div>
         {visibleNodes.map((node) => (
           <CanvasCard
             key={node.id}
+            t={props.t}
             node={node}
             lod={props.lod}
             selected={props.selectedId === node.id}
@@ -355,10 +359,10 @@ export function CanvasBoard(props: CanvasBoardProps): JSX.Element {
         ))}
       </div>
       <div className="cg-hint-bar">
-        拖空白处平移 · 空格+拖 也可平移 · 滚轮缩放（中心为指针）· 缩放 {Math.round(props.viewport.scale * 100)}%
-        {props.lod ? ' · 远看简化模式' : ''}
+        {props.t('canvas.board.hint', { percent: Math.round(props.viewport.scale * 100) })}
+        {props.lod ? props.t('canvas.board.lod') : ''}
         {visibleNodes.length < props.nodes.length
-          ? ` · 视口 ${visibleNodes.length}/${props.nodes.length}`
+          ? props.t('canvas.board.viewport', { visible: visibleNodes.length, total: props.nodes.length })
           : ''}
       </div>
     </div>

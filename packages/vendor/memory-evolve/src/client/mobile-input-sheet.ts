@@ -239,9 +239,12 @@ function updateMenuGeometry(preferredRoot?: HTMLElement): void {
 /**
  * 创建输入栏上拉弹窗增强。
  *
+ * @param t - 插件 locale 翻译函数（i18n，2026-09-16）：本模块是纯 DOM
+ *   助手、拿不到 React 的 t，故由调用方（client 入口的 dshMobile.enhance）
+ *   注入；只用于注入按钮的 aria-label 等无障碍文案。
  * @returns dispose：移动模式退出/卸载时调用，清理按钮与监听。
  */
-export function createInputSheetEnhance(): () => void {
+export function createInputSheetEnhance(t: (key: string) => string): () => void {
   let disposed = false
   let observer: MutationObserver | null = null
   /** rAF 节流句柄：MutationObserver 高频触发时合并为每帧一次 ensure。 */
@@ -276,7 +279,7 @@ export function createInputSheetEnhance(): () => void {
       const btn = document.createElement('button')
       btn.type = 'button'
       btn.className = MORE_BTN_CLASS
-      btn.setAttribute('aria-label', '更多操作')
+      btn.setAttribute('aria-label', t('mobile.moreActions'))
       btn.setAttribute('aria-haspopup', 'true')
       btn.setAttribute('aria-expanded', isSheetOpen() ? 'true' : 'false')
       btn.innerHTML = MORE_BTN_SVG

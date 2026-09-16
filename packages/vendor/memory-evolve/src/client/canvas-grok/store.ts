@@ -1,70 +1,14 @@
 /**
- * 画板持久化：整板快照写入 localStorage。
+ * 画板持久化：整板快照写入 localStorage（防抖）。
  *
- * 一期没有后端，刷新不丢全靠这里。写入做了：
- * - 形状校验（坏数据回落到预置种子，避免白屏）
- * - 防抖（拖卡片时不要每帧 JSON.stringify）
+ * 2026-09-16：纯前端的"读回本地快照"路径（`loadCanvasState` / `parseState`）
+ * 与其依赖的预置示例卡（`constants.ts` 的 `createSeedState`）一并删除——
+ * 画板自 2026-08-14 起"只走后端"（CanvasView 只 import createDebouncedSaver，
+ * 整板读写走宿主 API + rev 乐观锁），这三个函数全仓零调用点；留着等于留一份
+ * 中文示例数据要翻译。`saveCanvasState` 仍是防抖保存的落点，保留。
  */
-import { createSeedState, STORAGE_KEY } from './constants.ts'
-import type { CanvasNode, CanvasPersistState } from './types.ts'
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null
-}
-
-function isNode(v: unknown): v is CanvasNode {
-  if (!isRecord(v)) return false
-  const p = v.placement
-  if (!isRecord(p)) return false
-  return (
-    typeof v.id === 'string'
-    && typeof v.type === 'string'
-    && typeof v.title === 'string'
-    && typeof v.scope === 'string'
-    && typeof v.scopeLabel === 'string'
-    && typeof v.createdAt === 'number'
-    && typeof p.x === 'number'
-    && typeof p.y === 'number'
-    && typeof p.width === 'number'
-    && typeof p.height === 'number'
-    && typeof p.zIndex === 'number'
-  )
-}
-
-function parseState(raw: string): CanvasPersistState | null {
-  try {
-    const data: unknown = JSON.parse(raw)
-    if (!isRecord(data) || data.version !== 1) return null
-    if (!Array.isArray(data.nodes) || !data.nodes.every(isNode)) return null
-    const vp = data.viewport
-    if (!isRecord(vp)) return null
-    if (typeof vp.x !== 'number' || typeof vp.y !== 'number' || typeof vp.scale !== 'number') {
-      return null
-    }
-    const viewMode = data.viewMode
-    if (viewMode !== 'session' && viewMode !== 'project' && viewMode !== 'global') return null
-    return {
-      version: 1,
-      nodes: data.nodes,
-      viewport: { x: vp.x, y: vp.y, scale: vp.scale },
-      viewMode,
-      lastAiNodeId: typeof data.lastAiNodeId === 'string' ? data.lastAiNodeId : null,
-    }
-  } catch {
-    return null
-  }
-}
-
-/** 读取本地快照；没有或损坏则返回预置 4 张示例卡。 */
-export function loadCanvasState(): CanvasPersistState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return createSeedState()
-    return parseState(raw) ?? createSeedState()
-  } catch {
-    return createSeedState()
-  }
-}
+import { STORAGE_KEY } from './constants.ts'
+import type { CanvasPersistState } from './types.ts'
 
 export function saveCanvasState(state: CanvasPersistState): void {
   try {

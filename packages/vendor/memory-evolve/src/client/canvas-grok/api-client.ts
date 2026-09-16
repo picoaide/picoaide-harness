@@ -15,10 +15,39 @@
  * 乐观锁：整板保存带 rev，409 冲突时返回 { ok:false, conflict:true }，
  * 前端提示刷新（不静默覆盖——Grok 评审采纳）。
  */
+import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CanvasNode, CanvasPersistState } from './types.ts'
 
-/** 宿主 API 前缀。 */
+/**
+ * 宿主 API 前缀。 */
 const API_BASE = '/memory-evolve/api/canvas'
+
+/**
+ * 客户端侧失败原因（**稳定错误码**，不是文案）。
+ *
+ * i18n（2026-09-16）：本模块不是 React 组件、也拿不到插件 locale（它可能在
+ * 任何时机被调用），所以这里**不产出中文文案**，只回一个稳定码；由调用方
+ * （CanvasView，渲染期持有 t）翻成 `canvas.error.*` 字典键。宿主返回的
+ * 人话错误（服务端 message）继续原样透传：那是服务端语言，客户端无权改写。
+ */
+export type CanvasApiErrorCode =
+  /** 乐观锁冲突：board 已被其他会话改写（409）。 */
+  | 'conflict'
+  /** 网络/宿主不可达（fetch 抛错）。 */
+  | 'unreachable'
+  /** 其他非 2xx（且响应体里没有可用 message）。 */
+  | 'http'
+
+/** 把错误码翻成当前语言文案（调用方持有 t）。 */
+export function canvasErrorText(code: CanvasApiErrorCode, t: Translate): string {
+  return t(`canvas.error.${code}`)
+}
+
+/** 统一的失败文案：宿主 message 优先（服务端语言原样透传），否则按稳定码翻。 */
+export function apiErrorText(result: { error?: string; code?: CanvasApiErrorCode }, t: Translate): string {
+  if (typeof result.error === 'string' && result.error !== '') return result.error
+  return result.code === undefined ? t('canvas.error.unknown') : canvasErrorText(result.code, t)
+}
 
 /** 后端可用性缓存（每 Tab 生命周期探测一次）。 */
 let availability: boolean | null = null
@@ -94,7 +123,10 @@ export interface BackendSaveResult {
   ok: boolean
   conflict?: boolean
   rev?: number
+  /** 宿主返回的错误文本（原样透传；服务端语言，不在客户端改写）。 */
   error?: string
+  /** 客户端侧失败原因（无宿主 message 时由调用方按码翻译）。 */
+  code?: CanvasApiErrorCode
 }
 
 /**
@@ -123,14 +155,15 @@ export async function saveCanvasToBackend(
       }),
     })
     if (res.status === 409) {
-      return { ok: false, conflict: true, error: '画板已被其他会话修改' }
+      // 稳定码：文案由调用方按当前语言渲染（此处不得产出中文）
+      return { ok: false, conflict: true, code: 'conflict' }
     }
     if (!res.ok) {
       const body: unknown = await res.json().catch(() => null)
       const error = body && typeof body === 'object' && typeof (body as { error?: string }).error === 'string'
         ? (body as { error: string }).error
         : `HTTP ${res.status}`
-      return { ok: false, error }
+      return { ok: false, error, code: 'http' }
     }
     const body: unknown = await res.json()
     const revNext = body && typeof body === 'object' && typeof (body as { rev?: unknown }).rev === 'number'
@@ -138,7 +171,7 @@ export async function saveCanvasToBackend(
       : rev + 1
     return { ok: true, rev: revNext }
   } catch {
-    return { ok: false, error: '网络错误（宿主不可达）' }
+    return { ok: false, code: 'unreachable' }
   }
 }
 
@@ -179,7 +212,7 @@ export async function searchFilesBackend(
  * @param {string} nodeId
  * @returns {Promise<{ ok: boolean; error?: string }>}
  */
-export async function openNodeFileBackend(nodeId: string): Promise<{ ok: boolean; error?: string }> {
+export async function openNodeFileBackend(nodeId: string): Promise<{ ok: boolean; error?: string; code?: CanvasApiErrorCode }> {
   return openNodePathBackend('/open', nodeId)
 }
 
@@ -190,7 +223,7 @@ export async function openNodeFileBackend(nodeId: string): Promise<{ ok: boolean
  * @param {string} nodeId
  * @returns {Promise<{ ok: boolean; error?: string }>}
  */
-export async function openNodeFolderBackend(nodeId: string): Promise<{ ok: boolean; error?: string }> {
+export async function openNodeFolderBackend(nodeId: string): Promise<{ ok: boolean; error?: string; code?: CanvasApiErrorCode }> {
   return openNodePathBackend('/open-dir', nodeId)
 }
 
@@ -198,7 +231,7 @@ export async function openNodeFolderBackend(nodeId: string): Promise<{ ok: boole
 async function openNodePathBackend(
   endpoint: '/open' | '/open-dir',
   nodeId: string,
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; code?: CanvasApiErrorCode }> {
   try {
     const res = await fetch(`${API_BASE}${endpoint}`, {
       method: 'POST',
@@ -210,11 +243,11 @@ async function openNodePathBackend(
       const error = body && typeof body === 'object' && typeof (body as { error?: string }).error === 'string'
         ? (body as { error: string }).error
         : `HTTP ${res.status}`
-      return { ok: false, error }
+      return { ok: false, error, code: 'http' }
     }
     return { ok: true }
   } catch {
-    return { ok: false, error: '网络错误（宿主不可达）' }
+    return { ok: false, code: 'unreachable' }
   }
 }
 
@@ -242,7 +275,7 @@ export async function migrateNodeBackend(
   scope: 'session' | 'project' | 'global',
   sessionId: string,
   rev: number,
-): Promise<{ ok: boolean; conflict?: boolean; node?: object; rev?: number; error?: string }> {
+): Promise<{ ok: boolean; conflict?: boolean; node?: object; rev?: number; error?: string; code?: CanvasApiErrorCode }> {
   try {
     const res = await fetch(`${API_BASE}/migrate`, {
       method: 'POST',
@@ -250,14 +283,14 @@ export async function migrateNodeBackend(
       body: JSON.stringify({ nodeId, scope, sessionId, rev }),
     })
     if (res.status === 409) {
-      return { ok: false, conflict: true, error: '画板已被其他会话修改，请刷新后重试' }
+      return { ok: false, conflict: true, code: 'conflict' }
     }
     if (!res.ok) {
       const body: unknown = await res.json().catch(() => null)
       const error = body && typeof body === 'object' && typeof (body as { error?: string }).error === 'string'
         ? (body as { error: string }).error
         : `HTTP ${res.status}`
-      return { ok: false, error }
+      return { ok: false, error, code: 'http' }
     }
     const body: unknown = await res.json()
     const row = body as { node?: object; rev?: unknown }
@@ -267,6 +300,6 @@ export async function migrateNodeBackend(
       rev: typeof row.rev === 'number' ? row.rev : undefined,
     }
   } catch {
-    return { ok: false, error: '网络错误（宿主不可达）' }
+    return { ok: false, code: 'unreachable' }
   }
 }
