@@ -182,6 +182,38 @@ describe('siteOriginFromFields', () => {
     expect(siteOriginFromFields({ website: 'staging' })).toBeNull()
   })
 
+  // 2026-09-16 R4 复核：`bareHostOrigin` 会把纯数字当成整数 IPv4
+  // （`134744072` → `8.8.8.8`）、也会接受尾点/一位 TLD/带路径的单标签，
+  // 这些"文字上不像主机"的值不得进入绑定基准（实测曾落到公网 IPv4 字面量）。
+  it('rejects values whose TEXT is not a host (numeric IPv4 coercion, placeholders)', () => {
+    expect(siteOriginFromFields({ host: '134744072', homepage: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ host: '134744072' })).toBeNull()
+    expect(siteOriginFromFields({ server_url: '3232235777', docs: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ server_url: 'changeme.', docs: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ server_url: 'n.a', docs: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ server_url: 'example.com', docs: 'https://real.example' }))
+      .toBe('https://real.example')
+    // solo 形态同样不得凭空造出 origin（base 也是 null）。
+    expect(siteOriginFromFields({ server_url: 'n/a' })).toBeNull()
+    expect(siteOriginFromFields({ server_url: '-' })).toBeNull()
+    expect(siteOriginFromFields({ server_url: 'changeme' })).toBeNull()
+    expect(siteOriginFromFields({ server_url: 'TODO' })).toBeNull()
+  })
+
+  it('prefers the base address key’s typed host over a camelCase flow URL', () => {
+    // base 地址键上的裸主机（第 2 遍）优先于扩展拼法键上的显式 URL（第 4 遍）：
+    // `callbackUrl` 是 OAuth 回调，不是连接器站点（R4 复核）。
+    expect(siteOriginFromFields({ base_url: 'glitchtip.corp.example', callbackUrl: 'https://sso.example/cb' }))
+      .toBe('https://glitchtip.corp.example')
+    // 但同一形态里"显式 vs 显式"必须与 base 一致：裸单标签不做承诺，显式 URL 赢。
+    expect(siteOriginFromFields({ url: 'staging', HOSTNAME: 'https://real.example' }))
+      .toBe('https://real.example')
+  })
+
   it('does not let a URL under an unrelated key beat the address key’s bare host', () => {
     // DSN / 文档链接这类字段里带 URL，但它们不是连接器的站点。
     expect(siteOriginFromFields({ base_url: 'glitchtip.corp.example', sentry_dsn: 'https://abc123@9f1.sentry.io/1' }))
