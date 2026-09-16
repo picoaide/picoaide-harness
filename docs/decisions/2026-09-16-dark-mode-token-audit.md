@@ -58,16 +58,20 @@
 
 ## 待拍板 / 未修（认账）
 
-1. **vendored `packages/vendor/memory-evolve`（随桌面包分发，第三方上游
-   `github.com/csyangwen/dsh-memory-evolve`）**：12 个 CSS 里 11 个带病 ——
-   **240 处 `var(--dsw-*)` 指向 49 个上游不存在的名字**（占该插件 token 引用的 18.9%），
+1. **vendored `packages/vendor/memory-evolve`**（随桌面包分发，第三方上游
+   `github.com/csyangwen/dsh-memory-evolve`）：12 个 CSS 里 11 个带病 ——
+   **198 处 `var(--dsw-*)` 指向 46 个上游不存在的名字**（占该插件 token 引用的 18.9%），
    其中 138 处落到写死颜色、**37 处无 fallback（整条声明失效：边框在两种主题下都不画）**、
    2 处暗色 P0（`bookmark-styles.css:79` 白底 + 近白文字的菜单、`skills-browser/styles.css:248`
-   白字白底主按钮）。**升级上游修不了**（上游 main 与 vendored 基线在这 49 个名字上逐字节一致）。
-   **建议方案**：不动 vendored，用上游现成的 `ctx.theme.overrideTokens(source, {name:{light,dark}})`
-   加一层 49 名映射适配层（本仓 `client/branding` 已有先例；桌面 presenter 把 token 写成
-   body 内联变量，任意名字都生效，且值可以写 `var(--dsw-alias-border-l1)` 自动跟随主题）。
-   代价：组 2/组 3 共 23 个名字上游无语义对应，需要人工定亮/暗两色并真机复核。
+   白字白底主按钮）。**升级上游修不了**（上游 main 与 vendored 基线在这些名字上逐字节一致）。
+   → **已实施适配层**（不改 vendored 源码）：
+   `packages/host/desktop/src/client/legacy-theme-tokens.ts` 用
+   `ctx.get('theme').overrideTokens('picoaide-vendored-legacy-tokens', …)` 一次覆盖 46 个名字；
+   同义 alias 直接指真实 token（自动跟随主题），另一套 0–11 刻度色板映射到同值/近值的
+   上游 static token，上游缺族/缺档的（紫、黄、深色阶）给显式亮/暗一对。
+   护栏：`tests/legacy-theme-tokens.spec.ts` —— 对 vendored 源码做**全深度扫描**，
+   未定义名字必须与适配表**完全相等**（漏一个/多一个都红），且映射里每个 `var()` 目标
+   必须在上游样式里存在（防上游改名后层静默失效）。
 2. `packages/client/branding` 只服务 web 形态（不在桌面 profile 内），其中
    `brand-shell.tsx` 把 `--dsw-alias-brand-primary` 覆盖成绿色 —— 该 token 上游当
    **近黑/近白墨色**用，且被 `--dsw-alias-button-primary-fill`、Switch、输入框描边、
@@ -77,5 +81,17 @@
    `CapabilityCenterPanel` 卡片在暗色下用 `bg-layer-1` 放在 `bg-layer-2` 上 = 1.13:1
    （凹陷而非抬升，有描边兜底，待真机观感确认）；登录页输入框描边两主题都不到 3:1
    （既有取色）。
-4. 本轮全部对比度为**静态计算**（token 取值 + WCAG 公式），未做真机暗色截图复核；
-   建议后续真机过一遍主要面板。
+
+## 真机（打包版）验证
+
+`e2e:client` 新增 3 条断言（`scripts/e2e-client.mjs` §5.5，用
+`Emulation.setEmulatedMedia` 把应用切到暗色后测量），2026-09-16 在打包版上实测：
+
+| 断言 | 实测 |
+| --- | --- |
+| 暗色主题已生效 | `body[data-ds-dark-theme]` ✓ |
+| 暗色下版本号胶囊可读（反色） | `v2.7.5-beta.1`：bg `rgb(249,250,251)`、fg `rgb(53,54,56)`、**对比度 11.57:1** ✓ |
+| vendored 适配层已生效 | `--dsw-alias-border-l` = `#ffffff0f`（= 暗色 `border-l1`）、`--dsw-font-family-mono` 有值 ✓ |
+
+截图：`packages/host/desktop/.e2e-shots/05b-dark-sidebar.png`。
+
