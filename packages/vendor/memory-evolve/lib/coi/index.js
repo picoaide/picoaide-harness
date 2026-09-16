@@ -98,17 +98,17 @@ function makeNotify(commandTemplate) {
     // 二次解析值内的元字符，从根上杜绝命令注入（P1-1）。
     // 其余占位符（taskId/coi/status）来自插件内部受控值，可直接替换。
     const text = String(commandTemplate)
-      .replaceAll('{taskId}', taskId ?? '')
-      .replaceAll('{coi}', coi ?? '')
-      .replaceAll('{status}', status ?? '')
-      .replaceAll('{summary}', '"$DSH_COI_SUMMARY"')
+      .replaceAll('{taskId}',() => (taskId ?? ''))
+      .replaceAll('{coi}',() => (coi ?? ''))
+      .replaceAll('{status}',() => (status ?? ''))
+      .replaceAll('{summary}',() => ('"$DSH_COI_SUMMARY"'))
     try {
       const child = spawn('sh', ['-c', text], {
         stdio: 'ignore',
         detached: true,
         env: {
           ...process.env,
-          DSH_COI_SUMMARY: String(summary ?? '').slice(0, 200).replaceAll('\n', ' '),
+          DSH_COI_SUMMARY: String(summary ?? '').slice(0, 200).replaceAll('\n',() => (' ')),
         },
       })
       child.on('error', () => { /* 通知失败静默 */ })

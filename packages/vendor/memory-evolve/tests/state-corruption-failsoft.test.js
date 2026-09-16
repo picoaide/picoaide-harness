@@ -131,10 +131,13 @@ test('A1 标记被消费且只告知一次（快照注入 → 二次启动不再
     apply(ctx1, { memoryDir: dir })
     const marker = join(dir, 'plugin-state.json.quarantined.json')
     assert.equal(existsSync(marker), true, 'apply 阶段不得提前消费标记')
-    // 子代理等无会话视角的快照先渲染：不得吞掉用户可见的那次告知。
-    const noSession = String(ctx1.state.contexts.find(c => c.name === 'memory:snapshot').text({ agent: { id: 'sub' } }))
-    assert.match(noSession, /记忆设置曾被重置/)
-    assert.equal(existsSync(marker), true, '无会话视角的快照不得消费告知')
+    // 子代理是真实会话（有 session.id 且 header.origin='subagent'）：它的快照
+    // 先渲染时不得吞掉用户可见的那次告知。
+    const subagent = String(ctx1.state.contexts.find(c => c.name === 'memory:snapshot').text({
+      agent: { id: 'sub', session: { id: 'sub-1', header: { origin: 'subagent' } } },
+    }))
+    assert.match(subagent, /记忆设置曾被重置/)
+    assert.equal(existsSync(marker), true, '子代理会话不得消费告知')
     const snapshot1 = renderSnap(ctx1, dir)
     assert.match(snapshot1, /记忆设置曾被重置/, '会话视角快照必须看到一次性告知')
     assert.equal(existsSync(marker), false, '会话视角渲染后才消费标记')

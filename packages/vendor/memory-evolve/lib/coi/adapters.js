@@ -361,10 +361,10 @@ export class AdapterStore {
  */
 export function buildArgs(adapter, { task, cwd, model, sessionId, mode, images }) {
   const fill = (args) => args.map((arg) => String(arg)
-    .replaceAll('{task}', task ?? '')
-    .replaceAll('{workdir}', cwd ?? '')
-    .replaceAll('{model}', model ?? '')
-    .replaceAll('{sessionId}', sessionId ?? ''))
+    .replaceAll('{task}',() => (task ?? ''))
+    .replaceAll('{workdir}',() => (cwd ?? ''))
+    .replaceAll('{model}',() => (model ?? ''))
+    .replaceAll('{sessionId}',() => (sessionId ?? '')))
   // flag 模式图片参数：`-i /path/a.png -i /path/b.png`，插在含 {task} 的
   // 参数之前（commander 类 CLI 普遍接受 options 在前；对 resume.args 同样适用）
   const imageArgs = adapter.image?.mode === 'flag' && Array.isArray(images) && images.length > 0
