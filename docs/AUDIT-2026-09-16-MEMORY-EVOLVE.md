@@ -51,6 +51,8 @@
 | D9 | P2（文档） | `VENDORED.md` 三处与代码不符：①声称 mermaid 去重补丁落在 `lib/client.js`，实测入库 bundle 与上游**逐字节相同**（补丁从未生效，语义等价故无影响）②"41 个幻影 token"实为 **49**（1265 处引用）③未记录 `lib/i18n.js` 的本地新增键 | 修正三处 + 补 §D 修复批；并**给出可复现的 bundle 重建姿势**（`DSH_SOURCE=<带 esbuild 的目录> node scripts/build.mjs`，实测 0.28.1 重建 = 上游产物 + 唯一 mermaid 改动，逐字节可复现） | `check-theme-tokens`（49 个名字与适配层逐一对账）、桌面 `legacy-theme-tokens.spec.ts` 3/3 |
 | D10 | P2（i18n 基础设施） | 桌面原生面（托盘/通知）只认裸 `zh`/`en`，而上游 locale id 允许 `zh-CN`（客户端确实会写）⇒ 中文界面 + 英文托盘 | 新增 `desktop-locale.ts`（唯一实现）并让托盘的语言标签解析**共用同一份**前缀规则；`auto`/未设置仍交给系统语言 | `tests/desktop-locale.spec.ts` 9 例（含与托盘解析的一致性对拍） |
 
+| D11 | **P0 macOS 平台** | **客户现场：macOS 上一切记忆写入失败**（memory / dtodo / 归档 / sync），面板报「`.memory.lock` 是符号链接」，但目录里没有任何符号链接、锁都是 0 字节普通文件且越积越多。根因：`fdRealPath()` 用 `realpathSync('/dev/fd/N')` 反查 fd 真实路径，而 **macOS 上它不解析、原样返回 `/dev/fd/N`**（`/proc/self/fd` 不存在）⇒ 包含性检查判成"仓库外" ⇒ 拒写；清理用的 `unlinkSync('/dev/fd/N')` 又删不掉真文件。Linux 上 `/proc/self/fd` 正常解析，故本地/CI 全绿——**纯 macOS 平台缺陷** | `fdRealPath` 只在**真解析出路径**（不带 `/dev/fd`、`/proc/self/fd` 前缀，且 dev/ino 与 fd 一致）时才返回，否则 null ⇒ 跳过包含性检查；其余防线（打开后 inode 复核、路径链无符号链接、`removeCreatedFile` 回收）不变 | `tests/macos-fd-realpath.test.js` 4 例：用 loader 钩子把 `node:fs` 换成 macOS 形态复现现场（**回退修复后抛出的正是客户那句逐字相同的文案**）+ darwin 真机断言 + 防修过头用例 |
+
 ### 交付形态的连带修复（D5/D9）
 
 `lib/client.js` 是**运行期真正加载**的产物，而它自 2026-09-09 起就与 `src/client/**` 脱节
@@ -69,6 +71,7 @@
 | 英文界面下 advisor 的评审建议与问答回答改英文 | 英文界面用户 | 此前提示词硬编码「建议用中文输出」；而 note 是以用户指令形式注入主对话的，中英混排直接进会话 |
 | 中文界面下 advisor 行为**逐字不变** | 中文界面用户 | 中文提示词原文一字未改；默认语言仍是 `zh` |
 | 损坏的 `plugin-state.json` 会被改名留档为 `plugin-state.json.corrupt-<ts>.bak` 并按默认配置启动 | 遇到该损坏的用户 | 此前是**整个应用起不来**；留档是刻意的（不静默丢弃你的覆盖项），副作用是 home 里会多一个 `.bak` |
+| **macOS：记忆写入恢复可用** | 所有 macOS 客户端 | 此前 macOS 上 memory / dtodo / 归档 / 同步的**全部写入**都失败（报"符号链接/越界"，误导），只能读。已装的旧版客户端需升级；升级后无需人工清理——残留的 0 字节 `.memory.lock` 会被判定为过期锁并自动删除 |
 | 托盘/通知的语言跟随设置里的 `zh-CN` / `en-US` 这类带地区的 id | 显式选了带地区语言的用户 | 此前只认裸 `zh`/`en`，于是中文界面配英文托盘 |
 
 **尚未发布**：以上改动在分支 `chore/release-v2.7.5-beta.1` 的 `9974a92ac9` / `ecf8ecf2da`
