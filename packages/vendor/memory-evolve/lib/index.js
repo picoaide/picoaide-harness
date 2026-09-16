@@ -699,10 +699,12 @@ export function renderSnapshot(config, store, agent, counter, sessionTitleServic
   // NF-A1：状态留档告知（一次性）。放在最前，确保模型在第一条回复就能告知用户。
   if (quarantineNotice !== null && quarantineNotice !== undefined) {
     parts.push(st('snap.stateQuarantined', { at: String(quarantineNotice.at ?? '') }))
-    // Consume only once a SESSION-BEARING snapshot rendered it: a subagent or
-    // background assembly must not swallow the user's only notification, and
-    // the marker file stays on disk until then so the next launch retries.
-    if (agent?.session?.id) consumeQuarantineNotice()
+    // Consume only once a USER-VISIBLE snapshot rendered it. A subagent is a
+    // real session too (header.origin='subagent', session.id always present),
+    // so `session.id` alone would let the delegated agent swallow the user's
+    // only notification; use the same predicate this module already uses at
+    // `isSubagent` below (2026-09-16 audit R3).
+    if (agent?.session?.id && agent.session.header?.origin !== 'subagent') consumeQuarantineNotice()
   }
   // 会话 ID 段（快照最前面的独立输出端，常驻注入，不随任何模块开关）：
   // AI 始终知道"我是谁"——广播消息判断 sender/recipients 谁是谁、回复时
