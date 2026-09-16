@@ -8,6 +8,11 @@ import { test } from 'node:test'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+// `todayStamp()` is the LOCAL day the product writes into `daily/<day>.md`;
+// `new Date().toISOString()` is the UTC day, so the old expectations were wrong
+// for every hour the two differ (UTC+8 evenings) and the suite went red
+// (2026-09-16 R9 audit — the gate crossed midnight locally).
+import { todayStamp } from '../lib/store.js'
 
 import {
   LOCALES,
@@ -150,14 +155,14 @@ test('feedback line renders in both locales', async () => {
     { action: 'add', target: 'daily', content: 'shipped the parser', feedback: { sentiment: 'positive', category: 'Coding/Backend', quote: 'great work!', note: 'clean fix' } },
     fakeExec(),
   )
-  const daily = readFileSync(join(config.memoryDir, `daily/${new Date().toISOString().slice(0, 10)}.md`), 'utf8')
+  const daily = readFileSync(join(config.memoryDir, `daily/${todayStamp()}.md`), 'utf8')
   assert.ok(daily.includes('[Feedback]sentiment:positive | category:Coding/Backend | quote:"great work!" | note:clean fix'), daily)
   setLocale('zh')
   await tool.execute(
     { action: 'add', target: 'daily', content: 'hoàn tất parser', feedback: { sentiment: 'negative', category: '编程/后端' } },
     fakeExec(),
   )
-  const dailyZh = readFileSync(join(config.memoryDir, `daily/${new Date().toISOString().slice(0, 10)}.md`), 'utf8')
+  const dailyZh = readFileSync(join(config.memoryDir, `daily/${todayStamp()}.md`), 'utf8')
   assert.ok(dailyZh.includes('【反馈】情绪:负面 | 分类:编程/后端'), dailyZh)
   clean(dir)
 })

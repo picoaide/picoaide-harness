@@ -24,7 +24,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { browserOverlayHtml, browserShellHtml } from '../src/shell-pages.ts'
+import { browserOverlayHtml, browserShellHtml, emptyHtml } from '../src/shell-pages.ts'
 import { apply } from '../src/index.ts'
 
 /**
@@ -177,13 +177,30 @@ describe('injected chrome copy is per locale', () => {
       expect(String(table.failCredentials)).toContain('Action failed')
       expect(table.failPrefix).toBe('Action failed: ')
     }
-    // The empty state carries authored markup, escaped so it cannot close the
-    // surrounding <script> element whatever a translation contains.
+    // The empty state is DATA: the renderer escapes each line and adds the
+    // `<br/>` itself, so a translation (the one field a translator rewrites)
+    // can neither inject markup nor close the surrounding <script>.
+    expect(emptyHtml('a</script><script>window.__pwned=1</script><br/>b'))
+      .toBe('a&lt;/script&gt;&lt;script&gt;window.__pwned=1&lt;/script&gt;&lt;br/&gt;b')
+    expect(emptyHtml('one\ntwo')).toBe('one<br/>two')
     const shell = browserShellHtml('zh')
-    expect(shell).toContain('\\u003cbr/>')
+    expect(shell).toContain('打开浏览器，AI 会在需要时自动打开网页。<br/>你也可以点右上角 ＋ 先自己逛起来。')
     // …and the escaping is why the served page has exactly ONE </script> (its own).
     expect(shell.match(/<\/script>/gu)).toHaveLength(1)
     expect(browserOverlayHtml('en').match(/<\/script>/gu)).toHaveLength(1)
+  })
+
+  it('keeps the empty-state copy markup-free (the renderer owns the <br/>)', () => {
+    // 渲染层断言无法区分"字典里带 <br/>"与"渲染器插 <br/>"（两者产出的 HTML 逐字节
+    // 相同），所以 2026-09-16 R2 复核实测：把 C1 完整回退后上一组断言仍然全绿。
+    // 这条直接钉字典是数据 —— 文案里出现 `<`/`>` 即红。
+    const source = readFileSync(new URL('../src/shell-pages.ts', import.meta.url), 'utf8')
+    const values = [...source.matchAll(/\n\s*empty: '((?:[^'\\]|\\.)*)'/gu)].map((match) => match[1]!)
+    expect(values).toHaveLength(2)
+    for (const value of values) {
+      expect(value, value).not.toMatch(/[<>]/u)
+      expect(value, value).toContain('\\n')
+    }
   })
 })
 

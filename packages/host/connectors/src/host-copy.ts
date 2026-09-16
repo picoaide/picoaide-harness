@@ -286,7 +286,11 @@ export function hostLocaleOf(source: HostCopySource | undefined): HostLocale {
 export function hostT(locale: HostLocale, key: HostCopyKey, params?: Record<string, string>): string {
   let text: string = pickHostCopy(locale, zh[key] as string, en[key])
   if (params !== undefined) {
-    for (const [name, value] of Object.entries(params)) text = text.replaceAll(`{${name}}`, () => String(value))
+    // ONE pass over the template: a chained `replaceAll` per parameter re-scans
+    // the values it just inserted, so a value carrying another key's `{name}`
+    // token would be rewritten (2026-09-16 R9/R2 audit — `{permission}` is
+    // model-supplied).
+    text = text.replace(/\{(\w+)\}/gu, (match, name: string) => (Object.hasOwn(params, name) ? String(params[name]) : match))
   }
   return text
 }

@@ -375,7 +375,15 @@ export class BrowserRuntime {
     this.guard = new BrowserGuard(adapter)
     this.partition = partition ?? BROWSER_PARTITION
     this.locale = deps.locale ?? (() => DEFAULT_HOST_LOCALE)
-    this.pool = deps.pool ?? new TabPool(options.maxTabs !== undefined ? { maxTabs: options.maxTabs } : {})
+    // The pool this runtime builds for itself must speak the same language as
+    // the runtime (its user-gate refusals reach the activity panel AND the
+    // model). Production composes a pool in `index.ts` with the same provider;
+    // this branch is for embedders/tests that only pass `locale`
+    // (2026-09-16 R9 audit: the provider was dropped here).
+    this.pool = deps.pool ?? new TabPool({
+      ...(options.maxTabs !== undefined ? { maxTabs: options.maxTabs } : {}),
+      locale: this.locale,
+    })
     if (deps.store !== undefined) this.store = deps.store
     else this.store = new BrowserStore({ dir: this.partition.replace(/[^a-zA-Z0-9_-]/g, '_') + '-store' })
     this.pool.onChange((event) => this.emitMapped(event))
@@ -1046,6 +1054,47 @@ export class BrowserRuntime {
     this.materializePendingTabs()
     this.window.show()
     this.relayout()
+  }
+
+  /**
+   * Re-serve the two chrome pages after the application language changed.
+   *
+   * The shell and overlay pages are rendered PER REQUEST, so a window that was
+   * created (or prewarmed) earlier keeps the language it was loaded with —
+   * switching the language in Settings left the whole chrome stale until the
+   * window was destroyed and reopened (2026-09-16 R9 audit).
+   *
+   * Only the chrome is reloaded: tab contents are separate views attached to the
+   * window and the user's browsing session must survive. A page that is not
+   * mounted (no window / no overlay) is skipped.
+   *
+   * The whole body is fenced: `loadURL` on a WebContents that Electron destroyed
+   * between the null check and the call throws SYNCHRONOUSLY, and this runs from
+   * a `ctx.emit` listener (an uncaught throw would skip every later listener of
+   * the same event) — 2026-09-16 R2 audit.
+   */
+  reloadChromePages(): void {
+    try {
+      const origin = this.shellOrigin
+      if (origin === undefined) return
+      const win = this.window
+      if (win !== null && !win.isDestroyed()) {
+        void win.loadURL(`${origin}/browser-shell`).catch(() => {
+          console.error('[dsh-browser] shell page reload after a language change failed')
+        })
+      }
+      const overlay = this.overlay
+      if (overlay !== null) {
+        void overlay.webContents.loadURL(`${origin}/browser-overlay`).catch(() => {
+          console.error('[dsh-browser] overlay page reload after a language change failed')
+        })
+      }
+    } catch (cause) {
+      // A window that vanished mid-switch (or a torn-down overlay) is not a
+      // failure the user needs to see: the next window creation renders in the
+      // current language anyway.
+      console.error('[dsh-browser] chrome reload after a language change failed', cause)
+    }
   }
 
   /**

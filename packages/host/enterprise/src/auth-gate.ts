@@ -21,7 +21,8 @@ import {
 } from './skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { brandMarkSvg } from './channel-geometry.ts'
-import { hostCopy, hostLocaleFrom, type HostLocale } from 'dsh-plugin-desktop/host-locale'
+import { hostCopy, hostLocaleFrom, tryNormalizeHostLocale, type HostLocale } from 'dsh-plugin-desktop/host-locale'
+import { LOCALE_SETTINGS_NAMESPACE } from '@deepseek-ai/dsh-client-locale'
 import { absolutizeChannelAssets, asChannelPayload, brandChannel, mergeChannel, type BrandConfig, type ChannelConfig } from './channel-content.ts'
 import type { Session } from './server-connector/config.ts'
 
@@ -1146,12 +1147,40 @@ export function apply(ctx: Context, config: Config): void {
    * @returns 该请求应使用的语言。
    */
   const hostLocale = (req?: IncomingMessage): HostLocale => {
-    // 无头组合（loader smoke、测试替身）没有 desktopRuntime，且 ctx.get 可能
-    // 整个缺席 —— 结构性探测，与 desktop-loop-notify 同款。
-    const runtime = typeof ctx.get === 'function'
-      ? ctx.get('desktopRuntime') as { readonly locale?: unknown } | undefined
-      : undefined
-    return hostLocaleFrom(runtime, req?.headers['accept-language'])
+    // 优先级：launcher 的实时值（桌面端权威）→ 客户端设置里的语言偏好 → 请求头
+    // → 产品默认。加中间那一档的原因：浏览器部署（无桌面壳）里 `GET /` 的索引
+    // 变换**拿不到请求对象**（上游 tapIndex 只给 html），Accept-Language 在首屏
+    // 永远轮不到 ⇒ 首屏恒中文而同浏览器访问 /login 却是英文（2026-09-16 R9 审计）。
+    const fromRuntime = tryNormalizeHostLocale(runtimeLocale())
+    if (fromRuntime !== undefined) return fromRuntime
+    const chosen = tryNormalizeHostLocale(readLocalePreference())
+    if (chosen !== undefined) return chosen
+    return hostLocaleFrom(undefined, req?.headers['accept-language'])
+  }
+
+  /** 结构探测 `desktopRuntime.locale`（无头组合/测试替身下缺席）。 */
+  const runtimeLocale = (): unknown => {
+    try {
+      const runtime = typeof ctx.get === 'function'
+        ? ctx.get('desktopRuntime') as { readonly locale?: unknown } | undefined
+        : undefined
+      return runtime?.locale
+    } catch {
+      return undefined
+    }
+  }
+
+  /** 客户端存的语言偏好（`locale` 设置命名空间；无头组合下缺席）。 */
+  const readLocalePreference = (): unknown => {
+    try {
+      const settings = typeof ctx.get === 'function'
+        ? ctx.get('settings') as { get?: (namespace: string) => unknown } | undefined
+        : undefined
+      const value = settings?.get?.(LOCALE_SETTINGS_NAMESPACE) as { preference?: unknown } | undefined
+      return value?.preference
+    } catch {
+      return undefined
+    }
   }
 
   /** 归档超限文案（能力中心上传/安装路径可见）；语言按请求解析。 */

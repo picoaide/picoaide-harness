@@ -84,9 +84,8 @@ export function isValidCron(expr: string): boolean {
  * Compute the next matching instant after `fromMs` (ms epoch), in local time,
  * at minute granularity, strictly greater than `fromMs`. Returns the ms epoch
  * of the matching minute's start, or undefined when the calendar constraint
- * can never match (for example `0 0 30 2 *`). The five-year horizon includes
- * a full leap cycle, so a valid February 29 schedule remains reachable from
- * every non-leap year.
+ * can never match (for example `0 0 30 2 *`). The eight-year horizon covers the
+ * 2100 century leap gap, so a valid February 29 schedule stays reachable.
  *
  * Walks candidate year/month/day/hour/minute values straight from the parsed
  * field sets instead of scanning every minute. Wall-clock field construction
@@ -208,7 +207,16 @@ export function lastRunAtMs(expr: string, fromMs: number): number | undefined {
       }
       if (best !== undefined) return best
     }
-    cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1)
+    // A local calendar day that does not exist (a date-line skip such as
+    // Pacific/Apia's 2011-12-30) normalizes FORWARD, so `new Date(y, m, d - 1)`
+    // can land on the day we are already on — the loop would then spin forever.
+    // This runs synchronously inside a scheduler tick, so the hang would leave
+    // `tickInFlight` set and stop every job. Guard the step instead of trusting
+    // normalization (2026-09-16 R9 audit; the 8-year backwards horizon widened
+    // the reachable window, the defect itself is older).
+    const previous = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1)
+    if (previous.getTime() >= cursor.getTime()) break
+    cursor = previous
   }
   return undefined
 }

@@ -110,7 +110,7 @@ export interface NotificationBellOpts {
   /** 切换到某会话（DSH client sessions.open）。 */
   openSession: (sessionId: string) => void
   /** 翻译函数（zh/en 跟随界面语言）。 */
-  t: (key: string) => string
+  t: (key: string, params?: Record<string, unknown>) => string
 }
 
 /** 吸附状态：左右边 + 垂直像素。 */
@@ -354,7 +354,7 @@ function fmtTime(ts: number): string {
   return sameDay ? hm : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`
 }
 
-function senderLabel(item: NotificationItem, t: (key: string) => string): string {
+function senderLabel(item: NotificationItem, t: (key: string, params?: Record<string, unknown>) => string): string {
   return item.senderName === 'system' ? t('notify.system') : item.senderName
 }
 

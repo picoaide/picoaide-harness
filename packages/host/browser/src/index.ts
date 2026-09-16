@@ -47,6 +47,14 @@ type DownloadEntryStatus = DownloadEntry['status']
 declare module '@deepseek-ai/cordis' {
   interface Events {
     'pico/session-changed'(session: { username?: string; token?: string; serverURL?: string } | null): void
+    /**
+     * The launcher's user-visible language changed (the in-app locale setting).
+     *
+     * Emitted by the desktop shell. This plugin serves its two chrome pages per
+     * REQUEST, so a window that is already open keeps the language it was
+     * loaded with — the listener re-serves them (2026-09-16 R9 audit).
+     */
+    'pico/locale-changed'(locale: 'zh' | 'en'): void
   }
 }
 
@@ -492,6 +500,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     switchStoreForUser(user)
     startCookieHandoff()
   }
+
+  // Language switch: the two chrome pages are rendered per request, so an
+  // already-open window keeps the old language until it is re-served. Reload
+  // ONLY the chrome pages — the tab webContents (the user's browsing session)
+  // are separate views and must not be touched.
+  ctx.on('pico/locale-changed', () => { runtime.reloadChromePages() })
 
   // User switch: point new tabs at the new user's partition and swap the
   // per-user browser store (bookmarks/history/downloads/ledger), then close the

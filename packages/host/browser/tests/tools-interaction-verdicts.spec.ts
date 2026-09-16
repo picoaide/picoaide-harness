@@ -498,6 +498,11 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
     // secret set, which the refusal message must erase.
     await bound.call('browser_fill_credentials', { connectorId: 'corp' })
     navigateOnLookup = true
+    // Snapshot the DOM-write commands BEFORE the refused call: the first
+    // injection already pushed one containing `passField`, so a plain `.some()`
+    // afterwards is true either way and stops guarding the TOCTOU fence
+    // (2026-09-16 R9 audit).
+    const writesBefore = view.transport.commands.length
 
     const error = await fail(bound.call('browser_fill_credentials', { connectorId: 'corp' }))
     expect(error.code).toBe('policy')
@@ -506,7 +511,16 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
     expect(error.message).not.toContain(secret)
     expect(error.message).not.toContain('ZZTOP')
     expect(error.message).toContain('****')
-    expect(view.transport.commands.some((command) => String(command.params?.['expression'] ?? '').includes('passField'))).toBe(true)
+    // The refused call must not have written the credential into the page: no
+    // NEW command may carry the fill expression.
+    const writesDuringRefusal = view.transport.commands
+      .slice(writesBefore)
+      .filter((command) => String(command.params?.['expression'] ?? '').includes('passField'))
+    expect(writesDuringRefusal).toHaveLength(0)
+    // ...while the legitimate injection did write it (the probe is not vacuous).
+    expect(view.transport.commands
+      .slice(0, writesBefore)
+      .some((command) => String(command.params?.['expression'] ?? '').includes('passField'))).toBe(true)
   })
 
   it('描述文案写明站点绑定（对外契约同步）', () => {

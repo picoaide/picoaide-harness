@@ -152,4 +152,31 @@ describe('native copy added by the 2026-09-16 i18n pass', () => {
     expect(en.retry).not.toMatch(CJK)
     expect(en.lang).toBe('en')
   })
+
+  // 2026-09-16 R9 审计：i18n 那一轮只改了 announceUpdateReady 与 installUpdate 的
+  // Linux 分支，Windows/macOS 的安装对话框与「检查更新…」（托盘项已中文化）触发的
+  // 三个对话框仍是硬编码英文 —— 同一条流程从中文弹窗跳进英文弹窗。
+  it('localizes the rest of the update dialogs (install + manual check)', () => {
+    const zh = desktopUpdateDialogCopy('zh')
+    const en = desktopUpdateDialogCopy('en')
+    for (const value of [
+      zh.darwinOpenedDetail('P'), zh.winInstallDetail('P'), zh.winRestart, zh.winLater,
+      zh.checkFailedTitle('P'), zh.checkFailedMessage('P'), zh.checkFailedDetail,
+      zh.upToDateTitle('P'), zh.upToDateMessage('P'), zh.upToDateDetail('1.0.0'),
+      zh.availableTitle('P'), zh.availableMessage('1.0.0', 'P'), zh.availableDetail,
+    ]) {
+      expect(value, JSON.stringify(value)).toMatch(CJK)
+    }
+    for (const value of [
+      en.darwinOpenedDetail('P'), en.winInstallDetail('P'), en.winRestart, en.winLater,
+      en.checkFailedTitle('P'), en.checkFailedMessage('P'), en.checkFailedDetail,
+      en.upToDateTitle('P'), en.upToDateMessage('P'), en.upToDateDetail('1.0.0'),
+      en.availableTitle('P'), en.availableMessage('1.0.0', 'P'), en.availableDetail,
+    ]) {
+      expect(value, JSON.stringify(value)).not.toMatch(CJK)
+    }
+    // 产品名/版本号必须由 runtime 面传入（渠道构建下即渠道名）。
+    expect(zh.availableMessage('9.9.9', 'Acme AI')).toContain('Acme AI 9.9.9')
+    expect(en.upToDateDetail('9.9.9')).toContain('9.9.9')
+  })
 })

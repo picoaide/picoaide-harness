@@ -65,7 +65,7 @@ function optionalBoolean(value: unknown): boolean {
 
 /**
  * Host-side cron validation: the expression must parse AND have a reachable
- * next instant within the five-year horizon (a calendar-impossible schedule
+ * next instant within the eight-year horizon (a calendar-impossible schedule
  * such as `0 0 30 2 *` would otherwise produce a silently inert job).
  */
 function validCron(value: unknown): boolean {
