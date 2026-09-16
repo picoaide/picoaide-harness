@@ -427,8 +427,16 @@ export class TokenRefresher {
       read: (id: string) => Promise<ConnectorCredential | null>
       write: CredentialWriter
       target: (id: string) => OAuthTarget | null
-      /** Called after a refresh actually changed the stored credential. */
-      onRefreshed?: ((id: string, tokens: RefreshedTokens) => void) | undefined
+      /**
+       * Called after a refresh actually changed the stored credential.
+       *
+       * The third argument is the credential as **persisted** (with the store's
+       * `updatedAt`), so callers that mirror the refresh into live providers can
+       * tell "my refresh is newer than the snapshot this provider was built
+       * from" apart from "an interactive re-authorization has since replaced
+       * it" without guessing from `expiresAt`.
+       */
+      onRefreshed?: ((id: string, tokens: RefreshedTokens, persisted: ConnectorCredential) => void) | undefined
       timeoutMs?: number | undefined
       /**
        * Locale of the failure text, resolved by the caller for the request that
@@ -489,13 +497,13 @@ export class TokenRefresher {
       return { ok: false, reason: 'transient', message: hostT(locale, 'refresh.outboundBlocked', { message: error instanceof Error ? error.message : String(error) }) }
     }
     if (!outcome.ok) return outcome
-    await this.deps.write(id, {
+    const persisted = await this.deps.write(id, {
       accessToken: outcome.tokens.accessToken,
       ...(outcome.tokens.refreshToken === undefined ? {} : { refreshToken: outcome.tokens.refreshToken }),
       expiresAt: outcome.tokens.expiresAt,
       refreshedAt: Date.now(),
     })
-    this.deps.onRefreshed?.(id, outcome.tokens)
+    this.deps.onRefreshed?.(id, outcome.tokens, persisted)
     return outcome
   }
 }

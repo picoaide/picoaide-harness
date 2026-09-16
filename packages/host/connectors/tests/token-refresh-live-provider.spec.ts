@@ -129,6 +129,74 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
   }, 40_000)
 })
 
+  it('hands the rotated token to EVERY streamable-http server of one connector', async () => {
+    const server = await startRealMcpServer()
+    servers.push(server)
+    const dir = mkdtempSync(join(tmpdir(), 'live-provider-multi-'))
+    await authorizeOnce(dir, server)
+
+    const multi = def(server.origin)
+    multi.mcp = [
+      { serverName: 'moka-a', transport: 'streamable-http', url: `${server.origin}/mcp` },
+      { serverName: 'moka-b', transport: 'streamable-http', url: `${server.origin}/mcp` },
+    ]
+    const h = createHarness([multi], dir, { refreshSweepIntervalMs: 0 })
+    await waitFor(() => h.configs.length === 2, 15_000)
+    const before = h.configs.map((config) => (config as unknown as LiveConfig).authProvider?.tokens()?.refresh_token)
+    expect(before.every((token) => typeof token === 'string' && token !== ''), 'both servers should carry a token').toBe(true)
+
+    const refreshed = await callRoute(h, '/api/pico/connectors/moka/refresh', 'POST')
+    expect(refreshed.status).toBe(200)
+    const stored = await new ConnectorStore({ baseDir: dir }).readCredential('moka')
+    expect(stored?.refreshToken).not.toBe(before[0])
+
+    // BOTH transports must hold the same rotated credential. A per-connector
+    // single slot left every server but the last one on the consumed token.
+    for (const config of h.configs) {
+      expect((config as unknown as LiveConfig).authProvider?.tokens()?.refresh_token).toBe(stored?.refreshToken)
+    }
+    h.dispose()
+  }, 40_000)
+
+  it('does not resurrect a background refresh over a later re-authorization', async () => {
+    const server = await startRealMcpServer()
+    servers.push(server)
+    const dir = mkdtempSync(join(tmpdir(), 'live-provider-reauth-'))
+    await authorizeOnce(dir, server)
+
+    const h = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
+    await waitFor(() => h.configs.length === 1, 15_000)
+    const refreshed = await callRoute(h, '/api/pico/connectors/moka/refresh', 'POST')
+    expect(refreshed.status).toBe(200)
+    // The refresh itself announces the new credential, which re-registers the
+    // connector (config 2). Let that settle first so the config count below is
+    // the one caused by OUR re-authorization, not the refresh's own echo.
+    await waitFor(() => h.configs.length >= 2, 15_000)
+    const configsBefore = h.configs.length
+
+    // A user re-authorization replaces the credential with a grant whose
+    // lifetime is SHORTER than the background refresh result. `expiresAt` alone
+    // would declare the stale refresh newer and adopt it back; the store write
+    // order (`updatedAt`) is the only sound ordering.
+    const store = new ConnectorStore({ baseDir: dir })
+    const current = await store.readCredential('moka')
+    await store.updateCredential('moka', {
+      accessToken: 'at-after-reauth',
+      refreshToken: 'rt-after-reauth',
+      expiresAt: Date.now() + 1_000,
+      ...(current?.clientId === undefined ? {} : { clientId: current.clientId }),
+      refreshedAt: Date.now(),
+    })
+
+    // Production re-registration path: any credential change announces itself.
+    h.emit('pico/connector-credentials-changed', { id: 'moka' })
+    await waitFor(() => h.configs.length === configsBefore + 1, 15_000)
+    const newest = h.configs[h.configs.length - 1] as unknown as LiveConfig
+    expect(newest.authProvider?.tokens()?.refresh_token, 'the fresh grant must win').toBe('rt-after-reauth')
+    expect(newest.authProvider?.tokens()?.access_token).toBe('at-after-reauth')
+    h.dispose()
+  }, 40_000)
+
 describe('adopt() semantics', () => {
   const credential = {
     accessToken: 'access-1', refreshToken: 'refresh-1', clientId: 'client-1',

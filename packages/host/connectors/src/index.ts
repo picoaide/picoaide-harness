@@ -395,7 +395,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const mcpAuthProvider = async (
     def: ConnectorDef,
     credential: ConnectorCredential | null,
-  ): Promise<{ authProvider?: OAuthClientProvider }> => {
+  ): Promise<{ authProvider?: OAuthClientProvider; handle?: LiveProviderHandle }> => {
     const target = oauthTargetOf(def)
     if (target === null || credential?.accessToken === undefined) return {}
     // Registration must not depend on a discovery round trip: when the token is
@@ -417,9 +417,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           })
         },
       })
-      adoptLatestRefresh(def.id, handle, credential.expiresAt)
-      liveProviders.set(def.id, handle)
-      return { authProvider: handle.provider }
+      return { authProvider: handle.provider, handle }
     }
     try {
       const resolved = await resolveAuthorizationServer(
@@ -448,9 +446,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             })
         },
       })
-      adoptLatestRefresh(def.id, handle, credential.expiresAt)
-      liveProviders.set(def.id, handle)
-      return { authProvider: handle.provider }
+      return { authProvider: handle.provider, handle }
     } catch (error) {
       // A policy-blocked URL is an active redirection attempt: register
       // without the provider (the SDK will report 401 plainly) and log loudly.
@@ -460,12 +456,46 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /**
-   * Live OAuth providers keyed by connector id, so an out-of-band refresh can
-   * hand the rotated credential back to the transport that still holds the
-   * consumed one. Registration overwrites the entry: only the newest transport
-   * for an id can still be in use, and the stale handle is unreachable anyway.
+   * One live OAuth provider handle, as handed to a registered transport.
+   *
+   * `adopt` is the SDK-facing in-memory token mirror (`createOAuthProvider`).
    */
-  const liveProviders = new Map<string, { adopt: (tokens: RefreshedTokens) => void }>()
+  interface LiveProviderHandle {
+    adopt: (tokens: RefreshedTokens) => void
+  }
+
+  /**
+   * Live OAuth providers keyed by connector id, then by MCP `serverName`.
+   *
+   * A connector can register several streamable-http servers; each owns its own
+   * transport and its own provider, so a per-connector single slot would leave
+   * every server but the last one holding a consumed refresh token (the exact
+   * `invalid_grant` reuse this map exists to prevent). Handles are installed
+   * only AFTER their transport actually loaded, so a registration that was
+   * superseded — or whose plugin failed to load — can never displace the handle
+   * of the transport that is really in use.
+   */
+  const liveProviders = new Map<string, Map<string, LiveProviderHandle>>()
+
+  /** Install (or replace) the live handle of one registered server. */
+  function installLiveProvider(id: string, serverName: string, handle: LiveProviderHandle): void {
+    const byServer = liveProviders.get(id) ?? new Map<string, LiveProviderHandle>()
+    byServer.set(serverName, handle)
+    liveProviders.set(id, byServer)
+  }
+
+  /** Drop one server's handle (its transport is gone or about to be replaced). */
+  function dropLiveProvider(id: string, serverName: string): void {
+    const byServer = liveProviders.get(id)
+    if (byServer === undefined) return
+    byServer.delete(serverName)
+    if (byServer.size === 0) liveProviders.delete(id)
+  }
+
+  /** Every live handle of one connector (an out-of-band refresh fans out to all). */
+  function liveHandlesOf(id: string): Iterable<LiveProviderHandle> {
+    return liveProviders.get(id)?.values() ?? []
+  }
 
   /**
    * The most recent credential **our own** refresher produced, per connector.
@@ -475,30 +505,36 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * landing in between left the new transport holding the consumed token —
    * `onRefreshed` had no handle yet to feed, and the provider was born stale.
    * Keeping the last result lets a registration that started too early catch up
-   * before it goes live; the expiry guard makes the catch-up a no-op when the
-   * snapshot is already the newer of the two (e.g. an interactive
-   * re-authorization, which is newer than our last background refresh).
+   * before it goes live. The catch-up compares the persisted write's
+   * `updatedAt` against the snapshot's: a later interactive re-authorization
+   * (or manual credential replacement) has a larger `updatedAt` and is never
+   * overwritten, while a refresh that landed mid-registration is adopted.
    */
-  const latestRefresh = new Map<string, RefreshedTokens>()
+  const latestRefresh = new Map<string, { tokens: RefreshedTokens; updatedAt: number }>()
 
   /**
    * Bring a freshly built provider up to the newest credential we know of.
+   *
+   * The ordering predicate is the **store write** (`updatedAt`), never
+   * `expiresAt`: a server picks the lifetime, and an interactive
+   * re-authorization can legitimately produce a shorter one. An earlier
+   * background refresh must not overwrite that fresh grant; a refresh that
+   * landed while this registration was still building the provider must be
+   * adopted. `updatedAt` orders both correctly because every credential write
+   * goes through the store's exclusive read-modify-write (see ConnectorStore).
    * @param id - connector id the provider belongs to.
    * @param handle - the provider created for the current registration.
-   * @param snapshotExpiresAt - expiry of the credential that provider was built
-   *   from; the catch-up is skipped when that snapshot is already newer.
+   * @param snapshot - the credential the provider was built from.
    */
   function adoptLatestRefresh(
     id: string,
-    handle: { adopt: (tokens: RefreshedTokens) => void },
-    snapshotExpiresAt: number | undefined,
+    handle: LiveProviderHandle,
+    snapshot: ConnectorCredential | null | undefined,
   ): void {
     const latest = latestRefresh.get(id)
-    // Only when our refresh is the newer of the two: `expiresAt` advances on
-    // every grant, so an interactive re-authorization (which produced a later
-    // expiry) must not be overwritten by an earlier background refresh.
-    if (latest === undefined || latest.expiresAt <= (snapshotExpiresAt ?? 0)) return
-    handle.adopt(latest)
+    if (latest === undefined) return
+    if (latest.updatedAt <= (snapshot?.updatedAt ?? 0)) return
+    handle.adopt(latest.tokens)
   }
 
   /**
@@ -517,7 +553,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // Resolved per refresh call (a language switch must not need a restart) and
     // used for the failure text of the sweep's own refreshes.
     locale: () => locale(),
-    onRefreshed: (id, tokens) => {
+    onRefreshed: (id, tokens, persisted) => {
       // The engine just wrote the credential; mirror it so the panel shows the
       // new expiry without a disk read, then tell the rest of the host.
       setState(id, { expiresAt: tokens.expiresAt, refreshedAt: Date.now(), refreshToken: true })
@@ -528,8 +564,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // the grant, so the connector silently needs re-authorization. Feed the
       // live provider the credential we just persisted. Regression:
       // tests/token-refresh-live-provider.spec.ts.
-      latestRefresh.set(id, tokens)
-      liveProviders.get(id)?.adopt(tokens)
+      // The persisted write's `updatedAt` is what makes the catch-up in
+      // adoptLatestRefresh decide correctly against a later re-authorization.
+      latestRefresh.set(id, { tokens, updatedAt: persisted.updatedAt })
+      for (const handle of liveHandlesOf(id)) handle.adopt(tokens)
       ctx.emit('pico/connector-credentials-changed', { id })
     },
     ...(options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs }),
@@ -1096,6 +1134,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         rejected.push(copy('flow.fenceUnavailable', { serverName: server.serverName, error: httpFenceError }))
         continue
       }
+      // Resolve the provider BEFORE the superseded check below (the discovery
+      // round trip is one of the awaited windows that check exists for), but do
+      // NOT install its handle yet: installation waits until the transport has
+      // actually loaded, so a superseded registration — or one whose plugin
+      // fails to load — cannot clobber the handle that is really in use.
+      const auth = server.transport === 'streamable-http'
+        ? await mcpAuthProvider(def, credential)
+        : {}
       const config = server.transport === 'streamable-http'
         ? {
             transport: 'streamable-http' as const,
@@ -1106,7 +1152,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             // `OAuthClientProvider`, so the SDK injects the bearer token,
             // refreshes it when the server answers 401, persists the rotation
             // and retries the call. No hand-rolled fetch and no header rewriting.
-            ...(await mcpAuthProvider(def, credential)),
+            ...(auth.authProvider === undefined ? {} : { authProvider: auth.authProvider }),
             toolCallTimeoutMs: 120_000,
             failOnStartupError: false,
           }
@@ -1131,6 +1177,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // fibre BEFORE loading the new one — doing it after (the old order) made
       // every re-registration fail, and the row showed "连接失败".
       const retire = (): void => {
+        // The old transport is gone (or about to be): its handle must not keep
+        // receiving adopted tokens.
+        dropLiveProvider(def.id, server.serverName)
         const disposer = mcpDisposers.get(server.serverName)
         if (disposer === undefined) return
         try { disposer() } catch { /* teardown never throws */ }
@@ -1170,6 +1219,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         try { void fiber?.dispose?.() } catch { /* teardown never throws */ }
         return { rejected: [], superseded: true }
       }
+      // The transport loaded: THIS handle is the one an out-of-band refresh
+      // must feed now. Installing after the last superseded check closes both
+      // the "superseded registration clobbers the live handle" race and the
+      // "failed plugin leaves a dead handle" hole. The catch-up adopt follows
+      // in the same synchronous block, so a refresh that landed while the
+      // plugin was loading cannot slip between install and adopt.
+      if (auth.handle !== undefined) {
+        installLiveProvider(def.id, server.serverName, auth.handle)
+        adoptLatestRefresh(def.id, auth.handle, credential)
+      }
       // P2-23 kept: the map holds at most one disposer per server key, so the
       // fiber recorded here is the only live instance for that name.
       mcpDisposers.set(server.serverName, () => { void fiber?.dispose?.() })
@@ -1179,6 +1238,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
 
   const unregisterMcp = async (def: ConnectorDef): Promise<void> => {
     for (const server of def.mcp) {
+      dropLiveProvider(def.id, server.serverName)
       const dispose = mcpDisposers.get(server.serverName)
       if (dispose) {
         dispose()
@@ -1467,6 +1527,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // must not keep advertising the token it no longer has.
     refreshable.delete(id)
     lastAnnouncedToken.delete(id)
+    // No credential and no live transports remain (unregisterMcp dropped their
+    // handles): the cached refresh result must not be adopted by a later
+    // re-registration under a NEW authorization.
+    latestRefresh.delete(id)
+    liveProviders.delete(id)
     setState(id, {
       status: 'disconnected', everConnected: false, error: undefined, connectedAt: undefined,
       expiresAt: undefined, refreshedAt: undefined, refreshToken: undefined,
