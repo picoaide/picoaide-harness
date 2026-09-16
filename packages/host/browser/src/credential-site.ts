@@ -250,9 +250,15 @@ function looksLikeHostText(value: string, allowSingleLabel: boolean): boolean {
   const trimmed = value.trim()
   if (trimmed === '' || /\s/u.test(trimmed) || trimmed.length > 260) return false
   if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed) || trimmed.startsWith('//') || trimmed.includes('@')) return false
+  // `\` is a path separator in special URLs, so it must cut the host part too
+  // (`evil\real.com` resolves to the host `evil` — R7 audit).
+  if (trimmed.includes('\\')) return false
   const hostPort = trimmed.split(/[/?#]/u)[0] ?? ''
   const hostPart = hostPort.startsWith('[') ? hostPort : hostPort.replace(/:\d+$/u, '')
-  if (hostPart === '' || hostPart.endsWith('.')) return false
+  // `%` (percent-encoding decodes to `.` / empty labels) and the IDNA
+  // dot-equivalents (`。`/`．`/`｡`) rewrite the structure: refuse them rather
+  // than bind a host the operator did not write (R7 audit).
+  if (hostPart === '' || hostPart.endsWith('.') || /[%\u3002\uFF0E\uFF61]/u.test(hostPart)) return false
   const lower = hostPart.toLowerCase()
   // A bracketed IPv6 literal: the URL parser must echo it back unchanged.
   if (hostPart.startsWith('[')) {
@@ -298,7 +304,14 @@ function looksLikeHostText(value: string, allowSingleLabel: boolean): boolean {
   // Judge the denylist, the TLD and the reserved example domains on the ASCII /
   // IDNA form: that is the form the browser would actually resolve.
   const asciiLabels = parsed.split('.')
-  if (asciiLabels.some((label) => RESERVED_HOST_LABELS.has(label))) return false
+  // `localhost` is a real loopback NAME in the single-label branch, but as one
+  // LABEL of a dotted name it is a placeholder — `localhost.com` / `x.localhost`
+  // are registrable/rewritten hosts that must not outrank a real site URL
+  // (R7 audit: removing it from the denylist regressed exactly these).
+  if (asciiLabels.some((label) => label === 'localhost' || RESERVED_HOST_LABELS.has(label))) return false
+  // The ASCII/IDNA form must satisfy the DNS size limits too (`é`×63 + `.com`
+  // grows past 63 bytes per label).
+  if (asciiLabels.some((label) => label === '' || label.length > 63) || parsed.length > 253) return false
   const tld = asciiLabels.at(-1) ?? ''
   if (RESERVED_TLDS.has(tld)) return false
   // `example.com` / `example.org.cn` / `example.co.uk` … (RFC 2606 文档保留域):
