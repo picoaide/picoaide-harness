@@ -163,15 +163,16 @@ test('syncBuiltinSkills refuses a pre-placed symlink at the final SKILL.md landi
     mkdirSync(join(userSkills, BUILTIN), { recursive: true })
     symlinkSync(victim, join(userSkills, BUILTIN, 'SKILL.md'))
 
-    const { syncBuiltinSkills } = await import('../lib/coi/skills-sync.js')
+    const { syncBuiltinSkills, BUILTIN_SKILLS } = await import('../lib/coi/skills-sync.js')
     const results = syncBuiltinSkills(join(PKG, 'skills'), userSkills)
 
     assert.equal(readFileSync(victim, 'utf8').includes('STALE-SEED'), true, '仓外文件被内置技能正文覆盖（跟随了预置符号链接）')
     const entry = results.find((r) => r.name === BUILTIN)
     assert.notEqual(entry.action, 'synced', '落点被拒却仍报 synced 成功：调用方无法感知写穿')
     assert.equal(entry.action, 'refused')
-    // 其余内置技能不受影响（单个落点被拒不阻塞整轮同步）
-    assert.equal(results.filter((r) => r.action === 'synced').length, 3)
+    // 其余内置技能不受影响（单个落点被拒不阻塞整轮同步）。数量按清单算，
+    // 不再硬编码——上游 v26091501 新增 memory-consolidate，硬编码 3 会假红。
+    assert.equal(results.filter((r) => r.action === 'synced').length, BUILTIN_SKILLS.length - 1)
     assert.equal(existsSync(join(userSkills, BUILTIN, 'SKILL.md')), true, '拒收不得删除/改写预置链接本身')
   } finally {
     rmSync(dir, { recursive: true, force: true })

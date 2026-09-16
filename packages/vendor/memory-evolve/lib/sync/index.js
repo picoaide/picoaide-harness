@@ -104,8 +104,13 @@ export function spawnWorker(args) {
     const child = spawn(process.execPath, [SCRIPT_PATH, ...args], { stdio: ['ignore', 'pipe', 'pipe'], env })
     let stdout = ''
     let stderr = ''
-    child.stdout.on('data', (chunk) => { stdout += String(chunk) })
-    child.stderr.on('data', (chunk) => { stderr += String(chunk) })
+    // 流式解码（同 repo.js runGit 的修复）：裸 String(chunk) 逐块解码会把跨管道
+    // 分块边界的多字节字符变成 U+FFFD（worker stdout 末行是 JSON，损坏会导致
+    // 解析失败或摘要文本带替换符）。
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
     child.on('error', (error) => resolve({ ok: false, code: 1, stdout, stderr: error.message }))
     child.on('close', (code) => resolve({ ok: code === 0, code, stdout, stderr }))
   })
