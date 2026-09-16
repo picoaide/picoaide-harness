@@ -14,9 +14,15 @@ import { isValidCron, lastRunAtMs, nextRunAtMs, parseCron } from '../src/cron.ts
 function assertWithTz(tz: string, body: string): void {
   const moduleUrl = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../src/cron.ts')).href
   const script = `import assert from 'node:assert/strict'\nimport { lastRunAtMs, nextRunAtMs } from ${JSON.stringify(moduleUrl)}\n${body}`
+  // A regression in the walk can HANG (e.g. a day-cursor that stops moving).
+  // Without this inner deadline the synchronous execFileSync defeats vitest's
+  // testTimeout and the whole suite hangs until the CI job times out with no
+  // assertion message (2026-09-16 R4 audit).
   execFileSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script], {
     env: { ...process.env, TZ: tz },
     stdio: 'pipe',
+    timeout: 20_000,
+    killSignal: 'SIGKILL',
   })
 }
 
@@ -255,6 +261,18 @@ describe('按日回退游标不会因"跳日"原地打转（R9 审计）', () =>
       assert.equal(d.getDate(), 25)
       assert.equal(d.getHours(), 3)
       assert.equal(d.getDay(), 0)
+    `)
+  })
+
+  it('walks back by LOCAL days (a midnight DST day must not be skipped)', () => {
+    assertWithTz('America/Havana', `
+      // 2020-03-08 当地 00:00→01:00 跳变：若把"上一日"算成绝对 -24h，
+      // 2020-03-09 00:00 -04:00 会落到 03-07 23:00 -05:00，整个 03-08 被跳过。
+      const last = lastRunAtMs('0 3 * * 0', new Date('2020-03-15T00:30:00').getTime())
+      assert.ok(last !== undefined)
+      const d = new Date(last)
+      assert.equal(d.getDate(), 8, 'the Sunday 2020-03-08 must be found')
+      assert.equal(d.getHours(), 3)
     `)
   })
 

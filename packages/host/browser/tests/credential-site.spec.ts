@@ -204,6 +204,24 @@ describe('siteOriginFromFields', () => {
     expect(siteOriginFromFields({ server_url: 'TODO' })).toBeNull()
   })
 
+  // 2026-09-16 R5 复核：前导零的 IPv4 会被 WHATWG 按八进制重读（`010.0.0.1` →
+  // `8.0.0.1`），带点占位符与保留示例域则整个绕过"单标签否表"。
+  it('rejects normalized-away IPv4 spellings, reserved domains and dotted placeholders', () => {
+    const real = 'https://real.example'
+    for (const value of [
+      '010.0.0.1', '01.2.3.4', '1.02.3.4', '127.000.000.001', '0177.0.0.1',
+      'placeholder.com', 'your-domain.com', 'changeme.example', 'secret.com', 'host.com', 'todo.com',
+      'example.com', 'www.example.org', '0.0.0.0',
+      // A trailing dot is stripped by the gate but kept by the normalizer, so the
+      // derived origin could never equal a page origin — refuse it instead.
+      'glitchtip.corp.example.',
+    ]) {
+      expect(siteOriginFromFields({ server_url: value, homepage: real }), value).toBe(real)
+    }
+    expect(siteOriginFromFields({ server_url: 'tools.example' })).toBe('https://tools.example')
+    expect(siteOriginFromFields({ server_url: '例子.中国' })).toBe('https://xn--fsqu00a.xn--fiqs8s')
+  })
+
   it('prefers the base address key’s typed host over a camelCase flow URL', () => {
     // base 地址键上的裸主机（第 2 遍）优先于扩展拼法键上的显式 URL（第 4 遍）：
     // `callbackUrl` 是 OAuth 回调，不是连接器站点（R4 复核）。
