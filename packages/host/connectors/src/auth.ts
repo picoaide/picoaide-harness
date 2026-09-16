@@ -31,8 +31,17 @@ function authRequired(message: string): ConnectorError {
  * appearing in the error text: `OAuth 授权端点`, `OAuth token 端点` and
  * `设备授权验证地址` contain `授权`/`token`, while `MCP 端点` and the client
  * registration endpoint do not. The list below is the explicit,
- * locale-independent form of the same rule — behaviour is unchanged, and the
- * message text is no longer a contract.
+ * locale-independent form of the same rule, and the message text is no longer a
+ * contract.
+ *
+ * Two deliberate exceptions to the old rule (both yield an `error` row instead
+ * of `unauthorized`) — 2026-09-16 R3 audit, pinned by
+ * `tests/audit-r9-classification.spec.ts`:
+ *  - a network failure at the token exchange (`fetch failed`): the old rule never
+ *    matched the failure itself, only the step label;
+ *  - a malformed/null upstream body, whose V8 message ("Unexpected token '<'",
+ *    "…reading 'access_token'") happens to contain the letters `token`. A broken
+ *    upstream response is not "authorize again".
  */
 const AUTHORIZING_STEPS = new Set(['OAuth 授权端点', 'OAuth token 端点', '设备授权验证地址'])
 

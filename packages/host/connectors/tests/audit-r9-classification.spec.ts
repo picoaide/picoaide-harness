@@ -116,6 +116,83 @@ it('a server-side definition without fetchToken is a configuration error, not `u
   expect(String(row.error)).toContain('fetchToken')
 }, 20_000)
 
+it('a MALFORMED upstream body at the token exchange stays an ordinary error', async () => {
+  // The V8 message for `'<html>'.json()` contains the letters `token`
+  // ("Unexpected token '<'"), which is why the pre-i18n substring rule called
+  // this "authorize again". A broken upstream response is an ordinary error
+  // (2026-09-16 R3 audit — documented exception, pinned here).
+  const realFetch = globalThis.fetch
+  const json = (body: unknown): Response =>
+    new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = String(input)
+    if (url === 'https://mcp.example/mcp') {
+      return new Response('nope', {
+        status: 401,
+        headers: { 'www-authenticate': 'Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource"' },
+      })
+    }
+    if (url === 'https://mcp.example/.well-known/oauth-protected-resource') {
+      return json({ resource: 'https://mcp.example/mcp', authorization_servers: ['https://as.example'] })
+    }
+    if (url.startsWith('https://as.example/.well-known/oauth-authorization-server')) {
+      return json({
+        issuer: 'https://as.example',
+        authorization_endpoint: 'https://as.example/authorize',
+        token_endpoint: 'https://as.example/token',
+      })
+    }
+    if (url === 'https://as.example/token') {
+      // A 200 with an HTML body: `.json()` throws SyntaxError('Unexpected token …').
+      return new Response('<html>maintenance</html>', { status: 200, headers: { 'content-type': 'text/html' } })
+    }
+    void init
+    return await realFetch(url)
+  }) as unknown as typeof fetch
+
+  const def = {
+    id: 'probe-html',
+    name: 'probe',
+    description: 'probe',
+    authMode: 'oauth',
+    auth: {
+      discoveryUrl: 'https://mcp.example/mcp',
+      authorizeUrl: '',
+      tokenUrl: '',
+      clientId: 'c',
+      redirectUri: 'http://127.0.0.1/callback',
+      pkce: true,
+      publicClient: true,
+    },
+    mcp: [{ serverName: 'probe', streamable: false, transport: 'streamable-http', url: 'https://mcp.example/mcp' }],
+  } as unknown as ConnectorDef
+
+  try {
+    const controller = new AbortController()
+    let error: unknown
+    try {
+      await runAuth(def, {
+        signal: controller.signal,
+        locale: 'zh',
+        onRequest: (request: { authorizeUrl?: string }) => {
+          if (typeof request.authorizeUrl !== 'string') return
+          const parsed = new URL(request.authorizeUrl)
+          const redirect = parsed.searchParams.get('redirect_uri') ?? ''
+          const state = parsed.searchParams.get('state') ?? ''
+          setTimeout(() => { void realFetch(`${redirect}?state=${state}&code=THE-CODE`).catch(() => {}) }, 0)
+        },
+      })
+    } catch (cause) {
+      error = cause
+    }
+    expect(error).toBeInstanceOf(Error)
+    // SyntaxError from the body parse: no stable code, so the row stays `error`.
+    expect(connectorErrorCodeOf(error)).toBeUndefined()
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}, 20_000)
+
 it('a NETWORK failure at the token exchange stays an ordinary error', async () => {
   // 2026-09-16 R2 audit: `flowFetch` wrapped EVERY throw of an authorizing step
   // into `auth-required`, so a flaky network (undici `TypeError: fetch failed`)

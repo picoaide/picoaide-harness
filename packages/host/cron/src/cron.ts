@@ -211,11 +211,16 @@ export function lastRunAtMs(expr: string, fromMs: number): number | undefined {
     // Pacific/Apia's 2011-12-30) normalizes FORWARD, so `new Date(y, m, d - 1)`
     // can land on the day we are already on — the loop would then spin forever.
     // This runs synchronously inside a scheduler tick, so the hang would leave
-    // `tickInFlight` set and stop every job. Guard the step instead of trusting
-    // normalization (2026-09-16 R9 audit; the 8-year backwards horizon widened
-    // the reachable window, the defect itself is older).
-    const previous = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1)
-    if (previous.getTime() >= cursor.getTime()) break
+    // `tickInFlight` set and stop every job.
+    //
+    // Falling back to an absolute 24h step (instead of breaking out) keeps both
+    // properties: the walk always progresses AND every match before the skipped
+    // day is still visited — `break` was measured to drop the legitimate
+    // 2011-12-25 occurrence for `TZ=Pacific/Apia` (2026-09-16 R9/R3 audit; the
+    // 8-year backwards horizon widened the reachable window, the defect itself
+    // is older).
+    let previous = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1)
+    if (previous.getTime() >= cursor.getTime()) previous = new Date(cursor.getTime() - 86_400_000)
     cursor = previous
   }
   return undefined
