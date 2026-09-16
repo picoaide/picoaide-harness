@@ -213,13 +213,29 @@ export interface WaitForOptions {
   timeoutMs?: number | undefined
 }
 
+/** Control/turn state shared by the shell payload, the sidebar hint and the
+ * model-facing `browser_list_tabs` note (2026-09-16). */
+export interface BrowserControlState {
+  /** The user holds 我来操作 — every agent browser action is refused. */
+  controlled: boolean
+  /** An agent operation is running/queued right now. */
+  busy: boolean
+  /** Tool name behind {@link busy} ('' when idle). */
+  busyTool: string
+  /**
+   * True once an agent action was actually refused because the user holds
+   * control: the AI is waiting for 「交给 AI」. Cleared when control returns or
+   * the pool is cleared.
+   */
+  awaitingRelease: boolean
+  /** Tool whose call was refused ('' when nothing is waiting). */
+  awaitingReleaseTool: string
+}
+
 /** Shell/panel state projection (GET /api/pico/browser/state). */
-export interface BrowserShellState {
+export interface BrowserShellState extends BrowserControlState {
   tabs: BrowserTabState[]
   window: BrowserWindowState
-  controlled: boolean
-  busy: boolean
-  busyTool: string
   latestOp: BrowserOpLogEntry | null
   /** Overlay UI mode (capsule/panel/menu/viewer, or 'mask' while AI drives). */
   ui: { mode: OverlayMode | 'mask' }
@@ -257,6 +273,14 @@ export class BrowserRuntime {
   private readonly credentialOrigins = new Map<string, OriginCredentialRecord>()
   private readonly ops: BrowserOpLogEntry[] = []
   private opSeq = 0
+  /**
+   * Set while the AI is blocked by the user gate: the first agent browser
+   * action that was refused because the user holds 我来操作 control
+   * (2026-09-16). Non-null until control returns (`setUserControl(false)`) or
+   * the pool is cleared; surfaced through {@link controlState} so the shell,
+   * the sidebar hint and `browser_list_tabs` can all say the same thing.
+   */
+  private gateBlock: { at: number; tool: string } | null = null
   /** Redacted display paths of downloads, keyed by download id (R-5). The store
    * keeps the real on-disk path for `downloads_open`; only the model-facing
    * projection swaps this in. Bounded by {@link DOWNLOAD_DISPLAY_PATH_LIMIT}. */
@@ -325,6 +349,10 @@ export class BrowserRuntime {
     const mapped = (['tab', 'tab-meta', 'busy', 'takeover', 'release'] as const).includes(event as never)
       ? event as BrowserStreamEvent
       : 'state'
+    // 「AI 被用户闸挡住」的提示随控制权交还一起消失 —— 池子被清空（关闭浏览器、
+    // 窗口销毁、切换会话/分区、清数据）也会发 release，所以这条覆盖全部路径
+    // （2026-09-16）。
+    if (mapped === 'release') this.gateBlock = null
     if (mapped === 'busy' || mapped === 'takeover' || mapped === 'release') this.applyOverlay()
     this.emitAll(mapped)
   }
@@ -401,14 +429,26 @@ export class BrowserRuntime {
     return [...this.tabs.values()].map((tab) => this.projectTabState(tab))
   }
 
+  /**
+   * Control/turn-state projection — ONE source for the shell payload, the
+   * sidebar hint (`/state`) and the model-facing `browser_list_tabs` note.
+   */
+  controlState(): BrowserControlState {
+    return {
+      controlled: this.pool.controlled,
+      busy: this.pool.isBusy(),
+      busyTool: this.pool.busyToolOf(),
+      awaitingRelease: this.gateBlock !== null,
+      awaitingReleaseTool: this.gateBlock?.tool ?? '',
+    }
+  }
+
   shellState(): BrowserShellState {
     const tabs = [...this.tabs.values()].map((tab) => this.projectTabState(tab))
     return {
       tabs,
       window: this.windowState,
-      controlled: this.pool.controlled,
-      busy: this.pool.isBusy(),
-      busyTool: this.pool.busyToolOf(),
+      ...this.controlState(),
       latestOp: this.ops.at(-1) ?? null,
       ui: { mode: this.effectiveOverlayMode() },
     }
@@ -1375,15 +1415,38 @@ export class BrowserRuntime {
 
   private async withAgentAttribution<T>(tool: string, body: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const callerAgent = this.lastAgentId
-    return await this.pool.withOperation(tool, async () => {
-      const previous = this.lastAgentId
-      this.lastAgentId = callerAgent
-      try {
-        return await body()
-      } finally {
-        this.lastAgentId = previous
-      }
-    }, signal)
+    try {
+      return await this.pool.withOperation(tool, async () => {
+        const previous = this.lastAgentId
+        this.lastAgentId = callerAgent
+        try {
+          return await body()
+        } finally {
+          this.lastAgentId = previous
+        }
+      }, signal)
+    } catch (cause) {
+      // "用户拿着控制权"是一个**状态**，不是一次普通失败：记下来让 shell / 客户端
+      // 能提示用户去点「交给 AI」（2026-09-16 会话 88502514 的现场，AI 被静默挡住
+      // 25 分钟而界面上没有任何提示）。
+      if (cause instanceof BrowserError && cause.code === 'window-controlled') this.noteControlBlock(tool)
+      throw cause
+    }
+  }
+
+  /**
+   * Remember that an agent browser action was refused because the USER holds
+   * control (我来操作), and surface it once.
+   *
+   * 一次控制权周期只记一条 op（`gateBlock !== null` 时直接返回）：模型可能连续
+   * 重试十几次，活动面板不该被同一条原因刷屏；真正的证据是"第一次被挡住"。
+   * 状态在控制权交还（setUserControl(false)）或池子被清空时清掉。
+   */
+  private noteControlBlock(tool: string): void {
+    if (this.gateBlock !== null) return
+    this.gateBlock = { at: Date.now(), tool }
+    this.record(tool, 0, '用户正在操作浏览器（我来操作），AI 操作被挡住 —— 点「交给 AI」后继续', true)
+    this.emitAll('state')
   }
 
   // navigation family --------------------------------------------------------
@@ -2865,6 +2928,8 @@ export class BrowserRuntime {
       this.stopPendingLoads()
       this.record('browser_takeover', 0, 'user took over the browser', false, actor)
     } else {
+      // 交还控制权 = 等待结束：清掉"AI 被挡住"的提示状态（2026-09-16）。
+      this.gateBlock = null
       this.record('browser_release', 0, 'user released browser control', false, actor)
     }
   }
