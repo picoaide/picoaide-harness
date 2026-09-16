@@ -113,6 +113,23 @@ test('源码里不得再有模块级冻结语言的 LANG 常量', () => {
   assert.deepEqual(offenders, [], `模块级 LANG 常量会在加载期钉死语言：\n${offenders.join('\n')}`)
 })
 
+test('client 入口**注册**了解析器（承重接线，删掉即静默回退系统语言）', async () => {
+  // NF-A5（2026-09-16 对抗复核）：整条"跟随界面语言"链路的承重件是
+  // src/client/index.ts 里那一行 setClientLocaleResolver(() => ctx.locale…)。
+  // 删掉它，987 例曾全部照绿，而所有私有字典会静默退回 navigator.language。
+  const entry = readFileSync(join(CLIENT_ROOT, 'index.ts'), 'utf8')
+  assert.match(
+    entry,
+    /setClientLocaleResolver\(\(\) => \{?[\s\S]{0,200}?ctx\.locale\.getSnapshot\(\)\.active/u,
+    'client 入口必须把 locale 快照的 active 注册给 clientLang（否则私有字典退回系统语言）',
+  )
+  assert.match(entry, /ctx\.effect\([\s\S]{0,400}?setClientLocaleResolver\(null\)/u, '必须在 effect 清理里注销解析器')
+  // 打包产物里也必须真的有这两个符号（src 改了但没重建 bundle = 用户看不到）
+  const bundle = readFileSync(join(PACKAGE_ROOT, 'lib', 'client.js'), 'utf8')
+  assert.ok(bundle.includes('setClientLocaleResolver'), 'lib/client.js 必须已重建（含 resolver）')
+  assert.ok(bundle.includes('getSnapshot()'), 'lib/client.js 里应有 locale 快照读取')
+})
+
 test('每个私有字典文件都 import 了 clientLang', () => {
   const dictionaryFiles = [
     'CoIView.tsx',

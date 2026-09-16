@@ -51,6 +51,8 @@ const PANEL_KEYS = [
   'keyProgressiveDisclosure',
   'keyFullInjectThreshold',
   'keyFullInjectCharLimit',
+  // 2026-09-16 对抗复核 A2：key 轨分支过滤逃生口（此前只有 cordis 行 config 能改）
+  'keyBranchFilter',
 ]
 
 /** 截取 saveConfig 里 `const patch = { ... }` 那一段。 */
