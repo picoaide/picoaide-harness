@@ -485,6 +485,11 @@ export class TokenRefresher {
   private async perform(id: string, force: boolean, locale: HostLocale): Promise<RefreshOutcome> {
     const credential = await this.deps.read(id)
     if (!credential) return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.notConnected', { id }) }
+    // Snapshot the account scope at the SAME point as the credential read; the
+    // CAS below must compare against the scope this refresh started on, not the
+    // one current at write time (capturing it next to the CAS made the
+    // cross-account branch unreachable — 2026-09-16 audit R3-B).
+    const scopeAtStart = this.deps.scope?.()
     if (!force && !tokenNeedsRefresh(credential)) {
       return {
         ok: true,
@@ -521,7 +526,6 @@ export class TokenRefresher {
     }
     let persisted: ConnectorCredential
     if (this.deps.writeIfUnchanged !== undefined) {
-      const scopeAtStart = this.deps.scope?.()
       const cas = await this.deps.writeIfUnchanged(id, credential, patch)
       if (cas === null) {
         // The credential moved underfoot while the refresh was on the wire.

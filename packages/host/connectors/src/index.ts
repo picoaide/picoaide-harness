@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
-import { ConnectorStore } from './store.ts'
+import { ConnectorStore, sameCredential } from './store.ts'
 import { ConnectorError, connectorErrorCodeOf } from './connector-error.ts'
 import { hostLocaleOf, hostT, type HostCopyKey, type HostLocale } from './host-copy.ts'
 import { runAuth } from './auth.ts'
@@ -406,6 +406,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // re-establishment swaps the instance but keeps the directory, and that
     // write (e.g. a rotated refresh token) must not be dropped.
     const registrationScope = store.dir
+    // The credential snapshot this provider was built from; every SDK
+    // `saveTokens` write is compare-and-updated against it (advanced after each
+    // successful write). Without this, a 401 refresh already on the wire when
+    // the user disconnects (or re-authorizes) writes its stale result after the
+    // fact: it resurrects a deleted credential file or overwrites the newer
+    // grant (2026-09-16 audit R3-A).
+    let expected = credential
     // Registration must not depend on a discovery round trip: when the token is
     // still valid and the definition already names its token endpoint, the
     // provider can refresh on 401 through that endpoint alone (the SDK calls
@@ -420,10 +427,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         target,
         onPersist: (patch: Partial<ConnectorCredential>) => {
           if (registrationScope !== store.dir) return
-          const changed = persistAndMaybeAnnounce(def.id, patch)
-          void changed.catch((cause: unknown) => {
-            ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
-          })
+          void persistAndMaybeAnnounce(def.id, patch, expected)
+            .then((saved) => { if (saved !== null) expected = saved })
+            .catch((cause: unknown) => {
+              ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
+            })
         },
       })
       return { authProvider: handle.provider, handle }
@@ -450,8 +458,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           // next registration) would refresh with a dead grant. Never through
           // a store that a user switch has replaced in the meantime.
           if (registrationScope !== store.dir) return
-          void store.updateCredential(def.id, patch)
-            .then(() => { ctx.emit('pico/connector-credentials-changed', { id: def.id }) })
+          void store.updateCredentialIfUnchanged(def.id, expected, patch)
+            .then((saved) => {
+              if (saved === null) return
+              expected = saved
+              ctx.emit('pico/connector-credentials-changed', { id: def.id })
+            })
             .catch((cause: unknown) => {
               ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
             })
@@ -862,12 +874,20 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * the announcement idempotent: the second save changes nothing and stays quiet.
    */
   const lastAnnouncedToken = new Map<string, string>()
-  const persistAndMaybeAnnounce = async (id: string, patch: Partial<ConnectorCredential>): Promise<void> => {
+  const persistAndMaybeAnnounce = async (
+    id: string,
+    patch: Partial<ConnectorCredential>,
+    expected: ConnectorCredential,
+  ): Promise<ConnectorCredential | null> => {
     // Capture the store this save belongs to before the first await: a user
     // switch while the write is in flight must not redirect it into the next
     // user's directory (2026-09-16 audit E5).
     const target = store
     const current = await target.readCredential(id)
+    // Compare-and-update against the provider's snapshot: a disconnect (file
+    // gone) or a newer interactive re-authorization must make this stale SDK
+    // save a no-op instead of recreating/overwriting the credential.
+    if (current === null || !sameCredential(current, expected)) return null
     // A save that changes no credential material is a NO-OP. The SDK re-saves
     // tokens on every 401 handshake, and a blind write would bump `updatedAt`,
     // re-announce the connector and restart its MCP transport each time — a
@@ -877,14 +897,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const clientChanged = patch.clientId !== undefined && patch.clientId !== current?.clientId
     if (!tokenChanged && !refreshChanged && !clientChanged) {
       noteCredential(id, current)
-      return
+      return current
     }
-    const saved = await target.updateCredential(id, patch)
+    const saved = await target.updateCredentialIfUnchanged(id, expected, patch)
+    if (saved === null) return null
     noteCredential(id, saved)
     const token = saved.accessToken ?? ''
-    if (token === '' || lastAnnouncedToken.get(id) === token) return
+    if (token === '' || lastAnnouncedToken.get(id) === token) return saved
     lastAnnouncedToken.set(id, token)
     ctx.emit('pico/connector-credentials-changed', { id })
+    return saved
   }
 
   const noteCredential = (id: string, credential: ConnectorCredential | null): void => {
@@ -1624,7 +1646,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         if (stale()) return
         if (credentialUsable(def, effective)) {
           const outcome = await registerMcp(def, { signal: teardownController.signal })
-          if (stale() || outcome.superseded === true) return
+          // A newer registration for THIS connector (user pressed connect on it)
+          // only supersedes this def — the rest of the restore pass must still
+          // run. Only a real teardown/stale epoch aborts the whole loop.
+          if (stale()) return
+          if (outcome.superseded === true) continue
           if (outcome.pendingApproval !== undefined) {
             // FIX-02: an unapproved server-issued command never reaches spawn;
             // the row waits for the user's local decision.
