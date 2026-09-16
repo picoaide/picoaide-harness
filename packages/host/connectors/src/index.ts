@@ -121,6 +121,18 @@ export interface ConnectorsOptions {
    * Defaults to `REFRESH_SWEEP_INTERVAL_MS`; 0 disables the sweep (tests).
    */
   refreshSweepIntervalMs?: number
+  /**
+   * 一次扫掠的**可注入钩子**（2026-09-16，测试专用）。
+   *
+   * 为什么需要：扫掠是"后台定时器 + 真实 HTTP 往返 + 事件扇出"的组合，
+   * `audit-connectors.spec.ts` 的 PROBE A 此前靠"等下一次定时扫描"来观察
+   * 恢复，在 CI（4 vCPU、多包并发）上曾多次因调度抖动在预算内等不到
+   * （本地 12 进程压测亦复现 2/12）。把扫掠体抽成可注入的函数后，测试可以
+   * **自己驱动扫掠**，断言的是"扫掠逻辑会恢复"这个不变量，而不是调度运气。
+   * 注入的是**观察者**（拿到的是真实的扫掠函数）而不是替代实现——测试仍然
+   * 跑生产代码，只是可以主动调用它，而不必等定时器。未注入时行为与原来逐字相同。
+   */
+  onRefreshSweepReady?: (sweep: () => Promise<void>) => void
 }
 
 type JsonHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void
@@ -1473,23 +1485,33 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const intervalMs = options.refreshSweepIntervalMs ?? REFRESH_SWEEP_INTERVAL_MS
     if (intervalMs <= 0) return () => {}
     const timer = setInterval(() => {
-      void runLifecycle(async () => {
-        for (const def of defs) {
-          const state = states.get(def.id)
-          if (state?.status !== 'connected' && state?.status !== 'unauthorized') continue
-          const credential = await store.readCredential(def.id)
-          if (!credential || !tokenNeedsRefresh(credential)) continue
-          const outcome = await tokenRefresher.refresh(def.id)
-          if (!outcome.ok && outcome.reason === 'reauthorize') {
-            setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message })
-          }
-        }
-      }).catch((cause: unknown) => {
+      void runRefreshSweep().catch((cause: unknown) => {
         ctx.logger?.warn('pico-connectors: token sweep failed', cause)
       })
     }, intervalMs)
     return () => { clearInterval(timer) }
   }, 'pico connectors: token sweep')
+
+  /**
+   * 一次扫掠：把"该刷新的连接器刷一遍"串在生命周期队列里（与连接/断开互斥），
+   * 刷新失败的 `reauthorize` 落 `unauthorized`。定时器与测试注入共用这一份。
+   * @returns 扫掠完成的 Promise。
+   */
+  async function runRefreshSweep(): Promise<void> {
+    return runLifecycle(async () => {
+      for (const def of defs) {
+        const state = states.get(def.id)
+        if (state?.status !== 'connected' && state?.status !== 'unauthorized') continue
+        const credential = await store.readCredential(def.id)
+        if (!credential || !tokenNeedsRefresh(credential)) continue
+        const outcome = await tokenRefresher.refresh(def.id)
+        if (!outcome.ok && outcome.reason === 'reauthorize') {
+          setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message })
+        }
+      }
+    })
+  }
+  options.onRefreshSweepReady?.(runRefreshSweep)
 
   /**
    * A refreshed (or re-rotated) credential must reach the running MCP servers
