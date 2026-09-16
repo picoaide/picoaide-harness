@@ -141,9 +141,11 @@ function parseArgs(argv) {
  * Lines that carry a test/build verdict, across every runner this gate drives:
  * vitest (`FAIL`, `×`, `AssertionError`, `⎯ Failed Tests`, `Tests 1 failed`),
  * `node --test` (`not ok`), tsc (`error TS…`), and yarn/spawn failures
- * (`ELIFECYCLE`).
+ * (`ELIFECYCLE`). Deliberately excludes vitest's `Test Files` summary line: it
+ * matches on PASSING runs too (`Test Files 16 passed`) and used to consume the
+ * bounded verdict budget with noise.
  */
-const FAILURE_LINE = /(?:^|\s)(?:FAIL\b|not ok\b|AssertionError|ELIFECYCLE|error TS\d+|\d+\s+failed\b|Test Files\b|×|✗|⎯)/u
+const FAILURE_LINE = /(?:^|\s)(?:FAIL\b|not ok\b|AssertionError|ELIFECYCLE|error TS\d+|\d+\s+failed\b|×|✗|⎯)/u
 /** Cap on the verdict lines printed per failed task. */
 const MAX_FAILURE_LINES = 150
 /** Cap on the trailing context lines printed per failed task. */
@@ -162,13 +164,23 @@ const MAX_TAIL_LINES = 200
  * @returns the bounded report.
  */
 function summarizeFailure(output) {
-  const lines = output.split('\n')
+  // A trailing newline is a separator, not a line: keeping the empty element
+  // made exactly-(MAX_FAILURE_LINES + MAX_TAIL_LINES)-line output take the
+  // summary branch (off-by-one).
+  const body = output.endsWith('\n') ? output.slice(0, -1) : output
+  const lines = body.split('\n')
   if (lines.length <= MAX_FAILURE_LINES + MAX_TAIL_LINES) return output.trimEnd()
-  const flagged = lines.filter(line => FAILURE_LINE.test(line)).slice(0, MAX_FAILURE_LINES)
-  const tail = lines.slice(-MAX_TAIL_LINES)
+  const tailStart = Math.max(0, lines.length - MAX_TAIL_LINES)
+  const flagged = []
+  for (let index = 0; index < lines.length && flagged.length < MAX_FAILURE_LINES; index += 1) {
+    if (FAILURE_LINE.test(lines[index])) flagged.push({ index, line: lines[index] })
+  }
+  // Verdict lines already shown above are not repeated inside the tail.
+  const flaggedInTail = new Set(flagged.filter(entry => entry.index >= tailStart).map(entry => entry.index))
+  const tail = lines.slice(tailStart).filter((_, offset) => !flaggedInTail.has(tailStart + offset))
   const parts = [`(输出共 ${lines.length} 行;此处只打印判定行与末尾;完整输出用 --full-output 本地重跑)`]
   if (flagged.length > 0) {
-    parts.push(`--- 失败相关行(最多 ${MAX_FAILURE_LINES} 行,按出现顺序) ---`, ...flagged)
+    parts.push(`--- 失败相关行(最多 ${MAX_FAILURE_LINES} 行,按出现顺序) ---`, ...flagged.map(entry => entry.line))
   } else {
     parts.push('--- 未匹配到失败标记行(见下方末尾输出) ---')
   }

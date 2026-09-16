@@ -17,8 +17,8 @@
  * 现在的契约（见 `../connector-error.ts`）：
  *  1. Host 给"它自己产生、会跨到面板的错误"挂一个语言无关的 code，随状态一起
  *     下发（`errorCode` 字段，或请求响应体里的同名字段）；
- *  2. 客户端只按 code 映射；唯一的字串判据是 OS 级的 `ENOENT`（不是自然语言，
- *     任何语言下都一样）；
+ *  2. 客户端只按 code 映射；字串判据只剩 OS 级 `ENOENT`，以及**兜底顺序最末**的
+ *     一批 legacy 中文标记（旧 Host 构建/外部 CLI 仍在产出，见文件末尾注释）；
  *  3. **什么都不匹配的原始信息仍然回落到通用兜底**，信息不丢（附录在文案里）。
  */
 import { type ConnectorErrorCode } from '../connector-error.ts'
@@ -43,8 +43,16 @@ export function friendlyConnectorError(raw: string, code?: ConnectorErrorCode): 
   // Locale-independent OS-level fallback: a spawn failure for a missing binary
   // reads `ENOENT` in every language.
   if (raw.includes('ENOENT')) return t('error.commandMissing')
-  // Nothing classified this message (an older host build, another producer, an
-  // unexpected failure): keep the raw detail inside the generic wrapper rather
-  // than swallowing it.
+  // --- Legacy, code-less producers -----------------------------------------
+  // Older host builds and out-of-tree connector CLIs still emit the Chinese
+  // markers the pre-i18n classifier matched. Keep those working, but only as a
+  // LAST resort after the stable-code contract: a current producer must attach
+  // a code, because localized text is not a contract.
+  if (raw.includes('退出码')) return t('error.exitCode')
+  if (raw.includes('未找到命令')) return raw
+  if (raw.includes('下载')) return raw
+  if (raw.includes('token') || raw.includes('授权') || raw.includes('登录')) return raw
+  // Nothing classified this message (another producer, an unexpected failure):
+  // keep the raw detail inside the generic wrapper rather than swallowing it.
   return t('error.generic', { message: raw })
 }

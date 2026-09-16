@@ -77,6 +77,14 @@ describe('hostLocaleFrom', () => {
     expect(hostLocaleFrom(undefined, 'zh-CN')).toBe('zh')
   })
 
+  it('keeps looking at the header when the runtime value is unsupported or empty', () => {
+    // A half-written setting or a language pack we do not ship must not shadow
+    // the request's explicit choice.
+    expect(hostLocaleFrom({ locale: '' }, 'en-US,en;q=0.9')).toBe('en')
+    expect(hostLocaleFrom({ locale: 'ja' }, 'en-US,en;q=0.9')).toBe('en')
+    expect(hostLocaleFrom({ locale: 'ja' }, 'zh-CN')).toBe('zh')
+  })
+
   it('falls back to the product default when neither source decides', () => {
     expect(hostLocaleFrom(undefined, undefined)).toBe(DEFAULT_HOST_LOCALE)
     expect(hostLocaleFrom({ locale: 42 }, 'ja')).toBe(DEFAULT_HOST_LOCALE)
