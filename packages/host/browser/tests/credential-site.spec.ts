@@ -239,6 +239,22 @@ describe('siteOriginFromFields', () => {
     expect(siteOriginFromFields({ server_url: 'localhost:8000' })).toBe('http://localhost:8000')
   })
 
+  // 2026-09-16 R7 复核：`localhost` 只在**单标签**形态是真实回环名；作为点分名的
+  // 一级（`localhost.com` 等 8 个真实注册域、`x.localhost`）是占位符，会压过真实
+  // 站点 URL。反斜杠截断、百分号编码与 IDNA 句点同形字同样要拒。
+  it('keeps placeholder shapes of localhost and encoded hosts out of the binding', () => {
+    const real = 'https://real.example'
+    for (const value of [
+      'localhost.net', 'localhost.com', 'x.localhost', 'localhost.localdomain',
+      'evil\\real.com', '%2e%2e.com', 'a%2E%2Eb.com', 'exam。ple.com', `${'é'.repeat(63)}.com`,
+    ]) {
+      expect(siteOriginFromFields({ SERVER_URL: value, homepage: real }), value).toBe(real)
+    }
+    // 单标签回环名仍然可用（且只有它是唯一候选时）。
+    expect(siteOriginFromFields({ server_url: 'localhost:8000' })).toBe('http://localhost:8000')
+    expect(siteOriginFromFields({ server_url: 'localhost', docs: real })).toBe(real)
+  })
+
   it('prefers the base address key’s typed host over a camelCase flow URL', () => {
     // base 地址键上的裸主机（第 2 遍）优先于扩展拼法键上的显式 URL（第 4 遍）：
     // `callbackUrl` 是 OAuth 回调，不是连接器站点（R4 复核）。
