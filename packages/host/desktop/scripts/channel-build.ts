@@ -297,7 +297,7 @@ export function resolveChannelBuildContext(
  * @param context - `resolveChannelBuildContext()` 的结果。
  * @returns 追加到 electron-builder 命令行的参数。
  */
-export function channelBuilderConfigArgs(
+function channelBuilderConfigArgs(
   context: ChannelBuildContext,
   configFilePath?: string,
 ): string[] {
@@ -368,7 +368,7 @@ export function packagedProductName(buildDir?: string): string {
  * 协议 scheme）。官方构建继承任何一样都属于"官方包带上客户品牌"，比"没生效"更糟。
  * @param buildDir - `packages/host/desktop/build` 目录。
  */
-export function clearChannelResidue(buildDir: string): void {
+function clearChannelResidue(buildDir: string): void {
   rmSync(join(buildDir, 'channel.json'), { force: true })
   rmSync(join(buildDir, 'channel-electron-builder.cjs'), { force: true })
 }
@@ -482,7 +482,7 @@ function inlineChannelAssets(value: unknown, channelDir: string): Record<string,
  * @param outputPath - 写到哪里(相对仓库根或绝对路径)。
  * @returns 写出的绝对路径。
  */
-export function writeChannelBuilderConfig(context: ChannelBuildContext, outputPath: string): string {
+function writeChannelBuilderConfig(context: ChannelBuildContext, outputPath: string): string {
   if (context.official) {
     throw new Error('channel-build: 官方渠道不需要生成配置文件(不做任何覆盖)')
   }

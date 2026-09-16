@@ -28,7 +28,7 @@ import type { ConnectorDef, ConnectorMcp } from './types.ts'
 import { assertOutboundUrlAllowed, isOutboundUrlAllowed } from './outbound.ts'
 
 /** Server-name contract (matches the server-side `connectorServerNameRe`). */
-export const SERVER_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/
+const SERVER_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/
 
 /** Connector id contract (the server enforces the same shape). */
 export const CONNECTOR_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/
@@ -300,7 +300,7 @@ export function isDeniedEnvEntry(key: string, value: string): boolean {
  * @param key - environment variable name as the definition declared it.
  * @returns the name without surrounding whitespace.
  */
-export function normalizeEnvKey(key: string): string {
+function normalizeEnvKey(key: string): string {
   // 先剥"不可见格式字符"再 trim(2026-09-13 审计 R4,与 Go 侧 connectorEnvKeyNormalize
   // 逐条对齐):`\uFEFFNODE_OPTIONS` / `NODE\u200B_OPTIONS` 这类键 JS 的 trim() 只剥
   // 空白、Go 的 unicode.IsSpace 也不认 U+FEFF —— 两边口径不同就会出现"管理端保存

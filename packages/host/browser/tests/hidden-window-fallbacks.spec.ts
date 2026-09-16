@@ -247,12 +247,36 @@ describe('browser_press 与 browser_type 在隐藏窗口下同样兜底', () => 
     await runtime.open('https://a.example')
     adapter.lastWindow().visible = true
     const view = adapter.lastView()
+    // 读回（2026-09-15 审计 P3）：可见窗口下先探"谁在接收"，再发 CDP 真输入。
+    view.transport.handler = (method) => (method === 'Runtime.evaluate' ? { result: { value: 'INPUT' } } : {})
 
     await runtime.pressKey(1, 'Enter')
 
     const methods = view.transport.commands.map((c) => c.method)
     expect(methods.filter((m) => m === 'Input.dispatchKeyEvent')).toHaveLength(2)
-    expect(methods).not.toContain('Runtime.evaluate')
+    const evaluates = view.transport.commands.filter((c) => c.method === 'Runtime.evaluate')
+    expect(evaluates).toHaveLength(1)
+    expect(String(evaluates[0]?.params?.expression)).toContain('activeElement')
+    // 仍然没有 DOM 派发（可见窗口走真实输入域）
+    expect(String(evaluates[0]?.params?.expression)).not.toContain('KeyboardEvent')
+    runtime.dispose(); rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('press：可见窗口下没有可接收元素 ⇒ 记失败（不再"假成功"）', async () => {
+    const { runtime, adapter, dir } = makeRuntime()
+    await runtime.open('https://a.example')
+    adapter.lastWindow().visible = true
+    const view = adapter.lastView()
+    // 读回（P3）：activeElement 与 body 都没有 ⇒ 没有元素能接收按键。
+    view.transport.handler = (method, params) => {
+      if (method !== 'Runtime.evaluate') return {}
+      return String(params?.['expression'] ?? '').includes('activeElement') ? { result: { value: 'none' } } : {}
+    }
+
+    await runtime.pressKey(1, 'Enter')
+
+    expect(view.transport.commands.some((c) => c.method === 'Input.dispatchKeyEvent')).toBe(false)
+    expect(runtime.opLog.find((entry) => entry.tool === 'browser_press')?.failed).toBe(true)
     runtime.dispose(); rmSync(dir, { recursive: true, force: true })
   })
 

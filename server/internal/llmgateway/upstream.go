@@ -8,8 +8,6 @@ import (
 	"log"
 	"sync"
 	"time"
-
-	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
 // DecryptSecret decrypts an upstream API key. 默认报错(未接线即失败,
@@ -175,13 +173,6 @@ func mergeModelNames(a, b []string) []string {
 	return out
 }
 
-// MatchModels returns every enabled upstream serving modelName, in DB order.
-// Multiple candidates enable failover: when the first provider fails before
-// the first byte, the next one is tried.
-func MatchModels(db *sql.DB, modelName string) ([]Upstream, error) {
-	return MatchModelsByProtocol(db, modelName, "")
-}
-
 // MatchModelsByProtocol returns every enabled upstream serving modelName with
 // the given protocol ("" = any). This is how the Anthropic /v1/messages route
 // finds Anthropic-compatible providers only, while chat keeps OpenAI ones.
@@ -211,16 +202,4 @@ func MatchModelsByProtocol(db *sql.DB, modelName, protocol string) ([]Upstream, 
 		}
 	}
 	return out, nil
-}
-
-// MatchModel finds the first enabled upstream serving modelName, or ErrNotFound.
-func MatchModel(db *sql.DB, modelName string) (*Upstream, error) {
-	ups, err := MatchModels(db, modelName)
-	if err != nil {
-		return nil, err
-	}
-	if len(ups) == 0 {
-		return nil, serverstore.ErrNotFound
-	}
-	return &ups[0], nil
 }

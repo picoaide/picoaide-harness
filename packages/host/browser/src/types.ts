@@ -119,4 +119,10 @@ export interface BrowserToolOptions {
 export type CredentialResolver = (connectorId: string) => Promise<{ username?: string; password?: string } | null> & {
   /** Optional: list credential ids with usernames (NO secrets). */
   list?: () => Promise<Array<{ id: string; username?: string }>>
+  /**
+   * 站点绑定基准：该连接器自己的站点 origin（2026-09-15 审计 BUG-03）。
+   * `browser_fill_credentials` 注入前比对当前标签页的 origin；返回 `null` 或
+   * 能力缺席 ⇒ 拒绝注入。派生规则见 credential-site.ts，接线见 index.ts。
+   */
+  originOf?: (connectorId: string) => Promise<string | null>
 }

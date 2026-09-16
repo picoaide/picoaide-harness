@@ -149,7 +149,7 @@ func TestConnectorAdminLifecycle(t *testing.T) {
 	}
 
 	// 审计留痕。
-	logs, _ := serverstore.ListAuditLogs(db, 20)
+	logs, _, _ := serverstore.ListAuditLogsPagedFiltered(db, 0, 20, "", "")
 	actions := map[string]bool{}
 	for _, l := range logs {
 		actions[l.Action] = true

@@ -15,10 +15,10 @@
 import { DEFAULT_DEEP_LINK_SCHEME } from './desktop-channel.ts'
 
 /** Deep-link actions the desktop shell accepts. */
-export const DESKTOP_DEEP_LINK_ACTIONS = ['auth'] as const
+const DESKTOP_DEEP_LINK_ACTIONS = ['auth'] as const
 
 /** One allow-listed deep-link action. */
-export type DesktopDeepLinkAction = (typeof DESKTOP_DEEP_LINK_ACTIONS)[number]
+type DesktopDeepLinkAction = (typeof DESKTOP_DEEP_LINK_ACTIONS)[number]
 
 /** A validated deep link. */
 export interface DesktopDeepLink {

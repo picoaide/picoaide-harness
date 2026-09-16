@@ -59,12 +59,6 @@ func genTOTPSecret(accountName string) (secret, otpauthURL string, err error) {
 // 否则重放防护会让同一窗口内的第二次操作无法测试)。
 var nowFn = time.Now
 
-// totpValid 校验 6 位动态码(默认 ±1 步容差, 即 ±30s 时钟漂移容忍)。
-func totpValid(secret, code string) bool {
-	_, ok := totpStepValid(secret, code, nowFn())
-	return ok
-}
-
 // totpStepValid 返回**匹配到的时间步**(±1 步容差内)与是否有效。
 //
 // 为什么需要步号(审计 2026-09-13 P2-3):pquerna 的 Validate 只回 bool,
@@ -181,26 +175,6 @@ func createMFAChallenge(db *sql.DB, userID int64, kind, secretCipher string, ttl
 		VALUES (?, ?, ?, ?, ?)`,
 		id, userID, kind, secretCipher, time.Now().Add(ttl).UTC())
 	return id, err
-}
-
-func getMFAChallenge(db *sql.DB, id string) (*mfaChallenge, error) {
-	var m mfaChallenge
-	var expiresAt, usedAt any
-	err := db.QueryRow(`SELECT id, user_id, kind, secret, attempts, expires_at, used_at
-		FROM admin_mfa_challenges WHERE id = ?`, id).
-		Scan(&m.ID, &m.UserID, &m.Kind, &m.Secret, &m.Attempts, &expiresAt, &usedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, serverstore.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	m.ExpiresAt = parseChallengeTime(expiresAt)
-	if v, ok := usedAt.(time.Time); ok && !v.IsZero() {
-		t := v
-		m.UsedAt = &t
-	}
-	return &m, nil
 }
 
 func parseChallengeTime(v any) time.Time {

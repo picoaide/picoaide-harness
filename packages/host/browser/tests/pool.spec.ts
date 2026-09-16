@@ -160,6 +160,44 @@ describe('TabPool — quota', () => {
     await expect(pool.withOperation('browser_open', async () => 'ok')).resolves.toBe('ok')
   })
 
+  it('闸门拒绝的文案必须告诉模型怎么解开（2026-09-16）', async () => {
+    // 现场：只看到 timeout-policy 的 "tool call timed out after 30000ms"，模型
+    // 把"用户正拿着控制权"误判成页面卡死。凡是被闸门拒绝的出口，都要说清
+    // 「我来操作」/「交给 AI」这两个按钮。
+    const pool = new TabPool({ userGateTimeoutMs: 40 })
+    pool.setUserControl(true)
+    const timeout = await pool.withOperation('browser_eval', async () => 'never').catch((cause: unknown) => cause)
+    expect(String((timeout as Error).message)).toContain('交给 AI')
+    expect(String((timeout as Error).message)).toContain('我来操作')
+
+    const ctrl = new AbortController()
+    const pending = pool.withOperation('browser_click', async () => {}, ctrl.signal).catch((cause: unknown) => cause)
+    ctrl.abort()
+    const abort = await pending
+    expect((abort as BrowserError).code).toBe('window-controlled')
+    expect(String((abort as Error).message)).toContain('交给 AI')
+  })
+
+  it('清空池子同时结束"用户持有"状态（2026-09-16 P1）', () => {
+    // 池子被清空 = 关闭浏览器 / 窗口销毁 / 切换会话或分区 / 清数据。与
+    // 2026-09-15 P1-1 的会话切换修复同一口径：`controlled` 不能比池子活得久
+    // ——否则蒙版不再上锁、agent 变成静默超时，而「交给 AI」按钮随窗口一起没了。
+    const pool = new TabPool()
+    const events: string[] = []
+    pool.onChange((event) => events.push(event))
+    pool.registerTab(1, 'https://a', 'A')
+    pool.setUserControl(true)
+    expect(pool.controlled).toBe(true)
+    pool.clear()
+    expect(pool.controlled).toBe(false)
+    expect(events).toContain('release')
+    expect(pool.list()).toEqual([])
+    // 已经交还后再清空不再发 release（幂等，不制造假事件）
+    const before = events.filter((e) => e === 'release').length
+    pool.clear()
+    expect(events.filter((e) => e === 'release').length).toBe(before)
+  })
+
   it('预留令牌一次性：导航失败后的兜底释放不能把容量吃掉（2026-09-15 P0）', () => {
     // 现场形态：open() 预留 → createTabReal 里 registerTab（兑现预留）→
     // navigateInternal 抛 navigation-blocked → catch 里 removeTab，调用方再

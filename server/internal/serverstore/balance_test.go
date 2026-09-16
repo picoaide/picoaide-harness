@@ -266,7 +266,7 @@ func TestUsageDeductsActivatedBalanceOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 闸门关闭(默认):已开通用户照扣
-	if _, err := RecordUsage(db, activated, "bal-model2", 1_000_000, 0); err != nil { // 1 元
+	if _, err := RecordUsageKind(db, activated, "bal-model2", 1_000_000, 0, "chat"); err != nil { // 1 元
 		t.Fatal(err)
 	}
 	if u, _ := GetUserByID(db, activated); math.Abs(u.BalanceMoney-9) > 1e-9 {
@@ -274,7 +274,7 @@ func TestUsageDeductsActivatedBalanceOnly(t *testing.T) {
 	}
 	assertLedgerInvariant(t, db, activated)
 	// 未开通用户:不扣不记
-	if _, err := RecordUsage(db, untouched, "bal-model2", 1_000_000, 0); err != nil {
+	if _, err := RecordUsageKind(db, untouched, "bal-model2", 1_000_000, 0, "chat"); err != nil {
 		t.Fatal(err)
 	}
 	if u, _ := GetUserByID(db, untouched); u.BalanceMoney != 0 {
@@ -294,25 +294,25 @@ func TestUsageBackfillDeltaAndRefund(t *testing.T) {
 	if _, err := SetUserBalance(db, uid, 10, "", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	pend, err := RecordUsage(db, uid, "bal-model3", 0, 0) // pending, cost 0
+	pend, err := RecordUsageKind(db, uid, "bal-model3", 0, 0, "chat") // pending, cost 0
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := UpdateUsageTokens(db, pend, 1_000_000, 0); err != nil { // 1 元
+	if err := UpdateUsageTokensCachedEstimatedOverdraft(db, pend, 1_000_000, 0, 0, false); err != nil { // 1 元
 		t.Fatal(err)
 	}
 	if u, _ := GetUserByID(db, uid); math.Abs(u.BalanceMoney-9) > 1e-9 {
 		t.Fatalf("after backfill = %v, want 9", u.BalanceMoney)
 	}
 	// 重复回填同一结果:不再扣
-	if err := UpdateUsageTokens(db, pend, 1_000_000, 0); err != nil {
+	if err := UpdateUsageTokensCachedEstimatedOverdraft(db, pend, 1_000_000, 0, 0, false); err != nil {
 		t.Fatal(err)
 	}
 	if u, _ := GetUserByID(db, uid); math.Abs(u.BalanceMoney-9) > 1e-9 {
 		t.Fatalf("重复回填重复扣款: %v, want 9", u.BalanceMoney)
 	}
 	// 向下修正(估算回填 100 万 → 真实 50 万):回补 0.5 元
-	if err := UpdateUsageTokens(db, pend, 500_000, 0); err != nil {
+	if err := UpdateUsageTokensCachedEstimatedOverdraft(db, pend, 500_000, 0, 0, false); err != nil {
 		t.Fatal(err)
 	}
 	if u, _ := GetUserByID(db, uid); math.Abs(u.BalanceMoney-9.5) > 1e-9 {
@@ -351,12 +351,12 @@ func TestNegativeTokensDoNotRefund(t *testing.T) {
 		t.Fatalf("RecordUsageKind(负 token): %v", err)
 	}
 	// 2) pending 行 + 负 token 回填(流式 chat / Anthropic messages)
-	pend, err := RecordUsage(db, uid, "neg-model", 0, 0)
+	pend, err := RecordUsageKind(db, uid, "neg-model", 0, 0, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := UpdateUsageTokens(db, pend, -1_000_000, -1_000_000); err != nil {
-		t.Fatalf("UpdateUsageTokens(负 token): %v", err)
+	if err := UpdateUsageTokensCachedEstimatedOverdraft(db, pend, -1_000_000, -1_000_000, 0, false); err != nil {
+		t.Fatalf("UpdateUsageTokensCachedEstimatedOverdraft(负 token): %v", err)
 	}
 
 	u, err := GetUserByID(db, uid)
@@ -410,7 +410,7 @@ func TestConcurrentUsageCannotOverdraft(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			_, errs[i] = RecordUsage(db, uid, "od-model", 1_000_000, 0)
+			_, errs[i] = RecordUsageKind(db, uid, "od-model", 1_000_000, 0, "chat")
 		}(i)
 	}
 	close(start)
@@ -452,7 +452,7 @@ func TestConcurrentUsageCannotOverdraft(t *testing.T) {
 
 	// 未开通账户(余额 0 + 有费用)语义是"不扣不记",不得被当成余额不足。
 	off := mustBalanceUser(t, db, "od-off-user")
-	if _, err := RecordUsage(db, off, "od-model", 1_000_000, 0); err != nil {
+	if _, err := RecordUsageKind(db, off, "od-model", 1_000_000, 0, "chat"); err != nil {
 		t.Fatalf("未开通账户被误判为余额不足: %v", err)
 	}
 	if sum, _ := BalanceLedgerSum(db, off); sum != 0 {
@@ -470,12 +470,12 @@ func TestBackfillCannotOverdraft(t *testing.T) {
 	if _, err := SetUserBalance(db, uid, 0.5, "", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	pend, err := RecordUsage(db, uid, "bf-model", 0, 0) // pending,cost 0
+	pend, err := RecordUsageKind(db, uid, "bf-model", 0, 0, "chat") // pending,cost 0
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 回填 1 元 > 余额 0.5 元 → 余额不足
-	if err := UpdateUsageTokens(db, pend, 1_000_000, 0); !errors.Is(err, ErrInsufficientBalance) {
+	if err := updateUsageTokensAt(db, pend, 1_000_000, 0, time.Now()); !errors.Is(err, ErrInsufficientBalance) {
 		t.Fatalf("err = %v, want ErrInsufficientBalance", err)
 	}
 	u, err := GetUserByID(db, uid)
@@ -507,18 +507,18 @@ func TestRefundStillAppliesOnLegacyNegativeBalance(t *testing.T) {
 	if _, err := SetUserBalance(db, uid, 10, "", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	pend, err := RecordUsage(db, uid, "rf-model", 0, 0)
+	pend, err := RecordUsageKind(db, uid, "rf-model", 0, 0, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := UpdateUsageTokens(db, pend, 1_000_000, 0); err != nil { // 扣 1 元
+	if err := updateUsageTokensAt(db, pend, 1_000_000, 0, time.Now()); err != nil { // 扣 1 元
 		t.Fatal(err)
 	}
 	// 模拟修复前遗留的透支余额(生产库可能存在欠款账户)
 	if _, err := db.Exec(`UPDATE users SET balance_money = -5 WHERE id = ?`, uid); err != nil {
 		t.Fatal(err)
 	}
-	if err := UpdateUsageTokens(db, pend, 500_000, 0); err != nil { // 费用下调 → 回补 0.5
+	if err := updateUsageTokensAt(db, pend, 500_000, 0, time.Now()); err != nil { // 费用下调 → 回补 0.5
 		t.Fatalf("欠款账户回补被下限卡住: %v", err)
 	}
 	u, err := GetUserByID(db, uid)
@@ -529,7 +529,7 @@ func TestRefundStillAppliesOnLegacyNegativeBalance(t *testing.T) {
 		t.Fatalf("余额 = %v, want -4.5(负差额回补必须生效)", u.BalanceMoney)
 	}
 	// 欠款状态下新的消费仍被拒绝(不得继续加深欠款)
-	if _, err := RecordUsage(db, uid, "rf-model", 1_000_000, 0); !errors.Is(err, ErrInsufficientBalance) {
+	if _, err := RecordUsageKind(db, uid, "rf-model", 1_000_000, 0, "chat"); !errors.Is(err, ErrInsufficientBalance) {
 		t.Fatalf("欠款账户继续消费: err = %v, want ErrInsufficientBalance", err)
 	}
 }

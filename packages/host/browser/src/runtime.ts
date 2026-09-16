@@ -19,6 +19,7 @@ import { BrowserStore, stripSensitiveText, stripSensitiveUrl, type DownloadEntry
 import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
 import { SENSITIVE_KEY_PATTERN, isExactProseSensitiveKey } from './sensitive.ts'
 import { browserError, BrowserError, type BrowserErrorCode } from './errors.ts'
+import { httpOriginOf } from './credential-site.ts'
 import { isFrameOrderProblem, orderFramesByDom, frameOrderErrorMessage, SRCDOC_URL, type FrameCandidate, type FrameOrderProblem } from './frames.ts'
 import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
@@ -212,13 +213,29 @@ export interface WaitForOptions {
   timeoutMs?: number | undefined
 }
 
+/** Control/turn state shared by the shell payload, the sidebar hint and the
+ * model-facing `browser_list_tabs` note (2026-09-16). */
+export interface BrowserControlState {
+  /** The user holds 我来操作 — every agent browser action is refused. */
+  controlled: boolean
+  /** An agent operation is running/queued right now. */
+  busy: boolean
+  /** Tool name behind {@link busy} ('' when idle). */
+  busyTool: string
+  /**
+   * True once an agent action was actually refused because the user holds
+   * control: the AI is waiting for 「交给 AI」. Cleared when control returns or
+   * the pool is cleared.
+   */
+  awaitingRelease: boolean
+  /** Tool whose call was refused ('' when nothing is waiting). */
+  awaitingReleaseTool: string
+}
+
 /** Shell/panel state projection (GET /api/pico/browser/state). */
-export interface BrowserShellState {
+export interface BrowserShellState extends BrowserControlState {
   tabs: BrowserTabState[]
   window: BrowserWindowState
-  controlled: boolean
-  busy: boolean
-  busyTool: string
   latestOp: BrowserOpLogEntry | null
   /** Overlay UI mode (capsule/panel/menu/viewer, or 'mask' while AI drives). */
   ui: { mode: OverlayMode | 'mask' }
@@ -256,6 +273,14 @@ export class BrowserRuntime {
   private readonly credentialOrigins = new Map<string, OriginCredentialRecord>()
   private readonly ops: BrowserOpLogEntry[] = []
   private opSeq = 0
+  /**
+   * Set while the AI is blocked by the user gate: the first agent browser
+   * action that was refused because the user holds 我来操作 control
+   * (2026-09-16). Non-null until control returns (`setUserControl(false)`) or
+   * the pool is cleared; surfaced through {@link controlState} so the shell,
+   * the sidebar hint and `browser_list_tabs` can all say the same thing.
+   */
+  private gateBlock: { at: number; tool: string } | null = null
   /** Redacted display paths of downloads, keyed by download id (R-5). The store
    * keeps the real on-disk path for `downloads_open`; only the model-facing
    * projection swaps this in. Bounded by {@link DOWNLOAD_DISPLAY_PATH_LIMIT}. */
@@ -324,6 +349,10 @@ export class BrowserRuntime {
     const mapped = (['tab', 'tab-meta', 'busy', 'takeover', 'release'] as const).includes(event as never)
       ? event as BrowserStreamEvent
       : 'state'
+    // 「AI 被用户闸挡住」的提示随控制权交还一起消失 —— 池子被清空（关闭浏览器、
+    // 窗口销毁、切换会话/分区、清数据）也会发 release，所以这条覆盖全部路径
+    // （2026-09-16）。
+    if (mapped === 'release') this.gateBlock = null
     if (mapped === 'busy' || mapped === 'takeover' || mapped === 'release') this.applyOverlay()
     this.emitAll(mapped)
   }
@@ -400,14 +429,26 @@ export class BrowserRuntime {
     return [...this.tabs.values()].map((tab) => this.projectTabState(tab))
   }
 
+  /**
+   * Control/turn-state projection — ONE source for the shell payload, the
+   * sidebar hint (`/state`) and the model-facing `browser_list_tabs` note.
+   */
+  controlState(): BrowserControlState {
+    return {
+      controlled: this.pool.controlled,
+      busy: this.pool.isBusy(),
+      busyTool: this.pool.busyToolOf(),
+      awaitingRelease: this.gateBlock !== null,
+      awaitingReleaseTool: this.gateBlock?.tool ?? '',
+    }
+  }
+
   shellState(): BrowserShellState {
     const tabs = [...this.tabs.values()].map((tab) => this.projectTabState(tab))
     return {
       tabs,
       window: this.windowState,
-      controlled: this.pool.controlled,
-      busy: this.pool.isBusy(),
-      busyTool: this.pool.busyToolOf(),
+      ...this.controlState(),
       latestOp: this.ops.at(-1) ?? null,
       ui: { mode: this.effectiveOverlayMode() },
     }
@@ -1374,15 +1415,38 @@ export class BrowserRuntime {
 
   private async withAgentAttribution<T>(tool: string, body: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const callerAgent = this.lastAgentId
-    return await this.pool.withOperation(tool, async () => {
-      const previous = this.lastAgentId
-      this.lastAgentId = callerAgent
-      try {
-        return await body()
-      } finally {
-        this.lastAgentId = previous
-      }
-    }, signal)
+    try {
+      return await this.pool.withOperation(tool, async () => {
+        const previous = this.lastAgentId
+        this.lastAgentId = callerAgent
+        try {
+          return await body()
+        } finally {
+          this.lastAgentId = previous
+        }
+      }, signal)
+    } catch (cause) {
+      // "用户拿着控制权"是一个**状态**，不是一次普通失败：记下来让 shell / 客户端
+      // 能提示用户去点「交给 AI」（2026-09-16 会话 88502514 的现场，AI 被静默挡住
+      // 25 分钟而界面上没有任何提示）。
+      if (cause instanceof BrowserError && cause.code === 'window-controlled') this.noteControlBlock(tool)
+      throw cause
+    }
+  }
+
+  /**
+   * Remember that an agent browser action was refused because the USER holds
+   * control (我来操作), and surface it once.
+   *
+   * 一次控制权周期只记一条 op（`gateBlock !== null` 时直接返回）：模型可能连续
+   * 重试十几次，活动面板不该被同一条原因刷屏；真正的证据是"第一次被挡住"。
+   * 状态在控制权交还（setUserControl(false)）或池子被清空时清掉。
+   */
+  private noteControlBlock(tool: string): void {
+    if (this.gateBlock !== null) return
+    this.gateBlock = { at: Date.now(), tool }
+    this.record(tool, 0, '用户正在操作浏览器（我来操作），AI 操作被挡住 —— 点「交给 AI」后继续', true)
+    this.emitAll('state')
   }
 
   // navigation family --------------------------------------------------------
@@ -1505,6 +1569,9 @@ export class BrowserRuntime {
       if (wc.isDestroyed()) return
       wc.reload()
       await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
+      // BUG-05：用户在一次已在跑的 reload 期间点「我来操作」时，旧实现照样把
+      // 结果记成成功；接管必须让长操作中止（与 navigate/eval/wait_for 同口径）。
+      if (!user) this.assertAgentStillAllowed('browser_reload')
       this.updateTabState(tab)
       this.record('browser_reload', tabId, `reload tab ${tabId}`, false, user ? 'user' : 'ai')
     }
@@ -1519,6 +1586,7 @@ export class BrowserRuntime {
       if (wc.isDestroyed()) return
       wc.goBack()
       await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
+      if (!user) this.assertAgentStillAllowed('browser_go_back')
       this.updateTabState(tab)
       this.record('browser_go_back', tabId, `back to ${tab.url}`, false, user ? 'user' : 'ai')
     }
@@ -1533,6 +1601,7 @@ export class BrowserRuntime {
       if (wc.isDestroyed()) return
       wc.goForward()
       await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
+      if (!user) this.assertAgentStillAllowed('browser_go_forward')
       this.updateTabState(tab)
       this.record('browser_go_forward', tabId, `forward to ${tab.url}`, false, user ? 'user' : 'ai')
     }
@@ -1727,6 +1796,9 @@ export class BrowserRuntime {
           this.record('browser_screenshot', resolved, 'refused: credential window open', true)
           throw browserError('policy', CREDENTIAL_WINDOW_SCREENSHOT_REFUSAL)
         }
+        // BUG-05：接管检查与凭证窗口同一临界区（队列之后、真正的捕获之前），
+        // 用户在这张图排队/渲染期间接管时不该把图交给模型。
+        this.assertAgentStillAllowed('browser_screenshot')
         let primary: string
         try {
           return await withScreenshotBudget(
@@ -1761,7 +1833,9 @@ export class BrowserRuntime {
       // decision inside the capture path) is NOT a capture failure: rethrowing
       // it unchanged keeps `code: 'policy'` and its actionable text instead of
       // rewriting both into the generic "screenshot failed" wrapper (R7).
-      if (cause instanceof BrowserError && cause.code === 'policy') throw cause
+      // `window-controlled`（BUG-05 的接管检查点）同理：把"用户接管了"包装成
+      // "截图失败"会让模型以为重试就能拿到图。
+      if (cause instanceof BrowserError && (cause.code === 'policy' || cause.code === 'window-controlled')) throw cause
       // An empty capture (hidden window / background tab / zero-sized view)
       // must be a visible failure, never a silent 0-byte "screenshot" (P2-31).
       const message = cause instanceof Error ? cause.message : String(cause)
@@ -1770,6 +1844,9 @@ export class BrowserRuntime {
         `browser: screenshot failed — ${message}; the tab must be able to render (open the 浏览器 window if it is closed, then retry)`,
       )
     }
+    // 截图完成后再确认一次接管状态：用户在这张图渲染期间点「我来操作」时，不该
+    // 把画面交给模型（与 navigate 的"接管压过加载结果"同口径）。
+    this.assertAgentStillAllowed('browser_screenshot')
     this.record('browser_screenshot', resolved, 'screenshot captured')
     return data
   }
@@ -2385,12 +2462,35 @@ export class BrowserRuntime {
     } catch { /* best effort */ }
   }
 
+  /**
+   * 只读判定：文档里有没有能接收按键的元素（`document.activeElement`，退回
+   * `body`）。隐藏窗口路径一直有这个判定，可见窗口路径没有 —— 工具描述对外
+   * 承诺的 "no element able to receive the key ⇒ not-found" 因此只对一半路径
+   * 成立（2026-09-15 审计 P3）。
+   * @returns 命中的标签名，或 `null`（文档里没有可接收目标）。
+   */
+  private async keyReceivableTarget(tab: BrowserTab): Promise<string | null> {
+    const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
+      expression: '(() => { const el = document.activeElement ?? document.body; return el ? String(el.tagName || "unknown") : "none"; })()',
+      returnByValue: true,
+    })
+    const value = result.result?.value
+    return typeof value === 'string' && value !== 'none' ? value : null
+  }
+
   async pressKey(tabId: number, key: string, signal?: AbortSignal): Promise<void> {
     const resolved = this.resolveTab(tabId)
     await this.agentRun('browser_press', async () => {
       const tab = this.tab(resolved)
       const code = KEY_CODES[key] ?? key
       const vk = KEY_VK[key] ?? 0
+      const target = await this.keyReceivableTarget(tab)
+      if (target === null) {
+        // 与隐藏窗口路径同一出口：记失败，由工具层的 assertNoFailedOp 统一报
+        // not-found（消息里带 "not delivered"），不在 runtime 里另造一套文案。
+        this.record('browser_press', resolved, `press ${key} — no element able to receive the key`, true)
+        return
+      }
       // 2026-09-12：与 browser_click 同源。键盘事件也属输入域，隐藏窗口下协议层接受、
       // 页面收不到（真机自检报告把 browser_press 记成"返回成功"，但没有验证效果）。
       if (this.windowCanReceiveInput()) {
@@ -2400,7 +2500,8 @@ export class BrowserRuntime {
         await tab.cdp.send('Input.dispatchKeyEvent', {
           type: 'keyUp', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk,
         })
-        this.record('browser_press', resolved, `press ${key}`)
+        // 可见窗口同样要有读回：先把"谁在接收"读出来再记成功（P3）。
+        this.record('browser_press', resolved, `press ${key} → ${target}`)
         return
       }
       const outcome = await this.dispatchKeyViaDom(tab, key, code, vk)
@@ -2486,15 +2587,21 @@ export class BrowserRuntime {
     const resolved = this.resolveTab(tabId)
     await this.agentRun('browser_scroll', async () => {
       const tab = this.tab(resolved)
-      const expression = selector === undefined || selector === ''
+      const targeted = selector !== undefined && selector !== ''
+      const expression = !targeted
         ? `window.scrollBy({ top: ${Math.round(deltaY)}, behavior: 'instant' }); 'ok'`
         : `(() => { const el = document.querySelector(${JSON.stringify(String(selector))}); if (!el) return 'not found'; el.scrollIntoView({ block: 'center' }); return 'ok'; })()`
-      await tab.cdp.send('Runtime.evaluate', { expression, returnByValue: true })
+      const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', { expression, returnByValue: true })
+      // 页内判定必须回传（2026-09-15 审计残留）：旧实现丢掉返回值，选择器没命中
+      // 也报成功，模型以为已经滚到了目标位置。
+      if (targeted && result.result?.value === 'not found') {
+        throw this.interactionError(tab, 'not-found', `browser: scroll target not found — ${String(selector)}`)
+      }
     }, signal)
     this.record('browser_scroll', resolved, selector === undefined || selector === '' ? `scroll ${Math.round(deltaY)}px` : `scroll to ${selector}`)
   }
 
-  async fillCredentials(tabId: number, connectorId: string, signal?: AbortSignal): Promise<{ username: boolean; password: boolean }> {
+  async fillCredentials(tabId: number, connectorId: string, signal?: AbortSignal, expectedOrigin?: string): Promise<{ username: boolean; password: boolean }> {
     if (this.credentials === undefined) {
       throw browserError('policy', 'browser: credential injection is not available in this deployment')
     }
@@ -2505,6 +2612,12 @@ export class BrowserRuntime {
     const resolved = this.resolveTab(tabId)
     const outcome = await this.agentRun('browser_fill_credentials', async () => {
       const tab = this.tab(resolved)
+      // TOCTOU 收口（2026-09-15 复核）：工具层的站点绑定检查发生在排队之前，注入
+      // 发生在拿到全局互斥之后 —— 中间标签页可以导航走。写入 DOM 之前用**同一个**
+      // expectedOrigin 再比一次。
+      if (expectedOrigin !== undefined && httpOriginOf(tab.url) !== expectedOrigin) {
+        throw browserError('policy', `browser_fill_credentials refused: the tab left ${expectedOrigin} before the injection ran (now ${tab.url}); credentials are only injected into their own site`)
+      }
       const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
         expression: `
           (() => {
@@ -2560,8 +2673,19 @@ export class BrowserRuntime {
     return outcome
   }
 
-  /** Fill a form by field name/label/placeholder (batch). */
-  async fillForm(tabId: number, fields: Array<{ field: string; value: string }>, submit: boolean, signal?: AbortSignal): Promise<{ filled: number; submitted: boolean }> {
+  /**
+   * Fill a form by field name/label/placeholder (batch).
+   *
+   * 2026-09-15 审计 BUG-04：
+   *  - 写入走**原生 setter + 读回**（与 {@link insertTextViaDom} 同一形状）：
+   *    旧实现直接 `el.value = v` 就 `filled++`，React 受控组件会把赋值丢掉，
+   *    工具却报告"已填 N 个字段"；未知的 `<select>` 选项也被算作已填。
+   *  - 提交目标是**所填字段所属的 form**（`el.form`），不是
+   *    `document.querySelector('form')`（页面上第一个 form 往往是搜索框）：
+   *    多表单页面会误提交无关表单。目标不唯一/不存在/没有提交控件时明确失败。
+   *  - `missed` 把逐字段结果回给模型（没匹配上、或写了但读回不一致）。
+   */
+  async fillForm(tabId: number, fields: Array<{ field: string; value: string }>, submit: boolean, signal?: AbortSignal): Promise<{ filled: number; submitted: boolean; missed: string[] }> {
     const resolved = this.resolveTab(tabId)
     const outcome = await this.agentRun('browser_fill_form', async () => {
       const tab = this.tab(resolved)
@@ -2569,13 +2693,38 @@ export class BrowserRuntime {
         expression: `
           (() => {
             const fields = ${JSON.stringify(fields.map((f) => ({ field: f.field, value: f.value })))};
-            const set = (el, value) => {
-              el.value = value;
+            const lower = (s) => String(s || '').toLowerCase();
+            const truthy = (v) => ['1', 'true', 'yes', 'on', 'y', 'checked'].includes(String(v).trim().toLowerCase());
+            const writeValue = (el, value) => {
+              const type = lower(el.type);
+              const proto = Object.getPrototypeOf(el);
+              if (type === 'checkbox' || type === 'radio') {
+                const next = truthy(value);
+                const descriptor = Object.getOwnPropertyDescriptor(proto, 'checked');
+                try {
+                  if (descriptor && typeof descriptor.set === 'function') descriptor.set.call(el, next);
+                  else el.checked = next;
+                } catch { return { ok: false, readBack: '' }; }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return { ok: el.checked === next, readBack: String(el.checked) };
+              }
+              // 受控组件（React 等）会拦截实例上的 value 赋值：走原型上的原生
+              // setter，再读回校验，避免"填了但页面没变"被记成成功。
+              const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+              try {
+                if (descriptor && typeof descriptor.set === 'function') descriptor.set.call(el, String(value));
+                else if (typeof el.value === 'string') el.value = String(value);
+                else return { ok: false, readBack: '' };
+              } catch { return { ok: false, readBack: '' }; }
               el.dispatchEvent(new Event('input', { bubbles: true }));
               el.dispatchEvent(new Event('change', { bubbles: true }));
+              const readBack = typeof el.value === 'string' ? el.value : '';
+              return { ok: readBack === String(value), readBack };
             };
             let filled = 0;
-            const lower = (s) => String(s || '').toLowerCase();
+            const missed = [];
+            const targets = new Set();
             for (const f of fields) {
               const key = lower(f.field);
               const candidates = [...document.querySelectorAll('input, select, textarea')];
@@ -2585,31 +2734,47 @@ export class BrowserRuntime {
                 const label = c.closest('label');
                 return label && lower(label.textContent).includes(key);
               });
-              if (!el) continue;
-              set(el, f.value);
+              if (!el) { missed.push(f.field); continue; }
+              const outcome = writeValue(el, f.value);
+              if (!outcome.ok) { missed.push(f.field); continue; }
               filled++;
+              const form = el.form || el.closest('form');
+              if (form) targets.add(form);
             }
             let submitted = false;
-            ${submit ? `
-            const form = document.querySelector('form');
-            if (form) {
-              const btn = [form.querySelector('button[type=submit]'), form.querySelector('input[type=submit]')].find(Boolean);
-              if (btn) { btn.click(); submitted = true; }
-              else { form.requestSubmit(); submitted = true; }
+            let submitError = '';
+            if (${JSON.stringify(submit)}) {
+              if (targets.size === 0) submitError = 'the filled fields are not inside a form';
+              else if (targets.size > 1) submitError = 'the filled fields belong to ' + targets.size + ' different forms, so the target is ambiguous';
+              else {
+                const form = [...targets][0];
+                const btn = [form.querySelector('button[type=submit]'), form.querySelector('input[type=submit]')].find(Boolean);
+                try {
+                  if (btn) { btn.click(); submitted = true; }
+                  else if (typeof form.requestSubmit === 'function') { form.requestSubmit(); submitted = true; }
+                  else submitError = 'the target form has no submit control';
+                } catch (cause) { submitError = String((cause && cause.message) || cause); }
+              }
             }
-            ` : ''}
-            return { filled, submitted };
+            return { filled, submitted, missed, submitError };
           })()
         `,
         returnByValue: true,
       })
-      const value = result.result?.value as { filled?: number; submitted?: boolean } | undefined
-      if (value === undefined || (value.filled ?? 0) === 0) {
-        throw browserError('not-found', 'browser: no matching form fields found')
+      const value = result.result?.value as { filled?: number; submitted?: boolean; missed?: string[]; submitError?: string } | undefined
+      const filled = value?.filled ?? 0
+      const missed = Array.isArray(value?.missed) ? value!.missed! : []
+      if (filled === 0) {
+        throw browserError('not-found', `browser: no matching form fields found${missed.length === 0 ? '' : ` (unmatched: ${missed.join(', ')})`}`)
       }
-      return { filled: value.filled ?? 0, submitted: value.submitted === true }
+      if (submit && value?.submitted !== true) {
+        // 提交失败必须显式：旧实现静默 submitted=false，模型以为已经提交，
+        // 后续动作全都基于一个没发生的页面跳转。
+        throw browserError('not-found', `browser: filled ${filled} field(s) but did not submit — ${value?.submitError || 'unknown reason'}; click the real submit control with browser_click instead`)
+      }
+      return { filled, submitted: value?.submitted === true, missed }
     }, signal)
-    this.record('browser_fill_form', resolved, `fill form (${outcome.filled} fields${outcome.submitted ? ', submitted' : ''})`)
+    this.record('browser_fill_form', resolved, `fill form (${outcome.filled} fields${outcome.missed.length > 0 ? `, unmatched: ${outcome.missed.join(', ')}` : ''}${outcome.submitted ? ', submitted' : ''})`)
     return outcome
   }
 
@@ -2763,6 +2928,8 @@ export class BrowserRuntime {
       this.stopPendingLoads()
       this.record('browser_takeover', 0, 'user took over the browser', false, actor)
     } else {
+      // 交还控制权 = 等待结束：清掉"AI 被挡住"的提示状态（2026-09-16）。
+      this.gateBlock = null
       this.record('browser_release', 0, 'user released browser control', false, actor)
     }
   }
@@ -3198,7 +3365,7 @@ function maskBrowserSummary(summary: string): string {
  * shipped`, `Ref "abc123" noted`: R-4 closed that last residual by requiring a
  * credential key name in front of a bracket/quote before it counts as a value).
  */
-export const MIN_EMBEDDED_SECRET_LENGTH = 8
+const MIN_EMBEDDED_SECRET_LENGTH = 8
 
 /** Characters that make a short occurrence look like a *value* on its left, on
  * their own: `key=value`, `key: value`, `user:pass@host`. */

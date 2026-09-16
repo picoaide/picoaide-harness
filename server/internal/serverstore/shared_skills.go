@@ -122,8 +122,20 @@ func ListSharedSkills(db *sql.DB, status string) ([]SharedSkill, error) {
 }
 
 // ListVisibleSharedSkills 员工可见清单:approved 且已授权 + 自己上传的全部状态。
+//
+// P2-1(审计 2026-09-13,技能侧补齐 2026-09-15):App 级下架(apps.enabled=0)在
+// 员工面等同于不存在——智能体侧 ListVisibleAgentPresets 早已按 EnabledAppIDs
+// 过滤,技能侧当时漏了,于是两面的"下架"语义不一致(员工仍能列出并下载已下架
+// 的技能)。上架集合一次批量取回,不逐行查 apps。
+//
+// 门禁:internal/capabilities 的 TestSkillLifecycleUploadApproveInstall 第 5 步
+// 与 TestSkillLifecycleDisabledParityWithAgents 会在这条被摘掉时变红。
 func ListVisibleSharedSkills(db *sql.DB, author string, granted []string) ([]SharedSkill, error) {
 	list, err := orgSkillReleases(db, "")
+	if err != nil {
+		return nil, err
+	}
+	enabled, err := EnabledAppIDs(db, AppKindSkill)
 	if err != nil {
 		return nil, err
 	}
@@ -133,6 +145,9 @@ func ListVisibleSharedSkills(db *sql.DB, author string, granted []string) ([]Sha
 	}
 	out := []SharedSkill{}
 	for _, r := range list {
+		if !enabled[r.AppID] {
+			continue
+		}
 		if r.Publisher == author || (r.Status == ReleaseStatusApproved && ok[r.AppID]) {
 			out = append(out, releaseToShared(r))
 		}
@@ -155,11 +170,6 @@ func IncrementSharedSkillDownload(db *sql.DB, name, version string) (bool, error
 		return false, err
 	}
 	return true, nil
-}
-
-// SetSharedSkillStatus 审核(只改状态位,不碰内容)。
-func SetSharedSkillStatus(db *sql.DB, name, version string, status SharedSkillStatus, reason string) error {
-	return SetReleaseStatus(db, AppKindSkill, name, version, string(status), reason)
 }
 
 // DeleteSharedSkill 删除一个版本 = 软删(版本号永久占位,不可复用)。
@@ -229,20 +239,6 @@ func CreateSharedSkill(db *sql.DB, s *SharedSkill) (int64, error) {
 		return 0, ErrDuplicate
 	}
 	return id, err
-}
-
-// CreateSharedSkillCapped 同上,附带每作者待审配额(超出返回 ErrTooManyPending)。
-func CreateSharedSkillCapped(db *sql.DB, s *SharedSkill, pendingCap int) (int64, error) {
-	if pendingCap > 0 {
-		n, err := PendingReleaseCount(db, s.Author)
-		if err != nil {
-			return 0, err
-		}
-		if n >= pendingCap {
-			return 0, ErrTooManyPending
-		}
-	}
-	return CreateSharedSkill(db, s)
 }
 
 // SetSharedSkillArchive 覆盖某版本的归档。

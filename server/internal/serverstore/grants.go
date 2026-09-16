@@ -78,13 +78,6 @@ func AccessibleSkillNames(db *sql.DB, username string, groups []string) ([]strin
 	return AccessibleAppIDs(db, "skill", username, groups)
 }
 
-// DeleteSkillGrants removes all grants of a skill (resource deletion
-// cascades; old grants must never resurrect a re-created resource).
-func DeleteSkillGrants(db queryer, skillName string) error {
-	_, err := db.Exec("DELETE FROM app_grants WHERE kind = 'skill' AND app_id = ?", skillName)
-	return err
-}
-
 // ---------------------------------------------------------------------------
 // 共享技能/Agent 授权(0036):与 skill_grants 同模型,资源按 name 授权。
 // 表名/资源列是编译期常量(grantTable),无用户输入拼接。
@@ -273,10 +266,4 @@ func ReplaceSkillGroupGrants(db *sql.DB, skillName string, groups []string) erro
 			return err
 		},
 		groups)
-}
-
-// DeleteAppGrants 清空某 App 的全部授权(资源删除级联; 授权不可复活已删资源)。
-func DeleteAppGrants(db queryer, kind, appID string) error {
-	_, err := db.Exec("DELETE FROM app_grants WHERE kind = ? AND app_id = ?", kind, appID)
-	return err
 }

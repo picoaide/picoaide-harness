@@ -118,7 +118,7 @@ function pkce(): { verifier: string; challenge: string } {
  * 刻意不含厂商品牌：仓库里不留任何品牌描述，渠道化时由渠道包注入自己的名字
  * （客户在自家 IdP 的授权同意页上应该看到自己公司的产品名）。
  */
-export const DEFAULT_OAUTH_CLIENT_NAME = 'Enterprise AI Connector'
+const DEFAULT_OAUTH_CLIENT_NAME = 'Enterprise AI Connector'
 
 /** RFC 7591 dynamic client registration; returns the issued client id. */
 async function registerClient(
@@ -254,7 +254,12 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   // clicked cancel stayed parked on the socket.
   const flowOutbound = flowOutboundOptions(options)
   const discovered = auth.discoveryUrl ? await discoverMcpOAuth(auth.discoveryUrl, flowOutbound) : undefined
-  if (discovered?.publicMcp) return { updatedAt: Date.now() } as Partial<ConnectorCredential>
+  // The endpoint is public: no token is issued, but the successful discovery is
+  // itself the result and must be persisted. Without the `publicMcp` marker a
+  // restart could not tell this credential apart from a half-finished one
+  // (credentialUsable demands an accessToken for oauth connectors) and every
+  // tool vanished until the user manually reconnected (2026-09-15 audit).
+  if (discovered?.publicMcp) return { updatedAt: Date.now(), publicMcp: true } satisfies Partial<ConnectorCredential>
   const callbackHost = options.callbackHost ?? '127.0.0.1'
   const { verifier, challenge } = pkce()
   // RFC 6749 §10.12: bind the loopback callback to this flow. A callback

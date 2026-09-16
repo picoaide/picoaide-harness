@@ -27,7 +27,7 @@ func TestAuditHashChain(t *testing.T) {
 		t.Fatalf("chain verify: id=%d err=%v", id, err)
 	}
 	// 读回最新条的 hash
-	logs, _, err := ListAuditLogsPaged(db, 0, 10)
+	logs, _, err := ListAuditLogsPagedFiltered(db, 0, 10, "", "")
 	if err != nil || len(logs) < 3 {
 		t.Fatalf("list: %v %d", err, len(logs))
 	}

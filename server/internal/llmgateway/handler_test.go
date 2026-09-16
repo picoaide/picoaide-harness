@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -613,22 +612,31 @@ func TestDecryptSecretHookUsedByLoadUpstreams(t *testing.T) {
 	}
 }
 
-func TestMatchModel(t *testing.T) {
+func TestMatchModelByProtocol(t *testing.T) {
 	db, cleanup := serverstore.NewTestDB(t)
 	defer cleanup()
 	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models) VALUES ('a', 'http://a', 'k', '["m1","m2"]'), ('b', 'http://b', 'k', '["m3"]')`); err != nil {
 		t.Fatal(err)
 	}
 
-	up, err := MatchModel(db, "m2")
+	// 生产解析入口是协议版（MatchModels/MatchModel 这对无协议包装已删除）。
+	ups, err := MatchModelsByProtocol(db, "m2", "openai")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if up.Name != "a" || up.BaseURL != "http://a" {
-		t.Fatalf("upstream = %+v", up)
+	if len(ups) != 1 || ups[0].Name != "a" || ups[0].BaseURL != "http://a" {
+		t.Fatalf("upstreams = %+v", ups)
 	}
-	if _, err := MatchModel(db, "nope"); !errors.Is(err, serverstore.ErrNotFound) {
-		t.Fatalf("expected ErrNotFound, got %v", err)
+	// 未知模型:协议版是"集合"语义 —— 匹配不到返回**空集合 + nil error**
+	// (旧 MatchModel 返回 ErrNotFound),由生产调用方统一转 404:
+	// handler.go 的 `len(ups) == 0` 分支(HTTP 侧回归见 TestProxyModelNotFound /
+	// TestMessagesModelNotFound)。这里断言的是生产契约本身。
+	none, err := MatchModelsByProtocol(db, "nope", "openai")
+	if err != nil {
+		t.Fatalf("unknown model: %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("unknown model matched %+v, want none", none)
 	}
 }
 
@@ -695,7 +703,7 @@ func TestProxyStreamBackfilledThenDisconnectKeepsUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	usageID, err := serverstore.RecordUsage(db, uid, "deepseek-chat", 0, 0)
+	usageID, err := serverstore.RecordUsageKind(db, uid, "deepseek-chat", 0, 0, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}

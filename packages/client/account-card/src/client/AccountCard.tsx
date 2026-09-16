@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { t } from './locales.ts'
+import { formatMoney } from './money.ts'
 import type { UsagePayload } from '../usage-contract.ts'
 
 /** `/api/pico/auth/state` body (enterprise auth-gate). */
@@ -168,20 +169,6 @@ const RAIL_BUTTON: React.CSSProperties = {
 /** Initials: first character of the username, uppercased. */
 function initial(username: string | undefined): string {
   return (username ?? '?').slice(0, 1).toUpperCase()
-}
-
-/** Format a money amount using the active UI locale (currency is CNY). */
-function formatMoney(value: number): string {
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency: 'CNY',
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(value)
-  } catch {
-    return `¥${value.toFixed(2)}`
-  }
 }
 
 /** Guard: value is a finite number (excludes null/undefined/NaN/Infinity). */

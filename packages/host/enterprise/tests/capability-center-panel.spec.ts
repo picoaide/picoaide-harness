@@ -4,6 +4,7 @@ import {
   compareVersions,
   hasUpdateFor,
   installEndpoint,
+  itemsForTab,
   latestApprovedVersionByName,
   mergeItems,
   uninstallEndpoint,
@@ -173,5 +174,22 @@ describe('0059 official & score fields', () => {
     // 编译期保证: quality 只接受 '' | 'featured'
     const item: CapabilityItem = { ...base, quality: 'featured' }
     expect(item.quality).toBe('featured')
+  })
+})
+
+describe('itemsForTab（卡片唯一位置，2026-08-25 定案 / 2026-09-15 抽成纯函数）', () => {
+  const rows = [
+    { kind: 'skill' as const, name: 'local-draft', source: 'local', installed: false },
+    { kind: 'skill' as const, name: 'org-shared', source: 'org', installed: false },
+    { kind: 'skill' as const, name: 'org-installed', source: 'org', installed: true },
+    { kind: 'skill' as const, name: 'market-skill', source: 'market', installed: false },
+  ]
+
+  it('「市场」只放来源条目（本地创作不重复出现）', () => {
+    expect(itemsForTab(rows, 'market').map(i => i.name)).toEqual(['org-shared', 'org-installed', 'market-skill'])
+  })
+
+  it('「我的」放本地创作 + 已安装的来源条目（本地卡只管上传，安装动作在来源卡）', () => {
+    expect(itemsForTab(rows, 'mine').map(i => i.name)).toEqual(['local-draft', 'org-installed'])
   })
 })

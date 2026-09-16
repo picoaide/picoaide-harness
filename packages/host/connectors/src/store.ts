@@ -1,6 +1,7 @@
 /** Per-user connector credential store under the product home. */
 
 import { promises as fs } from 'node:fs'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, join, resolve } from 'node:path'
 import { userScopePath } from './user-scope.ts'
@@ -8,6 +9,30 @@ import { userScopePath } from './user-scope.ts'
 const DIRECTORY_MODE = 0o700
 const FILE_MODE = 0o600
 const MAX_CREDENTIAL_BYTES = 64 * 1024
+
+/**
+ * 凭据结构比对（唯一实现）：写后补偿用它判断"盘上还是不是我写的那一份"。
+ * 逐字段比，不做 JSON 字符串比较——那会受键序影响而漏判。
+ */
+export function sameCredential(a: ConnectorCredential, b: ConnectorCredential): boolean {
+  // 规范化：键排序 + **长度前缀**（纯 `k=v` 用 NUL 连接时，值里含 NUL 会让两份不同
+  // 凭据判成相同 —— 2026-09-15 第三轮复核给出的反例：{a:'x',b:'y'} 与
+  // {a:'x\u0000b=y'}。长度前缀让拼接无歧义）。
+  const fields = (value: ConnectorCredential): string =>
+    Object.entries(value.fields ?? {})
+      .sort(([x], [y]) => x.localeCompare(y))
+      .map(([k, v]) => `${String(k.length)}:${k}=${String(v.length)}:${v}`)
+      .join('|')
+  return a.updatedAt === b.updatedAt
+    && a.accessToken === b.accessToken
+    && a.refreshToken === b.refreshToken
+    && a.clientId === b.clientId
+    && a.clientSecret === b.clientSecret
+    && a.expiresAt === b.expiresAt
+    && a.refreshedAt === b.refreshedAt
+    && a.publicMcp === b.publicMcp
+    && fields(a) === fields(b)
+}
 
 /**
  * Connector ids come from marketplace-derived definitions, so they are
@@ -37,6 +62,14 @@ export interface ConnectorCredential {
   expiresAt?: number
   /** When the last successful token refresh happened (epoch ms). */
   refreshedAt?: number
+  /**
+   * The MCP endpoint answered without an authorization challenge during
+   * discovery (spec 2025-06-18 "public" server), so no token exists or is ever
+   * issued. Persisted so a restart can tell "no credential needed" apart from
+   * "authorization pending": without the marker the oauth-mode check demanded
+   * an accessToken and the connector silently disappeared from every restart.
+   */
+  publicMcp?: boolean
   updatedAt: number
 }
 
@@ -109,6 +142,10 @@ export class ConnectorStore {
   }
 
   async writeCredential(id: string, credential: ConnectorCredential): Promise<void> {
+    await this.exclusive(() => this.writeCredentialUnlocked(id, credential))
+  }
+
+  private async writeCredentialUnlocked(id: string, credential: ConnectorCredential): Promise<void> {
     await ensurePrivateDirectory(this.dir)
     const file = this.path(id)
     const temporary = join(this.dir, `.${basename(file)}.${process.pid}.${randomUUID()}.tmp`)
@@ -130,18 +167,69 @@ export class ConnectorStore {
   }
 
   async updateCredential(id: string, patch: Partial<ConnectorCredential>): Promise<ConnectorCredential> {
-    const current = (await this.readCredential(id)) ?? { updatedAt: 0 }
-    const next: ConnectorCredential = { ...current, ...patch, updatedAt: Date.now() }
-    await this.writeCredential(id, next)
-    return next
+    // 读-改-写必须在同一段独占区里：否则两个并发 update 会互相覆盖（写后补偿的
+    // 复核把这条竞态也一并暴露出来）。
+    return await this.exclusive(async () => {
+      const current = (await this.readCredential(id)) ?? { updatedAt: 0 }
+      const next: ConnectorCredential = { ...current, ...patch, updatedAt: Date.now() }
+      await this.writeCredentialUnlocked(id, next)
+      return next
+    })
   }
 
   async clearCredential(id: string): Promise<void> {
+    await this.exclusive(() => this.clearCredentialUnlocked(id))
+  }
+
+  private async clearCredentialUnlocked(id: string): Promise<void> {
     try {
       await fs.unlink(this.path(id))
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause
     }
+  }
+
+  /**
+   * 原子 compare-and-delete（2026-09-15 复核实测的"读→清"竞态）。
+   *
+   * 场景：写后补偿原先在 store 外面做 `readCredential → 比对 → clearCredential`，
+   * 读与清之间没有任何原子性 —— 更新的写入若恰好落在这个窗口里，就会被旧补偿
+   * **删掉**（不是覆盖，是消失；用户新提交的凭据静默丢失、下次启动不上线）。
+   * 把比较与删除放进同一段独占区，窗口即关闭。
+   *
+   * 并发边界（认账）：独占区是**本实例**的（同一进程内），跨进程写入不在保护范围；
+   * 产品里连接器凭据只有本插件写，故此处足够。
+   * @returns 真的删掉了返回 true；磁盘内容已经被别的写入换掉时返回 false。
+   */
+  async clearCredentialIfUnchanged(id: string, expected: ConnectorCredential): Promise<boolean> {
+    return await this.exclusive(async () => {
+      const current = await this.readCredential(id)
+      if (current === null || !sameCredential(current, expected)) return false
+      await this.clearCredentialUnlocked(id)
+      return true
+    })
+  }
+
+  /** 进程内串行化：凭据的读-改-写与比较-删除都排在同一条链上。 */
+  private chain: Promise<unknown> = Promise.resolve()
+  /**
+   * 独占区**非重入**（2026-09-15 第三轮复核）：在独占任务里再调用公开写方法
+   * （`writeCredential`/`updateCredential`/`clearCredential`/`clearCredentialIfUnchanged`）
+   * 会排到自己后面，凭据链路**无声挂死**（无报错、无超时）。内部实现一律用
+   * `*Unlocked` 变体；这里用 AsyncLocalStorage 把误用变成显式异常 —— 并发的
+   * 外部调用者不在同一 async 上下文里，不受影响。
+   */
+  private static readonly exclusiveScope = new AsyncLocalStorage<true>()
+  private async exclusive<T>(task: () => Promise<T>): Promise<T> {
+    if (ConnectorStore.exclusiveScope.getStore() === true) {
+      throw new Error('ConnectorStore: exclusive section is not re-entrant — use the *Unlocked internals')
+    }
+    const run = this.chain.then(
+      () => ConnectorStore.exclusiveScope.run(true, task),
+      () => ConnectorStore.exclusiveScope.run(true, task),
+    )
+    this.chain = run.then(() => undefined, () => undefined)
+    return await run
   }
 
   async hasCredential(id: string): Promise<boolean> {

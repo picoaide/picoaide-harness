@@ -110,7 +110,7 @@ const DEFAULTS = {
  * byte-identical (the `?`/`/` prefixes are not part of the key pattern).
  * Exported so the runtime op-log mask (`runtime.ts maskBrowserSummary`) reuses
  * this single implementation instead of keeping a second one (P1-5). */
-export function maskSensitiveFragment(fragment: string): string {
+function maskSensitiveFragment(fragment: string): string {
   const body = fragment.startsWith('#') ? fragment.slice(1) : fragment
   if (body === '' || !body.includes('=')) return fragment
   // 线性扫描替换(CodeQL js/polynomial-redos):原正则 /([^&#=?]+)=([^&]*)/gu
@@ -308,7 +308,7 @@ export function maskSensitiveKeyValueText(raw: string): string {
  * op-log/tab-title 路径都走它），第二份实现必然漂移——R-4 的教训。把差别放在
  * 同一个扫描器的词表档位上，行为只有一处可改。
  */
-export function maskSensitiveFreeText(raw: string): string {
+function maskSensitiveFreeText(raw: string): string {
   return scanKeyValueText(raw, 'text')
 }
 

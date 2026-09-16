@@ -11,6 +11,7 @@
 
 import { browserError } from './errors.ts'
 import type { BrowserError } from './errors.ts'
+import { USER_GATE_TIMEOUT_MS } from './budgets.ts'
 
 /** One tab's registry metadata (shell rendering + persistence). */
 export interface PoolTabMeta {
@@ -34,11 +35,17 @@ export interface PoolOptions {
   /** Quota wait budget ms (default 60000). */
   waitTimeoutMs?: number
   /**
-   * 用户接管（「我来操作」）后，agent 操作等待交还的上限（ms，缺省 300000）。
+   * 用户接管（「我来操作」）后，agent 操作等待交还的上限（ms，缺省
+   * {@link USER_GATE_TIMEOUT_MS}）。
    *
    * 2026-09-15 审计 P0-1：暂停本身是产品意图（"人操作时 loop 暂停"），但**无限期**
    * 等待会让模型回合永远挂着、无任何可见原因，用户只能手动停止回合。超时以明确
    * 错误结束这次工具调用（**不抢控制权**），让模型与客户端都能看到发生了什么。
+   *
+   * 2026-09-16（客户会话 session-88502514）：缺省值原本是 300s，**比浏览器工具的
+   * 30s 预算还长**——于是这条明确错误永远来不及送达，模型只看到 timeout-policy 的
+   * `tool call timed out after 30000ms`，把"用户正拿着控制权"误判成页面卡死。缺省值
+   * 现在取自 budgets.ts，并且必须始终小于工具预算。
    */
   userGateTimeoutMs?: number
 }
@@ -54,11 +61,20 @@ export interface TabReservation {
   readonly id: number
 }
 
-export const POOL_DEFAULTS = {
+const POOL_DEFAULTS = {
   maxTabs: 16,
-  userGateTimeoutMs: 300_000,
+  userGateTimeoutMs: USER_GATE_TIMEOUT_MS,
   waitTimeoutMs: 60_000,
 } as const
+
+/**
+ * 用户持有控制权时，agent 调用被拒的统一文案（模型面）：必须说清**怎么解开**。
+ *
+ * 2026-09-16 现场（会话 session-88502514）：模型只看到 `tool call timed out after
+ * 30000ms`，既不知道是用户拿着控制权，也没有"请用户点交给 AI"的指令，于是把
+ * 浏览器判成卡死、连试十几次，最后绕道用户自己的 Chrome 取数。
+ */
+const GATE_REFUSAL = '用户正在操作浏览器（我来操作）—— 请在浏览器窗口点「交给 AI」交还控制权后重试'
 
 interface QueueTicket {
   resolve: () => void
@@ -90,14 +106,15 @@ class PoolMutex {
       const gateStartedAt = Date.now()
       while (gate()) {
         if (signal !== undefined && signal.aborted) {
-          throw browserError('window-controlled', 'browser: agent was stopped while you control the browser')
+          throw browserError('window-controlled', `${GATE_REFUSAL}（这次调用已被停止）`)
         }
         // 2026-09-15 审计 P0-1：用户接管后不能无限期挂住模型回合。
+        // 2026-09-16：预算必须短于工具预算，否则这段文案永远到不了模型面前。
         if (gateBudgetMs > 0 && Date.now() - gateStartedAt >= gateBudgetMs) {
           const seconds = Math.round(gateBudgetMs / 1000)
           throw browserError(
             'window-controlled',
-            `browser: 等待用户交还浏览器超时（${String(seconds)}s）—— 用户点「交给 AI」后可重试`,
+            `browser: 等待用户交还浏览器超时（${String(seconds)}s）—— ${GATE_REFUSAL}`,
           )
         }
         await sleep(120)
@@ -115,7 +132,7 @@ class PoolMutex {
 function raceAbort(promise: Promise<void>, gate: () => boolean, signal?: AbortSignal): Promise<void> {
   if (signal === undefined) return promise
   const abortError = (): BrowserError => gate()
-    ? browserError('window-controlled', 'browser: agent was stopped while you control the browser')
+    ? browserError('window-controlled', `browser: ${GATE_REFUSAL}（这次调用已被停止）`)
     : browserError('interrupted', 'browser: operation aborted while queued')
   if (signal.aborted) return Promise.reject(abortError())
   return new Promise<void>((resolve, reject) => {
@@ -395,6 +412,14 @@ export class TabPool {
   }
 
   clear(): void {
+    // 池子没了 = 没人"持有"这个浏览器了（2026-09-16 P1）。
+    //
+    // 关闭浏览器（用户路径）、窗口被销毁、切换会话/分区、清数据都会走到这里；
+    // 与 2026-09-15 P1-1 修的会话切换路径同一口径：结束"用户持有"状态只走
+    // setUserControl（会发 release，蒙版/胶囊/客户端提示据此复位）。不复位的话
+    // `controlled` 会永久为 true：蒙版不再上锁、用户闸对 agent 变成静默超时，
+    // 而唯一的「交给 AI」按钮随窗口一起没了。
+    this.setUserControl(false)
     this.tabs.clear()
     this.pendingIds.clear()
     this.activeTabId = undefined

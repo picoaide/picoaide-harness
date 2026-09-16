@@ -34,7 +34,7 @@ func TestLeadVerifyOverdraftExploitChain(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-gate
-			_, results[i] = RecordUsage(db, uid, "lead-od", 1_000_000, 0)
+			_, results[i] = RecordUsageKind(db, uid, "lead-od", 1_000_000, 0, "chat")
 		}(i)
 	}
 	close(gate)
@@ -92,7 +92,7 @@ func TestLeadVerifyNegativeTokenNoRefund(t *testing.T) {
 	}
 
 	// 上游回报负 token（原利用链：prompt=-1000000, completion=-1000000）
-	if _, err := RecordUsage(db, uid, "lead-neg", -1_000_000, -1_000_000); err != nil {
+	if _, err := RecordUsageKind(db, uid, "lead-neg", -1_000_000, -1_000_000, "chat"); err != nil {
 		t.Fatalf("负 token 的 usage 记录不应报错（应被钳到 0 成本）: %v", err)
 	}
 

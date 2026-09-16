@@ -16,11 +16,10 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { BrowserRuntime, type WaitForOptions } from './runtime.ts'
 import { browserError } from './errors.ts'
+import { httpOriginOf } from './credential-site.ts'
 import { snapshotNote } from './snapshot.ts'
+import { BROWSER_TOOL_TIMEOUT_MS } from './budgets.ts'
 import type { BrowserWaitUntil } from './types.ts'
-
-/** Cooperative tool-call timeout budget for every browser tool (ms). */
-const BROWSER_TOOL_TIMEOUT_MS = 30_000
 
 /** Valid waitUntil values for navigation tools. */
 const WAIT_UNTILS: readonly BrowserWaitUntil[] = ['domcontentloaded', 'load', 'networkidle']
@@ -32,7 +31,7 @@ const BROWSER_GUIDANCE = `You have an embedded browser shared with the user. Rul
 1. Start with browser_open (url optional), then browser_navigate. browser_get_snapshot lists numbered interactable elements; target them by number or CSS selector.
 2. After navigation or any page change, take a fresh snapshot — pages re-render and renumber.
 3. browser_screenshot only for visual confirmation; snapshots/text are cheaper. browser_eval runs one expression (a heuristic guardrail rejects statements/assignments and eval/Function; fetch/XHR and any page JS are allowed) and returns its resolved value — promise results are awaited.
-4. The user may take over at any time (按钮: 我来操作). Your queued actions then wait; only the user gives control back (交给 AI) — never ask for it back, there is no tool for that, so do not fight the user.
+4. The user may take over at any time (按钮: 我来操作). Your queued actions then wait; only the user gives control back (交给 AI) — never ask for it back, there is no tool for that, so do not fight the user. While the user holds control your browser actions fail with '用户正在操作浏览器' / '等待用户交还浏览器超时': that is NOT a broken page — ask the user to press 交给 AI in the browser window, then retry (browser_list_tabs reports the same state).
 5. Use wait_for before acting on dynamic pages (SPAs) instead of sleeping.
 6. Bookmarks/history/downloads are shared with the user; save important pages with bookmarks_add; check your results via downloads_list (paths are usable by file tools).
 7. Close tabs you no longer need with browser_close_tab. Tabs are GLOBAL: every session and the user share one tab pool.`
@@ -75,42 +74,34 @@ function assertNoFailedOp(runtime: BrowserRuntime, tabId: number, tool: string, 
 }
 
 /**
- * 站点绑定（2026-09-15 审计 P2）。
+ * 站点绑定（2026-09-15 审计 BUG-03）。
  *
  * 现场：`browser_fill_credentials` 只按 connectorId 解析就把用户名/口令写进
  * **当前文档**——模型可以先把标签页开到任意站点再注入，凭据就落进了另一个
  * origin 的登录框（钓鱼页天然受益）。
  *
- * 这里在调用 runtime 之前把 `new URL(tab.url).origin` 与 connector 记录里的
- * origin 比对；不一致、或记录里根本没有可用 URL，一律拒绝并说明原因。
+ * 这里在调用 runtime 之前把 `new URL(tab.url).origin` 与 connector 的站点
+ * origin 比对；不一致、记录里没有可用 URL、或部署没提供基准，一律拒绝。
  *
- * 结构性扩展：能力挂在凭证解析器上（与既有的 `resolver.list` 同一形状：
- * `resolveCredentials.originOf = …` / `urlOf = …`），由部署侧注入（index.ts）。
- * **本轮 index.ts 冻结**，生产上还没有这个能力 ⇒ 此时维持现状、不误杀
- * （见审计报告 C3：还需 index.ts 注入 + connectors 侧暴露站点 URL 才真正生效）。
+ * 基准挂在凭证解析器上（与既有的 `resolver.list` 同一形状：
+ * `resolveCredentials.originOf = …` / `urlOf = …`），由 index.ts 注入，取值
+ * 逻辑唯一实现在 credential-site.ts（显式配置 → 凭据字段里的地址）。
  */
 interface OriginAwareCredentialResolver {
   originOf?: (connectorId: string) => Promise<string | null | undefined> | string | null | undefined
   urlOf?: (connectorId: string) => Promise<string | null | undefined> | string | null | undefined
 }
 
-/** http/https 的 origin；其它一律 `null`（`about:blank` 的 origin 是字符串
- * `"null"`，不能当成可比对的站点）。 */
-function httpOriginOf(value: string | null | undefined): string | null {
-  if (typeof value !== 'string' || value.trim() === '') return null
-  try {
-    const url = new URL(value.trim())
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : null
-  } catch {
-    return null
-  }
-}
-
 /** Refuse the injection when the tab's origin is not the connector's origin. */
-async function assertCredentialOrigin(runtime: BrowserRuntime, tabId: number, connectorId: string): Promise<void> {
+async function assertCredentialOrigin(runtime: BrowserRuntime, tabId: number, connectorId: string): Promise<string> {
   const resolver = (runtime as unknown as { credentials?: OriginAwareCredentialResolver }).credentials
   const lookup = resolver?.originOf ?? resolver?.urlOf
-  if (resolver === undefined || lookup === undefined) return
+  // fail-closed（BUG-03）：能力缺席**不再**等于"放行"。旧实现在部署没注入 origin
+  // 能力时直接 return，工具对外宣称的 SITE-BOUND 就只是文档承诺 —— 模型把标签页
+  // 开到钓鱼页即可拿到连接器凭据。现在拿不到基准就拒绝，并在错误里说明怎么登记站点。
+  if (resolver === undefined || lookup === undefined) {
+    throw browserError('policy', 'browser_fill_credentials refused: this deployment exposes no connector site URL, so the credential injection cannot be bound to an origin. Add the connector\'s site address to its stored credential fields (a base-URL field) or declare it in the browser plugin\'s credentialSites config, then retry — or type the value with browser_type instead.')
+  }
   const expected = httpOriginOf(await lookup.call(resolver, connectorId))
   if (expected === null) {
     throw browserError('policy', `browser_fill_credentials refused: the stored connector record for ${JSON.stringify(connectorId)} has no usable http(s) site URL, so the injection cannot be bound to an origin. Register the connector's site URL, or enter the value with browser_type instead.`)
@@ -122,6 +113,7 @@ async function assertCredentialOrigin(runtime: BrowserRuntime, tabId: number, co
   if (actual !== expected) {
     throw browserError('policy', `browser_fill_credentials refused: this tab is on ${actual} but connector ${JSON.stringify(connectorId)} is bound to ${expected}. Credentials are only injected into their own site — a look-alike page must not receive them; navigate the tab to ${expected} first.`)
   }
+  return expected
 }
 
 /** Result meta projection helpers. */
@@ -307,7 +299,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_list_tabs',
-    description: '[导航] List ALL tabs of the shared browser pool (every session and the user share one pool) with ids, urls, titles and the active marker.',
+    description: '[导航] List ALL tabs of the shared browser pool (every session and the user share one pool) with ids, urls, titles and the active marker. Also reports whether the USER currently holds control (我来操作): while they do, every other browser tool of yours is refused — ask the user to press 交给 AI instead of retrying.',
     parameters: {},
     output: {
       schema: {
@@ -328,6 +320,21 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
               },
             },
           },
+          // 2026-09-16：控制权状态必须对模型可见。此前只有"操作被拒"这一条出口，
+          // 而且（闸门预算比工具预算长时）连那条出口都被 timeout-policy 吞掉，
+          // 模型只能靠猜。list_tabs 是不走闸门的只读工具，是唯一任何时候都能问的
+          // "现在谁在开浏览器"。
+          control: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              controlled: { type: 'boolean', description: 'The user holds control (我来操作): your other browser tools are refused until they press 交给 AI.' },
+              busy: { type: 'boolean', description: 'A browser operation (yours or the user\'s) is running right now.' },
+              busyTool: { type: 'string', description: 'Name of the running tool (empty when idle).' },
+              awaitingRelease: { type: 'boolean', description: 'One of your browser calls was already refused because the user holds control — the user must press 交给 AI before you can continue.' },
+              awaitingReleaseTool: { type: 'string', description: 'The tool whose call was refused (empty when nothing is waiting).' },
+            },
+          },
         },
       },
       render: (_args, value) => [{ type: 'text', text: formatTabs(value) }],
@@ -341,6 +348,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       const tabs = runtime.listTabs()
       return {
         tabs: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title, loading: t.loading, active: t.visible })),
+        control: runtime.controlState(),
       }
     },
   }))
@@ -510,7 +518,17 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       submit: { type: 'boolean', description: 'Submit the enclosing form after filling (default false).' },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { filled: { type: 'integer' }, submitted: { type: 'boolean' } } },
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          filled: { type: 'integer' },
+          submitted: { type: 'boolean' },
+          // 逐字段结果（2026-09-15 审计 BUG-04）：没匹配上、或写了但读回不一致
+          // 的字段名。旧的"盲计数"让模型以为整批都填好了。
+          missed: { type: 'array', items: { type: 'string' } },
+        },
+      },
       render: (_args, value) => [{ type: 'text', text: formatFillForm(value) }],
       presentationMeta: (_args, value) => metaFrom(value),
     },
@@ -1054,8 +1072,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       noteAgent(runtime, exec.agent)
       const tabId = await tabOf(tab)
       // 2026-09-15 审计 P2：注入前先做站点绑定（见 assertCredentialOrigin）。
-      await assertCredentialOrigin(runtime, tabId, connectorId.trim())
-      return await runtime.fillCredentials(tabId, connectorId.trim(), exec.signal)
+      const expectedOrigin = await assertCredentialOrigin(runtime, tabId, connectorId.trim())
+      // 把基准带进临界区再复核一次（TOCTOU 收口）。
+      return await runtime.fillCredentials(tabId, connectorId.trim(), exec.signal, expectedOrigin)
     },
   }))
 
@@ -1172,15 +1191,33 @@ function formatText(value: unknown): string {
 }
 
 function formatTabs(value: unknown): string {
-  const v = value as { tabs?: Array<{ id: number; url: string; title: string; loading: boolean; active: boolean }> }
+  const v = value as {
+    tabs?: Array<{ id: number; url: string; title: string; loading: boolean; active: boolean }>
+    control?: { controlled?: boolean; busy?: boolean; busyTool?: string; awaitingRelease?: boolean; awaitingReleaseTool?: string }
+  }
   const tabs = v.tabs ?? []
-  if (tabs.length === 0) return 'No tabs open in this window.'
-  return tabs.map((t) => `${t.id}: ${t.title || t.url}${t.active ? ' (active)' : ''}${t.loading ? ' [loading]' : ''}`).join('\n')
+  const lines = tabs.length === 0
+    ? ['No tabs open in this window.']
+    : tabs.map((t) => `${t.id}: ${t.title || t.url}${t.active ? ' (active)' : ''}${t.loading ? ' [loading]' : ''}`)
+  // 2026-09-16：把"用户拿着控制权"直接写在模型看得到的地方（此前只有被拒的
+  // 工具调用会带这个信息，而现场那条出口被工具预算吞掉了）。
+  const control = v.control
+  if (control?.controlled === true) {
+    const blocked = control.awaitingRelease === true
+    lines.push(
+      'USER HOLDS CONTROL (我来操作): your other browser tools are refused until the user presses 交给 AI in the browser window.'
+      + (blocked
+        ? ` An earlier call was already refused${control.awaitingReleaseTool ? ` (${control.awaitingReleaseTool})` : ''} — ask the user to hand control back, do NOT retry blindly.`
+        : ''),
+    )
+  }
+  return lines.join('\n')
 }
 
 function formatFillForm(value: unknown): string {
-  const v = value as { filled?: number; submitted?: boolean }
-  return `Filled ${String(v.filled ?? 0)} field(s)${v.submitted === true ? ' and submitted the form' : ''}.`
+  const v = value as { filled?: number; submitted?: boolean; missed?: string[] }
+  const unmatched = Array.isArray(v.missed) && v.missed.length > 0 ? ` Unmatched field(s): ${v.missed.join(', ')}.` : ''
+  return `Filled ${String(v.filled ?? 0)} field(s)${v.submitted === true ? ' and submitted the form' : ''}.${unmatched}`
 }
 
 function formatWait(value: unknown): string {

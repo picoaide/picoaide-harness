@@ -11,6 +11,7 @@ import type {
 } from '../src/electron-adapter.ts'
 import type { CdpTransport } from '../src/cdp.ts'
 import { BrowserRuntime } from '../src/runtime.ts'
+import { TabPool } from '../src/pool.ts'
 import { BrowserStore } from '../src/store.ts'
 import { mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -444,6 +445,70 @@ describe('BrowserRuntime v4.2 — flat pool', () => {
     const err = await pending
     expect((err as Error & { code?: string }).code).toBe('window-controlled')
     cleanup()
+  })
+
+  it('用户闸挡住调用后上报"等待交还"状态，一次控制权周期只记一条 op（2026-09-16）', async () => {
+    // 现场（会话 session-88502514）：AI 的动作被用户闸挡住 25 分钟，模型只看到
+    // 笼统超时，界面/日志里没有任何"用户正拿着控制权"的证据。这个状态要能被
+    // shell（GET /state）、侧边栏提示和 browser_list_tabs 同时读到。
+    const adapter = new MockAdapter()
+    const dir = join(process.cwd(), 'tests', `.rt-gate-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(dir, { recursive: true })
+    const store = new BrowserStore({ dir })
+    const pool = new TabPool({ userGateTimeoutMs: 40 })
+    const runtime = new BrowserRuntime(adapter, {}, undefined, undefined, { pool, store })
+    try {
+      await runtime.open('https://a.example')
+      expect(runtime.shellState().awaitingRelease).toBe(false)
+
+      runtime.setUserControl(true, 'ai')
+      const first = await runtime.navigate(1, 'https://b.example').catch((cause: unknown) => cause)
+      expect((first as { code?: string }).code).toBe('window-controlled')
+      expect(String((first as Error).message)).toContain('交给 AI')
+
+      const state = runtime.shellState()
+      expect(state.controlled).toBe(true)
+      expect(state.awaitingRelease).toBe(true)
+      expect(state.awaitingReleaseTool).toBe('browser_navigate')
+      expect(runtime.controlState()).toMatchObject({ awaitingRelease: true, awaitingReleaseTool: 'browser_navigate' })
+
+      // 只有第一条被拒的调用进活动面板（模型重试十几次不该刷屏）
+      const blocked = runtime.opLog.filter((op) => op.summary.includes('用户正在操作浏览器'))
+      expect(blocked).toHaveLength(1)
+      expect(blocked[0]?.failed).toBe(true)
+      await runtime.navigate(1, 'https://c.example').catch(() => {})
+      expect(runtime.opLog.filter((op) => op.summary.includes('用户正在操作浏览器'))).toHaveLength(1)
+
+      // 池子被清空（关闭浏览器/窗口销毁/切换会话）同样复位"等待交还"
+      pool.clear()
+      expect(runtime.shellState().controlled).toBe(false)
+      expect(runtime.shellState().awaitingRelease).toBe(false)
+    } finally {
+      runtime.dispose()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('用户交还控制权后"等待交还"提示立刻消失（2026-09-16）', async () => {
+    const adapter = new MockAdapter()
+    const dir = join(process.cwd(), 'tests', `.rt-gate-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(dir, { recursive: true })
+    const store = new BrowserStore({ dir })
+    const runtime = new BrowserRuntime(adapter, {}, undefined, undefined, { pool: new TabPool({ userGateTimeoutMs: 40 }), store })
+    try {
+      await runtime.open('https://a.example')
+      runtime.setUserControl(true, 'ai')
+      await runtime.navigate(1, 'https://b.example').catch(() => {})
+      expect(runtime.shellState().awaitingRelease).toBe(true)
+      runtime.setUserControl(false, 'user')
+      expect(runtime.shellState().awaitingRelease).toBe(false)
+      expect(runtime.shellState().awaitingReleaseTool).toBe('')
+      // 交还后 agent 操作恢复正常（不是把池子卡死）
+      await expect(runtime.navigate(1, 'https://d.example')).resolves.toBeUndefined()
+    } finally {
+      runtime.dispose()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('user takeover aborts an in-flight waitFor (cooperative checkpoint)', async () => {

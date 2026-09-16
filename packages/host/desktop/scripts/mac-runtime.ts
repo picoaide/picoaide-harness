@@ -3,7 +3,7 @@
 import { chmodSync, existsSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
-export type MacArch = 'arm64'
+type MacArch = 'arm64'
 
 /** One required native file; `match` handles dependency-version drift. */
 export interface MacNativeEntry {

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { friendlyConnectorError, t } from './locales.ts'
+import { friendlyConnectorError } from './friendly-error.ts'
+import { t } from './locales.ts'
+import { statusLabel } from './status-label.ts'
 
 
 /**
@@ -134,14 +136,6 @@ const FILTER_BUTTON: React.CSSProperties = {
 }
 
 const FILTER_ACTIVE: React.CSSProperties = { ...FILTER_BUTTON, background: 'var(--dsw-alias-bg-layer-3)', color: 'var(--dsw-alias-label-primary)' }
-
-const statusText: Record<string, string> = {
-  disconnected: t('status.disconnected'),
-  connecting: t('status.connecting'),
-  connected: t('status.connected'),
-  unauthorized: t('status.unauthorized'),
-  error: t('status.error'),
-}
 
 // Design-token colors: adapt automatically to the light and dark themes.
 const statusColor: Record<string, string> = {
@@ -369,7 +363,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
     <div style={CARD}>
       <div style={HEAD}>
         <p style={TITLE} title={entry.name}>{entry.name}</p>
-        <p style={{ ...STATUS, color: statusColor[entry.status] ?? '#c9ccd3' }}>{statusText[entry.status] ?? entry.status}</p>
+        <p style={{ ...STATUS, color: statusColor[entry.status] ?? '#c9ccd3' }}>{statusLabel(entry.status)}</p>
       </div>
       <p style={DESC} title={entry.description}>{entry.description}</p>
 
@@ -552,16 +546,17 @@ type StatusFilter = 'all' | 'connected' | 'disconnected'
 
 export function ConnectorsList() {
   const [connectors, setConnectors] = useState<ConnectorEntry[] | null>(null)
-  const [loadError, setLoadError] = useState('')
+  // 布尔而不是字符串：文案在**渲染期**取（切语言后立刻跟随，2026-09-15 BUG-07）。
+  const [loadError, setLoadError] = useState(false)
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
 
   const refresh = useCallback((): void => {
     fetchJson<{ connectors: ConnectorEntry[] }>('/api/pico/connectors')
-      .then((data) => { setConnectors(data.connectors); setLoadError('') })
+      .then((data) => { setConnectors(data.connectors); setLoadError(false) })
       // 瞬时失败保留旧列表(不置空——旧实现把已连接卡片刷成「无连接器」
       // 空态误导用户),仅标错误态;首载失败(connectors===null)仍显示连接中。
-      .catch(() => setLoadError('刷新失败,显示上次数据'))
+      .catch(() => setLoadError(true))
   }, [])
 
   useEffect(() => {
@@ -599,7 +594,7 @@ export function ConnectorsList() {
         <button type="button" style={statusFilter === 'disconnected' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('disconnected')}>{t('filter.disconnected')}</button>
         <span style={{ ...LABEL, flex: 'none' }}>{t('filter.count', { connected: String(connectedCount), total: String(connectors.length) })}</span>
       </div>
-      {loadError !== '' && <p style={{ ...DESC, color: 'var(--dsw-alias-state-warn-label, #b45309)' }}>{loadError}</p>}
+      {loadError && <p style={{ ...DESC, color: 'var(--dsw-alias-state-warn-label, #b45309)' }}>{t('error.refreshStale')}</p>}
       {visible.length === 0 && <p style={DESC}>{t('empty.noMatch')}</p>}
       <div style={GRID}>
         {visible.map((entry) => (

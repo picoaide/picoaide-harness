@@ -26,9 +26,9 @@ export const SIDEBAR_AUTO_COLLAPSE = 1024
 /** Right column drag clamp floor. */
 export const RIGHTBAR_MIN = 300
 /** Maximum normal right panel width as a fraction of the frame. */
-export const RIGHTBAR_MAX_RATIO = 0.7
+const RIGHTBAR_MAX_RATIO = 0.7
 /** First-open right panel preference as a fraction of the frame. */
-export const RIGHTBAR_DEFAULT_RATIO = 0.45
+const RIGHTBAR_DEFAULT_RATIO = 0.45
 /** Center width protected while the normal right column is open. */
 const CENTER_MIN = 400
 
@@ -83,7 +83,7 @@ function clamp(value: number, min: number, max: number): number {
  * @param viewport - current frame measurement in px.
  * @returns the px preference to store at first opening.
  */
-export function rightbarFirstOpenWidth(viewport: number): number {
+function rightbarFirstOpenWidth(viewport: number): number {
   return Math.max(RIGHTBAR_MIN, Math.round(viewport * RIGHTBAR_DEFAULT_RATIO))
 }
 

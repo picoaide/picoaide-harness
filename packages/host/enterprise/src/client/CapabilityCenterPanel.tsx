@@ -377,6 +377,20 @@ export function hasUpdateFor(item: CapabilityItem): boolean {
   return compareVersions(latest, item.installedVersion) > 0
 }
 
+/**
+ * 「哪个 tab 显示哪些条目」的唯一实现（2026-09-15 抽出，行为不变）。
+ *
+ * 决策 2026-08-25：**卡片唯一位置** —— 本地创作只在「我的」，来源条目（市场/组织）
+ * 只在「市场」；已安装的来源条目同时出现在「我的」（便于卸载/更新）。
+ * 这条规则是"作者上传完在「我的」看不到安装按钮"的原因（本地卡只管上传），
+ * 抽出来是为了让回归用例能钉住它，而不是让后来者以为是 bug 随手改掉。
+ */
+export function itemsForTab<T extends { source?: string, installed?: boolean }>(items: readonly T[], tab: 'mine' | 'market'): T[] {
+  return tab === 'market'
+    ? items.filter(i => i.source !== 'local')
+    : items.filter(i => i.source === 'local' || i.installed === true)
+}
+
 /** 单测用：按（kind, source）解析安装端点。
  * 市场技能只存在于服务端 skills/marketplace 表,必须走 /api/pico/skills 代理
  * (网关 marketplace /archive);共享技能走 shared-skills 代理(带版本);
@@ -636,9 +650,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   }
 
   const visibleByTab = useMemo(() => {
-    const base = tab === 'market'
-      ? items.filter(i => i.source !== 'local')
-      : items.filter(i => i.source === 'local' || i.installed === true)
+    const base = itemsForTab(items, tab)
     const merged = mergeItems(base)
     // 搜索: name/displayName/description 关键词(大小写不敏感)。
     const q = search.trim().toLowerCase()

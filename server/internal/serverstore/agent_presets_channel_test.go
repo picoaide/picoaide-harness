@@ -1,6 +1,26 @@
 package serverstore
 
-import "testing"
+import (
+	"database/sql"
+	"testing"
+)
+
+// seedAppRelease 用**生产入口**播种「占名 + 建版本」:UpsertAppAndCreateReleaseOn
+// 需要调用方提供事务(N-2:发布锁与落库同事务同连接),旧的 db 包装已随死代码删除。
+func seedAppRelease(t *testing.T, db *sql.DB, app *App, rel *Release) {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UpsertAppAndCreateReleaseOn(tx, app, rel); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // N4（R7 复核 F2 §N4）：渠道闸门必须落在 DAO 层——`ListAgentPresets` /
 // `ListVisibleAgentPresets` 是「组织·共享 Agent」的**唯一**取数口，第一轮只在
@@ -14,16 +34,14 @@ func TestListAgentPresetsRejectsMarketChannelRows(t *testing.T) {
 	if _, err := CreateAgentPreset(db, &AgentPreset{Name: "org-agent", Version: "1.0.0", Author: "alice", Status: AgentPresetApproved}); err != nil {
 		t.Fatal(err)
 	}
-	// 市场渠道（UpsertAppAndCreateRelease 显式 channel=market）
-	if _, err := UpsertAppAndCreateRelease(db, &App{
+	// 市场渠道（显式 channel=market）
+	seedAppRelease(t, db, &App{
 		Kind: AppKindAgent, AppID: "mkt-agent", Title: "市场智能体",
 		Owner: "boss", Channel: AppChannelMarket, Enabled: 1,
 	}, &Release{
 		Kind: AppKindAgent, AppID: "mkt-agent", Version: "1.0.0", Title: "市场智能体",
 		Author: "boss", Publisher: "boss", Status: ReleaseStatusApproved,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 	if err := GrantApp(db, AppKindAgent, "mkt-agent", "alice", "user"); err != nil {
 		t.Fatal(err)
 	}
@@ -71,15 +89,13 @@ func TestListAgentPresetsRejectsMarketChannelRows(t *testing.T) {
 // 下架市场行前后行为一致：DAO 不再返回它，enabled 状态与渠道语义无关。
 func TestListAgentPresetsMarketDisableDoesNotChangeOrgView(t *testing.T) {
 	db := openTestDB(t)
-	if _, err := UpsertAppAndCreateRelease(db, &App{
+	seedAppRelease(t, db, &App{
 		Kind: AppKindAgent, AppID: "mkt-down", Title: "市场下架",
 		Owner: "boss", Channel: AppChannelMarket, Enabled: 1,
 	}, &Release{
 		Kind: AppKindAgent, AppID: "mkt-down", Version: "1.0.0", Title: "市场下架",
 		Author: "boss", Publisher: "boss", Status: ReleaseStatusApproved,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 	before, err := ListAgentPresets(db, "")
 	if err != nil {
 		t.Fatal(err)

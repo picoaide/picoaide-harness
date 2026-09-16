@@ -421,33 +421,6 @@ func (c *Checker) Check(ctx context.Context, current string) (*Result, error) {
 	return res, nil
 }
 
-// ParseCanonicalStable parses a canonical stable SemVer with an optional
-// lowercase "v" prefix; the prefix is stripped. Prerelease/build versions
-// are rejected.
-func ParseCanonicalStable(tag string) string {
-	v := strings.TrimPrefix(tag, "v")
-	if !IsStableSemVer(v) {
-		return ""
-	}
-	return v
-}
-
-// ParseCanonicalStableValid is ParseCanonicalStable with a validity signal.
-func ParseCanonicalStableValid(v string) (string, bool) {
-	canonical := ParseCanonicalStable(v)
-	return canonical, canonical != ""
-}
-
-// IsStableSemVer reports whether v is strict stable SemVer (M.m.p).
-func IsStableSemVer(v string) bool {
-	// prerelease present → not stable(在任何其它校验之前判定,避免与
-	// normalizeCore 的剥离顺序产生分歧)
-	if strings.Contains(strings.TrimPrefix(strings.TrimSpace(v), "v"), "-") {
-		return false
-	}
-	return normalizeCore(v) != ""
-}
-
 // NormalizeVersion 把 manifest 里的版本号规范化为"无 v 前缀"的完整 SemVer
 // (可含预发布段,如 2.7.0-rc.1);非法返回空串。
 func NormalizeVersion(v string) string {

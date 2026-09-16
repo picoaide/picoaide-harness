@@ -55,10 +55,11 @@ export function parseCron(expr: string): CronSchedule | null {
   }
   const weekdays = new Set<number>()
   for (const day of sets[4]!) weekdays.add(day === 7 ? 0 : day)
-  // Standard cron treats a step-from-wildcard ('*/n') as unrestricted too:
-  // Vixie's parser sets its DOM_STAR/DOW_STAR flag when the field starts with
-  // '*'. Treating '*/1' as restricted made `0 0 */1 * 1` run every day instead
-  // of Mondays, and similarly for explicit step expressions.
+  // Vixie's parser sets its DOM_STAR/DOW_STAR flag whenever the field STARTS
+  // with '*', including step-from-wildcard forms such as '*/n'. The flag does
+  // not make the value set unrestricted: '*/9' still only matches days
+  // 1,10,19,28. It only selects the combination rule in {@link dayCandidate}
+  // (star flag present -> AND, both fields explicit -> OR).
   const wildcardField = (field: string): boolean => /^\*(?:\/\d+)?$/u.test(field)
   return {
     minutes: sets[0]!,
@@ -186,12 +187,19 @@ export function lastRunAtMs(expr: string, fromMs: number): number | undefined {
   return undefined
 }
 
-/** Day/weekday OR gate shared by {@link matches} and the candidate scan. */
+/**
+ * Day/weekday gate shared by {@link matches} and the candidate scan.
+ *
+ * Vixie cron's rule: when EITHER field carries the star flag (a literal star,
+ * or a star-prefixed step field), the two fields are ANDed, otherwise they are
+ * ORed. ANDing is what keeps a day step of 9 on days 1,10,19,28 — returning the
+ * weekday set alone (the old behaviour) made every stepped day-of-month
+ * expression run daily.
+ */
 function dayCandidate(schedule: CronSchedule, date: Date): boolean {
   const dayMatches = schedule.days.has(date.getDate())
   const weekdayMatches = schedule.weekdays.has(date.getDay())
-  if (schedule.dayWildcard) return weekdayMatches
-  if (schedule.weekdayWildcard) return dayMatches
+  if (schedule.dayWildcard || schedule.weekdayWildcard) return dayMatches && weekdayMatches
   return dayMatches || weekdayMatches
 }
 
