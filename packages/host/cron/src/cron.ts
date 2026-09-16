@@ -99,7 +99,10 @@ export function nextRunAtMs(expr: string, fromMs: number): number | undefined {
   if (schedule === null) return undefined
   if (!hasPossibleCalendarDay(schedule)) return undefined
   const from = new Date(fromMs)
-  const limitMs = fromMs + 5 * 366 * 24 * 60 * 60 * 1000
+  // Eight years, not five: the 2100 century is not a leap year, so a valid
+  // `0 0 29 2 *` schedule can be up to ~7 years away (2097→2104) and a 5-year
+  // horizon declared it impossible (2026-09-16 audit R3-J).
+  const limitMs = fromMs + 8 * 366 * 24 * 60 * 60 * 1000
 
   const sortedMinutes = [...schedule.minutes].sort((a, b) => a - b)
   const sortedHours = [...schedule.hours].sort((a, b) => a - b)
@@ -149,7 +152,8 @@ export function nextRunAtMs(expr: string, fromMs: number): number | undefined {
  * granularity). Used by the scheduler's catch-up path: the previous
  * forward-only helper could only walk a bounded number of matches from the
  * last-known `nextRunAt`, so a long sleep fired an old occurrence instead of
- * the latest missed one.
+ * the latest missed one. The backwards horizon is eight years (century leap
+ * gap included).
  * @param expr - 5-field cron expression.
  * @param fromMs - upper bound (ms epoch).
  * @returns the matching minute start, or undefined when the calendar can never match.
@@ -158,11 +162,11 @@ export function lastRunAtMs(expr: string, fromMs: number): number | undefined {
   const schedule = parseCron(expr)
   if (schedule === null || !hasPossibleCalendarDay(schedule)) return undefined
   const from = new Date(fromMs)
-  // Walk whole days backwards (bounded by the same five-year rule as
+  // Walk whole days backwards (bounded by the same eight-year rule as
   // nextRunAtMs) and, on a matching day, pick the latest matching hour/minute
   // from the parsed sets. Minute-by-minute scanning would be correct but could
   // block the scheduler tick for millions of iterations after a long sleep.
-  const dayLimit = new Date(fromMs - 5 * 366 * 24 * 60 * 60 * 1000)
+  const dayLimit = new Date(fromMs - 8 * 366 * 24 * 60 * 60 * 1000)
   const sortedHours = [...schedule.hours].sort((a, b) => b - a)
   const sortedMinutes = [...schedule.minutes].sort((a, b) => b - a)
   let cursor = new Date(from.getFullYear(), from.getMonth(), from.getDate())
@@ -181,11 +185,16 @@ export function lastRunAtMs(expr: string, fromMs: number): number | undefined {
           // hour (2026-09-16 audit R2-E2).
           const first = new Date(year, month, day, hour, minute, 0, 0)
           if (first.getHours() !== hour || first.getMinutes() !== minute) continue
-          const second = new Date(first.getTime() + 60 * 60 * 1000)
-          const candidates = [first.getTime()]
-          if (second.getFullYear() === year && second.getMonth() === month && second.getDate() === day
-            && second.getHours() === hour && second.getMinutes() === minute) {
-            candidates.push(second.getTime())
+          // A DST rollback can repeat a wall clock by 30 minutes (Lord Howe) or
+          // 60 minutes (most zones); enumerate every minute within +90 that
+          // still reads the same wall clock and take the latest one.
+          const candidates = []
+          for (let delta = 0; delta <= 90 * 60 * 1000; delta += 60 * 1000) {
+            const probe = new Date(first.getTime() + delta)
+            if (probe.getFullYear() === year && probe.getMonth() === month && probe.getDate() === day
+              && probe.getHours() === hour && probe.getMinutes() === minute) {
+              candidates.push(probe.getTime())
+            }
           }
           candidates.sort((a, b) => b - a)
           for (const time of candidates) {

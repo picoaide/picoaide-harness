@@ -31,6 +31,20 @@ describe('DST/catch-up 一致性（2026-09-16 审计 E4/R2-E2）', () => {
     `)
   })
 
+  it('世纪闰年缺口：2100 不是闰年，2 月 29 日仍须可达', () => {
+    assertWithTz('UTC', `
+      const next = nextRunAtMs('0 0 29 2 *', Date.UTC(2097, 0, 1))
+      assert.equal(next, Date.UTC(2104, 1, 29))
+    `)
+  })
+
+  it('30 分钟回拨（Lord Howe）：重复区间取第二遍', () => {
+    assertWithTz('Australia/Lord_Howe', `
+      const last = lastRunAtMs('45 1 * * *', Date.UTC(2026, 3, 4, 15, 20))
+      assert.equal(last, Date.UTC(2026, 3, 4, 15, 15))
+    `)
+  })
+
   it('秋季回拨：重复小时里已发生的匹配不得被整日跳过', () => {
     // Expected epochs come from an independent minute-by-minute scanner (the
     // agent's counterexample); nextRunAtMs is not a reference here because it
