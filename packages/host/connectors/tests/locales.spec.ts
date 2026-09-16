@@ -1,39 +1,71 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { CONNECTOR_ERROR_CODES, connectorErrorCodeOf, withConnectorErrorCode } from '../src/connector-error.ts'
 import { friendlyConnectorError } from '../src/client/friendly-error.ts'
 import { setActiveLocale, t } from '../src/client/locales.ts'
 import { statusLabel } from '../src/client/status-label.ts'
 
 afterEach(() => { setActiveLocale('zh') })
 
-describe('friendlyConnectorError', () => {
-  it('passes through the node-side missing-command hint with the install command', () => {
-    expect(friendlyConnectorError('未找到命令 beisen-cli，请先安装：npm install -g beisen-cli'))
-      .toBe('未找到命令 beisen-cli，请先安装：npm install -g beisen-cli')
-    expect(friendlyConnectorError('未找到命令 dws，请确认已安装该命令行工具并加入 PATH'))
-      .toBe('未找到命令 dws，请确认已安装该命令行工具并加入 PATH')
+/**
+ * 2026-09-16 i18n 契约：friendly-error 只认**语言无关**的信号 —— Host 下发的稳定
+ * code，加上 OS 级的 `ENOENT`。旧实现按中文字串匹配，Host 文案一旦随语言走就会
+ * 在英文界面下全部落空（具体错误退化成通用兜底）。
+ */
+describe('friendlyConnectorError：稳定 code 契约', () => {
+  it('auth-required 原样透出（Host 的授权类文案本身已说明该做什么）', () => {
+    const raw = '需要先完成授权：当前凭据被服务端拒绝（点击「连接」重新授权）'
+    expect(friendlyConnectorError(raw, 'auth-required')).toBe(raw)
+    // 英文界面下同样透出（不再因为文案里没有「授权」二字而退化成兜底）
+    setActiveLocale('en')
+    const english = 'Authorization is required first: the server rejected the current credential'
+    expect(friendlyConnectorError(english, 'auth-required')).toBe(english)
   })
 
-  it('keeps the generic fallback for bare ENOENT errors', () => {
+  it('command-missing / download 原样透出（Node 侧已带安装命令等具体信息）', () => {
+    const missing = '未找到命令 beisen-cli，请先安装：npm install -g beisen-cli'
+    expect(friendlyConnectorError(missing, 'command-missing')).toBe(missing)
+    expect(friendlyConnectorError('下载失败：连接超时', 'download')).toBe('下载失败：连接超时')
+  })
+
+  it('exit-code 映射到友好文案，且跟随客户端语言', () => {
+    expect(friendlyConnectorError('登录命令退出码 1', 'exit-code')).toBe('登录命令失败：请确认已安装对应命令行工具并完成登录，然后重试')
+    setActiveLocale('en')
+    expect(friendlyConnectorError('login exited with code 1', 'exit-code'))
+      .toBe('Login command failed: make sure the corresponding CLI is installed and signed in, then retry')
+  })
+
+  it('ENOENT 是与语言无关的兜底判据（不带 code 也认）', () => {
     expect(friendlyConnectorError('spawn dws ENOENT')).toBe('未找到登录命令：请先安装对应命令行工具')
+    setActiveLocale('en')
+    expect(friendlyConnectorError('spawn dws ENOENT')).toBe('Login command not found: install the corresponding CLI first')
   })
 
-  it('maps non-zero CLI exits and passes through auth errors', () => {
-    expect(friendlyConnectorError('登录命令退出码 1')).toBe('登录命令失败：请确认已安装对应命令行工具并完成登录，然后重试')
-    expect(friendlyConnectorError('登录命令超时（300s）')).toBe('登录命令超时（300s）')
+  it('什么都不匹配的原始信息回落到通用兜底，且信息不丢', () => {
     expect(friendlyConnectorError('boom')).toBe('连接失败：boom')
+    setActiveLocale('en')
+    expect(friendlyConnectorError('boom')).toBe('Connection failed: boom')
+    // 旧的中文字串判据已不再是契约：一条形如「退出码」的未分类信息同样走兜底，
+    // 因为文案本身可以被翻译，匹配文案就是隐式契约（这正是本次修复的根因）。
+    expect(friendlyConnectorError('登录命令退出码 1')).toBe('Connection failed: 登录命令退出码 1')
+  })
+})
+
+describe('connector-error：code 的读取形状', () => {
+  it('接受 ConnectorError 实例、带 code/errorCode 的普通对象与裸 code', () => {
+    const error = withConnectorErrorCode(new Error('x'), 'auth-required')
+    expect(connectorErrorCodeOf(error)).toBe('auth-required')
+    expect(connectorErrorCodeOf({ errorCode: 'download' })).toBe('download')
+    expect(connectorErrorCodeOf('exit-code')).toBe('exit-code')
+    expect(connectorErrorCodeOf({ code: 'ABORT_ERR' })).toBeUndefined()
+    expect(connectorErrorCodeOf(new Error('plain'))).toBeUndefined()
+  })
+
+  it('枚举里没有拼写错误（Host 与 client 共用同一份定义）', () => {
+    expect([...CONNECTOR_ERROR_CODES]).toEqual(['auth-required', 'exit-code', 'command-missing', 'download'])
   })
 })
 
 describe('2026-09-15 BUG-07：英文界面下不再残留中文', () => {
-  it('friendlyConnectorError 的两条兜底文案跟随 locale', () => {
-    setActiveLocale('en')
-    expect(friendlyConnectorError('spawn dws ENOENT')).toBe('Login command not found: install the corresponding CLI first')
-    expect(friendlyConnectorError('登录命令退出码 1')).toBe('Login command failed: make sure the corresponding CLI is installed and signed in, then retry')
-    expect(friendlyConnectorError('boom')).toBe('Connection failed: boom')
-    // 透传分支不受语言影响
-    expect(friendlyConnectorError('未找到命令 dws')).toBe('未找到命令 dws')
-  })
-
   it('中文界面保持原文案（默认语言不回归）', () => {
     expect(friendlyConnectorError('boom')).toBe('连接失败：boom')
     expect(t('status.connected')).toBe('已连接')

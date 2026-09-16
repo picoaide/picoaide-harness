@@ -69,6 +69,7 @@
  */
 import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { DEFAULT_HOST_LOCALE, hostT, type HostLocale } from './host-copy.ts'
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 
@@ -252,12 +253,14 @@ function sameFile(a: TargetResolution, b: TargetResolution, foldCase: boolean): 
  * without another round trip: the raw spellings, the canonical ones that were
  * compared, and whether each path was readable at all.
  */
-function describeTargets(ours: TargetResolution | null, theirs: TargetResolution | null): string {
+function describeTargets(ours: TargetResolution | null, theirs: TargetResolution | null, locale: HostLocale = DEFAULT_HOST_LOCALE): string {
   const side = (label: string, value: TargetResolution | null): string =>
     value === null
       ? `${label}=<resolve failed>`
       : `${label}=${value.path} [canonical ${value.canonical}${value.error === null ? '' : ` unreadable:${value.error}`}]`
-  return `${side('本包', ours)} / ${side('mcp-client', theirs)}`
+  // The whole report can end up in the connector row (a `proven-other` verdict
+  // is thrown with it), so its own label follows the same locale.
+  return `${side(hostT(locale, 'fence.oursLabel'), ours)} / ${side('mcp-client', theirs)}`
 }
 
 /** What the runtime identity check concluded. */
@@ -520,7 +523,7 @@ function restoreField(field: string, descriptor: PropertyDescriptor | undefined)
  * Any failure lands on {@link McpTransportFenceUnavailableError}, which
  * `registerMcp` turns into a refusal to register the server.
  */
-async function verifyFenceSeam(): Promise<void> {
+async function verifyFenceSeam(locale: HostLocale): Promise<void> {
   const seen: Array<{ method: string; redirect: unknown }> = []
   const probeFetch: FetchLike = async (_input, init) => {
     const method = init?.method ?? 'GET'
@@ -540,24 +543,24 @@ async function verifyFenceSeam(): Promise<void> {
   for (const field of [REQUEST_INIT_FIELD, FETCH_WITH_INIT_FIELD, FETCH_FIELD]) {
     if (Object.getOwnPropertyDescriptor(probe, field) !== undefined) {
       throw new McpTransportFenceUnavailableError(
-        `MCP streamable-http 传输的 ${field} 已是实例自有属性（SDK 改用类字段，原型访问器被绕开）`,
+        hostT(locale, 'fence.ownProperty', { field }),
       )
     }
   }
   const requestInit = internals[REQUEST_INIT_FIELD] as RequestInit | undefined
   if (requestInit?.redirect !== 'manual') {
     throw new McpTransportFenceUnavailableError(
-      `MCP streamable-http 传输的 ${REQUEST_INIT_FIELD} 未被拦截（SDK 内部字段或构造方式已变更）`,
+      hostT(locale, 'fence.requestInitNotFenced', { field: REQUEST_INIT_FIELD }),
     )
   }
   const fetchWithInit = internals[FETCH_WITH_INIT_FIELD]
   if (typeof fetchWithInit !== 'function') {
-    throw new McpTransportFenceUnavailableError(`MCP streamable-http 传输的 ${FETCH_WITH_INIT_FIELD} 不可拦截`)
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.notInterceptable', { field: FETCH_WITH_INIT_FIELD }))
   }
   const fetchField = internals[FETCH_FIELD]
   if (!isFencedFetch(fetchField)) {
     throw new McpTransportFenceUnavailableError(
-      `MCP streamable-http 传输的 ${FETCH_FIELD} 未被拦截（GET/SSE 通道会回落到默认 fetch 并跟随重定向）`,
+      hostT(locale, 'fence.fetchNotFenced', { field: FETCH_FIELD }),
     )
   }
   // The production construction passes NO `fetch`: `(this._fetch ?? fetch)` must
@@ -566,19 +569,19 @@ async function verifyFenceSeam(): Promise<void> {
     requestInit: { headers: { [PROBE_HEADER]: '1' } },
   }) as unknown as Record<string, unknown>)[FETCH_FIELD]
   if (!isFencedFetch(bareFetch) || bareFetch === globalThis.fetch) {
-    throw new McpTransportFenceUnavailableError(`MCP streamable-http 传输未提供 ${FETCH_FIELD} 的加固包装（默认 fetch 会跟随重定向）`)
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.noHardenedFetch', { field: FETCH_FIELD }))
   }
   // The auth-provider path builds its own fetch: prove it is fenced too.
   seen.length = 0
   await (fetchWithInit as FetchLike)(PROBE_URL, { method: 'POST' }).catch(() => undefined)
   if (seen[0]?.redirect !== 'manual') {
-    throw new McpTransportFenceUnavailableError(`MCP streamable-http 传输的 ${FETCH_WITH_INIT_FIELD} 未强制 redirect:'manual'`)
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.fetchWithInitNotManual', { field: FETCH_WITH_INIT_FIELD }))
   }
   // The request path that actually carries the credentials and the body.
   seen.length = 0
   await probe.send({ jsonrpc: '2.0', method: 'ping', id: 1 } as never).catch(() => undefined)
   if (!seen.some(call => call.method === 'POST' && call.redirect === 'manual')) {
-    throw new McpTransportFenceUnavailableError("MCP streamable-http 传输未强制 redirect:'manual'")
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.sendNotManual'))
   }
   // THE SPEC CHAIN: `initialize` 200 → `notifications/initialized` 202 → the
   // SDK opens the GET(SSE) stream by itself (R5 hole).
@@ -587,17 +590,17 @@ async function verifyFenceSeam(): Promise<void> {
   await settleProbe(() => seen.some(call => call.method === 'GET'))
   const sse = seen.find(call => call.method === 'GET')
   if (sse === undefined) {
-    throw new McpTransportFenceUnavailableError('MCP streamable-http 传输的 GET(SSE) 流未经过可拦截的 fetch（重定向栅栏对 SSE 通道无效）')
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.sseNotFenced'))
   }
   if (sse.redirect !== 'manual') {
-    throw new McpTransportFenceUnavailableError("MCP streamable-http 传输的 GET(SSE) 流未强制 redirect:'manual'")
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.sseNotManual'))
   }
   // Reconnect/resume uses the same GET path, but is awaited — drive it too.
   seen.length = 0
   await probe.resumeStream('probe-event-id').catch(() => undefined)
   const resumed = seen.find(call => call.method === 'GET')
   if (resumed === undefined || resumed.redirect !== 'manual') {
-    throw new McpTransportFenceUnavailableError("MCP streamable-http 传输的 resumeStream() 未强制 redirect:'manual'")
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.resumeNotManual'))
   }
 }
 
@@ -629,25 +632,25 @@ async function settleProbe(reached: () => boolean, turns = 20): Promise<void> {
  *   rather than mocking module resolution.
  * @returns a function restoring the SDK's original property descriptors.
  */
-export function installMcpTransportRedirectFence(targets?: { ours: string; theirs: string }): () => void {
+export function installMcpTransportRedirectFence(targets?: { ours: string; theirs: string }, locale: HostLocale = DEFAULT_HOST_LOCALE): () => void {
   if (patched) return () => {}
   const verdict = targets === undefined
     ? verifyTargetsTheMcpClientSdk()
     : judgeTargets(targets.ours, targets.theirs)
   if (verdict.kind === 'unresolved') {
-    throw new McpTransportFenceUnavailableError(`无法定位 MCP streamable-http 传输实现: ${verdict.detail}`)
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.targetUnresolved', { detail: verdict.detail }))
   }
   if (verdict.kind === 'proven-other') {
     targetMismatch = true
     throw new McpTransportFenceUnavailableError(
-      `MCP streamable-http 传输加固目标与 mcp-client 不一致（${describeTargets(verdict.ours, verdict.theirs)}），拒绝注册`,
+      hostT(locale, 'fence.targetMismatch', { detail: describeTargets(verdict.ours, verdict.theirs, locale) }),
     )
   }
   if (verdict.kind === 'inconclusive') {
     // One side could not be read, so "different strings" is not evidence: the
     // behavioural verification below is the real gate. Keep the report — a
     // connector that later fails to fence must not look like a clean install.
-    targetWarning = describeTargets(verdict.ours, verdict.theirs)
+    targetWarning = describeTargets(verdict.ours, verdict.theirs, locale)
   }
   restorePatched = patchTransportClass()
   patched = true
@@ -712,7 +715,11 @@ export function uninstallMcpTransportRedirectFence(): void {
  * Guarantee the fence is installed and verified, or throw.
  * @throws {McpTransportFenceUnavailableError} when the seam cannot be fenced.
  */
-export async function ensureMcpTransportRedirectFence(): Promise<void> {
+export async function ensureMcpTransportRedirectFence(locale: HostLocale = DEFAULT_HOST_LOCALE): Promise<void> {
+  // NOTE: `failure` is memoized on purpose (one seam verification per process),
+  // so the FIRST caller's locale fixes the text of the cached error. That is a
+  // property of the memoized failure, not a module-level locale capture: the
+  // locale is still resolved per call and passed in.
   if (failure !== null) throw failure
   if (verified) return
   // Concurrent registrations share one verification: a second caller must not
@@ -722,19 +729,19 @@ export async function ensureMcpTransportRedirectFence(): Promise<void> {
   const attempt = (async (): Promise<void> => {
     if (!patched) {
       try {
-        installMcpTransportRedirectFence()
+        installMcpTransportRedirectFence(undefined, locale)
       } catch (error) {
-        failure = new McpTransportFenceUnavailableError(`MCP streamable-http 传输不可加固: ${String(error)}`)
+        failure = new McpTransportFenceUnavailableError(hostT(locale, 'fence.notHardened', { error: String(error) }))
         throw failure
       }
     }
     try {
-      await verifyFenceSeam()
+      await verifyFenceSeam(locale)
     } catch (error) {
       uninstallMcpTransportRedirectFence()
       failure = error instanceof McpTransportFenceUnavailableError
         ? error
-        : new McpTransportFenceUnavailableError(`MCP streamable-http 重定向栅栏校验失败: ${String(error)}`)
+        : new McpTransportFenceUnavailableError(hostT(locale, 'fence.verificationFailed', { error: String(error) }))
       throw failure
     }
     // A concurrent uninstall (test seam) must not leave a stale "verified".

@@ -26,6 +26,7 @@
 import { createHash } from 'node:crypto'
 import type { ConnectorDef, ConnectorMcp } from './types.ts'
 import { assertOutboundUrlAllowed, isOutboundUrlAllowed } from './outbound.ts'
+import { DEFAULT_HOST_LOCALE, hostT, type HostLocale } from './host-copy.ts'
 
 /** Server-name contract (matches the server-side `connectorServerNameRe`). */
 const SERVER_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/
@@ -433,16 +434,19 @@ export function declaredCredentialKeys(def: ConnectorDef): Set<string> {
  * `mcp[].env`. Other shape sloppiness is left to the existing behaviour so a
  * merely untidy definition does not vanish from the catalog.
  * @param def - the definition's credential-field groups.
+ * @param locale - locale for the reason text. The only current caller is the
+ *   catalog parser, which logs it; a caller that shows the reason to the user
+ *   passes the locale it resolved.
  * @returns a human-readable reason, or null.
  */
-export function credentialFieldProblem(def: Pick<ConnectorDef, 'tokenFields' | 'settings'>): string | null {
+export function credentialFieldProblem(def: Pick<ConnectorDef, 'tokenFields' | 'settings'>, locale: HostLocale = DEFAULT_HOST_LOCALE): string | null {
   for (const [group, fields] of [['tokenFields', def.tokenFields], ['settings', def.settings]] as const) {
     if (fields === undefined || !Array.isArray(fields)) continue
     for (const field of fields) {
       if (field === null || typeof field !== 'object' || Array.isArray(field)) continue
       const key = (field as { key?: unknown }).key
       if (typeof key === 'string' && isDeniedEnvKey(key)) {
-        return `${group} 的 key 不被允许: ${JSON.stringify(key)}`
+        return hostT(locale, 'policy.credentialFieldKeyDenied', { group, key: JSON.stringify(key) })
       }
     }
   }
@@ -512,53 +516,60 @@ export function stdioApprovalFingerprint(
  *
  * @param server - candidate entry (untrusted).
  * @param options.denyProtectedEnv - reject protected env keys (catalog parser).
+ * @param options.locale - locale for the reason text; `registerMcp` (the path
+ *   whose reasons reach the connector row) passes the resolved locale, the
+ *   catalog parser leaves the default because it only logs.
  * @returns a human-readable reason, or null.
  */
-export function mcpServerProblem(server: unknown, options: { denyProtectedEnv?: boolean } = {}): string | null {
-  if (server === null || typeof server !== 'object' || Array.isArray(server)) return 'mcp 项不是对象'
+export function mcpServerProblem(
+  server: unknown,
+  options: { denyProtectedEnv?: boolean; locale?: HostLocale } = {},
+): string | null {
+  const locale = options.locale ?? DEFAULT_HOST_LOCALE
+  if (server === null || typeof server !== 'object' || Array.isArray(server)) return hostT(locale, 'policy.notObject')
   const entry = server as Record<string, unknown>
   const serverName = entry.serverName
   if (typeof serverName !== 'string' || !SERVER_NAME_PATTERN.test(serverName)) {
-    return `serverName 不合规: ${JSON.stringify(serverName)}`
+    return hostT(locale, 'policy.serverNameInvalid', { serverName: JSON.stringify(serverName) })
   }
   const transport = entry.transport ?? 'stdio'
   if (transport !== 'stdio' && transport !== 'streamable-http') {
-    return `transport 不支持: ${JSON.stringify(entry.transport)}`
+    return hostT(locale, 'policy.transportUnsupported', { transport: JSON.stringify(entry.transport) })
   }
   if (transport === 'streamable-http') {
     const url = entry.url
-    if (typeof url !== 'string' || url === '') return 'streamable-http 缺少 url'
-    if (!isOutboundUrlAllowed(url)) return `url 不在允许的出站范围内: ${url}`
+    if (typeof url !== 'string' || url === '') return hostT(locale, 'policy.httpMissingUrl')
+    if (!isOutboundUrlAllowed(url)) return hostT(locale, 'policy.urlNotAllowed', { url })
   } else {
     const command = entry.command
-    if (typeof command !== 'string' || command.trim() === '') return 'stdio 缺少 command'
-    if (command.includes('\0')) return 'command 含 NUL'
+    if (typeof command !== 'string' || command.trim() === '') return hostT(locale, 'policy.stdioMissingCommand')
+    if (command.includes('\0')) return hostT(locale, 'policy.commandNul')
     const args = entry.args
     if (args !== undefined) {
-      if (!Array.isArray(args) || !args.every(item => typeof item === 'string')) return 'args 必须是字符串数组'
+      if (!Array.isArray(args) || !args.every(item => typeof item === 'string')) return hostT(locale, 'policy.argsNotStringArray')
     }
     const env = entry.env
     if (env !== undefined) {
-      if (env === null || typeof env !== 'object' || Array.isArray(env)) return 'env 必须是字符串映射'
+      if (env === null || typeof env !== 'object' || Array.isArray(env)) return hostT(locale, 'policy.envNotMapping')
       for (const [key, value] of Object.entries(env as Record<string, unknown>)) {
         if (options.denyProtectedEnv === true) {
-          if (isDeniedEnvKey(key)) return `env 键不被允许（受保护或为空）: ${JSON.stringify(key)}`
+          if (isDeniedEnvKey(key)) return hostT(locale, 'policy.envKeyDenied', { key: JSON.stringify(key) })
           // N-3: the selector tier is only open to a single plain program name.
           // The whole definition is refused (fail-loud) with the reason naming
           // both the key and the value, instead of silently dropping the pair.
           if (typeof value === 'string' && !isSafeCommandTemplateValue(value) && isCommandTemplateEnvKey(key)) {
-            return `env.${key} 的值不是单个程序名（含空白/shell 元字符或命令解释器，会被当作命令模板执行）: ${JSON.stringify(value)}`
+            return hostT(locale, 'policy.envTemplateValue', { key, value: JSON.stringify(value) })
           }
         }
-        if (typeof value !== 'string') return `env.${key} 必须是字符串`
+        if (typeof value !== 'string') return hostT(locale, 'policy.envValueNotString', { key })
       }
     }
   }
   const headers = entry.headers
   if (headers !== undefined) {
-    if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) return 'headers 必须是字符串映射'
+    if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) return hostT(locale, 'policy.headersNotMapping')
     if (Object.values(headers as Record<string, unknown>).some(value => typeof value !== 'string')) {
-      return 'headers 的值必须是字符串'
+      return hostT(locale, 'policy.headerValueNotString')
     }
   }
   return null
@@ -568,12 +579,16 @@ export function mcpServerProblem(server: unknown, options: { denyProtectedEnv?: 
  * Problem of the whole SERVER-issued definition (strict: protected env keys
  * are refused, not silently stripped).
  * @param mcp - the definition's `mcp` array.
+ * @param options.locale - locale for the reason text (see {@link mcpServerProblem}).
  * @returns a human-readable reason, or null.
  */
-export function mcpDefinitionProblem(mcp: unknown): string | null {
-  if (!Array.isArray(mcp) || mcp.length === 0) return 'mcp 必须是非空数组'
+export function mcpDefinitionProblem(mcp: unknown, options: { locale?: HostLocale } = {}): string | null {
+  if (!Array.isArray(mcp) || mcp.length === 0) return hostT(options.locale ?? DEFAULT_HOST_LOCALE, 'policy.mcpNotArray')
   for (const server of mcp) {
-    const problem = mcpServerProblem(server, { denyProtectedEnv: true })
+    const problem = mcpServerProblem(server, {
+      denyProtectedEnv: true,
+      ...(options.locale === undefined ? {} : { locale: options.locale }),
+    })
     if (problem !== null) return problem
   }
   return null
@@ -582,8 +597,9 @@ export function mcpDefinitionProblem(mcp: unknown): string | null {
 /**
  * Resolve the outbound URL of a streamable-http entry (policy enforced).
  * @param server - the validated entry.
+ * @param locale - locale for the error text (see {@link mcpServerProblem}).
  * @returns the parsed, allowed URL.
  */
-export function streamableHttpUrl(server: ConnectorMcp): URL {
-  return assertOutboundUrlAllowed(server.url ?? '', `MCP 端点 ${server.serverName}`)
+export function streamableHttpUrl(server: ConnectorMcp, locale: HostLocale = DEFAULT_HOST_LOCALE): URL {
+  return assertOutboundUrlAllowed(server.url ?? '', hostT(locale, 'step.mcpEndpointNamed', { serverName: server.serverName }), locale)
 }

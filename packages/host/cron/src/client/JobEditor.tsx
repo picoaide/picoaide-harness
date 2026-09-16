@@ -190,7 +190,7 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
           )}
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.workspace')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>（{t('job.actionNotEditable')}）</span>}</span>
+          <span style={styles.label}>{t('job.workspace')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>{t('job.parenthesized', { text: t('job.actionNotEditable') })}</span>}</span>
           <select
             style={styles.input}
             value={workspaceId}
@@ -204,7 +204,7 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
           </select>
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.agent')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>（{t('job.actionNotEditable')}）</span>}</span>
+          <span style={styles.label}>{t('job.agent')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>{t('job.parenthesized', { text: t('job.actionNotEditable') })}</span>}</span>
           <select
             style={styles.input}
             value={agentPreset}
@@ -214,13 +214,13 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
             <option value="">{t('job.agentDefault')}</option>
             {agentOptions.map(option => (
               <option key={option.id} value={option.id} disabled={option.broken !== undefined}>
-                {option.label}{option.broken !== undefined ? `（${option.broken}）` : ''}
+                {option.label}{option.broken !== undefined ? t('job.parenthesized', { text: option.broken }) : ''}
               </option>
             ))}
           </select>
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.permission')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>（{t('job.actionNotEditable')}）</span>}</span>
+          <span style={styles.label}>{t('job.permission')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>{t('job.parenthesized', { text: t('job.actionNotEditable') })}</span>}</span>
           <select
             style={styles.input}
             value={permission}
@@ -234,7 +234,7 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
           </select>
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.promptText')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>（{t('job.actionNotEditable')}）</span>}</span>
+          <span style={styles.label}>{t('job.promptText')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>{t('job.parenthesized', { text: t('job.actionNotEditable') })}</span>}</span>
           <textarea style={styles.input} rows={4} value={prompt} disabled={job !== undefined} onChange={(event) => { setPrompt(event.target.value) }} />
         </div>
         {error !== undefined && <span style={styles.error}>{error}</span>}

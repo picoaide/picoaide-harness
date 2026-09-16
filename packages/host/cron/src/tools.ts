@@ -12,6 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { HostCronService } from './host-service.ts'
 import { isValidCron, nextRunAtMs } from './cron.ts'
+import { hostLocaleOf, hostT, type CronHostCopyKey } from './host-copy.ts'
 
 /** Host-side collaborators of the tools. */
 export interface CronToolOptions {
@@ -23,6 +24,15 @@ export interface CronToolOptions {
 export function registerCronTools(ctx: Context, service: HostCronService, options: CronToolOptions = {}): () => void {
   const disposers: Array<() => void> = []
   const permissionNames = (): readonly string[] => options.permissions?.() ?? []
+  /**
+   * Host copy of THIS message (render payload or thrown error).
+   *
+   * Resolved per call from the probed `desktopRuntime`: the user can switch
+   * language while the app runs, and a tool result is rendered long after the
+   * plugin was applied. The tool/parameter DESCRIPTIONS stay Chinese on purpose
+   * (model-facing contract, see the module header).
+   */
+  const copy = (key: CronHostCopyKey, params?: Record<string, string>): string => hostT(hostLocaleOf(ctx), key, params)
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'cron_create',
@@ -38,20 +48,22 @@ export function registerCronTools(ctx: Context, service: HostCronService, option
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: `已创建定时任务 ${(value as { id: string }).id}` }],
+      render: (_args, value) => [{ type: 'text', text: copy('tool.created', { id: (value as { id: string }).id }) }],
     },
     async execute(args) {
       // Hand-check cross-field constraints the DSL does not express.
-      if (!isValidCron(args.cron)) throw new Error(`cron 表达式无效: ${args.cron}`)
-      if (nextRunAtMs(args.cron, Date.now()) === undefined) throw new Error(`cron 表达式在五年内无匹配时刻: ${args.cron}`)
-      if (args.prompt === undefined || args.prompt.trim() === '') throw new Error('必须提供 prompt（执行时发送给智能体会话的提示词）')
+      if (!isValidCron(args.cron)) throw new Error(copy('tool.invalidCron', { cron: args.cron }))
+      if (nextRunAtMs(args.cron, Date.now()) === undefined) throw new Error(copy('tool.cronNoMatch', { cron: args.cron }))
+      if (args.prompt === undefined || args.prompt.trim() === '') throw new Error(copy('tool.promptRequired'))
       // FIX-17: `permission` names a preset of the composed permission service.
       // Free text used to be accepted here and dropped by the executor; now an
       // unknown name is rejected at creation time.
       if (args.permission !== undefined) {
         const roster = permissionNames()
-        if (roster.length === 0) throw new Error('权限预设服务不可用，无法指定 permission')
-        if (!roster.includes(args.permission)) throw new Error(`未知的权限预设: ${args.permission}（可用：${roster.join(', ')}）`)
+        if (roster.length === 0) throw new Error(copy('tool.permissionUnavailable'))
+        if (!roster.includes(args.permission)) {
+          throw new Error(copy('tool.unknownPermission', { permission: args.permission, available: roster.join(', ') }))
+        }
       }
 
       const id = `job-${crypto.randomUUID()}`
@@ -109,7 +121,10 @@ export function registerCronTools(ctx: Context, service: HostCronService, option
       schema: { type: 'json' },
       render: (_args, value) => {
         const v = value as { jobId: string; enabled: boolean }
-        return [{ type: 'text', text: `${v.enabled ? '已启用' : '已停用'}定时任务 ${v.jobId}` }]
+        return [{
+          type: 'text',
+          text: copy('tool.setEnabled', { state: copy(v.enabled ? 'tool.enabled' : 'tool.disabled'), jobId: v.jobId }),
+        }]
       },
     },
     async execute(args) {
@@ -126,15 +141,18 @@ export function registerCronTools(ctx: Context, service: HostCronService, option
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: (value as { started: boolean }).started ? '定时任务已触发' : '定时任务未能触发' }],
+      render: (_args, value) => [{
+        type: 'text',
+        text: copy((value as { started: boolean }).started ? 'tool.triggered' : 'tool.notTriggered'),
+      }],
     },
     async execute(args) {
       // Owner filter: the run target must be visible to the current account
       // (a cross-account jobId is treated as "does not exist", not a leak).
       const before = service.listVisibleJobs().find(job => job.id === args.jobId)
-      if (before === undefined) throw new Error(`定时任务不存在: ${args.jobId}`)
+      if (before === undefined) throw new Error(copy('tool.jobMissing', { jobId: args.jobId }))
       if (before.executions.some(execution => execution.endedAt === undefined)) {
-        throw new Error(`定时任务 ${args.jobId} 已在运行`)
+        throw new Error(copy('tool.jobRunning', { jobId: args.jobId }))
       }
       service.apply(`tool-${crypto.randomUUID()}`, { kind: 'run', jobId: args.jobId })
       return { started: true }

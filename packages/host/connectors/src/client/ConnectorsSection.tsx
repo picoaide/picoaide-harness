@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { connectorErrorCodeOf, withConnectorErrorCode, type ConnectorErrorCode } from '../connector-error.ts'
 import { friendlyConnectorError } from './friendly-error.ts'
 import { t } from './locales.ts'
 import { statusLabel } from './status-label.ts'
@@ -20,6 +21,12 @@ interface ConnectorEntry {
   examples: string[]
   status: 'disconnected' | 'connecting' | 'connected' | 'unauthorized' | 'error'
   error?: string
+  /**
+   * Stable, locale-independent classification the host attached to `error`
+   * (2026-09-16). The friendly mapping keys off THIS, never off the message
+   * text — the text is translatable and therefore not a contract.
+   */
+  errorCode?: ConnectorErrorCode
   everConnected: boolean
   /** Absolute access-token expiry (epoch ms) when the server told us one. */
   expiresAt?: number | null
@@ -186,10 +193,20 @@ function formatInstant(ms: number): string {
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init)
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string }
-    throw new Error(body.error ?? `HTTP ${String(res.status)}`)
+    const body = (await res.json().catch(() => ({}))) as { error?: string; errorCode?: string }
+    // The host's error text is localized copy; the CODE is the contract.
+    throw withConnectorErrorCode(
+      new Error(body.error ?? `HTTP ${String(res.status)}`),
+      connectorErrorCodeOf(body),
+    )
   }
   return (await res.json()) as T
+}
+
+/** Friendly copy for a thrown error, using the host's stable code when present. */
+function friendlyFromError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  return friendlyConnectorError(error.message, connectorErrorCodeOf(error))
 }
 
 function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged: () => void }) {
@@ -288,7 +305,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       }
       onChanged()
     } catch (e) {
-      setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e))
+      setError(friendlyFromError(e))
     } finally {
       setBusy(null)
     }
@@ -306,7 +323,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       })
       onChanged()
     } catch (e) {
-      setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e))
+      setError(friendlyFromError(e))
     } finally {
       setBusy(null)
     }
@@ -322,7 +339,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       await fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/${allow ? 'approve' : 'deny'}`, { method: 'POST' })
       onChanged()
     } catch (e) {
-      setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e))
+      setError(friendlyFromError(e))
     } finally {
       setBusy(null)
     }
@@ -340,8 +357,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       await fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/refresh`, { method: 'POST' })
       onChanged()
     } catch (e) {
-      const message = e instanceof Error ? friendlyConnectorError(e.message) : String(e)
-      setError(t('token.refreshFailed', { message }))
+      setError(t('token.refreshFailed', { message: friendlyFromError(e) }))
     } finally {
       setBusy(null)
     }
@@ -355,7 +371,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       await fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/disconnect`, { method: 'POST' })
       onChanged()
     } catch (e) {
-      setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e))
+      setError(friendlyFromError(e))
     } finally {
       setBusy(null)
     }
@@ -373,7 +389,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       await fetchJson(`/api/pico/connectors/${encodeURIComponent(entry.id)}/cancel`, { method: 'POST' })
       onChanged()
     } catch (e) {
-      setError(e instanceof Error ? friendlyConnectorError(e.message) : String(e))
+      setError(friendlyFromError(e))
     } finally {
       setBusy(null)
     }
@@ -518,7 +534,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
 
       {downloading && entry.request?.message && <p style={LABEL}>{entry.request.message}</p>}
       {polling && <p style={LABEL}>{t('auth.waiting')}</p>}
-      {entry.error && !isConnected && <p style={{ ...STATUS, color: statusColor.error }}>{friendlyConnectorError(entry.error)}</p>}
+      {entry.error && !isConnected && <p style={{ ...STATUS, color: statusColor.error }}>{friendlyConnectorError(entry.error, connectorErrorCodeOf(entry.errorCode))}</p>}
       {error && <p style={{ ...STATUS, color: statusColor.error }}>{error}</p>}
 
       <div style={{ marginTop: 'auto', paddingTop: 4, display: 'flex', gap: 8 }}>
