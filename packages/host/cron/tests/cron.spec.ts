@@ -38,6 +38,13 @@ describe('DST/catch-up 一致性（2026-09-16 审计 E4/R2-E2）', () => {
     `)
   })
 
+  it('2 小时回拨（Antarctica/Troll）：重复区间取第二遍', () => {
+    assertWithTz('Antarctica/Troll', `
+      const last = lastRunAtMs('45 1 * * *', Date.UTC(2026, 9, 25, 1, 50))
+      assert.equal(last, Date.UTC(2026, 9, 25, 1, 45))
+    `)
+  })
+
   it('30 分钟回拨（Lord Howe）：重复区间取第二遍', () => {
     assertWithTz('Australia/Lord_Howe', `
       const last = lastRunAtMs('45 1 * * *', Date.UTC(2026, 3, 4, 15, 20))
