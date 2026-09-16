@@ -126,13 +126,19 @@ class PoolMutex {
     gateBudgetMs = 0,
   ): Promise<void> {
     const prev = this.tail
+    // The tool deadline is armed when the model issues the call, so queue time
+    // must count against the gate budget. Timing the budget from "after the
+    // mutex admitted us" let a long predecessor eat most of the tool deadline
+    // and the gate still waited its full budget afterwards — the deadline then
+    // replaced the explicit `window-controlled` refusal with the generic
+    // `tool call timed out after 30000ms` (2026-09-16 audit E2).
+    const budgetStartedAt = Date.now()
     let release!: () => void
     this.tail = new Promise<void>((resolve) => { release = resolve })
     try {
       // Waiting for the previous operation must be cancellable too: a wedged
       // predecessor used to block every later call forever (2026-09-08 P0-4).
       await raceAbort(prev, gate, signal, this.locale)
-      const gateStartedAt = Date.now()
       while (gate()) {
         if (signal !== undefined && signal.aborted) {
           throw browserError('window-controlled', gateRefusalWith(
@@ -143,7 +149,7 @@ class PoolMutex {
         }
         // 2026-09-15 审计 P0-1：用户接管后不能无限期挂住模型回合。
         // 2026-09-16：预算必须短于工具预算，否则这段文案永远到不了模型面前。
-        if (gateBudgetMs > 0 && Date.now() - gateStartedAt >= gateBudgetMs) {
+        if (gateBudgetMs > 0 && Date.now() - budgetStartedAt >= gateBudgetMs) {
           const seconds = Math.round(gateBudgetMs / 1000)
           throw browserError('window-controlled', hostCopy(
             this.locale(),

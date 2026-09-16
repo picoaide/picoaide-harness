@@ -475,7 +475,7 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
       // 工具层的 origin 检查已经通过；就在"取凭据"这一步把同一标签页的 URL 改掉，
       // 模拟排队/取凭据期间发生的导航（旧实现会照常把凭据注入新页面）。
       // 真的走一次导航（会更新 runtime 内部的 tab.url，两条检查读的都是它）
-      if (harness !== undefined) await harness.runtime.navigate(1, 'https://login.example.evil.test/', 'domcontentloaded')
+      if (harness !== undefined) await harness.runtime.navigate(1, 'https://login.example.evil.test/landing?code=SECRET123', 'domcontentloaded')
       return id === 'corp' ? { username: 'alice', password: SECRET } : null
     }) as CredentialResolverLike
     resolver.originOf = async () => 'https://login.example'
@@ -488,6 +488,8 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
     const error = await fail(bound.call('browser_fill_credentials', { connectorId: 'corp' }))
     expect(error.code).toBe('policy')
     expect(error.message).toMatch(/left https:\/\/login\.example before the injection/u)
+    // 模型可见错误不得带上跳转 URL 里的一次性 code/ticket。
+    expect(error.message).not.toContain('SECRET123')
     expect(view.transport.commands.some((command) => String(command.params?.['expression'] ?? '').includes('passField'))).toBe(false)
   })
 

@@ -2653,7 +2653,11 @@ export class BrowserRuntime {
       // 发生在拿到全局互斥之后 —— 中间标签页可以导航走。写入 DOM 之前用**同一个**
       // expectedOrigin 再比一次。
       if (expectedOrigin !== undefined && httpOriginOf(tab.url) !== expectedOrigin) {
-        throw browserError('policy', `browser_fill_credentials refused: the tab left ${expectedOrigin} before the injection ran (now ${tab.url}); credentials are only injected into their own site`)
+        // The tab may have navigated into an SSO/OAuth callback whose URL
+        // carries a one-time code/ticket. Redact exactly like every other
+        // model-facing URL exit: error.message lands in the model context and
+        // the session transcript (2026-09-16 audit E4).
+        throw browserError('policy', `browser_fill_credentials refused: the tab left ${expectedOrigin} before the injection ran (now ${stripSensitiveUrl(tab.url)}); credentials are only injected into their own site`)
       }
       const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
         expression: `
