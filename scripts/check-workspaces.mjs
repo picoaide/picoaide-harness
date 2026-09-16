@@ -126,7 +126,17 @@ function parseArgs(argv) {
       options.only = (argv[i + 1] ?? '').split(',').map(s => s.trim()).filter(Boolean)
       i += 1
     } else if (arg === '--concurrency') {
-      options.concurrency = Number(argv[i + 1])
+      // A non-numeric value used to reach `Math.min(NaN, …)` → zero workers, so
+      // the first wave (every root guard + the desktop check) silently ran
+      // NOTHING and the gate still exited 0 — a false green (2026-09-16 R9
+      // audit). Reject it like any other bad argument.
+      const value = Number(argv[i + 1])
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        console.error(`check-workspaces: --concurrency 需要正整数,收到 ${JSON.stringify(argv[i + 1])}`)
+        process.exitCode = 2
+        return null
+      }
+      options.concurrency = value
       i += 1
     } else if (arg === '--list') options.list = true
     else if (arg === '--no-guards') options.guards = false
@@ -322,7 +332,10 @@ async function runScheduler(tasks, limit, state) {
 }
 
 const options = parseArgs(process.argv.slice(2))
-if (options === null) process.exit(1)
+// A usage error sets exitCode 2 in parseArgs; honor it instead of flattening
+// every bad-argument case to 1 (2026-09-16 R9/R2 audit: the assignment was dead
+// code — `process.exit(1)` overrode it).
+if (options === null) process.exit(process.exitCode ?? 1)
 
 if (options.help) {
   console.log('用法: node scripts/check-workspaces.mjs [--changed [ref]] [--only a,b] [--concurrency N] [--list] [--no-guards] [--full-output]')

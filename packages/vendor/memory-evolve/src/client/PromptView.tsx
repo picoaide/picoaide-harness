@@ -79,9 +79,14 @@ type DictKey = Extract<MemoryEvolveKey, `prompt.${string}`>
  *
  * ⚠️ 必须每个组件各持一份（`const t = dict(props.t)`）：模块级常量/闭包在
  * 求值时早于插件 apply，那时 t 只能拿到默认语言，等于把界面语言钉死。
+ *
+ * ⚠️ `params` 必须透传：本视图目前用 `fillPlaceholders` 自己插值，所以收窄成
+ * `(key) => t(key)` 暂时看不出问题；但同一个包装器在 CoIView 上已经因为丢参
+ * 把 9 处文案渲染成 `{count}` 模板原文（2026-09-16 R9 审计 P1），这里保持同一
+ * 形状以免重蹈。
  */
-function dict(t: Translate): (key: DictKey) => string {
-  return (key) => t(key)
+function dict(t: Translate): (key: DictKey, params?: Record<string, unknown>) => string {
+  return (key, params) => t(key, params)
 }
 
 /** 统一错误文本。 */
@@ -196,7 +201,9 @@ function fillPlaceholders(text: string, values: Record<string, string>): string 
 
 export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element {
   const t = dict(props.t)
-  const say = (key: DictKey): string => t(key)
+  // `params` 必须透传（与 dict() 同一条契约）：缺失会把 {name} 之类的模板原文
+  // 直接渲染给用户（2026-09-16 R9/R2 审计）。
+  const say = (key: DictKey, params?: Record<string, unknown>): string => t(key, params)
 
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [injections, setInjections] = useState<Injection[]>([])

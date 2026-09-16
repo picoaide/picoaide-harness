@@ -14,7 +14,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { BraceMark, BrandName } from './Brand.tsx'
 import { AboutSection, OverlayBadge, applyBrandTheme, injectBrandShellStyles } from './brand-shell.tsx'
-import { setActiveLocale } from './locales.ts'
+import { setActiveLocale, t } from './locales.ts'
 
 /** Stable Cordis plugin name for the branding client half. */
 export const name = 'picoaide-branding-client'
@@ -130,7 +130,10 @@ export function apply(ctx: ClientContext): void {
       name: 'settings.section',
       id: 'picoaide-about',
       order: 900,
-      label: 'About PicoAide',
+      // A thunk, like the sibling sections: the settings shell re-evaluates it
+      // per render, so the nav row follows the language (a static string kept
+      // the English label in a Chinese UI — 2026-09-16 R9 audit).
+      label: () => t('about.sectionLabel'),
     }, AboutSection)),
     'picoaide-branding: about section',
   )

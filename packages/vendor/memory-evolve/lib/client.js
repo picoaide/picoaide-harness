@@ -4525,7 +4525,7 @@ function UiSettingsTabView(props) {
 var import_react11 = require("react");
 var import_jsx_runtime12 = require("react/jsx-runtime");
 function dict(t) {
-  return (key) => t(key);
+  return (key, params) => t(key, params);
 }
 var API2 = "/memory-evolve/api/coi";
 async function fetchJson(path, init) {
@@ -8209,7 +8209,7 @@ function BroadcastView(props) {
 var import_react17 = require("react");
 var import_jsx_runtime18 = require("react/jsx-runtime");
 function dict2(t) {
-  return (key) => t(key);
+  return (key, params) => t(key, params);
 }
 function errText3(err) {
   const message = err instanceof Error ? err.message : String(err);
@@ -8280,7 +8280,7 @@ function fillPlaceholders(text, values) {
 }
 function PromptView(props) {
   const t = dict2(props.t);
-  const say = (key) => t(key);
+  const say = (key, params) => t(key, params);
   const [prompts, setPrompts] = (0, import_react17.useState)([]);
   const [injections, setInjections] = (0, import_react17.useState)([]);
   const [sources, setSources] = (0, import_react17.useState)([]);

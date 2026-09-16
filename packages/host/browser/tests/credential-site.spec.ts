@@ -110,6 +110,57 @@ describe('siteOriginFromFields', () => {
     // An unrelated field value without a scheme must not become an origin.
     expect(siteOriginFromFields({ note: 'app.glitchtip.com' })).toBeNull()
   })
+
+  // 2026-09-16 R9 审计：关键词表放宽成裸子串后，非地址字段（`security` 里含
+  // `uri`、`website`/`siteName` 里含 `site`）也参与竞争，且裸主机归一让它们的
+  // 值变成 origin —— 一个口令形状的值就顶掉了连接器真正的站点。
+  it('does not let a non-address key hijack the binding', () => {
+    expect(siteOriginFromFields({ SECURITY_TOKEN: 'abc123def456', SITE_URL: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ siteName: 'staging', URL: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ website: 'staging', url: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ note: 'staging', url: 'https://real.example' }))
+      .toBe('https://real.example')
+  })
+
+  it('prefers the key that names the site over a camelCase flow URL', () => {
+    // `callbackUrl` is the OAuth redirect, not the connector's own site.
+    expect(siteOriginFromFields({ callbackUrl: 'https://sso.example/cb', url: 'https://app.example' }))
+      .toBe('https://app.example')
+  })
+
+  it('prefers an explicit scheme over a scheme-less guess regardless of key order', () => {
+    // base 只认带 scheme 的值；裸主机是新增能力，不得改写既有判定。
+    expect(siteOriginFromFields({ host: 'staging', url: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ hostname: 'staging', siteUrl: 'https://real.example' }))
+      .toBe('https://real.example')
+    // 没有任何显式地址时，地址形状键上的裸主机仍然生效（E1 的新能力）。
+    expect(siteOriginFromFields({ username: 'alice', hostname: 'glitchtip.corp.example' }))
+      .toBe('https://glitchtip.corp.example')
+  })
+
+  // 2026-09-16 R2 复核：把 `hostname` 并进 base 的地址键档、或把 `_` 放宽成 `[_-]`，
+  // 会让两个 base 地址键之间的取舍翻转 —— 同一份凭据的绑定基准被静默换主机。
+  it('keeps base’s choice between two address keys (no silent rebinding)', () => {
+    expect(siteOriginFromFields({ hostname: 'https://a.example', url: 'https://b.example' }))
+      .toBe('https://b.example')
+    expect(siteOriginFromFields({ server_url: 'https://real.example', 'callback-url': 'https://sso.example/cb' }))
+      .toBe('https://real.example')
+    // 两个 base 地址键两两对拍（110 组）见 temp/audit-r9/my-probe/site-diff.mjs。
+    expect(siteOriginFromFields({ SITE_URL: 'https://a.example', API_ENDPOINT: 'https://b.example' }))
+      .toBe('https://b.example')
+  })
+
+  it('does not let a URL under an unrelated key beat the address key’s bare host', () => {
+    // DSN / 文档链接这类字段里带 URL，但它们不是连接器的站点。
+    expect(siteOriginFromFields({ base_url: 'glitchtip.corp.example', sentry_dsn: 'https://abc123@9f1.sentry.io/1' }))
+      .toBe('https://glitchtip.corp.example')
+    expect(siteOriginFromFields({ host: 'glitchtip.corp.example', docs: 'https://docs.example/start' }))
+      .toBe('https://glitchtip.corp.example')
+  })
 })
 
 describe('credentialSiteOrigin', () => {

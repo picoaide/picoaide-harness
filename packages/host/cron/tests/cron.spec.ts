@@ -197,7 +197,7 @@ describe('nextRunAtMs', () => {
     expect(nextRunAtMs('0 0 30 2 *', Date.UTC(2026, 0, 1))).toBeUndefined()
   })
 
-  it('reaches a February 29 schedule within the five-year horizon', () => {
+  it('reaches a February 29 schedule within the eight-year horizon', () => {
     const from = new Date(2026, 0, 1).getTime()
     const next = nextRunAtMs('0 0 29 2 *', from)
     expect(next).toBeDefined()
@@ -225,5 +225,33 @@ describe('nextRunAtMs', () => {
     const from = new Date(2026, 7, 19, 9, 0, 0).getTime()
     const next = nextRunAtMs('0 9 * * *', from)!
     expect(next).toBeGreaterThan(from)
+  })
+})
+
+/**
+ * 2026-09-16 R9 审计：`lastRunAtMs` 的按日回退游标落在**整日不存在**的本地日
+ * （跨日界线的跳日，如 Pacific/Apia 的 2011-12-30）时，`new Date(y, m, d - 1)`
+ * 会被归一化回当天 ⇒ 死循环。该函数在调度器 tick 里同步调用，卡住就等于所有
+ * 定时任务永久停摆（`tickInFlight` 不复位）。8 年回退视野把这个窗口从 5 年放大
+ * 到 8 年，所以本轮一并加守卫。
+ */
+describe('按日回退游标不会因"跳日"原地打转（R9 审计）', () => {
+  it('terminates on a skipped local calendar day', () => {
+    assertWithTz('Pacific/Apia', `
+      // 2011-12-30 在当地不存在（跨日界线跳到 12-31）；表达式在 2004/2032 之间
+      // 没有命中日，游标会一路退到那个跳日。
+      const last = lastRunAtMs('0 0 29 2 */7', Date.UTC(2017, 5, 1))
+      assert.equal(last, undefined)
+    `)
+  })
+
+  it('still walks past ordinary days', () => {
+    assertWithTz('Pacific/Apia', `
+      const last = lastRunAtMs('0 0 29 2 *', Date.UTC(2017, 5, 1))
+      assert.ok(last !== undefined, 'an earlier February 29 exists inside the horizon')
+      const d = new Date(last)
+      assert.equal(d.getMonth(), 1)
+      assert.equal(d.getDate(), 29)
+    `)
   })
 })

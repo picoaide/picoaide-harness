@@ -49,6 +49,7 @@ import {
   desktopCrashPageCopy,
   desktopDiagnosticsPrivacyCopy,
   desktopLocaleFromLanguageTag,
+  desktopStartupCopy,
   desktopTrayLabel,
   desktopUpdateDialogCopy,
 } from './tray-locale.ts'
@@ -464,12 +465,13 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     // 产品名取自 profile 组装配置（渠道构建下即渠道自己的名字）—— 失败弹窗
     // 是渠道客户最可能看到的"厂商品牌露出"位置之一。
     const product = this.productName
+    const copy = desktopStartupCopy(this.currentLocale)
     const result = await dialog.showMessageBox({
       type: 'error',
-      title: 'Plugin Recovery',
-      message: `${product} could not load all plugins.`,
-      detail: `Failed plugins:\n${plugins}\n\n${error}\n\nRestart ${product} after resolving the failing plugin.`,
-      buttons: [`Restart ${product}`, 'Dismiss'],
+      title: copy.pluginRecoveryTitle,
+      message: copy.pluginRecoveryMessage(product),
+      detail: copy.pluginRecoveryDetail(plugins, error, product),
+      buttons: [copy.pluginRecoveryRestart(product), copy.pluginRecoveryDismiss],
       defaultId: 0,
       cancelId: 1,
       noLink: true,
@@ -530,13 +532,16 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
   /** Report one user-triggered check without exposing network or response details. */
   private async showManualUpdateCheckResult(result: UpdateCheckResult | null): Promise<void> {
+    // 这一组对话框由托盘里已本地化的「检查更新…」触发，整段文案（含按钮）跟着
+    // 当前语言走（2026-09-16 R9 审计：此前恒英文）。
+    const copy = desktopUpdateDialogCopy(this.currentLocale)
     if (result === null) {
       await dialog.showMessageBox({
         type: 'warning',
-        title: 'Unable to Check for Updates',
-        message: `${this.productName} could not check for updates.`,
-        detail: 'Please try again later.',
-        buttons: ['OK'],
+        title: copy.checkFailedTitle(this.productName),
+        message: copy.checkFailedMessage(this.productName),
+        detail: copy.checkFailedDetail,
+        buttons: [copy.confirm],
         defaultId: 0,
         noLink: true,
       })
@@ -546,10 +551,10 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (result.status === 'up-to-date') {
       await dialog.showMessageBox({
         type: 'info',
-        title: `${this.productName} Is Up to Date`,
-        message: `No newer version of ${this.productName} is available.`,
-        detail: `Installed version: ${result.currentVersion}`,
-        buttons: ['OK'],
+        title: copy.upToDateTitle(this.productName),
+        message: copy.upToDateMessage(this.productName),
+        detail: copy.upToDateDetail(result.currentVersion),
+        buttons: [copy.confirm],
         defaultId: 0,
         noLink: true,
       })
@@ -558,10 +563,10 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
     await dialog.showMessageBox({
       type: 'info',
-      title: `${this.productName} Update Available`,
-      message: `${this.productName} ${result.latestVersion} is available.`,
-      detail: 'Installer downloads are unavailable in this build.',
-      buttons: ['OK'],
+      title: copy.availableTitle(this.productName),
+      message: copy.availableMessage(result.latestVersion, this.productName),
+      detail: copy.availableDetail,
+      buttons: [copy.confirm],
       defaultId: 0,
       noLink: true,
     })
@@ -652,26 +657,28 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     }
 
     if (this.platform === 'darwin') {
+      const copy = desktopUpdateDialogCopy(this.currentLocale)
       const openError = await shell.openPath(installerPath)
       if (openError !== '') throw new Error(`dsh-plugin-desktop: failed to open update disk image: ${openError}`)
       await dialog.showMessageBox({
         type: 'info',
-        title: `${this.productName} Update Downloaded`,
-        message: `${this.productName} ${version} is ready to install.`,
-        detail: `The disk image has opened. Replace ${this.productName} in Applications, then reopen it.`,
-        buttons: ['OK'],
+        title: copy.downloadedTitle(this.productName),
+        message: copy.downloadedMessage(version, this.productName),
+        detail: copy.darwinOpenedDetail(this.productName),
+        buttons: [copy.confirm],
         defaultId: 0,
         noLink: true,
       })
       return
     }
 
+    const copy = desktopUpdateDialogCopy(this.currentLocale)
     const result = await dialog.showMessageBox({
       type: 'info',
-      title: `${this.productName} Update Downloaded`,
-      message: `${this.productName} ${version} is ready to install.`,
-      detail: `Restart ${this.productName} and run the installer now?`,
-      buttons: ['Restart and Install', 'Later'],
+      title: copy.downloadedTitle(this.productName),
+      message: copy.downloadedMessage(version, this.productName),
+      detail: copy.winInstallDetail(this.productName),
+      buttons: [copy.winRestart, copy.winLater],
       defaultId: 1,
       cancelId: 1,
       noLink: true,
@@ -718,7 +725,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     const error = cause instanceof Error ? cause : new Error(String(cause))
     this.logError(`dsh-plugin-desktop: failed to export diagnostics: ${error.message}`)
     try {
-      dialog.showErrorBox('Unable to Export Diagnostics', error.message)
+      // User-visible native surface: same table as the privacy confirmation
+      // (2026-09-16 R2 audit — this one was still hard-coded English).
+      dialog.showErrorBox(desktopDiagnosticsPrivacyCopy(this.currentLocale).errorTitle, error.message)
     } catch (dialogCause) {
       this.logError(`dsh-plugin-desktop: failed to show diagnostics error: ${dialogCause instanceof Error ? dialogCause.message : String(dialogCause)}`)
     }

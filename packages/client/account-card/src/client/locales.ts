@@ -53,7 +53,11 @@ export function setActiveLocale(id: string): void {
 export function t(key: AccountKey, params?: Record<string, string>): string {
   let text = (activeLocale === 'en' ? enDict : dict)[key]
   if (params !== undefined) {
-    for (const [name, value] of Object.entries(params)) text = text.replaceAll(`{${name}}`, () => String(value))
+    // ONE pass over the template: a chained `replaceAll` per parameter re-scans
+    // the values it just inserted, so a value carrying another key's `{name}`
+    // token would be rewritten (2026-09-16 R9 audit; same shape as
+    // `manifest-precheck`'s `fill`).
+    text = text.replace(/\{(\w+)\}/gu, (match, name: string) => (Object.hasOwn(params, name) ? String(params[name]) : match))
   }
   return text
 }

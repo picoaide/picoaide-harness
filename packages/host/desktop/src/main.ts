@@ -15,6 +15,8 @@ import { DEFAULT_DEEP_LINK_SCHEME, OFFICIAL_PRODUCT_NAME, readDesktopChannelProf
 import { applyInstallDshHome, isSystemWorkingDirectory } from './desktop-home.ts'
 import { desktopUserDataDirectoryName } from './desktop-user-data.ts'
 import { desktopProductVersion, ElectronDesktopRuntime } from './electron-runtime.ts'
+import { desktopStartupCopy } from './tray-locale.ts'
+import { hostCopy } from './host-locale.ts'
 import {
   ElectronStderrLogger,
   installDesktopChildProcessLogging,
@@ -90,11 +92,14 @@ function notifySkippedOptionalEntries(
 ): void {
   if (entries.length === 0) return
   const names = entries.map(entry => entry.name)
-  const suffix = names.length > 1 ? ` and ${names.length - 1} more` : ''
+  const copy = desktopStartupCopy(runtime.locale)
+  const suffix = names.length > 1
+    ? hostCopy(runtime.locale, ` 等 ${names.length - 1} 个`, ` and ${names.length - 1} more`)
+    : ''
   try {
     runtime.updates.notify({
-      title: 'Skipped Unavailable UI Plugin',
-      body: `${names[0]} is not installed in this profile${suffix}.`,
+      title: copy.skippedPluginTitle,
+      body: copy.skippedPluginBody(names[0] ?? '', suffix),
     })
   } catch (cause) {
     logger.error(`${BIN_NAME}: failed to show skipped plugin notification: ${cause instanceof Error ? cause.message : String(cause)}`)
@@ -116,9 +121,11 @@ function notifyWindowsVolumeConcerns(
 ): void {
   if (concerns.length === 0) return
   try {
+    const copy = desktopStartupCopy(runtime.locale)
+    const label = concerns[0]?.label ?? hostCopy(runtime.locale, '配置的路径', 'A configured path')
     runtime.updates.notify({
-      title: 'Storage May Be Unsupported',
-      body: `${concerns[0]?.label ?? 'A configured path'} is on a volume that may break sandboxed commands or plugin installs.`,
+      title: copy.volumeTitle,
+      body: copy.volumeBody(label),
     })
   } catch (cause) {
     logger.error(`${BIN_NAME}: failed to show Windows volume warning: ${cause instanceof Error ? cause.message : String(cause)}`)

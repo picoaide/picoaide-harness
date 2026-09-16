@@ -350,8 +350,18 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		skillOwners := appOwnerMap(db, serverstore.AppKindSkill, serverstore.AppChannelOrg)
 		agentOwners := appOwnerMap(db, serverstore.AppKindAgent, serverstore.AppChannelOrg)
 		// 官方属性(0059, App 级,与来源无关:market/org 行取同一 App)。
-		skillOfficials, _ := serverstore.AppOfficialMap(db, serverstore.AppKindSkill)
-		agentOfficials, _ := serverstore.AppOfficialMap(db, serverstore.AppKindAgent)
+		// 查询失败必须 500（与 listApprovals 两处同款）：吞掉后 map 为 nil，
+		// 整个能力中心会把所有官方内容标成非官方 —— 与事实相反的员工可见视图。
+		skillOfficials, err := serverstore.AppOfficialMap(db, serverstore.AppKindSkill)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		agentOfficials, err := serverstore.AppOfficialMap(db, serverstore.AppKindAgent)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
 
 		// 1) 市场技能(授权制)。
 		if includeMarket && ft.skills {
@@ -716,7 +726,13 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				return
 			}
 			agentOwners := appOwnerMap(db, serverstore.AppKindAgent, "")
-			agentOfficials, _ := serverstore.AppOfficialMap(db, serverstore.AppKindAgent)
+			// 同 skills 分支：查询失败必须 500，不能吞。吞掉后 map 为 nil，
+			// 每条智能体都会被标成非官方（丢蓝标）——与事实相反的管理视图。
+			agentOfficials, err := serverstore.AppOfficialMap(db, serverstore.AppKindAgent)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
 			for _, p := range rows {
 				out = append(out, ApprovalRow{
 					Kind:        KindAgent,

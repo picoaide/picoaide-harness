@@ -349,7 +349,11 @@ export async function refreshCredentialTokens(
   try {
     resolved = await resolveAuthorizationServer(target, options)
   } catch (error) {
-    if (error instanceof OutboundUrlBlockedError) throw error
+    // A blocked URL must stay visible as a policy refusal, never be retried
+    // against the throwaway endpoint. Discovery re-classifies the authorize /
+    // token step as `auth-required`, so the original refusal rides along as the
+    // `cause` (2026-09-16 R9 audit).
+    if (error instanceof OutboundUrlBlockedError || (error as { cause?: unknown } | null)?.cause instanceof OutboundUrlBlockedError) throw error
     return { ok: false, reason: 'transient', message: hostT(locale, 'refresh.authorizationServerResolveFailed', { message: error instanceof Error ? error.message : String(error) }) }
   }
   if (resolved.failure) return resolved.failure

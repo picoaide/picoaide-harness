@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { DesktopShellSpec, DesktopUpdateSource } from '../src/runtime.ts'
+import { desktopDiagnosticsPrivacyCopy } from '../src/tray-locale.ts'
 
 /** 下载用例共用的更新源:客户端只从登录的那台服务端取包。 */
 const UPDATE_SOURCE: DesktopUpdateSource = {
@@ -757,8 +758,10 @@ describe('Electron compatibility runtime', () => {
     expect(diagnostics.export).toHaveBeenCalledTimes(2)
     expect(electron.shell.showItemInFolder)
       .toHaveBeenCalledWith('C:\\Users\\Example\\diagnostics-retry.zip')
+    // The error box follows the app language like the privacy dialog above it
+    // (2026-09-16 R2 audit); the default test locale is English.
     expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
-      'Unable to Export Diagnostics',
+      desktopDiagnosticsPrivacyCopy('en').errorTitle,
       'disk is full',
     )
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('failed to export diagnostics: disk is full'))

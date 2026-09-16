@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { ConnectorAuthRequest, ConnectorDef, DeviceAuthConfig, OAuthAuthConfig } from './types.ts'
 import type { ConnectorCredential } from './store.ts'
-import { assertOutboundUrlAllowed, OutboundUrlBlockedError, outboundFetch } from './outbound.ts'
+import { assertOutboundUrlAllowed, OutboundTimeoutError, OutboundUrlBlockedError, outboundFetch } from './outbound.ts'
 import { expiryFromResponse } from './token-lifetime.ts'
 import { DEFAULT_HOST_LOCALE, hostT, type HostLocale } from './host-copy.ts'
 import { ConnectorError } from './connector-error.ts'
@@ -36,9 +36,22 @@ function authRequired(message: string): ConnectorError {
  */
 const AUTHORIZING_STEPS = new Set(['OAuth 授权端点', 'OAuth token 端点', '设备授权验证地址'])
 
-/** Re-classify a step failure, or rethrow untouched when the step is not one of them. */
+/**
+ * Failures the pre-2026-09-16 substring rule classified as "authorize again".
+ *
+ * The old rule matched the STEP LABEL the policy errors interpolate (`OAuth token
+ * 端点 指向内网…`, `… 请求超时`). A network failure or a caller abort carries no
+ * label (`fetch failed`), so it stayed an ordinary error — re-classifying every
+ * throw here moved a flaky network to `unauthorized`, telling the user to
+ * re-authorize something that will never succeed (2026-09-16 R2 audit).
+ */
+function isClassifiedStepFailure(error: unknown): boolean {
+  return error instanceof OutboundUrlBlockedError || error instanceof OutboundTimeoutError
+}
+
+/** Re-classify a policy/timeout step failure, or rethrow everything else untouched. */
 function markAuthorizingStep(error: unknown, what: string): never {
-  if (!AUTHORIZING_STEPS.has(what) || error instanceof ConnectorError) throw error
+  if (!AUTHORIZING_STEPS.has(what) || error instanceof ConnectorError || !isClassifiedStepFailure(error)) throw error
   throw new ConnectorError('auth-required', error instanceof Error ? error.message : String(error), { cause: error })
 }
 
@@ -311,8 +324,13 @@ export async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOpt
     if (!meta.authorization_endpoint || !meta.token_endpoint) continue
     // The RFC 8414 document names the endpoints that will receive the
     // authorization code and the PKCE verifier: check all three before use.
-    const authorizationEndpoint = assertOutboundUrlAllowed(meta.authorization_endpoint, 'OAuth 授权端点', locale).toString()
-    const tokenEndpoint = assertOutboundUrlAllowed(meta.token_endpoint, 'OAuth token 端点', locale).toString()
+    // The authorize/token steps go through {@link flowUrl}: a policy-blocked
+    // endpoint here is the same "authorization is impossible" failure the flow
+    // steps report, and the connect flow classifies rows by the stable code
+    // (the pre-2026-09-16 substring rule matched 授权/token in these messages;
+    // a bare throw lost that classification — 2026-09-16 R9 audit).
+    const authorizationEndpoint = flowUrl(meta.authorization_endpoint, 'OAuth 授权端点', locale).toString()
+    const tokenEndpoint = flowUrl(meta.token_endpoint, 'OAuth token 端点', locale).toString()
     const registrationEndpoint = meta.registration_endpoint === undefined
       ? undefined
       : assertOutboundUrlAllowed(meta.registration_endpoint, 'OAuth 客户端注册端点', locale).toString()
@@ -634,7 +652,11 @@ async function runServerSide(def: ConnectorDef, options: AuthRunOptions): Promis
   const auth = def.auth as { fetchToken?: unknown }
   options.onRequest({ connectorId: def.id })
   if (typeof auth.fetchToken !== 'function') {
-    throw authRequired(hostT(locale, 'auth.serverMissingFetchToken'))
+    // A definition that cannot carry the callback is a CONFIGURATION problem,
+    // not "authorize again": the pre-2026-09-16 substring rule did not match
+    // this message either (`fetchToken` has a capital T), so it stays an
+    // ordinary error (2026-09-16 R9 audit).
+    throw new Error(hostT(locale, 'auth.serverMissingFetchToken'))
   }
   const accessToken = await (auth.fetchToken as () => Promise<string>)()
   if (!accessToken) throw authRequired(hostT(locale, 'auth.serverNoToken'))
