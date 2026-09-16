@@ -454,8 +454,17 @@ function loadState(stateFile, deps = {}) {
  */
 let quarantineNotice = null
 
+/** Marker file backing the pending notice (kept until a user session sees it). */
+let quarantineMarkerFile = null
+
 /**
- * Read and consume the quarantine marker（读一次即删）。
+ * Read the quarantine marker WITHOUT consuming it.
+ *
+ * The marker must survive until a session-bearing snapshot actually renders it:
+ * deleting it in apply() lost the notice whenever the user opened the app and
+ * quit before any model turn, or whenever a subagent's snapshot rendered first
+ * (2026-09-16 audit R2-E3). {@link consumeQuarantineNotice} runs on the first
+ * user-visible render and removes the file.
  * @param {string} stateFile - 状态文件路径。
  * @returns {object|null} 标记内容；不存在/不可读时为 null。
  */
@@ -463,11 +472,21 @@ function readQuarantineNotice(stateFile) {
   const marker = stateQuarantineMarker(stateFile)
   try {
     const parsed = JSON.parse(readFileSync(marker, 'utf8'))
-    unlinkSync(marker)
+    quarantineMarkerFile = marker
     return parsed !== null && typeof parsed === 'object' ? parsed : null
   } catch {
+    quarantineMarkerFile = null
     return null
   }
+}
+
+/** Consume the pending notice: forget it and unlink the marker file. */
+function consumeQuarantineNotice() {
+  quarantineNotice = null
+  const marker = quarantineMarkerFile
+  quarantineMarkerFile = null
+  if (marker === null) return
+  try { unlinkSync(marker) } catch { /* already gone / unlink refused: notice is spent anyway */ }
 }
 
 /**
@@ -680,9 +699,10 @@ export function renderSnapshot(config, store, agent, counter, sessionTitleServic
   // NF-A1：状态留档告知（一次性）。放在最前，确保模型在第一条回复就能告知用户。
   if (quarantineNotice !== null && quarantineNotice !== undefined) {
     parts.push(st('snap.stateQuarantined', { at: String(quarantineNotice.at ?? '') }))
-    // 一次性：快照在每轮提示词组装时都会重渲染，模块级变量不清零会把
-    // "设置被重置"永远注入下去（2026-09-16 审计 E3）。
-    quarantineNotice = null
+    // Consume only once a SESSION-BEARING snapshot rendered it: a subagent or
+    // background assembly must not swallow the user's only notification, and
+    // the marker file stays on disk until then so the next launch retries.
+    if (agent?.session?.id) consumeQuarantineNotice()
   }
   // 会话 ID 段（快照最前面的独立输出端，常驻注入，不随任何模块开关）：
   // AI 始终知道"我是谁"——广播消息判断 sender/recipients 谁是谁、回复时
