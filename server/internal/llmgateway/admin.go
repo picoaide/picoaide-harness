@@ -69,6 +69,9 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	serverauth.AdminRoute(g, "DELETE", "/models/:id", serverauth.PermGatewayWrite, func(c *gin.Context) { deleteModel(c, db) })
 	serverauth.AdminRoute(g, "GET", "/gateway", serverauth.PermGatewayRead, func(c *gin.Context) { getGatewayConfig(c, db) })
 	serverauth.AdminRoute(g, "PUT", "/gateway", serverauth.PermGatewayWrite, func(c *gin.Context) { setGatewayConfig(c, db) })
+	// 错误上报自检(P0-4/D3):服务端代发测试事件 + 客户端上报状态聚合(P1-3)。
+	serverauth.AdminRoute(g, "POST", "/gateway/error-reporting/test", serverauth.PermGatewayWrite, func(c *gin.Context) { testErrorReporting(c, db) })
+	serverauth.AdminRoute(g, "GET", "/gateway/error-reporting/clients", serverauth.PermGatewayRead, func(c *gin.Context) { errorReportingClients(c, db) })
 	serverauth.AdminRoute(g, "GET", "/channels", serverauth.PermGatewayRead, func(c *gin.Context) { listChannelsAdmin(c) })
 	serverauth.AdminRoute(g, "POST", "/providers/:id/sync", serverauth.PermGatewayWrite, func(c *gin.Context) { syncOneAdmin(c, db) })
 	serverauth.AdminRoute(g, "POST", "/providers/sync-all", serverauth.PermGatewayWrite, func(c *gin.Context) { syncAllAdmin(c, db) })
@@ -784,17 +787,18 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 		retention = fmt.Sprintf("%d", serverstore.DefaultRetentionMonths)
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"default_model":           settings["gateway.default_model"],
-		"rate_limit":              rateLimit,
-		"peak_windows":            settings[serverstore.PeakWindowsSetting], // 高峰时段 JSON;空 = 无峰谷价
-		"retention_months":        retention,                                // usage 明细保留月数(0=永久,默认 6)
-		"error_reporting_dsn":     settings["web.error_reporting_dsn"],
-		"error_reporting_enabled": settings["web.error_reporting_enabled"] == "true",
-		"error_reporting_level":   settings["web.error_reporting_level"],
-		"glitchtip_base_url":      settings["web.glitchtip_base_url"],
-		"glitchtip_organization":  settings["web.glitchtip_organization"],
-		"default_thinking_level":  settings["web.default_thinking_level"],
-		"server_base_url":         settings["server.base_url"],
+		"default_model":             settings["gateway.default_model"],
+		"rate_limit":                rateLimit,
+		"peak_windows":              settings[serverstore.PeakWindowsSetting], // 高峰时段 JSON;空 = 无峰谷价
+		"retention_months":          retention,                                // usage 明细保留月数(0=永久,默认 6)
+		"error_reporting_dsn":       settings["web.error_reporting_dsn"],
+		"error_reporting_enabled":   settings["web.error_reporting_enabled"] == "true",
+		"error_reporting_level":     settings["web.error_reporting_level"],
+		"error_reporting_heartbeat": settings["web.error_reporting_heartbeat"] == "true",
+		"glitchtip_base_url":        settings["web.glitchtip_base_url"],
+		"glitchtip_organization":    settings["web.glitchtip_organization"],
+		"default_thinking_level":    settings["web.default_thinking_level"],
+		"server_base_url":           settings["server.base_url"],
 	})
 }
 
@@ -837,17 +841,18 @@ func (f *FlexibleString) UnmarshalJSON(b []byte) error {
 // 服务端链路调整删除(客户端默认启用、无消费方),不再下发/读写。
 func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	var req struct {
-		DefaultModel          *string         `json:"default_model"`
-		RateLimit             *FlexibleString `json:"rate_limit"`
-		PeakWindows           *string         `json:"peak_windows"`
-		RetentionMonths       *string         `json:"retention_months"`
-		ErrorReportingDSN     *string         `json:"error_reporting_dsn"`
-		ErrorReportingEnabled *bool           `json:"error_reporting_enabled"`
-		ErrorReportingLevel   *string         `json:"error_reporting_level"`
-		GlitchTipBaseURL      *string         `json:"glitchtip_base_url"`
-		GlitchTipOrg          *string         `json:"glitchtip_organization"`
-		DefaultThinkingLevel  *string         `json:"default_thinking_level"`
-		ServerBaseURL         *string         `json:"server_base_url"`
+		DefaultModel            *string         `json:"default_model"`
+		RateLimit               *FlexibleString `json:"rate_limit"`
+		PeakWindows             *string         `json:"peak_windows"`
+		RetentionMonths         *string         `json:"retention_months"`
+		ErrorReportingDSN       *string         `json:"error_reporting_dsn"`
+		ErrorReportingEnabled   *bool           `json:"error_reporting_enabled"`
+		ErrorReportingLevel     *string         `json:"error_reporting_level"`
+		ErrorReportingHeartbeat *bool           `json:"error_reporting_heartbeat"`
+		GlitchTipBaseURL        *string         `json:"glitchtip_base_url"`
+		GlitchTipOrg            *string         `json:"glitchtip_organization"`
+		DefaultThinkingLevel    *string         `json:"default_thinking_level"`
+		ServerBaseURL           *string         `json:"server_base_url"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
@@ -880,10 +885,76 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
+	// 错误上报 DSN 准入校验(2026-09-16,R2)。**必须放在任何写库之前**:
+	// 拒绝时不允许留下半套已生效的配置(AC1:400 且 settings 未被写入),也不留
+	// 审计噪音。规则见 dsn.go(硬拒 loopback/链路本地/云 metadata;私网与
+	// http 只告警不阻断 —— 内网自建 GlitchTip 是合法主场景)。
+	//
+	// F-07(修复轮 1):**原样回提交不算"新的坏配置"**。
+	//
+	// 现场链路:库里可能存着本轮之前保存的坏 DSN(如 `http://…@localhost:8000/1`,
+	// 旧版 webadmin 零校验照收);而「网关」页没有 DSN 输入框,它 GET 整份配置后
+	// `{ ...cfg }` 原样回提交 —— 而这里的判定只看"字段是否出现",于是该页保存
+	// **任何**无关配置都会被 400 拦住,管理员在本页无法自救(复核实证:A)
+	// `PUT {rate_limit:321}` → 200;B) 整份回提交 → 400 且 rate_limit 未变)。
+	//
+	// 语义:只有"本次提交要把它**改成**另一个坏值"才拒绝;与库中现值逐字相同的
+	// 提交视为**未提供**(不写库、不变更、不审计),但仍透出告警,让管理员知道
+	// 库里那串不可用 —— 与"不把没有数据渲染成一切正常"的取向一致。
+	// 库里现存的 DSN(未提交该字段时也要读出来做跨字段判定与告警)。
+	storedDSN, storedDSNExists, _ := serverstore.GetSetting(db, "web.error_reporting_dsn")
+	var dsnInspection ErrorReportingDSN
+	dsnUnchanged := false
+	if req.ErrorReportingDSN != nil && storedDSNExists && storedDSN == *req.ErrorReportingDSN {
+		dsnUnchanged = true
+		req.ErrorReportingDSN = nil
+	}
+	if req.ErrorReportingDSN != nil {
+		dsnInspection = InspectErrorReportingDSN(*req.ErrorReportingDSN)
+		if dsnInspection.Rejected() {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", dsnInspection.Message)
+			return
+		}
+	}
 	// 审计(2026-09 P1):字段级变更明细捕获。
 	// 2026-09-11:默认 token/金额配额已下线(网关唯一闸门 = 余额),不再有
 	// quota_default_change 动作。
 	changes := []string{}
+	// 合法但有风险的配置(私网/明文 http)透出给 webadmin 显示黄色告警条(P2-3)。
+	warnings := []string{}
+	if req.ErrorReportingDSN != nil && dsnInspection.Message != "" {
+		warnings = append(warnings, "错误上报 DSN:"+dsnInspection.Message)
+	} else if dsnUnchanged {
+		if storedInspection := InspectErrorReportingDSN(storedDSN); storedInspection.Rejected() {
+			// 库中现值本身不可用:不阻断本页保存,但必须让管理员看见。
+			warnings = append(warnings, "错误上报 DSN:库中现有值不可用("+storedInspection.Message+");请在「错误监控」页更新它")
+		}
+	}
+	// F-13(修复轮 1):跨字段一致性 —— **不能保存"启用上报但没有 DSN"**。
+	//
+	// 复核实证:`PUT enabled=true + dsn=""` 返回 200 且入库(enabled="true"/dsn=""),
+	// 客户端侧 `initSentry('')` 直接返回 —— 一个字节都不发,而管理员看到"已保存"。
+	// 这是 R2 的跨字段形态(单字段都合法,组合起来必然不工作)。
+	//
+	// 判定用**生效后**的值(本次提交值 ?? 库中现值),且必须在任何写库之前 ——
+	// 否则会出现"enabled 已写、然后发现 dsn 为空"的半套配置。
+	{
+		effectiveEnabled := false
+		effectiveDSN := strings.TrimSpace(storedDSN)
+		if storedEnabled, found, err := serverstore.GetSetting(db, "web.error_reporting_enabled"); err == nil && found {
+			effectiveEnabled = storedEnabled == "true"
+		}
+		if req.ErrorReportingEnabled != nil {
+			effectiveEnabled = *req.ErrorReportingEnabled
+		}
+		if req.ErrorReportingDSN != nil {
+			effectiveDSN = strings.TrimSpace(*req.ErrorReportingDSN)
+		}
+		if effectiveEnabled && effectiveDSN == "" {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", ErrorReportingDSNEnabledWithoutDSNMessage)
+			return
+		}
+	}
 	if req.DefaultModel != nil {
 		old, _, _ := serverstore.GetSetting(db, "gateway.default_model")
 		if old != *req.DefaultModel {
@@ -919,6 +990,8 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		}
 	}
 	if req.ErrorReportingDSN != nil {
+		// 准入校验已在**任何写库之前**完成(见本函数上方 dsnInspection);
+		// 这里只负责写入与透出告警。
 		if err := auditSetSetting(db, "web.error_reporting_dsn", "错误上报DSN", *req.ErrorReportingDSN, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
@@ -939,6 +1012,14 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 			return
 		}
 		if err := auditSetSetting(db, "web.error_reporting_level", "错误上报等级", *req.ErrorReportingLevel, &changes); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if req.ErrorReportingHeartbeat != nil {
+		// D4:独立开关,**默认 false = 与今天行为完全一致**;不改 error_reporting_level
+		// 的取值与语义(红线)。
+		if err := auditSetSetting(db, "web.error_reporting_heartbeat", "错误上报心跳", strconv.FormatBool(*req.ErrorReportingHeartbeat), &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
@@ -978,7 +1059,7 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	if len(changes) > 0 {
 		_ = serverstore.AuditLog(db, auditActor(c), "gateway_config", strings.Join(changes, ", "))
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "warnings": warnings})
 }
 
 func modelEnabledByDB(db *sql.DB, name string) bool {

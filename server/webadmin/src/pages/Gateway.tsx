@@ -187,7 +187,22 @@ export default function Gateway() {
       ])
       setProviders(p.providers ?? [])
       setModels(m.models ?? [])
-      setCfg(g)
+      // F-07(修复轮 1):**只把本页自己的字段放进 state**。
+      //
+      // 此前是 `setCfg(g)` —— 整份 GET 响应(还含 error_reporting_dsn /
+      // error_reporting_enabled / glitchtip_base_url 等**错误监控域**字段)被塞进
+      // 本页 state,保存时又 `{ ...cfg }` 原样回提交:只要库里存着一个被新校验
+      // 拒绝的 DSN(现场 `http://…@localhost:8000/1` 就是本轮之前存进去的),
+      // 本页保存**任何**无关配置都会 400,而本页没有 DSN 输入框 ⇒ 管理员无法自救
+      // (复核实证:A) PUT {rate_limit:321} → 200;B) 整份回提交 → 400 且 rate_limit 未变)。
+      setCfg({
+        default_model: g.default_model ?? '',
+        rate_limit: String(g.rate_limit ?? '60'),
+        peak_windows: g.peak_windows ?? '',
+        retention_months: g.retention_months ?? '6',
+        default_thinking_level: g.default_thinking_level ?? 'max',
+        server_base_url: g.server_base_url ?? '',
+      })
       const peak = parsePeakWindows(g.peak_windows ?? '')
       if (peak.ok) {
         setPeakList(peak.rows)
@@ -197,7 +212,6 @@ export default function Gateway() {
         setPeakList([])
         setPeakParseFailed(true)
       }
-      setCfg(cfg => ({ ...cfg, retention_months: g.retention_months ?? '6' }))
       setChannels(ch.channels ?? [])
       setError('')
     } catch (err: any) {
@@ -246,7 +260,16 @@ export default function Gateway() {
       // 高峰时段由结构化列表序列化;空列表 = 清空(无峰谷价,审计修复 H1/M4)
       // 审计 2026-08-25 B2:线上只存业务字段,keyId 是纯 UI 稳定键,不落库。
       const peaked = peakList.map(({ keyId: _drop, ...fields }) => fields)
-      const body = { ...cfg, peak_windows: peaked.length ? JSON.stringify(peaked) : '' }
+      // F-07:显式白名单而不是 `{ ...cfg }` —— 提交面必须等于**本页可见字段**,
+      // 否则页面会替别的域(错误监控/配额等)回写值,把无关校验失败带到本页。
+      const body = {
+        default_model: cfg.default_model,
+        rate_limit: cfg.rate_limit,
+        retention_months: cfg.retention_months,
+        default_thinking_level: cfg.default_thinking_level,
+        server_base_url: cfg.server_base_url,
+        peak_windows: peaked.length ? JSON.stringify(peaked) : '',
+      }
       await request(`${ADMIN_API}/gateway`, { method: 'PUT', body: JSON.stringify(body) })
       setError('')
       // 本次写入已落库,本地编辑区就是服务端现值 ⇒ 解析失败标记与「已确认清空」

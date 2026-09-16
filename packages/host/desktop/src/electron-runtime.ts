@@ -12,6 +12,7 @@ import {
   app,
   BrowserWindow,
   dialog,
+  ipcMain,
   Menu,
   nativeImage,
   nativeTheme,
@@ -55,6 +56,12 @@ import {
 import { downloadDesktopUpdate } from './update-download.ts'
 import type { UpdateCheckResult } from './update-checker.ts'
 import { desktopWindowOptions } from './window-options.ts'
+import {
+  installRendererErrorCapture,
+  reportRendererError,
+  setRendererErrorSink,
+  type RendererErrorSink,
+} from './renderer-error-capture.ts'
 
 /** Read the desktop package version instead of Electron's development-app version.
  * @param moduleUrl - module below the package's `src` or `lib` directory.
@@ -151,6 +158,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private readonly pendingDeepLinks: string[] = []
   /** Session-open handler installed by the desktop-shell plugin (notification click). */
   private sessionOpenHandler: ((sessionId: string) => void) | undefined
+  /** Renderer error IPC listener disposer (installed once, at first window mount). */
+  private disposeRendererErrorCapture: (() => void) | undefined
 
   /**
    * Product name for native menus, trays, and update notifications.
@@ -355,6 +364,11 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     } catch (cause) {
       this.reportDiagnosticExportError(cause)
     }
+  }
+
+  /** @inheritdoc */
+  setRendererErrorSink(sink: RendererErrorSink): () => void {
+    return setRendererErrorSink(sink)
   }
 
   /** @inheritdoc */
@@ -758,6 +772,12 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (this.platform === 'darwin') app.dock?.setIcon(icon)
     const origin = new URL(spec.url).origin
     nativeTheme.themeSource = spec.readThemeSource()
+    // P0-6/D8:渲染进程错误通道的监听在**创建窗口之前**装好,避免窗口刚起来
+    // 就抛错而通道还没就绪(preload 是同步执行的,窗口一 mount 就可能发)。
+    // 幂等:重复 mount(重启/多代 shell)只装一次。
+    if (this.disposeRendererErrorCapture === undefined) {
+      this.disposeRendererErrorCapture = installRendererErrorCapture(ipcMain)
+    }
     const window = new BrowserWindow(desktopWindowOptions(spec, icon, this.platform))
     // P1-4: deny every renderer permission request by default. Electron
     // auto-grants camera/mic/geolocation etc. when no handler is set, which
@@ -869,6 +889,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     window.webContents.on('will-redirect', navigate)
     window.webContents.on('render-process-gone', (_event, details) => {
       this.logError(`dsh-plugin-desktop: renderer process gone (reason: ${details.reason}, exitCode: ${formatDesktopExitCode(details.exitCode)})`)
+      // P0-6/D8:渲染进程崩溃也要进错误上报(reason/exitCode 作为 tag)。
+      // 无 sink(未登录/未启用上报/无头组合)时静默丢弃。
+      reportRendererError({ type: 'render-process-gone', reason: details.reason, exitCode: details.exitCode })
       // P1-3: a crashed renderer must not leave a dead white window. Retry
       // the load once; if the reload also fails, show a native error surface
       // with a manual reload entry instead of silently logging.
