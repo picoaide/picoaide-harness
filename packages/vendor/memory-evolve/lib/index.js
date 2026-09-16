@@ -704,6 +704,12 @@ export function renderSnapshot(config, store, agent, counter, sessionTitleServic
     // so `session.id` alone would let the delegated agent swallow the user's
     // only notification; use the same predicate this module already uses at
     // `isSubagent` below (2026-09-16 audit R3).
+    // KNOWN LIMITATION (R4-F2): automation-created top-level sessions (cron,
+    // de_session spawn, webhook) carry no distinguishing header field today, so
+    // they still count as user-visible and can consume the notice first. A
+    // robust fix needs the host to expose a session-kind signal; the marker file
+    // is intentionally left in place until some session renders, so at least
+    // "open and quit" is covered.
     if (agent?.session?.id && agent.session.header?.origin !== 'subagent') consumeQuarantineNotice()
   }
   // 会话 ID 段（快照最前面的独立输出端，常驻注入，不随任何模块开关）：
