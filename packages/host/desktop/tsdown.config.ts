@@ -18,6 +18,8 @@ export default defineConfig([
       profile: 'src/profile.ts',
       'desktop-plugins': 'src/desktop-plugins.ts',
       diagnostics: 'src/diagnostics.ts',
+      // P0-6/D8:渲染进程错误契约(preload + 宿主 + 打包断言都引用它)。
+      'renderer-error-contract': 'src/renderer-error-contract.ts',
       'diagnostic-export-worker': 'src/diagnostic-export-worker.ts',
       runtime: 'src/runtime.ts',
       'electron-runtime': 'src/electron-runtime.ts',
@@ -40,6 +42,25 @@ export default defineConfig([
     dts: false,
     clean: false,
     sourcemap: true,
+  },
+  {
+    // Sandboxed preload (P0-6/D8): `sandbox: true` 下 Electron 不支持 ESM
+    // preload,而本包 `"type": "module"` 会把 .js 当 ESM —— 所以必须显式输出
+    // .cjs。入口路径也要与 window-options.ts 里的解析一致。
+    name: `${PACKAGE_NAME}/preload`,
+    entry: { 'preload/renderer-error': 'src/preload/renderer-error.ts' },
+    outDir: 'lib',
+    format: 'cjs',
+    platform: 'node',
+    target: 'es2024',
+    fixedExtension: false,
+    dts: false,
+    clean: false,
+    sourcemap: true,
+    external: ['electron'],
+    outputOptions: {
+      entryFileNames: 'preload/renderer-error.cjs',
+    },
   },
   {
     name: `${PACKAGE_NAME}/bin`,

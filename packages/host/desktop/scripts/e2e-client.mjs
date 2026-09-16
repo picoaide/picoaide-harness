@@ -140,6 +140,24 @@ async function screenshot(cdp, name) {
 
 const wait = ms => new Promise(r => setTimeout(r, ms))
 
+/**
+ * mock gateway 的 Sentry 摄取账本（`GET /__e2e/sentry-events`，见
+ * e2e-fixture-gateway.mjs）。`count` = 真实 event 条数（session item 不算）。
+ *
+ * 返回 null = 端点缺失/不可达（旧 fixture）。调用方必须把它当**失败**处理，
+ * 不能当"跳过"：旧 fixture 没有这个查询面，静默跳过就正好复刻本条断言要
+ * 消灭的那种"链路没跑过却全绿"。
+ */
+async function fetchSentryStats() {
+  try {
+    const res = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/__e2e/sentry-events`)
+    if (!res.ok) return null
+    return await res.json()
+  } catch {
+    return null
+  }
+}
+
 /** Evaluate with a safe wrapper: innerText can throw on Shadow DOM nodes. */
 async function evalSafe(cdp, expression) {
   const r = await cdp.send('Runtime.evaluate', { expression, returnByValue: true })
@@ -214,6 +232,11 @@ async function main() {
     }
   }
   if (!gatewayReady) throw new Error('mock gateway failed to start')
+
+  // 错误监控断言（下面 4.6）的基线：在 app 启动/登录**之前**读一次摄取计数，
+  // 断言只看"本次运行期间新增的 event"——这样即使复用了上一轮残留的 gateway
+  // 进程（计数非 0）也不会拿旧数据假绿。
+  const sentryBaseline = (await fetchSentryStats())?.count ?? 0
 
   // 2. Reuse an already-running app with CDP, otherwise launch one.
   let ready = false
@@ -317,6 +340,73 @@ async function main() {
   })()`)
   reportStep('客户端插件图已装载（__DSH_BOOT__ 非空）', (boot?.entries ?? 0) > 0,
     `entries=${boot?.entries} ids=${(boot?.ids ?? []).slice(0, 6).join(',')}`)
+
+  // 4.6 错误监控链路真实激活（P1-6，2026-09-16）。
+  //
+  // 这条断言存在的唯一理由：「客户端 → GlitchTip（错误监控后端）」链路此前**没有
+  // 任何**自动化护栏。fixture 里既硬编码生产 DSN、又缺 `error_reporting_enabled`，
+  // error-reporting.ts 于是按 `=== true` 判定为关闭并 initSentry('') —— E2E 一路
+  // 全绿，上报链路却从未执行过一次。现在 fixture 自报本地 mock DSN 且
+  // enabled=true / heartbeat=true，客户端 init 成功后会发一条带 `picoaide.heartbeat`
+  // tag 的正向事件（`客户端错误上报链路自检 (<release>)`），打到 fixture 自己的
+  // Sentry 摄取端点；这里断言它真的到了。
+  //
+  // 注意：客户端**不再**无条件发自检 —— 那条 info 自检只在
+  // `web.error_reporting_heartbeat === true` 时才发（2026-09-16 D4：level=error 的
+  // 部署不该被自检噪声打搅）。fixture 必须打开该开关，本断言才有可观测信号。
+  //
+  // 判据（首选的事件计数，不做"客户端状态看起来是启用的"弱判据）：登录完成后
+  // 轮询 mock gateway 的摄取账本（≤15s），要求 `count`（真实 event 条数，session
+  // item 不计）严格大于本次运行开始前的基线。计数上不去 => 断言失败 => 非零退出。
+  const sentryDeadline = Date.now() + 15000
+  let sentryStats = null
+  while (Date.now() < sentryDeadline) {
+    sentryStats = await fetchSentryStats()
+    if ((sentryStats?.count ?? 0) > sentryBaseline) break
+    await wait(500)
+  }
+  const sentryCount = sentryStats?.count ?? null
+  // 空数组/异常元素一律降级成 null：断言失败必须是**报出来的失败**，
+  // 不能因为 detail 拼装时读了 undefined 而变成致命异常。
+  const lastRawEvent = Array.isArray(sentryStats?.events) ? sentryStats.events.at(-1) : null
+  const lastSentryEvent = lastRawEvent !== null && typeof lastRawEvent === 'object' ? lastRawEvent : null
+  reportStep(
+    '错误监控链路真实激活（客户端 → GlitchTip 兼容摄取端点）',
+    typeof sentryCount === 'number' && sentryCount > sentryBaseline,
+    `events=${sentryCount ?? 'unreachable'} baseline=${sentryBaseline} auth=${JSON.stringify(sentryStats?.auth ?? null)} `
+      + `last=${JSON.stringify(lastSentryEvent === null ? null : { level: lastSentryEvent.level ?? null, message: lastSentryEvent.message ?? null })}`,
+  )
+
+  // 4.7 渲染进程未捕获错误**真的**进链路（修复轮 1 / F-01 + F-11）。
+  //
+  // 4.6 用的是**主进程**发的正向心跳，与"页面主世界的错误能不能被采集"正交 ——
+  // 修复前 4.6 全绿，而渲染采集在 `contextIsolation: true` 下一条都没工作
+  // （监听装在了隔离世界）。这条断言把那个缺口钉成行为级判据：
+  //   ① 用 CDP 在**页面主世界**真的抛一个未捕获错误（`Runtime.evaluate` 默认
+  //      执行在页面主世界；若改成隔离世界，本断言应当变红）；
+  //   ② 要求摄取账本里出现带 `picoaide.process=renderer` tag、且消息含**本次
+  //      一次性 marker** 的事件（marker 保证不是旧事件/心跳造成的假绿）。
+  const rendererMarker = `E2E_RENDERER_UNCAUGHT_${Date.now()}`
+  const rendererScheduled = await evalSafe(cdp, `(() => {
+    setTimeout(() => { throw new Error(${JSON.stringify(rendererMarker)}) }, 0)
+    return 'SCHEDULED'
+  })()`)
+  const rendererDeadline = Date.now() + 15000
+  let rendererEvent = null
+  while (Date.now() < rendererDeadline) {
+    const stats = await fetchSentryStats()
+    const events = Array.isArray(stats?.events) ? stats.events : []
+    rendererEvent = events.find((entry) => entry !== null && typeof entry === 'object'
+      && entry.process_tag === 'renderer'
+      && `${entry.exception_value ?? ''}${entry.message ?? ''}`.includes(rendererMarker)) ?? null
+    if (rendererEvent !== null) break
+    await wait(500)
+  }
+  reportStep(
+    '渲染进程未捕获错误真实进链路（页面主世界 → preload → IPC → 上报后端）',
+    rendererEvent !== null,
+    `marker=${rendererMarker} scheduled=${rendererScheduled} event=${JSON.stringify(rendererEvent)}`,
+  )
 
   // 5. Main surface assertions.
   const mainBtns = await evalSafe(cdp, `[...new Set([...document.querySelectorAll('button')].map(b => b.textContent?.trim()).filter(Boolean))]`)

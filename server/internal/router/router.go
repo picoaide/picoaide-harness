@@ -192,6 +192,10 @@ func registerClientV2(cli *gin.RouterGroup, d Deps) {
 
 	// 遥测
 	cli.POST("/telemetry/skill-call", serverauth.BearerAuth(d.DB), d.Telemetry.ReportSkillCall)
+	// 客户端错误上报状态(P1-3/D7):客户端回报自身 error-reporting 初始化结果,
+	// 管理端在「错误监控」页展示 N 台已启用 / M 台失败(不再靠猜)。非致命语义:
+	// 未知 state 静默 ok 不写库,限流复用 telemetry 的 callLimiter。
+	cli.POST("/telemetry/error-reporting", serverauth.BearerAuth(d.DB), d.Telemetry.ReportErrorReporting)
 }
 
 // registerGatewayV1 挂载 DeepSeek 兼容的 LLM 网关 API,与官方完全一致:
@@ -290,6 +294,11 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "DELETE", "/models/:id", serverauth.PermGatewayWrite, d.Gateway.DeleteModel)
 	serverauth.AdminRoute(authed, "GET", "/gateway", serverauth.PermGatewayRead, d.Gateway.GetGatewayConfig)
 	serverauth.AdminRoute(authed, "PUT", "/gateway", serverauth.PermGatewayWrite, d.Gateway.SetGatewayConfig)
+	// 错误上报自检 + 客户端状态聚合(2026-09-16 P0-4/P1-3):
+	// test = 服务端代发一条测试事件(D3:浏览器直发拿不到可读失败原因);
+	// clients = 客户端上报状态聚合(D7)。
+	serverauth.AdminRoute(authed, "POST", "/gateway/error-reporting/test", serverauth.PermGatewayWrite, d.Gateway.TestErrorReporting)
+	serverauth.AdminRoute(authed, "GET", "/gateway/error-reporting/clients", serverauth.PermGatewayRead, d.Gateway.ErrorReportingClients)
 	serverauth.AdminRoute(authed, "GET", "/channels", serverauth.PermGatewayRead, d.Gateway.ListChannelsAdmin)
 	// 按模型并发状态(当前 + 90 天峰值 + 目标;2026-08-31 扩容申请指标)
 	serverauth.AdminRoute(authed, "GET", "/concurrency", serverauth.PermGatewayRead, d.Gateway.ConcurrencyStatus)

@@ -936,3 +936,149 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 		t.Fatalf("rate_limit = %q ok=%v, want 120", v, ok)
 	}
 }
+
+// TestSetGatewayConfigRejectsLoopbackDSN 是 AC1 的 handler 级判据:绕过 webadmin
+// 直接 PUT 一个指向本机的 DSN,必须 400 + VALIDATION 信封,且**旧值不变**
+// (拒绝发生在任何写库之前 —— 连同请求里的其它字段也不落库)。
+func TestSetGatewayConfigRejectsLoopbackDSN(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	const good = "https://0123456789abcdef0123456789abcdef@glitchtip.example.com/1"
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway",
+		`{"error_reporting_dsn":"`+good+`","error_reporting_enabled":true}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("seed good dsn: %d %s", w.Code, w.Body.String())
+	}
+
+	// 现场值(REQUEST F6/F8):GlitchTip 缺 GLITCHTIP_DOMAIN 时后台展示的 DSN。
+	// 同一请求里还带一个合法字段,用来证明"拒绝时不产生半套配置"。
+	body := `{"error_reporting_dsn":"http://key@localhost:8000/1","rate_limit":"321"}`
+	w, out := adminReq(t, r, "PUT", "/api/server/admin/gateway", body, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("loopback dsn accepted: %d %s", w.Code, w.Body.String())
+	}
+	env, _ := out["error"].(map[string]any)
+	if env == nil || env["code"] != "VALIDATION" {
+		t.Fatalf("error envelope = %v, want VALIDATION", out)
+	}
+	if msg, _ := env["message"].(string); msg != ErrorReportingDSNBlockedMessage {
+		t.Fatalf("message = %q, want %q", msg, ErrorReportingDSNBlockedMessage)
+	}
+	if v, ok, _ := serverstore.GetSetting(db, "web.error_reporting_dsn"); !ok || v != good {
+		t.Fatalf("dsn changed on rejection: %q ok=%v, want %q", v, ok, good)
+	}
+	// 同请求里的合法字段也不允许落库(校验先于全部写入)。
+	if v, ok, _ := serverstore.GetSetting(db, "gateway.rate_limit"); ok && v == "321" {
+		t.Fatalf("partial write happened on rejected request: rate_limit = %q", v)
+	}
+
+	// 另外几个"必然不可用"的字面值同样必须被拒(不只 localhost)。
+	for _, dsn := range []string{
+		"http://key@127.0.0.1/1",
+		"http://key@127.1.2.3/1",
+		"http://key@[::1]/1",
+		"http://key@169.254.169.254/1",
+		"http://key@0.0.0.0/1",
+	} {
+		w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"error_reporting_dsn":"`+dsn+`"}`, hdr)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("dsn %q accepted: %d %s", dsn, w.Code, w.Body.String())
+		}
+	}
+	if v, _, _ := serverstore.GetSetting(db, "web.error_reporting_dsn"); v != good {
+		t.Fatalf("dsn changed after rejected batch: %q", v)
+	}
+}
+
+// TestSetGatewayConfigAcceptsPublicDSN 确保正常公网 DSN 行为与今天完全一致
+// (200 + 写库),并且私网/明文只告警不阻断(内网自建场景合法)。
+func TestSetGatewayConfigAcceptsPublicDSN(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	const dsn = "https://0123456789abcdef0123456789abcdef@glitchtip.example.com/1"
+	w, out := adminReq(t, r, "PUT", "/api/server/admin/gateway",
+		`{"error_reporting_dsn":"`+dsn+`"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("public dsn rejected: %d %s", w.Code, w.Body.String())
+	}
+	if v, ok, _ := serverstore.GetSetting(db, "web.error_reporting_dsn"); !ok || v != dsn {
+		t.Fatalf("dsn = %q ok=%v, want %q", v, ok, dsn)
+	}
+	if ws, _ := out["warnings"].([]any); len(ws) != 0 {
+		t.Fatalf("public https dsn must not warn: %v", ws)
+	}
+
+	// 私网 + http:合法(内网自建)但必须告警。
+	w, out = adminReq(t, r, "PUT", "/api/server/admin/gateway",
+		`{"error_reporting_dsn":"http://key@10.0.0.5/1"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("private dsn rejected: %d %s", w.Code, w.Body.String())
+	}
+	if v, _, _ := serverstore.GetSetting(db, "web.error_reporting_dsn"); v != "http://key@10.0.0.5/1" {
+		t.Fatalf("private dsn not persisted: %q", v)
+	}
+	ws, _ := out["warnings"].([]any)
+	if len(ws) != 1 {
+		t.Fatalf("warnings = %v, want exactly one entry", out["warnings"])
+	}
+	joined, _ := ws[0].(string)
+	if !strings.Contains(joined, "明文传输") || !strings.Contains(joined, "内网私有网段") {
+		t.Fatalf("warning text = %q, want http + private mentions", joined)
+	}
+
+	// 清空是合法操作(不启用上报)。
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"error_reporting_dsn":""}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("clearing dsn rejected: %d %s", w.Code, w.Body.String())
+	}
+	if v, _, _ := serverstore.GetSetting(db, "web.error_reporting_dsn"); v != "" {
+		t.Fatalf("dsn not cleared: %q", v)
+	}
+}
+
+// TestGatewayHeartbeatSetting:错误上报心跳开关的读写与审计(P1-2/D4)。
+//
+// 这是"未改变 error_reporting_level 语义"的服务端半边证据:心跳是**独立** settings
+// 键,与等级阈值互不影响(等级只接受原有四个取值)。
+func TestGatewayHeartbeatSetting(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	// 缺省 false(与今天行为一致)。
+	w, out := adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK || out["error_reporting_heartbeat"] != false {
+		t.Fatalf("default heartbeat = %v (code %d), want false", out["error_reporting_heartbeat"], w.Code)
+	}
+
+	// 打开
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"error_reporting_heartbeat":true}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("enable heartbeat: %d %s", w.Code, w.Body.String())
+	}
+	if v, ok, _ := serverstore.GetSetting(db, "web.error_reporting_heartbeat"); !ok || v != "true" {
+		t.Fatalf("heartbeat setting = %q ok=%v, want true", v, ok)
+	}
+	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
+	if out["error_reporting_heartbeat"] != true {
+		t.Fatalf("heartbeat readback = %v, want true", out["error_reporting_heartbeat"])
+	}
+
+	// 关闭
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"error_reporting_heartbeat":false}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("disable heartbeat: %d", w.Code)
+	}
+	if v, _, _ := serverstore.GetSetting(db, "web.error_reporting_heartbeat"); v != "false" {
+		t.Fatalf("heartbeat setting = %q, want false", v)
+	}
+
+	// 等级阈值的白名单**没有**因为心跳而放宽(红线:不改其语义/取值)。
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"error_reporting_level":"fatal"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("fatal level accepted: %d (error_reporting_level semantics must not change)", w.Code)
+	}
+	// 心跳开关不影响等级值:两者可独立保存。
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"error_reporting_level":"warning","error_reporting_heartbeat":true}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("independent save: %d %s", w.Code, w.Body.String())
+	}
+	if v, _, _ := serverstore.GetSetting(db, "web.error_reporting_level"); v != "warning" {
+		t.Fatalf("level = %q, want warning", v)
+	}
+}
