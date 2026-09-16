@@ -8,6 +8,7 @@ import {
   afterPack,
   assertBrandAssetSvg,
   PACKAGED_FLOCK_SMOKE_TIMEOUT_MS,
+  PACKAGED_SENTRY_SMOKE_TIMEOUT_MS,
   PACKAGED_WEB_BRAND_ASSETS,
   PACKAGED_WEB_BRAND_FAVICON,
   PACKAGED_WEB_BRAND_OFFICIAL,
@@ -21,6 +22,7 @@ import {
   resolvePackagedLauncherCandidates,
   resolvePackagedUnpackedRoot,
   smokePackagedDiagnosticWorker,
+  smokePackagedErrorReporting,
   smokePackagedFlockLock,
   verifyPackagedRuntime,
   type ArchiveLister,
@@ -29,6 +31,7 @@ import {
   type PackageEntryReader,
   type PackagedRuntimeContext,
   type PackagedDiagnosticWorkerLauncher,
+  type SentrySmokeLauncher,
 } from '../scripts/verify-packaged-runtime.ts'
 import { FORBIDDEN_MACOS_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
 
@@ -53,6 +56,8 @@ const REQUIRED_ASAR_EXPORT_PATHS = [
   'lib/updates.js',
   'lib/windows-agent-presets.js',
   'lib/windows-pwsh-sandbox.js',
+  // P0-6/D8(2026-09-16):渲染进程错误契约(preload 与宿主共用)。
+  'lib/renderer-error-contract.js',
   'node_modules/@deepseek-ai/dsh-base/package.json',
   'node_modules/@deepseek-ai/dsh-web-app/package.json',
   'node_modules/@picoaide/dsh-enterprise/lib/session-service.js',
@@ -60,6 +65,12 @@ const REQUIRED_ASAR_EXPORT_PATHS = [
   'node_modules/@picoaide/dsh-enterprise/lib/gateway-model.js',
   'node_modules/@picoaide/dsh-enterprise/lib/bootstrap.js',
   'node_modules/@picoaide/dsh-enterprise/lib/client.js',
+  // P1-1(2026-09-16):error-reporting 静态 import @sentry/node,掉出 asar 时整个插件
+  // 模块加载失败且零日志;同批补漏的 skill-telemetry / channel-sync / invariant。
+  'node_modules/@picoaide/dsh-enterprise/lib/error-reporting.js',
+  'node_modules/@picoaide/dsh-enterprise/lib/skill-telemetry.js',
+  'node_modules/@picoaide/dsh-enterprise/lib/channel-sync.js',
+  'node_modules/@picoaide/dsh-enterprise/lib/invariant.js',
   'node_modules/@picoaide/dsh-enterprise/package.json',
   'node_modules/@picoaide/dsh-connectors/lib/sales-easy.js',
   'node_modules/@picoaide/dsh-connectors/lib/client.js',
@@ -169,9 +180,15 @@ describe('packaged desktop runtime verification', () => {
       () => { calls.push('static') },
       async (workerRoot) => { calls.push(workerRoot) },
       () => { calls.push('flock') },
+      () => { calls.push('error-reporting') },
     )
 
-    expect(calls).toEqual(['static', expect.stringMatching(/resources[\\/]app$/u), 'flock'])
+    expect(calls).toEqual([
+      'static',
+      expect.stringMatching(/resources[\\/]app$/u),
+      'flock',
+      'error-reporting',
+    ])
   })
 
   it('tracks the ConPTY-only native surface shipped by node-pty 1.2', () => {
@@ -417,6 +434,16 @@ describe('packaged desktop runtime verification', () => {
   it('verifies required package exports resolve from the ASAR archive', () => {
     // 该用例由 verifyUnpackedPackageResolution 直接覆盖（见下）。
     expect(REQUIRED_PACKAGED_RUNTIME_ENTRIES.length).toBeGreaterThan(0)
+  })
+
+  it('requires the enterprise error-reporting export in app.asar', () => {
+    // P1-1:error-reporting 是静态 import @sentry/node 的插件模块。它掉出 app.asar
+    // 时 Cordis 加载整个模块失败且零日志 —— 静态清单必须在打包时先拦住。
+    const asarPath = '/node_modules/@picoaide/dsh-enterprise/lib/error-reporting.js'
+    const entries = completeArchiveEntries().filter(entry => entry !== asarPath)
+    expect(entries).not.toContain(asarPath)
+    expect(() => verifyWithBrandStub(context('/build', 'win32'), () => entries, () => true))
+      .toThrow(/error-reporting/u)
   })
 })
 
@@ -668,5 +695,99 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         expect(() => smokePackagedFlockLock(fixture.runtimeContext)).not.toThrow()
       },
     )
+  })
+
+  describe('packaged error-reporting smoke (P1-1)', () => {
+    /** 造一个"打包根":物理 app 根 + 一个可执行启动器(win32 带 .exe 后缀)。 */
+    function sentryFixture(electronPlatformName: string): {
+      runtimeContext: PackagedRuntimeContext
+      appRoot: string
+      launcher: string
+    } {
+      const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-sentry-fixture-'))
+      const runtimeContext: PackagedRuntimeContext = {
+        appOutDir,
+        electronPlatformName,
+        arch: 1,
+        packager: {
+          appInfo: { productFilename: 'PicoAide Harness' },
+          executableName: 'dsh-plugin-desktop',
+        },
+      }
+      const appRoot = join(appOutDir, 'resources', 'app')
+      mkdirSync(appRoot, { recursive: true })
+      writeFileSync(join(appRoot, 'package.json'), '{"name":"fixture"}\n')
+      const launcher = join(
+        appOutDir,
+        electronPlatformName === 'win32' ? 'dsh-plugin-desktop.exe' : 'dsh-plugin-desktop',
+      )
+      writeFileSync(launcher, '#!/bin/sh\n')
+      chmodSync(launcher, 0o755)
+      return { runtimeContext, appRoot, launcher }
+    }
+
+    const successResult = { status: 0, stdout: 'SENTRY-SMOKE-OK\n', stderr: '' }
+
+    it('fails the afterPack gate when the sentry smoke reports a missing module', async () => {
+      const fixture = sentryFixture('linux')
+      const launch = vi.fn<SentrySmokeLauncher>(() => ({
+        status: 1,
+        stdout: '',
+        stderr: "Error: Cannot find module '@sentry/node'",
+      }))
+
+      await expect(afterPack(
+        fixture.runtimeContext,
+        () => {},
+        async () => {},
+        () => {},
+        runtimeContext => { smokePackagedErrorReporting(runtimeContext, launch) },
+      )).rejects.toThrow(/Cannot find module '@sentry\/node'/u)
+      expect(launch).toHaveBeenCalledOnce()
+    })
+
+    it('fails when the sentry smoke exits 0 without the success marker', () => {
+      const fixture = sentryFixture('linux')
+      const vacuous: SentrySmokeLauncher = () => ({ status: 0, stdout: '', stderr: '' })
+      expect(() => smokePackagedErrorReporting(fixture.runtimeContext, vacuous))
+        .toThrow(/without reporting SENTRY-SMOKE-OK/u)
+    })
+
+    it('passes when the sentry smoke prints SENTRY-SMOKE-OK', () => {
+      const fixture = sentryFixture('linux')
+      const launch = vi.fn<SentrySmokeLauncher>((executable, args, env) => {
+        expect(executable).toBe(fixture.launcher)
+        expect(env.ELECTRON_RUN_AS_NODE).toBe('1')
+        expect(args[1]).toBe(fixture.appRoot)
+        // 脚本必须真的去 require @sentry/node 与 import error-reporting
+        // (而不是"打印 OK 就退出")。
+        const script = readFileSync(args[0] as string, 'utf8')
+        expect(script).toContain('@sentry/node')
+        expect(script).toContain('@picoaide/dsh-enterprise/error-reporting')
+        expect(script).toContain('SENTRY-SMOKE-OK')
+        return successResult
+      })
+      expect(() => smokePackagedErrorReporting(fixture.runtimeContext, launch)).not.toThrow()
+      expect(launch).toHaveBeenCalledOnce()
+      expect(PACKAGED_SENTRY_SMOKE_TIMEOUT_MS).toBe(10_000)
+    })
+
+    it('does not skip the sentry smoke on win32', () => {
+      // @sentry/node 是纯 JS:三个平台都必须跑。win32 分支若退化成 skip,
+      // Windows 安装包的 GlitchTip 采集会再次变成无人把关的静默失效。
+      const fixture = sentryFixture('win32')
+      const launch = vi.fn<SentrySmokeLauncher>(() => successResult)
+      expect(() => smokePackagedErrorReporting(fixture.runtimeContext, launch)).not.toThrow()
+      expect(launch).toHaveBeenCalledOnce()
+      expect(launch.mock.calls[0]?.[0]).toBe(fixture.launcher)
+    })
+
+    it('fails loud when the packaged launcher is missing instead of skipping', () => {
+      const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-sentry-nolauncher-'))
+      const launch = vi.fn<SentrySmokeLauncher>(() => successResult)
+      expect(() => smokePackagedErrorReporting(context(appOutDir, 'linux'), launch))
+        .toThrow(/cannot find the packaged launcher/u)
+      expect(launch).not.toHaveBeenCalled()
+    })
   })
 })

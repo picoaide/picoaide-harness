@@ -32,6 +32,13 @@ export interface BootstrapConfig {
     error_reporting_dsn?: string
     error_reporting_enabled?: boolean
     error_reporting_level?: string
+    /**
+     * 正向心跳开关(2026-09-16,D4):true 时客户端每次进程启动发一条带
+     * `picoaide.heartbeat` tag 的 info 事件,**只对该 tag 绕过**
+     * `error_reporting_level` 阈值 —— 等级阈值语义未改变;默认 false(与今天一致)。
+     * 用途:证明「客户端 → GlitchTip」这一跳活着(否则健康链路在后台也是一片空白)。
+     */
+    error_reporting_heartbeat?: boolean
     /** 服务端下发的默认思考强度(默认模型 reasoningEffort);缺省不覆盖用户设置 */
     default_thinking_level?: string
   }
