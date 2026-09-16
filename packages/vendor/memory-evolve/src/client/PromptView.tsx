@@ -180,6 +180,20 @@ function NumInput(props: {
  *   顶栏（搜索/筛选/注入中/新建/来源）→ 左分类树 → 中列表 → 右详情表单。
  * 操作成功（保存/删除/注入/移除）后重新拉取列表，保持数据一致。
  */
+/**
+ * Fill `{name}` placeholders in ONE pass.
+ *
+ * Chained `.replace('{a}', value).replace('{b}', value)` re-scans already
+ * inserted values, so a user-provided title/hint containing `{b}` would be
+ * silently rewritten. Values are data, never templates (2026-09-16 audit R4-F1).
+ * @param text - template text.
+ * @param values - placeholder values (missing keys stay literal).
+ * @returns the filled text.
+ */
+function fillPlaceholders(text: string, values: Record<string, string>): string {
+  return text.replace(/\{(\w+)\}/gu, (match, name: string) => (Object.hasOwn(values, name) ? values[name] : match))
+}
+
 export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element {
   const t = dict(props.t)
   const say = (key: DictKey): string => t(key)
@@ -381,11 +395,9 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
       : injection.roundsLeft === null
         ? say('prompt.injectedInfiniteEnding')
         : say('prompt.injectedFiniteEnding')
-    showNotice(say('prompt.injected')
-      .replace('{name}',() => (injection.title))
-      .replace('{rounds}',() => (times))
-      .replace('{cadence}',() => (cadence))
-      .replace('{ending}',() => (ending)))
+    showNotice(fillPlaceholders(say('prompt.injected'), {
+      name: injection.title, rounds: times, cadence, ending,
+    }))
     await load()
     setShowInjections(true)
     window.dispatchEvent(new CustomEvent('dsh-memory-evolve:badge-change'))
@@ -585,7 +597,7 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
       setRenameValue('')
       await load()
       const suffix = data.renamed > 0 ? say('prompt.categoryRenamedSuffix').replace('{count}',() => (String(data.renamed))) : ''
-      showNotice(`${say('prompt.categoryRenamed').replace('{from}',() => (from)).replace('{to}',() => (to)).replace('{renamed}',() => (''))}${suffix}`)
+      showNotice(`${fillPlaceholders(say('prompt.categoryRenamed'), { from, to, renamed: '' })}${suffix}`)
     } catch (err) {
       showError(errText(err))
     }
@@ -595,7 +607,7 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
   const removeCategory = async (name: string): Promise<void> => {
     const count = prompts.filter((p) => p.category === name).length
     const hint = count > 0 ? say('prompt.categoryMoved').replace('{count}',() => (String(count))) : ''
-    const confirmText = say('prompt.deleteCategoryConfirm').replace('{name}',() => (name)).replace('{hint}',() => (hint))
+    const confirmText = fillPlaceholders(say('prompt.deleteCategoryConfirm'), { name, hint })
     if (!window.confirm(confirmText)) return
     try {
       const data = await api<{ removed: boolean; moved: number }>(

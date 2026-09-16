@@ -97,11 +97,9 @@ function makeNotify(commandTemplate) {
     // 模板中替换为双引号引用的 "$DSH_COI_SUMMARY"，shell 展开时不会
     // 二次解析值内的元字符，从根上杜绝命令注入（P1-1）。
     // 其余占位符（taskId/coi/status）来自插件内部受控值，可直接替换。
+    const notifyValues = { taskId: taskId ?? '', coi: coi ?? '', status: status ?? '', summary: '"$DSH_COI_SUMMARY"' }
     const text = String(commandTemplate)
-      .replaceAll('{taskId}',() => (taskId ?? ''))
-      .replaceAll('{coi}',() => (coi ?? ''))
-      .replaceAll('{status}',() => (status ?? ''))
-      .replaceAll('{summary}',() => ('"$DSH_COI_SUMMARY"'))
+      .replaceAll(/\{(taskId|coi|status|summary)\}/gu, (match, key) => (Object.hasOwn(notifyValues, key) ? String(notifyValues[key]) : match))
     try {
       const child = spawn('sh', ['-c', text], {
         stdio: 'ignore',

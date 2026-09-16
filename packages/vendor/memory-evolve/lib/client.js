@@ -8275,6 +8275,9 @@ function NumInput(props) {
     )
   ] });
 }
+function fillPlaceholders(text, values) {
+  return text.replace(/\{(\w+)\}/gu, (match, name) => (Object.hasOwn(values, name) ? values[name] : match));
+}
 function PromptView(props) {
   const t = dict2(props.t);
   const say = (key) => t(key);
@@ -8425,7 +8428,7 @@ function PromptView(props) {
     const times = injection.roundsLeft === null ? say("prompt.injectInfiniteShort") : injection.roundsLeft === 1 ? say("prompt.onceOnly") : say("prompt.injectRound").replace("{n}",() => (String(injection.roundsLeft)));
     const cadence = injection.every === 0 || injection.roundsLeft === 1 ? "" : (injection.every ?? 1) === 1 ? say("prompt.everyTurnParen") : say("prompt.injectCadenceParen").replace("{n}",() => (String(injection.every)));
     const ending = injection.every === 0 || injection.roundsLeft === 1 ? say("prompt.injectedOnceEnding") : injection.roundsLeft === null ? say("prompt.injectedInfiniteEnding") : say("prompt.injectedFiniteEnding");
-    showNotice(say("prompt.injected").replace("{name}",() => (injection.title)).replace("{rounds}",() => (times)).replace("{cadence}",() => (cadence)).replace("{ending}",() => (ending)));
+    showNotice(fillPlaceholders(say("prompt.injected"), { name: injection.title, rounds: times, cadence, ending }));
     await load();
     setShowInjections(true);
     window.dispatchEvent(new CustomEvent("dsh-memory-evolve:badge-change"));
@@ -8580,7 +8583,7 @@ function PromptView(props) {
       setRenameValue("");
       await load();
       const suffix = data.renamed > 0 ? say("prompt.categoryRenamedSuffix").replace("{count}",() => (String(data.renamed))) : "";
-      showNotice(`${say("prompt.categoryRenamed").replace("{from}",() => (from)).replace("{to}",() => (to)).replace("{renamed}",() => (""))}${suffix}`);
+      showNotice(`${fillPlaceholders(say("prompt.categoryRenamed"), { from, to, renamed: "" })}${suffix}`);
     } catch (err) {
       showError(errText3(err));
     }
@@ -8588,7 +8591,7 @@ function PromptView(props) {
   const removeCategory = async (name2) => {
     const count = prompts.filter((p) => p.category === name2).length;
     const hint = count > 0 ? say("prompt.categoryMoved").replace("{count}",() => (String(count))) : "";
-    const confirmText = say("prompt.deleteCategoryConfirm").replace("{name}",() => (name2)).replace("{hint}",() => (hint));
+    const confirmText = fillPlaceholders(say("prompt.deleteCategoryConfirm"), { name: name2, hint });
     if (!window.confirm(confirmText)) return;
     try {
       const data = await api4(
@@ -17143,7 +17146,7 @@ var en = {
   "broadcast.settings.wsCoord.enabled": "Enable workspace coordination",
   "broadcast.settings.wsCoord.enabled.hint": 'Registers de_ws_declare / de_ws_status / de_ws_release tools + write-conflict detection listeners + the activity snapshot section. Depends on the "Session broadcast" master switch (unavailable while broadcast is off). Off by default',
   "broadcast.settings.wsCoord.snapshot": "Activity snapshot section",
-  "broadcast.settings.wsCoord.snapshot.hint": "When \u22652 sessions are active in the workspace, inject one \u3010Workspace activity\u3011 line into the per-turn snapshot (with the current time and what each session is doing); zero cost with 0-1 active sessions",
+  "broadcast.settings.wsCoord.snapshot.hint": "When \u22652 sessions are active in the workspace, inject one [Workspace activity] line into the per-turn snapshot (with the current time and what each session is doing); zero cost with 0-1 active sessions",
   "broadcast.settings.wsCoord.enforce": "Hard-block mode",
   "broadcast.settings.wsCoord.enforce.hint": "Off by default (soft mode: trust the AI \u2014 conflicts warn but never block); when on, writes to files occupied by other sessions are denied at the tool layer (deny), and the AI sees the reason and adjusts on its own",
   "broadcast.guide.intro.title": "What is Session Broadcast",
