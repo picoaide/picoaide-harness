@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { installAdvisor } from '../lib/advisor/index.js'
-import { DEFAULT_ADVISOR_SYSTEM_PROMPT } from '../lib/advisor/prompt.js'
+import { defaultAdvisorSystemPrompt } from '../lib/advisor/prompt.js'
 import { validateRuntimePatch } from '../lib/index.js'
 
 let seq = 0
@@ -473,7 +473,7 @@ test('Q5：config GET 返回默认提示词全文 + 新配置字段；PATCH 校�
   const { server, base, request } = await makeServer(rig.ctx)
   t.after(() => server.close())
   const cfg = await request('GET', '/memory-evolve/api/advisor/config')
-  assert.equal(cfg.json.config.defaultSystemPrompt, DEFAULT_ADVISOR_SYSTEM_PROMPT)
+  assert.equal(cfg.json.config.defaultSystemPrompt, defaultAdvisorSystemPrompt())
   assert.equal(cfg.json.config.advisorInfoInject, false)
   // PATCH 新字段
   const patched = await request('PATCH', '/memory-evolve/api/advisor/config', { patch: { advisorInfoInject: true } })

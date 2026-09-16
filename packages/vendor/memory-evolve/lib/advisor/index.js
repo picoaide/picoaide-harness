@@ -24,7 +24,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { translate, getLocale, MISC2_DICT } from '../i18n.js'
 
 /** Translate through MISC2_DICT in the active host locale. */
@@ -34,7 +34,7 @@ import { AdvisorRuntime } from './runtime.js'
 import { AdvisorConversation } from './conversation.js'
 import { ScopeStore } from './scopes.js'
 import { buildAdvisorSystemPrompt } from './prompt.js'
-import { ADVISOR_ROLE_PREFIX, DEFAULT_ADVISOR_SYSTEM_PROMPT } from './prompt.js'
+import { advisorRolePrefix, defaultAdvisorSystemPrompt } from './prompt.js'
 import { SessionTranscriptObserver } from './observer.js'
 import { AdvisorDelivery } from './delivery.js'
 import { InstructionQueue } from './instructions.js'
@@ -119,6 +119,34 @@ function atomicWriteFactory() {
 }
 
 /**
+ * 惰性建目录（P1-B，2026-09-16）：此前 `installAdvisor` 在**装载期**急切
+ * `mkdirSync` 三个子目录，即使 `advisorEnabled` 默认关（面板与命令都可能
+ * 永远用不到）——只读 home / 磁盘满 / 目录被文件占位时，mkdir 抛错冒泡到
+ * `apply()`，cordis 报 `plugin tree failed to load`，**整个桌面应用起不来**。
+ * 改为在真正要写的那一刻建目录：写入失败只影响 advisor 自身的持久化，
+ * 不再阻断插件装载。
+ * @param {string} dir - 要确保存在的目录（递归创建）。
+ */
+function ensureDir(dir) {
+  mkdirSync(dir, { recursive: true })
+}
+
+/**
+ * 惰性写目录工厂（instructions / conversations / session-scopes）：
+ * 首次写入时建目录，之后不再重复 mkdir。
+ * @param {string} dir - 目标目录。
+ * @returns {() => void} 幂等的"确保目录存在"回调。
+ */
+function lazyDir(dir) {
+  let ready = false
+  return () => {
+    if (ready) return
+    ensureDir(dir)
+    ready = true
+  }
+}
+
+/**
  * 评审员会话持久化读写（2026-08-12 用户拍板：重启恢复，仅 reset 清空）。
  * 文件结构 { epoch, messages, scopeText? }——scopeText 是评审会话约束
  * （四层级第 4 层），conversation 每次写入时保留它（reset 时自然清除）。
@@ -133,6 +161,7 @@ const readConversation = (dataDir, sessionId) => {
   }
 }
 const writeConversation = (dataDir, sessionId, epoch, messages, scopeText = '') => {
+  ensureDir(dirname(conversationFileOf(dataDir, sessionId)))
   // FIX-27（2026-09-13）：自锚定安全原子写（原 `.tmp-<pid>-<nonce>` 可预置）
   writeFileAtomicSafeAt(
     conversationFileOf(dataDir, sessionId),
@@ -158,11 +187,11 @@ export function installAdvisor(ctx, config, deps = {}) {
     logger.warn?.('advisor: 检测到 dsh-advisor 插件也在运行——两者会重复评审/投递，建议停用一个')
   }
   const dataDir = deps.dataDir
-  mkdirSync(join(dataDir, 'instructions'), { recursive: true })
-  // Q3 持久化（2026-08-12 用户拍板）：评审员会话落盘，重启恢复
-  mkdirSync(join(dataDir, 'conversations'), { recursive: true })
-  // 四层级约束（2026-08-12 用户拍板）：项目/会话/评审会话约束存储
-  mkdirSync(join(dataDir, 'session-scopes'), { recursive: true })
+  // P1-B（2026-09-16）：装载期不再急切建目录（见 ensureDir/lazyDir 注释）。
+  // 子目录在首次写入那一刻创建；advisor 关了 / home 只读都不再阻断插件装载。
+  const ensureInstructionsDir = lazyDir(join(dataDir, 'instructions'))
+  const ensureScopeDirs = lazyDir(join(dataDir, 'session-scopes'))
+  const ensureDataDir = lazyDir(dataDir)
   const disposers = []
 
   // ---- 约束存储（ScopeStore：项目按 cwd、会话按 sessionId、评审会话随 conversation 文件）----
@@ -170,7 +199,10 @@ export function installAdvisor(ctx, config, deps = {}) {
   const scopes = new ScopeStore({
     // 路径约定：ScopeStore 内部用相对 dataDir 路径，这里统一拼前缀
     // ⚠️ 必须透传 data（曾漏传导致 writeFileSync(tmp, undefined)）
-    writeFile: (rel, data) => atomicWrite(join(dataDir, rel), data),
+    writeFile: (rel, data) => {
+      ensureScopeDirs()
+      atomicWrite(join(dataDir, rel), data)
+    },
     readFile: (rel) => {
       try {
         return readFileSync(join(dataDir, rel), 'utf8')
@@ -179,7 +211,10 @@ export function installAdvisor(ctx, config, deps = {}) {
       }
     },
     conversationFileOf: (sessionId) => `conversations/${safeId(sessionId)}.json`,
-    writeConversation: (rel, data) => atomicWrite(join(dataDir, rel), data),
+    writeConversation: (rel, data) => {
+      ensureDataDir()
+      atomicWrite(join(dataDir, rel), data)
+    },
   })
 
   // ---- 存储与指令 ----
@@ -191,7 +226,10 @@ export function installAdvisor(ctx, config, deps = {}) {
   // O_EXCL 打开 + 按 fd 写入 + 打开后 inode/路径复检）。
   const store = new ReviewStore({
     recordsFile: join(dataDir, 'records.jsonl'),
-    appendFile: (path, data) => appendFileSafeAt(path, data),
+    appendFile: (path, data) => {
+      ensureDataDir()
+      appendFileSafeAt(path, data)
+    },
     onStorageError: (event) => {
       // MAJOR-2：存储失败转 runtime-status（前端 live union 只认识三类
       // 事件）；带 reviewId 的失败归属到对应会话
@@ -208,7 +246,10 @@ export function installAdvisor(ctx, config, deps = {}) {
     },
   })
   const instructions = new InstructionQueue({
-    writeFile: atomicWriteFactory(dataDir),
+    writeFile: (path, data) => {
+      ensureInstructionsDir()
+      atomicWriteFactory()(path, data)
+    },
     fileFor: (sessionId) => join(dataDir, 'instructions', `${safeId(sessionId)}.json`),
     readFile: (path) => {
       try {
@@ -241,6 +282,7 @@ export function installAdvisor(ctx, config, deps = {}) {
   }
   const persistOverrides = () => {
     try {
+      ensureDataDir()
       atomicWrite(overridesFile, JSON.stringify(Object.fromEntries(overrides)))
     } catch (error) {
       logger.warn?.('advisor: persist session overrides failed', { error })
@@ -335,14 +377,14 @@ export function installAdvisor(ctx, config, deps = {}) {
     const runtime = new AdvisorRuntime({
       provider: route.provider,
       model: route.model,
-      systemPrompt: `${ADVISOR_ROLE_PREFIX}\n\n${config.advisorSystemPrompt || DEFAULT_ADVISOR_SYSTEM_PROMPT}`,
+      systemPrompt: `${advisorRolePrefix()}\n\n${config.advisorSystemPrompt || defaultAdvisorSystemPrompt()}`,
       // 2026-08-12 用户拍板四层级：每次评审调用动态拼接
       // [固定角色前缀 + 系统提示词] + 项目约束 + 会话约束 + 评审会话约束——
       // 约束保存后无需重建 runtime，下次评审立即生效
       systemPromptOf: () => {
         const workspace = resolveCwd(sessionId)
         return buildAdvisorSystemPrompt({
-          system: `${ADVISOR_ROLE_PREFIX}\n\n${config.advisorSystemPrompt || DEFAULT_ADVISOR_SYSTEM_PROMPT}`,
+          system: `${advisorRolePrefix()}\n\n${config.advisorSystemPrompt || defaultAdvisorSystemPrompt()}`,
           global: scopes.globalOf(logger),
           project: workspace !== null && workspace !== '' ? scopes.projectOf(workspace, logger) : '',
           session: scopes.sessionOf(sessionId, logger),
@@ -457,7 +499,7 @@ export function installAdvisor(ctx, config, deps = {}) {
         advisorModel: typeof config.advisorModel === 'string' && config.advisorModel !== '' ? config.advisorModel : null,
         advisorSystemPrompt: config.advisorSystemPrompt ?? '',
         // Q5：内置默认提示词全文（前端空配置时回填显示，编辑保存即自定义）
-        defaultSystemPrompt: DEFAULT_ADVISOR_SYSTEM_PROMPT,
+        defaultSystemPrompt: defaultAdvisorSystemPrompt(),
         advisorPanelEnabled: config.advisorPanelEnabled !== false,
         advisorImmuneTurns: config.advisorImmuneTurns ?? 0,
         advisorSteerSeverities: Array.isArray(config.advisorSteerSeverities) ? config.advisorSteerSeverities : ['nit', 'concern', 'blocker'],
