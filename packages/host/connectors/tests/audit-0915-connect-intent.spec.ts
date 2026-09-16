@@ -302,6 +302,51 @@ describe('ConnectorStore.clearCredentialIfUnchanged：原子 compare-and-delete'
     }
   })
 
+  it('非法 updatedAt 被规范为 0，后续写入恢复单调', async () => {
+    const dir = await tempDir('pico-store-bad-updatedat-')
+    const store = new ConnectorStore({ baseDir: dir })
+    await store.writeCredential('c', { updatedAt: 1, fields: { apiKey: 'A' } })
+    // 手工把时间戳写坏：必须写 `1e999` 字面量（JSON.stringify(Infinity) 会先变成
+    // null，那样走不到数值校验分支）。解析后 typeof 是 number 但非有限。
+    const file = join(dir, 'c.json')
+    const fsPromises = await import('node:fs/promises')
+    const rawText = (await fsPromises.readFile(file, 'utf8')).replace(/"updatedAt":\s*\d+/u, '"updatedAt":1e999')
+    await fsPromises.writeFile(file, rawText)
+    const read = await store.readCredential('c')
+    expect(read?.updatedAt).toBe(0)
+    const written = await store.updateCredential('c', { accessToken: 'a1' })
+    expect(Number.isSafeInteger(written.updatedAt)).toBe(true)
+    expect(written.updatedAt).toBeGreaterThan(0)
+    const second = await store.updateCredential('c', { accessToken: 'a2' })
+    expect(second.updatedAt).toBeGreaterThan(written.updatedAt)
+  })
+
+  it('updateCredentialIfUnchanged：快照变了 / 文件没了都不写（断开不复活）', async () => {
+    const dir = await tempDir('pico-store-cas-update-')
+    const store = new ConnectorStore({ baseDir: dir })
+    const first = await store.updateCredential('c', { accessToken: 'a1', fields: { apiKey: 'A' } })
+    expect((await store.updateCredentialIfUnchanged('c', first, { accessToken: 'a2' }))?.accessToken).toBe('a2')
+    // 期望快照已经过期（盘上是 a2 的那次写）⇒ 不再覆盖更新结果
+    expect(await store.updateCredentialIfUnchanged('c', first, { accessToken: 'a3' })).toBeNull()
+    const second = await store.readCredential('c')
+    // 断开（文件被清）后迟到的刷新写入不得复活凭据
+    await store.clearCredential('c')
+    expect(await store.updateCredentialIfUnchanged('c', second!, { accessToken: 'a4' })).toBeNull()
+    expect(await store.readCredential('c')).toBeNull()
+  })
+
+  it('updateCredential 的 updatedAt 严格递增（同毫秒也不重复）', async () => {
+    const dir = await tempDir('pico-store-updatedat-')
+    const store = new ConnectorStore({ baseDir: dir })
+    const first = await store.updateCredential('c', { accessToken: 'a1' })
+    const second = await store.updateCredential('c', { accessToken: 'a2' })
+    const third = await store.updateCredential('c', { accessToken: 'a3' })
+    // adoptLatestRefresh relies on this ordering when a refresh and an
+    // interactive re-authorization land in the same millisecond.
+    expect(second.updatedAt).toBeGreaterThan(first.updatedAt)
+    expect(third.updatedAt).toBeGreaterThan(second.updatedAt)
+  })
+
   it('sameCredential 逐字段比较（含 clientId/clientSecret/refreshedAt，且不受 fields 键序影响）', async () => {
     const base = { updatedAt: 5, fields: { a: '1', b: '2' } }
     expect(sameCredential(base, { updatedAt: 5, fields: { b: '2', a: '1' } })).toBe(true)

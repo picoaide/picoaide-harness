@@ -12,6 +12,7 @@ import {
   app,
   BrowserWindow,
   dialog,
+  ipcMain,
   Menu,
   nativeImage,
   nativeTheme,
@@ -49,12 +50,19 @@ import {
   desktopCrashPageCopy,
   desktopDiagnosticsPrivacyCopy,
   desktopLocaleFromLanguageTag,
+  desktopStartupCopy,
   desktopTrayLabel,
   desktopUpdateDialogCopy,
 } from './tray-locale.ts'
 import { downloadDesktopUpdate } from './update-download.ts'
 import type { UpdateCheckResult } from './update-checker.ts'
 import { desktopWindowOptions } from './window-options.ts'
+import {
+  installRendererErrorCapture,
+  reportRendererError,
+  setRendererErrorSink,
+  type RendererErrorSink,
+} from './renderer-error-capture.ts'
 
 /** Read the desktop package version instead of Electron's development-app version.
  * @param moduleUrl - module below the package's `src` or `lib` directory.
@@ -151,6 +159,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private readonly pendingDeepLinks: string[] = []
   /** Session-open handler installed by the desktop-shell plugin (notification click). */
   private sessionOpenHandler: ((sessionId: string) => void) | undefined
+  /** Renderer error IPC listener disposer (installed once, at first window mount). */
+  private disposeRendererErrorCapture: (() => void) | undefined
 
   /**
    * Product name for native menus, trays, and update notifications.
@@ -358,6 +368,11 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   /** @inheritdoc */
+  setRendererErrorSink(sink: RendererErrorSink): () => void {
+    return setRendererErrorSink(sink)
+  }
+
+  /** @inheritdoc */
   reportRendererBoot(report: RendererBootReport): void {
     if (this.rendererBootReported) return
     this.rendererBootReported = true
@@ -464,12 +479,13 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     // 产品名取自 profile 组装配置（渠道构建下即渠道自己的名字）—— 失败弹窗
     // 是渠道客户最可能看到的"厂商品牌露出"位置之一。
     const product = this.productName
+    const copy = desktopStartupCopy(this.currentLocale)
     const result = await dialog.showMessageBox({
       type: 'error',
-      title: 'Plugin Recovery',
-      message: `${product} could not load all plugins.`,
-      detail: `Failed plugins:\n${plugins}\n\n${error}\n\nRestart ${product} after resolving the failing plugin.`,
-      buttons: [`Restart ${product}`, 'Dismiss'],
+      title: copy.pluginRecoveryTitle,
+      message: copy.pluginRecoveryMessage(product),
+      detail: copy.pluginRecoveryDetail(plugins, error, product),
+      buttons: [copy.pluginRecoveryRestart(product), copy.pluginRecoveryDismiss],
       defaultId: 0,
       cancelId: 1,
       noLink: true,
@@ -530,13 +546,16 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
   /** Report one user-triggered check without exposing network or response details. */
   private async showManualUpdateCheckResult(result: UpdateCheckResult | null): Promise<void> {
+    // 这一组对话框由托盘里已本地化的「检查更新…」触发，整段文案（含按钮）跟着
+    // 当前语言走（2026-09-16 R9 审计：此前恒英文）。
+    const copy = desktopUpdateDialogCopy(this.currentLocale)
     if (result === null) {
       await dialog.showMessageBox({
         type: 'warning',
-        title: 'Unable to Check for Updates',
-        message: `${this.productName} could not check for updates.`,
-        detail: 'Please try again later.',
-        buttons: ['OK'],
+        title: copy.checkFailedTitle(this.productName),
+        message: copy.checkFailedMessage(this.productName),
+        detail: copy.checkFailedDetail,
+        buttons: [copy.confirm],
         defaultId: 0,
         noLink: true,
       })
@@ -546,10 +565,10 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (result.status === 'up-to-date') {
       await dialog.showMessageBox({
         type: 'info',
-        title: `${this.productName} Is Up to Date`,
-        message: `No newer version of ${this.productName} is available.`,
-        detail: `Installed version: ${result.currentVersion}`,
-        buttons: ['OK'],
+        title: copy.upToDateTitle(this.productName),
+        message: copy.upToDateMessage(this.productName),
+        detail: copy.upToDateDetail(result.currentVersion),
+        buttons: [copy.confirm],
         defaultId: 0,
         noLink: true,
       })
@@ -558,10 +577,10 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
     await dialog.showMessageBox({
       type: 'info',
-      title: `${this.productName} Update Available`,
-      message: `${this.productName} ${result.latestVersion} is available.`,
-      detail: 'Installer downloads are unavailable in this build.',
-      buttons: ['OK'],
+      title: copy.availableTitle(this.productName),
+      message: copy.availableMessage(result.latestVersion, this.productName),
+      detail: copy.availableDetail,
+      buttons: [copy.confirm],
       defaultId: 0,
       noLink: true,
     })
@@ -652,26 +671,28 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     }
 
     if (this.platform === 'darwin') {
+      const copy = desktopUpdateDialogCopy(this.currentLocale)
       const openError = await shell.openPath(installerPath)
       if (openError !== '') throw new Error(`dsh-plugin-desktop: failed to open update disk image: ${openError}`)
       await dialog.showMessageBox({
         type: 'info',
-        title: `${this.productName} Update Downloaded`,
-        message: `${this.productName} ${version} is ready to install.`,
-        detail: `The disk image has opened. Replace ${this.productName} in Applications, then reopen it.`,
-        buttons: ['OK'],
+        title: copy.downloadedTitle(this.productName),
+        message: copy.downloadedMessage(version, this.productName),
+        detail: copy.darwinOpenedDetail(this.productName),
+        buttons: [copy.confirm],
         defaultId: 0,
         noLink: true,
       })
       return
     }
 
+    const copy = desktopUpdateDialogCopy(this.currentLocale)
     const result = await dialog.showMessageBox({
       type: 'info',
-      title: `${this.productName} Update Downloaded`,
-      message: `${this.productName} ${version} is ready to install.`,
-      detail: `Restart ${this.productName} and run the installer now?`,
-      buttons: ['Restart and Install', 'Later'],
+      title: copy.downloadedTitle(this.productName),
+      message: copy.downloadedMessage(version, this.productName),
+      detail: copy.winInstallDetail(this.productName),
+      buttons: [copy.winRestart, copy.winLater],
       defaultId: 1,
       cancelId: 1,
       noLink: true,
@@ -718,7 +739,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     const error = cause instanceof Error ? cause : new Error(String(cause))
     this.logError(`dsh-plugin-desktop: failed to export diagnostics: ${error.message}`)
     try {
-      dialog.showErrorBox('Unable to Export Diagnostics', error.message)
+      // User-visible native surface: same table as the privacy confirmation
+      // (2026-09-16 R2 audit — this one was still hard-coded English).
+      dialog.showErrorBox(desktopDiagnosticsPrivacyCopy(this.currentLocale).errorTitle, error.message)
     } catch (dialogCause) {
       this.logError(`dsh-plugin-desktop: failed to show diagnostics error: ${dialogCause instanceof Error ? dialogCause.message : String(dialogCause)}`)
     }
@@ -758,6 +781,12 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (this.platform === 'darwin') app.dock?.setIcon(icon)
     const origin = new URL(spec.url).origin
     nativeTheme.themeSource = spec.readThemeSource()
+    // P0-6/D8:渲染进程错误通道的监听在**创建窗口之前**装好,避免窗口刚起来
+    // 就抛错而通道还没就绪(preload 是同步执行的,窗口一 mount 就可能发)。
+    // 幂等:重复 mount(重启/多代 shell)只装一次。
+    if (this.disposeRendererErrorCapture === undefined) {
+      this.disposeRendererErrorCapture = installRendererErrorCapture(ipcMain)
+    }
     const window = new BrowserWindow(desktopWindowOptions(spec, icon, this.platform))
     // P1-4: deny every renderer permission request by default. Electron
     // auto-grants camera/mic/geolocation etc. when no handler is set, which
@@ -869,6 +898,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     window.webContents.on('will-redirect', navigate)
     window.webContents.on('render-process-gone', (_event, details) => {
       this.logError(`dsh-plugin-desktop: renderer process gone (reason: ${details.reason}, exitCode: ${formatDesktopExitCode(details.exitCode)})`)
+      // P0-6/D8:渲染进程崩溃也要进错误上报(reason/exitCode 作为 tag)。
+      // 无 sink(未登录/未启用上报/无头组合)时静默丢弃。
+      reportRendererError({ type: 'render-process-gone', reason: details.reason, exitCode: details.exitCode })
       // P1-3: a crashed renderer must not leave a dead white window. Retry
       // the load once; if the reload also fails, show a native error surface
       // with a manual reload entry instead of silently logging.

@@ -282,6 +282,76 @@ describe('TokenRefresher', () => {
     expect(stored?.expiresAt).toBeGreaterThan(Date.now())
   })
 
+  it('treats a user switch during the refresh as a silent no-op', async () => {
+    const server = await startServer({ rotateRefresh: true })
+    const { store } = tempStore()
+    await store.writeCredential('example-a', credential({ expiresAt: Date.now() - 1000 }))
+    let scope = 'user-a'
+    const announced: string[] = []
+    const refresher = new TokenRefresher({
+      read: (id) => store.readCredential(id),
+      write: (id, patch) => store.updateCredential(id, patch),
+      writeIfUnchanged: async () => { scope = 'user-b'; return null },
+      scope: () => scope,
+      target: () => discoveryTarget(server.origin),
+      onRefreshed: (id) => { announced.push(id) },
+    })
+    const outcome = await refresher.refresh('example-a', { force: true })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.reason).toBe('not-applicable')
+    expect(announced).toEqual([])
+  })
+
+  it('mirrors a NEWER credential instead of the stale refresh result when the CAS misses', async () => {
+    const server = await startServer({ rotateRefresh: true })
+    const { store } = tempStore()
+    const before = credential({ expiresAt: Date.now() - 1000 })
+    await store.writeCredential('example-a', before)
+    const announced: Array<{ id: string; token: string | undefined }> = []
+    const refresher = new TokenRefresher({
+      read: (id) => store.readCredential(id),
+      write: (id, patch) => store.updateCredential(id, patch),
+      // An interactive re-authorization (or SDK self-heal) won the write order
+      // while the refresh was on the wire: the refresh must not overwrite it,
+      // but the winning credential should be mirrored into live providers.
+      writeIfUnchanged: async (id) => {
+        await store.updateCredential(id, {
+          accessToken: 'at-newer', refreshToken: 'rt-newer', expiresAt: Date.now() + 3_600_000,
+        })
+        return null
+      },
+      target: () => discoveryTarget(server.origin),
+      onRefreshed: (id, tokens) => { announced.push({ id, token: tokens.accessToken }) },
+    })
+    const outcome = await refresher.refresh('example-a', { force: true })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.tokens.accessToken).toBe('at-newer')
+    expect(announced).toEqual([{ id: 'example-a', token: 'at-newer' }])
+    expect((await store.readCredential('example-a'))?.accessToken).toBe('at-newer')
+  })
+
+  it('treats a disconnect during the refresh as not-applicable and never resurrects', async () => {
+    const server = await startServer({ rotateRefresh: true })
+    const { store } = tempStore()
+    await store.writeCredential('example-a', credential({ expiresAt: Date.now() - 1000 }))
+    const announced: string[] = []
+    const refresher = new TokenRefresher({
+      read: (id) => store.readCredential(id),
+      write: (id, patch) => store.updateCredential(id, patch),
+      writeIfUnchanged: async (id) => { await store.clearCredential(id); return null },
+      target: () => discoveryTarget(server.origin),
+      onRefreshed: (id) => { announced.push(id) },
+    })
+    const outcome = await refresher.refresh('example-a', { force: true })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.reason).toBe('not-applicable')
+    expect(announced).toEqual([])
+    expect(await store.readCredential('example-a')).toBeNull()
+  })
+
   it('skips the round trip while the stored token is still fresh', async () => {
     const server = await startServer()
     const { store } = tempStore()

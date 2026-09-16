@@ -46,6 +46,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 	base := "/api/client/v2/telemetry"
 	g := r.Group(base, serverauth.BearerAuth(db))
 	g.POST("/skill-call", reportSkillCall(db))
+	g.POST("/error-reporting", reportErrorReporting(db))
 }
 
 // reportSkillCall increments the call counter for the reported skill. The

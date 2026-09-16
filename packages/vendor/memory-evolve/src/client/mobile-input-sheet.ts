@@ -244,7 +244,7 @@ function updateMenuGeometry(preferredRoot?: HTMLElement): void {
  *   注入；只用于注入按钮的 aria-label 等无障碍文案。
  * @returns dispose：移动模式退出/卸载时调用，清理按钮与监听。
  */
-export function createInputSheetEnhance(t: (key: string) => string): () => void {
+export function createInputSheetEnhance(t: (key: string, params?: Record<string, unknown>) => string): () => void {
   let disposed = false
   let observer: MutationObserver | null = null
   /** rAF 节流句柄：MutationObserver 高频触发时合并为每帧一次 ensure。 */

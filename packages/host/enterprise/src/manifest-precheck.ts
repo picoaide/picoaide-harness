@@ -68,11 +68,18 @@ const runes = (s: string): number => [...s].length
 const issue = (code: string, message: string, field?: string): PrecheckIssue =>
   field === undefined ? { code, message } : { code, field, message }
 
-/** 把 `{name}` 占位符替换成实参（与客户端 `t()` 的插值语义一致）。 */
+/**
+ * Fill `{name}` placeholders in ONE pass.
+ *
+ * A chained replaceAll re-scans already-inserted values, so a user field
+ * containing `{n}` would be rewritten while it is being reported (2026-09-16
+ * audit R5). Same shape as the client `t()` implementations.
+ * @param template - message template.
+ * @param params - placeholder values; unknown placeholders stay literal.
+ * @returns the filled message.
+ */
 function fill(template: string, params: Record<string, string | number>): string {
-  let text = template
-  for (const [name, value] of Object.entries(params)) text = text.replaceAll(`{${name}}`, String(value))
-  return text
+  return template.replace(/\{(\w+)\}/gu, (match, name: string) => (Object.hasOwn(params, name) ? String(params[name]) : match))
 }
 
 /** 预检文案：zh 为原文（逐字保留）, en 为镜像。 */

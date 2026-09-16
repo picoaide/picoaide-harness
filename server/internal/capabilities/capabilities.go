@@ -350,8 +350,18 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		skillOwners := appOwnerMap(db, serverstore.AppKindSkill, serverstore.AppChannelOrg)
 		agentOwners := appOwnerMap(db, serverstore.AppKindAgent, serverstore.AppChannelOrg)
 		// 官方属性(0059, App 级,与来源无关:market/org 行取同一 App)。
-		skillOfficials, _ := serverstore.AppOfficialMap(db, serverstore.AppKindSkill)
-		agentOfficials, _ := serverstore.AppOfficialMap(db, serverstore.AppKindAgent)
+		// 查询失败必须 500（与 listApprovals 两处同款）：吞掉后 map 为 nil，
+		// 整个能力中心会把所有官方内容标成非官方 —— 与事实相反的员工可见视图。
+		skillOfficials, err := serverstore.AppOfficialMap(db, serverstore.AppKindSkill)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		agentOfficials, err := serverstore.AppOfficialMap(db, serverstore.AppKindAgent)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
 
 		// 1) 市场技能(授权制)。
 		if includeMarket && ft.skills {
@@ -668,9 +678,19 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			}
 			// 归属映射(2026-09-02):owner 是 App 级,与版本无关,一次查询覆盖。
 			skillOwners := appOwnerMap(db, serverstore.AppKindSkill, "")
-			// 上下架状态(App 级,2026-09-15):同上,一次批量取。
-			skillEnabled, _ := serverstore.EnabledAppIDs(db, serverstore.AppKindSkill)
-			skillOfficials, _ := serverstore.AppOfficialMap(db, serverstore.AppKindSkill)
+			// 上下架状态 / 官方属性(App 级,2026-09-15):一次批量取;查询失败必须
+			// 返回 500 —— 吞掉后 map 为 nil,每条技能都会被标成 enabled=false,
+			// 运营看到与事实相反的「已下架」徽标。
+			skillEnabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindSkill)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			skillOfficials, err := serverstore.AppOfficialMap(db, serverstore.AppKindSkill)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
 			for _, s := range rows {
 				// 决策 2026-08-25:跨源同名(市场技能表已有同名)标记冲突,
 				// 管理端提示且 approve 将被 409 阻断。
@@ -706,7 +726,13 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				return
 			}
 			agentOwners := appOwnerMap(db, serverstore.AppKindAgent, "")
-			agentOfficials, _ := serverstore.AppOfficialMap(db, serverstore.AppKindAgent)
+			// 同 skills 分支：查询失败必须 500，不能吞。吞掉后 map 为 nil，
+			// 每条智能体都会被标成非官方（丢蓝标）——与事实相反的管理视图。
+			agentOfficials, err := serverstore.AppOfficialMap(db, serverstore.AppKindAgent)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
 			for _, p := range rows {
 				out = append(out, ApprovalRow{
 					Kind:        KindAgent,

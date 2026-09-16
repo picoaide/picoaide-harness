@@ -98,7 +98,16 @@ async function ensurePrivateDirectory(dir: string): Promise<void> {
 }
 
 export class ConnectorStore {
-  private readonly dir: string
+  /**
+   * The resolved per-account directory this store writes to.
+   *
+   * Callers that outlive a session reconfiguration (an in-flight SDK 401 write,
+   * a refresh) compare THIS to decide whether they still write to the account
+   * they started on. Comparing store instance identity would wrongly reject a
+   * same-account reconfiguration — the new instance points at the same
+   * directory and the write is both safe and necessary (2026-09-16 audit R2).
+   */
+  readonly dir: string
 
   constructor(options: ConnectorStoreOptions = {}) {
     // Default root: `<dshHome>/users/<encoded-user>/connectors`; a real user
@@ -129,6 +138,13 @@ export class ConnectorStore {
       // A hand-edited (or truncated) timestamp must not poison the refresh
       // cadence: only a finite positive number is a usable `expiresAt`.
       const record = value as ConnectorCredential
+      if (!Number.isSafeInteger(record.updatedAt) || record.updatedAt < 0) {
+        // A hand-edited 1e999 parses to Infinity and JSON.stringify writes null
+        // on the next save, after which the credential becomes unreadable. A
+        // value above 2^53 also breaks `+1` monotonicity. Treat it as "no
+        // timestamp": writes start from 0 and repair the file.
+        record.updatedAt = 0
+      }
       if (record.expiresAt !== undefined && (!Number.isFinite(record.expiresAt) || record.expiresAt <= 0)) {
         delete record.expiresAt
       }
@@ -171,7 +187,48 @@ export class ConnectorStore {
     // 复核把这条竞态也一并暴露出来）。
     return await this.exclusive(async () => {
       const current = (await this.readCredential(id)) ?? { updatedAt: 0 }
-      const next: ConnectorCredential = { ...current, ...patch, updatedAt: Date.now() }
+      // Strictly increasing per id: two writes inside one millisecond must still
+      // be ordered, because `adoptLatestRefresh` compares this value to decide
+      // whether a refresh is newer than a registration's credential snapshot.
+      // `Date.now()` alone collides at ms resolution and would make that
+      // comparison skip a genuine catch-up (or, with `>=`, adopt a stale one).
+      const now = Date.now()
+      const base = Number.isSafeInteger(current.updatedAt) && current.updatedAt >= 0 ? current.updatedAt : 0
+      const updatedAt = now > base ? now : base + 1
+      const next: ConnectorCredential = { ...current, ...patch, updatedAt }
+      await this.writeCredentialUnlocked(id, next)
+      return next
+    })
+  }
+
+  /**
+   * Compare-and-update: apply `patch` only while the stored credential is still
+   * exactly the snapshot `expected` describes.
+   *
+   * Refresh writes must go through this. A refresh reads a credential, spends up
+   * to the outbound budget on the network, and would otherwise overwrite a newer
+   * interactive re-authorization (stale tokens winning the write order) or
+   * resurrect a credential the user disconnected in the meantime (the file is
+   * deleted, yet `updateCredential` recreates it from `{updatedAt:0}`). Called on
+   * a different user's store the comparison also fails, so a refresh that
+   * outlives a user switch cannot write one account's tokens into another's.
+   * @param id - connector id.
+   * @param expected - the credential snapshot the refresh started from.
+   * @param patch - fields to merge when the snapshot still holds.
+   * @returns the persisted credential, or null when nothing was written.
+   */
+  async updateCredentialIfUnchanged(
+    id: string,
+    expected: ConnectorCredential,
+    patch: Partial<ConnectorCredential>,
+  ): Promise<ConnectorCredential | null> {
+    return await this.exclusive(async () => {
+      const current = await this.readCredential(id)
+      if (current === null || !sameCredential(current, expected)) return null
+      const now = Date.now()
+      const base = Number.isSafeInteger(current.updatedAt) && current.updatedAt >= 0 ? current.updatedAt : 0
+      const updatedAt = now > base ? now : base + 1
+      const next: ConnectorCredential = { ...current, ...patch, updatedAt }
       await this.writeCredentialUnlocked(id, next)
       return next
     })

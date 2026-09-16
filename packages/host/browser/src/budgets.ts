@@ -43,3 +43,16 @@ export const USER_GATE_RESERVE_MS = 20_000
  * `tool call timed out after 30000ms`，真正的"用户正拿着控制权"被吞掉。
  */
 export const USER_GATE_TIMEOUT_MS = BROWSER_TOOL_TIMEOUT_MS - USER_GATE_RESERVE_MS
+
+/**
+ * Longest condition wait `browser_wait_for` accepts (ms).
+ *
+ * The tool's own deadline must cover the user-gate budget + this wait + margin;
+ * registering it at exactly this value left zero margin, so a gate wait plus a
+ * full condition wait hit the deadline and the explicit "condition not met"
+ * result was replaced by the generic timeout (2026-09-16 audit R2-E4).
+ */
+export const WAIT_FOR_MAX_MS = 40_000
+
+/** Registered deadline of `browser_wait_for`: gate + max wait + 5s margin. */
+export const BROWSER_WAIT_FOR_DEADLINE_MS = USER_GATE_TIMEOUT_MS + WAIT_FOR_MAX_MS + 5_000

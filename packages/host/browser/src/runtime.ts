@@ -227,6 +227,13 @@ export interface WaitForOptions {
   selector?: string | undefined
   text?: string | undefined
   timeoutMs?: number | undefined
+  /**
+   * Absolute instant the whole tool call must return by (armed by the tool's
+   * registered deadline minus a margin). Deducted from the effective wait when
+   * the call actually starts running, so mutex/queue time counts against the
+   * wait instead of pushing the tool past its deadline (2026-09-16 audit R3-C).
+   */
+  deadlineAt?: number | undefined
 }
 
 /** Control/turn state shared by the shell payload, the sidebar hint and the
@@ -368,7 +375,15 @@ export class BrowserRuntime {
     this.guard = new BrowserGuard(adapter)
     this.partition = partition ?? BROWSER_PARTITION
     this.locale = deps.locale ?? (() => DEFAULT_HOST_LOCALE)
-    this.pool = deps.pool ?? new TabPool(options.maxTabs !== undefined ? { maxTabs: options.maxTabs } : {})
+    // The pool this runtime builds for itself must speak the same language as
+    // the runtime (its user-gate refusals reach the activity panel AND the
+    // model). Production composes a pool in `index.ts` with the same provider;
+    // this branch is for embedders/tests that only pass `locale`
+    // (2026-09-16 R9 audit: the provider was dropped here).
+    this.pool = deps.pool ?? new TabPool({
+      ...(options.maxTabs !== undefined ? { maxTabs: options.maxTabs } : {}),
+      locale: this.locale,
+    })
     if (deps.store !== undefined) this.store = deps.store
     else this.store = new BrowserStore({ dir: this.partition.replace(/[^a-zA-Z0-9_-]/g, '_') + '-store' })
     this.pool.onChange((event) => this.emitMapped(event))
@@ -1039,6 +1054,47 @@ export class BrowserRuntime {
     this.materializePendingTabs()
     this.window.show()
     this.relayout()
+  }
+
+  /**
+   * Re-serve the two chrome pages after the application language changed.
+   *
+   * The shell and overlay pages are rendered PER REQUEST, so a window that was
+   * created (or prewarmed) earlier keeps the language it was loaded with —
+   * switching the language in Settings left the whole chrome stale until the
+   * window was destroyed and reopened (2026-09-16 R9 audit).
+   *
+   * Only the chrome is reloaded: tab contents are separate views attached to the
+   * window and the user's browsing session must survive. A page that is not
+   * mounted (no window / no overlay) is skipped.
+   *
+   * The whole body is fenced: `loadURL` on a WebContents that Electron destroyed
+   * between the null check and the call throws SYNCHRONOUSLY, and this runs from
+   * a `ctx.emit` listener (an uncaught throw would skip every later listener of
+   * the same event) — 2026-09-16 R2 audit.
+   */
+  reloadChromePages(): void {
+    try {
+      const origin = this.shellOrigin
+      if (origin === undefined) return
+      const win = this.window
+      if (win !== null && !win.isDestroyed()) {
+        void win.loadURL(`${origin}/browser-shell`).catch(() => {
+          console.error('[dsh-browser] shell page reload after a language change failed')
+        })
+      }
+      const overlay = this.overlay
+      if (overlay !== null) {
+        void overlay.webContents.loadURL(`${origin}/browser-overlay`).catch(() => {
+          console.error('[dsh-browser] overlay page reload after a language change failed')
+        })
+      }
+    } catch (cause) {
+      // A window that vanished mid-switch (or a torn-down overlay) is not a
+      // failure the user needs to see: the next window creation renders in the
+      // current language anyway.
+      console.error('[dsh-browser] chrome reload after a language change failed', cause)
+    }
   }
 
   /**
@@ -2653,7 +2709,11 @@ export class BrowserRuntime {
       // 发生在拿到全局互斥之后 —— 中间标签页可以导航走。写入 DOM 之前用**同一个**
       // expectedOrigin 再比一次。
       if (expectedOrigin !== undefined && httpOriginOf(tab.url) !== expectedOrigin) {
-        throw browserError('policy', `browser_fill_credentials refused: the tab left ${expectedOrigin} before the injection ran (now ${tab.url}); credentials are only injected into their own site`)
+        // The tab may have navigated into an SSO/OAuth callback whose URL
+        // carries a one-time code/ticket. Redact exactly like every other
+        // model-facing URL exit: error.message lands in the model context and
+        // the session transcript (2026-09-16 audit E4).
+        throw browserError('policy', `browser_fill_credentials refused: the tab left ${expectedOrigin} before the injection ran (now ${redactFilledSecretsText(tab, stripSensitiveUrl(tab.url), { verbatim: true }).slice(0, 200)}); credentials are only injected into their own site`)
       }
       const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
         expression: `
@@ -2869,9 +2929,13 @@ export class BrowserRuntime {
   /** Wait for a page condition. */
   async waitFor(tabId: number, options: WaitForOptions, signal?: AbortSignal): Promise<{ ok: boolean; reason: string }> {
     const resolved = this.resolveTab(tabId)
-    const timeout = Math.min(options.timeoutMs ?? Math.min(this.options.timeoutMs, 30_000), 120_000)
-    const deadline = Date.now() + timeout
     return await this.agentRun('browser_wait_for', async () => {
+      // Compute the condition deadline INSIDE the critical section: whatever
+      // time the mutex/gate took is already spent budget.
+      const configured = options.timeoutMs ?? Math.min(this.options.timeoutMs, 30_000)
+      const remaining = options.deadlineAt === undefined ? Number.POSITIVE_INFINITY : options.deadlineAt - Date.now()
+      const timeout = Math.min(configured, 120_000, Math.max(0, remaining))
+      const deadline = Date.now() + timeout
       const tab = this.tab(resolved)
       const startUrl = tab.url
       let lastReason = 'timeout'

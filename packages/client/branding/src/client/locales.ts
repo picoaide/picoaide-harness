@@ -9,6 +9,8 @@
  * 走字典，两种语言下都自洽。
  */
 export const zh = {
+  /** 设置导航里该段的标题（`settings.section` 的 label，按语言现取）。 */
+  'about.sectionLabel': '关于 PicoAide',
   /** 「关于」段正文。 */
   'about.description': 'PicoAide 品牌与界面壳：品牌图形、主题色、悬浮徽章与关于页面全部经官方 client 插件 slot 注入，无上游代码分支。',
   /** 条目名：品牌插件。 */
@@ -22,6 +24,7 @@ export const zh = {
 }
 
 export const en: Record<keyof typeof zh, string> = {
+  'about.sectionLabel': 'About PicoAide',
   'about.description': 'PicoAide branding and shell: the brand mark, theme colours, overlay badge and About page are all injected through official client-plugin slots — no upstream code forks.',
   'about.brandPlugin': 'Brand plugin',
   'about.productVersion': 'Product version',
@@ -42,9 +45,11 @@ export function setActiveLocale(id: string): void {
 export function t(key: BrandingKey, params?: Record<string, string>): string {
   let text: string = (activeLocale === 'en' ? en[key] : zh[key]) as string
   if (params !== undefined) {
-    for (const [name, value] of Object.entries(params)) {
-      text = text.replaceAll(`{${name}}`, value)
-    }
+    // ONE pass over the template: a chained `replaceAll` per parameter re-scans
+    // the values it just inserted, so a value carrying another key's `{name}`
+    // token would be rewritten (2026-09-16 R9 audit; same shape as
+    // `manifest-precheck`'s `fill`).
+    text = text.replace(/\{(\w+)\}/gu, (match, name: string) => (Object.hasOwn(params, name) ? String(params[name]) : match))
   }
   return text
 }

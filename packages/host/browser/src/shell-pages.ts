@@ -87,7 +87,11 @@ interface BrowserShellCopy extends BrowserFailureCopy {
   readonly bookmark: string
   /** Tooltip of the overflow (⋮) button. */
   readonly more: string
-  /** Empty state. Authored markup: it carries the `<br/>` the layout expects. */
+  /**
+   * Empty state. Two lines separated by `\n`; the renderer escapes each line and
+   * joins them with `<br/>`, so a translation can never inject markup
+   * (2026-09-16 R9 audit: this field used to be interpolated raw).
+   */
   readonly empty: string
   /** Title shown for a tab that has neither a title nor a URL yet. */
   readonly tabFallback: string
@@ -110,7 +114,7 @@ const SHELL_COPY: Readonly<Record<HostLocale, BrowserShellCopy>> = {
     addrLabel: '地址栏',
     bookmark: '收藏到书签',
     more: '更多',
-    empty: '打开浏览器，AI 会在需要时自动打开网页。<br/>你也可以点右上角 ＋ 先自己逛起来。',
+    empty: '打开浏览器，AI 会在需要时自动打开网页。\n你也可以点右上角 ＋ 先自己逛起来。',
     tabFallback: '新标签',
     closeTab: '关闭标签',
     nothingToBookmark: '当前没有可收藏的页面',
@@ -127,7 +131,7 @@ const SHELL_COPY: Readonly<Record<HostLocale, BrowserShellCopy>> = {
     addrLabel: 'Address bar',
     bookmark: 'Bookmark this page',
     more: 'More',
-    empty: 'Open the browser: the AI opens pages here automatically when it needs to.<br/>You can also click ＋ in the top right to start browsing on your own.',
+    empty: 'Open the browser: the AI opens pages here automatically when it needs to.\nYou can also click ＋ in the top right to start browsing on your own.',
     tabFallback: 'New tab',
     closeTab: 'Close tab',
     nothingToBookmark: 'There is no page to bookmark right now',
@@ -141,6 +145,19 @@ function escapeHtml(value: string): string {
     .replace(/</gu, '&lt;')
     .replace(/>/gu, '&gt;')
     .replace(/"/gu, '&quot;')
+}
+
+/**
+ * Render the two-line empty state: every line is escaped, then joined with the
+ * `<br/>` the layout wants. The dictionary therefore stays pure data — a
+ * translation can never inject markup or close a `<script>` (2026-09-16 R9
+ * audit: this was the only raw `${copy}` interpolation left on the page).
+ * Exported so the escaping can be pinned directly against a hostile translation.
+ * @param value - the locale's empty-state copy (`\n` between lines).
+ * @returns HTML-safe markup with literal line breaks.
+ */
+export function emptyHtml(value: string): string {
+  return value.split('\n').map(escapeHtml).join('<br/>')
 }
 
 /**
@@ -163,7 +180,7 @@ function scriptCopy(value: object): string {
 export function browserShellHtml(locale: HostLocale): string {
   const c = SHELL_COPY[locale]
   return `<!DOCTYPE html>
-<html lang="${c.lang}">
+<html lang="${escapeHtml(c.lang)}">
 <head>
 <meta charset="utf-8">
 <title>${escapeHtml(c.title)}</title>
@@ -262,7 +279,7 @@ export function browserShellHtml(locale: HostLocale): string {
   </div>
   <div id="empty" hidden>
     <div class="hero">◎</div>
-    <div class="msg">${c.empty}</div>
+    <div class="msg">${emptyHtml(c.empty)}</div>
   </div>
 <script>
   // Per-locale copy for this page (see browserShellHtml).
@@ -296,7 +313,7 @@ export function browserShellHtml(locale: HostLocale): string {
     if (status === 503) return COPY.failService
     if (data && typeof data.error === 'string' && data.error !== '') return COPY.failPrefix + data.error
     if (status === 0) return COPY.failNetwork
-    return COPY.failHttp.replace('{status}', String(status))
+    return COPY.failHttp.replace('{status}', () => String(status))
   }
 
   /** 读 JSON：4xx（代理异常时甚至是 HTML）一律不抛给调用点。 */
@@ -718,7 +735,7 @@ const OVERLAY_COPY: Readonly<Record<HostLocale, BrowserOverlayCopy>> = {
 export function browserOverlayHtml(locale: HostLocale): string {
   const c = OVERLAY_COPY[locale]
   return `<!DOCTYPE html>
-<html lang="${c.lang}">
+<html lang="${escapeHtml(c.lang)}">
 <head>
 <meta charset="utf-8">
 <style>
@@ -899,7 +916,7 @@ export function browserOverlayHtml(locale: HostLocale): string {
     if (status === 503) return COPY.failService
     if (data && typeof data.error === 'string' && data.error !== '') return COPY.failPrefix + data.error
     if (status === 0) return COPY.failNetwork
-    return COPY.failHttp.replace('{status}', String(status))
+    return COPY.failHttp.replace('{status}', () => String(status))
   }
 
   /** 读 JSON：4xx（代理异常时甚至是 HTML）一律不抛给调用点。 */

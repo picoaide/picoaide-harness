@@ -79,9 +79,14 @@ type DictKey = Extract<MemoryEvolveKey, `prompt.${string}`>
  *
  * ⚠️ 必须每个组件各持一份（`const t = dict(props.t)`）：模块级常量/闭包在
  * 求值时早于插件 apply，那时 t 只能拿到默认语言，等于把界面语言钉死。
+ *
+ * ⚠️ `params` 必须透传：本视图目前用 `fillPlaceholders` 自己插值，所以收窄成
+ * `(key) => t(key)` 暂时看不出问题；但同一个包装器在 CoIView 上已经因为丢参
+ * 把 9 处文案渲染成 `{count}` 模板原文（2026-09-16 R9 审计 P1），这里保持同一
+ * 形状以免重蹈。
  */
-function dict(t: Translate): (key: DictKey) => string {
-  return (key) => t(key)
+function dict(t: Translate): (key: DictKey, params?: Record<string, unknown>) => string {
+  return (key, params) => t(key, params)
 }
 
 /** 统一错误文本。 */
@@ -140,11 +145,11 @@ function EffectHint(props: {
   if (e === 0) {
     text = D('prompt.effectOnce') // 间隔 0 = 一次性（次数被覆盖为 1）
   } else if (r === 0) {
-    text = e === 1 ? D('prompt.effectInfinite') : D('prompt.effectInfiniteCadence').replace('{n}', String(e))
+    text = e === 1 ? D('prompt.effectInfinite') : D('prompt.effectInfiniteCadence').replace('{n}',() => (String(e)))
   } else if (r === 1) {
     text = D('prompt.effectOnce')
   } else {
-    text = e === 1 ? D('prompt.effectFinite').replace('{n}', String(r)) : D('prompt.effectFiniteCadence').replace('{n}', String(r)).replace('{m}', String(e))
+    text = e === 1 ? D('prompt.effectFinite').replace('{n}',() => (String(r))) : D('prompt.effectFiniteCadence').replace('{n}',() => (String(r))).replace('{m}',() => (String(e)))
   }
   return <div className="pm-effect-hint">{text}</div>
 }
@@ -180,9 +185,25 @@ function NumInput(props: {
  *   顶栏（搜索/筛选/注入中/新建/来源）→ 左分类树 → 中列表 → 右详情表单。
  * 操作成功（保存/删除/注入/移除）后重新拉取列表，保持数据一致。
  */
+/**
+ * Fill `{name}` placeholders in ONE pass.
+ *
+ * Chained `.replace('{a}', value).replace('{b}', value)` re-scans already
+ * inserted values, so a user-provided title/hint containing `{b}` would be
+ * silently rewritten. Values are data, never templates (2026-09-16 audit R4-F1).
+ * @param text - template text.
+ * @param values - placeholder values (missing keys stay literal).
+ * @returns the filled text.
+ */
+function fillPlaceholders(text: string, values: Record<string, string>): string {
+  return text.replace(/\{(\w+)\}/gu, (match, name: string) => (Object.hasOwn(values, name) ? values[name] : match))
+}
+
 export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element {
   const t = dict(props.t)
-  const say = (key: DictKey): string => t(key)
+  // `params` 必须透传（与 dict() 同一条契约）：缺失会把 {name} 之类的模板原文
+  // 直接渲染给用户（2026-09-16 R9/R2 审计）。
+  const say = (key: DictKey, params?: Record<string, unknown>): string => t(key, params)
 
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [injections, setInjections] = useState<Injection[]>([])
@@ -251,7 +272,7 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
       setInjections(i.injections)
       setCategories(c.categories)
     } catch (err) {
-      showError(say('prompt.loadFailed').replace('{message}', errText(err)))
+      showError(say('prompt.loadFailed').replace('{message}',() => (errText(err))))
     }
   }, [showError])
 
@@ -345,7 +366,7 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
 
   const deletePrompt = async (): Promise<void> => {
     if (selectedId === null) return
-    const text = say('prompt.deleteConfirm').replace('{name}', selected?.name ?? '')
+    const text = say('prompt.deleteConfirm').replace('{name}',() => (selected?.name ?? ''))
     if (!window.confirm(text)) return
     try {
       await api(`/memory-evolve/api/prompts/${encodeURIComponent(selectedId)}`, { method: 'DELETE' })
@@ -368,24 +389,22 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
       ? say('prompt.injectInfiniteShort')
       : injection.roundsLeft === 1
         ? say('prompt.onceOnly')
-        : say('prompt.injectRound').replace('{n}', String(injection.roundsLeft))
+        : say('prompt.injectRound').replace('{n}',() => (String(injection.roundsLeft)))
     // 节奏括号：every=0 或只注入一次（roundsLeft=1）时省略——一次性注入
     // 无需说明节奏，避免"只注入一次（每回合出现）"的矛盾感
     const cadence = injection.every === 0 || injection.roundsLeft === 1
       ? ''
       : (injection.every ?? 1) === 1
         ? say('prompt.everyTurnParen')
-        : say('prompt.injectCadenceParen').replace('{n}', String(injection.every))
+        : say('prompt.injectCadenceParen').replace('{n}',() => (String(injection.every)))
     const ending = injection.every === 0 || injection.roundsLeft === 1
       ? say('prompt.injectedOnceEnding')
       : injection.roundsLeft === null
         ? say('prompt.injectedInfiniteEnding')
         : say('prompt.injectedFiniteEnding')
-    showNotice(say('prompt.injected')
-      .replace('{name}', injection.title)
-      .replace('{rounds}', times)
-      .replace('{cadence}', cadence)
-      .replace('{ending}', ending))
+    showNotice(fillPlaceholders(say('prompt.injected'), {
+      name: injection.title, rounds: times, cadence, ending,
+    }))
     await load()
     setShowInjections(true)
     window.dispatchEvent(new CustomEvent('dsh-memory-evolve:badge-change'))
@@ -443,7 +462,7 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
         { method: 'POST', body: JSON.stringify({ immediate: true, sessionId: props.sessionId }) },
       )
       const name = data.injection.title
-      showNotice(data.steered ? say('prompt.injectedNow').replace('{name}', name) : say('prompt.injectedNowFallback').replace('{name}', name))
+      showNotice(data.steered ? say('prompt.injectedNow').replace('{name}',() => (name)) : say('prompt.injectedNowFallback').replace('{name}',() => (name)))
       await load()
       setShowInjections(true)
       window.dispatchEvent(new CustomEvent('dsh-memory-evolve:badge-change'))
@@ -508,7 +527,7 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
         )
       if (immediate) {
         const name = data.injection.title
-        showNotice((data as { steered: boolean }).steered ? say('prompt.injectedNow').replace('{name}', name) : say('prompt.injectedNowFallback').replace('{name}', name))
+        showNotice((data as { steered: boolean }).steered ? say('prompt.injectedNow').replace('{name}',() => (name)) : say('prompt.injectedNowFallback').replace('{name}',() => (name)))
       } else {
         await afterInjected(data.injection)
       }
@@ -540,12 +559,12 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
     if (inj.every === 0) return say('prompt.onceOnly')
     return (inj.every ?? 1) === 1
       ? say('prompt.everyTurn')
-      : say('prompt.injectCadence').replace('{n}', String(inj.every))
+      : say('prompt.injectCadence').replace('{n}',() => (String(inj.every)))
   }
 
   /** 剩余次数文案（null = 无限）。 */
   const remainingLabel = (inj: Injection): string =>
-    inj.roundsLeft === null ? say('prompt.injectInfinite') : say('prompt.injectRound').replace('{n}', String(inj.roundsLeft))
+    inj.roundsLeft === null ? say('prompt.injectInfinite') : say('prompt.injectRound').replace('{n}',() => (String(inj.roundsLeft)))
 
   /** 添加分类（受管列表）。**幂等**：同名已存在时不报错，提示并选中已有分类。 */
   const addCategory = async (): Promise<void> => {
@@ -560,7 +579,7 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
       setCategory(name)
       setNewCategoryName('')
       setAddingCategory(false)
-      if (data.alreadyExists) showNotice(say('prompt.categoryExists').replace('{name}', name))
+      if (data.alreadyExists) showNotice(say('prompt.categoryExists').replace('{name}',() => (name)))
     } catch (err) {
       showError(errText(err))
     }
@@ -584,8 +603,8 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
       setRenamingCategory(null)
       setRenameValue('')
       await load()
-      const suffix = data.renamed > 0 ? say('prompt.categoryRenamedSuffix').replace('{count}', String(data.renamed)) : ''
-      showNotice(`${say('prompt.categoryRenamed').replace('{from}', from).replace('{to}', to).replace('{renamed}', '')}${suffix}`)
+      const suffix = data.renamed > 0 ? say('prompt.categoryRenamedSuffix').replace('{count}',() => (String(data.renamed))) : ''
+      showNotice(`${fillPlaceholders(say('prompt.categoryRenamed'), { from, to, renamed: '' })}${suffix}`)
     } catch (err) {
       showError(errText(err))
     }
@@ -594,8 +613,8 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
   /** 删除分类：确认后调用 API（该分类下提示词自动移到未分类）。 */
   const removeCategory = async (name: string): Promise<void> => {
     const count = prompts.filter((p) => p.category === name).length
-    const hint = count > 0 ? say('prompt.categoryMoved').replace('{count}', String(count)) : ''
-    const confirmText = say('prompt.deleteCategoryConfirm').replace('{name}', name).replace('{hint}', hint)
+    const hint = count > 0 ? say('prompt.categoryMoved').replace('{count}',() => (String(count))) : ''
+    const confirmText = fillPlaceholders(say('prompt.deleteCategoryConfirm'), { name, hint })
     if (!window.confirm(confirmText)) return
     try {
       const data = await api<{ removed: boolean; moved: number }>(
@@ -606,8 +625,8 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
       setCategories(cats.categories)
       if (category === name) setCategory('全部')
       await load()
-      const moved = data.moved > 0 ? say('prompt.categoryMoved').replace('{count}', String(data.moved)) : ''
-      showNotice(`${say('prompt.categoryDeleted').replace('{name}', name)}${moved}`)
+      const moved = data.moved > 0 ? say('prompt.categoryMoved').replace('{count}',() => (String(data.moved))) : ''
+      showNotice(`${say('prompt.categoryDeleted').replace('{name}',() => (name))}${moved}`)
     } catch (err) {
       showError(errText(err))
     }
@@ -726,7 +745,7 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
           {injections.map((inj) => (
             <div key={inj.id} className="pm-overlay-item">
               <div className="pm-overlay-item-main">
-                <div className="pm-overlay-item-title">{say('prompt.quotedTitle').replace('{name}', inj.title)}</div>
+                <div className="pm-overlay-item-title">{say('prompt.quotedTitle').replace('{name}',() => (inj.title))}</div>
                 <div className="pm-overlay-item-sub">
                   {remainingLabel(inj)} · {cadenceLabel(inj)}
                 </div>
@@ -872,18 +891,18 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
                     <span className="pm-item-badge pm-item-badge-active" title={say('prompt.injectHint')}>
                       {active.roundsLeft === null
                         ? say('prompt.injectingBadgeInfinite')
-                        : say('prompt.injectingBadge').replace('{n}', String(active.roundsLeft))}
+                        : say('prompt.injectingBadge').replace('{n}',() => (String(active.roundsLeft)))}
                     </span>
                   )}
                 </div>
                 <div className="pm-item-summary">{summaryLine(p)}</div>
                 <div className="pm-item-row3">
                   <span className="pm-item-usage">
-                    {say('prompt.usage').replace('{n}', String(p.usageCount ?? 0))}
+                    {say('prompt.usage').replace('{n}',() => (String(p.usageCount ?? 0)))}
                   </span>
                   <span className="pm-item-used">
                     {p.lastUsedAt !== null
-                      ? say('prompt.lastUsed').replace('{time}', formatTime(p.lastUsedAt))
+                      ? say('prompt.lastUsed').replace('{time}',() => (formatTime(p.lastUsedAt)))
                       : say('prompt.neverUsed')}
                   </span>
                 </div>
@@ -1092,7 +1111,7 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
                         <span className="pm-inject-status">
                           {active.roundsLeft === null
                             ? say('prompt.injectingBadgeInfinite')
-                            : say('prompt.injectingBadge').replace('{n}', String(active.roundsLeft))}
+                            : say('prompt.injectingBadge').replace('{n}',() => (String(active.roundsLeft)))}
                           {' '}· {cadenceLabel(active)}
                         </span>
                         <button type="button" className="pm-danger-btn" onClick={() => void removeInjection(active.id)}>

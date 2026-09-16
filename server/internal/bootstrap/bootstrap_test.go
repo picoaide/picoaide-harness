@@ -316,3 +316,45 @@ func TestInjectGlitchTipDefaults(t *testing.T) {
 		t.Fatalf("invalid json expected passthrough, got %s", out)
 	}
 }
+
+// TestBootstrapDeliversHeartbeatFlag:错误上报心跳开关随 bootstrap 下发
+// (2026-09-16 P1-2/D4)。
+//
+// 语义契约:settings 显式为 "true" 才下发 true;缺省/无值/任何其它值都是 false
+// —— 默认行为必须与历史**完全一致**(零回归),否则等于悄悄给所有部署加了噪音。
+func TestBootstrapDeliversHeartbeatFlag(t *testing.T) {
+	r, db := setup(t)
+	u, _ := serverstore.GetUserByUsername(db, "alice")
+	token, _ := serverauth.IssueToken(db, u.ID)
+
+	// 缺省:false
+	_, out := getJSON(t, r, "/api/client/v2/config/bootstrap", token)
+	web := out["web"].(map[string]any)
+	if web["error_reporting_heartbeat"] != false {
+		t.Fatalf("default error_reporting_heartbeat = %v, want false", web["error_reporting_heartbeat"])
+	}
+
+	// 显式 true → 下发 true
+	if err := serverstore.SetSetting(db, "web.error_reporting_heartbeat", "true"); err != nil {
+		t.Fatal(err)
+	}
+	_, out = getJSON(t, r, "/api/client/v2/config/bootstrap", token)
+	web = out["web"].(map[string]any)
+	if web["error_reporting_heartbeat"] != true {
+		t.Fatalf("error_reporting_heartbeat = %v, want true", web["error_reporting_heartbeat"])
+	}
+	// 等级阈值语义未被心跳开关影响(红线:不改 error_reporting_level)。
+	if web["error_reporting_level"] != "error" {
+		t.Fatalf("error_reporting_level = %v, want error (unchanged default)", web["error_reporting_level"])
+	}
+
+	// 非 "true" 的任意值都回落 false(只有显式打开才生效)。
+	if err := serverstore.SetSetting(db, "web.error_reporting_heartbeat", "1"); err != nil {
+		t.Fatal(err)
+	}
+	_, out = getJSON(t, r, "/api/client/v2/config/bootstrap", token)
+	web = out["web"].(map[string]any)
+	if web["error_reporting_heartbeat"] != false {
+		t.Fatalf("error_reporting_heartbeat = %v for value \"1\", want false", web["error_reporting_heartbeat"])
+	}
+}

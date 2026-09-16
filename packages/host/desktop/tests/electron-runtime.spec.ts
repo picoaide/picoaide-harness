@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { DesktopShellSpec, DesktopUpdateSource } from '../src/runtime.ts'
+import { desktopDiagnosticsPrivacyCopy } from '../src/tray-locale.ts'
 
 /** 下载用例共用的更新源:客户端只从登录的那台服务端取包。 */
 const UPDATE_SOURCE: DesktopUpdateSource = {
@@ -164,7 +165,12 @@ const electron = vi.hoisted(() => {
     throw new Error(`unexpected image path ${path}`)
   })
 
+  // P0-6/D8:宿主在 mount 时用 ipcMain 装渲染进程错误通道;替身必须提供它
+  // (否则"忘了在 mock 里跟上 Electron 面"会让整组用例假红)。
+  const ipcMain = { on: vi.fn(), removeListener: vi.fn() }
+
   return {
+    ipcMain,
     app: {
       dock: { setIcon: vi.fn() },
       getLocale: vi.fn(() => 'en-US'),
@@ -218,6 +224,7 @@ const electron = vi.hoisted(() => {
 vi.mock('electron', () => ({
   app: electron.app,
   BrowserWindow: electron.BrowserWindow,
+  ipcMain: electron.ipcMain,
   dialog: electron.dialog,
   Menu: electron.Menu,
   nativeImage: electron.nativeImage,
@@ -249,6 +256,8 @@ const spec: DesktopShellSpec = {
 
 describe('Electron compatibility runtime', () => {
   beforeEach(() => {
+    electron.ipcMain.on.mockClear()
+    electron.ipcMain.removeListener.mockClear()
     electron.app.isPackaged = false
     electron.browserWindowOptions.length = 0
     electron.browserWindowThemeSources.length = 0
@@ -356,6 +365,8 @@ describe('Electron compatibility runtime', () => {
         nodeIntegration: false,
         sandbox: true,
         webSecurity: true,
+        // P0-6/D8:沙箱 preload 承载渲染进程错误转发;缺了它渲染采集静默失效。
+        preload: expect.stringContaining('preload/renderer-error.cjs'),
       },
       titleBarStyle: 'hiddenInset',
       transparent: true,
@@ -747,6 +758,9 @@ describe('Electron compatibility runtime', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
+    // Pin the ZH title: asserting the English one would be indistinguishable
+    // from the pre-i18n hard-coded literal (2026-09-16 R3 audit).
+    runtime.setLocalePreference('zh')
     diagnostics.export
       .mockRejectedValueOnce(new Error('disk is full'))
       .mockResolvedValueOnce('C:\\Users\\Example\\diagnostics-retry.zip')
@@ -757,8 +771,12 @@ describe('Electron compatibility runtime', () => {
     expect(diagnostics.export).toHaveBeenCalledTimes(2)
     expect(electron.shell.showItemInFolder)
       .toHaveBeenCalledWith('C:\\Users\\Example\\diagnostics-retry.zip')
+    // The error box follows the app language like the privacy dialog above it
+    // (2026-09-16 R2 audit). The Chinese form is asserted on purpose: the English
+    // one equals the old hard-coded literal, so it cannot detect a revert.
+    expect(desktopDiagnosticsPrivacyCopy('zh').errorTitle).toBe('无法导出诊断信息')
     expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
-      'Unable to Export Diagnostics',
+      desktopDiagnosticsPrivacyCopy('zh').errorTitle,
       'disk is full',
     )
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('failed to export diagnostics: disk is full'))

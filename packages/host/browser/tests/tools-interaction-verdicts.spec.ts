@@ -471,12 +471,21 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
 
   it('检查与注入之间标签页导航走 ⇒ 临界区内复核后拒绝（TOCTOU 收口）', async () => {
     let harness: Harness | undefined
+    let navigateOnLookup = false
+    // The secret is the previously injected password; the hostile page puts it
+    // in a URL longer than the 200-char cap, crossing the cut so a "cap first,
+    // redact second" order would leak its head fragment (R4 BUG-1).
+    const secret = 'ZZTOP98765'
+    const prefix = 'https://login.example.evil.test/landing?'
+    const fillerLen = 195 - `${prefix}&pwd=`.length
+    const evilUrl = `${prefix}${'a'.repeat(fillerLen)}&pwd=${secret}`
     const resolver = (async (id: string) => {
       // 工具层的 origin 检查已经通过；就在"取凭据"这一步把同一标签页的 URL 改掉，
       // 模拟排队/取凭据期间发生的导航（旧实现会照常把凭据注入新页面）。
-      // 真的走一次导航（会更新 runtime 内部的 tab.url，两条检查读的都是它）
-      if (harness !== undefined) await harness.runtime.navigate(1, 'https://login.example.evil.test/', 'domcontentloaded')
-      return id === 'corp' ? { username: 'alice', password: SECRET } : null
+      if (navigateOnLookup && harness !== undefined) {
+        await harness.runtime.navigate(1, evilUrl, 'domcontentloaded')
+      }
+      return id === 'corp' ? { username: 'alice', password: secret } : null
     }) as CredentialResolverLike
     resolver.originOf = async () => 'https://login.example'
     const bound = track(makeHarness({}, resolver))
@@ -485,10 +494,33 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
     const view = bound.adapter.lastView()
     view.transport.handler = fillHandler
 
+    // A first, legitimate injection leaves the password in the tab's filled
+    // secret set, which the refusal message must erase.
+    await bound.call('browser_fill_credentials', { connectorId: 'corp' })
+    navigateOnLookup = true
+    // Snapshot the DOM-write commands BEFORE the refused call: the first
+    // injection already pushed one containing `passField`, so a plain `.some()`
+    // afterwards is true either way and stops guarding the TOCTOU fence
+    // (2026-09-16 R9 audit).
+    const writesBefore = view.transport.commands.length
+
     const error = await fail(bound.call('browser_fill_credentials', { connectorId: 'corp' }))
     expect(error.code).toBe('policy')
     expect(error.message).toMatch(/left https:\/\/login\.example before the injection/u)
-    expect(view.transport.commands.some((command) => String(command.params?.['expression'] ?? '').includes('passField'))).toBe(false)
+    // 先擦除再截断：不得留下跳转 URL 里的一次性 code/ticket，更不得留下口令前缀。
+    expect(error.message).not.toContain(secret)
+    expect(error.message).not.toContain('ZZTOP')
+    expect(error.message).toContain('****')
+    // The refused call must not have written the credential into the page: no
+    // NEW command may carry the fill expression.
+    const writesDuringRefusal = view.transport.commands
+      .slice(writesBefore)
+      .filter((command) => String(command.params?.['expression'] ?? '').includes('passField'))
+    expect(writesDuringRefusal).toHaveLength(0)
+    // ...while the legitimate injection did write it (the probe is not vacuous).
+    expect(view.transport.commands
+      .slice(0, writesBefore)
+      .some((command) => String(command.params?.['expression'] ?? '').includes('passField'))).toBe(true)
   })
 
   it('描述文案写明站点绑定（对外契约同步）', () => {
@@ -503,9 +535,9 @@ describe('2026-09-15 P2：browser_wait_for 的实际生效上限写进描述', (
   it('描述与参数都写明 40000ms（工具体预算），并说明 runtime 的 120000ms 够不到', () => {
     const harness = track(makeHarness())
     const tool = harness.tools.get('browser_wait_for')!
-    expect(tool.timeoutMs).toBe(40_000)
+    expect(tool.timeoutMs).toBe(55_000)
     expect(tool.description).toContain('40000')
-    expect(tool.description).toContain('120000')
+    expect(tool.description).toContain('55')
     const timeout = tool.parameters.properties?.['timeoutMs']?.description ?? ''
     expect(timeout).toContain('40000')
     expect(timeout).toContain('30000')

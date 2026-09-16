@@ -870,7 +870,7 @@ export function MemoryTabView(props: ConvViewProps & MemoryTabViewProps): JSX.El
                             className="mt-item-edit"
                             rows={3}
                             value={editDraft}
-                            onChange={(event) => setEditDraft(event.target.value.replaceAll('§', ''))}
+                            onChange={(event) => setEditDraft(event.target.value.replaceAll('§',() => ('')))}
                           />
                           <div className="mt-entry-edit-row">
                             <span className="mt-entry-edit-hint">{t('memoryTab.editHint')}</span>

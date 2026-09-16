@@ -129,6 +129,108 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
   }, 40_000)
 })
 
+  it('hands the rotated token to EVERY streamable-http server of one connector', async () => {
+    const server = await startRealMcpServer()
+    servers.push(server)
+    const dir = mkdtempSync(join(tmpdir(), 'live-provider-multi-'))
+    await authorizeOnce(dir, server)
+
+    const multi = def(server.origin)
+    multi.mcp = [
+      { serverName: 'example-a-a', transport: 'streamable-http', url: `${server.origin}/mcp` },
+      { serverName: 'example-a-b', transport: 'streamable-http', url: `${server.origin}/mcp` },
+    ]
+    const h = createHarness([multi], dir, { refreshSweepIntervalMs: 0 })
+    await waitFor(() => h.configs.length === 2, 15_000)
+    const before = h.configs.map((config) => (config as unknown as LiveConfig).authProvider?.tokens()?.refresh_token)
+    expect(before.every((token) => typeof token === 'string' && token !== ''), 'both servers should carry a token').toBe(true)
+
+    const refreshed = await callRoute(h, '/api/pico/connectors/example-a/refresh', 'POST')
+    expect(refreshed.status).toBe(200)
+    const stored = await new ConnectorStore({ baseDir: dir }).readCredential('example-a')
+    expect(stored?.refreshToken).not.toBe(before[0])
+
+    // BOTH transports must hold the same rotated credential. A per-connector
+    // single slot left every server but the last one on the consumed token.
+    for (const config of h.configs) {
+      expect((config as unknown as LiveConfig).authProvider?.tokens()?.refresh_token).toBe(stored?.refreshToken)
+    }
+    h.dispose()
+  }, 40_000)
+
+  it('lets the SDK persist its own rotation after an out-of-band refresh adopted newer tokens', async () => {
+    const server = await startRealMcpServer()
+    servers.push(server)
+    const dir = mkdtempSync(join(tmpdir(), 'live-provider-sdk-after-adopt-'))
+    await authorizeOnce(dir, server)
+
+    const h = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
+    await waitFor(() => h.configs.length === 1, 15_000)
+
+    // Our refresher rotated RT1→RT2 and adopted it into the live provider.
+    const refreshed = await callRoute(h, '/api/pico/connectors/example-a/refresh', 'POST')
+    expect(refreshed.status).toBe(200)
+    const afterSweep = await new ConnectorStore({ baseDir: dir }).readCredential('example-a')
+
+    // A 401 self-heal inside the same window rotates from the token it was just
+    // fed; the provider must be allowed to persist that result instead of being
+    // CAS-rejected against its original registration snapshot (the baseline is
+    // advanced by adopt/syncBaseline). Otherwise the disk keeps RT2, which the
+    // SDK already consumed → invalid_grant on the next use.
+    await (liveConfig(h).authProvider as unknown as { saveTokens: (tokens: unknown) => Promise<void> }).saveTokens({
+      access_token: 'at-sdk', refresh_token: 'rt-sdk', token_type: 'Bearer', expires_in: 3_600,
+    })
+    // onPersist kicks the write off without awaiting it; poll for it.
+    let stored = await new ConnectorStore({ baseDir: dir }).readCredential('example-a')
+    const deadline = Date.now() + 5_000
+    while (Date.now() < deadline && stored?.refreshToken !== 'rt-sdk') {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      stored = await new ConnectorStore({ baseDir: dir }).readCredential('example-a')
+    }
+    expect(stored?.accessToken).toBe('at-sdk')
+    expect(stored?.updatedAt).toBeGreaterThan(afterSweep?.updatedAt ?? 0)
+    h.dispose()
+  }, 40_000)
+
+  it('does not resurrect a background refresh over a later re-authorization', async () => {
+    const server = await startRealMcpServer()
+    servers.push(server)
+    const dir = mkdtempSync(join(tmpdir(), 'live-provider-reauth-'))
+    await authorizeOnce(dir, server)
+
+    const h = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
+    await waitFor(() => h.configs.length === 1, 15_000)
+    const refreshed = await callRoute(h, '/api/pico/connectors/example-a/refresh', 'POST')
+    expect(refreshed.status).toBe(200)
+    // The refresh itself announces the new credential, which re-registers the
+    // connector (config 2). Let that settle first so the config count below is
+    // the one caused by OUR re-authorization, not the refresh's own echo.
+    await waitFor(() => h.configs.length >= 2, 15_000)
+    const configsBefore = h.configs.length
+
+    // A user re-authorization replaces the credential with a grant whose
+    // lifetime is SHORTER than the background refresh result. `expiresAt` alone
+    // would declare the stale refresh newer and adopt it back; the store write
+    // order (`updatedAt`) is the only sound ordering.
+    const store = new ConnectorStore({ baseDir: dir })
+    const current = await store.readCredential('example-a')
+    await store.updateCredential('example-a', {
+      accessToken: 'at-after-reauth',
+      refreshToken: 'rt-after-reauth',
+      expiresAt: Date.now() + 1_000,
+      ...(current?.clientId === undefined ? {} : { clientId: current.clientId }),
+      refreshedAt: Date.now(),
+    })
+
+    // Production re-registration path: any credential change announces itself.
+    h.emit('pico/connector-credentials-changed', { id: 'example-a' })
+    await waitFor(() => h.configs.length === configsBefore + 1, 15_000)
+    const newest = h.configs[h.configs.length - 1] as unknown as LiveConfig
+    expect(newest.authProvider?.tokens()?.refresh_token, 'the fresh grant must win').toBe('rt-after-reauth')
+    expect(newest.authProvider?.tokens()?.access_token).toBe('at-after-reauth')
+    h.dispose()
+  }, 40_000)
+
 describe('adopt() semantics', () => {
   const credential = {
     accessToken: 'access-1', refreshToken: 'refresh-1', clientId: 'client-1',

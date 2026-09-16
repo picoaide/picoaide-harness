@@ -21,7 +21,8 @@ import {
 } from './skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { brandMarkSvg } from './channel-geometry.ts'
-import { hostCopy, hostLocaleFrom, type HostLocale } from 'dsh-plugin-desktop/host-locale'
+import { hostCopy, hostLocaleFrom, tryNormalizeHostLocale, type HostLocale } from 'dsh-plugin-desktop/host-locale'
+import { LOCALE_SETTINGS_NAMESPACE } from '@deepseek-ai/dsh-client-locale'
 import { absolutizeChannelAssets, asChannelPayload, brandChannel, mergeChannel, type BrandConfig, type ChannelConfig } from './channel-content.ts'
 import type { Session } from './server-connector/config.ts'
 
@@ -479,7 +480,7 @@ export function renderLoginPage(locale: HostLocale): string {
     document.getElementById('btn').style.display = isPassword ? '' : 'none'
     f2.style.display = isPassword ? '' : 'none'
     browserBtn.style.display = isPassword ? 'none' : ''
-    browserBtn.textContent = T.signInWith.replace('{method}', methodLabel(currentMethod))
+    browserBtn.textContent = T.signInWith.replace('{method}',() => (methodLabel(currentMethod)))
     waiting.style.display = 'none'
   }
 
@@ -601,7 +602,7 @@ export function renderLoginPage(locale: HostLocale): string {
       }
       var data = await res.json().catch(function () { return {} })
       var raw = String(data.error && data.error.message ? data.error.message : (data.error || ''))
-      var msg = friendlyLoginError(raw) || T.signInFailed.replace('{status}', res.status)
+      var msg = friendlyLoginError(raw) || T.signInFailed.replace('{status}',() => (res.status))
       // 开放问题2: auditor 拒绝时提供「打开管理后台」入口。
       if (raw.toLowerCase().indexOf('auditor_not_allowed') >= 0) {
         var server = trimServer(document.getElementById('server').value.trim())
@@ -1146,12 +1147,40 @@ export function apply(ctx: Context, config: Config): void {
    * @returns 该请求应使用的语言。
    */
   const hostLocale = (req?: IncomingMessage): HostLocale => {
-    // 无头组合（loader smoke、测试替身）没有 desktopRuntime，且 ctx.get 可能
-    // 整个缺席 —— 结构性探测，与 desktop-loop-notify 同款。
-    const runtime = typeof ctx.get === 'function'
-      ? ctx.get('desktopRuntime') as { readonly locale?: unknown } | undefined
-      : undefined
-    return hostLocaleFrom(runtime, req?.headers['accept-language'])
+    // 优先级：launcher 的实时值（桌面端权威）→ 客户端设置里的语言偏好 → 请求头
+    // → 产品默认。加中间那一档的原因：浏览器部署（无桌面壳）里 `GET /` 的索引
+    // 变换**拿不到请求对象**（上游 tapIndex 只给 html），Accept-Language 在首屏
+    // 永远轮不到 ⇒ 首屏恒中文而同浏览器访问 /login 却是英文（2026-09-16 R9 审计）。
+    const fromRuntime = tryNormalizeHostLocale(runtimeLocale())
+    if (fromRuntime !== undefined) return fromRuntime
+    const chosen = tryNormalizeHostLocale(readLocalePreference())
+    if (chosen !== undefined) return chosen
+    return hostLocaleFrom(undefined, req?.headers['accept-language'])
+  }
+
+  /** 结构探测 `desktopRuntime.locale`（无头组合/测试替身下缺席）。 */
+  const runtimeLocale = (): unknown => {
+    try {
+      const runtime = typeof ctx.get === 'function'
+        ? ctx.get('desktopRuntime') as { readonly locale?: unknown } | undefined
+        : undefined
+      return runtime?.locale
+    } catch {
+      return undefined
+    }
+  }
+
+  /** 客户端存的语言偏好（`locale` 设置命名空间；无头组合下缺席）。 */
+  const readLocalePreference = (): unknown => {
+    try {
+      const settings = typeof ctx.get === 'function'
+        ? ctx.get('settings') as { get?: (namespace: string) => unknown } | undefined
+        : undefined
+      const value = settings?.get?.(LOCALE_SETTINGS_NAMESPACE) as { preference?: unknown } | undefined
+      return value?.preference
+    } catch {
+      return undefined
+    }
   }
 
   /** 归档超限文案（能力中心上传/安装路径可见）；语言按请求解析。 */
@@ -1164,13 +1193,13 @@ export function apply(ctx: Context, config: Config): void {
    * @returns 可直接写进响应的 HTML。
    */
   const loginPage = (locale: HostLocale): string => renderLoginPage(locale)
-    .replaceAll('__DEFAULT_SERVER__', defaultServer)
+    .replaceAll('__DEFAULT_SERVER__',() => (defaultServer))
     // 只有**确实配了**域名才打标记 —— 页面脚本据此决定要不要自动连接。
-    .replaceAll('__DEFAULT_SERVER_MARK__', configuredServer === '' ? '' : 'data-default-server="1"')
+    .replaceAll('__DEFAULT_SERVER_MARK__',() => (configuredServer === '' ? '' : 'data-default-server="1"'))
     // 内置了地址就不再提供"返回修改服务端地址"（见 backButtonHtml 的说明）。
-    .replaceAll('__BACK_BUTTON__', configuredServer === '' ? backButtonHtml(locale) : '')
-    .replaceAll('__BRAND_NAME__', brandTitle)
-    .replaceAll('__BRAND_JSON__', brandScriptLiteral(brand))
+    .replaceAll('__BACK_BUTTON__',() => (configuredServer === '' ? backButtonHtml(locale) : ''))
+    .replaceAll('__BRAND_NAME__',() => (brandTitle))
+    .replaceAll('__BRAND_JSON__',() => (brandScriptLiteral(brand)))
 
   /**
    * 组装会话恢复过渡页（`__BRAND_NAME__` 替换同登录页）。
@@ -1178,7 +1207,7 @@ export function apply(ctx: Context, config: Config): void {
    * @returns 可直接写进响应的 HTML。
    */
   const restoringPage = (locale: HostLocale): string =>
-    renderRestoringPage(locale).replaceAll('__BRAND_NAME__', brandTitle)
+    renderRestoringPage(locale).replaceAll('__BRAND_NAME__',() => (brandTitle))
 
   const json = (res: ServerResponse, code: number, body: unknown): void => {
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' })
@@ -1409,7 +1438,7 @@ export function apply(ctx: Context, config: Config): void {
         armPendingBrowserLoginFromLoginPage()
         return loginPage(locale)
       }
-      return html.replace('</head>', SESSION_LOST_SCRIPT + '</head>')
+      return html.replace('</head>',() => (SESSION_LOST_SCRIPT + '</head>'))
       }),
 
       ctx.webServer.register({

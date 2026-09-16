@@ -142,6 +142,14 @@ describe('cron 工具抛出的错误按调用解析', () => {
   }, 20_000)
 })
 
+describe('插值安全（2026-09-16 审计 E1）', () => {
+  it('插值值里的 $ 序列按字面量处理', () => {
+    expect(hostT('zh', 'tool.created', { id: 'job-$&x' })).toBe('已创建定时任务 job-$&x')
+    expect(hostT('en', 'tool.created', { id: "job-$'x" })).toBe("Created scheduled job job-$'x")
+    expect(hostT('zh', 'tool.created', { id: 'job-$$HOME' })).toBe('已创建定时任务 job-$$HOME')
+  })
+})
+
 describe('系统提示词公告在每次装配时取语言', () => {
   it('CRON_GUIDANCE 仍是中文源；cronGuidance(locale) 给出英文镜像', () => {
     expect(typeof CRON_GUIDANCE).toBe('string')

@@ -237,7 +237,7 @@ export function apply(ctx: ClientContext): void {
       name: 'settings.section',
       id: 'account',
       order: 999,
-      label: t('settings.account'),
+      label: () => t('settings.account'),
     }, AccountSection)),
     'enterprise: account section',
   )

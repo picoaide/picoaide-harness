@@ -49,7 +49,7 @@ import {
 } from './brand-web-route.ts'
 import { readDesktopChannelProfile } from './desktop-channel.ts'
 import type { ConnectionTrustFence, WriteProofDeps } from './write-proof.ts'
-import type { DesktopShellMode } from './runtime.ts'
+import type { DesktopLocale, DesktopShellMode } from './runtime.ts'
 import { desktopLocaleFromPreference } from './desktop-locale.ts'
 import type {} from './runtime.ts'
 
@@ -61,6 +61,14 @@ export const name = 'desktop-shell'
 declare module '@deepseek-ai/cordis' {
   interface Events {
     'pico/deep-link'(url: string): void
+    /**
+     * The user-visible language actually changed (in-app locale setting).
+     *
+     * Host-rendered surfaces that are served per request (the embedded browser's
+     * chrome pages) are already open by then and cannot re-render themselves;
+     * they listen for this event and re-serve (2026-09-16 R9 audit).
+     */
+    'pico/locale-changed'(locale: DesktopLocale): void
   }
 }
 
@@ -384,7 +392,13 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.on('settings/updated', (namespace, next) => {
     if (namespace !== UI_LOCALE_SETTINGS_NAMESPACE) return
+    const before = runtime.locale
     runtime.setLocalePreference(desktopLocaleFromPreference((next as LocaleSettings).preference))
+    // Tell Host surfaces that render per request but are already open (the
+    // embedded browser's chrome) to re-serve in the new language. Only on a real
+    // change: a settings write that keeps the same preference must not reload
+    // anything.
+    if (runtime.locale !== before) ctx.emit('pico/locale-changed', runtime.locale)
   })
   // picoaide:// deep links (auth callback): forward to Host consumers.
   // The enterprise plugin listens for 'pico/deep-link' and completes the

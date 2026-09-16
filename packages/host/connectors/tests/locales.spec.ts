@@ -44,9 +44,16 @@ describe('friendlyConnectorError：稳定 code 契约', () => {
     expect(friendlyConnectorError('boom')).toBe('连接失败：boom')
     setActiveLocale('en')
     expect(friendlyConnectorError('boom')).toBe('Connection failed: boom')
-    // 旧的中文字串判据已不再是契约：一条形如「退出码」的未分类信息同样走兜底，
-    // 因为文案本身可以被翻译，匹配文案就是隐式契约（这正是本次修复的根因）。
-    expect(friendlyConnectorError('登录命令退出码 1')).toBe('Connection failed: 登录命令退出码 1')
+    // code 契约优先：带 code 的消息永远走 code。没有 code 的**新式本地化文案**
+    // 仍然走兜底（英文里没有下文这些 legacy 中文标记）。
+    expect(friendlyConnectorError('Login command exited with code 1')).toBe('Connection failed: Login command exited with code 1')
+    // 旧 Host / 外部 CLI 的 legacy 中文标记在兜底顺序最末仍被识别（回退即用户
+    // 可见退化），但这不再是新生产者的契约。
+    expect(friendlyConnectorError('登录命令退出码 1')).toBe('Login command failed: make sure the corresponding CLI is installed and signed in, then retry')
+  })
+
+  it('raw 文本里的 $ 序列不被替换语义吞掉（远端/CLI 文本直插 error.generic）', () => {
+    expect(friendlyConnectorError("boom $& $' $$HOME")).toBe("连接失败：boom $& $' $$HOME")
   })
 })
 

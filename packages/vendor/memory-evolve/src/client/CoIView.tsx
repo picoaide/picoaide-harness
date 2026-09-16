@@ -123,9 +123,14 @@ type DictKey = Extract<MemoryEvolveKey, `coi.${string}`>
  * ⚠️ 必须是每个组件各持一份（`const t = dict(props.t)`），**不得**再退回
  * 模块级常量/闭包：模块求值早于插件 apply，那时 t 只能拿到默认语言，
  * 等于把界面语言钉死。
+ *
+ * ⚠️ 必须透传 `params`（2026-09-16 R9 审计 P1）：这里曾收窄成 `(key) => t(key)`，
+ * 于是 9 处 `t('coi.…', { … })` 的插值参数被静默丢掉，用户看到的是模板原文
+ * （`{count} 分钟前` / `（{value}）`）；上游 `translate` 无参时**原样返回模板**，
+ * 不会报错。
  */
-function dict(t: Translate): (key: DictKey) => string {
-  return (key) => t(key)
+function dict(t: Translate): (key: DictKey, params?: Record<string, unknown>) => string {
+  return (key, params) => t(key, params)
 }
 
 /* ------------------------------------------------------------------ */
@@ -156,7 +161,7 @@ function deleteJson<T>(path: string): Promise<T> {
 }
 
 /** unknown → 可读错误文本；空信息兜底，绝不渲染空红框。 */
-function errText(err: unknown, t: (key: DictKey) => string): string {
+function errText(err: unknown, t: (key: DictKey, params?: Record<string, unknown>) => string): string {
   const text = err instanceof Error ? err.message : String(err)
   return text !== undefined && text.trim() !== '' ? text : t('coi.error.noDetail')
 }
@@ -178,7 +183,7 @@ function fmtTime(ts: number | null | undefined): string {
 }
 
 /** 时间戳 → 相对时间（当次渲染语言）。 */
-function fmtAgo(ts: number | null | undefined, t: (key: DictKey) => string): string {
+function fmtAgo(ts: number | null | undefined, t: (key: DictKey, params?: Record<string, unknown>) => string): string {
   if (ts === null || ts === undefined) return '—'
   const delta = Math.max(0, Date.now() - ts)
   if (delta < 5000) return t('coi.ago.justNow')
@@ -213,7 +218,7 @@ function trunc(text: string, n = 40): string {
  * S4（2026-09-16）：**必须是函数**——表里含 `lang()`，写成模块级常量会让文案
  * 在模块加载那一刻就被钉死（与上面 `LANG` 常量同一个坑）。
  */
-function statusMeta(status: string, t: (key: DictKey) => string): { icon: string; label: string; cls: string } {
+function statusMeta(status: string, t: (key: DictKey, params?: Record<string, unknown>) => string): { icon: string; label: string; cls: string } {
   const meta: Record<string, { icon: string; label: string; cls: string }> = {
     queued: { icon: '⏳', label: t('coi.status.queued'), cls: 'coi-status-queued' },
     running: { icon: '⏳', label: t('coi.status.running'), cls: 'coi-status-running' },
@@ -232,7 +237,7 @@ const SCOPES = ['temporary', 'session', 'project', 'global'] as const
  * 原先写的是 `t(动态 scope 键) ?? scope` —— 但 t 永不返回 nullish，
  * 未知值实际渲染成键名（'scope.foo'），`??` 从不生效；这里按原意兜底。
  */
-function scopeLabel(scope: string, t: (key: DictKey) => string): string {
+function scopeLabel(scope: string, t: (key: DictKey, params?: Record<string, unknown>) => string): string {
   return (SCOPES as readonly string[]).includes(scope) ? t(`coi.scope.${scope}` as DictKey) : scope
 }
 
@@ -447,7 +452,7 @@ function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string 
   const removeTask = async (id: string): Promise<void> => {
     // 稳定版复审 P1-6：文案里的 {id} 占位符必须替换成真实任务 id，
     // 否则对话框显示字面量 {id}（旧版未替换，用户不知道删的是哪个任务）
-    if (!window.confirm(t('coi.tasks.confirmDelete').replace('{id}', id))) return
+    if (!window.confirm(t('coi.tasks.confirmDelete').replace('{id}',() => (id)))) return
     try {
       const res = await deleteJson<{ ok: boolean; message?: string }>(`/tasks/${encodeURIComponent(id)}`)
       if (res.ok !== true) {
@@ -670,7 +675,7 @@ function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string 
             <span className="coi-label">{t('coi.launch.scope')}</span>
             <select className="coi-select" value={scope} onChange={(e) => setScope(e.target.value)}>
               {SCOPES.map((s) => (
-                <option key={s} value={s}>{t(`scope.${s}`)}</option>
+                <option key={s} value={s}>{t(`coi.scope.${s}` as DictKey)}</option>
               ))}
             </select>
           </label>
@@ -1006,7 +1011,7 @@ function SessionsPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: stri
         <select className="coi-select" value={scopeFilter} onChange={(e) => setScopeFilter(e.target.value)} title={t('coi.sessions.filterScope')}>
           <option value="">{t('coi.all')}</option>
           {SCOPES.map((s) => (
-            <option key={s} value={s}>{t(`scope.${s}`)}</option>
+            <option key={s} value={s}>{t(`coi.scope.${s}` as DictKey)}</option>
           ))}
         </select>
         <input
