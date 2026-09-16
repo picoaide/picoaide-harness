@@ -8,6 +8,7 @@ import {
   computeDesktopColumns, DesktopLayoutState, MACOS_SIDEBAR_COLLAPSED,
   SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED,
 } from './layout-state.ts'
+import { isMacTitleBarDoubleClickTarget, requestTitleBarDoubleClick } from './titlebar.ts'
 
 /** Private values assembled by the advanced-shell registration. */
 interface AdvancedFrameInjected {
@@ -117,6 +118,17 @@ export function AdvancedFrame({ layout, platform, renderSlot, usePanelInfo }: Ad
   )
   const overlays = useMemo(() => renderSlot('shell.overlay', {}), [renderSlot])
 
+  /**
+   * macOS 标题栏双击 ⇒ 缩放/最小化（按系统偏好，宿主侧读 `AppleActionOnDoubleClick`）。
+   * 命中判定与请求都放在 `titlebar.ts`（可单测）：拖拽条是 CSS 伪元素，Electron 不会
+   * 给它原生双击行为（electron#16385），只能自己判、自己请宿主做。
+   */
+  const handleTitleBarDoubleClick = useCallback((event: React.MouseEvent<HTMLDivElement>): void => {
+    const modalOpen = document.querySelector('[aria-modal="true"]') !== null
+    if (!isMacTitleBarDoubleClickTarget(platform, event, modalOpen)) return
+    void requestTitleBarDoubleClick()
+  }, [platform])
+
   return (
     <div
       ref={frameRef}
@@ -127,6 +139,7 @@ export function AdvancedFrame({ layout, platform, renderSlot, usePanelInfo }: Ad
       data-rightbar-fullscreen={layoutInfo.rightbarFullscreen || undefined}
       data-rightbar-instant={layoutInfo.rightbarInstant || undefined}
       style={{ gridTemplateColumns: `${cols.sidebar}px minmax(0, 1fr) ${cols.rightbar}px` }}
+      onDoubleClick={handleTitleBarDoubleClick}
     >
       {platform === 'darwin' && <div className="dshDesktopMacCaptionRow" aria-hidden="true" />}
       {platform === 'win32' && <div className="dshDesktopWindowsCaptionRow" aria-hidden="true" />}

@@ -15,6 +15,8 @@ import {
   type ThemeSettings,
 } from '@deepseek-ai/dsh-client-ui-theme'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import { DESKTOP_TITLEBAR_DOUBLE_CLICK_PATH } from './desktop-window-contract.ts'
+import { handleDesktopTitleBarDoubleClickRequest } from './desktop-window-route.ts'
 import {
   handleRendererBootRequest,
   RENDERER_BOOT_REPORT_PATH,
@@ -291,6 +293,22 @@ export function apply(ctx: Context, config: Config): void {
       ),
     }),
     'dsh-plugin-desktop: renderer boot report route',
+  )
+  // 标题栏双击（macOS）：自绘拖拽条拿不到原生双击行为（electron#16385），
+  // renderer 检测到拖拽区上的 dblclick 后 POST 这里，宿主按系统偏好缩放/最小化。
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: DESKTOP_TITLEBAR_DOUBLE_CLICK_PATH,
+      handler: (req, res) => handleDesktopTitleBarDoubleClickRequest(
+        req,
+        res,
+        rendererOrigin,
+        () => { runtime.performTitleBarDoubleClick() },
+        proofDeps,
+      ),
+    }),
+    'dsh-plugin-desktop: titlebar double-click route',
   )
   // 品牌静态资源（favicon / manifest）覆盖上游 fallback 席位里那份厂商图形与厂商名。
   // 只在真的解析到图形时注册图标路由：宁可继续服务上游文件，也不裂图。

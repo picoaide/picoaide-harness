@@ -158,6 +158,13 @@ async function clickLabel(cdp, label, waitMs = 2500) {
   return r
 }
 
+/** 求值一个返回 Promise 的表达式（`Runtime.evaluate` 需要显式 awaitPromise）。 */
+async function evalAsync(cdp, expression) {
+  const r = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
+  if (r.exceptionDetails) throw new Error(r.exceptionDetails.text ?? 'evaluate error')
+  return r.result?.value
+}
+
 async function bodyText(cdp) {
   try { return await evalSafe(cdp, `document.body.textContent ?? ''`) }
   catch { return '' }
@@ -352,6 +359,18 @@ async function main() {
   reportStep('vendored 旧色板适配层已生效（--dsw-alias-border-l / --dsw-font-family-mono 有值）',
     (darkProbe?.adapter ?? '') !== '' && (darkProbe?.mono ?? '') !== '',
     `border-l=${darkProbe?.adapter} mono=${(darkProbe?.mono ?? '').slice(0, 24)}`)
+  // 5.6 macOS 标题栏双击路由：自绘拖拽区拿不到原生双击行为（electron#16385），
+  //     renderer 命中后经本路由请宿主执行。非 macOS 上宿主是 no-op，但"路由已注册 +
+  //     页面持有写面证明"必须成立 —— 404（没注册）或 403（证明链断）都说明这条通道废了。
+  const titleBar = await evalAsync(cdp, `(async () => {
+    const res = await fetch(${JSON.stringify('/api/pico/desktop/window/titlebar-double-click')}, {
+      method: 'POST', headers: { accept: 'application/json' },
+    })
+    return { status: res.status, body: await res.text() }
+  })()`)
+  reportStep('标题栏双击路由已注册且页面持有写面证明', titleBar?.status === 202,
+    `status=${titleBar?.status} body=${(titleBar?.body ?? '').slice(0, 60)}`)
+
   await screenshot(cdp, '05b-dark-sidebar')
   // 复位成浅色，避免影响后续面板断言（截图已留档）。
   await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] }).catch(() => {})
