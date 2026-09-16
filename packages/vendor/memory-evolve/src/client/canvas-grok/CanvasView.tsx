@@ -18,7 +18,6 @@ import type { NoteSubmit, PathSubmit } from './CanvasDialogs.tsx'
 import {
   CURRENT_PROJECT_ID,
   CURRENT_PROJECT_LABEL,
-  CURRENT_SESSION_LABEL,
   DEFAULT_SIZE,
   DEFAULT_VIEWPORT,
   FLASH_MS,
@@ -40,6 +39,7 @@ import {
 } from './helpers.ts'
 import { createDebouncedSaver } from './store.ts'
 import {
+  apiErrorText,
   detectBackend,
   fileProxyUrl,
   loadCanvasFromBackend,
@@ -83,6 +83,11 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
   // （前端 index.ts 探测 /canvas/state 后才注册 Tab），不再有纯前端
   // localStorage 降级模式（一期验收期行为，用户拍板取消：开=后端同步，
   // 关=整个画板不可见）。
+  //
+  // i18n（2026-09-16）：本组件此前声明了 `t` 却**从未读取**（103 处中文
+  // 硬编码），现在全部文案走 t；并把 t 继续下传 CanvasBoard / CanvasDialogs /
+  // CanvasCard 与 helpers 的纯函数（titleFromPath / saveTextToFile）。
+  const t = props.t
   const backendReadyRef = useRef(false)
   const backendRevRef = useRef(0)
   const [backendReady, setBackendReady] = useState(false)
@@ -183,7 +188,7 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
           setSyncState('idle')
         } else if (result.conflict) {
           setSyncState('conflict')
-          showToast('画板已被其他会话修改，请刷新页面加载最新内容')
+          showToast(t('canvas.error.conflict'))
         } else {
           // 网络/宿主错误：降级为离线提示，不打断本地操作
           setSyncState('offline')
@@ -251,7 +256,7 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
           textFilledRef.current.add(node.id)
           // 截断保护（与后端便签上限同量级），避免大文件撑爆卡片
           const clipped = text.length > 120 * 1024
-            ? `${text.slice(0, 120 * 1024)}\n…（内容过长，已截断）`
+            ? `${text.slice(0, 120 * 1024)}\n${t('canvas.content.truncated')}`
             : text
           // ⚠️ 必须基于 nodesRef.current（最新镜像）合并，不能用 effect
           // 闭包里的旧 nodes——否则会覆盖用户拖动中的卡片位置
@@ -372,9 +377,9 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
     const type = inferTypeFromPath(path)
     addNode({
       type,
-      title: titleFromPath(path),
+      title: titleFromPath(path, t),
       scope: 'session',
-      scopeLabel: CURRENT_SESSION_LABEL,
+      scopeLabel: t('canvas.scope.currentSession'),
       // 归属必须用真实查看者会话 id（曾写死模拟常量 CURRENT_SESSION_ID，
       // 导致新节点归属到假会话、其他会话视角过滤看不到——2026-08-14 修复）
       sessionId,
@@ -383,18 +388,18 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
       projectId: currentProjectId,
       path,
       unverified: true,
-      meta: { mtime: '未验证' },
+      meta: { mtime: t('canvas.node.unverified') },
     })
     setDialog(null)
-    showToast(`已上板：${titleFromPath(path)}`)
-  }, [addNode, currentProjectId, sessionId, showToast])
+    showToast(t('canvas.toast.pinned', { title: titleFromPath(path, t) }))
+  }, [addNode, currentProjectId, sessionId, showToast, t])
 
   const onNote = useCallback((payload: NoteSubmit) => {
     addNode({
       type: payload.type,
       title: payload.title,
       scope: 'session',
-      scopeLabel: CURRENT_SESSION_LABEL,
+      scopeLabel: t('canvas.scope.currentSession'),
       // 归属用真实查看者会话 id（2026-08-14 修复，见 onPath 注释）
       sessionId,
       // projectId 用后端下发的真实值（2026-08-14 修复，见 onPath 注释）
@@ -402,15 +407,15 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
       content: payload.content,
     })
     setDialog(null)
-    showToast('便签已上板')
-  }, [addNode, currentProjectId, sessionId, showToast])
+    showToast(t('canvas.toast.notePinned'))
+  }, [addNode, currentProjectId, sessionId, showToast, t])
 
   const onCatalog = useCallback((title: string, path: string, type: CanvasNodeType, size?: string) => {
     addNode({
       type,
       title,
       scope: 'session',
-      scopeLabel: CURRENT_SESSION_LABEL,
+      scopeLabel: t('canvas.scope.currentSession'),
       // 归属用真实查看者会话 id（2026-08-14 修复，见 onPath 注释）
       sessionId,
       // projectId 用后端下发的真实值（2026-08-14 修复，见 onPath 注释）
@@ -418,11 +423,11 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
       path,
       unverified: true,
       // 搜索结果显示真实文件大小（2026-08-14 删除内置示例 CATALOG_SIZE）
-      meta: size ? { size, mtime: '未验证' } : undefined,
+      meta: size ? { size, mtime: t('canvas.node.unverified') } : undefined,
     })
     setDialog(null)
-    showToast(`已上板：${title}`)
-  }, [addNode, currentProjectId, sessionId, showToast])
+    showToast(t('canvas.toast.pinned', { title }))
+  }, [addNode, currentProjectId, sessionId, showToast, t])
 
   // 「跳到最近 AI 便签」已于 2026-08-14 删除（用户反馈无用）：
   // lastAiNodeId 仍保留为持久化字段（boards.json 向后兼容），仅移除入口。
@@ -475,14 +480,14 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
           : kind === 'path' ? (node.path ?? '')
             : toReferenceText(node)
     if (!text) {
-      showToast('没有可复制的路径')
+      showToast(t('canvas.toast.noPath'))
       return
     }
     const ok = await copyText(text)
     showToast(ok
-      ? (kind === 'id' ? '已复制 ID' : kind === 'title' ? '已复制标题' : kind === 'path' ? '已复制路径' : '已复制引用串')
-      : '复制失败')
-  }, [nodes, showToast])
+      ? (kind === 'id' ? t('canvas.toast.copiedId') : kind === 'title' ? t('canvas.toast.copiedTitle') : kind === 'path' ? t('canvas.toast.copiedPath') : t('canvas.toast.copiedRef'))
+      : t('canvas.toast.copyFailed'))
+  }, [nodes, showToast, t])
 
   const onAskRemove = useCallback((id: string) => {
     setFocusId(id)
@@ -493,41 +498,47 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
   const onOpen = useCallback(async (id: string) => {
     const node = nodes.find((n) => n.id === id)
     if (!node?.path) {
-      showToast('该节点没有本地路径可打开')
+      showToast(t('canvas.toast.noLocalPath'))
       return
     }
     const result = await openNodeFileBackend(id)
-    showToast(result.ok ? `已用默认应用打开：${node.title}` : `打开失败：${result.error ?? '未知错误'}`)
-  }, [nodes, showToast])
+    showToast(result.ok
+      ? t('canvas.toast.opened', { title: node.title })
+      : t('canvas.toast.openFailed', { message: apiErrorText(result, t) }))
+  }, [nodes, showToast, t])
 
   /** 在系统文件管理器中打开上板文件**所在文件夹**（2026-08-14 用户
    *  要求：文件类型便签一键直达所在目录；后端对目录节点打开自身）。 */
   const onOpenFolder = useCallback(async (id: string) => {
     const node = nodes.find((n) => n.id === id)
     if (!node?.path) {
-      showToast('该节点没有本地路径可打开')
+      showToast(t('canvas.toast.noLocalPath'))
       return
     }
     const result = await openNodeFolderBackend(id)
-    showToast(result.ok ? `已在文件管理器中打开所在文件夹：${node.title}` : `打开失败：${result.error ?? '未知错误'}`)
-  }, [nodes, showToast])
+    showToast(result.ok
+      ? t('canvas.toast.openedFolder', { title: node.title })
+      : t('canvas.toast.openFailed', { message: apiErrorText(result, t) }))
+  }, [nodes, showToast, t])
 
   /** 保存文本/便签内容到本机（2026-08-14：弹系统保存对话框，AI 与
    *  用户加的 markdown/纯文本标签都能落地到实机文件）。 */
   const onSave = useCallback(async (id: string) => {
     const node = nodes.find((n) => n.id === id)
     if (!node || typeof node.content !== 'string' || node.content === '') {
-      showToast('该节点没有可保存的内容')
+      showToast(t('canvas.toast.noContent'))
       return
     }
-    const result = await saveTextToFile(node.title, node.content)
+    const result = await saveTextToFile(node.title, node.content, t)
     if (result.ok) {
-      showToast(result.message ? `已保存：${node.title}（${result.message}）` : `已保存：${node.title}`)
+      showToast(result.message
+        ? t('canvas.toast.savedWith', { title: node.title, message: result.message })
+        : t('canvas.toast.saved', { title: node.title }))
     } else if (!result.canceled) {
-      showToast(`保存失败：${result.message ?? '未知错误'}`)
+      showToast(t('canvas.toast.saveFailed', { message: result.message ?? t('canvas.error.unknown') }))
     }
     // canceled：用户主动取消保存对话框，不提示
-  }, [nodes, showToast])
+  }, [nodes, showToast, t])
 
   /** 打开迁移归属对话框（2026-08-14：仅用户手动触发）。 */
   const onMigrateClick = useCallback((id: string) => {
@@ -538,12 +549,14 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
   /** 执行迁移：调后端重写归属键，成功后更新本地节点 + rev。 */
   const onMigrate = useCallback(async (id: string, scope: 'session' | 'project' | 'global') => {
     if (!backendReadyRef.current) {
-      showToast('画板未连接后端，无法迁移归属')
+      showToast(t('canvas.toast.migrateOffline'))
       return
     }
     const result = await migrateNodeBackend(id, scope, sessionId, backendRevRef.current)
     if (!result.ok) {
-      showToast(result.conflict ? '画板已被其他会话修改，请刷新后重试' : `迁移失败：${result.error ?? '未知错误'}`)
+      showToast(result.conflict
+        ? t('canvas.toast.migrateConflict')
+        : t('canvas.toast.migrateFailed', { message: apiErrorText(result, t) }))
       return
     }
     // 后端返回迁移后的节点：更新本地 nodes（保持位置/内容不变）
@@ -555,8 +568,8 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
       })
     }
     setDialog(null)
-    showToast('归属已迁移')
-  }, [backendReadyRef, sessionId, showToast])
+    showToast(t('canvas.toast.migrated'))
+  }, [backendReadyRef, sessionId, showToast, t])
 
   /**
    * 跳转到节点归属会话（2026-08-14 用户反馈：跳转太快来不及反应，要
@@ -568,11 +581,11 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
   const openSessionWithToast = useCallback((targetSessionId: string) => {
     const node = nodes.find((n) => n.sessionId === targetSessionId)
     const name = node?.sessionName ?? shortSessionId(targetSessionId)
-    showToast(`正在跳转到会话：${name}`)
+    showToast(t('canvas.toast.jumping', { name }))
     setTimeout(() => {
       props.openSession?.(targetSessionId)
     }, 600)
-  }, [nodes, props.openSession, showToast])
+  }, [nodes, props.openSession, showToast, t])
 
   const onConfirmRemove = useCallback(() => {
     if (!focusId) return
@@ -583,8 +596,8 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
     setSelectedId((cur) => cur === focusId ? null : cur)
     setFocusId(null)
     setDialog(null)
-    showToast('已从画板移除')
-  }, [focusId, lastAiNodeId, nodes, showToast, upsert])
+    showToast(t('canvas.toast.removed'))
+  }, [focusId, lastAiNodeId, nodes, showToast, t, upsert])
 
   const onPreview = useCallback((id: string) => {
     setFocusId(id)
@@ -626,16 +639,16 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
     <div className="cg-root" ref={rootRef}>
       <div className="cg-toolbar">
         <div className="cg-toolbar-group">
-          <span className="cg-meta">视角</span>
-          <div className="cg-seg" role="tablist" aria-label="视角筛选">
+          <span className="cg-meta">{t('canvas.toolbar.view')}</span>
+          <div className="cg-seg" role="tablist" aria-label={t('canvas.toolbar.viewFilter')}>
             <button type="button" className={viewMode === 'session' ? 'cg-on' : ''} onClick={() => changeViewMode('session')}>
-              本会话
+              {t('canvas.view.session')}
             </button>
             <button type="button" className={viewMode === 'project' ? 'cg-on' : ''} onClick={() => changeViewMode('project')}>
-              本项目
+              {t('canvas.view.project')}
             </button>
             <button type="button" className={viewMode === 'global' ? 'cg-on' : ''} onClick={() => changeViewMode('global')}>
-              所有项目
+              {t('canvas.view.global')}
             </button>
           </div>
         </div>
@@ -644,20 +657,20 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
           <IconSearchOutline16 />
           <input
             value={query}
-            placeholder="搜索画板节点…"
+            placeholder={t('canvas.search.placeholder')}
             onChange={(e) => setQuery(e.target.value)}
           />
         </label>
 
         <div className="cg-toolbar-group">
           <button type="button" className="cg-btn cg-ghost" onClick={() => setDialog('path')}>
-            <IconPlusOutline16 /> 路径上板
+            <IconPlusOutline16 /> {t('canvas.action.path')}
           </button>
           <button type="button" className="cg-btn cg-ghost" onClick={() => setDialog('note')}>
-            <IconPlusOutline16 /> 便签
+            <IconPlusOutline16 /> {t('canvas.action.note')}
           </button>
           <button type="button" className="cg-btn cg-ghost" onClick={() => setDialog('catalog')}>
-            <IconPlusOutline16 /> 搜索上板
+            <IconPlusOutline16 /> {t('canvas.action.catalog')}
           </button>
         </div>
 
@@ -667,7 +680,7 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
           <button
             type="button"
             className="cg-btn cg-ghost cg-scale"
-            title="复位视角"
+            title={t('canvas.action.resetView')}
             onClick={() => applyViewport({ ...DEFAULT_VIEWPORT }, true)}
           >
             {Math.round(viewport.scale * 100)}%
@@ -675,19 +688,20 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
         </div>
 
         <span className="cg-meta">
-          {visibleNodes.length}/{nodes.length} 张
-          {searchActive ? ` · 命中 ${matchIds.size}` : ''}
-          {' · '}{viewMode === 'session' ? '本会话' : viewMode === 'project' ? currentProjectLabel : '所有项目'}
+          {t('canvas.meta.count', { visible: visibleNodes.length, total: nodes.length })}
+          {searchActive ? t('canvas.meta.hits', { count: matchIds.size }) : ''}
+          {' · '}{viewMode === 'session' ? t('canvas.view.session') : viewMode === 'project' ? currentProjectLabel : t('canvas.view.global')}
           {backendReady ? (
-            syncState === 'conflict' ? ' · ⚠️ 冲突，请刷新'
-              : syncState === 'saving' ? ' · 保存中'
-                : syncState === 'offline' ? ' · 未连接后端'
-                  : ' · 已同步'
-          ) : ' · 仅本地保存'}
+            syncState === 'conflict' ? t('canvas.sync.conflict')
+              : syncState === 'saving' ? t('canvas.sync.saving')
+                : syncState === 'offline' ? t('canvas.sync.offline')
+                  : t('canvas.sync.synced')
+          ) : t('canvas.sync.localOnly')}
         </span>
       </div>
 
       <CanvasBoard
+        t={t}
         nodes={visibleNodes}
         viewport={viewport}
         lod={lod}
@@ -714,6 +728,7 @@ export function CanvasView(props: ConvViewProps & CanvasViewProps): JSX.Element 
       />
 
       <CanvasDialogs
+        t={t}
         kind={dialog}
         previewNode={dialog === 'preview' ? previewNode : null}
         removeNode={dialog === 'remove' ? removeNode : null}

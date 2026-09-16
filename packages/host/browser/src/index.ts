@@ -37,7 +37,8 @@ import { BrowserRuntime } from './runtime.ts'
 import { TabPool } from './pool.ts'
 import { BrowserStore } from './store.ts'
 import { applyBrowserTools, parseToolGroups } from './tools.ts'
-import { BROWSER_SHELL_HTML, BROWSER_OVERLAY_HTML } from './shell-pages.ts'
+import { browserOverlayHtml, browserShellHtml } from './shell-pages.ts'
+import { hostLocaleFrom, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import type { CredentialResolver } from './types.ts'
 import type { DownloadEntry } from './store.ts'
 type DownloadEntryStatus = DownloadEntry['status']
@@ -332,6 +333,27 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }
 
+  /**
+   * Host UI locale for every piece of user-visible copy this plugin owns (the
+   * injected chrome pages, the native window title, the activity-panel
+   * summaries, the user-gate refusals).
+   *
+   * Resolved PER CALL, never cached: the language can change while the app runs
+   * and the browser window may already be open, so nothing here may freeze the
+   * first resolution into a module constant (the bug class documented in
+   * `packages/host/connectors/src/client/status-label.ts`). The service probe
+   * is per call too, so a launcher that composes later than this plugin is
+   * still picked up. Precedence (all inside {@link hostLocaleFrom}): the probed
+   * `desktopRuntime.locale` — the user's in-app choice, authoritative — then the
+   * request's `Accept-Language`, then the product default (`zh`).
+   * @param req - the request being served, when the copy is rendered for one.
+   * @returns the locale to render host copy in.
+   */
+  const hostLocale = (req?: IncomingMessage): HostLocale => hostLocaleFrom(
+    ctx.get('desktopRuntime') as { readonly locale?: unknown } | undefined,
+    req?.headers['accept-language'],
+  )
+
   const credentialResolver: CredentialResolver | undefined = createCredentialResolver({
     currentUser,
     ...(config.credentialSites === undefined ? {} : { credentialSites: config.credentialSites }),
@@ -361,16 +383,17 @@ export function apply(ctx: Context, config: Config = {}): void {
   const pool = new TabPool({
     ...(config.maxTabs !== undefined ? { maxTabs: config.maxTabs } : {}),
     ...(config.waitTimeoutMs !== undefined ? { waitTimeoutMs: config.waitTimeoutMs } : {}),
+    locale: () => hostLocale(),
   })
   const runtime = new BrowserRuntime(
-    createRealElectronAdapter(),
+    createRealElectronAdapter(undefined, () => hostLocale()),
     {
       ...config,
       downloadDir: config.downloadDir ?? (userDataDir !== undefined ? join(userDataDir, 'downloads') : join(fallbackDataRoot(), 'downloads')),
     },
     credentialResolver,
     browserPartitionFor(currentUser()),
-    { pool, store, currentUsername: currentUser },
+    { pool, store, currentUsername: currentUser, locale: () => hostLocale() },
   )
   const shellOrigin = `http://127.0.0.1:${String(ctx.webServer.port)}`
   runtime.setShellOrigin(shellOrigin)
@@ -769,10 +792,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     /**
      * 本插件自己的两个页面：加载即再交接一次 cookie（交接可能在开机竞态里
      * 刚开始播表，页面加载是一个自然的"该有了"时点）。
+     *
+     * 页面**按请求现渲染**：语言可能在使用过程中切换（桌面运行时的 locale 是
+     * 活的），所以 locale 在这里、每次请求解析一次，再交给页面构建函数；把
+     * locale 定死在插件装配期就是这条约束要消灭的 bug 类型。
      */
-    const page = (content: string): JsonHandler => (req, res) => {
+    const page = (render: (locale: HostLocale) => string): JsonHandler => (req, res) => {
       startCookieHandoff()
-      html(content)(req, res)
+      html(render(hostLocale(req)))(req, res)
     }
 
     const disposers = [
@@ -809,8 +836,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           }
         })().catch((cause: unknown) => json(res, 400, { error: cause instanceof Error ? cause.message : String(cause) }))
       } }),
-      ctx.webServer.register({ kind: 'exact', path: '/browser-shell', handler: page(BROWSER_SHELL_HTML) }),
-      ctx.webServer.register({ kind: 'exact', path: '/browser-overlay', handler: page(BROWSER_OVERLAY_HTML) }),
+      ctx.webServer.register({ kind: 'exact', path: '/browser-shell', handler: page(browserShellHtml) }),
+      ctx.webServer.register({ kind: 'exact', path: '/browser-overlay', handler: page(browserOverlayHtml) }),
     ]
     return () => {
       for (const dispose of disposers) dispose()

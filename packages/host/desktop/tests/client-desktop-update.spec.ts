@@ -10,6 +10,11 @@ import {
   triggerDesktopUpdateCheck,
   updateActionFor,
 } from '../src/client/desktop-update.tsx'
+import { setActiveLocale } from '../src/client/locales.ts'
+
+// The badge copy is locale-aware; every case below states the locale it asserts
+// in, and the reset keeps a failing English case from leaking into the next one.
+afterEach(() => setActiveLocale('zh'))
 
 describe('desktop update badge client', () => {
   it('parses a valid snapshot and rejects malformed bodies', async () => {
@@ -186,6 +191,23 @@ describe('desktop update badge view', () => {
     })
   })
 
+  it('follows the active locale instead of mixing languages in one badge', () => {
+    // 2026-09-16 i18n 回归：此前 `label` 恒为中文（`安装 2.3.0`）而同一对象的
+    // `title` 恒为英文 —— 任何语言下都有一半是错的。回退成任一硬编码即红。
+    setActiveLocale('en')
+    expect(desktopUpdateBadgeView({ ...base, readyVersion: '2.3.0', readyPath: '/tmp/i' })).toMatchObject({
+      state: 'ready',
+      label: 'Install 2.3.0',
+      title: 'Version 2.3.0 is downloaded — click to install',
+    })
+    setActiveLocale('zh')
+    expect(desktopUpdateBadgeView({ ...base, readyVersion: '2.3.0', readyPath: '/tmp/i' })).toMatchObject({
+      state: 'ready',
+      label: '安装 2.3.0',
+      title: '版本 2.3.0 已下载 — 点击安装',
+    })
+  })
+
   it('shows download progress and the retry attempt', () => {
     expect(desktopUpdateBadgeView({
       ...base,
@@ -196,11 +218,31 @@ describe('desktop update badge view', () => {
     })).toMatchObject({
       state: 'downloading',
       label: '2.3.0 50%',
-      title: 'Retrying download (attempt 2/5) in 4s…',
+      title: '正在重试下载（第 2/5 次），4 秒后继续…',
     })
+  })
+
+  it('translates the retry hover text too', () => {
+    setActiveLocale('en')
+    expect(desktopUpdateBadgeView({
+      ...base,
+      downloadingVersion: '2.3.0',
+      retryAttempt: 2,
+      retryDelayMs: 4_000,
+    })).toMatchObject({ title: 'Retrying download (attempt 2/5) in 4s…' })
+    expect(desktopUpdateBadgeView({
+      ...base,
+      downloadingVersion: '2.3.0',
+      retryAttempt: 2,
+      retryDelayMs: 0,
+    })).toMatchObject({ title: 'Downloading (attempt 2/5)…' })
   })
 
   it('falls back to the available label while the download has not started', () => {
     expect(desktopUpdateBadgeView(base)).toMatchObject({ state: 'available', label: '2.3.0' })
+    setActiveLocale('en')
+    expect(desktopUpdateBadgeView(base)).toMatchObject({
+      title: 'Version 2.3.0 available — click to check',
+    })
   })
 })

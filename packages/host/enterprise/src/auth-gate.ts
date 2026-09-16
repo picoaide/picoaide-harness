@@ -21,6 +21,7 @@ import {
 } from './skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { brandMarkSvg } from './channel-geometry.ts'
+import { hostCopy, hostLocaleFrom, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import { absolutizeChannelAssets, asChannelPayload, brandChannel, mergeChannel, type BrandConfig, type ChannelConfig } from './channel-content.ts'
 import type { Session } from './server-connector/config.ts'
 
@@ -48,13 +49,139 @@ import {
  * session exists. The user fills the server address and logs in through the
  * client's local API, which calls the gateway; on success the page reloads
  * into the DSH Web app in the same window.
+ *
+ * 文案与 `<html lang>` 随宿主语言（见 LOGIN_COPY 与 renderLoginPage）。
  */
-const LOGIN_HTML = `<!DOCTYPE html>
-<html lang="zh-CN">
+/**
+ * 登录页文案（zh 是原文逐字保留, en 是镜像）。
+ *
+ * 语言由**渲染方按请求/按渲染**解析后传入（`hostLocaleFrom`）—— 绝不在模块级
+ * 捕获：`t()`/文案一旦落在模块常量里，用户切语言后这一页会永远停在启动时的
+ * 语言（同类根因见 `packages/host/connectors/src/client/status-label.ts` 的注释）。
+ */
+interface LoginCopy {
+  /** `<title>` 里品牌名之后的词（品牌名由 apply() 单独替换）。 */
+  titleSuffix: string
+  connectTitle: string
+  connectTagline: string
+  next: string
+  usernamePlaceholder: string
+  passwordPlaceholder: string
+  signIn: string
+  browserSignIn: string
+  waiting: string
+  needServer: string
+  connecting: string
+  cannotConnect: string
+  methodLocal: string
+  methodUnconfigured: string
+  ldapUsername: string
+  /** 含 `{method}` 占位符。 */
+  signInWith: string
+  browserCancelled: string
+  needServerFirst: string
+  browserRegisterFailed: string
+  signingIn: string
+  /** 含 `{status}` 占位符。 */
+  signInFailed: string
+  auditorDenied: string
+  adminConsole: string
+  networkError: string
+  badCredentials: string
+  tooManyAttempts: string
+  accountDisabled: string
+}
+
+const LOGIN_COPY: Readonly<Record<HostLocale, LoginCopy>> = {
+  zh: {
+    titleSuffix: '登录',
+    connectTitle: '连接服务端',
+    connectTagline: '输入服务端地址以确认登录方式',
+    next: '下一步',
+    usernamePlaceholder: '账号',
+    passwordPlaceholder: '密码',
+    signIn: '登录',
+    browserSignIn: '使用浏览器登录',
+    waiting: '请在弹出的浏览器窗口中完成授权，等待授权完成后此处会自动继续…',
+    needServer: '请填写服务端地址',
+    connecting: '连接中…',
+    cannotConnect: '无法连接服务端，请检查地址与网络',
+    methodLocal: '本地账号',
+    methodUnconfigured: '该方式未配置',
+    ldapUsername: 'LDAP 账号',
+    signInWith: '使用 {method} 登录',
+    browserCancelled: '浏览器授权未完成或已取消，请重试',
+    needServerFirst: '请先填写服务端地址',
+    browserRegisterFailed: '无法登记浏览器登录，请重试',
+    signingIn: '登录中…',
+    signInFailed: '登录失败 ({status})',
+    auditorDenied: '审计账号不可登录客户端，请使用管理后台',
+    adminConsole: '打开管理后台 ↗',
+    networkError: '网络错误，请检查服务端地址后重试',
+    badCredentials: '账号或密码错误',
+    tooManyAttempts: '登录尝试过于频繁，请稍后再试',
+    accountDisabled: '账号已被禁用，请联系管理员',
+  },
+  en: {
+    titleSuffix: 'Sign in',
+    connectTitle: 'Connect to the server',
+    connectTagline: 'Enter the server address to load the available sign-in methods',
+    next: 'Next',
+    usernamePlaceholder: 'Username',
+    passwordPlaceholder: 'Password',
+    signIn: 'Sign in',
+    browserSignIn: 'Sign in with browser',
+    waiting: 'Complete the authorization in the browser window that just opened; this page continues automatically.',
+    needServer: 'Enter the server address',
+    connecting: 'Connecting…',
+    cannotConnect: 'Cannot reach the server — check the address and your network',
+    methodLocal: 'Local account',
+    methodUnconfigured: 'This method is not configured',
+    ldapUsername: 'LDAP username',
+    signInWith: 'Sign in with {method}',
+    browserCancelled: 'Browser sign-in was not completed or was cancelled. Please try again.',
+    needServerFirst: 'Enter the server address first',
+    browserRegisterFailed: 'Could not start browser sign-in. Please try again.',
+    signingIn: 'Signing in…',
+    signInFailed: 'Sign-in failed ({status})',
+    auditorDenied: 'Audit accounts cannot sign in to the desktop client. Please use the admin console.',
+    adminConsole: 'Open admin console ↗',
+    networkError: 'Network error — check the server address and try again',
+    badCredentials: 'Incorrect username or password',
+    tooManyAttempts: 'Too many sign-in attempts. Please try again later.',
+    accountDisabled: 'This account has been disabled. Contact your administrator.',
+  },
+}
+
+/**
+ * 把一份文案序列化成可安全内联进 `<script>` 的 JS 字面量。
+ *
+ * `JSON.stringify` 不转义 `<`，文案里一个 `</script>` 就能从字符串里逃逸出来改写
+ * 登录页 —— 登录页是认证前唯一的 HTML 面，这里按不可信输入处理（与
+ * `brandScriptLiteral` 同一口径）。
+ * @param value - 待内联的值。
+ * @returns 形如 `{"key":"…"}` 的安全字面量。
+ */
+function scriptLiteral(value: unknown): string {
+  return JSON.stringify(value).replace(/</gu, '\\u003c')
+}
+
+/**
+ * 登录页（认证前第一个界面）。
+ *
+ * 语言由调用方按请求解析（`hostLocaleFrom`）后传入；返回的 HTML 仍带
+ * `__BRAND_NAME__` / `__DEFAULT_SERVER__` 等占位符，由 `apply()` 做属性转义替换。
+ * @param locale - 本次渲染的宿主语言。
+ * @returns 独立 HTML 文档。
+ */
+export function renderLoginPage(locale: HostLocale): string {
+  const c = hostCopy(locale, LOGIN_COPY.zh, LOGIN_COPY.en)
+  return `<!DOCTYPE html>
+<html lang="${hostCopy(locale, 'zh-CN', 'en')}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__BRAND_NAME__ 登录</title>
+<title>__BRAND_NAME__ ${c.titleSuffix}</title>
 <style>
   :root {
     --bg: #ffffff;
@@ -116,11 +243,11 @@ const LOGIN_HTML = `<!DOCTYPE html>
 <div class="card">
   <!-- Step 1: 服务端地址 -->
   <div id="step1" class="stage active">
-    <h1>连接服务端</h1>
-    <div class="tagline">输入服务端地址以确认登录方式</div>
+    <h1>${c.connectTitle}</h1>
+    <div class="tagline">${c.connectTagline}</div>
     <form id="f1">
       <input id="server" type="url" placeholder="https://ai.example.com" value="__DEFAULT_SERVER__" __DEFAULT_SERVER_MARK__ autocomplete="off" spellcheck="false" required>
-      <button type="submit" id="next-btn">下一步</button>
+      <button type="submit" id="next-btn">${c.next}</button>
       <div class="err" id="err-step1"></div>
     </form>
   </div>
@@ -131,16 +258,18 @@ const LOGIN_HTML = `<!DOCTYPE html>
     <div class="brand" id="brand-area"></div>
     <div id="methods" class="methods"></div>
     <form id="f2" style="display:none">
-      <input id="username" placeholder="账号" autocomplete="username" style="display:none">
-      <input id="password" type="password" placeholder="密码" autocomplete="current-password" style="display:none">
-      <button type="submit" id="btn" style="display:none">登录</button>
+      <input id="username" placeholder="${c.usernamePlaceholder}" autocomplete="username" style="display:none">
+      <input id="password" type="password" placeholder="${c.passwordPlaceholder}" autocomplete="current-password" style="display:none">
+      <button type="submit" id="btn" style="display:none">${c.signIn}</button>
     </form>
-    <button type="button" id="browser-btn" style="display:none">使用浏览器登录</button>
-    <div class="hint" id="waiting" style="display:none">请在弹出的浏览器窗口中完成授权，等待授权完成后此处会自动继续…</div>
+    <button type="button" id="browser-btn" style="display:none">${c.browserSignIn}</button>
+    <div class="hint" id="waiting" style="display:none">${c.waiting}</div>
     <div class="err" id="err-step2"></div>
   </div>
 </div>
 <script>
+  // 页面脚本文案（由 apply() 之外的 renderLoginPage 按语言注入）。
+  var T = ${scriptLiteral(hostCopy(locale, LOGIN_COPY.zh, LOGIN_COPY.en))}
   // Desktop shell marker: the 0.1.2 token exchange clears the query string
   // after login, so stash the presentation parameters for the client shell
   // (token excluded — the exchange already minted the authority cookie).
@@ -183,9 +312,9 @@ const LOGIN_HTML = `<!DOCTYPE html>
   // ---- Step1 → Step2: 并行探测 channel + methods(任一成功进 Step2) ----
   async function connect(server) {
     err1.textContent = ''
-    if (!server) { err1.textContent = '请填写服务端地址'; return false }
+    if (!server) { err1.textContent = T.needServer; return false }
     document.getElementById('next-btn').disabled = true
-    document.getElementById('next-btn').textContent = '连接中…'
+    document.getElementById('next-btn').textContent = T.connecting
     try {
       var results = await Promise.allSettled([
         fetch('/api/pico/channel?server=' + encodeURIComponent(server)),
@@ -194,7 +323,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
       var channelOk = results[0].status === 'fulfilled' && results[0].value.ok
       var methodsOk = results[1].status === 'fulfilled' && results[1].value.ok
       if (!channelOk && !methodsOk) {
-        err1.textContent = '无法连接服务端，请检查地址与网络'
+        err1.textContent = T.cannotConnect
         return false
       }
       if (channelOk) {
@@ -217,7 +346,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
       return true
     } finally {
       document.getElementById('next-btn').disabled = false
-      document.getElementById('next-btn').textContent = '下一步'
+      document.getElementById('next-btn').textContent = T.next
     }
   }
 
@@ -318,13 +447,13 @@ const LOGIN_HTML = `<!DOCTYPE html>
       // 恶意/被劫持的网关控制;此前未转义直接拼进属性,可在本地登录页
       // origin 注入属性/事件处理器。label 同理(未知方式回退到 m.name)。
       var rawName = String(m.name == null ? '' : m.name)
-      var label = ({ local: '本地账号', ldap: 'LDAP', openid: 'OpenID', oidc: 'OIDC' })[rawName] || rawName
+      var label = ({ local: T.methodLocal, ldap: 'LDAP', openid: 'OpenID', oidc: 'OIDC' })[rawName] || rawName
       var name = esc(rawName)
       var configured = m.configured !== false
       return '<button type="button" data-method="' + name + '" class="method' +
         (rawName === currentMethod ? ' active' : '') +
         (configured ? '' : ' disabled') + '"' +
-        (configured ? '' : ' title="该方式未配置"') + '>' + esc(label) + '</button>'
+        (configured ? '' : ' title="' + esc(T.methodUnconfigured) + '"') + '>' + esc(label) + '</button>'
     }).join('')
     methodsBox.querySelectorAll('.method').forEach(function (b) {
       b.addEventListener('click', function () {
@@ -346,16 +475,16 @@ const LOGIN_HTML = `<!DOCTYPE html>
     var isPassword = currentMethod === 'local' || currentMethod === 'ldap'
     document.getElementById('username').style.display = isPassword ? '' : 'none'
     document.getElementById('password').style.display = isPassword ? '' : 'none'
-    if (isPassword) document.getElementById('username').placeholder = currentMethod === 'ldap' ? 'LDAP 账号' : '账号'
+    if (isPassword) document.getElementById('username').placeholder = currentMethod === 'ldap' ? T.ldapUsername : T.usernamePlaceholder
     document.getElementById('btn').style.display = isPassword ? '' : 'none'
     f2.style.display = isPassword ? '' : 'none'
     browserBtn.style.display = isPassword ? 'none' : ''
-    browserBtn.textContent = '使用 ' + methodLabel(currentMethod) + ' 登录'
+    browserBtn.textContent = T.signInWith.replace('{method}', methodLabel(currentMethod))
     waiting.style.display = 'none'
   }
 
   function methodLabel(name) {
-    return ({ local: '本地账号', ldap: 'LDAP', openid: 'OpenID', oidc: 'OIDC' })[name] || name
+    return ({ local: T.methodLocal, ldap: 'LDAP', openid: 'OpenID', oidc: 'OIDC' })[name] || name
   }
 
   function esc(s) {
@@ -406,13 +535,13 @@ const LOGIN_HTML = `<!DOCTYPE html>
     pollAttempts = 0
     browserBtn.disabled = false
     waiting.style.display = 'none'
-    err2.textContent = '浏览器授权未完成或已取消，请重试'
+    err2.textContent = T.browserCancelled
   }
 
   // ---- 浏览器方式(OpenID/OIDC): 打开授权页, 轮询等待深链回跳 ----
   async function browserLogin() {
     var server = document.getElementById('server').value.trim()
-    if (!server) { err2.textContent = '请先填写服务端地址'; return }
+    if (!server) { err2.textContent = T.needServerFirst; return }
     err2.textContent = ''
     waiting.style.display = 'block'
     browserBtn.disabled = true
@@ -437,7 +566,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
     } catch (e7) {
       waiting.style.display = 'none'
       browserBtn.disabled = false
-      err2.textContent = '无法登记浏览器登录，请重试'
+      err2.textContent = T.browserRegisterFailed
       return
     }
     window.open(base + '/api/client/v2/auth/' + name + '/login?server=' + encodeURIComponent(server), '_blank')
@@ -456,7 +585,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
     }
     btn.disabled = true
     var btnLabel = btn.textContent
-    btn.textContent = '登录中…'
+    btn.textContent = T.signingIn
     try {
       var res = await fetch('/api/pico/auth/login', {
         method: 'POST',
@@ -472,16 +601,16 @@ const LOGIN_HTML = `<!DOCTYPE html>
       }
       var data = await res.json().catch(function () { return {} })
       var raw = String(data.error && data.error.message ? data.error.message : (data.error || ''))
-      var msg = friendlyLoginError(raw) || ('登录失败 (' + res.status + ')')
+      var msg = friendlyLoginError(raw) || T.signInFailed.replace('{status}', res.status)
       // 开放问题2: auditor 拒绝时提供「打开管理后台」入口。
       if (raw.toLowerCase().indexOf('auditor_not_allowed') >= 0) {
         var server = trimServer(document.getElementById('server').value.trim())
-        err2.innerHTML = '审计账号不可登录客户端，请使用管理后台<br><a href="' + esc(server) + '/admin/" style="color:var(--accent);font-size:13px;text-decoration:underline">打开管理后台 ↗</a>'
+        err2.innerHTML = T.auditorDenied + '<br><a href="' + esc(server) + '/admin/" style="color:var(--accent);font-size:13px;text-decoration:underline">' + T.adminConsole + '</a>'
       } else {
         err2.textContent = msg
       }
     } catch (e5) {
-      err2.textContent = '网络错误，请检查服务端地址后重试'
+      err2.textContent = T.networkError
     } finally {
       btn.disabled = false
       btn.textContent = btnLabel
@@ -489,16 +618,17 @@ const LOGIN_HTML = `<!DOCTYPE html>
   })
   var friendlyLoginError = function (raw) {
     var code = raw.toLowerCase()
-    if (code.indexOf('invalid_credentials') >= 0 || code.indexOf('invalid credentials') >= 0 || code.indexOf('unauthorized') >= 0) return '账号或密码错误'
-    if (code.indexOf('rate') >= 0 || code.indexOf('too many') >= 0) return '登录尝试过于频繁，请稍后再试'
-    if (code.indexOf('network') >= 0 || code.indexOf('timeout') >= 0 || code.indexOf('econnrefused') >= 0) return '无法连接服务端，请检查地址与网络'
-    if (code.indexOf('disabled') >= 0 || code.indexOf('inactive') >= 0) return '账号已被禁用，请联系管理员'
-    if (code.indexOf('auditor_not_allowed') >= 0) return '审计账号不可登录客户端，请使用管理后台'
+    if (code.indexOf('invalid_credentials') >= 0 || code.indexOf('invalid credentials') >= 0 || code.indexOf('unauthorized') >= 0) return T.badCredentials
+    if (code.indexOf('rate') >= 0 || code.indexOf('too many') >= 0) return T.tooManyAttempts
+    if (code.indexOf('network') >= 0 || code.indexOf('timeout') >= 0 || code.indexOf('econnrefused') >= 0) return T.cannotConnect
+    if (code.indexOf('disabled') >= 0 || code.indexOf('inactive') >= 0) return T.accountDisabled
+    if (code.indexOf('auditor_not_allowed') >= 0) return T.auditorDenied
     return raw
   }
 </script>
 </body>
 </html>`
+}
 
 export interface Config {
   defaultServer?: string
@@ -620,12 +750,68 @@ export const Config: z<Config> = z.object({
 
 // 0057 强制改密页: 登录后被管理员重置密码(必须改密才能使用)时展示。
 // 与 LOGIN_HTML 无关联的关系不在此处理; 页面样式与登录页保持一致(浅色卡片)。
-const CHANGE_PASSWORD_HTML = `<!DOCTYPE html>
-<html lang="zh-CN">
+/** 强制改密页文案（zh 是原文逐字保留, en 是镜像）。 */
+interface ChangePasswordCopy {
+  title: string
+  hint: string
+  oldPlaceholder: string
+  newPlaceholder: string
+  confirmPlaceholder: string
+  submit: string
+  tooShort: string
+  mismatch: string
+  sameAsOld: string
+  submitting: string
+  failed: string
+  networkError: string
+}
+
+const CHANGE_PASSWORD_COPY: Readonly<Record<HostLocale, ChangePasswordCopy>> = {
+  zh: {
+    title: '修改密码',
+    hint: '你的密码已被管理员重置，为保障账号安全需要先设置新密码；修改成功后请用新密码重新登录。',
+    oldPlaceholder: '当前密码(管理员设置的临时密码)',
+    newPlaceholder: '新密码(至少 10 位)',
+    confirmPlaceholder: '确认新密码',
+    submit: '确认修改',
+    tooShort: '新密码至少 10 位',
+    mismatch: '两次输入的新密码不一致',
+    sameAsOld: '新密码不能与当前密码相同',
+    submitting: '提交中…',
+    failed: '修改失败',
+    networkError: '网络错误，请检查服务端地址后重试',
+  },
+  en: {
+    title: 'Change password',
+    hint: 'Your password was reset by an administrator. Set a new password to secure your account, then sign in with it.',
+    oldPlaceholder: 'Current password (temporary password from your administrator)',
+    newPlaceholder: 'New password (at least 10 characters)',
+    confirmPlaceholder: 'Confirm new password',
+    submit: 'Change password',
+    tooShort: 'New password needs at least 10 characters',
+    mismatch: 'The two new passwords do not match',
+    sameAsOld: 'New password must differ from the current one',
+    submitting: 'Submitting…',
+    failed: 'Change failed',
+    networkError: 'Network error — check the server address and try again',
+  },
+}
+
+/**
+ * 强制改密页（管理员重置密码后; 完成前业务 API 均被 403）。
+ *
+ * 语言由调用方按请求解析后传入。
+ * @param locale - 本次渲染的宿主语言。
+ * @returns 独立 HTML 文档。
+ */
+export function renderChangePasswordPage(locale: HostLocale): string {
+  const c = hostCopy(locale, CHANGE_PASSWORD_COPY.zh, CHANGE_PASSWORD_COPY.en)
+  return `<!DOCTYPE html>
+<html lang="${hostCopy(locale, 'zh-CN', 'en')}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>修改密码</title>
+<title>${c.title}</title>
 <style>
   /* 与 LOGIN_HTML 同一套主题口径（独立文档 ⇒ 走 prefers-color-scheme；
      桌面壳的 nativeTheme.themeSource 会驱动它）。2026-09-16 暗色审计：
@@ -666,13 +852,13 @@ const CHANGE_PASSWORD_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <div class="card">
-  <h1>修改密码</h1>
-  <p class="hint">你的密码已被管理员重置，为保障账号安全需要先设置新密码；修改成功后请用新密码重新登录。</p>
+  <h1>${c.title}</h1>
+  <p class="hint">${c.hint}</p>
   <form id="cf">
-    <input id="oldpw" type="password" placeholder="当前密码(管理员设置的临时密码)" autocomplete="current-password" required>
-    <input id="new1" type="password" placeholder="新密码(至少 10 位)" autocomplete="new-password" required>
-    <input id="new2" type="password" placeholder="确认新密码" autocomplete="new-password" required>
-    <button type="submit" id="cb">确认修改</button>
+    <input id="oldpw" type="password" placeholder="${c.oldPlaceholder}" autocomplete="current-password" required>
+    <input id="new1" type="password" placeholder="${c.newPlaceholder}" autocomplete="new-password" required>
+    <input id="new2" type="password" placeholder="${c.confirmPlaceholder}" autocomplete="new-password" required>
+    <button type="submit" id="cb">${c.submit}</button>
     <div class="err" id="cerr"></div>
   </form>
 </div>
@@ -686,11 +872,11 @@ const CHANGE_PASSWORD_HTML = `<!DOCTYPE html>
     var p1 = document.getElementById('new1').value
     var p2 = document.getElementById('new2').value
     cerr.textContent = ''
-    if (p1.length < 10) { cerr.textContent = '新密码至少 10 位'; return }
-    if (p1 !== p2) { cerr.textContent = '两次输入的新密码不一致'; return }
-    if (p1 === oldpw) { cerr.textContent = '新密码不能与当前密码相同'; return }
+    if (p1.length < 10) { cerr.textContent = ${scriptLiteral(c.tooShort)}; return }
+    if (p1 !== p2) { cerr.textContent = ${scriptLiteral(c.mismatch)}; return }
+    if (p1 === oldpw) { cerr.textContent = ${scriptLiteral(c.sameAsOld)}; return }
     cb.disabled = true
-    cb.textContent = '提交中…'
+    cb.textContent = ${scriptLiteral(c.submitting)}
     try {
       var res = await fetch('/api/pico/auth/password', {
         method: 'POST',
@@ -703,23 +889,30 @@ const CHANGE_PASSWORD_HTML = `<!DOCTYPE html>
         return
       }
       var data = await res.json().catch(function () { return {} })
-      cerr.textContent = String(data.error && data.error.message ? data.error.message : '修改失败')
+      cerr.textContent = String(data.error && data.error.message ? data.error.message : ${scriptLiteral(c.failed)})
     } catch (e5) {
-      cerr.textContent = '网络错误，请检查服务端地址后重试'
+      cerr.textContent = ${scriptLiteral(c.networkError)}
     } finally {
       cb.disabled = false
-      cb.textContent = '确认修改'
+      cb.textContent = ${scriptLiteral(c.submit)}
     }
   })
 <\/script>
 </body>
 </html>`
+}
 
 // P1-11: transient page shown while the persisted session is still being
 // restored; it re-requests the index (which now resolves to the app or the
 // login form) without a user-visible login-form flash.
-const RESTORING_HTML = `<!DOCTYPE html>
-<html lang="zh-CN">
+/**
+ * 会话恢复中的过渡页。
+ * @param locale - 本次渲染的宿主语言（调用方按渲染解析后传入）。
+ * @returns 独立 HTML 文档。
+ */
+export function renderRestoringPage(locale: HostLocale): string {
+  return `<!DOCTYPE html>
+<html lang="${hostCopy(locale, 'zh-CN', 'en')}">
 <head>
 <meta charset="utf-8">
 <title>__BRAND_NAME__</title>
@@ -731,7 +924,7 @@ const RESTORING_HTML = `<!DOCTYPE html>
 </style>
 </head>
 <body>
-<p>正在恢复登录状态…</p>
+<p>${hostCopy(locale, '正在恢复登录状态…', 'Restoring your session…')}</p>
 <script>
   // Once the restoration completes, the next index request serves the app
   // (or the login form). Poll briefly, then reload for good measure.
@@ -739,6 +932,7 @@ const RESTORING_HTML = `<!DOCTYPE html>
 <\/script>
 </body>
 </html>`
+}
 
 export const name = 'auth-gate'
 export const inject = ['webServer', 'picoSession']
@@ -862,8 +1056,27 @@ function builtInChannel(brand: BrandConfig | undefined): ChannelConfig {
  * 服务端说话；界面上留一个"改地址"的入口，既是多余的步骤，也给"把凭据发到别的
  * 地址"留了路。地址连不上时页面**仍停在 Step1**（那里可以改地址重试），所以
  * 真出问题时不会把人困住。
+ * @param locale - 渲染该页时的宿主语言。
+ * @returns 按钮元素 HTML（`← 修改服务端地址` / `← Change server address`）。
  */
-const BACK_BUTTON_HTML = '<button type="button" class="back" id="back-btn">← 修改服务端地址</button>'
+function backButtonHtml(locale: HostLocale): string {
+  return `<button type="button" class="back" id="back-btn">${hostCopy(locale, '← 修改服务端地址', '← Change server address')}</button>`
+}
+
+/**
+ * 归档超限的响应文案（技能/智能体下载与上传路径可见，回到能力中心面板）。
+ *
+ * 上限值来自 `MAX_ARCHIVE_BYTES`，两种语言插同一个数 —— 只翻译措辞。
+ * @param locale - 本次请求的语言。
+ * @returns 该语言的提示文案（zh 与历史逐字一致）。
+ */
+export function archiveTooLargeError(locale: HostLocale): string {
+  return hostCopy(
+    locale,
+    `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）`,
+    `Archive too large (over ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB)`,
+  )
+}
 
 export function apply(ctx: Context, config: Config): void {
   // srvcore-1 客户端一半(R3-F3-N1a/N1b,2026-09-13):深链守卫必须在**本进程
@@ -917,15 +1130,55 @@ export function apply(ctx: Context, config: Config): void {
   // 不共用同一个字符串。
   const brand = resolveBrand(config.brand)
   const brandTitle = escapeHtmlAttribute(brand.title)
-  const loginHTML = LOGIN_HTML
+
+  /**
+   * 本次请求/本次渲染的宿主语言。
+   *
+   * `ctx.locale` 是**客户端面**服务，宿主持不到它；权威来源是桌面壳的
+   * `desktopRuntime.locale`（用户的应用内选择），其次请求的 `Accept-Language`，
+   * 最后中文（见 `dsh-plugin-desktop/host-locale`）。
+   *
+   * **必须按请求/按渲染调用**：语言可能在两次请求之间变化（用户在设置里切
+   * 语言），任何模块级或 apply 级的缓存都会把首屏永久冻结在启动时的语言。
+   * `tapIndex` 拿不到请求对象（签名只有 html），所以那里只能用
+   * `desktopRuntime.locale` —— 而那正是权威值。
+   * @param req - 当前请求（索引渲染变换没有请求对象）。
+   * @returns 该请求应使用的语言。
+   */
+  const hostLocale = (req?: IncomingMessage): HostLocale => {
+    // 无头组合（loader smoke、测试替身）没有 desktopRuntime，且 ctx.get 可能
+    // 整个缺席 —— 结构性探测，与 desktop-loop-notify 同款。
+    const runtime = typeof ctx.get === 'function'
+      ? ctx.get('desktopRuntime') as { readonly locale?: unknown } | undefined
+      : undefined
+    return hostLocaleFrom(runtime, req?.headers['accept-language'])
+  }
+
+  /** 归档超限文案（能力中心上传/安装路径可见）；语言按请求解析。 */
+  const archiveTooLarge = (locale: HostLocale): string => archiveTooLargeError(locale)
+
+  /**
+   * 组装登录页：文案与 `<html lang>` 取 `locale`，品牌名/预置地址仍在这里做
+   * 上下文各自的转义替换（`__*__` 占位符流程不变）。
+   * @param locale - 本次请求的语言。
+   * @returns 可直接写进响应的 HTML。
+   */
+  const loginPage = (locale: HostLocale): string => renderLoginPage(locale)
     .replaceAll('__DEFAULT_SERVER__', defaultServer)
     // 只有**确实配了**域名才打标记 —— 页面脚本据此决定要不要自动连接。
     .replaceAll('__DEFAULT_SERVER_MARK__', configuredServer === '' ? '' : 'data-default-server="1"')
-    // 内置了地址就不再提供"返回修改服务端地址"（见 BACK_BUTTON_HTML 的说明）。
-    .replaceAll('__BACK_BUTTON__', configuredServer === '' ? BACK_BUTTON_HTML : '')
+    // 内置了地址就不再提供"返回修改服务端地址"（见 backButtonHtml 的说明）。
+    .replaceAll('__BACK_BUTTON__', configuredServer === '' ? backButtonHtml(locale) : '')
     .replaceAll('__BRAND_NAME__', brandTitle)
     .replaceAll('__BRAND_JSON__', brandScriptLiteral(brand))
-  const restoringHTML = RESTORING_HTML.replaceAll('__BRAND_NAME__', brandTitle)
+
+  /**
+   * 组装会话恢复过渡页（`__BRAND_NAME__` 替换同登录页）。
+   * @param locale - 本次渲染的语言。
+   * @returns 可直接写进响应的 HTML。
+   */
+  const restoringPage = (locale: HostLocale): string =>
+    renderRestoringPage(locale).replaceAll('__BRAND_NAME__', brandTitle)
 
   const json = (res: ServerResponse, code: number, body: unknown): void => {
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' })
@@ -1143,34 +1396,37 @@ export function apply(ctx: Context, config: Config): void {
       // P1-11: while the persisted session is still restoring, serve a
       // lightweight "loading" page that re-requests the index once ready —
       // never flash the login form over an existing valid session.
-      if (!ctx.picoSession.isRestored()) return restoringHTML
+      // 这里的语言按**每次渲染**解析：tapIndex 没有请求对象，取 desktopRuntime
+      // 的当前值（用户刚在设置里切了语言时，下一次索引渲染立刻就变）。
+      const locale = hostLocale()
+      if (!ctx.picoSession.isRestored()) return restoringPage(locale)
       const restored = ctx.picoSession.getSession()
       // 0057: 会话带强制改密标记(管理员重置密码) → 一律回强制改密页,
       // 即使应用重启后仍在(业务 API 在改密完成前也被服务端 403)。
-      if (restored !== null && restored.mustChangePassword === true) return CHANGE_PASSWORD_HTML
+      if (restored !== null && restored.mustChangePassword === true) return renderChangePasswordPage(locale)
       if (!ctx.picoSession.isLoggedIn()) {
         // 未登录 ⇒ 这一页就是登录页:顺手用预置服务端武装深链守卫(见上)。
         armPendingBrowserLoginFromLoginPage()
-        return loginHTML
+        return loginPage(locale)
       }
       return html.replace('</head>', SESSION_LOST_SCRIPT + '</head>')
       }),
 
       ctx.webServer.register({
         kind: 'exact', path: '/login',
-        handler: (_req: IncomingMessage, res: ServerResponse) => {
+        handler: (req: IncomingMessage, res: ServerResponse) => {
           armPendingBrowserLoginFromLoginPage()
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-          res.end(loginHTML)
+          res.end(loginPage(hostLocale(req)))
         },
       }),
 
       // 0057 强制改密页(管理员重置密码后; 完成前业务 API 均被 403)。
       ctx.webServer.register({
         kind: 'exact', path: '/change-password',
-        handler: (_req: IncomingMessage, res: ServerResponse) => {
+        handler: (req: IncomingMessage, res: ServerResponse) => {
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-          res.end(CHANGE_PASSWORD_HTML)
+          res.end(renderChangePasswordPage(hostLocale(req)))
         },
       }),
 
@@ -1203,7 +1459,7 @@ export function apply(ctx: Context, config: Config): void {
             })
           }
           try {
-            const sess = await login(body.server, body.username, body.password)
+            const sess = await login(body.server, body.username, body.password, hostLocale(req))
             ctx.picoSession.setSession(sess)
             // 0057: 强制改密标记 → 登录页跳转强制改密页(而非直接进应用)。
             json(res, 200, { ok: true, must_change_password: sess.mustChangePassword === true })
@@ -1426,7 +1682,7 @@ export function apply(ctx: Context, config: Config): void {
           const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
           if (pathname === '/api/pico/skills' && req.method === 'GET') {
             try {
-              const data = await fetchJSON(s.serverURL, '/api/client/v2/marketplace/skills', { token: s.token })
+              const data = await fetchJSON(s.serverURL, '/api/client/v2/marketplace/skills', { token: s.token, locale: hostLocale(req) })
               // Augment the gateway catalog with the locally installed skill
               // names so the panel can render per-skill install state.
               const installed = await listInstalledSkills(resolveSkillsDir())
@@ -1534,11 +1790,11 @@ export function apply(ctx: Context, config: Config): void {
             // anomalous archive must not be buffered into memory wholesale.
             const declared = upstream.headers.get('content-length')
             if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
-              return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+              return json(res, 413, { error: archiveTooLarge(hostLocale(req)) })
             }
             const content = await readBodyLimited(upstream.body, MAX_ARCHIVE_BYTES).catch(() => null)
             if (content === null) {
-              return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+              return json(res, 413, { error: archiveTooLarge(hostLocale(req)) })
             }
             // Pass through the upstream integrity headers (M3): the server
             // signs archives with X-Skill-Checksum / X-Skill-Version.
@@ -1586,7 +1842,7 @@ export function apply(ctx: Context, config: Config): void {
           // GET /api/pico/agent-presets -> gateway catalog + installed + local.
           if (pathname === '/api/pico/agent-presets' && req.method === 'GET') {
             try {
-              const data = await fetchJSON(s.serverURL, '/api/client/v2/agent-presets', { token: s.token })
+              const data = await fetchJSON(s.serverURL, '/api/client/v2/agent-presets', { token: s.token, locale: hostLocale(req) })
               const installed = await listInstalledPresets(presetsDir)
               const local = await mapLocalPresets(presetsDir, data.presets ?? [])
               json(res, 200, { ...data, installed, local })
@@ -1613,6 +1869,7 @@ export function apply(ctx: Context, config: Config): void {
               const packed = await packPreset(presetsDir, name)
               const gateway = await fetchJSON(s.serverURL, '/api/client/v2/agent-presets', {
                 token: s.token,
+                locale: hostLocale(req),
                 method: 'POST',
                 body: {
                   name: packed.name,
@@ -1668,11 +1925,11 @@ export function apply(ctx: Context, config: Config): void {
               if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
               const declared = upstream.headers.get('content-length')
               if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
-                return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+                return json(res, 413, { error: archiveTooLarge(hostLocale(req)) })
               }
               const content = await readBodyLimited(upstream.body, MAX_ARCHIVE_BYTES).catch(() => null)
               if (content === null) {
-                return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+                return json(res, 413, { error: archiveTooLarge(hostLocale(req)) })
               }
               const checksum = upstream.headers.get('x-preset-checksum') ?? undefined
               const presetVersion = upstream.headers.get('x-preset-version') ?? undefined
@@ -1731,11 +1988,11 @@ export function apply(ctx: Context, config: Config): void {
             if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
             const declared = upstream.headers.get('content-length')
             if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
-              return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+              return json(res, 413, { error: archiveTooLarge(hostLocale(req)) })
             }
             const content = await readBodyLimited(upstream.body, MAX_ARCHIVE_BYTES).catch(() => null)
             if (content === null) {
-              return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+              return json(res, 413, { error: archiveTooLarge(hostLocale(req)) })
             }
             const headers: Record<string, string> = {
               'Content-Type': upstream.headers.get('content-type') ?? 'application/octet-stream',
@@ -1780,7 +2037,7 @@ export function apply(ctx: Context, config: Config): void {
 
           if (pathname === '/api/pico/shared-skills' && req.method === 'GET') {
             try {
-              const data = await fetchJSON(s.serverURL, '/api/client/v2/shared-skills', { token: s.token })
+              const data = await fetchJSON(s.serverURL, '/api/client/v2/shared-skills', { token: s.token, locale: hostLocale(req) })
               const installed = await listInstalledSkills(skillsDir)
               const local = await listLocalSkills(skillsDir)
               json(res, 200, { ...data, installed, local })
@@ -1807,9 +2064,10 @@ export function apply(ctx: Context, config: Config): void {
             const version = typeof body.version === 'string' && body.version.trim() !== '' ? body.version.trim() : undefined
             if (name === '') return json(res, 400, { error: 'missing name' })
             try {
-              const packed = await packSkill(skillsDir, name, version)
+              const packed = await packSkill(skillsDir, name, version, hostLocale(req))
               const gateway = await fetchJSON(s.serverURL, '/api/client/v2/shared-skills', {
                 token: s.token,
+                locale: hostLocale(req),
                 method: 'POST',
                 body: {
                   name: packed.name,
@@ -1862,11 +2120,11 @@ export function apply(ctx: Context, config: Config): void {
               if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
               const declared = upstream.headers.get('content-length')
               if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
-                return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+                return json(res, 413, { error: archiveTooLarge(hostLocale(req)) })
               }
               const content = await readBodyLimited(upstream.body, MAX_ARCHIVE_BYTES).catch(() => null)
               if (content === null) {
-                return json(res, 413, { error: `归档过大（超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB）` })
+                return json(res, 413, { error: archiveTooLarge(hostLocale(req)) })
               }
               const checksum = upstream.headers.get('x-skill-checksum') ?? undefined
               const ver = upstream.headers.get('x-skill-version') ?? version
@@ -1937,7 +2195,7 @@ export function apply(ctx: Context, config: Config): void {
             // 上传行的 status/reason(2026-09-01 契约修复:此前匹配 org 而
             // org 仅含 approved,本地行状态徽章恒空)。
             const matchSource = source === 'local' ? 'own' : source
-            const data = await fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=${encodeURIComponent(matchSource)}`, { token: s.token })
+            const data = await fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=${encodeURIComponent(matchSource)}`, { token: s.token, locale: hostLocale(req) })
             const items = (data as { items?: Array<Record<string, unknown>> }).items ?? []
             const installedSkills = new Set(await listInstalledSkills(skillsDir))
             const installedPresets = new Set(await listInstalledPresets(presetsDir))
@@ -2030,8 +2288,8 @@ export function apply(ctx: Context, config: Config): void {
               // originChannel/provenance 已在上游 enriched 计算。
               if (localRows.length > 0 || true) {
                 const [mkt, org] = await Promise.all([
-                  fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=market`, { token: s.token }).catch(() => ({ items: [] })),
-                  fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=org`, { token: s.token }).catch(() => ({ items: [] })),
+                  fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=market`, { token: s.token, locale: hostLocale(req) }).catch(() => ({ items: [] })),
+                  fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=org`, { token: s.token, locale: hostLocale(req) }).catch(() => ({ items: [] })),
                 ])
                 const storeInstalled = [...(mkt as { items?: Array<Record<string, unknown>> }).items ?? [], ...(org as { items?: Array<Record<string, unknown>> }).items ?? []]
                   .filter((i) => {

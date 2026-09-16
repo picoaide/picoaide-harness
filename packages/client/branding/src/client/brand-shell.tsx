@@ -1,5 +1,6 @@
 import { createElement } from 'react'
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
+import { t } from './locales.ts'
 
 // build-time 版本注入(tsdown define 替换为字符串字面量);浏览器编译面无
 // node types,声明最小面的 process 占位。
@@ -141,20 +142,16 @@ export function AboutSection() {
     'div',
     { className: 'picoaide-about' },
     createElement('h2', null, 'PicoAide Harness'),
-    createElement(
-      'p',
-      null,
-      'PicoAide 品牌与界面壳：品牌图形、主题色、悬浮徽章与关于页面全部经官方 client 插件 slot 注入，无上游代码分支。',
-    ),
+    createElement('p', null, t('about.description')),
     createElement(
       'dl',
       null,
-      createElement('dt', null, 'Brand plugin'),
+      createElement('dt', null, t('about.brandPlugin')),
       createElement('dd', null, PACKAGE),
-      createElement('dt', null, 'Product version'),
+      createElement('dt', null, t('about.productVersion')),
       createElement('dd', null, version != null && version !== '' ? `v${version}` : '—'),
-      createElement('dt', null, 'UI surface'),
-      createElement('dd', null, 'Official DeepSeek Harness web UI (unmodified)'),
+      createElement('dt', null, t('about.uiSurface')),
+      createElement('dd', null, t('about.uiSurfaceValue')),
     ),
   )
 }

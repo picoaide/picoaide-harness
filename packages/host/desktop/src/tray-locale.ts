@@ -1,6 +1,6 @@
 /** Desktop-owned native tray copy for the locales shipped by DSH. */
 
-import type { DesktopLocale } from './runtime.ts'
+import type { DesktopLocale, DesktopPlatform } from './runtime.ts'
 import { localeIdToDesktopLocale } from './desktop-locale.ts'
 
 export type DesktopTrayLabelKey =
@@ -103,4 +103,105 @@ export function desktopTrayLabel(
 /** Resolve the native privacy confirmation shown before diagnostics export. */
 export function desktopDiagnosticsPrivacyCopy(locale: DesktopLocale): DesktopDiagnosticsPrivacyCopy {
   return diagnosticsPrivacyCopy[locale]
+}
+
+/** Platform whose installer hand-off the "update ready" detail has to explain. */
+export type DesktopUpdatePlatform = DesktopPlatform
+
+/**
+ * Copy for the two native update dialogs.
+ *
+ * 2026-09-16 i18n：两个对话框原先只有 Linux 的 `detail` 是硬编码中文，而同一对话框的
+ * title/message/按钮恒为英文 —— 中文用户看到的是中英混排，英文用户则在 Linux 上撞到
+ * 一段中文说明。整段文案（含按钮）改为随 `DesktopRuntime.locale` 走同一张表。
+ */
+export interface DesktopUpdateDialogCopy {
+  /** Title of the "download finished, ready to install" dialog. */
+  readonly readyTitle: (product: string) => string
+  /** Body of the same dialog. */
+  readonly readyMessage: (version: string, product: string) => string
+  /** Platform-specific instruction; `product` is only read by the Windows variant. */
+  readonly readyDetail: (platform: DesktopUpdatePlatform, installerPath: string, product: string) => string
+  /** Title of the "installer handed to the OS" dialog (Linux only). */
+  readonly downloadedTitle: (product: string) => string
+  /** Body of the same dialog. */
+  readonly downloadedMessage: (version: string, product: string) => string
+  /** Linux AppImage replacement instruction. */
+  readonly downloadedDetail: (installerPath: string) => string
+  /** Affirmative button label. */
+  readonly confirm: string
+}
+
+const updateDialogCopy: Record<DesktopLocale, DesktopUpdateDialogCopy> = {
+  en: {
+    readyTitle: product => `${product} Update Ready`,
+    readyMessage: (version, product) => `${product} ${version} is downloaded and ready to install.`,
+    readyDetail: (platform, installerPath, product) => platform === 'linux'
+      ? `The new AppImage has been downloaded to: ${installerPath}\n\nChoose Install Update in the app or the tray menu, then quit and replace the current AppImage with that file.`
+      : platform === 'darwin'
+        ? 'The disk image will open when you install. Choose Install Update in the app or the tray menu to continue.'
+        : `Choose Install Update in the app or the tray menu to restart ${product} and run the installer.`,
+    downloadedTitle: product => `${product} Update Downloaded`,
+    downloadedMessage: (version, product) => `${product} ${version} is ready to install.`,
+    downloadedDetail: installerPath =>
+      `The new AppImage has been downloaded to: ${installerPath}\n\nQuit this application, replace the current AppImage with that file, then run it again.`,
+    confirm: 'OK',
+  },
+  zh: {
+    readyTitle: product => `${product} 更新已就绪`,
+    readyMessage: (version, product) => `${product} ${version} 已下载完成，可以安装。`,
+    readyDetail: (platform, installerPath, product) => platform === 'linux'
+      ? `新版本 AppImage 已下载到: ${installerPath}\n\n在界面或托盘里点「安装更新」后,关闭本程序并用该文件替换当前 AppImage。`
+      : platform === 'darwin'
+        ? '安装时会打开磁盘映像。请在应用内或托盘菜单中选择「安装更新」继续。'
+        : `请在应用内或托盘菜单中选择「安装更新」，以重启 ${product} 并运行安装程序。`,
+    downloadedTitle: product => `${product} 更新已下载`,
+    downloadedMessage: (version, product) => `${product} ${version} 已可安装。`,
+    downloadedDetail: installerPath =>
+      `新版本 AppImage 已下载到: ${installerPath}\n\n请关闭本程序, 用该文件替换当前 AppImage 后重新运行。`,
+    confirm: '确定',
+  },
+}
+
+/** Resolve the copy for the native update dialogs. */
+export function desktopUpdateDialogCopy(locale: DesktopLocale): DesktopUpdateDialogCopy {
+  return updateDialogCopy[locale]
+}
+
+/**
+ * Copy for the renderer crash-fallback page.
+ *
+ * The page carries its own inline `<style>` and is loaded as a `data:` URL, so
+ * it cannot reach the client dictionaries; its copy lives here with the rest of
+ * the desktop-owned native strings.
+ */
+export interface DesktopCrashPageCopy {
+  /** `<html lang>` for the page. */
+  readonly lang: string
+  /** Page heading. */
+  readonly heading: string
+  /** Explanation under the heading. */
+  readonly body: string
+  /** Retry button label. */
+  readonly retry: string
+}
+
+const crashPageCopy: Record<DesktopLocale, DesktopCrashPageCopy> = {
+  en: {
+    lang: 'en',
+    heading: 'Failed to load the interface',
+    body: 'The renderer process could not load. Use the button below to retry; if it keeps failing, quit from the system tray and start the application again.',
+    retry: 'Reload',
+  },
+  zh: {
+    lang: 'zh-CN',
+    heading: '界面加载失败',
+    body: '渲染进程未能正常加载。可以点击下方按钮重试；若持续失败，请从系统托盘退出后重新启动应用。',
+    retry: '重新加载',
+  },
+}
+
+/** Resolve the copy for the renderer crash-fallback page. */
+export function desktopCrashPageCopy(locale: DesktopLocale): DesktopCrashPageCopy {
+  return crashPageCopy[locale]
 }

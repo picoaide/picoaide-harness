@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  desktopCrashPageCopy,
   desktopDiagnosticsPrivacyCopy,
   desktopLocaleFromLanguageTag,
   desktopTrayLabel,
+  desktopUpdateDialogCopy,
 } from '../src/tray-locale.ts'
 
 describe('desktopLocaleFromLanguageTag', () => {
@@ -99,5 +101,55 @@ describe('desktop tray labels use the resolved product name', () => {
     // 本地开发/未渠道化构建:与改造前逐字节一致。
     expect(desktopTrayLabel('zh', 'updateAvailable', '2.7.0')).toBe('PicoAide Harness 2.7.0 可用')
     expect(desktopTrayLabel('en', 'downloadingUpdate', '2.7.0', '')).toBe('Downloading PicoAide Harness 2.7.0…')
+  })
+})
+
+describe('native copy added by the 2026-09-16 i18n pass', () => {
+  const CJK = /[\u4e00-\u9fff]/u
+
+  it('localizes the whole update dialog, not just the Linux detail', () => {
+    // 回归：此前 title/message/按钮恒为英文，只有 Linux 的 detail 是中文，
+    // 于是两个语言下都是中英混排。整段（含按钮）必须同语言。
+    const zhReady = desktopUpdateDialogCopy('zh')
+    const enReady = desktopUpdateDialogCopy('en')
+    expect(zhReady.readyTitle('P')).toContain('更新已就绪')
+    expect(enReady.readyTitle('P')).toContain('Update Ready')
+    expect(zhReady.confirm).toBe('确定')
+    expect(enReady.confirm).toBe('OK')
+    expect(zhReady.readyMessage('1.0.0', 'P')).toMatch(CJK)
+    expect(enReady.readyMessage('1.0.0', 'P')).not.toMatch(CJK)
+  })
+
+  it('gives every update-dialog string an English form free of Chinese', () => {
+    const en = desktopUpdateDialogCopy('en')
+    for (const platform of ['linux', 'darwin', 'win32'] as const) {
+      expect(en.readyDetail(platform, '/tmp/i', 'P'), platform).not.toMatch(CJK)
+    }
+    expect(en.readyTitle('P')).not.toMatch(CJK)
+    expect(en.readyMessage('1.0.0', 'P')).not.toMatch(CJK)
+    expect(en.downloadedTitle('P')).not.toMatch(CJK)
+    expect(en.downloadedMessage('1.0.0', 'P')).not.toMatch(CJK)
+    expect(en.downloadedDetail('/tmp/i')).not.toMatch(CJK)
+  })
+
+  it('keeps the Linux AppImage instruction in both languages', () => {
+    // 中文原文必须逐字保留（只做加法）；英文侧此前根本不存在。
+    expect(desktopUpdateDialogCopy('zh').readyDetail('linux', '/tmp/i', 'P'))
+      .toBe('新版本 AppImage 已下载到: /tmp/i\n\n在界面或托盘里点「安装更新」后,关闭本程序并用该文件替换当前 AppImage。')
+    expect(desktopUpdateDialogCopy('en').readyDetail('linux', '/tmp/i', 'P'))
+      .toContain('The new AppImage has been downloaded to: /tmp/i')
+  })
+
+  it('localizes the crash-fallback page and its lang attribute', () => {
+    const zh = desktopCrashPageCopy('zh')
+    const en = desktopCrashPageCopy('en')
+    expect(zh.heading).toBe('界面加载失败')
+    expect(zh.body).toMatch(CJK)
+    expect(zh.retry).toBe('重新加载')
+    expect(zh.lang).toBe('zh-CN')
+    expect(en.heading).not.toMatch(CJK)
+    expect(en.body).not.toMatch(CJK)
+    expect(en.retry).not.toMatch(CJK)
+    expect(en.lang).toBe('en')
   })
 })

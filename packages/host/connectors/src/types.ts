@@ -7,6 +7,7 @@
  * (index.ts) owns the auth orchestration, token persistence and MCP
  * registration; connector packages only ship definitions.
  */
+import type { ConnectorErrorCode } from './connector-error.ts'
 
 /** Authentication modes (决策 2026-08-25:CLI 已移除——CLI 即 skill)。 */
 type ConnectorAuthMode = 'oauth' | 'device' | 'token' | 'server-side'
@@ -109,6 +110,16 @@ export interface ConnectorState {
   status: ConnectorStatus
   /** User-facing error when status is 'error'. */
   error?: string | undefined
+  /**
+   * Stable, locale-independent classification of `error` (2026-09-16 i18n).
+   *
+   * `error` is translatable copy, so it is NOT something a consumer may match
+   * on: the client's friendly-error mapping reads this field instead (see
+   * `src/connector-error.ts`). Older payloads without it fall back to the
+   * generic wrapper. Additive on the wire — a client that ignores it keeps
+   * working.
+   */
+  errorCode?: ConnectorErrorCode | undefined
   /** True once the user ever completed auth for this connector. */
   everConnected: boolean
   connectedAt?: number | undefined

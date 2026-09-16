@@ -23,7 +23,7 @@ declare module '@deepseek-ai/cordis' {
 import { AccountSection } from './AccountSection.tsx'
 import { BraceMark, BrandName, BrandBadge } from './Channel.tsx'
 import { applyUpdateSection } from './UpdateSection.tsx'
-import { buildChannelCSSVars } from './channel-vars.ts'
+import { buildChannelCSSVars, defaultHeroTagline } from './channel-vars.ts'
 import { installFavicon } from './favicon.ts'
 import { channelTitle } from '../channel-content.ts'
 import { startChannelStore, readChannelSync, subscribeChannel } from './channel-store.ts'
@@ -57,8 +57,12 @@ export const inject = ['slots', 'locale']
  * service registers each (namespace, locale) exactly once, so this client
  * cannot override them — give the upstream ui-conversation a configurable
  * headline and delete the two `headlineText`/`previewBadge` rules below.
+ *
+ * 兜底字面量（`content: var(…, "…")` 的第二参）由 `brandCss()` 按**当前**界面
+ * 语言求值：CSS 读不到语言，所以这份样式表随语言重绘（见 `paintBrandStyle`），
+ * 与 `channel-vars.ts` 的 `defaultHeroTagline()` 同源。
  */
-const BRAND_CSS = `
+const brandCss = (tagline: string): string => `
 /* Sidebar foot actions stack vertically above Settings (upstream container is a row). */
 [class$="_footerActions"] { flex-direction: column; align-items: stretch; }
 
@@ -73,7 +77,7 @@ const BRAND_CSS = `
 [class$="_headlineText"], [class$="_titleGroup"] > span:first-child { font-size: 0; }
 [class$="_headlineText"]::after, [class$="_titleGroup"] > span:first-child::after { content: var(--pico-hero-headline, "PicoAide Harness"); font-size: 26px; line-height: 32px; font-weight: 500; }
 [class$="_previewBadge"] { font-size: 0; }
-[class$="_previewBadge"]::after { content: var(--pico-hero-tagline, "企业版"); font-size: 12px; line-height: 18px; font-weight: 500; font-family: var(--ds-font-family-code); }
+[class$="_previewBadge"]::after { content: var(--pico-hero-tagline, ${JSON.stringify(tagline)}); font-size: 12px; line-height: 18px; font-weight: 500; font-family: var(--ds-font-family-code); }
 
 /* Skill center trigger hover feedback, matching the Settings trigger. */
 .pico-skill-trigger:hover { background: var(--dsw-alias-interactive-bg-hover); }
@@ -92,6 +96,32 @@ const BRAND_CSS = `
 }
 `
 
+/** 品牌兜底样式表元素（`paintBrandStyle` 注入/重绘，随语言变化）。 */
+let brandStyle: HTMLStyleElement | null = null
+
+/** 把渠道 CSS 变量写到 `:root`（默认文案随界面语言，见 buildChannelCSSVars）。 */
+function applyChannelVars(channel: ChannelConfig | null): void {
+  const root = document.documentElement
+  for (const [k, v] of Object.entries(buildChannelCSSVars(channel))) {
+    root.style.setProperty(k, v)
+  }
+}
+
+/**
+ * 注入/重绘品牌兜底样式表。
+ *
+ * CSS `content: var(…)` 的**兜底字面量**是样式表求值那一刻定死的（CSS 读不到
+ * 界面语言），所以必须可重绘：否则 `--pico-hero-tagline` 缺失时徽章会停在旧
+ * 语言。实际渲染值走 CSS 变量（`applyChannelVars` 写入，本就是按语言取的）。
+ */
+function paintBrandStyle(): void {
+  if (brandStyle === null || !brandStyle.isConnected) {
+    brandStyle = document.createElement('style')
+    document.head.appendChild(brandStyle)
+  }
+  brandStyle.textContent = brandCss(defaultHeroTagline())
+}
+
 /**
  * Register the enterprise surfaces: the brace brand at the upstream brand
  * slots (sidebar mark/name, hero mark), the skill center foot action above
@@ -108,21 +138,15 @@ export function apply(ctx: ClientContext): void {
       // 第 112 行又启动一次 → 双订阅,首个 disposer 永不释放)。
       const offStore = startChannelStore(ctx)
       // v3b §4.2: hero CSS 变量注入(渠道配置变化时更新)。
-      // 注意: --pico-hero-headline/--pico-hero-tagline 被 BRAND_CSS 的
+      // 注意: --pico-hero-headline/--pico-hero-tagline 被 brandCss() 的
       // `content: var(…)` 消费, content 只接受字符串字面量, 值必须带引号
       // 写入(buildChannelCSSVars 内 JSON.stringify), 否则整条声明非法、
       // hero 标题文字不可见(2026-09 实测)。渠道色已下线(2026-09 决策)。
-      const applyVars = (channel: ChannelConfig | null): void => {
-        const root = document.documentElement
-        for (const [k, v] of Object.entries(buildChannelCSSVars(channel))) {
-          root.style.setProperty(k, v)
-        }
-      }
-      applyVars(readChannelSync())
+      applyChannelVars(readChannelSync())
       // 渠道变更驱动 hero 变量(与 channel-store 同事件;此处仅应用 CSS 变量)。
-      const off = ctx.on('pico/channel-changed', (channel) => applyVars(channel))
+      const off = ctx.on('pico/channel-changed', (channel) => applyChannelVars(channel))
       // 播种(本地)同样要驱动变量:否则 hero 标题停在回落文案上。
-      const offStoreValue = subscribeChannel((channel) => applyVars(channel))
+      const offStoreValue = subscribeChannel((channel) => applyChannelVars(channel))
       return () => { off(); offStoreValue(); offStore() }
     },
     'enterprise: channel store',
@@ -147,6 +171,11 @@ export function apply(ctx: ClientContext): void {
         const active = locale.getLocale?.()?.active
         if (typeof active === 'string') setActiveLocale(active)
       } catch { /* keep the last known locale */ }
+      // 语言变化必须重算"按语言取值"的两处 hero 文案: CSS 变量的**兜底**
+      // 与渠道默认 tagline(见 channel-vars.ts 的 defaultHeroTagline 说明)。
+      // 只写变量不够 —— 样式表里的兜底字面量也得重绘。
+      applyChannelVars(readChannelSync())
+      paintBrandStyle()
     }
     sync()
     if (typeof locale.subscribe !== 'function') return () => {}
@@ -266,9 +295,7 @@ export function apply(ctx: ClientContext): void {
   }, 'enterprise: document channel title')
 
   ctx.effect(() => {
-    const style = document.createElement('style')
-    style.textContent = BRAND_CSS
-    document.head.appendChild(style)
-    return () => { style.remove() }
+    paintBrandStyle()
+    return () => { brandStyle?.remove(); brandStyle = null }
   }, 'enterprise: brand styles')
 }

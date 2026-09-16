@@ -5,6 +5,65 @@ import type { ConnectorAuthRequest, ConnectorDef, DeviceAuthConfig, OAuthAuthCon
 import type { ConnectorCredential } from './store.ts'
 import { assertOutboundUrlAllowed, OutboundUrlBlockedError, outboundFetch } from './outbound.ts'
 import { expiryFromResponse } from './token-lifetime.ts'
+import { DEFAULT_HOST_LOCALE, hostT, type HostLocale } from './host-copy.ts'
+import { ConnectorError } from './connector-error.ts'
+
+/**
+ * Stable code of an interactive-flow failure that means "the user has to
+ * (re)authorize".
+ *
+ * 2026-09-16 i18n: `src/index.ts` used to decide the row's `unauthorized` state
+ * (and the client its friendly copy) by looking for `授权` / `token` / `登录`
+ * inside the message. Those substrings vanish in English, so the classification
+ * now rides the error object. The set below is exactly the flow failures that
+ * meant "authorize again" in the Chinese source text; a definition/policy
+ * problem (bad URL, unsupported registration, malformed callback) stays an
+ * ordinary error, as it did before.
+ */
+function authRequired(message: string): ConnectorError {
+  return new ConnectorError('auth-required', message)
+}
+
+/**
+ * Flow steps whose refusal was reported as "authorization required".
+ *
+ * Before 2026-09-16 that classification came from the Chinese step label
+ * appearing in the error text: `OAuth 授权端点`, `OAuth token 端点` and
+ * `设备授权验证地址` contain `授权`/`token`, while `MCP 端点` and the client
+ * registration endpoint do not. The list below is the explicit,
+ * locale-independent form of the same rule — behaviour is unchanged, and the
+ * message text is no longer a contract.
+ */
+const AUTHORIZING_STEPS = new Set(['OAuth 授权端点', 'OAuth token 端点', '设备授权验证地址'])
+
+/** Re-classify a step failure, or rethrow untouched when the step is not one of them. */
+function markAuthorizingStep(error: unknown, what: string): never {
+  if (!AUTHORIZING_STEPS.has(what) || error instanceof ConnectorError) throw error
+  throw new ConnectorError('auth-required', error instanceof Error ? error.message : String(error), { cause: error })
+}
+
+/** `assertOutboundUrlAllowed` for one authorization-server flow step. */
+function flowUrl(rawUrl: string, what: string, locale: HostLocale): URL {
+  try {
+    return assertOutboundUrlAllowed(rawUrl, what, locale)
+  } catch (error) {
+    markAuthorizingStep(error, what)
+  }
+}
+
+/** `outboundFetch` for one authorization-server flow step. */
+async function flowFetch(
+  rawUrl: string,
+  what: string,
+  init: RequestInit,
+  options: { timeoutMs?: number; locale?: HostLocale },
+): Promise<Response> {
+  try {
+    return await outboundFetch(rawUrl, what, init, options)
+  } catch (error) {
+    markAuthorizingStep(error, what)
+  }
+}
 
 /**
  * Auth orchestration, mirroring WorkBuddy's connector flow:
@@ -36,6 +95,13 @@ export interface AuthRunOptions {
    * through, tests pass a short one.
    */
   outboundTimeoutMs?: number
+  /**
+   * Locale for every user-visible string this flow builds (thrown errors and
+   * the loopback callback page). The caller resolves it per connect request
+   * from the probed `desktopRuntime`; omitting it keeps the product default,
+   * which is what the pre-i18n behaviour was.
+   */
+  locale?: HostLocale
 }
 
 /**
@@ -45,22 +111,27 @@ export interface AuthRunOptions {
  * Both are passed EXPLICITLY to every call site so discovery and dynamic client
  * registration are cancelable and bounded like the token exchange already was —
  * a user who cancels a connect, or a logout that supersedes a restore, must not
- * be parked on a socket that never answers.
+ * be parked on a socket that never answers. `locale` rides along for the same
+ * reason: the error text belongs to the request that failed, not to the module.
  */
 interface OutboundCallOptions {
   signal?: AbortSignal | undefined
   timeoutMs?: number | undefined
+  locale?: HostLocale | undefined
 }
 
 /** Build `outboundFetch`'s init + options from one flow's outbound knobs. */
 function outboundCall(
   init: RequestInit,
   outbound: OutboundCallOptions,
-): { init: RequestInit; options: { timeoutMs?: number } } {
+): { init: RequestInit; options: { timeoutMs?: number; locale?: HostLocale } } {
   return {
     init: outbound.signal === undefined ? init : { ...init, signal: outbound.signal },
-    // `exactOptionalPropertyTypes`: only attach the override when it is set.
-    options: outbound.timeoutMs === undefined ? {} : { timeoutMs: outbound.timeoutMs },
+    // `exactOptionalPropertyTypes`: only attach the overrides when they are set.
+    options: {
+      ...(outbound.timeoutMs === undefined ? {} : { timeoutMs: outbound.timeoutMs }),
+      ...(outbound.locale === undefined ? {} : { locale: outbound.locale }),
+    },
   }
 }
 
@@ -72,7 +143,20 @@ function flowOutboundOptions(options: AuthRunOptions): OutboundCallOptions {
   return {
     signal: options.signal,
     ...(options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs }),
+    // Resolved by the caller per connect request; never cached in this module.
+    ...(options.locale === undefined ? {} : { locale: options.locale }),
   }
+}
+
+/**
+ * Locale of one outbound call's error text.
+ *
+ * A test or embedder that omits it gets the product default, exactly like the
+ * pre-i18n build; the plugin always passes the locale it resolved for the
+ * request.
+ */
+function outboundLocale(outbound: OutboundCallOptions): HostLocale {
+  return outbound.locale ?? DEFAULT_HOST_LOCALE
 }
 
 /**
@@ -143,9 +227,9 @@ async function registerClient(
     }),
   }, outbound)
   const response = await outboundFetch(registrationEndpoint, 'OAuth 客户端注册端点', call.init, call.options)
-  if (!response.ok) throw new Error(`OAuth 客户端注册失败: HTTP ${response.status}`)
+  if (!response.ok) throw new Error(hostT(outboundLocale(outbound), 'auth.registrationFailed', { status: String(response.status) }))
   const data = (await response.json()) as { client_id?: string }
-  if (!data.client_id) throw new Error('OAuth 客户端注册响应缺少 client_id')
+  if (!data.client_id) throw new Error(hostT(outboundLocale(outbound), 'auth.registrationMissingClientId'))
   return data.client_id
 }
 
@@ -180,14 +264,17 @@ export interface McpOAuthDiscovery {
 export async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOptions = {}): Promise<McpOAuthDiscovery> {
   // FIX-20: the MCP endpoint itself is definition-supplied; every URL this
   // function learns from the remote side is checked before it is fetched.
-  const mcp = assertOutboundUrlAllowed(mcpUrl, 'MCP 端点')
+  // Locale is resolved per call for the same reason as the URL check: a
+  // discovery failure is reported in the language of THIS request.
+  const locale = outboundLocale(outbound)
+  const mcp = assertOutboundUrlAllowed(mcpUrl, 'MCP 端点', locale)
   const resource = mcp.origin + mcp.pathname.replace(/\/+$/, '')
 
   const probeCall = outboundCall({ headers: { Accept: 'text/event-stream', 'MCP-Protocol-Version': '2025-06-18' } }, outbound)
   const probe = await outboundFetch(mcpUrl, 'MCP 端点', probeCall.init, probeCall.options)
   if (probe.status >= 200 && probe.status < 300) return { publicMcp: true, resource }
   if (probe.status !== 401 && probe.status !== 403) {
-    throw new Error(`MCP 端点响应异常: HTTP ${probe.status}`)
+    throw new Error(hostT(locale, 'auth.mcpProbeFailed', { status: String(probe.status) }))
   }
 
   const authHeader = probe.headers.get('www-authenticate') ?? ''
@@ -200,7 +287,7 @@ export async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOpt
   for (const metadataUrl of [...new Set(resourceMetadataCandidates)]) {
     // A blocked URL here is an active redirection attempt, not a typo to skip:
     // fail the flow instead of quietly trying the next candidate.
-    assertOutboundUrlAllowed(metadataUrl, 'OAuth resource metadata')
+    assertOutboundUrlAllowed(metadataUrl, 'OAuth resource metadata', locale)
     const metadataCall = outboundCall({ headers: { Accept: 'application/json' } }, outbound)
     const metadataResponse = await outboundFetch(metadataUrl, 'OAuth resource metadata', metadataCall.init, metadataCall.options)
     if (!metadataResponse.ok) continue
@@ -208,7 +295,7 @@ export async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOpt
     const authorizationServer = resourceMetadata.authorization_servers?.[0]
     if (!authorizationServer) continue
 
-    const asUrl = assertOutboundUrlAllowed(authorizationServer, 'OAuth authorization server')
+    const asUrl = assertOutboundUrlAllowed(authorizationServer, 'OAuth authorization server', locale)
     // RFC 8414 §3: the well-known segment is inserted BETWEEN the host and the
     // issuer path (`https://host/.well-known/oauth-authorization-server/path`),
     // not appended after the path. Keeping the issuer path matters for
@@ -224,11 +311,11 @@ export async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOpt
     if (!meta.authorization_endpoint || !meta.token_endpoint) continue
     // The RFC 8414 document names the endpoints that will receive the
     // authorization code and the PKCE verifier: check all three before use.
-    const authorizationEndpoint = assertOutboundUrlAllowed(meta.authorization_endpoint, 'OAuth 授权端点').toString()
-    const tokenEndpoint = assertOutboundUrlAllowed(meta.token_endpoint, 'OAuth token 端点').toString()
+    const authorizationEndpoint = assertOutboundUrlAllowed(meta.authorization_endpoint, 'OAuth 授权端点', locale).toString()
+    const tokenEndpoint = assertOutboundUrlAllowed(meta.token_endpoint, 'OAuth token 端点', locale).toString()
     const registrationEndpoint = meta.registration_endpoint === undefined
       ? undefined
-      : assertOutboundUrlAllowed(meta.registration_endpoint, 'OAuth 客户端注册端点').toString()
+      : assertOutboundUrlAllowed(meta.registration_endpoint, 'OAuth 客户端注册端点', locale).toString()
     const scopes = meta.scopes_supported?.includes('offline_access')
       ? 'offline_access'
       : meta.scopes_supported?.[0]
@@ -243,12 +330,17 @@ export async function discoverMcpOAuth(mcpUrl: string, outbound: OutboundCallOpt
       resource,
     }
   }
-  throw new Error('MCP OAuth 发现失败: 服务器要求授权但未找到 OAuth 元数据')
+  // The Chinese source text ("服务器要求授权…") contained `授权`, which is what
+  // classified this as `unauthorized` before; the code carries it now.
+  throw authRequired(hostT(locale, 'auth.discoveryFailed'))
 }
 
 /** Run an oauth2 authorization-code flow with PKCE and a loopback callback. */
 async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
   const auth = def.auth as OAuthAuthConfig
+  // Locale of every string this flow builds: resolved ONCE per connect request
+  // (from the runtime the plugin probed), then threaded into each message.
+  const locale = options.locale ?? DEFAULT_HOST_LOCALE
   // conn-1: discovery is the FIRST outbound hop of this flow and used to
   // ignore the flow's cancel signal (and any deadline) entirely — a user who
   // clicked cancel stayed parked on the socket.
@@ -290,11 +382,11 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     callbackServer?.close()
     callbackServer?.closeIdleConnections?.()
     callbackServer = null
-    rejectCode(new Error(`OAuth 授权已取消: ${reason}`))
+    rejectCode(authRequired(hostT(locale, 'auth.flowCancelled', { reason })))
   }
-  const onAbort = (): void => abortFlow(options.signal.reason instanceof Error ? options.signal.reason.message : String(options.signal.reason ?? '用户取消'))
+  const onAbort = (): void => abortFlow(options.signal.reason instanceof Error ? options.signal.reason.message : String(options.signal.reason ?? hostT(locale, 'auth.userCancelled')))
   options.signal.addEventListener('abort', onAbort, { once: true })
-  const flowTimer = setTimeout(() => abortFlow('等待授权超时（5 分钟）'), OAuthFlowTimeoutMs)
+  const flowTimer = setTimeout(() => abortFlow(hostT(locale, 'auth.flowTimeout')), OAuthFlowTimeoutMs)
   const port = await new Promise<number>((resolve, reject) => {
     const server = createServer((req, res) => {
       // The loopback port is fixed before any request can arrive (the listen
@@ -314,16 +406,18 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
       const codeParam = url.searchParams.get('code')
       const errorParam = url.searchParams.get('error')
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', Connection: 'close' })
-      res.end('<html><body><p>授权完成，可以关闭此窗口。</p></body></html>')
+      // The ONE page this package serves to the user's own browser: it must
+      // follow the same locale as the panel that opened the flow.
+      res.end(hostT(locale, 'auth.callbackPage'))
       server.close()
       server.closeIdleConnections()
       callbackServer = null
       if (errorParam) {
-        rejectCode(new Error(`OAuth 授权失败: ${errorParam}`))
+        rejectCode(authRequired(hostT(locale, 'auth.callbackFailed', { error: errorParam })))
         return
       }
       if (codeParam) resolveCode(codeParam)
-      else rejectCode(new Error('OAuth 回调缺少 code'))
+      else rejectCode(new Error(hostT(locale, 'auth.callbackMissingCode')))
     })
     server.listen(0, callbackHost, () => {
       const address = server.address() as AddressInfo
@@ -343,11 +437,12 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
       flowOutbound,
     )
     : auth.clientId || ''
-  if (!clientId) throw new Error('OAuth 服务器不支持动态客户端注册，且未配置固定 clientId')
+  if (!clientId) throw new Error(hostT(locale, 'auth.noClientId'))
   const codeChallengeMethod = auth.pkce ? 'S256' : undefined
-  const authorizeUrl = assertOutboundUrlAllowed(
+  const authorizeUrl = flowUrl(
     discovered?.authorizationEndpoint ?? auth.authorizeUrl,
     'OAuth 授权端点',
+    locale,
   )
   authorizeUrl.searchParams.set('response_type', 'code')
   authorizeUrl.searchParams.set('client_id', clientId)
@@ -380,9 +475,10 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   throwIfAborted(options.signal)
   // FIX-20: the token exchange carries the authorization code AND the PKCE
   // verifier — the last place the outbound policy must hold.
-  const tokenUrl = assertOutboundUrlAllowed(
+  const tokenUrl = flowUrl(
     options.tokenUrlOverride ?? discovered?.tokenEndpoint ?? auth.tokenUrl,
     'OAuth token 端点',
+    locale,
   ).toString()
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
@@ -398,11 +494,11 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body },
     { ...flowOutbound, timeoutMs: TOKEN_REQUEST_TIMEOUT_MS },
   )
-  const response = await outboundFetch(tokenUrl, 'OAuth token 端点', tokenCall.init, tokenCall.options)
-  if (!response.ok) throw new Error(`OAuth token 换取失败: HTTP ${response.status}`)
+  const response = await flowFetch(tokenUrl, 'OAuth token 端点', tokenCall.init, tokenCall.options)
+  if (!response.ok) throw authRequired(hostT(locale, 'auth.tokenExchangeFailed', { status: String(response.status) }))
   const data = (await response.json()) as Record<string, unknown>
   const accessToken = String(data.access_token ?? '')
-  if (!accessToken) throw new Error('OAuth token 响应缺少 access_token')
+  if (!accessToken) throw authRequired(hostT(locale, 'auth.tokenMissingAccessToken'))
   return {
     accessToken,
     clientId,
@@ -417,13 +513,14 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
 export async function refreshOAuthToken(
   def: ConnectorDef,
   credential: ConnectorCredential,
-  options: { tokenUrlOverride?: string; signal?: AbortSignal; outboundTimeoutMs?: number } = {},
+  options: { tokenUrlOverride?: string; signal?: AbortSignal; outboundTimeoutMs?: number; locale?: HostLocale } = {},
 ): Promise<Partial<ConnectorCredential> | null> {
   if (def.authMode !== 'oauth' || !credential.refreshToken) return null
   const auth = def.auth as OAuthAuthConfig
   const outbound: OutboundCallOptions = {
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs }),
+    ...(options.locale === undefined ? {} : { locale: options.locale }),
   }
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
@@ -447,7 +544,7 @@ export async function refreshOAuthToken(
   // exchange, including the redirect fence. A refused redirect is reported like
   // any other failed refresh (null): the stored credential stays untouched and
   // the connector keeps working with it.
-  tokenUrl = assertOutboundUrlAllowed(tokenUrl, 'OAuth token 端点').toString()
+  tokenUrl = assertOutboundUrlAllowed(tokenUrl, 'OAuth token 端点', outboundLocale(outbound)).toString()
   let response: Response
   try {
     response = await outboundFetch(tokenUrl, 'OAuth token 端点', {
@@ -481,12 +578,13 @@ async function runDevice(def: ConnectorDef, options: AuthRunOptions): Promise<Pa
   // verbatim. Check it exactly like its sibling `authorizeUrl`, and fail the
   // connect loudly (a device row whose verification page is unusable must not
   // silently report "connected").
-  const verificationUrl = assertOutboundUrlAllowed(auth.verificationUrl, '设备授权验证地址').toString()
+  const locale = options.locale ?? DEFAULT_HOST_LOCALE
+  const verificationUrl = flowUrl(auth.verificationUrl, '设备授权验证地址', locale).toString()
   options.onRequest({
     connectorId: def.id,
     verificationUrl,
   })
-  return pollUntilConnected(createProbe(def, options), auth.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, auth.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS, options.signal)
+  return pollUntilConnected(createProbe(def, options), auth.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, auth.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS, options.signal, locale)
 }
 
 interface AuthProbe {
@@ -509,6 +607,7 @@ async function pollUntilConnected(
   pollIntervalMs: number,
   pollTimeoutMs: number,
   signal: AbortSignal,
+  locale: HostLocale,
 ): Promise<Partial<ConnectorCredential>> {
   const deadline = Date.now() + pollTimeoutMs
   while (Date.now() < deadline) {
@@ -516,7 +615,7 @@ async function pollUntilConnected(
     await sleep(pollIntervalMs, signal)
     if (await probe.isConnected()) return { updatedAt: Date.now() } as Partial<ConnectorCredential>
   }
-  throw new Error('授权轮询超时，请重试')
+  throw authRequired(hostT(locale, 'auth.pollTimeout'))
 }
 
 /** Token form flow: emit the field list; the UI answers with the values. */
@@ -531,13 +630,14 @@ async function runToken(def: ConnectorDef, options: AuthRunOptions): Promise<Par
 /** Server-side flow: fetch the managed token through the injected callback. */
 async function runServerSide(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
   void def
+  const locale = options.locale ?? DEFAULT_HOST_LOCALE
   const auth = def.auth as { fetchToken?: unknown }
   options.onRequest({ connectorId: def.id })
   if (typeof auth.fetchToken !== 'function') {
-    throw new Error('服务端连接器定义缺少 fetchToken 回调')
+    throw authRequired(hostT(locale, 'auth.serverMissingFetchToken'))
   }
   const accessToken = await (auth.fetchToken as () => Promise<string>)()
-  if (!accessToken) throw new Error('服务端未返回 token')
+  if (!accessToken) throw authRequired(hostT(locale, 'auth.serverNoToken'))
   return { accessToken }
 }
 

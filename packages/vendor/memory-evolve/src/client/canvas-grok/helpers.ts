@@ -1,12 +1,18 @@
 /**
  * 纯函数工具：id、路径推断类型、视角可见性、引用串、剪贴板、几何。
  * 不碰 React / DOM（除 copyText 用 navigator.clipboard）。
+ *
+ * i18n（2026-09-16）：本文件是纯函数，**取不到** React 的 t——凡是产出
+ * 用户可见文案的函数（scopeBadgeText / titleFromPath / saveTextToFile）都把
+ * `t` 作为参数注入（调用方在渲染期已有当前语言）。matchesQuery 例外：它
+ * 只做匹配、不产文案，走 constants 的 TYPE_SEARCH_TERMS（与界面语言无关）。
  */
+import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   CURRENT_PROJECT_ID,
   CURRENT_SESSION_ID,
   EXT_TYPE,
-  TYPE_LABEL,
+  TYPE_SEARCH_TERMS,
 } from './constants.ts'
 import type {
   CanvasNode,
@@ -44,10 +50,10 @@ export function inferTypeFromPath(path: string): CanvasNodeType {
   return EXT_TYPE[ext] ?? 'file'
 }
 
-export function titleFromPath(path: string): string {
+export function titleFromPath(path: string, t: Translate): string {
   const cleaned = normalizePath(path).replace(/\\/g, '/').replace(/\/+$/, '')
   const base = cleaned.split('/').pop()
-  return base && base.length > 0 ? base : cleaned || '未命名'
+  return base && base.length > 0 ? base : cleaned || t('canvas.node.unnamed')
 }
 
 /** 人引用串：粘贴给 AI「去画板拿这个」。 */
@@ -55,8 +61,8 @@ export function toReferenceText(node: CanvasNode): string {
   return `[canvas:${node.id}] ${node.title}`
 }
 
-export function scopeBadgeText(node: CanvasNode, currentSessionId?: string): string {
-  if (node.scope === 'global') return `🌐 ${node.scopeLabel || '全局'}`
+export function scopeBadgeText(node: CanvasNode, currentSessionId: string | undefined, t: Translate): string {
+  if (node.scope === 'global') return `🌐 ${node.scopeLabel || t('canvas.scope.global')}`
   if (node.scope === 'project') return `📁 ${node.scopeLabel}`
   // 会话级节点：归属文案必须按**查看者视角**呈现（2026-08-14 修复）——
   // 后端存的是「放置者视角」的 scopeLabel（add_note 时写死『当前会话』），
@@ -67,13 +73,13 @@ export function scopeBadgeText(node: CanvasNode, currentSessionId?: string): str
   //     解析：别名→会话标题；2026-08-14 用户要求不再显示长 sessionId，
   //     解析不到才兜底短 id）。
   if (currentSessionId && node.sessionId && node.sessionId === currentSessionId) {
-    return `💬 当前会话`
+    return `💬 ${t('canvas.scope.currentSession')}`
   }
   if (node.sessionId) {
     const name = node.sessionName || shortSessionId(node.sessionId)
-    return `💬 其他会话 ${name}`
+    return `💬 ${t('canvas.scope.otherSession')} ${name}`
   }
-  return `💬 ${node.scopeLabel || '会话'}`
+  return `💬 ${node.scopeLabel || t('canvas.scope.session')}`
 }
 
 /** 会话短 id：取 session- 后的前 8 位（徽标防过长，够区分即可）。 */
@@ -108,11 +114,12 @@ export function isNodeVisible(
 export function matchesQuery(node: CanvasNode, query: string): boolean {
   const q = query.trim().toLowerCase()
   if (!q) return true
-  const typeName = TYPE_LABEL[node.type]
+  // 与界面语言无关的类型别名表（中文 + 英文）：切语言不得改变搜索结果。
+  const typeNames = TYPE_SEARCH_TERMS[node.type]
   return (
     node.title.toLowerCase().includes(q)
     || node.type.toLowerCase().includes(q)
-    || typeName.toLowerCase().includes(q)
+    || typeNames.some((name) => name.toLowerCase().includes(q))
     || (node.path?.toLowerCase().includes(q) ?? false)
     || node.id.toLowerCase().includes(q)
   )
@@ -216,10 +223,11 @@ export async function copyText(text: string): Promise<boolean> {
  * 浏览器默认下载目录）。
  * @param {string} title - 建议文件名（自动清洗非法字符 + 补扩展名）
  * @param {string} content - 文件内容
+ * @param {Translate} t - 插件 locale 翻译函数（纯函数取不到 React 的 t，注入）
  * @returns {Promise<{ ok: boolean; canceled?: boolean; message?: string }>}
  */
-export async function saveTextToFile(title: string, content: string): Promise<{ ok: boolean; canceled?: boolean; message?: string }> {
-  const safeName = sanitizeFileName(title) || '便签'
+export async function saveTextToFile(title: string, content: string, t: Translate): Promise<{ ok: boolean; canceled?: boolean; message?: string }> {
+  const safeName = sanitizeFileName(title) || t('canvas.note.defaultName')
   const fileName = /\.(md|txt)$/i.test(safeName) ? safeName : `${safeName}.md`
   // 首选：系统原生保存对话框（File System Access API）。
   const picker = (window as unknown as { showSaveFilePicker?: (opts: object) => Promise<{
@@ -230,7 +238,7 @@ export async function saveTextToFile(title: string, content: string): Promise<{ 
       const handle = await picker({
         suggestedName: fileName,
         types: [{
-          description: 'Markdown 文本',
+          description: t('canvas.save.markdownText'),
           accept: { 'text/markdown': ['.md', '.txt'] },
         }],
       })
@@ -256,7 +264,7 @@ export async function saveTextToFile(title: string, content: string): Promise<{ 
     a.click()
     a.remove()
     setTimeout(() => URL.revokeObjectURL(url), 5000)
-    return { ok: true, message: '已下载到浏览器默认下载目录' }
+    return { ok: true, message: t('canvas.save.downloaded') }
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) }
   }

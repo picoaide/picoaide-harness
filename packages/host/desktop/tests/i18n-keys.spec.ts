@@ -15,12 +15,22 @@ import { fileURLToPath } from 'node:url'
 
 const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url))
 
-/** Packages with a client dictionary (`src/client/locales.ts`). */
+/**
+ * Packages with a client dictionary (`src/client/locales.ts`).
+ *
+ * 2026-09-16：补入 `dsh-enterprise`（171 键，曾经是最大的字典却完全没被守卫覆盖 ——
+ * 这也是 79 个死键能长期留在里面的原因）、`branding` 与 `desktop`（本轮新增字典）。
+ * 字典**键集镜像 / en 列无中文 / 无空值**由 `i18n-dictionary-hygiene.spec.ts` 自动
+ * 发现并覆盖，新增包不必再往这里登记。
+ */
 const DICTIONARY_PACKAGES = [
   'packages/client/account-card',
+  'packages/client/branding',
   'packages/host/browser',
   'packages/host/connectors',
   'packages/host/cron',
+  'packages/host/desktop',
+  'packages/host/enterprise',
 ]
 
 function walk(dir: string, out: string[] = []): string[] {

@@ -1,3 +1,4 @@
+import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // Type-only: pulls the slot runtime props into this compilation face.
@@ -13,12 +14,13 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { BraceMark, BrandName } from './Brand.tsx'
 import { AboutSection, OverlayBadge, applyBrandTheme, injectBrandShellStyles } from './brand-shell.tsx'
+import { setActiveLocale } from './locales.ts'
 
 /** Stable Cordis plugin name for the branding client half. */
 export const name = 'picoaide-branding-client'
 
 /** Services required: the slot registry for the brand holes, plus the theme runtime. */
-export const inject = ['slots', 'theme']
+export const inject = ['slots', 'theme', 'locale']
 
 /**
  * Browser favicon artwork: the exact brand mark
@@ -65,6 +67,24 @@ function installFavicon(): void {
  * @param ctx - browser Cordis context.
  */
 export function apply(ctx: ClientContext): void {
+  // The About copy is locale-aware. Dictionaries read a module-local value, so
+  // follow the service here (every slot outlet re-renders on a switch, which
+  // re-evaluates `t()` at the new language).
+  ctx.effect(() => {
+    const locale = ctx.locale as unknown as {
+      getLocale?: () => { active?: unknown }
+      subscribe?: (listener: () => void) => () => void
+    }
+    const sync = (): void => {
+      try {
+        const active = locale.getLocale?.()?.active
+        if (typeof active === 'string') setActiveLocale(active)
+      } catch { /* keep the last known locale */ }
+    }
+    sync()
+    if (typeof locale.subscribe !== 'function') return () => {}
+    return locale.subscribe(sync)
+  }, 'picoaide-branding: follow active locale')
   ctx.effect(
     () => ctx.slots.inject('sidebar.brand.mark', () => ctx.slots.register({
       name: 'sidebar.brand.mark',

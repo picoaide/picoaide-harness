@@ -1,6 +1,6 @@
 # 无限画板 · 前端一期（canvas-grok）
 
-纯前端实现，数据走 `localStorage`（`memory-evolve.canvas.v1`）。主会话负责把本目录接到 `src/client/index.ts` 并构建 `lib/client.js`。
+数据走宿主 API（`/memory-evolve/api/canvas` + rev 乐观锁；2026-08-14 起「只走后端」，本目录里已无前端降级读盘路径）。主会话负责把本目录接到 `src/client/index.ts` 并构建 `lib/client.js`。
 
 ## 实现了什么
 
@@ -12,7 +12,6 @@
 - 画板内搜索：按标题/类型/路径过滤，命中闪烁并跳转
 - 操作：预览（轻量模拟 / 重量占位）、复制 ID·标题·路径·引用串 `[canvas:id] 标题`、移除确认
 - AI 投放：中央虚线投放区 +「AI 放置」标记（「跳到最近 AI 便签」按钮已于 2026-08-14 删除，用户反馈无用；lastAiNodeId 字段保留兼容）
-- 首次打开预置 4 张示例卡（全局 / 项目 / 当前会话 / 其他会话），用于演示筛选
 
 ## 接入
 
@@ -33,7 +32,7 @@ function registerCanvasTab(
 ): () => void                  // disposer
 ```
 
-槽位：`conversation.view` / `id: canvas-hub` / `order: 80` / `label: 画板`。
+槽位：`conversation.view` / `id: canvas-hub` / `order: 80` / `label` 默认取字典键 `canvas.tab.label`（i18n，2026-09-16；此前是模块级 `'画板'` 字面量，切语言不跟随）。
 
 ## 已知限制
 
@@ -53,7 +52,7 @@ function registerCanvasTab(
 | `CanvasCard.tsx` | 单卡 + LOD |
 | `CanvasDialogs.tsx` | 上板 / 预览 / 移除浮层 |
 | `types.ts` | 数据模型 |
-| `constants.ts` | 尺寸、LOD、种子、模拟清单 |
+| `constants.ts` | 尺寸、LOD、类型字典键（`TYPE_LABEL_KEYS`）、搜索匹配词表 |
 | `helpers.ts` | 视角可见性、引用串、几何 |
-| `store.ts` | localStorage 读写 |
+| `store.ts` | 防抖保存（localStorage 快照写入） |
 | `styles.css` | `cg-` 前缀样式 |

@@ -14,7 +14,12 @@
  *   - neither the activity panel nor Escape may hand control back to the AI.
  */
 import { describe, expect, it } from 'vitest'
-import { BROWSER_OVERLAY_HTML, BROWSER_SHELL_HTML } from '../src/shell-pages.ts'
+import { browserOverlayHtml, browserShellHtml } from '../src/shell-pages.ts'
+
+// The zh renderings are the source locale: every control-contract assertion
+// below was written against them before i18n, so they keep applying verbatim.
+const BROWSER_OVERLAY_HTML = browserOverlayHtml('zh')
+const BROWSER_SHELL_HTML = browserShellHtml('zh')
 
 describe('browser control contract: the pill button is the only entry', () => {
   it('never binds a click takeover on the whole-window scrim', () => {

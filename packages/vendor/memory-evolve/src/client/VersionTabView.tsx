@@ -152,7 +152,7 @@ export function VersionTabView(props: VersionTabTabProps): JSX.Element {
       {/* —— 等待重启横幅：服务端派生状态驱动，重挂/刷新后依然显示 —— */}
       {state?.restartRequired === true && (
         <div className="me-notice me-notice-warn" role="alert">
-          <strong>{t('version.restart.title')}</strong>：{t('version.restart.hint')}
+          <strong>{t('version.restart.title')}</strong>{t('version.sep.colon')}{t('version.restart.hint')}
         </div>
       )}
 
@@ -179,11 +179,11 @@ export function VersionTabView(props: VersionTabTabProps): JSX.Element {
           {/* 上次检测失败信息（stale 附加展示，不覆盖最后成功状态） */}
           {state?.lastError && (
             <p className="me-help">
-              {t('version.lastError')}：{state.lastError.message ?? state.lastError.kind ?? '—'}
+              {t('version.lastError')}{t('version.sep.colon')}{state.lastError.message ?? state.lastError.kind ?? '—'}
             </p>
           )}
           <p className="me-help">
-            {t('version.checkTime')}：{formatTime(state?.lastSuccessAt ?? state?.lastAttemptAt)}
+            {t('version.checkTime')}{t('version.sep.colon')}{formatTime(state?.lastSuccessAt ?? state?.lastAttemptAt)}
           </p>
         </div>
       </div>

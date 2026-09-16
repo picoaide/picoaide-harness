@@ -23,6 +23,7 @@ import AdmZip from 'adm-zip'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { assertArchiveSafe, archiveFormat, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { precheckSkillPackage } from './manifest-precheck.ts'
+import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
 
 /** Skill names must be a single safe directory segment. */
@@ -447,9 +448,12 @@ export interface SkillPackResult {
  * @param skillsDir - the skill root (`<dshHome>/skills`).
  * @param name - the skill directory name.
  * @param version - 可选覆盖;缺省时用包内 frontmatter 的 version。
+ * @param locale - 宿主语言(调用方按请求解析后传入;缺省中文,与历史行为一致)。
  * @returns the archive plus metadata, or throws with a user-facing message.
  */
-export async function packSkill(skillsDir: string, name: string, version?: string): Promise<SkillPackResult> {
+export async function packSkill(
+  skillsDir: string, name: string, version?: string, locale: HostLocale = DEFAULT_HOST_LOCALE,
+): Promise<SkillPackResult> {
   validateSkillName(name)
   const dir = join(skillsDir, name)
   await stat(join(dir, 'SKILL.md')).catch(() => {
@@ -458,7 +462,12 @@ export async function packSkill(skillsDir: string, name: string, version?: strin
   const meta = await readSkillFrontmatter(join(dir, 'SKILL.md'))
   const packVersion = version ?? metaString(meta.version)
   if (packVersion === undefined) {
-    throw new Error(`技能 "${name}" 的 SKILL.md 缺少 version 字段:请写明版本号(如 version: 1.0.0)后再上传`)
+    // 用户可见(经 auth-gate 的 { error } 回到能力中心面板), 故按宿主语言取。
+    throw new Error(hostCopy(
+      locale,
+      `技能 "${name}" 的 SKILL.md 缺少 version 字段:请写明版本号(如 version: 1.0.0)后再上传`,
+      `Skill "${name}" has no version field in SKILL.md: add a version (for example version: 1.0.0) and upload again`,
+    ))
   }
 
   const zip = new AdmZip()
@@ -472,10 +481,13 @@ export async function packSkill(skillsDir: string, name: string, version?: strin
   // 在这里失败就不发请求——用户不必等一次网络往返才知道包不合规。
   const raw = await readFile(join(dir, 'SKILL.md'), 'utf8')
   const entryNames = zip.getEntries().map((e) => e.entryName)
-  const issues = precheckSkillPackage(raw, name, entryNames)
+  const issues = precheckSkillPackage(raw, name, entryNames, locale)
   if (issues.length > 0) {
     const first = issues[0]!
-    throw new Error(`${first.code}: ${first.message}${issues.length > 1 ? `（另有 ${issues.length - 1} 项问题）` : ''}`)
+    const more = issues.length > 1
+      ? hostCopy(locale, `（另有 ${issues.length - 1} 项问题）`, ` (${issues.length - 1} more issues)`)
+      : ''
+    throw new Error(`${first.code}: ${first.message}${more}`)
   }
   const checksum = createHash('sha256').update(archive).digest('hex')
   const displayName = metaString(meta.name)

@@ -23,6 +23,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import { HostCronService } from './host-service.ts'
 import { makeCronRoutes } from './host-routes.ts'
 import { registerCronTools } from './tools.ts'
+import { cronGuidance, hostLocaleOf } from './host-copy.ts'
 import type { ConnectionTrustFence } from './write-proof.ts'
 import type { CronPermissionPresets, CronSessionHandle } from './host-executor.ts'
 
@@ -41,7 +42,14 @@ export const name = 'pico-cron'
 /** Required Host services (cordis inject waiting). */
 export const inject = ['systemPrompt', 'webServer', 'tools', 'sessionController', 'workspaceRegistry', 'agentPresets']
 
-/** Model-facing announcement: plugin presence, capabilities, and limits. */
+/**
+ * Model-facing announcement: plugin presence, capabilities, and limits.
+ *
+ * Kept as the Chinese source of the announcement (the exported name is part of
+ * the package surface); the system-prompt section is registered with
+ * {@link cronGuidance}, so what the model actually receives follows the host
+ * locale resolved at each prompt assembly.
+ */
 export const CRON_GUIDANCE = '本机已安装 dsh-cron 插件（PicoAide Harness 的定时任务调度器）：可创建定时任务（cron 表达式，分钟级精度），到点由 Host 进程执行——关闭窗口或浏览器页面后仍会执行；应用完全退出期间错过的触发点默认跳过（可在设置中开启补跑最近一次）；每个定时任务执行时会新建一个智能体会话（可指定工作区、智能体预设与权限），并把任务提示词发给该会话；执行详情（会话、开始/结束时间、结果、错误）记录在任务下可随时查看。模型可直接调用 cron_create / cron_list / cron_set_enabled / cron_run 工具创建、查看、启停和触发定时任务。用户提到「定时任务 / cron / 定时执行」时即指本插件，请据此协作。'
 
 /** Settings namespace of the cron plugin (spelled here and in the browser half). */
@@ -167,7 +175,11 @@ export function apply(ctx: Context, config: Config): void {
     disposeSection = ctx.systemPrompt.section({
       name: 'plugin:dsh-cron',
       order: SECTION_ORDER,
-      text: CRON_GUIDANCE,
+      // A THUNK, not a string: the announcement is rendered at every prompt
+      // assembly, so it follows a language switch that happens after this
+      // section was registered (2026-09-16 i18n). Resolving it once here would
+      // freeze the language for the whole session.
+      text: () => cronGuidance(hostLocaleOf(ctx)),
     })
   }
 

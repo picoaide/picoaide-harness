@@ -53,6 +53,16 @@ export interface Harness {
   readonly dispose: () => void
   /** 上游 `connection` 服务替身被问过几次（R7-RV-3：证明必须真的被检查）。 */
   readonly fence: { seen: number }
+  /**
+   * 切换桌面包探针 `desktopRuntime.locale`（2026-09-16 i18n）。
+   *
+   * 真机语义：用户在设置里切语言后 `DesktopRuntime.locale` 立即变化，而插件进程
+   * 不重启。Host 文案必须**每次构消息时**重新解析，这个可变量就是回归探针——
+   * 谁把语言冻结在模块级/apply 期常量上，两次调用就会给出同一种语言。
+   */
+  readonly setLocale: (locale: 'zh' | 'en') => void
+  /** 当前宿主语言（供用例断言探针确实被读到）。 */
+  readonly locale: () => 'zh' | 'en'
 }
 
 /**
@@ -91,6 +101,8 @@ export function createHarness(
   const liveServerNames = new Set<string>()
   const effectDisposers: Array<() => void> = []
   let username: string | null = 'user-a'
+  /** 可变的宿主语言：插件只能通过 ctx.get('desktopRuntime') 读到它。 */
+  let locale: 'zh' | 'en' = (options.locale as 'zh' | 'en' | undefined) ?? 'zh'
 
   // Record every confirmation prompt while keeping the caller's own callback
   // semantics (a headless embedder answers programmatically). A caller that
@@ -112,6 +124,8 @@ export function createHarness(
     get: (name: string) => {
       if (name === 'picoSession') return { getSession: () => (username === null ? null : { username }) }
       if (name === 'connection') return fence
+      // 与桌面壳同形：只暴露 locale 字段，插件用结构探针读取（host-locale.ts）。
+      if (name === 'desktopRuntime') return { get locale() { return locale } }
       return undefined
     },
     on: (event: string, handler: (next: unknown) => void) => {
@@ -170,6 +184,8 @@ export function createHarness(
     routes,
     prompts,
     fence: fence ?? { seen: 0 },
+    setLocale: (next) => { locale = next },
+    locale: () => locale,
     emitSession: (session) => {
       username = session?.username ?? null
       for (const handler of [...sessionHandlers]) handler(session)

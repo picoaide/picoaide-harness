@@ -28,7 +28,12 @@ describe('cron tools surface', () => {
   it('validates the cron expression and requires a prompt in execute', () => {
     expect(source).toContain('isValidCron(args.cron)')
     expect(source).toContain(`prompt.trim() === ''`)
-    expect(source).toContain('必须提供 prompt')
+    // 2026-09-16 i18n：文案搬进了 host-copy 字典（transcript 与错误随宿主语言），
+    // 这里钉住「execute 仍然通过字典抛出必填错误」而不是钉某个语言的字面量；
+    // 中文原文本身由 tests/host-copy.spec.ts 逐字断言。
+    expect(source).toContain("copy('tool.promptRequired')")
+    const copy = readFileSync(new URL('../src/host-copy.ts', import.meta.url), 'utf8')
+    expect(copy).toContain("'tool.promptRequired': '必须提供 prompt（执行时发送给智能体会话的提示词）'")
   })
 
   it('routes through the Host service', () => {
