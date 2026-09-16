@@ -106,7 +106,7 @@ export function hostLocaleOf(source: HostCopySource | undefined): HostLocale {
 export function hostT(locale: HostLocale, key: CronHostCopyKey, params?: Record<string, string>): string {
   let text: string = pickHostCopy(locale, zh[key] as string, en[key])
   if (params !== undefined) {
-    for (const [name, value] of Object.entries(params)) text = text.replaceAll(`{${name}}`, value)
+    for (const [name, value] of Object.entries(params)) text = text.replaceAll(`{${name}}`, () => String(value))
   }
   return text
 }

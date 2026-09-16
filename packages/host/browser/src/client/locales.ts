@@ -41,7 +41,7 @@ export function t(key: BrowserKey, params?: Record<string, string>): string {
   let text: string = (activeLocale === 'en' ? en[key] : zh[key]) as string
   if (params !== undefined) {
     for (const [name, value] of Object.entries(params)) {
-      text = text.replaceAll(`{${name}}`, value)
+      text = text.replaceAll(`{${name}}`, () => String(value))
     }
   }
   return text
