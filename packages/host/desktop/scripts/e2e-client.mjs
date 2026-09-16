@@ -328,7 +328,7 @@ async function main() {
   //   ② 侧边栏版本号胶囊是"反色"的 —— 亮色黑底白字、暗色白底黑字，两边对比度都要够
   //      （事故版本用了一个上游不存在的 token ⇒ 暗色恒为黑底近黑字）；
   //   ③ vendored memory-evolve 的旧色板适配层已生效（body 上有内联的 --dsw-alias-border-l，
-  //      指向真实 token）—— 那一层兜住 41 个幻影名字，掉了就会静默回到"边框不画"。
+  //      指向真实 token）—— 那一层兜住 49 个幻影名字，掉了就会静默回到"边框不画"。
   await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] }).catch(() => {})
   const darkFlipped = await waitFor(cdp, `document.body.hasAttribute('data-ds-dark-theme')`, 8000)
   const darkProbe = await evalSafe(cdp, `(() => {

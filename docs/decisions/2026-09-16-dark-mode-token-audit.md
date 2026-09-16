@@ -60,13 +60,13 @@
 
 1. **vendored `packages/vendor/memory-evolve`**（随桌面包分发，第三方上游
    `github.com/csyangwen/dsh-memory-evolve`）：12 个 CSS 里 11 个带病 ——
-   **198 处 `var(--dsw-*)` 指向 46 个上游不存在的名字**（占该插件 token 引用的 18.9%），
+   **1265 处 `var(--dsw-*)` 指向 49 个上游不存在的名字**（按名字去重后逐一对账），
    其中 138 处落到写死颜色、**37 处无 fallback（整条声明失效：边框在两种主题下都不画）**、
    2 处暗色 P0（`bookmark-styles.css:79` 白底 + 近白文字的菜单、`skills-browser/styles.css:248`
    白字白底主按钮）。**升级上游修不了**（上游 main 与 vendored 基线在这些名字上逐字节一致）。
    → **已实施适配层**（不改 vendored 源码）：
    `packages/host/desktop/src/client/legacy-theme-tokens.ts` 用
-   `ctx.get('theme').overrideTokens('picoaide-vendored-legacy-tokens', …)` 一次覆盖 46 个名字；
+   `ctx.get('theme').overrideTokens('picoaide-vendored-legacy-tokens', …)` 一次覆盖 49 个名字；
    同义 alias 直接指真实 token（自动跟随主题），另一套 0–11 刻度色板映射到同值/近值的
    上游 static token，上游缺族/缺档的（紫、黄、深色阶）给显式亮/暗一对。
    护栏：`tests/legacy-theme-tokens.spec.ts` —— 对 vendored 源码做**全深度扫描**，

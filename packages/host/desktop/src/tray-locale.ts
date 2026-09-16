@@ -1,6 +1,7 @@
 /** Desktop-owned native tray copy for the locales shipped by DSH. */
 
 import type { DesktopLocale } from './runtime.ts'
+import { localeIdToDesktopLocale } from './desktop-locale.ts'
 
 export type DesktopTrayLabelKey =
   | 'checkForUpdates'
@@ -71,9 +72,16 @@ const diagnosticsPrivacyCopy: Record<DesktopLocale, DesktopDiagnosticsPrivacyCop
   },
 }
 
-/** Resolve DSH's zh/en locale from an Electron or browser language tag. */
+/**
+ * Resolve DSH's zh/en locale from an Electron or browser language tag.
+ *
+ * 判定逻辑与"上游 locale 偏好 → 桌面语言"共用一份实现（`desktop-locale.ts`）：
+ * 两处各自为政正是 2026-09-16 P2-B2 的根因（界面认 `zh-CN`、托盘只认裸 `zh`）。
+ * @param languageTag - Electron/browser language tag.
+ * @returns the desktop locale; everything non-zh resolves to `en`.
+ */
 export function desktopLocaleFromLanguageTag(languageTag: string): DesktopLocale {
-  return /^zh(?:[-_]|$)/i.test(languageTag) ? 'zh' : 'en'
+  return localeIdToDesktopLocale(languageTag) ?? 'en'
 }
 
 /**
