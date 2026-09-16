@@ -140,8 +140,13 @@ export function createOAuthProvider(
   },
 ): {
   provider: OAuthClientProvider
-  /** The provider's live view of the tokens (updated by `saveTokens`). */
+  /** The provider's live view of the tokens (updated by `saveTokens` and `adopt`). */
   readonly tokens: OAuthTokens | undefined
+  /**
+   * Adopt tokens obtained by a refresh **we** ran, so the SDK's next 401
+   * self-heal presents the rotated credential instead of the consumed one.
+   */
+  adopt: (next: RefreshedTokens) => void
 } {
   const { credential, target } = options
   let tokens: OAuthTokens | undefined = credential.accessToken === undefined
@@ -248,6 +253,31 @@ export function createOAuthProvider(
   return {
     provider: provider as unknown as OAuthClientProvider,
     get tokens() { return tokens },
+    /**
+     * Adopt tokens **our own** refresher obtained out of band.
+     *
+     * The SDK's `saveTokens` is the only other writer, and it only runs when the
+     * SDK itself refreshed. A refresh we performed (background sweep, the
+     * panel's refresh button, or the restore path) rotates the refresh token in
+     * the store while this provider keeps the **consumed** one in memory — so
+     * the SDK's next 401 self-heal presents a dead grant and a rotation-aware
+     * server answers `invalid_grant: refresh token already used`, which per
+     * RFC 6749 §10.4 revokes the whole grant. Measured 2026-09-16 in CI as
+     * `InvalidGrantError: refresh token already used` from
+     * `StreamableHTTPClientTransport.send` → `auth()` → `executeTokenRequest`.
+     * @param next - the credential our refresher just persisted.
+     */
+    adopt(next: RefreshedTokens): void {
+      // A rotation MAY omit a new refresh token; keep the one we hold rather
+      // than dropping the only material a later refresh needs.
+      const refreshToken = next.refreshToken ?? tokens?.refresh_token
+      tokens = {
+        access_token: next.accessToken,
+        token_type: 'Bearer',
+        ...(refreshToken === undefined ? {} : { refresh_token: refreshToken }),
+        expires_in: Math.max(0, Math.round((next.expiresAt - Date.now()) / 1000)),
+      }
+    },
   }
 }
 
