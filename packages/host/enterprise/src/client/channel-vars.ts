@@ -6,10 +6,23 @@
 // `PicoAide Harness`)整条声明非法, content 计算值为 none, hero 标题与
 // 徽章文字事实上永远不可见。
 import type { ChannelConfig } from '../channel-content.ts'
+import { t } from './locales.ts'
 
-/** hero headline / tagline 默认值(渠道未配置该项时)。 */
+/** hero headline 默认值(渠道未配置该项时)。 */
 export const DEFAULT_HERO_HEADLINE = 'PicoAide Harness'
-export const DEFAULT_HERO_TAGLINE = '企业版'
+
+/**
+ * hero 徽章兜底文案(渠道未配置 client.tagline 时)。
+ *
+ * **必须是函数**: 徽章是首屏可见文案, 而 `t()` 的结果随界面语言变化 ——
+ * 写成模块级常量会在模块求值期(apply 之前)把当时的语言捕获死, 切到英文后
+ * 徽章仍是中文(与 connectors 的 `status-label.ts` 同一根因, 那里的注释有
+ * 完整复盘)。`index.ts` 的 BRAND_CSS 兜底也读这个函数, 两处同源。
+ * @returns 当前界面语言下的徽章文案。
+ */
+export function defaultHeroTagline(): string {
+  return t('hero.tagline')
+}
 
 /**
  * 由渠道配置推导 CSS 变量覆盖: 值已按 setProperty 语义序列化
@@ -23,6 +36,6 @@ export function buildChannelCSSVars(channel: ChannelConfig | null): Record<strin
   const tagline = channel?.client?.tagline ? channel.client.tagline : ''
   return {
     '--pico-hero-headline': JSON.stringify(name || DEFAULT_HERO_HEADLINE),
-    '--pico-hero-tagline': JSON.stringify(tagline || DEFAULT_HERO_TAGLINE),
+    '--pico-hero-tagline': JSON.stringify(tagline || defaultHeroTagline()),
   }
 }

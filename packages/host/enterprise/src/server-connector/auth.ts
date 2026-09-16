@@ -1,15 +1,29 @@
 import { loadElectronModule } from './electron.ts'
 import type { Session } from './config.ts'
+import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 
 export type AuthErrorKind = 'invalid_credentials' | 'auth_expired' | 'network' | 'server_error'
 
-/** User-facing message per auth failure kind (shown by the login page). */
-export function authErrorMessage(kind: AuthErrorKind): string {
+/**
+ * User-facing message per auth failure kind (shown by the login page).
+ *
+ * 这些消息**用户可见**: 登录页把 `AuthError.message` 原样渲染出来, 所以按宿主
+ * 语言取文案。语言由调用方**按请求**解析后传入(见 auth-gate.ts 的 hostLocale);
+ * 缺省中文 = 历史行为(account-card 等不发语言的调用方行为不变)。
+ * @param kind - 认证失败类别。
+ * @param locale - 宿主语言。
+ * @returns 该语言的用户可见文案。
+ */
+export function authErrorMessage(kind: AuthErrorKind, locale: HostLocale = DEFAULT_HOST_LOCALE): string {
   switch (kind) {
-    case 'invalid_credentials': return '账号或密码错误'
-    case 'auth_expired': return '登录已过期，请重新登录'
-    case 'network': return '网络错误，请检查网络连接'
-    case 'server_error': return '服务端错误，请稍后重试'
+    case 'invalid_credentials':
+      return hostCopy(locale, '账号或密码错误', 'Incorrect username or password')
+    case 'auth_expired':
+      return hostCopy(locale, '登录已过期，请重新登录', 'Your session has expired. Please sign in again.')
+    case 'network':
+      return hostCopy(locale, '网络错误，请检查网络连接', 'Network error — check your connection')
+    case 'server_error':
+      return hostCopy(locale, '服务端错误，请稍后重试', 'Server error — please try again later')
   }
 }
 
@@ -17,8 +31,9 @@ export class AuthError extends Error {
   constructor(
     public kind: AuthErrorKind,
     message?: string,
+    locale: HostLocale = DEFAULT_HOST_LOCALE,
   ) {
-    super(message ?? authErrorMessage(kind))
+    super(message ?? authErrorMessage(kind, locale))
     this.name = 'AuthError'
   }
 }
@@ -81,7 +96,18 @@ export function assertServerURLAllowed(serverURL: string): void {
   }
 }
 
-export async function login(serverURL: string, username: string, password: string): Promise<Session> {
+/**
+ * 登录网关。`locale` 只影响**本地生成**的用户可见文案(账号或密码错误等);
+ * 服务端下发的消息原样透出(服务端文案不在 i18n 范围内)。
+ * @param serverURL - 服务端地址(尾部斜杠会被归一)。
+ * @param username - 账号。
+ * @param password - 密码。
+ * @param locale - 宿主语言(调用方按请求解析)。
+ * @returns 已建立的会话。
+ */
+export async function login(
+  serverURL: string, username: string, password: string, locale: HostLocale = DEFAULT_HOST_LOCALE,
+): Promise<Session> {
   const server = normalizeServerURL(serverURL)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15000)
@@ -97,9 +123,13 @@ export async function login(serverURL: string, username: string, password: strin
       // v3b: 审计账号拒绝登录客户端(AUDITOR_NOT_ALLOWED)——给出明确提示。
       const body = await res.json().catch(() => null) as { error?: { code?: string } } | null
       if (body?.error?.code === 'AUDITOR_NOT_ALLOWED') {
-        throw new AuthError('server_error', '审计账号不可登录客户端,请使用管理后台')
+        throw new AuthError('server_error', hostCopy(
+          locale,
+          '审计账号不可登录客户端,请使用管理后台',
+          'Audit accounts cannot sign in to the desktop client. Please use the admin console.',
+        ))
       }
-      throw new AuthError('invalid_credentials')
+      throw new AuthError('invalid_credentials', undefined, locale)
     }
     if (!res.ok) throw new AuthError('server_error', `HTTP ${res.status}`)
     const data = (await res.json()) as {
@@ -167,7 +197,7 @@ export async function changePassword(
 export async function fetchJSON(
   serverURL: string,
   path: string,
-  opts: { token?: string; method?: string; body?: unknown; timeoutMs?: number } = {},
+  opts: { token?: string; method?: string; body?: unknown; timeoutMs?: number; locale?: HostLocale } = {},
 ): Promise<any> {
   const server = normalizeServerURL(serverURL)
   const controller = new AbortController()
@@ -211,12 +241,19 @@ export async function fetchJSON(
   }
   // 防御: 期望 JSON 的 API 却返回了 HTML(如误指向门户首页/SPA 或代理劫持)。
   // 早失败给出明确提示,而不是把 HTML 当 JSON 解析失败成含糊的 UPSTREAM。
+  // 这两条**用户可见**(经 auth-gate 的 { error } 回到能力中心面板),故按宿主语言取;
+  // `opts.locale` 由调用方按请求解析后传入,缺省中文 = 历史行为。
   if (parseFailed && res.status !== 204) {
     const ct = res.headers.get('content-type') ?? ''
+    const locale = opts.locale ?? DEFAULT_HOST_LOCALE
     if (ct.includes('text/html')) {
-      throw new ApiError('NOT_JSON', '服务端返回了 HTML 页面而非 JSON,请确认地址指向 API 服务根,而非门户/SPA 页面')
+      throw new ApiError('NOT_JSON', hostCopy(
+        locale,
+        '服务端返回了 HTML 页面而非 JSON,请确认地址指向 API 服务根,而非门户/SPA 页面',
+        'The server returned an HTML page instead of JSON; make sure the address points at the API root, not a portal/SPA page',
+      ))
     }
-    throw new ApiError('UPSTREAM', '网关响应不是合法 JSON')
+    throw new ApiError('UPSTREAM', hostCopy(locale, '网关响应不是合法 JSON', 'The gateway response is not valid JSON'))
   }
   return data
 }

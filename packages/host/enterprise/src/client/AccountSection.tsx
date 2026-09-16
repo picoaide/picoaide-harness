@@ -156,6 +156,12 @@ export function AccountSection(_props: PropsRuntime<'settings.section'>) {
       const data = (await res.json().catch(() => null)) as { error?: string } | null
       if (!res.ok) {
         const raw = String(data?.error ?? '')
+        // 刻意嗅探**服务端**的中文原文:Go 服务端的错误文案不在本次 i18n 范围内
+        // (服务端只回 `{"error":{"code","message"}}`,message 恒为中文),而"原密码
+        // 错误"这条要换成界面语言、又不能把服务端整句话塞给用户,只能按原文匹配。
+        // 这把客户端与服务端的措辞耦合在一起:服务端改文案时这里会**静默退化**成
+        // 直接显示服务端中文(不会报错)。更稳的做法是服务端在该分支回稳定错误码
+        // (如 AUTH_FAILED + 独立 code),届时把这里换成按 code 判定。
         const msg = raw.includes('原密码') ? t('account.password.errOld') : raw || t('account.password.errFailed', { error: String(res.status) })
         setPwErr(msg)
         return
