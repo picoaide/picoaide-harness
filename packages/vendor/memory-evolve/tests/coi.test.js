@@ -159,8 +159,16 @@ test('buildArgs: new / resume / continue per adapter', () => {
   // plain-cli 忽略会话模式
   const plain = { id: 'p', type: 'plain-cli', binary: 'x', args: ['{task}'] }
   assert.deepEqual(buildArgs(plain, { task: 't', mode: 'resume' }), ['t'])
-  // 占位符替换
+  // 占位符替换（对象字段来自模板）
   assert.deepEqual(buildArgs(kimi, { task: 't', cwd: '/w', model: 'm', mode: 'new' }), ['-p', 't'])
+  // 用户文本里的占位符字面量是数据：单遍替换后不得被后续 pass 再改写，也不得
+  // 触发 resume 的「占位符残留」误报（2026-09-16 audit R4-F1/R5）。
+  assert.deepEqual(
+    buildArgs(codex, {
+      task: 'explain {workdir} and {sessionId} and {model}', cwd: '/w', model: 'm', sessionId: 'uuid', mode: 'resume',
+    }),
+    ['exec', 'resume', 'uuid', 'explain {workdir} and {sessionId} and {model}'],
+  )
 })
 
 test('extractSessionId', () => {
