@@ -98,7 +98,6 @@ const zh = {
 
   // ---- token refresh engine (src/mcp-oauth-provider.ts) -------------------
   'refresh.publicMcp': 'MCP 端点公开可用，无需令牌',
-  'refresh.credentialChanged': '凭据在刷新期间已变化，本次刷新结果未写入（将稍后重试）',
   'refresh.invalidTokenUrl': 'token 端点不是合法 URL',
   'refresh.noTokenEndpoint': '连接器未声明 token 端点',
   'refresh.discoveryNoTokenEndpoint': '无法从 MCP 端点发现 token 端点',
@@ -205,7 +204,6 @@ const en: Record<keyof typeof zh, string> = {
   'policy.credentialFieldKeyDenied': '{group} declares a key that is not allowed: {key}',
 
   'refresh.publicMcp': 'The MCP endpoint is public; no token is needed',
-  'refresh.credentialChanged': 'The credential changed while the refresh was in flight; the result was not written (will retry later)',
   'refresh.invalidTokenUrl': 'the token endpoint is not a valid URL',
   'refresh.noTokenEndpoint': 'The connector declares no token endpoint',
   'refresh.discoveryNoTokenEndpoint': 'Could not discover a token endpoint from the MCP endpoint',

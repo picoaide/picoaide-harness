@@ -436,6 +436,12 @@ export class TokenRefresher {
        * authorization that no longer exists.
        */
       writeIfUnchanged?: ((id: string, expected: ConnectorCredential, patch: Partial<ConnectorCredential>) => Promise<ConnectorCredential | null>) | undefined
+      /**
+       * Account scope the read/write pair currently points at (e.g. the store's
+       * resolved directory). Captured when the refresh starts: a CAS miss on
+       * another scope means a user switch, which must stay a silent no-op.
+       */
+      scope?: (() => string) | undefined
       target: (id: string) => OAuthTarget | null
       /**
        * Called after a refresh actually changed the stored credential.
@@ -515,13 +521,31 @@ export class TokenRefresher {
     }
     let persisted: ConnectorCredential
     if (this.deps.writeIfUnchanged !== undefined) {
+      const scopeAtStart = this.deps.scope?.()
       const cas = await this.deps.writeIfUnchanged(id, credential, patch)
       if (cas === null) {
-        // The credential moved underfoot while the refresh was on the wire
-        // (disconnect, a newer interactive re-authorization, or a user switch).
-        // Publishing the old result would undo that newer write; report a
-        // transient failure so the next sweep starts from the current store.
-        return { ok: false, reason: 'transient', message: hostT(locale, 'refresh.credentialChanged') }
+        // The credential moved underfoot while the refresh was on the wire.
+        // Never publish the stale result; but distinguish the benign cases so
+        // the panel does not turn a successful outcome into a red error row:
+        //  - another account's store: silent no-op;
+        //  - no credential anymore (disconnect): not-applicable;
+        //  - a NEWER credential on the same account (interactive re-auth or an
+        //    SDK self-heal won the write order): mirror THAT credential into the
+        //    live providers instead of the one this refresh obtained.
+        if (this.deps.scope !== undefined && scopeAtStart !== this.deps.scope()) {
+          return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.notConnected', { id }) }
+        }
+        const current = await this.deps.read(id)
+        if (current === null) {
+          return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.notConnected', { id }) }
+        }
+        const tokens: RefreshedTokens = {
+          accessToken: current.accessToken ?? outcome.tokens.accessToken,
+          ...(current.refreshToken === undefined ? {} : { refreshToken: current.refreshToken }),
+          expiresAt: current.expiresAt ?? Date.now() + DEFAULT_TOKEN_LIFETIME_MS,
+        }
+        this.deps.onRefreshed?.(id, tokens, current)
+        return { ok: true, tokens }
       }
       persisted = cas
     } else {
