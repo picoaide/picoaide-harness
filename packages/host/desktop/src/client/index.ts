@@ -16,6 +16,7 @@ import { installDesktopDirectoryPickerBridge } from './directory-picker.ts'
 import { parseDesktopClientEnvironment } from './environment.ts'
 import { applyLoopNotifyClient } from './loop-notify.tsx'
 import { applyLegacyThemeTokens } from './legacy-theme-tokens.ts'
+import { setActiveLocale } from './locales.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
 export {
@@ -53,12 +54,32 @@ export const inject = [
   'slots',
   'sessions',
   'theme',
+  // Desktop-owned client copy (the update badge) needs the active locale. The
+  // client dictionaries read a module-local value, so follow the service here
+  // the same way the sibling packages do; every slot outlet re-renders on a
+  // locale switch, which re-evaluates `t()` at the new language.
+  'locale',
 ]
 
 /** Register desktop-owned client surfaces for the current BrowserWindow mode. @param ctx - browser Cordis context. */
 export function apply(ctx: ClientContext): void {
   const environment = parseDesktopClientEnvironment(window.location.search)
   if (!environment) return
+  ctx.effect(() => {
+    const locale = ctx.locale as unknown as {
+      getLocale?: () => { active?: unknown }
+      subscribe?: (listener: () => void) => () => void
+    }
+    const sync = (): void => {
+      try {
+        const active = locale.getLocale?.()?.active
+        if (typeof active === 'string') setActiveLocale(active)
+      } catch { /* keep the last known locale */ }
+    }
+    sync()
+    if (typeof locale.subscribe !== 'function') return () => {}
+    return locale.subscribe(sync)
+  }, 'dsh-plugin-desktop: follow active locale')
   ctx.effect(
     () => startRendererBootReporter(ctx.loader),
     'dsh-plugin-desktop: renderer boot health report',

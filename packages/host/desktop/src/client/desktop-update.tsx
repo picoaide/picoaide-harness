@@ -11,6 +11,7 @@ import {
   DESKTOP_UPDATE_INSTALL_PATH,
   type DesktopUpdateStateResponse,
 } from '../desktop-update-contract.ts'
+import { t } from './locales.ts'
 
 /**
  * Poll interval for the Host update snapshot, ms.
@@ -273,21 +274,21 @@ export function desktopUpdateBadgeView(state: DesktopUpdateStateResponse | null)
   if (ready !== undefined) {
     return {
       state: 'ready',
-      label: `安装 ${ready}`,
-      title: `Version ${ready} is downloaded — click to install`,
+      label: t('update.install', { version: ready }),
+      title: t('update.installTitle', { version: ready }),
     }
   }
   if (downloading !== undefined) {
     return {
       state: 'downloading',
       label: `${downloading}${percent !== undefined ? ` ${percent}` : ''}`,
-      title: downloadingRetryTitle(state) ?? `Downloading ${downloading}…`,
+      title: downloadingRetryTitle(state) ?? t('update.downloadingTitle', { version: downloading }),
     }
   }
   return {
     state: 'available',
     label: available ?? '',
-    title: `Version ${available ?? ''} available — click to check`,
+    title: t('update.availableTitle', { version: available ?? '' }),
   }
 }
 
@@ -296,8 +297,8 @@ function downloadingRetryTitle(state: DesktopUpdateStateResponse): string | unde
   if (state.retryAttempt <= 1 && state.retryDelayMs === 0) return undefined
   const attempt = `${String(state.retryAttempt)}/${String(state.retryMaxAttempts)}`
   return state.retryDelayMs > 0
-    ? `Retrying download (attempt ${attempt}) in ${String(Math.ceil(state.retryDelayMs / 1000))}s…`
-    : `Downloading (attempt ${attempt})…`
+    ? t('update.retryingIn', { attempt, seconds: String(Math.ceil(state.retryDelayMs / 1000)) })
+    : t('update.retryingNow', { attempt })
 }
 
 /** Right-aligned badge: newest pending update state, click to check/download/install. */
