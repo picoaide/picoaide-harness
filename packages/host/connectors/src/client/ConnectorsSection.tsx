@@ -108,9 +108,34 @@ const BUTTON: React.CSSProperties = {
   border: 'none',
   fontSize: 13,
   cursor: 'pointer',
-  background: '#2563eb',
-  color: '#fff',
+  // 成对的上游 token（Button.module.css 同款）：写死 #2563eb/#fff 在暗色下不翻转，
+  // 而下面的危险/警告按钮把填充换成 state 色后，白字会压出 2–3:1 的对比度
+  // （2026-09-16 暗色审计）。
+  background: 'var(--dsw-alias-button-primary-fill, #2563eb)',
+  color: 'var(--dsw-alias-label-primary-foreground, #fff)',
 }
+
+/**
+ * 破坏性/中断类动作的按钮样式：**描边式**（透明底 + state 色描边与文字）。
+ *
+ * 为什么不用实心 state 色 + 白字：暗色下 `--dsw-alias-state-error-primary` 是
+ * red-400(#f25a5a)、白字只有 3.29:1；`--dsw-alias-state-warn-primary` 是
+ * amber-500(#f59e0b)、两主题下白字 2.15:1。上游也是把 state 色当**文字**用的
+ * （Menu.module.css 的 danger 项、DiffBlock 等），没有"实心危险按钮"的 token 对。
+ * @param stateColor - state 色 token（含 var() 写法）。
+ * @returns 该按钮的样式。
+ */
+function stateOutlineButton(stateColor: string): React.CSSProperties {
+  return {
+    ...BUTTON,
+    background: 'transparent',
+    border: `1px solid ${stateColor}`,
+    color: stateColor,
+  }
+}
+
+const DANGER_BUTTON: React.CSSProperties = stateOutlineButton('var(--dsw-alias-state-error-primary, #dc2626)')
+const WARN_BUTTON: React.CSSProperties = stateOutlineButton('var(--dsw-alias-state-warn-label, #b45309)')
 
 const INPUT: React.CSSProperties = {
   padding: '6px 10px',
@@ -471,7 +496,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
               <button type="button" style={BUTTON} disabled={busy === 'submit'} onClick={() => { void decideApproval(true) }} aria-label={`${t('action.allow')} ${entry.name}`}>
                 {busy === 'submit' ? t('action.deciding') : t('action.allow')}
               </button>
-              <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)' }} disabled={busy === 'submit'} onClick={() => { void decideApproval(false) }} aria-label={`${t('action.deny')} ${entry.name}`}>
+              <button type="button" style={DANGER_BUTTON} disabled={busy === 'submit'} onClick={() => { void decideApproval(false) }} aria-label={`${t('action.deny')} ${entry.name}`}>
                 {t('action.deny')}
               </button>
             </div>
@@ -510,7 +535,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
           </button>
         ) : null}
         {isConnected ? (
-          <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)' }} disabled={busy === 'disconnect'} onClick={() => { void disconnect() }} aria-label={`${t('action.disconnect')} ${entry.name}`}>
+          <button type="button" style={DANGER_BUTTON} disabled={busy === 'disconnect'} onClick={() => { void disconnect() }} aria-label={`${t('action.disconnect')} ${entry.name}`}>
             {busy === 'disconnect' ? t('action.disconnecting') : t('action.disconnect')}
           </button>
         ) : entry.request?.approval ? (
@@ -524,7 +549,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
           // closed the authorization popup is never stuck on "连接中…".
           <button
             type="button"
-            style={{ ...BUTTON, background: 'var(--dsw-alias-state-warn-primary)' }}
+            style={WARN_BUTTON}
             disabled={busy === 'disconnect'}
             onClick={() => { void cancel() }}
             title={t('action.cancelHint')}

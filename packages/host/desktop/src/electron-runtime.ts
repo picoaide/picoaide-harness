@@ -971,7 +971,12 @@ async function reloadOrShowCrashFallback(
       : `<script>document.getElementById('retry').addEventListener('click',function(){location.href=${inlineScriptUrl(retryTarget)}})</script>`
     // 失败页是窗口标题的来源（页面 <title> 会盖掉 BrowserWindow 的 title），
     // 所以它同样必须是渠道自己的产品名。
-    const errorPage = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtmlText(runtime.productName)}</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f6f8}.card{text-align:center;max-width:420px;padding:32px}h1{font-size:18px;color:#1a1d24}p{color:#616267;font-size:14px}button{margin-top:12px;padding:8px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}</style></head><body><div class="card"><h1>界面加载失败</h1><p>渲染进程未能正常加载。可以点击下方按钮重试；若持续失败，请从系统托盘退出后重新启动应用。</p><button id="retry"${retryTarget === '' ? ' disabled' : ''}>重新加载</button></div>${retryScript}</body></html>`)}`
+    //
+    // 颜色：这是 `data:text/html` **独立文档**，拿不到客户端的设计 token，所以用
+    // 写死色 + `prefers-color-scheme`（桌面壳设了 `nativeTheme.themeSource`，
+    // 该媒体查询会跟随应用内的主题选择，而不是只看系统）。2026-09-16 暗色审计：
+    // 原先只有亮色一套，暗色主题下会闪一整页刺眼白。
+    const errorPage = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtmlText(runtime.productName)}</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f6f8;color-scheme:light dark}.card{text-align:center;max-width:420px;padding:32px}h1{font-size:18px;color:#1a1d24}p{color:#616267;font-size:14px}button{margin-top:12px;padding:8px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}@media (prefers-color-scheme: dark){body{background:#151517}h1{color:#f9fafb}p{color:#9ca3af}}</style></head><body><div class="card"><h1>界面加载失败</h1><p>渲染进程未能正常加载。可以点击下方按钮重试；若持续失败，请从系统托盘退出后重新启动应用。</p><button id="retry"${retryTarget === '' ? ' disabled' : ''}>重新加载</button></div>${retryScript}</body></html>`)}`
     await window.loadURL(errorPage)
   } catch {
     runtime.log('dsh-plugin-desktop: crash fallback page failed to load')

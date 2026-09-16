@@ -114,12 +114,15 @@ describe('mergeItems', () => {
 
 describe('avatarColor', () => {
   it('returns a stable color token for any non-empty name', () => {
+    // 必须是**会随主题翻转**的 alias token（2026-09-16 审计）：此前钉的是
+    // `var(--dsw-static-…` 开头，而那一族名字在上游并不存在（静态色板是三位刻度），
+    // 实际生效的始终是内层 alias —— 断言外层名字等于把"永远走 fallback"钉成预期。
     const color = avatarColor('code-review')
-    expect(color).toMatch(/^var\(--dsw-static-/u)
+    expect(color).toMatch(/^var\(--dsw-alias-/u)
     expect(avatarColor('code-review')).toBe(avatarColor('code-review'))
   })
   it('handles the empty name (fallback first color)', () => {
-    expect(avatarColor('')).toBe('var(--dsw-static-deepseek-5, var(--dsw-alias-brand-primary))')
+    expect(avatarColor('')).toBe('var(--dsw-alias-brand-primary)')
   })
 })
 

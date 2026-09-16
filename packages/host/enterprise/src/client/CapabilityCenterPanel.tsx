@@ -132,7 +132,9 @@ const TAB_BAR: React.CSSProperties = {
   alignItems: 'center',
   gap: 4,
   padding: '0 18px',
-  borderBottom: '1px solid var(--dsw-alias-border-l)',
+  // 上游没有 `--dsw-alias-border-l`（只有 l1/l2/l3/l4，2026-09-16 审计）⇒ 原先
+  // 分隔线在亮暗两色下都没有描边色（`1px solid` 空值 = 不画）。用会翻转的 l2。
+  borderBottom: '1px solid var(--dsw-alias-border-l2)',
 }
 
 const TAB: React.CSSProperties = {
@@ -229,11 +231,16 @@ const DESC_BUTTON: React.CSSProperties = {
   color: 'inherit',
 }
 
+// 头像底色：直接用**会随主题翻转**的 alias token。
+// 2026-09-16 审计：原先写成 `var(--dsw-static-deepseek-5, var(--dsw-alias-brand-primary))`
+// 这种两层写法，外层名字在上游**不存在**（静态色板是 100/400/500 这类三位刻度，
+// 没有 `-5`）⇒ 永远落到内层 alias，等于白写一层；直接写内层才是可读的真源，
+// 也避免"看着像静态色、实际是主题色"的误导。
 const AVATAR_COLORS = [
-  'var(--dsw-static-deepseek-5, var(--dsw-alias-brand-primary))',
-  'var(--dsw-static-green-5, var(--dsw-alias-state-success-primary))',
-  'var(--dsw-static-amber-5, var(--dsw-alias-state-warn-label))',
-  'var(--dsw-static-neutral-5, var(--dsw-alias-label-tertiary))',
+  'var(--dsw-alias-brand-primary)',
+  'var(--dsw-alias-state-success-primary)',
+  'var(--dsw-alias-state-warn-label)',
+  'var(--dsw-alias-label-tertiary)',
 ]
 
 /** 按名称+类型确定头像颜色（稳定；导出供单测）。 */
@@ -269,7 +276,10 @@ const BUTTON: React.CSSProperties = {
   borderRadius: 6,
   border: '1px solid transparent',
   background: 'var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #2563eb))',
-  color: 'var(--dsw-alias-label-inverted, #fff)',
+  // 主按钮上的字用上游的 label-primary-foreground（Button.module.css 同款）。
+  // 2026-09-16 审计：`--dsw-alias-label-inverted` 上游不存在 ⇒ 文字的 fallback #fff
+  // 虽然"看着还行"，但它与真实 token 的暗色取值不一致，属于隐性漂移。
+  color: 'var(--dsw-alias-label-primary-foreground, #fff)',
   fontSize: 12,
   cursor: 'pointer',
   whiteSpace: 'nowrap',
@@ -290,7 +300,7 @@ const CARD_FOOT: React.CSSProperties = {
   gap: 6,
   marginTop: 'auto',
   paddingTop: 10,
-  borderTop: '1px solid var(--dsw-alias-border-l)',
+  borderTop: '1px solid var(--dsw-alias-border-l2)',
 }
 const NOTICE: React.CSSProperties = { fontSize: 13, margin: 0, textAlign: 'center', padding: 12 }
 
@@ -314,7 +324,10 @@ const CHIP_SUCCESS = chipStyle('var(--dsw-alias-state-success-primary)')
 const CHIP_WARN = chipStyle('var(--dsw-alias-state-warn-label)')
 const CHIP_ERROR = chipStyle('var(--dsw-alias-state-error-primary)')
 /** 自制徽章(紫, 与官方蓝/来源灰区分)。 */
-const CHIP_LOCAL = chipStyle('#7C3AED')
+// 自制/本地来源徽章：原先写死紫色 #7C3AED，两主题同值 —— 暗色下面板底
+// (bg-layer-2 = rgb(44,44,46)) 上只有 2.45:1（2026-09-16 暗色审计）。
+// 上游没有紫色语义 token，改用会翻转的三级文字色，靠文案「自制」区分来源。
+const CHIP_LOCAL = chipStyle('var(--dsw-alias-label-tertiary)')
 
 /** 单测用：数值感知版本比较（对齐服务端 util.CompareSemVer 语义）。 */
 export function compareVersions(left: string, right: string): number {
@@ -783,7 +796,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
               </button>
             ) : uninstallConfirmKey === key ? (
               <div style={{ display: 'flex', gap: 8, width: '100%' }}>
-                <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)', color: 'var(--dsw-alias-label-inverted, #fff)' }} disabled={busy} onClick={() => { void uninstall(item) }}>
+                <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)', color: 'var(--dsw-alias-label-primary-foreground, #fff)' }} disabled={busy} onClick={() => { void uninstall(item) }}>
                   {busy && action?.kind === 'uninstalling' ? t('capability.uninstalling') : t('capability.confirmUninstall')}
                 </button>
                 <button type="button" style={{ ...BUTTON_SECONDARY, flex: 1 }} disabled={busy} onClick={() => { setUninstallConfirmKey(null) }}>{t('capability.cancel')}</button>
