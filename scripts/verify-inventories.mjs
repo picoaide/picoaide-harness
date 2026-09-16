@@ -139,10 +139,14 @@ const PREBUILD_EXEMPTIONS = new Map([
   ],
 ])
 
-/** 不在 `check-workspaces.mjs` check 链里的包(与那份脚本的注释同源)。 */
-const CHECK_CHAIN_EXEMPTIONS = new Map([
-  ['packages/vendor/memory-evolve', '有 test 脚本但不在原 yarn check 链里,保持原样(测试缺口另行报告)'],
-])
+/**
+ * 不在 `check-workspaces.mjs` check 链里的包(与那份脚本的注释同源)。
+ * 2026-09-16 起为空:此前 `packages/vendor/memory-evolve`(vendored 第三方插件,
+ * 随三平台安装包分发)在这里挂着"测试缺口另行报告"的豁免 ⇒ 950 个用例(含全部
+ * 本地安全加固的回归)**不在任何门禁链里**,升级上游时静默回归可直接进产物。
+ * 现已以 `script: 'test'` 接入门禁;新增豁免必须写明理由。
+ */
+const CHECK_CHAIN_EXEMPTIONS = new Map([])
 
 // ---- 3. scripts/check-workspaces.mjs 的包表 ----
 const checkChainDirs = []

@@ -49,7 +49,8 @@ import {
 } from './brand-web-route.ts'
 import { readDesktopChannelProfile } from './desktop-channel.ts'
 import type { ConnectionTrustFence, WriteProofDeps } from './write-proof.ts'
-import type { DesktopLocale, DesktopShellMode } from './runtime.ts'
+import type { DesktopShellMode } from './runtime.ts'
+import { desktopLocaleFromPreference } from './desktop-locale.ts'
 import type {} from './runtime.ts'
 
 /** Stable Cordis plugin name. */
@@ -72,12 +73,6 @@ export const DESKTOP_SETTINGS_NAMESPACE = 'dsh-desktop' as SettingsNamespace
 
 const UI_THEME_SETTINGS_NAMESPACE = THEME_SETTINGS_NAMESPACE as SettingsNamespace
 const UI_LOCALE_SETTINGS_NAMESPACE = LOCALE_SETTINGS_NAMESPACE as SettingsNamespace
-
-/** Bin the upstream locale preference onto the desktop's supported pair. */
-function normalizeDesktopLocale(value: string | undefined): DesktopLocale | undefined {
-  if (value === 'zh' || value === 'en') return value
-  return undefined
-}
 
 /** Desktop settings presented by the standard settings service. */
 export interface DesktopSettings {
@@ -389,7 +384,7 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.on('settings/updated', (namespace, next) => {
     if (namespace !== UI_LOCALE_SETTINGS_NAMESPACE) return
-    runtime.setLocalePreference(normalizeDesktopLocale((next as LocaleSettings).preference))
+    runtime.setLocalePreference(desktopLocaleFromPreference((next as LocaleSettings).preference))
   })
   // picoaide:// deep links (auth callback): forward to Host consumers.
   // The enterprise plugin listens for 'pico/deep-link' and completes the
@@ -411,7 +406,7 @@ export function apply(ctx: Context, config: Config): void {
       iconPath,
       trayIcons,
       readLocalePreference: () => {
-        return normalizeDesktopLocale((ctx.settings.get(UI_LOCALE_SETTINGS_NAMESPACE) as LocaleSettings | undefined)?.preference)
+        return desktopLocaleFromPreference((ctx.settings.get(UI_LOCALE_SETTINGS_NAMESPACE) as LocaleSettings | undefined)?.preference)
       },
       readThemeSource: () => {
         const theme = ctx.settings.get(UI_THEME_SETTINGS_NAMESPACE) as ThemeSettings | undefined

@@ -4,12 +4,12 @@
  * ## 为什么需要这一层
  *
  * `packages/vendor/memory-evolve`（第三方上游 `github.com/csyangwen/dsh-memory-evolve`
- * 的复制式 vendored 副本，随桌面包分发）里有 **41 个上游根本不存在的 `--dsw-*` 名字、
- * 198 处引用**：CSS 不报错，`var(--x, 字面量)` 会安静走 fallback ⇒ 那些颜色
+ * 的复制式 vendored 副本，随桌面包分发）里有 **49 个上游根本不存在的 `--dsw-*` 名字、
+ * 1265 处引用**：CSS 不报错，`var(--x, 字面量)` 会安静走 fallback ⇒ 那些颜色
  * **永远不随主题变化**；其中 `--dsw-alias-border-l`（36 处）与
  * `--dsw-alias-interactive-fg-default`/`--dsw-alias-text-tertiary` 等**没有 fallback**，
  * 整条声明直接失效（边框两种主题下都不画）。上游目前也修不了：实测上游 main 与
- * vendored 基线在这 41 个名字上逐字节一致（详见
+ * vendored 基线在这 49 个名字上逐字节一致（详见
  * `docs/decisions/2026-09-16-dark-mode-token-audit.md`）。
  *
  * ## 为什么用适配层而不是改 vendored 源码
@@ -18,7 +18,7 @@
  * 同步上游都要重放（现已有 9 条）。而主题服务本来就支持第三方覆盖层
  * （`ctx.get('theme').overrideTokens(source, tokens)`，见 `@deepseek-ai/dsh-client-ui-theme/client`），
  * 桌面 presenter 会把层里的 token 写成 `body` 的**内联自定义属性** ⇒ 任意名字都能有值、
- * 且 custom property 会被所有后代继承。一次覆盖 41 个名字即可同时修好：
+ * 且 custom property 会被所有后代继承。一次覆盖 49 个名字即可同时修好：
  * 失效声明（边框回来了）、写死颜色（落回真实 token）、白字白底（成对 token）。
  *
  * ## 取值口径
@@ -55,7 +55,7 @@ function pair(light: string, dark: string): LegacyTokenModes {
 }
 
 /**
- * 41 个旧名字 → 亮/暗取值。
+ * 49 个旧名字 → 亮/暗取值。
  *
  * 名字清单由 `tests/legacy-theme-tokens.spec.ts` 对 vendored 源码做**全深度扫描**
  * 后逐一对账：漏一个就红（防止下一轮上游同步带进新名字而没人发现）。
