@@ -670,7 +670,7 @@ function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string 
             <span className="coi-label">{t('coi.launch.scope')}</span>
             <select className="coi-select" value={scope} onChange={(e) => setScope(e.target.value)}>
               {SCOPES.map((s) => (
-                <option key={s} value={s}>{t(`scope.${s}`)}</option>
+                <option key={s} value={s}>{t(`coi.scope.${s}` as DictKey)}</option>
               ))}
             </select>
           </label>
@@ -1006,7 +1006,7 @@ function SessionsPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: stri
         <select className="coi-select" value={scopeFilter} onChange={(e) => setScopeFilter(e.target.value)} title={t('coi.sessions.filterScope')}>
           <option value="">{t('coi.all')}</option>
           {SCOPES.map((s) => (
-            <option key={s} value={s}>{t(`scope.${s}`)}</option>
+            <option key={s} value={s}>{t(`coi.scope.${s}` as DictKey)}</option>
           ))}
         </select>
         <input

@@ -680,6 +680,9 @@ export function renderSnapshot(config, store, agent, counter, sessionTitleServic
   // NF-A1：状态留档告知（一次性）。放在最前，确保模型在第一条回复就能告知用户。
   if (quarantineNotice !== null && quarantineNotice !== undefined) {
     parts.push(st('snap.stateQuarantined', { at: String(quarantineNotice.at ?? '') }))
+    // 一次性：快照在每轮提示词组装时都会重渲染，模块级变量不清零会把
+    // "设置被重置"永远注入下去（2026-09-16 审计 E3）。
+    quarantineNotice = null
   }
   // 会话 ID 段（快照最前面的独立输出端，常驻注入，不随任何模块开关）：
   // AI 始终知道"我是谁"——广播消息判断 sender/recipients 谁是谁、回复时

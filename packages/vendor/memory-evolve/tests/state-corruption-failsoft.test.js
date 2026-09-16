@@ -137,6 +137,9 @@ test('A1 标记被消费且只告知一次（快照注入 → 二次启动不再
     const snapshot = renderSnap(ctx2, dir)
     assert.match(snapshot, /记忆设置曾被重置/, '快照必须一次性告知模型（用户可感知的状态变化）')
     assert.match(snapshot, /corrupt-/, '告知里要给备份文件名')
+    // 快照每轮组装都会重渲染：同一次 apply 的第二次渲染不得再带这段，
+    // 否则模型会每轮重复向用户播报（2026-09-16 审计 E3）。
+    assert.doesNotMatch(renderSnap(ctx2, dir), /记忆设置曾被重置/, '同一进程内只告知一次')
 
     // 第三次：正常启动 → 不再出现该段（不反复用陈旧信息打扰）
     const ctx3 = fakeCtx()
