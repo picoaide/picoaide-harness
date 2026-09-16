@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import assert from 'node:assert/strict'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({ apply: () => {} }))
@@ -144,26 +145,68 @@ describe('audit: refresh failure must not park the connector forever', () => {
   it('PROBE A: a transient refresh failure recovers on the next sweep', async () => {
     const server = await start({ expiresIn: 3600 })
     const dir = mkdtempSync(join(tmpdir(), 'audit-a-'))
-    const h = createHarness([oauthDef(server.origin)], dir, { refreshSweepIntervalMs: 80 })
+    // 扫掠的可注入观察者（拿到的是**生产**扫掠函数）：这条用例要观察"下一轮
+    // 扫掠会恢复"，此前靠等定时器撞运气——CI（4 vCPU、多包并发）下定时器 +
+    // 真实 HTTP 往返 + 事件扇出会被调度拉开数秒，多次在预算内等不到（本地
+    // 12 进程压测亦复现 2/12）。改为测试**自己驱动扫掠**：断言的不变量
+    // （"扫掠逻辑会让它恢复"）不变，去掉的是调度运气。
+    let sweep: (() => Promise<void>) | undefined
+    // 定时扫掠关掉（`refreshSweepIntervalMs: 0`）：本用例**自己驱动**扫掠，
+    // 避免"手动扫掠 + 80ms 定时扫掠"两个来源并发抢同一份生命周期队列——
+    // 那正是此前偶发失败的来源之一（CI + 本地 4 进程压测均复现）。
+    const h = createHarness([oauthDef(server.origin)], dir, {
+      refreshSweepIntervalMs: 0,
+      onRefreshSweepReady: (fn: () => Promise<void>) => { sweep = fn },
+    })
     await seedCredential(dir, 'moka', {
       accessToken: 'at-first', refreshToken: 'rt-1', clientId: 'dyn-1',
       expiresAt: Date.now() + 5 * 60 * 1000,
     })
     h.emitSession({ username: 'user-a' })
-    // 这条用例要等两轮后台扫掠 + 两次真实 HTTP 往返；在 CI（4 vCPU、多包并发）上
-    // 每次 await 都可能被调度拉开数秒，所以三处预算都给足（断言本身不变）。
     await waitFor(() => h.configs.length === 1, 20_000)
+    assert.ok(sweep !== undefined, '插件必须把扫掠函数交给注入的观察者')
+    // 前置条件：连接器必须已经 connected，否则扫掠会（正确地）跳过它
+    await awaitRow(h, 'moka', row => row.status === 'connected', 20_000)
 
     // the token lapses while the endpoint is temporarily down
     server.fail = 'server_error'
     const store = new ConnectorStore({ baseDir: dir })
     await store.updateCredential('moka', { expiresAt: Date.now() - 1000 })
-    await waitFor(() => server.grants.length >= 1, 20_000)
+
+    /** 主动驱动扫掠，直到条件成立（真实 HTTP 往返仍需等待，但不再靠定时器）。 */
+    async function sweepUntil(predicate: () => boolean, budgetMs: number, label: string): Promise<void> {
+      const deadline = Date.now() + budgetMs
+      let rounds = 0
+      for (;;) {
+        try {
+          await sweep!()
+        } catch (error) {
+          // 扫掠自身抛错要立刻暴露（此前被 waitFor 的静默超时盖住）
+          throw new Error(`sweep threw while waiting for ${label}: ${String(error)}`)
+        }
+        rounds += 1
+        if (predicate()) return
+        if (Date.now() >= deadline) {
+          const row = await awaitRow(h, 'moka', () => true, 2_000).catch(() => ({ status: '?' }))
+          throw new Error(
+            `sweepUntil(${label}) not reached in ${budgetMs}ms after ${rounds} sweeps; `
+            + `grants=${JSON.stringify(server.grants)} configs=${h.configs.length} rowStatus=${row.status}`,
+          )
+        }
+        await new Promise(r => setTimeout(r, 20))
+      }
+    }
+
+    await sweepUntil(() => server.grants.length >= 1, 20_000, 'first refresh attempt')
     await new Promise(r => setTimeout(r, 120))
 
     // endpoint comes back: the sweep must try again by itself
     server.fail = null
-    await waitFor(() => server.grants.some(g => g === 'refresh_token') && h.configs.length >= 2, 30_000)
+    await sweepUntil(
+      () => server.grants.some(g => g === 'refresh_token') && h.configs.length >= 2,
+      30_000,
+      'recovery after the endpoint returns',
+    )
     const status = (JSON.parse((await callRoute(h, '/api/pico/connectors', 'GET')).body) as
       { connectors: Array<{ id: string, status: string }> }).connectors.find(c => c.id === 'moka')
     expect(status?.status).toBe('connected')
