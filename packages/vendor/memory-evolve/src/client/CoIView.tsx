@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import { clientLang } from '../../lib/i18n.js'
 
 /* ------------------------------------------------------------------ */
 /* 类型（与 host API 响应形状一致）                                      */
@@ -476,11 +477,20 @@ const DICT = {
 type DictKey = keyof (typeof DICT)['zh']
 
 /** 当前语言：浏览器为英文时用 en，否则 zh（与 PromptView 同规则）。 */
-const LANG: keyof typeof DICT = (typeof navigator !== 'undefined' && navigator.language?.toLowerCase().startsWith('en')) ? 'en' : 'zh'
+/**
+ * 当前界面语言。S4（2026-09-16）：此前是模块加载期求值一次的
+ * `navigator.language` 常量 —— 用户在设置里切语言时这些私有字典文案不跟随
+ * （看不到任何报错）。改为**每次取值时**向宿主 locale 解析器要（client 入口
+ * 注册，见 lib/i18n.js 的 clientLang），未注册时回落 navigator.language。
+ */
+function lang(): keyof typeof DICT {
+  return clientLang()
+}
 
 /** 字典查询：当前语言 → en 兜底 → key 本身。 */
 function t(key: DictKey): string {
-  return DICT[LANG][key] ?? DICT.en[key] ?? key
+  const active = lang()
+  return DICT[active][key] ?? DICT.en[key] ?? key
 }
 
 /* ------------------------------------------------------------------ */
@@ -536,13 +546,13 @@ function fmtTime(ts: number | null | undefined): string {
 function fmtAgo(ts: number | null | undefined): string {
   if (ts === null || ts === undefined) return '—'
   const delta = Math.max(0, Date.now() - ts)
-  if (delta < 5000) return LANG === 'zh' ? '刚刚' : 'just now'
+  if (delta < 5000) return lang() === 'zh' ? '刚刚' : 'just now'
   const s = Math.floor(delta / 1000)
-  if (s < 60) return LANG === 'zh' ? `${s} 秒前` : `${s}s ago`
+  if (s < 60) return lang() === 'zh' ? `${s} 秒前` : `${s}s ago`
   const m = Math.floor(s / 60)
-  if (m < 60) return LANG === 'zh' ? `${m} 分钟前` : `${m}m ago`
+  if (m < 60) return lang() === 'zh' ? `${m} 分钟前` : `${m}m ago`
   const h = Math.floor(m / 60)
-  return LANG === 'zh' ? `${h} 小时前` : `${h}h ago`
+  return lang() === 'zh' ? `${h} 小时前` : `${h}h ago`
 }
 
 /** 毫秒 → '500ms' / '42s' / '3m 5s' / '1h 2m'。 */
@@ -562,18 +572,23 @@ function trunc(text: string, n = 40): string {
   return one.length > n ? `${one.slice(0, n)}…` : one
 }
 
-/** 状态 → 图标/文案/样式类。 */
-const STATUS_META: Record<string, { icon: string; label: string; cls: string }> = {
-  queued: { icon: '⏳', label: LANG === 'zh' ? '排队中' : 'Queued', cls: 'coi-status-queued' },
-  running: { icon: '⏳', label: LANG === 'zh' ? '运行中' : 'Running', cls: 'coi-status-running' },
-  completed: { icon: '✅', label: LANG === 'zh' ? '已完成' : 'Completed', cls: 'coi-status-completed' },
-  failed: { icon: '❌', label: LANG === 'zh' ? '失败' : 'Failed', cls: 'coi-status-failed' },
-  killed: { icon: '🛑', label: LANG === 'zh' ? '已终止' : 'Killed', cls: 'coi-status-killed' },
-  interrupted: { icon: '⚠️', label: LANG === 'zh' ? '中断' : 'Interrupted', cls: 'coi-status-interrupted' },
-}
-
+/**
+ * 状态 → 图标/文案/样式类。
+ *
+ * S4（2026-09-16）：**必须是函数**——表里含 `lang()`，写成模块级常量会让文案
+ * 在模块加载那一刻就被钉死（与上面 `LANG` 常量同一个坑）。
+ */
 function statusMeta(status: string): { icon: string; label: string; cls: string } {
-  return STATUS_META[status] ?? { icon: '❔', label: status, cls: '' }
+  const zh = lang() === 'zh'
+  const meta: Record<string, { icon: string; label: string; cls: string }> = {
+    queued: { icon: '⏳', label: zh ? '排队中' : 'Queued', cls: 'coi-status-queued' },
+    running: { icon: '⏳', label: zh ? '运行中' : 'Running', cls: 'coi-status-running' },
+    completed: { icon: '✅', label: zh ? '已完成' : 'Completed', cls: 'coi-status-completed' },
+    failed: { icon: '❌', label: zh ? '失败' : 'Failed', cls: 'coi-status-failed' },
+    killed: { icon: '🛑', label: zh ? '已终止' : 'Killed', cls: 'coi-status-killed' },
+    interrupted: { icon: '⚠️', label: zh ? '中断' : 'Interrupted', cls: 'coi-status-interrupted' },
+  }
+  return meta[status] ?? { icon: '❔', label: status, cls: '' }
 }
 
 const SCOPES = ['temporary', 'session', 'project', 'global'] as const

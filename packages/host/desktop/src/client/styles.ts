@@ -68,8 +68,10 @@ html:has([aria-modal="true"]) .dshDesktopSidebarSurface::before { -webkit-app-re
   padding: 0 10px;
   border-radius: 999px;
   border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.08));
-  background: var(--dsw-alias-bg-elevated, #fff);
-  color: var(--dsw-alias-fg-1, #333);
+  /* 胶囊表面/文字用会翻转的 token：bg-elevated 与 fg-1 这两个名字上游都不存在
+     （2026-09-16 审计）⇒ 暗色下依旧是白底深字。上游 Pill 用的是 bg-layer-2。 */
+  background: var(--dsw-alias-bg-layer-2, #fff);
+  color: var(--dsw-alias-label-primary, #333);
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
@@ -77,25 +79,28 @@ html:has([aria-modal="true"]) .dshDesktopSidebarSurface::before { -webkit-app-re
   cursor: pointer;
 }
 .dshDesktopUpdateBadge:hover { border-color: var(--dsw-alias-border-l3, rgba(0, 0, 0, 0.16)); }
-.dshDesktopUpdateBadge:focus-visible { outline: 2px solid #2f6fed; outline-offset: 1px; }
+/* 焦点环/圆点/成功态一律走会翻转的 token（2026-09-16 暗色审计）：
+   硬编码的 #2f6fed / #e8871e / #16a34a / #15803d 在暗色下要么对比不足、
+   要么与旁边已翻转的 bg-layer-2 底色打架（ready 深绿字在暗底只有 2.78:1）。 */
+.dshDesktopUpdateBadge:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary, #2f6fed); outline-offset: 1px; }
 .dshDesktopUpdateBadgeDot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #2f6fed;
+  background: var(--dsw-alias-state-business-primary, #2f6fed);
   flex: 0 0 auto;
 }
 .dshDesktopUpdateBadge[data-state="downloading"] .dshDesktopUpdateBadgeDot {
-  background: #e8871e;
+  background: var(--dsw-alias-state-warn-primary, #e8871e);
   animation: dshDesktopUpdatePulse 1.2s ease-in-out infinite;
 }
 /* 已下载待安装:绿点 + 实心按钮,和"有新版本"明确区分(不再需要重新下载)。 */
 .dshDesktopUpdateBadge[data-state="ready"] {
-  border-color: #16a34a;
-  color: #15803d;
+  border-color: var(--dsw-alias-state-success-primary, #16a34a);
+  color: var(--dsw-alias-state-success-primary, #15803d);
 }
 .dshDesktopUpdateBadge[data-state="ready"] .dshDesktopUpdateBadgeDot {
-  background: #16a34a;
+  background: var(--dsw-alias-state-success-primary, #16a34a);
 }
 @keyframes dshDesktopUpdatePulse {
   0%, 100% { opacity: 1; }

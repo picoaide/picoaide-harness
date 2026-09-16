@@ -348,6 +348,42 @@ describe('published package surface', () => {
     }
   })
 
+  it('随包托盘位图：macOS 模板图是"黑 + 透明"的 mark，Windows/Linux 位图保留不透明底板', async () => {
+    // 2026-09-16 真机 P1：随包模板图曾是满画布不透明的方块，AppKit 只用 alpha 当遮罩
+    // ⇒ 菜单栏只剩一个实心方块（暗色菜单栏实测白方块）。这条**直接读随包产物**：
+    // 生成脚本的用例证明"怎么生成"，这条证明"发出去的就是对的"。
+    const stats = async (filename: string): Promise<{ clear: number, inked: number, nonBlackInk: number }> => {
+      const { data, info } = await sharp(readFileSync(new URL(`build/${filename}`, packageRoot)))
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true })
+      let clear = 0
+      let inked = 0
+      let nonBlackInk = 0
+      for (let i = 0; i < data.length; i += info.channels) {
+        if (data[i + 3] === 0) {
+          clear += 1
+          continue
+        }
+        inked += 1
+        if (data[i] !== 0 || data[i + 1] !== 0 || data[i + 2] !== 0) nonBlackInk += 1
+      }
+      return { clear, inked, nonBlackInk }
+    }
+
+    for (const filename of ['tray-iconTemplate.png', 'tray-iconTemplate@2x.png']) {
+      const { clear, inked, nonBlackInk } = await stats(filename)
+      expect(clear).toBeGreaterThan(inked)
+      expect(inked).toBeGreaterThan(0)
+      expect(nonBlackInk).toBe(0)
+    }
+    // 非模板位图仍原样绘制品牌图形（不透明方块 + 白 mark）：只有圆角几像素透明
+    // （32px 实测 4 px），其余全不透明；对比模板图 86% 是 clear。
+    const blue = await stats('tray-icon-blue@2x.png')
+    expect(blue.clear).toBeLessThan(20)
+    expect(blue.inked).toBeGreaterThan(900)
+  })
+
   it('keeps the iOS Default source icon unmodified', () => {
     const digest = createHash('sha256')
       .update(readFileSync(new URL('build/app-icon.png', packageRoot)))

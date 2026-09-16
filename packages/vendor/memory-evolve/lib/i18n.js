@@ -70,6 +70,48 @@ export function getActiveLocale() {
 }
 
 /**
+ * 浏览器侧"私有字典"的语言解析器（S4，2026-09-16）。
+ *
+ * 背景：随包客户端里有几处自带中英双语的**私有字典**（CoIView / PromptView
+ * 等，模块内 `DICT = { zh, en }`）。它们此前用
+ * `const LANG = navigator.language.startsWith('en') ? 'en' : 'zh'` 判定语言 ——
+ * 那是**模块加载期求值一次**、且看的是**操作系统语言**：用户在设置里切语言
+ * （或系统英文、用户切中文）时，这些界面停在旧语言不动，也没有任何报错。
+ *
+ * 正确来源是宿主 locale 服务的当前快照（`ctx.locale.getSnapshot().active`），
+ * 但私有字典在模块作用域、拿不到 ctx。于是由 client 入口在 `apply()` 里注册
+ * 一个解析器：私有字典在**每次取值时**调用 `clientLang()`，从而跟随切换。
+ *
+ * 未注册时回落 `navigator.language`（老行为：不经 apply 的测试与独立渲染仍可用）。
+ * @type {(() => 'zh'|'en') | null}
+ */
+let clientLocaleResolver = null
+
+/**
+ * Register the client-side locale resolver（由 client 入口调用一次）。
+ * @param {(() => 'zh'|'en') | null} resolver - 返回当前界面语言的函数。
+ */
+export function setClientLocaleResolver(resolver) {
+  clientLocaleResolver = typeof resolver === 'function' ? resolver : null
+}
+
+/**
+ * Resolve the language for browser-side private dictionaries.
+ * @returns {'zh'|'en'} the active interface language.
+ */
+export function clientLang() {
+  if (clientLocaleResolver !== null) {
+    const resolved = clientLocaleResolver()
+    if (resolved === 'zh' || resolved === 'en') return resolved
+  }
+  if (typeof navigator !== 'undefined' && typeof navigator.language === 'string'
+    && navigator.language.toLowerCase().startsWith('en')) {
+    return 'en'
+  }
+  return 'zh'
+}
+
+/**
  * Set the active locale (validated). The apply() wiring calls this at boot
  * and on every 'settings/updated' event for the 'locale' namespace.
  * @param {'zh'|'en'} locale - the new active locale.
@@ -117,8 +159,8 @@ export function translate(dict, key, params, locale = undefined) {
 export const MEMORY_DICT = {
   // ── tool description ──
   'memory.desc': [
-    '读写长期记忆（跨会话持久，随上下文快照对模型可见）。target=memory 存全局环境/项目事实，target=user 存用户事实，target=project 存当前工作目录的项目日志（仅当前项目会话可见），target=key 存当前项目的关键长期记忆（自动注入上下文，仅当前项目会话可见；支持 branches 限定 git 分支范围，缺省=全部；**写入需用户确认**：add 会进入待确认队列，确认后生效；add 可选 summary 参数提供一句话摘要用于渐进式披露），target=daily 追加今日日志（按需读取，不注入）。add 追加条目；replace 用唯一子串片段替换整个条目；remove 用唯一子串片段删除条目；**archive 把条目归档（仅 memory/user/key 三轨）**：按唯一子串片段从主轨移除整条、原文追加进对应归档文件（MEMORY-archive.md / USER-archive.md / 项目 KEY-archive.md，可逆——记忆 Tab 归档页可移回主记忆），适合"已不再需要注入、但丢之可惜"的低频旧事；list 查询条目——默认查主轨（未归档，全部返回，按时间正序），支持 filter（关键词过滤）、since/until（日期范围 YYYY-MM-DD，daily 可跨文件查历史日志）、limit（最多条数，配合 recent 取最近 N 条）、recent（最新在前）、branch（key 轨：只返回该分支可见的条目）、**archived=true（查对应归档文件 MEMORY-archive.md / USER-archive.md / 项目 KEY-archive.md——仅 memory/user/key 三轨，key 需要会话工作目录；归档不注入，可移回主记忆）**；查不到匹配或日期无法解析时，去掉过滤条件重查。**expand 按需加载全文（渐进式披露）**：当 key 轨为摘要模式时，系统提示词只注入摘要，需要详情时用 expand+id 加载完整条目。**每轮收尾批量写**：写每日日志+项目日志用一次调用（action=add 且 entries 数组含 target=daily 与 target=project 两项，entries 仅支持这两轨），不要分成两次调用。**情绪反馈**：若本回合真人用户输入有明显情绪（正面如"太好了/谢谢"，负面如"怎么还没改对/再试一次"），给 daily 和 project 两条都带 feedback 参数（sentiment/category/quote/note，程序自动生成【反馈】行并清洗特殊字符）；daily 的 category 写通用分层（如 编程/后端/数据库；分类指工作类型如 编程→前端开发→JavaScript，不是任务涉及的功能/模块名），project 的 category 写项目内分层（如 记忆模块/写入链路，按项目实际结构）；中性任务指令或其他会话 AI 发来的消息不要带 feedback。写入立即落盘，模型上下文将在下一次刷新时更新。',
-    'Read/write long-term memory (persists across sessions; visible to the model through context snapshots). target=memory stores global environment/project facts, target=user stores user facts, target=project stores the current working directory\'s project log (visible only to sessions of this project), target=key stores the current project\'s critical long-term memory (auto-injected into context, visible only to this project\'s sessions; supports branches to limit git-branch visibility, default=all; **writes require user confirmation**: add enters a pending-confirmation queue and takes effect after approval; add accepts an optional summary parameter — a one-line abstract for progressive disclosure), target=daily appends today\'s log (read on demand, not injected). add appends an entry; replace rewrites an entire entry matched by a unique substring; remove deletes an entry matched by a unique substring; **archive moves an entry into the archive (memory/user/key tracks only)**: matched by a unique substring, removed from the main track and appended verbatim into the archive file (MEMORY-archive.md / USER-archive.md / project KEY-archive.md; reversible — the Memory tab archive page can move entries back); good for low-frequency items "no longer worth injecting but too valuable to drop". list queries entries — main track by default (unarchived; everything returned, time ascending), supporting filter (keyword), since/until (date range YYYY-MM-DD; daily may query across historical files), limit (max entries, combine with recent to fetch the latest N), recent (newest first), branch (key track: only entries visible to that branch), **archived=true (query the archive files MEMORY-archive.md / USER-archive.md / project KEY-archive.md instead — memory/user/key tracks only; key needs the session working directory; archives are not injected and can be moved back to the main track)**; when nothing matches or dates fail to parse, retry without filters. **expand loads full text on demand (progressive disclosure)**: when the key track runs in summary mode the system prompt injects only summaries; use expand+id to load the full entry. **End-of-turn batch write**: write the daily log + project log in ONE call (action=add with an entries array containing target=daily and target=project items; entries supports these two tracks only) instead of two calls. **Sentiment feedback**: when the human user\'s input this turn carries clear emotion (positive e.g. "great/thanks", negative e.g. "still wrong/try again"), attach the feedback parameter (sentiment/category/quote/note; the program renders the [Feedback] line and strips special characters) to BOTH daily and project items; daily categories use generic layering (e.g. Coding/Backend/Databases — category describes the kind of work like Coding→Frontend→JavaScript, never the feature/module name), project categories use this project\'s own layering (e.g. Memory module/write path, following actual project structure); do not attach feedback for neutral task instructions or messages from other session AIs. Writes persist immediately; model context refreshes on the next turn.',
+    '读写长期记忆（跨会话持久，随上下文快照对模型可见）。target=memory 存全局环境/项目事实，target=user 存用户事实，target=project 存当前工作目录的项目日志（仅当前项目会话可见），target=key 存当前项目的关键长期记忆（自动注入上下文，仅当前项目会话可见；支持 branches 限定 git 分支范围，缺省=全部；**写入需用户确认**：add 会进入待确认队列，确认后生效；add 可选 summary 参数提供一句话摘要用于渐进式披露），target=daily 追加今日日志（按需读取，不注入）。add 追加条目；replace 用唯一子串片段替换整个条目；remove 用唯一子串片段删除条目；**archive 把条目归档（仅 memory/user/key 三轨）**：按唯一子串片段从主轨移除整条、原文追加进对应归档文件（MEMORY-archive.md / USER-archive.md / 项目 KEY-archive.md，可逆——记忆 Tab 归档页可移回主记忆），适合"已不再需要注入、但丢之可惜"的低频旧事；list 查询条目——默认查主轨（未归档，全部返回，按时间正序），支持 filter（关键词过滤）、since/until（日期范围 YYYY-MM-DD，daily 可跨文件查历史日志）、limit（最多条数，配合 recent 取最近 N 条）、recent（最新在前）、branch（key 轨：只返回该分支可见的条目；缺省=按会话工作目录当前分支过滤）、**archived=true（查对应归档文件 MEMORY-archive.md / USER-archive.md / 项目 KEY-archive.md——仅 memory/user/key 三轨，key 需要会话工作目录；归档不注入，可移回主记忆）**；查不到匹配或日期无法解析时，去掉过滤条件重查。**expand 按需加载全文（渐进式披露）**：当 key 轨为摘要模式时，系统提示词只注入摘要，需要详情时用 expand（必须带 target=key 与 id）加载完整条目。**每轮收尾批量写**：写每日日志+项目日志用一次调用（action=add 且 entries 数组含 target=daily 与 target=project 两项，entries 仅支持这两轨），不要分成两次调用。**情绪反馈**：若本回合真人用户输入有明显情绪（正面如"太好了/谢谢"，负面如"怎么还没改对/再试一次"），给 daily 和 project 两条都带 feedback 参数（sentiment/category/quote/note，程序自动生成【反馈】行并清洗特殊字符）；daily 的 category 写通用分层（如 编程/后端/数据库；分类指工作类型如 编程→前端开发→JavaScript，不是任务涉及的功能/模块名），project 的 category 写项目内分层（如 记忆模块/写入链路，按项目实际结构）；中性任务指令或其他会话 AI 发来的消息不要带 feedback。写入立即落盘，模型上下文将在下一次刷新时更新。',
+    'Read/write long-term memory (persists across sessions; visible to the model through context snapshots). target=memory stores global environment/project facts, target=user stores user facts, target=project stores the current working directory\'s project log (visible only to sessions of this project), target=key stores the current project\'s critical long-term memory (auto-injected into context, visible only to this project\'s sessions; supports branches to limit git-branch visibility, default=all; **writes require user confirmation**: add enters a pending-confirmation queue and takes effect after approval; add accepts an optional summary parameter — a one-line abstract for progressive disclosure), target=daily appends today\'s log (read on demand, not injected). add appends an entry; replace rewrites an entire entry matched by a unique substring; remove deletes an entry matched by a unique substring; **archive moves an entry into the archive (memory/user/key tracks only)**: matched by a unique substring, removed from the main track and appended verbatim into the archive file (MEMORY-archive.md / USER-archive.md / project KEY-archive.md; reversible — the Memory tab archive page can move entries back); good for low-frequency items "no longer worth injecting but too valuable to drop". list queries entries — main track by default (unarchived; everything returned, time ascending), supporting filter (keyword), since/until (date range YYYY-MM-DD; daily may query across historical files), limit (max entries, combine with recent to fetch the latest N), recent (newest first), branch (key track: only entries visible to that branch; default = the current branch of the session working directory), **archived=true (query the archive files MEMORY-archive.md / USER-archive.md / project KEY-archive.md instead — memory/user/key tracks only; key needs the session working directory; archives are not injected and can be moved back to the main track)**; when nothing matches or dates fail to parse, retry without filters. **expand loads full text on demand (progressive disclosure)**: when the key track runs in summary mode the system prompt injects only summaries; use expand (target=key and id are required) to load the full entry. **End-of-turn batch write**: write the daily log + project log in ONE call (action=add with an entries array containing target=daily and target=project items; entries supports these two tracks only) instead of two calls. **Sentiment feedback**: when the human user\'s input this turn carries clear emotion (positive e.g. "great/thanks", negative e.g. "still wrong/try again"), attach the feedback parameter (sentiment/category/quote/note; the program renders the [Feedback] line and strips special characters) to BOTH daily and project items; daily categories use generic layering (e.g. Coding/Backend/Databases — category describes the kind of work like Coding→Frontend→JavaScript, never the feature/module name), project categories use this project\'s own layering (e.g. Memory module/write path, following actual project structure); do not attach feedback for neutral task instructions or messages from other session AIs. Writes persist immediately; model context refreshes on the next turn.',
   ],
   // ── parameter descriptions ──
   'param.action': ['要执行的操作', 'The action to perform'],
@@ -176,8 +218,8 @@ export const MEMORY_DICT = {
     'Optional for add (key track only): branch scope, comma-separated (e.g. main,dev); default=all branches visible; empty string=all',
   ],
   'param.branch': [
-    'list 可选（仅 key 轨）：只返回该分支可见的条目（无标记的全部条目 + 标记含该分支的条目）',
-    'Optional for list (key track only): return only entries visible to that branch (untagged entries + entries tagged with it)',
+    'list 可选（仅 key 轨）：只返回该分支可见的条目（无标记的全部条目 + 标记含该分支的条目）。缺省=按会话工作目录的当前分支过滤（与系统提示词注入、expand 同一规则；非 git 仓库/拿不到分支则不过滤）',
+    'Optional for list (key track only): return only entries visible to that branch (untagged entries + entries tagged with it). Default = filter by the current branch of the session working directory (same rule as snapshot injection and expand; no filtering outside a git repo or when the branch is unknown)',
   ],
   'param.filter': [
     'list 可选：只返回内容包含该关键词的条目（大小写不敏感）',
@@ -211,6 +253,11 @@ export const MEMORY_DICT = {
   'msg.missingTarget': [
     '缺少 target（记忆轨必填；每轮收尾批量写请用 add + entries 数组）',
     'Missing target (a memory track is required; use add + the entries array for the end-of-turn batch write)',
+  ],
+  // P3-A（2026-09-16）：expand 只支持 key 轨，且必须带 target=key。
+  'msg.expandNeedsTarget': [
+    'expand 必须带 target=key（渐进式披露只作用于 key 轨）：请用 { action: "expand", target: "key", id: "<条目ID>" }',
+    'expand requires target=key (progressive disclosure applies to the key track only): use { action: "expand", target: "key", id: "<entry id>" }',
   ],
   'msg.fileUnreadableWrite': [
     '记忆文件存在但无法读取，拒绝写入（防止清空已有记忆）',
@@ -487,6 +534,11 @@ export const SKILL_DICT = {
 
 /** Snapshot injection strings (renderSnapshot / buildMemoryContext in lib/index.js). */
 export const SNAPSHOT_DICT = {
+  // 对抗复核 A1（2026-09-16）：状态文件损坏留档后的一次性告知（模型据此提示用户）
+  'snap.stateQuarantined': [
+    '## 记忆设置曾被重置（{at}）\n上一次启动时 `plugin-state.json` 损坏，已留档为同目录下的 `.corrupt-*.bak`，本次按**默认配置**运行——运行时开关与界面设置可能与你之前的设置不同。请转告用户：设置被重置了、备份文件在哪，需要的话让用户重新设置（记忆正文与各轨内容不受影响）。',
+    '## Memory settings were reset ({at})\nOn the previous launch `plugin-state.json` was corrupt; it was archived as a `.corrupt-*.bak` file next to it and this run uses **default settings** — runtime switches and UI settings may differ from what you had. Tell the user: their settings were reset, where the backup is, and that they can configure them again if needed (memory tracks and content are unaffected).',
+  ],
   'snap.sessionNamed': [
     '## 你的会话（用名称/别名/ID 与各模块消息里的 session id 比对判断是谁；回复时把名称/别名与 ID 告知对方）',
     '## Your session (match the name/alias/ID against session ids inside module messages to tell who is who; when replying, tell the other party the name/alias and ID)',
@@ -509,12 +561,12 @@ export const SNAPSHOT_DICT = {
     '## This project\'s key memories (memory tool target=key; current branch: {branch}; only branch-matching entries injected)',
   ],
   'snap.keySummaryHead': [
-    '## 本项目关键记忆（memory 工具 target=key；摘要模式，用 memory action=expand+id 加载全文）',
-    '## This project\'s key memories (memory tool target=key; summary mode — use memory action=expand+id to load full text)',
+    '## 本项目关键记忆（memory 工具 target=key；摘要模式，用 memory action=expand target=key id=<条目ID> 加载全文）',
+    '## This project\'s key memories (memory tool target=key; summary mode — use memory action=expand target=key id=<entry id> to load full text)',
   ],
   'snap.keySummaryBranchHead': [
-    '## 本项目关键记忆（memory 工具 target=key；摘要模式，当前分支：{branch}；用 memory action=expand+id 加载全文）',
-    '## This project\'s key memories (memory tool target=key; summary mode, current branch: {branch}; use memory action=expand+id to load full text)',
+    '## 本项目关键记忆（memory 工具 target=key；摘要模式，当前分支：{branch}；用 memory action=expand target=key id=<条目ID> 加载全文）',
+    '## This project\'s key memories (memory tool target=key; summary mode, current branch: {branch}; use memory action=expand target=key id=<entry id> to load full text)',
   ],
   'snap.section': [
     '## 记忆 memory-evolve（包含 memory 工具、dtodo 待办工具、skill_manage 技能工具）',
@@ -537,12 +589,16 @@ export const SNAPSHOT_DICT = {
     '- Todos (dtodo): at turn end call dtodo list to check what is due (default view: due-today/overdue first, max 8 items) — if unfinished due items exist, remind the user at the end of your reply; never expand the whole todo list unprompted; usage details (target categories, past/expired queries) live in the dtodo tool description.',
   ],
   'snap.turnEndHead': [
-    '- 每轮收尾（先输出完整回复文本，再在文本之后附带工具调用，严禁先调工具）必须：',
-    '- End of every turn (output your complete reply text FIRST, then attach tool calls AFTER it; calling tools first is strictly forbidden), you must:',
+    // 文案里**不出现 dtodo 字样**：本行不受 todoEnabled 控制，而项目契约要求
+    // 「todoEnabled=false 时整个快照不出现 dtodo」（模型看不到该工具、也不该被
+    // 要求调用，见 tests/todo.test.js 的 todo disabled 用例）。待办的收尾指导
+    // 由受控的 snap.todoHint 单独承担，这里只写「写入工具」总纲即可。
+    '- 每轮收尾分两步（不要把完整回复和写入工具调用放进同一条消息——带工具调用的消息结束不了 turn，会逼出多余收尾）：① 本条消息只发写入工具调用（memory 等，不写正文）；② 下一条消息输出完整回复（无工具调用，结束 turn）。',
+    '- End of every turn in two steps (do NOT put the complete reply and the write tool calls in the same message — a message with tool calls cannot end the turn, which forces an extra closing step): ① this message carries ONLY the write tool calls (memory and friends, no prose); ② the next message outputs the complete reply (no tool calls, ends the turn).',
   ],
   'snap.subagentTurnEndHead': [
-    '- 收尾（先输出完整回复文本，再在文本之后附带工具调用，严禁先调工具）：',
-    '- Turn end (output your complete reply text FIRST, then attach tool calls AFTER it; calling tools first is strictly forbidden):',
+    '- 收尾分两步（不要把完整回复和写入工具调用放进同一条消息）：① 本条消息只发写入工具调用（不写正文）；② 下一条消息输出完整回复（无工具调用，结束 turn）。',
+    '- Turn end in two steps (do NOT put the complete reply and the write tool calls in the same message): ① this message carries ONLY the write tool calls (no prose); ② the next message outputs the complete reply (no tool calls, ends the turn).',
   ],
   'snap.subagentWrite': [
     '仅在完成**独立成果**时（一项实质产出、一个关键决策或踩坑结论），用 memory 工具一次调用（entries 数组）向 {targets} 写入 1 条，保持简洁',

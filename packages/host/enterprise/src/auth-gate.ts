@@ -63,6 +63,11 @@ const LOGIN_HTML = `<!DOCTYPE html>
     --border: #d0d5dd;
     --err: #dc2626;
     --accent: #2563eb;
+    /* 实心强调按钮上的文字色：暗色 --accent 是浅蓝 #3b82f6，白字只有 3.68:1，
+       所以暗色改用深墨（6.23:1）。亮色保持白字（5.17:1）。 */
+    --accent-fg: #ffffff;
+    --brand-tile-bg: #0f1115;
+    --brand-tile-fg: #ffffff;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -72,6 +77,9 @@ const LOGIN_HTML = `<!DOCTYPE html>
       --border: #333333;
       --err: #f87171;
       --accent: #3b82f6;
+      --accent-fg: #0b1220;
+      --brand-tile-bg: #f9fafb;
+      --brand-tile-fg: #0f1115;
     }
   }
   body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: var(--bg); color: var(--fg); }
@@ -82,7 +90,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
   .stage.active { display: block; }
   form { display: flex; flex-direction: column; gap: 12px; }
   input { padding: 11px 13px; border-radius: 9px; border: 1px solid var(--border); background: var(--input-bg); color: var(--fg); font-size: 14px; box-sizing: border-box; width: 100%; }
-  button { padding: 11px; border-radius: 9px; border: none; background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; width: 100%; }
+  button { padding: 11px; border-radius: 9px; border: none; background: var(--accent); color: var(--accent-fg); font-size: 14px; font-weight: 600; cursor: pointer; width: 100%; }
   button:disabled { opacity: 0.6; cursor: default; }
   .err { color: var(--err); font-size: 13px; min-height: 18px; margin-top: 4px; text-align: left; }
   .hint { color: var(--fg); opacity: 0.7; font-size: 12px; margin-top: 8px; }
@@ -90,14 +98,16 @@ const LOGIN_HTML = `<!DOCTYPE html>
   /* Step2 渠道区(名称/标语/logo 来自服务端 /api/client/v2/channel) */
   .brand { margin-bottom: 18px; min-height: 92px; }
   .brand img, .brand .fallback { width: 64px; height: 64px; border-radius: 14px; object-fit: contain; margin-bottom: 8px; }
-  .brand .fallback { display: inline-flex; align-items: center; justify-content: center; background: #0f1115; color: #fff; font-size: 28px; font-weight: 700; }
+  /* 品牌兜底方块：亮=深底白 mark，暗=浅底深 mark（与 logo-dark.svg 的配对方向一致）。
+     原先写死 #0f1115，暗色下与页面底色 1.00:1（方块轮廓彻底消失）。 */
+  .brand .fallback { display: inline-flex; align-items: center; justify-content: center; background: var(--brand-tile-bg); color: var(--brand-tile-fg); font-size: 28px; font-weight: 700; }
   .brand-name { font-size: 20px; font-weight: 700; }
   .brand-tag { font-size: 12px; color: var(--fg); opacity: 0.6; }
   .welcome { font-size: 13px; margin-top: 6px; white-space: pre-wrap; }
   /* 方式选择器 */
   .methods { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-bottom: 14px; }
   .method { background: transparent; border: 1px solid var(--border); color: var(--fg); font-size: 13px; padding: 8px 14px; border-radius: 8px; width: auto; font-weight: 500; }
-  .method.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .method.active { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
   .method.disabled { opacity: 0.45; cursor: not-allowed; }
   .pw-fields .spacer { opacity: 0; }
 </style>
@@ -163,7 +173,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
   // 渠道兜底图形:权威源为 brands/official/logo.svg(黑色圆角方块 + 白色花括号桥形,
   // 花括号 1.25x 放大)。任何 logo 兜底都必须与 logo.svg 一致,禁止字母 P 等
   // 编造图形(旧版 P 字 logo 已退役)。
-  var BRACE_MARK_SVG = ${JSON.stringify(brandMarkSvg('#FFFFFF'))}
+  var BRACE_MARK_SVG = ${JSON.stringify(brandMarkSvg('currentColor'))}
 
   // 随包分发的品牌文案(channel.json 的 identity/copy,由 profile 组装期注入)。
   // 登录页要在这里就显示品牌 —— 此刻还没有服务端可问。__BRAND_JSON__ 由
@@ -617,16 +627,41 @@ const CHANGE_PASSWORD_HTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>修改密码</title>
 <style>
-  :root { --accent: #4176E6 }
-  body { font-family: system-ui, sans-serif; margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #F9FAFB; color: #1a1d24; }
-  .card { width: 90%; max-width: 400px; padding: 36px 28px; background: #fff; border-radius: 14px; box-shadow: 0 8px 30px rgba(15,17,21,.06); }
+  /* 与 LOGIN_HTML 同一套主题口径（独立文档 ⇒ 走 prefers-color-scheme；
+     桌面壳的 nativeTheme.themeSource 会驱动它）。2026-09-16 暗色审计：
+     这一页原先 11 个颜色全是字面量且无暗色分支，暗色下整屏白闪。 */
+  :root {
+    --accent: #4176E6;
+    --accent-fg: #ffffff;
+    --bg: #F9FAFB;
+    --fg: #1a1d24;
+    --card: #ffffff;
+    --muted: #6b7280;
+    --border: #d0d5dd;
+    --err: #dc2626;
+    --shadow: rgba(15,17,21,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --accent-fg: #0b1220;
+      --bg: #0f1115;
+      --fg: #e6e6e6;
+      --card: #1a1d24;
+      --muted: #9aa0a6;
+      --border: #333333;
+      --err: #f87171;
+      --shadow: rgba(0,0,0,.4);
+    }
+  }
+  body { font-family: system-ui, sans-serif; margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--bg); color: var(--fg); color-scheme: light dark; }
+  .card { width: 90%; max-width: 400px; padding: 36px 28px; background: var(--card); border-radius: 14px; box-shadow: 0 8px 30px var(--shadow); }
   h1 { font-size: 20px; margin: 0 0 6px; }
-  .hint { font-size: 13px; color: #6b7280; margin: 0 0 20px; line-height: 1.6; }
-  input { width: 100%; box-sizing: border-box; padding: 11px 12px; margin-bottom: 12px; border: 1px solid #d0d5dd; border-radius: 8px; font-size: 14px; }
+  .hint { font-size: 13px; color: var(--muted); margin: 0 0 20px; line-height: 1.6; }
+  input { width: 100%; box-sizing: border-box; padding: 11px 12px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; background: var(--card); color: var(--fg); }
   input:focus { outline: 2px solid var(--accent); border-color: transparent; }
-  button { width: 100%; padding: 11px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button { width: 100%; padding: 11px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-fg); font-size: 14px; font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .6; cursor: default; }
-  .err { margin-top: 10px; font-size: 13px; color: #dc2626; min-height: 1em; }
+  .err { margin-top: 10px; font-size: 13px; color: var(--err); min-height: 1em; }
 </style>
 </head>
 <body>
@@ -689,7 +724,10 @@ const RESTORING_HTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <title>__BRAND_NAME__</title>
 <style>
-  body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #fff; color: #616267; }
+  /* 独立文档：亮色 + 暗色两套（2026-09-16 暗色审计，原先只有写死亮色）。 */
+  :root { --bg: #fff; --fg: #616267; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0f1115; --fg: #9aa0a6; } }
+  body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: var(--bg); color: var(--fg); color-scheme: light dark; }
 </style>
 </head>
 <body>

@@ -281,6 +281,9 @@ export async function stagePaths(dir, fileset = 'project', env) {
  * @param {object} [opts]
  * @param {boolean} [opts.network=false] - 网络命令：GIT_TERMINAL_PROMPT=0 +
  *   网络超时；本地命令给本地超时。
+ * @param {Function} [opts.spawnFn] - 可注入的 spawn（测试用：注入假子进程与
+ *   PassThrough 流，使"多字节字符被切在管道分块边界"可确定性复现，见
+ *   tests/sync-utf8-stream.test.js）。缺省用 node:child_process 的 spawn。
  * @returns {Promise<{ok: boolean, code: number | null, stdout: string, stderr: string}>}
  */
 export function runGit(dir, args, opts = {}) {
@@ -295,16 +298,26 @@ export function runGit(dir, args, opts = {}) {
     ? { ...process.env, GIT_TERMINAL_PROMPT: '0', ...gitLocale }
     : { ...process.env, ...gitLocale }
   const env = opts.env ? { ...baseEnv, ...opts.env } : baseEnv
+  const spawnFn = typeof opts.spawnFn === 'function' ? opts.spawnFn : spawn
   return new Promise((resolve) => {
-    const child = spawn('git', args, {
+    const child = spawnFn('git', args, {
       cwd: dir,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''
     let stderr = ''
-    child.stdout.on('data', (chunk) => { stdout += String(chunk) })
-    child.stderr.on('data', (chunk) => { stderr += String(chunk) })
+    // 逐块解码必须走流式解码器（setEncoding）——**不能用 `String(chunk)`**：
+    // Buffer 的 String(chunk) 等价于 chunk.toString('utf8')，即每个管道分块各自
+    // 独立解码，任何跨分块边界的多字节字符（中文 3 字节、emoji 4 字节）都会被
+    // 切成两段无效序列、各解码成一个 U+FFFD。git 大对象按 32 KiB 块写管道，
+    // 于是每次同步都可能损坏几处记忆正文并随往返累积（2026-09-15 定位的
+    // MEMORY/daily 日志 45 处替换符根因）。setEncoding 让 Node 内部 StringDecoder
+    // 在分块边界保留半截序列，由下一块补齐。
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
     const timer = setTimeout(() => {
       child.kill('SIGKILL')
     }, network ? NETWORK_TIMEOUT_MS : LOCAL_TIMEOUT_MS)

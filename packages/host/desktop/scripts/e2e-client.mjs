@@ -158,6 +158,13 @@ async function clickLabel(cdp, label, waitMs = 2500) {
   return r
 }
 
+/** 求值一个返回 Promise 的表达式（`Runtime.evaluate` 需要显式 awaitPromise）。 */
+async function evalAsync(cdp, expression) {
+  const r = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
+  if (r.exceptionDetails) throw new Error(r.exceptionDetails.text ?? 'evaluate error')
+  return r.result?.value
+}
+
 async function bodyText(cdp) {
   try { return await evalSafe(cdp, `document.body.textContent ?? ''`) }
   catch { return '' }
@@ -315,6 +322,59 @@ async function main() {
   const mainBtns = await evalSafe(cdp, `[...new Set([...document.querySelectorAll('button')].map(b => b.textContent?.trim()).filter(Boolean))]`)
   const hasSidebar = ['定时任务', '能力中心', '连接器', '浏览器', '设置'].every(x => (mainBtns ?? []).includes(x) || (mainBtns ?? []).some(b => b.includes(x)))
   reportStep('主界面侧边栏导航完整', hasSidebar, `buttons=${(mainBtns ?? []).slice(0, 14).join(',')}`)
+
+  // 5.5 暗色模式（2026-09-16 真机事故的回归点）：
+  //   ① 主题真的切到暗色（body[data-ds-dark-theme]）；
+  //   ② 侧边栏版本号胶囊是"反色"的 —— 亮色黑底白字、暗色白底黑字，两边对比度都要够
+  //      （事故版本用了一个上游不存在的 token ⇒ 暗色恒为黑底近黑字）；
+  //   ③ vendored memory-evolve 的旧色板适配层已生效（body 上有内联的 --dsw-alias-border-l，
+  //      指向真实 token）—— 那一层兜住 49 个幻影名字，掉了就会静默回到"边框不画"。
+  await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] }).catch(() => {})
+  const darkFlipped = await waitFor(cdp, `document.body.hasAttribute('data-ds-dark-theme')`, 8000)
+  const darkProbe = await evalSafe(cdp, `(() => {
+    const luminance = (rgb) => {
+      const [r, g, b] = rgb.map(v => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4 })
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+    const parse = (value) => (value.match(/\\d+(\\.\\d+)?/g) ?? []).slice(0, 3).map(Number)
+    const contrast = (a, b) => { const [l1, l2] = [luminance(a), luminance(b)].sort((x, y) => y - x); return (l1 + 0.05) / (l2 + 0.05) }
+    const chip = [...document.querySelectorAll('span')]
+      .find(el => /^v\\d/.test((el.textContent ?? '').trim()) && el.children.length === 0)
+    const style = chip ? getComputedStyle(chip) : undefined
+    const bg = style ? parse(style.backgroundColor) : []
+    const fg = style ? parse(style.color) : []
+    return {
+      chipText: chip?.textContent ?? '',
+      bg: style?.backgroundColor ?? '',
+      fg: style?.color ?? '',
+      contrast: bg.length === 3 && fg.length === 3 ? contrast(bg, fg) : 0,
+      adapter: getComputedStyle(document.body).getPropertyValue('--dsw-alias-border-l').trim(),
+      mono: getComputedStyle(document.body).getPropertyValue('--dsw-font-family-mono').trim(),
+    }
+  })()`)
+  reportStep('暗色主题已生效（body[data-ds-dark-theme]）', darkFlipped, `prefers-color-scheme=dark`)
+  reportStep('暗色下版本号胶囊可读（反色：白底黑字）',
+    (darkProbe?.contrast ?? 0) >= 4.5,
+    `chip=${darkProbe?.chipText} bg=${darkProbe?.bg} fg=${darkProbe?.fg} contrast=${(darkProbe?.contrast ?? 0).toFixed(2)}`)
+  reportStep('vendored 旧色板适配层已生效（--dsw-alias-border-l / --dsw-font-family-mono 有值）',
+    (darkProbe?.adapter ?? '') !== '' && (darkProbe?.mono ?? '') !== '',
+    `border-l=${darkProbe?.adapter} mono=${(darkProbe?.mono ?? '').slice(0, 24)}`)
+  // 5.6 macOS 标题栏双击路由：自绘拖拽区拿不到原生双击行为（electron#16385），
+  //     renderer 命中后经本路由请宿主执行。非 macOS 上宿主是 no-op，但"路由已注册 +
+  //     页面持有写面证明"必须成立 —— 404（没注册）或 403（证明链断）都说明这条通道废了。
+  const titleBar = await evalAsync(cdp, `(async () => {
+    const res = await fetch(${JSON.stringify('/api/pico/desktop/window/titlebar-double-click')}, {
+      method: 'POST', headers: { accept: 'application/json' },
+    })
+    return { status: res.status, body: await res.text() }
+  })()`)
+  reportStep('标题栏双击路由已注册且页面持有写面证明', titleBar?.status === 202,
+    `status=${titleBar?.status} body=${(titleBar?.body ?? '').slice(0, 60)}`)
+
+  await screenshot(cdp, '05b-dark-sidebar')
+  // 复位成浅色，避免影响后续面板断言（截图已留档）。
+  await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] }).catch(() => {})
+  await waitFor(cdp, `!document.body.hasAttribute('data-ds-dark-theme')`, 8000)
 
   // 6. Feature panels (open, assert content, screenshot, close).
   const panelChecks = [

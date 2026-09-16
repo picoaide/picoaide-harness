@@ -146,7 +146,9 @@ const backButtonStyle: React.CSSProperties = {
   display: 'inline-flex',
   alignItems: 'center',
   gap: 6,
-  border: '1px solid var(--dsw-border, rgba(128,128,128,.3))',
+  // `--dsw-border` 上游不存在（2026-09-16 审计）⇒ 恒为半透明灰 fallback；
+  // 用真实的描边 token（两主题都会翻转：亮 rgba(0,0,0,.1) / 暗 rgba(255,255,255,.12)）。
+  border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.3))',
   borderRadius: 8,
   background: 'transparent',
   color: 'inherit',

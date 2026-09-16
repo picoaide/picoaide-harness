@@ -67,6 +67,22 @@ function createTodoTabLifecycle(register) {
   };
 }
 
+// lib/i18n.js
+var clientLocaleResolver = null;
+function setClientLocaleResolver(resolver) {
+  clientLocaleResolver = typeof resolver === "function" ? resolver : null;
+}
+function clientLang() {
+  if (clientLocaleResolver !== null) {
+    const resolved = clientLocaleResolver();
+    if (resolved === "zh" || resolved === "en") return resolved;
+  }
+  if (typeof navigator !== "undefined" && typeof navigator.language === "string" && navigator.language.toLowerCase().startsWith("en")) {
+    return "en";
+  }
+  return "zh";
+}
+
 // src/client/MemoryQueueView.tsx
 var import_jsx_runtime = require("react/jsx-runtime");
 function todoTargetLabel(t2, target) {
@@ -112,7 +128,7 @@ function formatTime(iso) {
   if (Number.isNaN(date.getTime())) return iso;
   return date.toLocaleString();
 }
-var isEn = () => typeof navigator !== "undefined" && navigator.language?.toLowerCase().startsWith("en");
+var isEn = () => clientLang() === "en";
 function MemoryQueueView(props) {
   const { t: t2, feature, onChanged } = props;
   const [entries, setEntries] = (0, import_react.useState)(null);
@@ -211,7 +227,8 @@ function MemoryQueueView(props) {
       canvasEnabled: draft.canvasEnabled,
       keyProgressiveDisclosure: draft.keyProgressiveDisclosure,
       keyFullInjectThreshold: draft.keyFullInjectThreshold,
-      keyFullInjectCharLimit: draft.keyFullInjectCharLimit
+      keyFullInjectCharLimit: draft.keyFullInjectCharLimit,
+      keyBranchFilter: draft.keyBranchFilter
     };
     void api("/api/config", {
       method: "POST",
@@ -661,6 +678,21 @@ function MemoryQueueView(props) {
                   /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "off", children: t2("panel.config.keyProgressiveDisclosure.off") }),
                   /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "on", children: t2("panel.config.keyProgressiveDisclosure.on") })
                 ]
+              }
+            )
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
+              t2("panel.config.keyBranchFilter"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.keyBranchFilter.hint") })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+              "input",
+              {
+                type: "checkbox",
+                className: "me-switch",
+                checked: draft.keyBranchFilter !== false,
+                onChange: (event) => patchDraft({ keyBranchFilter: event.target.checked })
               }
             )
           ] }),
@@ -3035,7 +3067,7 @@ function statusLabel(t2, status) {
 }
 function dayLabel(day) {
   const [, month, date] = day.split("-");
-  return typeof navigator !== "undefined" && navigator.language?.toLowerCase().startsWith("en") ? `${Number(month)}/${Number(date)}` : `${Number(month)}\u6708${Number(date)}\u65E5`;
+  return clientLang() === "en" ? `${Number(month)}/${Number(date)}` : `${Number(month)}\u6708${Number(date)}\u65E5`;
 }
 function TodoView(props) {
   const { t: t2, sessionId } = props;
@@ -4858,9 +4890,12 @@ var DICT = {
     "scope.global": "global"
   }
 };
-var LANG = typeof navigator !== "undefined" && navigator.language?.toLowerCase().startsWith("en") ? "en" : "zh";
+function lang() {
+  return clientLang();
+}
 function t(key) {
-  return DICT[LANG][key] ?? DICT.en[key] ?? key;
+  const active = lang();
+  return DICT[active][key] ?? DICT.en[key] ?? key;
 }
 var API2 = "/memory-evolve/api/coi";
 async function fetchJson(path, init) {
@@ -4896,13 +4931,13 @@ function fmtTime(ts) {
 function fmtAgo(ts) {
   if (ts === null || ts === void 0) return "\u2014";
   const delta = Math.max(0, Date.now() - ts);
-  if (delta < 5e3) return LANG === "zh" ? "\u521A\u521A" : "just now";
+  if (delta < 5e3) return lang() === "zh" ? "\u521A\u521A" : "just now";
   const s = Math.floor(delta / 1e3);
-  if (s < 60) return LANG === "zh" ? `${s} \u79D2\u524D` : `${s}s ago`;
+  if (s < 60) return lang() === "zh" ? `${s} \u79D2\u524D` : `${s}s ago`;
   const m = Math.floor(s / 60);
-  if (m < 60) return LANG === "zh" ? `${m} \u5206\u949F\u524D` : `${m}m ago`;
+  if (m < 60) return lang() === "zh" ? `${m} \u5206\u949F\u524D` : `${m}m ago`;
   const h = Math.floor(m / 60);
-  return LANG === "zh" ? `${h} \u5C0F\u65F6\u524D` : `${h}h ago`;
+  return lang() === "zh" ? `${h} \u5C0F\u65F6\u524D` : `${h}h ago`;
 }
 function fmtDur(ms) {
   if (ms === null || ms === void 0 || ms < 0) return "\u2014";
@@ -4917,16 +4952,17 @@ function trunc(text, n = 40) {
   const one = text.replace(/\s+/g, " ").trim();
   return one.length > n ? `${one.slice(0, n)}\u2026` : one;
 }
-var STATUS_META = {
-  queued: { icon: "\u23F3", label: LANG === "zh" ? "\u6392\u961F\u4E2D" : "Queued", cls: "coi-status-queued" },
-  running: { icon: "\u23F3", label: LANG === "zh" ? "\u8FD0\u884C\u4E2D" : "Running", cls: "coi-status-running" },
-  completed: { icon: "\u2705", label: LANG === "zh" ? "\u5DF2\u5B8C\u6210" : "Completed", cls: "coi-status-completed" },
-  failed: { icon: "\u274C", label: LANG === "zh" ? "\u5931\u8D25" : "Failed", cls: "coi-status-failed" },
-  killed: { icon: "\u{1F6D1}", label: LANG === "zh" ? "\u5DF2\u7EC8\u6B62" : "Killed", cls: "coi-status-killed" },
-  interrupted: { icon: "\u26A0\uFE0F", label: LANG === "zh" ? "\u4E2D\u65AD" : "Interrupted", cls: "coi-status-interrupted" }
-};
 function statusMeta(status) {
-  return STATUS_META[status] ?? { icon: "\u2754", label: status, cls: "" };
+  const zh2 = lang() === "zh";
+  const meta = {
+    queued: { icon: "\u23F3", label: zh2 ? "\u6392\u961F\u4E2D" : "Queued", cls: "coi-status-queued" },
+    running: { icon: "\u23F3", label: zh2 ? "\u8FD0\u884C\u4E2D" : "Running", cls: "coi-status-running" },
+    completed: { icon: "\u2705", label: zh2 ? "\u5DF2\u5B8C\u6210" : "Completed", cls: "coi-status-completed" },
+    failed: { icon: "\u274C", label: zh2 ? "\u5931\u8D25" : "Failed", cls: "coi-status-failed" },
+    killed: { icon: "\u{1F6D1}", label: zh2 ? "\u5DF2\u7EC8\u6B62" : "Killed", cls: "coi-status-killed" },
+    interrupted: { icon: "\u26A0\uFE0F", label: zh2 ? "\u4E2D\u65AD" : "Interrupted", cls: "coi-status-interrupted" }
+  };
+  return meta[status] ?? { icon: "\u2754", label: status, cls: "" };
 }
 var SCOPES = ["temporary", "session", "project", "global"];
 var BUILTIN_ADAPTER_IDS = /* @__PURE__ */ new Set(["kimi", "codex", "grok", "hermes"]);
@@ -6954,8 +6990,8 @@ function useAdvisorSessionStore(sessionId) {
 // src/client/advisor/AdvisorPanel.tsx
 var import_jsx_runtime16 = require("react/jsx-runtime");
 var CAPSULE_POS_KEY = "dsh-memory-evolve:advisor-capsule-pos";
-var isEn2 = () => typeof navigator !== "undefined" && navigator.language?.toLowerCase().startsWith("en");
-var STATUS_META2 = {
+var isEn2 = () => clientLang() === "en";
+var STATUS_META = {
   get disabled() {
     return { icon: "\u2716", label: isEn2() ? "Disabled" : "\u5DF2\u505C\u7528", cls: "advisor-status-disabled" };
   },
@@ -7283,7 +7319,7 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
     return `${k >= 10 ? Math.round(k) : k.toFixed(1)} K`;
   }, [snapshot.status?.conversationStats]);
   const status = snapshot.status?.runtimeStatus ?? "disabled";
-  const statusMeta2 = STATUS_META2[status];
+  const statusMeta2 = STATUS_META[status];
   const ownerLabel = `${snapshot.status?.sessionName ?? identity.sessionName ?? shortSession(snapshot.sessionId)} \xB7 ${snapshot.status?.workspace ?? identity.workspace ?? "\u5DE5\u4F5C\u7A7A\u95F4\u672A\u77E5"}`;
   const workspaceOptions = (0, import_react15.useMemo)(() => {
     const values = /* @__PURE__ */ new Set();
@@ -8086,7 +8122,7 @@ function WsCoordSettings({ t: t2 }) {
     error !== null && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-error", children: error })
   ] });
 }
-var isEn3 = () => typeof navigator !== "undefined" && navigator.language?.toLowerCase().startsWith("en");
+var isEn3 = () => clientLang() === "en";
 function BroadcastView(props) {
   const { t: t2, sessionId } = props;
   const [view, setView] = (0, import_react16.useState)("messages");
@@ -8805,7 +8841,7 @@ var DICT2 = {
   }
 };
 function pick(zhText, enText) {
-  return typeof navigator !== "undefined" && navigator.language?.toLowerCase().startsWith("en") ? enText : zhText;
+  return clientLang() === "en" ? enText : zhText;
 }
 function errText3(err) {
   const message = err instanceof Error ? err.message : String(err);
@@ -8872,8 +8908,8 @@ function NumInput(props) {
   ] });
 }
 function PromptView(props) {
-  const lang = typeof navigator !== "undefined" && navigator.language?.toLowerCase().startsWith("en") ? "en" : "zh";
-  const D = DICT2[lang];
+  const lang2 = clientLang();
+  const D = DICT2[lang2];
   const say = (key) => D[key];
   const [prompts, setPrompts] = (0, import_react17.useState)([]);
   const [injections, setInjections] = (0, import_react17.useState)([]);
@@ -10142,7 +10178,7 @@ async function api6(path, init) {
 }
 function clamp(text, max = 60) {
   if (text === null) {
-    return typeof navigator !== "undefined" && navigator.language?.toLowerCase().startsWith("en") ? "(none)" : "\uFF08\u65E0\uFF09";
+    return clientLang() === "en" ? "(none)" : "\uFF08\u65E0\uFF09";
   }
   const flat = text.replace(/\s+/g, " ");
   return flat.length > max ? `${flat.slice(0, max)}\u2026` : flat;
@@ -13019,7 +13055,7 @@ function autoFixMermaid(source) {
     const sub = /^(\s*subgraph\s+)(.+?)\s*$/.exec(line);
     if (sub !== null) {
       const title = sub[2];
-      if (!title.startsWith('"') && !title.startsWith("[") && /[（）()！？!?，。；：、""''【】《》]/.test(title)) {
+      if (!title.startsWith('"') && !title.startsWith("[") && /[（）()！？!?，。；：、"'【】《》]/.test(title)) {
         changed = true;
         return `${sub[1]}"${title.replace(/"/g, '\\"')}"`;
       }
@@ -16936,6 +16972,8 @@ var zh = {
   "panel.config.perTurnDailyWrites.hint": "\u8981\u6C42\u6A21\u578B\u6BCF\u4E2A\u56DE\u5408\u7ED3\u675F\u524D\u4E3B\u52A8\u68C0\u67E5\u5E76\u8BB0\u5F55\u5F53\u5929\u8FDB\u5C55\uFF1B\u5173\u95ED\u540E\u6BCF\u65E5\u65E5\u5FD7\u4EC5\u6309\u9700\u8BFB\u53D6\u3002\u26A0\uFE0F \u4F9D\u8D56 LLM \u6307\u4EE4\u9075\u5FAA\uFF0C\u5F31\u9075\u5FAA\u7684\u6A21\u578B\u4E0D\u4E00\u5B9A\u4F1A\u6267\u884C",
   "panel.config.perTurnKeyWrites": "\u6BCF\u56DE\u5408\u68C0\u67E5\u9879\u76EE\u5173\u952E\u8BB0\u5FC6",
   "panel.config.perTurnKeyWrites.hint": "\u8981\u6C42\u6A21\u578B\u6BCF\u4E2A\u56DE\u5408\u7ED3\u675F\u524D\u5224\u65AD\u662F\u5426\u51FA\u73B0\u91CD\u8981\u9879\u76EE\u4E8B\u5B9E\uFF08\u957F\u671F\u7EA6\u5B9A/\u51B3\u7B56/\u67B6\u6784/\u8E29\u5751\uFF09\uFF0C\u6709\u5219\u5199\u5165 target=key\uFF08\u81EA\u52A8\u6CE8\u5165\u4E0A\u4E0B\u6587\uFF09\uFF0C\u6CA1\u6709\u5C31\u8DF3\u8FC7\uFF1B\u5173\u95ED\u540E key \u4EC5\u4FDD\u7559\u624B\u52A8\u6DFB\u52A0\u4E0E\u8BFB\u53D6\u3002\u26A0\uFE0F \u4F9D\u8D56 LLM \u6307\u4EE4\u9075\u5FAA",
+  "panel.config.keyBranchFilter": "key \u8F68\u5206\u652F\u8FC7\u6EE4",
+  "panel.config.keyBranchFilter.hint": "\u5F00\u542F\uFF08\u9ED8\u8BA4\uFF09\u65F6\uFF0Ckey \u8F68\u6761\u76EE\u6309**\u5F53\u524D git \u5206\u652F**\u8FC7\u6EE4\uFF1A\u65E0\u5206\u652F\u6807\u8BB0\u7684\u6761\u76EE\u5BF9\u6240\u6709\u5206\u652F\u53EF\u89C1\uFF0C\u5E26 [branch:x] \u6807\u8BB0\u7684\u53EA\u5728\u8BE5\u5206\u652F\u53EF\u89C1\u2014\u2014\u7CFB\u7EDF\u63D0\u793A\u8BCD\u6CE8\u5165\u3001expand\u3001list \u4E09\u5904\u540C\u4E00\u89C4\u5219\u3002\u5173\u6389\u540E\u4E09\u5904\u90FD\u4E0D\u518D\u8FC7\u6EE4\uFF08\u8BCA\u65AD\u7528\uFF1B\u4F1A\u8BA9\u522B\u7684\u5206\u652F\u7684\u6761\u76EE\u4E5F\u51FA\u73B0\u5728\u5217\u8868\u91CC\uFF09",
   "panel.config.keyProgressiveDisclosure": "key \u8F68\u6E10\u8FDB\u5F0F\u62AB\u9732",
   "panel.config.keyProgressiveDisclosure.hint": "\u63A7\u5236 key \u8F68\u8BB0\u5FC6\u7684\u6CE8\u5165\u65B9\u5F0F\uFF1Aauto = \u5C0F\u6570\u636E\u91CF\u5168\u91CF\u6CE8\u5165\u3001\u5927\u6570\u636E\u91CF\u6458\u8981\u6CE8\u5165\uFF1Boff = \u59CB\u7EC8\u5168\u91CF\u6CE8\u5165\uFF08\u9ED8\u8BA4\uFF09\uFF1Bon = \u59CB\u7EC8\u6458\u8981\u6CE8\u5165\uFF08\u8282\u7701 token\uFF09",
   "panel.config.keyProgressiveDisclosure.auto": "\u81EA\u52A8",
@@ -17749,6 +17787,8 @@ var en = {
   "panel.config.perTurnDailyWrites.hint": "Require the model to check at the end of every turn and record the day's progress; when off, the daily log is read on demand only. \u26A0\uFE0F Relies on LLM instruction following \u2014 weaker models may not comply",
   "panel.config.perTurnKeyWrites": "Per-turn key-fact check",
   "panel.config.perTurnKeyWrites.hint": "Require the model to judge at the end of every turn whether an important project fact emerged (long-lived convention/decision/architecture/pitfall); if so, write it to target=key (injected into the context), otherwise skip. When off, key facts are only added manually or read. \u26A0\uFE0F Relies on LLM instruction following",
+  "panel.config.keyBranchFilter": "Key-track branch filter",
+  "panel.config.keyBranchFilter.hint": "When on (default), key-track entries are filtered by the **current git branch**: untagged entries are visible everywhere, entries tagged [branch:x] only on that branch \u2014 the same rule for snapshot injection, expand and list. Turn it off to disable filtering in all three (diagnostics; other branches' entries will then show up in the list)",
   "panel.config.keyProgressiveDisclosure": "Key-track progressive disclosure",
   "panel.config.keyProgressiveDisclosure.hint": "Control how key-track memories are injected: auto = full injection for small data, summary injection for large data; off = always full injection (default); on = always summary injection (saves tokens)",
   "panel.config.keyProgressiveDisclosure.auto": "Auto",
@@ -17828,6 +17868,13 @@ var inject = ["slots", "locale", "conversation", "sessions"];
 function apply(ctx) {
   const t2 = ctx.locale.bind(NS);
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), "memory-evolve: dictionaries");
+  ctx.effect(() => {
+    setClientLocaleResolver(() => {
+      const active = ctx.locale.getSnapshot().active;
+      return active === "zh" || active === "en" ? active : void 0;
+    });
+    return () => setClientLocaleResolver(null);
+  }, "memory-evolve: private-dictionary locale resolver");
   ctx.effect(() => {
     if (typeof document === "undefined") return () => {
     };

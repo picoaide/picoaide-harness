@@ -16,6 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { TabGuideView } from './TabGuideView.tsx'
+import { clientLang } from '../../lib/i18n.js'
 
 /** 提示词条目（与 host 端 PromptStore 一致）。 */
 interface Prompt {
@@ -313,11 +314,15 @@ const DICT = {
 
 type Lang = keyof typeof DICT
 
-/** 选择文案的语言（默认中文）。 */
+/**
+ * 选择文案的语言（默认中文）。
+ *
+ * S4（2026-09-16）：此前读 `navigator.language`（操作系统语言、模块加载期
+ * 求值一次）—— 用户在设置里切界面语言时这些文案不跟随。改为调用期向宿主
+ * locale 解析器要（client 入口注册，见 lib/i18n.js 的 clientLang）。
+ */
 function pick(zhText: string, enText: string): string {
-  return (typeof navigator !== 'undefined' && navigator.language?.toLowerCase().startsWith('en'))
-    ? enText
-    : zhText
+  return clientLang() === 'en' ? enText : zhText
 }
 
 /** 统一错误文本。 */
@@ -417,7 +422,7 @@ function NumInput(props: {
  * 操作成功（保存/删除/注入/移除）后重新拉取列表，保持数据一致。
  */
 export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element {
-  const lang: Lang = (typeof navigator !== 'undefined' && navigator.language?.toLowerCase().startsWith('en')) ? 'en' : 'zh'
+  const lang: Lang = clientLang()
   const D = DICT[lang]
   const say = (key: keyof typeof DICT.zh): string => D[key]
 

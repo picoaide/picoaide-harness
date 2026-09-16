@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-desktop",
-  "version": "2.7.5-beta.1",
+  "version": "2.7.5-beta.2",
   "description": "PicoAide Harness: an Electron shell composed as a DeepSeek Harness Cordis plugin",
   "license": "MIT",
   "publishConfig": {
@@ -312,6 +312,7 @@
     "productName": "PicoAide Harness",
     "electronLanguages": [
       "zh-CN",
+      "zh_CN",
       "en-US"
     ],
     "protocols": [
@@ -372,7 +373,6 @@
       "!*.tsx",
       "!**/node_modules/dsh-memory-evolve/src/**",
       "!**/node_modules/dsh-memory-evolve/docs/**",
-      "!**/node_modules/dsh-memory-evolve/skills/**",
       "!**/node_modules/dsh-memory-evolve/tests/**",
       "!**/node_modules/dsh-memory-evolve/node_modules/**",
       "!**/node_modules/shiki/**",

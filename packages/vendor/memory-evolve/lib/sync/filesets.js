@@ -335,19 +335,46 @@ export function removeCreatedFile(abs, createdStat) {
 /**
  * 从**已打开的 fd** 反查真实路径（唯一实现）。
  *
- * `/proc/self/fd/N`（Linux）/`/dev/fd/N`（macOS）是"这个 fd 到底开在哪"的
+ * `/proc/self/fd/N`（Linux）/`/dev/fd/N`（macOS/BSD）是"这个 fd 到底开在哪"的
  * 权威答案：祖先目录被换成符号链接（又被换回来）之后，按路径 lstat 已经找不到
  * 落点，但 fd 仍指向那个 inode，realpath 读出来就是仓库外的真实位置——逃逸
  * 回收只有靠它才不依赖"翻转后的路径仍指得回去"。
  *
+ * **macOS 陷阱（2026-09-16 客户现场，阻塞级）**：`realpathSync('/dev/fd/N')`
+ * 在 macOS 上**不解析**（原样返回 `/dev/fd/N`，且不抛错；`/proc/self/fd` 不存在）。
+ * 于是 fd 反查返回的是**入口自身**的字符串，包含性检查把它判成"落在仓库外"
+ * ⇒ `openExclusiveSafe` 返回 `unsafe` ⇒ 取锁抛出误导性的「仓库内 .memory.lock
+ * 是符号链接（或越出仓库边界）」；而清理用的 `unlinkSync('/dev/fd/N')` 什么都
+ * 删不掉 ⇒ 每个目录留下 0 字节残留锁、越积越多。**macOS 上 memory / dtodo /
+ * 归档 / sync 的全部写入因此失败**（读取正常——读路径不做这项检查）。
+ *
+ * 修法（两条都做）：
+ *  1. **只在真解析出路径时才返回**：候选结果若仍带 `/proc/self/fd/`、`/dev/fd/`
+ *     前缀（= 没解析），或 stat 出的 dev/ino 与已打开 fd 对不上，一律丢弃 →
+ *     返回 null ⇒ 调用方跳过包含性检查。方向是保守的：这项检查是"定位逃逸落点"
+ *     的**加强**手段，不是唯一防线——打开后的 inode 一致性复核与路径链无符号链接
+ *     复核在它之后仍照跑，且清理走 `removeCreatedFile`（按 inode 比对后 unlink
+ *     真实路径），不再碰 `/dev/fd` 入口本身。
+ *  2. 逐个候选尝试（不是"第一个不抛就返回"），第一个真的解析成功者胜出。
+ *
  * @param {number} fd - 已打开的文件描述符。
- * @returns {string | null} 真实绝对路径；平台不支持/文件已删除时 null。
+ * @returns {string | null} 真实绝对路径；平台不支持/未真解析/文件已删除时 null。
  */
 export function fdRealPath(fd) {
   for (const base of ['/proc/self/fd/', '/dev/fd/']) {
+    const candidate = `${base}${fd}`
+    let resolved
     try {
-      return realpathSync(`${base}${fd}`)
-    } catch { /* 平台无此入口或 fd 已失效 → 试下一个 */ }
+      resolved = realpathSync(candidate)
+    } catch { continue /* 平台无此入口或 fd 已失效 → 试下一个 */ }
+    if (resolved.startsWith(base)) continue // 没解析（macOS 的 /dev/fd/N）→ 丢弃
+    // 与 fd 自身比对 dev/ino：对不上说明该候选指向的不是我们打开的那个文件
+    try {
+      const viaFd = fstatSync(fd)
+      const viaPath = statSync(resolved)
+      if (viaFd.dev !== viaPath.dev || viaFd.ino !== viaPath.ino) continue
+    } catch { continue }
+    return resolved
   }
   return null
 }

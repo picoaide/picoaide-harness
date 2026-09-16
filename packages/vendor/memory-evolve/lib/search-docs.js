@@ -70,7 +70,11 @@ export function getSearchProviders() {
 function runCmd(command, args, { signal, timeoutMs = 30000, maxBytes = 0 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'ignore'] })
+    // 流式解码（同 sync/runGit 的修复）：裸 `out += chunk` 会按管道分块逐块
+    // toString('utf8')，跨分块边界的多字节字符变成 U+FFFD 后进入检索结果。
+    child.stdout.setEncoding('utf8')
     let out = ''
+    let outBytes = 0
     let timer = null
     const cleanup = () => {
       if (timer !== null) clearTimeout(timer)
@@ -86,13 +90,17 @@ function runCmd(command, args, { signal, timeoutMs = 30000, maxBytes = 0 } = {})
       signal.addEventListener('abort', onAbort, { once: true })
     }
     child.stdout.on('data', (chunk) => {
-      if (maxBytes > 0 && out.length + chunk.length > maxBytes) {
+      // 上限按 **UTF-8 字节** 计：setEncoding 后 chunk 是字符串，byteLength 换算回
+      // 字节数；旧实现用 .length（UTF-16 单元）会把中文少算成 1/3 字节。
+      const bytes = Buffer.byteLength(chunk, 'utf8')
+      if (maxBytes > 0 && outBytes + bytes > maxBytes) {
         // 输出爆炸（如全盘枚举）：终止，防止主进程被海量 stdout 数据淹没
         cleanup()
         child.kill()
         reject(new Error(`输出超过 ${maxBytes} 字节上限，已终止`))
         return
       }
+      outBytes += bytes
       out += chunk
     })
     child.on('error', (error) => { cleanup(); reject(error) })

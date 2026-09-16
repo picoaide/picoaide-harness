@@ -22,6 +22,7 @@ import {
   type AdvisorStoreSnapshot,
   useAdvisorSessionStore,
 } from './advisor-store.ts'
+import { clientLang } from '../../../lib/i18n.js'
 
 export type AdvisorHostProps = PropsRuntime<'conversation.session.header.actions'> & {
   /** index.ts 传入的插件 locale 翻译函数；面板主体按需求固定中文。 */
@@ -55,7 +56,7 @@ interface CapsuleDragState {
 }
 
 /** English browser → English panel labels; anything else keeps Chinese. */
-const isEn = (): boolean => typeof navigator !== 'undefined' && navigator.language?.toLowerCase().startsWith('en')
+const isEn = (): boolean => clientLang() === 'en'
 
 const STATUS_META: Record<AdvisorRuntimeStatus, { icon: string; label: string; cls: string }> = {
   get disabled() { return { icon: '✖', label: isEn() ? 'Disabled' : '已停用', cls: 'advisor-status-disabled' } },

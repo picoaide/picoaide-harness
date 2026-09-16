@@ -47,7 +47,7 @@ import { translate, getLocale, MISC2_DICT } from '../i18n.js'
 
 /** Translate through MISC2_DICT in the active host locale. */
 const art = (key, params) => translate(MISC2_DICT, key, params, getLocale())
-import { QA_SYSTEM_PROMPT_SUFFIX } from './prompt.js'
+import { qaSystemPromptSuffix } from './prompt.js'
 import { AdvisorConversation } from './conversation.js'
 // 角色包裹标记（2026-08-13 用户反馈：评审员必须分清谁对谁说话）
 import { ROLE_MARKERS, wrapRoleEntry } from './visible-surface.js'
@@ -736,7 +736,7 @@ export class AdvisorRuntime {
   async callQuestionModel(gen) {
     // Q3 重构：问答输入 = 持续会话全量历史（问题已作为最后一条 user 消息）
     const messages = this.buildConversationMessages(null)
-    const streamed = await this.streamText(messages, `${this.systemPromptOf()}\n${QA_SYSTEM_PROMPT_SUFFIX}`, gen)
+    const streamed = await this.streamText(messages, `${this.systemPromptOf()}\n${qaSystemPromptSuffix()}`, gen)
     if (streamed.kind !== 'ok') return streamed
     const answer = streamed.text.trim()
     if (answer === '') {

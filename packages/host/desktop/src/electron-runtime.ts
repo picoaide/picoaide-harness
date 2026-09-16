@@ -18,6 +18,7 @@ import {
   net,
   Notification,
   shell,
+  systemPreferences,
   Tray,
 } from 'electron'
 import { spawn } from 'node:child_process'
@@ -231,6 +232,38 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (window.isMinimized()) window.restore()
     window.show()
     window.focus()
+  }
+
+  /**
+   * macOS 标题栏双击：按**系统偏好**缩放或最小化窗口。
+   *
+   * 为什么应用要自己做（2026-09-16 用户报"左边无法双击扩大或缩小窗口"）：
+   * 我们用 `titleBarStyle: 'hiddenInset'` + 自绘的 `-webkit-app-region: drag` 拖拽条，
+   * 而 Electron **不会**为自定义拖拽区补原生双击行为（electron#16385，维护者给的
+   * 结论就是"应用自己实现"，官方 recipe 即下面这套 `AppleActionOnDoubleClick`）。
+   * 系统偏好有三个取值（系统设置 → 桌面与程序坞 → 双击窗口的标题栏以）：
+   * `Maximize`（缩放，默认）/ `Minimize` / `None`；读不到时按默认的缩放走。
+   */
+  performTitleBarDoubleClick(): void {
+    if (this.platform !== 'darwin') return
+    const window = this.window
+    if (window === undefined || window.isDestroyed()) return
+    // 全屏时系统自己接管双击，别在这里再切一次状态。
+    if (window.isFullScreen()) return
+    let action = 'Maximize'
+    try {
+      action = systemPreferences.getUserDefault('AppleActionOnDoubleClick', 'string')
+    } catch {
+      // 读不到偏好（老系统/受限环境）⇒ 保持系统默认语义：缩放。
+    }
+    if (action === 'None') return
+    if (action === 'Minimize') {
+      window.minimize()
+      return
+    }
+    // 'Maximize' 与任何未知取值：切换"缩放"状态（不是全屏）。
+    if (window.isMaximized()) window.unmaximize()
+    else window.maximize()
   }
 
   /** Whether the mounted native window currently holds keyboard focus. */
@@ -971,7 +1004,12 @@ async function reloadOrShowCrashFallback(
       : `<script>document.getElementById('retry').addEventListener('click',function(){location.href=${inlineScriptUrl(retryTarget)}})</script>`
     // 失败页是窗口标题的来源（页面 <title> 会盖掉 BrowserWindow 的 title），
     // 所以它同样必须是渠道自己的产品名。
-    const errorPage = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtmlText(runtime.productName)}</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f6f8}.card{text-align:center;max-width:420px;padding:32px}h1{font-size:18px;color:#1a1d24}p{color:#616267;font-size:14px}button{margin-top:12px;padding:8px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}</style></head><body><div class="card"><h1>界面加载失败</h1><p>渲染进程未能正常加载。可以点击下方按钮重试；若持续失败，请从系统托盘退出后重新启动应用。</p><button id="retry"${retryTarget === '' ? ' disabled' : ''}>重新加载</button></div>${retryScript}</body></html>`)}`
+    //
+    // 颜色：这是 `data:text/html` **独立文档**，拿不到客户端的设计 token，所以用
+    // 写死色 + `prefers-color-scheme`（桌面壳设了 `nativeTheme.themeSource`，
+    // 该媒体查询会跟随应用内的主题选择，而不是只看系统）。2026-09-16 暗色审计：
+    // 原先只有亮色一套，暗色主题下会闪一整页刺眼白。
+    const errorPage = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtmlText(runtime.productName)}</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f6f8;color-scheme:light dark}.card{text-align:center;max-width:420px;padding:32px}h1{font-size:18px;color:#1a1d24}p{color:#616267;font-size:14px}button{margin-top:12px;padding:8px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}@media (prefers-color-scheme: dark){body{background:#151517}h1{color:#f9fafb}p{color:#9ca3af}}</style></head><body><div class="card"><h1>界面加载失败</h1><p>渲染进程未能正常加载。可以点击下方按钮重试；若持续失败，请从系统托盘退出后重新启动应用。</p><button id="retry"${retryTarget === '' ? ' disabled' : ''}>重新加载</button></div>${retryScript}</body></html>`)}`
     await window.loadURL(errorPage)
   } catch {
     runtime.log('dsh-plugin-desktop: crash fallback page failed to load')
