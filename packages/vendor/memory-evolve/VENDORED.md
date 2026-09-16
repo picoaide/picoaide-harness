@@ -11,8 +11,16 @@ GitHub 拉取。上游是第三方仓库，本地按「上游变更 → 三方�
   （tag `v26090901`，2026-09-09）升级。上一版基线说明见本文件历史（提交 `8c20bc0c0b`）。
 - 上游把 `lib/` 作为发布产物提交：**node 侧 JS 直接写在 `lib/`**（我们的改动也落在这里），
   浏览器 bundle `lib/client.js` 由 `scripts/build.mjs` 从 `src/client/**` 用 esbuild 生成。
-  **不要在本目录跑 `scripts/build.mjs`**：它会用 `src/client/**` 重建 `lib/client.js`，把本地
-  补丁（mermaid subgraph 标题去重）覆盖掉；改了 client 侧就必须手动同步 `src/` 与 `lib/client.js`。
+  **改了 client 侧（`src/client/**`）必须重建 `lib/client.js`，两者一起提交**：运行期加载的是
+  `lib/client.js`，只改 `src/` 不会生效。重建需要 esbuild —— 上游脚本从 DSH checkout 解析
+  （`$DSH_SOURCE`，缺省 `~/.dsh/source/current`，见 `scripts/build.mjs:53-65`）。本机可复现姿势：
+  任何带 esbuild 的 node_modules 都能喂给它，例如
+  `DSH_SOURCE=<临时目录> node scripts/build.mjs`（临时目录下 `node_modules/esbuild` 软链到一份真实安装）。
+  实测 esbuild 0.28.1 重建产物 = 上游入库产物 **+ 唯一的 mermaid 去重改动**（逐字节可复现，
+  无重排噪声）；版本不同可能触发 `text loader` 的引号格式切换（约 2150 行重排，见脚本 77-84 行注释）。
+  历史上这里踩过一次：`f8fd905d49`（2026-08-31 的去重补丁）**只改了 `src/`、没重建 bundle**，
+  于是入库的 `lib/client.js` 与上游逐字节相同、补丁从未生效（语义等价所以无人发现）——2026-09-16
+  重建后才真正落地。
 - 上游 remote 也配置在本仓库（`git remote -v` 里的 `dsh-memory-evolve`），但**合并按下面的
   三方流程做**，不要在桌面包分支上直接 `git merge` 上游历史（会把上游的 `lib/` 覆盖本地加固）。
 
@@ -60,7 +68,10 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
 3. **`lib/skills.js`**：技能采纳的 Windows `EBUSY/EPERM/EACCES/ENOTEMPTY` 降级为
    复制+删除，且**合并语义**（不覆盖目标目录既有用户数据），提交 `b81b62d174`/`a26191b9b7`。
 4. **`lib/api.js`**：pending-skills approve 路由把文件系统错误包装为友好提示（不抛原始堆栈）。
-5. **`src/client/mermaid-render.ts` + `lib/client.js`**：subgraph 标题正则去重（提交 `f8fd905d49`）。
+5. **`src/client/mermaid-render.ts` + `lib/client.js`**：subgraph 标题字符类去重
+   （提交 `f8fd905d49`）。**勘误（2026-09-16）**：该提交当时只改了 `src/`，`lib/client.js`
+   与上游逐字节相同 ⇒ 补丁从未进入运行期产物（字符类去重语义等价，所以没有可观察影响）。
+   2026-09-16 重建 bundle 后两边一致；此后改 client 侧必须重建（见上文"来源与当前基线"）。
 6. **`lib/sync/{repo,identity,index,worker}.js`**：git 子进程统一 `LC_ALL=C LANG=C`。中文
    locale 下 git 输出「无法找到远程引用」会让 worker 的英文正则 `couldn't find remote ref`
    失配，把「远端分支不存在 / 首次推送」误报为致命拉取错误（本环境实测复现并修复）。
@@ -84,14 +95,29 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
 - 主仓提交：`910b1adbd3`、`a2bb757e9f`、`62c9c0793e`、`dca9bdd96e`、`31dc7c55a7`、
   `ed7898cd1c`、`9d03d757dd`、`470692e230`；报告见 `docs/AUDIT-*.md`。
 
-### C. 本地独有回归测试（17 个文件 + `tests/fixtures/`）
+### C. 本地独有回归测试（22 个文件 + `tests/fixtures/`）
 
 `advisor-records-landing-symlink`、`advisor-shared-guard-parity`、`api-same-origin-guard`、
 `api-sibling-guards`、`archive-lock-symlink-writeback`、`backup-bak-timestamp-landing-symlink`、
 `coi-skill-landing-unasserted-write`、`memory-tab-read-symlink`、`migration-symlink-outside-fence`、
 `skills-fault`、`state-file-symlink-landing-policy`、`store-lock-invariants`、
 `sync-conflict-pathescape`、`sync-provenance-tmp-landing-symlink`、`sync-symlink-writeback`、
-`tmp-landing-sweep-symlink-fence`、`write-target-symlink-toctou`（均 `.test.js`）。
+`tmp-landing-sweep-symlink-fence`、`write-target-symlink-toctou`（均 `.test.js`）；
+2026-09-16 新增 5 个：`state-corruption-failsoft`、`advisor-lazy-dirs`、`tool-param-contract`、
+`client-locale-follow`、`advisor-prompt-locale`、`i18n-dictionary-integrity`
+（**注**：§A.9 的 `skills-fault` 与本清单重复登记，历史上造成了"17 vs 18"的口径差）。
+
+### D. 2026-09-16 本地修复批（P1 启动级 + 参数契约 + i18n，全部带回归）
+
+| # | 修复 | 落地 | 回归 |
+|---|---|---|---|
+| D1 | **`plugin-state.json` 损坏 = 整个桌面应用起不来**（启动级）：`loadState` 原只容忍 ENOENT，JSON 坏/0 字节/`EISDIR` 一律 rethrow → cordis `plugin tree failed to load` → 宿主退出。改为 fail-soft：损坏文件**改名留档** `.corrupt-<ts>.bak` 后按空状态装载，连留档失败也不抛 | `lib/index.js`（`loadState`/`quarantineState`） | `tests/state-corruption-failsoft.test.js`（8 例；回退修复必红，已验） |
+| D2 | **记忆目录不可写同样起不来**：`installAdvisor` 在 `advisorEnabled` 默认关时仍急切 `mkdirSync` 三个子目录（只读 home/磁盘满 → 装载失败）。改为**惰性建目录**（首次写入时建），写入失败只影响 advisor 自身持久化 | `lib/advisor/index.js`（`ensureDir`/`lazyDir` + 6 个写路径包装） | `tests/advisor-lazy-dirs.test.js`（6 例；回退修复 5/6 必红，已验） |
+| D3 | **expand 提示与 schema 不一致**：快照写「`action=expand+id`」，schema 是 `required:['action','target']`、expand 只认 `target=key` ⇒ 模型照做撞上"缺少 target（…用 add + entries）"的误导文案。提示改为 `action=expand target=key id=…`，报错按 action 分派（新增 `msg.expandNeedsTarget`） | `lib/i18n.js`、`lib/index.js` | `tests/tool-param-contract.test.js`（P3-A 三条）+ `tests/progressive-disclosure.test.js` 断言收紧 |
+| D4 | **`list target=key` 不套分支作用域**：快照注入与 expand 都按当前分支过滤，只有 list 要显式传 `branch` ⇒ 返回仅限其它分支的条目（看得见用不上）。改为缺省按会话 cwd 的当前分支过滤（`keyBranchFilter=false` 或非 git 仓库仍不过滤） | `lib/index.js` | `tests/tool-param-contract.test.js`（P3-B 两条） |
+| D5 | **私有字典看操作系统语言、且加载期冻结**（S4）：7 处 `const LANG = navigator.language…` / 5 份 `isEn()`（CoIView / PromptView / BroadcastView / AdvisorPanel / MemoryQueueView / TodoView / SyncView）在用户切界面语言时不跟随。改为统一走 `clientLang()`（调用期解析），client 入口注册 resolver（读 locale 快照）；`STATUS_META` 这类**含语言的模块级表**改为函数 | `lib/i18n.js`（`setClientLocaleResolver`/`clientLang`）、`src/client/*`（7 文件）、`lib/client.js`（重建） | `tests/client-locale-follow.test.js`（7 例：解析契约 + 源码级"不得再有 `navigator.language` 判定/模块级 `LANG`"） |
+| D6 | **advisor 提示词只有中文、且硬编码「用中文输出」**：note 是以用户指令形式注入主 Agent 会话的 ⇒ 英文界面下中文指令直接进主对话。三段（默认系统提示词/角色前缀/问答追加段）按 locale 分派；**中文原文一字未改**；导出从模块级常量改为同名函数（防加载期冻结） | `lib/advisor/prompt.js`、`lib/advisor/{index,runtime}.js`、`tests/advisor-api.test.js` | `tests/advisor-prompt-locale.test.js`（7 例：zh 逐字一致 / en 无中文散文（剥离输入协议标记后断言）/ 可切换 / 非法 locale 回落 / 不再导出旧常量名） |
+| D7 | **字典健康度无门禁**：21 张 `[zh, en]` 字典此前只有手工检查。新增结构性不变量测试（二元组/非空/英文列无 CJK/占位符两侧一致/键不重复） | `tests/i18n-dictionary-integrity.test.js` | 23 例（直接 import 真实字典对象，不做正则扫源码——字典混用两种引号，正则会漏条目造成假绿） |
 
 ## 本次升级（`b4994fa` → `c337dc1a`）拿到了什么
 
@@ -117,12 +143,19 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
 
 ## 验证
 
-- 插件自带测试：**931 pass / 0 fail**（`HOME=<可写目录> node --test 'tests/*.test.js'`）。
-  - 两个环境坑（本轮都踩到）：① `HOME` 必须可写，否则插件往 `$HOME/.dsh` 写状态 → `EROFS` 假红；
-    ② 覆盖 `HOME` 后 git 读不到全局配置，`init.defaultBranch=main` 丢失 → `tests/update.test.js`
-    的 `git push origin main` 全失败（81 例假红）。工作区内可复现姿势：`temp/me-home/`（含
-    `.gitconfig` 与 `.config/`）。
-- 根守卫：`verify-inventories`、`verify-layout`、`check-theme-tokens` 全绿（本次未动 CSS，幻影
-  token 映射表不受影响）。
+- 插件自带测试：**987 pass / 0 fail**（`corepack yarn workspace dsh-memory-evolve test`，
+  或直接 `node scripts/run-tests.mjs`）。**本套测试自 2026-09-16 起进了根门禁**
+  （`scripts/check-workspaces.mjs` 的 `dsh-memory-evolve` 任务，`firstWave` 与 desktop
+  check 并发）；此前它在 `verify-inventories.mjs` 挂着 `CHECK_CHAIN_EXEMPTIONS` 豁免，
+  950 个用例（含全部本地安全加固回归）**不在任何门禁链里**。
+  - 测试运行器 `scripts/run-tests.mjs` 负责建一次性 `HOME`：① `HOME` 必须可写，否则插件往
+    `$HOME/.dsh` 写状态 → `EROFS` 假红；② 覆盖 `HOME` 后 git 读不到全局配置，
+    `init.defaultBranch=main` 丢失 → `tests/update.test.js` 的 `git push origin main`
+    全失败（81 例假红）。运行器写入最小 `.gitconfig`（`init.defaultBranch=main` +
+    user/safe.directory）并设 `LC_ALL=C`（git 的中文输出会让英文 stderr 断言失配），
+    `--keep-home` 可保留现场。
+- 根守卫：`verify-inventories`、`verify-layout`、`check-theme-tokens` 全绿；包表 ↔ 磁盘
+  workspace 包 ↔ prebuild 清单互相对拍（9 个包）。
 - 桌面侧：`packages/host/desktop` 的 `tests/legacy-theme-tokens.spec.ts` 3/3 通过（唯一引用本包
-  CSS 的宿主测试）。
+  CSS 的宿主测试），`tests/desktop-locale.spec.ts` 9/9（locale id → 桌面语言，含与托盘解析的
+  一致性对拍）。

@@ -54,6 +54,7 @@ import { createInputSheetEnhance } from './mobile-input-sheet'
 import { createNotificationBell } from './notification-bell.tsx'
 import { createTodoTabLifecycle, RUNTIME_CONFIG_CHANGED } from './todo-tab-lifecycle.js'
 import notificationStyles from './notification-styles.css'
+import { setClientLocaleResolver } from '../../lib/i18n.js'
 
 /** Locale namespace owned by this plugin. */
 const NS = 'memory-evolve'
@@ -1758,6 +1759,20 @@ export function apply(ctx: Context): void {
   const t = ctx.locale.bind(NS) as unknown as Translate
 
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'memory-evolve: dictionaries')
+
+  // S4（2026-09-16）：把**当前界面语言**交给宿主模块侧的私有字典解析器。
+  // 随包客户端里有几处自带 zh/en 双语的私有字典（CoIView / PromptView /
+  // BroadcastView / AdvisorPanel / MemoryQueueView / TodoView / SyncView），
+  // 它们此前读 `navigator.language`（= 操作系统语言、模块加载期求值一次）⇒
+  // 用户在设置里切语言时那些界面不跟随。这里注册一个**调用期**解析器
+  // （读 locale 快照，语言一变即生效）。
+  ctx.effect(() => {
+    setClientLocaleResolver(() => {
+      const active = ctx.locale.getSnapshot().active
+      return active === 'zh' || active === 'en' ? active : undefined
+    })
+    return () => setClientLocaleResolver(null)
+  }, 'memory-evolve: private-dictionary locale resolver')
 
   ctx.effect(() => {
     if (typeof document === 'undefined') return () => {}

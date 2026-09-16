@@ -209,7 +209,12 @@ test('renderSnapshot：off（默认）全量注入，on 摘要注入带 [id] 与
   // on：摘要注入
   const on = renderSnapshot(resolveConfig({ memoryDir: dir, keyProgressiveDisclosure: 'on' }), store, agent)
   assert.ok(on.includes('摘要模式'))
-  assert.ok(on.includes('action=expand+id'))
+  // P3-A（2026-09-16）：提示必须给出**可执行**的调用形态——expand 的 schema
+  // 是 required:['action','target'] 且只认 target==='key'；旧文案
+  // 「action=expand+id」会让模型只传 id，撞上"缺少 target"的误导报错。
+  assert.ok(on.includes('target=key'), '提示必须写明 target=key')
+  assert.ok(on.includes('id='), '提示必须写明 id 参数')
+  assert.ok(!on.includes('action=expand+id'), '旧的不可执行写法不得回归')
   assert.ok(on.includes('显式摘要'), 'explicit summary used when present')
   assert.ok(!on.includes('这是一条很长很长的正文内容第一行'), 'full body must not leak in summary mode')
   // 无显式摘要的条目 → autoSummary 首行兜底

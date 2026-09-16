@@ -17,7 +17,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { ArchiveStore, MemoryStore, SuggestionQueue, extractEntryDate, gitBranch, gitBranchList, parseEntryBranches, parseEntryDshOnly, parseEntrySummary, autoSummary, stripEntrySummary, todayStamp } from './store.js'
@@ -387,15 +387,65 @@ export function validateRuntimePatch(key, value) {
   }
 }
 
-/** Load persisted runtime overrides (stateFile); a missing file is empty. */
-function loadState(stateFile) {
+/**
+ * Load persisted runtime overrides (stateFile).
+ *
+ * P1-A（2026-09-16，**启动级**）：此前只容忍 `ENOENT`，其余读取/解析失败一律
+ * rethrow —— 而本函数在 `apply()`（插件装载路径）里被调用，抛错会让 cordis 报
+ * `plugin tree failed to load: failed to apply loader entry dsh-memory-evolve`，
+ * 宿主据此直接退出：**`plugin-state.json` 坏一个字节，整个桌面应用起不来**
+ * （用户看不到任何界面，只能手删文件自救）。同族损坏在本插件其它 sidecar
+ * （SUGGESTIONS.jsonl / skills-state.json / aliases.json …）上都被优雅吸收，
+ * 只有这一处致命。
+ *
+ * 现改为 fail-soft：损坏文件**改名留档**（`.corrupt-<ts>.bak`，不静默丢用户
+ * 覆盖项）后按空状态继续装载；连留档都失败也照样返回空状态，绝不抛错。
+ * @param {string} stateFile - 状态文件路径。
+ * @param {object} [deps] - 可选注入（测试用）。
+ * @param {(message: string, meta?: object) => void} [deps.onCorrupt] - 损坏回调（默认 console.warn）。
+ * @returns {object} 解析出的覆盖项；缺失/损坏时为 `{}`。
+ */
+function loadState(stateFile, deps = {}) {
+  const warn = deps.onCorrupt ?? ((message, meta) => console.warn(`[dsh-memory-evolve] ${message}`, meta ?? ''))
+  let text
   try {
-    const text = readFileSync(stateFile, 'utf8')
-    const parsed = JSON.parse(text)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    text = readFileSync(stateFile, 'utf8')
   } catch (error) {
-    if (error.code === 'ENOENT') return {}
-    throw error
+    if (error.code !== 'ENOENT') {
+      // 权限 / IO / 目录占位（EISDIR）等：按空状态继续，不阻断插件装载。
+      warn(`plugin-state.json 不可读（${error.code}），本次按空状态启动`, { stateFile })
+    }
+    return {}
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    warn(`plugin-state.json 解析失败（${error.message}），已留档并按空状态启动`, { stateFile })
+    quarantineState(stateFile, warn)
+    return {}
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    warn('plugin-state.json 顶层不是对象，已留档并按空状态启动', { stateFile })
+    quarantineState(stateFile, warn)
+    return {}
+  }
+  return parsed
+}
+
+/**
+ * Move a corrupt state file aside so the next `saveState` starts clean while the
+ * user's bytes stay recoverable. Never throws（P1-A：装载路径必须 fail-soft）。
+ * @param {string} stateFile - 损坏的状态文件。
+ * @param {(message: string, meta?: object) => void} warn - 告警回调。
+ */
+function quarantineState(stateFile, warn) {
+  const backup = `${stateFile}.corrupt-${Date.now()}.bak`
+  try {
+    renameSync(stateFile, backup)
+    warn(`已把损坏的状态文件留档到 ${backup}`)
+  } catch (error) {
+    warn(`损坏状态文件留档失败（${error.code}）——继续以空状态运行`, { stateFile })
   }
 }
 
@@ -1192,7 +1242,10 @@ export function memoryTool(ctx, config, store, queue, getRuntime, archive, write
       // 不需要顶层 target），其他操作缺 target 时给出明确错误而非底层报错。
       const isEntriesAdd = action === 'add' && Array.isArray(args.entries) && args.entries.length > 0
       if (!target && !isEntriesAdd) {
-        return { ok: false, message: mt('msg.missingTarget') }
+        // P3-A（2026-09-16）：expand 只支持 key 轨，快照提示又写作
+        // 「action=expand+id」——模型照做时会撞上"缺少 target"这条与 add
+        // 批量写强相关的文案，误导性极强。按 action 分派文案。
+        return { ok: false, message: action === 'expand' ? mt('msg.expandNeedsTarget') : mt('msg.missingTarget') }
       }
       let result
       try {
@@ -1278,13 +1331,25 @@ export function memoryTool(ctx, config, store, queue, getRuntime, archive, write
             const total = allEntries.length
             const earliest = dates.length > 0 ? dates.reduce((a, b) => (a < b ? a : b)) : ''
             const latest = dates.length > 0 ? dates.reduce((a, b) => (a > b ? a : b)) : ''
-            // key 轨的 branch 过滤：只看该分支可见的条目（无标记=全部 + 标记含该分支）
-            if (target === 'key' && args.branch !== undefined && String(args.branch).trim() !== '') {
-              const b = String(args.branch).trim()
-              entries = entries.filter((entry) => {
-                const scope = parseEntryBranches(entry)
-                return scope === null || scope.includes(b)
-              })
+            // key 轨的 branch 过滤（P3-B，2026-09-16）：与快照注入 / expand
+            // 同一规则——**缺省就按当前分支过滤**（未显式传 branch 时从会话
+            // cwd 取 `git branch --show-current`）。此前只有显式传 branch 才
+            // 过滤，模型 `list target=key` 会看到仅限其它分支的条目：那些条目
+            // 既不会注入、也 expand 不出来，属于"看得见用不上"的越界视图。
+            // 非 git 仓库 / 取不到分支 / keyBranchFilter=false → 不过滤（与
+            // 注入侧同样保守：宁可多给，不静默隐藏）。
+            if (target === 'key' && config.keyBranchFilter !== false) {
+              const explicit = args.branch !== undefined && String(args.branch).trim() !== ''
+                ? String(args.branch).trim()
+                : undefined
+              const cwd = exec?.agent?.session?.header?.cwd
+              const branch = explicit ?? (cwd ? gitBranch(cwd) : undefined)
+              if (branch !== undefined) {
+                entries = entries.filter((entry) => {
+                  const scope = parseEntryBranches(entry)
+                  return scope === null || scope.includes(branch)
+                })
+              }
             }
             let message = `${target}：${entries.length} 条匹配`
             if (protectedView) {

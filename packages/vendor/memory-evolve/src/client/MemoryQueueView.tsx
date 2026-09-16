@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { RUNTIME_CONFIG_CHANGED } from './todo-tab-lifecycle.js'
+import { clientLang } from '../../lib/i18n.js'
 
 /** Which feature sub-tab is active. */
 export type MemoryFeature = 'guide' | 'suggestions' | 'todo-suggestions' | 'skills' | 'config'
@@ -166,7 +167,7 @@ function formatTime(iso: string): string {
 
 /** The three feature panels (suggestions / skills / config). */
 /** English browser → English inline text. */
-const isEn = (): boolean => typeof navigator !== 'undefined' && navigator.language?.toLowerCase().startsWith('en')
+const isEn = (): boolean => clientLang() === 'en'
 
 export function MemoryQueueView(props: MemoryQueueViewProps): JSX.Element {
   const { t, feature, onChanged } = props
