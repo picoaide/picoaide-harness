@@ -168,22 +168,29 @@ export function lastRunAtMs(expr: string, fromMs: number): number | undefined {
   let cursor = new Date(from.getFullYear(), from.getMonth(), from.getDate())
   while (cursor.getTime() >= dayLimit.getTime()) {
     if (schedule.months.has(cursor.getMonth() + 1) && dayCandidate(schedule, cursor)) {
-      const sameDay = cursor.getFullYear() === from.getFullYear()
-        && cursor.getMonth() === from.getMonth()
-        && cursor.getDate() === from.getDate()
-      const maxHour = sameDay ? from.getHours() : 23
+      const year = cursor.getFullYear()
+      const month = cursor.getMonth()
+      const day = cursor.getDate()
       for (const hour of sortedHours) {
-        if (hour > maxHour) continue
-        const maxMinute = sameDay && hour === from.getHours() ? from.getMinutes() : 59
         for (const minute of sortedMinutes) {
-          if (minute > maxMinute) continue
-          const candidate = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate(), hour, minute, 0, 0)
-          // DST spring-forward: a nonexistent wall time is normalized by the
-          // Date constructor (02:00 → 03:00). Returning that instant would hand
-          // the scheduler a moment the expression does not match. Verify the
-          // constructed fields and the full schedule instead.
-          if (candidate.getHours() !== hour || candidate.getMinutes() !== minute) continue
-          if (candidate.getTime() <= fromMs && matches(schedule, candidate)) return candidate.getTime()
+          // Wall clock can repeat (DST fall-back) or vanish (spring-forward).
+          // `new Date` only ever yields the FIRST instance of a repeated hour;
+          // also consider the second (first + 1h) when its wall clock still
+          // matches, and prefer the later instant that is still <= fromMs. No
+          // wall-clock pruning: it mis-handles the second pass of a repeated
+          // hour (2026-09-16 audit R2-E2).
+          const first = new Date(year, month, day, hour, minute, 0, 0)
+          if (first.getHours() !== hour || first.getMinutes() !== minute) continue
+          const second = new Date(first.getTime() + 60 * 60 * 1000)
+          const candidates = [first.getTime()]
+          if (second.getFullYear() === year && second.getMonth() === month && second.getDate() === day
+            && second.getHours() === hour && second.getMinutes() === minute) {
+            candidates.push(second.getTime())
+          }
+          candidates.sort((a, b) => b - a)
+          for (const time of candidates) {
+            if (time <= fromMs && matches(schedule, new Date(time))) return time
+          }
         }
       }
     }

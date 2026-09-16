@@ -340,10 +340,11 @@ else if (options.changed !== null) {
   const files = await changedFiles(options.changed)
   const { selected, global } = selectByChanges(files)
   console.log(`check:fast — ${files.length} 个改动文件(相对 ${options.changed})→ ${global ? '全量(顶层文件改动)' : `${selected.length} 个包`}`)
-  if (selected.length === 0) {
-    console.log('check:fast — 没有包需要重跑')
-    process.exit(0)
-  }
+  // A zero-package selection (README / notes / .gitmodules changes) must still
+  // run the root guards: they read those very files (check:layout verifies
+  // README.i18n.yaml and .gitmodules against upstream.json). Exiting here was a
+  // false-green fast gate — CI full runs caught it only after the push.
+  if (selected.length === 0) console.log('check:fast — 没有包需要重跑;仍执行根守卫')
   selectedNames = new Set(selected)
 }
 

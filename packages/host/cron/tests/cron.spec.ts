@@ -1,22 +1,47 @@
+import { execFileSync } from 'node:child_process'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { isValidCron, lastRunAtMs, nextRunAtMs, parseCron } from '../src/cron.ts'
 
-describe('DST/catch-up 一致性（2026-09-16 审计 E4）', () => {
+/**
+ * Run cron assertions in a CHILD process with a fixed TZ.
+ *
+ * Mutating process.env.TZ at runtime proved inconsistent for Date (V8 caches
+ * the timezone), which made the DST regressions flaky; a fresh process reads
+ * TZ before the first Date is constructed.
+ */
+function assertWithTz(tz: string, body: string): void {
+  const moduleUrl = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../src/cron.ts')).href
+  const script = `import assert from 'node:assert/strict'\nimport { lastRunAtMs, nextRunAtMs } from ${JSON.stringify(moduleUrl)}\n${body}`
+  execFileSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script], {
+    env: { ...process.env, TZ: tz },
+    stdio: 'pipe',
+  })
+}
+
+describe('DST/catch-up 一致性（2026-09-16 审计 E4/R2-E2）', () => {
   it('lastRunAtMs 不返回春季跳变中被归一化、表达式不匹配的瞬间', () => {
-    const previous = process.env.TZ
-    process.env.TZ = 'America/New_York'
-    try {
-      // 2026-03-08 当地 02:xx 不存在；旧实现把构造出的 03:00 直接当命中返回。
-      const from = new Date(2026, 2, 8, 3, 30).getTime()
+    assertWithTz('America/New_York', `
+      const from = Date.UTC(2026, 2, 8, 7, 30) // 当地 03:30 EDT，02:xx 不存在
       const last = lastRunAtMs('0 2 * * *', from)
-      expect(last, 'there is always a previous matching instant').toBeDefined()
-      // 用正向扫描交叉验证：该瞬间必须真的是表达式的下一跳。
-      expect(nextRunAtMs('0 2 * * *', (last as number) - 1)).toBe(last)
-      expect(new Date(last as number).getHours()).toBe(2)
-    } finally {
-      if (previous === undefined) delete process.env.TZ
-      else process.env.TZ = previous
-    }
+      assert.ok(last !== undefined, 'there is always a previous matching instant')
+      assert.equal(new Date(last).getHours(), 2)
+      assert.equal(nextRunAtMs('0 2 * * *', last - 1), last)
+    `)
+  })
+
+  it('秋季回拨：重复小时里已发生的匹配不得被整日跳过', () => {
+    // Expected epochs come from an independent minute-by-minute scanner (the
+    // agent's counterexample); nextRunAtMs is not a reference here because it
+    // deliberately does not enumerate the repeated hour's second pass.
+    assertWithTz('America/New_York', `
+      const last0130 = lastRunAtMs('30 1 * * *', Date.UTC(2026, 10, 1, 6, 10)) // 01:10 EST
+      assert.equal(last0130, Date.UTC(2026, 10, 1, 5, 30)) // 第一遍 01:30 EDT
+
+      const last0100 = lastRunAtMs('0 1 * * *', Date.UTC(2026, 10, 1, 6, 30)) // 01:30 EST
+      assert.equal(last0100, Date.UTC(2026, 10, 1, 6, 0)) // 第二遍 01:00 EST
+    `)
   })
 })
 
