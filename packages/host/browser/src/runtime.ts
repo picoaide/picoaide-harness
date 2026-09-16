@@ -2657,7 +2657,7 @@ export class BrowserRuntime {
         // carries a one-time code/ticket. Redact exactly like every other
         // model-facing URL exit: error.message lands in the model context and
         // the session transcript (2026-09-16 audit E4).
-        throw browserError('policy', `browser_fill_credentials refused: the tab left ${expectedOrigin} before the injection ran (now ${stripSensitiveUrl(tab.url)}); credentials are only injected into their own site`)
+        throw browserError('policy', `browser_fill_credentials refused: the tab left ${expectedOrigin} before the injection ran (now ${stripSensitiveUrl(tab.url).slice(0, 200)}); credentials are only injected into their own site`)
       }
       const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
         expression: `

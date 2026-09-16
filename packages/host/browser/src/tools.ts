@@ -18,7 +18,7 @@ import { BrowserRuntime, type WaitForOptions } from './runtime.ts'
 import { browserError } from './errors.ts'
 import { httpOriginOf } from './credential-site.ts'
 import { snapshotNote } from './snapshot.ts'
-import { BROWSER_TOOL_TIMEOUT_MS } from './budgets.ts'
+import { BROWSER_TOOL_TIMEOUT_MS, BROWSER_WAIT_FOR_DEADLINE_MS, WAIT_FOR_MAX_MS } from './budgets.ts'
 import type { BrowserWaitUntil } from './types.ts'
 
 /** Valid waitUntil values for navigation tools. */
@@ -744,19 +744,19 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_wait_for',
-    description: '[read] Wait for a page condition (element/text/url/network-idle/settled) before acting — use instead of sleeping on dynamic pages. timeoutMs is clamped to the call budget: this tool is bounded at 40000 ms, so that is the longest wait that can actually complete (the runtime accepts up to 120000 ms, but a call that long is cut off by the tool budget first).',
+    description: `[read] Wait for a page condition (element/text/url/network-idle/settled) before acting — use instead of sleeping on dynamic pages. timeoutMs is clamped to ${String(WAIT_FOR_MAX_MS)} ms of waiting; the tool call itself is budgeted at ${String(Math.round(BROWSER_WAIT_FOR_DEADLINE_MS / 1000))} s, so a user-gate wait plus the full condition wait still returns this tool's own result instead of a generic timeout.`,
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       condition: { type: 'string', enum: WAIT_CONDITIONS, required: true, description: 'What to wait for.' },
       selector: { type: 'string', description: 'CSS selector (element-present / element-visible).' },
       text: { type: 'string', description: 'Text to appear (text-appear).' },
-      timeoutMs: { type: 'integer', description: 'Budget in ms (default 30000; effective maximum 40000 — the tool call budget).' },
+      timeoutMs: { type: 'integer', description: `Budget in ms (default 30000; effective maximum ${String(WAIT_FOR_MAX_MS)}).` },
     },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' }, reason: { type: 'string' } } },
       render: (_args, value) => [{ type: 'text', text: formatWait(value) }],
     },
-    timeoutMs: BROWSER_TOOL_TIMEOUT_MS + 10_000,
+    timeoutMs: BROWSER_WAIT_FOR_DEADLINE_MS,
     isConcurrencySafe: () => false,
     presentCall: present('Wait for condition'),
     async execute(args, exec) {
@@ -770,7 +770,11 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       }
       noteAgent(runtime, exec.agent)
       const tabId = await tabOf(tab)
-      return await runtime.waitFor(tabId, { condition, selector, text, timeoutMs }, exec.signal)
+      // Clamp the wait itself so gate (10s) + wait (<=40s) stay inside the tool
+      // deadline with margin; otherwise timeout-policy replaces the tool's own
+      // result with the generic `tool call timed out` at the boundary.
+      const waitMs = Math.min(timeoutMs ?? 30_000, WAIT_FOR_MAX_MS)
+      return await runtime.waitFor(tabId, { condition, selector, text, timeoutMs: waitMs }, exec.signal)
     },
   }))
 
