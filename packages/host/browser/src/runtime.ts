@@ -227,6 +227,13 @@ export interface WaitForOptions {
   selector?: string | undefined
   text?: string | undefined
   timeoutMs?: number | undefined
+  /**
+   * Absolute instant the whole tool call must return by (armed by the tool's
+   * registered deadline minus a margin). Deducted from the effective wait when
+   * the call actually starts running, so mutex/queue time counts against the
+   * wait instead of pushing the tool past its deadline (2026-09-16 audit R3-C).
+   */
+  deadlineAt?: number | undefined
 }
 
 /** Control/turn state shared by the shell payload, the sidebar hint and the
@@ -2657,7 +2664,7 @@ export class BrowserRuntime {
         // carries a one-time code/ticket. Redact exactly like every other
         // model-facing URL exit: error.message lands in the model context and
         // the session transcript (2026-09-16 audit E4).
-        throw browserError('policy', `browser_fill_credentials refused: the tab left ${expectedOrigin} before the injection ran (now ${stripSensitiveUrl(tab.url).slice(0, 200)}); credentials are only injected into their own site`)
+        throw browserError('policy', `browser_fill_credentials refused: the tab left ${expectedOrigin} before the injection ran (now ${redactFilledSecretsText(tab, stripSensitiveUrl(tab.url).slice(0, 200), { verbatim: true })}); credentials are only injected into their own site`)
       }
       const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
         expression: `
@@ -2873,9 +2880,13 @@ export class BrowserRuntime {
   /** Wait for a page condition. */
   async waitFor(tabId: number, options: WaitForOptions, signal?: AbortSignal): Promise<{ ok: boolean; reason: string }> {
     const resolved = this.resolveTab(tabId)
-    const timeout = Math.min(options.timeoutMs ?? Math.min(this.options.timeoutMs, 30_000), 120_000)
-    const deadline = Date.now() + timeout
     return await this.agentRun('browser_wait_for', async () => {
+      // Compute the condition deadline INSIDE the critical section: whatever
+      // time the mutex/gate took is already spent budget.
+      const configured = options.timeoutMs ?? Math.min(this.options.timeoutMs, 30_000)
+      const remaining = options.deadlineAt === undefined ? Number.POSITIVE_INFINITY : options.deadlineAt - Date.now()
+      const timeout = Math.min(configured, 120_000, Math.max(0, remaining))
+      const deadline = Date.now() + timeout
       const tab = this.tab(resolved)
       const startUrl = tab.url
       let lastReason = 'timeout'

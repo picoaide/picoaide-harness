@@ -760,6 +760,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Wait for condition'),
     async execute(args, exec) {
+      const startedAt = Date.now()
       const { tab, condition, selector, text, timeoutMs } = args as { tab?: number; condition: WaitForOptions['condition']; selector?: string; text?: string; timeoutMs?: number }
       if (!WAIT_CONDITIONS.includes(condition)) throw new Error(`condition must be one of: ${WAIT_CONDITIONS.join(', ')}`)
       if ((condition === 'element-present' || condition === 'element-visible') && (selector === undefined || selector === '')) {
@@ -774,7 +775,12 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       // deadline with margin; otherwise timeout-policy replaces the tool's own
       // result with the generic `tool call timed out` at the boundary.
       const waitMs = Math.min(timeoutMs ?? 30_000, WAIT_FOR_MAX_MS)
-      return await runtime.waitFor(tabId, { condition, selector, text, timeoutMs: waitMs }, exec.signal)
+      return await runtime.waitFor(tabId, {
+        condition, selector, text, timeoutMs: waitMs,
+        // The registered deadline is armed at dispatch; leave 1s margin for the
+        // return path so timeout-policy cannot replace our own result.
+        deadlineAt: startedAt + BROWSER_WAIT_FOR_DEADLINE_MS - 1_000,
+      }, exec.signal)
     },
   }))
 
