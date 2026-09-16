@@ -108,7 +108,7 @@ const GLOBAL_PREFIXES = [
 ]
 
 function parseArgs(argv) {
-  const options = { changed: null, only: null, list: false, concurrency: null, guards: true, help: false }
+  const options = { changed: null, only: null, list: false, concurrency: null, guards: true, help: false, fullOutput: false }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--changed') {
@@ -126,6 +126,7 @@ function parseArgs(argv) {
       i += 1
     } else if (arg === '--list') options.list = true
     else if (arg === '--no-guards') options.guards = false
+    else if (arg === '--full-output') options.fullOutput = true
     else if (arg === '--help' || arg === '-h') options.help = true
     else {
       console.error(`check-workspaces: 未知参数 ${arg}`)
@@ -134,6 +135,45 @@ function parseArgs(argv) {
     }
   }
   return options
+}
+
+/**
+ * Lines that carry a test/build verdict, across every runner this gate drives:
+ * vitest (`FAIL`, `×`, `AssertionError`, `⎯ Failed Tests`, `Tests 1 failed`),
+ * `node --test` (`not ok`), tsc (`error TS…`), and yarn/spawn failures
+ * (`ELIFECYCLE`).
+ */
+const FAILURE_LINE = /(?:^|\s)(?:FAIL\b|not ok\b|AssertionError|ELIFECYCLE|error TS\d+|\d+\s+failed\b|Test Files\b|×|✗|⎯)/u
+/** Cap on the verdict lines printed per failed task. */
+const MAX_FAILURE_LINES = 150
+/** Cap on the trailing context lines printed per failed task. */
+const MAX_TAIL_LINES = 200
+
+/**
+ * Bound a failed task's output to something a CI log can actually carry.
+ *
+ * The real-socket / real-subprocess suites print tens of thousands of lines, and
+ * GitHub **truncates the middle** of a job log — so dumping the whole capture
+ * pushed the verdict out of view (2026-09-16: a red Gate on
+ * `@picoaide/dsh-connectors` could not be diagnosed from the CI log at all;
+ * every rerun "fixed" it and every rerun hid why). Print the verdict lines
+ * first, then a bounded tail for context. `--full-output` restores the raw dump.
+ * @param output - the task's captured stdout+stderr.
+ * @returns the bounded report.
+ */
+function summarizeFailure(output) {
+  const lines = output.split('\n')
+  if (lines.length <= MAX_FAILURE_LINES + MAX_TAIL_LINES) return output.trimEnd()
+  const flagged = lines.filter(line => FAILURE_LINE.test(line)).slice(0, MAX_FAILURE_LINES)
+  const tail = lines.slice(-MAX_TAIL_LINES)
+  const parts = [`(输出共 ${lines.length} 行;此处只打印判定行与末尾;完整输出用 --full-output 本地重跑)`]
+  if (flagged.length > 0) {
+    parts.push(`--- 失败相关行(最多 ${MAX_FAILURE_LINES} 行,按出现顺序) ---`, ...flagged)
+  } else {
+    parts.push('--- 未匹配到失败标记行(见下方末尾输出) ---')
+  }
+  parts.push(`--- 输出末尾(最后 ${tail.length} 行) ---`, ...tail)
+  return parts.join('\n')
 }
 
 function git(args) {
@@ -269,7 +309,7 @@ const options = parseArgs(process.argv.slice(2))
 if (options === null) process.exit(1)
 
 if (options.help) {
-  console.log('用法: node scripts/check-workspaces.mjs [--changed [ref]] [--only a,b] [--concurrency N] [--list] [--no-guards]')
+  console.log('用法: node scripts/check-workspaces.mjs [--changed [ref]] [--only a,b] [--concurrency N] [--list] [--no-guards] [--full-output]')
   process.exit(0)
 }
 
@@ -336,7 +376,7 @@ console.log(`──── ${state.results.length} 个任务:${passed} 通过、$
 if (state.failed.length > 0) {
   for (const failure of state.failed) {
     console.error(`\n===== ${failure.task.name} 失败(退出码非 0) =====`)
-    console.error(failure.output.trimEnd())
+    console.error(options.fullOutput ? failure.output.trimEnd() : summarizeFailure(failure.output))
   }
   process.exit(1)
 }

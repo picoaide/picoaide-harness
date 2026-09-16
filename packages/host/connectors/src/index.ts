@@ -10,7 +10,7 @@ import { ConnectorStore } from './store.ts'
 import { ConnectorError, connectorErrorCodeOf } from './connector-error.ts'
 import { hostLocaleOf, hostT, type HostCopyKey, type HostLocale } from './host-copy.ts'
 import { runAuth } from './auth.ts'
-import { createOAuthProvider, resolveAuthorizationServer, TokenRefresher, tokenNeedsRefresh } from './mcp-oauth-provider.ts'
+import { createOAuthProvider, resolveAuthorizationServer, TokenRefresher, tokenNeedsRefresh, type RefreshedTokens } from './mcp-oauth-provider.ts'
 import type { OAuthTarget } from './mcp-oauth-provider.ts'
 import { REFRESH_LEAD_MS, REFRESH_SWEEP_INTERVAL_MS } from './token-lifetime.ts'
 import { userScopePath } from './user-scope.ts'
@@ -407,7 +407,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       && credential.expiresAt - Date.now() > REFRESH_LEAD_MS
       && target.tokenUrl !== undefined
     ) {
-      const { provider } = createOAuthProvider({
+      const handle = createOAuthProvider({
         credential,
         target,
         onPersist: (patch: Partial<ConnectorCredential>) => {
@@ -417,7 +417,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           })
         },
       })
-      return { authProvider: provider }
+      adoptLatestRefresh(def.id, handle, credential.expiresAt)
+      liveProviders.set(def.id, handle)
+      return { authProvider: handle.provider }
     }
     try {
       const resolved = await resolveAuthorizationServer(
@@ -430,7 +432,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         ctx.logger?.warn(`pico-connectors: ${def.id} 无法解析令牌端点（${resolved.failure.message}）`)
         return {}
       }
-      const { provider } = createOAuthProvider({
+      const handle = createOAuthProvider({
         credential,
         target,
         discovery: resolved.discovery,
@@ -446,13 +448,57 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             })
         },
       })
-      return { authProvider: provider }
+      adoptLatestRefresh(def.id, handle, credential.expiresAt)
+      liveProviders.set(def.id, handle)
+      return { authProvider: handle.provider }
     } catch (error) {
       // A policy-blocked URL is an active redirection attempt: register
       // without the provider (the SDK will report 401 plainly) and log loudly.
       ctx.logger?.error(`pico-connectors: ${def.id} 令牌端点解析被拒绝`, error)
       return {}
     }
+  }
+
+  /**
+   * Live OAuth providers keyed by connector id, so an out-of-band refresh can
+   * hand the rotated credential back to the transport that still holds the
+   * consumed one. Registration overwrites the entry: only the newest transport
+   * for an id can still be in use, and the stale handle is unreachable anyway.
+   */
+  const liveProviders = new Map<string, { adopt: (tokens: RefreshedTokens) => void }>()
+
+  /**
+   * The most recent credential **our own** refresher produced, per connector.
+   *
+   * `registerMcp` reads the credential once and builds the provider from that
+   * snapshot only later (after discovery / the outbound fence), so a refresh
+   * landing in between left the new transport holding the consumed token —
+   * `onRefreshed` had no handle yet to feed, and the provider was born stale.
+   * Keeping the last result lets a registration that started too early catch up
+   * before it goes live; the expiry guard makes the catch-up a no-op when the
+   * snapshot is already the newer of the two (e.g. an interactive
+   * re-authorization, which is newer than our last background refresh).
+   */
+  const latestRefresh = new Map<string, RefreshedTokens>()
+
+  /**
+   * Bring a freshly built provider up to the newest credential we know of.
+   * @param id - connector id the provider belongs to.
+   * @param handle - the provider created for the current registration.
+   * @param snapshotExpiresAt - expiry of the credential that provider was built
+   *   from; the catch-up is skipped when that snapshot is already newer.
+   */
+  function adoptLatestRefresh(
+    id: string,
+    handle: { adopt: (tokens: RefreshedTokens) => void },
+    snapshotExpiresAt: number | undefined,
+  ): void {
+    const latest = latestRefresh.get(id)
+    // Only when our refresh is the newer of the two: `expiresAt` advances on
+    // every grant, so an interactive re-authorization (which produced a later
+    // expiry) must not be overwritten by an earlier background refresh.
+    if (latest === undefined || latest.expiresAt <= (snapshotExpiresAt ?? 0)) return
+    handle.adopt(latest)
   }
 
   /**
@@ -475,6 +521,15 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // The engine just wrote the credential; mirror it so the panel shows the
       // new expiry without a disk read, then tell the rest of the host.
       setState(id, { expiresAt: tokens.expiresAt, refreshedAt: Date.now(), refreshToken: true })
+      // The in-memory mirror is NOT the store: a transport that outlives this
+      // refresh keeps the **consumed** refresh token and would present it on its
+      // next 401 self-heal. A rotation-aware server answers
+      // `invalid_grant: refresh token already used` and (RFC 6749 §10.4) revokes
+      // the grant, so the connector silently needs re-authorization. Feed the
+      // live provider the credential we just persisted. Regression:
+      // tests/token-refresh-live-provider.spec.ts.
+      latestRefresh.set(id, tokens)
+      liveProviders.get(id)?.adopt(tokens)
       ctx.emit('pico/connector-credentials-changed', { id })
     },
     ...(options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs }),
@@ -647,6 +702,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   /** Drop all MCP registrations and reset in-memory state (user switch). */
   const teardownAll = async (): Promise<void> => {
     teardownController.abort(new Error(copy('flow.userSwitchedRegistration')))
+    liveProviders.clear()
+    latestRefresh.clear()
     for (const dispose of mcpDisposers.values()) {
       try { dispose() } catch { /* teardown never throws */ }
     }
@@ -1500,6 +1557,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       lifecycleEpoch++
       // conn-1: …and a registration already awaiting must stop spawning.
       teardownController.abort(new Error(copy('flow.pluginUnloadRegistration')))
+      liveProviders.clear()
+      latestRefresh.clear()
       for (const dispose of mcpDisposers.values()) dispose()
       mcpDisposers.clear()
       // P0-1: teardown must abort any in-flight authorization flow — a
