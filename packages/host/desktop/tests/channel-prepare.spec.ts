@@ -210,8 +210,9 @@ describe('generateTrayIcons', () => {
     expect(white).toBeGreaterThan(0)
   })
 
-  it('官方 logo 的产物与"替换方块色"的旧行为逐字节一致', async () => {
-    // 改造只放宽了输入约束，官方路径的产物不能变一丝一毫。
+  it('官方 logo 的 Windows/Linux 位图与"替换方块色"的旧行为逐字节一致', async () => {
+    // 改造只放宽了输入约束，官方路径的**非模板**产物不能变一丝一毫
+    // （macOS 模板图是刻意改的，见下一条用例）。
     //
     // 旧实现是 `source.replaceAll(BRAND_COLOR, 变体色)`，其中 BRAND_COLOR 硬编码
     // 为 `#000000`；官方 logo 的方块本来就是 `#000000`，默认变体色（托盘渲染色）
@@ -222,13 +223,54 @@ describe('generateTrayIcons', () => {
     await generateTrayIcons({ source: officialLogo, buildRoot: out })
     const source = readFileSync(officialLogo, 'utf8')
     expect(source).toContain('fill="#000000"')
-    for (const [file, size] of [['tray-iconTemplate.png', 16], ['tray-icon-blue@2x.png', 32]] as const) {
+    for (const [file, size] of [['tray-icon-blue.png', 16], ['tray-icon-blue@2x.png', 32]] as const) {
       const legacy = await sharp(Buffer.from(source))
         .resize({ width: size, height: size, fit: 'contain' })
         .png({ compressionLevel: 9 })
         .toBuffer()
       expect(readFileSync(join(out, file)).equals(legacy)).toBe(true)
     }
+  })
+
+  it('macOS 模板图只有 mark：背景透明、落墨处字面黑、不含不透明底板', async () => {
+    // 2026-09-16 真机 P1：模板图此前是"满画布不透明的方块 + 白 mark"，而 AppKit 对
+    // 模板图**只拿 alpha 通道当遮罩**（RGB 一律忽略）⇒ 菜单栏里只剩一个实心方块
+    // （暗色菜单栏实测是白方块），花括号 mark 永远画不出来。
+    // 判据钉在像素上：背景必须 clear、落墨处必须字面黑、mark 确实存在。
+    const out = tempDir('dsh-tray-template-')
+    await generateTrayIcons({ source: officialLogo, buildRoot: out })
+
+    for (const file of ['tray-iconTemplate.png', 'tray-iconTemplate@2x.png'] as const) {
+      const { data, info } = await sharp(join(out, file))
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true })
+      let clear = 0
+      let inked = 0
+      let nonBlackInk = 0
+      for (let i = 0; i < data.length; i += info.channels) {
+        if (data[i + 3] === 0) {
+          clear += 1
+          continue
+        }
+        inked += 1
+        if (data[i] !== 0 || data[i + 1] !== 0 || data[i + 2] !== 0) nonBlackInk += 1
+      }
+      // 底板占满整张画布：留着它时 clear 恒为 0（16px 旧产物实测 0/256）。
+      expect(clear / (info.width * info.height)).toBeGreaterThan(0.5)
+      // 全透明 = 菜单栏里什么都没有。
+      expect(inked).toBeGreaterThan(0)
+      // 模板图规范是 black + clear；出现彩色/白色墨点说明又在当普通位图渲染。
+      expect(nonBlackInk).toBe(0)
+    }
+  })
+
+  it('方块之外没有任何 mark 的 logo 直接 fail-loud（否则模板图会全透明）', async () => {
+    const tileOnly = join(tempDir('dsh-tray-tileonly-'), 'logo.svg')
+    writeFileSync(tileOnly, '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">'
+      + '<rect width="24" height="24" rx="4" fill="#006AFF"/></svg>')
+    await expect(generateTrayIcons({ source: tileOnly, buildRoot: tempDir('dsh-tray-tileonly-out-') }))
+      .rejects.toThrow(/mark/iu)
   })
 
   it('没有平坦方块（渐变/样式表）时给出可读的失败', async () => {

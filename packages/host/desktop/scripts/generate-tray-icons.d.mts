@@ -6,11 +6,16 @@
  * scripts 下的 .ts）。声明与实现同源：改签名必须同步改这里。
  */
 
-/** 一个托盘位图变体：输出文件名、边长与替换后的品牌色。 */
+/** 一个托盘位图变体：输出文件名、边长、替换后的品牌色与是否 macOS 模板图。 */
 export interface TrayVariant {
   readonly file: string
   readonly size: number
   readonly color: string
+  /**
+   * `true` = macOS 模板图（只有 mark、背景透明、颜色规整成黑）。
+   * 系统只拿 alpha 当遮罩，所以这类位图**不能**带不透明底板。
+   */
+  readonly template?: boolean
 }
 
 /** `generateTrayIcons()` 的可覆盖输入。 */
