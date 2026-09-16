@@ -85,19 +85,19 @@ function clientLang() {
 
 // src/client/MemoryQueueView.tsx
 var import_jsx_runtime = require("react/jsx-runtime");
-function todoTargetLabel(t2, target) {
+function todoTargetLabel(t, target) {
   const track = target.slice(5);
-  if (track === "life") return `${isEn() ? "Todo" : "\u5F85\u529E"}\xB7${t2("todo.track.life")}`;
-  if (track === "work") return `${isEn() ? "Todo" : "\u5F85\u529E"}\xB7${t2("todo.track.work")}`;
-  if (track === "project") return `${isEn() ? "Todo" : "\u5F85\u529E"}\xB7${t2("todo.track.project")}`;
-  if (track === "daily") return `${isEn() ? "Todo" : "\u5F85\u529E"}\xB7${t2("todo.track.daily")}`;
+  if (track === "life") return `${isEn() ? "Todo" : "\u5F85\u529E"}\xB7${t("todo.track.life")}`;
+  if (track === "work") return `${isEn() ? "Todo" : "\u5F85\u529E"}\xB7${t("todo.track.work")}`;
+  if (track === "project") return `${isEn() ? "Todo" : "\u5F85\u529E"}\xB7${t("todo.track.project")}`;
+  if (track === "daily") return `${isEn() ? "Todo" : "\u5F85\u529E"}\xB7${t("todo.track.daily")}`;
   return target;
 }
-function suggestTargetLabel(t2, target) {
-  if (target.startsWith("todo-")) return todoTargetLabel(t2, target);
-  if (target === "memory") return t2("panel.suggestions.target.memory");
-  if (target === "user") return t2("panel.suggestions.target.user");
-  if (target === "key") return t2("panel.suggestions.target.key");
+function suggestTargetLabel(t, target) {
+  if (target.startsWith("todo-")) return todoTargetLabel(t, target);
+  if (target === "memory") return t("panel.suggestions.target.memory");
+  if (target === "user") return t("panel.suggestions.target.user");
+  if (target === "key") return t("panel.suggestions.target.key");
   return target;
 }
 function suggestTargetClass(target) {
@@ -130,7 +130,7 @@ function formatTime(iso) {
 }
 var isEn = () => clientLang() === "en";
 function MemoryQueueView(props) {
-  const { t: t2, feature, onChanged } = props;
+  const { t, feature, onChanged } = props;
   const [entries, setEntries] = (0, import_react.useState)(null);
   const [skills, setSkills] = (0, import_react.useState)(null);
   const [config, setConfig] = (0, import_react.useState)(null);
@@ -153,7 +153,7 @@ function MemoryQueueView(props) {
       setConfig(c.config);
       setDraft((prev) => prev ?? c.config);
     }).catch((error) => {
-      setNotice({ kind: "error", text: t2("panel.config.failed", { message: error.message }) });
+      setNotice({ kind: "error", text: t("panel.config.failed", { message: error.message }) });
     });
   };
   (0, import_react.useEffect)(() => {
@@ -168,9 +168,9 @@ function MemoryQueueView(props) {
       if (contents.some((content) => content !== "")) body.contents = contents;
       const overrides = {};
       for (const index of indices) {
-        const pick2 = targetPicks[index];
+        const pick = targetPicks[index];
         const row = (entries ?? []).find((candidate) => candidate.origIndex + 1 === index);
-        if (pick2 !== void 0 && pick2 !== row?.entry.target) overrides[String(index)] = pick2;
+        if (pick !== void 0 && pick !== row?.entry.target) overrides[String(index)] = pick;
       }
       if (Object.keys(overrides).length > 0) body.targets = overrides;
     }
@@ -182,7 +182,7 @@ function MemoryQueueView(props) {
       load();
       onChanged();
     }).catch((error) => {
-      setNotice({ kind: "error", text: t2("panel.config.failed", { message: error.message }) });
+      setNotice({ kind: "error", text: t("panel.config.failed", { message: error.message }) });
     }).finally(() => setBusy(false));
   };
   const runSkill = (op, name) => {
@@ -191,11 +191,11 @@ function MemoryQueueView(props) {
       method: "POST",
       body: JSON.stringify({ name })
     }).then(() => {
-      setNotice({ kind: "ok", text: t2("panel.skills.done", { op: op === "approve" ? t2("panel.skills.approve") : t2("panel.skills.reject") }) });
+      setNotice({ kind: "ok", text: t("panel.skills.done", { op: op === "approve" ? t("panel.skills.approve") : t("panel.skills.reject") }) });
       load();
       onChanged();
     }).catch((error) => {
-      setNotice({ kind: "error", text: t2("panel.config.failed", { message: error.message }) });
+      setNotice({ kind: "error", text: t("panel.config.failed", { message: error.message }) });
     }).finally(() => setBusy(false));
   };
   const saveConfig = () => {
@@ -237,9 +237,9 @@ function MemoryQueueView(props) {
       setConfig(res.config);
       setDraft(res.config);
       window.dispatchEvent(new CustomEvent(RUNTIME_CONFIG_CHANGED, { detail: res.config }));
-      setNotice({ kind: "ok", text: t2("panel.config.saved") });
+      setNotice({ kind: "ok", text: t("panel.config.saved") });
     }).catch((error) => {
-      setNotice({ kind: "error", text: t2("panel.config.failed", { message: error.message }) });
+      setNotice({ kind: "error", text: t("panel.config.failed", { message: error.message }) });
     }).finally(() => setBusy(false));
   };
   const patchDraft = (patch) => {
@@ -249,177 +249,177 @@ function MemoryQueueView(props) {
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-panel", children: [
     notice !== null && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: `me-notice me-notice-${notice.kind}`, children: notice.text }),
     feature === "guide" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", { className: "me-block", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "me-block-head", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", { className: "me-heading", children: t2("panel.guide.title") }) }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-help", children: t2("panel.guide.intro") }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "me-block-head", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", { className: "me-heading", children: t("panel.guide.title") }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-help", children: t("panel.guide.intro") }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide", children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F9E0}" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.memory.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.memory.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.memory.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.memory.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F504}" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.review.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.review.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.review.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.review.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u2705" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.todo.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.todo.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.todo.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.todo.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F6E0}\uFE0F" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.skill.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.skill.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.skill.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.skill.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F50D}" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.search.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.search.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.search.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.search.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F680}" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.coi.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.coi.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.coi.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.coi.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F4CC}" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.prompt.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.prompt.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.prompt.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.prompt.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F9E9}" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.models.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.models.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.models.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.models.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F9D0}" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.advisor.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.advisor.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.advisor.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.advisor.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F4E8}" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.broadcast.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.broadcast.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.broadcast.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.broadcast.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F4E1}" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.session.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.session.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.session.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.session.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F9ED}" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.sessionOrch.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.sessionOrch.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.sessionOrch.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.sessionOrch.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F3A8}" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.uiSettings.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.uiSettings.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.uiSettings.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.uiSettings.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u2B50" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.bookmark.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.bookmark.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.bookmark.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.bookmark.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F5BC}\uFE0F" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.canvas.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.canvas.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.canvas.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.canvas.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F501}" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.sync.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.sync.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.sync.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.sync.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-guide-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-guide-icon", children: "\u{1F6E1}\uFE0F" }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-guide-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t2("panel.guide.confirm.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t2("panel.guide.confirm.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: t("panel.guide.confirm.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("panel.guide.confirm.desc") })
           ] })
         ] })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { className: "me-guide-sub", children: t2("panel.guide.best.title") }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { className: "me-guide-sub", children: t("panel.guide.best.title") }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("ul", { className: "me-guide-tips", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: t2("panel.guide.best.1") }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: t2("panel.guide.best.2") }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: t2("panel.guide.best.3") }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: t2("panel.guide.best.4") })
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: t("panel.guide.best.1") }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: t("panel.guide.best.2") }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: t("panel.guide.best.3") }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: t("panel.guide.best.4") })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-guide-loop", children: t2("panel.guide.loop") })
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-guide-loop", children: t("panel.guide.loop") })
     ] }),
     (feature === "suggestions" || feature === "todo-suggestions") && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", { className: "me-block", children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-block-head", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", { className: "me-heading", children: feature === "todo-suggestions" ? t2("panel.todoSuggestions.title") : t2("panel.suggestions.title") }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", { className: "me-heading", children: feature === "todo-suggestions" ? t("panel.todoSuggestions.title") : t("panel.suggestions.title") }),
         suggestionRows.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-count", children: suggestionRows.length })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-help", children: feature === "todo-suggestions" ? t2("panel.todoSuggestions.help") : t2("panel.suggestions.help") }),
-      entries === null ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-muted", children: t2("panel.loading") }) : suggestionRows.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-empty", children: feature === "todo-suggestions" ? t2("panel.todoSuggestions.empty") : t2("panel.suggestions.empty") }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-help", children: feature === "todo-suggestions" ? t("panel.todoSuggestions.help") : t("panel.suggestions.help") }),
+      entries === null ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-muted", children: t("panel.loading") }) : suggestionRows.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-empty", children: feature === "todo-suggestions" ? t("panel.todoSuggestions.empty") : t("panel.suggestions.empty") }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", { className: "me-list", children: suggestionRows.map(({ entry, index }) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { className: "me-item", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-item-head", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "span",
               {
                 className: `me-badge me-badge-suggest me-badge-suggest-${suggestTargetClass(entry.target)}`,
-                title: t2("panel.suggestions.targetHint"),
-                children: suggestTargetLabel(t2, entry.target)
+                title: t("panel.suggestions.targetHint"),
+                children: suggestTargetLabel(t, entry.target)
               }
             ),
             entry.cwd && (entry.target === "key" || entry.target === "todo-project") && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
               "span",
               {
                 className: "me-badge me-badge-project",
-                title: t2("panel.suggestions.projectHint", { path: entry.cwd }),
+                title: t("panel.suggestions.projectHint", { path: entry.cwd }),
                 children: [
                   "\u{1F4C1} ",
                   projectName(entry.cwd)
                 ]
               }
             ),
-            (entry.hits ?? 1) > 1 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-badge me-badge-hits", title: t2("panel.suggestions.hitsHint"), children: t2("panel.suggestions.hits", { count: entry.hits ?? 1 }) }),
+            (entry.hits ?? 1) > 1 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-badge me-badge-hits", title: t("panel.suggestions.hitsHint"), children: t("panel.suggestions.hits", { count: entry.hits ?? 1 }) }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-item-time", title: entry.time, children: formatTime(entry.time) }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-item-actions", children: [
               !entry.target.startsWith("todo-") && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
                 "select",
                 {
                   className: "me-pick-target",
-                  title: t2("panel.suggestions.targetHint"),
+                  title: t("panel.suggestions.targetHint"),
                   value: targetPicks[index] ?? entry.target,
                   onChange: (event) => setTargetPicks((prev) => ({ ...prev, [index]: event.target.value })),
-                  children: SUGGEST_TARGETS.map((target) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: target, children: suggestTargetLabel(t2, target) }, target))
+                  children: SUGGEST_TARGETS.map((target) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: target, children: suggestTargetLabel(t, target) }, target))
                 }
               ),
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
@@ -429,7 +429,7 @@ function MemoryQueueView(props) {
                   className: "me-btn me-btn-ok",
                   disabled: busy,
                   onClick: () => runSuggestions("approve", [index]),
-                  children: t2("panel.suggestions.approve")
+                  children: t("panel.suggestions.approve")
                 }
               ),
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
@@ -438,9 +438,9 @@ function MemoryQueueView(props) {
                   type: "button",
                   className: "me-btn me-btn-archive",
                   disabled: busy,
-                  title: t2("panel.suggestions.archiveHint"),
+                  title: t("panel.suggestions.archiveHint"),
                   onClick: () => runSuggestions("archive", [index]),
-                  children: t2("panel.suggestions.archive")
+                  children: t("panel.suggestions.archive")
                 }
               ),
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
@@ -450,7 +450,7 @@ function MemoryQueueView(props) {
                   className: "me-btn me-btn-danger",
                   disabled: busy,
                   onClick: () => runSuggestions("reject", [index]),
-                  children: t2("panel.suggestions.reject")
+                  children: t("panel.suggestions.reject")
                 }
               )
             ] })
@@ -464,7 +464,7 @@ function MemoryQueueView(props) {
               onChange: (event) => setEdits((prev) => ({ ...prev, [index]: event.target.value }))
             }
           ),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-item-reason", children: entry.reason !== void 0 && entry.reason !== "" ? entry.reason : t2("panel.suggestions.editHint") })
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-item-reason", children: entry.reason !== void 0 && entry.reason !== "" ? entry.reason : t("panel.suggestions.editHint") })
         ] }, `${entry.time}-${index}`)) }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-bulk", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
@@ -474,7 +474,7 @@ function MemoryQueueView(props) {
               className: "me-btn me-btn-ok",
               disabled: busy,
               onClick: () => runSuggestions("approve", suggestionRows.map((row) => row.index)),
-              children: t2("panel.suggestions.approveAll")
+              children: t("panel.suggestions.approveAll")
             }
           ),
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
@@ -484,7 +484,7 @@ function MemoryQueueView(props) {
               className: "me-btn me-btn-danger",
               disabled: busy,
               onClick: () => runSuggestions("reject", suggestionRows.map((row) => row.index)),
-              children: t2("panel.suggestions.rejectAll")
+              children: t("panel.suggestions.rejectAll")
             }
           )
         ] })
@@ -492,14 +492,14 @@ function MemoryQueueView(props) {
     ] }),
     feature === "skills" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", { className: "me-block", children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-block-head", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", { className: "me-heading", children: t2("panel.skills.title") }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", { className: "me-heading", children: t("panel.skills.title") }),
         skills !== null && skills.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-count", children: skills.length })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-help", children: t2("panel.skills.help") }),
-      skills === null ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-muted", children: t2("panel.loading") }) : skills.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-empty", children: t2("panel.skills.empty") }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", { className: "me-list", children: skills.map((skill) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { className: "me-item", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-help", children: t("panel.skills.help") }),
+      skills === null ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-muted", children: t("panel.loading") }) : skills.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-empty", children: t("panel.skills.empty") }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", { className: "me-list", children: skills.map((skill) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { className: "me-item", children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-item-head", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-badge me-badge-target", children: skill.name }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-item-time", children: t2("panel.skills.pending") }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "me-item-time", children: t("panel.skills.pending") }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-item-actions", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "button",
@@ -508,7 +508,7 @@ function MemoryQueueView(props) {
                 className: "me-btn me-btn-ok",
                 disabled: busy,
                 onClick: () => runSkill("approve", skill.name),
-                children: t2("panel.skills.approve")
+                children: t("panel.skills.approve")
               }
             ),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
@@ -518,7 +518,7 @@ function MemoryQueueView(props) {
                 className: "me-btn me-btn-danger",
                 disabled: busy,
                 onClick: () => runSkill("reject", skill.name),
-                children: t2("panel.skills.reject")
+                children: t("panel.skills.reject")
               }
             )
           ] })
@@ -527,14 +527,14 @@ function MemoryQueueView(props) {
       ] }, skill.name)) })
     ] }),
     feature === "config" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", { className: "me-block", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "me-block-head", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", { className: "me-heading", children: t2("panel.config.title") }) }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-help", children: t2("panel.config.help") }),
-      draft === null ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-muted", children: t2("panel.loading") }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-form", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "me-block-head", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", { className: "me-heading", children: t("panel.config.title") }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-help", children: t("panel.config.help") }),
+      draft === null ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "me-muted", children: t("panel.loading") }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-form", children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-group", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.reviewEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.reviewEnabled.hint") })
+              t("panel.config.reviewEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.reviewEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -548,8 +548,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.reviewInterval"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.reviewInterval.hint") })
+              t("panel.config.reviewInterval"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.reviewInterval.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -566,8 +566,8 @@ function MemoryQueueView(props) {
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-group", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.skillReviewEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.skillReviewEnabled.hint") })
+              t("panel.config.skillReviewEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.skillReviewEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -581,8 +581,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.perTurnWriteGuard"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.perTurnWriteGuard.hint") })
+              t("panel.config.perTurnWriteGuard"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.perTurnWriteGuard.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -596,8 +596,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.writeGuardThreshold"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.writeGuardThreshold.hint") })
+              t("panel.config.writeGuardThreshold"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.writeGuardThreshold.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -617,8 +617,8 @@ function MemoryQueueView(props) {
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-group", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.perTurnProjectWrites"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.perTurnProjectWrites.hint") })
+              t("panel.config.perTurnProjectWrites"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.perTurnProjectWrites.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -632,8 +632,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.perTurnDailyWrites"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.perTurnDailyWrites.hint") })
+              t("panel.config.perTurnDailyWrites"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.perTurnDailyWrites.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -647,8 +647,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.perTurnKeyWrites"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.perTurnKeyWrites.hint") })
+              t("panel.config.perTurnKeyWrites"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.perTurnKeyWrites.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -664,8 +664,8 @@ function MemoryQueueView(props) {
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-group", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.keyProgressiveDisclosure"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.keyProgressiveDisclosure.hint") })
+              t("panel.config.keyProgressiveDisclosure"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.keyProgressiveDisclosure.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
               "select",
@@ -674,17 +674,17 @@ function MemoryQueueView(props) {
                 value: draft.keyProgressiveDisclosure ?? "off",
                 onChange: (event) => patchDraft({ keyProgressiveDisclosure: event.target.value }),
                 children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "auto", children: t2("panel.config.keyProgressiveDisclosure.auto") }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "off", children: t2("panel.config.keyProgressiveDisclosure.off") }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "on", children: t2("panel.config.keyProgressiveDisclosure.on") })
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "auto", children: t("panel.config.keyProgressiveDisclosure.auto") }),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "off", children: t("panel.config.keyProgressiveDisclosure.off") }),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "on", children: t("panel.config.keyProgressiveDisclosure.on") })
                 ]
               }
             )
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.keyBranchFilter"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.keyBranchFilter.hint") })
+              t("panel.config.keyBranchFilter"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.keyBranchFilter.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -698,8 +698,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.keyFullInjectThreshold"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.keyFullInjectThreshold.hint") })
+              t("panel.config.keyFullInjectThreshold"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.keyFullInjectThreshold.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -717,8 +717,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.keyFullInjectCharLimit"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.keyFullInjectCharLimit.hint") })
+              t("panel.config.keyFullInjectCharLimit"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.keyFullInjectCharLimit.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -738,8 +738,8 @@ function MemoryQueueView(props) {
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "me-group", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.searchDocsEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.searchDocsEnabled.hint") })
+              t("panel.config.searchDocsEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.searchDocsEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
               "select",
@@ -755,18 +755,18 @@ function MemoryQueueView(props) {
                   });
                 },
                 children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "all", children: t2("panel.config.searchDocsMode.all") }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "filename", children: t2("panel.config.searchDocsMode.filename") }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "content", children: t2("panel.config.searchDocsMode.content") }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "off", children: t2("panel.config.searchDocsMode.off") })
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "all", children: t("panel.config.searchDocsMode.all") }),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "filename", children: t("panel.config.searchDocsMode.filename") }),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "content", children: t("panel.config.searchDocsMode.content") }),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "off", children: t("panel.config.searchDocsMode.off") })
                 ]
               }
             )
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.coiEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.coiEnabled.hint") })
+              t("panel.config.coiEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.coiEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -780,8 +780,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.broadcastEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.broadcastEnabled.hint") })
+              t("panel.config.broadcastEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.broadcastEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -795,8 +795,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.advisorEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.advisorEnabled.hint") })
+              t("panel.config.advisorEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.advisorEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -810,8 +810,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.notifyEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.notifyEnabled.hint") })
+              t("panel.config.notifyEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.notifyEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -825,8 +825,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.syncEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.syncEnabled.hint") })
+              t("panel.config.syncEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.syncEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -840,8 +840,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.canvasEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.canvasEnabled.hint") })
+              t("panel.config.canvasEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.canvasEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -855,8 +855,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.sessionEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.sessionEnabled.hint") })
+              t("panel.config.sessionEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.sessionEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -870,8 +870,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.sessionSearchEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.sessionSearchEnabled.hint") })
+              t("panel.config.sessionSearchEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.sessionSearchEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -885,8 +885,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.promptsEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.promptsEnabled.hint") })
+              t("panel.config.promptsEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.promptsEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -900,8 +900,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.modelsEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.modelsEnabled.hint") })
+              t("panel.config.modelsEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.modelsEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -915,8 +915,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.uiSettingsEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.uiSettingsEnabled.hint") })
+              t("panel.config.uiSettingsEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.uiSettingsEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -930,8 +930,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.bookmarkEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.bookmarkEnabled.hint") })
+              t("panel.config.bookmarkEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.bookmarkEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -945,8 +945,8 @@ function MemoryQueueView(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "me-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "me-field-label", children: [
-              t2("panel.config.todoEnabled"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t2("panel.config.todoEnabled.hint") })
+              t("panel.config.todoEnabled"),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("em", { className: "me-field-hint", children: t("panel.config.todoEnabled.hint") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
               "input",
@@ -959,7 +959,7 @@ function MemoryQueueView(props) {
             )
           ] })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "me-actions", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", className: "me-btn me-btn-primary", disabled: busy, onClick: saveConfig, children: t2("panel.config.save") }) })
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "me-actions", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", className: "me-btn me-btn-primary", disabled: busy, onClick: saveConfig, children: t("panel.config.save") }) })
       ] })
     ] })
   ] });
@@ -1059,67 +1059,67 @@ async function api2(path, init) {
 }
 var persistedFeatures = /* @__PURE__ */ new Map();
 var persistedFileKeys = /* @__PURE__ */ new Map();
-function memoryGuideSections(t2) {
+function memoryGuideSections(t) {
   return [
     {
       icon: "\u{1F9E0}",
-      title: t2("memoryTab.guide.tracks.title"),
-      body: t2("memoryTab.guide.tracks.body"),
+      title: t("memoryTab.guide.tracks.title"),
+      body: t("memoryTab.guide.tracks.body"),
       items: [
-        t2("memoryTab.guide.tracks.item1"),
-        t2("memoryTab.guide.tracks.item2"),
-        t2("memoryTab.guide.tracks.item3"),
-        t2("memoryTab.guide.tracks.item4"),
-        t2("memoryTab.guide.tracks.item5")
+        t("memoryTab.guide.tracks.item1"),
+        t("memoryTab.guide.tracks.item2"),
+        t("memoryTab.guide.tracks.item3"),
+        t("memoryTab.guide.tracks.item4"),
+        t("memoryTab.guide.tracks.item5")
       ]
     },
     {
       icon: "\u{1F4C2}",
-      title: t2("memoryTab.guide.files.title"),
-      body: t2("memoryTab.guide.files.body"),
+      title: t("memoryTab.guide.files.title"),
+      body: t("memoryTab.guide.files.body"),
       items: [
-        t2("memoryTab.guide.files.item1"),
-        t2("memoryTab.guide.files.item2"),
-        t2("memoryTab.guide.files.item3")
+        t("memoryTab.guide.files.item1"),
+        t("memoryTab.guide.files.item2"),
+        t("memoryTab.guide.files.item3")
       ]
     },
     {
       icon: "\u{1F33F}",
-      title: t2("memoryTab.guide.branch.title"),
-      body: t2("memoryTab.guide.branch.body"),
+      title: t("memoryTab.guide.branch.title"),
+      body: t("memoryTab.guide.branch.body"),
       items: [
-        t2("memoryTab.guide.branch.item1"),
-        t2("memoryTab.guide.branch.item2")
+        t("memoryTab.guide.branch.item1"),
+        t("memoryTab.guide.branch.item2")
       ]
     },
     {
       icon: "\u{1F6E0}\uFE0F",
-      title: t2("memoryTab.guide.maintain.title"),
-      body: t2("memoryTab.guide.maintain.body"),
+      title: t("memoryTab.guide.maintain.title"),
+      body: t("memoryTab.guide.maintain.body"),
       items: [
-        t2("memoryTab.guide.maintain.item1"),
-        t2("memoryTab.guide.maintain.item2"),
-        t2("memoryTab.guide.maintain.item3")
+        t("memoryTab.guide.maintain.item1"),
+        t("memoryTab.guide.maintain.item2"),
+        t("memoryTab.guide.maintain.item3")
       ]
     },
     {
       icon: "\u2705",
-      title: t2("memoryTab.guide.suggestions.title"),
-      body: t2("memoryTab.guide.suggestions.body"),
+      title: t("memoryTab.guide.suggestions.title"),
+      body: t("memoryTab.guide.suggestions.body"),
       items: [
-        t2("memoryTab.guide.suggestions.item1"),
-        t2("memoryTab.guide.suggestions.item2")
+        t("memoryTab.guide.suggestions.item1"),
+        t("memoryTab.guide.suggestions.item2")
       ]
     },
     {
       icon: "\u{1F6E1}\uFE0F",
-      title: t2("memoryTab.guide.confirm.title"),
-      body: t2("memoryTab.guide.confirm.body")
+      title: t("memoryTab.guide.confirm.title"),
+      body: t("memoryTab.guide.confirm.body")
     }
   ];
 }
 function MemoryTabView(props) {
-  const { sessionId, t: t2 } = props;
+  const { sessionId, t } = props;
   const [files, setFiles] = (0, import_react2.useState)(null);
   const [notice, setNotice] = (0, import_react2.useState)(null);
   const [cwd, setCwd] = (0, import_react2.useState)(null);
@@ -1194,7 +1194,7 @@ function MemoryTabView(props) {
   };
   const openWithSystem = (row) => {
     const target = row.key === "memory" ? "memoryFile" : row.key === "user" ? "userFile" : row.key === "daily" ? "dailyFile" : row.key === "project" || row.key === "key" ? "projectsDir" : row.key === "archive-memory" ? "archiveMemoryFile" : row.key === "archive-user" ? "archiveUserFile" : row.key === "archive-key" ? "projectsDir" : "agentsFile";
-    void api2("/api/reveal", { method: "POST", body: JSON.stringify({ target }) }).then(() => flash(t2("memoryTab.opened"))).catch((error) => setNotice({ kind: "error", text: error.message }));
+    void api2("/api/reveal", { method: "POST", body: JSON.stringify({ target }) }).then(() => flash(t("memoryTab.opened"))).catch((error) => setNotice({ kind: "error", text: error.message }));
   };
   const saveKey = () => {
     const content = keyDraft.trim();
@@ -1207,7 +1207,7 @@ function MemoryTabView(props) {
       setKeyDraft("");
       setKeyDshOnly(false);
       load();
-      flash(t2("memoryTab.keyAdded"));
+      flash(t("memoryTab.keyAdded"));
     }).catch((error) => {
       setNotice({ kind: "error", text: error.message });
     }).finally(() => setKeySaving(false));
@@ -1222,7 +1222,7 @@ function MemoryTabView(props) {
     }).then(() => {
       setGlobalDrafts((prev) => ({ ...prev, [key]: "" }));
       load();
-      flash(t2("memoryTab.memoryUserAdded"));
+      flash(t("memoryTab.memoryUserAdded"));
     }).catch((error) => {
       setNotice({ kind: "error", text: error.message });
     }).finally(() => setGlobalSaving(false));
@@ -1246,7 +1246,7 @@ function MemoryTabView(props) {
     }).then(() => {
       setScopeEdit(null);
       load();
-      flash(t2("memoryTab.keyScopeSaved"));
+      flash(t("memoryTab.keyScopeSaved"));
     }).catch((error) => {
       setNotice({ kind: "error", text: error.message });
     }).finally(() => setScopeSaving(false));
@@ -1264,7 +1264,7 @@ function MemoryTabView(props) {
       })
     }).then(() => {
       load();
-      flash(entry.dshOnly ? t2("memoryTab.dshOnlyRemoved") : t2("memoryTab.dshOnlySet"));
+      flash(entry.dshOnly ? t("memoryTab.dshOnlyRemoved") : t("memoryTab.dshOnlySet"));
     }).catch((error) => {
       setNotice({ kind: "error", text: error.message });
     }).finally(() => setDeleting(false));
@@ -1272,7 +1272,7 @@ function MemoryTabView(props) {
   const deleteEntry = (entry) => {
     if (activeRow === null || deleting) return;
     const snippet = entry.text.length > 60 ? `${entry.text.slice(0, 60)}\u2026` : entry.text;
-    if (!window.confirm(t2("memoryTab.deleteConfirm", { snippet }))) return;
+    if (!window.confirm(t("memoryTab.deleteConfirm", { snippet }))) return;
     setDeleting(true);
     void api2("/api/memory/delete", {
       method: "POST",
@@ -1283,7 +1283,7 @@ function MemoryTabView(props) {
       })
     }).then(() => {
       load();
-      flash(t2("memoryTab.deleted"));
+      flash(t("memoryTab.deleted"));
     }).catch((error) => {
       setNotice({ kind: "error", text: error.message });
     }).finally(() => setDeleting(false));
@@ -1298,7 +1298,7 @@ function MemoryTabView(props) {
     if (content === "") return;
     if (INJECTED_KEYS.has(activeRow.key)) {
       const snippet = content.length > 60 ? `${content.slice(0, 60)}\u2026` : content;
-      if (!window.confirm(t2("memoryTab.editConfirm", { snippet }))) return;
+      if (!window.confirm(t("memoryTab.editConfirm", { snippet }))) return;
     }
     setEditSaving(true);
     void api2("/api/memory/update", {
@@ -1312,7 +1312,7 @@ function MemoryTabView(props) {
     }).then(() => {
       setEditEntryRaw(null);
       load();
-      flash(t2("memoryTab.updated"));
+      flash(t("memoryTab.updated"));
     }).catch((error) => {
       setNotice({ kind: "error", text: error.message });
     }).finally(() => setEditSaving(false));
@@ -1321,7 +1321,7 @@ function MemoryTabView(props) {
     if (activeRow === null || deleting) return;
     if (op === "archive") {
       const snippet = entry.text.length > 60 ? `${entry.text.slice(0, 60)}\u2026` : entry.text;
-      if (!window.confirm(t2("memoryTab.archiveConfirm", { snippet }))) return;
+      if (!window.confirm(t("memoryTab.archiveConfirm", { snippet }))) return;
     }
     setDeleting(true);
     const path = op === "archive" ? "/api/memory/archive" : "/api/archive/promote";
@@ -1331,7 +1331,7 @@ function MemoryTabView(props) {
       body: JSON.stringify({ sessionId: String(sessionId), target, match: entry.raw })
     }).then(() => {
       load();
-      flash(op === "archive" ? t2("memoryTab.archived") : t2("memoryTab.promoted"));
+      flash(op === "archive" ? t("memoryTab.archived") : t("memoryTab.promoted"));
     }).catch((error) => {
       setNotice({ kind: "error", text: error.message });
     }).finally(() => setDeleting(false));
@@ -1363,7 +1363,7 @@ function MemoryTabView(props) {
           "aria-selected": feature === "guide",
           className: feature === "guide" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature(feature === "guide" ? null : "guide"),
-          children: t2("memoryTab.feature.guide")
+          children: t("memoryTab.feature.guide")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(
@@ -1375,7 +1375,7 @@ function MemoryTabView(props) {
           className: feature === "suggestions" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature(feature === "suggestions" ? null : "suggestions"),
           children: [
-            t2("memoryTab.feature.suggestions"),
+            t("memoryTab.feature.suggestions"),
             badge.suggestions > 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-feature-count", children: badge.suggestions })
           ]
         }
@@ -1400,28 +1400,28 @@ function MemoryTabView(props) {
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("p", { className: "mt-warning", children: [
       "\u26A0\uFE0F ",
-      t2("memoryTab.warning")
+      t("memoryTab.warning")
     ] }),
     cwd !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("p", { className: "mt-cwd", children: [
-      t2("memoryTab.cwd"),
+      t("memoryTab.cwd"),
       ": ",
       cwd
     ] }),
     feature !== null ? feature === "guide" ? (
       // 记忆专属指南：详细介绍记忆 Tab 自己的功能（五轨/文件页签/分支/
       // 编辑维护/待确认建议机制）。整体插件指南在「Memory Evolve 设置」Tab。
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(TabGuideView, { sections: memoryGuideSections(t2) })
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(TabGuideView, { sections: memoryGuideSections(t) })
     ) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
       MemoryQueueView,
       {
-        t: t2,
+        t,
         feature: "suggestions",
         onChanged: () => {
           pollBadge();
           window.dispatchEvent(new CustomEvent("dsh-memory-evolve:badge-change"));
         }
       }
-    ) : files === null ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "mt-muted", children: t2("memoryTab.loading") }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
+    ) : files === null ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "mt-muted", children: t("memoryTab.loading") }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-toolbar", children: [
         /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-view-toggle", role: "group", children: [
           /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
@@ -1430,7 +1430,7 @@ function MemoryTabView(props) {
               type: "button",
               className: view === "pretty" ? "mt-view-btn mt-view-btn-active" : "mt-view-btn",
               onClick: () => setView("pretty"),
-              children: t2("memoryTab.viewPretty")
+              children: t("memoryTab.viewPretty")
             }
           ),
           /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
@@ -1439,7 +1439,7 @@ function MemoryTabView(props) {
               type: "button",
               className: view === "raw" ? "mt-view-btn mt-view-btn-active" : "mt-view-btn",
               onClick: () => setView("raw"),
-              children: t2("memoryTab.viewRaw")
+              children: t("memoryTab.viewRaw")
             }
           )
         ] }),
@@ -1449,7 +1449,7 @@ function MemoryTabView(props) {
             type: "search",
             className: "mt-search",
             value: query,
-            placeholder: t2("memoryTab.searchPlaceholder"),
+            placeholder: t("memoryTab.searchPlaceholder"),
             onChange: (event) => {
               setQuery(event.target.value);
               setPage(0);
@@ -1457,20 +1457,20 @@ function MemoryTabView(props) {
           }
         )
       ] }),
-      q !== "" && activeHidden && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "mt-empty", children: t2("memoryTab.noResults") }),
+      q !== "" && activeHidden && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "mt-empty", children: t("memoryTab.noResults") }),
       activeRow !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-card", children: [
         /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-card-head", children: [
           /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-card-title", children: activeRow.title }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-badge mt-badge-ro", children: t2("memoryTab.readonly") }),
-          activeEntries !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-badge mt-badge-count", children: t2("memoryTab.entryCount", { count: activeEntries.length }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-badge mt-badge-ro", children: t("memoryTab.readonly") }),
+          activeEntries !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-badge mt-badge-count", children: t("memoryTab.entryCount", { count: activeEntries.length }) }),
           activeRow.path !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-card-path", title: activeRow.path, children: activeRow.path }),
-          activeRow.available && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-card-actions", children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { type: "button", className: "mt-btn", onClick: () => openWithSystem(activeRow), children: t2("memoryTab.open") }) })
+          activeRow.available && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-card-actions", children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { type: "button", className: "mt-btn", onClick: () => openWithSystem(activeRow), children: t("memoryTab.open") }) })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("p", { className: "mt-card-desc", children: [
-          t2(`memoryTab.desc.${activeRow.key}`),
+          t(`memoryTab.desc.${activeRow.key}`),
           activeRow.key === "key" && branch !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "mt-card-desc-branch", children: [
             " ",
-            t2("memoryTab.keyBranchInfo", { branch })
+            t("memoryTab.keyBranchInfo", { branch })
           ] })
         ] }),
         activeRow.key === "key" && activeRow.available && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-key-add", children: [
@@ -1480,13 +1480,13 @@ function MemoryTabView(props) {
               className: "mt-key-input",
               rows: 2,
               value: keyDraft,
-              placeholder: t2("memoryTab.keyAddPlaceholder"),
+              placeholder: t("memoryTab.keyAddPlaceholder"),
               onChange: (event) => setKeyDraft(event.target.value)
             }
           ),
           branches.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-key-scope", children: [
             /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "mt-key-scope-label", children: [
-              t2("memoryTab.keyScope"),
+              t("memoryTab.keyScope"),
               ":"
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { className: "mt-scope-opt", children: [
@@ -1498,7 +1498,7 @@ function MemoryTabView(props) {
                   onChange: () => setKeyScope([])
                 }
               ),
-              t2("memoryTab.keyScopeAll")
+              t("memoryTab.keyScopeAll")
             ] }),
             branches.map((b) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { className: "mt-scope-opt", children: [
               /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
@@ -1513,8 +1513,8 @@ function MemoryTabView(props) {
             ] }, b))
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-key-add-foot", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-key-help", children: t2("memoryTab.keyAddHelp") }),
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { className: "mt-key-dsh-opt", title: t2("memoryTab.dshOnlyHint"), children: [
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-key-help", children: t("memoryTab.keyAddHelp") }),
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { className: "mt-key-dsh-opt", title: t("memoryTab.dshOnlyHint"), children: [
               /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
                 "input",
                 {
@@ -1523,7 +1523,7 @@ function MemoryTabView(props) {
                   onChange: (event) => setKeyDshOnly(event.target.checked)
                 }
               ),
-              t2("memoryTab.dshOnlyAdd")
+              t("memoryTab.dshOnlyAdd")
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
               "button",
@@ -1532,7 +1532,7 @@ function MemoryTabView(props) {
                 className: "mt-btn mt-btn-primary",
                 disabled: keySaving || keyDraft.trim() === "",
                 onClick: saveKey,
-                children: t2("memoryTab.keyAdd")
+                children: t("memoryTab.keyAdd")
               }
             )
           ] })
@@ -1544,12 +1544,12 @@ function MemoryTabView(props) {
               className: "mt-key-input",
               rows: 2,
               value: globalDrafts[activeRow.key] ?? "",
-              placeholder: activeRow.key === "memory" ? t2("memoryTab.memoryAddPlaceholder") : t2("memoryTab.userAddPlaceholder"),
+              placeholder: activeRow.key === "memory" ? t("memoryTab.memoryAddPlaceholder") : t("memoryTab.userAddPlaceholder"),
               onChange: (event) => setGlobalDrafts((prev) => ({ ...prev, [activeRow.key]: event.target.value }))
             }
           ),
           /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-key-add-foot", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-key-help", children: t2("memoryTab.memoryUserAddHelp") }),
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-key-help", children: t("memoryTab.memoryUserAddHelp") }),
             /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
               "button",
               {
@@ -1559,31 +1559,31 @@ function MemoryTabView(props) {
                 onClick: () => {
                   void saveGlobal(activeRow.key);
                 },
-                children: t2("memoryTab.memoryAdd")
+                children: t("memoryTab.memoryAdd")
               }
             )
           ] })
         ] }),
-        !activeRow.available ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "mt-muted", children: t2("memoryTab.noCwd") }) : !activeRow.exists ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("pre", { className: "mt-content", children: t2("memoryTab.empty") }) : activeEntries === null ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("pre", { className: "mt-content", children: activeRow.content }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "mt-entries", children: (pageEntries ?? []).map((entry, index) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-entry", children: [
+        !activeRow.available ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "mt-muted", children: t("memoryTab.noCwd") }) : !activeRow.exists ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("pre", { className: "mt-content", children: t("memoryTab.empty") }) : activeEntries === null ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("pre", { className: "mt-content", children: activeRow.content }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "mt-entries", children: (pageEntries ?? []).map((entry, index) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-entry", children: [
           /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-entry-head", children: [
             entry.time !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-entry-time", children: entry.time }),
-            entry.branch !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-entry-branch mt-entry-branch-tag", title: t2("memoryTab.gitBranch"), children: entry.branch }),
-            entry.tag !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-entry-tag", title: t2("memoryTab.projectTag"), children: entry.tag }),
-            entry.dshOnly && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "mt-entry-dsh-only", title: t2("memoryTab.dshOnlyHint"), children: [
+            entry.branch !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-entry-branch mt-entry-branch-tag", title: t("memoryTab.gitBranch"), children: entry.branch }),
+            entry.tag !== null && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-entry-tag", title: t("memoryTab.projectTag"), children: entry.tag }),
+            entry.dshOnly && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "mt-entry-dsh-only", title: t("memoryTab.dshOnlyHint"), children: [
               "\u{1F512} ",
-              t2("memoryTab.dshOnly")
+              t("memoryTab.dshOnly")
             ] }),
             activeRow.key === "key" && branches.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(
               "button",
               {
                 type: "button",
                 className: entry.branches === null ? "mt-entry-branch mt-entry-branch-all" : "mt-entry-branch",
-                title: entry.branches === null ? t2("memoryTab.keyScopeAllHint") : t2("memoryTab.keyScopeHint"),
+                title: entry.branches === null ? t("memoryTab.keyScopeAllHint") : t("memoryTab.keyScopeHint"),
                 onClick: () => openScope(entry),
                 children: [
-                  t2("memoryTab.keyScopeLabel"),
+                  t("memoryTab.keyScopeLabel"),
                   ": ",
-                  entry.branches === null ? t2("memoryTab.keyScopeAll") : entry.branches.join(", "),
+                  entry.branches === null ? t("memoryTab.keyScopeAll") : entry.branches.join(", "),
                   " \u25BE"
                 ]
               }
@@ -1594,10 +1594,10 @@ function MemoryTabView(props) {
                 {
                   type: "button",
                   className: "mt-btn mt-entry-op",
-                  title: t2("memoryTab.archive"),
+                  title: t("memoryTab.archive"),
                   disabled: deleting,
                   onClick: () => moveEntry(entry, "archive"),
-                  children: t2("memoryTab.archive")
+                  children: t("memoryTab.archive")
                 }
               ),
               (activeRow.key === "archive-memory" || activeRow.key === "archive-user" || activeRow.key === "archive-key") && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
@@ -1605,10 +1605,10 @@ function MemoryTabView(props) {
                 {
                   type: "button",
                   className: "mt-btn mt-entry-op",
-                  title: t2("memoryTab.promote"),
+                  title: t("memoryTab.promote"),
                   disabled: deleting,
                   onClick: () => moveEntry(entry, "promote"),
-                  children: t2("memoryTab.promote")
+                  children: t("memoryTab.promote")
                 }
               ),
               EDIT_KEYS.has(activeRow.key) && editEntryRaw !== entry.raw && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
@@ -1616,10 +1616,10 @@ function MemoryTabView(props) {
                 {
                   type: "button",
                   className: "mt-btn mt-entry-op",
-                  title: t2("memoryTab.edit"),
+                  title: t("memoryTab.edit"),
                   disabled: deleting,
                   onClick: () => startEdit(entry),
-                  children: t2("memoryTab.edit")
+                  children: t("memoryTab.edit")
                 }
               ),
               (activeRow.key === "memory" || activeRow.key === "user" || activeRow.key === "key") && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
@@ -1627,10 +1627,10 @@ function MemoryTabView(props) {
                 {
                   type: "button",
                   className: `mt-btn mt-entry-op${entry.dshOnly ? " mt-entry-dsh-on" : ""}`,
-                  title: t2("memoryTab.dshOnlyToggleHint"),
+                  title: t("memoryTab.dshOnlyToggleHint"),
                   disabled: deleting,
                   onClick: () => toggleDshOnly(entry),
-                  children: entry.dshOnly ? t2("memoryTab.dshOnlyOff") : t2("memoryTab.dshOnlyOn")
+                  children: entry.dshOnly ? t("memoryTab.dshOnlyOff") : t("memoryTab.dshOnlyOn")
                 }
               ),
               /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
@@ -1638,10 +1638,10 @@ function MemoryTabView(props) {
                 {
                   type: "button",
                   className: "mt-btn mt-entry-del",
-                  title: t2("memoryTab.delete"),
+                  title: t("memoryTab.delete"),
                   disabled: deleting,
                   onClick: () => deleteEntry(entry),
-                  children: t2("memoryTab.delete")
+                  children: t("memoryTab.delete")
                 }
               )
             ] })
@@ -1657,7 +1657,7 @@ function MemoryTabView(props) {
               }
             ),
             /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-entry-edit-row", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-entry-edit-hint", children: t2("memoryTab.editHint") }),
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-entry-edit-hint", children: t("memoryTab.editHint") }),
               /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
                 "button",
                 {
@@ -1665,15 +1665,15 @@ function MemoryTabView(props) {
                   className: "mt-btn mt-btn-primary",
                   disabled: editSaving || editDraft.trim() === "",
                   onClick: saveEdit,
-                  children: t2("memoryTab.save")
+                  children: t("memoryTab.save")
                 }
               ),
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { type: "button", className: "mt-btn", disabled: editSaving, onClick: () => setEditEntryRaw(null), children: t2("memoryTab.cancel") })
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { type: "button", className: "mt-btn", disabled: editSaving, onClick: () => setEditEntryRaw(null), children: t("memoryTab.cancel") })
             ] })
           ] }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "mt-entry-text", children: entry.text }),
           activeRow.key === "key" && scopeEdit === entry.raw && branches.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "mt-scope", children: [
             /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "mt-key-scope-label", children: [
-              t2("memoryTab.keyScope"),
+              t("memoryTab.keyScope"),
               ":"
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { className: "mt-scope-opt", children: [
@@ -1685,8 +1685,8 @@ function MemoryTabView(props) {
                   onChange: () => setScopeDraft([])
                 }
               ),
-              t2("memoryTab.keyScopeAll"),
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("em", { className: "mt-scope-all-hint", children: t2("memoryTab.keyScopeAllWeight") })
+              t("memoryTab.keyScopeAll"),
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("em", { className: "mt-scope-all-hint", children: t("memoryTab.keyScopeAllWeight") })
             ] }),
             branches.map((b) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { className: "mt-scope-opt", children: [
               /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
@@ -1707,10 +1707,10 @@ function MemoryTabView(props) {
                   className: "mt-btn mt-btn-primary",
                   disabled: scopeSaving,
                   onClick: saveScope,
-                  children: t2("memoryTab.keyScopeSave")
+                  children: t("memoryTab.keyScopeSave")
                 }
               ),
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { type: "button", className: "mt-btn", disabled: scopeSaving, onClick: () => setScopeEdit(null), children: t2("memoryTab.keyScopeCancel") })
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { type: "button", className: "mt-btn", disabled: scopeSaving, onClick: () => setScopeEdit(null), children: t("memoryTab.keyScopeCancel") })
             ] })
           ] })
         ] }, index)) }),
@@ -1722,10 +1722,10 @@ function MemoryTabView(props) {
               className: "mt-btn",
               disabled: safePage <= 0,
               onClick: () => setPage(safePage - 1),
-              children: t2("memoryTab.pagePrev")
+              children: t("memoryTab.pagePrev")
             }
           ),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-pager-info", children: t2("memoryTab.pageInfo", { page: safePage + 1, total: pageCount, count: activeEntries.length }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "mt-pager-info", children: t("memoryTab.pageInfo", { page: safePage + 1, total: pageCount, count: activeEntries.length }) }),
           /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
             "button",
             {
@@ -1733,11 +1733,11 @@ function MemoryTabView(props) {
               className: "mt-btn",
               disabled: safePage >= pageCount - 1,
               onClick: () => setPage(safePage + 1),
-              children: t2("memoryTab.pageNext")
+              children: t("memoryTab.pageNext")
             }
           )
         ] }),
-        activeRow.truncated && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "mt-muted", children: t2("memoryTab.truncated") })
+        activeRow.truncated && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "mt-muted", children: t("memoryTab.truncated") })
       ] })
     ] })
   ] });
@@ -1788,11 +1788,11 @@ function relOf(root, abs) {
   const prefix = root === "/" ? "/" : `${root}/`;
   return abs.startsWith(prefix) ? abs.slice(prefix.length) : "";
 }
-function formatSize(t2, size) {
+function formatSize(t, size) {
   if (size == null) return "";
-  if (size < 1024) return t2("bytes", { size });
-  if (size < 1024 * 1024) return t2("kib", { size: (size / 1024).toFixed(1) });
-  return t2("mib", { size: (size / 1024 / 1024).toFixed(1) });
+  if (size < 1024) return t("bytes", { size });
+  if (size < 1024 * 1024) return t("kib", { size: (size / 1024).toFixed(1) });
+  return t("mib", { size: (size / 1024 / 1024).toFixed(1) });
 }
 function formatTime2(ms) {
   const d = new Date(ms);
@@ -1813,7 +1813,7 @@ function ResourceIcon({ skill }) {
 var PAGE_SIZE2 = 20;
 function SkillList(props) {
   const {
-    t: t2,
+    t,
     skills,
     loading,
     error,
@@ -1849,8 +1849,8 @@ function SkillList(props) {
   const paged = filtered.slice((pageSafe - 1) * PAGE_SIZE2, pageSafe * PAGE_SIZE2);
   return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-section sb-section--skills", children: [
     /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-pane-head", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-pane-title", children: t2("pane.skills") }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-count", children: t2("skills.count", { count: filtered.length }) })
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-pane-title", children: t("pane.skills") }),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-count", children: t("skills.count", { count: filtered.length }) })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-chips", children: [
       sourceCounts.length > 1 && /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)(import_jsx_runtime4.Fragment, { children: [
@@ -1861,7 +1861,7 @@ function SkillList(props) {
             className: `sb-chip${sourceFilter === "all" ? " sb-chip--active" : ""}`,
             onClick: () => onSourceFilter("all"),
             children: [
-              t2("filter.all"),
+              t("filter.all"),
               " ",
               totalCount
             ]
@@ -1889,7 +1889,7 @@ function SkillList(props) {
           type: "button",
           className: `sb-chip${statusFilter === status ? " sb-chip--active" : ""}`,
           onClick: () => onStatusFilter(status),
-          children: status === "all" ? t2("filter.all") : status === "enabled" ? t2("status.enabled") : t2("disabled.badge")
+          children: status === "all" ? t("filter.all") : status === "enabled" ? t("status.enabled") : t("disabled.badge")
         },
         status
       ))
@@ -1897,42 +1897,42 @@ function SkillList(props) {
     /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-list", children: [
       loading && /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-note", children: [
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconLoadingOutline16, { className: "sb-spin" }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t2("loading.skills") })
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t("loading.skills") })
       ] }),
       !loading && error !== null && /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-note sb-note--error", children: [
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconWarningOutline16, {}),
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: error }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { type: "button", className: "sb-btn sb-btn--ghost", onClick: onRetry, children: t2("refresh") })
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { type: "button", className: "sb-btn sb-btn--ghost", onClick: onRetry, children: t("refresh") })
       ] }),
-      !loading && error === null && filtered.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-note", children: t2("search.empty") }),
+      !loading && error === null && filtered.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-note", children: t("search.empty") }),
       !loading && error === null && paged.map((skill) => /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)(
         "button",
         {
           type: "button",
           className: `sb-card${skill.name === selectedName ? " sb-card--active" : ""}${skill.disabled ? " sb-card--disabled" : ""}`,
           onClick: () => onSelect(skill),
-          title: skill.disabled ? t2("disabled.hint") : void 0,
+          title: skill.disabled ? t("disabled.hint") : void 0,
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("span", { className: "sb-card-top", children: [
               /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-card-name", children: skill.name }),
-              skill.disabled && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-badge sb-badge--disabled", children: t2("disabled.badge") }),
-              /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: `sb-badge${sourceClass(skill.source)}`, children: t2("source.badge", { source: skill.source }) })
+              skill.disabled && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-badge sb-badge--disabled", children: t("disabled.badge") }),
+              /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: `sb-badge${sourceClass(skill.source)}`, children: t("source.badge", { source: skill.source }) })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-card-desc", children: skill.description }),
             /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("span", { className: "sb-card-meta", children: [
               /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(ResourceIcon, { skill }),
               skill.whenToUse !== null && skill.whenToUse !== "" && /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("span", { className: "sb-card-when", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-card-when-label", children: t2("when.to.use") }),
+                /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-card-when-label", children: t("when.to.use") }),
                 skill.whenToUse
               ] }),
               /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-spacer" }),
-              skill.protected ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-badge sb-badge--protected", title: t2("protected.hint"), children: t2("protected.badge") }) : /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+              skill.protected ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-badge sb-badge--protected", title: t("protected.hint"), children: t("protected.badge") }) : /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
                 "span",
                 {
                   className: `sb-toggle${skill.disabled ? " sb-toggle--disabled" : ""}`,
                   role: "button",
                   tabIndex: 0,
-                  title: skill.disabled ? t2("enable") : t2("disable"),
+                  title: skill.disabled ? t("enable") : t("disable"),
                   onClick: (e) => {
                     e.stopPropagation();
                     onToggleDisabled(skill);
@@ -1944,7 +1944,7 @@ function SkillList(props) {
                       onToggleDisabled(skill);
                     }
                   },
-                  children: togglingName === skill.name ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconLoadingOutline16, { className: "sb-spin" }) : skill.disabled ? t2("enable") : t2("disable")
+                  children: togglingName === skill.name ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconLoadingOutline16, { className: "sb-spin" }) : skill.disabled ? t("enable") : t("disable")
                 }
               )
             ] })
@@ -1961,10 +1961,10 @@ function SkillList(props) {
           className: "sb-btn sb-btn--ghost",
           disabled: pageSafe <= 1,
           onClick: onPrevPage,
-          children: t2("pager.prev")
+          children: t("pager.prev")
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-pager-info", children: t2("pager.page", { page: pageSafe, total: pageCount }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-pager-info", children: t("pager.page", { page: pageSafe, total: pageCount }) }),
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
         "button",
         {
@@ -1972,7 +1972,7 @@ function SkillList(props) {
           className: "sb-btn sb-btn--ghost",
           disabled: pageSafe >= pageCount,
           onClick: onNextPage,
-          children: t2("pager.next")
+          children: t("pager.next")
         }
       )
     ] })
@@ -1980,7 +1980,7 @@ function SkillList(props) {
 }
 function FileTree(props) {
   const {
-    t: t2,
+    t,
     hasSkill,
     root,
     rootOptions,
@@ -2001,7 +2001,7 @@ function FileTree(props) {
     if (loadingDirs.has(dirAbs)) {
       return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-tree-note", style: indent, children: [
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconLoadingOutline16, { className: "sb-spin" }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t2("loading.dir") })
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t("loading.dir") })
       ] });
     }
     const dirError = dirErrors.get(dirAbs);
@@ -2009,13 +2009,13 @@ function FileTree(props) {
       return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-tree-note sb-note--error", style: indent, children: [
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconWarningOutline16, {}),
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-tree-errmsg", title: dirError, children: dirError }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { type: "button", className: "sb-tree-retry", onClick: () => onRetryDir(dirAbs), children: t2("refresh") })
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { type: "button", className: "sb-tree-retry", onClick: () => onRetryDir(dirAbs), children: t("refresh") })
       ] });
     }
     const entries = cache.get(dirAbs);
     if (entries === void 0) return null;
     if (entries.length === 0) {
-      return /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-tree-note", style: indent, children: t2("no.entries") });
+      return /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-tree-note", style: indent, children: t("no.entries") });
     }
     return entries.map((entry) => {
       const abs = joinPath(dirAbs, entry.name);
@@ -2050,7 +2050,7 @@ function FileTree(props) {
           title: abs,
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-tree-name", children: entry.name }),
-            /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-tree-size", children: formatSize(t2, entry.size) })
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-tree-size", children: formatSize(t, entry.size) })
           ]
         },
         abs
@@ -2058,12 +2058,12 @@ function FileTree(props) {
     });
   };
   return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-section sb-section--files", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-pane-head", children: /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-pane-title", children: t2("pane.files") }) }),
-    !hasSkill && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-note", children: t2("no.skill.selected") }),
-    hasSkill && root === null && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-note", children: t2("no.root") }),
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-pane-head", children: /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-pane-title", children: t("pane.files") }) }),
+    !hasSkill && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-note", children: t("no.skill.selected") }),
+    hasSkill && root === null && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-note", children: t("no.root") }),
     hasSkill && root !== null && /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)(import_jsx_runtime4.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-root-bar", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-root-label", children: t2("root.label") }),
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-root-label", children: t("root.label") }),
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
           "select",
           {
@@ -2085,7 +2085,7 @@ function FileTree(props) {
 }
 function FileEditor(props) {
   const {
-    t: t2,
+    t,
     file,
     fileLoading,
     fileError,
@@ -2117,16 +2117,16 @@ function FileEditor(props) {
   if (fileLoading) {
     body = /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-editor-empty", children: [
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconLoadingOutline16, { className: "sb-spin" }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t2("loading.dir") })
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t("loading.dir") })
     ] });
   } else if (fileError !== null) {
-    const msg = fileError.kind === "not.text" ? t2("not.text") : fileError.kind === "too.large" ? t2("too.large") : t2("read.failed", { message: fileError.message });
+    const msg = fileError.kind === "not.text" ? t("not.text") : fileError.kind === "too.large" ? t("too.large") : t("read.failed", { message: fileError.message });
     body = /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-editor-empty sb-note--error", children: [
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconWarningOutline16, {}),
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: msg })
     ] });
   } else if (file === null) {
-    body = /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-editor-empty", children: hasSelection ? t2("no.file") : t2("no.file") });
+    body = /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-editor-empty", children: hasSelection ? t("no.file") : t("no.file") });
   } else if (editing) {
     body = /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-editor-edit", children: [
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-gutter sb-gutter--edit", ref: gutterRef, "aria-hidden": true, children: lineNumbers.map((n) => /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { children: n }, n)) }),
@@ -2156,14 +2156,14 @@ function FileEditor(props) {
     /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-editor-topbar", children: [
       file !== null ? /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)(import_jsx_runtime4.Fragment, { children: [
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-editor-filename", children: basename(file.path) }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-editor-path", title: `${t2("path")}: ${file.path}`, children: file.path })
-      ] }) : /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-editor-path", children: t2("no.file") }),
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-editor-path", title: `${t("path")}: ${file.path}`, children: file.path })
+      ] }) : /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-editor-path", children: t("no.file") }),
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-spacer" }),
       file !== null && !editing && /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("button", { type: "button", className: "sb-btn", onClick: onEdit, children: [
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconEditOutline16, {}),
-        t2("edit")
+        t("edit")
       ] }),
-      editing && dirty && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-dirty-dot", title: t2("dirty.hint") }),
+      editing && dirty && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-dirty-dot", title: t("dirty.hint") }),
       editing && /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)(import_jsx_runtime4.Fragment, { children: [
         /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)(
           "button",
@@ -2174,22 +2174,22 @@ function FileEditor(props) {
             disabled: saveState === "saving" || !dirty,
             children: [
               /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconCheckOutline16, {}),
-              saveState === "saving" ? t2("saving") : t2("save")
+              saveState === "saving" ? t("saving") : t("save")
             ]
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { type: "button", className: "sb-btn sb-btn--ghost", onClick: onCancel, children: t2("cancel") })
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { type: "button", className: "sb-btn sb-btn--ghost", onClick: onCancel, children: t("cancel") })
       ] })
     ] }),
     body
   ] });
 }
 function DirsModal(props) {
-  const { t: t2, dirs, loading, error, input, mutating, onInputChange, onAdd, onRemove, onClose } = props;
+  const { t, dirs, loading, error, input, mutating, onInputChange, onAdd, onRemove, onClose } = props;
   return /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-modal-overlay", onClick: onClose, children: /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-modal sb-modal--dirs", onClick: (e) => e.stopPropagation(), children: [
-    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-modal-title", children: t2("dirs.title") }),
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-modal-title", children: t("dirs.title") }),
     /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-modal-body", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("p", { className: "sb-dirs-help", children: t2("dirs.help") }),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("p", { className: "sb-dirs-help", children: t("dirs.help") }),
       /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-dirs-addrow", children: [
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
           "input",
@@ -2197,7 +2197,7 @@ function DirsModal(props) {
             className: "sb-dirs-input",
             type: "text",
             value: input,
-            placeholder: t2("dirs.placeholder"),
+            placeholder: t("dirs.placeholder"),
             spellCheck: false,
             onChange: (e) => onInputChange(e.target.value),
             onKeyDown: (e) => {
@@ -2217,7 +2217,7 @@ function DirsModal(props) {
             onClick: onAdd,
             children: [
               mutating ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconLoadingOutline16, { className: "sb-spin" }) : null,
-              t2("dirs.add")
+              t("dirs.add")
             ]
           }
         )
@@ -2229,13 +2229,13 @@ function DirsModal(props) {
       /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-dirs-list", children: [
         loading && /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-note", children: [
           /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconLoadingOutline16, { className: "sb-spin" }),
-          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t2("loading.skills") })
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t("loading.skills") })
         ] }),
-        !loading && dirs.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-note", children: t2("dirs.empty") }),
+        !loading && dirs.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-note", children: t("dirs.empty") }),
         !loading && dirs.map((dir) => /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-dirs-row", children: [
           /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: `sb-dirs-path${dir.exists ? "" : " sb-dirs-path--missing"}`, title: dir.path, children: dir.path }),
-          !dir.exists && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-badge sb-badge--disabled", children: t2("dirs.missing") }),
-          dir.exists && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-count", children: t2("skills.count", { count: dir.skillCount }) }),
+          !dir.exists && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-badge sb-badge--disabled", children: t("dirs.missing") }),
+          dir.exists && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-count", children: t("skills.count", { count: dir.skillCount }) }),
           /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
             "button",
             {
@@ -2243,16 +2243,16 @@ function DirsModal(props) {
               className: "sb-btn sb-btn--ghost",
               disabled: mutating,
               onClick: () => onRemove(dir.path),
-              children: t2("dirs.remove")
+              children: t("dirs.remove")
             }
           )
         ] }, dir.path))
       ] })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-modal-actions", children: /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { type: "button", className: "sb-btn", onClick: onClose, children: t2("cancel") }) })
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-modal-actions", children: /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { type: "button", className: "sb-btn", onClick: onClose, children: t("cancel") }) })
   ] }) });
 }
-function SkillsBrowser({ t: t2, sessionId }) {
+function SkillsBrowser({ t, sessionId }) {
   const [skills, setSkills] = (0, import_react3.useState)([]);
   const [roots, setRoots] = (0, import_react3.useState)([]);
   const [skillsLoading, setSkillsLoading] = (0, import_react3.useState)(true);
@@ -2359,13 +2359,13 @@ function SkillsBrowser({ t: t2, sessionId }) {
         await loadSkills(true);
       } catch (err) {
         setActionError(
-          err instanceof Error ? err.message : t2("toggle.failed", { message: String(err) })
+          err instanceof Error ? err.message : t("toggle.failed", { message: String(err) })
         );
       } finally {
         setTogglingName(null);
       }
     },
-    [togglingName, loadSkills, t2]
+    [togglingName, loadSkills, t]
   );
   const loadDirs = (0, import_react3.useCallback)(async () => {
     setDirsLoading(true);
@@ -2698,7 +2698,7 @@ function SkillsBrowser({ t: t2, sessionId }) {
                 className: "sb-search-input",
                 type: "text",
                 value: query,
-                placeholder: t2("search.placeholder"),
+                placeholder: t("search.placeholder"),
                 onChange: (e) => setQuery(e.target.value)
               }
             ),
@@ -2708,7 +2708,7 @@ function SkillsBrowser({ t: t2, sessionId }) {
                 type: "button",
                 className: "sb-search-clear",
                 onClick: () => setQuery(""),
-                "aria-label": t2("cancel"),
+                "aria-label": t("cancel"),
                 children: /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconCloseOutline16, {})
               }
             )
@@ -2723,7 +2723,7 @@ function SkillsBrowser({ t: t2, sessionId }) {
                 setDirsError(null);
                 void loadDirs();
               },
-              title: t2("manage.dirs"),
+              title: t("manage.dirs"),
               children: /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconFolderOpen16, {})
             }
           ),
@@ -2734,7 +2734,7 @@ function SkillsBrowser({ t: t2, sessionId }) {
               className: "sb-icon-btn",
               onClick: () => void handleRefresh(),
               disabled: refreshing,
-              title: t2("refresh"),
+              title: t("refresh"),
               children: refreshing ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconLoadingOutline16, { className: "sb-spin" }) : /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives.IconRefreshOutline16, {})
             }
           )
@@ -2742,7 +2742,7 @@ function SkillsBrowser({ t: t2, sessionId }) {
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
           SkillList,
           {
-            t: t2,
+            t,
             skills,
             loading: skillsLoading,
             error: skillsError,
@@ -2778,7 +2778,7 @@ function SkillsBrowser({ t: t2, sessionId }) {
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
           FileTree,
           {
-            t: t2,
+            t,
             hasSkill: currentSkill !== null,
             root,
             rootOptions,
@@ -2799,7 +2799,7 @@ function SkillsBrowser({ t: t2, sessionId }) {
       (file !== null || fileLoading || fileError !== null) && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
         FileEditor,
         {
-          t: t2,
+          t,
           skillName: selectedName,
           file,
           fileLoading,
@@ -2819,26 +2819,26 @@ function SkillsBrowser({ t: t2, sessionId }) {
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-statusbar sb-statusbar--panel", children: [
       /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("span", { className: "sb-status-item", children: [
-        t2("status.skill"),
+        t("status.skill"),
         ": ",
         selectedName ?? "-"
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("span", { className: "sb-status-item", children: [
-        t2("status.file"),
+        t("status.file"),
         ": ",
         file !== null ? basename(file.path) : "-"
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-spacer" }),
-      saveState === "error" && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-status-item sb-status--error", children: t2("write.failed", { message: saveMessage }) }),
-      dirty && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-status-item sb-status--dirty", children: t2("status.unsaved") }),
-      saveState === "saved" && !dirty && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-status-item sb-status--saved", children: t2("status.saved") }),
-      file !== null && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-status-item", children: formatSize(t2, file.size) }),
-      file !== null && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-status-item", children: t2("mtime.label", { time: formatTime2(file.mtime) }) })
+      saveState === "error" && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-status-item sb-status--error", children: t("write.failed", { message: saveMessage }) }),
+      dirty && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-status-item sb-status--dirty", children: t("status.unsaved") }),
+      saveState === "saved" && !dirty && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-status-item sb-status--saved", children: t("status.saved") }),
+      file !== null && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-status-item", children: formatSize(t, file.size) }),
+      file !== null && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "sb-status-item", children: t("mtime.label", { time: formatTime2(file.mtime) }) })
     ] }),
     dirsOpen && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
       DirsModal,
       {
-        t: t2,
+        t,
         dirs,
         loading: dirsLoading,
         error: dirsError,
@@ -2851,8 +2851,8 @@ function SkillsBrowser({ t: t2, sessionId }) {
       }
     ),
     pendingAction !== null && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-modal-overlay", onClick: () => setPendingAction(null), children: /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-modal", onClick: (e) => e.stopPropagation(), children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-modal-title", children: t2("confirm.discard.title") }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-modal-body", children: t2("confirm.discard.body", { name: file !== null ? basename(file.path) : "" }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-modal-title", children: t("confirm.discard.title") }),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "sb-modal-body", children: t("confirm.discard.body", { name: file !== null ? basename(file.path) : "" }) }),
       /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "sb-modal-actions", children: [
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
           "button",
@@ -2860,7 +2860,7 @@ function SkillsBrowser({ t: t2, sessionId }) {
             type: "button",
             className: "sb-btn sb-btn--ghost",
             onClick: () => setPendingAction(null),
-            children: t2("cancel")
+            children: t("cancel")
           }
         ),
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
@@ -2873,7 +2873,7 @@ function SkillsBrowser({ t: t2, sessionId }) {
               setPendingAction(null);
               action();
             },
-            children: t2("confirm.discard.ok")
+            children: t("confirm.discard.ok")
           }
         )
       ] })
@@ -2884,74 +2884,74 @@ function SkillsBrowser({ t: t2, sessionId }) {
 // src/client/SkillsTabView.tsx
 var import_jsx_runtime5 = require("react/jsx-runtime");
 var persistedSkillsFeature = null;
-function skillsGuideSections(t2) {
+function skillsGuideSections(t) {
   return [
     {
       icon: "\u{1F6E0}\uFE0F",
-      title: t2("skillsTab.guide.what.title"),
-      body: t2("skillsTab.guide.what.body"),
+      title: t("skillsTab.guide.what.title"),
+      body: t("skillsTab.guide.what.body"),
       items: [
-        t2("skillsTab.guide.what.item1"),
-        t2("skillsTab.guide.what.item2")
+        t("skillsTab.guide.what.item1"),
+        t("skillsTab.guide.what.item2")
       ]
     },
     {
       icon: "\u{1F504}",
-      title: t2("skillsTab.guide.how.title"),
-      body: t2("skillsTab.guide.how.body"),
+      title: t("skillsTab.guide.how.title"),
+      body: t("skillsTab.guide.how.body"),
       items: [
-        t2("skillsTab.guide.how.item1"),
-        t2("skillsTab.guide.how.item2"),
-        t2("skillsTab.guide.how.item3")
+        t("skillsTab.guide.how.item1"),
+        t("skillsTab.guide.how.item2"),
+        t("skillsTab.guide.how.item3")
       ]
     },
     {
       icon: "\u{1F4E5}",
-      title: t2("skillsTab.guide.pending.title"),
-      body: t2("skillsTab.guide.pending.body"),
+      title: t("skillsTab.guide.pending.title"),
+      body: t("skillsTab.guide.pending.body"),
       items: [
-        t2("skillsTab.guide.pending.item1"),
-        t2("skillsTab.guide.pending.item2")
+        t("skillsTab.guide.pending.item1"),
+        t("skillsTab.guide.pending.item2")
       ]
     },
     {
       icon: "\u{1F50D}",
-      title: t2("skillsTab.guide.manager.title"),
-      body: t2("skillsTab.guide.manager.body"),
+      title: t("skillsTab.guide.manager.title"),
+      body: t("skillsTab.guide.manager.body"),
       items: [
-        t2("skillsTab.guide.manager.item1"),
-        t2("skillsTab.guide.manager.item2"),
-        t2("skillsTab.guide.manager.item3"),
-        t2("skillsTab.guide.manager.item4")
+        t("skillsTab.guide.manager.item1"),
+        t("skillsTab.guide.manager.item2"),
+        t("skillsTab.guide.manager.item3"),
+        t("skillsTab.guide.manager.item4")
       ]
     },
     {
       icon: "\u26D4",
-      title: t2("skillsTab.guide.disable.title"),
-      body: t2("skillsTab.guide.disable.body"),
+      title: t("skillsTab.guide.disable.title"),
+      body: t("skillsTab.guide.disable.body"),
       items: [
-        t2("skillsTab.guide.disable.item1"),
-        t2("skillsTab.guide.disable.item2")
+        t("skillsTab.guide.disable.item1"),
+        t("skillsTab.guide.disable.item2")
       ]
     },
     {
       icon: "\u{1F4C1}",
-      title: t2("skillsTab.guide.dirs.title"),
-      body: t2("skillsTab.guide.dirs.body")
+      title: t("skillsTab.guide.dirs.title"),
+      body: t("skillsTab.guide.dirs.body")
     },
     {
       icon: "\u{1F6AB}",
-      title: t2("skillsTab.guide.restraint.title"),
-      body: t2("skillsTab.guide.restraint.body"),
+      title: t("skillsTab.guide.restraint.title"),
+      body: t("skillsTab.guide.restraint.body"),
       items: [
-        t2("skillsTab.guide.restraint.item1"),
-        t2("skillsTab.guide.restraint.item2")
+        t("skillsTab.guide.restraint.item1"),
+        t("skillsTab.guide.restraint.item2")
       ]
     }
   ];
 }
 function SkillsTabView(props) {
-  const { t: t2, sessionId } = props;
+  const { t, sessionId } = props;
   const [feature, setFeature] = (0, import_react4.useState)(persistedSkillsFeature ?? "skills");
   const [skillsCount, setSkillsCount] = (0, import_react4.useState)(0);
   const pollBadge = (0, import_react4.useCallback)(() => {
@@ -2981,7 +2981,7 @@ function SkillsTabView(props) {
           "aria-selected": feature === "guide",
           className: feature === "guide" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("guide"),
-          children: t2("skillsTab.feature.guide")
+          children: t("skillsTab.feature.guide")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(
@@ -2993,7 +2993,7 @@ function SkillsTabView(props) {
           className: feature === "skills" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("skills"),
           children: [
-            t2("skillsTab.feature.skills"),
+            t("skillsTab.feature.skills"),
             skillsCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "mt-feature-count", children: skillsCount })
           ]
         }
@@ -3006,14 +3006,14 @@ function SkillsTabView(props) {
           "aria-selected": feature === "skill-browser",
           className: feature === "skill-browser" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("skill-browser"),
-          children: t2("skillsTab.feature.skillBrowser")
+          children: t("skillsTab.feature.skillBrowser")
         }
       )
     ] }),
-    feature === "guide" ? /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(TabGuideView, { sections: skillsGuideSections(t2) }) : feature === "skill-browser" ? /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(SkillsBrowser, { t: t2, sessionId }) : /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+    feature === "guide" ? /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(TabGuideView, { sections: skillsGuideSections(t) }) : feature === "skill-browser" ? /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(SkillsBrowser, { t, sessionId }) : /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
       MemoryQueueView,
       {
-        t: t2,
+        t,
         feature: "skills",
         onChanged: () => {
           pollBadge();
@@ -3045,9 +3045,9 @@ async function api3(path, init) {
   }
   return res.json();
 }
-function quadrantLabel(t2, quadrant) {
-  if (quadrant === null) return t2("todo.quadrant.none");
-  return t2(`todo.quadrant.${quadrant}`);
+function quadrantLabel(t, quadrant) {
+  if (quadrant === null) return t("todo.quadrant.none");
+  return t(`todo.quadrant.${quadrant}`);
 }
 function resolveItemQuadrant(item) {
   if (item.quadrant === "q1" || item.quadrant === "q2" || item.quadrant === "q3" || item.quadrant === "q4") {
@@ -3060,9 +3060,9 @@ function resolveItemQuadrant(item) {
   if (!important && urgent) return "q3";
   return "q4";
 }
-function statusLabel(t2, status) {
+function statusLabel(t, status) {
   const key = `todo.status.${status}`;
-  const label = t2(key);
+  const label = t(key);
   return label === key ? status : label;
 }
 function dayLabel(day) {
@@ -3070,7 +3070,7 @@ function dayLabel(day) {
   return clientLang() === "en" ? `${Number(month)}/${Number(date)}` : `${Number(month)}\u6708${Number(date)}\u65E5`;
 }
 function TodoView(props) {
-  const { t: t2, sessionId } = props;
+  const { t, sessionId } = props;
   const [target, setTarget] = (0, import_react5.useState)("all");
   const [addTarget, setAddTarget] = (0, import_react5.useState)("work");
   const [items, setItems] = (0, import_react5.useState)(null);
@@ -3140,7 +3140,7 @@ function TodoView(props) {
       setDraftQuad("");
       setDraftDue("");
       load();
-      flash(t2("todo.added"));
+      flash(t("todo.added"));
     }).catch((error) => {
       setNotice({ kind: "error", text: error.message });
     }).finally(() => setBusy(false));
@@ -3160,7 +3160,7 @@ function TodoView(props) {
       })
     }).then(() => {
       load();
-      flash(done ? t2("todo.done") : t2("todo.undone"));
+      flash(done ? t("todo.done") : t("todo.undone"));
     }).catch((error) => {
       setNotice({ kind: "error", text: error.message });
     }).finally(() => setBusy(false));
@@ -3168,14 +3168,14 @@ function TodoView(props) {
   const removeTodo = (item) => {
     if (busy) return;
     const snippet = item.text.split("\n")[0].slice(0, 40);
-    if (!window.confirm(t2("todo.deleteConfirm", { snippet }))) return;
+    if (!window.confirm(t("todo.deleteConfirm", { snippet }))) return;
     setBusy(true);
     void api3("/api/todo", {
       method: "POST",
       body: JSON.stringify({ sessionId, action: "remove", target: item.target, id: item.id })
     }).then(() => {
       load();
-      flash(t2("todo.deleted"));
+      flash(t("todo.deleted"));
     }).catch((error) => {
       setNotice({ kind: "error", text: error.message });
     }).finally(() => setBusy(false));
@@ -3205,7 +3205,7 @@ function TodoView(props) {
     }).then(() => {
       setEditId(null);
       load();
-      flash(t2("todo.updated"));
+      flash(t("todo.updated"));
     }).catch((error) => {
       setNotice({ kind: "error", text: error.message });
     }).finally(() => setBusy(false));
@@ -3227,7 +3227,7 @@ function TodoView(props) {
       })
     }).then(() => {
       load();
-      flash(t2("todo.updated"));
+      flash(t("todo.updated"));
     }).catch((error) => {
       setNotice({ kind: "error", text: error.message });
     }).finally(() => setBusy(false));
@@ -3262,23 +3262,23 @@ function TodoView(props) {
     const done = DONE_STATUSES.has(item.status);
     const overdue = item.due !== null && item.due < today && !done;
     return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)(import_jsx_runtime6.Fragment, { children: [
-      target === "all" && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "me-badge me-badge-target", children: item.past === true ? t2("todo.track.past") : t2(`todo.track.${item.target}`) }),
+      target === "all" && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "me-badge me-badge-target", children: item.past === true ? t("todo.track.past") : t(`todo.track.${item.target}`) }),
       item.past === true && target !== "all" && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "me-badge me-badge-day", children: dayLabel(item.day ?? "") }),
-      opts?.showQuad === true && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: `me-badge me-badge-quad me-badge-quad-${item.quadrant ?? "none"}`, children: quadrantLabel(t2, item.quadrant) }),
-      item.due !== null && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: `me-badge ${overdue ? "me-badge-overdue" : "me-badge-due"}`, children: overdue ? `${t2("todo.overdue")} ${item.due}` : `${t2("todo.due")} ${item.due}` }),
+      opts?.showQuad === true && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: `me-badge me-badge-quad me-badge-quad-${item.quadrant ?? "none"}`, children: quadrantLabel(t, item.quadrant) }),
+      item.due !== null && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: `me-badge ${overdue ? "me-badge-overdue" : "me-badge-due"}`, children: overdue ? `${t("todo.overdue")} ${item.due}` : `${t("todo.due")} ${item.due}` }),
       item.cat !== null && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "me-badge me-badge-target", children: item.cat }),
       /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
         "button",
         {
           type: "button",
           className: `me-badge me-badge-status me-badge-status-${item.status}`,
-          title: t2("todo.board.cycleStatus"),
+          title: t("todo.board.cycleStatus"),
           disabled: busy,
           onClick: (event) => {
             event.stopPropagation();
             cycleStatus(item);
           },
-          children: statusLabel(t2, item.status)
+          children: statusLabel(t, item.status)
         }
       )
     ] });
@@ -3286,9 +3286,9 @@ function TodoView(props) {
   const renderActions = (item) => {
     const done = DONE_STATUSES.has(item.status);
     return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("span", { className: "me-item-actions", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { type: "button", className: "me-btn me-btn-ok", disabled: busy, onClick: () => toggleDone(item), children: done ? t2("todo.undone") : t2("todo.done") }),
-      editId !== item.id && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { type: "button", className: "me-btn", disabled: busy, onClick: () => startEdit(item), children: t2("todo.edit") }),
-      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { type: "button", className: "me-btn me-btn-danger", disabled: busy, onClick: () => removeTodo(item), children: t2("memoryTab.delete") })
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { type: "button", className: "me-btn me-btn-ok", disabled: busy, onClick: () => toggleDone(item), children: done ? t("todo.undone") : t("todo.done") }),
+      editId !== item.id && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { type: "button", className: "me-btn", disabled: busy, onClick: () => startEdit(item), children: t("todo.edit") }),
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { type: "button", className: "me-btn me-btn-danger", disabled: busy, onClick: () => removeTodo(item), children: t("memoryTab.delete") })
     ] });
   };
   const renderEditForm = (item) => /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "me-todo-edit", children: [
@@ -3303,11 +3303,11 @@ function TodoView(props) {
     ),
     /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "me-todo-edit-row", children: [
       /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("select", { value: editQuad, onChange: (event) => setEditQuad(event.target.value), children: [
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "", children: t2("todo.quadrant.none") }),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q1", children: t2("todo.quadrant.q1") }),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q2", children: t2("todo.quadrant.q2") }),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q3", children: t2("todo.quadrant.q3") }),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q4", children: t2("todo.quadrant.q4") })
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "", children: t("todo.quadrant.none") }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q1", children: t("todo.quadrant.q1") }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q2", children: t("todo.quadrant.q2") }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q3", children: t("todo.quadrant.q3") }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q4", children: t("todo.quadrant.q4") })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
         "input",
@@ -3318,11 +3318,11 @@ function TodoView(props) {
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("select", { value: editStatus, onChange: (event) => setEditStatus(event.target.value), children: [
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "pending", children: t2("todo.status.pending") }),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "doing", children: t2("todo.status.doing") }),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "done", children: t2("todo.status.done") }),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "blocked", children: t2("todo.status.blocked") }),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "cancelled", children: t2("todo.status.cancelled") })
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "pending", children: t("todo.status.pending") }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "doing", children: t("todo.status.doing") }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "done", children: t("todo.status.done") }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "blocked", children: t("todo.status.blocked") }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "cancelled", children: t("todo.status.cancelled") })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
         "button",
@@ -3331,10 +3331,10 @@ function TodoView(props) {
           className: "me-btn me-btn-ok",
           disabled: busy || editDraft.trim() === "",
           onClick: () => saveEdit(item),
-          children: t2("todo.save")
+          children: t("todo.save")
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { type: "button", className: "me-btn", disabled: busy, onClick: () => setEditId(null), children: t2("todo.cancel") })
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { type: "button", className: "me-btn", disabled: busy, onClick: () => setEditId(null), children: t("todo.cancel") })
     ] })
   ] });
   const renderBoardCard = (item) => {
@@ -3359,19 +3359,19 @@ function TodoView(props) {
       item.id
     );
   };
-  const renderBoard = () => /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { className: "me-todo-board", role: "region", "aria-label": t2("todo.view.board"), children: BOARD_QUADRANTS.map((qid) => {
+  const renderBoard = () => /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { className: "me-todo-board", role: "region", "aria-label": t("todo.view.board"), children: BOARD_QUADRANTS.map((qid) => {
     const bucket = boardBuckets[qid];
     return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)(
       "section",
       {
         className: `me-todo-quad me-todo-quad-${qid}`,
-        "aria-label": t2(`todo.quadrant.${qid}`),
+        "aria-label": t(`todo.quadrant.${qid}`),
         children: [
           /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("header", { className: "me-todo-quad-head", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "me-todo-quad-title", children: t2(`todo.quadrant.${qid}`) }),
+            /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "me-todo-quad-title", children: t(`todo.quadrant.${qid}`) }),
             /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "me-todo-quad-count", children: bucket.length })
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { className: "me-todo-quad-body", children: bucket.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("p", { className: "me-todo-quad-empty", children: t2("todo.board.empty") }) : bucket.map((item) => renderBoardCard(item)) })
+          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { className: "me-todo-quad-body", children: bucket.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("p", { className: "me-todo-quad-empty", children: t("todo.board.empty") }) : bucket.map((item) => renderBoardCard(item)) })
         ]
       },
       qid
@@ -3380,8 +3380,8 @@ function TodoView(props) {
   const renderList = () => {
     if (visible.length === 0) {
       return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("p", { className: "me-empty", children: [
-        t2("todo.empty"),
-        (target === "all" || target === "past") && !showExpired && ` ${t2("todo.pastHint")}`
+        t("todo.empty"),
+        (target === "all" || target === "past") && !showExpired && ` ${t("todo.pastHint")}`
       ] });
     }
     return /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("ul", { className: "me-list", children: groups.map((group) => /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)(import_react5.Fragment, { children: [
@@ -3410,7 +3410,7 @@ function TodoView(props) {
           "aria-selected": target === "all",
           className: target === "all" ? "me-tab me-tab-active" : "me-tab",
           onClick: () => setTarget("all"),
-          children: t2("todo.track.all")
+          children: t("todo.track.all")
         }
       ),
       TARGETS.map((track) => /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
@@ -3421,7 +3421,7 @@ function TodoView(props) {
           "aria-selected": target === track,
           className: target === track ? "me-tab me-tab-active" : "me-tab",
           onClick: () => setTarget(track),
-          children: t2(`todo.track.${track}`)
+          children: t(`todo.track.${track}`)
         },
         track
       )),
@@ -3433,12 +3433,12 @@ function TodoView(props) {
           "aria-selected": target === "past",
           className: target === "past" ? "me-tab me-tab-active" : "me-tab",
           onClick: () => setTarget("past"),
-          children: t2("todo.track.past")
+          children: t("todo.track.past")
         }
       )
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("p", { className: "me-muted me-todo-help", children: t2("todo.help") }),
-    target === "project" && cwd === null && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("p", { className: "me-muted", children: t2("todo.projectHint") }),
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("p", { className: "me-muted me-todo-help", children: t("todo.help") }),
+    target === "project" && cwd === null && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("p", { className: "me-muted", children: t("todo.projectHint") }),
     target !== "past" && /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "me-todo-add", children: [
       target === "all" && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
         "select",
@@ -3446,8 +3446,8 @@ function TodoView(props) {
           className: "me-todo-select",
           value: addTarget,
           onChange: (event) => setAddTarget(event.target.value),
-          title: t2("todo.track"),
-          children: TARGETS.map((track) => /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: track, children: t2(`todo.track.${track}`) }, track))
+          title: t("todo.track"),
+          children: TARGETS.map((track) => /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: track, children: t(`todo.track.${track}`) }, track))
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
@@ -3456,7 +3456,7 @@ function TodoView(props) {
           type: "text",
           className: "me-todo-input",
           value: draft,
-          placeholder: t2("todo.addPlaceholder"),
+          placeholder: t("todo.addPlaceholder"),
           onChange: (event) => setDraft(event.target.value),
           onKeyDown: (event) => {
             if (event.key === "Enter") addTodo();
@@ -3469,13 +3469,13 @@ function TodoView(props) {
           className: "me-todo-select",
           value: draftQuad,
           onChange: (event) => setDraftQuad(event.target.value),
-          title: t2("todo.quadrant"),
+          title: t("todo.quadrant"),
           children: [
-            /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "", children: t2("todo.quadrant.none") }),
-            /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q1", children: t2("todo.quadrant.q1") }),
-            /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q2", children: t2("todo.quadrant.q2") }),
-            /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q3", children: t2("todo.quadrant.q3") }),
-            /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q4", children: t2("todo.quadrant.q4") })
+            /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "", children: t("todo.quadrant.none") }),
+            /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q1", children: t("todo.quadrant.q1") }),
+            /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q2", children: t("todo.quadrant.q2") }),
+            /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q3", children: t("todo.quadrant.q3") }),
+            /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q4", children: t("todo.quadrant.q4") })
           ]
         }
       ),
@@ -3486,29 +3486,29 @@ function TodoView(props) {
           className: "me-todo-date",
           value: draftDue,
           onChange: (event) => setDraftDue(event.target.value),
-          title: t2("todo.due")
+          title: t("todo.due")
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { type: "button", className: "me-btn me-btn-ok", disabled: busy || draft.trim() === "", onClick: addTodo, children: t2("todo.add") })
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { type: "button", className: "me-btn me-btn-ok", disabled: busy || draft.trim() === "", onClick: addTodo, children: t("todo.add") })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "me-todo-filters", children: [
       /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("label", { className: "me-todo-filter", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { children: t2("todo.filterStatus") }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { children: t("todo.filterStatus") }),
         /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("select", { value: statusFilter, onChange: (event) => setStatusFilter(event.target.value), children: [
-          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "active", children: t2("todo.status.active") }),
-          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "all", children: t2("todo.all") }),
-          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "done", children: t2("todo.status.done") })
+          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "active", children: t("todo.status.active") }),
+          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "all", children: t("todo.all") }),
+          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "done", children: t("todo.status.done") })
         ] })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("label", { className: "me-todo-filter", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { children: t2("todo.filterQuadrant") }),
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { children: t("todo.filterQuadrant") }),
         /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("select", { value: quadFilter, onChange: (event) => setQuadFilter(event.target.value), children: [
-          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "all", children: t2("todo.all") }),
-          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q1", children: t2("todo.quadrant.q1") }),
-          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q2", children: t2("todo.quadrant.q2") }),
-          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q3", children: t2("todo.quadrant.q3") }),
-          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q4", children: t2("todo.quadrant.q4") }),
-          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "none", children: t2("todo.quadrant.none") })
+          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "all", children: t("todo.all") }),
+          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q1", children: t("todo.quadrant.q1") }),
+          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q2", children: t("todo.quadrant.q2") }),
+          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q3", children: t("todo.quadrant.q3") }),
+          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "q4", children: t("todo.quadrant.q4") }),
+          /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("option", { value: "none", children: t("todo.quadrant.none") })
         ] })
       ] }),
       (target === "all" || target === "past") && /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("label", { className: "me-todo-filter me-todo-filter-check", children: [
@@ -3520,9 +3520,9 @@ function TodoView(props) {
             onChange: (event) => setShowExpired(event.target.checked)
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { children: t2("todo.showExpired") })
+        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { children: t("todo.showExpired") })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "me-todo-view-switch", role: "group", "aria-label": t2("todo.view.mode"), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "me-todo-view-switch", role: "group", "aria-label": t("todo.view.mode"), children: [
         /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
           "button",
           {
@@ -3530,7 +3530,7 @@ function TodoView(props) {
             className: viewMode === "list" ? "me-todo-view-btn me-todo-view-btn-active" : "me-todo-view-btn",
             "aria-pressed": viewMode === "list",
             onClick: () => setViewMode("list"),
-            children: t2("todo.view.list")
+            children: t("todo.view.list")
           }
         ),
         /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
@@ -3540,77 +3540,77 @@ function TodoView(props) {
             className: viewMode === "board" ? "me-todo-view-btn me-todo-view-btn-active" : "me-todo-view-btn",
             "aria-pressed": viewMode === "board",
             onClick: () => setViewMode("board"),
-            children: t2("todo.view.board")
+            children: t("todo.view.board")
           }
         )
       ] })
     ] }),
-    items === null ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("p", { className: "me-muted", children: t2("panel.loading") }) : viewMode === "board" ? renderBoard() : renderList()
+    items === null ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("p", { className: "me-muted", children: t("panel.loading") }) : viewMode === "board" ? renderBoard() : renderList()
   ] });
 }
 
 // src/client/TodosTabView.tsx
 var import_jsx_runtime7 = require("react/jsx-runtime");
 var persistedTodosFeature = null;
-function todosGuideSections(t2) {
+function todosGuideSections(t) {
   return [
     {
       icon: "\u{1F4CB}",
-      title: t2("todosTab.guide.tracks.title"),
-      body: t2("todosTab.guide.tracks.body"),
+      title: t("todosTab.guide.tracks.title"),
+      body: t("todosTab.guide.tracks.body"),
       items: [
-        t2("todosTab.guide.tracks.item1"),
-        t2("todosTab.guide.tracks.item2"),
-        t2("todosTab.guide.tracks.item3"),
-        t2("todosTab.guide.tracks.item4")
+        t("todosTab.guide.tracks.item1"),
+        t("todosTab.guide.tracks.item2"),
+        t("todosTab.guide.tracks.item3"),
+        t("todosTab.guide.tracks.item4")
       ]
     },
     {
       icon: "\u2795",
-      title: t2("todosTab.guide.add.title"),
-      body: t2("todosTab.guide.add.body"),
+      title: t("todosTab.guide.add.title"),
+      body: t("todosTab.guide.add.body"),
       items: [
-        t2("todosTab.guide.add.item1"),
-        t2("todosTab.guide.add.item2")
+        t("todosTab.guide.add.item1"),
+        t("todosTab.guide.add.item2")
       ]
     },
     {
       icon: "\u{1F532}",
-      title: t2("todosTab.guide.pending.title"),
-      body: t2("todosTab.guide.pending.body"),
+      title: t("todosTab.guide.pending.title"),
+      body: t("todosTab.guide.pending.body"),
       items: [
-        t2("todosTab.guide.pending.item1"),
-        t2("todosTab.guide.pending.item2")
+        t("todosTab.guide.pending.item1"),
+        t("todosTab.guide.pending.item2")
       ]
     },
     {
       icon: "\u{1F3AF}",
-      title: t2("todosTab.guide.attrs.title"),
-      body: t2("todosTab.guide.attrs.body"),
+      title: t("todosTab.guide.attrs.title"),
+      body: t("todosTab.guide.attrs.body"),
       items: [
-        t2("todosTab.guide.attrs.item1"),
-        t2("todosTab.guide.attrs.item2"),
-        t2("todosTab.guide.attrs.item3")
+        t("todosTab.guide.attrs.item1"),
+        t("todosTab.guide.attrs.item2"),
+        t("todosTab.guide.attrs.item3")
       ]
     },
     {
       icon: "\u{1F4C5}",
-      title: t2("todosTab.guide.view.title"),
-      body: t2("todosTab.guide.view.body"),
+      title: t("todosTab.guide.view.title"),
+      body: t("todosTab.guide.view.body"),
       items: [
-        t2("todosTab.guide.view.item1"),
-        t2("todosTab.guide.view.item2")
+        t("todosTab.guide.view.item1"),
+        t("todosTab.guide.view.item2")
       ]
     },
     {
       icon: "\u23F0",
-      title: t2("todosTab.guide.remind.title"),
-      body: t2("todosTab.guide.remind.body")
+      title: t("todosTab.guide.remind.title"),
+      body: t("todosTab.guide.remind.body")
     }
   ];
 }
 function TodosTabView(props) {
-  const { sessionId, t: t2 } = props;
+  const { sessionId, t } = props;
   const [feature, setFeature] = (0, import_react6.useState)(persistedTodosFeature ?? "todo-suggestions");
   const [todoSuggestionsCount, setTodoSuggestionsCount] = (0, import_react6.useState)(0);
   const pollBadge = (0, import_react6.useCallback)(() => {
@@ -3640,7 +3640,7 @@ function TodosTabView(props) {
           "aria-selected": feature === "guide",
           className: feature === "guide" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("guide"),
-          children: t2("todosTab.feature.guide")
+          children: t("todosTab.feature.guide")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
@@ -3652,7 +3652,7 @@ function TodosTabView(props) {
           className: feature === "todo-suggestions" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("todo-suggestions"),
           children: [
-            t2("todosTab.feature.todoSuggestions"),
+            t("todosTab.feature.todoSuggestions"),
             todoSuggestionsCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "mt-feature-count", children: todoSuggestionsCount })
           ]
         }
@@ -3665,14 +3665,14 @@ function TodosTabView(props) {
           "aria-selected": feature === "todo",
           className: feature === "todo" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("todo"),
-          children: t2("todosTab.feature.todo")
+          children: t("todosTab.feature.todo")
         }
       )
     ] }),
-    feature === "guide" ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(TabGuideView, { sections: todosGuideSections(t2) }) : feature === "todo" ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(TodoView, { t: t2, sessionId: String(sessionId) }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+    feature === "guide" ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(TabGuideView, { sections: todosGuideSections(t) }) : feature === "todo" ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(TodoView, { t, sessionId: String(sessionId) }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
       MemoryQueueView,
       {
-        t: t2,
+        t,
         feature: "todo-suggestions",
         onChanged: () => {
           pollBadge();
@@ -3700,7 +3700,7 @@ function formatTime3(ms) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 function VersionTabView(props) {
-  const { t: t2 } = props;
+  const { t } = props;
   const [state, setState] = (0, import_react7.useState)(null);
   const [releaseNotes, setReleaseNotes] = (0, import_react7.useState)("");
   const [checking, setChecking] = (0, import_react7.useState)(false);
@@ -3743,48 +3743,48 @@ function VersionTabView(props) {
     }).catch((err) => setError({ code: "network", message: err instanceof Error ? err.message : "network error" })).finally(() => setUpdating(false));
   };
   const busy = checking || updating || state === null;
-  const noteText = state?.noteCode ? t2(`version.note.${state.noteCode}`) : "";
+  const noteText = state?.noteCode ? t(`version.note.${state.noteCode}`) : "";
   return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "me-panel", children: [
     state?.restartRequired === true && /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "me-notice me-notice-warn", role: "alert", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("strong", { children: t2("version.restart.title") }),
-      "\uFF1A",
-      t2("version.restart.hint")
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("strong", { children: t("version.restart.title") }),
+      t("version.sep.colon"),
+      t("version.restart.hint")
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "me-block", children: /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "me-group", children: [
       /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "me-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "me-field-label", children: t2("version.current") }),
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "me-field-label", children: t("version.current") }),
         /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "me-field-value", children: state?.localTag ?? "\u2014" })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "me-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "me-field-label", children: t2("version.latest") }),
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "me-field-label", children: t("version.latest") }),
         /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "me-field-value", children: state?.latestTag ?? "\u2014" })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "me-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "me-field-label", children: t2("version.statusLabel") }),
-        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "me-field-value", children: state === null ? t2("version.loading") : t2(`version.status.${state.status ?? "unknown"}`) })
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "me-field-label", children: t("version.statusLabel") }),
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "me-field-value", children: state === null ? t("version.loading") : t(`version.status.${state.status ?? "unknown"}`) })
       ] }),
       noteText !== "" && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("p", { className: "me-help", children: noteText }),
       state?.lastError && /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("p", { className: "me-help", children: [
-        t2("version.lastError"),
-        "\uFF1A",
+        t("version.lastError"),
+        t("version.sep.colon"),
         state.lastError.message ?? state.lastError.kind ?? "\u2014"
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("p", { className: "me-help", children: [
-        t2("version.checkTime"),
-        "\uFF1A",
+        t("version.checkTime"),
+        t("version.sep.colon"),
         formatTime3(state?.lastSuccessAt ?? state?.lastAttemptAt)
       ] })
     ] }) }),
     /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "me-block", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { type: "button", className: "me-btn", disabled: busy, onClick: () => refresh(true), children: checking ? t2("version.checking") : t2("version.checkNow") }),
-      state?.status === "outdated" && state.latestTag && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { type: "button", className: "me-btn me-btn-primary", disabled: busy, onClick: doUpdate, children: updating ? t2("version.updating") : t2("version.updateNow", { tag: state.latestTag }) }),
-      error && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("p", { className: "me-notice me-notice-error", role: "alert", children: t2(`version.error.${error.code}`, { message: error.message }) })
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { type: "button", className: "me-btn", disabled: busy, onClick: () => refresh(true), children: checking ? t("version.checking") : t("version.checkNow") }),
+      state?.status === "outdated" && state.latestTag && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { type: "button", className: "me-btn me-btn-primary", disabled: busy, onClick: doUpdate, children: updating ? t("version.updating") : t("version.updateNow", { tag: state.latestTag }) }),
+      error && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("p", { className: "me-notice me-notice-error", role: "alert", children: t(`version.error.${error.code}`, { message: error.message }) })
     ] }),
     (releaseNotes !== "" || state?.lastUpdated?.notes) && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "me-block", children: /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "me-group", children: /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "me-field", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "me-field-label", children: t2("version.releaseNotes") }),
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "me-field-label", children: t("version.releaseNotes") }),
       /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "me-field-value me-notes-pre", children: state?.lastUpdated?.notes ?? releaseNotes })
     ] }) }) }),
-    state?.status === "unsupported" && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "me-block", children: /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("p", { className: "me-help", children: t2("version.unsupported.hint") }) })
+    state?.status === "unsupported" && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "me-block", children: /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("p", { className: "me-help", children: t("version.unsupported.hint") }) })
   ] });
 }
 
@@ -3792,7 +3792,7 @@ function VersionTabView(props) {
 var import_jsx_runtime9 = require("react/jsx-runtime");
 var persistedSettingsFeature = null;
 function SettingsTabView(props) {
-  const { t: t2 } = props;
+  const { t } = props;
   const [feature, setFeature] = (0, import_react8.useState)(persistedSettingsFeature ?? "guide");
   (0, import_react8.useEffect)(() => {
     persistedSettingsFeature = feature;
@@ -3807,7 +3807,7 @@ function SettingsTabView(props) {
           "aria-selected": feature === "guide",
           className: feature === "guide" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("guide"),
-          children: t2("settingsTab.feature.guide")
+          children: t("settingsTab.feature.guide")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
@@ -3818,7 +3818,7 @@ function SettingsTabView(props) {
           "aria-selected": feature === "config",
           className: feature === "config" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("config"),
-          children: t2("settingsTab.feature.config")
+          children: t("settingsTab.feature.config")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
@@ -3829,14 +3829,14 @@ function SettingsTabView(props) {
           "aria-selected": feature === "version",
           className: feature === "version" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("version"),
-          children: t2("settingsTab.feature.version")
+          children: t("settingsTab.feature.version")
         }
       )
     ] }),
-    feature === "version" ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(VersionTabView, { t: t2 }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+    feature === "version" ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(VersionTabView, { t }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
       MemoryQueueView,
       {
-        t: t2,
+        t,
         feature,
         onChanged: () => {
           window.dispatchEvent(new CustomEvent("dsh-memory-evolve:badge-change"));
@@ -3857,48 +3857,48 @@ function capacityText(value) {
   return String(value);
 }
 var persistedModelsFeature = null;
-function modelsGuideSections(t2) {
+function modelsGuideSections(t) {
   return [
     {
       icon: "\u{1F9ED}",
-      title: t2("modelsTab.guide.what.title"),
-      body: t2("modelsTab.guide.what.body"),
+      title: t("modelsTab.guide.what.title"),
+      body: t("modelsTab.guide.what.body"),
       items: [
-        t2("modelsTab.guide.what.item1"),
-        t2("modelsTab.guide.what.item2"),
-        t2("modelsTab.guide.what.item3")
+        t("modelsTab.guide.what.item1"),
+        t("modelsTab.guide.what.item2"),
+        t("modelsTab.guide.what.item3")
       ]
     },
     {
       icon: "\u2699\uFE0F",
-      title: t2("modelsTab.guide.config.title"),
-      body: t2("modelsTab.guide.config.body"),
+      title: t("modelsTab.guide.config.title"),
+      body: t("modelsTab.guide.config.body"),
       items: [
-        t2("modelsTab.guide.config.item1"),
-        t2("modelsTab.guide.config.item2"),
-        t2("modelsTab.guide.config.item3"),
-        t2("modelsTab.guide.config.item4"),
-        t2("modelsTab.guide.config.item5")
+        t("modelsTab.guide.config.item1"),
+        t("modelsTab.guide.config.item2"),
+        t("modelsTab.guide.config.item3"),
+        t("modelsTab.guide.config.item4"),
+        t("modelsTab.guide.config.item5")
       ]
     },
     {
       icon: "\u{1F916}",
-      title: t2("modelsTab.guide.tool.title"),
-      body: t2("modelsTab.guide.tool.body"),
+      title: t("modelsTab.guide.tool.title"),
+      body: t("modelsTab.guide.tool.body"),
       items: [
-        t2("modelsTab.guide.tool.item1"),
-        t2("modelsTab.guide.tool.item2")
+        t("modelsTab.guide.tool.item1"),
+        t("modelsTab.guide.tool.item2")
       ]
     },
     {
       icon: "\u{1F50C}",
-      title: t2("modelsTab.guide.switch.title"),
-      body: t2("modelsTab.guide.switch.body")
+      title: t("modelsTab.guide.switch.title"),
+      body: t("modelsTab.guide.switch.body")
     }
   ];
 }
 function ModelsTabView(props) {
-  const { t: t2 } = props;
+  const { t } = props;
   const [feature, setFeature] = (0, import_react9.useState)(persistedModelsFeature ?? "models");
   const [snapshot, setSnapshot] = (0, import_react9.useState)(null);
   const [loading, setLoading] = (0, import_react9.useState)(false);
@@ -4038,7 +4038,7 @@ function ModelsTabView(props) {
           "aria-selected": feature === "models",
           className: feature === "models" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("models"),
-          children: t2("modelsTab.feature.models")
+          children: t("modelsTab.feature.models")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
@@ -4049,23 +4049,23 @@ function ModelsTabView(props) {
           "aria-selected": feature === "guide",
           className: feature === "guide" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("guide"),
-          children: t2("modelsTab.feature.guide")
+          children: t("modelsTab.feature.guide")
         }
       )
     ] }),
-    feature === "guide" ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(TabGuideView, { sections: modelsGuideSections(t2) }) : /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(import_jsx_runtime10.Fragment, { children: [
+    feature === "guide" ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(TabGuideView, { sections: modelsGuideSections(t) }) : /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(import_jsx_runtime10.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "mt-toolbar", children: [
         /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
           "input",
           {
             className: "mt-search",
             type: "search",
-            placeholder: t2("modelsTab.searchPh"),
+            placeholder: t("modelsTab.searchPh"),
             value: query,
             onChange: (event) => {
               setQuery(event.target.value);
             },
-            "aria-label": t2("modelsTab.searchPh")
+            "aria-label": t("modelsTab.searchPh")
           }
         ),
         /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("label", { className: "mt-models-toggle-label", children: [
@@ -4079,26 +4079,26 @@ function ModelsTabView(props) {
               }
             }
           ),
-          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { children: t2("modelsTab.showReasoning") })
+          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { children: t("modelsTab.showReasoning") })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("button", { type: "button", className: "mt-btn", disabled: loading, onClick: load, children: loading ? t2("modelsTab.loading") : t2("modelsTab.refresh") }),
-        snapshot !== null ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-muted", children: t2("modelsTab.count", { total: snapshot.total, enabled: snapshot.enabledTotal }) }) : null
+        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("button", { type: "button", className: "mt-btn", disabled: loading, onClick: load, children: loading ? t("modelsTab.loading") : t("modelsTab.refresh") }),
+        snapshot !== null ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-muted", children: t("modelsTab.count", { total: snapshot.total, enabled: snapshot.enabledTotal }) }) : null
       ] }),
-      error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "mt-notice mt-notice-error", children: t2("modelsTab.loadFailed", { message: error }) }) : null,
-      snapshot !== null && rows.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("p", { className: "mt-muted", children: t2("modelsTab.empty") }) : null,
+      error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "mt-notice mt-notice-error", children: t("modelsTab.loadFailed", { message: error }) }) : null,
+      snapshot !== null && rows.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("p", { className: "mt-muted", children: t("modelsTab.empty") }) : null,
       /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "mt-models-scroll", children: /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("table", { className: "mt-models-table", children: [
         /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("tr", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("th", { className: "mt-models-cell mt-models-col-enable", children: t2("modelsTab.enabled") }),
-          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("th", { className: "mt-models-cell", children: t2("modelsTab.provider") }),
-          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("th", { className: "mt-models-cell", children: t2("modelsTab.model") }),
-          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("th", { className: "mt-models-cell mt-models-col-capacity", children: t2("modelsTab.capacity") }),
-          showReasoning ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("th", { className: "mt-models-cell mt-models-col-reasoning", children: t2("modelsTab.reasoning") }) : null,
-          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("th", { className: "mt-models-cell", children: t2("modelsTab.note") })
+          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("th", { className: "mt-models-cell mt-models-col-enable", children: t("modelsTab.enabled") }),
+          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("th", { className: "mt-models-cell", children: t("modelsTab.provider") }),
+          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("th", { className: "mt-models-cell", children: t("modelsTab.model") }),
+          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("th", { className: "mt-models-cell mt-models-col-capacity", children: t("modelsTab.capacity") }),
+          showReasoning ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("th", { className: "mt-models-cell mt-models-col-reasoning", children: t("modelsTab.reasoning") }) : null,
+          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("th", { className: "mt-models-cell", children: t("modelsTab.note") })
         ] }) }),
         /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("tbody", { children: rows.map(({ group, row }) => /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
           RowView,
           {
-            t: t2,
+            t,
             group,
             row,
             showReasoning,
@@ -4132,7 +4132,7 @@ function findRow(snapshot, provider, model) {
   return null;
 }
 function RowView(props) {
-  const { t: t2, group, row, showReasoning, expanded, saving, onToggle, onExpand, onSaveNote, onSaveReasoning } = props;
+  const { t, group, row, showReasoning, expanded, saving, onToggle, onExpand, onSaveNote, onSaveReasoning } = props;
   const [noteDraft, setNoteDraft] = (0, import_react9.useState)(row.note);
   const [thinkingDraft, setThinkingDraft] = (0, import_react9.useState)(row.thinking);
   const [recommendedDraft, setRecommendedDraft] = (0, import_react9.useState)(row.reasoning?.recommendedOverride ?? "");
@@ -4171,17 +4171,17 @@ function RowView(props) {
         checked: row.enabled,
         disabled: saving,
         onChange: onToggle,
-        "aria-label": row.enabled ? t2("modelsTab.disable") : t2("modelsTab.enable")
+        "aria-label": row.enabled ? t("modelsTab.disable") : t("modelsTab.enable")
       }
     ) }),
     /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("td", { className: "mt-models-cell", children: [
       /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-provider", children: group.providerDisplay }),
-      !group.active ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-tag mt-models-tag-dormant", children: t2("modelsTab.dormant") }) : null
+      !group.active ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-tag mt-models-tag-dormant", children: t("modelsTab.dormant") }) : null
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("td", { className: "mt-models-cell", children: /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "mt-models-model", children: [
       /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-model-name", children: row.name }),
       /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-model-id", children: row.id }),
-      row.supportsImage === true ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-tag", title: t2("modelsTab.supportsImageHint"), children: t2("modelsTab.supportsImage") }) : null
+      row.supportsImage === true ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-tag", title: t("modelsTab.supportsImageHint"), children: t("modelsTab.supportsImage") }) : null
     ] }) }),
     /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("td", { className: "mt-models-cell mt-models-col-capacity", children: /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("span", { className: "mt-models-capacity", children: [
       capacityText(row.contextWindow),
@@ -4189,11 +4189,11 @@ function RowView(props) {
       capacityText(row.maxTokens)
     ] }) }),
     showReasoning ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("td", { className: "mt-models-cell mt-models-col-reasoning", children: !row.thinking ? /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(import_jsx_runtime10.Fragment, { children: [
-      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-tag mt-models-tag-off", children: t2("modelsTab.thinkingOff") }),
-      levels.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("button", { type: "button", className: "mt-models-link", onClick: onExpand, "aria-expanded": expanded, children: expanded ? t2("modelsTab.closeEditor") : t2("modelsTab.editLevels") })
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-tag mt-models-tag-off", children: t("modelsTab.thinkingOff") }),
+      levels.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("button", { type: "button", className: "mt-models-link", onClick: onExpand, "aria-expanded": expanded, children: expanded ? t("modelsTab.closeEditor") : t("modelsTab.editLevels") })
     ] }) : levels.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-muted-cell", children: "\u2014" }) : /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(import_jsx_runtime10.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "mt-models-levels", children: [
-        usable.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-level-none", children: t2("modelsTab.levelsNone") }) : usable.slice(0, 4).map((l) => /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
+        usable.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-level-none", children: t("modelsTab.levelsNone") }) : usable.slice(0, 4).map((l) => /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
           "span",
           {
             className: l.id === recommended ? "mt-models-tag mt-models-tag-rec" : "mt-models-tag",
@@ -4206,7 +4206,7 @@ function RowView(props) {
           usable.length - 4
         ] }) : null
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("button", { type: "button", className: "mt-models-link", onClick: onExpand, "aria-expanded": expanded, children: expanded ? t2("modelsTab.closeEditor") : t2("modelsTab.editLevels") })
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("button", { type: "button", className: "mt-models-link", onClick: onExpand, "aria-expanded": expanded, children: expanded ? t("modelsTab.closeEditor") : t("modelsTab.editLevels") })
     ] }) }) : null,
     /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("td", { className: "mt-models-cell", children: /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
       "input",
@@ -4214,9 +4214,9 @@ function RowView(props) {
         className: "mt-models-note",
         type: "text",
         value: noteDraft,
-        placeholder: t2("modelsTab.notePh"),
+        placeholder: t("modelsTab.notePh"),
         disabled: saving,
-        "aria-label": t2("modelsTab.note"),
+        "aria-label": t("modelsTab.note"),
         onChange: (event) => {
           setNoteDraft(event.target.value);
         },
@@ -4226,7 +4226,7 @@ function RowView(props) {
       }
     ) }),
     expanded && levels.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("td", { className: "mt-models-expanded", colSpan: showReasoning ? 6 : 5, children: /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "mt-models-editor", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "mt-models-editor-title", children: t2("modelsTab.editorTitle") }),
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "mt-models-editor-title", children: t("modelsTab.editorTitle") }),
       /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("label", { className: "mt-models-editor-level", children: [
         /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
           "input",
@@ -4239,11 +4239,11 @@ function RowView(props) {
             }
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-editor-level-name", children: t2("modelsTab.thinking") }),
-        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-editor-hint", children: t2("modelsTab.thinkingHint") })
+        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-editor-level-name", children: t("modelsTab.thinking") }),
+        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-editor-hint", children: t("modelsTab.thinkingHint") })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("label", { className: "mt-models-editor-level", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-editor-label", children: t2("modelsTab.recommendedLevel") }),
+        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-editor-label", children: t("modelsTab.recommendedLevel") }),
         /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(
           "select",
           {
@@ -4254,7 +4254,7 @@ function RowView(props) {
               setRecommendedDraft(event.target.value);
             },
             children: [
-              /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("option", { value: "", children: t2("modelsTab.recommendedAuto") }),
+              /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("option", { value: "", children: t("modelsTab.recommendedAuto") }),
               levels.filter((l) => l.enabled).map((l) => /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("option", { value: l.id, children: [
                 l.name,
                 " (",
@@ -4283,7 +4283,7 @@ function RowView(props) {
         ),
         /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-editor-level-name", children: l.name }),
         /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-editor-level-id", children: l.id }),
-        l.id === recommended && thinkingDraft ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-tag mt-models-tag-rec", children: t2("modelsTab.recommended") }) : null,
+        l.id === recommended && thinkingDraft ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "mt-models-tag mt-models-tag-rec", children: t("modelsTab.recommended") }) : null,
         l.custom ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
           "button",
           {
@@ -4298,7 +4298,7 @@ function RowView(props) {
                 return next;
               });
             },
-            children: t2("modelsTab.removeLevel")
+            children: t("modelsTab.removeLevel")
           }
         ) : null
       ] }, l.id)) }),
@@ -4309,8 +4309,8 @@ function RowView(props) {
             className: "mt-search",
             type: "text",
             value: newId,
-            placeholder: t2("modelsTab.levelIdPh"),
-            "aria-label": t2("modelsTab.levelIdPh"),
+            placeholder: t("modelsTab.levelIdPh"),
+            "aria-label": t("modelsTab.levelIdPh"),
             disabled: saving,
             onChange: (event) => {
               setNewId(event.target.value.trim());
@@ -4323,8 +4323,8 @@ function RowView(props) {
             className: "mt-search",
             type: "text",
             value: newName,
-            placeholder: t2("modelsTab.levelNamePh"),
-            "aria-label": t2("modelsTab.levelNamePh"),
+            placeholder: t("modelsTab.levelNamePh"),
+            "aria-label": t("modelsTab.levelNamePh"),
             disabled: saving,
             onChange: (event) => {
               setNewName(event.target.value);
@@ -4346,7 +4346,7 @@ function RowView(props) {
               setNewId("");
               setNewName("");
             },
-            children: t2("modelsTab.addLevel")
+            children: t("modelsTab.addLevel")
           }
         )
       ] }),
@@ -4360,10 +4360,10 @@ function RowView(props) {
             onClick: () => {
               onSaveReasoning(thinkingDraft, recommendedDraft, [...levelDraft], customDraft);
             },
-            children: saving ? t2("modelsTab.saving") : t2("modelsTab.save")
+            children: saving ? t("modelsTab.saving") : t("modelsTab.save")
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("button", { type: "button", className: "mt-btn", disabled: saving, onClick: onExpand, children: t2("modelsTab.cancel") })
+        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("button", { type: "button", className: "mt-btn", disabled: saving, onClick: onExpand, children: t("modelsTab.cancel") })
       ] })
     ] }) }) : null
   ] });
@@ -4422,7 +4422,7 @@ function FeatureSwitchRow({ label, hint, checked, onChange }) {
   ] });
 }
 function UiSettingsTabView(props) {
-  const { t: t2 } = props;
+  const { t } = props;
   const [feature, setFeature] = (0, import_react10.useState)(persistedUiSettingsFeature ?? "mixed");
   const [features, setFeatures] = (0, import_react10.useState)(() => readFeatures());
   (0, import_react10.useEffect)(() => {
@@ -4436,14 +4436,14 @@ function UiSettingsTabView(props) {
     });
   };
   const renderMixed = () => /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: "me-block", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "me-block-head", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("h3", { className: "me-heading", children: t2("uiSettingsTab.features.title") }) }),
-    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("p", { className: "me-help", children: t2("uiSettingsTab.features.help") }),
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "me-block-head", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("h3", { className: "me-heading", children: t("uiSettingsTab.features.title") }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("p", { className: "me-help", children: t("uiSettingsTab.features.help") }),
     /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "me-form", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "me-group", children: [
       /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
         FeatureSwitchRow,
         {
-          label: t2("uiSettings.feature.sessionFilter"),
-          hint: t2("uiSettings.feature.sessionFilter.hint"),
+          label: t("uiSettings.feature.sessionFilter"),
+          hint: t("uiSettings.feature.sessionFilter.hint"),
           checked: features.sessionFilter,
           onChange: (checked) => toggleFeature("sessionFilter", checked)
         }
@@ -4451,8 +4451,8 @@ function UiSettingsTabView(props) {
       /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
         FeatureSwitchRow,
         {
-          label: t2("uiSettings.feature.wideChat"),
-          hint: t2("uiSettings.feature.wideChat.hint"),
+          label: t("uiSettings.feature.wideChat"),
+          hint: t("uiSettings.feature.wideChat.hint"),
           checked: features.wideChat,
           onChange: (checked) => toggleFeature("wideChat", checked)
         }
@@ -4460,8 +4460,8 @@ function UiSettingsTabView(props) {
       /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
         FeatureSwitchRow,
         {
-          label: t2("uiSettings.feature.wideBubble"),
-          hint: t2("uiSettings.feature.wideBubble.hint"),
+          label: t("uiSettings.feature.wideBubble"),
+          hint: t("uiSettings.feature.wideBubble.hint"),
           checked: features.wideBubble,
           onChange: (checked) => toggleFeature("wideBubble", checked)
         }
@@ -4469,8 +4469,8 @@ function UiSettingsTabView(props) {
       /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
         FeatureSwitchRow,
         {
-          label: t2("uiSettings.feature.contextWarn"),
-          hint: t2("uiSettings.feature.contextWarn.hint"),
+          label: t("uiSettings.feature.contextWarn"),
+          hint: t("uiSettings.feature.contextWarn.hint"),
           checked: features.contextWarn,
           onChange: (checked) => toggleFeature("contextWarn", checked)
         }
@@ -4478,8 +4478,8 @@ function UiSettingsTabView(props) {
       /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
         FeatureSwitchRow,
         {
-          label: t2("uiSettings.feature.mermaidRender"),
-          hint: t2("uiSettings.feature.mermaidRender.hint"),
+          label: t("uiSettings.feature.mermaidRender"),
+          hint: t("uiSettings.feature.mermaidRender.hint"),
           checked: features.mermaidRender,
           onChange: (checked) => toggleFeature("mermaidRender", checked)
         }
@@ -4487,9 +4487,9 @@ function UiSettingsTabView(props) {
     ] }) })
   ] });
   const renderGuide = () => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(TabGuideView, { sections: [
-    { icon: "\u{1F3A8}", title: t2("uiSettingsTab.guide.what.title"), body: t2("uiSettingsTab.guide.what.body") },
-    { icon: "\u{1F9E9}", title: t2("uiSettingsTab.guide.features.title"), body: t2("uiSettingsTab.guide.features.body"), items: [t2("uiSettingsTab.guide.features.item1"), t2("uiSettingsTab.guide.features.item2"), t2("uiSettingsTab.guide.features.item3"), t2("uiSettingsTab.guide.features.item4"), t2("uiSettingsTab.guide.features.item5")] },
-    { icon: "\u{1FA84}", title: t2("uiSettingsTab.guide.switch.title"), body: t2("uiSettingsTab.guide.switch.body") }
+    { icon: "\u{1F3A8}", title: t("uiSettingsTab.guide.what.title"), body: t("uiSettingsTab.guide.what.body") },
+    { icon: "\u{1F9E9}", title: t("uiSettingsTab.guide.features.title"), body: t("uiSettingsTab.guide.features.body"), items: [t("uiSettingsTab.guide.features.item1"), t("uiSettingsTab.guide.features.item2"), t("uiSettingsTab.guide.features.item3"), t("uiSettingsTab.guide.features.item4"), t("uiSettingsTab.guide.features.item5")] },
+    { icon: "\u{1FA84}", title: t("uiSettingsTab.guide.switch.title"), body: t("uiSettingsTab.guide.switch.body") }
   ] });
   return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "me-panel", children: [
     /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "mt-file-tabs", role: "tablist", children: [
@@ -4501,7 +4501,7 @@ function UiSettingsTabView(props) {
           "aria-selected": feature === "mixed",
           className: feature === "mixed" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("mixed"),
-          children: t2("uiSettingsTab.feature.mixed")
+          children: t("uiSettingsTab.feature.mixed")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
@@ -4512,7 +4512,7 @@ function UiSettingsTabView(props) {
           "aria-selected": feature === "guide",
           className: feature === "guide" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("guide"),
-          children: t2("uiSettingsTab.feature.guide")
+          children: t("uiSettingsTab.feature.guide")
         }
       )
     ] }),
@@ -4524,378 +4524,8 @@ function UiSettingsTabView(props) {
 // src/client/CoIView.tsx
 var import_react11 = require("react");
 var import_jsx_runtime12 = require("react/jsx-runtime");
-var DICT = {
-  zh: {
-    tab: "CLI\u8C03\u5EA6",
-    guide: "\u6307\u5357",
-    "guide.title": "COI \u8C03\u5EA6\u4F7F\u7528\u6307\u5357",
-    "guide.intro": "COI \u8C03\u5EA6 = \u628A\u4EFB\u52A1\u6D3E\u7ED9\u5916\u90E8 AI \u4EE3\u7406\uFF08kimi / codex / grok / hermes \u7B49\uFF09\u7684\u300C\u5916\u63F4\u8C03\u5EA6\u53F0\u300D\uFF1A\u540E\u53F0\u5F02\u6B65\u6267\u884C\u3001\u4E0D\u5361\u5F53\u524D\u4F1A\u8BDD\uFF1B\u5B9E\u65F6\u770B\u8FDB\u5EA6\u548C\u65E5\u5FD7\uFF1B\u4F1A\u8BDD\u5206\u5C42\u7BA1\u7406\u3001\u53EF\u4E00\u952E\u6062\u590D\u7EE7\u7EED\uFF1B\u4EFB\u52A1\u8FD8\u80FD\u8DE8\u4EE3\u7406\u63A5\u529B\uFF1B\u7ED3\u679C\u81EA\u52A8\u7559\u6863\u5E76\u6C89\u6DC0\u5230\u8BB0\u5FC6\u3002\u9ED8\u8BA4\u5173\u95ED\u2014\u2014\u5728\u300CMemory Evolve \u8BBE\u7F6E\u300DTab \u7684\u300C\u914D\u7F6E\u300D\u91CC\u6253\u5F00\u300CCOI \u8C03\u5EA6\u300D\u5F00\u5173\u3002",
-    "guide.use.title": "\u600E\u4E48\u53D1\u8D77\u4EFB\u52A1",
-    "guide.use.desc": "\u4E09\u79CD\u5165\u53E3\uFF0C\u4EFB\u9009\u5176\u4E00\uFF1A",
-    "guide.use.ai": "\u5BF9 AI \u8BF4\uFF1A",
-    "guide.use.aiDesc": "\u76F4\u63A5\u8BF4\u300C\u6D3E\u7ED9 kimi \u505A XX / \u8BA9 codex \u4FEE\u590D\u6D4B\u8BD5\u300D\u2014\u2014AI \u7528 de_coi_dispatch \u5DE5\u5177\u53D1\u8D77\uFF0C\u540E\u53F0\u5F02\u6B65\u8DD1\uFF0C\u5B8C\u6210\u540E\u7ED3\u679C\u6458\u8981\u81EA\u52A8\u5199\u8FDB\u9879\u76EE\u65E5\u5FD7\u548C\u4ECA\u65E5\u65E5\u5FD7\u3002",
-    "guide.use.slash": "\u7EC8\u7AEF\u547D\u4EE4\uFF1A",
-    "guide.use.slashDesc": '/de_coi run "\u4EFB\u52A1" --coi kimi\uFF08\u67E5\u770B\u5168\u90E8\u5B50\u547D\u4EE4\uFF1A/de_coi help\uFF09\u3002',
-    "guide.use.tab": "\u672C Tab\uFF1A",
-    "guide.use.tabDesc": "\u300C\u4EFB\u52A1\u300D\u9875\u586B\u9002\u914D\u5668\u3001\u4EFB\u52A1\u5185\u5BB9\u3001\u5C42\u7EA7\uFF0C\u53EF\u9009\u6062\u590D\u4F1A\u8BDD / \u4EFB\u52A1\u6A21\u677F / \u63A5\u529B\u5F15\u7528\uFF1B\u8FD8\u80FD\u52FE\u9009\u300C\u6CE8\u5165 DSH \u8BB0\u5FC6\u300D\u8BA9\u5916\u63F4\u5E26\u4E0A\u4F60\u7684\u9879\u76EE\u7EA6\u5B9A\uFF0C\u6216\u9644\u52A0\u4E0A\u4E0B\u6587\u6587\u672C\u3001\u5E26\u56FE\u5206\u6790\uFF1B\u70B9\u53D1\u8D77\uFF0C\u8FDB\u5EA6\u4E0E\u8F93\u51FA\u5B9E\u65F6\u53EF\u89C1\u3002",
-    "guide.scope.title": "\u4F1A\u8BDD\u5206\u5C42\uFF08\u8C01\u80FD\u770B\u5230\uFF09",
-    "guide.scope.desc": "\u4EFB\u52A1\u4E0E\u4F1A\u8BDD\u6309\u5C42\u7EA7\u5F52\u5C5E\uFF0C\u51B3\u5B9A\u8C01\u80FD\u770B\u5230\u3001\u80FD\u5426\u6062\u590D\uFF1A",
-    "guide.scope.temp": "\u4EC5\u53D1\u8D77\u5B83\u7684\u90A3\u4E2A\u4F1A\u8BDD\u53EF\u89C1\uFF0C\u4E00\u6B21\u6027\u4EFB\u52A1\uFF08\u6D4B\u8BD5\u9002\u914D\u5668\u7528\u8FD9\u4E2A\uFF09\u3002",
-    "guide.scope.session": "\u4EC5\u53D1\u8D77\u5B83\u7684\u90A3\u4E2A\u4F1A\u8BDD\u53EF\u89C1\uFF0C\u4F1A\u8BDD\u5185\u53EF\u6062\u590D\u3002",
-    "guide.scope.project": "\u8BE5\u9879\u76EE\uFF08\u76F8\u540C\u5DE5\u4F5C\u76EE\u5F55\uFF09\u7684\u6240\u6709\u4F1A\u8BDD\u53EF\u89C1\uFF0C\u53EF\u6302 git \u5206\u652F\u3002",
-    "guide.scope.global": "\u6240\u6709\u4F1A\u8BDD\u53EF\u89C1\uFF0C\u957F\u671F\u4FDD\u7559\u3002",
-    "guide.skill.title": "\u9002\u914D\u5668\u4E0E\u6280\u80FD",
-    "guide.skill.desc": "\u6BCF\u4E2A\u9002\u914D\u5668\u5BF9\u5E94\u4E00\u4E2A\u6280\u80FD\uFF08AI \u7684\u4F7F\u7528\u6307\u5357\uFF0C\u6CE8\u5165\u6A21\u578B\u4E0A\u4E0B\u6587\uFF09\uFF1A\u5185\u7F6E\u56DB\u5BB6\u5F00\u7BB1\u5373\u7528\uFF1B\u81EA\u5B9A\u4E49 CLI \u53EF\u5728\u300C\u9002\u914D\u5668\u300D\u9875\u6DFB\u52A0\uFF08\u542B\u666E\u901A\u547D\u4EE4 plain-cli\uFF09\uFF0C\u586B\u6280\u80FD\u540D\u4E0E\u5185\u5BB9\u540E AI \u5373\u5B66\u4F1A\u8C03\u7528\u5B83\u3002\u6280\u80FD\u53EF\u5728\u300C\u6280\u80FD\u7BA1\u7406\u300DTab \u7981\u7528\uFF0C\u53EF\u5728\u9002\u914D\u5668\u9875\u300C\u6280\u80FD\u300D\u6309\u94AE\u7F16\u8F91\u3002",
-    "guide.tips.title": "\u6700\u4F73\u5B9E\u8DF5",
-    "guide.tips.1": "\u5206\u5DE5\uFF1A\u524D\u7AEF\u2192kimi\uFF0C\u590D\u6742\u540E\u7AEF\u2192codex\uFF0C\u5FEB\u901F\u4EFB\u52A1\u2192grok\u3002",
-    "guide.tips.2": "\u63A5\u529B\u94FE\uFF1Acodex \u5199\u4EE3\u7801 \u2192 kimi review\uFF08\u53D1\u8D77\u65F6\u9009\u300C\u63A5\u529B\u5F15\u7528\u300D\uFF09\u3002",
-    "guide.tips.3": "\u91CD\u8981\u4F1A\u8BDD\u8BB0\u5F97\u5907\u6CE8\uFF08\u4F1A\u8BDD\u9875\u70B9\u5907\u6CE8\uFF09\uFF0C\u6062\u590D\u65F6\u6309\u540D\u5B57\u627E\u3002",
-    "guide.tips.4": "\u4EFB\u52A1\u7ED3\u675F\u53EF\u63A8\u9001\u901A\u77E5\uFF08\u914D\u7F6E\u9875\u586B\u901A\u77E5\u547D\u4EE4\uFF0C\u5982 hermes send \u63A8\u5FAE\u4FE1\uFF09\u3002",
-    "guide.tips.5": "\u6D3E\u6D3B\u65F6\u52FE\u9009\u300C\u6CE8\u5165 DSH \u8BB0\u5FC6\u300D\uFF0C\u5916\u63F4\u4F1A\u5E26\u7740\u4F60\u7684\u5168\u5C40\u89C4\u5219\u3001\u7528\u6237\u504F\u597D\u4E0E\u672C\u9879\u76EE\u5173\u952E\u8BB0\u5FC6\u5E72\u6D3B\uFF08\u6309\u5206\u652F\u8FC7\u6EE4\uFF0C\u4E0E DSH \u6CE8\u5165\u540C\u89C4\u5219\uFF09\uFF1B\u6D3E\u6D3B\u4E5F\u80FD\u5E26\u56FE\u2014\u2014\u622A\u56FE\u76F4\u63A5\u53D1\u7ED9\u5916\u63F4\u5206\u6790\uFF08codex / kimi / hermes \u652F\u6301\u8BFB\u56FE\uFF0Czcode \u7EAF\u6587\u672C\u4F1A\u660E\u786E\u62D2\u7EDD\uFF09\u3002",
-    "guide.loop": "\u95ED\u73AF\uFF1A\u6D3E\u4EFB\u52A1 \u2192 \u5B9E\u65F6\u770B\u8FDB\u5EA6 \u2192 \u62FF\u7ED3\u679C\u7559\u6863 \u2192 \u6458\u8981\u6C89\u6DC0\u8BB0\u5FC6 \u2192 \u4F1A\u8BDD\u53EF\u6062\u590D\u518D\u63A5\u529B\u3002",
-    tasks: "\u4EFB\u52A1",
-    sessions: "\u4F1A\u8BDD",
-    adapters: "\u9002\u914D\u5668",
-    templates: "\u6A21\u677F",
-    stats: "\u7EDF\u8BA1",
-    config: "\u914D\u7F6E",
-    loading: "\u52A0\u8F7D\u4E2D\u2026",
-    refresh: "\u5237\u65B0",
-    all: "\u5168\u90E8",
-    none: "\uFF08\u65E0\uFF09",
-    "launch.title": "\u53D1\u8D77\u4EFB\u52A1",
-    "launch.expand": "\u5C55\u5F00",
-    "launch.collapse": "\u6536\u8D77",
-    "launch.adapter": "\u9002\u914D\u5668",
-    "launch.prompt": "\u4EFB\u52A1\u5185\u5BB9",
-    "launch.promptPh": "\u4F8B\u5982\uFF1A\u4FEE\u590D tests/store.test.js \u4E2D\u5931\u8D25\u7684\u7528\u4F8B\u5E76\u9A8C\u8BC1",
-    "launch.scope": "\u8303\u56F4",
-    "launch.session": "\u6062\u590D\u4F1A\u8BDD",
-    "launch.sessionNone": "\uFF08\u65B0\u4F1A\u8BDD\uFF09",
-    "launch.sessionEmpty": "\uFF08\u5F53\u524D\u9002\u914D\u5668\u6682\u65E0\u4F1A\u8BDD\uFF09",
-    "launch.template": "\u6A21\u677F",
-    "launch.templateNone": "\uFF08\u4E0D\u7528\u6A21\u677F\uFF09",
-    "launch.ref": "\u63A5\u529B\u5F15\u7528",
-    "launch.refNone": "\uFF08\u4E0D\u5F15\u7528\uFF09",
-    "launch.submit": "\u53D1\u8D77",
-    "launch.injectTracks": "\u6CE8\u5165 DSH \u8BB0\u5FC6\uFF08\u53EF\u9009\uFF09",
-    "launch.injectTracksHint": "\u81EA\u4E3B\u9009\u62E9\u8981\u5E26\u7ED9 COI \u7684\u8BB0\u5FC6\u8F68\uFF08\u4E0E\u5C42\u7EA7 scope \u65E0\u5173\uFF0C\u4EFB\u4F55\u5C42\u7EA7\u90FD\u53EF\u6CE8\u5165\uFF09\uFF1A\u957F\u671F\u8BB0\u5FC6=\u5168\u5C40\u4E8B\u5B9E\u3001\u7528\u6237\u6863\u6848=\u4F60\u7684\u504F\u597D\u3001\u9879\u76EE\u5173\u952E\u8BB0\u5FC6=\u672C\u5DE5\u4F5C\u533A\u9879\u76EE\u6309\u5206\u652F\u8FC7\u6EE4\uFF08\u4E0D\u542B AGENTS.md\uFF09\u3002\u5185\u5BB9\u4F1A\u53D1\u7ED9\u5916\u90E8 COI \u670D\u52A1\uFF0C\u6CE8\u610F\u9690\u79C1\uFF1B\u7559\u7A7A=\u4E0D\u6CE8\u5165",
-    "launch.ctxText": "\u9644\u52A0\u4E0A\u4E0B\u6587\u6587\u672C\uFF08\u53EF\u9009\uFF09",
-    "launch.ctxTextPh": "\u81EA\u5DF1\u62FC\u63A5\u7684\u4E0A\u4E0B\u6587\uFF1A\u5982\u9879\u76EE\u8FDB\u5C55\u3001\u76F8\u5173\u65E5\u5FD7\u8981\u70B9\u2026\uFF08\u8D85 32KB \u81EA\u52A8\u5199\u6587\u4EF6\u5E76\u628A\u8DEF\u5F84\u544A\u8BC9 COI\uFF09",
-    "launch.needPrompt": "\u4EFB\u52A1\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A",
-    "launch.ok": "\u5DF2\u53D1\u8D77",
-    "tasks.empty": "\u6682\u65E0\u4EFB\u52A1",
-    "tasks.selectHint": "\u70B9\u51FB\u5DE6\u4FA7\u4EFB\u52A1\u67E5\u770B\u8BE6\u60C5\u4E0E\u8F93\u51FA",
-    "tasks.kill": "\u7EC8\u6B62",
-    "tasks.confirmKill": "\u786E\u8BA4\u7EC8\u6B62\u8BE5\u4EFB\u52A1\uFF1F",
-    "tasks.killed": "\u5DF2\u7EC8\u6B62",
-    "tasks.retry": "\u91CD\u8BD5",
-    "tasks.retried": "\u5DF2\u91CD\u65B0\u53D1\u8D77",
-    "tasks.copy": "\u590D\u5236",
-    "tasks.copied": "\u5DF2\u590D\u5236",
-    "tasks.copyFail": "\u590D\u5236\u5931\u8D25",
-    "tasks.log": "\u8F93\u51FA\u65E5\u5FD7",
-    "tasks.logEmpty": "\uFF08\u6682\u65E0\u8F93\u51FA\uFF09",
-    "tasks.logFull": "\u653E\u5927",
-    "tasks.prompt": "\u4EFB\u52A1\u5185\u5BB9",
-    "tasks.searchPh": "\u641C\u7D22\u4EFB\u52A1\uFF08\u5185\u5BB9/\u4EFB\u52A1 id\uFF09\u2026",
-    "tasks.pager.prev": "\u4E0A\u4E00\u9875",
-    "tasks.pager.next": "\u4E0B\u4E00\u9875",
-    "tasks.pager.total": "\u5171",
-    "tasks.delete": "\u5220\u9664",
-    "tasks.confirmDelete": "\u5220\u9664\u8BE5\u4EFB\u52A1\uFF1F\u5C06\u79FB\u9664\u4EFB\u52A1\u8BB0\u5F55\u4E0E\u8F93\u51FA\u7559\u6863\uFF08\u5DF2\u6C89\u6DC0\u5230\u8BB0\u5FC6\u7684\u6458\u8981\u4E0D\u53D7\u5F71\u54CD\uFF1B\u88AB\u63A5\u529B\u5F15\u7528\u7684\u4EFB\u52A1\u5220\u9664\u540E\uFF0C\u65B0\u63A5\u529B\u4F1A\u63D0\u793A\u4EFB\u52A1\u4E0D\u5B58\u5728\uFF09\u3002\n\n{id}",
-    "tasks.status": "\u72B6\u6001",
-    "tasks.adapter": "\u9002\u914D\u5668",
-    "tasks.scope": "\u8303\u56F4",
-    "tasks.branch": "\u5206\u652F",
-    "tasks.sessionId": "\u4F1A\u8BDD ID",
-    "tasks.created": "\u521B\u5EFA\u65F6\u95F4",
-    "tasks.duration": "\u8017\u65F6",
-    "tasks.lastOutput": "\u6700\u540E\u8F93\u51FA",
-    "tasks.exitCode": "\u9000\u51FA\u7801",
-    "tasks.error": "\u9519\u8BEF",
-    "sessions.filterScope": "\u8303\u56F4\u8FC7\u6EE4",
-    "sessions.searchPh": "\u641C\u7D22\u2026",
-    "sessions.note": "\u5907\u6CE8",
-    "sessions.save": "\u4FDD\u5B58",
-    "sessions.delete": "\u5220\u9664",
-    "sessions.confirmDelete": "\u786E\u8BA4\u5220\u9664\u8BE5\u4F1A\u8BDD\u8BB0\u5F55\uFF1F",
-    "sessions.empty": "\u6682\u65E0\u4F1A\u8BDD",
-    "sessions.locked": "\u6709\u4EFB\u52A1\u5360\u7528\u4E2D",
-    "sessions.lastSeen": "\u6700\u8FD1\u6D3B\u8DC3",
-    "adapters.guide": "\u6307\u5357",
-    "adapters.test": "\u6D4B\u8BD5",
-    "adapters.testOk": "\u6D4B\u8BD5\u4EFB\u52A1\u5DF2\u53D1\u8D77",
-    "adapters.skill": "\u6280\u80FD",
-    "adapters.skillHint": "\u8BE5\u9002\u914D\u5668\u7684\u4F7F\u7528\u6307\u5357\u6240\u5728\u6280\u80FD\uFF1A\u5B83\u662F\u540C\u6B65\u6CE8\u5165\u7684\u771F\u5B9E\u6709\u6548\u6280\u80FD\uFF08\u6765\u6E90=\u7528\u6237\u6280\u80FD\u5E93\uFF0C\u6CE8\u5165\u6BCF\u4E2A\u4F1A\u8BDD\u7684\u7CFB\u7EDF\u63D0\u793A\u8BCD\uFF09\uFF0CAI \u6BCF\u6B21\u4F1A\u8BDD\u90FD\u80FD\u770B\u5230\uFF1B\u7981\u7528\u8BF7\u5230\u300C\u6280\u80FD\u7BA1\u7406\u300DTab",
-    "adapters.skillBtn": "\u6280\u80FD",
-    "adapters.editSkillTitle": "\u7F16\u8F91\u6280\u80FD\uFF08AI \u4F7F\u7528\u6307\u5357\uFF09",
-    "adapters.editSkillHint": "\u6280\u80FD = AI \u7684\u4F7F\u7528\u6307\u5357\uFF1A\u672C\u6280\u80FD\u5DF2\u540C\u6B65\u6CE8\u5165\u7528\u6237\u6280\u80FD\u5E93\uFF08~/.agents/skills\uFF09\uFF0C\u6BCF\u4E2A\u4F1A\u8BDD\u7684\u7CFB\u7EDF\u63D0\u793A\u8BCD\u91CC\u90FD\u80FD\u770B\u5230\u5B83\uFF0CAI \u636E\u6B64\u6B63\u786E\u8C03\u7528\u672C\u9002\u914D\u5668\u3002\u5728\u8FD9\u91CC\u7F16\u8F91\u5373\u66F4\u65B0 SKILL.md\uFF1B\u63D2\u4EF6\u91CD\u542F\u65F6\u5185\u7F6E\u7248\u672C\u672A\u53D8\u4E0D\u4F1A\u8986\u76D6\u4F60\u7684\u7F16\u8F91\uFF1B\u7981\u7528\u5165\u53E3\u5728\u300C\u6280\u80FD\u7BA1\u7406\u300DTab\u3002",
-    "adapters.saveSkill": "\u4FDD\u5B58",
-    "adapters.skillSaved": "\u6280\u80FD\u5DF2\u4FDD\u5B58",
-    "adapters.skillName": "\u6280\u80FD\u540D\uFF08\u53EF\u9009\uFF09",
-    "adapters.skillNamePh": "\u5982 my-cli-skill\uFF08\u8BE5\u6280\u80FD\u7684 SKILL.md \u5C06\u6CE8\u5165 AI \u4E0A\u4E0B\u6587\uFF0CAI \u636E\u6B64\u5B66\u4F1A\u8C03\u7528\u6B64 CLI\uFF09",
-    "adapters.useCase": "\u9002\u7528\u573A\u666F",
-    "adapters.useCasePh": "\u544A\u8BC9 AI \u4EC0\u4E48\u4EFB\u52A1\u9002\u5408\u7528\u8FD9\u4E2A CLI\uFF0C\u5982\uFF1A\u590D\u6742\u540E\u7AEF\u903B\u8F91/\u6D4B\u8BD5\u4FEE\u590D\u2026",
-    "adapters.useCaseEmpty": "\uFF08\u672A\u586B\u5199\u9002\u7528\u573A\u666F\uFF09",
-    "adapters.editUseCase": "\u7F16\u8F91\u573A\u666F",
-    "adapters.saveUseCase": "\u4FDD\u5B58",
-    "adapters.skillContent": "\u6280\u80FD\u5185\u5BB9\uFF08SKILL.md\uFF09",
-    "adapters.skillContentPh": "# \u6280\u80FD\u6B63\u6587\n\n\u544A\u8BC9 AI \u5982\u4F55\u8C03\u7528\u8FD9\u4E2A CLI\uFF1A\u547D\u4EE4\u683C\u5F0F\u3001\u53C2\u6570\u3001\u4F1A\u8BDD\u6062\u590D\u65B9\u5F0F\u3001\u6CE8\u610F\u4E8B\u9879\u2026\uFF08frontmatter \u7684 name/description \u4F1A\u81EA\u52A8\u8865\u5168\uFF09",
-    "adapters.skillContentHint": "\u7559\u7A7A = \u53EA\u5173\u8054\u6280\u80FD\u540D\uFF08\u6280\u80FD\u6587\u4EF6\u9700\u53E6\u5916\u521B\u5EFA\uFF0C\u53EF\u6DFB\u52A0\u540E\u5230\u300C\u6280\u80FD\u300D\u6309\u94AE\u91CC\u7F16\u8F91\uFF09\uFF1B\u586B\u5199 = \u6280\u80FD\u4E0D\u5B58\u5728\u65F6\u81EA\u52A8\u521B\u5EFA",
-    "cancel": "\u53D6\u6D88",
-    "saving": "\u4FDD\u5B58\u4E2D\u2026",
-    "adapters.addTitle": "\u6DFB\u52A0\u81EA\u5B9A\u4E49\u9002\u914D\u5668",
-    "adapters.name": "\u540D\u79F0",
-    "adapters.type": "\u7C7B\u578B",
-    "adapters.binary": "\u53EF\u6267\u884C\u6587\u4EF6",
-    "adapters.args": "\u53C2\u6570",
-    "adapters.argsPh": "\u9017\u53F7\u5206\u9694\uFF0C\u5982\uFF1A-p, {task}",
-    "adapters.add": "\u6DFB\u52A0",
-    "adapters.delete": "\u5220\u9664",
-    "adapters.enable": "\u542F\u7528",
-    "adapters.disable": "\u7981\u7528",
-    "adapters.disabledHint": "\u5DF2\u7981\u7528\uFF1AAI \u8C03\u5EA6\u6B64\u9002\u914D\u5668\u4F1A\u88AB\u62D2\u7EDD\u5E76\u63D0\u793A\u6362\u7528\u5176\u4ED6\u53EF\u7528\u9879",
-    "adapters.confirmDelete": "\u786E\u8BA4\u5220\u9664\u8BE5\u81EA\u5B9A\u4E49\u9002\u914D\u5668\uFF1F",
-    "adapters.builtin": "\u5185\u7F6E",
-    "adapters.custom": "\u81EA\u5B9A\u4E49",
-    "adapters.resumeSection": "\u4F1A\u8BDD\u6062\u590D\u914D\u7F6E\uFF08ai-cli \u5FC5\u586B\uFF09",
-    "adapters.resumeSectionHint": "ai-cli \u7C7B\u578B\u5FC5\u987B\u6709\u6307\u5B9A\u4F1A\u8BDD\u6062\u590D\u80FD\u529B\uFF1B\u6CA1\u6709\u6062\u590D\u80FD\u529B\u7684 CLI \u8BF7\u9009 plain-cli \u7C7B\u578B",
-    "adapters.resumeKind": "\u6062\u590D\u65B9\u5F0F",
-    "adapters.resumeKindFlag": "flag \u6A21\u5F0F\uFF08\u6062\u590D\u53C2\u6570\u63D2\u5728\u57FA\u7840\u53C2\u6570\u524D\uFF09",
-    "adapters.resumeKindArgs": "args \u6A21\u5F0F\uFF08\u5B8C\u6574\u6062\u590D\u547D\u4EE4\uFF09",
-    "adapters.resumeFlag": "\u6062\u590D flag",
-    "adapters.resumeFlagPh": "\u5982 -S / -r / --resume",
-    "adapters.resumeArg": "\u4F1A\u8BDD\u53C2\u6570",
-    "adapters.resumeArgPh": "\u542B {sessionId} \u5360\u4F4D\u7B26\uFF0C\u5982 {sessionId}",
-    "adapters.resumeArgs": "\u6062\u590D\u547D\u4EE4\u53C2\u6570",
-    "adapters.resumeArgsPh": "\u9017\u53F7\u5206\u9694\uFF0C\u542B {sessionId}\uFF08\u53CA\u53EF\u9009 {task}\uFF09\uFF0C\u5982 exec, resume, {sessionId}, {task}",
-    "adapters.continueFlag": "\u6700\u8FD1\u4F1A\u8BDD\u6062\u590D flag\uFF08\u53EF\u9009\uFF09",
-    "adapters.continueFlagPh": '\u5982 -c\uFF1B\u7559\u7A7A = \u4E0D\u652F\u6301"\u6700\u8FD1\u4F1A\u8BDD"\u6062\u590D',
-    "adapters.extractSection": "\u4F1A\u8BDD ID \u81EA\u52A8\u63D0\u53D6\uFF08\u53EF\u9009\uFF09",
-    "adapters.extractSource": "\u8F93\u51FA\u6D41",
-    "adapters.extractRegex": "\u63D0\u53D6\u6B63\u5219",
-    "adapters.extractRegexPh": "\u6355\u83B7\u7EC4 1 \u4E3A\u4F1A\u8BDD ID\uFF0C\u5982 To resume this session: kimi -r (session_\\S+)",
-    "adapters.resumeMissing": "ai-cli \u7C7B\u578B\u5FC5\u987B\u586B\u5199\u4F1A\u8BDD\u6062\u590D\u914D\u7F6E\uFF08resume\uFF09",
-    "templates.addTitle": "\u6DFB\u52A0\u6A21\u677F",
-    "templates.name": "\u540D\u79F0",
-    "templates.prompt": "\u4EFB\u52A1\u5185\u5BB9",
-    "templates.adapterOpt": "\u9002\u914D\u5668\uFF08\u53EF\u9009\uFF09",
-    "templates.idOpt": "ID\uFF08\u53EF\u9009\uFF0C\u4E0D\u586B\u81EA\u52A8\uFF09",
-    "templates.add": "\u6DFB\u52A0",
-    "templates.delete": "\u5220\u9664",
-    "templates.confirmDelete": "\u786E\u8BA4\u5220\u9664\u8BE5\u6A21\u677F\uFF1F",
-    "templates.builtinKeep": "\u5185\u7F6E\u6A21\u677F\u4E0D\u53EF\u5220\u9664",
-    "templates.empty": "\u6682\u65E0\u6A21\u677F",
-    "stats.total": "\u603B\u4EFB\u52A1\u6570",
-    "stats.count": "\u4EFB\u52A1\u6570",
-    "stats.hours": "\u7D2F\u8BA1\u65F6\u957F",
-    "stats.byStatus": "\u72B6\u6001\u5206\u5E03",
-    "stats.empty": "\u6682\u65E0\u7EDF\u8BA1\u6570\u636E",
-    "config.notify": "\u901A\u77E5\u547D\u4EE4",
-    "config.notifyHint": "\u4EFB\u52A1\u7ED3\u675F\u65F6\u6267\u884C\uFF1B\u5360\u4F4D\u7B26\uFF1A{taskId} {coi} {status} {summary}",
-    "config.retention": "\u4EFB\u52A1\u4FDD\u7559\u5929\u6570",
-    "config.timeout": "\u4EFB\u52A1\u8D85\u65F6",
-    "config.timeoutHours": "\u5C0F\u65F6",
-    "config.timeoutMinutes": "\u5206\u949F",
-    "config.timeoutHint": "\u8D85\u65F6\u4EC5\u4F5C\u515C\u5E95\u9632\u7EBF\uFF08AI \u4EFB\u52A1\u53EF\u80FD\u6570\u5C0F\u65F6\u65E0\u8F93\u51FA\u5C5E\u6B63\u5E38\uFF09\uFF1B\u7559\u7A7A = \u4E0D\u4FEE\u6539",
-    "config.timeoutBad": "\u8D85\u65F6\u683C\u5F0F\u4E0D\u6B63\u786E",
-    "config.save": "\u4FDD\u5B58",
-    "config.saved": "\u5DF2\u4FDD\u5B58",
-    "scope.temporary": "\u4E34\u65F6",
-    "scope.session": "\u4F1A\u8BDD",
-    "scope.project": "\u9879\u76EE",
-    "scope.global": "\u5168\u5C40"
-  },
-  en: {
-    tab: "CLI Dispatch",
-    guide: "Guide",
-    "guide.title": "COI Dispatch Guide",
-    "guide.intro": 'COI Dispatch = the "external helper console" for handing tasks to external AI agents (kimi / codex / grok / hermes\u2026): tasks run in the background without blocking your session; progress and logs are live; sessions are tiered and resumable in one click; tasks can chain across agents; results are archived and distilled into memory. Off by default \u2014 enable "COI dispatch" under Config in the Memory Evolve Settings tab.',
-    "guide.use.title": "How to launch a task",
-    "guide.use.desc": "Three entries, pick any:",
-    "guide.use.ai": "Tell the AI:",
-    "guide.use.aiDesc": 'Say "dispatch XX to kimi / have codex fix the tests" \u2014 the AI launches it via de_coi_dispatch, it runs in the background, and on completion the summary is automatically written into the project log and daily log.',
-    "guide.use.slash": "Terminal command:",
-    "guide.use.slashDesc": '/de_coi run "task" --coi kimi (see all subcommands: /de_coi help).',
-    "guide.use.tab": "This tab:",
-    "guide.use.tabDesc": 'In the Tasks page fill in the adapter, prompt and scope; optionally resume a session / use a template / chain a reference task; you can also tick "inject DSH memory" so the helper carries your project conventions, attach context text or images; hit launch and watch progress and output live.',
-    "guide.scope.title": "Session tiers (who can see)",
-    "guide.scope.desc": "Tasks and sessions belong to a tier, which decides who can see and resume them:",
-    "guide.scope.temp": "Visible only to the launching session; one-off (use for testing an adapter).",
-    "guide.scope.session": "Visible only to the launching session; resumable within it.",
-    "guide.scope.project": "Visible to all sessions of the project (same working directory); can carry a git branch.",
-    "guide.scope.global": "Visible to every session; kept long-term.",
-    "guide.skill.title": "Adapters & skills",
-    "guide.skill.desc": "Every adapter maps to a skill (the AI usage guide, injected into the model context): the four built-ins work out of the box; custom CLIs can be added in the Adapters page (plain-cli included) \u2014 fill the skill name and content and the AI learns to drive it. Skills can be disabled in the Skill Manager tab and edited via the Skill button on the adapter page.",
-    "guide.tips.title": "Best practices",
-    "guide.tips.1": "Division of labor: frontend\u2192kimi, complex backend\u2192codex, quick tasks\u2192grok.",
-    "guide.tips.2": 'Chaining: codex writes code \u2192 kimi reviews (pick "reference task" when launching).',
-    "guide.tips.3": "Note important sessions (the note button in the sessions page) so you can find them by name when resuming.",
-    "guide.tips.4": "Tasks can push a notification on completion (set the notify command in the config page, e.g. hermes send to WeChat).",
-    "guide.tips.5": 'Tick "inject DSH memory" when dispatching and the helper works with your global rules, profile and this project key facts (branch-filtered, same rules as DSH injection); tasks can also carry images \u2014 send a screenshot for analysis (codex / kimi / hermes read images; zcode is text-only and will refuse clearly).',
-    "guide.loop": "The loop: dispatch \u2192 watch progress live \u2192 archive the result \u2192 distill the summary into memory \u2192 resume and chain the session.",
-    tasks: "Tasks",
-    sessions: "Sessions",
-    adapters: "Adapters",
-    templates: "Templates",
-    stats: "Stats",
-    config: "Config",
-    loading: "Loading\u2026",
-    refresh: "Refresh",
-    all: "All",
-    none: "(none)",
-    "launch.title": "Launch task",
-    "launch.expand": "Expand",
-    "launch.collapse": "Collapse",
-    "launch.adapter": "Adapter",
-    "launch.prompt": "Prompt",
-    "launch.promptPh": "e.g. fix the failing cases in tests/store.test.js and verify",
-    "launch.scope": "Scope",
-    "launch.session": "Resume session",
-    "launch.sessionNone": "(new session)",
-    "launch.sessionEmpty": "(no sessions for this adapter)",
-    "launch.template": "Template",
-    "launch.templateNone": "(no template)",
-    "launch.ref": "Relay ref",
-    "launch.refNone": "(none)",
-    "launch.submit": "Launch",
-    "launch.injectTracks": "Inject DSH memory (optional)",
-    "launch.injectTracksHint": "Pick which memory tracks to hand to the COI (independent of scope \u2014 any tier can inject): long-term memory=global facts, user profile=your preferences, project key=this workspace's key facts (branch-filtered; no AGENTS.md). Content is sent to external COI services \u2014 mind privacy; empty = no injection",
-    "launch.ctxText": "Extra context text (optional)",
-    "launch.ctxTextPh": "Your own context: project progress, log highlights\u2026 (over 32KB it is written to a file and the path is given to the COI)",
-    "launch.needPrompt": "Prompt must not be empty",
-    "launch.ok": "Launched",
-    "tasks.empty": "No tasks yet",
-    "tasks.selectHint": "Click a task on the left to view details and output",
-    "tasks.kill": "Kill",
-    "tasks.confirmKill": "Kill this task?",
-    "tasks.killed": "Killed",
-    "tasks.retry": "Retry",
-    "tasks.retried": "Re-launched",
-    "tasks.copy": "Copy",
-    "tasks.copied": "Copied",
-    "tasks.copyFail": "Copy failed",
-    "tasks.log": "Output log",
-    "tasks.logEmpty": "(no output yet)",
-    "tasks.logFull": "Expand",
-    "tasks.prompt": "Task prompt",
-    "tasks.searchPh": "Search tasks (content / task id)\u2026",
-    "tasks.pager.prev": "Prev",
-    "tasks.pager.next": "Next",
-    "tasks.pager.total": "of",
-    "tasks.delete": "Delete",
-    "tasks.confirmDelete": "Delete this task? Its record and output archive will be removed (memory summaries are unaffected; relay references to it will fail afterwards).\n\n{id}",
-    "tasks.status": "Status",
-    "tasks.adapter": "Adapter",
-    "tasks.scope": "Scope",
-    "tasks.branch": "Branch",
-    "tasks.sessionId": "Session ID",
-    "tasks.created": "Created",
-    "tasks.duration": "Duration",
-    "tasks.lastOutput": "Last output",
-    "tasks.exitCode": "Exit code",
-    "tasks.error": "Error",
-    "sessions.filterScope": "Scope filter",
-    "sessions.searchPh": "Search\u2026",
-    "sessions.note": "Note",
-    "sessions.save": "Save",
-    "sessions.delete": "Delete",
-    "sessions.confirmDelete": "Delete this session record?",
-    "sessions.empty": "No sessions",
-    "sessions.locked": "Occupied by a task",
-    "sessions.lastSeen": "Last seen",
-    "adapters.guide": "Guide",
-    "adapters.test": "Test",
-    "adapters.testOk": "Test task launched",
-    "adapters.skill": "Skill",
-    "adapters.skillHint": "The skill holding this adapter's usage guide: a real injected skill (source = user skill library, injected into every session's system prompt); disable it via the Skill Manager tab",
-    "adapters.skillBtn": "Skill",
-    "adapters.editSkillTitle": "Edit skill (AI usage guide)",
-    "adapters.editSkillHint": "The skill IS the AI usage guide: it is synced into the user skill library (~/.agents/skills) and injected into every session's system prompt, so the AI knows how to drive this adapter. Editing here updates that SKILL.md; plugin restarts will not overwrite your edits while the built-in version is unchanged; disable it via the Skill Manager tab.",
-    "adapters.saveSkill": "Save",
-    "adapters.skillSaved": "Skill saved",
-    "adapters.skillName": "Skill name (optional)",
-    "adapters.skillNamePh": "e.g. my-cli-skill (that SKILL.md will be injected into the AI context so the AI learns how to use this CLI)",
-    "adapters.useCase": "Use case",
-    "adapters.useCasePh": "Tell the AI which tasks suit this CLI, e.g. complex backend logic / test fixes\u2026",
-    "adapters.useCaseEmpty": "(no use case set)",
-    "adapters.editUseCase": "Edit",
-    "adapters.saveUseCase": "Save",
-    "adapters.skillContent": "Skill content (SKILL.md)",
-    "adapters.skillContentPh": "# Skill body\n\nTell the AI how to drive this CLI: command format, args, session resume, caveats\u2026 (frontmatter name/description are auto-completed)",
-    "adapters.skillContentHint": "Leave empty = link the skill name only (create the file later via the Skill button); filled = the skill is auto-created when missing",
-    "cancel": "Cancel",
-    "saving": "Saving\u2026",
-    "adapters.addTitle": "Add custom adapter",
-    "adapters.name": "Name",
-    "adapters.type": "Type",
-    "adapters.binary": "Binary",
-    "adapters.args": "Args",
-    "adapters.argsPh": "comma separated, e.g.: -p, {task}",
-    "adapters.add": "Add",
-    "adapters.delete": "Delete",
-    "adapters.enable": "Enable",
-    "adapters.disable": "Disable",
-    "adapters.disabledHint": "Disabled: dispatching to this adapter is rejected with a hint to use another one",
-    "adapters.confirmDelete": "Delete this custom adapter?",
-    "adapters.builtin": "builtin",
-    "adapters.custom": "custom",
-    "adapters.resumeSection": "Session resume (required for ai-cli)",
-    "adapters.resumeSectionHint": "ai-cli must support resuming a named session; CLIs without resume support should use plain-cli",
-    "adapters.resumeKind": "Resume mode",
-    "adapters.resumeKindFlag": "flag mode (resume flag + arg prepended to base args)",
-    "adapters.resumeKindArgs": "args mode (full resume command)",
-    "adapters.resumeFlag": "Resume flag",
-    "adapters.resumeFlagPh": "e.g. -S / -r / --resume",
-    "adapters.resumeArg": "Session arg",
-    "adapters.resumeArgPh": "with {sessionId} placeholder, e.g. {sessionId}",
-    "adapters.resumeArgs": "Resume command args",
-    "adapters.resumeArgsPh": "comma separated, with {sessionId} (and optional {task}), e.g. exec, resume, {sessionId}, {task}",
-    "adapters.continueFlag": "Continue-last flag (optional)",
-    "adapters.continueFlagPh": "e.g. -c; leave empty = no \u201Ccontinue last session\u201D support",
-    "adapters.extractSection": "Auto session-ID extraction (optional)",
-    "adapters.extractSource": "Output stream",
-    "adapters.extractRegex": "Extract regex",
-    "adapters.extractRegexPh": "capture group 1 = session ID, e.g. To resume this session: kimi -r (session_\\S+)",
-    "adapters.resumeMissing": "ai-cli requires a session resume config",
-    "templates.addTitle": "Add template",
-    "templates.name": "Name",
-    "templates.prompt": "Prompt",
-    "templates.adapterOpt": "Adapter (optional)",
-    "templates.idOpt": "ID (optional, auto if empty)",
-    "templates.add": "Add",
-    "templates.delete": "Delete",
-    "templates.confirmDelete": "Delete this template?",
-    "templates.builtinKeep": "Builtin templates cannot be deleted",
-    "templates.empty": "No templates",
-    "stats.total": "Total tasks",
-    "stats.count": "Tasks",
-    "stats.hours": "Total time",
-    "stats.byStatus": "By status",
-    "stats.empty": "No stats yet",
-    "config.notify": "Notify command",
-    "config.notifyHint": "Runs when a task finishes; placeholders: {taskId} {coi} {status} {summary}",
-    "config.retention": "Retention days",
-    "config.timeout": "Task timeout",
-    "config.timeoutHours": "hours",
-    "config.timeoutMinutes": "minutes",
-    "config.timeoutHint": "Timeout is a safety net only (AI agents may stay quiet for hours); leave empty to keep current",
-    "config.timeoutBad": "Bad timeout format",
-    "config.save": "Save",
-    "config.saved": "Saved",
-    "scope.temporary": "temporary",
-    "scope.session": "session",
-    "scope.project": "project",
-    "scope.global": "global"
-  }
-};
-function lang() {
-  return clientLang();
-}
-function t(key) {
-  const active = lang();
-  return DICT[active][key] ?? DICT.en[key] ?? key;
+function dict(t) {
+  return (key) => t(key);
 }
 var API2 = "/memory-evolve/api/coi";
 async function fetchJson(path, init) {
@@ -4913,9 +4543,9 @@ function postJson(path, body) {
 function deleteJson(path) {
   return fetchJson(path, { method: "DELETE" });
 }
-function errText(err) {
+function errText(err, t) {
   const text = err instanceof Error ? err.message : String(err);
-  return text !== void 0 && text.trim() !== "" ? text : "\u64CD\u4F5C\u5931\u8D25\uFF08\u65E0\u9519\u8BEF\u8BE6\u60C5\uFF09";
+  return text !== void 0 && text.trim() !== "" ? text : t("coi.error.noDetail");
 }
 function msgOr(text, fallback) {
   return text !== void 0 && text.trim() !== "" ? text : fallback;
@@ -4928,16 +4558,16 @@ function fmtTime(ts) {
   const d = new Date(ts);
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
-function fmtAgo(ts) {
+function fmtAgo(ts, t) {
   if (ts === null || ts === void 0) return "\u2014";
   const delta = Math.max(0, Date.now() - ts);
-  if (delta < 5e3) return lang() === "zh" ? "\u521A\u521A" : "just now";
+  if (delta < 5e3) return t("coi.ago.justNow");
   const s = Math.floor(delta / 1e3);
-  if (s < 60) return lang() === "zh" ? `${s} \u79D2\u524D` : `${s}s ago`;
+  if (s < 60) return t("coi.ago.seconds", { count: s });
   const m = Math.floor(s / 60);
-  if (m < 60) return lang() === "zh" ? `${m} \u5206\u949F\u524D` : `${m}m ago`;
+  if (m < 60) return t("coi.ago.minutes", { count: m });
   const h = Math.floor(m / 60);
-  return lang() === "zh" ? `${h} \u5C0F\u65F6\u524D` : `${h}h ago`;
+  return t("coi.ago.hours", { count: h });
 }
 function fmtDur(ms) {
   if (ms === null || ms === void 0 || ms < 0) return "\u2014";
@@ -4952,19 +4582,21 @@ function trunc(text, n = 40) {
   const one = text.replace(/\s+/g, " ").trim();
   return one.length > n ? `${one.slice(0, n)}\u2026` : one;
 }
-function statusMeta(status) {
-  const zh2 = lang() === "zh";
+function statusMeta(status, t) {
   const meta = {
-    queued: { icon: "\u23F3", label: zh2 ? "\u6392\u961F\u4E2D" : "Queued", cls: "coi-status-queued" },
-    running: { icon: "\u23F3", label: zh2 ? "\u8FD0\u884C\u4E2D" : "Running", cls: "coi-status-running" },
-    completed: { icon: "\u2705", label: zh2 ? "\u5DF2\u5B8C\u6210" : "Completed", cls: "coi-status-completed" },
-    failed: { icon: "\u274C", label: zh2 ? "\u5931\u8D25" : "Failed", cls: "coi-status-failed" },
-    killed: { icon: "\u{1F6D1}", label: zh2 ? "\u5DF2\u7EC8\u6B62" : "Killed", cls: "coi-status-killed" },
-    interrupted: { icon: "\u26A0\uFE0F", label: zh2 ? "\u4E2D\u65AD" : "Interrupted", cls: "coi-status-interrupted" }
+    queued: { icon: "\u23F3", label: t("coi.status.queued"), cls: "coi-status-queued" },
+    running: { icon: "\u23F3", label: t("coi.status.running"), cls: "coi-status-running" },
+    completed: { icon: "\u2705", label: t("coi.status.completed"), cls: "coi-status-completed" },
+    failed: { icon: "\u274C", label: t("coi.status.failed"), cls: "coi-status-failed" },
+    killed: { icon: "\u{1F6D1}", label: t("coi.status.killed"), cls: "coi-status-killed" },
+    interrupted: { icon: "\u26A0\uFE0F", label: t("coi.status.interrupted"), cls: "coi-status-interrupted" }
   };
   return meta[status] ?? { icon: "\u2754", label: status, cls: "" };
 }
 var SCOPES = ["temporary", "session", "project", "global"];
+function scopeLabel(scope, t) {
+  return SCOPES.includes(scope) ? t(`coi.scope.${scope}`) : scope;
+}
 var BUILTIN_ADAPTER_IDS = /* @__PURE__ */ new Set(["kimi", "codex", "grok", "hermes"]);
 var BUILTIN_TEMPLATE_IDS = /* @__PURE__ */ new Set(["review-code", "fix-tests", "summarize-logs", "architecture-analysis"]);
 var TASKS_POLL_MS = 3e3;
@@ -4979,16 +4611,17 @@ function ErrorLine(props) {
   return /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-error", children: props.error });
 }
 function CoIView(props) {
+  const t = dict(props.t);
   const sessionId = props.sessionId;
   const [sub, setSub] = (0, import_react11.useState)("tasks");
   const tabs = [
-    { id: "guide", key: "guide" },
-    { id: "tasks", key: "tasks" },
-    { id: "sessions", key: "sessions" },
-    { id: "adapters", key: "adapters" },
-    { id: "templates", key: "templates" },
-    { id: "stats", key: "stats" },
-    { id: "config", key: "config" }
+    { id: "guide", key: "coi.guide" },
+    { id: "tasks", key: "coi.tasks" },
+    { id: "sessions", key: "coi.sessions" },
+    { id: "adapters", key: "coi.adapters" },
+    { id: "templates", key: "coi.templates" },
+    { id: "stats", key: "coi.stats" },
+    { id: "config", key: "coi.config" }
   ];
   return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-root", children: [
     /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-tabs", role: "tablist", children: tabs.map((tab) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
@@ -5004,95 +4637,97 @@ function CoIView(props) {
       tab.id
     )) }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-body", children: [
-      sub === "guide" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(GuidePane, {}),
-      sub === "tasks" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(TasksPane, { dsSessionId: sessionId }),
-      sub === "sessions" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(SessionsPane, { dsSessionId: sessionId }),
-      sub === "adapters" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(AdaptersPane, {}),
-      sub === "templates" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(TemplatesPane, {}),
-      sub === "stats" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(StatsPane, {}),
-      sub === "config" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(ConfigPane, {})
+      sub === "guide" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(GuidePane, { t: props.t }),
+      sub === "tasks" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(TasksPane, { t: props.t, dsSessionId: sessionId }),
+      sub === "sessions" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(SessionsPane, { t: props.t, dsSessionId: sessionId }),
+      sub === "adapters" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(AdaptersPane, { t: props.t }),
+      sub === "templates" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(TemplatesPane, { t: props.t }),
+      sub === "stats" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(StatsPane, { t: props.t }),
+      sub === "config" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(ConfigPane, { t: props.t })
     ] })
   ] });
 }
-function GuidePane() {
+function GuidePane({ t: tt }) {
+  const t = dict(tt);
   return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-pane", children: [
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-card-title", children: t("guide.title") }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("p", { className: "coi-muted", children: t("guide.intro") })
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-card-title", children: t("coi.guide.title") }),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("p", { className: "coi-muted", children: t("coi.guide.intro") })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card", children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card-title", children: [
         "\u{1F680} ",
-        t("guide.use.title")
+        t("coi.guide.use.title")
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("p", { className: "coi-muted", children: t("guide.use.desc") }),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("p", { className: "coi-muted", children: t("coi.guide.use.desc") }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("ul", { className: "coi-guide-list", children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("li", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("guide.use.ai") }),
-          t("guide.use.aiDesc")
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("coi.guide.use.ai") }),
+          t("coi.guide.use.aiDesc")
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("li", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("guide.use.slash") }),
-          t("guide.use.slashDesc")
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("coi.guide.use.slash") }),
+          t("coi.guide.use.slashDesc")
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("li", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("guide.use.tab") }),
-          t("guide.use.tabDesc")
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("coi.guide.use.tab") }),
+          t("coi.guide.use.tabDesc")
         ] })
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card", children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card-title", children: [
         "\u{1F5C2}\uFE0F ",
-        t("guide.scope.title")
+        t("coi.guide.scope.title")
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("p", { className: "coi-muted", children: t("guide.scope.desc") }),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("p", { className: "coi-muted", children: t("coi.guide.scope.desc") }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("ul", { className: "coi-guide-list", children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("li", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("scope.temporary") }),
-          "\uFF1A",
-          t("guide.scope.temp")
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("coi.scope.temporary") }),
+          t("coi.sep.colon"),
+          t("coi.guide.scope.temp")
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("li", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("scope.session") }),
-          "\uFF1A",
-          t("guide.scope.session")
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("coi.scope.session") }),
+          t("coi.sep.colon"),
+          t("coi.guide.scope.session")
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("li", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("scope.project") }),
-          "\uFF1A",
-          t("guide.scope.project")
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("coi.scope.project") }),
+          t("coi.sep.colon"),
+          t("coi.guide.scope.project")
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("li", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("scope.global") }),
-          "\uFF1A",
-          t("guide.scope.global")
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { children: t("coi.scope.global") }),
+          t("coi.sep.colon"),
+          t("coi.guide.scope.global")
         ] })
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card", children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card-title", children: [
         "\u{1F9ED} ",
-        t("guide.skill.title")
+        t("coi.guide.skill.title")
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("p", { className: "coi-muted", children: t("guide.skill.desc") })
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("p", { className: "coi-muted", children: t("coi.guide.skill.desc") })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card", children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card-title", children: [
         "\u{1F4A1} ",
-        t("guide.tips.title")
+        t("coi.guide.tips.title")
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("ul", { className: "coi-guide-list", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("li", { children: t("guide.tips.1") }),
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("li", { children: t("guide.tips.2") }),
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("li", { children: t("guide.tips.3") }),
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("li", { children: t("guide.tips.4") })
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("li", { children: t("coi.guide.tips.1") }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("li", { children: t("coi.guide.tips.2") }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("li", { children: t("coi.guide.tips.3") }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("li", { children: t("coi.guide.tips.4") })
       ] })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("p", { className: "coi-muted coi-pad", children: t("guide.loop") })
+    /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("p", { className: "coi-muted coi-pad", children: t("coi.guide.loop") })
   ] });
 }
-function TasksPane({ dsSessionId }) {
+function TasksPane({ t: tt, dsSessionId }) {
+  const t = dict(tt);
   const visQs = (dsSessionId ?? "") !== "" ? `&sessionId=${encodeURIComponent(String(dsSessionId))}` : "";
   const [adapters, setAdapters] = (0, import_react11.useState)([]);
   const [templates, setTemplates] = (0, import_react11.useState)([]);
@@ -5139,7 +4774,7 @@ function TasksPane({ dsSessionId }) {
       setTotal(data.total);
       setError(null);
     } catch (err) {
-      setError(errText(err));
+      setError(errText(err, t));
     }
   }, [searchQ, page]);
   const loadDetail = (0, import_react11.useCallback)(async (id) => {
@@ -5147,23 +4782,23 @@ function TasksPane({ dsSessionId }) {
       const data = await fetchJson(`/tasks/${encodeURIComponent(id)}`);
       setDetail(data.task);
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     }
   }, []);
   const removeTask = async (id) => {
-    if (!window.confirm(t("tasks.confirmDelete").replace("{id}", id))) return;
+    if (!window.confirm(t("coi.tasks.confirmDelete").replace("{id}", id))) return;
     try {
       const res = await deleteJson(`/tasks/${encodeURIComponent(id)}`);
       if (res.ok !== true) {
-        setNotice({ kind: "error", text: msgOr(res.message, "\u5220\u9664\u5931\u8D25") });
+        setNotice({ kind: "error", text: msgOr(res.message, t("coi.tasks.deleteFailed")) });
         return;
       }
       setSelectedId(null);
       setDetail(null);
       void loadTasks();
-      setNotice({ kind: "ok", text: res.message ?? "\u5DF2\u5220\u9664" });
+      setNotice({ kind: "ok", text: res.message ?? t("coi.tasks.deleted") });
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     }
   };
   const loadLog = (0, import_react11.useCallback)(async (id) => {
@@ -5172,7 +4807,7 @@ function TasksPane({ dsSessionId }) {
       setLog(data.text);
       setLogError(null);
     } catch (err) {
-      setLogError(errText(err));
+      setLogError(errText(err, t));
     }
   }, []);
   (0, import_react11.useEffect)(() => {
@@ -5234,7 +4869,7 @@ function TasksPane({ dsSessionId }) {
   };
   const launch = async () => {
     if (prompt.trim() === "") {
-      setNotice({ kind: "error", text: t("launch.needPrompt") });
+      setNotice({ kind: "error", text: t("coi.launch.needPrompt") });
       return;
     }
     setLaunching(true);
@@ -5249,36 +4884,36 @@ function TasksPane({ dsSessionId }) {
         injectTracks: injectTracks.length > 0 ? injectTracks : void 0,
         contextText: ctxText.trim() === "" ? void 0 : ctxText
       });
-      setNotice({ kind: "ok", text: `${t("launch.ok")}${res.taskId !== void 0 ? `\uFF1A${res.taskId}` : ""}` });
+      setNotice({ kind: "ok", text: `${t("coi.launch.ok")}${res.taskId !== void 0 ? `${t("coi.sep.colon")}${res.taskId}` : ""}` });
       setPrompt("");
       setTemplateId("");
       setRefTaskId("");
       void loadTasks();
       window.dispatchEvent(new CustomEvent("dsh-memory-evolve:badge-change"));
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     } finally {
       setLaunching(false);
     }
   };
   const kill = async () => {
     if (detail === null) return;
-    if (!window.confirm(t("tasks.confirmKill"))) return;
+    if (!window.confirm(t("coi.tasks.confirmKill"))) return;
     try {
       await postJson(`/tasks/${encodeURIComponent(detail.id)}/cancel`, { force: false });
-      setNotice({ kind: "ok", text: t("tasks.killed") });
+      setNotice({ kind: "ok", text: t("coi.tasks.killed") });
       void loadTasks();
       void loadDetail(detail.id);
     } catch (err) {
-      const msg = errText(err);
+      const msg = errText(err, t);
       if (window.confirm(msg)) {
         try {
           await postJson(`/tasks/${encodeURIComponent(detail.id)}/cancel`, { force: true });
-          setNotice({ kind: "ok", text: t("tasks.killed") });
+          setNotice({ kind: "ok", text: t("coi.tasks.killed") });
           void loadTasks();
           void loadDetail(detail.id);
         } catch (err2) {
-          setNotice({ kind: "error", text: errText(err2) });
+          setNotice({ kind: "error", text: errText(err2, t) });
         }
       }
     }
@@ -5287,10 +4922,10 @@ function TasksPane({ dsSessionId }) {
     if (detail === null) return;
     try {
       const res = await postJson(`/tasks/${encodeURIComponent(detail.id)}/retry`);
-      setNotice({ kind: "ok", text: res.message ?? `${t("tasks.retried")}${res.taskId !== void 0 ? `\uFF1A${res.taskId}` : ""}` });
+      setNotice({ kind: "ok", text: res.message ?? `${t("coi.tasks.retried")}${res.taskId !== void 0 ? `${t("coi.sep.colon")}${res.taskId}` : ""}` });
       void loadTasks();
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     }
   };
   const copySession = async (text) => {
@@ -5299,7 +4934,7 @@ function TasksPane({ dsSessionId }) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      setNotice({ kind: "error", text: t("tasks.copyFail") });
+      setNotice({ kind: "error", text: t("coi.tasks.copyFail") });
     }
   };
   const detailDur = (task) => {
@@ -5311,14 +4946,14 @@ function TasksPane({ dsSessionId }) {
   return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-pane coi-tasks", children: [
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card", children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card-head", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-card-title", children: t("launch.title") }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-card-title", children: t("coi.launch.title") }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-grow" }),
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => setLaunchOpen(!launchOpen), children: launchOpen ? t("launch.collapse") : t("launch.expand") })
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => setLaunchOpen(!launchOpen), children: launchOpen ? t("coi.launch.collapse") : t("coi.launch.expand") })
       ] }),
       launchOpen && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(import_jsx_runtime12.Fragment, { children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-form-grid", children: [
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("launch.adapter") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.launch.adapter") }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(
               "select",
               {
@@ -5334,9 +4969,7 @@ function TasksPane({ dsSessionId }) {
                 children: [
                   adapters.map((a) => /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("option", { value: a.id, children: [
                     a.name,
-                    "\uFF08",
-                    a.id,
-                    "\uFF09"
+                    t("coi.sep.paren", { value: a.id })
                   ] }, a.id)),
                   adapters.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: adapterId, children: adapterId })
                 ]
@@ -5344,39 +4977,34 @@ function TasksPane({ dsSessionId }) {
             )
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("launch.scope") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.launch.scope") }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("select", { className: "coi-select", value: scope, onChange: (e) => setScope(e.target.value), children: SCOPES.map((s) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: s, children: t(`scope.${s}`) }, s)) })
           ] }),
           scope !== "temporary" && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("launch.session") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.launch.session") }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("select", { className: "coi-select", value: sessionId, onChange: (e) => setSessionId(e.target.value), children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", children: t("launch.sessionNone") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", children: t("coi.launch.sessionNone") }),
               sessions.filter((s) => s.adapterId === adapterId).map((s) => /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("option", { value: s.id, children: [
                 s.id,
-                "\uFF08",
-                s.adapterId,
-                s.note !== null && s.note !== "" ? ` \xB7 ${trunc(s.note, 12)}` : "",
-                "\uFF09"
+                t("coi.sep.paren", { value: `${s.adapterId}${s.note !== null && s.note !== "" ? ` \xB7 ${trunc(s.note, 12)}` : ""}` })
               ] }, s.id)),
-              sessions.filter((s) => s.adapterId === adapterId).length === 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", disabled: true, children: t("launch.sessionEmpty") })
+              sessions.filter((s) => s.adapterId === adapterId).length === 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", disabled: true, children: t("coi.launch.sessionEmpty") })
             ] })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("launch.template") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.launch.template") }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("select", { className: "coi-select", value: templateId, onChange: (e) => applyTemplate(e.target.value), children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", children: t("launch.templateNone") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", children: t("coi.launch.templateNone") }),
               templates.map((tpl) => /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("option", { value: tpl.id, children: [
                 tpl.name,
-                "\uFF08",
-                tpl.id,
-                "\uFF09"
+                t("coi.sep.paren", { value: tpl.id })
               ] }, tpl.id))
             ] })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("launch.ref") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.launch.ref") }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("select", { className: "coi-select", value: refTaskId, onChange: (e) => setRefTaskId(e.target.value), children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", children: t("launch.refNone") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", children: t("coi.launch.refNone") }),
               refTasks.map((task) => /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("option", { value: task.id, children: [
                 task.id,
                 " \xB7 ",
@@ -5386,21 +5014,21 @@ function TasksPane({ dsSessionId }) {
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("launch.prompt") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.launch.prompt") }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
             "textarea",
             {
               className: "coi-textarea coi-textarea-lg",
               rows: 6,
-              placeholder: t("launch.promptPh"),
+              placeholder: t("coi.launch.promptPh"),
               value: prompt,
               onChange: (e) => setPrompt(e.target.value)
             }
           )
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field coi-field-wide", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-field-check", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("launch.injectTracks") }) }),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("launch.injectTracksHint") })
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-field-check", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.launch.injectTracks") }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("coi.launch.injectTracksHint") })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("label", { className: "coi-field coi-field-wide coi-inject-track-line", children: ["memory", "user", "key"].map((track) => /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: "coi-field-check", children: [
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
@@ -5416,7 +5044,7 @@ function TasksPane({ dsSessionId }) {
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: track })
         ] }, track)) }),
         injectTracks.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field coi-field-wide", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("launch.ctxText") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.launch.ctxText") }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
             "textarea",
             {
@@ -5424,11 +5052,11 @@ function TasksPane({ dsSessionId }) {
               rows: 4,
               value: ctxText,
               onChange: (e) => setCtxText(e.target.value),
-              placeholder: t("launch.ctxTextPh")
+              placeholder: t("coi.launch.ctxTextPh")
             }
           )
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-form-actions", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-primary", disabled: launching, onClick: () => void launch(), children: t("launch.submit") }) })
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-form-actions", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-primary", disabled: launching, onClick: () => void launch(), children: t("coi.launch.submit") }) })
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(NoticeLine, { notice }),
@@ -5436,7 +5064,7 @@ function TasksPane({ dsSessionId }) {
       "input",
       {
         className: "coi-input",
-        placeholder: t("tasks.searchPh"),
+        placeholder: t("coi.tasks.searchPh"),
         value: searchQ,
         onChange: (e) => {
           setSearchQ(e.target.value);
@@ -5447,10 +5075,10 @@ function TasksPane({ dsSessionId }) {
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-split", children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-task-list", children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(ErrorLine, { error }),
-        tasks === null && error === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("loading") }),
-        tasks !== null && tasks.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("tasks.empty") }),
+        tasks === null && error === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("coi.loading") }),
+        tasks !== null && tasks.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("coi.tasks.empty") }),
         tasks?.map((task) => {
-          const meta = statusMeta(task.status);
+          const meta = statusMeta(task.status, t);
           return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(
             "button",
             {
@@ -5462,7 +5090,7 @@ function TasksPane({ dsSessionId }) {
                 /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-mono coi-task-id", children: task.id }),
                 /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-task-adapter", children: task.adapterId }),
                 /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-task-prompt", title: task.prompt, children: trunc(task.prompt) }),
-                /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-badge", children: t("scope." + task.scope) ?? task.scope }),
+                /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-badge", children: scopeLabel(task.scope, t) }),
                 /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-task-time", children: fmtTime(task.createdAt) })
               ]
             },
@@ -5479,7 +5107,7 @@ function TasksPane({ dsSessionId }) {
               onClick: () => setPage((p) => Math.max(1, p - 1)),
               children: [
                 "\u2039 ",
-                t("tasks.pager.prev")
+                t("coi.tasks.pager.prev")
               ]
             }
           ),
@@ -5488,7 +5116,7 @@ function TasksPane({ dsSessionId }) {
             " / ",
             Math.max(1, Math.ceil(total / TASK_LIMIT)),
             " \xB7 ",
-            t("tasks.pager.total"),
+            t("coi.tasks.pager.total"),
             " ",
             total
           ] }),
@@ -5500,7 +5128,7 @@ function TasksPane({ dsSessionId }) {
               disabled: page >= Math.max(1, Math.ceil(total / TASK_LIMIT)),
               onClick: () => setPage((p) => p + 1),
               children: [
-                t("tasks.pager.next"),
+                t("coi.tasks.pager.next"),
                 " \u203A"
               ]
             }
@@ -5508,95 +5136,95 @@ function TasksPane({ dsSessionId }) {
         ] })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-detail", children: [
-        selectedId === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("tasks.selectHint") }),
-        selectedId !== null && detail === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("loading") }),
+        selectedId === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("coi.tasks.selectHint") }),
+        selectedId !== null && detail === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("coi.loading") }),
         detail !== null && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(import_jsx_runtime12.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-detail-meta", children: [
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-meta-row", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("tasks.status") }),
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: statusMeta(detail.status).cls, children: [
-                statusMeta(detail.status).icon,
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.tasks.status") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: statusMeta(detail.status, t).cls, children: [
+                statusMeta(detail.status, t).icon,
                 " ",
-                statusMeta(detail.status).label
+                statusMeta(detail.status, t).label
               ] })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-meta-row", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("tasks.adapter") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.tasks.adapter") }),
               /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { children: detail.adapterId })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-meta-row", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("tasks.scope") }),
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-badge", children: t("scope." + detail.scope) ?? detail.scope })
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.tasks.scope") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-badge", children: scopeLabel(detail.scope, t) })
             ] }),
             detail.branch !== null && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-meta-row", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("tasks.branch") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.tasks.branch") }),
               /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-mono", children: detail.branch })
             ] }),
             detail.sessionId !== null && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-meta-row", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("tasks.sessionId") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.tasks.sessionId") }),
               /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-mono coi-small", children: detail.sessionId }),
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => void copySession(detail.sessionId ?? ""), children: copied ? t("tasks.copied") : t("tasks.copy") })
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => void copySession(detail.sessionId ?? ""), children: copied ? t("coi.tasks.copied") : t("coi.tasks.copy") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-meta-row", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("tasks.created") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.tasks.created") }),
               /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { children: fmtTime(detail.createdAt) })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-meta-row", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("tasks.duration") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.tasks.duration") }),
               /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { children: fmtDur(detailDur(detail)) })
             ] }),
             running && detail.lastOutputAt != null && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-meta-row", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("tasks.lastOutput") }),
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { children: fmtAgo(detail.lastOutputAt) })
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.tasks.lastOutput") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { children: fmtAgo(detail.lastOutputAt, t) })
             ] }),
             detail.exitCode !== null && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-meta-row", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("tasks.exitCode") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.tasks.exitCode") }),
               /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-mono", children: detail.exitCode })
             ] })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-detail-actions", children: [
             running && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("button", { type: "button", className: "coi-btn coi-btn-danger", onClick: () => void kill(), children: [
               "\u{1F6D1} ",
-              t("tasks.kill")
+              t("coi.tasks.kill")
             ] }),
             !running && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("button", { type: "button", className: "coi-btn", onClick: () => void retry(), children: [
               "\u21BB ",
-              t("tasks.retry")
+              t("coi.tasks.retry")
             ] }),
             !running && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("button", { type: "button", className: "coi-btn coi-btn-danger", onClick: () => void removeTask(detail.id), children: [
               "\u{1F5D1} ",
-              t("tasks.delete")
+              t("coi.tasks.delete")
             ] })
           ] }),
           detail.error !== null && detail.error !== "" && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-error", children: [
-            t("tasks.error"),
-            "\uFF1A",
+            t("coi.tasks.error"),
+            t("coi.sep.colon"),
             detail.error
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-log-head", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label coi-log-title", children: t("tasks.prompt") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label coi-log-title", children: t("coi.tasks.prompt") }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => setFullPrompt(true), children: [
               "\u26F6 ",
-              t("tasks.logFull")
+              t("coi.tasks.logFull")
             ] })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("pre", { className: "coi-prompt-view", children: detail.prompt }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-log-head", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label coi-log-title", children: t("tasks.log") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label coi-log-title", children: t("coi.tasks.log") }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => setFullLog(true), children: [
               "\u26F6 ",
-              t("tasks.logFull")
+              t("coi.tasks.logFull")
             ] })
           ] }),
           logError !== null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-error", children: logError }),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("pre", { ref: logRef, className: "coi-log", children: log === "" ? t("tasks.logEmpty") : log })
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("pre", { ref: logRef, className: "coi-log", children: log === "" ? t("coi.tasks.logEmpty") : log })
         ] })
       ] })
     ] }),
     fullPrompt && detail !== null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-modal", onClick: () => setFullPrompt(false), children: /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-modal-box", onClick: (e) => e.stopPropagation(), children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-modal-head", children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: "coi-mono coi-small", children: [
-          t("tasks.prompt"),
+          t("coi.tasks.prompt"),
           " \u2014 ",
           detail.id
         ] }),
@@ -5607,22 +5235,18 @@ function TasksPane({ dsSessionId }) {
     fullLog && detail !== null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-modal", onClick: () => setFullLog(false), children: /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-modal-box", onClick: (e) => e.stopPropagation(), children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-modal-head", children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: "coi-mono coi-small", children: [
-          t("tasks.log"),
+          t("coi.tasks.log"),
           " \u2014 ",
-          detail.id,
-          "\uFF08",
-          detail.adapterId,
-          " ",
-          t("scope." + detail.scope) ?? detail.scope,
-          "\uFF09"
+          t("coi.sep.paren", { value: `${detail.id} ${detail.adapterId} ${scopeLabel(detail.scope, t)}` })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => setFullLog(false), children: "\u2715" })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("pre", { ref: fullLogRef, className: "coi-log coi-log-full", children: log === "" ? t("tasks.logEmpty") : log })
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("pre", { ref: fullLogRef, className: "coi-log coi-log-full", children: log === "" ? t("coi.tasks.logEmpty") : log })
     ] }) })
   ] });
 }
-function SessionsPane({ dsSessionId }) {
+function SessionsPane({ t: tt, dsSessionId }) {
+  const t = dict(tt);
   const visQs = (dsSessionId ?? "") !== "" ? `&sessionId=${encodeURIComponent(String(dsSessionId))}` : "";
   const [sessions, setSessions] = (0, import_react11.useState)(null);
   const [error, setError] = (0, import_react11.useState)(null);
@@ -5634,13 +5258,13 @@ function SessionsPane({ dsSessionId }) {
   const load = (0, import_react11.useCallback)(async () => {
     try {
       const params = new URLSearchParams();
-      if (scopeFilter !== "") params.set("scope", scopeFilter);
-      if (q.trim() !== "") params.set("q", q.trim());
+      if (scopeFilter !== "") params.set("coi.scope", scopeFilter);
+      if (q.trim() !== "") params.set("coi.q", q.trim());
       const data = await fetchJson(`/sessions?${params.toString()}${visQs}`);
       setSessions(data.sessions);
       setError(null);
     } catch (err) {
-      setError(errText(err));
+      setError(errText(err, t));
     }
   }, [scopeFilter, q]);
   (0, import_react11.useEffect)(() => {
@@ -5650,51 +5274,51 @@ function SessionsPane({ dsSessionId }) {
     try {
       await postJson("/sessions/note", { id, note: noteDraft });
       setEditId(null);
-      setNotice({ kind: "ok", text: t("config.saved") });
+      setNotice({ kind: "ok", text: t("coi.config.saved") });
       void load();
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     }
   };
   const remove = async (id) => {
-    if (!window.confirm(t("sessions.confirmDelete"))) return;
+    if (!window.confirm(t("coi.sessions.confirmDelete"))) return;
     try {
       await deleteJson(`/sessions/${encodeURIComponent(id)}`);
       void load();
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     }
   };
   return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-pane", children: [
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-toolbar", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("select", { className: "coi-select", value: scopeFilter, onChange: (e) => setScopeFilter(e.target.value), title: t("sessions.filterScope"), children: [
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", children: t("all") }),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("select", { className: "coi-select", value: scopeFilter, onChange: (e) => setScopeFilter(e.target.value), title: t("coi.sessions.filterScope"), children: [
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", children: t("coi.all") }),
         SCOPES.map((s) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: s, children: t(`scope.${s}`) }, s))
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
         "input",
         {
           className: "coi-input",
-          placeholder: t("sessions.searchPh"),
+          placeholder: t("coi.sessions.searchPh"),
           value: q,
           onChange: (e) => setQ(e.target.value)
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn", onClick: () => void load(), children: t("refresh") })
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn", onClick: () => void load(), children: t("coi.refresh") })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(NoticeLine, { notice }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(ErrorLine, { error }),
-    sessions === null && error === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("loading") }),
-    sessions !== null && sessions.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("sessions.empty") }),
+    sessions === null && error === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("coi.loading") }),
+    sessions !== null && sessions.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("coi.sessions.empty") }),
     sessions?.map((s) => /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-row", children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-row-line", children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-mono coi-small", children: s.id }),
-        s.activeTaskId !== null && s.activeTaskId !== "" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { title: `${t("sessions.locked")}\uFF1A${s.activeTaskId}`, children: "\u{1F512}" }),
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-badge", children: t("scope." + s.scope) ?? s.scope }),
+        s.activeTaskId !== null && s.activeTaskId !== "" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { title: `${t("coi.sessions.locked")}${t("coi.sep.colon")}${s.activeTaskId}`, children: "\u{1F512}" }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-badge", children: scopeLabel(s.scope, t) }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { children: s.adapterId }),
         s.branch !== null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-mono coi-small", children: s.branch }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: "coi-muted coi-small", children: [
-          t("sessions.lastSeen"),
+          t("coi.sessions.lastSeen"),
           " ",
           fmtTime(s.lastSeen)
         ] })
@@ -5707,10 +5331,10 @@ function SessionsPane({ dsSessionId }) {
               className: "coi-input coi-grow",
               value: noteDraft,
               onChange: (e) => setNoteDraft(e.target.value),
-              placeholder: t("sessions.note")
+              placeholder: t("coi.sessions.note")
             }
           ),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => void saveNote(s.id), children: t("sessions.save") })
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => void saveNote(s.id), children: t("coi.sessions.save") })
         ] }) : /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(import_jsx_runtime12.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-grow", children: s.note !== null && s.note !== "" ? s.note : "\u2014" }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
@@ -5722,16 +5346,17 @@ function SessionsPane({ dsSessionId }) {
                 setEditId(s.id);
                 setNoteDraft(s.note ?? "");
               },
-              children: t("sessions.note")
+              children: t("coi.sessions.note")
             }
           )
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini coi-btn-danger", onClick: () => void remove(s.id), children: t("sessions.delete") })
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini coi-btn-danger", onClick: () => void remove(s.id), children: t("coi.sessions.delete") })
       ] })
     ] }, s.id))
   ] });
 }
-function AdaptersPane() {
+function AdaptersPane({ t: tt }) {
+  const t = dict(tt);
   const [adapters, setAdapters] = (0, import_react11.useState)(null);
   const [error, setError] = (0, import_react11.useState)(null);
   const [notice, setNotice] = (0, import_react11.useState)(null);
@@ -5765,7 +5390,7 @@ function AdaptersPane() {
       setAdapters(data.adapters);
       setError(null);
     } catch (err) {
-      setError(errText(err));
+      setError(errText(err, t));
     }
   }, []);
   (0, import_react11.useEffect)(() => {
@@ -5774,13 +5399,13 @@ function AdaptersPane() {
   const test = async (id) => {
     try {
       const res = await postJson("/adapters/test", { id });
-      setNotice({ kind: "ok", text: `${t("adapters.testOk")}${res.taskId !== void 0 ? `\uFF1A${res.taskId}` : ""}${res.message !== void 0 ? `\uFF08${res.message}\uFF09` : ""}` });
+      setNotice({ kind: "ok", text: `${t("coi.adapters.testOk")}${res.taskId !== void 0 ? `${t("coi.sep.colon")}${res.taskId}` : ""}${res.message !== void 0 ? t("coi.sep.paren", { value: res.message }) : ""}` });
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     }
   };
   const remove = async (id) => {
-    if (!window.confirm(t("adapters.confirmDelete"))) return;
+    if (!window.confirm(t("coi.adapters.confirmDelete"))) return;
     try {
       const res = await deleteJson(`/adapters/${encodeURIComponent(id)}`);
       if (res.ok === false) {
@@ -5789,7 +5414,7 @@ function AdaptersPane() {
       }
       void load();
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     }
   };
   const saveUseCase = async (a) => {
@@ -5797,13 +5422,13 @@ function AdaptersPane() {
       const def = { ...a, useCase: useCaseDraft.trim() };
       const res = await postJson("/adapters", { def });
       if (res.ok !== true) {
-        setNotice({ kind: "error", text: msgOr(res.message, "\u4FDD\u5B58\u5931\u8D25") });
+        setNotice({ kind: "error", text: msgOr(res.message, t("coi.adapters.saveFailed")) });
         return;
       }
       setUseCaseEditId(null);
       void load();
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     }
   };
   const toggleEnabled = async (a) => {
@@ -5811,12 +5436,12 @@ function AdaptersPane() {
       const next = a.enabled === false;
       const res = await postJson(`/adapters/${encodeURIComponent(a.id)}/enabled`, { enabled: next });
       if (res.ok !== true) {
-        setNotice({ kind: "error", text: msgOr(res.message, "\u64CD\u4F5C\u5931\u8D25") });
+        setNotice({ kind: "error", text: msgOr(res.message, t("coi.adapters.opFailed")) });
         return;
       }
       void load();
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     }
   };
   const openSkillEdit = async (a) => {
@@ -5827,13 +5452,13 @@ function AdaptersPane() {
     try {
       const res = await fetchJson(`/adapters/${encodeURIComponent(a.id)}/skill`);
       if (res.ok !== true) {
-        setSkillError(msgOr(res.message, "\u8BFB\u53D6\u5931\u8D25"));
+        setSkillError(msgOr(res.message, t("coi.adapters.readFailed")));
         return;
       }
       setSkillEditName(res.skillName ?? "");
       setSkillContent(res.content ?? "");
     } catch (err) {
-      setSkillError(errText(err));
+      setSkillError(errText(err, t));
     }
   };
   const saveSkill = async () => {
@@ -5847,14 +5472,14 @@ function AdaptersPane() {
         body: JSON.stringify({ content: skillContent })
       });
       if (res.ok !== true) {
-        setSkillError(msgOr(res.message, "\u4FDD\u5B58\u5931\u8D25"));
+        setSkillError(msgOr(res.message, t("coi.adapters.saveFailed")));
         return;
       }
-      setNotice({ kind: "ok", text: res.message ?? t("adapters.skillSaved") });
+      setNotice({ kind: "ok", text: res.message ?? t("coi.adapters.skillSaved") });
       setSkillEditId(null);
       setSkillContent("");
     } catch (err) {
-      setSkillError(errText(err));
+      setSkillError(errText(err, t));
     } finally {
       setSkillSaving(false);
     }
@@ -5863,7 +5488,7 @@ function AdaptersPane() {
     if (fType === "ai-cli") {
       const resumeEmpty = fResumeKind === "flag" ? fResumeFlag.trim() === "" : fResumeArgs.trim() === "";
       if (resumeEmpty) {
-        setNotice({ kind: "error", text: t("adapters.resumeMissing") });
+        setNotice({ kind: "error", text: t("coi.adapters.resumeMissing") });
         return;
       }
     }
@@ -5888,10 +5513,10 @@ function AdaptersPane() {
       const skillContent2 = fSkill.trim() !== "" && fSkillContent.trim() !== "" ? fSkillContent : void 0;
       const res = await postJson("/adapters", { def, skillContent: skillContent2 });
       if (res.ok !== true) {
-        setNotice({ kind: "error", text: msgOr(res.message, "\u4FDD\u5B58\u5931\u8D25") });
+        setNotice({ kind: "error", text: msgOr(res.message, t("coi.adapters.saveFailed")) });
         return;
       }
-      setNotice({ kind: "ok", text: res.skillMessage !== void 0 ? res.skillMessage : t("config.saved") });
+      setNotice({ kind: "ok", text: res.skillMessage !== void 0 ? res.skillMessage : t("coi.config.saved") });
       setFId("");
       setFName("");
       setFBinary("");
@@ -5904,7 +5529,7 @@ function AdaptersPane() {
       setFExtractRegex("");
       void load();
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     } finally {
       setAdding(false);
     }
@@ -5912,7 +5537,7 @@ function AdaptersPane() {
   return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-pane", children: [
     /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(NoticeLine, { notice }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(ErrorLine, { error }),
-    adapters === null && error === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("loading") }),
+    adapters === null && error === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("coi.loading") }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-cards", children: adapters?.map((a) => {
       const builtin = BUILTIN_ADAPTER_IDS.has(a.id);
       return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card coi-adapter-card", children: [
@@ -5920,34 +5545,30 @@ function AdaptersPane() {
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-strong", children: a.name }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-mono coi-small coi-muted", children: a.id }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-badge", children: a.type }),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-badge", children: builtin ? t("adapters.builtin") : t("adapters.custom") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-badge", children: builtin ? t("coi.adapters.builtin") : t("coi.adapters.custom") }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-grow" }),
-          a.skillName !== void 0 && a.skillName !== "" && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: "coi-muted coi-small coi-skill-tag", title: t("adapters.skillHint"), children: [
-            t("adapters.skill"),
-            "\uFF1A",
+          a.skillName !== void 0 && a.skillName !== "" && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: "coi-muted coi-small coi-skill-tag", title: t("coi.adapters.skillHint"), children: [
+            t("coi.adapters.skill"),
+            t("coi.sep.colon"),
             a.skillName
           ] }),
-          a.skillName !== void 0 && a.skillName !== "" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => void openSkillEdit(a), children: t("adapters.skillBtn") }),
+          a.skillName !== void 0 && a.skillName !== "" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => void openSkillEdit(a), children: t("coi.adapters.skillBtn") }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
             "button",
             {
               type: "button",
               className: `coi-btn coi-btn-mini${a.enabled === false ? " coi-btn-danger" : ""}`,
               onClick: () => void toggleEnabled(a),
-              children: a.enabled === false ? t("adapters.enable") : t("adapters.disable")
+              children: a.enabled === false ? t("coi.adapters.enable") : t("coi.adapters.disable")
             }
           ),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => void test(a.id), children: t("adapters.test") }),
-          !builtin && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini coi-btn-danger", onClick: () => void remove(a.id), children: t("adapters.delete") })
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => void test(a.id), children: t("coi.adapters.test") }),
+          !builtin && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini coi-btn-danger", onClick: () => void remove(a.id), children: t("coi.adapters.delete") })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-row-line coi-muted coi-small", children: [
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-mono", children: a.binary }),
           a.args.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-mono", children: a.args.join(" ") }),
-          a.avgMs !== void 0 && a.avgMs > 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: "coi-avg-ms", title: "\u5386\u53F2 completed \u4EFB\u52A1\u7684\u5E73\u5747\u8017\u65F6\uFF08de_coi_adapters \u540C\u6E90\uFF09", children: [
-            "\u23F1 \u5747\u8017\u65F6 ",
-            (a.avgMs / 6e4).toFixed(1),
-            " \u5206\u949F"
-          ] })
+          a.avgMs !== void 0 && a.avgMs > 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-avg-ms", title: t("coi.adapters.avgMsTitle"), children: t("coi.adapters.avgMs", { minutes: (a.avgMs / 6e4).toFixed(1) }) })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-row-line coi-muted coi-small", children: useCaseEditId === a.id ? /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(import_jsx_runtime12.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { children: "\u{1F3AF}" }),
@@ -5957,15 +5578,15 @@ function AdaptersPane() {
               className: "coi-input coi-grow",
               value: useCaseDraft,
               onChange: (e) => setUseCaseDraft(e.target.value),
-              placeholder: t("adapters.useCasePh")
+              placeholder: t("coi.adapters.useCasePh")
             }
           ),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini coi-btn-primary", onClick: () => void saveUseCase(a), children: t("adapters.saveUseCase") }),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => setUseCaseEditId(null), children: t("cancel") })
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini coi-btn-primary", onClick: () => void saveUseCase(a), children: t("coi.adapters.saveUseCase") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => setUseCaseEditId(null), children: t("coi.cancel") })
         ] }) : /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(import_jsx_runtime12.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: "coi-grow", children: [
             "\u{1F3AF} ",
-            a.useCase !== void 0 && a.useCase !== "" ? a.useCase : t("adapters.useCaseEmpty")
+            a.useCase !== void 0 && a.useCase !== "" ? a.useCase : t("coi.adapters.useCaseEmpty")
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
             "button",
@@ -5976,83 +5597,83 @@ function AdaptersPane() {
                 setUseCaseEditId(a.id);
                 setUseCaseDraft(a.useCase ?? "");
               },
-              children: t("adapters.editUseCase")
+              children: t("coi.adapters.editUseCase")
             }
           )
         ] }) }),
         a.enabled === false && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-row-line coi-error", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { children: [
           "\u26D4 ",
-          t("adapters.disabledHint")
+          t("coi.adapters.disabledHint")
         ] }) }),
         guideOpen === a.id && a.guide !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("pre", { className: "coi-guide", children: a.guide })
       ] }, a.id);
     }) }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-card-title", children: t("adapters.addTitle") }),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-card-title", children: t("coi.adapters.addTitle") }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-form-grid", children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: "id" }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fId, onChange: (e) => setFId(e.target.value), placeholder: "my-cli" })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.name") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.name") }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fName, onChange: (e) => setFName(e.target.value) })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.type") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.type") }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("select", { className: "coi-select", value: fType, onChange: (e) => setFType(e.target.value), children: [
             /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "ai-cli", children: "ai-cli" }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "plain-cli", children: "plain-cli" })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.binary") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.binary") }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fBinary, onChange: (e) => setFBinary(e.target.value), placeholder: "/usr/local/bin/my-cli" })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field coi-field-wide", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.args") }),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fArgs, onChange: (e) => setFArgs(e.target.value), placeholder: t("adapters.argsPh") })
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.args") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fArgs, onChange: (e) => setFArgs(e.target.value), placeholder: t("coi.adapters.argsPh") })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field coi-field-wide", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.skillName") }),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fSkill, onChange: (e) => setFSkill(e.target.value), placeholder: t("adapters.skillNamePh") })
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.skillName") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fSkill, onChange: (e) => setFSkill(e.target.value), placeholder: t("coi.adapters.skillNamePh") })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field coi-field-wide", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.useCase") }),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fUseCase, onChange: (e) => setFUseCase(e.target.value), placeholder: t("adapters.useCasePh") })
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.useCase") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fUseCase, onChange: (e) => setFUseCase(e.target.value), placeholder: t("coi.adapters.useCasePh") })
         ] }),
         fType === "ai-cli" && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(import_jsx_runtime12.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-field coi-field-wide coi-resume-section", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.resumeSection") }),
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("adapters.resumeSectionHint") })
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.resumeSection") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("coi.adapters.resumeSectionHint") })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.resumeKind") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.resumeKind") }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("select", { className: "coi-select", value: fResumeKind, onChange: (e) => setFResumeKind(e.target.value), children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "flag", children: t("adapters.resumeKindFlag") }),
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "args", children: t("adapters.resumeKindArgs") })
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "flag", children: t("coi.adapters.resumeKindFlag") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "args", children: t("coi.adapters.resumeKindArgs") })
             ] })
           ] }),
           fResumeKind === "flag" ? /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(import_jsx_runtime12.Fragment, { children: [
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.resumeFlag") }),
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fResumeFlag, onChange: (e) => setFResumeFlag(e.target.value), placeholder: t("adapters.resumeFlagPh") })
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.resumeFlag") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fResumeFlag, onChange: (e) => setFResumeFlag(e.target.value), placeholder: t("coi.adapters.resumeFlagPh") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.resumeArg") }),
-              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fResumeArg, onChange: (e) => setFResumeArg(e.target.value), placeholder: t("adapters.resumeArgPh") })
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.resumeArg") }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fResumeArg, onChange: (e) => setFResumeArg(e.target.value), placeholder: t("coi.adapters.resumeArgPh") })
             ] })
           ] }) : /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field coi-field-wide", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.resumeArgs") }),
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fResumeArgs, onChange: (e) => setFResumeArgs(e.target.value), placeholder: t("adapters.resumeArgsPh") })
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.resumeArgs") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fResumeArgs, onChange: (e) => setFResumeArgs(e.target.value), placeholder: t("coi.adapters.resumeArgsPh") })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field coi-field-wide", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.continueFlag") }),
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fContinueFlag, onChange: (e) => setFContinueFlag(e.target.value), placeholder: t("adapters.continueFlagPh") })
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.continueFlag") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fContinueFlag, onChange: (e) => setFContinueFlag(e.target.value), placeholder: t("coi.adapters.continueFlagPh") })
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-field coi-field-wide coi-resume-section", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.extractSection") }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-field coi-field-wide coi-resume-section", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.extractSection") }) }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.extractSource") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.extractSource") }),
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("select", { className: "coi-select", value: fExtractSource, onChange: (e) => setFExtractSource(e.target.value), children: [
               /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "none", children: "none" }),
               /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "stdout", children: "stdout" }),
@@ -6061,12 +5682,12 @@ function AdaptersPane() {
             ] })
           ] }),
           fExtractSource !== "none" && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field coi-field-wide", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.extractRegex") }),
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fExtractRegex, onChange: (e) => setFExtractRegex(e.target.value), placeholder: t("adapters.extractRegexPh") })
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.extractRegex") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fExtractRegex, onChange: (e) => setFExtractRegex(e.target.value), placeholder: t("coi.adapters.extractRegexPh") })
           ] })
         ] }),
         fSkill.trim() !== "" && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field coi-field-wide", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("adapters.skillContent") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.adapters.skillContent") }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
             "textarea",
             {
@@ -6074,10 +5695,10 @@ function AdaptersPane() {
               rows: 5,
               value: fSkillContent,
               onChange: (e) => setFSkillContent(e.target.value),
-              placeholder: t("adapters.skillContentPh")
+              placeholder: t("coi.adapters.skillContentPh")
             }
           ),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("adapters.skillContentHint") })
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("coi.adapters.skillContentHint") })
         ] })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-form-actions", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
@@ -6087,21 +5708,21 @@ function AdaptersPane() {
           className: "coi-btn coi-btn-primary",
           disabled: adding || fId.trim() === "" || fName.trim() === "" || fBinary.trim() === "" || fType === "ai-cli" && (fResumeKind === "flag" ? fResumeFlag.trim() === "" : fResumeArgs.trim() === ""),
           onClick: () => void add(),
-          children: t("adapters.add")
+          children: t("coi.adapters.add")
         }
       ) })
     ] }),
     skillEditId !== null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-modal", onClick: () => setSkillEditId(null), children: /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-modal-box", onClick: (e) => e.stopPropagation(), children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-modal-head", children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: "coi-small", children: [
-          t("adapters.editSkillTitle"),
-          "\uFF1A",
+          t("coi.adapters.editSkillTitle"),
+          t("coi.sep.colon"),
           skillEditName
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => setSkillEditId(null), children: "\u2715" })
       ] }),
       skillError !== null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-error coi-pad", children: skillError }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-pad coi-muted coi-small", children: t("adapters.editSkillHint") }),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-pad coi-muted coi-small", children: t("coi.adapters.editSkillHint") }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
         "textarea",
         {
@@ -6112,13 +5733,14 @@ function AdaptersPane() {
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-modal-head", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => setSkillEditId(null), children: t("cancel") }),
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-primary coi-btn-mini", disabled: skillSaving, onClick: () => void saveSkill(), children: skillSaving ? t("saving") : t("adapters.saveSkill") })
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => setSkillEditId(null), children: t("coi.cancel") }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-primary coi-btn-mini", disabled: skillSaving, onClick: () => void saveSkill(), children: skillSaving ? t("coi.saving") : t("coi.adapters.saveSkill") })
       ] })
     ] }) })
   ] });
 }
-function TemplatesPane() {
+function TemplatesPane({ t: tt }) {
+  const t = dict(tt);
   const [templates, setTemplates] = (0, import_react11.useState)(null);
   const [adapters, setAdapters] = (0, import_react11.useState)([]);
   const [error, setError] = (0, import_react11.useState)(null);
@@ -6134,7 +5756,7 @@ function TemplatesPane() {
       setTemplates(data.templates);
       setError(null);
     } catch (err) {
-      setError(errText(err));
+      setError(errText(err, t));
     }
   }, []);
   (0, import_react11.useEffect)(() => {
@@ -6144,15 +5766,15 @@ function TemplatesPane() {
   }, [load]);
   const remove = async (id) => {
     if (BUILTIN_TEMPLATE_IDS.has(id)) {
-      setNotice({ kind: "error", text: t("templates.builtinKeep") });
+      setNotice({ kind: "error", text: t("coi.templates.builtinKeep") });
       return;
     }
-    if (!window.confirm(t("templates.confirmDelete"))) return;
+    if (!window.confirm(t("coi.templates.confirmDelete"))) return;
     try {
       await deleteJson(`/templates/${encodeURIComponent(id)}`);
       void load();
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     }
   };
   const add = async () => {
@@ -6162,14 +5784,14 @@ function TemplatesPane() {
       if (fId.trim() !== "") def.id = fId.trim();
       if (fAdapterId !== "") def.adapterId = fAdapterId;
       await postJson("/templates", { def });
-      setNotice({ kind: "ok", text: t("config.saved") });
+      setNotice({ kind: "ok", text: t("coi.config.saved") });
       setFId("");
       setFName("");
       setFPrompt("");
       setFAdapterId("");
       void load();
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     } finally {
       setAdding(false);
     }
@@ -6177,47 +5799,48 @@ function TemplatesPane() {
   return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-pane", children: [
     /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(NoticeLine, { notice }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(ErrorLine, { error }),
-    templates === null && error === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("loading") }),
-    templates !== null && templates.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("templates.empty") }),
+    templates === null && error === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("coi.loading") }),
+    templates !== null && templates.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("coi.templates.empty") }),
     templates?.map((tpl) => /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-row", children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-row-line", children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-strong", children: tpl.name }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-mono coi-small coi-muted", children: tpl.id }),
         tpl.adapterId !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-badge", children: tpl.adapterId }),
-        BUILTIN_TEMPLATE_IDS.has(tpl.id) && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-badge", children: t("adapters.builtin") }),
+        BUILTIN_TEMPLATE_IDS.has(tpl.id) && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-badge", children: t("coi.adapters.builtin") }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-grow" }),
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini coi-btn-danger", onClick: () => void remove(tpl.id), children: t("templates.delete") })
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini coi-btn-danger", onClick: () => void remove(tpl.id), children: t("coi.templates.delete") })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-row-line coi-muted", title: tpl.prompt, children: trunc(tpl.prompt, 80) })
     ] }, tpl.id)),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-card-title", children: t("templates.addTitle") }),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-card-title", children: t("coi.templates.addTitle") }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-form-grid", children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("templates.name") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.templates.name") }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fName, onChange: (e) => setFName(e.target.value) })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("templates.adapterOpt") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.templates.adapterOpt") }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("select", { className: "coi-select", value: fAdapterId, onChange: (e) => setFAdapterId(e.target.value), children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", children: t("none") }),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", children: t("coi.none") }),
             adapters.map((a) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: a.id, children: a.id }, a.id))
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field coi-field-wide", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("templates.idOpt") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.templates.idOpt") }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: fId, onChange: (e) => setFId(e.target.value), placeholder: "my-template" })
         ] })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("templates.prompt") }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.templates.prompt") }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("textarea", { className: "coi-textarea", rows: 3, value: fPrompt, onChange: (e) => setFPrompt(e.target.value) })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-form-actions", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-primary", disabled: adding || fName.trim() === "" || fPrompt.trim() === "", onClick: () => void add(), children: t("templates.add") }) })
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-form-actions", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-primary", disabled: adding || fName.trim() === "" || fPrompt.trim() === "", onClick: () => void add(), children: t("coi.templates.add") }) })
     ] })
   ] });
 }
-function StatsPane() {
+function StatsPane({ t: tt }) {
+  const t = dict(tt);
   const [stats, setStats] = (0, import_react11.useState)(null);
   const [error, setError] = (0, import_react11.useState)(null);
   const load = (0, import_react11.useCallback)(async () => {
@@ -6226,34 +5849,34 @@ function StatsPane() {
       setStats(data);
       setError(null);
     } catch (err) {
-      setError(errText(err));
+      setError(errText(err, t));
     }
   }, []);
   (0, import_react11.useEffect)(() => {
     void load();
   }, [load]);
   return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-pane", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-toolbar", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn", onClick: () => void load(), children: t("refresh") }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-toolbar", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn", onClick: () => void load(), children: t("coi.refresh") }) }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(ErrorLine, { error }),
-    stats === null && error === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("loading") }),
+    stats === null && error === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("coi.loading") }),
     stats !== null && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(import_jsx_runtime12.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-stat-grid", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-stat-card", children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-stat-num", children: stats.total }),
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted", children: t("stats.total") })
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted", children: t("coi.stats.total") })
       ] }) }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-stat-grid", children: Object.entries(stats.byAdapter).map(([id, bucket]) => /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-stat-card", children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-strong", children: id }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-stat-num", children: bucket.count }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-muted coi-small", children: [
-          t("stats.count"),
+          t("coi.stats.count"),
           " \xB7 ",
-          t("stats.hours"),
+          t("coi.stats.hours"),
           " ",
           (bucket.totalMs / 36e5).toFixed(2),
           "h"
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-row-line coi-small", children: Object.entries(bucket.byStatus).map(([status, count]) => {
-          const meta = statusMeta(status);
+          const meta = statusMeta(status, t);
           return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: meta.cls, title: meta.label, children: [
             meta.icon,
             " ",
@@ -6261,11 +5884,12 @@ function StatsPane() {
           ] }, status);
         }) })
       ] }, id)) }),
-      Object.keys(stats.byAdapter).length === 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("stats.empty") })
+      Object.keys(stats.byAdapter).length === 0 && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("coi.stats.empty") })
     ] })
   ] });
 }
-function ConfigPane() {
+function ConfigPane({ t: tt }) {
+  const t = dict(tt);
   const [loaded, setLoaded] = (0, import_react11.useState)(false);
   const [error, setError] = (0, import_react11.useState)(null);
   const [notice, setNotice] = (0, import_react11.useState)(null);
@@ -6282,7 +5906,7 @@ function ConfigPane() {
       setTimeoutH(String(Math.floor(ms / 36e5)));
       setTimeoutM(String(Math.round(ms % 36e5 / 6e4)));
       setLoaded(true);
-    }).catch((err) => setError(errText(err)));
+    }).catch((err) => setError(errText(err, t)));
   }, []);
   const save = async () => {
     setSaving(true);
@@ -6294,13 +5918,13 @@ function ConfigPane() {
       if (retention.trim() !== "" && Number.isFinite(days)) patch.coiRetentionDays = days;
       if (timeoutH.trim() !== "" || timeoutM.trim() !== "") {
         const totalMinutes = (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
-        if (!Number.isFinite(totalMinutes) || totalMinutes < 0) throw new Error(t("config.timeoutBad"));
+        if (!Number.isFinite(totalMinutes) || totalMinutes < 0) throw new Error(t("coi.config.timeoutBad"));
         patch.coiTaskTimeoutMs = totalMinutes * 6e4;
       }
       await postJson("/config", { patch });
-      setNotice({ kind: "ok", text: t("config.saved") });
+      setNotice({ kind: "ok", text: t("coi.config.saved") });
     } catch (err) {
-      setNotice({ kind: "error", text: errText(err) });
+      setNotice({ kind: "error", text: errText(err, t) });
     } finally {
       setSaving(false);
     }
@@ -6308,28 +5932,28 @@ function ConfigPane() {
   return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-pane", children: [
     /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(NoticeLine, { notice }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(ErrorLine, { error }),
-    !loaded && error === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("loading") }),
+    !loaded && error === null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-muted coi-pad", children: t("coi.loading") }),
     loaded && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-card", children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("config.notify") }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.config.notify") }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", value: notify, onChange: (e) => setNotify(e.target.value) }),
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("config.notifyHint") })
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("coi.config.notifyHint") })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("config.retention") }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.config.retention") }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", type: "number", min: 0, value: retention, onChange: (e) => setRetention(e.target.value) })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("config.timeout") }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.config.timeout") }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-inline", children: [
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", type: "number", min: 0, value: timeoutH, onChange: (e) => setTimeoutH(e.target.value), placeholder: "0" }),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("config.timeoutHours") }),
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("coi.config.timeoutHours") }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("input", { className: "coi-input", type: "number", min: 0, max: 59, value: timeoutM, onChange: (e) => setTimeoutM(e.target.value), placeholder: "0" }),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("config.timeoutMinutes") })
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("coi.config.timeoutMinutes") })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("config.timeoutHint") })
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-muted coi-small", children: t("coi.config.timeoutHint") })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-form-actions", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-primary", disabled: saving, onClick: () => void save(), children: t("config.save") }) })
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-form-actions", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-primary", disabled: saving, onClick: () => void save(), children: t("coi.config.save") }) })
     ] })
   ] });
 }
@@ -6460,12 +6084,15 @@ var import_react_dom = require("react-dom");
 var import_react14 = require("react");
 var ADVISOR_CONNECTION_RESET_EVENT = "dsh-memory-evolve:advisor-connection-reset";
 var API3 = "/memory-evolve/api/advisor";
-var LEVEL_LABEL = {
-  conversation: "\u672C\u6B21\u8BC4\u5BA1\u4F1A\u8BDD\u7EA6\u675F",
-  session: "\u672C\u4F1A\u8BDD\u7EA6\u675F",
-  project: "\u672C\u9879\u76EE\u7EA6\u675F",
-  global: "\u5168\u5C40\u7EA6\u675F"
+var LEVEL_KEYS = {
+  conversation: "advisor.level.conversation",
+  session: "advisor.level.session",
+  project: "advisor.level.project",
+  global: "advisor.level.global"
 };
+function levelLabel(level, t) {
+  return t(LEVEL_KEYS[level]);
+}
 var POLL_MS = 1e3;
 var LIVE_LIMIT = 100;
 var LIVE_REVIEW_LIMIT = 100;
@@ -6527,9 +6154,9 @@ function patchJson(path, body) {
 function deleteJson2(path) {
   return fetchJson2(path, { method: "DELETE" });
 }
-function errorText(error) {
+function errorText(error, t) {
   const text = error instanceof Error ? error.message : String(error);
-  return text.trim() === "" ? "\u64CD\u4F5C\u5931\u8D25\uFF08\u65E0\u9519\u8BEF\u8BE6\u60C5\uFF09" : text;
+  return text.trim() === "" ? t("advisor.error.noDetail") : text;
 }
 function recordsPath(sessionId, filters, before, limit = RECORDS_PAGE_SIZE) {
   const params = new URLSearchParams();
@@ -6560,8 +6187,24 @@ var AdvisorSessionStore = class {
   recordsAbort = null;
   /** reset 后首次 after=0 是重放而非新到达，不能把旧卡片重复计入未读。 */
   suppressUnreadUntilSynced = false;
-  constructor(sessionId) {
+  /**
+   * 插件 locale 翻译函数。
+   *
+   * i18n（2026-09-16）选择**注入 t**而不是让 store 只存 `{ key, params }`：
+   * store 自己产出的文案不止静态键（还有 `实时游标已过期，历史重建失败：{msg}`
+   * 这类模板，以及 `errorText()` 的空消息兜底），而宿主/网络错误文本必须
+   * **原样透传**、不能拿去查字典 —— 若只存键，面板就得同时维护"键"与"原文"
+   * 两条渲染路径，任何新文案都可能漏翻。t 是 `ctx.locale.bind(NS)` 的调用期
+   * 绑定（语言一变，之后产出的文案即跟随），故不冻结语言。
+   */
+  t;
+  constructor(sessionId, t) {
     this.snapshot = initialSnapshot(sessionId);
+    this.t = t;
+  }
+  /** 热重载/多实例下把最新的 locale 绑定交给 store（身份通常稳定）。 */
+  setTranslate(t) {
+    this.t = t;
   }
   /** useSyncExternalStore 所需的稳定函数引用。 */
   subscribe = (listener) => {
@@ -6595,7 +6238,7 @@ var AdvisorSessionStore = class {
     this.removeBrowserResetListeners();
   }
   handleConnectionReset = () => {
-    this.resetCursorAndLive("\u8FDE\u63A5\u5DF2\u6062\u590D\uFF0C\u6B63\u5728\u91CD\u65B0\u540C\u6B65 Advisor \u4E8B\u4EF6\u2026");
+    this.resetCursorAndLive(this.t("advisor.notice.reconnected"));
   };
   installBrowserResetListeners() {
     window.addEventListener(ADVISOR_CONNECTION_RESET_EVENT, this.handleConnectionReset);
@@ -6667,7 +6310,7 @@ var AdvisorSessionStore = class {
       this.patch({ eventsLoading: false, ...rebuildSucceeded ? { eventsError: null } : {} });
     } catch (error) {
       if (!controller.signal.aborted && generation === this.generation) {
-        this.patch({ eventsLoading: false, eventsError: errorText(error) });
+        this.patch({ eventsLoading: false, eventsError: errorText(error, this.t) });
       }
     } finally {
       if (this.pollAbort === controller) this.pollAbort = null;
@@ -6688,7 +6331,7 @@ var AdvisorSessionStore = class {
       return true;
     } catch (error) {
       if (generation !== this.generation) return false;
-      this.patch({ reviews: [], eventsError: `\u5B9E\u65F6\u6E38\u6807\u5DF2\u8FC7\u671F\uFF0C\u5386\u53F2\u91CD\u5EFA\u5931\u8D25\uFF1A${errorText(error)}` });
+      this.patch({ reviews: [], eventsError: this.t("advisor.error.rebuildFailed", { message: errorText(error, this.t) }) });
       return false;
     }
   }
@@ -6770,7 +6413,7 @@ var AdvisorSessionStore = class {
       this.patch({ status, statusLoading: false, statusError: null });
     } catch (error) {
       if (sessionId !== this.snapshot.sessionId) return;
-      this.patch({ statusLoading: false, statusError: errorText(error) });
+      this.patch({ statusLoading: false, statusError: errorText(error, this.t) });
     }
   }
   async refreshInstructions() {
@@ -6784,7 +6427,7 @@ var AdvisorSessionStore = class {
       this.patch({ pending: data.pending, instructionsLoading: false, instructionsError: null });
     } catch (error) {
       if (sessionId !== this.snapshot.sessionId) return;
-      this.patch({ instructionsLoading: false, instructionsError: errorText(error) });
+      this.patch({ instructionsLoading: false, instructionsError: errorText(error, this.t) });
     }
   }
   async sendInstruction(text) {
@@ -6800,13 +6443,13 @@ var AdvisorSessionStore = class {
         pending: data.pending,
         instructionMutating: false,
         // Q4：指令入队后立即触发问答评审（回答注入会话流），不再是"等待下一轮"
-        notice: { kind: "ok", text: "\u6307\u4EE4\u5DF2\u53D1\u9001\uFF0CAdvisor \u6B63\u5728\u56DE\u7B54\uFF08\u56DE\u7B54\u4F1A\u76F4\u63A5\u6CE8\u5165\u4F1A\u8BDD\u6D41\uFF09" }
+        notice: { kind: "ok", text: this.t("advisor.notice.instructionSent") }
       });
     } catch (error) {
       this.patch({
         instructionMutating: false,
-        instructionsError: errorText(error),
-        notice: { kind: "error", text: errorText(error) }
+        instructionsError: errorText(error, this.t),
+        notice: { kind: "error", text: errorText(error, this.t) }
       });
     }
   }
@@ -6819,14 +6462,14 @@ var AdvisorSessionStore = class {
       });
       this.patch({
         instructionMutating: false,
-        notice: { kind: "ok", text: `\u5DF2\u65B0\u5EFA\u8BC4\u5BA1\u4F1A\u8BDD\uFF08#${data.epoch}\uFF09\u2014\u2014\u53EF\u5728\u7B2C\u4E00\u6761\u6307\u4EE4\u4E2D\u544A\u77E5\u8BC4\u5BA1\u5458\u80CC\u666F\u4FE1\u606F` }
+        notice: { kind: "ok", text: this.t("advisor.notice.conversationReset", { epoch: data.epoch }) }
       });
       this.resetCursorAndLive();
     } catch (error) {
       this.patch({
         instructionMutating: false,
-        instructionsError: errorText(error),
-        notice: { kind: "error", text: errorText(error) }
+        instructionsError: errorText(error, this.t),
+        notice: { kind: "error", text: errorText(error, this.t) }
       });
     }
   }
@@ -6839,13 +6482,13 @@ var AdvisorSessionStore = class {
       await this.refreshInstructions();
       this.patch({
         instructionMutating: false,
-        notice: { kind: "ok", text: `\u5DF2\u6E05\u7A7A ${data.cleared} \u6761\u5F85\u6D88\u8D39\u6307\u4EE4` }
+        notice: { kind: "ok", text: this.t("advisor.notice.instructionsCleared", { count: data.cleared }) }
       });
     } catch (error) {
       this.patch({
         instructionMutating: false,
-        instructionsError: errorText(error),
-        notice: { kind: "error", text: errorText(error) }
+        instructionsError: errorText(error, this.t),
+        notice: { kind: "error", text: errorText(error, this.t) }
       });
     }
   }
@@ -6860,13 +6503,13 @@ var AdvisorSessionStore = class {
       this.patch({
         status,
         statusLoading: false,
-        notice: { kind: "ok", text: enabled ? "\u672C\u4F1A\u8BDD Advisor \u5DF2\u542F\u7528" : "\u672C\u4F1A\u8BDD Advisor \u5DF2\u505C\u7528" }
+        notice: { kind: "ok", text: enabled ? this.t("advisor.notice.sessionEnabled") : this.t("advisor.notice.sessionDisabled") }
       });
     } catch (error) {
       this.patch({
         statusLoading: false,
-        statusError: errorText(error),
-        notice: { kind: "error", text: errorText(error) }
+        statusError: errorText(error, this.t),
+        notice: { kind: "error", text: errorText(error, this.t) }
       });
     }
   }
@@ -6876,7 +6519,7 @@ var AdvisorSessionStore = class {
       const data = await fetchJson2("/config");
       this.patch({ config: data.config, configLoading: false, configError: null });
     } catch (error) {
-      this.patch({ configLoading: false, configError: errorText(error) });
+      this.patch({ configLoading: false, configError: errorText(error, this.t) });
     }
   }
   async saveConfig(patch) {
@@ -6886,14 +6529,14 @@ var AdvisorSessionStore = class {
       this.patch({
         config: data.config,
         configSaving: false,
-        notice: { kind: "ok", text: "Advisor \u8BBE\u7F6E\u5DF2\u4FDD\u5B58\u5E76\u751F\u6548" }
+        notice: { kind: "ok", text: this.t("advisor.notice.configSaved") }
       });
       await this.refreshStatus();
     } catch (error) {
       this.patch({
         configSaving: false,
-        configError: errorText(error),
-        notice: { kind: "error", text: errorText(error) }
+        configError: errorText(error, this.t),
+        notice: { kind: "error", text: errorText(error, this.t) }
       });
     }
   }
@@ -6909,7 +6552,7 @@ var AdvisorSessionStore = class {
       this.patch({ scopes: data.scopes, scopesLoading: false, scopesError: null });
     } catch (error) {
       if (sessionId !== this.snapshot.sessionId) return;
-      this.patch({ scopesLoading: false, scopesError: errorText(error) });
+      this.patch({ scopesLoading: false, scopesError: errorText(error, this.t) });
     }
   }
   /** 保存某层约束（空文本=清除该层）。 */
@@ -6923,13 +6566,13 @@ var AdvisorSessionStore = class {
       this.patch({
         scopes: data.scopes,
         scopesSaving: false,
-        notice: { kind: "ok", text: `${LEVEL_LABEL[level]}\u5DF2\u4FDD\u5B58\uFF0C\u4E0B\u6B21\u8BC4\u5BA1\u7ACB\u5373\u751F\u6548` }
+        notice: { kind: "ok", text: this.t("advisor.notice.scopeSaved", { level: levelLabel(level, this.t) }) }
       });
     } catch (error) {
       this.patch({
         scopesSaving: false,
-        scopesError: errorText(error),
-        notice: { kind: "error", text: errorText(error) }
+        scopesError: errorText(error, this.t),
+        notice: { kind: "error", text: errorText(error, this.t) }
       });
     }
   }
@@ -6962,7 +6605,7 @@ var AdvisorSessionStore = class {
       });
     } catch (error) {
       if (!controller.signal.aborted) {
-        this.patch({ recordsLoading: false, recordsError: errorText(error) });
+        this.patch({ recordsLoading: false, recordsError: errorText(error, this.t) });
       }
     } finally {
       if (this.recordsAbort === controller) this.recordsAbort = null;
@@ -6975,8 +6618,11 @@ var AdvisorSessionStore = class {
     if (this.snapshot.notice !== null) this.patch({ notice: null });
   }
 };
-function useAdvisorSessionStore(sessionId) {
-  const store = (0, import_react14.useMemo)(() => new AdvisorSessionStore(sessionId), [sessionId]);
+function useAdvisorSessionStore(sessionId, t) {
+  const store = (0, import_react14.useMemo)(() => new AdvisorSessionStore(sessionId, t), [sessionId]);
+  (0, import_react14.useEffect)(() => {
+    store.setTranslate(t);
+  }, [store, t]);
   const snapshot = (0, import_react14.useSyncExternalStore)(store.subscribe, store.getSnapshot, store.getSnapshot);
   (0, import_react14.useEffect)(() => {
     const totalOff = snapshot.config !== null && snapshot.config.advisorEnabled !== true;
@@ -6990,68 +6636,45 @@ function useAdvisorSessionStore(sessionId) {
 // src/client/advisor/AdvisorPanel.tsx
 var import_jsx_runtime16 = require("react/jsx-runtime");
 var CAPSULE_POS_KEY = "dsh-memory-evolve:advisor-capsule-pos";
-var isEn2 = () => clientLang() === "en";
 var STATUS_META = {
-  get disabled() {
-    return { icon: "\u2716", label: isEn2() ? "Disabled" : "\u5DF2\u505C\u7528", cls: "advisor-status-disabled" };
-  },
-  get idle() {
-    return { icon: "\u25CF", label: isEn2() ? "Idle" : "\u7A7A\u95F2", cls: "advisor-status-idle" };
-  },
-  get reviewing() {
-    return { icon: "\u25D0", label: isEn2() ? "Reviewing" : "\u8BC4\u5BA1\u4E2D", cls: "advisor-status-reviewing" };
-  },
-  get quota_exhausted() {
-    return { icon: "\u23F8", label: isEn2() ? "Paused" : "\u5DF2\u6682\u505C", cls: "advisor-status-paused" };
-  },
-  get halted() {
-    return { icon: "\u26A0", label: isEn2() ? "Halted" : "\u5DF2\u7EC8\u6B62", cls: "advisor-status-halted" };
-  }
+  disabled: { icon: "\u2716", key: "advisor.status.disabled", cls: "advisor-status-disabled" },
+  idle: { icon: "\u25CF", key: "advisor.status.idle", cls: "advisor-status-idle" },
+  reviewing: { icon: "\u25D0", key: "advisor.status.reviewing", cls: "advisor-status-reviewing" },
+  quota_exhausted: { icon: "\u23F8", key: "advisor.status.paused", cls: "advisor-status-paused" },
+  halted: { icon: "\u26A0", key: "advisor.status.halted", cls: "advisor-status-halted" }
 };
+function statusMeta2(status, t) {
+  const meta = STATUS_META[status];
+  return { icon: meta.icon, label: t(meta.key), cls: meta.cls };
+}
 var SEVERITY_META = {
   // Q1：info 最低等级（默认仅记录不注入，面板照常展示）
-  info: { get label() {
-    return isEn2() ? "info \xB7 note" : "info \xB7 \u8BB0\u5F55";
-  }, cls: "advisor-severity-info" },
-  nit: { get label() {
-    return isEn2() ? "nit \xB7 suggestion" : "nit \xB7 \u5EFA\u8BAE";
-  }, cls: "advisor-severity-nit" },
-  concern: { get label() {
-    return isEn2() ? "concern \xB7 watch" : "concern \xB7 \u5173\u6CE8";
-  }, cls: "advisor-severity-concern" },
-  blocker: { get label() {
-    return isEn2() ? "blocker \xB7 blocking" : "blocker \xB7 \u963B\u65AD";
-  }, cls: "advisor-severity-blocker" },
+  info: { key: "advisor.severity.info", cls: "advisor-severity-info" },
+  nit: { key: "advisor.severity.nit", cls: "advisor-severity-nit" },
+  concern: { key: "advisor.severity.concern", cls: "advisor-severity-concern" },
+  blocker: { key: "advisor.severity.blocker", cls: "advisor-severity-blocker" },
   // Q4：问答回复（用户提问的直接回答，非评审建议）
-  answer: { get label() {
-    return isEn2() ? "answer" : "\u56DE\u7B54";
-  }, cls: "advisor-severity-answer" }
+  answer: { key: "advisor.severity.answer", cls: "advisor-severity-answer" }
 };
-function outcomeLabel(outcome) {
-  return isEn2() ? OUTCOME_EN[outcome] : OUTCOME_ZH[outcome];
+function severityMeta(severity, t) {
+  const meta = SEVERITY_META[severity];
+  return { label: t(meta.key), cls: meta.cls };
 }
-var OUTCOME_ZH = {
-  delivered: "\u5DF2\u9001\u8FBE",
+var OUTCOME_KEYS = {
+  delivered: "advisor.outcome.delivered",
   // Q1：info 级默认仅记录（事件照发、面板可见，会话流不受打扰）
-  recorded: "\u5DF2\u8BB0\u5F55",
+  recorded: "advisor.outcome.recorded",
   // Q4：问答回答已注入会话流
-  answered: "\u5DF2\u56DE\u7B54",
-  suppressed: "\u5DF2\u6291\u5236",
-  "no-note": "\u65E0\u5EFA\u8BAE",
-  dropped: "\u5DF2\u4E22\u5F03",
-  failed: "\u8BC4\u5BA1\u5931\u8D25",
-  cancelled: "\u5DF2\u53D6\u6D88"
+  answered: "advisor.outcome.answered",
+  suppressed: "advisor.outcome.suppressed",
+  "no-note": "advisor.outcome.noNote",
+  dropped: "advisor.outcome.dropped",
+  failed: "advisor.outcome.failed",
+  cancelled: "advisor.outcome.cancelled"
 };
-var OUTCOME_EN = {
-  delivered: "Delivered",
-  recorded: "Recorded",
-  answered: "Answered",
-  suppressed: "Suppressed",
-  "no-note": "No note",
-  dropped: "Dropped",
-  failed: "Review failed",
-  cancelled: "Cancelled"
-};
+function outcomeLabel(outcome, t) {
+  return t(OUTCOME_KEYS[outcome]);
+}
 function pad22(value) {
   return value < 10 ? `0${value}` : String(value);
 }
@@ -7068,13 +6691,13 @@ function formatElapsed(ms) {
   if (ms < 1e3) return `${Math.round(ms)}ms`;
   return `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)}s`;
 }
-function formatAgo(ts) {
-  if (ts === null) return "\u6682\u65E0\u6D3B\u52A8";
+function formatAgo(ts, t) {
+  if (ts === null) return t("advisor.ago.none");
   const delta = Math.max(0, Date.now() - ts);
-  if (delta < 5e3) return "\u521A\u521A";
-  if (delta < 6e4) return `${Math.floor(delta / 1e3)} \u79D2\u524D`;
-  if (delta < 36e5) return `${Math.floor(delta / 6e4)} \u5206\u949F\u524D`;
-  return `${Math.floor(delta / 36e5)} \u5C0F\u65F6\u524D`;
+  if (delta < 5e3) return t("advisor.ago.justNow");
+  if (delta < 6e4) return t("advisor.ago.seconds", { count: Math.floor(delta / 1e3) });
+  if (delta < 36e5) return t("advisor.ago.minutes", { count: Math.floor(delta / 6e4) });
+  return t("advisor.ago.hours", { count: Math.floor(delta / 36e5) });
 }
 function shortSession(sessionId) {
   return sessionId.length > 12 ? `${sessionId.slice(0, 8)}\u2026` : sessionId;
@@ -7087,8 +6710,9 @@ function timeCutoff(range) {
   return null;
 }
 function AdvisorHost(props) {
+  const t = props.t;
   const sessionId = String(props.sessionId);
-  const { store, snapshot } = useAdvisorSessionStore(sessionId);
+  const { store, snapshot } = useAdvisorSessionStore(sessionId, t);
   const [expanded, setExpanded] = (0, import_react15.useState)(() => typeof window === "undefined" ? false : !window.matchMedia("(max-width: 767px)").matches);
   const [userToggled, setUserToggled] = (0, import_react15.useState)(false);
   const preferredExpanded = (0, import_react15.useRef)(true);
@@ -7207,10 +6831,10 @@ function AdvisorHost(props) {
   };
   const runtimeStatus = snapshot.status?.runtimeStatus ?? "disabled";
   const capsuleStateClass = !enabled ? "advisor-capsule-disabled" : runtimeStatus === "reviewing" ? "advisor-capsule-reviewing" : runtimeStatus === "quota_exhausted" || runtimeStatus === "halted" ? "advisor-capsule-error" : "advisor-capsule-idle";
-  const headerTitle = panelEnabled ? props.t?.("advisor.header.toggle.title") ?? "\u6253\u5F00\u6216\u6298\u53E0\u4F1A\u8BDD\u8BC4\u5BA1\u9762\u677F" : "Advisor \u9762\u677F\u663E\u793A\u5DF2\u5173\u95ED\uFF1B\u70B9\u51FB\u53EF\u6253\u5F00\u8BBE\u7F6E";
+  const headerTitle = panelEnabled ? t("advisor.header.toggle.title") : t("advisor.header.toggle.titleOff");
   if (!globalEnabled) return null;
   const portal = typeof document === "undefined" ? null : (0, import_react_dom.createPortal)(
-    expanded ? /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(AdvisorPanel, { store, snapshot, onCollapse: toggle }) : panelEnabled ? (
+    expanded ? /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(AdvisorPanel, { t, store, snapshot, onCollapse: toggle }) : panelEnabled ? (
       // 2026-08-14 用户反馈：「显示悬浮胶囊」开关开启时，胶囊应常驻显示
       // （作为打开面板的入口 + 评审状态指示灯），不再因「本会话未启用评审」
       // 或「刷新后 userToggled 归零」而消失。评审状态由胶囊颜色表达
@@ -7228,12 +6852,12 @@ function AdvisorHost(props) {
           onPointerMove: onCapsulePointerMove,
           onPointerUp: finishCapsuleDrag,
           onPointerCancel: finishCapsuleDrag,
-          "aria-label": "\u5C55\u5F00\u4F1A\u8BDD\u8BC4\u5BA1\u9762\u677F",
-          title: "\u5C55\u5F00\u4F1A\u8BDD\u8BC4\u5BA1\u9762\u677F\uFF08\u6309\u4F4F\u53EF\u6CBF\u53F3\u8FB9\u7F18\u4E0A\u4E0B\u62D6\u52A8\uFF09",
+          "aria-label": t("advisor.capsule.aria"),
+          title: t("advisor.capsule.title"),
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-capsule-icon", "aria-hidden": "true", children: "\u25C9" }),
             /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-capsule-label", children: "Advisor" }),
-            snapshot.unreadCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-unread", "aria-label": `${snapshot.unreadCount} \u6761\u672A\u8BFB\u8BC4\u5BA1`, children: snapshot.unreadCount > 99 ? "99+" : snapshot.unreadCount })
+            snapshot.unreadCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-unread", "aria-label": t("advisor.unread.aria", { count: snapshot.unreadCount }), children: snapshot.unreadCount > 99 ? "99+" : snapshot.unreadCount })
           ]
         }
       )
@@ -7252,7 +6876,7 @@ function AdvisorHost(props) {
         title: headerTitle,
         children: [
           /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { "aria-hidden": "true", children: "\u25C9" }),
-          /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: props.t?.("advisor.header.toggle") ?? "\u4F1A\u8BDD\u8BC4\u5BA1" }),
+          /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: t("advisor.header.toggle") }),
           snapshot.unreadCount > 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-header-unread", "aria-hidden": "true", children: snapshot.unreadCount > 99 ? "99+" : snapshot.unreadCount })
         ]
       }
@@ -7260,7 +6884,7 @@ function AdvisorHost(props) {
     portal
   ] });
 }
-function AdvisorPanel({ store, snapshot, onCollapse }) {
+function AdvisorPanel({ t, store, snapshot, onCollapse }) {
   const [tab, setTab] = (0, import_react15.useState)("live");
   const [instruction, setInstruction] = (0, import_react15.useState)("");
   const [pendingOpen, setPendingOpen] = (0, import_react15.useState)(true);
@@ -7315,12 +6939,12 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
     const stats = snapshot.status?.conversationStats;
     if (stats === null || stats === void 0) return null;
     const k = stats.charCount / 1e3;
-    if (k < 1) return `${stats.charCount} \u5B57`;
+    if (k < 1) return t("advisor.context.chars", { count: stats.charCount });
     return `${k >= 10 ? Math.round(k) : k.toFixed(1)} K`;
   }, [snapshot.status?.conversationStats]);
   const status = snapshot.status?.runtimeStatus ?? "disabled";
-  const statusMeta2 = STATUS_META[status];
-  const ownerLabel = `${snapshot.status?.sessionName ?? identity.sessionName ?? shortSession(snapshot.sessionId)} \xB7 ${snapshot.status?.workspace ?? identity.workspace ?? "\u5DE5\u4F5C\u7A7A\u95F4\u672A\u77E5"}`;
+  const statusInfo = statusMeta2(status, t);
+  const ownerLabel = `${snapshot.status?.sessionName ?? identity.sessionName ?? shortSession(snapshot.sessionId)} \xB7 ${snapshot.status?.workspace ?? identity.workspace ?? t("advisor.workspace.unknown")}`;
   const workspaceOptions = (0, import_react15.useMemo)(() => {
     const values = /* @__PURE__ */ new Set();
     for (const record of snapshot.records) {
@@ -7348,21 +6972,21 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
       void submitInstruction();
     }
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("aside", { className: "advisor-panel", "aria-label": "\u4F1A\u8BDD\u8BC4\u5BA1\u60AC\u6D6E\u9762\u677F", children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("aside", { className: "advisor-panel", "aria-label": t("advisor.panel.aria"), children: [
     /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("header", { className: "advisor-panel-header", children: [
       /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-panel-heading", children: [
         /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-title-row", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("strong", { className: "advisor-title", children: "\u4F1A\u8BDD\u8BC4\u5BA1" }),
-          /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("span", { className: `advisor-status-badge ${statusMeta2.cls}`, title: snapshot.status?.phase || statusMeta2.label, children: [
-            /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-status-icon", "aria-hidden": "true", children: statusMeta2.icon }),
-            statusMeta2.label
+          /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("strong", { className: "advisor-title", children: t("advisor.panel.title") }),
+          /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("span", { className: `advisor-status-badge ${statusInfo.cls}`, title: snapshot.status?.phase || statusInfo.label, children: [
+            /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-status-icon", "aria-hidden": "true", children: statusInfo.icon }),
+            statusInfo.label
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-owner", title: ownerLabel, children: ownerLabel })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("button", { type: "button", className: "advisor-icon-button", onClick: onCollapse, "aria-label": "\u6298\u53E0 Advisor \u9762\u677F", title: "\u6298\u53E0", children: "\u2014" })
+      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("button", { type: "button", className: "advisor-icon-button", onClick: onCollapse, "aria-label": t("advisor.panel.collapseAria"), title: t("advisor.panel.collapse"), children: "\u2014" })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("section", { className: "advisor-status-strip", "aria-label": "Advisor \u8FD0\u884C\u72B6\u6001", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("section", { className: "advisor-status-strip", "aria-label": t("advisor.statusStrip.aria"), children: [
       /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(
         "button",
         {
@@ -7372,32 +6996,29 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
           className: `advisor-switch${snapshot.status?.effectiveEnabled ? " advisor-switch-on" : ""}`,
           disabled: snapshot.statusLoading || snapshot.status === null,
           onClick: () => void store.toggleSession(!(snapshot.status?.effectiveEnabled ?? false)),
-          title: "\u4EC5\u5207\u6362\u5F53\u524D\u4F1A\u8BDD\uFF1B\u4E0D\u4F1A\u4FEE\u6539\u5168\u5C40\u9ED8\u8BA4\u5F00\u5173",
+          title: t("advisor.switch.title"),
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-switch-track", children: /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-switch-thumb" }) }),
-            /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: snapshot.status?.effectiveEnabled ? "\u672C\u4F1A\u8BDD\u5DF2\u542F\u7528" : "\u672C\u4F1A\u8BDD\u672A\u542F\u7528" })
+            /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: snapshot.status?.effectiveEnabled ? t("advisor.switch.on") : t("advisor.switch.off") })
           ]
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-status-facts", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-model", title: `${snapshot.status?.provider ?? "\u2014"} / ${snapshot.status?.model ?? "\u2014"}`, children: snapshot.status?.model ?? "\u6A21\u578B\u672A\u89E3\u6790" }),
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: formatAgo(snapshot.lastActivityAt) }),
+        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-model", title: `${snapshot.status?.provider ?? "\u2014"} / ${snapshot.status?.model ?? "\u2014"}`, children: snapshot.status?.model ?? t("advisor.model.unresolved") }),
+        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: formatAgo(snapshot.lastActivityAt, t) }),
         (snapshot.status?.pendingCount ?? 0) > 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("span", { className: "advisor-pending-count", children: [
           "pending ",
           snapshot.status?.pendingCount
         ] })
       ] })
     ] }),
-    snapshot.status?.gateStatus !== void 0 && snapshot.status.gateStatus !== "ok" && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-warning", role: "status", children: [
-      "\u6A21\u578B\u95E8\u7981\u672A\u901A\u8FC7\uFF1A",
-      snapshot.status.disabledReason ?? (snapshot.status.gateStatus === "config-incomplete" ? "provider/model \u5FC5\u987B\u540C\u65F6\u586B\u5199\u6216\u540C\u65F6\u7559\u7A7A" : "\u5F53\u524D\u4F1A\u8BDD\u6A21\u578B\u4E0D\u53EF\u7528")
-    ] }),
-    snapshot.statusError !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ErrorNotice, { text: `\u72B6\u6001\u52A0\u8F7D\u5931\u8D25\uFF1A${snapshot.statusError}`, onRetry: () => void store.refreshStatus() }),
+    snapshot.status?.gateStatus !== void 0 && snapshot.status.gateStatus !== "ok" && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-warning", role: "status", children: t("advisor.gate.failed", { reason: snapshot.status.disabledReason ?? (snapshot.status.gateStatus === "config-incomplete" ? t("advisor.gate.configIncomplete") : t("advisor.gate.modelUnavailable")) }) }),
+    snapshot.statusError !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ErrorNotice, { t, text: t("advisor.error.statusLoad", { message: snapshot.statusError }), onRetry: () => void store.refreshStatus() }),
     snapshot.notice !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: `advisor-notice advisor-notice-${snapshot.notice.kind}`, role: "status", children: [
       /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: snapshot.notice.text }),
-      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("button", { type: "button", className: "advisor-notice-close", onClick: () => store.clearNotice(), "aria-label": "\u5173\u95ED\u63D0\u793A", children: "\xD7" })
+      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("button", { type: "button", className: "advisor-notice-close", onClick: () => store.clearNotice(), "aria-label": t("advisor.notice.dismiss"), children: "\xD7" })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-tabs", role: "tablist", "aria-label": "\u8BC4\u5BA1\u6570\u636E\u89C6\u56FE", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-tabs", role: "tablist", "aria-label": t("advisor.tabs.aria"), children: [
       /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
         "button",
         {
@@ -7406,7 +7027,7 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
           "aria-selected": tab === "scopes",
           className: `advisor-tab${tab === "scopes" ? " advisor-tab-active" : ""}`,
           onClick: () => setTab("scopes"),
-          children: "\u7EA6\u675F"
+          children: t("advisor.tab.scopes")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
@@ -7417,7 +7038,7 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
           "aria-selected": tab === "live",
           className: `advisor-tab${tab === "live" ? " advisor-tab-active" : ""}`,
           onClick: () => setTab("live"),
-          children: "\u5B9E\u65F6"
+          children: t("advisor.tab.live")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
@@ -7428,7 +7049,7 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
           "aria-selected": tab === "history",
           className: `advisor-tab${tab === "history" ? " advisor-tab-active" : ""}`,
           onClick: () => setTab("history"),
-          children: "\u8BB0\u5F55"
+          children: t("advisor.tab.history")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
@@ -7439,20 +7060,21 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
           "aria-selected": tab === "settings",
           className: `advisor-tab${tab === "settings" ? " advisor-tab-active" : ""}`,
           onClick: () => setTab("settings"),
-          children: "\u8BBE\u7F6E"
+          children: t("advisor.tab.settings")
         }
       )
     ] }),
-    tab === "scopes" ? /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ScopesErrorBoundary, { children: /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ScopesTab, { store, snapshot }) }) : tab === "live" ? (
+    tab === "scopes" ? /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ScopesErrorBoundary, { t, children: /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ScopesTab, { t, store, snapshot }) }) : tab === "live" ? (
       /* 2026-08-12 用户反馈：指令区（发指令/新建评审会话）只在实时 tab 显示 */
       /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-live", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("section", { ref: flowRef, className: "advisor-flow", onScroll: onFlowScroll, "aria-label": "\u5B9E\u65F6\u8BC4\u5BA1\u6D41", children: [
-          snapshot.eventsError !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ErrorNotice, { text: `\u5B9E\u65F6\u6D41\u52A0\u8F7D\u5931\u8D25\uFF1A${snapshot.eventsError}`, onRetry: () => store.resetCursorAndLive() }),
-          snapshot.eventsLoading && snapshot.reviews.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(LoadingBlock, { text: "\u6B63\u5728\u8FDE\u63A5 Advisor \u5B9E\u65F6\u6D41\u2026" }),
-          !snapshot.eventsLoading && snapshot.reviews.length === 0 && snapshot.eventsError === null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-empty", children: snapshot.status?.effectiveEnabled ? "\u6682\u65E0\u8BC4\u5BA1\u6D3B\u52A8\u3002\u65B0\u7684\u8BC4\u5BA1\u4F1A\u5728\u8FD9\u91CC\u5B9E\u65F6\u51FA\u73B0\u3002" : "\u672A\u542F\u7528\uFF1A\u53EF\u4F7F\u7528\u4E0A\u65B9\u4F1A\u8BDD\u5F00\u5173\uFF0C\u6216\u5728\u4E0B\u65B9\u8BBE\u7F6E\u4E2D\u5F00\u542F Advisor\u3002" }),
+        /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("section", { ref: flowRef, className: "advisor-flow", onScroll: onFlowScroll, "aria-label": t("advisor.live.aria"), children: [
+          snapshot.eventsError !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ErrorNotice, { t, text: t("advisor.error.eventsLoad", { message: snapshot.eventsError }), onRetry: () => store.resetCursorAndLive() }),
+          snapshot.eventsLoading && snapshot.reviews.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(LoadingBlock, { text: t("advisor.loading.events") }),
+          !snapshot.eventsLoading && snapshot.reviews.length === 0 && snapshot.eventsError === null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-empty", children: snapshot.status?.effectiveEnabled ? t("advisor.live.emptyEnabled") : t("advisor.live.emptyDisabled") }),
           snapshot.reviews.map((item, index) => /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
             ReviewCard,
             {
+              t,
               item,
               defaultInputOpen: index === snapshot.reviews.length - 1
             },
@@ -7468,11 +7090,11 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
                 const node = flowRef.current;
                 if (node !== null) node.scrollTop = node.scrollHeight;
               },
-              children: "\u56DE\u5230\u6700\u65B0"
+              children: t("advisor.live.backToLatest")
             }
           )
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("section", { className: "advisor-instructions", "aria-label": "Advisor \u6307\u4EE4\u533A", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("section", { className: "advisor-instructions", "aria-label": t("advisor.instructions.aria"), children: [
           /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-instruction-compose", children: [
             /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
               "textarea",
@@ -7483,7 +7105,7 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
                 value: instruction,
                 onChange: (event) => setInstruction(event.target.value),
                 onKeyDown: onInstructionKeyDown,
-                placeholder: "\u7ED9\u4F1A\u8BDD\u8BC4\u5BA1\u53D1\u6307\u4EE4\u2026\uFF08Enter \u53D1\u9001\uFF0CShift+Enter \u6362\u884C\uFF09"
+                placeholder: t("advisor.instructions.placeholder")
               }
             ),
             /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
@@ -7493,32 +7115,34 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
                 className: "advisor-button advisor-button-primary",
                 disabled: snapshot.instructionMutating || instruction.trim() === "",
                 onClick: () => void submitInstruction(),
-                children: "\u53D1\u9001"
+                children: t("advisor.instructions.send")
               }
             )
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-steer-hint", children: "\u8BC4\u5BA1\u5EFA\u8BAE\u6309\u4E25\u91CD\u5EA6\u5B9E\u65F6\u9001\u8FBE\uFF08nit/concern/blocker \u8D70 steer\uFF0Cinfo \u9ED8\u8BA4\u4EC5\u8BB0\u5F55\uFF09\uFF1B \u6307\u4EE4\u6846\u63D0\u95EE\u4F1A\u7ACB\u5373\u89E6\u53D1 Advisor \u56DE\u7B54\u5E76\u6CE8\u5165\u4F1A\u8BDD\u6D41\u3002" }),
+          /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-steer-hint", children: t("advisor.instructions.hint") }),
           /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-conversation-bar", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("span", { className: "advisor-conversation-stats", title: "\u8BC4\u5BA1\u5458\u6301\u7EED\u4F1A\u8BDD\u5DF2\u5360\u7528\u7684\u4E0A\u4E0B\u6587\uFF08\u5B57\u7B26\u6570\u4F30\u7B97\uFF0C\u4E2D\u6587 1 \u5B57\u22481 token\uFF1B\u5BF9\u6BD4\u6A21\u578B\u4E0A\u4E0B\u6587\u7A97\u53E3\u5224\u65AD\u662F\u5426\u65B0\u5EFA\u8BC4\u5BA1\u4F1A\u8BDD\uFF09", children: [
-              latestEpoch !== null ? `\u8BC4\u5BA1\u4F1A\u8BDD #${latestEpoch}` : "\u8BC4\u5BA1\u4F1A\u8BDD",
-              " \xB7 \u4E0A\u4E0B\u6587 ",
-              latestContextCount,
-              " \u6761",
+            /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("span", { className: "advisor-conversation-stats", title: t("advisor.conversation.statsTitle"), children: [
+              latestEpoch !== null ? t("advisor.conversation.epoch", { epoch: latestEpoch }) : t("advisor.conversation.label"),
+              " \xB7 ",
+              t("advisor.conversation.contextCount", { count: latestContextCount }),
               contextChars !== null && ` \xB7 \u2248${contextChars}`
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
+            /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(
               "button",
               {
                 type: "button",
                 className: "advisor-new-conversation",
                 disabled: snapshot.instructionMutating,
                 onClick: () => {
-                  if (window.confirm("\u65B0\u5EFA\u8BC4\u5BA1\u4F1A\u8BDD\u5C06\u6E05\u7A7A\u8BC4\u5BA1\u5458\u7684\u5168\u90E8\u4E0A\u4E0B\u6587\u4E0E\u8BB0\u5FC6\uFF08\u8BC4\u5BA1\u5458\u4ECE\u96F6\u5F00\u59CB\uFF09\u3002\n\u786E\u8BA4\u540E\u53EF\u5728\u7B2C\u4E00\u6761\u6307\u4EE4\u4E2D\u544A\u77E5\u80CC\u666F\u4FE1\u606F\u3002")) {
+                  if (window.confirm(t("advisor.conversation.resetConfirm"))) {
                     void store.resetConversation();
                   }
                 },
-                title: "\u6E05\u7A7A\u8BC4\u5BA1\u5458\u6301\u7EED\u4F1A\u8BDD\uFF08\u4E0A\u4E0B\u6587+\u8BB0\u5FC6\uFF09\uFF0C\u4ECE\u96F6\u5F00\u59CB\uFF1B\u9002\u5408\u6362\u4EFB\u52A1/\u63A7\u5236\u4E0A\u4E0B\u6587\u957F\u5EA6",
-                children: "\u{1F504} \u65B0\u5EFA\u8BC4\u5BA1\u4F1A\u8BDD"
+                title: t("advisor.conversation.resetTitle"),
+                children: [
+                  "\u{1F504} ",
+                  t("advisor.conversation.reset")
+                ]
               }
             )
           ] }),
@@ -7530,20 +7154,16 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
               "aria-expanded": pendingOpen,
               onClick: () => setPendingOpen((value) => !value),
               children: [
-                /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("span", { children: [
-                  "\u5F85\u6D88\u8D39\u6307\u4EE4 (",
-                  snapshot.pending.length,
-                  ")"
-                ] }),
+                /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: t("advisor.pending.toggle", { count: snapshot.pending.length }) }),
                 /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { "aria-hidden": "true", children: pendingOpen ? "\u25B4" : "\u25BE" })
               ]
             }
           ),
           pendingOpen && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-pending-list", children: [
-            snapshot.instructionsLoading && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-muted", children: "\u52A0\u8F7D\u4E2D\u2026" }),
-            !snapshot.instructionsLoading && snapshot.pending.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-muted", children: "\u6682\u65E0\u5F85\u6D88\u8D39\u6307\u4EE4" }),
+            snapshot.instructionsLoading && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-muted", children: t("advisor.loading.short") }),
+            !snapshot.instructionsLoading && snapshot.pending.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-muted", children: t("advisor.pending.empty") }),
             snapshot.pending.map((item) => /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-pending-item", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-pending-state", children: item.state === "reserved" ? "\u6D88\u8D39\u4E2D" : "\u5F85\u6D88\u8D39" }),
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-pending-state", children: item.state === "reserved" ? t("advisor.pending.consuming") : t("advisor.pending.waiting") }),
               /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-pending-text", title: item.text, children: item.text })
             ] }, item.id)),
             snapshot.pending.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
@@ -7553,20 +7173,20 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
                 className: "advisor-link advisor-link-danger",
                 disabled: snapshot.instructionMutating,
                 onClick: () => void store.clearInstructions(),
-                children: "\u6E05\u7A7A\u5F85\u6D88\u8D39\u6307\u4EE4"
+                children: t("advisor.pending.clear")
               }
             )
           ] }),
           snapshot.instructionsError !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-inline-error", children: [
             snapshot.instructionsError,
-            /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("button", { type: "button", className: "advisor-link", onClick: () => void store.refreshInstructions(), children: "\u91CD\u8BD5" })
+            /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("button", { type: "button", className: "advisor-link", onClick: () => void store.refreshInstructions(), children: t("advisor.action.retry") })
           ] })
         ] })
       ] })
     ) : tab === "settings" ? (
       /* 2026-08-12 用户反馈：会话评审设置移入独立 Tab（交互统一） */
-      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(SettingsDisclosure, { store, snapshot })
-    ) : /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("section", { className: "advisor-history", "aria-label": "\u5386\u53F2\u8BC4\u5BA1\u8BB0\u5F55", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(SettingsDisclosure, { t, store, snapshot })
+    ) : /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("section", { className: "advisor-history", "aria-label": t("advisor.history.aria"), children: [
       /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-history-filters", children: [
         /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(
           "select",
@@ -7574,10 +7194,10 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
             className: "advisor-select",
             value: filters.session,
             onChange: (event) => setFilters({ ...filters, session: event.target.value }),
-            "aria-label": "\u4F1A\u8BDD\u7B5B\u9009",
+            "aria-label": t("advisor.history.sessionFilter"),
             children: [
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "current", children: "\u5F53\u524D\u4F1A\u8BDD" }),
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "all", children: "\u5168\u90E8\u4F1A\u8BDD" })
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "current", children: t("advisor.history.sessionCurrent") }),
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "all", children: t("advisor.history.sessionAll") })
             ]
           }
         ),
@@ -7587,14 +7207,14 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
             className: "advisor-select",
             value: filters.severity,
             onChange: (event) => setFilters({ ...filters, severity: event.target.value }),
-            "aria-label": "\u4E25\u91CD\u5EA6\u7B5B\u9009",
+            "aria-label": t("advisor.history.severityFilter"),
             children: [
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "", children: "\u5168\u90E8\u4E25\u91CD\u5EA6" }),
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "", children: t("advisor.history.severityAll") }),
               /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "info", children: "info" }),
               /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "nit", children: "nit" }),
               /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "concern", children: "concern" }),
               /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "blocker", children: "blocker" }),
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "answer", children: "\u56DE\u7B54" })
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "answer", children: t("advisor.history.severityAnswer") })
             ]
           }
         ),
@@ -7604,12 +7224,12 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
             className: "advisor-select",
             value: filters.timeRange,
             onChange: (event) => setFilters({ ...filters, timeRange: event.target.value }),
-            "aria-label": "\u65F6\u95F4\u7B5B\u9009",
+            "aria-label": t("advisor.history.timeFilter"),
             children: [
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "all", children: "\u5168\u90E8\u65F6\u95F4" }),
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "24h", children: "\u6700\u8FD1 24 \u5C0F\u65F6" }),
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "7d", children: "\u6700\u8FD1 7 \u5929" }),
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "30d", children: "\u6700\u8FD1 30 \u5929" })
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "all", children: t("advisor.history.timeAll") }),
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "24h", children: t("advisor.history.time24h") }),
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "7d", children: t("advisor.history.time7d") }),
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: "30d", children: t("advisor.history.time30d") })
             ]
           }
         ),
@@ -7621,20 +7241,21 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
               list: "advisor-workspaces",
               value: filters.workspace,
               onChange: (event) => setFilters({ ...filters, workspace: event.target.value }),
-              placeholder: "\u5DE5\u4F5C\u7A7A\u95F4\uFF08\u53EF\u9009\uFF09",
-              "aria-label": "\u5DE5\u4F5C\u7A7A\u95F4\u7B5B\u9009"
+              placeholder: t("advisor.history.workspacePlaceholder"),
+              "aria-label": t("advisor.history.workspaceFilter")
             }
           ),
           /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("datalist", { id: "advisor-workspaces", children: workspaceOptions.map((workspace) => /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("option", { value: workspace }, workspace)) }),
-          /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("button", { type: "button", className: "advisor-button", onClick: () => void store.loadRecords(filters), children: "\u67E5\u8BE2" })
+          /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("button", { type: "button", className: "advisor-button", onClick: () => void store.loadRecords(filters), children: t("advisor.history.query") })
         ] })
       ] }),
-      snapshot.recordsError !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ErrorNotice, { text: `\u5386\u53F2\u52A0\u8F7D\u5931\u8D25\uFF1A${snapshot.recordsError}`, onRetry: () => void store.loadRecords(filters) }),
-      snapshot.recordsLoading && snapshot.records.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(LoadingBlock, { text: "\u6B63\u5728\u52A0\u8F7D\u5386\u53F2\u8BB0\u5F55\u2026" }),
-      !snapshot.recordsLoading && visibleRecords.length === 0 && snapshot.recordsError === null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-empty", children: "\u5F53\u524D\u7B5B\u9009\u4E0B\u6682\u65E0\u8BC4\u5BA1\u8BB0\u5F55\u3002" }),
+      snapshot.recordsError !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ErrorNotice, { t, text: t("advisor.error.recordsLoad", { message: snapshot.recordsError }), onRetry: () => void store.loadRecords(filters) }),
+      snapshot.recordsLoading && snapshot.records.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(LoadingBlock, { text: t("advisor.loading.records") }),
+      !snapshot.recordsLoading && visibleRecords.length === 0 && snapshot.recordsError === null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-empty", children: t("advisor.history.empty") }),
       /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-history-list", children: visibleRecords.map((record, index) => /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
         ReviewCard,
         {
+          t,
           item: { reviewId: record.reviewId, started: null, finished: null, record, arrivedAt: 0 },
           defaultInputOpen: index === 0,
           history: true
@@ -7648,42 +7269,42 @@ function AdvisorPanel({ store, snapshot, onCollapse }) {
           className: "advisor-button advisor-load-more",
           disabled: snapshot.recordsLoading,
           onClick: () => void store.loadRecords(snapshot.recordsFilters, true),
-          children: snapshot.recordsLoading ? "\u52A0\u8F7D\u4E2D\u2026" : "\u52A0\u8F7D\u66F4\u591A"
+          children: snapshot.recordsLoading ? t("advisor.loading.short") : t("advisor.history.loadMore")
         }
       )
     ] })
   ] });
 }
 function ReviewCard(props) {
-  const { item, history = false } = props;
+  const { t, item, history = false } = props;
   const [inputOpen, setInputOpen] = (0, import_react15.useState)(props.defaultInputOpen);
   (0, import_react15.useEffect)(() => setInputOpen(props.defaultInputOpen), [props.defaultInputOpen]);
   const terminal = item.finished ?? item.record;
   const ts = item.started?.ts ?? terminal?.ts ?? 0;
   const note = terminal?.note ?? null;
-  const severity = note === null ? null : SEVERITY_META[note.severity];
+  const severity = note === null ? null : severityMeta(note.severity, t);
   const inProgress = terminal === null;
-  const identity = item.started === null && item.record !== null ? `${item.record.sessionName ?? shortSession(item.record.sessionId)} \xB7 ${item.record.workspace ?? "\u5DE5\u4F5C\u7A7A\u95F4\u672A\u77E5"}` : null;
+  const identity = item.started === null && item.record !== null ? `${item.record.sessionName ?? shortSession(item.record.sessionId)} \xB7 ${item.record.workspace ?? t("advisor.workspace.unknown")}` : null;
   return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(
     "article",
     {
       className: `advisor-review-card${inProgress ? " advisor-review-card-running" : ""}${history ? " advisor-review-card-history" : ""}`,
       tabIndex: 0,
-      "aria-label": `\u4F1A\u8BDD\u8BC4\u5BA1 ${item.reviewId}`,
+      "aria-label": t("advisor.card.aria", { reviewId: item.reviewId }),
       children: [
         /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-review-meta", children: [
           /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("time", { dateTime: new Date(ts).toISOString(), title: formatDateTime(ts), children: history ? formatDateTime(ts) : formatClock(ts) }),
           severity !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: `advisor-severity ${severity.cls}`, children: severity.label }),
           terminal !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: formatElapsed(terminal.elapsedMs) }),
-          terminal?.delivery === "steer" && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-delivery", children: "\u5DF2\u9001\u8FBE \u2713" }),
-          terminal?.delivery === "inject" && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-delivery", children: "\u5DF2\u6CE8\u5165 \u2713" }),
-          terminal !== null && terminal.delivery === null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: outcomeLabel(terminal.outcome) })
+          terminal?.delivery === "steer" && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-delivery", children: t("advisor.delivery.steer") }),
+          terminal?.delivery === "inject" && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-delivery", children: t("advisor.delivery.inject") }),
+          terminal !== null && terminal.delivery === null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: outcomeLabel(terminal.outcome, t) })
         ] }),
         identity !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-record-owner", title: identity, children: identity }),
         (terminal?.instructions.length ?? 0) > 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-consumed-instructions", children: [
           /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("span", { className: "advisor-instruction-tag", children: [
-            "\u{1F4CB} \u6267\u884C\u6307\u4EE4 \xD7",
-            terminal?.instructions.length
+            "\u{1F4CB} ",
+            t("advisor.card.instructions", { count: terminal?.instructions.length ?? 0 })
           ] }),
           terminal?.instructions.map((text, index) => /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-consumed-text", title: text, children: text }, `${index}-${text}`))
         ] }),
@@ -7697,32 +7318,30 @@ function ReviewCard(props) {
               onClick: () => setInputOpen((value) => !value),
               children: [
                 /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("span", { children: [
-                  "\u4F1A\u8BDD #",
-                  item.started.input.epoch,
-                  " \xB7 \u4E0A\u4E0B\u6587 ",
-                  item.started.input.contextCount,
-                  " \u6761",
-                  item.started.input.mode === "qa" ? " \xB7 \u95EE\u7B54" : ` \xB7 \u672C\u8F6E ${item.started.input.messageCount} \u6761`
+                  t("advisor.card.sessionEpoch", { epoch: item.started.input.epoch }),
+                  " \xB7 ",
+                  t("advisor.conversation.contextCount", { count: item.started.input.contextCount }),
+                  item.started.input.mode === "qa" ? t("advisor.card.qa") : t("advisor.card.thisRound", { count: item.started.input.messageCount })
                 ] }),
-                /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { "aria-hidden": "true", children: inputOpen ? "\u6536\u8D77 \u25B4" : "\u5C55\u5F00 \u25BE" })
+                /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { "aria-hidden": "true", children: inputOpen ? t("advisor.card.collapse") : t("advisor.card.expand") })
               ]
             }
           ),
           inputOpen && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("pre", { className: "advisor-input-markdown", children: item.started.input.markdown })
-        ] }) : history ? /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-input-unavailable", children: "\u5386\u53F2\u7EC8\u6001\u8BB0\u5F55\u4E0D\u5305\u542B\u8F93\u5165\u5FEB\u7167" }) : null,
+        ] }) : history ? /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-input-unavailable", children: t("advisor.card.noInputSnapshot") }) : null,
         inProgress ? /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-reviewing", "aria-live": "polite", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: "\u8BC4\u5BA1\u4E2D\u2026" }),
+          /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: t("advisor.card.reviewing") }),
           /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-skeleton-line" }),
           /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-skeleton-line advisor-skeleton-line-short" })
         ] }) : note !== null ? /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-note", children: [
-          terminal?.outcome === "suppressed" && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-note-meta", children: "\u5DF2\u6291\u5236\uFF1A\u6B64\u6761\u5EFA\u8BAE\u88AB\u95F8\u95E8\u62E6\u622A\uFF08\u53BB\u91CD / \u7A7A\u6CDB\u6291\u5236 / \u6BCF\u8F6E\u4E00\u6761\uFF09\uFF0C\u672A\u6CE8\u5165\u4E3B\u4F1A\u8BDD" }),
+          terminal?.outcome === "suppressed" && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-note-meta", children: t("advisor.card.suppressedNote") }),
           note.text
-        ] }) : /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-outcome-empty", children: outcomeLabel(terminal.outcome) }),
+        ] }) : /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-outcome-empty", children: outcomeLabel(terminal.outcome, t) }),
         terminal?.error !== null && terminal?.error !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-card-error", children: [
           terminal.error.code,
-          "\uFF1A",
+          t("advisor.card.errorSep"),
           terminal.error.message,
-          terminal.error.retryable && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: "\uFF08\u53EF\u91CD\u8BD5\uFF09" })
+          terminal.error.retryable && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: t("advisor.card.retryable") })
         ] })
       ]
     }
@@ -7738,16 +7357,12 @@ var ScopesErrorBoundary = class extends import_react15.Component {
   }
   render() {
     if (this.state.failed !== null) {
-      return /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("section", { className: "advisor-scopes", "aria-label": "\u8BC4\u5BA1\u5458\u7EA6\u675F", children: /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-card-error", children: [
-        "\u7EA6\u675F\u533A\u57DF\u6E32\u67D3\u51FA\u9519\uFF1A",
-        this.state.failed,
-        "\uFF08\u8BE6\u89C1\u6D4F\u89C8\u5668\u63A7\u5236\u53F0\uFF09"
-      ] }) });
+      return /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("section", { className: "advisor-scopes", "aria-label": this.props.t("advisor.scopes.aria"), children: /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-card-error", children: this.props.t("advisor.scopes.boundaryError", { message: this.state.failed }) }) });
     }
     return this.props.children;
   }
 };
-function ScopesTab({ store, snapshot }) {
+function ScopesTab({ t, store, snapshot }) {
   const [draft, setDraft] = (0, import_react15.useState)(null);
   (0, import_react15.useEffect)(() => {
     if (snapshot.scopes === null) return;
@@ -7759,23 +7374,24 @@ function ScopesTab({ store, snapshot }) {
     });
   }, [snapshot.scopes]);
   if (draft === null) {
-    return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("section", { className: "advisor-scopes", "aria-label": "\u8BC4\u5BA1\u5458\u7EA6\u675F", children: [
-      snapshot.scopesLoading && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(LoadingBlock, { text: "\u6B63\u5728\u52A0\u8F7D\u7EA6\u675F\u2026" }),
-      snapshot.scopesError !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ErrorNotice, { text: `\u7EA6\u675F\u52A0\u8F7D\u5931\u8D25\uFF1A${snapshot.scopesError}`, onRetry: () => void store.refreshScopes() })
+    return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("section", { className: "advisor-scopes", "aria-label": t("advisor.scopes.aria"), children: [
+      snapshot.scopesLoading && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(LoadingBlock, { text: t("advisor.loading.scopes") }),
+      snapshot.scopesError !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ErrorNotice, { t, text: t("advisor.error.scopesLoad", { message: snapshot.scopesError }), onRetry: () => void store.refreshScopes() })
     ] });
   }
   const save = (level, text) => {
     void store.saveScope(level, text);
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("section", { className: "advisor-scopes", "aria-label": "\u8BC4\u5BA1\u5458\u7EA6\u675F", children: [
-    snapshot.scopesError !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ErrorNotice, { text: `\u7EA6\u675F\u4FDD\u5B58\u5931\u8D25\uFF1A${snapshot.scopesError}`, onRetry: () => void store.refreshScopes() }),
-    /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-scope-hint", children: "\u56DB\u5C42\u7EA7\u7EA6\u675F\u62FC\u63A5\u8FDB\u8BC4\u5BA1\u5458\u7CFB\u7EDF\u63D0\u793A\u8BCD\uFF08\u51B2\u7A81\u65F6\u8D8A\u5C40\u90E8\u8D8A\u4F18\u5148\uFF09\uFF1B\u4FDD\u5B58\u540E\u7ACB\u5373\u751F\u6548\u3002" }),
+  return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("section", { className: "advisor-scopes", "aria-label": t("advisor.scopes.aria"), children: [
+    snapshot.scopesError !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ErrorNotice, { t, text: t("advisor.error.scopesSave", { message: snapshot.scopesError }), onRetry: () => void store.refreshScopes() }),
+    /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-scope-hint", children: t("advisor.scopes.hint") }),
     /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
       ScopeField,
       {
-        label: `${LEVEL_LABEL.conversation}\uFF08\u968F\u300C\u65B0\u5EFA\u8BC4\u5BA1\u4F1A\u8BDD\u300D\u6E05\u7A7A\uFF09`,
+        label: t("advisor.scopes.conversationLabel", { level: levelLabel("conversation", t) }),
         value: draft.conversation.text,
-        placeholder: "\u53EA\u5BF9\u672C\u6B21\u8BC4\u5BA1\u4F1A\u8BDD\u751F\u6548\u2026\uFF08\u53EF\u591A\u884C\uFF0C\u591A\u6761\u6307\u4EE4\u4E00\u6B21\u5199\uFF09",
+        placeholder: t("advisor.scopes.conversationPlaceholder"),
+        t,
         saving: snapshot.scopesSaving,
         onSave: (text) => save("conversation", text)
       }
@@ -7783,9 +7399,10 @@ function ScopesTab({ store, snapshot }) {
     /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
       ScopeField,
       {
-        label: `${LEVEL_LABEL.session}\uFF08\u672C\u4F1A\u8BDD\u4E00\u76F4\u6709\u6548\uFF09`,
+        label: t("advisor.scopes.sessionLabel", { level: levelLabel("session", t) }),
         value: draft.session.text,
-        placeholder: "\u53EA\u5BF9\u672C\u4F1A\u8BDD\u751F\u6548\u2026",
+        placeholder: t("advisor.scopes.sessionPlaceholder"),
+        t,
         saving: snapshot.scopesSaving,
         onSave: (text) => save("session", text)
       }
@@ -7793,9 +7410,10 @@ function ScopesTab({ store, snapshot }) {
     /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
       ScopeField,
       {
-        label: `${LEVEL_LABEL.project}\uFF08\u5DE5\u4F5C\u533A ${draft.project.workspace ?? "\u672A\u77E5"} \u7684\u6240\u6709\u4F1A\u8BDD\u5171\u4EAB\uFF09`,
+        label: t("advisor.scopes.projectLabel", { level: levelLabel("project", t), workspace: draft.project.workspace ?? t("advisor.workspace.unknownShort") }),
         value: draft.project.text,
-        placeholder: "\u5BF9\u672C\u9879\u76EE\u6240\u6709\u4F1A\u8BDD\u751F\u6548\u2026",
+        placeholder: t("advisor.scopes.projectPlaceholder"),
+        t,
         saving: snapshot.scopesSaving,
         onSave: (text) => save("project", text)
       }
@@ -7803,9 +7421,10 @@ function ScopesTab({ store, snapshot }) {
     /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
       ScopeField,
       {
-        label: `${LEVEL_LABEL.global}\uFF08\u6240\u6709\u9879\u76EE\u3001\u6240\u6709\u4F1A\u8BDD\u90FD\u751F\u6548\uFF09`,
+        label: t("advisor.scopes.globalLabel", { level: levelLabel("global", t) }),
         value: draft.global.text,
-        placeholder: "\u5BF9\u6240\u6709\u9879\u76EE\u6240\u6709\u4F1A\u8BDD\u751F\u6548\u2026\uFF08\u5982\uFF1A\u8BC4\u5BA1\u610F\u89C1\u4E00\u5F8B\u7528\u4E2D\u6587\u3001\u4E0D\u8981\u91CD\u590D\u5DF2\u63D0\u8FC7\u7684\u5EFA\u8BAE\uFF09",
+        placeholder: t("advisor.scopes.globalPlaceholder"),
+        t,
         saving: snapshot.scopesSaving,
         onSave: (text) => save("global", text)
       }
@@ -7842,12 +7461,12 @@ function ScopeField(props) {
         className: "advisor-button advisor-scope-save",
         disabled: props.saving || !dirty && value === props.value,
         onClick: () => props.onSave(value),
-        children: props.saving ? "\u4FDD\u5B58\u4E2D\u2026" : "\u4FDD\u5B58"
+        children: props.saving ? props.t("advisor.action.saving") : props.t("advisor.action.save")
       }
     )
   ] });
 }
-function SettingsDisclosure({ store, snapshot }) {
+function SettingsDisclosure({ t, store, snapshot }) {
   const [draft, setDraft] = (0, import_react15.useState)(null);
   const [localError, setLocalError] = (0, import_react15.useState)(null);
   (0, import_react15.useEffect)(() => {
@@ -7865,7 +7484,7 @@ function SettingsDisclosure({ store, snapshot }) {
     const provider = draft.advisorProvider?.trim() ?? "";
     const model = draft.advisorModel?.trim() ?? "";
     if (provider === "" !== (model === "")) {
-      setLocalError("provider \u4E0E model \u5FC5\u987B\u540C\u65F6\u586B\u5199\uFF0C\u6216\u540C\u65F6\u7559\u7A7A\u4EE5\u7EE7\u627F\u4F1A\u8BDD\u6A21\u578B\u3002");
+      setLocalError(t("advisor.settings.providerModelPair"));
       return;
     }
     const defaultPrompt = snapshot.config?.defaultSystemPrompt ?? "";
@@ -7881,11 +7500,11 @@ function SettingsDisclosure({ store, snapshot }) {
   return (
     /* 2026-08-12 用户反馈：设置默认直接显示（去掉 details 折叠箭头） */
     /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-settings", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-settings-title", children: "\u4F1A\u8BDD\u8BC4\u5BA1\u8BBE\u7F6E" }),
+      /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-settings-title", children: t("advisor.settings.title") }),
       /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-settings-body", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-muted", children: "\u6A21\u5757\u603B\u95F8\uFF08\u542F\u7528/\u505C\u7528\uFF09\u5728\u300CMemory Evolve \u8BBE\u7F6E\u300DTab \u7684\u914D\u7F6E\u533A\u63A7\u5236" }),
-        snapshot.configLoading && draft === null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(LoadingBlock, { text: "\u6B63\u5728\u52A0\u8F7D\u8BBE\u7F6E\u2026" }),
-        snapshot.configError !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ErrorNotice, { text: `\u8BBE\u7F6E\u52A0\u8F7D\u5931\u8D25\uFF1A${snapshot.configError}`, onRetry: () => void store.refreshConfig() }),
+        /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-muted", children: t("advisor.settings.masterSwitchHint") }),
+        snapshot.configLoading && draft === null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(LoadingBlock, { text: t("advisor.loading.settings") }),
+        snapshot.configError !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(ErrorNotice, { t, text: t("advisor.error.configLoad", { message: snapshot.configError }), onRetry: () => void store.refreshConfig() }),
         draft !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)(import_jsx_runtime16.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-settings-switches", children: [
             /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("label", { className: "advisor-check-row", children: [
@@ -7897,9 +7516,9 @@ function SettingsDisclosure({ store, snapshot }) {
                   onChange: (event) => setDraft({ ...draft, advisorPanelEnabled: event.target.checked })
                 }
               ),
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: "\u663E\u793A\u60AC\u6D6E\u80F6\u56CA\u6309\u94AE" })
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: t("advisor.settings.showCapsule") })
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("label", { className: "advisor-check-row", title: "info \u662F\u6700\u4F4E\u7B49\u7EA7\u5EFA\u8BAE\uFF1A\u9ED8\u8BA4\u53EA\u8BB0\u5F55\u4E0D\u6CE8\u5165\u4F1A\u8BDD\uFF1B\u5F00\u542F\u540E\u4EE5\u6CE8\u5165\uFF08\u975E\u6253\u65AD\uFF09\u65B9\u5F0F\u9001\u8FBE", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("label", { className: "advisor-check-row", title: t("advisor.settings.infoInjectTitle"), children: [
               /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
                 "input",
                 {
@@ -7908,39 +7527,39 @@ function SettingsDisclosure({ store, snapshot }) {
                   onChange: (event) => setDraft({ ...draft, advisorInfoInject: event.target.checked })
                 }
               ),
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: "info \u7EA7\u5EFA\u8BAE\u4E5F\u6CE8\u5165\u4F1A\u8BDD" })
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: t("advisor.settings.infoInject") })
             ] })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-settings-grid", children: [
             /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("label", { className: "advisor-field", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: "\u4F9B\u5E94\u5546\uFF08Provider\uFF09" }),
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: t("advisor.settings.provider") }),
               /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
                 "input",
                 {
                   className: "advisor-input",
                   value: draft.advisorProvider ?? "",
                   onChange: (event) => setDraft({ ...draft, advisorProvider: event.target.value }),
-                  placeholder: "\u7559\u7A7A\u5219\u7EE7\u627F\u4F1A\u8BDD"
+                  placeholder: t("advisor.settings.inheritPlaceholder")
                 }
               )
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("label", { className: "advisor-field", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: "\u6A21\u578B\uFF08Model\uFF09" }),
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: t("advisor.settings.model") }),
               /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
                 "input",
                 {
                   className: "advisor-input",
                   value: draft.advisorModel ?? "",
                   onChange: (event) => setDraft({ ...draft, advisorModel: event.target.value }),
-                  placeholder: "\u7559\u7A7A\u5219\u7EE7\u627F\u4F1A\u8BDD"
+                  placeholder: t("advisor.settings.inheritPlaceholder")
                 }
               )
             ] })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("label", { className: "advisor-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("span", { children: [
-              "\u8BC4\u5BA1\u7CFB\u7EDF\u63D0\u793A\u8BCD",
-              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-prompt-mode", children: draft.advisorSystemPrompt === "" ? "\uFF08\u4F7F\u7528\u5185\u7F6E\u9ED8\u8BA4\u63D0\u793A\u8BCD\uFF0C\u7F16\u8F91\u540E\u4FDD\u5B58\u5373\u4E3A\u81EA\u5B9A\u4E49\uFF09" : "\uFF08\u81EA\u5B9A\u4E49\uFF09" })
+              t("advisor.settings.systemPrompt"),
+              /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { className: "advisor-prompt-mode", children: draft.advisorSystemPrompt === "" ? t("advisor.settings.promptBuiltin") : t("advisor.settings.promptCustom") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
               "textarea",
@@ -7950,7 +7569,7 @@ function SettingsDisclosure({ store, snapshot }) {
                 maxLength: 8192,
                 value: draft.advisorSystemPrompt === "" ? snapshot.config?.defaultSystemPrompt ?? "" : draft.advisorSystemPrompt,
                 onChange: (event) => setDraft({ ...draft, advisorSystemPrompt: event.target.value }),
-                placeholder: "\u7559\u7A7A\u4F7F\u7528\u5185\u7F6E\u8BC4\u5BA1\u63D0\u793A\u8BCD"
+                placeholder: t("advisor.settings.promptPlaceholder")
               }
             ),
             /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
@@ -7965,12 +7584,12 @@ function SettingsDisclosure({ store, snapshot }) {
                     await store.saveConfig({ advisorSystemPrompt: "" });
                   })();
                 },
-                title: "\u6062\u590D\u4E3A\u5185\u7F6E\u9ED8\u8BA4\u63D0\u793A\u8BCD\uFF08\u4FDD\u5B58\u540E\u7ACB\u5373\u751F\u6548\uFF0C\u8F93\u5165\u6846\u663E\u793A\u6700\u65B0\u5185\u7F6E\u9ED8\u8BA4\uFF09",
-                children: "\u6062\u590D\u9ED8\u8BA4\u63D0\u793A\u8BCD"
+                title: t("advisor.settings.restoreTitle"),
+                children: t("advisor.settings.restore")
               }
             )
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-settings-hint", children: "\u5168\u5C40\u9ED8\u8BA4\u5F00\u5173\u4E0D\u4F1A\u6E05\u9664\u5F53\u524D\u4F1A\u8BDD override\uFF1B\u4F1A\u8BDD\u7EA7\u542F\u505C\u8BF7\u4F7F\u7528\u4E0A\u65B9\u72B6\u6001\u6761\u3002" }),
+          /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-settings-hint", children: t("advisor.settings.overrideHint") }),
           (localError ?? snapshot.configError) !== null && /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("div", { className: "advisor-inline-error", children: localError ?? snapshot.configError }),
           /* @__PURE__ */ (0, import_jsx_runtime16.jsx)(
             "button",
@@ -7979,7 +7598,7 @@ function SettingsDisclosure({ store, snapshot }) {
               className: "advisor-button advisor-button-primary advisor-settings-save",
               disabled: snapshot.configSaving,
               onClick: () => void save(),
-              children: snapshot.configSaving ? "\u4FDD\u5B58\u4E2D\u2026" : "\u4FDD\u5B58\u8BBE\u7F6E"
+              children: snapshot.configSaving ? t("advisor.action.saving") : t("advisor.settings.save")
             }
           )
         ] })
@@ -7987,10 +7606,10 @@ function SettingsDisclosure({ store, snapshot }) {
     ] })
   );
 }
-function ErrorNotice({ text, onRetry }) {
+function ErrorNotice({ t, text, onRetry }) {
   return /* @__PURE__ */ (0, import_jsx_runtime16.jsxs)("div", { className: "advisor-error", role: "alert", children: [
     /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("span", { children: text }),
-    /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("button", { type: "button", className: "advisor-link", onClick: onRetry, children: "\u91CD\u8BD5" })
+    /* @__PURE__ */ (0, import_jsx_runtime16.jsx)("button", { type: "button", className: "advisor-link", onClick: onRetry, children: t("advisor.action.retry") })
   ] });
 }
 function LoadingBlock({ text }) {
@@ -8013,7 +7632,7 @@ async function fetchJson3(path, init) {
 }
 function errText2(err) {
   const text = err instanceof Error ? err.message : String(err);
-  return text !== void 0 && text.trim() !== "" ? text : isEn3() ? "Operation failed (no error detail)" : "\u64CD\u4F5C\u5931\u8D25\uFF08\u65E0\u9519\u8BEF\u8BE6\u60C5\uFF09";
+  return text !== void 0 && text.trim() !== "" ? text : isEn2() ? "Operation failed (no error detail)" : "\u64CD\u4F5C\u5931\u8D25\uFF08\u65E0\u9519\u8BEF\u8BE6\u60C5\uFF09";
 }
 function fmtTime2(ts) {
   return new Date(ts).toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -8038,7 +7657,7 @@ function displayName(sid, aliases) {
   if (aliases[sid] !== void 0) return `${aliases[sid]}\uFF08${short}\uFF09`;
   return short;
 }
-function WsCoordSettings({ t: t2 }) {
+function WsCoordSettings({ t }) {
   const [config, setConfig] = (0, import_react16.useState)(null);
   const [busy, setBusy] = (0, import_react16.useState)(false);
   const [error, setError] = (0, import_react16.useState)(null);
@@ -8064,15 +7683,15 @@ function WsCoordSettings({ t: t2 }) {
       if (body.config) setConfig(body.config);
     }).catch((err) => setError(errText2(err))).finally(() => setBusy(false));
   };
-  if (config === null) return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty", children: t2("broadcast.loading") });
+  if (config === null) return /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty", children: t("broadcast.loading") });
   const on = (k) => config[k] === true;
   return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-settings", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-settings-title", children: t2("broadcast.settings.wsCoord.title") }),
-    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("p", { className: "bb-settings-desc", children: t2("broadcast.settings.wsCoord.desc") }),
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-settings-title", children: t("broadcast.settings.wsCoord.title") }),
+    /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("p", { className: "bb-settings-desc", children: t("broadcast.settings.wsCoord.desc") }),
     /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("label", { className: "me-field", children: [
       /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("span", { className: "me-field-label", children: [
-        t2("broadcast.settings.wsCoord.enabled"),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("em", { className: "me-field-hint", children: t2("broadcast.settings.wsCoord.enabled.hint") })
+        t("broadcast.settings.wsCoord.enabled"),
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("em", { className: "me-field-hint", children: t("broadcast.settings.wsCoord.enabled.hint") })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
         "input",
@@ -8088,8 +7707,8 @@ function WsCoordSettings({ t: t2 }) {
     on("wsCoordEnabled") && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(import_jsx_runtime17.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("label", { className: "me-field me-field-sub", children: [
         /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("span", { className: "me-field-label", children: [
-          t2("broadcast.settings.wsCoord.snapshot"),
-          /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("em", { className: "me-field-hint", children: t2("broadcast.settings.wsCoord.snapshot.hint") })
+          t("broadcast.settings.wsCoord.snapshot"),
+          /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("em", { className: "me-field-hint", children: t("broadcast.settings.wsCoord.snapshot.hint") })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
           "input",
@@ -8104,8 +7723,8 @@ function WsCoordSettings({ t: t2 }) {
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("label", { className: "me-field me-field-sub", children: [
         /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("span", { className: "me-field-label", children: [
-          t2("broadcast.settings.wsCoord.enforce"),
-          /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("em", { className: "me-field-hint", children: t2("broadcast.settings.wsCoord.enforce.hint") })
+          t("broadcast.settings.wsCoord.enforce"),
+          /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("em", { className: "me-field-hint", children: t("broadcast.settings.wsCoord.enforce.hint") })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
           "input",
@@ -8122,9 +7741,9 @@ function WsCoordSettings({ t: t2 }) {
     error !== null && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-error", children: error })
   ] });
 }
-var isEn3 = () => clientLang() === "en";
+var isEn2 = () => clientLang() === "en";
 function BroadcastView(props) {
-  const { t: t2, sessionId } = props;
+  const { t, sessionId } = props;
   const [view, setView] = (0, import_react16.useState)("messages");
   const [messages, setMessages] = (0, import_react16.useState)(null);
   const [rooms, setRooms] = (0, import_react16.useState)(null);
@@ -8211,10 +7830,10 @@ function BroadcastView(props) {
   const roomListTotalPages = Math.max(1, Math.ceil(filteredRooms.length / PAGE_SIZE3));
   const roomListPageItems = filteredRooms.slice((roomPage - 1) * PAGE_SIZE3, roomPage * PAGE_SIZE3);
   const deleteMessage = async (msg) => {
-    if (!window.confirm(t2("broadcast.message.deleteConfirm", { subject: msg.subject }))) return;
+    if (!window.confirm(t("broadcast.message.deleteConfirm", { subject: msg.subject }))) return;
     try {
       await fetchJson3(`/messages/${encodeURIComponent(msg.id)}`, { method: "DELETE" });
-      setNotice({ kind: "ok", text: t2("broadcast.message.deleted") });
+      setNotice({ kind: "ok", text: t("broadcast.message.deleted") });
       void load();
     } catch (err) {
       setNotice({ kind: "error", text: errText2(err) });
@@ -8257,13 +7876,13 @@ function BroadcastView(props) {
     }
   };
   const kickMember = async (room, member) => {
-    if (!window.confirm(t2("broadcast.room.kickConfirm", { member }))) return;
+    if (!window.confirm(t("broadcast.room.kickConfirm", { member }))) return;
     try {
       await fetchJson3(`/rooms/${encodeURIComponent(room.id)}/kick`, {
         method: "POST",
         body: JSON.stringify({ member })
       });
-      setNotice({ kind: "ok", text: t2("broadcast.room.kick") });
+      setNotice({ kind: "ok", text: t("broadcast.room.kick") });
       void load();
       setOpenRoom(null);
     } catch (err) {
@@ -8271,14 +7890,14 @@ function BroadcastView(props) {
     }
   };
   const dissolveRoom = async (room) => {
-    if (!window.confirm(t2("broadcast.room.dissolveConfirm", { name: room.name }))) return;
+    if (!window.confirm(t("broadcast.room.dissolveConfirm", { name: room.name }))) return;
     try {
       const res = await fetchJson3(`/rooms/${encodeURIComponent(room.id)}/dissolve`, { method: "POST" });
       if (res.ok !== true) {
-        setNotice({ kind: "error", text: res.message ?? (isEn3() ? "Operation failed" : "\u64CD\u4F5C\u5931\u8D25") });
+        setNotice({ kind: "error", text: res.message ?? (isEn2() ? "Operation failed" : "\u64CD\u4F5C\u5931\u8D25") });
         return;
       }
-      setNotice({ kind: "ok", text: t2("broadcast.room.dissolved") });
+      setNotice({ kind: "ok", text: t("broadcast.room.dissolved") });
       void load();
     } catch (err) {
       setNotice({ kind: "error", text: errText2(err) });
@@ -8292,26 +7911,26 @@ function BroadcastView(props) {
     });
   };
   const renderMsgCard = (m, expandId, setExpandId) => {
-    const from = m.sender === "system" ? isEn3() ? "System" : "\u7CFB\u7EDF" : displayName(m.sender, aliases);
+    const from = m.sender === "system" ? isEn2() ? "System" : "\u7CFB\u7EDF" : displayName(m.sender, aliases);
     const to = m.recipients.map((r) => recipientLabel(r, roomMap, aliases)).join(", ");
     const unread = m.readBy.length === 0;
     const isOpen = expandId === m.id;
     return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-card", children: [
       /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-row", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-strong", children: m.subject || (isEn3() ? "(no subject)" : "\uFF08\u65E0\u4E3B\u9898\uFF09") }),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: `bb-badge${unread ? " bb-badge-unread" : " bb-badge-read"}`, children: unread ? t2("broadcast.msg.unread") : t2("broadcast.msg.read") }),
-        m.hasBody && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-badge bb-badge-long", children: t2("broadcast.messages.long") }),
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-strong", children: m.subject || (isEn2() ? "(no subject)" : "\uFF08\u65E0\u4E3B\u9898\uFF09") }),
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: `bb-badge${unread ? " bb-badge-unread" : " bb-badge-read"}`, children: unread ? t("broadcast.msg.unread") : t("broadcast.msg.read") }),
+        m.hasBody && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-badge bb-badge-long", children: t("broadcast.messages.long") }),
         /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-grow" }),
         /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-muted bb-small", children: fmtTime2(m.createdAt) }),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini", onClick: () => void toggleExpand(m, expandId, setExpandId), children: isOpen ? t2("broadcast.message.collapse") : t2("broadcast.message.expand") }),
-        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini bb-btn-danger", onClick: () => void deleteMessage(m), children: t2("broadcast.message.delete") })
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini", onClick: () => void toggleExpand(m, expandId, setExpandId), children: isOpen ? t("broadcast.message.collapse") : t("broadcast.message.expand") }),
+        /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini bb-btn-danger", onClick: () => void deleteMessage(m), children: t("broadcast.message.delete") })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-muted bb-small", title: m.sender === "system" ? void 0 : m.sender, children: [
-        t2("broadcast.messages.sender"),
+        t("broadcast.messages.sender"),
         "\uFF1A",
         from,
         " \xB7 ",
-        t2("broadcast.messages.to"),
+        t("broadcast.messages.to"),
         "\uFF1A",
         to
       ] }),
@@ -8346,7 +7965,7 @@ function BroadcastView(props) {
         type: "button",
         className: `bb-chip${currentFilter === f ? " bb-chip-active" : ""}`,
         onClick: () => onFilter(f),
-        children: t2(`broadcast.filter.${f}`)
+        children: t(`broadcast.filter.${f}`)
       },
       f
     )),
@@ -8354,7 +7973,7 @@ function BroadcastView(props) {
       "input",
       {
         className: "bb-search",
-        placeholder: t2("broadcast.searchPh"),
+        placeholder: t("broadcast.searchPh"),
         value: currentQuery,
         onChange: (e) => onQuery(e.target.value)
       }
@@ -8363,20 +7982,20 @@ function BroadcastView(props) {
   const renderPager = (currentPage, total, onPage) => {
     if (total <= 1) return null;
     return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-pager", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini", disabled: currentPage <= 1, onClick: () => onPage(currentPage - 1), children: t2("broadcast.pagePrev") }),
-      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-muted bb-small", children: t2("broadcast.pageInfo", { page: currentPage, total }) }),
-      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini", disabled: currentPage >= total, onClick: () => onPage(currentPage + 1), children: t2("broadcast.pageNext") })
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini", disabled: currentPage <= 1, onClick: () => onPage(currentPage - 1), children: t("broadcast.pagePrev") }),
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-muted bb-small", children: t("broadcast.pageInfo", { page: currentPage, total }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini", disabled: currentPage >= total, onClick: () => onPage(currentPage + 1), children: t("broadcast.pageNext") })
     ] });
   };
   const myAlias = aliases[sessionId];
   const renderGuide = () => /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(TabGuideView, { sections: [
-    { icon: "\u{1F4E8}", title: t2("broadcast.guide.intro.title"), body: t2("broadcast.guide.intro.body") },
-    { icon: "\u2709\uFE0F", title: t2("broadcast.guide.send.title"), body: t2("broadcast.guide.send.body"), items: [t2("broadcast.guide.send.item1"), t2("broadcast.guide.send.item2"), t2("broadcast.guide.send.item3")] },
-    { icon: "\u{1F4E5}", title: t2("broadcast.guide.inbox.title"), body: t2("broadcast.guide.inbox.body"), items: [t2("broadcast.guide.inbox.item1"), t2("broadcast.guide.inbox.item2"), t2("broadcast.guide.inbox.item3")] },
-    { icon: "\u{1F465}", title: t2("broadcast.guide.room.title"), body: t2("broadcast.guide.room.body"), items: [t2("broadcast.guide.room.item1"), t2("broadcast.guide.room.item2"), t2("broadcast.guide.room.item3")] },
-    { icon: "\u{1F3F7}\uFE0F", title: t2("broadcast.guide.alias.title"), body: t2("broadcast.guide.alias.body"), items: [t2("broadcast.guide.alias.item1"), t2("broadcast.guide.alias.item2")] },
-    { icon: "\u{1F6E1}\uFE0F", title: t2("broadcast.guide.wscoord.title"), body: t2("broadcast.guide.wscoord.body"), items: [t2("broadcast.guide.wscoord.item1"), t2("broadcast.guide.wscoord.item2"), t2("broadcast.guide.wscoord.item3")] },
-    { icon: "\u2699\uFE0F", title: t2("broadcast.guide.switch.title"), body: t2("broadcast.guide.switch.body") }
+    { icon: "\u{1F4E8}", title: t("broadcast.guide.intro.title"), body: t("broadcast.guide.intro.body") },
+    { icon: "\u2709\uFE0F", title: t("broadcast.guide.send.title"), body: t("broadcast.guide.send.body"), items: [t("broadcast.guide.send.item1"), t("broadcast.guide.send.item2"), t("broadcast.guide.send.item3")] },
+    { icon: "\u{1F4E5}", title: t("broadcast.guide.inbox.title"), body: t("broadcast.guide.inbox.body"), items: [t("broadcast.guide.inbox.item1"), t("broadcast.guide.inbox.item2"), t("broadcast.guide.inbox.item3")] },
+    { icon: "\u{1F465}", title: t("broadcast.guide.room.title"), body: t("broadcast.guide.room.body"), items: [t("broadcast.guide.room.item1"), t("broadcast.guide.room.item2"), t("broadcast.guide.room.item3")] },
+    { icon: "\u{1F3F7}\uFE0F", title: t("broadcast.guide.alias.title"), body: t("broadcast.guide.alias.body"), items: [t("broadcast.guide.alias.item1"), t("broadcast.guide.alias.item2")] },
+    { icon: "\u{1F6E1}\uFE0F", title: t("broadcast.guide.wscoord.title"), body: t("broadcast.guide.wscoord.body"), items: [t("broadcast.guide.wscoord.item1"), t("broadcast.guide.wscoord.item2"), t("broadcast.guide.wscoord.item3")] },
+    { icon: "\u2699\uFE0F", title: t("broadcast.guide.switch.title"), body: t("broadcast.guide.switch.body") }
   ] });
   return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-pane", children: [
     /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "mt-file-tabs", role: "tablist", children: [
@@ -8388,7 +8007,7 @@ function BroadcastView(props) {
           "aria-selected": view === "guide",
           className: view === "guide" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setView("guide"),
-          children: t2("broadcast.tab.guide")
+          children: t("broadcast.tab.guide")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
@@ -8399,7 +8018,7 @@ function BroadcastView(props) {
           "aria-selected": view === "messages",
           className: view === "messages" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setView("messages"),
-          children: t2("broadcast.tab.messages")
+          children: t("broadcast.tab.messages")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
@@ -8410,7 +8029,7 @@ function BroadcastView(props) {
           "aria-selected": view === "rooms",
           className: view === "rooms" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setView("rooms"),
-          children: t2("broadcast.tab.rooms")
+          children: t("broadcast.tab.rooms")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
@@ -8421,25 +8040,25 @@ function BroadcastView(props) {
           "aria-selected": view === "settings",
           className: view === "settings" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setView("settings"),
-          children: t2("broadcast.tab.settings")
+          children: t("broadcast.tab.settings")
         }
       )
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-session-line", title: sessionId, children: [
       /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("span", { className: "bb-session-label", children: [
-        t2("broadcast.mySessionId"),
+        t("broadcast.mySessionId"),
         "\uFF1A"
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("code", { className: "bb-mono", children: myAlias !== void 0 ? `${myAlias}\uFF08${shortId(sessionId)}\uFF09` : shortId(sessionId) }),
-      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini", onClick: () => copyText2(sessionId, "id"), children: copied === "id" ? t2("broadcast.copied") : t2("broadcast.copyId") }),
-      myAlias !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini", onClick: () => copyText2(myAlias, "alias"), children: copied === "alias" ? t2("broadcast.copied") : t2("broadcast.copyAlias") })
+      /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini", onClick: () => copyText2(sessionId, "id"), children: copied === "id" ? t("broadcast.copied") : t("broadcast.copyId") }),
+      myAlias !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini", onClick: () => copyText2(myAlias, "alias"), children: copied === "alias" ? t("broadcast.copied") : t("broadcast.copyAlias") })
     ] }),
     notice !== null && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: `bb-notice bb-notice-${notice.kind}`, children: notice.text }),
     error !== null && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-error", children: error }),
     view === "guide" && renderGuide(),
-    view === "settings" && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(WsCoordSettings, { t: t2 }),
+    view === "settings" && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(WsCoordSettings, { t }),
     view === "messages" && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-list", children: [
-      messages === null && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty", children: t2("broadcast.loading") }),
+      messages === null && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty", children: t("broadcast.loading") }),
       messages !== null && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(import_jsx_runtime17.Fragment, { children: [
         renderToolbar(
           filter,
@@ -8454,16 +8073,16 @@ function BroadcastView(props) {
           }
         ),
         directMessages.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-empty", children: [
-          t2("broadcast.messages.empty"),
-          messages.some((m) => m.recipients.some((r) => isRoomRef(r))) && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-hint", children: t2("broadcast.messages.roomInRooms") })
+          t("broadcast.messages.empty"),
+          messages.some((m) => m.recipients.some((r) => isRoomRef(r))) && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-hint", children: t("broadcast.messages.roomInRooms") })
         ] }),
-        directMessages.length > 0 && filteredMessages.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty", children: t2("broadcast.messages.empty") }),
+        directMessages.length > 0 && filteredMessages.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty", children: t("broadcast.messages.empty") }),
         pageItems.map((m) => renderMsgCard(m, expanded, setExpanded)),
         renderPager(page, totalPages, setPage)
       ] })
     ] }),
     view === "rooms" && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-list", children: [
-      rooms === null && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty", children: t2("broadcast.loading") }),
+      rooms === null && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty", children: t("broadcast.loading") }),
       rooms !== null && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(import_jsx_runtime17.Fragment, { children: [
         /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-toolbar", children: [
           ["all", "active", "dissolved"].map((s) => /* @__PURE__ */ (0, import_jsx_runtime17.jsx)(
@@ -8475,7 +8094,7 @@ function BroadcastView(props) {
                 setRoomStatus(s);
                 setRoomPage(1);
               },
-              children: t2(`broadcast.roomStatus.${s}`)
+              children: t(`broadcast.roomStatus.${s}`)
             },
             s
           )),
@@ -8488,7 +8107,7 @@ function BroadcastView(props) {
                 setRoomDays(d);
                 setRoomPage(1);
               },
-              children: t2(`broadcast.roomDays.${d}`)
+              children: t(`broadcast.roomDays.${d}`)
             },
             d
           )),
@@ -8496,7 +8115,7 @@ function BroadcastView(props) {
             "input",
             {
               className: "bb-search",
-              placeholder: t2("broadcast.roomSearchPh"),
+              placeholder: t("broadcast.roomSearchPh"),
               value: roomQuery,
               onChange: (e) => {
                 setRoomQuery(e.target.value);
@@ -8505,11 +8124,11 @@ function BroadcastView(props) {
             }
           )
         ] }),
-        filteredRooms.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty", children: t2("broadcast.rooms.empty") }),
+        filteredRooms.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty", children: t("broadcast.rooms.empty") }),
         roomListPageItems.map((room) => {
           const dissolved = room.status === "dissolved";
           const online = room.onlineCount > 0 && !dissolved;
-          const statusLabel2 = dissolved ? t2("broadcast.room.status.dissolved") : online ? t2("broadcast.room.status.active") : t2("broadcast.room.status.idle");
+          const statusLabel2 = dissolved ? t("broadcast.room.status.dissolved") : online ? t("broadcast.room.status.active") : t("broadcast.room.status.idle");
           const members = presence[room.id] ?? room.members.map((sid) => ({ sessionId: sid, status: "unknown", online: false, lastActiveAt: null }));
           const isOpen = openRoom === room.id;
           return /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: `bb-card${isOpen ? " bb-card-open" : ""}${dissolved ? " bb-card-dissolved" : ""}`, children: [
@@ -8517,47 +8136,47 @@ function BroadcastView(props) {
               /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: `bb-dot${online ? " bb-dot-on" : dissolved ? " bb-dot-off" : " bb-dot-idle"}` }),
               /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-strong", children: room.name }),
               /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: `bb-badge${dissolved ? " bb-badge-dissolved" : online ? " bb-badge-online" : ""}`, children: statusLabel2 }),
-              /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-badge", children: t2("broadcast.room.online", { online: room.onlineCount, total: room.members.length }) }),
+              /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-badge", children: t("broadcast.room.online", { online: room.onlineCount, total: room.members.length }) }),
               /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-grow" }),
               /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("span", { className: "bb-muted bb-small", children: [
-                t2("broadcast.room.lastActive"),
+                t("broadcast.room.lastActive"),
                 "\uFF1A",
                 fmtTime2(room.lastActiveAt)
               ] }),
-              /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-detail", onClick: () => void toggleRoom(room), children: isOpen ? t2("broadcast.message.collapse") : t2("broadcast.room.detail") }),
-              !dissolved && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini bb-btn-danger", onClick: () => void dissolveRoom(room), children: t2("broadcast.room.dissolve") })
+              /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-detail", onClick: () => void toggleRoom(room), children: isOpen ? t("broadcast.message.collapse") : t("broadcast.room.detail") }),
+              !dissolved && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini bb-btn-danger", onClick: () => void dissolveRoom(room), children: t("broadcast.room.dissolve") })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-meta", children: [
               /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("code", { className: "bb-mono bb-small", children: room.id }),
               /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("span", { className: "bb-muted bb-small", children: [
                 "\xB7 ",
-                t2("broadcast.room.created"),
+                t("broadcast.room.created"),
                 " ",
                 fmtTime2(room.createdAt),
                 " \xB7 ",
                 room.members.length,
                 " ",
-                t2("broadcast.room.members")
+                t("broadcast.room.members")
               ] }),
-              /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini", onClick: () => copyText2(room.id, `room-${room.id}`), children: t2("broadcast.room.copyId") })
+              /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini", onClick: () => copyText2(room.id, `room-${room.id}`), children: t("broadcast.room.copyId") })
             ] }),
             isOpen && /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)(import_jsx_runtime17.Fragment, { children: [
               /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-members", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-section-title", children: t2("broadcast.room.members") }),
+                /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-section-title", children: t("broadcast.room.members") }),
                 members.map((p) => /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-row bb-member", title: p.sessionId, children: [
                   /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: `bb-dot${p.online ? " bb-dot-on" : " bb-dot-idle"}` }),
                   /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("code", { className: "bb-mono", children: displayName(p.sessionId, aliases) }),
                   /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("span", { className: "bb-muted bb-small", children: [
-                    p.online ? "running" : p.status === "idle" ? "idle" : t2("broadcast.room.presence.unknown"),
+                    p.online ? "running" : p.status === "idle" ? "idle" : t("broadcast.room.presence.unknown"),
                     p.lastActiveAt !== null ? ` \xB7 ${fmtTime2(p.lastActiveAt)}` : ""
                   ] }),
                   /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-grow" }),
-                  !dissolved && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini bb-btn-danger", onClick: () => void kickMember(room, p.sessionId), children: t2("broadcast.room.kick") })
+                  !dissolved && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("button", { type: "button", className: "bb-btn bb-btn-mini bb-btn-danger", onClick: () => void kickMember(room, p.sessionId), children: t("broadcast.room.kick") })
                 ] }, p.sessionId))
               ] }),
               /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-room-msgs", children: [
                 /* @__PURE__ */ (0, import_jsx_runtime17.jsxs)("div", { className: "bb-section-title", children: [
-                  t2("broadcast.room.messages"),
+                  t("broadcast.room.messages"),
                   /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("span", { className: "bb-count", children: roomMessages.length })
                 ] }),
                 renderToolbar(
@@ -8572,8 +8191,8 @@ function BroadcastView(props) {
                     setRoomMsgPage(1);
                   }
                 ),
-                roomMessages.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty bb-empty-sm", children: t2("broadcast.room.messages.empty") }),
-                roomMessages.length > 0 && filteredRoomMessages.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty bb-empty-sm", children: t2("broadcast.room.messages.empty") }),
+                roomMessages.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty bb-empty-sm", children: t("broadcast.room.messages.empty") }),
+                roomMessages.length > 0 && filteredRoomMessages.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime17.jsx)("div", { className: "bb-empty bb-empty-sm", children: t("broadcast.room.messages.empty") }),
                 roomPageItems.map((m) => renderMsgCard(m, roomMsgExpanded, setRoomMsgExpanded)),
                 renderPager(roomMsgPage, roomTotalPages, setRoomMsgPage)
               ] })
@@ -8589,259 +8208,8 @@ function BroadcastView(props) {
 // src/client/PromptView.tsx
 var import_react17 = require("react");
 var import_jsx_runtime18 = require("react/jsx-runtime");
-var DICT2 = {
-  zh: {
-    // 「指南」子 tab：提示词注入功能的详细介绍（本 Tab 专属）。
-    guide: "\u6307\u5357",
-    library: "\u63D0\u793A\u8BCD\u5E93",
-    guideIntro: "\u63D0\u793A\u8BCD\u6CE8\u5165 = \u300C\u6307\u4EE4\u8303\u5F0F\u8D44\u4EA7\u5E93 + \u4E00\u952E\u6CE8\u5165\u300D\uFF1A\u628A\u5E38\u7528\u5DE5\u4F5C\u8303\u5F0F\uFF08\u4EE3\u7801\u5BA1\u67E5 / \u8C03\u8BD5 / PRD / \u6D4B\u8BD5\u7B49\uFF09\u56FA\u5316\u6210\u63D0\u793A\u8BCD\uFF0C\u9009\u4E2D\u5373\u6CE8\u5165\u2014\u2014\u6A21\u578B\u4E0B\u4E00\u8F6E\u81EA\u52A8\u770B\u5230\u3001\u4E0D\u6253\u65AD\u56DE\u590D\uFF0C\u7B49\u4E8E\u7ED9 AI \u4E0B\u53D1\u64CD\u4F5C\u624B\u518C\u3002",
-    guideLibTitle: "\u63D0\u793A\u8BCD\u5E93\uFF1A\u4F60\u7684\u8303\u5F0F\u8D44\u4EA7",
-    guideLibBody: "\u53EF\u590D\u7528\u7684\u6307\u4EE4\u8303\u5F0F\u8D44\u4EA7\uFF0C\u6765\u6E90\u4EE5\u7528\u6237\u81EA\u5199\u4E3A\u4E3B\uFF1A",
-    guideLibItem1: "\u65B0\u5EFA / \u7F16\u8F91 / \u5220\u9664\uFF1A\u540D\u79F0 + \u7B80\u4ECB + \u5206\u7C7B + \u6807\u7B7E + \u6B63\u6587\uFF08Markdown\uFF09\uFF0C\u65B0\u5EFA\u65F6\u5206\u7C7B\u7559\u7A7A\u81EA\u52A8\u5F52\u5165\u300C\u4E34\u65F6\u300D\uFF1B",
-    guideLibItem2: "\u5206\u7C7B\u7BA1\u7406\uFF1A\u5185\u7F6E\u5206\u7C7B + \u81EA\u5B9A\u4E49\u6DFB\u52A0 / \u91CD\u547D\u540D / \u5220\u9664\uFF08\u5220\u9664\u65F6\u8BE5\u5206\u7C7B\u4E0B\u63D0\u793A\u8BCD\u81EA\u52A8\u79FB\u5230\u672A\u5206\u7C7B\uFF09\uFF1B",
-    guideLibItem3: "\u641C\u7D22\uFF08\u540D\u79F0 / \u5206\u7C7B / \u6807\u7B7E / \u5185\u5BB9\uFF09+ \u590D\u5236\u5230\u526A\u8D34\u677F + \u4F7F\u7528\u7EDF\u8BA1\uFF1B",
-    guideLibItem4: "\u5185\u7F6E 13 \u6761\u6765\u81EA GitHub \u771F\u5B9E\u63D0\u793A\u8BCD\u8D44\u4EA7\u7684\u51B7\u542F\u52A8\u793A\u4F8B\uFF08SpecRoute / Claude-Code-Promts-Skills\uFF09\uFF0C\u5E76\u9644\u8303\u5F0F\u5E93\u94FE\u63A5\u4F9B\u81EA\u53D6\uFF1B",
-    guideLibItem5: "\u542F\u7528\u72B6\u6001\uFF1A\u7981\u7528\u540E AI \u7684\u63D0\u793A\u8BCD\u5DE5\u5177\uFF08de_prompts\uFF09\u770B\u4E0D\u5230\u3001\u4E5F\u4E0D\u80FD\u6CE8\u5165\u2014\u2014GUI \u4ECD\u53EF\u7F16\u8F91\uFF0C\u968F\u65F6\u53EF\u91CD\u65B0\u542F\u7528\uFF1BAI \u53EF\u67E5\u8BE2\u5217\u8868\uFF08\u6309 ID \u53D6\u8BE6\u60C5\uFF09\u5E76\u9009\u62E9\u5408\u9002\u63D0\u793A\u8BCD\u6CE8\u5165\u5F53\u524D\u4F1A\u8BDD\uFF0C\u6216\u7528\u4F5C\u5B50\u4F1A\u8BDD / \u5B50\u4EE3\u7406 / CLI \u4EFB\u52A1\u63D0\u793A\u8BCD\u3002",
-    guideInjectTitle: "\u6CE8\u5165\u673A\u5236\uFF1A\u6B21\u6570 \xD7 \u95F4\u9694",
-    guideInjectBody: "\u9009\u4E2D\u63D0\u793A\u8BCD\u914D\u7F6E\u300C\u6B21\u6570 \xD7 \u95F4\u9694\u300D\u5373\u6CE8\u5165\uFF08\u6B21\u6570 / \u95F4\u9694\u53EF\u8F93\u5165\u4EFB\u610F\u6570\u5B57\uFF09\uFF1A",
-    guideInjectItem1: "\u6B21\u6570\uFF1A\u4E00\u6B21\u6027\uFF081 \u8F6E\uFF09/ \u6709\u9650 N \u6B21 / \u65E0\u9650\uFF080 = \u6301\u7EED\u6CE8\u5165\u76F4\u5230\u624B\u52A8\u505C\u6B62\uFF09\uFF1B",
-    guideInjectItem2: "\u95F4\u9694\uFF1A\u6BCF\u56DE\u5408\uFF081\uFF09/ \u6BCF M \u56DE\u5408\u51FA\u73B0 1 \u6B21\uFF08\u5982\u300C\u6BCF 3 \u56DE\u5408\u63D0\u9192\u4E00\u6B21\u300D\uFF09\uFF1B",
-    guideInjectItem3: "\u5199\u540E\u5373\u65F6\u6CE8\u5165\u3001\u4E0D\u6253\u65AD\u56DE\u590D\uFF1A\u5185\u5BB9\u5199\u5165\u6CE8\u5165\u8F68\uFF0C\u6A21\u578B\u4E0B\u4E00\u8F6E\u751F\u6210\u65F6\u81EA\u52A8\u770B\u5230\uFF1B",
-    guideInjectItem4: "\u6B63\u6587\u652F\u6301 {{date}} / {{time}} \u53D8\u91CF\uFF0C\u6CE8\u5165\u65F6\u81EA\u52A8\u5C55\u5F00\uFF08\u9002\u5408\u5E26\u65E5\u671F\u7684\u65E5\u62A5\u6A21\u677F\uFF09\uFF1B",
-    guideInjectItem5: "\u4E34\u65F6\u6CE8\u5165\uFF1A\u4E0D\u5EFA\u63D0\u793A\u8BCD\u4E5F\u80FD\u6CE8\u5165\u2014\u2014\u8BE6\u60C5\u680F\u76F4\u63A5\u8F93\u5165\u5185\u5BB9\u70B9\u300C\u6CE8\u5165\u300D\uFF0C\u81EA\u52A8\u5B58\u5165\u63D0\u793A\u8BCD\u5E93\uFF08\u5206\u7C7B\u7559\u7A7A\u5F52\u5165\u300C\u4E34\u65F6\u300D\uFF09\uFF0C\u4E00\u6B21\u64CD\u4F5C\u540C\u65F6\u5165\u5E93\u5E76\u751F\u6548\u3002",
-    guideTrackTitle: "\u6CE8\u5165\u72B6\u6001\uFF1A\u968F\u65F6\u53EF\u89C1\u3001\u53EF\u505C",
-    guideTrackBody: "\u6BCF\u4E2A\u63D0\u793A\u8BCD\u6709\u660E\u786E\u72B6\u6001\uFF08\u672A\u6CE8\u5165 / \u6CE8\u5165\u4E2D\xB7\u5269 N \u6B21 / \u6301\u7EED\u6CE8\u5165\u4E2D\uFF09\uFF0C\u53EF\u968F\u65F6\u505C\u6B62\uFF1B\u300C\u6CE8\u5165\u4E2D\u300D\u6D6E\u5C42\u5B9E\u65F6\u5C55\u793A\uFF1B\u4F1A\u8BDD\u9875 Tab \u680F\u6709\u6D3B\u8DC3\u6CE8\u5165\u65F6\u663E\u793A\u7EA2\u70B9 \u{1F534}\u3002",
-    guideSwitchTitle: "\u5F00\u5173",
-    guideSwitchBody: "\u63D0\u793A\u8BCD\u7BA1\u7406\u5668\u9ED8\u8BA4\u5173\u95ED\uFF1A\u5728\u300CMemory Evolve \u8BBE\u7F6E\u300DTab \u7684\u300C\u914D\u7F6E\u300D\u91CC\u6253\u5F00\u300C\u63D0\u793A\u8BCD\u7BA1\u7406\u5668\u300D\u5F00\u5173\uFF0C\u5237\u65B0\u540E\u672C Tab \u51FA\u73B0\u3002",
-    search: "\u641C\u7D22\u540D\u79F0\u3001\u5206\u7C7B\u3001\u6807\u7B7E\u6216\u5185\u5BB9\u2026",
-    new: "\u65B0\u5EFA\u63D0\u793A\u8BCD",
-    all: "\u5168\u90E8",
-    uncategorized: "\u672A\u5206\u7C7B",
-    inject: "\u6CE8\u5165",
-    injectRound: "\u6CE8\u5165 {n} \u6B21",
-    injectInfinite: "\u65E0\u9650\u6B21\uFF08\u6301\u7EED\u6CE8\u5165\uFF09",
-    injectCadence: "\u6BCF {n} \u56DE\u5408\u4E00\u6B21",
-    everyTurn: "\u6BCF\u56DE\u5408",
-    injectHint: "\u5199\u5165\u6CE8\u5165\u8F68\uFF0C\u6A21\u578B\u4E0B\u4E00\u8F6E\u81EA\u52A8\u770B\u5230\uFF1B\u6B21\u6570\u6309\u5BF9\u8BDD\u56DE\u5408\u6D88\u8017\uFF08\u53EF\u95F4\u9694\u6CE8\u5165\uFF09\uFF0C\u65E0\u9650\u6B21\u5219\u6301\u7EED\u5230\u624B\u52A8\u505C\u6B62",
-    injecting: "\u6CE8\u5165\u4E2D",
-    injectingBadge: "\u6CE8\u5165\u4E2D\xB7\u5269{n}\u6B21",
-    injectingBadgeInfinite: "\u6CE8\u5165\u4E2D\xB7\u6301\u7EED",
-    injectingIdle: "\u672A\u6CE8\u5165",
-    noInjection: "\u8FD8\u6CA1\u6709\u6CE8\u5165\u4E2D\u7684\u63D0\u793A\u8BCD",
-    removeInjection: "\u505C\u6B62\u6CE8\u5165",
-    stoppedInjection: "\u5DF2\u505C\u6B62\u6CE8\u5165",
-    copy: "\u590D\u5236",
-    copied: "\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F",
-    save: "\u4FDD\u5B58",
-    saving: "\u4FDD\u5B58\u4E2D\u2026",
-    cancel: "\u53D6\u6D88",
-    delete: "\u5220\u9664",
-    deleteConfirm: "\u786E\u5B9A\u5220\u9664\u300C{name}\u300D\uFF1F\u5220\u9664\u540E\u4E0D\u53EF\u6062\u590D\uFF0C\u5176\u6D3B\u8DC3\u6CE8\u5165\u4F1A\u4E00\u5E76\u79FB\u9664\u3002",
-    sources: "GitHub \u8303\u5F0F\u5E93\u6765\u6E90",
-    sourcesHint: "\u4EE5\u4E0B\u4ED3\u5E93\u6709\u5927\u91CF\u9AD8\u8D28\u91CF\u63D0\u793A\u8BCD/\u89C4\u8303\uFF08\u7528\u6237\u81EA\u53D6\uFF0C\u4E0D\u505A\u81EA\u52A8\u5BFC\u5165\uFF09\uFF1A",
-    empty: "\u8FD8\u6CA1\u6709\u63D0\u793A\u8BCD\u3002\u70B9\u300C\u65B0\u5EFA\u63D0\u793A\u8BCD\u300D\u5F00\u59CB\uFF0C\u6216\u4ECE\u53F3\u4FA7\u6765\u6E90\u94FE\u63A5\u83B7\u53D6\u7075\u611F\u3002",
-    noMatch: "\u6CA1\u6709\u5339\u914D\u7684\u63D0\u793A\u8BCD",
-    formNew: "\u65B0\u5EFA\u63D0\u793A\u8BCD",
-    formEdit: "\u7F16\u8F91\u63D0\u793A\u8BCD",
-    name: "\u540D\u79F0",
-    namePh: "\u5982\uFF1A\u4EE3\u7801\u5BA1\u67E5\uFF08Code Review\uFF09",
-    description: "\u7B80\u4ECB",
-    descriptionPh: "\u4E00\u53E5\u8BDD\u8BF4\u660E\u8FD9\u4E2A\u63D0\u793A\u8BCD\u7684\u7528\u9014\uFF08AI \u9009\u62E9\u63D0\u793A\u8BCD\u65F6\u770B\u8FD9\u91CC\uFF09",
-    enabled: "\u542F\u7528\u72B6\u6001",
-    enabledOn: "\u5DF2\u542F\u7528",
-    enabledOff: "\u5DF2\u7981\u7528",
-    disabledHint: "\u7981\u7528\u540E\u4E0D\u51FA\u73B0\u5728 AI \u7684\u63D0\u793A\u8BCD\u5217\u8868\uFF0C\u4E5F\u4E0D\u80FD\u88AB AI \u6CE8\u5165\uFF1B\u53EF\u5728\u672C\u9875\u91CD\u65B0\u542F\u7528",
-    category: "\u5206\u7C7B",
-    categoryPh: "\u5982\uFF1A\u5F00\u53D1\u6D41\u7A0B\uFF08\u7559\u7A7A\u81EA\u52A8\u5F52\u5165\u300C\u4E34\u65F6\u300D\uFF09",
-    tags: "\u6807\u7B7E",
-    tagsPh: "\u9017\u53F7\u5206\u9694\uFF0C\u5982\uFF1Areview, \u8D28\u91CF",
-    content: "\u5185\u5BB9",
-    contentPh: "\u5728\u8FD9\u91CC\u7F16\u5199\u63D0\u793A\u8BCD\u6B63\u6587\u2026\n\u652F\u6301 {{date}}\u3001{{time}} \u53D8\u91CF\uFF0C\u6CE8\u5165\u65F6\u81EA\u52A8\u5C55\u5F00\u3002",
-    usage: "\u5DF2\u6CE8\u5165 {n} \u6B21",
-    lastUsed: "\u6700\u8FD1\u6CE8\u5165\uFF1A{time}",
-    neverUsed: "\u4ECE\u672A\u6CE8\u5165\u8FC7",
-    rounds: "\u6B21\u6570",
-    cadence: "\u95F4\u9694",
-    roundsHint: "0=\u65E0\u9650\uFF1B1=\u53EA\u6CE8\u5165\u4E00\u6B21",
-    everyHint: "0=\u53EA\u6CE8\u5165\u4E00\u6B21\uFF1B1=\u6BCF\u56DE\u5408\uFF1BN=\u6BCF N \u56DE\u5408\u4E00\u6B21",
-    onceOnly: "\u53EA\u6CE8\u5165\u4E00\u6B21",
-    effectOnce: "\u4E00\u6B21\u6027\uFF1A\u4E0B\u4E00\u8F6E\u51FA\u73B0\u4E00\u6B21\u540E\u81EA\u52A8\u7ED3\u675F",
-    effectInfinite: "\u65E0\u9650\u6B21\uFF1A\u6BCF\u56DE\u5408\u51FA\u73B0\uFF0C\u6301\u7EED\u5230\u624B\u52A8\u505C\u6B62",
-    effectInfiniteCadence: "\u65E0\u9650\u6B21\uFF1A\u6BCF {n} \u56DE\u5408\u51FA\u73B0\u4E00\u6B21\uFF0C\u6301\u7EED\u5230\u624B\u52A8\u505C\u6B62",
-    effectFinite: "\u5171 {n} \u6B21\uFF1A\u6BCF\u56DE\u5408\u51FA\u73B0\uFF0C\u7528\u5C3D\u81EA\u52A8\u7ED3\u675F",
-    effectFiniteCadence: "\u5171 {n} \u6B21\uFF1A\u6BCF {m} \u56DE\u5408\u51FA\u73B0\u4E00\u6B21\uFF0C\u7528\u5C3D\u81EA\u52A8\u7ED3\u675F",
-    roundsInvalid: "\u6B21\u6570\u5FC5\u987B\u662F \u22650 \u7684\u6574\u6570\uFF080 = \u65E0\u9650\u6B21\uFF09",
-    everyInvalid: "\u95F4\u9694\u5FC5\u987B\u662F \u22650 \u7684\u6574\u6570\uFF080 = \u53EA\u6CE8\u5165\u4E00\u6B21\uFF09",
-    // 预设注入按钮（覆盖最常见的场景，普通用户无需理解次数×间隔）
-    injectOnceBtn: "\u6CE8\u5165\u4E00\u6B21",
-    injectOnceBtnHint: "\u53EA\u6CE8\u5165\u4E00\u6B21\uFF1A\u4E0B\u4E00\u8F6E\u51FA\u73B0\u540E\u81EA\u52A8\u7ED3\u675F",
-    injectInfiniteBtn: "\u6301\u7EED\u6CE8\u5165",
-    injectInfiniteBtnHint: "\u6BCF\u56DE\u5408\u51FA\u73B0\uFF0C\u76F4\u5230\u624B\u52A8\u505C\u6B62",
-    customBtn: "\u81EA\u5B9A\u4E49",
-    customBtnHint: "\u81EA\u7531\u8BBE\u7F6E\u6B21\u6570\u4E0E\u95F4\u9694",
-    // 立即注入：通过快照变更当前回合立即生效（会话空闲则马上唤醒）；
-    // 固定只注入一次，不受次数/间隔两个数字影响（用户拍板语义）
-    injectNowBtn: "\u26A1 \u7ACB\u5373\u6CE8\u5165",
-    injectNowBtnHint: "\u7ACB\u523B\u751F\u6548\u4E00\u6B21\uFF08\u5F53\u524D\u56DE\u5408/\u9A6C\u4E0A\u5524\u9192\uFF09\uFF0C\u53EA\u6CE8\u5165\u4E00\u6B21\uFF0C\u4E0D\u53D7\u6B21\u6570\u4E0E\u95F4\u9694\u5F71\u54CD",
-    injectedNow: "\u5DF2\u7ACB\u5373\u6CE8\u5165\u300C{name}\u300D\uFF1A\u5F53\u524D\u56DE\u5408\u751F\u6548\uFF0C\u4EC5\u6B64\u4E00\u6B21\uFF08\u4E0D\u53D7\u6B21\u6570/\u95F4\u9694\u5F71\u54CD\uFF09",
-    injectedNowFallback: "\u5DF2\u7ACB\u5373\u6CE8\u5165\u300C{name}\u300D\uFF08\u63D2\u8BDD\u672A\u9001\u8FBE\uFF0C\u5C06\u5728\u4E0B\u4E00\u8F6E\u751F\u6548\uFF09",
-    collapseCustom: "\u6536\u8D77",
-    quickTitle: "\u4E34\u65F6\u6CE8\u5165",
-    quickDesc: "\u4E0D\u5EFA\u63D0\u793A\u8BCD\u4E5F\u80FD\u6CE8\u5165\uFF1A\u76F4\u63A5\u8F93\u5165\u5185\u5BB9\u70B9\u300C\u6CE8\u5165\u4E00\u6B21\u300D\uFF0C\u4F1A\u81EA\u52A8\u5B58\u5165\u63D0\u793A\u8BCD\u5E93\uFF08\u5206\u7C7B\u7559\u7A7A\u5F52\u5165\u300C\u4E34\u65F6\u300D\uFF09\uFF0C\u4E00\u6B21\u64CD\u4F5C\u540C\u65F6\u5165\u5E93\u5E76\u751F\u6548\u3002",
-    quickNamePh: "\u540D\u79F0\uFF08\u53EF\u9009\uFF0C\u7559\u7A7A\u53D6\u5185\u5BB9\u9996\u884C\uFF09",
-    quickCategoryPh: "\u5206\u7C7B\uFF08\u53EF\u9009\uFF0C\u7559\u7A7A\u5F52\u5165\u300C\u4E34\u65F6\u300D\uFF09",
-    contentRequired: "\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A",
-    error: "{message}",
-    loadFailed: "\u52A0\u8F7D\u5931\u8D25\uFF1A{message}",
-    injected: "\u5DF2\u6CE8\u5165\u300C{name}\u300D\uFF1A{rounds}{cadence}\uFF0C\u6A21\u578B\u4E0B\u4E00\u8F6E\u751F\u6548{ending}",
-    injectedOnceEnding: "\uFF0C\u4E4B\u540E\u81EA\u52A8\u7ED3\u675F",
-    injectedFiniteEnding: "\uFF0C\u7528\u5C3D\u81EA\u52A8\u7ED3\u675F",
-    injectedInfiniteEnding: "\uFF0C\u76F4\u5230\u624B\u52A8\u505C\u6B62",
-    injectInfiniteShort: "\u6301\u7EED\u6CE8\u5165",
-    everyTurnParen: "\uFF08\u6BCF\u56DE\u5408\u51FA\u73B0\uFF09",
-    injectCadenceParen: "\uFF08\u6BCF {n} \u56DE\u5408\u51FA\u73B0\uFF09",
-    removed: "\u5DF2\u79FB\u9664\u6CE8\u5165",
-    reload: "\u5237\u65B0",
-    newCategory: "\u65B0\u5206\u7C7B",
-    newCategoryPh: "\u8F93\u5165\u5206\u7C7B\u540D\uFF0C\u56DE\u8F66\u786E\u8BA4",
-    deleteCategory: "\u5220\u9664\u5206\u7C7B",
-    renameCategory: "\u91CD\u547D\u540D\u5206\u7C7B",
-    renamePh: "\u8F93\u5165\u65B0\u5206\u7C7B\u540D\uFF0C\u56DE\u8F66\u786E\u8BA4",
-    categoryRemoved: "\u5DF2\u5220\u9664\u5206\u7C7B\u300C{name}\u300D{moved}",
-    categoryDeleted: "\u5DF2\u5220\u9664\u5206\u7C7B\u300C{name}\u300D",
-    categoryMoved: "\uFF0C{count} \u6761\u63D0\u793A\u8BCD\u5DF2\u79FB\u5230\u672A\u5206\u7C7B",
-    categoryExists: "\u5206\u7C7B\u300C{name}\u300D\u5DF2\u5B58\u5728\uFF0C\u5DF2\u4E3A\u4F60\u9009\u4E2D",
-    categoryRenamed: "\u5DF2\u91CD\u547D\u540D\u300C{from}\u300D\u2192\u300C{to}\u300D{renamed}",
-    categoryRenamedSuffix: "\uFF0C{count} \u6761\u63D0\u793A\u8BCD\u5DF2\u540C\u6B65"
-  },
-  en: {
-    // "Guide" sub-tab: detailed introduction of the prompt injection feature.
-    guide: "Guide",
-    library: "Prompt library",
-    guideIntro: 'Prompt injection = an "instruction-pattern asset library + one-click injection": turn recurring working paradigms (code review / debugging / PRD / testing\u2026) into prompts, then inject one with a click \u2014 the model sees it next turn without interrupting the reply, like handing the AI an operating manual.',
-    guideLibTitle: "Prompt library: your pattern assets",
-    guideLibBody: "Reusable instruction patterns, mostly user-written:",
-    guideLibItem1: "Create / edit / delete: name + description + category + tags + body (Markdown); a new prompt with an empty category goes to Temp automatically;",
-    guideLibItem2: "Categories: built-in ones plus custom add / rename / delete (prompts in a deleted category move to Uncategorized);",
-    guideLibItem3: "Search (name / category / tags / content) + copy to clipboard + usage stats;",
-    guideLibItem4: "13 cold-start examples from real GitHub prompt assets (SpecRoute / Claude-Code-Promts-Skills) plus links to public pattern libraries;",
-    guideLibItem5: "Enabled state: disabled prompts are hidden from the AI prompt tool (de_prompts) and cannot be injected by AI \u2014 still editable here, re-enable anytime; the AI can list prompts (fetch details by ID) and inject the right one into the current session, or use it as a sub-session / subagent / CLI task prompt.",
-    guideInjectTitle: "Injection mechanics: rounds \xD7 cadence",
-    guideInjectBody: 'Pick a prompt, set "rounds \xD7 cadence" and inject (both numbers freely editable):',
-    guideInjectItem1: "Rounds: one-shot (1) / finite N / infinite (0 = keep injecting until stopped);",
-    guideInjectItem2: 'Cadence: every turn (1) / once every M turns (e.g. "remind every 3 turns");',
-    guideInjectItem3: "Injected without interrupting: content goes to the injection track and the model sees it next turn;",
-    guideInjectItem4: "The body supports {{date}} / {{time}} variables, expanded at injection time (handy for dated templates);",
-    guideInjectItem5: "Ad-hoc injection: inject without creating a prompt first \u2014 type content in the detail bar and click inject; it is auto-saved to the library (empty category \u2192 Temp) and takes effect in one step.",
-    guideTrackTitle: "Injection status: visible and stoppable",
-    guideTrackBody: 'Every prompt has a clear status (idle / injecting\xB7N left / injecting forever) and can be stopped anytime; the "injecting" overlay shows it live; the session tab bar shows a red dot \u{1F534} while any injection is active.',
-    guideSwitchTitle: "Switch",
-    guideSwitchBody: 'The prompt manager is off by default: enable "Prompt manager" under Config in the Memory Evolve Settings tab, then refresh to reveal this tab.',
-    search: "Search name, category, tags or content\u2026",
-    new: "New prompt",
-    all: "All",
-    uncategorized: "Uncategorized",
-    inject: "Inject",
-    injectRound: "Inject {n} times",
-    injectInfinite: "Unlimited (until stopped)",
-    injectCadence: "every {n} turns",
-    everyTurn: "every turn",
-    injectHint: "Writes to the injection track \u2014 visible to the model next turn; countdown consumes per conversation turn (interval injection supported); unlimited runs until stopped manually",
-    injecting: "Injecting",
-    injectingBadge: "injecting\xB7{n} left",
-    injectingBadgeInfinite: "injecting\xB7ongoing",
-    injectingIdle: "not injected",
-    noInjection: "Nothing is being injected right now",
-    removeInjection: "Stop",
-    stoppedInjection: "Injection stopped",
-    copy: "Copy",
-    copied: "Copied to clipboard",
-    save: "Save",
-    saving: "Saving\u2026",
-    cancel: "Cancel",
-    delete: "Delete",
-    deleteConfirm: 'Delete "{name}"? This cannot be undone and removes its active injections too.',
-    sources: "GitHub prompt sources",
-    sourcesHint: "These repos host high-quality prompts/specs (browse yourself \u2014 no auto import):",
-    empty: 'No prompts yet. Click "New prompt" to start, or grab ideas from the source links.',
-    noMatch: "No matching prompts",
-    formNew: "New prompt",
-    formEdit: "Edit prompt",
-    name: "Name",
-    namePh: "e.g. Code Review",
-    description: "Description",
-    descriptionPh: "One line about what this prompt does (AI reads this when picking a prompt)",
-    enabled: "Enabled",
-    enabledOn: "Enabled",
-    enabledOff: "Disabled",
-    disabledHint: "Disabled prompts are hidden from AI lists and cannot be injected by AI; re-enable here anytime",
-    category: "Category",
-    categoryPh: "e.g. workflow (empty = Temp category)",
-    tags: "Tags",
-    tagsPh: "Comma-separated, e.g. review, quality",
-    content: "Content",
-    contentPh: "Write the prompt body here\u2026\n{{date}} and {{time}} variables expand on inject.",
-    usage: "Injected {n} times",
-    lastUsed: "Last injected: {time}",
-    neverUsed: "Never injected",
-    rounds: "Count",
-    cadence: "Cadence",
-    roundsHint: "0=unlimited; 1=once only",
-    everyHint: "0=once only; 1=every turn; N=every N turns",
-    onceOnly: "once only",
-    effectOnce: "Once: appears next turn, then auto-ends",
-    effectInfinite: "Unlimited: every turn, until stopped",
-    effectInfiniteCadence: "Unlimited: once every {n} turns, until stopped",
-    effectFinite: "{n} times: every turn, auto-ends when spent",
-    effectFiniteCadence: "{n} times: once every {m} turns, auto-ends when spent",
-    roundsInvalid: "Count must be an integer \u2265 0 (0 = unlimited)",
-    everyInvalid: "Cadence must be an integer \u2265 0 (0 = once only)",
-    // Preset inject buttons (cover the most common cases; no need to
-    // understand count × cadence for everyday use).
-    injectOnceBtn: "Inject once",
-    injectOnceBtnHint: "Once only: appears next turn, then auto-ends",
-    injectInfiniteBtn: "Keep injecting",
-    injectInfiniteBtnHint: "Every turn, until stopped",
-    customBtn: "Custom",
-    customBtnHint: "Free-form count and cadence",
-    // Immediate injection: takes effect this turn via snapshot change (or
-    // wakes an idle session); fixed to once only, ignores count and cadence.
-    injectNowBtn: "\u26A1 Inject now",
-    injectNowBtnHint: "Takes effect immediately (this turn / wakes the session), once only \u2014 ignores count and cadence",
-    injectedNow: 'Injected "{name}" now: effective this turn, once only (ignores count/cadence)',
-    injectedNowFallback: 'Injected "{name}" now (steer not delivered \u2014 will take effect next turn)',
-    collapseCustom: "Collapse",
-    quickTitle: "Quick inject",
-    quickDesc: 'Inject without saving a prompt first: type content and hit "Inject once" \u2014 it is auto-saved to the library (empty category goes to Temp) in one step.',
-    quickNamePh: "Name (optional; defaults to first content line)",
-    quickCategoryPh: "Category (optional; empty = Temp)",
-    contentRequired: "Content is required",
-    error: "{message}",
-    loadFailed: "Load failed: {message}",
-    injected: 'Injected "{name}": {rounds}{cadence} \u2014 visible next turn{ending}',
-    injectedOnceEnding: ", then auto-ends",
-    injectedFiniteEnding: ", auto-ends when spent",
-    injectedInfiniteEnding: ", until stopped",
-    injectInfiniteShort: "Keep injecting",
-    everyTurnParen: " (every turn)",
-    injectCadenceParen: " (every {n} turns)",
-    removed: "Injection removed",
-    reload: "Reload",
-    newCategory: "New category",
-    newCategoryPh: "Type a category name, Enter to confirm",
-    deleteCategory: "Delete category",
-    renameCategory: "Rename category",
-    renamePh: "Type a new name, Enter to confirm",
-    categoryRemoved: 'Category "{name}" deleted{moved}',
-    categoryDeleted: 'Category "{name}" deleted',
-    categoryMoved: ", {count} prompts moved to Uncategorized",
-    categoryExists: 'Category "{name}" already exists \u2014 selected',
-    categoryRenamed: 'Renamed "{from}" \u2192 "{to}"{renamed}',
-    categoryRenamedSuffix: ", {count} prompts updated"
-  }
-};
-function pick(zhText, enText) {
-  return clientLang() === "en" ? enText : zhText;
+function dict2(t) {
+  return (key) => t(key);
 }
 function errText3(err) {
   const message = err instanceof Error ? err.message : String(err);
@@ -8867,8 +8235,8 @@ async function api4(url, init) {
 function parseInjectNums(roundsText, everyText, say) {
   const rounds = roundsText.trim() === "" ? 0 : Number(roundsText);
   const every = everyText.trim() === "" ? 1 : Number(everyText);
-  if (!Number.isInteger(rounds) || rounds < 0) throw new Error(say("roundsInvalid"));
-  if (!Number.isInteger(every) || every < 0) throw new Error(say("everyInvalid"));
+  if (!Number.isInteger(rounds) || rounds < 0) throw new Error(say("prompt.roundsInvalid"));
+  if (!Number.isInteger(every) || every < 0) throw new Error(say("prompt.everyInvalid"));
   return { rounds, every };
 }
 function EffectHint(props) {
@@ -8878,13 +8246,13 @@ function EffectHint(props) {
   const D = props.say;
   let text;
   if (e === 0) {
-    text = D("effectOnce");
+    text = D("prompt.effectOnce");
   } else if (r === 0) {
-    text = e === 1 ? D("effectInfinite") : D("effectInfiniteCadence").replace("{n}", String(e));
+    text = e === 1 ? D("prompt.effectInfinite") : D("prompt.effectInfiniteCadence").replace("{n}", String(e));
   } else if (r === 1) {
-    text = D("effectOnce");
+    text = D("prompt.effectOnce");
   } else {
-    text = e === 1 ? D("effectFinite").replace("{n}", String(r)) : D("effectFiniteCadence").replace("{n}", String(r)).replace("{m}", String(e));
+    text = e === 1 ? D("prompt.effectFinite").replace("{n}", String(r)) : D("prompt.effectFiniteCadence").replace("{n}", String(r)).replace("{m}", String(e));
   }
   return /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-effect-hint", children: text });
 }
@@ -8908,9 +8276,8 @@ function NumInput(props) {
   ] });
 }
 function PromptView(props) {
-  const lang2 = clientLang();
-  const D = DICT2[lang2];
-  const say = (key) => D[key];
+  const t = dict2(props.t);
+  const say = (key) => t(key);
   const [prompts, setPrompts] = (0, import_react17.useState)([]);
   const [injections, setInjections] = (0, import_react17.useState)([]);
   const [sources, setSources] = (0, import_react17.useState)([]);
@@ -8966,7 +8333,7 @@ function PromptView(props) {
       setInjections(i.injections);
       setCategories(c.categories);
     } catch (err) {
-      showError(say("loadFailed").replace("{message}", errText3(err)));
+      showError(say("prompt.loadFailed").replace("{message}", errText3(err)));
     }
   }, [showError]);
   (0, import_react17.useEffect)(() => {
@@ -9043,7 +8410,7 @@ function PromptView(props) {
   };
   const deletePrompt = async () => {
     if (selectedId === null) return;
-    const text = say("deleteConfirm").replace("{name}", selected?.name ?? "");
+    const text = say("prompt.deleteConfirm").replace("{name}", selected?.name ?? "");
     if (!window.confirm(text)) return;
     try {
       await api4(`/memory-evolve/api/prompts/${encodeURIComponent(selectedId)}`, { method: "DELETE" });
@@ -9055,10 +8422,10 @@ function PromptView(props) {
     }
   };
   const afterInjected = async (injection) => {
-    const times = injection.roundsLeft === null ? say("injectInfiniteShort") : injection.roundsLeft === 1 ? say("onceOnly") : say("injectRound").replace("{n}", String(injection.roundsLeft));
-    const cadence = injection.every === 0 || injection.roundsLeft === 1 ? "" : (injection.every ?? 1) === 1 ? say("everyTurnParen") : say("injectCadenceParen").replace("{n}", String(injection.every));
-    const ending = injection.every === 0 || injection.roundsLeft === 1 ? say("injectedOnceEnding") : injection.roundsLeft === null ? say("injectedInfiniteEnding") : say("injectedFiniteEnding");
-    showNotice(say("injected").replace("{name}", injection.title).replace("{rounds}", times).replace("{cadence}", cadence).replace("{ending}", ending));
+    const times = injection.roundsLeft === null ? say("prompt.injectInfiniteShort") : injection.roundsLeft === 1 ? say("prompt.onceOnly") : say("prompt.injectRound").replace("{n}", String(injection.roundsLeft));
+    const cadence = injection.every === 0 || injection.roundsLeft === 1 ? "" : (injection.every ?? 1) === 1 ? say("prompt.everyTurnParen") : say("prompt.injectCadenceParen").replace("{n}", String(injection.every));
+    const ending = injection.every === 0 || injection.roundsLeft === 1 ? say("prompt.injectedOnceEnding") : injection.roundsLeft === null ? say("prompt.injectedInfiniteEnding") : say("prompt.injectedFiniteEnding");
+    showNotice(say("prompt.injected").replace("{name}", injection.title).replace("{rounds}", times).replace("{cadence}", cadence).replace("{ending}", ending));
     await load();
     setShowInjections(true);
     window.dispatchEvent(new CustomEvent("dsh-memory-evolve:badge-change"));
@@ -9101,7 +8468,7 @@ function PromptView(props) {
         { method: "POST", body: JSON.stringify({ immediate: true, sessionId: props.sessionId }) }
       );
       const name2 = data.injection.title;
-      showNotice(data.steered ? say("injectedNow").replace("{name}", name2) : say("injectedNowFallback").replace("{name}", name2));
+      showNotice(data.steered ? say("prompt.injectedNow").replace("{name}", name2) : say("prompt.injectedNowFallback").replace("{name}", name2));
       await load();
       setShowInjections(true);
       window.dispatchEvent(new CustomEvent("dsh-memory-evolve:badge-change"));
@@ -9113,7 +8480,7 @@ function PromptView(props) {
     if (busy) return;
     const text = content.trim();
     if (!text) {
-      showError(say("contentRequired"));
+      showError(say("prompt.contentRequired"));
       return;
     }
     let nums;
@@ -9130,7 +8497,7 @@ function PromptView(props) {
     setBusy(true);
     try {
       const firstLine = text.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "";
-      const promptName = name.trim() || (firstLine.length > 20 ? `${firstLine.slice(0, 20)}\u2026` : firstLine) || "\u672A\u547D\u540D\u63D0\u793A\u8BCD";
+      const promptName = name.trim() || (firstLine.length > 20 ? `${firstLine.slice(0, 20)}\u2026` : firstLine) || say("prompt.untitledName");
       const created = await api4("/memory-evolve/api/prompts", {
         method: "POST",
         body: JSON.stringify({
@@ -9151,7 +8518,7 @@ function PromptView(props) {
       );
       if (immediate) {
         const name2 = data.injection.title;
-        showNotice(data.steered ? say("injectedNow").replace("{name}", name2) : say("injectedNowFallback").replace("{name}", name2));
+        showNotice(data.steered ? say("prompt.injectedNow").replace("{name}", name2) : say("prompt.injectedNowFallback").replace("{name}", name2));
       } else {
         await afterInjected(data.injection);
       }
@@ -9165,7 +8532,7 @@ function PromptView(props) {
   const removeInjection = async (id) => {
     try {
       await api4(`/memory-evolve/api/prompts/injections/${encodeURIComponent(id)}`, { method: "DELETE" });
-      showNotice(say("stoppedInjection"));
+      showNotice(say("prompt.stoppedInjection"));
       await load();
       window.dispatchEvent(new CustomEvent("dsh-memory-evolve:badge-change"));
     } catch (err) {
@@ -9174,10 +8541,10 @@ function PromptView(props) {
   };
   const activeInjectionOf = (promptId) => injections.find((i) => i.sourcePromptId === promptId);
   const cadenceLabel = (inj) => {
-    if (inj.every === 0) return say("onceOnly");
-    return (inj.every ?? 1) === 1 ? say("everyTurn") : say("injectCadence").replace("{n}", String(inj.every));
+    if (inj.every === 0) return say("prompt.onceOnly");
+    return (inj.every ?? 1) === 1 ? say("prompt.everyTurn") : say("prompt.injectCadence").replace("{n}", String(inj.every));
   };
-  const remainingLabel = (inj) => inj.roundsLeft === null ? say("injectInfinite") : say("injectRound").replace("{n}", String(inj.roundsLeft));
+  const remainingLabel = (inj) => inj.roundsLeft === null ? say("prompt.injectInfinite") : say("prompt.injectRound").replace("{n}", String(inj.roundsLeft));
   const addCategory = async () => {
     const name2 = newCategoryName.trim();
     if (!name2) return;
@@ -9190,7 +8557,7 @@ function PromptView(props) {
       setCategory(name2);
       setNewCategoryName("");
       setAddingCategory(false);
-      if (data.alreadyExists) showNotice(say("categoryExists").replace("{name}", name2));
+      if (data.alreadyExists) showNotice(say("prompt.categoryExists").replace("{name}", name2));
     } catch (err) {
       showError(errText3(err));
     }
@@ -9212,16 +8579,17 @@ function PromptView(props) {
       setRenamingCategory(null);
       setRenameValue("");
       await load();
-      const suffix = data.renamed > 0 ? say("categoryRenamedSuffix").replace("{count}", String(data.renamed)) : "";
-      showNotice(`${say("categoryRenamed").replace("{from}", from).replace("{to}", to).replace("{renamed}", "")}${suffix}`);
+      const suffix = data.renamed > 0 ? say("prompt.categoryRenamedSuffix").replace("{count}", String(data.renamed)) : "";
+      showNotice(`${say("prompt.categoryRenamed").replace("{from}", from).replace("{to}", to).replace("{renamed}", "")}${suffix}`);
     } catch (err) {
       showError(errText3(err));
     }
   };
   const removeCategory = async (name2) => {
     const count = prompts.filter((p) => p.category === name2).length;
-    const hint = count > 0 ? say("categoryMoved").replace("{count}", String(count)) : "";
-    if (!window.confirm(`${say("deleteCategory")}\u300C${name2}\u300D\uFF1F${hint}`)) return;
+    const hint = count > 0 ? say("prompt.categoryMoved").replace("{count}", String(count)) : "";
+    const confirmText = say("prompt.deleteCategoryConfirm").replace("{name}", name2).replace("{hint}", hint);
+    if (!window.confirm(confirmText)) return;
     try {
       const data = await api4(
         `/memory-evolve/api/prompts/categories/${encodeURIComponent(name2)}`,
@@ -9231,8 +8599,8 @@ function PromptView(props) {
       setCategories(cats.categories);
       if (category === name2) setCategory("\u5168\u90E8");
       await load();
-      const moved = data.moved > 0 ? say("categoryMoved").replace("{count}", String(data.moved)) : "";
-      showNotice(`${say("categoryDeleted").replace("{name}", name2)}${moved}`);
+      const moved = data.moved > 0 ? say("prompt.categoryMoved").replace("{count}", String(data.moved)) : "";
+      showNotice(`${say("prompt.categoryDeleted").replace("{name}", name2)}${moved}`);
     } catch (err) {
       showError(errText3(err));
     }
@@ -9241,7 +8609,7 @@ function PromptView(props) {
     const text = selected?.content ?? "";
     try {
       await navigator.clipboard.writeText(text);
-      showNotice(say("copied"));
+      showNotice(say("prompt.copied"));
     } catch (err) {
       showError(errText3(err));
     }
@@ -9263,7 +8631,7 @@ function PromptView(props) {
           "aria-selected": view === "guide",
           className: view === "guide" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setView("guide"),
-          children: say("guide")
+          children: say("prompt.guide")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
@@ -9274,18 +8642,18 @@ function PromptView(props) {
           "aria-selected": view === "main",
           className: view === "main" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setView("main"),
-          children: say("library")
+          children: say("prompt.library")
         }
       )
     ] }),
     view === "guide" ? (
       // 提示词注入专属指南（本 Tab 功能详细介绍，文案见 DICT guide* 键）
       /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(TabGuideView, { sections: [
-        { icon: "\u{1F4CC}", title: say("guideIntro"), body: "" },
-        { icon: "\u{1F4DA}", title: say("guideLibTitle"), body: say("guideLibBody"), items: [say("guideLibItem1"), say("guideLibItem2"), say("guideLibItem3"), say("guideLibItem4"), say("guideLibItem5")] },
-        { icon: "\u{1F489}", title: say("guideInjectTitle"), body: say("guideInjectBody"), items: [say("guideInjectItem1"), say("guideInjectItem2"), say("guideInjectItem3"), say("guideInjectItem4")] },
-        { icon: "\u{1F534}", title: say("guideTrackTitle"), body: say("guideTrackBody") },
-        { icon: "\u2699\uFE0F", title: say("guideSwitchTitle"), body: say("guideSwitchBody") }
+        { icon: "\u{1F4CC}", title: say("prompt.guideIntro"), body: "" },
+        { icon: "\u{1F4DA}", title: say("prompt.guideLibTitle"), body: say("prompt.guideLibBody"), items: [say("prompt.guideLibItem1"), say("prompt.guideLibItem2"), say("prompt.guideLibItem3"), say("prompt.guideLibItem4"), say("prompt.guideLibItem5")] },
+        { icon: "\u{1F489}", title: say("prompt.guideInjectTitle"), body: say("prompt.guideInjectBody"), items: [say("prompt.guideInjectItem1"), say("prompt.guideInjectItem2"), say("prompt.guideInjectItem3"), say("prompt.guideInjectItem4")] },
+        { icon: "\u{1F534}", title: say("prompt.guideTrackTitle"), body: say("prompt.guideTrackBody") },
+        { icon: "\u2699\uFE0F", title: say("prompt.guideSwitchTitle"), body: say("prompt.guideSwitchBody") }
       ] })
     ) : /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(import_jsx_runtime18.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-toolbar", children: [
@@ -9293,7 +8661,7 @@ function PromptView(props) {
           "input",
           {
             className: "pm-search",
-            placeholder: say("search"),
+            placeholder: say("prompt.search"),
             value: search,
             onChange: (e) => setSearch(e.target.value)
           }
@@ -9304,7 +8672,7 @@ function PromptView(props) {
             className: "pm-select",
             value: category,
             onChange: (e) => setCategory(e.target.value),
-            title: say("category"),
+            title: say("prompt.category"),
             children: categories.map((c) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("option", { value: c, children: c }, c))
           }
         ),
@@ -9317,9 +8685,9 @@ function PromptView(props) {
               setShowInjections(!showInjections);
               setShowSources(false);
             },
-            title: say("injectHint"),
+            title: say("prompt.injectHint"),
             children: [
-              say("injecting"),
+              say("prompt.injecting"),
               injections.length > 0 ? ` (${injections.length})` : ""
             ]
           }
@@ -9333,37 +8701,33 @@ function PromptView(props) {
               setShowSources(!showSources);
               setShowInjections(false);
             },
-            children: say("sources")
+            children: say("prompt.sources")
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-primary-btn", onClick: startCreate, children: say("new") })
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-primary-btn", onClick: startCreate, children: say("prompt.new") })
       ] }),
       (error !== null || notice !== null) && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: `pm-banner ${error !== null ? "pm-banner-error" : ""}`, children: [
         error !== null ? error : notice,
         error !== null && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-banner-close", onClick: () => setError(null), children: "\xD7" })
       ] }),
       showInjections && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-overlay", ref: overlayRef, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-overlay-title", children: say("injecting") }),
-        injections.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-overlay-empty", children: say("noInjection") }),
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-overlay-title", children: say("prompt.injecting") }),
+        injections.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-overlay-empty", children: say("prompt.noInjection") }),
         injections.map((inj) => /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-overlay-item", children: [
           /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-overlay-item-main", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-overlay-item-title", children: [
-              "\u300C",
-              inj.title,
-              "\u300D"
-            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-overlay-item-title", children: say("prompt.quotedTitle").replace("{name}", inj.title) }),
             /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-overlay-item-sub", children: [
               remainingLabel(inj),
               " \xB7 ",
               cadenceLabel(inj)
             ] })
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-danger-btn pm-overlay-remove", onClick: () => void removeInjection(inj.id), children: say("removeInjection") })
+          /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-danger-btn pm-overlay-remove", onClick: () => void removeInjection(inj.id), children: say("prompt.removeInjection") })
         ] }, inj.id))
       ] }),
       showSources && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-overlay pm-overlay-wide", ref: overlayRef, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-overlay-title", children: say("sources") }),
-        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-overlay-sub", children: say("sourcesHint") }),
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-overlay-title", children: say("prompt.sources") }),
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-overlay-sub", children: say("prompt.sourcesHint") }),
         sources.map((s) => /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-source-item", children: [
           /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("a", { className: "pm-source-link", href: s.url, target: "_blank", rel: "noreferrer", children: s.name }),
           /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-source-desc", children: s.desc })
@@ -9378,7 +8742,7 @@ function PromptView(props) {
               className: `pm-cat ${category === "\u5168\u90E8" ? "pm-cat-active" : ""}`,
               onClick: () => setCategory("\u5168\u90E8"),
               children: [
-                /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-cat-name", children: say("all") }),
+                /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-cat-name", children: say("prompt.all") }),
                 /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-cat-count", children: prompts.length })
               ]
             }
@@ -9392,7 +8756,7 @@ function PromptView(props) {
                   {
                     className: "pm-cat-add-input",
                     autoFocus: true,
-                    placeholder: say("renamePh"),
+                    placeholder: say("prompt.renamePh"),
                     value: renameValue,
                     onChange: (e) => setRenameValue(e.target.value),
                     onKeyDown: (e) => {
@@ -9425,7 +8789,7 @@ function PromptView(props) {
                 {
                   type: "button",
                   className: "pm-cat-del",
-                  title: say("renameCategory"),
+                  title: say("prompt.renameCategory"),
                   onClick: () => {
                     setRenamingCategory(c);
                     setRenameValue(c);
@@ -9438,7 +8802,7 @@ function PromptView(props) {
                 {
                   type: "button",
                   className: "pm-cat-del",
-                  title: say("deleteCategory"),
+                  title: say("prompt.deleteCategory"),
                   onClick: () => void removeCategory(c),
                   children: "\xD7"
                 }
@@ -9452,7 +8816,7 @@ function PromptView(props) {
               className: `pm-cat ${category === "\u672A\u5206\u7C7B" ? "pm-cat-active" : ""}`,
               onClick: () => setCategory("\u672A\u5206\u7C7B"),
               children: [
-                /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-cat-name", children: say("uncategorized") }),
+                /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-cat-name", children: say("prompt.uncategorized") }),
                 /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-cat-count", children: uncategorizedCount })
               ]
             }
@@ -9463,7 +8827,7 @@ function PromptView(props) {
               {
                 className: "pm-cat-add-input",
                 autoFocus: true,
-                placeholder: say("newCategoryPh"),
+                placeholder: say("prompt.newCategoryPh"),
                 value: newCategoryName,
                 onChange: (e) => setNewCategoryName(e.target.value),
                 onKeyDown: (e) => {
@@ -9477,13 +8841,14 @@ function PromptView(props) {
             ),
             /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-cat-add-ok", onClick: () => void addCategory(), children: "\u2713" })
           ] }) : /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("button", { type: "button", className: "pm-cat-add-btn", onClick: () => setAddingCategory(true), children: [
-            "\uFF0B ",
-            say("newCategory")
+            say("prompt.plusGlyph"),
+            " ",
+            say("prompt.newCategory")
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-pane-list", children: [
-          prompts.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-pane-empty", children: say("empty") }),
-          prompts.length > 0 && filtered.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-pane-empty", children: say("noMatch") }),
+          prompts.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-pane-empty", children: say("prompt.empty") }),
+          prompts.length > 0 && filtered.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-pane-empty", children: say("prompt.noMatch") }),
           filtered.map((p) => {
             const active = activeInjectionOf(p.id);
             return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(
@@ -9496,13 +8861,13 @@ function PromptView(props) {
                   /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-item-row1", children: [
                     /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-name", children: p.name }),
                     /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-badge", children: p.category }),
-                    p.enabled === false && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-badge pm-item-badge-off", title: say("disabledHint"), children: say("enabledOff") }),
-                    active !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-badge pm-item-badge-active", title: say("injectHint"), children: active.roundsLeft === null ? say("injectingBadgeInfinite") : say("injectingBadge").replace("{n}", String(active.roundsLeft)) })
+                    p.enabled === false && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-badge pm-item-badge-off", title: say("prompt.disabledHint"), children: say("prompt.enabledOff") }),
+                    active !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-badge pm-item-badge-active", title: say("prompt.injectHint"), children: active.roundsLeft === null ? say("prompt.injectingBadgeInfinite") : say("prompt.injectingBadge").replace("{n}", String(active.roundsLeft)) })
                   ] }),
                   /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-item-summary", children: summaryLine(p) }),
                   /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-item-row3", children: [
-                    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-usage", children: say("usage").replace("{n}", String(p.usageCount ?? 0)) }),
-                    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-used", children: p.lastUsedAt !== null ? say("lastUsed").replace("{time}", formatTime4(p.lastUsedAt)) : say("neverUsed") })
+                    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-usage", children: say("prompt.usage").replace("{n}", String(p.usageCount ?? 0)) }),
+                    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-item-used", children: p.lastUsedAt !== null ? say("prompt.lastUsed").replace("{time}", formatTime4(p.lastUsedAt)) : say("prompt.neverUsed") })
                   ] })
                 ]
               },
@@ -9514,27 +8879,27 @@ function PromptView(props) {
           selected === null && !creating && // 未选中提示词 → 「临时注入」快速表单：不建提示词也能直接注入
           // （自动入库 + 注入一步完成，分类留空归入「临时」）
           /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-form", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-form-title", children: say("quickTitle") }),
-            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-quick-sub", children: say("quickDesc") }),
+            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-form-title", children: say("prompt.quickTitle") }),
+            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-quick-sub", children: say("prompt.quickDesc") }),
             /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { className: "pm-field", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-label", children: say("name") }),
+              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-label", children: say("prompt.name") }),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                 "input",
                 {
                   className: "pm-input",
-                  placeholder: say("quickNamePh"),
+                  placeholder: say("prompt.quickNamePh"),
                   value: name,
                   onChange: (e) => setName(e.target.value)
                 }
               )
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { className: "pm-field", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-label", children: say("description") }),
+              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-label", children: say("prompt.description") }),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                 "input",
                 {
                   className: "pm-input",
-                  placeholder: say("descriptionPh"),
+                  placeholder: say("prompt.descriptionPh"),
                   value: description,
                   onChange: (e) => setDescription(e.target.value)
                 }
@@ -9542,27 +8907,27 @@ function PromptView(props) {
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { className: "pm-field pm-field-grow", children: [
               /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { className: "pm-field-label", children: [
-                say("content"),
+                say("prompt.content"),
                 " *"
               ] }),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                 "textarea",
                 {
                   className: "pm-textarea",
-                  placeholder: say("contentPh"),
+                  placeholder: say("prompt.contentPh"),
                   value: content,
                   onChange: (e) => setContent(e.target.value)
                 }
               )
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { className: "pm-field", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-label", children: say("category") }),
+              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-label", children: say("prompt.category") }),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                 "input",
                 {
                   className: "pm-input",
                   list: "pm-category-list",
-                  placeholder: say("quickCategoryPh"),
+                  placeholder: say("prompt.quickCategoryPh"),
                   value: formCategory,
                   onChange: (e) => setFormCategory(e.target.value)
                 }
@@ -9575,10 +8940,10 @@ function PromptView(props) {
                 {
                   type: "button",
                   className: "pm-primary-btn",
-                  title: say("injectOnceBtnHint"),
+                  title: say("prompt.injectOnceBtnHint"),
                   onClick: () => void quickInject({ rounds: 1, every: 0 }),
                   disabled: busy,
-                  children: busy ? say("saving") : say("injectOnceBtn")
+                  children: busy ? say("prompt.saving") : say("prompt.injectOnceBtn")
                 }
               ),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
@@ -9586,10 +8951,10 @@ function PromptView(props) {
                 {
                   type: "button",
                   className: "pm-tool-btn",
-                  title: say("injectInfiniteBtnHint"),
+                  title: say("prompt.injectInfiniteBtnHint"),
                   onClick: () => void quickInject({ rounds: 0, every: 1 }),
                   disabled: busy,
-                  children: say("injectInfiniteBtn")
+                  children: say("prompt.injectInfiniteBtn")
                 }
               ),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
@@ -9597,10 +8962,10 @@ function PromptView(props) {
                 {
                   type: "button",
                   className: "pm-tool-btn",
-                  title: say("injectNowBtnHint"),
+                  title: say("prompt.injectNowBtnHint"),
                   onClick: () => void quickInject(void 0, true),
                   disabled: busy,
-                  children: say("injectNowBtn")
+                  children: say("prompt.injectNowBtn")
                 }
               ),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
@@ -9608,9 +8973,9 @@ function PromptView(props) {
                 {
                   type: "button",
                   className: "pm-tool-btn",
-                  title: say("customBtnHint"),
+                  title: say("prompt.customBtnHint"),
                   onClick: () => setCustomOpen(!customOpen),
-                  children: say("customBtn")
+                  children: say("prompt.customBtn")
                 }
               )
             ] }),
@@ -9619,8 +8984,8 @@ function PromptView(props) {
                 /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                   NumInput,
                   {
-                    label: say("rounds"),
-                    hint: say("roundsHint"),
+                    label: say("prompt.rounds"),
+                    hint: say("prompt.roundsHint"),
                     value: roundsText,
                     min: 0,
                     onChange: setRoundsText
@@ -9629,8 +8994,8 @@ function PromptView(props) {
                 /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                   NumInput,
                   {
-                    label: say("cadence"),
-                    hint: say("everyHint"),
+                    label: say("prompt.cadence"),
+                    hint: say("prompt.everyHint"),
                     value: everyText,
                     min: 0,
                     onChange: setEveryText
@@ -9639,48 +9004,48 @@ function PromptView(props) {
               ] }),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(EffectHint, { roundsText, everyText, say }),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-actions", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-primary-btn", onClick: () => void quickInject(), disabled: busy, children: busy ? say("saving") : say("inject") }),
-                /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-tool-btn", onClick: () => setCustomOpen(false), children: say("collapseCustom") })
+                /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-primary-btn", onClick: () => void quickInject(), disabled: busy, children: busy ? say("prompt.saving") : say("prompt.inject") }),
+                /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-tool-btn", onClick: () => setCustomOpen(false), children: say("prompt.collapseCustom") })
               ] })
             ] })
           ] }),
           (selected !== null || creating) && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-form", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-form-title", children: creating ? say("formNew") : say("formEdit") }),
+            /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-form-title", children: creating ? say("prompt.formNew") : say("prompt.formEdit") }),
             /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { className: "pm-field", children: [
               /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { className: "pm-field-label", children: [
-                say("name"),
+                say("prompt.name"),
                 " *"
               ] }),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                 "input",
                 {
                   className: "pm-input",
-                  placeholder: say("namePh"),
+                  placeholder: say("prompt.namePh"),
                   value: name,
                   onChange: (e) => setName(e.target.value)
                 }
               )
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { className: "pm-field", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-label", children: say("description") }),
+              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-label", children: say("prompt.description") }),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                 "input",
                 {
                   className: "pm-input",
-                  placeholder: say("descriptionPh"),
+                  placeholder: say("prompt.descriptionPh"),
                   value: description,
                   onChange: (e) => setDescription(e.target.value)
                 }
               )
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { className: "pm-field", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-label", children: say("category") }),
+              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-label", children: say("prompt.category") }),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                 "input",
                 {
                   className: "pm-input",
                   list: "pm-category-list",
-                  placeholder: say("categoryPh"),
+                  placeholder: say("prompt.categoryPh"),
                   value: formCategory,
                   onChange: (e) => setFormCategory(e.target.value)
                 }
@@ -9688,12 +9053,12 @@ function PromptView(props) {
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("datalist", { id: "pm-category-list", children: displayCategories.map((c) => /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("option", { value: c }, c)) })
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { className: "pm-field", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-label", children: say("tags") }),
+              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-label", children: say("prompt.tags") }),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                 "input",
                 {
                   className: "pm-input",
-                  placeholder: say("tagsPh"),
+                  placeholder: say("prompt.tagsPh"),
                   value: tags,
                   onChange: (e) => setTags(e.target.value)
                 }
@@ -9701,14 +9066,14 @@ function PromptView(props) {
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { className: "pm-field pm-field-grow", children: [
               /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { className: "pm-field-label", children: [
-                say("content"),
+                say("prompt.content"),
                 " *"
               ] }),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                 "textarea",
                 {
                   className: "pm-textarea",
-                  placeholder: say("contentPh"),
+                  placeholder: say("prompt.contentPh"),
                   value: content,
                   onChange: (e) => setContent(e.target.value)
                 }
@@ -9716,8 +9081,8 @@ function PromptView(props) {
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { className: "pm-field pm-enable-row", children: [
               /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { className: "pm-field-label", children: [
-                say("enabled"),
-                /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-hint", children: say("disabledHint") })
+                say("prompt.enabled"),
+                /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("span", { className: "pm-field-hint", children: say("prompt.disabledHint") })
               ] }),
               /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                 "button",
@@ -9727,7 +9092,7 @@ function PromptView(props) {
                   "aria-checked": enabled,
                   className: `pm-toggle ${enabled ? "pm-toggle-on" : ""}`,
                   onClick: () => setEnabled(!enabled),
-                  children: enabled ? say("enabledOn") : say("enabledOff")
+                  children: enabled ? say("prompt.enabledOn") : say("prompt.enabledOff")
                 }
               )
             ] }),
@@ -9737,12 +9102,12 @@ function PromptView(props) {
                 if (active !== void 0) {
                   return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(import_jsx_runtime18.Fragment, { children: [
                     /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { className: "pm-inject-status", children: [
-                      active.roundsLeft === null ? say("injectingBadgeInfinite") : say("injectingBadge").replace("{n}", String(active.roundsLeft)),
+                      active.roundsLeft === null ? say("prompt.injectingBadgeInfinite") : say("prompt.injectingBadge").replace("{n}", String(active.roundsLeft)),
                       " ",
                       "\xB7 ",
                       cadenceLabel(active)
                     ] }),
-                    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-danger-btn", onClick: () => void removeInjection(active.id), children: say("removeInjection") })
+                    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-danger-btn", onClick: () => void removeInjection(active.id), children: say("prompt.removeInjection") })
                   ] });
                 }
                 return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)(import_jsx_runtime18.Fragment, { children: [
@@ -9751,9 +9116,9 @@ function PromptView(props) {
                     {
                       type: "button",
                       className: "pm-primary-btn",
-                      title: say("injectOnceBtnHint"),
+                      title: say("prompt.injectOnceBtnHint"),
                       onClick: () => void injectPreset(1, 0),
-                      children: say("injectOnceBtn")
+                      children: say("prompt.injectOnceBtn")
                     }
                   ),
                   /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
@@ -9761,9 +9126,9 @@ function PromptView(props) {
                     {
                       type: "button",
                       className: "pm-tool-btn",
-                      title: say("injectInfiniteBtnHint"),
+                      title: say("prompt.injectInfiniteBtnHint"),
                       onClick: () => void injectPreset(0, 1),
-                      children: say("injectInfiniteBtn")
+                      children: say("prompt.injectInfiniteBtn")
                     }
                   ),
                   /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
@@ -9771,9 +9136,9 @@ function PromptView(props) {
                     {
                       type: "button",
                       className: "pm-tool-btn",
-                      title: say("injectNowBtnHint"),
+                      title: say("prompt.injectNowBtnHint"),
                       onClick: () => void injectNow(selected.id),
-                      children: say("injectNowBtn")
+                      children: say("prompt.injectNowBtn")
                     }
                   ),
                   /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
@@ -9781,9 +9146,9 @@ function PromptView(props) {
                     {
                       type: "button",
                       className: "pm-tool-btn",
-                      title: say("customBtnHint"),
+                      title: say("prompt.customBtnHint"),
                       onClick: () => setCustomOpen(!customOpen),
-                      children: say("customBtn")
+                      children: say("prompt.customBtn")
                     }
                   ),
                   customOpen && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "pm-custom-zone pm-custom-zone-inline", children: [
@@ -9791,8 +9156,8 @@ function PromptView(props) {
                       /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                         NumInput,
                         {
-                          label: say("rounds"),
-                          hint: say("roundsHint"),
+                          label: say("prompt.rounds"),
+                          hint: say("prompt.roundsHint"),
                           value: roundsText,
                           min: 0,
                           onChange: setRoundsText
@@ -9801,29 +9166,29 @@ function PromptView(props) {
                       /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(
                         NumInput,
                         {
-                          label: say("cadence"),
-                          hint: say("everyHint"),
+                          label: say("prompt.cadence"),
+                          hint: say("prompt.everyHint"),
                           value: everyText,
                           min: 0,
                           onChange: setEveryText
                         }
                       ),
-                      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-primary-btn", onClick: () => void injectPrompt(), children: say("inject") }),
-                      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-tool-btn", onClick: () => setCustomOpen(false), children: say("collapseCustom") })
+                      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-primary-btn", onClick: () => void injectPrompt(), children: say("prompt.inject") }),
+                      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-tool-btn", onClick: () => setCustomOpen(false), children: say("prompt.collapseCustom") })
                     ] }),
                     /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(EffectHint, { roundsText, everyText, say })
                   ] }),
-                  /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-tool-btn", onClick: () => void copyPrompt(), children: say("copy") })
+                  /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-tool-btn", onClick: () => void copyPrompt(), children: say("prompt.copy") })
                 ] });
               })(),
-              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-tool-btn", onClick: () => void savePrompt(), disabled: busy, children: busy ? say("saving") : say("save") }),
-              !creating && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-danger-btn", onClick: () => void deletePrompt(), children: say("delete") }),
+              /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-tool-btn", onClick: () => void savePrompt(), disabled: busy, children: busy ? say("prompt.saving") : say("prompt.save") }),
+              !creating && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-danger-btn", onClick: () => void deletePrompt(), children: say("prompt.delete") }),
               creating && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("button", { type: "button", className: "pm-tool-btn", onClick: () => {
                 setCreating(false);
                 setSelectedId(null);
-              }, children: say("cancel") })
+              }, children: say("prompt.cancel") })
             ] }),
-            !creating && selected !== null && selectedIsDirty && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-dirty-hint", children: pick("\u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539", "Unsaved changes") })
+            !creating && selected !== null && selectedIsDirty && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "pm-dirty-hint", children: say("prompt.unsavedChanges") })
           ] })
         ] })
       ] })
@@ -9934,7 +9299,7 @@ function flashAnchor(el) {
   }, 1600);
 }
 function BookmarksView(props) {
-  const { t: t2, sessionId } = props;
+  const { t, sessionId } = props;
   const [feature, setFeature] = (0, import_react18.useState)(persistedFeature ?? "list");
   const [bookmarks, setBookmarks] = (0, import_react18.useState)(null);
   const [query, setQuery] = (0, import_react18.useState)("");
@@ -9949,10 +9314,10 @@ function BookmarksView(props) {
       return;
     }
     void api5(`?sessionId=${encodeURIComponent(sessionId)}`).then((data) => setBookmarks(data.bookmarks ?? [])).catch((error) => {
-      setNotice({ kind: "error", text: t2("bookmark.error", { message: error.message }) });
+      setNotice({ kind: "error", text: t("bookmark.error", { message: error.message }) });
       setBookmarks([]);
     });
-  }, [sessionId, t2]);
+  }, [sessionId, t]);
   (0, import_react18.useEffect)(() => {
     load();
   }, [load]);
@@ -9963,19 +9328,19 @@ function BookmarksView(props) {
   }, [load]);
   const onJump = (bm) => {
     setBusy(true);
-    setNotice({ kind: "info", text: t2("bookmark.jumping") });
+    setNotice({ kind: "info", text: t("bookmark.jumping") });
     void jumpToAnchor(bm).then((result) => {
       if (result === "ok") {
-        setNotice({ kind: "ok", text: t2("bookmark.jump.ok", { label: bm.label }) });
+        setNotice({ kind: "ok", text: t("bookmark.jump.ok", { label: bm.label }) });
       } else if (result === "no-chat") {
-        setNotice({ kind: "error", text: t2("bookmark.jump.noChat") });
+        setNotice({ kind: "error", text: t("bookmark.jump.noChat") });
       } else {
-        setNotice({ kind: "error", text: t2("bookmark.jump.notFound", { label: bm.label }) });
+        setNotice({ kind: "error", text: t("bookmark.jump.notFound", { label: bm.label }) });
       }
     }).finally(() => setBusy(false));
   };
   const onRename = (bm) => {
-    const input = window.prompt(t2("bookmark.prompt.rename"), bm.label);
+    const input = window.prompt(t("bookmark.prompt.rename"), bm.label);
     if (input === null) return;
     const label = input.trim();
     if (label === "") return;
@@ -9985,28 +9350,28 @@ function BookmarksView(props) {
       body: JSON.stringify({ sessionId, id: bm.id, label })
     }).then(() => {
       load();
-      setNotice({ kind: "ok", text: t2("bookmark.renamed") });
+      setNotice({ kind: "ok", text: t("bookmark.renamed") });
     }).catch((error) => {
-      setNotice({ kind: "error", text: t2("bookmark.error", { message: error.message }) });
+      setNotice({ kind: "error", text: t("bookmark.error", { message: error.message }) });
     }).finally(() => setBusy(false));
   };
   const onDelete = (bm) => {
-    if (!window.confirm(t2("bookmark.confirm.delete", { label: bm.label }))) return;
+    if (!window.confirm(t("bookmark.confirm.delete", { label: bm.label }))) return;
     setBusy(true);
     void api5("", {
       method: "DELETE",
       body: JSON.stringify({ sessionId, id: bm.id })
     }).then(() => {
       load();
-      setNotice({ kind: "ok", text: t2("bookmark.deleted") });
+      setNotice({ kind: "ok", text: t("bookmark.deleted") });
     }).catch((error) => {
-      setNotice({ kind: "error", text: t2("bookmark.error", { message: error.message }) });
+      setNotice({ kind: "error", text: t("bookmark.error", { message: error.message }) });
     }).finally(() => setBusy(false));
   };
   const onFork = (bm) => {
-    if (!window.confirm(t2("bookmark.fork.confirm", { n: String(bm.turn ?? bm.seq) }))) return;
+    if (!window.confirm(t("bookmark.fork.confirm", { n: String(bm.turn ?? bm.seq) }))) return;
     setBusy(true);
-    setNotice({ kind: "info", text: t2("bookmark.fork.working") });
+    setNotice({ kind: "info", text: t("bookmark.fork.working") });
     void fetch("/memory-evolve/api/bookmarks/fork", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -10014,12 +9379,12 @@ function BookmarksView(props) {
       body: JSON.stringify({ sessionId: bm.sessionId, seq: bm.seq, anchorKey: bm.anchorKey ?? void 0 })
     }).then((res) => res.json().catch(() => ({}))).then((data) => {
       if (typeof data.sessionId === "string") {
-        setNotice({ kind: "ok", text: t2("bookmark.fork.ok", { id: data.sessionId }) });
+        setNotice({ kind: "ok", text: t("bookmark.fork.ok", { id: data.sessionId }) });
       } else {
-        setNotice({ kind: "error", text: t2("bookmark.error", { message: data.error ?? "HTTP error" }) });
+        setNotice({ kind: "error", text: t("bookmark.error", { message: data.error ?? "HTTP error" }) });
       }
     }).catch((error) => {
-      setNotice({ kind: "error", text: t2("bookmark.error", { message: error.message }) });
+      setNotice({ kind: "error", text: t("bookmark.error", { message: error.message }) });
     }).finally(() => setBusy(false));
   };
   const q = query.trim().toLowerCase();
@@ -10027,23 +9392,23 @@ function BookmarksView(props) {
   const guideSections = [
     {
       icon: "\u2B50",
-      title: t2("bookmark.guide.what.title"),
-      body: t2("bookmark.guide.what.body")
+      title: t("bookmark.guide.what.title"),
+      body: t("bookmark.guide.what.body")
     },
     {
       icon: "\u{1F4CD}",
-      title: t2("bookmark.guide.star.title"),
-      body: t2("bookmark.guide.star.body")
+      title: t("bookmark.guide.star.title"),
+      body: t("bookmark.guide.star.body")
     },
     {
       icon: "\u{1F4DC}",
-      title: t2("bookmark.guide.list.title"),
-      body: t2("bookmark.guide.list.body")
+      title: t("bookmark.guide.list.title"),
+      body: t("bookmark.guide.list.body")
     },
     {
       icon: "\u2699\uFE0F",
-      title: t2("bookmark.guide.switch.title"),
-      body: t2("bookmark.guide.switch.body")
+      title: t("bookmark.guide.switch.title"),
+      body: t("bookmark.guide.switch.body")
     }
   ];
   return /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: "bm-panel", children: [
@@ -10056,7 +9421,7 @@ function BookmarksView(props) {
           "aria-selected": feature === "list",
           className: feature === "list" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("list"),
-          children: t2("bookmark.tab.list")
+          children: t("bookmark.tab.list")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
@@ -10067,14 +9432,14 @@ function BookmarksView(props) {
           "aria-selected": feature === "guide",
           className: feature === "guide" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("guide"),
-          children: t2("bookmark.tab.guide")
+          children: t("bookmark.tab.guide")
         }
       )
     ] }),
     feature === "guide" && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(TabGuideView, { sections: guideSections }),
     feature === "list" && /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(import_jsx_runtime19.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: "bm-toolbar", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("h3", { children: t2("bookmark.list.title") }),
+        /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("h3", { children: t("bookmark.list.title") }),
         /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
           "button",
           {
@@ -10082,26 +9447,26 @@ function BookmarksView(props) {
             className: "bm-toolbar-btn",
             disabled: busy,
             onClick: () => load(),
-            children: t2("bookmark.refresh")
+            children: t("bookmark.refresh")
           }
         )
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("p", { className: "bm-help", children: t2("bookmark.list.help") }),
+      /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("p", { className: "bm-help", children: t("bookmark.list.help") }),
       /* @__PURE__ */ (0, import_jsx_runtime19.jsx)(
         "input",
         {
           type: "search",
           className: "bm-search",
-          placeholder: t2("bookmark.search.placeholder"),
+          placeholder: t("bookmark.search.placeholder"),
           value: query,
           onChange: (event) => setQuery(event.target.value),
-          "aria-label": t2("bookmark.search.placeholder")
+          "aria-label": t("bookmark.search.placeholder")
         }
       ),
       notice !== null && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { className: `bm-notice bm-notice-${notice.kind}`, children: notice.text }),
       /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: "bm-list", children: [
-        filtered === null && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { className: "bm-empty", children: t2("bookmark.loading") }),
-        filtered !== null && filtered.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { className: "bm-empty", children: q === "" ? t2("bookmark.empty") : t2("bookmark.search.empty") }),
+        filtered === null && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { className: "bm-empty", children: t("bookmark.loading") }),
+        filtered !== null && filtered.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("div", { className: "bm-empty", children: q === "" ? t("bookmark.empty") : t("bookmark.search.empty") }),
         filtered !== null && filtered.map((bm) => /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)(
           "div",
           {
@@ -10117,7 +9482,7 @@ function BookmarksView(props) {
               }
             },
             tabIndex: 0,
-            title: t2("bookmark.jump.hint"),
+            title: t("bookmark.jump.hint"),
             children: [
               /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("div", { className: "bm-item-head", children: [
                 /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("span", { className: "bm-item-label", children: [
@@ -10125,7 +9490,7 @@ function BookmarksView(props) {
                   bm.label
                 ] }),
                 /* @__PURE__ */ (0, import_jsx_runtime19.jsxs)("span", { className: "bm-item-meta", children: [
-                  bm.turn !== null ? t2("bookmark.turn", { n: String(bm.turn) }) : `seq ${bm.seq}`,
+                  bm.turn !== null ? t("bookmark.turn", { n: String(bm.turn) }) : `seq ${bm.seq}`,
                   " \xB7 ",
                   formatTime5(bm.createdAt)
                 ] })
@@ -10138,10 +9503,10 @@ function BookmarksView(props) {
                   onClick: (event) => event.stopPropagation(),
                   onKeyDown: (event) => event.stopPropagation(),
                   children: [
-                    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("button", { type: "button", disabled: busy, onClick: () => onJump(bm), children: t2("bookmark.action.jump") }),
-                    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("button", { type: "button", disabled: busy, onClick: () => onFork(bm), children: t2("bookmark.action.fork") }),
-                    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("button", { type: "button", disabled: busy, onClick: () => onRename(bm), children: t2("bookmark.action.rename") }),
-                    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("button", { type: "button", className: "bm-danger", disabled: busy, onClick: () => onDelete(bm), children: t2("bookmark.action.delete") })
+                    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("button", { type: "button", disabled: busy, onClick: () => onJump(bm), children: t("bookmark.action.jump") }),
+                    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("button", { type: "button", disabled: busy, onClick: () => onFork(bm), children: t("bookmark.action.fork") }),
+                    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("button", { type: "button", disabled: busy, onClick: () => onRename(bm), children: t("bookmark.action.rename") }),
+                    /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("button", { type: "button", className: "bm-danger", disabled: busy, onClick: () => onDelete(bm), children: t("bookmark.action.delete") })
                   ]
                 }
               )
@@ -10184,7 +9549,7 @@ function clamp(text, max = 60) {
   return flat.length > max ? `${flat.slice(0, max)}\u2026` : flat;
 }
 function SyncView(props) {
-  const { t: t2, sessionId } = props;
+  const { t, sessionId } = props;
   const [status, setStatus] = (0, import_react19.useState)(null);
   const [conflicts, setConflicts] = (0, import_react19.useState)([]);
   const [globalConflicts, setGlobalConflicts] = (0, import_react19.useState)({});
@@ -10217,11 +9582,11 @@ function SyncView(props) {
       }));
       setGlobalConflicts(gMap);
     } catch (error) {
-      setNotice({ kind: "error", text: t2("syncTab.loadFailed", { message: error.message }) });
+      setNotice({ kind: "error", text: t("syncTab.loadFailed", { message: error.message }) });
     } finally {
       setInitialized(true);
     }
-  }, [sessionId, t2]);
+  }, [sessionId, t]);
   (0, import_react19.useEffect)(() => {
     remoteUrlEdited.current = false;
     setRemoteUrl("");
@@ -10252,7 +9617,7 @@ function SyncView(props) {
     if (mode === "shared") {
       if (status?.global?.enabled !== true || status?.global?.initialized !== true) {
         setFeature("remote");
-        return { ok: false, text: t2("syncTab.project.mode.shared.needRemote") };
+        return { ok: false, text: t("syncTab.project.mode.shared.needRemote") };
       }
       const url = status.global.url;
       const r2 = await api6("/setup", { method: "POST", body: JSON.stringify({ sessionId, url }) });
@@ -10261,7 +9626,7 @@ function SyncView(props) {
     const r = await api6("/setup", { method: "POST", body: JSON.stringify({ sessionId }) });
     return r;
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "mt-panel", children: !initialized ? /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "bb-empty", children: t2("syncTab.loading") }) : /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)(import_jsx_runtime20.Fragment, { children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "mt-panel", children: !initialized ? /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "bb-empty", children: t("syncTab.loading") }) : /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)(import_jsx_runtime20.Fragment, { children: [
     notice !== null && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: notice.kind === "ok" ? "me-notice-ok" : "me-notice-error", children: notice.text }),
     /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "mt-file-tabs", role: "tablist", children: [
       /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
@@ -10272,7 +9637,7 @@ function SyncView(props) {
           "aria-selected": feature === "project",
           className: feature === "project" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("project"),
-          children: t2("syncTab.tab.project")
+          children: t("syncTab.tab.project")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
@@ -10283,7 +9648,7 @@ function SyncView(props) {
           "aria-selected": feature === "global",
           className: feature === "global" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("global"),
-          children: t2("syncTab.tab.global")
+          children: t("syncTab.tab.global")
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
@@ -10294,13 +9659,13 @@ function SyncView(props) {
           "aria-selected": feature === "remote",
           className: feature === "remote" ? "mt-file-tab mt-file-tab-active" : "mt-file-tab",
           onClick: () => setFeature("remote"),
-          children: t2("syncTab.tab.remote")
+          children: t("syncTab.tab.remote")
         }
       )
     ] }),
     feature === "project" && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)(import_jsx_runtime20.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "sv-section", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "sv-section-title", children: t2("syncTab.section.project") }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "sv-section-title", children: t("syncTab.section.project") }),
         /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { style: { display: "flex", flexDirection: "column", gap: "8px" }, children: [
           /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("label", { className: `sv-radio-row${status?.projectEnabled !== true ? " sv-radio-active" : ""}`, children: [
             /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
@@ -10315,8 +9680,8 @@ function SyncView(props) {
               }
             ),
             /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("span", { style: { flex: 1 }, children: [
-              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-label", children: t2("syncTab.project.mode.off") }),
-              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-desc", children: t2("syncTab.project.mode.off.desc") })
+              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-label", children: t("syncTab.project.mode.off") }),
+              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-desc", children: t("syncTab.project.mode.off.desc") })
             ] })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("label", { className: `sv-radio-row${status?.projectEnabled === true && status?.remoteKind === "main-repo" ? " sv-radio-active" : ""}`, children: [
@@ -10332,8 +9697,8 @@ function SyncView(props) {
               }
             ),
             /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("span", { style: { flex: 1 }, children: [
-              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-label", children: t2("syncTab.project.mode.main") }),
-              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-desc", children: t2("syncTab.project.mode.main.desc") })
+              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-label", children: t("syncTab.project.mode.main") }),
+              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-desc", children: t("syncTab.project.mode.main.desc") })
             ] })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("label", { className: `sv-radio-row${status?.projectEnabled === true && status?.remoteKind === "shared-repo" ? " sv-radio-active" : ""}`, children: [
@@ -10349,40 +9714,40 @@ function SyncView(props) {
               }
             ),
             /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("span", { style: { flex: 1 }, children: [
-              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-label", children: t2("syncTab.project.mode.shared") }),
-              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-desc", children: t2("syncTab.project.mode.shared.desc") })
+              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-label", children: t("syncTab.project.mode.shared") }),
+              /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-desc", children: t("syncTab.project.mode.shared.desc") })
             ] })
           ] })
         ] }),
         status?.projectEnabled === true && status?.initialized === true && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "sv-status", style: { marginTop: "10px" }, children: [
           /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("p", { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("strong", { children: t2("syncTab.status.remoteKind", { kind: status?.remoteKind === "main-repo" ? t2("syncTab.status.remoteKindMain") : status?.remoteKind === "shared-repo" ? t2("syncTab.status.remoteKindShared") : t2("syncTab.status.remoteKindNone") }) }),
+            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("strong", { children: t("syncTab.status.remoteKind", { kind: status?.remoteKind === "main-repo" ? t("syncTab.status.remoteKindMain") : status?.remoteKind === "shared-repo" ? t("syncTab.status.remoteKindShared") : t("syncTab.status.remoteKindNone") }) }),
             /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("br", {}),
-            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-status-url", children: status?.originUrl || t2("syncTab.status.remoteKindNone") })
+            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-status-url", children: status?.originUrl || t("syncTab.status.remoteKindNone") })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("p", { children: [
-            t2("syncTab.status.branch", { branch: status?.remoteBranch ?? "?" }),
+            t("syncTab.status.branch", { branch: status?.remoteBranch ?? "?" }),
             /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("br", {}),
-            t2("syncTab.status.counts", {
+            t("syncTab.status.counts", {
               pending: String((status?.uncommitted ?? 0) + (status?.ahead ?? 0)),
               behind: String(status?.behind ?? 0),
               conflicts: String(status?.conflicts ?? 0)
             })
           ] }),
-          status?.migrateFrom != null && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { children: t2("syncTab.status.migrate", { dir: status.migrateFrom }) })
+          status?.migrateFrom != null && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { children: t("syncTab.status.migrate", { dir: status.migrateFrom }) })
         ] }),
         status?.projectEnabled === true && status?.initialized === true && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "sv-actions", children: [
           /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "me-btn me-btn-primary", disabled: busy, onClick: () => {
             void run(() => api6("/sync", { method: "POST", body: JSON.stringify({ sessionId }) }));
-          }, children: t2("syncTab.actions.sync") }),
+          }, children: t("syncTab.actions.sync") }),
           /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "me-btn me-btn-ok", disabled: busy, onClick: () => {
             void run(() => api6("/sync", { method: "POST", body: JSON.stringify({ sessionId, push: true }) }));
-          }, children: t2("syncTab.actions.push") })
+          }, children: t("syncTab.actions.push") })
         ] }),
-        status?.enabled === true && status?.projectEnabled === true && status?.initialized !== true && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "bb-meta", style: { marginTop: "8px" }, children: t2("syncTab.status.notInit") })
+        status?.enabled === true && status?.projectEnabled === true && status?.initialized !== true && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "bb-meta", style: { marginTop: "8px" }, children: t("syncTab.status.notInit") })
       ] }),
       status?.enabled === true && conflicts.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "sv-section", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "sv-section-title", children: t2("syncTab.conflicts.title", { count: conflicts.length }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "sv-section-title", children: t("syncTab.conflicts.title", { count: conflicts.length }) }),
         conflicts.map((c) => /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "bb-session-line", children: [
           /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { children: [
             /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("strong", { children: [
@@ -10397,15 +9762,15 @@ function SyncView(props) {
             c.reason,
             /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("br", {}),
             /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("span", { className: "bb-meta", children: [
-              t2("syncTab.conflicts.base"),
+              t("syncTab.conflicts.base"),
               "\uFF1A",
               clamp(c.base),
               /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("br", {}),
-              t2("syncTab.conflicts.ours"),
+              t("syncTab.conflicts.ours"),
               "\uFF1A",
               clamp(c.ours),
               /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("br", {}),
-              t2("syncTab.conflicts.theirs"),
+              t("syncTab.conflicts.theirs"),
               "\uFF1A",
               clamp(c.theirs)
             ] })
@@ -10413,19 +9778,19 @@ function SyncView(props) {
           /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "bb-actions", children: [
             /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "me-btn", disabled: busy, onClick: () => {
               void run(() => api6("/resolve", { method: "POST", body: JSON.stringify({ sessionId, index: c.index, choice: "ours" }) }));
-            }, children: t2("syncTab.conflicts.oursBtn") }),
+            }, children: t("syncTab.conflicts.oursBtn") }),
             /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "me-btn", disabled: busy, onClick: () => {
               void run(() => api6("/resolve", { method: "POST", body: JSON.stringify({ sessionId, index: c.index, choice: "theirs" }) }));
-            }, children: t2("syncTab.conflicts.theirsBtn") }),
+            }, children: t("syncTab.conflicts.theirsBtn") }),
             /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "me-btn", disabled: busy, onClick: () => {
               void run(() => api6("/resolve", { method: "POST", body: JSON.stringify({ sessionId, index: c.index, choice: "both" }) }));
-            }, children: t2("syncTab.conflicts.bothBtn") })
+            }, children: t("syncTab.conflicts.bothBtn") })
           ] })
         ] }, c.index))
       ] })
     ] }),
     feature === "global" && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "sv-section", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "sv-section-title", children: t2("syncTab.section.global") }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "sv-section-title", children: t("syncTab.section.global") }),
       status?.global?.enabled === true && status?.global?.initialized === true ? /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)(import_jsx_runtime20.Fragment, { children: [
         [
           ["memory", "syncTab.global.trackMemory"],
@@ -10433,7 +9798,7 @@ function SyncView(props) {
           ["daily", "syncTab.global.trackDaily"],
           ["todo", "syncTab.global.trackTodo"]
         ].map(([track, labelKey]) => /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("label", { className: "me-field", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "me-field-label", children: t2(labelKey) }),
+          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "me-field-label", children: t(labelKey) }),
           /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
             "input",
             {
@@ -10448,20 +9813,20 @@ function SyncView(props) {
           )
         ] }, track)),
         /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("p", { className: "bb-meta", children: [
-          t2("syncTab.global.uncommitted", { n: String((status.global.uncommitted ?? 0) + (status.global.ahead ?? 0)) }),
+          t("syncTab.global.uncommitted", { n: String((status.global.uncommitted ?? 0) + (status.global.ahead ?? 0)) }),
           /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("br", {}),
-          t2("syncTab.global.hint")
+          t("syncTab.global.hint")
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "sv-actions", children: [
           /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "me-btn me-btn-primary", disabled: busy, onClick: () => {
             void run(() => api6("/global-sync", { method: "POST", body: JSON.stringify({ sessionId }) }));
-          }, children: t2("syncTab.global.sync") }),
+          }, children: t("syncTab.global.sync") }),
           /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "me-btn me-btn-ok", disabled: busy, onClick: () => {
             void run(() => api6("/global-sync", { method: "POST", body: JSON.stringify({ sessionId, push: true }) }));
-          }, children: t2("syncTab.global.push") })
+          }, children: t("syncTab.global.push") })
         ] }),
         Object.entries(globalConflicts).map(([track, items]) => items.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "sv-section", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "sv-section-title", children: t2("syncTab.conflicts.titleGlobal", { track: t2(GLOBAL_TRACK_LABEL[track] ?? "syncTab.global.title"), count: String(items.length) }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "sv-section-title", children: t("syncTab.conflicts.titleGlobal", { track: t(GLOBAL_TRACK_LABEL[track] ?? "syncTab.global.title"), count: String(items.length) }) }),
           items.map((c) => /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "bb-session-line", children: [
             /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { children: [
               /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("strong", { children: [
@@ -10476,15 +9841,15 @@ function SyncView(props) {
               c.reason,
               /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("br", {}),
               /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("span", { className: "bb-meta", children: [
-                t2("syncTab.conflicts.base"),
+                t("syncTab.conflicts.base"),
                 "\uFF1A",
                 clamp(c.base),
                 /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("br", {}),
-                t2("syncTab.conflicts.ours"),
+                t("syncTab.conflicts.ours"),
                 "\uFF1A",
                 clamp(c.ours),
                 /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("br", {}),
-                t2("syncTab.conflicts.theirs"),
+                t("syncTab.conflicts.theirs"),
                 "\uFF1A",
                 clamp(c.theirs)
               ] })
@@ -10492,21 +9857,21 @@ function SyncView(props) {
             /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "bb-actions", children: [
               /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "me-btn", disabled: busy, onClick: () => {
                 void run(() => api6("/resolve", { method: "POST", body: JSON.stringify({ sessionId, index: c.index, choice: "ours", fileset: GLOBAL_FILESET[track] }) }));
-              }, children: t2("syncTab.conflicts.oursBtn") }),
+              }, children: t("syncTab.conflicts.oursBtn") }),
               /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "me-btn", disabled: busy, onClick: () => {
                 void run(() => api6("/resolve", { method: "POST", body: JSON.stringify({ sessionId, index: c.index, choice: "theirs", fileset: GLOBAL_FILESET[track] }) }));
-              }, children: t2("syncTab.conflicts.theirsBtn") }),
+              }, children: t("syncTab.conflicts.theirsBtn") }),
               /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("button", { type: "button", className: "me-btn", disabled: busy, onClick: () => {
                 void run(() => api6("/resolve", { method: "POST", body: JSON.stringify({ sessionId, index: c.index, choice: "both", fileset: GLOBAL_FILESET[track] }) }));
-              }, children: t2("syncTab.conflicts.bothBtn") })
+              }, children: t("syncTab.conflicts.bothBtn") })
             ] })
           ] }, `g-${track}-${c.index}`))
         ] }, `g-${track}`) : null)
-      ] }) : /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "bb-settings-desc", children: t2("syncTab.global.notInit") })
+      ] }) : /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "bb-settings-desc", children: t("syncTab.global.notInit") })
     ] }),
     feature === "remote" && /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { className: "sv-section", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "sv-section-title", children: t2("syncTab.section.remote") }),
-      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "bb-settings-desc", children: t2("syncTab.remote.desc") }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("div", { className: "sv-section-title", children: t("syncTab.section.remote") }),
+      /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "bb-settings-desc", children: t("syncTab.remote.desc") }),
       /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("div", { style: { display: "flex", flexDirection: "column", gap: "8px" }, children: [
         /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("label", { className: `sv-radio-row${!remoteOn ? " sv-radio-active" : ""}`, children: [
           /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
@@ -10525,8 +9890,8 @@ function SyncView(props) {
             }
           ),
           /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("span", { style: { flex: 1 }, children: [
-            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-label", children: t2("syncTab.remote.mode.off") }),
-            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-desc", children: t2("syncTab.remote.mode.off.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-label", children: t("syncTab.remote.mode.off") }),
+            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-desc", children: t("syncTab.remote.mode.off.desc") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("label", { className: `sv-radio-row${remoteOn ? " sv-radio-active" : ""}`, children: [
@@ -10540,8 +9905,8 @@ function SyncView(props) {
             }
           ),
           /* @__PURE__ */ (0, import_jsx_runtime20.jsxs)("span", { style: { flex: 1 }, children: [
-            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-label", children: t2("syncTab.remote.mode.on") }),
-            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-desc", children: t2("syncTab.remote.mode.on.desc") })
+            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-label", children: t("syncTab.remote.mode.on") }),
+            /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("span", { className: "sv-radio-desc", children: t("syncTab.remote.mode.on.desc") })
           ] })
         ] })
       ] }),
@@ -10553,7 +9918,7 @@ function SyncView(props) {
               type: "text",
               className: "me-input",
               style: { flex: "1 1 360px", width: "auto", minWidth: "min(280px, 100%)" },
-              placeholder: t2("syncTab.remote.placeholder"),
+              placeholder: t("syncTab.remote.placeholder"),
               value: remoteUrl,
               onChange: (event) => {
                 remoteUrlEdited.current = true;
@@ -10570,7 +9935,7 @@ function SyncView(props) {
               onClick: () => {
                 void run(() => api6("/global-remote", { method: "POST", body: JSON.stringify({ url: remoteUrl.trim(), enabled: true }) }));
               },
-              children: status?.global?.initialized === true && status?.global?.url !== "" ? t2("syncTab.remote.modify") : t2("syncTab.remote.save")
+              children: status?.global?.initialized === true && status?.global?.url !== "" ? t("syncTab.remote.modify") : t("syncTab.remote.save")
             }
           ),
           status?.global?.initialized === true && status?.global?.url !== "" && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(
@@ -10582,14 +9947,14 @@ function SyncView(props) {
               onClick: () => {
                 void run(() => api6("/global-remote", { method: "POST", body: JSON.stringify({ enabled: false }) }));
               },
-              children: t2("syncTab.remote.disable")
+              children: t("syncTab.remote.disable")
             }
           )
         ] }),
-        status?.global?.initialized === true && status?.global?.url !== "" && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "bb-meta", style: { marginTop: "8px" }, children: t2("syncTab.remote.current", { url: status.global.url }) })
-      ] }) : /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "bb-meta", style: { marginTop: "8px" }, children: t2("syncTab.remote.switchHint") })
+        status?.global?.initialized === true && status?.global?.url !== "" && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "bb-meta", style: { marginTop: "8px" }, children: t("syncTab.remote.current", { url: status.global.url }) })
+      ] }) : /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "bb-meta", style: { marginTop: "8px" }, children: t("syncTab.remote.switchHint") })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "bb-empty", children: t2("syncTab.footnote") })
+    /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "bb-empty", children: t("syncTab.footnote") })
   ] }) });
 }
 
@@ -10612,7 +9977,7 @@ async function api7(path, init) {
   return body;
 }
 function TurnBookmarkButton(props) {
-  const { anchorKey, seq, turn, summary, t: t2 } = props;
+  const { anchorKey, seq, turn, summary, t } = props;
   const [bookmark, setBookmark] = (0, import_react20.useState)(null);
   const [busy, setBusy] = (0, import_react20.useState)(false);
   const [menuOpen, setMenuOpen] = (0, import_react20.useState)(false);
@@ -10639,16 +10004,16 @@ function TurnBookmarkButton(props) {
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [menuOpen]);
-  const defaultLabel = t2("bookmark.defaultLabel", { n: String(turn ?? seq ?? "?") });
+  const defaultLabel = t("bookmark.defaultLabel", { n: String(turn ?? seq ?? "?") });
   const createOrRename = (mode) => {
     const sessionId = resolveSessionId(props.sessionId);
     if (!sessionId) {
-      window.alert(t2("bookmark.error", { message: t2("bookmark.noSession") }));
+      window.alert(t("bookmark.error", { message: t("bookmark.noSession") }));
       return;
     }
     const initial = mode === "rename" && bookmark !== null ? bookmark.label : defaultLabel;
     const input = window.prompt(
-      mode === "rename" ? t2("bookmark.prompt.rename") : t2("bookmark.prompt.create"),
+      mode === "rename" ? t("bookmark.prompt.rename") : t("bookmark.prompt.create"),
       initial
     );
     if (input === null) return;
@@ -10669,7 +10034,7 @@ function TurnBookmarkButton(props) {
         });
         window.dispatchEvent(new CustomEvent("dsh-memory-evolve:bookmarks-change"));
       }).catch((error) => {
-        window.alert(t2("bookmark.error", { message: error.message }));
+        window.alert(t("bookmark.error", { message: error.message }));
       }).finally(() => setBusy(false));
     } else if (bookmark !== null) {
       void api7("", {
@@ -10684,7 +10049,7 @@ function TurnBookmarkButton(props) {
         });
         window.dispatchEvent(new CustomEvent("dsh-memory-evolve:bookmarks-change"));
       }).catch((error) => {
-        window.alert(t2("bookmark.error", { message: error.message }));
+        window.alert(t("bookmark.error", { message: error.message }));
       }).finally(() => setBusy(false));
     } else {
       setBusy(false);
@@ -10693,7 +10058,7 @@ function TurnBookmarkButton(props) {
   const remove = () => {
     const sessionId = resolveSessionId(props.sessionId);
     if (bookmark === null) return;
-    if (!window.confirm(t2("bookmark.confirm.delete", { label: bookmark.label }))) return;
+    if (!window.confirm(t("bookmark.confirm.delete", { label: bookmark.label }))) return;
     setBusy(true);
     setMenuOpen(false);
     void api7("", {
@@ -10703,11 +10068,11 @@ function TurnBookmarkButton(props) {
       setBookmark(null);
       window.dispatchEvent(new CustomEvent("dsh-memory-evolve:bookmarks-change"));
     }).catch((error) => {
-      window.alert(t2("bookmark.error", { message: error.message }));
+      window.alert(t("bookmark.error", { message: error.message }));
     }).finally(() => setBusy(false));
   };
   const bookmarked = bookmark !== null;
-  const title = bookmarked ? t2("bookmark.star.title.on", { label: bookmark.label }) : t2("bookmark.star.title.off");
+  const title = bookmarked ? t("bookmark.star.title.on", { label: bookmark.label }) : t("bookmark.star.title.off");
   return /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "bm-star-wrap", ref: wrapRef, "data-bm-anchor": anchorKey, children: [
     /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(
       "button",
@@ -10729,8 +10094,8 @@ function TurnBookmarkButton(props) {
       }
     ),
     menuOpen && bookmarked && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "bm-star-menu", role: "menu", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("button", { type: "button", role: "menuitem", onClick: () => createOrRename("rename"), children: t2("bookmark.menu.rename") }),
-      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("button", { type: "button", role: "menuitem", className: "bm-danger", onClick: remove, children: t2("bookmark.menu.delete") })
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("button", { type: "button", role: "menuitem", onClick: () => createOrRename("rename"), children: t("bookmark.menu.rename") }),
+      /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("button", { type: "button", role: "menuitem", className: "bm-danger", onClick: remove, children: t("bookmark.menu.delete") })
     ] })
   ] });
 }
@@ -10938,7 +10303,6 @@ var VIRT_PAD = 280;
 var FLASH_MS = 1400;
 var HIGHLIGHT_MS = 1800;
 var CURRENT_SESSION_ID = "sess-demo-current";
-var CURRENT_SESSION_LABEL = "\u5F53\u524D\u4F1A\u8BDD";
 var CURRENT_PROJECT_ID = "proj-demo";
 var CURRENT_PROJECT_LABEL = "dsh-memory-evolve";
 var AI_ZONE = { x: 80, y: 40, width: 560, height: 300 };
@@ -10950,13 +10314,24 @@ var DEFAULT_SIZE = {
   media: { width: 320, height: 220 },
   file: { width: 260, height: 170 }
 };
-var TYPE_LABEL = {
-  folder: "\u6587\u4EF6\u5939",
-  markdown: "Markdown",
-  plainText: "\u7EAF\u6587\u672C",
-  image: "\u56FE\u7247",
-  media: "\u97F3\u89C6\u9891",
-  file: "\u6587\u4EF6"
+var TYPE_LABEL_KEYS = {
+  folder: "canvas.type.folder",
+  markdown: "canvas.type.markdown",
+  plainText: "canvas.type.plainText",
+  image: "canvas.type.image",
+  media: "canvas.type.media",
+  file: "canvas.type.file"
+};
+function typeLabel(type, t) {
+  return t(TYPE_LABEL_KEYS[type]);
+}
+var TYPE_SEARCH_TERMS = {
+  folder: ["\u6587\u4EF6\u5939", "folder", "\u76EE\u5F55", "directory"],
+  markdown: ["markdown", "md"],
+  plainText: ["\u7EAF\u6587\u672C", "plain text", "plaintext", "txt", "text"],
+  image: ["\u56FE\u7247", "image", "picture", "photo"],
+  media: ["\u97F3\u89C6\u9891", "media", "audio", "video"],
+  file: ["\u6587\u4EF6", "file"]
 };
 var TYPE_GLYPH = {
   folder: "\u{1F4C1}",
@@ -11015,25 +10390,25 @@ function inferTypeFromPath(path) {
   const ext = base.split(".").pop()?.toLowerCase() ?? "";
   return EXT_TYPE[ext] ?? "file";
 }
-function titleFromPath(path) {
+function titleFromPath(path, t) {
   const cleaned = normalizePath(path).replace(/\\/g, "/").replace(/\/+$/, "");
   const base = cleaned.split("/").pop();
-  return base && base.length > 0 ? base : cleaned || "\u672A\u547D\u540D";
+  return base && base.length > 0 ? base : cleaned || t("canvas.node.unnamed");
 }
 function toReferenceText(node) {
   return `[canvas:${node.id}] ${node.title}`;
 }
-function scopeBadgeText(node, currentSessionId) {
-  if (node.scope === "global") return `\u{1F310} ${node.scopeLabel || "\u5168\u5C40"}`;
+function scopeBadgeText(node, currentSessionId, t) {
+  if (node.scope === "global") return `\u{1F310} ${node.scopeLabel || t("canvas.scope.global")}`;
   if (node.scope === "project") return `\u{1F4C1} ${node.scopeLabel}`;
   if (currentSessionId && node.sessionId && node.sessionId === currentSessionId) {
-    return `\u{1F4AC} \u5F53\u524D\u4F1A\u8BDD`;
+    return `\u{1F4AC} ${t("canvas.scope.currentSession")}`;
   }
   if (node.sessionId) {
     const name = node.sessionName || shortSessionId(node.sessionId);
-    return `\u{1F4AC} \u5176\u4ED6\u4F1A\u8BDD ${name}`;
+    return `\u{1F4AC} ${t("canvas.scope.otherSession")} ${name}`;
   }
-  return `\u{1F4AC} ${node.scopeLabel || "\u4F1A\u8BDD"}`;
+  return `\u{1F4AC} ${node.scopeLabel || t("canvas.scope.session")}`;
 }
 function shortSessionId(sessionId) {
   const m = /^session-(.+)$/.exec(sessionId);
@@ -11052,8 +10427,8 @@ function isNodeVisible(node, viewMode, sessionId = CURRENT_SESSION_ID, projectId
 function matchesQuery(node, query) {
   const q = query.trim().toLowerCase();
   if (!q) return true;
-  const typeName = TYPE_LABEL[node.type];
-  return node.title.toLowerCase().includes(q) || node.type.toLowerCase().includes(q) || typeName.toLowerCase().includes(q) || (node.path?.toLowerCase().includes(q) ?? false) || node.id.toLowerCase().includes(q);
+  const typeNames = TYPE_SEARCH_TERMS[node.type];
+  return node.title.toLowerCase().includes(q) || node.type.toLowerCase().includes(q) || typeNames.some((name) => name.toLowerCase().includes(q)) || (node.path?.toLowerCase().includes(q) ?? false) || node.id.toLowerCase().includes(q);
 }
 function clamp2(n, min, max) {
   return Math.min(max, Math.max(min, n));
@@ -11107,8 +10482,8 @@ async function copyText(text) {
     return false;
   }
 }
-async function saveTextToFile(title, content) {
-  const safeName = sanitizeFileName(title) || "\u4FBF\u7B7E";
+async function saveTextToFile(title, content, t) {
+  const safeName = sanitizeFileName(title) || t("canvas.note.defaultName");
   const fileName = /\.(md|txt)$/i.test(safeName) ? safeName : `${safeName}.md`;
   const picker = window.showSaveFilePicker;
   if (typeof picker === "function") {
@@ -11116,7 +10491,7 @@ async function saveTextToFile(title, content) {
       const handle = await picker({
         suggestedName: fileName,
         types: [{
-          description: "Markdown \u6587\u672C",
+          description: t("canvas.save.markdownText"),
           accept: { "text/markdown": [".md", ".txt"] }
         }]
       });
@@ -11140,7 +10515,7 @@ async function saveTextToFile(title, content) {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 5e3);
-    return { ok: true, message: "\u5DF2\u4E0B\u8F7D\u5230\u6D4F\u89C8\u5668\u9ED8\u8BA4\u4E0B\u8F7D\u76EE\u5F55" };
+    return { ok: true, message: t("canvas.save.downloaded") };
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
@@ -11162,6 +10537,13 @@ function isTypingTarget(target) {
 
 // src/client/canvas-grok/api-client.ts
 var API_BASE = "/memory-evolve/api/canvas";
+function canvasErrorText(code, t) {
+  return t(`canvas.error.${code}`);
+}
+function apiErrorText(result, t) {
+  if (typeof result.error === "string" && result.error !== "") return result.error;
+  return result.code === void 0 ? t("canvas.error.unknown") : canvasErrorText(result.code, t);
+}
 var availability = null;
 async function detectBackend() {
   if (availability !== null) return availability;
@@ -11214,18 +10596,18 @@ async function saveCanvasToBackend(state, rev, sessionId) {
       })
     });
     if (res.status === 409) {
-      return { ok: false, conflict: true, error: "\u753B\u677F\u5DF2\u88AB\u5176\u4ED6\u4F1A\u8BDD\u4FEE\u6539" };
+      return { ok: false, conflict: true, code: "conflict" };
     }
     if (!res.ok) {
       const body2 = await res.json().catch(() => null);
       const error = body2 && typeof body2 === "object" && typeof body2.error === "string" ? body2.error : `HTTP ${res.status}`;
-      return { ok: false, error };
+      return { ok: false, error, code: "http" };
     }
     const body = await res.json();
     const revNext = body && typeof body === "object" && typeof body.rev === "number" ? body.rev : rev + 1;
     return { ok: true, rev: revNext };
   } catch {
-    return { ok: false, error: "\u7F51\u7EDC\u9519\u8BEF\uFF08\u5BBF\u4E3B\u4E0D\u53EF\u8FBE\uFF09" };
+    return { ok: false, code: "unreachable" };
   }
 }
 async function searchFilesBackend(query, opts = {}) {
@@ -11261,11 +10643,11 @@ async function openNodePathBackend(endpoint, nodeId) {
     if (!res.ok) {
       const body = await res.json().catch(() => null);
       const error = body && typeof body === "object" && typeof body.error === "string" ? body.error : `HTTP ${res.status}`;
-      return { ok: false, error };
+      return { ok: false, error, code: "http" };
     }
     return { ok: true };
   } catch {
-    return { ok: false, error: "\u7F51\u7EDC\u9519\u8BEF\uFF08\u5BBF\u4E3B\u4E0D\u53EF\u8FBE\uFF09" };
+    return { ok: false, code: "unreachable" };
   }
 }
 function fileProxyUrl(nodeId) {
@@ -11279,12 +10661,12 @@ async function migrateNodeBackend(nodeId, scope, sessionId, rev) {
       body: JSON.stringify({ nodeId, scope, sessionId, rev })
     });
     if (res.status === 409) {
-      return { ok: false, conflict: true, error: "\u753B\u677F\u5DF2\u88AB\u5176\u4ED6\u4F1A\u8BDD\u4FEE\u6539\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5" };
+      return { ok: false, conflict: true, code: "conflict" };
     }
     if (!res.ok) {
       const body2 = await res.json().catch(() => null);
       const error = body2 && typeof body2 === "object" && typeof body2.error === "string" ? body2.error : `HTTP ${res.status}`;
-      return { ok: false, error };
+      return { ok: false, error, code: "http" };
     }
     const body = await res.json();
     const row = body;
@@ -11294,7 +10676,7 @@ async function migrateNodeBackend(nodeId, scope, sessionId, rev) {
       rev: typeof row.rev === "number" ? row.rev : void 0
     };
   } catch {
-    return { ok: false, error: "\u7F51\u7EDC\u9519\u8BEF\uFF08\u5BBF\u4E3B\u4E0D\u53EF\u8FBE\uFF09" };
+    return { ok: false, code: "unreachable" };
   }
 }
 
@@ -11308,7 +10690,7 @@ function extOf(path) {
   return base.slice(i + 1).toUpperCase().slice(0, 6);
 }
 function CardBody(props) {
-  const { node, backendReady, onChangeContent } = props;
+  const { t, node, backendReady, onChangeContent } = props;
   const hue = placeholderHue(node.id);
   if (node.type === "markdown" || node.type === "plainText") {
     return /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
@@ -11318,7 +10700,7 @@ function CardBody(props) {
         {
           className: "cg-editor",
           value: node.content ?? "",
-          placeholder: node.type === "markdown" ? "\u5199\u4E00\u6BB5 Markdown\u2026" : "\u5199\u4E00\u6BB5\u7EAF\u6587\u672C\u2026",
+          placeholder: node.type === "markdown" ? t("canvas.card.editorMarkdown") : t("canvas.card.editorPlain"),
           onPointerDown: (e) => e.stopPropagation(),
           onWheel: (e) => e.stopPropagation(),
           onChange: (e) => onChangeContent(node.id, e.target.value)
@@ -11348,7 +10730,7 @@ function CardBody(props) {
           },
           children: [
             "\u{1F5BC}",
-            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("small", { children: "\u56FE\u7247\u9884\u89C8" })
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("small", { children: t("canvas.card.imagePreview") })
           ]
         }
       ),
@@ -11368,7 +10750,7 @@ function CardBody(props) {
           },
           children: [
             "\u25B6",
-            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("small", { children: isAudio ? "\u97F3\u9891" : "\u89C6\u9891" })
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("small", { children: isAudio ? t("canvas.card.audio") : t("canvas.card.video") })
           ]
         }
       ),
@@ -11380,15 +10762,15 @@ function CardBody(props) {
       /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("div", { className: "cg-ph", style: { fontSize: 32, minHeight: 56 }, children: "\u{1F4C1}" }),
       node.path ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("div", { className: "cg-card-path", title: node.path, children: node.path }) : null,
       /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "cg-card-meta", children: [
-        node.meta?.size ?? "\u6587\u4EF6\u5939",
-        " \xB7 \u6682\u4E0D\u652F\u6301\u5185\u5D4C\u6D4F\u89C8"
+        node.meta?.size ?? t("canvas.type.folder"),
+        t("canvas.card.folderNoBrowse")
       ] })
     ] });
   }
   return /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
     /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "cg-file-ext", children: extOf(node.path) }),
     node.path ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("div", { className: "cg-card-path", title: node.path, children: node.path }) : null,
-    /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("div", { className: "cg-card-meta", children: [node.meta?.size, node.meta?.mtime].filter(Boolean).join(" \xB7 ") || TYPE_LABEL[node.type] })
+    /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("div", { className: "cg-card-meta", children: [node.meta?.size, node.meta?.mtime].filter(Boolean).join(" \xB7 ") || typeLabel(node.type, t) })
   ] });
 }
 function CanvasCardInner(props) {
@@ -11432,31 +10814,31 @@ function CanvasCardInner(props) {
       children: [
         /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("header", { className: "cg-card-head", onPointerDown: onHeadPointerDown, children: [
           /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "cg-drag", "aria-hidden": true, children: "\u22EE\u22EE" }),
-          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "cg-type-glyph", title: TYPE_LABEL[node.type], children: TYPE_GLYPH[node.type] }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "cg-type-glyph", title: typeLabel(node.type, props.t), children: TYPE_GLYPH[node.type] }),
           /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("strong", { className: "cg-card-title", title: node.title, children: node.title }),
           /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("span", { className: "cg-badges", children: [
-            node.aiPlaced ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "cg-badge cg-badge-ai", children: "AI \u653E\u7F6E" }) : null,
-            node.unverified ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "cg-badge cg-badge-warn", children: "\u672A\u9A8C\u8BC1" }) : null,
-            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "cg-badge", title: scopeBadgeText(node, props.currentSessionId), children: scopeBadgeText(node, props.currentSessionId) })
+            node.aiPlaced ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "cg-badge cg-badge-ai", children: props.t("canvas.card.aiPlaced") }) : null,
+            node.unverified ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "cg-badge cg-badge-warn", children: props.t("canvas.card.unverified") }) : null,
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { className: "cg-badge", title: scopeBadgeText(node, props.currentSessionId, props.t), children: scopeBadgeText(node, props.currentSessionId, props.t) })
           ] })
         ] }),
         lod ? /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("div", { className: "cg-lod", children: [
           TYPE_GLYPH[node.type],
           /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("span", { children: node.title })
         ] }) : /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)(import_jsx_runtime23.Fragment, { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("div", { className: "cg-card-body", children: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(CardBody, { node, backendReady: props.backendReady, onChangeContent: props.onChangeContent }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("div", { className: "cg-card-body", children: /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(CardBody, { t: props.t, node, backendReady: props.backendReady, onChangeContent: props.onChangeContent }) }),
           /* @__PURE__ */ (0, import_jsx_runtime23.jsxs)("footer", { className: "cg-card-foot", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", onClick: () => props.onPreview(node.id), children: "\u9884\u89C8" }),
-            (node.type === "markdown" || node.type === "plainText") && node.content ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", className: "cg-open", onClick: () => props.onSave(node.id), title: "\u4FDD\u5B58\u5185\u5BB9\u5230\u672C\u673A\u6587\u4EF6", children: "\u4FDD\u5B58" }) : null,
-            node.path ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", className: "cg-open", onClick: () => props.onOpen(node.id), title: "\u7528\u7CFB\u7EDF\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00", children: "\u6253\u5F00" }) : null,
-            node.path ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", className: "cg-open", onClick: () => props.onOpenFolder(node.id), title: "\u5728\u7CFB\u7EDF\u6587\u4EF6\u7BA1\u7406\u5668\u4E2D\u6253\u5F00\u8BE5\u6587\u4EF6\u6240\u5728\u7684\u6587\u4EF6\u5939\uFF08Finder / \u8D44\u6E90\u7BA1\u7406\u5668\uFF09", children: "\u6240\u5728\u6587\u4EF6\u5939" }) : null,
-            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", onClick: () => props.onMigrate(node.id), title: "\u8FC1\u79FB\u8282\u70B9\u5F52\u5C5E\uFF08\u672C\u4F1A\u8BDD/\u672C\u9879\u76EE/\u6240\u6709\u9879\u76EE\u53EF\u89C1\uFF09", children: "\u5F52\u5C5E" }),
-            props.openSession && node.scope === "session" && node.sessionId && node.sessionId !== props.currentSessionId ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", className: "cg-open", onClick: () => props.openSession?.(node.sessionId), title: "\u8DF3\u8F6C\u5230\u8BE5\u8282\u70B9\u6240\u5C5E\u4F1A\u8BDD", children: "\u8DF3\u8F6C" }) : null,
-            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", onClick: () => props.onCopy(node.id, "id"), children: "\u590D\u5236 ID" }),
-            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", onClick: () => props.onCopy(node.id, "title"), children: "\u590D\u5236\u6807\u9898" }),
-            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", onClick: () => props.onCopy(node.id, "path"), disabled: !node.path, children: "\u590D\u5236\u8DEF\u5F84" }),
-            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", onClick: () => props.onCopy(node.id, "ref"), children: "\u5F15\u7528" }),
-            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", className: "cg-danger", onClick: () => props.onAskRemove(node.id), children: "\u79FB\u9664" })
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", onClick: () => props.onPreview(node.id), children: props.t("canvas.card.preview") }),
+            (node.type === "markdown" || node.type === "plainText") && node.content ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", className: "cg-open", onClick: () => props.onSave(node.id), title: props.t("canvas.card.saveTitle"), children: props.t("canvas.card.save") }) : null,
+            node.path ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", className: "cg-open", onClick: () => props.onOpen(node.id), title: props.t("canvas.card.openTitle"), children: props.t("canvas.card.open") }) : null,
+            node.path ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", className: "cg-open", onClick: () => props.onOpenFolder(node.id), title: props.t("canvas.card.openFolderTitle"), children: props.t("canvas.card.openFolder") }) : null,
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", onClick: () => props.onMigrate(node.id), title: props.t("canvas.card.migrateTitle"), children: props.t("canvas.card.migrate") }),
+            props.openSession && node.scope === "session" && node.sessionId && node.sessionId !== props.currentSessionId ? /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", className: "cg-open", onClick: () => props.openSession?.(node.sessionId), title: props.t("canvas.card.jumpTitle"), children: props.t("canvas.card.jump") }) : null,
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", onClick: () => props.onCopy(node.id, "id"), children: props.t("canvas.card.copyId") }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", onClick: () => props.onCopy(node.id, "title"), children: props.t("canvas.card.copyTitle") }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", onClick: () => props.onCopy(node.id, "path"), disabled: !node.path, children: props.t("canvas.card.copyPath") }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", onClick: () => props.onCopy(node.id, "ref"), children: props.t("canvas.card.copyRef") }),
+            /* @__PURE__ */ (0, import_jsx_runtime23.jsx)("button", { type: "button", className: "cg-danger", onClick: () => props.onAskRemove(node.id), children: props.t("canvas.card.remove") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime23.jsx)(
@@ -11464,8 +10846,8 @@ function CanvasCardInner(props) {
           {
             type: "button",
             className: "cg-resize-handle",
-            "aria-label": "\u62D6\u52A8\u8C03\u6574\u5361\u7247\u5927\u5C0F",
-            title: "\u62D6\u52A8\u8C03\u6574\u5927\u5C0F",
+            "aria-label": props.t("canvas.card.resizeAria"),
+            title: props.t("canvas.card.resizeTitle"),
             onPointerDown: onResizePointerDown
           }
         )
@@ -11713,12 +11095,13 @@ function CanvasBoard(props) {
                 width: AI_ZONE.width,
                 height: AI_ZONE.height
               },
-              children: /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("span", { className: "cg-ai-zone-label", children: "AI \u4FBF\u7B7E\u533A \xB7 AI \u65B0\u653E\u7684\u4FBF\u7B7E\u843D\u5728\u8FD9\u91CC\uFF0C\u53EF\u62D6\u8D70" })
+              children: /* @__PURE__ */ (0, import_jsx_runtime24.jsx)("span", { className: "cg-ai-zone-label", children: props.t("canvas.board.aiZone") })
             }
           ),
           visibleNodes.map((node) => /* @__PURE__ */ (0, import_jsx_runtime24.jsx)(
             CanvasCard,
             {
+              t: props.t,
               node,
               lod: props.lod,
               selected: props.selectedId === node.id,
@@ -11744,11 +11127,9 @@ function CanvasBoard(props) {
           ))
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime24.jsxs)("div", { className: "cg-hint-bar", children: [
-          "\u62D6\u7A7A\u767D\u5904\u5E73\u79FB \xB7 \u7A7A\u683C+\u62D6 \u4E5F\u53EF\u5E73\u79FB \xB7 \u6EDA\u8F6E\u7F29\u653E\uFF08\u4E2D\u5FC3\u4E3A\u6307\u9488\uFF09\xB7 \u7F29\u653E ",
-          Math.round(props.viewport.scale * 100),
-          "%",
-          props.lod ? " \xB7 \u8FDC\u770B\u7B80\u5316\u6A21\u5F0F" : "",
-          visibleNodes.length < props.nodes.length ? ` \xB7 \u89C6\u53E3 ${visibleNodes.length}/${props.nodes.length}` : ""
+          props.t("canvas.board.hint", { percent: Math.round(props.viewport.scale * 100) }),
+          props.lod ? props.t("canvas.board.lod") : "",
+          visibleNodes.length < props.nodes.length ? props.t("canvas.board.viewport", { visible: visibleNodes.length, total: props.nodes.length }) : ""
         ] })
       ]
     }
@@ -11759,20 +11140,21 @@ function CanvasBoard(props) {
 var import_react23 = require("react");
 var import_jsx_runtime25 = require("react/jsx-runtime");
 function PathDialog(props) {
+  const { t } = props;
   const [path, setPath] = (0, import_react23.useState)("");
   const guessed = inferTypeFromPath(path);
-  return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog", role: "dialog", "aria-label": "\u8DEF\u5F84\u4E0A\u677F", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("h3", { children: "\u8DEF\u5F84\u4E0A\u677F" }),
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("p", { children: "\u7C98\u8D34\u672C\u5730\u8DEF\u5F84\u5373\u53EF\u751F\u6210\u5361\u7247\u3002\u6682\u4E0D\u6821\u9A8C\u6587\u4EF6\u662F\u5426\u5B58\u5728\uFF0C\u5361\u7247\u4F1A\u6807\u300C\u672A\u9A8C\u8BC1\u300D\u3002" }),
+  return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog", role: "dialog", "aria-label": t("canvas.dialog.path.title"), children: [
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("h3", { children: t("canvas.dialog.path.title") }),
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("p", { children: t("canvas.dialog.path.desc") }),
     /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-field", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("label", { htmlFor: "cg-path-input", children: "\u672C\u5730\u8DEF\u5F84" }),
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("label", { htmlFor: "cg-path-input", children: t("canvas.dialog.path.label") }),
       /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
         "input",
         {
           id: "cg-path-input",
           autoFocus: true,
           value: path,
-          placeholder: "/Users/me/Documents/\u5408\u540C.pdf",
+          placeholder: "/Users/me/Documents/contract.pdf",
           onChange: (e) => setPath(e.target.value),
           onKeyDown: (e) => {
             if (e.key === "Enter" && path.trim()) props.onPath({ path });
@@ -11781,14 +11163,9 @@ function PathDialog(props) {
         }
       )
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-hint", children: [
-      "\u5C06\u8BC6\u522B\u4E3A\uFF1A",
-      TYPE_GLYPH[guessed],
-      " ",
-      TYPE_LABEL[guessed]
-    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "cg-hint", children: t("canvas.dialog.path.detected", { glyph: TYPE_GLYPH[guessed], label: typeLabel(guessed, t) }) }),
     /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog-actions", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-ghost", onClick: props.onClose, children: "\u53D6\u6D88" }),
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-ghost", onClick: props.onClose, children: t("canvas.action.cancel") }),
       /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
         "button",
         {
@@ -11796,25 +11173,26 @@ function PathDialog(props) {
           className: "cg-btn cg-primary",
           disabled: !path.trim(),
           onClick: () => props.onPath({ path }),
-          children: "\u4E0A\u677F"
+          children: t("canvas.action.pin")
         }
       )
     ] })
   ] });
 }
 function NoteDialog(props) {
-  const [title, setTitle] = (0, import_react23.useState)("\u672A\u547D\u540D\u4FBF\u7B7E");
+  const { t } = props;
+  const [title, setTitle] = (0, import_react23.useState)(t("canvas.dialog.note.defaultTitle"));
   const [type, setType] = (0, import_react23.useState)("markdown");
   const [content, setContent] = (0, import_react23.useState)("");
-  return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog", role: "dialog", "aria-label": "\u65B0\u5EFA\u4FBF\u7B7E", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("h3", { children: "\u4FBF\u7B7E\u4E0A\u677F" }),
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("p", { children: "\u5185\u5BB9\u5B58\u5728\u753B\u677F\u91CC\uFF0C\u4E0D\u6307\u5411\u4EFB\u4F55\u6587\u4EF6\u3002" }),
+  return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog", role: "dialog", "aria-label": t("canvas.dialog.note.aria"), children: [
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("h3", { children: t("canvas.dialog.note.title") }),
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("p", { children: t("canvas.dialog.note.desc") }),
     /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-field", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("label", { htmlFor: "cg-note-title", children: "\u6807\u9898" }),
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("label", { htmlFor: "cg-note-title", children: t("canvas.dialog.field.title") }),
       /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("input", { id: "cg-note-title", autoFocus: true, value: title, onChange: (e) => setTitle(e.target.value) })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-field", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("label", { htmlFor: "cg-note-type", children: "\u7C7B\u578B" }),
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("label", { htmlFor: "cg-note-type", children: t("canvas.dialog.field.type") }),
       /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)(
         "select",
         {
@@ -11823,30 +11201,31 @@ function NoteDialog(props) {
           onChange: (e) => setType(e.target.value === "plainText" ? "plainText" : "markdown"),
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("option", { value: "markdown", children: "Markdown" }),
-            /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("option", { value: "plainText", children: "\u7EAF\u6587\u672C" })
+            /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("option", { value: "plainText", children: t("canvas.type.plainText") })
           ]
         }
       )
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-field", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("label", { htmlFor: "cg-note-body", children: "\u5185\u5BB9" }),
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("label", { htmlFor: "cg-note-body", children: t("canvas.dialog.field.content") }),
       /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("textarea", { id: "cg-note-body", value: content, onChange: (e) => setContent(e.target.value) })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog-actions", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-ghost", onClick: props.onClose, children: "\u53D6\u6D88" }),
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-ghost", onClick: props.onClose, children: t("canvas.action.cancel") }),
       /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
         "button",
         {
           type: "button",
           className: "cg-btn cg-primary",
-          onClick: () => props.onNote({ title: title.trim() || "\u672A\u547D\u540D\u4FBF\u7B7E", type, content }),
-          children: "\u4E0A\u677F"
+          onClick: () => props.onNote({ title: title.trim() || t("canvas.dialog.note.defaultTitle"), type, content }),
+          children: t("canvas.action.pin")
         }
       )
     ] })
   ] });
 }
 function CatalogDialog(props) {
+  const { t } = props;
   const [q, setQ] = (0, import_react23.useState)("");
   const [scope, setScope] = (0, import_react23.useState)("local");
   const [remoteRows, setRemoteRows] = (0, import_react23.useState)(null);
@@ -11868,9 +11247,9 @@ function CatalogDialog(props) {
       if (searchSeq.current !== seq) return;
       setSearching(false);
       setRemoteRows(rows2);
-      if (rows2 === null) setSearchError("\u672C\u5730\u641C\u7D22\u4E0D\u53EF\u7528");
+      if (rows2 === null) setSearchError(t("canvas.dialog.catalog.error"));
     });
-  }, [props.backendReady, props.sessionId, q, scope]);
+  }, [props.backendReady, props.sessionId, q, scope, t]);
   const changeScope = (0, import_react23.useCallback)((next) => {
     if (next === scope) return;
     searchSeq.current++;
@@ -11880,11 +11259,11 @@ function CatalogDialog(props) {
     setSearching(false);
   }, [scope]);
   const rows = props.backendReady && remoteRows !== null ? remoteRows : [];
-  return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog", role: "dialog", "aria-label": "\u641C\u7D22\u4E0A\u677F", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("h3", { children: "\u641C\u7D22\u4E0A\u677F" }),
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("p", { children: "\u641C\u7D22\u672C\u673A\u6587\u4EF6\uFF0C\u9009\u4E2D\u5373\u4E0A\u677F\u3002" }),
+  return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog", role: "dialog", "aria-label": t("canvas.dialog.catalog.title"), children: [
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("h3", { children: t("canvas.dialog.catalog.title") }),
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("p", { children: t("canvas.dialog.catalog.desc") }),
     /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-field", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("label", { htmlFor: "cg-cat-q", children: "\u5173\u952E\u5B57" }),
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("label", { htmlFor: "cg-cat-q", children: t("canvas.dialog.catalog.keyword") }),
       /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-search-row", children: [
         /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
           "input",
@@ -11892,24 +11271,24 @@ function CatalogDialog(props) {
             id: "cg-cat-q",
             autoFocus: true,
             value: q,
-            placeholder: "\u5408\u540C / \u8BBE\u8BA1\u7A3F / \u5F55\u97F3\u2026",
+            placeholder: t("canvas.dialog.catalog.placeholder"),
             onChange: (e) => setQ(e.target.value),
             onKeyDown: (e) => {
               if (e.key === "Enter") runSearch();
             }
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-primary", onClick: runSearch, disabled: !q.trim(), children: "\u641C\u7D22" })
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-primary", onClick: runSearch, disabled: !q.trim(), children: t("canvas.action.search") })
       ] })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-seg cg-scope", role: "group", "aria-label": "\u641C\u7D22\u8303\u56F4", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: scope === "local" ? "cg-on" : "", onClick: () => changeScope("local"), children: "\u672C\u673A\u5168\u90E8" }),
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: scope === "project" ? "cg-on" : "", onClick: () => changeScope("project"), children: "\u5F53\u524D\u9879\u76EE" })
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-seg cg-scope", role: "group", "aria-label": t("canvas.dialog.catalog.scopeAria"), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: scope === "local" ? "cg-on" : "", onClick: () => changeScope("local"), children: t("canvas.dialog.catalog.scopeLocal") }),
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: scope === "project" ? "cg-on" : "", onClick: () => changeScope("project"), children: t("canvas.dialog.catalog.scopeProject") })
     ] }),
-    searching ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "cg-hint", children: "\u641C\u7D22\u4E2D\u2026" }) : null,
+    searching ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "cg-hint", children: t("canvas.dialog.catalog.searching") }) : null,
     searchError ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "cg-hint cg-hint-error", children: searchError }) : null,
     /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-catalog", children: [
-      !searching && rows.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "cg-hint", children: q.trim() ? "\u6CA1\u6709\u5339\u914D\u7684\u6587\u4EF6" : "\u8F93\u5165\u5173\u952E\u5B57\u641C\u7D22\u672C\u673A\u6587\u4EF6" }) : null,
+      !searching && rows.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "cg-hint", children: q.trim() ? t("canvas.dialog.catalog.noMatch") : t("canvas.dialog.catalog.prompt") }) : null,
       rows.map((item) => /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)(
         "button",
         {
@@ -11931,25 +11310,25 @@ function CatalogDialog(props) {
         item.path
       ))
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "cg-dialog-actions", children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-ghost", onClick: props.onClose, children: "\u5173\u95ED" }) })
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "cg-dialog-actions", children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-ghost", onClick: props.onClose, children: t("canvas.action.close") }) })
   ] });
 }
 function PreviewDialog(props) {
-  const { node } = props;
+  const { t, node } = props;
   const light = node.type === "markdown" || node.type === "plainText" || node.type === "image" || node.type === "media";
   const hue = placeholderHue(node.id);
   const proxyUrl = props.backendReady ? fileProxyUrl(node.id) : "";
-  return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog cg-dialog-wide", role: "dialog", "aria-label": "\u9884\u89C8", children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog cg-dialog-wide", role: "dialog", "aria-label": t("canvas.dialog.preview.aria"), children: [
     /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("h3", { children: [
       TYPE_GLYPH[node.type],
       " ",
       node.title
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("p", { children: [
-      node.path ?? "\u753B\u677F\u5185\u4FBF\u7B7E",
-      node.unverified ? " \xB7 \u8DEF\u5F84\u672A\u9A8C\u8BC1" : ""
+      node.path ?? t("canvas.dialog.preview.noteOnly"),
+      node.unverified ? t("canvas.dialog.preview.unverified") : ""
     ] }),
-    node.type === "markdown" || node.type === "plainText" ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "cg-preview-body", children: node.content || "\uFF08\u7A7A\u5185\u5BB9\uFF09" }) : null,
+    node.type === "markdown" || node.type === "plainText" ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "cg-preview-body", children: node.content || t("canvas.dialog.preview.empty") }) : null,
     node.type === "image" ? proxyUrl ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("img", { className: "cg-preview-img", src: proxyUrl, alt: node.title, loading: "lazy", decoding: "async" }) : /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)(
       "div",
       {
@@ -11960,7 +11339,7 @@ function PreviewDialog(props) {
         },
         children: [
           "\u{1F5BC}",
-          /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("small", { children: "\u542F\u7528\u753B\u677F\u6A21\u5757\u540E\u53EF\u9884\u89C8\u771F\u5B9E\u56FE\u7247" })
+          /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("small", { children: t("canvas.dialog.preview.enableImage") })
         ]
       }
     ) : null,
@@ -11974,67 +11353,68 @@ function PreviewDialog(props) {
         },
         children: [
           "\u25B6",
-          /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("small", { children: "\u542F\u7528\u753B\u677F\u6A21\u5757\u540E\u53EF\u64AD\u653E\u771F\u5B9E\u6587\u4EF6" })
+          /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("small", { children: t("canvas.dialog.preview.enableMedia") })
         ]
       }
     ) : null,
     !light ? /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { children: [
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("p", { children: "\u6B64\u7C7B\u7D20\u6750\u6682\u4E0D\u5728\u6D4F\u89C8\u5668\u5185\u6E32\u67D3\uFF08Word / PDF / \u6587\u4EF6\u5939\u7B49\uFF09\u3002" }),
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("p", { children: t("canvas.dialog.preview.unsupported") }),
       node.path ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(
         "button",
         {
           type: "button",
           className: "cg-btn cg-ghost",
           onClick: () => props.onOpen(node.id),
-          children: "\u7528\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00"
+          children: t("canvas.action.openDefault")
         }
       ) : null
     ] }) : null,
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "cg-dialog-actions", children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-primary", onClick: props.onClose, children: "\u5173\u95ED" }) })
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("div", { className: "cg-dialog-actions", children: /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-primary", onClick: props.onClose, children: t("canvas.action.close") }) })
   ] });
 }
 function RemoveDialog(props) {
-  return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog", role: "dialog", "aria-label": "\u786E\u8BA4\u79FB\u9664", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("h3", { children: "\u4ECE\u753B\u677F\u79FB\u9664\uFF1F" }),
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("p", { children: [
-      "\u5C06\u79FB\u9664\u300C",
-      props.node.title,
-      "\u300D\u3002\u53EA\u4ECE\u753B\u677F\u62FF\u6389\uFF0C\u4E0D\u5220\u9664\u6E90\u6587\u4EF6",
-      props.node.path ? `\uFF08${props.node.path}\uFF09` : "",
-      "\u3002"
-    ] }),
+  const { t, node } = props;
+  return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog", role: "dialog", "aria-label": t("canvas.dialog.remove.aria"), children: [
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("h3", { children: t("canvas.dialog.remove.title") }),
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("p", { children: node.path ? t("canvas.dialog.remove.bodyWithPath", { title: node.title, path: node.path }) : t("canvas.dialog.remove.body", { title: node.title }) }),
     /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog-actions", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-ghost", onClick: props.onClose, children: "\u53D6\u6D88" }),
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-primary", onClick: props.onConfirm, children: "\u79FB\u9664" })
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-ghost", onClick: props.onClose, children: t("canvas.action.cancel") }),
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-primary", onClick: props.onConfirm, children: t("canvas.action.remove") })
     ] })
   ] });
 }
 function MigrateDialog(props) {
+  const { t } = props;
   const [scope, setScope] = (0, import_react23.useState)(props.node.scope === "global" ? "global" : props.node.scope === "project" ? "project" : "session");
-  return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog", role: "dialog", "aria-label": "\u8FC1\u79FB\u5F52\u5C5E", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("h3", { children: "\u8FC1\u79FB\u5F52\u5C5E" }),
-    /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("p", { children: [
-      "\u300C",
-      props.node.title,
-      "\u300D\u5C06\u79FB\u52A8\u5230\uFF1A"
-    ] }),
+  return /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog", role: "dialog", "aria-label": t("canvas.dialog.migrate.title"), children: [
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("h3", { children: t("canvas.dialog.migrate.title") }),
+    /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("p", { children: t("canvas.dialog.migrate.body", { title: props.node.title }) }),
     /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-migrate-opts", children: [
       /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("button", { type: "button", className: `cg-migrate-opt${scope === "session" ? " cg-on" : ""}`, onClick: () => setScope("session"), children: [
-        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("strong", { children: "\u{1F4AC} \u672C\u4F1A\u8BDD" }),
-        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("small", { children: "\u5F52\u5F53\u524D\u4F1A\u8BDD\uFF08\u5728\u522B\u7684\u4F1A\u8BDD\u6253\u5F00\u753B\u677F\u770B\u4E0D\u5230\u5B83\uFF0C\u9664\u975E\u5207\u300C\u6240\u6709\u9879\u76EE\u300D\uFF09" })
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("strong", { children: [
+          "\u{1F4AC} ",
+          t("canvas.view.session")
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("small", { children: t("canvas.dialog.migrate.sessionDesc") })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("button", { type: "button", className: `cg-migrate-opt${scope === "project" ? " cg-on" : ""}`, onClick: () => setScope("project"), children: [
-        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("strong", { children: "\u{1F4C1} \u672C\u9879\u76EE" }),
-        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("small", { children: "\u9879\u76EE\u7EA7\uFF1A\u5F53\u524D\u9879\u76EE\u5185\u6240\u6709\u4F1A\u8BDD\u90FD\u80FD\u770B\u5230" })
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("strong", { children: [
+          "\u{1F4C1} ",
+          t("canvas.view.project")
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("small", { children: t("canvas.dialog.migrate.projectDesc") })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("button", { type: "button", className: `cg-migrate-opt${scope === "global" ? " cg-on" : ""}`, onClick: () => setScope("global"), children: [
-        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("strong", { children: "\u{1F310} \u6240\u6709\u9879\u76EE\u53EF\u89C1" }),
-        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("small", { children: "\u5168\u5C40\uFF1A\u4EFB\u4F55\u4F1A\u8BDD\u3001\u4EFB\u4F55\u89C6\u89D2\u90FD\u80FD\u770B\u5230" })
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("strong", { children: [
+          "\u{1F310} ",
+          t("canvas.dialog.migrate.globalLabel")
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("small", { children: t("canvas.dialog.migrate.globalDesc") })
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime25.jsxs)("div", { className: "cg-dialog-actions", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-ghost", onClick: props.onClose, children: "\u53D6\u6D88" }),
-      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-primary", onClick: () => props.onMigrate(props.node.id, scope), children: "\u8FC1\u79FB" })
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-ghost", onClick: props.onClose, children: t("canvas.action.cancel") }),
+      /* @__PURE__ */ (0, import_jsx_runtime25.jsx)("button", { type: "button", className: "cg-btn cg-primary", onClick: () => props.onMigrate(props.node.id, scope), children: t("canvas.action.migrate") })
     ] })
   ] });
 }
@@ -12048,12 +11428,12 @@ function CanvasDialogs(props) {
         if (e.target === e.currentTarget) props.onClose();
       },
       children: [
-        props.kind === "path" ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(PathDialog, { onClose: props.onClose, onPath: props.onPath }) : null,
-        props.kind === "note" ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(NoteDialog, { onClose: props.onClose, onNote: props.onNote }) : null,
-        props.kind === "catalog" ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(CatalogDialog, { onClose: props.onClose, onCatalog: props.onCatalog, backendReady: props.backendReady, sessionId: props.sessionId }) : null,
-        props.kind === "preview" && props.previewNode ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(PreviewDialog, { node: props.previewNode, onClose: props.onClose, onToast: props.onToast, backendReady: props.backendReady, onOpen: props.onOpen }) : null,
-        props.kind === "remove" && props.removeNode ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(RemoveDialog, { node: props.removeNode, onClose: props.onClose, onConfirm: props.onConfirmRemove }) : null,
-        props.kind === "migrate" && props.migrateNode ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(MigrateDialog, { node: props.migrateNode, onClose: props.onClose, onMigrate: props.onMigrate }) : null
+        props.kind === "path" ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(PathDialog, { t: props.t, onClose: props.onClose, onPath: props.onPath }) : null,
+        props.kind === "note" ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(NoteDialog, { t: props.t, onClose: props.onClose, onNote: props.onNote }) : null,
+        props.kind === "catalog" ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(CatalogDialog, { t: props.t, onClose: props.onClose, onCatalog: props.onCatalog, backendReady: props.backendReady, sessionId: props.sessionId }) : null,
+        props.kind === "preview" && props.previewNode ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(PreviewDialog, { t: props.t, node: props.previewNode, onClose: props.onClose, onToast: props.onToast, backendReady: props.backendReady, onOpen: props.onOpen }) : null,
+        props.kind === "remove" && props.removeNode ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(RemoveDialog, { t: props.t, node: props.removeNode, onClose: props.onClose, onConfirm: props.onConfirmRemove }) : null,
+        props.kind === "migrate" && props.migrateNode ? /* @__PURE__ */ (0, import_jsx_runtime25.jsx)(MigrateDialog, { t: props.t, node: props.migrateNode, onClose: props.onClose, onMigrate: props.onMigrate }) : null
       ]
     }
   );
@@ -12110,6 +11490,7 @@ function placeNear(nodes, type, preferX, preferY) {
   return { x: preferX + offset, y: preferY + offset + size.height * 0 };
 }
 function CanvasView(props) {
+  const t = props.t;
   const backendReadyRef = (0, import_react24.useRef)(false);
   const backendRevRef = (0, import_react24.useRef)(0);
   const [backendReady, setBackendReady] = (0, import_react24.useState)(false);
@@ -12184,7 +11565,7 @@ function CanvasView(props) {
         setSyncState("idle");
       } else if (result.conflict) {
         setSyncState("conflict");
-        showToast("\u753B\u677F\u5DF2\u88AB\u5176\u4ED6\u4F1A\u8BDD\u4FEE\u6539\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u52A0\u8F7D\u6700\u65B0\u5185\u5BB9");
+        showToast(t("canvas.error.conflict"));
       } else {
         setSyncState("offline");
       }
@@ -12235,7 +11616,7 @@ function CanvasView(props) {
           if (cancelled) return;
           textFilledRef.current.add(node.id);
           const clipped = text.length > 120 * 1024 ? `${text.slice(0, 120 * 1024)}
-\u2026\uFF08\u5185\u5BB9\u8FC7\u957F\uFF0C\u5DF2\u622A\u65AD\uFF09` : text;
+${t("canvas.content.truncated")}` : text;
           const next = nodesRef.current.map((n) => n.id === node.id ? { ...n, content: clipped } : n);
           nodesRef.current = next;
           setNodes(next);
@@ -12335,9 +11716,9 @@ function CanvasView(props) {
     const type = inferTypeFromPath(path);
     addNode({
       type,
-      title: titleFromPath(path),
+      title: titleFromPath(path, t),
       scope: "session",
-      scopeLabel: CURRENT_SESSION_LABEL,
+      scopeLabel: t("canvas.scope.currentSession"),
       // 归属必须用真实查看者会话 id（曾写死模拟常量 CURRENT_SESSION_ID，
       // 导致新节点归属到假会话、其他会话视角过滤看不到——2026-08-14 修复）
       sessionId,
@@ -12346,17 +11727,17 @@ function CanvasView(props) {
       projectId: currentProjectId,
       path,
       unverified: true,
-      meta: { mtime: "\u672A\u9A8C\u8BC1" }
+      meta: { mtime: t("canvas.node.unverified") }
     });
     setDialog(null);
-    showToast(`\u5DF2\u4E0A\u677F\uFF1A${titleFromPath(path)}`);
-  }, [addNode, currentProjectId, sessionId, showToast]);
+    showToast(t("canvas.toast.pinned", { title: titleFromPath(path, t) }));
+  }, [addNode, currentProjectId, sessionId, showToast, t]);
   const onNote = (0, import_react24.useCallback)((payload) => {
     addNode({
       type: payload.type,
       title: payload.title,
       scope: "session",
-      scopeLabel: CURRENT_SESSION_LABEL,
+      scopeLabel: t("canvas.scope.currentSession"),
       // 归属用真实查看者会话 id（2026-08-14 修复，见 onPath 注释）
       sessionId,
       // projectId 用后端下发的真实值（2026-08-14 修复，见 onPath 注释）
@@ -12364,14 +11745,14 @@ function CanvasView(props) {
       content: payload.content
     });
     setDialog(null);
-    showToast("\u4FBF\u7B7E\u5DF2\u4E0A\u677F");
-  }, [addNode, currentProjectId, sessionId, showToast]);
+    showToast(t("canvas.toast.notePinned"));
+  }, [addNode, currentProjectId, sessionId, showToast, t]);
   const onCatalog = (0, import_react24.useCallback)((title, path, type, size) => {
     addNode({
       type,
       title,
       scope: "session",
-      scopeLabel: CURRENT_SESSION_LABEL,
+      scopeLabel: t("canvas.scope.currentSession"),
       // 归属用真实查看者会话 id（2026-08-14 修复，见 onPath 注释）
       sessionId,
       // projectId 用后端下发的真实值（2026-08-14 修复，见 onPath 注释）
@@ -12379,11 +11760,11 @@ function CanvasView(props) {
       path,
       unverified: true,
       // 搜索结果显示真实文件大小（2026-08-14 删除内置示例 CATALOG_SIZE）
-      meta: size ? { size, mtime: "\u672A\u9A8C\u8BC1" } : void 0
+      meta: size ? { size, mtime: t("canvas.node.unverified") } : void 0
     });
     setDialog(null);
-    showToast(`\u5DF2\u4E0A\u677F\uFF1A${title}`);
-  }, [addNode, currentProjectId, sessionId, showToast]);
+    showToast(t("canvas.toast.pinned", { title }));
+  }, [addNode, currentProjectId, sessionId, showToast, t]);
   const onMoveNode = (0, import_react24.useCallback)((id, x, y, shouldPersist) => {
     setNodes((prev) => {
       const next = prev.map((n) => {
@@ -12424,12 +11805,12 @@ function CanvasView(props) {
     if (!node) return;
     const text = kind === "id" ? node.id : kind === "title" ? node.title : kind === "path" ? node.path ?? "" : toReferenceText(node);
     if (!text) {
-      showToast("\u6CA1\u6709\u53EF\u590D\u5236\u7684\u8DEF\u5F84");
+      showToast(t("canvas.toast.noPath"));
       return;
     }
     const ok = await copyText(text);
-    showToast(ok ? kind === "id" ? "\u5DF2\u590D\u5236 ID" : kind === "title" ? "\u5DF2\u590D\u5236\u6807\u9898" : kind === "path" ? "\u5DF2\u590D\u5236\u8DEF\u5F84" : "\u5DF2\u590D\u5236\u5F15\u7528\u4E32" : "\u590D\u5236\u5931\u8D25");
-  }, [nodes, showToast]);
+    showToast(ok ? kind === "id" ? t("canvas.toast.copiedId") : kind === "title" ? t("canvas.toast.copiedTitle") : kind === "path" ? t("canvas.toast.copiedPath") : t("canvas.toast.copiedRef") : t("canvas.toast.copyFailed"));
+  }, [nodes, showToast, t]);
   const onAskRemove = (0, import_react24.useCallback)((id) => {
     setFocusId(id);
     setDialog("remove");
@@ -12437,46 +11818,46 @@ function CanvasView(props) {
   const onOpen = (0, import_react24.useCallback)(async (id) => {
     const node = nodes.find((n) => n.id === id);
     if (!node?.path) {
-      showToast("\u8BE5\u8282\u70B9\u6CA1\u6709\u672C\u5730\u8DEF\u5F84\u53EF\u6253\u5F00");
+      showToast(t("canvas.toast.noLocalPath"));
       return;
     }
     const result = await openNodeFileBackend(id);
-    showToast(result.ok ? `\u5DF2\u7528\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00\uFF1A${node.title}` : `\u6253\u5F00\u5931\u8D25\uFF1A${result.error ?? "\u672A\u77E5\u9519\u8BEF"}`);
-  }, [nodes, showToast]);
+    showToast(result.ok ? t("canvas.toast.opened", { title: node.title }) : t("canvas.toast.openFailed", { message: apiErrorText(result, t) }));
+  }, [nodes, showToast, t]);
   const onOpenFolder = (0, import_react24.useCallback)(async (id) => {
     const node = nodes.find((n) => n.id === id);
     if (!node?.path) {
-      showToast("\u8BE5\u8282\u70B9\u6CA1\u6709\u672C\u5730\u8DEF\u5F84\u53EF\u6253\u5F00");
+      showToast(t("canvas.toast.noLocalPath"));
       return;
     }
     const result = await openNodeFolderBackend(id);
-    showToast(result.ok ? `\u5DF2\u5728\u6587\u4EF6\u7BA1\u7406\u5668\u4E2D\u6253\u5F00\u6240\u5728\u6587\u4EF6\u5939\uFF1A${node.title}` : `\u6253\u5F00\u5931\u8D25\uFF1A${result.error ?? "\u672A\u77E5\u9519\u8BEF"}`);
-  }, [nodes, showToast]);
+    showToast(result.ok ? t("canvas.toast.openedFolder", { title: node.title }) : t("canvas.toast.openFailed", { message: apiErrorText(result, t) }));
+  }, [nodes, showToast, t]);
   const onSave = (0, import_react24.useCallback)(async (id) => {
     const node = nodes.find((n) => n.id === id);
     if (!node || typeof node.content !== "string" || node.content === "") {
-      showToast("\u8BE5\u8282\u70B9\u6CA1\u6709\u53EF\u4FDD\u5B58\u7684\u5185\u5BB9");
+      showToast(t("canvas.toast.noContent"));
       return;
     }
-    const result = await saveTextToFile(node.title, node.content);
+    const result = await saveTextToFile(node.title, node.content, t);
     if (result.ok) {
-      showToast(result.message ? `\u5DF2\u4FDD\u5B58\uFF1A${node.title}\uFF08${result.message}\uFF09` : `\u5DF2\u4FDD\u5B58\uFF1A${node.title}`);
+      showToast(result.message ? t("canvas.toast.savedWith", { title: node.title, message: result.message }) : t("canvas.toast.saved", { title: node.title }));
     } else if (!result.canceled) {
-      showToast(`\u4FDD\u5B58\u5931\u8D25\uFF1A${result.message ?? "\u672A\u77E5\u9519\u8BEF"}`);
+      showToast(t("canvas.toast.saveFailed", { message: result.message ?? t("canvas.error.unknown") }));
     }
-  }, [nodes, showToast]);
+  }, [nodes, showToast, t]);
   const onMigrateClick = (0, import_react24.useCallback)((id) => {
     setFocusId(id);
     setDialog("migrate");
   }, []);
   const onMigrate = (0, import_react24.useCallback)(async (id, scope) => {
     if (!backendReadyRef.current) {
-      showToast("\u753B\u677F\u672A\u8FDE\u63A5\u540E\u7AEF\uFF0C\u65E0\u6CD5\u8FC1\u79FB\u5F52\u5C5E");
+      showToast(t("canvas.toast.migrateOffline"));
       return;
     }
     const result = await migrateNodeBackend(id, scope, sessionId, backendRevRef.current);
     if (!result.ok) {
-      showToast(result.conflict ? "\u753B\u677F\u5DF2\u88AB\u5176\u4ED6\u4F1A\u8BDD\u4FEE\u6539\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5" : `\u8FC1\u79FB\u5931\u8D25\uFF1A${result.error ?? "\u672A\u77E5\u9519\u8BEF"}`);
+      showToast(result.conflict ? t("canvas.toast.migrateConflict") : t("canvas.toast.migrateFailed", { message: apiErrorText(result, t) }));
       return;
     }
     if (result.node && typeof result.rev === "number") {
@@ -12487,16 +11868,16 @@ function CanvasView(props) {
       });
     }
     setDialog(null);
-    showToast("\u5F52\u5C5E\u5DF2\u8FC1\u79FB");
-  }, [backendReadyRef, sessionId, showToast]);
+    showToast(t("canvas.toast.migrated"));
+  }, [backendReadyRef, sessionId, showToast, t]);
   const openSessionWithToast = (0, import_react24.useCallback)((targetSessionId) => {
     const node = nodes.find((n) => n.sessionId === targetSessionId);
     const name = node?.sessionName ?? shortSessionId(targetSessionId);
-    showToast(`\u6B63\u5728\u8DF3\u8F6C\u5230\u4F1A\u8BDD\uFF1A${name}`);
+    showToast(t("canvas.toast.jumping", { name }));
     setTimeout(() => {
       props.openSession?.(targetSessionId);
     }, 600);
-  }, [nodes, props.openSession, showToast]);
+  }, [nodes, props.openSession, showToast, t]);
   const onConfirmRemove = (0, import_react24.useCallback)(() => {
     if (!focusId) return;
     const next = nodes.filter((n) => n.id !== focusId);
@@ -12506,8 +11887,8 @@ function CanvasView(props) {
     setSelectedId((cur) => cur === focusId ? null : cur);
     setFocusId(null);
     setDialog(null);
-    showToast("\u5DF2\u4ECE\u753B\u677F\u79FB\u9664");
-  }, [focusId, lastAiNodeId, nodes, showToast, upsert]);
+    showToast(t("canvas.toast.removed"));
+  }, [focusId, lastAiNodeId, nodes, showToast, t, upsert]);
   const onPreview = (0, import_react24.useCallback)((id) => {
     setFocusId(id);
     setDialog("preview");
@@ -12542,11 +11923,11 @@ function CanvasView(props) {
   return /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("div", { className: "cg-root", ref: rootRef, children: [
     /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("div", { className: "cg-toolbar", children: [
       /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("div", { className: "cg-toolbar-group", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("span", { className: "cg-meta", children: "\u89C6\u89D2" }),
-        /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("div", { className: "cg-seg", role: "tablist", "aria-label": "\u89C6\u89D2\u7B5B\u9009", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("button", { type: "button", className: viewMode === "session" ? "cg-on" : "", onClick: () => changeViewMode("session"), children: "\u672C\u4F1A\u8BDD" }),
-          /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("button", { type: "button", className: viewMode === "project" ? "cg-on" : "", onClick: () => changeViewMode("project"), children: "\u672C\u9879\u76EE" }),
-          /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("button", { type: "button", className: viewMode === "global" ? "cg-on" : "", onClick: () => changeViewMode("global"), children: "\u6240\u6709\u9879\u76EE" })
+        /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("span", { className: "cg-meta", children: t("canvas.toolbar.view") }),
+        /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("div", { className: "cg-seg", role: "tablist", "aria-label": t("canvas.toolbar.viewFilter"), children: [
+          /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("button", { type: "button", className: viewMode === "session" ? "cg-on" : "", onClick: () => changeViewMode("session"), children: t("canvas.view.session") }),
+          /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("button", { type: "button", className: viewMode === "project" ? "cg-on" : "", onClick: () => changeViewMode("project"), children: t("canvas.view.project") }),
+          /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("button", { type: "button", className: viewMode === "global" ? "cg-on" : "", onClick: () => changeViewMode("global"), children: t("canvas.view.global") })
         ] })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("label", { className: "cg-search", children: [
@@ -12555,7 +11936,7 @@ function CanvasView(props) {
           "input",
           {
             value: query,
-            placeholder: "\u641C\u7D22\u753B\u677F\u8282\u70B9\u2026",
+            placeholder: t("canvas.search.placeholder"),
             onChange: (e) => setQuery(e.target.value)
           }
         )
@@ -12563,15 +11944,18 @@ function CanvasView(props) {
       /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("div", { className: "cg-toolbar-group", children: [
         /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("button", { type: "button", className: "cg-btn cg-ghost", onClick: () => setDialog("path"), children: [
           /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(import_dsh_client_ui_primitives2.IconPlusOutline16, {}),
-          " \u8DEF\u5F84\u4E0A\u677F"
+          " ",
+          t("canvas.action.path")
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("button", { type: "button", className: "cg-btn cg-ghost", onClick: () => setDialog("note"), children: [
           /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(import_dsh_client_ui_primitives2.IconPlusOutline16, {}),
-          " \u4FBF\u7B7E"
+          " ",
+          t("canvas.action.note")
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("button", { type: "button", className: "cg-btn cg-ghost", onClick: () => setDialog("catalog"), children: [
           /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(import_dsh_client_ui_primitives2.IconPlusOutline16, {}),
-          " \u641C\u7D22\u4E0A\u677F"
+          " ",
+          t("canvas.action.catalog")
         ] })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime26.jsx)("div", { className: "cg-toolbar-sep" }),
@@ -12580,7 +11964,7 @@ function CanvasView(props) {
         {
           type: "button",
           className: "cg-btn cg-ghost cg-scale",
-          title: "\u590D\u4F4D\u89C6\u89D2",
+          title: t("canvas.action.resetView"),
           onClick: () => applyViewport({ ...DEFAULT_VIEWPORT }, true),
           children: [
             Math.round(viewport.scale * 100),
@@ -12589,19 +11973,17 @@ function CanvasView(props) {
         }
       ) }),
       /* @__PURE__ */ (0, import_jsx_runtime26.jsxs)("span", { className: "cg-meta", children: [
-        visibleNodes.length,
-        "/",
-        nodes.length,
-        " \u5F20",
-        searchActive ? ` \xB7 \u547D\u4E2D ${matchIds.size}` : "",
+        t("canvas.meta.count", { visible: visibleNodes.length, total: nodes.length }),
+        searchActive ? t("canvas.meta.hits", { count: matchIds.size }) : "",
         " \xB7 ",
-        viewMode === "session" ? "\u672C\u4F1A\u8BDD" : viewMode === "project" ? currentProjectLabel : "\u6240\u6709\u9879\u76EE",
-        backendReady ? syncState === "conflict" ? " \xB7 \u26A0\uFE0F \u51B2\u7A81\uFF0C\u8BF7\u5237\u65B0" : syncState === "saving" ? " \xB7 \u4FDD\u5B58\u4E2D" : syncState === "offline" ? " \xB7 \u672A\u8FDE\u63A5\u540E\u7AEF" : " \xB7 \u5DF2\u540C\u6B65" : " \xB7 \u4EC5\u672C\u5730\u4FDD\u5B58"
+        viewMode === "session" ? t("canvas.view.session") : viewMode === "project" ? currentProjectLabel : t("canvas.view.global"),
+        backendReady ? syncState === "conflict" ? t("canvas.sync.conflict") : syncState === "saving" ? t("canvas.sync.saving") : syncState === "offline" ? t("canvas.sync.offline") : t("canvas.sync.synced") : t("canvas.sync.localOnly")
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(
       CanvasBoard,
       {
+        t,
         nodes: visibleNodes,
         viewport,
         lod,
@@ -12630,6 +12012,7 @@ function CanvasView(props) {
     /* @__PURE__ */ (0, import_jsx_runtime26.jsx)(
       CanvasDialogs,
       {
+        t,
         kind: dialog,
         previewNode: dialog === "preview" ? previewNode : null,
         removeNode: dialog === "remove" ? removeNode : null,
@@ -12671,13 +12054,13 @@ function injectCanvasStyles() {
 function registerCanvasTab(ctx, opts) {
   const disposeStyle = injectCanvasStyles();
   const slotId = opts.id ?? "canvas-hub";
-  const slotLabel = opts.label ?? "\u753B\u677F";
   const slotOrder = opts.order ?? 80;
+  const slotLabel = () => opts.label ?? opts.t("canvas.tab.label");
   const disposeSlot = ctx.slots.inject("conversation.view", () => ctx.slots.register({
     name: "conversation.view",
     id: slotId,
     order: slotOrder,
-    label: () => slotLabel
+    label: slotLabel
   }, (props) => CanvasView({ ...props, t: opts.t, openSession: opts.openSession })));
   return () => {
     disposeSlot();
@@ -13038,15 +12421,14 @@ function isMermaidBlock(block) {
   const info = block.querySelector('[class*="infostring"]');
   return info?.textContent?.trim().toLowerCase() === "mermaid";
 }
-function showErrorHint(block, error) {
+function showErrorHint(block, t, error) {
   if (block.querySelector(".me-mermaid-error") !== null) return;
   const pre = block.querySelector("pre");
   if (pre === null) return;
   const hint = document.createElement("div");
   hint.className = "me-mermaid-error";
   const detail = error instanceof Error ? (String(error.message).split("\n")[0] ?? "").slice(0, 80) : "";
-  const zh2 = (document.documentElement.lang ?? "").toLowerCase().startsWith("zh");
-  hint.textContent = zh2 ? `\u26A0 mermaid \u6E32\u67D3\u5931\u8D25${detail === "" ? "" : `\uFF1A${detail}`}\uFF0C\u5DF2\u4FDD\u7559\u4EE3\u7801\uFF08\u53EF\u590D\u5236\u4FEE\u6B63\uFF09` : `\u26A0 mermaid render failed${detail === "" ? "" : `: ${detail}`}, code kept`;
+  hint.textContent = detail === "" ? t("mermaid.renderFailed") : t("mermaid.renderFailedDetail", { detail });
   pre.insertAdjacentElement("beforebegin", hint);
 }
 function autoFixMermaid(source) {
@@ -13099,7 +12481,7 @@ function fixDangerChars(text) {
     return ch === "(" ? "\uFF08" : "\uFF09";
   });
 }
-function ensureDownloadButton(block) {
+function ensureDownloadButton(block, t) {
   const wrap = block.querySelector(".me-mermaid-wrap");
   if (wrap === null) return;
   const svg = wrap.querySelector("svg");
@@ -13110,9 +12492,8 @@ function ensureDownloadButton(block) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "me-mermaid-download";
-  const zh2 = (document.documentElement.lang ?? "").toLowerCase().startsWith("zh");
-  btn.textContent = zh2 ? "\u4E0B\u8F7D" : "SVG";
-  btn.title = zh2 ? "\u4E0B\u8F7D\u6B64\u56FE\u4E3A SVG\uFF08\u77E2\u91CF\uFF0C\u53EF\u65E0\u635F\u7F29\u653E\uFF09" : "Download diagram as SVG";
+  btn.textContent = t("mermaid.download");
+  btn.title = t("mermaid.downloadTitle");
   btn.addEventListener("click", (event) => {
     event.stopPropagation();
     downloadSvg(svg);
@@ -13134,7 +12515,7 @@ function downloadSvg(svg) {
   a.remove();
   URL.revokeObjectURL(url);
 }
-async function renderBlock(block, source, state) {
+async function renderBlock(block, source, state, t) {
   if (state.rendering) return;
   state.rendering = true;
   let engine;
@@ -13169,7 +12550,7 @@ async function renderBlock(block, source, state) {
         state.engineFails = 0;
         block.setAttribute(RENDERED_MARK, "");
         block.removeAttribute(FAILED_MARK);
-        ensureDownloadButton(block);
+        ensureDownloadButton(block, t);
         return;
       } catch (error) {
         lastError = error;
@@ -13181,7 +12562,7 @@ async function renderBlock(block, source, state) {
       state.rendered = true;
       block.setAttribute(RENDERED_MARK, "");
       block.setAttribute(FAILED_MARK, "");
-      showErrorHint(block, lastError);
+      showErrorHint(block, t, lastError);
     }
     console.warn(`[dsh-memory-evolve] mermaid render failed (attempt ${state.failCount}):`, lastError);
   } finally {
@@ -13189,11 +12570,11 @@ async function renderBlock(block, source, state) {
   }
   if (!state.rendered && block.isConnected && block.querySelector("pre") !== null) {
     window.setTimeout(() => {
-      schedule(block, true);
+      schedule(block, t, true);
     }, RETRY_DELAY_MS);
   }
 }
-function schedule(block, force = false) {
+function schedule(block, t, force = false) {
   if (!isMermaidBlock(block)) return;
   let state = states.get(block);
   if (state === void 0) {
@@ -13207,10 +12588,10 @@ function schedule(block, force = false) {
       s.rendered = false;
       s.failCount = 0;
       block.removeAttribute(RENDERED_MARK);
-      schedule(block, true);
+      schedule(block, t, true);
       return;
     }
-    ensureDownloadButton(block);
+    ensureDownloadButton(block, t);
     return;
   }
   const source = block.querySelector("pre")?.textContent ?? "";
@@ -13220,13 +12601,13 @@ function schedule(block, force = false) {
   s.timer = window.setTimeout(() => {
     const current = block.querySelector("pre")?.textContent ?? "";
     if (current === s.source) {
-      if (!s.rendering) void renderBlock(block, s.source, s);
+      if (!s.rendering) void renderBlock(block, s.source, s, t);
     } else {
-      schedule(block);
+      schedule(block, t);
     }
   }, force ? FORCE_STABLE_MS : STABLE_MS);
 }
-function createMermaidRenderer() {
+function createMermaidRenderer(t) {
   let observer;
   let disposed = false;
   let rescanTimer;
@@ -13238,15 +12619,15 @@ function createMermaidRenderer() {
           addedCount += 1;
           if (!(node instanceof HTMLElement)) continue;
           const self = node.classList.contains("md-code-block") ? node : node.closest(".md-code-block");
-          if (self instanceof HTMLElement) schedule(self);
+          if (self instanceof HTMLElement) schedule(self, t);
           if (self === null) {
-            for (const inner of node.querySelectorAll(".md-code-block")) schedule(inner);
+            for (const inner of node.querySelectorAll(".md-code-block")) schedule(inner, t);
           }
         }
       } else {
         const element = mutation.target instanceof HTMLElement ? mutation.target : mutation.target.parentElement;
         const block = element?.closest(".md-code-block");
-        if (block instanceof HTMLElement) schedule(block);
+        if (block instanceof HTMLElement) schedule(block, t);
       }
     }
     if (addedCount > 40) scheduleRescans();
@@ -13258,7 +12639,7 @@ function createMermaidRenderer() {
       if (index >= delays.length) return;
       rescanTimer = window.setTimeout(() => {
         if (disposed || observer === void 0) return;
-        for (const block of document.querySelectorAll(".md-code-block")) schedule(block);
+        for (const block of document.querySelectorAll(".md-code-block")) schedule(block, t);
         run(index + 1);
       }, delays[index]);
     };
@@ -13269,7 +12650,7 @@ function createMermaidRenderer() {
     if (enabled && observer === void 0) {
       observer = new MutationObserver(onMutations);
       observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class"] });
-      for (const block of document.querySelectorAll(".md-code-block")) schedule(block);
+      for (const block of document.querySelectorAll(".md-code-block")) schedule(block, t);
       scheduleRescans();
     } else if (!enabled && observer !== void 0) {
       observer.disconnect();
@@ -15585,7 +14966,7 @@ function updateMenuGeometry(preferredRoot) {
     `${Math.max(1, Math.min(MENU_MAX_H_CAP, Math.floor(viewHeight - MENU_TOP_MARGIN * 2)))}px`
   );
 }
-function createInputSheetEnhance() {
+function createInputSheetEnhance(t) {
   let disposed = false;
   let observer = null;
   let raf = 0;
@@ -15606,7 +14987,7 @@ function createInputSheetEnhance() {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = MORE_BTN_CLASS;
-      btn.setAttribute("aria-label", "\u66F4\u591A\u64CD\u4F5C");
+      btn.setAttribute("aria-label", t("mobile.moreActions"));
       btn.setAttribute("aria-haspopup", "true");
       btn.setAttribute("aria-expanded", isSheetOpen() ? "true" : "false");
       btn.innerHTML = MORE_BTN_SVG;
@@ -15885,8 +15266,8 @@ function fmtTime3(ts) {
   const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
   return sameDay ? hm : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
 }
-function senderLabel(item, t2) {
-  return item.senderName === "system" ? t2("notify.system") : item.senderName;
+function senderLabel(item, t) {
+  return item.senderName === "system" ? t("notify.system") : item.senderName;
 }
 function AttachmentList({ item }) {
   return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "me-notify-attachments", children: item.attachments.map((att, i) => /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "me-notify-att", children: att.mime?.startsWith("image/") ? /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
@@ -15906,7 +15287,7 @@ function AttachmentList({ item }) {
     }
   ) }, i)) });
 }
-function Bell({ openSession, t: t2 }) {
+function Bell({ openSession, t }) {
   const [unread, setUnread] = (0, import_react25.useState)(0);
   const [open, setOpen] = (0, import_react25.useState)(false);
   const [items, setItems] = (0, import_react25.useState)(null);
@@ -16099,9 +15480,9 @@ function Bell({ openSession, t: t2 }) {
             onPointerMove: onBellPointerMove,
             onPointerUp: finishPointer,
             onPointerCancel: finishPointer,
-            "aria-label": t2("notify.bellAria"),
+            "aria-label": t("notify.bellAria"),
             "aria-expanded": open,
-            title: t2("notify.bellAria"),
+            title: t("notify.bellAria"),
             children: [
               /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "me-notify-bell-icon", "aria-hidden": "true", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(BellIcon, {}) }),
               unread > 0 && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "me-notify-badge", children: unread > 99 ? "99+" : unread })
@@ -16113,25 +15494,25 @@ function Bell({ openSession, t: t2 }) {
           {
             className: `me-notify-pop${popUp ? " me-notify-pop-up" : ""}`,
             role: "dialog",
-            "aria-label": t2("notify.bellAria"),
+            "aria-label": t("notify.bellAria"),
             children: [
               /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "me-notify-pop-head", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "me-notify-pop-title", children: t2("notify.title") }),
+                /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "me-notify-pop-title", children: t("notify.title") }),
                 unread > 0 && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "me-notify-pop-count", children: unread > 99 ? "99+" : unread }),
-                /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "me-notify-readall", onClick: readAll, children: t2("notify.readAll") })
+                /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "me-notify-readall", onClick: readAll, children: t("notify.readAll") })
               ] }),
               /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "me-notify-list", children: [
-                items === null && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "me-notify-empty", children: t2("notify.loading") }),
+                items === null && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "me-notify-empty", children: t("notify.loading") }),
                 items !== null && items.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "me-notify-empty", children: [
                   /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "me-notify-empty-icon", "aria-hidden": "true", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(BellIcon, { size: 22 }) }),
-                  /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: t2("notify.empty") })
+                  /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: t("notify.empty") })
                 ] }),
                 items?.map((item) => {
                   const parsed = parseNotifyContent(item.content);
                   const preview = previewText(item);
                   return /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "me-notify-item", children: [
                     /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "me-notify-item-head", children: [
-                      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: `me-notify-sender me-notify-${item.semantic}`, children: senderLabel(item, t2) }),
+                      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: `me-notify-sender me-notify-${item.semantic}`, children: senderLabel(item, t) }),
                       parsed.headline && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "me-notify-coi-chip", children: "COI" }),
                       /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "me-notify-time", children: fmtTime3(item.createdAt) })
                     ] }),
@@ -16147,15 +15528,15 @@ function Bell({ openSession, t: t2 }) {
                             setOpen(false);
                           }
                         },
-                        title: item.sender ? t2("notify.jump") : void 0,
+                        title: item.sender ? t("notify.jump") : void 0,
                         children: displaySubject(item)
                       }
                     ),
                     preview ? /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: `me-notify-content${item.isLong ? " me-notify-content-clamped" : ""}`, children: linkify(preview) }) : null,
                     item.attachments.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(AttachmentList, { item }),
                     /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "me-notify-item-actions", children: [
-                      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "me-notify-markread", onClick: () => markReadItem(item.id), children: t2("notify.markRead") }),
-                      item.isLong && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "me-notify-more", onClick: () => viewDetail(item), children: t2("notify.viewDetail") })
+                      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "me-notify-markread", onClick: () => markReadItem(item.id), children: t("notify.markRead") }),
+                      item.isLong && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "me-notify-more", onClick: () => viewDetail(item), children: t("notify.viewDetail") })
                     ] })
                   ] }, item.id);
                 })
@@ -16165,12 +15546,12 @@ function Bell({ openSession, t: t2 }) {
         ),
         modal && modalParsed && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "me-notify-modal-backdrop", onClick: () => setModal(null), children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "me-notify-modal", role: "dialog", "aria-modal": "true", onClick: (e) => e.stopPropagation(), children: [
           /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "me-notify-modal-head", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "me-notify-modal-title", children: displaySubject(modal.item) || t2("notify.title") }),
-            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "me-notify-modal-close", onClick: () => setModal(null), "aria-label": t2("notify.close"), children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(CloseIcon, {}) })
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "me-notify-modal-title", children: displaySubject(modal.item) || t("notify.title") }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "me-notify-modal-close", onClick: () => setModal(null), "aria-label": t("notify.close"), children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(CloseIcon, {}) })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "me-notify-modal-body", children: [
             /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "me-notify-modal-meta", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: `me-notify-sender me-notify-${modal.item.semantic}`, children: senderLabel(modal.item, t2) }),
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: `me-notify-sender me-notify-${modal.item.semantic}`, children: senderLabel(modal.item, t) }),
               modalParsed.headline && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "me-notify-coi-chip", children: "COI" }),
               /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "me-notify-time", children: fmtTime3(modal.item.createdAt) })
             ] }),
@@ -16192,10 +15573,10 @@ function Bell({ openSession, t: t2 }) {
                     setModal(null);
                     setOpen(false);
                   },
-                  children: t2("notify.jump")
+                  children: t("notify.jump")
                 }
               ),
-              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "me-notify-delete", onClick: () => removeItem(modal.item.id), children: t2("notify.delete") })
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "me-notify-delete", onClick: () => removeItem(modal.item.id), children: t("notify.delete") })
             ] })
           ] })
         ] }) })
@@ -16222,6 +15603,7 @@ var notification_styles_default = "/**\n * web \u7AD9\u5185\u901A\u77E5\u94C3\u9
 
 // src/client/index.ts
 var NS = "memory-evolve";
+var activeTranslate = null;
 var zh = {
   "tab.label": "\u6280\u80FD\u7BA1\u7406\u5668",
   "tab.label.alt": "\u6280\u80FD\u7BA1\u7406\u5668",
@@ -17037,7 +16419,632 @@ var zh = {
   "panel.reveal.agentsFile": "\u5168\u5C40\u89C4\u5219 (AGENTS.md)",
   "panel.config.saved": "\u914D\u7F6E\u5DF2\u4FDD\u5B58\u3002\u65B0\u542F\u7528/\u5173\u95ED\u7684\u6A21\u5757\u9700\u5237\u65B0\u9875\u9762\u540E\u751F\u6548",
   "panel.config.failed": "\u64CD\u4F5C\u5931\u8D25\uFF1A{message}",
-  "panel.loading": "\u52A0\u8F7D\u4E2D\u2026"
+  "panel.loading": "\u52A0\u8F7D\u4E2D\u2026",
+  // COI 调度 tab（CoIView 私有字典迁入，2026-09-16 i18n）
+  "coi.tab": "CLI\u8C03\u5EA6",
+  "coi.guide": "\u6307\u5357",
+  "coi.guide.title": "COI \u8C03\u5EA6\u4F7F\u7528\u6307\u5357",
+  "coi.guide.intro": "COI \u8C03\u5EA6 = \u628A\u4EFB\u52A1\u6D3E\u7ED9\u5916\u90E8 AI \u4EE3\u7406\uFF08kimi / codex / grok / hermes \u7B49\uFF09\u7684\u300C\u5916\u63F4\u8C03\u5EA6\u53F0\u300D\uFF1A\u540E\u53F0\u5F02\u6B65\u6267\u884C\u3001\u4E0D\u5361\u5F53\u524D\u4F1A\u8BDD\uFF1B\u5B9E\u65F6\u770B\u8FDB\u5EA6\u548C\u65E5\u5FD7\uFF1B\u4F1A\u8BDD\u5206\u5C42\u7BA1\u7406\u3001\u53EF\u4E00\u952E\u6062\u590D\u7EE7\u7EED\uFF1B\u4EFB\u52A1\u8FD8\u80FD\u8DE8\u4EE3\u7406\u63A5\u529B\uFF1B\u7ED3\u679C\u81EA\u52A8\u7559\u6863\u5E76\u6C89\u6DC0\u5230\u8BB0\u5FC6\u3002\u9ED8\u8BA4\u5173\u95ED\u2014\u2014\u5728\u300CMemory Evolve \u8BBE\u7F6E\u300DTab \u7684\u300C\u914D\u7F6E\u300D\u91CC\u6253\u5F00\u300CCOI \u8C03\u5EA6\u300D\u5F00\u5173\u3002",
+  "coi.guide.use.title": "\u600E\u4E48\u53D1\u8D77\u4EFB\u52A1",
+  "coi.guide.use.desc": "\u4E09\u79CD\u5165\u53E3\uFF0C\u4EFB\u9009\u5176\u4E00\uFF1A",
+  "coi.guide.use.ai": "\u5BF9 AI \u8BF4\uFF1A",
+  "coi.guide.use.aiDesc": "\u76F4\u63A5\u8BF4\u300C\u6D3E\u7ED9 kimi \u505A XX / \u8BA9 codex \u4FEE\u590D\u6D4B\u8BD5\u300D\u2014\u2014AI \u7528 de_coi_dispatch \u5DE5\u5177\u53D1\u8D77\uFF0C\u540E\u53F0\u5F02\u6B65\u8DD1\uFF0C\u5B8C\u6210\u540E\u7ED3\u679C\u6458\u8981\u81EA\u52A8\u5199\u8FDB\u9879\u76EE\u65E5\u5FD7\u548C\u4ECA\u65E5\u65E5\u5FD7\u3002",
+  "coi.guide.use.slash": "\u7EC8\u7AEF\u547D\u4EE4\uFF1A",
+  "coi.guide.use.slashDesc": '/de_coi run "\u4EFB\u52A1" --coi kimi\uFF08\u67E5\u770B\u5168\u90E8\u5B50\u547D\u4EE4\uFF1A/de_coi help\uFF09\u3002',
+  "coi.guide.use.tab": "\u672C Tab\uFF1A",
+  "coi.guide.use.tabDesc": "\u300C\u4EFB\u52A1\u300D\u9875\u586B\u9002\u914D\u5668\u3001\u4EFB\u52A1\u5185\u5BB9\u3001\u5C42\u7EA7\uFF0C\u53EF\u9009\u6062\u590D\u4F1A\u8BDD / \u4EFB\u52A1\u6A21\u677F / \u63A5\u529B\u5F15\u7528\uFF1B\u8FD8\u80FD\u52FE\u9009\u300C\u6CE8\u5165 DSH \u8BB0\u5FC6\u300D\u8BA9\u5916\u63F4\u5E26\u4E0A\u4F60\u7684\u9879\u76EE\u7EA6\u5B9A\uFF0C\u6216\u9644\u52A0\u4E0A\u4E0B\u6587\u6587\u672C\u3001\u5E26\u56FE\u5206\u6790\uFF1B\u70B9\u53D1\u8D77\uFF0C\u8FDB\u5EA6\u4E0E\u8F93\u51FA\u5B9E\u65F6\u53EF\u89C1\u3002",
+  "coi.guide.scope.title": "\u4F1A\u8BDD\u5206\u5C42\uFF08\u8C01\u80FD\u770B\u5230\uFF09",
+  "coi.guide.scope.desc": "\u4EFB\u52A1\u4E0E\u4F1A\u8BDD\u6309\u5C42\u7EA7\u5F52\u5C5E\uFF0C\u51B3\u5B9A\u8C01\u80FD\u770B\u5230\u3001\u80FD\u5426\u6062\u590D\uFF1A",
+  "coi.guide.scope.temp": "\u4EC5\u53D1\u8D77\u5B83\u7684\u90A3\u4E2A\u4F1A\u8BDD\u53EF\u89C1\uFF0C\u4E00\u6B21\u6027\u4EFB\u52A1\uFF08\u6D4B\u8BD5\u9002\u914D\u5668\u7528\u8FD9\u4E2A\uFF09\u3002",
+  "coi.guide.scope.session": "\u4EC5\u53D1\u8D77\u5B83\u7684\u90A3\u4E2A\u4F1A\u8BDD\u53EF\u89C1\uFF0C\u4F1A\u8BDD\u5185\u53EF\u6062\u590D\u3002",
+  "coi.guide.scope.project": "\u8BE5\u9879\u76EE\uFF08\u76F8\u540C\u5DE5\u4F5C\u76EE\u5F55\uFF09\u7684\u6240\u6709\u4F1A\u8BDD\u53EF\u89C1\uFF0C\u53EF\u6302 git \u5206\u652F\u3002",
+  "coi.guide.scope.global": "\u6240\u6709\u4F1A\u8BDD\u53EF\u89C1\uFF0C\u957F\u671F\u4FDD\u7559\u3002",
+  "coi.guide.skill.title": "\u9002\u914D\u5668\u4E0E\u6280\u80FD",
+  "coi.guide.skill.desc": "\u6BCF\u4E2A\u9002\u914D\u5668\u5BF9\u5E94\u4E00\u4E2A\u6280\u80FD\uFF08AI \u7684\u4F7F\u7528\u6307\u5357\uFF0C\u6CE8\u5165\u6A21\u578B\u4E0A\u4E0B\u6587\uFF09\uFF1A\u5185\u7F6E\u56DB\u5BB6\u5F00\u7BB1\u5373\u7528\uFF1B\u81EA\u5B9A\u4E49 CLI \u53EF\u5728\u300C\u9002\u914D\u5668\u300D\u9875\u6DFB\u52A0\uFF08\u542B\u666E\u901A\u547D\u4EE4 plain-cli\uFF09\uFF0C\u586B\u6280\u80FD\u540D\u4E0E\u5185\u5BB9\u540E AI \u5373\u5B66\u4F1A\u8C03\u7528\u5B83\u3002\u6280\u80FD\u53EF\u5728\u300C\u6280\u80FD\u7BA1\u7406\u300DTab \u7981\u7528\uFF0C\u53EF\u5728\u9002\u914D\u5668\u9875\u300C\u6280\u80FD\u300D\u6309\u94AE\u7F16\u8F91\u3002",
+  "coi.guide.tips.title": "\u6700\u4F73\u5B9E\u8DF5",
+  "coi.guide.tips.1": "\u5206\u5DE5\uFF1A\u524D\u7AEF\u2192kimi\uFF0C\u590D\u6742\u540E\u7AEF\u2192codex\uFF0C\u5FEB\u901F\u4EFB\u52A1\u2192grok\u3002",
+  "coi.guide.tips.2": "\u63A5\u529B\u94FE\uFF1Acodex \u5199\u4EE3\u7801 \u2192 kimi review\uFF08\u53D1\u8D77\u65F6\u9009\u300C\u63A5\u529B\u5F15\u7528\u300D\uFF09\u3002",
+  "coi.guide.tips.3": "\u91CD\u8981\u4F1A\u8BDD\u8BB0\u5F97\u5907\u6CE8\uFF08\u4F1A\u8BDD\u9875\u70B9\u5907\u6CE8\uFF09\uFF0C\u6062\u590D\u65F6\u6309\u540D\u5B57\u627E\u3002",
+  "coi.guide.tips.4": "\u4EFB\u52A1\u7ED3\u675F\u53EF\u63A8\u9001\u901A\u77E5\uFF08\u914D\u7F6E\u9875\u586B\u901A\u77E5\u547D\u4EE4\uFF0C\u5982 hermes send \u63A8\u5FAE\u4FE1\uFF09\u3002",
+  "coi.guide.tips.5": "\u6D3E\u6D3B\u65F6\u52FE\u9009\u300C\u6CE8\u5165 DSH \u8BB0\u5FC6\u300D\uFF0C\u5916\u63F4\u4F1A\u5E26\u7740\u4F60\u7684\u5168\u5C40\u89C4\u5219\u3001\u7528\u6237\u504F\u597D\u4E0E\u672C\u9879\u76EE\u5173\u952E\u8BB0\u5FC6\u5E72\u6D3B\uFF08\u6309\u5206\u652F\u8FC7\u6EE4\uFF0C\u4E0E DSH \u6CE8\u5165\u540C\u89C4\u5219\uFF09\uFF1B\u6D3E\u6D3B\u4E5F\u80FD\u5E26\u56FE\u2014\u2014\u622A\u56FE\u76F4\u63A5\u53D1\u7ED9\u5916\u63F4\u5206\u6790\uFF08codex / kimi / hermes \u652F\u6301\u8BFB\u56FE\uFF0Czcode \u7EAF\u6587\u672C\u4F1A\u660E\u786E\u62D2\u7EDD\uFF09\u3002",
+  "coi.guide.loop": "\u95ED\u73AF\uFF1A\u6D3E\u4EFB\u52A1 \u2192 \u5B9E\u65F6\u770B\u8FDB\u5EA6 \u2192 \u62FF\u7ED3\u679C\u7559\u6863 \u2192 \u6458\u8981\u6C89\u6DC0\u8BB0\u5FC6 \u2192 \u4F1A\u8BDD\u53EF\u6062\u590D\u518D\u63A5\u529B\u3002",
+  "coi.tasks": "\u4EFB\u52A1",
+  "coi.sessions": "\u4F1A\u8BDD",
+  "coi.adapters": "\u9002\u914D\u5668",
+  "coi.templates": "\u6A21\u677F",
+  "coi.stats": "\u7EDF\u8BA1",
+  "coi.config": "\u914D\u7F6E",
+  "coi.loading": "\u52A0\u8F7D\u4E2D\u2026",
+  "coi.refresh": "\u5237\u65B0",
+  "coi.all": "\u5168\u90E8",
+  "coi.none": "\uFF08\u65E0\uFF09",
+  "coi.launch.title": "\u53D1\u8D77\u4EFB\u52A1",
+  "coi.launch.expand": "\u5C55\u5F00",
+  "coi.launch.collapse": "\u6536\u8D77",
+  "coi.launch.adapter": "\u9002\u914D\u5668",
+  "coi.launch.prompt": "\u4EFB\u52A1\u5185\u5BB9",
+  "coi.launch.promptPh": "\u4F8B\u5982\uFF1A\u4FEE\u590D tests/store.test.js \u4E2D\u5931\u8D25\u7684\u7528\u4F8B\u5E76\u9A8C\u8BC1",
+  "coi.launch.scope": "\u8303\u56F4",
+  "coi.launch.session": "\u6062\u590D\u4F1A\u8BDD",
+  "coi.launch.sessionNone": "\uFF08\u65B0\u4F1A\u8BDD\uFF09",
+  "coi.launch.sessionEmpty": "\uFF08\u5F53\u524D\u9002\u914D\u5668\u6682\u65E0\u4F1A\u8BDD\uFF09",
+  "coi.launch.template": "\u6A21\u677F",
+  "coi.launch.templateNone": "\uFF08\u4E0D\u7528\u6A21\u677F\uFF09",
+  "coi.launch.ref": "\u63A5\u529B\u5F15\u7528",
+  "coi.launch.refNone": "\uFF08\u4E0D\u5F15\u7528\uFF09",
+  "coi.launch.submit": "\u53D1\u8D77",
+  "coi.launch.injectTracks": "\u6CE8\u5165 DSH \u8BB0\u5FC6\uFF08\u53EF\u9009\uFF09",
+  "coi.launch.injectTracksHint": "\u81EA\u4E3B\u9009\u62E9\u8981\u5E26\u7ED9 COI \u7684\u8BB0\u5FC6\u8F68\uFF08\u4E0E\u5C42\u7EA7 scope \u65E0\u5173\uFF0C\u4EFB\u4F55\u5C42\u7EA7\u90FD\u53EF\u6CE8\u5165\uFF09\uFF1A\u957F\u671F\u8BB0\u5FC6=\u5168\u5C40\u4E8B\u5B9E\u3001\u7528\u6237\u6863\u6848=\u4F60\u7684\u504F\u597D\u3001\u9879\u76EE\u5173\u952E\u8BB0\u5FC6=\u672C\u5DE5\u4F5C\u533A\u9879\u76EE\u6309\u5206\u652F\u8FC7\u6EE4\uFF08\u4E0D\u542B AGENTS.md\uFF09\u3002\u5185\u5BB9\u4F1A\u53D1\u7ED9\u5916\u90E8 COI \u670D\u52A1\uFF0C\u6CE8\u610F\u9690\u79C1\uFF1B\u7559\u7A7A=\u4E0D\u6CE8\u5165",
+  "coi.launch.ctxText": "\u9644\u52A0\u4E0A\u4E0B\u6587\u6587\u672C\uFF08\u53EF\u9009\uFF09",
+  "coi.launch.ctxTextPh": "\u81EA\u5DF1\u62FC\u63A5\u7684\u4E0A\u4E0B\u6587\uFF1A\u5982\u9879\u76EE\u8FDB\u5C55\u3001\u76F8\u5173\u65E5\u5FD7\u8981\u70B9\u2026\uFF08\u8D85 32KB \u81EA\u52A8\u5199\u6587\u4EF6\u5E76\u628A\u8DEF\u5F84\u544A\u8BC9 COI\uFF09",
+  "coi.launch.needPrompt": "\u4EFB\u52A1\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A",
+  "coi.launch.ok": "\u5DF2\u53D1\u8D77",
+  "coi.tasks.empty": "\u6682\u65E0\u4EFB\u52A1",
+  "coi.tasks.selectHint": "\u70B9\u51FB\u5DE6\u4FA7\u4EFB\u52A1\u67E5\u770B\u8BE6\u60C5\u4E0E\u8F93\u51FA",
+  "coi.tasks.kill": "\u7EC8\u6B62",
+  "coi.tasks.confirmKill": "\u786E\u8BA4\u7EC8\u6B62\u8BE5\u4EFB\u52A1\uFF1F",
+  "coi.tasks.killed": "\u5DF2\u7EC8\u6B62",
+  "coi.tasks.retry": "\u91CD\u8BD5",
+  "coi.tasks.retried": "\u5DF2\u91CD\u65B0\u53D1\u8D77",
+  "coi.tasks.copy": "\u590D\u5236",
+  "coi.tasks.copied": "\u5DF2\u590D\u5236",
+  "coi.tasks.copyFail": "\u590D\u5236\u5931\u8D25",
+  "coi.tasks.log": "\u8F93\u51FA\u65E5\u5FD7",
+  "coi.tasks.logEmpty": "\uFF08\u6682\u65E0\u8F93\u51FA\uFF09",
+  "coi.tasks.logFull": "\u653E\u5927",
+  "coi.tasks.prompt": "\u4EFB\u52A1\u5185\u5BB9",
+  "coi.tasks.searchPh": "\u641C\u7D22\u4EFB\u52A1\uFF08\u5185\u5BB9/\u4EFB\u52A1 id\uFF09\u2026",
+  "coi.tasks.pager.prev": "\u4E0A\u4E00\u9875",
+  "coi.tasks.pager.next": "\u4E0B\u4E00\u9875",
+  "coi.tasks.pager.total": "\u5171",
+  "coi.tasks.delete": "\u5220\u9664",
+  "coi.tasks.confirmDelete": "\u5220\u9664\u8BE5\u4EFB\u52A1\uFF1F\u5C06\u79FB\u9664\u4EFB\u52A1\u8BB0\u5F55\u4E0E\u8F93\u51FA\u7559\u6863\uFF08\u5DF2\u6C89\u6DC0\u5230\u8BB0\u5FC6\u7684\u6458\u8981\u4E0D\u53D7\u5F71\u54CD\uFF1B\u88AB\u63A5\u529B\u5F15\u7528\u7684\u4EFB\u52A1\u5220\u9664\u540E\uFF0C\u65B0\u63A5\u529B\u4F1A\u63D0\u793A\u4EFB\u52A1\u4E0D\u5B58\u5728\uFF09\u3002\n\n{id}",
+  "coi.tasks.status": "\u72B6\u6001",
+  "coi.tasks.adapter": "\u9002\u914D\u5668",
+  "coi.tasks.scope": "\u8303\u56F4",
+  "coi.tasks.branch": "\u5206\u652F",
+  "coi.tasks.sessionId": "\u4F1A\u8BDD ID",
+  "coi.tasks.created": "\u521B\u5EFA\u65F6\u95F4",
+  "coi.tasks.duration": "\u8017\u65F6",
+  "coi.tasks.lastOutput": "\u6700\u540E\u8F93\u51FA",
+  "coi.tasks.exitCode": "\u9000\u51FA\u7801",
+  "coi.tasks.error": "\u9519\u8BEF",
+  "coi.sessions.filterScope": "\u8303\u56F4\u8FC7\u6EE4",
+  "coi.sessions.searchPh": "\u641C\u7D22\u2026",
+  "coi.sessions.note": "\u5907\u6CE8",
+  "coi.sessions.save": "\u4FDD\u5B58",
+  "coi.sessions.delete": "\u5220\u9664",
+  "coi.sessions.confirmDelete": "\u786E\u8BA4\u5220\u9664\u8BE5\u4F1A\u8BDD\u8BB0\u5F55\uFF1F",
+  "coi.sessions.empty": "\u6682\u65E0\u4F1A\u8BDD",
+  "coi.sessions.locked": "\u6709\u4EFB\u52A1\u5360\u7528\u4E2D",
+  "coi.sessions.lastSeen": "\u6700\u8FD1\u6D3B\u8DC3",
+  "coi.adapters.guide": "\u6307\u5357",
+  "coi.adapters.test": "\u6D4B\u8BD5",
+  "coi.adapters.testOk": "\u6D4B\u8BD5\u4EFB\u52A1\u5DF2\u53D1\u8D77",
+  "coi.adapters.skill": "\u6280\u80FD",
+  "coi.adapters.skillHint": "\u8BE5\u9002\u914D\u5668\u7684\u4F7F\u7528\u6307\u5357\u6240\u5728\u6280\u80FD\uFF1A\u5B83\u662F\u540C\u6B65\u6CE8\u5165\u7684\u771F\u5B9E\u6709\u6548\u6280\u80FD\uFF08\u6765\u6E90=\u7528\u6237\u6280\u80FD\u5E93\uFF0C\u6CE8\u5165\u6BCF\u4E2A\u4F1A\u8BDD\u7684\u7CFB\u7EDF\u63D0\u793A\u8BCD\uFF09\uFF0CAI \u6BCF\u6B21\u4F1A\u8BDD\u90FD\u80FD\u770B\u5230\uFF1B\u7981\u7528\u8BF7\u5230\u300C\u6280\u80FD\u7BA1\u7406\u300DTab",
+  "coi.adapters.skillBtn": "\u6280\u80FD",
+  "coi.adapters.editSkillTitle": "\u7F16\u8F91\u6280\u80FD\uFF08AI \u4F7F\u7528\u6307\u5357\uFF09",
+  "coi.adapters.editSkillHint": "\u6280\u80FD = AI \u7684\u4F7F\u7528\u6307\u5357\uFF1A\u672C\u6280\u80FD\u5DF2\u540C\u6B65\u6CE8\u5165\u7528\u6237\u6280\u80FD\u5E93\uFF08~/.agents/skills\uFF09\uFF0C\u6BCF\u4E2A\u4F1A\u8BDD\u7684\u7CFB\u7EDF\u63D0\u793A\u8BCD\u91CC\u90FD\u80FD\u770B\u5230\u5B83\uFF0CAI \u636E\u6B64\u6B63\u786E\u8C03\u7528\u672C\u9002\u914D\u5668\u3002\u5728\u8FD9\u91CC\u7F16\u8F91\u5373\u66F4\u65B0 SKILL.md\uFF1B\u63D2\u4EF6\u91CD\u542F\u65F6\u5185\u7F6E\u7248\u672C\u672A\u53D8\u4E0D\u4F1A\u8986\u76D6\u4F60\u7684\u7F16\u8F91\uFF1B\u7981\u7528\u5165\u53E3\u5728\u300C\u6280\u80FD\u7BA1\u7406\u300DTab\u3002",
+  "coi.adapters.saveSkill": "\u4FDD\u5B58",
+  "coi.adapters.skillSaved": "\u6280\u80FD\u5DF2\u4FDD\u5B58",
+  "coi.adapters.skillName": "\u6280\u80FD\u540D\uFF08\u53EF\u9009\uFF09",
+  "coi.adapters.skillNamePh": "\u5982 my-cli-skill\uFF08\u8BE5\u6280\u80FD\u7684 SKILL.md \u5C06\u6CE8\u5165 AI \u4E0A\u4E0B\u6587\uFF0CAI \u636E\u6B64\u5B66\u4F1A\u8C03\u7528\u6B64 CLI\uFF09",
+  "coi.adapters.useCase": "\u9002\u7528\u573A\u666F",
+  "coi.adapters.useCasePh": "\u544A\u8BC9 AI \u4EC0\u4E48\u4EFB\u52A1\u9002\u5408\u7528\u8FD9\u4E2A CLI\uFF0C\u5982\uFF1A\u590D\u6742\u540E\u7AEF\u903B\u8F91/\u6D4B\u8BD5\u4FEE\u590D\u2026",
+  "coi.adapters.useCaseEmpty": "\uFF08\u672A\u586B\u5199\u9002\u7528\u573A\u666F\uFF09",
+  "coi.adapters.editUseCase": "\u7F16\u8F91\u573A\u666F",
+  "coi.adapters.saveUseCase": "\u4FDD\u5B58",
+  "coi.adapters.skillContent": "\u6280\u80FD\u5185\u5BB9\uFF08SKILL.md\uFF09",
+  "coi.adapters.skillContentPh": "# \u6280\u80FD\u6B63\u6587\n\n\u544A\u8BC9 AI \u5982\u4F55\u8C03\u7528\u8FD9\u4E2A CLI\uFF1A\u547D\u4EE4\u683C\u5F0F\u3001\u53C2\u6570\u3001\u4F1A\u8BDD\u6062\u590D\u65B9\u5F0F\u3001\u6CE8\u610F\u4E8B\u9879\u2026\uFF08frontmatter \u7684 name/description \u4F1A\u81EA\u52A8\u8865\u5168\uFF09",
+  "coi.adapters.skillContentHint": "\u7559\u7A7A = \u53EA\u5173\u8054\u6280\u80FD\u540D\uFF08\u6280\u80FD\u6587\u4EF6\u9700\u53E6\u5916\u521B\u5EFA\uFF0C\u53EF\u6DFB\u52A0\u540E\u5230\u300C\u6280\u80FD\u300D\u6309\u94AE\u91CC\u7F16\u8F91\uFF09\uFF1B\u586B\u5199 = \u6280\u80FD\u4E0D\u5B58\u5728\u65F6\u81EA\u52A8\u521B\u5EFA",
+  "coi.cancel": "\u53D6\u6D88",
+  "coi.saving": "\u4FDD\u5B58\u4E2D\u2026",
+  "coi.adapters.addTitle": "\u6DFB\u52A0\u81EA\u5B9A\u4E49\u9002\u914D\u5668",
+  "coi.adapters.name": "\u540D\u79F0",
+  "coi.adapters.type": "\u7C7B\u578B",
+  "coi.adapters.binary": "\u53EF\u6267\u884C\u6587\u4EF6",
+  "coi.adapters.args": "\u53C2\u6570",
+  "coi.adapters.argsPh": "\u9017\u53F7\u5206\u9694\uFF0C\u5982\uFF1A-p, {task}",
+  "coi.adapters.add": "\u6DFB\u52A0",
+  "coi.adapters.delete": "\u5220\u9664",
+  "coi.adapters.enable": "\u542F\u7528",
+  "coi.adapters.disable": "\u7981\u7528",
+  "coi.adapters.disabledHint": "\u5DF2\u7981\u7528\uFF1AAI \u8C03\u5EA6\u6B64\u9002\u914D\u5668\u4F1A\u88AB\u62D2\u7EDD\u5E76\u63D0\u793A\u6362\u7528\u5176\u4ED6\u53EF\u7528\u9879",
+  "coi.adapters.confirmDelete": "\u786E\u8BA4\u5220\u9664\u8BE5\u81EA\u5B9A\u4E49\u9002\u914D\u5668\uFF1F",
+  "coi.adapters.builtin": "\u5185\u7F6E",
+  "coi.adapters.custom": "\u81EA\u5B9A\u4E49",
+  "coi.adapters.resumeSection": "\u4F1A\u8BDD\u6062\u590D\u914D\u7F6E\uFF08ai-cli \u5FC5\u586B\uFF09",
+  "coi.adapters.resumeSectionHint": "ai-cli \u7C7B\u578B\u5FC5\u987B\u6709\u6307\u5B9A\u4F1A\u8BDD\u6062\u590D\u80FD\u529B\uFF1B\u6CA1\u6709\u6062\u590D\u80FD\u529B\u7684 CLI \u8BF7\u9009 plain-cli \u7C7B\u578B",
+  "coi.adapters.resumeKind": "\u6062\u590D\u65B9\u5F0F",
+  "coi.adapters.resumeKindFlag": "flag \u6A21\u5F0F\uFF08\u6062\u590D\u53C2\u6570\u63D2\u5728\u57FA\u7840\u53C2\u6570\u524D\uFF09",
+  "coi.adapters.resumeKindArgs": "args \u6A21\u5F0F\uFF08\u5B8C\u6574\u6062\u590D\u547D\u4EE4\uFF09",
+  "coi.adapters.resumeFlag": "\u6062\u590D flag",
+  "coi.adapters.resumeFlagPh": "\u5982 -S / -r / --resume",
+  "coi.adapters.resumeArg": "\u4F1A\u8BDD\u53C2\u6570",
+  "coi.adapters.resumeArgPh": "\u542B {sessionId} \u5360\u4F4D\u7B26\uFF0C\u5982 {sessionId}",
+  "coi.adapters.resumeArgs": "\u6062\u590D\u547D\u4EE4\u53C2\u6570",
+  "coi.adapters.resumeArgsPh": "\u9017\u53F7\u5206\u9694\uFF0C\u542B {sessionId}\uFF08\u53CA\u53EF\u9009 {task}\uFF09\uFF0C\u5982 exec, resume, {sessionId}, {task}",
+  "coi.adapters.continueFlag": "\u6700\u8FD1\u4F1A\u8BDD\u6062\u590D flag\uFF08\u53EF\u9009\uFF09",
+  "coi.adapters.continueFlagPh": '\u5982 -c\uFF1B\u7559\u7A7A = \u4E0D\u652F\u6301"\u6700\u8FD1\u4F1A\u8BDD"\u6062\u590D',
+  "coi.adapters.extractSection": "\u4F1A\u8BDD ID \u81EA\u52A8\u63D0\u53D6\uFF08\u53EF\u9009\uFF09",
+  "coi.adapters.extractSource": "\u8F93\u51FA\u6D41",
+  "coi.adapters.extractRegex": "\u63D0\u53D6\u6B63\u5219",
+  "coi.adapters.extractRegexPh": "\u6355\u83B7\u7EC4 1 \u4E3A\u4F1A\u8BDD ID\uFF0C\u5982 To resume this session: kimi -r (session_\\S+)",
+  "coi.adapters.resumeMissing": "ai-cli \u7C7B\u578B\u5FC5\u987B\u586B\u5199\u4F1A\u8BDD\u6062\u590D\u914D\u7F6E\uFF08resume\uFF09",
+  "coi.templates.addTitle": "\u6DFB\u52A0\u6A21\u677F",
+  "coi.templates.name": "\u540D\u79F0",
+  "coi.templates.prompt": "\u4EFB\u52A1\u5185\u5BB9",
+  "coi.templates.adapterOpt": "\u9002\u914D\u5668\uFF08\u53EF\u9009\uFF09",
+  "coi.templates.idOpt": "ID\uFF08\u53EF\u9009\uFF0C\u4E0D\u586B\u81EA\u52A8\uFF09",
+  "coi.templates.add": "\u6DFB\u52A0",
+  "coi.templates.delete": "\u5220\u9664",
+  "coi.templates.confirmDelete": "\u786E\u8BA4\u5220\u9664\u8BE5\u6A21\u677F\uFF1F",
+  "coi.templates.builtinKeep": "\u5185\u7F6E\u6A21\u677F\u4E0D\u53EF\u5220\u9664",
+  "coi.templates.empty": "\u6682\u65E0\u6A21\u677F",
+  "coi.stats.total": "\u603B\u4EFB\u52A1\u6570",
+  "coi.stats.count": "\u4EFB\u52A1\u6570",
+  "coi.stats.hours": "\u7D2F\u8BA1\u65F6\u957F",
+  "coi.stats.byStatus": "\u72B6\u6001\u5206\u5E03",
+  "coi.stats.empty": "\u6682\u65E0\u7EDF\u8BA1\u6570\u636E",
+  "coi.config.notify": "\u901A\u77E5\u547D\u4EE4",
+  "coi.config.notifyHint": "\u4EFB\u52A1\u7ED3\u675F\u65F6\u6267\u884C\uFF1B\u5360\u4F4D\u7B26\uFF1A{taskId} {coi} {status} {summary}",
+  "coi.config.retention": "\u4EFB\u52A1\u4FDD\u7559\u5929\u6570",
+  "coi.config.timeout": "\u4EFB\u52A1\u8D85\u65F6",
+  "coi.config.timeoutHours": "\u5C0F\u65F6",
+  "coi.config.timeoutMinutes": "\u5206\u949F",
+  "coi.config.timeoutHint": "\u8D85\u65F6\u4EC5\u4F5C\u515C\u5E95\u9632\u7EBF\uFF08AI \u4EFB\u52A1\u53EF\u80FD\u6570\u5C0F\u65F6\u65E0\u8F93\u51FA\u5C5E\u6B63\u5E38\uFF09\uFF1B\u7559\u7A7A = \u4E0D\u4FEE\u6539",
+  "coi.config.timeoutBad": "\u8D85\u65F6\u683C\u5F0F\u4E0D\u6B63\u786E",
+  "coi.config.save": "\u4FDD\u5B58",
+  "coi.config.saved": "\u5DF2\u4FDD\u5B58",
+  "coi.scope.temporary": "\u4E34\u65F6",
+  "coi.scope.session": "\u4F1A\u8BDD",
+  "coi.scope.project": "\u9879\u76EE",
+  "coi.scope.global": "\u5168\u5C40",
+  // 提示词 tab（PromptView 私有字典迁入，2026-09-16 i18n）
+  "prompt.guide": "\u6307\u5357",
+  "prompt.library": "\u63D0\u793A\u8BCD\u5E93",
+  "prompt.guideIntro": "\u63D0\u793A\u8BCD\u6CE8\u5165 = \u300C\u6307\u4EE4\u8303\u5F0F\u8D44\u4EA7\u5E93 + \u4E00\u952E\u6CE8\u5165\u300D\uFF1A\u628A\u5E38\u7528\u5DE5\u4F5C\u8303\u5F0F\uFF08\u4EE3\u7801\u5BA1\u67E5 / \u8C03\u8BD5 / PRD / \u6D4B\u8BD5\u7B49\uFF09\u56FA\u5316\u6210\u63D0\u793A\u8BCD\uFF0C\u9009\u4E2D\u5373\u6CE8\u5165\u2014\u2014\u6A21\u578B\u4E0B\u4E00\u8F6E\u81EA\u52A8\u770B\u5230\u3001\u4E0D\u6253\u65AD\u56DE\u590D\uFF0C\u7B49\u4E8E\u7ED9 AI \u4E0B\u53D1\u64CD\u4F5C\u624B\u518C\u3002",
+  "prompt.guideLibTitle": "\u63D0\u793A\u8BCD\u5E93\uFF1A\u4F60\u7684\u8303\u5F0F\u8D44\u4EA7",
+  "prompt.guideLibBody": "\u53EF\u590D\u7528\u7684\u6307\u4EE4\u8303\u5F0F\u8D44\u4EA7\uFF0C\u6765\u6E90\u4EE5\u7528\u6237\u81EA\u5199\u4E3A\u4E3B\uFF1A",
+  "prompt.guideLibItem1": "\u65B0\u5EFA / \u7F16\u8F91 / \u5220\u9664\uFF1A\u540D\u79F0 + \u7B80\u4ECB + \u5206\u7C7B + \u6807\u7B7E + \u6B63\u6587\uFF08Markdown\uFF09\uFF0C\u65B0\u5EFA\u65F6\u5206\u7C7B\u7559\u7A7A\u81EA\u52A8\u5F52\u5165\u300C\u4E34\u65F6\u300D\uFF1B",
+  "prompt.guideLibItem2": "\u5206\u7C7B\u7BA1\u7406\uFF1A\u5185\u7F6E\u5206\u7C7B + \u81EA\u5B9A\u4E49\u6DFB\u52A0 / \u91CD\u547D\u540D / \u5220\u9664\uFF08\u5220\u9664\u65F6\u8BE5\u5206\u7C7B\u4E0B\u63D0\u793A\u8BCD\u81EA\u52A8\u79FB\u5230\u672A\u5206\u7C7B\uFF09\uFF1B",
+  "prompt.guideLibItem3": "\u641C\u7D22\uFF08\u540D\u79F0 / \u5206\u7C7B / \u6807\u7B7E / \u5185\u5BB9\uFF09+ \u590D\u5236\u5230\u526A\u8D34\u677F + \u4F7F\u7528\u7EDF\u8BA1\uFF1B",
+  "prompt.guideLibItem4": "\u5185\u7F6E 13 \u6761\u6765\u81EA GitHub \u771F\u5B9E\u63D0\u793A\u8BCD\u8D44\u4EA7\u7684\u51B7\u542F\u52A8\u793A\u4F8B\uFF08SpecRoute / Claude-Code-Promts-Skills\uFF09\uFF0C\u5E76\u9644\u8303\u5F0F\u5E93\u94FE\u63A5\u4F9B\u81EA\u53D6\uFF1B",
+  "prompt.guideLibItem5": "\u542F\u7528\u72B6\u6001\uFF1A\u7981\u7528\u540E AI \u7684\u63D0\u793A\u8BCD\u5DE5\u5177\uFF08de_prompts\uFF09\u770B\u4E0D\u5230\u3001\u4E5F\u4E0D\u80FD\u6CE8\u5165\u2014\u2014GUI \u4ECD\u53EF\u7F16\u8F91\uFF0C\u968F\u65F6\u53EF\u91CD\u65B0\u542F\u7528\uFF1BAI \u53EF\u67E5\u8BE2\u5217\u8868\uFF08\u6309 ID \u53D6\u8BE6\u60C5\uFF09\u5E76\u9009\u62E9\u5408\u9002\u63D0\u793A\u8BCD\u6CE8\u5165\u5F53\u524D\u4F1A\u8BDD\uFF0C\u6216\u7528\u4F5C\u5B50\u4F1A\u8BDD / \u5B50\u4EE3\u7406 / CLI \u4EFB\u52A1\u63D0\u793A\u8BCD\u3002",
+  "prompt.guideInjectTitle": "\u6CE8\u5165\u673A\u5236\uFF1A\u6B21\u6570 \xD7 \u95F4\u9694",
+  "prompt.guideInjectBody": "\u9009\u4E2D\u63D0\u793A\u8BCD\u914D\u7F6E\u300C\u6B21\u6570 \xD7 \u95F4\u9694\u300D\u5373\u6CE8\u5165\uFF08\u6B21\u6570 / \u95F4\u9694\u53EF\u8F93\u5165\u4EFB\u610F\u6570\u5B57\uFF09\uFF1A",
+  "prompt.guideInjectItem1": "\u6B21\u6570\uFF1A\u4E00\u6B21\u6027\uFF081 \u8F6E\uFF09/ \u6709\u9650 N \u6B21 / \u65E0\u9650\uFF080 = \u6301\u7EED\u6CE8\u5165\u76F4\u5230\u624B\u52A8\u505C\u6B62\uFF09\uFF1B",
+  "prompt.guideInjectItem2": "\u95F4\u9694\uFF1A\u6BCF\u56DE\u5408\uFF081\uFF09/ \u6BCF M \u56DE\u5408\u51FA\u73B0 1 \u6B21\uFF08\u5982\u300C\u6BCF 3 \u56DE\u5408\u63D0\u9192\u4E00\u6B21\u300D\uFF09\uFF1B",
+  "prompt.guideInjectItem3": "\u5199\u540E\u5373\u65F6\u6CE8\u5165\u3001\u4E0D\u6253\u65AD\u56DE\u590D\uFF1A\u5185\u5BB9\u5199\u5165\u6CE8\u5165\u8F68\uFF0C\u6A21\u578B\u4E0B\u4E00\u8F6E\u751F\u6210\u65F6\u81EA\u52A8\u770B\u5230\uFF1B",
+  "prompt.guideInjectItem4": "\u6B63\u6587\u652F\u6301 {{date}} / {{time}} \u53D8\u91CF\uFF0C\u6CE8\u5165\u65F6\u81EA\u52A8\u5C55\u5F00\uFF08\u9002\u5408\u5E26\u65E5\u671F\u7684\u65E5\u62A5\u6A21\u677F\uFF09\uFF1B",
+  "prompt.guideInjectItem5": "\u4E34\u65F6\u6CE8\u5165\uFF1A\u4E0D\u5EFA\u63D0\u793A\u8BCD\u4E5F\u80FD\u6CE8\u5165\u2014\u2014\u8BE6\u60C5\u680F\u76F4\u63A5\u8F93\u5165\u5185\u5BB9\u70B9\u300C\u6CE8\u5165\u300D\uFF0C\u81EA\u52A8\u5B58\u5165\u63D0\u793A\u8BCD\u5E93\uFF08\u5206\u7C7B\u7559\u7A7A\u5F52\u5165\u300C\u4E34\u65F6\u300D\uFF09\uFF0C\u4E00\u6B21\u64CD\u4F5C\u540C\u65F6\u5165\u5E93\u5E76\u751F\u6548\u3002",
+  "prompt.guideTrackTitle": "\u6CE8\u5165\u72B6\u6001\uFF1A\u968F\u65F6\u53EF\u89C1\u3001\u53EF\u505C",
+  "prompt.guideTrackBody": "\u6BCF\u4E2A\u63D0\u793A\u8BCD\u6709\u660E\u786E\u72B6\u6001\uFF08\u672A\u6CE8\u5165 / \u6CE8\u5165\u4E2D\xB7\u5269 N \u6B21 / \u6301\u7EED\u6CE8\u5165\u4E2D\uFF09\uFF0C\u53EF\u968F\u65F6\u505C\u6B62\uFF1B\u300C\u6CE8\u5165\u4E2D\u300D\u6D6E\u5C42\u5B9E\u65F6\u5C55\u793A\uFF1B\u4F1A\u8BDD\u9875 Tab \u680F\u6709\u6D3B\u8DC3\u6CE8\u5165\u65F6\u663E\u793A\u7EA2\u70B9 \u{1F534}\u3002",
+  "prompt.guideSwitchTitle": "\u5F00\u5173",
+  "prompt.guideSwitchBody": "\u63D0\u793A\u8BCD\u7BA1\u7406\u5668\u9ED8\u8BA4\u5173\u95ED\uFF1A\u5728\u300CMemory Evolve \u8BBE\u7F6E\u300DTab \u7684\u300C\u914D\u7F6E\u300D\u91CC\u6253\u5F00\u300C\u63D0\u793A\u8BCD\u7BA1\u7406\u5668\u300D\u5F00\u5173\uFF0C\u5237\u65B0\u540E\u672C Tab \u51FA\u73B0\u3002",
+  "prompt.search": "\u641C\u7D22\u540D\u79F0\u3001\u5206\u7C7B\u3001\u6807\u7B7E\u6216\u5185\u5BB9\u2026",
+  "prompt.new": "\u65B0\u5EFA\u63D0\u793A\u8BCD",
+  "prompt.all": "\u5168\u90E8",
+  "prompt.uncategorized": "\u672A\u5206\u7C7B",
+  "prompt.inject": "\u6CE8\u5165",
+  "prompt.injectRound": "\u6CE8\u5165 {n} \u6B21",
+  "prompt.injectInfinite": "\u65E0\u9650\u6B21\uFF08\u6301\u7EED\u6CE8\u5165\uFF09",
+  "prompt.injectCadence": "\u6BCF {n} \u56DE\u5408\u4E00\u6B21",
+  "prompt.everyTurn": "\u6BCF\u56DE\u5408",
+  "prompt.injectHint": "\u5199\u5165\u6CE8\u5165\u8F68\uFF0C\u6A21\u578B\u4E0B\u4E00\u8F6E\u81EA\u52A8\u770B\u5230\uFF1B\u6B21\u6570\u6309\u5BF9\u8BDD\u56DE\u5408\u6D88\u8017\uFF08\u53EF\u95F4\u9694\u6CE8\u5165\uFF09\uFF0C\u65E0\u9650\u6B21\u5219\u6301\u7EED\u5230\u624B\u52A8\u505C\u6B62",
+  "prompt.injecting": "\u6CE8\u5165\u4E2D",
+  "prompt.injectingBadge": "\u6CE8\u5165\u4E2D\xB7\u5269{n}\u6B21",
+  "prompt.injectingBadgeInfinite": "\u6CE8\u5165\u4E2D\xB7\u6301\u7EED",
+  "prompt.injectingIdle": "\u672A\u6CE8\u5165",
+  "prompt.noInjection": "\u8FD8\u6CA1\u6709\u6CE8\u5165\u4E2D\u7684\u63D0\u793A\u8BCD",
+  "prompt.removeInjection": "\u505C\u6B62\u6CE8\u5165",
+  "prompt.stoppedInjection": "\u5DF2\u505C\u6B62\u6CE8\u5165",
+  "prompt.copy": "\u590D\u5236",
+  "prompt.copied": "\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F",
+  "prompt.save": "\u4FDD\u5B58",
+  "prompt.saving": "\u4FDD\u5B58\u4E2D\u2026",
+  "prompt.cancel": "\u53D6\u6D88",
+  "prompt.delete": "\u5220\u9664",
+  "prompt.deleteConfirm": "\u786E\u5B9A\u5220\u9664\u300C{name}\u300D\uFF1F\u5220\u9664\u540E\u4E0D\u53EF\u6062\u590D\uFF0C\u5176\u6D3B\u8DC3\u6CE8\u5165\u4F1A\u4E00\u5E76\u79FB\u9664\u3002",
+  "prompt.sources": "GitHub \u8303\u5F0F\u5E93\u6765\u6E90",
+  "prompt.sourcesHint": "\u4EE5\u4E0B\u4ED3\u5E93\u6709\u5927\u91CF\u9AD8\u8D28\u91CF\u63D0\u793A\u8BCD/\u89C4\u8303\uFF08\u7528\u6237\u81EA\u53D6\uFF0C\u4E0D\u505A\u81EA\u52A8\u5BFC\u5165\uFF09\uFF1A",
+  "prompt.empty": "\u8FD8\u6CA1\u6709\u63D0\u793A\u8BCD\u3002\u70B9\u300C\u65B0\u5EFA\u63D0\u793A\u8BCD\u300D\u5F00\u59CB\uFF0C\u6216\u4ECE\u53F3\u4FA7\u6765\u6E90\u94FE\u63A5\u83B7\u53D6\u7075\u611F\u3002",
+  "prompt.noMatch": "\u6CA1\u6709\u5339\u914D\u7684\u63D0\u793A\u8BCD",
+  "prompt.formNew": "\u65B0\u5EFA\u63D0\u793A\u8BCD",
+  "prompt.formEdit": "\u7F16\u8F91\u63D0\u793A\u8BCD",
+  "prompt.name": "\u540D\u79F0",
+  "prompt.namePh": "\u5982\uFF1A\u4EE3\u7801\u5BA1\u67E5\uFF08Code Review\uFF09",
+  "prompt.description": "\u7B80\u4ECB",
+  "prompt.descriptionPh": "\u4E00\u53E5\u8BDD\u8BF4\u660E\u8FD9\u4E2A\u63D0\u793A\u8BCD\u7684\u7528\u9014\uFF08AI \u9009\u62E9\u63D0\u793A\u8BCD\u65F6\u770B\u8FD9\u91CC\uFF09",
+  "prompt.enabled": "\u542F\u7528\u72B6\u6001",
+  "prompt.enabledOn": "\u5DF2\u542F\u7528",
+  "prompt.enabledOff": "\u5DF2\u7981\u7528",
+  "prompt.disabledHint": "\u7981\u7528\u540E\u4E0D\u51FA\u73B0\u5728 AI \u7684\u63D0\u793A\u8BCD\u5217\u8868\uFF0C\u4E5F\u4E0D\u80FD\u88AB AI \u6CE8\u5165\uFF1B\u53EF\u5728\u672C\u9875\u91CD\u65B0\u542F\u7528",
+  "prompt.category": "\u5206\u7C7B",
+  "prompt.categoryPh": "\u5982\uFF1A\u5F00\u53D1\u6D41\u7A0B\uFF08\u7559\u7A7A\u81EA\u52A8\u5F52\u5165\u300C\u4E34\u65F6\u300D\uFF09",
+  "prompt.tags": "\u6807\u7B7E",
+  "prompt.tagsPh": "\u9017\u53F7\u5206\u9694\uFF0C\u5982\uFF1Areview, \u8D28\u91CF",
+  "prompt.content": "\u5185\u5BB9",
+  "prompt.contentPh": "\u5728\u8FD9\u91CC\u7F16\u5199\u63D0\u793A\u8BCD\u6B63\u6587\u2026\n\u652F\u6301 {{date}}\u3001{{time}} \u53D8\u91CF\uFF0C\u6CE8\u5165\u65F6\u81EA\u52A8\u5C55\u5F00\u3002",
+  "prompt.usage": "\u5DF2\u6CE8\u5165 {n} \u6B21",
+  "prompt.lastUsed": "\u6700\u8FD1\u6CE8\u5165\uFF1A{time}",
+  "prompt.neverUsed": "\u4ECE\u672A\u6CE8\u5165\u8FC7",
+  "prompt.rounds": "\u6B21\u6570",
+  "prompt.cadence": "\u95F4\u9694",
+  "prompt.roundsHint": "0=\u65E0\u9650\uFF1B1=\u53EA\u6CE8\u5165\u4E00\u6B21",
+  "prompt.everyHint": "0=\u53EA\u6CE8\u5165\u4E00\u6B21\uFF1B1=\u6BCF\u56DE\u5408\uFF1BN=\u6BCF N \u56DE\u5408\u4E00\u6B21",
+  "prompt.onceOnly": "\u53EA\u6CE8\u5165\u4E00\u6B21",
+  "prompt.effectOnce": "\u4E00\u6B21\u6027\uFF1A\u4E0B\u4E00\u8F6E\u51FA\u73B0\u4E00\u6B21\u540E\u81EA\u52A8\u7ED3\u675F",
+  "prompt.effectInfinite": "\u65E0\u9650\u6B21\uFF1A\u6BCF\u56DE\u5408\u51FA\u73B0\uFF0C\u6301\u7EED\u5230\u624B\u52A8\u505C\u6B62",
+  "prompt.effectInfiniteCadence": "\u65E0\u9650\u6B21\uFF1A\u6BCF {n} \u56DE\u5408\u51FA\u73B0\u4E00\u6B21\uFF0C\u6301\u7EED\u5230\u624B\u52A8\u505C\u6B62",
+  "prompt.effectFinite": "\u5171 {n} \u6B21\uFF1A\u6BCF\u56DE\u5408\u51FA\u73B0\uFF0C\u7528\u5C3D\u81EA\u52A8\u7ED3\u675F",
+  "prompt.effectFiniteCadence": "\u5171 {n} \u6B21\uFF1A\u6BCF {m} \u56DE\u5408\u51FA\u73B0\u4E00\u6B21\uFF0C\u7528\u5C3D\u81EA\u52A8\u7ED3\u675F",
+  "prompt.roundsInvalid": "\u6B21\u6570\u5FC5\u987B\u662F \u22650 \u7684\u6574\u6570\uFF080 = \u65E0\u9650\u6B21\uFF09",
+  "prompt.everyInvalid": "\u95F4\u9694\u5FC5\u987B\u662F \u22650 \u7684\u6574\u6570\uFF080 = \u53EA\u6CE8\u5165\u4E00\u6B21\uFF09",
+  "prompt.injectOnceBtn": "\u6CE8\u5165\u4E00\u6B21",
+  "prompt.injectOnceBtnHint": "\u53EA\u6CE8\u5165\u4E00\u6B21\uFF1A\u4E0B\u4E00\u8F6E\u51FA\u73B0\u540E\u81EA\u52A8\u7ED3\u675F",
+  "prompt.injectInfiniteBtn": "\u6301\u7EED\u6CE8\u5165",
+  "prompt.injectInfiniteBtnHint": "\u6BCF\u56DE\u5408\u51FA\u73B0\uFF0C\u76F4\u5230\u624B\u52A8\u505C\u6B62",
+  "prompt.customBtn": "\u81EA\u5B9A\u4E49",
+  "prompt.customBtnHint": "\u81EA\u7531\u8BBE\u7F6E\u6B21\u6570\u4E0E\u95F4\u9694",
+  "prompt.injectNowBtn": "\u26A1 \u7ACB\u5373\u6CE8\u5165",
+  "prompt.injectNowBtnHint": "\u7ACB\u523B\u751F\u6548\u4E00\u6B21\uFF08\u5F53\u524D\u56DE\u5408/\u9A6C\u4E0A\u5524\u9192\uFF09\uFF0C\u53EA\u6CE8\u5165\u4E00\u6B21\uFF0C\u4E0D\u53D7\u6B21\u6570\u4E0E\u95F4\u9694\u5F71\u54CD",
+  "prompt.injectedNow": "\u5DF2\u7ACB\u5373\u6CE8\u5165\u300C{name}\u300D\uFF1A\u5F53\u524D\u56DE\u5408\u751F\u6548\uFF0C\u4EC5\u6B64\u4E00\u6B21\uFF08\u4E0D\u53D7\u6B21\u6570/\u95F4\u9694\u5F71\u54CD\uFF09",
+  "prompt.injectedNowFallback": "\u5DF2\u7ACB\u5373\u6CE8\u5165\u300C{name}\u300D\uFF08\u63D2\u8BDD\u672A\u9001\u8FBE\uFF0C\u5C06\u5728\u4E0B\u4E00\u8F6E\u751F\u6548\uFF09",
+  "prompt.collapseCustom": "\u6536\u8D77",
+  "prompt.quickTitle": "\u4E34\u65F6\u6CE8\u5165",
+  "prompt.quickDesc": "\u4E0D\u5EFA\u63D0\u793A\u8BCD\u4E5F\u80FD\u6CE8\u5165\uFF1A\u76F4\u63A5\u8F93\u5165\u5185\u5BB9\u70B9\u300C\u6CE8\u5165\u4E00\u6B21\u300D\uFF0C\u4F1A\u81EA\u52A8\u5B58\u5165\u63D0\u793A\u8BCD\u5E93\uFF08\u5206\u7C7B\u7559\u7A7A\u5F52\u5165\u300C\u4E34\u65F6\u300D\uFF09\uFF0C\u4E00\u6B21\u64CD\u4F5C\u540C\u65F6\u5165\u5E93\u5E76\u751F\u6548\u3002",
+  "prompt.quickNamePh": "\u540D\u79F0\uFF08\u53EF\u9009\uFF0C\u7559\u7A7A\u53D6\u5185\u5BB9\u9996\u884C\uFF09",
+  "prompt.quickCategoryPh": "\u5206\u7C7B\uFF08\u53EF\u9009\uFF0C\u7559\u7A7A\u5F52\u5165\u300C\u4E34\u65F6\u300D\uFF09",
+  "prompt.contentRequired": "\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A",
+  "prompt.error": "{message}",
+  "prompt.loadFailed": "\u52A0\u8F7D\u5931\u8D25\uFF1A{message}",
+  "prompt.injected": "\u5DF2\u6CE8\u5165\u300C{name}\u300D\uFF1A{rounds}{cadence}\uFF0C\u6A21\u578B\u4E0B\u4E00\u8F6E\u751F\u6548{ending}",
+  "prompt.injectedOnceEnding": "\uFF0C\u4E4B\u540E\u81EA\u52A8\u7ED3\u675F",
+  "prompt.injectedFiniteEnding": "\uFF0C\u7528\u5C3D\u81EA\u52A8\u7ED3\u675F",
+  "prompt.injectedInfiniteEnding": "\uFF0C\u76F4\u5230\u624B\u52A8\u505C\u6B62",
+  "prompt.injectInfiniteShort": "\u6301\u7EED\u6CE8\u5165",
+  "prompt.everyTurnParen": "\uFF08\u6BCF\u56DE\u5408\u51FA\u73B0\uFF09",
+  "prompt.injectCadenceParen": "\uFF08\u6BCF {n} \u56DE\u5408\u51FA\u73B0\uFF09",
+  "prompt.removed": "\u5DF2\u79FB\u9664\u6CE8\u5165",
+  "prompt.reload": "\u5237\u65B0",
+  "prompt.newCategory": "\u65B0\u5206\u7C7B",
+  "prompt.newCategoryPh": "\u8F93\u5165\u5206\u7C7B\u540D\uFF0C\u56DE\u8F66\u786E\u8BA4",
+  "prompt.deleteCategory": "\u5220\u9664\u5206\u7C7B",
+  "prompt.renameCategory": "\u91CD\u547D\u540D\u5206\u7C7B",
+  "prompt.renamePh": "\u8F93\u5165\u65B0\u5206\u7C7B\u540D\uFF0C\u56DE\u8F66\u786E\u8BA4",
+  "prompt.categoryRemoved": "\u5DF2\u5220\u9664\u5206\u7C7B\u300C{name}\u300D{moved}",
+  "prompt.categoryDeleted": "\u5DF2\u5220\u9664\u5206\u7C7B\u300C{name}\u300D",
+  "prompt.categoryMoved": "\uFF0C{count} \u6761\u63D0\u793A\u8BCD\u5DF2\u79FB\u5230\u672A\u5206\u7C7B",
+  "prompt.categoryExists": "\u5206\u7C7B\u300C{name}\u300D\u5DF2\u5B58\u5728\uFF0C\u5DF2\u4E3A\u4F60\u9009\u4E2D",
+  "prompt.categoryRenamed": "\u5DF2\u91CD\u547D\u540D\u300C{from}\u300D\u2192\u300C{to}\u300D{renamed}",
+  "prompt.categoryRenamedSuffix": "\uFF0C{count} \u6761\u63D0\u793A\u8BCD\u5DF2\u540C\u6B65",
+  "prompt.unsavedChanges": "\u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539",
+  // 无限画板 / 会话评审 / 移动端补充文案（2026-09-16 i18n）
+  "canvas.tab.label": "\u753B\u677F",
+  "canvas.toolbar.view": "\u89C6\u89D2",
+  "canvas.toolbar.viewFilter": "\u89C6\u89D2\u7B5B\u9009",
+  "canvas.view.session": "\u672C\u4F1A\u8BDD",
+  "canvas.view.project": "\u672C\u9879\u76EE",
+  "canvas.view.global": "\u6240\u6709\u9879\u76EE",
+  "canvas.search.placeholder": "\u641C\u7D22\u753B\u677F\u8282\u70B9\u2026",
+  "canvas.action.path": "\u8DEF\u5F84\u4E0A\u677F",
+  "canvas.action.note": "\u4FBF\u7B7E",
+  "canvas.action.catalog": "\u641C\u7D22\u4E0A\u677F",
+  "canvas.action.resetView": "\u590D\u4F4D\u89C6\u89D2",
+  "canvas.action.pin": "\u4E0A\u677F",
+  "canvas.action.cancel": "\u53D6\u6D88",
+  "canvas.action.close": "\u5173\u95ED",
+  "canvas.action.search": "\u641C\u7D22",
+  "canvas.action.remove": "\u79FB\u9664",
+  "canvas.action.migrate": "\u8FC1\u79FB",
+  "canvas.action.openDefault": "\u7528\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00",
+  "canvas.meta.count": "{visible}/{total} \u5F20",
+  "canvas.meta.hits": " \xB7 \u547D\u4E2D {count}",
+  "canvas.sync.conflict": " \xB7 \u26A0\uFE0F \u51B2\u7A81\uFF0C\u8BF7\u5237\u65B0",
+  "canvas.sync.saving": " \xB7 \u4FDD\u5B58\u4E2D",
+  "canvas.sync.offline": " \xB7 \u672A\u8FDE\u63A5\u540E\u7AEF",
+  "canvas.sync.synced": " \xB7 \u5DF2\u540C\u6B65",
+  "canvas.sync.localOnly": " \xB7 \u4EC5\u672C\u5730\u4FDD\u5B58",
+  "canvas.node.unnamed": "\u672A\u547D\u540D",
+  "canvas.node.unverified": "\u672A\u9A8C\u8BC1",
+  "canvas.scope.global": "\u5168\u5C40",
+  "canvas.scope.currentSession": "\u5F53\u524D\u4F1A\u8BDD",
+  "canvas.scope.otherSession": "\u5176\u4ED6\u4F1A\u8BDD",
+  "canvas.scope.session": "\u4F1A\u8BDD",
+  "canvas.note.defaultName": "\u4FBF\u7B7E",
+  "canvas.save.markdownText": "Markdown \u6587\u672C",
+  "canvas.save.downloaded": "\u5DF2\u4E0B\u8F7D\u5230\u6D4F\u89C8\u5668\u9ED8\u8BA4\u4E0B\u8F7D\u76EE\u5F55",
+  "canvas.content.truncated": "\u2026\uFF08\u5185\u5BB9\u8FC7\u957F\uFF0C\u5DF2\u622A\u65AD\uFF09",
+  "canvas.error.conflict": "\u753B\u677F\u5DF2\u88AB\u5176\u4ED6\u4F1A\u8BDD\u4FEE\u6539\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u52A0\u8F7D\u6700\u65B0\u5185\u5BB9",
+  "canvas.error.unreachable": "\u7F51\u7EDC\u9519\u8BEF\uFF08\u5BBF\u4E3B\u4E0D\u53EF\u8FBE\uFF09",
+  "canvas.error.http": "\u8BF7\u6C42\u5931\u8D25",
+  "canvas.error.unknown": "\u672A\u77E5\u9519\u8BEF",
+  "canvas.toast.pinned": "\u5DF2\u4E0A\u677F\uFF1A{title}",
+  "canvas.toast.notePinned": "\u4FBF\u7B7E\u5DF2\u4E0A\u677F",
+  "canvas.toast.noPath": "\u6CA1\u6709\u53EF\u590D\u5236\u7684\u8DEF\u5F84",
+  "canvas.toast.copiedId": "\u5DF2\u590D\u5236 ID",
+  "canvas.toast.copiedTitle": "\u5DF2\u590D\u5236\u6807\u9898",
+  "canvas.toast.copiedPath": "\u5DF2\u590D\u5236\u8DEF\u5F84",
+  "canvas.toast.copiedRef": "\u5DF2\u590D\u5236\u5F15\u7528\u4E32",
+  "canvas.toast.copyFailed": "\u590D\u5236\u5931\u8D25",
+  "canvas.toast.noLocalPath": "\u8BE5\u8282\u70B9\u6CA1\u6709\u672C\u5730\u8DEF\u5F84\u53EF\u6253\u5F00",
+  "canvas.toast.opened": "\u5DF2\u7528\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00\uFF1A{title}",
+  "canvas.toast.openedFolder": "\u5DF2\u5728\u6587\u4EF6\u7BA1\u7406\u5668\u4E2D\u6253\u5F00\u6240\u5728\u6587\u4EF6\u5939\uFF1A{title}",
+  "canvas.toast.openFailed": "\u6253\u5F00\u5931\u8D25\uFF1A{message}",
+  "canvas.toast.noContent": "\u8BE5\u8282\u70B9\u6CA1\u6709\u53EF\u4FDD\u5B58\u7684\u5185\u5BB9",
+  "canvas.toast.saved": "\u5DF2\u4FDD\u5B58\uFF1A{title}",
+  "canvas.toast.savedWith": "\u5DF2\u4FDD\u5B58\uFF1A{title}\uFF08{message}\uFF09",
+  "canvas.toast.saveFailed": "\u4FDD\u5B58\u5931\u8D25\uFF1A{message}",
+  "canvas.toast.migrateOffline": "\u753B\u677F\u672A\u8FDE\u63A5\u540E\u7AEF\uFF0C\u65E0\u6CD5\u8FC1\u79FB\u5F52\u5C5E",
+  "canvas.toast.migrateConflict": "\u753B\u677F\u5DF2\u88AB\u5176\u4ED6\u4F1A\u8BDD\u4FEE\u6539\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5",
+  "canvas.toast.migrateFailed": "\u8FC1\u79FB\u5931\u8D25\uFF1A{message}",
+  "canvas.toast.migrated": "\u5F52\u5C5E\u5DF2\u8FC1\u79FB",
+  "canvas.toast.jumping": "\u6B63\u5728\u8DF3\u8F6C\u5230\u4F1A\u8BDD\uFF1A{name}",
+  "canvas.toast.removed": "\u5DF2\u4ECE\u753B\u677F\u79FB\u9664",
+  "canvas.type.folder": "\u6587\u4EF6\u5939",
+  "canvas.type.markdown": "Markdown",
+  "canvas.type.plainText": "\u7EAF\u6587\u672C",
+  "canvas.type.image": "\u56FE\u7247",
+  "canvas.type.media": "\u97F3\u89C6\u9891",
+  "canvas.type.file": "\u6587\u4EF6",
+  "canvas.board.aiZone": "AI \u4FBF\u7B7E\u533A \xB7 AI \u65B0\u653E\u7684\u4FBF\u7B7E\u843D\u5728\u8FD9\u91CC\uFF0C\u53EF\u62D6\u8D70",
+  "canvas.board.hint": "\u62D6\u7A7A\u767D\u5904\u5E73\u79FB \xB7 \u7A7A\u683C+\u62D6 \u4E5F\u53EF\u5E73\u79FB \xB7 \u6EDA\u8F6E\u7F29\u653E\uFF08\u4E2D\u5FC3\u4E3A\u6307\u9488\uFF09\xB7 \u7F29\u653E {percent}%",
+  "canvas.board.lod": " \xB7 \u8FDC\u770B\u7B80\u5316\u6A21\u5F0F",
+  "canvas.board.viewport": " \xB7 \u89C6\u53E3 {visible}/{total}",
+  "canvas.card.aiPlaced": "AI \u653E\u7F6E",
+  "canvas.card.unverified": "\u672A\u9A8C\u8BC1",
+  "canvas.card.preview": "\u9884\u89C8",
+  "canvas.card.save": "\u4FDD\u5B58",
+  "canvas.card.saveTitle": "\u4FDD\u5B58\u5185\u5BB9\u5230\u672C\u673A\u6587\u4EF6",
+  "canvas.card.open": "\u6253\u5F00",
+  "canvas.card.openTitle": "\u7528\u7CFB\u7EDF\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00",
+  "canvas.card.openFolder": "\u6240\u5728\u6587\u4EF6\u5939",
+  "canvas.card.openFolderTitle": "\u5728\u7CFB\u7EDF\u6587\u4EF6\u7BA1\u7406\u5668\u4E2D\u6253\u5F00\u8BE5\u6587\u4EF6\u6240\u5728\u7684\u6587\u4EF6\u5939\uFF08Finder / \u8D44\u6E90\u7BA1\u7406\u5668\uFF09",
+  "canvas.card.migrate": "\u5F52\u5C5E",
+  "canvas.card.migrateTitle": "\u8FC1\u79FB\u8282\u70B9\u5F52\u5C5E\uFF08\u672C\u4F1A\u8BDD/\u672C\u9879\u76EE/\u6240\u6709\u9879\u76EE\u53EF\u89C1\uFF09",
+  "canvas.card.jump": "\u8DF3\u8F6C",
+  "canvas.card.jumpTitle": "\u8DF3\u8F6C\u5230\u8BE5\u8282\u70B9\u6240\u5C5E\u4F1A\u8BDD",
+  "canvas.card.copyId": "\u590D\u5236 ID",
+  "canvas.card.copyTitle": "\u590D\u5236\u6807\u9898",
+  "canvas.card.copyPath": "\u590D\u5236\u8DEF\u5F84",
+  "canvas.card.copyRef": "\u5F15\u7528",
+  "canvas.card.remove": "\u79FB\u9664",
+  "canvas.card.resizeAria": "\u62D6\u52A8\u8C03\u6574\u5361\u7247\u5927\u5C0F",
+  "canvas.card.resizeTitle": "\u62D6\u52A8\u8C03\u6574\u5927\u5C0F",
+  "canvas.card.editorMarkdown": "\u5199\u4E00\u6BB5 Markdown\u2026",
+  "canvas.card.editorPlain": "\u5199\u4E00\u6BB5\u7EAF\u6587\u672C\u2026",
+  "canvas.card.imagePreview": "\u56FE\u7247\u9884\u89C8",
+  "canvas.card.audio": "\u97F3\u9891",
+  "canvas.card.video": "\u89C6\u9891",
+  "canvas.card.folderNoBrowse": " \xB7 \u6682\u4E0D\u652F\u6301\u5185\u5D4C\u6D4F\u89C8",
+  "canvas.dialog.path.title": "\u8DEF\u5F84\u4E0A\u677F",
+  "canvas.dialog.path.desc": "\u7C98\u8D34\u672C\u5730\u8DEF\u5F84\u5373\u53EF\u751F\u6210\u5361\u7247\u3002\u6682\u4E0D\u6821\u9A8C\u6587\u4EF6\u662F\u5426\u5B58\u5728\uFF0C\u5361\u7247\u4F1A\u6807\u300C\u672A\u9A8C\u8BC1\u300D\u3002",
+  "canvas.dialog.path.label": "\u672C\u5730\u8DEF\u5F84",
+  "canvas.dialog.path.detected": "\u5C06\u8BC6\u522B\u4E3A\uFF1A{glyph} {label}",
+  "canvas.dialog.note.title": "\u4FBF\u7B7E\u4E0A\u677F",
+  "canvas.dialog.note.aria": "\u65B0\u5EFA\u4FBF\u7B7E",
+  "canvas.dialog.note.desc": "\u5185\u5BB9\u5B58\u5728\u753B\u677F\u91CC\uFF0C\u4E0D\u6307\u5411\u4EFB\u4F55\u6587\u4EF6\u3002",
+  "canvas.dialog.note.defaultTitle": "\u672A\u547D\u540D\u4FBF\u7B7E",
+  "canvas.dialog.field.title": "\u6807\u9898",
+  "canvas.dialog.field.type": "\u7C7B\u578B",
+  "canvas.dialog.field.content": "\u5185\u5BB9",
+  "canvas.dialog.catalog.title": "\u641C\u7D22\u4E0A\u677F",
+  "canvas.dialog.catalog.desc": "\u641C\u7D22\u672C\u673A\u6587\u4EF6\uFF0C\u9009\u4E2D\u5373\u4E0A\u677F\u3002",
+  "canvas.dialog.catalog.keyword": "\u5173\u952E\u5B57",
+  "canvas.dialog.catalog.placeholder": "\u5408\u540C / \u8BBE\u8BA1\u7A3F / \u5F55\u97F3\u2026",
+  "canvas.dialog.catalog.scopeAria": "\u641C\u7D22\u8303\u56F4",
+  "canvas.dialog.catalog.scopeLocal": "\u672C\u673A\u5168\u90E8",
+  "canvas.dialog.catalog.scopeProject": "\u5F53\u524D\u9879\u76EE",
+  "canvas.dialog.catalog.searching": "\u641C\u7D22\u4E2D\u2026",
+  "canvas.dialog.catalog.error": "\u672C\u5730\u641C\u7D22\u4E0D\u53EF\u7528",
+  "canvas.dialog.catalog.noMatch": "\u6CA1\u6709\u5339\u914D\u7684\u6587\u4EF6",
+  "canvas.dialog.catalog.prompt": "\u8F93\u5165\u5173\u952E\u5B57\u641C\u7D22\u672C\u673A\u6587\u4EF6",
+  "canvas.dialog.preview.aria": "\u9884\u89C8",
+  "canvas.dialog.preview.noteOnly": "\u753B\u677F\u5185\u4FBF\u7B7E",
+  "canvas.dialog.preview.unverified": " \xB7 \u8DEF\u5F84\u672A\u9A8C\u8BC1",
+  "canvas.dialog.preview.empty": "\uFF08\u7A7A\u5185\u5BB9\uFF09",
+  "canvas.dialog.preview.enableImage": "\u542F\u7528\u753B\u677F\u6A21\u5757\u540E\u53EF\u9884\u89C8\u771F\u5B9E\u56FE\u7247",
+  "canvas.dialog.preview.enableMedia": "\u542F\u7528\u753B\u677F\u6A21\u5757\u540E\u53EF\u64AD\u653E\u771F\u5B9E\u6587\u4EF6",
+  "canvas.dialog.preview.unsupported": "\u6B64\u7C7B\u7D20\u6750\u6682\u4E0D\u5728\u6D4F\u89C8\u5668\u5185\u6E32\u67D3\uFF08Word / PDF / \u6587\u4EF6\u5939\u7B49\uFF09\u3002",
+  "canvas.dialog.remove.aria": "\u786E\u8BA4\u79FB\u9664",
+  "canvas.dialog.remove.title": "\u4ECE\u753B\u677F\u79FB\u9664\uFF1F",
+  "canvas.dialog.remove.body": "\u5C06\u79FB\u9664\u300C{title}\u300D\u3002\u53EA\u4ECE\u753B\u677F\u62FF\u6389\uFF0C\u4E0D\u5220\u9664\u6E90\u6587\u4EF6\u3002",
+  "canvas.dialog.remove.bodyWithPath": "\u5C06\u79FB\u9664\u300C{title}\u300D\u3002\u53EA\u4ECE\u753B\u677F\u62FF\u6389\uFF0C\u4E0D\u5220\u9664\u6E90\u6587\u4EF6\uFF08{path}\uFF09\u3002",
+  "canvas.dialog.migrate.title": "\u8FC1\u79FB\u5F52\u5C5E",
+  "canvas.dialog.migrate.body": "\u300C{title}\u300D\u5C06\u79FB\u52A8\u5230\uFF1A",
+  "canvas.dialog.migrate.sessionDesc": "\u5F52\u5F53\u524D\u4F1A\u8BDD\uFF08\u5728\u522B\u7684\u4F1A\u8BDD\u6253\u5F00\u753B\u677F\u770B\u4E0D\u5230\u5B83\uFF0C\u9664\u975E\u5207\u300C\u6240\u6709\u9879\u76EE\u300D\uFF09",
+  "canvas.dialog.migrate.projectDesc": "\u9879\u76EE\u7EA7\uFF1A\u5F53\u524D\u9879\u76EE\u5185\u6240\u6709\u4F1A\u8BDD\u90FD\u80FD\u770B\u5230",
+  "canvas.dialog.migrate.globalLabel": "\u6240\u6709\u9879\u76EE\u53EF\u89C1",
+  "canvas.dialog.migrate.globalDesc": "\u5168\u5C40\uFF1A\u4EFB\u4F55\u4F1A\u8BDD\u3001\u4EFB\u4F55\u89C6\u89D2\u90FD\u80FD\u770B\u5230",
+  "advisor.level.conversation": "\u672C\u6B21\u8BC4\u5BA1\u4F1A\u8BDD\u7EA6\u675F",
+  "advisor.level.session": "\u672C\u4F1A\u8BDD\u7EA6\u675F",
+  "advisor.level.project": "\u672C\u9879\u76EE\u7EA6\u675F",
+  "advisor.level.global": "\u5168\u5C40\u7EA6\u675F",
+  "advisor.status.disabled": "\u5DF2\u505C\u7528",
+  "advisor.status.idle": "\u7A7A\u95F2",
+  "advisor.status.reviewing": "\u8BC4\u5BA1\u4E2D",
+  "advisor.status.paused": "\u5DF2\u6682\u505C",
+  "advisor.status.halted": "\u5DF2\u7EC8\u6B62",
+  "advisor.severity.info": "info \xB7 \u8BB0\u5F55",
+  "advisor.severity.nit": "nit \xB7 \u5EFA\u8BAE",
+  "advisor.severity.concern": "concern \xB7 \u5173\u6CE8",
+  "advisor.severity.blocker": "blocker \xB7 \u963B\u65AD",
+  "advisor.severity.answer": "\u56DE\u7B54",
+  "advisor.outcome.delivered": "\u5DF2\u9001\u8FBE",
+  "advisor.outcome.recorded": "\u5DF2\u8BB0\u5F55",
+  "advisor.outcome.answered": "\u5DF2\u56DE\u7B54",
+  "advisor.outcome.suppressed": "\u5DF2\u6291\u5236",
+  "advisor.outcome.noNote": "\u65E0\u5EFA\u8BAE",
+  "advisor.outcome.dropped": "\u5DF2\u4E22\u5F03",
+  "advisor.outcome.failed": "\u8BC4\u5BA1\u5931\u8D25",
+  "advisor.outcome.cancelled": "\u5DF2\u53D6\u6D88",
+  "advisor.ago.none": "\u6682\u65E0\u6D3B\u52A8",
+  "advisor.ago.justNow": "\u521A\u521A",
+  "advisor.ago.seconds": "{count} \u79D2\u524D",
+  "advisor.ago.minutes": "{count} \u5206\u949F\u524D",
+  "advisor.ago.hours": "{count} \u5C0F\u65F6\u524D",
+  "advisor.workspace.unknown": "\u5DE5\u4F5C\u7A7A\u95F4\u672A\u77E5",
+  "advisor.workspace.unknownShort": "\u672A\u77E5",
+  "advisor.header.toggle.titleOff": "Advisor \u9762\u677F\u663E\u793A\u5DF2\u5173\u95ED\uFF1B\u70B9\u51FB\u53EF\u6253\u5F00\u8BBE\u7F6E",
+  "advisor.capsule.aria": "\u5C55\u5F00\u4F1A\u8BDD\u8BC4\u5BA1\u9762\u677F",
+  "advisor.capsule.title": "\u5C55\u5F00\u4F1A\u8BDD\u8BC4\u5BA1\u9762\u677F\uFF08\u6309\u4F4F\u53EF\u6CBF\u53F3\u8FB9\u7F18\u4E0A\u4E0B\u62D6\u52A8\uFF09",
+  "advisor.unread.aria": "{count} \u6761\u672A\u8BFB\u8BC4\u5BA1",
+  "advisor.panel.aria": "\u4F1A\u8BDD\u8BC4\u5BA1\u60AC\u6D6E\u9762\u677F",
+  "advisor.panel.title": "\u4F1A\u8BDD\u8BC4\u5BA1",
+  "advisor.panel.collapse": "\u6298\u53E0",
+  "advisor.panel.collapseAria": "\u6298\u53E0 Advisor \u9762\u677F",
+  "advisor.statusStrip.aria": "Advisor \u8FD0\u884C\u72B6\u6001",
+  "advisor.switch.title": "\u4EC5\u5207\u6362\u5F53\u524D\u4F1A\u8BDD\uFF1B\u4E0D\u4F1A\u4FEE\u6539\u5168\u5C40\u9ED8\u8BA4\u5F00\u5173",
+  "advisor.switch.on": "\u672C\u4F1A\u8BDD\u5DF2\u542F\u7528",
+  "advisor.switch.off": "\u672C\u4F1A\u8BDD\u672A\u542F\u7528",
+  "advisor.model.unresolved": "\u6A21\u578B\u672A\u89E3\u6790",
+  "advisor.gate.failed": "\u6A21\u578B\u95E8\u7981\u672A\u901A\u8FC7\uFF1A{reason}",
+  "advisor.gate.configIncomplete": "provider/model \u5FC5\u987B\u540C\u65F6\u586B\u5199\u6216\u540C\u65F6\u7559\u7A7A",
+  "advisor.gate.modelUnavailable": "\u5F53\u524D\u4F1A\u8BDD\u6A21\u578B\u4E0D\u53EF\u7528",
+  "advisor.notice.dismiss": "\u5173\u95ED\u63D0\u793A",
+  "advisor.tabs.aria": "\u8BC4\u5BA1\u6570\u636E\u89C6\u56FE",
+  "advisor.tab.scopes": "\u7EA6\u675F",
+  "advisor.tab.live": "\u5B9E\u65F6",
+  "advisor.tab.history": "\u8BB0\u5F55",
+  "advisor.tab.settings": "\u8BBE\u7F6E",
+  "advisor.live.aria": "\u5B9E\u65F6\u8BC4\u5BA1\u6D41",
+  "advisor.live.emptyEnabled": "\u6682\u65E0\u8BC4\u5BA1\u6D3B\u52A8\u3002\u65B0\u7684\u8BC4\u5BA1\u4F1A\u5728\u8FD9\u91CC\u5B9E\u65F6\u51FA\u73B0\u3002",
+  "advisor.live.emptyDisabled": "\u672A\u542F\u7528\uFF1A\u53EF\u4F7F\u7528\u4E0A\u65B9\u4F1A\u8BDD\u5F00\u5173\uFF0C\u6216\u5728\u4E0B\u65B9\u8BBE\u7F6E\u4E2D\u5F00\u542F Advisor\u3002",
+  "advisor.live.backToLatest": "\u56DE\u5230\u6700\u65B0",
+  "advisor.instructions.aria": "Advisor \u6307\u4EE4\u533A",
+  "advisor.instructions.placeholder": "\u7ED9\u4F1A\u8BDD\u8BC4\u5BA1\u53D1\u6307\u4EE4\u2026\uFF08Enter \u53D1\u9001\uFF0CShift+Enter \u6362\u884C\uFF09",
+  "advisor.instructions.send": "\u53D1\u9001",
+  "advisor.instructions.hint": "\u8BC4\u5BA1\u5EFA\u8BAE\u6309\u4E25\u91CD\u5EA6\u5B9E\u65F6\u9001\u8FBE\uFF08nit/concern/blocker \u8D70 steer\uFF0Cinfo \u9ED8\u8BA4\u4EC5\u8BB0\u5F55\uFF09\uFF1B\u6307\u4EE4\u6846\u63D0\u95EE\u4F1A\u7ACB\u5373\u89E6\u53D1 Advisor \u56DE\u7B54\u5E76\u6CE8\u5165\u4F1A\u8BDD\u6D41\u3002",
+  "advisor.conversation.statsTitle": "\u8BC4\u5BA1\u5458\u6301\u7EED\u4F1A\u8BDD\u5DF2\u5360\u7528\u7684\u4E0A\u4E0B\u6587\uFF08\u5B57\u7B26\u6570\u4F30\u7B97\uFF0C\u4E2D\u6587 1 \u5B57\u22481 token\uFF1B\u5BF9\u6BD4\u6A21\u578B\u4E0A\u4E0B\u6587\u7A97\u53E3\u5224\u65AD\u662F\u5426\u65B0\u5EFA\u8BC4\u5BA1\u4F1A\u8BDD\uFF09",
+  "advisor.conversation.epoch": "\u8BC4\u5BA1\u4F1A\u8BDD #{epoch}",
+  "advisor.conversation.label": "\u8BC4\u5BA1\u4F1A\u8BDD",
+  "advisor.conversation.contextCount": "\u4E0A\u4E0B\u6587 {count} \u6761",
+  "advisor.conversation.reset": "\u65B0\u5EFA\u8BC4\u5BA1\u4F1A\u8BDD",
+  "advisor.conversation.resetConfirm": "\u65B0\u5EFA\u8BC4\u5BA1\u4F1A\u8BDD\u5C06\u6E05\u7A7A\u8BC4\u5BA1\u5458\u7684\u5168\u90E8\u4E0A\u4E0B\u6587\u4E0E\u8BB0\u5FC6\uFF08\u8BC4\u5BA1\u5458\u4ECE\u96F6\u5F00\u59CB\uFF09\u3002\n\u786E\u8BA4\u540E\u53EF\u5728\u7B2C\u4E00\u6761\u6307\u4EE4\u4E2D\u544A\u77E5\u80CC\u666F\u4FE1\u606F\u3002",
+  "advisor.conversation.resetTitle": "\u6E05\u7A7A\u8BC4\u5BA1\u5458\u6301\u7EED\u4F1A\u8BDD\uFF08\u4E0A\u4E0B\u6587+\u8BB0\u5FC6\uFF09\uFF0C\u4ECE\u96F6\u5F00\u59CB\uFF1B\u9002\u5408\u6362\u4EFB\u52A1/\u63A7\u5236\u4E0A\u4E0B\u6587\u957F\u5EA6",
+  "advisor.pending.toggle": "\u5F85\u6D88\u8D39\u6307\u4EE4 ({count})",
+  "advisor.pending.empty": "\u6682\u65E0\u5F85\u6D88\u8D39\u6307\u4EE4",
+  "advisor.pending.consuming": "\u6D88\u8D39\u4E2D",
+  "advisor.pending.waiting": "\u5F85\u6D88\u8D39",
+  "advisor.pending.clear": "\u6E05\u7A7A\u5F85\u6D88\u8D39\u6307\u4EE4",
+  "advisor.action.retry": "\u91CD\u8BD5",
+  "advisor.action.save": "\u4FDD\u5B58",
+  "advisor.action.saving": "\u4FDD\u5B58\u4E2D\u2026",
+  "advisor.history.aria": "\u5386\u53F2\u8BC4\u5BA1\u8BB0\u5F55",
+  "advisor.history.sessionFilter": "\u4F1A\u8BDD\u7B5B\u9009",
+  "advisor.history.sessionCurrent": "\u5F53\u524D\u4F1A\u8BDD",
+  "advisor.history.sessionAll": "\u5168\u90E8\u4F1A\u8BDD",
+  "advisor.history.severityFilter": "\u4E25\u91CD\u5EA6\u7B5B\u9009",
+  "advisor.history.severityAll": "\u5168\u90E8\u4E25\u91CD\u5EA6",
+  "advisor.history.severityAnswer": "\u56DE\u7B54",
+  "advisor.history.timeFilter": "\u65F6\u95F4\u7B5B\u9009",
+  "advisor.history.timeAll": "\u5168\u90E8\u65F6\u95F4",
+  "advisor.history.time24h": "\u6700\u8FD1 24 \u5C0F\u65F6",
+  "advisor.history.time7d": "\u6700\u8FD1 7 \u5929",
+  "advisor.history.time30d": "\u6700\u8FD1 30 \u5929",
+  "advisor.history.workspacePlaceholder": "\u5DE5\u4F5C\u7A7A\u95F4\uFF08\u53EF\u9009\uFF09",
+  "advisor.history.workspaceFilter": "\u5DE5\u4F5C\u7A7A\u95F4\u7B5B\u9009",
+  "advisor.history.query": "\u67E5\u8BE2",
+  "advisor.history.empty": "\u5F53\u524D\u7B5B\u9009\u4E0B\u6682\u65E0\u8BC4\u5BA1\u8BB0\u5F55\u3002",
+  "advisor.history.loadMore": "\u52A0\u8F7D\u66F4\u591A",
+  "advisor.loading.events": "\u6B63\u5728\u8FDE\u63A5 Advisor \u5B9E\u65F6\u6D41\u2026",
+  "advisor.loading.records": "\u6B63\u5728\u52A0\u8F7D\u5386\u53F2\u8BB0\u5F55\u2026",
+  "advisor.loading.scopes": "\u6B63\u5728\u52A0\u8F7D\u7EA6\u675F\u2026",
+  "advisor.loading.settings": "\u6B63\u5728\u52A0\u8F7D\u8BBE\u7F6E\u2026",
+  "advisor.loading.short": "\u52A0\u8F7D\u4E2D\u2026",
+  "advisor.error.statusLoad": "\u72B6\u6001\u52A0\u8F7D\u5931\u8D25\uFF1A{message}",
+  "advisor.error.eventsLoad": "\u5B9E\u65F6\u6D41\u52A0\u8F7D\u5931\u8D25\uFF1A{message}",
+  "advisor.error.recordsLoad": "\u5386\u53F2\u52A0\u8F7D\u5931\u8D25\uFF1A{message}",
+  "advisor.error.scopesLoad": "\u7EA6\u675F\u52A0\u8F7D\u5931\u8D25\uFF1A{message}",
+  "advisor.error.scopesSave": "\u7EA6\u675F\u4FDD\u5B58\u5931\u8D25\uFF1A{message}",
+  "advisor.error.configLoad": "\u8BBE\u7F6E\u52A0\u8F7D\u5931\u8D25\uFF1A{message}",
+  "advisor.error.rebuildFailed": "\u5B9E\u65F6\u6E38\u6807\u5DF2\u8FC7\u671F\uFF0C\u5386\u53F2\u91CD\u5EFA\u5931\u8D25\uFF1A{message}",
+  "advisor.error.noDetail": "\u64CD\u4F5C\u5931\u8D25\uFF08\u65E0\u9519\u8BEF\u8BE6\u60C5\uFF09",
+  "advisor.notice.reconnected": "\u8FDE\u63A5\u5DF2\u6062\u590D\uFF0C\u6B63\u5728\u91CD\u65B0\u540C\u6B65 Advisor \u4E8B\u4EF6\u2026",
+  "advisor.notice.instructionSent": "\u6307\u4EE4\u5DF2\u53D1\u9001\uFF0CAdvisor \u6B63\u5728\u56DE\u7B54\uFF08\u56DE\u7B54\u4F1A\u76F4\u63A5\u6CE8\u5165\u4F1A\u8BDD\u6D41\uFF09",
+  "advisor.notice.conversationReset": "\u5DF2\u65B0\u5EFA\u8BC4\u5BA1\u4F1A\u8BDD\uFF08#{epoch}\uFF09\u2014\u2014\u53EF\u5728\u7B2C\u4E00\u6761\u6307\u4EE4\u4E2D\u544A\u77E5\u8BC4\u5BA1\u5458\u80CC\u666F\u4FE1\u606F",
+  "advisor.notice.instructionsCleared": "\u5DF2\u6E05\u7A7A {count} \u6761\u5F85\u6D88\u8D39\u6307\u4EE4",
+  "advisor.notice.sessionEnabled": "\u672C\u4F1A\u8BDD Advisor \u5DF2\u542F\u7528",
+  "advisor.notice.sessionDisabled": "\u672C\u4F1A\u8BDD Advisor \u5DF2\u505C\u7528",
+  "advisor.notice.configSaved": "Advisor \u8BBE\u7F6E\u5DF2\u4FDD\u5B58\u5E76\u751F\u6548",
+  "advisor.notice.scopeSaved": "{level}\u5DF2\u4FDD\u5B58\uFF0C\u4E0B\u6B21\u8BC4\u5BA1\u7ACB\u5373\u751F\u6548",
+  "advisor.card.aria": "\u4F1A\u8BDD\u8BC4\u5BA1 {reviewId}",
+  "advisor.card.instructions": "\u6267\u884C\u6307\u4EE4 \xD7{count}",
+  "advisor.card.sessionEpoch": "\u4F1A\u8BDD #{epoch}",
+  "advisor.card.qa": " \xB7 \u95EE\u7B54",
+  "advisor.card.thisRound": " \xB7 \u672C\u8F6E {count} \u6761",
+  "advisor.card.collapse": "\u6536\u8D77 \u25B4",
+  "advisor.card.expand": "\u5C55\u5F00 \u25BE",
+  "advisor.card.noInputSnapshot": "\u5386\u53F2\u7EC8\u6001\u8BB0\u5F55\u4E0D\u5305\u542B\u8F93\u5165\u5FEB\u7167",
+  "advisor.card.reviewing": "\u8BC4\u5BA1\u4E2D\u2026",
+  "advisor.card.suppressedNote": "\u5DF2\u6291\u5236\uFF1A\u6B64\u6761\u5EFA\u8BAE\u88AB\u95F8\u95E8\u62E6\u622A\uFF08\u53BB\u91CD / \u7A7A\u6CDB\u6291\u5236 / \u6BCF\u8F6E\u4E00\u6761\uFF09\uFF0C\u672A\u6CE8\u5165\u4E3B\u4F1A\u8BDD",
+  "advisor.card.retryable": "\uFF08\u53EF\u91CD\u8BD5\uFF09",
+  "advisor.card.errorSep": "\uFF1A",
+  "advisor.delivery.steer": "\u5DF2\u9001\u8FBE \u2713",
+  "advisor.delivery.inject": "\u5DF2\u6CE8\u5165 \u2713",
+  "advisor.scopes.aria": "\u8BC4\u5BA1\u5458\u7EA6\u675F",
+  "advisor.scopes.boundaryError": "\u7EA6\u675F\u533A\u57DF\u6E32\u67D3\u51FA\u9519\uFF1A{message}\uFF08\u8BE6\u89C1\u6D4F\u89C8\u5668\u63A7\u5236\u53F0\uFF09",
+  "advisor.scopes.hint": "\u56DB\u5C42\u7EA7\u7EA6\u675F\u62FC\u63A5\u8FDB\u8BC4\u5BA1\u5458\u7CFB\u7EDF\u63D0\u793A\u8BCD\uFF08\u51B2\u7A81\u65F6\u8D8A\u5C40\u90E8\u8D8A\u4F18\u5148\uFF09\uFF1B\u4FDD\u5B58\u540E\u7ACB\u5373\u751F\u6548\u3002",
+  "advisor.scopes.conversationLabel": "{level}\uFF08\u968F\u300C\u65B0\u5EFA\u8BC4\u5BA1\u4F1A\u8BDD\u300D\u6E05\u7A7A\uFF09",
+  "advisor.scopes.conversationPlaceholder": "\u53EA\u5BF9\u672C\u6B21\u8BC4\u5BA1\u4F1A\u8BDD\u751F\u6548\u2026\uFF08\u53EF\u591A\u884C\uFF0C\u591A\u6761\u6307\u4EE4\u4E00\u6B21\u5199\uFF09",
+  "advisor.scopes.sessionLabel": "{level}\uFF08\u672C\u4F1A\u8BDD\u4E00\u76F4\u6709\u6548\uFF09",
+  "advisor.scopes.sessionPlaceholder": "\u53EA\u5BF9\u672C\u4F1A\u8BDD\u751F\u6548\u2026",
+  "advisor.scopes.projectLabel": "{level}\uFF08\u5DE5\u4F5C\u533A {workspace} \u7684\u6240\u6709\u4F1A\u8BDD\u5171\u4EAB\uFF09",
+  "advisor.scopes.projectPlaceholder": "\u5BF9\u672C\u9879\u76EE\u6240\u6709\u4F1A\u8BDD\u751F\u6548\u2026",
+  "advisor.scopes.globalLabel": "{level}\uFF08\u6240\u6709\u9879\u76EE\u3001\u6240\u6709\u4F1A\u8BDD\u90FD\u751F\u6548\uFF09",
+  "advisor.scopes.globalPlaceholder": "\u5BF9\u6240\u6709\u9879\u76EE\u6240\u6709\u4F1A\u8BDD\u751F\u6548\u2026\uFF08\u5982\uFF1A\u8BC4\u5BA1\u610F\u89C1\u4E00\u5F8B\u7528\u4E2D\u6587\u3001\u4E0D\u8981\u91CD\u590D\u5DF2\u63D0\u8FC7\u7684\u5EFA\u8BAE\uFF09",
+  "advisor.context.chars": "{count} \u5B57",
+  "advisor.settings.title": "\u4F1A\u8BDD\u8BC4\u5BA1\u8BBE\u7F6E",
+  "advisor.settings.masterSwitchHint": "\u6A21\u5757\u603B\u95F8\uFF08\u542F\u7528/\u505C\u7528\uFF09\u5728\u300CMemory Evolve \u8BBE\u7F6E\u300DTab \u7684\u914D\u7F6E\u533A\u63A7\u5236",
+  "advisor.settings.showCapsule": "\u663E\u793A\u60AC\u6D6E\u80F6\u56CA\u6309\u94AE",
+  "advisor.settings.infoInjectTitle": "info \u662F\u6700\u4F4E\u7B49\u7EA7\u5EFA\u8BAE\uFF1A\u9ED8\u8BA4\u53EA\u8BB0\u5F55\u4E0D\u6CE8\u5165\u4F1A\u8BDD\uFF1B\u5F00\u542F\u540E\u4EE5\u6CE8\u5165\uFF08\u975E\u6253\u65AD\uFF09\u65B9\u5F0F\u9001\u8FBE",
+  "advisor.settings.infoInject": "info \u7EA7\u5EFA\u8BAE\u4E5F\u6CE8\u5165\u4F1A\u8BDD",
+  "advisor.settings.provider": "\u4F9B\u5E94\u5546\uFF08Provider\uFF09",
+  "advisor.settings.model": "\u6A21\u578B\uFF08Model\uFF09",
+  "advisor.settings.inheritPlaceholder": "\u7559\u7A7A\u5219\u7EE7\u627F\u4F1A\u8BDD",
+  "advisor.settings.systemPrompt": "\u8BC4\u5BA1\u7CFB\u7EDF\u63D0\u793A\u8BCD",
+  "advisor.settings.promptBuiltin": "\uFF08\u4F7F\u7528\u5185\u7F6E\u9ED8\u8BA4\u63D0\u793A\u8BCD\uFF0C\u7F16\u8F91\u540E\u4FDD\u5B58\u5373\u4E3A\u81EA\u5B9A\u4E49\uFF09",
+  "advisor.settings.promptCustom": "\uFF08\u81EA\u5B9A\u4E49\uFF09",
+  "advisor.settings.promptPlaceholder": "\u7559\u7A7A\u4F7F\u7528\u5185\u7F6E\u8BC4\u5BA1\u63D0\u793A\u8BCD",
+  "advisor.settings.restore": "\u6062\u590D\u9ED8\u8BA4\u63D0\u793A\u8BCD",
+  "advisor.settings.restoreTitle": "\u6062\u590D\u4E3A\u5185\u7F6E\u9ED8\u8BA4\u63D0\u793A\u8BCD\uFF08\u4FDD\u5B58\u540E\u7ACB\u5373\u751F\u6548\uFF0C\u8F93\u5165\u6846\u663E\u793A\u6700\u65B0\u5185\u7F6E\u9ED8\u8BA4\uFF09",
+  "advisor.settings.overrideHint": "\u5168\u5C40\u9ED8\u8BA4\u5F00\u5173\u4E0D\u4F1A\u6E05\u9664\u5F53\u524D\u4F1A\u8BDD override\uFF1B\u4F1A\u8BDD\u7EA7\u542F\u505C\u8BF7\u4F7F\u7528\u4E0A\u65B9\u72B6\u6001\u6761\u3002",
+  "advisor.settings.save": "\u4FDD\u5B58\u8BBE\u7F6E",
+  "advisor.settings.providerModelPair": "provider \u4E0E model \u5FC5\u987B\u540C\u65F6\u586B\u5199\uFF0C\u6216\u540C\u65F6\u7559\u7A7A\u4EE5\u7EE7\u627F\u4F1A\u8BDD\u6A21\u578B\u3002",
+  "mobile.moreActions": "\u66F4\u591A\u64CD\u4F5C",
+  // COI/提示词迁移补齐键（2026-09-16 i18n）
+  "coi.status.queued": "\u6392\u961F\u4E2D",
+  "coi.status.running": "\u8FD0\u884C\u4E2D",
+  "coi.status.completed": "\u5DF2\u5B8C\u6210",
+  "coi.status.failed": "\u5931\u8D25",
+  "coi.status.killed": "\u5DF2\u7EC8\u6B62",
+  "coi.status.interrupted": "\u4E2D\u65AD",
+  "coi.ago.justNow": "\u521A\u521A",
+  "coi.ago.seconds": "{count} \u79D2\u524D",
+  "coi.ago.minutes": "{count} \u5206\u949F\u524D",
+  "coi.ago.hours": "{count} \u5C0F\u65F6\u524D",
+  "coi.sep.colon": "\uFF1A",
+  "coi.sep.paren": "\uFF08{value}\uFF09",
+  "coi.error.noDetail": "\u64CD\u4F5C\u5931\u8D25\uFF08\u65E0\u9519\u8BEF\u8BE6\u60C5\uFF09",
+  "coi.tasks.deleteFailed": "\u5220\u9664\u5931\u8D25",
+  "coi.tasks.deleted": "\u5DF2\u5220\u9664",
+  "coi.adapters.saveFailed": "\u4FDD\u5B58\u5931\u8D25",
+  "coi.adapters.opFailed": "\u64CD\u4F5C\u5931\u8D25",
+  "coi.adapters.readFailed": "\u8BFB\u53D6\u5931\u8D25",
+  "coi.adapters.avgMs": "\u23F1 \u5747\u8017\u65F6 {minutes} \u5206\u949F",
+  "coi.adapters.avgMsTitle": "\u5386\u53F2 completed \u4EFB\u52A1\u7684\u5E73\u5747\u8017\u65F6\uFF08de_coi_adapters \u540C\u6E90\uFF09",
+  "prompt.untitledName": "\u672A\u547D\u540D\u63D0\u793A\u8BCD",
+  "prompt.deleteCategoryConfirm": "\u786E\u5B9A\u5220\u9664\u5206\u7C7B\u300C{name}\u300D\uFF1F{hint}",
+  "prompt.quotedTitle": "\u300C{name}\u300D",
+  "prompt.plusGlyph": "\uFF0B",
+  // mermaid 渲染器 / 版本页补漏（2026-09-16 i18n）
+  "mermaid.renderFailed": "\u26A0 mermaid \u6E32\u67D3\u5931\u8D25\uFF0C\u5DF2\u4FDD\u7559\u4EE3\u7801\uFF08\u53EF\u590D\u5236\u4FEE\u6B63\uFF09",
+  "mermaid.renderFailedDetail": "\u26A0 mermaid \u6E32\u67D3\u5931\u8D25\uFF1A{detail}\uFF0C\u5DF2\u4FDD\u7559\u4EE3\u7801\uFF08\u53EF\u590D\u5236\u4FEE\u6B63\uFF09",
+  "mermaid.download": "\u4E0B\u8F7D",
+  "mermaid.downloadTitle": "\u4E0B\u8F7D\u6B64\u56FE\u4E3A SVG\uFF08\u77E2\u91CF\uFF0C\u53EF\u65E0\u635F\u7F29\u653E\uFF09",
+  "version.sep.colon": "\uFF1A"
 };
 var en = {
   "tab.label": "Skill Manager",
@@ -17852,7 +17859,632 @@ var en = {
   "panel.reveal.agentsFile": "Global rules (AGENTS.md)",
   "panel.config.saved": "Config saved. Refresh the page for newly enabled/disabled modules to take effect",
   "panel.config.failed": "Failed: {message}",
-  "panel.loading": "Loading\u2026"
+  "panel.loading": "Loading\u2026",
+  // COI 调度 tab（CoIView 私有字典迁入，2026-09-16 i18n）
+  "coi.tab": "CLI Dispatch",
+  "coi.guide": "Guide",
+  "coi.guide.title": "COI Dispatch Guide",
+  "coi.guide.intro": 'COI Dispatch = the "external helper console" for handing tasks to external AI agents (kimi / codex / grok / hermes\u2026): tasks run in the background without blocking your session; progress and logs are live; sessions are tiered and resumable in one click; tasks can chain across agents; results are archived and distilled into memory. Off by default \u2014 enable "COI dispatch" under Config in the Memory Evolve Settings tab.',
+  "coi.guide.use.title": "How to launch a task",
+  "coi.guide.use.desc": "Three entries, pick any:",
+  "coi.guide.use.ai": "Tell the AI:",
+  "coi.guide.use.aiDesc": 'Say "dispatch XX to kimi / have codex fix the tests" \u2014 the AI launches it via de_coi_dispatch, it runs in the background, and on completion the summary is automatically written into the project log and daily log.',
+  "coi.guide.use.slash": "Terminal command:",
+  "coi.guide.use.slashDesc": '/de_coi run "task" --coi kimi (see all subcommands: /de_coi help).',
+  "coi.guide.use.tab": "This tab:",
+  "coi.guide.use.tabDesc": 'In the Tasks page fill in the adapter, prompt and scope; optionally resume a session / use a template / chain a reference task; you can also tick "inject DSH memory" so the helper carries your project conventions, attach context text or images; hit launch and watch progress and output live.',
+  "coi.guide.scope.title": "Session tiers (who can see)",
+  "coi.guide.scope.desc": "Tasks and sessions belong to a tier, which decides who can see and resume them:",
+  "coi.guide.scope.temp": "Visible only to the launching session; one-off (use for testing an adapter).",
+  "coi.guide.scope.session": "Visible only to the launching session; resumable within it.",
+  "coi.guide.scope.project": "Visible to all sessions of the project (same working directory); can carry a git branch.",
+  "coi.guide.scope.global": "Visible to every session; kept long-term.",
+  "coi.guide.skill.title": "Adapters & skills",
+  "coi.guide.skill.desc": "Every adapter maps to a skill (the AI usage guide, injected into the model context): the four built-ins work out of the box; custom CLIs can be added in the Adapters page (plain-cli included) \u2014 fill the skill name and content and the AI learns to drive it. Skills can be disabled in the Skill Manager tab and edited via the Skill button on the adapter page.",
+  "coi.guide.tips.title": "Best practices",
+  "coi.guide.tips.1": "Division of labor: frontend\u2192kimi, complex backend\u2192codex, quick tasks\u2192grok.",
+  "coi.guide.tips.2": 'Chaining: codex writes code \u2192 kimi reviews (pick "reference task" when launching).',
+  "coi.guide.tips.3": "Note important sessions (the note button in the sessions page) so you can find them by name when resuming.",
+  "coi.guide.tips.4": "Tasks can push a notification on completion (set the notify command in the config page, e.g. hermes send to WeChat).",
+  "coi.guide.tips.5": 'Tick "inject DSH memory" when dispatching and the helper works with your global rules, profile and this project key facts (branch-filtered, same rules as DSH injection); tasks can also carry images \u2014 send a screenshot for analysis (codex / kimi / hermes read images; zcode is text-only and will refuse clearly).',
+  "coi.guide.loop": "The loop: dispatch \u2192 watch progress live \u2192 archive the result \u2192 distill the summary into memory \u2192 resume and chain the session.",
+  "coi.tasks": "Tasks",
+  "coi.sessions": "Sessions",
+  "coi.adapters": "Adapters",
+  "coi.templates": "Templates",
+  "coi.stats": "Stats",
+  "coi.config": "Config",
+  "coi.loading": "Loading\u2026",
+  "coi.refresh": "Refresh",
+  "coi.all": "All",
+  "coi.none": "(none)",
+  "coi.launch.title": "Launch task",
+  "coi.launch.expand": "Expand",
+  "coi.launch.collapse": "Collapse",
+  "coi.launch.adapter": "Adapter",
+  "coi.launch.prompt": "Prompt",
+  "coi.launch.promptPh": "e.g. fix the failing cases in tests/store.test.js and verify",
+  "coi.launch.scope": "Scope",
+  "coi.launch.session": "Resume session",
+  "coi.launch.sessionNone": "(new session)",
+  "coi.launch.sessionEmpty": "(no sessions for this adapter)",
+  "coi.launch.template": "Template",
+  "coi.launch.templateNone": "(no template)",
+  "coi.launch.ref": "Relay ref",
+  "coi.launch.refNone": "(none)",
+  "coi.launch.submit": "Launch",
+  "coi.launch.injectTracks": "Inject DSH memory (optional)",
+  "coi.launch.injectTracksHint": "Pick which memory tracks to hand to the COI (independent of scope \u2014 any tier can inject): long-term memory=global facts, user profile=your preferences, project key=this workspace's key facts (branch-filtered; no AGENTS.md). Content is sent to external COI services \u2014 mind privacy; empty = no injection",
+  "coi.launch.ctxText": "Extra context text (optional)",
+  "coi.launch.ctxTextPh": "Your own context: project progress, log highlights\u2026 (over 32KB it is written to a file and the path is given to the COI)",
+  "coi.launch.needPrompt": "Prompt must not be empty",
+  "coi.launch.ok": "Launched",
+  "coi.tasks.empty": "No tasks yet",
+  "coi.tasks.selectHint": "Click a task on the left to view details and output",
+  "coi.tasks.kill": "Kill",
+  "coi.tasks.confirmKill": "Kill this task?",
+  "coi.tasks.killed": "Killed",
+  "coi.tasks.retry": "Retry",
+  "coi.tasks.retried": "Re-launched",
+  "coi.tasks.copy": "Copy",
+  "coi.tasks.copied": "Copied",
+  "coi.tasks.copyFail": "Copy failed",
+  "coi.tasks.log": "Output log",
+  "coi.tasks.logEmpty": "(no output yet)",
+  "coi.tasks.logFull": "Expand",
+  "coi.tasks.prompt": "Task prompt",
+  "coi.tasks.searchPh": "Search tasks (content / task id)\u2026",
+  "coi.tasks.pager.prev": "Prev",
+  "coi.tasks.pager.next": "Next",
+  "coi.tasks.pager.total": "of",
+  "coi.tasks.delete": "Delete",
+  "coi.tasks.confirmDelete": "Delete this task? Its record and output archive will be removed (memory summaries are unaffected; relay references to it will fail afterwards).\n\n{id}",
+  "coi.tasks.status": "Status",
+  "coi.tasks.adapter": "Adapter",
+  "coi.tasks.scope": "Scope",
+  "coi.tasks.branch": "Branch",
+  "coi.tasks.sessionId": "Session ID",
+  "coi.tasks.created": "Created",
+  "coi.tasks.duration": "Duration",
+  "coi.tasks.lastOutput": "Last output",
+  "coi.tasks.exitCode": "Exit code",
+  "coi.tasks.error": "Error",
+  "coi.sessions.filterScope": "Scope filter",
+  "coi.sessions.searchPh": "Search\u2026",
+  "coi.sessions.note": "Note",
+  "coi.sessions.save": "Save",
+  "coi.sessions.delete": "Delete",
+  "coi.sessions.confirmDelete": "Delete this session record?",
+  "coi.sessions.empty": "No sessions",
+  "coi.sessions.locked": "Occupied by a task",
+  "coi.sessions.lastSeen": "Last seen",
+  "coi.adapters.guide": "Guide",
+  "coi.adapters.test": "Test",
+  "coi.adapters.testOk": "Test task launched",
+  "coi.adapters.skill": "Skill",
+  "coi.adapters.skillHint": "The skill holding this adapter's usage guide: a real injected skill (source = user skill library, injected into every session's system prompt); disable it via the Skill Manager tab",
+  "coi.adapters.skillBtn": "Skill",
+  "coi.adapters.editSkillTitle": "Edit skill (AI usage guide)",
+  "coi.adapters.editSkillHint": "The skill IS the AI usage guide: it is synced into the user skill library (~/.agents/skills) and injected into every session's system prompt, so the AI knows how to drive this adapter. Editing here updates that SKILL.md; plugin restarts will not overwrite your edits while the built-in version is unchanged; disable it via the Skill Manager tab.",
+  "coi.adapters.saveSkill": "Save",
+  "coi.adapters.skillSaved": "Skill saved",
+  "coi.adapters.skillName": "Skill name (optional)",
+  "coi.adapters.skillNamePh": "e.g. my-cli-skill (that SKILL.md will be injected into the AI context so the AI learns how to use this CLI)",
+  "coi.adapters.useCase": "Use case",
+  "coi.adapters.useCasePh": "Tell the AI which tasks suit this CLI, e.g. complex backend logic / test fixes\u2026",
+  "coi.adapters.useCaseEmpty": "(no use case set)",
+  "coi.adapters.editUseCase": "Edit",
+  "coi.adapters.saveUseCase": "Save",
+  "coi.adapters.skillContent": "Skill content (SKILL.md)",
+  "coi.adapters.skillContentPh": "# Skill body\n\nTell the AI how to drive this CLI: command format, args, session resume, caveats\u2026 (frontmatter name/description are auto-completed)",
+  "coi.adapters.skillContentHint": "Leave empty = link the skill name only (create the file later via the Skill button); filled = the skill is auto-created when missing",
+  "coi.cancel": "Cancel",
+  "coi.saving": "Saving\u2026",
+  "coi.adapters.addTitle": "Add custom adapter",
+  "coi.adapters.name": "Name",
+  "coi.adapters.type": "Type",
+  "coi.adapters.binary": "Binary",
+  "coi.adapters.args": "Args",
+  "coi.adapters.argsPh": "comma separated, e.g.: -p, {task}",
+  "coi.adapters.add": "Add",
+  "coi.adapters.delete": "Delete",
+  "coi.adapters.enable": "Enable",
+  "coi.adapters.disable": "Disable",
+  "coi.adapters.disabledHint": "Disabled: dispatching to this adapter is rejected with a hint to use another one",
+  "coi.adapters.confirmDelete": "Delete this custom adapter?",
+  "coi.adapters.builtin": "builtin",
+  "coi.adapters.custom": "custom",
+  "coi.adapters.resumeSection": "Session resume (required for ai-cli)",
+  "coi.adapters.resumeSectionHint": "ai-cli must support resuming a named session; CLIs without resume support should use plain-cli",
+  "coi.adapters.resumeKind": "Resume mode",
+  "coi.adapters.resumeKindFlag": "flag mode (resume flag + arg prepended to base args)",
+  "coi.adapters.resumeKindArgs": "args mode (full resume command)",
+  "coi.adapters.resumeFlag": "Resume flag",
+  "coi.adapters.resumeFlagPh": "e.g. -S / -r / --resume",
+  "coi.adapters.resumeArg": "Session arg",
+  "coi.adapters.resumeArgPh": "with {sessionId} placeholder, e.g. {sessionId}",
+  "coi.adapters.resumeArgs": "Resume command args",
+  "coi.adapters.resumeArgsPh": "comma separated, with {sessionId} (and optional {task}), e.g. exec, resume, {sessionId}, {task}",
+  "coi.adapters.continueFlag": "Continue-last flag (optional)",
+  "coi.adapters.continueFlagPh": "e.g. -c; leave empty = no \u201Ccontinue last session\u201D support",
+  "coi.adapters.extractSection": "Auto session-ID extraction (optional)",
+  "coi.adapters.extractSource": "Output stream",
+  "coi.adapters.extractRegex": "Extract regex",
+  "coi.adapters.extractRegexPh": "capture group 1 = session ID, e.g. To resume this session: kimi -r (session_\\S+)",
+  "coi.adapters.resumeMissing": "ai-cli requires a session resume config",
+  "coi.templates.addTitle": "Add template",
+  "coi.templates.name": "Name",
+  "coi.templates.prompt": "Prompt",
+  "coi.templates.adapterOpt": "Adapter (optional)",
+  "coi.templates.idOpt": "ID (optional, auto if empty)",
+  "coi.templates.add": "Add",
+  "coi.templates.delete": "Delete",
+  "coi.templates.confirmDelete": "Delete this template?",
+  "coi.templates.builtinKeep": "Builtin templates cannot be deleted",
+  "coi.templates.empty": "No templates",
+  "coi.stats.total": "Total tasks",
+  "coi.stats.count": "Tasks",
+  "coi.stats.hours": "Total time",
+  "coi.stats.byStatus": "By status",
+  "coi.stats.empty": "No stats yet",
+  "coi.config.notify": "Notify command",
+  "coi.config.notifyHint": "Runs when a task finishes; placeholders: {taskId} {coi} {status} {summary}",
+  "coi.config.retention": "Retention days",
+  "coi.config.timeout": "Task timeout",
+  "coi.config.timeoutHours": "hours",
+  "coi.config.timeoutMinutes": "minutes",
+  "coi.config.timeoutHint": "Timeout is a safety net only (AI agents may stay quiet for hours); leave empty to keep current",
+  "coi.config.timeoutBad": "Bad timeout format",
+  "coi.config.save": "Save",
+  "coi.config.saved": "Saved",
+  "coi.scope.temporary": "temporary",
+  "coi.scope.session": "session",
+  "coi.scope.project": "project",
+  "coi.scope.global": "global",
+  // 提示词 tab（PromptView 私有字典迁入，2026-09-16 i18n）
+  "prompt.guide": "Guide",
+  "prompt.library": "Prompt library",
+  "prompt.guideIntro": 'Prompt injection = an "instruction-pattern asset library + one-click injection": turn recurring working paradigms (code review / debugging / PRD / testing\u2026) into prompts, then inject one with a click \u2014 the model sees it next turn without interrupting the reply, like handing the AI an operating manual.',
+  "prompt.guideLibTitle": "Prompt library: your pattern assets",
+  "prompt.guideLibBody": "Reusable instruction patterns, mostly user-written:",
+  "prompt.guideLibItem1": "Create / edit / delete: name + description + category + tags + body (Markdown); a new prompt with an empty category goes to Temp automatically;",
+  "prompt.guideLibItem2": "Categories: built-in ones plus custom add / rename / delete (prompts in a deleted category move to Uncategorized);",
+  "prompt.guideLibItem3": "Search (name / category / tags / content) + copy to clipboard + usage stats;",
+  "prompt.guideLibItem4": "13 cold-start examples from real GitHub prompt assets (SpecRoute / Claude-Code-Promts-Skills) plus links to public pattern libraries;",
+  "prompt.guideLibItem5": "Enabled state: disabled prompts are hidden from the AI prompt tool (de_prompts) and cannot be injected by AI \u2014 still editable here, re-enable anytime; the AI can list prompts (fetch details by ID) and inject the right one into the current session, or use it as a sub-session / subagent / CLI task prompt.",
+  "prompt.guideInjectTitle": "Injection mechanics: rounds \xD7 cadence",
+  "prompt.guideInjectBody": 'Pick a prompt, set "rounds \xD7 cadence" and inject (both numbers freely editable):',
+  "prompt.guideInjectItem1": "Rounds: one-shot (1) / finite N / infinite (0 = keep injecting until stopped);",
+  "prompt.guideInjectItem2": 'Cadence: every turn (1) / once every M turns (e.g. "remind every 3 turns");',
+  "prompt.guideInjectItem3": "Injected without interrupting: content goes to the injection track and the model sees it next turn;",
+  "prompt.guideInjectItem4": "The body supports {{date}} / {{time}} variables, expanded at injection time (handy for dated templates);",
+  "prompt.guideInjectItem5": "Ad-hoc injection: inject without creating a prompt first \u2014 type content in the detail bar and click inject; it is auto-saved to the library (empty category \u2192 Temp) and takes effect in one step.",
+  "prompt.guideTrackTitle": "Injection status: visible and stoppable",
+  "prompt.guideTrackBody": 'Every prompt has a clear status (idle / injecting\xB7N left / injecting forever) and can be stopped anytime; the "injecting" overlay shows it live; the session tab bar shows a red dot \u{1F534} while any injection is active.',
+  "prompt.guideSwitchTitle": "Switch",
+  "prompt.guideSwitchBody": 'The prompt manager is off by default: enable "Prompt manager" under Config in the Memory Evolve Settings tab, then refresh to reveal this tab.',
+  "prompt.search": "Search name, category, tags or content\u2026",
+  "prompt.new": "New prompt",
+  "prompt.all": "All",
+  "prompt.uncategorized": "Uncategorized",
+  "prompt.inject": "Inject",
+  "prompt.injectRound": "Inject {n} times",
+  "prompt.injectInfinite": "Unlimited (until stopped)",
+  "prompt.injectCadence": "every {n} turns",
+  "prompt.everyTurn": "every turn",
+  "prompt.injectHint": "Writes to the injection track \u2014 visible to the model next turn; countdown consumes per conversation turn (interval injection supported); unlimited runs until stopped manually",
+  "prompt.injecting": "Injecting",
+  "prompt.injectingBadge": "injecting\xB7{n} left",
+  "prompt.injectingBadgeInfinite": "injecting\xB7ongoing",
+  "prompt.injectingIdle": "not injected",
+  "prompt.noInjection": "Nothing is being injected right now",
+  "prompt.removeInjection": "Stop",
+  "prompt.stoppedInjection": "Injection stopped",
+  "prompt.copy": "Copy",
+  "prompt.copied": "Copied to clipboard",
+  "prompt.save": "Save",
+  "prompt.saving": "Saving\u2026",
+  "prompt.cancel": "Cancel",
+  "prompt.delete": "Delete",
+  "prompt.deleteConfirm": 'Delete "{name}"? This cannot be undone and removes its active injections too.',
+  "prompt.sources": "GitHub prompt sources",
+  "prompt.sourcesHint": "These repos host high-quality prompts/specs (browse yourself \u2014 no auto import):",
+  "prompt.empty": 'No prompts yet. Click "New prompt" to start, or grab ideas from the source links.',
+  "prompt.noMatch": "No matching prompts",
+  "prompt.formNew": "New prompt",
+  "prompt.formEdit": "Edit prompt",
+  "prompt.name": "Name",
+  "prompt.namePh": "e.g. Code Review",
+  "prompt.description": "Description",
+  "prompt.descriptionPh": "One line about what this prompt does (AI reads this when picking a prompt)",
+  "prompt.enabled": "Enabled",
+  "prompt.enabledOn": "Enabled",
+  "prompt.enabledOff": "Disabled",
+  "prompt.disabledHint": "Disabled prompts are hidden from AI lists and cannot be injected by AI; re-enable here anytime",
+  "prompt.category": "Category",
+  "prompt.categoryPh": "e.g. workflow (empty = Temp category)",
+  "prompt.tags": "Tags",
+  "prompt.tagsPh": "Comma-separated, e.g. review, quality",
+  "prompt.content": "Content",
+  "prompt.contentPh": "Write the prompt body here\u2026\n{{date}} and {{time}} variables expand on inject.",
+  "prompt.usage": "Injected {n} times",
+  "prompt.lastUsed": "Last injected: {time}",
+  "prompt.neverUsed": "Never injected",
+  "prompt.rounds": "Count",
+  "prompt.cadence": "Cadence",
+  "prompt.roundsHint": "0=unlimited; 1=once only",
+  "prompt.everyHint": "0=once only; 1=every turn; N=every N turns",
+  "prompt.onceOnly": "once only",
+  "prompt.effectOnce": "Once: appears next turn, then auto-ends",
+  "prompt.effectInfinite": "Unlimited: every turn, until stopped",
+  "prompt.effectInfiniteCadence": "Unlimited: once every {n} turns, until stopped",
+  "prompt.effectFinite": "{n} times: every turn, auto-ends when spent",
+  "prompt.effectFiniteCadence": "{n} times: once every {m} turns, auto-ends when spent",
+  "prompt.roundsInvalid": "Count must be an integer \u2265 0 (0 = unlimited)",
+  "prompt.everyInvalid": "Cadence must be an integer \u2265 0 (0 = once only)",
+  "prompt.injectOnceBtn": "Inject once",
+  "prompt.injectOnceBtnHint": "Once only: appears next turn, then auto-ends",
+  "prompt.injectInfiniteBtn": "Keep injecting",
+  "prompt.injectInfiniteBtnHint": "Every turn, until stopped",
+  "prompt.customBtn": "Custom",
+  "prompt.customBtnHint": "Free-form count and cadence",
+  "prompt.injectNowBtn": "\u26A1 Inject now",
+  "prompt.injectNowBtnHint": "Takes effect immediately (this turn / wakes the session), once only \u2014 ignores count and cadence",
+  "prompt.injectedNow": 'Injected "{name}" now: effective this turn, once only (ignores count/cadence)',
+  "prompt.injectedNowFallback": 'Injected "{name}" now (steer not delivered \u2014 will take effect next turn)',
+  "prompt.collapseCustom": "Collapse",
+  "prompt.quickTitle": "Quick inject",
+  "prompt.quickDesc": 'Inject without saving a prompt first: type content and hit "Inject once" \u2014 it is auto-saved to the library (empty category goes to Temp) in one step.',
+  "prompt.quickNamePh": "Name (optional; defaults to first content line)",
+  "prompt.quickCategoryPh": "Category (optional; empty = Temp)",
+  "prompt.contentRequired": "Content is required",
+  "prompt.error": "{message}",
+  "prompt.loadFailed": "Load failed: {message}",
+  "prompt.injected": 'Injected "{name}": {rounds}{cadence} \u2014 visible next turn{ending}',
+  "prompt.injectedOnceEnding": ", then auto-ends",
+  "prompt.injectedFiniteEnding": ", auto-ends when spent",
+  "prompt.injectedInfiniteEnding": ", until stopped",
+  "prompt.injectInfiniteShort": "Keep injecting",
+  "prompt.everyTurnParen": " (every turn)",
+  "prompt.injectCadenceParen": " (every {n} turns)",
+  "prompt.removed": "Injection removed",
+  "prompt.reload": "Reload",
+  "prompt.newCategory": "New category",
+  "prompt.newCategoryPh": "Type a category name, Enter to confirm",
+  "prompt.deleteCategory": "Delete category",
+  "prompt.renameCategory": "Rename category",
+  "prompt.renamePh": "Type a new name, Enter to confirm",
+  "prompt.categoryRemoved": 'Category "{name}" deleted{moved}',
+  "prompt.categoryDeleted": 'Category "{name}" deleted',
+  "prompt.categoryMoved": ", {count} prompts moved to Uncategorized",
+  "prompt.categoryExists": 'Category "{name}" already exists \u2014 selected',
+  "prompt.categoryRenamed": 'Renamed "{from}" \u2192 "{to}"{renamed}',
+  "prompt.categoryRenamedSuffix": ", {count} prompts updated",
+  "prompt.unsavedChanges": "Unsaved changes",
+  // 无限画板 / 会话评审 / 移动端补充文案（2026-09-16 i18n）
+  "canvas.tab.label": "Canvas",
+  "canvas.toolbar.view": "View",
+  "canvas.toolbar.viewFilter": "View filter",
+  "canvas.view.session": "This session",
+  "canvas.view.project": "This project",
+  "canvas.view.global": "All projects",
+  "canvas.search.placeholder": "Search canvas nodes\u2026",
+  "canvas.action.path": "Pin by path",
+  "canvas.action.note": "Note",
+  "canvas.action.catalog": "Search & pin",
+  "canvas.action.resetView": "Reset view",
+  "canvas.action.pin": "Pin",
+  "canvas.action.cancel": "Cancel",
+  "canvas.action.close": "Close",
+  "canvas.action.search": "Search",
+  "canvas.action.remove": "Remove",
+  "canvas.action.migrate": "Migrate",
+  "canvas.action.openDefault": "Open with default app",
+  "canvas.meta.count": "{visible}/{total} cards",
+  "canvas.meta.hits": " \xB7 {count} hits",
+  "canvas.sync.conflict": " \xB7 \u26A0\uFE0F Conflict \u2014 refresh",
+  "canvas.sync.saving": " \xB7 Saving",
+  "canvas.sync.offline": " \xB7 Backend offline",
+  "canvas.sync.synced": " \xB7 Synced",
+  "canvas.sync.localOnly": " \xB7 Local only",
+  "canvas.node.unnamed": "Untitled",
+  "canvas.node.unverified": "Unverified",
+  "canvas.scope.global": "Global",
+  "canvas.scope.currentSession": "This session",
+  "canvas.scope.otherSession": "Other session",
+  "canvas.scope.session": "Session",
+  "canvas.note.defaultName": "Note",
+  "canvas.save.markdownText": "Markdown text",
+  "canvas.save.downloaded": "Downloaded to the browser default download folder",
+  "canvas.content.truncated": "\u2026 (content too long, truncated)",
+  "canvas.error.conflict": "The board was changed by another session. Refresh the page to load the latest content.",
+  "canvas.error.unreachable": "Network error (host unreachable)",
+  "canvas.error.http": "Request failed",
+  "canvas.error.unknown": "Unknown error",
+  "canvas.toast.pinned": "Pinned: {title}",
+  "canvas.toast.notePinned": "Note pinned",
+  "canvas.toast.noPath": "No path to copy",
+  "canvas.toast.copiedId": "ID copied",
+  "canvas.toast.copiedTitle": "Title copied",
+  "canvas.toast.copiedPath": "Path copied",
+  "canvas.toast.copiedRef": "Reference copied",
+  "canvas.toast.copyFailed": "Copy failed",
+  "canvas.toast.noLocalPath": "This node has no local path to open",
+  "canvas.toast.opened": "Opened with the default app: {title}",
+  "canvas.toast.openedFolder": "Opened the containing folder: {title}",
+  "canvas.toast.openFailed": "Open failed: {message}",
+  "canvas.toast.noContent": "This node has no content to save",
+  "canvas.toast.saved": "Saved: {title}",
+  "canvas.toast.savedWith": "Saved: {title} ({message})",
+  "canvas.toast.saveFailed": "Save failed: {message}",
+  "canvas.toast.migrateOffline": "The canvas backend is offline \u2014 ownership cannot be moved",
+  "canvas.toast.migrateConflict": "The board was changed by another session. Refresh and retry.",
+  "canvas.toast.migrateFailed": "Move failed: {message}",
+  "canvas.toast.migrated": "Ownership moved",
+  "canvas.toast.jumping": "Jumping to session: {name}",
+  "canvas.toast.removed": "Removed from the canvas",
+  "canvas.type.folder": "Folder",
+  "canvas.type.markdown": "Markdown",
+  "canvas.type.plainText": "Plain text",
+  "canvas.type.image": "Image",
+  "canvas.type.media": "Audio / video",
+  "canvas.type.file": "File",
+  "canvas.board.aiZone": "AI note zone \xB7 Notes added by AI land here; drag them anywhere",
+  "canvas.board.hint": "Drag empty space to pan \xB7 Space+drag also pans \xB7 Scroll to zoom (at pointer) \xB7 Zoom {percent}%",
+  "canvas.board.lod": " \xB7 Simplified zoomed-out view",
+  "canvas.board.viewport": " \xB7 Viewport {visible}/{total}",
+  "canvas.card.aiPlaced": "AI placed",
+  "canvas.card.unverified": "Unverified",
+  "canvas.card.preview": "Preview",
+  "canvas.card.save": "Save",
+  "canvas.card.saveTitle": "Save content to a local file",
+  "canvas.card.open": "Open",
+  "canvas.card.openTitle": "Open with the system default app",
+  "canvas.card.openFolder": "Folder",
+  "canvas.card.openFolderTitle": "Open the containing folder in the system file manager (Finder / Explorer)",
+  "canvas.card.migrate": "Owner",
+  "canvas.card.migrateTitle": "Move this node (this session / this project / all projects)",
+  "canvas.card.jump": "Jump",
+  "canvas.card.jumpTitle": "Jump to the session that owns this node",
+  "canvas.card.copyId": "Copy ID",
+  "canvas.card.copyTitle": "Copy title",
+  "canvas.card.copyPath": "Copy path",
+  "canvas.card.copyRef": "Reference",
+  "canvas.card.remove": "Remove",
+  "canvas.card.resizeAria": "Drag to resize the card",
+  "canvas.card.resizeTitle": "Drag to resize",
+  "canvas.card.editorMarkdown": "Write Markdown\u2026",
+  "canvas.card.editorPlain": "Write plain text\u2026",
+  "canvas.card.imagePreview": "Image preview",
+  "canvas.card.audio": "Audio",
+  "canvas.card.video": "Video",
+  "canvas.card.folderNoBrowse": " \xB7 Inline browsing is not supported yet",
+  "canvas.dialog.path.title": "Pin by path",
+  "canvas.dialog.path.desc": 'Paste a local path to create a card. Existence is not verified, so the card is marked "Unverified".',
+  "canvas.dialog.path.label": "Local path",
+  "canvas.dialog.path.detected": "Detected as: {glyph} {label}",
+  "canvas.dialog.note.title": "Pin a note",
+  "canvas.dialog.note.aria": "New note",
+  "canvas.dialog.note.desc": "The content lives on the canvas and points to no file.",
+  "canvas.dialog.note.defaultTitle": "Untitled note",
+  "canvas.dialog.field.title": "Title",
+  "canvas.dialog.field.type": "Type",
+  "canvas.dialog.field.content": "Content",
+  "canvas.dialog.catalog.title": "Search & pin",
+  "canvas.dialog.catalog.desc": "Search local files and pin one with a click.",
+  "canvas.dialog.catalog.keyword": "Keyword",
+  "canvas.dialog.catalog.placeholder": "contract / mockup / recording\u2026",
+  "canvas.dialog.catalog.scopeAria": "Search scope",
+  "canvas.dialog.catalog.scopeLocal": "Whole machine",
+  "canvas.dialog.catalog.scopeProject": "Current project",
+  "canvas.dialog.catalog.searching": "Searching\u2026",
+  "canvas.dialog.catalog.error": "Local search is unavailable",
+  "canvas.dialog.catalog.noMatch": "No matching files",
+  "canvas.dialog.catalog.prompt": "Type a keyword to search local files",
+  "canvas.dialog.preview.aria": "Preview",
+  "canvas.dialog.preview.noteOnly": "Canvas note",
+  "canvas.dialog.preview.unverified": " \xB7 Path unverified",
+  "canvas.dialog.preview.empty": "(empty)",
+  "canvas.dialog.preview.enableImage": "Enable the canvas module to preview the real image",
+  "canvas.dialog.preview.enableMedia": "Enable the canvas module to play the real file",
+  "canvas.dialog.preview.unsupported": "This kind of item is not rendered in the browser yet (Word / PDF / folders, etc.).",
+  "canvas.dialog.remove.aria": "Confirm removal",
+  "canvas.dialog.remove.title": "Remove from the canvas?",
+  "canvas.dialog.remove.body": 'Remove "{title}" from the canvas. The source file is not deleted.',
+  "canvas.dialog.remove.bodyWithPath": 'Remove "{title}" from the canvas. The source file is not deleted ({path}).',
+  "canvas.dialog.migrate.title": "Move ownership",
+  "canvas.dialog.migrate.body": 'Move "{title}" to:',
+  "canvas.dialog.migrate.sessionDesc": 'Owned by this session (invisible from other sessions unless you switch to "All projects")',
+  "canvas.dialog.migrate.projectDesc": "Project level: visible to every session in this project",
+  "canvas.dialog.migrate.globalLabel": "Visible to all projects",
+  "canvas.dialog.migrate.globalDesc": "Global: visible from any session and any view",
+  "advisor.level.conversation": "This review conversation",
+  "advisor.level.session": "This session",
+  "advisor.level.project": "This project",
+  "advisor.level.global": "Global",
+  "advisor.status.disabled": "Disabled",
+  "advisor.status.idle": "Idle",
+  "advisor.status.reviewing": "Reviewing",
+  "advisor.status.paused": "Paused",
+  "advisor.status.halted": "Halted",
+  "advisor.severity.info": "info \xB7 note",
+  "advisor.severity.nit": "nit \xB7 suggestion",
+  "advisor.severity.concern": "concern \xB7 watch",
+  "advisor.severity.blocker": "blocker \xB7 blocking",
+  "advisor.severity.answer": "answer",
+  "advisor.outcome.delivered": "Delivered",
+  "advisor.outcome.recorded": "Recorded",
+  "advisor.outcome.answered": "Answered",
+  "advisor.outcome.suppressed": "Suppressed",
+  "advisor.outcome.noNote": "No note",
+  "advisor.outcome.dropped": "Dropped",
+  "advisor.outcome.failed": "Review failed",
+  "advisor.outcome.cancelled": "Cancelled",
+  "advisor.ago.none": "No activity yet",
+  "advisor.ago.justNow": "Just now",
+  "advisor.ago.seconds": "{count}s ago",
+  "advisor.ago.minutes": "{count}m ago",
+  "advisor.ago.hours": "{count}h ago",
+  "advisor.workspace.unknown": "Unknown workspace",
+  "advisor.workspace.unknownShort": "unknown",
+  "advisor.header.toggle.titleOff": "The Advisor panel is hidden; click to open settings",
+  "advisor.capsule.aria": "Open the session review panel",
+  "advisor.capsule.title": "Open the session review panel (press and drag along the right edge to move it)",
+  "advisor.unread.aria": "{count} unread reviews",
+  "advisor.panel.aria": "Session review floating panel",
+  "advisor.panel.title": "Session review",
+  "advisor.panel.collapse": "Collapse",
+  "advisor.panel.collapseAria": "Collapse the Advisor panel",
+  "advisor.statusStrip.aria": "Advisor runtime status",
+  "advisor.switch.title": "Toggles this session only; the global default switch is unchanged",
+  "advisor.switch.on": "Enabled in this session",
+  "advisor.switch.off": "Not enabled in this session",
+  "advisor.model.unresolved": "Model unresolved",
+  "advisor.gate.failed": "Model gate failed: {reason}",
+  "advisor.gate.configIncomplete": "provider and model must be set together or left empty together",
+  "advisor.gate.modelUnavailable": "the current session model is unavailable",
+  "advisor.notice.dismiss": "Dismiss the notice",
+  "advisor.tabs.aria": "Review data views",
+  "advisor.tab.scopes": "Scopes",
+  "advisor.tab.live": "Live",
+  "advisor.tab.history": "History",
+  "advisor.tab.settings": "Settings",
+  "advisor.live.aria": "Live review stream",
+  "advisor.live.emptyEnabled": "No review activity yet. New reviews appear here in real time.",
+  "advisor.live.emptyDisabled": "Not enabled: use the session switch above, or enable Advisor in Settings below.",
+  "advisor.live.backToLatest": "Back to latest",
+  "advisor.instructions.aria": "Advisor instructions",
+  "advisor.instructions.placeholder": "Send the reviewer an instruction\u2026 (Enter to send, Shift+Enter for a new line)",
+  "advisor.instructions.send": "Send",
+  "advisor.instructions.hint": "Review notes are delivered in real time by severity (nit/concern/blocker steer the session; info is only recorded by default). A question in the instruction box triggers an Advisor answer that is injected into the conversation.",
+  "advisor.conversation.statsTitle": "Context used by the reviewer conversation (estimated characters; about 1 token per CJK character). Compare with the model context window to decide whether to start a new review conversation.",
+  "advisor.conversation.epoch": "Review conversation #{epoch}",
+  "advisor.conversation.label": "Review conversation",
+  "advisor.conversation.contextCount": "{count} context items",
+  "advisor.conversation.reset": "New review conversation",
+  "advisor.conversation.resetConfirm": "Starting a new review conversation clears the reviewer's entire context and memory (it starts from scratch).\nYou can give it background in the first instruction.",
+  "advisor.conversation.resetTitle": "Clear the reviewer conversation (context + memory) and start from scratch; useful when switching tasks or capping context length",
+  "advisor.pending.toggle": "Pending instructions ({count})",
+  "advisor.pending.empty": "No pending instructions",
+  "advisor.pending.consuming": "Consuming",
+  "advisor.pending.waiting": "Pending",
+  "advisor.pending.clear": "Clear pending instructions",
+  "advisor.action.retry": "Retry",
+  "advisor.action.save": "Save",
+  "advisor.action.saving": "Saving\u2026",
+  "advisor.history.aria": "Review history",
+  "advisor.history.sessionFilter": "Session filter",
+  "advisor.history.sessionCurrent": "Current session",
+  "advisor.history.sessionAll": "All sessions",
+  "advisor.history.severityFilter": "Severity filter",
+  "advisor.history.severityAll": "All severities",
+  "advisor.history.severityAnswer": "Answer",
+  "advisor.history.timeFilter": "Time filter",
+  "advisor.history.timeAll": "All time",
+  "advisor.history.time24h": "Last 24 hours",
+  "advisor.history.time7d": "Last 7 days",
+  "advisor.history.time30d": "Last 30 days",
+  "advisor.history.workspacePlaceholder": "Workspace (optional)",
+  "advisor.history.workspaceFilter": "Workspace filter",
+  "advisor.history.query": "Query",
+  "advisor.history.empty": "No review records match the current filters.",
+  "advisor.history.loadMore": "Load more",
+  "advisor.loading.events": "Connecting to the Advisor live stream\u2026",
+  "advisor.loading.records": "Loading history\u2026",
+  "advisor.loading.scopes": "Loading scopes\u2026",
+  "advisor.loading.settings": "Loading settings\u2026",
+  "advisor.loading.short": "Loading\u2026",
+  "advisor.error.statusLoad": "Failed to load status: {message}",
+  "advisor.error.eventsLoad": "Failed to load the live stream: {message}",
+  "advisor.error.recordsLoad": "Failed to load history: {message}",
+  "advisor.error.scopesLoad": "Failed to load scopes: {message}",
+  "advisor.error.scopesSave": "Failed to save scopes: {message}",
+  "advisor.error.configLoad": "Failed to load settings: {message}",
+  "advisor.error.rebuildFailed": "The live cursor expired and rebuilding history failed: {message}",
+  "advisor.error.noDetail": "Operation failed (no error details)",
+  "advisor.notice.reconnected": "Connection restored \u2014 resyncing Advisor events\u2026",
+  "advisor.notice.instructionSent": "Instruction sent \u2014 the Advisor is answering (the answer is injected into the conversation)",
+  "advisor.notice.conversationReset": "Started a new review conversation (#{epoch}) \u2014 you can give the reviewer background in the first instruction",
+  "advisor.notice.instructionsCleared": "Cleared {count} pending instructions",
+  "advisor.notice.sessionEnabled": "Advisor is enabled in this session",
+  "advisor.notice.sessionDisabled": "Advisor is disabled in this session",
+  "advisor.notice.configSaved": "Advisor settings saved and applied",
+  "advisor.notice.scopeSaved": "Saved {level}; it takes effect on the next review",
+  "advisor.card.aria": "Session review {reviewId}",
+  "advisor.card.instructions": "Instructions run \xD7{count}",
+  "advisor.card.sessionEpoch": "Session #{epoch}",
+  "advisor.card.qa": " \xB7 Q&A",
+  "advisor.card.thisRound": " \xB7 {count} this round",
+  "advisor.card.collapse": "Collapse \u25B4",
+  "advisor.card.expand": "Expand \u25BE",
+  "advisor.card.noInputSnapshot": "Historical records do not include the input snapshot",
+  "advisor.card.reviewing": "Reviewing\u2026",
+  "advisor.card.suppressedNote": "Suppressed: the gate blocked this note (duplicate / too vague / one per turn); it was not injected into the main conversation",
+  "advisor.card.retryable": "(retryable)",
+  "advisor.card.errorSep": ": ",
+  "advisor.delivery.steer": "Delivered \u2713",
+  "advisor.delivery.inject": "Injected \u2713",
+  "advisor.scopes.aria": "Reviewer scopes",
+  "advisor.scopes.boundaryError": "The scopes area failed to render: {message} (see the browser console)",
+  "advisor.scopes.hint": "The four scope levels are appended to the reviewer system prompt (the more local level wins on conflict) and take effect immediately after saving.",
+  "advisor.scopes.conversationLabel": '{level} (cleared by "New review conversation")',
+  "advisor.scopes.conversationPlaceholder": "Applies to this review conversation only\u2026 (multi-line; several instructions at once are fine)",
+  "advisor.scopes.sessionLabel": "{level} (valid for this session)",
+  "advisor.scopes.sessionPlaceholder": "Applies to this session only\u2026",
+  "advisor.scopes.projectLabel": "{level} (shared by every session in workspace {workspace})",
+  "advisor.scopes.projectPlaceholder": "Applies to every session in this project\u2026",
+  "advisor.scopes.globalLabel": "{level} (applies to all projects and sessions)",
+  "advisor.scopes.globalPlaceholder": "Applies to all projects and sessions\u2026 (e.g. always answer in Chinese; do not repeat notes already raised)",
+  "advisor.context.chars": "{count} chars",
+  "advisor.settings.title": "Session review settings",
+  "advisor.settings.masterSwitchHint": 'The module master switch lives in the Config area of the "Memory Evolve Settings" tab',
+  "advisor.settings.showCapsule": "Show the floating capsule button",
+  "advisor.settings.infoInjectTitle": "info is the lowest severity: recorded only by default; when enabled it is injected (without interrupting)",
+  "advisor.settings.infoInject": "Also inject info-level notes",
+  "advisor.settings.provider": "Provider",
+  "advisor.settings.model": "Model",
+  "advisor.settings.inheritPlaceholder": "Empty inherits the session",
+  "advisor.settings.systemPrompt": "Reviewer system prompt",
+  "advisor.settings.promptBuiltin": "(using the built-in default prompt; edit and save to customize)",
+  "advisor.settings.promptCustom": "(custom)",
+  "advisor.settings.promptPlaceholder": "Empty uses the built-in reviewer prompt",
+  "advisor.settings.restore": "Restore default prompt",
+  "advisor.settings.restoreTitle": "Restore the built-in default prompt (applied immediately after saving; the box then shows the latest built-in default)",
+  "advisor.settings.overrideHint": "The global default does not clear this session's override; use the status strip above to toggle this session.",
+  "advisor.settings.save": "Save settings",
+  "advisor.settings.providerModelPair": "provider and model must both be filled in, or both left empty to inherit the session model.",
+  "mobile.moreActions": "More actions",
+  // COI/提示词迁移补齐键（2026-09-16 i18n）
+  "coi.status.queued": "Queued",
+  "coi.status.running": "Running",
+  "coi.status.completed": "Completed",
+  "coi.status.failed": "Failed",
+  "coi.status.killed": "Killed",
+  "coi.status.interrupted": "Interrupted",
+  "coi.ago.justNow": "just now",
+  "coi.ago.seconds": "{count}s ago",
+  "coi.ago.minutes": "{count}m ago",
+  "coi.ago.hours": "{count}h ago",
+  "coi.sep.colon": ": ",
+  "coi.sep.paren": " ({value})",
+  "coi.error.noDetail": "Operation failed (no error details)",
+  "coi.tasks.deleteFailed": "Delete failed",
+  "coi.tasks.deleted": "Deleted",
+  "coi.adapters.saveFailed": "Save failed",
+  "coi.adapters.opFailed": "Operation failed",
+  "coi.adapters.readFailed": "Read failed",
+  "coi.adapters.avgMs": "\u23F1 avg {minutes} min",
+  "coi.adapters.avgMsTitle": "Average duration of completed tasks (same source as de_coi_adapters)",
+  "prompt.untitledName": "Untitled prompt",
+  "prompt.deleteCategoryConfirm": 'Delete the category "{name}"? {hint}',
+  "prompt.quotedTitle": '"{name}"',
+  "prompt.plusGlyph": "+",
+  // mermaid 渲染器 / 版本页补漏（2026-09-16 i18n）
+  "mermaid.renderFailed": "\u26A0 mermaid render failed, code kept",
+  "mermaid.renderFailedDetail": "\u26A0 mermaid render failed: {detail}, code kept",
+  "mermaid.download": "SVG",
+  "mermaid.downloadTitle": "Download diagram as SVG",
+  "version.sep.colon": ": "
 };
 var BADGE_POLL_MS = 3e4;
 var dshMobile = {
@@ -17862,12 +18494,18 @@ var dshMobile = {
    *  data-dsh-mobile-sheet 属性，mobile.css 据此把 .tools + 模型选择
    *  显示为 fixed 底栏；常驻保留发送/圆环/⋯）。协议约定：移动模式
    *  激活时调用一次，返回 dispose。 */
-  enhance: createInputSheetEnhance
+  enhance: () => createInputSheetEnhance(activeTranslate ?? ((key) => key))
 };
 var inject = ["slots", "locale", "conversation", "sessions"];
 function apply(ctx) {
-  const t2 = ctx.locale.bind(NS);
+  const t = ctx.locale.bind(NS);
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), "memory-evolve: dictionaries");
+  ctx.effect(() => {
+    activeTranslate = t;
+    return () => {
+      activeTranslate = null;
+    };
+  }, "memory-evolve: module-scope translate mirror");
   ctx.effect(() => {
     setClientLocaleResolver(() => {
       const active = ctx.locale.getSnapshot().active;
@@ -18023,7 +18661,7 @@ function apply(ctx) {
       openSession: (sessionId) => {
         ctx.sessions.open(sessionId);
       },
-      t: t2
+      t
     }).dispose;
   }).catch(() => {
   });
@@ -18044,8 +18682,8 @@ function apply(ctx) {
       name: "conversation.view",
       id: "memory-files",
       order: 10,
-      label: () => memoryBadgeCount > 0 ? t2("memoryTab.label.pending", { count: memoryBadgeCount }) : t2("memoryTab.label")
-    }, (props) => MemoryTabView({ ...props, t: t2 })));
+      label: () => memoryBadgeCount > 0 ? t("memoryTab.label.pending", { count: memoryBadgeCount }) : t("memoryTab.label")
+    }, (props) => MemoryTabView({ ...props, t })));
   };
   const registerSkillsTab = () => {
     disposeSkillsTab?.();
@@ -18053,15 +18691,15 @@ function apply(ctx) {
       name: "conversation.view",
       id: "skills-hub",
       order: 20,
-      label: () => skillsBadgeCount > 0 ? t2("skillsTab.label.pending", { count: skillsBadgeCount }) : t2("skillsTab.label")
-    }, (props) => SkillsTabView({ ...props, t: t2 })));
+      label: () => skillsBadgeCount > 0 ? t("skillsTab.label.pending", { count: skillsBadgeCount }) : t("skillsTab.label")
+    }, (props) => SkillsTabView({ ...props, t })));
   };
   const todoTabLifecycle = createTodoTabLifecycle(() => ctx.slots.inject("conversation.view", () => ctx.slots.register({
     name: "conversation.view",
     id: "todos-hub",
     order: 30,
-    label: () => todosBadgeCount > 0 ? t2("todosTab.label.pending", { count: todosBadgeCount }) : t2("todosTab.label")
-  }, (props) => TodosTabView({ ...props, t: t2 }))));
+    label: () => todosBadgeCount > 0 ? t("todosTab.label.pending", { count: todosBadgeCount }) : t("todosTab.label")
+  }, (props) => TodosTabView({ ...props, t }))));
   const onRuntimeConfigChanged = (event) => {
     const detail = event.detail;
     todoTabLifecycle.setEnabled(detail?.todoEnabled !== false);
@@ -18075,8 +18713,8 @@ function apply(ctx) {
       name: "conversation.view",
       id: "settings-hub",
       order: 120,
-      label: () => updateBadgeCount > 0 ? t2("settingsTab.label.pending") : t2("settingsTab.label")
-    }, (props) => SettingsTabView({ ...props, t: t2 })));
+      label: () => updateBadgeCount > 0 ? t("settingsTab.label.pending") : t("settingsTab.label")
+    }, (props) => SettingsTabView({ ...props, t })));
   };
   let disposeModelsTab;
   const registerModelsTab = () => {
@@ -18085,8 +18723,8 @@ function apply(ctx) {
       name: "conversation.view",
       id: "models-hub",
       order: 90,
-      label: () => t2("modelsTab.label")
-    }, (props) => ModelsTabView({ ...props, t: t2 })));
+      label: () => t("modelsTab.label")
+    }, (props) => ModelsTabView({ ...props, t })));
   };
   let disposeSyncTab;
   const registerSyncTab = () => {
@@ -18095,8 +18733,8 @@ function apply(ctx) {
       name: "conversation.view",
       id: "memory-sync-hub",
       order: 80,
-      label: () => t2("syncTab.label")
-    }, (props) => SyncView({ ...props, t: t2 })));
+      label: () => t("syncTab.label")
+    }, (props) => SyncView({ ...props, t })));
   };
   const pollBadge = () => {
     if (tabCancelled || disposeMemoryTab === void 0) return;
@@ -18176,17 +18814,17 @@ function apply(ctx) {
       name: "conversation.view",
       id: "coi-hub",
       order: 40,
-      label: () => coiRunningCount > 0 ? t2("coiTab.label.pending", { count: coiRunningCount }) : t2("coiTab.label")
+      label: () => coiRunningCount > 0 ? t("coiTab.label.pending", { count: coiRunningCount }) : t("coiTab.label")
     }, (props) => {
       currentCoiSessionId = props.sessionId;
-      return CoIView({ ...props, t: t2 });
+      return CoIView({ ...props, t });
     }));
   };
   const pollCoiRunning = () => {
     if (coiCancelled || disposeCoiTab === void 0) return;
     const q = currentCoiSessionId !== void 0 ? `?limit=200&sessionId=${encodeURIComponent(currentCoiSessionId)}` : "?limit=200";
     void fetch(`/memory-evolve/api/coi/tasks${q}`).then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))).then((data) => {
-      const running = (data.tasks ?? []).filter((t3) => t3.status === "running" || t3.status === "queued").length;
+      const running = (data.tasks ?? []).filter((t2) => t2.status === "running" || t2.status === "queued").length;
       if (running !== coiRunningCount) {
         coiRunningCount = running;
         registerCoiTab();
@@ -18214,7 +18852,7 @@ function apply(ctx) {
     name: "conversation.session.header.actions",
     id: "advisor-review-panel",
     order: 30
-  }, (props) => AdvisorHost({ ...props, t: t2 })));
+  }, (props) => AdvisorHost({ ...props, t })));
   ctx.effect(() => () => {
     disposeAdvisor?.();
   }, "memory-evolve: advisor panel");
@@ -18229,7 +18867,7 @@ function apply(ctx) {
       name: "conversation.session.header.actions",
       id: "copy-session-id",
       order: 0
-    }, (props) => HeaderActions({ ...props, t: t2 })));
+    }, (props) => HeaderActions({ ...props, t })));
   }).catch(() => {
   });
   ctx.effect(() => () => {
@@ -18244,8 +18882,8 @@ function apply(ctx) {
       name: "conversation.view",
       id: "broadcast-hub",
       order: 50,
-      label: () => t2("broadcastTab.label")
-    }, (props) => BroadcastView({ ...props, t: t2 })));
+      label: () => t("broadcastTab.label")
+    }, (props) => BroadcastView({ ...props, t })));
   }).catch(() => {
   });
   ctx.effect(() => () => {
@@ -18262,11 +18900,11 @@ function apply(ctx) {
   void fetch("/memory-evolve/api/ui-settings/state").then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))).then((data) => {
     if (uiSettingsCancelled || data.enabled !== true) return;
     const sessionFilter = createSessionFilter({
-      barTitle: t2("uiSettings.feature.sessionFilter"),
-      on: t2("uiSettings.filter.on"),
-      off: t2("uiSettings.filter.off"),
-      runningLabel: t2("uiSettings.running.label"),
-      ungroupedLabel: t2("uiSettings.ungrouped")
+      barTitle: t("uiSettings.feature.sessionFilter"),
+      on: t("uiSettings.filter.on"),
+      off: t("uiSettings.filter.off"),
+      runningLabel: t("uiSettings.running.label"),
+      ungroupedLabel: t("uiSettings.ungrouped")
     });
     disposeSessionFilter = sessionFilter.dispose;
     const wideChat = createWideChat();
@@ -18275,7 +18913,7 @@ function apply(ctx) {
     disposeWideBubble = wideBubble.dispose;
     const contextMeterWarn = createContextMeterWarn();
     disposeContextMeterWarn = contextMeterWarn.dispose;
-    const mermaidRenderer = createMermaidRenderer();
+    const mermaidRenderer = createMermaidRenderer(t);
     disposeMermaidRender = mermaidRenderer.dispose;
     const features = readFeatures();
     sessionFilter.setEnabled(features.sessionFilter);
@@ -18298,8 +18936,8 @@ function apply(ctx) {
       name: "conversation.view",
       id: "ui-settings-hub",
       order: 110,
-      label: () => t2("uiSettingsTab.label")
-    }, (props) => UiSettingsTabView({ ...props, t: t2 })));
+      label: () => t("uiSettingsTab.label")
+    }, (props) => UiSettingsTabView({ ...props, t })));
   }).catch(() => {
   });
   ctx.effect(() => () => {
@@ -18320,8 +18958,8 @@ function apply(ctx) {
       name: "conversation.view",
       id: "prompt-hub",
       order: 60,
-      label: () => promptBadgeCount > 0 ? t2("promptTab.label.active", { count: promptBadgeCount }) : t2("promptTab.label")
-    }, (props) => PromptView({ ...props, t: t2 })));
+      label: () => promptBadgeCount > 0 ? t("promptTab.label.active", { count: promptBadgeCount }) : t("promptTab.label")
+    }, (props) => PromptView({ ...props, t })));
   };
   const pollPromptBadge = () => {
     if (promptCancelled || disposePromptTab === void 0) return;
@@ -18369,7 +19007,7 @@ function apply(ctx) {
         bookmarkInjectorStarted = true;
         disposeBookmarkInjector = createBookmarkInjector(
           () => currentBookmarkSessionId,
-          { t: t2 }
+          { t }
         ).dispose;
       }
       return null;
@@ -18378,8 +19016,8 @@ function apply(ctx) {
       name: "conversation.view",
       id: "bookmarks-hub",
       order: 100,
-      label: () => t2("bookmarkTab.label")
-    }, (props) => BookmarksView({ ...props, t: t2 })));
+      label: () => t("bookmarkTab.label")
+    }, (props) => BookmarksView({ ...props, t })));
   }).catch(() => {
   });
   ctx.effect(() => () => {
@@ -18394,7 +19032,7 @@ function apply(ctx) {
     if (canvasCancelled || data.enabled !== true) return;
     disposeCanvasTab = registerCanvasTab(
       ctx,
-      { t: t2, openSession: (sessionId) => {
+      { t, openSession: (sessionId) => {
         ctx.sessions.open(sessionId);
       } }
     );

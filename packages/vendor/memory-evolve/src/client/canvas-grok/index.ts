@@ -67,14 +67,16 @@ function injectCanvasStyles(): () => void {
 export function registerCanvasTab(ctx: CanvasTabHost, opts: RegisterCanvasTabOpts): () => void {
   const disposeStyle = injectCanvasStyles()
   const slotId = opts.id ?? 'canvas-hub'
-  const slotLabel = opts.label ?? '画板'
   const slotOrder = opts.order ?? 80
+  // i18n：默认 Tab 名来自插件字典（此前是模块级 '画板' 字面量，切语言不跟随）。
+  // 在 label 回调里求值 = 每次求值都取当前语言（ctx.locale.bind 是调用期解析）。
+  const slotLabel = (): string => opts.label ?? opts.t('canvas.tab.label')
   const disposeSlot = ctx.slots.inject('conversation.view', () =>
     ctx.slots.register({
       name: 'conversation.view',
       id: slotId,
       order: slotOrder,
-      label: () => slotLabel,
+      label: slotLabel,
     }, (props) => CanvasView({ ...props, t: opts.t, openSession: opts.openSession })))
   return () => {
     disposeSlot()

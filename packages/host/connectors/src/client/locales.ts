@@ -55,6 +55,9 @@ export const zh = {
   'command.connected': '{name}（已连接）',
   'command.info': '查看连接器信息',
   'command.infoPrompt': '{name}（已连接）。模型可直接调用其注入工具（mcp__*），例如：{examples}',
+  // 列表分隔符随语言走：中文用顿号，英文用逗号。此前硬编码 '、' 会漏进英文句子
+  // （`for example: a、b`）。
+  'command.exampleSeparator': '、',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -108,6 +111,7 @@ export const en: Record<keyof typeof zh, string> = {
   'command.connected': '{name} (connected)',
   'command.info': 'View connector information',
   'command.infoPrompt': '{name} (connected). The model can call its injected tools (mcp__*), for example: {examples}',
+  'command.exampleSeparator': ', ',
 }
 
 export type ConnectorsKey = keyof typeof zh

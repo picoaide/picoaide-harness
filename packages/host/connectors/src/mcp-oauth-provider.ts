@@ -36,6 +36,7 @@ import type {
 import { discoverMcpOAuth } from './auth.ts'
 import { assertOutboundUrlAllowed, OutboundUrlBlockedError } from './outbound.ts'
 import { DEFAULT_TOKEN_LIFETIME_MS, REFRESH_LEAD_MS } from './token-lifetime.ts'
+import { DEFAULT_HOST_LOCALE, hostT, type HostLocale } from './host-copy.ts'
 import type { ConnectorCredential } from './store.ts'
 
 /** Persist helper shape (the real one is `ConnectorStore.updateCredential`). */
@@ -257,15 +258,21 @@ export function createOAuthProvider(
  */
 export async function resolveAuthorizationServer(
   target: OAuthTarget,
-  options: { timeoutMs?: number | undefined } = {},
+  options: { timeoutMs?: number | undefined; locale?: HostLocale | undefined } = {},
 ): Promise<{ discovery?: { authorizationServerUrl: string; tokenEndpoint: string }; resource?: string; failure?: RefreshFailure }> {
+  // Every failure message below is built for THIS call's locale; nothing is
+  // cached at module scope (the caller resolves it per refresh request).
+  const locale = options.locale ?? DEFAULT_HOST_LOCALE
   if (target.discoveryUrl) {
     const discovered = await discoverMcpOAuth(
       target.discoveryUrl,
-      options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs },
+      {
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        locale,
+      },
     )
     if (discovered.publicMcp) {
-      return { failure: { ok: false, reason: 'not-applicable', message: 'MCP 端点公开可用，无需令牌' } }
+      return { failure: { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.publicMcp') } }
     }
     const asUrl = discovered.authorizationServerUrl
     if (discovered.tokenEndpoint && asUrl) {
@@ -276,17 +283,17 @@ export async function resolveAuthorizationServer(
     }
   }
   if (target.tokenUrl) {
-    const tokenEndpoint = assertOutboundUrlAllowed(target.tokenUrl, 'OAuth token 端点').toString()
+    const tokenEndpoint = assertOutboundUrlAllowed(target.tokenUrl, 'OAuth token 端点', locale).toString()
     const asUrl = authorizationServerUrl(target)
     return asUrl === undefined
-      ? { failure: { ok: false, reason: 'transient', message: 'token 端点不是合法 URL' } }
+      ? { failure: { ok: false, reason: 'transient', message: hostT(locale, 'refresh.invalidTokenUrl') } }
       : { discovery: { authorizationServerUrl: asUrl, tokenEndpoint } }
   }
   return {
     failure: {
       ok: false,
       reason: 'not-applicable',
-      message: target.discoveryUrl === undefined ? '连接器未声明 token 端点' : '无法从 MCP 端点发现 token 端点',
+      message: hostT(locale, target.discoveryUrl === undefined ? 'refresh.noTokenEndpoint' : 'refresh.discoveryNoTokenEndpoint'),
     },
   }
 }
@@ -298,13 +305,14 @@ export async function resolveAuthorizationServer(
 export async function refreshCredentialTokens(
   credential: ConnectorCredential,
   target: OAuthTarget,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; locale?: HostLocale } = {},
 ): Promise<RefreshOutcome> {
+  const locale = options.locale ?? DEFAULT_HOST_LOCALE
   if (credential.refreshToken === undefined) {
     return {
       ok: false,
       reason: 'not-applicable',
-      message: credential.accessToken === undefined ? '没有可用的凭据' : '凭据不含 refresh token，无法自动续期',
+      message: hostT(locale, credential.accessToken === undefined ? 'refresh.noCredential' : 'refresh.noRefreshToken'),
     }
   }
   let resolved: Awaited<ReturnType<typeof resolveAuthorizationServer>>
@@ -312,7 +320,7 @@ export async function refreshCredentialTokens(
     resolved = await resolveAuthorizationServer(target, options)
   } catch (error) {
     if (error instanceof OutboundUrlBlockedError) throw error
-    return { ok: false, reason: 'transient', message: `授权服务器解析失败：${error instanceof Error ? error.message : String(error)}` }
+    return { ok: false, reason: 'transient', message: hostT(locale, 'refresh.authorizationServerResolveFailed', { message: error instanceof Error ? error.message : String(error) }) }
   }
   if (resolved.failure) return resolved.failure
 
@@ -338,27 +346,27 @@ export async function refreshCredentialTokens(
   // server (the connector's MCP URL is authoritative for bearer tokens).
   const serverUrl = target.discoveryUrl ?? target.resourceUrl ?? resolved.resource ?? resolved.discovery?.authorizationServerUrl
   if (serverUrl === undefined) {
-    return { ok: false, reason: 'not-applicable', message: '连接器未声明 MCP 端点' }
+    return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.missingMcpEndpoint') }
   }
   try {
     const result = await auth(provider, { serverUrl })
     if (result !== 'AUTHORIZED') {
-      return { ok: false, reason: 'reauthorize', message: '授权服务器未完成令牌刷新，需要重新授权' }
+      return { ok: false, reason: 'reauthorize', message: hostT(locale, 'refresh.notCompleted') }
     }
   } catch (error) {
     const code = oauthErrorCode(error)
     const message = error instanceof Error ? error.message : String(error)
     if (message === REAUTHORIZE_REQUIRED) {
-      return { ok: false, reason: 'reauthorize', message: 'refresh token 已失效，需要重新授权' }
+      return { ok: false, reason: 'reauthorize', message: hostT(locale, 'refresh.tokenExpired') }
     }
     if (code !== undefined && DEAD_GRANT_CODES.has(code)) {
-      return { ok: false, reason: 'reauthorize', message: `授权服务器拒绝了刷新（${code}），需要重新授权` }
+      return { ok: false, reason: 'reauthorize', message: hostT(locale, 'refresh.grantRejected', { code }) }
     }
-    return { ok: false, reason: 'transient', message: `令牌刷新失败：${message}` }
+    return { ok: false, reason: 'transient', message: hostT(locale, 'refresh.failed', { message }) }
   }
   const saved = patch as Partial<ConnectorCredential> | undefined
   if (saved?.accessToken === undefined) {
-    return { ok: false, reason: 'transient', message: '令牌刷新未返回 access_token' }
+    return { ok: false, reason: 'transient', message: hostT(locale, 'refresh.missingAccessToken') }
   }
   return {
     ok: true,
@@ -392,6 +400,14 @@ export class TokenRefresher {
       /** Called after a refresh actually changed the stored credential. */
       onRefreshed?: ((id: string, tokens: RefreshedTokens) => void) | undefined
       timeoutMs?: number | undefined
+      /**
+       * Locale of the failure text, resolved by the caller for the request that
+       * triggered the refresh (panel click / background sweep). A function, not
+       * a value: the sweep and the panel can run under different settings, and
+       * a refresh started before a language switch must still report in the
+       * language the user sees now.
+       */
+      locale?: (() => HostLocale) | undefined
     },
   ) {}
 
@@ -400,10 +416,10 @@ export class TokenRefresher {
   }
 
   /** Refresh `id` unless it is already fresh; `force` skips the freshness check. */
-  async refresh(id: string, options: { force?: boolean } = {}): Promise<RefreshOutcome> {
+  async refresh(id: string, options: { force?: boolean; locale?: HostLocale } = {}): Promise<RefreshOutcome> {
     const existing = this.inflight.get(id)
     if (existing) return await existing
-    const run = this.perform(id, options.force === true)
+    const run = this.perform(id, options.force === true, options.locale ?? this.deps.locale?.() ?? DEFAULT_HOST_LOCALE)
     this.inflight.set(id, run)
     try {
       return await run
@@ -412,9 +428,9 @@ export class TokenRefresher {
     }
   }
 
-  private async perform(id: string, force: boolean): Promise<RefreshOutcome> {
+  private async perform(id: string, force: boolean, locale: HostLocale): Promise<RefreshOutcome> {
     const credential = await this.deps.read(id)
-    if (!credential) return { ok: false, reason: 'not-applicable', message: `连接器 ${id} 尚未连接` }
+    if (!credential) return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.notConnected', { id }) }
     if (!force && !tokenNeedsRefresh(credential)) {
       return {
         ok: true,
@@ -426,18 +442,21 @@ export class TokenRefresher {
       }
     }
     const target = this.deps.target(id)
-    if (!target) return { ok: false, reason: 'not-applicable', message: `连接器 ${id} 不支持令牌刷新` }
+    if (!target) return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.unsupported', { id }) }
     let outcome: RefreshOutcome
     try {
       outcome = await refreshCredentialTokens(
         credential,
         target,
-        this.deps.timeoutMs === undefined ? {} : { timeoutMs: this.deps.timeoutMs },
+        {
+          ...(this.deps.timeoutMs === undefined ? {} : { timeoutMs: this.deps.timeoutMs }),
+          locale,
+        },
       )
     } catch (error) {
       // A blocked URL is an active redirection attempt: surface it, never
       // silently retry against a throwaway endpoint.
-      return { ok: false, reason: 'transient', message: `令牌刷新被出站策略拒绝：${error instanceof Error ? error.message : String(error)}` }
+      return { ok: false, reason: 'transient', message: hostT(locale, 'refresh.outboundBlocked', { message: error instanceof Error ? error.message : String(error) }) }
     }
     if (!outcome.ok) return outcome
     await this.deps.write(id, {

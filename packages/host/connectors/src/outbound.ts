@@ -33,6 +33,7 @@
  */
 import { BlockList, isIP } from 'node:net'
 import { hostname as osHostname } from 'node:os'
+import { DEFAULT_HOST_LOCALE, hostT, stepLabel, type HostLocale } from './host-copy.ts'
 
 /** Thrown when a connector-controlled URL is outside the allowed outbound set. */
 export class OutboundUrlBlockedError extends Error {
@@ -82,6 +83,12 @@ export interface OutboundFetchOptions {
    * able to widen or shorten its own deadline.
    */
   timeoutMs?: number
+  /**
+   * Locale for the error text this request may throw. Omitted callers get
+   * {@link DEFAULT_HOST_LOCALE} (the pre-i18n behaviour); every plugin call
+   * site passes the locale resolved from `desktopRuntime` for THIS request.
+   */
+  locale?: HostLocale
 }
 
 /**
@@ -204,37 +211,41 @@ function classifyHost(hostname: string): AddressClass {
  * Parse and check one connector-controlled URL.
  * @param rawUrl - the URL as the remote side supplied it.
  * @param what - the flow step naming the URL in the error (e.g. `MCP 端点`).
+ * @param locale - locale for the error text (defaults to the product default).
  * @returns the parsed URL when it is allowed.
  * @throws {OutboundUrlBlockedError} when the URL is malformed or outside the policy.
  */
-export function assertOutboundUrlAllowed(rawUrl: string, what: string): URL {
+export function assertOutboundUrlAllowed(rawUrl: string, what: string, locale: HostLocale = DEFAULT_HOST_LOCALE): URL {
+  // The step label and every sentence below are rendered HERE, from the locale
+  // this call was given — never from a module-level constant.
+  const label = stepLabel(locale, what)
   let parsed: URL
   try {
     parsed = new URL(rawUrl)
   } catch {
-    throw new OutboundUrlBlockedError(`${what} 不是合法 URL: ${rawUrl}`)
+    throw new OutboundUrlBlockedError(hostT(locale, 'outbound.notUrl', { what: label, url: rawUrl }))
   }
   const isHttps = parsed.protocol === 'https:'
   const isHttp = parsed.protocol === 'http:'
   if (!isHttps && !isHttp) {
-    throw new OutboundUrlBlockedError(`${what} 只允许 https（或本地回环 http）: ${parsed.protocol}//${parsed.host}`)
+    throw new OutboundUrlBlockedError(hostT(locale, 'outbound.notHttps', { what: label, target: `${parsed.protocol}//${parsed.host}` }))
   }
   // Credentials in the authority are never legitimate for a discovered
   // endpoint and are a classic way to make a hostile host look trustworthy.
   if (parsed.username !== '' || parsed.password !== '') {
-    throw new OutboundUrlBlockedError(`${what} 不允许在 URL 中携带用户名/密码: ${parsed.host}`)
+    throw new OutboundUrlBlockedError(hostT(locale, 'outbound.credentials', { what: label, target: parsed.host }))
   }
   const kind = classifyHost(parsed.hostname)
   if (kind === 'blocked') {
-    throw new OutboundUrlBlockedError(`${what} 指向内网/链路本地/元数据地址，已拒绝: ${parsed.host}`)
+    throw new OutboundUrlBlockedError(hostT(locale, 'outbound.blocked', { what: label, target: parsed.host }))
   }
   if (isHttp && kind !== 'loopback') {
-    throw new OutboundUrlBlockedError(`${what} 使用 http 但主机不是回环地址: ${parsed.host}`)
+    throw new OutboundUrlBlockedError(hostT(locale, 'outbound.notLoopback', { what: label, target: parsed.host }))
   }
   if (kind === 'name' && parsed.hostname.toLowerCase().replace(/\.$/u, '') === osHostname().toLowerCase()) {
     // The local machine's own name resolves to a local interface in most
     // deployments; treat it as non-public rather than trusting DNS here.
-    throw new OutboundUrlBlockedError(`${what} 指向本机主机名，已拒绝: ${parsed.host}`)
+    throw new OutboundUrlBlockedError(hostT(locale, 'outbound.localHostname', { what: label, target: parsed.host }))
   }
   return parsed
 }
@@ -305,7 +316,8 @@ function describeRedirect(response: Response): string {
  * @param rawUrl - the URL as the remote side supplied it.
  * @param what - the flow step naming the URL in the error (e.g. `OAuth token 端点`).
  * @param init - request options; `redirect` is forced to `manual`.
- * @param options - deadline override (defaults to {@link OUTBOUND_REQUEST_TIMEOUT_MS}).
+ * @param options - deadline override (defaults to {@link OUTBOUND_REQUEST_TIMEOUT_MS})
+ *   and the locale for this request's error text.
  * @returns the response, which is guaranteed not to be a redirect.
  * @throws {OutboundUrlBlockedError} when the URL is outside the policy or the
  *   remote side answered with a redirect.
@@ -317,12 +329,14 @@ export async function outboundFetch(
   init: RequestInit = {},
   options: OutboundFetchOptions = {},
 ): Promise<Response> {
-  const target = assertOutboundUrlAllowed(rawUrl, what)
+  const locale = options.locale ?? DEFAULT_HOST_LOCALE
+  const label = stepLabel(locale, what)
+  const target = assertOutboundUrlAllowed(rawUrl, what, locale)
   const deadlineMs = options.timeoutMs ?? OUTBOUND_REQUEST_TIMEOUT_MS
   // `AbortSignal.timeout` answers a bare RangeError for these; name the option
   // instead so a misconfigured deployment sees what to fix.
   if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) {
-    throw new RangeError(`出站请求截止时间非法（timeoutMs=${String(deadlineMs)}），必须为正数`)
+    throw new RangeError(hostT(locale, 'outbound.badDeadline', { timeoutMs: String(deadlineMs) }))
   }
   const deadline = AbortSignal.timeout(deadlineMs)
   const caller = init.signal ?? null
@@ -337,13 +351,17 @@ export async function outboundFetch(
     // A caller abort (user cancel, teardown) is that caller's own outcome and
     // keeps its own error; only the deadline becomes a deadline report.
     if (deadline.aborted && !(caller?.aborted ?? false)) {
-      throw new OutboundTimeoutError(`${what} 出站请求超时（${deadlineMs}ms 内未完成），已中止: ${target.host}`)
+      throw new OutboundTimeoutError(hostT(locale, 'outbound.timeout', {
+        what: label,
+        timeoutMs: String(deadlineMs),
+        host: target.host,
+      }))
     }
     throw cause
   }
   if (isRedirectResponse(response)) {
     throw new OutboundUrlBlockedError(
-      `${what} 返回重定向（${describeRedirect(response)}），按出站策略拒绝跟随: ${target.host}`,
+      hostT(locale, 'outbound.redirect', { what: label, detail: describeRedirect(response), host: target.host }),
     )
   }
   return response

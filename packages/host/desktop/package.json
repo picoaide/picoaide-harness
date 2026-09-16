@@ -55,6 +55,10 @@
       "types": "./lib/types/desktop-home.d.ts",
       "default": "./lib/desktop-home.js"
     },
+    "./host-locale": {
+      "types": "./lib/types/host-locale.d.ts",
+      "default": "./lib/host-locale.js"
+    },
     "./diagnostics": {
       "types": "./lib/types/diagnostics.d.ts",
       "default": "./lib/diagnostics.js"

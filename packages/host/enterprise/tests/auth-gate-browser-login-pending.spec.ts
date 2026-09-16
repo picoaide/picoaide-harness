@@ -1,10 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from '../src/auth-gate.ts'
-import { brandMarkSvg } from '../src/channel-geometry.ts'
+import { renderLoginPage } from '../src/auth-gate.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 /**
@@ -37,13 +35,13 @@ import type { Session } from '../src/server-connector/config.ts'
 // 第一半:页面脚本的接线存在性(真实 LOGIN_HTML + jsdom 内联脚本)
 // ---------------------------------------------------------------------------
 
-/** 从 auth-gate.ts 提取 LOGIN_HTML 模板并求值(与 auth-gate-login.spec.ts 同款)。 */
+/**
+ * 真实登录页 HTML（zh）。页面自 2026-09-16 起是 `renderLoginPage(locale)` 的产物
+ * （文案/`lang` 随宿主语言），所以这里直接渲染而不是从源码里抠模板字面量
+ * —— 抠模板的做法在页面变成函数后就失效了（与 auth-gate-login.spec.ts 同款）。
+ */
 function renderedLoginHTML(): string {
-  const src = readFileSync(fileURLToPath(new URL('../src/auth-gate.ts', import.meta.url)), 'utf8')
-  const m = src.match(/const LOGIN_HTML = `([\s\S]*?)`\n\nexport interface Config/)
-  expect(m, 'LOGIN_HTML template must be findable').not.toBeNull()
-  const fn = new Function('brandMarkSvg', `return \`${m![1]!}\``) // eslint-disable-line no-new-func
-  return fn(brandMarkSvg)
+  return renderLoginPage('zh')
 }
 
 /** 求值后的登录页内联脚本(真实模板,含运行时占位符替换)。 */
@@ -98,6 +96,12 @@ function bootLoginPage(opts: { server?: string, registrationStatus?: number } = 
   // 自有断言:模板求值后的脚本必须仍是合法 JS(捕获 `\/` 之类转义破坏)。
   expect(() => { new Function(script) }).not.toThrow() // eslint-disable-line no-new-func
 
+  // 页面文案自 2026-09-16 由 `var T = {...}`（按语言注入）提供,所以从**真实脚本**
+  // 里取出这份字面量注入到重建出来的函数作用域,而不是让测试自备一份文案
+  // （自备一份就等于把文案断言与产品文案解耦,改坏了测试也绿）。
+  const tLiteral = script.match(/var T = (\{[\s\S]*?\})\n/u)?.[1]
+  expect(tLiteral, 'login page script must define the copy table T').toBeDefined()
+
   const events: string[] = []
   const openCalls: string[] = []
   const fetchCalls: PageHarness['fetchCalls'] = []
@@ -105,6 +109,7 @@ function bootLoginPage(opts: { server?: string, registrationStatus?: number } = 
   const status = opts.registrationStatus ?? 200
 
   const factory = new Function('document', 'window', 'fetch', `
+    var T = ${tLiteral}
     var err2 = { textContent: '' }
     var waiting = { style: { display: 'none' } }
     var browserBtn = { disabled: false }

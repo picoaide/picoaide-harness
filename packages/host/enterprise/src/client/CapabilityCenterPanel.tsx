@@ -432,6 +432,20 @@ export function uninstallEndpoint(item: CapabilityItem, version: string): string
   return `/api/pico/agent-presets/${encodeURIComponent(item.name)}/uninstall`
 }
 
+/**
+ * 上传预检撞上同名内容时的提示文案（**必须走字典**）。
+ *
+ * 抽成纯函数的原因与 connectors 的 `status-label.ts` 相同：文案取自模块级
+ * `t()`，只有"切语言后跟着变"这种断言才有判别力 —— 写成硬编码字符串时，
+ * 渲染测试照样全绿（2026-09-16 审计：本文件已用 t() 74 次，只有这一条漏网，
+ * 英文界面下整句是中文）。
+ * @param displayName - 占用该名称的条目展示名（调用方已回退到 name）。
+ * @returns 当前界面语言下的提示文案。
+ */
+export function nameTakenError(displayName: string): string {
+  return t('capability.nameTaken', { name: displayName })
+}
+
 /** 单测用：把同名（kind+name）条目归并成一张卡（保留最高 approved 版本为当前）。 */
 export function mergeItems(items: readonly CapabilityItem[]): CapabilityItem[] {
   const byKey = new Map<string, CapabilityItem>()
@@ -638,7 +652,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     if (clash !== undefined && clash.isOwner !== true) {
       setAction({
         key, kind: 'failed',
-        error: `名称已被占用:「${clash.displayName || clash.name}」已存在于能力中心,请更换名称或联系管理员`,
+        error: nameTakenError(clash.displayName || clash.name),
         name: item.name,
       })
       return

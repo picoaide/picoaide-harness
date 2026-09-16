@@ -1,30 +1,22 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { apply, type Config } from '../src/auth-gate.ts'
-import { brandMarkSvg } from '../src/channel-geometry.ts'
+import { apply, renderChangePasswordPage, renderLoginPage, type Config } from '../src/auth-gate.ts'
 
-// 回归测试(2026-09):LOGIN_HTML 是 TS 模板字符串,内联 <script> 里的正则
+// 回归测试(2026-09):登录页是 TS 模板字符串,内联 <script> 里的正则
 // `\/` 会被模板转义(cooked)成 `/`(输出 `//$` = 空正则+行注释)导致浏览器
 // SyntaxError,登录页整个 JS 不执行(点「下一步」触发原生表单提交 → 页面刷新、
-// 输入框被清空)。此测试从源码提取 LOGIN_HTML,**按模板字面量真实求值**后
-// 再验证: 1) script 可作为 JS 解析(捕获所有 cooked 转义毁坏); 2) 不含
-// 会退化成行注释的 `/\/` 转义序列(即禁止带反斜杠的正则出现在模板里)。
+// 输入框被清空)。此测试渲染**真实页面**(renderLoginPage),再验证:
+// 1) script 可作为 JS 解析(捕获所有 cooked 转义毁坏); 2) 不含会退化成行注释的
+// `/\/` 转义序列(即禁止带反斜杠的正则出现在模板里)。
+//
+// 2026-09-16 i18n:页面从模块常量变成 `renderLoginPage(locale)` 的函数,文案与
+// `<html lang>` 随语言变化,所以这里不再从源码抠模板字面量(函数体里已有
+// `${…}` 插值),而是直接渲染 —— 模板 cooked 语义经 esbuild 原样保留,判别力不变。
 
-/** 从 auth-gate.ts 提取 LOGIN_HTML 的模板原始文本并求值(模拟浏览器收到的
- * HTML)。用 Function 构造真实模板字面量,而不是手工字符串替换——手工替换
- * 曾漏掉模板 cooked 转义(`\/` → `/`),让 `\/+$` 静默退化成 `//+$`。
- */
+/** 渲染 zh 登录页（默认语言）。 */
 function renderedLoginHTML(): string {
-  const src = readFileSync(fileURLToPath(new URL('../src/auth-gate.ts', import.meta.url)), 'utf8')
-  const m = src.match(/const LOGIN_HTML = `([\s\S]*?)`\n\nexport interface Config/)
-  expect(m, 'LOGIN_HTML template must be findable').not.toBeNull()
-  const raw = m![1]!
-  // LOGIN_HTML 至今不含 ${...} / \` / \$ / \\ 序列;若未来出现,这里会抛错,
-  // 提示按真实模板语义处理(与编译产物 tsdown 保持模板原样一致)。
-  // 模板现在插值 ${brandMarkSvg('#FFFFFF')}(P2-39:几何单一来源),求值需注入。
-  const fn = new Function('brandMarkSvg', `return \`${raw}\``) // eslint-disable-line no-new-func
-  return fn(brandMarkSvg)
+  return renderLoginPage('zh')
 }
 
 /** 从求值后的 HTML 提取首个内联 <script> 内容。 */
@@ -141,14 +133,9 @@ describe('auth-gate LOGIN_HTML inline script', () => {
   })
 })
 
-// ---- 0057 强制改密页模板(CHANGE_PASSWORD_HTML) ----
+// ---- 0057 强制改密页模板(renderChangePasswordPage) ----
 function renderedChangePasswordHTML(): string {
-  const src = readFileSync(fileURLToPath(new URL('../src/auth-gate.ts', import.meta.url)), 'utf8')
-  const m = src.match(/const CHANGE_PASSWORD_HTML = `([\s\S]*?)`\n\n\/\/ P1-11/)
-  expect(m, 'CHANGE_PASSWORD_HTML template must be findable').not.toBeNull()
-  const raw = m![1]!
-  const fn = new Function(`return \`${raw}\``) // eslint-disable-line no-new-func
-  return fn()
+  return renderChangePasswordPage('zh')
 }
 
 describe('auth-gate CHANGE_PASSWORD_HTML inline script', () => {

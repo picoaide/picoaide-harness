@@ -21,6 +21,7 @@ import { SENSITIVE_KEY_PATTERN, isExactProseSensitiveKey } from './sensitive.ts'
 import { browserError, BrowserError, type BrowserErrorCode } from './errors.ts'
 import { httpOriginOf } from './credential-site.ts'
 import { isFrameOrderProblem, orderFramesByDom, frameOrderErrorMessage, SRCDOC_URL, type FrameCandidate, type FrameOrderProblem } from './frames.ts'
+import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import type {
@@ -199,12 +200,27 @@ interface OriginCredentialRecord {
 
 /** Wait-for condition spec. */
 /**
- * 浏览器窗口/标签标题的中性缺省值。
+ * 浏览器窗口/标签标题的中性缺省值（按 locale）。
  *
  * 刻意不含厂商品牌：仓库里不留任何品牌描述。渠道构建下窗口标题应显示渠道名，
  * 由渠道包注入（迁移见 docs/planning/2026-09-10-channel-package-reference.md）。
  */
-export const BROWSER_DEFAULT_TITLE = 'AI 浏览器'
+const BROWSER_DEFAULT_TITLE: Readonly<Record<HostLocale, string>> = {
+  zh: 'AI 浏览器',
+  en: 'AI Browser',
+}
+
+/**
+ * Native window/tab-title fallback for one locale.
+ *
+ * The locale is passed in per call (never captured): the window can already be
+ * open when the user switches the application language.
+ * @param locale - locale to render the title in.
+ * @returns the neutral default browser title.
+ */
+export function browserDefaultTitle(locale: HostLocale): string {
+  return BROWSER_DEFAULT_TITLE[locale]
+}
 
 export interface WaitForOptions {
   condition: 'element-present' | 'element-visible' | 'text-appear' | 'url-change' | 'network-idle' | 'settled'
@@ -253,6 +269,16 @@ export interface RuntimeDeps {
   pool?: TabPool
   store?: BrowserStore
   currentUsername?: () => string | null
+  /**
+   * Locale provider for the copy the runtime produces (window title, activity
+   * panel summaries, refusal messages).
+   *
+   * A PROVIDER, not a value: it is called at production time so a language
+   * change applies to the next message instead of freezing the language the
+   * plugin was applied with (the bug class documented in
+   * `dsh-connectors/src/client/status-label.ts`). Absent ⇒ {@link DEFAULT_HOST_LOCALE}.
+   */
+  locale?: () => HostLocale
 }
 
 /**
@@ -262,6 +288,8 @@ export interface RuntimeDeps {
 export class BrowserRuntime {
   private readonly tabs = new Map<number, BrowserTab>()
   private nextTabId = 1
+  /** Locale provider for runtime-produced copy (see {@link RuntimeDeps.locale}). */
+  private readonly locale: () => HostLocale
   /**
    * Credential accounting keyed by ORIGIN (R7, 2026-09-13): the value set and
    * the activity window a `browser_fill_credentials` created, scoped to what
@@ -339,6 +367,7 @@ export class BrowserRuntime {
     }
     this.guard = new BrowserGuard(adapter)
     this.partition = partition ?? BROWSER_PARTITION
+    this.locale = deps.locale ?? (() => DEFAULT_HOST_LOCALE)
     this.pool = deps.pool ?? new TabPool(options.maxTabs !== undefined ? { maxTabs: options.maxTabs } : {})
     if (deps.store !== undefined) this.store = deps.store
     else this.store = new BrowserStore({ dir: this.partition.replace(/[^a-zA-Z0-9_-]/g, '_') + '-store' })
@@ -1374,9 +1403,10 @@ export class BrowserRuntime {
   private refreshWindowTitle(tab: BrowserTab): void {
     if (this.window === null || this.window.isDestroyed()) return
     if (tab.id !== this.pool.activeTab) return
+    const fallback = browserDefaultTitle(this.locale())
     const shown = redactFilledSecretsText(tab, tab.title)
-    const title = shown !== '' ? shown : BROWSER_DEFAULT_TITLE
-    this.window.setTitle(title === BROWSER_DEFAULT_TITLE ? title : `${title} — ${BROWSER_DEFAULT_TITLE}`)
+    const title = shown !== '' ? shown : fallback
+    this.window.setTitle(title === fallback ? title : `${title} — ${fallback}`)
   }
 
   private releaseTabDisposers(id: number): void {
@@ -1445,7 +1475,11 @@ export class BrowserRuntime {
   private noteControlBlock(tool: string): void {
     if (this.gateBlock !== null) return
     this.gateBlock = { at: Date.now(), tool }
-    this.record(tool, 0, '用户正在操作浏览器（我来操作），AI 操作被挡住 —— 点「交给 AI」后继续', true)
+    this.record(tool, 0, hostCopy(
+      this.locale(),
+      '用户正在操作浏览器（我来操作），AI 操作被挡住 —— 点「交给 AI」后继续',
+      'The user is operating the browser (take-over); the AI is blocked — click "Hand back to AI" to continue',
+    ), true)
     this.emitAll('state')
   }
 
@@ -1840,8 +1874,11 @@ export class BrowserRuntime {
       // must be a visible failure, never a silent 0-byte "screenshot" (P2-31).
       const message = cause instanceof Error ? cause.message : String(cause)
       this.record('browser_screenshot', resolved, `screenshot failed: ${message}`, true)
+      // Model-facing: English like the rest of the tool surface (tool
+      // descriptions are registered once and cannot be per-request), and no
+      // localized window name — the window is 「浏览器」in zh and "browser" here.
       throw new Error(
-        `browser: screenshot failed — ${message}; the tab must be able to render (open the 浏览器 window if it is closed, then retry)`,
+        `browser: screenshot failed — ${message}; the tab must be able to render (open the browser window if it is closed, then retry)`,
       )
     }
     // 截图完成后再确认一次接管状态：用户在这张图渲染期间点「我来操作」时，不该
@@ -2907,7 +2944,11 @@ export class BrowserRuntime {
    */
   private assertAgentStillAllowed(operation: string): void {
     if (!this.pool.controlled) return
-    throw browserError('window-controlled', `browser: 用户已接管浏览器，AI 操作已中止（${operation}）`)
+    throw browserError('window-controlled', hostCopy(
+      this.locale(),
+      `browser: 用户已接管浏览器，AI 操作已中止（${operation}）`,
+      `browser: the user took over the browser — AI action aborted (${operation})`,
+    ))
   }
 
   /** Stop pending page loads when the user takes over (navigation is not cancellable via a JS signal). */
@@ -3115,7 +3156,11 @@ export class BrowserRuntime {
       seen.add(session)
       await this.clearSessionData(session, all)
     }
-    this.record('browser_clear_data', 0, `clear browsing data (${all ? '全部' : '站点'})`)
+    this.record('browser_clear_data', 0, hostCopy(
+      this.locale(),
+      `clear browsing data (${all ? '全部' : '站点'})`,
+      `clear browsing data (${all ? 'all' : 'this site'})`,
+    ))
   }
 
   private async clearSessionData(session: NativeSession, all: boolean): Promise<void> {

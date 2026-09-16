@@ -368,9 +368,11 @@ describe('R3-N3: the fence patches the SDK build mcp-client actually loads', () 
     )
     expect(source.includes('redirect')).toBe(false)
     expect(dirname(MCP_CLIENT_ENTRY)).toContain('@deepseek-ai/dsh-mcp-client')
-    // …and the plugin never registers a streamable-http server unwarned.
+    // …and the plugin never registers a streamable-http server unwarned. The
+    // call carries the host locale (2026-09-16 i18n), so the assertion is on the
+    // awaited call itself rather than on an exact argument list.
     const indexSource = await readFile(fileURLToPath(new URL('../src/index.ts', import.meta.url)), 'utf8')
-    expect(indexSource).toContain('await ensureMcpTransportRedirectFence()')
+    expect(indexSource).toMatch(/await ensureMcpTransportRedirectFence\(/)
   })
 
   it('keeps both seams installed (request init and the auth-provider fetch)', async () => {

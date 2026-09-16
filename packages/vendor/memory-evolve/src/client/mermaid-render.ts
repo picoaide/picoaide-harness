@@ -181,7 +181,7 @@ function isMermaidBlock(block: HTMLElement): boolean {
  * @param block - 目标代码块。
  * @param error - 最后一次渲染失败的错误（可选，用于提取定位信息）。
  */
-function showErrorHint(block: HTMLElement, error?: unknown): void {
+function showErrorHint(block: HTMLElement, t: MermaidTranslate, error?: unknown): void {
   if (block.querySelector('.me-mermaid-error') !== null) return // 已提示过，不重复插入。
   const pre = block.querySelector('pre')
   if (pre === null) return
@@ -192,10 +192,12 @@ function showErrorHint(block: HTMLElement, error?: unknown): void {
   const detail = error instanceof Error
     ? (String(error.message).split('\n')[0] ?? '').slice(0, 80)
     : ''
-  const zh = (document.documentElement.lang ?? '').toLowerCase().startsWith('zh')
-  hint.textContent = zh
-    ? `⚠ mermaid 渲染失败${detail === '' ? '' : `：${detail}`}，已保留代码（可复制修正）`
-    : `⚠ mermaid render failed${detail === '' ? '' : `: ${detail}`}, code kept`
+  // i18n（2026-09-16）：此前按 `document.documentElement.lang` 自己判语言
+  // （zh 分支硬编码、且无视应用内语言设置）；现在文案走注册字典，由调用方
+  // （client 入口 apply 期）注入的 t 在调用期取当前语言。
+  hint.textContent = detail === ''
+    ? t('mermaid.renderFailed')
+    : t('mermaid.renderFailedDetail', { detail })
   pre.insertAdjacentElement('beforebegin', hint)
 }
 
@@ -295,7 +297,7 @@ function fixDangerChars(text: string): string {
  *
  * @param block - 已渲染的 mermaid 代码块。
  */
-function ensureDownloadButton(block: HTMLElement): void {
+function ensureDownloadButton(block: HTMLElement, t: MermaidTranslate): void {
   const wrap = block.querySelector<HTMLElement>('.me-mermaid-wrap')
   if (wrap === null) return
   const svg = wrap.querySelector<SVGSVGElement>('svg')
@@ -314,9 +316,8 @@ function ensureDownloadButton(block: HTMLElement): void {
   const btn = document.createElement('button')
   btn.type = 'button'
   btn.className = 'me-mermaid-download'
-  const zh = (document.documentElement.lang ?? '').toLowerCase().startsWith('zh')
-  btn.textContent = zh ? '下载' : 'SVG'
-  btn.title = zh ? '下载此图为 SVG（矢量，可无损缩放）' : 'Download diagram as SVG'
+  btn.textContent = t('mermaid.download')
+  btn.title = t('mermaid.downloadTitle')
   btn.addEventListener('click', (event) => {
     event.stopPropagation() // 不冒泡，避免误触块级行为。
     downloadSvg(svg)
@@ -361,7 +362,7 @@ function downloadSvg(svg: SVGSVGElement): void {
  * @param source - 已确认稳定的 mermaid 源码。
  * @param state - 该块的处理状态（成功后置 rendered，失败也置——防刷屏）。
  */
-async function renderBlock(block: HTMLElement, source: string, state: BlockState): Promise<void> {
+async function renderBlock(block: HTMLElement, source: string, state: BlockState, t: MermaidTranslate): Promise<void> {
   // 防并发：同一块同时只允许一个渲染在途（稳定判定 timer 与延迟重试可能
   // 重叠，重复渲染同一 id 的 mermaid 图会互相干扰）。
   if (state.rendering) return
@@ -410,7 +411,7 @@ async function renderBlock(block: HTMLElement, source: string, state: BlockState
         // 成功 = 图真的渲染出来了，清掉可能的失败标记（之前失败过又被还原的块）。
         block.removeAttribute(FAILED_MARK)
         // 渲染成功后立即放下载按钮（复制按钮旁）；此后由 schedule 兜底补插。
-        ensureDownloadButton(block)
+        ensureDownloadButton(block, t)
         return
       } catch (error) {
         lastError = error
@@ -430,7 +431,7 @@ async function renderBlock(block: HTMLElement, source: string, state: BlockState
       // 永久失败标记：restore 检测见到它不再重置重试（否则延迟重扫会把它
       // 当成"图被还原"反复重置，每次重试失败 mermaid 又插一个错误块）。
       block.setAttribute(FAILED_MARK, '')
-      showErrorHint(block, lastError)
+      showErrorHint(block, t, lastError)
     }
     console.warn(`[dsh-memory-evolve] mermaid render failed (attempt ${state.failCount}):`, lastError)
   } finally {
@@ -442,7 +443,7 @@ async function renderBlock(block: HTMLElement, source: string, state: BlockState
   // 若持续重渲染则重试到稳定为止；引擎失败也在此无限重试（本地端点恢复即
   // 成功）。成功路径已在上面 return，不会走到这里。
   if (!state.rendered && block.isConnected && block.querySelector('pre') !== null) {
-    window.setTimeout(() => { schedule(block, true) }, RETRY_DELAY_MS)
+    window.setTimeout(() => { schedule(block, t, true) }, RETRY_DELAY_MS)
   }
 }
 
@@ -456,7 +457,7 @@ async function renderBlock(block: HTMLElement, source: string, state: BlockState
  * @param block - 候选代码块（.md-code-block 或其中的元素）。
  * @param force - 强制重置稳定判定计时器（默认 false）。
  */
-function schedule(block: HTMLElement, force = false): void {
+function schedule(block: HTMLElement, t: MermaidTranslate, force = false): void {
   if (!isMermaidBlock(block)) return
   let state = states.get(block)
   if (state === undefined) {
@@ -477,12 +478,12 @@ function schedule(block: HTMLElement, force = false): void {
       s.rendered = false
       s.failCount = 0 // 图被还原 = 环境已重置，清失败计数允许重新尝试。
       block.removeAttribute(RENDERED_MARK)
-      schedule(block, true)
+      schedule(block, t, true)
       return
     }
     // wrap 还在：补插下载按钮（复制按钮点击等 React 局部重渲染可能清掉
     // 我们插在操作区里的按钮，mutation 驱动下幂等补插，保持按钮常驻）。
-    ensureDownloadButton(block)
+    ensureDownloadButton(block, t)
     return
   }
   const source = block.querySelector('pre')?.textContent ?? ''
@@ -493,9 +494,9 @@ function schedule(block: HTMLElement, force = false): void {
     const current = block.querySelector('pre')?.textContent ?? ''
     if (current === s.source) {
       // 两次读取一致 = 流式已稳定 → 渲染（渲染中则由延迟重试接管，防并发）。
-      if (!s.rendering) void renderBlock(block, s.source, s)
+      if (!s.rendering) void renderBlock(block, s.source, s, t)
     } else {
-      schedule(block) // 仍在变化（流式继续）→ 重新计时。
+      schedule(block, t) // 仍在变化（流式继续）→ 重新计时。
     }
   }, force ? FORCE_STABLE_MS : STABLE_MS)
 }
@@ -506,7 +507,13 @@ function schedule(block: HTMLElement, force = false): void {
  * @returns { setEnabled, dispose }：setEnabled(false)=停止观察（已渲染的
  *   图保留，刷新后随开关状态恢复）；dispose=模块卸载清理。
  */
-export function createMermaidRenderer(): { setEnabled(enabled: boolean): void; dispose(): void } {
+/**
+ * 本模块的翻译函数形状（由 client 入口在 apply 期注入；调用期解析语言）。
+ * 本文件是纯 DOM 助手，取不到 React 的 t，故一律显式下传。
+ */
+type MermaidTranslate = (key: string, params?: Record<string, unknown>) => string
+
+export function createMermaidRenderer(t: MermaidTranslate): { setEnabled(enabled: boolean): void; dispose(): void } {
   let observer: MutationObserver | undefined
   let disposed = false
   /** 延迟重扫定时器（消息异步挂载/增量渲染的兜底窗口）。 */
@@ -524,14 +531,14 @@ export function createMermaidRenderer(): { setEnabled(enabled: boolean): void; d
           const self = node.classList.contains('md-code-block')
             ? node
             : node.closest<HTMLElement>('.md-code-block')
-          if (self instanceof HTMLElement) schedule(self)
+          if (self instanceof HTMLElement) schedule(self, t)
           // 向下扫（Grok 审阅意见 P0-①）：React 一次插入整个消息列表容器
           // （remount/历史回放）时，容器内的 .md-code-block 不会出现在
           // addedNodes 里——只做向上 closest 会整体漏检，全靠补扫兜底。
           // 对容器向下 querySelectorAll 一次即覆盖全部块（块内无嵌套块，
           // 若 self 已命中则无需再向下扫）。
           if (self === null) {
-            for (const inner of node.querySelectorAll<HTMLElement>('.md-code-block')) schedule(inner)
+            for (const inner of node.querySelectorAll<HTMLElement>('.md-code-block')) schedule(inner, t)
           }
         }
       } else {
@@ -544,7 +551,7 @@ export function createMermaidRenderer(): { setEnabled(enabled: boolean): void; d
           : mutation.target.parentElement
         const block = element?.closest<HTMLElement>('.md-code-block')
         // block 可能为 undefined（element 不存在）或 null（未命中）→ 统一判空。
-        if (block instanceof HTMLElement) schedule(block)
+        if (block instanceof HTMLElement) schedule(block, t)
       }
     }
     // 视图整体重挂载（顶部 Tab 切换 remount、会话切换）会一次性插入大量
@@ -567,7 +574,7 @@ export function createMermaidRenderer(): { setEnabled(enabled: boolean): void; d
       if (index >= delays.length) return
       rescanTimer = window.setTimeout(() => {
         if (disposed || observer === undefined) return
-        for (const block of document.querySelectorAll<HTMLElement>('.md-code-block')) schedule(block)
+        for (const block of document.querySelectorAll<HTMLElement>('.md-code-block')) schedule(block, t)
         run(index + 1)
       }, delays[index])
     }
@@ -586,7 +593,7 @@ export function createMermaidRenderer(): { setEnabled(enabled: boolean): void; d
       // attributes(class) 捕获 banner 语言标签出现。
       observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class'] })
       // 全量扫描当前已渲染的消息（打开开关时立即生效于历史消息）。
-      for (const block of document.querySelectorAll<HTMLElement>('.md-code-block')) schedule(block)
+      for (const block of document.querySelectorAll<HTMLElement>('.md-code-block')) schedule(block, t)
       scheduleRescans()
     } else if (!enabled && observer !== undefined) {
       observer.disconnect()

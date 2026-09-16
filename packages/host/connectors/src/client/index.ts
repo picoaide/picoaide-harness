@@ -115,7 +115,7 @@ export function apply(ctx: ClientContext): void {
             const live = sessions.binding(session.sessionId)?.session
             if (live === undefined) return
             const text = option.id === 'info'
-              ? t('command.infoPrompt', { name: connector.name, examples: (connector.examples ?? []).join('、') })
+              ? t('command.infoPrompt', { name: connector.name, examples: (connector.examples ?? []).join(t('command.exampleSeparator')) })
               : option.label
             await live.prompt([{ type: 'text', text }], 'queue')
           },

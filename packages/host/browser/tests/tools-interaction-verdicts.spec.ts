@@ -391,11 +391,12 @@ describe('2026-09-15 P1：browser_release 不在模型工具面上', () => {
     expect([...DEFAULT_GROUPS]).not.toContain('browser_release')
   })
 
-  it('工具描述与系统提示词都写明"只有用户能交回控制权"', () => {
+  it('工具描述与系统提示词都写明"只有用户能交回控制权"（2026-09-16 i18n：模型面统一英文，按功能描述而非写死按钮名）', () => {
     const harness = track(makeHarness())
     const takeover = harness.tools.get('browser_takeover')!
     expect(takeover.description).toMatch(/NO model-side counterpart/u)
-    expect(takeover.description).toMatch(/交给 AI/u)
+    expect(takeover.description).toMatch(/the hand-back control in the browser window/u)
+    expect(takeover.description).not.toMatch(/交给 AI|我来操作/u)
   })
 
   it('runtime 的 setUserControl 能力保留（用户按钮/关闭浏览器仍然用它）', async () => {

@@ -42,6 +42,9 @@ export const zh = {
   'job.deleteConfirm': '确定删除该定时任务吗？',
   'job.editTitle': '编辑任务',
   'job.actionNotEditable': '执行内容编辑后不可修改',
+  // 全角括号曾是 JSX 里的硬编码文本：英文界面下只差括号是中文排印。括号随语言
+  // 走（英文用半角，并带一个前导空格）。
+  'job.parenthesized': '（{text}）',
   'job.showHistory': '展开执行详情',
   'job.hideHistory': '收起执行详情',
   'job.execution.succeeded': '成功',
@@ -102,6 +105,7 @@ export const en: Record<CronKey, string> = {
   'job.deleteConfirm': 'Delete this scheduled job?',
   'job.editTitle': 'Edit job',
   'job.actionNotEditable': 'Execution content cannot be edited here',
+  'job.parenthesized': ' ({text})',
   'job.showHistory': 'Expand execution detail',
   'job.hideHistory': 'Collapse execution detail',
   'job.execution.succeeded': 'Succeeded',

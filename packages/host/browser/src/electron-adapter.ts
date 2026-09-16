@@ -14,7 +14,8 @@
  * @module @picoaide/dsh-browser
  */
 
-import { BROWSER_DEFAULT_TITLE } from './runtime.ts'
+import { browserDefaultTitle } from './runtime.ts'
+import { DEFAULT_HOST_LOCALE, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import type { CdpTransport } from './cdp.ts'
 
 /** The minimal native view surface the browser runtime drives. */
@@ -236,7 +237,15 @@ export interface ElectronModuleLike {
 }
 
 /** Lazy real adapter over Electron (imported only on first browser start). */
-export function createRealElectronAdapter(electronModule?: ElectronModuleLike): ElectronAdapter {
+export function createRealElectronAdapter(
+  electronModule?: ElectronModuleLike,
+  /**
+   * Locale provider for the native window title created here. A provider (not
+   * a value) because the window outlives any single locale resolution; the
+   * runtime re-titles it on every active-tab change anyway.
+   */
+  locale: () => HostLocale = () => DEFAULT_HOST_LOCALE,
+): ElectronAdapter {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const electron = electronModule ?? (require('electron') as ElectronModuleLike)
   const { WebContentsView, BrowserWindow, dialog } = electron
@@ -417,7 +426,7 @@ export function createRealElectronAdapter(electronModule?: ElectronModuleLike): 
         height: BROWSER_WINDOW_DEFAULT.height,
         minWidth: BROWSER_WINDOW_MIN.width,
         minHeight: BROWSER_WINDOW_MIN.height,
-        title: BROWSER_DEFAULT_TITLE,
+        title: browserDefaultTitle(locale()),
         // 2026-09-08 product decision: the browser is created at client boot
         // but stays HIDDEN — the agent operates it in the background and the
         // shell's 浏览器 button shows it on demand. Creation must therefore

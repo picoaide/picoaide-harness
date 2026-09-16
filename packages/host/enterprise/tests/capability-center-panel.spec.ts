@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   avatarColor,
   compareVersions,
@@ -7,9 +7,13 @@ import {
   itemsForTab,
   latestApprovedVersionByName,
   mergeItems,
+  nameTakenError,
   uninstallEndpoint,
   type CapabilityItem,
 } from '../src/client/CapabilityCenterPanel.tsx'
+import { setActiveLocale } from '../src/client/locales.ts'
+
+afterEach(() => { setActiveLocale('zh') })
 
 describe('compareVersions', () => {
   it('compares numerically (1.9.0 < 1.10.0)', () => {
@@ -194,5 +198,31 @@ describe('itemsForTab（卡片唯一位置，2026-08-25 定案 / 2026-09-15 抽�
 
   it('「我的」放本地创作 + 已安装的来源条目（本地卡只管上传，安装动作在来源卡）', () => {
     expect(itemsForTab(rows, 'mine').map(i => i.name)).toEqual(['local-draft', 'org-installed'])
+  })
+})
+
+describe('nameTakenError（上传预检撞同名，2026-09-16 i18n）', () => {
+  // 此前这句是组件里的**硬编码中文**——同文件已用 t() 74 次，只有它漏网，
+  // 英文界面下整句是中文。渲染测试抓不到（组件根本没渲染这句），所以这里
+  // 断言"切语言后文案跟着变"。
+  it('zh：占用名出现在文案里，且是中文原文', () => {
+    expect(nameTakenError('妙笔文案'))
+      .toBe('名称已被占用:「妙笔文案」已存在于能力中心,请更换名称或联系管理员')
+  })
+
+  it('en：同一句走英文，且不含中文', () => {
+    setActiveLocale('en')
+    const message = nameTakenError('Acme Writer')
+    expect(message).toContain('Acme Writer')
+    expect(message).toBe('Name already taken: "Acme Writer" already exists in the Capability Hub. Choose another name or contact your administrator.')
+    expect(message).not.toMatch(/[\u4e00-\u9fff]/u)
+  })
+
+  it('每次调用都取当前语言（不是模块级常量）', () => {
+    expect(nameTakenError('x')).toContain('名称已被占用')
+    setActiveLocale('en')
+    expect(nameTakenError('x')).toContain('Name already taken')
+    setActiveLocale('zh')
+    expect(nameTakenError('x')).toContain('名称已被占用')
   })
 })

@@ -117,7 +117,7 @@ export function BrowserTrigger(props: PropsRuntime<'sidebar.footer.action'>) {
       data-waiting={waiting ? 'true' : undefined}
       style={{ ...base, position: 'relative', ...(waiting ? { color: WAITING_COLOR } : null) }}
       onClick={wake}
-      title={waiting ? t('panel.waiting') : t('panel.title')}
+      title={waiting ? t('panel.waiting', { button: t('button.handBack') }) : t('panel.title')}
     >
       <svg width={props.wide ? 16 : 18} height={props.wide ? 16 : 18} viewBox="0 0 16 16" fill="none" aria-hidden="true">
         <circle cx="8" cy="8" r="6.2" stroke="currentColor" strokeWidth="1.3"/>

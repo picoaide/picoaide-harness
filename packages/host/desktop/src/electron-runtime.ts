@@ -46,9 +46,11 @@ import { formatDesktopExitCode, type DesktopLogger } from './desktop-logger.ts'
 import { exportDesktopDiagnostics } from './diagnostic-export.ts'
 import { prepareTrayIcon } from './tray-icons.ts'
 import {
+  desktopCrashPageCopy,
   desktopDiagnosticsPrivacyCopy,
   desktopLocaleFromLanguageTag,
   desktopTrayLabel,
+  desktopUpdateDialogCopy,
 } from './tray-locale.ts'
 import { downloadDesktopUpdate } from './update-download.ts'
 import type { UpdateCheckResult } from './update-checker.ts'
@@ -612,17 +614,15 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
    * @param installerPath - absolute path of the verified installer.
    */
   private async announceUpdateReady(version: string, installerPath: string): Promise<void> {
-    const detail = this.platform === 'linux'
-      ? `新版本 AppImage 已下载到: ${installerPath}\n\n在界面或托盘里点「安装更新」后,关闭本程序并用该文件替换当前 AppImage。`
-      : this.platform === 'darwin'
-        ? `The disk image will open when you install. Choose Install Update in the app or the tray menu to continue.`
-        : `Choose Install Update in the app or the tray menu to restart ${this.productName} and run the installer.`
+    // 整段文案（含按钮）随当前语言走:此前只有 Linux 的 detail 是中文,而同一
+    // 对话框的 title/message/按钮恒为英文(2026-09-16 i18n)。
+    const copy = desktopUpdateDialogCopy(this.currentLocale)
     await dialog.showMessageBox({
       type: 'info',
-      title: `${this.productName} Update Ready`,
-      message: `${this.productName} ${version} is downloaded and ready to install.`,
-      detail,
-      buttons: ['OK'],
+      title: copy.readyTitle(this.productName),
+      message: copy.readyMessage(version, this.productName),
+      detail: copy.readyDetail(this.platform, installerPath, this.productName),
+      buttons: [copy.confirm],
       defaultId: 0,
       noLink: true,
     })
@@ -638,12 +638,13 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
    */
   private async installUpdate(version: string, installerPath: string): Promise<void> {
     if (this.platform === 'linux') {
+      const copy = desktopUpdateDialogCopy(this.currentLocale)
       await dialog.showMessageBox({
         type: 'info',
-        title: `${this.productName} Update Downloaded`,
-        message: `${this.productName} ${version} is ready to install.`,
-        detail: `新版本 AppImage 已下载到: ${installerPath}\n\n请关闭本程序, 用该文件替换当前 AppImage 后重新运行。`,
-        buttons: ['OK'],
+        title: copy.downloadedTitle(this.productName),
+        message: copy.downloadedMessage(version, this.productName),
+        detail: copy.downloadedDetail(installerPath),
+        buttons: [copy.confirm],
         defaultId: 0,
         noLink: true,
       })
@@ -873,7 +874,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       // with a manual reload entry instead of silently logging.
       if (details.reason !== 'clean-exit' && details.reason !== 'killed') {
         void reloadOrShowCrashFallback(
-          { log: (message) => this.logError(message), productName: this.productName },
+          { log: (message) => this.logError(message), productName: this.productName, locale: this.currentLocale },
           window,
         )
       }
@@ -883,7 +884,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       if (errorCode === -3 /* ABORTED - expected during navigation */) return
       this.logError(`dsh-plugin-desktop: renderer failed to load (${errorCode}: ${errorDescription})`)
       void reloadOrShowCrashFallback(
-        { log: (message) => this.logError(message), productName: this.productName },
+        { log: (message) => this.logError(message), productName: this.productName, locale: this.currentLocale },
         window,
       )
     })
@@ -982,7 +983,7 @@ function escapeHtmlText(value: string): string {
 }
 
 async function reloadOrShowCrashFallback(
-  runtime: { log(message: string): void; productName: string },
+  runtime: { log(message: string): void; productName: string; locale: DesktopLocale },
   window: BrowserWindow,
 ): Promise<void> {
   if (window.isDestroyed()) return
@@ -1009,7 +1010,10 @@ async function reloadOrShowCrashFallback(
     // 写死色 + `prefers-color-scheme`（桌面壳设了 `nativeTheme.themeSource`，
     // 该媒体查询会跟随应用内的主题选择，而不是只看系统）。2026-09-16 暗色审计：
     // 原先只有亮色一套，暗色主题下会闪一整页刺眼白。
-    const errorPage = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtmlText(runtime.productName)}</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f6f8;color-scheme:light dark}.card{text-align:center;max-width:420px;padding:32px}h1{font-size:18px;color:#1a1d24}p{color:#616267;font-size:14px}button{margin-top:12px;padding:8px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}@media (prefers-color-scheme: dark){body{background:#151517}h1{color:#f9fafb}p{color:#9ca3af}}</style></head><body><div class="card"><h1>界面加载失败</h1><p>渲染进程未能正常加载。可以点击下方按钮重试；若持续失败，请从系统托盘退出后重新启动应用。</p><button id="retry"${retryTarget === '' ? ' disabled' : ''}>重新加载</button></div>${retryScript}</body></html>`)}`
+    // 文案随当前语言走（2026-09-16 i18n）：这是 `data:text/html` 独立文档，
+    // 拿不到客户端字典，所以与托盘/对话框文案同源放在 `tray-locale.ts`。
+    const copy = desktopCrashPageCopy(runtime.locale)
+    const errorPage = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html><html lang="${copy.lang}"><head><meta charset="utf-8"><title>${escapeHtmlText(runtime.productName)}</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f6f8;color-scheme:light dark}.card{text-align:center;max-width:420px;padding:32px}h1{font-size:18px;color:#1a1d24}p{color:#616267;font-size:14px}button{margin-top:12px;padding:8px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}@media (prefers-color-scheme: dark){body{background:#151517}h1{color:#f9fafb}p{color:#9ca3af}}</style></head><body><div class="card"><h1>${escapeHtmlText(copy.heading)}</h1><p>${escapeHtmlText(copy.body)}</p><button id="retry"${retryTarget === '' ? ' disabled' : ''}>${escapeHtmlText(copy.retry)}</button></div>${retryScript}</body></html>`)}`
     await window.loadURL(errorPage)
   } catch {
     runtime.log('dsh-plugin-desktop: crash fallback page failed to load')

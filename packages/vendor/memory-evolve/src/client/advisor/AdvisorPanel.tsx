@@ -4,13 +4,21 @@
  * AdvisorHost 是唯一 slot 入口：它在会话 header 中渲染开合按钮，并把面板
  * createPortal 到 document.body，从而避开会话子树可能形成的 containing block。
  * AdvisorPanel 只负责五区 UI；数据与副作用全部由 advisor-store.ts 管理。
+ *
+ * i18n（2026-09-16）：本文件此前**声明了 t 却只在 2 处使用**，其余面板文案
+ * 硬编码中文，另有约 18 处状态/严重度/结果标签走手写的 `isEn()`
+ * （读 `navigator.language` = 操作系统语言，无视应用内语言设置）。现在：
+ *   - 一切文案经 `t`（由 index.ts 在 apply 期绑定，调用期解析语言）；
+ *   - 状态/严重度/结果/耗时/相对时间等标签改成 `(t) => string` 的函数，
+ *     不再有模块级常量（模块求值早于 apply，会把语言钉死）；
+ *   - `t` 继续下传到 ReviewCard / ScopesTab / SettingsDisclosure 等子组件。
  */
 import { Component, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { PropsRuntime, Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import {
-  LEVEL_LABEL,
+  levelLabel,
   type AdvisorConfig,
   type AdvisorScopes,
   type AdvisorHistoryFilters,
@@ -22,14 +30,15 @@ import {
   type AdvisorStoreSnapshot,
   useAdvisorSessionStore,
 } from './advisor-store.ts'
-import { clientLang } from '../../../lib/i18n.js'
 
 export type AdvisorHostProps = PropsRuntime<'conversation.session.header.actions'> & {
-  /** index.ts 传入的插件 locale 翻译函数；面板主体按需求固定中文。 */
-  t?: Translate
+  /** index.ts 传入的插件 locale 翻译函数（面板文案全部经它取）。 */
+  t: Translate
 }
 
 export interface AdvisorPanelProps {
+  /** 插件 locale 翻译函数（i18n：面板文案一律经它取）。 */
+  t: Translate
   store: AdvisorSessionStore
   snapshot: AdvisorStoreSnapshot
   onCollapse: () => void
@@ -55,52 +64,58 @@ interface CapsuleDragState {
   dragged: boolean
 }
 
-/** English browser → English panel labels; anything else keeps Chinese. */
-const isEn = (): boolean => clientLang() === 'en'
-
-const STATUS_META: Record<AdvisorRuntimeStatus, { icon: string; label: string; cls: string }> = {
-  get disabled() { return { icon: '✖', label: isEn() ? 'Disabled' : '已停用', cls: 'advisor-status-disabled' } },
-  get idle() { return { icon: '●', label: isEn() ? 'Idle' : '空闲', cls: 'advisor-status-idle' } },
-  get reviewing() { return { icon: '◐', label: isEn() ? 'Reviewing' : '评审中', cls: 'advisor-status-reviewing' } },
-  get quota_exhausted() { return { icon: '⏸', label: isEn() ? 'Paused' : '已暂停', cls: 'advisor-status-paused' } },
-  get halted() { return { icon: '⚠', label: isEn() ? 'Halted' : '已终止', cls: 'advisor-status-halted' } },
+/**
+ * 运行状态标签（函数式：语言在**调用期**解析，模块级常量会钉死默认语言）。
+ * 图标/样式类与语言无关，文案走字典。
+ */
+const STATUS_META: Record<AdvisorRuntimeStatus, { icon: string; key: string; cls: string }> = {
+  disabled: { icon: '✖', key: 'advisor.status.disabled', cls: 'advisor-status-disabled' },
+  idle: { icon: '●', key: 'advisor.status.idle', cls: 'advisor-status-idle' },
+  reviewing: { icon: '◐', key: 'advisor.status.reviewing', cls: 'advisor-status-reviewing' },
+  quota_exhausted: { icon: '⏸', key: 'advisor.status.paused', cls: 'advisor-status-paused' },
+  halted: { icon: '⚠', key: 'advisor.status.halted', cls: 'advisor-status-halted' },
 }
 
-const SEVERITY_META: Record<AdvisorNoteSeverity, { label: string; cls: string }> = {
+/** 状态徽标文案（当次渲染语言）。 */
+function statusMeta(status: AdvisorRuntimeStatus, t: Translate): { icon: string; label: string; cls: string } {
+  const meta = STATUS_META[status]
+  return { icon: meta.icon, label: t(meta.key), cls: meta.cls }
+}
+
+/** 严重度标签：前半段是稳定标识（info/nit/…），后半段走字典。 */
+const SEVERITY_META: Record<AdvisorNoteSeverity, { key: string; cls: string }> = {
   // Q1：info 最低等级（默认仅记录不注入，面板照常展示）
-  info: { get label() { return isEn() ? 'info · note' : 'info · 记录' }, cls: 'advisor-severity-info' },
-  nit: { get label() { return isEn() ? 'nit · suggestion' : 'nit · 建议' }, cls: 'advisor-severity-nit' },
-  concern: { get label() { return isEn() ? 'concern · watch' : 'concern · 关注' }, cls: 'advisor-severity-concern' },
-  blocker: { get label() { return isEn() ? 'blocker · blocking' : 'blocker · 阻断' }, cls: 'advisor-severity-blocker' },
+  info: { key: 'advisor.severity.info', cls: 'advisor-severity-info' },
+  nit: { key: 'advisor.severity.nit', cls: 'advisor-severity-nit' },
+  concern: { key: 'advisor.severity.concern', cls: 'advisor-severity-concern' },
+  blocker: { key: 'advisor.severity.blocker', cls: 'advisor-severity-blocker' },
   // Q4：问答回复（用户提问的直接回答，非评审建议）
-  answer: { get label() { return isEn() ? 'answer' : '回答' }, cls: 'advisor-severity-answer' },
+  answer: { key: 'advisor.severity.answer', cls: 'advisor-severity-answer' },
 }
 
-function outcomeLabel(outcome: keyof typeof OUTCOME_ZH): string {
-  return isEn() ? OUTCOME_EN[outcome] : OUTCOME_ZH[outcome]
+/** 严重度徽标文案（当次渲染语言）。 */
+function severityMeta(severity: AdvisorNoteSeverity, t: Translate): { label: string; cls: string } {
+  const meta = SEVERITY_META[severity]
+  return { label: t(meta.key), cls: meta.cls }
 }
-const OUTCOME_ZH = {
-  delivered: '已送达',
+
+/** 终态结果标签的字典键。 */
+const OUTCOME_KEYS = {
+  delivered: 'advisor.outcome.delivered',
   // Q1：info 级默认仅记录（事件照发、面板可见，会话流不受打扰）
-  recorded: '已记录',
+  recorded: 'advisor.outcome.recorded',
   // Q4：问答回答已注入会话流
-  answered: '已回答',
-  suppressed: '已抑制',
-  'no-note': '无建议',
-  dropped: '已丢弃',
-  failed: '评审失败',
-  cancelled: '已取消',
+  answered: 'advisor.outcome.answered',
+  suppressed: 'advisor.outcome.suppressed',
+  'no-note': 'advisor.outcome.noNote',
+  dropped: 'advisor.outcome.dropped',
+  failed: 'advisor.outcome.failed',
+  cancelled: 'advisor.outcome.cancelled',
 } as const
-const OUTCOME_EN = {
-  delivered: 'Delivered',
-  recorded: 'Recorded',
-  answered: 'Answered',
-  suppressed: 'Suppressed',
-  'no-note': 'No note',
-  dropped: 'Dropped',
-  failed: 'Review failed',
-  cancelled: 'Cancelled',
-} as const
+
+function outcomeLabel(outcome: keyof typeof OUTCOME_KEYS, t: Translate): string {
+  return t(OUTCOME_KEYS[outcome])
+}
 
 function pad2(value: number): string {
   return value < 10 ? `0${value}` : String(value)
@@ -122,13 +137,13 @@ function formatElapsed(ms: number): string {
   return `${(ms / 1_000).toFixed(ms < 10_000 ? 1 : 0)}s`
 }
 
-function formatAgo(ts: number | null): string {
-  if (ts === null) return '暂无活动'
+function formatAgo(ts: number | null, t: Translate): string {
+  if (ts === null) return t('advisor.ago.none')
   const delta = Math.max(0, Date.now() - ts)
-  if (delta < 5_000) return '刚刚'
-  if (delta < 60_000) return `${Math.floor(delta / 1_000)} 秒前`
-  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)} 分钟前`
-  return `${Math.floor(delta / 3_600_000)} 小时前`
+  if (delta < 5_000) return t('advisor.ago.justNow')
+  if (delta < 60_000) return t('advisor.ago.seconds', { count: Math.floor(delta / 1_000) })
+  if (delta < 3_600_000) return t('advisor.ago.minutes', { count: Math.floor(delta / 60_000) })
+  return t('advisor.ago.hours', { count: Math.floor(delta / 3_600_000) })
 }
 
 function shortSession(sessionId: string): string {
@@ -148,8 +163,9 @@ function timeCutoff(range: AdvisorHistoryFilters['timeRange']): number | null {
  * 共用同一个 session store，因此双入口开合不会造成第二份轮询。
  */
 export function AdvisorHost(props: AdvisorHostProps): JSX.Element {
+  const t = props.t
   const sessionId = String(props.sessionId)
-  const { store, snapshot } = useAdvisorSessionStore(sessionId)
+  const { store, snapshot } = useAdvisorSessionStore(sessionId, t)
   const [expanded, setExpanded] = useState(() => (
     typeof window === 'undefined' ? false : !window.matchMedia('(max-width: 767px)').matches
   ))
@@ -323,8 +339,8 @@ export function AdvisorHost(props: AdvisorHostProps): JSX.Element {
     : 'advisor-capsule-idle'
 
   const headerTitle = panelEnabled
-    ? (props.t?.('advisor.header.toggle.title') ?? '打开或折叠会话评审面板')
-    : 'Advisor 面板显示已关闭；点击可打开设置'
+    ? t('advisor.header.toggle.title')
+    : t('advisor.header.toggle.titleOff')
 
   // 2026-08-13 用户反馈：设置 Tab 的「会话评审（Advisor）」是模块总闸——
   // **总闸关闭**时评审入口（头部按钮、悬浮胶囊、面板）整体不渲染，模块
@@ -335,7 +351,7 @@ export function AdvisorHost(props: AdvisorHostProps): JSX.Element {
 
   const portal = typeof document === 'undefined' ? null : createPortal(
     expanded ? (
-      <AdvisorPanel store={store} snapshot={snapshot} onCollapse={toggle} />
+      <AdvisorPanel t={t} store={store} snapshot={snapshot} onCollapse={toggle} />
     ) : panelEnabled ? (
       // 2026-08-14 用户反馈：「显示悬浮胶囊」开关开启时，胶囊应常驻显示
       // （作为打开面板的入口 + 评审状态指示灯），不再因「本会话未启用评审」
@@ -352,13 +368,13 @@ export function AdvisorHost(props: AdvisorHostProps): JSX.Element {
         onPointerMove={onCapsulePointerMove}
         onPointerUp={finishCapsuleDrag}
         onPointerCancel={finishCapsuleDrag}
-        aria-label="展开会话评审面板"
-        title="展开会话评审面板（按住可沿右边缘上下拖动）"
+        aria-label={t('advisor.capsule.aria')}
+        title={t('advisor.capsule.title')}
       >
         <span className="advisor-capsule-icon" aria-hidden="true">◉</span>
         <span className="advisor-capsule-label">Advisor</span>
         {snapshot.unreadCount > 0 && (
-          <span className="advisor-unread" aria-label={`${snapshot.unreadCount} 条未读评审`}>
+          <span className="advisor-unread" aria-label={t('advisor.unread.aria', { count: snapshot.unreadCount })}>
             {snapshot.unreadCount > 99 ? '99+' : snapshot.unreadCount}
           </span>
         )}
@@ -378,7 +394,7 @@ export function AdvisorHost(props: AdvisorHostProps): JSX.Element {
         title={headerTitle}
       >
         <span aria-hidden="true">◉</span>
-        <span>{props.t?.('advisor.header.toggle') ?? '会话评审'}</span>
+        <span>{t('advisor.header.toggle')}</span>
         {snapshot.unreadCount > 0 && (
           <span className="advisor-header-unread" aria-hidden="true">
             {snapshot.unreadCount > 99 ? '99+' : snapshot.unreadCount}
@@ -391,7 +407,7 @@ export function AdvisorHost(props: AdvisorHostProps): JSX.Element {
 }
 
 /** 面板本体：Header、状态条、实时/历史主区、指令区、设置 disclosure。 */
-export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps): JSX.Element {
+export function AdvisorPanel({ t, store, snapshot, onCollapse }: AdvisorPanelProps): JSX.Element {
   const [tab, setTab] = useState<PanelTab>('live')
   const [instruction, setInstruction] = useState('')
   const [pendingOpen, setPendingOpen] = useState(true)
@@ -459,15 +475,15 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
     const stats = snapshot.status?.conversationStats
     if (stats === null || stats === undefined) return null
     const k = stats.charCount / 1000
-    if (k < 1) return `${stats.charCount} 字`
+    if (k < 1) return t('advisor.context.chars', { count: stats.charCount })
     return `${k >= 10 ? Math.round(k) : k.toFixed(1)} K`
   }, [snapshot.status?.conversationStats])
 
   const status = snapshot.status?.runtimeStatus ?? 'disabled'
-  const statusMeta = STATUS_META[status]
+  const statusInfo = statusMeta(status, t)
   // 2026-08-12 用户反馈：owner 优先用 status 兜底（评审卡片未产生时
   // 也能显示会话名/工作空间），再回退评审卡片的 identity
-  const ownerLabel = `${snapshot.status?.sessionName ?? identity.sessionName ?? shortSession(snapshot.sessionId)} · ${snapshot.status?.workspace ?? identity.workspace ?? '工作空间未知'}`
+  const ownerLabel = `${snapshot.status?.sessionName ?? identity.sessionName ?? shortSession(snapshot.sessionId)} · ${snapshot.status?.workspace ?? identity.workspace ?? t('advisor.workspace.unknown')}`
   const workspaceOptions = useMemo(() => {
     const values = new Set<string>()
     for (const record of snapshot.records) {
@@ -500,24 +516,24 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
   }
 
   return (
-    <aside className="advisor-panel" aria-label="会话评审悬浮面板">
+    <aside className="advisor-panel" aria-label={t('advisor.panel.aria')}>
       <header className="advisor-panel-header">
         <div className="advisor-panel-heading">
           <div className="advisor-title-row">
-            <strong className="advisor-title">会话评审</strong>
-            <span className={`advisor-status-badge ${statusMeta.cls}`} title={snapshot.status?.phase || statusMeta.label}>
-              <span className="advisor-status-icon" aria-hidden="true">{statusMeta.icon}</span>
-              {statusMeta.label}
+            <strong className="advisor-title">{t('advisor.panel.title')}</strong>
+            <span className={`advisor-status-badge ${statusInfo.cls}`} title={snapshot.status?.phase || statusInfo.label}>
+              <span className="advisor-status-icon" aria-hidden="true">{statusInfo.icon}</span>
+              {statusInfo.label}
             </span>
           </div>
           <div className="advisor-owner" title={ownerLabel}>{ownerLabel}</div>
         </div>
-        <button type="button" className="advisor-icon-button" onClick={onCollapse} aria-label="折叠 Advisor 面板" title="折叠">
+        <button type="button" className="advisor-icon-button" onClick={onCollapse} aria-label={t('advisor.panel.collapseAria')} title={t('advisor.panel.collapse')}>
           —
         </button>
       </header>
 
-      <section className="advisor-status-strip" aria-label="Advisor 运行状态">
+      <section className="advisor-status-strip" aria-label={t('advisor.statusStrip.aria')}>
         <button
           type="button"
           role="switch"
@@ -525,16 +541,16 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
           className={`advisor-switch${snapshot.status?.effectiveEnabled ? ' advisor-switch-on' : ''}`}
           disabled={snapshot.statusLoading || snapshot.status === null}
           onClick={() => void store.toggleSession(!(snapshot.status?.effectiveEnabled ?? false))}
-          title="仅切换当前会话；不会修改全局默认开关"
+          title={t('advisor.switch.title')}
         >
           <span className="advisor-switch-track"><span className="advisor-switch-thumb" /></span>
-          <span>{snapshot.status?.effectiveEnabled ? '本会话已启用' : '本会话未启用'}</span>
+          <span>{snapshot.status?.effectiveEnabled ? t('advisor.switch.on') : t('advisor.switch.off')}</span>
         </button>
         <div className="advisor-status-facts">
           <span className="advisor-model" title={`${snapshot.status?.provider ?? '—'} / ${snapshot.status?.model ?? '—'}`}>
-            {snapshot.status?.model ?? '模型未解析'}
+            {snapshot.status?.model ?? t('advisor.model.unresolved')}
           </span>
-          <span>{formatAgo(snapshot.lastActivityAt)}</span>
+          <span>{formatAgo(snapshot.lastActivityAt, t)}</span>
           {(snapshot.status?.pendingCount ?? 0) > 0 && (
             <span className="advisor-pending-count">pending {snapshot.status?.pendingCount}</span>
           )}
@@ -543,22 +559,22 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
 
       {snapshot.status?.gateStatus !== undefined && snapshot.status.gateStatus !== 'ok' && (
         <div className="advisor-warning" role="status">
-          模型门禁未通过：{snapshot.status.disabledReason ?? (snapshot.status.gateStatus === 'config-incomplete'
-            ? 'provider/model 必须同时填写或同时留空'
-            : '当前会话模型不可用')}
+          {t('advisor.gate.failed', { reason: snapshot.status.disabledReason ?? (snapshot.status.gateStatus === 'config-incomplete'
+            ? t('advisor.gate.configIncomplete')
+            : t('advisor.gate.modelUnavailable')) })}
         </div>
       )}
       {snapshot.statusError !== null && (
-        <ErrorNotice text={`状态加载失败：${snapshot.statusError}`} onRetry={() => void store.refreshStatus()} />
+        <ErrorNotice t={t} text={t('advisor.error.statusLoad', { message: snapshot.statusError })} onRetry={() => void store.refreshStatus()} />
       )}
       {snapshot.notice !== null && (
         <div className={`advisor-notice advisor-notice-${snapshot.notice.kind}`} role="status">
           <span>{snapshot.notice.text}</span>
-          <button type="button" className="advisor-notice-close" onClick={() => store.clearNotice()} aria-label="关闭提示">×</button>
+          <button type="button" className="advisor-notice-close" onClick={() => store.clearNotice()} aria-label={t('advisor.notice.dismiss')}>×</button>
         </div>
       )}
 
-      <div className="advisor-tabs" role="tablist" aria-label="评审数据视图">
+      <div className="advisor-tabs" role="tablist" aria-label={t('advisor.tabs.aria')}>
         {/* 2026-08-12 用户拍板：约束 Tab 放最前——对本会话评审员的层级约束 */}
         <button
           type="button"
@@ -567,7 +583,7 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
           className={`advisor-tab${tab === 'scopes' ? ' advisor-tab-active' : ''}`}
           onClick={() => setTab('scopes')}
         >
-          约束
+          {t('advisor.tab.scopes')}
         </button>
         <button
           type="button"
@@ -576,7 +592,7 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
           className={`advisor-tab${tab === 'live' ? ' advisor-tab-active' : ''}`}
           onClick={() => setTab('live')}
         >
-          实时
+          {t('advisor.tab.live')}
         </button>
         <button
           type="button"
@@ -585,7 +601,7 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
           className={`advisor-tab${tab === 'history' ? ' advisor-tab-active' : ''}`}
           onClick={() => setTab('history')}
         >
-          记录
+          {t('advisor.tab.history')}
         </button>
         {/* 2026-08-12 用户反馈：设置移入独立 Tab（交互统一） */}
         <button
@@ -595,32 +611,33 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
           className={`advisor-tab${tab === 'settings' ? ' advisor-tab-active' : ''}`}
           onClick={() => setTab('settings')}
         >
-          设置
+          {t('advisor.tab.settings')}
         </button>
       </div>
 
       {tab === 'scopes' ? (
-        <ScopesErrorBoundary>
-          <ScopesTab store={store} snapshot={snapshot} />
+        <ScopesErrorBoundary t={t}>
+          <ScopesTab t={t} store={store} snapshot={snapshot} />
         </ScopesErrorBoundary>
       ) : tab === 'live' ? (
         /* 2026-08-12 用户反馈：指令区（发指令/新建评审会话）只在实时 tab 显示 */
         <div className="advisor-live">
-        <section ref={flowRef} className="advisor-flow" onScroll={onFlowScroll} aria-label="实时评审流">
+        <section ref={flowRef} className="advisor-flow" onScroll={onFlowScroll} aria-label={t('advisor.live.aria')}>
           {snapshot.eventsError !== null && (
-            <ErrorNotice text={`实时流加载失败：${snapshot.eventsError}`} onRetry={() => store.resetCursorAndLive()} />
+            <ErrorNotice t={t} text={t('advisor.error.eventsLoad', { message: snapshot.eventsError })} onRetry={() => store.resetCursorAndLive()} />
           )}
-          {snapshot.eventsLoading && snapshot.reviews.length === 0 && <LoadingBlock text="正在连接 Advisor 实时流…" />}
+          {snapshot.eventsLoading && snapshot.reviews.length === 0 && <LoadingBlock text={t('advisor.loading.events')} />}
           {!snapshot.eventsLoading && snapshot.reviews.length === 0 && snapshot.eventsError === null && (
             <div className="advisor-empty">
               {snapshot.status?.effectiveEnabled
-                ? '暂无评审活动。新的评审会在这里实时出现。'
-                : '未启用：可使用上方会话开关，或在下方设置中开启 Advisor。'}
+                ? t('advisor.live.emptyEnabled')
+                : t('advisor.live.emptyDisabled')}
             </div>
           )}
           {snapshot.reviews.map((item, index) => (
             <ReviewCard
               key={item.reviewId}
+              t={t}
               item={item}
               defaultInputOpen={index === snapshot.reviews.length - 1}
             />
@@ -635,11 +652,11 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
                 if (node !== null) node.scrollTop = node.scrollHeight
               }}
             >
-              回到最新
+              {t('advisor.live.backToLatest')}
             </button>
           )}
         </section>
-                <section className="advisor-instructions" aria-label="Advisor 指令区">
+                <section className="advisor-instructions" aria-label={t('advisor.instructions.aria')}>
         <div className="advisor-instruction-compose">
         <textarea
         className="advisor-textarea advisor-instruction-input"
@@ -648,7 +665,7 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
         value={instruction}
         onChange={(event) => setInstruction(event.target.value)}
         onKeyDown={onInstructionKeyDown}
-        placeholder="给会话评审发指令…（Enter 发送，Shift+Enter 换行）"
+        placeholder={t('advisor.instructions.placeholder')}
         />
         <button
         type="button"
@@ -656,17 +673,16 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
         disabled={snapshot.instructionMutating || instruction.trim() === ''}
         onClick={() => void submitInstruction()}
         >
-        发送
+        {t('advisor.instructions.send')}
         </button>
         </div>
         <div className="advisor-steer-hint">
-        评审建议按严重度实时送达（nit/concern/blocker 走 steer，info 默认仅记录）；
-        指令框提问会立即触发 Advisor 回答并注入会话流。
+        {t('advisor.instructions.hint')}
         </div>
         {/* Q3 重构：评审员会话管理——上下文统计 + 新建评审会话 */}
         <div className="advisor-conversation-bar">
-        <span className="advisor-conversation-stats" title="评审员持续会话已占用的上下文（字符数估算，中文 1 字≈1 token；对比模型上下文窗口判断是否新建评审会话）">
-        {latestEpoch !== null ? `评审会话 #${latestEpoch}` : '评审会话'} · 上下文 {latestContextCount} 条
+        <span className="advisor-conversation-stats" title={t('advisor.conversation.statsTitle')}>
+        {latestEpoch !== null ? t('advisor.conversation.epoch', { epoch: latestEpoch }) : t('advisor.conversation.label')} · {t('advisor.conversation.contextCount', { count: latestContextCount })}
         {contextChars !== null && ` · ≈${contextChars}`}
         </span>
         <button
@@ -674,13 +690,13 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
         className="advisor-new-conversation"
         disabled={snapshot.instructionMutating}
         onClick={() => {
-        if (window.confirm('新建评审会话将清空评审员的全部上下文与记忆（评审员从零开始）。\n确认后可在第一条指令中告知背景信息。')) {
+        if (window.confirm(t('advisor.conversation.resetConfirm'))) {
         void store.resetConversation()
         }
         }}
-        title="清空评审员持续会话（上下文+记忆），从零开始；适合换任务/控制上下文长度"
+        title={t('advisor.conversation.resetTitle')}
         >
-        🔄 新建评审会话
+        🔄 {t('advisor.conversation.reset')}
         </button>
         </div>
         <button
@@ -689,18 +705,18 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
         aria-expanded={pendingOpen}
         onClick={() => setPendingOpen((value) => !value)}
         >
-        <span>待消费指令 ({snapshot.pending.length})</span>
+        <span>{t('advisor.pending.toggle', { count: snapshot.pending.length })}</span>
         <span aria-hidden="true">{pendingOpen ? '▴' : '▾'}</span>
         </button>
         {pendingOpen && (
         <div className="advisor-pending-list">
-        {snapshot.instructionsLoading && <span className="advisor-muted">加载中…</span>}
+        {snapshot.instructionsLoading && <span className="advisor-muted">{t('advisor.loading.short')}</span>}
         {!snapshot.instructionsLoading && snapshot.pending.length === 0 && (
-        <span className="advisor-muted">暂无待消费指令</span>
+        <span className="advisor-muted">{t('advisor.pending.empty')}</span>
         )}
         {snapshot.pending.map((item) => (
         <div key={item.id} className="advisor-pending-item">
-        <span className="advisor-pending-state">{item.state === 'reserved' ? '消费中' : '待消费'}</span>
+        <span className="advisor-pending-state">{item.state === 'reserved' ? t('advisor.pending.consuming') : t('advisor.pending.waiting')}</span>
         <span className="advisor-pending-text" title={item.text}>{item.text}</span>
         </div>
         ))}
@@ -711,7 +727,7 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
         disabled={snapshot.instructionMutating}
         onClick={() => void store.clearInstructions()}
         >
-        清空待消费指令
+        {t('advisor.pending.clear')}
         </button>
         )}
         </div>
@@ -719,49 +735,49 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
         {snapshot.instructionsError !== null && (
         <div className="advisor-inline-error">
         {snapshot.instructionsError}
-        <button type="button" className="advisor-link" onClick={() => void store.refreshInstructions()}>重试</button>
+        <button type="button" className="advisor-link" onClick={() => void store.refreshInstructions()}>{t('advisor.action.retry')}</button>
         </div>
         )}
         </section>
         </div>
       ) : tab === 'settings' ? (
         /* 2026-08-12 用户反馈：会话评审设置移入独立 Tab（交互统一） */
-        <SettingsDisclosure store={store} snapshot={snapshot} />
+        <SettingsDisclosure t={t} store={store} snapshot={snapshot} />
       ) : (
-        <section className="advisor-history" aria-label="历史评审记录">
+        <section className="advisor-history" aria-label={t('advisor.history.aria')}>
           <div className="advisor-history-filters">
             <select
               className="advisor-select"
               value={filters.session}
               onChange={(event) => setFilters({ ...filters, session: event.target.value as 'current' | 'all' })}
-              aria-label="会话筛选"
+              aria-label={t('advisor.history.sessionFilter')}
             >
-              <option value="current">当前会话</option>
-              <option value="all">全部会话</option>
+              <option value="current">{t('advisor.history.sessionCurrent')}</option>
+              <option value="all">{t('advisor.history.sessionAll')}</option>
             </select>
             <select
               className="advisor-select"
               value={filters.severity}
               onChange={(event) => setFilters({ ...filters, severity: event.target.value as '' | AdvisorNoteSeverity })}
-              aria-label="严重度筛选"
+              aria-label={t('advisor.history.severityFilter')}
             >
-              <option value="">全部严重度</option>
+              <option value="">{t('advisor.history.severityAll')}</option>
               <option value="info">info</option>
               <option value="nit">nit</option>
               <option value="concern">concern</option>
               <option value="blocker">blocker</option>
-              <option value="answer">回答</option>
+              <option value="answer">{t('advisor.history.severityAnswer')}</option>
             </select>
             <select
               className="advisor-select"
               value={filters.timeRange}
               onChange={(event) => setFilters({ ...filters, timeRange: event.target.value as AdvisorHistoryFilters['timeRange'] })}
-              aria-label="时间筛选"
+              aria-label={t('advisor.history.timeFilter')}
             >
-              <option value="all">全部时间</option>
-              <option value="24h">最近 24 小时</option>
-              <option value="7d">最近 7 天</option>
-              <option value="30d">最近 30 天</option>
+              <option value="all">{t('advisor.history.timeAll')}</option>
+              <option value="24h">{t('advisor.history.time24h')}</option>
+              <option value="7d">{t('advisor.history.time7d')}</option>
+              <option value="30d">{t('advisor.history.time30d')}</option>
             </select>
             <div className="advisor-workspace-filter">
               <input
@@ -769,28 +785,29 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
                 list="advisor-workspaces"
                 value={filters.workspace}
                 onChange={(event) => setFilters({ ...filters, workspace: event.target.value })}
-                placeholder="工作空间（可选）"
-                aria-label="工作空间筛选"
+                placeholder={t('advisor.history.workspacePlaceholder')}
+                aria-label={t('advisor.history.workspaceFilter')}
               />
               <datalist id="advisor-workspaces">
                 {workspaceOptions.map((workspace) => <option key={workspace} value={workspace} />)}
               </datalist>
               <button type="button" className="advisor-button" onClick={() => void store.loadRecords(filters)}>
-                查询
+                {t('advisor.history.query')}
               </button>
             </div>
           </div>
           {snapshot.recordsError !== null && (
-            <ErrorNotice text={`历史加载失败：${snapshot.recordsError}`} onRetry={() => void store.loadRecords(filters)} />
+            <ErrorNotice t={t} text={t('advisor.error.recordsLoad', { message: snapshot.recordsError })} onRetry={() => void store.loadRecords(filters)} />
           )}
-          {snapshot.recordsLoading && snapshot.records.length === 0 && <LoadingBlock text="正在加载历史记录…" />}
+          {snapshot.recordsLoading && snapshot.records.length === 0 && <LoadingBlock text={t('advisor.loading.records')} />}
           {!snapshot.recordsLoading && visibleRecords.length === 0 && snapshot.recordsError === null && (
-            <div className="advisor-empty">当前筛选下暂无评审记录。</div>
+            <div className="advisor-empty">{t('advisor.history.empty')}</div>
           )}
           <div className="advisor-history-list">
             {visibleRecords.map((record, index) => (
               <ReviewCard
                 key={record.reviewId}
+                t={t}
                 item={{ reviewId: record.reviewId, started: null, finished: null, record, arrivedAt: 0 }}
                 defaultInputOpen={index === 0}
                 history
@@ -804,7 +821,7 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
               disabled={snapshot.recordsLoading}
               onClick={() => void store.loadRecords(snapshot.recordsFilters, true)}
             >
-              {snapshot.recordsLoading ? '加载中…' : '加载更多'}
+              {snapshot.recordsLoading ? t('advisor.loading.short') : t('advisor.history.loadMore')}
             </button>
           )}
         </section>
@@ -815,43 +832,44 @@ export function AdvisorPanel({ store, snapshot, onCollapse }: AdvisorPanelProps)
 }
 
 function ReviewCard(props: {
+  t: Translate
   item: AdvisorReviewItem
   defaultInputOpen: boolean
   history?: boolean
 }): JSX.Element {
-  const { item, history = false } = props
+  const { t, item, history = false } = props
   const [inputOpen, setInputOpen] = useState(props.defaultInputOpen)
   useEffect(() => setInputOpen(props.defaultInputOpen), [props.defaultInputOpen])
 
   const terminal = item.finished ?? item.record
   const ts = item.started?.ts ?? terminal?.ts ?? 0
   const note = terminal?.note ?? null
-  const severity = note === null ? null : SEVERITY_META[note.severity]
+  const severity = note === null ? null : severityMeta(note.severity, t)
   const inProgress = terminal === null
   const identity = item.started === null && item.record !== null
-    ? `${item.record.sessionName ?? shortSession(item.record.sessionId)} · ${item.record.workspace ?? '工作空间未知'}`
+    ? `${item.record.sessionName ?? shortSession(item.record.sessionId)} · ${item.record.workspace ?? t('advisor.workspace.unknown')}`
     : null
 
   return (
     <article
       className={`advisor-review-card${inProgress ? ' advisor-review-card-running' : ''}${history ? ' advisor-review-card-history' : ''}`}
       tabIndex={0}
-      aria-label={`会话评审 ${item.reviewId}`}
+      aria-label={t('advisor.card.aria', { reviewId: item.reviewId })}
     >
       <div className="advisor-review-meta">
         <time dateTime={new Date(ts).toISOString()} title={formatDateTime(ts)}>{history ? formatDateTime(ts) : formatClock(ts)}</time>
         {severity !== null && <span className={`advisor-severity ${severity.cls}`}>{severity.label}</span>}
         {terminal !== null && <span>{formatElapsed(terminal.elapsedMs)}</span>}
-        {terminal?.delivery === 'steer' && <span className="advisor-delivery">已送达 ✓</span>}
-        {terminal?.delivery === 'inject' && <span className="advisor-delivery">已注入 ✓</span>}
-        {terminal !== null && terminal.delivery === null && <span>{outcomeLabel(terminal.outcome)}</span>}
+        {terminal?.delivery === 'steer' && <span className="advisor-delivery">{t('advisor.delivery.steer')}</span>}
+        {terminal?.delivery === 'inject' && <span className="advisor-delivery">{t('advisor.delivery.inject')}</span>}
+        {terminal !== null && terminal.delivery === null && <span>{outcomeLabel(terminal.outcome, t)}</span>}
       </div>
 
       {identity !== null && <div className="advisor-record-owner" title={identity}>{identity}</div>}
 
       {(terminal?.instructions.length ?? 0) > 0 && (
         <div className="advisor-consumed-instructions">
-          <span className="advisor-instruction-tag">📋 执行指令 ×{terminal?.instructions.length}</span>
+          <span className="advisor-instruction-tag">📋 {t('advisor.card.instructions', { count: terminal?.instructions.length ?? 0 })}</span>
           {terminal?.instructions.map((text, index) => (
             <span key={`${index}-${text}`} className="advisor-consumed-text" title={text}>{text}</span>
           ))}
@@ -868,20 +886,20 @@ function ReviewCard(props: {
           >
             {/* Q3 重构：上下文统计（历史条数 + 会话代数）+ 本轮增量条数 */}
             <span>
-              会话 #{item.started.input.epoch} · 上下文 {item.started.input.contextCount} 条
-              {item.started.input.mode === 'qa' ? ' · 问答' : ` · 本轮 ${item.started.input.messageCount} 条`}
+              {t('advisor.card.sessionEpoch', { epoch: item.started.input.epoch })} · {t('advisor.conversation.contextCount', { count: item.started.input.contextCount })}
+              {item.started.input.mode === 'qa' ? t('advisor.card.qa') : t('advisor.card.thisRound', { count: item.started.input.messageCount })}
             </span>
-            <span aria-hidden="true">{inputOpen ? '收起 ▴' : '展开 ▾'}</span>
+            <span aria-hidden="true">{inputOpen ? t('advisor.card.collapse') : t('advisor.card.expand')}</span>
           </button>
           {inputOpen && <pre className="advisor-input-markdown">{item.started.input.markdown}</pre>}
         </div>
       ) : history ? (
-        <div className="advisor-input-unavailable">历史终态记录不包含输入快照</div>
+        <div className="advisor-input-unavailable">{t('advisor.card.noInputSnapshot')}</div>
       ) : null}
 
       {inProgress ? (
         <div className="advisor-reviewing" aria-live="polite">
-          <span>评审中…</span>
+          <span>{t('advisor.card.reviewing')}</span>
           <span className="advisor-skeleton-line" />
           <span className="advisor-skeleton-line advisor-skeleton-line-short" />
         </div>
@@ -889,18 +907,18 @@ function ReviewCard(props: {
         <div className="advisor-note">
           {/* 2026-08-12 用户反馈：说明"已抑制"含义（闸门拦截、未注入主会话） */}
           {terminal?.outcome === 'suppressed' && (
-            <div className="advisor-note-meta">已抑制：此条建议被闸门拦截（去重 / 空泛抑制 / 每轮一条），未注入主会话</div>
+            <div className="advisor-note-meta">{t('advisor.card.suppressedNote')}</div>
           )}
           {note.text}
         </div>
       ) : (
-        <div className="advisor-outcome-empty">{outcomeLabel(terminal.outcome)}</div>
+        <div className="advisor-outcome-empty">{outcomeLabel(terminal.outcome, t)}</div>
       )}
 
       {terminal?.error !== null && terminal?.error !== undefined && (
         <div className="advisor-card-error">
-          {terminal.error.code}：{terminal.error.message}
-          {terminal.error.retryable && <span>（可重试）</span>}
+          {terminal.error.code}{t('advisor.card.errorSep')}{terminal.error.message}
+          {terminal.error.retryable && <span>{t('advisor.card.retryable')}</span>}
         </div>
       )}
     </article>
@@ -912,7 +930,7 @@ function ReviewCard(props: {
  * DSH 的 SlotErrorBoundary 移除）。这里兜底：约束区域出错只显示错误条，
  * 面板其余部分（实时/记录/指令区）不受影响；错误详情打印到 console。
  */
-class ScopesErrorBoundary extends Component<{ children: ReactNode }, { failed: string | null }> {
+class ScopesErrorBoundary extends Component<{ t: Translate; children: ReactNode }, { failed: string | null }> {
   override state: { failed: string | null } = { failed: null }
 
   static getDerivedStateFromError(error: unknown): { failed: string | null } {
@@ -926,8 +944,8 @@ class ScopesErrorBoundary extends Component<{ children: ReactNode }, { failed: s
   override render(): ReactNode {
     if (this.state.failed !== null) {
       return (
-        <section className="advisor-scopes" aria-label="评审员约束">
-          <div className="advisor-card-error">约束区域渲染出错：{this.state.failed}（详见浏览器控制台）</div>
+        <section className="advisor-scopes" aria-label={this.props.t('advisor.scopes.aria')}>
+          <div className="advisor-card-error">{this.props.t('advisor.scopes.boundaryError', { message: this.state.failed })}</div>
         </section>
       )
     }
@@ -941,7 +959,8 @@ class ScopesErrorBoundary extends Component<{ children: ReactNode }, { failed: s
  * 下次评审立即生效（后端动态拼接，无需重建）。
  * 生命周期：评审会话约束随「新建评审会话」清空；会话/项目约束持久化。
  */
-function ScopesTab({ store, snapshot }: {
+function ScopesTab({ t, store, snapshot }: {
+  t: Translate
   store: AdvisorSessionStore
   snapshot: AdvisorStoreSnapshot
 }): JSX.Element {
@@ -959,10 +978,10 @@ function ScopesTab({ store, snapshot }: {
 
   if (draft === null) {
     return (
-      <section className="advisor-scopes" aria-label="评审员约束">
-        {snapshot.scopesLoading && <LoadingBlock text="正在加载约束…" />}
+      <section className="advisor-scopes" aria-label={t('advisor.scopes.aria')}>
+        {snapshot.scopesLoading && <LoadingBlock text={t('advisor.loading.scopes')} />}
         {snapshot.scopesError !== null && (
-          <ErrorNotice text={`约束加载失败：${snapshot.scopesError}`} onRetry={() => void store.refreshScopes()} />
+          <ErrorNotice t={t} text={t('advisor.error.scopesLoad', { message: snapshot.scopesError })} onRetry={() => void store.refreshScopes()} />
         )}
       </section>
     )
@@ -973,37 +992,40 @@ function ScopesTab({ store, snapshot }: {
   }
 
   return (
-    <section className="advisor-scopes" aria-label="评审员约束">
+    <section className="advisor-scopes" aria-label={t('advisor.scopes.aria')}>
       {snapshot.scopesError !== null && (
-        <ErrorNotice text={`约束保存失败：${snapshot.scopesError}`} onRetry={() => void store.refreshScopes()} />
+        <ErrorNotice t={t} text={t('advisor.error.scopesSave', { message: snapshot.scopesError })} onRetry={() => void store.refreshScopes()} />
       )}
       <div className="advisor-scope-hint">
-        四层级约束拼接进评审员系统提示词（冲突时越局部越优先）；保存后立即生效。
+        {t('advisor.scopes.hint')}
       </div>
 
       {/* 第 4 层：本次评审会话约束（新建评审会话即清空） */}
       <ScopeField
-        label={`${LEVEL_LABEL.conversation}（随「新建评审会话」清空）`}
+        label={t('advisor.scopes.conversationLabel', { level: levelLabel('conversation', t) })}
         value={draft.conversation.text}
-        placeholder="只对本次评审会话生效…（可多行，多条指令一次写）"
+        placeholder={t('advisor.scopes.conversationPlaceholder')}
+        t={t}
         saving={snapshot.scopesSaving}
         onSave={(text) => save('conversation', text)}
       />
 
       {/* 第 3 层：本会话约束（跨新建评审会话保留） */}
       <ScopeField
-        label={`${LEVEL_LABEL.session}（本会话一直有效）`}
+        label={t('advisor.scopes.sessionLabel', { level: levelLabel('session', t) })}
         value={draft.session.text}
-        placeholder="只对本会话生效…"
+        placeholder={t('advisor.scopes.sessionPlaceholder')}
+        t={t}
         saving={snapshot.scopesSaving}
         onSave={(text) => save('session', text)}
       />
 
       {/* 第 2 层：本项目约束（本工作区所有会话共享） */}
       <ScopeField
-        label={`${LEVEL_LABEL.project}（工作区 ${draft.project.workspace ?? '未知'} 的所有会话共享）`}
+        label={t('advisor.scopes.projectLabel', { level: levelLabel('project', t), workspace: draft.project.workspace ?? t('advisor.workspace.unknownShort') })}
         value={draft.project.text}
-        placeholder="对本项目所有会话生效…"
+        placeholder={t('advisor.scopes.projectPlaceholder')}
+        t={t}
         saving={snapshot.scopesSaving}
         onSave={(text) => save('project', text)}
       />
@@ -1011,9 +1033,10 @@ function ScopesTab({ store, snapshot }: {
       {/* 第 0 层：全局约束（所有项目所有会话生效）——2026-08-12 用户拍板：
           系统提示词一般不改，全局约束词是日常层 */}
       <ScopeField
-        label={`${LEVEL_LABEL.global}（所有项目、所有会话都生效）`}
+        label={t('advisor.scopes.globalLabel', { level: levelLabel('global', t) })}
         value={draft.global.text}
-        placeholder="对所有项目所有会话生效…（如：评审意见一律用中文、不要重复已提过的建议）"
+        placeholder={t('advisor.scopes.globalPlaceholder')}
+        t={t}
         saving={snapshot.scopesSaving}
         onSave={(text) => save('global', text)}
       />
@@ -1023,6 +1046,7 @@ function ScopesTab({ store, snapshot }: {
 
 /** 单层约束输入框（多行 + 保存按钮）。 */
 function ScopeField(props: {
+  t: Translate
   label: string
   value: string
   placeholder: string
@@ -1056,13 +1080,14 @@ function ScopeField(props: {
         disabled={props.saving || (!dirty && value === props.value)}
         onClick={() => props.onSave(value)}
       >
-        {props.saving ? '保存中…' : '保存'}
+        {props.saving ? props.t('advisor.action.saving') : props.t('advisor.action.save')}
       </button>
     </label>
   )
 }
 
-function SettingsDisclosure({ store, snapshot }: {
+function SettingsDisclosure({ t, store, snapshot }: {
+  t: Translate
   store: AdvisorSessionStore
   snapshot: AdvisorStoreSnapshot
 }): JSX.Element {
@@ -1088,7 +1113,7 @@ function SettingsDisclosure({ store, snapshot }: {
     const provider = draft.advisorProvider?.trim() ?? ''
     const model = draft.advisorModel?.trim() ?? ''
     if ((provider === '') !== (model === '')) {
-      setLocalError('provider 与 model 必须同时填写，或同时留空以继承会话模型。')
+      setLocalError(t('advisor.settings.providerModelPair'))
       return
     }
     // Q5：提示词与内置默认相同 → 存 ''（等价内置，未来升级默认提示词自动跟随）；
@@ -1109,14 +1134,14 @@ function SettingsDisclosure({ store, snapshot }: {
   return (
     /* 2026-08-12 用户反馈：设置默认直接显示（去掉 details 折叠箭头） */
     <div className="advisor-settings">
-      <div className="advisor-settings-title">会话评审设置</div>
+      <div className="advisor-settings-title">{t('advisor.settings.title')}</div>
       <div className="advisor-settings-body">
         {/* 2026-08-14 用户拍板：总闸开关收敛到 Memory Evolve 设置 Tab（此处
             曾与其重复）；面板设置只保留本模块的运行参数，不再重复总闸。 */}
-        <div className="advisor-muted">模块总闸（启用/停用）在「Memory Evolve 设置」Tab 的配置区控制</div>
-        {snapshot.configLoading && draft === null && <LoadingBlock text="正在加载设置…" />}
+        <div className="advisor-muted">{t('advisor.settings.masterSwitchHint')}</div>
+        {snapshot.configLoading && draft === null && <LoadingBlock text={t('advisor.loading.settings')} />}
         {snapshot.configError !== null && (
-          <ErrorNotice text={`设置加载失败：${snapshot.configError}`} onRetry={() => void store.refreshConfig()} />
+          <ErrorNotice t={t} text={t('advisor.error.configLoad', { message: snapshot.configError })} onRetry={() => void store.refreshConfig()} />
         )}
         {draft !== null && (
           <>
@@ -1127,44 +1152,44 @@ function SettingsDisclosure({ store, snapshot }: {
                   checked={draft.advisorPanelEnabled}
                   onChange={(event) => setDraft({ ...draft, advisorPanelEnabled: event.target.checked })}
                 />
-                <span>显示悬浮胶囊按钮</span>
+                <span>{t('advisor.settings.showCapsule')}</span>
               </label>
               {/* Q1：info 级建议默认仅记录不注入（面板可见、会话流零打扰） */}
-              <label className="advisor-check-row" title="info 是最低等级建议：默认只记录不注入会话；开启后以注入（非打断）方式送达">
+              <label className="advisor-check-row" title={t('advisor.settings.infoInjectTitle')}>
                 <input
                   type="checkbox"
                   checked={draft.advisorInfoInject}
                   onChange={(event) => setDraft({ ...draft, advisorInfoInject: event.target.checked })}
                 />
-                <span>info 级建议也注入会话</span>
+                <span>{t('advisor.settings.infoInject')}</span>
               </label>
             </div>
             <div className="advisor-settings-grid">
               <label className="advisor-field">
-                <span>供应商（Provider）</span>
+                <span>{t('advisor.settings.provider')}</span>
                 <input
                   className="advisor-input"
                   value={draft.advisorProvider ?? ''}
                   onChange={(event) => setDraft({ ...draft, advisorProvider: event.target.value })}
-                  placeholder="留空则继承会话"
+                  placeholder={t('advisor.settings.inheritPlaceholder')}
                 />
               </label>
               <label className="advisor-field">
-                <span>模型（Model）</span>
+                <span>{t('advisor.settings.model')}</span>
                 <input
                   className="advisor-input"
                   value={draft.advisorModel ?? ''}
                   onChange={(event) => setDraft({ ...draft, advisorModel: event.target.value })}
-                  placeholder="留空则继承会话"
+                  placeholder={t('advisor.settings.inheritPlaceholder')}
                 />
               </label>
             </div>
             {/* Q5：提示词——空配置时回填显示内置默认全文，可编辑保存（=自定义），可一键恢复默认 */}
             <label className="advisor-field">
               <span>
-                评审系统提示词
+                {t('advisor.settings.systemPrompt')}
                 <span className="advisor-prompt-mode">
-                  {draft.advisorSystemPrompt === '' ? '（使用内置默认提示词，编辑后保存即为自定义）' : '（自定义）'}
+                  {draft.advisorSystemPrompt === '' ? t('advisor.settings.promptBuiltin') : t('advisor.settings.promptCustom')}
                 </span>
               </span>
               <textarea
@@ -1173,7 +1198,7 @@ function SettingsDisclosure({ store, snapshot }: {
                 maxLength={8_192}
                 value={draft.advisorSystemPrompt === '' ? (snapshot.config?.defaultSystemPrompt ?? '') : draft.advisorSystemPrompt}
                 onChange={(event) => setDraft({ ...draft, advisorSystemPrompt: event.target.value })}
-                placeholder="留空使用内置评审提示词"
+                placeholder={t('advisor.settings.promptPlaceholder')}
               />
               <button
                 type="button"
@@ -1189,13 +1214,13 @@ function SettingsDisclosure({ store, snapshot }: {
                     await store.saveConfig({ advisorSystemPrompt: '' })
                   })()
                 }}
-                title="恢复为内置默认提示词（保存后立即生效，输入框显示最新内置默认）"
+                title={t('advisor.settings.restoreTitle')}
               >
-                恢复默认提示词
+                {t('advisor.settings.restore')}
               </button>
             </label>
             <div className="advisor-settings-hint">
-              全局默认开关不会清除当前会话 override；会话级启停请使用上方状态条。
+              {t('advisor.settings.overrideHint')}
             </div>
             {(localError ?? snapshot.configError) !== null && (
               <div className="advisor-inline-error">{localError ?? snapshot.configError}</div>
@@ -1206,7 +1231,7 @@ function SettingsDisclosure({ store, snapshot }: {
               disabled={snapshot.configSaving}
               onClick={() => void save()}
             >
-              {snapshot.configSaving ? '保存中…' : '保存设置'}
+              {snapshot.configSaving ? t('advisor.action.saving') : t('advisor.settings.save')}
             </button>
           </>
         )}
@@ -1215,11 +1240,11 @@ function SettingsDisclosure({ store, snapshot }: {
   )
 }
 
-function ErrorNotice({ text, onRetry }: { text: string; onRetry: () => void }): JSX.Element {
+function ErrorNotice({ t, text, onRetry }: { t: Translate; text: string; onRetry: () => void }): JSX.Element {
   return (
     <div className="advisor-error" role="alert">
       <span>{text}</span>
-      <button type="button" className="advisor-link" onClick={onRetry}>重试</button>
+      <button type="button" className="advisor-link" onClick={onRetry}>{t('advisor.action.retry')}</button>
     </div>
   )
 }

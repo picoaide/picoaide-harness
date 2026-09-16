@@ -7,6 +7,8 @@ import { join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { ConnectorStore } from './store.ts'
+import { ConnectorError, connectorErrorCodeOf } from './connector-error.ts'
+import { hostLocaleOf, hostT, type HostCopyKey, type HostLocale } from './host-copy.ts'
 import { runAuth } from './auth.ts'
 import { createOAuthProvider, resolveAuthorizationServer, TokenRefresher, tokenNeedsRefresh } from './mcp-oauth-provider.ts'
 import type { OAuthTarget } from './mcp-oauth-provider.ts'
@@ -258,6 +260,31 @@ function exact(handler: JsonHandler): (req: IncomingMessage, res: ServerResponse
 }
 
 export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
+  /**
+   * Host locale of THIS message.
+   *
+   * Resolved from the probed `desktopRuntime` on every call — never captured in
+   * a constant (a module-level or apply-time capture is the bug class documented
+   * in `src/client/status-label.ts`; the user can switch language while the app
+   * runs). Deep modules (auth/outbound/policy/fence/refresh) receive the value
+   * as an explicit argument, so their copy is resolved per request too.
+   */
+  const locale = (): HostLocale => hostLocaleOf(ctx)
+  /**
+   * Translate one host copy key in the current host locale.
+   *
+   * Deliberately NOT named like the client translator: the desktop i18n
+   * dead-key guard (`packages/host/desktop/tests/i18n-keys.spec.ts`) treats every
+   * client-translator call with a literal key in a package's sources as a CLIENT
+   * dictionary key, and these keys live in the host dictionary.
+   */
+  const copy = (key: HostCopyKey, params?: Record<string, string>): string => hostT(locale(), key, params)
+  /** State patch carrying the stable code of a caught error (see connector-error.ts). */
+  const withCode = (error: unknown): { errorCode?: ReturnType<typeof connectorErrorCodeOf> } => {
+    const code = connectorErrorCodeOf(error)
+    return code === undefined ? {} : { errorCode: code }
+  }
+
   // N3: the MCP streamable-http transport is constructed inside
   // `dsh-mcp-client` with its own `fetch`, so the redirect fence must be on the
   // SDK class before the first instance exists. Installing it here keeps the
@@ -441,6 +468,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const def = defs.find(entry => entry.id === id)
       return def ? oauthTargetOf(def) : null
     },
+    // Resolved per refresh call (a language switch must not need a restart) and
+    // used for the failure text of the sweep's own refreshes.
+    locale: () => locale(),
     onRefreshed: (id, tokens) => {
       // The engine just wrote the credential; mirror it so the panel shows the
       // new expiry without a disk read, then tell the rest of the host.
@@ -495,7 +525,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
 
   /** Register a new intent, superseding (and aborting) whatever was in flight. */
   const beginIntent = (id: string): ConnectIntent => {
-    connectIntents.get(id)?.controller.abort(new Error('连接意图已被更新的请求取代'))
+    connectIntents.get(id)?.controller.abort(new Error(copy('flow.superseded')))
     const intent: ConnectIntent = {
       generation: currentGeneration(id),
       controller: new AbortController(),
@@ -616,16 +646,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
 
   /** Drop all MCP registrations and reset in-memory state (user switch). */
   const teardownAll = async (): Promise<void> => {
-    teardownController.abort(new Error('用户已切换，连接器注册中止'))
+    teardownController.abort(new Error(copy('flow.userSwitchedRegistration')))
     for (const dispose of mcpDisposers.values()) {
       try { dispose() } catch { /* teardown never throws */ }
     }
     mcpDisposers.clear()
-    for (const flow of pendingFlows.values()) flow.abort(new Error('用户已切换，连接流程中止'))
+    for (const flow of pendingFlows.values()) flow.abort(new Error(copy('flow.userSwitchedConnect')))
     pendingFlows.clear()
     // BUG-02: connect/submit intents started under the previous session must
     // not publish a form, flip a row or write a credential for the new one.
-    for (const intent of connectIntents.values()) intent.controller.abort(new Error('用户已切换，连接流程中止'))
+    for (const intent of connectIntents.values()) intent.controller.abort(new Error(copy('flow.userSwitchedConnect')))
     connectIntents.clear()
     pendingRequests.clear()
     pendingApprovals.clear()
@@ -963,7 +993,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const gate = await checkStdioApproval(def, stdioServers, credential)
     if (superseded()) return { rejected: [], superseded: true }
     if (gate !== null) {
-      if ('denied' in gate) return { rejected: ['用户拒绝了本地执行确认，未启动本地命令'] }
+      if ('denied' in gate) return { rejected: [copy('flow.approvalDenied')] }
       // Nothing is spawned while ANY stdio server of this connector is
       // unapproved: a partially registered connector is harder to reason about
       // than a row that simply waits for the user's decision.
@@ -979,7 +1009,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     let httpFenceError: string | null = null
     if (httpServers.length > 0) {
       try {
-        await ensureMcpTransportRedirectFence()
+        await ensureMcpTransportRedirectFence(locale())
         // The seam is fenced and behaviourally verified; the identity of the
         // two resolutions could not be settled (see the fence module). The
         // connection proceeds — the path pair goes to the log once, so a field
@@ -998,20 +1028,22 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     if (superseded()) return { rejected: [], superseded: true }
     for (const server of def.mcp) {
       if (superseded()) return { rejected: [], superseded: true }
-      const problem = mcpServerProblem(server)
+      // The rejection text is shown on the connector row, so it is rendered in
+      // the locale resolved for THIS registration.
+      const problem = mcpServerProblem(server, { locale: locale() })
       if (problem !== null) {
         rejected.push(`${server?.serverName ?? '?'}: ${problem}`)
         continue
       }
       if (server.transport === 'streamable-http' && httpFenceError !== null) {
-        rejected.push(`${server.serverName}: streamable-http 出站重定向栅栏不可用，拒绝连接（${httpFenceError}）`)
+        rejected.push(copy('flow.fenceUnavailable', { serverName: server.serverName, error: httpFenceError }))
         continue
       }
       const config = server.transport === 'streamable-http'
         ? {
             transport: 'streamable-http' as const,
             serverName: server.serverName,
-            url: streamableHttpUrl(server).toString(),
+            url: streamableHttpUrl(server, locale()).toString(),
             headers: renderHeaders(server, credential),
             // MCP authorization spec: the transport is handed the official
             // `OAuthClientProvider`, so the SDK injects the bearer token,
@@ -1060,7 +1092,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         // revoked grant). Say what the user has to do instead of leaking the
         // transport's raw "Error POSTing to endpoint: {\"error\":\"invalid_token\"}".
         if (/401|invalid_token|Unauthorized/iu.test(message)) {
-          throw new Error('需要先完成授权：当前凭据被服务端拒绝（点击「连接」重新授权）', { cause })
+          // A stable code travels with this failure: it is what the host uses to
+          // pick the `unauthorized` row state and what the client maps to its
+          // friendly copy. Matching the TEXT here is what broke under i18n.
+          throw new ConnectorError('auth-required', copy('flow.authRequired'), { cause })
         }
         // Defensive: a name held by an instance we do not own (HMR leftovers, a
         // previous generation). Retire whatever this plugin knows about and try
@@ -1214,6 +1249,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         ...(existing?.fields ? { fields: existing.fields } : {}),
         ...(options.clientName === undefined ? {} : { clientName: options.clientName }),
         ...(options.outboundTimeoutMs === undefined ? {} : { outboundTimeoutMs: options.outboundTimeoutMs }),
+        // The locale of the user who clicked connect: the callback page, the
+        // thrown errors and the refresh text below all follow it.
+        locale: locale(),
       })
       // Token mode returned above; only OAuth/device/server-side reach this.
       // BUG-02: the credential write is the point of no return for a cancelled
@@ -1272,13 +1310,15 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // must not stamp 'disconnected' or an error over its 'connecting' state.
       if (supersededByNewerIntent(id, intent)) return
       const message = error instanceof Error ? error.message : String(error)
-      const unauthorized = message.includes('授权') || message.includes('token') || message.includes('登录')
+      // Classification is by the stable, locale-independent code the producer
+      // attached — never by substrings of a (now translatable) message.
+      const unauthorized = connectorErrorCodeOf(error) === 'auth-required'
       // A user-initiated abort maps to the neutral 'disconnected' state, not
       // an error (the cancel button must not leave a scary red row behind).
       if (controller.signal.aborted) {
         setState(id, { status: 'disconnected', everConnected: Boolean(states.get(id)?.everConnected), error: undefined })
       } else {
-        setState(id, { status: unauthorized ? 'unauthorized' : 'error', error: message })
+        setState(id, { status: unauthorized ? 'unauthorized' : 'error', error: message, ...withCode(error) })
       }
       // Terminal failure likewise invalidates the pending authorize URL.
       pendingRequests.delete(id)
@@ -1355,7 +1395,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // clearing the credential: their next await observes the bump and stops
     // instead of spawning MCP servers for a disconnected connector. The abort
     // also cancels a flow that has not reached its first await yet (BUG-02).
-    invalidateIntent(id, new Error('用户在连接过程中断开了连接'))
+    invalidateIntent(id, new Error(copy('flow.userDisconnected')))
     const def = getDef(id)
     if (def) await unregisterMcp(def)
     // P0-1: a disconnect must also abort any in-flight authorization flow —
@@ -1363,7 +1403,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // connector and write back credentials after the user disconnected.
     const flow = pendingFlows.get(id)
     if (flow) flow.abort(
-      new Error('用户在连接过程中断开了连接'),
+      new Error(copy('flow.userDisconnected')),
     )
     await store.clearCredential(id)
     // The card renders "有效期至 …" from these facts: a disconnected connector
@@ -1415,7 +1455,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
               if (!outcome.ok && outcome.reason === 'reauthorize') {
                 // The grant is gone: say so on the row instead of registering
                 // MCP servers that are guaranteed to 401.
-                setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message })
+                setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
                 return null
               }
               return await store.readCredential(def.id) ?? credential
@@ -1448,7 +1488,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         // and exits the whole app. Surface it on the connector row instead.
         const message = error instanceof Error ? error.message : String(error)
         ctx.logger.error(`pico-connectors: failed to restore ${def.id}: ${message}`)
-        setState(def.id, { status: 'error', error: message })
+        setState(def.id, { status: 'error', error: message, ...withCode(error) })
       }
     }
   }
@@ -1459,15 +1499,15 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // after teardown must not re-register MCP servers (P2-23).
       lifecycleEpoch++
       // conn-1: …and a registration already awaiting must stop spawning.
-      teardownController.abort(new Error('插件卸载，连接器注册中止'))
+      teardownController.abort(new Error(copy('flow.pluginUnloadRegistration')))
       for (const dispose of mcpDisposers.values()) dispose()
       mcpDisposers.clear()
       // P0-1: teardown must abort any in-flight authorization flow — a
       // lingering OAuth/device flow would keep the callback server up and
       // (on a later disconnect) could write back credentials after teardown.
-      for (const flow of pendingFlows.values()) flow.abort(new Error('插件卸载，连接流程中止'))
+      for (const flow of pendingFlows.values()) flow.abort(new Error(copy('flow.pluginUnloadConnect')))
       pendingFlows.clear()
-      for (const intent of connectIntents.values()) intent.controller.abort(new Error('插件卸载，连接流程中止'))
+      for (const intent of connectIntents.values()) intent.controller.abort(new Error(copy('flow.pluginUnloadConnect')))
       connectIntents.clear()
     }
   }, 'pico connectors: restore + cleanup')
@@ -1504,9 +1544,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         if (state?.status !== 'connected' && state?.status !== 'unauthorized') continue
         const credential = await store.readCredential(def.id)
         if (!credential || !tokenNeedsRefresh(credential)) continue
-        const outcome = await tokenRefresher.refresh(def.id)
+        const outcome = await tokenRefresher.refresh(def.id, { locale: locale() })
         if (!outcome.ok && outcome.reason === 'reauthorize') {
-          setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message })
+          setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
         }
       }
     })
@@ -1580,15 +1620,23 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const id = rawId
       const def = getDef(id)
       if (!def) return json(res, 404, { error: `unknown connector: ${id}` })
-      if (oauthTargetOf(def) === null) return json(res, 400, { error: '该连接器不支持令牌刷新' })
-      const outcome = await tokenRefresher.refresh(id, { force: true })
+      if (oauthTargetOf(def) === null) return json(res, 400, { error: copy('flow.refreshUnsupported') })
+      const outcome = await tokenRefresher.refresh(id, { force: true, locale: locale() })
       if (!outcome.ok) {
+        // The refresh engine reports WHY the refresh failed; a dead grant is the
+        // one outcome that means "authorize again", and that is the stable code
+        // the client maps (the message itself is translatable).
+        const errorCode = outcome.reason === 'reauthorize' ? 'auth-required' : undefined
         if (outcome.reason === 'reauthorize') {
-          setState(id, { status: 'unauthorized', everConnected: true, error: outcome.message })
+          setState(id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode })
         } else if (outcome.reason === 'transient') {
           setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: outcome.message })
         }
-        return json(res, outcome.reason === 'not-applicable' ? 400 : 409, { error: outcome.message, reason: outcome.reason })
+        return json(res, outcome.reason === 'not-applicable' ? 400 : 409, {
+          error: outcome.message,
+          reason: outcome.reason,
+          ...(errorCode === undefined ? {} : { errorCode }),
+        })
       }
       noteCredential(id, await store.readCredential(id))
       setState(id, { status: 'connected', everConnected: true, error: undefined })
@@ -1610,7 +1658,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // path; the abort here is the safety net for an abandoned flow.
       const stale = pendingFlows.get(id)
       if (stale) {
-        stale.abort(new Error('连接器重新连接，旧授权流程已取消'))
+        stale.abort(new Error(copy('flow.reconnectCancelled')))
         pendingFlows.delete(id)
         pendingRequests.delete(id)
       }
@@ -1621,7 +1669,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       emitRequest(request)
       void startConnect(id).catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error)
-        setState(id, { status: 'error', error: message })
+        setState(id, { status: 'error', error: message, ...withCode(error) })
       })
       // The pending request may gain fields once the flow starts; poll the
       // state endpoint for the final shape.
@@ -1640,7 +1688,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // flow that already registered itself in pendingFlows — a connect parked
       // in its first credential read (or waiting for the settings form) used to
       // keep going and put the row back to "connecting" after the cancel.
-      invalidateIntent(id, new Error('用户取消了连接'))
+      invalidateIntent(id, new Error(copy('flow.userCancelled')))
       setState(id, { status: 'disconnected', everConnected: Boolean(states.get(id)?.everConnected), error: undefined })
       pendingRequests.delete(id)
       pendingFieldRequestKind.delete(id)
@@ -1668,7 +1716,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       try {
         void submitAuth(id, fields as Record<string, string>).catch((error: unknown) => {
           const message = error instanceof Error ? error.message : String(error)
-          setState(id, { status: 'error', error: message })
+          setState(id, { status: 'error', error: message, ...withCode(error) })
         })
         // Return immediately: token form flows complete fast, but OAuth/device
         // flows can run for minutes — the fetch must not hang the panel's
@@ -1746,7 +1794,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       if (!getDef(id)) return json(res, 404, { error: `unknown connector: ${id}` })
       pendingApprovals.delete(id)
       pendingRequests.delete(id)
-      setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: '本地执行确认被拒绝，未启动本地命令' })
+      setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: copy('flow.approvalDeniedRow') })
       json(res, 200, { ok: true })
     }
 
