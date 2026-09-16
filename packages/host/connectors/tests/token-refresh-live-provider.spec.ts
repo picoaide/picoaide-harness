@@ -158,6 +158,40 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
     h.dispose()
   }, 40_000)
 
+  it('lets the SDK persist its own rotation after an out-of-band refresh adopted newer tokens', async () => {
+    const server = await startRealMcpServer()
+    servers.push(server)
+    const dir = mkdtempSync(join(tmpdir(), 'live-provider-sdk-after-adopt-'))
+    await authorizeOnce(dir, server)
+
+    const h = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
+    await waitFor(() => h.configs.length === 1, 15_000)
+
+    // Our refresher rotated RT1→RT2 and adopted it into the live provider.
+    const refreshed = await callRoute(h, '/api/pico/connectors/example-a/refresh', 'POST')
+    expect(refreshed.status).toBe(200)
+    const afterSweep = await new ConnectorStore({ baseDir: dir }).readCredential('example-a')
+
+    // A 401 self-heal inside the same window rotates from the token it was just
+    // fed; the provider must be allowed to persist that result instead of being
+    // CAS-rejected against its original registration snapshot (the baseline is
+    // advanced by adopt/syncBaseline). Otherwise the disk keeps RT2, which the
+    // SDK already consumed → invalid_grant on the next use.
+    await (liveConfig(h).authProvider as unknown as { saveTokens: (tokens: unknown) => Promise<void> }).saveTokens({
+      access_token: 'at-sdk', refresh_token: 'rt-sdk', token_type: 'Bearer', expires_in: 3_600,
+    })
+    // onPersist kicks the write off without awaiting it; poll for it.
+    let stored = await new ConnectorStore({ baseDir: dir }).readCredential('example-a')
+    const deadline = Date.now() + 5_000
+    while (Date.now() < deadline && stored?.refreshToken !== 'rt-sdk') {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      stored = await new ConnectorStore({ baseDir: dir }).readCredential('example-a')
+    }
+    expect(stored?.accessToken).toBe('at-sdk')
+    expect(stored?.updatedAt).toBeGreaterThan(afterSweep?.updatedAt ?? 0)
+    h.dispose()
+  }, 40_000)
+
   it('does not resurrect a background refresh over a later re-authorization', async () => {
     const server = await startRealMcpServer()
     servers.push(server)
