@@ -185,11 +185,12 @@ export function lastRunAtMs(expr: string, fromMs: number): number | undefined {
           // hour (2026-09-16 audit R2-E2).
           const first = new Date(year, month, day, hour, minute, 0, 0)
           if (first.getHours() !== hour || first.getMinutes() !== minute) continue
-          // A DST rollback can repeat a wall clock by 30 minutes (Lord Howe) or
-          // 60 minutes (most zones); enumerate every minute within +90 that
+          // A DST rollback can repeat a wall clock by 30 minutes (Lord Howe),
+          // 60 minutes (most zones), 2h (Antarctica/Troll) or 3h
+          // (Antarctica/Casey 2020); enumerate every minute within +180 that
           // still reads the same wall clock and take the latest one.
           const candidates = []
-          for (let delta = 0; delta <= 90 * 60 * 1000; delta += 60 * 1000) {
+          for (let delta = 0; delta <= 180 * 60 * 1000; delta += 60 * 1000) {
             const probe = new Date(first.getTime() + delta)
             if (probe.getFullYear() === year && probe.getMonth() === month && probe.getDate() === day
               && probe.getHours() === hour && probe.getMinutes() === minute) {
