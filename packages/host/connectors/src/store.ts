@@ -138,6 +138,13 @@ export class ConnectorStore {
       // A hand-edited (or truncated) timestamp must not poison the refresh
       // cadence: only a finite positive number is a usable `expiresAt`.
       const record = value as ConnectorCredential
+      if (!Number.isSafeInteger(record.updatedAt) || record.updatedAt < 0) {
+        // A hand-edited 1e999 parses to Infinity and JSON.stringify writes null
+        // on the next save, after which the credential becomes unreadable. A
+        // value above 2^53 also breaks `+1` monotonicity. Treat it as "no
+        // timestamp": writes start from 0 and repair the file.
+        record.updatedAt = 0
+      }
       if (record.expiresAt !== undefined && (!Number.isFinite(record.expiresAt) || record.expiresAt <= 0)) {
         delete record.expiresAt
       }
@@ -186,7 +193,8 @@ export class ConnectorStore {
       // `Date.now()` alone collides at ms resolution and would make that
       // comparison skip a genuine catch-up (or, with `>=`, adopt a stale one).
       const now = Date.now()
-      const updatedAt = now > current.updatedAt ? now : current.updatedAt + 1
+      const base = Number.isSafeInteger(current.updatedAt) && current.updatedAt >= 0 ? current.updatedAt : 0
+      const updatedAt = now > base ? now : base + 1
       const next: ConnectorCredential = { ...current, ...patch, updatedAt }
       await this.writeCredentialUnlocked(id, next)
       return next
@@ -218,7 +226,8 @@ export class ConnectorStore {
       const current = await this.readCredential(id)
       if (current === null || !sameCredential(current, expected)) return null
       const now = Date.now()
-      const updatedAt = now > current.updatedAt ? now : current.updatedAt + 1
+      const base = Number.isSafeInteger(current.updatedAt) && current.updatedAt >= 0 ? current.updatedAt : 0
+      const updatedAt = now > base ? now : base + 1
       const next: ConnectorCredential = { ...current, ...patch, updatedAt }
       await this.writeCredentialUnlocked(id, next)
       return next

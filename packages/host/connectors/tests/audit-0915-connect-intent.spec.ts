@@ -302,6 +302,25 @@ describe('ConnectorStore.clearCredentialIfUnchanged：原子 compare-and-delete'
     }
   })
 
+  it('非法 updatedAt 被规范为 0，后续写入恢复单调', async () => {
+    const dir = await tempDir('pico-store-bad-updatedat-')
+    const store = new ConnectorStore({ baseDir: dir })
+    await store.writeCredential('c', { updatedAt: 1, fields: { apiKey: 'A' } })
+    // 手工把时间戳写坏：必须写 `1e999` 字面量（JSON.stringify(Infinity) 会先变成
+    // null，那样走不到数值校验分支）。解析后 typeof 是 number 但非有限。
+    const file = join(dir, 'c.json')
+    const fsPromises = await import('node:fs/promises')
+    const rawText = (await fsPromises.readFile(file, 'utf8')).replace(/"updatedAt":\s*\d+/u, '"updatedAt":1e999')
+    await fsPromises.writeFile(file, rawText)
+    const read = await store.readCredential('c')
+    expect(read?.updatedAt).toBe(0)
+    const written = await store.updateCredential('c', { accessToken: 'a1' })
+    expect(Number.isSafeInteger(written.updatedAt)).toBe(true)
+    expect(written.updatedAt).toBeGreaterThan(0)
+    const second = await store.updateCredential('c', { accessToken: 'a2' })
+    expect(second.updatedAt).toBeGreaterThan(written.updatedAt)
+  })
+
   it('updateCredentialIfUnchanged：快照变了 / 文件没了都不写（断开不复活）', async () => {
     const dir = await tempDir('pico-store-cas-update-')
     const store = new ConnectorStore({ baseDir: dir })

@@ -282,6 +282,27 @@ describe('TokenRefresher', () => {
     expect(stored?.expiresAt).toBeGreaterThan(Date.now())
   })
 
+  it('treats a user switch during the refresh as a silent no-op', async () => {
+    const server = await startServer({ rotateRefresh: true })
+    const { store } = tempStore()
+    await store.writeCredential('example-a', credential({ expiresAt: Date.now() - 1000 }))
+    let scope = 'user-a'
+    const announced: string[] = []
+    const refresher = new TokenRefresher({
+      read: (id) => store.readCredential(id),
+      write: (id, patch) => store.updateCredential(id, patch),
+      writeIfUnchanged: async () => { scope = 'user-b'; return null },
+      scope: () => scope,
+      target: () => discoveryTarget(server.origin),
+      onRefreshed: (id) => { announced.push(id) },
+    })
+    const outcome = await refresher.refresh('example-a', { force: true })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.reason).toBe('not-applicable')
+    expect(announced).toEqual([])
+  })
+
   it('mirrors a NEWER credential instead of the stale refresh result when the CAS misses', async () => {
     const server = await startServer({ rotateRefresh: true })
     const { store } = tempStore()
