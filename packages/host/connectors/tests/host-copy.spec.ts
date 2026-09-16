@@ -211,6 +211,17 @@ describe('中文文案逐字节不变 + 步骤标签映射', () => {
       .toBe('OAuth token 端点 出站请求超时（30000ms 内未完成），已中止: a.example')
   })
 
+  it('插值值里的 $ 序列按字面量处理（远端 Location/URL 不能篡改文案）', () => {
+    // replaceAll 的字符串替换值会把 $$/$&/$`/$' 当替换模式；服务端下发的 URL
+    // 或错误文本一旦含这些序列，用户可见文案会被截断/复制。
+    expect(hostT('zh', 'outbound.notUrl', { what: 'MCP 端点', url: 'https://a.example/$&p=1' }))
+      .toBe('MCP 端点 不是合法 URL: https://a.example/$&p=1')
+    expect(hostT('zh', 'outbound.notUrl', { what: 'MCP 端点', url: "https://a.example/$'x" }))
+      .toBe("MCP 端点 不是合法 URL: https://a.example/$'x")
+    expect(hostT('en', 'outbound.notUrl', { what: 'MCP endpoint', url: 'https://a.example/$$HOME' }))
+      .toBe('MCP endpoint is not a valid URL: https://a.example/$$HOME')
+  })
+
   it('步骤标签：zh 原样、en 映射已知标签、未知标签两种语言都原样透出', () => {
     expect(stepLabel('zh', 'MCP 端点')).toBe('MCP 端点')
     expect(stepLabel('en', 'MCP 端点')).toBe('MCP endpoint')

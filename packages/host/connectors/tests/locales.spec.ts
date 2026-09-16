@@ -51,6 +51,10 @@ describe('friendlyConnectorError：稳定 code 契约', () => {
     // 可见退化），但这不再是新生产者的契约。
     expect(friendlyConnectorError('登录命令退出码 1')).toBe('Login command failed: make sure the corresponding CLI is installed and signed in, then retry')
   })
+
+  it('raw 文本里的 $ 序列不被替换语义吞掉（远端/CLI 文本直插 error.generic）', () => {
+    expect(friendlyConnectorError("boom $& $' $$HOME")).toBe("连接失败：boom $& $' $$HOME")
+  })
 })
 
 describe('connector-error：code 的读取形状', () => {

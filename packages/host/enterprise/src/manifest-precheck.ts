@@ -71,7 +71,7 @@ const issue = (code: string, message: string, field?: string): PrecheckIssue =>
 /** 把 `{name}` 占位符替换成实参（与客户端 `t()` 的插值语义一致）。 */
 function fill(template: string, params: Record<string, string | number>): string {
   let text = template
-  for (const [name, value] of Object.entries(params)) text = text.replaceAll(`{${name}}`, String(value))
+  for (const [name, value] of Object.entries(params)) text = text.replaceAll(`{${name}}`, () => String(value))
   return text
 }
 

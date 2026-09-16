@@ -53,7 +53,7 @@ export function setActiveLocale(id: string): void {
 export function t(key: AccountKey, params?: Record<string, string>): string {
   let text = (activeLocale === 'en' ? enDict : dict)[key]
   if (params !== undefined) {
-    for (const [name, value] of Object.entries(params)) text = text.replaceAll(`{${name}}`, value)
+    for (const [name, value] of Object.entries(params)) text = text.replaceAll(`{${name}}`, () => String(value))
   }
   return text
 }
