@@ -175,34 +175,38 @@ export function lastRunAtMs(expr: string, fromMs: number): number | undefined {
       const year = cursor.getFullYear()
       const month = cursor.getMonth()
       const day = cursor.getDate()
+      // Collect every candidate instant of this day FIRST, then take the
+      // latest one <= fromMs. Short-circuiting inside the wall-clock-descending
+      // loops is wrong under a rollback: a larger wall clock's FIRST pass can
+      // be earlier than a smaller wall clock's SECOND pass (Antarctica/Troll
+      // 01:59 first pass = 23:59Z, 01:30 second pass = 01:30Z), so the old
+      // first-match return recorded a time up to the rollback length in the
+      // "past" (or even later than the wake-up wall clock). 2026-09-16 audit R5.
+      let best: number | undefined
       for (const hour of sortedHours) {
         for (const minute of sortedMinutes) {
           // Wall clock can repeat (DST fall-back) or vanish (spring-forward).
           // `new Date` only ever yields the FIRST instance of a repeated hour;
-          // also consider the second (first + 1h) when its wall clock still
-          // matches, and prefer the later instant that is still <= fromMs. No
-          // wall-clock pruning: it mis-handles the second pass of a repeated
-          // hour (2026-09-16 audit R2-E2).
+          // enumerate every minute within +180 (Lord Howe 30m, most zones 60m,
+          // Troll 2h, Casey 3h) whose wall clock still matches.
           const first = new Date(year, month, day, hour, minute, 0, 0)
           if (first.getHours() !== hour || first.getMinutes() !== minute) continue
-          // A DST rollback can repeat a wall clock by 30 minutes (Lord Howe),
-          // 60 minutes (most zones), 2h (Antarctica/Troll) or 3h
-          // (Antarctica/Casey 2020); enumerate every minute within +180 that
-          // still reads the same wall clock and take the latest one.
-          const candidates = []
-          for (let delta = 0; delta <= 180 * 60 * 1000; delta += 60 * 1000) {
+          // Only pay for the repeat-probe walk when this wall clock is close to
+          // a DST offset change; ordinary minutes have exactly one instance.
+          const repeated = new Date(first.getTime() + 180 * 60 * 1000).getTimezoneOffset() !== first.getTimezoneOffset()
+          const maxDelta = repeated ? 180 * 60 * 1000 : 0
+          for (let delta = 0; delta <= maxDelta; delta += 60 * 1000) {
             const probe = new Date(first.getTime() + delta)
-            if (probe.getFullYear() === year && probe.getMonth() === month && probe.getDate() === day
-              && probe.getHours() === hour && probe.getMinutes() === minute) {
-              candidates.push(probe.getTime())
-            }
-          }
-          candidates.sort((a, b) => b - a)
-          for (const time of candidates) {
-            if (time <= fromMs && matches(schedule, new Date(time))) return time
+            if (probe.getFullYear() !== year || probe.getMonth() !== month || probe.getDate() !== day
+              || probe.getHours() !== hour || probe.getMinutes() !== minute) continue
+            const time = probe.getTime()
+            if (time > fromMs) continue
+            if (!matches(schedule, probe)) continue
+            if (best === undefined || time > best) best = time
           }
         }
       }
+      if (best !== undefined) return best
     }
     cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1)
   }

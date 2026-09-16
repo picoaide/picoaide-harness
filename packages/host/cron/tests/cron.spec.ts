@@ -38,6 +38,14 @@ describe('DST/catch-up 一致性（2026-09-16 审计 E4/R2-E2）', () => {
     `)
   })
 
+  it('2 小时回拨跨 (时,分) 候选取最近瞬间，而不是墙钟降序的第一个', () => {
+    assertWithTz('Antarctica/Troll', `
+      const from = Date.UTC(2026, 9, 25, 1, 30) // 本地 01:30（第二遍）
+      assert.equal(lastRunAtMs('* 1 * * *', from), from)
+      assert.equal(lastRunAtMs('30,31 1 * * *', from), from)
+    `)
+  })
+
   it('2 小时回拨（Antarctica/Troll）：重复区间取第二遍', () => {
     assertWithTz('Antarctica/Troll', `
       const last = lastRunAtMs('45 1 * * *', Date.UTC(2026, 9, 25, 1, 50))
