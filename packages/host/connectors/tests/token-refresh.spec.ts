@@ -22,6 +22,7 @@ import type { AddressInfo } from 'node:net'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import assert from 'node:assert/strict'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 // The real bridge spawns/connects for real; this suite exercises the config the
@@ -544,7 +545,15 @@ describe('background sweep (stdio connectors cannot re-read a token)', () => {
       mcp: [{ serverName: 'stdio-crm', transport: 'stdio', command: process.execPath, args: ['-e', ''] }],
     }
     const dir = mkdtempSync(join(tmpdir(), 'conn-sweep-'))
-    const h = createHarness([def], dir, { refreshSweepIntervalMs: 60, requestApproval: () => true })
+    // 定时扫掠关掉、由测试自己驱动：本用例要观察的是"扫掠会刷新并重注册"这个
+    // 不变量，而不是"定时器在 8 秒内被调度到"。CI（4 vCPU、多包并发）下定时器
+    // 会被调度拉开数秒，此前多次在 8s 预算内等不到（2026-09-16 Gate 红过一次）。
+    let sweep: (() => Promise<void>) | undefined
+    const h = createHarness([def], dir, {
+      refreshSweepIntervalMs: 0,
+      requestApproval: () => true,
+      onRefreshSweepReady: (fn: () => Promise<void>) => { sweep = fn },
+    })
     await seedCredential(dir, 'stdio-crm', {
       accessToken: 'at-first',
       refreshToken: 'rt-1',
@@ -556,14 +565,28 @@ describe('background sweep (stdio connectors cannot re-read a token)', () => {
     h.emitSession({ username: 'user-a' })
     await waitFor(() => h.configs.length === 1)
     expect(h.configs[0]?.env?.PICOAIDE_CONNECTOR_ACCESS_TOKEN).toBe('at-first')
+    assert.ok(sweep !== undefined, '插件必须把扫掠函数交给注入的观察者')
 
     // The token lapses while the app keeps running: nothing calls the server,
     // so only the sweep can notice.
     const store = new ConnectorStore({ baseDir: dir })
     await store.updateCredential('stdio-crm', { expiresAt: Date.now() - 1000 })
 
-    await waitFor(() => server.grants.length === 1, 8000)
-    await waitFor(() => h.configs.length === 2, 8000)
+    /** 主动驱动扫掠直到一轮往返完成（真实 HTTP 仍需等待，但不再靠定时器）。 */
+    const deadline = Date.now() + 20_000
+    let rounds = 0
+    while (server.grants.length === 0 || h.configs.length < 2) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `sweep never refreshed the lapsed credential in ${rounds} sweeps; `
+          + `grants=${JSON.stringify(server.grants)} configs=${h.configs.length}`,
+        )
+      }
+      await sweep()
+      rounds += 1
+      if (server.grants.length === 0 || h.configs.length < 2) await new Promise(r => setTimeout(r, 20))
+    }
+    expect(server.grants.length).toBe(1)
     expect(h.configs[1]?.env?.PICOAIDE_CONNECTOR_ACCESS_TOKEN).toBe('at-1')
     const stored = await store.readCredential('stdio-crm')
     expect(stored?.expiresAt).toBeGreaterThan(Date.now())
