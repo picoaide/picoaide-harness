@@ -136,74 +136,105 @@ function isPrivateHost(host: string): boolean {
 /**
  * 从连接器凭据的字段里挑出站点 origin。
  *
- * 三遍选值（顺序即优先级）：
- *  1. **地址形状键上的显式 http(s) 地址**。base 的地址键（词边界判据）在此完全
- *     同序；扩展拼法（camelCase / `hostname` / 连字符）也享受同一优先级，因为
- *     base 对"地址键优先于其它键"这件事本身就是这么定的，只是没识别这些拼法。
- *  2. **地址形状键上"明确像主机"的裸值**（含点 / IP / 回环私网，如
- *     `app.example.com`、`10.0.0.5:8000`）—— base 在这里派生不出 origin，所以
- *     只会**新增**可绑定的记录。
- *  3. **其它键上的显式 http(s) 地址** —— base 的兜底。
- *  4. **地址形状键上的单标签裸值**（`glitchtip`、`glitchtip:8000`，内网自部署场景）
- *     —— 放在最后：`n/a` / `changeme` / `TODO` 这类占位符也能被归一成
- *     `http://n` 这种 origin，不能让它顶掉一条真实的显式地址（2026-09-16 R3 审计：
- *     `{api_url:'n/a', homepage:'https://real.example'}` 曾从 real.example 变成
- *     `http://n`，拒绝文案还会把该主机当成指令告诉模型）。
+ * 选值顺序（**前两步用 base 的地址键判据，第三步是 base 的兜底，后三步才是新增
+ * 的扩展拼法**，这样"base 能绑定的记录"永远先由 base 的规则裁决）：
  *
- * 第 2 步排在第 3 步之前，是为了不让一个"非地址字段里的 URL"（例如
- * `{base_url:'glitchtip.corp.example', sentry_dsn:'https://…@sentry.io/1'}` 的
- * DSN）顶掉连接器真正的站点。**与 base 的差异只剩两类**：地址键的裸主机名现在
- * 能绑定、扩展拼法现在与 base 地址键同档；两个 base 地址键之间的取舍（含 110 组
- * 两两对拍）与 base 逐条一致，且没有任何记录会从"可绑定"变成"不可绑定"
- * （2026-09-16 R2/R3 复核差分：372 万组里 baseNonNull→null = 0）。
+ *  1. base 地址键上的显式 http(s) 地址；
+ *  2. base 地址键上**文字形态就是主机**的裸值（`app.example.com`、
+ *     `10.0.0.5:8000`、`glitchtip.corp.example/api`）—— base 在这里派生不出
+ *     origin，所以只会把原本绑不上的记录**新增**为可绑定（E1 能力）；
+ *  3. 其余键上的显式 http(s) 地址（base 的原兜底，键序与 base 完全一致）；
+ *  4. 扩展拼法键上的显式 http(s) 地址（camelCase / `hostname` / 连字符）；
+ *  5. 扩展拼法键上文字形态是主机的裸值；
+ *  6. 扩展拼法键上的单标签裸值（`glitchtip`、`glitchtip:8000`，内网自部署）——
+ *     放最后，因为 `n/a`/`changeme`/`-` 这类占位符也能被归一成 `http://n`。
+ *
+ * 与 base 的差异**只有两处**，且都是"新增可绑定 / 更信任地址键"的方向：
+ *  - 第 2 步：base 地址键上的**裸主机**现在可以绑定（base 派生不出 → 落到第 3 步）；
+ *  - 第 4~6 步：扩展拼法键在 base 里只是普通键，现在享受地址键待遇。
+ * 其余情形（尤其是两个 base 地址键之间的取舍）与 base **逐条一致**，
+ * 且没有任何记录会从"可绑定"变成"不可绑定"（R2/R3/R4 复核：60k+ 随机差分里
+ * `baseNonNull → null = 0`，4218 组强档键两两对拍胜出键完全相同）。
  * @param fields - 凭据字段（`ConnectorCredential.fields`）。
  * @returns 第一个可用 origin，或 `null`。
  */
 export function siteOriginFromFields(fields: Record<string, string> | undefined): string | null {
   if (fields === undefined) return null
   const entries = Object.entries(fields).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
-  // 键名像地址的排前面；同优先级按键名字典序（对象键序不参与，结果稳定）。
-  const ranked = entries
-    .map(([key, value]) => ({ key, value, hint: siteFieldHint(key) }))
-    .sort((a, b) => (a.hint - b.hint) || a.key.localeCompare(b.key))
-  const addressShaped = ranked.filter((entry) => entry.hint !== SITE_FIELD_HINT_NONE)
-  const otherKeys = ranked.filter((entry) => entry.hint === SITE_FIELD_HINT_NONE)
-  for (const entry of addressShaped) {
-    const origin = httpOriginOf(entry.value)
-    if (origin !== null) return origin
+  // base 的排序：地址键（词边界判据）优先，其余按键名字典序。
+  const baseRanked = entries
+    .map(([key, value]) => ({ key, value, strong: SITE_FIELD_HINT_STRONG.test(key) }))
+    .sort((a, b) => (Number(b.strong) - Number(a.strong)) || a.key.localeCompare(b.key))
+  // 扩展拼法键（base 不认、我们认的那一批），按键名字典序。
+  const extended = entries
+    .filter(([key]) => !SITE_FIELD_HINT_STRONG.test(key) && siteFieldHint(key) !== SITE_FIELD_HINT_NONE)
+    .map(([key, value]) => ({ key, value }))
+    .sort((a, b) => a.key.localeCompare(b.key))
+
+  const explicitIn = (list: readonly { value: string }[]): string | null => {
+    for (const entry of list) {
+      const origin = httpOriginOf(entry.value)
+      if (origin !== null) return origin
+    }
+    return null
   }
-  for (const entry of addressShaped) {
-    const origin = bareHostOrigin(entry.value)
-    if (origin !== null && isUnambiguousHost(origin)) return origin
+  const hostIn = (list: readonly { value: string }[], allowSingleLabel: boolean): string | null => {
+    for (const entry of list) {
+      if (!looksLikeHostText(entry.value, allowSingleLabel)) continue
+      const origin = bareHostOrigin(entry.value)
+      if (origin !== null) return origin
+    }
+    return null
   }
-  for (const entry of otherKeys) {
-    const origin = httpOriginOf(entry.value)
-    if (origin !== null) return origin
-  }
-  for (const entry of addressShaped) {
-    const origin = bareHostOrigin(entry.value)
-    if (origin !== null) return origin
-  }
-  return null
+
+  const strong = baseRanked.filter((entry) => entry.strong)
+  const rest = baseRanked.filter((entry) => !entry.strong)
+  // 最后一遍覆盖**所有**地址形状键（含 base 地址键）：单标签内网名没有竞争者时
+  // 仍然可用（`{server_url:'glitchtip:8000'}` 必须能绑定）。
+  const addressShaped = [...strong, ...extended]
+  return explicitIn(strong)
+    ?? hostIn(strong, false)
+    ?? explicitIn(rest)
+    ?? explicitIn(extended)
+    ?? hostIn(extended, false)
+    ?? hostIn(addressShaped, true)
 }
 
+/** 占位符/保留名，永远不该被当成主机（大小写不敏感）。 */
+const PLACEHOLDER_HOSTS = new Set(['changeme', 'todo', 'none', 'null', 'nan', 'undefined', 'placeholder', 'password', 'secret', 'host', 'example'])
+
 /**
- * Whether a normalized origin names a host no placeholder would spell by accident.
+ * Whether the text the operator wrote really names a host.
  *
- * `n/a`、`changeme`、`-`、`abc123def456` 都能通过 `bareHostOrigin`（它的职责是
- * "用户只填了主机名"），但只有带点 / IP / 回环私网的值才足以让人相信它真的是
- * 站点；单标签值留给最后一遍（2026-09-16 R3 审计）。
- * @param origin - `bareHostOrigin` 的返回值。
- * @returns 该 origin 是否"明确像主机"。
+ * `bareHostOrigin` 的职责是"把它拼成 URL"，因此 `134744072`（WHATWG 会当成整数
+ * IPv4 `8.8.8.8`）、`changeme.`（尾点）、`n.a`（一位 TLD）、`n/a`（带路径的单标签）
+ * 都能通过它。这些值一旦被采信，绑定基准会指向一个**真实可达的公网主机**
+ * （R4 审计实测 578 组落到 IPv4 字面量），拒绝文案还会把它当指令交给模型，
+ * 所以第 2/5/6 步先用文字的形态判据筛一遍。
+ * @param value - 字段原值。
+ * @param allowSingleLabel - 是否接受 `glitchtip` / `glitchtip:8000` 这类内网单标签名（只给最后一遍）。
+ * @returns 该值是否是"文字形态的主机"。
  */
-function isUnambiguousHost(origin: string): boolean {
-  let host: string
-  try {
-    host = new URL(origin).hostname
-  } catch {
-    return false
-  }
-  return host.includes('.') || host.startsWith('[') || isPrivateHost(host)
+function looksLikeHostText(value: string, allowSingleLabel: boolean): boolean {
+  const trimmed = value.trim()
+  if (trimmed === '' || /\s/u.test(trimmed) || trimmed.length > 260) return false
+  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed) || trimmed.startsWith('//') || trimmed.includes('@')) return false
+  // A host is everything before the first path/query/fragment, minus the port.
+  const hostPart = (trimmed.split(/[/?#]/u)[0] ?? '').replace(/:\d+$/u, '').replace(/\.$/u, '')
+  if (hostPart === '') return false
+  if (hostPart.startsWith('[')) return /^\[[0-9a-f:.]{2,}\]$/iu.test(hostPart)
+  // All-digit (or hex) spellings are numbers, not hostnames: WHATWG turns them
+  // into an IPv4 literal.
+  if (/^(?:\d+|0[xX][0-9a-f]+)$/u.test(hostPart)) return false
+  const labels = hostPart.split('.')
+  if (!labels.every((label) => /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/iu.test(label))) return false
+  if (labels.length === 1) return allowSingleLabel && hostPart.length >= 2 && !PLACEHOLDER_HOSTS.has(hostPart.toLowerCase())
+  if (labels.length === 4 && labels.every((label) => /^\d{1,3}$/u.test(label))) return true
+  // A DNS name: the TLD must be alphabetic (or punycode) and at least two chars.
+  const tld = labels.at(-1) ?? ''
+  if (!/^(?:[a-z]{2,}|xn--[a-z0-9-]+)$/iu.test(tld)) return false
+  const lower = hostPart.toLowerCase()
+  return !/^(?:example\.(?:com|net|org|edu)|.*\.(?:invalid|test|localhost))$/u.test(lower)
 }
 
 /**
