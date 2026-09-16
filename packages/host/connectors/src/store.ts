@@ -98,7 +98,16 @@ async function ensurePrivateDirectory(dir: string): Promise<void> {
 }
 
 export class ConnectorStore {
-  private readonly dir: string
+  /**
+   * The resolved per-account directory this store writes to.
+   *
+   * Callers that outlive a session reconfiguration (an in-flight SDK 401 write,
+   * a refresh) compare THIS to decide whether they still write to the account
+   * they started on. Comparing store instance identity would wrongly reject a
+   * same-account reconfiguration — the new instance points at the same
+   * directory and the write is both safe and necessary (2026-09-16 audit R2).
+   */
+  readonly dir: string
 
   constructor(options: ConnectorStoreOptions = {}) {
     // Default root: `<dshHome>/users/<encoded-user>/connectors`; a real user

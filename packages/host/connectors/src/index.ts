@@ -398,11 +398,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   ): Promise<{ authProvider?: OAuthClientProvider; handle?: LiveProviderHandle }> => {
     const target = oauthTargetOf(def)
     if (target === null || credential?.accessToken === undefined) return {}
-    // The provider (and any SDK 401 self-heal it drives) belongs to the store
+    // The provider (and any SDK 401 self-heal it drives) belongs to the ACCOUNT
     // that was current when this registration was built. A user switch replaces
-    // `store`; persisting through the *new* one would write this account's
-    // tokens into the next user's directory (2026-09-16 audit E5).
-    const registrationStore = store
+    // `store` with a store rooted in another directory; persisting through it
+    // would write this account's tokens into the next user's directory. Compare
+    // the resolved directory, not the instance: a same-account session
+    // re-establishment swaps the instance but keeps the directory, and that
+    // write (e.g. a rotated refresh token) must not be dropped.
+    const registrationScope = store.dir
     // Registration must not depend on a discovery round trip: when the token is
     // still valid and the definition already names its token endpoint, the
     // provider can refresh on 401 through that endpoint alone (the SDK calls
@@ -416,7 +419,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         credential,
         target,
         onPersist: (patch: Partial<ConnectorCredential>) => {
-          if (registrationStore !== store) return
+          if (registrationScope !== store.dir) return
           const changed = persistAndMaybeAnnounce(def.id, patch)
           void changed.catch((cause: unknown) => {
             ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
@@ -446,8 +449,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           // access token must reach the store, or the next process (or the
           // next registration) would refresh with a dead grant. Never through
           // a store that a user switch has replaced in the meantime.
-          if (registrationStore !== store) return
-          void registrationStore.updateCredential(def.id, patch)
+          if (registrationScope !== store.dir) return
+          void store.updateCredential(def.id, patch)
             .then(() => { ctx.emit('pico/connector-credentials-changed', { id: def.id }) })
             .catch((cause: unknown) => {
               ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
@@ -558,6 +561,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // read: a disconnect, a newer interactive re-authorization, or a user
     // switch must make the stale result a no-op (2026-09-16 audit E5/E6).
     writeIfUnchanged: (id, expected, patch) => store.updateCredentialIfUnchanged(id, expected, patch),
+    scope: () => store.dir,
     target: (id) => {
       const def = defs.find(entry => entry.id === id)
       return def ? oauthTargetOf(def) : null
@@ -603,6 +607,21 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * mismatch after its next await and aborts instead of resurrecting a
    * disconnected connector.
    */
+  /**
+   * Per-connector registration sequence. Bumped by EVERY `registerMcp` entry so
+   * an older registration that is still parked in discovery (e.g. one triggered
+   * by a credentials-changed announce) cannot finish after a newer one (a user
+   * re-authorization) and retire/replace its transport. `beginIntent` alone did
+   * not cover this: it does not bump the generation, and announce-triggered
+   * registrations carry the teardown signal rather than an intent.
+   */
+  const registrationSeqs = new Map<string, number>()
+  const currentRegistrationSeq = (id: string): number => registrationSeqs.get(id) ?? 0
+  const bumpRegistrationSeq = (id: string): number => {
+    const next = currentRegistrationSeq(id) + 1
+    registrationSeqs.set(id, next)
+    return next
+  }
   const connectorGenerations = new Map<string, number>()
   const currentGeneration = (id: string): number => connectorGenerations.get(id) ?? 0
   const bumpGeneration = (id: string): number => {
@@ -1089,9 +1108,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // registration request) bumps it, and every await below re-checks this
     // closure so the old registration cannot spawn after the bump.
     const generation = currentGeneration(def.id)
-    /** A teardown/disconnect landed: spawn nothing more, let the caller unwind quietly. */
+    const registrationSeq = bumpRegistrationSeq(def.id)
+    /** A teardown/disconnect or a NEWER registration landed: spawn nothing more. */
     const superseded = (): boolean =>
-      outbound.signal?.aborted === true || generation !== currentGeneration(def.id)
+      outbound.signal?.aborted === true
+      || generation !== currentGeneration(def.id)
+      || registrationSeq !== currentRegistrationSeq(def.id)
     // conn-1: a logout/user switch that lands while this registration is
     // awaiting must not resurrect the previous user's MCP servers.
     if (superseded()) return { rejected: [], superseded: true }
