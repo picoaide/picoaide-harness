@@ -137,6 +137,36 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
 `zh-CN`，语言包插件也按这个 id 注册），但**内置 locale 只有 `zh`/`en`**、且本 profile 不装
 语言包插件 ⇒ `LocaleSnapshot.active` 今天必然是裸 id。两处归一化因此等价，不改。
 
+### F. macOS `/dev/fd` 陷阱（2026-09-16 客户现场，阻塞级）
+
+**症状**：macOS 客户端上**一切记忆写入失败**（读取正常）——面板报
+「Failed: 仓库内 .memory.lock 是符号链接（或越出仓库边界）——已拒绝写入」，
+但用户实测目录树里一个符号链接都没有、`.memory.lock` 都是 0 字节普通文件，
+且"写入尝试后会重新生成"、越积越多。memory / dtodo / 归档 / sync 全中招。
+
+**根因**：`lib/sync/filesets.js` 的 `fdRealPath()` 用 `/proc/self/fd/N` →
+`/dev/fd/N` 反查"这个 fd 到底开在哪"。**macOS 上 `/proc/self/fd` 不存在，而
+`realpathSync('/dev/fd/N')` 不解析、原样返回 `/dev/fd/N` 且不抛错**（客户在
+真机用 node 与 python 双验）。于是返回的是**入口自身**的字符串 →
+`isInsideRoot(realRoot, '/dev/fd/20')` = false → `openExclusiveSafe` 返回
+`unsafe` → `withLock` 抛那条误导文案；清理用的 `unlinkSync('/dev/fd/N')` 又
+什么都删不掉（真文件在 `/dev/fd` 下不存在）⇒ 残留锁堆积。**Linux 上
+`/proc/self/fd/N` 正常解析，所以本地/CI 全绿，纯 macOS 平台缺陷。**
+
+**修法**（`lib/sync/filesets.js`）：`fdRealPath` 只在**真解析出路径**时才返回——
+候选结果仍带 `/proc/self/fd/`、`/dev/fd/` 前缀（= 没解析）或 stat 出的 dev/ino
+与已打开 fd 对不上，一律丢弃 → 返回 null ⇒ 调用方跳过包含性检查。方向保守：
+该项检查是"定位逃逸落点"的**加强**手段而非唯一防线，打开后的 inode 一致性复核
+与路径链无符号链接复核在它之后仍照跑，清理走 `removeCreatedFile`（按 inode 比对
+后 unlink 真实路径）。逐个候选尝试，第一个真解析成功者胜出。
+
+**回归**：`tests/macos-fd-realpath.test.js`（4 例）。CI 跑在 Linux，所以用
+**loader 钩子把 `node:fs` 换成 macOS 形态**（`tests/fixtures/fs-macos-hook.mjs`：
+`/dev/fd/*` 原样返回、`/proc/self/fd` ENOENT）复现现场——实测**回退修复后，
+用例抛出的正是客户那句逐字相同的文案**；本机是 darwin 时另有一条真机断言。
+残留锁无需人工清理：0 字节锁会被 `isStaleLock` 判为 stale 并自动删除（客户机器
+重启客户端后首次写入即自愈）。
+
 ## 本次升级（`b4994fa` → `c337dc1a`）拿到了什么
 
 | 上游提交 | 内容 | 落地文件 |
