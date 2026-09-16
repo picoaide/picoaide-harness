@@ -146,14 +146,15 @@ function isPrivateHost(host: string): boolean {
  *     `10.0.0.5:8000`、`glitchtip.corp.example/api`）—— base 在这里派生不出
  *     origin，所以只会把原本绑不上的记录**新增**为可绑定（E1 能力）；
  *  3. 其余键上的显式 http(s) 地址（base 的原兜底，键序与 base 完全一致）；
- *  4. 扩展拼法键上的显式 http(s) 地址（camelCase / `hostname` / 连字符）；
- *  5. 扩展拼法键上文字形态是主机的裸值；
- *  6. 扩展拼法键上的单标签裸值（`glitchtip`、`glitchtip:8000`，内网自部署）——
+ *  4. 扩展拼法键（camelCase / `hostname` / 连字符）上文字形态是主机的裸值；
+ *  5. 全部地址形状键上的单标签裸值（`glitchtip`、`glitchtip:8000`，内网自部署）——
  *     放最后，因为 `n/a`/`changeme`/`-` 这类占位符也能被归一成 `http://n`。
+ *     扩展拼法键上的**显式 URL 不单列一步**：它们本就在第 3 步的键序里，
+ *     单列既是死分支（R5 实测 200k 组命中 0），也会改写 base 的显式 URL 取舍。
  *
  * 与 base 的差异**只有两处**，且都是"新增可绑定 / 更信任地址键"的方向：
  *  - 第 2 步：base 地址键上的**裸主机**现在可以绑定（base 派生不出 → 落到第 3 步）；
- *  - 第 4~6 步：扩展拼法键在 base 里只是普通键，现在享受地址键待遇。
+ *  - 第 4~5 步：扩展拼法键在 base 里只是普通键，现在享受地址键待遇（仅限裸主机）。
  * 其余情形（尤其是两个 base 地址键之间的取舍）与 base **逐条一致**，
  * 且没有任何记录会从"可绑定"变成"不可绑定"（R2/R3/R4 复核：60k+ 随机差分里
  * `baseNonNull → null = 0`，4218 组强档键两两对拍胜出键完全相同）。
@@ -212,7 +213,7 @@ export function siteOriginFromFields(fields: Record<string, string> | undefined)
  * 真站点 URL，而 `.com`/`.bar` 是真实 TLD，拒绝文案还会把它当导航指令给模型）。
  */
 const RESERVED_HOST_LABELS = new Set([
-  'invalid', 'test', 'localhost',
+  'invalid', 'test',
   'changeme', 'todo', 'none', 'null', 'nan', 'undefined', 'placeholder', 'password', 'secret', 'host',
   'your-domain', 'yourdomain', 'your-host', 'yourhost', 'my-domain', 'mydomain', 'domain', 'foo', 'bar',
 ])
@@ -224,7 +225,7 @@ const RESERVED_HOST_LABELS = new Set([
  * 这类记录推回 base 的兜底（真的换绑到别的显式 URL）。`example.com/net/org/edu`
  * 这类二级保留域仍被下面拦掉。
  */
-const RESERVED_TLDS = new Set(['invalid', 'test', 'localhost'])
+const RESERVED_TLDS = new Set(['invalid', 'test'])
 
 /**
  * Whether the text the operator wrote really names a host.
@@ -235,10 +236,12 @@ const RESERVED_TLDS = new Set(['invalid', 'test', 'localhost'])
  * 一台**真实可达的公网主机**，而拒绝文案会把它当指令交给模型
  * （`navigate the tab to http://8.8.8.8 first`）⇒ 凭据可能被注入无关站点。
  *
- * 判据 = 结构规则（无 scheme/空白/`@`、主机部分非空且无尾点、无空标签、保留名）
- * ＋ **URL 解析回读一致性**（`new URL('https://'+文本).hostname` 必须等于文本的
- * ASCII/IDNA 形式）——后者一处覆盖整数/八进制 IPv4 重写等全部归一化意外，
- * 同时保留 IDN 主机（`例子.中国` → `xn--fsqu00a.xn--fiqs8s`）。
+ * 判据 = 结构规则（无 scheme/空白/`@`、主机部分非空且无尾点、无空标签、保留名、
+ * 数值字面量）＋ **IDNA 归一化与 URL 解析回读一致性**。回读是纵深防御：`new URL`
+ * 会把 `134744072` / `0x08080808` / `010.0.0.1` 读成别的 IPv4，也会把全角/零宽
+ * 拼写折叠成 ASCII，所以**保留名否表与 TLD 判定都必须在 IDNA 形态上再跑一遍**
+ * （只在原文上跑会被 `ｐｌａｃｅｈｏｌｄｅｒ.com` 这类同形拼写绕过 —— 2026-09-16 R6 审计）。
+ * IDN 主机（`例子.中国` → `xn--fsqu00a.xn--fiqs8s`）仍然可用。
  * @param value - 字段原值。
  * @param allowSingleLabel - 是否接受 `glitchtip` / `glitchtip:8000` 这类内网单标签名（只给最后一遍）。
  * @returns 该值是否是"文字形态的主机"。
@@ -251,6 +254,7 @@ function looksLikeHostText(value: string, allowSingleLabel: boolean): boolean {
   const hostPart = hostPort.startsWith('[') ? hostPort : hostPort.replace(/:\d+$/u, '')
   if (hostPart === '' || hostPart.endsWith('.')) return false
   const lower = hostPart.toLowerCase()
+  // A bracketed IPv6 literal: the URL parser must echo it back unchanged.
   if (hostPart.startsWith('[')) {
     try {
       return new URL(`https://${hostPart}`).hostname === lower
@@ -259,10 +263,23 @@ function looksLikeHostText(value: string, allowSingleLabel: boolean): boolean {
     }
   }
   const labels = lower.split('.')
-  if (labels.some((label) => label === '' || RESERVED_HOST_LABELS.has(label))) return false
-  // Single-label intranet names are the LAST resort: they must look like a name
-  // (at least one letter — `134744072` is a number, not a host), not a placeholder.
-  if (labels.length === 1) return allowSingleLabel && hostPart.length >= 2 && /[a-z\p{L}]/u.test(hostPart)
+  if (labels.some((label) => label === '' || label.length > 63 || RESERVED_HOST_LABELS.has(label))) return false
+  if (hostPart.length > 253) return false
+  // Single-label intranet names are the LAST resort: a DNS label shape that is not
+  // a numeric/hex/percent spelling (`134744072`, `0x08080808`, `010%2e0%2e0e1` are
+  // all rewritten into another host by the URL parser) and not a placeholder in
+  // ANY encoding (`ｐｌａｃｅｈｏｌｄｅｒ` IDNA-folds to `placeholder`).
+  if (labels.length === 1) {
+    if (!allowSingleLabel || hostPart.length < 2) return false
+    if (!/^[\p{L}][\p{L}\p{N}-]*$/u.test(hostPart)) return false
+    const ascii = domainToASCII(hostPart)
+    if (ascii === '' || ascii !== lower || RESERVED_HOST_LABELS.has(ascii)) return false
+    try {
+      return new URL(`https://${ascii}`).hostname === ascii
+    } catch {
+      return false
+    }
+  }
   // A dotted-quad IPv4 is allowed only in its canonical form (no WHATWG rewrite).
   if (/^\d{1,3}(?:\.\d{1,3}){3}$/u.test(hostPart)) {
     return labels.every((label) => Number(label) <= 255 && (label === '0' || !label.startsWith('0')))
@@ -278,13 +295,16 @@ function looksLikeHostText(value: string, allowSingleLabel: boolean): boolean {
     return false
   }
   if (parsed !== ascii.toLowerCase()) return false
-  // Judge the TLD on the ASCII/IDNA form: `例子.中国` is a valid host whose TLD
-  // is the punycode label `xn--fiqs8s`.
+  // Judge the denylist, the TLD and the reserved example domains on the ASCII /
+  // IDNA form: that is the form the browser would actually resolve.
   const asciiLabels = parsed.split('.')
+  if (asciiLabels.some((label) => RESERVED_HOST_LABELS.has(label))) return false
   const tld = asciiLabels.at(-1) ?? ''
   if (RESERVED_TLDS.has(tld)) return false
-  // `example.com` / `example.org` … (RFC 2606 文档保留域) are placeholders.
-  if (['com', 'net', 'org', 'edu'].includes(tld) && (asciiLabels.at(-2) ?? '') === 'example') return false
+  // `example.com` / `example.org.cn` / `example.co.uk` … (RFC 2606 文档保留域):
+  // `example` 出现在**任何非末级**位置都视为占位（`glitchtip.corp.example`
+  // 这类把 example 当 TLD 的内网命名不受影响）。
+  if (asciiLabels.slice(0, -1).includes('example')) return false
   return /^(?:[a-z]{2,}|xn--[a-z0-9-]+)$/u.test(tld)
 }
 
