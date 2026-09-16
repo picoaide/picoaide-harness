@@ -59,6 +59,12 @@ describe('bareHostOrigin: 用户按内置模板只填主机名', () => {
     // label, IDN. Private/loopback/single-label default to http.
     expect(bareHostOrigin('127.0.0.1:8000')).toBe('http://127.0.0.1:8000')
     expect(bareHostOrigin('10.0.0.5:8000')).toBe('http://10.0.0.5:8000')
+    // IP literals default to http (CGNAT / benchmark / public addresses alike):
+    // guessing https made http intranet services permanently unbindable.
+    expect(bareHostOrigin('100.64.0.7')).toBe('http://100.64.0.7')
+    expect(bareHostOrigin('198.18.0.9')).toBe('http://198.18.0.9')
+    expect(bareHostOrigin('203.0.113.9:8080')).toBe('http://203.0.113.9:8080')
+    expect(bareHostOrigin('[2001:db8::1]')).toBe('http://[2001:db8::1]')
     expect(bareHostOrigin('glitchtip:8000')).toBe('http://glitchtip:8000')
     expect(bareHostOrigin('例子.中国')).toBe('https://xn--fsqu00a.xn--fiqs8s')
   })

@@ -80,7 +80,7 @@ export function applyUpdateSection(ctx: ClientContext): void {
       name: 'settings.section',
       id: 'update',
       order: 1000,
-      label: t('update.about'),
+      label: () => t('update.about'),
     }, UpdateSection)),
     'enterprise: settings update section',
   )

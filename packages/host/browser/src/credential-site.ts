@@ -77,11 +77,16 @@ export function bareHostOrigin(
   // through to the credential fields.
   const singleLabel = !host.includes('.') && !isPrivateHost(host)
   if (singleLabel && options.singleLabel === false) return null
+  // An IP literal (CGNAT 100.64/10, benchmark 198.18/15, private blocks, but
+  // also a bare public address) is far more likely a directly-reached service
+  // than a TLS one; defaulting them to https made the binding permanently
+  // unreachable for http intranet addresses (2026-09-16 audit R5).
+  const ipLiteral = host.startsWith('[') || /^\d{1,3}(?:\.\d{1,3}){3}$/u.test(host)
   // `new URL` gives IDN/IPv4/IPv6/single-label a hostname; private/loopback/
-  // single-label intranet names default to http, public names to https. The
-  // refusal message tells the user what to do when the real service uses the
-  // other scheme (scheme-less input cannot encode that choice).
-  const scheme = isPrivateHost(host) || singleLabel ? 'http' : 'https'
+  // single-label intranet names and IP literals default to http, public DNS
+  // names to https. The refusal message tells the user what to do when the real
+  // service uses the other scheme (scheme-less input cannot encode that choice).
+  const scheme = isPrivateHost(host) || singleLabel || ipLiteral ? 'http' : 'https'
   return `${scheme}://${url.host.toLowerCase()}`
 }
 

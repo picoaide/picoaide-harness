@@ -55,6 +55,15 @@ describe('precheckSkillPackage（与服务端同码）', () => {
       .some((i) => i.code === PrecheckCode.ProvenanceForbidden)).toBe(true)
   })
 
+  it('报错文本里的用户值只插一遍（值含占位符不被后续替换改写）', () => {
+    const rawTag = '{n}'.repeat(15) // 45 chars, over the 32-rune tag limit
+    const issues = precheckSkillPackage(md({ tags: `["${rawTag}"]` }), 'demo-skill')
+    const hit = issues.find((issue) => issue.code === PrecheckCode.FieldTooLong && issue.field === 'tags')
+    expect(hit, 'the over-long tag must be reported').toBeDefined()
+    expect(hit?.message).toContain(rawTag)
+    expect(hit?.message).not.toContain('32'.repeat(10))
+  })
+
   it('旧 camelCase 调用策略键与非布尔值被拒', () => {
     expect(precheckSkillPackage(md({ userInvocable: 'true' }), 'demo-skill')
       .some((i) => i.code === PrecheckCode.InvocationInvalid)).toBe(true)
