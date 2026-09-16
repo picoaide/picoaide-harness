@@ -154,6 +154,34 @@ describe('siteOriginFromFields', () => {
       .toBe('https://b.example')
   })
 
+  it('does not let a placeholder in an address key beat a real URL elsewhere', () => {
+    // 2026-09-16 R3 审计：`n/a`/`changeme`/`TODO`/`-` 都能被裸主机归一成
+    // `http://n` 这类 origin，早期实现让它压过真站点，拒绝文案还会把该主机
+    // 当成指令告诉模型。单标签猜测必须排在显式地址之后。
+    expect(siteOriginFromFields({ api_url: 'n/a', homepage: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ server_url: 'changeme', docs: 'https://real.example' }))
+      .toBe('https://real.example')
+    expect(siteOriginFromFields({ address: 'TODO', note: 'https://real.example' }))
+      .toBe('https://real.example')
+    // 明确像主机的裸值（含点 / IP / 私网）仍然赢过无关键上的 URL。
+    expect(siteOriginFromFields({ server_url: 'glitchtip.corp.example', docs: 'https://real.example' }))
+      .toBe('https://glitchtip.corp.example')
+    expect(siteOriginFromFields({ server_url: '10.0.0.5:8000', docs: 'https://real.example' }))
+      .toBe('http://10.0.0.5:8000')
+    // 没有别的候选时，单标签内网值仍可用（E1 能力）。
+    expect(siteOriginFromFields({ server_url: 'glitchtip:8000' })).toBe('http://glitchtip:8000')
+  })
+
+  it('recognizes env-style HOSTNAME and camelCase hostName keys', () => {
+    expect(siteOriginFromFields({ HOSTNAME: 'glitchtip.corp.example' })).toBe('https://glitchtip.corp.example')
+    expect(siteOriginFromFields({ hostName: 'glitchtip.corp.example' })).toBe('https://glitchtip.corp.example')
+    // 词边界仍然成立：非地址键的单键形态不得凭空造出 origin。
+    expect(siteOriginFromFields({ SECURITY_TOKEN: 'abc123def456' })).toBeNull()
+    expect(siteOriginFromFields({ siteName: 'staging' })).toBeNull()
+    expect(siteOriginFromFields({ website: 'staging' })).toBeNull()
+  })
+
   it('does not let a URL under an unrelated key beat the address key’s bare host', () => {
     // DSN / 文档链接这类字段里带 URL，但它们不是连接器的站点。
     expect(siteOriginFromFields({ base_url: 'glitchtip.corp.example', sentry_dsn: 'https://abc123@9f1.sentry.io/1' }))

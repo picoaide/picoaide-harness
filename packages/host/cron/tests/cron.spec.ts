@@ -245,6 +245,19 @@ describe('按日回退游标不会因"跳日"原地打转（R9 审计）', () =>
     `)
   })
 
+  it('still finds a match that lies BEFORE the skipped day', () => {
+    assertWithTz('Pacific/Apia', `
+      // 2011-12-30 不存在；2011-12-25 是周日 03:00，必须仍被找到
+      // （早期实现遇到跳日直接 break，会丢掉它 —— R3 审计）。
+      const last = lastRunAtMs('0 3 * * 0', new Date('2011-12-31T23:59:00').getTime())
+      assert.ok(last !== undefined, 'the Sunday before the skipped day must be found')
+      const d = new Date(last)
+      assert.equal(d.getDate(), 25)
+      assert.equal(d.getHours(), 3)
+      assert.equal(d.getDay(), 0)
+    `)
+  })
+
   it('still walks past ordinary days', () => {
     assertWithTz('Pacific/Apia', `
       const last = lastRunAtMs('0 0 29 2 *', Date.UTC(2017, 5, 1))

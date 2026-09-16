@@ -147,6 +147,9 @@ describe('native copy added by the 2026-09-16 i18n pass', () => {
     expect(zh.body).toMatch(CJK)
     expect(zh.retry).toBe('重新加载')
     expect(zh.lang).toBe('zh-CN')
+    // 诊断导出失败框的标题（R3 审计：原先只被英文断言覆盖 ⇒ 回退成硬编码不红）。
+    expect(desktopDiagnosticsPrivacyCopy('zh').errorTitle).toMatch(CJK)
+    expect(desktopDiagnosticsPrivacyCopy('en').errorTitle).not.toMatch(CJK)
     expect(en.heading).not.toMatch(CJK)
     expect(en.body).not.toMatch(CJK)
     expect(en.retry).not.toMatch(CJK)

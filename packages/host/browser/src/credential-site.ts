@@ -40,8 +40,14 @@
  * `http://abc123def456`）。
  */
 const SITE_FIELD_HINT_STRONG = /(?:^|_)(?:base_?)?(?:url|uri|site|host|origin|endpoint|address)(?:$|_)/iu
-/** 地址形状的扩展拼法（含 camelCase 与 `hostname`）：排序与裸主机归一的放行判据。 */
-const SITE_FIELD_LOOKS_LIKE_ADDRESS = /(?:^|[_-])(?:base[_-]?)?(?:hostname|url|uri|site|host|origin|endpoint|address)(?:$|[_-])|(?:Url|Uri|Site|Hostname|Host|Origin|Endpoint|Address|URL|URI)$/u
+/**
+ * 扩展档之一：词边界 / 连字符分隔（大小写不敏感，因此 `HOSTNAME` 这种 env 风格
+ * 的键也算地址键）。camelCase 另立一条**大小写敏感**的规则，否则 `/uri/i` 又会
+ * 把 `security` 判成地址键（B1 的原始缺陷形态）。
+ */
+const SITE_FIELD_LOOKS_LIKE_ADDRESS_WORD = /(?:^|[_-])(?:base[_-]?)?(?:hostname|url|uri|site|host|origin|endpoint|address)(?:$|[_-])/iu
+/** 扩展档之二：camelCase（`serverUrl` / `apiEndpoint` / `hostName`）。 */
+const SITE_FIELD_LOOKS_LIKE_ADDRESS_CAMEL = /(?:hostName|Url|Uri|Site|Hostname|Host|Origin|Endpoint|Address|URL|URI)$/u
 
 /**
  * 地址形状的优先级：0 = 与 base 同档的地址键，1 = 扩展拼法的地址键，
@@ -49,7 +55,7 @@ const SITE_FIELD_LOOKS_LIKE_ADDRESS = /(?:^|[_-])(?:base[_-]?)?(?:hostname|url|u
  */
 function siteFieldHint(key: string): number {
   if (SITE_FIELD_HINT_STRONG.test(key)) return 0
-  if (SITE_FIELD_LOOKS_LIKE_ADDRESS.test(key)) return 1
+  if (SITE_FIELD_LOOKS_LIKE_ADDRESS_WORD.test(key) || SITE_FIELD_LOOKS_LIKE_ADDRESS_CAMEL.test(key)) return 1
   return SITE_FIELD_HINT_NONE
 }
 
@@ -134,16 +140,22 @@ function isPrivateHost(host: string): boolean {
  *  1. **地址形状键上的显式 http(s) 地址**。base 的地址键（词边界判据）在此完全
  *     同序；扩展拼法（camelCase / `hostname` / 连字符）也享受同一优先级，因为
  *     base 对"地址键优先于其它键"这件事本身就是这么定的，只是没识别这些拼法。
- *  2. **地址形状键上的裸主机名**（自部署模板教用户只填 `app.example.com`）
- *     —— base 在这里派生不出 origin，所以只会**新增**可绑定的记录。
- *  3. **其它键上的显式 http(s) 地址** —— base 的兜底，保持最后。
+ *  2. **地址形状键上"明确像主机"的裸值**（含点 / IP / 回环私网，如
+ *     `app.example.com`、`10.0.0.5:8000`）—— base 在这里派生不出 origin，所以
+ *     只会**新增**可绑定的记录。
+ *  3. **其它键上的显式 http(s) 地址** —— base 的兜底。
+ *  4. **地址形状键上的单标签裸值**（`glitchtip`、`glitchtip:8000`，内网自部署场景）
+ *     —— 放在最后：`n/a` / `changeme` / `TODO` 这类占位符也能被归一成
+ *     `http://n` 这种 origin，不能让它顶掉一条真实的显式地址（2026-09-16 R3 审计：
+ *     `{api_url:'n/a', homepage:'https://real.example'}` 曾从 real.example 变成
+ *     `http://n`，拒绝文案还会把该主机当成指令告诉模型）。
  *
  * 第 2 步排在第 3 步之前，是为了不让一个"非地址字段里的 URL"（例如
  * `{base_url:'glitchtip.corp.example', sentry_dsn:'https://…@sentry.io/1'}` 的
- * DSN）顶掉连接器真正的站点。**与 base 的差异只剩这两类**：地址键的裸主机名
- * 现在能绑定、扩展拼法现在与 base 地址键同档；两个 base 地址键之间的取舍
- * （含 110 组两两对拍）与 base 逐条一致，且没有任何记录会从"可绑定"变成
- * "不可绑定"（2026-09-16 R2 复核差分：20000 组里 baseNonNull→null = 0）。
+ * DSN）顶掉连接器真正的站点。**与 base 的差异只剩两类**：地址键的裸主机名现在
+ * 能绑定、扩展拼法现在与 base 地址键同档；两个 base 地址键之间的取舍（含 110 组
+ * 两两对拍）与 base 逐条一致，且没有任何记录会从"可绑定"变成"不可绑定"
+ * （2026-09-16 R2/R3 复核差分：372 万组里 baseNonNull→null = 0）。
  * @param fields - 凭据字段（`ConnectorCredential.fields`）。
  * @returns 第一个可用 origin，或 `null`。
  */
@@ -154,22 +166,44 @@ export function siteOriginFromFields(fields: Record<string, string> | undefined)
   const ranked = entries
     .map(([key, value]) => ({ key, value, hint: siteFieldHint(key) }))
     .sort((a, b) => (a.hint - b.hint) || a.key.localeCompare(b.key))
-  for (const entry of ranked) {
-    if (entry.hint === SITE_FIELD_HINT_NONE) continue
+  const addressShaped = ranked.filter((entry) => entry.hint !== SITE_FIELD_HINT_NONE)
+  const otherKeys = ranked.filter((entry) => entry.hint === SITE_FIELD_HINT_NONE)
+  for (const entry of addressShaped) {
     const origin = httpOriginOf(entry.value)
     if (origin !== null) return origin
   }
-  for (const entry of ranked) {
-    if (entry.hint === SITE_FIELD_HINT_NONE) continue
+  for (const entry of addressShaped) {
+    const origin = bareHostOrigin(entry.value)
+    if (origin !== null && isUnambiguousHost(origin)) return origin
+  }
+  for (const entry of otherKeys) {
+    const origin = httpOriginOf(entry.value)
+    if (origin !== null) return origin
+  }
+  for (const entry of addressShaped) {
     const origin = bareHostOrigin(entry.value)
     if (origin !== null) return origin
   }
-  for (const entry of ranked) {
-    if (entry.hint !== SITE_FIELD_HINT_NONE) continue
-    const origin = httpOriginOf(entry.value)
-    if (origin !== null) return origin
-  }
   return null
+}
+
+/**
+ * Whether a normalized origin names a host no placeholder would spell by accident.
+ *
+ * `n/a`、`changeme`、`-`、`abc123def456` 都能通过 `bareHostOrigin`（它的职责是
+ * "用户只填了主机名"），但只有带点 / IP / 回环私网的值才足以让人相信它真的是
+ * 站点；单标签值留给最后一遍（2026-09-16 R3 审计）。
+ * @param origin - `bareHostOrigin` 的返回值。
+ * @returns 该 origin 是否"明确像主机"。
+ */
+function isUnambiguousHost(origin: string): boolean {
+  let host: string
+  try {
+    host = new URL(origin).hostname
+  } catch {
+    return false
+  }
+  return host.includes('.') || host.startsWith('[') || isPrivateHost(host)
 }
 
 /**

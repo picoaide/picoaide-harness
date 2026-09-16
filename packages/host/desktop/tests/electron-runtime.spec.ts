@@ -748,6 +748,9 @@ describe('Electron compatibility runtime', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
+    // Pin the ZH title: asserting the English one would be indistinguishable
+    // from the pre-i18n hard-coded literal (2026-09-16 R3 audit).
+    runtime.setLocalePreference('zh')
     diagnostics.export
       .mockRejectedValueOnce(new Error('disk is full'))
       .mockResolvedValueOnce('C:\\Users\\Example\\diagnostics-retry.zip')
@@ -759,9 +762,11 @@ describe('Electron compatibility runtime', () => {
     expect(electron.shell.showItemInFolder)
       .toHaveBeenCalledWith('C:\\Users\\Example\\diagnostics-retry.zip')
     // The error box follows the app language like the privacy dialog above it
-    // (2026-09-16 R2 audit); the default test locale is English.
+    // (2026-09-16 R2 audit). The Chinese form is asserted on purpose: the English
+    // one equals the old hard-coded literal, so it cannot detect a revert.
+    expect(desktopDiagnosticsPrivacyCopy('zh').errorTitle).toBe('无法导出诊断信息')
     expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
-      desktopDiagnosticsPrivacyCopy('en').errorTitle,
+      desktopDiagnosticsPrivacyCopy('zh').errorTitle,
       'disk is full',
     )
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('failed to export diagnostics: disk is full'))
