@@ -41,9 +41,11 @@ const ACTION_BUTTON: React.CSSProperties = {
   marginTop: 8,
   padding: '8px 14px',
   borderRadius: 6,
-  border: '1px solid var(--dsw-alias-state-info-primary, #4176E6)',
+  // `--dsw-alias-state-info-primary` 上游不存在（2026-09-16 审计）⇒ 亮暗都恒为
+  // fallback 的 #4176E6。上游的"业务/信息蓝"是 state-business-primary（两主题都翻转）。
+  border: '1px solid var(--dsw-alias-state-business-primary, #4176E6)',
   background: 'transparent',
-  color: 'var(--dsw-alias-state-info-primary, #4176E6)',
+  color: 'var(--dsw-alias-state-business-primary, #4176E6)',
   fontSize: 13,
   cursor: 'pointer',
   alignSelf: 'flex-start',
@@ -54,9 +56,13 @@ const INPUT: React.CSSProperties = {
   boxSizing: 'border-box',
   padding: '8px 10px',
   borderRadius: 6,
-  border: '1px solid var(--dsw-alias-border-primary, #D0D5DD)',
-  background: 'var(--dsw-alias-bg-elevated, #FFFFFF)',
-  color: 'var(--dsw-alias-text-primary, #1A1D24)',
+  // 输入框表面/描边/文字：用上游真实存在的 token（bg-layer-1 / border-l2 /
+  // label-primary，见 ui-primitives 的 Input.module.css）。原先的
+  // `--dsw-alias-border-primary` / `--dsw-alias-bg-elevated` / `--dsw-alias-text-primary`
+  // 上游都不存在 ⇒ 暗色下仍是白底深字。
+  border: '1px solid var(--dsw-alias-border-l2, #D0D5DD)',
+  background: 'var(--dsw-alias-bg-layer-1, #FFFFFF)',
+  color: 'var(--dsw-alias-label-primary, #1A1D24)',
   fontSize: 13,
 }
 

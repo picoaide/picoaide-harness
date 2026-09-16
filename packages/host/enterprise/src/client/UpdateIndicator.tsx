@@ -166,7 +166,13 @@ export function UpdateIndicator({ state }: { state?: UpdateState | null }): JSX.
     : downloading !== undefined
       ? `${downloading}${percent !== undefined ? ` ${percent}` : ''}`
       : available ?? ''
-  const color = ready !== undefined ? '#16a34a' : downloading !== undefined ? '#f59e0b' : '#3b82f6'
+  // 状态色走会翻转的 token（2026-09-16 暗色审计）：原先写死的 #16a34a/#f59e0b/#3b82f6
+  // 在亮色侧边栏上只有 2.06–3.15:1，'下载中'的琥珀点在亮色下几乎看不见。
+  const color = ready !== undefined
+    ? 'var(--dsw-alias-state-success-primary, #16a34a)'
+    : downloading !== undefined
+      ? 'var(--dsw-alias-state-warn-primary, #f59e0b)'
+      : 'var(--dsw-alias-state-business-primary, #3b82f6)'
   const title = ready !== undefined
     ? t('update.readyTitle', { version: ready })
     : downloading !== undefined
@@ -189,7 +195,7 @@ export function UpdateIndicator({ state }: { state?: UpdateState | null }): JSX.
         fontSize: 10,
         fontWeight: 600,
         lineHeight: 1,
-        color: 'var(--dsw-alias-fg-primary, #000000)',
+        color: 'var(--dsw-alias-label-primary, #000000)',
         whiteSpace: 'nowrap',
       },
       title,
@@ -202,6 +208,8 @@ export function UpdateIndicator({ state }: { state?: UpdateState | null }): JSX.
         height: 6,
         borderRadius: '50%',
         backgroundColor: color,
+        // 6px 的点在浅底上只有 2–3:1：用一圈描边把边界补出来（跟随主题的 border token）。
+        boxShadow: '0 0 0 1px var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1))',
       },
     }),
     label,

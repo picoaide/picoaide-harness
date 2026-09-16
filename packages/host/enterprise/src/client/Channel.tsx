@@ -144,8 +144,12 @@ export function BraceMark({ size, className }: { size: number; className?: strin
         width: size,
         height: size,
         borderRadius: radius,
-        backgroundColor: 'var(--dsw-alias-fg-primary, #000000)',
-        color: 'var(--dsw-alias-bg-base, #ffffff)',
+        // 品牌方块 = 反色胶囊：底色取**正文墨色**（亮=近黑 / 暗=近白），mark 取反色墨。
+        // 2026-09-16 修：原先用 `--dsw-alias-fg-primary`（上游**不存在**这个 token）
+        // ⇒ 底色永远是 fallback 的 #000000，而 mark 用的 `--dsw-alias-bg-base` 在暗色
+        // 下变成近黑 → 暗色侧边栏里"黑块上的黑 mark"，等于看不见品牌图形。
+        backgroundColor: 'var(--dsw-alias-label-primary, #000000)',
+        color: 'var(--dsw-alias-label-primary-inverted, #ffffff)',
       },
     },
     BraceGlyph(),
@@ -221,8 +225,13 @@ export function BrandName() {
             letterSpacing: '0',
             padding: '2px 5px',
             borderRadius: '4px',
-            color: 'var(--dsw-alias-bg-base, #ffffff)',
-            backgroundColor: 'var(--dsw-alias-fg-primary, #000000)',
+            // 版本号胶囊 = 反色（亮色：黑底白字；暗色：白底黑字）。
+            // 2026-09-16 真机反馈"暗色下看不清"：这里原先用 `--dsw-alias-fg-primary`，
+            // 该 token 上游**不存在** ⇒ 底色恒为 fallback #000000，而文字用
+            // `--dsw-alias-bg-base`（暗色 = bluish-950 近黑）→ 黑底黑字。
+            // 正确的一对是 label-primary（会翻转的墨色）+ label-primary-inverted（反色墨）。
+            color: 'var(--dsw-alias-label-primary-inverted, #ffffff)',
+            backgroundColor: 'var(--dsw-alias-label-primary, #000000)',
             opacity: 0.75,
           },
         }, `v${version}`)
@@ -238,7 +247,7 @@ export function BrandBadge() {
   const name = resolveClientName(channel)
   return createElement(
     'span',
-    { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--dsw-alias-fg-secondary, #666)', opacity: 0.85 } },
+    { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--dsw-alias-label-secondary, #666)', opacity: 0.85 } },
     // 加载失败只是不显示这张小图（名字还在），不占位破图。
     logo ? createElement(ChannelLogo, { url: logo, size: 16, alt: '', radius: 3, fallback: () => null }) : null,
     name,

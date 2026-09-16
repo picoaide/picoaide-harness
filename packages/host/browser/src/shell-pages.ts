@@ -28,11 +28,17 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
     --text-muted: #6b7280;
     --border: #dcdfe4;
     --accent: #2563eb;
-    --accent-soft: rgba(37, 99, 235, .12);
     --warning: #d97706;
+    /* 实心胶囊上的文字色：填充色随主题翻，文字必须跟着翻，否则暗色下白字压浅橙
+       （--warning #f0a03c 上白字 2.14:1）。取值见 2026-09-16 暗色审计：
+       浅橙/浅蓝上都是深墨最稳（深墨 #1a1d24 在 #d97706 上 5.31:1、#f0a03c 上 7.87:1）。 */
+    --on-warning: #1a1d24;
+    --on-accent: #ffffff;
     --danger: #dc2626;
     --radius: 6px;
     --radius-lg: 8px;
+    /* 独立文档：让原生滚动条/控件跟随应用主题（桌面壳设了 nativeTheme.themeSource）。 */
+    color-scheme: light dark;
     font-size: 13px;
   }
   @media (prefers-color-scheme: dark) {
@@ -44,8 +50,9 @@ export const BROWSER_SHELL_HTML = `<!DOCTYPE html>
       --text-muted: #a6a9b0;
       --border: #34363d;
       --accent: #6b9bff;
-      --accent-soft: rgba(107, 155, 255, .16);
       --warning: #f0a03c;
+      --on-warning: #1a1d24;
+      --on-accent: #1a1d24;
       --danger: #f0726e;
     }
   }
@@ -327,11 +334,14 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
     --text-muted: #6b7280;
     --border: #dcdfe4;
     --accent: #2563eb;
-    --accent-soft: rgba(37, 99, 235, .12);
     --warning: #d97706;
+    --on-warning: #1a1d24;
+    --on-accent: #ffffff;
     --danger: #dc2626;
     --radius: 6px;
     --radius-lg: 8px;
+    /* 独立文档：让原生滚动条/控件跟随应用主题（桌面壳设了 nativeTheme.themeSource）。 */
+    color-scheme: light dark;
     font-size: 13px;
   }
   @media (prefers-color-scheme: dark) {
@@ -343,8 +353,9 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
       --text-muted: #a6a9b0;
       --border: #34363d;
       --accent: #6b9bff;
-      --accent-soft: rgba(107, 155, 255, .16);
       --warning: #f0a03c;
+      --on-warning: #1a1d24;
+      --on-accent: #1a1d24;
       --danger: #f0726e;
     }
   }
@@ -381,7 +392,7 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
   .s-capsule .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* The toggle is ALWAYS visible (never hover-revealed): 我来操作 / 交给 AI is
      the single control for handing the browser over and taking it back. */
-  .s-capsule .take { flex: none; display: inline-flex; align-items: center; height: 24px; padding: 0 10px; font-size: 12px; background: var(--warning); border-color: var(--warning); color: #fff; }
+  .s-capsule .take { flex: none; display: inline-flex; align-items: center; height: 24px; padding: 0 10px; font-size: 12px; background: var(--warning); border-color: var(--warning); color: var(--on-warning); }
 
   /* ---------- panel (AI 活动) ---------- */
   .s-panel { flex-direction: column; background: var(--surface-raised); border-left: 1px solid var(--border); box-shadow: -8px 0 28px rgba(0,0,0,.10); }
@@ -606,15 +617,17 @@ export const BROWSER_OVERLAY_HTML = `<!DOCTYPE html>
       label = '交给 AI'
       title = '交回给 AI 继续操作'
       take.style.background = 'var(--accent)'; take.style.borderColor = 'var(--accent)'
+      // 填充换成强调色时文字色必须一起换（暗色 --accent 是浅蓝，白字只有 2.71:1）。
+      take.style.color = 'var(--on-accent)'
     } else if (state.busy) {
       dot.className = 'dot busy'
       $('ai-label').textContent = 'AI 操作中 · ' + labelOf(state.busyTool)
       title = '暂停 AI，自己操作'
-      take.style.background = ''; take.style.borderColor = ''
+      take.style.background = ''; take.style.borderColor = ''; take.style.color = ''
     } else {
       dot.className = 'dot'
       $('ai-label').textContent = 'AI'
-      take.style.background = ''; take.style.borderColor = ''
+      take.style.background = ''; take.style.borderColor = ''; take.style.color = ''
     }
     // 接管请求还在飞的时候保留「正在接管…」（见 takeControl），其余情况按状态刷新。
     if (!take.disabled) { take.textContent = label; take.title = title }

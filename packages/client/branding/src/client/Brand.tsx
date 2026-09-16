@@ -91,8 +91,11 @@ export function BraceMark({ size, className }: { size: number; className?: strin
         width: size,
         height: size,
         borderRadius: Math.max(4, Math.round(size * BRACE_TILE_RADIUS_RATIO)),
-        backgroundColor: 'var(--dsw-alias-fg-primary, #000000)',
-        color: 'var(--dsw-alias-bg-base, #ffffff)',
+        // 与 enterprise 的 Channel.tsx 同款（两份拷贝必须一致）：
+        // 方块取会翻转的正文墨色，mark 取反色墨 —— `--dsw-alias-fg-primary` 上游不存在，
+        // 用它会让底色恒为 #000000，而 mark 在暗色下变成近黑（黑底黑 mark = 看不见）。
+        backgroundColor: 'var(--dsw-alias-label-primary, #000000)',
+        color: 'var(--dsw-alias-label-primary-inverted, #ffffff)',
       },
     },
     BraceGlyph(),
@@ -120,8 +123,10 @@ export function BrandName() {
             letterSpacing: '0',
             padding: '2px 5px',
             borderRadius: '4px',
-            color: 'var(--dsw-alias-bg-base, #ffffff)',
-            backgroundColor: 'var(--dsw-alias-fg-primary, #000000)',
+            // 版本号胶囊 = 反色（亮：黑底白字 / 暗：白底黑字）。与 enterprise 的
+            // Channel.tsx 同款；`--dsw-alias-fg-primary` 上游不存在 ⇒ 原先暗色下黑底黑字。
+            color: 'var(--dsw-alias-label-primary-inverted, #ffffff)',
+            backgroundColor: 'var(--dsw-alias-label-primary, #000000)',
             opacity: 0.75,
           },
         }, `v${version}`)
