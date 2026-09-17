@@ -88,6 +88,9 @@ export default function ErrorMonitoring() {
   const [testErr, setTestErr] = useState('')
   const [clients, setClients] = useState<ErrorReportingClientsPayload>(EMPTY_CLIENTS)
   const [clientsError, setClientsError] = useState('')
+  // 已加载闸门（2026-09-17 审计 P3）：计数块在数据到达前渲染 `?? 0` 会闪"0 台"，
+  // 与"绝不把没有数据渲染成一切正常"直接冲突。
+  const [clientsLoaded, setClientsLoaded] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -118,6 +121,8 @@ export default function ErrorMonitoring() {
     } catch (err: any) {
       setClients(EMPTY_CLIENTS)
       setClientsError(err.message)
+    } finally {
+      setClientsLoaded(true)
     }
   }, [])
 
@@ -309,13 +314,22 @@ export default function ErrorMonitoring() {
         </CardHeader>
         <CardContent className="space-y-3">
           {clientsError && <div className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">{clientsError}</div>}
-          <div className="grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
-            <div>已启用上报: <span className="font-medium">{clients.ready ?? 0}</span> 台</div>
-            <div>初始化失败: <span className="font-medium text-destructive">{clients.failed ?? 0}</span> 台</div>
-            <div>未启用: <span className="font-medium">{clients.disabled ?? 0}</span> 台</div>
-            <div>配置不可用: <span className="font-medium">{clients.config_unavailable ?? 0}</span> 台</div>
-          </div>
-          <p className="text-xs text-muted-foreground">最近一次上报: {formatTime(clients.last_report_at)}</p>
+          {/* 2026-09-17 审计（P3）：计数块原先**无条件**渲染 `?? 0`，数据到达前会先闪一遍
+              「已启用上报: 0 台」——正是本卡片下面那条注释警告的"把没有数据渲染成一切正常"。
+              加一条已加载闸门：未加载完不渲染任何计数。 */}
+          {clientsLoaded ? (
+            <>
+              <div className="grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
+                <div>已启用上报: <span className="font-medium">{clients.ready ?? 0}</span> 台</div>
+                <div>初始化失败: <span className="font-medium text-destructive">{clients.failed ?? 0}</span> 台</div>
+                <div>未启用: <span className="font-medium">{clients.disabled ?? 0}</span> 台</div>
+                <div>配置不可用: <span className="font-medium">{clients.config_unavailable ?? 0}</span> 台</div>
+              </div>
+              <p className="text-xs text-muted-foreground">最近一次上报: {formatTime(clients.last_report_at)}</p>
+            </>
+          ) : (
+            !clientsError && <p className="text-sm text-muted-foreground">客户端上报状态加载中…</p>
+          )}
           {/* 本 bug 的教训:绝不要把"没有数据"渲染成"一切正常"。 */}
           {!hasClientData && !clientsError && (
             <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-sm text-amber-700">
