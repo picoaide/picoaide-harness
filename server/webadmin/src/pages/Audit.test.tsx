@@ -317,6 +317,7 @@ const SERVER_ACTIONS: ReadonlyArray<readonly [action: string, label: string]> = 
   ['balance_grant', '余额发放'],
   ['balance_settings', '余额策略变更'],
   ['gateway_config', '网关配置变更'],
+  ['error_reporting_test', '错误上报连通性自检'],
   ['provider_create', '新建上游'],
   ['provider_update', '更新上游'],
   ['provider_delete', '删除上游'],

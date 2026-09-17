@@ -269,3 +269,48 @@ func TestLDAPDialTimeoutApplies(t *testing.T) {
 		t.Fatalf("auth took %v, want ~%v timeout", d, ldapTimeout)
 	}
 }
+
+// TestLDAPDialControlBlocksMetadata(2026-09-17 审计,LDAP check-then-dial):
+// 连接期复检必须作用在**真正要拨的 IP** 上 —— 只检查 CheckOutboundTarget 的
+// 主机解析结果会留下 rebinding 窗口(两次解析之间换掉答案)。
+func TestLDAPDialControlBlocksMetadata(t *testing.T) {
+	cases := []struct {
+		name    string
+		address string
+		wantErr bool
+	}{
+		{"云 metadata", "169.254.169.254:389", true},
+		{"阿里云 metadata", "100.100.100.200:389", true},
+		{"IPv6 链路本地", "[fe80::1]:389", true},
+		{"企业私网目录(放行)", "10.1.2.3:389", false},
+		{"公网目录(放行)", "203.0.113.7:636", false},
+		{"形状异常不误伤", "not-a-host-port", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ldapDialControl("tcp", tc.address, nil)
+			if tc.wantErr && err == nil {
+				t.Fatalf("ldapDialControl(%q) = nil, want refusal", tc.address)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ldapDialControl(%q) = %v, want nil (私网/公网必须放行)", tc.address, err)
+			}
+		})
+	}
+}
+
+// TestRedactCredentialStripsBindPassword:对端可以把 bind 口令原样回显在错误文本里,
+// 落日志前必须擦掉(空口令不动,避免把空串替换成噪声)。
+func TestRedactCredentialStripsBindPassword(t *testing.T) {
+	const pw = "S3cr3t-Bind-Pw"
+	got := redactCredential("ldap: invalid credentials (bind pw="+pw+")", pw)
+	if strings.Contains(got, pw) {
+		t.Fatalf("password leaked into log text: %q", got)
+	}
+	if !strings.Contains(got, "***") {
+		t.Fatalf("password must be replaced, got %q", got)
+	}
+	if plain := "no secret here"; redactCredential(plain, "") != plain {
+		t.Fatalf("empty password must leave the text untouched")
+	}
+}

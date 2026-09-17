@@ -109,6 +109,7 @@ const ACTION_LABEL: Record<string, string> = {
   skill_normalize: '规范化技能包',
   // 网关(上游/模型/配置)。
   gateway_config: '网关配置变更',
+  error_reporting_test: '错误上报连通性自检',
   provider_create: '新建上游',
   provider_update: '更新上游',
   provider_delete: '删除上游',

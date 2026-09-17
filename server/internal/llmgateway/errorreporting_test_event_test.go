@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
 // errReportingRewriteTransport 把出站请求重写到 httptest 服务器,使用例
@@ -326,5 +328,109 @@ func TestErrorReportingTestEventRejectsMalformedBody(t *testing.T) {
 	}
 	if n := outbound.Load(); n != 2 {
 		t.Fatalf(`{"dsn":null} without a stored DSN must not probe anything, probes = %d`, n)
+	}
+}
+
+// TestErrorReportingTestEventHTTP3xx:上报服务要求重定向 ⇒ kind=HTTP_3XX,
+// 不再是"不应出现"的 UNKNOWN(2026-09-17 审计 R4)。本客户端不跟随重定向,
+// 所以 3xx 对 DSN 配置而言是一个**可诊断的确定结论**。
+func TestErrorReportingTestEventHTTP3xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://example.com/elsewhere", http.StatusFound)
+	}))
+	defer srv.Close()
+	useRewriteClient(t, srv.URL)
+
+	inspection := ErrorReportingDSN{
+		Verdict:       ErrorReportingDSNAccept,
+		Host:          "203.0.113.7",
+		ProjectID:     "1",
+		PublicKey:     "key",
+		StoreEndpoint: "https://203.0.113.7/api/1/store/",
+	}
+	got := sendErrorReportingTestEvent(context.Background(), inspection, "test")
+	if got.OK {
+		t.Fatalf("302 reported success: %+v", got)
+	}
+	if got.Kind != ErrorReportingKindHTTP3xx {
+		t.Fatalf("kind = %s, want HTTP_3XX", got.Kind)
+	}
+	if got.HTTPStatus != http.StatusFound {
+		t.Fatalf("http_status = %d, want 302", got.HTTPStatus)
+	}
+	msg := errorReportingFailureMessage(got.Kind)
+	if !strings.Contains(msg, "重定向") {
+		t.Fatalf("message %q must explain the redirect", msg)
+	}
+}
+
+// TestErrorReportingTestEventHidesInternalCause(R1/R3):失败响应**不得**回显
+// 目标响应体片段或含内网 IP 的 dial 错误 —— 否则管理员可借本端点做内网端口
+// 扫描 + 横幅读取。诊断信息由 kind/http_status/elapsed_ms 承担,原文只进日志。
+func TestErrorReportingTestEventHidesInternalCause(t *testing.T) {
+	const marker = "INTERNAL-BANNER-9f3c"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(marker))
+	}))
+	defer srv.Close()
+	useRewriteClient(t, srv.URL)
+
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	if err := serverstore.SetSetting(db, "web.error_reporting_dsn",
+		"https://key@203.0.113.7/1"); err != nil {
+		t.Fatal(err)
+	}
+	w, out := adminReq(t, r, "POST", "/api/server/admin/gateway/error-reporting/test", `{}`, hdr)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (%s)", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), marker) {
+		t.Fatalf("response leaked the upstream banner: %s", w.Body.String())
+	}
+	detail, _ := out["detail"].(map[string]any)
+	if detail == nil {
+		t.Fatalf("missing detail: %v", out)
+	}
+	if _, hasCause := detail["cause"]; hasCause {
+		t.Fatalf("detail.cause must not be echoed to the caller: %v", detail)
+	}
+	if detail["kind"] != ErrorReportingKindHTTP4xx {
+		t.Fatalf("kind = %v, want HTTP_4XX", detail["kind"])
+	}
+}
+
+// TestErrorReportingTestEventWritesAudit(R5):每次自检必须留痕 ——
+// 这是全仓唯一"让服务端向管理员指定地址发请求"的动作。
+func TestErrorReportingTestEventWritesAudit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"event_id":"abc"}`))
+	}))
+	defer srv.Close()
+	useRewriteClient(t, srv.URL)
+
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	if err := serverstore.SetSetting(db, "web.error_reporting_dsn",
+		"https://key@203.0.113.7/1"); err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/gateway/error-reporting/test", `{}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("test event = %d (%s)", w.Code, w.Body.String())
+	}
+	rows, _, err := serverstore.ListAuditLogsPagedFiltered(db, 0, 50, "error_reporting_test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("audit rows for error_reporting_test = %d, want 1", len(rows))
+	}
+	if rows[0].Username != "boss" {
+		t.Fatalf("audit actor = %q, want boss", rows[0].Username)
+	}
+	if !strings.Contains(rows[0].Detail, "203.0.113.7") {
+		t.Fatalf("audit detail must name the probed endpoint, got %q", rows[0].Detail)
 	}
 }
