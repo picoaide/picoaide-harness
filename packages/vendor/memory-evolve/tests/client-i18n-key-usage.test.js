@@ -257,3 +257,45 @@ test('任何「键收窄」箭头包装器都必须透传第二个参数（审�
     `以下键收窄包装器会静默丢掉模板参数：\n${offenders.join('\n')}`,
   )
 })
+
+test('lib/client.js（发布产物）与 src 的键收窄包装器必须同形（防「改了源码没重建」）', () => {
+  // 2026-09-17 第 3 轮审计 D4（P2）：`lib/client.js` 是**已跟踪、且是运行时真源**
+  // 的构建产物（package.json 的 exports["./client"] 指向它，cordis 客户端注册表
+  // 也加载它），而本包门禁只有 `test`、**CI 永远不会重建 lib/**。实测：只把
+  // lib 里的 `say` 退回一参、src 保持正确 ⇒ 全套 1015 pass / 0 fail 全绿。
+  // 同包已有先例（client-config-save.test.js 的 bundle↔src 键集合对拍），这里
+  // 把"包装器是否透传参数"这一条也纳入对拍。
+  const bundle = readFileSync(join(PACKAGE_ROOT, 'lib', 'client.js'), 'utf8')
+  // 与源码侧同一条判据：`(key, params) => t(key, params)` 形态必须两个实参都转发。
+  const sourceWrappers = []
+  for (const { relative: file, source } of SOURCES) {
+    for (const m of source.matchAll(/const\s+(\w+)\s*=\s*\(([^)]*)\)\s*(?::[^=]*)?=>\s*(\w+)\(([^)]*)\)/gu)) {
+      const params = m[2].split(',').map((p) => p.trim()).filter(Boolean)
+      if (!/:\s*[\w.<>[\]]*(?:Key|Keys|Dict)\b/u.test(params[0] ?? '')) continue
+      sourceWrappers.push(m[1])
+    }
+  }
+  assert.ok(sourceWrappers.length >= 1, `源码里没找到键收窄包装器（${sourceWrappers.join(',')}）`)
+  const offenders = []
+  for (const name of sourceWrappers) {
+    // 产物里同一包装器的形态：`const NAME = (key, params) => X(key, params)`
+    const re = new RegExp(
+      `const\\s+${name}\\s*=\\s*\\(([^)]*)\\)\\s*=>\\s*\\w+\\(([^)]*)\\)`,
+      'u',
+    )
+    const hit = re.exec(bundle)
+    if (hit === null) {
+      offenders.push(`${name}: lib/client.js 里找不到该包装器（产物可能未重建）`)
+      continue
+    }
+    const params = hit[1].split(',').map((p) => p.trim()).filter(Boolean)
+    const args = hit[2].split(',').map((a) => a.trim()).filter(Boolean)
+    if (params.length < 2 || args.length < 2) {
+      offenders.push(
+        `${name}: lib/client.js 里是 (${hit[1].trim()}) => …(${hit[2].trim()})` +
+        ' —— 产物未与源码同步（改了 src 必须重建 lib）',
+      )
+    }
+  }
+  assert.deepEqual(offenders, [], `发布产物与源码不一致：\n${offenders.join('\n')}`)
+})
