@@ -28,11 +28,15 @@ beforeEach(() => {
  * 等网关配置**加载完成**。2026-09-17 独立审计：本文件 18 处锚在静态 CardTitle
  * 「全局设置」上，它在 loading 期就已渲染，随后同步读配置值的断言会拿到初值 ——
  * 注入 400ms 响应延迟即 6 例红（`Unable to find a label with the text of: 高峰开始 1`）。
- * 判据换成 loading 的**消失**：loading 期两张表各渲染一个 Skeleton
- * （Gateway.tsx:686/756，唯一的两处 animate-pulse），它消失 = 数据已落地。
+ *
+ * 判据 = loading 骨架的**消失**，用显式 `data-testid`（Gateway.tsx:686/756）而**不是**
+ * CSS 类名：初版写成 `document.querySelectorAll('.animate-pulse')`，独立复核指出
+ * 一次纯样式改名（`skeleton.tsx` 的类名）就能让它静默失效 —— 改名后加延迟 10/28 红、
+ * 不加延迟 28/28 绿（判据被架空却零信号）。testid 把耦合钉在明面上，配套的正向对照
+ * 用例（「加载期必须渲染骨架」）保证骨架被删/被改名时用例会**响亮地**失败。
  */
 async function waitForGatewayLoaded(): Promise<void> {
-  await waitFor(() => expect(document.querySelectorAll('.animate-pulse')).toHaveLength(0))
+  await waitFor(() => expect(screen.queryAllByTestId('gateway-loading')).toHaveLength(0), { timeout: 5000 })
 }
 
 async function openDialog() {
@@ -43,6 +47,22 @@ async function openDialog() {
 }
 
 describe('Gateway 网关配置页', () => {
+  it('加载期必须渲染骨架(正向对照:骨架与判据同生共死)', async () => {
+    // 把响应闸住 ⇒ 页面必须停在 loading 态、两张表各渲染一行骨架。
+    // 若有人删掉骨架或改掉 data-testid,本用例**响亮地红**,而不是让 18 处
+    // waitForGatewayLoaded 静默变成空判据（独立复核 P2-1 的修法）。
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      await gate
+      return baseImpl(path, init)
+    })
+    render(<Gateway />)
+    expect(screen.getAllByTestId('gateway-loading')).toHaveLength(2)
+    release()
+    await waitForGatewayLoaded()
+  })
+
   it('渲染全局设置、上游表格与模型列表', async () => {
     render(<Gateway />)
     expect(await screen.findByText('全局设置')).toBeInTheDocument()
