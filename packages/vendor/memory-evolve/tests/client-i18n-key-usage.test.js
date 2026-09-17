@@ -78,7 +78,7 @@ function constArrays(source) {
   for (const m of source.matchAll(
     /const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*\[([^\]]*)\]\s*as\s+const/gu,
   )) {
-    const items = [...m[2].matchAll(/'([^']*)'/gu)].map((x) => x[1])
+    const items = [...m[2].matchAll(/'([^']*)'|\b(\d+)\b/gu)].map((x) => x[1] ?? x[2])
     if (items.length > 0) map.set(m[1], items)
   }
   return map
@@ -137,6 +137,7 @@ test("字面量键 t('key') / say('key') 必须存在于 zh 与 en 两张字典"
 test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字典', () => {
   const offenders = []
   let enumerated = 0
+  let enumeratedNamed = 0
   for (const { relative: file, source } of SOURCES) {
     const arrays = constArrays(source)
     // 2026-09-17 第 3 轮审计 R3-i18n-1:模板键的洞**几乎从不**是数组名本身,
@@ -149,11 +150,26 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
     // `(['unread','all','read'] as const).map((f) => t(`broadcast.filter.${f}`))`
     // 根本没有数组名，只认具名数组会漏枚举、模板专有键被删仍全绿。
     const inlineArrays = new Map()
+    // 形态甲：一维字面量数组 `(['a','b'] as const).map((x) => …)` / `([0,7,30] as const).map((d) => …)`
     for (const m of source.matchAll(
-      /\[\s*((?:'[^']*'\s*,\s*)*'[^']*')\s*\]\s*as\s+const\s*\)?\s*\.map\(\s*\(?\s*(\w+)\s*\)?\s*=>/gu,
+      /\[\s*((?:'[^']*'|\d+)(?:\s*,\s*(?:'[^']*'|\d+))*)\s*\]\s*as\s+const\s*\)?\s*\.map\(\s*\(?\s*([\w$]+)\s*\)?\s*=>/gu,
     )) {
-      const items = [...m[1].matchAll(/'([^']*)'/gu)].map((x) => x[1])
+      const items = [...m[1].matchAll(/'([^']*)'|\b(\d+)\b/gu)].map((x) => x[1] ?? x[2])
       if (items.length > 0) inlineArrays.set(m[2], items)
+    }
+    // 形态乙：元组数组 + 解构回调 —— `([['k1','v1'],['k2','v2']] as const).map(([a, b]) => …)`
+    // 真实活形态见 SyncView.tsx:403-409（`t(labelKey)`，labelKey 是第 2 个元素）。
+    // 这里把每个元组的第 n 个元素登记到对应形参名下（解构形参按位置对应）。
+    for (const m of source.matchAll(
+      /\[\s*((?:\[[^\]]*\]\s*,\s*)*\[[^\]]*\])\s*,?\s*\]\s*as\s+const\s*\)?\s*\.map\(\s*\(\s*\[([^\]]*)\]\s*\)\s*=>/gsu,
+    )) {
+      const tuples = [...m[1].matchAll(/\[([^\]]*)\]/gu)].map((t) =>
+        [...t[1].matchAll(/'([^']*)'|\b(\d+)\b/gu)].map((x) => x[1] ?? x[2]))
+      const names = m[2].split(',').map((n) => n.trim()).filter(Boolean)
+      names.forEach((name, idx) => {
+        const col = tuples.map((t) => t[idx]).filter((v) => v !== undefined)
+        if (col.length > 0) inlineArrays.set(name, col)
+      })
     }
     const mapVars = new Map()
     for (const m of source.matchAll(/\b(\w+)\.map\(\s*\(?\s*(\w+)\s*\)?\s*=>/gu)) {
@@ -175,18 +191,18 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
       const holeName = holes.length === 1 ? holes[0] : null
       // 洞可以解析成数组:① 洞本身就是数组名;② 洞是 `.map()` 的回调形参 ⇒ 用它的数组
       let items = null
+      let fromNamed = false
       if (holeName !== null && /^[A-Za-z_$][\w$]*$/u.test(holeName)) {
-        if (arrays.has(holeName)) items = arrays.get(holeName)
-        else if (inlineArrays.has(holeName)) items = inlineArrays.get(holeName)
+        if (arrays.has(holeName)) { items = arrays.get(holeName); fromNamed = true } else if (inlineArrays.has(holeName)) items = inlineArrays.get(holeName)
         else if (mapVars.has(holeName)) {
           const name = mapVars.get(holeName)
-          if (arrays.has(name)) items = arrays.get(name)
-          else if (inlineArrays.has(holeName)) items = inlineArrays.get(holeName)
+          if (arrays.has(name)) { items = arrays.get(name); fromNamed = true } else if (inlineArrays.has(holeName)) items = inlineArrays.get(holeName)
         }
       }
       const candidates = items === null ? null : items.map((item) => `${prefix}${item}`)
       if (candidates !== null) {
         enumerated += candidates.length
+        if (fromNamed) enumeratedNamed += candidates.length
         for (const key of candidates) {
           const miss = missing(key)
           if (miss !== null) offenders.push(`${file}:${line}: t(\`${template}\`) 展开出 '${key}' 不在 ${miss} 字典`)
@@ -211,13 +227,54 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
     offenders, [],
     `以下模板键展开后不在字典里（会渲染成裸键名）：\n${offenders.join('\n')}`,
   )
+  // 形态丙（2026-09-17 第 5 轮 R5-i18n-1）：**整个变量当键** ——
+  // `([['k1','v1'],…] as const).map(([a, b]) => t(b))`，真实活形态见
+  // SyncView.tsx:409-411（`t(labelKey)`）。它不是模板洞，上面两条正则都覆盖不到；
+  // 变量指向枚举数组的**某一列**。这里按"该变量在 `.map()` 解构形参里 ⇒ 用它的列"
+  // 展开校验，列取值由上面的 inlineArrays（元组分支）登记。
+  for (const { relative: file, source } of SOURCES) {
+    const inlineCols = new Map()
+    for (const m of source.matchAll(
+      /\[\s*((?:\[[^\]]*\]\s*,\s*)*\[[^\]]*\])\s*,?\s*\]\s*as\s+const\s*\)?\s*\.map\(\s*\(\s*\[([^\]]*)\]\s*\)\s*=>/gsu,
+    )) {
+      const tuples = [...m[1].matchAll(/\[([^\]]*)\]/gu)].map((t) =>
+        [...t[1].matchAll(/'([^']*)'|\b(\d+)\b/gu)].map((x) => x[1] ?? x[2]))
+      const names = m[2].split(',').map((n) => n.trim()).filter(Boolean)
+      names.forEach((name, idx) => {
+        const col = tuples.map((t) => t[idx]).filter((v) => v !== undefined)
+        if (col.length > 0) inlineCols.set(name, col)
+      })
+    }
+    for (const m of source.matchAll(/(?:^|[^\w.])(?:t|say)\(\s*([A-Za-z_$][\w$]*)\s*\)/gu)) {
+      const variable = m[1]
+      if (!inlineCols.has(variable)) continue
+      const line = source.slice(0, m.index).split('\n').length
+      for (const key of inlineCols.get(variable)) {
+        const miss = !ZH_KEYS.has(key) ? 'zh' : !EN_KEYS.has(key) ? 'en' : null
+        if (miss !== null) offenders.push(`${file}:${line}: t(${variable}) 展开出 '${key}' 不在 ${miss} 字典`)
+        else enumerated += 1
+      }
+    }
+  }
+  // 上面的形态丙也参与 offenders 收敛判断，故此处再次断言。
+  assert.deepEqual(
+    offenders, [],
+    `以下模板键/枚举变量展开后不在字典里（会渲染成裸键名）：\n${offenders.join('\n')}`,
+  )
   // ★ 元断言（2026-09-17 第 4 轮 R4-i18n-1）：枚举面本身必须达到已知下限。
   // 否则将来正则失配 ⇒ 全部退化成"前缀存在即可" ⇒ 守卫静默失去增量保护，
   // 而 offenders 仍为空、看起来一切正常。这是"守卫自身的守卫"。
+  // ★ 元断言（2026-09-17 第 5 轮 R5-i18n-2 收紧）：原来只有 `enumerated >= 4`，
+  // 而真实值是 14（具名 8 + 内联 6）⇒ 任**一条**正则失配后仍有 6 或 8 ≥ 4，全绿，
+  // 元断言守不住它被加进来要守的事。改为**按来源分别**下下限（各留约 1/2 余量）。
   assert.ok(
-    enumerated >= 4,
-    `模板键枚举面异常偏小（enumerated=${enumerated}）—— 枚举正则可能已失配，` +
-    '守卫会静默退化成前缀检查（比没有更危险：它看起来仍有覆盖）',
+    enumeratedNamed >= 8,
+    `具名数组枚举面异常偏小（named=${enumeratedNamed}）—— 具名枚举正则可能已失配`,
+  )
+  assert.ok(
+    enumerated >= 12,
+    `枚举总数异常偏小（total=${enumerated}, named=${enumeratedNamed}）—— ` +
+    '内联数组枚举正则可能已失配（守卫会静默退化成前缀检查，比没有更危险）',
   )
 })
 
@@ -298,30 +355,33 @@ test('lib/client.js（发布产物）与 src 的键收窄包装器必须同形�
   // 箭头（`const say = (key: DictKey, …) => t(…)`）与函数声明
   // （`function dict(t: Translate) { return (key, params) => t(key, params) }`）。
   // 原实现只收箭头 ⇒ 只改 lib 里的 `dict`（F1 的**原始形态**）仍全绿。
+  // 收集**两种形态**并保留出现顺序：(name, 源码位置) → 用于与产物里的同名声明**按序**对拍。
+  // 2026-09-17 第 5 轮 R5-d4-1：产物侧 `dict`(CoIView) 与 `dict2`(PromptView) 是两个同形函数，
+  // 而源码侧收集到的**名字都是 `dict`**。旧实现用 `function\s+${name}\s*\(` 取**首个**匹配
+  // ⇒ `dict` 被查 2 次、`dict2` 从未被查（改坏它整套门禁全绿）。按序对拍即可闭合。
   const sourceWrappers = []
   for (const { relative: file, source } of SOURCES) {
-    for (const m of source.matchAll(/const\s+(\w+)\s*=\s*\(([^)]*)\)\s*(?::[^=]*)?=>\s*(\w+)\(([^)]*)\)/gu)) {
-      const params = m[2].split(',').map((p) => p.trim()).filter(Boolean)
-      if (!/:\s*[\w.<>[\]]*(?:Key|Keys|Dict)\b/u.test(params[0] ?? '')) continue
-      sourceWrappers.push(m[1])
-    }
-    // 函数声明形态：`function dict(t: Translate) { … return (key, params) => t(key, params) }`
-    for (const m of source.matchAll(/function\s+(\w+)\s*\(([^)]*)\)\s*(?::[^{]*)?\{([\s\S]*?)\n\}/gu)) {
-      const name = m[1]
-      const body = m[3]
-      // 只收"返回键收窄包装器"的函数（体内出现 (key, params) => X(key, params) 形态）
-      if (!/\(\s*\w+\s*,\s*\w+\s*\)\s*=>\s*\w+\(\s*\w+\s*,\s*\w+\s*\)/u.test(body)) continue
-      if (!/Translate|Dict(Key)?\b/u.test(m[2])) continue
-      sourceWrappers.push(name)
-    }
+    const arrow = [...source.matchAll(/const\s+(\w+)\s*=\s*\(([^)]*)\)\s*(?::[^=]*)?=>\s*(\w+)\(([^)]*)\)/gu)]
+      .filter((m) => /:\s*[\w.<>[\]]*(?:Key|Keys|Dict)\b/u.test(m[2] ?? ''))
+      .map((m) => ({ file, name: m[1], kind: 'arrow' }))
+    const fn = [...source.matchAll(/function\s+(\w+)\s*\(([^)]*)\)\s*(?::[^{]*)?\{([\s\S]*?)\n\}/gu)]
+      .filter((m) => /\(\s*\w+\s*,\s*\w+\s*\)\s*=>\s*\w+\(\s*\w+\s*,\s*\w+\s*\)/u.test(m[3])
+        && /Translate|Dict(Key)?\b/u.test(m[2]))
+      .map((m) => ({ file, name: m[1], kind: 'function' }))
+    sourceWrappers.push(...arrow, ...fn)
   }
+  // 元断言改为**名字集合**（计数会被同名塌缩掩盖 —— R5-d4-2）。
+  const wrapperNames = new Set(sourceWrappers.map((w) => w.name))
   assert.ok(
-    sourceWrappers.length >= 2,
-    `源码侧的键收窄包装器收集数异常偏小（${sourceWrappers.length}: ${sourceWrappers.join(',')}）—— ` +
-    '必须同时覆盖箭头（say）与函数声明（dict）两种形态，否则对拍只闭一半（R4-d4-1）',
+    wrapperNames.has('dict') && wrapperNames.has('say'),
+    `源码侧包装器名字集合异常（${[...wrapperNames].join(',')}）—— 必须同时覆盖函数声明（dict）与箭头（say）`,
   )
   const offenders = []
-  for (const name of sourceWrappers) {
+  // 产物里同名声明可能出现多次（esbuild 去重后叫 dict / dict2）：按**出现顺序**逐个对应。
+  const seenCount = new Map()
+  for (const { file, name } of sourceWrappers) {
+    const ordinal = seenCount.get(name) ?? 0
+    seenCount.set(name, ordinal + 1)
     // 产物里同一包装器可能是箭头形态（`const NAME = (k, p) => X(k, p)`），
     // 也可能被 esbuild 保留为函数声明内含的返回箭头（`function NAME(t) { return (k, p) => … }`）。
     // 先试箭头，再退化到"函数声明体内找箭头"。
@@ -335,12 +395,21 @@ test('lib/client.js（发布产物）与 src 的键收窄包装器必须同形�
       // 不能直接用 `function NAME(...) { [\s\S]*? (a,b)=>X(a,b)` —— 非贪婪的
       // `[\s\S]*?` 会跨过 `}` 漂到**后面另一个函数**里，于是被改坏的 NAME 也匹配成功
       // （2026-09-17 第 4 轮实测：把 dict 退成一参仍全绿，就是这个 bug）。
-      const headRe = new RegExp(`function\\s+${name}\\s*\\(`, 'u')
-      const head = headRe.exec(bundle)
+      // esbuild 对同名顶层声明会**去重改名**（第 2 个 `dict` 变成 `dict2`），
+      // 所以候选名是 `dict`、`dict2`、`dict3`…；按 ordinal 取第 ordinal 个命中的候选。
+      // 2026-09-17 第 5 轮 R5-d4-1：这正是 `dict2` 漏检的根因（旧实现只按原名取首个）。
+      const candidates = [name, ...Array.from({ length: 8 }, (_, i) => `${name}${i + 2}`)]
+      const matchedCandidates = candidates
+        .map((candidate) => {
+          const m = new RegExp(`function\\s+${candidate}\\s*\\(`, 'u').exec(bundle)
+          return m === null ? null : { text: m[0], index: m.index }
+        })
+        .filter((x) => x !== null)
+      const head = matchedCandidates[ordinal] ?? null
       let fnHit = null
       if (head !== null) {
         // 从 `{` 起按大括号配对取出函数体
-        const open = bundle.indexOf('{', head.index + head[0].length)
+        const open = bundle.indexOf('{', head.index + head.text.length)
         if (open !== -1) {
           let depth = 0
           let end = -1
@@ -360,9 +429,9 @@ test('lib/client.js（发布产物）与 src 的键收窄包装器必须同形�
         // 兜底：函数声明存在但体内**没有**两参转发 ⇒ 记为不一致
         const existsRe = new RegExp(`function\\s+${name}\\s*\\(`, 'u')
         if (existsRe.test(bundle)) {
-          offenders.push(`${name}: lib/client.js 里的函数声明未透传两个参数（产物未与源码同步）`)
+          offenders.push(`${file}: ${name}#${ordinal} 在 lib/client.js 里未透传两个参数（产物未与源码同步）`)
         } else {
-          offenders.push(`${name}: lib/client.js 里找不到该包装器（产物可能未重建）`)
+          offenders.push(`${file}: ${name}#${ordinal} 在 lib/client.js 里找不到（产物可能未重建）`)
         }
         continue
       }
