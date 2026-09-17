@@ -683,7 +683,7 @@ export default function Gateway() {
             </TableHeader>
             <TableBody>
               {loading ? (
-                <TableRow><TableCell colSpan={8}><Skeleton className="h-8 w-full" /></TableCell></TableRow>
+                <TableRow data-testid="gateway-loading"><TableCell colSpan={8}><Skeleton className="h-8 w-full" /></TableCell></TableRow>
               ) : providers.length === 0 ? (
                 <TableRow><TableCell colSpan={8} className="text-center text-muted-foreground">暂无上游,点击「添加上游」开始接入</TableCell></TableRow>
               ) : providers.map((p) => (
@@ -753,7 +753,7 @@ export default function Gateway() {
             </TableHeader>
             <TableBody>
               {loading ? (
-                <TableRow><TableCell colSpan={6}><Skeleton className="h-8 w-full" /></TableCell></TableRow>
+                <TableRow data-testid="gateway-loading"><TableCell colSpan={6}><Skeleton className="h-8 w-full" /></TableCell></TableRow>
               ) : models.length === 0 ? (
                 <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground">暂无模型,添加手动型上游或点击「立即同步」</TableCell></TableRow>
               ) : models.map((m) => {

@@ -46,15 +46,24 @@ let bytes: Uint8Array | null = null
 // ---------------------------------------------------------------------------
 const AUDIT_SETTINGS_PATH = '/api/server/admin/audit/settings'
 
-/** 等到审计表格出现 rows 行数据(不含表头行)。 */
+/**
+ * 等到审计表格出现 rows 行数据(不含表头行)。
+ *
+ * 显式 5s 预算：RTL 默认 1000ms 在 CI/4 路并行负载下与 `app-login-capability.test.tsx`
+ * 那处同因（2026-09-17 审计 P3-5）——判据本身是对的，只是预算要够。
+ * 另注：**空态也占 1 行**（`Audit.tsx` 的 `logs.length===0` 分支渲一个 TableRow 包
+ * EmptyState），所以 rows=1 与空态同形、rows=0 永不通过；本文件只在 ≥3 行处使用。
+ */
 async function waitForAuditRows(rows: number): Promise<void> {
-  await waitFor(() => expect(screen.getAllByRole('row')).toHaveLength(rows + 1))
+  if (rows < 2) throw new Error(`waitForAuditRows 只用于 rows>=2（空态占位行会与之同形），收到 ${rows}`)
+  await waitFor(() => expect(screen.getAllByRole('row')).toHaveLength(rows + 1), { timeout: 5000 })
 }
 
 /** 等到列表响应已落地(settings 与 logs 同属 load() 的一条链,settings 在后)。 */
 async function waitForAuditLoad(): Promise<void> {
-  await waitFor(() =>
-    expect(mockRequest.mock.calls.some(([p]) => String(p) === AUDIT_SETTINGS_PATH)).toBe(true),
+  await waitFor(
+    () => expect(mockRequest.mock.calls.some(([p]) => String(p) === AUDIT_SETTINGS_PATH)).toBe(true),
+    { timeout: 5000 },
   )
 }
 
@@ -232,8 +241,11 @@ describe('审计动作表覆盖组织共享库动作(SG-5)', () => {
 // 的动作 —— 它们在表里回落成裸 id、在筛选下拉里选不到(后端 ?action= 本来就支持)。
 //
 // 下面的清单 = 服务端全部写点(repo 全量 grep `AuditLog(` 的第三个实参,含
-// `action := …` 的双分支与 decide/applyGrant 的参数)。**冻结契约**:服务端新增
-// 审计写点时必须同步这张表 + ACTION_LABEL;少一条 ⇒ 本用例红。
+// `action := …` 的双分支与 decide/applyGrant 的参数)。
+// **口径更正(2026-09-17 独立审计 P3-2)**:这张表是**人工维护的清单**,用例只保证
+// "清单内的动作都渲染中文标签、且裸 id 不出现" —— 服务端新增写点而**没人**往这里
+// 补时,本用例**不会**红(原先"少一条 ⇒ 本用例红"的说法与实现不符,已删)。
+// 自动对账机制尚未实现,服务端加审计动作时需人工同步本表。
 // kebab 之外的历史动作(mcp_*/kb_*)只在 ACTION_LABEL 里保留(存量行),不在此表。
 // ---------------------------------------------------------------------------
 const SERVER_ACTIONS: ReadonlyArray<readonly [action: string, label: string]> = [
@@ -350,6 +362,9 @@ describe('审计动作表覆盖服务端全部写点(SG-5 残留)', () => {
     // 显式预算(S10-2 修复轮 5):本用例一次性渲染 74 条服务端写入动作,再逐条
     // queryByText/getByRole —— 单机实测约 4.35s,已占满 vitest 默认 5000ms 的
     // 87%(CI 的 gate 与其他 job 并行、或本机与 Go 套件同跑时实测超时过一次)。
-    // 显式 20s 只放宽这一个用例的上限,不放宽断言口径。
-  }, 20_000)
+    // 2026-09-17 独立审计 P3-4:每条断言都是**整文档**扫描(74×3 次),机器被压到
+    // 92% busy / load≈20 时本用例必撞 20s。这里把上限提到 40s(口径不变)。
+    // 根治办法是收窄查询范围(把表格查询限定在 table 内),属后续优化,未在本轮做。
+    // 显式 40s 只放宽这一个用例的上限,不放宽断言口径。
+  }, 40_000)
 })
