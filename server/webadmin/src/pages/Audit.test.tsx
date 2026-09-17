@@ -33,6 +33,31 @@ let captured = ''
 // 旧代码确实没有 BOM,但那个断言证明不了)。这里同时取文本与字节。
 let bytes: Uint8Array | null = null
 
+// ---------------------------------------------------------------------------
+// 等"真的加载完",不要等"发过请求"(2026-09-17 Gate 红的根因)
+//
+// 原先各用例统一写 `await waitFor(() => expect(mockRequest).toHaveBeenCalled())` ——
+// 只要**任意**一个请求发出就满足(可能是 /audit/settings),此刻列表响应还没落地、
+// 组件 state 还是空数组,于是读 state 的断言拿到空数据。CI 负载下实测:导出的 CSV
+// 只有表头(`expected 'id,username,action,detail,created_at' to contain '=cmd|…'`)。
+// 判据必须是"渲染结果"而不是"调用记录":
+//   * waitForAuditRows  —— 表头 + N 行数据都在 DOM 里(= logs 已落 state);
+//   * waitForAuditLoad  —— 列表响应已落地(settings 请求只在 logs 落 state 之后发出)。
+// ---------------------------------------------------------------------------
+const AUDIT_SETTINGS_PATH = '/api/server/admin/audit/settings'
+
+/** 等到审计表格出现 rows 行数据(不含表头行)。 */
+async function waitForAuditRows(rows: number): Promise<void> {
+  await waitFor(() => expect(screen.getAllByRole('row')).toHaveLength(rows + 1))
+}
+
+/** 等到列表响应已落地(settings 与 logs 同属 load() 的一条链,settings 在后)。 */
+async function waitForAuditLoad(): Promise<void> {
+  await waitFor(() =>
+    expect(mockRequest.mock.calls.some(([p]) => String(p) === AUDIT_SETTINGS_PATH)).toBe(true),
+  )
+}
+
 beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
@@ -52,7 +77,8 @@ beforeEach(() => {
 
 async function exportCsv(): Promise<string> {
   render(<Audit />)
-  await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+  // 必须等数据行出现再点导出:导出读的是组件 state,提前点只会拿到表头。
+  await waitForAuditRows(LOGS.length)
   fireEvent.click(screen.getByRole('button', { name: /导出 CSV/ }))
   await waitFor(() => {
     expect(captured).not.toBe('')
@@ -106,7 +132,7 @@ describe('审计员访问审计保留策略(R7-RV-2 残留)', () => {
   it('auditor 能看到保留天数,但输入框只读、没有保存按钮', async () => {
     setCurrentAdmin(AUDITOR)
     render(<Audit />)
-    await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+    await waitForAuditLoad()
 
     const input = screen.getByLabelText('审计保留天数') as HTMLInputElement
     expect(input.disabled || input.readOnly).toBe(true)
@@ -123,7 +149,7 @@ describe('审计员访问审计保留策略(R7-RV-2 残留)', () => {
   it('auditor 的保留天数控件是只读的,且任何交互都不会触发 PUT', async () => {
     setCurrentAdmin(AUDITOR)
     render(<Audit />)
-    await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+    await waitForAuditRows(LOGS.length)
     const input = screen.getByLabelText('审计保留天数') as HTMLInputElement
     // jsdom 的 fireEvent 会绕过浏览器"只读输入不触发 change"的语义,所以这里钉
     // DOM 属性 + 真正的护栏(saveRetention 无权限直接返回,绝不发 PUT)。
@@ -136,7 +162,7 @@ describe('审计员访问审计保留策略(R7-RV-2 残留)', () => {
   it('只有 audit:read 的部分权限集同样只读(等价形态)', async () => {
     setCurrentAdmin(READONLY)
     render(<Audit />)
-    await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+    await waitForAuditRows(LOGS.length)
     expect((screen.getByLabelText('审计保留天数') as HTMLInputElement).readOnly).toBe(true)
     expect(screen.queryByRole('button', { name: /保存策略/ })).toBeNull()
     expect(screen.getByRole('button', { name: /导出 CSV/ })).toBeInTheDocument()
@@ -145,7 +171,7 @@ describe('审计员访问审计保留策略(R7-RV-2 残留)', () => {
   it('super_admin 仍然可编辑并可保存(不误伤)', async () => {
     setCurrentAdmin(SUPER)
     render(<Audit />)
-    await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+    await waitForAuditRows(LOGS.length)
     const input = screen.getByLabelText('审计保留天数') as HTMLInputElement
     expect(input.disabled).toBe(false)
     fireEvent.change(input, { target: { value: '30' } })
@@ -180,7 +206,7 @@ describe('审计动作表覆盖组织共享库动作(SG-5)', () => {
   it('行内渲染中文标签,不回落成裸 action id', async () => {
     setCurrentAdmin(SUPER)
     render(<Audit />)
-    await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+    await waitForAuditRows(ORG_LOGS.length)
     expect(await screen.findByText('下架共享技能')).toBeInTheDocument()
     expect(screen.getByText('重新上架共享技能')).toBeInTheDocument()
     expect(screen.getByText('下架智能体')).toBeInTheDocument()
@@ -192,7 +218,7 @@ describe('审计动作表覆盖组织共享库动作(SG-5)', () => {
   it('筛选下拉可选这两个动作(后端 ?action= 精确匹配的唯一入口)', async () => {
     setCurrentAdmin(SUPER)
     render(<Audit />)
-    await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+    await waitForAuditRows(ORG_LOGS.length)
     fireEvent.click(screen.getByRole('combobox'))
     expect(await screen.findByRole('option', { name: '下架共享技能' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: '重新上架共享技能' })).toBeInTheDocument()
@@ -309,7 +335,7 @@ describe('审计动作表覆盖服务端全部写点(SG-5 残留)', () => {
     })
     setCurrentAdmin(SUPER)
     render(<Audit />)
-    await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+    await waitForAuditRows(logs.length)
 
     for (const [action, label] of SERVER_ACTIONS) {
       // 裸 id 一个都不许出现在表里(出现 = 未登记,row badge 会回落成 outline + 原串)。
