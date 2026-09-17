@@ -327,12 +327,21 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
     // 之后再 `t(meta.key)` —— 消费端按**基对象名**查表，所以必须把别名的值域接上。
     // 支持 `const A = BASE[...]` / `const A = BASE.x` / `let A = BASE[...]`（同文件内）。
     // 迭代两轮以覆盖 `a = b = BASE[x]` 这类链式别名。
+    //
+    // ★★ 重名必须**取并集**（2026-09-17 第 10 轮 R10-i18n-1）：`AdvisorPanel.tsx` 里
+    // `statusMeta()` 与 `severityMeta()` **各自声明了 `const meta`**（分别指向
+    // STATUS_META / SEVERITY_META）。原实现 `!holeDomains.has(name)` 让后者被永久跳过
+    // ⇒ `t(meta.key)` 只拿到 status 表，`advisor.severity.*` 5 个键静默。
+    // 重名时取并集是**安全的失败方向**（可能假阳性，但绝不静默漏）。
+    // 更彻底的解法是流敏感绑定或类型系统（见 round-10 报告 B 节）。
     for (let pass = 0; pass < 2; pass += 1) {
       for (const m of source.matchAll(
         /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*([A-Za-z_$][\w$]*)\s*(?:\[[^\]]*\]|\.[A-Za-z_$][\w$]*)/gu,
       )) {
         const items = holeDomains.get(m[2]) ?? domains.get(m[2])
-        if (items !== undefined && !holeDomains.has(m[1])) holeDomains.set(m[1], items)
+        if (items === undefined) continue
+        const cur = holeDomains.get(m[1])
+        holeDomains.set(m[1], cur === undefined ? items : [...new Set([...cur, ...items])])
       }
     }
     // ★ 宿主 side 值域（2026-09-17 第 7 轮 R7-i18n-2）：`memoryTab.desc.${activeRow.key}`
