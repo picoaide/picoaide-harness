@@ -118,11 +118,14 @@ export default function ErrorMonitoring() {
     try {
       const data = await request(`${ADMIN_API}/gateway/error-reporting/clients`)
       setClients(data ?? EMPTY_CLIENTS)
-    } catch (err: any) {
-      setClients(EMPTY_CLIENTS)
-      setClientsError(err.message)
-    } finally {
       setClientsLoaded(true)
+    } catch (err: any) {
+      // 2026-09-17 审计 F2/F3：原先在 finally 里无条件置 loaded=true，而错误分支又把
+      // clients 重置成 EMPTY ⇒ 请求失败/刷新失败时错误横幅下方照样渲染"0 台"
+      // （同一个"把没有数据渲染成一切正常"）。改为**只有成功落地才算加载完**：
+      // 失败时保留上一次数据（隐藏）并只显示错误横幅。
+      setClientsError(err.message)
+      setClientsLoaded(false)
     }
   }, [])
 
@@ -331,7 +334,7 @@ export default function ErrorMonitoring() {
             !clientsError && <p className="text-sm text-muted-foreground">客户端上报状态加载中…</p>
           )}
           {/* 本 bug 的教训:绝不要把"没有数据"渲染成"一切正常"。 */}
-          {!hasClientData && !clientsError && (
+          {clientsLoaded && !hasClientData && !clientsError && (
             <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-sm text-amber-700">
               尚无客户端上报状态。这不代表链路正常:客户端只有登录并完成一次错误上报初始化后才会回报;
               请确认上报开关已开启且客户端版本包含状态上报能力。
