@@ -74,7 +74,7 @@
 
 ```json
 "defaults": {
-  "server_url": "https://harness-a.example.com",
+  "server_url": "https://harness.example.com",
   "telemetry_channel": "example-a",
   "locale": "zh"
 }

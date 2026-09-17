@@ -4,7 +4,7 @@
  * surface, capture screenshots, and emit a Markdown report.
  *
  * Usage:
- *   REAL_SERVER=https://harness-legacy.example.com REAL_USER=user001 REAL_PASS=... \
+ *   REAL_SERVER=https://harness.example.com REAL_USER=test-user REAL_PASS=... \
  *   node scripts/real-env-verify.mjs [--port 9224] [--shots .real-env-shots]
  */
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -26,8 +26,8 @@ const PORT = Number(arg('--port', '9224'))
 const shotsDir = arg('--shots', join(PACKAGE_ROOT, '.real-env-shots'))
 const reportPath = join(PACKAGE_ROOT, '.real-env-report.md')
 
-const SERVER = process.env.REAL_SERVER ?? 'https://harness-legacy.example.com'
-const USER = process.env.REAL_USER ?? 'user001'
+const SERVER = process.env.REAL_SERVER ?? (() => { throw new Error('REAL_SERVER is required') })()
+const USER = process.env.REAL_USER ?? 'test-user'
 const PASS = process.env.REAL_PASS ?? ''
 
 if (!PASS) {
