@@ -519,11 +519,16 @@ export function apply(ctx: Context): void {
         //
         // ★★ R3-ent-1(第 3 轮审计修复):与 catch 分支同理 —— 只有**换了服务端**才关,
         // 同服务端的一次配置抖动不该变成"本会话永久零上报"。
-        if (sentry !== null && sentryServerURL !== null && sentryServerURL !== session.serverURL) {
+        const tornDown = sentry !== null && sentryServerURL !== session.serverURL
+        if (tornDown) {
           await initSentry('', release)
         }
         status = { state: 'config_unavailable', reason: 'bootstrap 回退空配置(models 为空或形状不合)' }
-        ctx.logger?.warn?.('错误上报:服务端配置不可用(models 为空,已回退空配置):已关闭上报,不再外发')
+        // 文案必须与真实动作一致（2026-09-17 第 4 轮 P3①）：服务端没变时实例是**保留**的，
+        // 说"已关闭上报"就是撒谎——正是本轮要消灭的"状态与实例脱钩"。
+        ctx.logger?.warn?.(tornDown
+          ? '错误上报:服务端配置不可用(models 为空,已回退空配置):已关闭上报,不再外发'
+          : '错误上报:服务端配置不可用(models 为空,已回退空配置):本次不上报(服务端未变,保留实例待恢复)')
         void reportErrorReportingStatus(session, status)
         return
       }
@@ -576,12 +581,15 @@ export function apply(ctx: Context): void {
       // 的网络抖动**,这时关掉实例会把抖动放大成"本会话永久零上报"(只有下一次
       // session-changed 才恢复)——比修复前更差(修复前这两条分支不关实例、抖动自愈)。
       // 所以按**服务端身份是否变了**决定:变了才关,没变就保留实例(等下次 sync 自愈)。
-      if (sentry !== null && sentryServerURL !== null && sentryServerURL !== session.serverURL) {
+      const tornDown = sentry !== null && sentryServerURL !== session.serverURL
+      if (tornDown) {
         await initSentry('', release)
       }
       status = { state: 'config_unavailable', reason }
       console.warn('[error-reporting] bootstrap 失败,不上报:', cause)
-      ctx.logger?.warn?.('error-reporting: bootstrap 失败,不上报:', cause)
+      ctx.logger?.warn?.(tornDown
+        ? 'error-reporting: bootstrap 失败,已关闭上报(服务端已切换,避免用旧 DSN 误报):'
+        : 'error-reporting: bootstrap 失败,本次不上报(服务端未变,保留实例待恢复):', cause)
       void reportErrorReportingStatus(session, status)
     }
   }
