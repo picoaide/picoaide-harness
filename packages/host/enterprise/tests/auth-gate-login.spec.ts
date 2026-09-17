@@ -178,9 +178,9 @@ function servedLoginPage(config: Config): string {
 
 describe('auth-gate login page: 内置地址后不再提供"修改服务端地址"', () => {
   it('渠道包内置了地址 → 页面上没有返回入口，但仍带自动连接标记', () => {
-    const html = servedLoginPage({ defaultServer: 'https://harness.mokahr.vip' })
+    const html = servedLoginPage({ defaultServer: 'https://harness.example.com' })
     expect(html).toContain('data-default-server="1"')
-    expect(html).toContain('value="https://harness.mokahr.vip"')
+    expect(html).toContain('value="https://harness.example.com"')
     // 断言的是**标记**：脚本里始终有 `getElementById('back-btn')`（判空守卫），
     // 所以这里查的是按钮元素与它的可见文案。
     expect(html).not.toContain('id="back-btn"')

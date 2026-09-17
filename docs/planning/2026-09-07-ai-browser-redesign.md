@@ -548,7 +548,7 @@ Group
   - v4 shell：两行 chrome + 分组 TabStrip + 右下角 AI 指示胶囊（常驻/呼吸/接管快捷）+ 活动面板浮层（会话切换器+动作时间线+我来操作/交给 AI）+ ⋮ 菜单与书签/历史/下载查看器 + 空态 + SSE 推送 + 键盘快捷键；遮罩页删除
   - 会话生命周期：归档（view 销毁留元数据）/24h 回收/重开恢复/最后标签关组/未绑定组
 - **测试**：10 文件 186 用例全绿（runtime 34 / registry 29 / eval-policy 51 / store 21 / resolve 13 / 既有 38）
-- **真机验证**（https://picoaide-next.kq0575.cn/ user001）：
+- **真机验证**（https://harness.example.com/ test-user）：
   - UI E2E 18/18（temp/browser-v4-e2e.mjs，截图 temp/browser-v4-shots/）：登录/窗口/建标签/导航/双标签/切换/按钮态/AI 指示/活动面板/接管-释放/菜单/历史-书签-下载查看器/关标签/分组段/快捷键/隐藏-重开
   - AI 驱动 E2E 通过（temp/browser-v4-ai-e2e.mjs，截图 temp/browser-v4-ai-shots/）：真实 agent 调用 browser_open → browser_navigate → browser_get_text 闭环，面板实时呈现
 - **实施中修复的真实缺陷**（均有测试锁定）：①registry 配额队列释放后不 pump 等待者+waitTimeoutMs 未接线；②archiveFor 经 destroyTab 抹掉归档元数据；③shell ⋮ 菜单打开即被 document click 关闭（stopPropagation）；④busyGroup 把前台组误判为「AI 操作中」；⑤真机环境工作区注册表预填（客户端无工作区时无法创建会话，属测试环境约束）

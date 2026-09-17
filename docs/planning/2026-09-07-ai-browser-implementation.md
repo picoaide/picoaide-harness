@@ -27,9 +27,9 @@
 - AI 计划预览（工具执行前摘要注入）；跨标签上下文（页面信息缓存）；企业策略矩阵（工具级禁用）；工具组动态激活
 
 ### 发布
-- 版本 set 2.6.7-beta.7 → yarn check 全绿 → e2e-client 13/13 → 真机验证（user001）截图 → PR → 打 tag
+- 版本 set 2.6.7-beta.7 → yarn check 全绿 → e2e-client 13/13 → 真机验证（test-user）截图 → PR → 打 tag
 
 ## 验证环境
-- 测试服务器：https://picoaide-next.kq0575.cn/（user001 / user001123456）
+- 测试服务器：https://harness.example.com/（test-user / test-password）
 - E2E 工具：packages/host/desktop/scripts/e2e-client.mjs（mock gateway，可扩展 CDP 驱动）
 - 截图：packages/host/desktop/.e2e-shots/ + temp/browser-v4-shots/
