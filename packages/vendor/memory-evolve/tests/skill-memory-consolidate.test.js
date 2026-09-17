@@ -2,11 +2,14 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   ENTRY_DELIMITER, clusterEntries, computeIdf, cosine, diceBigrams, entryTerms,
   fnv1a32, main, normText, pairReasons, parseArgs, parseMemoryText, quotedRefersTo, scanDir, stripHeaderComment,
 } from '../skills/memory-consolidate/scripts/scan_memory.mjs'
+
+const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 // memory-consolidate 内置技能的预扫脚本：解析 / 相似度 / 候选理由 / 聚类 /
 // 目录扫描 / CLI。脚本只做候选发现，写操作由 AI 用 memory 工具执行（不在本文件范围）。
@@ -184,5 +187,51 @@ test('工具函数：normText / diceBigrams 基本行为', () => {
   assert.ok(diceBigrams('记忆合并梳理标准', '记忆合并梳理标准全文') > 0.8)
   assert.equal(diceBigrams('完全不同', 'xyz'), 0)
   assert.equal(ENTRY_DELIMITER, '\n§\n')
-  assert.ok(!existsSync(join(tmpdir(), 'memscan-nonexistent')))
+  // TQ-10（2026-09-17 审计）：原先此处是
+  // `assert.ok(!existsSync(join(tmpdir(), 'memscan-nonexistent')))` —— 仓库里
+  // 没有任何代码会创建该路径，恒真、测不到任何行为，已删除（"扫描不产生杂散
+  // 目录"若真要钉，应由 main CLI 用例按真实产物断言）。这里补 normText 的
+  // 幂等性，让本用例名（normText/diceBigrams）对应的覆盖是真的。
+  const once = normText('Hello, 世界！ [2026-09-01] ')
+  assert.equal(normText(once), once, 'normText 必须幂等（二次归一不再变化）')
+})
+
+test('SKILL.md 步骤 5：备份推送只提示用户在「记忆同步」Tab 手动操作，不得留不可执行的 curl', () => {
+  // S13-4（2026-09-17 审计）：这一节原先给的是一条 curl（写死 127.0.0.1:3080、
+  // 不带 Origin 头）。它在产品里**必然失败**：所有 /memory-evolve 写路由都过同源
+  // 守卫（lib/http-guard.js 要求非 GET 带同源 Origin），桌面产品的 Web 端口由
+  // 运行时分配（packages/host/desktop/src/profile.ts 的 DEFAULT_DESKTOP_PORT=0），
+  // 而且它与「记忆同步无 AI 侧入口，AI 不参与同步执行」的既有决策冲突（lib/sync/
+  // index.js:355-359）。文档契约：这一节只能给出用户手动路径，不能把确定性失败
+  // 写成「待下次自动备份」。
+  const skill = readFileSync(join(PKG_ROOT, 'skills', 'memory-consolidate', 'SKILL.md'), 'utf8')
+  const start = skill.indexOf('### 步骤 5')
+  const end = skill.indexOf('## 四、何时运行')
+  assert.ok(start >= 0 && end > start, '技能必须仍有「步骤 5」与「四、何时运行」两节')
+  const step5 = skill.slice(start, end)
+  assert.doesNotMatch(step5, /curl\s+-X\s+POST/, '不得再给模型一条必然 400 的 curl 命令')
+  assert.doesNotMatch(step5, /127\.0\.0\.1:3080/, '不得写死开发机的 dsh web 端口（桌面端口是运行时分配的）')
+  assert.doesNotMatch(step5, /待下次自动备份/, '不得把确定性失败写成"待自动备份"（并没有自动备份兜底）')
+  assert.match(step5, /「记忆同步」Tab/, '必须给出真实存在的入口：记忆同步 Tab')
+  assert.match(step5, /「共享记忆库」/, '未启用共享记忆库时还要给出启用路径')
+  assert.match(step5, /「推送」/, '必须点名用户要点的按钮：推送')
+  assert.match(step5, /用户/, '必须写明这一步只能由用户触发')
+  assert.match(step5, /不参与同步执行|AI 不执行同步/, '必须与「AI 不参与同步执行」的决策一致')
+})
+
+test('SKILL.md 头部：就地记录「提升 x-version 会整目录覆盖本地改动」的维护者提示', () => {
+  // S13-4 复核（2026-09-17）：x-version 1→2 让 v2.7.5-beta.2..beta.5 的已装机器
+  // 在下次启动时整目录重同步该技能，本地改动被覆盖——这是内置技能同步的既定
+  // 语义（要保持"正文改动能送达用户"就必须提升版本号），不是要改掉的行为。
+  // 缺口只在**可发现性**：改这个文件的人（下一轮提 x-version 的人）必须看得到。
+  // 所以断言这条提示在 SKILL.md 里（放在 frontmatter 紧邻的说明行，与 x-version
+  // 同一屏）。删掉提示 → 本用例红。
+  const skill = readFileSync(join(PKG_ROOT, 'skills', 'memory-consolidate', 'SKILL.md'), 'utf8')
+  const frontmatterEnd = skill.indexOf('\n---\n')
+  assert.ok(frontmatterEnd > 0, 'SKILL.md 必须有 frontmatter')
+  const header = skill.slice(frontmatterEnd, skill.indexOf('# 记忆合并梳理'))
+  assert.match(header, /x-version/, '提示必须点名触发条件：frontmatter 的 x-version')
+  assert.match(header, /整目录替换|整目录覆盖/, '必须说明后果是整目录替换/覆盖')
+  assert.match(header, /本地改动|自加文件/, '必须说明被覆盖的是本地改动/自加文件')
+  assert.match(header, /skills-sync\.js/, '必须指向真正的实现（lib/coi/skills-sync.js）')
 })

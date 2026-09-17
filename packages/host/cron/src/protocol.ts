@@ -65,8 +65,10 @@ function optionalBoolean(value: unknown): boolean {
 
 /**
  * Host-side cron validation: the expression must parse AND have a reachable
- * next instant within the eight-year horizon (a calendar-impossible schedule
- * such as `0 0 30 2 *` would otherwise produce a silently inert job).
+ * next instant inside the per-schedule scan horizon — eight years for the
+ * plain forms, forty-one when the day/weekday AND branch is in play (see
+ * `horizonDays` in cron.ts). A calendar-impossible schedule such as
+ * `0 0 30 2 *` would otherwise produce a silently inert job.
  */
 function validCron(value: unknown): boolean {
   if (typeof value !== 'string' || value === '') return false

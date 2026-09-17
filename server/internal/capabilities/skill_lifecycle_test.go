@@ -623,3 +623,143 @@ func TestSkillAdminEnabledEndpointGuards(t *testing.T) {
 		t.Fatal("跨渠道请求不得改动市场技能的 enabled")
 	}
 }
+
+// adminBearer 用管理员自己的 API token 走客户端面（与员工同一个中间件：
+// BearerAuth → VerifyToken，IsAdmin 随行）。
+func adminBearer(t *testing.T, db *sql.DB) map[string]string {
+	t.Helper()
+	boss, err := serverstore.GetUserByUsername(db, "boss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := serverauth.IssueToken(db, boss.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{"Authorization": "Bearer " + token}
+}
+
+func approveSkill(t *testing.T, r *gin.Engine, adminHdr map[string]string, version string) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/server/admin/shared-skills/"+skillLifecycleName+"/"+version+"/approve", nil)
+	for k, v := range adminHdr {
+		req.Header.Set(k, v)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("approve %s = %d %s", version, w.Code, w.Body.String())
+	}
+}
+
+func grantSkill(t *testing.T, r *gin.Engine, adminHdr map[string]string, username string) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{"username": username})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("PUT", "/api/server/admin/shared-skills/"+skillLifecycleName+"/grant", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range adminHdr {
+		req.Header.Set(k, v)
+	}
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("grant %s = %d %s", username, w.Code, w.Body.String())
+	}
+}
+
+// clientSkillList 调 /api/client/v2/shared-skills（能力中心之外的另一条客户端
+// 清单面），返回 "name@version" 列表。
+func clientSkillList(t *testing.T, r *gin.Engine, hdr map[string]string) []string {
+	t.Helper()
+	w := doGet(t, r, "/api/client/v2/shared-skills", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("客户端技能清单 = %d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Skills []struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		} `json:"skills"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	out := []string{}
+	for _, s := range body.Skills {
+		out = append(out, s.Name+"@"+s.Version)
+	}
+	return out
+}
+
+func containsStr(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// 审计 2026-09-15 S11-2：客户端面的「下架」必须对**管理员**同样生效。
+//
+// 客户端安装通路的归档端点在路由树里恒以 admin=false 构造（与调用者是否管理员
+// 无关），所以管理员在客户端清单里看到已下架行 = 可点但必 404 的死行。这正是
+// agentshare 已经钉死的口径（listVisible 的 `&& enabled[...]`：管理员在客户端面
+// 也不该看到可点但下载必 404 的行）。两条客户端清单（技能清单 +
+// 能力中心聚合的组织分区）都要过滤，而管理面清单仍全量（下架不删数据）。
+func TestSkillDisabledHiddenFromAdminClientLists(t *testing.T) {
+	r, db, adminHdr, aliceHdr, bobHdr := setupSkillLifecycle(t)
+	bossHdr := adminBearer(t, db)
+
+	uploadSkill(t, r, aliceHdr, "1.0.0")
+	approveSkill(t, r, adminHdr, "1.0.0")
+	// 管理员自己也落授权（客户端下载门对 admin 没有豁免，只有作者/已授权可下），
+	// 这样"上架可装 / 下架 404"才是同一主体的可比对。
+	grantSkill(t, r, adminHdr, "boss")
+	grantSkill(t, r, adminHdr, "bob")
+
+	callers := []struct {
+		who string
+		hdr map[string]string
+	}{
+		{"管理员", bossHdr},
+		{"员工", bobHdr},
+		{"作者", aliceHdr},
+	}
+	// 正对照：上架时三种角色在两条客户端面都可见、可安装（夹具本身可见）。
+	for _, c := range callers {
+		if !hasSkillVersion(capabilityItems(t, r, c.hdr, "market"), "1.0.0", "org") {
+			t.Fatalf("上架时%s在能力中心看不到组织技能（正对照失败）", c.who)
+		}
+		if !containsStr(clientSkillList(t, r, c.hdr), skillLifecycleName+"@1.0.0") {
+			t.Fatalf("上架时%s在客户端技能清单看不到组织技能（正对照失败）", c.who)
+		}
+		if code := downloadSkill(t, r, c.hdr, "1.0.0"); code != http.StatusOK {
+			t.Fatalf("上架时%s下载 = %d, want 200（正对照失败）", c.who, code)
+		}
+	}
+
+	toggleSkillEnabled(t, r, adminHdr, skillLifecycleName, false)
+
+	// 下架后：两条客户端面对三种角色都必须与「不存在」同语义（管理员也不例外）。
+	for _, c := range callers {
+		if hasSkillVersion(capabilityItems(t, r, c.hdr, "market"), "1.0.0", "org") {
+			t.Fatalf("下架后%s仍能在能力中心看到组织技能（客户端面下架必须生效）", c.who)
+		}
+		if containsStr(clientSkillList(t, r, c.hdr), skillLifecycleName+"@1.0.0") {
+			t.Fatalf("下架后%s仍能在客户端技能清单看到组织技能", c.who)
+		}
+		if code := downloadSkill(t, r, c.hdr, "1.0.0"); code != http.StatusNotFound {
+			t.Fatalf("下架后%s下载 = %d, want 404", c.who, code)
+		}
+	}
+
+	// 管理面清单仍全量：下架不等于删除，管理员要能重新上架/排障。
+	w := doGet(t, r, "/api/server/admin/shared-skills", adminHdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("管理面清单 = %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), skillLifecycleName) {
+		t.Fatal("管理面清单被下架过滤了（管理面必须全量，见 listAll）")
+	}
+}

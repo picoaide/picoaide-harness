@@ -21,6 +21,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { TabGuideView } from './TabGuideView.tsx'
+import { createNoticeTimer } from './ui-guards.js'
 import type { MemoryEvolveKey } from './index.ts'
 
 /** 提示词条目（与 host 端 PromptStore 一致）。 */
@@ -256,9 +257,14 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
   const showError = useCallback((err: unknown): void => {
     setError(errText(err))
   }, [])
+  // ME-10（2026-09-17 二审）：提示位定时器必须归属自己 —— 旧写法每次
+  // showNotice 新开一个不跟踪的 4s 定时器，先来的那个到点会清掉 4s 内后到
+  // 的第二条提示（刚出现就消失），且卸载时不清理。
+  const noticeTimer = useRef<ReturnType<typeof createNoticeTimer> | null>(null)
+  if (noticeTimer.current === null) noticeTimer.current = createNoticeTimer(setNotice)
+  useEffect(() => () => noticeTimer.current?.dispose(), [])
   const showNotice = useCallback((text: string): void => {
-    setNotice(text)
-    window.setTimeout(() => setNotice(null), 4000)
+    noticeTimer.current?.show(text)
   }, [])
 
   const load = useCallback(async (): Promise<void> => {
@@ -309,11 +315,15 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
 
   const selected = prompts.find((p) => p.id === selectedId) ?? null
 
-  /** 选中一个提示词 → 填充表单（丢弃未保存的编辑）。 */
-  const selectPrompt = (id: string): void => {
-    const p = prompts.find((x) => x.id === id)
-    if (!p) return
-    setSelectedId(id)
+  /**
+   * 用给定条目回填右侧表单（选中 / 新建共用；丢弃未保存的编辑）。
+   * ME-2（2026-09-17 二审）：新建流程必须直接传**刚返回的条目对象**——
+   * 走 selectPrompt(id) 会在 render 期闭包的 prompts 里查找，而新建的 id
+   * 不可能出现在旧数组里（find → undefined → 静默 no-op）：表单不回填、
+   * 条目看似没建上，用户再点一次就产生第二条同名同内容提示词。
+   */
+  const applyPromptDraft = (p: Prompt): void => {
+    setSelectedId(p.id)
     setCreating(false)
     setName(p.name)
     setDescription(p.description ?? '')
@@ -321,6 +331,13 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
     setTags(p.tags.join(', '))
     setContent(p.content)
     setEnabled(p.enabled !== false)
+  }
+
+  /** 选中一个提示词 → 填充表单（丢弃未保存的编辑）。 */
+  const selectPrompt = (id: string): void => {
+    const p = prompts.find((x) => x.id === id)
+    if (!p) return
+    applyPromptDraft(p)
   }
 
   /** 进入新建模式：清空表单。 */
@@ -531,7 +548,9 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
       } else {
         await afterInjected(data.injection)
       }
-      selectPrompt(created.prompt.id) // 回填表单：新建条目已选中，可改名/改分类
+      // 回填表单：新建条目已选中，可改名/改分类。必须用刚返回的对象
+      // （ME-2：selectPrompt(id) 查的是 render 期旧 prompts，永远找不到）。
+      applyPromptDraft(created.prompt)
     } catch (err) {
       showError(errText(err))
     } finally {

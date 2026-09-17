@@ -472,14 +472,16 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   private async showRendererBootRecovery(report: Extract<RendererBootReport, { status: 'failed' }>): Promise<void> {
-    const plugins = report.plugins.length === 0
-      ? 'Unknown client plugin'
-      : report.plugins.map(plugin => `- ${plugin}`).join('\n')
-    const error = report.error === undefined ? 'The client Loader did not provide an error message.' : report.error
     // 产品名取自 profile 组装配置（渠道构建下即渠道自己的名字）—— 失败弹窗
     // 是渠道客户最可能看到的"厂商品牌露出"位置之一。
     const product = this.productName
     const copy = desktopStartupCopy(this.currentLocale)
+    // 兜底句也必须走 copy（2026-09-17 S05-3 审计）：这里曾硬编码英文，中文
+    // 界面的详情因此中英混排（localize 扫描看不到三元分支里的字面量）。
+    const plugins = report.plugins.length === 0
+      ? copy.unknownPlugin
+      : report.plugins.map(plugin => `- ${plugin}`).join('\n')
+    const error = report.error === undefined ? copy.loaderErrorMissing : report.error
     const result = await dialog.showMessageBox({
       type: 'error',
       title: copy.pluginRecoveryTitle,

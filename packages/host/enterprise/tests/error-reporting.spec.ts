@@ -6,6 +6,7 @@ import {
   captureRendererError,
   captureRendererGone,
   dsnHostOf,
+  type ErrorReportingState,
   getErrorReportingStatus,
   HEARTBEAT_TAG,
   initSentry,
@@ -58,9 +59,23 @@ vi.mock('@sentry/node', () => ({
 
 /** 状态上报(fetchJSON)捕获。 */
 const reported: Array<{ path: string; body: Record<string, string> }> = []
+/** 每一次尝试(含失败)的目标服务器:S07-02 的重试/换服务器用例要看"是否真的又发了一次"。 */
+const attempts: Array<{ server: string; path: string; token?: string }> = []
 let fetchShouldFail = false
+/** 非 null 时挂起请求(S07-02 的在飞去重用例需要一次"尚未返回"的上报)。 */
+let fetchGate: Promise<void> | null = null
 vi.mock('../src/server-connector/auth.ts', () => ({
-  fetchJSON: vi.fn(async (_serverURL: string, path: string, opts: { body?: unknown }) => {
+  fetchJSON: vi.fn(async (serverURL: string, path: string, opts: { body?: unknown; token?: string }) => {
+    // token 决定服务端把那行状态 upsert 到**哪个用户**(S07-02 复核 2026-09-17):
+    // 每个用例只读 server/path,但"两个用户 = 两行"要靠它区分。
+    attempts.push({ server: serverURL, path, token: opts.token })
+    if (fetchGate !== null) {
+      // 只挡第一次(S07-02 在飞去重用例):后续请求不该被同一个闸门拖住,
+      // 否则断言失败会退化成 5s 超时、看不出真正的差异。
+      const gate = fetchGate
+      fetchGate = null
+      await gate
+    }
     if (fetchShouldFail) throw new Error('network down')
     reported.push({ path, body: opts.body as Record<string, string> })
     return { ok: true }
@@ -141,7 +156,9 @@ beforeEach(async () => {
   await initSentry('', 'test-reset')
   vi.clearAllMocks()
   reported.length = 0
+  attempts.length = 0
   fetchShouldFail = false
+  fetchGate = null
   sessionListener = null
   bootstrapResult = { config: { default_model: 'm', models: [], skills: [], mcp: [], web: {} }, fellBack: false, fallback: 'ok' }
 })
@@ -487,6 +504,146 @@ describe('状态上报(P1-3/D7)', () => {
     const ok = await reportErrorReportingStatus(null, { state: 'ready', dsnHost: 'h', level: 'error' })
     expect(ok).toBe(false)
     expect(reported.length).toBe(0)
+  })
+
+  // -------------------------------------------------------------------------
+  // S07-02(2026-09-17 审计):去重键必须是整份载荷的身份,且只能在 POST 成功
+  // 之后消费 —— 旧实现"POST 之前入集、失败不摘除"会让一次瞬时失败把这台机器
+  // 从管理端永久抹掉,并让换服务器/改 DSN 后的新载荷永不外发。
+  // -------------------------------------------------------------------------
+
+  const STATUS_PATH = '/api/client/v2/telemetry/error-reporting'
+  const reportAttempts = (): Array<{ server: string; path: string }> =>
+    attempts.filter((a) => a.path === STATUS_PATH)
+  const delivered = (): Array<{ path: string; body: Record<string, string> }> =>
+    reported.filter((r) => r.path === STATUS_PATH)
+  const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+  /** 再触发一次会话变更同步(apply 已由 runSync 装好监听器)。 */
+  const syncAgain = async (session: Session): Promise<void> => {
+    sessionListener!(session)
+    await tick()
+  }
+  /** 一份"上报已启用"的 bootstrap 载荷(DSN/等级可调)。 */
+  function enableReporting(dsn = GOOD_DSN, level?: string): void {
+    bootstrapResult = {
+      config: {
+        default_model: 'm',
+        models: [{ id: 'm' }],
+        skills: [],
+        mcp: [],
+        web: {
+          error_reporting_enabled: true,
+          error_reporting_dsn: dsn,
+          ...(level === undefined ? {} : { error_reporting_level: level }),
+        },
+      },
+      fellBack: false,
+      fallback: 'ok',
+    }
+  }
+
+  it('retries the report on the next session change after a failure (S07-02)', async () => {
+    enableReporting()
+    fetchShouldFail = true
+    const { ctx } = stubCtx()
+    await runSync(ctx, SESSION)
+    expect(reportAttempts().length).toBe(1)
+    expect(delivered().length).toBe(0)
+
+    // 瞬时故障(5xx / 超时 / 遥测 10 次每分限流的 429)过去后再同步一次必须重发。
+    // 修复前:key 在 POST 之前就已入集且失败不摘除 ⇒ 这里恒为 1 条、0 条送达。
+    fetchShouldFail = false
+    await syncAgain(SESSION)
+    expect(reportAttempts().length).toBe(2)
+    expect(delivered().length).toBe(1)
+    expect(delivered()[0]!.body).toMatchObject({ state: 'ready', dsn_host: 'glitchtip.example.com' })
+
+    // 只重试一次,不是每次同步都发:成功后同一载荷重新去重。
+    await syncAgain(SESSION)
+    expect(reportAttempts().length).toBe(2)
+  })
+
+  it('reports again after switching to a different server (S07-02)', async () => {
+    enableReporting()
+    const { ctx } = stubCtx()
+    await runSync(ctx, SESSION)
+    expect(reportAttempts().map((a) => a.server)).toEqual(['https://gateway.example'])
+
+    // 登出后登录另一台服务器是允许的(登录闸只在已登录时拒绝换服务器);
+    // 键不含 serverURL 时,第二台服务器的管理端一行都收不到。
+    await syncAgain({ ...SESSION, serverURL: 'https://other.example' })
+    expect(reportAttempts().map((a) => a.server)).toEqual(['https://gateway.example', 'https://other.example'])
+    expect(delivered().at(-1)!.body).toMatchObject({ state: 'ready', dsn_host: 'glitchtip.example.com' })
+  })
+
+  it('reports again for a different user on the same machine and server (S07-02)', async () => {
+    enableReporting()
+    const { ctx } = stubCtx()
+    await runSync(ctx, { ...SESSION, username: 'alice', token: 'tok-alice' })
+    expect(delivered().length).toBe(1)
+
+    // S07-02 复核(2026-09-17,P3):服务端那行状态是**按用户** upsert 的
+    // (telemetry/errorreporting.go 用认证用户 id,管理端列表 select 用户名),
+    // 而键此前不含身份 —— 同一台机器换用户登录时载荷逐字节相同、键也不变,
+    // bob 的上报被 alice 的键挡住,后台永远只有 alice 那一行(可执行探针复现)。
+    await syncAgain({ ...SESSION, username: 'bob', token: 'tok-bob' })
+    expect(reportAttempts().length).toBe(2)
+    expect(delivered().length).toBe(2)
+    // 两条上报各带自己的会话令牌 ⇒ 服务端落到两个用户的两行(行身份 = 用户)。
+    expect(reportAttempts().map((a) => a.token)).toEqual(['tok-alice', 'tok-bob'])
+
+    // 身份缺失(旧服务端/畸形登录响应)既不能与具名用户同键、也不能整条丢弃:
+    // 匿名第一次要发出去,之后再同步仍按同一身份降噪。
+    await syncAgain({ ...SESSION, username: undefined as unknown as string, token: 'tok-anon' })
+    expect(reportAttempts().length).toBe(3)
+    await syncAgain({ ...SESSION, username: undefined as unknown as string, token: 'tok-anon-2' })
+    expect(reportAttempts().length).toBe(3)
+
+    // 同一用户重新登录(新令牌、同名)保持原有降噪:键里放的是身份,不是令牌。
+    await syncAgain({ ...SESSION, username: 'alice', token: 'tok-alice-2' })
+    expect(reportAttempts().length).toBe(3)
+  })
+
+  it('reports again when the admin changes the DSN host or the level (S07-02)', async () => {
+    enableReporting()
+    const { ctx } = stubCtx()
+    await runSync(ctx, SESSION)
+    expect(delivered().length).toBe(1)
+
+    // dsn_host/level 就是服务端那一段 upsert 行的内容:配置变了就要重报,
+    // 否则后台一直显示旧 DSN 主机/旧等级。
+    enableReporting(`https://${PUBLIC_KEY}@glitchtip2.example.com/1`, 'warning')
+    await syncAgain(SESSION)
+    expect(reportAttempts().length).toBe(2)
+    expect(delivered().at(-1)!.body).toMatchObject({ dsn_host: 'glitchtip2.example.com', level: 'warning' })
+  })
+
+  it('does not double-POST the same status while one report is in flight (S07-02)', async () => {
+    // "成功后才登记"必须配一个在飞集合,否则并发同步会为同一载荷发两条。
+    const value: ErrorReportingState = { state: 'ready', dsnHost: 'h', level: 'error' }
+    let release!: () => void
+    fetchGate = new Promise<void>((resolve) => { release = resolve })
+    const first = reportErrorReportingStatus(SESSION, value)
+    await expect(reportErrorReportingStatus(SESSION, value)).resolves.toBe(false)
+    expect(reportAttempts().length).toBe(1)
+
+    release()
+    await expect(first).resolves.toBe(true)
+    expect(reportAttempts().length).toBe(1)
+    // 成功后同一载荷仍然去重。
+    await expect(reportErrorReportingStatus(SESSION, value)).resolves.toBe(false)
+    expect(reportAttempts().length).toBe(1)
+  })
+
+  it('caps the reported-key set so a changing payload cannot grow it without bound (S07-02)', async () => {
+    for (let i = 0; i < 65; i++) {
+      await expect(reportErrorReportingStatus(SESSION, { state: 'config_unavailable', reason: `r${i}` })).resolves.toBe(true)
+    }
+    // 上限 64、淘汰最旧:第 1 个键已被挤出,同一载荷会重新上报(不是永久占位)。
+    await expect(reportErrorReportingStatus(SESSION, { state: 'config_unavailable', reason: 'r0' })).resolves.toBe(true)
+    // 最近一批仍在集合内(淘汰最旧 ≠ 整体清空)。
+    await expect(reportErrorReportingStatus(SESSION, { state: 'config_unavailable', reason: 'r64' })).resolves.toBe(false)
+    expect(reportAttempts().length).toBe(66)
   })
 })
 

@@ -36,34 +36,122 @@ var import_react2 = require("react");
 // src/client/MemoryQueueView.tsx
 var import_react = require("react");
 
+// src/client/tab-badge.js
+function normalizeCount(next) {
+  return typeof next === "number" && Number.isFinite(next) && next > 0 ? Math.trunc(next) : 0;
+}
+function createBadgeTab(register, poke) {
+  let disposer;
+  let count = 0;
+  return {
+    /** 注册条目（幂等：已注册即 no-op —— 绝不 dispose 重来）。 */
+    mount() {
+      if (disposer !== void 0) return;
+      disposer = register(() => count);
+    },
+    /** 更新红点计数：值没变不做事；变化只 poke，不重注册。 */
+    setCount(next) {
+      const value = normalizeCount(next);
+      if (value === count) return;
+      count = value;
+      if (disposer !== void 0) poke();
+    },
+    count: () => count,
+    mounted: () => disposer !== void 0,
+    dispose() {
+      const dispose = disposer;
+      disposer = void 0;
+      dispose?.();
+    }
+  };
+}
+
 // src/client/todo-tab-lifecycle.js
 var RUNTIME_CONFIG_CHANGED = "dsh-memory-evolve:runtime-config-changed";
-function createTodoTabLifecycle(register) {
+function createTodoTabLifecycle(register, poke) {
+  const badge = createBadgeTab(register, poke);
   let enabled = false;
-  let disposer;
-  const mount = () => {
-    disposer?.();
-    disposer = register();
-  };
   return {
     setEnabled(next) {
       enabled = next === true;
-      if (!enabled) {
-        disposer?.();
-        disposer = void 0;
-      } else if (disposer === void 0) {
-        mount();
-      }
+      if (enabled) badge.mount();
+      else badge.dispose();
     },
-    refresh() {
-      if (enabled && disposer !== void 0) mount();
+    /** 计数变化：只刷新 label（poke），不重注册。 */
+    setCount(next) {
+      badge.setCount(next);
     },
+    count: () => badge.count(),
     dispose() {
       enabled = false;
-      disposer?.();
-      disposer = void 0;
+      badge.dispose();
     },
     enabled: () => enabled
+  };
+}
+
+// src/client/ui-guards.js
+var SCROLL_FOLLOW_THRESHOLD_PX = 24;
+function createScrollFollow(threshold = SCROLL_FOLLOW_THRESHOLD_PX) {
+  let following = true;
+  const nearBottom = (el) => {
+    if (el === null || el === void 0) return true;
+    const height = Number(el.scrollHeight) || 0;
+    const top = Number(el.scrollTop) || 0;
+    const client = Number(el.clientHeight) || 0;
+    return height - top - client <= threshold;
+  };
+  return {
+    onScroll(el) {
+      if (el === null || el === void 0) return;
+      following = nearBottom(el);
+    },
+    apply(el) {
+      if (el === null || el === void 0) return false;
+      if (!following) return false;
+      el.scrollTop = el.scrollHeight;
+      return true;
+    },
+    reset() {
+      following = true;
+    },
+    following: () => following
+  };
+}
+function createNoticeTimer(apply, opts = {}) {
+  const delayMs = opts.delayMs ?? 4e3;
+  const schedule = opts.schedule ?? setTimeout;
+  const cancel = opts.cancel ?? clearTimeout;
+  let timer;
+  return {
+    show(text) {
+      if (timer !== void 0) cancel(timer);
+      apply(text);
+      timer = schedule(() => {
+        timer = void 0;
+        apply(null);
+      }, delayMs);
+    },
+    dispose() {
+      if (timer === void 0) return;
+      cancel(timer);
+      timer = void 0;
+    },
+    pending: () => timer !== void 0
+  };
+}
+function createLatestOnly() {
+  let seq = 0;
+  return {
+    begin() {
+      seq += 1;
+      const token = seq;
+      return () => token === seq;
+    },
+    invalidate() {
+      seq += 1;
+    },
+    current: () => seq
   };
 }
 
@@ -3686,12 +3774,30 @@ function TodosTabView(props) {
 // src/client/SettingsTabView.tsx
 var import_react8 = require("react");
 
+// src/client/view-error.js
+function hostErrorFromResponse(status, body) {
+  const record = body !== null && typeof body === "object" ? body : {};
+  const code = typeof record.code === "string" && record.code !== "" ? record.code : "network";
+  const message = typeof record.error === "string" && record.error !== "" ? record.error : typeof record.message === "string" && record.message !== "" ? record.message : `HTTP ${status}`;
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+function viewErrorOf(err) {
+  const message = err instanceof Error ? err.message : typeof err === "string" && err !== "" ? err : "network error";
+  const code = err !== null && typeof err === "object" && typeof err.code === "string" && err.code !== "" ? err.code : "network";
+  return { code, message };
+}
+
 // src/client/VersionTabView.tsx
 var import_react7 = require("react");
 var import_jsx_runtime8 = require("react/jsx-runtime");
 async function fetchStatus(force) {
   const res = await fetch(`/memory-evolve/api/update/status${force ? "?force=1" : ""}`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw hostErrorFromResponse(res.status, body);
+  }
   return await res.json();
 }
 function formatTime3(ms) {
@@ -3712,7 +3818,7 @@ function VersionTabView(props) {
     fetchStatus(force).then((data) => {
       setState(data);
       window.dispatchEvent(new CustomEvent("dsh-memory-evolve:badge-change"));
-    }).catch((err) => setError({ code: "network", message: err instanceof Error ? err.message : "network error" })).finally(() => setChecking(false));
+    }).catch((err) => setError(viewErrorOf(err))).finally(() => setChecking(false));
   };
   (0, import_react7.useEffect)(() => {
     refresh(false);
@@ -4759,13 +4865,17 @@ function TasksPane({ t: tt, dsSessionId }) {
   const logRef = (0, import_react11.useRef)(null);
   const fullLogRef = (0, import_react11.useRef)(null);
   const selectedRef = (0, import_react11.useRef)(null);
+  const logFollow = (0, import_react11.useRef)(createScrollFollow());
+  const tasksSeq = (0, import_react11.useRef)(createLatestOnly());
   (0, import_react11.useEffect)(() => {
     selectedRef.current = selectedId;
   }, [selectedId]);
   const loadTasks = (0, import_react11.useCallback)(async () => {
+    const isCurrent = tasksSeq.current.begin();
     try {
       const q = searchQ.trim();
       const data = await fetchJson(`/tasks?page=${page}&pageSize=${TASK_LIMIT}${visQs}${q !== "" ? `&q=${encodeURIComponent(q)}` : ""}`);
+      if (!isCurrent()) return;
       if (data.tasks.length === 0 && data.total > 0 && page > 1) {
         setPage(Math.max(1, Math.ceil(data.total / TASK_LIMIT)));
         return;
@@ -4774,6 +4884,7 @@ function TasksPane({ t: tt, dsSessionId }) {
       setTotal(data.total);
       setError(null);
     } catch (err) {
+      if (!isCurrent()) return;
       setError(errText(err, t));
     }
   }, [searchQ, page]);
@@ -4840,6 +4951,7 @@ function TasksPane({ t: tt, dsSessionId }) {
     setDetail(null);
     setLog("");
     setLogError(null);
+    logFollow.current.reset();
     void loadDetail(selectedId);
     void loadLog(selectedId);
   }, [selectedId, loadDetail, loadLog]);
@@ -4853,11 +4965,13 @@ function TasksPane({ t: tt, dsSessionId }) {
     return () => clearInterval(timer);
   }, [selectedId, running, loadLog, loadDetail]);
   (0, import_react11.useEffect)(() => {
-    const el = logRef.current;
-    if (el !== null) el.scrollTop = el.scrollHeight;
-    const full = fullLogRef.current;
-    if (full !== null) full.scrollTop = full.scrollHeight;
+    logFollow.current.apply(logRef.current);
+    logFollow.current.apply(fullLogRef.current);
   }, [log]);
+  const onLogScroll = () => {
+    logFollow.current.onScroll(logRef.current);
+    logFollow.current.onScroll(fullLogRef.current);
+  };
   const applyTemplate = (id) => {
     setTemplateId(id);
     const tpl = templates.find((item) => item.id === id);
@@ -5217,7 +5331,7 @@ function TasksPane({ t: tt, dsSessionId }) {
             ] })
           ] }),
           logError !== null && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "coi-error", children: logError }),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("pre", { ref: logRef, className: "coi-log", children: log === "" ? t("coi.tasks.logEmpty") : log })
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("pre", { ref: logRef, className: "coi-log", onScroll: onLogScroll, children: log === "" ? t("coi.tasks.logEmpty") : log })
         ] })
       ] })
     ] }),
@@ -5241,7 +5355,7 @@ function TasksPane({ t: tt, dsSessionId }) {
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => setFullLog(false), children: "\u2715" })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("pre", { ref: fullLogRef, className: "coi-log coi-log-full", children: log === "" ? t("coi.tasks.logEmpty") : log })
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("pre", { ref: fullLogRef, className: "coi-log coi-log-full", onScroll: onLogScroll, children: log === "" ? t("coi.tasks.logEmpty") : log })
     ] }) })
   ] });
 }
@@ -5255,15 +5369,19 @@ function SessionsPane({ t: tt, dsSessionId }) {
   const [q, setQ] = (0, import_react11.useState)("");
   const [editId, setEditId] = (0, import_react11.useState)(null);
   const [noteDraft, setNoteDraft] = (0, import_react11.useState)("");
+  const sessionsSeq = (0, import_react11.useRef)(createLatestOnly());
   const load = (0, import_react11.useCallback)(async () => {
+    const isCurrent = sessionsSeq.current.begin();
     try {
       const params = new URLSearchParams();
-      if (scopeFilter !== "") params.set("coi.scope", scopeFilter);
-      if (q.trim() !== "") params.set("coi.q", q.trim());
+      if (scopeFilter !== "") params.set("scope", scopeFilter);
+      if (q.trim() !== "") params.set("q", q.trim());
       const data = await fetchJson(`/sessions?${params.toString()}${visQs}`);
+      if (!isCurrent()) return;
       setSessions(data.sessions);
       setError(null);
     } catch (err) {
+      if (!isCurrent()) return;
       setError(errText(err, t));
     }
   }, [scopeFilter, q]);
@@ -5516,7 +5634,8 @@ function AdaptersPane({ t: tt }) {
         setNotice({ kind: "error", text: msgOr(res.message, t("coi.adapters.saveFailed")) });
         return;
       }
-      setNotice({ kind: "ok", text: res.skillMessage !== void 0 ? res.skillMessage : t("coi.config.saved") });
+      const skillMessage = typeof res.skillMessage === "string" && res.skillMessage !== "" ? res.skillMessage : null;
+      setNotice({ kind: "ok", text: skillMessage ?? t("coi.config.saved") });
       setFId("");
       setFName("");
       setFBinary("");
@@ -5553,6 +5672,13 @@ function AdaptersPane({ t: tt }) {
             a.skillName
           ] }),
           a.skillName !== void 0 && a.skillName !== "" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", { type: "button", className: "coi-btn coi-btn-mini", onClick: () => void openSkillEdit(a), children: t("coi.adapters.skillBtn") }),
+          typeof a.guide === "string" && a.guide !== "" && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("button", {
+            type: "button",
+            className: "coi-btn coi-btn-mini",
+            "aria-expanded": guideOpen === a.id,
+            onClick: () => setGuideOpen(guideOpen === a.id ? null : a.id),
+            children: t("coi.adapters.guide")
+          }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
             "button",
             {
@@ -6815,7 +6941,7 @@ function AdvisorHost(props) {
     };
     mediaQuery.addEventListener("change", onMediaChange);
     return () => mediaQuery.removeEventListener("change", onMediaChange);
-  }, [panelEnabled]);
+  }, [panelEnabled, userToggled]);
   (0, import_react15.useEffect)(() => {
     store.setPanelVisible(expanded);
     return () => store.setPanelVisible(false);
@@ -7278,7 +7404,6 @@ function AdvisorPanel({ t, store, snapshot, onCollapse }) {
 function ReviewCard(props) {
   const { t, item, history = false } = props;
   const [inputOpen, setInputOpen] = (0, import_react15.useState)(props.defaultInputOpen);
-  (0, import_react15.useEffect)(() => setInputOpen(props.defaultInputOpen), [props.defaultInputOpen]);
   const terminal = item.finished ?? item.record;
   const ts = item.started?.ts ?? terminal?.ts ?? 0;
   const note = terminal?.note ?? null;
@@ -8321,9 +8446,11 @@ function PromptView(props) {
   const showError = (0, import_react17.useCallback)((err) => {
     setError(errText3(err));
   }, []);
+  const noticeTimer = (0, import_react17.useRef)(null);
+  if (noticeTimer.current === null) noticeTimer.current = createNoticeTimer(setNotice);
+  (0, import_react17.useEffect)(() => () => noticeTimer.current?.dispose(), []);
   const showNotice = (0, import_react17.useCallback)((text) => {
-    setNotice(text);
-    window.setTimeout(() => setNotice(null), 4e3);
+    noticeTimer.current?.show(text);
   }, []);
   const load = (0, import_react17.useCallback)(async () => {
     try {
@@ -8361,10 +8488,8 @@ function PromptView(props) {
     });
   }, [prompts, search, category]);
   const selected = prompts.find((p) => p.id === selectedId) ?? null;
-  const selectPrompt = (id) => {
-    const p = prompts.find((x) => x.id === id);
-    if (!p) return;
-    setSelectedId(id);
+  const applyPromptDraft = (p) => {
+    setSelectedId(p.id);
     setCreating(false);
     setName(p.name);
     setDescription(p.description ?? "");
@@ -8372,6 +8497,11 @@ function PromptView(props) {
     setTags(p.tags.join(", "));
     setContent(p.content);
     setEnabled(p.enabled !== false);
+  };
+  const selectPrompt = (id) => {
+    const p = prompts.find((x) => x.id === id);
+    if (!p) return;
+    applyPromptDraft(p);
   };
   const startCreate = () => {
     setSelectedId(null);
@@ -8525,7 +8655,7 @@ function PromptView(props) {
       } else {
         await afterInjected(data.injection);
       }
-      selectPrompt(created.prompt.id);
+      applyPromptDraft(created.prompt);
     } catch (err) {
       showError(errText3(err));
     } finally {
@@ -16358,7 +16488,7 @@ var zh = {
   "panel.config.perTurnKeyWrites": "\u6BCF\u56DE\u5408\u68C0\u67E5\u9879\u76EE\u5173\u952E\u8BB0\u5FC6",
   "panel.config.perTurnKeyWrites.hint": "\u8981\u6C42\u6A21\u578B\u6BCF\u4E2A\u56DE\u5408\u7ED3\u675F\u524D\u5224\u65AD\u662F\u5426\u51FA\u73B0\u91CD\u8981\u9879\u76EE\u4E8B\u5B9E\uFF08\u957F\u671F\u7EA6\u5B9A/\u51B3\u7B56/\u67B6\u6784/\u8E29\u5751\uFF09\uFF0C\u6709\u5219\u5199\u5165 target=key\uFF08\u81EA\u52A8\u6CE8\u5165\u4E0A\u4E0B\u6587\uFF09\uFF0C\u6CA1\u6709\u5C31\u8DF3\u8FC7\uFF1B\u5173\u95ED\u540E key \u4EC5\u4FDD\u7559\u624B\u52A8\u6DFB\u52A0\u4E0E\u8BFB\u53D6\u3002\u26A0\uFE0F \u4F9D\u8D56 LLM \u6307\u4EE4\u9075\u5FAA",
   "panel.config.keyBranchFilter": "key \u8F68\u5206\u652F\u8FC7\u6EE4",
-  "panel.config.keyBranchFilter.hint": "\u5F00\u542F\uFF08\u9ED8\u8BA4\uFF09\u65F6\uFF0Ckey \u8F68\u6761\u76EE\u6309**\u5F53\u524D git \u5206\u652F**\u8FC7\u6EE4\uFF1A\u65E0\u5206\u652F\u6807\u8BB0\u7684\u6761\u76EE\u5BF9\u6240\u6709\u5206\u652F\u53EF\u89C1\uFF0C\u5E26 [branch:x] \u6807\u8BB0\u7684\u53EA\u5728\u8BE5\u5206\u652F\u53EF\u89C1\u2014\u2014\u7CFB\u7EDF\u63D0\u793A\u8BCD\u6CE8\u5165\u3001expand\u3001list \u4E09\u5904\u540C\u4E00\u89C4\u5219\u3002\u5173\u6389\u540E\u4E09\u5904\u90FD\u4E0D\u518D\u8FC7\u6EE4\uFF08\u8BCA\u65AD\u7528\uFF1B\u4F1A\u8BA9\u522B\u7684\u5206\u652F\u7684\u6761\u76EE\u4E5F\u51FA\u73B0\u5728\u5217\u8868\u91CC\uFF09",
+  "panel.config.keyBranchFilter.hint": "\u5F00\u542F\uFF08\u9ED8\u8BA4\uFF09\u65F6\uFF0Ckey \u8F68\u6761\u76EE\u6309**\u5F53\u524D git \u5206\u652F**\u8FC7\u6EE4\uFF1A\u65E0\u5206\u652F\u6807\u8BB0\u7684\u6761\u76EE\u5BF9\u6240\u6709\u5206\u652F\u53EF\u89C1\uFF0C\u5E26 [branch:x] \u6807\u8BB0\u7684\u53EA\u5728\u8BE5\u5206\u652F\u53EF\u89C1\u2014\u2014\u7CFB\u7EDF\u63D0\u793A\u8BCD\u6CE8\u5165\u3001COI \u6CE8\u5165\u3001list\u3001expand \u56DB\u5904\u540C\u4E00\u89C4\u5219\u3002\u5173\u6389\u540E\u56DB\u5904\u90FD\u4E0D\u518D\u8FC7\u6EE4\uFF08\u8BCA\u65AD\u7528\uFF1B\u4F1A\u8BA9\u522B\u7684\u5206\u652F\u7684\u6761\u76EE\u4E5F\u51FA\u73B0\u5728\u5217\u8868\u91CC\uFF09",
   "panel.config.keyProgressiveDisclosure": "key \u8F68\u6E10\u8FDB\u5F0F\u62AB\u9732",
   "panel.config.keyProgressiveDisclosure.hint": "\u63A7\u5236 key \u8F68\u8BB0\u5FC6\u7684\u6CE8\u5165\u65B9\u5F0F\uFF1Aauto = \u5C0F\u6570\u636E\u91CF\u5168\u91CF\u6CE8\u5165\u3001\u5927\u6570\u636E\u91CF\u6458\u8981\u6CE8\u5165\uFF1Boff = \u59CB\u7EC8\u5168\u91CF\u6CE8\u5165\uFF08\u9ED8\u8BA4\uFF09\uFF1Bon = \u59CB\u7EC8\u6458\u8981\u6CE8\u5165\uFF08\u8282\u7701 token\uFF09",
   "panel.config.keyProgressiveDisclosure.auto": "\u81EA\u52A8",
@@ -17798,7 +17928,7 @@ var en = {
   "panel.config.perTurnKeyWrites": "Per-turn key-fact check",
   "panel.config.perTurnKeyWrites.hint": "Require the model to judge at the end of every turn whether an important project fact emerged (long-lived convention/decision/architecture/pitfall); if so, write it to target=key (injected into the context), otherwise skip. When off, key facts are only added manually or read. \u26A0\uFE0F Relies on LLM instruction following",
   "panel.config.keyBranchFilter": "Key-track branch filter",
-  "panel.config.keyBranchFilter.hint": "When on (default), key-track entries are filtered by the **current git branch**: untagged entries are visible everywhere, entries tagged [branch:x] only on that branch \u2014 the same rule for snapshot injection, expand and list. Turn it off to disable filtering in all three (diagnostics; other branches' entries will then show up in the list)",
+  "panel.config.keyBranchFilter.hint": "When on (default), key-track entries are filtered by the **current git branch**: untagged entries are visible everywhere, entries tagged [branch:x] only on that branch \u2014 the same rule for snapshot injection, COI injection, list and expand. Turn it off to disable filtering in all four (diagnostics; other branches' entries will then show up in the list)",
   "panel.config.keyProgressiveDisclosure": "Key-track progressive disclosure",
   "panel.config.keyProgressiveDisclosure.hint": "Control how key-track memories are injected: auto = full injection for small data, summary injection for large data; off = always full injection (default); on = always summary injection (saves tokens)",
   "panel.config.keyProgressiveDisclosure.auto": "Auto",
@@ -18673,52 +18803,61 @@ function apply(ctx) {
     disposeNotifyBell?.();
   }, "memory-evolve: notification bell");
   let tabCancelled = false;
-  let memoryBadgeCount = 0;
-  let updateBadgeCount = 0;
-  let skillsBadgeCount = 0;
-  let todosBadgeCount = 0;
-  let disposeMemoryTab;
-  let disposeSkillsTab;
-  const registerMemoryTab = () => {
-    disposeMemoryTab?.();
-    disposeMemoryTab = ctx.slots.inject("conversation.view", () => ctx.slots.register({
+  const pokeTabLabels = () => {
+    let dispose;
+    try {
+      dispose = ctx.slots.register({
+        name: "conversation.view",
+        id: "memory-evolve-label-refresh",
+        order: 999
+      }, () => null);
+    } catch {
+      return;
+    }
+    dispose();
+  };
+  const memoryTab = createBadgeTab(
+    (getCount) => ctx.slots.inject("conversation.view", () => ctx.slots.register({
       name: "conversation.view",
       id: "memory-files",
       order: 10,
-      label: () => memoryBadgeCount > 0 ? t("memoryTab.label.pending", { count: memoryBadgeCount }) : t("memoryTab.label")
-    }, (props) => MemoryTabView({ ...props, t })));
-  };
-  const registerSkillsTab = () => {
-    disposeSkillsTab?.();
-    disposeSkillsTab = ctx.slots.inject("conversation.view", () => ctx.slots.register({
+      label: () => getCount() > 0 ? t("memoryTab.label.pending", { count: getCount() }) : t("memoryTab.label")
+    }, (props) => MemoryTabView({ ...props, t }))),
+    pokeTabLabels
+  );
+  const skillsTab = createBadgeTab(
+    (getCount) => ctx.slots.inject("conversation.view", () => ctx.slots.register({
       name: "conversation.view",
       id: "skills-hub",
       order: 20,
-      label: () => skillsBadgeCount > 0 ? t("skillsTab.label.pending", { count: skillsBadgeCount }) : t("skillsTab.label")
-    }, (props) => SkillsTabView({ ...props, t })));
-  };
-  const todoTabLifecycle = createTodoTabLifecycle(() => ctx.slots.inject("conversation.view", () => ctx.slots.register({
-    name: "conversation.view",
-    id: "todos-hub",
-    order: 30,
-    label: () => todosBadgeCount > 0 ? t("todosTab.label.pending", { count: todosBadgeCount }) : t("todosTab.label")
-  }, (props) => TodosTabView({ ...props, t }))));
+      label: () => getCount() > 0 ? t("skillsTab.label.pending", { count: getCount() }) : t("skillsTab.label")
+    }, (props) => SkillsTabView({ ...props, t }))),
+    pokeTabLabels
+  );
+  const todoTabLifecycle = createTodoTabLifecycle(
+    (getCount) => ctx.slots.inject("conversation.view", () => ctx.slots.register({
+      name: "conversation.view",
+      id: "todos-hub",
+      order: 30,
+      label: () => getCount() > 0 ? t("todosTab.label.pending", { count: getCount() }) : t("todosTab.label")
+    }, (props) => TodosTabView({ ...props, t }))),
+    pokeTabLabels
+  );
   const onRuntimeConfigChanged = (event) => {
     const detail = event.detail;
     todoTabLifecycle.setEnabled(detail?.todoEnabled !== false);
   };
   window.addEventListener(RUNTIME_CONFIG_CHANGED, onRuntimeConfigChanged);
   ctx.effect(() => () => window.removeEventListener(RUNTIME_CONFIG_CHANGED, onRuntimeConfigChanged), "memory-evolve: todo tab runtime listener");
-  let disposeSettingsTab;
-  const registerSettingsTab = () => {
-    disposeSettingsTab?.();
-    disposeSettingsTab = ctx.slots.inject("conversation.view", () => ctx.slots.register({
+  const settingsTab = createBadgeTab(
+    (getCount) => ctx.slots.inject("conversation.view", () => ctx.slots.register({
       name: "conversation.view",
       id: "settings-hub",
       order: 120,
-      label: () => updateBadgeCount > 0 ? t("settingsTab.label.pending") : t("settingsTab.label")
-    }, (props) => SettingsTabView({ ...props, t })));
-  };
+      label: () => getCount() > 0 ? t("settingsTab.label.pending") : t("settingsTab.label")
+    }, (props) => SettingsTabView({ ...props, t }))),
+    pokeTabLabels
+  );
   let disposeModelsTab;
   const registerModelsTab = () => {
     disposeModelsTab?.();
@@ -18740,28 +18879,12 @@ function apply(ctx) {
     }, (props) => SyncView({ ...props, t })));
   };
   const pollBadge = () => {
-    if (tabCancelled || disposeMemoryTab === void 0) return;
+    if (tabCancelled || !memoryTab.mounted()) return;
     void fetch("/memory-evolve/api/badge").then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))).then((data) => {
-      const suggestions = data.suggestions ?? 0;
-      const skills = data.skills ?? 0;
-      const todoSuggestions = data.todoSuggestions ?? 0;
-      const update = data.update ?? 0;
-      if (update !== updateBadgeCount) {
-        updateBadgeCount = update;
-        registerSettingsTab();
-      }
-      if (suggestions !== memoryBadgeCount) {
-        memoryBadgeCount = suggestions;
-        registerMemoryTab();
-      }
-      if (skills !== skillsBadgeCount) {
-        skillsBadgeCount = skills;
-        registerSkillsTab();
-      }
-      if (todoSuggestions !== todosBadgeCount) {
-        todosBadgeCount = todoSuggestions;
-        todoTabLifecycle.refresh();
-      }
+      settingsTab.setCount(data.update ?? 0);
+      memoryTab.setCount(data.suggestions ?? 0);
+      skillsTab.setCount(data.skills ?? 0);
+      todoTabLifecycle.setCount(data.todoSuggestions ?? 0);
     }).catch(() => {
     });
   };
@@ -18773,20 +18896,16 @@ function apply(ctx) {
       registerSyncTab();
     }
     if (tabCancelled || data.config?.memoryTabEnabled !== true) return;
-    registerMemoryTab();
-    registerSkillsTab();
+    memoryTab.mount();
+    skillsTab.mount();
     todoTabLifecycle.setEnabled(data.config?.todoEnabled !== false);
-    registerSettingsTab();
+    settingsTab.mount();
     pollBadge();
     const timer = setInterval(pollBadge, BADGE_POLL_MS);
     ctx.effect(() => () => clearInterval(timer), "memory-evolve: memory tab badge poller");
     void fetch("/memory-evolve/api/update/status").then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))).then((data2) => {
       if (tabCancelled) return;
-      const hasUpdate = data2?.status === "outdated" ? 1 : 0;
-      if (hasUpdate !== updateBadgeCount) {
-        updateBadgeCount = hasUpdate;
-        registerSettingsTab();
-      }
+      settingsTab.setCount(data2?.status === "outdated" ? 1 : 0);
     }).catch(() => {
     });
     const onTabChanged = () => pollBadge();
@@ -18796,10 +18915,10 @@ function apply(ctx) {
   });
   ctx.effect(() => () => {
     tabCancelled = true;
-    disposeMemoryTab?.();
-    disposeSkillsTab?.();
+    memoryTab.dispose();
+    skillsTab.dispose();
     todoTabLifecycle.dispose();
-    disposeSettingsTab?.();
+    settingsTab.dispose();
   }, "memory-evolve: memory tabs");
   ctx.effect(() => () => {
     disposeSyncTab?.();
@@ -18808,30 +18927,27 @@ function apply(ctx) {
     disposeModelsTab?.();
   }, "memory-evolve: models tab");
   let coiCancelled = false;
-  let disposeCoiTab;
-  let coiRunningCount = 0;
   let currentCoiSessionId;
-  const registerCoiTab = () => {
-    disposeCoiTab?.();
-    disposeCoiTab = ctx.slots.inject("conversation.view", () => ctx.slots.register({
+  const coiTab = createBadgeTab(
+    (getCount) => ctx.slots.inject("conversation.view", () => ctx.slots.register({
       name: "conversation.view",
       id: "coi-hub",
       order: 40,
-      label: () => coiRunningCount > 0 ? t("coiTab.label.pending", { count: coiRunningCount }) : t("coiTab.label")
+      label: () => getCount() > 0 ? t("coiTab.label.pending", { count: getCount() }) : t("coiTab.label")
     }, (props) => {
       currentCoiSessionId = props.sessionId;
       return CoIView({ ...props, t });
-    }));
+    })),
+    pokeTabLabels
+  );
+  const registerCoiTab = () => {
+    coiTab.mount();
   };
   const pollCoiRunning = () => {
-    if (coiCancelled || disposeCoiTab === void 0) return;
+    if (coiCancelled || !coiTab.mounted()) return;
     const q = currentCoiSessionId !== void 0 ? `?limit=200&sessionId=${encodeURIComponent(currentCoiSessionId)}` : "?limit=200";
     void fetch(`/memory-evolve/api/coi/tasks${q}`).then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))).then((data) => {
-      const running = (data.tasks ?? []).filter((t2) => t2.status === "running" || t2.status === "queued").length;
-      if (running !== coiRunningCount) {
-        coiRunningCount = running;
-        registerCoiTab();
-      }
+      coiTab.setCount((data.tasks ?? []).filter((t2) => t2.status === "running" || t2.status === "queued").length);
     }).catch(() => {
     });
   };
@@ -18848,7 +18964,7 @@ function apply(ctx) {
   });
   ctx.effect(() => () => {
     coiCancelled = true;
-    disposeCoiTab?.();
+    coiTab.dispose();
   }, "memory-evolve: coi tab");
   let disposeAdvisor;
   disposeAdvisor = ctx.slots.inject("conversation.session.header.actions", () => ctx.slots.register({
@@ -18953,25 +19069,22 @@ function apply(ctx) {
     disposeMermaidRender?.();
   }, "memory-evolve: ui-settings tab");
   let promptCancelled = false;
-  let disposePromptTab;
-  let promptBadgeCount = 0;
-  const registerPromptTab = () => {
-    disposePromptTab?.();
-    disposePromptTab = ctx.slots.inject("conversation.view", () => ctx.slots.register({
+  const promptTab = createBadgeTab(
+    (getCount) => ctx.slots.inject("conversation.view", () => ctx.slots.register({
       name: "conversation.view",
       id: "prompt-hub",
       order: 60,
-      label: () => promptBadgeCount > 0 ? t("promptTab.label.active", { count: promptBadgeCount }) : t("promptTab.label")
-    }, (props) => PromptView({ ...props, t })));
+      label: () => getCount() > 0 ? t("promptTab.label.active", { count: getCount() }) : t("promptTab.label")
+    }, (props) => PromptView({ ...props, t }))),
+    pokeTabLabels
+  );
+  const registerPromptTab = () => {
+    promptTab.mount();
   };
   const pollPromptBadge = () => {
-    if (promptCancelled || disposePromptTab === void 0) return;
+    if (promptCancelled || !promptTab.mounted()) return;
     void fetch("/memory-evolve/api/prompts/injections").then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))).then((data) => {
-      const count = data.injections?.length ?? 0;
-      if (count !== promptBadgeCount) {
-        promptBadgeCount = count;
-        registerPromptTab();
-      }
+      promptTab.setCount(data.injections?.length ?? 0);
     }).catch(() => {
     });
   };
@@ -18988,7 +19101,7 @@ function apply(ctx) {
   });
   ctx.effect(() => () => {
     promptCancelled = true;
-    disposePromptTab?.();
+    promptTab.dispose();
   }, "memory-evolve: prompt tab");
   let bookmarkCancelled = false;
   let disposeBookmarkTab;

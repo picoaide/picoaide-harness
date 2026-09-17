@@ -19,10 +19,15 @@
  * 例外：`packages/vendor/**` 是随包分发的**第三方** vendored 插件（memory-evolve），
  * 它的旧版命名债单独记账，不拦本守卫 —— 恢复上游同步比逐行改名更重要。
  *
- * 自证：`--self-test` 用内存夹具跑正/反用例（每次 check 都会跑一遍，毫秒级）。
+ * 自证：`--self-test` 用内存夹具跑正/反用例（每次 check 都会跑一遍，毫秒级）：
+ * 判定规则、嵌套 var 扫描、样式块解析、**块注释后的行号**（S15-6）与
+ * **自有源码根缺失/空目录必须硬错误**（S15-8）。其中 S15-8 还额外把本脚本复制进
+ * 合成树、用**真实入口**跑一遍 —— 只测辅助函数证明不了 main() 真的调用了它。
  */
 
-import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -49,7 +54,11 @@ const SOURCE_PATTERN = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|css)$/u
  */
 function stripComments(text) {
   return text
-    .replace(/\/\*[\s\S]*?\*\//gu, '')
+    // S15-6(2026-09-17 审计)：块注释必须**保行结构** —— 内容换成等长空格、换行原样保留。
+    // 以前整段删掉（含注释内部的换行），后面所有 `file:line` 都随注释行数整体前移
+    // （24 个引用 token 的文件里 15 个报错坐标，如 Brand.tsx 报 79 实为 97），
+    // 而 snippet 取自同一份错位文本 ⇒ 坐标看着自洽却指向别的行。
+    .replace(/\/\*[\s\S]*?\*\//gu, comment => comment.replace(/[^\n]/gu, ' '))
     .replace(/(^|[^:])\/\/[^\n]*/gmu, '$1')
 }
 
@@ -162,6 +171,37 @@ function* sourceFiles(dir) {
 }
 
 /**
+ * 断言每个自有源码根都真实存在且非空（S15-8，2026-09-17 审计）。
+ *
+ * 此前缺失的根被 `continue` 静默跳过：整棵树改名（如 packages/client 挪走）、路径写错、
+ * 或只检出部分目录时，守卫的覆盖面直接少一块，却仍打印 `OK（…0 条阻断）` 并 exit 0 ——
+ * 与上游主题根缺失即抛错的行为不对称。宁可红一次让人同步 {@link OUR_ROOTS}，
+ * 不能静默退化成"扫了个寂寞"。
+ *
+ * 导出仅为让 self-test 用临时目录造"缺失/空"两种坏树。
+ * @param {readonly string[]} roots - 相对 `base` 的目录列表。
+ * @param {string} [base] - 仓库根（默认 {@link ROOT}）。
+ */
+export function assertRootsPresent(roots, base = ROOT) {
+  for (const root of roots) {
+    const absolute = join(base, root)
+    if (!existsSync(absolute)) {
+      throw new Error(
+        `check-theme-tokens: 找不到自有源码根 ${root}（${relative(base, absolute)} 不存在）；`
+        + '目录被改名/漏检出时必须同步 OUR_ROOTS，否则整棵树静默脱离扫描面',
+      )
+    }
+    if (!statSync(absolute).isDirectory()) {
+      throw new Error(`check-theme-tokens: 自有源码根 ${root} 不是目录`)
+    }
+    // 空目录 = 扫描面为 0（被搬空/占位残留），同样必须炸。
+    if (readdirSync(absolute).length === 0) {
+      throw new Error(`check-theme-tokens: 自有源码根 ${root} 是空目录（扫描面为 0，疑似被搬空）`)
+    }
+  }
+}
+
+/**
  * 扫出文本里所有 `var(...)` 调用的参数串（**配对括号**扫描，支持嵌套 var）。
  * @param {string} text - 文本（可跨行）。
  * @returns {{ args: string, index: number }[]} 参数串与起始下标。
@@ -243,6 +283,72 @@ function suggestions(token, defined) {
   return [...new Set([...byPrefix, ...byDistance])].slice(0, 4)
 }
 
+/**
+ * S15-8 调用点回归（2026-09-17 审计复核）。
+ *
+ * {@link assertRootsPresent} 被 selfTest 直接调用只能证明**辅助函数**有效，证明不了
+ * `main()` 真的调用了它：复核时把 `assertRootsPresent(OUR_ROOTS)` 删掉、恢复原来那句
+ * 静默 `continue`，本守卫对"自有根缺失"和"自有根被搬空"两棵坏树**都打印 OK 并 exit 0**
+ * —— 恰好在门禁最该拦住的地方假绿。
+ *
+ * 测法：把本脚本**原样复制**进一棵合成树，用它自己的入口跑（脚本用自身路径推导 ROOT，
+ * 所以只有复制才能测另一棵树）。合成树里放最小上游主题样式根（`upstreamTokens()` 缺目录
+ * 会抛错，不能让它成为红的真实原因）+ 4 个自有源码根，再分别造"缺失"与"被搬空"两种坏树。
+ * 副本靠环境变量掐断递归：副本不会再派生子进程。
+ */
+function entryPointSelfTest() {
+  if (process.env.CHECK_THEME_TOKENS_SKIP_ENTRY_TEST === '1') return
+  const scratch = mkdtempSync(join(tmpdir(), 'check-theme-tokens-entry-'))
+  try {
+    const scriptsDir = join(scratch, 'scripts')
+    mkdirSync(scriptsDir)
+    copyFileSync(fileURLToPath(import.meta.url), join(scriptsDir, 'check-theme-tokens.mjs'))
+    const themeDir = join(scratch, 'deepseek-harness', 'packages', 'client', 'ui-theme', 'src')
+    mkdirSync(themeDir, { recursive: true })
+    writeFileSync(
+      join(themeDir, 'design-platform.css'),
+      'body {\n  --dsw-alias-label-primary: #000000;\n}\n'
+      + 'body[data-ds-dark-theme] {\n  --dsw-alias-label-primary: #ffffff;\n}\n',
+    )
+    for (const root of OUR_ROOTS) {
+      const dir = join(scratch, root)
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'probe.ts'), 'export const probe = 1\n')
+    }
+    const run = () => spawnSync(process.execPath, [join('scripts', 'check-theme-tokens.mjs')], {
+      cwd: scratch,
+      encoding: 'utf8',
+      env: { ...process.env, CHECK_THEME_TOKENS_SKIP_ENTRY_TEST: '1' },
+    })
+    const healthy = run()
+    if (healthy.status !== 0) {
+      throw new Error(
+        `check-theme-tokens: self-test 失败 —— 合成树自有根齐备时真实入口应通过，`
+        + `实际 exit ${healthy.status}：${healthy.stderr.slice(0, 400)}`,
+      )
+    }
+    const brands = join(scratch, 'brands')
+    rmSync(brands, { recursive: true, force: true })
+    const missing = run()
+    if (missing.status === 0 || !missing.stderr.includes('找不到自有源码根 brands')) {
+      throw new Error(
+        `check-theme-tokens: self-test 失败 —— 自有源码根缺失时真实入口必须报错`
+        + `(exit=${missing.status})，stderr=${missing.stderr.slice(0, 300)}`,
+      )
+    }
+    mkdirSync(brands)
+    const emptied = run()
+    if (emptied.status === 0 || !emptied.stderr.includes('空目录')) {
+      throw new Error(
+        `check-theme-tokens: self-test 失败 —— 自有源码根被搬空时真实入口必须报错`
+        + `(exit=${emptied.status})，stderr=${emptied.stderr.slice(0, 300)}`,
+      )
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
 /** 内存夹具正/反用例（保证守卫不会退化成恒绿）。 */
 function selfTest() {
   const defined = new Set(['--dsw-alias-label-primary', '--dsw-alias-label-primary-inverted'])
@@ -275,17 +381,61 @@ function selfTest() {
   if (blocks.length !== 2 || !blocks[1].tokens.has('--dsw-alias-a')) {
     throw new Error('check-theme-tokens: self-test 失败 —— 样式块解析')
   }
+
+  // S15-6(2026-09-17 审计)：块注释上方的偏移必须不影响下面引用的行号 ——
+  // 报出的 `file:line` 是开发者唯一的行动坐标，必须指向原文件的真实那一行。
+  // S15-8：自有源码根缺失/空目录必须硬错误，而不是静默少扫一棵树。
+  const scratch = mkdtempSync(join(tmpdir(), 'check-theme-tokens-'))
+  try {
+    const probe = join(scratch, 'Probe.tsx')
+    writeFileSync(probe, [
+      '/* 块注释第一行',
+      '   第二行',
+      '   第三行 */',
+      '',
+      "export const style = { color: 'var(--dsw-alias-nope, #000000)' }",
+    ].join('\n'))
+    const hits = scanFile(probe, new Set(['--dsw-alias-label-primary']))
+    if (hits.length !== 1 || hits[0].line !== 5) {
+      throw new Error(
+        `check-theme-tokens: self-test 失败 —— 3 行块注释后的违规行号应为 5，实际 ${JSON.stringify(hits)}`,
+      )
+    }
+    if (!hits[0].snippet.includes('var(--dsw-alias-nope')) {
+      throw new Error(`check-theme-tokens: self-test 失败 —— snippet 未落在违规行：${hits[0].snippet}`)
+    }
+    mkdirSync(join(scratch, 'present'))
+    writeFileSync(join(scratch, 'present', 'a.ts'), 'export const a = 1\n')
+    assertRootsPresent(['present'], scratch)
+    mkdirSync(join(scratch, 'emptied'))
+    for (const bad of ['missing', 'emptied']) {
+      let threw = false
+      try {
+        assertRootsPresent([bad], scratch)
+      } catch {
+        threw = true
+      }
+      if (!threw) {
+        throw new Error(`check-theme-tokens: self-test 失败 —— 自有源码根 ${bad} 未触发硬错误`)
+      }
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+
+  // S15-8 调用点：必须走**真实入口**（见 entryPointSelfTest 的说明）。
+  entryPointSelfTest()
 }
 
 function main() {
   selfTest()
+  assertRootsPresent(OUR_ROOTS)
   const defined = upstreamTokens()
   const problems = []
   let scanned = 0
   let references = 0
   for (const root of OUR_ROOTS) {
     const absolute = join(ROOT, root)
-    if (!existsSync(absolute)) continue
     for (const file of sourceFiles(absolute)) {
       scanned += 1
       const hits = scanFile(file, defined)

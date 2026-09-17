@@ -186,9 +186,12 @@ describe('ErrorMonitoring 错误监控页', () => {
   // --- P2-3:私网/明文只告警不阻断 ------------------------------------------
 
   it('私网 DSN 保存后显示黄色告警(不阻断保存)', async () => {
+    // 公钥用**独特字面量**而不是 "key":下面的"不回显公钥"断言必须能咬住真泄漏
+    // (泛化的 /key/ 在页面把 `publicKey` 原样渲染出来时仍可能假绿)。
+    const publicKey = 'pubkey0123456789abcdef'
     render(<ErrorMonitoring />)
     const input = await screen.findByLabelText(DSN_LABEL)
-    fireEvent.change(input, { target: { value: 'http://key@10.0.0.5/1' } })
+    fireEvent.change(input, { target: { value: `http://${publicKey}@10.0.0.5/1` } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     // 保存必须发生(内网自建 GlitchTip 是合法场景)。
     await waitFor(() => {
@@ -196,7 +199,11 @@ describe('ErrorMonitoring 错误监控页', () => {
     })
     // 输入框下方实时回显解析结果(不含 public key)。
     expect(await screen.findByText(/主机: 10\.0\.0\.5 \/ 项目 ID: 1/, { exact: false })).toBeInTheDocument()
-    expect(screen.queryByText(/key/)).not.toBeInTheDocument
+    // 2026-09-17 审计 S12-03:原断言漏了调用括号(`.not.toBeInTheDocument`),
+    // 取到的是函数对象 —— 永远为真、从不执行,页面真泄漏公钥也照样绿。
+    // 靶点必须落在**渲染出来的文本**上:input 的 value 不进 textContent,
+    // 所以这里若是红的,只可能是页面把 DSN 里的公钥渲染了出来。
+    expect(document.body.textContent ?? '').not.toContain(publicKey)
   })
 
   // --- P0-4:发送测试事件(AC3) ---------------------------------------------

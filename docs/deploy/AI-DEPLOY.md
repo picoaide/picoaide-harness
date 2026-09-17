@@ -594,7 +594,7 @@ picoaide-harness.example.cn {
 6. 经**真实域名**复验：`/healthz`、`/admin/`、`/api/client/v2/channel`、
    `/api/client/v2/updates/manifest`、`/updates/client/<安装包>`（range 请求 206）。
 
-2026-09-10 在测试环境（101.42.228.128）按上述步骤完成过一次真实切换，现场记录模板见
+2026-09-10 在测试环境（`<server-host>`）按上述步骤完成过一次真实切换，现场记录模板见
 部署目录里的 `DEPLOY-NOTES-<host>.md`（含备份路径、回滚命令、与文档的偏差说明）。
 
 ---

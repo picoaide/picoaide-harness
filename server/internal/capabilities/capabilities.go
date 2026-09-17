@@ -362,6 +362,21 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
+		// 上下架(App 级,2026-09-15):客户端面下架与不存在同语义 —— 客户端安装
+		// 通路的归档端点恒以 admin=false 构造(与调用者是否管理员无关),管理员
+		// 看到的下架行点一次必 404(审计 2026-09-15 S11-2,对齐 agentshare
+		// listVisible 的 `&& enabled[...]`)。组织分区两个 kind 都要过滤;员工
+		// 分支走 ListVisible* 已在 DAO 层过滤。管理面清单仍全量(见 listApprovals)。
+		skillEnabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindSkill)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		agentEnabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindAgent)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
 
 		// 1) 市场技能(授权制)。
 		if includeMarket && ft.skills {
@@ -421,7 +436,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					return
 				}
 				for _, s := range all {
-					if s.Status == serverstore.SharedSkillApproved {
+					if s.Status == serverstore.SharedSkillApproved && skillEnabled[s.Name] {
 						appendSharedSkill(&items, s, versions, skillOwners[s.Name] == u.Username, skillOfficials[s.Name])
 					}
 				}
@@ -479,7 +494,9 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					return
 				}
 				for _, p := range all {
-					if p.Status == serverstore.AgentPresetApproved {
+					// 与技能面同口径(审计 2026-09-15 S11-2):下架行管理员在客户端
+					// 面也不该看到 —— 归档端点 admin=false,点了必 404。
+					if p.Status == serverstore.AgentPresetApproved && agentEnabled[p.Name] {
 						appendSharedAgent(&items, p, versions, agentOwners[p.Name] == u.Username, agentOfficials[p.Name])
 					}
 				}
@@ -733,6 +750,15 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
 			}
+			// SG-4(审计 2026-09-17,r2 server-gateway P3):智能体行的上下架状态。
+			// 与技能分支同理,查询失败必须 500 —— 吞掉后 map 为 nil,每条智能体
+			// 都会被标成 enabled=false,审批页显示与事实相反的「已下架」+「上架」
+			// 按钮(管理员一点就把在架内容真下架)。
+			agentEnabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindAgent)
+			if err != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
 			for _, p := range rows {
 				out = append(out, ApprovalRow{
 					Kind:        KindAgent,
@@ -748,6 +774,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					CreatedAt:   p.CreatedAt.Format("2006-01-02 15:04:05"),
 					Downloads:   p.Downloads,
 					Official:    agentOfficials[p.Name],
+					Enabled:     agentEnabled[p.Name],
 					BasePath:    "/api/server/admin/agent-presets/" + pathEscape(p.Name) + "/" + pathEscape(p.Version),
 					GrantsBase:  "/api/server/admin/agent-presets/" + pathEscape(p.Name),
 					PreviewPath: "/api/server/admin/agent-presets/" + pathEscape(p.Name) + "/" + pathEscape(p.Version) + "/preview",

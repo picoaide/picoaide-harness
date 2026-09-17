@@ -20,6 +20,7 @@ vi.mock('@deepseek-ai/dsh-mcp-client', () => ({ apply: () => {} }))
 
 import { runAuth } from '../src/auth.ts'
 import { connectorErrorCodeOf } from '../src/connector-error.ts'
+import { friendlyConnectorError } from '../src/client/friendly-error.ts'
 import { callRoute, createHarness } from './helpers/connector-harness.ts'
 import type { ConnectorDef } from '../src/types.ts'
 
@@ -262,9 +263,14 @@ it('a NETWORK failure at the token exchange stays an ordinary error', async () =
     const message = error instanceof Error ? error.message : String(error)
     expect(message).toContain('fetch failed')
     expect(connectorErrorCodeOf(error)).toBeUndefined()
-    // …and the pre-i18n rule agrees: this is an ordinary error, not "authorize again".
-    const baseRule = message.includes('授权') || message.includes('token') || message.includes('登录')
-    expect(baseRule).toBe(false)
+    // 走**生产**分类器断言（2026-09-17 二轮审计 TQ-9）：旧写法在这里把
+    // "pre-i18n 子串规则"当场重算一遍（`message.includes('授权')…`），
+    // 断言的是测试自己算出来的布尔值，任何生产改动都不经过它。
+    // 现在直接问生产代码：这条普通网络错误必须落进泛化包装，不得被当成
+    // "需要重新授权"。
+    const rendered = friendlyConnectorError(message, connectorErrorCodeOf(error))
+    expect(rendered).not.toBe(message)
+    expect(rendered).not.toMatch(/重新授权|authoriz/iu)
   } finally {
     globalThis.fetch = realFetch
   }

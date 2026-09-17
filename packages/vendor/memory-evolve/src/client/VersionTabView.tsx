@@ -23,6 +23,7 @@
  */
 import { useEffect, useState } from 'react'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import { hostErrorFromResponse, viewErrorOf } from './view-error.js'
 
 /** Locale-bound props（memory-evolve 命名空间）。 */
 export interface VersionTabViewProps {
@@ -65,7 +66,14 @@ interface ViewError {
 /** 刷新当前状态（force 走「检查更新」语义）。 */
 async function fetchStatus(force: boolean): Promise<UpdateState> {
   const res = await fetch(`/memory-evolve/api/update/status${force ? '?force=1' : ''}`)
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) {
+    // ME-8（2026-09-17 二审）：宿主用 {ok:false,code,error} 分级表达失败
+    // （422 unsupported=模块未装配 / 503 error=服务内部错误），只判 HTTP 状态码
+    // 会把真实原因整块丢掉，用户只看到「网络请求失败：HTTP 503」。与 POST
+    // /api/update 的失败路径同源处理：先读信封，HTTP 状态仅作兜底。
+    const body = await res.json().catch(() => null)
+    throw hostErrorFromResponse(res.status, body)
+  }
   return (await res.json()) as UpdateState
 }
 
@@ -102,7 +110,9 @@ export function VersionTabView(props: VersionTabTabProps): JSX.Element {
         // 各 Tab 红点（设置 Tab 的 🔴 由此出现/消失）。
         window.dispatchEvent(new CustomEvent('dsh-memory-evolve:badge-change'))
       })
-      .catch((err: unknown) => setError({ code: 'network', message: err instanceof Error ? err.message : 'network error' }))
+      // ME-8（2026-09-17 二审）：宿主信封里的 code/error 必须保留
+      // （viewErrorOf 透传带 code 的异常），不能一律压成 network。
+      .catch((err: unknown) => setError(viewErrorOf(err)))
       .finally(() => setChecking(false))
   }
 

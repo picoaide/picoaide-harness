@@ -812,6 +812,35 @@ describe('Electron compatibility runtime', () => {
     expect(recoveryCalls[0]?.[0].detail).toContain('vision_crop')
   })
 
+  it('localizes both plugin-recovery fallback fragments (2026-09-17 S05-3 audit)', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    electron.dialog.showMessageBox.mockResolvedValue({ response: 1, checkboxChecked: false })
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+
+    // 分支一：Loader settlement 失败但没给 error（boot-health.ts:31-33 的真实形状）。
+    const missingError = new ElectronDesktopRuntime(async () => {})
+    missingError.setLocalePreference('zh')
+    missingError.reportRendererBoot({ status: 'failed', plugins: ['dsh-vision-router'] })
+    await vi.waitFor(() => { expect(electron.dialog.showMessageBox).toHaveBeenCalledTimes(1) })
+
+    // 分支二：Loader 报了 error，但没有任何条目停在非 ACTIVE 态（plugins 为空）。
+    const missingPlugins = new ElectronDesktopRuntime(async () => {})
+    missingPlugins.setLocalePreference('zh')
+    missingPlugins.reportRendererBoot({ status: 'failed', plugins: [], error: 'boom' })
+    await vi.waitFor(() => { expect(electron.dialog.showMessageBox).toHaveBeenCalledTimes(2) })
+
+    const recoveryCalls = electron.dialog.showMessageBox.mock.calls as unknown as Array<[{ title?: string, detail?: string }]>
+    expect(recoveryCalls[0]?.[0].title).toBe('插件恢复')
+    expect(recoveryCalls[0]?.[0].detail).toContain('客户端 Loader 未提供错误信息。')
+    expect(recoveryCalls[1]?.[0].detail).toContain('未知客户端插件')
+    // 中文详情里不得再出现任何硬编码英文兜底片段（这两句曾以三元分支字面量
+    // 的形式留在 electron-runtime 里）。
+    for (const call of recoveryCalls) {
+      expect(call[0].detail).not.toContain('The client Loader did not provide an error message.')
+      expect(call[0].detail).not.toContain('Unknown client plugin')
+    }
+  })
+
   it('commits a healthy renderer without showing recovery', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')

@@ -234,6 +234,28 @@ describe('model-facing tool copy is single-language (English)', () => {
       .replace(/(^|\s)\/\/[^\n]*/gu, '$1')
     expect(code.match(HAN)).toBeNull()
   })
+
+  it('no localized ⋮ menu label leaks into the model copy', () => {
+    // 2026-09-17 审计 S01-4：菜单文案是**按请求语言**渲染的（OVERLAY_COPY.zh/en
+    // 的 menu* 值），而工具文案在 apply 期固定 —— 写死任一种语言的菜单项名，
+    // 对另一种语言的用户就是一条指向不存在控件的指令（`browser_clear_data` 曾
+    // 让模型转告用户点 "Clear browsing data"，而默认 UI 里写的是「清除数据…」）。
+    // zh 方向已由上面的 CJK 守卫覆盖，这条钉住最容易被抄回来的英文标签。
+    const shellSource = readFileSync(new URL('../src/shell-pages.ts', import.meta.url), 'utf8')
+    const labels = [...shellSource.matchAll(/\n\s*menuClearData: '((?:[^'\\]|\\.)*)'/gu)].map((match) => match[1]!)
+    // 夹具自检：两种语言各取到一条，否则下面的循环是空循环（假绿）。
+    expect(labels).toHaveLength(2)
+    // 注释不是模型可见文案（本包注释是中文）：与上面的 CJK 守卫同口径先剥注释。
+    const code = TOOLS_SOURCE
+      .replace(/\/\*[\s\S]*?\*\//gu, '')
+      .replace(/(^|\s)\/\/[^\n]*/gu, '$1')
+    for (const label of labels) {
+      // 结尾的省略号是菜单自身的排版（表示"打开面板"），不是文案的一部分。
+      const text = label.replace(/[….]+$/u, '')
+      expect(text.length, label).toBeGreaterThanOrEqual(4)
+      expect(code, `model copy must not name the localized menu entry ${label}`).not.toContain(text)
+    }
+  })
 })
 
 /* ------------------------------------------------------------------ *
