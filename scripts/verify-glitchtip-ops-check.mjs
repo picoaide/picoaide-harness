@@ -365,9 +365,16 @@ for (const shape of ['https://key@glitchtip.example.com', 'https://key@glitchtip
   }
   check(result.status === 2, `S15-9-R2: 站点不可达必须 exit 2(实际 ${result.status})`)
   check(report !== null, `S15-9-R2: fetch 抛错也必须输出可解析的 --json(实际 ${result.stdout.slice(0, 200)})`)
+  // 断言必须比"notes 里出现过某个域名子串"更强:note 的形态是确定的(见
+  // glitchtip-ops-check.mjs 的 `已跳过：` + join(', ')),这里钉**整条 note**,
+  // 于是"host 被截断/被换成别的域名/前缀文案走失"都会红 —— 只查子串时换域名也绿。
+  // 顺带修掉 CodeQL js/incomplete-url-substring-sanitization(它把域名子串判定
+  // 当成"不完整的 URL 校验",尽管此处 receiver 是 notes 数组元素而非 URL)。
+  const skippedNote = 'cookie jar 里有 cookie 不属于目标 http://127.0.0.1:1'
+    + '（域/路径不匹配或仅限 https），已跳过：evil.example.com'
   check(
-    Array.isArray(report?.notes) && report.notes.some(note => note.includes('已跳过') && note.includes('evil.example.com')),
-    `S15-9-R2: fetch 抛错时被跳过的 cookie 同样必须出现在 notes 里，实际 ${JSON.stringify(report?.notes)}`,
+    Array.isArray(report?.notes) && report.notes.some(note => note === skippedNote),
+    `S15-9-R2: fetch 抛错时被跳过的 cookie 必须以整条 note 出现（${skippedNote}），实际 ${JSON.stringify(report?.notes)}`,
   )
   check(
     Array.isArray(report?.verdict) && report.verdict.some(line => line.startsWith('UNKNOWN')),
