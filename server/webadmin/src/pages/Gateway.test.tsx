@@ -63,6 +63,21 @@ describe('Gateway 网关配置页', () => {
     await waitForGatewayLoaded()
   })
 
+  it('配置未加载完时全局设置不可保存(审计 F5:空初值会清空默认模型/峰谷)', async () => {
+    // 加载期间 `cfg` 还是空初值，此时保存会提交 default_model="" / peak_windows=""。
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      await gate
+      return baseImpl(path, init)
+    })
+    render(<Gateway />)
+    expect(screen.getByRole('button', { name: '保存' })).toBeDisabled()
+    release()
+    await waitForGatewayLoaded()
+    expect(screen.getByRole('button', { name: '保存' })).toBeEnabled()
+  })
+
   it('渲染全局设置、上游表格与模型列表', async () => {
     render(<Gateway />)
     expect(await screen.findByText('全局设置')).toBeInTheDocument()
