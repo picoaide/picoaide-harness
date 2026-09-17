@@ -165,9 +165,13 @@ describe('a superseded registration must not steal the live provider', () => {
     // An out-of-band refresh must reach the transport that is actually live.
     const refreshed = await callRoute(h, '/api/pico/connectors/moka/refresh', 'POST')
     expect(refreshed.status).toBe(200)
+    const live = h.configs[0] as unknown as { authProvider?: { tokens: () => Promise<{ refresh_token?: string } | undefined> } }
+    // 读 SDK 面视图会**顺带保鲜**（`tokens()` 已改为"快过期先续期"），所以基准
+    // 要在读之后取：不断言"等于某个历史快照"，而断言"传输上活着的那份 == 库里
+    // 现在的那份"（这正是本用例要钉的不变量）。
+    const shown = (await live.authProvider?.tokens())?.refresh_token
     const stored = await new ConnectorStore({ baseDir: dir }).readCredential('moka')
-    const live = h.configs[0] as unknown as { authProvider?: { tokens: () => { refresh_token?: string } | undefined } }
-    expect(live.authProvider?.tokens()?.refresh_token).toBe(stored?.refreshToken)
+    expect(shown).toBe(stored?.refreshToken)
     expect(server.stats.revokedRefreshReuse).toBe(0)
     h.dispose()
   }, 60_000)
