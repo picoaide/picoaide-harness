@@ -13,6 +13,15 @@ const depts = [
   { id: 2, name: '前端组', parent_id: 1, leader_id: 0, leader_name: '', description: '', member_count: 1, child_count: 0, granted_count: 0 },
 ]
 
+/**
+ * 等部门树**数据**渲染完成（2026-09-17 审计：本文件原先锚在静态标题「部门管理」上，
+ * 它在 /departments 响应落地前就已渲染，随后的同步断言读到空表 —— 注入 400ms
+ * 响应延迟即 5/7 例红，与 CI 那次审计 CSV 用例同一个模子）。
+ */
+async function waitForDeptTree(): Promise<void> {
+  await waitFor(() => expect(screen.getAllByText('研发部').length).toBeGreaterThan(0))
+}
+
 beforeEach(() => {
   window.confirm = confirmSpy as any
   mockRequest.mockReset()
@@ -31,7 +40,7 @@ beforeEach(() => {
 describe('Departments 部门管理页', () => {
   it('渲染部门树表格:层级/主管/成员数/已授权徽标', async () => {
     render(<MemoryRouter><Departments /></MemoryRouter>)
-    expect(await screen.findByText('部门管理')).toBeInTheDocument()
+    await waitForDeptTree()
     expect(screen.getAllByText('研发部').length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText('前端组').length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText('alice').length).toBeGreaterThanOrEqual(1) // 主管列
@@ -41,7 +50,7 @@ describe('Departments 部门管理页', () => {
 
   it('新建部门:提交 POST /departments', async () => {
     render(<MemoryRouter><Departments /></MemoryRouter>)
-    await screen.findByText('部门管理')
+    await waitForDeptTree()
     fireEvent.click(screen.getByRole('button', { name: '新建部门' }))
     const dialog = within(await screen.findByRole('dialog'))
     fireEvent.change(dialog.getByPlaceholderText('如 研发部'), { target: { value: '财务部' } })
@@ -54,7 +63,7 @@ describe('Departments 部门管理页', () => {
 
   it('新建部门:父级下拉可选已有部门(高1:新建时不得排除整棵树)', async () => {
     render(<MemoryRouter><Departments /></MemoryRouter>)
-    await screen.findByText('部门管理')
+    await waitForDeptTree()
     fireEvent.click(screen.getByRole('button', { name: '新建部门' }))
     const dialog = within(await screen.findByRole('dialog'))
     fireEvent.click(dialog.getByRole('combobox', { name: '上级部门' }))
@@ -67,7 +76,7 @@ describe('Departments 部门管理页', () => {
 
   it('编辑部门:父级下拉排除自身及其子树', async () => {
     render(<MemoryRouter><Departments /></MemoryRouter>)
-    await screen.findByText('部门管理')
+    await waitForDeptTree()
     fireEvent.click(screen.getAllByRole('button', { name: '编辑' })[0]) // 研发部
     const dialog = within(await screen.findByRole('dialog'))
     fireEvent.click(dialog.getByRole('combobox', { name: '上级部门' }))
@@ -80,7 +89,7 @@ describe('Departments 部门管理页', () => {
 
   it('编辑部门:主管下拉列出用户,保存调用 PUT', async () => {
     render(<MemoryRouter><Departments /></MemoryRouter>)
-    await screen.findByText('部门管理')
+    await waitForDeptTree()
     fireEvent.click(screen.getAllByRole('button', { name: '编辑' })[0])
     const dialog = within(await screen.findByRole('dialog'))
     expect((dialog.getByPlaceholderText('如 研发部') as HTMLInputElement).value).toBe('研发部')
@@ -93,7 +102,7 @@ describe('Departments 部门管理页', () => {
 
   it('删除部门:确认后调用 DELETE', async () => {
     render(<MemoryRouter><Departments /></MemoryRouter>)
-    await screen.findByText('部门管理')
+    await waitForDeptTree()
     fireEvent.click(screen.getAllByRole('button', { name: '删除' })[0])
     expect(mockRequest).toHaveBeenCalledWith(
       '/api/server/admin/departments/1',
@@ -118,7 +127,7 @@ describe('Departments 部门管理页', () => {
     })
     const u = userEvent.setup()
     render(<MemoryRouter><Departments /></MemoryRouter>)
-    await screen.findByText('部门管理')
+    await waitForDeptTree()
     fireEvent.click(screen.getByRole('button', { name: '新建部门' }))
     const dialog = within(await screen.findByRole('dialog'))
     // 搜索式下拉:输入关键词触发服务端搜索并点选
@@ -129,8 +138,11 @@ describe('Departments 部门管理页', () => {
     await waitFor(() => {
       expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/users?page=1&size=200&q=alice')
     })
-    const items = screen.getAllByText('alice').map((el) => el.closest('[cmdk-item]')).filter((el) => el !== null)
-    expect(items.length).toBeGreaterThan(0)
+    const items = await waitFor(() => {
+      const found = screen.getAllByText('alice').map((el) => el.closest('[cmdk-item]')).filter((el) => el !== null)
+      expect(found.length).toBeGreaterThan(0)
+      return found
+    })
     fireEvent.click(items[0]!)
     // 选中后 trigger 显示 alice(候选列表已关)
     expect(dialog.getByText('alice')).toBeInTheDocument()
