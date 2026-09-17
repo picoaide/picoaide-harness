@@ -54,8 +54,9 @@ describe('TransferOwnerDialog 归属转移', () => {
       '/api/server/admin/apps/skill/crm-skill/owner',
       expect.objectContaining({ method: 'PUT', body: JSON.stringify({ official: true }) }),
     ))
-    expect(onSaved).toHaveBeenCalled()
-    expect(onClose).toHaveBeenCalled()
+    // 回调在 await 之后才触发：只等"调用记录"会让这两条断言读到旧值（同族竞态）。
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
   })
 
   it('转给用户:未选人时禁用,选人后提交 {owner}', async () => {
