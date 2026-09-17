@@ -28,6 +28,24 @@ var blockedOutboundHosts = map[string]bool{
 	"instance-data": true, "metadata.azure.com": true,
 }
 
+// OutboundBlockedError 表示这次出站被**策略**拒绝(链路本地/云 metadata/
+// 已知 metadata 主机名),而不是解析或连接失败。
+//
+// 为什么要类型化(2026-09-17 独立验证 N4):CheckOutboundTarget 同时承担
+// "策略判定"与"DNS 解析"两职 —— 调用方若把它的**任何**错误都当作策略拒绝,
+// 就会把"域名解析不了"报成"被安全护栏拦下,这是安全策略不是网络故障",
+// 诊断方向完全相反(实测 `no-such-host.invalid` 触发)。错误文本保持逐字不变,
+// 只额外给出可判定的类型。
+type OutboundBlockedError struct{ msg string }
+
+func (e *OutboundBlockedError) Error() string { return e.msg }
+
+// IsOutboundBlocked 报告错误是否来自出站护栏的策略判定(而非 DNS/连接故障)。
+func IsOutboundBlocked(err error) bool {
+	var blocked *OutboundBlockedError
+	return errors.As(err, &blocked)
+}
+
 // IsBlockedOutboundHost 报告主机名是否属于已知 metadata 服务。
 func IsBlockedOutboundHost(host string) bool {
 	return blockedOutboundHosts[strings.ToLower(strings.TrimSpace(host))]
@@ -70,7 +88,7 @@ func SafeOutboundDialContext(ctx context.Context, network, addr string) (net.Con
 	var lastErr error
 	for _, ipa := range ips {
 		if IsBlockedOutboundIP(ipa.IP) {
-			lastErr = errors.New("outbound address is link-local/metadata and blocked")
+			lastErr = &OutboundBlockedError{msg: "outbound address is link-local/metadata and blocked"}
 			continue
 		}
 		d := &net.Dialer{Timeout: 30 * time.Second}
@@ -143,21 +161,22 @@ func CheckOutboundTarget(ctx context.Context, host string) error {
 		return errors.New("outbound host is empty")
 	}
 	if IsBlockedOutboundHost(host) {
-		return fmt.Errorf("outbound host %q is a known metadata service and blocked", host)
+		return &OutboundBlockedError{msg: fmt.Sprintf("outbound host %q is a known metadata service and blocked", host)}
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		if IsBlockedOutboundIP(ip) {
-			return errors.New("outbound address is link-local/metadata and blocked")
+			return &OutboundBlockedError{msg: "outbound address is link-local/metadata and blocked"}
 		}
 		return nil
 	}
 	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
+		// DNS 故障不是策略拒绝:原样返回(带 *net.DNSError),由调用方按网络故障分类。
 		return err
 	}
 	for _, ipa := range ips {
 		if IsBlockedOutboundIP(ipa.IP) {
-			return errors.New("outbound address is link-local/metadata and blocked")
+			return &OutboundBlockedError{msg: "outbound address is link-local/metadata and blocked"}
 		}
 	}
 	return nil

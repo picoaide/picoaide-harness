@@ -486,6 +486,80 @@ func TestErrorReportingTestEventBlockedKind(t *testing.T) {
 	}
 }
 
+// TestErrorReportingTestEventDnsFailureIsNotBlocked(N4 回归,2026-09-17 独立验证):
+// 出站复检函数同时做策略判定与 DNS 解析 —— 若把它的**任何**错误都归成 BLOCKED,
+// 管理员会看到「目标地址被出站护栏拦截…这是安全策略,不是网络故障」,而真相是
+// 域名根本解析不了(DNS 故障被误诊成安全策略,排障方向相反)。
+// 判据必须来自护栏类型,而不是"复检函数返回了错误"。
+func TestErrorReportingTestEventDnsFailureIsNotBlocked(t *testing.T) {
+	// 主机名含空标签(非法域名)⇒ 由解析器**本地**拒绝,不依赖任何外部 DNS 的
+	// 回应(独立验证 F3:此前用 .invalid,在"什么都解析"的解析器环境下会假红/空判)。
+	inspection := ErrorReportingDSN{
+		Verdict:       ErrorReportingDSNAccept,
+		Host:          "a..b",
+		ProjectID:     "1",
+		PublicKey:     "key",
+		StoreEndpoint: "http://a..b/api/1/store/",
+	}
+	got := sendErrorReportingTestEvent(context.Background(), inspection, "test")
+	if got.Kind == ErrorReportingKindBlocked {
+		t.Fatalf("DNS 解析失败被误分类为 BLOCKED: %s / %s", got.Message, got.Detail)
+	}
+	if got.Kind != ErrorReportingKindDNS {
+		// 只在"解析器真的拒绝了它"时才要求 DNS 结论;若本环境的解析器把任何名字都
+		// 解析成功,则这条分支根本没被走到 —— 跳过并说清楚,而不是给一句假红。
+		if strings.Contains(got.Detail, "no such host") {
+			t.Fatalf("kind = %s (%s), want DNS", got.Kind, got.Detail)
+		}
+		t.Skipf("本环境的解析器没有拒绝 a..b(%s):无法覆盖 DNS 失败分支", got.Detail)
+	}
+	if strings.Contains(got.Message, "护栏") {
+		t.Fatalf("网络故障不得套用安全策略文案: %q", got.Message)
+	}
+}
+
+// TestErrorReportingTestEventBlockedAtTransportIsBlocked(独立验证 F1):护栏在
+// **出站传输路径**拦下的拒绝必须同样归成 BLOCKED —— 预检的主机与端点真正连到的主机
+// 可以不同(DNS rebinding 形态:预检 127.0.0.1 放行,出站目标是云 metadata),
+// 此前这种情形落进"不应出现"的 UNKNOWN。
+func TestErrorReportingTestEventBlockedAtTransportIsBlocked(t *testing.T) {
+	inspection := ErrorReportingDSN{
+		Verdict:       ErrorReportingDSNAccept,
+		Host:          "127.0.0.1", // 预检:环回放行(内网上游是产品主场景)
+		ProjectID:     "1",
+		PublicKey:     "key",
+		StoreEndpoint: "http://169.254.169.254/api/1/store/", // 真正出站时才被护栏拦下
+	}
+	got := sendErrorReportingTestEvent(context.Background(), inspection, "test")
+	if got.Kind != ErrorReportingKindBlocked {
+		t.Fatalf("kind = %s (%s), want BLOCKED(出站路径的护栏拒绝)", got.Kind, got.Detail)
+	}
+	if !strings.Contains(got.Message, "护栏") {
+		t.Fatalf("message = %q, want the guard explanation", got.Message)
+	}
+}
+
+// TestErrorReportingTestEventCanceledIsNotUnknown(独立验证 F2):调用方主动中断
+// (页面关闭/服务停止)不是"未知故障",也不是链路故障。
+func TestErrorReportingTestEventCanceledIsNotUnknown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	inspection := ErrorReportingDSN{
+		Verdict:       ErrorReportingDSNAccept,
+		Host:          "127.0.0.1", // IP 字面量:预检不查 ctx,必然放行到出站那一步
+		ProjectID:     "1",
+		PublicKey:     "key",
+		StoreEndpoint: "http://127.0.0.1:1/api/1/store/",
+	}
+	got := sendErrorReportingTestEvent(ctx, inspection, "test")
+	if got.Kind == ErrorReportingKindUnknown {
+		t.Fatalf("已取消的请求落进了 UNKNOWN(不应出现的兜底): %s", got.Detail)
+	}
+	if got.Kind != ErrorReportingKindCanceled {
+		t.Fatalf("kind = %s (%s), want CANCELED", got.Kind, got.Detail)
+	}
+}
+
 // firstNonLoopbackIPv4 返回本机第一个非回环 IPv4(没有就跳过用例)。
 func firstNonLoopbackIPv4(t *testing.T) string {
 	t.Helper()

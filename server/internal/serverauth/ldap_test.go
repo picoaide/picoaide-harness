@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/go-ldap/ldap/v3"
 )
@@ -341,6 +343,46 @@ func TestRedactCredentialEscapesControlChars(t *testing.T) {
 	long := redactCredential(strings.Repeat("A", 1000), "")
 	if len(long) > 320 {
 		t.Fatalf("超长文本必须截断, got %d 字节", len(long))
+	}
+}
+
+// TestRedactCredentialEscapesBidiAndKeepsUTF8Valid(2026-09-17 独立验证 P3/P4):
+//   - 双向/零宽格式字符(U+202A-U+202E、U+2066-U+2069、U+200B-U+200F)不产生换行,
+//     但会改变日志的**显示顺序** —— 对端可借此把 "gnp.exe" 读成 "exe.png";
+//   - 截断在转义之后按字节切,会切出半个多字节字符,而 log.Printf 把非法 UTF-8
+//     原样写盘(不净化成 U+FFFD),下游日志采集看到乱码。
+func TestRedactCredentialEscapesBidiAndKeepsUTF8Valid(t *testing.T) {
+	got := redactCredential("ok\u202egnp.exe\u202c end", "")
+	for _, r := range got {
+		if unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			t.Fatalf("格式字符未转义(显示顺序可被对端改动): %q", got)
+		}
+	}
+	if !strings.Contains(got, `\u202e`) {
+		t.Fatalf("应转义成可见 \\u202e, got %q", got)
+	}
+
+	// 截断必须落在 rune 边界。多种形状一起钉:纯 3 字节汉字、带 1 字节前缀(300
+	// 不是 3 的倍数偏移 ⇒ 按字节切必切出半个字)、4 字节 emoji 及其前缀形态。
+	for _, in := range []string{
+		strings.Repeat("啊", 1000),
+		"x" + strings.Repeat("啊", 1000),
+		"日志: " + strings.Repeat("错误", 400),
+		strings.Repeat("😀", 300),
+		"a" + strings.Repeat("😀", 300),
+	} {
+		got := redactCredential(in, "")
+		if len(got) > 320 {
+			t.Fatalf("超长文本必须截断, got %d 字节", len(got))
+		}
+		if !utf8.ValidString(got) {
+			t.Fatalf("截断切出了非法 UTF-8(输入 %d 字节): %q", len(in), got)
+		}
+	}
+	// 转义会变长,再叠一层:转义后的中文串也要保持合法。
+	mixed := redactCredential(strings.Repeat("啊\\x01", 200), "")
+	if !utf8.ValidString(mixed) {
+		t.Fatalf("转义+截断后不是合法 UTF-8: %q", mixed)
 	}
 }
 

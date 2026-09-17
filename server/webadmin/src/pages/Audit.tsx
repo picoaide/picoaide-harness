@@ -200,6 +200,11 @@ export default function Audit() {
   // （或加载失败）就点「保存策略」会把 180 写进库。加载成功前锁死写面。
   const [retentionLoaded, setRetentionLoaded] = useState(false)
   const [retentionBusy, setRetentionBusy] = useState(false)
+  // 5-3：保留策略**读取失败**必须与"还在加载"区分（此前静默吞掉失败，界面永久停在"加载中"）。
+  const [retentionError, setRetentionError] = useState('')
+  // R6（2026-09-17 独立验证）：日志列表此前没有任何加载闸门，首帧就渲染
+  // 「暂无审计记录」——把"还没读到"说成"没有记录"（F7 在 Users/Departments 修掉的同族形态）。
+  const [logsLoaded, setLogsLoaded] = useState(false)
 
   // 体验层能力判定(护栏在服务端 RequirePermission):
   //   GET /audit/settings 只需 audit:read —— auditor 能读保留天数;
@@ -220,11 +225,17 @@ export default function Audit() {
       setLogs(data.logs)
       setTotal(data.total)
       setPage(p)
+      setLogsLoaded(true)
       // G13: 保留策略(读仅 PermAuditRead; 写 403 由保存按钮语义兜底)
       request(`${ADMIN_API}/audit/settings`).then((s) => {
         if (s?.retention_days) setRetentionDays(s.retention_days)
         setRetentionLoaded(true)
-      }).catch(() => { /* 非 super_admin 亦可读；写面保持锁定（见 retentionLoaded） */ })
+      }).catch((err: any) => {
+        // 5-3（2026-09-17 第二轮独立验证）：此前这里静默吞掉失败，而本轮又给未加载状态
+        // 加了「保留策略加载中…」文案 ⇒ 请求失败会**永久**显示"加载中"，没有任何失败提示
+        // （与 R4"把失败说成还在加载"同族）。失败要明说，写面保持锁定。
+        setRetentionError(err?.message ?? '读取失败')
+      })
     } catch (err: any) {
       if (current !== loadSeq.current) return // P1-8: 过期响应不写错误
       setError(err.message)
@@ -323,10 +334,19 @@ export default function Audit() {
           aria-label="审计保留天数"
           value={retentionDays}
           readOnly={!canWriteRetention}
-          disabled={!canWriteRetention}
+          disabled={!canWriteRetention || !retentionLoaded}
           onChange={(e) => setRetentionDays(Number(e.target.value))}
         />
         <span className="text-xs text-muted-foreground">天(1~3650; 保存后立即清理更旧日志)</span>
+        {canWriteRetention && !retentionLoaded && !retentionError && (
+          // R5：加载未完成时按钮是禁用的，必须说明"为什么点了没反应"；同时输入框也
+          // 禁用 —— 否则管理员先输入的天数会被落地值覆盖（实测输入 30 → 变成 90）。
+          <span className="text-xs text-muted-foreground">保留策略加载中…</span>
+        )}
+        {canWriteRetention && !retentionLoaded && retentionError && (
+          // 5-3：失败不能伪装成"加载中"（那会让人一直等下去）。
+          <span className="text-xs text-destructive">保留策略读取失败（{retentionError}），保存已锁定——请刷新页面后重试</span>
+        )}
         {canWriteRetention ? (
           <Button size="sm" variant="outline" disabled={retentionBusy || !retentionLoaded} onClick={() => { void saveRetention() }}>
             {retentionBusy ? '保存中…' : '保存策略'}
@@ -411,7 +431,7 @@ export default function Audit() {
               <TableCell className="font-mono text-xs text-muted-foreground">{fmtTime(l.created_at)}</TableCell>
             </TableRow>
           ))}
-          {logs.length === 0 && (
+          {logsLoaded && logs.length === 0 && (
             <TableRow>
               <TableCell colSpan={5} className="border-0 p-0">
                 <EmptyState
@@ -419,6 +439,13 @@ export default function Audit() {
                   title="暂无审计记录"
                   desc="敏感操作(用户/部门/技能/令牌)会在此留痕"
                 />
+              </TableCell>
+            </TableRow>
+          )}
+          {!logsLoaded && logs.length === 0 && (
+            <TableRow>
+              <TableCell colSpan={5} className="border-0 p-0">
+                <div className="p-4 text-sm text-muted-foreground">审计记录加载中…</div>
               </TableCell>
             </TableRow>
           )}

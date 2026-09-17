@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { request, ADMIN_API } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
@@ -7,14 +7,13 @@ import { Label } from '../components/ui/label'
 import { Badge } from '../components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog'
-import { Checkbox } from '../components/ui/checkbox'
 import { Skeleton } from '../components/ui/skeleton'
 import { EmptyState } from '../components/empty-state'
 import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
 import { TransferOwnerDialog } from '../components/transfer-owner-dialog'
 import { CapabilityLockPanel } from '../components/capability-lock-panel'
+import { GrantDialog } from '../components/grant-dialog'
 import { Store, Download, Package, Activity, UserCog } from 'lucide-react'
-import { deptTreeOptions } from '../lib/utils'
 
 interface Skill {
   id: number
@@ -33,11 +32,6 @@ interface Skill {
   quality?: string
   /** 来源渠道: market=市场(管理端直上架) || org=员工上传(审批后)。 */
   channel?: 'market' | 'org'
-}
-
-interface Grant {
-  grantee_type: string
-  grantee: string
 }
 
 interface Dept {
@@ -90,10 +84,6 @@ export default function Marketplace() {
   // 锁定管理(2026-09-04 从审批页迁入市场页)
   const [lockOpen, setLockOpen] = useState(false)
   const [transferSkill, setTransferSkill] = useState<Skill | null>(null)
-  const [grants, setGrants] = useState<Grant[]>([])
-  const [grantTarget, setGrantTarget] = useState('')
-  const [grantGroups, setGrantGroups] = useState<string[]>([])
-  const [grantSaving, setGrantSaving] = useState(false)
 
   // 弹窗内操作错误(审计 A5-L4):靠近操作点展示,页面级错误只留给加载失败
   const [dialogError, setDialogError] = useState('')
@@ -304,95 +294,6 @@ export default function Marketplace() {
     }
   }
 
-  // ---- 授权 ----
-  function grantPath(d: { kind: 'skill'; name: string; id: number }): string {
-    return `${ADMIN_API}/skills/${encodeURIComponent(d.name)}/grant`
-  }
-
-  function grantsPath(d: { kind: 'skill'; name: string; id: number }): string {
-    return `${ADMIN_API}/skills/${encodeURIComponent(d.name)}/grants`
-  }
-
-  async function openGrants(d: { kind: 'skill'; name: string; id: number }) {
-    setDialogError('')
-    try {
-      const data = await request(grantsPath(d))
-      setGrants(data.grants ?? [])
-      setGrantGroups((data.grants ?? []).filter((g: Grant) => g.grantee_type === 'group').map((g: Grant) => g.grantee))
-      setGrantTarget('')
-      setGrantDialog(d)
-    } catch (err: any) {
-      setDialogError(err.message)
-    }
-  }
-
-  // 保存部门多选 = 整组替换(原子;用户授权保留)。审计 A5-M6:
-  // 覆盖语义必须确认 + 明示,避免取消勾选一个部门就把其它部门授权静默清掉。
-  async function saveDeptGrants() {
-    if (grantSaving || !grantDialog) return // P1-6: 双击守卫
-    if (!window.confirm('保存部门授权将覆盖该资源的全部部门授权(用户授权不受影响)。确定保存?')) return
-    setGrantSaving(true)
-    setDialogError('')
-    try {
-      await request(grantsPath(grantDialog), {
-        method: 'PUT',
-        body: JSON.stringify({ groups: grantGroups }),
-      })
-      setGrantDialog(null)
-      loadSkills()
-    } catch (err: any) {
-      setDialogError(err.message)
-    } finally {
-      setGrantSaving(false)
-    }
-  }
-
-  function toggleGroup(name: string) {
-    setGrantGroups((prev) => (prev.includes(name) ? prev.filter((g) => g !== name) : [...prev, name]))
-  }
-
-  async function doGrant() {
-    if (busy || !grantDialog || !grantTarget.trim()) return // P1-6: 双击守卫
-    const isGroup = grantTarget.trim().startsWith('@')
-    setDialogError('')
-    setBusy('grant')
-    try {
-      await request(grantPath(grantDialog), {
-        method: 'PUT',
-        body: JSON.stringify(isGroup ? { group: grantTarget.trim().slice(1) } : { username: grantTarget.trim() }),
-      })
-      setGrantTarget('')
-      openGrants(grantDialog)
-    } catch (err: any) {
-      setDialogError(err.message)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  async function revokeGrant(g: Grant) {
-    if (busy || !grantDialog) return // P1-6: 双击守卫
-    if (!window.confirm(`撤销「${g.grantee}」的授权?`)) return
-    setDialogError('')
-    setBusy(`revoke-${g.grantee_type}-${g.grantee}`)
-    try {
-      await request(grantPath(grantDialog), {
-        method: 'DELETE',
-        body: JSON.stringify(g.grantee_type === 'group' ? { group: g.grantee } : { username: g.grantee }),
-      })
-      openGrants(grantDialog)
-    } catch (err: any) {
-      setDialogError(err.message)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const deptOptions = useMemo(() => {
-    const nameById = new Map(departments.map((d) => [d.id, d.name]))
-    return deptTreeOptions(departments).map((o) => ({ ...o, name: nameById.get(o.id) ?? '' }))
-  }, [departments])
-
   return (
     <div className="space-y-6">
       {opError && <div className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">{opError}</div>}
@@ -462,7 +363,7 @@ export default function Marketplace() {
                     <Button variant="outline" onClick={() => openEditSkill(s)}>编辑</Button>
                     <Button variant="outline" onClick={() => openReplace(s)}>上传新版</Button>
                     <Button variant="outline" onClick={() => setTransferSkill(s)} title="转移归属(负责人)">归属</Button>
-                    <Button variant="outline" onClick={() => openGrants({ kind: 'skill', name: s.name, id: 0 })}>授权</Button>
+                    <Button variant="outline" onClick={() => setGrantDialog({ kind: 'skill', name: s.name, id: 0 })}>授权</Button>
                     {s.enabled
                       ? <Button variant="destructive" disabled={busy !== null} onClick={() => disableSkill(s.name)}>{busy === `disable-skill-${s.name}` ? '下架中…' : '下架'}</Button>
                       : <Button variant="outline" disabled={busy !== null} onClick={() => enableSkill(s.name)}>{busy === `enable-skill-${s.name}` ? '上架中…' : '重新上架'}</Button>}
@@ -590,53 +491,17 @@ export default function Marketplace() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={grantDialog !== null} onOpenChange={(v) => !v && setGrantDialog(null)}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>授权「{grantDialog?.name}」</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3">
-            {grants.length > 0 && (
-              <div className="space-y-2 rounded-md border p-3">
-                {grants.map((g) => (
-                  <div key={`${g.grantee_type}:${g.grantee}`} className="flex flex-wrap items-center gap-2 text-sm">
-                    <Badge variant={g.grantee_type === 'group' ? 'outline' : 'secondary'}>
-                      {g.grantee_type === 'group' ? `@${g.grantee}` : g.grantee}
-                    </Badge>
-                    <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => revokeGrant(g)}>{busy === `revoke-${g.grantee_type}-${g.grantee}` ? '撤销中…' : '撤销'}</Button>
-                  </div>
-                ))}
-              </div>
-            )}
-            {grants.length === 0 && (
-              <div className="text-xs text-muted-foreground">未授权:所有用户均不可见(严格默认),请授权用户或部门组</div>
-            )}
-            <div className="space-y-1">
-              <Label>部门(多选:一个资源可授权多个部门,成员共享无需重复上传)</Label>
-              <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border p-2">
-                {deptOptions.map((o) => (
-                  <label key={o.id} className="flex cursor-pointer items-center gap-2 text-sm">
-                    <Checkbox
-                      checked={grantGroups.includes(o.name)}
-                      onChange={() => toggleGroup(o.name)}
-                    />
-                    {o.label}
-                  </label>
-                ))}
-                {deptOptions.length === 0 && <div className="text-xs text-muted-foreground">暂无部门</div>}
-              </div>
-              <p className="text-xs text-muted-foreground">「保存部门授权」将覆盖该资源的全部部门授权(用户授权不受影响)</p>
-              <Button size="sm" variant="outline" className="mt-1 w-full" disabled={grantSaving || busy !== null} onClick={saveDeptGrants}>{grantSaving ? '保存中…' : '保存部门授权'}</Button>
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="grant-user">用户名(单个,可选)</Label>
-              <Input id="grant-user" placeholder="如 alice" value={grantTarget} onChange={(e) => setGrantTarget(e.target.value)} />
-            </div>
-            {dialogError && <div className="text-sm text-destructive">{dialogError}</div>}
-            <Button className="w-full" disabled={!grantTarget.trim() || grantSaving || busy !== null} onClick={doGrant}>{busy === 'grant' ? '处理中…' : '添加用户授权'}</Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+      {/* 2026-09-17 独立验证 R3：这里原先有 GrantDialog 的第二份拷贝（同一逻辑两份实现），
+          其中"授权列表未落地也渲染未授权 + 保存可点"会导致 PUT {groups: []} 清空全部部门授权。
+          统一用 components/grant-dialog.tsx（已加 grantsLoaded 闸门）。 */}
+      <GrantDialog
+        open={grantDialog !== null}
+        name={grantDialog?.name ?? ''}
+        basePath={`${ADMIN_API}/skills/${encodeURIComponent(grantDialog?.name ?? '')}`}
+        departments={departments}
+        onClose={() => setGrantDialog(null)}
+        onSaved={() => loadSkills()}
+      />
     </div>
   )
 }

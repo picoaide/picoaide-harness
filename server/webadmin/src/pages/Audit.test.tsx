@@ -207,13 +207,53 @@ describe('审计员访问审计保留策略(R7-RV-2 残留)', () => {
     render(<Audit />)
     await waitForAuditRows(LOGS.length)
     const input = screen.getByLabelText('审计保留天数') as HTMLInputElement
+    // 保留策略是**独立**请求：等它落地再断言可编辑，否则负载下会拿到"闸门还没开"
+    // 的中间态（+400ms 全响应注入下本用例曾红：输入被禁用、点击被吞）。
+    await waitFor(() => expect(screen.getByRole('button', { name: /保存策略/ })).toBeEnabled())
     expect(input.disabled).toBe(false)
     fireEvent.change(input, { target: { value: '30' } })
+    // R5：落地值不得覆盖管理员刚输入的内容（实测输入 30 被改写回 90）。
     expect(input.value).toBe('30')
     fireEvent.click(screen.getByRole('button', { name: /保存策略/ }))
     await waitFor(() => {
       expect(mockRequest.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')).toBe(true)
     })
+  })
+
+  it('审计记录未落地时不渲染"暂无审计记录"(R6:首帧把"没读到"说成"没有")', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    mockRequest.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/server/admin/audit?')) {
+        await gate
+        return { logs: [], total: 0 }
+      }
+      if (String(path).startsWith('/api/server/admin/audit/settings')) return { retention_days: 180 }
+      return {}
+    })
+    setCurrentAdmin(SUPER)
+    render(<Audit />)
+    // 加载期：说明"在加载"，而不是断言"没有记录"。
+    expect(screen.getByText(/审计记录加载中/)).toBeInTheDocument()
+    expect(screen.queryByText('暂无审计记录')).toBeNull()
+    release()
+    // 真的读到了、并且确实是空 ⇒ 才允许渲染空态。
+    expect(await screen.findByText('暂无审计记录')).toBeInTheDocument()
+  })
+
+  it('5-3: 保留策略读取失败时说明失败(不能永久显示"加载中")', async () => {
+    // 2026-09-17 第二轮独立验证 P3：`.catch(() => {})` 静默吞掉失败，而"加载中"提示
+    // 只由 !retentionLoaded 决定 ⇒ 请求失败会**永久**显示"加载中"，没有任何失败提示。
+    mockRequest.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/server/admin/audit?')) return { logs: LOGS, total: LOGS.length }
+      if (String(path).startsWith('/api/server/admin/audit/settings')) throw new Error('读取策略失败')
+      return {}
+    })
+    setCurrentAdmin(SUPER)
+    render(<Audit />)
+    expect(await screen.findByText(/保留策略读取失败/)).toBeInTheDocument()
+    expect(screen.queryByText(/保留策略加载中/)).toBeNull()
+    expect(screen.getByRole('button', { name: /保存策略/ })).toBeDisabled()
   })
 })
 

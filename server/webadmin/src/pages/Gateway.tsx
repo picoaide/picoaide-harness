@@ -165,6 +165,13 @@ export default function Gateway() {
   // 响应体 ⇒ 服务端明说"配置有问题"的告警在界面上完全不可见,管理员只看到「已保存」。
   const [warnings, setWarnings] = useState<string[]>([])
   const [loading, setLoading] = useState(true) // 审计修复 L2
+  // F5 残留(2026-09-17 独立验证 R1):`loading` 在 finally 里**无条件**置 false ⇒
+  // 四个 GET 里只要有一个**失败**(不只是挂起),写面就解锁,而 `cfg` 还停在空初值
+  // (default_model="" / peak_windows="")—— 实测点保存提交
+  // `{"default_model":"","rate_limit":"60","retention_months":"6",…}`:清空默认模型与
+  // 峰谷计费窗口,并静默把限流/保留期重置成默认值。
+  // 解锁条件必须是"这份配置真的读到了",而不是"这次请求结束了"。
+  const [cfgLoaded, setCfgLoaded] = useState(false)
   // P1-6: 提交中操作标识(双击守卫 + 按钮禁用/loading)。null = 空闲,值为操作 key。
   const [busy, setBusy] = useState<string | null>(null)
 
@@ -218,8 +225,11 @@ export default function Gateway() {
       }
       setChannels(ch.channels ?? [])
       setError('')
+      // 只有四个 GET 全部成功、且 cfg 已按响应写入,才允许写回(R1)。
+      setCfgLoaded(true)
     } catch (err: any) {
       setError(err.message)
+      setCfgLoaded(false)
     } finally {
       setLoading(false)
     }
@@ -805,14 +815,20 @@ export default function Gateway() {
         <CardHeader>
           <CardTitle>全局设置</CardTitle>
           <CardDescription>随客户端启动配置下发,员工登录后自动应用</CardDescription>
-          <div className="flex justify-end">
-            {/* 2026-09-17 审计 F5：`cfg` 是空初值，`loading` 只罩两张表 ⇒ 加载中点保存
-                会提交 default_model="" / peak_windows=""（清空默认模型与峰谷计费窗口）。
-                写面在加载完成前锁死。 */}
-            <Button onClick={saveGateway} disabled={busy !== null || loading}>{busy === 'save-gateway' ? '处理中…' : '保存'}</Button>
+          <div className="flex items-center justify-end gap-3">
+            {/* 2026-09-17 审计 F5 + 独立验证 R1：`cfg` 是空初值，`loading` 只罩两张表
+                ⇒ 加载中/加载**失败**时点保存会提交 default_model="" / peak_windows=""
+                （清空默认模型与峰谷计费窗口）。解锁条件用 `cfgLoaded`（成功才置位），
+                失败时给出可行动说明。 */}
+            {!loading && !cfgLoaded && (
+              <span className="text-xs text-destructive">全局设置未加载成功，保存已锁定（避免把空值当成新配置提交）——请刷新页面后重试</span>
+            )}
+            <Button onClick={saveGateway} disabled={busy !== null || loading || !cfgLoaded}>{busy === 'save-gateway' ? '处理中…' : '保存'}</Button>
           </div>
         </CardHeader>
-        <CardContent className="space-y-6">
+        <CardContent>
+        {/* 加载未成功时整块写面禁用：fieldset 的 disabled 会传播到其中的 input/button */}
+        <fieldset disabled={!cfgLoaded} className="space-y-6">
           {/* 客户端默认 */}
           <section className="space-y-1">
             <h3 className="text-sm font-medium text-muted-foreground">客户端默认</h3>
@@ -976,6 +992,7 @@ export default function Gateway() {
               </p>
             </div>
           </section>
+        </fieldset>
         </CardContent>
       </Card>
 

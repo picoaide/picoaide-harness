@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/go-ldap/ldap/v3"
 
@@ -416,13 +418,35 @@ func redactCredential(text, secret string) string {
 	out = sanitizeLogLine(out)
 	const maxLogText = 300
 	if len(out) > maxLogText {
-		out = out[:maxLogText] + "…"
+		out = truncateUTF8(out, maxLogText) + "…"
 	}
 	return out
 }
 
-// sanitizeLogLine 把 CR/LF/Tab 与非可打印字符转成可见转义(CWE-117:对端文本
-// 不能伪造日志行)。
+// truncateUTF8 按**字节**上限截断,但绝不留半个字符。
+//
+// 为什么要专门做(2026-09-17 独立验证 P4):转义后的文本仍可能是多字节 UTF-8
+// (中文错误消息很常见),直接 out[:300] 会切出非法字节序列;而 log.Printf 用
+// %s/%v 把非法字节**原样**写盘,不会净化成 U+FFFD —— 下游日志采集会看到乱码。
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	for i := maxBytes; i > 0; i-- {
+		if utf8.RuneStart(s[i]) {
+			return s[:i]
+		}
+	}
+	return ""
+}
+
+// sanitizeLogLine 把 CR/LF/Tab、控制字符与**双向/零宽格式字符**转成可见转义
+// (CWE-117:对端文本不能伪造日志行)。
+//
+// 为什么连格式字符也要转(2026-09-17 独立验证 P3):U+202E(U+202A-U+202E)、
+// U+2066-U+2069、U+200B-U+200F 这类字符不产生换行,但会**改变显示顺序**
+// (实测 "ok\u202egnp.exe\u202c end" 在编辑器里读成 "ok exe.png end")——
+// 管理员看日志会被误导;U+2028/U+2029 在部分查看器里还是换行。
 func sanitizeLogLine(text string) string {
 	var b strings.Builder
 	b.Grow(len(text))
@@ -436,6 +460,8 @@ func sanitizeLogLine(text string) string {
 			b.WriteString(`\t`)
 		case r < 0x20 || r == 0x7f:
 			b.WriteString(fmt.Sprintf(`\x%02x`, r))
+		case unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp):
+			b.WriteString(fmt.Sprintf(`\u%04x`, r))
 		default:
 			b.WriteRune(r)
 		}

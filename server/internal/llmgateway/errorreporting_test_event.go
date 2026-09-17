@@ -90,6 +90,10 @@ const (
 	ErrorReportingKindHTTP3xx = "HTTP_3XX"
 	ErrorReportingKindHTTP4xx = "HTTP_4XX"
 	ErrorReportingKindHTTP5xx = "HTTP_5XX"
+	// ErrorReportingKindCanceled:自检请求被调用方中断(管理页面关闭、服务正在停止)。
+	// 2026-09-17 独立验证 F2:此前这种情形落进"不应出现"的 UNKNOWN —— 它既不是链路
+	// 故障也不是未知故障,而是"没得到结论",必须说清楚。
+	ErrorReportingKindCanceled = "CANCELED"
 	// ErrorReportingKindUnknown 兜底(不应出现;出现即说明分类漏了一种)。
 	ErrorReportingKindUnknown = "UNKNOWN"
 )
@@ -110,6 +114,19 @@ func classifyErrorReportingFailure(err error, status int) string {
 	}
 	if err == nil {
 		return ErrorReportingKindUnknown
+	}
+	// F1(2026-09-17 独立验证):护栏也会在**出站传输路径**拦下同一个目标 ——
+	// 预检用的主机与端点真正解析到的主机可以不同(DNS rebinding 形态),或请求走了
+	// 代理路径。那时错误由 netguard 的 Dial/Proxy 钩子产生,与预检同源,必须同样
+	// 归成 BLOCKED,而不是"不应出现"的 UNKNOWN(实测:预检 127.0.0.1 放行、
+	// 端点 169.254.169.254 ⇒ 此前报 UNKNOWN)。
+	if util.IsOutboundBlocked(err) {
+		return ErrorReportingKindBlocked
+	}
+	// F2:调用方主动中断不是"未知故障"(页面关掉/服务停止时不该报"上报测试事件失败")。
+	// 必须排在 DNS/OpError 之前:取消常常以 *net.OpError("operation was canceled") 现身。
+	if errors.Is(err, context.Canceled) {
+		return ErrorReportingKindCanceled
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return ErrorReportingKindTimeout
@@ -204,10 +221,26 @@ func sendErrorReportingTestEvent(ctx context.Context, inspection ErrorReportingD
 	// 保存时不做 DNS 解析(内网域名/离线部署),所以出站前必须复检目标
 	// (链路本地/云 metadata 一律拒绝;私网放行)。
 	if err := util.CheckOutboundTarget(reqCtx, inspection.Host); err != nil {
-		// N4:这是安全策略拒绝,不是网络故障 —— 单列一类,文案不泄露解析结果。
+		// N4:被安全策略拒绝单列一类,文案不泄露解析结果。
+		//
+		// 但 CheckOutboundTarget **同时**承担策略判定与 DNS 解析两职
+		// (2026-09-17 独立验证 N4 实测):把它的任何错误都归成 BLOCKED,会把
+		// "域名解析不了"报成"被出站护栏拦截…这是安全策略,不是网络故障" ——
+		// 与 N4 的本意(区分"被策略拦"与"其它故障")方向相反,对基线是倒退。
+		// 判据必须来自护栏自己的类型,而不是"这个函数返回了错误"。
+		if util.IsOutboundBlocked(err) {
+			return errorReportingTestResult{
+				Kind:     ErrorReportingKindBlocked,
+				Message:  errorReportingFailureMessage(ErrorReportingKindBlocked),
+				Detail:   err.Error(),
+				Endpoint: inspection.StoreEndpoint,
+			}
+		}
+		// 解析失败等走原有分类(→ DNS/TIMEOUT/CONNECT),不套用安全策略文案。
+		kind := classifyErrorReportingFailure(err, 0)
 		return errorReportingTestResult{
-			Kind:     ErrorReportingKindBlocked,
-			Message:  errorReportingFailureMessage(ErrorReportingKindBlocked),
+			Kind:     kind,
+			Message:  errorReportingFailureMessage(kind),
 			Detail:   err.Error(),
 			Endpoint: inspection.StoreEndpoint,
 		}
@@ -279,6 +312,8 @@ func errorReportingFailureMessage(kind string) string {
 		return "上报服务拒绝了测试事件(HTTP 4xx,通常是 DSN 公钥或项目 ID 不对)"
 	case ErrorReportingKindHTTP5xx:
 		return "上报服务内部错误(HTTP 5xx)"
+	case ErrorReportingKindCanceled:
+		return "自检请求已中断(管理页面关闭或服务正在停止),本次没有得到结论"
 	}
 	return "上报测试事件失败"
 }
