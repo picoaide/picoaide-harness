@@ -54,6 +54,23 @@ type SentryModule = {
 let sentry: SentryModule | null = null
 
 /**
+ * 当前 live 实例所属的会话服务端（`session.serverURL`）。
+ *
+ * 为什么需要它（2026-09-17 第 3 轮审计 R3-ent-1）：`catch` 分支在拿不到 bootstrap
+ * 时会关掉旧实例。若这次失败只是**同一台服务端的网络抖动**，关掉等于"服务端抖一下
+ * = 本会话永久零上报"（只有下一次 session-changed 才可能重来）—— 比修之前更差，
+ * 因为修之前那两条分支根本不关实例、抖动是自愈的。
+ *
+ * 但完全不关也不行：**换了服务端**（同机换账号/换租户）时旧实例仍会向**上一个**
+ * 服务端的 DSN 外发，那是跨租户误报。
+ *
+ * 所以判据是"服务端身份是否变了"，而不是"这次 bootstrap 是否成功"：
+ *   - 同一 serverURL 失败 ⇒ 保留实例（自愈，下次 session-changed 或重试仍可用）；
+ *   - 不同 serverURL 失败 ⇒ 关掉（避免拿旧租户的 DSN 继续上报）。
+ */
+let sentryServerURL: string | null = null
+
+/**
  * 客户端错误上报状态(PLAN §4.2)。每次 `sync()` 结束前更新,供上层/管理端观测。
  *
  * 为什么导出**函数**而不是导出这个绑定:tsdown/ESM 下外部 import 到的是值快照,
@@ -227,6 +244,8 @@ export async function initSentry(
   release: string,
   level = 'error',
   heartbeat = false,
+  /** 本次初始化所属的会话服务端；用于区分"同服务端抖动"与"换了服务端"。 */
+  serverURL?: string,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   if (sentry !== null) {
     // 重新初始化前先关闭旧实例(登出/切换 DSN)。
@@ -237,6 +256,7 @@ export async function initSentry(
       await sentry.close(1500)
     } catch { /* ignore */ }
     sentry = null
+    sentryServerURL = null
   }
   const normalized = dsn.trim()
   if (!normalized) {
@@ -289,6 +309,7 @@ export async function initSentry(
       return { ok: false, reason: SDK_REJECTED_DSN_REASON }
     }
     sentry = SentryNode as unknown as SentryModule
+    sentryServerURL = serverURL ?? null
     status = { state: 'ready', dsnHost: dsnHost ?? '', level }
     // 链路自检(联调 2026-08-27):info 级,只有开心跳时才发 ——
     // 默认阈值 error 会把它丢掉,这正是"健康链路在后台也一片空白"的机制(F9/F11)。
@@ -308,6 +329,7 @@ export async function initSentry(
     console.warn('error-reporting: Sentry init 失败(降级不启用):', cause)
     status = { state: 'failed', reason, ...(dsnHost === undefined ? {} : { dsnHost }) }
     sentry = null
+    sentryServerURL = null
     return { ok: false, reason }
   }
 }
@@ -492,11 +514,14 @@ export function apply(ctx: Context): void {
       const web = config.web
       if (fallback === 'empty') {
         // ★ ent-1(修复轮回归):这条新分支在基线上走的是 `web={}` ⇒ `enabled=false`
-        // ⇒ `await initSentry('', release)`(关旧实例)。改成 early return 后漏了关闭:
-        // 服务端 models 变空时,已初始化的实例仍在向旧 DSN 外发,而状态/日志说的是
-        // "本次不上报"。先 teardown 再置状态 —— 顺序反了就会出现"状态已
-        // config_unavailable、实例还活着"的中间态。
-        await initSentry('', release)
+        // ⇒ 关旧实例。改成 early return 后漏了关闭:服务端 models 变空时,已初始化的
+        // 实例仍在向旧 DSN 外发,而状态/日志说的是"本次不上报"。
+        //
+        // ★★ R3-ent-1(第 3 轮审计修复):与 catch 分支同理 —— 只有**换了服务端**才关,
+        // 同服务端的一次配置抖动不该变成"本会话永久零上报"。
+        if (sentry !== null && sentryServerURL !== null && sentryServerURL !== session.serverURL) {
+          await initSentry('', release)
+        }
         status = { state: 'config_unavailable', reason: 'bootstrap 回退空配置(models 为空或形状不合)' }
         ctx.logger?.warn?.('错误上报:服务端配置不可用(models 为空,已回退空配置):已关闭上报,不再外发')
         void reportErrorReportingStatus(session, status)
@@ -530,6 +555,7 @@ export function apply(ctx: Context): void {
         release,
         web?.error_reporting_level ?? 'error',
         web?.error_reporting_heartbeat === true,
+        session.serverURL,
       )
       if (result.ok) {
         // info 会落盘(桌面默认日志阈值 info),这是"链路活着"的第一手痕迹。
@@ -543,11 +569,16 @@ export function apply(ctx: Context): void {
     } catch (cause) {
       // bootstrap 失败不阻断;但现在状态可查、日志会落盘。
       const reason = cause instanceof Error ? cause.message : String(cause)
-      // ★ ent-1(修复轮):这条分支同样产出 `config_unavailable`(语义 = 本次不上报,
-      // 且该状态会回传服务端)。状态/日志说"不上报"就必须真的停:此前只改状态不关实例,
-      // 拿不到 bootstrap 时旧实例仍在向**上一个**会话的 DSN 外发 —— 同服务端换账号
-      // 时这就是"用旧租户的 DSN 继续上报"。保守停止(宁可本次不上报,也不误报)。
-      await initSentry('', release)
+      // ★ ent-1(修复轮):状态/日志说"不上报"就不能让旧实例继续向**上一个**会话的
+      // DSN 外发(同服务端换账号 = 用旧租户的 DSN 上报)。
+      //
+      // ★★ R3-ent-1(第 3 轮审计修复):但"拿不到 bootstrap"绝大多数是**同一台服务端
+      // 的网络抖动**,这时关掉实例会把抖动放大成"本会话永久零上报"(只有下一次
+      // session-changed 才恢复)——比修复前更差(修复前这两条分支不关实例、抖动自愈)。
+      // 所以按**服务端身份是否变了**决定:变了才关,没变就保留实例(等下次 sync 自愈)。
+      if (sentry !== null && sentryServerURL !== null && sentryServerURL !== session.serverURL) {
+        await initSentry('', release)
+      }
       status = { state: 'config_unavailable', reason }
       console.warn('[error-reporting] bootstrap 失败,不上报:', cause)
       ctx.logger?.warn?.('error-reporting: bootstrap 失败,不上报:', cause)

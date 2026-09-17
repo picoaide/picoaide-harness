@@ -735,13 +735,15 @@ describe('审计修复轮回归(ent-1: 状态说"不上报"就必须关掉旧实
     expect(warns.some((w) => w.includes('已关闭上报'))).toBe(true)
   })
 
-  it('ent-1: bootstrap 回退空配置后必须 close 旧实例(config_unavailable 分支)', async () => {
+  it('ent-1/R3: 同服务端回退空配置 ⇒ 保留实例(抖动可自愈),状态转 config_unavailable', async () => {
+    // 2026-09-17 第 3 轮审计 R3-ent-1:ent-1 当初"一律 close"的修法把**同服务端的
+    // 一次抖动**放大成"本会话永久零上报"(只有下次 session-changed 才恢复),比修复前
+    // 更差(修复前这两条分支不关实例、抖动自愈)。改成按**服务端身份是否变了**判定:
+    // 同服务端 ⇒ 保留实例;换服务端 ⇒ 才关(避免拿旧租户 DSN 上报)。
     bootstrapResult = enabledBootstrap()
     const { ctx, warns } = stubCtx()
     await primeReady(ctx)
 
-    // models 变空 ⇒ validateBootstrap 把整份配置换成 EMPTY(web:{});HEAD 的
-    // `fallback === 'empty'` 新分支此前只改状态、不关实例。
     bootstrapResult = {
       config: { default_model: '', models: [], skills: [], mcp: [], web: {} },
       fellBack: true,
@@ -750,16 +752,38 @@ describe('审计修复轮回归(ent-1: 状态说"不上报"就必须关掉旧实
     sessionListener!(SESSION)
     await new Promise((resolve) => setTimeout(resolve, 0))
 
+    // 状态如实说"本次不上报"…
     expect(getErrorReportingStatus()).toMatchObject({ state: 'config_unavailable' })
-    expect(sentryMock.close).toHaveBeenCalledWith(1500)
-    expect(captureRendererError({ type: 'error', message: 'AFTER-EMPTY-FALLBACK' })).toBe(false)
-    expect(sentryMock.captureException).not.toHaveBeenCalled()
-    expect(warns.some((w) => w.includes('已关闭上报'))).toBe(true)
+    expect(warns.length).toBeGreaterThan(0)
+    // …但**不关**实例:同服务端的一次配置抖动不该永久停报。
+    expect(sentryMock.close).not.toHaveBeenCalled()
     // 状态仍然回传服务端(P1-3 契约不变)。
     expect(reported.some((r) => r.body.state === 'config_unavailable')).toBe(true)
+    void ctx
   })
 
-  it('ent-1: bootstrap 抛错后必须 close 旧实例(同属 config_unavailable)', async () => {
+  it('ent-1/R3: bootstrap 抛错且**换了服务端** ⇒ 必须 close(跨租户防线)', async () => {
+    bootstrapResult = enabledBootstrap()
+    const { ctx } = stubCtx()
+    await primeReady(ctx)
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      bootstrapResult = new Error('AuthError: network')
+      // ★ 关键:换到**另一台服务端**(同机换账号/换租户的场景)。
+      sessionListener!({ ...SESSION, serverURL: 'https://other-gateway.example', username: 'other' })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(getErrorReportingStatus()).toMatchObject({ state: 'config_unavailable', reason: 'AuthError: network' })
+      // 服务端身份变了 ⇒ 旧实例(上一个租户的 DSN)必须停,否则就是跨租户误报。
+      expect(sentryMock.close).toHaveBeenCalledWith(1500)
+      expect(captureRendererError({ type: 'error', message: 'AFTER-BOOTSTRAP-FAIL' })).toBe(false)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('ent-1/R3: bootstrap 抛错但**服务端没变** ⇒ 保留实例(抖动自愈,不永久停报)', async () => {
     bootstrapResult = enabledBootstrap()
     const { ctx } = stubCtx()
     await primeReady(ctx)
@@ -770,10 +794,10 @@ describe('审计修复轮回归(ent-1: 状态说"不上报"就必须关掉旧实
       sessionListener!(SESSION)
       await new Promise((resolve) => setTimeout(resolve, 0))
 
-      expect(getErrorReportingStatus()).toMatchObject({ state: 'config_unavailable', reason: 'AuthError: network' })
-      // 状态/日志说"不上报" ⇒ 旧实例(上一个会话的 DSN)必须已经停。
-      expect(sentryMock.close).toHaveBeenCalledWith(1500)
-      expect(captureRendererError({ type: 'error', message: 'AFTER-BOOTSTRAP-FAIL' })).toBe(false)
+      expect(getErrorReportingStatus()).toMatchObject({ state: 'config_unavailable' })
+      // 服务端没变 ⇒ **不关**:一次网络抖动不该让本会话永久零上报(R3-ent-1)。
+      expect(sentryMock.close).not.toHaveBeenCalled()
+      void ctx
     } finally {
       warn.mockRestore()
     }
