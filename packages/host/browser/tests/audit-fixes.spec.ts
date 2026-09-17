@@ -106,7 +106,7 @@ class MockAdapter implements ElectronAdapter {
   createView(): NativeView { const v = new MockView(); this.views.push(v); return v }
   createMaskView(): NativeView { const v = new MockView(); this.overlays.push(v); return v }
   createBrowserWindow(): never {
-    const w = { visible: false, destroyed: false, title: '' }
+    const w = { visible: false, destroyed: false, title: '', minimized: false, focused: true }
     this.windows.push(w as never)
     return {
       loadURL: async () => {},
@@ -115,6 +115,10 @@ class MockAdapter implements ElectronAdapter {
       focus: () => {},
       isVisible: () => w.visible,
       isDestroyed: () => w.destroyed,
+      // 2026-09-17：焦点动作按"窗口是否真的在前台"放行；测试默认给一个
+      // 可见+未最小化+有焦点的窗口，需要复现后台/最小化场景时直接改字段。
+      isMinimized: () => w.minimized,
+      isFocused: () => w.focused,
       close: () => { w.destroyed = true },
       setTitle: (t: string) => { w.title = t },
       // 2026-09-15 审计 P2-4：真实 Electron 对已销毁窗口调 getContentSize() 会抛
@@ -514,6 +518,9 @@ describe('audit fixes: op-log actor + store switching', () => {
     const { runtime, adapter, cleanup } = makeRuntime()
     await runtime.prewarm()
     const overlay = adapter.overlays[0]!
+    // 2026-09-17：夺焦点只在窗口真的在前台时发生（否则会把用户切走/最小化的
+    // 窗口拽回来）——P2-7 的场景是用户正看着这个窗口，所以先把窗口置为前台。
+    adapter.windows[0]!.visible = true
     // 用户接管 → 蒙版让位；交还 → 蒙版重新上锁，此时必须拿回键盘焦点
     runtime.setUserControl(true, 'user')
     overlay.focus.mockClear()
