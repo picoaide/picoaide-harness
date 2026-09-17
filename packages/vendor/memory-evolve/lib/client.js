@@ -4524,6 +4524,12 @@ function UiSettingsTabView(props) {
 // src/client/CoIView.tsx
 var import_react11 = require("react");
 var import_jsx_runtime12 = require("react/jsx-runtime");
+var SCOPE_KEYS = {
+  temporary: "coi.scope.temporary",
+  session: "coi.scope.session",
+  project: "coi.scope.project",
+  global: "coi.scope.global"
+};
 function dict(t) {
   return (key, params) => t(key, params);
 }
@@ -4595,7 +4601,7 @@ function statusMeta(status, t) {
 }
 var SCOPES = ["temporary", "session", "project", "global"];
 function scopeLabel(scope, t) {
-  return SCOPES.includes(scope) ? t(`coi.scope.${scope}`) : scope;
+  return SCOPES.includes(scope) ? t(SCOPE_KEYS[scope]) : scope;
 }
 var BUILTIN_ADAPTER_IDS = /* @__PURE__ */ new Set(["kimi", "codex", "grok", "hermes"]);
 var BUILTIN_TEMPLATE_IDS = /* @__PURE__ */ new Set(["review-code", "fix-tests", "summarize-logs", "architecture-analysis"]);
@@ -4978,7 +4984,7 @@ function TasksPane({ t: tt, dsSessionId }) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.launch.scope") }),
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("select", { className: "coi-select", value: scope, onChange: (e) => setScope(e.target.value), children: SCOPES.map((s) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: s, children: t(`coi.scope.${s}`) }, s)) })
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("select", { className: "coi-select", value: scope, onChange: (e) => setScope(e.target.value), children: SCOPES.map((s) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: s, children: t(SCOPE_KEYS[s]) }, s)) })
           ] }),
           scope !== "temporary" && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.launch.session") }),
@@ -5293,7 +5299,7 @@ function SessionsPane({ t: tt, dsSessionId }) {
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-toolbar", children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("select", { className: "coi-select", value: scopeFilter, onChange: (e) => setScopeFilter(e.target.value), title: t("coi.sessions.filterScope"), children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", children: t("coi.all") }),
-        SCOPES.map((s) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: s, children: t(`coi.scope.${s}`) }, s))
+        SCOPES.map((s) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: s, children: t(SCOPE_KEYS[s]) }, s))
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
         "input",
