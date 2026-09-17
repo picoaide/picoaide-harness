@@ -35,3 +35,13 @@
 
 - 静态守卫：`node scripts/check-workflows.mjs`（解析 YAML + 42 个 shell run 块 `bash -n`）。
 - 判据自测：对真实提交区间跑一遍文件名判定（文档提交 ⇒ `code=false`；含 `packages/host/...` 的提交 ⇒ `code=true`）。
+
+## 已知边界（2026-09-17 实测）
+
+1. **新建分支的首次 push 仍会跑全量 CI**：push 事件的 `github.event.before` 在全零时按 fail-safe 判为 `code=true`（见 §实现第 1 条）。
+   实测：`git push -u origin docs/<new-branch>` 触发的 run 里 `Detect docs-only change` 成功但 `Gate` / `Go server` 仍 in_progress。
+   影响：**文档分支的首跑拿不到快路径**，而且这一跑的必需检查与 PR run 同名同 SHA，会让 PR 一直 BLOCKED 到它跑完。
+   绕法（不改流水线）：首跑之后**再追加一次 docs-only 提交**，第二次 push 的 `before` 已是普通提交 ⇒ 快路径生效、必需检查按 skipped 通过；
+   旧 run 可 `gh run cancel` 省 runner（它属于旧 SHA，不影响新 SHA 的必需检查）。
+2. 判据是"**全部**改动文件落在 `docs/**`、`site/**`、`*.md`"，不是"主要改动是文档"；混一个脚本/配置就回全量。
+3. 只在 `pull_request` 与分支 `push` 上生效；tag 一律全量（发布链）。
