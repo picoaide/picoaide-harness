@@ -11,7 +11,7 @@
  */
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import type { ChangeEvent } from 'react'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 import { clientLang } from '../../lib/i18n.js'
 
 /** 四条待办轨。 */
@@ -30,14 +30,30 @@ type TodoViewMode = 'list' | 'board'
 /** 四象限标识（q1~q4）。 */
 type QuadrantId = 'q1' | 'q2' | 'q3' | 'q4'
 
+/**
+ * 宿主 todo 状态值域（与 `lib/todo.js` 的 `TODO_STATUSES` 一致）。
+ *
+ * ★ 这里是"动态键"的**检查点前移**：`todo.status.<status>` 与
+ * `todo.quadrant.<q>` 都是模板拼出来的键，静态守卫只能靠正则猜值域；
+ * 把值域声明成联合类型后，`t(\`todo.status.${status}\`)` 会展开成字面量
+ * 联合并逐个对照 `zh` 字典校验 —— 字典里删掉任一状态键、或这里多加一个
+ * 字典没有的状态，都是编译错。
+ *
+ * 注意：宿主若回一个域外状态，运行时行为与改动前**完全一致**（字典未命中
+ * 时 `translate()` 回落键名，`statusLabel` 再把原始 status 显示出来）——
+ * 联合类型是契约声明，不是新增的运行时约束。
+ */
+type TodoStatus = 'pending' | 'doing' | 'done' | 'blocked' | 'cancelled'
+
 /** GET /api/todo 返回的单条待办。 */
 interface TodoItem {
   id: string
   time: string
   /** 存储侧象限；null 表示未写 quadrant 标签。 */
-  quadrant: string | null
+  quadrant: QuadrantId | null
   due: string | null
-  status: string
+  /** 宿主状态；值域见 TodoStatus（越界值仍走运行时回落）。 */
+  status: TodoStatus
   doneAt: string | null
   cat: string | null
   text: string
@@ -56,7 +72,7 @@ interface TodoItem {
 
 /** Locale-bound props。 */
 export interface TodoViewProps {
-  t: Translate
+  t: MemoryEvolveTranslate
   sessionId: string
 }
 
@@ -89,7 +105,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /** 象限文案（q1..q4）；null = 未分类。 */
-function quadrantLabel(t: Translate, quadrant: string | null): string {
+function quadrantLabel(t: MemoryEvolveTranslate, quadrant: QuadrantId | null): string {
   if (quadrant === null) return t('todo.quadrant.none')
   return t(`todo.quadrant.${quadrant}`)
 }
@@ -123,8 +139,11 @@ function resolveItemQuadrant(item: TodoItem): QuadrantId {
 }
 
 /** 状态文案键：pending / doing / done / blocked / cancelled。 */
-function statusLabel(t: Translate, status: string): string {
-  const key = `todo.status.${status}`
+function statusLabel(t: MemoryEvolveTranslate, status: TodoStatus): string {
+  // 显式标注模板字面量类型：TS 默认把模板表达式推成 `string`（只有上下文是
+  // 字面量/模板字面量类型时才保留字面量联合），标注后就展开成 5 个字面量键，
+  // `t(key)` 因此在编译期对照字典校验。
+  const key: `todo.status.${TodoStatus}` = `todo.status.${status}`
   const label = t(key)
   // 未知状态时 locale 可能回落为 key 本身，直接展示原始 status
   return label === key ? status : label

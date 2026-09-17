@@ -1,22 +1,50 @@
 /**
  * 键**使用**守卫（2026-09-17，审计 `i18n-core-3` / F3）。
  *
- * 缺陷形态（审计实测，M6 变异）：旧的一批 i18n 守卫只钉"已迁移文件里不得再出现
- * 代码态中文"（`client-i18n-coverage.test.js`）与"zh/en 键集镜像 / en 列无中文"
- * （`i18n-dictionary-integrity.test.js`、desktop 的 `i18n-dictionary-hygiene`），
- * **没有任何一条**校验"调用点用到的键是否存在"。于是把仍被 `t('coi.ago.justNow')`
- * 引用的键整条删掉，47 例守卫全绿；同一盲区也让 `39692cac6e` 的两次迁移漏改
- * （CoIView 对 `scope.<id>` 旧键名的引用、`dict()` 包装器丢模板参数）静默通过。
+ * ## ★ 定位（2026-09-17 类型系统轮改写）：本守卫是**兜底**，主防线是 typecheck
  *
- * 本文件补上这条缺口，钉四件事（全部对 `src/client/**` 生效）：
+ * 主防线 = `packages/vendor/memory-evolve/package.json` 的 **`typecheck`**
+ * （`tsc -p tsconfig.json`，随 `scripts/check-workspaces.mjs` 的
+ * `dsh-memory-evolve` 任务与 `test` 一起进 `yarn check` / CI）。
+ * 它靠类型系统覆盖**整类**键错误：`ctx.locale.bind(NS)` 返回
+ * `TranslateNS<'memory-evolve'>`（键 = 本包 `zh` 字典键 ∪ 平台 `common` 词表），
+ * 这个窄类型随 props 流到每个视图，任何 `t('…')` 都在编译期对照字典校验。
+ *
+ * 本文件**只钉几类结构不变量**——它们是类型系统看不见的（不是"还没实现的形态"）：
  *   1. 字典自身非平凡（键数 + zh/en 键集同名），避免守卫"空过"；
- *   2. 字面量键：`t('key')` / `say('key')` 用到的键在 **zh 与 en 两张字典**里都存在；
- *   3. 模板键：`` t(`prefix.${expr}`) `` —— 若 expr 能在同文件解析成 `as const`
- *      数组，则**逐个展开**校验（SCOPES 这类枚举漂移会被抓住）；否则退化为
- *      "存在以该前缀开头的键"（动态值无法静态枚举）；
- *   4. 键收窄包装器：`dict()` 必须把第二个形参透传给 t —— 审计 F1 的成因正是
- *      `(key) => t(key)` 静默丢弃 `{count}`/`{value}` 参数（本包门禁不做类型检查，
- *      TS 本可拦住的 TS2554 不会让 `node --test` 变红）。
+ *   2. `dict()` / `say` 这类**包装器必须透传第二个参数**：`(key) => t(key)` 会静默
+ *      丢掉 `{count}`，而两边都是 `Translate` 类型 ⇒ **tsc 抓不到**（审计 F1 的成因）；
+ *   3. `lib/client.js`（发布产物，运行时真源）与 `src` 的键收窄包装器必须同形——
+ *      防"改了源码没重建"；产物是 JS，**tsc 抓不到**；
+ *   4. 字面量 / 模板 / 成员表达式的键存在性 —— 类型系统已完整覆盖，这里保留为
+ *      **纵深防御**（类型链一旦被新的 `as unknown as` 断言掐断，这条仍会响）。
+ *
+ * ## ★ 本守卫**不追求形态完备**（有意为之，附收敛数据）
+ *
+ * 2026-09-17 的 11 轮审计里，本守卫对"键使用形态"逐形态打补丁，**6 轮不收敛**：
+ *
+ * | 轮次 | 本守卫闭合形态 | 该轮新暴露/遗留的未闭合形态 |
+ * |---|---|---|
+ * | R7 → R8 | 成员表达式值域整类 | 4 通道只闭合 2 个（`meta.key`、`TYPE_LABEL_KEYS` 仍绿） |
+ * | R8 → R9 | +19 个键 | 别名一跳缺失；`severity` 5 键被"先到先得"保护成静默 |
+ * | R9 → R10 | +9 个键 | 别名**重名**取并集缺并集 → 又静默 5 键 |
+ * | R10 → R11 | +5 个键（40/40） | 形态面**净增 1**（第 5 段无计数采集）；21 键的前缀兜底是假边界 |
+ * | R11 | 本可再 +14/21 | R8 列的 8 个等价重构到 HEAD **一个都没闭合** |
+ *
+ * 结论：**形态维度不收敛**（修一个形状 → 下轮又漏一个形状），所以不再靠它覆盖
+ * "值域怎么包"这一类问题。等价重构（`Object.freeze({…} as const)`、双重断言、
+ * 值域跨文件、解构别名、spread 组合）在本守卫下**重构本身 GREEN、删键仍 GREEN**，
+ * 而 typecheck 对这 5 种形态**逐个 RED**（原始输出见
+ * `.multiagent/audit-beta3-introduced/typesystem/TYPESYSTEM-REPORT.md` 第 4 节）。
+ * 新增形态时请**先问类型系统**能不能覆盖；只有它覆盖不到的结构不变量才加到这里。
+ *
+ * ## 缺陷形态（审计实测，M6 变异）：旧的守卫为什么不够
+ *
+ * 旧的一批 i18n 守卫只钉"已迁移文件里不得再出现代码态中文"（`client-i18n-coverage.test.js`）
+ * 与"zh/en 键集镜像 / en 列无中文"（`i18n-dictionary-integrity.test.js`、desktop 的
+ * `i18n-dictionary-hygiene`），**没有任何一条**校验"调用点用到的键是否存在"。于是把仍被
+ * `t('coi.ago.justNow')` 引用的键整条删掉，47 例守卫全绿；同一盲区也让 `39692cac6e` 的两次
+ * 迁移漏改（CoIView 对 `scope.<id>` 旧键名的引用、`dict()` 包装器丢模板参数）静默通过。
  *
  * 已知边界（有意为之）：只扫直传的字面量/模板（间接经 `mt()`/`st()` 的键会误报，
  * 文档已说明）；动态值（`t(\`todo.track.${item.target}\`)`）只做前缀存在性。
@@ -398,10 +426,17 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
       // 动态值无法静态枚举（洞是真正的表达式，如 `${state.status ?? 'unknown'}`、
       // 或值域不在本文件内）：退化为"前缀必须至少命中一个键"。
       //
-      // ★ 已知边界：这类洞下「只被该模板引用的键」被删仍不会被发现（前缀还有别的键）。
-      // 要真正覆盖需要类型检查（本包门禁不做 tsc）或运行时键审计，超出本守卫能力，
-      // 故显式记录而非假装覆盖；`prefixFallbacks` 计数被元断言钉住，防止
-      // "枚举面悄悄退化、大量洞回落到前缀检查"（2026-09-17 第 6 轮 A3-10）。
+      // ★ 已知边界（**本守卫不追求形态完备**）：这类洞下「只被该模板引用的键」被删仍
+      // 不会被本守卫发现（前缀还有别的键）。这把这一类问题**交给主防线 typecheck**：
+      // `version.status.*` / `version.note.*` / `version.error.*` / `canvas.error.*`
+      // 共 21 个键现在都有值域联合类型（`VersionTabView.tsx` 的 `UpdateStatus` /
+      // `UpdateNoteCode` / `UpdateErrorCode`、`canvas-grok/api-client.ts` 的
+      // `CanvasApiErrorCode`），删任一键 ⇒ tsc 报 TS2345 并指名是哪个字面量。
+      // 实测：21/21 逐键 RED（第 11 轮 `R11-i18n-1` 的 P2 由此结构性关闭）。
+      // 这里保留前缀检查只是纵深防御，**不为它再补形态**——R7→R11 六轮实测该维度
+      // 不收敛（见文件头收敛表）。
+      // `prefixFallbacks` 计数被元断言钉住，防止"枚举面悄悄退化、大量洞回落到前缀检查"
+      // （2026-09-17 第 6 轮 A3-10）。
       if (![...ZH_KEYS].some((key) => key.startsWith(prefix))) {
         offenders.push(`${file}:${line}: t(\`${template}\`) 的前缀 '${prefix}' 在 zh 字典里没有任何键`)
       } else if (![...EN_KEYS].some((key) => key.startsWith(prefix))) {
@@ -475,8 +510,9 @@ test('dict() 包装器必须把模板参数透传给 t（审计 F1：丢了就�
         params,
         // 要求形如 (key, params) => t(key, params)：两个形参都声明、两个实参都转发
         forwards: /\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*=>\s*(\w+)\(\s*\1\s*,\s*\2\s*\)/u.test(body),
-        // 包装器的入参必须就是 Translate（否则这个断言盯错了东西）
-        translate: /\b\w+\s*:\s*Translate\b/u.test(params),
+        // 包装器的入参必须是翻译函数类型（宽 `Translate`，或 2026-09-17 类型系统轮
+        // 收窄后的 `MemoryEvolveTranslate`）——否则这个断言盯错了东西。
+        translate: /\b\w+\s*:\s*(?:MemoryEvolve)?Translate\b/u.test(params),
       })
     }
   }

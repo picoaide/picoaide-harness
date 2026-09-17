@@ -7,10 +7,10 @@
  * 显示「已复制」反馈。
  */
 import { useState } from 'react'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 
 /** @param props - 标准 session slot props（含当前会话 id）。 */
-export function CopySessionIdButton(props: { sessionId: string; t: Translate }): JSX.Element {
+export function CopySessionIdButton(props: { sessionId: string; t: MemoryEvolveTranslate }): JSX.Element {
   const [copied, setCopied] = useState(false)
   return (
     <button

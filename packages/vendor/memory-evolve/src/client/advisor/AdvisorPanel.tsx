@@ -15,7 +15,8 @@
  */
 import { Component, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import type { PropsRuntime, Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveKey, MemoryEvolveTranslate } from '../index.ts'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import {
   levelLabel,
@@ -33,12 +34,12 @@ import {
 
 export type AdvisorHostProps = PropsRuntime<'conversation.session.header.actions'> & {
   /** index.ts 传入的插件 locale 翻译函数（面板文案全部经它取）。 */
-  t: Translate
+  t: MemoryEvolveTranslate
 }
 
 export interface AdvisorPanelProps {
   /** 插件 locale 翻译函数（i18n：面板文案一律经它取）。 */
-  t: Translate
+  t: MemoryEvolveTranslate
   store: AdvisorSessionStore
   snapshot: AdvisorStoreSnapshot
   onCollapse: () => void
@@ -68,7 +69,7 @@ interface CapsuleDragState {
  * 运行状态标签（函数式：语言在**调用期**解析，模块级常量会钉死默认语言）。
  * 图标/样式类与语言无关，文案走字典。
  */
-const STATUS_META: Record<AdvisorRuntimeStatus, { icon: string; key: string; cls: string }> = {
+const STATUS_META: Record<AdvisorRuntimeStatus, { icon: string; key: MemoryEvolveKey; cls: string }> = {
   disabled: { icon: '✖', key: 'advisor.status.disabled', cls: 'advisor-status-disabled' },
   idle: { icon: '●', key: 'advisor.status.idle', cls: 'advisor-status-idle' },
   reviewing: { icon: '◐', key: 'advisor.status.reviewing', cls: 'advisor-status-reviewing' },
@@ -77,13 +78,13 @@ const STATUS_META: Record<AdvisorRuntimeStatus, { icon: string; key: string; cls
 }
 
 /** 状态徽标文案（当次渲染语言）。 */
-function statusMeta(status: AdvisorRuntimeStatus, t: Translate): { icon: string; label: string; cls: string } {
+function statusMeta(status: AdvisorRuntimeStatus, t: MemoryEvolveTranslate): { icon: string; label: string; cls: string } {
   const meta = STATUS_META[status]
   return { icon: meta.icon, label: t(meta.key), cls: meta.cls }
 }
 
 /** 严重度标签：前半段是稳定标识（info/nit/…），后半段走字典。 */
-const SEVERITY_META: Record<AdvisorNoteSeverity, { key: string; cls: string }> = {
+const SEVERITY_META: Record<AdvisorNoteSeverity, { key: MemoryEvolveKey; cls: string }> = {
   // Q1：info 最低等级（默认仅记录不注入，面板照常展示）
   info: { key: 'advisor.severity.info', cls: 'advisor-severity-info' },
   nit: { key: 'advisor.severity.nit', cls: 'advisor-severity-nit' },
@@ -94,7 +95,7 @@ const SEVERITY_META: Record<AdvisorNoteSeverity, { key: string; cls: string }> =
 }
 
 /** 严重度徽标文案（当次渲染语言）。 */
-function severityMeta(severity: AdvisorNoteSeverity, t: Translate): { label: string; cls: string } {
+function severityMeta(severity: AdvisorNoteSeverity, t: MemoryEvolveTranslate): { label: string; cls: string } {
   const meta = SEVERITY_META[severity]
   return { label: t(meta.key), cls: meta.cls }
 }
@@ -113,7 +114,7 @@ const OUTCOME_KEYS = {
   cancelled: 'advisor.outcome.cancelled',
 } as const
 
-function outcomeLabel(outcome: keyof typeof OUTCOME_KEYS, t: Translate): string {
+function outcomeLabel(outcome: keyof typeof OUTCOME_KEYS, t: MemoryEvolveTranslate): string {
   return t(OUTCOME_KEYS[outcome])
 }
 
@@ -137,7 +138,7 @@ function formatElapsed(ms: number): string {
   return `${(ms / 1_000).toFixed(ms < 10_000 ? 1 : 0)}s`
 }
 
-function formatAgo(ts: number | null, t: Translate): string {
+function formatAgo(ts: number | null, t: MemoryEvolveTranslate): string {
   if (ts === null) return t('advisor.ago.none')
   const delta = Math.max(0, Date.now() - ts)
   if (delta < 5_000) return t('advisor.ago.justNow')
@@ -162,7 +163,10 @@ function timeCutoff(range: AdvisorHistoryFilters['timeRange']): number | null {
  * strict-session slot 入口。窄屏初始折叠；桌面初始展开。header 与 body portal
  * 共用同一个 session store，因此双入口开合不会造成第二份轮询。
  */
-export function AdvisorHost(props: AdvisorHostProps): JSX.Element {
+// 返回类型必须允许 null：`globalEnabled` 为假时本组件 early-return null
+// （React 允许组件返回 null）。此前只写 `JSX.Element`，于是那道早退分支
+// 一直是类型错——`null` 不是 `Element`。
+export function AdvisorHost(props: AdvisorHostProps): JSX.Element | null {
   const t = props.t
   const sessionId = String(props.sessionId)
   const { store, snapshot } = useAdvisorSessionStore(sessionId, t)
@@ -832,7 +836,7 @@ export function AdvisorPanel({ t, store, snapshot, onCollapse }: AdvisorPanelPro
 }
 
 function ReviewCard(props: {
-  t: Translate
+  t: MemoryEvolveTranslate
   item: AdvisorReviewItem
   defaultInputOpen: boolean
   history?: boolean
@@ -930,7 +934,7 @@ function ReviewCard(props: {
  * DSH 的 SlotErrorBoundary 移除）。这里兜底：约束区域出错只显示错误条，
  * 面板其余部分（实时/记录/指令区）不受影响；错误详情打印到 console。
  */
-class ScopesErrorBoundary extends Component<{ t: Translate; children: ReactNode }, { failed: string | null }> {
+class ScopesErrorBoundary extends Component<{ t: MemoryEvolveTranslate; children: ReactNode }, { failed: string | null }> {
   override state: { failed: string | null } = { failed: null }
 
   static getDerivedStateFromError(error: unknown): { failed: string | null } {
@@ -960,7 +964,7 @@ class ScopesErrorBoundary extends Component<{ t: Translate; children: ReactNode 
  * 生命周期：评审会话约束随「新建评审会话」清空；会话/项目约束持久化。
  */
 function ScopesTab({ t, store, snapshot }: {
-  t: Translate
+  t: MemoryEvolveTranslate
   store: AdvisorSessionStore
   snapshot: AdvisorStoreSnapshot
 }): JSX.Element {
@@ -1046,7 +1050,7 @@ function ScopesTab({ t, store, snapshot }: {
 
 /** 单层约束输入框（多行 + 保存按钮）。 */
 function ScopeField(props: {
-  t: Translate
+  t: MemoryEvolveTranslate
   label: string
   value: string
   placeholder: string
@@ -1087,7 +1091,7 @@ function ScopeField(props: {
 }
 
 function SettingsDisclosure({ t, store, snapshot }: {
-  t: Translate
+  t: MemoryEvolveTranslate
   store: AdvisorSessionStore
   snapshot: AdvisorStoreSnapshot
 }): JSX.Element {
@@ -1240,7 +1244,7 @@ function SettingsDisclosure({ t, store, snapshot }: {
   )
 }
 
-function ErrorNotice({ t, text, onRetry }: { t: Translate; text: string; onRetry: () => void }): JSX.Element {
+function ErrorNotice({ t, text, onRetry }: { t: MemoryEvolveTranslate; text: string; onRetry: () => void }): JSX.Element {
   return (
     <div className="advisor-error" role="alert">
       <span>{text}</span>

@@ -6,7 +6,7 @@
  * 不自行保存第二份服务端状态，避免面板折叠/Tab 切换后出现数据分叉。
  */
 import { useEffect, useMemo, useSyncExternalStore } from 'react'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from '../index.ts'
 
 /** index.ts 将 DSH 的 connection/reset 桥接为这个浏览器事件。 */
 export const ADVISOR_CONNECTION_RESET_EVENT = 'dsh-memory-evolve:advisor-connection-reset'
@@ -30,7 +30,7 @@ export const LEVEL_KEYS = {
 } as const
 
 /** 约束层级显示名（当次渲染的语言）。 */
-export function levelLabel(level: keyof typeof LEVEL_KEYS, t: Translate): string {
+export function levelLabel(level: keyof typeof LEVEL_KEYS, t: MemoryEvolveTranslate): string {
   return t(LEVEL_KEYS[level])
 }
 const POLL_MS = 1_000
@@ -139,8 +139,17 @@ export interface AdvisorStatus {
   routeSource: 'configured' | 'session' | null
   runtimeStatus: AdvisorRuntimeStatus
   phase: string
-  /** 复审中7：host 契约为 0/1（当前是否有评审在飞，非队列长度） */
-  inFlight: number
+  /**
+   * 复审中7：host 契约为 0/1（当前是否有评审在飞，非队列长度）。
+   *
+   * 类型系统在 `mergeLiveEvents()` 抓到一处真实不一致：`/status` 下来的
+   * `inFlight` 是数字 0/1，而 live `runtime-status` 事件合并时写的是
+   * `event.runtimeStatus === 'reviewing'`（布尔）——同一个"是否在飞"的语义，
+   * 两种表示。本字段全仓无读取点（只有这一处写入），所以这里的并集是
+   * **如实描述现状**、而不是靠断言把布尔硬塞进 number；改成 `?: 1|0` 会
+   * 改变运行时写出的值，超出"只做类型层面改动"的边界，故留给后续拍板。
+   */
+  inFlight: number | boolean
   pendingCount: number
   panelEnabled: boolean
   disabledReason?: string
@@ -297,7 +306,7 @@ function deleteJson<T>(path: string): Promise<T> {
   return fetchJson<T>(path, { method: 'DELETE' })
 }
 
-function errorText(error: unknown, t: Translate): string {
+function errorText(error: unknown, t: MemoryEvolveTranslate): string {
   const text = error instanceof Error ? error.message : String(error)
   return text.trim() === '' ? t('advisor.error.noDetail') : text
 }
@@ -353,15 +362,15 @@ export class AdvisorSessionStore {
    * 两条渲染路径，任何新文案都可能漏翻。t 是 `ctx.locale.bind(NS)` 的调用期
    * 绑定（语言一变，之后产出的文案即跟随），故不冻结语言。
    */
-  private t: Translate
+  private t: MemoryEvolveTranslate
 
-  constructor(sessionId: string, t: Translate) {
+  constructor(sessionId: string, t: MemoryEvolveTranslate) {
     this.snapshot = initialSnapshot(sessionId)
     this.t = t
   }
 
   /** 热重载/多实例下把最新的 locale 绑定交给 store（身份通常稳定）。 */
-  setTranslate(t: Translate): void {
+  setTranslate(t: MemoryEvolveTranslate): void {
     this.t = t
   }
 
@@ -819,7 +828,7 @@ export class AdvisorSessionStore {
 }
 
 /** React 绑定：sessionId 变化即创建新 store，旧 store 的请求在 cleanup 中全部取消。 */
-export function useAdvisorSessionStore(sessionId: string, t: Translate): {
+export function useAdvisorSessionStore(sessionId: string, t: MemoryEvolveTranslate): {
   store: AdvisorSessionStore
   snapshot: AdvisorStoreSnapshot
 } {

@@ -6,7 +6,7 @@
  * 位置用 left/top 写世界坐标，由外层世界层做 transform，卡片本身不跟视口重排。
  */
 import { memo, useCallback, type PointerEvent as ReactPointerEvent } from 'react'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from '../index.ts'
 import { TYPE_GLYPH, typeLabel } from './constants.ts'
 import { placeholderHue, scopeBadgeText } from './helpers.ts'
 import type { CanvasNode } from './types.ts'
@@ -14,7 +14,7 @@ import { fileProxyUrl } from './api-client.ts'
 
 export interface CanvasCardProps {
   /** 插件 locale 翻译函数（i18n：文案一律经它取，不再硬编码中文）。 */
-  t: Translate
+  t: MemoryEvolveTranslate
   node: CanvasNode
   /** 当前是否处于低细节档。变化才让 memo 失效。 */
   lod: boolean
@@ -57,7 +57,7 @@ function extOf(path?: string): string {
   return base.slice(i + 1).toUpperCase().slice(0, 6)
 }
 
-function CardBody(props: { t: Translate; node: CanvasNode; backendReady: boolean; onChangeContent: CanvasCardProps['onChangeContent'] }): JSX.Element {
+function CardBody(props: { t: MemoryEvolveTranslate; node: CanvasNode; backendReady: boolean; onChangeContent: CanvasCardProps['onChangeContent'] }): JSX.Element {
   const { t, node, backendReady, onChangeContent } = props
   const hue = placeholderHue(node.id)
 

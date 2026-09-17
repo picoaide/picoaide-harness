@@ -8,7 +8,7 @@
  * （TYPE_LABEL_KEYS）并导出 `typeLabel(type, t)`，由渲染点在调用期求值。
  * 画板内搜索匹配另走 TYPE_SEARCH_TERMS（不随界面语言变化，见下）。
  */
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveKey, MemoryEvolveTranslate } from '../index.ts'
 import type {
   CanvasNodeType,
   CanvasPlacement,
@@ -73,8 +73,13 @@ export const DEFAULT_SIZE: Record<CanvasNodeType, { width: number; height: numbe
 /**
  * 类型展示名的**字典键**。渲染点用 `typeLabel(type, t)` 取当前语言文案
  * （模块级不能再存中文常量：求值早于 apply，会钉死语言）。
+ *
+ * ★ 值域类型是 `MemoryEvolveKey`（不是 `string`）：这张表就是"动态键"的
+ * 检查点所在 —— `t(TYPE_LABEL_KEYS[type])` 拼出的键在这里逐个对照 `zh`
+ * 字典校验，表里写错/字典里删键都是编译错。此前标成 `string`，等于把
+ * 键检查从这张表上摘掉。
  */
-export const TYPE_LABEL_KEYS: Record<CanvasNodeType, string> = {
+export const TYPE_LABEL_KEYS: Record<CanvasNodeType, MemoryEvolveKey> = {
   folder: 'canvas.type.folder',
   markdown: 'canvas.type.markdown',
   plainText: 'canvas.type.plainText',
@@ -84,7 +89,7 @@ export const TYPE_LABEL_KEYS: Record<CanvasNodeType, string> = {
 }
 
 /** 类型展示名（当次渲染的语言）。 */
-export function typeLabel(type: CanvasNodeType, t: Translate): string {
+export function typeLabel(type: CanvasNodeType, t: MemoryEvolveTranslate): string {
   return t(TYPE_LABEL_KEYS[type])
 }
 

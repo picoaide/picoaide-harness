@@ -14,8 +14,11 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
-import type { MemoryEvolveKey } from '../index.ts'
+import type { MemoryEvolveTranslate } from './index.ts'
+// 键类型真源是同目录的 client 入口（此前写成 '../index.ts'，那段路径在 src/ 下
+// 根本不存在——因为只是 `import type`，esbuild 擦掉后运行时与构建都不报错，
+// 只有类型检查会红，于是 CoIView 里的 MemoryEvolveKey 收窄一直是空转）。
+import type { MemoryEvolveKey } from './index.ts'
 
 /* ------------------------------------------------------------------ */
 /* 类型（与 host API 响应形状一致）                                      */
@@ -133,7 +136,7 @@ type Dict = (key: DictKey, params?: Record<string, unknown>) => string
  * 模块级常量/闭包：模块求值早于插件 apply，那时 t 只能拿到默认语言，
  * 等于把界面语言钉死。
  */
-function dict(t: Translate): Dict {
+function dict(t: MemoryEvolveTranslate): Dict {
   return (key, params) => t(key, params)
 }
 
@@ -280,7 +283,7 @@ type SubTab = 'guide' | 'tasks' | 'sessions' | 'adapters' | 'templates' | 'stats
 
 export interface CoIViewProps {
   /** slot 注入的插件 locale 翻译（文案一律经它取；键域 'coi.'）。 */
-  t: Translate
+  t: MemoryEvolveTranslate
 }
 
 export function CoIView(props: ConvViewProps & CoIViewProps): JSX.Element {
@@ -330,7 +333,7 @@ export function CoIView(props: ConvViewProps & CoIViewProps): JSX.Element {
 /* 使用指南                                                             */
 /* ------------------------------------------------------------------ */
 
-function GuidePane({ t: tt }: { t: Translate }): JSX.Element {
+function GuidePane({ t: tt }: { t: MemoryEvolveTranslate }): JSX.Element {
   const t = dict(tt)
   return (
     <div className="coi-pane">
@@ -379,7 +382,7 @@ function GuidePane({ t: tt }: { t: Translate }): JSX.Element {
 /* 任务视图：发起表单 + 列表 + 详情/日志                                  */
 /* ------------------------------------------------------------------ */
 
-function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string }): JSX.Element {
+function TasksPane({ t: tt, dsSessionId }: { t: MemoryEvolveTranslate; dsSessionId?: string }): JSX.Element {
   const t = dict(tt)
   /** 可见性 query：带 DSH 会话 id 时后端按层级过滤（临时/会话=本会话，项目=本会话 cwd）。 */
   const visQs = (dsSessionId ?? '') !== '' ? `&sessionId=${encodeURIComponent(String(dsSessionId))}` : ''
@@ -960,7 +963,7 @@ function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string 
 /* 会话视图                                                             */
 /* ------------------------------------------------------------------ */
 
-function SessionsPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string }): JSX.Element {
+function SessionsPane({ t: tt, dsSessionId }: { t: MemoryEvolveTranslate; dsSessionId?: string }): JSX.Element {
   const t = dict(tt)
   const visQs = (dsSessionId ?? '') !== '' ? `&sessionId=${encodeURIComponent(String(dsSessionId))}` : ''
   const [sessions, setSessions] = useState<CoiSession[] | null>(null)
@@ -1082,7 +1085,7 @@ function SessionsPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: stri
 /* 适配器视图                                                           */
 /* ------------------------------------------------------------------ */
 
-function AdaptersPane({ t: tt }: { t: Translate }): JSX.Element {
+function AdaptersPane({ t: tt }: { t: MemoryEvolveTranslate }): JSX.Element {
   const t = dict(tt)
   const [adapters, setAdapters] = useState<Adapter[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -1528,7 +1531,7 @@ function AdaptersPane({ t: tt }: { t: Translate }): JSX.Element {
 /* 模板视图                                                             */
 /* ------------------------------------------------------------------ */
 
-function TemplatesPane({ t: tt }: { t: Translate }): JSX.Element {
+function TemplatesPane({ t: tt }: { t: MemoryEvolveTranslate }): JSX.Element {
   const t = dict(tt)
   const [templates, setTemplates] = useState<CoiTemplate[] | null>(null)
   const [adapters, setAdapters] = useState<Adapter[]>([])
@@ -1653,7 +1656,7 @@ function TemplatesPane({ t: tt }: { t: Translate }): JSX.Element {
 /* 统计视图                                                             */
 /* ------------------------------------------------------------------ */
 
-function StatsPane({ t: tt }: { t: Translate }): JSX.Element {
+function StatsPane({ t: tt }: { t: MemoryEvolveTranslate }): JSX.Element {
   const t = dict(tt)
   const [stats, setStats] = useState<CoiStats | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -1719,7 +1722,7 @@ function StatsPane({ t: tt }: { t: Translate }): JSX.Element {
 /* 配置视图                                                             */
 /* ------------------------------------------------------------------ */
 
-function ConfigPane({ t: tt }: { t: Translate }): JSX.Element {
+function ConfigPane({ t: tt }: { t: MemoryEvolveTranslate }): JSX.Element {
   const t = dict(tt)
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState<string | null>(null)

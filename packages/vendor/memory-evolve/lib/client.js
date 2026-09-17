@@ -18658,6 +18658,7 @@ function apply(ctx) {
   void fetch("/memory-evolve/api/notifications/unread").then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))).then(() => {
     if (notifyBellCancelled) return;
     disposeNotifyBell = createNotificationBell({
+      // 通知载荷的会话 id 是线上字符串，`ctx.sessions.open` 收品牌 `SessionId`（运行时零表示）。
       openSession: (sessionId) => {
         ctx.sessions.open(sessionId);
       },

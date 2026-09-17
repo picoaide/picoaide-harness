@@ -16,7 +16,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 import { MemoryQueueView } from './MemoryQueueView.tsx'
 import { TodoView } from './TodoView.tsx'
 import { TabGuideView, type GuideSection } from './TabGuideView.tsx'
@@ -26,7 +26,7 @@ type TodosFeature = 'guide' | 'todo-suggestions' | 'todo'
 
 /** Locale-bound props（locate namespace：memory-evolve）。 */
 export interface TodosTabViewProps {
-  t: Translate
+  t: MemoryEvolveTranslate
 }
 
 /** 跨重挂持久化的子 tab 选择（模块级：badge 刷新导致组件重挂后恢复）。 */
@@ -37,7 +37,7 @@ let persistedTodosFeature: TodosFeature | null = null
  * 详细介绍待办功能本身——四轨、如何添加、待确认待办管理、状态与筛选、
  * 智能视图与到期提醒。文案来自全局 locale（todosTab.guide.* 键组）。
  */
-function todosGuideSections(t: Translate): GuideSection[] {
+function todosGuideSections(t: MemoryEvolveTranslate): GuideSection[] {
   return [
     {
       icon: '📋',

@@ -19,7 +19,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveKey, MemoryEvolveTranslate } from './index.ts'
 import { clientLang } from '../../lib/i18n.js'
 
 const API = '/memory-evolve/memory-sync'
@@ -64,8 +64,14 @@ interface SyncStatus {
 /** 全局轨 fileset（/conflicts 与 /resolve 的 fileset 参数；track → fileset）。 */
 const GLOBAL_FILESET: Record<string, string> = { memory: 'memory-global', user: 'user-global', daily: 'daily-global', todo: 'todo-global' }
 
-/** 全局轨显示名词典键（冲突区标题用；track → 词典键）。 */
-const GLOBAL_TRACK_LABEL: Record<string, string> = {
+/**
+ * 全局轨显示名词典键（冲突区标题用；track → 词典键）。
+ *
+ * ★ 值域类型是 `MemoryEvolveKey`（不是 `string`）：渲染点
+ * `t(GLOBAL_TRACK_LABEL[track] ?? 'syncTab.global.title')` 的键来自这张表，
+ * 声明成字典键类型就把检查点放在了表上（拼错/删字典键都编译错）。
+ */
+const GLOBAL_TRACK_LABEL: Record<string, MemoryEvolveKey> = {
   memory: 'syncTab.global.trackMemory',
   user: 'syncTab.global.trackUser',
   daily: 'syncTab.global.trackDaily',
@@ -111,7 +117,7 @@ type Notice = { kind: 'ok' | 'error'; text: string } | null
 /** 子 Tab：project=本项目 / global=全局记忆 / remote=共享记忆库。 */
 type SyncFeature = 'project' | 'global' | 'remote'
 
-export function SyncView(props: ConvViewProps & { t: Translate }): JSX.Element {
+export function SyncView(props: ConvViewProps & { t: MemoryEvolveTranslate }): JSX.Element {
   const { t, sessionId } = props
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [conflicts, setConflicts] = useState<ConflictItem[]>([])

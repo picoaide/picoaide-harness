@@ -1,9 +1,30 @@
 {
+  // Type-only project for the client face of this vendored plugin.
+  //
+  // This package ships no `node_modules` of its own (it declares no runtime
+  // dependencies) and its original `paths` pointed at an author-machine
+  // checkout (`/Users/edgar/.dsh/source/current/...`), so `tsc` could never
+  // resolve anything here. Every path below is repo-relative (`baseUrl` is
+  // this directory) and resolves from `yarn install` alone, so it behaves the
+  // same on a developer box and in CI.
+  //
+  // `paths` patterns are ordered by TypeScript with the longest prefix first
+  // and then the longest pattern first, so `@deepseek-ai/*/client` wins over
+  // `@deepseek-ai/*`; exact keys win over every pattern. The single
+  // `@deepseek-ai/*` entry maps a bare package specifier to its directory, and
+  // the package's own `package.json#types` then points at `lib/types`.
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
+    // The node half of this package is plain ESM JavaScript under `lib/`, and
+    // the client face imports two of those modules (`../../lib/i18n.js` and
+    // `./todo-tab-lifecycle.js`) for values. `allowJs` lets the compiler read
+    // their JSDoc instead of a hand-written `.d.ts` that could drift; with
+    // `checkJs` off the JS itself stays uninspected, only its exported types
+    // are inferred.
+    "allowJs": true,
     "jsx": "react-jsx",
     "strict": true,
     "skipLibCheck": true,
@@ -11,37 +32,67 @@
     "forceConsistentCasingInFileNames": true,
     "noEmit": true,
     "ignoreDeprecations": "6.0",
+    // Deterministic global type set: do not slurp ambient `@types/*` from
+    // whatever node_modules happens to be reachable upwards. The client face
+    // only needs the DOM lib, which `target: ES2022` already enables.
+    "types": [],
     "baseUrl": ".",
     "paths": {
+      // React has no `node_modules` here either; `desktop` does not depend on
+      // `@types/react-dom`, so the two workspaces that do are both listed and
+      // TypeScript uses the first candidate that exists.
       "react": [
-        "/Users/edgar/.dsh/source/current/node_modules/.pnpm/@types+react@18.3.31/node_modules/@types/react"
+        "../../../client/account-card/node_modules/@types/react/index.d.ts",
+        "../../host/desktop/node_modules/@types/react/index.d.ts"
       ],
       "react/jsx-runtime": [
-        "/Users/edgar/.dsh/source/current/node_modules/.pnpm/@types+react@18.3.31/node_modules/@types/react/jsx-runtime.d.ts"
+        "../../../client/account-card/node_modules/@types/react/jsx-runtime.d.ts",
+        "../../host/desktop/node_modules/@types/react/jsx-runtime.d.ts"
       ],
+      "react/jsx-dev-runtime": [
+        "../../../client/account-card/node_modules/@types/react/jsx-dev-runtime.d.ts",
+        "../../host/desktop/node_modules/@types/react/jsx-dev-runtime.d.ts"
+      ],
+      "react-dom": [
+        "../../../client/account-card/node_modules/@types/react-dom/index.d.ts",
+        "../../host/cron/node_modules/@types/react-dom/index.d.ts"
+      ],
+      "react-dom/client": [
+        "../../../client/account-card/node_modules/@types/react-dom/client.d.ts",
+        "../../host/cron/node_modules/@types/react-dom/client.d.ts"
+      ],
+      // `cordis` is the historical bare specifier used by this vendored source;
+      // the package is published as `@deepseek-ai/cordis`. Both names MUST
+      // resolve to the same file: the platform augments `Context` with
+      // `declare module '@deepseek-ai/cordis'` (`ctx.slots`, `ctx.locale`,
+      // `ctx.conversation`, …), and if `cordis` resolved elsewhere those
+      // augmentations would land on a different module identity and silently
+      // do nothing.
       "cordis": [
-        "/Users/edgar/.dsh/source/current/vendor/cordis/lib/types/index.d.ts"
+        "../../host/desktop/node_modules/@deepseek-ai/cordis/lib/types/index.d.ts"
       ],
-      "@deepseek-ai/dsh-client-ui-slots": [
-        "/Users/edgar/.dsh/source/current/packages/client/ui-slots/lib/types/index.d.ts"
+      "@deepseek-ai/cordis": [
+        "../../host/desktop/node_modules/@deepseek-ai/cordis/lib/types/index.d.ts"
       ],
-      "@deepseek-ai/dsh-client-ui-conversation/client": [
-        "/Users/edgar/.dsh/source/current/packages/client/ui-conversation/lib/types/client/index.d.ts"
+      // Platform subpath exports (`/client`, `/types`, `/brand`). TypeScript
+      // does not apply a package's `exports` map to a `paths` substitution, so
+      // these need their own patterns.
+      "@deepseek-ai/*/client": [
+        "../../host/desktop/node_modules/@deepseek-ai/*/lib/types/client/index.d.ts"
       ],
-      "@deepseek-ai/dsh-client-locale/client": [
-        "/Users/edgar/.dsh/source/current/packages/client/locale/lib/types/client/index.d.ts"
+      "@deepseek-ai/*/types": [
+        "../../host/desktop/node_modules/@deepseek-ai/*/lib/types/types.d.ts"
       ],
-      "@deepseek-ai/dsh-client-runtime/client": [
-        "/Users/edgar/.dsh/source/current/packages/client/runtime/lib/types/client/index.d.ts"
+      "@deepseek-ai/*/brand": [
+        "../../host/desktop/node_modules/@deepseek-ai/*/lib/types/brand.d.ts"
       ],
-      "@deepseek-ai/dsh-client-ui-primitives": [
-        "/Users/edgar/.dsh/source/current/packages/client/ui-primitives/lib/types/index.d.ts"
-      ],
-      "@deepseek-ai/dsh-client-web-react": [
-        "/Users/edgar/.dsh/source/current/packages/client/web-react/lib/types/index.d.ts"
-      ],
-      "@deepseek-ai/dsh-client-ui-settings/client": [
-        "/Users/edgar/.dsh/source/current/packages/client/ui-settings/lib/types/client/index.d.ts"
+      // Bare `@deepseek-ai/<pkg>`: map to the installed directory and let its
+      // `package.json#types` pick the entry. Needed for the platform packages
+      // referenced from inside the `.d.ts` trees above (`skipLibCheck` would
+      // otherwise swallow their unresolved imports and silently degrade those
+      // types to `any`).
+      "@deepseek-ai/*": [
+        "../../host/desktop/node_modules/@deepseek-ai/*"
       ]
     }
   },

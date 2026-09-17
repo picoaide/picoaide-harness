@@ -17,7 +17,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 import { TabGuideView } from './TabGuideView.tsx'
 import { clientLang } from '../../lib/i18n.js'
 
@@ -111,7 +111,7 @@ function displayName(sid: string, aliases: Record<string, string>): string {
  * 数据通道：GET/POST /memory-evolve/api/config（与 MemoryQueueView 同款）。
  * 开关：wsCoordEnabled 总开关 + 展开后的两个子开关（快照段 / 硬拦截）。
  */
-function WsCoordSettings({ t }: { t: Translate }): JSX.Element {
+function WsCoordSettings({ t }: { t: MemoryEvolveTranslate }): JSX.Element {
   const [config, setConfig] = useState<Record<string, unknown> | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -202,7 +202,7 @@ function WsCoordSettings({ t }: { t: Translate }): JSX.Element {
 /** English browser → English inline text. */
 const isEn = (): boolean => clientLang() === 'en'
 
-export function BroadcastView(props: ConvViewProps & { t: Translate }): JSX.Element {
+export function BroadcastView(props: ConvViewProps & { t: MemoryEvolveTranslate }): JSX.Element {
   const { t, sessionId } = props
   const [view, setView] = useState<'guide' | 'messages' | 'rooms' | 'settings'>('messages')
   const [messages, setMessages] = useState<Msg[] | null>(null)
@@ -330,7 +330,9 @@ export function BroadcastView(props: ConvViewProps & { t: Translate }): JSX.Elem
   }
 
   /** 展开/收起消息全文（长内容走 /content）。 */
-  const toggleExpand = async (msg: Msg, expandId: string, setExpandId: (id: string | null) => void): Promise<void> => {
+  // 与 renderMsgCard 同因：`expandId` 就是 `useState<string | null>`，null 表示
+  // "当前没有展开的消息"，函数体只做 `expandId === msg.id` 比较。
+  const toggleExpand = async (msg: Msg, expandId: string | null, setExpandId: (id: string | null) => void): Promise<void> => {
     if (expandId === msg.id) {
       setExpandId(null)
       return
@@ -407,7 +409,10 @@ export function BroadcastView(props: ConvViewProps & { t: Translate }): JSX.Elem
   }
 
   /** 消息卡片（消息列表与房间消息共用）。 */
-  const renderMsgCard = (m: Msg, expandId: string, setExpandId: (id: string | null) => void): JSX.Element => {
+  // `expandId` 为 null 表示当前没有展开的消息——两个调用点传的都是
+  // `useState<string | null>(null)`，参数类型如实写成 `string | null`
+  // （函数体只做 `expandId === m.id` 比较，没有任何 string 专属操作）。
+  const renderMsgCard = (m: Msg, expandId: string | null, setExpandId: (id: string | null) => void): JSX.Element => {
     const from = m.sender === 'system' ? (isEn() ? 'System' : '系统') : displayName(m.sender, aliases)
     const to = m.recipients.map((r) => recipientLabel(r, roomMap, aliases)).join(', ')
     const unread = m.readBy.length === 0 // 超管视角：无人读过 = 未读

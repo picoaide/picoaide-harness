@@ -17,12 +17,12 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 import { TabGuideView, type GuideSection } from './TabGuideView.tsx'
 
 /** Locale-bound props（locate namespace：memory-evolve）。 */
 export interface ModelsTabViewProps {
-  t: Translate
+  t: MemoryEvolveTranslate
 }
 
 /** 一个思考等级（含是否用户自定义）。 */
@@ -100,7 +100,7 @@ type ModelsFeature = 'models' | 'guide'
 let persistedModelsFeature: ModelsFeature | null = null
 
 /** 模型设置 Tab 专属指南内容（「指南」子 Tab）。 */
-function modelsGuideSections(t: Translate): GuideSection[] {
+function modelsGuideSections(t: MemoryEvolveTranslate): GuideSection[] {
   return [
     {
       icon: '🧭',
@@ -414,7 +414,7 @@ function findRow(snapshot: Snapshot | null, provider: string, model: string): Mo
 
 /** 一行（含展开的思考等级编辑器）。 */
 function RowView(props: {
-  t: Translate
+  t: MemoryEvolveTranslate
   group: ProviderGroup
   row: ModelRow
   showReasoning: boolean

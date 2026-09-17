@@ -19,7 +19,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 import { TabGuideView } from './TabGuideView.tsx'
 import type { MemoryEvolveKey } from './index.ts'
 
@@ -59,9 +59,9 @@ interface Source {
   desc: string
 }
 
-/** Locale-bound props（与 MemoryTabView 一致，宽类型 Translate）。 */
+/** Locale-bound props（与 MemoryTabView 一致，键类型收窄到本插件命名空间）。 */
 export interface PromptViewProps {
-  t: Translate
+  t: MemoryEvolveTranslate
 }
 
 
@@ -89,7 +89,7 @@ type Dict = (key: DictKey, params?: Record<string, unknown>) => string
  * ⚠️ 必须每个组件各持一份（`const t = dict(props.t)`）：模块级常量/闭包在
  * 求值时早于插件 apply，那时 t 只能拿到默认语言，等于把界面语言钉死。
  */
-function dict(t: Translate): Dict {
+function dict(t: MemoryEvolveTranslate): Dict {
   return (key, params) => t(key, params)
 }
 
@@ -508,7 +508,12 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
         }),
       })
       // immediate=true：立即注入（只注入一次，忽略次数/间隔）
-      const data = immediate
+      //
+      // 两个分支的后端响应形状不同：immediate 分支多一个 `steered`。这里把
+      // `data` 显式标注成"并集的可选化"（`steered?: boolean`）——两边的返回
+      // 都直接可赋值，读取处也就不再需要 `(data as { steered: boolean })`
+      // 这种双重断言（此前那个断言正是类型链断掉的地方）。
+      const data: { injection: Injection; steered?: boolean } = immediate
         ? await api<{ injection: Injection; steered: boolean }>(
           `/memory-evolve/api/prompts/${encodeURIComponent(created.prompt.id)}/inject`,
           { method: 'POST', body: JSON.stringify({ immediate: true, sessionId: props.sessionId }) },
@@ -519,7 +524,7 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
         )
       if (immediate) {
         const name = data.injection.title
-        showNotice((data as { steered: boolean }).steered ? say('prompt.injectedNow').replace('{name}', name) : say('prompt.injectedNowFallback').replace('{name}', name))
+        showNotice(data.steered ? say('prompt.injectedNow').replace('{name}', name) : say('prompt.injectedNowFallback').replace('{name}', name))
       } else {
         await afterInjected(data.injection)
       }
@@ -1137,7 +1142,13 @@ export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element 
                         type="button"
                         className="pm-tool-btn"
                         title={say('prompt.injectNowBtnHint')}
-                        onClick={() => void injectNow(selected.id)}
+                        // 可达性论证（TS 推不出来，用非空断言收口——纯类型层，
+                        // 不产生任何运行时差异）：本按钮在 `!creating &&` 的
+                        // IIFE 里，而该 IIFE 的渲染条件是外层
+                        // `selected !== null || creating`；两式合取即得
+                        // `selected !== null`。编译器不做跨析取式、跨闭包的
+                        // 这种推理，故此处显式断言。
+                        onClick={() => void injectNow(selected!.id)}
                       >
                         {say('prompt.injectNowBtn')}
                       </button>

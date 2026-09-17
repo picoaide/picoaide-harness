@@ -7,12 +7,12 @@
  * 别名优先（拟人化，告别满屏长 Session ID）。修改覆盖、清除移除。
  */
 import { useState } from 'react'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 
 const ALIAS_API = '/memory-evolve/api/aliases'
 
 /** @param props - 标准 session slot props（含当前会话 id）。 */
-export function AliasButton(props: { sessionId: string; t: Translate }): JSX.Element {
+export function AliasButton(props: { sessionId: string; t: MemoryEvolveTranslate }): JSX.Element {
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
   const [saving, setSaving] = useState(false)

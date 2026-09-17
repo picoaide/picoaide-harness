@@ -28,7 +28,7 @@ const disposeCanvas = registerCanvasTab(ctx, { t })
 ```ts
 function registerCanvasTab(
   ctx: CanvasTabHost,          // 只需 ctx.slots.inject / register
-  opts: { t: Translate },
+  opts: { t: MemoryEvolveTranslate },  // 本插件命名空间的窄类型翻译函数（见 ../index.ts）
 ): () => void                  // disposer
 ```
 

@@ -36,6 +36,9 @@
  * CSS order:-1 视觉排最左。
  */
 
+// 类型专用导入（运行时零影响）：键收窄的翻译函数类型，见 createInputSheetEnhance。
+import type { MemoryEvolveTranslate } from './index.ts'
+
 /** html 属性名：上拉弹窗开关（mobile.css 的 fixed 底栏规则作用域）。 */
 export const SHEET_ATTR = 'data-dsh-mobile-sheet'
 
@@ -241,10 +244,13 @@ function updateMenuGeometry(preferredRoot?: HTMLElement): void {
  *
  * @param t - 插件 locale 翻译函数（i18n，2026-09-16）：本模块是纯 DOM
  *   助手、拿不到 React 的 t，故由调用方（client 入口的 dshMobile.enhance）
- *   注入；只用于注入按钮的 aria-label 等无障碍文案。
+ *   注入；只用于注入按钮的 aria-label 等无障碍文案。类型取入口的
+ *   `MemoryEvolveTranslate`（键收窄到本插件命名空间），这样这里用到的
+ *   每个键也在编译期对照字典校验 —— 此前写成宽类型 `(key: string) => string`，
+ *   等于在入口之外又把类型链掐断一次。
  * @returns dispose：移动模式退出/卸载时调用，清理按钮与监听。
  */
-export function createInputSheetEnhance(t: (key: string) => string): () => void {
+export function createInputSheetEnhance(t: MemoryEvolveTranslate): () => void {
   let disposed = false
   let observer: MutationObserver | null = null
   /** rAF 节流句柄：MutationObserver 高频触发时合并为每帧一次 ensure。 */

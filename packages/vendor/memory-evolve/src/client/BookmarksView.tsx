@@ -16,7 +16,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 import { TabGuideView, type GuideSection } from './TabGuideView.tsx'
 
 /** 宿主返回的书签形状。 */
@@ -35,7 +35,7 @@ interface Bookmark {
 
 /** Locale-bound props。 */
 export interface BookmarksViewProps {
-  t: Translate
+  t: MemoryEvolveTranslate
 }
 
 /** 子功能：列表 / 指南。 */

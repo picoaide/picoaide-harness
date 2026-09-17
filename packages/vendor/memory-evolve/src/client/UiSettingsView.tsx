@@ -16,7 +16,7 @@
 import { useEffect, useState } from 'react'
 import type { JSX } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 import { TabGuideView } from './TabGuideView.tsx'
 import { readFeatures, writeFeatures, type UiSettingsFeatures } from './ui-settings-features.ts'
 
@@ -25,7 +25,7 @@ type UiSettingsFeature = 'mixed' | 'guide'
 
 /** Locale-bound props（memory-evolve 命名空间）。 */
 export interface UiSettingsTabViewProps {
-  t: Translate
+  t: MemoryEvolveTranslate
 }
 
 /** 跨重挂持久化的子 tab 选择（与其他 Tab 同款模式）。 */

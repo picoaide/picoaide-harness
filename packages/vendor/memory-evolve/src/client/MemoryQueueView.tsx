@@ -10,7 +10,7 @@
  * can refresh the badge counts (and the session-tab red dot).
  */
 import { useEffect, useState } from 'react'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 import { RUNTIME_CONFIG_CHANGED } from './todo-tab-lifecycle.js'
 import { clientLang } from '../../lib/i18n.js'
 
@@ -19,14 +19,14 @@ export type MemoryFeature = 'guide' | 'suggestions' | 'todo-suggestions' | 'skil
 
 /** Locale-bound props for the feature panels. */
 export interface MemoryQueueViewProps {
-  t: Translate
+  t: MemoryEvolveTranslate
   feature: MemoryFeature
   /** Called after any queue/config mutation so the parent can re-poll badges. */
   onChanged: () => void
 }
 
 /** 待办建议 target 的展示名（todo-life → 待办·生活）。 */
-function todoTargetLabel(t: Translate, target: string): string {
+function todoTargetLabel(t: MemoryEvolveTranslate, target: string): string {
   const track = target.slice(5)
   if (track === 'life') return `${isEn() ? 'Todo' : '待办'}·${t('todo.track.life')}`
   if (track === 'work') return `${isEn() ? 'Todo' : '待办'}·${t('todo.track.work')}`
@@ -36,7 +36,7 @@ function todoTargetLabel(t: Translate, target: string): string {
 }
 
 /** 建议目标 → 友好显示名（长期记忆/用户档案/项目关键记忆/待办·…）。 */
-function suggestTargetLabel(t: Translate, target: string): string {
+function suggestTargetLabel(t: MemoryEvolveTranslate, target: string): string {
   if (target.startsWith('todo-')) return todoTargetLabel(t, target)
   if (target === 'memory') return t('panel.suggestions.target.memory')
   if (target === 'user') return t('panel.suggestions.target.user')
@@ -96,6 +96,16 @@ interface PendingSkill {
   content: string
 }
 
+/**
+ * key 轨渐进式披露取值域（`<select>` 的三个 `<option value>` 就是它的全集）。
+ *
+ * 抽成具名类型是为了把检查点前移到**值域声明处**：`<select>` 的
+ * `event.target.value` 在 DOM 上永远是 `string`，静态不可知，所以在那个
+ * 赋值点用一次 `as` 收窄；而值域本身（三个字面量）由这里单点持有，
+ * 字典键、默认值、面板渲染三处都从它派生。
+ */
+type ProgressiveDisclosure = 'auto' | 'off' | 'on'
+
 /** Runtime config view (subset returned by /api/config). */
 interface RuntimeConfig {
   reviewEnabled: boolean
@@ -127,7 +137,7 @@ interface RuntimeConfig {
   /** 无限画板（独立子模块，默认关）：素材集中台 + de_canvas 双向。 */
   canvasEnabled: boolean
   /** key 轨渐进式披露模式：auto（小数据量全量/大数据量摘要）/ off（始终全量）/ on（始终摘要）。 */
-  keyProgressiveDisclosure: 'auto' | 'off' | 'on'
+  keyProgressiveDisclosure: ProgressiveDisclosure
   /** auto 模式下条目数阈值：条目数 ≤ 此值时全量注入。 */
   keyFullInjectThreshold: number
   /** auto 模式下字符数阈值：总字符数 ≤ 此值时全量注入。 */
@@ -766,7 +776,7 @@ export function MemoryQueueView(props: MemoryQueueViewProps): JSX.Element {
                   <select
                     className="me-todo-select"
                     value={draft.keyProgressiveDisclosure ?? 'off'}
-                    onChange={(event) => patchDraft({ keyProgressiveDisclosure: event.target.value })}
+                    onChange={(event) => patchDraft({ keyProgressiveDisclosure: event.target.value as ProgressiveDisclosure })}
                   >
                     <option value="auto">{t('panel.config.keyProgressiveDisclosure.auto')}</option>
                     <option value="off">{t('panel.config.keyProgressiveDisclosure.off')}</option>

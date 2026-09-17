@@ -6,7 +6,7 @@
  * 本目录自包含：不要改 index.ts / build / package.json / lib/client.js。
  */
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from '../index.ts'
 import { CanvasView } from './CanvasView.tsx'
 import { STYLE_ATTR } from './constants.ts'
 import styles from './styles.css'
@@ -34,7 +34,7 @@ export interface CanvasTabHost {
 }
 
 export interface RegisterCanvasTabOpts {
-  t: Translate
+  t: MemoryEvolveTranslate
   /** 可选覆盖：槽位 id（默认 canvas-hub；双实现并存对比时用不同 id） */
   id?: string
   /** 可选覆盖：Tab 显示名（默认 画板） */

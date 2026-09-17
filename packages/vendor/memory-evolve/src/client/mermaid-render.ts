@@ -30,6 +30,9 @@
  * dangerouslySetInnerHTML 同性质。
  */
 
+// 类型专用导入（运行时零影响）：键收窄的翻译函数类型，见 MermaidTranslate。
+import type { MemoryEvolveTranslate } from './index.ts'
+
 /** 内容稳定判定等待时长（ms）：流式输出停顿这么久且内容不变才渲染。 */
 const STABLE_MS = 400
 
@@ -510,8 +513,12 @@ function schedule(block: HTMLElement, t: MermaidTranslate, force = false): void 
 /**
  * 本模块的翻译函数形状（由 client 入口在 apply 期注入；调用期解析语言）。
  * 本文件是纯 DOM 助手，取不到 React 的 t，故一律显式下传。
+ *
+ * 别名直接指向入口的 `MemoryEvolveTranslate`（键收窄到本插件命名空间），
+ * 不再自己声明 `(key: string) => string`：宽类型会让本文件用到的
+ * `mermaid.*` 键逃出编译期校验。
  */
-type MermaidTranslate = (key: string, params?: Record<string, unknown>) => string
+type MermaidTranslate = MemoryEvolveTranslate
 
 export function createMermaidRenderer(t: MermaidTranslate): { setEnabled(enabled: boolean): void; dispose(): void } {
   let observer: MutationObserver | undefined

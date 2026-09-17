@@ -15,7 +15,7 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from '../index.ts'
 import { CanvasCard } from './CanvasCard.tsx'
 import { AI_ZONE, MAX_SCALE, MIN_SCALE, VIRT_PAD, ZOOM_STEP } from './constants.ts'
 import {
@@ -28,7 +28,7 @@ import type { CanvasNode, CanvasViewport } from './types.ts'
 
 export interface CanvasBoardProps {
   /** 插件 locale 翻译函数（i18n：文案一律经它取，不再硬编码中文）。 */
-  t: Translate
+  t: MemoryEvolveTranslate
   nodes: CanvasNode[]
   viewport: CanvasViewport
   lod: boolean

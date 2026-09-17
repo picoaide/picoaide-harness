@@ -15,7 +15,7 @@
  * 乐观锁：整板保存带 rev，409 冲突时返回 { ok:false, conflict:true }，
  * 前端提示刷新（不静默覆盖——Grok 评审采纳）。
  */
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from '../index.ts'
 import type { CanvasNode, CanvasPersistState } from './types.ts'
 
 /**
@@ -39,12 +39,12 @@ export type CanvasApiErrorCode =
   | 'http'
 
 /** 把错误码翻成当前语言文案（调用方持有 t）。 */
-export function canvasErrorText(code: CanvasApiErrorCode, t: Translate): string {
+export function canvasErrorText(code: CanvasApiErrorCode, t: MemoryEvolveTranslate): string {
   return t(`canvas.error.${code}`)
 }
 
 /** 统一的失败文案：宿主 message 优先（服务端语言原样透传），否则按稳定码翻。 */
-export function apiErrorText(result: { error?: string; code?: CanvasApiErrorCode }, t: Translate): string {
+export function apiErrorText(result: { error?: string; code?: CanvasApiErrorCode }, t: MemoryEvolveTranslate): string {
   if (typeof result.error === 'string' && result.error !== '') return result.error
   return result.code === undefined ? t('canvas.error.unknown') : canvasErrorText(result.code, t)
 }
@@ -74,11 +74,28 @@ export function resetBackendDetection(): void {
 }
 
 /**
+ * 后端 `/state` 行的完整形状。
+ *
+ * = localStorage 快照（{@link CanvasPersistState}） + 后端独有的字段：
+ * 乐观锁 `rev`，以及后端按会话工作目录解析出的项目归属（2026-08-14 新增）。
+ * 项目归属**不进** `CanvasPersistState`：那个类型描述的是 localStorage 快照，
+ * 它不该长出只有后端才有的字段；此前返回类型写成 `CanvasPersistState & { rev }`，
+ * 于是对象字面量多出的两个字段（TS2353）与读取处（TS2339）全是类型错。
+ */
+export type CanvasRemoteState = CanvasPersistState & {
+  rev: number
+  /** 当前会话项目归属 id（后端解析；后端未下发时缺省）。 */
+  currentProjectId?: string
+  /** 当前会话项目归属显示名（后端解析；后端未下发时缺省）。 */
+  currentProjectLabel?: string
+}
+
+/**
  * 后端整板读取。返回 null = 后端不可用或空板（调用方决定回退种子）。
  * @param {string} sessionId - 当前会话 id（后端按需解析归属，前端只透传）
- * @returns {Promise<CanvasPersistState & { rev: number } | null>}
+ * @returns {Promise<CanvasRemoteState | null>}
  */
-export async function loadCanvasFromBackend(sessionId: string): Promise<(CanvasPersistState & { rev: number }) | null> {
+export async function loadCanvasFromBackend(sessionId: string): Promise<CanvasRemoteState | null> {
   try {
     const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''
     const res = await fetch(`${API_BASE}${query}`, { method: 'GET' })

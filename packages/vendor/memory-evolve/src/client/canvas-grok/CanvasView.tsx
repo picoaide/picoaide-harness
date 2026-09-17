@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from '../index.ts'
 import {
   IconPlusOutline16,
   IconSearchOutline16,
@@ -59,7 +59,7 @@ import type {
 } from './types.ts'
 
 export interface CanvasViewProps {
-  t: Translate
+  t: MemoryEvolveTranslate
   /** 跳转到指定会话（2026-08-14：双击「其他会话」徽标调用，主会话
    * 注入 ctx.sessions.open——与 web 通知铃铛同款路径）。 */
   openSession?: (sessionId: string) => void

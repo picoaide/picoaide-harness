@@ -76,14 +76,21 @@ const PACKAGES = [
   // 2026-09-16:vendored 第三方插件(随三平台安装包分发)的测试此前**不在任何门禁
   // 链里**(verify-inventories 的 CHECK_CHAIN_EXEMPTIONS 显式豁免),本地加固
   // (同源守卫/符号链接写落点断言/失败软着陆)只有"手工跑"这一条保证 —— 升级
-  // 上游时一次静默回归就能进产物。这里以 `script: 'test'` 接进来:该包没有
+  // 上游时一次静默回归就能进产物。这里以 `scripts: ['test']` 接进来:该包没有
   // build 步骤(lib/ 入库,构建依赖 ~/.dsh/source 的 esbuild),也无构建期依赖,
   // 故 firstWave(与 desktop check、根守卫并发)且不被任何包依赖。
+  //
+  // 2026-09-17 类型系统轮:追加 `typecheck`。该包此前**从不做类型检查**
+  // (package.json 里连 tsc 脚本都没有,tsconfig 的 10 条 paths 还全指向包作者
+  // 机器的绝对路径),于是 `ctx.locale.bind(NS) as unknown as Translate` 这层
+  // 双重断言把键类型链掐断后无人发现 —— 键拼错/字典漏键只能靠 `tests/` 里的
+  // 正则静态守卫逐形态打补丁,6 轮不收敛。现在类型收窄到 `MemoryEvolveKey`,
+  // 这条 `typecheck` 就是主防线,必须与 test 一起进门禁。
   {
     name: 'dsh-memory-evolve',
     dir: 'packages/vendor/memory-evolve',
     needs: [],
-    script: 'test',
+    scripts: ['test', 'typecheck'],
     firstWave: true,
   },
 ]
@@ -249,7 +256,8 @@ async function runScheduler(tasks, limit, state) {
       const blocked = task.needs.filter(name => !succeeded.has(name))
       if (blocked.length > 0) {
         // 依赖已失败(不在 pending/running 里也永远不会成功)→ 跳过
-        const dead = blocked.filter(name => !pending.has(name) && !running.has(name))
+        const inFlight = gatesInFlight()
+        const dead = blocked.filter(name => !inFlight.has(name))
         if (dead.length > 0) {
           pending.delete(task.name)
           state.skipped.push({ task, blockedBy: dead })
@@ -300,13 +308,24 @@ const wantsGuards = options.guards
 const guards = wantsGuards ? GUARDS.map(guard => ({ ...guard })) : []
 const selected = PACKAGES.filter(pkg => selectedNames === null || selectedNames.has(pkg.name))
 const selectedSet = new Set(selected.map(pkg => pkg.name))
-const packages = selected.map(pkg => ({
-  name: pkg.name,
+/**
+ * 一个包可以有多个门禁脚本(如 vendored 插件的 `test` + `typecheck`)。报表与
+ * 调度用两把钥匙:`name` 是**任务**名(多脚本时带 `#<script>` 后缀,保证唯一),
+ * `gate` 是**包**名(`needs` 与成功判定都按包聚合 —— 包的每个脚本都通过,
+ * 依赖它的包才会启动)。单脚本包二者相同。
+ */
+const packages = selected.flatMap(pkg => {
+  const scripts = pkg.scripts ?? [pkg.script ?? 'check']
   // 未被选中的依赖不参与本轮调度(显式指定子集时,其产物由上一次全量门禁提供)
-  needs: pkg.needs.filter(name => selectedSet.has(name)),
-  args: ['workspace', pkg.name, 'run', pkg.script ?? 'check'],
-  firstWave: pkg.firstWave === true,
-}))
+  const needs = pkg.needs.filter(name => selectedSet.has(name))
+  return scripts.map((script, index) => ({
+    name: index === 0 ? pkg.name : `${pkg.name}#${script}`,
+    gate: pkg.name,
+    needs,
+    args: ['workspace', pkg.name, 'run', script],
+    firstWave: pkg.firstWave === true,
+  }))
+})
 
 if (options.list) {
   for (const pkg of selected) {
@@ -323,15 +342,15 @@ console.log(`check — 并发 ${concurrency};按构建依赖分层(desktop 必�
 // 阶段 1:desktop check 与根守卫并行。desktop 内部的 verify:profile 会按需构建
 // 其余插件包的 lib/(增量 prebuild),此刻不跑那些包自己的 check,避免与它的
 // profile 冒烟争抢同一份 lib/。firstWave 标记的包(无构建期依赖,如 vendored
-// 插件的 test)也放在这一波,把它们的耗时藏进 desktop 的长任务里。
+// 插件的 test/typecheck)也放在这一波,把它们的耗时藏进 desktop 的长任务里。
 const firstWave = [
   ...guards,
-  ...packages.filter(task => task.name === 'dsh-plugin-desktop' || task.firstWave === true),
+  ...packages.filter(task => (task.gate ?? task.name) === 'dsh-plugin-desktop' || task.firstWave === true),
 ]
 if (firstWave.length > 0) await runPool(firstWave, concurrency, state)
 
 // 阶段 2:依赖感知调度(依赖失败的包直接跳过,不产生级联噪音)。
-const rest = packages.filter(task => task.name !== 'dsh-plugin-desktop' && task.firstWave !== true)
+const rest = packages.filter(task => (task.gate ?? task.name) !== 'dsh-plugin-desktop' && task.firstWave !== true)
 if (rest.length > 0) await runScheduler(rest, concurrency, state)
 
 const totalMs = Date.now() - startedAt

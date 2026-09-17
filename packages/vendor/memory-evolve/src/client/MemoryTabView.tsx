@@ -18,7 +18,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 import { MemoryQueueView } from './MemoryQueueView.tsx'
 import { TabGuideView, type GuideSection } from './TabGuideView.tsx'
 
@@ -29,9 +29,29 @@ import { TabGuideView, type GuideSection } from './TabGuideView.tsx'
  */
 type TabFeature = 'guide' | 'suggestions'
 
+/**
+ * 记忆文件行的稳定 key 域 —— 与 host `lib/memory-tab.js` 的 `FILES` 一一对应。
+ *
+ * ★ 动态键的**检查点前移**：渲染点用 ``t(`memoryTab.desc.${activeRow.key}`)``
+ * 拼键。把 key 声明成联合类型后，模板展开成 9 个字面量并逐个对照 `zh`
+ * 字典校验：字典里任一条 `memoryTab.desc.*` 被删掉、或这里多加一个 key，
+ * 都是编译错。host 若真回一个域外 key，运行时行为与改动前一致（
+ * `translate()` 未命中回落键名），联合类型只是把契约写实。
+ */
+type MemoryFileKey =
+  | 'project'
+  | 'key'
+  | 'daily'
+  | 'user'
+  | 'memory'
+  | 'archive-user'
+  | 'archive-memory'
+  | 'archive-key'
+  | 'agents'
+
 /** One memory-file row from the host. */
 interface MemoryFileRow {
-  key: string
+  key: MemoryFileKey
   title: string
   available: boolean
   exists: boolean
@@ -42,7 +62,7 @@ interface MemoryFileRow {
 
 /** Locale-bound props (the `memoryEvolve` namespace). */
 export interface MemoryTabViewProps {
-  t: Translate
+  t: MemoryEvolveTranslate
 }
 
 /** 视图模式：美观（条目卡片）/ 纯文本（原始 <pre>）。 */
@@ -187,7 +207,7 @@ const persistedFileKeys = new Map<string, string | null>()
  * 详细介绍记忆功能本身——五轨记忆、文件页签、git 分支感知、编辑维护、
  * 待确认记忆建议机制。文案来自全局 locale（memoryTab.guide.* 键组）。
  */
-function memoryGuideSections(t: Translate): GuideSection[] {
+function memoryGuideSections(t: MemoryEvolveTranslate): GuideSection[] {
   return [
     {
       icon: '🧠',

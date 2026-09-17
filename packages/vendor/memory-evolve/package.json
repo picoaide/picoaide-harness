@@ -12,7 +12,8 @@
   },
   "scripts": {
     "test": "node scripts/run-tests.mjs",
-    "build": "node scripts/build.mjs"
+    "build": "node scripts/build.mjs",
+    "typecheck": "node ../../host/desktop/node_modules/typescript/bin/tsc -p tsconfig.json"
   },
   "license": "MIT",
   "dsh": {
