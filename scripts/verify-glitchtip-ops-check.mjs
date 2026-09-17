@@ -350,6 +350,25 @@ for (const shape of ['https://key@glitchtip.example.com', 'https://key@glitchtip
 }
 
 {
+  // S15-9-N1(负例,2026-09-17 独立复核指出的盲区):上面那条只查"该有时有" ——
+  // 把 note 改成**无条件**产出(去掉 `skippedCookieDomains.length > 0` 判断)时,
+  // 正例照样绿、空名单也吐 `已跳过：`。这里补"不该有时没有":
+  // 全部 cookie 都匹配目标时,notes 里不得出现「已跳过」。
+  const api = await startKeysApi([{ dsn: { public: 'https://key@glitchtip.example.com/42' } }])
+  const jar = writeJar(join(tempDir('glitchtip-jar-'), 'c.txt'), [
+    ['127.0.0.1', 'FALSE', '/', 'FALSE', String(FUTURE), 'glitchtip_session', 'SECRET-LOCAL'],
+  ])
+  const result = await runCheck(['--base-url', api.baseUrl, '--cookies', jar, '--json'])
+  await api.close()
+  const report = JSON.parse(result.stdout)
+  check(result.status === 0, `S15-9-N1: 全部 cookie 匹配时应 exit 0(实际 ${result.status})`)
+  check(
+    Array.isArray(report.notes) && !report.notes.some(note => String(note).includes('已跳过')),
+    `S15-9-N1: 没有被过滤的 cookie 时不得出现「已跳过」note，实际 ${JSON.stringify(report.notes)}`,
+  )
+}
+
+{
   // S15-9-R2(P3)：fetch 自身抛错（网络层失败）时，调用方会重建 keys 对象 ——
   // "管理员 cookie 因域/路径/secure 不匹配被跳过"这条唯一线索不能在重建时丢掉。
   // 用死端口 127.0.0.1:1 制造连接失败（不依赖外部网络）。
