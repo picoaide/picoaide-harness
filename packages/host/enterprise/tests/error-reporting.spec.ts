@@ -364,7 +364,19 @@ describe('sync() 状态映射(P0-3)', () => {
     await runSync(ctx, SESSION)
     expect(getErrorReportingStatus()).toEqual({ state: 'ready', dsnHost: 'glitchtip.example.com', level: 'warning' })
     // 成功路径必须有 info(默认日志阈值 info ⇒ 会落盘),这是链路活着的第一手痕迹。
-    expect(infos.some((m) => m.includes('glitchtip.example.com'))).toBe(true)
+    //
+    // 2026-09-17 改判据:原先 `infos.some((m) => m.includes('glitchtip.example.com'))`
+    // 既弱(换域名/后面多打一段也绿),又正是 CodeQL
+    // js/incomplete-url-substring-sanitization 命中的"域名字串判据"形态。
+    // 现在钉**整条形状**,并把 dsn 值绑到上面那条结构化状态(同一真源):
+    // `release=` 前缀里是产品版本(运行期拼接),用 startsWith/endsWith 组合避开
+    // 硬编码整条文案,同时仍能抓住"少打/多打字段"。
+    const status = getErrorReportingStatus()
+    expect(
+      infos.some((m) =>
+        m.startsWith(`error-reporting: 已启用(dsn=${status.dsnHost}, release=picoaide-desktop@`)
+        && m.endsWith(', level=warning)')),
+    ).toBe(true)
     // 绝不打印完整 DSN / public key。
     const all = [...warns, ...infos, ...debug].join('\n')
     expect(all).not.toContain(PUBLIC_KEY)

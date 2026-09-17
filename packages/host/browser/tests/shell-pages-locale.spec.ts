@@ -34,12 +34,51 @@ import { apply } from '../src/index.ts'
  */
 const HAN = /[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff]/u
 
-/** Strip what is NOT rendered copy: HTML/CSS comments and JS line comments. */
+/**
+ * Strip what is NOT rendered copy: HTML comments, CSS block comments and JS line
+ * comments.
+ *
+ * 2026-09-17: rewritten from regex `.replace()` calls to小 scanners. CodeQL
+ * `js/incomplete-multi-character-sanitization` correctly points out that
+ * `replace(/<!--…-->/, '')` can be bypassed by nested/malformed markers; this
+ * helper is not a security boundary, but the scanner form states the boundary
+ * explicitly (unterminated block ⇒ swallow the rest).
+ */
+
+/** Drop an open/close delimited block (same semantics for `<!-- -->` and `/* *​/`). */
+function stripBlock(text: string, open: string, close: string): string {
+  let out = ''
+  let rest = text
+  for (;;) {
+    const start = rest.indexOf(open)
+    if (start < 0) return out + rest
+    out += rest.slice(0, start)
+    const end = rest.indexOf(close, start + open.length)
+    if (end < 0) return out // unterminated ⇒ the rest is inside the block
+    rest = rest.slice(end + close.length)
+  }
+}
+
+/**
+ * Drop `//` line comments — but only when the `//` starts the line or follows
+ * whitespace, so `https://…` inside a literal is never truncated (this mirrors
+ * the old `(^|\s)\/\/` behaviour exactly).
+ */
+function stripLineComments(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      for (let i = 0; i < line.length - 1; i += 1) {
+        const prev = i === 0 ? '' : line[i - 1]!
+        if (line[i] === '/' && line[i + 1] === '/' && (i === 0 || /\s/u.test(prev))) return line.slice(0, i)
+      }
+      return line
+    })
+    .join('\n')
+}
+
 function renderedSurface(page: string): string {
-  return page
-    .replace(/<!--[\s\S]*?-->/gu, '')
-    .replace(/\/\*[\s\S]*?\*\//gu, '')
-    .replace(/(^|\s)\/\/[^\n]*/gu, '$1')
+  return stripLineComments(stripBlock(stripBlock(page, '<!--', '-->'), '/*', '*/'))
 }
 
 /** Every marker must be absent from the RENDERED copy (comments are not copy). */

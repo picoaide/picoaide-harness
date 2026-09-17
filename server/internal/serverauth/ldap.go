@@ -2,10 +2,13 @@ package serverauth
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
@@ -95,13 +98,41 @@ func (p *LDAPProvider) dialConn() (ldapConn, error) {
 	if err := util.CheckOutboundTarget(ctx, u.Hostname()); err != nil {
 		return nil, err
 	}
-	conn, err := ldap.DialURL(p.ServerURL, ldap.DialWithDialer(&net.Dialer{Timeout: ldapTimeout}))
+	conn, err := ldap.DialURL(p.ServerURL, ldap.DialWithDialer(ldapDialer()))
 	if err != nil {
 		return nil, err
 	}
 	// read/write deadline so a silent server cannot block bind/search forever
 	conn.SetTimeout(ldapTimeout)
 	return conn, nil
+}
+
+// ldapDialControl 是 LDAP 出站的**连接期**复检:它拿到的是拨号器**真正要连**的
+// 地址,因此不存在"先解析一次做检查、再解析一次去连接"的 check-then-dial 窗口
+// (2026-09-17 独立审计:此前只有 CheckOutboundTarget 的主机解析结果做检查,
+// ldap.DialURL 内部会再解析一次,DNS rebinding 可在两次解析之间换掉答案)。
+//
+// 只拦链路本地/云 metadata(util.IsBlockedOutboundIP);私网照旧放行 ——
+// 企业目录常在 10.x/172.16.x,不能一刀切禁私网。
+func ldapDialControl(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		// 形状异常时交回默认语义(不静默放行"任意目标"—— 这里只是拿不到 IP)。
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil
+	}
+	if util.IsBlockedOutboundIP(ip) {
+		return fmt.Errorf("ldap: refused to connect to link-local/metadata address %s", ip)
+	}
+	return nil
+}
+
+// ldapDialer 是 LDAP 连接用的 dialer(超时 + 连接期复检)。测试注入点见 ldapDialerFn。
+func ldapDialer() *net.Dialer {
+	return &net.Dialer{Timeout: ldapTimeout, Control: ldapDialControl}
 }
 
 // ldapSearchPagingSize bounds each LDAP page during full-directory scans
@@ -354,4 +385,60 @@ func (p *LDAPProvider) Authenticate(username, password string) (UserInfo, error)
 		ui.Groups = groups
 	}
 	return ui, nil
+}
+
+// redactCredential 把**已知凭据**从待落日志的文本里擦掉,并转义控制字符。
+//
+// 为什么不能只做一次精确子串替换(2026-09-17 独立审计 N1):
+//   - 错误文本来自对端(不可信):目录服务在 bind 请求里就拿到了明文口令,
+//     可以任意变形回显 —— 实测大小写、base64、URL 编码都是现成的绕过;
+//   - 所以这里擦**常见编码形态**(原样/小写/大写/base64/URL 编码),并承认
+//     "部分回显/插入分隔符"这类变形仍可能漏(残余风险,已在发布说明认账);
+//   - 另外对端可在文本里塞 CR/LF 伪造整行日志(CWE-117),所以控制字符一律
+//     转成可见转义,保证一条错误只占一行。
+func redactCredential(text, secret string) string {
+	out := text
+	if secret != "" {
+		variants := []string{
+			secret,
+			strings.ToLower(secret),
+			strings.ToUpper(secret),
+			base64.StdEncoding.EncodeToString([]byte(secret)),
+			url.QueryEscape(secret),
+		}
+		for _, v := range variants {
+			if v == "" {
+				continue
+			}
+			out = strings.ReplaceAll(out, v, "***")
+		}
+	}
+	out = sanitizeLogLine(out)
+	const maxLogText = 300
+	if len(out) > maxLogText {
+		out = out[:maxLogText] + "…"
+	}
+	return out
+}
+
+// sanitizeLogLine 把 CR/LF/Tab 与非可打印字符转成可见转义(CWE-117:对端文本
+// 不能伪造日志行)。
+func sanitizeLogLine(text string) string {
+	var b strings.Builder
+	b.Grow(len(text))
+	for _, r := range text {
+		switch {
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r < 0x20 || r == 0x7f:
+			b.WriteString(fmt.Sprintf(`\x%02x`, r))
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

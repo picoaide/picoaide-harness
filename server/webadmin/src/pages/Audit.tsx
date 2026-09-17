@@ -109,6 +109,7 @@ const ACTION_LABEL: Record<string, string> = {
   skill_normalize: '规范化技能包',
   // 网关(上游/模型/配置)。
   gateway_config: '网关配置变更',
+  error_reporting_test: '错误上报连通性自检',
   provider_create: '新建上游',
   provider_update: '更新上游',
   provider_delete: '删除上游',
@@ -195,6 +196,9 @@ export default function Audit() {
   const loadSeq = useRef(0)
   // G13: 审计保留策略(仅 super_admin 可写; auditor 只读展示)
   const [retentionDays, setRetentionDays] = useState(180)
+  // 2026-09-17 审计 F6：保留天数默认 180，异步填充的 catch 又是静默的 ⇒ 未加载完
+  // （或加载失败）就点「保存策略」会把 180 写进库。加载成功前锁死写面。
+  const [retentionLoaded, setRetentionLoaded] = useState(false)
   const [retentionBusy, setRetentionBusy] = useState(false)
 
   // 体验层能力判定(护栏在服务端 RequirePermission):
@@ -219,7 +223,8 @@ export default function Audit() {
       // G13: 保留策略(读仅 PermAuditRead; 写 403 由保存按钮语义兜底)
       request(`${ADMIN_API}/audit/settings`).then((s) => {
         if (s?.retention_days) setRetentionDays(s.retention_days)
-      }).catch(() => { /* 非 super_admin 亦可读 */ })
+        setRetentionLoaded(true)
+      }).catch(() => { /* 非 super_admin 亦可读；写面保持锁定（见 retentionLoaded） */ })
     } catch (err: any) {
       if (current !== loadSeq.current) return // P1-8: 过期响应不写错误
       setError(err.message)
@@ -323,7 +328,7 @@ export default function Audit() {
         />
         <span className="text-xs text-muted-foreground">天(1~3650; 保存后立即清理更旧日志)</span>
         {canWriteRetention ? (
-          <Button size="sm" variant="outline" disabled={retentionBusy} onClick={() => { void saveRetention() }}>
+          <Button size="sm" variant="outline" disabled={retentionBusy || !retentionLoaded} onClick={() => { void saveRetention() }}>
             {retentionBusy ? '保存中…' : '保存策略'}
           </Button>
         ) : (

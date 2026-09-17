@@ -29,6 +29,8 @@ interface Department {
 
 export default function Departments() {
   const [depts, setDepts] = useState<Department[]>([])
+  // 2026-09-17 审计 F7：空态提示在加载完成前就渲染（“暂无部门”读起来像已确认没有）。
+  const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false) // L10:提交/删除双击守卫
   const [deptDialog, setDeptDialog] = useState(false)
@@ -45,9 +47,11 @@ export default function Departments() {
       if (current !== loadSeq.current) return // P1-8: 过期响应丢弃
       setDepts(d.departments ?? [])
       setError('') // 成功后清空错误(中3 同口径)
+      setLoaded(true)
     } catch (err: any) {
       if (current !== loadSeq.current) return // P1-8: 过期响应不写错误
       setError(err.message)
+      setLoaded(true) // 失败也解除闸门，避免永久“加载中”
     }
   }, [])
 
@@ -153,7 +157,7 @@ export default function Departments() {
               </TableRow>
             )
           })}
-          {depts.length === 0 && (
+          {loaded && depts.length === 0 && (
             <TableRow>
               <TableCell colSpan={7} className="border-0 p-0">
                 <EmptyState

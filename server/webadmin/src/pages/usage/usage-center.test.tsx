@@ -221,6 +221,41 @@ describe('用量中心 · 请求日志', () => {
 })
 
 describe('用量中心 · 余额', () => {
+  it('策略未落地时写面禁用(即使员工表已加载完)', async () => {
+    // 2026-09-17 审计 F1 复现：闸门若挂在**员工列表**的 loading 上，`/users` 先回来、
+    // `/balance` 还在飞时写面就解锁，而 draft 仍是空串 ⇒ 点保存会 PUT
+    // monthly_amount=0（误清空）。所以断言点必须在"员工表已落地"之后。
+    let releaseBalance!: () => void
+    const gate = new Promise<void>((resolve) => { releaseBalance = resolve })
+    const base = mockRequest.getMockImplementation()!
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/balance' && (init?.method ?? 'GET') === 'GET') await gate
+      return base(path, init)
+    })
+    renderAt('/usage', <Balance />)
+    // 员工表先落地（这曾经是"写面解锁"的充要条件）。
+    expect(await screen.findByText('alice')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /保存/ })).toBeDisabled()
+    expect(screen.getByLabelText('每人每月额度(元)')).toBeDisabled()
+    expect(screen.getByText(/发放策略加载中/)).toBeInTheDocument()
+    releaseBalance()
+    await waitFor(() => expect(screen.getByRole('button', { name: /保存/ })).toBeEnabled())
+    expect(screen.queryByText(/发放策略加载中/)).toBeNull()
+  })
+
+  it('策略加载失败时写面保持锁定并说明原因(不再静默吞错)', async () => {
+    const base = mockRequest.getMockImplementation()!
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/balance' && (init?.method ?? 'GET') === 'GET') {
+        throw new Error('balance unavailable')
+      }
+      return base(path, init)
+    })
+    renderAt('/usage', <Balance />)
+    expect(await screen.findByText(/发放策略加载失败/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /保存/ })).toBeDisabled()
+  })
+
   it('展示发放策略与员工余额,调整弹窗实时预览并提交', async () => {
     renderAt('/usage', <Balance />)
     // 发放策略卡：标题在数据落地前就渲染（Balance.tsx 静态 CardTitle），额度值必须自己等。

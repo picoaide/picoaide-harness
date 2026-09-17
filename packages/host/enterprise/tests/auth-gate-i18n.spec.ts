@@ -72,16 +72,54 @@ const EN_MARKERS = [
 ] as const
 
 /**
+ * 按标签名剔除成对块（`<script>…</script>` / `<style>…</style>`），大小写不敏感。
+ *
+ * 2026-09-17：从正则 `.replace()` 改成**逐段扫描**。原因有二：
+ * 1) CodeQL `js/incomplete-multi-character-sanitization` 会（正确地）指出
+ *    "用一条正则删 `<script>…</script>` 可被嵌套/畸形标签绕过" —— 这个助手
+ *    本身不是安全边界，但它没必要长成被拦的形态；
+ * 2) 扫描版对"未闭合块"的语义是显式的（其后全部视为块内），比非贪婪正则好读。
+ * @param html - 完整页面 HTML。
+ * @param tag - 标签名（不含尖括号，如 `script`）。
+ * @returns 剔除该块后的字符串。
+ */
+function stripTagBlock(html: string, tag: string): string {
+  const open = `<${tag}`
+  const close = `</${tag}>`
+  let out = ''
+  let rest = html
+  for (;;) {
+    const start = rest.toLowerCase().indexOf(open)
+    if (start < 0) return out + rest
+    out += rest.slice(0, start)
+    const end = rest.toLowerCase().indexOf(close, start)
+    if (end < 0) return out // 未闭合：其后全部视为块内
+    rest = rest.slice(end + close.length)
+  }
+}
+
+/** 剔除 HTML 注释（同样是扫描，不用正则替换）。 */
+function stripHtmlComments(html: string): string {
+  let out = ''
+  let rest = html
+  for (;;) {
+    const start = rest.indexOf('<!--')
+    if (start < 0) return out + rest
+    out += rest.slice(0, start)
+    const end = rest.indexOf('-->', start)
+    if (end < 0) return out
+    rest = rest.slice(end + '-->'.length)
+  }
+}
+
+/**
  * 去掉**不可见**内容后的正文（`<script>` / `<style>` / HTML 注释）。
  * 登录页的样式与脚本里留着中文注释（不渲染），全页 CJK 扫描会误报。
  * @param html - 完整页面 HTML。
  * @returns 只含可见标记文本的字符串。
  */
 function visibleMarkup(html: string): string {
-  return html
-    .replace(/<script>[\s\S]*?<\/script>/giu, '')
-    .replace(/<style>[\s\S]*?<\/style>/giu, '')
-    .replace(/<!--[\s\S]*?-->/gu, '')
+  return stripHtmlComments(stripTagBlock(stripTagBlock(html, 'script'), 'style'))
 }
 
 /** 断言一页英文文档里没有任何中文可见文案。 */

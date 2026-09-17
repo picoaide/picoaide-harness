@@ -1874,7 +1874,13 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 		report, err := prov.ProbeDirectory()
 		if err != nil {
 			// 脱敏:详情只进服务端日志(避免回传目录内部信息)。
-			log.Printf("auth test ldap probe: %v", err)
+			// 2026-09-17 审计 + CodeQL go/clear-text-logging:落日志前**必须**把 bind
+			// 口令从错误串里擦掉 —— 错误文本来自对端(不可信):目录服务完全可以把自己
+			// 在 bind 请求里收到的口令原样回显,而我们此前只做长度截断、不做字符集清洗。
+			// 2026-09-17 审计 N1：这里必须用**解析后的** `password`（webadmin 的
+			// 「测试连接」传的是空值/掩码，真实口令是从库里解密回读的），用请求字段
+			// 等于在最常见的主路径上完全不擦除。
+			log.Printf("auth test ldap probe: %s", redactCredential(err.Error(), password))
 			results["ok"] = false
 			results["message"] = "LDAP 连接失败,请检查地址/凭据/过滤器(详情见服务端日志)"
 			break
@@ -1908,8 +1914,14 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 		// 装 SafeOutboundTransport 做**连接期 IP 复检**(与网关上游/余额查询同一
 		// 护栏):拦链路本地与云 metadata(含 DNS rebinding 场景),
 		// 私网照旧放行 —— 企业自建 IdP 常在 10.x/172.16.x,不能一刀切禁私网。
-		client := &http.Client{Timeout: 10 * time.Second, Transport: util.SafeOutboundTransport()}
-		r, err := client.Get(iu.String() + "/.well-known/openid-configuration")
+		//
+		// 2026-09-17 审计 N2(撤回上一版改动):探针**必须复用运行期同一个 client**
+		// (`oidcOutboundClient`:≤5 跳、逐跳 CheckOutboundTarget 复检)。
+		// 上一版给探针加了 `ErrUseLastResponse`(禁跟随),结果是**假阴性**:
+		// 合法 IdP 把 discovery 301 到 canonical 地址时,探针报
+		// "Issuer 返回 301" 而运行期 `oidc.NewProvider` 正常工作 ——
+		// 管理员会被引去改一个本来正常的配置,且探针与运行期策略不一致。
+		r, err := oidcOutboundClient.Get(iu.String() + "/.well-known/openid-configuration")
 		if err != nil {
 			log.Printf("auth test oidc discovery: %v", err)
 			results["ok"] = false
