@@ -169,9 +169,10 @@ describe('Capabilities 能力中心(统一审批)', () => {
       )
     })
 
-    // busy 守卫：`setEnabled` 的 busy 键是 `…enabled`，而按钮的 disabled 只绑 `…approve`
-    // （Capabilities.tsx:286）⇒ 等"按钮可用"永远立刻通过，而链未结束时点击会被
-    // `if (busy) return` 静默吞掉（2026-09-17 独立审计实测）。改为点到成功为止。
+    // 组件已修（isBusy 覆盖 'enabled'）：在途时该行按钮置灰，链跑完自动恢复。
+    // 但**仍需"点到成功为止"**：负载下 waitFor 观察到 enabled 与 React 替换该 DOM
+    // 节点可能相邻发生，单击会落在旧节点上（400ms 注入实测：单击版红、重试版绿，
+    // 且 PUT 次数=1，不会重复提交）。
     await waitFor(() => {
       fireEvent.click(screen.getByRole('button', { name: '重新上架' }))
       expect(mockRequest).toHaveBeenCalledWith(
@@ -179,6 +180,35 @@ describe('Capabilities 能力中心(统一审批)', () => {
         { method: 'PUT', body: JSON.stringify({ enabled: true }) },
       )
     })
+    // 重试式点击不得变成重复提交（成功一次即停）。
+    expect(mockRequest.mock.calls.filter(([p, init]) => String(p).endsWith('/shared-skills/legacy/enabled')
+      && (init as RequestInit | undefined)?.method === 'PUT')).toHaveLength(1)
+  })
+
+  it('上下架在途时行内按钮置灰（busy 键必须覆盖 enabled，审计 P2）', async () => {
+    const u = userEvent.setup()
+    const live = { ...SKILL_ROWS[0]!, status: 'approved' as const, enabled: true }
+    const off = { ...SKILL_ROWS[0]!, name: 'legacy', display_name: 'Legacy 审计', status: 'approved' as const, enabled: false,
+      base_path: '/api/server/admin/shared-skills/legacy/1.0.0',
+      grants_base: '/api/server/admin/shared-skills/legacy' }
+    let releasePut: () => void = () => {}
+    const putGate = new Promise<void>((resolve) => { releasePut = resolve })
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/capabilities/approvals?status=approved') return { approvals: [live, off] }
+      if (path === '/api/server/admin/departments') return { departments: [] }
+      if (init?.method === 'PUT') { await putGate; return {} }
+      return {}
+    })
+    render(<Capabilities />)
+    await u.click(screen.getByRole('tab', { name: '已通过（0）' }))
+    await screen.findByText('CodeQL 审计')
+
+    await u.click(screen.getByRole('button', { name: '下架' }))
+    // PUT 在途：**该行**的按钮必须禁用（busy 是 per-row 的键；回退 isBusy 的
+    // 'enabled' 分支即红）。另一行（legacy）不受影响，故这里查的是「下架」本身。
+    await waitFor(() => expect(screen.getByRole('button', { name: '下架' })).toBeDisabled())
+    releasePut()
+    await waitFor(() => expect(screen.getByRole('button', { name: '下架' })).toBeEnabled())
   })
 
   it('已通过智能体行同样可上下架 → PUT agent-presets/:name/enabled(SG-4)', async () => {
