@@ -137,6 +137,13 @@ export function createOAuthProvider(
     /** Redirect URL for an interactive flow; `undefined` keeps it non-interactive. */
     redirectUrl?: string | undefined
     onPersist?: ((patch: Partial<ConnectorCredential>) => Promise<void> | void) | undefined
+    /**
+     * Ensure the credential is fresh through the caller's per-connector
+     * single-flight; resolves with the refreshed tokens (or `null` when nothing
+     * was refreshed). Injected by `registerMcp` so the SDK's `tokens()` and our
+     * own refresh paths share ONE owner (2026-09-17).
+     */
+    ensureFresh?: (() => Promise<RefreshedTokens | null>) | undefined
   },
 ): {
   provider: OAuthClientProvider
@@ -149,6 +156,21 @@ export function createOAuthProvider(
   adopt: (next: RefreshedTokens) => void
 } {
   const { credential, target } = options
+  const ensureFresh = options.ensureFresh
+  /** 绝对过期时刻（ms）；`adopt` / SDK 的 `saveTokens` 都会更新它。 */
+  let expiresAt: number | undefined = credential.expiresAt
+  const adoptTokens = (next: RefreshedTokens): void => {
+    // A rotation MAY omit a new refresh token; keep the one we hold rather
+    // than dropping the only material a later refresh needs.
+    const refreshToken = next.refreshToken ?? tokens?.refresh_token
+    expiresAt = next.expiresAt
+    tokens = {
+      access_token: next.accessToken,
+      token_type: 'Bearer',
+      ...(refreshToken === undefined ? {} : { refresh_token: refreshToken }),
+      expires_in: Math.max(0, Math.round((next.expiresAt - Date.now()) / 1000)),
+    }
+  }
   let tokens: OAuthTokens | undefined = credential.accessToken === undefined
     ? undefined
     : {
@@ -184,9 +206,45 @@ export function createOAuthProvider(
       clientInformation = information
       await options.onPersist?.({ clientId: information.client_id })
     },
-    tokens: () => tokens,
+    /**
+     * Refresh through **our** single-flight, then hand the SDK fresh tokens.
+     *
+     * 只有一个刷新主人的收口（2026-09-17）：SDK 的 401 自愈会读出 refresh token
+     * 自己换一次（`authInternal` → `tokens()` → `refreshAuthorization`），而这条
+     * 路径**不在** `TokenRefresher.inflight` 里。它一旦和我们的刷新（心跳/面板/
+     * 重开恢复）并发，同一个单次 refresh token 会被出示两次，启用轮换复用检测的
+     * 授权服务器（RFC 6749 §10.4）会吊销整个授权 —— CI 里表现为
+     * `InvalidGrantError: refresh token already used`。
+     *
+     * SDK 的四个 `tokens()` 调用点全部是 `await provider.tokens()`，所以这里可以
+     * 在交出令牌前先确保新鲜：快过期/已过期时走同一个 per-id 单飞，SDK 拿到的
+     * 永远是当前世代，于是它不会再发起自己的刷新 —— 刷新的主人只剩我们一个。
+     *
+     * 未注入 `ensureFresh`（没有 OAuth target / 无刷新材料）时保持原语义。
+     * @returns 该 provider 当前持有的令牌（刷新失败时仍是旧的，交给 SDK 走原来的
+     *   escalate 路径）。
+     */
+    tokens: async (): Promise<OAuthTokens | undefined> => {
+      // 与 `tokenNeedsRefresh` 同判据，但用**活的** `expiresAt`（`adopt` /
+      // `saveTokens` 都会前移它）：没有 refresh token 的连接器永不在这里刷新；
+      // 未记录过期时间视为可能过期（问一次很便宜）。
+      const needsFresh = credential.refreshToken !== undefined
+        && (expiresAt === undefined || expiresAt - REFRESH_LEAD_MS <= Date.now())
+      if (ensureFresh !== undefined && needsFresh) {
+        try {
+          const fresh = await ensureFresh()
+          if (fresh !== null) adoptTokens(fresh)
+        } catch {
+          // 刷新失败不改写这里的行为：交回旧令牌，SDK 随后按原路径处理
+          // （transient 由上层退避，dead grant 由 saveTokens/401 链路升级为
+          // 「需要重新授权」）。
+        }
+      }
+      return tokens
+    },
     saveTokens: async (next: OAuthTokens) => {
       tokens = next
+      expiresAt = Date.now() + (next.expires_in === undefined ? DEFAULT_TOKEN_LIFETIME_MS / 1000 : next.expires_in) * 1000
       await options.onPersist?.({
         accessToken: next.access_token,
         ...(next.refresh_token === undefined ? {} : { refreshToken: next.refresh_token }),
@@ -268,15 +326,7 @@ export function createOAuthProvider(
      * @param next - the credential our refresher just persisted.
      */
     adopt(next: RefreshedTokens): void {
-      // A rotation MAY omit a new refresh token; keep the one we hold rather
-      // than dropping the only material a later refresh needs.
-      const refreshToken = next.refreshToken ?? tokens?.refresh_token
-      tokens = {
-        access_token: next.accessToken,
-        token_type: 'Bearer',
-        ...(refreshToken === undefined ? {} : { refresh_token: refreshToken }),
-        expires_in: Math.max(0, Math.round((next.expiresAt - Date.now()) / 1000)),
-      }
+      adoptTokens(next)
     },
   }
 }

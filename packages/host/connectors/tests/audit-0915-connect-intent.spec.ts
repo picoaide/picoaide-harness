@@ -94,6 +94,35 @@ function publicDef(origin: string): ConnectorDef {
   }
 }
 
+/**
+ * 让出一轮事件循环（宏任务 + 微任务）。用于"被 park 的调用已经返回、其续体也已
+ * 跑完"这种没有磁盘/状态可观测点的收尾 —— 比裸睡 50–150ms 稳，因为它们只是
+ * 等调度，而固定 sleep 在 CI 负载下会先于异步落地（2026-09-17 的
+ * `expected undefined to be 'FRESH-B'` 就是这条）。
+ */
+async function flush(): Promise<void> {
+  await new Promise(r => setTimeout(r, 0))
+  await new Promise(r => setImmediate(r))
+}
+
+/**
+ * 统计补偿删除的次数：断言"迟到的旧写入被清掉"之前，必须先看到补偿**真的跑过**，
+ * 否则 `readCredential === null` 在写入落地前就已经成立（假绿）。
+ */
+function countClears(): () => number {
+  const original = ConnectorStore.prototype.clearCredentialIfUnchanged
+  let clears = 0
+  vi.spyOn(ConnectorStore.prototype, 'clearCredentialIfUnchanged').mockImplementation(async function (
+    this: ConnectorStore,
+    ...args: Parameters<ConnectorStore['clearCredentialIfUnchanged']>
+  ) {
+    const result = await original.apply(this, args)
+    clears += 1
+    return result
+  })
+  return () => clears
+}
+
 describe('BUG-02: a connect intent must not outlive a cancel', () => {
   it('cancelling during the first credential read publishes no form and leaves the row disconnected', async () => {
     const dir = await tempDir('pico-intent-cancel-')
@@ -103,6 +132,8 @@ describe('BUG-02: a connect intent must not outlive a cancel', () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     let held = false
+    let readReturned!: () => void
+    const readReturnedPromise = new Promise<void>((resolve) => { readReturned = resolve })
     vi.spyOn(ConnectorStore.prototype, 'readCredential').mockImplementation(async function (
       this: ConnectorStore,
       id: string,
@@ -110,6 +141,7 @@ describe('BUG-02: a connect intent must not outlive a cancel', () => {
       if (!held) {
         held = true
         await gate
+        readReturned()
       }
       return await original.call(this, id)
     })
@@ -118,7 +150,10 @@ describe('BUG-02: a connect intent must not outlive a cancel', () => {
     await callRoute(h, '/api/pico/connectors/racetest/connect', 'POST')
     await callRoute(h, '/api/pico/connectors/racetest/cancel', 'POST')
     release()
-    await new Promise(resolve => setTimeout(resolve, 50))
+    // 等 park 的读真的返回（它的续体是同步判定 intent，之后没有别的 await），
+    // 再让出一轮事件循环 —— 不再裸睡 50ms。
+    await readReturnedPromise
+    await flush()
 
     const state = JSON.parse((await callRoute(h, '/api/pico/connectors/racetest/state', 'GET')).body) as
       { status: string, request: unknown }
@@ -156,9 +191,12 @@ describe('BUG-02: a connect intent must not outlive a cancel', () => {
     // 确定性：必须等到写真的进入 park（否则用例走的是"写前检查"那条路，
     // 补偿代码根本不会被执行 —— 2026-09-15 复核实测到的假绿）。
     await waitFor(() => parked, 5000)
+    const clears = countClears()
     await callRoute(h, '/api/pico/connectors/tok/disconnect', 'POST')
     release()
-    await new Promise(resolve => setTimeout(resolve, 80))
+    // 必须先看到补偿删除真的执行（否则 null 在写入落地前就成立 —— 假绿）。
+    await waitFor(() => clears() >= 1, 10_000)
+    await flush()
 
     expect(await store.readCredential('tok')).toBeNull()
     expect(h.configs).toHaveLength(0)
@@ -198,15 +236,23 @@ describe('BUG-02: a connect intent must not outlive a cancel', () => {
     await waitFor(() => calls === 2 && gates.length === 2, 5000)
     void secondParked
 
+    const clears = countClears()
     // 放行陈旧写入：它落地时"更新的意图"仍在飞行（这是判据回归的判别条件）。
     gates[0]!()
-    await new Promise(resolve => setTimeout(resolve, 150))
+    await waitFor(() => clears() >= 1, 10_000)
     expect(await store.readCredential('tok')).toBeNull()
 
     // 再放行新写入：新尝试的凭据照常落地，没有被旧补偿误删。
     gates[1]!()
-    await new Promise(resolve => setTimeout(resolve, 150))
-    expect((await store.readCredential('tok'))?.fields?.['apiKey']).toBe('FRESH-B')
+    // 轮询到新凭据落盘（`waitFor` 只吃同步谓词，异步谓词恒真 —— 那样会在写盘前
+    // 就返回，正是本轮要消灭的那类假绿）。
+    let fresh = await store.readCredential('tok')
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline && fresh?.fields?.['apiKey'] !== 'FRESH-B') {
+      await new Promise(r => setTimeout(r, 10))
+      fresh = await store.readCredential('tok')
+    }
+    expect(fresh?.fields?.['apiKey']).toBe('FRESH-B')
     h.dispose()
   })
 
@@ -234,9 +280,12 @@ describe('BUG-02: a connect intent must not outlive a cancel', () => {
     await waitFor(() => parked, 5000)
     await callRoute(h, '/api/pico/connectors/tok/disconnect', 'POST')
     // 更新的意图**真的写了盘**（第二次 updateCredential 不再被 park）。
+    const clears = countClears()
     await callRoute(h, '/api/pico/connectors/tok/auth-submit', 'POST', { fields: { apiKey: 'FRESH-B' } })
     release()
-    await new Promise(resolve => setTimeout(resolve, 120))
+    // 迟到写入的补偿必须先跑过，再读盘判定不变式。
+    await waitFor(() => clears() >= 1, 10_000)
+    await flush()
 
     // 不变式：磁盘上绝不能是那份迟到的旧凭据（要么已被清掉，要么是新的）。
     const onDisk = await store.readCredential('tok')

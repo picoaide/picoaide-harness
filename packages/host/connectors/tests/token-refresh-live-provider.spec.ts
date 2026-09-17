@@ -53,7 +53,7 @@ function def(origin: string): ConnectorDef {
 }
 
 /** The transport the plugin registered, with the SDK provider the plugin handed it. */
-type LiveConfig = { url: string, authProvider?: { tokens: () => { refresh_token?: string } | undefined } }
+type LiveConfig = { url: string, authProvider?: { tokens: () => Promise<{ refresh_token?: string, access_token?: string } | undefined> } }
 
 function liveConfig(h: ReturnType<typeof createHarness>): LiveConfig {
   const config = h.configs[0]
@@ -88,7 +88,7 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
     // the provider's in-memory mirror holds refresh token RT1.
     const h = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
     await waitFor(() => h.configs.length === 1, 15_000)
-    const before = liveConfig(h).authProvider?.tokens()?.refresh_token
+    const before = (await liveConfig(h).authProvider?.tokens())?.refresh_token
     expect(before, 'the registration should carry a refresh token').toBeTruthy()
 
     // An out-of-band refresh — the panel button's route, same engine the
@@ -103,7 +103,7 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
     // THE GUARD: the transport that is still in use must hold RT2, not RT1.
     // Without `liveProviders`/`adopt` this reads RT1 and the next 401 reuses a
     // consumed token.
-    expect(liveConfig(h).authProvider?.tokens()?.refresh_token).toBe(stored?.refreshToken)
+    expect((await liveConfig(h).authProvider?.tokens())?.refresh_token).toBe(stored?.refreshToken)
     h.dispose()
   }, 30_000)
 
@@ -142,7 +142,7 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
     ]
     const h = createHarness([multi], dir, { refreshSweepIntervalMs: 0 })
     await waitFor(() => h.configs.length === 2, 15_000)
-    const before = h.configs.map((config) => (config as unknown as LiveConfig).authProvider?.tokens()?.refresh_token)
+    const before = await Promise.all(h.configs.map(async (config) => (await (config as unknown as LiveConfig).authProvider?.tokens())?.refresh_token))
     expect(before.every((token) => typeof token === 'string' && token !== ''), 'both servers should carry a token').toBe(true)
 
     const refreshed = await callRoute(h, '/api/pico/connectors/example-a/refresh', 'POST')
@@ -153,7 +153,7 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
     // BOTH transports must hold the same rotated credential. A per-connector
     // single slot left every server but the last one on the consumed token.
     for (const config of h.configs) {
-      expect((config as unknown as LiveConfig).authProvider?.tokens()?.refresh_token).toBe(stored?.refreshToken)
+      expect((await (config as unknown as LiveConfig).authProvider?.tokens())?.refresh_token).toBe(stored?.refreshToken)
     }
     h.dispose()
   }, 40_000)
@@ -226,8 +226,8 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
     h.emit('pico/connector-credentials-changed', { id: 'example-a' })
     await waitFor(() => h.configs.length === configsBefore + 1, 15_000)
     const newest = h.configs[h.configs.length - 1] as unknown as LiveConfig
-    expect(newest.authProvider?.tokens()?.refresh_token, 'the fresh grant must win').toBe('rt-after-reauth')
-    expect(newest.authProvider?.tokens()?.access_token).toBe('at-after-reauth')
+    expect((await newest.authProvider?.tokens())?.refresh_token, 'the fresh grant must win').toBe('rt-after-reauth')
+    expect((await newest.authProvider?.tokens())?.access_token).toBe('at-after-reauth')
     h.dispose()
   }, 40_000)
 
@@ -260,11 +260,11 @@ describe('adopt() semantics', () => {
     expect(handle.tokens?.refresh_token).toBe('refresh-1')
   })
 
-  it('feeds the SDK-facing view, not just an internal field', () => {
+  it('feeds the SDK-facing view, not just an internal field', async () => {
     // `tokens()` is what the SDK reads on its 401 path; the guard must land there.
     const handle = createOAuthProvider({ credential, target })
     handle.adopt({ accessToken: 'access-4', refreshToken: 'refresh-4', expiresAt: Date.now() + 60_000 })
-    expect(handle.provider.tokens()?.refresh_token).toBe('refresh-4')
-    expect(handle.provider.tokens()?.access_token).toBe('access-4')
+    expect((await handle.provider.tokens())?.refresh_token).toBe('refresh-4')
+    expect((await handle.provider.tokens())?.access_token).toBe('access-4')
   })
 })

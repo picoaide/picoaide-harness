@@ -434,6 +434,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const created = createOAuthProvider({
         credential,
         target,
+        ensureFresh: async () => await ensureCredentialFresh(def.id, baseline),
         onPersist: (patch: Partial<ConnectorCredential>) => {
           if (registrationScope !== store.dir) return
           void persistAndMaybeAnnounce(def.id, patch, baseline.current)
@@ -466,6 +467,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         target,
         discovery: resolved.discovery,
         ...(resolved.resource === undefined ? {} : { resource: resolved.resource }),
+        ensureFresh: async () => await ensureCredentialFresh(def.id, baseline),
         onPersist: (patch: Partial<ConnectorCredential>) => {
           // The SDK's persistence point: a rotated refresh token or a new
           // access token must reach the store, or the next process (or the
@@ -633,6 +635,37 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     },
     ...(options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs }),
   })
+
+  /**
+   * 让 SDK provider 交出令牌前先确保新鲜 —— 走**同一个** per-id 单飞。
+   *
+   * 2026-09-17：SDK 的 401 自愈（`authInternal` → `tokens()` →
+   * `refreshAuthorization`）不在 `TokenRefresher.inflight` 里。它和我们的刷新
+   * （心跳 / 面板 / 重开恢复）并发时，同一个单次 refresh token 会被出示两次，
+   * 启用轮换复用检测的授权服务器（RFC 6749 §10.4）会吊销整个授权 —— CI 里的
+   * `InvalidGrantError: refresh token already used` 就是这条。
+   *
+   * SDK 的四个 `tokens()` 调用点全部 `await provider.tokens()`，所以收口放在
+   * provider 的 `tokens()` 里：快过期时先经这里刷一次，SDK 拿到的是当前世代，
+   * 于是它不会再发起自己的刷新 —— 刷新的主人只剩一个（`TokenRefresher`）。
+   * @param id - 连接器 id。
+   * @param baseline - 该 provider 的 CAS 基准快照（刷新落盘后同步前移）。
+   * @returns 刷新后的令牌；未刷新或失败时返回 null（provider 交回旧令牌，SDK 按原
+   *   路径升级为 transient / 需要重新授权）。
+   */
+  const ensureCredentialFresh = async (
+    id: string,
+    baseline: { current: ConnectorCredential },
+  ): Promise<RefreshedTokens | null> => {
+    const outcome = await tokenRefresher.refresh(id, { locale: locale() })
+    if (!outcome.ok) return null
+    // 刷新引擎的 onRefreshed 已经把新凭据喂给活着的 provider（adopt +
+    // syncBaseline）；这里再把这个 provider 自己的 CAS 基准前移，避免 SDK 之后
+    // 的持久化拿着被取代的快照做比较而静默丢弃。
+    const persisted = await store.readCredential(id)
+    if (persisted !== null) baseline.current = persisted
+    return outcome.tokens
+  }
   const pendingRequests = new Map<string, ConnectorAuthRequest>()
   /** Server-issued stdio commands waiting for a local decision, keyed by connector id. */
   const pendingApprovals = new Map<string, PendingApproval>()
