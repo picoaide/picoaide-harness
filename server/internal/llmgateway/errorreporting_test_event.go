@@ -20,6 +20,17 @@ package llmgateway
 // public key,本来就是给客户端用的)。`util.SafeOutboundTransport()` 有意
 // **允许私网** —— 内网自建 GlitchTip 是产品主场景;它仍然会拦截链路本地 /
 // 云 metadata(DNS rebinding 复检)。
+//
+// 2026-09-17 独立审计(R1–R6)后的三处收紧与两条明确接受:
+//   - R1/R3:失败详情(目标响应体前 300B、含内网 IP 的 dial 错误)**不再回显**给
+//     调用方,只进服务端日志 —— 否则管理员可借本端点做内网端口扫描 + 读横幅。
+//     返回体保留 kind/http_status/endpoint/elapsed_ms,诊断力不受影响
+//     (webadmin 本来也只渲染 message + detail.kind)。
+//   - R4:3xx 单列 HTTP_3XX(本客户端不跟随重定向)。
+//   - R5:每次自检写一条审计(error_reporting_test),留下"谁在什么时候探测了哪里"。
+//   - R2(无频率限制)/R6(代理部署下目标由代理二次解析):**接受**。前者要求
+//     super_admin + CSRF 且单次出站有 8s 上限、无放大效应;后者是全部出站共有
+//     的环境属性(netguard.go 的代理路径注释已说明),不单独在本端点解决。
 // ---------------------------------------------------------------------------
 
 import (
@@ -33,6 +44,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -68,6 +80,10 @@ const (
 	ErrorReportingKindConnect = "CONNECT"
 	ErrorReportingKindTLS     = "TLS"
 	ErrorReportingKindTimeout = "TIMEOUT"
+	// ErrorReportingKindHTTP3xx:本端点**不跟随重定向**(见 errorReportingTestClient),
+	// 3xx 说明 DSN 指向了会跳转的地址 —— 单列一类,而不是落进"不应出现"的
+	// UNKNOWN(2026-09-17 独立审计 R4:此前 302 被归为 UNKNOWN)。
+	ErrorReportingKindHTTP3xx = "HTTP_3XX"
 	ErrorReportingKindHTTP4xx = "HTTP_4XX"
 	ErrorReportingKindHTTP5xx = "HTTP_5XX"
 	// ErrorReportingKindUnknown 兜底(不应出现;出现即说明分类漏了一种)。
@@ -84,6 +100,9 @@ func classifyErrorReportingFailure(err error, status int) string {
 	}
 	if status >= 400 {
 		return ErrorReportingKindHTTP4xx
+	}
+	if status >= 300 {
+		return ErrorReportingKindHTTP3xx
 	}
 	if err == nil {
 		return ErrorReportingKindUnknown
@@ -241,6 +260,8 @@ func errorReportingFailureMessage(kind string) string {
 		return "上报服务的 TLS 证书校验失败"
 	case ErrorReportingKindTimeout:
 		return fmt.Sprintf("连接上报服务超时(>%s)", errorReportingTestTimeout)
+	case ErrorReportingKindHTTP3xx:
+		return "上报服务要求重定向(本端点不跟随重定向,请让 DSN 直接指向 store 端点)"
 	case ErrorReportingKindHTTP4xx:
 		return "上报服务拒绝了测试事件(HTTP 4xx,通常是 DSN 公钥或项目 ID 不对)"
 	case ErrorReportingKindHTTP5xx:
@@ -306,7 +327,19 @@ func testErrorReporting(c *gin.Context, db *sql.DB) {
 		release = "dev"
 	}
 	result := sendErrorReportingTestEvent(c.Request.Context(), inspection, release)
+	// R5(审计 2026-09-17):这是"能让服务端向任意管理员指定地址发请求"的动作,
+	// 必须留痕(谁、什么时候、探测了哪个主机、结果如何)。
+	auditDetail := fmt.Sprintf("endpoint=%s kind=%s", result.Endpoint, result.Kind)
+	if result.OK {
+		auditDetail = fmt.Sprintf("endpoint=%s ok http=%d", result.Endpoint, result.HTTPStatus)
+	}
+	_ = serverstore.AuditLog(db, auditActor(c), "error_reporting_test", auditDetail)
 	if !result.OK {
+		// R1/R3(审计 2026-09-17):原始失败详情(含目标响应体片段与 dial 到的内网
+		// IP)**只进服务端日志**,不回显给调用方 —— 否则本端点可被当作内网端口
+		// 扫描器 + 横幅读取器。诊断力由 kind/message/http_status/elapsed_ms 承担。
+		log.Printf("error-reporting test event failed: kind=%s endpoint=%s status=%d: %s",
+			result.Kind, result.Endpoint, result.HTTPStatus, result.Detail)
 		detail := gin.H{
 			"kind":     result.Kind,
 			"endpoint": result.Endpoint,
@@ -314,9 +347,6 @@ func testErrorReporting(c *gin.Context, db *sql.DB) {
 		}
 		if result.HTTPStatus != 0 {
 			detail["http_status"] = result.HTTPStatus
-		}
-		if result.Detail != "" {
-			detail["cause"] = result.Detail
 		}
 		if result.ElapsedMS > 0 {
 			detail["elapsed_ms"] = result.ElapsedMS

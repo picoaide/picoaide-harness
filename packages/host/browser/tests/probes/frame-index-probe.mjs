@@ -43,7 +43,9 @@ runProbe(async () => {
   const outer = await serve({
     '/mixed': mixedOuter(`http://localhost:${inner.port}`),
     '/redirects': redirectOuter(`http://localhost:${inner.port}`),
-    '/plain': `<!doctype html><html><body><iframe src="${SAME_HTML.replace(/"/g, '&quot;').replace('<p', '<p')}" srcdoc="${SAME_HTML.replace(/"/g, '&quot;')}"></iframe></body></html>`,
+    // 注：2026-09-17 删掉了一个 `.replace('<p', '<p')` 恒等替换（CodeQL
+    // js/identity-replacement 命中；它本来就没做任何事，删掉输出逐字节不变）。
+    '/plain': `<!doctype html><html><body><iframe src="${SAME_HTML.replace(/"/g, '&quot;')}" srcdoc="${SAME_HTML.replace(/"/g, '&quot;')}"></iframe></body></html>`,
   })
 
   // ---------------------------------------------------------------- RED half

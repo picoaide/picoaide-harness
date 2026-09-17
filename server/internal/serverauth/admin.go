@@ -1874,7 +1874,10 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 		report, err := prov.ProbeDirectory()
 		if err != nil {
 			// 脱敏:详情只进服务端日志(避免回传目录内部信息)。
-			log.Printf("auth test ldap probe: %v", err)
+			// 2026-09-17 审计 + CodeQL go/clear-text-logging:落日志前**必须**把 bind
+			// 口令从错误串里擦掉 —— 错误文本来自对端(不可信):目录服务完全可以把自己
+			// 在 bind 请求里收到的口令原样回显,而我们此前只做长度截断、不做字符集清洗。
+			log.Printf("auth test ldap probe: %s", redactCredential(err.Error(), req.LDAP.BindPassword))
 			results["ok"] = false
 			results["message"] = "LDAP 连接失败,请检查地址/凭据/过滤器(详情见服务端日志)"
 			break
@@ -1908,7 +1911,18 @@ func (a *AdminAPI) testAuthConnection(c *gin.Context) {
 		// 装 SafeOutboundTransport 做**连接期 IP 复检**(与网关上游/余额查询同一
 		// 护栏):拦链路本地与云 metadata(含 DNS rebinding 场景),
 		// 私网照旧放行 —— 企业自建 IdP 常在 10.x/172.16.x,不能一刀切禁私网。
-		client := &http.Client{Timeout: 10 * time.Second, Transport: util.SafeOutboundTransport()}
+		//
+		// 2026-09-17 独立审计(与 error-reporting 自检端点对齐):**不跟随重定向**。
+		// 跟随会把请求带到未经 validateIssuerURL 校验的目标(重定向目标仍受
+		// SafeOutboundTransport 的连接期复检,但"探针只探测它声称探测的地址"
+		// 这条语义更清楚),也让 CodeQL 的 go/request-forgery 处置与那条一致。
+		client := &http.Client{
+			Timeout:   10 * time.Second,
+			Transport: util.SafeOutboundTransport(),
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 		r, err := client.Get(iu.String() + "/.well-known/openid-configuration")
 		if err != nil {
 			log.Printf("auth test oidc discovery: %v", err)

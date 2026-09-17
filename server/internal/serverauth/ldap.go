@@ -3,9 +3,11 @@ package serverauth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
@@ -95,13 +97,41 @@ func (p *LDAPProvider) dialConn() (ldapConn, error) {
 	if err := util.CheckOutboundTarget(ctx, u.Hostname()); err != nil {
 		return nil, err
 	}
-	conn, err := ldap.DialURL(p.ServerURL, ldap.DialWithDialer(&net.Dialer{Timeout: ldapTimeout}))
+	conn, err := ldap.DialURL(p.ServerURL, ldap.DialWithDialer(ldapDialer()))
 	if err != nil {
 		return nil, err
 	}
 	// read/write deadline so a silent server cannot block bind/search forever
 	conn.SetTimeout(ldapTimeout)
 	return conn, nil
+}
+
+// ldapDialControl 是 LDAP 出站的**连接期**复检:它拿到的是拨号器**真正要连**的
+// 地址,因此不存在"先解析一次做检查、再解析一次去连接"的 check-then-dial 窗口
+// (2026-09-17 独立审计:此前只有 CheckOutboundTarget 的主机解析结果做检查,
+// ldap.DialURL 内部会再解析一次,DNS rebinding 可在两次解析之间换掉答案)。
+//
+// 只拦链路本地/云 metadata(util.IsBlockedOutboundIP);私网照旧放行 ——
+// 企业目录常在 10.x/172.16.x,不能一刀切禁私网。
+func ldapDialControl(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		// 形状异常时交回默认语义(不静默放行"任意目标"—— 这里只是拿不到 IP)。
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil
+	}
+	if util.IsBlockedOutboundIP(ip) {
+		return fmt.Errorf("ldap: refused to connect to link-local/metadata address %s", ip)
+	}
+	return nil
+}
+
+// ldapDialer 是 LDAP 连接用的 dialer(超时 + 连接期复检)。测试注入点见 ldapDialerFn。
+func ldapDialer() *net.Dialer {
+	return &net.Dialer{Timeout: ldapTimeout, Control: ldapDialControl}
 }
 
 // ldapSearchPagingSize bounds each LDAP page during full-directory scans
@@ -354,4 +384,13 @@ func (p *LDAPProvider) Authenticate(username, password string) (UserInfo, error)
 		ui.Groups = groups
 	}
 	return ui, nil
+}
+
+// redactCredential 把**已知凭据**从待落日志的文本里擦掉(空口令不擦,避免把
+// 空串替换成噪声)。用途:错误文本来自对端(不可信),而落盘日志是长期留存面。
+func redactCredential(text, secret string) string {
+	if secret == "" {
+		return text
+	}
+	return strings.ReplaceAll(text, secret, "***")
 }
