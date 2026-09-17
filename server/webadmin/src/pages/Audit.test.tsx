@@ -59,7 +59,14 @@ async function waitForAuditRows(rows: number): Promise<void> {
   await waitFor(() => expect(screen.getAllByRole('row')).toHaveLength(rows + 1), { timeout: 5000 })
 }
 
-/** 等到列表响应已落地(settings 与 logs 同属 load() 的一条链,settings 在后)。 */
+/**
+ * 等到列表响应已落地。
+ *
+ * 判据 = settings 请求已发出（它在 `load()` 里紧跟在 `setLogs(data.logs)` 之后、
+ * 同一同步块内）⇒ "settings 被调用" ≈ "setLogs 已被调用"。**严格说它不等于
+ * "已渲染"**（React 可能还没 flush），所以读**数据行**的断言要用
+ * `waitForAuditRows`；本函数只用于不依赖数据行的加载链等待（2026-09-17 审计 P3）。
+ */
 async function waitForAuditLoad(): Promise<void> {
   await waitFor(
     () => expect(mockRequest.mock.calls.some(([p]) => String(p) === AUDIT_SETTINGS_PATH)).toBe(true),
@@ -349,22 +356,24 @@ describe('审计动作表覆盖服务端全部写点(SG-5 残留)', () => {
     render(<Audit />)
     await waitForAuditRows(logs.length)
 
+    // 性能与判据（2026-09-17 独立审计 P2-4）：原写法对 74 条动作逐条调
+    // queryByText + getAllByText + getByRole(option)，**每次都是整文档扫描**
+    // （单机 2845ms、负载下会撞用例预算）。改为一次性快照集合比对：
+    // 语义等价（原断言就是精确文本匹配），实测 333ms（-88%）。
+    const texts = new Set<string>()
+    for (const el of document.querySelectorAll('*')) texts.add((el.textContent ?? '').trim())
+
     for (const [action, label] of SERVER_ACTIONS) {
       // 裸 id 一个都不许出现在表里(出现 = 未登记,row badge 会回落成 outline + 原串)。
-      expect(screen.queryByText(action)).toBeNull()
-      expect(screen.getAllByText(label).length).toBeGreaterThan(0)
+      expect(texts.has(action)).toBe(false)
+      expect(texts.has(label)).toBe(true)
     }
 
     fireEvent.click(screen.getByRole('combobox'))
+    // 选项在 portal 里，同样一次查询取全集再比对（逐个 getByRole 是 N 次整文档扫描）。
+    const options = new Set(screen.getAllByRole('option').map((o) => (o.textContent ?? '').trim()))
     for (const [, label] of SERVER_ACTIONS) {
-      expect(screen.getByRole('option', { name: label })).toBeInTheDocument()
+      expect(options.has(label)).toBe(true)
     }
-    // 显式预算(S10-2 修复轮 5):本用例一次性渲染 74 条服务端写入动作,再逐条
-    // queryByText/getByRole —— 单机实测约 4.35s,已占满 vitest 默认 5000ms 的
-    // 87%(CI 的 gate 与其他 job 并行、或本机与 Go 套件同跑时实测超时过一次)。
-    // 2026-09-17 独立审计 P3-4:每条断言都是**整文档**扫描(74×3 次),机器被压到
-    // 92% busy / load≈20 时本用例必撞 20s。这里把上限提到 40s(口径不变)。
-    // 根治办法是收窄查询范围(把表格查询限定在 table 内),属后续优化,未在本轮做。
-    // 显式 40s 只放宽这一个用例的上限,不放宽断言口径。
-  }, 40_000)
+  })
 })
