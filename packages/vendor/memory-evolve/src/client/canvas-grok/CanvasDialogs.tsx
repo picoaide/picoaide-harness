@@ -6,7 +6,7 @@
  * 走文件代理，否则占位色块。
  */
 import { useCallback, useRef, useState } from 'react'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from '../index.ts'
 import { TYPE_GLYPH, typeLabel } from './constants.ts'
 import { inferTypeFromPath, placeholderHue } from './helpers.ts'
 import { fileProxyUrl, searchFilesBackend } from './api-client.ts'
@@ -24,7 +24,7 @@ export interface NoteSubmit {
 
 export interface CanvasDialogsProps {
   /** 插件 locale 翻译函数（i18n：文案一律经它取，不再硬编码中文）。 */
-  t: Translate
+  t: MemoryEvolveTranslate
   kind: CanvasDialogKind
   previewNode: CanvasNode | null
   removeNode: CanvasNode | null
@@ -46,7 +46,7 @@ export interface CanvasDialogsProps {
   onMigrate: (nodeId: string, scope: 'session' | 'project' | 'global') => void
 }
 
-function PathDialog(props: { t: Translate; onClose: () => void; onPath: (p: PathSubmit) => void }): JSX.Element {
+function PathDialog(props: { t: MemoryEvolveTranslate; onClose: () => void; onPath: (p: PathSubmit) => void }): JSX.Element {
   const { t } = props
   const [path, setPath] = useState('')
   const guessed = inferTypeFromPath(path)
@@ -86,7 +86,7 @@ function PathDialog(props: { t: Translate; onClose: () => void; onPath: (p: Path
   )
 }
 
-function NoteDialog(props: { t: Translate; onClose: () => void; onNote: (p: NoteSubmit) => void }): JSX.Element {
+function NoteDialog(props: { t: MemoryEvolveTranslate; onClose: () => void; onNote: (p: NoteSubmit) => void }): JSX.Element {
   const { t } = props
   const [title, setTitle] = useState(t('canvas.dialog.note.defaultTitle'))
   const [type, setType] = useState<'markdown' | 'plainText'>('markdown')
@@ -129,7 +129,7 @@ function NoteDialog(props: { t: Translate; onClose: () => void; onNote: (p: Note
 }
 
 function CatalogDialog(props: {
-  t: Translate
+  t: MemoryEvolveTranslate
   onClose: () => void
   onCatalog: (title: string, path: string, type: CanvasNodeType, size?: string) => void
   /** 后端可用标记：true 时走宿主真实搜索。 */
@@ -240,7 +240,7 @@ function CatalogDialog(props: {
 }
 
 function PreviewDialog(props: {
-  t: Translate
+  t: MemoryEvolveTranslate
   node: CanvasNode
   /** 后端可用标记：true 时预览走宿主文件代理（真实文件内容）。 */
   backendReady: boolean
@@ -321,7 +321,7 @@ function PreviewDialog(props: {
 }
 
 function RemoveDialog(props: {
-  t: Translate
+  t: MemoryEvolveTranslate
   node: CanvasNode
   onClose: () => void
   onConfirm: () => void
@@ -351,7 +351,7 @@ function RemoveDialog(props: {
  *   🌐 所有项目可见 → global 级（所有视角可见）
  */
 function MigrateDialog(props: {
-  t: Translate
+  t: MemoryEvolveTranslate
   node: CanvasNode
   onClose: () => void
   onMigrate: (nodeId: string, scope: 'session' | 'project' | 'global') => void

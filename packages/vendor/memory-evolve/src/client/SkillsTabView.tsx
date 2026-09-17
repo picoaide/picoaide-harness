@@ -15,7 +15,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 import { MemoryQueueView } from './MemoryQueueView.tsx'
 import { SkillsBrowser } from './skills-browser/SkillsBrowser.tsx'
 import { TabGuideView, type GuideSection } from './TabGuideView.tsx'
@@ -25,7 +25,7 @@ type SkillsFeature = 'guide' | 'skills' | 'skill-browser'
 
 /** Locale-bound props（locate namespace：memory-evolve）。 */
 export interface SkillsTabViewProps {
-  t: Translate
+  t: MemoryEvolveTranslate
 }
 
 /** 跨重挂持久化的子 tab 选择（模块级：badge 刷新导致组件重挂后恢复）。 */
@@ -36,7 +36,7 @@ let persistedSkillsFeature: SkillsFeature | null = null
  * 详细介绍技能功能本身——技能是什么、如何沉淀、待确认技能建议、技能管理
  * （浏览/禁用/自定义目录/文件编辑）。文案来自全局 locale（skillsTab.guide.* 键组）。
  */
-function skillsGuideSections(t: Translate): GuideSection[] {
+function skillsGuideSections(t: MemoryEvolveTranslate): GuideSection[] {
   return [
     {
       icon: '🛠️',

@@ -96,12 +96,12 @@ export interface ApiError {
   error: string
 }
 
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from '../index.ts'
 
-/** The component's props: a wide translate function bound to the `skills-manager` namespace. */
+/** The component's props: a translate function bound to this plugin's `memory-evolve` namespace. */
 export interface SkillsBrowserProps {
-  /** Translate a key of the `skills-manager` dictionary (fallback `common`). */
-  t: Translate
+  /** 翻译一个本插件字典键（`memory-evolve` 命名空间；平台 `common` 词表亦可用）。 */
+  t: MemoryEvolveTranslate
   /**
    * 当前会话 ID（conversation.view 挂载点由 ConvViewProps 注入）。
    * 随四个 cwd 敏感请求（列表/浏览/读/写）带给服务端，用于把项目技能

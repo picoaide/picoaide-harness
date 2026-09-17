@@ -19,7 +19,7 @@
  * 切换后组件不重渲染也能拿到最新会话 id），书签 Tab 传字符串。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 
 /** 单条书签（与宿主 API 对齐的最小字段）。 */
 interface BookmarkRow {
@@ -41,7 +41,7 @@ export interface TurnBookmarkButtonProps {
   summary: string
   /** 会话 id：字符串（槽位场景）或提供者函数（DOM 注入场景）。 */
   sessionId: string | (() => string)
-  t: Translate
+  t: MemoryEvolveTranslate
 }
 
 /** 解析会话 id：函数形态在每次使用时取最新值（会话切换安全）。 */

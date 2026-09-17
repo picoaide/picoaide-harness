@@ -27,6 +27,8 @@
  */
 import { createRoot } from 'react-dom/client'
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type PointerEvent } from 'react'
+// 类型专用导入（运行时零影响）：键收窄的翻译函数类型，见 NotificationBellOpts。
+import type { MemoryEvolveTranslate } from './index.ts'
 
 /* ------------------------------------------------------------------ */
 /* 图标                                                                */
@@ -109,8 +111,8 @@ interface NotificationItem {
 export interface NotificationBellOpts {
   /** 切换到某会话（DSH client sessions.open）。 */
   openSession: (sessionId: string) => void
-  /** 翻译函数（zh/en 跟随界面语言）。 */
-  t: (key: string) => string
+  /** 翻译函数（zh/en 跟随界面语言）；键收窄到本插件命名空间。 */
+  t: MemoryEvolveTranslate
 }
 
 /** 吸附状态：左右边 + 垂直像素。 */
@@ -354,7 +356,7 @@ function fmtTime(ts: number): string {
   return sameDay ? hm : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`
 }
 
-function senderLabel(item: NotificationItem, t: (key: string) => string): string {
+function senderLabel(item: NotificationItem, t: MemoryEvolveTranslate): string {
   return item.senderName === 'system' ? t('notify.system') : item.senderName
 }
 

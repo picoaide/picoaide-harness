@@ -18,7 +18,15 @@ import type { Context } from 'cordis'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: the 'conversation.view' SlotMap row lives in ui-conversation.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+// Type-only: `Context.slots` / `Context.uiRenderer` are declared by the UI
+// renderer's `declare module '@deepseek-ai/cordis'` augmentation. Nothing here
+// imports it for values, but without it `ctx.slots` is not on `Context` at all
+// (the same import `dsh-plugin-desktop`'s client face uses).
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+// 品牌类型 `SessionId`：`ctx.sessions.open` 收的就是它（线上是字符串，
+// 品牌只存在于类型层，故两个入口处各需要一次断言，见 openSession 处注释）。
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { MemoryTabView } from './MemoryTabView.tsx'
 import { SkillsTabView } from './SkillsTabView.tsx'
 import { TodosTabView } from './TodosTabView.tsx'
@@ -67,7 +75,7 @@ const NS = 'memory-evolve'
  * apply 内的 t。因此这里存一份"调用期可读"的引用（与 lib/i18n.js 的
  * setClientLocaleResolver 同一模式）；未 apply 时回落到返回键名本身。
  */
-let activeTranslate: Translate | null = null
+let activeTranslate: MemoryEvolveTranslate | null = null
 
 /** Dictionary key set for the memory-evolve namespace. */
 export type MemoryEvolveKey = keyof typeof zh
@@ -77,6 +85,19 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'memory-evolve': MemoryEvolveKey
   }
 }
+
+/**
+ * 本插件命名空间的翻译函数类型 = 平台 `ctx.locale.bind(NS)` 的返回类型
+ * （`TranslateNS<'memory-evolve'>` = 本插件字典键 ∪ 平台 `common` 词表）。
+ *
+ * **这是本包 i18n 的主防线**：`apply()` 里 `const t = ctx.locale.bind(NS)`
+ * 不带任何断言就得到这个类型，随后 t 流传到哪个组件，哪个组件里的
+ * `t('…')` 就在编译期对照 `zh` 字典校验（`en` 由
+ * `Record<MemoryEvolveKey, string>` 镜像同一键集）。漏键、拼错、改名残留
+ * 都是编译错，且对"值域怎么包（as const / freeze / 跨文件 / 解构 / spread）"
+ * 免疫——那正是正则静态守卫收敛不了的维度。
+ */
+export type MemoryEvolveTranslate = TranslateNS<'memory-evolve'>
 
 /** Simplified-Chinese dictionary (key-set source of truth). */
 export const zh = {
@@ -3020,7 +3041,19 @@ export const inject = ['slots', 'locale', 'conversation', 'sessions']
  * @param ctx - client root context.
  */
 export function apply(ctx: Context): void {
-  const t = ctx.locale.bind(NS) as unknown as Translate
+  // ★ 本文件的主防线：**不写断言**。
+  //
+  // 平台 locale 服务的 `bind` 本来就是泛型的：
+  //   bind<N extends Extract<keyof LocaleNamespaceMap, string>>(ns: N): TranslateNS<N>
+  //   TranslateNS<N> = Translate<LocaleKeysOf<N>>，LocaleKeysOf<N> = 本命名空间键 | 平台公共词表
+  // 本文件又已经 augment 了 `LocaleNamespaceMap['memory-evolve'] = MemoryEvolveKey`，
+  // 所以 `bind(NS)`（NS 是字面量 'memory-evolve'）返回的就是**窄类型**翻译函数。
+  //
+  // 此前写成 `ctx.locale.bind(NS) as unknown as Translate`：`Translate` 的默认
+  // 类型参数是 `string`，于是这层双重断言把泛型信息**全部抹掉**，此后每一处
+  // `t('随便什么')` 都合法 —— 这正是"正则守卫打不完的形态"能溜进来的原因。
+  // 删掉断言 = 让编译器接管整类检查（键缺失/拼错在编译期即红）。
+  const t = ctx.locale.bind(NS)
 
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'memory-evolve: dictionaries')
 
@@ -3184,7 +3217,8 @@ export function apply(ctx: Context): void {
     .then(() => {
       if (notifyBellCancelled) return
       disposeNotifyBell = createNotificationBell({
-        openSession: (sessionId) => { ctx.sessions.open(sessionId) },
+        // 通知载荷的会话 id 是线上字符串，`ctx.sessions.open` 收品牌 `SessionId`（运行时零表示）。
+        openSession: (sessionId) => { ctx.sessions.open(sessionId as SessionId) },
         t,
       }).dispose
     })
@@ -3323,7 +3357,11 @@ export function apply(ctx: Context): void {
 
   void fetch('/memory-evolve/api/config')
     .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-    .then((data: { config?: { memoryTabEnabled?: boolean; modelsEnabled?: boolean } }) => {
+    // 这里读到的每个开关都必须在标注里出现：`syncEnabled` / `todoEnabled`
+    // 都属于 host 的 BOOLEAN_KEYS（lib/index.js），`GET /api/config` 会回显，
+    // 但此前的内联标注只写了两个键，于是下面两次读取一直是类型错（读的是
+    // "标注里不存在的属性"）。补齐标注 = 让这份契约跟上 host。
+    .then((data: { config?: { memoryTabEnabled?: boolean; modelsEnabled?: boolean; syncEnabled?: boolean; todoEnabled?: boolean } }) => {
       // 模型设置 tab：跟随 modelsEnabled 运行时开关（默认开，与其他模块
       // 同款独立开关，在「设置」Tab 的「配置」里切换；开启后刷新页面出现）。
       if (!tabCancelled && data.config?.modelsEnabled === true && disposeModelsTab === undefined) {
@@ -3729,7 +3767,7 @@ export function apply(ctx: Context): void {
       if (canvasCancelled || data.enabled !== true) return
       disposeCanvasTab = registerCanvasTab(
         ctx as unknown as import('./canvas-grok/index.ts').CanvasTabHost,
-        { t, openSession: (sessionId) => { ctx.sessions.open(sessionId) } },
+        { t, openSession: (sessionId) => { ctx.sessions.open(sessionId as SessionId) } },
       )
     })
     .catch(() => { /* 画板未启用：不注入任何东西 */ })

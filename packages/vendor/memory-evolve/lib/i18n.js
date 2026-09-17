@@ -83,13 +83,20 @@ export function getActiveLocale() {
  * 一个解析器：私有字典在**每次取值时**调用 `clientLang()`，从而跟随切换。
  *
  * 未注册时回落 `navigator.language`（老行为：不经 apply 的测试与独立渲染仍可用）。
- * @type {(() => 'zh'|'en') | null}
+ *
+ * 解析器允许返回 `undefined` 表示"这一票不表态"：宿主 locale 快照里出现 zh/en
+ * 之外的值时 client 入口就是这么返回的，`clientLang()` 会就此回落到
+ * `navigator.language`（`resolved === 'zh' || resolved === 'en'` 那个判断正是为
+ * 这条路径写的）。类型必须如实带上 `undefined`，否则调用点会因为"声明的契约比
+ * 实现更严"而报类型错（`lib/i18n.js` 现在由 tsconfig 的 `allowJs` 读进类型程序）。
+ * @type {(() => 'zh'|'en'|undefined) | null}
  */
 let clientLocaleResolver = null
 
 /**
  * Register the client-side locale resolver（由 client 入口调用一次）。
- * @param {(() => 'zh'|'en') | null} resolver - 返回当前界面语言的函数。
+ * @param {(() => 'zh'|'en'|undefined) | null} resolver - 返回当前界面语言的函数；
+ *   返回 `undefined` 表示不表态，交给 `clientLang()` 回落 `navigator.language`。
  */
 export function setClientLocaleResolver(resolver) {
   clientLocaleResolver = typeof resolver === 'function' ? resolver : null

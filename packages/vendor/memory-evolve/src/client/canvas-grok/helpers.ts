@@ -7,7 +7,7 @@
  * `t` 作为参数注入（调用方在渲染期已有当前语言）。matchesQuery 例外：它
  * 只做匹配、不产文案，走 constants 的 TYPE_SEARCH_TERMS（与界面语言无关）。
  */
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from '../index.ts'
 import {
   CURRENT_PROJECT_ID,
   CURRENT_SESSION_ID,
@@ -50,7 +50,7 @@ export function inferTypeFromPath(path: string): CanvasNodeType {
   return EXT_TYPE[ext] ?? 'file'
 }
 
-export function titleFromPath(path: string, t: Translate): string {
+export function titleFromPath(path: string, t: MemoryEvolveTranslate): string {
   const cleaned = normalizePath(path).replace(/\\/g, '/').replace(/\/+$/, '')
   const base = cleaned.split('/').pop()
   return base && base.length > 0 ? base : cleaned || t('canvas.node.unnamed')
@@ -61,7 +61,7 @@ export function toReferenceText(node: CanvasNode): string {
   return `[canvas:${node.id}] ${node.title}`
 }
 
-export function scopeBadgeText(node: CanvasNode, currentSessionId: string | undefined, t: Translate): string {
+export function scopeBadgeText(node: CanvasNode, currentSessionId: string | undefined, t: MemoryEvolveTranslate): string {
   if (node.scope === 'global') return `🌐 ${node.scopeLabel || t('canvas.scope.global')}`
   if (node.scope === 'project') return `📁 ${node.scopeLabel}`
   // 会话级节点：归属文案必须按**查看者视角**呈现（2026-08-14 修复）——
@@ -223,10 +223,10 @@ export async function copyText(text: string): Promise<boolean> {
  * 浏览器默认下载目录）。
  * @param {string} title - 建议文件名（自动清洗非法字符 + 补扩展名）
  * @param {string} content - 文件内容
- * @param {Translate} t - 插件 locale 翻译函数（纯函数取不到 React 的 t，注入）
+ * @param {MemoryEvolveTranslate} t - 插件 locale 翻译函数（纯函数取不到 React 的 t，注入）
  * @returns {Promise<{ ok: boolean; canceled?: boolean; message?: string }>}
  */
-export async function saveTextToFile(title: string, content: string, t: Translate): Promise<{ ok: boolean; canceled?: boolean; message?: string }> {
+export async function saveTextToFile(title: string, content: string, t: MemoryEvolveTranslate): Promise<{ ok: boolean; canceled?: boolean; message?: string }> {
   const safeName = sanitizeFileName(title) || t('canvas.note.defaultName')
   const fileName = /\.(md|txt)$/i.test(safeName) ? safeName : `${safeName}.md`
   // 首选：系统原生保存对话框（File System Access API）。

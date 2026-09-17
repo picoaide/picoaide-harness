@@ -22,23 +22,49 @@
  *   - 全部文案走 zh/en 字典键，无硬编码中文。
  */
 import { useEffect, useState } from 'react'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 
 /** Locale-bound props（memory-evolve 命名空间）。 */
 export interface VersionTabViewProps {
-  t: Translate
+  t: MemoryEvolveTranslate
 }
 
 /** SettingsTabView 引用用（同 VersionTabViewProps，兼容名）。 */
 export type VersionTabTabProps = VersionTabViewProps
 
+/**
+ * `version.status.<code>` 的值域（对齐 lib/update.js 写出的 status）。
+ *
+ * ★ 动态键的**检查点前移**：渲染点用 ``t(`version.status.${state.status}`)``，
+ * 键是拼出来的。把值域声明成联合类型后，模板展开成字面量联合并逐个对照
+ * `zh` 字典校验：字典里 5 个 `version.status.*` 少任何一个、或这里多出一个
+ * 字典没有的状态，都是编译错。宿主越界值仍走原来的回落（translate 回落键名），
+ * 联合类型只是把契约写实，不新增运行时约束。
+ */
+type UpdateStatus = 'latest' | 'outdated' | 'no-release' | 'unsupported' | 'unknown'
+
+/** `version.note.<code>` 的值域（lib/update.js 的 noteCode；'' = 无说明）。 */
+type UpdateNoteCode = 'latest-exact' | 'latest-contained' | 'outdated' | 'no-release' | 'unsupported'
+
+/** `version.error.<code>` 的值域（lib/update.js 的 code + 前端本地 code）。 */
+type UpdateErrorCode =
+  | 'bad-request'
+  | 'busy'
+  | 'dirty'
+  | 'error'
+  | 'network'
+  | 'target-changed'
+  | 'unknown'
+  | 'unsupported'
+  | 'untrusted'
+
 /** 服务端状态对象（/api/update/status 的 DTO 白名单，字段对齐 lib/update.js）。 */
 interface UpdateState {
   ok?: boolean
-  status?: string // latest | outdated | no-release | unsupported | unknown
+  status?: UpdateStatus
   latestTag?: string | null
   localTag?: string | null
-  noteCode?: string
+  noteCode?: UpdateNoteCode | ''
   lastAttemptAt?: number | null
   lastSuccessAt?: number | null
   lastError?: { kind?: string; message?: string } | null
@@ -49,7 +75,7 @@ interface UpdateState {
 /** 更新接口返回（POST /api/update）。 */
 interface UpdateOutcome {
   ok: boolean
-  code?: string
+  code?: UpdateErrorCode
   error?: string
   tag?: string
   releaseNotes?: string
@@ -58,7 +84,7 @@ interface UpdateOutcome {
 
 /** 统一错误对象（code → 字典文案；message 兜底展示）。 */
 interface ViewError {
-  code: string
+  code: UpdateErrorCode
   message: string
 }
 

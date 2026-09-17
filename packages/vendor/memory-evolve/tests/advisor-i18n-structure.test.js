@@ -67,23 +67,28 @@ test('LEVEL_KEYS：四层级都映射到 advisor.level.*，且键在 zh/en 双�
   }
 })
 
+// 2026-09-17 类型系统轮：`t` 的标注从宽的 `Translate`（= `Translate<string>`）收窄成
+// `MemoryEvolveTranslate`（= `TranslateNS<'memory-evolve'>`，键对照本包字典）。结构意图
+// 不变（`t` 必须是**注入的参数**、文案必须在**调用期**求值），故断言同步放宽到两种标注。
+const T_PARAM = 't: (?:MemoryEvolve)?Translate'
+
 test('AdvisorPanel：isEn()/navigator.language 判语言已移除，标签走 (t) 的函数', () => {
   const panel = codeOnly(readFileSync(join(ADVISOR_DIR, 'AdvisorPanel.tsx'), 'utf8'))
   assert.doesNotMatch(panel, /\bisEn\b/u, 'isEn（读 navigator.language）必须删除')
   assert.doesNotMatch(panel, /OUTCOME_ZH|OUTCOME_EN/u, '私有结果标签表必须并入注册字典')
   assert.doesNotMatch(panel, /STATUS_META\[[^\]]*\]\.label/u, 'STATUS_META 只存键，文案经 statusMeta(status, t)')
-  assert.match(panel, /function statusMeta\(status[^)]*t: Translate/u)
-  assert.match(panel, /function severityMeta\(severity[^)]*t: Translate/u)
-  assert.match(panel, /function outcomeLabel\(outcome[^)]*t: Translate/u)
-  assert.match(panel, /function formatAgo\(ts[^)]*t: Translate/u)
+  assert.match(panel, new RegExp(`function statusMeta\\(status[^)]*${T_PARAM}`, 'u'))
+  assert.match(panel, new RegExp(`function severityMeta\\(severity[^)]*${T_PARAM}`, 'u'))
+  assert.match(panel, new RegExp(`function outcomeLabel\\(outcome[^)]*${T_PARAM}`, 'u'))
+  assert.match(panel, new RegExp(`function formatAgo\\(ts[^)]*${T_PARAM}`, 'u'))
 })
 
 test('advisor-store：notice/错误文案经注入的 t（不再有硬编码中文）', () => {
   const store = codeOnly(readFileSync(join(ADVISOR_DIR, 'advisor-store.ts'), 'utf8'))
-  assert.match(store, /constructor\(sessionId: string, t: Translate\)/u, 't 必须在构造期注入')
-  assert.match(store, /setTranslate\(t: Translate\)/u, '热重载/多实例要能同步最新 t')
-  assert.match(store, /useAdvisorSessionStore\(sessionId: string, t: Translate\)/u)
-  assert.match(store, /function errorText\(error: unknown, t: Translate\)/u)
+  assert.match(store, new RegExp(`constructor\\(sessionId: string, ${T_PARAM}\\)`, 'u'), 't 必须在构造期注入')
+  assert.match(store, new RegExp(`setTranslate\\(${T_PARAM}\\)`, 'u'), '热重载/多实例要能同步最新 t')
+  assert.match(store, new RegExp(`useAdvisorSessionStore\\(sessionId: string, ${T_PARAM}\\)`, 'u'))
+  assert.match(store, new RegExp(`function errorText\\(error: unknown, ${T_PARAM}\\)`, 'u'))
   const cjk = store.split('\n')
     .map((line, index) => ({ line, index: index + 1 }))
     .filter(({ line }) => !/^\s*(\*|\/\/|\/\*)/u.test(line))

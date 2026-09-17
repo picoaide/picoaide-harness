@@ -3,12 +3,12 @@
  * 「⧉ 复制会话ID」+「✎ 别名」两个按钮并排。strict-session slot 自动
  * 注入 sessionId；t 由插件闭包传入。
  */
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 import { CopySessionIdButton } from './CopySessionIdButton.tsx'
 import { AliasButton } from './AliasButton.tsx'
 
 /** @param props - 标准 session slot props + 翻译函数。 */
-export function HeaderActions(props: { sessionId: string; t: Translate }): JSX.Element {
+export function HeaderActions(props: { sessionId: string; t: MemoryEvolveTranslate }): JSX.Element {
   return (
     <>
       <CopySessionIdButton {...props} />

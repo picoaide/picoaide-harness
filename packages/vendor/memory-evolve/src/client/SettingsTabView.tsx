@@ -17,7 +17,7 @@
  */
 import { useEffect, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 import { MemoryQueueView } from './MemoryQueueView.tsx'
 import { VersionTabView } from './VersionTabView.tsx'
 
@@ -26,7 +26,7 @@ type SettingsFeature = 'guide' | 'config' | 'version'
 
 /** Locale-bound props（memory-evolve 命名空间）。 */
 export interface SettingsTabViewProps {
-  t: Translate
+  t: MemoryEvolveTranslate
 }
 
 /** 跨重挂持久化的子 tab 选择（模块级：badge 刷新导致组件重挂后恢复）。 */

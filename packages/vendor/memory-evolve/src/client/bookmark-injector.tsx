@@ -28,7 +28,7 @@
  * 中间轮不打星（与官方 turnTail 只渲染轮尾的语义一致）。
  */
 import { createRoot, type Root } from 'react-dom/client'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { MemoryEvolveTranslate } from './index.ts'
 import { TurnBookmarkButton } from './TurnBookmarkButton.tsx'
 
 /** 注入的星标宿主容器 data 标记（保活重扫时跳过已注入的）。 */
@@ -162,7 +162,7 @@ function extractSummary(node: HTMLElement, root: HTMLElement): string {
  */
 export function createBookmarkInjector(
   getSessionId: () => string,
-  deps: { t: Translate },
+  deps: { t: MemoryEvolveTranslate },
 ): BookmarkInjector {
   let disposed = false
   let observer: MutationObserver | null = null
