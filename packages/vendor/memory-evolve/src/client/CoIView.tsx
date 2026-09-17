@@ -120,15 +120,6 @@ interface Notice {
  */
 type DictKey = Extract<MemoryEvolveKey, `coi.${string}`>
 
-/**
- * 把归属层级 id 映射成字典键。
- *
- * 2026-09-17 第 12 轮审计 F2：原先三处调用点写成 ``t(`coi.scope.${s}` as DictKey)``
- * —— `as` 断言**直接绕过键检查**，于是 `coi.scope.*` 一族在类型系统下无人看管
- * （删键后 tsc 只在别处报错，这三处零报错）。
- * 改成显式收窄的映射函数后，返回类型标注会把检查点**钉在这个函数上**：
- * 删掉任一 `coi.scope.<id>` ⇒ 这里立刻 TS2322。调用点也就不再需要断言。
- */
 type ScopeId = (typeof SCOPES)[number]
 
 /**
