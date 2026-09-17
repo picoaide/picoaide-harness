@@ -46,7 +46,7 @@ The same pattern is used for: the capability center entry (`sidebar.footer.actio
 - Service-class packages default-export a service class; function plugins only have named exports `name` / `inject` / `Config` / `apply`;
 - Host plugins provide capabilities through official services such as `webServer` / `apiProxy` / `tools` / `systemPrompt`;
 - **Loopback API pattern** (the common approach for connectors/scheduled tasks/browser): the plugin registers same-origin HTTP APIs (`/api/pico/...`), which the client UI consumes via fetch; `isLoopbackRequest` / `browserSameOriginMarker` validate that the request comes from a same-origin client;
-- **Model tool registration**: `ctx.tools.register(defineTool({...}))` — scheduled tasks expose `cron_create`/`cron_list`/`cron_set_enabled`/`cron_run`; the browser exposes the `browser_*` tool group; tools are registered inside `ctx.effect` so they can be unloaded;
+- **Model tool registration**: `ctx.tools.register(defineTool({...}))` — scheduled tasks expose `cron_create`/`cron_list`/`cron_set_enabled`/`cron_run`/`cron_remove`; the browser exposes the `browser_*` tool group; tools are registered inside `ctx.effect` so they can be unloaded;
 - **Cross-plugin events**: types are only declared (`declare module '@deepseek-ai/cordis'`); runtime events are emitted by their owner — e.g. `pico/session-changed` (owned by enterprise, only consumed by connectors/cron/browser).
 
 ## Common Constraints Checklist

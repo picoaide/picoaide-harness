@@ -46,7 +46,7 @@ ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
 - 服务类包默认导出服务类；函数插件仅命名导出 `name` / `inject` / `Config` / `apply`；
 - Host 插件通过 `webServer` / `apiProxy` / `tools` / `systemPrompt` 等官方服务提供能力；
 - **loopback API 模式**（连接器/定时任务/浏览器的通用做法）：插件注册同源 HTTP API（`/api/pico/...`），客户端 UI 通过 fetch 消费；`isLoopbackRequest` / `browserSameOriginMarker` 校验请求来自同源客户端；
-- **模型工具注册**：`ctx.tools.register(defineTool({...}))`——定时任务暴露 `cron_create`/`cron_list`/`cron_set_enabled`/`cron_run`；浏览器暴露 `browser_*` 工具组；工具在 `ctx.effect` 内注册以便卸载；
+- **模型工具注册**：`ctx.tools.register(defineTool({...}))`——定时任务暴露 `cron_create`/`cron_list`/`cron_set_enabled`/`cron_run`/`cron_remove`；浏览器暴露 `browser_*` 工具组；工具在 `ctx.effect` 内注册以便卸载；
 - **跨插件事件**：类型只声明（`declare module '@deepseek-ai/cordis'`），运行时事件由拥有者发出——如 `pico/session-changed`（enterprise 拥有，connectors/cron/browser 只消费）。
 
 ## 常用约束清单
