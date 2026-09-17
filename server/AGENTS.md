@@ -80,7 +80,7 @@ data/                  # 服务端运行时数据(0700,gitignore);数据库在 P
 - **REST 错误**:`{"error":{"code":"ERR_CODE","message":"..."}}`;`AUTH_REQUIRED`/`AUTH_FAILED`/`FORBIDDEN`(管理端)/`NOT_FOUND`/`VALIDATION`/`UPSTREAM`/`RATE_LIMITED`/`INTERNAL`(健康探针与 404 NoRoute 同信封)
 - **bootstrap**:`{default_model, models, skills, web, connectors}`(接入方对 skills/web 缺省值兜底;connectors 为服务端连接器目录,0042 起)
 - **员工用量接口**:`GET /api/client/v2/auth/usage` → `{balance_money, balance_activated, balance_enabled, balance_monthly, balance_mode, is_admin, today/yesterday/monthly/total usage+cost}`(账户卡的数据源;字段集合是**跨语言契约**,由 `server/internal/serverauth/usage_contract_test.go` 与 `packages/client/account-card/src/usage-contract.ts` 对拍)
-- **DB**:PostgreSQL 唯一,迁移 `internal/serverstore/migrations-pg/` 0001–0062(0034 shared_skills 多版本、0035 agent_presets 多版本、0036 共享授权、0037 quality、0039 usage 分区 + 日/月账本、0040/0041 归档直存 DB、0042 connectors、0043/0044 provider protocol、0045 glitchtip 下架、0046 rbac 角色、0048 审计哈希链、0057 管理员 MFA、0061/0062 员工余额与账本)
+- **DB**:PostgreSQL 唯一,迁移 `internal/serverstore/migrations-pg/` 0001–0068(0034 shared_skills 多版本、0035 agent_presets 多版本、0036 共享授权、0037 quality、0039 usage 分区 + 日/月账本、0040/0041 归档直存 DB、0042 connectors、0043/0044 provider protocol、0045 glitchtip 下架、0046 rbac 角色、0048 审计哈希链、0057 管理员 MFA、0061/0062 员工余额与账本、0063 usage.estimated、0064 TOTP 防重放、0065 usage.provider_id、0066 管理会话 secret_hash、0067 外部身份绑定、0068 客户端错误上报状态)
 - **审计契约**:`GET /api/server/admin/audit?page=&size=&action=&username=`(敏感操作留痕;默认保留 180 天,settings `audit.retention_days` 可配;0048 起哈希链防篡改)
 - **费用口径**:cost 记录时按 输入×input_price/1e6 + 输出×output_price/1e6(缓存命中另按 `cache_input_price_per_1m`,0029),高峰窗口(settings `usage.peak_windows`,北京时间)外 × `offpeak_discount`;员工侧不再有"配额/剩余"概念(见上条),拦截只看账户余额
 

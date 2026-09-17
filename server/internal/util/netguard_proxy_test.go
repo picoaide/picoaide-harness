@@ -3,6 +3,7 @@ package util
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -249,6 +250,44 @@ func TestOutboundGuardAllowsLegitimateTargets(t *testing.T) {
 		if err := CheckOutboundTarget(ctx, host); err == nil {
 			t.Errorf("CheckOutboundTarget(%q) = nil, want 拦截", host)
 		}
+	}
+}
+
+// TestOutboundGuardDistinguishesPolicyFromDnsFailure(N4,2026-09-17 独立验证):
+// CheckOutboundTarget 同时承担"策略判定"与"DNS 解析"两职 —— 调用方必须能分辨
+// 二者,否则会把"域名解析不了"报成"被安全护栏拦截…这是安全策略"(已实测到的
+// 倒退)。判据是 OutboundBlockedError 类型,不是"这个函数返回了错误"。
+func TestOutboundGuardDistinguishesPolicyFromDnsFailure(t *testing.T) {
+	ctx := context.Background()
+	for _, host := range []string{
+		"169.254.169.254", "169.254.170.2", "100.100.100.200",
+		"metadata.google.internal", "fd00:ec2::254",
+	} {
+		err := CheckOutboundTarget(ctx, host)
+		if err == nil {
+			t.Fatalf("CheckOutboundTarget(%q) = nil, want 拦截", host)
+		}
+		if !IsOutboundBlocked(err) {
+			t.Errorf("CheckOutboundTarget(%q) 是策略拒绝,但 IsOutboundBlocked = false(%v)", host, err)
+		}
+	}
+	// 解析不了的域名:原样带 *net.DNSError 返回,**不得**算策略拒绝。
+	// 用含空标签的非法域名("a..b"):由解析器**本地**拒绝,不依赖外部 DNS 的回应
+	// (独立验证 F3:此前用 .invalid,在"什么都解析"的解析器环境下会空判)。
+	err := CheckOutboundTarget(ctx, "a..b")
+	if err == nil {
+		t.Skip("本环境的解析器把 a..b 也解析成功了:无法覆盖 DNS 失败分支")
+	}
+	if IsOutboundBlocked(err) {
+		t.Fatalf("DNS 解析失败被当成策略拒绝: %v", err)
+	}
+	var dnsErr *net.DNSError
+	if !errors.As(err, &dnsErr) {
+		t.Fatalf("want *net.DNSError, got %T: %v", err, err)
+	}
+	// 空主机是参数错误,同样不是策略拒绝(它没有"目标"可言)。
+	if IsOutboundBlocked(CheckOutboundTarget(ctx, "")) {
+		t.Error("空主机是参数错误,不该算策略拒绝")
 	}
 }
 

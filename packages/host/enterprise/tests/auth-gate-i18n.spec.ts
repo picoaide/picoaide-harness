@@ -78,7 +78,9 @@ const EN_MARKERS = [
  * 1) CodeQL `js/incomplete-multi-character-sanitization` 会（正确地）指出
  *    "用一条正则删 `<script>…</script>` 可被嵌套/畸形标签绕过" —— 这个助手
  *    本身不是安全边界，但它没必要长成被拦的形态；
- * 2) 扫描版对"未闭合块"的语义是显式的（其后全部视为块内），比非贪婪正则好读。
+ * 2) 扫描版对"未闭合块"的语义是显式的 —— **未闭合即抛错**：独立复核
+ *    2026-09-17 指出，若把"未闭合"当成"其后全部视为块内"，畸形输入会让断言
+ *    **少扫一段却仍然通过**（判别力静默变松）。测试助手应当响亮地失败。
  * @param html - 完整页面 HTML。
  * @param tag - 标签名（不含尖括号，如 `script`）。
  * @returns 剔除该块后的字符串。
@@ -93,12 +95,12 @@ function stripTagBlock(html: string, tag: string): string {
     if (start < 0) return out + rest
     out += rest.slice(0, start)
     const end = rest.toLowerCase().indexOf(close, start)
-    if (end < 0) return out // 未闭合：其后全部视为块内
+    if (end < 0) throw new Error(`stripTagBlock: unterminated <${tag}> — the assertion would silently skip the rest`)
     rest = rest.slice(end + close.length)
   }
 }
 
-/** 剔除 HTML 注释（同样是扫描，不用正则替换）。 */
+/** 剔除 HTML 注释（同样是扫描，不用正则替换；未闭合即抛错，理由同上）。 */
 function stripHtmlComments(html: string): string {
   let out = ''
   let rest = html
@@ -107,7 +109,7 @@ function stripHtmlComments(html: string): string {
     if (start < 0) return out + rest
     out += rest.slice(0, start)
     const end = rest.indexOf('-->', start)
-    if (end < 0) return out
+    if (end < 0) throw new Error('stripHtmlComments: unterminated <!-- — the assertion would silently skip the rest')
     rest = rest.slice(end + '-->'.length)
   }
 }

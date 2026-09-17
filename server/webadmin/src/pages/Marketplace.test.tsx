@@ -103,8 +103,12 @@ describe('Marketplace 商城页', () => {
     fireEvent.click(screen.getAllByRole('button', { name: '授权' })[0])
     const dialog = within(await screen.findByRole('dialog'))
     expect(await dialog.findByText(/一个资源可授权多个部门/)).toBeInTheDocument()
+    // 授权列表落地前写面是锁的（R3 闸门）：必须等到按钮真的可点再点，否则负载下
+    // 这一击会被 disabled 吞掉（+400ms 注入即红）。
+    const saveBtn = dialog.getByRole('button', { name: '保存部门授权' })
+    await waitFor(() => expect(saveBtn).toBeEnabled())
     fireEvent.click(dialog.getByLabelText(/研发部/))
-    fireEvent.click(dialog.getByRole('button', { name: '保存部门授权' }))
+    fireEvent.click(saveBtn)
     expect(confirmSpy).toHaveBeenCalled()
     expect(mockRequest).toHaveBeenCalledWith(
       '/api/server/admin/skills/data-extract/grants',
@@ -124,6 +128,70 @@ describe('Marketplace 商城页', () => {
       '/api/server/admin/skills/data-extract/grants',
       expect.objectContaining({ method: 'PUT' }),
     )
+  })
+
+  it('R3: 授权列表读取失败时不可保存(否则空列表会清空全部部门授权)', async () => {
+    // 2026-09-17 独立验证 R3：`grants` 初值是空数组，读取失败时页面照样渲染
+    // 「未授权:所有用户均不可见(严格默认)」且保存可点 ⇒ PUT {groups: []} 清空部门授权。
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/skills/data-extract/grants') throw new Error('授权列表读取失败')
+      if (path === '/api/server/admin/skills/data-extract/grants' && init?.method === 'PUT') return { ok: true }
+      if (path === '/api/server/admin/departments') return { departments: DEPTS }
+      if (path === '/api/server/admin/skills') return { skills: SKILLS }
+      return {}
+    })
+    render(<Marketplace />)
+    await screen.findByText('data-extract')
+    fireEvent.click(screen.getAllByRole('button', { name: '授权' })[0])
+    const dialog = within(await screen.findByRole('dialog'))
+    expect(await dialog.findByText(/授权列表未加载成功/)).toBeInTheDocument()
+    // 不得把"没读到"渲染成"未授权"（那正是会诱导管理员点保存的假状态）。
+    expect(dialog.queryByText(/未授权:所有用户均不可见/)).not.toBeInTheDocument()
+    const saveBtn = dialog.getByRole('button', { name: '保存部门授权' })
+    expect(saveBtn).toBeDisabled()
+    fireEvent.click(saveBtn)
+    expect(mockRequest).not.toHaveBeenCalledWith(
+      '/api/server/admin/skills/data-extract/grants',
+      expect.objectContaining({ method: 'PUT' }),
+    )
+  })
+
+  it('5-1: 换资源后不得展示上一份资源的授权(否则撤销会打到新资源上)', async () => {
+    // 2026-09-17 第二轮独立验证 P2：对话框是常挂载的，`grants` 只在请求成功后才覆盖 ⇒
+    // "打开 A（已加载完）→ 关闭 → 打开 B（B 还在路上）"的窗口里显示的是 **A 的授权**，
+    // 撤销按钮可点，实测发出 `DELETE /skills/legacy/grant {"group":"研发部"}` —— 把 A 的
+    // 授权对象删到了 B 上。修法=资源切换时在渲染期同步归零 + 列表/撤销都过 grantsLoaded。
+    // 注：jsdom 里 act() 会把 effect 一并冲掉，所以"渲染期归零"与"列表闸门"两种机制
+    // 单看都能让本用例通过（变异验证：只拆任一个仍绿，两个一起拆才红）。真实浏览器里
+    // effect 在绘制之后，那一帧的窗口只有渲染期归零能关上。
+    let releaseB!: () => void
+    const gateB = new Promise<void>((resolve) => { releaseB = resolve })
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/server/admin/skills/data-extract/grants') return { grants: [{ grantee_type: 'group', grantee: '研发部' }] }
+      if (path === '/api/server/admin/skills/legacy/grants') { await gateB; return { grants: [] } }
+      if (path === '/api/server/admin/departments') return { departments: DEPTS }
+      if (path === '/api/server/admin/skills') return { skills: SKILLS }
+      return {}
+    })
+    render(<Marketplace />)
+    await screen.findByText('data-extract')
+    const cardOf = (name: string) => within(screen.getByText(name).closest<HTMLElement>('[class*="group"]')!)
+    // 打开 A，等它的授权落地
+    fireEvent.click(cardOf('data-extract').getByRole('button', { name: '授权' }))
+    expect(await within(await screen.findByRole('dialog')).findByText('@研发部')).toBeInTheDocument()
+    // 关闭，再打开 B（B 的列表挂起）
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    fireEvent.click(cardOf('legacy').getByRole('button', { name: '授权' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    expect(dialog.queryByText('@研发部')).toBeNull()
+    expect(dialog.queryByRole('button', { name: '撤销' })).toBeNull()
+    expect(dialog.getByRole('button', { name: '保存部门授权' })).toBeDisabled()
+    expect(mockRequest).not.toHaveBeenCalledWith(
+      '/api/server/admin/skills/legacy/grant',
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+    releaseB()
   })
 
   it('M1: 已下架技能显示「重新上架」并调用 enable 端点', async () => {

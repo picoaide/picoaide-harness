@@ -91,6 +91,11 @@ export default function ErrorMonitoring() {
   // 已加载闸门（2026-09-17 审计 P3）：计数块在数据到达前渲染 `?? 0` 会闪"0 台"，
   // 与"绝不把没有数据渲染成一切正常"直接冲突。
   const [clientsLoaded, setClientsLoaded] = useState(false)
+  // 写面闸门（2026-09-17 独立验证 R2，与 F5/R1 同族）：`cfg` 的初值是
+  // `enabled=false` + 空 DSN，而 `load()` 失败时写面照样解锁 —— 此时点保存会提交
+  // `PUT {error_reporting_enabled:false, error_reporting_dsn:""}`：**关掉错误上报并
+  // 抹掉已配的 DSN**（后果比 Gateway 那条更重）。解锁条件必须是"配置真的读到了"。
+  const [cfgLoaded, setCfgLoaded] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -105,8 +110,10 @@ export default function ErrorMonitoring() {
         glitchtip_base_url: g.glitchtip_base_url ?? '',
         glitchtip_organization: g.glitchtip_organization ?? '',
       })
+      setCfgLoaded(true)
     } catch (err: any) {
       setError(err.message)
+      setCfgLoaded(false)
     } finally {
       setLoading(false)
     }
@@ -204,7 +211,9 @@ export default function ErrorMonitoring() {
         `${res?.note ? ' ' + res.note : ''}`,
       )
     } catch (err: any) {
-      // 失败原因由服务端分类(DNS/CONNECT/TLS/TIMEOUT/HTTP_4XX/HTTP_5XX),见 detail.kind。
+      // 失败原因由服务端分类,这里只做展示(不在前端枚举 kind,免得新增一类就漏一个):
+      // DNS / CONNECT / TLS / TIMEOUT / BLOCKED(出站护栏) / HTTP_3XX / HTTP_4XX /
+      // HTTP_5XX / CANCELED(自检被中断) / UNKNOWN(兜底)。
       setTestErr(err?.detail?.kind ? `${err.message}(${err.detail.kind})` : err.message)
     } finally {
       setTestBusy(false)
@@ -236,6 +245,11 @@ export default function ErrorMonitoring() {
         <CardContent className="space-y-4">
           {loading ? (
             <p className="text-sm text-muted-foreground">加载中…</p>
+          ) : !cfgLoaded ? (
+            // 失败时不渲染表单（渲染出来的是"未启用 + 空 DSN"的假状态，保存还会把它写回）。
+            <p className="text-sm text-destructive">
+              配置未加载成功，表单与保存已锁定（避免把"未启用 + 空 DSN"当成新配置写回，那会关掉错误上报并抹掉 DSN）——请重新加载页面重试。
+            </p>
           ) : (
             <>
               <div className="flex items-center gap-2">
@@ -382,8 +396,11 @@ export default function ErrorMonitoring() {
         </CardContent>
       </Card>
 
-      <div className="flex justify-end">
-        <Button onClick={save} disabled={busy}>{busy ? '保存中…' : '保存'}</Button>
+      <div className="flex items-center justify-end gap-3">
+        {!loading && !cfgLoaded && (
+          <span className="text-xs text-destructive">配置未加载成功，保存已锁定</span>
+        )}
+        <Button onClick={save} disabled={busy || !cfgLoaded}>{busy ? '保存中…' : '保存'}</Button>
       </div>
     </div>
   )
