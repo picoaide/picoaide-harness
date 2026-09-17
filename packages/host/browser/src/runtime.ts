@@ -45,8 +45,16 @@ const DEFAULT_LOAD_TIMEOUT_MS = 20_000
  * (real-device report 2026-09-12: `tool call timed out after 30000ms`).
  */
 const SCREENSHOT_PRIMARY_BUDGET_MS = 8_000
-/** Share of the call budget the renderer-side capture must keep in reserve (ms). */
+/**
+ * Share of the call budget the renderer-side capture must keep in reserve (ms).
+ *
+ * It is the fallback's OWN bound as well (see
+ * {@link BrowserRuntime.screenshotFallbackBudgetMs}) — reserving it without
+ * enforcing it left the fallback able to eat the whole tool deadline.
+ */
 const SCREENSHOT_FALLBACK_RESERVE_MS = 5_000
+/** Margin kept between the two bounded capture attempts and the tool deadline (ms). */
+const SCREENSHOT_DEADLINE_MARGIN_MS = 1_000
 /** Op-log ring size. */
 const OP_LOG_LIMIT = 200
 /**
@@ -1904,10 +1912,13 @@ export class BrowserRuntime {
         // CDP path composites the frame without a surface, so screenshots keep
         // working for an agent-driven (never shown) window.
         try {
-          const fallback = await captureScreenshotViaCdp(
-            (method, params) => tab.cdp.send(method, params),
-            this.options.screenshotMaxWidth,
-            this.options.screenshotQuality,
+          const fallback = await withScreenshotBudget(
+            captureScreenshotViaCdp(
+              (method, params) => tab.cdp.send(method, params),
+              this.options.screenshotMaxWidth,
+              this.options.screenshotQuality,
+            ),
+            this.screenshotFallbackBudgetMs(),
           )
           this.record('browser_screenshot', resolved, `capturePage unavailable (${primary}); captured via CDP fromSurface:false`, false, 'ai', SCREENSHOT_FALLBACK_SUMMARY_LIMIT)
           return fallback
@@ -1954,6 +1965,26 @@ export class BrowserRuntime {
       SCREENSHOT_PRIMARY_BUDGET_MS,
       Math.max(1_000, this.options.timeoutMs - SCREENSHOT_FALLBACK_RESERVE_MS),
     )
+  }
+
+  /**
+   * Budget for the renderer-side (CDP) capture attempt: the reserve share of
+   * the call budget, never more than what the primary attempt left behind.
+   *
+   * 2026-09-17 (real-device report, Windows client 2.7.5-beta.4): the primary
+   * `capturePage()` attempt was bounded, but this fallback was awaited
+   * **unbounded** — a renderer that never produces a frame made the whole call
+   * run into the tool deadline, and the model only ever saw
+   * `tool call timed out after 30000ms` (twice, on two different sites) with
+   * nothing pointing at the capture being stuck. `budgets.ts` documents the
+   * invariant as "8s native + 5s renderer fallback" *inside* the 30s tool
+   * budget; without this bound that invariant does not hold. Both attempts are
+   * bounded now, so a stall reports itself instead of being replaced by the
+   * upstream timeout policy.
+   */
+  private screenshotFallbackBudgetMs(): number {
+    const remaining = this.options.timeoutMs - this.screenshotPrimaryBudgetMs() - SCREENSHOT_DEADLINE_MARGIN_MS
+    return Math.max(1_000, Math.min(SCREENSHOT_FALLBACK_RESERVE_MS, remaining))
   }
 
   /**

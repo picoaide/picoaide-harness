@@ -149,12 +149,12 @@ class MockAdapter implements ElectronAdapter {
   lastWindow(): { visible: boolean; destroyed: boolean } { return this.windows.at(-1)! }
 }
 
-function makeRuntime(): { runtime: BrowserRuntime; adapter: MockAdapter; dir: string } {
+function makeRuntime(options: { timeoutMs?: number } = {}): { runtime: BrowserRuntime; adapter: MockAdapter; dir: string } {
   const adapter = new MockAdapter()
   const dir = join(process.cwd(), 'tests', `.hidden-store-${Math.random().toString(36).slice(2)}`)
   mkdirSync(dir, { recursive: true })
   const store = new BrowserStore({ dir })
-  const runtime = new BrowserRuntime(adapter as never, {}, undefined, undefined, { store })
+  const runtime = new BrowserRuntime(adapter as never, options, undefined, undefined, { store })
   return { runtime, adapter, dir }
 }
 
@@ -390,4 +390,31 @@ describe('browser_screenshot 在无渲染表面时退到 CDP fromSurface:false',
     expect(runtime.opLog.find((entry) => entry.tool === 'browser_screenshot')?.failed).toBe(true)
     runtime.dispose(); rmSync(dir, { recursive: true, force: true })
   })
+
+  it('渲染器侧抓帧卡住时按预算收口，不拖到工具 deadline（2026-09-17 真机形态）', async () => {
+    // 现场（Windows 客户端 2.7.5-beta.4）：`browser_screenshot` 在 example.com 与
+    // the-internet 上各超时一次，模型只看到 `tool call timed out after 30000ms`。
+    // 原生 `capturePage()` 当时已按 8s 预算收口，但 CDP 回落是**无界** await ——
+    // 渲染器不产帧时它一直挂着，直到上游 timeout-policy 把整个结果换掉，
+    // "哪一段卡住" 的信息一次都送不出去。本用例把回落改成永不 settle：调用必须
+    // 在工具预算内以自带原因的失败收口。
+    const { runtime, adapter, dir } = makeRuntime({ timeoutMs: 2_500 })
+    await runtime.open('https://a.example')
+    const view = adapter.lastView()
+    view.captureError = new Error('Current display surface not available for capture')
+    view.transport.handler = (method) => (method === 'Page.getLayoutMetrics' ? new Promise(() => {}) : {})
+
+    const started = Date.now()
+    const error = await runtime.screenshot(1).then(() => null, (cause: unknown) => cause as Error)
+    const elapsed = Date.now() - started
+
+    expect(error, '必须失败，而不是一直挂着').not.toBeNull()
+    expect(error?.message).toMatch(/did not settle within/u)
+    // 两条路的原因都要留下：原生那条 + 渲染器回落那条。
+    expect(error?.message).toMatch(/display surface not available/u)
+    expect(error?.message).toMatch(/renderer-side fallback/u)
+    expect(elapsed, '必须在工具预算内收口（budgets.ts：内部等待必须短于工具 deadline）').toBeLessThan(2_500)
+    expect(runtime.opLog.find((entry) => entry.tool === 'browser_screenshot')?.failed).toBe(true)
+    runtime.dispose(); rmSync(dir, { recursive: true, force: true })
+  }, 15_000)
 })

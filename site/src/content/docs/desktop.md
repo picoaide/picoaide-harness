@@ -105,7 +105,7 @@ description: PicoAide Harness 桌面客户端的完整功能与操作指南：�
 - 每次执行会**新建一个智能体会话**（指定工作区、预设与权限），把任务提示词发给该会话；
 - 执行详情：触发时间、开始/结束时间、结果（成功/失败/已取消）、错误信息、**打开的会话**——可从详情直接跳到该会话继续（session jump）；
 - 支持手动「立即执行」；任务可启用/停用/删除；
-- 模型可直接调用 `cron_create` / `cron_list` / `cron_set_enabled` / `cron_run` 工具——但用户始终可以在界面上看到并管理这些任务（AI 只提议、人决定）。
+- 模型可直接调用 `cron_create` / `cron_list` / `cron_set_enabled` / `cron_run` / `cron_remove` 工具——但用户始终可以在界面上看到并管理这些任务（AI 只提议、人决定）。
 
 ### 设置
 

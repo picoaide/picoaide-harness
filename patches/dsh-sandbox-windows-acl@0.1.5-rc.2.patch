@@ -1,0 +1,30 @@
+--- a/lib/types-DuU3lSVe.js
++++ b/lib/types-DuU3lSVe.js
+@@ -369,6 +369,18 @@
+ 	};
+ }
+ /**
++* Desktop patch (PicoAide Harness, 2026-09-17): ERROR_ACCESS_DENIED (Win32 5)
++* from SetNamedSecurityInfoW is a WORKSPACE property, not a transient API
++* failure, and the bare "SetNamedSecurityInfoW failed (Win32 5)" line leaves the
++* operator with nothing to act on (real-device report: every command in that
++* workspace failed and each one needed its own permission escalation). Writing
++* a DACL requires the caller to OWN the directory (ownership implies
++* WRITE_DAC), so the hint below names the situations that break that
++* precondition and the two ways out of it.
++*/
++const ERROR_ACCESS_DENIED = 5;
++const DACL_WRITE_DENIED_HINT = " - the directory's DACL is not writable by this process: writing a DACL requires owning the directory (or holding WRITE_DAC). A workspace on a mapped network drive, a directory reached through a junction or symbolic link elsewhere, a cloud-sync placeholder, a non-NTFS volume, a folder owned by another account, or a DACL protected by security software all fail here. Move the workspace to a local NTFS directory created by this account, or run this session with the fully permissive permission preset instead of the sandboxed one.";
++/**
+ * Shared tail of grantWrite and revokeWrite: merge `entry` into `oldAcl`
+ * (null = no explicit DACL yet; SetEntriesInAclW builds one from scratch),
+ * free the descriptor before applying the merged ACL, apply it, then free the
+@@ -395,7 +407,7 @@
+ 	const freedDescriptor = descriptor !== null ? api.localFree(descriptor) : null;
+ 	const applyResult = api.setNamedSecurityInfoW(path, 1, 4, null, null, newAcl, null);
+ 	const freedNew = api.localFree(newAcl);
+-	if (applyResult !== 0) throwWin32(api, "SetNamedSecurityInfoW", applyResult, `${label}(${path})`);
++	if (applyResult !== 0) throwWin32(api, "SetNamedSecurityInfoW", applyResult, `${label}(${path})${applyResult === ERROR_ACCESS_DENIED ? DACL_WRITE_DENIED_HINT : ""}`);
+ 	if (freedDescriptor !== null && !isNullPtr$1(freedDescriptor)) throwLastError$1(api, "LocalFree", `${label}(${path}) descriptor`);
+ 	if (!isNullPtr$1(freedNew)) throwLastError$1(api, "LocalFree", `${label}(${path}) new ACL`);
+ }

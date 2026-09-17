@@ -105,7 +105,7 @@ A task = cron expression + execution content + execution environment:
 - Each run **creates a new agent session** (with the specified workspace, preset, and permissions) and sends the task prompt to that session;
 - Execution details: trigger time, start/end time, result (Succeeded / Failed / Cancelled), error message, and the **opened session** — you can jump straight from the details to that session to continue (session jump);
 - Manual "Run now" is supported; jobs can be enabled/disabled/deleted;
-- Models can call the `cron_create` / `cron_list` / `cron_set_enabled` / `cron_run` tools directly — but users can always see and manage these tasks in the UI (AI only proposes, humans decide).
+- Models can call the `cron_create` / `cron_list` / `cron_set_enabled` / `cron_run` / `cron_remove` tools directly — but users can always see and manage these tasks in the UI (AI only proposes, humans decide).
 
 ### Settings
 
