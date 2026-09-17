@@ -138,6 +138,15 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
   const offenders = []
   for (const { relative: file, source } of SOURCES) {
     const arrays = constArrays(source)
+    // 2026-09-17 第 3 轮审计 R3-i18n-1:模板键的洞**几乎从不**是数组名本身,
+    // 真实形状是 `SCOPES.map((s) => t(`coi.scope.${s}`))` —— 洞是回调形参。
+    // 原实现只认 `arrays.has(hole)`,于是永远走不到枚举分支、退化成"前缀存在即可",
+    // 导致「只被模板引用的键」被删掉也全绿（实测 zh+en 删 3 个模板专有键 → 5/5 绿）。
+    // 这里先把 `NAME.map((VAR) => …)` / `NAME.map(VAR => …)` 的 VAR→NAME 关系建出来。
+    const mapVars = new Map()
+    for (const m of source.matchAll(/\b(\w+)\.map\(\s*\(?\s*(\w+)\s*\)?\s*=>/gu)) {
+      mapVars.set(m[2], m[1])
+    }
     for (const m of source.matchAll(/\b(?:t|say)\(\s*`([^`]*)`/gu)) {
       const template = m[1]
       const line = source.slice(0, m.index).split('\n').length
@@ -151,8 +160,14 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
         continue
       }
       const holes = [...template.matchAll(/\$\{([^}]*)\}/gu)].map((h) => h[1].trim())
-      const expandable = holes.length === 1 && /^[A-Za-z_$][\w$]*$/u.test(holes[0]) && arrays.has(holes[0])
-      const candidates = expandable ? arrays.get(holes[0]).map((item) => `${prefix}${item}`) : null
+      const holeName = holes.length === 1 ? holes[0] : null
+      // 洞可以解析成数组:① 洞本身就是数组名;② 洞是 `.map()` 的回调形参 ⇒ 用它的数组
+      let arrayName = null
+      if (holeName !== null && /^[A-Za-z_$][\w$]*$/u.test(holeName)) {
+        if (arrays.has(holeName)) arrayName = holeName
+        else if (mapVars.has(holeName) && arrays.has(mapVars.get(holeName))) arrayName = mapVars.get(holeName)
+      }
+      const candidates = arrayName === null ? null : arrays.get(arrayName).map((item) => `${prefix}${item}`)
       if (candidates !== null) {
         for (const key of candidates) {
           const miss = missing(key)
@@ -160,7 +175,13 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
         }
         continue
       }
-      // 动态值无法静态枚举：退化为"前缀必须至少命中一个键"
+      // 动态值无法静态枚举（洞是表达式，如 `${state.status ?? 'unknown'}`、
+      // `${activeRow.key}`）：退化为"前缀必须至少命中一个键"。
+      //
+      // ★ 已知边界（2026-09-17 第 3 轮审计 R3-i18n-1 残留）：这类**表达式洞**下，
+      // 「只被该模板引用的键」被删掉仍不会被发现（前缀仍有别的键）。要真正覆盖
+      // 需要类型检查（本包门禁不做 tsc）或运行时键审计，超出本守卫能力，故显式
+      // 记录而非假装覆盖。可枚举的形态（数组名或 `.map()` 回调形参）已真正展开。
       if (![...ZH_KEYS].some((key) => key.startsWith(prefix))) {
         offenders.push(`${file}:${line}: t(\`${template}\`) 的前缀 '${prefix}' 在 zh 字典里没有任何键`)
       } else if (![...EN_KEYS].some((key) => key.startsWith(prefix))) {
