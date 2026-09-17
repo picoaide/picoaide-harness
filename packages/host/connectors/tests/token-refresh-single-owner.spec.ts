@@ -70,6 +70,51 @@ function refreshGrants(server: RealMcpServer): number {
   return server.stats.grants.filter(g => g === 'refresh_token').length
 }
 
+describe('SDK 自己续期后，旋转后的 refresh token 必须已经落盘', () => {
+  it('saveTokens 返回时磁盘上就是新令牌（不能 fire-and-forget）', async () => {
+    // 现场（2026-09-17 flake 定案）：`onPersist` 原来是 `void persist(...)`，
+    // 于是 `saveTokens` 在**持久化之前**就 resolve（实测旋转落盘比 SDK 调用返回晚
+    // 4–29ms）。随后任何读者（registerMcp 建 provider、restoreAll）都可能拿着
+    // 一枚**已被消费**的 refresh token 去续期 ⇒ 轮换复用检测吊销整个授权。
+    //
+    // 这里把落盘人为放慢，把"0–1ms 的巧合窗口"变成确定可观测的窗口：
+    // 未修版本在 `saveTokens` 返回后立刻读盘会看到旧令牌。
+    const proto = ConnectorStore.prototype as unknown as {
+      writeCredentialUnlocked: (...args: unknown[]) => Promise<void>
+    }
+    const originalWrite = proto.writeCredentialUnlocked
+    vi.spyOn(proto, 'writeCredentialUnlocked').mockImplementation(async function (
+      this: ConnectorStore,
+      ...args: unknown[]
+    ) {
+      await new Promise(r => setTimeout(r, 200))
+      return await originalWrite.apply(this, args)
+    })
+
+    const server = await startRealMcpServer()
+    servers.push(server)
+    const dir = mkdtempSync(join(tmpdir(), 'persist-window-'))
+    await authorizeOnce(dir, server)
+
+    const h = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
+    await waitFor(() => h.configs.length === 1, 15_000)
+    const provider = (h.configs[0] as unknown as {
+      authProvider?: { saveTokens: (t: Record<string, unknown>) => Promise<void> }
+    }).authProvider
+    expect(provider, '注册时必须带上 SDK provider').toBeTruthy()
+
+    const store = new ConnectorStore({ baseDir: dir })
+    const before = await store.readCredential('example-a')
+    // 模拟 SDK 自己续期完成后的持久化点（SDK 就是这么调 saveTokens 的）。
+    await provider!.saveTokens({ access_token: 'at-sdk', refresh_token: 'rt-rotated', expires_in: 3600 })
+
+    const onDisk = await store.readCredential('example-a')
+    expect(onDisk?.refreshToken, 'saveTokens 返回时新 refresh token 必须已经落盘').toBe('rt-rotated')
+    expect(onDisk?.refreshToken).not.toBe(before?.refreshToken)
+    h.dispose()
+  }, 30_000)
+})
+
 describe('上游契约：SDK 必须 await provider.tokens()', () => {
   it('每一个 .tokens() 调用点都带 await（异步保鲜依赖这一点，升级上游必须重查）', async () => {
     // 我们把 provider 的 `tokens()` 改成"快过期先经单飞续期再交出"，这只有在
