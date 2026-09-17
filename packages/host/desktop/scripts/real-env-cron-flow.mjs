@@ -5,7 +5,7 @@
  * key state is screenshot.
  *
  * Usage:
- *   REAL_SERVER=https://harness.example.com REAL_USER=user001 REAL_PASS=user001123456 \
+ *   REAL_SERVER=https://harness.example.com REAL_USER=test-user REAL_PASS=test-password \
  *   node scripts/real-env-cron-flow.mjs --port 9224 --shots .real-env-cron-flow-shots
  */
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -23,8 +23,8 @@ const PORT = Number(arg('--port', '9224'))
 const shotsDir = arg('--shots', join(PACKAGE_ROOT, '.real-env-cron-flow-shots'))
 const reportPath = join(PACKAGE_ROOT, '.real-env-cron-flow-report.md')
 
-const SERVER = process.env.REAL_SERVER ?? 'https://harness.example.com'
-const USER = process.env.REAL_USER ?? 'user001'
+const SERVER = process.env.REAL_SERVER ?? (() => { throw new Error('REAL_SERVER is required') })()
+const USER = process.env.REAL_USER ?? 'test-user'
 const PASS = process.env.REAL_PASS ?? ''
 if (!PASS) { console.error('set REAL_PASS'); process.exit(2) }
 
