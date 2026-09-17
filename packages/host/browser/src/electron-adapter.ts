@@ -137,6 +137,28 @@ export interface NativeBrowserWindow {
   focus(): void
   isVisible(): boolean
   isDestroyed(): boolean
+  /**
+   * Whether the window is minimized (optional: test doubles and non-Electron
+   * adapters may omit it; "absent" means unknown and is treated as NOT
+   * minimized).
+   *
+   * 2026-09-17：焦点动作必须能区分"用户在看的窗口"与"被最小化/在后台的窗口"——
+   * 给最小化窗口的 webContents 抢焦点会让 Windows 把它恢复前台（用户报告
+   * 「最小化会自动弹出、切走一会儿又弹回来」）。
+   */
+  isMinimized?(): boolean
+  /**
+   * Whether the window currently holds OS focus (optional; absent means unknown
+   * and is treated as "may take focus").
+   */
+  isFocused?(): boolean
+  /**
+   * Observe the window GAINING OS focus (optional; returns an unsubscribe).
+   *
+   * 用户在窗口外时不得抢焦点，但用户把窗口带到前台时必须重新上锁键盘
+   * （P2-7）——这个事件是唯一的合法时机。
+   */
+  onFocus?(listener: () => void): () => void
   /** Truly close the window (agent-initiated; destroys all child views). */
   close(): void
   setTitle(title: string): void
@@ -145,6 +167,11 @@ export interface NativeBrowserWindow {
   readonly contentView: {
     addChildView(view: unknown): void
     removeChildView(view: unknown): void
+    /**
+     * Native child order, bottom-most first (optional; absent means unknown and
+     * callers fall back to an unconditional re-attach).
+     */
+    readonly children?: readonly unknown[]
   }
   /** Observe window resize (bounds recomputation). */
   onResize(listener: () => void): () => void
@@ -153,6 +180,52 @@ export interface NativeBrowserWindow {
   /** Focus the window's own webContents (toolbar shell page) — hands keyboard
    * shortcuts back after the overlay view releases focus. */
   focusPage(): void
+}
+
+/**
+ * Raise one NATIVE child view to the top of the window's child stack.
+ *
+ * Electron's `WebContentsView` z-order follows attach order, so the reliable
+ * way to bring a view forward is `removeChildView` + `addChildView`. Both calls
+ * are skipped when the view is ALREADY the last (top-most) child: Electron
+ * itself treats that as a no-op reorder, and attaching a view is reported to
+ * grab focus with no opt-out (electron/electron#42339; electron/electron#42922
+ * has no `focusable`).
+ *
+ * Evidence split (2026-09-17): the user report — "the browser window keeps
+ * popping back to the front, and restores itself from minimized" — is
+ * consistent with a focus grab on Windows; on Linux, direct measurement
+ * (temp/audit-0917-window-focus) shows `addChildView` itself does NOT activate
+ * the window, so the Windows half is inferred rather than reproduced. The
+ * redundant re-attaches this helper removes are real either way: before the fix
+ * every relayout (tab switch/close, resize, ledger restore, the resize Windows
+ * emits when minimizing) re-ordered two native views.
+ *
+ * When `contentView.children` is unavailable the helper falls back to the
+ * unconditional re-attach, which is always correct (only wasteful).
+ * @param win - the browser window owning the child stack.
+ * @param view - the native view to raise.
+ */
+export function raiseChildView(win: NativeBrowserWindow, view: unknown): void {
+  try {
+    const children = win.contentView.children
+    if (children !== undefined && children.length > 0 && children[children.length - 1] === view) return
+  } catch {
+    // `children` is best-effort: an adapter that throws here still gets the
+    // unconditional re-attach below.
+  }
+  try {
+    win.contentView.removeChildView(view)
+  } catch {
+    // A never-attached view cannot be removed; adding it again is
+    // harmless either way.
+  }
+  try {
+    win.contentView.addChildView(view)
+  } catch {
+    // 视图销毁竞态下 attach 可能抛（与该文件的 view focus/detach 同类）：层序问题
+    // 不该升级成插件失败，下一次 relayout/applyOverlay 还会再试。
+  }
 }
 
 /**
@@ -286,14 +359,7 @@ export function createRealElectronAdapter(
         // to do here beyond releasing the reference (the window owns it).
       },
       moveToTop(win) {
-        // Re-attach the NATIVE view so it lands on top of every sibling.
-        try {
-          win.contentView.removeChildView(view)
-        } catch {
-          // A never-attached view cannot be removed; adding it again is
-          // harmless either way.
-        }
-        win.contentView.addChildView(view)
+        raiseChildView(win, view)
       },
       webContents: {
         cdp: wc.debugger,
@@ -379,14 +445,7 @@ export function createRealElectronAdapter(
           }
         },
         moveToTop(win) {
-          // Re-attach the NATIVE view so it lands on top of every sibling.
-          try {
-            win.contentView.removeChildView(view)
-          } catch {
-            // A never-attached view cannot be removed; adding it again is
-            // harmless either way.
-          }
-          win.contentView.addChildView(view)
+          raiseChildView(win, view)
         },
         webContents: {
           cdp: wc.debugger,
@@ -487,6 +546,30 @@ export function createRealElectronAdapter(
         },
         isVisible: () => !win.isDestroyed() && win.isVisible(),
         isDestroyed: () => win.isDestroyed(),
+        isMinimized: () => !win.isDestroyed() && win.isMinimized(),
+        isFocused: () => !win.isDestroyed() && win.isFocused(),
+        onFocus: (listener) => {
+          if (win.isDestroyed()) return () => {}
+          // 逐个 listener 兜异常（与 resize/closed 的处理一致）：这个回调在窗口
+          // 事件派发栈里跑，抛出去就是未捕获异常，而它唯一的职责是重新上锁。
+          const wrapped = (): void => {
+            try {
+              listener()
+            } catch {
+              // 焦点处理绝不能把窗口事件链打断。
+            }
+          }
+          win.on('focus', wrapped)
+          return () => {
+            // A window destroyed between the check and the call throws on
+            // removeListener: unsubscribing is best-effort by nature.
+            try {
+              win.removeListener('focus', wrapped)
+            } catch {
+              // The window is gone; its listeners went with it.
+            }
+          }
+        },
         close: () => {
           if (win.isDestroyed()) return
           allowClose = true

@@ -356,6 +356,7 @@ export class BrowserRuntime {
   private readonly guard: BrowserGuard
   private windowResizeDisposer: (() => void) | null = null
   private windowClosedDisposer: (() => void) | null = null
+  private windowFocusDisposer: (() => void) | null = null
   private disposed = false
   private partition: string
   /**
@@ -748,9 +749,15 @@ export class BrowserRuntime {
     this.pool.registerTab(id, '', '', reservation)
 
     try {
-      // User-created tabs (shell ＋) surface the window; agent-created tabs
-      // and ledger restore keep it hidden (2026-09-08 product decision).
-      const win = await this.ensureWindow(this.shellOrigin, actor === 'user')
+      // User-created tabs (shell ＋ / address bar) surface the window; agent-created
+      // tabs and ledger restore keep it hidden (2026-09-08 product decision).
+      //
+      // 2026-09-17（审计 S5）：`actor === 'user'` 还有一条非用户动作来源 —— 用户
+      // 持有控制权时页面自行 window.open 会被判成 user 路径，而那一刻用户可能
+      // 已经切走或最小化，再 show() 就是把窗口拽回前台。所以只在"窗口还不存在
+      // （用户第一次点开浏览器）"或"窗口真的在前台（用户正看着它）"时才显示。
+      const wantShow = actor === 'user' && (this.window === null || this.windowAttended(this.window))
+      const win = await this.ensureWindow(this.shellOrigin, wantShow)
       const bounds = this.contentBounds()
       view.attach(win, bounds)
       this.relayout()
@@ -893,15 +900,20 @@ export class BrowserRuntime {
   private relayout(): void {
     const bounds = this.contentBounds()
     const active = this.pool.activeTab
-    let visibleTab: BrowserTab | undefined
     for (const tab of this.tabs.values()) {
       tab.view.setBounds(bounds)
       tab.view.setVisible(tab.id === active)
-      if (tab.id === active) visibleTab = tab
     }
-    if (visibleTab !== undefined && this.window !== null && !this.window.isDestroyed()) {
-      visibleTab.view.moveToTop(this.window)
-    }
+    // 2026-09-17（用户报告 + 独立审计 M1）：**不在这里重排活动标签视图**。
+    // 原生层序只有两条不变式：①新 attach 的视图在最上（attach 本身如此）；
+    // ②蒙版永远在最上（下面的 applyOverlay 负责，且已在最上时不重复重排）。
+    // 标签之间不需要重排：同一时刻只有一个标签 setVisible(true)，而隐藏视图
+    // 不参与合成、也不改变层序（像素级验证见 temp/audit-0917-window-focus/AUDIT.md §3）。
+    // 每次 remove+add 都是一次 addChildView，而 addChildView 在 Windows 上可能
+    // 激活顶层窗口（electron#42339）：旧代码让**每一次** relayout（切/关标签、
+    // resize、恢复账本、最小化引发的 resize）都重排两次原生子视图，这正是
+    // "用户切走/最小化之后窗口又弹回来"的第二条路径。
+    // 任何将来新增的"改变子视图顺序"的入口，都必须调用 applyOverlay()。
     this.applyOverlay()
   }
 
@@ -942,15 +954,46 @@ export class BrowserRuntime {
     }
   }
 
+  /**
+   * True only while the window is genuinely in front of the user: visible, not
+   * minimized, and holding OS focus.
+   *
+   * 2026-09-17（用户报告「浏览器老是弹出来，切到别的窗口一会儿它又弹出来，
+   * 最小化会自动弹出」）：给一个 WebContents 抢焦点会激活它的顶层窗口 ——
+   * Windows 上还会把**最小化**的窗口恢复回来。所以"上锁时夺键盘"（P2-7）这类
+   * 动作必须只在用户真的在看这个窗口时做，三个判据任一不成立就跳过：
+   *   - hidden（用户点 X → hide）：抢焦点会把它重新拉出来；
+   *   - minimized：Windows 会把窗口从最小化恢复（并且 resize → relayout 会
+   *     反复重试，形成"你最小化、它弹回来"的拉锯）；
+   *   - 已经没有焦点（用户在别的应用里）：抢焦点等于把窗口拽到前台。
+   *
+   * 可选成员缺席（测试替身、非 Electron 适配器）按"未知即允许"处理：那是不抢
+   * 焦点的宿主，保持既有语义比保守拒绝更安全。
+   */
+  private windowAttended(win: NativeBrowserWindow): boolean {
+    try {
+      if (win.isDestroyed() || !win.isVisible()) return false
+      if (win.isMinimized?.() === true) return false
+      if (win.isFocused?.() === false) return false
+      return true
+    } catch {
+      // A window destroyed mid-check is by definition not attended.
+      return false
+    }
+  }
+
   private applyOverlay(): void {
     if (this.overlay === null) return
-    if (this.window === null || this.window.isDestroyed()) return
+    const win = this.window
+    if (win === null || win.isDestroyed()) return
     const mode = this.effectiveOverlayMode()
     this.overlay.setBounds(this.overlayBounds(mode))
-    this.overlay.moveToTop(this.window)
+    this.overlay.moveToTop(win)
     // 2026-09-15 审计 P2-7：mask 是"整窗锁定"状态，必须同时拿键盘焦点 ——
     // 只挡鼠标时，用户先前点过的页面输入框仍会收到键盘输入。
-    if (mode === 'mask') this.overlay.focus?.()
+    // 2026-09-17：夺焦点只在窗口真的在前台时进行（见 windowAttended）；用户把
+    // 窗口带回前台时由 onFocus 补做这一次上锁，因此 P2-7 不会因为这道闸而退化。
+    if (mode === 'mask' && this.windowAttended(win)) this.overlay.focus?.()
   }
 
   /** User-driven overlay mode switch (panel/menu/viewer/capsule). The mode is
@@ -963,7 +1006,8 @@ export class BrowserRuntime {
     this.emitAll('state')
     // Leaving a floating surface (menu/viewer) hands the keyboard back to the
     // shell toolbar so Ctrl+L/T/W/R keep working after overlay interactions.
-    if (mode === 'capsule' && this.window !== null && !this.window.isDestroyed()) {
+    // 2026-09-17：同样只在这个窗口真的在前台时做（否则等于把窗口拽回前台）。
+    if (mode === 'capsule' && this.window !== null && this.windowAttended(this.window)) {
       this.window.focusPage()
     }
   }
@@ -1039,6 +1083,10 @@ export class BrowserRuntime {
       })
     }
     this.windowResizeDisposer = win.onResize(() => { this.relayout() })
+    // 用户把窗口带回前台时补做键盘上锁：窗口在后台/最小化期间 windowAttended
+    // 为假（那时夺焦点会把窗口拽回来），若不在这一刻补上，蒙版上锁就永久失效
+    // —— 页面输入框会重新拿到键盘（P2-7 的原始缺陷）。
+    this.windowFocusDisposer = win.onFocus?.(() => { this.applyOverlay() }) ?? null
     this.windowClosedDisposer = win.onClosed(() => {
       for (const tab of this.tabs.values()) {
         try {
@@ -1058,8 +1106,10 @@ export class BrowserRuntime {
       this.overlayPartition = undefined
       this.windowResizeDisposer?.()
       this.windowClosedDisposer?.()
+      this.windowFocusDisposer?.()
       this.windowResizeDisposer = null
       this.windowClosedDisposer = null
+      this.windowFocusDisposer = null
       this.window = null
     })
     return win
@@ -3334,6 +3384,8 @@ export class BrowserRuntime {
     this.tabs.clear()
     this.windowResizeDisposer?.()
     this.windowClosedDisposer?.()
+    this.windowFocusDisposer?.()
+    this.windowFocusDisposer = null
     if (this.window !== null && !this.window.isDestroyed()) this.window.close()
     this.window = null
     this.overlay = null
