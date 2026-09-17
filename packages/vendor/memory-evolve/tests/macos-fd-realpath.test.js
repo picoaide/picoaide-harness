@@ -21,7 +21,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -49,19 +49,39 @@ test('macOS 形态（/dev/fd 不解析）：写入闭环必须成立、且不留
   assert.equal(out.withLock, true, 'withLock 必须能取到锁')
 })
 
-test('本机平台：fdRealPath 解析结果必须与 fd 指向同一个 inode', () => {
+test('本机平台：有 /proc/self/fd 就必须真解析出与 fd 同一 inode 的真实路径', (t) => {
+  // TQ-1（2026-09-17 审计）：原先这里 `if (resolved === null) return`——把
+  // 「解析循环被删/回归」和「平台没有 fd 入口」混成同一结果，于是在有 /proc 的
+  // Linux/CI 上删掉 lib/sync/filesets.js fdRealPath() 的整个解析循环，本用例
+  // （它是 fdRealPath 的**唯一**覆盖）照样绿。
+  // 现在闸门只看 /proc/self/fd（fdRealPath 的**第一候选**）：有它就必须解析成功，
+  // 且先用 realpathSync 正面证明这一跳在本机是活的；只有 macOS 这类没有 /proc、
+  // 且 /dev/fd 按设计**不解析**的平台才 skip（那条分支由本文件第一条 shim 用例覆盖）。
+  if (!existsSync('/proc/self/fd')) {
+    return t.skip('本机无 /proc/self/fd（macOS 的 /dev/fd 不解析）：fdRealPath 合法的返回值就是 null')
+  }
   const dir = mkdtempSync(join(tmpdir(), 'dsh-fdreal-'))
   try {
     const file = join(dir, 'x.txt')
     writeFileSync(file, 'x')
     const fd = openSync(file, 'r')
-    const resolved = fdRealPath(fd)
     const viaFd = statSync(file)
+    // 正向控制：先证明「/proc/self/fd/N → 真实路径」这一跳在本机成立
+    // （= fdRealPath 的候选顺序里第一条真的走过），再要求它照此返回。
+    const viaProc = realpathSync(`/proc/self/fd/${fd}`)
+    const resolved = fdRealPath(fd)
     closeSync(fd)
-    if (resolved === null) return // 平台不支持（macOS）→ 调用方跳过包含性检查，合法
+    assert.equal(viaProc, realpathSync(file), '/proc/self/fd/N 在本机必须解析成真实路径（前置事实变了）')
+    assert.notEqual(
+      resolved,
+      null,
+      '本机 /proc/self/fd 可用却解析不出真实路径——fdRealPath 的反查循环被删/坏了'
+        + '（这正是 macOS shim 用例之外唯一的本机正向证明）',
+    )
     const viaPath = statSync(resolved)
     assert.equal(viaPath.dev, viaFd.dev, 'fdRealPath 必须返回真实路径（dev 对不上）')
     assert.equal(viaPath.ino, viaFd.ino, 'fdRealPath 必须返回真实路径（ino 对不上）')
+    assert.equal(resolved, realpathSync(file), '必须解析成真实路径，而不是 fd 入口自身')
     assert.ok(!resolved.startsWith('/dev/fd/'), '不得返回 /dev/fd 入口自身')
     assert.ok(!resolved.startsWith('/proc/self/fd/'), '不得返回 /proc/self/fd 入口自身')
   } finally {

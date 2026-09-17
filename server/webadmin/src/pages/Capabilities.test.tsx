@@ -178,6 +178,27 @@ describe('Capabilities 能力中心(统一审批)', () => {
     })
   })
 
+  it('已通过智能体行同样可上下架 → PUT agent-presets/:name/enabled(SG-4)', async () => {
+    const u = userEvent.setup()
+    const agent = { ...AGENT_ROWS[0]!, status: 'approved' as const, enabled: true }
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/server/admin/capabilities/approvals?status=approved') return { approvals: [agent] }
+      if (path === '/api/server/admin/departments') return { departments: [] }
+      return {}
+    })
+    render(<Capabilities />)
+    await u.click(screen.getByRole('tab', { name: '已通过（0）' }))
+    await screen.findByText('PPT 生成')
+    // 修复前按钮被 `row.kind === 'skill'` 挡住:智能体行没有任何上下架入口。
+    await u.click(screen.getByRole('button', { name: '下架' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith(
+        '/api/server/admin/agent-presets/ppt-gen/enabled',
+        { method: 'PUT', body: JSON.stringify({ enabled: false }) },
+      )
+    })
+  })
+
   it('归属列显示 apps.owner(与上传者可不同)', async () => {
     render(<Capabilities />)
     await screen.findByText('CodeQL 审计')

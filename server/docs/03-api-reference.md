@@ -152,6 +152,7 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 | GET | `/api/server/admin/agent-presets/:name/grants` | 授权清单(按 name,同名多版本共享) |
 | PUT | `/api/server/admin/agent-presets/:name/grants` | 整组替换部门授权(body `{groups:[...]}`;用户授权保留) |
 | PUT/DELETE | `/api/server/admin/agent-presets/:name/grant` | 增/删单条授权(body `{username}` 或 `{group}`) |
+| PUT | `/api/server/admin/agent-presets/:name/enabled` | 组织共享智能体上下架(2026-09-17,SG-4):body `{enabled: true\|false}` → `{ok, enabled}`;语义与共享技能的 `/:name/enabled` 对称(apps.enabled),但**只作用于 org 渠道行**(市场智能体由 marketplace 的 `POST /agents/:name/enable` 管,跨渠道写 404);下架后员工目录不可见、归档下载 404,管理端仍可审核/预览/下载核查;审计 `agent_preset_enable` / `agent_preset_disable` |
 
 ## 8b. 共享技能(客户端用,Bearer,多版本)
 
@@ -194,7 +195,7 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/server/admin/capabilities/approvals?status=&type=` | 归并 shared-skills 与 agent-presets 的队列 `{approvals:[ApprovalRow]}`;`status` 缺省=`pending`,`all`=全量,或 `pending\|approved\|rejected`;`type=skill\|agent`(缺省全部);行含 `kind/name/version/display_name/description/author/status/reason/quality/downloads/calls(技能)/created_at/conflict/enabled`(技能行,上下架状态) 与 `base_path`/`preview_path`/`grants_base`(原域端点,均为 `/api/server/admin/*` 前缀);`conflict=true` = 该共享技能与市场 skills 同名(approve 将被 409 阻断) |
+| GET | `/api/server/admin/capabilities/approvals?status=&type=` | 归并 shared-skills 与 agent-presets 的队列 `{approvals:[ApprovalRow]}`;`status` 缺省=`pending`,`all`=全量,或 `pending\|approved\|rejected`;`type=skill\|agent`(缺省全部);行含 `kind/name/version/display_name/description/author/status/reason/quality/downloads/calls(技能)/created_at/conflict/enabled`(上下架状态,两种 kind 都下发,2026-09-17 起) 与 `base_path`/`preview_path`/`grants_base`(原域端点,均为 `/api/server/admin/*` 前缀);`conflict=true` = 该共享技能与市场 skills 同名(approve 将被 409 阻断) |
 
 ## 9. Bootstrap
 

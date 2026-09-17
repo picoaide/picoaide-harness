@@ -83,7 +83,13 @@ func reportErrorReporting(db *sql.DB) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 			return
 		}
-		state := strings.TrimSpace(req.State)
+		// SG-1(审计 2026-09-17;r3v 复核补 state):state 也必须**先剥控制字符
+		// 再查白名单**。只 TrimSpace + 查白名单时 `failed\u0000` 不在白名单里,
+		// 于是走「未知状态静默忽略」分支:回 200 {ok:true} 但**一个字都不落库**,
+		// 该用户上一行(如上一次的 ready)继续在后台显示 —— 正是 SG-1 要消灭的
+		// "后台显示正常、客户端已经坏掉",而且触发它的正是 SG-1 自己清洗的那类
+		// 字符。清洗后仍按白名单判定:真正不认识的状态值才走静默忽略。
+		state := stripControlChars(strings.TrimSpace(req.State))
 		if !errorReportingStates[state] {
 			// 未知状态静默忽略(不落库、不消耗上报预算),与 reportSkillCall
 			// 对"平台上不存在的技能"的静默成功同语义。
@@ -99,8 +105,12 @@ func reportErrorReporting(db *sql.DB) gin.HandlerFunc {
 		if !errorReportingLevels[level] {
 			level = ""
 		}
-		reason := serverstore.TruncateRunes(strings.TrimSpace(req.Reason), errorReportingMaxReasonRunes)
-		release := serverstore.TruncateRunes(strings.TrimSpace(req.Release), errorReportingMaxReleaseLen)
+		// SG-1(审计 2026-09-17):先剥控制字符再截断 —— 一个 `\u0000` 会让
+		// PostgreSQL 拒绝整个参数(UPDATE/INSERT 失败 ⇒ 500 + 整行不落库,
+		// 用户上一行旧状态继续在后台显示正常)。清洗而不是报错,与文件头
+		// 「单字段不合法只清洗该字段」的契约一致。
+		reason := serverstore.TruncateRunes(stripControlChars(strings.TrimSpace(req.Reason)), errorReportingMaxReasonRunes)
+		release := serverstore.TruncateRunes(stripControlChars(strings.TrimSpace(req.Release)), errorReportingMaxReleaseLen)
 
 		// 限流放在校验之后:非法/未知请求不消耗上报预算(与 skill-call 一致)。
 		if u := serverauth.CurrentUser(c); u != nil {

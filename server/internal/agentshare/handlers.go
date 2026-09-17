@@ -39,6 +39,7 @@ type Handlers struct {
 	ReplacePresetGrants    gin.HandlerFunc // PUT /:name/grants
 	SetPresetGrant         gin.HandlerFunc // PUT /:name/grant
 	RemovePresetGrant      gin.HandlerFunc // DELETE /:name/grant
+	SetEnabled             gin.HandlerFunc // PUT /:name/enabled（组织共享智能体上下架，SG-4）
 }
 
 // NewHandlers 返回共享 Agent handler 集合(db + cacheDir 注入)。
@@ -65,5 +66,6 @@ func NewHandlers(db *sql.DB, cacheDir string) *Handlers {
 		ReplacePresetGrants:    replacePresetGrants(db),
 		SetPresetGrant:         setPresetGrant(db, true),
 		RemovePresetGrant:      setPresetGrant(db, false),
+		SetEnabled:             setEnabled(db),
 	}
 }

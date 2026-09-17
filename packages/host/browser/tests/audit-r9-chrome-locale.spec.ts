@@ -122,13 +122,21 @@ describe('语言切换后重新服务 chrome 页', () => {
     expect(adapter.overlays.at(-1)!.loadURL).toHaveBeenCalledWith(`${SHELL_ORIGIN}/browser-overlay`)
     tabView.loadURL.mockClear()
     adapter.windowLoads.length = 0
+    // 2026-09-17 审计 S03-01/S02-02/S01-3：overlay 的 spy 必须与 tab 视图同口径清空。
+    // MockView 的 webContents.loadURL 与视图级 loadURL 是**同一个** vi.fn，而
+    // mountOverlay 在窗口创建时已经用同一个 URL 调过一次 —— 不清历史，下面"重载后"
+    // 的断言会被那次挂载调用满足：删掉 reloadChromePages 的 overlay 分支，本用例照样
+    // 绿（文件头注释声称"shell 页与 overlay 页都被重新 loadURL"，实际只钉住 shell 一半）。
+    const overlayView = adapter.overlays.at(-1)!
+    overlayView.loadURL.mockClear()
 
     runtime.reloadChromePages()
     // loadURL is fire-and-forget in the reload path (errors are logged).
     await new Promise(resolve => setTimeout(resolve, 0))
 
     expect(adapter.windowLoads).toEqual([`${SHELL_ORIGIN}/browser-shell`])
-    expect(adapter.overlays.at(-1)!.loadURL).toHaveBeenCalledWith(`${SHELL_ORIGIN}/browser-overlay`)
+    expect(overlayView.loadURL).toHaveBeenCalledTimes(1)
+    expect(overlayView.loadURL).toHaveBeenCalledWith(`${SHELL_ORIGIN}/browser-overlay`)
     expect(tabView.loadURL).not.toHaveBeenCalled()
   })
 

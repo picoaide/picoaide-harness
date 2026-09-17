@@ -25,7 +25,7 @@
  */
 import { URL } from 'node:url'
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { translate, getLocale, COI2_DICT } from '../i18n.js'
 import { applyRequestGuard, readBody as sharedReadBody } from '../http-guard.js'

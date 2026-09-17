@@ -279,11 +279,20 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * dictionary key, and these keys live in the host dictionary.
    */
   const copy = (key: HostCopyKey, params?: Record<string, string>): string => hostT(locale(), key, params)
-  /** State patch carrying the stable code of a caught error (see connector-error.ts). */
-  const withCode = (error: unknown): { errorCode?: ReturnType<typeof connectorErrorCodeOf> } => {
-    const code = connectorErrorCodeOf(error)
-    return code === undefined ? {} : { errorCode: code }
-  }
+  /**
+   * State patch carrying the stable code of a caught error (see connector-error.ts).
+   *
+   * 无 code 时也必须**带上这个键**（2026-09-17 S04-3 审计）：setState 是合并写，
+   * 早先只在有 code 时才写字段，于是一条 `errorCode:'auth-required'` 会粘到
+   * 之后任何一条未分类的失败上（客户端按 code 优先渲染 ⇒ 跳过本地化兜底、
+   * 把原始错误文本直出），把分类契约反过来用。
+   *
+   * 同一条审计的反向规则：**凡是写 `error` 的 setState 都要同时交代 `errorCode`**
+   * —— 拿不到分类就显式写 `errorCode: undefined`（下面所有清空错误、或换成未
+   * 分类消息的路径），否则同一个字段会以另一种方式粘住。
+   */
+  const withCode = (error: unknown): { errorCode?: ReturnType<typeof connectorErrorCodeOf> } =>
+    ({ errorCode: connectorErrorCodeOf(error) })
 
   // N3: the MCP streamable-http transport is constructed inside
   // `dsh-mcp-client` with its own `fetch`, so the redirect fence must be on the
@@ -1375,7 +1384,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const requestDeclaredFields = (id: string, def: ConnectorDef): void => {
     pendingFieldRequestKind.set(id, 'tokenFields')
     emitRequest({ connectorId: id, fields: def.tokenFields ?? [] })
-    setState(id, { status: 'connecting', error: undefined })
+    setState(id, { status: 'connecting', error: undefined, errorCode: undefined })
   }
 
   /** Start the auth flow for a connector (background for poll-based modes). */
@@ -1393,7 +1402,17 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     try {
       const existing = await store.readCredential(id)
       if (!intentLive(id, intent)) return
-      setState(id, { status: 'connecting', everConnected: Boolean(existing) || Boolean(states.get(id)?.everConnected) })
+      // 进入 connecting 必须把上一次的失败文案与分类一起清掉（2026-09-17 S04-3
+      // 复核 P4：这是同一条规则漏掉的**唯一**一处状态写入点）。客户端
+      // `client/ConnectorsSection.tsx` 对任何非 connected 状态都渲染 `error`
+      // 段落，留着旧值会让"新一轮连接中"的行继续显示上一次的失败（errorCode 也
+      // 跟着留下）；两者必须同时清，否则又回到"分类与文案各说各话"。
+      setState(id, {
+        status: 'connecting',
+        everConnected: Boolean(existing) || Boolean(states.get(id)?.everConnected),
+        error: undefined,
+        errorCode: undefined,
+      })
 
       // Pre-connect settings: if required fields are missing, emit the form and
       // wait for auth-submit before starting the actual auth flow.
@@ -1423,17 +1442,17 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         const outcome = await registerMcp(def, { signal: intentSignal(intent) })
         if (outcome.superseded === true) return
         if (outcome.pendingApproval !== undefined) {
-          setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+          setState(id, { status: 'unauthorized', everConnected: true, error: undefined, errorCode: undefined })
           return
         }
         if (outcome.rejected.length > 0) {
           pendingRequests.delete(id)
-          setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+          setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; '), errorCode: undefined })
           return
         }
         pendingRequests.delete(id)
         pendingFieldRequestKind.delete(id)
-        setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
+        setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined, errorCode: undefined })
         return
       }
       // The auth flow reuses the intent's controller: /cancel, disconnect and a
@@ -1490,15 +1509,15 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         // FIX-02: the credential is stored, but the server-issued stdio
         // command still needs a local decision — nothing was spawned and the
         // confirmation request stays in `pendingRequests` for the panel.
-        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+        setState(id, { status: 'unauthorized', everConnected: true, error: undefined, errorCode: undefined })
         return
       }
       if (outcome.rejected.length > 0) {
         pendingRequests.delete(id)
-        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; '), errorCode: undefined })
         return
       }
-      setState(id, { status: "connected", everConnected: true, connectedAt: Date.now(), error: undefined })
+      setState(id, { status: "connected", everConnected: true, connectedAt: Date.now(), error: undefined, errorCode: undefined })
       // The flow reached a terminal success: the authorize URL in
       // pendingRequests is stale (the auth page was already opened and the
       // code exchanged). Leaving it behind makes every later panel open
@@ -1517,7 +1536,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // A user-initiated abort maps to the neutral 'disconnected' state, not
       // an error (the cancel button must not leave a scary red row behind).
       if (controller.signal.aborted) {
-        setState(id, { status: 'disconnected', everConnected: Boolean(states.get(id)?.everConnected), error: undefined })
+        setState(id, { status: 'disconnected', everConnected: Boolean(states.get(id)?.everConnected), error: undefined, errorCode: undefined })
       } else {
         setState(id, { status: unauthorized ? 'unauthorized' : 'error', error: message, ...withCode(error) })
       }
@@ -1576,15 +1595,15 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const outcome = await registerMcp(def, { signal: intentSignal(intent) })
       if (outcome.superseded === true || !intentLive(id, intent)) return
       if (outcome.pendingApproval !== undefined) {
-        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+        setState(id, { status: 'unauthorized', everConnected: true, error: undefined, errorCode: undefined })
         return
       }
       if (outcome.rejected.length > 0) {
         pendingRequests.delete(id)
-        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; '), errorCode: undefined })
         return
       }
-      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
+      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined, errorCode: undefined })
       pendingRequests.delete(id)
     } finally {
       endIntent(id, intent)
@@ -1616,8 +1635,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // re-registration under a NEW authorization.
     latestRefresh.delete(id)
     liveProviders.delete(id)
+    // 断开必须连分类一起清（2026-09-17 S04-3 审计）：只清 error 会留下
+    // `errorCode:'auth-required'`，下一次未分类失败就会被渲染成"需要重新授权"。
     setState(id, {
-      status: 'disconnected', everConnected: false, error: undefined, connectedAt: undefined,
+      status: 'disconnected', everConnected: false, error: undefined, errorCode: undefined, connectedAt: undefined,
       expiresAt: undefined, refreshedAt: undefined, refreshToken: undefined,
     })
     pendingRequests.delete(id)
@@ -1678,14 +1699,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           if (outcome.pendingApproval !== undefined) {
             // FIX-02: an unapproved server-issued command never reaches spawn;
             // the row waits for the user's local decision.
-            setState(def.id, { status: 'unauthorized', everConnected: true, error: undefined })
+            setState(def.id, { status: 'unauthorized', everConnected: true, error: undefined, errorCode: undefined })
             continue
           }
           if (outcome.rejected.length > 0) {
-            setState(def.id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+            setState(def.id, { status: 'error', everConnected: true, error: outcome.rejected.join('; '), errorCode: undefined })
             continue
           }
-          setState(def.id, { status: 'connected', everConnected: true })
+          setState(def.id, { status: 'connected', everConnected: true, error: undefined, errorCode: undefined })
         } else if (def.authMode === 'token' || def.authMode === 'device') {
           // Fields-only connector whose required fields were removed/truncated:
           // ask for them again instead of silently staying disconnected.
@@ -1784,11 +1805,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const outcome = await registerMcp(def, { signal: teardownController.signal })
       if (outcome.superseded === true) return
       if (outcome.pendingApproval !== undefined) {
-        setState(def.id, { status: 'unauthorized', everConnected: true, error: undefined })
+        setState(def.id, { status: 'unauthorized', everConnected: true, error: undefined, errorCode: undefined })
         return
       }
       if (outcome.rejected.length > 0) {
-        setState(def.id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        setState(def.id, { status: 'error', everConnected: true, error: outcome.rejected.join('; '), errorCode: undefined })
       }
     }).catch((cause: unknown) => {
       ctx.logger?.warn(`pico-connectors: ${payload.id} 令牌更新后重注册失败`, cause)
@@ -1842,7 +1863,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         if (outcome.reason === 'reauthorize') {
           setState(id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode })
         } else if (outcome.reason === 'transient') {
-          setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: outcome.message })
+          setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: outcome.message, errorCode: undefined })
         }
         return json(res, outcome.reason === 'not-applicable' ? 400 : 409, {
           error: outcome.message,
@@ -1851,7 +1872,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         })
       }
       noteCredential(id, await store.readCredential(id))
-      setState(id, { status: 'connected', everConnected: true, error: undefined })
+      setState(id, { status: 'connected', everConnected: true, error: undefined, errorCode: undefined })
       json(res, 200, { ok: true, expiresAt: outcome.tokens.expiresAt })
     }
 
@@ -1901,7 +1922,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // in its first credential read (or waiting for the settings form) used to
       // keep going and put the row back to "connecting" after the cancel.
       invalidateIntent(id, new Error(copy('flow.userCancelled')))
-      setState(id, { status: 'disconnected', everConnected: Boolean(states.get(id)?.everConnected), error: undefined })
+      setState(id, { status: 'disconnected', everConnected: Boolean(states.get(id)?.everConnected), error: undefined, errorCode: undefined })
       pendingRequests.delete(id)
       pendingFieldRequestKind.delete(id)
       json(res, 200, { ok: true })
@@ -1987,14 +2008,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const outcome = await registerMcp(def, { signal: teardownController.signal })
       if (outcome.superseded === true) return json(res, 200, { ok: true })
       if (outcome.pendingApproval !== undefined) {
-        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+        setState(id, { status: 'unauthorized', everConnected: true, error: undefined, errorCode: undefined })
         return json(res, 409, { error: 'approval did not settle every pending command' })
       }
       if (outcome.rejected.length > 0) {
-        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; '), errorCode: undefined })
         return json(res, 400, { error: outcome.rejected.join('; ') })
       }
-      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
+      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined, errorCode: undefined })
       json(res, 200, { ok: true })
     }
 
@@ -2006,7 +2027,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       if (!getDef(id)) return json(res, 404, { error: `unknown connector: ${id}` })
       pendingApprovals.delete(id)
       pendingRequests.delete(id)
-      setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: copy('flow.approvalDeniedRow') })
+      setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: copy('flow.approvalDeniedRow'), errorCode: undefined })
       json(res, 200, { ok: true })
     }
 

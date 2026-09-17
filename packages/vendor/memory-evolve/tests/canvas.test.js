@@ -10,6 +10,7 @@
  */
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -24,6 +25,7 @@ import {
   normalizeNode,
   openNodeFile,
   openNodeFolder,
+  installCanvas,
   readCanvas,
   resolveNodeFile,
   searchLocalFiles,
@@ -393,9 +395,9 @@ test('findNode 按 id 查找', () => {
   assert.equal(findNode(board.nodes, 'nope'), undefined)
 })
 
-test('整板保存做形状归一：前端附加字段剥除、缺省字段补齐、id 保留', () => {
+test('整板保存做形状归一：未知字段剥除、meta 白名单保留、缺省字段补齐、id 保留', () => {
   const { config } = tempConfig()
-  // 模拟前端 localStorage 时代遗留的节点格式（带 meta 等附加字段）
+  // 模拟前端节点格式（带 meta 与未知附加字段）
   const frontendNode = {
     id: 'canvas_abc123',
     type: 'image',
@@ -405,7 +407,9 @@ test('整板保存做形状归一：前端附加字段剥除、缺省字段补�
     sessionId: 's1',
     projectId: 'p1',
     path: '/tmp/x.png',
-    meta: { size: '1 KB', mtime: '示例' }, // 附加字段应被剥除
+    // ME-4（2026-09-17 二审）：meta 是卡片「1.2 MB · 未验证」那行的数据源，
+    // 不再是「应剥除的附加字段」——剥掉它刷新后文字就没了（有损往返）。
+    meta: { size: '1 KB', mtime: '示例', junk: 'x'.repeat(200) },
     placement: { x: 10, y: 20, width: 320, height: 240, zIndex: 1 },
     aiPlaced: false,
     createdAt: 123456,
@@ -414,10 +418,30 @@ test('整板保存做形状归一：前端附加字段剥除、缺省字段补�
   const board = readCanvas(config)
   const saved = board.nodes[0]
   assert.equal(saved.id, 'canvas_abc123') // 前缀合法 → id 保留
-  assert.equal(saved.meta, undefined)     // 附加字段剥除
+  assert.deepEqual(saved.meta, { size: '1 KB', mtime: '示例' }) // 白名单保留，未知键剥除
   assert.equal(saved.unverified, true)    // 路径不存在 → unverified 补齐
   assert.equal(saved.title, '前端图')
   assert.equal(board.rev, 1)
+})
+
+test('ME-4：meta 白名单只收 {size,mtime} 两个限长字符串（脏值归一为 undefined）', () => {
+  const { config } = tempConfig()
+  writeCanvas(config, {
+    nodes: [
+      // 非对象 / 数组 / 全空 / 数字字段 → 一律 undefined（前端按 undefined 判空）
+      { id: 'canvas_empty', title: 'a', scope: 'session', placement: {}, meta: {} },
+      { id: 'canvas_bad', title: 'b', scope: 'session', placement: {}, meta: { size: 42, mtime: null } },
+      { id: 'canvas_arr', title: 'c', scope: 'session', placement: {}, meta: ['1 KB'] },
+      // 超长字段按上限截断（boards.json 不被展示层字符串撑爆）
+      { id: 'canvas_long', title: 'd', scope: 'session', placement: {}, meta: { size: 'S'.repeat(80), mtime: 'M'.repeat(200) } },
+    ],
+  }, 0)
+  const board = readCanvas(config)
+  const byId = (id) => board.nodes.find((n) => n.id === id)
+  assert.equal(byId('canvas_empty').meta, undefined)
+  assert.equal(byId('canvas_bad').meta, undefined)
+  assert.equal(byId('canvas_arr').meta, undefined)
+  assert.deepEqual(byId('canvas_long').meta, { size: 'S'.repeat(32), mtime: 'M'.repeat(64) })
 })
 
 test('整板保存：非法 id 前缀重新生成', () => {
@@ -431,4 +455,74 @@ test('formatBytes 格式化', () => {
   assert.equal(formatBytes(500), '500 B')
   assert.equal(formatBytes(2048), '2.0 KB')
   assert.equal(formatBytes(5 * 1024 * 1024), '5.0 MB')
+})
+
+/** 最小 ctx：驱动 installCanvas 注册的真实 HTTP handler（ME-4 读回投影断言用）。 */
+async function bootCanvasHttp(config, resolveCwd = () => null) {
+  const routes = []
+  const ctx = {
+    tools: { register: () => () => {} },
+    effect: (fn) => fn() ?? (() => {}),
+    inject: (deps, callback) => ({ dispose: callback(ctx) ?? (() => {}) }),
+    webServer: { register: (route) => { routes.push(route); return () => {} } },
+  }
+  installCanvas(ctx, config, resolveCwd, () => null)
+  const route = routes[0]
+  assert.ok(route !== undefined, 'installCanvas 必须注册画板 HTTP 路由')
+  const server = createServer((req, res) => route.handler(req, res))
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const base = `http://127.0.0.1:${server.address().port}`
+  return {
+    base,
+    request: async (method, path, body) => {
+      const res = await fetch(base + path, {
+        method,
+        headers: {
+          origin: base,
+          ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      })
+      const data = await res.json().catch(() => ({}))
+      return { status: res.status, data }
+    },
+    close: () => new Promise((resolve) => server.close(resolve)),
+  }
+}
+
+test('ME-4：POST /canvas → GET /canvas 的 meta 往返不丢（刷新后卡片大小/未验证行仍在）', async () => {
+  const { config } = tempConfig()
+  const http = await bootCanvasHttp(config)
+  try {
+    // 前端「路径上板/搜索上板」写入的节点形状（CanvasView.tsx:391/426）：
+    // meta.size 来自真实文件大小，meta.mtime 是「未验证」展示文案。
+    const node = {
+      id: 'canvas_meta1',
+      type: 'file',
+      title: '报告.pdf',
+      scope: 'session',
+      scopeLabel: '当前会话',
+      sessionId: 'sess-1',
+      projectId: 'proj-1',
+      path: '/tmp/does-not-exist-report.pdf',
+      unverified: true,
+      meta: { size: '1.2 MB', mtime: '未验证' },
+      placement: { x: 0, y: 0, width: 320, height: 240, zIndex: 1 },
+      createdAt: 1,
+    }
+    // 整板写入口在 base 本身（POST /memory-evolve/api/canvas），GET 读回是 /state
+    const saved = await http.request('POST', '/memory-evolve/api/canvas', { nodes: [node], rev: 0 })
+    assert.equal(saved.status, 200, JSON.stringify(saved.data))
+    assert.equal(saved.data.ok, true)
+
+    const state = await http.request('GET', '/memory-evolve/api/canvas?sessionId=sess-1')
+    assert.equal(state.status, 200)
+    const got = state.data.nodes.find((n) => n.id === 'canvas_meta1')
+    assert.ok(got !== undefined, '读回必须包含刚保存的节点')
+    // 核心断言：GET 投影必须带 meta（缺了它，卡片刷新后只剩类型名）。
+    assert.deepEqual(got.meta, { size: '1.2 MB', mtime: '未验证' })
+    assert.equal(got.unverified, true)
+  } finally {
+    await http.close()
+  }
 })

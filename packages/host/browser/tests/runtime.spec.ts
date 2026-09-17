@@ -527,6 +527,35 @@ describe('BrowserRuntime v4.2 — flat pool', () => {
     cleanup()
   })
 
+  it('截图渲染期间的接管也必须记进 gateBlock（2026-09-17 审计 S01-2/S02-03）', async () => {
+    const { runtime, adapter, cleanup } = makeRuntime()
+    await runtime.open('https://a.example')
+    const id = runtime.currentTabId()!
+    const view = adapter.lastView()
+    // 把捕获挂住：模拟"用户在截图渲染期间点了「我来操作」"。
+    let release!: (image: NativeImage) => void
+    const gate = new Promise<NativeImage>((resolve) => { release = resolve })
+    view.capturePage.mockImplementationOnce(async () => await gate)
+
+    const pending = runtime.screenshot(id).catch((cause: unknown) => cause)
+    await sleep(30)
+    runtime.setUserControl(true, 'user')
+    release(new MockImage(64, 64))
+
+    const error = await pending as { code?: string }
+    expect(error.code).toBe('window-controlled')
+    // 关键：这次拒绝必须走到 withAgentAttribution 的记账路径，否则侧边栏
+    // 「AI 正在等你交还浏览器控制权」不会亮（gateBlock 是唯一触发源）。
+    expect(runtime.shellState()).toMatchObject({
+      controlled: true,
+      awaitingRelease: true,
+      awaitingReleaseTool: 'browser_screenshot',
+    })
+    expect(runtime.opLog.filter((op) => op.summary.includes('用户正在操作浏览器'))).toHaveLength(1)
+    runtime.setUserControl(false, 'user')
+    cleanup()
+  })
+
   it('navigation failure with a previous page is reported, not swallowed', async () => {
     const { runtime, adapter, cleanup } = makeRuntime()
     await runtime.open('https://old.example')

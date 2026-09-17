@@ -70,6 +70,18 @@ const EVAL_SUMMARY_LIMIT = 60 + 'eval: '.length
 const PAGE_STATE_SUMMARY_LIMIT = 120 + 'after-change: '.length
 const SCREENSHOT_FALLBACK_SUMMARY_LIMIT = 120 + 'capturePage unavailable (); captured via CDP fromSurface:false'.length
 const SELECT_VALUE_SUMMARY_LIMIT = 80
+/**
+ * Cap on the page-derived element name in the `browser_press` summary
+ * (2026-09-17 审计 S02-04）。
+ *
+ * `keyReceivableTarget` 读的是 `document.activeElement.tagName` —— 谁被聚焦由
+ * **页面**决定，而 HTML 的元素名没有长度上限（jsdom 实测 50000 字符的 tagName
+ * 可被 focus）。该摘要落进内存 op log（OP_LOG_LIMIT=200 是唯一的内存界），并经
+ * `/ops` 原样下发给蒙版页的活动面板；同一批页面派生的兄弟摘要（navigate/eval/
+ * page_state/select）都显式带上限，这里补齐。上限走 `record(..., summaryLimit)`，
+ * 即先脱敏后截断（F-2）。
+ */
+const PRESS_TARGET_SUMMARY_LIMIT = 64
 /** Cap on the model-facing `wait_for` failure reason (F-2: applied after the
  * redaction — the page/CDP message is cut at the call site otherwise). */
 const WAIT_FOR_REASON_LIMIT = 240
@@ -1195,6 +1207,25 @@ export class BrowserRuntime {
   }
 
   /**
+   * 标签页的**原始** http(s) origin —— 授权判定不得以脱敏显示投影为基准
+   * （2026-09-17 审计 S02-01）。
+   *
+   * `tabState()` 是给模型/界面看的投影：URL 先过 `stripSensitiveUrl`，再过
+   * `redactFilledSecretsText` 的**逐字**擦除（值集合在标签页生命周期内一直存在，
+   * R-5）。擦除范围是整个 URL 串，**主机段也在内**：注入过的口令只要 ≥8 字符且
+   * 恰好是站点主机的子串（口令 `glitchtip`、站点 https://glitchtip.corp.example），
+   * 投影 URL 就变成 `https://****….example`。`browser_fill_credentials` 的站点闸门
+   * 曾拿这个投影算 origin，于是同一 origin 上第一次注入成功、之后每次都被拒，
+   * 拒绝文案还把模型指向一个不存在的主机 —— 与 {@link fillCredentials} 临界区内
+   * 用原始 `tab.url` 的 TOCTOU 复核（同一个闸门的另一半）口径互相矛盾。
+   * @param id - 标签页 id（未知 id 与 `tabState` 同样抛 not-found）。
+   * @returns 原始 http(s) origin；非 http(s)/不透明 origin 为 `null`。
+   */
+  tabOrigin(id: number): string | null {
+    return httpOriginOf(this.tab(id).url)
+  }
+
+  /**
    * The credential-activity window (R-4, 2026-09-13).
    *
    * A tab enters the window when `browser_fill_credentials` injects a stored
@@ -1897,37 +1928,45 @@ export class BrowserRuntime {
         // BUG-05：接管检查与凭证窗口同一临界区（队列之后、真正的捕获之前），
         // 用户在这张图排队/渲染期间接管时不该把图交给模型。
         this.assertAgentStillAllowed('browser_screenshot')
+        let captured: string
         let primary: string
         try {
-          return await withScreenshotBudget(
+          captured = await withScreenshotBudget(
             captureScreenshot(tab.view.webContents, this.options.screenshotMaxWidth, this.options.screenshotQuality),
             this.screenshotPrimaryBudgetMs(),
           )
         } catch (cause) {
           primary = cause instanceof Error ? cause.message : String(cause)
+          // 2026-09-12: the browser window is created hidden by design, and a
+          // hidden window has no viz surface — `capturePage()` then fails with
+          // "Current display surface not available for capture". The renderer-side
+          // CDP path composites the frame without a surface, so screenshots keep
+          // working for an agent-driven (never shown) window.
+          try {
+            captured = await withScreenshotBudget(
+              captureScreenshotViaCdp(
+                (method, params) => tab.cdp.send(method, params),
+                this.options.screenshotMaxWidth,
+                this.options.screenshotQuality,
+              ),
+              this.screenshotFallbackBudgetMs(),
+            )
+            this.record('browser_screenshot', resolved, `capturePage unavailable (${primary}); captured via CDP fromSurface:false`, false, 'ai', SCREENSHOT_FALLBACK_SUMMARY_LIMIT)
+          } catch (cause2) {
+            const secondary = cause2 instanceof Error ? cause2.message : String(cause2)
+            // Both reasons are kept: the primary one is what the P2-31 guard
+            // ("empty image (0x0)") and real-device diagnostics key on.
+            throw new Error(`${primary}; renderer-side fallback: ${secondary}`)
+          }
         }
-        // 2026-09-12: the browser window is created hidden by design, and a
-        // hidden window has no viz surface — `capturePage()` then fails with
-        // "Current display surface not available for capture". The renderer-side
-        // CDP path composites the frame without a surface, so screenshots keep
-        // working for an agent-driven (never shown) window.
-        try {
-          const fallback = await withScreenshotBudget(
-            captureScreenshotViaCdp(
-              (method, params) => tab.cdp.send(method, params),
-              this.options.screenshotMaxWidth,
-              this.options.screenshotQuality,
-            ),
-            this.screenshotFallbackBudgetMs(),
-          )
-          this.record('browser_screenshot', resolved, `capturePage unavailable (${primary}); captured via CDP fromSurface:false`, false, 'ai', SCREENSHOT_FALLBACK_SUMMARY_LIMIT)
-          return fallback
-        } catch (cause) {
-          const secondary = cause instanceof Error ? cause.message : String(cause)
-          // Both reasons are kept: the primary one is what the P2-31 guard
-          // ("empty image (0x0)") and real-device diagnostics key on.
-          throw new Error(`${primary}; renderer-side fallback: ${secondary}`)
-        }
+        // 截图完成后再确认一次接管状态：用户在这张图渲染期间点「我来操作」时，不该
+        // 把画面交给模型（与 navigate 的"接管压过加载结果"同口径）。
+        // 必须在 agentRun **体内**：`window-controlled` 由 withAgentAttribution 的
+        // catch 转成 gateBlock（noteControlBlock），放到 agentRun 之外会让这次拒绝
+        // 既不进 op-log 也不亮侧边栏「AI 正在等你交还浏览器控制权」（2026-09-17 审计
+        // S01-2/S02-03：同一函数里 reload/go_back/go_forward 的检查点都在体内）。
+        this.assertAgentStillAllowed('browser_screenshot')
+        return captured
       }, signal)
     } catch (cause) {
       // A policy refusal (the credential window just above, or a future policy
@@ -1948,9 +1987,8 @@ export class BrowserRuntime {
         `browser: screenshot failed — ${message}; the tab must be able to render (open the browser window if it is closed, then retry)`,
       )
     }
-    // 截图完成后再确认一次接管状态：用户在这张图渲染期间点「我来操作」时，不该
-    // 把画面交给模型（与 navigate 的"接管压过加载结果"同口径）。
-    this.assertAgentStillAllowed('browser_screenshot')
+    // 截图完成后的接管复检已移入 agentRun 体内（见上方注释）：放在这里会因为
+    // 绕过 withAgentAttribution 而丢掉 gateBlock/op-log 记录。
     this.record('browser_screenshot', resolved, 'screenshot captured')
     return data
   }
@@ -2625,7 +2663,8 @@ export class BrowserRuntime {
           type: 'keyUp', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk,
         })
         // 可见窗口同样要有读回：先把"谁在接收"读出来再记成功（P3）。
-        this.record('browser_press', resolved, `press ${key} → ${target}`)
+        // target 来自页面（activeElement.tagName，无长度上限）⇒ 摘要必须带上限（S02-04）。
+        this.record('browser_press', resolved, `press ${key} → ${target}`, false, 'ai', PRESS_TARGET_SUMMARY_LIMIT)
         return
       }
       const outcome = await this.dispatchKeyViaDom(tab, key, code, vk)
@@ -2740,11 +2779,13 @@ export class BrowserRuntime {
       // 发生在拿到全局互斥之后 —— 中间标签页可以导航走。写入 DOM 之前用**同一个**
       // expectedOrigin 再比一次。
       if (expectedOrigin !== undefined && httpOriginOf(tab.url) !== expectedOrigin) {
-        // The tab may have navigated into an SSO/OAuth callback whose URL
-        // carries a one-time code/ticket. Redact exactly like every other
-        // model-facing URL exit: error.message lands in the model context and
-        // the session transcript (2026-09-16 audit E4).
-        throw browserError('policy', `browser_fill_credentials refused: the tab left ${expectedOrigin} before the injection ran (now ${redactFilledSecretsText(tab, stripSensitiveUrl(tab.url), { verbatim: true }).slice(0, 200)}); credentials are only injected into their own site`)
+        // 拒绝文案**不含被观测的任何字节**（2026-09-17 四轮复核，与工具层
+        // src/tools.ts 的同一条拒绝保持同一口径）：脱敏投影挡不住两类口令 ——
+        // URL 主机会被大小写折叠（`Sup3rSecret` → `sup3rsecret`），而
+        // MIN_EMBEDDED_SECRET_LENGTH 之下的短口令（如 `abc123`）根本不在擦除集里。
+        // error.message 会进模型上下文与会话转录，所以这里只报"离开了站点"这个
+        // 事实 + 期望 origin（后者来自用户自己的连接器登记，可安全回显）。
+        throw browserError('policy', `browser_fill_credentials refused: the tab left ${expectedOrigin} before the injection ran; credentials are only injected into their own site`)
       }
       const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
         expression: `

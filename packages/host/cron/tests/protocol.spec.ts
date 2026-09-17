@@ -122,6 +122,17 @@ describe('parseActionEnvelope cron validation', () => {
       input: { name: 'x', cron: '0 0 29 2 *', action: { kind: 'agent', prompt: 'p' } },
     }))).toBeDefined()
   })
+
+  it('accepts AND schedules whose next match is years out (S08-02 审计)', () => {
+    // 日/周 AND 分支的命中间隔可达 40 年：固定八年视野曾把这三条合法表达式
+    // 判成 invalid-action（2026-09-17 S08-02 审计）。
+    for (const cron of ['0 0 */7 3 0', '0 0 29 2 */7', '0 0 */31 1 1']) {
+      expect(parseActionEnvelope(envelope({
+        kind: 'create', id: 'j',
+        input: { name: 'x', cron, action: { kind: 'agent', prompt: 'p' } },
+      })), cron).toBeDefined()
+    }
+  })
 })
 
 describe('FIX-17: permission 是枚举,不是自由文本', () => {

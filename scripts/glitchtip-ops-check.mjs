@@ -44,6 +44,16 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
+// S15-5(2026-09-17 审计)：任何未预期的抛错都必须落到 exit 2（本文件定义的"无法完成核查"）。
+// 未捕获异常默认以 exit 1 结束 —— 与"核查完成但发现缺陷"同码，而且 --json 会在写 JSON
+// 之前就断掉（stdout 只剩栈）。这里统一 fail-closed，绝不让崩溃伪装成"有缺陷"或"没问题"。
+const failClosed = (error) => {
+  process.stderr.write(`✗ glitchtip-ops-check 未能完成核查:${error?.stack ?? error}\n`);
+  process.exit(2);
+};
+process.on('uncaughtException', failClosed);
+process.on('unhandledRejection', failClosed);
+
 // ---------------------------------------------------------------------------
 // 参数解析
 // ---------------------------------------------------------------------------
@@ -60,7 +70,8 @@ const HELP = `glitchtip-ops-check.mjs — GlitchTip 自托管 DSN 域名核查�
   --org <slug>          组织 slug（env GLITCHTIP_ORG，默认 picoaide）
   --project <slug>      项目 slug（env GLITCHTIP_PROJECT，默认 picoaide-web）
   --cookies <path>      管理员 cookie jar（env GLITCHTIP_COOKIES；默认依次尝试
-                        ./.glitchtip-recon/c.txt 与 ~/.cache/picoaide/glitchtip-cookies.txt）
+                        ./.glitchtip-recon/c.txt 与 ~/.cache/picoaide/glitchtip-cookies.txt；
+                        只发送 jar 中 domain/path/secure 匹配目标站点的 cookie）
   --ssh <user@host>     生产主机（★ 只读容器核查必填；env GLITCHTIP_SSH_HOST）
   --ssh-key <path>      ssh 私钥（env GLITCHTIP_SSH_KEY，默认 ~/.ssh/id_ed25519）
   --container <name>    容器名（env GLITCHTIP_CONTAINER，默认 glitchtip-web-1）
@@ -237,10 +248,27 @@ function parseDsn(raw) {
     return null;
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-  const publicKey = decodeURIComponent(url.username || '');
+  // S15-5(2026-09-17 审计)：decode 必须**全函数**（total）—— 上面 `new URL()` 通过不代表
+  // userinfo 可解码：`http://ab%zz@host/1` 能正常解析，但 decodeURIComponent('ab%zz')
+  // 抛 URIError。原来只有 new URL 在 try 里，于是远端返回的一个坏字节就把工具打成
+  // 未捕获异常（exit 1 = 文档里的"发现缺陷"，且 --json 输出整段丢失）。
+  // 解不开就按"不可解析"处理 ⇒ 调用方走 UNKNOWN / exit 2。
+  let publicKey = '';
+  try {
+    publicKey = decodeURIComponent(url.username || '');
+  } catch {
+    return null;
+  }
   if (!publicKey) return null;
   const segments = url.pathname.split('/').filter((s) => s !== '');
   const projectId = segments.length > 0 ? segments[segments.length - 1] : '';
+  // S15-2-R2(2026-09-17 审计复核)：**没有 project id 的 DSN 同样不可用**。
+  // `https://key@host` 与 `https://key@host/` 都能被 new URL() 接受，但 projectId 是空串、
+  // store 端点退化成 `<scheme>://<host>/api//store/` —— 这种 DSN 永远上报不成功。
+  // 上一轮只按 `parsed === null` 分流，这两种形态于是落进下面的 `else if (parsed)`：
+  // 工具打印「OK: 后台展示的 DSN 不指向本机」并 exit 0，而它自己的第 ④ 步正写着
+  // "无法推导" —— 与 S15-2 同类的假绿。这里按"不可解析"处理，让调用方走 UNKNOWN/exit 2。
+  if (projectId === '') return null;
   const prefix = segments.length > 1 ? `/${segments.slice(0, -1).join('/')}` : '';
   return {
     raw: raw.trim(),
@@ -279,29 +307,96 @@ function hostFromDomain(value) {
   }
 }
 
+/**
+ * 把值安全地包进 POSIX sh 单引号。
+ *
+ * S15-7(2026-09-17 审计)：ssh 会把 argv 用空格拼成**一条字符串**交给远端登录 shell 解析，
+ * 所以远程命令里插值的一切（容器名、compose 目录）都等价于在远端执行拼接后的文本。
+ * 此前容器名未加引号 ⇒ `--container 'x; touch /tmp/pwned #'` 就能在生产机上执行任意命令，
+ * 而本文件头部承诺的是"只读 ssh 命令，绝不修改任何东西"。
+ * 单引号内除 `'` 外全是字面量；`'` 用 `'\''` 拼接（闭合-转义-重开）。
+ * @param {unknown} value - 任意值。
+ * @returns {string} 已加引号的 shell 字面量。
+ */
+function shQuote(value) {
+  return `'${String(value).replace(/'/gu, `'\\''`)}'`;
+}
+
 // ---------------------------------------------------------------------------
 // 只读探测
 // ---------------------------------------------------------------------------
 
-async function fetchKeys(cookieJar) {
-  const url = `${cfg.baseUrl}/api/0/projects/${encodeURIComponent(cfg.org)}/${encodeURIComponent(cfg.project)}/keys/`;
-  const headers = { accept: 'application/json' };
-  if (cookieJar && existsSync(cookieJar)) {
-    const jar = readFileSync(cookieJar, 'utf8');
-    const pairs = [];
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    for (const line of jar.split('\n')) {
-      // curl 写的 Netscape jar 用 "#HttpOnly_" 给 HttpOnly cookie 打前缀 —— 它仍是数据行，不是注释。
-      const trimmed = line.replace(/^#HttpOnly_/, '').trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const cols = trimmed.split('\t');
-      if (cols.length < 7) continue;
-      const expiresAt = Number(cols[4]);
-      if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < nowSeconds) continue; // 过期 cookie 不发
-      pairs.push(`${cols[5]}=${cols[6]}`);
-    }
-    if (pairs.length > 0) headers.cookie = pairs.join('; ');
+/**
+ * 判断 Netscape/curl jar 里的一行 cookie 是否该发给目标 URL。
+ *
+ * S15-9(2026-09-17 审计)：jar 的列序是 domain, includeSubdomains, path, secure, expiry, name, value，
+ * 标准语义（curl/浏览器）按 domain/path/secure 三元匹配。此前只看第 4 列过期时间 ⇒
+ * 复用/浏览器导出的 jar 里**别的域名**的 cookie、以及标记 Secure 的 cookie 走 http://，
+ * 都会被一起发给 --base-url 指到的主机（凭据越域外泄，操作者在 --help 里看不到）。
+ * @param {string[]} cols - 已按 tab 拆分的 jar 行（≥7 列）。
+ * @param {URL} target - 即将请求的目标 URL。
+ * @returns {boolean} 该行是否适用于 target。
+ */
+function cookieAppliesTo(cols, target) {
+  const rawDomain = cols[0].toLowerCase();
+  const includeSubdomains = cols[1].toUpperCase() === 'TRUE' || rawDomain.startsWith('.');
+  const domain = rawDomain.replace(/^\./u, '');
+  const host = target.hostname.toLowerCase();
+  // host-only cookie 必须精确相等；带前导点/IncludeSubdomains 的才允许后缀匹配。
+  if (domain !== host && !(includeSubdomains && host.endsWith(`.${domain}`))) return false;
+  // Secure cookie 只在 https 下发送。
+  if (cols[3].toUpperCase() === 'TRUE' && target.protocol !== 'https:') return false;
+  // RFC 6265 §5.1.4 的路径匹配：cookie-path 是请求路径的前缀，且边界必须是 `/`。
+  const cookiePath = cols[2] === '' ? '/' : cols[2];
+  const requestPath = target.pathname === '' ? '/' : target.pathname;
+  const pathMatches = requestPath === cookiePath
+    || requestPath.startsWith(cookiePath.endsWith('/') ? cookiePath : `${cookiePath}/`);
+  return pathMatches;
+}
+
+/**
+ * 读 cookie jar，挑出**适用于目标 URL** 的 cookie（S15-9 的 domain/path/secure 过滤）。
+ *
+ * S15-9-R2(2026-09-17 审计复核)：过滤必须在进入 fetch 之前完成，并把结论**交回调用方** ——
+ * 原来 skipped 只挂在 fetchKeys 的返回值上，而 fetch 自身抛错时调用方会重建 keys 对象，
+ * "管理员 cookie 因域/路径/secure 不匹配被跳过"这条唯一线索就丢了：401 路径没事，
+ * 网络错误路径只剩一句 fetch failed，运维会去排查一个并没过期的 cookie。
+ * @param {string} cookieJar - jar 路径（不存在则不发任何 cookie）。
+ * @param {string} url - 即将请求的 URL。
+ * @returns {{ header: string | null, skipped: string[] }} Cookie 头值与被跳过的域名。
+ */
+function collectCookies(cookieJar, url) {
+  if (!cookieJar || !existsSync(cookieJar)) return { header: null, skipped: [] };
+  const jar = readFileSync(cookieJar, 'utf8');
+  const pairs = [];
+  const skipped = new Set();
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  let target = null;
+  try {
+    target = new URL(url);
+  } catch {
+    target = null; // 站点 URL 非法：fetch 那步会失败并走 UNKNOWN，这里不发任何 cookie。
   }
+  for (const line of jar.split('\n')) {
+    // curl 写的 Netscape jar 用 "#HttpOnly_" 给 HttpOnly cookie 打前缀 —— 它仍是数据行，不是注释。
+    const trimmed = line.replace(/^#HttpOnly_/, '').trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const cols = trimmed.split('\t');
+    if (cols.length < 7) continue;
+    const expiresAt = Number(cols[4]);
+    if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < nowSeconds) continue; // 过期 cookie 不发
+    if (target === null || !cookieAppliesTo(cols, target)) {
+      skipped.add(cols[0]);
+      continue;
+    }
+    pairs.push(`${cols[5]}=${cols[6]}`);
+  }
+  return { header: pairs.length > 0 ? pairs.join('; ') : null, skipped: [...skipped] };
+}
+
+async function fetchKeys(url, cookies) {
+  const headers = { accept: 'application/json' };
+  if (cookies.header !== null) headers.cookie = cookies.header;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
   try {
@@ -313,7 +408,7 @@ async function fetchKeys(cookieJar) {
     } catch {
       /* 非 JSON 响应：保留原文片段 */
     }
-    return { ok: res.ok, status: res.status, url, body, raw: text.slice(0, 400) };
+    return { ok: res.ok, status: res.status, url, body, raw: text.slice(0, 400), skippedCookieDomains: cookies.skipped };
   } finally {
     clearTimeout(timer);
   }
@@ -362,7 +457,8 @@ function inspectContainerEnv() {
   if (existsSync(cfg.sshKey)) args.push('-i', cfg.sshKey);
   args.push(
     cfg.sshHost,
-    `docker inspect ${cfg.container} --format '{{range .Config.Env}}{{println .}}{{end}}'`,
+    // S15-7：容器名按字面量传递（加引号），远端 shell 不再解释其中的元字符。
+    `docker inspect ${shQuote(cfg.container)} --format '{{range .Config.Env}}{{println .}}{{end}}'`,
   );
   const result = runReadOnly('ssh', args);
   if (!result.ok) {
@@ -422,9 +518,12 @@ function inspectContainerEnv() {
 
 function buildApplyCommands({ expectedDsn, domain }) {
   const domainValue = domain ?? cfg.baseUrl;
+  // S15-7：这些是给人类运维**复制粘贴执行**的命令，插值同样必须加引号（composeDir
+  // 可能带空格/元字符），否则等于把一条可注入的命令递到生产 shell 里。
+  const composeFile = path.join(cfg.composeDir, 'compose.yml');
   return [
     `# ── 0) 先备份（人工执行；本脚本不会执行任何一条） ──`,
-    `cd ${cfg.composeDir} && cp -a compose.yml "compose.yml.bak-$(date +%Y%m%d-%H%M%S)"`,
+    `cd ${shQuote(cfg.composeDir)} && cp -a compose.yml "compose.yml.bak-$(date +%Y%m%d-%H%M%S)"`,
     ``,
     `# ── 1) 在 ${cfg.composeDir}/compose.yml 的 services.web.environment 下新增一行 ──`,
     `#    取值必须带协议。若已存在 APP_URL / GLITCHTIP_URL，请改【它们】（优先级更高）。`,
@@ -432,11 +531,11 @@ function buildApplyCommands({ expectedDsn, domain }) {
     `#      GLITCHTIP_DOMAIN: ${domainValue}      # ← 新增（仅当 APP_URL/GLITCHTIP_URL 都不存在）`,
     ``,
     `# ── 2) 只重启 web 服务（不要 down -v，会删数据卷） ──`,
-    `cd ${cfg.composeDir} && docker compose up -d web`,
+    `cd ${shQuote(cfg.composeDir)} && docker compose up -d web`,
     ``,
     `# ── 3) 核对变量已进入容器 ──`,
-    `docker inspect ${cfg.container} --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E 'GLITCHTIP_URL|APP_URL|GLITCHTIP_DOMAIN'`,
-    `docker compose -f ${cfg.composeDir}/compose.yml ps`,
+    `docker inspect ${shQuote(cfg.container)} --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E 'GLITCHTIP_URL|APP_URL|GLITCHTIP_DOMAIN'`,
+    `docker compose -f ${shQuote(composeFile)} ps`,
     ``,
     `# ── 4) 核对后台 DSN 与 permalink 已变成公网域名 ──`,
     `curl -s -b <管理员cookie jar> '${cfg.baseUrl}/api/0/projects/${cfg.org}/${cfg.project}/keys/'`,
@@ -485,11 +584,32 @@ if (!report.cookieJarPresent) {
   report.verdict.push('UNKNOWN: 未提供管理员 cookie jar，无法核查后台展示的 DSN');
   report.exitCode = 2;
 } else {
+  const keysUrl = `${cfg.baseUrl}/api/0/projects/${encodeURIComponent(cfg.org)}/${encodeURIComponent(cfg.project)}/keys/`;
+  // S15-9-R2(2026-09-17 审计复核)：cookie 过滤在 try 之前算好；fetch 抛错时 catch 里
+  // 重建的 keys 对象也必须带上 skippedCookieDomains，否则"cookie 被跳过"这条线索在网络
+  // 错误路径上消失（下面统一由 keys.skippedCookieDomains 出 note）。
+  let cookies = { header: null, skipped: [] };
   let keys;
   try {
-    keys = await fetchKeys(cfg.cookieJar);
+    cookies = collectCookies(cfg.cookieJar, keysUrl);
+    keys = await fetchKeys(keysUrl, cookies);
   } catch (error) {
-    keys = { ok: false, status: 0, url: '', body: null, raw: String(error?.message ?? error) };
+    keys = {
+      ok: false,
+      status: 0,
+      url: keysUrl,
+      body: null,
+      raw: String(error?.message ?? error),
+      skippedCookieDomains: cookies.skipped,
+    };
+  }
+  // S15-9：被域/路径/secure 过滤掉的 cookie 必须说出来 —— 否则"管理员 cookie 没生效"
+  // 会表现成一句无法排查的 401。
+  if (Array.isArray(keys.skippedCookieDomains) && keys.skippedCookieDomains.length > 0) {
+    report.notes.push(
+      `cookie jar 里有 cookie 不属于目标 ${cfg.baseUrl}（域/路径不匹配或仅限 https），已跳过：`
+      + keys.skippedCookieDomains.join(', '),
+    );
   }
   if (!keys.ok || !Array.isArray(keys.body) || keys.body.length === 0) {
     report.notes.push(
@@ -519,6 +639,15 @@ if (!report.cookieJarPresent) {
       report.exitCode = 1;
     } else if (parsed) {
       report.verdict.push('OK: 后台展示的 DSN 不指向本机');
+    } else {
+      // S15-2(2026-09-17 审计)：API 返回了行、但 DSN 解析不出来（字段缺失/形态变化/
+      // userinfo 含非法转义）时必须显式 UNKNOWN + exit 2。此前这个分支既不设 verdict
+      // 也不设 exitCode ⇒ 工具在"什么都没核查到"的情况下打印"无缺陷"并 exit 0，
+      // 恰好在 API 形态变了（升级/换端点/被代理插了登录页）时变成假绿。
+      // 注意与 FAIL 的优先级：loopback 缺陷只能由解析成功的 DSN 得出（上面的分支），
+      // 这里只降级为"无法完成核查"；后续容器 env 的 FAIL 也保持"已有非 0 码不回退"。
+      report.verdict.push('UNKNOWN: keys API 返回的行没有可解析的 DSN（字段缺失或形态已变）');
+      report.exitCode = 2;
     }
   }
 }
@@ -586,4 +715,12 @@ if (!asJson) {
   log('');
   log(`退出码 ${report.exitCode}（0=无缺陷 1=发现缺陷 2=用法/凭据问题）`);
 }
-process.exit(report.exitCode);
+// S15-2-R2 / S15-5-R2(2026-09-17 审计复核)：收尾**不能**用 process.exit()，两个原因：
+//   ① stdout 是异步管道：超过管道缓冲的 --json 会在 process.exit 处被截断（实测只剩
+//      64KiB 量级），而退出码仍是 0 —— 机器消费者读到半截 JSON，甚至把它当成"核查通过"；
+//   ② 同步尾部里产生的 Promise.reject 要等当前 tick 结束才发 unhandledRejection，
+//      process.exit 抢在它前面 ⇒ 错误被吞、退出码 0，上面那条 fail-closed 铁轨形同虚设。
+// 改用 process.exitCode：事件循环排空（含未写完的 stdout）后自然退出，退出码语义不变；
+// 再让出一轮 setImmediate，确保挂起的 unhandledRejection 通知一定先送达 failClosed。
+process.exitCode = report.exitCode;
+await new Promise((resolve) => setImmediate(resolve));

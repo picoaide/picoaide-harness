@@ -203,4 +203,22 @@ describe('auth-gate login page: 内置地址后不再提供"修改服务端地�
     expect(guard, 'back-btn 的监听必须先判空').not.toBeNull()
     expect(script).not.toMatch(/^\s*document\.getElementById\('back-btn'\)\.addEventListener/m)
   })
+
+  it('配置值里出现占位符字面量也不得被二次展开（2026-09-17 二轮审计 IP-1）', () => {
+    // 旧实现是链式 replaceAll：值里若含**后面才替换**的占位符，它会在另一个
+    // 上下文里被展开 —— `defaults.server_url` 带 `__BRAND_JSON__` 时，
+    // brandScriptLiteral()（JSON.stringify，引号未转义）被插进 value="…" 属性，
+    // JSON 自己的 " 闭合属性 ⇒ 登录页出现任意属性/内联 JS（真实复现过 onfocus
+    // 处理器读密码框）。这里断言单遍填充：值原样（仅属性转义）落进 value。
+    const hostile = 'https://harness.example.com/__BRAND_JSON__'
+    const html = servedLoginPage({ defaultServer: hostile })
+    const valueAttr = html.match(/id="server"[^>]*/u)?.[0] ?? ''
+    // 属性里是**原值**（斜杠与下划线无需转义），没有被替换成品牌 JSON。
+    expect(valueAttr).toContain(`value="${hostile}"`)
+    // 攻击面必须消失：品牌 JSON 不得出现在 input 标签内部。
+    expect(valueAttr).not.toContain('var BRAND')
+    expect(valueAttr).not.toContain('{')
+    // 品牌 JSON 仍必须被真实填充（防止"干脆不替换"式的假修复）。
+    expect(html).toContain('var BRAND = {')
+  })
 })

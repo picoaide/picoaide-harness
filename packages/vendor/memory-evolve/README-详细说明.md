@@ -103,7 +103,7 @@
 - **key 记忆按分支范围注入**：key 条目可带 `[branch:main,dev]` 标记限定可见分支；**无标记 = 全部**（所有分支可见，历史条目天然如此）。注入时只注入「无标记」+「标记覆盖当前分支」的条目，**当前分支名随 key 一起注入**（快照 key 小节标题 + 提示行「当前 git 分支」），让模型明确知道自己所在分支。
 - **分支范围管理**：记忆 Tab 的 KEY 页签里，每条 key 显示「分支: 全部 ▾ / 分支: main,dev ▾」徽标，点击展开多选（全部与具体分支互斥，「全部」权重最大）；手动添加时可同时选择分支范围；模型提交建议时可用 `branches=main,dev` 参数（缺省=全部，不存在的分支会警告但照常写入）。
 - **日志分支 tag**：项目日志与每日日志的每一条记录**自动带来源分支 tag** `[git main]`（程序标注，模型无需也无法手写——手写前缀会被剥离），日志可溯源到分支，跨分支回顾时不会张冠李戴。
-- **开关**：`keyBranchFilter`（默认 true，仅 config.yaml）可关闭 key 的分支过滤注入。
+- **开关**：`keyBranchFilter`（默认 true）可关闭 key 的分支过滤注入。**运行时可改**：Memory Evolve「设置 → 配置」里的「key 轨分支过滤」开关（落盘 `plugin-state.json`、改完即时生效），`config.yaml` 仍可设静态初值。关闭后**四处**都不再过滤——快照注入 / COI·外部执行器注入 / `memory list` / `memory expand`（全部注入、不注入分支名）。
 
 ## 技能管理器（合并自 dsh-skill-browser）
 
@@ -448,7 +448,7 @@ agent 会通过 `memory` 工具读写记忆，通过 `skill_manage` 工具管理
 | `perTurnProjectWrites` | `true` | 每回合写入项目日志：每轮收尾向该轨写入 1 条本回合进展；关 = 项目日志仅按需读取 |
 | `perTurnDailyWrites` | `true` | 每回合写入每日日志：每轮收尾向该轨写入 1 条本回合进展；关 = 每日日志仅按需读取 |
 | `perTurnKeyWrites` | `true` | 每回合检查项目关键记忆：每轮收尾判断是否出现重要项目事实（长期约定/决策/架构/踩坑），有则写入 `key` 轨（自动注入），没有就跳过；关 = key 仅保留手动添加与读取 |
-| `keyBranchFilter` | `true` | key 记忆按 git 分支过滤注入：仅注入无标记（全部）或覆盖当前分支的条目，当前分支名随 key 一起注入（非 git 仓库自动退化为全部注入）；仅 config.yaml 可配置 |
+| `keyBranchFilter` | `true` | key 记忆按 git 分支过滤注入：仅注入无标记（全部）或覆盖当前分支的条目，当前分支名随 key 一起注入（非 git 仓库自动退化为全部注入）。**运行时可改**：Memory Evolve「设置 → 配置」的「key 轨分支过滤」开关（落盘 `plugin-state.json`、即时生效），config.yaml 仍可设静态初值；关闭后快照注入 / COI·外部执行器注入 / list / expand 四处都不再过滤 |
 | `entryDatePrefix` | `true` | 记忆条目自动加时间前缀：全局轨与项目关键记忆 `[YYYY-MM-DD]`、项目日志 `[YYYY-MM-DD HH:MM]`、每日日志 `[HH:MM] [项目]`（项目标签由程序取自会话工作目录自动标注；**git 仓库中项目日志/每日日志还会自动加分支 tag `[git 分支名]`**，日志可溯源到分支，模型无需手写） |
 | `injectMemory` | `true` | 记忆快照注入开关（只注入低频变化的轨——用户档案/全局事实/项目关键记忆 + 「记忆 memory-evolve」提示段；项目日志/每日日志内容按需读取，不注入） |
 | `injectionScan` | `true` | 写入内容的提示注入短语扫描 |
