@@ -8277,7 +8277,7 @@ function NumInput(props) {
 }
 function PromptView(props) {
   const t = dict2(props.t);
-  const say = (key) => t(key);
+  const say = (key, params) => t(key, params);
   const [prompts, setPrompts] = (0, import_react17.useState)([]);
   const [injections, setInjections] = (0, import_react17.useState)([]);
   const [sources, setSources] = (0, import_react17.useState)([]);

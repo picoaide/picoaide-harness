@@ -191,7 +191,9 @@ function NumInput(props: {
  */
 export function PromptView(props: ConvViewProps & PromptViewProps): JSX.Element {
   const t = dict(props.t)
-  const say = (key: DictKey): string => t(key)
+  // 必须透传第二个参数：审计 F1 的事故形态正是"收窄包装器只转发 key"，
+  // 会让带占位符的文案原样渲染 {n}。这里与 dict() 保持同一契约。
+  const say = (key: DictKey, params?: Record<string, unknown>): string => t(key, params)
 
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [injections, setInjections] = useState<Injection[]>([])
