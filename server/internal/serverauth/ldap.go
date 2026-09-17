@@ -2,6 +2,7 @@ package serverauth
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -386,11 +387,58 @@ func (p *LDAPProvider) Authenticate(username, password string) (UserInfo, error)
 	return ui, nil
 }
 
-// redactCredential 把**已知凭据**从待落日志的文本里擦掉(空口令不擦,避免把
-// 空串替换成噪声)。用途:错误文本来自对端(不可信),而落盘日志是长期留存面。
+// redactCredential 把**已知凭据**从待落日志的文本里擦掉,并转义控制字符。
+//
+// 为什么不能只做一次精确子串替换(2026-09-17 独立审计 N1):
+//   - 错误文本来自对端(不可信):目录服务在 bind 请求里就拿到了明文口令,
+//     可以任意变形回显 —— 实测大小写、base64、URL 编码都是现成的绕过;
+//   - 所以这里擦**常见编码形态**(原样/小写/大写/base64/URL 编码),并承认
+//     "部分回显/插入分隔符"这类变形仍可能漏(残余风险,已在发布说明认账);
+//   - 另外对端可在文本里塞 CR/LF 伪造整行日志(CWE-117),所以控制字符一律
+//     转成可见转义,保证一条错误只占一行。
 func redactCredential(text, secret string) string {
-	if secret == "" {
-		return text
+	out := text
+	if secret != "" {
+		variants := []string{
+			secret,
+			strings.ToLower(secret),
+			strings.ToUpper(secret),
+			base64.StdEncoding.EncodeToString([]byte(secret)),
+			url.QueryEscape(secret),
+		}
+		for _, v := range variants {
+			if v == "" {
+				continue
+			}
+			out = strings.ReplaceAll(out, v, "***")
+		}
 	}
-	return strings.ReplaceAll(text, secret, "***")
+	out = sanitizeLogLine(out)
+	const maxLogText = 300
+	if len(out) > maxLogText {
+		out = out[:maxLogText] + "…"
+	}
+	return out
+}
+
+// sanitizeLogLine 把 CR/LF/Tab 与非可打印字符转成可见转义(CWE-117:对端文本
+// 不能伪造日志行)。
+func sanitizeLogLine(text string) string {
+	var b strings.Builder
+	b.Grow(len(text))
+	for _, r := range text {
+		switch {
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r < 0x20 || r == 0x7f:
+			b.WriteString(fmt.Sprintf(`\x%02x`, r))
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
