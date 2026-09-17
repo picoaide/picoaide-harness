@@ -279,11 +279,20 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * dictionary key, and these keys live in the host dictionary.
    */
   const copy = (key: HostCopyKey, params?: Record<string, string>): string => hostT(locale(), key, params)
-  /** State patch carrying the stable code of a caught error (see connector-error.ts). */
-  const withCode = (error: unknown): { errorCode?: ReturnType<typeof connectorErrorCodeOf> } => {
-    const code = connectorErrorCodeOf(error)
-    return code === undefined ? {} : { errorCode: code }
-  }
+  /**
+   * State patch carrying the stable code of a caught error (see connector-error.ts).
+   *
+   * 无 code 时也必须**带上这个键**（2026-09-17 S04-3 审计）：setState 是合并写，
+   * 早先只在有 code 时才写字段，于是一条 `errorCode:'auth-required'` 会粘到
+   * 之后任何一条未分类的失败上（客户端按 code 优先渲染 ⇒ 跳过本地化兜底、
+   * 把原始错误文本直出），把分类契约反过来用。
+   *
+   * 同一条审计的反向规则：**凡是写 `error` 的 setState 都要同时交代 `errorCode`**
+   * —— 拿不到分类就显式写 `errorCode: undefined`（下面所有清空错误、或换成未
+   * 分类消息的路径），否则同一个字段会以另一种方式粘住。
+   */
+  const withCode = (error: unknown): { errorCode?: ReturnType<typeof connectorErrorCodeOf> } =>
+    ({ errorCode: connectorErrorCodeOf(error) })
 
   // N3: the MCP streamable-http transport is constructed inside
   // `dsh-mcp-client` with its own `fetch`, so the redirect fence must be on the
@@ -425,9 +434,17 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const created = createOAuthProvider({
         credential,
         target,
-        onPersist: (patch: Partial<ConnectorCredential>) => {
+        ensureFresh: async () => await ensureCredentialFresh(def.id, baseline),
+        // **必须 await 落盘**（2026-09-17 flake 定案）：`saveTokens` 是 SDK 自己
+        // 续期后唯一的持久化点，而 provider 的 `tokens()` 又会把内存里的新令牌
+        // 交给下一次请求。写盘一旦 fire-and-forget，SDK 的续期就已经"完成"了而
+        // 磁盘还是旧的 —— 随后任何读者（registerMcp 的建 provider、restoreAll）
+        // 都可能拿着一枚**已被消费**的 refresh token 去续期，轮换复用检测随即
+        // 吊销整个授权（实测窗口 4–29ms，CI 里就是那条
+        // `InvalidGrantError: refresh token already used`）。
+        onPersist: async (patch: Partial<ConnectorCredential>) => {
           if (registrationScope !== store.dir) return
-          void persistAndMaybeAnnounce(def.id, patch, baseline.current)
+          await persistAndMaybeAnnounce(def.id, patch, baseline.current)
             .then((saved) => { if (saved !== null) baseline.current = saved })
             .catch((cause: unknown) => {
               ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
@@ -457,13 +474,17 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         target,
         discovery: resolved.discovery,
         ...(resolved.resource === undefined ? {} : { resource: resolved.resource }),
-        onPersist: (patch: Partial<ConnectorCredential>) => {
-          // The SDK's persistence point: a rotated refresh token or a new
-          // access token must reach the store, or the next process (or the
-          // next registration) would refresh with a dead grant. Never through
-          // a store that a user switch has replaced in the meantime.
+        ensureFresh: async () => await ensureCredentialFresh(def.id, baseline),
+        // The SDK's persistence point: a rotated refresh token or a new
+        // access token must reach the store, or the next process (or the
+        // next registration) would refresh with a dead grant. Never through
+        // a store that a user switch has replaced in the meantime.
+        // **必须 await 落盘**（2026-09-17 flake 定案）：返回 undefined 会让
+        // `saveTokens` 在持久化之前就 resolve，随后任何读者都可能拿到已被消费的
+        // refresh token（见上面静态端点分支的同一段说明）。
+        onPersist: async (patch: Partial<ConnectorCredential>) => {
           if (registrationScope !== store.dir) return
-          void store.updateCredentialIfUnchanged(def.id, baseline.current, patch)
+          await store.updateCredentialIfUnchanged(def.id, baseline.current, patch)
             .then((saved) => {
               if (saved === null) return
               baseline.current = saved
@@ -624,6 +645,37 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     },
     ...(options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs }),
   })
+
+  /**
+   * 让 SDK provider 交出令牌前先确保新鲜 —— 走**同一个** per-id 单飞。
+   *
+   * 2026-09-17：SDK 的 401 自愈（`authInternal` → `tokens()` →
+   * `refreshAuthorization`）不在 `TokenRefresher.inflight` 里。它和我们的刷新
+   * （心跳 / 面板 / 重开恢复）并发时，同一个单次 refresh token 会被出示两次，
+   * 启用轮换复用检测的授权服务器（RFC 6749 §10.4）会吊销整个授权 —— CI 里的
+   * `InvalidGrantError: refresh token already used` 就是这条。
+   *
+   * SDK 的四个 `tokens()` 调用点全部 `await provider.tokens()`，所以收口放在
+   * provider 的 `tokens()` 里：快过期时先经这里刷一次，SDK 拿到的是当前世代，
+   * 于是它不会再发起自己的刷新 —— 刷新的主人只剩一个（`TokenRefresher`）。
+   * @param id - 连接器 id。
+   * @param baseline - 该 provider 的 CAS 基准快照（刷新落盘后同步前移）。
+   * @returns 刷新后的令牌；未刷新或失败时返回 null（provider 交回旧令牌，SDK 按原
+   *   路径升级为 transient / 需要重新授权）。
+   */
+  const ensureCredentialFresh = async (
+    id: string,
+    baseline: { current: ConnectorCredential },
+  ): Promise<RefreshedTokens | null> => {
+    const outcome = await tokenRefresher.refresh(id, { locale: locale() })
+    if (!outcome.ok) return null
+    // 刷新引擎的 onRefreshed 已经把新凭据喂给活着的 provider（adopt +
+    // syncBaseline）；这里再把这个 provider 自己的 CAS 基准前移，避免 SDK 之后
+    // 的持久化拿着被取代的快照做比较而静默丢弃。
+    const persisted = await store.readCredential(id)
+    if (persisted !== null) baseline.current = persisted
+    return outcome.tokens
+  }
   const pendingRequests = new Map<string, ConnectorAuthRequest>()
   /** Server-issued stdio commands waiting for a local decision, keyed by connector id. */
   const pendingApprovals = new Map<string, PendingApproval>()
@@ -1375,7 +1427,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const requestDeclaredFields = (id: string, def: ConnectorDef): void => {
     pendingFieldRequestKind.set(id, 'tokenFields')
     emitRequest({ connectorId: id, fields: def.tokenFields ?? [] })
-    setState(id, { status: 'connecting', error: undefined })
+    setState(id, { status: 'connecting', error: undefined, errorCode: undefined })
   }
 
   /** Start the auth flow for a connector (background for poll-based modes). */
@@ -1393,7 +1445,17 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     try {
       const existing = await store.readCredential(id)
       if (!intentLive(id, intent)) return
-      setState(id, { status: 'connecting', everConnected: Boolean(existing) || Boolean(states.get(id)?.everConnected) })
+      // 进入 connecting 必须把上一次的失败文案与分类一起清掉（2026-09-17 S04-3
+      // 复核 P4：这是同一条规则漏掉的**唯一**一处状态写入点）。客户端
+      // `client/ConnectorsSection.tsx` 对任何非 connected 状态都渲染 `error`
+      // 段落，留着旧值会让"新一轮连接中"的行继续显示上一次的失败（errorCode 也
+      // 跟着留下）；两者必须同时清，否则又回到"分类与文案各说各话"。
+      setState(id, {
+        status: 'connecting',
+        everConnected: Boolean(existing) || Boolean(states.get(id)?.everConnected),
+        error: undefined,
+        errorCode: undefined,
+      })
 
       // Pre-connect settings: if required fields are missing, emit the form and
       // wait for auth-submit before starting the actual auth flow.
@@ -1423,17 +1485,17 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         const outcome = await registerMcp(def, { signal: intentSignal(intent) })
         if (outcome.superseded === true) return
         if (outcome.pendingApproval !== undefined) {
-          setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+          setState(id, { status: 'unauthorized', everConnected: true, error: undefined, errorCode: undefined })
           return
         }
         if (outcome.rejected.length > 0) {
           pendingRequests.delete(id)
-          setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+          setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; '), errorCode: undefined })
           return
         }
         pendingRequests.delete(id)
         pendingFieldRequestKind.delete(id)
-        setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
+        setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined, errorCode: undefined })
         return
       }
       // The auth flow reuses the intent's controller: /cancel, disconnect and a
@@ -1490,15 +1552,15 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         // FIX-02: the credential is stored, but the server-issued stdio
         // command still needs a local decision — nothing was spawned and the
         // confirmation request stays in `pendingRequests` for the panel.
-        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+        setState(id, { status: 'unauthorized', everConnected: true, error: undefined, errorCode: undefined })
         return
       }
       if (outcome.rejected.length > 0) {
         pendingRequests.delete(id)
-        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; '), errorCode: undefined })
         return
       }
-      setState(id, { status: "connected", everConnected: true, connectedAt: Date.now(), error: undefined })
+      setState(id, { status: "connected", everConnected: true, connectedAt: Date.now(), error: undefined, errorCode: undefined })
       // The flow reached a terminal success: the authorize URL in
       // pendingRequests is stale (the auth page was already opened and the
       // code exchanged). Leaving it behind makes every later panel open
@@ -1517,7 +1579,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // A user-initiated abort maps to the neutral 'disconnected' state, not
       // an error (the cancel button must not leave a scary red row behind).
       if (controller.signal.aborted) {
-        setState(id, { status: 'disconnected', everConnected: Boolean(states.get(id)?.everConnected), error: undefined })
+        setState(id, { status: 'disconnected', everConnected: Boolean(states.get(id)?.everConnected), error: undefined, errorCode: undefined })
       } else {
         setState(id, { status: unauthorized ? 'unauthorized' : 'error', error: message, ...withCode(error) })
       }
@@ -1576,15 +1638,15 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const outcome = await registerMcp(def, { signal: intentSignal(intent) })
       if (outcome.superseded === true || !intentLive(id, intent)) return
       if (outcome.pendingApproval !== undefined) {
-        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+        setState(id, { status: 'unauthorized', everConnected: true, error: undefined, errorCode: undefined })
         return
       }
       if (outcome.rejected.length > 0) {
         pendingRequests.delete(id)
-        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; '), errorCode: undefined })
         return
       }
-      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
+      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined, errorCode: undefined })
       pendingRequests.delete(id)
     } finally {
       endIntent(id, intent)
@@ -1616,8 +1678,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // re-registration under a NEW authorization.
     latestRefresh.delete(id)
     liveProviders.delete(id)
+    // 断开必须连分类一起清（2026-09-17 S04-3 审计）：只清 error 会留下
+    // `errorCode:'auth-required'`，下一次未分类失败就会被渲染成"需要重新授权"。
     setState(id, {
-      status: 'disconnected', everConnected: false, error: undefined, connectedAt: undefined,
+      status: 'disconnected', everConnected: false, error: undefined, errorCode: undefined, connectedAt: undefined,
       expiresAt: undefined, refreshedAt: undefined, refreshToken: undefined,
     })
     pendingRequests.delete(id)
@@ -1678,14 +1742,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           if (outcome.pendingApproval !== undefined) {
             // FIX-02: an unapproved server-issued command never reaches spawn;
             // the row waits for the user's local decision.
-            setState(def.id, { status: 'unauthorized', everConnected: true, error: undefined })
+            setState(def.id, { status: 'unauthorized', everConnected: true, error: undefined, errorCode: undefined })
             continue
           }
           if (outcome.rejected.length > 0) {
-            setState(def.id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+            setState(def.id, { status: 'error', everConnected: true, error: outcome.rejected.join('; '), errorCode: undefined })
             continue
           }
-          setState(def.id, { status: 'connected', everConnected: true })
+          setState(def.id, { status: 'connected', everConnected: true, error: undefined, errorCode: undefined })
         } else if (def.authMode === 'token' || def.authMode === 'device') {
           // Fields-only connector whose required fields were removed/truncated:
           // ask for them again instead of silently staying disconnected.
@@ -1784,11 +1848,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const outcome = await registerMcp(def, { signal: teardownController.signal })
       if (outcome.superseded === true) return
       if (outcome.pendingApproval !== undefined) {
-        setState(def.id, { status: 'unauthorized', everConnected: true, error: undefined })
+        setState(def.id, { status: 'unauthorized', everConnected: true, error: undefined, errorCode: undefined })
         return
       }
       if (outcome.rejected.length > 0) {
-        setState(def.id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        setState(def.id, { status: 'error', everConnected: true, error: outcome.rejected.join('; '), errorCode: undefined })
       }
     }).catch((cause: unknown) => {
       ctx.logger?.warn(`pico-connectors: ${payload.id} 令牌更新后重注册失败`, cause)
@@ -1842,7 +1906,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         if (outcome.reason === 'reauthorize') {
           setState(id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode })
         } else if (outcome.reason === 'transient') {
-          setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: outcome.message })
+          setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: outcome.message, errorCode: undefined })
         }
         return json(res, outcome.reason === 'not-applicable' ? 400 : 409, {
           error: outcome.message,
@@ -1851,7 +1915,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         })
       }
       noteCredential(id, await store.readCredential(id))
-      setState(id, { status: 'connected', everConnected: true, error: undefined })
+      setState(id, { status: 'connected', everConnected: true, error: undefined, errorCode: undefined })
       json(res, 200, { ok: true, expiresAt: outcome.tokens.expiresAt })
     }
 
@@ -1901,7 +1965,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // in its first credential read (or waiting for the settings form) used to
       // keep going and put the row back to "connecting" after the cancel.
       invalidateIntent(id, new Error(copy('flow.userCancelled')))
-      setState(id, { status: 'disconnected', everConnected: Boolean(states.get(id)?.everConnected), error: undefined })
+      setState(id, { status: 'disconnected', everConnected: Boolean(states.get(id)?.everConnected), error: undefined, errorCode: undefined })
       pendingRequests.delete(id)
       pendingFieldRequestKind.delete(id)
       json(res, 200, { ok: true })
@@ -1987,14 +2051,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const outcome = await registerMcp(def, { signal: teardownController.signal })
       if (outcome.superseded === true) return json(res, 200, { ok: true })
       if (outcome.pendingApproval !== undefined) {
-        setState(id, { status: 'unauthorized', everConnected: true, error: undefined })
+        setState(id, { status: 'unauthorized', everConnected: true, error: undefined, errorCode: undefined })
         return json(res, 409, { error: 'approval did not settle every pending command' })
       }
       if (outcome.rejected.length > 0) {
-        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; ') })
+        setState(id, { status: 'error', everConnected: true, error: outcome.rejected.join('; '), errorCode: undefined })
         return json(res, 400, { error: outcome.rejected.join('; ') })
       }
-      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined })
+      setState(id, { status: 'connected', everConnected: true, connectedAt: Date.now(), error: undefined, errorCode: undefined })
       json(res, 200, { ok: true })
     }
 
@@ -2006,7 +2070,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       if (!getDef(id)) return json(res, 404, { error: `unknown connector: ${id}` })
       pendingApprovals.delete(id)
       pendingRequests.delete(id)
-      setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: copy('flow.approvalDeniedRow') })
+      setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: copy('flow.approvalDeniedRow'), errorCode: undefined })
       json(res, 200, { ok: true })
     }
 

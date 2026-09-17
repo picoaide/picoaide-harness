@@ -383,6 +383,12 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "PUT", "/agent-presets/:name/grants", serverauth.PermCapabilityWrite, d.Agentshare.ReplacePresetGrants)
 	serverauth.AdminRoute(authed, "PUT", "/agent-presets/:name/grant", serverauth.PermCapabilityWrite, d.Agentshare.SetPresetGrant)
 	serverauth.AdminRoute(authed, "DELETE", "/agent-presets/:name/grant", serverauth.PermCapabilityWrite, d.Agentshare.RemovePresetGrant)
+	// 组织共享智能体上下架(SG-4,2026-09-17):与上面共享技能的
+	// PUT /shared-skills/:name/enabled 对称 —— 同一 RBAC 权限点、同一 JSON 信封、
+	// 同一 apps.enabled 语义(读侧三处闸门早已就位:ListVisibleAgentPresets /
+	// agentshare.listVisible / serveArchive)。市场渠道智能体仍走 marketplace 的
+	// POST /agents/:name/enable,两条路径互不越界(requireOrgAgent / 渠道守卫)。
+	serverauth.AdminRoute(authed, "PUT", "/agent-presets/:name/enabled", serverauth.PermCapabilityWrite, d.Agentshare.SetEnabled)
 
 	// 能力中心管理
 	serverauth.AdminRoute(authed, "GET", "/capabilities/approvals", serverauth.PermCapabilityRead, d.Capability.ListApprovals)

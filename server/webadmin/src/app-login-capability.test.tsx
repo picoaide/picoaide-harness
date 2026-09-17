@@ -94,7 +94,9 @@ describe('登录后的能力判定(R7-RV-2)', () => {
     await loginThroughForm()
 
     // 不能为了修只读角色把写入口对所有人收掉(过度纠正)。
-    expect(await screen.findByRole('button', { name: '新建用户' })).toBeInTheDocument()
+    // 显式 5s 预算：默认 1000ms 在 CI/4 路并行负载下不够（2026-09-17 审计实测
+    // 4 路并行 8 次里红 1 次，报错是 findBy* 超时而非判据错）。判据不变，只放宽上限。
+    expect(await screen.findByRole('button', { name: '新建用户' }, { timeout: 5000 })).toBeInTheDocument()
     expect(screen.queryByText(/当前为审计只读视图/)).toBeNull()
   })
 })

@@ -232,6 +232,17 @@ export interface DesktopStartupCopy {
   readonly pluginRecoveryDetail: (plugins: string, error: string, product: string) => string
   readonly pluginRecoveryRestart: (product: string) => string
   readonly pluginRecoveryDismiss: string
+  /**
+   * `pluginRecoveryDetail` 的两段兜底文案（2026-09-17 S05-3 审计）。
+   *
+   * 这两句此前以**三元分支的字面量**形式留在 electron-runtime 里：本地化扫描
+   * 只看对象属性的写法，看不到分支里的英文，于是中文用户拿到的是
+   * 「加载失败的插件: Unknown client plugin / The client Loader did not
+   * provide an error message.」这种中英混排详情 —— 与同一次本地化修的正是
+   * 同一个弹窗。兜底句必须和模板同源，否则下次仍会漏。
+   */
+  readonly unknownPlugin: string
+  readonly loaderErrorMissing: string
   /** Notification: an optional UI plugin of the profile is not installed. */
   readonly skippedPluginTitle: string
   readonly skippedPluginBody: (name: string, suffix: string) => string
@@ -248,6 +259,8 @@ const startupCopy: Record<DesktopLocale, DesktopStartupCopy> = {
       `Failed plugins:\n${plugins}\n\n${error}\n\nRestart ${product} after resolving the failing plugin.`,
     pluginRecoveryRestart: product => `Restart ${product}`,
     pluginRecoveryDismiss: 'Dismiss',
+    unknownPlugin: 'Unknown client plugin',
+    loaderErrorMissing: 'The client Loader did not provide an error message.',
     skippedPluginTitle: 'Skipped Unavailable UI Plugin',
     skippedPluginBody: (name, suffix) => `${name} is not installed in this profile${suffix}.`,
     volumeTitle: 'Storage May Be Unsupported',
@@ -260,6 +273,8 @@ const startupCopy: Record<DesktopLocale, DesktopStartupCopy> = {
       `加载失败的插件:\n${plugins}\n\n${error}\n\n请先处理失败的插件，然后重启 ${product}。`,
     pluginRecoveryRestart: product => `重启 ${product}`,
     pluginRecoveryDismiss: '忽略',
+    unknownPlugin: '未知客户端插件',
+    loaderErrorMissing: '客户端 Loader 未提供错误信息。',
     skippedPluginTitle: '已跳过不可用的界面插件',
     // suffix 以「 等 N 个」开头，必须插在动词前（插在句尾会变成
     // 「foo 未安装在此配置中 等 2 个。」—— 2026-09-16 R2 审计）。

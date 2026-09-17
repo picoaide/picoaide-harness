@@ -240,14 +240,21 @@ describe('nextRunAtMs', () => {
  * 会被归一化回当天 ⇒ 死循环。该函数在调度器 tick 里同步调用，卡住就等于所有
  * 定时任务永久停摆（`tickInFlight` 不复位）。8 年回退视野把这个窗口从 5 年放大
  * 到 8 年，所以本轮一并加守卫。
+ * （S08-02 之后 AND 分支的回退视野变成 41 年：同一条用例的游标现在会越过跳日
+ * 继续走到 2004-02-29，所以断言从 undefined 改为"跨过跳日仍拿到正确的命中"。）
  */
 describe('按日回退游标不会因"跳日"原地打转（R9 审计）', () => {
   it('terminates on a skipped local calendar day', () => {
     assertWithTz('Pacific/Apia', `
-      // 2011-12-30 在当地不存在（跨日界线跳到 12-31）；表达式在 2004/2032 之间
-      // 没有命中日，游标会一路退到那个跳日。
+      // 2011-12-30 在当地不存在（跨日界线跳到 12-31）；2004-02-29 是周日，
+      // 游标必须跨过那个跳日往回走到它（走不出去就是死循环，用例会超时）。
       const last = lastRunAtMs('0 0 29 2 */7', Date.UTC(2017, 5, 1))
-      assert.equal(last, undefined)
+      assert.ok(last !== undefined, 'the walk must terminate with the 2004 match')
+      const d = new Date(last)
+      assert.equal(d.getFullYear(), 2004)
+      assert.equal(d.getMonth(), 1)
+      assert.equal(d.getDate(), 29)
+      assert.equal(d.getDay(), 0)
     `)
   })
 
@@ -284,5 +291,60 @@ describe('按日回退游标不会因"跳日"原地打转（R9 审计）', () =>
       assert.equal(d.getMonth(), 1)
       assert.equal(d.getDate(), 29)
     `)
+  })
+})
+
+/**
+ * 2026-09-17 S08-02 审计：扫描视野原本是**固定**八年，但日/周 AND 分支（任一
+ * 侧带 `*` 前缀即 AND，见 dayCandidate）的 (月, 日, 周几) 合取最长可隔 40 年
+ * —— 2 月 29 日 + 周日是 2088→2128（2100 不是闰年，之后的星期循环整体错位），
+ * 普通日期最长 12 年。于是完全合法的表达式被判「八年内无匹配时刻」：
+ * cron_create 抛错、POST /api/cron/action 回 400 invalid-action；从 2026-09-17
+ * 当天算起，5952 个可表达的 AND 形式里有 97 个被误拒（v2.7.4 对同一条表达式
+ * 是返回值的）。修法=按表达式给视野（horizonDays：AND 分支 41*366 天，覆盖
+ * 400 年格里高利周期实测最大间隔 14609 天；其余保持 8*366）。
+ */
+describe('AND 分支的扫描视野（S08-02 审计，2026-09-17）', () => {
+  it('今天就被误拒的案例：3 月的日步进 AND 周日，真实命中在 10.5 年后', () => {
+    assertWithTz('UTC', `
+      assert.equal(nextRunAtMs('0 0 */7 3 0', Date.UTC(2026, 8, 17)), Date.UTC(2037, 2, 1))
+    `)
+  })
+
+  it('40 年闰日缺口：2 月 29 日 AND 周日仍须可达', () => {
+    assertWithTz('UTC', `
+      // 2088-02-29 是周日，下一次同样是周日的 2 月 29 日在 2128 年。
+      assert.equal(nextRunAtMs('0 0 29 2 */7', Date.UTC(2088, 1, 29)), Date.UTC(2128, 1, 29))
+      assert.equal(nextRunAtMs('0 0 29 2 */7', Date.UTC(2089, 5, 1)), Date.UTC(2128, 1, 29))
+    `)
+  })
+
+  it('12 年普通日期缺口：1 月的日步进 AND 周一 / 1 月 2 日 AND 周日', () => {
+    assertWithTz('UTC', `
+      assert.equal(nextRunAtMs('0 0 */31 1 1', Date.UTC(2092, 0, 2)), Date.UTC(2103, 0, 1))
+      assert.equal(nextRunAtMs('0 0 2 1 */7', Date.UTC(2191, 0, 3)), Date.UTC(2203, 0, 2))
+    `)
+  })
+
+  it('catch-up（lastRunAtMs）用同一视野', () => {
+    assertWithTz('UTC', `
+      // 2088-02-29 与 2128-02-29 之间是 40 年空档：从空档中间的 2108 年回看，
+      // 上一次命中在近 20 年前，旧的八年回退视野会直接返回 undefined
+      // （调度器的补跑路径依赖它，见 host-scheduler.ts）。
+      assert.equal(lastRunAtMs('0 0 29 2 */7', Date.UTC(2108, 0, 1)), Date.UTC(2088, 1, 29))
+      assert.equal(lastRunAtMs('0 0 29 2 */7', Date.UTC(2128, 2, 1)), Date.UTC(2128, 1, 29))
+      assert.equal(lastRunAtMs('0 0 */7 3 0', Date.UTC(2037, 2, 2)), Date.UTC(2037, 2, 1))
+    `)
+  })
+
+  it('视野放宽不放过真正不可能的表达式', () => {
+    // 2 月 31 日即使在 AND 分支里也永远不成立（hasPossibleCalendarDay 直接拒），
+    // 放宽视野不得把「不可能」变成「有匹配」。
+    assertWithTz('UTC', `
+      assert.equal(nextRunAtMs('0 0 31 2 */2', Date.UTC(2026, 0, 1)), undefined)
+      assert.equal(lastRunAtMs('0 0 31 2 */2', Date.UTC(2026, 0, 1)), undefined)
+    `)
+    expect(nextRunAtMs('0 0 30 2 *', Date.UTC(2026, 0, 1))).toBeUndefined()
+    expect(lastRunAtMs('0 0 30 2 *', Date.UTC(2026, 0, 1))).toBeUndefined()
   })
 })

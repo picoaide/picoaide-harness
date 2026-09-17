@@ -67,12 +67,15 @@ func reportSkillCall(db *sql.DB) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 			return
 		}
-		name := strings.TrimSpace(req.Name)
+		// SG-1(审计 2026-09-17):name/version 是同一个洞 —— NUL 能穿过长度与
+		// 分隔符校验,却会让后续 SELECT/UPDATE 的参数被 PG 拒绝(500 + 计数丢失)。
+		// 与 error-reporting 共用同一份清洗;清洗后再走原有校验(空名/分隔符仍 400)。
+		name := stripControlChars(strings.TrimSpace(req.Name))
 		if name == "" || len(name) > maxNameLen || strings.ContainsAny(name, "/\\") {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "skill name 不合法")
 			return
 		}
-		version := strings.TrimSpace(req.Version)
+		version := stripControlChars(strings.TrimSpace(req.Version))
 		if len(version) > maxNameLen {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "version 不合法")
 			return

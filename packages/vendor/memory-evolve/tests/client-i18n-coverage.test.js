@@ -103,18 +103,40 @@ test('动态模板键的字典族必须存在（scope.${s} 这类漏改会被抓
 })
 
 test('非文案的解析/匹配模式必须保留（翻了就会坏）', () => {
-  // 通知铃铛：解析邮件头，必须同时认中文与英文标签
-  const bell = readFileSync(join(CLIENT_ROOT, 'notification-bell.tsx'), 'utf8')
-  assert.ok(bell.includes('主题') && bell.includes('Subject'), '邮件头解析必须双语兼容')
-  assert.ok(bell.includes('发送人') && bell.includes('Sender'), '邮件头解析必须双语兼容')
-  // 分支注入器：识别上游「在新对话中分支」菜单项
-  const bookmark = readFileSync(join(CLIENT_ROOT, 'bookmark-injector.tsx'), 'utf8')
-  assert.ok(bookmark.includes('在新对话中分支'), 'BRANCH_PATTERNS 必须保留上游中文菜单文本')
-  // 书签视图：匹配上游 tab 文案（对话 / 更早 / 加载历史）
-  const bookmarks = readFileSync(join(CLIENT_ROOT, 'BookmarksView.tsx'), 'utf8')
-  for (const needle of ['对话', '更早', '加载历史']) {
-    assert.ok(bookmarks.includes(needle), `上游 tab 文案匹配必须保留「${needle}」`)
+  // TQ-2（2026-09-17 审计）：原来这些断言 grep 的是**含注释的原始源码**，而
+  // 「在新对话中分支」「主题」「发送人」「对话」等字面量同时活在模块头部注释里
+  // —— 把 BRANCH_PATTERNS 清成 `[]`（整个分支接管失效）、把解析正则删掉，断言
+  // 照样绿（变异实测 GREEN）。现在一律先剥注释，并且不再找"某个词在不在文件里"，
+  // 而是钉住承载行为的**数据结构/匹配表达式本身**。
+  const bell = codeOnly(readFileSync(join(CLIENT_ROOT, 'notification-bell.tsx'), 'utf8'))
+  const mailField = /const MAIL_FIELD_RE = (\/.*\/[a-z]*)/u.exec(bell)
+  assert.ok(mailField !== null, '邮件正文解析必须仍有 MAIL_FIELD_RE（删掉＝邮件式正文不再结构化）')
+  for (const needle of ['主题', '发送人', 'Subject', 'Sender']) {
+    assert.ok(
+      mailField[1].includes(needle),
+      `MAIL_FIELD_RE 必须同时认「${needle}」（中英双语解析，翻了就解析不出字段）`,
+    )
   }
-  const bellSource = codeOnly(bell)
-  assert.doesNotMatch(bellSource, /t\('.*主题/u, '解析模式不得改成走字典')
+  // 分支注入器：BRANCH_PATTERNS 的**成员**与**消费点**都要在（空数组＝按钮认不出）
+  const bookmark = codeOnly(readFileSync(join(CLIENT_ROOT, 'bookmark-injector.tsx'), 'utf8'))
+  const branchPatterns = /const BRANCH_PATTERNS = \[([^\]]*)\]/u.exec(bookmark)
+  assert.ok(branchPatterns !== null, '必须仍有 BRANCH_PATTERNS（分支接管的承重件）')
+  assert.deepEqual(
+    [...branchPatterns[1].matchAll(/'([^']*)'/gu)].map((match) => match[1]),
+    ['在新对话中分支', 'Branch into a new conversation'],
+    'BRANCH_PATTERNS 必须原样保留上游 zh/en 菜单文本（清空＝分支按钮再也认不出）',
+  )
+  assert.match(bookmark, /BRANCH_PATTERNS\.some\(/u, 'BRANCH_PATTERNS 必须真的被 isBranchButton 消费')
+  // 书签视图：上游 tab 文案匹配（比较表达式本身，不是注释里的词）
+  const bookmarks = codeOnly(readFileSync(join(CLIENT_ROOT, 'BookmarksView.tsx'), 'utf8'))
+  for (const needle of [
+    "text === '对话'",
+    "text === 'Chat'",
+    "text.includes('更早')",
+    "text.includes('加载历史')",
+    "text.includes('Load earlier')",
+  ]) {
+    assert.ok(bookmarks.includes(needle), `上游 tab 文案匹配必须保留：${needle}`)
+  }
+  assert.doesNotMatch(bell, /t\('.*主题/u, '解析模式不得改成走字典')
 })

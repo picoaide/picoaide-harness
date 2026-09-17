@@ -56,3 +56,19 @@ export const WAIT_FOR_MAX_MS = 40_000
 
 /** Registered deadline of `browser_wait_for`: gate + max wait + 5s margin. */
 export const BROWSER_WAIT_FOR_DEADLINE_MS = USER_GATE_TIMEOUT_MS + WAIT_FOR_MAX_MS + 5_000
+
+/**
+ * How long an agent `browser_open` waits for a free tab slot when the pool is
+ * full (ms) — see {@link TabPool} `reserveTab`.
+ *
+ * 2026-09-17 审计 S01-1：这个等待**必须**短于工具预算。池子满时 `browser_open`
+ * 会先等槽位，而等待比 deadline 长的话，模型只会看到笼统的
+ * `tool call timed out after 30000ms`，池子自己那句可执行的
+ * "tab limit reached — close a tab first" 永远送不出去（与 §用户闸 同一类事故）；
+ * 更糟的是这次等待发生在**全局池锁内**，排在后面的其它浏览器调用会被一起拖过
+ * 各自的 deadline。曾经是 60s（= 2×工具预算）。
+ *
+ * 取值 = 工具预算 − 用户闸预算 − 余量：闸门与槽位等待是同一次调用里先后发生的
+ * 两段等待，必须**相加**留在预算内（5s + 10s = 15s，余下 15s 跑真正的开页）。
+ */
+export const TAB_SLOT_WAIT_TIMEOUT_MS = 5_000

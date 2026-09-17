@@ -12,7 +12,7 @@
 import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import { browserError } from './errors.ts'
 import type { BrowserError } from './errors.ts'
-import { USER_GATE_TIMEOUT_MS } from './budgets.ts'
+import { TAB_SLOT_WAIT_TIMEOUT_MS, USER_GATE_TIMEOUT_MS } from './budgets.ts'
 
 /** One tab's registry metadata (shell rendering + persistence). */
 export interface PoolTabMeta {
@@ -33,7 +33,14 @@ export interface PoolTabView {
 export interface PoolOptions {
   /** Flat tab cap (default 16). */
   maxTabs?: number
-  /** Quota wait budget ms (default 60000). */
+  /**
+   * Quota wait budget ms (default {@link TAB_SLOT_WAIT_TIMEOUT_MS}).
+   *
+   * 必须显著短于工具预算：等待发生在全局池锁内，超时后抛出的 quota 错误要能
+   * 送达模型，而不是被上游 timeout-policy 换成笼统的 `tool call timed out`。
+   * 代价是"用户在 5s 之后才交还控制权"这种情况会多一次重试（超时文案已写明
+   * 该怎么做）。
+   */
   waitTimeoutMs?: number
   /**
    * 用户接管（「我来操作」）后，agent 操作等待交还的上限（ms，缺省
@@ -71,7 +78,9 @@ export interface TabReservation {
 const POOL_DEFAULTS = {
   maxTabs: 16,
   userGateTimeoutMs: USER_GATE_TIMEOUT_MS,
-  waitTimeoutMs: 60_000,
+  // 必须短于工具预算（budgets.ts 的 TAB_SLOT_WAIT_TIMEOUT_MS 说明理由）：
+  // 超时后抛出的 quota 错误要能真的送达模型，而不是被 timeout-policy 换掉。
+  waitTimeoutMs: TAB_SLOT_WAIT_TIMEOUT_MS,
   locale: (): HostLocale => DEFAULT_HOST_LOCALE,
 } as const
 
@@ -334,7 +343,9 @@ export class TabPool {
         ticket.settled = true
         const idx = this.tabWaiters.indexOf(ticket)
         if (idx >= 0) this.tabWaiters.splice(idx, 1)
-        reject(browserError('quota', `browser: timed out waiting for a tab slot (${Math.round(this.options.waitTimeoutMs / 1000)}s)`))
+        // 文案必须**可执行**：只报 "timed out waiting for a tab slot" 会像一次
+        // 普通超时，模型不知道要关标签（2026-09-17 审计 S01-1）。
+        reject(browserError('quota', `browser: timed out waiting for a tab slot (${Math.round(this.options.waitTimeoutMs / 1000)}s, ${this.options.maxTabs} tabs open) — close a tab first`))
       }, this.options.waitTimeoutMs)
       timer.unref?.()
       ticket.timer = timer

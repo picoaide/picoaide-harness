@@ -22,7 +22,7 @@ PicoAide Harness `2.7.5-beta.4` / Electron 43.4.0 / Windows，工作区 `D:\proj
 | `budgets.ts:32-33` | 不变量原文写的是"截图有 **8s 原生预算 + 5s 渲染器回落**"，都必须在 30s 工具预算之内 |
 | `runtime.ts` `screenshot()` | 原生 `capturePage()` 走 `withScreenshotBudget(..., screenshotPrimaryBudgetMs())`（≤8s）**有界** |
 | 同上（改造前） | CDP 回落 `captureScreenshotViaCdp(...)` 是**无界 await** —— `SCREENSHOT_FALLBACK_RESERVE_MS` 只被用来**算**原生的预算，从没被拿来**约束**回落 |
-| `runtime.ts:714` | CDP send 自身超时 = `options.timeoutMs`（30s），与工具 deadline **同一个数**，救不了 |
+| `runtime.ts` `createTabReal()`（锚点用符号名：`const cdp = new CdpSession(view.webContents.cdp, { timeoutMs: this.options.timeoutMs })`） | CDP send 自身超时 = `options.timeoutMs`（30s），与工具 deadline **同一个数**，救不了 |
 
 ⇒ 渲染器不产帧时，回落一直挂着，直到上游 `guard/timeout-policy` 在 deadline 把整个结果**替换**成
 `tool call timed out after 30000ms`：模型与用户都看不到"卡在哪一段"。这与 2026-09-16 用户闸那次
@@ -93,6 +93,8 @@ fsutil reparsepoint query D:\project\urlfy   # 非零退出=不是 junction/符�
 - `packages/host/desktop`：`vitest run tests/sandbox-acl-grant-hint.spec.ts` → 3 passed。
 - `node scripts/verify-patches.mjs` → 10 个补丁在 pristine tarball 上干净应用且与 yarn 封存副本逐字节一致；
   `node scripts/verify-patch-resolutions.mjs --strict-lock` → 10 个补丁包 exact + `^` 键一一对应。
-- 整仓 `corepack yarn check`（build + typecheck + test + 6 个 guard）→ **16/16 通过，exit 0**（日志
-  `temp/check-2026-09-17.log`）。
+- 整仓 `corepack yarn check`（build + typecheck + test + 7 个根守卫）→ **16/16 通过，exit 0**（日志
+  `temp/check-2026-09-17.log`；当时 = 7 个守卫 + 9 个 workspace 包）。**当前 tree 已增至 9 个守卫
+  + 9 个包 = 18 个任务**（新增 `check:theme-tokens` / `check:glitchtip` / `check:check-workspaces`），
+  可用 `node scripts/check-workspaces.mjs --list` 复算。
 - 变异验证：截图回落预算改回无界 → 新用例红；把 pristine ACL 包覆盖回安装位 → 守卫 3 例中 2 例红。

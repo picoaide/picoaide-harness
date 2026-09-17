@@ -558,7 +558,7 @@ describe('MCP registration receives the official auth provider', () => {
     }
     expect(config.transport).toBe('streamable-http')
     expect(typeof config.authProvider?.tokens).toBe('function')
-    expect(config.authProvider?.tokens()?.access_token).toBe('at-live')
+    expect((await config.authProvider?.tokens())?.access_token).toBe('at-live')
     h.dispose()
   })
 

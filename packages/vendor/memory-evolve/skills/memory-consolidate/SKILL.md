@@ -1,10 +1,15 @@
 ---
 name: memory-consolidate
 x-provider: dsh-memory-evolve
-x-version: 1
+x-version: 2
 description: "Use when the user asks to consolidate, merge, deduplicate, or reorganize accumulated dsh-memory-evolve memories (global long-term memory, user profile, project key facts), or when a periodic memory review should run a full consolidation pass. Covers supersede-keep-newest, similar-entry merging, literal dedup, conflict resolution, project-local archiving, stale-state cleanup, and cross-track relocation, all with archive-based reversibility. 触发场景：用户要求梳理/合并/去重/整理记忆（长期记忆、用户档案、项目 key），记忆条目重复记录、新旧版本并存、表述相近却分散多条，或记忆审查到期需要一次系统性整合归档。"
 ---
 <!-- 本技能由 dsh-memory-evolve 插件内置提供：源头随插件升级同步，禁用请到「技能管理」Tab -->
+<!-- 维护者注意（S13-4 复核，2026-09-17）：插件按 frontmatter 的 x-version 判断是否需要重同步，
+     一旦提升该版本号，已装机器下次启动会**整目录替换** ~/.agents/skills/memory-consolidate/
+     （本地改动与自加文件一并被覆盖，语义见 lib/coi/skills-sync.js 的 syncSkillDirSafe）——
+     这是内置技能同步的既定行为，正文改动必须提升版本号才能送达用户；提升前请确认
+     本地自定义内容已另行留存（例如另建一个自己的技能目录）。 -->
 
 # 记忆合并梳理（memory-consolidate）
 
@@ -97,14 +102,18 @@ node <技能目录>/scripts/scan_memory.mjs --dir <memoryDir> --out <工作区>/
   归档 M 条 / 抽取 K 条 / 跳过 J 条）+ 1-2 个代表例 + 跳过原因。合并中产生的、值得
   长期注入的项目级事实，另行向 key 轨提交建议。
 
-### 步骤 5：备份推送
+### 步骤 5：备份推送（只能由用户触发，AI 不执行同步）
 
-向记忆同步发一次手动推送（仅 DSH 运行时可用；失败不阻塞，在报告注明「待下次自动备份」）：
+记忆批量改动后建议推送到共享记忆库，但**AI 没有同步入口**（记忆同步完全由用户在
+Web GUI 主动操作，AI 不参与同步执行）——这一步只能**提示用户**完成：
 
-```bash
-curl -X POST http://127.0.0.1:3080/memory-evolve/memory-sync/global-sync \
-  -H "Content-Type: application/json" -d '{"push":true}'
-```
+- 请用户打开「记忆同步」Tab →「全局记忆」子 Tab，点「推送」；
+- 共享记忆库尚未启用/初始化时，先请用户到「记忆同步」Tab →「共享记忆库」子 Tab
+  启用并初始化，再回到「全局记忆」推送；
+- 用户完成前，报告里如实写「已提示用户手动推送备份」，**不要**声称备份已完成。
+
+不要改用 HTTP 请求（curl）代劳：本插件的写接口要求同源 `Origin` 头（浏览器自带、
+命令行不带，必然被拒），且桌面产品的 Web 端口是运行时分配的，写死端口也连不上。
 
 ## 四、何时运行
 
