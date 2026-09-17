@@ -19,7 +19,8 @@ const depts = [
  * 响应延迟即 5/7 例红，与 CI 那次审计 CSV 用例同一个模子）。
  */
 async function waitForDeptTree(): Promise<void> {
-  await waitFor(() => expect(screen.getAllByText('研发部').length).toBeGreaterThan(0))
+  // 显式 5s 预算（RTL 默认 1000ms 在 4 路并行负载下与 app-login-capability 那处同因）。
+  await waitFor(() => expect(screen.getAllByText('研发部').length).toBeGreaterThan(0), { timeout: 5000 })
 }
 
 beforeEach(() => {
@@ -142,7 +143,7 @@ describe('Departments 部门管理页', () => {
       const found = screen.getAllByText('alice').map((el) => el.closest('[cmdk-item]')).filter((el) => el !== null)
       expect(found.length).toBeGreaterThan(0)
       return found
-    })
+    }, { timeout: 5000 })
     fireEvent.click(items[0]!)
     // 选中后 trigger 显示 alice(候选列表已关)
     expect(dialog.getByText('alice')).toBeInTheDocument()
