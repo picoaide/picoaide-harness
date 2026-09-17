@@ -10,7 +10,7 @@
  * gateway.
  *
  * Usage:
- *   REAL_SERVER=https://picoaide-harness.kq0575.cn REAL_USER=user001 REAL_PASS=user001123456 \
+ *   REAL_SERVER=https://harness.example.com REAL_USER=test-user REAL_PASS=test-password \
  *   node scripts/real-env-browser-no-approval.mjs --port 9226 --shots .real-env-browser-shots
  */
 import { spawn } from 'node:child_process'
@@ -34,8 +34,8 @@ const appBinary = arg('--app', join(PACKAGE_ROOT, 'dist', 'linux-unpacked', 'dsh
 const shotsDir = arg('--shots', join(PACKAGE_ROOT, '.real-env-browser-shots'))
 const reportPath = join(PACKAGE_ROOT, '.real-env-browser-report.md')
 
-const SERVER = process.env.REAL_SERVER ?? 'https://picoaide-harness.kq0575.cn'
-const USER = process.env.REAL_USER ?? 'user001'
+const SERVER = process.env.REAL_SERVER ?? (() => { throw new Error('REAL_SERVER is required') })()
+const USER = process.env.REAL_USER ?? 'test-user'
 const PASS = process.env.REAL_PASS ?? ''
 if (!PASS) { console.error('set REAL_PASS'); process.exit(2) }
 

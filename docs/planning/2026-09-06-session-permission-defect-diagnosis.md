@@ -3,7 +3,7 @@
 诊断对象：桌面产品 PicoAide Harness v2.6.7-beta.2（win32，Electron 43.4.0，DSH 0.1.2-rc.1），数据源：用户诊断包
 `diagnostics-1788670585487-08ffd48e-5e0d-4120-8b96-3537b7e8c270.zip`（09-06 导出，含 10 份日志 + 1 份 crash dump）
 + 用户真实环境截图（会话内 `resume failed … preset "standard" failed to mount: 23 rows name plugins that cannot be resolved`
-+ `(gateway/internal)`）+ 本地打包版复现 + 真实服务端（picoaide-next.kq0575.cn / user001）端到端验证。
++ `(gateway/internal)`）+ 本地打包版复现 + 真实服务端（harness.example.com / test-user）端到端验证。
 
 ## 一句话结论（修订）
 
@@ -57,7 +57,7 @@ reuses an existing blank session」](https://github.com/deepseek-ai/deepseek-har
   支持物理布局（`Resources/app`、`resources/app`）。
 - 测试：`verify-packaged-runtime.spec.ts` 新增物理布局用例；`package.spec.ts` / `verify-mac-release.spec.ts` 断言适配。
 
-**验证结果（真实服务端 https://picoaide-next.kq0575.cn/，user001，物理布局打包版）：**
+**验证结果（真实服务端 https://harness.example.com/，test-user，物理布局打包版）：**
 登录 → 新建会话 ×3 全部成功（composer 权限徽标出现）→ 权限切换「工作区内修改→完全权限」保持 → 设置默认权限
 「完全权限」写入 settings.yaml 并持久化 → 改默认后再新建会话徽标=完全权限；全程无 console 错误。
 本地门禁：typecheck 全绿、desktop 487 测试通过、package:dir（afterPack 验证器）通过。
