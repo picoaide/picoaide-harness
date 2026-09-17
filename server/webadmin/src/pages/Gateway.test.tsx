@@ -78,6 +78,23 @@ describe('Gateway 网关配置页', () => {
     expect(screen.getByRole('button', { name: '保存' })).toBeEnabled()
   })
 
+  it('加载失败时全局设置也不可保存(R1:失败路径此前会解锁并提交空初值)', async () => {
+    // 独立验证 R1 实测：四个 GET 里只要有一个**失败**（不是挂起），此前 finally 会
+    // 把 loading 置 false ⇒ 写面解锁而 cfg 仍是空初值 ⇒ 点保存提交
+    // {"default_model":"","peak_windows":"",…}：清空默认模型与峰谷计费窗口。
+    // 解锁条件必须是"这份配置真的读到了"。
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith('/gateway')) throw new Error('网关配置读取失败')
+      return baseImpl(path, init)
+    })
+    render(<Gateway />)
+    const save = screen.getByRole('button', { name: '保存' })
+    await waitFor(() => expect(screen.getByText(/全局设置未加载成功/)).toBeInTheDocument())
+    expect(save).toBeDisabled()
+    fireEvent.click(save)
+    expect(mockRequest.mock.calls.filter(([p, i]: any[]) => p.endsWith('/gateway') && i?.method === 'PUT')).toHaveLength(0)
+  })
+
   it('渲染全局设置、上游表格与模型列表', async () => {
     render(<Gateway />)
     expect(await screen.findByText('全局设置')).toBeInTheDocument()

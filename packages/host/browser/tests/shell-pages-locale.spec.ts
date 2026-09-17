@@ -42,7 +42,11 @@ const HAN = /[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff]/u
  * `js/incomplete-multi-character-sanitization` correctly points out that
  * `replace(/<!--…-->/, '')` can be bypassed by nested/malformed markers; this
  * helper is not a security boundary, but the scanner form states the boundary
- * explicitly (unterminated block ⇒ swallow the rest).
+ * explicitly.
+ *
+ * Unterminated block ⇒ **throw** (独立复核 2026-09-17：此前是"其后全部视为块内"，
+ * 结果是畸形输入会让断言**少扫一段却仍然通过** —— 判别力静默变松。测试助手遇到
+ * 未闭合的标记应当响亮地失败，而不是安静地缩小扫描面)。
  */
 
 /** Drop an open/close delimited block (same semantics for `<!-- -->` and `/* *​/`). */
@@ -54,7 +58,7 @@ function stripBlock(text: string, open: string, close: string): string {
     if (start < 0) return out + rest
     out += rest.slice(0, start)
     const end = rest.indexOf(close, start + open.length)
-    if (end < 0) return out // unterminated ⇒ the rest is inside the block
+    if (end < 0) throw new Error(`stripBlock: unterminated ${open} — the assertion would silently skip the rest`)
     rest = rest.slice(end + close.length)
   }
 }

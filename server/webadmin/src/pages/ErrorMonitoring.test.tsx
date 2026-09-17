@@ -289,4 +289,43 @@ describe('ErrorMonitoring 错误监控页', () => {
     // 本 bug 的教训:空数据必须显式说明"这不代表链路正常"。
     expect(await screen.findByText(/尚无客户端上报状态。这不代表链路正常/)).toBeInTheDocument()
   })
+
+  // --- 独立验证 R4:上面那条 F2 修复此前**没有回归网** ------------------------
+
+  it('客户端状态读取失败时既无计数也无"尚无状态"空态(独立验证 R4 回归网)', async () => {
+    // 回退成"finally 里无条件置 clientsLoaded=true"（修复前的形态）时本用例必红：
+    // 那时失败分支把 clients 重置成 EMPTY，页面会渲染「已启用上报: 0 台」+
+    // 「尚无客户端上报状态」，正是 F2 要修的"把没有数据渲染成一切正常"。
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.endsWith('/gateway/error-reporting/clients')) throw new Error('客户端状态读取失败')
+      if (path.endsWith('/gateway')) return GATEWAY as any
+      throw new Error(`unexpected path: ${path}`)
+    })
+    render(<ErrorMonitoring />)
+    expect(await screen.findByText('客户端状态读取失败')).toBeInTheDocument()
+    expect(screen.queryByText(/已启用上报:/)).toBeNull()
+    expect(screen.queryByText(/尚无客户端上报状态/)).toBeNull()
+    // 也不得停在"加载中"（那是把失败说成还在加载）。
+    expect(screen.queryByText(/客户端上报状态加载中/)).toBeNull()
+  })
+
+  // --- 独立验证 R2:本页自己的写面此前零加载闸门 ------------------------------
+
+  it('配置读取失败时表单与保存都锁死(独立验证 R2:否则会关掉上报并抹掉 DSN)', async () => {
+    // 此前 `disabled={busy}`：/gateway 失败 ⇒ 表单以"未启用 + 空 DSN"渲染且保存可点 ⇒
+    // PUT {error_reporting_enabled:false, error_reporting_dsn:""}：关闭错误上报并抹掉 DSN。
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.endsWith('/gateway/error-reporting/clients')) return CLIENTS as any
+      if (path.endsWith('/gateway')) throw new Error('网关配置读取失败')
+      throw new Error(`unexpected path: ${path}`)
+    })
+    render(<ErrorMonitoring />)
+    const save = screen.getByRole('button', { name: '保存' })
+    await waitFor(() => expect(screen.getByText(/配置未加载成功，表单与保存已锁定/)).toBeInTheDocument())
+    expect(save).toBeDisabled()
+    // 表单不得以"未启用 + 空 DSN"的假状态出现。
+    expect(screen.queryByLabelText(DSN_LABEL)).toBeNull()
+    fireEvent.click(save)
+    expect(mockRequest.mock.calls.filter((c) => c[0] === '/api/server/admin/gateway' && (c[1] as RequestInit)?.method === 'PUT')).toHaveLength(0)
+  })
 })
