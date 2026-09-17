@@ -75,14 +75,45 @@ test('同一张字典内键不重复（对象字面量重复键会静默覆盖�
   const { dirname, join } = await import('node:path')
   const { fileURLToPath } = await import('node:url')
   const source = readFileSync(join(dirname(dirname(fileURLToPath(import.meta.url))), 'lib', 'i18n.js'), 'utf8')
-  // 只看「行首两空格 + 'key': [」这一种真实条目形态（缩进不同即为嵌套结构）
-  const seen = new Map()
+    .replace(/\/\*[\s\S]*?\*\//gu, '') // 块注释
+    .split('\n').map((line) => line.replace(/(^|\s)\/\/.*$/u, '$1')).join('\n') // 行注释
+  // TQ-7（2026-09-17 审计）：原实现只认「行首**两空格** + 'key': [」这一种缩进形态，
+  // 且从不检查解析到了多少条 —— 字典一旦被重排（四空格/无缩进/双引号键），seen 恒空，
+  // 重复键检查静默变成空转；插入一条缩进不同的重复键（如 4 空格的 'memory.desc'）
+  // 也照样绿（变异实测 GREEN，而 JS 里后者确实覆盖前者）。
+  // 现在：①按 `export const X_DICT = {` 分块；②任意缩进、单/双引号键都认；
+  // ③与运行期 import 的字典**逐键对拍**（解析失效/漏条立刻红，不是静默 0 覆盖）。
+  const perDict = new Map()
+  let current = null
+  for (const line of source.split('\n')) {
+    const start = /^export const ([A-Z0-9_]+_DICT) = \{/u.exec(line)
+    if (start !== null) {
+      current = start[1]
+      perDict.set(current, [])
+      continue
+    }
+    if (current === null) continue
+    if (line === '}') { current = null; continue } // 顶层字典以行首 `}` 收尾
+    const entry = /^\s*(?:'([^']+)'|"([^"]+)")\s*:\s*\[/u.exec(line)
+    if (entry !== null) perDict.get(current).push(entry[1] ?? entry[2])
+  }
+  const parsedTotal = [...perDict.values()].reduce((sum, keys) => sum + keys.length, 0)
+  assert.ok(perDict.size >= 20, `必须解析到 20+ 张字典块，实际 ${perDict.size}（判据空转）`)
+  assert.ok(parsedTotal >= 500, `源码解析出的字典键总数应 ≥ 500，实际 ${parsedTotal}（解析器失效＝判据空转）`)
   const duplicates = []
-  for (const match of source.matchAll(/^ {2}'([^']+)':\s*\[/gmu)) {
-    const key = match[1]
-    const previous = seen.get(key)
-    if (previous !== undefined) duplicates.push(key)
-    seen.set(key, true)
+  for (const [name, keys] of perDict) {
+    const seen = new Set()
+    for (const key of keys) {
+      if (seen.has(key)) duplicates.push(`${name}.${key}`)
+      seen.add(key)
+    }
+    // 与运行期字典对拍：重复键会让源码侧多出一条（JS 已静默丢弃后者），
+    // 条目形态变化（改成 helper 生成等）也会在这里露出来。
+    assert.deepEqual(
+      [...keys].sort(),
+      Object.keys(i18n[name] ?? {}).sort(),
+      `${name} 的源码条目与运行期字典不一致（解析器跟不上格式＝判据空转）`,
+    )
   }
   assert.deepEqual(duplicates, [], `i18n.js 存在重复键（后者覆盖前者）：${duplicates.join(', ')}`)
 })

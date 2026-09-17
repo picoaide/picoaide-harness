@@ -222,6 +222,10 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	serverauth.AdminRoute(g, "PUT", "/:name/grants", serverauth.PermCapabilityWrite, replacePresetGrants(db))
 	serverauth.AdminRoute(g, "PUT", "/:name/grant", serverauth.PermCapabilityWrite, setPresetGrant(db, true))
 	serverauth.AdminRoute(g, "DELETE", "/:name/grant", serverauth.PermCapabilityWrite, setPresetGrant(db, false))
+	// 组织共享智能体上下架(SG-4):与共享技能的 /:name/enabled 对称(同 RBAC、
+	// 同 JSON 信封、同 apps.enabled 语义)。市场智能体仍走 marketplace 的
+	// POST /agents/:name/enable。
+	serverauth.AdminRoute(g, "PUT", "/:name/enabled", serverauth.PermCapabilityWrite, setEnabled(db))
 }
 
 func presetJSON(p serverstore.AgentPreset) gin.H {
@@ -716,6 +720,54 @@ func removeVersioned(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		_ = os.Remove(filepath.Join(cacheDir, safeName(name, version)))
 		_ = serverstore.AuditLog(db, adminUsername(c), "agent_preset_delete", name+"@"+version)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// setEnabled 组织共享智能体上下架(SG-4,审计 2026-09-17,r2 server-gateway P3)。
+//
+// 语义与共享技能的 PUT /shared-skills/:name/enabled 完全对称(apps.enabled),
+// 且**只作用于组织渠道行** —— 市场渠道智能体由 marketplace 的
+// POST /agents/:name/enable 管理,那里同样拒绝跨渠道写(agentshare-2 的反方向
+// 守卫,避免两个入口互相覆盖),所以本端点复用 requireOrgAgent。
+//
+// 为什么必须有它:读侧(员工清单 ListVisibleAgentPresets、agentshare.listVisible、
+// serveArchive)一直按 apps.enabled 闸门过滤,但组织智能体此前**没有任何写入点**
+// (marketplace 的 SetAppEnabled 只放行 AppChannelMarket),管理员要下线一个
+// 组织智能体只能走软删 —— 而软删会永久烧掉名字与版本号。本端点把这个不对称
+// 补上:下架不删数据,重新上架即恢复。
+func setEnabled(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		name := c.Param("name")
+		if !presetIDRe.MatchString(name) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "预设名不合法")
+			return
+		}
+		var req struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil || req.Enabled == nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", `请求体格式错误(需要 {"enabled": true|false})`)
+			return
+		}
+		if !requireOrgAgent(c, db, name) {
+			return
+		}
+		if err := serverstore.SetAppEnabled(db, serverstore.AppKindAgent, name, *req.Enabled); err != nil {
+			if errors.Is(err, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "切换失败")
+			return
+		}
+		// 可见性变更必审计(与市场智能体的 agent 上下架、共享技能的
+		// shared_skill_disable/enable 同精神)。
+		action := "agent_preset_disable"
+		if *req.Enabled {
+			action = "agent_preset_enable"
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), action, name)
+		c.JSON(http.StatusOK, gin.H{"ok": true, "enabled": *req.Enabled})
 	}
 }
 

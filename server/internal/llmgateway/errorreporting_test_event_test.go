@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -65,7 +66,7 @@ func TestErrorReportingTestEventSuccess(t *testing.T) {
 
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
-	const dsn = "https://test-public-key@203.0.113.7/1"
+	const dsn = "https://0123456789abcdef0123456789abcdef@203.0.113.7/1"
 	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"error_reporting_dsn":"`+dsn+`"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("seed dsn: %d %s", w.Code, w.Body.String())
 	}
@@ -81,8 +82,8 @@ func TestErrorReportingTestEventSuccess(t *testing.T) {
 	if !eventIDRe.MatchString(eventID) {
 		t.Fatalf("event_id = %q, want 32 hex", eventID)
 	}
-	if !strings.Contains(gotAuth, "sentry_key=test-public-key") {
-		t.Fatalf("X-Sentry-Auth = %q, want sentry_key=test-public-key", gotAuth)
+	if !strings.Contains(gotAuth, "sentry_key=0123456789abcdef0123456789abcdef") {
+		t.Fatalf("X-Sentry-Auth = %q, want sentry_key=0123456789abcdef0123456789abcdef", gotAuth)
 	}
 	if !strings.Contains(gotAuth, "sentry_version=7") {
 		t.Fatalf("X-Sentry-Auth = %q, want sentry_version=7", gotAuth)
@@ -204,7 +205,7 @@ func TestErrorReportingTestEventRejectsLoopbackDsn(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway",
-		`{"error_reporting_dsn":"https://test-public-key@203.0.113.7/1"}`, hdr); w.Code != http.StatusOK {
+		`{"error_reporting_dsn":"https://0123456789abcdef0123456789abcdef@203.0.113.7/1"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("seed dsn: %d %s", w.Code, w.Body.String())
 	}
 
@@ -230,5 +231,100 @@ func TestErrorReportingTestEventRejectsLoopbackDsn(t *testing.T) {
 	env, _ = out["error"].(map[string]any)
 	if env == nil || env["code"] != "VALIDATION" {
 		t.Fatalf("envelope = %v, want VALIDATION", out)
+	}
+}
+
+// SG-3(审计 2026-09-17,r2 server-gateway P3):坏请求体不得被静默当成"用库里的
+// DSN"——截断 JSON 曾经回 200 ok:true(实测的是**另一条** DSN,假绿),
+// `{"dsn":123}` 曾经回一条与事实相反的 400「尚未配置错误上报 DSN」。
+// 本用例把两种形状与"空体例外"一起钉住。
+func TestErrorReportingTestEventRejectsMalformedBody(t *testing.T) {
+	var outbound atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		outbound.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"event_id":"0123456789abcdef0123456789abcdef"}`))
+	}))
+	defer srv.Close()
+	useRewriteClient(t, srv.URL)
+
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	// 库里存一条**可用**的 DSN:坏请求体绝不能拿它去发探测并回 ok:true。
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway",
+		`{"error_reporting_dsn":"https://0123456789abcdef0123456789abcdef@203.0.113.7/1"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("seed dsn: %d %s", w.Code, w.Body.String())
+	}
+	const path = "/api/server/admin/gateway/error-reporting/test"
+
+	badBodies := []struct {
+		name string
+		body string
+	}{
+		{"truncated json", `{"dsn":`},
+		{"wrong type for dsn", `{"dsn":123}`},
+		{"not an object", `["dsn"]`},
+		{"explicit empty dsn", `{"dsn":""}`},
+	}
+	for _, tc := range badBodies {
+		t.Run(tc.name, func(t *testing.T) {
+			w, out := adminReq(t, r, "POST", path, tc.body, hdr)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("body %s = %d %s, want 400", tc.body, w.Code, w.Body.String())
+			}
+			env, _ := out["error"].(map[string]any)
+			if env == nil || env["code"] != "VALIDATION" {
+				t.Fatalf("body %s envelope = %v, want VALIDATION", tc.body, out)
+			}
+			msg, _ := env["message"].(string)
+			// 类型错误绝不能再说成「尚未配置」:库里配置完好,那是与事实相反的诊断。
+			if strings.Contains(msg, "尚未配置") {
+				t.Fatalf("body %s message = %q,must not claim the DSN is unconfigured", tc.body, msg)
+			}
+		})
+	}
+	// 假绿的核心判据:坏体一次都没发出站(更没把库里的 DSN 结论冒充成调用方的)。
+	if n := outbound.Load(); n != 0 {
+		t.Fatalf("malformed bodies triggered %d outbound probe(s), want 0", n)
+	}
+
+	// 空体例外仍然有效:空体 = 用已保存的 DSN(而不是 400)。
+	w, out := adminReq(t, r, "POST", path, "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("empty body = %d %s, want 200 using the stored DSN", w.Code, w.Body.String())
+	}
+	if out["ok"] != true {
+		t.Fatalf("empty body ok = %v, want true (%v)", out["ok"], out)
+	}
+	if n := outbound.Load(); n != 1 {
+		t.Fatalf("empty body outbound probes = %d, want 1", n)
+	}
+
+	// SG-3 残留(r3v 复核,2026-09-17):`{"dsn":null}` 与字段缺省同义(都回落库里的
+	// DSN),与显式 `""`(400)刻意不对称 —— 判据是"null 表示这个可选字段没有值",
+	// 不是"调用方要求用空 DSN"。这条同时钉住:它确实发出站(不是没测却说通)。
+	w, out = adminReq(t, r, "POST", path, `{"dsn":null}`, hdr)
+	if w.Code != http.StatusOK || out["ok"] != true {
+		t.Fatalf(`{"dsn":null} = %d %v, want 200 ok:true via the stored DSN`, w.Code, out)
+	}
+	if n := outbound.Load(); n != 2 {
+		t.Fatalf(`{"dsn":null} outbound probes = %d, want 2`, n)
+	}
+
+	// 另一半(对称性):库里**没有** DSN 时,null 与缺省给同样的 400「尚未配置」——
+	// 它不会凭空造出一条 DSN,也不会假绿。
+	if w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"error_reporting_dsn":""}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("clear dsn: %d", w.Code)
+	}
+	w, out = adminReq(t, r, "POST", path, `{"dsn":null}`, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf(`{"dsn":null} without a stored DSN = %d, want 400 (%s)`, w.Code, w.Body.String())
+	}
+	env, _ := out["error"].(map[string]any)
+	if env == nil || env["code"] != "VALIDATION" {
+		t.Fatalf(`{"dsn":null} envelope = %v, want VALIDATION`, out)
+	}
+	if n := outbound.Load(); n != 2 {
+		t.Fatalf(`{"dsn":null} without a stored DSN must not probe anything, probes = %d`, n)
 	}
 }

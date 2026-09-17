@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import { createLatestOnly, createScrollFollow } from './ui-guards.js'
 import type { MemoryEvolveKey } from '../index.ts'
 
 /* ------------------------------------------------------------------ */
@@ -418,15 +419,24 @@ function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string 
   const logRef = useRef<HTMLPreElement | null>(null)
   const fullLogRef = useRef<HTMLPreElement | null>(null)
   const selectedRef = useRef<string | null>(null)
+  /** ME-9：日志「跟随底部」闸门（用户上滚后停止自动滚动）。 */
+  const logFollow = useRef(createScrollFollow())
+  /** ME-11：只认最新一次列表请求的序号闸门（搜索/翻页 vs 3s 轮询）。 */
+  const tasksSeq = useRef(createLatestOnly())
 
   useEffect(() => {
     selectedRef.current = selectedId
   }, [selectedId])
 
   const loadTasks = useCallback(async (): Promise<void> => {
+    // ME-11（2026-09-17 二审）：搜索/翻页请求与 3s 轮询共用这组 setState，
+    // 必须只认最新一次请求 —— 旧请求后返回会把新筛选结果覆盖成旧列表
+    // （搜索框里是 'fix'、列表却是未过滤的），最长 3s 后才被下轮轮询纠正。
+    const isCurrent = tasksSeq.current.begin()
     try {
       const q = searchQ.trim()
       const data = await fetchJson<{ tasks: CoiTask[]; total: number }>(`/tasks?page=${page}&pageSize=${TASK_LIMIT}${visQs}${q !== '' ? `&q=${encodeURIComponent(q)}` : ''}`)
+      if (!isCurrent()) return
       // 页码越界保护：当前页已无数据但总数 > 0（如删除了本页任务）→ 自动跳回最后一页
       if (data.tasks.length === 0 && data.total > 0 && page > 1) {
         setPage(Math.max(1, Math.ceil(data.total / TASK_LIMIT)))
@@ -436,6 +446,7 @@ function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string 
       setTotal(data.total)
       setError(null)
     } catch (err) {
+      if (!isCurrent()) return
       setError(errText(err, t))
     }
   }, [searchQ, page])
@@ -517,6 +528,8 @@ function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string 
     setDetail(null)
     setLog('')
     setLogError(null)
+    // ME-9：换任务=换日志，跟随状态复位（否则上一个任务里上滚过就再也不跟了）。
+    logFollow.current.reset()
     void loadDetail(selectedId)
     void loadLog(selectedId)
   }, [selectedId, loadDetail, loadLog])
@@ -534,12 +547,18 @@ function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string 
   }, [selectedId, running, loadLog, loadDetail])
 
   // 日志自动滚到底部（详情 + 全屏弹窗）。
+  // ME-9（2026-09-17 二审）：必须带「用户是否还在底部」的闸门 —— 旧写法
+  // 每有新内容就无条件 scrollTop = scrollHeight，而运行中任务每 2s 轮询一次
+  // ⇒ 用户上滚回读中段输出会被反复拽回底部（全屏弹窗同样）。用户滚回底部
+  // 即自动恢复跟随；切换任务时重置为跟随（新日志从底部跟起）。
   useEffect(() => {
-    const el = logRef.current
-    if (el !== null) el.scrollTop = el.scrollHeight
-    const full = fullLogRef.current
-    if (full !== null) full.scrollTop = full.scrollHeight
+    logFollow.current.apply(logRef.current)
+    logFollow.current.apply(fullLogRef.current)
   }, [log])
+  const onLogScroll = (): void => {
+    logFollow.current.onScroll(logRef.current)
+    logFollow.current.onScroll(fullLogRef.current)
+  }
 
   const applyTemplate = (id: string): void => {
     setTemplateId(id)
@@ -921,7 +940,7 @@ function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string 
                 <button type="button" className="coi-btn coi-btn-mini" onClick={() => setFullLog(true)}>⛶ {t('coi.tasks.logFull')}</button>
               </div>
               {logError !== null && <div className="coi-error">{logError}</div>}
-              <pre ref={logRef} className="coi-log">{log === '' ? t('coi.tasks.logEmpty') : log}</pre>
+              <pre ref={logRef} className="coi-log" onScroll={onLogScroll}>{log === '' ? t('coi.tasks.logEmpty') : log}</pre>
             </>
           )}
         </div>
@@ -944,7 +963,7 @@ function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string 
               <span className="coi-mono coi-small">{t('coi.tasks.log')} — {t('coi.sep.paren', { value: `${detail.id} ${detail.adapterId} ${scopeLabel(detail.scope, t)}` })}</span>
               <button type="button" className="coi-btn coi-btn-mini" onClick={() => setFullLog(false)}>✕</button>
             </div>
-            <pre ref={fullLogRef} className="coi-log coi-log-full">{log === '' ? t('coi.tasks.logEmpty') : log}</pre>
+            <pre ref={fullLogRef} className="coi-log coi-log-full" onScroll={onLogScroll}>{log === '' ? t('coi.tasks.logEmpty') : log}</pre>
           </div>
         </div>
       )}
@@ -966,16 +985,23 @@ function SessionsPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: stri
   const [q, setQ] = useState('')
   const [editId, setEditId] = useState<string | null>(null)
   const [noteDraft, setNoteDraft] = useState('')
+  /** ME-11：只认最新一次列表请求（范围过滤/搜索连续变更时丢弃旧响应）。 */
+  const sessionsSeq = useRef(createLatestOnly())
 
   const load = useCallback(async (): Promise<void> => {
+    const isCurrent = sessionsSeq.current.begin()
     try {
       const params = new URLSearchParams()
-      if (scopeFilter !== '') params.set('coi.scope', scopeFilter)
-      if (q.trim() !== '') params.set('coi.q', q.trim())
+      // 参数名必须与宿主一致：lib/coi/api.js 只读 ?scope / ?q（不是字典键，
+      // 不加 coi. 前缀——2026-09-17 i18n 批量加前缀时误伤过这两处）。
+      if (scopeFilter !== '') params.set('scope', scopeFilter)
+      if (q.trim() !== '') params.set('q', q.trim())
       const data = await fetchJson<{ sessions: CoiSession[] }>(`/sessions?${params.toString()}${visQs}`)
+      if (!isCurrent()) return
       setSessions(data.sessions)
       setError(null)
     } catch (err) {
+      if (!isCurrent()) return
       setError(errText(err, t))
     }
   }, [scopeFilter, q])
@@ -1256,12 +1282,17 @@ function AdaptersPane({ t: tt }: { t: Translate }): JSX.Element {
         }
       }
       const skillContent = fSkill.trim() !== '' && fSkillContent.trim() !== '' ? fSkillContent : undefined
-      const res = await postJson<{ ok: boolean; message?: string; skillMessage?: string }>('/adapters', { def, skillContent })
+      const res = await postJson<{ ok: boolean; message?: string; skillMessage?: string | null }>('/adapters', { def, skillContent })
       if (res.ok !== true) {
         setNotice({ kind: 'error', text: msgOr(res.message, t('coi.adapters.saveFailed')) })
         return
       }
-      setNotice({ kind: 'ok', text: res.skillMessage !== undefined ? res.skillMessage : t('coi.config.saved') })
+      // ME-3（2026-09-17 二审）：宿主在「技能名留空」这条常见路径上回的是
+      // 裸 `skillMessage: null`（不是缺字段），只判 !== undefined 会把这句
+      // 空值当成提示正文 ⇒ NoticeLine 渲染成一条空绿条，用户看不到「已保存」。
+      // 判据收紧为「非空字符串」，否则回落通用保存成功文案。
+      const skillMessage = typeof res.skillMessage === 'string' && res.skillMessage !== '' ? res.skillMessage : null
+      setNotice({ kind: 'ok', text: skillMessage ?? t('coi.config.saved') })
       setFId('')
       setFName('')
       setFBinary('')
@@ -1305,6 +1336,20 @@ function AdaptersPane({ t: tt }: { t: Translate }): JSX.Element {
                 {a.skillName !== undefined && a.skillName !== '' && (
                   <button type="button" className="coi-btn coi-btn-mini" onClick={() => void openSkillEdit(a)}>
                     {t('coi.adapters.skillBtn')}
+                  </button>
+                )}
+                {/* ME-5（2026-09-17 二审）：guideOpen 此前没有任何 setter —— 宿主
+                    每个内置适配器都下发多行 markdown guide（adapters.js 注释写明
+                    「GUI 可查看」），渲染分支与样式都在，唯独缺触发入口 ⇒ 指南
+                    整体不可达（死 UI）。这里补上唯一开关。 */}
+                {typeof a.guide === 'string' && a.guide !== '' && (
+                  <button
+                    type="button"
+                    className="coi-btn coi-btn-mini"
+                    aria-expanded={guideOpen === a.id}
+                    onClick={() => setGuideOpen(guideOpen === a.id ? null : a.id)}
+                  >
+                    {t('coi.adapters.guide')}
                   </button>
                 )}
                 <button

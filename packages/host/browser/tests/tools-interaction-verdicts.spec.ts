@@ -18,6 +18,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { BROWSER_WAIT_FOR_DEADLINE_MS, WAIT_FOR_MAX_MS } from '../src/budgets.ts'
 import { BrowserRuntime } from '../src/runtime.ts'
 import { BrowserStore } from '../src/store.ts'
 import { DEFAULT_GROUPS, applyBrowserTools, parseToolGroups } from '../src/tools.ts'
@@ -245,6 +246,27 @@ describe('2026-09-15 P2：browser_press / browser_scroll 不得静默成功', ()
     expect(harness.runtime.opLog.find((entry) => entry.tool === 'browser_press')?.failed).toBe(false)
   })
 
+  it('press：可见窗口路径的 op-log 摘要带上限（页面可控的 tagName 不能无上限落进 op log，2026-09-17 S02-04）', async () => {
+    const harness = track(makeHarness())
+    await harness.runtime.open('https://a.example')
+    // 只读判定读的是 document.activeElement.tagName —— 谁被聚焦由页面决定，而 HTML
+    // 的元素名没有长度上限（5000 字符即代表）。走可见窗口路径才会把它写进摘要。
+    harness.adapter.windows[0]!.visible = true
+    const huge = 'A'.repeat(5_000)
+    harness.adapter.lastView().transport.handler = (method, params) => {
+      if (method !== 'Runtime.evaluate') return {}
+      return String(params?.['expression'] ?? '').includes('activeElement') ? { result: { value: huge } } : {}
+    }
+
+    await expect(harness.call('browser_press', { key: 'Enter' })).resolves.toEqual({ ok: true })
+    const summary = harness.runtime.opLog.find((entry) => entry.tool === 'browser_press')!.summary
+    // 前提前置：摘要里确实是那条页面值（前缀在），否则下面的上限断言是空过的。
+    expect(summary.startsWith('press Enter → A')).toBe(true)
+    // 上限走 record(..., summaryLimit)：先脱敏后截断，整条摘要不超过 64 字符。
+    expect(summary.length).toBeLessThanOrEqual(64)
+    expect(summary).not.toContain(huge)
+  })
+
   it('scroll：目标元素不存在 ⇒ not-found，而不是"已滚动"', async () => {
     const harness = track(makeHarness())
     await harness.runtime.open('https://a.example')
@@ -435,8 +457,10 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
 
     const error = await fail(harness.call('browser_fill_credentials', { connectorId: 'corp' }))
     expect(error.code).toBe('policy')
-    expect(error.message).toContain('https://login.example.evil.test')
+    expect(error.message).toContain('"corp"')
     expect(error.message).toContain('https://login.example')
+    // 被观测的 origin 是页面影响的不可信侧，文案里不得出现（2026-09-17 三轮对抗复核 S02-01）。
+    expect(error.message).not.toContain('https://login.example.evil.test')
     expect(view.transport.commands.some((command) => String(command.params?.['expression'] ?? '').includes('passField'))).toBe(false)
   })
 
@@ -445,6 +469,68 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
     await harness.runtime.open('https://login.example/login')
     harness.adapter.lastView().transport.handler = fillHandler
     await expect(harness.call('browser_fill_credentials', { connectorId: 'corp' })).resolves.toEqual({ username: true, password: true })
+  })
+
+  it('口令是主机名的子串 ⇒ 同一 origin 的第二次注入仍然通过（闸门必须看原始 URL，2026-09-17 S02-01）', async () => {
+    // 口令 ≥8 字符且逐字落在 origin 里：注入后 tabState() 的脱敏投影会把主机段
+    // 改写成 `https://****….example`。站点闸门若拿这份显示投影算 origin，同一
+    // origin 上的第二次注入会被"站点不符"永久误拒，并回显一个不存在的主机。
+    const origin = 'https://glitchtip.corp.example'
+    const password = 'glitchtip'
+    const resolver = (async (id: string) => (id === 'corp' ? { username: 'alice', password } : null)) as CredentialResolverLike
+    resolver.originOf = async () => origin
+    const harness = track(makeHarness({}, resolver))
+    await harness.runtime.open(`${origin}/signin`)
+    harness.adapter.lastView().transport.handler = fillHandler
+
+    await expect(harness.call('browser_fill_credentials', { connectorId: 'corp' })).resolves.toEqual({ username: true, password: true })
+    // 前提断言（防假绿）：投影确实被擦除了，否则这条用例根本没走到那条路径。
+    expect(harness.runtime.tabState(1).url).toContain('****')
+    expect(harness.runtime.tabState(1).url).not.toContain(password)
+
+    // 授权判定读原始 URL ⇒ 第二次注入照常成功。
+    await expect(harness.call('browser_fill_credentials', { connectorId: 'corp' })).resolves.toEqual({ username: true, password: true })
+  })
+
+  it('站点不符的拒绝文案不得回显被观测的 origin，任何大小写形态的口令都不进模型面（2026-09-17 三轮对抗复核 S02-01 残留）', async () => {
+    // 闸门比对必须看原始 URL，但**文案里不能出现被观测的 origin**：它由页面影响
+    // （弹窗/跳转主机名可以带注入过的口令，https://<口令>.evil.example）。
+    // 上一轮的「回显脱敏投影」挡不住两种形态，本用例逐一钉住：
+    //   ① 大写口令：URL 解析把主机名折叠成小写（Sup3rSecret → sup3rsecret），
+    //      逐字脱敏是大小写敏感的 indexOf 匹配 ⇒ 投影原样放行；
+    //   ② <8 字符口令：投影只按整 token 匹配（'.' 算词字符）⇒ 原样放行。
+    // 修法是把被观测侧整段从文案里删掉，只留连接器 id 与用户登记的期望 origin。
+    const origin = 'https://login.corp.example'
+    const cases = [
+      { password: 'Sup3rSecret', observedHost: 'sup3rsecret.evil.example' },
+      { password: 'abc123', observedHost: 'abc123.evil.example' },
+    ]
+    for (const { password, observedHost } of cases) {
+      const resolver = (async (id: string) => (id === 'corp' ? { username: 'alice', password } : null)) as CredentialResolverLike
+      resolver.originOf = async () => origin
+      const harness = track(makeHarness({}, resolver))
+      await harness.runtime.open(`${origin}/signin`)
+      harness.adapter.lastView().transport.handler = fillHandler
+      await expect(harness.call('browser_fill_credentials', { connectorId: 'corp' })).resolves.toEqual({ username: true, password: true })
+
+      // 页面把口令拼进新主机名后导航走（同 tab 继承 filledSecrets 的替换集）。
+      // 主机名走 URL 规范化的**小写形态**（Chromium 的 did-navigate/getURL 报的就是
+      // 这个形态；夹具的 navigate 不做规范化，这里显式喂规范化后的值）。
+      await harness.runtime.navigate(1, `https://${password.toLowerCase()}.evil.example/popup`)
+      // 前提断言（防假绿）：投影确实放行了小写的口令主机（这正是上一轮漏掉的形态）。
+      expect(harness.runtime.tabState(1).url).toContain(observedHost)
+
+      const error = await fail(harness.call('browser_fill_credentials', { connectorId: 'corp' }))
+      expect(error.code).toBe('policy')
+      // 模型仍知道该做什么：连接器 id + 期望 origin（用户自己登记的可信值）。
+      expect(error.message).toContain('"corp"')
+      expect(error.message).toContain(origin)
+      expect(error.message).toMatch(/navigate the tab to/u)
+      // 关键断言：口令的任何大小写形态都不出现，被观测的主机整段不出现。
+      expect(error.message.toLowerCase()).not.toContain(password.toLowerCase())
+      expect(error.message).not.toContain(password)
+      expect(error.message).not.toContain(observedHost)
+    }
   })
 
   it('连接器记录里没有可用 URL ⇒ 拒绝并说明原因', async () => {
@@ -467,6 +553,38 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
     expect(error.message).toMatch(/no connector site URL/u)
     // 一个字节都没注入
     expect(view.transport.commands.some((command) => String(command.params?.['expression'] ?? '').includes('passField'))).toBe(false)
+  })
+
+  it('TOCTOU 拒绝文案不回显观测 URL：大小写折叠与短口令都不行（2026-09-17 四轮复核）', async () => {
+    // 两种绕过形态：① ≥8 字符但含大写 —— URL 主机名会被小写化，逐字擦除匹配不到；
+    // ② 短于 MIN_EMBEDDED_SECRET_LENGTH(8) —— 根本不在擦除集里。它们都曾被
+    // "回显脱敏投影"的实现原样（或折叠后）送进模型上下文与会话转录。
+    for (const secret of ['Sup3rSecret', 'abc123']) {
+      let harness: Harness | undefined
+      let navigateOnLookup = false
+      const evilHost = `${secret.toLowerCase()}.evil.example`
+      const resolver = (async (id: string) => {
+        if (navigateOnLookup && harness !== undefined) {
+          await harness.runtime.navigate(1, `https://${evilHost}/popup`, 'domcontentloaded')
+        }
+        return id === 'corp' ? { username: 'alice', password: secret } : null
+      }) as CredentialResolverLike
+      resolver.originOf = async () => 'https://login.example'
+      const bound = track(makeHarness({}, resolver))
+      harness = bound
+      await bound.runtime.open('https://login.example/login')
+      bound.adapter.lastView().transport.handler = fillHandler
+      await bound.call('browser_fill_credentials', { connectorId: 'corp' })
+      navigateOnLookup = true
+
+      const error = await fail(bound.call('browser_fill_credentials', { connectorId: 'corp' }))
+      expect(error.code).toBe('policy')
+      expect(error.message).toContain('https://login.example')
+      expect(error.message).not.toContain(secret)
+      expect(error.message).not.toContain(secret.toLowerCase())
+      expect(error.message).not.toContain(evilHost)
+      harness = undefined
+    }
   })
 
   it('检查与注入之间标签页导航走 ⇒ 临界区内复核后拒绝（TOCTOU 收口）', async () => {
@@ -507,10 +625,13 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
     const error = await fail(bound.call('browser_fill_credentials', { connectorId: 'corp' }))
     expect(error.code).toBe('policy')
     expect(error.message).toMatch(/left https:\/\/login\.example before the injection/u)
-    // 先擦除再截断：不得留下跳转 URL 里的一次性 code/ticket，更不得留下口令前缀。
+    // 拒绝文案**一个被观测字节都不含**（2026-09-17 四轮复核）：脱敏投影挡不住
+    // 大小写折叠（URL 主机会小写化口令）与 <8 字符的短口令，所以这里不回显
+    // 观测到的 URL；仍可执行的指令是"把标签页导航回 expected origin"。
     expect(error.message).not.toContain(secret)
     expect(error.message).not.toContain('ZZTOP')
-    expect(error.message).toContain('****')
+    expect(error.message).not.toContain('evil.test')
+    expect(error.message).not.toContain('landing')
     // The refused call must not have written the credential into the page: no
     // NEW command may carry the fill expression.
     const writesDuringRefusal = view.transport.commands
@@ -532,14 +653,17 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
 // ------------------------------------------- P2: wait_for 上限文案
 
 describe('2026-09-15 P2：browser_wait_for 的实际生效上限写进描述', () => {
-  it('描述与参数都写明 40000ms（工具体预算），并说明 runtime 的 120000ms 够不到', () => {
+  it('描述与参数都写明条件等待上限 40000ms 与工具体预算 55s（含单位，2026-09-17 二轮复核 TQ-6）', () => {
     const harness = track(makeHarness())
     const tool = harness.tools.get('browser_wait_for')!
-    expect(tool.timeoutMs).toBe(55_000)
-    expect(tool.description).toContain('40000')
-    expect(tool.description).toContain('55')
+    expect(tool.timeoutMs).toBe(BROWSER_WAIT_FOR_DEADLINE_MS)
+    expect(tool.description).toContain(String(WAIT_FOR_MAX_MS))
+    // 单位必须一起断言：只写 toContain('55') 的话，把描述改成 "55000 ms"
+    // （数值相同、单位全错，模型会按毫秒理解 55）也照样绿。
+    expect(tool.description).toContain('55 s')
+    expect(tool.description).not.toContain('55000')
     const timeout = tool.parameters.properties?.['timeoutMs']?.description ?? ''
-    expect(timeout).toContain('40000')
+    expect(timeout).toContain(String(WAIT_FOR_MAX_MS))
     expect(timeout).toContain('30000')
   })
 })

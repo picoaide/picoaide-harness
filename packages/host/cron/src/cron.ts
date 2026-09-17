@@ -84,8 +84,9 @@ export function isValidCron(expr: string): boolean {
  * Compute the next matching instant after `fromMs` (ms epoch), in local time,
  * at minute granularity, strictly greater than `fromMs`. Returns the ms epoch
  * of the matching minute's start, or undefined when the calendar constraint
- * can never match (for example `0 0 30 2 *`). The eight-year horizon covers the
- * 2100 century leap gap, so a valid February 29 schedule stays reachable.
+ * can never match (for example `0 0 30 2 *`) or lies beyond the schedule's
+ * scan horizon ({@link horizonDays}: eight years, or 41 years when the
+ * day/weekday AND branch is in play).
  *
  * Walks candidate year/month/day/hour/minute values straight from the parsed
  * field sets instead of scanning every minute. Wall-clock field construction
@@ -98,10 +99,7 @@ export function nextRunAtMs(expr: string, fromMs: number): number | undefined {
   if (schedule === null) return undefined
   if (!hasPossibleCalendarDay(schedule)) return undefined
   const from = new Date(fromMs)
-  // Eight years, not five: the 2100 century is not a leap year, so a valid
-  // `0 0 29 2 *` schedule can be up to ~7 years away (2097→2104) and a 5-year
-  // horizon declared it impossible (2026-09-16 audit R3-J).
-  const limitMs = fromMs + 8 * 366 * 24 * 60 * 60 * 1000
+  const limitMs = fromMs + horizonDays(schedule) * 24 * 60 * 60 * 1000
 
   const sortedMinutes = [...schedule.minutes].sort((a, b) => a - b)
   const sortedHours = [...schedule.hours].sort((a, b) => a - b)
@@ -151,8 +149,7 @@ export function nextRunAtMs(expr: string, fromMs: number): number | undefined {
  * granularity). Used by the scheduler's catch-up path: the previous
  * forward-only helper could only walk a bounded number of matches from the
  * last-known `nextRunAt`, so a long sleep fired an old occurrence instead of
- * the latest missed one. The backwards horizon is eight years (century leap
- * gap included).
+ * the latest missed one. The backwards horizon mirrors {@link horizonDays}.
  * @param expr - 5-field cron expression.
  * @param fromMs - upper bound (ms epoch).
  * @returns the matching minute start, or undefined when the calendar can never match.
@@ -161,11 +158,11 @@ export function lastRunAtMs(expr: string, fromMs: number): number | undefined {
   const schedule = parseCron(expr)
   if (schedule === null || !hasPossibleCalendarDay(schedule)) return undefined
   const from = new Date(fromMs)
-  // Walk whole days backwards (bounded by the same eight-year rule as
+  // Walk whole days backwards (bounded by the same per-schedule rule as
   // nextRunAtMs) and, on a matching day, pick the latest matching hour/minute
   // from the parsed sets. Minute-by-minute scanning would be correct but could
   // block the scheduler tick for millions of iterations after a long sleep.
-  const dayLimit = new Date(fromMs - 8 * 366 * 24 * 60 * 60 * 1000)
+  const dayLimit = new Date(fromMs - horizonDays(schedule) * 24 * 60 * 60 * 1000)
   const sortedHours = [...schedule.hours].sort((a, b) => b - a)
   const sortedMinutes = [...schedule.minutes].sort((a, b) => b - a)
   let cursor = new Date(from.getFullYear(), from.getMonth(), from.getDate())
@@ -216,14 +213,39 @@ export function lastRunAtMs(expr: string, fromMs: number): number | undefined {
     // Falling back to an absolute 24h step (instead of breaking out) keeps both
     // properties: the walk always progresses AND every match before the skipped
     // day is still visited — `break` was measured to drop the legitimate
-    // 2011-12-25 occurrence for `TZ=Pacific/Apia` (2026-09-16 R9/R3 audit; the
-    // 8-year backwards horizon widened the reachable window, the defect itself
-    // is older).
+    // 2011-12-25 occurrence for `TZ=Pacific/Apia` (2026-09-16 R9/R3 audit;
+    // widening the backwards horizon enlarged the reachable window, the defect
+    // itself is older).
     let previous = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1)
     if (previous.getTime() >= cursor.getTime()) previous = new Date(cursor.getTime() - 86_400_000)
     cursor = previous
   }
   return undefined
+}
+
+// Scan horizon for one schedule, in days — the reachable window of both
+// nextRunAtMs and lastRunAtMs.
+//
+// Eight years (not five) covers the 2100 century leap gap: `0 0 29 2 *` can be
+// ~7 years away (2097→2104), and a 5-year horizon declared it impossible
+// (2026-09-16 audit R3-J).
+//
+// It does NOT cover the day/weekday AND branch that dayCandidate selects
+// whenever either field carries the star flag: a (month, day, weekday)
+// conjunction can be 12 years apart (2191→2203 for "Jan 2 that is a Sunday",
+// `0 0 2 1 */7`) and up to 40 years apart for February 29 (2088→2128 for
+// "Feb 29 that is a Sunday"), because 2100 is not a leap year and the weekday
+// cycle shifts afterwards. The fixed eight-year limit therefore rejected
+// perfectly valid schedules — `0 0 */7 3 0` has its next match on 2037-03-01,
+// yet cron_create threw "no matching instant" and POST /api/cron/action
+// answered 400 invalid-action; 97 of the 5952 expressible AND forms were
+// refused from today's clock (2026-09-17 audit S08-02). 41 * 366 days exceeds
+// the worst gap reachable in the 400-year Gregorian cycle (14609 days = 40.0
+// years); the OR branch never waits more than ~1 year, so it keeps the cheap
+// eight. (Line comments, not a block comment: the expressions above contain
+// the `*/` sequence that would close one early.)
+function horizonDays(schedule: CronSchedule): number {
+  return schedule.dayWildcard || schedule.weekdayWildcard ? 41 * 366 : 8 * 366
 }
 
 /**

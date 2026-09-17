@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
 import Gateway from './Gateway'
 import { request } from '../api'
 
@@ -24,9 +24,20 @@ beforeEach(() => {
   mockRequest.mockImplementation(baseImpl)
 })
 
+/**
+ * 等网关配置**加载完成**。2026-09-17 独立审计：本文件 18 处锚在静态 CardTitle
+ * 「全局设置」上，它在 loading 期就已渲染，随后同步读配置值的断言会拿到初值 ——
+ * 注入 400ms 响应延迟即 6 例红（`Unable to find a label with the text of: 高峰开始 1`）。
+ * 判据换成 loading 的**消失**：loading 期两张表各渲染一个 Skeleton
+ * （Gateway.tsx:686/756，唯一的两处 animate-pulse），它消失 = 数据已落地。
+ */
+async function waitForGatewayLoaded(): Promise<void> {
+  await waitFor(() => expect(document.querySelectorAll('.animate-pulse')).toHaveLength(0))
+}
+
 async function openDialog() {
   render(<Gateway />)
-  await screen.findByText('全局设置')
+  await waitForGatewayLoaded()
   fireEvent.click(screen.getByRole('button', { name: '添加上游' }))
   return within(await screen.findByRole('dialog'))
 }
@@ -115,7 +126,7 @@ describe('Gateway 网关配置页', () => {
 
   it('上游编辑:对话框回填并提交 PUT(密钥留空不提交)', async () => {
     render(<Gateway />)
-    await screen.findByText('全局设置')
+    await waitForGatewayLoaded()
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
     const dialog = within(await screen.findByRole('dialog'))
     expect(dialog.getByDisplayValue('deepseek')).toBeInTheDocument()
@@ -133,7 +144,7 @@ describe('Gateway 网关配置页', () => {
   it('渠道同步模型删除确认文案说明不会自动恢复', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     render(<Gateway />)
-    await screen.findByText('全局设置')
+    await waitForGatewayLoaded()
     fireEvent.click(screen.getAllByRole('button', { name: '删除' })[1])
     expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('同步不会自动恢复'))
     confirmSpy.mockRestore()
@@ -141,7 +152,7 @@ describe('Gateway 网关配置页', () => {
 
   it('全局设置:非 http URL 阻止保存并提示', async () => {
     render(<Gateway />)
-    await screen.findByText('全局设置')
+    await waitForGatewayLoaded()
     fireEvent.change(screen.getByLabelText('对外访问地址 (Server Base URL)'), { target: { value: 'not-a-url' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     expect(await screen.findByText('对外访问地址必须是 http(s) URL')).toBeInTheDocument()
@@ -150,7 +161,7 @@ describe('Gateway 网关配置页', () => {
 
   it('立即同步:手动型上游折叠为汇总行', async () => {
     render(<Gateway />)
-    await screen.findByText('全局设置')
+    await waitForGatewayLoaded()
     fireEvent.click(screen.getByRole('button', { name: '立即同步' }))
     expect(await screen.findByText(/deepseek: \+1\/-0; 1 个手动型上游跳过/)).toBeInTheDocument()
   })
@@ -166,7 +177,7 @@ describe('Gateway 网关配置页', () => {
 
   it('模型配置编辑:打开对话框提交显示名+价格', async () => {
     render(<Gateway />)
-    await screen.findByText('全局设置')
+    await waitForGatewayLoaded()
     fireEvent.click(screen.getAllByRole('button', { name: '配置' })[0])
     const dialog = within(await screen.findByRole('dialog'))
     fireEvent.change(dialog.getByLabelText('输入价格(元/百万 token)'), { target: { value: '3' } })
@@ -183,7 +194,7 @@ describe('Gateway 网关配置页', () => {
 
   it('模型配置编辑:提交含低谷折扣率', async () => {
     render(<Gateway />)
-    await screen.findByText('全局设置')
+    await waitForGatewayLoaded()
     fireEvent.click(screen.getAllByRole('button', { name: '配置' })[0])
     const dialog = within(await screen.findByRole('dialog'))
     fireEvent.change(dialog.getByLabelText('输入价格(元/百万 token)'), { target: { value: '2' } })
@@ -248,7 +259,7 @@ describe('Gateway 网关配置页', () => {
 
   it('高峰时段:结构化编辑器预设 DeepSeek 政策并序列化保存', async () => {
     render(<Gateway />)
-    await screen.findByText('全局设置')
+    await waitForGatewayLoaded()
     fireEvent.click(screen.getByRole('button', { name: 'DeepSeek 当前政策(工作日)' }))
     expect((screen.getByLabelText('高峰开始 1') as HTMLInputElement).value).toBe('09:00')
     expect((screen.getByLabelText('高峰结束 2') as HTMLInputElement).value).toBe('18:00')
@@ -271,7 +282,7 @@ describe('Gateway 网关配置页', () => {
       }
     })
     render(<Gateway />)
-    await screen.findByText('全局设置')
+    await waitForGatewayLoaded()
     expect((screen.getByLabelText('高峰开始 1') as HTMLInputElement).value).toBe('09:00')
     fireEvent.click(screen.getByRole('button', { name: '清空(无峰谷价)' }))
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
@@ -287,7 +298,7 @@ describe('Gateway 网关配置页', () => {
 
   it('高峰时段:开始晚于结束时阻止保存并提示', async () => {
     render(<Gateway />)
-    await screen.findByText('全局设置')
+    await waitForGatewayLoaded()
     fireEvent.click(screen.getByRole('button', { name: '添加时段' }))
     const start = screen.getByLabelText('高峰开始 1') as HTMLInputElement
     const end = screen.getByLabelText('高峰结束 1') as HTMLInputElement
@@ -312,7 +323,7 @@ describe('Gateway 网关配置页', () => {
       return baseImpl(path, init)
     })
     render(<Gateway />)
-    await screen.findByText('全局设置')
+    await waitForGatewayLoaded()
     // 页面显式提示解析失败(而不是装作「无峰谷价」)
     expect(screen.getByText(/高峰时段配置无法解析/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
@@ -329,7 +340,7 @@ describe('Gateway 网关配置页', () => {
       return baseImpl(path, init)
     })
     render(<Gateway />)
-    await screen.findByText('全局设置')
+    await waitForGatewayLoaded()
     fireEvent.click(screen.getByRole('button', { name: 'DeepSeek 当前政策(工作日)' }))
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await screen.findByText('已保存')
@@ -342,7 +353,7 @@ describe('Gateway 网关配置页', () => {
     vi.stubGlobal('crypto', {})
     try {
       render(<Gateway />)
-      await screen.findByText('全局设置')
+      await waitForGatewayLoaded()
       fireEvent.click(screen.getByRole('button', { name: 'DeepSeek 当前政策(工作日)' }))
       expect((screen.getByLabelText('高峰开始 1') as HTMLInputElement).value).toBe('09:00')
       fireEvent.click(screen.getByRole('button', { name: '保存' }))
@@ -374,7 +385,7 @@ describe('Gateway 网关配置页', () => {
     it('确认前保存被拒;确认清空后保存成功且写入 peak_windows=""', async () => {
       const puts = unparsableStore()
       render(<Gateway />)
-      await screen.findByText('全局设置')
+      await waitForGatewayLoaded()
       expect(screen.getByText(/高峰时段配置无法解析/)).toBeInTheDocument()
 
       // ① 未确认清空:保存被拒,绝不 PUT(改前这就是死路:页面里没有清空入口)。
@@ -407,7 +418,7 @@ describe('Gateway 网关配置页', () => {
     it('确认清空后又重建时段 ⇒ 提交的是新时段(不是空值)', async () => {
       const puts = unparsableStore()
       render(<Gateway />)
-      await screen.findByText('全局设置')
+      await waitForGatewayLoaded()
       fireEvent.click(screen.getByRole('button', { name: '清空高峰时段配置' }))
       fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '确认清空' }))
       // 重建 = 放弃清空意图(确认标记作废),但列表非空本来就允许保存。
@@ -459,7 +470,7 @@ describe('Gateway 保存面(F-07)', () => {
     // (可能已被新校验拒绝的)DSN 带回服务端,导致保存无关配置被 400 拦住。
     const puts = storeWithForeignFields()
     render(<Gateway />)
-    await screen.findByText('全局设置')
+    await waitForGatewayLoaded()
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await screen.findByText('已保存')
 
@@ -476,5 +487,53 @@ describe('Gateway 保存面(F-07)', () => {
     for (const foreign of ['error_reporting_dsn', 'error_reporting_enabled', 'error_reporting_level', 'error_reporting_heartbeat', 'glitchtip_base_url', 'glitchtip_organization']) {
       expect(body[foreign]).toBeUndefined()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 修复轮 2(S12-01 / S10-5):保存响应里的非阻断告警必须在页面上可见
+// ---------------------------------------------------------------------------
+
+describe('Gateway 保存告警', () => {
+  /** 模拟服务端对「写入后配置仍不可用」返回 200 + warnings(S12-01 的降级路径)。 */
+  function warnOnSave(warnings: string[]) {
+    const puts: Array<Record<string, unknown>> = []
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/gateway' && init?.method === 'PUT') {
+        puts.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+        return { ok: true, warnings }
+      }
+      return baseImpl(path, init)
+    })
+    return puts
+  }
+
+  it('200 + warnings 时页面显示黄条告警(不能只闪「已保存」)', async () => {
+    // 事故:Gateway 页此前 `await request(...)` 后丢弃响应体 —— S12-01 把
+    // 「库里 enabled=true 但 DSN 为空」从 400 降级成 200+warning、S10-5 把
+    // 「库中现值不可用」也做成 warning,两处告警在唯一会触发它们的页面上
+    // 一律不可见,管理员只看到「已保存」。
+    const puts = warnOnSave([
+      '错误上报:库中开关已打开但 DSN 为空(客户端不会上报任何错误);请在「错误监控」页填写 DSN 或关闭开关',
+      '错误上报 DSN:库中现有值不可用(不能指向本机或云元数据地址);请在「错误监控」页更新它',
+    ])
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+
+    // 告警逐条渲染(不是只取第一条),且保存本身仍然成功。
+    expect(await screen.findByText(/库中开关已打开但 DSN 为空/)).toBeInTheDocument()
+    expect(screen.getByText(/库中现有值不可用/)).toBeInTheDocument()
+    expect(screen.getByText('已保存')).toBeInTheDocument()
+    expect(puts.length).toBe(1)
+  })
+
+  it('warnings 为空/缺省时不渲染任何告警条', async () => {
+    warnOnSave([])
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存')
+    expect(document.querySelector('.border-amber-500\\/40')).toBeNull()
   })
 })

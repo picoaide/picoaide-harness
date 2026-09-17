@@ -300,6 +300,9 @@ export function AdvisorHost(props: AdvisorHostProps): JSX.Element {
   useEffect(() => {
     const mediaQuery = window.matchMedia('(max-width: 767px)')
     const onMediaChange = (event: MediaQueryListEvent): void => {
+      // ME-7（2026-09-17 二审）：userToggled 必须在依赖数组里 —— 监听器只订阅
+      // 一次，缺它时读到的永远是订阅那一刻的 false，于是「配置关闭面板 + 用户
+      // 手动点开」后一次窗口缩放就把面板收起，与同文件 :294 的承诺矛盾。
       if (!panelEnabled && !userToggled) {
         setExpanded(false)
         return
@@ -313,7 +316,7 @@ export function AdvisorHost(props: AdvisorHostProps): JSX.Element {
 
     mediaQuery.addEventListener('change', onMediaChange)
     return () => mediaQuery.removeEventListener('change', onMediaChange)
-  }, [panelEnabled])
+  }, [panelEnabled, userToggled])
 
   useEffect(() => {
     store.setPanelVisible(expanded)
@@ -838,8 +841,11 @@ function ReviewCard(props: {
   history?: boolean
 }): JSX.Element {
   const { t, item, history = false } = props
+  // ME-6（2026-09-17 二审）：defaultInputOpen 是「由列表位置派生的默认值」
+  // （调用点传 index === reviews.length - 1），不能当受控值回灌 —— 新评审到达
+  // 时旧卡从 last 变 last-1，这个 effect 会把用户正在读的输入快照自己折叠
+  // （即便用户此前手动点开过也会被覆盖）。取挂载初值即可。
   const [inputOpen, setInputOpen] = useState(props.defaultInputOpen)
-  useEffect(() => setInputOpen(props.defaultInputOpen), [props.defaultInputOpen])
 
   const terminal = item.finished ?? item.record
   const ts = item.started?.ts ?? terminal?.ts ?? 0

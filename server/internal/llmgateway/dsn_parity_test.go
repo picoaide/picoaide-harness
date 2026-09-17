@@ -8,11 +8,18 @@ import (
 )
 
 // dsnCorpusEntry 是 testdata/dsn_corpus.json 的一行。
+//
+// ProjectID / StoreEndpoint(2026-09-17,S10-2 修复轮 3/r3v 复核)是**可选**的
+// 逐字锚点:只钉 verdict+message 抓不到"同一串两侧记不同项目 ID/端点"这类分歧
+// —— `https://key@host/1?x=/2` 曾让服务端报项目 1 而客户端 SDK 把事件发往项目 2
+// (两边的 message 都是空串,原语料完全看不见)。字段缺省 = 该行不锚。
 type dsnCorpusEntry struct {
-	DSN     string                   `json:"dsn"`
-	Verdict ErrorReportingDSNVerdict `json:"verdict"`
-	Message string                   `json:"message"`
-	Note    string                   `json:"note"`
+	DSN           string                   `json:"dsn"`
+	Verdict       ErrorReportingDSNVerdict `json:"verdict"`
+	Message       string                   `json:"message"`
+	Note          string                   `json:"note"`
+	ProjectID     string                   `json:"project_id"`
+	StoreEndpoint string                   `json:"store_endpoint"`
 }
 
 type dsnCorpusFile struct {
@@ -65,6 +72,14 @@ func TestDSNCorpus(t *testing.T) {
 			}
 			if got.Message != tc.Message {
 				t.Fatalf("message = %q, want %q (note: %s)", got.Message, tc.Message, tc.Note)
+			}
+			// 可选的逐字锚点:项目 ID 与 ingest 端点必须与客户端 SDK 同源(见
+			// dsnCorpusEntry 注释;缺省 = 该行不锚)。
+			if tc.ProjectID != "" && got.ProjectID != tc.ProjectID {
+				t.Fatalf("project id = %q, want %q (note: %s)", got.ProjectID, tc.ProjectID, tc.Note)
+			}
+			if tc.StoreEndpoint != "" && got.StoreEndpoint != tc.StoreEndpoint {
+				t.Fatalf("store endpoint = %q, want %q (note: %s)", got.StoreEndpoint, tc.StoreEndpoint, tc.Note)
 			}
 			// ValidateErrorReportingDSN 是 handler 用的薄封装,结论必须一致。
 			err := ValidateErrorReportingDSN(tc.DSN)
