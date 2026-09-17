@@ -283,10 +283,14 @@ export default function Capabilities() {
                 const meta = STATUS_META[row.status]
                 const kindMeta = KIND_META[row.kind]
                 const KindIcon = kindMeta.icon
+                // 行内**任一**操作在途都要置灰并拦住重复点击。此前漏了 'enabled'
+                // （上下架的键，见 setEnabled）⇒ 管理员在"下架"在途时点"重新上架"会被
+                // `if (busy) return` 静默吞掉、按钮也不置灰，零反馈（2026-09-17 独立审计）。
                 const isBusy = busy === row.name + row.version + 'approve'
                   || busy === row.name + row.version + 'reject'
                   || busy === row.name + row.version + 'delete'
                   || busy === row.name + row.version + 'quality'
+                  || busy === row.name + row.version + 'enabled'
                 return (
                   <TableRow key={row.kind + ':' + row.name + '@' + row.version}>
                     <TableCell>
