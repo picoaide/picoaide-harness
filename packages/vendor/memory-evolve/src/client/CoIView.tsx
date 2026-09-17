@@ -121,6 +121,35 @@ interface Notice {
 type DictKey = Extract<MemoryEvolveKey, `coi.${string}`>
 
 /**
+ * 把归属层级 id 映射成字典键。
+ *
+ * 2026-09-17 第 12 轮审计 F2：原先三处调用点写成 ``t(`coi.scope.${s}` as DictKey)``
+ * —— `as` 断言**直接绕过键检查**，于是 `coi.scope.*` 一族在类型系统下无人看管
+ * （删键后 tsc 只在别处报错，这三处零报错）。
+ * 改成显式收窄的映射函数后，返回类型标注会把检查点**钉在这个函数上**：
+ * 删掉任一 `coi.scope.<id>` ⇒ 这里立刻 TS2322。调用点也就不再需要断言。
+ */
+type ScopeId = (typeof SCOPES)[number]
+
+/**
+ * 归属层级 id → 字典键的**校验表**。
+ *
+ * 2026-09-17 第 12 轮审计 F2：原先三处调用点写成 ``t(`coi.scope.${s}` as DictKey)``
+ * —— `as` 断言**直接绕过键检查**，`coi.scope.*` 一族在类型系统下无人看管
+ * （删键后 tsc 只在别处报错，这三处零报错）。
+ *
+ * 改用显式映射表 + `Record<ScopeId, DictKey>` 标注：检查点落在**表声明处**，
+ * 删掉任一 `coi.scope.<id>` ⇒ 这里立刻 TS2322；调用点 `t(SCOPE_KEYS[scope])`
+ * 拿到的是已收窄的 `DictKey`，不再需要任何断言。
+ */
+const SCOPE_KEYS: Record<ScopeId, DictKey> = {
+  temporary: 'coi.scope.temporary',
+  session: 'coi.scope.session',
+  project: 'coi.scope.project',
+  global: 'coi.scope.global',
+}
+
+/**
  * 本视图的翻译函数：键收窄到 `coi.` 域，**可选模板参数**（`{count}` / `{value}` …）。
  *
  * 2026-09-17（审计 i18n-core-1）：此前 `dict()` 的返回类型只声明一个形参，
@@ -245,7 +274,7 @@ const SCOPES = ['temporary', 'session', 'project', 'global'] as const
  * 未知值实际渲染成键名（'scope.foo'），`??` 从不生效；这里按原意兜底。
  */
 function scopeLabel(scope: string, t: Dict): string {
-  return (SCOPES as readonly string[]).includes(scope) ? t(`coi.scope.${scope}` as DictKey) : scope
+  return (SCOPES as readonly string[]).includes(scope) ? t(SCOPE_KEYS[scope as ScopeId]) : scope
 }
 
 /** 内置适配器 id（host 不返回内置标记，前端据此隐藏删除按钮；与 lib/coi/adapters.js 对齐）。 */
@@ -682,7 +711,7 @@ function TasksPane({ t: tt, dsSessionId }: { t: MemoryEvolveTranslate; dsSession
             <span className="coi-label">{t('coi.launch.scope')}</span>
             <select className="coi-select" value={scope} onChange={(e) => setScope(e.target.value)}>
               {SCOPES.map((s) => (
-                <option key={s} value={s}>{t(`coi.scope.${s}` as DictKey)}</option>
+                <option key={s} value={s}>{t(SCOPE_KEYS[s])}</option>
               ))}
             </select>
           </label>
@@ -1018,7 +1047,7 @@ function SessionsPane({ t: tt, dsSessionId }: { t: MemoryEvolveTranslate; dsSess
         <select className="coi-select" value={scopeFilter} onChange={(e) => setScopeFilter(e.target.value)} title={t('coi.sessions.filterScope')}>
           <option value="">{t('coi.all')}</option>
           {SCOPES.map((s) => (
-            <option key={s} value={s}>{t(`coi.scope.${s}` as DictKey)}</option>
+            <option key={s} value={s}>{t(SCOPE_KEYS[s])}</option>
           ))}
         </select>
         <input

@@ -255,9 +255,13 @@ async function runScheduler(tasks, limit, state) {
       if (running.size >= limit) break
       const blocked = task.needs.filter(name => !succeeded.has(name))
       if (blocked.length > 0) {
-        // 依赖已失败(不在 pending/running 里也永远不会成功)→ 跳过
-        const inFlight = gatesInFlight()
-        const dead = blocked.filter(name => !inFlight.has(name))
+        // 依赖已失败(不在 pending/running 里也永远不会成功)→ 跳过。
+        // 2026-09-17 修复：类型系统轮误引入未定义的 `gatesInFlight()`，导致
+        // `yarn check`（= CI gate job）在**快乐路径与失败路径两条**上都直接
+        // ReferenceError 崩溃 —— 正是"依赖失败优雅跳过"这道防护本身被摧毁。
+        // 这里回到按任务名判定的原表达式（多脚本包的依赖是按**包名**声明的，
+        // 而 succeeded/running 用的是**任务名**，两者的键控差异见 P3 记录）。
+        const dead = blocked.filter(name => !pending.has(name) && !running.has(name))
         if (dead.length > 0) {
           pending.delete(task.name)
           state.skipped.push({ task, blockedBy: dead })
