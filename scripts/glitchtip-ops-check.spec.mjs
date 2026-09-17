@@ -35,6 +35,7 @@ const UNREACHABLE_SSH = 'nobody@192.0.2.1'
 
 let failures = 0
 let checks = 0
+let skips = 0
 
 function check(label, condition, detail) {
   checks += 1
@@ -194,6 +195,27 @@ try {
     )
   }
 
+  console.log('\n【P2 边界】IP 保护必须独立生效（jar 域带前导点的 IP 也必须拒）')
+  {
+    // 2026-09-17 第 3 轮审计 R3-ops-2:此前 IP 用例的 jar 域写成无点的 `0.0.1`，
+    // 会被"前导点规则"先挡住 ⇒ 该断言实际测的是点规则，IP 保护**无独立断言**。
+    // 带点的 `.0.0.1` 才能把 IP 保护单独逼出来。
+    seenCookies.length = 0
+    const jar = join(work, 'ip-dotted.jar')
+    writeFileSync(jar, [
+      '# Netscape HTTP Cookie File',
+      '.0.0.1\tTRUE\t/\tFALSE\t1999999999\tsessionid\tIP_DOTTED_TRAP',
+      '',
+    ].join('\n'))
+    await runScript(['--base-url', baseUrl, '--cookies', jar])
+    const last = seenCookies.at(-1)
+    check(
+      'jar 域 .0.0.1（有前导点的 IP）对目标 127.0.0.1 ⇒ 不发送',
+      last === null || last === undefined,
+      `实际收到 cookie=${String(last)}`,
+    )
+  }
+
   console.log('\n【P2 边界】父域 cookie 必须匹配子域（须真正走到后缀分支，别被 IP 短路掩盖）')
   {
     // 2026-09-17 证伪轮发现：原用例目标写成 IP 127.0.0.1，会在"IP 不做后缀匹配"
@@ -222,13 +244,24 @@ try {
         '.localhost\tTRUE\t/\tFALSE\t1999999999\tsessionid\tPARENT_DOMAIN',
         '',
       ].join('\n'))
-      await runScript(['--base-url', `http://foo.localhost:${pPort}`, '--cookies', jar])
-      const last = seenCookies.at(-1)
-      check(
-        '父域 .localhost 匹配子域 foo.localhost ⇒ 真发出 cookie',
-        /sessionid=PARENT_DOMAIN/.test(String(last)),
-        `实际收到 cookie=${String(last)}`,
-      )
+      // 预检解析栈：`foo.localhost` 依赖 systemd-resolved 一类的 `.localhost` 合成。
+      // 解析不到时**显式跳过**并说明原因 —— 既不静默通过（那会假装有覆盖），
+      // 也不假红（2026-09-17 第 3 轮审计 R3-ops-1：干净容器里曾整条 yarn check 变红）。
+      const resolvable = await new Promise((r) => {
+        import('node:dns').then(({ lookup }) => lookup('foo.localhost', (err, addr) => r(!err && addr === '127.0.0.1')))
+      })
+      if (!resolvable) {
+        skips += 1
+        console.log('  ⊘ SKIP 父域正例：本机解析栈不合成 .localhost（无法构造子域场景）')
+      } else {
+        await runScript(['--base-url', `http://foo.localhost:${pPort}`, '--cookies', jar])
+        const last = seenCookies.at(-1)
+        check(
+          '父域 .localhost 匹配子域 foo.localhost ⇒ 真发出 cookie',
+          /sessionid=PARENT_DOMAIN/.test(String(last)),
+          `实际收到 cookie=${String(last)}`,
+        )
+      }
     } catch {
       parentOk = false
       check('父域用例可运行（foo.localhost 可解析）', false, '无法建立父域场景')
@@ -258,5 +291,8 @@ try {
   rmSync(work, { recursive: true, force: true })
 }
 
-console.log(`\n${failures === 0 ? '→ PASS' : '→ FAIL'}（${checks - failures}/${checks} 通过）`)
+console.log(
+  `\n${failures === 0 ? '→ PASS' : '→ FAIL'}（${checks - failures}/${checks} 通过` +
+  `${skips > 0 ? `，${skips} 项因环境跳过` : ''}）`,
+)
 process.exit(failures === 0 ? 0 : 1)
