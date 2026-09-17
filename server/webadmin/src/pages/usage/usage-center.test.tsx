@@ -223,10 +223,8 @@ describe('用量中心 · 请求日志', () => {
 describe('用量中心 · 余额', () => {
   it('展示发放策略与员工余额,调整弹窗实时预览并提交', async () => {
     renderAt('/usage', <Balance />)
-    // 发放策略卡
-    expect(await screen.findByText('按月发放余额')).toBeInTheDocument()
-    const amt = screen.getByLabelText('每人每月额度(元)')
-    expect((amt as HTMLInputElement).value).toBe('100')
+    // 发放策略卡：标题在数据落地前就渲染（Balance.tsx 静态 CardTitle），额度值必须自己等。
+    await waitFor(() => expect((screen.getByLabelText('每人每月额度(元)') as HTMLInputElement).value).toBe('100'))
     // 员工余额表(过滤掉 super_admin)
     expect(await screen.findByText('alice')).toBeInTheDocument()
     expect(screen.queryByText('boss')).not.toBeInTheDocument()
