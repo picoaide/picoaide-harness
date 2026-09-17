@@ -31,6 +31,23 @@ const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const CLIENT_ROOT = join(PACKAGE_ROOT, 'src', 'client')
 const ENTRY = join(CLIENT_ROOT, 'index.ts')
 
+/**
+ * 宿主 side 的 row key 清单（2026-09-17 第 7 轮 R7-i18n-2）。
+ *
+ * 真源 = 同包产物 `lib/memory-tab.js` 里的 `rows = [{ key: '<x>' }, …]` —— 它们是
+ * **硬编码字面量**，不是"宿主下发的运行时数据"。`memoryTab.desc.agents` 只在这里出现，
+ * 客户端 `src/` 里没有它的字面量，所以必须跨半边读；否则删它会静默放过（第 6/7 轮实测）。
+ * 本测试文件本来就在读同包的 `lib/client.js`（见 D4 对拍），跨半边读值域一致成立。
+ */
+const HOST_ROW_KEYS = (() => {
+  try {
+    const bundle = readFileSync(join(PACKAGE_ROOT, 'lib', 'memory-tab.js'), 'utf8')
+    return [...bundle.matchAll(/\{\s*key:\s*'([^']+)'/gu)].map((m) => m[1])
+  } catch {
+    return []
+  }
+})()
+
 /** 字典块的起止标记（zh 是键集真源，en 由 `Record<MemoryEvolveKey, string>` 强制镜像）。 */
 const ZH_MARKER = 'export const zh = {'
 const EN_MARKER = 'export const en:'
@@ -167,6 +184,7 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
   let enumerated = 0
   let enumeratedNamed = 0
   let prefixFallbacks = 0
+  const srcTotals = { named: 0, inline: 0, set: 0, tuple: 0, callback: 0, forOf: 0 }
   /** 键缺失判定：返回缺失的语言标签，或 null（两侧都在）。 */
   const missing = (key) => (!ZH_KEYS.has(key) ? 'zh' : !EN_KEYS.has(key) ? 'en' : null)
   for (const { relative: file, source } of SOURCES) {
@@ -177,14 +195,36 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
     //   ② 洞是 `.map()`/`.forEach()` 的回调形参 ⇒ 用被遍历变量的值域
     //   ③ 洞是 `for (const x of NAME)` 的循环变量 ⇒ 同上
     const holeDomains = new Map()
-    for (const [name, items] of domains) holeDomains.set(name, items)
-    for (const m of source.matchAll(/\b(\w+)\.(?:map|forEach)\(\s*\(?\s*(\w+)\s*\)?\s*=>/gu)) {
+    // 来源计数（2026-09-17 第 7 轮 R7-i18n-3）：必须**按来源**分别下下限。
+    // 第 6 轮只钉总数 ⇒ 本提交的"解耦"丢掉了内联数组识别（9 个键失去覆盖），
+    // 而总数反而从 21 涨到 36（新纳入 TARGETS/BOARD_QUADRANTS/ENTRY_KEYS 补上了数量）
+    // ⇒ 数量型元断言完全看不出来。按来源钉死才能防下一次"重构顺手删掉一段"。
+    const src = { named: 0, inline: 0, set: 0, tuple: 0, callback: 0, forOf: 0 }
+    for (const [name, items] of domains) {
+      holeDomains.set(name, items)
+      src.named += 1
+    }
+    // 形态甲（第 4 轮加、第 6 轮**被我误删**、第 7 轮加回并加来源断言）：
+    // 内联一维字面量数组 + 紧随的 `.map()/.forEach()`：
+    //   `(['unread','all','read'] as const).map((f) => t(`broadcast.filter.${f}`))`
+    //   `([0, 7, 30] as const).map((d) => …)`、`([0,7,30] as const)` 亦可无 as const
+    for (const m of source.matchAll(
+      /\[\s*((?:'[^']*'|"[^"]*"|\d+)(?:\s*,\s*(?:'[^']*'|"[^"]*"|\d+))*)\s*,?\s*\]\s*(?:as\s+const|satisfies[^\n]*)?\s*\)?\s*\.(?:map|forEach)\(\s*\(?\s*(\w+)\s*\)?\s*=>/gsu,
+    )) {
+      const items = literalItems(m[1])
+      if (items.length === 0) continue
+      if (!holeDomains.has(m[2])) { holeDomains.set(m[2], items); src.inline += 1 }
+    }
+    // 具名数组 / Set 的遍历点与 for-of（回调形参允许带类型标注 `(s: string) =>`）
+    for (const m of source.matchAll(/\b(\w+)\.(?:map|forEach)\(\s*\(?\s*(\w+)\s*(?::[^)]*)?\)?\s*=>/gu)) {
       const items = domains.get(m[1])
-      if (items !== undefined && !holeDomains.has(m[2])) holeDomains.set(m[2], items)
+      if (items === undefined) continue
+      if (!holeDomains.has(m[2])) { holeDomains.set(m[2], items); src.callback += 1 }
     }
     for (const m of source.matchAll(/for\s*\(\s*const\s+(\w+)\s+of\s+(\w+)\s*\)/gu)) {
       const items = domains.get(m[2])
-      if (items !== undefined && !holeDomains.has(m[1])) holeDomains.set(m[1], items)
+      if (items === undefined) continue
+      if (!holeDomains.has(m[1])) { holeDomains.set(m[1], items); src.forOf += 1 }
     }
     // 元组数组（具名或内联）+ 解构回调 ⇒ 按列登记到解构形参
     const tupleArrays = new Map()
@@ -194,6 +234,7 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
       const tuples = [...m[2].matchAll(/\[([^\]]*)\]/gu)].map((t) => literalItems(t[1]))
       if (tuples.length === 0) continue
       if (m[1] !== undefined) tupleArrays.set(m[1], tuples)
+      src.tuple += 1
       // 紧跟其后的 `.map(([a, b]) => …)` / `.forEach(...)`（内联场景）
       const after = source.slice(m.index + m[0].length, m.index + m[0].length + 120)
       const cb = /^\s*\)?\s*\.(?:map|forEach)\(\s*\(\s*\[([^\]]*)\]\s*\)\s*=>/u.exec(after)
@@ -215,12 +256,11 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
     }
     // `SET.has(x)` 守卫：值域并入 x（MemoryTabView 的 `!ENTRY_KEYS.has(activeRow.key)` 形态）。
     //
-    // ★ 已声明边界（2026-09-17 第 6 轮 R6-i18n-2 的残留）：`activeRow.key` 的**完整**
-    // 值域来自宿主下发的 `files`（运行时数据），本文件只能静态读到 `ENTRY_KEYS` 的 8 个成员；
-    // 第 9 个 `memoryTab.desc.agents`（AGENTS.md 那一行）的值**在客户端源码里没有任何字面量**，
-    // 因此无法静态枚举。实测：删 8 个 ENTRY_KEYS 成员中的任意一个 ⇒ 变红；
-    // 删 `agents` 那一个 ⇒ 仍绿（前缀检查只在整族清零时才响）。
-    // 要有覆盖只能靠类型检查或运行时键审计，超出本守卫能力 —— 显式记录而非假装覆盖。
+    // ★ 第 7 轮修正（R7-i18n-2）：此前这里声明"`activeRow.key` 的值域是宿主下发的
+    // 运行时数据、无法静态枚举"—— **该理由是事实错误**。9 个 row key 是**硬编码字面量**，
+    // 真源在同包产物 `lib/memory-tab.js` 的 `rows = [{ key: '<x>' }, …]`（含 `agents`）。
+    // 本测试文件本来就在读同包的 `lib/client.js`，跨半边读值域完全成立 —— 见文件顶部
+    // `HOST_ROW_KEYS` 与下方 hostKeys 块。故删掉旧的"接受边界"声明。
     for (const m of source.matchAll(/\b([A-Za-z_$][\w$]*)\.has\(\s*([A-Za-z_$][\w$.]*)\s*\)/gu)) {
       const items = domains.get(m[1])
       if (items === undefined) continue
@@ -233,6 +273,17 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
       // 属性访问形态 `x.y`：把最后一段也登记（`activeRow.key` ⇒ `key`）
       const last = target.split('.').pop()
       if (last !== target && !holeDomains.has(last)) holeDomains.set(last, items)
+    }
+    // ★ 宿主 side 值域（2026-09-17 第 7 轮 R7-i18n-2）：`memoryTab.desc.${activeRow.key}`
+    // 的 `activeRow.key` 值域来自 **lib/memory-tab.js 的硬编码 rows**（9 项，含 `agents`）。
+    // 第 6/7 轮实测：删 `memoryTab.desc.agents` 时整套 1017 例 fail 0 —— 因为
+    // `ENTRY_KEYS` 只含 8 项、`agents` 不在其中。这里把宿主读到的 9 个 key 并入
+    // `activeRow.key` 与 `key` 两个洞名（属性形态按最后一段查）。
+    if (/memoryTab\.desc\./.test(source) && HOST_ROW_KEYS.length > 0) {
+      for (const hole of ['activeRow.key', 'key']) {
+        const cur = holeDomains.get(hole) ?? []
+        holeDomains.set(hole, [...new Set([...cur, ...HOST_ROW_KEYS])])
+      }
     }
     for (const m of source.matchAll(/\b(?:t|say)\(\s*`([^`]*)`/gu)) {
       const template = m[1]
@@ -302,6 +353,7 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
         else enumerated += 1
       }
     }
+    for (const k of Object.keys(src)) srcTotals[k] += src[k]
   }
   assert.deepEqual(
     offenders, [],
@@ -312,6 +364,18 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
   // ⇒ 任一条正则失配后仍可能过线、全绿，元断言守不住它被加进来要守的事。
   // 现在按**来源**分别下下限，并额外钉住**回落到前缀检查的调用点数**，防止
   // "枚举面悄悄退化、大家全走前缀分支"这种静默失效（第 6 轮 A3-10/A3-11）。
+  // ★ 来源级下限（2026-09-17 第 7 轮 R7-i18n-3）：只钉总数会被"数量替换"掩盖 ——
+  // 第 6 轮的解耦丢掉了**内联数组**识别（9 个键失去覆盖），而总数反而从 21 涨到 36。
+  // 每个来源必须各自有下限，删掉任一段收集代码都会立刻红。
+  const SOURCE_FLOORS = { named: 12, inline: 3, set: 0, tuple: 1, callback: 3, forOf: 0 }
+  const starved = Object.entries(SOURCE_FLOORS)
+    .filter(([k, floor]) => srcTotals[k] < floor)
+    .map(([k, floor]) => `${k}=${srcTotals[k]} < ${floor}`)
+  assert.deepEqual(
+    starved, [],
+    `以下枚举来源低于下限（某段收集代码可能已被删除/失配，该类形态将静默失去覆盖）：\n${starved.join('\n')}` +
+    `\n实测来源分布：${JSON.stringify(srcTotals)}`,
+  )
   assert.ok(
     enumeratedNamed >= 8,
     `具名值域枚举面异常偏小（named=${enumeratedNamed}）—— 具名收集可能已失配`,
