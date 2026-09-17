@@ -2,7 +2,7 @@
 
 - 日期：2026-09-07
 - 对象：`packages/host/browser`（v4.2 单池定案，2026-09-07 13:17 构建 + 14:17 打包产物 `dist/linux-unpacked`）
-- 方法：设计文档对照（`docs/planning/2026-09-07-ai-browser-redesign.md`）→ 全量源码走读 → 单测补丁实锤（`vitest`，158 存量 + 5 项探针全绿）→ 真机行为验证（https://picoaide-next.kq0575.cn/ user001，CDP + 真实合成截图 `import -window root` + 真实鼠标点击 `xdotool`）
+- 方法：设计文档对照（`docs/planning/2026-09-07-ai-browser-redesign.md`）→ 全量源码走读 → 单测补丁实锤（`vitest`，158 存量 + 5 项探针全绿）→ 真机行为验证（https://harness.example.com/ test-user，CDP + 真实合成截图 `import -window root` + 真实鼠标点击 `xdotool`）
 - 验证环境：审计探针 `temp/audit-browser-mask-probe.mjs`，截图 `temp/audit-browser-mask-shots/`（A1 / B1 / B2 / C1）
 - 结论：**2 个用户可见 P0（z-order 遮挡 + open 遮罩/忙态缺失）**、4 个 P1（eval 绕过 / upload 白名单缺失 / store 不随登录切换 / 下载守卫重复挂载）、11 个 P2、4 个 P3。
 
@@ -92,7 +92,7 @@
 
 ---
 
-## 真机验证记录（2026-09-07，picoaide-next.kq0575.cn / user001）
+## 真机验证记录（2026-09-07，harness.example.com / test-user）
 
 ```
 phase A: browser_open seen=true; state tabs=1 busy=false   ← open 无忙态（bug P0-2）
@@ -158,7 +158,7 @@ phase B: wait_for busy=true busyTool=browser_wait_for      ← 忙态正常
 
 ### 测试与真机验证
 - 单测：存量 158 → 删除 resolve.spec(19) → +`tests/audit-fixes.spec.ts` 14 项（eval 绕过锁、open 用户闸/忙态、守卫幂等、waitExpression、ledger 物化+可关、upload 白名单正/反例、actor、store 切换、eval 脱敏）= **153 项全绿**；browser `check`（build+typecheck+test）全绿。
-- 真机 E2E（picoaide-next.kq0575.cn / user001，重建 dist/linux-unpacked + `temp/browser-v4.2-e2e.mjs`）：**14/14 通过**，含真实合成截图断言——标签打开后胶囊仍可见（v42-01）、活动面板浮层真实可见（v42-03）、接管态（v42-04）、菜单/查看器（v42-05/06）——CDP 盲区已纳入验证。
+- 真机 E2E（harness.example.com / test-user，重建 dist/linux-unpacked + `temp/browser-v4.2-e2e.mjs`）：**14/14 通过**，含真实合成截图断言——标签打开后胶囊仍可见（v42-01）、活动面板浮层真实可见（v42-03）、接管态（v42-04）、菜单/查看器（v42-05/06）——CDP 盲区已纳入验证。
 - 真机遮罩探针（`temp/audit-browser-mask-probe.mjs`，阶段 A 断言更新为修复后语义：open 期间 `busy=true`、真实点击被拦截接管）重跑中。
 
 ---

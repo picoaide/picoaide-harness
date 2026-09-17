@@ -74,7 +74,7 @@
 
 ```json
 "defaults": {
-  "server_url": "https://harness.mokahr.vip",
+  "server_url": "https://harness.example.com",
   "telemetry_channel": "moka",
   "locale": "zh"
 }
