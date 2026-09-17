@@ -80,6 +80,10 @@ const (
 	ErrorReportingKindConnect = "CONNECT"
 	ErrorReportingKindTLS     = "TLS"
 	ErrorReportingKindTimeout = "TIMEOUT"
+	// ErrorReportingKindBlocked:目标被出站护栏拦下(链路本地/云 metadata)。
+	// 2026-09-17 审计 N4:此前这种拒绝落进 UNKNOWN,而文件头写着"UNKNOWN 不应出现",
+	// 管理员也无法区分"被安全策略拦"与"未知故障"。
+	ErrorReportingKindBlocked = "BLOCKED"
 	// ErrorReportingKindHTTP3xx:本端点**不跟随重定向**(见 errorReportingTestClient),
 	// 3xx 说明 DSN 指向了会跳转的地址 —— 单列一类,而不是落进"不应出现"的
 	// UNKNOWN(2026-09-17 独立审计 R4:此前 302 被归为 UNKNOWN)。
@@ -200,10 +204,10 @@ func sendErrorReportingTestEvent(ctx context.Context, inspection ErrorReportingD
 	// 保存时不做 DNS 解析(内网域名/离线部署),所以出站前必须复检目标
 	// (链路本地/云 metadata 一律拒绝;私网放行)。
 	if err := util.CheckOutboundTarget(reqCtx, inspection.Host); err != nil {
-		kind := classifyErrorReportingFailure(err, 0)
+		// N4:这是安全策略拒绝,不是网络故障 —— 单列一类,文案不泄露解析结果。
 		return errorReportingTestResult{
-			Kind:     kind,
-			Message:  errorReportingFailureMessage(kind),
+			Kind:     ErrorReportingKindBlocked,
+			Message:  errorReportingFailureMessage(ErrorReportingKindBlocked),
 			Detail:   err.Error(),
 			Endpoint: inspection.StoreEndpoint,
 		}
@@ -231,9 +235,16 @@ func sendErrorReportingTestEvent(ctx context.Context, inspection ErrorReportingD
 		if len(detail) > 300 {
 			detail = detail[:300]
 		}
+		// N5(审计 2026-09-17):3xx 走专用文案 —— 此前 message 恒为
+		// "上报服务返回 HTTP %d",那条"请在 DSN 里直接指向 store 端点"的可操作指引
+		// 永远到不了管理员(webadmin 只渲染 message + kind)。
+		message := fmt.Sprintf("上报服务返回 HTTP %d", resp.StatusCode)
+		if kind == ErrorReportingKindHTTP3xx {
+			message = errorReportingFailureMessage(ErrorReportingKindHTTP3xx)
+		}
 		return errorReportingTestResult{
 			Kind:       kind,
-			Message:    fmt.Sprintf("上报服务返回 HTTP %d", resp.StatusCode),
+			Message:    message,
 			HTTPStatus: resp.StatusCode,
 			Detail:     detail,
 			Endpoint:   inspection.StoreEndpoint,
@@ -260,6 +271,8 @@ func errorReportingFailureMessage(kind string) string {
 		return "上报服务的 TLS 证书校验失败"
 	case ErrorReportingKindTimeout:
 		return fmt.Sprintf("连接上报服务超时(>%s)", errorReportingTestTimeout)
+	case ErrorReportingKindBlocked:
+		return "目标地址被出站护栏拦截(链路本地/云 metadata):这是安全策略,不是网络故障"
 	case ErrorReportingKindHTTP3xx:
 		return "上报服务要求重定向(本端点不跟随重定向,请让 DSN 直接指向 store 端点)"
 	case ErrorReportingKindHTTP4xx:

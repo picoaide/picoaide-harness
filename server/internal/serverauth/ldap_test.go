@@ -1,8 +1,11 @@
 package serverauth
 
 import (
+	"encoding/base64"
 	"errors"
 	"net"
+	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -299,18 +302,59 @@ func TestLDAPDialControlBlocksMetadata(t *testing.T) {
 	}
 }
 
-// TestRedactCredentialStripsBindPassword:对端可以把 bind 口令原样回显在错误文本里,
-// 落日志前必须擦掉(空口令不动,避免把空串替换成噪声)。
+// TestRedactCredentialStripsBindPassword:对端可以任意变形回显 bind 口令
+// (2026-09-17 审计 N1 实测:大小写/base64/URL 编码都是现成绕过),落日志前
+// 必须把常见编码形态也擦掉;空口令不动,避免把空串替换成噪声。
 func TestRedactCredentialStripsBindPassword(t *testing.T) {
 	const pw = "S3cr3t-Bind-Pw"
-	got := redactCredential("ldap: invalid credentials (bind pw="+pw+")", pw)
-	if strings.Contains(got, pw) {
-		t.Fatalf("password leaked into log text: %q", got)
+	variants := map[string]string{
+		"原样":     pw,
+		"小写":     strings.ToLower(pw),
+		"大写":     strings.ToUpper(pw),
+		"base64": base64.StdEncoding.EncodeToString([]byte(pw)),
+		"URL编码":  url.QueryEscape(pw),
 	}
-	if !strings.Contains(got, "***") {
-		t.Fatalf("password must be replaced, got %q", got)
+	for name, v := range variants {
+		got := redactCredential("ldap: bind failed (echo="+v+")", pw)
+		if strings.Contains(got, v) {
+			t.Fatalf("%s 形态未被擦除: %q", name, got)
+		}
+		if !strings.Contains(got, "***") {
+			t.Fatalf("%s 形态必须被替换, got %q", name, got)
+		}
 	}
 	if plain := "no secret here"; redactCredential(plain, "") != plain {
-		t.Fatalf("empty password must leave the text untouched")
+		t.Fatalf("空口令必须原样返回")
+	}
+}
+
+// TestRedactCredentialEscapesControlChars(CWE-117):对端在错误文本里塞 CR/LF
+// 可以伪造整行日志;落盘前必须转义成可见形式。同时超长文本要截断。
+func TestRedactCredentialEscapesControlChars(t *testing.T) {
+	got := redactCredential("oops\n2026/09/17 audit: username=root action=login_success\r\tx", "")
+	if strings.ContainsAny(got, "\n\r\t") {
+		t.Fatalf("控制字符未被转义(可伪造日志行): %q", got)
+	}
+	if !strings.Contains(got, `\n`) || !strings.Contains(got, `\r`) {
+		t.Fatalf("应转义成可见 \\n/\\r, got %q", got)
+	}
+	long := redactCredential(strings.Repeat("A", 1000), "")
+	if len(long) > 320 {
+		t.Fatalf("超长文本必须截断, got %d 字节", len(long))
+	}
+}
+
+// TestLDAPDialerWiresControl(审计 N6 回归网有洞):*行为*测试只测 `ldapDialControl`
+// 纯函数,把 `ldapDialer()` 里的 `Control:` 接线摘掉后既有用例**仍全绿**。这里钉接线本身。
+func TestLDAPDialerWiresControl(t *testing.T) {
+	d := ldapDialer()
+	if d.Control == nil {
+		t.Fatal("ldapDialer() 必须挂上 Control(连接期 IP 复检),否则 check-then-dial 窗口重新打开")
+	}
+	if reflect.ValueOf(d.Control).Pointer() != reflect.ValueOf(ldapDialControl).Pointer() {
+		t.Fatal("Control 必须是 ldapDialControl 本身(不要换成一个不检查的实现)")
+	}
+	if d.Timeout != ldapTimeout {
+		t.Fatalf("Timeout = %v, want %v", d.Timeout, ldapTimeout)
 	}
 }

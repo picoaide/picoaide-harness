@@ -3,6 +3,7 @@ package llmgateway
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -432,5 +433,109 @@ func TestErrorReportingTestEventWritesAudit(t *testing.T) {
 	}
 	if !strings.Contains(rows[0].Detail, "203.0.113.7") {
 		t.Fatalf("audit detail must name the probed endpoint, got %q", rows[0].Detail)
+	}
+}
+
+// TestErrorReportingTestEvent3xxMessageReachesAdmin(N5):3xx 的专用文案必须真的
+// 出现在响应里 —— 此前 message 恒为"上报服务返回 HTTP %d",那句"请在 DSN 里直接
+// 指向 store 端点"的可操作指引永远到不了管理员(webadmin 只渲染 message + kind)。
+func TestErrorReportingTestEvent3xxMessageReachesAdmin(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://example.com/elsewhere", http.StatusMovedPermanently)
+	}))
+	defer srv.Close()
+	useRewriteClient(t, srv.URL)
+
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	if err := serverstore.SetSetting(db, "web.error_reporting_dsn", "https://key@203.0.113.7/1"); err != nil {
+		t.Fatal(err)
+	}
+	w, out := adminReq(t, r, "POST", "/api/server/admin/gateway/error-reporting/test", `{}`, hdr)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (%s)", w.Code, w.Body.String())
+	}
+	env, _ := out["error"].(map[string]any)
+	msg, _ := env["message"].(string)
+	if !strings.Contains(msg, "重定向") {
+		t.Fatalf("message = %q, want the redirect guidance", msg)
+	}
+	detail, _ := out["detail"].(map[string]any)
+	if detail["kind"] != ErrorReportingKindHTTP3xx || detail["http_status"] != float64(301) {
+		t.Fatalf("detail = %v, want HTTP_3XX + 301", detail)
+	}
+}
+
+// TestErrorReportingTestEventBlockedKind(N4):被出站护栏拦下(链路本地/metadata)
+// 必须单列 BLOCKED,而不是落进"不应出现"的 UNKNOWN —— 否则管理员分不清
+// "被安全策略拦"与"未知故障"。
+func TestErrorReportingTestEventBlockedKind(t *testing.T) {
+	inspection := ErrorReportingDSN{
+		Verdict:       ErrorReportingDSNAccept,
+		Host:          "169.254.169.254",
+		ProjectID:     "1",
+		PublicKey:     "key",
+		StoreEndpoint: "http://169.254.169.254/api/1/store/",
+	}
+	got := sendErrorReportingTestEvent(context.Background(), inspection, "test")
+	if got.Kind != ErrorReportingKindBlocked {
+		t.Fatalf("kind = %s (%s), want BLOCKED", got.Kind, got.Detail)
+	}
+	if !strings.Contains(got.Message, "护栏") {
+		t.Fatalf("message = %q, want the guard explanation", got.Message)
+	}
+}
+
+// firstNonLoopbackIPv4 返回本机第一个非回环 IPv4(没有就跳过用例)。
+func firstNonLoopbackIPv4(t *testing.T) string {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Skipf("InterfaceAddrs: %v", err)
+	}
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.To4() == nil || ipnet.IP.IsLoopback() || ipnet.IP.IsLinkLocalUnicast() {
+			continue
+		}
+		return ipnet.IP.To4().String()
+	}
+	t.Skip("no non-loopback IPv4 available")
+	return ""
+}
+
+// TestErrorReportingTestEventHidesDialedAddress(N6):R1 的**第二条通道** ——
+// dial 失败时错误文本里带着解析后的内网 IP。它只能进服务端日志,不许出现在响应里。
+// (已提交的那条用例走 `errorReportingTestClient` 重写 seam,只覆盖"目标响应体"通道。)
+func TestErrorReportingTestEventHidesDialedAddress(t *testing.T) {
+	ip := firstNonLoopbackIPv4(t)
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	// 私有地址在 DSN 校验里只告警(内网自建 GlitchTip 是主场景),所以能走到真实出站。
+	if err := serverstore.SetSetting(db, "web.error_reporting_dsn", "http://key@"+ip+":1/1"); err != nil {
+		t.Fatal(err)
+	}
+	w, out := adminReq(t, r, "POST", "/api/server/admin/gateway/error-reporting/test", `{}`, hdr)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	// 口径:调用方**自己填的** DSN 会出现在 detail.endpoint(合法回显,webadmin 也这么用),
+	// 因此这里钉的是"调用方没提供的信息"不许出现 —— dial 错误原文、连接结论、
+	// 以及除 endpoint 之外再冒出来的地址。
+	for _, forbidden := range []string{"dial tcp", "connection refused", "no such host", "connect:"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("dial error text leaked into the response (%q): %s", forbidden, body)
+		}
+	}
+	if n := strings.Count(body, ip); n > 1 {
+		t.Fatalf("dialed address appears %d times (only detail.endpoint may carry it): %s", n, body)
+	}
+	detail, _ := out["detail"].(map[string]any)
+	if detail["kind"] != ErrorReportingKindConnect {
+		t.Fatalf("detail = %v, want kind=CONNECT", detail)
+	}
+	if endpoint, _ := detail["endpoint"].(string); !strings.Contains(endpoint, ip) {
+		t.Fatalf("endpoint = %q, want the caller-supplied DSN host", endpoint)
 	}
 }

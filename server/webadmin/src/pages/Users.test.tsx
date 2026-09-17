@@ -33,6 +33,24 @@ beforeEach(() => {
 })
 
 describe('Users 用户管理页', () => {
+  it('列表返回前不渲染「暂无匹配用户」与「共 0 人」(审计 F7)', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/server/admin/users?page=')) {
+        await gate
+        return { users: [{ id: 1, username: 'alice', is_admin: false, status: 1, groups: [] }], total: 1, page: 1, size: 20 }
+      }
+      return {}
+    })
+    render(<MemoryRouter><Users /></MemoryRouter>)
+    expect(screen.queryByText('暂无匹配用户')).toBeNull()
+    expect(screen.getByText('加载中…')).toBeInTheDocument()
+    release()
+    expect(await screen.findByText('alice')).toBeInTheDocument()
+    expect(screen.getByText(/共 1 人/)).toBeInTheDocument()
+  })
+
   it('渲染用户表格:部门徽标与管理角色', async () => {
     render(<MemoryRouter><Users /></MemoryRouter>)
     expect(await screen.findByText('alice')).toBeInTheDocument()
