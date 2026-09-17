@@ -7,11 +7,14 @@
  * 展示 http://<key>@localhost:8000/1 这种永远不可能工作的 DSN（客户端会把事件发往自己的电脑）。
  *
  * 安全约定（硬性）：
- *   - 默认（无参数）= 只读：只发 HTTP GET + 只读 ssh 命令，绝不修改任何东西。
+ *   - 全程只读：只发 HTTP GET + 只读 ssh 命令，绝不修改任何东西。
  *   - --apply 只【打印】建议执行的生产命令，不代为执行；且必须同时给 --yes。
  *   - 本文件不含任何凭据、也不含任何生产地址的默认值：站点 / 主机 / ssh 目标 / 容器 /
- *     compose 目录**一律必须显式提供**（参数或环境变量）。缺站点或主机时**拒绝运行**
- *     （exit 2），绝不猜一个默认目标 —— 否则无参数运行就会对某个真实环境发起 ssh/HTTP。
+ *     compose 目录**一律必须显式提供**（参数或环境变量）。缺站点时**拒绝运行**（exit 2），
+ *     绝不猜一个默认目标 —— 否则就会对某个真实环境发起 ssh/HTTP。
+ *   - `--base-url` 必填；`--ssh` 可省（省了就是"只核查 API 侧"这一受支持的子集用法，
+ *     但会在结论里明确标注容器 env **未**核查，不冒充完整核查）。给了 `--ssh` 却连不上
+ *     ⇒ exit 2（"核查无法完成"），**不是** exit 0（"一切正常"）。
  *
  * 用法（`--base-url` 是必填项；无参数运行会打印用法并以 exit 2 退出，**不会**猜目标）：
  *   node scripts/glitchtip-ops-check.mjs --base-url <url> --ssh <user@host>   # 完整只读核查
@@ -48,12 +51,13 @@ import path from 'node:path';
 // 参数解析
 // ---------------------------------------------------------------------------
 
-const HELP = `glitchtip-ops-check.mjs — GlitchTip 自托管 DSN 域名核查（默认只读）
+const HELP = `glitchtip-ops-check.mjs — GlitchTip 自托管 DSN 域名核查（只读，不改任何东西）
 
-用法:
-  node scripts/glitchtip-ops-check.mjs [--json]           只读核查（默认模式）
-  node scripts/glitchtip-ops-check.mjs --apply --yes      打印人工修复命令（绝不代为执行）
-  node scripts/glitchtip-ops-check.mjs --help             本帮助
+用法（--base-url 必填；无参数运行打印本帮助并以 exit 2 退出）:
+  node scripts/glitchtip-ops-check.mjs --base-url <url> --ssh <user@host>   完整只读核查
+  node scripts/glitchtip-ops-check.mjs --base-url <url> [--json]           仅 API 侧核查
+  node scripts/glitchtip-ops-check.mjs --base-url <url> --apply --yes      打印人工修复命令（绝不代为执行）
+  node scripts/glitchtip-ops-check.mjs --help                             本帮助
 
 参数（站点与主机必须显式给出 —— 本脚本不含任何生产地址默认值）:
   --base-url <url>      GlitchTip 站点（★ 必填；env GLITCHTIP_BASE_URL）
@@ -74,7 +78,7 @@ const HELP = `glitchtip-ops-check.mjs — GlitchTip 自托管 DSN 域名核查�
 说明:
   只读模式只做三件事：GET GlitchTip keys API、只读 docker inspect、读本机 cookie jar 是否存在。
   --apply 生成的命令供【人类运维】复制执行（见 docs/deploy/2026-09-16-glitchtip-selfhost-operations.md）。
-  退出码: 0=无缺陷 1=发现缺陷 2=用法/凭据问题。`;
+  退出码: 0=无缺陷 1=发现缺陷 2=用法/缺凭据/无法完成核查。`;
 
 function parseArgs(argv) {
   const out = { flags: new Set(), values: new Map() };
@@ -288,17 +292,32 @@ function hostFromDomain(value) {
  *
  * jar 里可能同时存着多个站点的会话（浏览器导出的尤其如此）。不校验域列就等于
  * 把**任意站点**的会话 cookie 发给 `--base-url` 指定的主机，`--base-url` 可被
- * 命令行/环境变量改成攻击者域名 ⇒ 会话泄漏。规则与浏览器一致：
- * 精确主机匹配，或 jar 域是目标主机的**父域**（前导点写法）。IP 字面量只做精确匹配。
+ * 命令行/环境变量改成攻击者域名 ⇒ 会话泄漏。
+ *
+ * 规则（**从严**，宁可漏发也不误发）：
+ *   - 精确主机匹配（两种写法都算：`host` 与 `.host`）；
+ *   - 带**前导点**的 jar 域才是 Domain cookie，才可匹配其子域（curl 实测：
+ *     host-only 写无前导点、显式 `Domain=` 才写点 —— 所以只看有无点即可区分，
+ *     比浏览器略严：浏览器对无点域也做后缀匹配）；
+ *   - IP 字面量（IPv4/IPv6，含 `[::1]`）只做精确匹配，绝不做后缀匹配
+ *     （否则 `0.0.1` 会匹配到 `127.0.0.1`）。
+ *
+ * 已知边界（有意为之）：不做公共后缀表校验（jar 域 `com` 会匹配 `a.example.com`）；
+ * 该 jar 由运维自己生成、内容可信，从严方向不会造成误发。
  */
 function cookieDomainMatches(jarDomain, targetHost) {
   if (!jarDomain || !targetHost) return false;
-  const d = jarDomain.trim().toLowerCase().replace(/^\./, '');
-  const h = targetHost.trim().toLowerCase();
-  if (d === '') return false;
+  const raw = jarDomain.trim().toLowerCase();
+  const hadLeadingDot = raw.startsWith('.');
+  const d = raw.replace(/^\./, '');
+  // 目标主机可能是 URL 里的 IPv6 字面量（`[::1]`），去掉方括号再比对。
+  const h = targetHost.trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
+  if (d === '' || h === '') return false;
   if (d === h) return true;
-  // IP 字面量不做后缀匹配（避免 "0.0.1" 匹配到 "127.0.0.1" 之类的误判）。
+  // IP 字面量（v4 全数字点分 / 含冒号的 v6）不做任何后缀匹配。
   if (/^[0-9.]+$/.test(h) || h.includes(':')) return false;
+  // 只有 domain cookie（前导点）才允许匹配子域。
+  if (!hadLeadingDot) return false;
   return h.endsWith(`.${d}`);
 }
 
@@ -617,6 +636,6 @@ if (asJson) {
 }
 if (!asJson) {
   log('');
-  log(`退出码 ${report.exitCode}（0=无缺陷 1=发现缺陷 2=用法/凭据问题）`);
+  log(`退出码 ${report.exitCode}（0=无缺陷 1=发现缺陷 2=用法/缺凭据/无法完成核查）`);
 }
 process.exit(report.exitCode);
