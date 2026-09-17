@@ -3,7 +3,7 @@
  *
  * The scheduler is currently UI-only (its Host ledger + executor are not
  * reachable from a conversation). These tools let the model create, list,
- * enable/disable, and trigger scheduled jobs directly, sharing the exact
+ * enable/disable, trigger, and delete scheduled jobs directly, sharing the exact
  * same Host ledger and executor as the UI. A job action is a closed
  * discriminated union — the only kind is `agent` (spawn a fresh agent
  * session for a prompt) — never a command or shell line.
@@ -156,6 +156,36 @@ export function registerCronTools(ctx: Context, service: HostCronService, option
       }
       service.apply(`tool-${crypto.randomUUID()}`, { kind: 'run', jobId: args.jobId })
       return { started: true }
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'cron_remove',
+    description: '删除一个定时任务（连同它的执行历史，不可恢复）。任务正在执行时拒绝删除——先 cron_set_enabled 停用，或等本次执行结束后再删。',
+    parameters: {
+      jobId: { type: 'string', required: true, description: '定时任务 id' },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args, value) => [{
+        type: 'text',
+        text: copy('tool.removed', { jobId: (value as { jobId: string }).jobId }),
+      }],
+    },
+    async execute(args) {
+      // Owner filter, same contract as cron_run: a job the current account
+      // cannot see is reported as missing rather than deleted (the ledger
+      // re-checks ownership at apply time as well).
+      const before = service.listVisibleJobs().find(job => job.id === args.jobId)
+      if (before === undefined) throw new Error(copy('tool.jobMissing', { jobId: args.jobId }))
+      // A live execution is not cancelled by deleting its job (`settle()`
+      // tolerates the missing record), so the run would keep going while its
+      // history disappears. Refuse instead of losing the record silently.
+      if (before.executions.some(execution => execution.endedAt === undefined)) {
+        throw new Error(copy('tool.jobRunning', { jobId: args.jobId }))
+      }
+      service.apply(`tool-${crypto.randomUUID()}`, { kind: 'delete', jobId: args.jobId })
+      return { jobId: args.jobId, removed: true }
     },
   })))
 

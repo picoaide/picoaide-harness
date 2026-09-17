@@ -10,11 +10,22 @@ import { URL } from 'node:url'
 describe('cron tools surface', () => {
   const source = readFileSync(new URL('../src/tools.ts', import.meta.url), 'utf8')
 
-  it('registers cron_create / cron_list / cron_set_enabled / cron_run', () => {
+  it('registers cron_create / cron_list / cron_set_enabled / cron_run / cron_remove', () => {
     expect(source).toContain("name: 'cron_create'")
     expect(source).toContain("name: 'cron_list'")
     expect(source).toContain("name: 'cron_set_enabled'")
     expect(source).toContain("name: 'cron_run'")
+    expect(source).toContain("name: 'cron_remove'")
+  })
+
+  it('cron_remove routes through the ledger delete action with owner-filtered existence checks', () => {
+    // 2026-09-17：模型能建任务却不能删任务（真机自检报告）。删除必须走与 GUI
+    // 同一个 delete 动作，并且和 cron_run 一样先过 owner 过滤（看不见的任务按
+    // "不存在"处理，而不是泄露或误删）。
+    expect(source).toContain("kind: 'delete', jobId: args.jobId")
+    expect(source).toContain('service.listVisibleJobs()')
+    // 正在执行的任务拒删：delete 不取消在跑的会话，只让它的执行记录凭空消失。
+    expect(source).toContain('execution.endedAt === undefined')
   })
 
   it('has no command/shell/executable parameter fields', () => {
