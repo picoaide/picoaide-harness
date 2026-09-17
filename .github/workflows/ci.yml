@@ -30,8 +30,67 @@ env:
 # ============================================================================
 
 jobs:
+  # 2026-09-17:只改文档(docs/、site/、任意 *.md)时跳过全部重活。
+  # **不能**用 workflow 级 paths-ignore:那会让必需检查停在 Pending,受保护的 PR
+  # 永远合不了(官方 Troubleshooting required status checks 明说"不要对必需检查用
+  # 路径过滤")。改为「永远运行的 changes job + job 级 if」——被 if 跳过的 job 在
+  # 分支保护里按 Success 计(文档:success/skipped/neutral 都算通过)。
+  # 判据:diff 里出现任何 docs/ site/ *.md 之外的文件 => code=true;检测本身失败
+  # 也按 true 处理(fail-safe,宁可多跑)。
+  changes:
+    name: Detect docs-only change
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          # tag 一律按"有代码改动"处理:发布链必须完整跑(且 tag 的 before 常是全零)
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${GITHUB_SHA}"
+          fi
+          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          CHANGED="$(git diff --name-only "${BASE}" "${HEAD}" || true)"
+          if [[ -z "${CHANGED}" ]]; then
+            # 空 diff(空提交/强制推送后的未知状态)按有改动处理
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          DOCS_ONLY=1
+          while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            case "$f" in
+              docs/*|site/*|*.md) ;;
+              *) DOCS_ONLY=0; break ;;
+            esac
+          done <<< "${CHANGED}"
+          if [[ "${DOCS_ONLY}" == "1" ]]; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Report scope
+        run: echo "docs-only=${{ steps.scope.outputs.code == 'false' }}（code=${{ steps.scope.outputs.code }}）"
+
   gate:
     name: Gate (tests + workspace build)
+    needs: changes
+    # changes 失败(而非成功判定为 docs-only)时照跑:宁可多跑,不可漏测
+    if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -99,6 +158,8 @@ jobs:
 
   server:
     name: Go server
+    needs: changes
+    if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -214,7 +275,8 @@ jobs:
 
   desktop-linux:
     name: Desktop (Linux)
-    needs: gate
+    needs: [changes, gate]
+    if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -354,7 +416,8 @@ jobs:
 
   desktop-windows:
     name: Desktop (Windows installer)
-    needs: gate
+    needs: [changes, gate]
+    if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     timeout-minutes: 60
     permissions:
@@ -465,7 +528,8 @@ jobs:
   # 会让 Release 因 needs 里某颗被 skip 而连带 skip,2026-09-05 beta.1 实测)。
   desktop-macos:
     name: Desktop (macOS)
-    needs: gate
+    needs: [changes, gate]
+    if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'
     runs-on: macos-15
     # 330 → 360(GitHub 托管 runner 上限):正式 tag 上官方与每个渠道各自排队公证,
     # 共享同一份 job 预算(渠道数一多就要改成按序号矩阵拆 job,见 release runbook)。
@@ -819,8 +883,8 @@ jobs:
   # PR 场景:把本次提交的编译产物汇总评论到 PR(fork 分支 token 只读,跳过)。
   pr-summary:
     name: PR build artifacts summary
-    if: github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
-    needs: [desktop-linux, desktop-windows, desktop-macos, server]
+    if: always() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
+    needs: [changes, desktop-linux, desktop-windows, desktop-macos, server]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -831,10 +895,20 @@ jobs:
         with:
           script: |
             const marker = '<!-- picoaide-ci-artifacts -->'
+            const docsOnly = '${{ needs.changes.outputs.code }}' === 'false'
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
-            const body = [
-              marker,
-              '## CI 编译产物',
+            const body = docsOnly
+              ? [
+                  marker,
+                  '## 本次只改文档',
+                  '',
+                  '改动只涉及 `docs/`、`site/` 或 `*.md`，按 CI 规则（`changes` job）跳过了 Gate / Go server / 三平台打包；合并不受影响。',
+                  '',
+                  `规则见 \`.github/workflows/ci.yml\` 的 \`changes\` job；出现任何非文档文件即回到全量 CI。`,
+                ].join('\n')
+              : [
+                  marker,
+                  '## CI 编译产物',
               '',
               '本次提交的门禁（gate + server + 三平台打包）全部通过，可下载产物：',
               '',
@@ -844,7 +918,7 @@ jobs:
               `- Server: \`picoaide-server-linux-amd64\` — Go 服务端二进制`,
               '',
               `下载入口：[Actions 运行页 → Artifacts](${runUrl}#artifacts)`,
-            ].join('\n')
+                ].join('\n')
             const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
