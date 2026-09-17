@@ -75,13 +75,22 @@ export interface PromptViewProps {
 type DictKey = Extract<MemoryEvolveKey, `prompt.${string}`>
 
 /**
+ * 本视图的翻译函数：键收窄到 `prompt.` 域，**可选模板参数**。
+ *
+ * 2026-09-17（审计 i18n-core-1，与 CoIView 同一份实现）：此前返回类型只声明
+ * 一个形参，带参调用点传的第二个实参会被静默丢弃。本视图当前没有带参调用点，
+ * 属同类隐患，一并收紧以防下次迁移时复发。
+ */
+type Dict = (key: DictKey, params?: Record<string, unknown>) => string
+
+/**
  * 造一个「本视图键 → 当前语言文案」的查询函数。
  *
  * ⚠️ 必须每个组件各持一份（`const t = dict(props.t)`）：模块级常量/闭包在
  * 求值时早于插件 apply，那时 t 只能拿到默认语言，等于把界面语言钉死。
  */
-function dict(t: Translate): (key: DictKey) => string {
-  return (key) => t(key)
+function dict(t: Translate): Dict {
+  return (key, params) => t(key, params)
 }
 
 /** 统一错误文本。 */

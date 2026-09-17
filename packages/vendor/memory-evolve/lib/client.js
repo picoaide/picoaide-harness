@@ -4525,7 +4525,7 @@ function UiSettingsTabView(props) {
 var import_react11 = require("react");
 var import_jsx_runtime12 = require("react/jsx-runtime");
 function dict(t) {
-  return (key) => t(key);
+  return (key, params) => t(key, params);
 }
 var API2 = "/memory-evolve/api/coi";
 async function fetchJson(path, init) {
@@ -4978,7 +4978,7 @@ function TasksPane({ t: tt, dsSessionId }) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.launch.scope") }),
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("select", { className: "coi-select", value: scope, onChange: (e) => setScope(e.target.value), children: SCOPES.map((s) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: s, children: t(`scope.${s}`) }, s)) })
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("select", { className: "coi-select", value: scope, onChange: (e) => setScope(e.target.value), children: SCOPES.map((s) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: s, children: t(`coi.scope.${s}`) }, s)) })
           ] }),
           scope !== "temporary" && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: "coi-field", children: [
             /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "coi-label", children: t("coi.launch.session") }),
@@ -5293,7 +5293,7 @@ function SessionsPane({ t: tt, dsSessionId }) {
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "coi-toolbar", children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("select", { className: "coi-select", value: scopeFilter, onChange: (e) => setScopeFilter(e.target.value), title: t("coi.sessions.filterScope"), children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: "", children: t("coi.all") }),
-        SCOPES.map((s) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: s, children: t(`scope.${s}`) }, s))
+        SCOPES.map((s) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("option", { value: s, children: t(`coi.scope.${s}`) }, s))
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
         "input",
@@ -8209,7 +8209,7 @@ function BroadcastView(props) {
 var import_react17 = require("react");
 var import_jsx_runtime18 = require("react/jsx-runtime");
 function dict2(t) {
-  return (key) => t(key);
+  return (key, params) => t(key, params);
 }
 function errText3(err) {
   const message = err instanceof Error ? err.message : String(err);
