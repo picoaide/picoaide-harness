@@ -194,24 +194,47 @@ try {
     )
   }
 
-  console.log('\n【P2 边界】父域 cookie 应匹配子域（浏览器同源语义）')
+  console.log('\n【P2 边界】父域 cookie 必须匹配子域（须真正走到后缀分支，别被 IP 短路掩盖）')
   {
+    // 2026-09-17 证伪轮发现：原用例目标写成 IP 127.0.0.1，会在"IP 不做后缀匹配"
+    // 那行就返回，**永远走不到父域后缀分支** —— 把后缀分支删掉它照样绿（假绿）。
+    // 改为用 `foo.localhost` 这种非 IP 目标，并真起一个绑定它的 mock 来断言"真发出去了"。
     seenCookies.length = 0
-    const jar = join(work, 'parent.jar')
-    writeFileSync(jar, [
-      '# Netscape HTTP Cookie File',
-      '.localhost\tFALSE\t/\tFALSE\t1999999999\tsessionid\tPARENT_DOMAIN',
-      '',
-    ].join('\n'))
-    // 目标主机是 127.0.0.1（IP）⇒ 父域规则对 IP 不适用，应不发；
-    // 这条断言固定"IP 不做父域匹配"的语义，防止将来误放开。
-    await runScript(['--base-url', baseUrl, '--cookies', jar])
-    const last = seenCookies.at(-1)
-    check(
-      'IP 目标不做父域匹配 ⇒ 未发送',
-      last === null || last === undefined,
-      `实际收到 cookie=${String(last)}`,
-    )
+    const parentServer = createServer((req, res) => {
+      seenCookies.push(req.headers.cookie ?? null)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify([{
+        id: '1',
+        dsn: { public: 'https://deadbeefdeadbeefdeadbeefdeadbeef@glitchtip.example.com/1' },
+        projectId: 1,
+      }]))
+    })
+    let parentOk = true
+    try {
+      parentServer.listen(0, '127.0.0.1')
+      await once(parentServer, 'listening')
+      const { port: pPort } = parentServer.address()
+      const jar = join(work, 'parent2.jar')
+      // 目标主机写 `${pPort}` 所在的 loopback 不行（是 IP）——用 host 别名：
+      // `foo.localhost` 在多数解析器里指向 127.0.0.1，正是父域 `.localhost` 的子域。
+      writeFileSync(jar, [
+        '# Netscape HTTP Cookie File',
+        '.localhost\tTRUE\t/\tFALSE\t1999999999\tsessionid\tPARENT_DOMAIN',
+        '',
+      ].join('\n'))
+      await runScript(['--base-url', `http://foo.localhost:${pPort}`, '--cookies', jar])
+      const last = seenCookies.at(-1)
+      check(
+        '父域 .localhost 匹配子域 foo.localhost ⇒ 真发出 cookie',
+        /sessionid=PARENT_DOMAIN/.test(String(last)),
+        `实际收到 cookie=${String(last)}`,
+      )
+    } catch {
+      parentOk = false
+      check('父域用例可运行（foo.localhost 可解析）', false, '无法建立父域场景')
+    } finally {
+      if (parentOk) parentServer.close()
+    }
   }
 
   // ---------------------------------------------------------------- JSON 契约
