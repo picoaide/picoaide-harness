@@ -280,6 +280,10 @@ export default function UsageBalance() {
 
   const st = summary?.status
   const monthly = summary?.settings.monthly_amount ?? 0
+  // 2026-09-17 审计（P3 升级为真缺陷）：策略卡在 summary 落地前就渲染出可写控件，
+  // 而 draft* 是**空初值**；此时点「保存」会把空额度当成 0 提交（PUT /balance
+  // monthly_amount=0），等于一次误清空。加载期间一律禁用写面。
+  const writeLocked = !canWrite || loading
 
   return (
     <div className="space-y-6">
@@ -310,10 +314,10 @@ export default function UsageBalance() {
           </div>
           {canWrite && (
             <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={grantNow} disabled={saving || monthly <= 0}>
+              <Button variant="outline" onClick={grantNow} disabled={saving || loading || monthly <= 0}>
                 <Gift className="mr-1 h-4 w-4" />立即补发本月
               </Button>
-              <Button onClick={saveSettings} disabled={saving}>
+              <Button onClick={saveSettings} disabled={saving || loading}>
                 {saving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Check className="mr-1 h-4 w-4" />}保存
               </Button>
             </div>
@@ -323,7 +327,7 @@ export default function UsageBalance() {
           <div className="rounded-md border p-3">
             <div className="flex items-center justify-between">
               <Label htmlFor="bal-enabled" className="text-sm font-medium">余额闸门</Label>
-              <Switch id="bal-enabled" checked={draftEnabled} disabled={!canWrite} onCheckedChange={setDraftEnabled} />
+              <Switch id="bal-enabled" checked={draftEnabled} disabled={writeLocked} onCheckedChange={setDraftEnabled} />
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
               {draftEnabled
@@ -334,13 +338,13 @@ export default function UsageBalance() {
           <div className="rounded-md border p-3">
             <div className="text-sm font-medium">发放方式</div>
             <div className="mt-2 grid grid-cols-2 gap-2">
-              <button type="button" disabled={!canWrite} onClick={() => setDraftMode('add')}
-                className={cn('rounded-md border p-2 text-left text-xs', draftMode === 'add' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50', !canWrite && 'cursor-not-allowed opacity-60')}>
+              <button type="button" disabled={writeLocked} onClick={() => setDraftMode('add')}
+                className={cn('rounded-md border p-2 text-left text-xs', draftMode === 'add' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50', writeLocked && 'cursor-not-allowed opacity-60')}>
                 <div className="text-sm font-medium">累加</div>
                 <div className="text-muted-foreground">余额 + 月额度</div>
               </button>
-              <button type="button" disabled={!canWrite} onClick={() => setDraftMode('cover')}
-                className={cn('rounded-md border p-2 text-left text-xs', draftMode === 'cover' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50', !canWrite && 'cursor-not-allowed opacity-60')}>
+              <button type="button" disabled={writeLocked} onClick={() => setDraftMode('cover')}
+                className={cn('rounded-md border p-2 text-left text-xs', draftMode === 'cover' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50', writeLocked && 'cursor-not-allowed opacity-60')}>
                 <div className="text-sm font-medium">覆盖</div>
                 <div className="text-muted-foreground">清零后重置为月额度</div>
               </button>
@@ -352,7 +356,7 @@ export default function UsageBalance() {
           <div className="rounded-md border p-3">
             <Label htmlFor="bal-amount" className="text-sm font-medium">每人每月额度(元)</Label>
             <Input id="bal-amount" className="mt-2" inputMode="decimal" placeholder="例如 100"
-              value={draftAmount} readOnly={!canWrite} disabled={!canWrite}
+              value={draftAmount} readOnly={writeLocked} disabled={writeLocked}
               onChange={(e) => setDraftAmount(e.target.value)} />
             {canWrite && (
               <div className="mt-2 flex flex-wrap gap-1.5">

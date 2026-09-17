@@ -221,6 +221,25 @@ describe('用量中心 · 请求日志', () => {
 })
 
 describe('用量中心 · 余额', () => {
+  it('策略未加载完时写面禁用(避免把空额度当 0 提交)', async () => {
+    // 2026-09-17 审计 P3→真缺陷：策略卡在 summary 落地前就渲染可写控件，而 draft*
+    // 是空初值；此时点保存会 PUT monthly_amount=0（误清空）。加载期间写面必须锁。
+    let releaseBalance!: () => void
+    const gate = new Promise<void>((resolve) => { releaseBalance = resolve })
+    const base = mockRequest.getMockImplementation()!
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/balance' && (init?.method ?? 'GET') === 'GET') {
+        await gate
+      }
+      return base(path, init)
+    })
+    renderAt('/usage', <Balance />)
+    expect(screen.getByRole('button', { name: /保存/ })).toBeDisabled()
+    expect(screen.getByLabelText('每人每月额度(元)')).toBeDisabled()
+    releaseBalance()
+    await waitFor(() => expect(screen.getByRole('button', { name: /保存/ })).toBeEnabled())
+  })
+
   it('展示发放策略与员工余额,调整弹窗实时预览并提交', async () => {
     renderAt('/usage', <Balance />)
     // 发放策略卡：标题在数据落地前就渲染（Balance.tsx 静态 CardTitle），额度值必须自己等。

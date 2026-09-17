@@ -55,6 +55,27 @@ beforeEach(() => {
 })
 
 describe('ErrorMonitoring 错误监控页', () => {
+  it('客户端状态返回前不渲染计数(不闪"0 台")', async () => {
+    // 2026-09-17 审计 P3：计数块原先无条件渲染 `?? 0`，数据到达前先闪一遍
+    // 「已启用上报: 0 台」——与本卡片自己的"绝不把没有数据渲染成一切正常"冲突。
+    let releaseClients!: () => void
+    const clientsGate = new Promise<void>((resolve) => { releaseClients = resolve })
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.endsWith('/gateway/error-reporting/clients')) {
+        await clientsGate
+        return CLIENTS as any
+      }
+      if (path.endsWith('/gateway')) return GATEWAY as any
+      throw new Error(`unexpected path: ${path}`)
+    })
+    render(<ErrorMonitoring />)
+    expect(await screen.findByText(/客户端上报状态加载中/)).toBeInTheDocument()
+    // 关键断言：加载期间**不得**出现任何计数(尤其是 0 台)。
+    expect(screen.queryByText(/已启用上报:/)).toBeNull()
+    releaseClients()
+    expect(await screen.findByText(/已启用上报:/)).toBeInTheDocument()
+  })
+
   it('回填错误监控域配置(不含网关其他字段)', async () => {
     render(<ErrorMonitoring />)
     expect(await screen.findByLabelText(DSN_LABEL)).toHaveValue(GATEWAY.error_reporting_dsn)
