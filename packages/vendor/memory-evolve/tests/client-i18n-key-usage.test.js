@@ -110,7 +110,9 @@ function literalItems(text) {
  *   3. `const NAME = ['a','b']`（裸数组）
  *   4. `const NAME = new Set(['a','b'])`（`.has(x)` 守卫，见 tupleColumns 之外的 Set 用法）
  */
+const MEMBER_DOMAINS = { objectLiteral: [], objectArray: [] }
 function valueDomains(source) {
+  const memberDomains = MEMBER_DOMAINS
   const map = new Map()
   // 形态 1–3：具名数组（`as const` / 显式类型 / 裸数组都收）。
   //
@@ -148,20 +150,23 @@ function valueDomains(source) {
       else if (source[i] === '}' && (depth -= 1) === 0) { end = i; break }
     }
     if (end === -1) continue
-    if (!/^\s*as\s+const/u.test(source.slice(end + 1, end + 20))) continue
+    // 2026-09-17 第 9 轮 R9-i18n-1：**不再硬要求 `as const`**。
+    // `const X: Record<T, {key:string}> = { … }`（STATUS_META / SEVERITY_META /
+    // TYPE_LABEL_KEYS）同样持有 i18n 键，却因缺 `as const` 从未进表 ⇒ 14 个活键静默。
+    // 只排除"明显不是映射表"的紧跟 token（函数调用/运算符），其余一律收。
     // 只收"值是 i18n 键"的成员（含 `.` 或 `_`）—— 避免把 `{ id: 'guide', key: 'coi.guide' }`
     // 里的 id 值混进值域。
     const items = [...source.slice(open + 1, end).matchAll(/[:{]\s*'([^']+)'|[:{]\s*"([^"]+)"/gu)]
       .map((x) => x[1] ?? x[2])
       .filter((v) => /[._]/.test(v))
-    if (items.length > 0 && !map.has(head[1])) map.set(head[1], items)
+    if (items.length > 0 && !map.has(head[1])) { map.set(head[1], items); memberDomains.objectLiteral.push(head[1]) }
   }
   // 形态 6：对象数组（`[{ key: 'a' }, { key: 'b' }]`）—— 取出每个对象的 `key` 字段。
   for (const m of source.matchAll(
     /const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*\[([\s\S]*?)\]\s*(?:as\s+const|satisfies[^\n]*)?/gu,
   )) {
     const keys = [...m[2].matchAll(/\{[^{}]*\bkey\s*:\s*'([^']+)'/gu)].map((x) => x[1])
-    if (keys.length > 0 && !map.has(m[1])) map.set(m[1], keys)
+    if (keys.length > 0 && !map.has(m[1])) { map.set(m[1], keys); memberDomains.objectArray.push(m[1]) }
   }
   return map
 }
@@ -221,12 +226,20 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
   let enumerated = 0
   let enumeratedNamed = 0
   let prefixFallbacks = 0
-  const srcTotals = { named: 0, inline: 0, set: 0, tuple: 0, callback: 0, forOf: 0 }
+  const srcTotals = { named: 0, inline: 0, set: 0, tuple: 0, callback: 0, forOf: 0, member: 0, objectArray: 0 }
   /** 键缺失判定：返回缺失的语言标签，或 null（两侧都在）。 */
   const missing = (key) => (!ZH_KEYS.has(key) ? 'zh' : !EN_KEYS.has(key) ? 'en' : null)
   for (const { relative: file, source } of SOURCES) {
     // 统一值域表（2026-09-17 第 6 轮 R6-i18n-1：识别与取值解耦，不再按形态打补丁）
+    // ★ 每个文件重置（2026-09-17 第 9 轮自查发现：原来声明在循环外 ⇒ 跨文件累加，
+    // 且 `srcTotals[k] += src[k]` 每次把已累计值再加一遍 ⇒ 二次膨胀到 628，
+    // 于是"某类收集被打断"根本触发不了下限 —— 元断言形同虚设）。
+    const src = { named: 0, inline: 0, set: 0, tuple: 0, callback: 0, forOf: 0, member: 0, objectArray: 0 }
+    MEMBER_DOMAINS.objectLiteral.length = 0
+    MEMBER_DOMAINS.objectArray.length = 0
     const domains = valueDomains(source)
+    src.member = MEMBER_DOMAINS.objectLiteral.length
+    src.objectArray = MEMBER_DOMAINS.objectArray.length
     // 洞 → 可枚举取值。三种来源合并到一张表：
     //   ① 洞本身是变量名，且该变量有静态值域（数组/Set）
     //   ② 洞是 `.map()`/`.forEach()` 的回调形参 ⇒ 用被遍历变量的值域
@@ -236,7 +249,6 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
     // 第 6 轮只钉总数 ⇒ 本提交的"解耦"丢掉了内联数组识别（9 个键失去覆盖），
     // 而总数反而从 21 涨到 36（新纳入 TARGETS/BOARD_QUADRANTS/ENTRY_KEYS 补上了数量）
     // ⇒ 数量型元断言完全看不出来。按来源钉死才能防下一次"重构顺手删掉一段"。
-    const src = { named: 0, inline: 0, set: 0, tuple: 0, callback: 0, forOf: 0 }
     for (const [name, items] of domains) {
       holeDomains.set(name, items)
       src.named += 1
@@ -310,6 +322,18 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
       // 属性访问形态 `x.y`：把最后一段也登记（`activeRow.key` ⇒ `key`）
       const last = target.split('.').pop()
       if (last !== target && !holeDomains.has(last)) holeDomains.set(last, items)
+    }
+    // ★ 别名解析（2026-09-17 第 9 轮 R9-i18n-1）：`const meta = STATUS_META[status]`
+    // 之后再 `t(meta.key)` —— 消费端按**基对象名**查表，所以必须把别名的值域接上。
+    // 支持 `const A = BASE[...]` / `const A = BASE.x` / `let A = BASE[...]`（同文件内）。
+    // 迭代两轮以覆盖 `a = b = BASE[x]` 这类链式别名。
+    for (let pass = 0; pass < 2; pass += 1) {
+      for (const m of source.matchAll(
+        /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*([A-Za-z_$][\w$]*)\s*(?:\[[^\]]*\]|\.[A-Za-z_$][\w$]*)/gu,
+      )) {
+        const items = holeDomains.get(m[2]) ?? domains.get(m[2])
+        if (items !== undefined && !holeDomains.has(m[1])) holeDomains.set(m[1], items)
+      }
     }
     // ★ 宿主 side 值域（2026-09-17 第 7 轮 R7-i18n-2）：`memoryTab.desc.${activeRow.key}`
     // 的 `activeRow.key` 值域来自 **lib/memory-tab.js 的硬编码 rows**（9 项，含 `agents`）。
@@ -408,7 +432,7 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
   // ★ 来源级下限（2026-09-17 第 7 轮 R7-i18n-3）：只钉总数会被"数量替换"掩盖 ——
   // 第 6 轮的解耦丢掉了**内联数组**识别（9 个键失去覆盖），而总数反而从 21 涨到 36。
   // 每个来源必须各自有下限，删掉任一段收集代码都会立刻红。
-  const SOURCE_FLOORS = { named: 12, inline: 3, set: 0, tuple: 1, callback: 3, forOf: 0 }
+  const SOURCE_FLOORS = { named: 12, inline: 3, set: 0, tuple: 1, callback: 3, forOf: 0, member: 4, objectArray: 1 }
   const starved = Object.entries(SOURCE_FLOORS)
     .filter(([k, floor]) => srcTotals[k] < floor)
     .map(([k, floor]) => `${k}=${srcTotals[k]} < ${floor}`)
