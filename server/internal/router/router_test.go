@@ -108,6 +108,11 @@ func TestNamespaces(t *testing.T) {
 		"POST " + nsServer + "/admin/agents",
 		"GET " + nsServer + "/admin/portal",
 		"GET " + nsServer + "/admin/connectors",
+		// SG-4(审计 2026-09-17):组织共享技能/智能体的上下架开关必须成对存在 ——
+		// 读侧两侧都由 apps.enabled 闸门控制,写侧只剩技能一侧时,下线一个组织
+		// 智能体只能走软删(名字与版本号永久占位)。
+		"PUT " + nsServer + "/admin/shared-skills/:name/enabled",
+		"PUT " + nsServer + "/admin/agent-presets/:name/enabled",
 		// 2026-08-31: 按模型并发状态(当前/峰值/目标,扩容申请)
 		"GET " + nsServer + "/admin/concurrency",
 		"PUT " + nsServer + "/admin/apps/:kind/:app_id/owner",

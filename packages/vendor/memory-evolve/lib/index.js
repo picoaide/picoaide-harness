@@ -91,7 +91,13 @@ export const DEFAULTS = {
   // 第 2 轮起提醒。可在「Memory Evolve 设置 → 配置」打开。
   perTurnWriteGuard: false,  // false（默认）= 不计数、不提醒；true = 启用看门狗
   writeGuardThreshold: 2,    // 连续 N 轮未写入触发提醒（正整数，>=1）
-  keyBranchFilter: true,      // static (config.yaml only): inject only KEY entries whose branch scope matches the session's git branch
+  // key 轨分支过滤（缺省开）：快照注入 / COI·外部执行器注入 / list / expand
+  // 四处同一规则——无分支标记的条目对所有分支可见，带 [branch:x] 标记的只在
+  // x 分支可见。S13-1/S14-2（2026-09-17 审计）与 S13-1 复核（2026-09-17）：
+  // 它已是运行时键（设置面板可切换、落盘 plugin-state.json），四处都必须读
+  // getRuntime() 的活值（renderSnapshot 收到的是 runtime 覆盖对象；
+  // buildMemoryContext 由接线处显式传活值）。
+  keyBranchFilter: true,      // runtime-overridable (panel switch; persisted to plugin-state.json)
   // key 轨渐进式披露（2026-08-15）：摘要注入减少 token，按需展开加载全文
   keyProgressiveDisclosure: 'off', // 'auto' | 'off' | 'on' — auto=小数据量全量注入、大数据量摘要注入；off=始终全量（默认）；on=始终摘要
   keyFullInjectThreshold: 3,  // auto 模式：条目数 ≤ 此值 → 全量注入
@@ -1453,7 +1459,12 @@ export function memoryTool(ctx, config, store, queue, getRuntime, archive, write
             // 既不会注入、也 expand 不出来，属于"看得见用不上"的越界视图。
             // 非 git 仓库 / 取不到分支 / keyBranchFilter=false → 不过滤（与
             // 注入侧同样保守：宁可多给，不静默隐藏）。
-            if (target === 'key' && config.keyBranchFilter !== false) {
+            // S13-1/S14-2（2026-09-17 审计）：keyBranchFilter 已是**运行时键**
+            // （设置面板可切换、落盘 plugin-state.json），这里必须读
+            // getRuntime() 的活值——config 是 apply 期解析的静态行配置，面板
+            // 关掉开关后它仍是 true，于是 list 照旧过滤、与「关掉后三处都不再
+            // 过滤」的面板提示相反（开关成了假逃生口）。
+            if (target === 'key' && getRuntime().keyBranchFilter !== false) {
               const explicit = args.branch !== undefined && String(args.branch).trim() !== ''
                 ? String(args.branch).trim()
                 : undefined
@@ -1634,7 +1645,9 @@ export function memoryTool(ctx, config, store, queue, getRuntime, archive, write
             // 分支作用域过滤（审查修复）：与快照注入/key 轨 list 同一规则——
             // 只有当前分支可见的条目（无标记=全部 + [branch:…] 含当前分支）
             // 才能 expand，防止分支 A 的会话 expand 出仅限分支 B 的条目。
-            const branch = config.keyBranchFilter !== false ? gitBranch(cwd) : undefined
+            // S13-1/S14-2（2026-09-17 审计）：读运行时活值（同 list 的修复），
+            // 否则面板关掉开关后 expand 仍过滤，别的分支的条目 expand 不出来。
+            const branch = getRuntime().keyBranchFilter !== false ? gitBranch(cwd) : undefined
             let keyEntries = store.entriesOf('key', keyAgent)
             if (branch !== undefined) {
               keyEntries = keyEntries.filter((entry) => {
@@ -1671,8 +1684,8 @@ export function memoryTool(ctx, config, store, queue, getRuntime, archive, write
 /**
  * 构建 COI 任务注入的记忆上下文文本（与 DSH 会话注入同源同规则）：
  *   长期记忆 + 用户档案（所有任务注入）；项目关键记忆仅在有 cwd 时注入，
- *   且按 git 分支过滤（与 keyBranchFilter 一致：只注入无标记或覆盖当前
- *   分支的条目）。**不注入 AGENTS.md**（用户决策：DSH 的每轮纪律/开发规则
+ *   且按 git 分支过滤（只注入无标记或覆盖当前分支的条目）。
+ *   **不注入 AGENTS.md**（用户决策：DSH 的每轮纪律/开发规则
  *   只约束 DSH 主模型，不应强加给外部 COI）。项目日志/每日日志不注入
  *   （流水太长，与 DSH 快照策略一致）。
  *   tracks 可只取部分轨（'memory'/'user'/'key' 子集，COI 调度由 AI 经
@@ -1681,11 +1694,19 @@ export function memoryTool(ctx, config, store, queue, getRuntime, archive, write
  *   这些条目只适用于 DSH 自身（DSH 纪律/规则/架构类事实），外部执行器
  *   不必遵循 DSH 规则，注入只会让它们困惑。COI 调度注入时传 true；DSH
  *   自身快照注入不传（标记条目照常注入 DSH）。
+ *   keyBranchFilter=false 时**完全不过滤**（无标记/带标记条目都注入，且不注入
+ *   分支名）——这是本函数**第 4 处** key 分支过滤面（S13-1 复核，2026-09-17）：
+ *   此前这里硬编码过滤、不读运行时开关，用户关掉诊断开关后 COI/外部执行器仍
+ *   静默看不到别的分支的 key，与「关掉后三处都不过滤」的面板承诺不符。调用方
+ *   必须传 `getRuntime().keyBranchFilter !== false` 的活值（见 apply 的接线），
+ *   与快照注入 / list / expand 三处同规则；本函数不做运行时读取，保持纯函数。
+ *   任务自己声明的 branch（scope=project 可挂 branch）优先于开关：显式声明即
+ *   显式意图，仍然生效。
  * @param {MemoryStore} store - 记忆 store。
- * @param {object} [opts] - { cwd, branch, tracks, excludeDshOnly }。
+ * @param {object} [opts] - { cwd, branch, tracks, excludeDshOnly, keyBranchFilter }。
  * @returns {string} 拼接好的上下文文本（无内容返回空串）。
  */
-export function buildMemoryContext(store, { cwd, branch: declaredBranch, tracks, excludeDshOnly } = {}) {
+export function buildMemoryContext(store, { cwd, branch: declaredBranch, tracks, excludeDshOnly, keyBranchFilter } = {}) {
   // tracks 缺省=全部三轨（兼容快照等既有调用方）；COI 调度时由 AI 经
   // injectTracks 参数自主选择（scope 与注入无关，任何层级都能选轨注入）
   const want = (track) => tracks === undefined || tracks.includes(track)
@@ -1707,8 +1728,12 @@ export function buildMemoryContext(store, { cwd, branch: declaredBranch, tracks,
     // 分支过滤：优先用任务声明的分支（scope=project 可挂 branch，如
     // feat/tag-question-paper）；任务未声明时回退到 cwd 目录当前 checkout
     // 的分支（git branch --show-current，与 DSH 会话注入同规则）。非 git
-    // 仓库/获取失败 → 全部注入。
-    const branch = declaredBranch ?? gitBranch(cwd)
+    // 仓库/获取失败 → 全部注入。keyBranchFilter=false（运行时诊断开关，调用方
+    // 传活值）→ 连"当前分支"都不取，条目与分支名一并按"不过滤"注入（S13-1
+    // 复核，2026-09-17：与快照/list/expand 三处同规则）。显式声明的 branch
+    // 不受开关影响：任务声明了分支就是显式意图（仍按它过滤并注入分支名）。
+    const declared = declaredBranch ?? undefined
+    const branch = declared ?? (keyBranchFilter === false ? undefined : gitBranch(cwd))
     if (branch !== undefined) {
       keyEntries = keyEntries.filter((entry) => {
         const scope = parseEntryBranches(entry)
@@ -2166,8 +2191,17 @@ export function apply(ctx, rawConfig = {}) {
           resolveCwd: (sessionId) => ctx.get('agents')?.get?.(sessionId)?.session?.header?.cwd,
           // 记忆上下文注入（读 memory/user/key；tracks 由 AI 经 injectTracks
           // 自主选择）。excludeDshOnly=true：跳过带 [dsh-only] 标记的条目——
-          // 外部执行器不是 DSH，不必遵循 DSH 纪律/规则，注入只会让其困惑
-          memoryContext: ({ cwd, branch, tracks }) => buildMemoryContext(store, { cwd, branch, tracks, excludeDshOnly: true }),
+          // 外部执行器不是 DSH，不必遵循 DSH 纪律/规则，注入只会让其困惑。
+          // keyBranchFilter 读 getRuntime() 活值（S13-1 复核，2026-09-17）：
+          // 这是第 4 处 key 分支过滤面，必须与快照/list/expand 一样跟随设置
+          // 面板的运行时开关，否则关掉开关后 COI 注入仍在偷偷过滤。
+          memoryContext: ({ cwd, branch, tracks }) => buildMemoryContext(store, {
+            cwd,
+            branch,
+            tracks,
+            excludeDshOnly: true,
+            keyBranchFilter: getRuntime().keyBranchFilter !== false,
+          }),
           // 渠道通知回调（coiNotifyChannels 自动通知）：notify 模块未启用时
           // ref 为 null → 可选链返回 undefined，COI 侧静默跳过
           sendChannelNotify: (opts) => notifySendRef?.(opts),

@@ -83,6 +83,7 @@ export function resetErrorReportingStatusForTest(): void {
   heartbeatSent = false
   disabledWarned = false
   reportedStatusKeys.clear()
+  pendingStatusKeys.clear()
 }
 
 /** 只取主机名,绝不记录/上报完整 DSN(public key 也没有出现在日志里的必要)。 */
@@ -404,30 +405,91 @@ export interface RendererErrorPayload {
   url?: string
 }
 
-/** 状态上报去重键(每进程每个 state+reason 只报一次;登出登入不重复)。 */
+/**
+ * 状态上报去重键(键 = **整份载荷的身份**,不是 state+reason)。
+ *
+ * S07-02(2026-09-17 审计):旧键只含 state+reason,于是 (a) 登出后登录**另一台**
+ * 服务器(登录闸只在已登录时拒绝换服务器)时,新服务器管理端一行都收不到;
+ * (b) 管理员改了 DSN/等级时,载荷(dsn_host/level,服务端按用户 upsert 的那一行)
+ * 变了却仍被判成"已报过" ⇒ 后台永远显示旧值。两者都是本功能要消灭的盲区,
+ * 所以键必须带上 serverURL 与载荷的判别字段。
+ *
+ * 生产路径**不需要**额外的 reset:换服务器/换配置都会算出新键(见上);
+ * 登出后故意保留已成功键 —— 同一台服务器的同一状态在重新登录时不重报
+ * (原注释"登出登入不重复"的降噪语义保留)。
+ */
 const reportedStatusKeys = new Set<string>()
 
-/** 上报状态键:state + reason 前缀(reason 变化才是新信息)。 */
-function statusReportKey(value: ErrorReportingState): string {
-  const reason = 'reason' in value ? value.reason.slice(0, 80) : ''
-  return `${value.state}#${reason}`
+/**
+ * 在飞键:同一键并发上报时只发一次 POST。
+ *
+ * 与 `reportedStatusKeys` 分开的原因(S07-02):已成功键只能在 **POST 成功之后**
+ * 才写入,否则一次瞬时失败(5xx / 超时 / 服务端 10 次每分的遥测限流 429)就会让
+ * 这台机器在**本进程余下的全部时间里**从管理端消失;而"成功后才写"必须配一个
+ * 在飞集合,才能继续挡住并发重复 POST。失败时从本集合摘除 ⇒ 下一次会话变更
+ * 同步(`subscribeSession`,事件驱动、不是循环)重试一次,不会有重试风暴。
+ */
+const pendingStatusKeys = new Set<string>()
+
+/** 已成功键上限(淘汰最旧):键含服务器地址与 DSN,病态服务端/多次切换不能无限增长。 */
+const MAX_REPORTED_STATUS_KEYS = 64
+
+/**
+ * 上报者身份(键里的身份维度)。
+ *
+ * S07-02 复核(2026-09-17,P3):服务端那行状态是**按用户** upsert 的
+ * (`server/internal/telemetry/errorreporting.go` 用认证用户 id,管理端列表另
+ * select `users.username`),所以键必须带上登录身份 —— 缺了它,同一台机器同一台
+ * 服务器上换用户登录时载荷逐字节相同、键也不变,第二个人的上报被第一个人的键
+ * 挡住,管理端永远只有前一个人的行(可执行探针:alice 报完 bob 再登录只发出
+ * 1 条 POST,应发 2 条)。
+ *
+ * 身份缺失(旧服务端/畸形登录响应)不能与任何真实用户名同键,也不能被整条丢弃:
+ * 用带 NUL 的哨兵(合法用户名不含控制字符),匿名载荷自身仍按同键降噪。
+ */
+function sessionIdentity(session: Session): string {
+  const username = typeof session.username === 'string' ? session.username.trim() : ''
+  return username === '' ? '\u0000anonymous' : username
+}
+
+/** 上报状态键:服务器地址 + 用户身份 + state + reason + dsn_host + level(见上)。 */
+function statusReportKey(session: Session, value: ErrorReportingState): string {
+  // reason 的截断长度必须与 POST 体一致(体是 slice(0, 200)):键 = 整份载荷的
+  // 身份,键里截得更短会让第 80 字符之后才不同的两份载荷塌成同一个键。
+  const reason = 'reason' in value ? value.reason.slice(0, 200) : ''
+  const dsnHost = 'dsnHost' in value ? value.dsnHost ?? '' : ''
+  const level = 'level' in value ? value.level : ''
+  return `${session.serverURL}#${sessionIdentity(session)}#${value.state}#${reason}#${dsnHost}#${level}`
+}
+
+/** 登记"已成功上报";超过上限淘汰最旧(Set 保插入序)。 */
+function rememberReportedStatusKey(key: string): void {
+  pendingStatusKeys.delete(key)
+  reportedStatusKeys.add(key)
+  while (reportedStatusKeys.size > MAX_REPORTED_STATUS_KEYS) {
+    const oldest = reportedStatusKeys.values().next().value
+    if (oldest === undefined) return
+    reportedStatusKeys.delete(oldest)
+  }
 }
 
 /**
  * 把当前错误上报状态回传服务端(P1-3/D7)。
  *
- * 尽力而为:失败只 `logger.debug`,**绝不重试、绝不阻塞、绝不影响宿主**
- * (与 skill-telemetry 的非致命语义一致)。上报体只含 state/reason/dsn_host/
- * level/release,**不含完整 DSN、不含 public key**。
+ * 尽力而为:本次调用内**绝不重试、绝不阻塞、绝不影响宿主**
+ * (与 skill-telemetry 的非致命语义一致);失败只是摘掉在飞键,留给下一次会话
+ * 变更同步重试一次(S07-02)。上报体只含 state/reason/dsn_host/level/release,
+ * **不含完整 DSN、不含 public key**。
  */
 export async function reportErrorReportingStatus(
   session: Session | null,
   value: ErrorReportingState,
 ): Promise<boolean> {
   if (session === null) return false
-  const key = statusReportKey(value)
-  if (reportedStatusKeys.has(key)) return false
-  reportedStatusKeys.add(key)
+  const key = statusReportKey(session, value)
+  // 已成功或已在飞 ⇒ 不重复发。
+  if (reportedStatusKeys.has(key) || pendingStatusKeys.has(key)) return false
+  pendingStatusKeys.add(key)
   const body: Record<string, string> = { state: value.state, release: `picoaide-desktop@${DESKTOP_VERSION}` }
   if ('reason' in value && value.reason !== '') body.reason = value.reason.slice(0, 200)
   if ('dsnHost' in value && value.dsnHost !== undefined && value.dsnHost !== '') body.dsn_host = value.dsnHost
@@ -439,9 +501,12 @@ export async function reportErrorReportingStatus(
       body,
       timeoutMs: 5000,
     })
+    // ★ S07-02:只有**成功**才登记为已报(旧实现在 POST 之前就入集)。
+    rememberReportedStatusKey(key)
     return true
   } catch {
-    // 状态上报失败不能产生任何用户可见影响;key 已入集,不重试风暴。
+    // 状态上报失败不能产生任何用户可见影响;摘掉在飞键 ⇒ 下一次会话变更重试一次。
+    pendingStatusKeys.delete(key)
     return false
   }
 }

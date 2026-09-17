@@ -10,9 +10,25 @@
  * 同步以**整目录**为单位（SKILL.md + scripts/ 等辅助文件随技能一起走）；
  * 被禁用的技能文件仍存在，只是不注入模型。
  */
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import { writeFileAtomicSafeAt, writeTargetRefusedError } from '../sync/filesets.js'
+
+/**
+ * 换入过程中的两个临时目录名（都与目标同父目录，同一文件系统才能 rename）：
+ *   - `<destDir>.staging-<pid>-<ts>`：新内容先全部写这里，写完整体换入；
+ *   - `<destDir>.old-<pid>-<ts>`：旧目录先原子改名到这里"旁置"，换入成功后再删。
+ * 两个名字都带 pid/时间戳：既是并发同步的隔离（互不覆盖），也是崩溃残留的
+ * 清扫判据（见 {@link sweepStaleSwapDirs}）。
+ */
+const STAGING_INFIX = '.staging-'
+const ASIDE_INFIX = '.old-'
+
+/**
+ * 暂存/旁置目录的"陈旧"年龄上限：超过它一律按崩溃残留清扫（即便 pid 还在
+ * 进程表里 —— pid 会被复用，长时间没人管的目录不可能是"正在跑的同步"）。
+ */
+const STALE_SWAP_MAX_AGE_MS = 6 * 60 * 60 * 1000
 
 /** 插件内置的技能清单（目录名 = 技能名）。 */
 export const BUILTIN_SKILLS = [
@@ -92,10 +108,17 @@ export function normalizeSkillText(raw, skillName, displayName) {
  *
  * @param {string} pluginSkillsDir - 插件包内 skills/ 目录的绝对路径。
  * @param {string} userSkillsDir - 用户技能库目录（~/.agents/skills）。
- * @returns {Array<{name:string, action:'synced'|'unchanged'|'missing'|'refused', message?:string}>}
+ * @returns {Array<{name:string, action:'synced'|'unchanged'|'missing'|'refused', message?:string, code?:string}>}
+ *   `code` 只在可区分的失败上出现（目前只有换入+回滚双失败的
+ *   `SKILL_SWAP_RECOVERY_FAILED`，见 {@link SkillSwapRecoveryError}）。
  */
 export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
   const results = []
+  // S13-3 复核（2026-09-17）：先清扫上次同步留下的暂存/旁置目录。SIGKILL/断电
+  // 不会走 catch，`<name>.staging-<pid>-<ts>` 会永久留在技能库里（它的 SKILL.md
+  // 带真实技能的 frontmatter name，是个只会越积越多的幽灵）；清扫放在同步开头，
+  // 每次启动都收一遍。
+  sweepStaleSwapDirs(userSkillsDir)
   for (const name of BUILTIN_SKILLS) {
     const srcDir = join(pluginSkillsDir, name)
     const srcFile = join(srcDir, 'SKILL.md')
@@ -108,6 +131,7 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
     const srcText = readFileSync(srcFile, 'utf8')
     let action = 'unchanged'
     let message
+    let code
     const needsCopy = !existsSync(destFile)
       || skillVersion(srcText) > skillVersion(readFileSync(destFile, 'utf8'))
     if (needsCopy) {
@@ -118,47 +142,211 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
         // fail-loud 但可感知：绝不把"没写成/写到库外"报成 synced。
         action = 'refused'
         message = String(error?.message ?? error)
-        console.warn(`[dsh-memory-evolve] 内置技能 ${name} 落点被拒（跳过）：${message}`)
+        if (typeof error?.code === 'string') code = error.code
+        if (error?.code === 'SKILL_SWAP_RECOVERY_FAILED') {
+          // S13-3 复核（2026-09-17）：换入失败**且**回滚也失败——比普通 refused
+          // 严重一级（技能目录当前缺失，新旧两份副本还在盘上）。用 error 级别 +
+          // 点名路径，让它在启动日志里不被 warn 洪水淹没。
+          console.error(`[dsh-memory-evolve] 内置技能 ${name} 换入失败且未能回滚，需人工恢复：${message}`)
+        } else {
+          console.warn(`[dsh-memory-evolve] 内置技能 ${name} 落点被拒（跳过）：${message}`)
+        }
       }
     }
-    results.push(message === undefined ? { name, action } : { name, action, message })
+    results.push({
+      name,
+      action,
+      ...(message === undefined ? {} : { message }),
+      ...(code === undefined ? {} : { code }),
+    })
   }
+  // S13-3 三轮复核（2026-09-17）：**收尾再扫一遍**。SIGKILL 落在"改名为 .old-* 之后、
+  // 暂存目录换入之前"时（dest 缺失 + .old-* 是旧内容唯一副本），开头的清扫必须留下
+  // .old-*；本次同步刚把真目录装回来，这一遍就能立刻收掉它 —— 否则它会以"带真实
+  // frontmatter name 的幽灵目录"活到下次启动，被 DSH 技能发现记成重复候选
+  // （skill … ignored because a higher-priority skill already exists，整整一个会话）。
+  sweepStaleSwapDirs(userSkillsDir)
   return results
 }
 
 /**
  * 整目录落盘（上游 v26091501 的"整目录同步"语义 × 本地 NF-1 落点断言）。
  *
- * 语义：目标目录先清空再整体复制（上游行为：技能辅助文件随技能一起更新，
- * 用户自加在内置技能目录里的文件会被删除）。安全面：
+ * 语义：**先写暂存目录、全部写成后整体换入**——用户自加在内置技能目录里的
+ * 文件随整目录替换一起消失（上游"整目录覆盖"行为不变）。安全面：
  *   - `<userSkillsDir>/<name>` 存在但不是真实目录（符号链接 / 普通文件）→ 拒收；
- *   - 目标目录内**任何**符号链接条目 → 拒收（清空之前先扫，见下）；
+ *   - 目标目录内**任何**符号链接条目 → 拒收（换入之前先扫，见下）；
  *   - 逐文件 `writeFileAtomicSafeAt(..., { anchorDir })`：从技能库根到落点整条链
  *     逐层 lstat，任一符号链接或真实路径逃出技能库即拒收（含 TOCTOU 窗口——
  *     断言在原子写内部对写入前的真实路径复检）。
  * 任一文件被拒即抛错，由调用方记 `refused` 并跳过该技能（不静默半写）。
+ * S13-3（2026-09-17 审计）：上一版是"先 rm 目标目录再逐文件写"，循环里任何
+ * 一次失败（ENOSPC/EACCES/预扫之后才出现的符号链接…）都会把已装好的技能删空
+ * 或写一半，而调用方只记 refused——与本函数"不静默半写"的承诺相反（v2.7.4 的
+ * 单文件原子写在失败时保留旧文件，属回归）。
+ *
+ * **换入是三步可恢复的（S13-3 复核，2026-09-17）**：
+ *   1) `rename(old → <name>.old-<pid>-<ts>)` 把旧目录原子旁置（不再先 rm）；
+ *   2) `rename(staging → dest)` 让新内容就位；
+ *   3) 删除旁置副本（尽力而为，删不掉留给下次同步清扫）。
+ * 因此失败面只有两种，且都不丢内容：
+ *   - 第 2 步失败 → 先把旁置副本改回原处再抛原始错误（旧技能原封不动，暂存副本
+ *     清理掉），调用方记 `refused`；
+ *   - 第 2 步失败**且**回滚也失败 → 抛 {@link SkillSwapRecoveryError}
+ *     （code=SKILL_SWAP_RECOVERY_FAILED），错误文本点名暂存（新）与旁置（旧）两份
+ *     副本路径，调用方按"需要人工恢复"上报，而不是含糊的 refused。
+ * 保证的边界要说清：**"旧目录在失败时原样保留"只覆盖到上面这两条路径**；进程被
+ * SIGKILL/断电打断（不走 catch）时目录状态取决于断点，残留由下次同步开头的
+ * {@link sweepStaleSwapDirs} 收拾。
  *
  * @param {string} srcDir - 插件包内技能目录。
  * @param {string} destDir - 用户技能库内的目标目录。
  * @param {string} anchorDir - 技能库根（落点断言的基准）。
  */
 function syncSkillDirSafe(srcDir, destDir, anchorDir) {
+  let hadDest = false
   try {
     const stat = lstatSync(destDir)
     if (stat.isSymbolicLink() || !stat.isDirectory()) throw writeTargetRefusedError(destDir)
+    hadDest = true
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error
   }
-  // 清空**之前**先扫一遍：目标目录里任何符号链接条目都拒收。上游的整目录语义
+  // 换入**之前**先扫一遍：目标目录里任何符号链接条目都拒收。上游的整目录语义
   // 是 `rm -rf` 后重铺，遇到预置的 `<name>/SKILL.md` 链接会"顺带删掉链接再写真
   // 文件"——不写穿，但把拒收变成了静默删除（调用方看到 synced，用户预置的链接
   // 却没了）。本地 NF-1 的口径是 fail-loud：不动那个链接、如实报 refused。
   const planted = findSymlinkEntry(destDir)
   if (planted !== null) throw writeTargetRefusedError(join(destDir, planted))
-  rmSync(destDir, { recursive: true, force: true })
-  mkdirSync(destDir, { recursive: true })
-  for (const rel of listFilesRel(srcDir)) {
-    writeFileAtomicSafeAt(join(destDir, rel), readFileSync(join(srcDir, rel)), { anchorDir })
+  // 暂存目录与目标同父目录（同一文件系统，rename 才能原子换入）；落点仍在
+  // 技能库根之下，逐文件断言（anchorDir）照旧生效。
+  const stagingDir = `${destDir}${STAGING_INFIX}${process.pid}-${Date.now()}`
+  let asideDir = null
+  try {
+    mkdirSync(stagingDir, { recursive: true })
+    for (const rel of listFilesRel(srcDir)) {
+      writeFileAtomicSafeAt(join(stagingDir, rel), readFileSync(join(srcDir, rel)), { anchorDir })
+    }
+    // 1) 旧目录旁置（原子；不再有"rm 之后 rename 失败 ⇒ 技能消失"的窗口）
+    if (hadDest) {
+      asideDir = `${destDir}${ASIDE_INFIX}${process.pid}-${Date.now()}`
+      renameSync(destDir, asideDir)
+    }
+    // 2) 新内容就位；失败先把旧目录改回来（回滚再失败 → 抛可恢复错误）
+    try {
+      renameSync(stagingDir, destDir)
+    } catch (error) {
+      if (asideDir === null) throw error
+      try {
+        renameSync(asideDir, destDir)
+      } catch (restoreError) {
+        throw new SkillSwapRecoveryError(destDir, stagingDir, asideDir, error, restoreError)
+      }
+      throw error
+    }
+    // 3) 旁置副本已是垃圾：删除尽力而为，删不掉留给下次同步清扫
+    if (asideDir !== null) {
+      try { rmSync(asideDir, { recursive: true, force: true }) } catch { /* 留给清扫 */ }
+    }
+  } catch (error) {
+    // 只有"目标目录仍然在盘上（旧内容在位 / 回滚成功 / 新内容已就位）"或
+    // "本来就没有旧目录"时才删暂存副本；目标缺失时暂存目录是这份内容的唯一
+    // 完整副本，必须保留并在错误里点名（S13-3 复核：否则技能将凭空消失）。
+    if (!hadDest || existsSync(destDir)) {
+      try { rmSync(stagingDir, { recursive: true, force: true }) } catch { /* 残留由下次同步清扫 */ }
+    }
+    throw error
+  }
+}
+
+/**
+ * 换入失败且旧目录回滚也失败（S13-3 复核，2026-09-17）。
+ *
+ * 这是"内容还在、但技能目录暂时缺失"的第三态：暂存目录里是完整的新副本，
+ * 旁置目录里是完整的旧副本，两者都刻意保留（见 {@link syncSkillDirSafe} 的
+ * catch）。调用方（{@link syncBuiltinSkills}）按 `code` 把它与普通 `refused`
+ * 区分开，用 error 级别上报路径供人工恢复。
+ */
+export class SkillSwapRecoveryError extends Error {
+  /**
+   * @param {string} destDir - 本应就位的技能目录。
+   * @param {string} stagingDir - 新内容副本（保留）。
+   * @param {string} asideDir - 旧内容副本（保留）。
+   * @param {unknown} swapError - 换入 rename 的原始错误。
+   * @param {unknown} restoreError - 回滚 rename 的错误。
+   */
+  constructor(destDir, stagingDir, asideDir, swapError, restoreError) {
+    super(`dsh-memory-evolve: 技能目录 ${destDir} 换入失败且旧目录回滚失败 —— 需人工恢复：新副本 ${stagingDir}，旧副本 ${asideDir}（换入错误：${swapError?.message ?? swapError}；回滚错误：${restoreError?.message ?? restoreError}）`)
+    this.name = 'SkillSwapRecoveryError'
+    this.code = 'SKILL_SWAP_RECOVERY_FAILED'
+    this.destDir = destDir
+    this.stagingDir = stagingDir
+    this.asideDir = asideDir
+  }
+}
+
+/**
+ * 解析换入临时目录名（`<skill>.staging-<pid>-<ts>` / `<skill>.old-<pid>-<ts>`）。
+ * @param {string} name - 技能库根下的目录名。
+ * @returns {{skillName:string, pid:number, ts:number, aside:boolean}|null}
+ */
+function parseSwapDirName(name) {
+  for (const [infix, aside] of [[STAGING_INFIX, false], [ASIDE_INFIX, true]]) {
+    const at = name.lastIndexOf(infix)
+    if (at <= 0) continue
+    const match = /^(\d+)-(\d+)$/.exec(name.slice(at + infix.length))
+    if (match === null) continue
+    return { skillName: name.slice(0, at), pid: Number(match[1]), ts: Number(match[2]), aside }
+  }
+  return null
+}
+
+/**
+ * pid 是否还活着。唯一用途是判断某个暂存/旁置目录是否属于"正在跑的同步"。
+ * ESRCH=不存在；EPERM=存在但无权限（宁可漏扫，不可误扫）；非法 pid 当不存在。
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
+/**
+ * 清扫上次同步留下的暂存/旁置目录（S13-3 复核，2026-09-17）。
+ *
+ * 判据三条同时成立才删，且只在本插件自己的命名空间内动手：
+ *   - **同父目录 + 名字形状匹配**：`<BUILTIN_SKILLS 成员>.staging-<pid>-<ts>` /
+ *     `.old-<pid>-<ts>`（技能名限定在内置清单里，绝不碰用户自己的目录）；
+ *   - **陈旧**：pid 已不存在，或目录年龄超过 {@link STALE_SWAP_MAX_AGE_MS}
+ *     （pid 复用兜底）；仍在跑的并发同步（活 pid + 新时间戳）不动；
+ *   - **旁置副本额外要求真技能目录还在**：真目录缺失时那个旁置目录是旧内容的
+ *     唯一副本（双 rename 失败路径），刻意留给人工恢复，不清。syncBuiltinSkills
+ *     在同步循环**之后**会再调用一次本函数（2026-09-17 三轮复核）：本次同步把
+ *     真目录装回来时，这个旁置副本立刻被收掉，不再以幽灵技能候选活到下次启动。
+ * 删除失败只忽略：残留不影响同步正确性，下次启动再扫。
+ *
+ * @param {string} userSkillsDir - 用户技能库目录（~/.agents/skills）。
+ */
+function sweepStaleSwapDirs(userSkillsDir) {
+  let names
+  try {
+    names = readdirSync(userSkillsDir)
+  } catch {
+    return // 技能库还不存在：没有残留可扫
+  }
+  const now = Date.now()
+  for (const name of names) {
+    const parsed = parseSwapDirName(name)
+    if (parsed === null || !BUILTIN_SKILLS.includes(parsed.skillName)) continue
+    if (parsed.aside && !existsSync(join(userSkillsDir, parsed.skillName))) continue
+    if (isPidAlive(parsed.pid) && now - parsed.ts <= STALE_SWAP_MAX_AGE_MS) continue
+    try { rmSync(join(userSkillsDir, name), { recursive: true, force: true }) } catch { /* 清不掉不影响同步 */ }
   }
 }
 

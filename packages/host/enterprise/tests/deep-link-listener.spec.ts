@@ -63,6 +63,17 @@ function stubFetchCapturing() {
   return calls
 }
 
+/**
+ * 等待条件成立（2026-09-17 审计：本文件原来一律 `await setTimeout(30)`，
+ * 负载高时异步预验证还没落地断言就跑了 —— 全量门禁里偶发假红（同一天
+ * connectors 套件也因固定 sleep 假红过）。轮询到条件成立即返回，超时后
+ * 由调用点的断言给出真实失败信息。
+ */
+async function waitFor(condition: () => boolean, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!condition() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5))
+}
+
 describe('installDeepLinkListener 会话切换防护 (F12)', () => {
   it('refuses a silent server switch and sends no token before the switch guard (srvcore-1)', async () => {
     const calls = stubFetchCapturing()
@@ -70,7 +81,7 @@ describe('installDeepLinkListener 会话切换防护 (F12)', () => {
     const applied: Session[] = []
     installDeepLinkListener(ctx, (s) => applied.push(s), () => A, SCHEME)
     fire(`${SCHEME}://auth?token=attacker&server=` + encodeURIComponent('https://evil.example') + '&user=eve')
-    await new Promise((r) => setTimeout(r, 30))
+    await waitFor(() => warns.join(' ').includes('refused server switch'))
     expect(applied).toHaveLength(0)
     expect(warns.join(' ')).toContain('refused server switch')
     // 关键:换端判定必须早于预验证 fetch —— 旧顺序先 fetch(带 `Bearer attacker`)
@@ -85,7 +96,7 @@ describe('installDeepLinkListener 会话切换防护 (F12)', () => {
     const applied: Session[] = []
     installDeepLinkListener(ctx, (s) => applied.push(s), () => null, SCHEME)
     fire(`${SCHEME}://auth?token=tok-b&server=` + encodeURIComponent('https://b.example') + '&user=bob')
-    await new Promise((r) => setTimeout(r, 30))
+    await waitFor(() => applied.length > 0)
     expect(applied).toHaveLength(1)
     expect(applied[0]!.serverURL).toBe('https://b.example')
     vi.unstubAllGlobals()
@@ -97,7 +108,7 @@ describe('installDeepLinkListener 会话切换防护 (F12)', () => {
     const applied: Session[] = []
     installDeepLinkListener(ctx, (s) => applied.push(s), () => A, SCHEME)
     fire(`${SCHEME}://auth?token=tok-new&server=` + encodeURIComponent('https://a.example') + '&user=alice')
-    await new Promise((r) => setTimeout(r, 30))
+    await waitFor(() => applied.length > 0)
     expect(applied).toHaveLength(1)
     expect(applied[0]!.token).toBe('tok-new')
     vi.unstubAllGlobals()
@@ -111,7 +122,7 @@ describe('installDeepLinkListener 会话切换防护 (F12)', () => {
     const applied: Session[] = []
     installDeepLinkListener(ctx, (s) => applied.push(s), () => null, SCHEME)
     fire(`${SCHEME}://auth?token=tok-c&server=` + encodeURIComponent('https://c.example') + '&user=carol')
-    await new Promise((r) => setTimeout(r, 30))
+    await waitFor(() => applied.length > 0)
     expect(applied).toHaveLength(1)
     expect(warns.join(' ')).not.toContain('malformed')
 
@@ -120,7 +131,7 @@ describe('installDeepLinkListener 会话切换防护 (F12)', () => {
     const rejected: Session[] = []
     installDeepLinkListener(fallback.ctx, (s) => rejected.push(s), () => null)
     fallback.fire(`${SCHEME}://auth?token=tok-d&server=` + encodeURIComponent('https://d.example') + '&user=dave')
-    await new Promise((r) => setTimeout(r, 30))
+    await waitFor(() => fallback.warns.join(' ').includes('malformed'))
     expect(rejected).toHaveLength(0)
     expect(fallback.warns.join(' ')).toContain('malformed')
     vi.unstubAllGlobals()

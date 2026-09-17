@@ -40,6 +40,27 @@ const ACTION_LABEL: Record<string, string> = {
   skill_grant: '技能授权',
   skill_revoke: '技能撤销授权',
   skill_grants_replace: '技能部门授权替换',
+  // 组织共享库(shared_*)动作:此前只在服务端写入、读侧未登记,于是无法在
+  // 筛选下拉里选中、行内还会回落成裸 id(SG-5,审计 2026-09-17)。共享技能
+  // 上下架的动作名带 shared_ 前缀与市场域区分,标签与市场 twins 对齐。
+  shared_skill_enable: '重新上架共享技能',
+  shared_skill_disable: '下架共享技能',
+  shared_skill_upload: '上传共享技能',
+  shared_skill_approve: '通过共享技能',
+  shared_skill_reject: '拒绝共享技能',
+  shared_skill_delete: '删除共享技能',
+  shared_skill_qualify: '设置共享技能质量',
+  shared_skill_grant: '共享技能授权',
+  shared_skill_revoke: '共享技能撤销授权',
+  // 组织共享智能体(agent_preset_*)同族:含 2026-09-17 新增的上下架动作(SG-4)。
+  agent_preset_upload: '上传智能体',
+  agent_preset_approve: '通过智能体',
+  agent_preset_reject: '拒绝智能体',
+  agent_preset_delete: '删除智能体',
+  agent_preset_qualify: '设置智能体质量',
+  agent_preset_grant: '智能体授权',
+  agent_preset_enable: '重新上架智能体',
+  agent_preset_disable: '下架智能体',
   user_create: '创建用户',
   user_update: '更新用户',
   user_delete: '删除用户',
@@ -53,7 +74,8 @@ const ACTION_LABEL: Record<string, string> = {
   balance_adjust: '调整余额',
   balance_grant: '余额发放',
   balance_settings: '余额策略变更',
-  // MCP 与知识库(MCP/KB)动作——生产环境写入,原名未映射时显示原始 id
+  // 历史 MCP/知识库动作:当前代码已无写点(功能下线),但存量库里的行仍需中文
+  // 标签与筛选入口 —— 不要删(删了老行会回落成裸 id)。
   mcp_create: '新建MCP',
   mcp_update: 'MCP更新',
   mcp_delete: '删除MCP',
@@ -65,6 +87,57 @@ const ACTION_LABEL: Record<string, string> = {
   kb_import: '知识库导入',
   kb_grant: '知识库授权',
   kb_revoke: '知识库撤销授权',
+  // SG-5 残留(r3v 复核,2026-09-17):把服务端**实际会写入**的其余动作补齐 ——
+  // 未登记的动作在行内回落成裸 id、且进不了筛选下拉(后端 ?action= 本来就支持)。
+  // 上一轮只补了组织共享库那一族,漏掉了 agent_preset_revoke 与下面这些老动作;
+  // 完整清单由 Audit.test.tsx 的 SERVER_ACTIONS 冻结(服务端新增写点时必须同步)。
+  agent_preset_revoke: '智能体撤销授权',
+  // 市场智能体(marketplace/agent_api.go 的 agent_* 写点)。标签一律带「市场」
+  // 限定词:组织共享侧(agent_preset_*)已占用「下架智能体」等名字,下拉里两项
+  // 同名会让管理员无法分辨。
+  agent_create: '上架市场智能体',
+  agent_update: '更新市场智能体',
+  agent_update_meta: '更新市场智能体信息',
+  agent_disable: '下架市场智能体',
+  agent_enable: '重新上架市场智能体',
+  agent_grant: '市场智能体授权',
+  agent_revoke: '市场智能体撤销授权',
+  agent_grants: '市场智能体部门授权替换',
+  // 能力中心:名称锁定与技能包规范化(sharedskills / marketplace 管理面)。
+  capability_lock: '锁定能力名称',
+  capability_unlock: '解锁能力名称',
+  skill_normalize: '规范化技能包',
+  // 网关(上游/模型/配置)。
+  gateway_config: '网关配置变更',
+  provider_create: '新建上游',
+  provider_update: '更新上游',
+  provider_delete: '删除上游',
+  model_create: '新建模型',
+  model_update: '更新模型',
+  model_delete: '删除模型',
+  // 连接器凭据与启用状态(connectors/admin.go)。
+  connector_create: '新建连接器',
+  connector_update: '更新连接器',
+  connector_enabled: '连接器上下架',
+  connector_delete: '删除连接器',
+  // 登录与管理员自助操作(serverauth)。login_success/login_fail 也在审计表里,
+  // 登记后可按结果筛选。
+  login_success: '登录成功',
+  login_fail: '登录失败',
+  password_change: '修改密码',
+  admin_password_change: '修改管理员密码',
+  admin_mfa_login: '管理员 MFA 登录',
+  admin_mfa_enable: '开启管理员 MFA',
+  admin_mfa_disable: '关闭管理员 MFA',
+  admin_mfa_reset: '重置管理员 MFA',
+  role_change: '变更角色',
+  audit_retention_change: '审计保留策略变更',
+  ldap_sync: 'LDAP 同步',
+  // 能力中心归属转移与报表订阅。
+  app_owner_transfer: '转移能力归属',
+  report_subscription_create: '新建报表订阅',
+  report_subscription_update: '更新报表订阅',
+  report_subscription_delete: '删除报表订阅',
 }
 // 注:quota_change / dept_budget_change / quota_default_change 随配额与部门预算
 // 下线一并移除(2026-09-11),不再有新数据产生。

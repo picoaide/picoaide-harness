@@ -10,9 +10,10 @@
  * plus the optional COI 调度 / 提示词 / 无限画板 tabs, all backed by
  * the node half's /memory-evolve/api routes. Each tab label carries a
  * red-dot pending count (🔴 记忆 (N) / 🔴 技能 (N) / 🔴 待办 (N)) while
- * suggestions/skills/todos await confirmation, refreshed by polling the
- * badge endpoint and re-registering through the deferral handle's
- * refresh().
+ * suggestions/skills/todos await confirmation; the polled count only
+ * pokes the slot ledger so upstream re-reads the label thunk — the entry
+ * itself is never re-registered (ME-1: re-registering changes the entry
+ * identity, which is the React key, and remounts the visible view).
  */
 import type { Context } from 'cordis'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -53,6 +54,7 @@ import mobileCss from './mobile.css'
 import { createInputSheetEnhance } from './mobile-input-sheet'
 import { createNotificationBell } from './notification-bell.tsx'
 import { createTodoTabLifecycle, RUNTIME_CONFIG_CHANGED } from './todo-tab-lifecycle.js'
+import { createBadgeTab } from './tab-badge.js'
 import notificationStyles from './notification-styles.css'
 import { setClientLocaleResolver } from '../../lib/i18n.js'
 
@@ -830,7 +832,7 @@ export const zh = {
   'panel.config.perTurnKeyWrites': '每回合检查项目关键记忆',
   'panel.config.perTurnKeyWrites.hint': '要求模型每个回合结束前判断是否出现重要项目事实（长期约定/决策/架构/踩坑），有则写入 target=key（自动注入上下文），没有就跳过；关闭后 key 仅保留手动添加与读取。⚠️ 依赖 LLM 指令遵循',
   'panel.config.keyBranchFilter': 'key 轨分支过滤',
-  'panel.config.keyBranchFilter.hint': '开启（默认）时，key 轨条目按**当前 git 分支**过滤：无分支标记的条目对所有分支可见，带 [branch:x] 标记的只在该分支可见——系统提示词注入、expand、list 三处同一规则。关掉后三处都不再过滤（诊断用；会让别的分支的条目也出现在列表里）',
+  'panel.config.keyBranchFilter.hint': '开启（默认）时，key 轨条目按**当前 git 分支**过滤：无分支标记的条目对所有分支可见，带 [branch:x] 标记的只在该分支可见——系统提示词注入、COI 注入、list、expand 四处同一规则。关掉后四处都不再过滤（诊断用；会让别的分支的条目也出现在列表里）',
   'panel.config.keyProgressiveDisclosure': 'key 轨渐进式披露',
   'panel.config.keyProgressiveDisclosure.hint': '控制 key 轨记忆的注入方式：auto = 小数据量全量注入、大数据量摘要注入；off = 始终全量注入（默认）；on = 始终摘要注入（节省 token）',
   'panel.config.keyProgressiveDisclosure.auto': '自动',
@@ -2272,7 +2274,7 @@ export const en: Record<MemoryEvolveKey, string> = {
   'panel.config.perTurnKeyWrites': 'Per-turn key-fact check',
   'panel.config.perTurnKeyWrites.hint': 'Require the model to judge at the end of every turn whether an important project fact emerged (long-lived convention/decision/architecture/pitfall); if so, write it to target=key (injected into the context), otherwise skip. When off, key facts are only added manually or read. ⚠️ Relies on LLM instruction following',
   'panel.config.keyBranchFilter': 'Key-track branch filter',
-  'panel.config.keyBranchFilter.hint': 'When on (default), key-track entries are filtered by the **current git branch**: untagged entries are visible everywhere, entries tagged [branch:x] only on that branch — the same rule for snapshot injection, expand and list. Turn it off to disable filtering in all three (diagnostics; other branches\' entries will then show up in the list)',
+  'panel.config.keyBranchFilter.hint': 'When on (default), key-track entries are filtered by the **current git branch**: untagged entries are visible everywhere, entries tagged [branch:x] only on that branch — the same rule for snapshot injection, COI injection, list and expand. Turn it off to disable filtering in all four (diagnostics; other branches\' entries will then show up in the list)',
   'panel.config.keyProgressiveDisclosure': 'Key-track progressive disclosure',
   'panel.config.keyProgressiveDisclosure.hint': 'Control how key-track memories are injected: auto = full injection for small data, summary injection for large data; off = always full injection (default); on = always summary injection (saves tokens)',
   'panel.config.keyProgressiveDisclosure.auto': 'Auto',
@@ -3201,46 +3203,66 @@ export function apply(ctx: Context): void {
   //   80 无限画板 / 80 记忆同步 / 90 模型设置 / 100 书签 / 110 Web UI设置 /
   //   120 Memory Evolve 设置
   // 每个 label 携带各自的待确认红点计数（记忆=记忆建议数、技能=技能建议数、
-  // 待办=待办建议数），badge 变化时重新注册触发 label 重求值。
+  // 待办=待办建议数、COI=运行中任务数、提示词=活跃注入数、设置=有新版本）。
+  // ME-1（2026-09-17 二审）：计数变化**不再重注册条目**（上游条目身份就是
+  // React key，重注册会把正在显示的视图整棵重挂）；条目只注册一次，label
+  // thunk 现读计数，计数变化只用 pokeTabLabels() 通知账本让上游重读 label。
   let tabCancelled = false
-  let memoryBadgeCount = 0
-  // 版本检测红点（0/1）：有新发布版本时设置 Tab label 显示 🔴。
-  // 与 count 类 badge 独立——由 /api/badge 的 update 字段驱动。
-  let updateBadgeCount = 0
-  let skillsBadgeCount = 0
-  let todosBadgeCount = 0
-  let disposeMemoryTab: (() => void) | undefined
-  let disposeSkillsTab: (() => void) | undefined
 
-  const registerMemoryTab = (): void => {
-    disposeMemoryTab?.()
-    disposeMemoryTab = ctx.slots.inject('conversation.view', () =>
+  /**
+   * 刷新 conversation.view 的 label 快照，**不动任何真实条目的身份**：
+   * 往账本写一个「同一同步块内立即释放」的空条目。上游没有独立的
+   * 「label 变了」通道（ui-conversation 只订阅 slots.subscribe 与 locale
+   * revision），账本写入是唯一稳定触发点；通知是微任务批量的，注册与释放
+   * 在同一个同步块内完成 ⇒ 空条目在被读取前已出账，永远不会渲染成 Tab。
+   */
+  const pokeTabLabels = (): void => {
+    let dispose: (() => void) | undefined
+    try {
+      dispose = ctx.slots.register({
+        name: 'conversation.view',
+        id: 'memory-evolve-label-refresh',
+        order: 999,
+      }, () => null)
+    } catch {
+      return // 槽未声明（宿主无 ui-conversation）等：label 保持上次文案即可
+    }
+    dispose()
+  }
+
+  const memoryTab = createBadgeTab(
+    (getCount: () => number) => ctx.slots.inject('conversation.view', () =>
       ctx.slots.register({
         name: 'conversation.view',
         id: 'memory-files',
         order: 10,
-        label: () => (memoryBadgeCount > 0 ? t('memoryTab.label.pending', { count: memoryBadgeCount }) : t('memoryTab.label')),
-      }, (props) => MemoryTabView({ ...props, t })))
-  }
-  const registerSkillsTab = (): void => {
-    disposeSkillsTab?.()
-    disposeSkillsTab = ctx.slots.inject('conversation.view', () =>
+        label: () => (getCount() > 0 ? t('memoryTab.label.pending', { count: getCount() }) : t('memoryTab.label')),
+      }, (props) => MemoryTabView({ ...props, t }))),
+    pokeTabLabels,
+  )
+  const skillsTab = createBadgeTab(
+    (getCount: () => number) => ctx.slots.inject('conversation.view', () =>
       ctx.slots.register({
         name: 'conversation.view',
         id: 'skills-hub',
         order: 20,
-        label: () => (skillsBadgeCount > 0 ? t('skillsTab.label.pending', { count: skillsBadgeCount }) : t('skillsTab.label')),
-      }, (props) => SkillsTabView({ ...props, t })))
-  }
+        label: () => (getCount() > 0 ? t('skillsTab.label.pending', { count: getCount() }) : t('skillsTab.label')),
+      }, (props) => SkillsTabView({ ...props, t }))),
+    pokeTabLabels,
+  )
   // 待办 Tab 生命周期（todoEnabled 运行时开关）：默认启用；配置面板保存后
-  // 经 RUNTIME_CONFIG_CHANGED 事件即时隐藏/恢复，无需刷新页面。
-  const todoTabLifecycle = createTodoTabLifecycle(() => ctx.slots.inject('conversation.view', () =>
-    ctx.slots.register({
-      name: 'conversation.view',
-      id: 'todos-hub',
-      order: 30,
-      label: () => (todosBadgeCount > 0 ? t('todosTab.label.pending', { count: todosBadgeCount }) : t('todosTab.label')),
-    }, (props) => TodosTabView({ ...props, t }))))
+  // 经 RUNTIME_CONFIG_CHANGED 事件即时隐藏/恢复，无需刷新页面。计数走
+  // setCount（poke 刷新 label，不重注册——ME-1）。
+  const todoTabLifecycle = createTodoTabLifecycle(
+    (getCount: () => number) => ctx.slots.inject('conversation.view', () =>
+      ctx.slots.register({
+        name: 'conversation.view',
+        id: 'todos-hub',
+        order: 30,
+        label: () => (getCount() > 0 ? t('todosTab.label.pending', { count: getCount() }) : t('todosTab.label')),
+      }, (props) => TodosTabView({ ...props, t }))),
+    pokeTabLabels,
+  )
   const onRuntimeConfigChanged = (event: Event): void => {
     const detail = (event as CustomEvent<{ todoEnabled?: boolean }>).detail
     todoTabLifecycle.setEnabled(detail?.todoEnabled !== false)
@@ -3248,19 +3270,18 @@ export function apply(ctx: Context): void {
   window.addEventListener(RUNTIME_CONFIG_CHANGED, onRuntimeConfigChanged)
   ctx.effect(() => () => window.removeEventListener(RUNTIME_CONFIG_CHANGED, onRuntimeConfigChanged), 'memory-evolve: todo tab runtime listener')
   // 设置 Tab（Memory Evolve 设置，order 120 放最后）：整体指南 + 配置 + 版本。
-  // 红点：检测到新发布版本时 label 变 🔴 变体（updateBadgeCount 驱动，重注册
-  // 生效；无红点时注册一次即可，badge 变化才重注册）。
-  let disposeSettingsTab: (() => void) | undefined
-  const registerSettingsTab = (): void => {
-    disposeSettingsTab?.()
-    disposeSettingsTab = ctx.slots.inject('conversation.view', () =>
+  // 红点：检测到新发布版本时 label 变 🔴 变体（版本红点计数驱动；同样
+  // 走 poke 刷新 label，不重注册——ME-1）。
+  const settingsTab = createBadgeTab(
+    (getCount: () => number) => ctx.slots.inject('conversation.view', () =>
       ctx.slots.register({
         name: 'conversation.view',
         id: 'settings-hub',
         order: 120,
-        label: () => (updateBadgeCount > 0 ? t('settingsTab.label.pending') : t('settingsTab.label')),
-      }, (props) => SettingsTabView({ ...props, t })))
-  }
+        label: () => (getCount() > 0 ? t('settingsTab.label.pending') : t('settingsTab.label')),
+      }, (props) => SettingsTabView({ ...props, t }))),
+    pokeTabLabels,
+  )
   // 模型设置 Tab（order 90，书签之后）：表格展示 DSH 供应商/模型 +
   // 每模型启用/备注/思考等级配置（de_models 工具的 Web 数据面）。
   // 与其他模块同款独立开关 modelsEnabled（默认开）：开关在「设置」Tab 的
@@ -3291,32 +3312,17 @@ export function apply(ctx: Context): void {
       }, (props) => SyncView({ ...props, t })))
   }
   const pollBadge = (): void => {
-    // 三个 tab 未注册前不轮询（registerMemoryTab 是探测成功的标志）。
-    if (tabCancelled || disposeMemoryTab === undefined) return
+    // 三个 tab 未注册前不轮询（memoryTab.mount() 是探测成功的标志）。
+    if (tabCancelled || !memoryTab.mounted()) return
     void fetch('/memory-evolve/api/badge')
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then((data: { suggestions?: number; skills?: number; todoSuggestions?: number; update?: number }) => {
-        const suggestions = data.suggestions ?? 0
-        const skills = data.skills ?? 0
-        const todoSuggestions = data.todoSuggestions ?? 0
         // 版本红点独立处理（不参与 count 语义；badge 只读缓存，绝不触发 git）。
-        const update = data.update ?? 0
-        if (update !== updateBadgeCount) {
-          updateBadgeCount = update
-          registerSettingsTab()
-        }
-        if (suggestions !== memoryBadgeCount) {
-          memoryBadgeCount = suggestions
-          registerMemoryTab()
-        }
-        if (skills !== skillsBadgeCount) {
-          skillsBadgeCount = skills
-          registerSkillsTab()
-        }
-        if (todoSuggestions !== todosBadgeCount) {
-          todosBadgeCount = todoSuggestions
-          todoTabLifecycle.refresh()
-        }
+        // setCount 内部判等 + poke 刷新 label（ME-1：不重注册条目）。
+        settingsTab.setCount(data.update ?? 0)
+        memoryTab.setCount(data.suggestions ?? 0)
+        skillsTab.setCount(data.skills ?? 0)
+        todoTabLifecycle.setCount(data.todoSuggestions ?? 0)
       })
       .catch(() => { /* badge is best-effort; the tab still works */ })
   }
@@ -3340,25 +3346,22 @@ export function apply(ctx: Context): void {
       if (tabCancelled || data.config?.memoryTabEnabled !== true) return
       // 四个核心 tab 一起注册：记忆 / 技能 / 待办 / 设置（顺序 10/20/30/120）。
       // 待办 Tab 额外受 todoEnabled 运行时开关控制（默认开；关闭时隐藏）。
-      registerMemoryTab()
-      registerSkillsTab()
+      memoryTab.mount()
+      skillsTab.mount()
       todoTabLifecycle.setEnabled(data.config?.todoEnabled !== false)
-      registerSettingsTab()
+      settingsTab.mount()
       pollBadge()
       const timer = setInterval(pollBadge, BADGE_POLL_MS)
       ctx.effect(() => () => clearInterval(timer), 'memory-evolve: memory tab badge poller')
       // 版本检测：进入 Web UI 时触发一次惰性检测（24h 缓存内不跑 git）。
-      // 完成后直接同步 updateBadgeCount + 重注册（等 30s 轮询太慢）；
+      // 完成后直接同步红点计数（等 30s 轮询太慢；setCount 内部判等 + poke
+      // 刷新 label，不重注册——ME-1）；
       // badge-change 监听也已注册，后续 VersionTabView 的操作会走事件通道。
       void fetch('/memory-evolve/api/update/status')
         .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
         .then((data: { ok?: boolean; status?: string }) => {
           if (tabCancelled) return
-          const hasUpdate = data?.status === 'outdated' ? 1 : 0
-          if (hasUpdate !== updateBadgeCount) {
-            updateBadgeCount = hasUpdate
-            registerSettingsTab()
-          }
+          settingsTab.setCount(data?.status === 'outdated' ? 1 : 0)
         })
         .catch(() => { /* best-effort：检测失败保持无红点，版本子 Tab 可手动重试 */ })
       // The tab's own queue actions (approve/archive/reject skills too) fire
@@ -3371,10 +3374,10 @@ export function apply(ctx: Context): void {
     .catch(() => { /* the tab is optional; a failure just leaves it hidden */ })
   ctx.effect(() => () => {
     tabCancelled = true
-    disposeMemoryTab?.()
-    disposeSkillsTab?.()
+    memoryTab.dispose()
+    skillsTab.dispose()
     todoTabLifecycle.dispose()
-    disposeSettingsTab?.()
+    settingsTab.dispose()
   }, 'memory-evolve: memory tabs')
 
   // 记忆同步 Tab 的清理（注册本身在 /api/config 探测成功后进行；
@@ -3394,29 +3397,30 @@ export function apply(ctx: Context): void {
   // 存在才注册（coiEnabled=false 时 API 404，Tab 自动隐藏）。label 带红点
   // 计数：有运行中/排队中任务（按当前会话可见性）时显示「🔴 COI调度 (N)」
   // ——30s 轮询任务列表 + 监听 badge-change 事件（派发任务后即时刷新）；
-  // 计数变化时重新注册触发 label 重求值（与记忆/技能/待办 Tab 同机制）。
+  // 计数变化只 poke 刷新 label（ME-1：重注册会把正在看的任务列表/日志重挂）。
   let coiCancelled = false
-  let disposeCoiTab: (() => void) | undefined
-  let coiRunningCount = 0
   /** 当前会话 id：由 COI Tab 渲染时缓存（任务可见性按会话过滤的依据）。 */
   let currentCoiSessionId: string | undefined
-
-  const registerCoiTab = (): void => {
-    disposeCoiTab?.()
-    disposeCoiTab = ctx.slots.inject('conversation.view', () =>
+  const coiTab = createBadgeTab(
+    (getCount: () => number) => ctx.slots.inject('conversation.view', () =>
       ctx.slots.register({
         name: 'conversation.view',
         id: 'coi-hub',
         order: 40,
-        label: () => (coiRunningCount > 0 ? t('coiTab.label.pending', { count: coiRunningCount }) : t('coiTab.label')),
+        label: () => (getCount() > 0 ? t('coiTab.label.pending', { count: getCount() }) : t('coiTab.label')),
       }, (props) => {
         currentCoiSessionId = (props as { sessionId?: string }).sessionId
         return CoIView({ ...props, t })
-      }))
+      })),
+    pokeTabLabels,
+  )
+
+  const registerCoiTab = (): void => {
+    coiTab.mount()
   }
 
   const pollCoiRunning = (): void => {
-    if (coiCancelled || disposeCoiTab === undefined) return
+    if (coiCancelled || !coiTab.mounted()) return
     // 带会话视角查询（与任务列表同规则：temporary/session=本会话、project=本
     // 工作区、global=全显）；limit 放宽到 200，运行中任务不可能超此量。
     const q = currentCoiSessionId !== undefined
@@ -3425,11 +3429,8 @@ export function apply(ctx: Context): void {
     void fetch(`/memory-evolve/api/coi/tasks${q}`)
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then((data: { tasks?: Array<{ status?: string }> }) => {
-        const running = (data.tasks ?? []).filter((t) => t.status === 'running' || t.status === 'queued').length
-        if (running !== coiRunningCount) {
-          coiRunningCount = running
-          registerCoiTab()
-        }
+        // 只 poke 刷新 label（ME-1：重注册会把正在看的任务列表/日志重挂）。
+        coiTab.setCount((data.tasks ?? []).filter((t) => t.status === 'running' || t.status === 'queued').length)
       })
       .catch(() => { /* 红点是尽力而为；Tab 本身不受影响 */ })
   }
@@ -3450,7 +3451,7 @@ export function apply(ctx: Context): void {
     .catch(() => { /* COI 未启用：Tab 保持隐藏 */ })
   ctx.effect(() => () => {
     coiCancelled = true
-    disposeCoiTab?.()
+    coiTab.dispose()
   }, 'memory-evolve: coi tab')
 
   // Advisor 只占 strict-session header.actions：同一组件渲染 header toggle，
@@ -3604,32 +3605,30 @@ export function apply(ctx: Context): void {
   // 提示词 Tab（conversation.view 第四个 entry）：提示词管理器。跟随 host
   // API 探测注册（prompts 模块为插件常驻能力，无独立开关）。label 带红点
   // 计数：有活跃注入时显示「🔴 提示词 (N)」——30s 轮询注入轨 + 监听
-  // badge-change 事件（注入/停止后 PromptView 即时触发）刷新。
+  // badge-change 事件（注入/停止后 PromptView 即时触发）刷新；计数变化只
+  // poke 刷新 label（ME-1：重注册会把提示词表单/浮层重挂）。
   let promptCancelled = false
-  let disposePromptTab: (() => void) | undefined
-  let promptBadgeCount = 0
-  const registerPromptTab = (): void => {
-    disposePromptTab?.()
-    disposePromptTab = ctx.slots.inject('conversation.view', () =>
+  const promptTab = createBadgeTab(
+    (getCount: () => number) => ctx.slots.inject('conversation.view', () =>
       ctx.slots.register({
         name: 'conversation.view',
         id: 'prompt-hub',
         order: 60,
-        label: () => promptBadgeCount > 0
-          ? t('promptTab.label.active', { count: promptBadgeCount })
-          : t('promptTab.label'),
-      }, (props) => PromptView({ ...props, t })))
+        label: () => (getCount() > 0
+          ? t('promptTab.label.active', { count: getCount() })
+          : t('promptTab.label')),
+      }, (props) => PromptView({ ...props, t }))),
+    pokeTabLabels,
+  )
+  const registerPromptTab = (): void => {
+    promptTab.mount()
   }
   const pollPromptBadge = (): void => {
-    if (promptCancelled || disposePromptTab === undefined) return
+    if (promptCancelled || !promptTab.mounted()) return
     void fetch('/memory-evolve/api/prompts/injections')
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then((data: { injections?: unknown[] }) => {
-        const count = data.injections?.length ?? 0
-        if (count !== promptBadgeCount) {
-          promptBadgeCount = count
-          registerPromptTab()
-        }
+        promptTab.setCount(data.injections?.length ?? 0)
       })
       .catch(() => { /* badge is best-effort; the tab still works */ })
   }
@@ -3648,7 +3647,7 @@ export function apply(ctx: Context): void {
     .catch(() => { /* host 端不可用：Tab 保持隐藏 */ })
   ctx.effect(() => () => {
     promptCancelled = true
-    disposePromptTab?.()
+    promptTab.dispose()
   }, 'memory-evolve: prompt tab')
 
   // 会话书签（session bookmarks）：**独立子模块**。探测宿主端

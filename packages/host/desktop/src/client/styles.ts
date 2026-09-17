@@ -81,7 +81,10 @@ html:has([aria-modal="true"]) .dshDesktopSidebarSurface::before { -webkit-app-re
 .dshDesktopUpdateBadge:hover { border-color: var(--dsw-alias-border-l3, rgba(0, 0, 0, 0.16)); }
 /* 焦点环/圆点/成功态一律走会翻转的 token（2026-09-16 暗色审计）：
    硬编码的 #2f6fed / #e8871e / #16a34a / #15803d 在暗色下要么对比不足、
-   要么与旁边已翻转的 bg-layer-2 底色打架（ready 深绿字在暗底只有 2.78:1）。 */
+   要么与旁边已翻转的 bg-layer-2 底色打架（ready 深绿字在暗底只有 2.78:1）。
+   例外是 ready 的文字：--dsw-alias-state-success-primary **不随主题翻转**
+   （亮暗都解析成 green-500），当文字色用会让亮色主题掉到 2.28:1
+   （2026-09-17 S06-01 审计），因此它只保留给圆点/边框。 */
 .dshDesktopUpdateBadge:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary, #2f6fed); outline-offset: 1px; }
 .dshDesktopUpdateBadgeDot {
   width: 8px;
@@ -97,7 +100,13 @@ html:has([aria-modal="true"]) .dshDesktopSidebarSurface::before { -webkit-app-re
 /* 已下载待安装:绿点 + 实心按钮,和"有新版本"明确区分(不再需要重新下载)。 */
 .dshDesktopUpdateBadge[data-state="ready"] {
   border-color: var(--dsw-alias-state-success-primary, #16a34a);
-  color: var(--dsw-alias-state-success-primary, #15803d);
+  /* 文字显式给一对可读值（2026-09-17 S06-01 审计）：沿用状态色会同时丢掉
+     亮色主题（白底 2.28:1）与暗色主题（深底上换成 green-500 也只有 6.12:1，
+     但仍不如显式值的 7.13:1），而徽标底色 bg-layer-2 是翻转的。 */
+  color: #15803d; /* 亮色 bg-layer-2(#fff) 上 5.02:1 */
+}
+body[data-ds-dark-theme] .dshDesktopUpdateBadge[data-state="ready"] {
+  color: var(--dsw-static-green-400, #4ed17e); /* 暗色 bg-layer-2 上 7.13:1 */
 }
 .dshDesktopUpdateBadge[data-state="ready"] .dshDesktopUpdateBadgeDot {
   background: var(--dsw-alias-state-success-primary, #16a34a);

@@ -256,11 +256,37 @@ func testErrorReporting(c *gin.Context, db *sql.DB) {
 		DSN *string `json:"dsn"`
 	}
 	// 请求体可为空(缺省用已保存的 DSN);空体不算错误。
-	_ = c.ShouldBindJSON(&req)
+	//
+	// SG-3(r3v 复核,2026-09-17)把「字段缺省」的口径写死:`dsn` 是 `*string`,
+	// JSON **null 与字段缺省同义** —— 两者都表示"调用方没有给出 DSN",于是都回落
+	// 到库里已保存的那条(文档化的例外原样保留:缺省字段 / 空体 = 用已保存的 DSN)。
+	// 与 `""` 的不对称是**刻意**的:`""` 是一个显式的、作为 DSN 非法的值(它的
+	// 语义只能是"用空 DSN"),静默回落会把另一条 DSN 的结论当成它的结论;
+	// 而 JSON null 是"这个可选字段没有值"的标准写法(Go 侧 `*string` 只区分
+	// nil/非 nil,区分 null 与缺省需要额外的 RawMessage 解码,换不来产品价值)。
+	// 两种形状的结论都由 errorreporting_test_event_test.go 冻结。
+	//
+	// SG-3(审计 2026-09-17,r2 server-gateway P3):**坏体**必须与空体分开 ——
+	// 此前忽略绑定错误,截断 JSON(`{"dsn":`)会被静默丢弃、改用库里**另一条**
+	// DSN 发探测并回 200 ok:true,调用方据此判定"我要测的那条通了"(假绿,而
+	// 本端点存在的全部意义就是给管理员可信的连通性结论);`{"dsn":123}` 更怪
+	// ——encoding/json 对 *string 先分配指针再解码失败,req.DSN 成了"非 nil 的
+	// 空串",于是回一条与事实相反的 400「尚未配置错误上报 DSN」。口径与
+	// telemetry handler 一致:请求体不是合法 JSON ⇒ 400 VALIDATION。
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误(需要 JSON 对象,dsn 为可选字符串)")
+		return
+	}
 
 	raw := ""
 	if req.DSN != nil {
+		// 显式给出但为空 ≠ 字段缺省:前者是调用方明确要求"用空 DSN",必须报错,
+		// 不能悄悄回落到库里的值(否则同样是把另一条 DSN 的结果当成它的结论)。
 		raw = *req.DSN
+		if strings.TrimSpace(raw) == "" {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "dsn 不能为空(省略该字段才会使用已保存的 DSN)")
+			return
+		}
 	} else if v, _, err := serverstore.GetSetting(db, "web.error_reporting_dsn"); err == nil {
 		raw = v
 	}

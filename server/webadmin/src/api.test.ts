@@ -50,4 +50,44 @@ describe('api 请求层(审计 A5-M3/L5/L6)', () => {
     })
     await expect(request('/api/server/admin/x')).resolves.toEqual({ ok: true, items: [1] })
   })
+
+  // 2026-09-17 审计 S12-04:detail 的解析此前没有任何测试真正执行 ——
+  // setup.ts 全局 mock 了 ../api,页面用例里的 detail 是测试自己塞进替身
+  // ApiError 的;把 api.ts 的读取位置写错(如 body.error.detail)或整段删掉,
+  // 套件仍然全绿,线上 DNS/CONNECT/TLS/TIMEOUT/HTTP_4XX/HTTP_5XX 分类会静默
+  // 退化成裸 message。这两条用例打桩 fetch 打**真实实现**(本文件已 unmock)。
+  it('失败信封顶层的 detail 段被解析并暴露(错误上报失败分类)', async () => {
+    const { request, ApiError } = await loadApi()
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 502,
+      statusText: 'Bad Gateway',
+      json: async () => ({
+        error: { code: 'UPSTREAM', message: '无法解析上报服务域名(DNS 失败)' },
+        // 分类在 error **之外**的顶层 detail 里(与服务端信封一致)。
+        detail: { kind: 'DNS' },
+      }),
+    })
+    const err = await request('/api/server/admin/gateway/error-reporting/test', { method: 'POST' }).catch((e: any) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(502)
+    expect(err.code).toBe('UPSTREAM')
+    expect(err.message).toBe('无法解析上报服务域名(DNS 失败)')
+    expect(err.detail).toEqual({ kind: 'DNS' })
+  })
+
+  it('detail 缺失或不是对象时保持 undefined(不产生半解析的 detail)', async () => {
+    const { request } = await loadApi()
+    const bodies = [
+      { error: { code: 'UPSTREAM', message: '上游失败' } },
+      { error: { code: 'UPSTREAM', message: '上游失败' }, detail: null },
+      { error: { code: 'UPSTREAM', message: '上游失败' }, detail: 'oops' },
+      { error: { code: 'UPSTREAM', message: '上游失败' }, detail: 42 },
+    ]
+    for (const body of bodies) {
+      fetchMock.mockResolvedValue({ ok: false, status: 502, statusText: 'Bad Gateway', json: async () => body })
+      const err = await request('/api/server/admin/x').catch((e: any) => e)
+      expect(err.detail).toBeUndefined()
+    }
+  })
 })

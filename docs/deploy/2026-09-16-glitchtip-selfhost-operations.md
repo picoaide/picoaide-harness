@@ -4,7 +4,8 @@
 - 关联：决策 D9（[决策记录](../decisions/2026-09-16-glitchtip-error-collection.md)）· 验收标准 AC11 / AC15
 - **本文档是给人类运维的操作手册。** 仓库里的任何自动化（含 AI 代理、CI、脚本）**都不得执行本文的生产写操作**；
   代理对生产主机与 GlitchTip 实例只允许**只读**勘察（`SELECT` / `docker logs` / `docker inspect` / HTTP GET）。
-- 只读辅助脚本：`scripts/glitchtip-ops-check.mjs`（默认只读，输出当前 DSN、是否 loopback、容器 env、期望 DSN）。
+- 只读辅助脚本：`scripts/glitchtip-ops-check.mjs`（默认只读：只发 HTTP **GET** 与只读 `ssh docker inspect`；
+  站点与主机**必须显式提供**，脚本内置零生产默认值）。
 
 > **一段话结论**：GlitchTip 收到的错误事件本身是好的（收包链路健康），但后台**展示**给运维的 DSN
 > 是 `http://…@localhost:8000/1`，而 issue 永久链接也是 `http://localhost:8000/...`。
@@ -285,12 +286,26 @@ POST 上报端点。所以：
 1. **本手册是给人执行的 runbook。** 仓库里的脚本、CI、AI 代理**不得**执行 §4 的任何写操作
    （改 compose、重启容器、改 webadmin 配置），也**不得**对 GlitchTip 发出写请求。
 2. 代理对生产只允许**只读**：`docker logs` / `docker inspect` / `psql SELECT` / HTTP **GET**。
-3. 只读核查可以这样跑（不产生任何变更）：
+3. 只读核查可以这样跑（**对 GlitchTip 实例与部署主机只读**；脚本自身不写任何文件，也不改动本仓）：
 
    ```bash
-   node scripts/glitchtip-ops-check.mjs            # 只读：打印当前 DSN、是否 loopback、容器 env、期望 DSN
-   node scripts/glitchtip-ops-check.mjs --help     # 全部参数
+   node scripts/glitchtip-ops-check.mjs --base-url <站点URL> --ssh <user@host>   # 只读：打印当前 DSN、是否 loopback、容器 env、期望 DSN
+   node scripts/glitchtip-ops-check.mjs --help                                  # 全部参数
    ```
+
+   脚本**实际保证的**（读代码可逐条核对 `scripts/glitchtip-ops-check.mjs`）：
+
+   - 对 GlitchTip 只发 **HTTP GET**（keys API）；对主机只发只读 `ssh`，远端命令固定是
+     `docker inspect <容器> --format …`，容器名与 compose 目录按 POSIX 单引号字面量传递
+     （`shQuote`），远端 shell 不会解释其中的元字符；
+   - cookie jar **不是整表发送**：只发 domain / path / secure 与目标站点匹配的 cookie；
+   - 脚本**只读文件、不写文件**（不改仓库、不改部署机、不建缓存）——但它**仍会联网**：
+     一次 keys API `GET`（给 `--ssh` 时再加一次 ssh 登录），所以"只读"指**读语义**，不是"离线"；
+   - 站点与主机**必须显式给**（`--base-url`/`GLITCHTIP_BASE_URL`、`--ssh`/`GLITCHTIP_SSH_HOST`）：
+     脚本不含任何生产地址默认值，无参数运行直接 exit 2，不会对任何真实环境发起请求；
+   - 退出码：**0** = 核查完成且未发现缺陷、**1** = 核查完成且发现缺陷（如 DSN 是 loopback）、
+     **2** = 未能完成核查（用法/参数错误、缺凭据、未预期崩溃 fail-closed）—— `2` 不是"有缺陷"；
+   - `--ssh` 的取值会作为 ssh 的登录目标参数**原样传给 ssh**，请只传 `user@host` 形状的可信值。
 
    脚本的 `--apply` 模式**只打印**建议命令（不代执行），且必须额外给 `--yes` 才肯继续。
 

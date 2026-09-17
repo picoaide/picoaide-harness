@@ -22,6 +22,18 @@ function tempDir() {
   return mkdtempSync(join(tmpdir(), 'dsh-memory-advisor-dir-'))
 }
 
+/**
+ * advisor 的**进程级** single-reviewer claim 键（lib/advisor/index.js 的
+ * `REVIEWER_KEY`）。测试里没有 dispose 路径，本文件第一次 `apply()` 会一直
+ * 持有它 —— 后续 apply 全部走 `non-reviewer instance — …/API skipped` 早退。
+ *
+ * TQ-3（2026-09-17 审计）：HTTP 面用例正是被这个早退掩盖的——原来的
+ * `ctx.state.routes.length > 0` 数的是**别的插件**（lib/api.js / skills-manager）
+ * 的路由，删掉 advisor 的 `ctx.inject(['webServer'], …)` 注册照样绿。要让断言
+ * 真的压在 advisor 的注册上，就得先让本用例成为 claim 持有者。
+ */
+const REVIEWER_CLAIM_KEY = '__dshMemoryEvolveAdvisorReviewer__'
+
 function clean(dir) {
   rmSync(dir, { recursive: true, force: true })
 }
@@ -93,12 +105,19 @@ test('P1-B 记忆目录被普通文件占位（ENOTDIR）：apply 不抛、memor
 test('P1-B 写入路径会自建目录（懒建不丢功能）', () => {
   const dir = tempDir()
   try {
+    // 释放前面用例占住的 claim，让本次 apply 真的装配 advisor（含 HTTP 面）
+    delete globalThis[REVIEWER_CLAIM_KEY]
     const ctx = fakeCtx()
     apply(ctx, { memoryDir: dir, advisorEnabled: true, advisorProvider: 'p', advisorModel: 'm' })
     // apply 之后 advisor 数据目录仍不存在（懒建），但 advisor 的 HTTP 面已挂上
     // （功能面完整：命令注册受"评审员实例"claim 影响，这里钉住路由这一确定性信号）
     assert.equal(existsSync(join(dir, 'advisor')), false, '装载期不得建 advisor 目录')
-    assert.ok(ctx.state.routes.length > 0, 'advisor HTTP 面应在装载期挂上（功能未因懒建退化）')
+    // TQ-3（2026-09-17 审计）：必须点名校验 advisor **自己注册的那条路由**
+    // （lib/advisor/api.js 的 BASE = /memory-evolve/api/advisor）。只数
+    // `routes.length > 0` 会把别的插件的路由算成 advisor 的面。
+    const advisorRoute = ctx.state.routes.find((route) => route?.path === '/memory-evolve/api/advisor')
+    assert.ok(advisorRoute, 'advisor HTTP 面必须由本插件注册（懒建不得让功能退化）')
+    assert.equal(advisorRoute.kind, 'prefix', 'advisor HTTP 面必须是 prefix 路由（子端点 /status 等挂在其下）')
   } finally {
     clean(dir)
   }

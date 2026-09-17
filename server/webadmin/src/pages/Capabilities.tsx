@@ -42,7 +42,7 @@ interface ApprovalRow {
   grants_base: string
   preview_path: string
   conflict?: boolean
-  /** 上下架状态（App 级，2026-09-15）：仅技能行的组织库上下架开关使用。 */
+  /** 上下架状态（App 级，2026-09-15；智能体行 2026-09-17 起同样下发）。 */
   enabled?: boolean
 }
 
@@ -170,7 +170,12 @@ export default function Capabilities() {
     }
   }
 
-  /** 组织共享技能上下架（2026-09-15）：apps.enabled 级开关，员工可见性与下载同时受控。 */
+  /**
+   * 组织共享技能/智能体上下架（技能 2026-09-15，智能体 2026-09-17 SG-4）：
+   * apps.enabled 级开关，员工可见性与下载同时受控。两 kind 的服务端端点对称
+   * （/shared-skills/:name/enabled 与 /agent-presets/:name/enabled），都挂在
+   * 行的 grants_base 下，故这里不需要按 kind 分支。
+   */
   const setEnabled = async (row: ApprovalRow, enabled: boolean) => {
     if (busy) return
     setBusy(row.name + row.version + 'enabled')
@@ -305,7 +310,7 @@ export default function Capabilities() {
                     </TableCell>
                     <TableCell>
                       <Badge variant={meta.variant}>{meta.label}</Badge>
-                      {row.status === 'approved' && row.kind === 'skill' && row.enabled === false && (
+                      {row.status === 'approved' && row.enabled === false && (
                         <Badge variant="destructive" className="ml-1" title="已下架：员工目录不可见且不可下载（数据保留）">已下架</Badge>
                       )}
                     </TableCell>
@@ -352,7 +357,7 @@ export default function Capabilities() {
                             <ShieldCheck className="h-4 w-4" />
                           </Button>
                         )}
-                        {row.status === 'approved' && row.kind === 'skill' && (
+                        {row.status === 'approved' && (
                           row.enabled === false ? (
                             <Button size="sm" variant="outline" disabled={isBusy}
                               onClick={() => { void setEnabled(row, true) }}

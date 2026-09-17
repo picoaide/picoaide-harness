@@ -33,6 +33,31 @@ let captured = ''
 // 旧代码确实没有 BOM,但那个断言证明不了)。这里同时取文本与字节。
 let bytes: Uint8Array | null = null
 
+// ---------------------------------------------------------------------------
+// 等"真的加载完",不要等"发过请求"(2026-09-17 Gate 红的根因)
+//
+// 原先各用例统一写 `await waitFor(() => expect(mockRequest).toHaveBeenCalled())` ——
+// 只要**任意**一个请求发出就满足(可能是 /audit/settings),此刻列表响应还没落地、
+// 组件 state 还是空数组,于是读 state 的断言拿到空数据。CI 负载下实测:导出的 CSV
+// 只有表头(`expected 'id,username,action,detail,created_at' to contain '=cmd|…'`)。
+// 判据必须是"渲染结果"而不是"调用记录":
+//   * waitForAuditRows  —— 表头 + N 行数据都在 DOM 里(= logs 已落 state);
+//   * waitForAuditLoad  —— 列表响应已落地(settings 请求只在 logs 落 state 之后发出)。
+// ---------------------------------------------------------------------------
+const AUDIT_SETTINGS_PATH = '/api/server/admin/audit/settings'
+
+/** 等到审计表格出现 rows 行数据(不含表头行)。 */
+async function waitForAuditRows(rows: number): Promise<void> {
+  await waitFor(() => expect(screen.getAllByRole('row')).toHaveLength(rows + 1))
+}
+
+/** 等到列表响应已落地(settings 与 logs 同属 load() 的一条链,settings 在后)。 */
+async function waitForAuditLoad(): Promise<void> {
+  await waitFor(() =>
+    expect(mockRequest.mock.calls.some(([p]) => String(p) === AUDIT_SETTINGS_PATH)).toBe(true),
+  )
+}
+
 beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
@@ -52,7 +77,8 @@ beforeEach(() => {
 
 async function exportCsv(): Promise<string> {
   render(<Audit />)
-  await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+  // 必须等数据行出现再点导出:导出读的是组件 state,提前点只会拿到表头。
+  await waitForAuditRows(LOGS.length)
   fireEvent.click(screen.getByRole('button', { name: /导出 CSV/ }))
   await waitFor(() => {
     expect(captured).not.toBe('')
@@ -106,7 +132,7 @@ describe('审计员访问审计保留策略(R7-RV-2 残留)', () => {
   it('auditor 能看到保留天数,但输入框只读、没有保存按钮', async () => {
     setCurrentAdmin(AUDITOR)
     render(<Audit />)
-    await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+    await waitForAuditLoad()
 
     const input = screen.getByLabelText('审计保留天数') as HTMLInputElement
     expect(input.disabled || input.readOnly).toBe(true)
@@ -123,7 +149,7 @@ describe('审计员访问审计保留策略(R7-RV-2 残留)', () => {
   it('auditor 的保留天数控件是只读的,且任何交互都不会触发 PUT', async () => {
     setCurrentAdmin(AUDITOR)
     render(<Audit />)
-    await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+    await waitForAuditRows(LOGS.length)
     const input = screen.getByLabelText('审计保留天数') as HTMLInputElement
     // jsdom 的 fireEvent 会绕过浏览器"只读输入不触发 change"的语义,所以这里钉
     // DOM 属性 + 真正的护栏(saveRetention 无权限直接返回,绝不发 PUT)。
@@ -136,7 +162,7 @@ describe('审计员访问审计保留策略(R7-RV-2 残留)', () => {
   it('只有 audit:read 的部分权限集同样只读(等价形态)', async () => {
     setCurrentAdmin(READONLY)
     render(<Audit />)
-    await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+    await waitForAuditRows(LOGS.length)
     expect((screen.getByLabelText('审计保留天数') as HTMLInputElement).readOnly).toBe(true)
     expect(screen.queryByRole('button', { name: /保存策略/ })).toBeNull()
     expect(screen.getByRole('button', { name: /导出 CSV/ })).toBeInTheDocument()
@@ -145,7 +171,7 @@ describe('审计员访问审计保留策略(R7-RV-2 残留)', () => {
   it('super_admin 仍然可编辑并可保存(不误伤)', async () => {
     setCurrentAdmin(SUPER)
     render(<Audit />)
-    await waitFor(() => expect(mockRequest).toHaveBeenCalled())
+    await waitForAuditRows(LOGS.length)
     const input = screen.getByLabelText('审计保留天数') as HTMLInputElement
     expect(input.disabled).toBe(false)
     fireEvent.change(input, { target: { value: '30' } })
@@ -155,4 +181,175 @@ describe('审计员访问审计保留策略(R7-RV-2 残留)', () => {
       expect(mockRequest.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')).toBe(true)
     })
   })
+})
+
+// ---------------------------------------------------------------------------
+// SG-5(审计 2026-09-17,r2 server-gateway P3):本区间新增的组织共享库审计动作
+// (shared_skill_enable/disable,以及 SG-4 新增的 agent_preset_enable/disable)
+// 必须进 ACTION_LABEL —— 否则筛选下拉里没有它们、行内还会回落成裸 id。
+// ---------------------------------------------------------------------------
+describe('审计动作表覆盖组织共享库动作(SG-5)', () => {
+  const ORG_LOGS = [
+    { id: 11, username: 'boss', action: 'shared_skill_disable', detail: 'codeql', created_at: '2026-09-17T10:00:00+08:00' },
+    { id: 12, username: 'boss', action: 'shared_skill_enable', detail: 'codeql', created_at: '2026-09-17T10:00:01+08:00' },
+    { id: 13, username: 'boss', action: 'agent_preset_disable', detail: 'ppt-gen', created_at: '2026-09-17T10:00:02+08:00' },
+  ]
+
+  beforeEach(() => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/server/admin/audit?')) return { logs: ORG_LOGS, total: ORG_LOGS.length }
+      if (String(path).startsWith('/api/server/admin/audit/settings')) return { retention_days: 180 }
+      return {}
+    })
+  })
+
+  it('行内渲染中文标签,不回落成裸 action id', async () => {
+    setCurrentAdmin(SUPER)
+    render(<Audit />)
+    await waitForAuditRows(ORG_LOGS.length)
+    expect(await screen.findByText('下架共享技能')).toBeInTheDocument()
+    expect(screen.getByText('重新上架共享技能')).toBeInTheDocument()
+    expect(screen.getByText('下架智能体')).toBeInTheDocument()
+    for (const raw of ['shared_skill_disable', 'shared_skill_enable', 'agent_preset_disable']) {
+      expect(screen.queryByText(raw)).toBeNull()
+    }
+  })
+
+  it('筛选下拉可选这两个动作(后端 ?action= 精确匹配的唯一入口)', async () => {
+    setCurrentAdmin(SUPER)
+    render(<Audit />)
+    await waitForAuditRows(ORG_LOGS.length)
+    fireEvent.click(screen.getByRole('combobox'))
+    expect(await screen.findByRole('option', { name: '下架共享技能' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: '重新上架共享技能' })).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SG-5 残留(r3v 复核,2026-09-17):上一轮只补了组织共享库那一族,漏了
+// `agent_preset_revoke`(server/internal/agentshare/routes.go 的撤销分支)以及
+// capability_lock / capability_unlock / skill_normalize 等一批**服务端一直在写**
+// 的动作 —— 它们在表里回落成裸 id、在筛选下拉里选不到(后端 ?action= 本来就支持)。
+//
+// 下面的清单 = 服务端全部写点(repo 全量 grep `AuditLog(` 的第三个实参,含
+// `action := …` 的双分支与 decide/applyGrant 的参数)。**冻结契约**:服务端新增
+// 审计写点时必须同步这张表 + ACTION_LABEL;少一条 ⇒ 本用例红。
+// kebab 之外的历史动作(mcp_*/kb_*)只在 ACTION_LABEL 里保留(存量行),不在此表。
+// ---------------------------------------------------------------------------
+const SERVER_ACTIONS: ReadonlyArray<readonly [action: string, label: string]> = [
+  ['skill_create', '上架技能'],
+  ['skill_update', '更新技能'],
+  ['skill_disable', '下架技能'],
+  ['skill_enable', '重新上架技能'],
+  ['skill_grant', '技能授权'],
+  ['skill_revoke', '技能撤销授权'],
+  ['skill_grants_replace', '技能部门授权替换'],
+  ['skill_normalize', '规范化技能包'],
+  ['shared_skill_upload', '上传共享技能'],
+  ['shared_skill_approve', '通过共享技能'],
+  ['shared_skill_reject', '拒绝共享技能'],
+  ['shared_skill_delete', '删除共享技能'],
+  ['shared_skill_qualify', '设置共享技能质量'],
+  ['shared_skill_grant', '共享技能授权'],
+  ['shared_skill_revoke', '共享技能撤销授权'],
+  ['shared_skill_enable', '重新上架共享技能'],
+  ['shared_skill_disable', '下架共享技能'],
+  ['agent_preset_upload', '上传智能体'],
+  ['agent_preset_approve', '通过智能体'],
+  ['agent_preset_reject', '拒绝智能体'],
+  ['agent_preset_delete', '删除智能体'],
+  ['agent_preset_qualify', '设置智能体质量'],
+  ['agent_preset_grant', '智能体授权'],
+  ['agent_preset_revoke', '智能体撤销授权'],
+  ['agent_preset_enable', '重新上架智能体'],
+  ['agent_preset_disable', '下架智能体'],
+  ['agent_create', '上架市场智能体'],
+  ['agent_update', '更新市场智能体'],
+  ['agent_update_meta', '更新市场智能体信息'],
+  ['agent_disable', '下架市场智能体'],
+  ['agent_enable', '重新上架市场智能体'],
+  ['agent_grant', '市场智能体授权'],
+  ['agent_revoke', '市场智能体撤销授权'],
+  ['agent_grants', '市场智能体部门授权替换'],
+  ['capability_lock', '锁定能力名称'],
+  ['capability_unlock', '解锁能力名称'],
+  ['app_owner_transfer', '转移能力归属'],
+  ['user_create', '创建用户'],
+  ['user_update', '更新用户'],
+  ['user_delete', '删除用户'],
+  ['user_dept', '用户部门变更'],
+  ['user_tokens_revoked', '吊销令牌'],
+  ['role_change', '变更角色'],
+  ['dept_create', '新建部门'],
+  ['dept_update', '更新部门'],
+  ['dept_delete', '删除部门'],
+  ['auth_config', '修改认证配置'],
+  ['ldap_sync', 'LDAP 同步'],
+  ['audit_retention_change', '审计保留策略变更'],
+  ['login_success', '登录成功'],
+  ['login_fail', '登录失败'],
+  ['password_change', '修改密码'],
+  ['admin_password_change', '修改管理员密码'],
+  ['admin_mfa_login', '管理员 MFA 登录'],
+  ['admin_mfa_enable', '开启管理员 MFA'],
+  ['admin_mfa_disable', '关闭管理员 MFA'],
+  ['admin_mfa_reset', '重置管理员 MFA'],
+  ['balance_adjust', '调整余额'],
+  ['balance_grant', '余额发放'],
+  ['balance_settings', '余额策略变更'],
+  ['gateway_config', '网关配置变更'],
+  ['provider_create', '新建上游'],
+  ['provider_update', '更新上游'],
+  ['provider_delete', '删除上游'],
+  ['model_create', '新建模型'],
+  ['model_update', '更新模型'],
+  ['model_delete', '删除模型'],
+  ['connector_create', '新建连接器'],
+  ['connector_update', '更新连接器'],
+  ['connector_enabled', '连接器上下架'],
+  ['connector_delete', '删除连接器'],
+  ['report_subscription_create', '新建报表订阅'],
+  ['report_subscription_update', '更新报表订阅'],
+  ['report_subscription_delete', '删除报表订阅'],
+]
+
+describe('审计动作表覆盖服务端全部写点(SG-5 残留)', () => {
+  it('清单本身自洽:标签唯一(下拉里同名两项会让管理员无法分辨)', () => {
+    const labels = SERVER_ACTIONS.map(([, label]) => label)
+    expect(new Set(labels).size).toBe(SERVER_ACTIONS.length)
+    expect(new Set(SERVER_ACTIONS.map(([action]) => action)).size).toBe(SERVER_ACTIONS.length)
+  })
+
+  it('每一行都渲染中文标签(不回落成裸 action id),且筛选下拉可选', async () => {
+    const logs = SERVER_ACTIONS.map(([action], i) => ({
+      id: 100 + i,
+      username: 'boss',
+      action,
+      detail: `${action}-detail`,
+      created_at: '2026-09-17T10:00:00+08:00',
+    }))
+    mockRequest.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/server/admin/audit?')) return { logs, total: logs.length }
+      if (String(path).startsWith('/api/server/admin/audit/settings')) return { retention_days: 180 }
+      return {}
+    })
+    setCurrentAdmin(SUPER)
+    render(<Audit />)
+    await waitForAuditRows(logs.length)
+
+    for (const [action, label] of SERVER_ACTIONS) {
+      // 裸 id 一个都不许出现在表里(出现 = 未登记,row badge 会回落成 outline + 原串)。
+      expect(screen.queryByText(action)).toBeNull()
+      expect(screen.getAllByText(label).length).toBeGreaterThan(0)
+    }
+
+    fireEvent.click(screen.getByRole('combobox'))
+    for (const [, label] of SERVER_ACTIONS) {
+      expect(screen.getByRole('option', { name: label })).toBeInTheDocument()
+    }
+    // 显式预算(S10-2 修复轮 5):本用例一次性渲染 74 条服务端写入动作,再逐条
+    // queryByText/getByRole —— 单机实测约 4.35s,已占满 vitest 默认 5000ms 的
+    // 87%(CI 的 gate 与其他 job 并行、或本机与 Go 套件同跑时实测超时过一次)。
+    // 显式 20s 只放宽这一个用例的上限,不放宽断言口径。
+  }, 20_000)
 })

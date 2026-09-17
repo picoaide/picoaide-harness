@@ -144,16 +144,27 @@ func listVisible(db *sql.DB) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 			return
 		}
+		// 上下架状态(App 级,2026-09-15):客户端面下架与不存在同语义,所以必须
+		// **先取后分支**。审计 2026-09-15 S11-2:此前只在末尾取 enabled 当作
+		// 响应字段,admin 分支只按审核状态过滤,而客户端下载路由恒以
+		// admin=false 构造(routes.go:76,与调用者是否管理员无关),于是管理员
+		// 在客户端看到的下架行点一次必 404 —— 管理面清单仍全量(见 listAll)。
+		enabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindSkill)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
 		var list []serverstore.SharedSkill
 		if u.IsAdmin {
 			// Admins see everything already approved (admin 恒全量,不落授权表).
+			// 下架行例外:与不存在同语义(对齐 agentshare.listVisible 的 `&& enabled[...]`)。
 			all, err := serverstore.ListSharedSkills(db, "")
 			if err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
 			}
 			for _, s := range all {
-				if s.Status == serverstore.SharedSkillApproved {
+				if s.Status == serverstore.SharedSkillApproved && enabled[s.Name] {
 					list = append(list, s)
 				}
 			}
@@ -169,12 +180,8 @@ func listVisible(db *sql.DB) gin.HandlerFunc {
 				return
 			}
 		}
-		// 上下架状态（App 级）：管理端要据此渲染「已下架」与切换按钮，一次批量取。
-		enabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindSkill)
-		if err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-			return
-		}
+		// enabled 字段保留(客户端不消费,审计 2026-09-15 S11-2):列出的行都已按
+		// 上面那份 map 过滤,故此处恒为 true;管理端渲染「已下架」走 listAll。
 		out := make([]gin.H, 0, len(list))
 		for _, s := range list {
 			row := rowJSON(s)

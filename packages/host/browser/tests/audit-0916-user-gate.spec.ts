@@ -9,7 +9,13 @@
  * 0 秒返回。本文件盯住三条修复：预算不变量、模型面可见性、客户端提示。
  */
 import { describe, expect, it } from 'vitest'
-import { BROWSER_TOOL_TIMEOUT_MS, USER_GATE_RESERVE_MS, USER_GATE_TIMEOUT_MS } from '../src/budgets.ts'
+import {
+  BROWSER_TOOL_TIMEOUT_MS,
+  BROWSER_WAIT_FOR_DEADLINE_MS,
+  USER_GATE_RESERVE_MS,
+  USER_GATE_TIMEOUT_MS,
+  WAIT_FOR_MAX_MS,
+} from '../src/budgets.ts'
 import { TabPool } from '../src/pool.ts'
 import { applyBrowserTools } from '../src/tools.ts'
 import type { BrowserRuntime } from '../src/runtime.ts'
@@ -20,6 +26,67 @@ interface RegisteredTool {
   timeoutMs?: number
   execute: (args: unknown, exec: unknown) => Promise<Record<string, unknown>>
   output: { render: (args: unknown, value: unknown) => Array<{ type: string; text?: string }> }
+}
+
+/**
+ * 全部浏览器工具及其**应有**的注册预算（2026-09-17 审计 S03-03）。
+ *
+ * 逐个列出而不是从 tools.ts 反推：这张表就是"注册面"的清单——新增工具必须在这里
+ * 出现（下面的集合断言会红），改名/删工具同理。旧用例只抽样了 `browser_list_tabs`
+ * 一个，把 `interactSpecs` 三个工具的 `timeoutMs` 删掉整套测试仍然全绿（变异已证）。
+ */
+const EXPECTED_DEADLINES: Record<string, number> = {
+  browser_open: BROWSER_TOOL_TIMEOUT_MS,
+  browser_navigate: BROWSER_TOOL_TIMEOUT_MS,
+  browser_reload: BROWSER_TOOL_TIMEOUT_MS,
+  browser_go_back: BROWSER_TOOL_TIMEOUT_MS,
+  browser_go_forward: BROWSER_TOOL_TIMEOUT_MS,
+  browser_list_tabs: BROWSER_TOOL_TIMEOUT_MS,
+  browser_switch_tab: BROWSER_TOOL_TIMEOUT_MS,
+  browser_close_tab: BROWSER_TOOL_TIMEOUT_MS,
+  browser_click: BROWSER_TOOL_TIMEOUT_MS,
+  browser_type: BROWSER_TOOL_TIMEOUT_MS,
+  browser_select: BROWSER_TOOL_TIMEOUT_MS,
+  browser_press: BROWSER_TOOL_TIMEOUT_MS,
+  browser_scroll: BROWSER_TOOL_TIMEOUT_MS,
+  browser_fill_form: BROWSER_TOOL_TIMEOUT_MS,
+  browser_upload_file: BROWSER_TOOL_TIMEOUT_MS,
+  browser_get_snapshot: BROWSER_TOOL_TIMEOUT_MS,
+  browser_get_text: BROWSER_TOOL_TIMEOUT_MS,
+  browser_screenshot: BROWSER_TOOL_TIMEOUT_MS,
+  // 唯一的长预算：用户闸 + 条件等待上限 + 余量（budgets.ts 是唯一真源）。
+  browser_wait_for: BROWSER_WAIT_FOR_DEADLINE_MS,
+  browser_eval: BROWSER_TOOL_TIMEOUT_MS,
+  browser_bookmarks_add: BROWSER_TOOL_TIMEOUT_MS,
+  browser_bookmarks_list: BROWSER_TOOL_TIMEOUT_MS,
+  browser_bookmarks_remove: BROWSER_TOOL_TIMEOUT_MS,
+  browser_history_search: BROWSER_TOOL_TIMEOUT_MS,
+  browser_download: BROWSER_TOOL_TIMEOUT_MS,
+  browser_downloads_list: BROWSER_TOOL_TIMEOUT_MS,
+  browser_downloads_remove: BROWSER_TOOL_TIMEOUT_MS,
+  browser_takeover: BROWSER_TOOL_TIMEOUT_MS,
+  browser_fill_credentials: BROWSER_TOOL_TIMEOUT_MS,
+  browser_clear_data: BROWSER_TOOL_TIMEOUT_MS,
+  browser_credentials_list: BROWSER_TOOL_TIMEOUT_MS,
+}
+
+/**
+ * 注册**全部**工具。runtime 只需要一个惰性桩：工具定义（含 timeoutMs/description）
+ * 在注册期求值，execute/render 里的 runtime 引用此时不会被解引用。
+ */
+function registerAllTools(): Map<string, RegisteredTool> {
+  const tools = new Map<string, RegisteredTool>()
+  const stub: unknown = new Proxy(function () {}, {
+    get: () => stub,
+    apply: () => stub,
+    construct: () => stub,
+  })
+  const ctx = {
+    tools: { register: (definition: RegisteredTool) => { tools.set(definition.name, definition); return () => {} } },
+    systemPrompt: { section: () => () => {} },
+  } as unknown as Parameters<typeof applyBrowserTools>[0]
+  applyBrowserTools(ctx, stub as BrowserRuntime)
+  return tools
 }
 
 /** 只实现 list_tabs 用到的那几个入口：这是模型面出口的最小面。 */
@@ -55,17 +122,42 @@ describe('浏览器预算不变量（2026-09-16）', () => {
     expect(BROWSER_TOOL_TIMEOUT_MS - USER_GATE_TIMEOUT_MS).toBe(USER_GATE_RESERVE_MS)
     expect(USER_GATE_RESERVE_MS).toBeGreaterThanOrEqual(10_000)
     expect(USER_GATE_TIMEOUT_MS).toBeGreaterThan(0)
+    // wait_for 的预算必须覆盖 闸门 + 条件等待上限 + 余量，否则一次满额等待会被
+    // timeout-policy 换成笼统超时（2026-09-16 R2-E4）。
+    expect(BROWSER_WAIT_FOR_DEADLINE_MS).toBeGreaterThan(USER_GATE_TIMEOUT_MS + WAIT_FOR_MAX_MS)
   })
 
-  it('每个浏览器工具注册的预算就是 BROWSER_TOOL_TIMEOUT_MS（单一真源）', () => {
-    const tool = registerListTabs({ controlled: false, busy: false, busyTool: '', awaitingRelease: false, awaitingReleaseTool: '' })
-    expect(tool.timeoutMs).toBe(BROWSER_TOOL_TIMEOUT_MS)
+  it('**每一个**注册工具的预算都来自 budgets.ts（单一真源；不是抽样一个）', () => {
+    const tools = registerAllTools()
+    // 注册面完整性：少注册/改名都算回归（这条同时钉住"清单与实现同步"）。
+    expect([...tools.keys()].sort()).toEqual(Object.keys(EXPECTED_DEADLINES).sort())
+    const wrong: string[] = []
+    for (const [name, expected] of Object.entries(EXPECTED_DEADLINES)) {
+      const actual = tools.get(name)?.timeoutMs
+      if (actual !== expected) wrong.push(`${name}: ${String(actual)} ≠ ${String(expected)}`)
+    }
+    // 预算缺失（undefined）也落在这里：上游 timeout-policy 会退回它自己的缺省，
+    // 现场表现就是"闸门还没走完、工具先被超时换掉"。
+    expect(wrong).toEqual([])
+    // 兜底扫一遍：任何注册工具都不许漏掉 deadline。
+    for (const [name, tool] of tools) {
+      expect(tool.timeoutMs, `${name} 没有注册 timeoutMs`).toBeTypeOf('number')
+    }
   })
 
   it('池子的默认闸门预算取自 budgets.ts（部署走的正是这个缺省）', () => {
     // 生产路径上 index.ts 不覆盖 userGateTimeoutMs，所以这个缺省值就是现场行为。
     // 回归护栏：把 300s 改回去会让上面的不等式测试变红。
     expect(new TabPool().options.userGateTimeoutMs).toBe(USER_GATE_TIMEOUT_MS)
+  })
+
+  it('配额等待预算也必须留在工具预算之内（2026-09-17 审计 S01-1）', () => {
+    // 池子满了以后 reserveTab 会等到 waitTimeoutMs；它比工具 deadline 长的话，
+    // 排队中的 browser_open 只会拿到 `tool call timed out after 30000ms`，
+    // 池子自己的 "tab limit reached"/"timed out waiting for a tab slot" 全被吞掉。
+    const pool = new TabPool()
+    expect(pool.options.waitTimeoutMs).toBeLessThan(BROWSER_TOOL_TIMEOUT_MS)
+    expect(pool.options.waitTimeoutMs + USER_GATE_TIMEOUT_MS).toBeLessThan(BROWSER_TOOL_TIMEOUT_MS)
   })
 })
 

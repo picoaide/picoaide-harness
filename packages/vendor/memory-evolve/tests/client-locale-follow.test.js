@@ -124,10 +124,22 @@ test('client 入口**注册**了解析器（承重接线，删掉即静默回退
     'client 入口必须把 locale 快照的 active 注册给 clientLang（否则私有字典退回系统语言）',
   )
   assert.match(entry, /ctx\.effect\([\s\S]{0,400}?setClientLocaleResolver\(null\)/u, '必须在 effect 清理里注销解析器')
-  // 打包产物里也必须真的有这两个符号（src 改了但没重建 bundle = 用户看不到）
+  // TQ-8（2026-09-17 审计）：原来只 `bundle.includes('setClientLocaleResolver')`
+  // —— 找的是**符号**，而 inlined 模块定义本身（lib/client.js:72）就满足它，
+  // 于是删掉两处**注册调用点**（setter + effect 清理里的 disposer）照样绿，
+  // 而这正是本用例要拦的场景（src 修了但 bundle 是旧的 = 用户侧静默回退系统语言）。
+  // 现在钉**调用本身**：注册的箭头函数里读 locale 快照的 active；清理函数里注销。
   const bundle = readFileSync(join(PACKAGE_ROOT, 'lib', 'client.js'), 'utf8')
-  assert.ok(bundle.includes('setClientLocaleResolver'), 'lib/client.js 必须已重建（含 resolver）')
-  assert.ok(bundle.includes('getSnapshot()'), 'lib/client.js 里应有 locale 快照读取')
+  assert.match(
+    bundle,
+    /setClientLocaleResolver\(\(\) *=> *\{?[\s\S]{0,200}?getSnapshot\(\)\.active/u,
+    'lib/client.js 必须含 setClientLocaleResolver(… getSnapshot().active …) 注册调用（只有符号＝接线没了）',
+  )
+  assert.match(
+    bundle,
+    /setClientLocaleResolver\(null\)/u,
+    'lib/client.js 的 effect 清理里必须注销解析器（否则重挂后悬空）',
+  )
 })
 
 test('仍带私有字典的文件都 import 了 clientLang', () => {

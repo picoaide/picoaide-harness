@@ -143,6 +143,27 @@ export function inferNodeTypeFromPath(path) {
 }
 
 /**
+ * 节点 meta 归一（ME-4，2026-09-17 二审）。
+ *
+ * 前端卡片用 `meta.size` / `meta.mtime` 渲染「1.2 MB · 未验证」那行
+ * （canvas-grok/CanvasCard.tsx:149/159），而整板归一（writeCanvas）与 GET
+ * 投影此前都没有这个字段：一次保存或一次刷新/切会话就把刚看到的大小与
+ * 状态文字丢掉（有损往返；unverified 徽标是另一个字段所以还在，现象更
+ * 误导——标着未验证却没了尺寸行）。这里按白名单保留两个**字符串**字段
+ * 并限长（未知键照旧丢弃；mtime 是展示层文案，与既有 scopeLabel 同口径）。
+ *
+ * @param {unknown} input - 前端传来的 meta（可能是 localStorage 时代遗留的任意形状）。
+ * @returns {{ size?: string, mtime?: string } | undefined} 空对象归一为 undefined。
+ */
+export function normalizeNodeMeta(input) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const size = typeof input.size === 'string' && input.size.trim() !== '' ? input.size.trim().slice(0, 32) : undefined
+  const mtime = typeof input.mtime === 'string' && input.mtime.trim() !== '' ? input.mtime.trim().slice(0, 64) : undefined
+  if (size === undefined && mtime === undefined) return undefined
+  return { ...(size !== undefined ? { size } : {}), ...(mtime !== undefined ? { mtime } : {}) }
+}
+
+/**
  * 读取画板整板状态；文件不存在返回空板。任何损坏都回退空板
  * （不抛——前端有种子兜底，后端空板是合法初始态）。
  * @param {object} config - resolved plugin config。
@@ -203,6 +224,8 @@ export function writeCanvas(config, patch, rev) {
       projectId: typeof n.projectId === 'string' ? n.projectId : undefined,
       path: typeof n.path === 'string' && n.path !== '' ? n.path.slice(0, 1024) : undefined,
       content: typeof n.content === 'string' ? n.content.slice(0, CANVAS_NOTE_MAX_BYTES) : undefined,
+      // ME-4：meta 必须随整板保存落盘，否则刷新后卡片的大小/未验证行消失。
+      meta: normalizeNodeMeta(n.meta),
       placement: {
         x: Number.isFinite(Number(p.x)) ? Number(p.x) : 0,
         y: Number.isFinite(Number(p.y)) ? Number(p.y) : 0,
@@ -282,6 +305,8 @@ export function normalizeNode(input, owner) {
     projectId,
     path,
     content,
+    // ME-4：与 writeCanvas 同一条契约（未知键丢弃、两字段限长）。
+    meta: normalizeNodeMeta(input?.meta),
     placement,
     aiPlaced: input?.aiPlaced === true,
     unverified: Boolean(path) && !existsSync(path),
@@ -947,6 +972,9 @@ export function installCanvas(ctx, config, resolveCwd, resolveSessionName) {
                   ? (resolveSessionName?.(n.sessionId) ?? undefined)
                   : undefined,
                 path: n.path, content: n.content, placement: n.placement,
+                // ME-4：读回投影必须带 meta（否则保存过的大小/未验证文字在
+                // 刷新或切会话后无声消失）；历史脏值同样过一遍白名单。
+                meta: normalizeNodeMeta(n.meta),
                 aiPlaced: n.aiPlaced === true, unverified: n.unverified === true,
                 createdAt: n.createdAt,
               })),
