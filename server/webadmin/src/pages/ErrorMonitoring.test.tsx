@@ -55,6 +55,27 @@ beforeEach(() => {
 })
 
 describe('ErrorMonitoring 错误监控页', () => {
+  it('客户端状态返回前不渲染计数(不闪"0 台")', async () => {
+    // 2026-09-17 审计 P3：计数块原先无条件渲染 `?? 0`，数据到达前先闪一遍
+    // 「已启用上报: 0 台」——与本卡片自己的"绝不把没有数据渲染成一切正常"冲突。
+    let releaseClients!: () => void
+    const clientsGate = new Promise<void>((resolve) => { releaseClients = resolve })
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.endsWith('/gateway/error-reporting/clients')) {
+        await clientsGate
+        return CLIENTS as any
+      }
+      if (path.endsWith('/gateway')) return GATEWAY as any
+      throw new Error(`unexpected path: ${path}`)
+    })
+    render(<ErrorMonitoring />)
+    expect(await screen.findByText(/客户端上报状态加载中/)).toBeInTheDocument()
+    // 关键断言：加载期间**不得**出现任何计数(尤其是 0 台)。
+    expect(screen.queryByText(/已启用上报:/)).toBeNull()
+    releaseClients()
+    expect(await screen.findByText(/已启用上报:/)).toBeInTheDocument()
+  })
+
   it('回填错误监控域配置(不含网关其他字段)', async () => {
     render(<ErrorMonitoring />)
     expect(await screen.findByLabelText(DSN_LABEL)).toHaveValue(GATEWAY.error_reporting_dsn)
@@ -254,8 +275,8 @@ describe('ErrorMonitoring 错误监控页', () => {
   it('展示客户端上报状态(含失败原因)', async () => {
     render(<ErrorMonitoring />)
     expect(await screen.findByText(/已启用上报:/)).toBeInTheDocument()
-    // 计数块是**无条件渲染**的（ErrorMonitoring.tsx 的四个 div 用 `?? 0`），它出现
-    // 不代表 clients 明细已落地 —— 明细断言必须自己等（同族竞态，2026-09-17 审计）。
+    // 计数块现在由 `clientsLoaded` 闸门控制（2026-09-17 审计 F2：失败/未落地时
+    // 不再闪"0 台"）；明细仍各自等自己的文本，不依赖计数块出现。
     expect(await screen.findByText(/u2\(初始化失败\): Sentry init 失败:invalid dsn/)).toBeInTheDocument()
     expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/gateway/error-reporting/clients')
     // 有数据时不得出现"尚无客户端上报状态"误导文案。

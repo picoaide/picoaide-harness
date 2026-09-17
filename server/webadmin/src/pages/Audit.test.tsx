@@ -162,6 +162,24 @@ describe('审计员访问审计保留策略(R7-RV-2 残留)', () => {
     expect(mockRequest.mock.calls.map(([p]) => String(p)).some((p) => p.includes('/audit/settings'))).toBe(true)
   })
 
+  it('保留策略未落地时不给出可点的保存(审计 F6:默认 180 会被写库)', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    mockRequest.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/server/admin/audit?')) {
+        await gate
+        return { logs: LOGS, total: LOGS.length }
+      }
+      if (String(path).startsWith('/api/server/admin/audit/settings')) return { retention_days: 180 }
+      return {}
+    })
+    setCurrentAdmin(SUPER)
+    render(<Audit />)
+    expect(screen.getByRole('button', { name: /保存策略/ })).toBeDisabled()
+    release()
+    await waitFor(() => expect(screen.getByRole('button', { name: /保存策略/ })).toBeEnabled())
+  })
+
   it('auditor 的保留天数控件是只读的,且任何交互都不会触发 PUT', async () => {
     setCurrentAdmin(AUDITOR)
     render(<Audit />)
@@ -317,6 +335,7 @@ const SERVER_ACTIONS: ReadonlyArray<readonly [action: string, label: string]> = 
   ['balance_grant', '余额发放'],
   ['balance_settings', '余额策略变更'],
   ['gateway_config', '网关配置变更'],
+  ['error_reporting_test', '错误上报连通性自检'],
   ['provider_create', '新建上游'],
   ['provider_update', '更新上游'],
   ['provider_delete', '删除上游'],

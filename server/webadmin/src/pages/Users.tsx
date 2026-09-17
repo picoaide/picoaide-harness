@@ -81,6 +81,9 @@ function fmtTime(s: string): string {
 export default function Users() {
   const navigate = useNavigate()
   const [users, setUsers] = useState<User[]>([])
+  // 2026-09-17 审计 F7：列表为空时的“暂无匹配用户”与“共 0 人”在**加载完成前**就渲染，
+  // 读起来像“确实没有用户”。加已加载闸门（失败也解除，避免永久加载态）。
+  const [loaded, setLoaded] = useState(false)
   const [depts, setDepts] = useState<Department[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -121,9 +124,12 @@ export default function Users() {
       setTotal(u.total)
       setPage(p)
       setError('') // 成功后清空页面级错误(中3)
+      setLoaded(true)
     } catch (err: any) {
       if (current !== loadSeq.current) return // P1-8: 过期响应不写错误
       setError(err.message)
+      // 失败也解除闸门：否则页面永久停在“加载中”，连“确实没有数据”都看不到。
+      setLoaded(true)
     }
   }, [])
 
@@ -485,7 +491,7 @@ export default function Users() {
               </TableCell>
             </TableRow>
           ))}
-          {users.length === 0 && (
+          {loaded && users.length === 0 && (
             <TableRow>
               <TableCell colSpan={9} className="border-0 p-0">
                 <EmptyState
@@ -501,7 +507,7 @@ export default function Users() {
       </Card>
       <div className="flex items-center gap-2">
         <Button size="sm" variant="outline" disabled={page <= 1} onClick={() => load(page - 1, q)}>上一页</Button>
-        <span className="text-sm text-muted-foreground">第 {page}/{pages} 页 · 共 {total} 人</span>
+        <span className="text-sm text-muted-foreground">{loaded ? `第 ${page}/${pages} 页 · 共 ${total} 人` : '加载中…'}</span>
         <Button size="sm" variant="outline" disabled={page >= pages} onClick={() => load(page + 1, q)}>下一页</Button>
       </div>
 

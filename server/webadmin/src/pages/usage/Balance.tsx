@@ -116,15 +116,26 @@ export default function UsageBalance() {
   // 每次点击都是 403,与 App 的"所有修改已禁用"横幅直接矛盾)。
   const canWrite = hasPermission(PERM_USER_WRITE)
 
+  // 2026-09-17 审计 F1：策略卡曾经用**员工列表**的 `loading` 当写面闸门，而
+  // `loadSummary` 既没有自己的 loading、catch 又是静默的 ⇒ `/users` 先回来、
+  // `/balance` 还在飞（或失败）时写面就解锁，草稿还是空串，点保存会把
+  // `monthly_amount` 写成 0（误清空）。闸门必须挂在"策略已落地"上。
+  const [summaryLoaded, setSummaryLoaded] = useState(false)
+  const [summaryError, setSummaryError] = useState('')
+
   const loadSummary = useCallback(async () => {
+    setSummaryError('')
     try {
       const s: BalanceSummary = await request(`${ADMIN_API}/balance`)
       setSummary(s)
       setDraftEnabled(s.settings.enabled)
       setDraftMode(s.settings.monthly_mode)
       setDraftAmount(s.settings.monthly_amount > 0 ? String(s.settings.monthly_amount) : '')
-    } catch {
-      /* 策略卡加载失败不阻断员工表 */
+      setSummaryLoaded(true)
+    } catch (e: any) {
+      // 不再静默吞错：策略没落地就保持写面锁死，并把原因显示出来。
+      setSummaryLoaded(false)
+      setSummaryError(e?.message || '发放策略加载失败')
     }
   }, [])
 
@@ -280,6 +291,10 @@ export default function UsageBalance() {
 
   const st = summary?.status
   const monthly = summary?.settings.monthly_amount ?? 0
+  // 2026-09-17 审计（P3 升级为真缺陷）：策略卡在 summary 落地前就渲染出可写控件，
+  // 而 draft* 是**空初值**；此时点「保存」会把空额度当成 0 提交（PUT /balance
+  // monthly_amount=0），等于一次误清空。加载期间一律禁用写面。
+  const writeLocked = !canWrite || !summaryLoaded
 
   return (
     <div className="space-y-6">
@@ -310,20 +325,28 @@ export default function UsageBalance() {
           </div>
           {canWrite && (
             <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={grantNow} disabled={saving || monthly <= 0}>
+              <Button variant="outline" onClick={grantNow} disabled={saving || writeLocked || monthly <= 0}>
                 <Gift className="mr-1 h-4 w-4" />立即补发本月
               </Button>
-              <Button onClick={saveSettings} disabled={saving}>
+              <Button onClick={saveSettings} disabled={saving || writeLocked}>
                 {saving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Check className="mr-1 h-4 w-4" />}保存
               </Button>
             </div>
           )}
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-3">
+          {/* 写面为什么锁着必须说清楚（审计 F1）：否则管理员只看到一排点不动的控件。 */}
+          {canWrite && (summaryError !== '' || !summaryLoaded) && (
+            <div className={`md:col-span-3 text-xs ${summaryError ? 'text-destructive' : 'text-muted-foreground'}`}>
+              {summaryError
+                ? `发放策略加载失败:${summaryError}（写面已锁定 —— 未拿到当前额度时保存会把空值当成 0 提交）`
+                : '发放策略加载中…（加载完成前写面锁定）'}
+            </div>
+          )}
           <div className="rounded-md border p-3">
             <div className="flex items-center justify-between">
               <Label htmlFor="bal-enabled" className="text-sm font-medium">余额闸门</Label>
-              <Switch id="bal-enabled" checked={draftEnabled} disabled={!canWrite} onCheckedChange={setDraftEnabled} />
+              <Switch id="bal-enabled" checked={draftEnabled} disabled={writeLocked} onCheckedChange={setDraftEnabled} />
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
               {draftEnabled
@@ -334,13 +357,13 @@ export default function UsageBalance() {
           <div className="rounded-md border p-3">
             <div className="text-sm font-medium">发放方式</div>
             <div className="mt-2 grid grid-cols-2 gap-2">
-              <button type="button" disabled={!canWrite} onClick={() => setDraftMode('add')}
-                className={cn('rounded-md border p-2 text-left text-xs', draftMode === 'add' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50', !canWrite && 'cursor-not-allowed opacity-60')}>
+              <button type="button" disabled={writeLocked} onClick={() => setDraftMode('add')}
+                className={cn('rounded-md border p-2 text-left text-xs', draftMode === 'add' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50', writeLocked && 'cursor-not-allowed opacity-60')}>
                 <div className="text-sm font-medium">累加</div>
                 <div className="text-muted-foreground">余额 + 月额度</div>
               </button>
-              <button type="button" disabled={!canWrite} onClick={() => setDraftMode('cover')}
-                className={cn('rounded-md border p-2 text-left text-xs', draftMode === 'cover' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50', !canWrite && 'cursor-not-allowed opacity-60')}>
+              <button type="button" disabled={writeLocked} onClick={() => setDraftMode('cover')}
+                className={cn('rounded-md border p-2 text-left text-xs', draftMode === 'cover' ? 'border-primary bg-primary/5' : 'hover:bg-muted/50', writeLocked && 'cursor-not-allowed opacity-60')}>
                 <div className="text-sm font-medium">覆盖</div>
                 <div className="text-muted-foreground">清零后重置为月额度</div>
               </button>
@@ -352,7 +375,7 @@ export default function UsageBalance() {
           <div className="rounded-md border p-3">
             <Label htmlFor="bal-amount" className="text-sm font-medium">每人每月额度(元)</Label>
             <Input id="bal-amount" className="mt-2" inputMode="decimal" placeholder="例如 100"
-              value={draftAmount} readOnly={!canWrite} disabled={!canWrite}
+              value={draftAmount} readOnly={writeLocked} disabled={writeLocked}
               onChange={(e) => setDraftAmount(e.target.value)} />
             {canWrite && (
               <div className="mt-2 flex flex-wrap gap-1.5">

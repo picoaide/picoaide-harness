@@ -806,7 +806,10 @@ export default function Gateway() {
           <CardTitle>全局设置</CardTitle>
           <CardDescription>随客户端启动配置下发,员工登录后自动应用</CardDescription>
           <div className="flex justify-end">
-            <Button onClick={saveGateway} disabled={busy !== null}>{busy === 'save-gateway' ? '处理中…' : '保存'}</Button>
+            {/* 2026-09-17 审计 F5：`cfg` 是空初值，`loading` 只罩两张表 ⇒ 加载中点保存
+                会提交 default_model="" / peak_windows=""（清空默认模型与峰谷计费窗口）。
+                写面在加载完成前锁死。 */}
+            <Button onClick={saveGateway} disabled={busy !== null || loading}>{busy === 'save-gateway' ? '处理中…' : '保存'}</Button>
           </div>
         </CardHeader>
         <CardContent className="space-y-6">

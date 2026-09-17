@@ -39,6 +39,25 @@ beforeEach(() => {
 })
 
 describe('Departments 部门管理页', () => {
+  it('部门树返回前不渲染「暂无部门」(审计 F7)', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    // 只闸住部门树；其余端点（如主管下拉用的 /users）仍走默认实现，
+    // 否则组件会因空响应抛错、渲染成错误态（不是我们要断言的对象）。
+    const base = mockRequest.getMockImplementation()!
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/departments') await gate
+      return base(path, init)
+    })
+    render(<MemoryRouter><Departments /></MemoryRouter>)
+    expect(screen.queryByText('暂无部门')).toBeNull()
+    release()
+    // 用文件里的数据等待助手：树里「研发部」会出现多次（主管列/子部门行），
+    // 单数 findByText 会因多处匹配报错。
+    await waitForDeptTree()
+    expect(screen.queryByText('暂无部门')).toBeNull()
+  })
+
   it('渲染部门树表格:层级/主管/成员数/已授权徽标', async () => {
     render(<MemoryRouter><Departments /></MemoryRouter>)
     await waitForDeptTree()
