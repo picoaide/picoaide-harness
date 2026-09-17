@@ -72,14 +72,42 @@ function codeOnly(source) {
     .join('\n')
 }
 
-/** 同文件里 `const X = [...] as const` 的字面量数组（用于展开模板键的枚举）。 */
-function constArrays(source) {
+/**
+ * 从一段文本里取出静态字面量值（统一的取值器）。
+ *
+ * 2026-09-17 第 6 轮 R6-i18n-1：此前三条收集正则**各自实现取值**，于是"数组识别"
+ * 与"元素类型"耦合在一起 —— 数字元素、元组、Set、**不带 `as const`** 的显式类型
+ * 数组逐个漏网，而把 `([0,7,30] as const)` 提成 `const X: number[] = [0,7,30]`
+ * 只是一次常规重构。现在识别与取值分离，所有形态共用本函数。
+ */
+function literalItems(text) {
+  return [...text.matchAll(/'([^']*)'|"([^"]*)"|\b(\d+)\b/gu)].map((x) => x[1] ?? x[2] ?? x[3])
+}
+
+/**
+ * 值域表：变量名 → 该变量的静态可枚举取值。
+ *
+ * 覆盖 TS 里最常见的几种写法（第 5/6 轮证明"逐形态打补丁"是打不完的）：
+ *   1. `const NAME = ['a','b'] as const`
+ *   2. `const NAME: T[] = ['a','b']`（**无 as const** —— 之前正是这里漏）
+ *   3. `const NAME = ['a','b']`（裸数组）
+ *   4. `const NAME = new Set(['a','b'])`（`.has(x)` 守卫，见 tupleColumns 之外的 Set 用法）
+ */
+function valueDomains(source) {
   const map = new Map()
+  // 形态 1–3：具名数组（`as const` / 显式类型 / 裸数组都收）
   for (const m of source.matchAll(
-    /const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*\[([^\]]*)\]\s*as\s+const/gu,
+    /const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*\[([^\]]*)\]\s*(?:as\s+const|satisfies[^\n]*)?/gu,
   )) {
-    const items = [...m[2].matchAll(/'([^']*)'|\b(\d+)\b/gu)].map((x) => x[1] ?? x[2])
-    if (items.length > 0) map.set(m[1], items)
+    const items = literalItems(m[2])
+    if (items.length > 0 && !map.has(m[1])) map.set(m[1], items)
+  }
+  // 形态 4：Set 字面量
+  for (const m of source.matchAll(
+    /const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*new\s+Set\(\s*\[([^\]]*)\]/gu,
+  )) {
+    const items = literalItems(m[2])
+    if (items.length > 0 && !map.has(m[1])) map.set(m[1], items)
   }
   return map
 }
@@ -138,42 +166,73 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
   const offenders = []
   let enumerated = 0
   let enumeratedNamed = 0
+  let prefixFallbacks = 0
+  /** 键缺失判定：返回缺失的语言标签，或 null（两侧都在）。 */
+  const missing = (key) => (!ZH_KEYS.has(key) ? 'zh' : !EN_KEYS.has(key) ? 'en' : null)
   for (const { relative: file, source } of SOURCES) {
-    const arrays = constArrays(source)
-    // 2026-09-17 第 3 轮审计 R3-i18n-1:模板键的洞**几乎从不**是数组名本身,
-    // 真实形状是 `SCOPES.map((s) => t(`coi.scope.${s}`))` —— 洞是回调形参。
-    // 原实现只认 `arrays.has(hole)`,于是永远走不到枚举分支、退化成"前缀存在即可",
-    // 导致「只被模板引用的键」被删掉也全绿（实测 zh+en 删 3 个模板专有键 → 5/5 绿）。
-    // 这里先把 `NAME.map((VAR) => …)` / `NAME.map(VAR => …)` 的 VAR→NAME 关系建出来。
-    //
-    // 2026-09-17 第 4 轮审计 R4-i18n-1:内联数组也必须能枚举 —— 真实形状
-    // `(['unread','all','read'] as const).map((f) => t(`broadcast.filter.${f}`))`
-    // 根本没有数组名，只认具名数组会漏枚举、模板专有键被删仍全绿。
-    const inlineArrays = new Map()
-    // 形态甲：一维字面量数组 `(['a','b'] as const).map((x) => …)` / `([0,7,30] as const).map((d) => …)`
-    for (const m of source.matchAll(
-      /\[\s*((?:'[^']*'|\d+)(?:\s*,\s*(?:'[^']*'|\d+))*)\s*\]\s*as\s+const\s*\)?\s*\.map\(\s*\(?\s*([\w$]+)\s*\)?\s*=>/gu,
-    )) {
-      const items = [...m[1].matchAll(/'([^']*)'|\b(\d+)\b/gu)].map((x) => x[1] ?? x[2])
-      if (items.length > 0) inlineArrays.set(m[2], items)
+    // 统一值域表（2026-09-17 第 6 轮 R6-i18n-1：识别与取值解耦，不再按形态打补丁）
+    const domains = valueDomains(source)
+    // 洞 → 可枚举取值。三种来源合并到一张表：
+    //   ① 洞本身是变量名，且该变量有静态值域（数组/Set）
+    //   ② 洞是 `.map()`/`.forEach()` 的回调形参 ⇒ 用被遍历变量的值域
+    //   ③ 洞是 `for (const x of NAME)` 的循环变量 ⇒ 同上
+    const holeDomains = new Map()
+    for (const [name, items] of domains) holeDomains.set(name, items)
+    for (const m of source.matchAll(/\b(\w+)\.(?:map|forEach)\(\s*\(?\s*(\w+)\s*\)?\s*=>/gu)) {
+      const items = domains.get(m[1])
+      if (items !== undefined && !holeDomains.has(m[2])) holeDomains.set(m[2], items)
     }
-    // 形态乙：元组数组 + 解构回调 —— `([['k1','v1'],['k2','v2']] as const).map(([a, b]) => …)`
-    // 真实活形态见 SyncView.tsx:403-409（`t(labelKey)`，labelKey 是第 2 个元素）。
-    // 这里把每个元组的第 n 个元素登记到对应形参名下（解构形参按位置对应）。
+    for (const m of source.matchAll(/for\s*\(\s*const\s+(\w+)\s+of\s+(\w+)\s*\)/gu)) {
+      const items = domains.get(m[2])
+      if (items !== undefined && !holeDomains.has(m[1])) holeDomains.set(m[1], items)
+    }
+    // 元组数组（具名或内联）+ 解构回调 ⇒ 按列登记到解构形参
+    const tupleArrays = new Map()
     for (const m of source.matchAll(
-      /\[\s*((?:\[[^\]]*\]\s*,\s*)*\[[^\]]*\])\s*,?\s*\]\s*as\s+const\s*\)?\s*\.map\(\s*\(\s*\[([^\]]*)\]\s*\)\s*=>/gsu,
+      /(?:const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*)?\[\s*((?:\[[^\]]*\]\s*,\s*)*\[[^\]]*\])\s*,?\s*\]\s*(?:as\s+const|satisfies[^\n]*)?/gsu,
     )) {
-      const tuples = [...m[1].matchAll(/\[([^\]]*)\]/gu)].map((t) =>
-        [...t[1].matchAll(/'([^']*)'|\b(\d+)\b/gu)].map((x) => x[1] ?? x[2]))
-      const names = m[2].split(',').map((n) => n.trim()).filter(Boolean)
-      names.forEach((name, idx) => {
+      const tuples = [...m[2].matchAll(/\[([^\]]*)\]/gu)].map((t) => literalItems(t[1]))
+      if (tuples.length === 0) continue
+      if (m[1] !== undefined) tupleArrays.set(m[1], tuples)
+      // 紧跟其后的 `.map(([a, b]) => …)` / `.forEach(...)`（内联场景）
+      const after = source.slice(m.index + m[0].length, m.index + m[0].length + 120)
+      const cb = /^\s*\)?\s*\.(?:map|forEach)\(\s*\(\s*\[([^\]]*)\]\s*\)\s*=>/u.exec(after)
+      if (cb !== null) {
+        cb[1].split(',').map((n) => n.trim()).filter(Boolean).forEach((name, idx) => {
+          const col = tuples.map((t) => t[idx]).filter((v) => v !== undefined)
+          if (col.length > 0) holeDomains.set(name, col)
+        })
+      }
+    }
+    // 具名元组数组的遍历点：`NAME.map(([a, b]) => …)` / `NAME.forEach(...)`
+    for (const m of source.matchAll(/\b([A-Za-z_$][\w$]*)\s*\.(?:map|forEach)\(\s*\(\s*\[([^\]]*)\]\s*\)\s*=>/gu)) {
+      const tuples = tupleArrays.get(m[1])
+      if (tuples === undefined) continue
+      m[2].split(',').map((n) => n.trim()).filter(Boolean).forEach((name, idx) => {
         const col = tuples.map((t) => t[idx]).filter((v) => v !== undefined)
-        if (col.length > 0) inlineArrays.set(name, col)
+        if (col.length > 0 && !holeDomains.has(name)) holeDomains.set(name, col)
       })
     }
-    const mapVars = new Map()
-    for (const m of source.matchAll(/\b(\w+)\.map\(\s*\(?\s*(\w+)\s*\)?\s*=>/gu)) {
-      mapVars.set(m[2], m[1])
+    // `SET.has(x)` 守卫：值域并入 x（MemoryTabView 的 `!ENTRY_KEYS.has(activeRow.key)` 形态）。
+    //
+    // ★ 已声明边界（2026-09-17 第 6 轮 R6-i18n-2 的残留）：`activeRow.key` 的**完整**
+    // 值域来自宿主下发的 `files`（运行时数据），本文件只能静态读到 `ENTRY_KEYS` 的 8 个成员；
+    // 第 9 个 `memoryTab.desc.agents`（AGENTS.md 那一行）的值**在客户端源码里没有任何字面量**，
+    // 因此无法静态枚举。实测：删 8 个 ENTRY_KEYS 成员中的任意一个 ⇒ 变红；
+    // 删 `agents` 那一个 ⇒ 仍绿（前缀检查只在整族清零时才响）。
+    // 要有覆盖只能靠类型检查或运行时键审计，超出本守卫能力 —— 显式记录而非假装覆盖。
+    for (const m of source.matchAll(/\b([A-Za-z_$][\w$]*)\.has\(\s*([A-Za-z_$][\w$.]*)\s*\)/gu)) {
+      const items = domains.get(m[1])
+      if (items === undefined) continue
+      const target = m[2]
+      if (!holeDomains.has(target)) holeDomains.set(target, items)
+      else {
+        const merged = new Set([...holeDomains.get(target), ...items])
+        holeDomains.set(target, [...merged])
+      }
+      // 属性访问形态 `x.y`：把最后一段也登记（`activeRow.key` ⇒ `key`）
+      const last = target.split('.').pop()
+      if (last !== target && !holeDomains.has(last)) holeDomains.set(last, items)
     }
     for (const m of source.matchAll(/\b(?:t|say)\(\s*`([^`]*)`/gu)) {
       const template = m[1]
@@ -181,7 +240,6 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
       const dollar = template.indexOf('${')
       // 无插值的模板等价于字面量键
       const prefix = dollar === -1 ? template : template.slice(0, dollar)
-      const missing = (key) => (!ZH_KEYS.has(key) ? 'zh' : !EN_KEYS.has(key) ? 'en' : null)
       if (dollar === -1) {
         const miss = missing(prefix)
         if (miss !== null) offenders.push(`${file}:${line}: t(\`${template}\`) 不在 ${miss} 字典`)
@@ -189,14 +247,20 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
       }
       const holes = [...template.matchAll(/\$\{([^}]*)\}/gu)].map((h) => h[1].trim())
       const holeName = holes.length === 1 ? holes[0] : null
-      // 洞可以解析成数组:① 洞本身就是数组名;② 洞是 `.map()` 的回调形参 ⇒ 用它的数组
+      // 洞 → 值域：统一查上面合并好的 holeDomains（数组/Set/元组列/for-of/解构都进了这张表）。
+      // 洞本身是变量名时直接查；是属性访问（`activeRow.key`）时查最后一段。
       let items = null
       let fromNamed = false
-      if (holeName !== null && /^[A-Za-z_$][\w$]*$/u.test(holeName)) {
-        if (arrays.has(holeName)) { items = arrays.get(holeName); fromNamed = true } else if (inlineArrays.has(holeName)) items = inlineArrays.get(holeName)
-        else if (mapVars.has(holeName)) {
-          const name = mapVars.get(holeName)
-          if (arrays.has(name)) { items = arrays.get(name); fromNamed = true } else if (inlineArrays.has(holeName)) items = inlineArrays.get(holeName)
+      if (holeName !== null) {
+        if (holeDomains.has(holeName)) {
+          items = holeDomains.get(holeName)
+          fromNamed = true
+        } else {
+          const last = holeName.split('.').pop()
+          if (last !== holeName && holeDomains.has(last)) {
+            items = holeDomains.get(last)
+            fromNamed = true
+          }
         }
       }
       const candidates = items === null ? null : items.map((item) => `${prefix}${item}`)
@@ -209,17 +273,33 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
         }
         continue
       }
-      // 动态值无法静态枚举（洞是表达式，如 `${state.status ?? 'unknown'}`、
-      // `${activeRow.key}`）：退化为"前缀必须至少命中一个键"。
+      prefixFallbacks += 1
+      // 动态值无法静态枚举（洞是真正的表达式，如 `${state.status ?? 'unknown'}`、
+      // 或值域不在本文件内）：退化为"前缀必须至少命中一个键"。
       //
-      // ★ 已知边界（2026-09-17 第 3 轮审计 R3-i18n-1 残留）：这类**表达式洞**下，
-      // 「只被该模板引用的键」被删掉仍不会被发现（前缀仍有别的键）。要真正覆盖
-      // 需要类型检查（本包门禁不做 tsc）或运行时键审计，超出本守卫能力，故显式
-      // 记录而非假装覆盖。可枚举的形态（数组名或 `.map()` 回调形参）已真正展开。
+      // ★ 已知边界：这类洞下「只被该模板引用的键」被删仍不会被发现（前缀还有别的键）。
+      // 要真正覆盖需要类型检查（本包门禁不做 tsc）或运行时键审计，超出本守卫能力，
+      // 故显式记录而非假装覆盖；`prefixFallbacks` 计数被元断言钉住，防止
+      // "枚举面悄悄退化、大量洞回落到前缀检查"（2026-09-17 第 6 轮 A3-10）。
       if (![...ZH_KEYS].some((key) => key.startsWith(prefix))) {
         offenders.push(`${file}:${line}: t(\`${template}\`) 的前缀 '${prefix}' 在 zh 字典里没有任何键`)
       } else if (![...EN_KEYS].some((key) => key.startsWith(prefix))) {
         offenders.push(`${file}:${line}: t(\`${template}\`) 的前缀 '${prefix}' 在 en 字典里没有任何键`)
+      }
+    }
+    // 形态丙（2026-09-17 第 5 轮 R5-i18n-1，第 6 轮统一到 holeDomains）：
+    // **整个变量当键** —— `TRACKS.map(([t, k]) => t(k))`，真实活形态 SyncView.tsx:411。
+    // 它不是模板洞，上面的模板扫描覆盖不到；变量若在 holeDomains 里有值域就逐个校验。
+    // （注意：`t(x.y)` 的属性形态也走这里，值域按最后一段查。）
+    for (const m of source.matchAll(/(?:^|[^\w.$])(?:t|say)\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\)/gu)) {
+      const variable = m[1]
+      const items = holeDomains.get(variable) ?? holeDomains.get(variable.split('.').pop())
+      if (items === undefined) continue
+      const line = source.slice(0, m.index).split('\n').length
+      for (const key of items) {
+        const miss = missing(key)
+        if (miss !== null) offenders.push(`${file}:${line}: t(${variable}) 展开出 '${key}' 不在 ${miss} 字典`)
+        else enumerated += 1
       }
     }
   }
@@ -227,54 +307,24 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
     offenders, [],
     `以下模板键展开后不在字典里（会渲染成裸键名）：\n${offenders.join('\n')}`,
   )
-  // 形态丙（2026-09-17 第 5 轮 R5-i18n-1）：**整个变量当键** ——
-  // `([['k1','v1'],…] as const).map(([a, b]) => t(b))`，真实活形态见
-  // SyncView.tsx:409-411（`t(labelKey)`）。它不是模板洞，上面两条正则都覆盖不到；
-  // 变量指向枚举数组的**某一列**。这里按"该变量在 `.map()` 解构形参里 ⇒ 用它的列"
-  // 展开校验，列取值由上面的 inlineArrays（元组分支）登记。
-  for (const { relative: file, source } of SOURCES) {
-    const inlineCols = new Map()
-    for (const m of source.matchAll(
-      /\[\s*((?:\[[^\]]*\]\s*,\s*)*\[[^\]]*\])\s*,?\s*\]\s*as\s+const\s*\)?\s*\.map\(\s*\(\s*\[([^\]]*)\]\s*\)\s*=>/gsu,
-    )) {
-      const tuples = [...m[1].matchAll(/\[([^\]]*)\]/gu)].map((t) =>
-        [...t[1].matchAll(/'([^']*)'|\b(\d+)\b/gu)].map((x) => x[1] ?? x[2]))
-      const names = m[2].split(',').map((n) => n.trim()).filter(Boolean)
-      names.forEach((name, idx) => {
-        const col = tuples.map((t) => t[idx]).filter((v) => v !== undefined)
-        if (col.length > 0) inlineCols.set(name, col)
-      })
-    }
-    for (const m of source.matchAll(/(?:^|[^\w.])(?:t|say)\(\s*([A-Za-z_$][\w$]*)\s*\)/gu)) {
-      const variable = m[1]
-      if (!inlineCols.has(variable)) continue
-      const line = source.slice(0, m.index).split('\n').length
-      for (const key of inlineCols.get(variable)) {
-        const miss = !ZH_KEYS.has(key) ? 'zh' : !EN_KEYS.has(key) ? 'en' : null
-        if (miss !== null) offenders.push(`${file}:${line}: t(${variable}) 展开出 '${key}' 不在 ${miss} 字典`)
-        else enumerated += 1
-      }
-    }
-  }
-  // 上面的形态丙也参与 offenders 收敛判断，故此处再次断言。
-  assert.deepEqual(
-    offenders, [],
-    `以下模板键/枚举变量展开后不在字典里（会渲染成裸键名）：\n${offenders.join('\n')}`,
-  )
-  // ★ 元断言（2026-09-17 第 4 轮 R4-i18n-1）：枚举面本身必须达到已知下限。
-  // 否则将来正则失配 ⇒ 全部退化成"前缀存在即可" ⇒ 守卫静默失去增量保护，
-  // 而 offenders 仍为空、看起来一切正常。这是"守卫自身的守卫"。
-  // ★ 元断言（2026-09-17 第 5 轮 R5-i18n-2 收紧）：原来只有 `enumerated >= 4`，
-  // 而真实值是 14（具名 8 + 内联 6）⇒ 任**一条**正则失配后仍有 6 或 8 ≥ 4，全绿，
-  // 元断言守不住它被加进来要守的事。改为**按来源分别**下下限（各留约 1/2 余量）。
+  // ★ 元断言（2026-09-17 第 5/6 轮收紧）：
+  // 原来只有 `enumerated >= 4`，而真实值 21（具名 + 内联 + 元组列 + for-of 等）
+  // ⇒ 任一条正则失配后仍可能过线、全绿，元断言守不住它被加进来要守的事。
+  // 现在按**来源**分别下下限，并额外钉住**回落到前缀检查的调用点数**，防止
+  // "枚举面悄悄退化、大家全走前缀分支"这种静默失效（第 6 轮 A3-10/A3-11）。
   assert.ok(
     enumeratedNamed >= 8,
-    `具名数组枚举面异常偏小（named=${enumeratedNamed}）—— 具名枚举正则可能已失配`,
+    `具名值域枚举面异常偏小（named=${enumeratedNamed}）—— 具名收集可能已失配`,
   )
   assert.ok(
-    enumerated >= 12,
+    enumerated >= 18,
     `枚举总数异常偏小（total=${enumerated}, named=${enumeratedNamed}）—— ` +
-    '内联数组枚举正则可能已失配（守卫会静默退化成前缀检查，比没有更危险）',
+    '某条收集正则可能已失配（守卫会静默退化成前缀检查，比没有更危险）',
+  )
+  assert.ok(
+    prefixFallbacks <= 14,
+    `回落到"前缀存在即可"的模板调用点异常偏多（${prefixFallbacks}）—— ` +
+    '枚举面可能大面积失效（此时删单个键不会被发现）',
   )
 })
 
