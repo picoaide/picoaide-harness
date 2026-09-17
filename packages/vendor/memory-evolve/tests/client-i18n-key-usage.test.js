@@ -197,3 +197,42 @@ test('dict() 包装器必须把模板参数透传给 t（审计 F1：丢了就�
     `以下包装器会把模板参数静默丢掉（带占位符的文案原样渲染 {count}）：\n${offenders.join('\n')}`,
   )
 })
+
+test('任何「键收窄」箭头包装器都必须透传第二个参数（审计 F1 同形态潜伏项）', () => {
+  // 2026-09-17 证伪轮发现：F1 的形态不止 `function dict(...)` —— PromptView 里
+  // `const say = (key: DictKey): string => t(key)` 是**完全同形态**的收窄包装器，
+  // 只是当前调用点都用 .replace('{n}', …) 手工替换、没带第二个实参，所以没炸。
+  // 一旦有人写 say('k', { n }) 就会静默丢参数（正是 F1 的事故）。
+  // 这里把断言推广到所有 `(key: <Dict 类型>, …) => <t>(key, …)` 形态的箭头函数。
+  //
+  // 注意：正则必须**同时**匹配"坏形态"（1 参 1 实参）与"好形态"（2 参 2 实参），
+  // 否则修好之后 seen 会变成 0、把安全断言误判成失配（第一版就踩了这个坑）。
+  const offenders = []
+  const seen = []
+  for (const { relative: file, source } of SOURCES) {
+    for (const m of source.matchAll(
+      /const\s+(\w+)\s*=\s*\(([^)]*)\)\s*(?::[^=]*)?=>\s*(\w+)\(([^)]*)\)/gu,
+    )) {
+      const [, name, rawParams, callee, rawArgs] = m
+      const params = rawParams.split(',').map((p) => p.trim()).filter(Boolean)
+      const args = rawArgs.split(',').map((a) => a.trim()).filter(Boolean)
+      // 只盯"键收窄"包装器：首参类型是字典键类型，且只转发给一个 callee。
+      if (!/:\s*[\w.<>[\]]*(?:Key|Keys|Dict)\b/u.test(params[0] ?? '')) continue
+      if (params.length === 0) continue
+      seen.push(`${file}:${name}`)
+      const forwardsSecond = params.length >= 2 && args.length >= 2
+      if (!forwardsSecond) {
+        offenders.push(
+          `${file}: const ${name} = (${rawParams.trim()}) => ${callee}(${rawArgs.trim()})` +
+          ' 只转发一个实参 —— 带占位符的文案会渲染成字面量 {x}；应写成 (key, params) => t(key, params)',
+        )
+      }
+    }
+  }
+  // 至少应看到已知的两处形态（dict() 是 function 声明不计入；PromptView.say 应在此）。
+  assert.ok(seen.length >= 1, `未发现任何键收窄箭头包装器（seen=${seen.length}）—— 守卫正则可能已失配`)
+  assert.deepEqual(
+    offenders, [],
+    `以下键收窄包装器会静默丢掉模板参数：\n${offenders.join('\n')}`,
+  )
+})
