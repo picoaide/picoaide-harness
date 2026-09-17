@@ -136,6 +136,7 @@ test("字面量键 t('key') / say('key') 必须存在于 zh 与 en 两张字典"
 
 test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字典', () => {
   const offenders = []
+  let enumerated = 0
   for (const { relative: file, source } of SOURCES) {
     const arrays = constArrays(source)
     // 2026-09-17 第 3 轮审计 R3-i18n-1:模板键的洞**几乎从不**是数组名本身,
@@ -143,6 +144,17 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
     // 原实现只认 `arrays.has(hole)`,于是永远走不到枚举分支、退化成"前缀存在即可",
     // 导致「只被模板引用的键」被删掉也全绿（实测 zh+en 删 3 个模板专有键 → 5/5 绿）。
     // 这里先把 `NAME.map((VAR) => …)` / `NAME.map(VAR => …)` 的 VAR→NAME 关系建出来。
+    //
+    // 2026-09-17 第 4 轮审计 R4-i18n-1:内联数组也必须能枚举 —— 真实形状
+    // `(['unread','all','read'] as const).map((f) => t(`broadcast.filter.${f}`))`
+    // 根本没有数组名，只认具名数组会漏枚举、模板专有键被删仍全绿。
+    const inlineArrays = new Map()
+    for (const m of source.matchAll(
+      /\[\s*((?:'[^']*'\s*,\s*)*'[^']*')\s*\]\s*as\s+const\s*\)?\s*\.map\(\s*\(?\s*(\w+)\s*\)?\s*=>/gu,
+    )) {
+      const items = [...m[1].matchAll(/'([^']*)'/gu)].map((x) => x[1])
+      if (items.length > 0) inlineArrays.set(m[2], items)
+    }
     const mapVars = new Map()
     for (const m of source.matchAll(/\b(\w+)\.map\(\s*\(?\s*(\w+)\s*\)?\s*=>/gu)) {
       mapVars.set(m[2], m[1])
@@ -162,13 +174,19 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
       const holes = [...template.matchAll(/\$\{([^}]*)\}/gu)].map((h) => h[1].trim())
       const holeName = holes.length === 1 ? holes[0] : null
       // 洞可以解析成数组:① 洞本身就是数组名;② 洞是 `.map()` 的回调形参 ⇒ 用它的数组
-      let arrayName = null
+      let items = null
       if (holeName !== null && /^[A-Za-z_$][\w$]*$/u.test(holeName)) {
-        if (arrays.has(holeName)) arrayName = holeName
-        else if (mapVars.has(holeName) && arrays.has(mapVars.get(holeName))) arrayName = mapVars.get(holeName)
+        if (arrays.has(holeName)) items = arrays.get(holeName)
+        else if (inlineArrays.has(holeName)) items = inlineArrays.get(holeName)
+        else if (mapVars.has(holeName)) {
+          const name = mapVars.get(holeName)
+          if (arrays.has(name)) items = arrays.get(name)
+          else if (inlineArrays.has(holeName)) items = inlineArrays.get(holeName)
+        }
       }
-      const candidates = arrayName === null ? null : arrays.get(arrayName).map((item) => `${prefix}${item}`)
+      const candidates = items === null ? null : items.map((item) => `${prefix}${item}`)
       if (candidates !== null) {
+        enumerated += candidates.length
         for (const key of candidates) {
           const miss = missing(key)
           if (miss !== null) offenders.push(`${file}:${line}: t(\`${template}\`) 展开出 '${key}' 不在 ${miss} 字典`)
@@ -192,6 +210,14 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
   assert.deepEqual(
     offenders, [],
     `以下模板键展开后不在字典里（会渲染成裸键名）：\n${offenders.join('\n')}`,
+  )
+  // ★ 元断言（2026-09-17 第 4 轮 R4-i18n-1）：枚举面本身必须达到已知下限。
+  // 否则将来正则失配 ⇒ 全部退化成"前缀存在即可" ⇒ 守卫静默失去增量保护，
+  // 而 offenders 仍为空、看起来一切正常。这是"守卫自身的守卫"。
+  assert.ok(
+    enumerated >= 4,
+    `模板键枚举面异常偏小（enumerated=${enumerated}）—— 枚举正则可能已失配，` +
+    '守卫会静默退化成前缀检查（比没有更危险：它看起来仍有覆盖）',
   )
 })
 
@@ -267,6 +293,11 @@ test('lib/client.js（发布产物）与 src 的键收窄包装器必须同形�
   // 把"包装器是否透传参数"这一条也纳入对拍。
   const bundle = readFileSync(join(PACKAGE_ROOT, 'lib', 'client.js'), 'utf8')
   // 与源码侧同一条判据：`(key, params) => t(key, params)` 形态必须两个实参都转发。
+  //
+  // 2026-09-17 第 4 轮审计 R4-d4-1:必须**同时**收集两种声明形态 ——
+  // 箭头（`const say = (key: DictKey, …) => t(…)`）与函数声明
+  // （`function dict(t: Translate) { return (key, params) => t(key, params) }`）。
+  // 原实现只收箭头 ⇒ 只改 lib 里的 `dict`（F1 的**原始形态**）仍全绿。
   const sourceWrappers = []
   for (const { relative: file, source } of SOURCES) {
     for (const m of source.matchAll(/const\s+(\w+)\s*=\s*\(([^)]*)\)\s*(?::[^=]*)?=>\s*(\w+)\(([^)]*)\)/gu)) {
@@ -274,16 +305,68 @@ test('lib/client.js（发布产物）与 src 的键收窄包装器必须同形�
       if (!/:\s*[\w.<>[\]]*(?:Key|Keys|Dict)\b/u.test(params[0] ?? '')) continue
       sourceWrappers.push(m[1])
     }
+    // 函数声明形态：`function dict(t: Translate) { … return (key, params) => t(key, params) }`
+    for (const m of source.matchAll(/function\s+(\w+)\s*\(([^)]*)\)\s*(?::[^{]*)?\{([\s\S]*?)\n\}/gu)) {
+      const name = m[1]
+      const body = m[3]
+      // 只收"返回键收窄包装器"的函数（体内出现 (key, params) => X(key, params) 形态）
+      if (!/\(\s*\w+\s*,\s*\w+\s*\)\s*=>\s*\w+\(\s*\w+\s*,\s*\w+\s*\)/u.test(body)) continue
+      if (!/Translate|Dict(Key)?\b/u.test(m[2])) continue
+      sourceWrappers.push(name)
+    }
   }
-  assert.ok(sourceWrappers.length >= 1, `源码里没找到键收窄包装器（${sourceWrappers.join(',')}）`)
+  assert.ok(
+    sourceWrappers.length >= 2,
+    `源码侧的键收窄包装器收集数异常偏小（${sourceWrappers.length}: ${sourceWrappers.join(',')}）—— ` +
+    '必须同时覆盖箭头（say）与函数声明（dict）两种形态，否则对拍只闭一半（R4-d4-1）',
+  )
   const offenders = []
   for (const name of sourceWrappers) {
-    // 产物里同一包装器的形态：`const NAME = (key, params) => X(key, params)`
-    const re = new RegExp(
+    // 产物里同一包装器可能是箭头形态（`const NAME = (k, p) => X(k, p)`），
+    // 也可能被 esbuild 保留为函数声明内含的返回箭头（`function NAME(t) { return (k, p) => … }`）。
+    // 先试箭头，再退化到"函数声明体内找箭头"。
+    const arrowRe = new RegExp(
       `const\\s+${name}\\s*=\\s*\\(([^)]*)\\)\\s*=>\\s*\\w+\\(([^)]*)\\)`,
       'u',
     )
-    const hit = re.exec(bundle)
+    let hit = arrowRe.exec(bundle)
+    if (hit === null) {
+      // 函数声明：**先把该函数的花括号体抠出来**，再在体内找两参转发。
+      // 不能直接用 `function NAME(...) { [\s\S]*? (a,b)=>X(a,b)` —— 非贪婪的
+      // `[\s\S]*?` 会跨过 `}` 漂到**后面另一个函数**里，于是被改坏的 NAME 也匹配成功
+      // （2026-09-17 第 4 轮实测：把 dict 退成一参仍全绿，就是这个 bug）。
+      const headRe = new RegExp(`function\\s+${name}\\s*\\(`, 'u')
+      const head = headRe.exec(bundle)
+      let fnHit = null
+      if (head !== null) {
+        // 从 `{` 起按大括号配对取出函数体
+        const open = bundle.indexOf('{', head.index + head[0].length)
+        if (open !== -1) {
+          let depth = 0
+          let end = -1
+          for (let i = open; i < bundle.length; i += 1) {
+            if (bundle[i] === '{') depth += 1
+            else if (bundle[i] === '}' && (depth -= 1) === 0) { end = i; break }
+          }
+          if (end !== -1) {
+            const body = bundle.slice(open + 1, end)
+            fnHit = /\(\s*\w+\s*,\s*\w+\s*\)\s*=>\s*\w+\(\s*\w+\s*,\s*\w+\s*\)/u.test(body)
+              ? [null, 'k, p', 'k, p'] : null
+          }
+        }
+      }
+      if (fnHit !== null) hit = fnHit
+      else {
+        // 兜底：函数声明存在但体内**没有**两参转发 ⇒ 记为不一致
+        const existsRe = new RegExp(`function\\s+${name}\\s*\\(`, 'u')
+        if (existsRe.test(bundle)) {
+          offenders.push(`${name}: lib/client.js 里的函数声明未透传两个参数（产物未与源码同步）`)
+        } else {
+          offenders.push(`${name}: lib/client.js 里找不到该包装器（产物可能未重建）`)
+        }
+        continue
+      }
+    }
     if (hit === null) {
       offenders.push(`${name}: lib/client.js 里找不到该包装器（产物可能未重建）`)
       continue
