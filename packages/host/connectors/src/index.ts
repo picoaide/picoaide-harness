@@ -435,9 +435,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         credential,
         target,
         ensureFresh: async () => await ensureCredentialFresh(def.id, baseline),
-        onPersist: (patch: Partial<ConnectorCredential>) => {
+        // **必须 await 落盘**（2026-09-17 flake 定案）：`saveTokens` 是 SDK 自己
+        // 续期后唯一的持久化点，而 provider 的 `tokens()` 又会把内存里的新令牌
+        // 交给下一次请求。写盘一旦 fire-and-forget，SDK 的续期就已经"完成"了而
+        // 磁盘还是旧的 —— 随后任何读者（registerMcp 的建 provider、restoreAll）
+        // 都可能拿着一枚**已被消费**的 refresh token 去续期，轮换复用检测随即
+        // 吊销整个授权（实测窗口 4–29ms，CI 里就是那条
+        // `InvalidGrantError: refresh token already used`）。
+        onPersist: async (patch: Partial<ConnectorCredential>) => {
           if (registrationScope !== store.dir) return
-          void persistAndMaybeAnnounce(def.id, patch, baseline.current)
+          await persistAndMaybeAnnounce(def.id, patch, baseline.current)
             .then((saved) => { if (saved !== null) baseline.current = saved })
             .catch((cause: unknown) => {
               ctx.logger?.warn(`pico-connectors: ${def.id} 令牌持久化失败`, cause)
@@ -468,13 +475,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         discovery: resolved.discovery,
         ...(resolved.resource === undefined ? {} : { resource: resolved.resource }),
         ensureFresh: async () => await ensureCredentialFresh(def.id, baseline),
-        onPersist: (patch: Partial<ConnectorCredential>) => {
-          // The SDK's persistence point: a rotated refresh token or a new
-          // access token must reach the store, or the next process (or the
-          // next registration) would refresh with a dead grant. Never through
-          // a store that a user switch has replaced in the meantime.
+        // The SDK's persistence point: a rotated refresh token or a new
+        // access token must reach the store, or the next process (or the
+        // next registration) would refresh with a dead grant. Never through
+        // a store that a user switch has replaced in the meantime.
+        // **必须 await 落盘**（2026-09-17 flake 定案）：返回 undefined 会让
+        // `saveTokens` 在持久化之前就 resolve，随后任何读者都可能拿到已被消费的
+        // refresh token（见上面静态端点分支的同一段说明）。
+        onPersist: async (patch: Partial<ConnectorCredential>) => {
           if (registrationScope !== store.dir) return
-          void store.updateCredentialIfUnchanged(def.id, baseline.current, patch)
+          await store.updateCredentialIfUnchanged(def.id, baseline.current, patch)
             .then((saved) => {
               if (saved === null) return
               baseline.current = saved
