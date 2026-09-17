@@ -43,6 +43,11 @@ const GUARDS = [
   // 2026-09-16 真机事故(暗色模式看不清)后的守卫:我们插件里的颜色引用必须是上游
   // **真实存在**的主题 token,否则 CSS 会安静地走 fallback、永远不随主题变化。
   { name: 'check:theme-tokens', args: ['run', 'check:theme-tokens'], path: '客户端主题 token 引用' },
+  // 2026-09-17 审计补齐的断言缺口:glitchtip-ops-check.mjs 此前**没有任何自动化
+  // 覆盖**(不在 CI / 不在 verify-ci-scripts / 不在 package.json)。审计修掉它两处
+  // 真实缺陷(ssh 不可达仍退 0="一切正常";cookie jar 域列被丢弃致会话外发)后,
+  // 按"红不了的断言算缺口"补上行为门禁 —— 回退任一修复都会让它变红。
+  { name: 'check:glitchtip-ops', args: ['run', 'check:glitchtip-ops'], path: 'GlitchTip 运维脚本行为门禁' },
 ]
 
 /**

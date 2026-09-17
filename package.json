@@ -88,7 +88,8 @@
     "dist:linux": "yarn workspace dsh-plugin-desktop dist:linux",
     "version": "node scripts/version.mjs",
     "version:set": "node scripts/version.mjs set",
-    "version:check": "node scripts/version.mjs check"
+    "version:check": "node scripts/version.mjs check",
+    "check:glitchtip-ops": "node scripts/glitchtip-ops-check.spec.mjs"
   },
   "devDependencies": {
     "yaml": "^2.9.0"
