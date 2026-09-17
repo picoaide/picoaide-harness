@@ -95,7 +95,9 @@ IDN 主机（`例子.中国` → `xn--fsqu00a.xn--fiqs8s`）与 `localhost` 仍�
    换码网络故障；上游返回非 JSON / JSON `null`（base 只是因为 V8 文案里恰好含 `token` 字样而误判）。
 2. **站点绑定**：地址形状键上的裸主机名现在可绑定（`app.example.com`、`10.0.0.5:8000`），
    且地址形状键优先于其它键；两个 base 地址键之间的取舍与 base **逐条一致**，
-   没有任何记录从"可绑定"变成"不可绑定"（372.4 万组差分 `baseNonNull→null = 0`）。
+   没有任何记录从"可绑定"变成"不可绑定"（R3 的 **372.4 万组穷举对拍** `baseNonNull→null = 0`，
+   探针 `temp/audit-r9-r3/r3-adversarial/cred-pairs.mjs`；冻结轮 R5–R7 另用 **120k 组随机差分**
+   复核同一不变量，结论相同 —— 两个数字是不同轮的样本量，不是同一不变量在同轮的两次统计）。
 
 ## 五、已声明残留（本轮不做）
 
@@ -130,7 +132,8 @@ IDN 主机（`例子.中国` → `xn--fsqu00a.xn--fiqs8s`）与 `localhost` 仍�
 - 需要确定绑定时用 `credentialSites` 显式声明（模块文档与拒绝文案都已这么写）。
 
 **回归凭证**：`yarn check` 16/16 连跑四次绿；`tests/credential-site.spec.ts` 28 例
-（含 R4/R5/R6/R7 四批共 76 组定点反例）；base 差分 120k 组 `baseNonNull→null = 0`；
+（含 R4/R5/R6/R7 四批共 76 组定点反例）；base 差分 **120k 组随机** `baseNonNull→null = 0`
+（冻结轮 R5–R7：`temp/audit-r9-r5/site/diff-r5.mjs 120000` / `temp/audit-r9-r6/site/order2-r6.mjs 120000`）；
 强档键两两穷举 1,938,420 组与 base 逐条一致。
 
 ### 冻结残余清单（R8 复核后仍存在，均已分类为 P3 或更低）
@@ -146,6 +149,6 @@ IDN 主机（`例子.中国` → `xn--fsqu00a.xn--fiqs8s`）与 `localhost` 仍�
 - `corepack yarn check`：16/16 任务通过（7 个根守卫 + desktop profile 冒烟 + 8 个 workspace 包），
   连跑三次绿（R1 修复后 / R2 修复后 / R3 修复后）。
 - Go：`go test ./internal/capabilities/... ./internal/serverstore/...` 绿。
-- 变异自证（回退修复即红）：credential-site（21→23 例）、shell-pages 空态、TOCTOU、分类三例、
+- 变异自证（回退修复即红）：credential-site（R2 时 21→23 例，最终 28 例）、shell-pages 空态、TOCTOU、分类三例、
   cron 跳日、desktop emit、诊断失败框、memory-evolve 三层守卫、7 个 `t()` 单遍语义。
 - 对抗复核的独立证据：`temp/audit-r9*/**`（分片报告、差分探针、双树 A/B、产物重建对拍）。

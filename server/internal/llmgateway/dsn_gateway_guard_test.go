@@ -41,20 +41,63 @@ func TestGatewaySaveIgnoresUnchangedLegacyBadDSN(t *testing.T) {
 		t.Fatalf("rate_limit not saved: %q (want 322)", got)
 	}
 	// 但要如实告警:库中现值不可用(不能把坏配置渲染成一切正常)。
-	warnings, _ := out2["warnings"].([]any)
-	found := false
-	for _, raw := range warnings {
-		if text, ok := raw.(string); ok && strings.Contains(text, "库中现有值不可用") {
-			found = true
-		}
-	}
-	if !found {
+	if !warnsStoredDSNUnusable(out2) {
 		t.Fatalf("expected a warning about the unusable stored DSN, got %v", out2["warnings"])
 	}
 	if got, _, _ := serverstore.GetSetting(db, "web.error_reporting_dsn"); got != legacyBadDSN {
 		t.Fatalf("stored DSN must stay untouched, got %q", got)
 	}
 	_ = out
+}
+
+// warnsStoredDSNUnusable 报告响应 warnings 里是否带"库中现有值不可用"告警。
+func warnsStoredDSNUnusable(out map[string]any) bool {
+	warnings, _ := out["warnings"].([]any)
+	for _, raw := range warnings {
+		if text, ok := raw.(string); ok && strings.Contains(text, "库中现有值不可用") {
+			return true
+		}
+	}
+	return false
+}
+
+// S10-5(2026-09-17):「库中现值不可用」的告警此前被 dsnUnchanged 卡住 —— 只有把同一个
+// 坏值**逐字回提交**才会出现,字段缺省的部分体 PUT(只改开关/其它网关字段)拿到的是
+// warnings:[],与"不能把坏配置渲染成一切正常"的取向相反。
+//
+// 现场路径真实存在:旧版 webadmin 零校验写入的坏 DSN 就躺在库里,而「网关」页根本不
+// 提交该字段。
+func TestGatewayPartialUpdateWarnsAboutStoredBadDSN(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	const legacyBadDSN = "http://0123456789abcdef0123456789abcdef@localhost:8000/1"
+	if err := serverstore.SetSetting(db, "web.error_reporting_dsn", legacyBadDSN); err != nil {
+		t.Fatal(err)
+	}
+
+	// 只改开关(不带 dsn 字段):库中坏值仍是生效值 ⇒ 必须告警,但不阻断。
+	w, out := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"error_reporting_enabled":true}`, hdr)
+	if w.Code != 200 {
+		t.Fatalf("partial update rejected: %d %s", w.Code, w.Body.String())
+	}
+	if !warnsStoredDSNUnusable(out) {
+		t.Fatalf("expected a warning about the unusable stored DSN, got %v", out["warnings"])
+	}
+	if got, _, _ := serverstore.GetSetting(db, "web.error_reporting_enabled"); got != "true" {
+		t.Fatalf("enabled not saved: %q (want true)", got)
+	}
+
+	// 用**好**值把库里的坏值换掉:新值才是生效值,不能再拿旧值告警(否则管理员
+	// 修好了还看到"库中现有值不可用")。
+	w2, out2 := adminReq(t, r, "PUT", "/api/server/admin/gateway",
+		`{"error_reporting_dsn":"https://key@glitchtip.example.com/1"}`, hdr)
+	if w2.Code != 200 {
+		t.Fatalf("valid DSN rejected: %d %s", w2.Code, w2.Body.String())
+	}
+	if warnsStoredDSNUnusable(out2) {
+		t.Fatalf("stale stored value must not be warned about after being replaced, got %v", out2["warnings"])
+	}
 }
 
 // F-07 的另一半:把同一个坏值**改成另一个坏值**仍然必须拒绝(不能借"未变化"绕过)。

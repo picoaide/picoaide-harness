@@ -124,3 +124,63 @@ func TestCapabilitiesOrgSectionExcludesMarketChannelAgent(t *testing.T) {
 		t.Fatalf("审批队列丢失组织智能体（positive control）：%s", body)
 	}
 }
+
+// 审计 2026-09-15 S11-2（agent 半边，与技能面同根因）：组织智能体的下架对
+// **管理员**同样要生效。客户端安装通路的归档端点恒以 admin=false 构造（与调用者
+// 是否管理员无关），而聚合面的 admin 分支此前只按审核状态过滤，于是管理员在
+// 客户端看到可点但下载必 404 的行；agentshare.listVisible 早已按 enabled 过滤
+// （P2-1，审计 2026-09-13），聚合面漏了。
+func TestAgentDisabledHiddenFromAdminCapabilitiesOrgSection(t *testing.T) {
+	r, db, _, userTokens := setupRouter(t)
+	defer db.Close()
+	bossHdr := adminBearer(t, db)
+	alice := map[string]string{"Authorization": "Bearer " + userTokens["alice"]}
+
+	if _, err := serverstore.CreateAgentPreset(db, &serverstore.AgentPreset{
+		Name: "org-agent", DisplayName: "组织智能体", Version: "1.0.0",
+		Author: "alice", Status: serverstore.AgentPresetApproved,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.GrantApp(db, serverstore.AppKindAgent, "org-agent", "alice", "user"); err != nil {
+		t.Fatal(err)
+	}
+
+	orgAgentNames := func(hdr map[string]string) []string {
+		w := doGet(t, r, "/api/client/v2/capabilities?source=org&type=agent", hdr)
+		if w.Code != 200 {
+			t.Fatalf("capabilities source=org status=%d body=%s", w.Code, w.Body.String())
+		}
+		var out struct {
+			Items []struct {
+				Name string `json:"name"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		got := []string{}
+		for _, it := range out.Items {
+			got = append(got, it.Name)
+		}
+		return got
+	}
+	callers := map[string]map[string]string{"管理员": bossHdr, "员工": alice}
+
+	// 正对照：上架时两种角色都能看到（夹具本身可见）。
+	for who, hdr := range callers {
+		if !containsStr(orgAgentNames(hdr), "org-agent") {
+			t.Fatalf("上架时%s在能力中心组织分区看不到组织智能体（正对照失败）", who)
+		}
+	}
+
+	if err := serverstore.SetAppEnabled(db, serverstore.AppKindAgent, "org-agent", false); err != nil {
+		t.Fatal(err)
+	}
+
+	for who, hdr := range callers {
+		if containsStr(orgAgentNames(hdr), "org-agent") {
+			t.Fatalf("下架后%s仍能在能力中心组织分区看到组织智能体", who)
+		}
+	}
+}

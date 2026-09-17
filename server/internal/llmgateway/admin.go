@@ -904,9 +904,9 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	// 库里现存的 DSN(未提交该字段时也要读出来做跨字段判定与告警)。
 	storedDSN, storedDSNExists, _ := serverstore.GetSetting(db, "web.error_reporting_dsn")
 	var dsnInspection ErrorReportingDSN
-	dsnUnchanged := false
 	if req.ErrorReportingDSN != nil && storedDSNExists && storedDSN == *req.ErrorReportingDSN {
-		dsnUnchanged = true
+		// F-07:原样回提交不算"新的坏配置" —— 视为未提供(不写库、不变更、不审计);
+		// 但下面的告警仍要看库中现值。
 		req.ErrorReportingDSN = nil
 	}
 	if req.ErrorReportingDSN != nil {
@@ -924,7 +924,11 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	warnings := []string{}
 	if req.ErrorReportingDSN != nil && dsnInspection.Message != "" {
 		warnings = append(warnings, "错误上报 DSN:"+dsnInspection.Message)
-	} else if dsnUnchanged {
+	} else if req.ErrorReportingDSN == nil && storedDSNExists {
+		// S10-5(2026-09-17):只要本次**没有提交新的 DSN**(字段缺省,或与库中逐字
+		// 相同的原样回提交),生效值就是库中现值 —— 它不可用时必须告警。此前这条被
+		// dsnUnchanged 卡住,`PUT {error_reporting_enabled:true}` 这类部分体更新拿到
+		// 的是 warnings:[],与"不能把坏配置渲染成一切正常"的取向相反。
 		if storedInspection := InspectErrorReportingDSN(storedDSN); storedInspection.Rejected() {
 			// 库中现值本身不可用:不阻断本页保存,但必须让管理员看见。
 			warnings = append(warnings, "错误上报 DSN:库中现有值不可用("+storedInspection.Message+");请在「错误监控」页更新它")
@@ -950,9 +954,24 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		if req.ErrorReportingDSN != nil {
 			effectiveDSN = strings.TrimSpace(*req.ErrorReportingDSN)
 		}
+		// S12-01(审计 2026-09-17):拒绝只在**本次提交显式提供**这两个字段之一时生效
+		// (req.* 为指针;F-07 已把"原样回提交"折成 nil)。
+		//
+		// 否则「网关」页(F-07 白名单,页面上没有 DSN 输入框)保存任何无关字段都会被
+		// 这里拦住:库里的 enabled="true" + dsn="" 是旧版 webadmin 可写入的真实存量
+		// (v2.7.4 无 DSN 校验,且当时由「错误监控」页同时提交两个字段),该页既不能
+		// 提交这两个字段、也不能靠报错自救。语义与 F-07 同源:库里的坏状态不是
+		// "本次新的坏配置",降级为告警并点名唯一能修的页面。
+		explicitSubmission := req.ErrorReportingEnabled != nil || req.ErrorReportingDSN != nil
 		if effectiveEnabled && effectiveDSN == "" {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", ErrorReportingDSNEnabledWithoutDSNMessage)
-			return
+			if explicitSubmission {
+				// 文案追加页面指引,让 400 自我定位(常量本身在 dsn.go,由
+				// dsn 对拍语料冻结,不改它以免两侧文案漂移)。
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+					ErrorReportingDSNEnabledWithoutDSNMessage+";请到「错误监控」页填写 DSN 或关闭开关")
+				return
+			}
+			warnings = append(warnings, "错误上报:库中开关已打开但 DSN 为空(客户端不会上报任何错误);请在「错误监控」页填写 DSN 或关闭开关")
 		}
 	}
 	if req.DefaultModel != nil {

@@ -43,6 +43,15 @@ const GUARDS = [
   // 2026-09-16 真机事故(暗色模式看不清)后的守卫:我们插件里的颜色引用必须是上游
   // **真实存在**的主题 token,否则 CSS 会安静地走 fallback、永远不随主题变化。
   { name: 'check:theme-tokens', args: ['run', 'check:theme-tokens'], path: '客户端主题 token 引用' },
+  // 2026-09-17 审计 S15-2/5/7/9:GlitchTip 运维核查脚本是**对着生产跑**的只读工具,
+  // fail-open(查不出来却 exit 0)/崩溃(exit 1 与"发现缺陷"同码)/远程命令注入/cookie 越域
+  // 都只能在本地用假 keys API + 假 ssh 复现 —— 不进门禁就只能等在现场踩。
+  { name: 'check:glitchtip', args: ['run', 'check:glitchtip'], path: 'GlitchTip 运维核查脚本' },
+  // 2026-09-17 审计复核 S15-1/S15-3/S15-4：编排器自身的"假绿"（算不出改动当没有改动、
+  // --only 打错包名筛出空集）与 .gitignore 的 .glitchtip-recon/ 规则此前**没有任何回归网**
+  // —— 一次静默回退就能让 check:fast 重新变成 0 任务 + exit 0。用真脚本副本在合成 git
+  // 仓库里跑（corepack 走桩），不联网、不跑真实包。
+  { name: 'check:check-workspaces', args: ['run', 'check:check-workspaces'], path: '门禁编排器自身(--changed/--only/.gitignore)' },
 ]
 
 /**
@@ -123,7 +132,15 @@ function parseArgs(argv) {
         i += 1
       } else options.changed = 'HEAD'
     } else if (arg === '--only') {
-      options.only = (argv[i + 1] ?? '').split(',').map(s => s.trim()).filter(Boolean)
+      // 与 --changed 同款:下一个 token 以 `--` 开头说明值缺失,报用法错误
+      // 而不是把 `--no-guards` 当成包名(2026-09-17 审计 S15-4 附带)。
+      const next = argv[i + 1]
+      if (next === undefined || next.startsWith('--')) {
+        console.error('check-workspaces: --only 需要一个包名列表(逗号分隔)')
+        process.exitCode = 2
+        return null
+      }
+      options.only = next.split(',').map(s => s.trim()).filter(Boolean)
       i += 1
     } else if (arg === '--concurrency') {
       // A non-numeric value used to reach `Math.min(NaN, …)` → zero workers, so
@@ -202,21 +219,46 @@ function summarizeFailure(output) {
   return parts.join('\n')
 }
 
+/**
+ * Run git and report **both** its stdout and whether it succeeded.
+ *
+ * The old version discarded stderr and the exit code and resolved stdout
+ * whatever happened, so `git diff --name-only <typo>` (exit 128, empty stdout)
+ * was indistinguishable from "nothing changed": `check:fast` then ran zero
+ * package checks and exited 0 — a false-green fast gate (2026-09-17 audit
+ * S15-1). Callers must treat `ok === false` as a hard error.
+ * @param args - git argv (without the leading `git`).
+ * @returns `{ ok, out, err }`; `out`/`err` are trimmed of a trailing newline.
+ */
 function git(args) {
   return new Promise(resolve => {
-    const child = spawn('git', args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'] })
+    const child = spawn('git', args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
     let out = ''
+    let err = ''
     child.stdout.on('data', chunk => { out += chunk })
-    child.on('error', () => resolve(''))
-    child.on('close', () => resolve(out))
+    child.stderr.on('data', chunk => { err += chunk })
+    child.on('error', error => resolve({ ok: false, out: '', err: error.message }))
+    child.on('close', code => resolve({ ok: code === 0, out: out.trimEnd(), err: err.trimEnd() }))
   })
 }
 
 /** 本次工作区相对 `ref` 的改动文件列表(含未跟踪文件)。 */
 async function changedFiles(ref) {
+  // 先确认 ref 可解析:`--changed <typo>` / 浅克隆 / detached HEAD 下
+  // `git diff` 会失败,失败被当成"没有改动"就是假绿,所以这里 fail loud。
+  const resolved = await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
+  if (!resolved.ok) {
+    return {
+      error: `--changed 的 ref 无法解析:${JSON.stringify(ref)}${resolved.err ? `(${resolved.err})` : ''}` +
+        ' —— 请确认它存在于本仓库(例如 origin/master)。拒绝把"算不出改动"当成"没有改动"。',
+    }
+  }
   const tracked = await git(['diff', '--name-only', ref])
+  if (!tracked.ok) return { error: `git diff --name-only ${ref} 失败:${tracked.err || `退出码非 0`}` }
   const untracked = await git(['ls-files', '--others', '--exclude-standard'])
-  return [...new Set([...tracked.split('\n'), ...untracked.split('\n')].map(s => s.trim()).filter(Boolean))]
+  if (!untracked.ok) return { error: `git ls-files --others 失败:${untracked.err || `退出码非 0`}` }
+  const files = [...new Set([...tracked.out.split('\n'), ...untracked.out.split('\n')].map(s => s.trim()).filter(Boolean))]
+  return { files }
 }
 
 /** 把改动文件映射为需要重跑的包 + 是否需要跑根守卫。 */
@@ -348,9 +390,29 @@ const concurrency = options.concurrency ??
   (Number.isFinite(envConcurrency) && envConcurrency > 0 ? envConcurrency : defaultConcurrency)
 
 let selectedNames = null
-if (options.only !== null) selectedNames = new Set(options.only)
-else if (options.changed !== null) {
-  const files = await changedFiles(options.changed)
+if (options.only !== null) {
+  // 显式点名必须兑现:名字打错时旧行为是"筛出空集 → 0 个任务 → exit 0",
+  // 与"这些包都过了"无法区分(2026-09-17 审计 S15-4)。空值(--only 后面没跟
+  // 东西)同样按用法错误处理。
+  const known = new Set(PACKAGES.map(pkg => pkg.name))
+  const unknown = options.only.filter(name => !known.has(name))
+  if (options.only.length === 0) {
+    console.error('check-workspaces: --only 需要包名列表(逗号分隔),收到空值')
+    process.exit(2)
+  }
+  if (unknown.length > 0) {
+    console.error(`check-workspaces: --only 里有不存在的包:${unknown.join(', ')}`)
+    console.error(`可选:${[...known].join(', ')}`)
+    process.exit(2)
+  }
+  selectedNames = new Set(options.only)
+} else if (options.changed !== null) {
+  const changed = await changedFiles(options.changed)
+  if (changed.error !== undefined) {
+    console.error(`check-workspaces: ${changed.error}`)
+    process.exit(2)
+  }
+  const files = changed.files
   const { selected, global } = selectByChanges(files)
   console.log(`check:fast — ${files.length} 个改动文件(相对 ${options.changed})→ ${global ? '全量(顶层文件改动)' : `${selected.length} 个包`}`)
   // A zero-package selection (README / notes / .gitmodules changes) must still

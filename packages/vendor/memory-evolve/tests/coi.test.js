@@ -2403,3 +2403,47 @@ test('broadcast api: 消息列表/全文/删除 + 房间列表/在线/踢人/解
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('coi api: POST /coi/export 走真实 handler —— 建目录 + 起导出 + 落盘（ME-12：mkdirSync 漏 import）', async () => {
+  // 缺陷形态（2026-09-17 二审 P3）：lib/coi/api.js 的路由体调用 mkdirSync，
+  // 而 import 只有 existsSync ⇒ 任何调用都被外层 catch 压成
+  // 400 {ok:false,message:'mkdirSync is not defined'}（看起来像参数错误）。
+  // 该路由当时没有 in-tree 调用点，所以 1023 例全绿也照不出来。
+  const dir = tempDir()
+  const api = await bootApi(dir)
+  try {
+    // 自定义适配器：binary 用当前 node（内置适配器的 kimi/grok 在测试机不存在，
+    // 真实 spawn 会 ENOENT）；mgmtCmds.export 打印一行后退出。
+    const def = {
+      id: 'export-probe',
+      name: 'Export Probe',
+      type: 'plain-cli',
+      binary: process.execPath,
+      args: ['{task}'],
+      mgmtCmds: { export: ['-e', 'process.stdout.write("EXPORT-OK")'] },
+    }
+    const created = await api.request('POST', '/memory-evolve/api/coi/adapters', { def })
+    assert.equal(created.data.ok, true, JSON.stringify(created.data))
+
+    const res = await api.request('POST', '/memory-evolve/api/coi/export', { sessionId: 'sess-abc', adapterId: 'export-probe' })
+    assert.equal(res.status, 200, JSON.stringify(res.data))
+    assert.equal(res.data.ok, true, JSON.stringify(res.data))
+
+    // exports 目录必须真被创建（缺 import 时路由在 mkdirSync 就抛，目录不存在）。
+    const outDir = join(dir, 'exports')
+    assert.ok(existsSync(outDir), 'exports 目录已创建')
+    assert.ok(String(res.data.message).includes(outDir), `回执应带落盘路径：${res.data.message}`)
+
+    // 导出是后台子进程：等它 close 后写盘。
+    const outFile = join(outDir, 'export-probe-sess-abc.log')
+    const deadline = Date.now() + 10000
+    while (!existsSync(outFile) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    assert.ok(existsSync(outFile), '导出文件已落盘')
+    assert.equal(readFileSync(outFile, 'utf8'), 'EXPORT-OK')
+  } finally {
+    await api.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

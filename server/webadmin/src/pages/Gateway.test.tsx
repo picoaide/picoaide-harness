@@ -478,3 +478,51 @@ describe('Gateway 保存面(F-07)', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// 修复轮 2(S12-01 / S10-5):保存响应里的非阻断告警必须在页面上可见
+// ---------------------------------------------------------------------------
+
+describe('Gateway 保存告警', () => {
+  /** 模拟服务端对「写入后配置仍不可用」返回 200 + warnings(S12-01 的降级路径)。 */
+  function warnOnSave(warnings: string[]) {
+    const puts: Array<Record<string, unknown>> = []
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/gateway' && init?.method === 'PUT') {
+        puts.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+        return { ok: true, warnings }
+      }
+      return baseImpl(path, init)
+    })
+    return puts
+  }
+
+  it('200 + warnings 时页面显示黄条告警(不能只闪「已保存」)', async () => {
+    // 事故:Gateway 页此前 `await request(...)` 后丢弃响应体 —— S12-01 把
+    // 「库里 enabled=true 但 DSN 为空」从 400 降级成 200+warning、S10-5 把
+    // 「库中现值不可用」也做成 warning,两处告警在唯一会触发它们的页面上
+    // 一律不可见,管理员只看到「已保存」。
+    const puts = warnOnSave([
+      '错误上报:库中开关已打开但 DSN 为空(客户端不会上报任何错误);请在「错误监控」页填写 DSN 或关闭开关',
+      '错误上报 DSN:库中现有值不可用(不能指向本机或云元数据地址);请在「错误监控」页更新它',
+    ])
+    render(<Gateway />)
+    await screen.findByText('全局设置')
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+
+    // 告警逐条渲染(不是只取第一条),且保存本身仍然成功。
+    expect(await screen.findByText(/库中开关已打开但 DSN 为空/)).toBeInTheDocument()
+    expect(screen.getByText(/库中现有值不可用/)).toBeInTheDocument()
+    expect(screen.getByText('已保存')).toBeInTheDocument()
+    expect(puts.length).toBe(1)
+  })
+
+  it('warnings 为空/缺省时不渲染任何告警条', async () => {
+    warnOnSave([])
+    render(<Gateway />)
+    await screen.findByText('全局设置')
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存')
+    expect(document.querySelector('.border-amber-500\\/40')).toBeNull()
+  })
+})

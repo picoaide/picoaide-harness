@@ -350,7 +350,7 @@ is_admin, monthly_usage, monthly_cost, today_*, yesterday_*, total_*
   老客户端连新服务端 → 忽略新字段、只透传 message，行为不变。
 - **回滚**：服务端回滚到旧版本时，新表/新列无副作用（旧代码不读）；`balance_grant_items`
   的当月锚在旧版本不生效 → 旧版本可能重复发放一次当月额度，回滚 runbook 需写明"回滚后当日不要手动触发发放"。
-- **生产检查**（测试环境 198.51.100.10 / 正式 198.51.100.20）：
+- **生产检查**（测试环境 `<test-host>` / 正式 `<prod-host>`）：
   升级后 `GET /api/server/admin/balance` 应满足 `Σ balance_ledger.amount == users.balance_money`
   （提供 `picoaide-server --check-balance` CLI 或运维 SQL，二选一，实施阶段 5 决定）。
 

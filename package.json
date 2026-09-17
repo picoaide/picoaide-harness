@@ -71,6 +71,8 @@
     "check:patches": "node scripts/verify-patches.mjs",
     "check:inventories": "node scripts/verify-inventories.mjs",
     "check:theme-tokens": "node scripts/check-theme-tokens.mjs",
+    "check:glitchtip": "node scripts/verify-glitchtip-ops-check.mjs",
+    "check:check-workspaces": "node scripts/verify-check-workspaces.mjs",
     "prebuild": "yarn workspace dsh-plugin-desktop prebuild",
     "check": "node scripts/check-workspaces.mjs",
     "check:fast": "node scripts/check-workspaces.mjs --changed",

@@ -160,6 +160,10 @@ export default function Gateway() {
   // P3: flash 定时器由 useFlash 统一清理。
   const [okMsg, setOkMsg] = useFlash(2000)
   const [syncMsg, setSyncMsg] = useFlash(4000)
+  // 保存响应里的**非阻断告警**(S12-01 的 200+warning 降级、S10-5 的「库中现值
+  // 不可用」)。2026-09-17(修复轮 2):本页是唯一会产生这类 PUT 的页面,此前丢弃
+  // 响应体 ⇒ 服务端明说"配置有问题"的告警在界面上完全不可见,管理员只看到「已保存」。
+  const [warnings, setWarnings] = useState<string[]>([])
   const [loading, setLoading] = useState(true) // 审计修复 L2
   // P1-6: 提交中操作标识(双击守卫 + 按钮禁用/loading)。null = 空闲,值为操作 key。
   const [busy, setBusy] = useState<string | null>(null)
@@ -270,8 +274,15 @@ export default function Gateway() {
         server_base_url: cfg.server_base_url,
         peak_windows: peaked.length ? JSON.stringify(peaked) : '',
       }
-      await request(`${ADMIN_API}/gateway`, { method: 'PUT', body: JSON.stringify(body) })
+      const res = await request(`${ADMIN_API}/gateway`, { method: 'PUT', body: JSON.stringify(body) })
       setError('')
+      // S12-01/S10-5 修复轮 2(2026-09-17):服务端把「本次写入让配置处于有问题
+      // 状态」的说明放在 200 响应的 warnings 里(不阻断保存)。必须读出来渲染 ——
+      // 否则警告文案只有服务端和测试知道,页面上永远是「已保存」。
+      const returned = Array.isArray(res?.warnings)
+        ? res.warnings.filter((w: unknown): w is string => typeof w === 'string')
+        : []
+      setWarnings(returned)
       // 本次写入已落库,本地编辑区就是服务端现值 ⇒ 解析失败标记与「已确认清空」
       // 都不再成立(否则第二次保存会带着过期判定继续拒绝/继续清空)。
       setPeakParseFailed(false)
@@ -639,6 +650,13 @@ export default function Gateway() {
       {error && <div className="text-sm text-destructive">{error}</div>}
       {okMsg && <div className="text-sm text-green-600">{okMsg}</div>}
       {syncMsg && <div className="text-sm text-green-600">{syncMsg}</div>}
+      {/* 保存告警(非阻断):与「错误监控」页同一套黄条样式 —— 保存成功但配置
+          仍不可用时,不能让「已保存」成为唯一反馈(S12-01/S10-5,2026-09-17)。 */}
+      {warnings.map((w) => (
+        <div key={w} className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-sm text-amber-700">
+          {w}
+        </div>
+      ))}
 
       {/* ① 上游 Provider */}
       <Card>

@@ -106,12 +106,23 @@ async function assertCredentialOrigin(runtime: BrowserRuntime, tabId: number, co
   if (expected === null) {
     throw browserError('policy', `browser_fill_credentials refused: the stored connector record for ${JSON.stringify(connectorId)} has no usable http(s) site URL, so the injection cannot be bound to an origin. Enter the value with browser_type instead, and ask the user to record the connector's site address (a base-URL field) or declare it in the browser plugin's credentialSites config.`)
   }
-  const actual = httpOriginOf(runtime.tabState(tabId).url)
+  // 原始 URL 派生（runtime.tabOrigin），**不得**读 tabState() 的脱敏投影：投影会把
+  // 注入过的口令逐字擦成 `****`，口令恰好落在主机名里时（≥8 字符）origin 本身被改写，
+  // 同 origin 的后续注入会被永久误拒并回显畸形主机（2026-09-17 审计 S02-01）。
+  // 与 runtime.fillCredentials 临界区内的 TOCTOU 复核同源。
+  const actual = runtime.tabOrigin(tabId)
   if (actual === null) {
     throw browserError('policy', `browser_fill_credentials refused: this tab has no http(s) origin, while connector ${JSON.stringify(connectorId)} is bound to ${expected}. Navigate the tab to that site first.`)
   }
   if (actual !== expected) {
-    throw browserError('policy', `browser_fill_credentials refused: this tab is on ${actual} but connector ${JSON.stringify(connectorId)} is bound to ${expected}. Credentials are only injected into their own site — a look-alike page must not receive them; navigate the tab to ${expected} first.`)
+    // 比对用 raw origin（runtime.tabOrigin），文案里**一个字节的被观测 origin 都不出现**
+    // （2026-09-17 三轮对抗复核 S02-01 残留）：被观测方是页面影响的不可信侧 —— 页面可以把
+    // 注入过的口令拼进弹窗/跳转主机名（https://<口令>.evil.example），而任何"投影后再回显"
+    // 的写法都挡不住它：URL 解析把主机名折叠成小写（口令 Sup3rSecret 变成 sup3rsecret），
+    // 逐字脱敏是按大小写敏感的 indexOf 匹配；<8 字符的口令又只按整 token 匹配（`.`/`-`/`_`
+    // 都算词字符），于是短口令原样回显。模型只需要知道"不是这个站点"以及该去哪儿，
+    // 所以文案只保留连接器 id 与**用户自己登记**的期望 origin（可信侧）。
+    throw browserError('policy', `browser_fill_credentials refused: this tab is not on the site connector ${JSON.stringify(connectorId)} is bound to (${expected}). Credentials are only injected into their own site — a look-alike page must not receive them; navigate the tab to ${expected} first.`)
   }
   return expected
 }
@@ -1134,13 +1145,16 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     },
     timeoutMs: BROWSER_TOOL_TIMEOUT_MS,
     isConcurrencySafe: () => false,
-    presentCall: present('Clear browsing data'),
+    presentCall: present('Clear site data'),
     async execute(args, exec) {
       const scope = (args as { scope?: string }).scope
       if (scope === 'all-data') {
         // Design §7.3-4: all-data needs the USER's shell confirmation — the
         // tool surface refuses; users clear everything via the browser menu.
-        throw browserError('policy', 'browser: clear_data all-data requires a user confirmation in the browser window menu — use the ⋮ menu → Clear browsing data')
+        // 菜单文案是按请求语言渲染的（OVERLAY_COPY.zh/en），而本工具的文案在 apply
+        // 期就固定 —— 写死任一种语言的菜单项名，对另一种语言的用户就是一条不存在
+        // 的指令（默认 UI 是 zh）。控件一律按功能/位置描述（2026-09-17 审计 S01-4）。
+        throw browserError('policy', 'browser: clear_data all-data requires a user confirmation in the browser window menu — ask the user to open the ⋮ menu and pick the destructive clear-browsing-data entry (it asks to confirm clearing everything)')
       }
       noteAgent(runtime, exec.agent)
       await runtime.runGated('browser_clear_data', () => runtime.clearData(false), exec.signal)

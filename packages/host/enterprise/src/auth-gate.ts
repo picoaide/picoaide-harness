@@ -1187,27 +1187,51 @@ export function apply(ctx: Context, config: Config): void {
   const archiveTooLarge = (locale: HostLocale): string => archiveTooLargeError(locale)
 
   /**
+   * 单遍填充模板占位符：**替换文本不再被扫描**。
+   *
+   * 旧的链式 `.replaceAll('__A__', …).replaceAll('__B__', …)` 有一个注入面
+   * （2026-09-17 二轮对抗审计 IP-1）：值本身是渠道/运维配置（未受信），只要某个
+   * 值里出现**后面才替换**的占位符字面量，它就会在**另一个上下文**里被展开 ——
+   * 例如 `defaults.server_url = "https://host/__BRAND_JSON__"` 会把
+   * `brandScriptLiteral()`（JSON.stringify，引号未转义）插进
+   * `value="__DEFAULT_SERVER__"` 属性里，JSON 自己的 `"` 闭合属性、后续内容变成
+   * 标记（已用真实 channel.json + parse5 复现：登录页出现 onfocus 处理器，
+   * 聚焦即读出密码框内容）。单遍替换从结构上消灭这一类。
+   *
+   * 未知占位符原样保留（与旧行为一致：模板里出现的其它 `__X__` 不动）。
+   * @param template - 含 `__NAME__` 占位符的模板。
+   * @param values - 占位符 → 取值的函数（**不得**在取值里再调用本函数）。
+   * @returns 填充后的字符串。
+   */
+  const fillPlaceholders = (template: string, values: Readonly<Record<string, () => string>>): string =>
+    template.replace(/__[A-Z][A-Z0-9_]*__/gu, (token) => {
+      const value = values[token]
+      return value === undefined ? token : value()
+    })
+
+  /**
    * 组装登录页：文案与 `<html lang>` 取 `locale`，品牌名/预置地址仍在这里做
-   * 上下文各自的转义替换（`__*__` 占位符流程不变）。
+   * 上下文各自的转义替换（`__*__` 占位符单遍填充，见 fillPlaceholders）。
    * @param locale - 本次请求的语言。
    * @returns 可直接写进响应的 HTML。
    */
-  const loginPage = (locale: HostLocale): string => renderLoginPage(locale)
-    .replaceAll('__DEFAULT_SERVER__',() => (defaultServer))
+  const loginPage = (locale: HostLocale): string => fillPlaceholders(renderLoginPage(locale), {
+    __DEFAULT_SERVER__: () => defaultServer,
     // 只有**确实配了**域名才打标记 —— 页面脚本据此决定要不要自动连接。
-    .replaceAll('__DEFAULT_SERVER_MARK__',() => (configuredServer === '' ? '' : 'data-default-server="1"'))
+    __DEFAULT_SERVER_MARK__: () => (configuredServer === '' ? '' : 'data-default-server="1"'),
     // 内置了地址就不再提供"返回修改服务端地址"（见 backButtonHtml 的说明）。
-    .replaceAll('__BACK_BUTTON__',() => (configuredServer === '' ? backButtonHtml(locale) : ''))
-    .replaceAll('__BRAND_NAME__',() => (brandTitle))
-    .replaceAll('__BRAND_JSON__',() => (brandScriptLiteral(brand)))
+    __BACK_BUTTON__: () => (configuredServer === '' ? backButtonHtml(locale) : ''),
+    __BRAND_NAME__: () => brandTitle,
+    __BRAND_JSON__: () => brandScriptLiteral(brand),
+  })
 
   /**
-   * 组装会话恢复过渡页（`__BRAND_NAME__` 替换同登录页）。
+   * 组装会话恢复过渡页（`__BRAND_NAME__` 替换同登录页，同样单遍填充）。
    * @param locale - 本次渲染的语言。
    * @returns 可直接写进响应的 HTML。
    */
   const restoringPage = (locale: HostLocale): string =>
-    renderRestoringPage(locale).replaceAll('__BRAND_NAME__',() => (brandTitle))
+    fillPlaceholders(renderRestoringPage(locale), { __BRAND_NAME__: () => brandTitle })
 
   const json = (res: ServerResponse, code: number, body: unknown): void => {
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' })
