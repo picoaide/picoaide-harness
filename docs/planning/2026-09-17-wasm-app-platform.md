@@ -104,7 +104,7 @@
 | **`app_id`** | **既是应用标识、也是域名标签**：基础规则沿用平台既有 `^[a-z0-9]+(?:-[a-z0-9]+)*$`（小写、无连续/首尾连字符）；**wasm 应用额外约束**：长度 ≤ **63**（DNS label 上限）、**不得纯数字**（避免 IP 形态）、**不得以 `xn--` 开头**（punycode）、不得是保留字（下行）、不得与基域下既有 DNS 记录/主机名冲突 | `manifest.go:243/60-61` + 域名规则 |
 | `app_id` 唯一性 | **同 kind 内由 `apps` 主键 `(kind, app_id)` 保证** | 一个 `app_id` 只能对应一个域名，因此不需要额外标识列 |
 | `app_id` 改名 | **不支持改名**（改名等于换域名）：需要新名字就新建应用，旧应用照 R37 退役 | 版本与域名都是外部契约 |
-| 版本号 | 严格 `^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$`，必须严格递增；失败不占号（R18） | `manifest.go:248` + `appstore/publish.go:221-238` |
+| 版本号 | 严格 `^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$`，必须严格递增；**失败的发布不占号**（R18：失败不落 release 行）；**已落行的版本永久占号**——被拒与软删（`deleted_at`）的版本同样不可复用（`UNIQUE(kind,app_id,version)`）。两者是**两条不同规则**，不得互相推导 | `manifest.go:248` + `appstore/publish.go:221-238` + `0053_apps.sql:50/53` |
 | 非首版 changelog | 必填（空即拒，422 `MISSING_FIELD`） | `publish.go:241-244` |
 | **app_id 保留字** | `www api admin portal app apps updates static cdn mail ns ns1 ns2 dns ftp vpn sso login auth autodiscover autoconfig mta-sts dmarc acme _acme-challenge` + **部署期可注入的企业已知主机名**（基域是平台资产） |
 
@@ -114,7 +114,7 @@
 |---|---|---|
 | `.wasm` 体积上限 | **32 MiB**（R33） | Go 实测 3.34 MB；余量留给内嵌 HTML/JS/资源 |
 | 上传请求体上限 | **48 MiB**（base64 JSON，R21） | 必须进 `largeBodyRoutes` 白名单；**白名单只是豁免** ⇒ handler 内必须自己再套 `http.MaxBytesReader(48<<20)`；先查 `Content-Length` 回 413 |
-| **客户端上传超时** | **90 s**（必须 > 服务端 `ReadTimeout 60 s`）；>8 MiB 走**分片 + 续传** | 客户端既有大上传是 `timeoutMs: 30000`（`auth-gate.ts:1936/2132`），32 MiB 必然超时 |
+| **客户端上传超时** | **90 s**（必须 > 服务端 `ReadTimeout 60 s`）；>8 MiB 走**分片 + 续传** | 客户端既有大上传是 `timeoutMs: 30000`（`packages/host/enterprise/src/auth-gate.ts` 两处，`grep -n "timeoutMs: 30000"` 取当前位置——**行号会随提交漂移，文档不写死**），32 MiB 必然超时 |
 | 上传时限（服务端） | `http.Server.ReadTimeout = 60 s` | 48 MiB 需 ≈6.7 Mbps 保底；部署文档须写明前置反代不得设更小的 body 上限/超时 |
 | 静态资源 | **发布期从 wasm 自定义段抽出**到 `<data_root>/apps/<app_id>/assets/<release_id>/`，宿主直接服务 + 缓存；**抽完立即释放原始字节** | HTML/JS 也走这条（R8/R37）；抽出失败 = 发布失败；缓存键 `app_id + version + path` |
 | **自定义段总量上限** | **≤ 4 MiB**（超限 `SECTION_OVERSIZE`） | 实测：自定义段零用途却整体进内存（2.48 MiB→32.48 MiB，RSS +34 MiB、编译 1.78 s） |
@@ -131,20 +131,32 @@
 
 | 项 | 配置 | 依据 |
 |---|---|---|
-| 上下文取消 | ⚠️ **必须** `WithCloseOnContextDone(true)` | 实测：不开则 context 超时完全不生效 |
-| 随机源 | ⚠️ **必须** `WithRandSource(rand.Reader)` | `internal/sys/sys.go:151-152`：默认 `NewFakeRandSource()` ⇒ 全零 |
+| 上下文取消 | ⚠️ **必须** `WithCloseOnContextDone(true)`（**RuntimeConfig**；编译进程与执行进程必须一致，见 §4.3.1） | 实测：不开则 context 超时完全不生效；该开关经 `wasm.Module.AssignModuleID` 进入 module ID ⇒ 两侧不一致时磁盘缓存**永不命中**（静默） |
+| 随机源 | ⚠️ **必须** `WithRandSource(rand.Reader)`（**ModuleConfig**，**每次实例化都要设**） | 默认是 `platform.NewFakeRandSource()` = `rand.New(rand.NewSource(42))`（实现 `internal/platform/crypto.go:12/15-17`，调用点 `internal/sys/sys.go:151-152`）：**固定种子 42 的确定性伪随机，跨独立实例完全一致**（实测三个独立 Runtime 的 guest 首读同为 `dfd79b4d76429b61`）。比"全零"更隐蔽：作者本地看着"每次都在变"，线上每个用户拿到的"随机"值却相同；判据必须是"两次独立实例序列**不同**"（§10.2 第 21 项） |
 | 墙钟 / 单调钟 / 睡眠 | ⚠️ **必须** `WithSysWalltime()` + `WithSysNanotime()` + `WithNanosleep(真实实现)` | `config.go:582`：默认不是 `time.Now` |
 | 文件系统 | ⚠️ **零 preopen** | 实测：有 preopen ⇒ 挂载点下全部可读 |
 | 参数 / 环境变量 | **不传 args、不传任何 env** | 传 env = 把部署环境交进沙箱 |
 | stdin / stdout | stdin = 宿主构造的请求帧；stdout/stderr 捕获到内存缓冲，**绝不落宿主 stdout** | §7 帧协议 |
 | 实例内存 | `WithMemoryLimitPages(1024)` = **64 MiB/实例**（R22） | 实测：Go 常驻 8 MiB 堆时 16 MiB 上限只剩 ~7 MiB 余量；Zig 初始内存默认 16.4 MiB（工具链决定，平台设不了） |
 | 实例策略 | **只缓存编译结果，每请求新实例**；禁止实例复用 | 实测实例化 + `_start` = 10.6 ms（空跑）/ 106.9 ms（8 MiB 堆）⇒ 可行 |
-| 编译缓存 | **`wazero.NewCompilationCacheWithDir(<data_root>/apps/_compile-cache)`**（内容寻址 sha256、跨 Runtime/进程/重启）；**不自建 LRU** | wazero `cache.go:34/56`；接口注释明写"for decoupling, not third-party implementations"，编译产物跨不了进程 |
+| 编译缓存 | **`wazero.NewCompilationCacheWithDir(<data_root>/apps/_compile-cache)`**（内容寻址 sha256、跨 Runtime/进程/重启）；**不自建 LRU**；配置与目录纪律见 §4.3.1 | wazero `cache.go:34/56`；接口注释明写"for decoupling, not third-party implementations"，编译产物跨不了进程 |
 | 编译进程（R31） | **单进程串行（并发 1）** + 队列 64（满则 429）+ CPU 配额 | 实测 2.48 MiB 编译 1.3–1.7 s；32 MiB 极端模块 ~10–20 s |
 | 编译进程隔离（R31） | **非特权用户 + bwrap/landlock + seccomp + `--unshare-net` + env 白名单**（不得继承 PG DSN / master key 等） | 唯一"读不可信字节且可能写宿主"的进程；env 纪律与实例同等 |
 | 驱动与连接 | **一应用一 driver 实例 + 一应用一连接，不复用** | `vtab` 包级注册是进程全局 |
 | **内存四笔账** | 编译缓存驻留 + 32×64 MiB 实例 + 编译峰值 + **上传峰值**（base64 单次 ≈118 MB：32+43+43）**各自设限并联立**；**启动自检：理论峰值 > 可用内存 70% ⇒ 拒绝启动** | 四笔账必须同时设限；峰值超可用内存 70% 时**拒绝启动**而不是等 OOM |
 | 上传频率 | 每用户 30 次/小时（validate + publish 合计）+ **同时最多 1 次编译中的上传** | 防"上传即预编译"成为 DoS 面 |
+
+#### 4.3.1 编译缓存：唯一构造函数与信任边界
+
+> 依据 = wazero v1.12.0 源码 + 本机复跑（探针 `docs/evidence/2026-09-17-wasm-app-platform/cache-key/`，2026-09-17）。
+> 键 = `sha256(moduleID ‖ magic ‖ CPU features)`，其中 `moduleID = AssignModuleID(binary, listeners, ensureTermination)`（`runtime.go:261`、`internal/wasm/module.go:214-231`、`internal/engine/wazevo/engine_cache.go:29-41`）；目录按 wazero 版本分片（`wazero-v<ver>-<os>-<arch>`）。
+
+| # | 不变量 | 违反时的后果（**全部是静默的**） |
+|---|---|---|
+| a | **两侧共用一份 `newRuntimeConfig()`**：编译进程与执行进程的 `WithCloseOnContextDone`、`CoreFeatures`、engine 种类必须相同（`WithMemoryLimitPages` **允许不同——它不进键**）；并有测试断言两侧逐字段相等 | 实测：只改内存上限 ⇒ 命中同一键 `429b279e…`；只改 `WithCloseOnContextDone` ⇒ 换键 `68689fd7…`（条目 10.06 → 10.51 MiB）。不一致 ⇒ 发布期编译**暖不到**执行进程 ⇒ 进程重启后每个应用首个请求付一次冷编译（1.9 s），同模块落**两份**条目 |
+| b | **键的可复用前提**：同 wazero 版本（目录名分片）、同 CPU features、同 `WithCloseOnContextDone`、同函数监听器配置 | 换 wazero 版本或换 CPU（异构机队）都会复制条目 ⇒ 缓存容量与回收（§11 第 11 项）必须按 `(版本, CPU, flag)` 三元组算 |
+| c | **每次实例化新建 ModuleConfig**：`WithRandSource` / `WithSysWalltime` / `WithSysNanotime` / `WithNanosleep` / `WithStdin` / `WithStdout` / `WithStderr` / `WithArgs` / `WithEnv` 都是 **ModuleConfig**（只有 `WithCloseOnContextDone` / `WithMemoryLimitPages` 在 RuntimeConfig 上）；**同一个 ModuleConfig 不得跨请求复用** | 漏设 = 随机源/时钟/stdio 全部回落危险默认值（固定种子伪随机 + 2022-01-01 假时钟）；复用 = 把上一请求的 stdout 缓冲/环境带进下一请求 |
+| d | **缓存目录是信任边界**：目录属主 = 编译进程，执行进程只读；不得挂载成任何"外部可写"路径 | wazero 原话 *"The embedder must safeguard this directory from external changes"*（`cache.go:55`）；条目只带**同文件内** CRC32（防损坏、不防篡改），而执行进程会把这些字节 **mmap 成机器码执行** ⇒ 编译进程一旦被攻破（§15.1 第 14 条正是假设它可能被攻破），缓存就是**提权到 server 进程的持久通道**。要么加校验方案，要么在 §12 显式认账（§11 第 24 项） |
 
 ### 4.4 宿主能力调用
 
@@ -165,7 +177,7 @@
 | **数据库体积上限** | **100 MB**（`PRAGMA max_page_count = 25600`，页 4096 B） | R2；⚠️ **该 pragma 与全部 `SQLITE_LIMIT_*` 都是连接级且不持久**（实测：重开文件/新连接读回默认值）⇒ **每条连接都要重设**（连接钩子 + 变异测试），漏设即静默失去上限 |
 | 单语句 | **强制单语句**：分号须位于字符串字面量之外；其后除空白/注释外有内容即拒 | 实测：多语句让 `db.query`/`db.exec` 区分形同虚设 |
 | schema | **仅 `main`**（任何 `ATTACH` 一律拒） | 实测：一条 `ATTACH` 即可跨应用读 |
-| 语句种类白名单 | 仅 `SELECT`/`INSERT`/`UPDATE`/`DELETE`；**禁全部 DDL（含 `CREATE`/`DROP`/`ALTER`）**、禁 `ATTACH`/`DETACH`/`VACUUM`/`PRAGMA`/`WITH RECURSIVE` | 建表只经 `db.define`（R32，宿主代执行并强制上限）；`VACUUM INTO` 是独立于 ATTACH 的任意文件写原语（实测可写 `/tmp`） |
+| 语句种类白名单 | 仅 `SELECT`/`INSERT`/`UPDATE`/`DELETE`；**禁全部 DDL（含 `CREATE`/`DROP`/`ALTER`）**、禁 `ATTACH`/`DETACH`/`VACUUM`/`PRAGMA`/`WITH RECURSIVE` | 建表只经 `db.define`（R32，宿主代执行并强制上限）；`VACUUM INTO` 与 `ATTACH` **同受 `SQLITE_LIMIT_ATTACHED` 约束**（实测 =0 时一起被拒：`too many attached databases - max 0`、目标文件不生成；modernc v1.55.0 / v1.59.0 一致）⇒ 禁它是**纵深**，真正的闸门是下行的连接级限额 |
 | 连接级只读分层 | `SELECT` 走 `_pragma=query_only(1)` 连接；写走读写连接且每次调用前重置连接状态 | 防连接级状态粘连 |
 | `SQLITE_LIMIT_SQL_LENGTH` / `LENGTH` | 64 KiB / 1 MiB | 单条 SQL / 单值 |
 | `SQLITE_LIMIT_COLUMN` | 128 | 结果集列数 |
@@ -173,7 +185,7 @@
 | `SQLITE_LIMIT_COMPOUND_SELECT` | 8 | 复合 SELECT |
 | `SQLITE_LIMIT_VDBE_OP` | 50 000 | 挡**编译期巨型语句**；⚠️ **不是运行期护栏**（实测无界递归 CTE 只有 32 条指令） |
 | `SQLITE_LIMIT_FUNCTION_ARG` / `VARIABLE_NUMBER` | 16 / 128 | |
-| `SQLITE_LIMIT_ATTACHED` | **0** | 引擎层否决 ATTACH（每条连接重设） |
+| `SQLITE_LIMIT_ATTACHED` | **0** | 引擎层否决 ATTACH，**并且是 `VACUUM INTO` 的唯一闸门**（实测见上行）；⚠️ 连接级不持久 ⇒ **每条连接重设**（连接钩子 + 变异测试），漏设即二者同时复活 |
 | `SQLITE_LIMIT_LIKE_PATTERN_LENGTH` | 512 | 防 LIKE 模式爆炸 |
 | `SQLITE_LIMIT_TRIGGER_DEPTH` / `WORKER_THREADS` | 8 / **0** | 触发深度 / 禁辅助线程 |
 | 返回行数 / 字节 | 5 000 行 / 8 MiB | 超出即截断并报错 |
@@ -196,7 +208,7 @@
 | **每用户全局在跑上限** | **4**（跨应用聚合） | 否则单用户 20 个应用可占满全局 32 槽 |
 | 每应用并发 | **恒为 1**（串行） | 与"每应用一连接"一致 |
 | 全局并发实例 | **32**（配合 64 MiB/实例 ≈ 2 GiB 上界） | 防跨应用耗尽 |
-| **匿名限流**（R35） | 全局匿名令牌桶（默认 3000 次/分）+ 每 IP 60 次/分；**启用子域却未显式配置 `PICOAI_TRUSTED_PROXIES` ⇒ 拒绝启动** | 缺省只信回环；错配会让全部匿名流量坍缩进同一桶 = 全组织 429（本仓已有同族事故） |
+| **匿名限流**（R35） | 全局匿名令牌桶（默认 3000 次/分）+ 每 IP 60 次/分；**启用子域却未显式配置 `PICOAI_TRUSTED_PROXIES` ⇒ 拒绝启动**；⚠️ `docker-compose.yml:98` 默认注入 `172.28.0.2` ⇒ 自检必须能区分"compose 默认值"与"管理员显式配置"，否则要么永远拒启、要么形同虚设 | 缺省只信回环；错配会让全部匿名流量坍缩进同一桶 = 全组织 429（本仓已有同族事故） |
 | 响应缓存 | 仅缓存 `assets.read` 的静态资源；键 `app_id + version + path`；动态响应一律不缓存 | 键必须含 `app_id` |
 
 ### 4.7 账号、AI 与额度
@@ -224,7 +236,7 @@
 | 响应头白名单 | `content-type`（限定集合）、`cache-control`、`content-disposition`（仅 `inline`）、`x-content-type-options` | Cookie 由宿主独占 |
 | CR/LF | 头值中出现即拒 | 防响应拆分 |
 | 主机名反查 | `Host` 的**第一级标签** → `apps.app_id`（`kind=wasm_app`）；查不到**直接 404**，绝不回落主站 | 域名标签即 `app_id` |
-| **host 门控** | 应用子域**独立路由树**；`/`、`/portal`、`/models`、`/chat/completions`、`/updates/client/*` 在子域**必须全部不命中** | 现网路由只按 path 注册，`/` 与 `/portal` 在 NoRoute 分支 ⇒ 否则子域会渲染门户（钓鱼 + 源混淆） |
+| **host 门控（allow-list）** | 应用子域**只挂应用路由树**——主站路由在子域**一律不注册**，而不是维护一份"禁命中清单"。至少覆盖：`/`、`/portal`、`/admin/*`（webadmin SPA，带账密表单）、`/healthz`、`/models`、`/chat/completions`、`/v1/*`、`/api/server/*`、`/updates/client/*` | 全仓 Go 代码**零 host 维度判断**（`Request.Host` 仅 `clientrelease.go:200` 一处、用于拼下载 URL），`/`、`/portal`、`/admin/*` 都在 NoRoute 分支、`/healthz` 在根引擎上 ⇒ 清单式禁命中必然漏（2026-09-17 复核）；断言见 §10.1 13a–13d |
 | 跨应用写防护 | 子域路由树最外层**无条件**校验：非幂等方法要求 `Origin == https://<app_id>.<应用基域>`（无 Origin 校验 Referer 前缀），且**早于**任何重定向/重写 | 同 eTLD+1 下 `SameSite=Strict` 挡不住 `<a>.<基域>` → `<b>.<基域>` 的跨源写 |
 
 ### 4.9 审计与可观测
@@ -532,6 +544,10 @@
 11. 应用 A 的 SQL 读应用 B 的库                     → 拒（文件边界 + ATTACH 双重否决）
 12. 连接复用后 database_list 只剩 main          → 成立（每应用一连接 + 每次调用重置）
 13. 新建连接是否仍带全套限额                        → 成立（连接钩子；变异测试：去掉钩子必红）
+13a. 子域 GET / 或 /portal                        → 404（应用路由树不注册主站路由）
+13b. 子域 GET /admin/                             → 404（webadmin SPA 不对子域暴露；它带账密表单）
+13c. 子域 GET /healthz                            → 404（存活探测面不对子域暴露）
+13d. 子域 GET /updates/client/<资产>、/v1/*、/api/server/*  → 404（主站面一律不注册；allow-list 而非清单）
 ```
 
 ### 10.2 沙箱逃逸（红线 4/5）
@@ -627,14 +643,14 @@
 
 ## 11. 必须实测的假设与未闭合缺口
 
-> 下列清单是**开工前必须钉死/实测**的项与**已知缺口**，按依赖顺序排列（1–10 阻塞实现，11–15 待实测，16–22 缺口）。
+> 下列清单是**开工前必须钉死/实测**的项与**已知缺口**，按依赖顺序排列（1–10 阻塞实现，11–15 待实测，16–24 缺口）。
 
 **必须先定/先测（阻塞实现）**
 
 1. **导入白名单由参考实现生成**（先写 Go 样例 → CI 真编译 → dump 导入集）；核对含 `fd_read`
 2. **帧格式 + 应用配置文件落到示例代码**：长度前缀 + `read_exact` 样板（三处：宿主实现、skill references、validate 判据）；`picoaide.app.json` 的 schema、发布期抽取、`assets.read` 读取路径与校验规则（含 `login_required=true` 空名单即拒）
-3. **迁移两件**：`app_releases.status` CHECK 放开审核态；`apps.channel` CHECK 放开 + `kind` 白名单放开（**不新增标识列**：域名标签就是 `app_id`；`api_tokens` 保持现状）
-4. **`kind` 影响面审计**：非测试代码 108 处引用 / 13 文件 + webadmin 6 个前端文件；`channelLabel` 对未知值回落"组织共享库"要给 wasm 分支
+3. **迁移一件**：`apps.channel` CHECK 放开 + `kind` 白名单放开（**不新增标识列**：域名标签就是 `app_id`；`api_tokens` 保持现状）。`app_releases.status` **无需迁移**——`0053_apps.sql:45` 的 CHECK 已含 `'pending','approved','rejected'`（2026-09-17 复核），只有引入新字面量才需要动
+4. **`kind` 影响面审计**：非测试代码 108 处引用 / 13 文件 + webadmin 6 个前端文件（**计数口径见 §15.2 引用纪律**：换 revision 会变）；**两个**未知值回落点都要加 wasm 分支——`channelLabel`（回落"组织共享库"）与 `kindLabelOf`（回落"技能"，用于官方锁定报错）
 5. **host 门控 + 子域路由树 + 子域限体 + 413 可读性**（4 个独立实现点；`/` 与 `/portal` 在 NoRoute 分支）
 6. **换票端点改造**（POST + Origin + `next` 白名单 + 票原子消费）
 7. **限流重做**：可信代理自检（`PICOAI_TRUSTED_PROXIES`）+ 全局匿名桶 + 每 IP 桶
@@ -659,6 +675,8 @@
 20. **部署文档**：`AI-DEPLOY.md` 需新增应用子域章节（通配证书由企业自备）+ 资源规格（含"与另一渠道栈共用宿主机"的最低内存）+ 前置反代要求
 21. **可观测**：`/readyz`（磁盘/队列/缓存水位）+ 低水位拒绝发布 + 排障信息面（编译输出归属、失败详单留存、日志落点）
 22. **余额预留扩到既有桌面路径**（同一处 handler，一次做掉更省）
+23. **证据探针入库**：§15.2 的数字必须可复跑——本轮已把 3 个复跑探针入库（`docs/evidence/2026-09-17-wasm-app-platform/`）；其余本地探针（`temp/wasm-audit2-sql/`、`temp/wasm-audit2-mem/`、`temp/wasm-redteam/`、`temp/wasm-feas/`、`temp/wasm-crash/`）在实现启动前收敛入库（`temp/` 在 `.gitignore:84`，对任何 clone 都不可见），并给每个数字标注测量基线 commit
+24. **编译缓存目录的属主与信任边界**（§4.3.1-d）需拍板：接受风险（写进 §12 认账 + 确认 bwrap/landlock 的可写面只有该目录）还是加校验/隔离方案
 
 ---
 
@@ -703,7 +721,8 @@
 
 ## 14. 参考
 
-- 实测探针：`temp/wasm-audit2-sql/`（SQLite 隔离与限额语义）、`temp/wasm-audit2-mem/`（wazero 内存与 Go wasip1 导入面，含 `parse-wasm.py`）、`temp/wasm-redteam/`（签名不匹配、自定义段放大、内存声明）、`temp/wasm-feas/`（三语言工具链与 Node WASI 本地预览）
+- 实测探针（**已入库，可直接复跑**）：`docs/evidence/2026-09-17-wasm-app-platform/`——`cache-key/`（缓存键敏感性与命中）、`random-get/`（默认随机源）、`vacuum-into/`（`VACUUM INTO` vs `LIMIT_ATTACHED`），各目录带重跑命令
+- 实测探针（**本地，未入库**，收敛要求见 §11 第 23 项）：`temp/wasm-audit2-sql/`（SQLite 隔离与限额语义）、`temp/wasm-audit2-mem/`（wazero 内存与 Go wasip1 导入面，含 `parse-wasm.py`）、`temp/wasm-redteam/`（签名不匹配、自定义段放大、内存声明）、`temp/wasm-feas/`（三语言工具链与 Node WASI 本地预览）
 - 权威依据：[SQLite run-time limits](https://www.sqlite.org/c3ref/limit.html) · [wazero CompilationCache](https://github.com/tetratelabs/wazero/blob/v1.12.0/cache.go) · [Cloudflare Durable Objects 规则](https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/)
 
 ---
@@ -714,11 +733,11 @@
 
 | # | 不变量 | 一句话理由 |
 |---|---|---|
-| 1 | wazero 五项显式注入（`WithCloseOnContextDone` / `WithRandSource(rand.Reader)` / `WithSysWalltime` / `WithSysNanotime` / `WithNanosleep`）+ 零 preopen | 默认值就是危险值：随机源全零、时钟非真实、取消不生效、preopen 下挂载点全可读 |
-| 2 | host 门控 + 应用子域独立路由树 | 主站路由只按 path 注册（`/`、`/portal` 在 NoRoute 分支）⇒ 没有门控时每个子域都会渲染门户 |
+| 1 | wazero 五项显式注入（`WithCloseOnContextDone` / `WithRandSource(rand.Reader)` / `WithSysWalltime` / `WithSysNanotime` / `WithNanosleep`）+ 零 preopen | 默认值就是危险值：随机源是**固定种子 42 的确定性伪随机**（跨独立实例完全一致）、时钟是 2022-01-01、取消不生效、preopen 下挂载点全可读；其中 `WithRandSource`/`WithSysWalltime`/`WithSysNanotime`/`WithNanosleep` 是 **ModuleConfig（每请求设）**，`WithCloseOnContextDone` 是 RuntimeConfig（编译/执行两侧必须一致，§4.3.1） |
+| 2 | host 门控 + 应用子域独立路由树（allow-list） | 全仓 Go 代码**零 host 维度判断**、主站路由只按 path 注册（`/`、`/portal`、`/admin/*` 在 NoRoute 分支、`/healthz` 在根引擎）⇒ 没有门控时每个子域都会渲染门户与**管理台登录页** |
 | 3 | `SameSite=Strict` + `Origin == 自身源` | `<a>.<基域>` 与 `<b>.<基域>` 同站，Lax 挡不住跨源写（表单 + `text/plain` 免预检） |
 | 4 | 每条连接重设 `max_page_count` 与全部 `SQLITE_LIMIT_*` | 二者都是连接级且不持久：新连接读回默认值 ⇒ 漏设即**静默**失去 100 MB 上限与 ATTACH 否决 |
-| 5 | 禁 `VACUUM INTO` 与全部 DDL | 前者是独立于 ATTACH 的任意文件写原语；后者会绕过宿主托管的表结构 |
+| 5 | 禁 `VACUUM INTO` 与全部 DDL | DDL 会绕过宿主托管的表结构；`VACUUM INTO` 与 `ATTACH` **同受 `SQLITE_LIMIT_ATTACHED` 约束**（实测 =0 时一起被拒）⇒ **真正的闸门是"每条连接重设 `LIMIT_ATTACHED=0`"**（第 4 条），显式禁它是纵深：该限额一旦漏设，两者会同时复活 |
 | 6 | 宿主函数必须传 ctx + 返回后强制复检 | 宿主不传 ctx 时 guest 预算完全失效，且 `Call` 返回 `err=nil`（失败被报成成功） |
 | 7 | `err=nil` 但 module 已关闭 / 无响应帧 ⇒ 必须映射 `MODULE_KILLED`/`RUNTIME_NO_RESPONSE` | 静默失败的唯一兜底，绝不返回 200 |
 | 8 | 帧内 `user` 由宿主构造 + 子域 host-only/HttpOnly Cookie | 红线 3（应用拿不到平台凭证）的落地；身份只有这一条来源 |
@@ -746,6 +765,12 @@
 | Node 24 内置 `node:wasi` | 零新增依赖跑通 Go/Rust/Zig 产物（读 stdin 帧、写 `RS` 帧） | 本地预览放 skill（R40/R42、§9.4 第 10 条） |
 | 既有上传链路 | 客户端大上传 `timeoutMs: 30000`；服务端 `ReadTimeout 60 s`；base64 单次峰值 ≈118 MB | 客户端超时 90 s + 分片 + 内存四笔账（§4.2/§4.3） |
 | 部署基线 | AI-DEPLOY 建议 ≥4 核 / 8 GB / 50 GB；内存四笔账峰值须启动自检 | §4.3 启动自检 |
+| **编译缓存键敏感性** | 只改 `WithMemoryLimitPages(1024)` ⇒ **同一键命中**（`429b279e…`）；只改 `WithCloseOnContextDone(true)` ⇒ **换键**（`68689fd7…`，条目 10.06 → 10.51 MiB） | §4.3.1-a（两侧 RuntimeConfig 必须一致） |
+| **默认随机源** | 三个独立 Runtime 的 guest 首读**完全相同**（`dfd79b4d76429b61`）；注入 `rand.Reader` 后互不相同 | §4.3 随机源；§10.2 第 21 项判据 |
+| **`VACUUM INTO` vs `LIMIT_ATTACHED=0`** | 被拒（`too many attached databases - max 0`，目标文件不生成）；去掉限额即可写文件（modernc v1.55.0 / v1.59.0 一致） | §15.1 第 5 条；§4.5 连接级限额 |
+| **编译缓存收益与体积** | 冷编译 1.92 s → 命中 **86 ms（22×）**；条目 **10.06 MiB** / 模块 2.76 MB（≈3.7×；开启 `WithCloseOnContextDone` 后 10.51 MiB） | §11 第 11 项（跨进程/重启收益与占用） |
 
-复跑姿势：探针在 `temp/wasm-audit2-sql/`（隔离与限额）、`temp/wasm-audit2-mem/`（内存与导入面，含 `parse-wasm.py`）、`temp/wasm-redteam/`（签名/段/内存声明）、`temp/wasm-feas/`（三语言与 Node WASI）；wazero 模块缓存需 `GOMODCACHE=temp/wasm-crash/gomodcache`。
+> **测量基线与引用纪律（2026-09-17 复核）**：上表数字在该日的工作区复测，其中带 `file:line` 的引用**会随提交漂移**——同一份文档在 master 与分支上就出现过 `auth-gate.ts`、`router.go`、`AppKind` 计数三处不一致。**以符号/命令为准，不写死行号**；新加数字必须标注测量基线 commit。已入库探针见 §14。
+
+复跑姿势：**已入库** `docs/evidence/2026-09-17-wasm-app-platform/`（`cache-key/`、`random-get/`、`vacuum-into/`，每个目录一条命令）；**本地未入库** `temp/wasm-audit2-sql/`（隔离与限额）、`temp/wasm-audit2-mem/`（内存与导入面，含 `parse-wasm.py`）、`temp/wasm-redteam/`（签名/段/内存声明）、`temp/wasm-feas/`（三语言与 Node WASI）。依赖锚定 Go 1.26.5 / wazero v1.12.0 / modernc.org/sqlite v1.55.0（`VACUUM INTO` 一项另在 v1.59.0 复核）；任一本地 Go 模块缓存都可作 `GOMODCACHE`（例如 `temp/wasm-crash/gomodcache`）。
 
