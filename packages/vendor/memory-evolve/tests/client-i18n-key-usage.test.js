@@ -112,10 +112,16 @@ function literalItems(text) {
  */
 function valueDomains(source) {
   const map = new Map()
-  // 形态 1–3：具名数组（`as const` / 显式类型 / 裸数组都收）
+  // 形态 1–3：具名数组（`as const` / 显式类型 / 裸数组都收）。
+  //
+  // 2026-09-17 第 8 轮 R8-i18n-1 踩坑：必须**排除对象数组**（`[{ id: 'x', key: 'k' }]`）——
+  // 否则本正则会把 `id` 与 `key` 的**所有**字面量混成一个值域（实测 `tabs` 被登记成
+  // `['guide','coi.guide','tasks',…]`），进而让 `t(tab.key)` 报出一堆假缺失。
+  // 对象数组交给形态 6 只取 `key:` 字段。
   for (const m of source.matchAll(
     /const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*\[([^\]]*)\]\s*(?:as\s+const|satisfies[^\n]*)?/gu,
   )) {
+    if (/\{/.test(m[2])) continue
     const items = literalItems(m[2])
     if (items.length > 0 && !map.has(m[1])) map.set(m[1], items)
   }
@@ -125,6 +131,37 @@ function valueDomains(source) {
   )) {
     const items = literalItems(m[2])
     if (items.length > 0 && !map.has(m[1])) map.set(m[1], items)
+  }
+  // 形态 5（2026-09-17 第 8 轮 R8-i18n-1）：对象字面量映射 —— **值是键名本身**。
+  //   `const LEVEL_KEYS = { conversation: 'advisor.level.conversation', … } as const`
+  //   活调用点：`t(LEVEL_KEYS[level])`、`t(OUTCOME_KEYS[outcome])`、`t(TYPE_LABEL_KEYS[type])`。
+  //   之前完全没登记（守卫只认数组/Set/元组/回调），导致这类键删掉后整套门禁全绿。
+  //   用**大括号配对**取对象体：`as const` 对象里常有注释与嵌套（`OUTCOME_KEYS` 的
+  //   每个成员后面都跟一行注释），非贪婪 `\{[\s\S]*?\}` 会在第一个 `}` 处截断
+  //   （实测漏掉整个 OUTCOME_KEYS，导致 `t(OUTCOME_KEYS[outcome])` 的 8 个键无覆盖）。
+  for (const head of source.matchAll(/const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*\{/gu)) {
+    const open = head.index + head[0].length - 1
+    let depth = 0
+    let end = -1
+    for (let i = open; i < source.length; i += 1) {
+      if (source[i] === '{') depth += 1
+      else if (source[i] === '}' && (depth -= 1) === 0) { end = i; break }
+    }
+    if (end === -1) continue
+    if (!/^\s*as\s+const/u.test(source.slice(end + 1, end + 20))) continue
+    // 只收"值是 i18n 键"的成员（含 `.` 或 `_`）—— 避免把 `{ id: 'guide', key: 'coi.guide' }`
+    // 里的 id 值混进值域。
+    const items = [...source.slice(open + 1, end).matchAll(/[:{]\s*'([^']+)'|[:{]\s*"([^"]+)"/gu)]
+      .map((x) => x[1] ?? x[2])
+      .filter((v) => /[._]/.test(v))
+    if (items.length > 0 && !map.has(head[1])) map.set(head[1], items)
+  }
+  // 形态 6：对象数组（`[{ key: 'a' }, { key: 'b' }]`）—— 取出每个对象的 `key` 字段。
+  for (const m of source.matchAll(
+    /const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*\[([\s\S]*?)\]\s*(?:as\s+const|satisfies[^\n]*)?/gu,
+  )) {
+    const keys = [...m[2].matchAll(/\{[^{}]*\bkey\s*:\s*'([^']+)'/gu)].map((x) => x[1])
+    if (keys.length > 0 && !map.has(m[1])) map.set(m[1], keys)
   }
   return map
 }
@@ -342,9 +379,13 @@ test('模板键 t(`prefix.${expr}`) 展开后必须存在于 zh 与 en 两张字
     // **整个变量当键** —— `TRACKS.map(([t, k]) => t(k))`，真实活形态 SyncView.tsx:411。
     // 它不是模板洞，上面的模板扫描覆盖不到；变量若在 holeDomains 里有值域就逐个校验。
     // （注意：`t(x.y)` 的属性形态也走这里，值域按最后一段查。）
-    for (const m of source.matchAll(/(?:^|[^\w.$])(?:t|say)\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\)/gu)) {
+    for (const m of source.matchAll(/(?:^|[^\w.$])(?:t|say)\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)(\[[^\]]*\])?\s*\)/gu)) {
       const variable = m[1]
-      const items = holeDomains.get(variable) ?? holeDomains.get(variable.split('.').pop())
+      // 成员/下标形态（第 8 轮 R8-i18n-1）：`t(LEVEL_KEYS[level])` / `t(meta.key)` ——
+      // 值域来自**基对象**的名字（LEVEL_KEYS / meta），下标或属性只是取用方式。
+      const items = holeDomains.get(variable)
+        ?? holeDomains.get(variable.split('.')[0])
+        ?? holeDomains.get(variable.split('.').pop())
       if (items === undefined) continue
       const line = source.slice(0, m.index).split('\n').length
       for (const key of items) {
