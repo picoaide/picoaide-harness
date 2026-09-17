@@ -25,9 +25,9 @@ beforeEach(() => {
 })
 
 /**
- * 等网关配置**加载完成**。2026-09-17 独立审计：本文件 18 处锚在静态 CardTitle
+ * 等网关配置**加载完成**。2026-09-17 独立审计：本文件 19 处锚在静态 CardTitle
  * 「全局设置」上，它在 loading 期就已渲染，随后同步读配置值的断言会拿到初值 ——
- * 注入 400ms 响应延迟即 6 例红（`Unable to find a label with the text of: 高峰开始 1`）。
+ * 注入 400ms 响应延迟即 10~11 例红（例：`Unable to find a label with the text of: 高峰开始 1`）。
  *
  * 判据 = loading 骨架的**消失**，用显式 `data-testid`（Gateway.tsx:686/756）而**不是**
  * CSS 类名：初版写成 `document.querySelectorAll('.animate-pulse')`，独立复核指出

@@ -169,8 +169,11 @@ describe('Capabilities 能力中心(统一审批)', () => {
       )
     })
 
-    await u.click(screen.getByRole('button', { name: '重新上架' }))
+    // busy 守卫：`setEnabled` 的 busy 键是 `…enabled`，而按钮的 disabled 只绑 `…approve`
+    // （Capabilities.tsx:286）⇒ 等"按钮可用"永远立刻通过，而链未结束时点击会被
+    // `if (busy) return` 静默吞掉（2026-09-17 独立审计实测）。改为点到成功为止。
     await waitFor(() => {
+      fireEvent.click(screen.getByRole('button', { name: '重新上架' }))
       expect(mockRequest).toHaveBeenCalledWith(
         '/api/server/admin/shared-skills/legacy/enabled',
         { method: 'PUT', body: JSON.stringify({ enabled: true }) },

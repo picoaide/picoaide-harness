@@ -254,7 +254,9 @@ describe('ErrorMonitoring 错误监控页', () => {
   it('展示客户端上报状态(含失败原因)', async () => {
     render(<ErrorMonitoring />)
     expect(await screen.findByText(/已启用上报:/)).toBeInTheDocument()
-    expect(screen.getByText(/u2\(初始化失败\): Sentry init 失败:invalid dsn/)).toBeInTheDocument()
+    // 计数块是**无条件渲染**的（ErrorMonitoring.tsx 的四个 div 用 `?? 0`），它出现
+    // 不代表 clients 明细已落地 —— 明细断言必须自己等（同族竞态，2026-09-17 审计）。
+    expect(await screen.findByText(/u2\(初始化失败\): Sentry init 失败:invalid dsn/)).toBeInTheDocument()
     expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/gateway/error-reporting/clients')
     // 有数据时不得出现"尚无客户端上报状态"误导文案。
     expect(screen.queryByText(/尚无客户端上报状态/)).not.toBeInTheDocument()

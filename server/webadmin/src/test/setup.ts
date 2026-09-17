@@ -1,6 +1,11 @@
 import { vi, afterEach } from 'vitest'
 import '@testing-library/jest-dom/vitest'
-import { cleanup } from '@testing-library/react'
+import { cleanup, configure } from '@testing-library/react'
+
+// findBy*/waitFor 的默认预算 1000ms 在 CI / 4 路并行负载下不够（2026-09-17 独立
+// 审计实测多处：三段链式请求的页面约 1.2s、懒 chunk 场景 1.2~2s 才就绪）。
+// 全局提到 5s —— 判据不变，只是"等多久才算失败"；用例级 { timeout } 仍可覆盖。
+configure({ asyncUtilTimeout: 5000 })
 
 afterEach(() => cleanup())
 

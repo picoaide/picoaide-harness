@@ -47,8 +47,8 @@ describe('Users 用户管理页', () => {
     fireEvent.click(screen.getAllByRole('button', { name: '部门' })[0])
     const dialog = within(await screen.findByRole('dialog'))
     expect(dialog.getByText(/从部门树选择归属/)).toBeInTheDocument()
-    // alice 归属研发部 → 复选框已勾选;保存提交 group_ids 数组
-    expect(dialog.getByRole('checkbox', { name: /研发部/ })).toBeChecked()
+    // 部门树是对话框打开后异步拉的：等复选框**出现**再断言勾选态（同族竞态）。
+    expect(await dialog.findByRole('checkbox', { name: /研发部/ })).toBeChecked()
     fireEvent.click(dialog.getByRole('button', { name: '保存' }))
     expect(mockRequest).toHaveBeenCalledWith(
       '/api/server/admin/users/1/department',
