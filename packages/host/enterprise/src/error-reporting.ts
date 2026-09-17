@@ -68,9 +68,16 @@ export type ErrorReportingState =
 
 let status: ErrorReportingState = { state: 'idle' }
 
-/** 只读当前状态(纯读,便于断言与状态上报)。 */
+/**
+ * 只读当前状态(纯读,便于断言与状态上报)。
+ *
+ * ★ ent-5(修复轮):必须返回**快照**,不能返回模块内那个可变对象的引用 —— 该对象
+ * 同时是 `reportErrorReportingStatus()` 的输入,消费方(诊断面板/管理端 UI)改写
+ * 读到的对象就会静默污染状态机与上报内容(实测 `a.state='HACKED'` 会让内部状态
+ * 真的变成 HACKED)。状态对象只有一层,浅拷贝足够。
+ */
 export function getErrorReportingStatus(): ErrorReportingState {
-  return status
+  return { ...status }
 }
 
 /**
@@ -139,9 +146,19 @@ export function unsupportedDsnReason(dsn: string): string | undefined {
   }
   if (parsed.username.trim() === '') return 'DSN 缺少公钥:客户端 SDK 不会发出任何事件'
   const segments = parsed.pathname.split('/').filter((segment) => segment !== '')
-  const projectId = segments.length > 0 ? segments[segments.length - 1]! : ''
-  if (!/^[0-9]+$/.test(projectId) || Number(projectId) <= 0) {
-    return 'DSN 的项目 ID 必须是正整数:客户端 SDK 不会发出任何事件'
+  const lastSegment = segments.length > 0 ? segments[segments.length - 1]! : ''
+  // ★ ent-2(修复轮):与 SDK 的归一化对齐 —— `dsnFromString()` 对尾段取的是
+  // **前导数字**(`projectId.match(/^\d+/)`,`@sentry/utils/cjs/dsn.js`),
+  // 于是 `/1abc` 在 SDK 侧就是 project 1、path 为空,事件真的投递到
+  // `/api/1/envelope/`(复核员的真实投递 A/B 对照)。此前这里用全串匹配
+  // `/^[0-9]+$/`,把 SDK 能正常工作的形状误判成"必然不可用",客户端会
+  // **永久拒绝启用**上报。
+  // 仍然拒绝两类形状:`/abc`(无前导数字)与 `/0`(project 0 不存在)——
+  // SDK 会发出请求但服务端没有对应项目,与本次要拦的 `localhost` 事故同族,
+  // 不能因为放宽归一化而放行。
+  const leadingDigits = /^[0-9]+/.exec(lastSegment)?.[0] ?? ''
+  if (leadingDigits === '' || Number(leadingDigits) <= 0) {
+    return 'DSN 的项目 ID 必须是数字(前导数字需大于 0):客户端 SDK 不会投递到有效项目'
   }
   return undefined
 }
@@ -474,8 +491,14 @@ export function apply(ctx: Context): void {
       const { config, fallback } = await getBootstrap(session)
       const web = config.web
       if (fallback === 'empty') {
+        // ★ ent-1(修复轮回归):这条新分支在基线上走的是 `web={}` ⇒ `enabled=false`
+        // ⇒ `await initSentry('', release)`(关旧实例)。改成 early return 后漏了关闭:
+        // 服务端 models 变空时,已初始化的实例仍在向旧 DSN 外发,而状态/日志说的是
+        // "本次不上报"。先 teardown 再置状态 —— 顺序反了就会出现"状态已
+        // config_unavailable、实例还活着"的中间态。
+        await initSentry('', release)
         status = { state: 'config_unavailable', reason: 'bootstrap 回退空配置(models 为空或形状不合)' }
-        ctx.logger?.warn?.('错误上报:服务端配置不可用(models 为空,已回退空配置),本次不上报')
+        ctx.logger?.warn?.('错误上报:服务端配置不可用(models 为空,已回退空配置):已关闭上报,不再外发')
         void reportErrorReportingStatus(session, status)
         return
       }
@@ -488,11 +511,16 @@ export function apply(ctx: Context): void {
       const dsn = web?.error_reporting_dsn ?? ''
       ctx.logger?.debug('error-reporting: dsn from bootstrap', enabled && dsn !== '' ? 'configured' : 'disabled/empty')
       if (!enabled || dsn.trim() === '') {
+        // ★ ent-1(修复轮回归):基线在这里是 `await initSentry('', release)` —— 它同时
+        // 承担"关闭旧实例"的副作用。本轮新增 early return 时丢了这一步,于是管理员在
+        // 后台把开关关掉后**旧 DSN 仍在继续外发**,而那条 warn 还写着"客户端不会上报
+        // 任何错误"。先关实例、再写状态/日志,保证"状态说不报"与"实例已关"不脱钩。
+        await initSentry('', release)
         status = { state: 'disabled' }
         // 降噪:同一进程只 warn 一次(登录/登出反复触发 sync)。
         if (!disabledWarned) {
           disabledWarned = true
-          ctx.logger?.warn?.('错误上报未启用(开关关闭或 DSN 为空):客户端不会上报任何错误')
+          ctx.logger?.warn?.('错误上报未启用(开关关闭或 DSN 为空):已关闭上报,客户端不会外发任何错误')
         }
         void reportErrorReportingStatus(session, status)
         return
@@ -515,6 +543,11 @@ export function apply(ctx: Context): void {
     } catch (cause) {
       // bootstrap 失败不阻断;但现在状态可查、日志会落盘。
       const reason = cause instanceof Error ? cause.message : String(cause)
+      // ★ ent-1(修复轮):这条分支同样产出 `config_unavailable`(语义 = 本次不上报,
+      // 且该状态会回传服务端)。状态/日志说"不上报"就必须真的停:此前只改状态不关实例,
+      // 拿不到 bootstrap 时旧实例仍在向**上一个**会话的 DSN 外发 —— 同服务端换账号
+      // 时这就是"用旧租户的 DSN 继续上报"。保守停止(宁可本次不上报,也不误报)。
+      await initSentry('', release)
       status = { state: 'config_unavailable', reason }
       console.warn('[error-reporting] bootstrap 失败,不上报:', cause)
       ctx.logger?.warn?.('error-reporting: bootstrap 失败,不上报:', cause)

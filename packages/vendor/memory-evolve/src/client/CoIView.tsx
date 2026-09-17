@@ -118,14 +118,23 @@ interface Notice {
 type DictKey = Extract<MemoryEvolveKey, `coi.${string}`>
 
 /**
+ * 本视图的翻译函数：键收窄到 `coi.` 域，**可选模板参数**（`{count}` / `{value}` …）。
+ *
+ * 2026-09-17（审计 i18n-core-1）：此前 `dict()` 的返回类型只声明一个形参，
+ * 带参调用点传的第二个实参在 JS 层被静默丢弃，文案原样渲染成 `{count} 秒前`。
+ * 包装器与所有接收 t 的 helper 都必须是这个类型，否则同一个坑会再出现一次。
+ */
+type Dict = (key: DictKey, params?: Record<string, unknown>) => string
+
+/**
  * 造一个「本视图键 → 当前语言文案」的查询函数。
  *
  * ⚠️ 必须是每个组件各持一份（`const t = dict(props.t)`），**不得**再退回
  * 模块级常量/闭包：模块求值早于插件 apply，那时 t 只能拿到默认语言，
  * 等于把界面语言钉死。
  */
-function dict(t: Translate): (key: DictKey) => string {
-  return (key) => t(key)
+function dict(t: Translate): Dict {
+  return (key, params) => t(key, params)
 }
 
 /* ------------------------------------------------------------------ */
@@ -156,7 +165,7 @@ function deleteJson<T>(path: string): Promise<T> {
 }
 
 /** unknown → 可读错误文本；空信息兜底，绝不渲染空红框。 */
-function errText(err: unknown, t: (key: DictKey) => string): string {
+function errText(err: unknown, t: Dict): string {
   const text = err instanceof Error ? err.message : String(err)
   return text !== undefined && text.trim() !== '' ? text : t('coi.error.noDetail')
 }
@@ -178,7 +187,7 @@ function fmtTime(ts: number | null | undefined): string {
 }
 
 /** 时间戳 → 相对时间（当次渲染语言）。 */
-function fmtAgo(ts: number | null | undefined, t: (key: DictKey) => string): string {
+function fmtAgo(ts: number | null | undefined, t: Dict): string {
   if (ts === null || ts === undefined) return '—'
   const delta = Math.max(0, Date.now() - ts)
   if (delta < 5000) return t('coi.ago.justNow')
@@ -213,7 +222,7 @@ function trunc(text: string, n = 40): string {
  * S4（2026-09-16）：**必须是函数**——表里含 `lang()`，写成模块级常量会让文案
  * 在模块加载那一刻就被钉死（与上面 `LANG` 常量同一个坑）。
  */
-function statusMeta(status: string, t: (key: DictKey) => string): { icon: string; label: string; cls: string } {
+function statusMeta(status: string, t: Dict): { icon: string; label: string; cls: string } {
   const meta: Record<string, { icon: string; label: string; cls: string }> = {
     queued: { icon: '⏳', label: t('coi.status.queued'), cls: 'coi-status-queued' },
     running: { icon: '⏳', label: t('coi.status.running'), cls: 'coi-status-running' },
@@ -232,7 +241,7 @@ const SCOPES = ['temporary', 'session', 'project', 'global'] as const
  * 原先写的是 `t(动态 scope 键) ?? scope` —— 但 t 永不返回 nullish，
  * 未知值实际渲染成键名（'scope.foo'），`??` 从不生效；这里按原意兜底。
  */
-function scopeLabel(scope: string, t: (key: DictKey) => string): string {
+function scopeLabel(scope: string, t: Dict): string {
   return (SCOPES as readonly string[]).includes(scope) ? t(`coi.scope.${scope}` as DictKey) : scope
 }
 
@@ -670,7 +679,7 @@ function TasksPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: string 
             <span className="coi-label">{t('coi.launch.scope')}</span>
             <select className="coi-select" value={scope} onChange={(e) => setScope(e.target.value)}>
               {SCOPES.map((s) => (
-                <option key={s} value={s}>{t(`scope.${s}`)}</option>
+                <option key={s} value={s}>{t(`coi.scope.${s}` as DictKey)}</option>
               ))}
             </select>
           </label>
@@ -1006,7 +1015,7 @@ function SessionsPane({ t: tt, dsSessionId }: { t: Translate; dsSessionId?: stri
         <select className="coi-select" value={scopeFilter} onChange={(e) => setScopeFilter(e.target.value)} title={t('coi.sessions.filterScope')}>
           <option value="">{t('coi.all')}</option>
           {SCOPES.map((s) => (
-            <option key={s} value={s}>{t(`scope.${s}`)}</option>
+            <option key={s} value={s}>{t(`coi.scope.${s}` as DictKey)}</option>
           ))}
         </select>
         <input

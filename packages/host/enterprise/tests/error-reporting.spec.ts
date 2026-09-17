@@ -672,3 +672,180 @@ describe('退出冲刷的 disposer 契约(F-05)', () => {
     expect(disposers[0]!()).toBeUndefined()
   })
 })
+
+// ---------------------------------------------------------------------------
+// 第 1 轮审计修复(ent-1 / ent-2 / ent-5):回归防线
+// 发现来源:.multiagent/audit-beta3-introduced/round-1/FINDINGS-enterprise-reporting.md
+// ---------------------------------------------------------------------------
+
+describe('审计修复轮回归(ent-1: 状态说"不上报"就必须关掉旧实例)', () => {
+  /** 造一份"已启用"的 bootstrap 响应(enabled=true + 好 DSN)。 */
+  function enabledBootstrap(): { config: unknown; fellBack: boolean; fallback: string } {
+    return {
+      config: {
+        default_model: 'm',
+        models: [{ id: 'm' }],
+        skills: [],
+        mcp: [],
+        web: { error_reporting_enabled: true, error_reporting_dsn: GOOD_DSN },
+      },
+      fellBack: false,
+      fallback: 'ok',
+    }
+  }
+
+  /** 走一次真实接线(apply + subscribeSession)让实例真的 init,并清空 close 记录。 */
+  async function primeReady(ctx: Context): Promise<void> {
+    await runSync(ctx, SESSION)
+    expect(getErrorReportingStatus()).toMatchObject({ state: 'ready', dsnHost: 'glitchtip.example.com' })
+    expect(initCalls()).toBe(1)
+    sentryMock.close.mockClear()
+  }
+
+  it('ent-1: 开关关闭后必须 close 旧实例(disabled 分支不再外发)', async () => {
+    bootstrapResult = enabledBootstrap()
+    const { ctx, warns } = stubCtx()
+    await primeReady(ctx)
+
+    // 第二次会话变化(**无中间登出**,与审计 r2 B 段一致):服务端把开关关掉。
+    bootstrapResult = {
+      config: {
+        default_model: 'm',
+        models: [{ id: 'm' }],
+        skills: [],
+        mcp: [],
+        web: { error_reporting_enabled: false, error_reporting_dsn: GOOD_DSN },
+      },
+      fellBack: false,
+      fallback: 'ok',
+    }
+    sessionListener!(SESSION)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(getErrorReportingStatus()).toEqual({ state: 'disabled' })
+    // ★ 回归点:基线在这里 `await initSentry('', release)` 关掉旧实例;改后 early
+    // return 漏了这一步 ⇒ 旧 DSN 继续外发。close(1500) 是 initSentry('') 的关闭路径。
+    expect(sentryMock.close).toHaveBeenCalledWith(1500)
+    // 实例已摘除 ⇒ 渲染进程错误不再外发(capture 返回 falsy,SDK 一次都不被调用)。
+    expect(captureRendererError({ type: 'error', message: 'AFTER-DISABLED' })).toBe(false)
+    expect(captureRendererGone({ reason: 'crashed', exitCode: 1 })).toBe(false)
+    expect(sentryMock.captureException).not.toHaveBeenCalled()
+    expect(sentryMock.captureMessage).not.toHaveBeenCalled()
+    // 日志不再说谎:它必须说明"已关闭上报",而不是"不会上报"却仍在发。
+    expect(warns.some((w) => w.includes('已关闭上报'))).toBe(true)
+  })
+
+  it('ent-1: bootstrap 回退空配置后必须 close 旧实例(config_unavailable 分支)', async () => {
+    bootstrapResult = enabledBootstrap()
+    const { ctx, warns } = stubCtx()
+    await primeReady(ctx)
+
+    // models 变空 ⇒ validateBootstrap 把整份配置换成 EMPTY(web:{});HEAD 的
+    // `fallback === 'empty'` 新分支此前只改状态、不关实例。
+    bootstrapResult = {
+      config: { default_model: '', models: [], skills: [], mcp: [], web: {} },
+      fellBack: true,
+      fallback: 'empty',
+    }
+    sessionListener!(SESSION)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(getErrorReportingStatus()).toMatchObject({ state: 'config_unavailable' })
+    expect(sentryMock.close).toHaveBeenCalledWith(1500)
+    expect(captureRendererError({ type: 'error', message: 'AFTER-EMPTY-FALLBACK' })).toBe(false)
+    expect(sentryMock.captureException).not.toHaveBeenCalled()
+    expect(warns.some((w) => w.includes('已关闭上报'))).toBe(true)
+    // 状态仍然回传服务端(P1-3 契约不变)。
+    expect(reported.some((r) => r.body.state === 'config_unavailable')).toBe(true)
+  })
+
+  it('ent-1: bootstrap 抛错后必须 close 旧实例(同属 config_unavailable)', async () => {
+    bootstrapResult = enabledBootstrap()
+    const { ctx } = stubCtx()
+    await primeReady(ctx)
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      bootstrapResult = new Error('AuthError: network')
+      sessionListener!(SESSION)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(getErrorReportingStatus()).toMatchObject({ state: 'config_unavailable', reason: 'AuthError: network' })
+      // 状态/日志说"不上报" ⇒ 旧实例(上一个会话的 DSN)必须已经停。
+      expect(sentryMock.close).toHaveBeenCalledWith(1500)
+      expect(captureRendererError({ type: 'error', message: 'AFTER-BOOTSTRAP-FAIL' })).toBe(false)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})
+
+describe('审计修复轮回归(ent-2: DSN 预检与 SDK 归一化对齐)', () => {
+  it('ent-2: `/1abc` 形态不再被判 failed(SDK 归一成 project 1 并真实投递)', async () => {
+    // 真实 SDK 的 `dsnFromString()` 取尾段**前导数字**作 projectId(/1abc ⇒ 1,
+    // path 为空),审计用 A/B 对照实测事件真的投递到 `/api/1/envelope/`。
+    // 此前全串匹配 `/^[0-9]+$/` 把这种"能用的形状"误判成必然不可用。
+    expect(unsupportedDsnReason('https://key@glitchtip.example.com/1abc')).toBeUndefined()
+    expect(unsupportedDsnReason('https://key@glitchtip.example.com/sentry/1abc')).toBeUndefined()
+
+    sentryMock.clientProvider = () => ({ getDsn: () => ({ host: 'glitchtip.example.com' }) })
+    try {
+      const result = await initSentry('https://key@glitchtip.example.com/1abc', 'r1')
+      expect(result).toEqual({ ok: true })
+      // 预检放行 ⇒ 真的进了 SDK、状态是 ready(而不是 failed)。
+      expect(initCalls()).toBe(1)
+      expect(getErrorReportingStatus()).toMatchObject({ state: 'ready', dsnHost: 'glitchtip.example.com' })
+    } finally {
+      sentryMock.clientProvider = undefined
+    }
+  })
+
+  it('ent-2: 放宽归一化没有放行确实非法的形状(缺 host / 非 http(s) / 非数字 / project 0)', async () => {
+    // 这次修的是"误杀",不是"一律放行":预检的"必然不可用"判定面必须保留。
+    expect(unsupportedDsnReason('https://key@/1')).toContain('不是合法的 URL')
+    expect(unsupportedDsnReason('ftp://key@glitchtip.example.com/1')).toContain('不受支持')
+    expect(unsupportedDsnReason('https://key@glitchtip.example.com:99999/1')).toContain('端口')
+    expect(unsupportedDsnReason('https://key@glitchtip.example.com/abc')).toContain('项目 ID')
+    expect(unsupportedDsnReason('https://key@glitchtip.example.com/0')).toContain('项目 ID')
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      for (const bad of [
+        'https://key@/1',
+        'ftp://key@glitchtip.example.com/1',
+        'https://key@glitchtip.example.com/abc',
+        'https://key@glitchtip.example.com/0',
+      ]) {
+        await initSentry(bad, 'r1')
+        expect(getErrorReportingStatus().state, bad).toBe('failed')
+      }
+      // 一条都不进 SDK(进了就是"谎报 ready"的来源)。
+      expect(initCalls()).toBe(0)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})
+
+describe('审计修复轮回归(ent-5: 状态 getter 返回快照)', () => {
+  it('ent-5: 外部改写返回对象污染不了内部状态与上报体', async () => {
+    await initSentry(GOOD_DSN, 'r1')
+    const snapshot = getErrorReportingStatus()
+    expect(snapshot).toEqual({ state: 'ready', dsnHost: 'glitchtip.example.com', level: 'error' })
+
+    // 消费方改写"读到的"对象(审计实测 `a.state='HACKED'` 曾真的改写模块内状态)。
+    const hack = snapshot as unknown as Record<string, string>
+    hack.state = 'HACKED'
+    hack.dsnHost = 'evil.example.com'
+    hack.level = 'debug'
+    expect(getErrorReportingStatus()).toEqual({ state: 'ready', dsnHost: 'glitchtip.example.com', level: 'error' })
+
+    // 每次都是新对象(不是同一个引用),并且内部状态改写不了 ⇒ 上报体也不会被污染。
+    expect(getErrorReportingStatus()).not.toBe(getErrorReportingStatus())
+    await reportErrorReportingStatus(SESSION, getErrorReportingStatus())
+    const body = reported.at(-1)!.body
+    expect(body.state).toBe('ready')
+    expect(body.dsn_host).toBe('glitchtip.example.com')
+    expect(JSON.stringify(reported)).not.toContain('HACKED')
+  })
+})

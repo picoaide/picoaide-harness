@@ -13,10 +13,10 @@
  *     compose 目录**一律必须显式提供**（参数或环境变量）。缺站点或主机时**拒绝运行**
  *     （exit 2），绝不猜一个默认目标 —— 否则无参数运行就会对某个真实环境发起 ssh/HTTP。
  *
- * 用法：
- *   node scripts/glitchtip-ops-check.mjs                 # 只读核查（默认）
- *   node scripts/glitchtip-ops-check.mjs --json          # 只读核查，输出 JSON
- *   node scripts/glitchtip-ops-check.mjs --apply --yes    # 打印人工修复命令（不执行）
+ * 用法（`--base-url` 是必填项；无参数运行会打印用法并以 exit 2 退出，**不会**猜目标）：
+ *   node scripts/glitchtip-ops-check.mjs --base-url <url> --ssh <user@host>   # 完整只读核查
+ *   node scripts/glitchtip-ops-check.mjs --base-url <url> --json            # 仅 API 侧，输出 JSON
+ *   node scripts/glitchtip-ops-check.mjs --base-url <url> --apply --yes      # 打印人工修复命令（不执行）
  *   node scripts/glitchtip-ops-check.mjs --help
  *
  * 参数（站点与主机**必须显式提供**；其余有非生产默认值）：
@@ -283,8 +283,28 @@ function hostFromDomain(value) {
 // 只读探测
 // ---------------------------------------------------------------------------
 
+/**
+ * Netscape cookie jar 的域列是否匹配目标主机。
+ *
+ * jar 里可能同时存着多个站点的会话（浏览器导出的尤其如此）。不校验域列就等于
+ * 把**任意站点**的会话 cookie 发给 `--base-url` 指定的主机，`--base-url` 可被
+ * 命令行/环境变量改成攻击者域名 ⇒ 会话泄漏。规则与浏览器一致：
+ * 精确主机匹配，或 jar 域是目标主机的**父域**（前导点写法）。IP 字面量只做精确匹配。
+ */
+function cookieDomainMatches(jarDomain, targetHost) {
+  if (!jarDomain || !targetHost) return false;
+  const d = jarDomain.trim().toLowerCase().replace(/^\./, '');
+  const h = targetHost.trim().toLowerCase();
+  if (d === '') return false;
+  if (d === h) return true;
+  // IP 字面量不做后缀匹配（避免 "0.0.1" 匹配到 "127.0.0.1" 之类的误判）。
+  if (/^[0-9.]+$/.test(h) || h.includes(':')) return false;
+  return h.endsWith(`.${d}`);
+}
+
 async function fetchKeys(cookieJar) {
   const url = `${cfg.baseUrl}/api/0/projects/${encodeURIComponent(cfg.org)}/${encodeURIComponent(cfg.project)}/keys/`;
+  const targetHost = hostFromDomain(cfg.baseUrl);
   const headers = { accept: 'application/json' };
   if (cookieJar && existsSync(cookieJar)) {
     const jar = readFileSync(cookieJar, 'utf8');
@@ -296,6 +316,11 @@ async function fetchKeys(cookieJar) {
       if (!trimmed || trimmed.startsWith('#')) continue;
       const cols = trimmed.split('\t');
       if (cols.length < 7) continue;
+      // 域列（cols[0]）必须与目标主机匹配：jar 里可能同时存着多个站点的会话
+      // （浏览器导出的 jar 尤其如此），不校验就会把**别的站点**的会话 cookie
+      // 发给我们请求的主机。2026-09-17 审计修复（round-1/FINDINGS-misc-ops-docs.md
+      // 的 misc-ops-docs-2：mock 实测 cookie 被发往 --base-url 指定的任意主机）。
+      if (!cookieDomainMatches(cols[0], targetHost)) continue;
       const expiresAt = Number(cols[4]);
       if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < nowSeconds) continue; // 过期 cookie 不发
       pairs.push(`${cols[5]}=${cols[6]}`);
@@ -531,8 +556,16 @@ if (!envInfo.reachable) {
   report.notes.push(envInfo.skipped === true
     ? '跳过容器 env 核查（未提供主机）：只给了 --base-url，本次仅核查 API 侧'
     : `无法通过 ssh 读取容器 env（${cfg.sshHost}）：${envInfo.error}`);
-  if (envInfo.skipped !== true) {
+  if (envInfo.skipped === true) {
+    // 用户**显式**只给 --base-url：这是被支持的子集用法，不构成"核查失败"。
+    report.verdict.push('UNKNOWN: 未指定 --ssh，本次只核查了 API 侧（容器站点 URL 未核查）');
+  } else {
+    // 给了主机却读不到 ⇒ 核查无法完成，按契约退 2。
+    // 2026-09-17 审计修复：此前这里只 push 一行 UNKNOWN 文字而不改 exitCode，
+    // 脚本仍退 0（"一切正常"）—— 运维会误以为链路健康，正是本工具要消灭的
+    // "静默无信号"。见 round-1/FINDINGS-misc-ops-docs.md。
     report.verdict.push('UNKNOWN: 未能读取容器 env，站点 URL（GLITCHTIP_URL/APP_URL/GLITCHTIP_DOMAIN）设置情况未知');
+    report.exitCode = 2;
   }
 } else {
   log(`   MAIN_URL=${envInfo.mainUrl ?? '(未设置)'}（GlitchTip 6.2.x 里无代码读取 = 零效果）`);

@@ -4,7 +4,7 @@
 - 关联：决策 D9（[决策记录](../decisions/2026-09-16-glitchtip-error-collection.md)）· 验收标准 AC11 / AC15
 - **本文档是给人类运维的操作手册。** 仓库里的任何自动化（含 AI 代理、CI、脚本）**都不得执行本文的生产写操作**；
   代理对生产主机与 GlitchTip 实例只允许**只读**勘察（`SELECT` / `docker logs` / `docker inspect` / HTTP GET）。
-- 只读辅助脚本：`scripts/glitchtip-ops-check.mjs`（默认只读，输出当前 DSN、是否 loopback、容器 env、期望 DSN）。
+- 只读辅助脚本：`scripts/glitchtip-ops-check.mjs`（只读；`--base-url` 必填，输出当前 DSN、是否 loopback、容器 env、期望 DSN）。
 
 > **一段话结论**：GlitchTip 收到的错误事件本身是好的（收包链路健康），但后台**展示**给运维的 DSN
 > 是 `http://…@localhost:8000/1`，而 issue 永久链接也是 `http://localhost:8000/...`。
@@ -288,9 +288,16 @@ POST 上报端点。所以：
 3. 只读核查可以这样跑（不产生任何变更）：
 
    ```bash
-   node scripts/glitchtip-ops-check.mjs            # 只读：打印当前 DSN、是否 loopback、容器 env、期望 DSN
+   # --base-url 必填（脚本不含任何生产地址默认值；无参数运行会打印用法并 exit 2）
+   node scripts/glitchtip-ops-check.mjs \
+     --base-url https://<你的 GlitchTip 域名> --ssh <user@生产主机> \
+     --cookies <管理员 cookie jar>   # 只读：打印当前 DSN、是否 loopback、容器 env、期望 DSN
    node scripts/glitchtip-ops-check.mjs --help     # 全部参数
    ```
+
+   只给 `--base-url` 时脚本**只核查 API 侧**并明确标注容器 env 未核查（不冒充完整核查）；
+   给了 `--ssh` 却连不上则按契约以 **exit 2** 退出（"核查无法完成"，不是"一切正常"）。
+   jar 文件里域列不匹配目标主机的 cookie 不会被发送（避免把别的站点会话带给被核查主机）。
 
    脚本的 `--apply` 模式**只打印**建议命令（不代执行），且必须额外给 `--yes` 才肯继续。
 

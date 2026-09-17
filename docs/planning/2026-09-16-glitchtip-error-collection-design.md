@@ -453,7 +453,9 @@ $ git diff v2.7.5-beta.2 HEAD -- packages/host/enterprise/src/error-reporting.ts
 - `packages/host/desktop/package.json` 的 `build.files` / `asarUnpack`（`@sentry/*` 本来就该留在 asar 内；
   加 `asarUnpack` 反而会踩 `listUnpackedUnsafeJs` 的「JS 泄漏到物理树」门禁 `verify-packaged-runtime.ts:741-746`）。
 - 其他服务包（connectors/browser/cron/account-card）与品牌素材。
-- 生产环境（`101.42.228.128`、GlitchTip 实例）：**只读**，一切运维纠正走文档交付给人工。
+- 生产环境（生产主机、GlitchTip 实例）：**只读**，一切运维纠正走文档交付给人工。
+  （具体主机地址**只允许出现在运维手册** `docs/deploy/2026-09-16-glitchtip-selfhost-operations.md`；
+  设计文档不记录内部地址。2026-09-17 审计修复。）
 
 ---
 
