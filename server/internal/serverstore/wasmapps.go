@@ -118,6 +118,35 @@ func nullableSQLTime(v any) *time.Time {
 	return &t
 }
 
+// WasmAppCurrentVersions 取一组应用"当前生效版本"的版本号。
+//
+// 管理面列表要显示「当前版本」，而 apps 行上只有 current_release_id（版本号在
+// app_releases 上）。用一条 `= ANY(?::bigint[])` 批量取（同 balance.go 的用法），
+// 不做 N+1；空入参直接返回空 map（避免给 PG 传空数组）。
+// 版本行被软删/已被回收时该 id 查不到 ⇒ 调用方拿到零值（列表里显示空），不报错。
+// @param ids - current_release_id 集合。
+// @returns id → version。
+func WasmAppCurrentVersions(ctx context.Context, db *sql.DB, ids []int64) (map[int64]string, error) {
+	out := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id, version FROM app_releases WHERE id = ANY(?::bigint[])`, pgInt64Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var version string
+		if err := rows.Scan(&id, &version); err != nil {
+			return nil, err
+		}
+		out[id] = version
+	}
+	return out, rows.Err()
+}
+
 // isForeignKeyViolation 报告 PG 的外键冲突(23503):CreateWasmRelease 用它
 // 把"应用不存在"翻译成 ErrNotFound,而不是让调用方拿到裸驱动错误。
 func isForeignKeyViolation(err error) bool {

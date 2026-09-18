@@ -287,7 +287,7 @@ func newEnv(t *testing.T, mutate ...func(*Options)) *env {
 	}
 	e.mgr = session.New(session.Options{
 		DB:         db,
-		BaseDomain: testBaseDomain,
+		BaseDomain: func() string { return testBaseDomain },
 		MainOrigin: testMainOrigin,
 		Auth: func(username, password string) (string, int64, error) {
 			ui, err := api.AuthenticatePassword(username, password)
@@ -308,7 +308,7 @@ func newEnv(t *testing.T, mutate ...func(*Options)) *env {
 	opt := Options{
 		DB:         db,
 		DataRoot:   e.root,
-		BaseDomain: testBaseDomain,
+		BaseDomain: func() string { return testBaseDomain },
 		Sessions:   e.mgr,
 		Events:     ev,
 		AIBaseURL:  "http://127.0.0.1:9",

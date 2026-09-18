@@ -71,7 +71,9 @@ describe('导航权限过滤(P2-43)', () => {
   })
 
   it('多权限点条目命中任一即可见(能力中心 market:read | capability:read)', () => {
-    expect(paths({ role: 'auditor', permissions: ['capability:read'] })).toEqual(['/capabilities'])
+    // capability:read 同时 gate「能力中心」与「应用中心」(2026-09-18 新增,读权限
+    // 复用同一点);market:read 只 gate 能力中心 —— 下面两条断言正是这条边界。
+    expect(paths({ role: 'auditor', permissions: ['capability:read'] })).toEqual(['/capabilities', '/app-center'])
     expect(paths({ role: 'auditor', permissions: ['market:read'] })).toEqual(['/capabilities'])
   })
 

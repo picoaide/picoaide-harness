@@ -79,7 +79,11 @@ type Options struct {
 	// 以配置为准 —— 明文部署（本地开发/内网 http）只能靠显式写 `http://` 打开，
 	// 否则会出现"https 回跳到只有 http 的端口"这种静默失败。
 	// 空 = 未启用应用子域（与 edge.HostGate 同语义：此时 /app-ticket 一律 404）。
-	BaseDomain string
+	//
+	// **是函数而不是字符串**（2026-09-18 用户要求「管理端支持泛域名配置」）：
+	// 基域从启动期部署配置变成运行期设置，换票回跳地址必须按**改后的**基域生成，
+	// owning 一份启动期快照会让"控制台改完要重启才生效"。
+	BaseDomain func() string
 	// MainOrigin 是主站源（如 `https://harness.example.com`）。
 	//
 	// 空 = 按请求推导（edge.SelfOrigin）。非空时它同时是**断言**：请求自身的源
@@ -383,9 +387,17 @@ func ParseBaseDomain(raw string) (scheme, host string) {
 	return scheme, s
 }
 
+// baseDomain 读当前基域（取值函数可能为 nil ⇒ 视作未启用，绝不 panic）。
+func (m *Manager) baseDomain() string {
+	if m.opt.BaseDomain == nil {
+		return ""
+	}
+	return strings.TrimSpace(m.opt.BaseDomain())
+}
+
 // AppOrigin 返回某应用的源（`scheme://<app_id>.<基域>`）。空 = 未启用应用子域。
 func (m *Manager) AppOrigin(appID string) string {
-	scheme, host := ParseBaseDomain(m.opt.BaseDomain)
+	scheme, host := ParseBaseDomain(m.baseDomain())
 	if scheme == "" || host == "" || appID == "" {
 		return ""
 	}

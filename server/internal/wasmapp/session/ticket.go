@@ -118,7 +118,7 @@ func (m *Manager) TicketPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lang := localeOf(r)
-	if _, host := ParseBaseDomain(m.opt.BaseDomain); host == "" {
+	if _, host := ParseBaseDomain(m.baseDomain()); host == "" {
 		// 未启用应用子域（与 edge.HostGate 同语义：BaseDomain 为空 ⇒ 无应用）
 		edge.WriteAppNotFound(w, r, "")
 		return
@@ -160,7 +160,7 @@ func (m *Manager) TicketSubmit(w http.ResponseWriter, r *http.Request) {
 	// 同一份字节（审计探针的"逐字节相同 ⇒ 回落主站"判据因此误报）。
 	// 与 appserver 的 `mainOrigin == ""` 分支同一口径：功能未启用时明确 404，
 	// 而不是假装走到了应用查找。
-	if _, host := ParseBaseDomain(m.opt.BaseDomain); host == "" {
+	if _, host := ParseBaseDomain(m.baseDomain()); host == "" {
 		edge.WriteAppNotFound(w, r, "")
 		return
 	}

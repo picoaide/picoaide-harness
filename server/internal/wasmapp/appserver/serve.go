@@ -149,7 +149,7 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 		// R25（2026-09-18 收敛为 access 三模式）：access=login/whitelist 且未登录
 		// ⇒ 302 主站换票，**只带相对路径**的 next
 		//（带绝对 URL 会把"跳到哪"变成一个可被误用的输入；§4.7 的 next 白名单也只收相对路径）。
-		if s.mainOrigin == "" {
+		if s.mainOriginNow() == "" {
 			// BaseDomain 未配置 ⇒ 拼不出换票地址。这是部署配置错误，不能静默：
 			// 静默按匿名放行 = 把要求登录的应用变成公开应用。
 			s.logf("appserver: BaseDomain 未配置，无法为要求登录的应用换票 app=%s", appID)
@@ -244,7 +244,7 @@ func secureRequest(r *http.Request) bool {
 // net/url 的 PathEscape 对 `&`/`=` 不转义，直接拼进 query 会被解析成额外的参数
 // （`?next=/s?a=1&b=2` ⇒ next 只剩 `/s?a=1`）—— 任务书里写的 PathEscape 在这里是错的。
 func (s *Server) ticketURL(r *http.Request, appID string) string {
-	return s.mainOrigin + "/app-ticket?app=" + url.QueryEscape(appID) +
+	return s.mainOriginNow() + "/app-ticket?app=" + url.QueryEscape(appID) +
 		"&next=" + url.QueryEscape(cleanRequestURI(r))
 }
 

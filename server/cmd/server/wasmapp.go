@@ -46,8 +46,12 @@ type wasmPlatform struct {
 	Enabled bool
 	// AppServer 是应用子域请求管线（HostGate 的 Apps 分支）。
 	AppServer *appserver.Server
-	// HostGate 是主机名门控（只有启用子域时才非 nil）。
+	// HostGate 是主机名门控（**总是非 nil**：基域可在运行期启用，见
+	// setupWasmPlatform 里的注释 —— 按启动期 enabled 决定装不装会让控制台
+	// 改完必须重启）。
 	HostGate *edge.HostGate
+	// BaseDomain 是应用基域的运行期持有者（控制台保存后同步生效）。
+	BaseDomain *baseDomainHolder
 	// API 是操作面 handler 集合（§8）。
 	API *wasmapi.Handlers
 	// Session 是员工浏览器会话与一次性换票（R12/R16）。
@@ -146,9 +150,13 @@ func mustRefuseStartupForIsolation(mode compile.IsolationMode, usable bool) bool
 // 带着无隔离的编译进程对外服务、两个副本各持一半票），"暂时跑起来但语义已坏"
 // 比"起不来"危险得多。
 func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API, dataDir, addr string) *wasmPlatform {
-	baseDomain := strings.TrimSpace(os.Getenv(EnvAppsBaseDomain))
+	// 应用基域：**管理端可配置**（2026-09-18 用户要求「应用名 + 泛域名 = 应用访问
+	// 地址」）。优先级：控制台保存过（含显式清空）> 环境变量。取值走 holder
+	// （原子读）—— HostGate 每请求都要判一次，而写路径只有控制台保存。
+	base := newBaseDomainHolder(db, os.Getenv(EnvAppsBaseDomain))
+	baseDomain := func() string { return base.Get() }
 	extraReserved := splitCSV(os.Getenv(EnvAppsExtraReserved))
-	enabled := baseDomain != ""
+	enabled := baseDomain() != ""
 
 	// ---- R35：可信代理自检（未启用子域时不校验，既有部署行为不变）----
 	if err := anonlimit.CheckTrustedProxies(os.Getenv, enabled); err != nil {
@@ -318,6 +326,8 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		Compiler:           compiler,
 		Events:             eventSink,
 		BaseDomain:         baseDomain,
+		BaseDomainSource:   base.Source,
+		ApplyBaseDomain:    base.Apply,
 		AppIDExtraReserved: extraReserved,
 		Audit:              func(username, action, detail string) { _ = serverstore.AuditLog(db, username, action, detail) },
 		// 发布面的 fail-closed 闸门（审计 P1-1：AllowPublish 此前零调用方）。
@@ -331,6 +341,7 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 
 	p := &wasmPlatform{
 		Enabled:       enabled,
+		BaseDomain:    base,
 		AppServer:     appSrv,
 		API:           api,
 		Session:       sessMgr,
@@ -344,12 +355,12 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		AI:            ai,
 		lock:          lock,
 	}
-	if enabled {
-		// Main 由 main.go 在拿到 *gin.Engine 后回填（HostGate 需要主站 handler）。
-		p.HostGate = &edge.HostGate{BaseDomain: baseDomain, Apps: appSrv}
-	}
-	log.Printf("wasm: platform ready (subdomain=%v base_domain=%q extra_reserved=%d)",
-		enabled, baseDomain, len(extraReserved))
+	// HostGate **无条件常挂**：空基域时 MatchHost 对所有主机名返回 HostMain ⇒
+	// ServeHTTP 直接交主站，与"没挂门控"逐字节等价；非空时才把应用子域分流。
+	// Main 由 main.go 在拿到 *gin.Engine 后回填。
+	p.HostGate = &edge.HostGate{BaseDomain: baseDomain, Apps: appSrv}
+	log.Printf("wasm: platform ready (subdomain=%v base_domain=%q source=%s extra_reserved=%d)",
+		baseDomain() != "", baseDomain(), base.Source(), len(extraReserved))
 	return p
 }
 

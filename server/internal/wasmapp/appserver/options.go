@@ -42,7 +42,10 @@ type Options struct {
 	//
 	// 为空 = 未启用应用子域：此时 RequiresLogin 的应用**无法**换票，本包按
 	// 500 处理（配置错误不静默，见 §6.1 与 R25 的取舍说明）。
-	BaseDomain string
+	//
+	// **是函数而不是字符串**（2026-09-18）：基域可由管理端在运行期修改，
+	// 服务端每处使用都必须读当前值（换票地址、日志、准入判定）。
+	BaseDomain func() string
 	// Sessions 是会话与票务管理器（模块 G）。必填：
 	// 身份帧的唯一来源、`?ticket=` 兑换的唯一实现都在它里面。
 	Sessions *session.Manager
@@ -95,8 +98,6 @@ type Server struct {
 	// ai 是共享的 ai.chat 客户端（按 (用户, 会话) 缓存在手令牌，§4.7）。
 	ai capapi.AI
 
-	// mainOrigin 是主站源（`scheme://<BaseDomain>`），换票回跳用；空 = 未启用应用子域。
-	mainOrigin string
 	// trustedProxies 是可信前置代理（PICOAI_TRUSTED_PROXIES）：
 	// 只有来自它们的 X-Forwarded-For 才被采信（见 clientip.go）。
 	trustedProxies []netip.Prefix
@@ -182,13 +183,10 @@ func New(opt Options) (*Server, error) {
 	}
 	s.ai = aichat.New(aichat.Options{BaseURL: opt.AIBaseURL, DB: opt.DB})
 
-	// 主站源：与 session 包同一份解析（BaseDomain 可带 scheme；缺省 https）。
-	scheme, host := session.ParseBaseDomain(opt.BaseDomain)
-	if host != "" {
-		s.mainOrigin = scheme + "://" + host
-	}
+	// 主站源不再缓存：基域可由管理端在运行期改（2026-09-18），换票地址必须按
+	// **当前**值生成 —— 见 mainOriginNow()。这里只做一次启动日志。
 	s.trustedProxies = trustedProxiesFromEnv()
-	if s.mainOrigin == "" {
+	if s.mainOriginNow() == "" {
 		logger("appserver: BaseDomain 为空：未启用应用子域；RequiresLogin 的应用无法换票（将按 500 处理）")
 	} else if len(s.trustedProxies) == 0 {
 		// R35：子域启用却没有可信代理配置 ⇒ 全部匿名流量会坍缩进同一个每 IP 桶。
@@ -350,6 +348,22 @@ func samePath(a, b string) bool {
 // 与 anonlimit 的启动自检（anonlimit.CheckTrustedProxies）共用同一个变量名常量，
 // 不新增字段、不新增真源。无法解析的项直接忽略（fail-closed：忽略=不信任，
 // 只会让限流更严；启动自检已负责把非法值拦在进程之外）。
+// mainOriginNow 按**当前**基域计算主站源（`scheme://<host>`）；空 = 未启用应用子域。
+//
+// 与 session.ParseBaseDomain 同一份解析（基域可带 scheme，缺省 https）—— 解析规则
+// 只允许一份，避免两处对 "http://127.0.0.1:8080" 这类取值判断不一致。
+func (s *Server) mainOriginNow() string {
+	raw := ""
+	if s.opt.BaseDomain != nil {
+		raw = s.opt.BaseDomain()
+	}
+	scheme, host := session.ParseBaseDomain(raw)
+	if host == "" {
+		return ""
+	}
+	return scheme + "://" + host
+}
+
 func trustedProxiesFromEnv() []netip.Prefix {
 	raw := strings.TrimSpace(os.Getenv(anonlimit.EnvTrustedProxies))
 	if raw == "" {

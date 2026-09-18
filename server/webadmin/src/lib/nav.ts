@@ -8,7 +8,7 @@
 // RequirePermission 才是护栏);某条目声明多个权限点时命中任一即可见。
 // 未声明 perms 的条目 fail-closed(仅超管可见),防止以后新增页面漏声明。
 import {
-  Users, Settings2, KeyRound, BarChart3, Store, ScrollText, Network, Server, Bug, Plug,
+  Users, Settings2, KeyRound, BarChart3, Store, ScrollText, Network, Server, Bug, Plug, Boxes,
   type LucideIcon,
 } from 'lucide-react'
 import {
@@ -55,6 +55,10 @@ export const NAV_ENTRIES: NavEntry[] = [
   { to: '/usage', label: '用量中心', icon: BarChart3, section: '运维', perms: [PERM_USAGE_READ] },
   // 2026-09-02:合并「市场 · 技能」与「能力中心」为单入口(客户端同构)。
   { to: '/capabilities', label: '能力中心', icon: Store, section: '运维', perms: [PERM_MARKET_READ, PERM_CAP_READ] },
+  // 2026-09-18:员工自建 WASM 应用的平台管理员面(列表/上下架/冻结/转移归属/更新审批)。
+  // 读权限复用 capability:read(与后端路由申报的权限点一致);写动作在页面内另按
+  // capability:write 收敛(体验层,服务端 RequirePermission 才是护栏)。
+  { to: '/app-center', label: '应用中心', icon: Boxes, section: '运维', perms: [PERM_CAP_READ] },
   { to: '/connectors', label: '连接器', icon: Plug, section: '运维', perms: [PERM_CONNECTOR_READ] },
   { to: '/server-info', label: '服务器信息', icon: Server, section: '运维', perms: [PERM_SERVERINFO_READ] },
   // 审计分区(auditor + super_admin 只读)
