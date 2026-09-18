@@ -13,6 +13,7 @@ import (
 	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/wasmapp/readyz"
 )
 
 // 本文件是「应用泛域名」的运行期配置（2026-09-18 用户要求：
@@ -32,8 +33,30 @@ type baseDomainHolder struct {
 	db  *sql.DB
 	env string
 
+	// plan 返回**当前生效**的内存四笔账计划（2026-09-19 注入 wasmLimitsHolder.Plan）。
+	//
+	// 为什么必须是函数而不是启动期快照：启用子域时的内存自检要与"限制项控制台保存的
+	// 档位/设置"算同一份账，否则在 2 GB 机器上声明了 small 档、却因为这里仍按默认档
+	// 的 2550 MiB 算账而开不了子域（两处判据分叉的经典形态）。
+	plan func() readyz.MemoryPlan
+
 	value  atomic.Pointer[string]
 	source atomic.Pointer[string]
+}
+
+// SetPlanProvider 注入四笔账计划来源（装配期在 wasmLimitsHolder 建好后调用一次）。
+func (h *baseDomainHolder) SetPlanProvider(fn func() readyz.MemoryPlan) {
+	if h != nil {
+		h.plan = fn
+	}
+}
+
+// memoryPlan 返回当前计划（未注入 ⇒ 默认档，保持既有测试与最小装配的行为）。
+func (h *baseDomainHolder) memoryPlan() readyz.MemoryPlan {
+	if h != nil && h.plan != nil {
+		return h.plan()
+	}
+	return readyz.DefaultMemoryPlan()
 }
 
 // newBaseDomainHolder 解析初始值：控制台设置 > 环境变量 > 空（未启用子域）。
@@ -106,7 +129,7 @@ func (h *baseDomainHolder) Apply(raw string) *apperr.Error {
 				WithHint("先在部署的 .env 里显式配置 PICOAI_TRUSTED_PROXIES（反代地址），再回来保存基域")
 		}
 		// §4.3：内存四笔账（实例池 + 编译峰值 + 上传峰值 + 缓存驻留）。
-		if berr := checkStartupMemory(true, readMemAvailable(), log.Printf); berr != nil {
+		if berr := checkStartupMemory(true, readMemAvailable(), h.memoryPlan(), log.Printf); berr != nil {
 			return berr
 		}
 	}

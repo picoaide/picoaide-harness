@@ -194,6 +194,12 @@ func main() {
 	wasmPlat := setupWasmPlatform(wasmCtx, db, authCfg.API, *dataDir, *addr)
 	defer wasmPlat.Close()
 
+	// 内置演示应用（随镜像发布，见 internal/wasmapp/appseed + cmd/server/wasmapp_demo.go）：
+	// 装在 /opt/picoaide/demo-apps，服务端每次启动播种**缺失**的那些。
+	// 已存在（含被管理员删除后仍在库里的行）一律跳过 ⇒ "可删除，删了不再回来"。
+	// 失败只记日志：演示应用播种不该挡住服务启动。
+	seedDemoApps(wasmCtx, db, *dataDir)
+
 	// 内置技能（随镜像发布，见 internal/wasmapp/skillseed）：镜像内
 	// /opt/picoaide/skills（可用 PICOAI_SKILL_SEED_DIR 覆盖），服务端打包后由
 	// GET /api/client/v2/skills/builtin[/:name/archive] 下发，客户端在能力中心

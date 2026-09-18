@@ -440,4 +440,23 @@ func (s *Scheduler) AppStats(appID string) (running, waiting int) {
 }
 
 // Options 返回本调度器生效的上限（测试与文档断言用）。
-func (s *Scheduler) Options() Options { return s.opt }
+func (s *Scheduler) Options() Options {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.opt
+}
+
+// SetOptions 热替换调度上限（控制台保存后即时生效）。
+//
+// 为什么允许运行期改：并发上限是**运营参数**（机器大小/应用数量变了就要调），
+// 而 Scheduler 的全部判定都在 s.mu 下读 s.opt —— 换掉这一份并立刻 pump 一次，
+// 新上限对在途与后续请求同时生效（收紧时不会打断已在跑的请求，只影响新的准入）。
+func (s *Scheduler) SetOptions(opt Options) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.opt = opt.withDefaults()
+	s.pumpAllLocked()
+	s.mu.Unlock()
+}

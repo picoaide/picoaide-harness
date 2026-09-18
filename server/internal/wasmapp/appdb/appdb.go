@@ -298,6 +298,39 @@ func (d *DB) chmodDBFile() error {
 	return nil
 }
 
+// appConnCacheKiB 是**每条连接**的 SQLite 页缓存上限（KiB，正数即"多少 KiB"）。
+//
+// 为什么收紧（2026-09-18，"几百个应用 + 小内存机器"目标）：SQLite 默认 cache_size
+// 是 -2000（2 MiB/连接），一个应用库句柄持有 2 条连接（只读 + 读写）⇒ 默认
+// 4 MiB/应用的常驻页缓存；几百个应用被访问过一轮就会叠成几百 MiB。
+// 限到 1 MiB/连接（2 MiB/句柄）对应用查询的影响可忽略（单次查询结果上限 8 MiB，
+// 但工作集是几十 KB 级的行集），换来的常驻下降是线性的。
+const appConnCacheKiB = 1024
+
+// connCacheKiB 是**当前**每连接页缓存上限（控制台可改；0 = 用编译期默认）。
+// 用原子量：写它的可能是管理端请求 goroutine，读它的是每个新连接的加固路径。
+var connCacheKiB atomic.Int64
+
+// SetConnCacheKiB 设置每连接页缓存上限（KiB）；<=0 表示回到默认。
+//
+// 生效范围：**之后新建的连接**（PRAGMA cache_size 是连接级参数）。已有句柄在
+// 空闲回收后重建时自然拿到新值——因此控制台保存不需要重启，也不打断在途请求。
+func SetConnCacheKiB(kib int) {
+	if kib <= 0 {
+		connCacheKiB.Store(0)
+		return
+	}
+	connCacheKiB.Store(int64(kib))
+}
+
+// ConnCacheKiB 返回当前生效值（诊断/控制台回读用）。
+func ConnCacheKiB() int {
+	if v := connCacheKiB.Load(); v > 0 {
+		return int(v)
+	}
+	return appConnCacheKiB
+}
+
 // hardenConnLocked 对**一条**连接施加全套连接级限额，然后跑两条金丝雀。
 //
 // 顺序有讲究：先 max_page_count（纯连接参数），再 SQLITE_LIMIT_\*，最后 query_only(1)。
@@ -310,6 +343,12 @@ func (d *DB) hardenConnLocked(ctx context.Context, conn *sql.Conn, readonly bool
 	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA max_page_count = %d", d.maxPageCount)); err != nil {
 		return apperr.New(apperr.CodeInternal, "appdb: 设置 max_page_count 失败").WithCause(err).
 			WithDetail("max_page_count", d.maxPageCount)
+	}
+	// 页缓存上限（连接级；负值表示 KiB）。放在 LIMIT 之前：它是纯连接参数，
+	// 不影响后面两条金丝雀的判定。
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA cache_size = -%d", ConnCacheKiB())); err != nil {
+		return apperr.New(apperr.CodeInternal, "appdb: 设置 cache_size 失败").WithCause(err).
+			WithDetail("cache_size_kib", ConnCacheKiB())
 	}
 	for _, lim := range connectionLimits() {
 		if _, err := sqlite.Limit(conn, lim.id, lim.value); err != nil {

@@ -19,6 +19,7 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
 	"github.com/picoaide/picoaide/internal/wasmapp/edge"
 	"github.com/picoaide/picoaide/internal/wasmapp/events"
+	"github.com/picoaide/picoaide/internal/wasmapp/memprofile"
 	"github.com/picoaide/picoaide/internal/wasmapp/queue"
 	"github.com/picoaide/picoaide/internal/wasmapp/readyz"
 	"github.com/picoaide/picoaide/internal/wasmapp/session"
@@ -103,27 +104,29 @@ const compileUnavailableDetail = "编译子系统不可用（发布链路已禁�
 
 // checkStartupMemory 执行 §4.3 的内存四笔账启动自检（返回非 nil ⇒ 调用方 log.Fatalf）。
 //
-// 为什么按 enabled 分档（审计 P2-8）：四笔账算的是**运行期**的实例池（32×64 MiB）/
-// 编译峰值/上传峰值/缓存驻留 —— 应用子域没启用时这些资源一分都不会被用到，却要求
-// 机器 `MemAvailable ≥ 3.56 GiB`（total 2550 MB ÷ 70%），4 GiB 容器直接起不来：
-// "没用到这个功能也被它挡住启动"。未启用时只记一行日志。
+// 为什么按 enabled 分档（审计 P2-8）：四笔账算的是**运行期**的实例池/编译峰值/上传峰值/
+// 缓存驻留 —— 应用子域没启用时这些资源一分都不会被用到，却按默认档要求机器
+// `MemAvailable ≥ 3.56 GiB`（total 2550 MB ÷ 70%）："没用到这个功能也被它挡住启动"。
+// 未启用时只记一行日志。
 //
-// ⚠️ 启用时判据**一点没放宽**：仍然是 fail-closed（§4.3 原话"拒绝启动而不是等 OOM"）。
+// ⚠️ 启用时判据**一点没放宽**：仍然是 fail-closed（§4.3 原话"拒绝启动而不是等 OOM"）；
+// 2026-09-18 起账本按**部署声明的内存档位**算（plan），而同一份档位也喂给 appserver
+// 强制并发/实例上限/模块缓存/库句柄 —— 因此"自检算的账"与"实际跑的账"是同一份。
 //
 // 参数显式传入 availableBytes（而不是函数内部读 /proc）：让"极小 MemAvailable ⇒
 // 拒绝启动 / 不 Fatalf"能被确定性测到，不必真改 /proc/meminfo。
-func checkStartupMemory(enabled bool, availableBytes int64, logf func(format string, args ...any)) *apperr.Error {
+func checkStartupMemory(enabled bool, availableBytes int64, plan readyz.MemoryPlan, logf func(format string, args ...any)) *apperr.Error {
 	if !enabled {
 		logf("wasm: 应用平台未启用（未配置 %s），跳过内存四笔账自检"+
 			"（实例池/编译峰值/上传峰值/缓存驻留都不会被用到）", EnvAppsBaseDomain)
 		return nil
 	}
-	budget, berr := readyz.CheckStartupMemory(availableBytes)
+	budget, berr := readyz.CheckStartupMemoryFor(availableBytes, plan)
 	if berr != nil {
 		return berr
 	}
-	logf("wasm: memory budget instances=%dMB compile_peak=%dMB upload_peak=%dMB cache_resident=%dMB total=%dMB available=%dMB limit=%dMB",
-		budget.Instances>>20, budget.CompilePeak>>20, budget.UploadPeak>>20,
+	logf("wasm: memory budget profile=%s instances=%dMB compile_peak=%dMB upload_peak=%dMB cache_resident=%dMB total=%dMB available=%dMB limit=%dMB",
+		budget.Profile, budget.Instances>>20, budget.CompilePeak>>20, budget.UploadPeak>>20,
 		budget.CacheResident>>20, budget.Total>>20, budget.Available>>20, budget.Limit>>20)
 	return nil
 }
@@ -158,6 +161,20 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 	extraReserved := splitCSV(os.Getenv(EnvAppsExtraReserved))
 	enabled := baseDomain() != ""
 
+	// ---- 内存档位（2026-09-18）：数值同时驱动下面的启动自检与运行期强制 ----
+	// 未知档位名**拒绝启动**（静默回落默认会让小机器在"以为已降档"的状态下 OOM）。
+	prof, perr := memprofile.FromEnv(os.Getenv)
+	if perr != nil {
+		log.Fatalf("WASM 应用平台内存档位配置错误：%v", perr)
+	}
+	// 平台限制项（并发/内存）：控制台设置 > 部署档位 > 编译期默认。
+	// 自检与运行期强制都用**这一份**（见 wasmLimitsHolder 的注释）。
+	limitsHolder := newWasmLimitsHolder(db, prof)
+	// 启用子域的合法性自检与控制台/启动自检共用同一份账（见 baseDomainHolder.plan）。
+	base.SetPlanProvider(limitsHolder.Plan)
+	plan := limitsHolder.Plan()
+	log.Printf("wasm: 内存档位 %s；平台限制项来源=%s %s", prof.Report(), limitsHolder.Source(), limitsHolder.Get().Encode())
+
 	// ---- R35：可信代理自检（未启用子域时不校验，既有部署行为不变）----
 	if err := anonlimit.CheckTrustedProxies(os.Getenv, enabled); err != nil {
 		log.Fatalf("WASM 应用平台启动自检失败：%v", err)
@@ -165,7 +182,9 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 
 	// ---- §4.3：内存四笔账（实例池 + 编译峰值 + 上传峰值 + 缓存驻留）----
 	// 只在启用应用子域时校验（见 checkStartupMemory 的注释：未启用时这四笔账不会被用到）。
-	if berr := checkStartupMemory(enabled, readMemAvailable(), log.Printf); berr != nil {
+	// 账本按**本部署声明的档位**算：同一份数值也喂给 appserver（队列并发/实例上限/
+	// 模块缓存/库句柄），因此"自检算的账"与"实际跑的账"是同一份。
+	if berr := checkStartupMemory(enabled, readMemAvailable(), plan, log.Printf); berr != nil {
 		log.Fatalf("WASM 应用平台启动自检失败：%v", berr)
 	}
 
@@ -176,7 +195,15 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 	}
 
 	limiter := anonlimit.New(anonlimit.DefaultOptions())
-	scheduler := queue.New(queue.DefaultOptions())
+	// 队列的全局并发取自档位（不是编译期常量）：声明与执行同一份数。
+	qopt := queue.DefaultOptions()
+	qopt.GlobalRunning = limitsHolder.Get().MaxInstances
+	qopt.PerAppRunning = limitsHolder.Get().AppRunning
+	qopt.PerAppQueue = limitsHolder.Get().AppQueue
+	qopt.PerUserGlobalRunning = limitsHolder.Get().UserGlobalRunning
+	qopt.PerUserPerAppRunning = limitsHolder.Get().UserPerAppRunning
+	qopt.PerUserPerAppQueued = limitsHolder.Get().UserPerAppQueued
+	scheduler := queue.New(qopt)
 	eventSink := events.NewSink(db, events.Options{})
 	eventSink.Start(ctx)
 
@@ -277,9 +304,17 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		AppIDExtraReserved: extraReserved,
 		AIBaseURL:          normalizeLoopbackBaseURL(addr),
 		Logger:             log.Printf,
+		// 内存档位同时驱动：队列并发、实例内存上限、模块缓存上限、库句柄上限。
+		MemoryProfile: prof,
 	})
 	if aerr != nil {
 		log.Fatalf("wasm 应用子域管线装配失败：%v", aerr)
+	}
+	// 限制项接到运行态：①注入下发钩子（控制台保存后即时生效）
+	// ②首次下发一次（让控制台保存过的设置覆盖档位折算值）。
+	limitsHolder.SetApplier(appSrv.ApplyLimits)
+	if restart := appSrv.ApplyLimits(limitsHolder.Get()); len(restart) > 0 {
+		log.Printf("wasm: ⚠️ 平台限制项里有需重启才生效的字段：%v（当前进程仍按启动时的值跑）", restart)
 	}
 
 	checker := readyz.New(readyz.Options{
@@ -332,6 +367,14 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		Audit:              func(username, action, detail string) { _ = serverstore.AuditLog(db, username, action, detail) },
 		// 发布面的 fail-closed 闸门（审计 P1-1：AllowPublish 此前零调用方）。
 		Ready: checker,
+		// 下架/冻结/删除后立即释放进程内驻留（模块 + 库句柄，见 api.Options.OnAppEvict）。
+		OnAppEvict: func(appID string) { appSrv.EvictApp(appID) },
+		// 平台限制项（并发/内存）：读写闭包；校验与下发都在 wasmLimitsHolder/ApplyLimits。
+		Limits:          limitsHolder.Get,
+		LimitsSource:    limitsHolder.Source,
+		LimitsApply:     limitsHolder.Apply,
+		LimitsRestart:   limitsHolder.RestartPending,
+		MemoryAvailable: readMemAvailable,
 	})
 
 	// 分片上传会话的保留期回收（§4.2）：与调用事件同款调度器（启动即清一次 + 周期）。

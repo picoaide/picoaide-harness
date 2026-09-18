@@ -29,6 +29,7 @@ import (
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
 	"github.com/picoaide/picoaide/internal/wasmapp/events"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
@@ -111,6 +112,27 @@ type Options struct {
 	// AppIDExtraReserved 是**部署期注入的企业已知主机名**（§4.1：基域是平台资产，
 	// 不能被应用占走）。直接转交 registry.ValidateAppID 的 extraReserved 参数。
 	AppIDExtraReserved []string
+
+	// Limits / LimitsSource / LimitsApply / LimitsRestart / MemoryAvailable
+	// 是**平台限制项**（并发与内存）的读写闭包（2026-09-19：控制台可配置）。
+	//
+	// 为什么用闭包而不是让本包直接读库：解析优先级（设置 > 部署档位 > 编译期默认）、
+	// 四笔账自检与"下发到运行中组件"这三件事都住在装配侧（cmd/server 的
+	// wasmLimitsHolder + appserver.ApplyLimits）；本包只做"组装视图 + 转发"。
+	// 任何一个为 nil ⇒ 对应能力不可用（GET/PUT 会如实报错，不静默给假值）。
+	Limits          func() applimits.Limits
+	LimitsSource    func() string
+	LimitsApply     func(raw string) ([]string, *apperr.Error)
+	LimitsRestart   func() []string
+	MemoryAvailable func() int64
+
+	// OnAppEvict 是"立即释放该应用的进程内驻留"的钩子（可选）。
+	//
+	// 触发点 = 下架 / 冻结 / 删除：这几件事之后该应用大概率长时间不会被访问，
+	// 与其等 appserver 的空闲 TTL 扫描，不如事件驱动立刻丢掉编译模块与库句柄
+	// （2026-09-18 用户要求"更快释放"）。生产装配注入 appserver.Server.EvictApp；
+	// 不注入 ⇒ 什么都不做（内存由 TTL 兜底），因此本包不依赖 appserver。
+	OnAppEvict func(appID string)
 }
 
 // Handlers 是操作面 handler 集合（§8 全表）。
@@ -144,6 +166,9 @@ type Handlers struct {
 	up uploadState
 
 	// ---- 管理面 /api/server/admin/wasm-apps ----
+	// 平台限制项（并发/内存）：GET 读当前值 + 四笔账预览，PUT 保存并下发。
+	AdminLimitsGet     gin.HandlerFunc // GET /wasm-apps/limits
+	AdminLimitsPut     gin.HandlerFunc // PUT /wasm-apps/limits
 	AdminList          gin.HandlerFunc // GET    ""
 	AdminUnpublish     gin.HandlerFunc // POST   /:app_id/unpublish
 	AdminPublish       gin.HandlerFunc // POST   /:app_id/publish（与下架对称，管理员处置完能恢复）
@@ -187,6 +212,8 @@ func NewHandlers(opt Options) *Handlers {
 	h.AdminReview = h.adminReview
 	h.AdminBaseDomainGet = h.adminBaseDomainGet
 	h.AdminBaseDomainPut = h.adminBaseDomainPut
+	h.AdminLimitsGet = h.adminLimitsGet
+	h.AdminLimitsPut = h.adminLimitsPut
 	return h
 }
 
@@ -324,6 +351,18 @@ func (h *Handlers) auditOrg(username, action, detail string) {
 	if h.opt.DB != nil {
 		_ = serverstore.AuditLog(h.opt.DB, username, action, detail)
 	}
+}
+
+// evictApp 通知装配层立即释放该应用的进程内驻留（编译模块 + 库句柄）。
+//
+// 只在下架 / 冻结 / 删除**成功之后**调用：这三件事之后应用大概率长时间不被访问，
+// 事件驱动的释放比等空闲 TTL 更符合"更快释放"。钩子未注入 ⇒ 静默跳过
+// （内存由 appserver 的空闲回收兜底），因此本包对 appserver 零依赖。
+func (h *Handlers) evictApp(appID string) {
+	if h == nil || h.opt.OnAppEvict == nil || appID == "" {
+		return
+	}
+	h.opt.OnAppEvict(appID)
 }
 
 // auditDetail 拼装稳定的审计明细（沿用 appstore.TransferOwnerAuditDetail 的形态：

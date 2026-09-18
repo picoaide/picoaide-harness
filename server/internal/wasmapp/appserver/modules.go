@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
@@ -48,7 +49,9 @@ type moduleEntry struct {
 	// wazero 允许在实例运行期间 Close 一个 CompiledModule，但"正在实例化的那一刻"
 	// 被 Close 会直接失败 —— 淘汰的判据必须比"能不能 Close"更保守。
 	refs int
-	elem *list.Element
+	// lastUsed 是最近一次被引用（acquire/insert）的时刻，空闲淘汰判据。
+	lastUsed time.Time
+	elem     *list.Element
 }
 
 // moduleCache 是 `wazero.CompiledModule` 的进程内缓存（LRU + 双维度上限）。
@@ -61,13 +64,21 @@ type moduleEntry struct {
 //
 // # 上限与淘汰策略
 //
-// 双维度上限直接复用 limits 的编译缓存两项（CompileCacheMaxBytes 512 MiB /
-// CompileCacheMaxEntries 4096）：CompiledModule 的驻留正是 §4.3「内存四笔账」里
-// "编译缓存驻留"那一笔，复用同一组数值可以保证"磁盘条目 + 内存条目"整体不越过
-// §4.3 的内存预算，且**不引入新旋钮**（数值单一真源，§5.5）。
+// 三个维度，全部来自 limits（数值单一真源）：
+//   - ModuleCacheMaxBytes / ModuleCacheMaxEntries：**进程内**驻留上限，刻意与
+//     磁盘编译缓存（512 MiB / 4096）解耦 —— 磁盘可以留大，内存必须按机器设；
+//   - ModuleCacheIdleTTL：**空闲淘汰**。这一条是 2026-09-18 补的，理由是实测
+//     （temp/wasm-mem-probe）：几百个应用里每个都可能被用过一次，容量未满时
+//     LRU 永不淘汰 ⇒ 常驻内存只涨不落；而且 CompiledModule.Close 之后 RSS
+//     只归还约 20%（需要显式归还 OS，见 reclaim.go）。
 //
-// 淘汰是 LRU（每次命中把条目移到队首，从队尾开始淘汰），并**跳过仍在使用的条目**
-// （refs > 0）：极端情况下宁可短暂超限，也不把正在跑的请求关掉。
+// 淘汰有两条路径：①容量超限时按 LRU 从队尾淘汰（插入路径，同步做）；
+// ②空闲超时由后台 sweep 逐出（时间路径，见 Server.sweepLoop）。
+// 两条都**跳过仍在使用的条目**（refs > 0）：极端情况下宁可短暂超限，
+// 也不把正在跑的请求关掉。
+//
+// 另有一条**事件驱动**的逐出：应用下架/冻结/删除时由 EvictApp 立即丢掉它的模块
+// （用户要求的"更快释放"：不再等 TTL，也不再占着缓存）。
 //
 // 并发：同一 key 的并发冷编译被 compileSem（容量 1）串行化 —— 与 §4.3「编译进程
 // 并发 1」同一纪律：让 32 个并发冷编译同时展开会把进程内存打爆（编译峰值远大于
@@ -80,17 +91,61 @@ type moduleCache struct {
 
 	maxBytes   int64
 	maxEntries int
+	// idleTTL 是空闲淘汰阈值（0 = 不按时间淘汰，只按容量）。
+	idleTTL time.Duration
+	now     func() time.Time
 
 	compileSem chan struct{}
 }
 
-// newModuleCache 用 limits 的编译缓存上限构造缓存。
+// newModuleCache 用 limits 的**进程内**模块缓存上限构造缓存（默认 TTL）。
 func newModuleCache() *moduleCache {
+	return newModuleCacheWith(limits.ModuleCacheMaxBytes, limits.ModuleCacheMaxEntries,
+		limits.ModuleCacheIdleTTL, time.Now)
+}
+
+// SetBounds 热替换缓存上限与空闲 TTL（控制台保存后即时生效）。
+//
+// 收紧时**不动在途条目**：把新上限记下后立刻按 LRU 淘汰到上限内（跳过 refs>0），
+// 空闲 TTL 变化由下一轮 sweep 生效。放宽则什么都不用做（后续插入自然填满）。
+func (c *moduleCache) SetBounds(maxBytes int64, maxEntries int, idleTTL time.Duration) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	if maxBytes > 0 {
+		c.maxBytes = maxBytes
+	}
+	if maxEntries > 0 {
+		c.maxEntries = maxEntries
+	}
+	c.idleTTL = idleTTL
+	victims := c.evictLocked()
+	c.mu.Unlock()
+	for _, m := range victims {
+		_ = m.Close(context.Background())
+	}
+}
+
+// bounds 返回当前上限（诊断/控制台回读用）。
+func (c *moduleCache) bounds() (maxBytes int64, maxEntries int, idleTTL time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.maxBytes, c.maxEntries, c.idleTTL
+}
+
+// newModuleCacheWith 是带全部参数的构造函数（部署档位/测试注入用）。
+func newModuleCacheWith(maxBytes int64, maxEntries int, idleTTL time.Duration, now func() time.Time) *moduleCache {
+	if now == nil {
+		now = time.Now
+	}
 	return &moduleCache{
 		items:      map[moduleKey]*moduleEntry{},
 		ll:         list.New(),
-		maxBytes:   limits.CompileCacheMaxBytes,
-		maxEntries: limits.CompileCacheMaxEntries,
+		maxBytes:   maxBytes,
+		maxEntries: maxEntries,
+		idleTTL:    idleTTL,
+		now:        now,
 		compileSem: make(chan struct{}, limits.CompileConcurrency),
 	}
 }
@@ -138,6 +193,7 @@ func (c *moduleCache) tryAcquire(key moduleKey) (wazero.CompiledModule, func(), 
 		return nil, nil, false
 	}
 	e.refs++
+	e.lastUsed = c.now()
 	c.ll.MoveToFront(e.elem)
 	return e.mod, c.releaser(e), true
 }
@@ -166,13 +222,14 @@ func (c *moduleCache) insert(key moduleKey, res compiledResult) (wazero.Compiled
 	if e, ok := c.items[key]; ok {
 		// 理论上到不了（信号量已串行化），但重复插入必须无害：用已有的，关掉多的那个。
 		e.refs++
+		e.lastUsed = c.now()
 		c.ll.MoveToFront(e.elem)
 		release := c.releaser(e)
 		c.mu.Unlock()
 		go func() { _ = res.mod.Close(context.Background()) }()
 		return e.mod, release, nil
 	}
-	e := &moduleEntry{key: key, mod: res.mod, size: size, refs: 1}
+	e := &moduleEntry{key: key, mod: res.mod, size: size, refs: 1, lastUsed: c.now()}
 	e.elem = c.ll.PushFront(e)
 	c.items[key] = e
 	c.bytes += size
@@ -220,6 +277,83 @@ func (c *moduleCache) removeLocked(e *moduleEntry) {
 	delete(c.items, e.key)
 	c.ll.Remove(e.elem)
 	c.bytes -= e.size
+}
+
+// ===== 空闲淘汰与事件驱动逐出（2026-09-18：内存"更快释放"的两条路径）=====
+
+// sweep 逐出**空闲超过 idleTTL** 的条目，返回 (条目数, 记账字节数)。
+//
+// 为什么需要它（而不只是容量淘汰）：几百个应用每个都可能被用过一次，
+// 容量未满 ⇒ LRU 永不淘汰 ⇒ 常驻内存只涨不落。sweep 由 Server 的后台循环
+// （sweepLoop）周期调用；被逐出的条目在这里就 Close（释放机器码），
+// 调用方按返回值决定要不要再让 OS 回收一次（reclaim.go）。
+//
+// refs > 0 的条目一律跳过：正在跑的请求不受影响，等下一轮。
+// idleTTL <= 0 ⇒ 不按时间淘汰（返回 0）。
+func (c *moduleCache) sweep() (int, int64) {
+	if c == nil || c.idleTTL <= 0 {
+		return 0, 0
+	}
+	cutoff := c.now().Add(-c.idleTTL)
+	c.mu.Lock()
+	var victims []*moduleEntry
+	for e := c.ll.Back(); e != nil; e = e.Prev() {
+		entry := e.Value.(*moduleEntry)
+		if entry.refs != 0 || !entry.lastUsed.Before(cutoff) {
+			continue
+		}
+		victims = append(victims, entry)
+	}
+	freed := c.dropLocked(victims)
+	c.mu.Unlock()
+	c.closeAll_(&freed)
+	return freed.count, freed.bytes
+}
+
+// evictApp 逐出某应用的全部缓存条目（下架 / 冻结 / 删除时调用），
+// 返回 (条目数, 记账字节数)。在跑的请求（refs > 0）留给 TTL 路径。
+func (c *moduleCache) evictApp(appID string) (int, int64) {
+	if c == nil || appID == "" {
+		return 0, 0
+	}
+	c.mu.Lock()
+	var victims []*moduleEntry
+	for _, entry := range c.items {
+		if entry.key.AppID == appID && entry.refs == 0 {
+			victims = append(victims, entry)
+		}
+	}
+	freed := c.dropLocked(victims)
+	c.mu.Unlock()
+	c.closeAll_(&freed)
+	return freed.count, freed.bytes
+}
+
+// evicted 是一次逐出的记账结果。
+type evicted struct {
+	count int
+	bytes int64
+	mods  []wazero.CompiledModule
+}
+
+// dropLocked 把选中的条目从缓存摘除（Close 必须放到锁外）。
+func (c *moduleCache) dropLocked(victims []*moduleEntry) evicted {
+	out := evicted{}
+	for _, v := range victims {
+		c.removeLocked(v)
+		out.count++
+		out.bytes += v.size
+		out.mods = append(out.mods, v.mod)
+	}
+	return out
+}
+
+// closeAll_ 在锁外关闭逐出的模块（命名带下划线：与 closeAll 区分，后者关全量）。
+func (c *moduleCache) closeAll_(e *evicted) {
+	for _, m := range e.mods {
+		// Close 可能触发引擎侧回收，放到锁外做。
+		_ = m.Close(context.Background())
+	}
 }
 
 // closeAll 关闭全部缓存条目（Server.Close 调用）。
