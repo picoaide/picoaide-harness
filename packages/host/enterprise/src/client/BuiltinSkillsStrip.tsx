@@ -1,24 +1,15 @@
 /**
- * 能力中心的「平台内置技能」区（2026-09-18）。
+ * 平台内置技能（服务端下发、客户端按需安装）的**数据与动作**。
  *
- * 背景：内置技能（当前是 WASM 应用作者手册 `picoaide-app-builder`）**随服务端
- * 镜像发布**，客户端**按需安装** —— 用户明确要求"skill 应该是内置到服务端，
- * 客户端可以按需安装"。因此：
- *
- *  - 不自动安装：这里只给一个可点的入口（员工自己决定装不装）。**这是唯一入口**
- *    —— vendored 插件（`dsh-memory-evolve`）的随包技能同步清单里刻意排除了平台
- *    技能（`lib/coi/skills-sync.js` 的 `PLATFORM_SKILLS`）：否则开机就自动装好，
- *    这个按钮永远走不到，「按需」名存实亡（独立审计 2026-09-18 P1-1）；
- *  - 复用既有安装链路：`POST /api/pico/skills/builtin/:name/install` 在宿主侧
- *    走的就是能力中心市场技能那条 `installSkillArchive()`（sha256 对照 → 整树
- *    安全解包 → `<dshHome>/skills`），不另写一套安装逻辑；
- *  - 落点与市场安装**同一个根**（`<dshHome>/skills`，上游 skill-filesystem 的
- *    user-dsh root / rank 400）。
- *
- * 服务端没有这条端点时（旧版服务端）整块**隐藏**：不显示空壳，也不报错打扰。
+ * 2026-09-18 用户口径：内置技能在能力中心里必须**和普通技能一样是一张卡片**，
+ * 而不是顶部置顶的一条横幅。因此这里不再渲染任何 UI —— 只导出：
+ *   - `useBuiltinSkills()`：清单 / 已装目录 / 本地版本 / 忙碌与失败态 / 安装动作；
+ *   - 纯函数（`builtinAction` / `builtinRowState` / `builtinInstallEndpoint` /
+ *     `matchBuiltinSkill`）：可单测，且让"哪一行显示什么"与渲染解耦。
+ * 卡片外观由 `CapabilityCenterPanel` 用**它自己的卡片样式**渲染（同一套 CARD /
+ * 徽章 / 按钮），避免两份样式漂移，也避免 panel ↔ 本模块的循环 import。
  */
 import { useEffect, useState } from 'react'
-import { t } from './locales.ts'
 import { compareVersions } from './version-compare.ts'
 
 /** 内置技能清单行（服务端 `GET /api/client/v2/skills/builtin` 的形状）。 */
@@ -87,34 +78,14 @@ export function builtinInstallEndpoint(name: string, force: boolean): string {
   return force ? `${base}?force=1` : base
 }
 
-const SECTION: React.CSSProperties = {
-  margin: '0 0 12px',
-  padding: '10px 12px',
-  border: '1px solid var(--dsw-alias-border-l2)',
-  borderRadius: 10,
-  background: 'var(--dsw-alias-bg-module-platform, transparent)',
-}
-const ROW: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 10, marginTop: 6 }
-const NAME: React.CSSProperties = { fontSize: 13, fontWeight: 600, margin: 0 }
-const META: React.CSSProperties = { fontSize: 11, opacity: 0.7, margin: 0 }
-const DESC: React.CSSProperties = { fontSize: 12, opacity: 0.85, margin: '2px 0 0', lineHeight: 1.45 }
-const BUTTON: React.CSSProperties = {
-  marginLeft: 'auto', flex: '0 0 auto', height: 28, padding: '0 12px', borderRadius: 8, cursor: 'pointer',
-  border: '1px solid var(--dsw-alias-brand-primary)', background: 'var(--dsw-alias-brand-primary)',
-  color: 'var(--dsw-alias-label-primary-foreground, #fff)', fontSize: 12,
-}
-const BUTTON_DISABLED: React.CSSProperties = { ...BUTTON, opacity: 0.55, cursor: 'default' }
-const DONE: React.CSSProperties = { ...META, marginLeft: 'auto', flex: '0 0 auto' }
-const FAIL_ROW: React.CSSProperties = { marginLeft: 'auto', flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: 8 }
-const FAIL: React.CSSProperties = { ...META, marginLeft: 0, flex: '0 0 auto', color: 'var(--dsw-alias-state-error-primary)', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
-
 /**
- * 「平台内置技能」区。
+ * 内置技能的数据与动作（面板把它渲染成普通卡片）。
  *
- * 拿不到清单（未登录 / 旧版服务端 / 网络失败）时**不渲染任何东西** —— 这是一块
- * 便利入口，不是主面；失败态交给能力中心自己的分区错误提示，不在这里制造噪音。
+ * 拿不到清单（未登录 / 旧版服务端 / 网络失败）时返回空列表 —— 这不是错误面，
+ * 能力中心自己的分区错误提示负责其它失败。
+ * @returns 清单、已装目录、本地版本、忙碌/失败态与安装动作。
  */
-export function BuiltinSkillsStrip() {
+export function useBuiltinSkills(onInstalled?: () => void) {
   const [rows, setRows] = useState<BuiltinSkill[]>([])
   const [installed, setInstalled] = useState<string[]>([])
   const [versions, setVersions] = useState<Record<string, string | undefined>>({})
@@ -150,13 +121,11 @@ export function BuiltinSkillsStrip() {
         }
         if (alive) setVersions(map)
       } catch {
-        // 静默：内置技能区拿不到就整块不显示（旧版服务端就是这条路）。
+        // 静默：拿不到内置技能清单就当作"没有"（旧版服务端就是这条路）。
       }
     })()
     return () => { alive = false }
   }, [])
-
-  if (rows.length === 0) return null
 
   const install = async (skill: BuiltinSkill): Promise<void> => {
     const isInstalled = installed.includes(skill.name)
@@ -170,6 +139,9 @@ export function BuiltinSkillsStrip() {
       }
       setInstalled(prev => (prev.includes(skill.name) ? prev : [...prev, skill.name]))
       setVersions(prev => ({ ...prev, [skill.name]: skill.version }))
+      // 装成功 ⇒ 通知面板刷新「我的」列表：那只技能马上以普通卡片出现
+      // （带「平台内置」来源徽章），同时本入口卡片消失（见面板的 localSkillNames 过滤）。
+      onInstalled?.()
     } catch (cause) {
       setFailed({ name: skill.name, message: cause instanceof Error ? cause.message : String(cause) })
     } finally {
@@ -177,46 +149,47 @@ export function BuiltinSkillsStrip() {
     }
   }
 
-  return (
-    <section style={SECTION} aria-label={t('capability.builtinTitle')}>
-      <p style={NAME}>{t('capability.builtinTitle')}</p>
-      <p style={META}>{t('capability.builtinHint')}</p>
-      {rows.map(skill => {
-        const isInstalled = installed.includes(skill.name)
-        const rowState = builtinRowState(skill.name, { installed, busy, failedName: failed?.name ?? null })
-        // 本行的失败信息（`rowState` 是另一个变量，TS 不会替我们把 `failed` 收窄）。
-        const failure = failed?.name === skill.name ? failed : null
-        const action = builtinAction(skill.version, versions[skill.name], isInstalled)
-        const label = action === 'install'
-          ? t('capability.builtinInstall')
-          : action === 'update'
-            ? t('capability.updateTo', { version: skill.version })
-            : t('capability.builtinInstalled')
-        return (
-          <div key={skill.name} style={ROW}>
-            <div style={{ minWidth: 0 }}>
-              <p style={NAME}>{skill.title !== undefined && skill.title !== '' ? skill.title : skill.name}</p>
-              <p style={META}>{`${skill.name} · v${skill.version}`}</p>
-              {skill.description !== undefined && skill.description !== '' && <p style={DESC}>{skill.description}</p>}
-            </div>
-            {rowState === 'installed'
-              ? <span style={DONE}>{label}</span>
-              : rowState === 'busy'
-                ? <button type="button" style={BUTTON_DISABLED} disabled>{label}</button>
-                : failure !== null
-                  // 失败的是**这一行**：就地显示原因 + 重试按钮，其余行不受影响。
-                  ? (
-                      <span style={FAIL_ROW}>
-                        <span style={FAIL} title={failure.message}>{failure.message}</span>
-                        <button type="button" style={BUTTON} onClick={() => { void install(skill) }}>
-                          {t('capability.builtinRetry')}
-                        </button>
-                      </span>
-                    )
-                  : <button type="button" style={BUTTON} onClick={() => { void install(skill) }}>{label}</button>}
-          </div>
-        )
-      })}
-    </section>
-  )
+  return { rows, installed, versions, busy, failed, install }
+}
+
+/**
+ * 内置技能是否命中搜索词（与面板对普通卡片的搜索口径一致：标题/名字/描述）。
+ *
+ * 抽成纯函数是为了让"内置技能也要能被搜到"这条口径可单测 —— 它在横幅形态下
+ * 天然不成立（横幅在列表之外，搜索框管不到它）。
+ * @param skill - 内置技能行。
+ * @param query - 搜索框内容（空串 = 全部命中）。
+ * @returns 命中为 true。
+ */
+export function matchBuiltinSkill(skill: BuiltinSkill, query: string): boolean {
+  const q = query.trim().toLowerCase()
+  if (q === '') return true
+  const fields = [skill.name, skill.title ?? '', skill.description ?? '', skill.author ?? '', skill.category ?? '']
+  return fields.some(f => f.toLowerCase().includes(q))
+}
+
+/**
+ * 选出"要以普通卡片渲染"的内置技能行。
+ *
+ * 口径（2026-09-18 用户要求 + 不重复渲染）：
+ *   - **已装的排除**：本机技能库扫描出来的那张普通卡片就是它（带「平台内置」来源
+ *     徽章），再渲染一张会变成同一个技能两张卡；
+ *   - 只属于「我的」分区，且类型筛选为"智能体"时全部排除（内置的目前都是技能）；
+ *   - 参与搜索，口径与普通卡片一致（标题/名字/描述/作者/分类）。
+ *
+ * `installedNames` 请传**两个事实源的并集**（服务端清单里的 installed[] +
+ * 面板「我的」列表里的本地技能名）：任一源说"已装"就按已装处理 —— 宁可少一张
+ * 入口卡片（用户能在列表里看到它），也不要出现重复卡片。
+ * @param options - 候选行、已装名字集合、搜索词与类型筛选。
+ * @returns 需要渲染的行（保持服务端给出的顺序）。
+ */
+export function selectBuiltinCards(options: {
+  rows: readonly BuiltinSkill[]
+  installedNames: ReadonlySet<string>
+  query: string
+  kindFilter: 'all' | 'skill' | 'agent'
+}): BuiltinSkill[] {
+  if (options.kindFilter === 'agent') return []
+  return options.rows.filter(skill =>
+    !options.installedNames.has(skill.name) && matchBuiltinSkill(skill, options.query))
 }
