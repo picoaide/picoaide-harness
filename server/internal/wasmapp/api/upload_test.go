@@ -441,7 +441,18 @@ func TestUploadCompleteMissingChunksAndTotalMismatch(t *testing.T) {
 	}
 
 	// 各片之和 ≠ total_bytes ⇒ 400（片齐了但总量对不上）。
-	mismatch := env.createUpload(token, "mismatch-app", "1.0.0", int64(len(wasm))+1, int64(len(parts[0])))
+	//
+	// ⚠️ 片大小必须按**声明的总量**重算，不能沿用 `planThree` 给原尺寸算出来的那个：
+	// 服务端按 `ceil(total_bytes / chunk_bytes)` 推导期望片数，而 `len(wasm)+1` 在
+	// `len(wasm)` 恰好能被 3 整除时会把它顶成 **4** ⇒ 服务端先报"还有 1 片没有收到"，
+	// 这条断言就变成看编译产物字节数的掷骰子（CI 实测红过，本地因为尺寸不同而绿）。
+	// 取 `ceil(total/3)` 保证期望片数恒为 3，且三片之和 = len(wasm) ≠ total ⇒ 稳定命中"总量不符"。
+	mismatchTotal := int64(len(wasm)) + 1
+	mismatchChunk := (mismatchTotal + 2) / 3
+	if got := (mismatchTotal + mismatchChunk - 1) / mismatchChunk; got != 3 {
+		t.Fatalf("夹具不自洽：服务端会推导出 %d 片（want 3，total=%d chunk=%d）", got, mismatchTotal, mismatchChunk)
+	}
+	mismatch := env.createUpload(token, "mismatch-app", "1.0.0", mismatchTotal, mismatchChunk)
 	env.putChunk(token, mismatch.UploadID, 0, parts[0])
 	env.putChunk(token, mismatch.UploadID, 1, parts[1])
 	env.putChunk(token, mismatch.UploadID, 2, parts[2])
