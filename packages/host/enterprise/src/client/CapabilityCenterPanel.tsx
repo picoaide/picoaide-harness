@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { t } from './locales.ts'
 import { compareVersions } from './version-compare.ts'
-import { BuiltinSkillsStrip } from './BuiltinSkillsStrip.tsx'
+import { builtinAction, builtinRowState, selectBuiltinCards, useBuiltinSkills, type BuiltinSkill } from './BuiltinSkillsStrip.tsx'
 
 /**
  * 能力中心（Capability Hub）——技能商城 / 共享技能 / 共享 Agent 的归一入口。
@@ -459,6 +459,13 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<SourceTab>('mine')
   const [filter, setFilter] = useState<TypeFilter>('all')
   const [search, setSearch] = useState('')
+  // 平台内置技能：与普通技能**同一张卡片、同一个网格**（2026-09-18 用户口径：
+  // "这里渲染应该是一个普通技能，而不是这种置顶的"）。
+  // 已安装的那些**不在这里渲染** —— 它们本来就在「我的」列表里（本机技能库扫描
+  // 出来的普通卡片，带「平台内置」来源徽章）；重复渲染会让同一个技能出现两张卡。
+  // 装成功后刷新分区，让普通卡片立刻出现、这张"安装入口"卡片同时消失。
+  const builtin = useBuiltinSkills(() => { loadAllRef.current?.() })
+  const loadAllRef = useRef<(() => void) | null>(null)
   const [items, setItems] = useState<CapabilityItem[]>([])
   const [sections, setSections] = useState<Record<string, SectionState>>({})
   const [action, setAction] = useState<ActionState | null>(null)
@@ -669,9 +676,17 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     })
   }, [items, tab, filter, search])
 
+  // 让内置技能的"安装成功"回调拿到最新的 loadAll（hook 在 loadAll 之前调用）。
+  loadAllRef.current = loadAll
+
   const sectionStatus = (key: 'mine' | 'market'): SectionState => sections[key] ?? { status: 'idle', error: '' }
 
   const isMineSection = tab === 'mine'
+  /** 本机技能库已有的技能名（含已安装的平台内置技能）—— 用来避免重复渲染。 */
+  const localSkillNames = useMemo(
+    () => new Set(items.filter(i => i.kind === 'skill' && i.source === 'local').map(i => i.name)),
+    [items],
+  )
   const renderBadges = (item: CapabilityItem): React.ReactNode => {
     const statusBadge = item.status === 'pending' ? <span style={CHIP_WARN}>{t('capability.pending')}</span>
       : item.status === 'rejected' ? <span style={CHIP_ERROR}>{t('capability.rejected')}</span>
@@ -714,6 +729,63 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         )}
         {item.dirty === true && <span style={CHIP_WARN}>{t('capability.dirty')}</span>}
       </>
+    )
+  }
+
+  /** 内置技能行 → 与普通技能同构的卡片（同一套 CARD / 标题行 / 徽章 / 页脚按钮）。 */
+  const renderBuiltinCard = (skill: BuiltinSkill): React.ReactNode => {
+    const key = `builtin:${skill.name}`
+    const isInstalled = builtin.installed.includes(skill.name)
+    const rowState = builtinRowState(skill.name, {
+      installed: builtin.installed,
+      busy: builtin.busy,
+      failedName: builtin.failed?.name ?? null,
+    })
+    const failure = builtin.failed?.name === skill.name ? builtin.failed : null
+    const next = builtinAction(skill.version, builtin.versions[skill.name], isInstalled)
+    const label = next === 'install'
+      ? t('capability.builtinInstall')
+      : next === 'update'
+        ? t('capability.updateTo', { version: skill.version })
+        : t('capability.builtinInstalled')
+    const title = skill.title !== undefined && skill.title !== '' ? skill.title : skill.name
+    return (
+      <div key={key} className="pico-skill-card" style={CARD}>
+        <div style={TITLE_ROW}>
+          <span style={{ ...AVATAR, color: avatarColor(skill.name), background: `color-mix(in srgb, ${avatarColor(skill.name)} 14%, transparent)` }} aria-hidden="true">
+            {skill.name.charAt(0)}
+          </span>
+          <div style={NAME_COL}>
+            <div style={NAME_WRAP}>
+              <p style={{ ...NAME, ...NAME_TEXT }} title={title}>{title}</p>
+              <span style={CHIP_LOCAL}>{t('capability.builtinBadge')}</span>
+              <span style={chipStyle('var(--dsw-alias-brand-primary)')}>{t('capability.filterSkill')}</span>
+            </div>
+            <p style={META}>{skill.author !== undefined && skill.author !== '' ? `v${skill.version} · ${skill.author}` : `v${skill.version}`}</p>
+          </div>
+        </div>
+        {skill.description !== undefined && skill.description !== '' && (
+          <p style={DESC_CLAMP} title={skill.description}>{skill.description}</p>
+        )}
+        <div style={CARD_FOOT}>
+          {rowState === 'installed' ? (
+            <span style={{ ...CHIP_SUCCESS, flex: 1, textAlign: 'center' }}>{label}</span>
+          ) : rowState === 'busy' ? (
+            <button type="button" style={{ ...BUTTON_DISABLED, flex: 1 }} disabled>{label}</button>
+          ) : failure !== null ? (
+            <>
+              <span style={{ ...META, flex: 1, color: 'var(--dsw-alias-state-error-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={failure.message}>
+                {failure.message}
+              </span>
+              <button type="button" style={BUTTON} onClick={() => { void builtin.install(skill) }}>
+                {t('capability.builtinRetry')}
+              </button>
+            </>
+          ) : (
+            <button type="button" style={{ ...BUTTON, flex: 1 }} onClick={() => { void builtin.install(skill) }}>{label}</button>
+          )}
+        </div>
+      </div>
     )
   }
 
@@ -825,8 +897,22 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
       return <div style={{ gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: 24 }}><p style={EMPTY}>{st.error}</p><button type="button" style={BUTTON_SECONDARY} onClick={() => { void loadAll() }}>{t('capability.retry')}</button></div>
     }
     const rows = visibleByTab
-    if (rows.length === 0) return renderEmpty(filter === 'all' ? emptyText : t('capability.emptyFilter'))
-    return rows.map(renderCard)
+    // 内置技能只属于「我的」（它们是本机可安装的能力，不在市场里），且类型筛选
+    // 为"智能体"时不显示；搜索按与普通卡片同一口径过滤。
+    const builtinRows = key === 'mine'
+      ? selectBuiltinCards({
+          rows: builtin.rows,
+          // 两个事实源取并集：服务端下发的 installed[] + 面板「我的」列表里的本地技能名。
+          installedNames: new Set([...builtin.installed, ...localSkillNames]),
+          query: search,
+          kindFilter: filter,
+        })
+      : []
+    if (rows.length === 0 && builtinRows.length === 0) {
+      return renderEmpty(filter === 'all' ? emptyText : t('capability.emptyFilter'))
+    }
+    // 内置技能排在前面（数量少且是平台自带），其余按既有排序。
+    return [...builtinRows.map(renderBuiltinCard), ...rows.map(renderCard)]
   }
 
   // 分区状态驱动内容;全局 loading 已移除(旧实现 setLoading(true) 后同步置
@@ -866,12 +952,6 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
               color: 'var(--dsw-alias-label-primary)', fontSize: 12, outline: 'none',
             }}
           />
-        </div>
-        {/* 平台内置技能（随服务端镜像发布、客户端按需安装）：独立一区，不参与
-            上面的来源 Tab / 归并排序 —— 它不是"市场里的某条内容"，而是平台自带
-            的能力入口。拿不到清单（旧版服务端/未登录）时整块不渲染。 */}
-        <div style={{ padding: '0 20px' }}>
-          <BuiltinSkillsStrip />
         </div>
         <div style={BODY}>{content}</div>
         {installConfirmKey !== null && (

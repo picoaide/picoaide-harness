@@ -28,7 +28,7 @@ import { join } from 'node:path'
 import * as tar from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply, type Config } from '../src/auth-gate.ts'
-import { builtinAction, builtinInstallEndpoint, builtinRowState, type BuiltinSkill } from '../src/client/BuiltinSkillsStrip.tsx'
+import { builtinAction, builtinInstallEndpoint, builtinRowState, selectBuiltinCards, type BuiltinSkill } from '../src/client/BuiltinSkillsStrip.tsx'
 import { APP_BUILDER_SKILL, builtinSkillInstallHint, isBuiltinSkillInstalled } from '../src/builtin-skills.ts'
 import { readProvenance, resolveSkillsDir } from '../src/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
@@ -407,5 +407,56 @@ describe('内置技能行的按钮区状态：失败只影响那一行', () => {
   it('已装的行永远显示已安装，即使别的行正在装/刚失败', () => {
     const state = { installed: ['done-skill'], busy: 'busy-skill', failedName: 'busy-skill' }
     expect(builtinRowState('done-skill', state)).toBe('installed')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 内置技能以"普通技能卡片"渲染（2026-09-18 用户口径）
+// ---------------------------------------------------------------------------
+//
+// 用户现场反馈：能力中心里内置技能被渲染成**顶部置顶的一条横幅**，而其它技能都是
+// 网格里的普通卡片。现在内置技能只在**未安装**时以普通卡片出现在「我的」网格里
+// （已装的由本机技能库扫描出来的那张普通卡片代表它，避免同一个技能两张卡）。
+
+describe('内置技能以普通卡片渲染：只渲染未安装的、参与搜索与筛选', () => {
+  const ROWS = [
+    { name: 'picoaide-app-builder', version: '1.0.0', title: 'PicoAide 应用构建（WASM 应用）', description: '用 Go 写一个应用平台上的 WASM 应用', author: 'PicoAide', category: '应用开发' },
+    { name: 'another-builtin', version: '2.0.0', title: '另一个内置技能', description: '无关描述' },
+  ]
+
+  it('未安装 ⇒ 渲染成卡片', () => {
+    const rows = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: '', kindFilter: 'all' })
+    expect(rows.map(r => r.name)).toEqual(['picoaide-app-builder', 'another-builtin'])
+  })
+
+  it('已安装 ⇒ 不再渲染（本机技能库里的普通卡片就是它）', () => {
+    const rows = selectBuiltinCards({
+      rows: ROWS,
+      installedNames: new Set(['picoaide-app-builder']),
+      query: '',
+      kindFilter: 'all',
+    })
+    expect(rows.map(r => r.name)).toEqual(['another-builtin'])
+  })
+
+  it('两个事实源任一说"已装"都按已装处理（宁可少一张入口卡，也不要重复卡）', () => {
+    // 服务端 installed[] 与面板本地列表可能不同步：并集后仍必须排除。
+    const union = new Set(['picoaide-app-builder'])
+    expect(selectBuiltinCards({ rows: ROWS, installedNames: union, query: '', kindFilter: 'skill' })).toHaveLength(1)
+  })
+
+  it('参与搜索：按标题/名字/描述/作者/分类命中（与普通卡片同口径）', () => {
+    const byTitle = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: '应用构建', kindFilter: 'all' })
+    expect(byTitle.map(r => r.name)).toEqual(['picoaide-app-builder'])
+    const byDesc = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: 'wasm', kindFilter: 'all' })
+    expect(byDesc.map(r => r.name)).toEqual(['picoaide-app-builder'])
+    const byAuthor = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: 'picoaide', kindFilter: 'all' })
+    expect(byAuthor.map(r => r.name)).toEqual(['picoaide-app-builder'])
+    const noHit = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: '不存在的东西', kindFilter: 'all' })
+    expect(noHit).toEqual([])
+  })
+
+  it('类型筛选为"智能体"时不渲染（内置的目前都是技能）', () => {
+    expect(selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: '', kindFilter: 'agent' })).toEqual([])
   })
 })
