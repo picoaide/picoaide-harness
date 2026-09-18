@@ -247,6 +247,40 @@ func (a *API) loginAllowed(c *gin.Context, username string) bool {
 	return true
 }
 
+// ===== 供非 gin 入口复用同一套登录失败预算（2026-09-17）=====
+//
+// 为什么必须导出：WASM 应用平台的员工浏览器登录页（internal/wasmapp/session）
+// 走的是 net/http 而不是 gin，如果它自己不做预算，就等于**在客户端面
+// /auth/login 之外新开了一个没有爆破防护的密码入口** —— 同一份账号密码、
+// 同一套 provider，防护却只覆盖其中一个入口。这三个方法让新入口复用
+// **完全相同**的三个桶（host|username / u:username / ip:host），
+// 因此两处入口共享同一份失败预算（在一个入口上的失败会同时收紧另一个）。
+
+// AllowLoginAttempt 判定一次登录尝试是否在失败预算内。
+// host 传客户端 IP（反代下由 gin 的 ClientIP 语义决定，调用方负责取值）。
+func (a *API) AllowLoginAttempt(username, host string) bool {
+	scope := dbLimiterScope(a.DB)
+	return a.limiter.allow(scope+host+"|"+username) &&
+		a.limiter.allow(scope+"u:"+username) &&
+		a.loginIPLimiter.allow(scope+"ip:"+host)
+}
+
+// RecordLoginFailure 记一次登录失败（三个桶同时计数）。
+func (a *API) RecordLoginFailure(username, host string) {
+	scope := dbLimiterScope(a.DB)
+	a.limiter.record(scope + host + "|" + username)
+	a.limiter.record(scope + "u:" + username)
+	a.loginIPLimiter.record(scope + "ip:" + host)
+}
+
+// ResetLoginSuccess 在认证成功后清空三个桶（合法登录不应消耗失败预算）。
+func (a *API) ResetLoginSuccess(username, host string) {
+	scope := dbLimiterScope(a.DB)
+	a.limiter.reset(scope + host + "|" + username)
+	a.limiter.reset(scope + "u:" + username)
+	a.loginIPLimiter.reset(scope + "ip:" + host)
+}
+
 // loginFailed records a failed authentication against all three buckets.
 func (a *API) loginFailed(c *gin.Context, username string) {
 	scope := dbLimiterScope(a.DB)

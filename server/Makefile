@@ -43,6 +43,8 @@ test-server-fast:
 # webadmin 是编译进 Go 二进制的临时产物:build-server 自动先构建,不单独编译
 build-server: webadmin
 	go build -o $(BIN) ./cmd/server
+	@# WASM 应用平台的编译子进程：必须与 server 同目录（compile 按自身路径解析）。
+	go build -o $(dir $(BIN))picoaide-app-compile ./cmd/picoaide-app-compile
 
 # 两段式构建(2026-09): 先构建前端 dist, 再 go build 嵌入真实产物。
 # vite build 会清空 dist 目录, build 后恢复 .gitkeep 占位(go:embed dist/*
@@ -55,7 +57,12 @@ webadmin:
 # 用法:make docker-image 或 make docker-image IMAGE=ghcr.io/picoaide/picoaide-harness-server TAG=v0.4.0
 docker-image:
 	@echo "  构建镜像 $(IMAGE):$(TAG) (VERSION=$(VERSION))"
-	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(TAG) .
+	@# skillassets：内置技能资产（镜像内 /opt/picoaide/skills）。源头是 vendored
+	@# 插件包里的 skills/ —— 只有一份，不在 server/ 下再复制一份（漂移会让员工装到
+	@# 的技能与仓库里评审过的那份不是同一个东西）。
+	docker build --build-arg VERSION=$(VERSION) \
+	  --build-context skillassets=../packages/vendor/memory-evolve \
+	  -t $(IMAGE):$(TAG) .
 
 # 离线镜像导出已移出仓库:发布流程由 CI 在 tag 时产出 tar 上传更新服务器,
 # 客户侧按 docs/deploy/AI-DEPLOY.md 从更新服务器下载后 docker load。

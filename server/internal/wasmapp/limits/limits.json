@@ -1,0 +1,830 @@
+{
+  "version": 1,
+  "source": "server/internal/wasmapp/limits/limits.go",
+  "items": [
+    {
+      "Key": "max_app_id_len",
+      "Value": "63",
+      "Unit": "count",
+      "Section": "§4.1",
+      "Title": "app_id 长度上限",
+      "Note": "DNS label 上限；app_id 本身就是域名标签"
+    },
+    {
+      "Key": "app_id_pattern",
+      "Value": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "Unit": "",
+      "Section": "§4.1",
+      "Title": "app_id 规则",
+      "Note": "小写、无连续/首尾连字符"
+    },
+    {
+      "Key": "version_pattern",
+      "Value": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.]+)?$",
+      "Unit": "",
+      "Section": "§4.1",
+      "Title": "版本号规则",
+      "Note": "严格 x.y.z（可带 -prerelease），必须严格递增"
+    },
+    {
+      "Key": "retained_versions",
+      "Value": "3",
+      "Unit": "count",
+      "Section": "§5.3",
+      "Title": "保留版本数",
+      "Note": "最近 N 个曾生效版本；更早的软删并归档置空"
+    },
+    {
+      "Key": "artifact_quota_per_user_bytes",
+      "Value": "1073741824",
+      "Unit": "bytes",
+      "Section": "§5.3",
+      "Title": "每用户制品总量",
+      "Note": "PG BYTEA 口径，含全部版本"
+    },
+    {
+      "Key": "reserved_app_ids",
+      "Value": "www, api, admin, portal, app, apps, updates, static, cdn, mail, ns, ns1, ns2, dns, ftp, vpn, sso, login, auth, autodiscover, autoconfig, mta-sts, dmarc, acme, _acme-challenge",
+      "Unit": "",
+      "Section": "§4.1",
+      "Title": "app_id 保留字",
+      "Note": "另有部署期注入的企业已知主机名"
+    },
+    {
+      "Key": "wasm_max_bytes",
+      "Value": "33554432",
+      "Unit": "bytes",
+      "Section": "§4.2",
+      "Title": ".wasm 体积上限",
+      "Note": ""
+    },
+    {
+      "Key": "upload_body_max_bytes",
+      "Value": "50331648",
+      "Unit": "bytes",
+      "Section": "§4.2",
+      "Title": "上传请求体上限",
+      "Note": "base64 JSON；必须进 largeBodyRoutes 且 handler 自套 MaxBytesReader"
+    },
+    {
+      "Key": "client_upload_timeout",
+      "Value": "90",
+      "Unit": "seconds",
+      "Section": "§4.2",
+      "Title": "客户端上传超时",
+      "Note": "必须大于服务端 ReadTimeout（§10.5 第 58 项是配置断言）"
+    },
+    {
+      "Key": "server_read_timeout",
+      "Value": "60",
+      "Unit": "seconds",
+      "Section": "§4.2",
+      "Title": "服务端 ReadTimeout",
+      "Note": "48 MiB 需约 6.7 Mbps 保底"
+    },
+    {
+      "Key": "section_total_max_bytes",
+      "Value": "4194304",
+      "Unit": "bytes",
+      "Section": "§4.2",
+      "Title": "自定义段总量上限",
+      "Note": "超限 SECTION_OVERRIDE_OVERSIZE"
+    },
+    {
+      "Key": "app_config_max_bytes",
+      "Value": "65536",
+      "Unit": "bytes",
+      "Section": "§4.2",
+      "Title": "应用配置文件上限",
+      "Note": "picoaide.app.json，不计入 wasm 上限"
+    },
+    {
+      "Key": "app_config_whitelist_max",
+      "Value": "2000",
+      "Unit": "count",
+      "Section": "§4.2",
+      "Title": "白名单条目上限",
+      "Note": "平台不校验账号是否存在（否则等于账号枚举接口）"
+    },
+    {
+      "Key": "compile_timeout",
+      "Value": "60",
+      "Unit": "seconds",
+      "Section": "§4.2",
+      "Title": "编译超时",
+      "Note": "同步 publish 在 60 s 预算内完成"
+    },
+    {
+      "Key": "dry_run_budget",
+      "Value": "2",
+      "Unit": "seconds",
+      "Section": "§4.2",
+      "Title": "合成帧干跑预算",
+      "Note": "编译通过 ≠ 能跑（签名不匹配编译期全绿）"
+    },
+    {
+      "Key": "compile_queue_depth",
+      "Value": "64",
+      "Unit": "count",
+      "Section": "§4.3",
+      "Title": "编译队列深度",
+      "Note": "满则拒绝"
+    },
+    {
+      "Key": "compile_concurrency",
+      "Value": "1",
+      "Unit": "count",
+      "Section": "§4.3",
+      "Title": "编译并发",
+      "Note": "单进程串行"
+    },
+    {
+      "Key": "upload_chunk_max_bytes",
+      "Value": "8388608",
+      "Unit": "bytes",
+      "Section": "§4.2",
+      "Title": "分片上传单片上限",
+      "Note": "载荷超过它就走分片 + 续传"
+    },
+    {
+      "Key": "upload_chunk_min_bytes",
+      "Value": "65536",
+      "Unit": "bytes",
+      "Section": "§4.2",
+      "Title": "分片上传单片下限",
+      "Note": "防把载荷切成海量碎片"
+    },
+    {
+      "Key": "upload_max_chunks",
+      "Value": "1024",
+      "Unit": "count",
+      "Section": "§4.2",
+      "Title": "单会话片数上限",
+      "Note": "片数是有界资源"
+    },
+    {
+      "Key": "upload_session_ttl",
+      "Value": "1800",
+      "Unit": "seconds",
+      "Section": "§4.2",
+      "Title": "分片上传会话有效期",
+      "Note": "过期整会话作废并回收磁盘"
+    },
+    {
+      "Key": "upload_sessions_per_user",
+      "Value": "4",
+      "Unit": "count",
+      "Section": "§4.2",
+      "Title": "每用户并发上传会话数",
+      "Note": ""
+    },
+    {
+      "Key": "upload_disk_quota_per_user_bytes",
+      "Value": "50331648",
+      "Unit": "bytes",
+      "Section": "§4.2",
+      "Title": "每用户在飞上传磁盘配额",
+      "Note": "按未过期会话的声明总量（预留）判定；预留恒 ≥ 实际 ⇒ 真空上界"
+    },
+    {
+      "Key": "upload_rate_per_hour",
+      "Value": "30",
+      "Unit": "count",
+      "Section": "§4.3",
+      "Title": "每用户上传频率",
+      "Note": "validate + publish 合计"
+    },
+    {
+      "Key": "upload_concurrent_compiles",
+      "Value": "1",
+      "Unit": "count",
+      "Section": "§4.3",
+      "Title": "同时编译中的上传数",
+      "Note": ""
+    },
+    {
+      "Key": "wasm_import_module",
+      "Value": "wasi_snapshot_preview1",
+      "Unit": "",
+      "Section": "§4.2",
+      "Title": "唯一允许的导入模块",
+      "Note": "env.* / js.* 一律拒"
+    },
+    {
+      "Key": "required_exports",
+      "Value": "_start, memory",
+      "Unit": "",
+      "Section": "§4.2",
+      "Title": "必须导出",
+      "Note": "额外导出忽略"
+    },
+    {
+      "Key": "asset_max_path_bytes",
+      "Value": "256",
+      "Unit": "bytes",
+      "Section": "§4.2",
+      "Title": "包内资源路径上限",
+      "Note": "assets.read 的逻辑路径，不是宿主文件路径"
+    },
+    {
+      "Key": "asset_max_segment_bytes",
+      "Value": "255",
+      "Unit": "bytes",
+      "Section": "§4.2",
+      "Title": "资源路径单段上限",
+      "Note": "POSIX NAME_MAX；不检查会退化成不可读的 ENAMETOOLONG"
+    },
+    {
+      "Key": "asset_max_list_entries",
+      "Value": "10000",
+      "Unit": "count",
+      "Section": "§4.2",
+      "Title": "资源清单条数上限",
+      "Note": "自省/诊断接口"
+    },
+    {
+      "Key": "instance_memory_pages",
+      "Value": "1024",
+      "Unit": "pages",
+      "Section": "§4.3",
+      "Title": "单实例线性内存页",
+      "Note": "64 MiB"
+    },
+    {
+      "Key": "instance_memory_bytes",
+      "Value": "67108864",
+      "Unit": "bytes",
+      "Section": "§4.3",
+      "Title": "单实例内存上限",
+      "Note": "WithMemoryLimitPages"
+    },
+    {
+      "Key": "global_instances",
+      "Value": "32",
+      "Unit": "count",
+      "Section": "§4.6",
+      "Title": "全局并发实例",
+      "Note": "≈ 2 GiB 上界"
+    },
+    {
+      "Key": "compile_cache_max_bytes",
+      "Value": "536870912",
+      "Unit": "bytes",
+      "Section": "§4.3",
+      "Title": "编译缓存体积上限",
+      "Note": "wazero 磁盘缓存，按 mtime 回收"
+    },
+    {
+      "Key": "compile_cache_max_entries",
+      "Value": "4096",
+      "Unit": "count",
+      "Section": "§4.3",
+      "Title": "编译缓存条目上限",
+      "Note": ""
+    },
+    {
+      "Key": "memory_peak_guard_percent",
+      "Value": "70",
+      "Unit": "percent",
+      "Section": "§4.3",
+      "Title": "启动自检内存水位",
+      "Note": "理论峰值超过可用内存该比例即拒绝启动"
+    },
+    {
+      "Key": "upload_peak_per_upload_bytes",
+      "Value": "123731968",
+      "Unit": "bytes",
+      "Section": "§4.3",
+      "Title": "单次上传峰值内存账",
+      "Note": "base64 单次 ≈ 32+43+43 MB"
+    },
+    {
+      "Key": "host_call_budget_default",
+      "Value": "5",
+      "Unit": "seconds",
+      "Section": "§4.4",
+      "Title": "宿主调用兜底预算",
+      "Note": ""
+    },
+    {
+      "Key": "ai_chat_max_messages",
+      "Value": "128",
+      "Unit": "count",
+      "Section": "§4.4",
+      "Title": "ai.chat 消息条数上限",
+      "Note": ""
+    },
+    {
+      "Key": "ai_chat_max_body_bytes",
+      "Value": "1048576",
+      "Unit": "bytes",
+      "Section": "§4.4",
+      "Title": "ai.chat 请求体上限",
+      "Note": ""
+    },
+    {
+      "Key": "app_db_page_size",
+      "Value": "4096",
+      "Unit": "bytes",
+      "Section": "§4.5",
+      "Title": "应用库页大小",
+      "Note": ""
+    },
+    {
+      "Key": "app_db_max_page_count",
+      "Value": "25600",
+      "Unit": "pages",
+      "Section": "§4.5",
+      "Title": "应用库 max_page_count",
+      "Note": "PRAGMA max_page_count，连接级不持久 ⇒ 每条连接重设"
+    },
+    {
+      "Key": "app_db_max_bytes",
+      "Value": "104857600",
+      "Unit": "bytes",
+      "Section": "§4.5",
+      "Title": "应用库体积上限",
+      "Note": "100 MB 硬限（平台固定，用户无旋钮）"
+    },
+    {
+      "Key": "sql_limit_sql_length",
+      "Value": "65536",
+      "Unit": "bytes",
+      "Section": "§4.5",
+      "Title": "SQLITE_LIMIT_SQL_LENGTH",
+      "Note": "单条 SQL"
+    },
+    {
+      "Key": "sql_limit_length",
+      "Value": "1048576",
+      "Unit": "bytes",
+      "Section": "§4.5",
+      "Title": "SQLITE_LIMIT_LENGTH",
+      "Note": "单值"
+    },
+    {
+      "Key": "sql_limit_column",
+      "Value": "128",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "SQLITE_LIMIT_COLUMN",
+      "Note": "结果集列数"
+    },
+    {
+      "Key": "sql_limit_expr_depth",
+      "Value": "32",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "SQLITE_LIMIT_EXPR_DEPTH",
+      "Note": ""
+    },
+    {
+      "Key": "sql_limit_parser_depth",
+      "Value": "32",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "SQLITE_LIMIT_PARSER_DEPTH",
+      "Note": ""
+    },
+    {
+      "Key": "sql_limit_compound_select",
+      "Value": "8",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "SQLITE_LIMIT_COMPOUND_SELECT",
+      "Note": ""
+    },
+    {
+      "Key": "sql_limit_vdbe_op",
+      "Value": "50000",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "SQLITE_LIMIT_VDBE_OP",
+      "Note": "挡编译期巨型语句；不是运行期护栏"
+    },
+    {
+      "Key": "sql_limit_function_arg",
+      "Value": "16",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "SQLITE_LIMIT_FUNCTION_ARG",
+      "Note": ""
+    },
+    {
+      "Key": "sql_limit_variable_number",
+      "Value": "128",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "SQLITE_LIMIT_VARIABLE_NUMBER",
+      "Note": ""
+    },
+    {
+      "Key": "sql_limit_attached",
+      "Value": "0",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "SQLITE_LIMIT_ATTACHED",
+      "Note": "0 = 引擎层否决 ATTACH，也是 VACUUM INTO 的唯一闸门"
+    },
+    {
+      "Key": "sql_limit_like_pattern_length",
+      "Value": "512",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "SQLITE_LIMIT_LIKE_PATTERN_LENGTH",
+      "Note": ""
+    },
+    {
+      "Key": "sql_limit_trigger_depth",
+      "Value": "8",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "SQLITE_LIMIT_TRIGGER_DEPTH",
+      "Note": ""
+    },
+    {
+      "Key": "sql_limit_worker_threads",
+      "Value": "0",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "SQLITE_LIMIT_WORKER_THREADS",
+      "Note": "禁辅助线程"
+    },
+    {
+      "Key": "sql_max_rows",
+      "Value": "5000",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "返回行数上限",
+      "Note": "超出即截断并报错"
+    },
+    {
+      "Key": "sql_max_result_bytes",
+      "Value": "8388608",
+      "Unit": "bytes",
+      "Section": "§4.5",
+      "Title": "返回字节上限",
+      "Note": ""
+    },
+    {
+      "Key": "sql_statement_budget",
+      "Value": "5",
+      "Unit": "seconds",
+      "Section": "§4.5",
+      "Title": "单语句硬超时",
+      "Note": "独立于 guest 超时；驱动取消时 sqlite3_interrupt"
+    },
+    {
+      "Key": "app_db_handle_max",
+      "Value": "32",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "同时持有的应用库句柄上限",
+      "Note": "每句柄 2 条 SQLite 连接 ⇒ fd 硬上界"
+    },
+    {
+      "Key": "max_tables_per_app",
+      "Value": "16",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "每应用表数上限",
+      "Note": "由 db.define 强制"
+    },
+    {
+      "Key": "max_columns_per_table",
+      "Value": "16",
+      "Unit": "count",
+      "Section": "§4.5",
+      "Title": "每表列数上限",
+      "Note": "由 db.define 强制"
+    },
+    {
+      "Key": "table_name_pattern",
+      "Value": "^[a-z][a-z0-9_]{0,30}$",
+      "Unit": "",
+      "Section": "§4.5",
+      "Title": "表名规则",
+      "Note": ""
+    },
+    {
+      "Key": "column_name_pattern",
+      "Value": "^[a-z][a-z0-9_]{0,30}$",
+      "Unit": "",
+      "Section": "§4.5",
+      "Title": "列名规则",
+      "Note": ""
+    },
+    {
+      "Key": "reserved_row_id_column",
+      "Value": "_row_id",
+      "Unit": "",
+      "Section": "§5.2",
+      "Title": "平台保留列",
+      "Note": "应用提到即拒"
+    },
+    {
+      "Key": "sql_column_types",
+      "Value": "text, int, real, bool, datetime",
+      "Unit": "",
+      "Section": "§4.5",
+      "Title": "列类型枚举",
+      "Note": "封闭集合"
+    },
+    {
+      "Key": "allowed_statement_kinds",
+      "Value": "SELECT, INSERT, UPDATE, DELETE",
+      "Unit": "",
+      "Section": "§4.5",
+      "Title": "语句种类白名单",
+      "Note": "其余一律拒（含全部 DDL）"
+    },
+    {
+      "Key": "app_request_body_max_bytes",
+      "Value": "1048576",
+      "Unit": "bytes",
+      "Section": "§4.6",
+      "Title": "应用 API 请求体上限",
+      "Note": "子域路由树不在两个 1 MB 中间件分组里 ⇒ 必须自己实现"
+    },
+    {
+      "Key": "app_response_body_max_bytes",
+      "Value": "8388608",
+      "Unit": "bytes",
+      "Section": "§4.6",
+      "Title": "应用响应体上限",
+      "Note": ""
+    },
+    {
+      "Key": "protocol_line_max_bytes",
+      "Value": "1048576",
+      "Unit": "bytes",
+      "Section": "§4.6",
+      "Title": "协议帧单行上限",
+      "Note": "超限 RUNTIME_OUTPUT_OVERRUN"
+    },
+    {
+      "Key": "guest_budget",
+      "Value": "10",
+      "Unit": "seconds",
+      "Section": "§4.6",
+      "Title": "guest 执行预算",
+      "Note": "进入宿主调用时暂停计时"
+    },
+    {
+      "Key": "host_ai_chat_budget",
+      "Value": "30",
+      "Unit": "seconds",
+      "Section": "§4.6",
+      "Title": "ai.chat 宿主预算",
+      "Note": ""
+    },
+    {
+      "Key": "request_wall_clock",
+      "Value": "60",
+      "Unit": "seconds",
+      "Section": "§4.6",
+      "Title": "请求端到端墙钟",
+      "Note": "含排队等待，到点即拒"
+    },
+    {
+      "Key": "app_queue_depth",
+      "Value": "32",
+      "Unit": "count",
+      "Section": "§4.6",
+      "Title": "每应用队列长度",
+      "Note": "超出 429 + Retry-After"
+    },
+    {
+      "Key": "user_per_app_running",
+      "Value": "1",
+      "Unit": "count",
+      "Section": "§4.6",
+      "Title": "单用户同应用在跑",
+      "Note": ""
+    },
+    {
+      "Key": "user_per_app_queued",
+      "Value": "4",
+      "Unit": "count",
+      "Section": "§4.6",
+      "Title": "单用户同应用排队",
+      "Note": ""
+    },
+    {
+      "Key": "user_global_running",
+      "Value": "4",
+      "Unit": "count",
+      "Section": "§4.6",
+      "Title": "单用户跨应用全局在跑",
+      "Note": ""
+    },
+    {
+      "Key": "app_concurrency",
+      "Value": "1",
+      "Unit": "count",
+      "Section": "§4.6",
+      "Title": "每应用并发",
+      "Note": "恒为 1（串行）"
+    },
+    {
+      "Key": "retry_after_seconds",
+      "Value": "1",
+      "Unit": "seconds",
+      "Section": "§4.6",
+      "Title": "Retry-After",
+      "Note": ""
+    },
+    {
+      "Key": "anon_global_rate_per_min",
+      "Value": "3000",
+      "Unit": "count",
+      "Section": "§4.6",
+      "Title": "全局匿名令牌桶",
+      "Note": "次/分"
+    },
+    {
+      "Key": "anon_global_burst",
+      "Value": "3000",
+      "Unit": "count",
+      "Section": "§4.6",
+      "Title": "全局匿名桶容量",
+      "Note": ""
+    },
+    {
+      "Key": "anon_per_ip_rate_per_min",
+      "Value": "60",
+      "Unit": "count",
+      "Section": "§4.6",
+      "Title": "每 IP 匿名速率",
+      "Note": "次/分"
+    },
+    {
+      "Key": "anon_per_ip_burst",
+      "Value": "60",
+      "Unit": "count",
+      "Section": "§4.6",
+      "Title": "每 IP 匿名桶容量",
+      "Note": ""
+    },
+    {
+      "Key": "ticket_ttl",
+      "Value": "60",
+      "Unit": "seconds",
+      "Section": "§4.7",
+      "Title": "一次性换票有效期",
+      "Note": "code 单次、绑 (user, app)"
+    },
+    {
+      "Key": "app_session_ttl",
+      "Value": "28800",
+      "Unit": "seconds",
+      "Section": "§4.7",
+      "Title": "应用子域会话 TTL",
+      "Note": "Cookie host-only + HttpOnly + Secure + SameSite=Strict"
+    },
+    {
+      "Key": "ai_token_ttl",
+      "Value": "2700",
+      "Unit": "seconds",
+      "Section": "§4.7",
+      "Title": "AI 令牌有效期",
+      "Note": "宿主内存持有、到期重铸、登出吊销"
+    },
+    {
+      "Key": "ai_token_renew_before",
+      "Value": "300",
+      "Unit": "seconds",
+      "Section": "§4.7",
+      "Title": "AI 令牌续期提前量",
+      "Note": ""
+    },
+    {
+      "Key": "ai_user_rate_per_min",
+      "Value": "60",
+      "Unit": "count",
+      "Section": "§4.7",
+      "Title": "用户级限流",
+      "Note": "平台既有，应用无独立额度"
+    },
+    {
+      "Key": "ai_in_flight_per_user",
+      "Value": "32",
+      "Unit": "count",
+      "Section": "§4.7",
+      "Title": "在途上限",
+      "Note": "平台既有 InFlightGuard"
+    },
+    {
+      "Key": "session_max_form_bytes",
+      "Value": "8192",
+      "Unit": "bytes",
+      "Section": "§4.7",
+      "Title": "员工会话表单体上限",
+      "Note": "登录/换票两个表单只有几个短字段"
+    },
+    {
+      "Key": "session_max_username_bytes",
+      "Value": "128",
+      "Unit": "bytes",
+      "Section": "§4.7",
+      "Title": "账号字段上限",
+      "Note": "与客户端面登录同口径"
+    },
+    {
+      "Key": "session_max_password_bytes",
+      "Value": "1024",
+      "Unit": "bytes",
+      "Section": "§4.7",
+      "Title": "密码字段上限",
+      "Note": "与客户端面登录同口径"
+    },
+    {
+      "Key": "session_max_next_bytes",
+      "Value": "512",
+      "Unit": "bytes",
+      "Section": "§4.7",
+      "Title": "换票 next 长度上限",
+      "Note": "§4.7「next 只接受同基域相对路径」的一部分"
+    },
+    {
+      "Key": "call_event_retention_days",
+      "Value": "7",
+      "Unit": "days",
+      "Section": "§4.9",
+      "Title": "调用事件保留",
+      "Note": ""
+    },
+    {
+      "Key": "call_event_ring_size",
+      "Value": "4096",
+      "Unit": "count",
+      "Section": "§4.9",
+      "Title": "调用事件环形内存容量",
+      "Note": ""
+    },
+    {
+      "Key": "call_event_flush_interval",
+      "Value": "2",
+      "Unit": "seconds",
+      "Section": "§4.9",
+      "Title": "调用事件批量落库间隔",
+      "Note": ""
+    },
+    {
+      "Key": "call_event_batch_max",
+      "Value": "512",
+      "Unit": "count",
+      "Section": "§4.9",
+      "Title": "调用事件单批上限",
+      "Note": ""
+    },
+    {
+      "Key": "diagnostics_default_limit",
+      "Value": "50",
+      "Unit": "count",
+      "Section": "§4.9",
+      "Title": "诊断默认条数",
+      "Note": ""
+    },
+    {
+      "Key": "diagnostics_max_limit",
+      "Value": "200",
+      "Unit": "count",
+      "Section": "§4.9",
+      "Title": "诊断条数上限",
+      "Note": ""
+    },
+    {
+      "Key": "stderr_tail_bytes",
+      "Value": "2048",
+      "Unit": "bytes",
+      "Section": "§4.9",
+      "Title": "stderr 尾巴上限",
+      "Note": "诊断回给作者"
+    },
+    {
+      "Key": "retirement_snapshot_retention_days",
+      "Value": "90",
+      "Unit": "days",
+      "Section": "§5.3",
+      "Title": "退役快照保留",
+      "Note": "冻结/退役后保留快照的时长；到期由平台回收"
+    },
+    {
+      "Key": "log_max_line_bytes",
+      "Value": "4096",
+      "Unit": "bytes",
+      "Section": "§5.1",
+      "Title": "单条日志上限",
+      "Note": ""
+    },
+    {
+      "Key": "log_max_per_request",
+      "Value": "100",
+      "Unit": "count",
+      "Section": "§5.1",
+      "Title": "每请求日志条数上限",
+      "Note": "超出丢弃并计数"
+    }
+  ]
+}

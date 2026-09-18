@@ -1,0 +1,431 @@
+/**
+ * 发布编排的**客户端半边**：应用中心面板 → 本机 `/api/pico/apps/wasm/publish`。
+ *
+ * 为什么由页面发起（而不是给 AI 一条工具面）：页面是"经 launch token 换过票的浏览器
+ * 页面"，**天然持有** `dsh-auth-*` 持有性证明 —— 本地写面的围栏对它是透明的（先例：
+ * `CapabilityCenterPanel` 的上传就是页面上下文直发本地写面）。宿主拿到请求后按 §4.2 的
+ * 客户端契约出站（90 s 预算；`base64 > 8 MiB` 自动分片 + 续传），**这份编排只有一份实现**
+ * （`packages/host/enterprise/src/wasm-apps.ts`）——面板不复制、也不旁路任何一条路径。
+ *
+ * 本模块只做四件事，全是纯逻辑（可单测、无 React）：
+ *  1. 把表单草稿拼成宿主约定的请求体（`config` 的字段名是**服务端契约**：
+ *     `access` / `whitelist` / `purpose` / `data_sensitivity` / `owner`
+ *     —— 旧的 `visible` 已删除、`login_required` 被 `access` 取代，字段集合是**封闭**的，
+ *     多发一个旧字段就等于发布必然被拒）；
+ *  2. 读文件 → base64（分片 32 KiB 累加，避免 `String.fromCharCode(...bigArray)` 爆栈）；
+ *  3. **预校验**（{@link validatePublishDraft}）：把服务端已有的形态规则搬到提交之前，
+ *     免得用户白等一次 90 s 的往返。它只做加法 —— 拦下的必然是服务端也会拒的；
+ *  4. 把服务端**结构化错误** `{error:{code,message,details,hints}}` 一字段不丢地解析出来
+ *     —— 第一消费者是 AI，也是给员工看的：只显示"失败"等于把可自修的信息丢掉（§8）。
+ *
+ * @module @picoaide/dsh-wasm-apps/client/publish-app
+ */
+
+import { t } from './locales.ts'
+import {
+  ACCESS_MODES,
+  APP_ID_ALL_DIGITS_PATTERN,
+  APP_ID_MAX_LENGTH,
+  APP_ID_PATTERN,
+  APP_ID_PUNYCODE_PREFIX,
+  DEFAULT_ACCESS,
+  VERSION_PATTERN,
+  WHITELIST_MAX,
+  type AccessMode,
+} from './appcfg-contract.ts'
+
+/** 本地发布入口（宿主路由；唯一的发布链路）。 */
+export const PUBLISH_PATH = '/api/pico/apps/wasm/publish'
+
+export { ACCESS_MODES, DEFAULT_ACCESS, WHITELIST_MAX, type AccessMode }
+
+/** 应用配置草稿（字段名与 `picoaide.app.json` 一一对应）。 */
+export interface PublishConfigDraft {
+  /**
+   * 访问模式（三选一；缺省 `login`）。
+   *
+   * 取代了旧的 `visible` + `login_required` 两个布尔：那两个的组合里有一半是
+   * 无意义甚至自相矛盾的（§4.2 的 R25/R26）。
+   */
+  access: AccessMode
+  /**
+   * 准入名单（手填账号）。
+   *
+   * **平台不比对**（R24 不变）：平台只把身份与访问模式注入帧，名单判定仍由应用读
+   * 自己的配置做。`access=whitelist` 时服务端要求非空，否则应用对所有人都不可用。
+   */
+  whitelist: string[]
+  /** 用途声明（首次发布必填）。 */
+  purpose: string
+  /** 数据敏感度声明（首次发布必填）。 */
+  dataSensitivity: string
+  /** 负责人声明（首次发布必填；不是平台归属）。 */
+  owner: string
+}
+
+/** 一次发布的表单草稿。 */
+export interface PublishDraft {
+  appId: string
+  version: string
+  title: string
+  changelog: string
+  config: PublishConfigDraft
+}
+
+/** 待发布的产物（文件选择的结果；`bytes` 是真字节，不是文件名）。 */
+export interface PublishFile {
+  name: string
+  bytes: Uint8Array
+}
+
+/** 失败：服务端结构化错误**原样**（`details`/`hints` 一字不改）。 */
+export interface PublishFailure {
+  ok: false
+  /** HTTP 状态；null = 请求根本没到达宿主（传输层）。 */
+  status: number | null
+  code: string
+  message: string
+  details: unknown
+  hints: string[]
+  /** true = 传输层失败（网络/被取消），不是服务端裁决。 */
+  transport: boolean
+}
+
+/** 成功：服务端 `POST …/releases` 的 201 体里 UI 需要的那几个字段。 */
+export interface PublishSuccess {
+  ok: true
+  appId: string
+  title: string
+  version: string
+  /** 服务端 release.status（`approved` / `pending` / …）。 */
+  status: string
+  /** true = 这个版本就是当前线上版本。 */
+  live: boolean
+  /** true = 进了待审队列（线上仍是旧版本，R17）。 */
+  pending: boolean
+  entryURL: string
+  checksum: string
+  sizeBytes: number
+}
+
+/** 提交过程中的两个可观察阶段（同步 publish 只有"读文件 / 等一次请求"两态，不做假进度条）。 */
+export type PublishPhase = 'reading' | 'uploading'
+
+/** {@link submitPublish} 的可注入依赖（测试与 UI 共用同一条实现）。 */
+export interface SubmitDeps {
+  fetch?: typeof fetch
+  signal?: AbortSignal
+  onPhase?: (phase: PublishPhase) => void
+}
+
+/**
+ * 把白名单文本切成数组：逗号 / 顿号 / 分号 / 换行都算分隔符。
+ *
+ * 去空白、丢空串、按首次出现顺序去重（服务端 `normalizeWhitelist` 同口径；
+ * 这里做的是"别把整行当成一个账号"的输入宽容，不是第二份准入规则）。
+ * @param text - 用户输入的白名单文本。
+ * @returns 归一化后的账号数组。
+ */
+export function splitWhitelist(text: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const piece of text.split(/[,，、;\n\r\t]+/u)) {
+    const value = piece.trim()
+    if (value === '' || seen.has(value)) continue
+    seen.add(value)
+    out.push(value)
+  }
+  return out
+}
+
+/**
+ * Uint8Array → base64。
+ *
+ * 分片累加（32 KiB/次）而不是 `String.fromCharCode(...bytes)`：后者在 32 MiB 载荷上
+ * 会直接撞 `RangeError: Maximum call stack size exceeded`（参数个数上限≈65k）。
+ * @param bytes - 原始字节。
+ * @returns 标准 base64（无换行、带 `=` 填充）。
+ */
+export function encodeBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+    // `String.fromCharCode(...slice)` 的实参个数 ≤ 32768，安全。
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK))
+  }
+  return btoa(binary)
+}
+
+/**
+ * 拼发布请求体（宿主 `/api/pico/apps/wasm/publish` 的入参）。
+ *
+ * `config` 只发 `access` / `whitelist` / `purpose` / `data_sensitivity` / `owner` 五个字段
+ * —— **不发 `visible`**（字段已删除，服务端字段集合封闭，多发即拒）、
+ * **不发 `login_required`**（已被 `access` 取代）。
+ * 旧字段混进来会让服务端在"未知字段"上拒掉整个发布。
+ *
+ * 只带非空的可选字段：`title`/`changelog` 留空时**不发**（服务端对空串有自己的回落），
+ * 免得把"没填"变成一个看起来像"填了空"的值。
+ * @param draft - 表单草稿。
+ * @param wasmBase64 - 产物字节（base64）。
+ * @returns 请求体对象。
+ */
+export function buildPublishBody(draft: PublishDraft, wasmBase64: string): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    app_id: draft.appId.trim(),
+    version: draft.version.trim(),
+    wasm_base64: wasmBase64,
+    config: {
+      access: draft.config.access,
+      whitelist: [...draft.config.whitelist],
+      purpose: draft.config.purpose,
+      data_sensitivity: draft.config.dataSensitivity,
+      owner: draft.config.owner,
+    },
+  }
+  if (draft.title.trim() !== '') body.title = draft.title.trim()
+  if (draft.changelog.trim() !== '') body.changelog = draft.changelog.trim()
+  return body
+}
+
+/** 一条预校验问题。`code` 是稳定标识（供测试与 AI 定位），`message` 是给人看的文案。 */
+export interface ValidationIssue {
+  /** 出问题的字段（`wasm_file` / `app_id` / `version` / `title` / `access` / `whitelist` / …）。 */
+  field: string
+  /** 稳定问题码（`app_id_shape` / `whitelist_empty` / …）—— 不随文案改动。 */
+  code: string
+  /** 已本地化的可读文案（当前语言）。 */
+  message: string
+}
+
+/**
+ * 校验选项。
+ *
+ * `firstRelease` 缺省 `true`：客户端**看不到**服务端的版本历史，无法知道这次是不是首版。
+ * 取保守一侧（按首版要求）的理由是首版恰恰是最常见的路径，而漏拦的代价是用户白等一次
+ * 90 s 往返后拿到同一句拒绝。服务端仍是裁决者：非首版留空这些字段它**不会**拒。
+ */
+export interface ValidateOptions {
+  firstRelease?: boolean
+}
+
+/**
+ * 发布表单的**前端预校验**：与 `server/internal/wasmapp/{registry,appcfg}` 同口径。
+ *
+ * 逐条对应服务端规则（括号里是服务端位置）：
+ *  - `app_id` 形态 / 长度 / 纯数字 / `xn--`（`registry.ValidateAppID` + `limits.AppIDPattern`）；
+ *  - `version` 形态（`registry.ValidateVersion` + `limits.VersionPattern`）；
+ *  - `access` 取值（`appcfg` 的三模式枚举）；
+ *  - `access=whitelist` 时名单非空 + 条目数上限（`appcfg.Validate` 的 `empty_whitelist`）；
+ *  - 首版 `title`/`purpose`/`data_sensitivity`/`owner` 非空（`appcfg.Validate(true)`）。
+ *
+ * **只做加法**：这里拦下的一定是服务端也会拒的。不做的事（服务端才知道）：
+ * app_id 保留字与企业既有主机名、版本号严格递增、wasm 模块校验。
+ * @param draft - 表单草稿。
+ * @param options - 校验选项（`firstRelease`，缺省 true）。
+ * @returns 问题列表；空数组 = 可以提交（服务端仍可能拒）。
+ */
+export function validatePublishDraft(draft: PublishDraft, options: ValidateOptions = {}): ValidationIssue[] {
+  const issues: ValidationIssue[] = []
+  const firstRelease = options.firstRelease ?? true
+  const appId = draft.appId.trim()
+  const version = draft.version.trim()
+
+  if (appId === '') {
+    issues.push({ field: 'app_id', code: 'app_id_required', message: t('appCenter.invalidAppIdRequired') })
+  } else if (appId.length > APP_ID_MAX_LENGTH) {
+    issues.push({ field: 'app_id', code: 'app_id_length', message: t('appCenter.invalidAppIdLength') })
+  } else if (appId.startsWith(APP_ID_PUNYCODE_PREFIX)) {
+    // 先于形态检查：任何 `xn--` 开头的串都过不了形态正则（`-` 后必须跟字母数字），
+    // 但"punycode 前缀保留给国际化域名"比"含非法字符"更能让人知道该改什么。
+    issues.push({ field: 'app_id', code: 'app_id_punycode', message: t('appCenter.invalidAppIdPunycode') })
+  } else if (!APP_ID_PATTERN.test(appId)) {
+    issues.push({ field: 'app_id', code: 'app_id_shape', message: t('appCenter.invalidAppIdShape') })
+  } else if (APP_ID_ALL_DIGITS_PATTERN.test(appId)) {
+    issues.push({ field: 'app_id', code: 'app_id_numeric', message: t('appCenter.invalidAppIdNumeric') })
+  }
+
+  if (version === '') {
+    issues.push({ field: 'version', code: 'version_required', message: t('appCenter.invalidVersionRequired') })
+  } else if (!VERSION_PATTERN.test(version)) {
+    issues.push({ field: 'version', code: 'version_shape', message: t('appCenter.invalidVersionShape') })
+  }
+
+  if (!(ACCESS_MODES as readonly string[]).includes(draft.config.access)) {
+    issues.push({ field: 'access', code: 'access_invalid', message: t('appCenter.invalidAccess') })
+  }
+
+  // whitelist 的两条只在"选了白名单模式"或"填了名单"时才有意义：
+  // 选了别的模式却留着名单是允许的（服务端不比对，名单只是给应用自己读的备份）。
+  if (draft.config.access === 'whitelist') {
+    if (draft.config.whitelist.length === 0) {
+      issues.push({ field: 'whitelist', code: 'whitelist_empty', message: t('appCenter.invalidWhitelistEmpty') })
+    } else if (draft.config.whitelist.length > WHITELIST_MAX) {
+      issues.push({ field: 'whitelist', code: 'whitelist_too_many', message: t('appCenter.invalidWhitelistTooMany') })
+    }
+  }
+
+  if (firstRelease) {
+    if (draft.title.trim() === '') {
+      issues.push({ field: 'title', code: 'title_required', message: t('appCenter.requiredTitle') })
+    }
+    if (draft.config.purpose.trim() === '') {
+      issues.push({ field: 'purpose', code: 'purpose_required', message: t('appCenter.requiredPurpose') })
+    }
+    if (draft.config.dataSensitivity.trim() === '') {
+      issues.push({ field: 'data_sensitivity', code: 'data_sensitivity_required', message: t('appCenter.requiredDataSensitivity') })
+    }
+    if (draft.config.owner.trim() === '') {
+      issues.push({ field: 'owner', code: 'owner_required', message: t('appCenter.requiredOwner') })
+    }
+  }
+
+  return issues
+}
+
+/**
+ * 解析服务端错误信封。**不裁剪、不改写**：`code`/`message`/`details`/`hints` 全带上，
+ * 缺字段时回落成"能读的替代值"而不是空串（UI 与 AI 都要有东西可看）。
+ * @param status - HTTP 状态；null = 传输层失败。
+ * @param payload - 解析后的响应体（可能为 null：非 JSON）。
+ * @param fallbackMessage - 完全没有可读信息时的兜底文案。
+ * @returns 结构化失败对象。
+ */
+export function parseErrorEnvelope(
+  status: number | null,
+  payload: unknown,
+  fallbackMessage = 'request failed',
+): PublishFailure {
+  const root = (payload ?? {}) as Record<string, unknown>
+  const error = (root.error ?? {}) as Record<string, unknown>
+  const code = typeof error.code === 'string' && error.code !== ''
+    ? error.code
+    : status === null ? 'NETWORK_ERROR' : `HTTP_${String(status)}`
+  const message = typeof error.message === 'string' && error.message !== ''
+    ? error.message
+    : fallbackMessage
+  const details = Object.hasOwn(error, 'details') ? error.details : undefined
+  const hints = Array.isArray(error.hints)
+    ? error.hints.filter((hint): hint is string => typeof hint === 'string' && hint !== '')
+    : []
+  return { ok: false, status, code, message, details, hints, transport: status === null }
+}
+
+/**
+ * 解析成功响应（服务端 `publish.go:670-690` 的 `{app, release, review_required}`）。
+ *
+ * 形状不对（缺 `release.version`）时**不假装成功**：回落成结构化失败并把原始体放进
+ * `details`，这样"服务端改了下发形状"会立刻被看见，而不是显示一个空白的成功页。
+ * @param payload - 解析后的响应体。
+ * @returns 成功对象，或结构化失败。
+ */
+export function parsePublishOutcome(payload: unknown): PublishSuccess | PublishFailure {
+  const root = (payload ?? {}) as Record<string, unknown>
+  const app = (root.app ?? {}) as Record<string, unknown>
+  const release = (root.release ?? {}) as Record<string, unknown>
+  const version = typeof release.version === 'string' ? release.version : ''
+  if (version === '') {
+    return {
+      ok: false,
+      status: 200,
+      code: 'UNEXPECTED_RESPONSE',
+      message: '服务端没有返回版本号（发布响应形状与客户端预期不一致）',
+      details: { response: payload },
+      hints: ['把 details.response 交给平台维护者：这通常意味着服务端刚改了发布响应'],
+      transport: false,
+    }
+  }
+  const pending = root.review_required === true || release.status === 'pending'
+  return {
+    ok: true,
+    appId: typeof app.app_id === 'string' ? app.app_id : '',
+    title: typeof app.title === 'string' ? app.title : '',
+    version,
+    status: typeof release.status === 'string' ? release.status : '',
+    live: release.current === true || !pending,
+    pending,
+    entryURL: typeof app.entry_url === 'string' ? app.entry_url : '',
+    checksum: typeof release.checksum === 'string' ? release.checksum : '',
+    sizeBytes: typeof release.size === 'number' ? release.size : 0,
+  }
+}
+
+/**
+ * 提交一次发布：读文件 → base64 → `POST /api/pico/apps/wasm/publish` → 解析结果。
+ *
+ * 分片与 90 s 预算**不在这里**：那是宿主 `/publish` 的编排（`base64 > 8 MiB` 自动分片、
+ * 断线续传）。本函数只负责"页面这一侧"的一次 fetch —— 复制一份分片逻辑等于制造第二个
+ * 契约，迟早与服务端漂移（这正是 FIX-43 的教训）。
+ * @param draft - 表单草稿。
+ * @param file - 已选择的产物。
+ * @param deps - 可注入的 fetch / 取消信号 / 阶段回调。
+ * @returns 成功或**结构化**失败（永不抛异常：UI 必须总能显示点什么）。
+ */
+export async function submitPublish(
+  draft: PublishDraft,
+  file: PublishFile,
+  deps: SubmitDeps = {},
+): Promise<PublishSuccess | PublishFailure> {
+  const doFetch = deps.fetch ?? globalThis.fetch
+  deps.onPhase?.('reading')
+  let wasmBase64: string
+  try {
+    wasmBase64 = encodeBase64(file.bytes)
+  } catch (cause) {
+    return {
+      ok: false,
+      status: null,
+      code: 'FILE_READ_FAILED',
+      message: cause instanceof Error ? cause.message : String(cause),
+      details: { file: file.name, size_bytes: file.bytes.byteLength },
+      hints: ['重新选择文件；若文件在别处被改写，请重新编译后再发布'],
+      transport: false,
+    }
+  }
+  deps.onPhase?.('uploading')
+  let response: Response
+  try {
+    response = await doFetch(PUBLISH_PATH, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildPublishBody(draft, wasmBase64)),
+      ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+    })
+  } catch (cause) {
+    const aborted = cause instanceof Error && cause.name === 'AbortError'
+    return {
+      ok: false,
+      status: null,
+      code: aborted ? 'ABORTED' : 'NETWORK_ERROR',
+      message: cause instanceof Error ? cause.message : String(cause),
+      details: { url: PUBLISH_PATH },
+      hints: aborted
+        ? ['已取消本次发布；重发同一条 publish 时宿主会从已收到的分片继续（不会从头再来）']
+        : ['确认本机宿主仍在运行（这是本机路由，不是外网请求）'],
+      transport: true,
+    }
+  }
+  const text = await response.text().catch(() => '')
+  let payload: unknown = null
+  try {
+    payload = text === '' ? null : JSON.parse(text)
+  } catch {
+    payload = null
+  }
+  if (!response.ok) {
+    return parseErrorEnvelope(response.status, payload, text.slice(0, 400) !== '' ? text.slice(0, 400) : 'request failed')
+  }
+  if (payload === null) {
+    // 2xx 但不是 JSON：宿主/网关被换掉了（门户 HTML 之类）。原样回显，不假装成功。
+    return {
+      ok: false,
+      status: response.status,
+      code: 'UNEXPECTED_RESPONSE',
+      message: '发布接口返回的不是 JSON',
+      details: { body: text.slice(0, 800) },
+      hints: ['检查是否有反向代理把本机路由劫持到了门户页面'],
+      transport: false,
+    }
+  }
+  return parsePublishOutcome(payload)
+}

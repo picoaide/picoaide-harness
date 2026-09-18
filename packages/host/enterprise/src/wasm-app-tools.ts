@@ -1,0 +1,532 @@
+/**
+ * WASM 应用平台的**宿主工具面**：让 AI 能列出目录、预检、发布
+ * （设计基线 `docs/planning/2026-09-17-wasm-app-platform.md` §6.5b 的最小工具集）。
+ *
+ * ## 为什么是工具而不是 curl
+ *
+ * 员工令牌只存在于 Host（`ctx.picoSession`）的内存里（红线 3：应用与 AI 都拿不到）。
+ * 所以 AI 有两条路都走不通：直连服务端（没有令牌）、打本机写面（要求浏览器持有性
+ * 证明，而 AI 的 bash/curl 拿不到那张票）。工具在宿主进程内执行，直接调用与本地路由
+ * **同一批编排函数**（`wasm-apps.ts` 的 `publishApp` / `validateApp` / `listCatalog`），
+ * 令牌只在本进程内被用作 `Authorization` 头，**既不打印也不返回**。
+ *
+ * ## publisher 语义（设计 §8 / F-52b）
+ *
+ * 「AI 只是编辑器，`publisher` 记发起操作的员工」：工具用的就是**当前登录员工的
+ * 会话令牌**，服务端据此记录归属与审计 —— 因此"谁让 AI 发的，就记谁"。这里
+ * **不得**引入任何共享账号 / 服务账号 / 高权限代发路径：一旦引入，全部应用都会归到
+ * 同一个账号上，"发布者即管理者"的权限模型立刻失效。未登录时工具直接拒绝，
+ * 绝不会退化成"用别人的身份发"。
+ *
+ * ## 契约
+ *
+ *  - 参数描述是**模型可见契约**（中文，与 cron/browser 的工具面一致）：每个字段都
+ *    写清必填/形态/约束，让模型不必靠试错就能填对。
+ *  - 结果里**原样带出**服务端业务错误信封的 `code`/`message`/`details`/`hints`
+ *    （§8：第一消费者是 AI，丢掉 hints 等于让它自己猜）。
+ *  - 出站预算 ≥ 90 s（{@link WASM_APP_TOOL_TIMEOUT_MS} 严格大于
+ *    `CLIENT_UPLOAD_TIMEOUT_MS`）：服务端 publish 是同步的、含最长 60 s 编译，
+ *    工具 deadline 若短于出站预算，模型只会看到一句笼统的 tool timeout
+ *    （本仓已有"闸门 + 余量 < 工具预算"的教训，见 2026-09-16 浏览器用户闸诊断）。
+ *
+ * @module @picoaide/dsh-enterprise/wasm-app-tools
+ */
+
+import type { Context } from '@deepseek-ai/cordis'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+import { hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
+import { APP_BUILDER_SKILL, builtinSkillInstallHint, isBuiltinSkillInstalled } from './builtin-skills.ts'
+import type { Session } from './server-connector/config.ts'
+import {
+  CLIENT_UPLOAD_TIMEOUT_MS,
+  errorEnvelopeOf,
+  listCatalog,
+  parseWasmBody,
+  publishApp,
+  validateApp,
+  wasmError,
+  type WasmResponse,
+} from './wasm-apps.ts'
+
+/**
+ * 工具面的注册结果（`.name` 的集合即模型可见的工具清单）。
+ *
+ * 三个名字只在这里出现一次：注册与测试断言共用同一份真源（写死两处的话，
+ * "工具改名了但测试还在断言旧名字"会静默通过）。
+ */
+export const WASM_APP_TOOL_NAMES = ['wasm_app_list', 'wasm_app_validate', 'wasm_app_publish'] as const
+
+/**
+ * 工具的单次预算：120 s。
+ *
+ * **必须严格大于** {@link CLIENT_UPLOAD_TIMEOUT_MS}（90 s，§4.2）：先由出站预算
+ * 到点 abort，模型才能拿到带 `GATEWAY_TIMEOUT` + hints 的**结构化**结果；
+ * 反过来（工具先到点）结果会被上游超时策略整条替换成 `tool call timed out`，
+ * 里面的诊断信息一个字都送不到模型。
+ */
+export const WASM_APP_TOOL_TIMEOUT_MS = 120_000
+
+// ---------------------------------------------------------------------------
+// 配置字段规格（`picoaide.app.json`）
+// ---------------------------------------------------------------------------
+//
+// **单一真源** = 服务端生成的机器可读字段表
+// `server/internal/wasmapp/appcfg/appcfg.json`（由服务端侧生成）。
+// 下面这几个常量是它在宿主工具侧的镜像，由 `tests/wasm-app-tools.spec.ts` 里
+// 一条**读那份 JSON 逐项对拍**的用例钉住：字段集合与首版必填标志一旦漂移即红
+// （文件还不存在时该用例 skip 并打印原因，不假绿）。
+//
+// 为什么不 import：跨包 import 服务端 Go 包的产物不在任何 package exports 里，
+// 运行期解析不可靠；而工具的参数 schema 必须是编译期常量（`defineTool` 要它做
+// 类型推导）。客户端面板另有一份镜像（`@picoaide/dsh-wasm-apps` 的
+// `appcfg-contract.ts`），同样对拍那份 JSON —— 三处都指向同一个真源。
+
+/** `picoaide.app.json` 的**封闭**字段集合（多一个未知字段服务端即拒）。 */
+export const APP_CONFIG_FIELDS = ['access', 'whitelist', 'purpose', 'data_sensitivity', 'owner'] as const
+
+/** `picoaide.app.json` 的字段名类型。 */
+export type AppConfigField = (typeof APP_CONFIG_FIELDS)[number]
+
+/**
+ * **首版必填**的声明字段（服务端 `appcfg.Validate(firstRelease=true)`）。
+ *
+ * `title` 不在这张表里：它是发布载荷字段而不是配置文件字段（`title` 的首版必填
+ * 由服务端 `publish.go` 单独判定，工具面把它标成必填参数）。
+ */
+export const APP_CONFIG_FIRST_RELEASE_REQUIRED = ['purpose', 'data_sensitivity', 'owner'] as const
+
+/** `access` 的三个取值（与帧内 `auth.mode` 同一套，§7.1）。 */
+export const APP_CONFIG_ACCESS_MODES = ['public', 'login', 'whitelist'] as const
+
+/** `access` 的缺省值：`login`（写漏不该让应用意外变成匿名可达）。 */
+export const APP_CONFIG_DEFAULT_ACCESS = 'login'
+
+/** 每个配置字段的说明（模型可见；测试断言每个字段都有非空说明）。 */
+export const APP_CONFIG_FIELD_DESCRIPTIONS: Record<AppConfigField, string> = {
+  access: '访问模式，三选一：public = 匿名可用（谁都能打开，不需要登录）；login = 登录后全员可用（**缺省**，拿不准就填它）；whitelist = 仅名单内用户可用（平台只把登录身份交给应用，名单由应用自己比对）。',
+  whitelist: '准入名单：手填的账号列表（用户名或用户 ID），access=whitelist 时**必须非空**（空名单意味着对所有人不可用，服务端会拒）。平台**不校验**账号是否存在（避免变成账号枚举接口），也不提供员工名录；上限 2000 条。改名单 = 发一个新版本。',
+  purpose: '一句话用途声明（首版必填）：这个应用做什么、给谁用。会显示在应用中心。',
+  data_sensitivity: '数据敏感度声明（首版必填）：例如「公开」「内部」「敏感」。写给管理员看的一行。',
+  owner: '负责人声明（首版必填）：出问题找谁（姓名 / 工号 / 账号）。**这不是平台归属**——平台归属取自登录态（谁发布就是谁的），不可伪造。',
+}
+
+/**
+ * `config` 参数的字段 schema：字段名来自 {@link APP_CONFIG_FIELDS}，首版必填标志
+ * 来自 {@link APP_CONFIG_FIRST_RELEASE_REQUIRED}（两者都是常量，测试对拍）。
+ *
+ * 说明为什么标成"必填"而不是"首版必填"：JSON Schema 表达不了"仅首版必填"。
+ * 取严格一侧（始终要求这三个声明）的代价是更新版本时要多写三行，收益是
+ * **声明永远不会因为漏填而被服务端判成"空"**——而这三行本来就写在应用的
+ * `picoaide.app.json` 里，模型手上就有。
+ */
+const APP_CONFIG_PROPERTIES = {
+  access: {
+    type: 'string',
+    enum: APP_CONFIG_ACCESS_MODES,
+    description: APP_CONFIG_FIELD_DESCRIPTIONS.access,
+  },
+  whitelist: {
+    type: 'array',
+    items: { type: 'string' },
+    description: APP_CONFIG_FIELD_DESCRIPTIONS.whitelist,
+  },
+  purpose: {
+    type: 'string',
+    required: true,
+    description: APP_CONFIG_FIELD_DESCRIPTIONS.purpose,
+  },
+  data_sensitivity: {
+    type: 'string',
+    required: true,
+    description: APP_CONFIG_FIELD_DESCRIPTIONS.data_sensitivity,
+  },
+  owner: {
+    type: 'string',
+    required: true,
+    description: APP_CONFIG_FIELD_DESCRIPTIONS.owner,
+  },
+} as const
+
+/** `config` 参数的说明（发布必填；字段集合封闭：多一个未知字段服务端即拒）。 */
+const APP_CONFIG_DESCRIPTION = [
+  '应用配置声明（`picoaide.app.json` 的内容；**发布必填**，服务端字段表里 `config` 就是必填项）。',
+  '字段集合是**封闭**的：access / whitelist / purpose / data_sensitivity / owner —— ',
+  '多一个未知字段（例如已删除的 visible / login_required）服务端会直接拒。',
+  '首次发布时 purpose / data_sensitivity / owner 三个声明缺一不可；更新版本时可以省略未改动的（服务端沿用原值），',
+  '但要改访问方式或名单就必须给全五个字段。注意**改配置 = 发新版本**，运行期改不了。',
+].join('')
+
+/** `config` 参数的说明（validate 的可选形态：预检时带上会一起校验）。 */
+const APP_CONFIG_DESCRIPTION_OPTIONAL = [
+  '可选：应用配置声明（`picoaide.app.json` 的内容）。',
+  '预检时带上它会**一起校验**：access 取值、access=whitelist 时的名单是否为空、首版三个声明是否齐全都能提前发现。',
+  '字段集合是**封闭**的：access / whitelist / purpose / data_sensitivity / owner —— 多一个未知字段（例如已删除的 visible / login_required）服务端会直接拒。',
+].join('')
+
+// ---------------------------------------------------------------------------
+// 参数描述（模型可见契约）
+// ---------------------------------------------------------------------------
+
+/** `appId` 的形态规则（与 `limits.AppIDPattern`、服务端 `registry.ValidateAppID` 同口径）。 */
+const APP_ID_DESCRIPTION = [
+  '应用标识（app_id），同时也是它的域名标签：应用地址是 https://<app_id>.<企业域名>。',
+  '形态：小写字母/数字，用单个连字符分段（正则 ^[a-z0-9]+(?:-[a-z0-9]+)*$），不超过 63 个字符，',
+  '不能是纯数字，不能以 xn-- 开头，不能用平台保留字（www / api / admin / portal / updates / sso / login 等）。',
+  '**一经发布不能改名**；首个发布者永久占用该标识（删除、下架也还是他的）。',
+  '先用 wasm_app_list 看看有没有被占用。',
+].join('')
+
+/** `version` 的形态与递增规则。 */
+const VERSION_DESCRIPTION = [
+  '新版本号，形如 x.y.z（可带 -prerelease 后缀，正则 ^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.]+)?$），',
+  '并且必须**严格大于**该应用当前的线上版本（服务端拒绝回退与重复；先用 wasm_app_list 查当前版本）。',
+  '首次发布任意合法版本号都可以（建议 1.0.0）。**失败的发布不占版本号**，可以拿同一个号重发。',
+].join('')
+
+/** `wasmPath` 的读取面与体积约束（FIX-39/FIX-41 的收敛结果）。 */
+const WASM_PATH_DESCRIPTION = [
+  '本机编译产物（.wasm 文件）的**绝对路径**，例如 /workspace/shared-notes/main.wasm。',
+  '约束：必须是**普通文件**（不能是目录 / 设备 / 管道）；必须位于**已登记的工作区**内（本会话或同机其它已登记工作区）或数据根的 apps 目录下',
+  '（其它位置一律拒绝 —— 包括数据根里的凭据文件与数据根之外的任何目录，这是安全边界不是可调配置）；文件不超过 32 MiB。',
+  '大于 8 MiB 的产物由宿主自动分片上传并在断线后只补缺失分片，调用方不需要特殊处理。',
+  '产物要在会话工作区内编译（见 skill 的黄金路径：GOCACHE/GOMODCACHE/GOPATH/TMPDIR 都指向工作区）。',
+].join('')
+
+/** `title` 的必填规则。 */
+const TITLE_DESCRIPTION = [
+  '应用标题：显示在应用中心的名字，例如「共享便签」（首版必填）。',
+  '更新已有应用时也请照填（与上次一致即可）：服务端在缺省时会沿用现有标题，但显式给出才不会把标题写歪。',
+].join('')
+
+/** `changelog` 的必填规则（**非首版必填**是模型最容易漏的一条）。 */
+const CHANGELOG_DESCRIPTION = [
+  '本次更新说明（**非首版必填**：给已有应用发新版本时必须写，首版可以省略）。',
+  '写给使用者看的一句话，例如「修复了名单校验」「新增导出按钮」。',
+].join('')
+
+/** `uploadId` 的续传用法（配合 UPLOAD_INCOMPLETE 的 details.upload_id）。 */
+const UPLOAD_ID_DESCRIPTION = [
+  '分片上传会话 id：**只在断线续传时填**。',
+  '上一次 publish 返回 UPLOAD_INCOMPLETE 时，把它 error.details.upload_id 的值原样填进来，',
+  '宿主就只会补传缺失的分片（会话 TTL 内有效）；不填则重新开一次上传会话，已传的片不会复用。',
+].join('')
+
+/** 频率闸门的说明（validate 与 publish 共用一条额度）。 */
+const RATE_LIMIT_DESCRIPTION = '预检与发布**合计**每人每小时 30 次，同一时刻只允许 1 个编译中的上传。拿到 RATE_LIMITED / COMPILE_BUSY 时按 hints 等一会儿再试，不要连续重试。'
+
+/**
+ * 作者手册的指路（写面工具的说明里**常驻**一句）。
+ *
+ * 用户要求「skill 内置到服务端、客户端按需安装」：技能是随需的，模型不能假设它
+ * 一定在本机。写清这条，模型在第一次失败时就知道该让用户去装，而不是反复重试
+ * 或改用 curl（那条路走不通，见模块头注释）。
+ */
+const SKILL_POINTER = `写代码/编译产物遇到问题时，本机应装有平台内置的作者手册技能 ${APP_BUILDER_SKILL}（客户端「能力中心 → 平台内置技能」一键安装，服务端随镜像下发）：里面是导入面清单、字段表与编译黄金路径。若未安装，工具报错时会给出安装指路。`
+
+// ---------------------------------------------------------------------------
+// 内置作者手册的指路
+// ---------------------------------------------------------------------------
+
+/**
+ * 哪些失败值得附上「先装作者手册」。
+ *
+ * 判据是「**作者写的东西**不对」——手册里是导入面清单、配置字段表与编译黄金路径，
+ * 只有这类失败它救得了。**认不出业务信封时一律不附**（上游根本不是本服务端在说话）。
+ * 四类**不附**：
+ *
+ *   - **身份**（401/403）：未登录 / 审计账号只读 / 越权，装手册解决不了；
+ *   - **传输**（`GATEWAY_*`）：网络不可达或出站超时。附指路会把模型引向
+ *     「去装技能」这种与故障无关的动作（独立审计 2026-09-18 P2-2 复现的正是这条）；
+ *   - **本地前置闸门**（`WASM_PATH_*` / `UPLOAD_*` / `MISSING_FIELD` /
+ *     `INVALID_JSON`）：产物压根没送到服务端，问题是路径、参数或分片会话；
+ *   - **平台侧的"现在别来"**（`RATE_LIMITED` / `COMPILE_BUSY`）：等服务端腾出来
+ *     就行，不是作者要改东西（独立验证 2026-09-18 P3-2）。
+ *
+ * 其余（服务端业务错误：导入面、段表、体积、配置字段、`COMPILE_TIMEOUT`/`COMPILE_OOM`
+ * 这类"产物本身有问题/太大"、编译失败…）一律附上。
+ * @param status - 上游或本地状态码。
+ * @param code - 错误信封里的 `code`；**认不出信封时必须省略**（见上：不附指路）。
+ * @returns 该失败是否附加指路。
+ */
+export function skillHintAppliesTo(status: number, code?: string): boolean {
+  if (status < 400 || status === 401 || status === 403) return false
+  // 没有 code = 认不出业务信封（反代 HTML / 空 body / 被劫持的响应）⇒ 不指路。
+  if (code === undefined) return false
+  if (code.startsWith('GATEWAY_')) return false
+  if (code.startsWith('WASM_PATH_') || code.startsWith('UPLOAD_')) return false
+  return code !== 'MISSING_FIELD' && code !== 'INVALID_JSON'
+    && code !== 'RATE_LIMITED' && code !== 'COMPILE_BUSY'
+}
+
+/**
+ * 内置作者手册**没装**时给出指路，装了则返回 `null`。
+ *
+ * 每次调用都重新判定磁盘事实（用户可以在会话中途装上，模块级冻结会把"已经装好了"
+ * 一直报成"没装"——本仓对宿主侧语言/状态有过同类教训）。
+ * @param locale - 宿主语言（按调用解析）。
+ * @returns 指路文案，或 null（已装 / 无需提示）。
+ */
+export async function resolveSkillHint(locale: HostLocale): Promise<string | null> {
+  return (await isBuiltinSkillInstalled()) ? null : builtinSkillInstallHint(locale)
+}
+
+// ---------------------------------------------------------------------------
+// 注册
+// ---------------------------------------------------------------------------
+
+/** 工具面的宿主依赖。 */
+export interface WasmAppToolOptions {
+  /**
+   * 宿主语言（**每次调用**解析，禁止模块级冻结）。
+   *
+   * 与 cron/browser 同款：用户可以在应用运行中切换语言，而工具结果是在插件
+   * apply 之后很久才渲染的 —— 模块级常量会把语言钉死在导入那一刻。
+   */
+  locale: () => HostLocale
+}
+
+/**
+ * 把三个工具注册到 `ctx.tools`。
+ *
+ * 调用方**必须**从插件 fiber（`ctx.effect`）里调用并回收返回的 disposer：
+ * 注册表的 disposer 不跟着 effect 走，漏回收会让插件重载后留下指向旧闭包的
+ * 工具（本仓已有同款教训，见 browser 的 `applyBrowserTools` 注释）。
+ * @param ctx - Host 上下文（用到 `picoSession` / `tools` / `logger`）。
+ * @param options - 宿主依赖（语言解析器）。
+ * @returns 注销全部工具的 disposer。
+ */
+export function registerWasmAppTools(ctx: Context, options: WasmAppToolOptions): () => void {
+  const tools = ctx.tools as typeof ctx.tools | undefined
+  if (tools === undefined || typeof tools.register !== 'function') {
+    // 生产组合里由 `inject: ['tools']` 保证这个服务在场；只有最小组合（单测、
+    // 无头嵌入）会缺席。此时**明确报错**而不是静默什么都不做 —— 静默会让
+    // "工具没注册"表现成"模型说它没有这个工具"，而日志里一条线索都没有。
+    ctx.logger?.error?.(
+      `pico: tools service is absent — ${WASM_APP_TOOL_NAMES.join('/')} were NOT registered`,
+    )
+    return () => {}
+  }
+  const disposers: Array<() => void> = []
+
+  /**
+   * 前置闸门：会话必须存在；写面还必须不是审计账号。
+   *
+   * 与本地路由的 `writeGuard()` **同口径**（`role === 'auditor'` 拒绝写面），
+   * 只是把结果做成信封而不是 HTTP 403 —— 模型看到的诊断信息一样多，而且与
+   * 服务端业务错误的读法一致。
+   */
+  const gate = (
+    locale: HostLocale,
+    kind: 'read' | 'write',
+  ): { ok: true, session: Session } | { ok: false, response: WasmResponse } => {
+    const session = ctx.picoSession.getSession()
+    if (session === null) {
+      return {
+        ok: false,
+        response: wasmError({
+          code: 'AUTH_REQUIRED',
+          message: hostCopy(locale, '未登录：宿主机上没有员工会话', 'not logged in: this host has no employee session'),
+          status: 401,
+          hints: [
+            '请让用户先在客户端登录，然后重试本工具：服务端要求员工令牌，AI 自己拿不到也不该持有它',
+            '不要改用 curl 或其它途径直连服务端/本机写面：那条路要么没有令牌、要么被浏览器持有性证明挡住',
+          ],
+        }),
+      }
+    }
+    if (kind === 'write' && session.role === 'auditor') {
+      return {
+        ok: false,
+        response: wasmError({
+          code: 'FORBIDDEN',
+          message: hostCopy(locale, '审计账号不能修改应用', 'audit accounts cannot modify apps'),
+          status: 403,
+          hints: ['审计账号是只读的：请让应用发布者本人（或有写权限的员工）登录后再执行发布 / 预检'],
+        }),
+      }
+    }
+    return { ok: true, session }
+  }
+
+  /**
+   * 统一的输出投影（成功给 body，失败给**原样**信封；渲染交给模型读 JSON）。
+   *
+   * 返回类型是无损 JSON：工具的输出契约就是它（`output.schema = {type:'json'}`），
+   * 而信封里的 details 也已经是无损 JSON —— 两边同源，不需要任何断言。
+   *
+   * `skillHint` 只在失败且**值得指路**时非空（见 {@link skillHintAppliesTo}）：
+   * 附在 hints 的**末尾**（服务端自己的 hints 是主证据，指路是补充，不能挤掉它）。
+   */
+  const asToolResult = (response: WasmResponse, skillHint: string | null = null): JsonValue => {
+    const parsed = parseWasmBody(response)
+    if (response.status >= 400) {
+      // 先解析信封再判指路：`code` 决定这次失败是不是"作者写的东西不对"
+      // （见 {@link skillHintAppliesTo} —— 网关/本地前置闸门不附指路）。
+      const envelope = errorEnvelopeOf(response)
+      const hint = skillHint !== null && skillHintAppliesTo(response.status, envelope?.code) ? skillHint : null
+      if (envelope !== null) {
+        if (hint !== null) envelope.hints = [...(envelope.hints ?? []), hint]
+        return { ok: false, status: response.status, error: envelope }
+      }
+      // 认不出业务信封（网关 HTML / 代理劫持 / 空 body）：把原文带出去，
+      // 绝不伪造一个 code —— 模型宁可见到真实字节，也不要一个编出来的错误码。
+      // **也不附技能指路**：上游都没在说我们的协议，装作者手册与此无关
+      // （独立验证 2026-09-18 R-1；`skillHintAppliesTo` 无 code 时同样返回 false）。
+      return {
+        ok: false,
+        status: response.status,
+        error: {
+          code: 'UNEXPECTED_UPSTREAM_BODY',
+          message: hostCopy(options.locale(), '上游返回的不是业务信封', 'the upstream response is not a business error envelope'),
+        },
+        body: parsed ?? response.text,
+      }
+    }
+    return { ok: true, status: response.status, body: parsed ?? response.text }
+  }
+
+  /**
+   * 写面工具的统一收尾：失败时按需附上「先装作者手册」的指路。
+   *
+   * 作者手册（{@link APP_BUILDER_SKILL}）是 `wasm_app_*` 失败后模型唯一能自证的资料：
+   * 没有它，模型只能靠猜 API 形态，会把"导入面不对""字段名写错"误诊成工具坏了。
+   * 用户明确要求过这条指路必须由工具面给出（`builtin-skills.ts` 的头注释）。
+   *
+   * 成功路径**不做任何 stat**（每次发布都白查一次磁盘没有必要）。
+   */
+  const asWriteToolResult = async (response: WasmResponse): Promise<JsonValue> =>
+    asToolResult(response, response.status >= 400 ? await resolveSkillHint(options.locale()) : null)
+
+  const output = {
+    schema: { type: 'json' as const },
+    render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }],
+  }
+
+  // ---------------------------------------------------------------- list
+
+  disposers.push(tools.register(defineTool({
+    name: 'wasm_app_list',
+    description: [
+      '列出应用中心里的 WASM 应用（应用标识、标题、负责人、访问模式 access、是否上架 enabled、当前版本、入口链接）。',
+      '发布前用它确认两件事：app_id 有没有被占用、以及已有应用的**当前版本号**（新版本号必须严格大于它）。',
+      '**已下架**（enabled=false）的应用也会列出（它的域名仍然可访问，只是不在应用中心推荐），不要据此认为标识空闲。',
+      '只读，不改变任何状态。',
+    ].join(''),
+    parameters: {},
+    output,
+    timeoutMs: WASM_APP_TOOL_TIMEOUT_MS,
+    isConcurrencySafe: () => true,
+    async execute(_args, exec) {
+      const locale = options.locale()
+      const allowed = gate(locale, 'read')
+      if (!allowed.ok) return asToolResult(allowed.response)
+      return asToolResult(await listCatalog(ctx, allowed.session, exec.signal))
+    },
+  })))
+
+  // ------------------------------------------------------------ validate
+
+  disposers.push(tools.register(defineTool({
+    name: 'wasm_app_validate',
+    description: [
+      '发布前预检一个 WASM 应用产物：服务端做静态校验（导入面 / 导出 / 段表 / 体积）+ 真编译 + 合成帧干跑，',
+      '返回体积、校验和、导入导出清单与是否首版。**不占版本号、不进审计、不改线上版本**，失败也不消耗版本号，可以反复调用。',
+      '正确的用法是：先 validate 把错误改完，再 publish。',
+      RATE_LIMIT_DESCRIPTION,
+      SKILL_POINTER,
+    ].join(''),
+    parameters: {
+      appId: { type: 'string', required: true, description: APP_ID_DESCRIPTION },
+      wasmPath: { type: 'string', required: true, description: WASM_PATH_DESCRIPTION },
+      version: { type: 'string', description: `可选：这次打算发布的版本号，带上它会一起做形态预检。${VERSION_DESCRIPTION}` },
+      title: { type: 'string', description: `可选：打算使用的标题，带上它会一起做首版必填预检。${TITLE_DESCRIPTION}` },
+      config: {
+        type: 'object',
+        additionalProperties: false,
+        description: APP_CONFIG_DESCRIPTION_OPTIONAL,
+        properties: APP_CONFIG_PROPERTIES,
+      },
+    },
+    output,
+    timeoutMs: WASM_APP_TOOL_TIMEOUT_MS,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const locale = options.locale()
+      const allowed = gate(locale, 'write')
+      if (!allowed.ok) return asToolResult(allowed.response)
+      return asWriteToolResult(await validateApp(ctx, allowed.session, {
+        appId: args.appId.trim(),
+        wasm: { kind: 'path', value: args.wasmPath.trim() },
+        locale,
+        signal: exec.signal,
+        ...(args.version === undefined ? {} : { version: args.version.trim() }),
+        ...(args.title === undefined ? {} : { title: args.title }),
+        ...(args.config === undefined ? {} : { config: args.config }),
+      }))
+    },
+  })))
+
+  // ------------------------------------------------------------- publish
+
+  disposers.push(tools.register(defineTool({
+    name: 'wasm_app_publish',
+    description: [
+      '把本机编译好的 .wasm 产物发布为应用的一个新版本。服务端**同步**执行：静态校验 → 真编译（最长约 60 秒）→ 干跑 → 落库 → 切换线上版本；',
+      '宿主侧单次出站预算 90 秒，大于 8 MiB 的产物自动分片续传（断线后重发只会补缺失的分片，可从 UPLOAD_INCOMPLETE 的 details.upload_id 续传）。',
+      '发布者身份 = **当前登录员工**（服务端按会话令牌记录归属：谁让 AI 发的就记谁，不能替他人发布）。',
+      'config **必填**（首次发布时 purpose / data_sensitivity / owner 三个声明缺一不可；更新版本时未改动的可以省略，服务端沿用原值）；',
+      '给已有应用发新版本必须写 changelog（首版可以省略）。',
+      '失败不占版本号：按返回的 error.code / details / hints 改完，用同一个版本号重发即可。',
+      '若企业开启了更新审批，新版本会进待审队列（结果里 status=pending，线上仍是旧版本，不影响正在使用的用户）。',
+      SKILL_POINTER,
+    ].join(''),
+    parameters: {
+      appId: { type: 'string', required: true, description: APP_ID_DESCRIPTION },
+      version: { type: 'string', required: true, description: VERSION_DESCRIPTION },
+      wasmPath: { type: 'string', required: true, description: WASM_PATH_DESCRIPTION },
+      title: { type: 'string', required: true, description: TITLE_DESCRIPTION },
+      changelog: { type: 'string', description: CHANGELOG_DESCRIPTION },
+      config: {
+        type: 'object',
+        required: true,
+        additionalProperties: false,
+        description: APP_CONFIG_DESCRIPTION,
+        properties: APP_CONFIG_PROPERTIES,
+      },
+      uploadId: { type: 'string', description: UPLOAD_ID_DESCRIPTION },
+    },
+    output,
+    timeoutMs: WASM_APP_TOOL_TIMEOUT_MS,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const locale = options.locale()
+      const allowed = gate(locale, 'write')
+      if (!allowed.ok) return asToolResult(allowed.response)
+      return asWriteToolResult(await publishApp(ctx, allowed.session, {
+        appId: args.appId.trim(),
+        version: args.version.trim(),
+        wasm: { kind: 'path', value: args.wasmPath.trim() },
+        locale,
+        signal: exec.signal,
+        ...(args.title === undefined ? {} : { title: args.title }),
+        ...(args.changelog === undefined ? {} : { changelog: args.changelog }),
+        ...(args.config === undefined ? {} : { config: args.config }),
+        ...(args.uploadId === undefined ? {} : { uploadId: args.uploadId.trim() }),
+      }))
+    },
+  })))
+
+  return () => { for (const dispose of disposers) dispose() }
+}
+
+/**
+ * 工具预算与出站预算的序关系（唯一不变量，测试与调用方都读它）。
+ *
+ * 存在意义：两个数字分别定义在两个模块里，谁把它们改成"工具先到点"就会让所有
+ * 诊断信息被上游超时策略吞掉，而那种故障在测试里表现为"偶发超时"，极难定位。
+ * @returns 工具预算 − 出站预算（毫秒，必须为正）。
+ */
+export function wasmAppToolHeadroomMs(): number {
+  return WASM_APP_TOOL_TIMEOUT_MS - CLIENT_UPLOAD_TIMEOUT_MS
+}

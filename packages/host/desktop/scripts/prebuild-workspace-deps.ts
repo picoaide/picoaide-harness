@@ -51,6 +51,7 @@ const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
   { workspace: null, dir: 'packages/host/desktop' },
   { workspace: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', deps: ['packages/host/desktop'] },
   { workspace: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', deps: ['packages/host/desktop'] },
+  { workspace: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', deps: [] },
   { workspace: '@picoaide/dsh-branding', dir: 'packages/client/branding', deps: ['packages/host/desktop'] },
   { workspace: '@picoaide/dsh-cron', dir: 'packages/host/cron' },
   { workspace: '@picoaide/dsh-connectors', dir: 'packages/host/connectors' },

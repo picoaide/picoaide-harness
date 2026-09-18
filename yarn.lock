@@ -5733,12 +5733,14 @@ __metadata:
     "@deepseek-ai/dsh-credentials": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-host-webserver": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-invariants": "npm:0.1.5-rc.2"
+    "@deepseek-ai/dsh-scope": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-session": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-settings": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-skill": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-skill-filesystem": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-tool-skill": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-tools": "npm:0.1.5-rc.2"
+    "@deepseek-ai/dsh-util-values": "npm:0.1.5-rc.2"
     "@deepseek-ai/schemastery": "npm:^3.18.2"
     "@sentry/node": "npm:^7.120.0"
     "@types/node": "npm:^22.20.0"
@@ -5752,6 +5754,30 @@ __metadata:
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
     yaml: "npm:^2.9.0"
+  peerDependencies:
+    "@deepseek-ai/cordis": 4.0.2
+  languageName: unknown
+  linkType: soft
+
+"@picoaide/dsh-wasm-apps@workspace:*, @picoaide/dsh-wasm-apps@workspace:packages/client/wasm-apps":
+  version: 0.0.0-use.local
+  resolution: "@picoaide/dsh-wasm-apps@workspace:packages/client/wasm-apps"
+  dependencies:
+    "@deepseek-ai/cordis": "npm:4.0.2"
+    "@deepseek-ai/dsh-client-locale": "npm:0.1.5-rc.2"
+    "@deepseek-ai/dsh-client-ui-renderer": "npm:0.1.5-rc.2"
+    "@deepseek-ai/dsh-client-ui-sidebar": "npm:0.1.5-rc.2"
+    "@deepseek-ai/dsh-client-ui-slots": "npm:0.1.5-rc.2"
+    "@deepseek-ai/dsh-invariants": "npm:0.1.5-rc.2"
+    "@types/node": "npm:^22.20.0"
+    "@types/react": "npm:^18"
+    "@types/react-dom": "npm:^18.3.5"
+    jsdom: "npm:25.0.1"
+    react: "npm:18.3.1"
+    react-dom: "npm:18.3.1"
+    tsdown: "npm:0.22.2"
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
   peerDependencies:
     "@deepseek-ai/cordis": 4.0.2
   languageName: unknown
@@ -8010,6 +8036,7 @@ __metadata:
     "@picoaide/dsh-connectors": "workspace:*"
     "@picoaide/dsh-cron": "workspace:*"
     "@picoaide/dsh-enterprise": "workspace:*"
+    "@picoaide/dsh-wasm-apps": "workspace:*"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
     adm-zip: "npm:^0.6.0"
@@ -9198,7 +9225,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"jsdom@npm:^25.0.0":
+"jsdom@npm:25.0.1, jsdom@npm:^25.0.0":
   version: 25.0.1
   resolution: "jsdom@npm:25.0.1"
   dependencies:

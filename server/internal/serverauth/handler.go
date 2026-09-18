@@ -613,3 +613,16 @@ func userJSON(u *serverstore.User) gin.H {
 		"mfa_enabled":          u.TotpEnabled,
 	}
 }
+
+// AuthenticatePassword 供 WASM 应用平台的员工浏览器登录页复用同一套 provider 链
+// （local/LDAP，顺序与客户端面一致）。不新增任何行为：只是 authenticate 的导出包装
+// —— `authenticate` 未导出，而应用平台的登录页在另一个包（internal/wasmapp/session），
+// 必须能走到同一条链路，否则两处登录会出现"客户端能登、应用平台登不上"的口径分叉。
+//
+// 调用方职责（本函数**不做**，与 handleLogin 一致的部分由调用方补齐）：
+//   - 账号可用性判定（status != 1 / RoleAuditor 拒绝）；
+//   - 外部身份建号（provisionUser 未导出）——需要时由调用方给出 users 行 id，
+//     或留 0 让 wasmapp/session 按用户名解析既有行。
+func (a *API) AuthenticatePassword(username, password string) (UserInfo, error) {
+	return a.authenticate(username, password)
+}

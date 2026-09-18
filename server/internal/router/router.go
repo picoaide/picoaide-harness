@@ -30,6 +30,9 @@ import (
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
+	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
+	"github.com/picoaide/picoaide/internal/wasmapp/session"
+	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 )
 
 // 命名空间根(集中常量, 全仓库唯一真源)。
@@ -62,6 +65,23 @@ type Deps struct {
 	Telemetry   *telemetry.Handlers
 	Gateway     *llmgateway.Handlers
 	Reports     *reports.Handlers
+
+	// Wasm 是 WASM 应用平台的操作面（设计基线
+	// docs/planning/2026-09-17-wasm-app-platform.md §8）。
+	//
+	// ⚠️ 管理面只在**主站**暴露（§4.8 / F-52e）：应用子域走独立路由树
+	// （edge.HostGate），主站路由在子域结构上不可达，因此这里挂的管理
+	// 端点不会泄漏到 `<app_id>.<基域>`。
+	Wasm *wasmapi.Handlers
+	// WasmSession 是员工浏览器会话与一次性换票（R12/R16）。
+	//
+	// 这几个是**主站 HTML 面**（不是 API）：`/login`、`/logout`、`/app-ticket`。
+	// 与 `/`、`/portal`、`/admin/*` 同属"产品 HTML 面"，不受 API 强制 JSON 约束。
+	WasmSession *session.Manager
+	// SkillSeed 内置技能下发面（随服务端镜像发布：/opt/picoaide/skills）。
+	// 见 internal/wasmapp/skillseed —— 与 ClientRelease 同一范式，只是下发的是
+	// 技能包而不是安装包；客户端按需安装，不自动装。
+	SkillSeed *skillseed.Handlers
 }
 
 // Register 集中装配两个命名空间分组下的全部路由。
@@ -88,6 +108,80 @@ func Register(r *gin.Engine, deps Deps) {
 	// ServeFile 自带 Range/断点续传,无需额外中间件。
 	r.GET("/updates/client/*file", deps.ClientRelease.File)
 	r.HEAD("/updates/client/*file", deps.ClientRelease.File)
+
+	// ================= 员工浏览器会话与一次性换票（R12/R16）=================
+	// 这四个是**主站 HTML 面**（不是 API，不适用 JSON 强制约束）：
+	//   GET  /login       员工登录页（账密；语言按请求解析）
+	//   POST /login       登录提交
+	//   POST /logout      登出（级联吊销该会话下全部应用子域会话）
+	//   GET  /app-ticket  换票确认页（应用子域 302 过来只能发 GET，故有此页）
+	//   POST /app-ticket  签发一次性 code（**POST + Origin == 主站源 + next 白名单**）
+	// 换票端点为什么必须 POST（§4.7/§10.4 第 41 项）：GET 形态会被
+	// `<img src>` / `<iframe>` 这类第三方页面触发，等于把登录态换成可重放的 code。
+	if deps.WasmSession != nil {
+		r.GET("/login", gin.WrapF(deps.WasmSession.LoginPage))
+		r.POST("/login", gin.WrapF(deps.WasmSession.LoginSubmit))
+		r.POST("/logout", gin.WrapF(deps.WasmSession.Logout))
+		r.GET("/app-ticket", gin.WrapF(deps.WasmSession.TicketPage))
+		r.POST("/app-ticket", gin.WrapF(deps.WasmSession.TicketSubmit))
+	}
+
+	// ================= WASM 应用平台操作面（§8）=================
+	registerWasm(r, deps)
+}
+
+// registerWasm 挂载 WASM 应用平台的全部端点（设计基线 §8 操作面全表）。
+//
+// 全部路径集中在**本包**声明（仓库纪律：业务包不得自行 r.Group() 注册生产路由）。
+func registerWasm(r *gin.Engine, d Deps) {
+	if d.Wasm == nil {
+		return
+	}
+	// 客户端员工面：Bearer 认证。上传体上限 48 MiB（§4.2/R21）⇒ 两条上传路由
+	// 必须进 largeBodyRoutes 豁免 1 MB 中间件；**豁免只是豁免**，handler 内自己
+	// 还要套 MaxBytesReader（§4.2 原话）。
+	wg := r.Group(NamespaceClientV2+"/apps/wasm", bodyLimitMiddleware(), serverauth.BearerAuth(d.DB))
+	wg.POST("/validate", d.Wasm.Validate)
+	wg.POST("/:app_id/releases", d.Wasm.Publish)
+	wg.POST("/:app_id/publish", d.Wasm.SetPublished)
+	wg.POST("/:app_id/unpublish", d.Wasm.SetPublished)
+	wg.POST("/:app_id/freeze", d.Wasm.Freeze)
+	wg.GET("/:app_id/export", d.Wasm.Export)
+	wg.DELETE("/:app_id", d.Wasm.Delete)
+	wg.GET("/:app_id/diagnostics", d.Wasm.Diagnostics)
+	wg.GET("/:app_id/schema", d.Wasm.Schema)
+	wg.GET("/catalog", d.Wasm.Catalog)
+
+	// ---- 分片上传与续传（§4.2 / §7.3）----
+	//
+	// 为什么必须分片：客户端上传超时 90 s > 服务端 ReadTimeout 60 s > 编译 60 s，
+	// 32 MiB 一次 POST 必然撞 60 s 的 ReadTimeout（§10.5 第 58 项）。
+	// 端点语义（实现见 wasmapp/api/upload.go，存储见 wasmapp/upload）：
+	//
+	//	POST   /uploads                          开会话（小 JSON，**不**豁免）
+	//	PUT    /uploads/:upload_id/chunks/:index 上传第 index 片（application/octet-stream）
+	//	GET    /uploads/:upload_id               续传查询（已收到哪些片）
+	//	POST   /uploads/:upload_id/complete      拼装并走既有发布链路（小 JSON，**不**豁免）
+	//	DELETE /uploads/:upload_id               主动放弃（回收磁盘）
+	//
+	// 只有 PUT 那一条进 largeBodyRoutes（单片可达 8 MiB > 1 MiB 默认上限）；
+	// 其余四条都是小 JSON。**豁免只是豁免**：PUT 的 handler 内部自己再套
+	// http.MaxBytesReader 并先查 Content-Length（§4.2 原话）。
+	wg.POST("/uploads", d.Wasm.UploadCreate)
+	wg.PUT("/uploads/:upload_id/chunks/:index", d.Wasm.UploadChunk)
+	wg.GET("/uploads/:upload_id", d.Wasm.UploadStatus)
+	wg.POST("/uploads/:upload_id/complete", d.Wasm.UploadComplete)
+	wg.DELETE("/uploads/:upload_id", d.Wasm.UploadAbort)
+
+	// 管理面最小运维面（R23）：应用列表 / 下架 / 转移归属 / 冻结 + 审核开关。
+	// 权限点复用能力中心的粗粒度点（§13：RBAC 沿用资源类别级 + 应用层 owner 比较，
+	// 不造实例级权限点）。
+	ag := r.Group(NamespaceServer+"/admin/wasm-apps", bodyLimitMiddleware(), serverauth.AdminAuth(d.DB))
+	serverauth.AdminRoute(ag, "GET", "", serverauth.PermCapabilityRead, d.Wasm.AdminList)
+	serverauth.AdminRoute(ag, "POST", "/:app_id/unpublish", serverauth.PermCapabilityWrite, d.Wasm.AdminUnpublish)
+	serverauth.AdminRoute(ag, "PUT", "/:app_id/owner", serverauth.PermCapabilityWrite, d.Wasm.AdminTransferOwner)
+	serverauth.AdminRoute(ag, "POST", "/:app_id/freeze", serverauth.PermCapabilityWrite, d.Wasm.AdminFreeze)
+	serverauth.AdminRoute(ag, "PUT", "/review", serverauth.PermCapabilityWrite, d.Wasm.AdminReview)
 }
 
 // maxJSONBody 是 /api/client/v2 与 /api/server 下全部端点的默认请求体上限
@@ -103,6 +197,14 @@ var largeBodyRoutes = map[string]struct{}{
 	"POST " + NamespaceServer + "/admin/agents/:name/archive": {}, // agentshare 24MB
 	"POST " + NamespaceClientV2 + "/shared-skills":            {}, // sharedskills 24MB
 	"POST " + NamespaceClientV2 + "/agent-presets":            {}, // agentshare 24MB
+	// WASM 应用上传：.wasm ≤ 32 MiB、base64 后请求体 ≤ 48 MiB（§4.2/R21）。
+	// handler 内必须自己再套 http.MaxBytesReader(48<<20) 并先查 Content-Length。
+	"POST " + NamespaceClientV2 + "/apps/wasm/validate":         {},
+	"POST " + NamespaceClientV2 + "/apps/wasm/:app_id/releases": {},
+	// 分片上传的单片（§4.2：单片 ≤ UploadChunkMaxBytes = 8 MiB > 1 MiB 默认上限）。
+	// 同理：豁免只是豁免，handler 内自己套 MaxBytesReader(8<<20) 并先查 Content-Length。
+	// 开会话与 complete 是**小 JSON**，故意不进这张表。
+	"PUT " + NamespaceClientV2 + "/apps/wasm/uploads/:upload_id/chunks/:index": {},
 }
 
 // bodyLimitExempt 判定某路由是否自带更大的请求体上限。
@@ -172,6 +274,17 @@ func registerClientV2(cli *gin.RouterGroup, d Deps) {
 	mg.GET("/skills", d.Market.ListSkills)
 	mg.GET("/skills/:name", d.Market.GetSkill)
 	mg.GET("/skills/:name/archive", d.Market.DownloadArchive)
+
+	// 内置技能(随服务端镜像发布,见 internal/wasmapp/skillseed)。
+	// 内容在镜像层(/opt/picoaide/skills),随镜像升级而更新;客户端在能力中心
+	// 按需安装(下载 → sha256 对照 → 整树解包 → <dshHome>/skills)。
+	// 认证口径与市场/共享技能一致:**BearerAuth** —— 未登录时连"平台内置了
+	// 哪些技能"都不该被枚举,而客户端本来就得先登录才有意义。
+	// 响应头契约与 marketplace 相同(X-Skill-Checksum / X-Skill-Version),
+	// 客户端安装器靠它做完整性对照。
+	builtinSkills := cli.Group("/skills/builtin", serverauth.BearerAuth(d.DB))
+	builtinSkills.GET("", d.SkillSeed.ListBuiltin)
+	builtinSkills.GET("/:name/archive", d.SkillSeed.BuiltinDownload)
 
 	// 共享技能
 	sg := cli.Group("/shared-skills", serverauth.BearerAuth(d.DB))

@@ -20,6 +20,8 @@ import {
   validateSkillName,
 } from './skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
+import { createWasmAppsRoute } from './wasm-apps.ts'
+import { registerWasmAppTools } from './wasm-app-tools.ts'
 import { brandMarkSvg } from './channel-geometry.ts'
 import { hostCopy, hostLocaleFrom, tryNormalizeHostLocale, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import { LOCALE_SETTINGS_NAMESPACE } from '@deepseek-ai/dsh-client-locale'
@@ -936,7 +938,10 @@ export function renderRestoringPage(locale: HostLocale): string {
 }
 
 export const name = 'auth-gate'
-export const inject = ['webServer', 'picoSession']
+// `tools` 是 WASM 应用平台的宿主工具面（wasm_app_list / wasm_app_validate /
+// wasm_app_publish）所需的服务：不声明它，apply 可能在 tools 服务就位之前跑完，
+// 结果是工具静默缺席（模型只会说"没有这个工具"，日志里一条线索都没有）。
+export const inject = ['webServer', 'picoSession', 'tools']
 
 /**
  * 把渠道包预置的域名安全地放进 `value="…"` 属性。
@@ -1751,6 +1756,85 @@ export function apply(ctx: Context, config: Config): void {
             }
             return
           }
+          // ---- 平台内置技能（随服务端镜像发布，客户端按需安装）----
+          // 与市场/组织技能**共用同一条安装链路**（installSkillArchive：sha256
+          // 对照 → 整树安全解包 → <dshHome>/skills），只换下载地址与来源标记。
+          // 默认**不自动安装**：员工在能力中心点一次；清单里带 installed，界面
+          // 据此显示「安装 / 已安装 / 更新到 vX」。
+          if (pathname === '/api/pico/skills/builtin' && req.method === 'GET') {
+            try {
+              const data = await fetchJSON(s.serverURL, '/api/client/v2/skills/builtin', { token: s.token, locale: hostLocale(req) })
+              const installed = await listInstalledSkills(resolveSkillsDir())
+              json(res, 200, { ...data, installed })
+            } catch (cause) {
+              if (cause instanceof AuthError && cause.kind === 'auth_expired') {
+                ctx.picoSession.clear()
+                return json(res, 401, { error: 'auth expired' })
+              }
+              // 旧版服务端没有这条端点（404）：让面板把内置技能区整块隐藏，
+              // 而不是显示一个空壳。原样透传状态码，不伪装成"没有内置技能"
+              // （"伪装成空清单"会让运维永远查不出服务端少了这条路由）。
+              if (cause instanceof ApiError && cause.status === 404) {
+                return json(res, 404, { error: 'builtin skills unavailable' })
+              }
+              gatewayError(res, cause)
+            }
+            return
+          }
+          const builtinInstallMatch = req.method === 'POST'
+            ? /^\/api\/pico\/skills\/builtin\/([^/]+)\/install$/u.exec(pathname)
+            : null
+          if (builtinInstallMatch !== null) {
+            const name = decodeURIComponent(builtinInstallMatch[1]!)
+            try {
+              validateSkillName(name)
+            } catch (cause) {
+              return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
+            }
+            try {
+              const upstream = await gatewayFetch(
+                `${normalizeServerURL(s.serverURL)}/api/client/v2/skills/builtin/${encodeURIComponent(name)}/archive`,
+                { headers: { Authorization: `Bearer ${s.token}` } },
+              )
+              if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+              const length = Number(upstream.headers.get('content-length') ?? '0')
+              if (length > MAX_ARCHIVE_BYTES) {
+                return json(res, 413, { error: 'archive too large' })
+              }
+              const archive = await readBodyLimited(upstream.body, MAX_ARCHIVE_BYTES).catch(() => null)
+              if (archive === null) return json(res, 413, { error: 'archive too large' })
+              // 内置技能的这两个头不是可选项：内容是**我们自己的服务端**下发的，
+              // 少了 checksum 就没有任何完整性凭据（skill-install 在没有该头时
+              // 会静默跳过 sha256 对照），少了 version 就永远判不出「更新到 vX」。
+              // 因此这里 fail-closed，而不是沿用市场通路那种"有就校验"的宽松口径。
+              const checksum = upstream.headers.get('x-skill-checksum')
+              const version = upstream.headers.get('x-skill-version')
+              if (checksum === null || checksum === '' || version === null || version === '') {
+                return json(res, 502, { error: 'builtin archive is missing its integrity headers; refused' })
+              }
+              const result = await installSkillArchive({
+                name,
+                archive,
+                checksum,
+                version,
+                skillsDir: resolveSkillsDir(),
+                // 溯源(D6)：标记为 builtin，与市场/组织区分开。
+                channel: 'builtin',
+                server: s.serverURL,
+              })
+              json(res, 200, { ok: true, name: result.name, version: result.version })
+            } catch (cause) {
+              if (cause instanceof AuthError && cause.kind === 'auth_expired') {
+                ctx.picoSession.clear()
+                return json(res, 401, { error: 'auth expired' })
+              }
+              // 与市场安装同口径：校验/解包类拒绝是客户端错误，网关/IO 是上游错误。
+              const message = cause instanceof Error ? cause.message : String(cause)
+              const isRefusal = /checksum|archive|SKILL\.md|invalid skill name|link entry|too large|traversal|empty path/u.test(message)
+              json(res, isRefusal ? 422 : 502, { error: message })
+            }
+            return
+          }
           const installMatch = req.method === 'POST'
             ? /^\/api\/pico\/skills\/([^/]+)\/install$/u.exec(pathname)
             : null
@@ -2415,6 +2499,24 @@ export function apply(ctx: Context, config: Config): void {
           }
         },
       }),
+      // WASM 应用平台的本地操作面（§8 第 10 项 / §4.2 的客户端上传契约）：
+      // 目录 + 预检 + 发布编排（>8 MiB 分片续传、90 s 预算）+ 生命周期代理。
+      // 复用同一套 guard/requireWriteProof/session/collectBody，不另立一套围栏。
+      ctx.webServer.register(createWasmAppsRoute(ctx, {
+        guard,
+        requireWriteProof,
+        writeGuard,
+        session,
+        json,
+        collectBody,
+        hostLocale,
+      })),
+      // WASM 应用平台的**宿主工具面**（§6.5b）：让 AI 能自己预检与发布，而不是
+      // 只能请员工去应用中心点。三个工具直接调用上面那条路由背后的**同一批编排
+      // 函数**（wasm-apps.ts 的 publishApp/validateApp/listCatalog）—— 不经 HTTP，
+      // 因此不需要浏览器持有性证明，也不会把员工令牌交给任何调用方。
+      // 语言按**每次调用**解析（hostLocale 是 apply 作用域里的函数，不在模块级冻结）。
+      registerWasmAppTools(ctx, { locale: () => hostLocale() }),
     ]
     return () => { for (const dispose of disposers) dispose() }
   }, 'pico auth-gate routes')

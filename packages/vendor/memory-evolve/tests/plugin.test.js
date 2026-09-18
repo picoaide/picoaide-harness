@@ -1,8 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { apply, gitBranch, gitBranchList, inject, resolveConfig, renderSnapshot, resolveRevealTarget, toWindowsPath, RUNTIME_KEYS, validateRuntimePatch } from '../lib/index.js'
 import { setLocale } from '../lib/i18n.js'
@@ -191,7 +191,12 @@ test('resolveConfig defaults and validation', () => {
   assert.equal(config.skillReviewEnabled, false)
   assert.equal(config.skillManageToolName, 'skill_manage')
   assert.ok(config.memoryDir.endsWith('memories'))
-  assert.ok(config.skillDir.endsWith(join('.agents', 'skills')))
+  // 2026-09-18:内置技能落点从 ~/.agents/skills(user-agents root, rank 500)
+  // 改为 <DSH_HOME>/skills(user-dsh root, rank 400)—— 与客户端「能力中心安装」
+  // 同一个根,否则随包副本会压过服务端下发的副本。事故说明见
+  // tests/builtin-skills-decoupled.test.js。
+  const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
+  assert.equal(config.skillDir, join(resolve(dshHome), 'skills'))
   assert.deepEqual(config.searchDocsExts, ['md'])
   assert.equal(config.searchDocsProviders, 'auto')
   assert.equal(config.searchDocsEnabled, false)

@@ -3,6 +3,8 @@ package serverstore
 import (
 	"database/sql/driver"
 	"errors"
+	"fmt"
+	"log"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -27,7 +29,35 @@ func newPGConnector(dsn string) (driver.Connector, error) {
 	// 连接池由 openPG 配置 SetMaxOpenConns/Idle/Lifetime。
 	cfg.RuntimeParams["TimeZone"] = "Asia/Shanghai"
 	cfg.RuntimeParams["application_name"] = "picoaide-server"
+	// PG 的 NOTICE/WARNING 默认**无人接收**（pgconn 只在你给了非 nil 回调时才转发），
+	// 于是迁移里那些 `RAISE WARNING '跳过 N 行…'` 一个字都到不了服务端日志 ——
+	// 数据不丢，但"跳过了多少行"这件事完全静默（独立审计 2026-09-18 P2-2）。
+	// 这里统一接住：迁移/DDL 的诊断信息从此进服务端日志。
+	cfg.OnNotice = func(_ *pgconn.PgConn, notice *pgconn.Notice) {
+		if notice == nil {
+			return
+		}
+		pgNoticeSink(fmt.Sprintf("postgres %s: %s%s", notice.Severity, notice.Message, noticeDetailSuffix(notice)))
+	}
 	return stdlib.GetConnector(*cfg), nil
+}
+
+// pgNoticeSink 是 NOTICE/WARNING 的落点（测试可替换以捕获）。
+//
+// 做成变量而不是直接 `log.Printf`：这条通路的价值就是"诊断信息真的能被看见"，
+// 而"能被看见"必须有可断言的证据（见 pgNoticeSink 的用例）。
+var pgNoticeSink = func(message string) { log.Printf("%s", message) }
+
+// noticeDetailSuffix 把 NOTICE 的 DETAIL/HINT 拼进一行（有才拼）。
+func noticeDetailSuffix(notice *pgconn.Notice) string {
+	out := ""
+	if notice.Detail != "" {
+		out += " detail=" + notice.Detail
+	}
+	if notice.Hint != "" {
+		out += " hint=" + notice.Hint
+	}
+	return out
 }
 
 // isDuplicateRelationErr 报告 err 是否为 PG 42P07(relation already exists)。

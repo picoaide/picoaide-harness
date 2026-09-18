@@ -24,8 +24,14 @@ const MAX_UNPACKED_BYTES = 64 * 1024 * 1024
  *  极小的条目在 TS 侧放行、Go 侧拒绝)。 */
 const MAX_ENTRIES = 10_000
 
-/** Tar entry types we refuse: symbolic links and hard links. */
-const LINK_TYPES = new Set(['SymbolicLink', 'Link'])
+/**
+ * Tar entry types we refuse: links and special files.
+ *
+ * 链接条目是路径穿越与覆写的载体（`../` 目标、预置同名链接）；
+ * 设备/FIFO 条目在解包时会被 `mknod`/`mkfifo` 物化（或让解包器报出裸异常），
+ * 而技能包里合法的只有**普通文件与目录**，所以这一类一律拒（独立审计 2026-09-18 P2-3）。
+ */
+const LINK_TYPES = new Set(['SymbolicLink', 'Link', 'CharacterDevice', 'BlockDevice', 'FIFO'])
 
 /** Unix S_IFLNK extracted from a zip entry's packed attribute. */
 const ZIP_MODE_TYPE = 0o170000
@@ -162,6 +168,7 @@ export async function assertArchiveSafe(archive: Buffer): Promise<void> {
   try {
     await writeFile(archiveFile, archive, { mode: 0o600 })
     let total = 0
+    let entries = 0
     let violation: string | null = null
     const seen = new Set<string>()
     await tar.t({
@@ -169,6 +176,13 @@ export async function assertArchiveSafe(archive: Buffer): Promise<void> {
       onentry: (entry) => {
         if (violation !== null) return
         try {
+          // 条目数上限对**两种格式一视同仁**（Go 侧 archiveutil.MaxEntries 也是）。
+          // 此前只有 zip 分支计数 ⇒ 10001 个小条目的 tar.gz 能一路落盘
+          // （独立审计 2026-09-18 P2-2 实测 10050 条目被接受）。
+          entries++
+          if (entries > MAX_ENTRIES) {
+            throw new Error(`archive has too many entries (${entries} > ${MAX_ENTRIES})`)
+          }
           if (entry.type === 'Directory') {
             assertSafeEntryPath(entry.path)
             return

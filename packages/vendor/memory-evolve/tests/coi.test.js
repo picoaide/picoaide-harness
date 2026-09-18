@@ -625,7 +625,21 @@ test('skills sync: version-gated copy protects user edits', async () => {
   mkdirSync(join(pluginSkills, 'kimi-cli-calling'), { recursive: true })
   writeFileSync(join(pluginSkills, 'kimi-cli-calling', 'SKILL.md'), '---\nx-version: 1\n---\n# kimi v1\n')
   const { syncBuiltinSkills, BUILTIN_SKILLS } = await import('../lib/coi/skills-sync.js')
+  // 清单是**冻结**的：新增内置技能必须同时改这里（防止"目录加了但忘了登记"）。
+  // 2026-09-18：**平台技能不得进入随包同步清单**（用户口径「客户端可以按需安装」
+  // + 独立审计 P1-1）。picoaide-app-builder 随服务端镜像发布、由能力中心按需安装；
+  // 把它放进这张表就等于开机自动装上，「按需」名存实亡。
   assert.deepEqual(BUILTIN_SKILLS, ['kimi-cli-calling', 'codex-cli-calling', 'grok-cli-calling', 'hermes-cli-calling', 'memory-consolidate'])
+  const { PLATFORM_SKILLS } = await import('../lib/coi/skills-sync.js')
+  for (const name of PLATFORM_SKILLS) {
+    assert.ok(!BUILTIN_SKILLS.includes(name), `平台技能 ${name} 不得出现在随包同步清单里`)
+  }
+  // 平台技能仍然留在包内 `skills/` 目录：服务端 Dockerfile 用
+  // `--build-context skillassets=<本包>` 从这里 COPY 进镜像，删目录会让镜像构建失败。
+  const { existsSync } = await import('node:fs')
+  for (const name of PLATFORM_SKILLS) {
+    assert.ok(existsSync(new URL(`../skills/${name}/SKILL.md`, import.meta.url)), `平台技能源目录必须留在包里：skills/${name}`)
+  }
   const results = syncBuiltinSkills(pluginSkills, userSkills)
   assert.equal(results.find((r) => r.name === 'kimi-cli-calling').action, 'synced')
   assert.equal(results.find((r) => r.name === 'codex-cli-calling').action, 'missing')

@@ -4,6 +4,7 @@
 - 状态：**设计定稿**。R1–R42 为已拍板决策；开工前必须钉死/实测的项与已知缺口见 §11；关键数值的实测依据见 §15。
 - 术语：**应用** = 员工（或其 AI）编写并上传的单个 `.wasm`；**平台** = 本仓的 Go 服务端 + 桌面客户端。
 - 原则：**每个能力都有上限，每个上限都有数值，每个数值都有测试**；**平台只提供运行环境与身份，业务怎么做由应用代码决定**。
+- ⚠️ **勘误（2026-09-18）**：实施与独立审计过程中发现本文件有若干处**论证/措辞与实测或可实现语义不符**，已在原处就地标注 `⚠️ 勘误`（不动原判据的**意图**，只把判据改成可判定的形式）。完整清单与依据见 `docs/planning/2026-09-17-wasm-app-platform-implementation.md` 的 §2（偏差裁定）与 §6.6（审计对设计论证的更正）。
 
 ---
 
@@ -43,7 +44,7 @@
 | **R22** | **实例内存 64 MiB / 单响应 8 MiB** | 2026-09-17 |
 | **R23** | 最小运维面（webadmin）：应用列表 / 下架 / 转移归属 | 2026-09-17 |
 | **R24** | **准入由应用代码控制**：平台只提供经校验的身份，不拦"已登录但未授权"的请求 | 2026-09-17 |
-| **R25** | **登录要求、可见性、白名单统一由应用配置文件决定**（随发布提交，见 §4.2）：`login_required`（默认 true）/ `visible`（是否列入应用中心目录）；允许匿名时帧内 `user: null`，身份相关宿主调用 `AUTH_REQUIRED`。**改配置 = 发新版** | 2026-09-17 |
+| **R25** | ⚠️ 变更（2026-09-18，用户拍板）**访问模式收敛为一个 `access` 枚举**（随发布提交，见 §4.2）：`"public"`（允许匿名）/ `"login"`（要求登录，登录后**全员可用**，**缺省**）/ `"whitelist"`（要求登录 + 名单准入）。旧字段 `login_required` 与 `visible` 已删除（读取侧保留兼容 shim，见 §10.5 第 56c 项）。允许匿名时帧内 `user: null`，身份相关宿主调用 `AUTH_REQUIRED`。**改配置 = 发新版** | 2026-09-17（2026-09-18 修订） |
 | **R26** | **平台不提供任何员工目录能力**（不列举 / 不搜索 / **不校验账号是否存在**）；名单写在应用配置文件里，由作者手填已知账号 | 2026-09-17 |
 | **R27** | 帧内提供 `user.is_publisher`（当前使用者是否为本应用发布者）；应用可选使用（如只给发布者显示设置/统计入口） | 2026-09-17 |
 | **R28** | **作者画像 = 全员自助**：不假设作者会写代码或懂运维；门槛由 skill + 员工 AI 承担 | 2026-09-17 |
@@ -56,7 +57,7 @@
 | **R35** | 匿名 `public` 与**限流重做**同批上线：可信代理自检（启用子域却未配 `PICOAI_TRUSTED_PROXIES` ⇒ 拒绝启动）+ 全局匿名令牌桶 | 2026-09-17 |
 | **R36** | **AI 调用走平台既有请求路径**：应用只是壳子，**谁登录用谁的额度与余额**；平台**不引入应用级配额、不做应用维度归因**（网关已有用户级记录）。调用事件里保留 `app_id` 仅供诊断与追责，不参与计费 | 2026-09-17 |
 | **R37** | 应用退役 = **冻结 → 只读快照保留 90 天（管理员可导出）→ 真删并写审计** | 2026-09-17 |
-| **R38** | **可见性 = 配置里的 `visible` 布尔**：`true` 列入应用中心目录，`false` 不列入（知道链接仍可打开，**能不能用仍由应用自己判**）；平台只做目录过滤，不做准入拦截 | 2026-09-17 |
+| **R38** | ⚠️ 变更（2026-09-18，用户拍板）**目录一律展示全部应用**：无论公开与否、有没有权限、是否下架都列出来（条目里给出 `access` 与 `enabled`，由使用者判断该不该点）。`visible` 布尔与"按可见性过滤"**作废**；目录只剩三条硬条件——未删除 · `kind=wasm_app` · 有生效版本（冻结的应用不列：冻结即停止服务，列出来只是死链）。**能不能用仍由应用自己判**（R24） | 2026-09-17（2026-09-18 修订） |
 | **R39** | **Tier 1 收敛为 Go**（`GOOS=wasip1`）；Rust/Zig 降为"实测可用、不承诺"，白名单与样例只维护一份 | 2026-09-17 |
 | **R40** | **工具链分发与本地自测属于 skill / 员工 AI 职责**，平台不提供 | 2026-09-17 |
 | **R41** | **不设分期**：设计按终态一次写清；实施顺序由 §11 的依赖与缺口清单驱动 | 2026-09-17 |
@@ -117,11 +118,11 @@
 | **客户端上传超时** | **90 s**（必须 > 服务端 `ReadTimeout 60 s`）；>8 MiB 走**分片 + 续传** | 客户端既有大上传是 `timeoutMs: 30000`（`packages/host/enterprise/src/auth-gate.ts` 两处，`grep -n "timeoutMs: 30000"` 取当前位置——**行号会随提交漂移，文档不写死**），32 MiB 必然超时 |
 | 上传时限（服务端） | `http.Server.ReadTimeout = 60 s` | 48 MiB 需 ≈6.7 Mbps 保底；部署文档须写明前置反代不得设更小的 body 上限/超时 |
 | 静态资源 | **发布期从 wasm 自定义段抽出**到 `<data_root>/apps/<app_id>/assets/<release_id>/`，宿主直接服务 + 缓存；**抽完立即释放原始字节** | HTML/JS 也走这条（R8/R37）；抽出失败 = 发布失败；缓存键 `app_id + version + path` |
-| **自定义段总量上限** | **≤ 4 MiB**（超限 `SECTION_OVERSIZE`） | 实测：自定义段零用途却整体进内存（2.48 MiB→32.48 MiB，RSS +34 MiB、编译 1.78 s） |
+| **自定义段总量上限** | **≤ 4 MiB**（超限 `SECTION_OVERRIDE_OVERSIZE` —— **以 §7.4 失败语义表为准**；本格旧写 `SECTION_OVERSIZE`，实现按 §7.4 用名） | 实测：自定义段零用途却整体进内存（2.48 MiB→32.48 MiB，RSS +34 MiB、编译 1.78 s） |
 | **导入面白名单** | **由参考实现构建期生成、不手写**：每语言一份"读帧 + 调全部宿主函数 + 写帧"的样例，CI 真编译后 dump 导入集写入 `limits.go`；**判据 = 符号 + 类型**（签名不匹配 ⇒ `IMPORT_SIGNATURE_MISMATCH`） | 必须含 `fd_read`（ABI 读 stdin 需要）；Go 实测 17 条 / 16 个不同名（`fd_write`×2） |
 | 导出面 | **必须含 `_start` 与 `memory`，额外导出忽略** | Rust 实测多一个 `__main_void` |
 | 编译超时 | 60 s | 实测 2.48 MiB 冷编译 1.27–1.69 s |
-| **应用配置文件** | `picoaide.app.json`（随 publish 提交，**不计入 32 MiB wasm 上限**，≤64 KiB）：`{visible, login_required, whitelist[], purpose, data_sensitivity, owner}`；发布期随资源一起抽出到 `assets/<release_id>/`，应用用 `assets.read("picoaide.app.json")` 读取 | **平台不校验 whitelist 里的账号是否存在**（否则等于提供账号枚举接口）；`login_required=true` 且名单为空 ⇒ 拒（`APP_CONFIG_INVALID`）；whitelist ≤ 2 000 条；改任何一项都要发新版 |
+| **应用配置文件** | `picoaide.app.json`（随 publish 提交，**不计入 32 MiB wasm 上限**，≤64 KiB）：`{access, whitelist[], purpose, data_sensitivity, owner}`，其中 `access` 是 ⚠️ 变更（2026-09-18，用户拍板）引入的访问模式枚举，取值 `"public"` \| `"login"` \| `"whitelist"`，**缺省 `login`**；发布期随资源一起抽出到 `assets/<release_id>/`，应用用 `assets.read("picoaide.app.json")` 读取。**字段规格单一真源** = `appcfgspec.go` → `appcfg.json` + skill `references/app-config.md`（生成物，见 §5.5） | **平台不校验 whitelist 里的账号是否存在**（否则等于提供账号枚举接口）；`access="whitelist"` 且名单为空 ⇒ 拒（`APP_CONFIG_INVALID`）；whitelist ≤ 2 000 条；改任何一项都要发新版。旧字段 `login_required` / `visible` 只作读取侧兼容（§10.5 第 56c 项） |
 | 上传期校验（validate） | 导入面（符号+类型）+ 导出面 + **自解析段表**（结构化错误，不把 wazero 裸错误当唯一出口）+ 体积 + **一次真实编译** + **合成帧干跑**（2 s 预算跑 `Instantiate → _start → 响应帧`） | 编译通过 ≠ 能跑（签名不匹配编译期全绿、实例化才炸，实测）；干跑与编译同进程同配额；**validate 不落版本号、不进审计** |
 | **publish** | **同步**：校验 → 编译（复用 validate 缓存）→ 落 release 行 → 生效或进待审；失败**不落行** | R30/R18；状态只有"审核态 + 删除态" |
 
@@ -218,7 +219,7 @@
 | 应用子域会话 | 一次性换票（code 单次、60 s、绑 `(user, app)`）；Cookie **host-only + HttpOnly + Secure（fail-closed：非 https 不签发）+ SameSite=Strict**，TTL 8 h | R12/R16 |
 | 换票端点 | **POST + `Origin == 主站源` + `next` 只接受同基域相对路径**（`/` 开头、不得含 `//`/scheme），非法回落 `/`；签发写审计 | 防登录 CSRF 与开放重定向 |
 | 准入（R24） | **应用侧**：平台只注入身份；未授权请求照样进 wasm，由应用读自己配置里的 `whitelist` 判定并返回 403（页面必须显示本人账号） | 名单由作者手填在配置文件里；平台不提供目录、不校验账号存在性 |
-| 登录要求（R25） | 由应用配置文件决定：`login_required: true`（默认）时未登录 302 换票；`false` 时帧内 `user: null`，身份相关宿主调用 `AUTH_REQUIRED` | 与 R35 限流同批上线 |
+| 登录要求（R25） | ⚠️ 变更（2026-09-18，用户拍板）由应用配置文件的 `access` 决定：`login`（缺省）/ `whitelist` 时未登录 302 换票；`public` 时帧内 `user: null`，身份相关宿主调用 `AUTH_REQUIRED`。`whitelist` 只是"要求登录 + 在帧里告诉应用模式"，**名单仍由应用自己判**（R24） | 与 R35 限流同批上线 |
 | AI 令牌 | **每个员工浏览器会话铸一张 45 min 用户令牌**（宿主内存持有并按需续期，登出即吊销）；**`api_tokens` 无需加任何列** | 不做应用维度 ⇒ **`api_tokens` 保持现状，不加列、不加唯一约束** |
 | **AI 额度与归因**（R36） | **不做应用级额度、不做应用维度归因**：用户级余额 + 网关既有 60 次/分桶 + `InFlightGuard` 是全部边界；网关已有用户级记录 | 语义已定：谁登录用谁的钱；应用只是壳子 |
 | **额度可见性**（R36） | **唯一的额度入口是桌面客户端**（余额/用量都在客户端里）；**应用子域、应用中心页、门户都不提供额度或用量页面** | 应用侧不需要知道余额，只需在宿主返回额度错误时给出可读提示 |
@@ -261,7 +262,7 @@
 | `db.define(table, columns[])` | **建表**（宿主代执行 `CREATE TABLE IF NOT EXISTS` 并做上限检查；重复调用幂等） | 表名/列名 `^[a-z][a-z0-9_]{0,30}$`；列类型枚举封闭；列 ≤ 16；表 ≤ 16；禁止指定主键/外键/索引/触发器；**改结构 = 由应用自己建新表或加列**（R32，无自动迁移） |
 | `db.query(sql, args)` | 单条 SELECT | 单语句、参数化、`SQLITE_LIMIT_*`、返回 ≤ 5 000 行 / 8 MiB |
 | `db.exec(sql, args)` | 单条写语句 | 仅 INSERT/UPDATE/DELETE；禁 DDL |
-| `db.tx(fn)` | 事务（语言侧糖） | ABI 层是 `tx_begin`/`tx_commit`/`tx_rollback`（§7.2）；事务内**禁止**调用任何其他宿主函数；硬超时 5 s 强制回滚 |
+| `db.tx(fn)` | 事务（语言侧糖） | ABI 层是 `tx_begin`/`tx_commit`/`tx_rollback`（§7.2）；事务内**允许** `db.query`/`db.exec`（+ 两个出口），**禁止** `tx_begin`（嵌套）/`ai.chat`/`log`/`assets.read`/`db.define`；硬超时 5 s 强制回滚。⚠️ **勘误**：本格原写"禁止调用任何其他宿主函数"，按字面实现会让 `db.tx` **完全不可用**（只能 begin→立刻 commit）—— §4.4 给的依据（"防事务长期持锁 + 占满执行槽"）只覆盖会长时间阻塞/占槽的能力，不覆盖同一条连接上的快 SQL（实施报告 D12，独立审计 P0） |
 | `ai.chat(messages, model?)` | 调 AI | 模型由服务端裁决；预算 30 s；不注入系统提示；匿名调用 ⇒ `AUTH_REQUIRED`；**按使用者身份走平台既有路径计费与限流（R36）** |
 | `log(level, msg)` | 写日志 | 单条 ≤ 4 KiB；每请求 ≤ 100 条；超出丢弃并计数 |
 | `assets.read(path)` | 读包内资源 | 资源已在发布期抽到宿主磁盘（§4.2），应用与宿主读同一份；无文件系统语义、无路径穿越 |
@@ -323,7 +324,8 @@
 ```
 员工浏览器 / 客户端"应用中心"页
   │  ① 访问 https://<app_id>.<应用基域>/（R29：企业自备通配域名+证书）
-  │     无有效应用子域 Cookie ⇒ 302 到主站换票（login_required；public 允许匿名直入）
+  │     无有效应用子域 Cookie ⇒ 302 到主站换票（access=login/whitelist；public 允许匿名直入）
+  │     （⚠️ 变更（2026-09-18，用户拍板）：模式取值收敛为 access 三模式）
   ▼
 主站 https://<基域>/app-ticket   ← POST + Origin 校验 + next 白名单（§4.7）
   │  ② 主站员工浏览器会话（R16）→ 生成一次性 code（60s，绑 user+app）
@@ -361,7 +363,7 @@
   ③ AI 调 POST …/wasm/validate     ← 导入面(符号+类型) + 导出面 + 段表 + 体积 + 真编译 + 干跑
        ├─ 通过 → ④                （不落版本号、不进审计）
        └─ 失败 → 结构化 {code, details, hints} → AI 自修 → 回到 ②
-  ④ AI 调 POST …/wasm/:app_id/releases（wasm + Manifest{version,title,changelog} + 应用配置文件{visible,login_required,whitelist,用途,敏感性,负责人}）
+  ④ AI 调 POST …/wasm/:app_id/releases（wasm + Manifest{version,title,changelog} + 应用配置文件{access,whitelist,用途,敏感性,负责人}；⚠️ 变更（2026-09-18，用户拍板）：字段从 visible/login_required 收敛为 access 三模式）
   ⑤ 平台在 60 s 预算内编译（复用 ③ 的缓存）：
        ├─ 编译/干跑失败 → **不落行**，同步回结构化错误 ⇒ 版本号未被占用（R18），可直接重发
        └─ 成功 → 落 release 行（默认直接生效；若管理员开了审核开关 ⇒ 待审，线上仍旧版本）
@@ -390,7 +392,7 @@
 
 ```json
 {"abi":"picoaide-app/1","app_id":"expense-note","version":"1.0.0",
- "auth":{"mode":"login_required","verified":true},
+ "auth":{"mode":"whitelist","verified":true},
  "user":{"id":10231,"username":"zhangwei","display_name":"张伟",
          "dept":"研发部","is_publisher":false},
  "method":"POST","path":"/api/save","query":{},
@@ -398,7 +400,7 @@
  "body":"{\"amount\":100}"}
 ```
 
-（`auth.mode` 取自应用配置文件：`login_required` 或 `public`；后者且未登录时 `user` 为 `null`。清单本身不进帧——应用用 `assets.read("picoaide.app.json")` 读自己的配置。首帧与后续 RPC 应答共用同一帧格式。）
+（⚠️ 变更（2026-09-18，用户拍板）：`auth.mode` 取自应用配置文件的 `access`，取值只有 `public` / `login` / `whitelist` 三个；`public` 且未登录时 `user` 为 `null`。`whitelist` 模式下宿主**不比对名单**，只是把这个模式告诉应用。清单本身不进帧——应用用 `assets.read("picoaide.app.json")` 读自己的配置。首帧与后续 RPC 应答共用同一帧格式。）
 
 **身份契约（R24–R27，宿主保证）**：
 
@@ -426,7 +428,8 @@
     调宿主函数 → 【暂停 guest 计时】+ 宿主预算（ai.chat 30 s / SQL 语句 5 s）
     宿主返回   → 恢复 guest 计时 + 强制复检 ctx/module 状态
   离开 guest → 停止
-上传路径：客户端 90 s > 服务端 ReadTimeout 60 s > 编译 60 s（同步 publish 在 60 s 预算内，含 1 次缓存复用）
+上传路径：客户端 90 s > 服务端 ReadTimeout 60 s **≥** 编译 60 s（同步 publish 在 60 s 预算内，含 1 次缓存复用）
+> ⚠️ 勘误：原文两处都写 `>`，但 60 与 60 之间不可能是严格大于；实现按 `>=` 断言（实施报告 D2）。
 ```
 
 ### 7.4 失败语义（**绝不把失败报成成功**）
@@ -466,7 +469,7 @@
 | 冻结/导出/删除 | `POST …/wasm/:app_id/freeze` · `GET …/export` · `DELETE …/wasm/:app_id` | R37：冻结 → 只读快照 90 天（管理员可导出）→ 真删并审计 |
 | 诊断 | `GET …/wasm/:app_id/diagnostics` | 最近失败与被杀记录（含 guest exit code + stderr 尾） |
 | 自省 | `GET …/wasm/:app_id/schema` | 表结构与占用（仅发布者 + 审计） |
-| **应用中心** | `GET /api/client/v2/apps/wasm/catalog` | R34：按可见性（R38）过滤后的列表（名称/一句话说明/负责人/入口链接）；**不做安装语义，也不显示额度/用量**（额度只在桌面客户端可见） |
+| **应用中心** | `GET /api/client/v2/apps/wasm/catalog` | R34：⚠️ 变更（2026-09-18，用户拍板）**不再按可见性过滤**（R38 作废）——列出全部未删除、有生效版本、未冻结的应用（名称/一句话说明/负责人/**访问级别 `access`**/**是否下架 `enabled`**/入口链接）；**不做安装语义，也不显示额度/用量**（额度只在桌面客户端可见） |
 | 运维面 | （webadmin）应用列表 / 下架 / 转移归属 / 冻结 | R23；转移归属必须放开 kind 白名单（现硬写 skill/agent ⇒ 400） |
 
 **审核开关（R17）**：管理后台可配，**默认关**（默认不审 + 事后抽检）。开启时发布进待审队列（线上仍旧版本），管理员在 webadmin 审批；开关变更写审计。
@@ -516,7 +519,7 @@
 4. **stdout 只用于协议帧**（`RS` + 长度 + JSON）；日志走 `log`
 5. **`ai.chat` 是阻塞的**（非流式），UI 要显示等待态
 6. **不能联网、不能读文件、不能开线程**；外部资源必须内联（HTML/JS 也编进 wasm，R8/R37）
-7. **准入由你自己判**（R24）：配置写在 `picoaide.app.json`（`visible` / `login_required` / `whitelist`），入口第一件事就是读它并比对名单；名单用 `username`/`user.id`；无权限页显示"你的账号：xxx"（平台不校验账号是否存在，拼错只能靠这一步发现）
+7. **准入由你自己判**（R24）：配置写在 `picoaide.app.json`（⚠️ 变更（2026-09-18，用户拍板）：`access` 三模式 + `whitelist`），入口第一件事就是读它并比对名单；名单用 `username`/`user.id`；无权限页显示"你的账号：xxx"（平台不校验账号是否存在，拼错只能靠这一步发现）
 8. **平台不提供员工名录**（R26）：名单只能手填已知账号；改配置 = 发新版（R25）
 9. **不依赖 `$HOME`**：编译器状态目录必须落在会话工作区内（R42；否则沙箱下 Go 会报"标准库不存在"这种指错方向的错）
 10. **发布前先本地自测**：Node 内置 `node:wasi` 可零依赖跑通产物（读 stdin 帧、写 `RS` 帧），再走 `validate`
@@ -554,8 +557,15 @@
 
 ```
 14. os.Open("/etc/passwd") 等全部文件操作         → DENIED（零 preopen）✅ 已实测
+    ⚠️ 勘误（2026-09-18 实测 wazero v1.12.0 / Go 1.26.6）：errno **不是 ENOSYS** —— Go 的 os.* 得到 EBADF(8)；
+       原生 path_open 绝对路径 EPERM(63)、相对路径 fd≥3 EBADF(8)、stdio fd ENOTDIR(54)。
+       判据必须写成"DENIED（errno≠0）"；绑死 ENOSYS 的断言永远无法通过（实施报告 §6.6）。
 15. ReadDir("/")                                → DENIED ✅ 已实测
-16. 任意出站（socket/DNS）                         → 不可达（白名单不含 sock_* + preview1 无 sock_open + host 未监听）✅ 已实测
+16. 任意出站（socket/DNS）                         → 不可达 ✅ 已实测
+    ⚠️ 勘误（判据按 2026-09-18 实测更正）：preview1 **有** sock_accept/sock_recv/sock_send/sock_shutdown
+       （**没有** sock_open/sock_bind/sock_listen/sock_connect），且 Go 运行时会真的发出其中两个导入
+       （经 text/template、html/template 的 Execute 可达）。真正的不变量是「**没有任何途径得到一个 socket fd**」：
+       syscall.Socket → "Not implemented on wasip1"；sock_accept(0..10) 全 EBADF(8)。
 17. 导入面含 env.* / js.*                         → 上传期拒
 18. 导入符号类型不符                                → IMPORT_SIGNATURE_MISMATCH（**编译期不报**，实测）
 19. 组件模型产物（layer=1）                         → COMPONENT_MODEL_UNSUPPORTED
@@ -590,7 +600,8 @@
 ### 10.4 会话、身份与准入
 
 ```
-39. 未登录访问 login_required 应用子域                → 302 换票 → 主站登录页
+39. 未登录访问要求登录的应用子域（access=login/whitelist） → 302 换票 → 主站登录页
+    ⚠️ 变更（2026-09-18，用户拍板）：取值从 login_required/public 改为 public/login/whitelist
 40. 重放 ticket（第二次）/跨应用使用 ticket            → 拒（一次性 + 绑 user+app）
 41. 第三方页面 iframe/img 触发 /app-ticket           → 拒（POST + Origin 校验 + next 白名单）
 42. 应用 JS 读 document.cookie                     → 空（HttpOnly）
@@ -601,7 +612,7 @@
 47. 匿名请求任何路径的响应体含 username                → 拒（`user:null` 分支不得渲染账号，防枚举）
 48. 匿名请求打满全局桶                                → 429（全局匿名桶 + 每 IP 桶；代理错配时启动即拒绝）
 49. HTTP 访问应用子域（非 https）                     → 不签发 Cookie（Secure fail-closed）
-51. 未授权员工打开应用                                → **不是边界**（R24）：请求进 wasm，由应用返回 403
+51. 未授权员工打开应用（access=whitelist 但不在名单）  → **不是边界**（R24）：⚠️ 变更（2026-09-18，用户拍板）平台**不比对名单**，请求照进 wasm，由应用返回 403
 ```
 
 ### 10.5 发布链路
@@ -617,9 +628,13 @@
 56. 上传 33 MiB wasm（base64 ≈44 MiB）               → 应用层拒（32 MiB 上限）且错误可读
 57. 上传 40 MiB wasm（base64 ≈53 MiB，触 48 MiB）     → 中间件拒且错误可读（不得退化成无指向的 400）
 56b. 配置文件缺失 / JSON 非法 / 字段越界                  → APP_CONFIG_INVALID（拒发布）
-56c. login_required=true 且 whitelist 为空               → 拒（否则应用对所有人不可用）
+56c. access="whitelist" 且 whitelist 为空              → 拒（否则应用对所有人不可用）。
+    ⚠️ 变更（2026-09-18，用户拍板）原规则「login_required=true 且 whitelist 为空 ⇒ 拒」**废止**：
+    "登录后全员可用"（access="login"）是正式模式，名单为空合法；旧字段 login_required/visible
+    仍按映射表被读懂（login_required=false⇒public；true+名单非空⇒whitelist；true+名单空⇒login）
 56d. whitelist 含不存在的账号                            → **允许发布**（平台不校验，避免账号枚举）；由无权限页显示本人账号闭环
-56e. visible=false 的应用                                → 不进应用中心目录；URL 直达仍可用（能否用由应用自己判，R24）
+56e. 设了 access=whitelist / 已下架（enabled=0）的应用     → ⚠️ 变更（2026-09-18，用户拍板）**照旧列入应用中心**（下架是可逆的发布者动作、应用与数据都还在；子域返回 410 说明「已下架但数据保留」，条目由 UI 标「已下架」并禁用打开）（条目里给出访问级别与下架状态）；
+    URL 直达仍可用（能否用由应用自己判，R24）。`visible` 字段与"按可见性过滤"作废（R38）
 56f. 改了配置但版本号没变                                  → 拒（改配置 = 发新版，R25）
 58. 客户端上传超时 < 服务端 ReadTimeout                → 配置断言（limits 单一真源）；>8 MiB 必走分片
 59. 编译失败重发同一版本号                            → **成功**（失败不落行，R18）
@@ -648,7 +663,7 @@
 **必须先定/先测（阻塞实现）**
 
 1. **导入白名单由参考实现生成**（先写 Go 样例 → CI 真编译 → dump 导入集）；核对含 `fd_read`
-2. **帧格式 + 应用配置文件落到示例代码**：长度前缀 + `read_exact` 样板（三处：宿主实现、skill references、validate 判据）；`picoaide.app.json` 的 schema、发布期抽取、`assets.read` 读取路径与校验规则（含 `login_required=true` 空名单即拒）
+2. **帧格式 + 应用配置文件落到示例代码**：长度前缀 + `read_exact` 样板（三处：宿主实现、skill references、validate 判据）；`picoaide.app.json` 的 schema、发布期抽取、`assets.read` 读取路径与校验规则（⚠️ 变更（2026-09-18，用户拍板）：含 `access="whitelist"` 空名单即拒；字段规格由 `appcfgspec.go` 生成）
 3. **迁移一件**：`apps.channel` CHECK 放开 + `kind` 白名单放开（**不新增标识列**：域名标签就是 `app_id`；`api_tokens` 保持现状）。`app_releases.status` **无需迁移**——`0053_apps.sql:45` 的 CHECK 已含 `'pending','approved','rejected'`（2026-09-17 复核），只有引入新字面量才需要动
 4. **`kind` 影响面审计**：非测试代码 108 处引用 / 13 文件 + webadmin 6 个前端文件（**计数口径见 §15.2 引用纪律**：换 revision 会变）；**两个**未知值回落点都要加 wasm 分支——`channelLabel`（回落"组织共享库"）与 `kindLabelOf`（回落"技能"，用于官方锁定报错）
 5. **host 门控 + 子域路由树 + 子域限体 + 413 可读性**（4 个独立实现点；`/` 与 `/portal` 在 NoRoute 分支）
@@ -703,7 +718,7 @@
 | 复用项 | 现状 | 需要新增 |
 |---|---|---|
 | 应用与版本 | `apps`/`app_releases`（0053） | `kind` CHECK 加 `wasm_app`（**不新增标识列**：域名标签 = `app_id`，同 kind 内已由主键唯一）；**`apps.channel` CHECK 放开**；`app_releases.status` CHECK 放开审核态；**失败发布不落行**（R30）⇒ 版本唯一约束保持现状 |
-| 归属与审批 | `appstore.Publish`（owner 首占、锁定名、跨渠道同名、`PendingCap`） | **入口加 kind 白名单**；新增应用级审核开关（R17，默认关）；publish 载荷增加**应用配置文件**（visible / login_required / whitelist / 用途 / 敏感性 / 负责人，见 §4.2） |
+| 归属与审批 | `appstore.Publish`（owner 首占、锁定名、跨渠道同名、`PendingCap`） | **入口加 kind 白名单**；新增应用级审核开关（R17，默认关）；publish 载荷增加**应用配置文件**（⚠️ 变更（2026-09-18，用户拍板）：access / whitelist / 用途 / 敏感性 / 负责人，见 §4.2） |
 | 员工令牌 | `IssueToken`/`VerifyToken`/`CreateToken` | **无需改表**（R36）：宿主为每个浏览器会话铸一张短时用户令牌、内存持有、登出吊销；`VerifyToken` 保持现状 |
 | AI 网关 | `/v1` + `BearerAuth` + `InFlightGuard` | **应用侧零改动**（R36）：宿主用会话级用户令牌走既有路径；仅建议把既有"只判余额 >0、结算在后"的缺口一并修掉（平台自身风险，与应用无关） |
 | 路由 | `internal/router` 集中声明 | 应用子域**独立路由树** + **host 门控** + 子域限体 + 最外层 Origin 校验；上传路由进 `largeBodyRoutes` 且 handler 自套限体；补"新增大体积路由必须进白名单"的反向断言 |

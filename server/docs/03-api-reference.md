@@ -197,6 +197,32 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 |------|------|------|
 | GET | `/api/server/admin/capabilities/approvals?status=&type=` | 归并 shared-skills 与 agent-presets 的队列 `{approvals:[ApprovalRow]}`;`status` 缺省=`pending`,`all`=全量,或 `pending\|approved\|rejected`;`type=skill\|agent`(缺省全部);行含 `kind/name/version/display_name/description/author/status/reason/quality/downloads/calls(技能)/created_at/conflict/enabled`(上下架状态,两种 kind 都下发,2026-09-17 起) 与 `base_path`/`preview_path`/`grants_base`(原域端点,均为 `/api/server/admin/*` 前缀);`conflict=true` = 该共享技能与市场 skills 同名(approve 将被 409 阻断) |
 
+## 8d. 内置技能(客户端用,Bearer,随服务端镜像发布)
+
+> 「技能内置到服务端、客户端按需安装」：技能内容放在**镜像层**的
+> `/opt/picoaide/skills/<name>/`(Dockerfile 逐技能 COPY，可用 `PICOAI_SKILL_SEED_DIR`
+> 覆盖)，服务端直接把它打包下发 —— 内容随镜像升级而更新，客户端**不自动安装**，
+> 员工在能力中心的「平台内置技能」区点一次安装(复用市场那条安装链路:
+> 下载 → sha256 对照 → 整树解包 → `<dshHome>/skills`)。实现见 `internal/wasmapp/skillseed`。
+> 与 §6/§8b 的差别只有一处:**没有授权门**(平台自带、对全部登录员工可见)，
+> 认证口径与它们完全一致(BearerAuth)。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/client/v2/skills/builtin` | 清单 `{skills:[{name, version, title, description, author, category, sha256, size, files, source:"builtin"}]}`;`sha256`/`size` 描述的是**打包后的 tar.gz**;资产目录不存在或全部不合格时返回空数组(不报错) |
+| GET | `/api/client/v2/skills/builtin/:name/archive` | tar.gz 包;附 `X-Skill-Checksum`(sha256,与清单同值)与 `X-Skill-Version`;未知名 404 JSON 信封 |
+
+包格式:根部 `SKILL.md`(frontmatter 必须含 `name`/`version`(严格 semver)/`title`/`description`/`author`/`category`)，
+与管理员上传技能包走**同一套**校验(`archiveutil` + `skillmanifest`)，不合规的内置技能在服务端
+启动扫描时被丢弃并记日志,不会以"能装上一个坏技能"的形式下发。
+
+### 客户端侧(本地回环代理,不是服务端端点)
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/pico/skills/builtin` | 透传服务端清单并附本机 `installed` 目录名列表 |
+| POST | `/api/pico/skills/builtin/:name/install` | 下载 + 校验 + 装到 `<dshHome>/skills/<name>`;`?force=1` 覆盖安装;**缺 `x-skill-checksum`/`x-skill-version` 一律拒绝**(502) |
+
 ## 9. Bootstrap
 
 ### GET `/api/client/v2/config/bootstrap`(Bearer)

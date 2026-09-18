@@ -4,8 +4,12 @@ import { gzipSync, gzipSync as gzip } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
 import { assertArchiveSafe } from '../src/archive-util.ts'
 
-/** Minimal POSIX ustar header + payload (the tar validator only reads paths). */
-function tarEntry(name: string, content: string): Buffer {
+/**
+ * Minimal POSIX ustar header + payload (the tar validator only reads paths).
+ * @param typeflag - ustar type flag：`'0'` 普通文件（缺省）、`'5'` 目录、`'2'` 符号链接、
+ *   `'6'` FIFO、`'3'` 字符设备 —— 后三类是"合法技能包里不该出现"的形态。
+ */
+function tarEntry(name: string, content: string, typeflag = '0'): Buffer {
   const header = Buffer.alloc(512)
   header.write(name, 0, 100, 'utf8')
   header.write('0000644', 100, 8, 'utf8')
@@ -14,7 +18,7 @@ function tarEntry(name: string, content: string): Buffer {
   header.write(`${content.length.toString(8).padStart(11, '0')} `, 124, 12, 'utf8')
   header.write('00000000000 ', 136, 12, 'utf8')
   header.write('        ', 148, 8, 'utf8')
-  header.write('0', 156, 1, 'utf8')
+  header.write(typeflag, 156, 1, 'utf8')
   header.write('ustar\0', 257, 6, 'utf8')
   header.write('00', 263, 2, 'utf8')
   const checksum = [...header].reduce((sum, byte) => sum + byte, 0)
@@ -28,6 +32,11 @@ function tarGz(entries: Array<[string, string]>): Buffer {
   const parts = entries.map(([name, content]) => tarEntry(name, content))
   parts.push(Buffer.alloc(1024))
   return gzipSync(Buffer.concat(parts))
+}
+
+/** 手工拼一个只带 typeflag 的条目（内容为空，用于特殊文件类型用例）。 */
+function tarGzTyped(name: string, typeflag: string): Buffer {
+  return gzipSync(Buffer.concat([tarEntry(name, '', typeflag), Buffer.alloc(1024)]))
 }
 
 describe('assertArchiveSafe duplicate entries (P2-11)', () => {
@@ -60,5 +69,26 @@ describe('assertArchiveSafe duplicate entries (P2-11)', () => {
     await expect(assertArchiveSafe(zip.toBuffer())).resolves.toBeUndefined()
     await expect(assertArchiveSafe(tarGz([['SKILL.md', 'a'], ['references/a.md', 'b']])))
       .resolves.toBeUndefined()
+  })
+})
+
+describe('assertArchiveSafe 条目数与特殊文件类型（审计 2026-09-18 P2-2 / P2-3）', () => {
+  it('tar.gz 与 zip 一样按 MAX_ENTRIES 拒绝（此前只有 zip 分支计数）', async () => {
+    // 10001 个条目 —— Go 侧 archiveutil.MaxEntries 也是 10000，两端同口径。
+    const many: Array<[string, string]> = []
+    for (let i = 0; i <= 10_000; i++) many.push([`f/${i}.txt`, 'x'])
+    await expect(assertArchiveSafe(tarGz(many))).rejects.toThrow(/too many entries/u)
+  })
+
+  it('条目数刚好在上限内仍然接受（边界：> 而不是 >=）', async () => {
+    const many: Array<[string, string]> = []
+    for (let i = 0; i < 10_000; i++) many.push([`f/${i}.txt`, 'x'])
+    await expect(assertArchiveSafe(tarGz(many))).resolves.toBeUndefined()
+  })
+
+  it('tar.gz 里的 FIFO / 字符设备条目被拒（技能包里合法的只有普通文件与目录）', async () => {
+    await expect(assertArchiveSafe(tarGzTyped('pipe', '6'))).rejects.toThrow(/link entry refused/u)
+    await expect(assertArchiveSafe(tarGzTyped('dev', '3'))).rejects.toThrow(/link entry refused/u)
+    await expect(assertArchiveSafe(tarGzTyped('blk', '4'))).rejects.toThrow(/link entry refused/u)
   })
 })

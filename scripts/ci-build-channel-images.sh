@@ -123,12 +123,15 @@ for channel in "${CHANNELS[@]}"; do
   # 不能依赖 set -e,必须显式短路。
   build() {
     local img_tar="$REPO_ROOT/image.tar"
+    # skillassets = 内置技能资产的源头（Dockerfile 把它 COPY 进 /opt/picoaide/skills，
+    # 服务端由 GET /api/client/v2/skills/builtin 下发、客户端在能力中心按需安装）。
     docker buildx build \
       --platform linux/amd64 \
       --build-arg VERSION="$VER" \
       --build-arg CHANNEL="$channel" \
       --build-context clientassets=./client-assets \
       --build-context channelassets=./channels-context \
+      --build-context skillassets=./packages/vendor/memory-evolve \
       --label "org.opencontainers.image.source=https://github.com/picoaide/picoaide-harness" \
       --label "org.opencontainers.image.version=$VER" \
       --tag "${IMAGE}:v${VER}" \
@@ -153,6 +156,10 @@ for channel in "${CHANNELS[@]}"; do
       set -e
       test -s /opt/picoaide/client/CLIENT-RELEASE.json || { echo "MISSING /opt/picoaide/client/CLIENT-RELEASE.json" >&2; exit 1; }
       test -s /opt/picoaide/channel/channel.json || { echo "MISSING /opt/picoaide/channel/channel.json" >&2; exit 1; }
+      # 内置技能（服务端下发、客户端按需安装）：缺 SKILL.md 时清单会是空的，
+      # 而"清单是空的"在客户端只表现为"能力中心里没有这条技能"，零报错。
+      test -s /opt/picoaide/skills/picoaide-app-builder/SKILL.md || { echo "MISSING /opt/picoaide/skills/picoaide-app-builder/SKILL.md" >&2; exit 1; }
+      test -s /opt/picoaide/skills/picoaide-app-builder/references/publishing.md || { echo "MISSING builtin skill references/" >&2; exit 1; }
       test -s "/opt/picoaide/CHANNEL" || { echo "MISSING /opt/picoaide/CHANNEL" >&2; exit 1; }
       ls /opt/picoaide/client/ | grep -q . || { echo "client dir empty" >&2; exit 1; }
     '
