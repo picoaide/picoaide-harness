@@ -72,6 +72,9 @@ func Table() []Entry {
 		{"global_instances", itoa(GlobalInstances), "count", "§4.6", "全局并发实例", "≈ 2 GiB 上界"},
 		{"compile_cache_max_bytes", itoa(CompileCacheMaxBytes), "bytes", "§4.3", "编译缓存体积上限", "wazero 磁盘缓存，按 mtime 回收"},
 		{"compile_cache_max_entries", itoa(CompileCacheMaxEntries), "count", "§4.3", "编译缓存条目上限", ""},
+		{"module_cache_max_bytes", itoa(ModuleCacheMaxBytes), "bytes", "§4.3", "进程内编译模块缓存上限", "与磁盘缓存解耦；按部署内存档位可缩放"},
+		{"module_cache_max_entries", itoa(ModuleCacheMaxEntries), "count", "§4.3", "进程内编译模块条目上限", ""},
+		{"module_cache_idle_ttl", secs(ModuleCacheIdleTTL), "seconds", "§4.3", "编译模块空闲淘汰", "空闲即逐出并归还 OS（几百个应用的常驻上界）"},
 		{"memory_peak_guard_percent", itoa(MemoryPeakGuardPercent), "percent", "§4.3", "启动自检内存水位", "理论峰值超过可用内存该比例即拒绝启动"},
 		{"upload_peak_per_upload_bytes", itoa(UploadPeakPerUploadBytes), "bytes", "§4.3", "单次上传峰值内存账", "base64 单次 ≈ 32+43+43 MB"},
 

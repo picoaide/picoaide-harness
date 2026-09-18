@@ -40,6 +40,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
+# 内置演示应用（员工自建应用平台，见 internal/wasmapp/appseed）：
+# 一份 wasm + 一份清单，播种成 public/login/whitelist 三个演示应用。
+COPY demoapps/ ./demoapps/
 COPY --from=webadmin /build/dist ./webadmin/dist/
 COPY webadmin/embed.go ./webadmin/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
@@ -49,6 +52,12 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 # 缺它的后果：发布链路 fail-closed（启动不再 Fatal，但功能不可用）。
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags "-s -w" -o /out/picoaide-app-compile ./cmd/picoaide-app-compile
+# 演示应用：目标是 **wasm32-wasip1**（不是宿主平台），一份制品 + 清单。
+RUN mkdir -p /out/demo-apps \
+ && CGO_ENABLED=0 GOOS=wasip1 GOARCH=wasm \
+    go build -trimpath -ldflags "-s -w" -o /out/demo-apps/app.wasm ./demoapps/appdemo \
+ && cp demoapps/demos.json /out/demo-apps/demos.json \
+ && chmod -R a+rX /out/demo-apps
 
 # --- Stage 3: 运行镜像(CA 证书用于 HTTPS 上游/LDAPS;entrypoint 降权;数据卷 0700) ---
 FROM alpine:3.21
@@ -61,6 +70,7 @@ FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata su-exec bubblewrap && \
     adduser -D -u 10001 -h /app picoaide
 WORKDIR /app
+COPY --from=build /out/demo-apps /opt/picoaide/demo-apps
 COPY --from=build /out/picoaide-server /app/picoaide-server
 COPY --from=build /out/picoaide-app-compile /app/picoaide-app-compile
 COPY docker/entrypoint.sh /app/entrypoint.sh

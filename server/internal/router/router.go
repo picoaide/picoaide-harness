@@ -188,6 +188,10 @@ func registerWasm(r *gin.Engine, d Deps) {
 	// 读用 capability:read（与列表同权限点），写用 capability:write。
 	serverauth.AdminRoute(ag, "GET", "/domain", serverauth.PermCapabilityRead, d.Wasm.AdminBaseDomainGet)
 	serverauth.AdminRoute(ag, "PUT", "/domain", serverauth.PermCapabilityWrite, d.Wasm.AdminBaseDomainPut)
+	// 平台限制项（并发/内存）：2026-09-19 用户要求"后台要有配置页面"。
+	// 读用 capability:read（与列表同权限点），写用 capability:write。
+	serverauth.AdminRoute(ag, "GET", "/limits", serverauth.PermCapabilityRead, d.Wasm.AdminLimitsGet)
+	serverauth.AdminRoute(ag, "PUT", "/limits", serverauth.PermCapabilityWrite, d.Wasm.AdminLimitsPut)
 }
 
 // maxJSONBody 是 /api/client/v2 与 /api/server 下全部端点的默认请求体上限

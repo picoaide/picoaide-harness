@@ -118,6 +118,25 @@ const (
 	// CompileCacheMaxEntries 是缓存条目数上限（§10.3 第 35 项「或超条数」；
 	// 文档未给具体数字，这里取固定值并作为唯一真源）。
 	CompileCacheMaxEntries = 4096
+	// ModuleCacheMaxBytes 是**进程内**编译模块缓存的记账上限（§4.3 第一笔账）。
+	//
+	// 与 CompileCacheMaxBytes（**磁盘**缓存）刻意解耦：磁盘可以留 512 MiB，
+	// 进程内驻留必须按机器内存设。旧实现直接复用磁盘上限（512 MiB 记账，
+	// 即最多 ≈128 MiB wasm 常驻），对"几百个应用 + 小内存机器"是危险默认。
+	// 依据 2026-09-18 实测（temp/wasm-mem-probe）：3.45 MiB Go 应用编译后存活
+	// ≈6 MiB（≈1.8×）、峰值 RSS ≈25 MB/应用。
+	ModuleCacheMaxBytes = 128 << 20
+	// ModuleCacheMaxEntries 是**进程内**编译模块缓存的条目数上限。
+	//
+	// 与磁盘缓存的 4096 条解耦：进程内条目受 ModuleCacheMaxBytes 约束更紧，
+	// 条目上限只防"一堆极小模块把索引/元数据撑大"。
+	ModuleCacheMaxEntries = 128
+	// ModuleCacheIdleTTL 是**进程内**编译模块的空闲淘汰时间（§4.3）。
+	//
+	// 为什么必须有时间维度（而不只是 LRU 容量）：几百个应用里每个都可能被用过
+	// 一次，容量未满时 LRU 永不淘汰 ⇒ 内存只涨不落（2026-09-18 实测：全部
+	// Close 后 RSS 只归还约 20%）。空闲即逐出，并触发一次归还 OS。
+	ModuleCacheIdleTTL = 10 * time.Minute
 	// MemoryPeakGuardPercent 是启动自检的内存水位（§4.3）：理论峰值 > 可用内存 70% ⇒ 拒绝启动。
 	MemoryPeakGuardPercent = 70
 	// UploadPeakPerUploadBytes 是单次上传的峰值内存账（§4.3「内存四笔账」）：

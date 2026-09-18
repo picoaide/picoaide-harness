@@ -43,8 +43,71 @@ const (
 	// 单次发布最多 32 MiB wasm + 资产，1 GiB 足够数百次发布，同时远高于"写满即事故"的余量。
 	MinDiskFreeBytes = 1 << 30
 	// InstancePoolBytes 是"32 × 64 MiB 实例"这笔账（§4.3 第二笔）。
+	//
+	// 保留为**默认档**的数值；实际生效值由 MemoryPlan 给（部署可用
+	// PICOAI_WASM_MEMORY_PROFILE 声明更小的档位，见 memprofile 包）。
 	InstancePoolBytes = limits.GlobalInstances * limits.InstanceMemoryPages * limits.WasmPageSize
 )
+
+// MemoryPlan 是「内存四笔账」的**输入**（2026-09-18：从编译期常量改为可声明的档位）。
+//
+// 为什么要能声明：实例池这笔账 = 并发 × 单实例上限，是一个**最坏情况上界**。
+// 32 × 64 MiB = 2 GiB 的上界让任何小于约 4 GB 的机器都过不了启动自检，
+// 而唯一的补救路径过去是"重新构建镜像"。改成档位后，同一份数值同时驱动
+// 启动自检与运行期强制（队列并发 / 实例内存上限 / 模块缓存上限 / 库句柄上限），
+// 因此"声明的账"与"实际跑的账"不会分叉。
+//
+// 零值字段一律回落到默认档（DefaultMemoryPlan），保证既有调用点的语义不变。
+type MemoryPlan struct {
+	// Profile 是档位名（default / small / large；仅用于日志与 /readyz 展示）。
+	Profile string
+	// Instances 是全局并发实例上限（实例池那笔账的乘数）。
+	Instances int
+	// InstanceMemoryBytes 是单实例线性内存上限（字节）。
+	InstanceMemoryBytes int64
+	// ModuleCacheBytes 是**进程内**编译模块缓存上限（"缓存驻留"这笔账）。
+	ModuleCacheBytes int64
+	// CompilePeakBytes 是编译峰值这笔账（0 ⇒ 用 CompilePeakBytes 常量）。
+	CompilePeakBytes int64
+	// UploadPeakBytes 是上传峰值这笔账（0 ⇒ 用 limits.UploadPeakPerUploadBytes）。
+	UploadPeakBytes int64
+}
+
+// DefaultMemoryPlan 返回默认档的四笔账输入（与 2026-09-18 之前的编译期常量逐一相同）。
+func DefaultMemoryPlan() MemoryPlan {
+	return MemoryPlan{
+		Profile:             "default",
+		Instances:           limits.GlobalInstances,
+		InstanceMemoryBytes: int64(limits.InstanceMemoryPages) * int64(limits.WasmPageSize),
+		ModuleCacheBytes:    limits.ModuleCacheMaxBytes,
+		CompilePeakBytes:    CompilePeakBytes,
+		UploadPeakBytes:     limits.UploadPeakPerUploadBytes,
+	}
+}
+
+// withDefaults 把零值字段补成默认档（调用方只填关心的一两项也不会算出错误的账）。
+func (p MemoryPlan) withDefaults() MemoryPlan {
+	d := DefaultMemoryPlan()
+	if p.Profile == "" {
+		p.Profile = d.Profile
+	}
+	if p.Instances <= 0 {
+		p.Instances = d.Instances
+	}
+	if p.InstanceMemoryBytes <= 0 {
+		p.InstanceMemoryBytes = d.InstanceMemoryBytes
+	}
+	if p.ModuleCacheBytes <= 0 {
+		p.ModuleCacheBytes = d.ModuleCacheBytes
+	}
+	if p.CompilePeakBytes <= 0 {
+		p.CompilePeakBytes = d.CompilePeakBytes
+	}
+	if p.UploadPeakBytes <= 0 {
+		p.UploadPeakBytes = d.UploadPeakBytes
+	}
+	return p
+}
 
 // CompilerStatsSnapshot 是编译侧水位的**结构化视图**（与 compile.Stats 解耦，
 // 避免本包 import compile 造成依赖环）。
@@ -351,26 +414,35 @@ func (l *InstanceLock) Path() string {
 
 // MemoryBudget 是四笔账的分解（便于日志与探针展示）。
 type MemoryBudget struct {
-	Instances     int64 `json:"instances_bytes"`
-	CompilePeak   int64 `json:"compile_peak_bytes"`
-	UploadPeak    int64 `json:"upload_peak_bytes"`
-	CacheResident int64 `json:"cache_resident_bytes"`
-	Total         int64 `json:"total_bytes"`
-	Available     int64 `json:"available_bytes"`
+	// Profile 是本次判定用的内存档位名（default / small / large）。
+	Profile       string `json:"profile"`
+	Instances     int64  `json:"instances_bytes"`
+	CompilePeak   int64  `json:"compile_peak_bytes"`
+	UploadPeak    int64  `json:"upload_peak_bytes"`
+	CacheResident int64  `json:"cache_resident_bytes"`
+	Total         int64  `json:"total_bytes"`
+	Available     int64  `json:"available_bytes"`
 	// Limit 是允许的上限（可用内存 × limits.MemoryPeakGuardPercent%）。
 	Limit int64 `json:"limit_bytes"`
 	OK    bool  `json:"ok"`
 }
 
-// ComputeMemoryBudget 计算理论峰值并判定是否超过可用内存的允许比例。
+// ComputeMemoryBudget 计算**默认档**的理论峰值并判定是否超过可用内存的允许比例。
 // availableBytes ≤ 0 表示读不到 ⇒ **不判定**（返回 OK=true 并标注），
 // 因为"读不到就拒绝启动"会让容器/受限环境无法部署；此时由部署文档兜住。
 func ComputeMemoryBudget(availableBytes int64) MemoryBudget {
+	return ComputeMemoryBudgetFor(availableBytes, DefaultMemoryPlan())
+}
+
+// ComputeMemoryBudgetFor 按给定档位计算理论峰值并判定（§4.3 内存四笔账）。
+func ComputeMemoryBudgetFor(availableBytes int64, plan MemoryPlan) MemoryBudget {
+	p := plan.withDefaults()
 	b := MemoryBudget{
-		Instances:     InstancePoolBytes,
-		CompilePeak:   CompilePeakBytes,
-		UploadPeak:    limits.UploadPeakPerUploadBytes,
-		CacheResident: CacheResidentBytes,
+		Profile:       p.Profile,
+		Instances:     int64(p.Instances) * p.InstanceMemoryBytes,
+		CompilePeak:   p.CompilePeakBytes,
+		UploadPeak:    p.UploadPeakBytes,
+		CacheResident: p.ModuleCacheBytes,
 		Available:     availableBytes,
 	}
 	b.Total = b.Instances + b.CompilePeak + b.UploadPeak + b.CacheResident
@@ -383,9 +455,14 @@ func ComputeMemoryBudget(availableBytes int64) MemoryBudget {
 	return b
 }
 
-// CheckStartupMemory 是启动自检入口：不达标返回错误（调用方 log.Fatal）。
+// CheckStartupMemory 是启动自检入口（默认档）：不达标返回错误（调用方 log.Fatal）。
 func CheckStartupMemory(availableBytes int64) (MemoryBudget, *apperr.Error) {
-	b := ComputeMemoryBudget(availableBytes)
+	return CheckStartupMemoryFor(availableBytes, DefaultMemoryPlan())
+}
+
+// CheckStartupMemoryFor 是按档位的启动自检入口。
+func CheckStartupMemoryFor(availableBytes int64, plan MemoryPlan) (MemoryBudget, *apperr.Error) {
+	b := ComputeMemoryBudgetFor(availableBytes, plan)
 	if b.OK {
 		return b, nil
 	}
@@ -393,9 +470,11 @@ func CheckStartupMemory(availableBytes int64) (MemoryBudget, *apperr.Error) {
 		WithDetail("total_bytes", b.Total).
 		WithDetail("limit_bytes", b.Limit).
 		WithDetail("available_bytes", b.Available).
+		WithDetail("profile", b.Profile).
 		WithDetail("guard_percent", limits.MemoryPeakGuardPercent).
 		WithHint("§4.3 要求内存四笔账联立：实例池 + 编译峰值 + 上传峰值 + 缓存驻留").
-		WithHint("扩容机器内存，或由平台管理员下调可用实例数（当前为编译期常量，需重新构建）")
+		WithHint("两条出路：①扩容机器内存；②用 PICOAI_WASM_MEMORY_PROFILE 声明更小的档位" +
+			"（small = 3 并发 / 64 MiB 实例 / 64 MiB 模块缓存，适合 2 GB 级机器）")
 }
 
 // ===== 平台相关读取 =====

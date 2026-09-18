@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,6 +16,9 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
+	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/wasmapp/memprofile"
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
 	"github.com/picoaide/picoaide/internal/wasmapp/session"
 )
@@ -248,6 +252,111 @@ func (h *Handlers) adminPublish(c *gin.Context) {
 	h.auditApp(appID, admin.Username, "wasm_app_publish_toggle",
 		auditDetail(appID, app.Title, "enabled false → true（管理员上架）"))
 	c.JSON(http.StatusOK, gin.H{"app": gin.H{"app_id": appID, "enabled": true, "changed": true}})
+}
+
+// SettingWasmLimits 是平台限制项（并发/内存）的设置键（与 cmd/server 的持有者同名同义）。
+const SettingWasmLimits = "wasm.limits"
+
+// limitsView 组装控制台要的完整视图（GET 与 PUT 返回同一形状）。
+//
+// 视图里同时给出：当前值、来源、默认值、档位预设、取值区间、四笔账预览与
+// "哪些改动要重启"。**预算判定用服务端读到的可用内存**（客户端算不了），
+// 因此前端只需要把 ok=false 的红色提示渲染出来即可，不必自己复刻公式。
+func (h *Handlers) limitsView() gin.H {
+	cur := applimits.Defaults()
+	if h.opt.Limits != nil {
+		cur = h.opt.Limits()
+	}
+	source := "default"
+	if h.opt.LimitsSource != nil {
+		source = h.opt.LimitsSource()
+	}
+	var available int64
+	if h.opt.MemoryAvailable != nil {
+		available = h.opt.MemoryAvailable()
+	}
+	var pending []string
+	if h.opt.LimitsRestart != nil {
+		pending = h.opt.LimitsRestart()
+	}
+	if pending == nil {
+		pending = []string{}
+	}
+	return gin.H{
+		"limits":   cur,
+		"source":   source,
+		"defaults": applimits.Defaults(),
+		"presets": gin.H{
+			"default": applimits.Defaults(),
+			"small":   applimits.FromProfile(memprofile.Small()),
+			"large":   applimits.FromProfile(memprofile.Large()),
+		},
+		"ranges": applimits.Ranges(),
+		"budget": cur.Budget(available),
+		// 水位比例与预算判定同一真源（前端编辑期预览要复刻这个公式）。
+		"guard_percent": limits.MemoryPeakGuardPercent,
+		// 哪些字段属于"改了要重启"（前端据此在保存后弹提示）。
+		"restart_fields":  []string{"instance_memory_mb"},
+		"restart_pending": pending,
+		"setting_key":     SettingWasmLimits,
+	}
+}
+
+// AdminLimitsGet 读当前平台限制项 + 四笔账预览。
+func (h *Handlers) adminLimitsGet(c *gin.Context) {
+	if err := h.requireReady(); err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, h.limitsView())
+}
+
+// AdminLimitsPut 保存平台限制项（空 limits ⇒ 清空设置、回到部署档位/默认）。
+//
+// 校验/四笔账/落库/下发全部在注入的 LimitsApply 里完成（那些知识住在装配侧）；
+// 本函数只负责：解析 body → 调它 → 写审计 → 回读视图（含 restart_pending）。
+func (h *Handlers) adminLimitsPut(c *gin.Context) {
+	if err := h.requireReady(); err != nil {
+		writeErr(c, err)
+		return
+	}
+	admin := serverauth.AdminUser(c)
+	if admin == nil {
+		writeErr(c, apperr.New(apperr.CodeAuthRequired, "未登录"))
+		return
+	}
+	if h.opt.LimitsApply == nil {
+		writeErr(c, apperr.New(apperr.CodeInternal, "平台限制项不可配置（装配未注入）").
+			WithHint("服务端未提供限制项保存钩子：请升级服务端或检查部署装配"))
+		return
+	}
+	var req struct {
+		Limits *json.RawMessage `json:"limits"`
+	}
+	if berr := bindAdminJSON(c, &req); berr != nil {
+		writeErr(c, berr)
+		return
+	}
+	raw := ""
+	if req.Limits != nil && string(*req.Limits) != "null" {
+		raw = string(*req.Limits)
+	}
+	old := h.opt.Limits()
+	restart, aerr := h.opt.LimitsApply(raw)
+	if aerr != nil {
+		writeErr(c, aerr)
+		return
+	}
+	if next := h.opt.Limits(); next != old {
+		detail := fmt.Sprintf("平台限制项 %s → %s", old.Encode(), next.Encode())
+		if len(restart) > 0 {
+			detail += fmt.Sprintf("（需重启生效：%v）", restart)
+		}
+		h.auditOrg(admin.Username, "wasm_limits_change", detail)
+	}
+	view := h.limitsView()
+	view["restart_pending"] = restart
+	c.JSON(http.StatusOK, view)
 }
 
 // AdminTransferOwner 转移归属（§11 第 17 项：离职/接管）。
