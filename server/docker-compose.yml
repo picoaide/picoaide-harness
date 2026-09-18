@@ -96,6 +96,12 @@ services:
       # 宿主机已有别的反代(共享 Caddy/nginx)时,改成它连过来的地址(通常是
       # docker 网桥网关,如 172.20.0.1)。
       PICOAI_TRUSTED_PROXIES: ${PICOAI_TRUSTED_PROXIES:-172.28.0.2}
+      # 上一条是否来自**管理员显式配置**:compose 的 ${VAR:+1} 只在 .env 里真的写了
+      # PICOAI_TRUSTED_PROXIES 时才非空,从而把"显式配置"与"compose 兜底
+      # 172.28.0.2"区分开 —— WASM 应用子域的启动自检(R35)依赖这个区分:
+      # 启用子域却没显式配可信代理 ⇒ 拒绝启动(否则全部匿名流量共用一个限流桶,
+      # 本仓已有同族事故)。不启用应用子域时该变量无作用。
+      PICOAI_TRUSTED_PROXIES_EXPLICIT: ${PICOAI_TRUSTED_PROXIES:+1}
       # 本服务端对外可达地址(如 https://ai.example.com)。**配了就是唯一权威**;
       # 留空则按请求推导(X-Forwarded-Proto: https → TLS → 回环 http)。
       # 为什么要配:客户端更新清单里的下载地址必须是**绝对 https**,而客户端会
@@ -103,6 +109,19 @@ services:
       # 或服务端在反代后面判断不出协议,清单会按设计拒发 client 段
       # (`client_unavailable`),表现为"检查更新永远说已是最新"。
       PICOAI_PUBLIC_BASE_URL: ${PICOAI_PUBLIC_BASE_URL:-}
+      # ---- WASM 应用平台（员工自建应用）----
+      # 应用基域（<app_id>.<基域>）。留空 = 不启用应用子域。
+      # 启用时必须显式配置 PICOAI_TRUSTED_PROXIES（未显式配置会拒绝启动）。
+      PICOAI_APPS_BASE_DOMAIN: ${PICOAI_APPS_BASE_DOMAIN:-}
+      # 部署期注入的企业既有主机名（逗号分隔；应用不得占用）。
+      PICOAI_APPS_EXTRA_RESERVED: ${PICOAI_APPS_EXTRA_RESERVED:-}
+      # 编译子进程隔离档：require（生产推荐）| auto（默认）| off（仅测试）。
+      PICOAI_COMPILE_ISOLATION: ${PICOAI_COMPILE_ISOLATION:-auto}
+      # 内置技能资产目录（随镜像发布，服务端由 GET /api/client/v2/skills/builtin
+      # 下发，客户端在能力中心按需安装）。**默认就是镜像里的位置，一般不用改**；
+      # 要换成宿主机目录（现场排查/加技能）时同时解开下面的 bind mount：
+      #   volumes: - ./skills:/opt/picoaide/skills:ro
+      PICOAI_SKILL_SEED_DIR: ${PICOAI_SKILL_SEED_DIR:-/opt/picoaide/skills}
       # 单账号登录失败上限(留空 = 服务端默认)。**仅测试环境**建议调大,
       # 免得反复登录把管理员账号锁死。
       PICOAI_LOGIN_MAX_ATTEMPTS: ${PICOAI_LOGIN_MAX_ATTEMPTS:-}

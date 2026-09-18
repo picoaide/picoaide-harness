@@ -1,0 +1,661 @@
+package wasmmod
+
+import (
+	"bytes"
+	"encoding/binary"
+	"encoding/hex"
+	"fmt"
+	"strings"
+
+	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+)
+
+// ===== 模块头常量（§4.2 魔数 + 版本/层字段校验）=====
+
+const (
+	// ModuleMagic 是 wasm 二进制魔数 `\0asm`。
+	ModuleMagic = "\x00asm"
+	// CoreVersion 是 core module 的版本字段（文件第 5–6 字节，小端）。
+	CoreVersion = 1
+	// ComponentVersion 是组件模型（component）的版本字段取值（0x0d）。
+	ComponentVersion = 13
+	// HeaderLen = 魔数 4 字节 + 版本 2 字节 + 层（layer）2 字节（§10.2 第 19 项）。
+	HeaderLen = 8
+)
+
+// 段 id（wasm core spec）。自定义段（0）可重复且可出现在任意位置，其余段最多一次且按 id 升序。
+const (
+	SectionCustom    byte = 0
+	SectionType      byte = 1
+	SectionImport    byte = 2
+	SectionFunction  byte = 3
+	SectionTable     byte = 4
+	SectionMemory    byte = 5
+	SectionGlobal    byte = 6
+	SectionExport    byte = 7
+	SectionStart     byte = 8
+	SectionElement   byte = 9
+	SectionCode      byte = 10
+	SectionData      byte = 11
+	SectionDataCount byte = 12
+)
+
+// 导入项种类（Import.Kind / ImportSpec.Kind 的取值）。
+const (
+	KindFunc   = "func"
+	KindMemory = "memory"
+	KindTable  = "table"
+	KindGlobal = "global"
+)
+
+// sectionNames 是段 id → 名字（Section.Name 只对自定义段有值，这里是诊断用的通用名字）。
+var sectionNames = map[byte]string{
+	SectionCustom:    "custom",
+	SectionType:      "type",
+	SectionImport:    "import",
+	SectionFunction:  "function",
+	SectionTable:     "table",
+	SectionMemory:    "memory",
+	SectionGlobal:    "global",
+	SectionExport:    "export",
+	SectionStart:     "start",
+	SectionElement:   "element",
+	SectionCode:      "code",
+	SectionData:      "data",
+	SectionDataCount: "datacount",
+}
+
+// SectionName 返回段 id 的名字（未知 id 返回 "section(<id>)"）。
+func SectionName(id byte) string {
+	if n, ok := sectionNames[id]; ok {
+		return n
+	}
+	return fmt.Sprintf("section(%d)", id)
+}
+
+// ===== 公开类型（§4.2）=====
+
+// Import 是一条导入项。
+//
+// 判据 = **符号 + 类型**（§4.2）：只匹配符号名会让"签名不匹配"的产物通过静态校验，
+// 而这类产物**编译期全绿、实例化才炸**（§10.2 第 18 项实测），所以类型必须一起判。
+type Import struct {
+	// Module 是导入模块名；平台只允许 limits.WasmImportModule。
+	Module string
+	// Name 是导入符号名（如 fd_read）。
+	Name string
+	// Kind 是种类：func / memory / table / global。
+	Kind string
+	// Signature 是规范化类型签名（格式见 SignatureFormatDoc，例：i32i32i32i32_i32）。
+	Signature string
+}
+
+// Section 是一条段表项。
+//
+// Offset/Size 描述**负载**（payload）：Offset 是负载在文件中的绝对起始偏移，
+// Size 是负载字节数（不含 1 字节段 id 与 LEB128 长度前缀）。自定义段的 Name 是
+// 负载开头的名字字段（名字字段本身计入 Size）。
+type Section struct {
+	ID     byte
+	Name   string
+	Offset int
+	Size   int
+}
+
+// ModuleInfo 是静态解析结果（Validate/Parse 的返回值）。
+type ModuleInfo struct {
+	// Imports 是导入段的全部条目（**保持段内顺序与重复**：Go wasip1 实测 fd_write 出现两次）。
+	Imports []Import
+	// Exports 是导出名，按段内顺序。
+	Exports []string
+	// ExportKinds 是导出名 → 种类（func/memory/table/global）；额外字段，便于上层断言
+	// "_start" 是函数、"memory" 是内存（§4.2 导出面判据）。
+	ExportKinds map[string]string
+	// Sections 是段表（含自定义段），按文件顺序。
+	Sections []Section
+	// CustomSections 是段名 → 内容（**重名取第一个**，次数见 CustomSectionCounts）。
+	// 内容切片与传入的 data 共享底层数组（不复制）；若要在释放 data 后继续持有，
+	// 请用 ExtractCustomSections（它会复制）。
+	CustomSections map[string][]byte
+	// CustomSectionCounts 是段名 → 出现次数（重名时同样只有第一个进 CustomSections）。
+	CustomSectionCounts map[string]int
+	// CustomBytes 是全部自定义段的**负载字节和**（口径见 validate.go 的 Validate 注释：
+	// 含段名字段，取保守口径）。
+	CustomBytes int
+	// HasStart 表示存在 start 段（实例化时会自动执行该函数；平台不因此拒绝，仅记录以便诊断）。
+	HasStart bool
+	// MemoryDeclared 表示模块**声明**了线性内存（memory 段非空，或导入了 memory）。
+	MemoryDeclared bool
+	// MemoryExported 表示导出段里有一个种类为 memory 的 "memory" 导出。
+	// §4.2：memory 必须是**导出**而非仅声明（wazero 实例化需要它）。
+	MemoryExported bool
+	// Version / Layer 是模块头两个字段（core: 1 / 0）。
+	Version uint16
+	Layer   uint16
+}
+
+// funcType 是类型段里的一条函数类型。
+type funcType struct {
+	params  []string
+	results []string
+}
+
+func (ft funcType) signature() string {
+	return strings.Join(ft.params, "") + "_" + strings.Join(ft.results, "")
+}
+
+// valueTypeName 把 wasm 值类型字节映射成签名里的短名。
+func valueTypeName(b byte) string {
+	switch b {
+	case 0x7f:
+		return "i32"
+	case 0x7e:
+		return "i64"
+	case 0x7d:
+		return "f32"
+	case 0x7c:
+		return "f64"
+	case 0x7b:
+		return "v128"
+	case 0x70:
+		return "funcref"
+	case 0x6f:
+		return "externref"
+	default:
+		return fmt.Sprintf("t%02x", b)
+	}
+}
+
+// ===== 错误构造（每条都带 hints，§8：第一消费者是 AI）=====
+
+// malformedf 构造 SECTION_MALFORMED（段表/头部结构非法）。
+// apperr.CommonHints 里没有该码的条目，故本包自带一组提示（§8：每条错误都必须带 hints）。
+func malformedf(format string, args ...any) *apperr.Error {
+	return apperr.Newf(apperr.CodeSectionMalformed, format, args...).
+		WithHint(hintsFor(apperr.CodeSectionMalformed, malformedHints...)...)
+}
+
+// hintsFor 返回公共提示（apperr.CommonHints）加上本包补充的提示；
+// 返回**新切片**，不会改写 apperr 的公共表（跨包全局不得被本包就地修改）。
+func hintsFor(code apperr.Code, extra ...string) []string {
+	out := append([]string{}, apperr.CommonHints[code]...)
+	return append(out, extra...)
+}
+
+// malformedHints 是段表类错误的固定提示集合。
+var malformedHints = []string{
+	"文件必须是标准 core module：`\\0asm` 开头、版本字段 = 1、层字段 = 0",
+	"编译目标必须是 wasm32-wasip1（Go: GOOS=wasip1 GOARCH=wasm）",
+	"不要上传 .wat 文本、gzip 压缩包、或组件模型（component / .wit）产物",
+}
+
+// ===== 解析 =====
+
+// Parse 只做**结构与格式解析**，不做任何策略判据（导出面 / 导入白名单 / 体积）。
+//
+// 存在两个入口的原因（自举）：导入白名单（imports_gen.go）本身就是"参考实现真编译产物"的
+// 导出结果，生成器必须在白名单**尚不存在/尚未更新**时就能读出导入集，所以生成器走 Parse；
+// 业务代码一律走 Validate（= Parse + 全部策略判据），门禁测试还会额外断言
+// Validate(参考实现) 通过，确保生成的清单确实覆盖参考实现。
+//
+// 返回的错误全部是 SECTION_MALFORMED（魔数/版本/长度越界/字段非法）或
+// COMPONENT_MODEL_UNSUPPORTED（层字段 != 0，§10.2 第 19 项）。
+func Parse(data []byte) (*ModuleInfo, error) {
+	if len(data) < HeaderLen {
+		return nil, malformedf("模块只有 %d 字节，不足 8 字节头部", len(data)).
+			WithDetail("size", len(data)).
+			WithDetail("min_size", HeaderLen)
+	}
+	if !bytes.Equal(data[:len(ModuleMagic)], []byte(ModuleMagic)) {
+		return nil, malformedf("魔数不是 `\\0asm`（前 4 字节是 %s）", hex.EncodeToString(data[:4])).
+			WithDetail("magic", hex.EncodeToString(data[:4]))
+	}
+	version := binary.LittleEndian.Uint16(data[4:6])
+	layer := binary.LittleEndian.Uint16(data[6:8])
+
+	// ⚠️ 必须先判层字段再判版本：组件模型的版本字段是 13（0x0d），
+	// 反过来判会把"组件模型"误报成 SECTION_MALFORMED，AI 就拿不到正确出路。
+	if layer != 0 {
+		return nil, apperr.New(apperr.CodeComponentModelUnsupport,
+			"不支持组件模型（component）产物：平台只接受 core module").
+			WithDetail("layer", layer).
+			WithDetail("version", version).
+			WithHint(hintsFor(apperr.CodeComponentModelUnsupport,
+				"若用 Rust，请编译到 wasm32-wasip1（而不是 wasm32-wasip2 / component target）",
+				"若用 TypeScript/AssemblyScript，本平台不支持（工具链只产出组件模型）")...)
+	}
+	if version != CoreVersion {
+		return nil, malformedf("模块版本字段是 %d，只支持 core module 版本 %d", version, CoreVersion).
+			WithDetail("version", version).
+			WithDetail("expected_version", CoreVersion)
+	}
+
+	info := &ModuleInfo{
+		Version:             version,
+		Layer:               layer,
+		ExportKinds:         map[string]string{},
+		CustomSections:      map[string][]byte{},
+		CustomSectionCounts: map[string]int{},
+	}
+
+	// 段表遍历：id(1B) + LEB128 u32 长度 + 负载。
+	var (
+		typePayload, importPayload, exportPayload, memoryPayload, startPayload []byte
+		haveType, haveImport, haveExport, haveMemory, haveStart                bool
+		lastSectionID                                                          = -1
+	)
+	offset := HeaderLen
+	for offset < len(data) {
+		sectionStart := offset
+		id := data[offset]
+		offset++
+		size, used, err := readU32(data[offset:])
+		if err != nil {
+			return nil, malformedf("第 %d 字节处的段长度前缀非法：%v（段 id=%s）",
+				offset, err, SectionName(id)).
+				WithDetail("offset", sectionStart).
+				WithDetail("section_id", id).
+				WithDetail("section", SectionName(id)).
+				WithDetail("size_available", len(data)-offset)
+		}
+		offset += used
+		if uint64(size) > uint64(len(data)-offset) {
+			return nil, malformedf("段 %s 声明长度 %d 字节，但文件只剩 %d 字节（段表越界/截断）",
+				SectionName(id), size, len(data)-offset).
+				WithDetail("offset", sectionStart).
+				WithDetail("section_id", id).
+				WithDetail("section", SectionName(id)).
+				WithDetail("declared_size", size).
+				WithDetail("available", len(data)-offset)
+		}
+		payloadStart := offset
+		payload := data[offset : offset+int(size)]
+		offset += int(size)
+
+		if id == SectionCustom {
+			// 自定义段：负载开头是名字（u32 长度 + UTF-8）。
+			name, n, err := readName(payload)
+			if err != nil {
+				return nil, malformedf("自定义段（偏移 %d）的段名非法：%v", sectionStart, err).
+					WithDetail("offset", sectionStart).
+					WithDetail("section_id", id).
+					WithDetail("section", SectionName(id)).
+					WithDetail("size", size)
+			}
+			info.Sections = append(info.Sections, Section{ID: id, Name: name, Offset: payloadStart, Size: int(size)})
+			info.CustomSectionCounts[name]++
+			if _, dup := info.CustomSections[name]; !dup {
+				info.CustomSections[name] = payload[n:]
+			}
+			info.CustomBytes += int(size)
+			continue
+		}
+
+		// 非自定义段：每个 id 至多一次，且必须按 id 升序（core spec §5.5）。
+		if int(id) < lastSectionID {
+			return nil, malformedf("段顺序非法：段 %s 出现在段 id %d 之后（非自定义段必须按 id 升序）",
+				SectionName(id), lastSectionID).
+				WithDetail("offset", sectionStart).
+				WithDetail("section_id", id).
+				WithDetail("section", SectionName(id)).
+				WithDetail("previous_section_id", lastSectionID)
+		}
+		if id > SectionDataCount {
+			return nil, malformedf("未知段 id %d（core spec 只定义 0–12）", id).
+				WithDetail("offset", sectionStart).
+				WithDetail("section_id", id)
+		}
+		lastSectionID = int(id)
+		info.Sections = append(info.Sections, Section{ID: id, Offset: payloadStart, Size: int(size)})
+
+		switch id {
+		case SectionType:
+			if haveType {
+				return nil, duplicateSection(sectionStart, id)
+			}
+			haveType, typePayload = true, payload
+		case SectionImport:
+			if haveImport {
+				return nil, duplicateSection(sectionStart, id)
+			}
+			haveImport, importPayload = true, payload
+		case SectionExport:
+			if haveExport {
+				return nil, duplicateSection(sectionStart, id)
+			}
+			haveExport, exportPayload = true, payload
+		case SectionMemory:
+			if haveMemory {
+				return nil, duplicateSection(sectionStart, id)
+			}
+			haveMemory, memoryPayload = true, payload
+		case SectionStart:
+			if haveStart {
+				return nil, duplicateSection(sectionStart, id)
+			}
+			haveStart, startPayload = true, payload
+		}
+	}
+
+	// 类型段必须**先**解析：导入函数的签名（Import.Signature）都指向类型段的下标。
+	var types []funcType
+	if haveType {
+		parsed, err := parseTypes(typePayload)
+		if err != nil {
+			return nil, err
+		}
+		types = parsed
+	}
+
+	if haveImport {
+		imports, err := parseImports(importPayload, types)
+		if err != nil {
+			return nil, err
+		}
+		info.Imports = imports
+		for _, imp := range imports {
+			if imp.Kind == KindMemory {
+				info.MemoryDeclared = true
+			}
+		}
+	}
+	if haveExport {
+		names, kinds, err := parseExports(exportPayload)
+		if err != nil {
+			return nil, err
+		}
+		info.Exports = names
+		info.ExportKinds = kinds
+		if k, ok := kinds["memory"]; ok && k == KindMemory {
+			info.MemoryExported = true
+		}
+	}
+	if haveMemory {
+		n, used, err := readU32(memoryPayload)
+		if err != nil {
+			return nil, malformedf("内存段的条目数非法：%v", err).
+				WithDetail("section", SectionName(SectionMemory))
+		}
+		if n > 0 {
+			info.MemoryDeclared = true
+		}
+		// 逐条校验 limits 编码，避免"声明了但编码非法"被当成合法。
+		rest := memoryPayload[used:]
+		for i := uint32(0); i < n; i++ {
+			_, consumed, err := parseLimits(rest)
+			if err != nil {
+				return nil, malformedf("内存段第 %d 条 limits 非法：%v", i, err).
+					WithDetail("section", SectionName(SectionMemory)).
+					WithDetail("index", i)
+			}
+			rest = rest[consumed:]
+		}
+	}
+	if haveStart {
+		if len(startPayload) == 0 {
+			return nil, malformedf("start 段为空（规范要求一个函数索引）").
+				WithDetail("section", SectionName(SectionStart))
+		}
+		if _, _, err := readU32(startPayload); err != nil {
+			return nil, malformedf("start 段的函数索引非法：%v", err).
+				WithDetail("section", SectionName(SectionStart))
+		}
+		info.HasStart = true
+	}
+	return info, nil
+}
+
+func duplicateSection(offset int, id byte) *apperr.Error {
+	return malformedf("段 %s 出现了两次（非自定义段至多一次）", SectionName(id)).
+		WithDetail("offset", offset).
+		WithDetail("section_id", id).
+		WithDetail("section", SectionName(id))
+}
+
+// parseTypes 解析类型段：vec of functype(0x60)。
+func parseTypes(payload []byte) ([]funcType, error) {
+	n, used, err := readU32(payload)
+	if err != nil {
+		return nil, malformedf("类型段条目数非法：%v", err).WithDetail("section", SectionName(SectionType))
+	}
+	out := make([]funcType, 0, n)
+	rest := payload[used:]
+	for i := uint32(0); i < n; i++ {
+		if len(rest) == 0 {
+			return nil, malformedf("类型段第 %d 条在数据结束前截断", i).
+				WithDetail("section", SectionName(SectionType)).WithDetail("index", i)
+		}
+		if rest[0] != 0x60 {
+			return nil, malformedf("类型段第 %d 条不是函数类型（首字节 0x%02x，应为 0x60）", i, rest[0]).
+				WithDetail("section", SectionName(SectionType)).WithDetail("index", i)
+		}
+		rest = rest[1:]
+		np, used, err := readU32(rest)
+		if err != nil {
+			return nil, malformedf("类型段第 %d 条形参个数非法：%v", i, err).
+				WithDetail("section", SectionName(SectionType)).WithDetail("index", i)
+		}
+		rest = rest[used:]
+		if uint64(np) > uint64(len(rest)) {
+			return nil, malformedf("类型段第 %d 条形参越界（声明 %d 个）", i, np).
+				WithDetail("section", SectionName(SectionType)).WithDetail("index", i)
+		}
+		ft := funcType{params: make([]string, 0, np)}
+		for k := uint32(0); k < np; k++ {
+			ft.params = append(ft.params, valueTypeName(rest[k]))
+		}
+		rest = rest[np:]
+		nr, used, err := readU32(rest)
+		if err != nil {
+			return nil, malformedf("类型段第 %d 条结果个数非法：%v", i, err).
+				WithDetail("section", SectionName(SectionType)).WithDetail("index", i)
+		}
+		rest = rest[used:]
+		if uint64(nr) > uint64(len(rest)) {
+			return nil, malformedf("类型段第 %d 条结果越界（声明 %d 个）", i, nr).
+				WithDetail("section", SectionName(SectionType)).WithDetail("index", i)
+		}
+		ft.results = make([]string, 0, nr)
+		for k := uint32(0); k < nr; k++ {
+			ft.results = append(ft.results, valueTypeName(rest[k]))
+		}
+		rest = rest[nr:]
+		out = append(out, ft)
+	}
+	return out, nil
+}
+
+// parseImports 解析导入段（vec of import）。
+func parseImports(payload []byte, types []funcType) ([]Import, error) {
+	n, used, err := readU32(payload)
+	if err != nil {
+		return nil, malformedf("导入段条目数非法：%v", err).WithDetail("section", SectionName(SectionImport))
+	}
+	rest := payload[used:]
+	out := make([]Import, 0, n)
+	for i := uint32(0); i < n; i++ {
+		detail := func() *apperr.Error {
+			return malformedf("导入段第 %d 条非法", i).
+				WithDetail("section", SectionName(SectionImport)).
+				WithDetail("index", i)
+		}
+		module, consumed, err := readName(rest)
+		if err != nil {
+			return nil, detail().WithCause(err)
+		}
+		rest = rest[consumed:]
+		name, consumed, err := readName(rest)
+		if err != nil {
+			return nil, detail().WithCause(err)
+		}
+		rest = rest[consumed:]
+		if len(rest) == 0 {
+			return nil, detail().WithCause(errTruncated)
+		}
+		kindByte := rest[0]
+		rest = rest[1:]
+		imp := Import{Module: module, Name: name}
+		switch kindByte {
+		case 0x00: // func: typeidx
+			idx, consumed, err := readU32(rest)
+			if err != nil {
+				return nil, detail().WithCause(err)
+			}
+			rest = rest[consumed:]
+			if uint64(idx) >= uint64(len(types)) {
+				return nil, detail().WithDetail("type_index", idx).
+					WithDetail("type_count", len(types)).
+					WithCause(errTruncated)
+			}
+			imp.Kind = KindFunc
+			imp.Signature = types[idx].signature()
+		case 0x01: // table: reftype + limits
+			if len(rest) == 0 {
+				return nil, detail().WithCause(errTruncated)
+			}
+			elemType := valueTypeName(rest[0])
+			lim, consumed, err := parseLimits(rest[1:])
+			if err != nil {
+				return nil, detail().WithCause(err)
+			}
+			rest = rest[1+consumed:]
+			imp.Kind = KindTable
+			imp.Signature = "table:" + elemType + ":" + lim
+		case 0x02: // memory: limits
+			lim, consumed, err := parseLimits(rest)
+			if err != nil {
+				return nil, detail().WithCause(err)
+			}
+			rest = rest[consumed:]
+			imp.Kind = KindMemory
+			imp.Signature = "mem:" + lim
+		case 0x03: // global: valtype + mut
+			if len(rest) < 2 {
+				return nil, detail().WithCause(errTruncated)
+			}
+			imp.Kind = KindGlobal
+			imp.Signature = "global:" + valueTypeName(rest[0])
+			if rest[1] == 1 {
+				imp.Signature += ":mut"
+			}
+			rest = rest[2:]
+		default:
+			return nil, detail().WithDetail("kind_byte", kindByte).
+				WithDetail("reason", "导入种类只能是 0(func)/1(table)/2(memory)/3(global)")
+		}
+		out = append(out, imp)
+	}
+	return out, nil
+}
+
+// parseExports 解析导出段（vec of export），返回名字序列与名字→种类映射。
+func parseExports(payload []byte) ([]string, map[string]string, error) {
+	n, used, err := readU32(payload)
+	if err != nil {
+		return nil, nil, malformedf("导出段条目数非法：%v", err).WithDetail("section", SectionName(SectionExport))
+	}
+	rest := payload[used:]
+	names := make([]string, 0, n)
+	kinds := make(map[string]string, n)
+	for i := uint32(0); i < n; i++ {
+		detail := func() *apperr.Error {
+			return malformedf("导出段第 %d 条非法", i).
+				WithDetail("section", SectionName(SectionExport)).
+				WithDetail("index", i)
+		}
+		name, consumed, err := readName(rest)
+		if err != nil {
+			return nil, nil, detail().WithCause(err)
+		}
+		rest = rest[consumed:]
+		if len(rest) < 2 {
+			return nil, nil, detail().WithCause(errTruncated)
+		}
+		kindByte, idx := rest[0], rest[1:]
+		rest = rest[1:]
+		var kind string
+		switch kindByte {
+		case 0x00:
+			kind = KindFunc
+		case 0x01:
+			kind = KindTable
+		case 0x02:
+			kind = KindMemory
+		case 0x03:
+			kind = KindGlobal
+		default:
+			return nil, nil, detail().WithDetail("kind_byte", kindByte).
+				WithDetail("reason", "导出种类只能是 0(func)/1(table)/2(memory)/3(global)")
+		}
+		_, consumed, err = readU32(idx)
+		if err != nil {
+			return nil, nil, detail().WithCause(err)
+		}
+		rest = rest[consumed:]
+		if _, dup := kinds[name]; dup {
+			// 规范要求导出名唯一；重名会让"memory 是不是内存"这类判据产生歧义（安全相关），故直接拒。
+			return nil, nil, detail().WithDetail("name", name).
+				WithDetail("reason", "导出名重复（规范要求唯一）")
+		}
+		names = append(names, name)
+		kinds[name] = kind
+	}
+	return names, kinds, nil
+}
+
+// parseLimits 解析 limits 编码（flags 字节 + min [+ max]），返回描述串与消耗字节数。
+func parseLimits(b []byte) (string, int, error) {
+	if len(b) == 0 {
+		return "", 0, errTruncated
+	}
+	flags := b[0]
+	if flags > 0x03 {
+		return "", 0, fmt.Errorf("limits flags 非法：0x%02x", flags)
+	}
+	used := 1
+	min, n, err := readU32(b[used:])
+	if err != nil {
+		return "", 0, err
+	}
+	used += n
+	out := fmt.Sprintf("%d..", min)
+	if flags&0x01 != 0 {
+		max, n, err := readU32(b[used:])
+		if err != nil {
+			return "", 0, err
+		}
+		used += n
+		out += fmt.Sprintf("%d", max)
+	} else {
+		out += "∞"
+	}
+	if flags&0x02 != 0 {
+		out += ":shared"
+	}
+	return out, used, nil
+}
+
+// ===== 自定义段抽取（发布期静态资源，§4.2）=====
+
+// ExtractCustomSections 抽出全部自定义段，供发布期把静态资源落到
+// `<data_root>/apps/<app_id>/assets/<release_id>/`（§4.2，抽完即可释放 wasm 原始字节）。
+//
+// 与 Parse 的差别：
+//   - 返回的内容是**复制**过的，不与 data 共享底层数组——这是"抽完立即释放原始字节"（§4.2）成立的前提；
+//   - 重名段取第一个（与 Parse 一致）。
+//
+// 本函数只做结构解析，**不重复策略判据**：调用方应先 Validate（体积 / 自定义段总量 / 导出面 / 导入面）
+// 再抽取（发布链路"抽出失败 = 发布失败"的前提是静态校验已经通过）。
+func ExtractCustomSections(data []byte) (map[string][]byte, error) {
+	info, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]byte, len(info.CustomSections))
+	for name, content := range info.CustomSections {
+		cp := make([]byte, len(content))
+		copy(cp, content)
+		out[name] = cp
+	}
+	return out, nil
+}

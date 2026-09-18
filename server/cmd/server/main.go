@@ -38,6 +38,8 @@ import (
 	"github.com/picoaide/picoaide/internal/telemetry"
 	"github.com/picoaide/picoaide/internal/updatecheck"
 	"github.com/picoaide/picoaide/internal/util"
+	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 	"github.com/picoaide/picoaide/webadmin"
 )
 
@@ -182,6 +184,32 @@ func main() {
 	// (启用 LDAP 立即生效、禁用 LDAP 立即失效,无需重启)。
 	adminAPI := &serverauth.AdminAPI{DB: db}
 	adminAPI.ReloadAuth = func() error { return auth.ReloadProviders(db) }
+
+	// WASM 应用平台（设计基线 docs/planning/2026-09-17-wasm-app-platform.md）。
+	// 装配期自检失败一律 log.Fatalf（见 setupWasmPlatform 的注释：三处 fail-closed
+	// 的失败形态都是静默的）。未配置 PICOAI_APPS_BASE_DOMAIN 时平台降级为
+	// "只有操作面、没有应用子域" —— 发布/校验链路仍可用。
+	wasmCtx, wasmStop := context.WithCancel(context.Background())
+	defer wasmStop()
+	wasmPlat := setupWasmPlatform(wasmCtx, db, authCfg.API, *dataDir, *addr)
+	defer wasmPlat.Close()
+
+	// 内置技能（随镜像发布，见 internal/wasmapp/skillseed）：镜像内
+	// /opt/picoaide/skills（可用 PICOAI_SKILL_SEED_DIR 覆盖），服务端打包后由
+	// GET /api/client/v2/skills/builtin[/:name/archive] 下发，客户端在能力中心
+	// **按需安装**（不自动装）。这里启动即加载一次：清单要在第一个请求之前就绪，
+	// 且"资产缺失/坏掉"必须出现在启动日志里 —— 否则它只表现为"客户端里没有这条
+	// 技能"，零报错（与 clientrelease 的负载清单同一个教训）。
+	skillCatalog := skillseed.New(skillseed.Dir)
+	if lerr := skillCatalog.Load(); lerr != nil {
+		log.Printf("内置技能目录读取失败（%v），内置技能清单为空", lerr)
+	} else {
+		for _, problem := range skillCatalog.Problems() {
+			log.Printf("内置技能被跳过 —— %s", problem)
+		}
+		log.Printf("内置技能：%d 个（%s）", len(skillCatalog.Entries()), skillCatalog.Dir())
+	}
+
 	router.Register(r, router.Deps{
 		DB:        db,
 		Auth:      auth.Handlers(),
@@ -191,6 +219,8 @@ func main() {
 		// 客户端安装包随镜像发布:服务端把它所在的镜像目录直接对外提供
 		// (GET /api/client/v2/updates/manifest 与 /updates/client/<file>)。
 		ClientRelease: clientrelease.NewHandlers(func() string { return version }, channelID),
+		// 内置技能下发面（随镜像发布：/opt/picoaide/skills）。
+		SkillSeed: skillseed.NewHandlers(skillCatalog),
 		// 渠道内容随镜像发布(channels/<id>/ → /opt/picoaide/channel/),服务端读文件下发。
 		Channel: channel.NewHandlers(),
 		// 门户页配置:只管"是否公开 / 下载地址覆盖 / 说明文字"。
@@ -204,9 +234,17 @@ func main() {
 		Telemetry:   telemetry.NewHandlers(db),
 		Gateway:     llmgateway.NewHandlers(db),
 		Reports:     reports.NewHandlers(db),
+		// WASM 应用平台操作面（§8）+ 员工浏览器会话/换票（R12/R16）。
+		// 管理面只在主站暴露：应用子域走 edge.HostGate 的独立路由树，
+		// 主站路由在子域结构上不可达（§4.8 / F-52e）。
+		Wasm:        wasmPlat.API,
+		WasmSession: wasmPlat.Session,
 	})
 	// 固定探针(不属于两命名空间)。
 	r.GET("/healthz", bootstrap.NewHandlers(db).Health)
+	// §4.9 运维面：磁盘余量 / 编译队列 / 执行队列 / 编译缓存水位。
+	// 现网 healthz 只做 db.Ping —— 磁盘满仍 healthy，那正是本探针要补的洞。
+	r.GET("/readyz", gin.WrapH(wasmPlat.Checker.Handler()))
 	// 审计日志保留策略(v3b: settings audit.retention_days, 默认 180 天;
 	// 安全/权限类事件 365 天由应用策略保证, 这里按全局保留清理)。
 	retentionDays := 180
@@ -232,13 +270,26 @@ func main() {
 	log.Printf("picoaide-server v%s listening on %s (data=%s)", version, *addr, *dataDir)
 	// 显式超时(slowloris/慢体攻击防护);WriteTimeout 需覆盖 SSE 流(空闲流由网关侧
 	// 90s idle 判定终止),给足 5 分钟
+	// 主机名门控必须在 HTTP 服务的最外层（§4.8 / §15.1 第 2 条）：
+	// 应用子域只可能进入应用路由树，主站路由在子域**结构上不可达**
+	// （allow-list，而不是在庞大的主站路由表上维护"禁命中清单"）。
+	// 未启用应用子域时 HostGate 为 nil，直接挂主站引擎（既有行为不变）。
+	var rootHandler http.Handler = r
+	if wasmPlat.HostGate != nil {
+		wasmPlat.HostGate.Main = r
+		rootHandler = wasmPlat.HostGate
+	}
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           r,
+		Handler:           rootHandler,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		WriteTimeout:      5 * time.Minute,
-		IdleTimeout:       120 * time.Second,
+		// 读超时的**唯一真源**是 limits.ServerReadTimeout（§5.5 数值单一真源）：
+		// §10.5 第 58 项的配置断言是 `ClientUploadTimeout(90s) > ServerReadTimeout`，
+		// 它只有在"真实服务端行为与 limits 常量同源"时才成立 —— 硬编码 60s 会让
+		// 改 limits 不改行为、断言开始说谎（审计 P2-5）。
+		ReadTimeout:  limits.ServerReadTimeout,
+		WriteTimeout: 5 * time.Minute,
+		IdleTimeout:  120 * time.Second,
 		// FIX-15(审计 2026-09-12,P1,纵深):请求行与请求头合计上限。
 		// 此前沿用 Go 默认 1 MB —— 256 KB 的 `?type=` 查询串能被完整接收并
 		// 进入 O(n²) 解析(单请求 14.96 s / ~500 CPU·秒)。真实客户端的

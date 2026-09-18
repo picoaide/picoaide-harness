@@ -1,0 +1,484 @@
+import { useCallback, useEffect, useState } from 'react'
+import { PublishForm } from './PublishForm.tsx'
+import { openAppEntry } from './open-app.ts'
+import { safeEntryURL } from './open-app.ts'
+import { ACCESS_MODES, DEFAULT_ACCESS, type AccessMode } from './appcfg-contract.ts'
+import { t, type AppCenterKey } from './locales.ts'
+
+/**
+ * 应用中心（App Center，R34）——「同事做的小工具」的目录。
+ *
+ * 四条产品约定（都来自设计基线，不是自由发挥）：
+ *
+ *  - **目录一律展示全部应用**（2026-09-18 拍板）。**不再按可见性过滤**：`visible` 字段
+ *    已从契约里删除，"公开 / 登录后使用 / 仅白名单"只决定**谁能用**，不决定**谁能看见**
+ *    （白名单应用也列出来，点开由应用自己判并返回它的 403 页）。服务端
+ *    `GET /api/client/v2/apps/wasm/catalog` 给什么就渲染什么，客户端不新增第二条筛选规则
+ *    —— 两份规则迟早给出不同答案，而"为什么这个应用看不到"会变成无法回答的问题。
+ *  - **标出访问级别**：用服务端下发的 `access`（三模式之一），让"点开会被拦吗"在点击
+ *    之前就有答案。`access` 尚未就绪时的过渡兼容见 {@link resolveAccess}。
+ *  - **下架的条目也要展示**（`enabled=false` 显示"已下架"并禁用打开）：下架不等于不存在，
+ *    直接从目录里消失会让用户以为是自己看错了。
+ *  - **R36：不显示额度/用量**。额度唯一的入口是桌面客户端本来的账号卡；这一页只有
+ *    名称 / 一句话说明 / 负责人 / 访问级别 / 入口链接。**不做安装语义**：应用在子域上，
+ *    点开即用（没有"装到本地"这一步）。
+ *
+ * @module @picoaide/dsh-wasm-apps/client/AppCenterPanel
+ */
+
+/** 目录条目（服务端 `catalog` 的字段子集；未知字段一律忽略）。 */
+export interface AppCenterItem {
+  appId: string
+  title: string
+  description: string
+  responsible: string
+  entryURL: string
+  /** 访问级别（服务端 `access`）：决定"点开会不会被应用拦下"。 */
+  access: AccessMode
+  /** 是否上架（服务端 `enabled`）；`false` = 已下架，仍然展示但禁用打开。 */
+  enabled: boolean
+}
+
+/**
+ * 解析一条目录行的访问级别。
+ *
+ * **过渡兼容（可删）**：`access` 三模式与服务端 `api/read.go` 的 catalog 是同一批改动
+ * 的两半，落地过程中服务端可能还在下发旧的 `login_required` / `whitelist`。因此
+ * `access` 缺失时按旧字段回落读取：
+ *
+ * ```
+ * access ?? (login_required === false ? 'public' : (whitelist?.length ? 'whitelist' : 'login'))
+ * ```
+ *
+ * 这条分支**只在 `access` 缺席时生效**（服务端一旦返回 `access` 它就永远不会被走到）。
+ * 它的价值是"迁移期间不要把每个应用都误标成登录后使用"；确认服务端已下发 `access`
+ * 之后（`appcfg-contract.spec.ts` 的对拍 + 一次真实目录响应）即可删除。
+ * @param row - 服务端目录行。
+ * @returns 三模式之一；服务端给了非法值时回落成 `login`（缺省模式，不放大权限）。
+ */
+export function resolveAccess(row: Record<string, unknown>): AccessMode {
+  const raw = row.access
+  if (typeof raw === 'string') {
+    if ((ACCESS_MODES as readonly string[]).includes(raw)) return raw as AccessMode
+    // **给了但非法**（不是缺失）⇒ 按缺省模式处理，绝不落到下面的旧字段分支：
+    // 那一条会把"服务端下发了一个我们还不认识的新模式"翻译成 `public`
+    // （`login_required === false` 时），也就是**把权限放大**。
+    // 独立审计 2026-09-18 在 DOM 上复现过这条（`access: 'org'` + `login_required: false`
+    // 渲染成「公开」）；不认识的值一律按最保守的缺省显示。
+    return DEFAULT_ACCESS
+  }
+  // ---- 以下是过渡兼容分支（**只在 access 缺失时**生效，见函数注释）：access 就绪后删除 ----
+  if (row.login_required === false) return 'public'
+  if (Array.isArray(row.whitelist) && row.whitelist.length > 0) return 'whitelist'
+  return DEFAULT_ACCESS
+}
+
+/** 访问级别徽标的字典键。 */
+const ACCESS_BADGE_KEYS: Record<AccessMode, AppCenterKey> = {
+  public: 'appCenter.accessBadge.public',
+  login: 'appCenter.accessBadge.login',
+  whitelist: 'appCenter.accessBadge.whitelist',
+}
+
+/**
+ * 访问级别的展示文案（短标签，目录行里用）。
+ * @param access - 访问级别。
+ * @returns 当前语言下的短标签。
+ */
+export function accessBadge(access: AccessMode): string {
+  return t(ACCESS_BADGE_KEYS[access])
+}
+
+/** 面板状态机。 */
+export type AppCenterState =
+  | { kind: 'loading' }
+  | { kind: 'error', message: string }
+  | { kind: 'ready', items: AppCenterItem[] }
+
+/**
+ * 解析目录载荷（纯函数，便于单测）。
+ *
+ * 字段名与 server 的 `catalog` 行一一对应（`app_id`/`title`/`description`/
+ * `responsible`/`entry_url`/`access`/`enabled`）；`title` 缺失时回落到 `app_id`
+ * （应用名就是域名，至少能让人认出是哪个）。
+ *
+ * **不丢任何一行**：这里只有"这条不是合法对象"才跳过，没有任何按可见性/权限/
+ * 上下架的筛选（目录展示全部应用）。
+ * @param payload - `GET /api/pico/apps/wasm` 的响应体。
+ * @returns 归一化后的条目；结构不对时返回空数组（面板显示空态，而不是崩掉）。
+ */
+export function parseCatalog(payload: unknown): AppCenterItem[] {
+  const rows = (payload as { apps?: unknown } | null)?.apps
+  if (!Array.isArray(rows)) return []
+  const items: AppCenterItem[] = []
+  for (const row of rows) {
+    if (row === null || typeof row !== 'object') continue
+    const entry = row as Record<string, unknown>
+    const appId = typeof entry.app_id === 'string' ? entry.app_id : ''
+    if (appId === '') continue
+    items.push({
+      appId,
+      title: typeof entry.title === 'string' && entry.title.trim() !== '' ? entry.title : appId,
+      description: typeof entry.description === 'string' ? entry.description : '',
+      responsible: typeof entry.responsible === 'string' ? entry.responsible : '',
+      entryURL: typeof entry.entry_url === 'string' ? entry.entry_url : '',
+      access: resolveAccess(entry),
+      // 服务端**会**下发 enabled（下架条目也照样列在目录里，见 api/read.go），
+      // 所以这里只在字段缺失时才按"上架"兜底。
+      enabled: entry.enabled !== false,
+    })
+  }
+  return items
+}
+
+/**
+ * 入口链接的展示文本（只显示主机名：完整 URL 太长，而 <app_id>.<基域> 的
+ * 主机名本身就是"这是什么应用"的第二个答案）。
+ * @param entryURL - 服务端下发的入口链接。
+ * @returns 主机名，或原串（解析失败时）。
+ */
+export function entryHostLabel(entryURL: string): string {
+  const url = safeEntryURL(entryURL)
+  if (url === null) return entryURL
+  try {
+    return new URL(url).host
+  } catch {
+    return entryURL
+  }
+}
+
+const OVERLAY: React.CSSProperties = {
+  position: 'fixed',
+  inset: 0,
+  zIndex: 1000,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+}
+
+const MASK: React.CSSProperties = {
+  position: 'absolute',
+  inset: 0,
+  background: 'var(--dsw-alias-bg-mask-1)',
+  backdropFilter: 'var(--dsw-mask-blur)',
+}
+
+const PANEL: React.CSSProperties = {
+  position: 'relative',
+  zIndex: 1,
+  display: 'flex',
+  flexDirection: 'column',
+  width: 720,
+  maxWidth: 'calc(100vw - 48px)',
+  height: 'min(680px, calc(100vh - 48px))',
+  borderRadius: 24,
+  overflow: 'hidden',
+  background: 'var(--dsw-alias-bg-layer-2)',
+  boxShadow: 'var(--dsw-shadow-lv3)',
+}
+
+const HEADER: React.CSSProperties = {
+  flex: 'none',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  height: 54,
+  boxSizing: 'border-box',
+  padding: '14px 18px',
+}
+
+const TITLE: React.CSSProperties = {
+  margin: 0,
+  fontSize: 16,
+  lineHeight: '24px',
+  fontWeight: 500,
+  color: 'var(--dsw-alias-label-primary)',
+}
+
+const SUBTITLE: React.CSSProperties = {
+  margin: '2px 0 0',
+  fontSize: 12,
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-label-secondary)',
+}
+
+const CLOSE: React.CSSProperties = {
+  border: 'none',
+  background: 'transparent',
+  cursor: 'pointer',
+  color: 'var(--dsw-alias-label-secondary)',
+  fontSize: 18,
+  lineHeight: '24px',
+  padding: '2px 6px',
+}
+
+/** 面板头部右侧的发布入口（FIX-38：整条发布链路唯一的员工调用方）。 */
+const PUBLISH_ENTRY: React.CSSProperties = {
+  border: '1px solid var(--dsw-alias-border-l2)',
+  borderRadius: 10,
+  background: 'transparent',
+  color: 'var(--dsw-alias-label-primary)',
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+  fontSize: 13,
+  lineHeight: '20px',
+  padding: '4px 12px',
+}
+
+const BODY: React.CSSProperties = {
+  flex: 1,
+  minHeight: 0,
+  overflowY: 'auto',
+  padding: '4px 18px 18px',
+}
+
+const CARD: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 12,
+  padding: '12px 14px',
+  marginBottom: 8,
+  borderRadius: 14,
+  border: '1px solid var(--dsw-alias-border-l2)',
+  background: 'var(--dsw-alias-bg-layer-1)',
+}
+
+const ROW_MAIN: React.CSSProperties = { flex: 1, minWidth: 0 }
+
+const TITLE_ROW: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }
+
+/** 访问级别徽标（短标签；放在标题右侧，让"点开会不会被拦"在点击前可见）。 */
+const BADGE: React.CSSProperties = {
+  flex: 'none',
+  borderRadius: 999,
+  border: '1px solid var(--dsw-alias-border-l2)',
+  padding: '0 8px',
+  fontSize: 11,
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-label-secondary)',
+  whiteSpace: 'nowrap',
+}
+
+/** 已下架徽标（比访问级别更弱一等：状态而不是能力）。 */
+const DISABLED_BADGE: React.CSSProperties = { ...BADGE, color: 'var(--dsw-alias-label-tertiary)' }
+
+const ROW_TITLE: React.CSSProperties = {
+  margin: 0,
+  fontSize: 14,
+  lineHeight: '22px',
+  fontWeight: 500,
+  color: 'var(--dsw-alias-label-primary)',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+}
+
+const ROW_DESC: React.CSSProperties = {
+  margin: '2px 0 0',
+  fontSize: 12,
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-label-secondary)',
+}
+
+const ROW_META: React.CSSProperties = {
+  margin: '4px 0 0',
+  fontSize: 11,
+  lineHeight: '16px',
+  color: 'var(--dsw-alias-label-tertiary)',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+}
+
+const OPEN_BUTTON: React.CSSProperties = {
+  flex: 'none',
+  border: '1px solid var(--dsw-alias-border-l2)',
+  borderRadius: 10,
+  background: 'transparent',
+  color: 'var(--dsw-alias-label-primary)',
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+  fontSize: 13,
+  lineHeight: '20px',
+  padding: '6px 12px',
+}
+
+const HINT: React.CSSProperties = {
+  padding: '28px 18px',
+  textAlign: 'center',
+  color: 'var(--dsw-alias-label-secondary)',
+  fontSize: 13,
+  lineHeight: '20px',
+}
+
+/**
+ * 应用中心面板（模态）。
+ *
+ * 两个视图（FIX-38）：**目录**（默认，只读）与**发布**（员工发布入口）。发布由页面
+ * 上下文 `POST /api/pico/apps/wasm/publish` —— 页面天然持 `dsh-auth-*` 持有性证明，
+ * 因此不需要任何新的信任机制；分片/续传/90 s 预算全部复用宿主那一份编排。
+ *
+ * @param props - `onClose` 由触发按钮提供（关闭时卸载面板）。
+ */
+export function AppCenterPanel({ onClose }: { onClose: () => void }) {
+  const [state, setState] = useState<AppCenterState>({ kind: 'loading' })
+  const [view, setView] = useState<'catalog' | 'publish'>('catalog')
+
+  const load = useCallback(async (): Promise<void> => {
+    setState({ kind: 'loading' })
+    try {
+      const response = await fetch('/api/pico/apps/wasm')
+      if (!response.ok) {
+        // 401 = 未登录（宿主路由的 AUTH_REQUIRED）：这是可读的常态，不是崩溃。
+        setState({ kind: 'error', message: response.status === 401 ? t('appCenter.notLoggedIn') : `${t('appCenter.error')} (HTTP ${String(response.status)})` })
+        return
+      }
+      setState({ kind: 'ready', items: parseCatalog(await response.json()) })
+    } catch (cause) {
+      setState({ kind: 'error', message: cause instanceof Error ? cause.message : String(cause) })
+    }
+  }, [])
+
+  useEffect(() => { void load() }, [load])
+
+  // Esc 关闭：模态的可预期出口（与能力中心一致的口径）。
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('keydown', onKey) }
+  }, [onClose])
+
+  return (
+    <div style={OVERLAY} role="dialog" aria-modal="true" aria-label={t('appCenter.title')} className="pico-app-center">
+      <div style={MASK} onClick={onClose} />
+      <div style={PANEL}>
+        <div style={HEADER}>
+          <div>
+            <h2 style={TITLE}>{t('appCenter.title')}</h2>
+            <p style={SUBTITLE}>{view === 'publish' ? t('appCenter.publishTitle') : t('appCenter.subtitle')}</p>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {view === 'catalog' && (
+              <button
+                type="button"
+                className="pico-app-center-publish"
+                data-action="open-publish"
+                style={PUBLISH_ENTRY}
+                aria-label={t('appCenter.publishAria')}
+                onClick={() => { setView('publish') }}
+              >
+                {t('appCenter.publish')}
+              </button>
+            )}
+            <button type="button" style={CLOSE} onClick={onClose} aria-label={t('appCenter.close')}>✕</button>
+          </div>
+        </div>
+        <div style={BODY}>
+          {view === 'catalog'
+            ? <AppCenterBody state={state} onRetry={() => { void load() }} onPublish={() => { setView('publish') }} />
+            : (
+                <PublishForm
+                  onClose={() => { setView('catalog') }}
+                  onPublished={() => { void load() }}
+                />
+              )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 面板正文：把四种状态渲染成 DOM（loading / error / empty / list）。
+ *
+ * 单独导出而不是内联在 {@link AppCenterPanel} 里，是为了让"目录渲染 / 空态 /
+ * 不含额度字段"这三条断言可以**直接渲染**；而"挂载后真的取数"这条链路由
+ * `app-center-mount.spec.tsx` 用真挂载（跑 `useEffect`）+ 真路由覆盖（FIX-42）。
+ * @param props - 当前状态、重试回调与"去发布"回调。
+ */
+export function AppCenterBody({ state, onRetry, onPublish }: { state: AppCenterState, onRetry: () => void, onPublish?: () => void }) {
+  return (
+    <>
+      {state.kind === 'loading' && <div style={HINT}>{t('appCenter.loading')}</div>}
+      {state.kind === 'error' && (
+        <div style={HINT}>
+          <div>{state.message}</div>
+          <button type="button" className="pico-app-center-retry" style={{ ...OPEN_BUTTON, marginTop: 12 }} onClick={onRetry}>
+            {t('appCenter.retry')}
+          </button>
+        </div>
+      )}
+      {state.kind === 'ready' && state.items.length === 0 && (
+        <div style={HINT}>
+          <div>{t('appCenter.empty')}</div>
+          <div style={{ marginTop: 6 }}>{t('appCenter.emptyHint')}</div>
+          {onPublish !== undefined && (
+            <button type="button" className="pico-app-center-empty-publish" style={{ ...OPEN_BUTTON, marginTop: 12 }} onClick={onPublish}>
+              {t('appCenter.publish')}
+            </button>
+          )}
+        </div>
+      )}
+      {state.kind === 'ready' && state.items.map(item => (
+        <AppCenterRow key={item.appId} item={item} />
+      ))}
+    </>
+  )
+}
+
+/**
+ * 一行应用：名称 / 访问级别 / 一句话说明 / 负责人 / 入口链接 / 打开。
+ *
+ * 下架的条目（`enabled=false`）**照常展示**并标出"已下架"，只是打开按钮禁用 ——
+ * 直接从目录消失会让用户以为是自己看错了。
+ *
+ * 点击"打开"走 {@link openAppEntry}（内置浏览器优先、系统浏览器兜底）；
+ * 链接非法（或已下架）时按钮禁用 —— 一个点不动的按钮比一个什么都不做的按钮诚实。
+ * @param props - 目录条目。
+ */
+export function AppCenterRow({ item }: { item: AppCenterItem }) {
+  const [opening, setOpening] = useState(false)
+  const openable = item.enabled && safeEntryURL(item.entryURL) !== null
+  const open = (): void => {
+    if (!openable) return
+    setOpening(true)
+    void openAppEntry(item.entryURL).finally(() => { setOpening(false) })
+  }
+  return (
+    <div style={CARD} className="pico-app-center-card">
+      <div style={ROW_MAIN}>
+        <div style={TITLE_ROW}>
+          <h3 style={ROW_TITLE} title={item.title}>{item.title}</h3>
+          <span
+            style={BADGE}
+            className="pico-app-center-access"
+            data-role="access-level"
+            data-access={item.access}
+          >
+            {accessBadge(item.access)}
+          </span>
+          {!item.enabled && (
+            <span style={DISABLED_BADGE} className="pico-app-center-disabled" data-role="app-disabled">
+              {t('appCenter.disabled')}
+            </span>
+          )}
+        </div>
+        {item.description !== '' && <p style={ROW_DESC}>{item.description}</p>}
+        <p style={ROW_META}>
+          {item.responsible !== '' && <span>{`${t('appCenter.responsible')}: ${item.responsible}`}</span>}
+          {item.responsible !== '' && item.entryURL !== '' && <span>{' · '}</span>}
+          {item.entryURL !== '' && <span className="pico-app-center-entry">{entryHostLabel(item.entryURL)}</span>}
+        </p>
+      </div>
+      <button
+        type="button"
+        style={{ ...OPEN_BUTTON, ...(openable && !opening ? {} : { opacity: 0.5, cursor: 'default' }) }}
+        onClick={open}
+        disabled={!openable || opening}
+        aria-label={`${t('appCenter.openAria')} ${item.title}`}
+      >
+        {t('appCenter.open')}
+      </button>
+    </div>
+  )
+}

@@ -20,6 +20,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { ArchiveStore, MemoryStore, SuggestionQueue, extractEntryDate, gitBranch, gitBranchList, parseEntryBranches, parseEntryDshOnly, parseEntrySummary, autoSummary, stripEntrySummary, todayStamp } from './store.js'
 import { stripEntryId, extractEntryId, legacyIdFor } from './sync/entryid.js'
 import { readAliases } from './aliases.js'
@@ -32,6 +33,7 @@ import { installMemorySync, makeProjectDirResolver } from './sync/index.js'
 import { registerManagedRoot, unregisterManagedRoot, writeFileAtomicSafeAt } from './sync/filesets.js'
 import { createSearchDocsController, searchDocsCommand } from './search-docs.js'
 import { installBroadcast, installCoi } from './coi/index.js'
+import { syncBuiltinSkills } from './coi/skills-sync.js'
 import { installNotify, installChannelSend, installSessionImages } from './notify.js'
 import { buildWsCoordBlock, installWsCoord } from './coi/ws-coord.js'
 import { installSession } from './session-orch.js'
@@ -51,6 +53,13 @@ import { resolveLocale, setLocale, getLocale, translate, MEMORY_DICT, REVIEW_DIC
 const mt = (key, params) => translate(MEMORY_DICT, key, params)
 /** Translate through the SNAPSHOT dictionary in the active locale. */
 const st = (key, params) => translate(SNAPSHOT_DICT, key, params)
+
+/**
+ * 插件包内 `skills/` 目录（内置技能的源头）。
+ * 与 `lib/coi/index.js` 的 `PLUGIN_SKILLS_DIR` 指向同一份内容 —— 那边给 COI
+ * 安装流程用，这边给**与 COI 无关**的启动期同步用（见 apply 里的「内置技能同步」）。
+ */
+const PLUGIN_SKILLS_DIR = fileURLToPath(new URL('../skills/', import.meta.url))
 
 // Re-exported for the web API layer (api.js imports them from here).
 export { gitBranch, gitBranchList } from './store.js'
@@ -607,7 +616,14 @@ export function resolveConfig(raw) {
   const home = process.env.DSH_HOME || join(homedir(), '.dsh')
   config.memoryDir = resolve(config.memoryDir ?? join(home, 'memories'))
   config.suggestionsFile = resolve(config.suggestionsFile ?? join(config.memoryDir, 'SUGGESTIONS.jsonl'))
-  config.skillDir = resolve(config.skillDir ?? join(homedir(), '.agents', 'skills'))
+  // 内置技能落点（2026-09-18）：默认与客户端「能力中心安装」**同一个根** ——
+  // `<DSH_HOME>/skills`（上游 skill-filesystem 的 user-dsh root，rank 400）。
+  // 此前默认是 `~/.agents/skills`（user-agents root，rank 500），后果有两个：
+  // ①同一个技能在磁盘上有两份副本（随包同步一份、服务端下发一份）；
+  // ②rank 小者胜，落在 400 的服务端副本才该赢，而随包副本落在 500。
+  // `home` 已按 `$DSH_HOME || ~/.dsh` 解析：桌面端启动器会把渠道数据根写回
+  // DSH_HOME，所以这里天然跟随渠道目录（不硬编码产品目录名）。
+  config.skillDir = resolve(config.skillDir ?? join(home, 'skills'))
   for (const key of POSITIVE_NUMBER_KEYS) {
     const value = config[key]
     if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
@@ -2176,7 +2192,44 @@ export function apply(ctx, rawConfig = {}) {
   }
   sessionImageCtrl.sync()
 
-  // 7. COI 调度模块（de_coi 工具/命令/API）：统一调度 kimi/codex/grok/hermes
+  // 7. 内置技能同步（**与 COI 无关**，2026-09-18 从 installCoi 里解耦）。
+  //
+  //     背景：`syncBuiltinSkills` 原先只在 `installCoi()` 里被调用，而
+  //     `installCoi` 只在 `coiEnabled === true` 时才安装（默认 false）——
+  //     于是「内置技能随插件同步到技能库」这件事被一个毫不相干的 COI 调度
+  //     开关挡住了，员工装完客户端根本看不到这些技能。
+  //
+  //     ⚠️ 这里同步的**只有本插件自己的技能**（COI 适配器 + memory-consolidate）。
+  //     平台技能 `picoaide-app-builder` 不在此列：它随服务端镜像发布，由员工在
+  //     客户端「能力中心 → 平台内置技能」按需安装（用户口径 2026-09-18）。
+  //     开机自动写进技能库会让「按需」名存实亡（独立审计 P1-1），
+  //     见 `lib/coi/skills-sync.js` 的 `BUILTIN_SKILLS` / `PLATFORM_SKILLS`。
+  //
+  //     现在：无条件在启动期同步一次，唯一的开关是它自己的 `coiSyncSkills`
+  //     （默认 true；技能管理 Tab 可关）。落点 = `config.skillDir`
+  //     （默认 `<DSH_HOME>/skills`）。失败**不静默**：missing / refused 都
+  //     打日志并点名技能，否则「技能没装上」在打包版里完全不可见。
+  //
+  //     注：`installCoi` 内部仍保留上游那次同步调用（COI 开启时二次调用），
+  //     两次都是同一份源与目标，第二次按 x-version 判定为 unchanged，幂等。
+  //     保留它是为了把 vendored 上游代码的改动面压到最小。
+  if (config.coiSyncSkills !== false) {
+    try {
+      const synced = syncBuiltinSkills(PLUGIN_SKILLS_DIR, config.skillDir)
+      const changed = synced.filter((s) => s.action === 'synced')
+      const failed = synced.filter((s) => s.action === 'missing' || s.action === 'refused')
+      if (changed.length > 0) {
+        console.log(`[dsh-memory-evolve] 内置技能已同步到 ${config.skillDir}：${changed.map((s) => s.name).join(', ')}`)
+      }
+      if (failed.length > 0) {
+        console.warn(`[dsh-memory-evolve] 内置技能未就位（${config.skillDir}）：${failed.map((s) => `${s.name}=${s.action}`).join(', ')}`)
+      }
+    } catch (error) {
+      console.warn(`[dsh-memory-evolve] 内置技能同步失败（忽略）：${error.message}`)
+    }
+  }
+
+  // 7.1 COI 调度模块（de_coi 工具/命令/API）：统一调度 kimi/codex/grok/hermes
   //    等 CLI 代理。模块边界：lib/coi/* 独立目录，只通过 memoryStore.add
   //    这一个薄接口沉淀摘要；未来拆独立插件时替换该回调即可。
   //    coiEnabled 为运行时开关（默认禁用）：开启时安装（工具/命令/API 注册、

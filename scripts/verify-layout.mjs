@@ -58,6 +58,7 @@ const packageNameTable = new Map([
   ['packages/host/cron', '@picoaide/dsh-cron'],
   ['packages/client/account-card', '@picoaide/dsh-account-card'],
   ['packages/client/branding', '@picoaide/dsh-branding'],
+  ['packages/client/wasm-apps', '@picoaide/dsh-wasm-apps'],
   ['packages/vendor/memory-evolve', 'dsh-memory-evolve'],
   ['community/fabric', 'dsh-community-fabric'],
 ])

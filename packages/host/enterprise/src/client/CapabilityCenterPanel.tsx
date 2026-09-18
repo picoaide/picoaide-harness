@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { t } from './locales.ts'
+import { compareVersions } from './version-compare.ts'
+import { BuiltinSkillsStrip } from './BuiltinSkillsStrip.tsx'
 
 /**
  * 能力中心（Capability Hub）——技能商城 / 共享技能 / 共享 Agent 的归一入口。
@@ -329,51 +331,12 @@ const CHIP_ERROR = chipStyle('var(--dsw-alias-state-error-primary)')
 // 上游没有紫色语义 token，改用会翻转的三级文字色，靠文案「自制」区分来源。
 const CHIP_LOCAL = chipStyle('var(--dsw-alias-label-tertiary)')
 
-/** 单测用：数值感知版本比较（对齐服务端 util.CompareSemVer 语义）。 */
-export function compareVersions(left: string, right: string): number {
-  if (left === right) return 0
-  const tokenize = (v: string): Array<{ text: string; numeric: boolean }> | null => {
-    const out: Array<{ text: string; numeric: boolean }> = []
-    let run = ''
-    let numeric = false
-    let have = false
-    const flush = (): void => {
-      if (have) { out.push({ text: run, numeric }); run = ''; have = false }
-    }
-    for (const ch of v) {
-      if (ch === '.' || ch === '-' || ch === '_') { flush(); continue }
-      if (ch >= '0' && ch <= '9') { if (have && !numeric) flush(); run += ch; numeric = true; have = true; continue }
-      if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) { if (have && numeric) flush(); run += ch; numeric = false; have = true; continue }
-      return null
-    }
-    flush()
-    return out.length === 0 ? null : out
-  }
-  const lt = tokenize(left)
-  const rt = tokenize(right)
-  if (lt === null || rt === null) return left < right ? -1 : left > right ? 1 : 0
-  const n = Math.max(lt.length, rt.length)
-  for (let i = 0; i < n; i += 1) {
-    const l = lt[i]
-    const r = rt[i]
-    if (l !== undefined && r !== undefined) {
-      if (l.numeric !== r.numeric) return l.numeric ? -1 : 1
-      if (l.numeric) {
-        const ln = Number(l.text) || 0
-        const rn = Number(r.text) || 0
-        if (ln < rn) return -1
-        if (ln > rn) return 1
-        continue
-      }
-      if (l.text !== r.text) return l.text < r.text ? -1 : 1
-      continue
-    }
-    const extra = l ?? r
-    if (extra !== undefined && !extra.numeric) return l === undefined ? 1 : -1
-    return l === undefined ? -1 : 1
-  }
-  return 0
-}
+/**
+ * 单测用：数值感知版本比较 —— 实现已抽到 `version-compare.ts`（内置技能区
+ * BuiltinSkillsStrip 也要用它，而 panel 渲染 strip，反向 import 会成环）。
+ * 这里 re-export 保持既有调用面不变。
+ */
+export { compareVersions } from './version-compare.ts'
 
 /** 根据（kind, name）取最高 approved 版本（数值感知）。 */
 export function latestApprovedVersionByName(items: readonly CapabilityItem[], kind: CapabilityKind, name: string): string | undefined {
@@ -724,9 +687,11 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         ? <span style={CHIP_LOCAL}>{t('capability.sourceLocal')}</span>
         : item.originChannel === 'org'
           ? <span style={CHIP_NEUTRAL}>{t('capability.sourceOrg')}</span>
-          : item.originChannel === 'market'
-            ? <span style={CHIP_NEUTRAL}>{t('capability.sourceMarket')}</span>
-            : <span style={CHIP_NEUTRAL}>{t('capability.sourceOther')}</span>
+          : item.originChannel === 'builtin'
+            ? <span style={CHIP_NEUTRAL}>{t('capability.sourceBuiltin')}</span>
+            : item.originChannel === 'market'
+              ? <span style={CHIP_NEUTRAL}>{t('capability.sourceMarket')}</span>
+              : <span style={CHIP_NEUTRAL}>{t('capability.sourceOther')}</span>
     return (
       <>
         <span style={chipStyle(item.kind === 'skill' ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-label-secondary)')}>
@@ -741,7 +706,9 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         {statusBadge}
         {item.source === 'local' && item.originChannel !== undefined && (
           <span style={CHIP_NEUTRAL}>
-            {item.originChannel === 'org' ? t('capability.sourceOrg') : t('capability.sourceMarket')}
+            {item.originChannel === 'org'
+              ? t('capability.sourceOrg')
+              : item.originChannel === 'builtin' ? t('capability.sourceBuiltin') : t('capability.sourceMarket')}
             {` v${item.version}`}
           </span>
         )}
@@ -899,6 +866,12 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
               color: 'var(--dsw-alias-label-primary)', fontSize: 12, outline: 'none',
             }}
           />
+        </div>
+        {/* 平台内置技能（随服务端镜像发布、客户端按需安装）：独立一区，不参与
+            上面的来源 Tab / 归并排序 —— 它不是"市场里的某条内容"，而是平台自带
+            的能力入口。拿不到清单（旧版服务端/未登录）时整块不渲染。 */}
+        <div style={{ padding: '0 20px' }}>
+          <BuiltinSkillsStrip />
         </div>
         <div style={BODY}>{content}</div>
         {installConfirmKey !== null && (

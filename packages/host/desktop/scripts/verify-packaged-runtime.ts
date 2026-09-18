@@ -96,6 +96,23 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/dsh-memory-evolve/skills/memory-consolidate/SKILL.md',
   // 技能辅助文件（上游 v26091501 起技能按整目录同步，scripts/ 要跟着走）。
   'node_modules/dsh-memory-evolve/skills/memory-consolidate/scripts/scan_memory.mjs',
+  // 平台内置技能 `picoaide-app-builder`（WASM 应用平台作者手册，设计 §9.3）：
+  // ⚠️ 它**不在**随包同步清单里（`lib/coi/skills-sync.js` 的 `PLATFORM_SKILLS`）——
+  // 内容随**服务端镜像**发布、由员工在能力中心按需安装；这里断言它在**包里**，
+  // 是因为同一份源目录也是服务端镜像的构建上下文（Dockerfile 的 --build-context），
+  // 整目录都在清单里 —— references/ 是 AI 的操作手册正文，examples/ 是能编译的模板，
+  // 少任何一个文件都会让"作者照着 skill 做"在打包版里断链。
+  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/SKILL.md',
+  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/abi.md',
+  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/limits.md',
+  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/publishing.md',
+  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/diagnostics.md',
+  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/app-config.md',
+  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/main.go',
+  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/go.mod',
+  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/picoaide.app.json',
+  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/preview.mjs',
+  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/README.md',
 ] as const
 
 /** Physical entries that Electron cannot load from ASAR (native binaries). */

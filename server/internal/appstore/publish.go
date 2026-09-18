@@ -358,17 +358,28 @@ func publishLockKey(kind, appID string) string {
 	return "picoaide:publish:" + kind + "/" + appID
 }
 
+// channelLabel 把分发渠道渲染成人类可读的名字（用于"名称已被 X 占用"这类提示）。
+//
+// ⚠️ §11 第 4 项明确要求：**两个未知值回落点都要加 wasm 分支** —— 否则
+// wasm 应用撞名时会显示"名称已被组织共享库占用"，而它根本不在组织共享库里，
+// 会把发布者（以及替他排查的 AI）引向完全错误的方向。
 func channelLabel(channel string) string {
-	if channel == serverstore.AppChannelMarket {
+	switch channel {
+	case serverstore.AppChannelMarket:
 		return "市场"
+	case serverstore.AppChannelWasm:
+		return "应用（WASM）"
 	}
 	return "组织共享库"
 }
 
 // kindLabelOf 官方锁定提示用(与 channelLabel 同风格)。
 func kindLabelOf(kind string) string {
-	if kind == "agent" {
+	switch kind {
+	case "agent":
 		return "智能体"
+	case serverstore.AppKindWasmApp:
+		return "应用"
 	}
 	return "技能"
 }

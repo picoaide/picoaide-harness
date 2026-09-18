@@ -76,6 +76,8 @@ const PACKAGES = [
   { name: '@picoaide/dsh-branding', dir: 'packages/client/branding', needs: [] },
   { name: 'dsh-community-fabric', dir: 'community/fabric', needs: [] },
   { name: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', needs: ['@picoaide/dsh-enterprise'] },
+  // WASM 应用平台的客户端半边（应用中心 + 发布编排入口）：读 enterprise 的 lib/types。
+  { name: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', needs: [] },
   { name: '@picoaide/dsh-browser', dir: 'packages/host/browser', needs: ['@picoaide/dsh-connectors'] },
   // 2026-09-16:vendored 第三方插件(随三平台安装包分发)的测试此前**不在任何门禁
   // 链里**(verify-inventories 的 CHECK_CHAIN_EXEMPTIONS 显式豁免),本地加固
@@ -97,6 +99,7 @@ const PATH_OWNERS = [
   ['packages/host/desktop/', 'dsh-plugin-desktop'],
   ['packages/host/enterprise/', '@picoaide/dsh-enterprise'],
   ['packages/client/account-card/', '@picoaide/dsh-account-card'],
+  ['packages/client/wasm-apps/', '@picoaide/dsh-wasm-apps'],
   ['packages/client/branding/', '@picoaide/dsh-branding'],
   ['packages/host/connectors/', '@picoaide/dsh-connectors'],
   ['packages/host/browser/', '@picoaide/dsh-browser'],

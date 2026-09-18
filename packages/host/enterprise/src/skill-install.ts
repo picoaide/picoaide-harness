@@ -61,7 +61,7 @@ export interface InstallSkillArchiveOptions {
   /** Optional gateway-reported version (`x-skill-version`), passed through. */
   version?: string | undefined
   /** 分发渠道(写入溯源标记;缺省 market)。 */
-  channel?: 'market' | 'org' | undefined
+  channel?: 'market' | 'org' | 'builtin' | undefined
   /** 来源服务端地址(写入溯源标记)。 */
   server?: string | undefined
 }
@@ -298,8 +298,8 @@ export interface SkillProvenance {
   appId: string
   /** 安装时的版本号。 */
   version: string
-  /** 分发渠道:market=市场,org=组织共享库。 */
-  channel: 'market' | 'org'
+  /** 分发渠道:market=市场,org=组织共享库,builtin=平台内置(随服务端镜像发布)。 */
+  channel: 'market' | 'org' | 'builtin'
   /** 来源服务端(多环境时区分)。 */
   server?: string | undefined
   /** 安装时归档的 sha256(本地改动检测的基准)。 */
@@ -325,7 +325,9 @@ export async function readProvenance(skillDir: string): Promise<SkillProvenance 
     const raw = await readFile(join(skillDir, PROVENANCE_DIR, 'release.json'), 'utf8')
     const parsed = JSON.parse(raw) as Partial<SkillProvenance>
     if (typeof parsed.appId !== 'string' || typeof parsed.version !== 'string') return undefined
-    const channel = parsed.channel === 'market' || parsed.channel === 'org' ? parsed.channel : 'market'
+    const channel = parsed.channel === 'market' || parsed.channel === 'org' || parsed.channel === 'builtin'
+      ? parsed.channel
+      : 'market'
     return {
       appId: parsed.appId,
       version: parsed.version,

@@ -3,7 +3,7 @@
  *
  * 设计（用户拍板）：AI 使用 COI 的指南 = 正常技能（默认启用，可在
  * 「技能管理」Tab 禁用）。插件包内自带内置技能（skills/ 目录），
- * 插件启动时同步到技能库（~/.agents/skills）：
+ * 插件启动时同步到技能库（落点 = `config.skillDir`，桌面端缺省 `<DSH_HOME>/skills`）：
  *   - 目标不存在 → 复制（装上）
  *   - 目标 x-version 更低 → 整目录覆盖（源头在插件，升级随插件更新）
  *   - 一致 → 跳过
@@ -30,7 +30,26 @@ const ASIDE_INFIX = '.old-'
  */
 const STALE_SWAP_MAX_AGE_MS = 6 * 60 * 60 * 1000
 
-/** 插件内置的技能清单（目录名 = 技能名）。 */
+/**
+ * 插件内置的技能清单（目录名 = 技能名）—— **只含本插件自己的技能**。
+ *
+ * ⚠️ **平台技能不在这个清单里**（2026-09-18，用户口径 + 独立审计 P1-1 的修复）：
+ * `skills/picoaide-app-builder/` 虽然与这些技能放在同一个目录下，但它是
+ * **平台内置技能**：内容随服务端镜像发布（`GET /api/client/v2/skills/builtin`），
+ * 由员工在客户端「能力中心 → 平台内置技能」**按需安装**。
+ *
+ * 为什么会踩：要"内置到服务端 + 按需安装"，就不能有一条开机自动把它写进技能库的
+ * 旁路 —— 否则员工什么都没点，面板已经显示"已安装"，安装按钮永远走不到，
+ * 「按需」名存实亡（审计实测：apply() 一次之后技能就在 `<DSH_HOME>/skills` 里，
+ * 且没有能力中心的溯源信息）。
+ *
+ * 它留在 `skills/` 目录里的原因是**服务端的构建上下文**：`server/Dockerfile` 用
+ * `--build-context skillassets=<本包>` 从这里 COPY 进镜像。所以目录必须在、
+ * 内容必须完整，但它**不参与**这里的同步。
+ *
+ * 回归门禁：`tests/coi.test.js` 断言本清单里不含任何平台技能，
+ * `tests/builtin-skills-decoupled.test.js` 断言 apply() 之后它**没有**被装上。
+ */
 export const BUILTIN_SKILLS = [
   'kimi-cli-calling',
   'codex-cli-calling',
@@ -38,6 +57,14 @@ export const BUILTIN_SKILLS = [
   'hermes-cli-calling',
   'memory-consolidate',
 ]
+
+/**
+ * 由**服务端**分发、客户端按需安装的技能（不属于本插件的同步范围）。
+ *
+ * 单独列出来是为了让"哪些是平台技能"这件事有唯一真源：同步逻辑与回归测试都读它，
+ * 而不是各自写一遍字面量（写两处就会漂移，漂移的后果见 {@link BUILTIN_SKILLS}）。
+ */
+export const PLATFORM_SKILLS = ['picoaide-app-builder']
 
 /**
  * 技能名白名单（kebab-case，与 dsh-skill 的公开规则一致）。
@@ -107,7 +134,7 @@ export function normalizeSkillText(raw, skillName, displayName) {
  * 单个技能落点被拒只记 `refused`，不阻塞其余技能同步。
  *
  * @param {string} pluginSkillsDir - 插件包内 skills/ 目录的绝对路径。
- * @param {string} userSkillsDir - 用户技能库目录（~/.agents/skills）。
+ * @param {string} userSkillsDir - 用户技能库目录（`config.skillDir`，桌面端缺省 `<DSH_HOME>/skills`）。
  * @returns {Array<{name:string, action:'synced'|'unchanged'|'missing'|'refused', message?:string, code?:string}>}
  *   `code` 只在可区分的失败上出现（目前只有换入+回滚双失败的
  *   `SKILL_SWAP_RECOVERY_FAILED`，见 {@link SkillSwapRecoveryError}）。
@@ -120,6 +147,11 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
   // 每次启动都收一遍。
   sweepStaleSwapDirs(userSkillsDir)
   for (const name of BUILTIN_SKILLS) {
+    // 纵深防御：平台技能由服务端分发、员工按需安装，任何情况下都不许经这条
+    // 开机同步路径落进技能库。清单本身已经把它们排除了，这一条挡的是"将来有人
+    // 手滑把平台技能名加回 BUILTIN_SKILLS"——那种回归会让「按需安装」静默失效，
+    // 而失效的表现只是"按钮变成已安装"，没有任何报错。
+    if (PLATFORM_SKILLS.includes(name)) continue
     const srcDir = join(pluginSkillsDir, name)
     const srcFile = join(srcDir, 'SKILL.md')
     if (!existsSync(srcFile)) {
@@ -331,7 +363,7 @@ function isPidAlive(pid) {
  *     真目录装回来时，这个旁置副本立刻被收掉，不再以幽灵技能候选活到下次启动。
  * 删除失败只忽略：残留不影响同步正确性，下次启动再扫。
  *
- * @param {string} userSkillsDir - 用户技能库目录（~/.agents/skills）。
+ * @param {string} userSkillsDir - 用户技能库目录（`config.skillDir`，桌面端缺省 `<DSH_HOME>/skills`）。
  */
 function sweepStaleSwapDirs(userSkillsDir) {
   let names

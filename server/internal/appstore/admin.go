@@ -46,9 +46,13 @@ func transferOwner(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		kind := c.Param("kind")
 		appID := c.Param("app_id")
-		if kind != serverstore.AppKindSkill && kind != serverstore.AppKindAgent {
+		// kind 白名单（§11 第 17 项）：wasm 应用与技能/智能体共用一个统一应用模型，
+		// 归属转移/官方归属是**应用级**动作（与版本无关），因此同一个端点必须能覆盖
+		// 三种 kind —— 此前硬写 skill/agent，导致对 wasm 应用一律 400。
+		if kind != serverstore.AppKindSkill && kind != serverstore.AppKindAgent &&
+			kind != serverstore.AppKindWasmApp {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
-				"类型不合法:只能是 skill 或 agent")
+				"类型不合法:只能是 skill、agent 或 wasm_app")
 			return
 		}
 		if !skillmanifest.IsAppID(appID) {

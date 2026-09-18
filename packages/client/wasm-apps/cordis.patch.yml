@@ -1,0 +1,9 @@
+# WASM app platform client surfaces (应用中心 / App Center).
+#
+# The row carries the client bundle (`dsh.client`) that registers the sidebar
+# entry and the catalog panel. The local API it consumes
+# (`/api/pico/apps/wasm/*`) is owned by `@picoaide/dsh-enterprise`'s wasm-apps
+# module — one local route registration, not two.
+- insert:
+    - id: picoaide-wasm-apps
+      name: '@picoaide/dsh-wasm-apps'

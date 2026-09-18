@@ -59,6 +59,9 @@ const INSTALL_ANCHOR = fileURLToPath(new URL('../package.json', import.meta.url)
 const DESKTOP_PATCH_PATH = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
 const ENTERPRISE_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-enterprise/package.json')), 'cordis.patch.yml')
 const ACCOUNT_CARD_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-account-card/package.json')), 'cordis.patch.yml')
+// WASM 应用中心（客户端半边）：与 account-card 同构 —— 由桌面包通过 profile 组装期
+// 注入，插件自己不解析随包路径（跨包路径在 tsdown 内联后会指向不存在的目录）。
+const WASM_APPS_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-wasm-apps/package.json')), 'cordis.patch.yml')
 const CONNECTORS_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-connectors/package.json')), 'cordis.patch.yml')
 const BROWSER_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-browser/package.json')), 'cordis.patch.yml')
 const MEMORY_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('dsh-memory-evolve/package.json')), 'cordis.patch.yml')
@@ -515,6 +518,7 @@ export async function prepareDesktopProfile(
   const desktopPatches = loadOverlayPatches(BIN_NAME, DESKTOP_PATCH_PATH)
   const enterprisePatches = loadOverlayPatches(BIN_NAME, ENTERPRISE_PATCH_PATH)
   const accountCardPatches = loadOverlayPatches(BIN_NAME, ACCOUNT_CARD_PATCH_PATH)
+  const wasmAppsPatches = loadOverlayPatches(BIN_NAME, WASM_APPS_PATCH_PATH)
   const connectorsPatches = loadOverlayPatches(BIN_NAME, CONNECTORS_PATCH_PATH)
   const browserPatches = loadOverlayPatches(BIN_NAME, BROWSER_PATCH_PATH)
   const memoryPatches = loadOverlayPatches(BIN_NAME, MEMORY_PATCH_PATH)
@@ -529,6 +533,9 @@ export async function prepareDesktopProfile(
     // Account card right after the enterprise rows: it injects the
     // `picoSession` service and the enterprise shared gateway helpers.
     bundlePatches.push(...accountCardPatches)
+    // WASM 应用中心（客户端半边）：与 account-card 同层，晚于 enterprise
+    // （它读 enterprise 提供的本地路由与会话）。
+    bundlePatches.push(...wasmAppsPatches)
     bundlePatches.push(...connectorsPatches)
     bundlePatches.push(...browserPatches)
     bundlePatches.push(...memoryPatches)

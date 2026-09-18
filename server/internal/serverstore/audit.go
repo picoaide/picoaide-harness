@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -116,6 +117,8 @@ type AuditLogEntry struct {
 	PrevHash  string    `json:"prev_hash"` // 0048 哈希链
 	Hash      string    `json:"hash"`      // 0048 本条目 sha256(省略响应)
 	CreatedAt time.Time `json:"created_at"`
+	// AppID 是 wasm 应用维度(0069,可空):非应用审计为空串(库里 NULL)。
+	AppID string `json:"app_id"`
 }
 
 // AuditLog appends an audit entry with a tamper-evident hash chain
@@ -134,6 +137,27 @@ const auditChainLockKey = int64(0x5069636F) // "Pico"
 // 分叉链(VerifyAuditChain 报断链)。事务 + pg_advisory_xact_lock 让
 // 「读尾 + 插入」原子且跨实例互斥(事务结束自动释放锁)。
 func AuditLog(db *sql.DB, username, action, detail string) error {
+	return auditLog(db, "", username, action, detail)
+}
+
+// AuditLogApp 与 AuditLog 相同,但把条目关联到一个 **wasm 应用**(迁移 0069
+// 新增的 audit_logs.app_id,§4.9「审计的 app 维度」):发布/上下架/冻结/删除/
+// 换票签发这类操作必须答得出"谁在什么时候用了哪个应用"。
+//
+// 链口径版本化(0069,只是**追加**一种口径,老调用点行为逐字节不变):
+//   - hash_version=1(0048 老口径,不含 app_id):老行与所有非应用审计仍写 1;
+//   - hash_version=2:链输入末尾追加 "|app_id"。
+//
+// 加列不会改变老行的链输入,老行天然仍可校验;VerifyAuditChain 按 hash_version
+// 选算法,所以新旧行可以在同一条链里共存,而篡改 app_id 会立刻被链校验发现。
+func AuditLogApp(db *sql.DB, appID, username, action, detail string) error {
+	// app_id 即域名标签(§4.1/§4.8),不区分大小写 ⇒ 入链前统一小写,
+	// 否则 ListAuditLogsByApp 的小写查询会查不到同一应用的历史条目。
+	return auditLog(db, strings.ToLower(strings.TrimSpace(appID)), username, action, detail)
+}
+
+// auditLog 是 AuditLog / AuditLogApp 的共同实现(appID 为空 = 0048 老口径)。
+func auditLog(db *sql.DB, appID, username, action, detail string) error {
 	// F16(审计 2026-09-11):审计写路径改为**每 DB 单 worker 串行 + 批量**。
 	// 旧实现每次审计都单独开事务、取全局 advisory lock、读链尾、插入、提交;
 	// 高并发登录/管理操作会在这把全局锁上排队,把请求延迟整体拉高。
@@ -141,7 +165,7 @@ func AuditLog(db *sql.DB, username, action, detail string) error {
 	// 一次锁获取,DB 往返与锁竞争降为 1/N;worker 空闲 60s 自动退出,
 	// 测试的多临时库不会积累常驻 goroutine。
 	w := auditWorkerFor(db)
-	req := auditRequest{username: username, action: action, detail: detail, done: make(chan error, 1)}
+	req := auditRequest{appID: appID, username: username, action: action, detail: detail, done: make(chan error, 1)}
 	enqueue := func(worker *auditWorker) bool {
 		select {
 		case worker.ch <- req:
@@ -176,7 +200,9 @@ func AuditLog(db *sql.DB, username, action, detail string) error {
 
 type auditRequest struct {
 	username, action, detail string
-	done                     chan error
+	// appID 非空时本条目带应用维度(§4.9):链口径升到 hash_version=2。
+	appID string
+	done  chan error
 }
 
 type auditWorker struct {
@@ -319,11 +345,18 @@ func writeAuditBatch(db *sql.DB, batch []auditRequest) []error {
 			return failAll(err, i)
 		}
 		now := time.Now().UTC().Format(time.RFC3339)
-		payload := prevHash + "|" + r.username + "|" + r.action + "|" + r.detail + "|" + now
+		// 链口径按行选择(0069):带应用维度的行写 v2,其余保持 v1 —— 同一批
+		// 里两种口径可以混排,prevHash 的推进与口径无关(链只认上一行的 hash)。
+		payload := auditHashPayload(prevHash, r.username, r.action, r.detail, now)
+		version := auditHashVersionLegacy
+		if r.appID != "" {
+			payload = auditHashPayloadV2(prevHash, r.username, r.action, r.detail, now, r.appID)
+			version = auditHashVersionApp
+		}
 		sum := sha256.Sum256([]byte(payload))
 		hash := hex.EncodeToString(sum[:])
-		if _, err := tx.Exec("INSERT INTO audit_logs (username, action, detail, prev_hash, hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-			r.username, r.action, r.detail, prevHash, hash, now); err != nil {
+		if _, err := tx.Exec("INSERT INTO audit_logs (username, action, detail, prev_hash, hash, created_at, app_id, hash_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			r.username, r.action, r.detail, prevHash, hash, now, nullIfEmpty(r.appID), version); err != nil {
 			errs[i] = err
 			// 回滚这一条,保住此前已插入的条目;失败则整批作废。
 			if _, rbErr := tx.Exec("ROLLBACK TO SAVEPOINT audit_row"); rbErr != nil {
@@ -345,9 +378,22 @@ func writeAuditBatch(db *sql.DB, batch []auditRequest) []error {
 	return errs
 }
 
+// auditHashVersionLegacy / auditHashVersionApp 是链接口径版本(0069):
+// v1 = 0048 的 sha256(prev|username|action|detail|created_at);
+// v2 = 在末尾追加 app_id(链输入变化 ⇒ 篡改 app_id 会断链)。
+const (
+	auditHashVersionLegacy int16 = 1
+	auditHashVersionApp    int16 = 2
+)
+
 // auditHashPayload mirrors the payload used at write time (same layout).
 func auditHashPayload(prevHash, username, action, detail, createdAt string) string {
 	return prevHash + "|" + username + "|" + action + "|" + detail + "|" + createdAt
+}
+
+// auditHashPayloadV2 是 0069 之后的带应用维度口径:老口径 + "|" + app_id。
+func auditHashPayloadV2(prevHash, username, action, detail, createdAt, appID string) string {
+	return auditHashPayload(prevHash, username, action, detail, createdAt) + "|" + appID
 }
 
 // VerifyAuditChain walks the audit log from oldest to newest and verifies
@@ -358,7 +404,7 @@ func auditHashPayload(prevHash, username, action, detail, createdAt string) stri
 // prev_hash 指向已删除的更早条目),故第一个条目只校验自身哈希、不校验
 // 链尾衔接;其后每条仍必须与上一条 hash 严格衔接。
 func VerifyAuditChain(db *sql.DB) (int64, error) {
-	rows, err := db.Query("SELECT id, username, action, detail, prev_hash, hash, created_at FROM audit_logs ORDER BY id ASC")
+	rows, err := db.Query("SELECT id, username, action, detail, prev_hash, hash, created_at, hash_version, app_id FROM audit_logs ORDER BY id ASC")
 	if err != nil {
 		return 0, err
 	}
@@ -370,7 +416,10 @@ func VerifyAuditChain(db *sql.DB) (int64, error) {
 		var username, action, detail, rowPrev, rowHash, created string
 		created = ""
 		var createdAny any
-		if err := rows.Scan(&id, &username, &action, &detail, &rowPrev, &rowHash, &createdAny); err != nil {
+		// hash_version/app_id 由 0069 加入:老行是 1/NULL,v2 行带 app_id。
+		var version int16
+		var appID sql.NullString
+		if err := rows.Scan(&id, &username, &action, &detail, &rowPrev, &rowHash, &createdAny, &version, &appID); err != nil {
 			return 0, err
 		}
 		if s, ok := createdAny.(string); ok {
@@ -388,7 +437,18 @@ func VerifyAuditChain(db *sql.DB) (int64, error) {
 		} else if rowPrev != prevHash {
 			return id, errors.New("audit chain broken at entry")
 		}
-		sum := sha256.Sum256([]byte(auditHashPayload(rowPrev, username, action, detail, created)))
+		// 按行的链接口径版本选算法(0069):不认识的高版本必须报错而不是
+		// 静默按 v1 算 —— 后者会把"无法校验"伪装成"链完好"。
+		var payload string
+		switch version {
+		case auditHashVersionApp:
+			payload = auditHashPayloadV2(rowPrev, username, action, detail, created, appID.String)
+		case auditHashVersionLegacy:
+			payload = auditHashPayload(rowPrev, username, action, detail, created)
+		default:
+			return id, fmt.Errorf("unsupported audit hash version %d", version)
+		}
+		sum := sha256.Sum256([]byte(payload))
 		if hex.EncodeToString(sum[:]) != rowHash {
 			return id, errors.New("audit hash mismatch")
 		}
@@ -401,6 +461,26 @@ func VerifyAuditChain(db *sql.DB) (int64, error) {
 // first) optionally filtered by action/username (审计 M8), plus the total
 // for the filtered set.
 func ListAuditLogsPagedFiltered(db *sql.DB, offset, limit int, action, username string) ([]AuditLogEntry, int64, error) {
+	return listAuditLogs(db, offset, limit, action, username, "")
+}
+
+// ListAuditLogsByApp 返回某个 wasm 应用的审计条目(最新在前),§4.9「审计的
+// app 维度」的读取入口:发布/上下架/冻结/删除/换票这类操作按应用可查。
+// appID 为空即拒(空串聚合全部应用 = 会把应用维度静默变成全局视图)。
+func ListAuditLogsByApp(db *sql.DB, appID string, limit int) ([]AuditLogEntry, error) {
+	if strings.TrimSpace(appID) == "" {
+		return nil, errors.New("audit by app: app_id 不能为空")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	logs, _, err := listAuditLogs(db, 0, limit, "", "", strings.ToLower(strings.TrimSpace(appID)))
+	return logs, err
+}
+
+// listAuditLogs 是所有审计分页查询的唯一实现(action/username/appID 为空 =
+// 不过滤;appID 的过滤走 0069 的 idx_audit_logs_app)。
+func listAuditLogs(db *sql.DB, offset, limit int, action, username, appID string) ([]AuditLogEntry, int64, error) {
 	where := ""
 	args := []any{}
 	if action != "" {
@@ -411,6 +491,10 @@ func ListAuditLogsPagedFiltered(db *sql.DB, offset, limit int, action, username 
 		where += " AND username = ?"
 		args = append(args, username)
 	}
+	if appID != "" {
+		where += " AND app_id = ?"
+		args = append(args, appID)
+	}
 	where = strings.TrimPrefix(where, " AND ")
 	var total int64
 	countQ := "SELECT COUNT(*) FROM audit_logs"
@@ -420,7 +504,7 @@ func ListAuditLogsPagedFiltered(db *sql.DB, offset, limit int, action, username 
 	if err := db.QueryRow(countQ, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	q := "SELECT id, username, action, detail, prev_hash, hash, created_at FROM audit_logs"
+	q := "SELECT id, username, action, detail, prev_hash, hash, created_at, app_id FROM audit_logs"
 	if where != "" {
 		q += " WHERE " + where
 	}
@@ -435,10 +519,12 @@ func ListAuditLogsPagedFiltered(db *sql.DB, offset, limit int, action, username 
 	for rows.Next() {
 		var l AuditLogEntry
 		var created any
-		if err := rows.Scan(&l.ID, &l.Username, &l.Action, &l.Detail, &l.PrevHash, &l.Hash, &created); err != nil {
+		var appIDAny sql.NullString
+		if err := rows.Scan(&l.ID, &l.Username, &l.Action, &l.Detail, &l.PrevHash, &l.Hash, &created, &appIDAny); err != nil {
 			return nil, 0, err
 		}
 		l.CreatedAt = parseSQLTime(created)
+		l.AppID = appIDAny.String
 		out = append(out, l)
 	}
 	return out, total, rows.Err()
