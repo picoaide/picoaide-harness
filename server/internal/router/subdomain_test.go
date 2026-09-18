@@ -56,7 +56,7 @@ var mainRoutePaths = []string{
 func TestAppSubdomainCannotReachMainRoutes(t *testing.T) {
 	main := buildTestRouter(t)
 	apps := &stubApps{}
-	gate := &edge.HostGate{BaseDomain: testAppBase, Main: main, Apps: apps}
+	gate := &edge.HostGate{BaseDomain: func() string { return testAppBase }, Main: main, Apps: apps}
 
 	for _, p := range mainRoutePaths {
 		host := "expense-note." + testAppBase
@@ -107,7 +107,7 @@ func (s *sentinelMain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func TestMainHostStillServesMainRoutes(t *testing.T) {
 	main := &sentinelMain{}
 	apps := &stubApps{}
-	gate := &edge.HostGate{BaseDomain: testAppBase, Main: main, Apps: apps}
+	gate := &edge.HostGate{BaseDomain: func() string { return testAppBase }, Main: main, Apps: apps}
 
 	for _, host := range []string{
 		testAppBase,         // 基域本身
@@ -136,7 +136,7 @@ func TestMainHostStillServesMainRoutes(t *testing.T) {
 func TestNestedLabelIs404(t *testing.T) {
 	main := buildTestRouter(t)
 	apps := &stubApps{}
-	gate := &edge.HostGate{BaseDomain: testAppBase, Main: main, Apps: apps}
+	gate := &edge.HostGate{BaseDomain: func() string { return testAppBase }, Main: main, Apps: apps}
 
 	req := httptest.NewRequest(http.MethodGet, "https://x.www."+testAppBase+"/", nil)
 	req.Host = "x.www." + testAppBase
@@ -156,7 +156,7 @@ func TestNestedLabelIs404(t *testing.T) {
 func TestReservedHostnamesAreNotMainSite(t *testing.T) {
 	main := buildTestRouter(t)
 	apps := &stubApps{}
-	gate := &edge.HostGate{BaseDomain: testAppBase, Main: main, Apps: apps}
+	gate := &edge.HostGate{BaseDomain: func() string { return testAppBase }, Main: main, Apps: apps}
 
 	for _, label := range []string{"admin", "www", "api", "login", "portal"} {
 		host := label + "." + testAppBase
@@ -178,7 +178,7 @@ func TestReservedHostnamesAreNotMainSite(t *testing.T) {
 func TestDisabledSubdomainKeepsLegacyBehavior(t *testing.T) {
 	main := &sentinelMain{}
 	apps := &stubApps{}
-	gate := &edge.HostGate{BaseDomain: "", Main: main, Apps: apps}
+	gate := &edge.HostGate{BaseDomain: func() string { return "" }, Main: main, Apps: apps}
 
 	for _, host := range []string{"anything.example.net", "a.b.example.net", "x.apps.example.com"} {
 		req := httptest.NewRequest(http.MethodGet, "http://"+host+"/healthz", nil)

@@ -179,9 +179,15 @@ func registerWasm(r *gin.Engine, d Deps) {
 	ag := r.Group(NamespaceServer+"/admin/wasm-apps", bodyLimitMiddleware(), serverauth.AdminAuth(d.DB))
 	serverauth.AdminRoute(ag, "GET", "", serverauth.PermCapabilityRead, d.Wasm.AdminList)
 	serverauth.AdminRoute(ag, "POST", "/:app_id/unpublish", serverauth.PermCapabilityWrite, d.Wasm.AdminUnpublish)
+	// 上架：与下架对称（下架是管理员的处置动作，处置完必须能恢复）。
+	serverauth.AdminRoute(ag, "POST", "/:app_id/publish", serverauth.PermCapabilityWrite, d.Wasm.AdminPublish)
 	serverauth.AdminRoute(ag, "PUT", "/:app_id/owner", serverauth.PermCapabilityWrite, d.Wasm.AdminTransferOwner)
 	serverauth.AdminRoute(ag, "POST", "/:app_id/freeze", serverauth.PermCapabilityWrite, d.Wasm.AdminFreeze)
 	serverauth.AdminRoute(ag, "PUT", "/review", serverauth.PermCapabilityWrite, d.Wasm.AdminReview)
+	// 应用泛域名配置（2026-09-18 用户要求：应用名 + 泛域名 = 应用访问地址）。
+	// 读用 capability:read（与列表同权限点），写用 capability:write。
+	serverauth.AdminRoute(ag, "GET", "/domain", serverauth.PermCapabilityRead, d.Wasm.AdminBaseDomainGet)
+	serverauth.AdminRoute(ag, "PUT", "/domain", serverauth.PermCapabilityWrite, d.Wasm.AdminBaseDomainPut)
 }
 
 // maxJSONBody 是 /api/client/v2 与 /api/server 下全部端点的默认请求体上限

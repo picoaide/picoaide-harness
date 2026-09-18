@@ -117,7 +117,7 @@ func TestGateExtraMainHostsRoutesUnknownHostsToMain(t *testing.T) {
 		main := &recordingHandler{}
 		apps := &recordingHandler{}
 		return &HostGate{
-			BaseDomain:     testBase,
+			BaseDomain:     func() string { return testBase },
 			Main:           main,
 			Apps:           apps,
 			ExtraMainHosts: []string{extra, "PORTAL.Example.COM:8443."},
@@ -197,7 +197,7 @@ func TestGateExtraMainHostsRoutesUnknownHostsToMain(t *testing.T) {
 func TestGateNeverFallsBackToMain(t *testing.T) {
 	main := &recordingHandler{}
 	apps := &recordingHandler{}
-	g := &HostGate{BaseDomain: testBase, Main: main, Apps: apps}
+	g := &HostGate{BaseDomain: func() string { return testBase }, Main: main, Apps: apps}
 
 	cases := []struct {
 		host     string
@@ -230,7 +230,7 @@ func TestGateNeverFallsBackToMain(t *testing.T) {
 
 // TestGate404WritesSecurityHeaders：§4.8「含 4xx/5xx」。
 func TestGate404WritesSecurityHeaders(t *testing.T) {
-	g := &HostGate{BaseDomain: testBase, Main: &recordingHandler{}, Apps: &recordingHandler{}}
+	g := &HostGate{BaseDomain: func() string { return testBase }, Main: &recordingHandler{}, Apps: &recordingHandler{}}
 	req := httptest.NewRequest("GET", "http://missing."+testBase+"/", nil)
 	req.Host = "missing." + testBase
 	w := httptest.NewRecorder()
@@ -248,7 +248,7 @@ func TestGate404WritesSecurityHeaders(t *testing.T) {
 
 // TestGate404APIUsesJSONEnvelope：API 路径要 JSON 信封（服务端 §7.0 契约）。
 func TestGate404APIUsesJSONEnvelope(t *testing.T) {
-	g := &HostGate{BaseDomain: testBase, Main: &recordingHandler{}, Apps: &recordingHandler{}}
+	g := &HostGate{BaseDomain: func() string { return testBase }, Main: &recordingHandler{}, Apps: &recordingHandler{}}
 	req := httptest.NewRequest("GET", "http://missing."+testBase+"/api/x", nil)
 	req.Host = "missing." + testBase
 	w := httptest.NewRecorder()
@@ -265,7 +265,7 @@ func TestGate404APIUsesJSONEnvelope(t *testing.T) {
 // TestGateWithoutAppsHandler：Apps 未装配时也不能回落主站。
 func TestGateWithoutAppsHandler(t *testing.T) {
 	main := &recordingHandler{}
-	g := &HostGate{BaseDomain: testBase, Main: main}
+	g := &HostGate{BaseDomain: func() string { return testBase }, Main: main}
 	req := httptest.NewRequest("GET", "http://expense-note."+testBase+"/", nil)
 	req.Host = "expense-note." + testBase
 	w := httptest.NewRecorder()
@@ -554,5 +554,55 @@ func TestSecurityHeadersIncludeFrameAncestors(t *testing.T) {
 	}
 	if h.Get("Referrer-Policy") != "no-referrer" {
 		t.Fatal("必须 no-referrer（§4.8）")
+	}
+}
+
+// TestGatePicksUpBaseDomainChangeWithoutRestart 是「管理端配置泛域名」的核心判据
+// （2026-09-18 用户要求：应用名 + 泛域名 = 应用访问地址）。
+//
+// 门控**常挂**、基域由取值函数提供 ⇒ 控制台保存后**同一进程内立即生效**：
+//   - 基域为空时：一切主机名都当主站（等价于没挂门控，既有部署行为不变）；
+//   - 基域变成 `apps.example.com` 后：`<应用名>.apps.example.com` 立刻进应用分支。
+//
+// 变异判据：把 BaseDomain 换回启动期字符串快照（或按 enabled 决定装不装门控），
+// 本用例必红 —— 那正是"控制台改完要重启才生效"的形态。
+func TestGatePicksUpBaseDomainChangeWithoutRestart(t *testing.T) {
+	main := &recordingHandler{}
+	apps := &recordingHandler{}
+	current := ""
+	g := &HostGate{BaseDomain: func() string { return current }, Main: main, Apps: apps}
+
+	serve := func(host string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "http://"+host+"/", nil)
+		rec := httptest.NewRecorder()
+		g.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// ① 未配置基域：应用子域形态的主机名也走主站（与"没挂门控"逐字节等价）。
+	if rec := serve("expense-note.apps.example.com"); rec.Body.String() != "MAIN" {
+		t.Fatalf("未配置基域时应走主站，得到 %q", rec.Body.String())
+	}
+	if rec := serve("harness.example.com"); rec.Body.String() != "MAIN" {
+		t.Fatalf("主站主机名应走主站，得到 %q", rec.Body.String())
+	}
+
+	// ② 控制台保存基域（同一个 gate 实例，不重建、不重启）。
+	current = "apps.example.com"
+
+	if rec := serve("expense-note.apps.example.com"); rec.Code != 200 || rec.Body.String() != "APP" {
+		t.Fatalf("配置基域后应用子域必须立刻进应用分支，得到 %d %q", rec.Code, rec.Body.String())
+	}
+	if rec := serve("harness.example.com"); rec.Body.String() != "MAIN" {
+		t.Fatalf("非本基域的主机名仍走主站，得到 %q", rec.Body.String())
+	}
+	if rec := serve("a.b.apps.example.com"); rec.Code != 404 {
+		t.Fatalf("多级标签仍必须 404（通配证书只覆盖一级），得到 %d", rec.Code)
+	}
+
+	// ③ 再清空：立刻回到"全部走主站"。
+	current = ""
+	if rec := serve("expense-note.apps.example.com"); rec.Body.String() != "MAIN" {
+		t.Fatalf("清空基域后应立刻回到主站，得到 %q", rec.Body.String())
 	}
 }

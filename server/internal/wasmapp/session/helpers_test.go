@@ -154,7 +154,7 @@ func newEnv(t *testing.T, mutate ...func(*Options)) *testEnv {
 	}
 	opt := Options{
 		DB:         db,
-		BaseDomain: testBaseDomain,
+		BaseDomain: func() string { return testBaseDomain },
 		MainOrigin: testMainOrigin,
 		Auth: func(username, password string) (string, int64, error) {
 			ui, err := api.AuthenticatePassword(username, password)

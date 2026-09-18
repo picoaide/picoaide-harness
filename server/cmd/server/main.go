@@ -273,7 +273,9 @@ func main() {
 	// 主机名门控必须在 HTTP 服务的最外层（§4.8 / §15.1 第 2 条）：
 	// 应用子域只可能进入应用路由树，主站路由在子域**结构上不可达**
 	// （allow-list，而不是在庞大的主站路由表上维护"禁命中清单"）。
-	// 未启用应用子域时 HostGate 为 nil，直接挂主站引擎（既有行为不变）。
+	// HostGate **无条件常挂**（2026-09-18：基域可由管理端在运行期启用 ⇒ 不能再按
+	// 启动期状态决定装不装）。基域为空时它把所有主机名判成主站并直接交回主站引擎，
+	// 与"没挂门控"逐字节等价（edge.MatchHost 的约定）。
 	var rootHandler http.Handler = r
 	if wasmPlat.HostGate != nil {
 		wasmPlat.HostGate.Main = r

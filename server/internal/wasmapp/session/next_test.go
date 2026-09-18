@@ -182,11 +182,11 @@ func TestParseBaseDomain(t *testing.T) {
 
 // TestAppOrigin 断言基域配置决定回跳源的 scheme（明文部署只能显式写 http://）。
 func TestAppOrigin(t *testing.T) {
-	plain := New(Options{BaseDomain: "apps.example.com"})
+	plain := New(Options{BaseDomain: func() string { return "apps.example.com" }})
 	if got := plain.AppOrigin("my-app"); got != "https://my-app.apps.example.com" {
 		t.Fatalf("AppOrigin = %q", got)
 	}
-	local := New(Options{BaseDomain: "http://127.0.0.1:8080"})
+	local := New(Options{BaseDomain: func() string { return "http://127.0.0.1:8080" }})
 	if got := local.AppOrigin("my-app"); got != "http://my-app.127.0.0.1:8080" {
 		t.Fatalf("明文部署 AppOrigin = %q", got)
 	}

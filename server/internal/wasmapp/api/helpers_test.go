@@ -231,7 +231,7 @@ func newTestEnv(t *testing.T, mutators ...func(*Options)) *testEnv {
 		DataRoot:         dataRoot,
 		CompileCacheRoot: cacheRoot,
 		Compiler:         comp,
-		BaseDomain:       "apps.example.com",
+		BaseDomain:       func() string { return "apps.example.com" },
 		Now:              func() time.Time { return time.Now().UTC() },
 	}
 	for _, m := range mutators {
@@ -296,6 +296,9 @@ func (e *testEnv) mount(r *gin.Engine) {
 	adm.GET("", e.h.AdminList)
 	adm.PUT("/review", e.h.AdminReview)
 	adm.POST("/:app_id/unpublish", e.h.AdminUnpublish)
+	adm.POST("/:app_id/publish", e.h.AdminPublish)
+	adm.GET("/domain", e.h.AdminBaseDomainGet)
+	adm.PUT("/domain", e.h.AdminBaseDomainPut)
 	adm.PUT("/:app_id/owner", e.h.AdminTransferOwner)
 	adm.POST("/:app_id/freeze", e.h.AdminFreeze)
 

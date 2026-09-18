@@ -414,7 +414,8 @@ func TestModuleCache_CloseAllClosesEntries(t *testing.T) {
 // ===== 换票 URL：next 必须是相对路径且正确转义 =====
 
 func TestTicketURLUsesRelativeNext(t *testing.T) {
-	s := &Server{mainOrigin: testMainOrigin}
+	// 主站源不再缓存成字段（基域运行期可改）⇒ 用例按 Options 给当前基域。
+	s := &Server{opt: Options{BaseDomain: func() string { return testBaseDomain }}}
 	req := httptest.NewRequest(http.MethodGet, "https://app."+testBaseDomain+"/a/b?q=1&r=2&ticket=dead", nil)
 	got := s.ticketURL(req, "expense")
 	u, err := url.Parse(got)

@@ -23,6 +23,8 @@ const Audit = lazy(() => import('./pages/Audit'))
 const ServerInfo = lazy(() => import('./pages/ServerInfo'))
 // 2026-09-02:「市场 · 技能」与「能力中心」合并为单入口(与客户端 IA 对齐)。
 const CapabilityCenter = lazy(() => import('./pages/CapabilityCenter'))
+// 2026-09-18:应用中心(员工自建 WASM 应用的平台管理员面)。
+const AppCenter = lazy(() => import('./pages/AppCenter'))
 const Connectors = lazy(() => import('./pages/Connectors'))
 
 // Usage 相关页含 VChart(约 2.6MB 未压缩),懒加载避免污染首屏(审计2026-E1)。
@@ -361,6 +363,7 @@ export default function App() {
                   </Route>
                   <Route path="/marketplace" element={<Navigate to="/capabilities?tab=market" replace />} />
                   <Route path="/capabilities" element={<CapabilityCenter />} />
+                  <Route path="/app-center" element={<AppCenter />} />
                   <Route path="/connectors" element={<Connectors />} />
                   <Route path="/audit" element={<Audit />} />
                   <Route path="/server-info" element={<ServerInfo />} />

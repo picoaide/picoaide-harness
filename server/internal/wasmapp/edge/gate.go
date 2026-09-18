@@ -23,8 +23,15 @@ type AppHandler interface {
 // 这是 allow-list 语义 —— 而不是在庞大的主站路由表上维护"禁命中清单"
 // （全仓 Go 代码零 host 维度判断，清单式禁命中必然漏）。
 type HostGate struct {
-	// BaseDomain 是应用基域（空 = 未启用应用子域，全部走主站）。
-	BaseDomain string
+	// BaseDomain 返回**当前**应用基域（空 = 未启用应用子域，全部走主站）。
+	//
+	// 为什么是函数而不是字符串（2026-09-18 用户要求「管理端支持泛域名配置」）：
+	// 基域从"启动期部署配置"变成了"管理端可改的运行期设置"，而门控是每请求都要
+	// 判一次的地方 —— 持一份启动期快照会让"控制台改完不生效，重启才生效"。
+	//
+	// 语义与 MatchHost(host, "") 一致：返回空串时**一切主机名都当主站**
+	// （等于没有门控），因此本门控可以无条件常挂，不需要启动期判断是否安装。
+	BaseDomain func() string
 	// Main 是主站（既有 gin 引擎）。
 	Main http.Handler
 	// Apps 是应用子域处理器（为 nil 时任何应用子域都 404）。
@@ -46,9 +53,18 @@ type HostGate struct {
 	ExtraMainHosts []string
 }
 
+// currentBaseDomain 读当前基域（取值函数可能为 nil —— 早期装配/测试里只给字符串。
+// nil 时返回空串，等价于"未启用子域"，绝不 panic）。
+func (g *HostGate) currentBaseDomain() string {
+	if g.BaseDomain == nil {
+		return ""
+	}
+	return strings.TrimSpace(g.BaseDomain())
+}
+
 // ServeHTTP 实现 http.Handler。
 func (g *HostGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	label, kind := MatchHost(r.Host, g.BaseDomain)
+	label, kind := MatchHost(r.Host, g.currentBaseDomain())
 	switch kind {
 	case HostApp:
 		if g.Apps == nil {

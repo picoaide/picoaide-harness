@@ -35,6 +35,8 @@ export const PERM_GATEWAY_READ = 'gateway:read'
 export const PERM_USAGE_READ = 'usage:read'
 export const PERM_MARKET_READ = 'market:read'
 export const PERM_CAP_READ = 'capability:read'
+/** 能力中心写面(审批/上下架/归属转移等处置动作;应用中心复用同一点,见 §13)。 */
+export const PERM_CAP_WRITE = 'capability:write'
 export const PERM_CONNECTOR_READ = 'connector:read'
 export const PERM_SERVERINFO_READ = 'server-info:read'
 export const PERM_AUDIT_READ = 'audit:read'
