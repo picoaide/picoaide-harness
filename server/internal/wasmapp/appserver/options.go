@@ -15,10 +15,13 @@ import (
 
 	"github.com/picoaide/picoaide/internal/wasmapp/aichat"
 	"github.com/picoaide/picoaide/internal/wasmapp/anonlimit"
+	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
 	"github.com/picoaide/picoaide/internal/wasmapp/capapi"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
 	"github.com/picoaide/picoaide/internal/wasmapp/edge"
 	"github.com/picoaide/picoaide/internal/wasmapp/events"
+	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/wasmapp/memprofile"
 	"github.com/picoaide/picoaide/internal/wasmapp/queue"
 	"github.com/picoaide/picoaide/internal/wasmapp/runtime"
 	"github.com/picoaide/picoaide/internal/wasmapp/session"
@@ -58,6 +61,11 @@ type Options struct {
 	// Compiler 可选：只用于读编译缓存（本包断言它与执行侧**共用同一个缓存目录**，
 	// §4.3.1-a：不一致会让"发布期编译暖不到执行进程"这条前提静默失效）。
 	Compiler *compile.Compiler
+	// MemoryProfile 是本部署声明的内存档位（可选；零值 ⇒ memprofile.Default()）。
+	//
+	// 它不只是记账口径：队列的全局并发、执行侧实例内存上限、进程内模块缓存上限、
+	// 应用库句柄上限**全部**取自它 —— 声明与执行同一份数（见 memprofile 包注释）。
+	MemoryProfile memprofile.Profile
 	// AppIDExtraReserved 是部署期注入的企业既有主机名（§4.1）：
 	// 本包用它做**纵深防御** —— 即使库里存在同名应用行，也不给这些主机名提供内容。
 	AppIDExtraReserved []string
@@ -108,6 +116,19 @@ type Server struct {
 	// drainTimeout 是关闭前排空等待的测试注入点（0 = shutdownDrainTimeout）。
 	drainTimeout time.Duration
 
+	// profile 是本部署声明的内存档位（memprofile）：数值同时驱动队列并发、
+	// 实例内存上限、模块缓存上限与应用库句柄上限。
+	profile memprofile.Profile
+	// limits 是**当前生效**的限制项（控制台保存后由 ApplyLimits 更新；
+	// 零值 ⇒ 按 profile 折算，见 CurrentLimits）。
+	limits applimits.Limits
+	// runtimePages 是执行侧 runtime 实际生效的单实例内存页上限。
+	// 它只在装配时写一次：wazero 的 WithMemoryLimitPages 属于 RuntimeConfig，
+	// runtime 建好后不可变 ⇒ 控制台改这一项要重启（ApplyLimits 会如实标注）。
+	runtimePages uint32
+	// reclaim 是限频的"归还内存给 OS"执行器（见 reclaim.go）。
+	reclaim *reclaimer
+
 	// ===== 关闭期排空（见 Close 的注释：wazero 的 Runtime 不能在编译/实例化中途被关闭）=====
 	mu        sync.Mutex
 	closing   bool
@@ -115,6 +136,10 @@ type Server struct {
 	drained   chan struct{}
 	closeOnce sync.Once
 	closeErr  error
+
+	// sweeperStop 停止后台空闲回收循环（Close 时关闭一次；见 sweepLoop）。
+	sweeperStop chan struct{}
+	sweeperOnce sync.Once
 }
 
 // 编译期断言：本包就是 edge 的应用处理器。
@@ -142,9 +167,19 @@ func New(opt Options) (*Server, error) {
 	}
 	s := &Server{opt: opt, logger: logger, now: now, drained: make(chan struct{})}
 
+	// 内存档位：零值 ⇒ 默认档（与历史行为一致）。数值同时驱动下面四处的强制。
+	prof := opt.MemoryProfile
+	if prof.Name == "" {
+		prof = memprofile.Default()
+	}
+	s.profile = prof
+
 	scheduler := opt.Scheduler
 	if scheduler == nil {
-		scheduler = queue.New(queue.DefaultOptions())
+		qopt := queue.DefaultOptions()
+		// 全局并发实例取自档位（不是编译期常量）：声明与执行同一份数。
+		qopt.GlobalRunning = prof.Instances
+		scheduler = queue.New(qopt)
 	}
 	s.scheduler = scheduler
 	limiter := opt.Limiter
@@ -165,16 +200,24 @@ func New(opt Options) (*Server, error) {
 	}
 
 	// 运行时装配：DataRoot 非空 ⇒ 用 wazero 的磁盘编译缓存（与编译子进程共用）。
+	// 单实例内存上限取自档位（wazero 侧是"上限"，线性内存按需增长）。
 	rt, err := runtime.New(context.Background(), runtime.Options{
-		DataRoot: opt.DataRoot,
-		Logger:   log.New(fnWriter{fn: logger}, "", 0),
+		DataRoot:    opt.DataRoot,
+		MemoryPages: prof.InstanceMemoryPages,
+		Logger:      log.New(fnWriter{fn: logger}, "", 0),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("appserver: 装配执行侧运行时失败: %w", err)
 	}
 	s.rt = rt
-	s.modules = newModuleCache()
-	s.appdbs = newAppDBPool(now)
+	s.runtimePages = prof.InstanceMemoryPages
+	s.limits = applimits.FromProfile(prof)
+	// 进程内模块缓存：上限与磁盘缓存解耦，并按档位缩放；空闲 TTL 由后台 sweep 执行。
+	s.modules = newModuleCacheWith(prof.ModuleCacheBytes, limits.ModuleCacheMaxEntries,
+		limits.ModuleCacheIdleTTL, now)
+	s.appdbs = newAppDBPoolWithMax(now, prof.Instances)
+	s.reclaim = newReclaimer(freeOSMemory, now, logger)
+	logger("appserver: %s（队列并发/实例内存/模块缓存/库句柄均按此档位强制）", prof.Report())
 
 	// §4.7 / D3.1：ai.chat 由宿主用 http.Client 直调本地 /v1（不经出站白名单），
 	// 令牌按 (用户, 会话) 缓存在内存里。BaseURL 缺失时 aichat 自己 fail-closed。
@@ -195,7 +238,84 @@ func New(opt Options) (*Server, error) {
 		logger("appserver: ⚠️ 已启用应用子域但 %s 未配置：匿名限流将按 TCP 对端地址计数（反代后=全部匿名流量共用一个桶）",
 			anonlimit.EnvTrustedProxies)
 	}
+	// 后台空闲回收：模块缓存与库句柄的"用不着就还"（见 sweepLoop）。
+	s.sweeperStop = make(chan struct{})
+	go s.sweepLoop()
 	return s, nil
+}
+
+// sweepLoop 是后台空闲回收循环：周期性地
+//
+//	① 逐出空闲超过 limits.ModuleCacheIdleTTL 的编译模块（释放机器码）；
+//	② 回收空闲超过 appDBIdleTimeout 的应用库句柄（释放 SQLite 连接与页缓存）；
+//	③ 只要真的释放了东西，就限频地归还一次内存给 OS（reclaim.go）。
+//
+// 为什么必须是"时间驱动"（而不只是容量驱动）：几百个应用时，每个应用都可能被
+// 访问过一次而容量始终没满 —— 只有 LRU 的话这些模块会永久驻留（实测：全部 Close
+// 后 RSS 也只回落约 20%）。这条循环是"更快释放"的落点。
+func (s *Server) sweepLoop() {
+	t := time.NewTicker(moduleSweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.sweeperStop:
+			return
+		case <-t.C:
+			s.sweepOnce()
+		}
+	}
+}
+
+// sweepOnce 执行一轮空闲回收（测试可直接调用，不必等 ticker）。
+func (s *Server) sweepOnce() {
+	var freedBytes int64
+	if s.modules != nil {
+		if n, bytes := s.modules.sweep(); n > 0 {
+			freedBytes += bytes
+			s.logf("appserver: 空闲回收编译模块 %d 个（空闲 > %s，记账 %d KiB）",
+				n, limits.ModuleCacheIdleTTL, bytes>>10)
+		}
+	}
+	if s.appdbs != nil {
+		if n, bytes := s.appdbs.sweepIdle(); n > 0 {
+			freedBytes += bytes
+			s.logf("appserver: 空闲回收应用库句柄 %d 个（空闲 > %s）", n, appDBIdleTimeout)
+		}
+	}
+	if freedBytes > 0 && s.reclaim != nil {
+		s.reclaim.request("空闲回收", freedBytes)
+	}
+}
+
+// EvictApp 立即丢掉某应用的进程内驻留（模块 + 库句柄），并把内存还给 OS。
+//
+// 触发点：应用下架 / 冻结 / 删除 —— 这几件事之后该应用大概率长时间不会被访问，
+// 与其等 TTL 扫描，不如事件驱动立刻释放（用户要求的"更快释放"）。
+// 返回被逐出的模块数与记账字节数（日志/测试用）。
+// 在途请求不受影响（refs > 0 的模块留给 TTL 路径）。
+func (s *Server) EvictApp(appID string) (int, int64) {
+	if s == nil {
+		return 0, 0
+	}
+	var mods int
+	var bytes int64
+	if s.modules != nil {
+		mods, bytes = s.modules.evictApp(appID)
+	}
+	var handles int
+	if s.appdbs != nil {
+		if n, b := s.appdbs.evictApp(appID); n > 0 {
+			handles = n
+			bytes += b
+		}
+	}
+	if mods > 0 || handles > 0 {
+		s.logf("appserver: 事件驱动逐出 app=%s（模块 %d 个 / 库句柄 %d 个，记账 %d KiB）", appID, mods, handles, bytes>>10)
+		if s.reclaim != nil {
+			s.reclaim.request("应用处置", bytes)
+		}
+	}
+	return mods, bytes
 }
 
 // Close 释放本包创建的资源（模块缓存 + 执行侧运行时）。
@@ -230,6 +350,12 @@ func (s *Server) Close() error {
 const shutdownDrainTimeout = 10 * time.Second
 
 func (s *Server) close() error {
+	// 先停后台回收循环：它会访问模块缓存与句柄池，必须在拆它们之前退出。
+	s.sweeperOnce.Do(func() {
+		if s.sweeperStop != nil {
+			close(s.sweeperStop)
+		}
+	})
 	s.mu.Lock()
 	s.closing = true
 	if s.inflight == 0 {

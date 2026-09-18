@@ -42,7 +42,7 @@ func TestMemorySelfCheckSkippedWhenDisabled(t *testing.T) {
 	var lines []string
 	logf := func(format string, args ...any) { lines = append(lines, format) }
 
-	if err := checkStartupMemory(false, 1, logf); err != nil {
+	if err := checkStartupMemory(false, 1, readyz.DefaultMemoryPlan(), logf); err != nil {
 		t.Fatalf("未启用子域时必须跳过内存自检（不能挡住启动）：%v", err)
 	}
 	joined := strings.Join(lines, "\n")
@@ -57,7 +57,7 @@ func TestMemorySelfCheckSkippedWhenDisabled(t *testing.T) {
 // TestMemorySelfCheckFailClosedWhenEnabled：启用子域时判据**一点没放宽** ——
 // 理论峰值 > 可用内存 70% ⇒ 拒绝启动（§4.3：拒绝启动而不是等 OOM）。
 func TestMemorySelfCheckFailClosedWhenEnabled(t *testing.T) {
-	if err := checkStartupMemory(true, 1, func(string, ...any) {}); err == nil {
+	if err := checkStartupMemory(true, 1, readyz.DefaultMemoryPlan(), func(string, ...any) {}); err == nil {
 		t.Fatal("启用子域 + 极小 MemAvailable ⇒ 必须拒绝启动")
 	}
 	// 四笔账之和恰好卡在 70% 水位 ⇒ 通过；少 1 字节 ⇒ 拒绝。
@@ -65,15 +65,15 @@ func TestMemorySelfCheckFailClosedWhenEnabled(t *testing.T) {
 		int64(limits.UploadPeakPerUploadBytes) + readyz.CacheResidentBytes
 	guard := int64(limits.MemoryPeakGuardPercent)
 	avail := (need*100 + guard - 1) / guard
-	if err := checkStartupMemory(true, avail, func(string, ...any) {}); err != nil {
+	if err := checkStartupMemory(true, avail, readyz.DefaultMemoryPlan(), func(string, ...any) {}); err != nil {
 		t.Fatalf("恰好等于水位应通过：%v", err)
 	}
-	if err := checkStartupMemory(true, avail-1, func(string, ...any) {}); err == nil {
+	if err := checkStartupMemory(true, avail-1, readyz.DefaultMemoryPlan(), func(string, ...any) {}); err == nil {
 		t.Fatal("超过水位 1 字节必须拒绝启动（判据不得放宽）")
 	}
 	// 正常机器：放行 + 明细进日志（运维据此看到四笔账的构成）。
 	var lines []string
-	if err := checkStartupMemory(true, 64<<30, func(format string, args ...any) {
+	if err := checkStartupMemory(true, 64<<30, readyz.DefaultMemoryPlan(), func(format string, args ...any) {
 		lines = append(lines, format)
 	}); err != nil {
 		t.Fatalf("64 GiB 可用内存应通过：%v", err)
@@ -150,7 +150,10 @@ func TestWasmPlatformWiringPresent(t *testing.T) {
 		needle string
 		why    string
 	}{
-		{"checkStartupMemory(enabled, readMemAvailable(), log.Printf)", "内存四笔账自检必须按 enabled 分档（P2-8）"},
+		{"checkStartupMemory(enabled, readMemAvailable(), plan, log.Printf)", "内存四笔账自检必须按 enabled 分档（P2-8）且按部署档位算账"},
+		{"memprofile.FromEnv(os.Getenv)", "内存档位必须来自部署配置（未知档位 fail-loud）"},
+		{"MemoryProfile: prof,", "档位必须真的喂给 appserver（声明与执行同一份数）"},
+		{"OnAppEvict: func(appID string) { appSrv.EvictApp(appID) },", "下架/冻结/删除后必须立即释放进程内驻留"},
 		{"mustRefuseStartupForIsolation(mode, usable)", "require 档必须真的拒绝启动（P2-1）"},
 		{"compile.IsolationFromEnv()", "隔离档必须来自部署配置"},
 		{"events.NewCleanupScheduler(", "7 天保留必须有人来删（P1-2）"},

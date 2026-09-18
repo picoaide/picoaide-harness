@@ -42,9 +42,12 @@ const (
 	// appDBIdleTimeout 是句柄空闲回收时间。
 	//
 	// 它是**实现参数**（不是 §4 的平台上限，故不进 limits）：太久不用就释放 2 条连接
-	// 与 SQLite 页缓存；10 分钟足以覆盖"用户在一个应用里连续操作"的常见节奏，
-	// 又不会让"偶尔用一次"的几十个应用长期占着 fd（与 compile.DefaultIdleTimeout 同精神）。
-	appDBIdleTimeout = 10 * time.Minute
+	// 与 SQLite 页缓存。2026-09-18 从 10 分钟收紧到 3 分钟 —— 理由是"几百个应用 +
+	// 小内存机器"这个目标场景：每句柄 2 条连接各带一份页缓存，10 分钟意味着
+	// "每个被访问过一次的应用"都会长期占着这份常驻；3 分钟仍覆盖"用户在一个应用里
+	// 连续操作"的节奏（重开代价实测 1.7–3.2 ms），但把"偶尔用一次"的尾巴收得更紧。
+	// 另有一条事件驱动的立即回收：应用下架/冻结/删除时 Server.EvictApp。
+	appDBIdleTimeout = 3 * time.Minute
 )
 
 // appDBHandle 是池中的一条应用库句柄。
@@ -82,14 +85,111 @@ type appDBPool struct {
 	now     func() time.Time
 	// max 是池容量（缺省 appDBHandleMax；测试可调小）。
 	max int
+	// idle 是空闲回收阈值（缺省 appDBIdleTimeout；控制台可调，见 SetLimits）。
+	idle time.Duration
 }
 
 func newAppDBPool(now func() time.Time) *appDBPool {
+	return newAppDBPoolWithMax(now, appDBHandleMax)
+}
+
+// newAppDBPoolWithMax 用指定容量构造句柄池（生产走内存档位的并发数；测试可调小）。
+func newAppDBPoolWithMax(now func() time.Time, max int) *appDBPool {
 	if now == nil {
 		now = time.Now
 	}
-	return &appDBPool{handles: map[string]*appDBHandle{}, now: now, max: appDBHandleMax}
+	if max <= 0 {
+		max = appDBHandleMax
+	}
+	return &appDBPool{handles: map[string]*appDBHandle{}, now: now, max: max, idle: appDBIdleTimeout}
 }
+
+// SetLimits 热替换池容量与空闲回收阈值（控制台保存后即时生效）。
+//
+// 收紧容量时不打断在途请求：超出部分按"最久未用且 inflight==0"逐个关闭，
+// 全部在用则暂时超限（与 acquire 的降级路径同一精神：缓存策略不得让用户请求失败）。
+func (p *appDBPool) SetLimits(max int, idle time.Duration) {
+	if p == nil {
+		return
+	}
+	if max <= 0 {
+		max = appDBHandleMax
+	}
+	if idle <= 0 {
+		idle = appDBIdleTimeout
+	}
+	p.mu.Lock()
+	p.max = max
+	p.idle = idle
+	var closing []*appdb.DB
+	for len(p.handles) > p.max {
+		victim := p.oldestIdleLocked()
+		if victim == nil {
+			break
+		}
+		delete(p.handles, victim.appID)
+		closing = append(closing, victim.db)
+	}
+	p.mu.Unlock()
+	p.closeAllDBs(closing)
+}
+
+// Limits 返回当前容量与空闲阈值（控制台回读/测试断言用）。
+func (p *appDBPool) Limits() (max int, idle time.Duration) {
+	if p == nil {
+		return 0, 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.max, p.idle
+}
+
+// sweepIdle 回收空闲超过 appDBIdleTimeout 的句柄，返回 (句柄数, 记账字节数)。
+//
+// 与 acquire 里的"顺手回收"是同一判据的**时间驱动**版本：acquire 只在有请求时才
+// 扫描，几百个应用里"没人再访问"的那些句柄会一直留到下一次同应用请求（可能永远
+// 不来）。后台 sweep 让它们按时归还（连接 + 页缓存 + driver 实例）。
+func (p *appDBPool) sweepIdle() (int, int64) {
+	if p == nil {
+		return 0, 0
+	}
+	cutoff := p.now().Add(-p.idle)
+	p.mu.Lock()
+	var closing []*appdb.DB
+	var freed int64
+	for key, h := range p.handles {
+		if h.inflight == 0 && h.lastUsed.Before(cutoff) {
+			delete(p.handles, key)
+			closing = append(closing, h.db)
+			freed += appDBHandleBookkeepingBytes
+		}
+	}
+	p.mu.Unlock()
+	p.closeAllDBs(closing)
+	return len(closing), freed
+}
+
+// evictApp 立即回收某应用的句柄（下架/冻结/删除时调用）；在用的句柄跳过。
+func (p *appDBPool) evictApp(appID string) (int, int64) {
+	if p == nil || appID == "" {
+		return 0, 0
+	}
+	p.mu.Lock()
+	h, ok := p.handles[appID]
+	if !ok || h.inflight != 0 {
+		p.mu.Unlock()
+		return 0, 0
+	}
+	delete(p.handles, appID)
+	p.mu.Unlock()
+	p.closeAllDBs([]*appdb.DB{h.db})
+	return 1, appDBHandleBookkeepingBytes
+}
+
+// appDBHandleBookkeepingBytes 是"一个应用库句柄被回收"的**记账量**（供日志与
+// 归还 OS 的触发条件使用，不是精确值）：两条 SQLite 连接各一份页缓存
+// （appdb 里把 cache_size 限到 1 MiB）= 2 MiB。
+const appDBHandleBookkeepingBytes = 2 << 20
 
 // acquire 取得某应用的句柄，返回时该句柄已被**独占**（h.mu 已加锁）。
 //
@@ -105,7 +205,7 @@ func (p *appDBPool) acquire(ctx context.Context, dataRoot, appID string) (*appDB
 
 	// 空闲阈值先算出来：**本次请求的应用**如果也空闲超时了，同样要回收重建
 	//（"空闲"的判据是"距上次使用超过阈值"，与"是不是这次要用的应用"无关）。
-	cutoff := p.now().Add(-appDBIdleTimeout)
+	cutoff := p.now().Add(-p.idle)
 
 	p.mu.Lock()
 	if h, ok := p.handles[appID]; ok {

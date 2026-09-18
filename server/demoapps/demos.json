@@ -1,0 +1,29 @@
+{
+  "demos": [
+    {
+      "app_id": "demo-public",
+      "title": "演示 · 公开应用（匿名可达）",
+      "description": "不需要登录就能打开：演示 access=public 的准入模式。页面会显示本次请求是匿名的（请求帧里 user 为 null），因此不渲染任何账号信息。",
+      "access": "public",
+      "purpose": "演示公开访问模式：可用于面向全员甚至未登录访客的查询类小工具",
+      "data_sensitivity": "公开"
+    },
+    {
+      "app_id": "demo-login",
+      "title": "演示 · 登录可见",
+      "description": "需要员工账号：演示 access=login（缺省模式）。页面显示平台注入的身份（账号/用户 ID/部门/是否发布者）与共享留言墙。",
+      "access": "login",
+      "purpose": "演示登录门槛与身份注入：应用无需自己实现登录，宿主把身份放进请求帧",
+      "data_sensitivity": "内部"
+    },
+    {
+      "app_id": "demo-whitelist",
+      "title": "演示 · 白名单可见",
+      "description": "需要登录且在名单内：演示 access=whitelist。平台只负责要求登录并告知模式，名单比对由应用读自己的 picoaide.app.json 完成；不在名单里的账号会看到 403 页面并显示本人账号。",
+      "access": "whitelist",
+      "whitelist": ["user001"],
+      "purpose": "演示名单准入：适合只给少数人用的内部工具",
+      "data_sensitivity": "内部"
+    }
+  ]
+}

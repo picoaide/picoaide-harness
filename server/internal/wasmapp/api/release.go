@@ -77,6 +77,10 @@ func (h *Handlers) setPublished(c *gin.Context) {
 	}
 	h.auditApp(appID, u.Username, "wasm_app_publish_toggle",
 		auditDetail(appID, app.Title, fmt.Sprintf("enabled %t → %t", app.Enabled, target)))
+	if !target {
+		// 下架即释放进程内驻留（编译模块 + 库句柄；上架不动，见 OnAppEvict 注释）。
+		h.evictApp(appID)
+	}
 	c.JSON(http.StatusOK, gin.H{"app": gin.H{
 		"app_id": appID, "enabled": target, "changed": true, "entry_url": h.appOrigin(c, appID),
 	}})
@@ -214,6 +218,8 @@ func (h *Handlers) deleteApp(c *gin.Context) {
 	h.auditApp(appID, u.Username, "wasm_app_delete",
 		auditDetail(appID, app.Title, fmt.Sprintf("软删（标识与版本号永久占位；资源与库保留 %d 天待真删）",
 			limits.RetirementSnapshotRetentionDays)))
+	// 删除（软删）即释放进程内驻留：模块与库句柄都没有再留着的理由。
+	h.evictApp(appID)
 	c.JSON(http.StatusOK, gin.H{"app": gin.H{
 		"app_id": appID, "deleted": true, "frozen_at": app.FrozenAt, "deleted_at": h.now().UTC(),
 	}, "retention_days": limits.RetirementSnapshotRetentionDays,

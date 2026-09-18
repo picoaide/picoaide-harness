@@ -60,6 +60,8 @@ export const NAV_ENTRIES: NavEntry[] = [
   // capability:write 收敛(体验层,服务端 RequirePermission 才是护栏)。
   { to: '/app-center', label: '应用中心', icon: Boxes, section: '运维', perms: [PERM_CAP_READ] },
   { to: '/connectors', label: '连接器', icon: Plug, section: '运维', perms: [PERM_CONNECTOR_READ] },
+  // 2026-09-19:员工自建 WASM 应用的并发/内存限制项（用户要求"后台要有配置页面"）。
+  { to: '/app-platform', label: '应用平台', icon: Boxes, section: '运维', perms: [PERM_CAP_READ] },
   { to: '/server-info', label: '服务器信息', icon: Server, section: '运维', perms: [PERM_SERVERINFO_READ] },
   // 审计分区(auditor + super_admin 只读)
   { to: '/audit', label: '审计日志', icon: ScrollText, section: '审计', perms: [PERM_AUDIT_READ] },

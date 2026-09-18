@@ -15,6 +15,7 @@ import Login from './pages/Login'
 // 路由级懒加载(性能优化 2026-P):各页面拆成独立 JS chunk,首屏只加载
 // 当前路由页面;其余页面(含各自依赖)在导航时按需加载,降低首屏体积。
 const UsersPage = lazy(() => import('./pages/Users'))
+const AppPlatform = lazy(() => import('./pages/AppPlatform'))
 const Departments = lazy(() => import('./pages/Departments'))
 const Gateway = lazy(() => import('./pages/Gateway'))
 const Auth = lazy(() => import('./pages/Auth'))
@@ -365,6 +366,7 @@ export default function App() {
                   <Route path="/capabilities" element={<CapabilityCenter />} />
                   <Route path="/app-center" element={<AppCenter />} />
                   <Route path="/connectors" element={<Connectors />} />
+                  <Route path="/app-platform" element={<AppPlatform />} />
                   <Route path="/audit" element={<Audit />} />
                   <Route path="/server-info" element={<ServerInfo />} />
                   <Route path="*" element={<NotFound />} />

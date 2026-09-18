@@ -283,6 +283,30 @@
       "Note": ""
     },
     {
+      "Key": "module_cache_max_bytes",
+      "Value": "134217728",
+      "Unit": "bytes",
+      "Section": "§4.3",
+      "Title": "进程内编译模块缓存上限",
+      "Note": "与磁盘缓存解耦；按部署内存档位可缩放"
+    },
+    {
+      "Key": "module_cache_max_entries",
+      "Value": "128",
+      "Unit": "count",
+      "Section": "§4.3",
+      "Title": "进程内编译模块条目上限",
+      "Note": ""
+    },
+    {
+      "Key": "module_cache_idle_ttl",
+      "Value": "600",
+      "Unit": "seconds",
+      "Section": "§4.3",
+      "Title": "编译模块空闲淘汰",
+      "Note": "空闲即逐出并归还 OS（几百个应用的常驻上界）"
+    },
+    {
       "Key": "memory_peak_guard_percent",
       "Value": "70",
       "Unit": "percent",
