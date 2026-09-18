@@ -345,7 +345,7 @@ func TestServe_LegacySchemaConfigStillWorks(t *testing.T) {
 }
 
 func TestServe_MissingBaseDomainIs500NotAnonymous(t *testing.T) {
-	e := newEnv(t, func(o *Options) { o.BaseDomain = "" })
+	e := newEnv(t, func(o *Options) { o.BaseDomain = func() string { return "" } })
 	appID := e.appID("nobase")
 	e.publishApp(appSpec{appID: appID, config: loginRequiredConfig("alice")})
 

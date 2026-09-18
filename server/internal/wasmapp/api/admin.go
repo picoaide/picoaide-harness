@@ -16,6 +16,7 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
+	"github.com/picoaide/picoaide/internal/wasmapp/session"
 )
 
 // 本文件是 §8 的**管理面**（R23"最小运维面"）：应用列表 / 下架 / 转移归属 / 冻结
@@ -44,17 +45,32 @@ func (h *Handlers) adminList(c *gin.Context) {
 		writeErr(c, internalErr("查询失败", err))
 		return
 	}
+	// 当前版本号：apps 行上只有 current_release_id，批量取一次（管理面列表要显示
+	// 「当前版本」，没有它这一页只能显示一个内部 id）。取不到不算错 —— 版本行可能
+	// 已被保留策略回收，列表里显示空串即可。
+	ids := make([]int64, 0, len(apps))
+	for _, a := range apps {
+		if a.CurrentReleaseID > 0 {
+			ids = append(ids, a.CurrentReleaseID)
+		}
+	}
+	versions, verr := serverstore.WasmAppCurrentVersions(c.Request.Context(), h.opt.DB, ids)
+	if verr != nil {
+		writeErr(c, internalErr("查询版本失败", verr))
+		return
+	}
 	out := make([]gin.H, 0, len(apps))
 	for _, a := range apps {
 		if limit > 0 && len(out) >= limit {
 			break
 		}
 		out = append(out, gin.H{
-			"app_id":      a.AppID,
-			"title":       a.Title,
-			"description": a.Description,
-			"owner":       a.Owner,
-			"enabled":     a.Enabled,
+			"current_version": versions[a.CurrentReleaseID],
+			"app_id":          a.AppID,
+			"title":           a.Title,
+			"description":     a.Description,
+			"owner":           a.Owner,
+			"enabled":         a.Enabled,
 			// access 从 config_json 现解（0071 起没有 visible 投影列）：
 			// 管理面要能一眼看出访问级别，解析失败回落 login。
 			"access":             string(appcfg.AccessOfConfigJSON(a.ConfigJSON)),
@@ -104,6 +120,134 @@ func (h *Handlers) adminUnpublish(c *gin.Context) {
 	h.auditApp(appID, admin.Username, "wasm_app_publish_toggle",
 		auditDetail(appID, app.Title, "enabled true → false（管理员下架）"))
 	c.JSON(http.StatusOK, gin.H{"app": gin.H{"app_id": appID, "enabled": false, "changed": true}})
+}
+
+// SettingAppsBaseDomain 是应用基域的设置键（管理端可改；未设置时回落环境变量）。
+//
+// 为什么要有它（2026-09-18 用户要求）：「应用名 + 泛域名 = 应用访问地址」这件事必须
+// 能在管理端配置 —— 原来只有部署期环境变量，改一次要重部署。落库之后由装配侧注入的
+// ApplyBaseDomain 负责校验/生效，本包只做"读写 + 审计"。
+const SettingAppsBaseDomain = "wasm.apps_base_domain"
+
+// baseDomainView 是控制台要的完整视图（GET 与 PUT 返回同一形状）。
+func (h *Handlers) baseDomainView() gin.H {
+	value := ""
+	if h.opt.BaseDomain != nil {
+		value = h.opt.BaseDomain()
+	}
+	source := "none"
+	if h.opt.BaseDomainSource != nil {
+		source = h.opt.BaseDomainSource()
+	}
+	scheme, host := session.ParseBaseDomain(value)
+	view := gin.H{
+		"base_domain": value,
+		"source":      source,
+		"enabled":     host != "",
+		"setting_key": SettingAppsBaseDomain,
+		// 控制台直接把它渲染成示例：把 `<app_id>` 换成真实应用名就是访问地址。
+		"url_pattern": "",
+	}
+	if host != "" {
+		view["url_pattern"] = scheme + "://<app_id>." + host
+	}
+	return view
+}
+
+// AdminBaseDomainGet 读当前应用基域配置（控制台渲染 + 保存后回读）。
+func (h *Handlers) adminBaseDomainGet(c *gin.Context) {
+	if err := h.requireReady(); err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, h.baseDomainView())
+}
+
+// AdminBaseDomainPut 保存应用基域（空串 = 关闭应用子域）。
+//
+// 校验/自检/落库/生效全部在注入的 ApplyBaseDomain 里完成（那些知识住在装配侧：
+// 启用子域要过 R35 可信代理与内存四笔账两条 fail-closed）。本函数只负责：
+// 解析 body → 调它 → 写审计 → 回读视图。**失败一定原样回错误信封**（含 hints），
+// 控制台据此提示"还差什么条件"，而不是给一句"保存失败"。
+func (h *Handlers) adminBaseDomainPut(c *gin.Context) {
+	if err := h.requireReady(); err != nil {
+		writeErr(c, err)
+		return
+	}
+	admin := serverauth.AdminUser(c)
+	if admin == nil {
+		writeErr(c, apperr.New(apperr.CodeAuthRequired, "未登录"))
+		return
+	}
+	if h.opt.ApplyBaseDomain == nil {
+		writeErr(c, apperr.New(apperr.CodeInternal, "应用基域不可配置（装配未注入）").
+			WithHint("服务端未提供基域保存钩子：请升级服务端或检查部署装配"))
+		return
+	}
+	var req struct {
+		BaseDomain *string `json:"base_domain"`
+	}
+	if berr := bindAdminJSON(c, &req); berr != nil {
+		writeErr(c, berr)
+		return
+	}
+	if req.BaseDomain == nil {
+		writeErr(c, apperr.New(apperr.CodeValidation, "缺少 base_domain").
+			WithDetail("field", "base_domain").
+			WithHint("body 形如 {\"base_domain\":\"apps.example.com\"}；传空串表示关闭应用子域"))
+		return
+	}
+	old := ""
+	if h.opt.BaseDomain != nil {
+		old = h.opt.BaseDomain()
+	}
+	next := strings.TrimSpace(*req.BaseDomain)
+	if err := h.opt.ApplyBaseDomain(next); err != nil {
+		writeErr(c, err)
+		return
+	}
+	if next != old {
+		h.auditOrg(admin.Username, "wasm_apps_base_domain_change",
+			fmt.Sprintf("应用基域 %q → %q（员工自建应用的访问域名）", old, next))
+	}
+	c.JSON(http.StatusOK, h.baseDomainView())
+}
+
+// AdminPublish 管理员上架（R23：管理员可处置任意应用）。
+//
+// 与 AdminUnpublish **严格对称**：同一权限点（capability:write）、同一审计动作名
+// （wasm_app_publish_toggle，只靠明细里的方向区分）、同样的幂等语义
+// （已是上架状态 ⇒ changed:false，不写审计）。
+//
+// 为什么管理面必须有上架：下架是管理员的处置动作，处置完要能恢复；只给下架
+// 等于让管理员把应用"关掉就再也打不开"（客户端面的上架只有发布者能调）。
+func (h *Handlers) adminPublish(c *gin.Context) {
+	if err := h.requireReady(); err != nil {
+		writeErr(c, err)
+		return
+	}
+	admin := serverauth.AdminUser(c)
+	if admin == nil {
+		writeErr(c, apperr.New(apperr.CodeAuthRequired, "未登录"))
+		return
+	}
+	appID := registry.NormalizeAppID(c.Param("app_id"))
+	app, aerr := h.adminApp(c, appID)
+	if aerr != nil {
+		writeErr(c, aerr)
+		return
+	}
+	if app.Enabled {
+		c.JSON(http.StatusOK, gin.H{"app": gin.H{"app_id": appID, "enabled": true, "changed": false}})
+		return
+	}
+	if err := serverstore.SetWasmAppEnabled(c.Request.Context(), h.opt.DB, appID, true); err != nil {
+		writeErr(c, internalErr("上架失败", err))
+		return
+	}
+	h.auditApp(appID, admin.Username, "wasm_app_publish_toggle",
+		auditDetail(appID, app.Title, "enabled false → true（管理员上架）"))
+	c.JSON(http.StatusOK, gin.H{"app": gin.H{"app_id": appID, "enabled": true, "changed": true}})
 }
 
 // AdminTransferOwner 转移归属（§11 第 17 项：离职/接管）。

@@ -2,9 +2,11 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 )
 
 // ===========================================================================
@@ -220,4 +222,146 @@ func TestAppstoreTransferOwnerAcceptsWasmApp(t *testing.T) {
 	// 未知 kind 仍被拒（白名单没有变成"什么都收"）。
 	e.decodeErr(e.req(http.MethodPut, "/api/server/admin/apps/bogus_kind/shared-admin-tool/owner", "",
 		map[string]any{"owner": "bob"}), http.StatusBadRequest)
+}
+
+// TestAdminBaseDomainGetPut 覆盖「管理端配置应用泛域名」的读写面
+// （2026-09-18 用户要求：应用名 + 泛域名 = 应用访问地址）。
+//
+// 判据：
+//   - GET 回控制台要用的完整视图（当前值 / 来源 / 是否启用 / 可直接展示的 URL 模板）；
+//   - PUT 保存后立即回读新值，并写**组织级**审计（基域是组织级配置，没有 app 维度）；
+//   - 校验失败与"注入侧拒绝"都必须原样回 §8 信封（带 code/hints），不能吞成 500；
+//   - 缺 body 字段要 400 而不是静默清空（清空 = 关闭子域，必须显式）。
+func TestAdminBaseDomainGetPut(t *testing.T) {
+	applied := ""
+	rejectNext := false
+	e := newTestEnv(t, func(o *Options) {
+		o.BaseDomain = func() string { return applied }
+		o.BaseDomainSource = func() string {
+			if applied == "" {
+				return "none"
+			}
+			return "setting"
+		}
+		o.ApplyBaseDomain = func(next string) *apperr.Error {
+			if rejectNext {
+				return apperr.New(apperr.CodeValidation, "模拟注入侧拒绝").
+					WithDetail("reason", "guard_failed").
+					WithHint("这条 hint 必须原样到控制台")
+			}
+			applied = next
+			return nil
+		}
+	})
+
+	// ① 初始（未启用）：enabled=false，url_pattern 为空。
+	var got struct {
+		BaseDomain string `json:"base_domain"`
+		Source     string `json:"source"`
+		Enabled    bool   `json:"enabled"`
+		URLPattern string `json:"url_pattern"`
+		SettingKey string `json:"setting_key"`
+	}
+	e.decodeJSON(e.req(http.MethodGet, "/api/server/admin/wasm-apps/domain", "", nil), http.StatusOK, &got)
+	if got.Enabled || got.URLPattern != "" || got.Source != "none" || got.SettingKey != SettingAppsBaseDomain {
+		t.Fatalf("未启用时的视图不对: %+v", got)
+	}
+
+	// ② 保存：回读新值 + 可直接展示的 URL 模板。
+	e.decodeJSON(e.req(http.MethodPut, "/api/server/admin/wasm-apps/domain", "", map[string]any{
+		"base_domain": "apps.example.com",
+	}), http.StatusOK, &got)
+	if got.BaseDomain != "apps.example.com" || !got.Enabled || got.Source != "setting" {
+		t.Fatalf("保存后视图不对: %+v", got)
+	}
+	if got.URLPattern != "https://<app_id>.apps.example.com" {
+		t.Fatalf("URL 模板不对: %q", got.URLPattern)
+	}
+	// 审计：组织级动作（wasm_apps_base_domain_change），明细带旧值→新值。
+	logs, _, err := serverstore.ListAuditLogsPagedFiltered(e.db, 0, 50, "wasm_apps_base_domain_change", "")
+	if err != nil {
+		t.Fatalf("读审计失败: %v", err)
+	}
+	if len(logs) == 0 {
+		t.Fatal("基域变更必须写审计")
+	}
+	if !strings.Contains(logs[0].Detail, "apps.example.com") {
+		t.Fatalf("审计明细应含新值: %q", logs[0].Detail)
+	}
+
+	// ③ 缺字段 ⇒ 400（清空必须显式传空串，不能靠漏传）。
+	eb := e.decodeErr(e.req(http.MethodPut, "/api/server/admin/wasm-apps/domain", "", map[string]any{}), http.StatusBadRequest)
+	if eb.Error.Code != string(apperr.CodeValidation) {
+		t.Fatalf("缺 base_domain 的 code = %s", eb.Error.Code)
+	}
+
+	// ④ 注入侧拒绝 ⇒ 原样透传（code/details/hints）。
+	rejectNext = true
+	eb = e.decodeErr(e.req(http.MethodPut, "/api/server/admin/wasm-apps/domain", "", map[string]any{
+		"base_domain": "apps.example.com",
+	}), http.StatusBadRequest)
+	if reason, _ := eb.Error.Details["reason"].(string); reason != "guard_failed" {
+		t.Fatalf("注入侧拒绝的 details 丢了: %+v", eb.Error.Details)
+	}
+	if len(eb.Error.Hints) == 0 || !strings.Contains(eb.Error.Hints[0], "原样到控制台") {
+		t.Fatalf("注入侧拒绝的 hints 丢了: %+v", eb.Error.Hints)
+	}
+	if applied != "apps.example.com" {
+		t.Fatalf("被拒的保存不该生效: %q", applied)
+	}
+}
+
+// TestAdminPublishIsSymmetricToUnpublish 管理面必须能"上架"（2026-09-18 补）。
+//
+// 为什么要有：下架是管理员的**处置**动作，处置完必须能恢复；只给下架等于让管理员
+// 把应用"关掉就再也打不开"（客户端面的上架只有发布者能调）。与下架严格对称：
+// 同一审计动作名、同样幂等（未变更 ⇒ changed:false 且不写第二条审计）。
+func TestAdminPublishIsSymmetricToUnpublish(t *testing.T) {
+	e := newTestEnv(t)
+	e.publishOK(e.tokens["alice"], "revive-tool", "1.0.0", testGuestModule(t), goodConfig())
+	toggle := func() bool {
+		var out struct {
+			App struct {
+				Enabled bool `json:"enabled"`
+				Changed bool `json:"changed"`
+			} `json:"app"`
+		}
+		e.decodeJSON(e.req(http.MethodPost, "/api/server/admin/wasm-apps/revive-tool/unpublish", "", nil), http.StatusOK, &out)
+		if out.App.Enabled || !out.App.Changed {
+			t.Fatalf("管理员下架结果不对: %+v", out.App)
+		}
+		app, _ := serverstore.GetWasmApp(t.Context(), e.db, "revive-tool")
+		if app.Enabled {
+			t.Fatal("下架后 apps.enabled 应为 0")
+		}
+		// 上架：回到可用状态，归属不变。
+		e.decodeJSON(e.req(http.MethodPost, "/api/server/admin/wasm-apps/revive-tool/publish", "", nil), http.StatusOK, &out)
+		if !out.App.Enabled || !out.App.Changed {
+			t.Fatalf("管理员上架结果不对: %+v", out.App)
+		}
+		app, _ = serverstore.GetWasmApp(t.Context(), e.db, "revive-tool")
+		if !app.Enabled {
+			t.Fatal("上架后 apps.enabled 应为 1")
+		}
+		if app.Owner != "alice" {
+			t.Fatalf("管理员处置不得改写归属: %s", app.Owner)
+		}
+		// 幂等：已是上架时 changed=false（且不重复写审计）。
+		e.decodeJSON(e.req(http.MethodPost, "/api/server/admin/wasm-apps/revive-tool/publish", "", nil), http.StatusOK, &out)
+		return out.App.Changed
+	}
+	if changed := toggle(); changed {
+		t.Fatal("状态未变更时 changed 应为 false")
+	}
+	actions := e.auditActions("revive-tool")
+	n := 0
+	for _, a := range actions {
+		if a == "wasm_app_publish_toggle" {
+			n++
+		}
+	}
+	// 一上一下 = 两条；幂等那次不写。
+	if n != 2 {
+		t.Fatalf("上架/下架各写一条审计（幂等不写），实际 %d 条: %v", n, actions)
+	}
 }

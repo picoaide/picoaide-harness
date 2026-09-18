@@ -21,7 +21,7 @@ import (
 // DB 为 nil 的 Manager 仍然渲染成功 —— 这本身就是"GET 不碰数据库"的证明。
 func TestTicketPageRendersFormOnly(t *testing.T) {
 	audit := &auditRec{}
-	m := New(Options{BaseDomain: testBaseDomain, Audit: audit.fn})
+	m := New(Options{BaseDomain: func() string { return testBaseDomain }, Audit: audit.fn})
 	rec := httptest.NewRecorder()
 	m.TicketPage(rec, httpsReq(http.MethodGet, testMainOrigin+"/app-ticket?app=my-app&next=%2Fdash", nil))
 	if rec.Code != http.StatusOK {
@@ -50,7 +50,7 @@ func TestTicketPageRendersFormOnly(t *testing.T) {
 
 // TestTicketPageLocalePerRequest 断言换票页也按请求解析语言。
 func TestTicketPageLocalePerRequest(t *testing.T) {
-	m := New(Options{BaseDomain: testBaseDomain})
+	m := New(Options{BaseDomain: func() string { return testBaseDomain }})
 	r1 := httpsReq(http.MethodGet, testMainOrigin+"/app-ticket?app=my-app", nil)
 	r1.Header.Set("Accept-Language", "en")
 	en := httptest.NewRecorder()
@@ -70,7 +70,7 @@ func TestTicketPageLocalePerRequest(t *testing.T) {
 // TestTicketPageNotFoundForMalformedApp 断言形态非法的 app 直接 404
 // （不查库，避免未登录用户用它探测应用是否存在）。
 func TestTicketPageNotFoundForMalformedApp(t *testing.T) {
-	m := New(Options{BaseDomain: testBaseDomain})
+	m := New(Options{BaseDomain: func() string { return testBaseDomain }})
 	for _, target := range []string{
 		testMainOrigin + "/app-ticket",
 		testMainOrigin + "/app-ticket?app=",
@@ -188,7 +188,7 @@ func TestTicketSubmitRejectsMalformedApp(t *testing.T) {
 // TestTicketPageSharesAppIDRulesWithSubmit：GET 确认页与 POST 必须**同一套** app 规则
 // （否则 GET 会变成"哪些形态能被 POST 接受"的探测器）。
 func TestTicketPageSharesAppIDRulesWithSubmit(t *testing.T) {
-	m := New(Options{BaseDomain: testBaseDomain})
+	m := New(Options{BaseDomain: func() string { return testBaseDomain }})
 	for _, app := range []string{
 		"real-app.evil.example.com", "real-app:8443", "REAL-APP", "real-app.",
 		"admin", "123", strings.Repeat("a", 64), "",

@@ -76,10 +76,26 @@ type Options struct {
 	// 就得先往测试库里灌 1 GiB 的制品字节。生产装配不要设置它。
 	ArtifactUsed func(ctx context.Context, username string) (int64, error)
 
-	// BaseDomain 是应用基域（`<app_id>.<BaseDomain>`）。与 internal/wasmapp/session
-	// 的同名字段**同源同语义**（同一份部署配置：session 用它拼换票回跳，本包用它拼
-	// 目录/发布响应里的入口链接）。空 = 未启用应用子域 ⇒ 入口链接回落为按请求 Host 推导。
-	BaseDomain string
+	// BaseDomain 返回**当前**应用基域（`<app_id>.<BaseDomain>`）。与
+	// internal/wasmapp/session 的同名字段**同源同语义**（同一份配置：session 用它拼
+	// 换票回跳，本包用它拼目录/发布响应里的入口链接）。空 = 未启用应用子域 ⇒
+	// 入口链接回落为按请求 Host 推导。
+	//
+	// 函数而不是字符串：管理端可在运行期改基域（2026-09-18 用户要求）。
+	BaseDomain func() string
+
+	// BaseDomainSource 返回当前基域的**来源**（"setting" / "env" / "none"），
+	// 只给控制台展示用（让管理员一眼看出"这个值是控制台配的还是部署时写死的"）。
+	BaseDomainSource func() string
+
+	// ApplyBaseDomain 由 cmd/server 注入：校验 + 落库 + 同步运行期值，一步完成。
+	//
+	// 为什么放在注入侧而不是本包：启用子域要跑的两条 fail-closed 自检
+	// （R35 可信代理必须显式配置、§4.3 内存四笔账）都住在 cmd/server 的装配代码里，
+	// 本包只负责"发请求 → 拿结果 → 写审计"。返回非 nil 表示**没有生效**
+	// （校验失败/自检不过），错误原样进 §8 信封回给控制台 —— 用 *apperr.Error
+	// 而不是裸 error：控制台要拿到 code/details/hints 才能提示"还差什么条件"。
+	ApplyBaseDomain func(baseDomain string) *apperr.Error
 	// CompileCacheRoot 覆盖**编译缓存根目录**（缺省 = DataRoot：缓存落在
 	// `<DataRoot>/_compile-cache`）。
 	//
@@ -130,9 +146,12 @@ type Handlers struct {
 	// ---- 管理面 /api/server/admin/wasm-apps ----
 	AdminList          gin.HandlerFunc // GET    ""
 	AdminUnpublish     gin.HandlerFunc // POST   /:app_id/unpublish
+	AdminPublish       gin.HandlerFunc // POST   /:app_id/publish（与下架对称，管理员处置完能恢复）
 	AdminTransferOwner gin.HandlerFunc // PUT    /:app_id/owner
 	AdminFreeze        gin.HandlerFunc // POST   /:app_id/freeze
 	AdminReview        gin.HandlerFunc // PUT    /review  (R17 审核开关)
+	AdminBaseDomainGet gin.HandlerFunc // GET    /domain   (应用泛域名配置，2026-09-18)
+	AdminBaseDomainPut gin.HandlerFunc // PUT    /domain
 }
 
 // SettingReviewRequired 是发布审核开关的 settings 键（R17）。
@@ -162,9 +181,12 @@ func NewHandlers(opt Options) *Handlers {
 	h.UploadAbort = h.uploadAbort
 	h.AdminList = h.adminList
 	h.AdminUnpublish = h.adminUnpublish
+	h.AdminPublish = h.adminPublish
 	h.AdminTransferOwner = h.adminTransferOwner
 	h.AdminFreeze = h.adminFreeze
 	h.AdminReview = h.adminReview
+	h.AdminBaseDomainGet = h.adminBaseDomainGet
+	h.AdminBaseDomainPut = h.adminBaseDomainPut
 	return h
 }
 
@@ -473,7 +495,11 @@ func (h *Handlers) validateAppID(appID string) *apperr.Error {
 func (h *Handlers) appOrigin(c *gin.Context, appID string) string {
 	// 基域解析规则只允许一份：复用 session.ParseBaseDomain（同一份部署配置的
 	// 两个消费者必须对"带不带 scheme / 大小写 / 尾点"给出相同结论）。
-	if scheme, host := session.ParseBaseDomain(h.opt.BaseDomain); scheme != "" && host != "" && appID != "" {
+	raw := ""
+	if h.opt.BaseDomain != nil {
+		raw = h.opt.BaseDomain()
+	}
+	if scheme, host := session.ParseBaseDomain(raw); scheme != "" && host != "" && appID != "" {
 		return scheme + "://" + appID + "." + host
 	}
 	host := strings.TrimSpace(c.Request.Host)
