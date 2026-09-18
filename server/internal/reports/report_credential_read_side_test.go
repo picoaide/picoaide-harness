@@ -47,6 +47,7 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
+	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 )
 
 const r3Secret = "SUPER-SECRET-BOT-KEY"
@@ -70,6 +71,7 @@ func r3ProdRouter(t *testing.T) (*gin.Engine, *sql.DB) {
 		Channel:       channel.NewHandlers(),
 		PortalAdmin:   portal.NewAdminHandlers(db),
 		ClientRelease: clientrelease.NewHandlers(func() string { return "2.7.2" }, "official"),
+		SkillSeed:     skillseed.NewHandlers(skillseed.New(t.TempDir())),
 		Market:        marketplace.NewHandlers(db, t.TempDir()),
 		Agentshare:    agentshare.NewHandlers(db, t.TempDir()),
 		Shared:        sharedskills.NewHandlers(db, t.TempDir()),

@@ -44,13 +44,25 @@ COPY --from=webadmin /build/dist ./webadmin/dist/
 COPY webadmin/embed.go ./webadmin/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o /out/picoaide-server ./cmd/server
+# WASM 应用平台的编译子进程（R19/R31）：**必须**与 server 二进制同目录 ——
+# compile.resolveChildBinary 按"自身可执行文件所在目录 + picoaide-app-compile"解析。
+# 缺它的后果：发布链路 fail-closed（启动不再 Fatal，但功能不可用）。
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags "-s -w" -o /out/picoaide-app-compile ./cmd/picoaide-app-compile
 
 # --- Stage 3: 运行镜像(CA 证书用于 HTTPS 上游/LDAPS;entrypoint 降权;数据卷 0700) ---
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata su-exec && \
+# bubblewrap：WASM 应用平台编译子进程的 OS 级隔离（R31 / §15.1 第 14 条，
+# 唯一"读不可信字节且可能写宿主"的进程）。**读到的是白名单**：沙箱内 / 是空 tmpfs，
+# 只放行系统目录 + 模块目录 + 缓存目录（唯一可写），因此它读不到 master key、
+# 也读不到别的应用的 SQLite 库。
+# ⚠️ 容器里 bwrap 需要非特权 user namespace 或 `--cap-add SYS_ADMIN`（见部署文档）；
+# 不可用时 compile.New 按 PICOAI_COMPILE_ISOLATION 决定回落还是拒绝启动。
+RUN apk add --no-cache ca-certificates tzdata su-exec bubblewrap && \
     adduser -D -u 10001 -h /app picoaide
 WORKDIR /app
 COPY --from=build /out/picoaide-server /app/picoaide-server
+COPY --from=build /out/picoaide-app-compile /app/picoaide-app-compile
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
@@ -99,6 +111,34 @@ ENV PICOAI_CLIENT_RELEASE_DIR=/opt/picoaide/client
 # 否则在此显式声明对外地址(如 PICOAI_PUBLIC_BASE_URL=https://ai.example.com,
 # 允许带子路径),否则清单不下发 client 段并给出 client_unavailable 原因。
 # ENV PICOAI_PUBLIC_BASE_URL=https://ai.example.com
+
+# --- 内置技能随镜像分发（"技能内置到服务端、客户端按需安装"） ---
+# 平台自带技能（当前是 WASM 应用作者手册 picoaide-app-builder）放在镜像层里，
+# 服务端把 /opt/picoaide/skills 直接对外提供：
+#   GET /api/client/v2/skills/builtin                 清单（name/version/sha256/size…）
+#   GET /api/client/v2/skills/builtin/:name/archive   tar.gz 包（响应头带 sha256/version）
+# 客户端在能力中心**按需安装**（下载 → sha256 对照 → 整树解包 → <dshHome>/skills），
+# 不自动安装、不需要管理员。技能内容随镜像升级而更新，正是"内置"要的语义。
+#
+# 构建上下文契约（与 clientassets 同规矩）：
+#   skillassets/skills/<name>/SKILL.md   必须存在（源头在 vendored 插件包
+#                                        packages/vendor/memory-evolve/skills/）
+# 构建命令必须带 `--build-context skillassets=<仓库根>/packages/vendor/memory-evolve`
+# （见 server/Makefile 的 docker-image 与 scripts/ci-build-channel-images.sh）。
+# ⚠️ 源头只有一份：不要在 server/ 下再放一份技能副本，两边漂移会让"员工装到的
+# 技能"与"仓库里评审过的技能"不是同一份。
+#
+# **逐个列出，不用 `skills/*/` 通配**：那个目录里还有 5 个随客户端分发的 COI 适配器
+# 技能（kimi/codex/grok/hermes-cli-calling、memory-consolidate），它们是插件自己的
+# 同步链路的资产、不是平台内置技能，也没有平台必需的 frontmatter（version/title/…）——
+# 通配进来只会让 skillseed 每次启动都把它们记成"被跳过的坏资产"，把真正的告警淹掉。
+# 新增一个平台内置技能 = 这里加一行 + 该技能带齐平台 frontmatter（缺字段会被
+# skillmanifest 校验拒掉，且启动日志会点名）。
+COPY --from=skillassets skills/picoaide-app-builder/ /opt/picoaide/skills/picoaide-app-builder/
+# 目录位置固定，服务端直接读（无需 entrypoint 落盘）。可用该 env 覆盖成
+# 别的路径（如挂载宿主机目录做现场排查），照 clientrelease 的
+# PICOAI_CLIENT_RELEASE_DIR 风格。
+ENV PICOAI_SKILL_SEED_DIR=/opt/picoaide/skills
 
 # --- 渠道配置随镜像分发(服务端对外内容的唯一来源) ---
 # CI 构建前把仓库 channels/<channel-id>/ (配置 + logo 等素材)复制成

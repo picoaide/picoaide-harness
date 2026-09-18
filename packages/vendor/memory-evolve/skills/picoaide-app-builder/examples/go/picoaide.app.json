@@ -1,0 +1,7 @@
+{
+  "access": "whitelist",
+  "whitelist": ["zhangwei", "liyang"],
+  "purpose": "团队共享便签墙",
+  "data_sensitivity": "内部",
+  "owner": "张伟"
+}

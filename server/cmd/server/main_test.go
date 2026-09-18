@@ -43,6 +43,7 @@ import (
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
 	"github.com/picoaide/picoaide/internal/updatecheck"
+	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 	"github.com/picoaide/picoaide/webadmin"
 )
 
@@ -142,14 +143,16 @@ func buildRouter(t *testing.T) *gin.Engine {
 		Channel:       channel.NewHandlers(),
 		PortalAdmin:   portal.NewAdminHandlers(nil),
 		ClientRelease: clientrelease.NewHandlers(func() string { return "2.7.0" }, "official"),
-		Market:        marketplace.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Agentshare:    agentshare.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Shared:        sharedskills.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Capability:    capabilities.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Connector:     connectors.NewHandlers(nil),
-		Telemetry:     telemetry.NewHandlers(nil),
-		Gateway:       llmgateway.NewHandlers(nil),
-		Reports:       reports.NewHandlers(nil),
+		// 内置技能下发面：资产目录用一次性空目录（本地测试没有 /opt/picoaide/skills）。
+		SkillSeed:  skillseed.NewHandlers(skillseed.New(t.TempDir())),
+		Market:     marketplace.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		Agentshare: agentshare.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		Shared:     sharedskills.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		Capability: capabilities.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
+		Connector:  connectors.NewHandlers(nil),
+		Telemetry:  telemetry.NewHandlers(nil),
+		Gateway:    llmgateway.NewHandlers(nil),
+		Reports:    reports.NewHandlers(nil),
 	})
 	return r
 }
@@ -449,6 +452,7 @@ func TestV2RealDB(t *testing.T) {
 		Channel:       channel.NewHandlers(),
 		PortalAdmin:   portal.NewAdminHandlers(nil),
 		ClientRelease: clientrelease.NewHandlers(func() string { return "dev" }, "official"),
+		SkillSeed:     skillseed.NewHandlers(skillseed.New(t.TempDir())),
 		Market:        marketplace.NewHandlers(db, t.TempDir()),
 		Agentshare:    agentshare.NewHandlers(db, t.TempDir()),
 		Shared:        sharedskills.NewHandlers(db, t.TempDir()),
