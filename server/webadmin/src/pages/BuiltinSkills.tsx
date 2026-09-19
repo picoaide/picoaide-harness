@@ -40,6 +40,14 @@ interface BuiltinSkill {
 
 interface BuiltinProblem {
   name: string
+  /**
+   * 名字的字节十六进制（空格分隔），**仅当名字不是合法 UTF-8 时**服务端才给。
+   *
+   * 为什么要这一列（2026-09-19 第三轮审计 F3-6）：Linux 文件名是任意字节串，非法
+   * UTF-8 的名字经 JSON 编码后每个非法字节都变成 `\ufffd` —— 两个不同的非法名会
+   * 显示成同一个 `��A`，管理员据此定位不到具体文件。十六进制是唯一且精确的形态。
+   */
+  name_bytes_hex?: string
   reason: string
 }
 
@@ -117,8 +125,8 @@ export default function BuiltinSkills() {
               平台内置技能
               {view && (
                 <Badge variant={problems.length > 0 || loadError ? 'destructive' : 'secondary'} data-testid="builtin-count">
-                  {skills.length} 条
-                  {problems.length > 0 ? ` · ${problems.length} 条被跳过` : ''}
+                  {skills.length} 条可用
+                  {problems.length > 0 ? ` · ${problems.length} 条未收录` : ''}
                 </Badge>
               )}
             </CardTitle>
@@ -172,12 +180,19 @@ export default function BuiltinSkills() {
             <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-[13px]" data-testid="builtin-problems">
               <div className="flex items-center gap-2 font-medium text-amber-700">
                 <AlertTriangle className="h-4 w-4" />
-                有 {problems.length} 条技能被跳过（不会出现在员工的能力中心里）
+                有 {problems.length} 条未收录（下面逐条列出；不会出现在员工的能力中心里）
               </div>
-              <ul className="mt-2 space-y-1">
+              <ul className="mt-2 space-y-1" data-testid="builtin-problem-list">
                 {problems.map((p, i) => (
-                  <li key={`${p.name}-${i}`} className="break-all">
+                  <li key={`${p.name}-${p.name_bytes_hex ?? ''}-${i}`} className="break-all" data-testid="builtin-problem-item">
                     <span className="font-mono text-xs">{p.name}</span>
+                    {p.name_bytes_hex !== undefined && p.name_bytes_hex !== '' && (
+                      // 非法 UTF-8 名字的精确形态：`name` 里可能显示成同一个 `��`，
+                      // 这一列才是"到底是哪个文件"（F3-6）。
+                      <span className="ml-1 font-mono text-[11px] text-muted-foreground" data-testid="builtin-problem-name-hex">
+                        (原始字节 {p.name_bytes_hex})
+                      </span>
+                    )}
                     <span className="text-muted-foreground"> —— {p.reason}</span>
                   </li>
                 ))}
@@ -200,7 +215,7 @@ export default function BuiltinSkills() {
               {!view.dir_exists
                 ? '镜像里没有内置技能资产目录（本地直接跑二进制就是这种形态，不是故障）。'
                 : problems.length > 0
-                  ? '资产目录存在，但没有一条技能通过校验。请看上面的「被跳过」原因。'
+                  ? '资产目录存在，但没有一条技能通过校验。请看上面的「未收录」原因。'
                   : '资产目录存在，但里面没有任何条目（每个技能必须是 <name>/SKILL.md 的形态）。'}
             </div>
           )}

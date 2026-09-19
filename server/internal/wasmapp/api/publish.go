@@ -693,6 +693,52 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 		return nil, e
 	}
 
+	// ---- E0 快照新鲜度：任何写入之前的"读—改"冲突检测 ----
+	//
+	// 现场（审计第三轮 B 区 CONFIRMED，2026-09-19）：`existing` 是本次请求开头
+	// （loadForPublish）读到的 apps 行快照，而**写回投影**在 commitRelease 里 ——
+	// 中间隔着真编译 + staging（秒级窗口）。窗口里落库的任何一次并发写都会被这一次的
+	// 陈旧快照覆盖。最典型的是**并发 approve**：
+	//
+	//	① 发布读到 apps = {title:"报销助手", current_release_id:R1}；
+	//	② 管理员批准 v1.1.0 ⇒ apps = {title:"工资条查询", current_release_id:R2}
+	//	   （R2 的版本行 title="工资条查询"）——投影随审批切走；
+	//	③ 发布继续走：E1 的 UPSERT 把①的陈旧 title/description 写回 ⇒
+	//	   apps = {title:"报销助手", current_release_id:R2}
+	//	   ⇒ 目录显示"报销助手"、生效版本却是 R2（标题"工资条查询"）：**目录与生效
+	//	     版本不一致**的终态，而且没有任何路径会自己修回来（E1 只在发布时写，
+	//	     下一次审核才可能覆盖）。
+	//
+	// E1.5 的 owner 复读只认"抢占"那一种形态（owner 变了才拒），覆盖不到这条。这里在
+	// **任何写入之前**复读一次 apps 行并逐字段比对快照：不一致 ⇒ fail-loud 让作者重试。
+	// 此刻还没有建版本行、也没有写 staging ⇒ 版本号没被占用，重试是干净的。
+	//
+	// 残留（要认账）：复读与 commitRelease 的第一次写之间仍有微秒级窗口 —— 彻底关掉它
+	// 需要把"校验 + 写投影"做成一条带条件的 UPDATE（serverstore 目前没有这种 DAO）。
+	// 现有的两道防线把窗口从"秒级"压到"微秒级"：①这里的复读；②后面一律以**复读值**
+	// 为投影/补偿基线（即便真撞上，写回的也是刚刚读到的值，而不是编译前的陈旧值）。
+	if existing != nil {
+		fresh, ferr := serverstore.GetWasmApp(c.Request.Context(), h.opt.DB, appID)
+		if ferr != nil {
+			return nil, internalErr("查询失败", ferr)
+		}
+		if field := staleAppField(existing, fresh); field != "" {
+			e := apperr.New(apperr.CodeValidation,
+				"应用状态在本次发布期间被其他操作改变了，本次发布已中止（未占用版本号）").
+				WithDetail("app_id", appID).
+				WithDetail("version", version).
+				WithDetail("changed_field", field).
+				WithHint("请重试发布：本次没有写入任何行或资源；并发审批/上下架/冻结/改名/再次发布都会触发这条")
+			// 409（不是 400）：参数没写错，是时序冲突 —— 与"拒绝后不能再通过"同码同状态。
+			e.HTTP = http.StatusConflict
+			h.auditFailed(u, appID, version, e)
+			return nil, e
+		}
+		// 投影与补偿一律以**复读值**为基线（见上面的"残留"：微秒级窗口里写回的也必须
+		// 是刚刚读到的值，不能是编译前的陈旧值）。
+		existing = fresh
+	}
+
 	// ---- C→落库：先把资源写进 staging（仍在库外）----
 	stage, serr := h.writeStaging(st)
 	if serr != nil {
@@ -850,8 +896,9 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 	//
 	// 三条分支的口径（read.go 的目录/详情/导出都是"读 apps 行"）：
 	//   - **approved**：投影 = 本次版本（title/description + 配置三列，与 G1 同源同版）；
-	//   - **待审 + 已存在应用**：投影**一字不动** —— 传 in.existing 的现值，不是待审
-	//     标题/描述（UPSERT 的冲突分支会照写这两列）；
+	//   - **待审 + 已存在应用**：投影**一字不动** —— 显式传 in.existing 的**现值**
+	//     （title/description/config_json/purpose/data_sensitivity 五列全都传现值，
+	//     见下面的 Finding 6 说明）；
 	//   - **首版待审**：apps 行还没有任何生效版本，显示面用 **app_id 占位**（不是待审
 	//     标题：未审核内容不进投影列；也不是空串：目录/详情/导出读的就是这一列，
 	//     read.go 对空值没有 title 兜底 ⇒ 空标题会先出现在管理面与导出里）。目录此时
@@ -863,6 +910,16 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 	// 残留（要认账）：首版待审期间再发新版若省略 title，继承源是 apps 行的占位
 	// （app_id）而不是上一份草稿标题 ⇒ 作者需重填一次。宁可让作者多打一次，也不让
 	// "没人批准过的标题"成为下一版的缺省（与继承基线同一条纪律）。
+	//
+	// Finding 6（审计第三轮 B 区）：待审分支给 UpsertWasmApp 传的三个配置列此前是
+	// **空串**，靠 DAO 的冲突分支"恰好不写这三列"才实现"配置一字不动" —— 这个不变量
+	// 没有任何守卫，谁改一下 DAO 的列集就会静默改写全组织的访问级别/用途。现在像
+	// title/description 一样**显式传现值**：不变量搬进 api 层（与实现无关地成立），
+	// 同时下方有契约级用例钉住"待审路径不改这三列"。
+	//
+	// 空标题的历史行（apps.title = ''，0071 之前的残渣）：待审路径写回空串会让目录/
+	// 详情/导出继续顶着空标题（read.go 对空 title 没有兜底）。这里统一按首版待审的
+	// 占位口径补成 app_id —— 空串不是可接受的终态，"占位"至少能被识别成非真实标题。
 	projConfig, projPurpose, projSensitivity := "", "", ""
 	projTitle, projDescription := in.appID, ""
 	switch {
@@ -870,7 +927,11 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 		projConfig, projPurpose, projSensitivity = string(st.configJSON), st.config.Purpose, st.config.DataSensitivity
 		projTitle, projDescription = in.title, st.config.Purpose
 	case in.existing != nil:
+		projConfig, projPurpose, projSensitivity = in.existing.ConfigJSON, in.existing.Purpose, in.existing.DataSensitivity
 		projTitle, projDescription = in.existing.Title, in.existing.Description
+		if strings.TrimSpace(projTitle) == "" {
+			projTitle = in.appID
+		}
 	}
 	if err := serverstore.UpsertWasmApp(ctx, h.opt.DB, serverstore.WasmApp{
 		AppID: in.appID, Title: projTitle, Description: projDescription,
@@ -885,9 +946,14 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 	// 那把锁）。落库后复读一次：赢家不是我且我不是管理员 ⇒ 这是一次并发抢占，
 	// 立刻拒绝（此时**还没有**建版本行，所以不占版本号）。
 	//
-	// 残留：抢占失败者这一次的 UpsertWasmApp 可能覆写赢家的 title/description
-	// （DAO 的冲突分支对这两列没有守卫）。已列入交付说明的残留项 —— 彻底修法是把
-	// 发布收敛到 appstore.Publish 的事务级咨询锁内核（需要 serverstore 暴露 tx 版 DAO）。
+	// 注意这条**只管抢占那一种形态**（owner 变了才拒）。其他并发写（审批把投影切走、
+	// 上下架、冻结…）由 publishFromBytes 的 E0 快照新鲜度检测兜住 —— 那一条在任何写入
+	// 之前就 fail-loud，所以这里的"覆写赢家 title/description"窗口已被收敛到微秒级：
+	// 触发这条时写回的 title/description 是 E0 复读到的**赢家值**（不是编译前的快照），
+	// 而 owner 抢占失败者不会带走别人的显示面。
+	//
+	// 残留：彻底消除"校验与写入之间的窗口"需要把发布收敛到 appstore.Publish 的事务级
+	// 咨询锁内核（需要 serverstore 暴露 tx 版 DAO）；当前的窗口量与后果见 E0 段。
 	if app, err := serverstore.GetWasmApp(ctx, h.opt.DB, in.appID); err == nil {
 		out.Owner = app.Owner
 		if app.Owner != in.publisher && !h.isAdmin(c) {
@@ -1145,6 +1211,59 @@ func (h *Handlers) loadForPublish(ctx context.Context, appID string) (*serversto
 		return nil, nil, internalErr("查询失败", herr)
 	}
 	return app, hist, nil
+}
+
+// staleAppField 比较两份 apps 行快照，返回第一处不同的字段名（空串 = 未变）。
+//
+// 用途：发布链路在**任何写入之前**用它判断"读快照 → 写投影"之间有没有别的写者
+// （并发 approve / 上下架 / 冻结 / 改名 / 再次发布）插进来 —— 那会让本次发布把陈旧
+// 的 title/description 写回投影，留下"目录与生效版本不一致"的终态（见 publishFromBytes
+// 的 E0 段）。
+//
+// 比较口径是"会影响本次写回结果或补偿基线的列"，并且**逐字段比较而不是只看
+// updated_at**：错误信息里要能指出变的是哪一个字段（"谁动了这个应用"是作者唯一能
+// 行动的信息）。updated_at 放在最后：任何写入都会推进它 ⇒ 连"值没变但确实被人写过"
+// 也挡得住（宁可让作者重试一次，也不写回一个来历不明的快照）。
+func staleAppField(snap, fresh *serverstore.WasmApp) string {
+	switch {
+	case fresh == nil:
+		// 快照在、行没了：只可能被真删（软删会留行）⇒ 一律按冲突处理。
+		return "deleted"
+	case snap.Title != fresh.Title:
+		return "title"
+	case snap.Description != fresh.Description:
+		return "description"
+	case snap.Owner != fresh.Owner:
+		return "owner"
+	case snap.Enabled != fresh.Enabled:
+		return "enabled"
+	case snap.ConfigJSON != fresh.ConfigJSON:
+		return "config_json"
+	case snap.Purpose != fresh.Purpose:
+		return "purpose"
+	case snap.DataSensitivity != fresh.DataSensitivity:
+		return "data_sensitivity"
+	case snap.CurrentReleaseID != fresh.CurrentReleaseID:
+		return "current_release_id"
+	case !sameTimePtr(snap.FrozenAt, fresh.FrozenAt):
+		return "frozen_at"
+	case !sameTimePtr(snap.DeletedAt, fresh.DeletedAt):
+		return "deleted_at"
+	case !snap.UpdatedAt.Equal(fresh.UpdatedAt):
+		return "updated_at"
+	}
+	return ""
+}
+
+// sameTimePtr 比较两个可空时间戳（nil 与 nil 相等，nil 与非 nil 不等）。
+func sameTimePtr(a, b *time.Time) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	}
+	return a.Equal(*b)
 }
 
 // inheritBase 返回**更新发布**的字段继承基线 = 最新 approved 版本的 `config_json`

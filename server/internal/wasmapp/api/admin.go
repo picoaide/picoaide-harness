@@ -348,15 +348,20 @@ func (h *Handlers) adminReleases(c *gin.Context) {
 			continue
 		}
 		out = append(out, gin.H{
-			"id":         r.ID,
-			"version":    r.Version,
-			"status":     r.Status,
-			"title":      r.Title,
-			"publisher":  r.Publisher,
-			"size":       r.Size,
-			"checksum":   r.Checksum,
-			"changelog":  r.Changelog,
-			"created_at": r.CreatedAt,
+			"id":        r.ID,
+			"version":   r.Version,
+			"status":    r.Status,
+			"title":     r.Title,
+			"publisher": r.Publisher,
+			"size":      r.Size,
+			"checksum":  r.Checksum,
+			"changelog": r.Changelog,
+			// 描述与标题同源（都来自 apps 的显示面投影 = 生效版本的 app_releases 行）：
+			// 审核通过会把这两列一起公开给全组织（admin.go 的 syncAppProjection），
+			// 所以审批人必须在批准**之前**看到它们（审计第三轮 B 区：此前只下发 title，
+			// 而卡片连 title 都没渲染 ⇒ 对"改名/换描述"是盲批）。
+			"description": r.Description,
+			"created_at":  r.CreatedAt,
 			// 审核结论（被拒理由）。R1-uxw-4：管理员写下的理由此前只落在审计详情里 ——
 			// 审批面自己都回看不了"我上次为什么拒的"，发布者更无从得知。
 			// pending/approved 行恒为空串（数据库侧保证），前端只在 rejected 行渲染它。
@@ -455,20 +460,37 @@ func (h *Handlers) reviewRelease(c *gin.Context, approve bool) {
 			WithHint("软删的版本号永久占位、内容不再可用（§4.1）；请让作者发布新版本"))
 		return
 	}
-	if approve && meta.Status == serverstore.ReleaseStatusApproved {
-		// 幂等：已通过的不再写审计、也不再动生效版本投影。
+	// 已终态的重复调用：**状态不再写，但投影必须重算一次**（自愈）。
+	//
+	// 为什么不能"终态就早退"（审计第三轮 B 区 CONFIRMED，2026-09-19）：本端点的三步
+	// 写入是顺序、非事务的 ——
+	//
+	//	① SetReleaseStatusForReview（状态落库，不可回滚）
+	//	② 投影重算（SetWasmAppCurrentRelease / SetWasmAppConfig / SetWasmAppDisplay）
+	//
+	// ②任一步失败时端点回 500「审核结果已落库，但…失败（请重试一次）」。而重试时版本
+	// 行已经是终态 —— 老实现命中下面的早退分支直接 200 `changed=false`，**一次都不再
+	// 跑投影**，于是目录标题/描述/生效版本永久停在旧值（首版待审则永远顶着 app_id
+	// 占位）。旧的早退注释还写着"重复调用本端点幂等（会再走一次投影同步）"，与实现相反。
+	//
+	// 现在的口径：终态 ⇒ 不重复写状态、不重复写审计（幂等无副作用），但**无条件重跑
+	// 一次投影同步**（syncAppProjection 是幂等且最小写入的：值没变就不写）。因此
+	// "重试一次"这句错误提示是真的可重试，而"重复 approve"也不会变成重复副作用。
+	if (approve && meta.Status == serverstore.ReleaseStatusApproved) ||
+		(!approve && meta.Status == serverstore.ReleaseStatusRejected) {
+		current := h.currentVersionOf(ctx, appID, app)
+		latestVersion, perr := h.syncAppProjection(ctx, appID, app)
+		if perr != nil {
+			writeErr(c, perr)
+			return
+		}
+		if latestVersion != "" {
+			current = latestVersion
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"app_id": appID, "version": version,
 			"status": meta.Status, "changed": false,
-			"current_version": h.currentVersionOf(ctx, appID, app),
-		})
-		return
-	}
-	if !approve && meta.Status == serverstore.ReleaseStatusRejected {
-		c.JSON(http.StatusOK, gin.H{
-			"app_id": appID, "version": version,
-			"status": meta.Status, "changed": false,
-			"current_version": h.currentVersionOf(ctx, appID, app),
+			"current_version": current,
 		})
 		return
 	}
@@ -512,65 +534,23 @@ func (h *Handlers) reviewRelease(c *gin.Context, approve bool) {
 		return
 	}
 
-	// 审核落定之后把 apps 行的**投影**重算为"最新 approved 版本"
-	// （R1-pm-9 + R2-1）：current_release_id 与 config_json/purpose/data_sensitivity
-	// 以及 title/description 是同一份版本的投影列，必须一起回到同一版。
-	//
-	// 两条路径共用同一段，因为它们要的是同一个答案：
-	//   - **approve**：新版本成为生效版本 ⇒ 投影切到它（目录徽标/标题/描述/生效版本随
-	//     审批生效 —— 待审期间 E1 刻意不写 title/description，所以这里是它们唯一的
-	//     生效入口，漏掉就等于"批准了却永远看不到新标题"）；
-	//   - **reject** ：被拒版本从未生效 ⇒ 投影**恢复**成仍在生效的那一版 ——
-	//     否则待审版本带来的 access/负责人/用途会永久留在目录上（审核期间展示一个
-	//     没被任何人批准的访问级别，正是这条缺陷的下游后果），标题/描述同理
-	//     （这条路同时把老实现留下的"脏标题"投影治好）。
-	//
-	// 取最新 approved 而不是本次版本：审批一个**更旧**的待审版本时（例如 v2 待审、
-	// v3 已通过），生效版本仍然是更新的那个 approved 版本 —— 与线上交付
-	// （max(id) approved）同口径。
-	//
-	// 没有任何 approved 版本（首版待审被拒）时不动投影：没有可投影的基线，
-	// 而"把一行从未生效的配置留着"与"把它清空"对目录都没有影响（目录只列有生效
-	// 版本的应用，见 read.go 的目录条件）。
+	// 审核落定之后把 apps 行的**投影**重算为"最新 approved 版本"（R1-pm-9 + R2-1）。
+	// 实现与理由见 syncAppProjection（approve/reject 两条路径共用同一段，因为它们
+	// 要的是同一个答案；上面的终态分支也调它 —— 那是"请重试一次"能真正修好的关键）。
 	current := h.currentVersionOf(ctx, appID, app)
-	latest, lerr := serverstore.LatestApprovedWasmReleaseMeta(ctx, h.opt.DB, appID)
-	switch {
-	case errors.Is(lerr, serverstore.ErrNotFound):
-		// 没有已通过版本：保持现状（上面已取到"当前生效版本"= 空或回收后的残留）。
-	case lerr != nil:
-		// 状态已经落库（approved/rejected），但投影没更新。这不是"审核失败"，而是
-		// 平台侧写入故障；重复调用本端点幂等（会再走一次投影同步），所以如实报错
-		// 让管理员重试。
-		writeErr(c, internalErr("审核结果已落库，但应用投影更新失败（请重试一次）", lerr))
+	if latestVersion, perr := h.syncAppProjection(ctx, appID, app); perr != nil {
+		writeErr(c, perr)
 		return
-	default:
-		if latest.ID != app.CurrentReleaseID {
-			if serr := serverstore.SetWasmAppCurrentRelease(ctx, h.opt.DB, appID, latest.ID); serr != nil {
-				writeErr(c, internalErr("审核结果已落库，但应用投影更新失败（请重试一次）", serr))
-				return
-			}
-		}
-		// 配置列与 config_json 同源同版：purpose/data_sensitivity 从该版本的
-		// config_json 现解（解析失败回落空串，与 AccessOfConfigJSON 同向）。
-		// 空 config_json 的历史行不写 —— 不能拿"没有配置"去清掉现有投影。
-		if strings.TrimSpace(latest.ConfigJSON) != "" {
-			purpose, sensitivity := appcfg.DeclarationsOfConfigJSON(latest.ConfigJSON)
-			if serr := serverstore.SetWasmAppConfig(ctx, h.opt.DB, appID,
-				latest.ConfigJSON, purpose, sensitivity); serr != nil {
-				writeErr(c, internalErr("审核结果已落库，但配置投影更新失败（请重试一次）", serr))
-				return
-			}
-		}
-		// 显示面两列（title/description）也取**该版本行自己的值**（R2-1）：
-		// 这两个字段是版本的属性（publish 时与 config 一起写进 app_releases），
-		// 与 purpose 不同源时也要以版本行为准 —— 目录门面必须与生效版本逐字一致。
-		// 这里**无条件**写（不像 config 那样跳过空行）：标题/描述为空是合法状态，
-		// 且首版待审用的 app_id 占位必须在这一刻被真值替掉。
-		if serr := serverstore.SetWasmAppDisplay(ctx, h.opt.DB, appID, latest.Title, latest.Description); serr != nil {
-			writeErr(c, internalErr("审核结果已落库，但显示面投影更新失败（请重试一次）", serr))
-			return
-		}
-		current = latest.Version
+	} else if latestVersion != "" {
+		current = latestVersion
+	}
+
+	// 审计明细里的标题取**投影落定之后**的行状态：syncAppProjection 刚刚可能把 app_id
+	// 占位（首版待审）或脏投影换成了生效版本的真值 —— 用审批前读到的旧快照会把一次
+	// 成功的首审记成「首版待审，暂无生效标题」，那同样是留错证据（auditTitleOf 的判据
+	// 就是 current_release_id）。复读失败不阻断审核：审计是尽力而为的旁路。
+	if refreshed, rerr := serverstore.GetWasmApp(ctx, h.opt.DB, appID); rerr == nil {
+		app = refreshed
 	}
 
 	// 审计：动作名沿用既有风格（wasm_app_* 前缀、一条动作一个名字）；明细里
@@ -578,14 +558,14 @@ func (h *Handlers) reviewRelease(c *gin.Context, approve bool) {
 	// 面是运维可读的，不是内容仓库）。
 	if approve {
 		h.auditApp(appID, admin.Username, "wasm_app_release_approve",
-			auditDetail(appID, app.Title, fmt.Sprintf("v%s 审核通过（管理员审批；当前生效 v%s）", version, current)))
+			auditDetail(appID, auditTitleOf(app), fmt.Sprintf("v%s 审核通过（管理员审批；当前生效 v%s）", version, current)))
 	} else {
 		detail := fmt.Sprintf("v%s 审核拒绝", version)
 		if reason != "" {
 			detail += "：" + reason
 		}
 		h.auditApp(appID, admin.Username, "wasm_app_release_reject",
-			auditDetail(appID, app.Title, detail))
+			auditDetail(appID, auditTitleOf(app), detail))
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"app_id":          appID,
@@ -595,6 +575,73 @@ func (h *Handlers) reviewRelease(c *gin.Context, approve bool) {
 		"current_version": current,
 		"reason":          reason,
 	})
+}
+
+// syncAppProjection 把 apps 行的**投影列**重算为"最新 approved 版本"，返回生效版本号。
+//
+// 投影列 = current_release_id 与 config_json/purpose/data_sensitivity 以及
+// title/description（R1-pm-9 + R2-1）：它们是同一份版本的投影，必须一起回到同一版。
+//
+// 两条调用路径要的是同一个答案：
+//   - **approve**：新版本成为生效版本 ⇒ 投影切到它（目录徽标/标题/描述/生效版本随
+//     审批生效 —— 待审期间 E1 刻意不写 title/description，所以这里是它们唯一的
+//     生效入口，漏掉就等于"批准了却永远看不到新标题"）；
+//   - **reject** ：被拒版本从未生效 ⇒ 投影**恢复**成仍在生效的那一版 ——
+//     否则待审版本带来的 access/负责人/用途会永久留在目录上（审核期间展示一个
+//     没被任何人批准的访问级别，正是这条缺陷的下游后果），标题/描述同理
+//     （这条路同时把老实现留下的"脏标题"投影治好）。
+//
+// 取最新 approved 而不是本次版本：审批一个**更旧**的待审版本时（例如 v2 待审、
+// v3 已通过），生效版本仍然是更新的那个 approved 版本 —— 与线上交付
+// （max(id) approved）同口径。
+//
+// 没有任何 approved 版本（首版待审被拒）时不动投影：没有可投影的基线，
+// 而"把一行从未生效的配置留着"与"把它清空"对目录都没有影响（目录只列有生效
+// 版本的应用，见 read.go 的目录条件）。
+//
+// **幂等且最小写入**（审计第三轮 B 区 CONFIRMED 的修复点）：每一步都先比较现值，
+// 值没变就不写。这有两个后果，缺一不可：
+//   - "已终态但投影不一致"的重复调用能**自愈**（重试一次真的会把投影补齐）；
+//   - "再调一次"不产生任何写入（updated_at 不跳），即幂等无副作用。
+//
+// 失败语义：状态已经落库（approved/rejected）、但投影没更新 —— 这不是"审核失败"，
+// 而是平台侧写入故障。端点如实回 500「请重试一次」；重试会再次走到这里。
+func (h *Handlers) syncAppProjection(ctx context.Context, appID string, app *serverstore.WasmApp) (string, *apperr.Error) {
+	latest, lerr := serverstore.LatestApprovedWasmReleaseMeta(ctx, h.opt.DB, appID)
+	switch {
+	case errors.Is(lerr, serverstore.ErrNotFound):
+		// 没有已通过版本：保持现状（"当前生效版本"= 空或回收后的残留）。
+		return "", nil
+	case lerr != nil:
+		return "", internalErr("审核结果已落库，但应用投影更新失败（请重试一次）", lerr)
+	}
+	if latest.ID != app.CurrentReleaseID {
+		if serr := serverstore.SetWasmAppCurrentRelease(ctx, h.opt.DB, appID, latest.ID); serr != nil {
+			return "", internalErr("审核结果已落库，但应用投影更新失败（请重试一次）", serr)
+		}
+	}
+	// 配置列与 config_json 同源同版：purpose/data_sensitivity 从该版本的
+	// config_json 现解（解析失败回落空串，与 AccessOfConfigJSON 同向）。
+	// 空 config_json 的历史行不写 —— 不能拿"没有配置"去清掉现有投影。
+	if strings.TrimSpace(latest.ConfigJSON) != "" {
+		purpose, sensitivity := appcfg.DeclarationsOfConfigJSON(latest.ConfigJSON)
+		if app.ConfigJSON != latest.ConfigJSON || app.Purpose != purpose || app.DataSensitivity != sensitivity {
+			if serr := serverstore.SetWasmAppConfig(ctx, h.opt.DB, appID,
+				latest.ConfigJSON, purpose, sensitivity); serr != nil {
+				return "", internalErr("审核结果已落库，但配置投影更新失败（请重试一次）", serr)
+			}
+		}
+	}
+	// 显示面两列（title/description）也取**该版本行自己的值**（R2-1）：
+	// 这两个字段是版本的属性（publish 时与 config 一起写进 app_releases），
+	// 与 purpose 不同源时也要以版本行为准 —— 目录门面必须与生效版本逐字一致。
+	// 首版待审用的 app_id 占位必须在这一刻被真值替掉（值相同则不必写）。
+	if app.Title != latest.Title || app.Description != latest.Description {
+		if serr := serverstore.SetWasmAppDisplay(ctx, h.opt.DB, appID, latest.Title, latest.Description); serr != nil {
+			return "", internalErr("审核结果已落库，但显示面投影更新失败（请重试一次）", serr)
+		}
+	}
+	return latest.Version, nil
 }
 
 // currentVersionOf 返回该应用**当前生效版本**的版本号（投影读不到时回落空串）。
@@ -638,7 +685,7 @@ func (h *Handlers) adminUnpublish(c *gin.Context) {
 		return
 	}
 	h.auditApp(appID, admin.Username, "wasm_app_publish_toggle",
-		auditDetail(appID, app.Title, "enabled true → false（管理员下架）"))
+		auditDetail(appID, auditTitleOf(app), "enabled true → false（管理员下架）"))
 	// 下架即释放进程内驻留（编译模块 + 库句柄）——与发布者路径（api/release.go 的
 	// setPublished）同一钩子。此前只有发布者路径调用它（P1-8）：管理端处置完，
 	// 进程内还留着该应用的模块与库句柄，直到空闲 TTL 到点才回收 —— 而文档与装配
@@ -784,7 +831,7 @@ func (h *Handlers) adminPublish(c *gin.Context) {
 		return
 	}
 	h.auditApp(appID, admin.Username, "wasm_app_publish_toggle",
-		auditDetail(appID, app.Title, "enabled false → true（管理员上架）"))
+		auditDetail(appID, auditTitleOf(app), "enabled false → true（管理员上架）"))
 	c.JSON(http.StatusOK, gin.H{"app": gin.H{"app_id": appID, "enabled": true, "changed": true}})
 }
 
@@ -985,7 +1032,7 @@ func (h *Handlers) adminTransferOwner(c *gin.Context) {
 		return
 	}
 	h.auditApp(appID, admin.Username, "app_owner_transfer",
-		appstore.TransferOwnerAuditDetail(serverstore.AppKindWasmApp, appID, app.Title, app.Owner, owner))
+		appstore.TransferOwnerAuditDetail(serverstore.AppKindWasmApp, appID, auditTitleOf(app), app.Owner, owner))
 	c.JSON(http.StatusOK, gin.H{"app": gin.H{"app_id": appID, "owner": owner, "changed": true}})
 }
 
@@ -1038,7 +1085,7 @@ func (h *Handlers) adminFreeze(c *gin.Context) {
 			}
 		}
 		h.auditApp(appID, admin.Username, "wasm_app_freeze",
-			auditDetail(appID, app.Title, "冻结（管理员处置；停止服务 + 进入只读快照保留期）"))
+			auditDetail(appID, auditTitleOf(app), "冻结（管理员处置；停止服务 + 进入只读快照保留期）"))
 		// 冻结 = 停止服务（appserver 对冻结应用直接 404）⇒ 进程内驻留没有留着的理由。
 		// 与发布者下架路径共用同一钩子（P1-8：管理端此前不逐出）。
 		h.evictApp(appID)
@@ -1054,7 +1101,7 @@ func (h *Handlers) adminFreeze(c *gin.Context) {
 		return
 	}
 	h.auditApp(appID, admin.Username, "wasm_app_freeze",
-		auditDetail(appID, app.Title, "解冻（enabled 保持不变）"))
+		auditDetail(appID, auditTitleOf(app), "解冻（enabled 保持不变）"))
 	c.JSON(http.StatusOK, gin.H{"app": gin.H{"app_id": appID, "frozen": false, "changed": true, "enabled": app.Enabled}})
 }
 

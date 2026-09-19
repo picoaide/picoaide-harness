@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+	"github.com/picoaide/picoaide/internal/wasmapp/capapi"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/tetratelabs/wazero/sys"
 )
@@ -46,15 +48,23 @@ type failureContext struct {
 	// 只看错误串/退出码永远分不出"内存超限"与"应用自己 os.Exit(2)"。峰值是唯一能区分
 	// 两者的现场证据 ⇒ 判定要"退出码 + 峰值贴近上限"**双条件**（见 memoryNearLimit）。
 	peakMemoryBytes int64
-	// stderrHead 是 guest stderr 的**开头**窗口（不是尾巴；见 tailBuffer）。
+	// stderrOOMLine 是 guest stderr 里**命中的运行时 OOM 特征行原文**（"" = 没命中；
+	// 由 tailBuffer 的滚动扫描给出，见其 scanLocked）。
 	//
-	// 为什么必须带上它（R2-DG-1）：双条件只覆盖"分块累积到 OOM"这一种形态。**一次性巨块
-	// 分配**（`make([]byte, N)` 且 N 接近上限）失败时峰值只有常态水位（实测 64 MiB 上限下
-	// 的 62 MiB 巨块：peak = 3.4 MiB = 上限的 5.1%），双条件因此不成立、方向被判反 ——
-	// 平台记录的 `peak_memory_bytes` 反过来"证明"不是内存问题，hints 把作者引向
-	// os.Exit/panic。那种形态的唯一证据是 Go 运行时打在 stderr **最前面**的
-	// `fatal error: out of memory`：它必须被保留下来并参与分类（见 stderrOOMEvidence）。
-	stderrHead string
+	// 为什么必须带上它（R2-DG-1 + 第三轮审计 P2-1）：双条件只覆盖"分块累积到 OOM"这一种
+	// 形态。**一次性巨块分配**（`make([]byte, N)` 且 N 接近上限）失败时峰值只有常态水位
+	// （实测 64 MiB 上限下的 62 MiB 巨块：peak = 3.4 MiB = 上限的 5.1%），双条件因此不成立、
+	// 方向被判反 —— 平台记录的 `peak_memory_bytes` 反过来"证明"不是内存问题，hints 把作者
+	// 引向 os.Exit/panic。那种形态的唯一证据是运行时自己打的那一行
+	// （`runtime: out of memory: cannot allocate …`），它可能出现在 stderr 的**任意位置**。
+	//
+	// ⚠️ 判据是"**运行时形态**的行"（行首锚定或"没有 panic 行时的行内命中"，见
+	// oomStderrMarkers / scanLocked），不是裸的 "out of memory" 子串 —— 后者会把
+	// `panic("… out of memory …")` 这类非恶意文本误判成平台内存事故（第三轮审计 P2-2）。
+	stderrOOMLine string
+	// stderrOOMAnchored 表示上面那行是否落在**行首**（运行时自己输出的形态）。
+	// 它只进证据（落库/信封），不参与判定 —— 判定在扫描时已经用过这个事实。
+	stderrOOMAnchored bool
 }
 
 // goOOMExitCode 是 Go 运行时内存耗尽时的退出码（实测 Go 1.26.5 / wazero v1.12.0：
@@ -78,32 +88,88 @@ const goOOMExitCode = 2
 // 62 MiB 分配：退出码 2、峰值 3.4 MiB = 上限的 5.1%；而同机 60 MiB 的那次**成功**分配
 // 峰值 99.2% —— 平台的记录会反过来"证明"不是内存问题）。
 //
-// R2-DG-1（2026-09-19）把这个边界补上了：这种形态的唯一证据是 Go 运行时打在 stderr
-// **最前面**的 `fatal error: out of memory`，现在由 tailBuffer 的开头窗口保留、由
-// stderrOOMEvidence 参与分类（见 classifyGuestError 的第 5b 条）。双条件仍然是主判据
-// （它不需要读 guest 自带的内容），头部特征串是"峰值没采到"时的兜底。
+// R2-DG-1（2026-09-19）把这个边界补上了：这种形态的唯一证据是运行时自己打的
+// `runtime: out of memory: cannot allocate …` 那一行，现在由 tailBuffer 的**滚动扫描**
+// 取出、由 stderrOOMEvidence 参与分类（见 classifyGuestError 的第 5b 条）。双条件仍然是
+// 主判据（它不需要读 guest 自带的内容），运行时特征行是"峰值没采到"时的兜底。
 const memoryNearLimitRatio = 9 // peak*10 >= limit*9 ⇔ peak ≥ 90% 上限
 
-// oomStderrMarkers 是 Go 运行时 OOM 打在 stderr 开头的特征串（实测 Go 1.26.5/wazero v1.12.0）：
+// oomStderrMarkers 是 Go 运行时 OOM 打在 stderr 上的**运行时前缀**（实测 Go 1.26.5 /
+// wazero v1.12.0，三行都来自运行时自己的 print/throw 路径）：
 //
 //	runtime: out of memory: cannot allocate 65011712-byte block (360448 in use)
+//	fatal error: runtime: out of memory
 //	fatal error: out of memory
 //
-// 只收"out of memory"这一条**足够具体**的判据（`memoryErrorPatterns` 里的
-// "over limit of"/"memory limit" 是 wazero 自己的错误串口径，guest stderr 里出现它们
-// 更多是应用在打印日志，不作为证据）。
-var oomStderrMarkers = []string{"out of memory"}
-
-// stderrOOMEvidence 报告 guest stderr 的开头有没有 Go 运行时 OOM 的特征串。
+// ⚠️ 这里**只收运行时形态**，不收裸的 "out of memory"（第三轮审计 P2-2 实测的误报面）：
+// 未 recover 的 panic 与运行时 OOM 共用退出码 2，而 panic 的消息是应用可控文本 ——
+// `panic("tool failed: upstream returned: out of memory while reading resultset")`
+// 这种**非恶意**写法（包装上游错误串）会命中裸串，让平台把应用自己的致命错误说成
+// "内存用量超过单实例上限"，还给出两条反向建议。
 //
-// 取舍（如实记）：stderr 是 **guest 自己写的内容**，应用可以打印 "out of memory" 来让
-// 平台把它的 os.Exit(2) 归成 RUNTIME_MEMORY。代价仅限于**这一个失败码的诊断方向**
-// （平台不据此做任何准入/计费判定），而收益是"真实 OOM 的方向判反"这条已经实测发生过的
-// 缺陷被修掉；并且 hints 会把证据（stderr 头部特征串 + 峰值）一并写出来，作者/管理员
-// 一眼能自证。若将来要彻底关闭这个面，只能改成"由宿主注入的分配失败回调"（wazero 无此面）。
-func (f failureContext) stderrOOMEvidence() bool {
-	return f.stderrHead != "" && containsAny(f.stderrHead, oomStderrMarkers)
+// 裸串的判据价值本来也有限：`memoryErrorPatterns` 里的 "over limit of"/"memory limit"
+// 是 wazero 自己的错误串口径，guest stderr 里出现它们更多是应用在打印日志。
+var oomStderrMarkers = []string{
+	"runtime: out of memory",
+	"fatal error: runtime: out of memory",
+	"fatal error: out of memory",
 }
+
+// panicStderrPrefix 是 Go 打印未 recover panic 时的行首形态（`panic: <值>`）。
+//
+// 它的作用不是"识别 panic 再免责"，而是**收窄证据**：见过这一行之后，只有**行首**命中
+// 运行时前缀才算 OOM 证据（见 tailBuffer.scanLocked）—— panic 行内的同名字样一律不算。
+const panicStderrPrefix = "panic: "
+
+// oomMarkerLastByte 是全部特征串的**末字节**（三条都以 "y" 结尾）。
+//
+// 它只是扫描器的性能闸门：行内子串搜索只在"刚追加的字节等于它"时做一次，否则每写一个
+// 字节都要把整行扫一遍（O(行长²)）。判据本身与它无关（搜索命中的仍是完整特征串）。
+const oomMarkerLastByte = 'y'
+
+// stderrOOMEvidence 报告滚动扫描有没有取到"Go 运行时 OOM 特征行"。
+//
+// 判据的正确性由扫描器负责（行首锚定 + panic 排除 + 运行时前缀，见 tailBuffer.scanLocked），
+// 这里只读结论。取舍（如实记，第三轮审计后仍成立的部分）：stderr 是**guest 自己写的内容**，
+// 应用仍可以逐字打印运行时那一行来让平台把它的 os.Exit(2) 归成 RUNTIME_MEMORY。代价仅限于
+// **这一个失败码的诊断方向**（平台不据此做任何准入/计费判定），而收益是"真实 OOM 的方向判反"
+// 这条已实测发生过的缺陷被修掉；并且证据行会逐字进错误信封与调用事件（evidence 字段），
+// 作者/管理员可以拿它对拍运行时的真实格式。要彻底关闭这个面只能改成"由宿主注入的分配失败
+// 回调"（wazero 无此面）。
+func (f failureContext) stderrOOMEvidence() bool { return f.stderrOOMLine != "" }
+
+// memoryEvidence 是**落库/回信**用的"分类依据"（第三轮审计 P3-1）。
+//
+// 为什么要有它：`oom_evidence` 与命中的证据行此前只进瞬时错误信封，`wasm_call_events` 里
+// 只有 reason_code/peak/exit —— 事后在诊断面看到的正是"RUNTIME_MEMORY + 峰值 3.4 MiB +
+// stderr_tail 全是 goroutine 回溯"这幅自相矛盾的画面，无法分辨真 OOM / panic 误报 / 伪造。
+//
+// 形态（单行、字段有界、内容经既有转义）：
+//
+//	kind=stderr_oom_line; anchored=true; line="runtime: out of memory: cannot allocate …"; peak=3407872; limit=67108864; exit=2
+//	kind=peak_near_limit; peak=67108864; limit=67108864; exit=2
+//
+// 证据行本身是 guest 可控文本，所以按 200 字节裁（capapi.MaxEvidenceBytes 同口径）。
+func (f failureContext) memoryEvidence(kind string, code uint32) string {
+	limit := int64(effectivePages(f.memoryPages)) * int64(limits.WasmPageSize)
+	var b strings.Builder
+	fmt.Fprintf(&b, "kind=%s; peak=%d; limit=%d; exit=%d", kind, f.peakMemoryBytes, limit, code)
+	if kind == memoryEvidenceStderrLine {
+		fmt.Fprintf(&b, "; anchored=%t; line=%s", f.stderrOOMAnchored, strconv.Quote(f.stderrOOMLine))
+	}
+	out := b.String()
+	if len(out) > capapi.MaxEvidenceBytes {
+		out = out[:capapi.MaxEvidenceBytes]
+	}
+	return out
+}
+
+// memoryEvidenceKind 的取值（也是错误信封里 `oom_evidence` 的值）：
+// 判据来自运行时特征行，还是来自"峰值贴近上限"。
+const (
+	memoryEvidenceStderrLine = "stderr_oom_line"
+	memoryEvidencePeak       = "peak_near_limit"
+)
 
 // peakNearLimit 报告"采样到的峰值是否贴近本次运行的内存上限"。
 //
@@ -135,8 +201,11 @@ func effectivePages(pages uint32) uint32 {
 //     "被 ctx 关闭"，与 guest 自己的 proc_exit 区分开）
 //  5. ExitError(code!=0) 且 峰值贴近上限 且 code==2 → RUNTIME_MEMORY（R1-e2e-1：
 //     Go 运行时 OOM 走 proc_exit(2)，**双条件**收窄，普通 os.Exit(2) 不会被误报）
-//     5b. ExitError(code==2) 且峰值**不**贴上限，但 stderr 开头有 OOM 特征串 → RUNTIME_MEMORY
-//     （R2-DG-1：一次性巨块分配的形态，峰值只有常态水位；证据在 stderr 头部）
+//     5b. ExitError(code==2) 且峰值**不**贴上限，但 stderr 里滚动命中了**运行时 OOM
+//     特征行**（`runtime: out of memory` / `fatal error: runtime: out of memory` /
+//     `fatal error: out of memory`）→ RUNTIME_MEMORY
+//     （R2-DG-1：一次性巨块分配的形态，峰值只有常态水位；第三轮审计把"开头 2 KiB 窗口"
+//     改成滚动匹配，并排除 panic 文本里的同名字样 —— 见 tailBuffer.scanLocked）
 //  6. 其他 ExitError(code!=0)  → RUNTIME_GUEST_EXIT(code)（**绝不报成 RUNTIME_NO_RESPONSE**，
 //     §10.3 第 28 项）
 //  7. err==nil 且 module 已关闭 → MODULE_KILLED（§15.1 第 7 条硬断言）
@@ -174,7 +243,9 @@ func classifyGuestError(err error, f failureContext) *apperr.Error {
 					fmt.Sprintf("应用内存用量超过单实例上限（%s）", fmtPages(effectivePages(f.memoryPages))),
 					f.memoryPages).WithDetail("guest_exit_code", code).
 					WithDetail("peak_memory_bytes", f.peakMemoryBytes).
-					WithDetail("memory_limit_bytes", limit)
+					WithDetail("memory_limit_bytes", limit).
+					WithDetail("oom_evidence", memoryEvidencePeak).
+					WithDetail("evidence", f.memoryEvidence(memoryEvidencePeak, code))
 				return e.WithHint(
 					fmt.Sprintf("峰值内存 %s 已达到上限的 %d%% 以上、退出码 %d（Go 运行时 OOM 的固定形态）",
 						fmtBytes(int(f.peakMemoryBytes)), memoryNearLimitRatio*10, code),
@@ -182,8 +253,10 @@ func classifyGuestError(err error, f failureContext) *apperr.Error {
 					"减小一次性分配（分页/流式处理、别把大结果集整体读进内存）；"+
 						"Go 运行时自身还有数 MiB 常驻堆，留给业务数据的内存比上限小")
 			}
-			// 5b（R2-DG-1）：**一次性巨块分配**的 OOM 峰值只有常态水位（分配根本没成功，
-			// 采样看不到"贴近上限"），唯一证据是 stderr 开头的 `fatal error: out of memory`。
+			// 5b（R2-DG-1，第三轮审计收紧）：**一次性巨块分配**的 OOM 峰值只有常态水位
+			// （分配根本没成功，采样看不到"贴近上限"），唯一证据是运行时自己打的
+			// `runtime: out of memory: cannot allocate …` 那一行 —— 它可能出现在 stderr 的
+			// **任意位置**（应用先打了多少日志都不影响），由 tailBuffer 的滚动扫描取出。
 			// 没有这一条时，作者会拿到 RUNTIME_GUEST_EXIT + "检查 os.Exit 调用"的方向错提示
 			// （实测：64 MiB 上限下 62 MiB 一次性分配、峰值 5.1%）。
 			if code == goOOMExitCode && f.stderrOOMEvidence() {
@@ -193,12 +266,16 @@ func classifyGuestError(err error, f failureContext) *apperr.Error {
 					f.memoryPages).WithDetail("guest_exit_code", code).
 					WithDetail("peak_memory_bytes", f.peakMemoryBytes).
 					WithDetail("memory_limit_bytes", limit).
-					WithDetail("oom_evidence", "stderr_head").
-					WithDetail("stderr_head", stderrFirstLine(f.stderrHead))
+					WithDetail("oom_evidence", memoryEvidenceStderrLine).
+					WithDetail("stderr_oom_line", stderrFirstLine(f.stderrOOMLine)).
+					WithDetail("evidence", f.memoryEvidence(memoryEvidenceStderrLine, code))
 				return e.WithHint(
-					fmt.Sprintf("退出码 %d 且 stderr 开头有 Go 运行时的 \"out of memory\" 特征串"+
-						"（这类**一次性巨块**分配失败时，采样到的峰值只有 %s，比上限低得多，"+
-						"别被 peak_memory_bytes 误导）", code, fmtBytes(int(f.peakMemoryBytes))),
+					fmt.Sprintf("退出码 %d 且 stderr 出现 Go 运行时 OOM 的**特征行**（以 %q 开头；"+
+						"这类**一次性巨块**分配失败时，采样到的峰值只有 %s，比上限低得多，"+
+						"别被 peak_memory_bytes 误导）", code, oomStderrMarkers[0], fmtBytes(int(f.peakMemoryBytes))),
+					"判据来源见 evidence 字段（kind=stderr_oom_line + 命中行原文）：它取的是运行时自己"+
+						"打印的分配失败行，不是应用的 panic 文本；应用若自己打印了同名文本，"+
+						"evidence 里的 line 会与之逐字一致，可据此存疑",
 					"减小一次性分配：把大块拆成分页/流式处理，或改用宿主能力（db.query 的分页/聚合）",
 					"Go 运行时自身还有数 MiB 常驻堆，留给业务数据的内存比上限小")
 			}

@@ -221,6 +221,14 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 	// 地址」）。优先级：控制台保存过（含显式清空）> 环境变量。取值走 holder
 	// （原子读）—— HostGate 每请求都要判一次，而写路径只有控制台保存。
 	base := newBaseDomainHolder(db, os.Getenv(EnvAppsBaseDomain))
+	// 启动期 fail-loud（2026-09-19 第三轮对抗审计 A-2）：环境变量 / 存量设置行里的
+	// 应用基域必须过**与控制台保存、运行期签发闸门同一份**判据
+	// （session.InspectAppBaseDomain）。非法形态（`intranet` 单标签、`apps.example.com..`
+	// 多尾点、IP、下划线、公网后缀…）在旧实现里会一路生效，直到第一次换票才以
+	// "浏览器丢弃 Cookie ⇒ 兑换恒失败"的形式暴露 —— 这里直接拒绝启动。
+	if err := base.StartupError(); err != nil {
+		log.Fatalf("WASM 应用平台启动自检失败：应用基域配置非法：%v", err)
+	}
 	baseDomain := func() string { return base.Get() }
 	extraReserved := splitCSV(os.Getenv(EnvAppsExtraReserved))
 	enabled := baseDomain() != ""

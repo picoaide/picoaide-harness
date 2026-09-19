@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -37,6 +36,34 @@ import (
 //
 // 一句话：**GET 把浏览器带到主站，POST 在"确有主站源"的前提下签发票，
 // 跳板页把票交给应用子域。**
+
+// ===== 残留清单（本模块**认账**的未消除面，2026-09-19 第三轮对抗审计 A-3/A-4）=====
+//
+// 这三条都**不是放行类**缺陷（没有任何一条能绕过 nonce 的逐字节比对），但会被运维/下一轮
+// 审计问到，写在这里免得重新发现：
+//
+//  1.（A-3，P3，**接受不改**）**专属 Cookie 名可枚举**：每票一个
+//     `picoaide_ticket_nonce_<sha256(code)[:8]>`，而 Cookie **名**对同基域下任意应用页面的
+//     JS 可见（只有值受 HttpOnly 保护）⇒ 应用 B 的页面能数出"当前浏览器有几张在途票"。
+//     名字不可逆（sha256 截断：拿不到 code/nonce），值也读不到。
+//     不改的理由：代价大于收益。要消除"可枚举"，要么把名字改成与 code 无关的随机名、
+//     并在票上多存一份"名字→票"的服务端状态（回退槽位的兼容面也要重做），要么删掉专属名
+//     —— 后者等于退回"同一浏览器两张在途票互相覆盖"的可用性缺陷。而收益≈0：在途票
+//     **数量**本身不是凭证，且与"票在 URL 里、窗口只有 60 秒"的既有暴露面重叠。
+//     边界：不泄漏 code/nonce，不能据此兑换或伪造任何票。
+//
+//  2.（A-4，P3，**如实认账**）"固定名被 HttpOnly 占住"这层**偶然**缓解已消失：文档里
+//     已认账的残留（兄弟应用可先写入自己可控的 nonce Cookie，再诱导受害者带票访问 ——
+//     两步会话固定）此前偶尔会被"固定名在浏览器里是基域级唯一一份、且 HttpOnly ⇒
+//     页面脚本无法**覆盖**"挡住；改成每票一个新鲜名字后，攻击者只需**新建**一个尚不存在
+//     的名字 —— HttpOnly 只挡覆盖（RFC 6265 §5.3 第 11.2 步），不挡新建（旧 Cookie 过了
+//     60 秒本来也会自然消失）。⇒ 该残留**更容易命中**（不必再等固定名过期）。
+//     本批**不改设计**（随机名同样挡不住新建），只如实记录；发布说明第九节第 3 条同步写明。
+//
+//  3.（设计取舍，非缺陷）**回退槽位**：签发同时下发固定名，兑换侧按"专属名 → 固定名"读。
+//     仓内没有生产代码消费固定名（只有 appserver/session 的测试读它），它的价值是对
+//     **仓外**内嵌装配/既有集成方的兼容；代价是每票多一条 Cookie 与一条读取分支。
+//     删掉它在仓内零影响，但会让仓外集成方静默失效 ⇒ 保留。
 
 // ticket 是一次性换票的载荷：绑 (user, app)，不绑具体路径 ——
 // next 只是"换完票回哪儿"，与凭据本身无关。
@@ -728,6 +755,12 @@ func appCookie(raw string, expires time.Time) *http.Cookie {
 // Options.MainOriginResolver 完成（本包不 import clientrelease，避免把下载面拖进会话面）。
 const publicBaseURLEnvName = "PICOAI_PUBLIC_BASE_URL"
 
+// appBaseDomainEnvName 是"应用基域"的环境变量名（与 cmd/server 的 EnvAppsBaseDomain 同值）。
+//
+// 同样只用于**错误文案**：拒绝签发/拒绝保存时的可执行动作必须点名运维真的能改的那两处
+// （控制台「应用域名」与环境变量），而不是"某处配置"。
+const appBaseDomainEnvName = "PICOAI_APPS_BASE_DOMAIN"
+
 // ticketNoncePlan 是"这张票能不能带 nonce"的**部署级**判定结果。
 type ticketNoncePlan int
 
@@ -772,9 +805,19 @@ const ticketNonceRemedyAlignOrigin = "把服务端对外地址配成与应用基
 	"就只能停用应用子域（把 PICOAI_APPS_BASE_DOMAIN 留空，应用不可访问）——" +
 	"平台**没有**\"允许无 nonce 换票\"的运维开关（env / settings / 控制台里都不存在这个配置项）"
 
+// ticketNonceRemedyTrailingDots 是"基域写了多个结尾点"的可执行动作（比通用文案更具体：
+// 直接给出正确写法）。判据见 basedomain.go 的结尾点规则 —— 单个结尾点会被归一化掉、
+// 多个一律 fail-loud。
+const ticketNonceRemedyTrailingDots = "去掉多余的结尾点：基域只允许**一个**结尾点" +
+	"（FQDN 根点，`apps.example.com.` 会被归一化掉、照常可用），多个结尾点" +
+	"（`apps.example.com..`、`apps.example.com..:8443`）会被浏览器整条丢弃 —— " +
+	"改写成 `apps.example.com` 后在控制台「应用域名」保存 / 环境变量 " + appBaseDomainEnvName + " 里同步"
+
 // ticketNonceRemedyBaseDomain 是"应用基域本身写不出 Cookie Domain"的可执行动作。
-const ticketNonceRemedyBaseDomain = "换一个能承载 Cookie 的应用基域（普通 DNS 名：字母/数字/连字符/点，" +
-	"端口会被忽略；**不能**是 IP 地址，也不能含下划线），并让服务端对外地址与该基域同域" +
+const ticketNonceRemedyBaseDomain = "换一个能承载 Cookie 的应用基域（普通 DNS 名：至少两级、字母/数字/连字符/点，" +
+	"端口会被忽略；**不能**是 IP 地址、单标签（如 intranet）、公网后缀（如 co.uk）、localhost、" +
+	"含下划线，也不能多写结尾点），并在两处一起改：控制台「应用域名」保存 / 环境变量 " +
+	appBaseDomainEnvName + "，同时让服务端对外地址与该基域同域" +
 	"（控制台 server.base_url / " + publicBaseURLEnvName + "）"
 
 // refuseTicketNonce 是"无法为本部署下发 nonce Cookie"的**唯一出口**：
@@ -836,60 +879,30 @@ func (m *Manager) refuseTicketNonce(w http.ResponseWriter, r *http.Request, lang
 // ticketNonceRemedy* 常量）。绝不写"去打开 session.Options.AllowTicketWithoutNonce"
 // —— 那是 Go 结构体字段，运维没有配置面（2026-09-19 第二轮审计 §1.3）。
 //
-// 注意这里**不猜 registrable domain**（不引 PSL、不写 `Domain=example.com`）：
-// Domain 一律写成应用基域，越界猜父域会把 Cookie 铺到比应用面更大的范围上。
+// 注意这里**不猜 registrable domain**（不写 `Domain=example.com`）：
+// Domain 一律写成应用基域，越界猜父域会把 Cookie 铺到比应用面更大的范围上
+// （判据里唯一用到 PSL 的地方是**拒绝**"基域本身是公网后缀"，见 basedomain.go）。
+//
+// 判定本身在 CheckTicketNonceCapability（basedomain.go）：控制台保存路径的第三条
+// fail-closed 自检调**同一个函数**，所以"控制台说能存"与"签发时真的能存"不可能分叉。
 func (m *Manager) ticketNonceDecision() ticketNonceDecision {
-	scheme, rawHost := ParseBaseDomain(m.baseDomain())
-	baseHost := normalizeHostOnly(rawHost)
-	if baseHost == "" {
-		return ticketNonceDecision{
-			Plan:   ticketNonceUnavailable,
-			Reason: "base_domain_unset",
-			Remedy: ticketNonceRemedyAlignOrigin,
-		}
+	cap := CheckTicketNonceCapability(m.baseDomain(), m.configuredMainOrigin())
+	if cap.Derived {
+		// derive 是"对外地址给不出可用主机名"时的统一处理：按应用基域推导（配置事实）。
+		// 推导生效时打一条 info 日志（每个 Manager 一次），点名建议显式配置对外地址。
+		m.logDerivedMainOriginOnce(cap.MainOrigin)
 	}
-	if !cookieDomainWritable(baseHost) {
-		return ticketNonceDecision{
-			Plan:   ticketNonceUnavailable,
-			Reason: "base_domain_not_cookie_writable:" + baseHost,
-			Remedy: ticketNonceRemedyBaseDomain,
-		}
-	}
-	configured := m.configuredMainOrigin()
-	// derive 是"对外地址给不出可用主机名"时的统一处理：按应用基域推导（配置事实）。
-	// 诊断用的 origin 保留配置里写的端口（如实反映部署），Cookie Domain 只取主机名。
-	derive := func() ticketNonceDecision {
-		origin := scheme + "://" + rawHost
-		m.logDerivedMainOriginOnce(origin)
-		return ticketNonceDecision{
-			Plan:         ticketNonceRequired,
-			CookieDomain: baseHost,
-			MainOrigin:   origin,
-			Derived:      true,
-		}
-	}
-	if configured == "" {
-		// 未配置（或配了一个解析不出源的值，例如漏 scheme）⇒ 按应用基域推导。
-		return derive()
-	}
-	mainHost := originHost(configured)
-	if mainHost == "" {
-		// 配置了但取不出可用主机名（IPv6 字面量等）：Domain Cookie 在 IP 上没有意义
-		// ⇒ 与"未配置"同等处理（推导出的是配置里的基域，仍然只来自配置）。
-		return derive()
-	}
-	if mainHost == baseHost || strings.HasSuffix(mainHost, "."+baseHost) {
-		return ticketNonceDecision{
-			Plan:         ticketNonceRequired,
-			CookieDomain: baseHost,
-			MainOrigin:   configured,
-		}
+	plan := ticketNonceUnavailable
+	if cap.Usable {
+		plan = ticketNonceRequired
 	}
 	return ticketNonceDecision{
-		Plan:       ticketNonceUnavailable,
-		MainOrigin: configured,
-		Reason:     "main_origin_not_same_domain_as_base:" + mainHost,
-		Remedy:     ticketNonceRemedyAlignOrigin,
+		Plan:         plan,
+		CookieDomain: cap.CookieDomain,
+		MainOrigin:   cap.MainOrigin,
+		Derived:      cap.Derived,
+		Reason:       cap.Reason,
+		Remedy:       cap.Remedy,
 	}
 }
 
@@ -935,46 +948,9 @@ func normalizeDomain(raw string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
 }
 
-// normalizeHostOnly 把主机名归一成**比较与 Cookie Domain 共用的唯一形状**：
-// 小写、去尾点、剥端口。空串 = 取不出主机名（空值 / IPv6 字面量）。
-//
-// 为什么需要它（R2-2，2026-09-19 第二轮审计 §1.2）：
-//   - `PICOAI_APPS_BASE_DOMAIN=apps.example.com:8443` 与 `http://127.0.0.1:8080`
-//     这两种写法都被 Options.BaseDomain 的注释明确支持，但端口不参与 Cookie 的作用域；
-//   - 旧实现里 baseHost 只做 normalizeDomain（保留端口）而 mainHost 走 originHost
-//     （剥端口）⇒ 基域与对外地址**写成同一个值**也被判成"不同域"（500 + 文案指错方向）；
-//   - derive 出来的 `Domain=<host>:<port>` 会被 net/http 静默省略整个属性 ⇒ Cookie
-//     退化成 host-only ⇒ 子域兑换恒失败，且零 ERROR 零审计（静默死）。
-func normalizeHostOnly(raw string) string {
-	host := normalizeDomain(raw)
-	if host == "" || strings.HasPrefix(host, "[") { // IPv6 字面量：Domain Cookie 无意义
-		return ""
-	}
-	if i := strings.IndexByte(host, ':'); i >= 0 {
-		host = host[:i]
-	}
-	return strings.TrimSuffix(host, ".")
-}
-
-// cookieDomainWritable 报告 host 能否作为 Set-Cookie 的 Domain 属性真正下发。
-//
-// 判据直接问**将要执行序列化的那份实现**（net/http 的 Cookie.String：Domain 非法时
-// **静默省略整个属性**），而不是自己复制一份字符规则 —— 这样"能不能写出去"永远以网库
-// 为准，不会随 Go 版本漂移（也恰好解释了 `harness_example.com` 为什么写不出去）。
-//
-// IP 字面量单独拒：net/http 对裸 IPv4 会照写 `Domain=127.0.0.1`，而浏览器按
-// RFC 6265 §5.3 只接受"与响应主机 domain-match 的域名"，IP 一律丢弃整条 Set-Cookie
-// ⇒ 又是一种"服务端自认为发了、浏览器根本没存"的静默死。
-func cookieDomainWritable(host string) bool {
-	if host == "" || strings.ContainsAny(host, ":[]") {
-		return false
-	}
-	if net.ParseIP(host) != nil {
-		return false
-	}
-	probe := http.Cookie{Name: TicketNonceCookieName, Value: "probe", Path: "/", Domain: host}
-	return strings.Contains(probe.String(), "Domain=")
-}
+// normalizeHostOnly 与 cookieDomainWritable 已移入 basedomain.go —— 那里是
+// 「应用基域」判定的**唯一真源**（形状 canonicalHostOnly + 策略 InspectAppBaseDomain），
+// 运行期、控制台保存、启动期三条路径共用同一份实现（2026-09-19 第三轮审计 A-1/A-2）。
 
 // ticketNonceCookieNameFor 派生"这张票专属的 nonce Cookie 名"。
 //

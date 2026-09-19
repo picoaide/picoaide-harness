@@ -21,17 +21,41 @@ VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
 # 那里串行是为了 service 容器的 max_connections,不是性能考虑)。
 TEST_PARALLEL ?= 4
 
-# 单包测试超时(2026-09-19 修订,第二轮审计 R2-SK-7):Go 默认 10m 曾在本仓门禁里
-# 连续两次以 "panic: test timed out after 10m0s" 假红——但那两次是**并发跑多套
-# 重型测试**造成的负载假象,不是真实耗时。第二轮审计按 CI 同形命令在本机
-# (4 vCPU,与 runner 同规格)实测:全量 EXIT=0,最慢单包 llmgateway 298.9s、
-# serverstore 165-189s ⇒ 旧注释声称的"serverstore 空闲单跑 560s,紧贴 600s"
-# **不可复现**;默认 10m 本来就有 ≥2× 余量。故收到 15m:对最慢包 3× 余量,
-# 又远小于 job 预算,真挂时仍能拿到 goroutine dump 与用例名。
-# 注意:放宽单包超时不能替代 CI 的 job 预算——两者必须满足
-# 「job timeout > 单包超时 + 其余包耗时」,否则真挂时 job 先被整体取消,
-# 诊断反而比默认 10m 更差(见 .github/workflows/ci.yml 的 server job)。
+# 单包测试超时——**必须按上下文（-p）分别取值，余量结论不可跨上下文搬运**。
+#
+# 2026-09-19 第三轮审计 F3-5 实测（同一台 4 vCPU 机器，与 CI runner 同规格；
+# 全部 52 包 EXIT=0，`go test -json` 逐包耗时；两个上下文各一行）：
+#   【-p 1】CI 的 `go test ./... -p 1` 与 `make test`
+#        WALL 1471.8s；最慢 llmgateway 250.4s、serverstore 140.2s、wasmapp/api 232.2s
+#        ⇒ 对 600s 有 2.4× 余量、对 900s 有 3.6× 余量 ⇒ 适用值 15m（TEST_TIMEOUT）。
+#   【-p 4】`make test-server`（默认 TEST_PARALLEL=4）
+#        WALL 787s；最慢 llmgateway **625.0s**（比 -p 1 涨 2.5×）、serverstore 513.9s
+#        （涨 3.7×）、wasmapp/api 321.3s
+#        ⇒ 对 900s 只剩 1.44× 余量、**对旧的 600s 默认已经撞穿**（625 > 600）
+#        ⇒ 适用值 25m（TEST_TIMEOUT_PARALLEL）。
+#
+# ⚠️ 两个已犯过的错，下一个人不要再犯：
+#   ① "Go 默认 10m 有 ≥2× 余量" **只对 -p 1 成立**。本仓历史上那两次
+#      `panic: test timed out after 10m0s` 曾被归因为"并发跑多套重型测试的负载假象"，
+#      现在看**不是假象**：`-p 4` 这条路径的最慢包实测 625s，本来就会撞穿 600s。
+#      -p 1 的 250s 数据**不能**用来论证 -p 4 的余量（并行争抢让单包 wall 涨 2.5–3.7×）。
+#   ② 因此**不要**把某一上下文的实测余量搬到另一个上下文，也不要让两个入口共用一个
+#      超时变量：`test`（-p 1）与 `test-server`（-p 4）各自钉自己的值。
+#
+# 25m 的推导：p1 最坏一轮 llmgateway 298.9s × 2.5（并行膨胀）≈ 750s，再乘 2× 单包抖动
+# ≈ 1500s < 25m；同时远小于 CI job 的 45min，真挂时仍打得完 goroutine dump 与用例名。
+# `make check` 走 test-server ⇒ 也拿到 25m。CI 的 `go test -p 1 -timeout 15m` 是
+# .github/workflows/ci.yml 里写死的字面量（**不受本文件任何变量影响**），口径未变。
+# 注意：放宽单包超时不能替代 CI 的 job 预算——两者必须满足
+# 「job timeout > 单包超时 + 其余包耗时」，否则真挂时 job 先被整体取消，
+# 诊断反而比默认 10m 更差（见 .github/workflows/ci.yml 的 server job 与
+# `scripts/check-workflows.mjs` 的 SK-7b 策略：它静态核对 2×timeout+5 ≤ job 预算）。
 TEST_TIMEOUT ?= 15m
+
+# `make test-server` 是 `-p $(TEST_PARALLEL)`（默认 4），沿用 -p 1 论证出的 15m 会让
+# 最慢包只剩 1.44× 余量（见上）。可用 `make test-server TEST_TIMEOUT_PARALLEL=15m`
+# 显式退回旧口径（例如要复现旧行为）。
+TEST_TIMEOUT_PARALLEL ?= 25m
 
 test:
 	go test ./... -count=1 -timeout $(TEST_TIMEOUT)
@@ -44,7 +68,7 @@ test:
 # router/skillmanifest/telemetry/cmd/server),新增包也会再次漏跑。
 # 与 CI 的 `go test ./...` 同义(internal/ + cmd/ 即全部业务包;scripts/ 无测试)。
 test-server:
-	go test ./internal/... ./cmd/... -count=1 -p $(TEST_PARALLEL) -timeout $(TEST_TIMEOUT)
+	go test ./internal/... ./cmd/... -count=1 -p $(TEST_PARALLEL) -timeout $(TEST_TIMEOUT_PARALLEL)
 
 # 开发循环用的快速测试:不加 -count=1,未改动的包直接命中 go test 结果缓存
 # (实测全仓无改动 0.3s;改一个包只重跑那一个包)。发布门禁请用 test-server/check。

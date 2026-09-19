@@ -131,6 +131,49 @@ describe('形状漂移：不许把"解析不出来"显示成"你没有版本"', 
     expect(outcome.releases).toEqual([])
   })
 
+  // 审计第三轮 B 区 CONFIRMED（temp/audit-round3/B/cl-probe.log）：非对象元素此前被
+  // `.filter()` 静默丢掉 ⇒ `releases:[null]` 与 `releases:[]` 同形（ok:true + 空清单），
+  // 界面于是说"你没有版本"。逐元素形状门必须与 `reason` 键缺席同一口径。
+  it('行元素不是对象（null/number/string/array）⇒ 形状错误，不得回落成空清单', () => {
+    for (const payload of [
+      { releases: [null], app_id: 'roster' },
+      { releases: [1] },
+      { releases: ['1.0.0'] },
+      { releases: [['1.0.0']] },
+      { releases: [{ version: '1.0.0', reason: '' }, null] },
+    ]) {
+      const outcome = parseMyReleasesOutcome('roster', payload)
+      expect(outcome.ok, JSON.stringify(payload)).toBe(false)
+      if (outcome.ok) throw new Error('unreachable')
+      expect(outcome.code, JSON.stringify(payload)).toBe('UNEXPECTED_RESPONSE')
+    }
+  })
+
+  it('行对象缺必需字段（version 不是字符串）⇒ 形状错误（不是"空行"）', () => {
+    for (const payload of [
+      { releases: [{}] },
+      { releases: [{ reason: '' }] },
+      { releases: [{ version: 1, reason: '' }] },
+      { releases: [{ version: null, reason: '' }] },
+    ]) {
+      const outcome = parseMyReleasesOutcome('roster', payload)
+      expect(outcome.ok, JSON.stringify(payload)).toBe(false)
+      if (outcome.ok) throw new Error('unreachable')
+      expect(outcome.code, JSON.stringify(payload)).toBe('UNEXPECTED_RESPONSE')
+    }
+  })
+
+  it('对照组：形状正确的行（可选字段缺席）仍然成功 —— 门不许误伤', () => {
+    const outcome = parseMyReleasesOutcome('roster', {
+      app_id: 'roster',
+      releases: [{ version: '1.0.0', reason: '', status: 'pending' }],
+    })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('unreachable')
+    expect(outcome.releases).toHaveLength(1)
+    expect(outcome.releases[0]!.version).toBe('1.0.0')
+  })
+
   it('回显的 app_id 与请求不一致 ⇒ 形状错误（防止把别的应用的版本画到这一行）', () => {
     const outcome = parseMyReleasesOutcome('roster', { app_id: 'other', releases: [] })
     expect(outcome.ok).toBe(false)

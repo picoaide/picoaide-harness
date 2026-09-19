@@ -114,9 +114,14 @@ function shapeMismatch(appId: string, payload: unknown, message: string): Publis
 /**
  * 解析版本历史响应：`{app_id,current_version,review_required,releases:[{version,status,reason,created_at,current,checksum,size}]}`。
  *
- * 三条纪律：
+ * 四条纪律：
  *  - `releases` **必须是数组**：缺席/类型不对 ⇒ 形状错误（回落成空清单就是把
  *    "我们解析坏了"说成"你没有版本"，与目录页的 P2-10 同族）；
+ *  - **每个元素都必须是形状正确的行对象**（`version`/`reason` 均为字符串）：
+ *    `[null]`/`[1]`/`["1.0.0"]` 这类"下发了元素但不是行对象"的形态同样 ⇒ 形状错误。
+ *    审计第三轮 B 区实测（temp/audit-round3/B/cl-probe.log）：此前非对象元素被
+ *    `.filter()` 静默丢掉 ⇒ `ok:true` + 空清单 ⇒ 界面说"你没有版本"，
+ *    与"服务端一行都没下发"混为一谈；
  *  - `reason` **必须是字符串**（可以是空串 —— rejected 行确实可能没写理由）：键缺席/
  *    类型漂移 ⇒ 形状错误，绝不降级成空串（"管理员没有填写理由"是把解析失败说成事实）；
  *  - 服务端**下发了行**却一行都没解析出来（`version` 全空）⇒ 形状错误，同样不显示空态。
@@ -133,27 +138,26 @@ export function parseMyReleasesOutcome(appId: string, payload: unknown): MyRelea
   if (!Array.isArray(root.releases)) {
     return shapeMismatch(appId, payload, t('appCenter.releasesShapeMismatch'))
   }
-  // `reason` 是**审核结论本身**：键缺席/非字符串 ⇒ 形状错误，绝不当成空串 ——
-  // 空串在界面上会显示成"管理员没有填写理由"，那是把"我们没读到"说成服务端的事实
-  // （模块头两条纪律里的第二条）。审计第二轮 A2-F6 实测：`releases`/`version` 受形状
-  // 门约束，只有 `reason` 被 `asString()` 静默降级。
-  const malformedReason = root.releases.some(row =>
-    row !== null && typeof row === 'object' &&
+  // 形状门（**逐元素**）：行必须是对象，`version` 与 `reason` 必须是字符串。
+  // 非对象元素（null/number/string/array）此前被下面的 `.filter()` 吃掉 ⇒
+  // "下发了 `[null]`"与"一行都没下发"给出同一个空清单（审计第三轮 B 区 CONFIRMED）。
+  // 绝不用 `?? {}` / `asString()` 之类把它降级成"空行"：那是把解析失败说成事实。
+  const malformedRow = root.releases.some(row =>
+    row === null || typeof row !== 'object' ||
+    typeof (row as Record<string, unknown>).version !== 'string' ||
     typeof (row as Record<string, unknown>).reason !== 'string')
-  if (malformedReason) {
+  if (malformedRow) {
     return shapeMismatch(appId, payload, t('appCenter.releasesShapeMismatch'))
   }
-  const rows = root.releases
-    .filter((row): row is Record<string, unknown> => row !== null && typeof row === 'object')
-    .map(row => ({
-      version: asString(row.version),
-      status: asString(row.status),
-      reason: asString(row.reason),
-      createdAt: asString(row.created_at),
-      current: row.current === true,
-      checksum: asString(row.checksum),
-      size: typeof row.size === 'number' ? row.size : 0,
-    }))
+  const rows = (root.releases as Record<string, unknown>[]).map(row => ({
+    version: asString(row.version),
+    status: asString(row.status),
+    reason: asString(row.reason),
+    createdAt: asString(row.created_at),
+    current: row.current === true,
+    checksum: asString(row.checksum),
+    size: typeof row.size === 'number' ? row.size : 0,
+  }))
   const releases = rows.filter(row => row.version !== '')
   if (rows.length > 0 && releases.length === 0) {
     return shapeMismatch(appId, payload, t('appCenter.releasesShapeMismatch'))
