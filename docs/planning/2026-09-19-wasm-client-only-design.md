@@ -777,6 +777,15 @@ desktop 组装期把 `deepLinkScheme` 与 `appOriginScheme` 注入新包（profi
 
 ①老客户端无归因；②"不限"依赖传输层超时与运维安全阀；③无工具仍存在内容安全风险；④**服务端 wasm 不再具备任何 AI 能力**（依赖 AI 的应用必须改成"前端调 AI → 结果回传 wasm"的形态）。
 
+**2026-09-20 实施期实测后追加的认账（每条都有 file:line 证据，见 `temp/wasm-client-only/fix-app-ai.md`）**：
+
+⑤ **`X-Pico-App-Id` 出站头做不出来（§21.4 的实现路径需改判）**：chat 出站头的**唯一构造点**在上游 `deepseek-harness/packages/**/llm-deepseek/src/adapter.ts:539-551`，而 `GenerateOptions`/`LlmCallConfig`/`llm/stream`（对 loop 请求深冻结）**都没有 header 通道** ⇒ 在不改上游 submodule 的前提下加不上这个头。
+**替代路径（主控 2026-09-20 裁定，待实施）**：隐藏会话 id 本身就是 `app:<app_id>`，而出站头 `x-deepseek-harness-session-id` **天然带应用身份** ⇒ 服务端应**按会话 id 前缀派生归因**（`app:` ⇒ `app_id`），**不需要新头**。现状 = 服务端 `internal/llmgateway/app_attribution.go:36-65` 仍只读 `X-Pico-App-Id`、且**不校验该请求是否属会话链路** ⇒ §21.6 判据 8 的后半（伪造头的非会话请求被忽略并 warn）**在服务端未实现**。**本版如实认账：应用维度用量在真实环境里不会有数据**（面板按「统计尚未上线/无归因」显示，不显示 0）。
+⑥ **隐藏会话"元数据含 `app_id`"做不到**：`SessionHeader` 字段集封闭 + jsonl 头白名单会拒掉额外键（file:line 见该报告）⇒ `app_id` 目前只能从**会话 id** 与**出站会话头**推得。§21.6 判据 5 的"元数据含 `app_id`"应改为"**会话 id 前缀可判定**"。
+⑦ **客户端 UI 侧的应用 AI 面板到不了协议 handler**：`AppAiPanel` 渲染在客户端 UI（loopback 源），它 `fetch('/__picoaide/ai/chat')` 走的是 loopback 服务端，而该路径**全仓只有协议 handler 一处**（应用窗口内才是协议源）⇒ 面板的聊天链路**当前不通**（本轮只补齐了它的授权路由与宿主侧记录/撤销）。修法二选一（待拍板）：①给面板走一条**宿主本机 HTTP 路由**（与 `/api/pico/wasm-apps/open` 同族）；②面板不再承担聊天，只做"授权/用量/说明"，聊天由应用页自己调保留路径。**本版认账：面板聊天不可用。**
+⑧ **R2-L2-2 只做了一半**：`open` 响应 404/410 ⇒ 关窗 + 清缓存的触发源已实现（并修掉它的前置阻塞：此前**所有** 404 都被当"端点不存在"）；"客户端按目录对比"这一触发源**未做**。
+⑨ **持久性缺口（自 W2 起）**：窗口状态与安装密钥的原子写**没有 fsync**（本地助手与上游 `@deepseek-ai/dsh-atomic-write` 都没有；上游 `.d.ts` 明写 *Crash durability (fsync) is out of scope*）⇒ "rename 已提交但数据仍在页缓存"的掉电窗口存在。
+
 ---
 
 ## 22. 零端口迁移就绪（上游 `apps/desktop` / `apps/desktop-host` 形态，2026-09-19 追加）
