@@ -548,14 +548,23 @@ func TestClientRequestRequiresProof(t *testing.T) {
 	}
 }
 
-// TestOpenAppFrozenStatesDoNotCollapse 钉住契约 §5.1 / §7.7③ / R2-X-2：
-// 冻结 / 软删 / 未登记都是 404，但**必须**带不同的 `reason`。
+// TestOpenAppFrozenStatesDoNotCollapse 钉住契约 §5.1 / §7.7② / R2-X-2（判定口径见
+// R2-L1-2 的主控裁定 (b)，2026-09-20）：**两档，不是三档**。
 //
-// 为什么不能塌缩：客户端的文案与下一步动作不同（冻结=「已被管理员停用，请联系管理员」；
-// 已删除=「应用不存在」）。全部说成"应用不存在"会让被冻结的应用看起来像被删了 ——
-// 用户会去问"为什么删了我的应用"，而管理员什么都没删。
+//	· 冻结 ⇒ `app_frozen` —— 文案与下一步动作都不同（「已被管理员停用，请联系管理员」）。
+//	· 软删 ⇒ `app_not_found`，与"从未登记"**同档同 reason**：契约 §7.7② 给"已删除"的
+//	  可见文案本来就是「应用不存在」；而 `GetWasmAppByHost` 的 WHERE 带
+//	  `deleted_at IS NULL` ⇒ 软删行在 DAO 层已经返回 ErrNotFound（`app_deleted` 分支
+//	  永不可达，已随本次修复删除）。
 //
-// 变异：去掉任一处的 `WithDetail("reason", …)` ⇒ 本用例红。
+// 为什么不能全塌缩：把**冻结**说成"应用不存在"会让用户以为应用被删了 —— 用户会去问
+// "为什么删了我的应用"，而管理员什么都没删。
+//
+// 判据强度（原先的弱点）：旧断言只要求软删/未登记档"非 `app_frozen` 且非空" ——
+// 它在"软删档真的多出一个 reason"的将来**不会红**。现在三档的 `reason` **取值逐个钉死**
+// （并显式断言软删 == 未登记），所以任何一档漂移都必须显式改这条断言。
+//
+// 变异：去掉任一处的 `WithDetail("reason", …)` / 把冻结档写成 `app_not_found` ⇒ 本用例红。
 func TestOpenAppFrozenStatesDoNotCollapse(t *testing.T) {
 	e := newTestEnv(t)
 	seedOpenApp(t, e, "frozen", "1.0.0", "被冻结的应用", true)
@@ -585,14 +594,22 @@ func TestOpenAppFrozenStatesDoNotCollapse(t *testing.T) {
 		return reason
 	}
 
-	if got := readReason(e.postOpen("frozen", e.tokens["alice"], "", true), http.StatusNotFound); got != "app_frozen" {
-		t.Fatalf("冻结应用的 reason = %q, want app_frozen（三档不得塌缩）", got)
+	// 三档的 reason **取值**逐个钉死（不是"非冻结且非空"）：冻结档独立，
+	// 软删档 == 未登记档（同档是裁定 (b) 的契约本身，不是"忘了区分"）。
+	frozenReason := readReason(e.postOpen("frozen", e.tokens["alice"], "", true), http.StatusNotFound)
+	deletedReason := readReason(e.postOpen("frozen-deleted", e.tokens["alice"], "", true), http.StatusNotFound)
+	ghostReason := readReason(e.postOpen("ghost", e.tokens["alice"], "", true), http.StatusNotFound)
+	if frozenReason != "app_frozen" {
+		t.Fatalf("冻结应用的 reason = %q, want app_frozen（冻结档必须独立）", frozenReason)
 	}
-	if got := readReason(e.postOpen("frozen-deleted", e.tokens["alice"], "", true), http.StatusNotFound); got == "app_frozen" || got == "" {
-		t.Fatalf("软删应用的 reason = %q, want 非 app_frozen 且非空（与冻结区分）", got)
+	if deletedReason != "app_not_found" {
+		t.Fatalf("软删应用的 reason = %q, want app_not_found（与未登记同档；要改成独立取值必须先改这条断言并重新裁定）", deletedReason)
 	}
-	if got := readReason(e.postOpen("ghost", e.tokens["alice"], "", true), http.StatusNotFound); got == "app_frozen" || got == "" {
-		t.Fatalf("未登记应用的 reason = %q, want 非 app_frozen 且非空", got)
+	if ghostReason != "app_not_found" {
+		t.Fatalf("未登记应用的 reason = %q, want app_not_found", ghostReason)
+	}
+	if deletedReason != ghostReason {
+		t.Fatalf("软删(%q) 与未登记(%q) 必须同档：DAO 带 `deleted_at IS NULL`，两档共用一条出口", deletedReason, ghostReason)
 	}
 	// 正常的应用不受影响（正对照）。
 	if rec := e.postOpen("alive", e.tokens["alice"], "", true); rec.Code != http.StatusOK {

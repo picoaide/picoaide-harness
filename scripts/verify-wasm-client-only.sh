@@ -225,8 +225,11 @@ if want 3; then
     log="$LOG_DIR/go-test.json"
     # 只取退出码会让"PG 不可达 ⇒ 全部 t.Skip"变成零断言的门禁绿（R1-TST-2）⇒ -json + 解析。
     if (cd server && run_limited 1200 go test ./internal/wasmapp/... ./internal/router/... -count=1 -json) >"$log" 2>&1; then
+      # 关键用例名单（**改上游/改名时同步这里**）：W1 把 `TestClientFrameUser_MatchesSessionProjection`
+      # 改名为 `TestClientFrameUser_ProjectsUserRowAndPublisherFlag`（同一意图）。checker 会区分
+      # "报告里不存在（多半被改名，给出候选）"与"存在但没通过"—— 见 2026-09-20 的 R1-L4-5。
       if node scripts/wasm/check-go-test-json.mjs "$log" \
-          --require TestClientRequest_LoginRequiredWithoutIdentityIs401,TestCheckClientOrigin,TestClientFrameUser_MatchesSessionProjection; then
+          --require TestClientRequest_LoginRequiredWithoutIdentityIs401,TestCheckClientOrigin,TestClientFrameUser_ProjectsUserRowAndPublisherFlag; then
         pass "go test 定向包（真 PG；用例级 0 skip；三条关键用例确实 pass）"
       else
         fail "go test 报告不合格（用例级 skip / 关键用例缺失 / 有失败事件；报告 $log）"

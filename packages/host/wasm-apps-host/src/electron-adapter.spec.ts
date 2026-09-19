@@ -21,8 +21,22 @@ vi.mock('electron', () => ({
   },
 }))
 
+/**
+ * 浏览器包的 session 守卫（R2-L2-5）：**适配器的转发**是本节要证的接线 ——
+ * scheme 传错（例如传成深链 scheme）或漏传 partition 时，真机探针与浏览器包自己的
+ * 单测都不会红（探针在探针内部重实现了一遍闸门）。
+ */
+const guardEnsureSession = vi.fn()
+const guardInstallGate = vi.fn()
+vi.mock('@picoaide/dsh-browser/guard', () => ({
+  ensureSessionGuard: guardEnsureSession,
+  installAppSchemeRequestGate: guardInstallGate,
+}))
+
 const { DEFAULT_APP_SCHEME } = await import('./app-protocol.ts')
 const { createRealElectronAdapter, registerAppScheme } = await import('./electron-adapter.ts')
+// 动态 import（不是静态）：静态 import 会在上面的替身声明**之前**求值 mock 工厂。
+const { session } = await import('electron')
 
 beforeEach(() => {
   registerSchemesAsPrivileged.mockClear()
@@ -30,6 +44,8 @@ beforeEach(() => {
   partitionHandle.mockClear()
   fromPartition.mockClear()
   defaultSessionFetch.mockClear()
+  guardEnsureSession.mockClear()
+  guardInstallGate.mockClear()
 })
 
 describe('registerAppScheme', () => {
@@ -79,6 +95,34 @@ describe('createRealElectronAdapter', () => {
     adapter.handleInSession('schema-probe-d-app', 'persist:agent-browser-alice', handler)
     expect(fromPartition).toHaveBeenCalledWith('persist:agent-browser-alice')
     expect(partitionHandle).toHaveBeenCalledWith('schema-probe-d-app', handler)
+  })
+
+  it('把权限守卫与请求闸门转发到正确的 session（默认 / 分区），带 scheme 与判据（R2-L2-5）', () => {
+    const adapter = createRealElectronAdapter()
+    const isAppSurface = (id: number | undefined): boolean => id === 7
+
+    // 默认 session：两个守卫都不带 partition。
+    adapter.ensureSessionGuard?.()
+    expect(guardEnsureSession).toHaveBeenCalledTimes(1)
+    expect(guardEnsureSession.mock.calls[0]?.[0]).toBe(session.defaultSession)
+
+    adapter.installAppSchemeRequestGate?.('schema-probe-e-app', isAppSurface)
+    expect(guardInstallGate).toHaveBeenCalledTimes(1)
+    const [defaultTarget, defaultOptions] = guardInstallGate.mock.calls[0] as unknown as [unknown, { scheme: string, isAppSurfaceWebContents: unknown }]
+    expect(defaultTarget).toBe(session.defaultSession)
+    // scheme 与判据都要**原样**转发：这里是"传成深链 scheme / 判据写反"的唯一判据点。
+    expect(defaultOptions.scheme).toBe('schema-probe-e-app')
+    expect(defaultOptions.isAppSurfaceWebContents).toBe(isAppSurface)
+
+    // 分区：target 换成该分区，参数不变。
+    adapter.ensureSessionGuard?.('persist:agent-browser-alice')
+    adapter.installAppSchemeRequestGate?.('schema-probe-e-app', isAppSurface, 'persist:agent-browser-alice')
+    expect(fromPartition).toHaveBeenCalledWith('persist:agent-browser-alice')
+    expect(guardEnsureSession).toHaveBeenLastCalledWith(expect.objectContaining({ protocol: { handle: partitionHandle } }))
+    const [partitionTarget, partitionOptions] = guardInstallGate.mock.calls[1] as unknown as [unknown, { scheme: string, isAppSurfaceWebContents: unknown }]
+    expect(partitionTarget).toEqual(expect.objectContaining({ protocol: { handle: partitionHandle } }))
+    expect(partitionOptions.scheme).toBe('schema-probe-e-app')
+    expect(partitionOptions.isAppSurfaceWebContents).toBe(isAppSurface)
   })
 
   it('routes outbound requests through the Chromium session stack', async () => {

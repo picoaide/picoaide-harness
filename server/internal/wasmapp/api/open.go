@@ -84,10 +84,23 @@ func (h *Handlers) openApp(c *gin.Context) {
 		return
 	}
 	if app == nil || app.DeletedAt != nil || app.FrozenAt != nil {
-		// **三档不得塌缩**（契约 §5.1 失败行 / §7.7③ / R2-X-2）：冻结 / 软删 / 未登记
-		// 都是 404，但带不同的 `reason` —— 客户端据它选文案（冻结说"已被管理员停用"、
-		// 已删除说"应用不存在"）。塌缩会让"被冻结"看起来像"被删除"。
-		reason, message, hint := "app_deleted", "应用不存在", "该应用已退役删除；如需恢复请联系平台管理员"
+		// **两档，不是三档**（R2-L1-2 主控裁定 (b)，2026-09-20）：
+		//
+		//	· 冻结 ⇒ `app_frozen`（文案独立：只读快照、数据仍在）；
+		//	· 软删 ⇒ `app_not_found`，与"从未登记"**同档同 reason**。
+		//
+		// 为什么软删不单独一档（而不是"漏了"）：
+		//  ① 契约 §7.7② 给"已删除"的用户可见文案本来就是「应用不存在」，与"从未登记"
+		//     逐字相同 —— 只有冻结档的文案与下一步动作不同；
+		//  ② `serverstore.GetWasmAppByHost` 的 WHERE 带 `deleted_at IS NULL` ⇒ 软删行
+		//     在 DAO 层就返回 ErrNotFound，上面那个分支已经按 app_not_found 出口；
+		//  ③ 要"真区分"就得新开一条"含软删"的 DAO 查询路径 ⇒ 多一个存在性判据，
+		//     而文案契约并不要求区分（多出来的信息只对枚举者有用）。
+		// ⇒ 旧代码里 `reason = "app_deleted"` 那一支**永不可达**（只有 DAO 返回带
+		// DeletedAt 的行才可能命中），留着它就是"语义已死却能被当成活契约"的依据 ——
+		// 已删。下面的 `nil` / `DeletedAt` 判定保留为**纵深防御**（"退役即停止路由"
+		// 是安全语义），但它们与未登记共用同一份 reason/文案，不构成第三个取值。
+		reason, message, hint := "app_not_found", "应用不存在", "该应用未在本平台登记或已退役；请回到应用中心刷新目录"
 		if app != nil && app.FrozenAt != nil {
 			reason = "app_frozen"
 			message = "应用已被管理员停用（冻结）"

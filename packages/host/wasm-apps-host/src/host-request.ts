@@ -33,6 +33,29 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
+/**
+ * 宿主**保留命名空间**的路径前缀（§21.2 规则②③；**唯一实现**）。
+ *
+ * 用法是"是不是保留面"，不是"是不是某条具体桥"：`/__picoaide`（无尾斜杠）与
+ * `/__picoaide/...` 都属于保留面（R2-L2-3）。服务端 `internal/wasmapp` 的
+ * `reservedPathPrefix = "__picoaide/"` 是同一口径的另一半 —— 改这里必须同步改那里。
+ */
+export const RESERVED_HOST_PREFIX = '/__picoaide'
+
+/**
+ * 这个 pathname 是否落在宿主保留命名空间里（**含无尾斜杠的裸前缀**）。
+ *
+ * 判据写成"等于前缀 或 以前缀 + '/' 开头"，而不是 `startsWith('/__picoaide/')`：
+ * 后者会把 `/__picoaide` 漏进普通应用请求分支（转发平台）—— 那是 R2-L2-3 实测的缺口。
+ * 也不写成 `startsWith('/__picoaide')`：那会连 `/__picoaidex` 一起吞掉（过度拦截同样
+ * 是缺陷：应用有合法路径叫这个名字时会被莫名 404）。
+ * @param path - 已解析的 pathname（含 `/` 前缀）。
+ * @returns true = 保留面（除 AI 桥之外一律 404，绝不转发）。
+ */
+export function isReservedHostPath(path: string): boolean {
+  return path === RESERVED_HOST_PREFIX || path.startsWith(`${RESERVED_HOST_PREFIX}/`)
+}
+
 /** 持有性证明请求头（§22.2 R2 冻结）。 */
 export const HOST_PROOF_HEADER = 'x-pico-host-proof'
 

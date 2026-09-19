@@ -249,9 +249,18 @@ func TestAppDBPool_HandleOpensOneWriterPlusReadersConnections(t *testing.T) {
 //
 // 变异：去掉 acquire 里的 opening 分支 ⇒ 本用例出现 500（且 fd 数 > 1+N）。
 func TestAppDBPool_ConcurrentFirstRequestsShareOneOpen(t *testing.T) {
-	// ⚠️ 单用户同应用同时运行数默认是 1（§4.6）⇒ 四个请求必须来自**四个不同员工**，
-	// 否则它们被队列串行化，本用例的前提（并发 Open 撞 WAL 写锁）就消失了（2026-09-19
-	// W4 身份一律注入后实测：同用户会被串行）。这里用 4 个员工恢复真实并发。
+	// ⚠️ 单用户同应用同时运行数默认是 1（§4.6）⇒ 同一个员工的四个请求会被队列串行化，
+	// 本用例的前提（并发 Open 撞 WAL 写锁）就消失了（2026-09-19 W4 身份一律注入后实测：
+	// 同用户确实会被串行）。
+	//
+	// 这里**不是**靠多个员工拿并发，而是**显式放宽队列**（下面 `PerUser*` 全给 4）——
+	// 4 个 goroutine 都走 `e.get`，它恒注入同一个 `e.ownerUser`（helpers_test.go 的
+	// `doClient`），所以身份只有一个。
+	//
+	// 为什么不需要多员工（对照台账 §U 的 R2-L7-1 规则）：那条规则允许两条等效路径 ——
+	// ①注入 ≥2 个身份，或 ②**显式放宽** `PerUser*`。两者都是"把队列从用例前提里摘出去"，
+	// 本用例选 ②：被测对象是**池的单飞**（appDBOpenFlight），不是队列的身份维度；换成
+	// 多员工会把变量从"队列"改成"身份"。（同款写法与如实注释见 releasecache_test.go。）
 	e := newEnv(t, func(o *Options) {
 		o.Scheduler = queue.New(queue.Options{PerUserPerAppRunning: 4, PerUserPerAppQueued: 4, PerUserGlobalRunning: 4})
 	})

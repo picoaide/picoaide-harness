@@ -4,21 +4,28 @@
  * 这一层刻意不 import electron —— 上面的 import 本身就在证明"插件主体可在纯
  * Node 下加载"（profile 冒烟与单测都走这条路）。
  */
-import { readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import {
   apply,
   wasmAppUrl,
+  WASM_APP_AI_CONSENT_ROUTE,
   WASM_APP_CHANNEL_ROUTE,
   WASM_APP_DEEP_LINK_FOREIGN_EVENT,
   WASM_APP_OPEN_EVENT,
   WASM_APP_OPEN_ROUTE,
+  WASM_APPS_AI_RUNNER_SERVICE,
+  WASM_APPS_WINDOW_ADAPTER_SERVICE,
   WASM_APPS_LOCAL_PREFIX,
   WASM_APPS_HOST_ADAPTER_SERVICE,
   type Config,
 } from './index.ts'
+import { AI_CHAT_PATH } from './ai-chat.ts'
+import { AI_CONSENT_FILE_NAME } from './ai-authorization.ts'
 import type { AppSchemeRequestHandler, WasmAppsHostAdapter } from './electron-adapter.ts'
 import type { AppSession, PicoSessionLike } from './session.ts'
 
@@ -33,6 +40,10 @@ function fakeContext(options: {
   /** 缺省给一个"放行"的围栏（部署里它总在）；显式 `null` = 模拟围栏服务缺席。 */
   fence?: { requestRejection: (request: { headers: IncomingMessage['headers'] }) => 401 | 403 | undefined } | null | undefined
   locale?: string
+  /** 应用 AI 的执行面（§21.2 步骤③；桌面壳 `provide` 的那个服务名）。 */
+  aiRunner?: unknown
+  /** 窗口适配器（配合 `apply(ctx, {userDataDir})` 才建窗口管理器；生命周期用例需要）。 */
+  windowAdapter?: unknown
 } = {}) {
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
   const emitted: Array<{ event: string, payload: unknown }> = []
@@ -72,6 +83,8 @@ function fakeContext(options: {
     } satisfies PicoSessionLike],
     ['desktopRuntime', { locale: options.locale ?? 'zh' }],
     ['connection', options.fence === null ? undefined : (options.fence ?? { requestRejection: () => undefined })],
+    [WASM_APPS_AI_RUNNER_SERVICE, options.aiRunner],
+    [WASM_APPS_WINDOW_ADAPTER_SERVICE, options.windowAdapter],
   ])
 
   const ctx = {
@@ -523,6 +536,88 @@ describe('local open route', () => {
     expect(JSON.parse(state.body).window).toBe('opened')
   })
 
+  /**
+   * 生命周期反应（§7.2 / §16.1「触发源 = open 端点响应」；**R2-L2-2**）。
+   *
+   * 平台说应用没了（404 冻结/退役、410 下架）⇒ 关掉还开着的窗口 + 丢缓存；
+   * 401/403 是**可恢复**的拒绝（登录过期/白名单）⇒ 窗必须留着，否则一次登录过期
+   * 会表现成"应用被卸载"。变异：把关闭分支去掉 ⇒ 前两条红；把闸门放宽到所有
+   * denied ⇒ 第三条红。
+   */
+  it('平台报 410/404 ⇒ 关窗 + 清缓存；401 拒绝 ⇒ 窗留着（R2-L2-2）', async () => {
+    const closed: string[] = []
+    const opened: string[] = []
+    const windowAdapter = {
+      createAppWindow: (options: { appId: string }) => {
+        opened.push(options.appId)
+        return { id: options.appId }
+      },
+      focusAppWindow: () => {},
+      closeAppWindow: (handle: { id: string }) => { closed.push(handle.id) },
+      setAspectRatio: () => {},
+    }
+    let answer: () => Response = () => new Response(JSON.stringify({ version: '1.0.0', changed: false }), { status: 200 })
+    const h = fakeContext({
+      session: ALICE,
+      windowAdapter,
+      fetch: async (url) => (url.endsWith('/open') ? answer() : new Response('{}', { status: 200 })),
+    })
+    // `userDataDir` 是**配置**（窗口几何/缓存的落点），窗口适配器是**服务**（适配器注入）：
+    // 两者都在，`windows` 才存在（缺一 ⇒ 退回"只发事件"的纯 Node 形态）。
+    apply(h.ctx as unknown as Parameters<typeof apply>[0], { userDataDir: mkdtempSync(join(tmpdir(), 'pico-wasm-apps-lifecycle-')) })
+    const proof = await proofHeaderOf(h)
+
+    const openOnce = async (): Promise<{ status: number, body: string }> => {
+      const { res, state } = fakeResponse()
+      routeOf(h).handler(
+        fakeRequest('POST', '{"app_id":"demo"}', proof),
+        res,
+      )
+      // 建窗路径带真实文件 I/O（窗口记忆落盘）⇒ 只冲微任务不够，等一小段时间。
+      await flush()
+      await new Promise(resolve => { setTimeout(resolve, 20) })
+      return state
+    }
+
+    // ① 正常打开（窗口建立）—— 并断言 `window:'opened'`（新建）。
+    // 变异：把 `window` 改回 `windows.has(target) ? 'focused' : 'opened'` ⇒ 这里变红
+    // （真实适配器下新建完成时 has() 必为 true ⇒ 永远报"已聚焦"）。
+    const first = await openOnce()
+    expect(first.status).toBe(200)
+    expect(JSON.parse(first.body)).toMatchObject({ window: 'opened' })
+    expect(opened).toEqual(['demo'])
+
+    // ①b 再打开同一个应用 ⇒ 聚焦已有窗口（`focused`）。
+    const again = await openOnce()
+    expect(JSON.parse(again.body)).toMatchObject({ window: 'focused' })
+    expect(opened).toEqual(['demo'])
+
+    // ② 平台说"已下架"（410）⇒ 关窗。
+    answer = () => new Response(JSON.stringify({ error: { code: 'APP_GONE', reason: 'app_disabled' } }), { status: 410 })
+    const gone = await openOnce()
+    expect(gone.status).toBe(410)
+    expect(closed).toEqual(['demo'])
+    // 缓存也被丢掉：同一个应用再次打开时**不再**信旧版本（knownVersions 已清）。
+    expect(h.warnings.join('\n')).toContain('closing its window and dropping its cache')
+
+    // ③ 冻结（404 + reason=app_frozen）同样关窗。先重新打开一个窗口（②已经关掉了）。
+    answer = () => new Response(JSON.stringify({ version: '1.0.0', changed: false }), { status: 200 })
+    expect((await openOnce()).status).toBe(200)
+    answer = () => new Response(JSON.stringify({ error: { code: 'APP_NOT_FOUND', reason: 'app_frozen' } }), { status: 404 })
+    const frozen = await openOnce()
+    expect(frozen.status).toBe(404)
+    expect(closed).toEqual(['demo', 'demo'])
+    expect(JSON.parse(frozen.body)).toMatchObject({ error: { code: 'APP_NOT_FOUND' } })
+
+    // ④ 401（登录过期）**不**关窗：这是可恢复的拒绝。
+    answer = () => new Response(JSON.stringify({ version: '1.0.0', changed: false }), { status: 200 })
+    expect((await openOnce()).status).toBe(200)
+    answer = () => new Response(JSON.stringify({ error: { code: 'AUTH_REQUIRED' } }), { status: 401 })
+    const before = [...closed]
+    expect((await openOnce()).status).toBe(401)
+    expect(closed).toEqual(before)
+  })
+
   it('fails closed when the protocol could not be registered', async () => {
     const h = fakeContext({ adapter: null, session: ALICE })
     apply(h.ctx, {})
@@ -551,5 +646,200 @@ describe('package shape', () => {
     const adapter = readFileSync(fileURLToPath(new URL('./electron-adapter.ts', import.meta.url)), 'utf8')
     expect(adapter).toContain("import { protocol, safeStorage, session } from 'electron'")
     expect(adapter).toContain('registerSchemesAsPrivileged')
+  })
+})
+
+/**
+ * 应用 AI 桥的**装配面**判据（§21.6 判据 1/2/3 的宿主侧一半）。
+ *
+ * 这里连的是**真的** `handleAiChat` + **真的** `createAiChatAuthorization`（文件形态）
+ * + 真的本机授权路由；唯一的替身是"跑一轮模型"的执行面（它属于客户端 AI loop，桌面侧
+ * 由 `packages/host/desktop/src/app-ai-runner.ts` 提供并用真 agent-loop 覆盖）。
+ */
+describe('应用 AI 桥（§21）：授权路由 → 闸门 → SSE，且不转发平台', () => {
+  const routeOf = (h: ReturnType<typeof fakeContext>) => {
+    const route = h.routes.find(entry => entry.path === WASM_APPS_LOCAL_PREFIX)
+    expect(route, 'local surface must be registered').toBeDefined()
+    return route!
+  }
+
+  const proofHeaderOf = async (h: ReturnType<typeof fakeContext>): Promise<Record<string, string>> => {
+    const { res, state } = fakeResponse()
+    routeOf(h).handler(fakeRequest('GET', undefined, {}, `${WASM_APPS_LOCAL_PREFIX}/host-proof`), res)
+    await flush()
+    expect(state.status).toBe(200)
+    return { 'x-pico-host-proof': (JSON.parse(state.body) as { proof: string }).proof }
+  }
+
+  const consent = async (
+    h: ReturnType<typeof fakeContext>,
+    headers: Record<string, string>,
+    body: unknown,
+  ): Promise<{ status: number, body: string }> => {
+    const { res, state } = fakeResponse()
+    routeOf(h).handler(
+      fakeRequest('POST', JSON.stringify(body), headers, WASM_APP_AI_CONSENT_ROUTE),
+      res,
+    )
+    // 授权记录带真实文件 I/O（原子写）⇒ 只冲微任务不够。
+    await flush()
+    await new Promise(resolve => { setTimeout(resolve, 20) })
+    return state
+  }
+
+  /** 一次应用页的 AI 调用（走协议 handler，不是本机路由）。 */
+  const chat = async (
+    h: ReturnType<typeof fakeContext>,
+    body: unknown,
+  ): Promise<Response> => {
+    expect(h.handler, 'the app protocol handler must be registered').toBeDefined()
+    return await h.handler!(new Request(`picoaide-app://demo${AI_CHAT_PATH}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }))
+  }
+
+  /** 记录调用次数的假执行面。 */
+  const runnerOf = () => {
+    const calls: Array<{ sessionId: string, appId: string, messages: readonly unknown[] }> = []
+    return {
+      calls,
+      runner: {
+        async run(input: { sessionId: string, appId: string, messages: readonly unknown[], onDelta: (text: string) => void }) {
+          calls.push({ sessionId: input.sessionId, appId: input.appId, messages: input.messages })
+          input.onDelta('你')
+          input.onDelta('好')
+          return { content: '你好' }
+        },
+      },
+    }
+  }
+
+  it('未授权 ⇒ 403 app_ai_denied，且一次模型调用都不发生（零 token）', async () => {
+    const { calls, runner } = runnerOf()
+    const h = fakeContext({ session: ALICE, aiRunner: runner })
+    apply(h.ctx, {})
+    const response = await chat(h, { messages: [{ role: 'user', content: 'hi' }] })
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ error: { code: 'app_ai_denied' } })
+    // 变异：去掉授权闸门（先跑模型再查授权）⇒ 这里变成 1。
+    expect(calls).toHaveLength(0)
+  })
+
+  it('端到端：本机授权路由 "允许" ⇒ 应用页调用立刻 200 SSE；"撤销" ⇒ 回到 403', async () => {
+    const { calls, runner } = runnerOf()
+    const h = fakeContext({ session: ALICE, aiRunner: runner })
+    apply(h.ctx, {})
+    const proof = await proofHeaderOf(h)
+
+    // ① 允许（渲染层的"允许"按钮走的就是这一条）。
+    const granted = await consent(h, proof, { app_id: 'demo', granted: true })
+    expect(granted.status).toBe(200)
+    expect(JSON.parse(granted.body)).toEqual({ app_id: 'demo', granted: true })
+
+    // ② 应用页调用：SSE 增量按序 + done 收尾。
+    const served = await chat(h, { messages: [{ role: 'user', content: 'hi' }], stream: true })
+    expect(served.status).toBe(200)
+    const text = await served.text()
+    expect(text).toContain('event: delta\ndata: {"delta":"你"}')
+    expect(text).toContain('event: delta\ndata: {"delta":"好"}')
+    expect(text).toContain('event: done')
+    expect(calls).toHaveLength(1)
+    // 隐藏会话 id 由闸门给出（不是应用可控的输入）。
+    expect(calls[0]?.sessionId).toBe('app:demo')
+
+    // ③ 撤销（设置/面板里的那个出口）⇒ 下一次调用 403。
+    const revoked = await consent(h, proof, { app_id: 'demo', granted: false })
+    expect(revoked.status).toBe(200)
+    const refused = await chat(h, { messages: [{ role: 'user', content: 'again' }] })
+    expect(refused.status).toBe(403)
+    expect(await refused.json()).toMatchObject({ error: { code: 'app_ai_denied' } })
+    expect(calls).toHaveLength(1)
+  })
+
+  it('授权落盘（给了 userDataDir）：允许写进宿主文件，重新装配的实例仍然放行（判据 3）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pico-wasm-apps-consent-route-'))
+    const { calls, runner } = runnerOf()
+
+    // ① 第一个实例：经授权路由"允许"。
+    const first = fakeContext({ session: ALICE, aiRunner: runner })
+    apply(first.ctx, { userDataDir: dir })
+    const granted = await consent(first, await proofHeaderOf(first), { app_id: 'demo', granted: true })
+    expect(granted.status).toBe(200)
+    const file = join(dir, AI_CONSENT_FILE_NAME)
+    expect(existsSync(file), '授权必须落到宿主私有文件（内存态重启即忘）').toBe(true)
+    expect(readFileSync(file, 'utf8')).toContain('demo')
+
+    // ② 第二个实例（同一目录 = 重启后的进程）：不经过任何"允许"，直接调用就该放行。
+    const second = fakeContext({ session: ALICE, aiRunner: runner })
+    apply(second.ctx, { userDataDir: dir })
+    const served = await chat(second, { messages: [{ role: 'user', content: 'hi' }], stream: false })
+    expect(served.status).toBe(200)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('授权按用户维度隔离：另一个用户名下的授权不生效', async () => {
+    const { calls, runner } = runnerOf()
+    const h = fakeContext({ session: ALICE, aiRunner: runner })
+    apply(h.ctx, {})
+    const proof = await proofHeaderOf(h)
+    await consent(h, proof, { app_id: 'demo', granted: true })
+
+    h.setSession({ serverURL: ALICE.serverURL, token: 'tok2', username: 'bob' })
+    h.fireSessionChanged()
+    const response = await chat(h, { messages: [{ role: 'user', content: 'hi' }] })
+    expect(response.status).toBe(403)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('授权路由要求持有性证明 / 已登录 / 合法 app_id / 布尔 granted', async () => {
+    const h = fakeContext({ session: ALICE })
+    apply(h.ctx, {})
+
+    const noProof = await consent(h, {}, { app_id: 'demo', granted: true })
+    expect(noProof.status).toBe(401)
+    expect(JSON.parse(noProof.body)).toMatchObject({ error: 'proof_required' })
+
+    const proof = await proofHeaderOf(h)
+    const badApp = await consent(h, proof, { app_id: 'Not Valid', granted: true })
+    expect(badApp.status).toBe(400)
+    const badFlag = await consent(h, proof, { app_id: 'demo', granted: 'yes' })
+    expect(badFlag.status).toBe(400)
+
+    h.setSession(null)
+    h.fireSessionChanged()
+    const signedOut = await consent(h, proof, { app_id: 'demo', granted: true })
+    expect(signedOut.status).toBe(401)
+  })
+
+  it('没有执行面 ⇒ 503 app_ai_unavailable（不静默给空答案）', async () => {
+    const h = fakeContext({ session: ALICE })
+    apply(h.ctx, {})
+    const proof = await proofHeaderOf(h)
+    await consent(h, proof, { app_id: 'demo', granted: true })
+    const response = await chat(h, { messages: [{ role: 'user', content: 'hi' }] })
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({ error: { code: 'app_ai_unavailable' } })
+  })
+
+  it('保留路径不转发平台：AI 调用与授权路由都不产生任何平台出站', async () => {
+    const { runner } = runnerOf()
+    const fetched: string[] = []
+    const h = fakeContext({
+      session: ALICE,
+      aiRunner: runner,
+      fetch: async (url) => {
+        fetched.push(url)
+        return new Response(JSON.stringify({ version: '1.0.0', changed: false }), { status: 200 })
+      },
+    })
+    apply(h.ctx, {})
+    const proof = await proofHeaderOf(h)
+    await consent(h, proof, { app_id: 'demo', granted: true })
+    const served = await chat(h, { messages: [{ role: 'user', content: 'hi' }], stream: false })
+    expect(served.status).toBe(200)
+    // 变异：把 `__picoaide/ai/chat` 落进"普通应用请求"分支 ⇒ 这里会多出一条平台 URL。
+    expect(fetched).toEqual([])
   })
 })

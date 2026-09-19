@@ -634,7 +634,11 @@ describe('配置字段与 appcfg.json 对拍（单一真源缺席即红，不再
 // ---------------------------------------------------------------------------
 
 describe('wasm_app_list：列出目录（只读）', () => {
-  it('出站 GET catalog，带 Bearer；entry_url 绝对化后原样返回', async () => {
+  // ⚠️ **反向断言**（R2-L1-1，2026-09-20 主控裁定）：这条用例原先钉的是"entry_url
+  // 绝对化后原样返回"—— 服务端已不再下发该键（旧访问模型的 emit 随 W4 删除），宿主
+  // 的补全分支也一并删除。夹具**故意**保留一行旧形态数据（模拟旧服务端/历史缓存），
+  // 用来钉住"宿主不认识它、不改写它"：重新加回补全 ⇒ `/shared-notes` 变成绝对地址 ⇒ 红。
+  it('出站 GET catalog，带 Bearer；目录逐字节透传（旧入口链接字段不被改写）', async () => {
     const h = harness(() => json(200, CATALOG))
     const result = await h.run('wasm_app_list', {})
     expect(h.outbound).toHaveLength(1)
@@ -643,7 +647,8 @@ describe('wasm_app_list：列出目录（只读）', () => {
     expect(result.ok).toBe(true)
     expect(result.status).toBe(200)
     expect(result.body.apps[0].app_id).toBe('shared-notes')
-    expect(result.body.apps[0].entry_url).toBe('https://harness.example/shared-notes')
+    // 相对值保持相对（旧实现这里会给出 `https://harness.example/shared-notes`）。
+    expect(result.body.apps[0].entry_url).toBe('/shared-notes')
     // P1-4：工具描述承诺输出"当前版本"（模型据此算出严格递增的新版本号），而目录行
     // 原先**没有**这个字段 —— 猜错版本号的代价是一次完整上传（≤32 MiB）+ 审计拒绝
     // + 消耗上传额度。这条断言钉住"承诺的数据真的在工具输出里"。

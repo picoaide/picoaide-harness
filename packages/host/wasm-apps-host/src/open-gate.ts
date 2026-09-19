@@ -131,6 +131,23 @@ export function parseAppOpenResponse(value: unknown): { version: string, release
 }
 
 /**
+ * 读平台错误信封里的错误码（`{"error":{"code":…}}` / `{"error":"code"}`）。
+ *
+ * 只有**对象形态的 `error.code`** 才算信封 —— 这一条同时用来分辨"端点缺失的 404"
+ * （无信封）与"应用级拒绝的 404"（有信封），放宽会把两者混成一件事。
+ * @param body - 已解析的响应体（解析失败传 `undefined`）。
+ * @returns 错误码，或 `null`（不是平台错误信封）。
+ */
+export function platformErrorCode(body: unknown): string | null {
+  if (body === null || typeof body !== 'object') return null
+  const error = (body as { error?: unknown }).error
+  if (typeof error === 'string' && error !== '') return error
+  if (typeof error !== 'object' || error === null) return null
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' && code !== '' ? code : null
+}
+
+/**
  * 构造打开校验器。
  * @param deps - 会话/出站/证明/预算。
  * @returns 校验器。
@@ -159,8 +176,8 @@ export function createAppOpenGate(deps: AppOpenGateDeps): AppOpenGate {
           body: JSON.stringify({ current_version: currentVersion }),
           signal: controller.signal,
         })
-        // 端点还不存在（滚动升级窗口）：404/405/501 都按"不支持"继续打开。
-        if (response.status === 404 || response.status === 405 || response.status === 501) {
+        // 端点还不存在（滚动升级窗口）：405/501 一律按"不支持"继续打开。
+        if (response.status === 405 || response.status === 501) {
           warn(`pico-wasm-apps-host: the platform has no app open endpoint yet (HTTP ${String(response.status)}); opening without a version check`)
           return { kind: 'unsupported' }
         }
@@ -170,15 +187,18 @@ export function createAppOpenGate(deps: AppOpenGateDeps): AppOpenGate {
         } catch {
           body = undefined
         }
+        // 404 有两种语义，必须看响应体分开（R2-L2-2）：
+        //  · **平台错误信封**（`{"error":{"code","message"}}`）= 端点存在、它明确说
+        //    "没有这个应用"（服务端 `open.go` 的冻结/退役/未登记三档都是 404 + 信封）；
+        //  · 非信封（HTML/空体/路由不存在）= 旧平台还没有这条端点 ⇒ 继续打开（滚动升级）。
+        // 不分开的后果是**冻结/下架的应用在真实适配器下永远关不掉窗口**：404 被当成
+        // "端点缺失"，路由拿到 `unsupported` 就照常打开。
+        if (response.status === 404 && platformErrorCode(body) === null) {
+          warn('pico-wasm-apps-host: the platform has no app open endpoint yet (HTTP 404 without an error envelope); opening without a version check')
+          return { kind: 'unsupported' }
+        }
         if (!response.ok) {
-          const code = (() => {
-            const error = (body as { error?: unknown } | undefined)?.error
-            if (typeof error === 'string') return error
-            if (typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string') {
-              return (error as { code: string }).code
-            }
-            return `HTTP_${String(response.status)}`
-          })()
+          const code = platformErrorCode(body) ?? `HTTP_${String(response.status)}`
           // 401：proof 失效时重签一次再试（与请求面同口径）。
           if (response.status === 401 && deps.appProof !== undefined) {
             deps.appProof.invalidate()

@@ -23,6 +23,7 @@ import {
   hasAppAiConsent,
   revokeAppAiConsent,
   streamAppAiChat,
+  syncAppAiConsent,
   type AppAiConsentStore,
   type AppAiDeps,
   type AppAiFailure,
@@ -96,6 +97,7 @@ export function AppAiPanel({ appId, userId, store, deps }: {
   const [consented, setConsented] = useState(() => hasAppAiConsent(userId, appId, storage))
   const [denied, setDenied] = useState(false)
   const [revoked, setRevoked] = useState(false)
+  const [syncFailed, setSyncFailed] = useState<string | null>(null)
   const [messages, setMessages] = useState<AppAiMessage[]>([])
   const [draft, setDraft] = useState('')
   const [streaming, setStreaming] = useState('')
@@ -106,19 +108,41 @@ export function AppAiPanel({ appId, userId, store, deps }: {
   // 仅前台（§21.1 第 15 条）：组件卸载（页面关闭/切走）⇒ 取消在跑的那一轮。
   useEffect(() => () => { controller.current?.abort() }, [])
 
+  /**
+   * 允许（§21.1 第 9 条）。
+   *
+   * 两处都要写：宿主（`syncAppAiConsent`，真正决定闸门放不放行）与渲染层
+   * （`localStorage`，决定"还要不要再弹说明卡"）。宿主写失败 ⇒ **不放行** UI：
+   * 让用户看到"已允许"但下一次调用 403，比让他再点一次糟糕得多。
+   */
   const allow = useCallback((): void => {
-    grantAppAiConsent(userId, appId, storage)
-    setDenied(false)
-    setRevoked(false)
-    setConsented(hasAppAiConsent(userId, appId, storage))
-  }, [appId, storage, userId])
+    void (async () => {
+      const synced = await syncAppAiConsent(appId, true, deps)
+      if (!synced.ok) {
+        setSyncFailed(synced.message)
+        setConsented(false)
+        return
+      }
+      setSyncFailed(null)
+      grantAppAiConsent(userId, appId, storage)
+      setDenied(false)
+      setRevoked(false)
+      setConsented(hasAppAiConsent(userId, appId, storage))
+    })()
+  }, [appId, deps, storage, userId])
 
   const revoke = useCallback((): void => {
-    revokeAppAiConsent(userId, appId, storage)
-    setConsented(false)
-    setDenied(false)
-    setRevoked(true)
-  }, [appId, storage, userId])
+    // 撤销先落宿主（闸门立刻拒绝），再清 UI 记忆 —— 反过来的话，写失败会留下
+    // "界面已撤销、宿主还记着"的窗口。
+    void (async () => {
+      const synced = await syncAppAiConsent(appId, false, deps)
+      revokeAppAiConsent(userId, appId, storage)
+      setConsented(false)
+      setDenied(false)
+      setRevoked(true)
+      setSyncFailed(synced.ok ? null : synced.message)
+    })()
+  }, [appId, deps, storage, userId])
 
   const send = useCallback(async (): Promise<void> => {
     const content = draft.trim()
@@ -175,6 +199,8 @@ export function AppAiPanel({ appId, userId, store, deps }: {
           <div data-role="ai-intro">{t('appCenter.ai.intro')}</div>
           {denied && <div data-role="ai-denied">{t('appCenter.ai.denied')}</div>}
           {revoked && !denied && <div data-role="ai-revoked">{t('appCenter.ai.revoked')}</div>}
+          {/* 宿主没记住授权（写失败/拿不到持有性证明）：如实说，不放行输入框。 */}
+          {syncFailed !== null && <div data-role="ai-consent-failed">{t('appCenter.ai.consentFailed')}</div>}
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
             <button type="button" className="pico-app-ai-allow" data-action="ai-allow" style={BUTTON} onClick={allow}>
               {t('appCenter.ai.allow')}

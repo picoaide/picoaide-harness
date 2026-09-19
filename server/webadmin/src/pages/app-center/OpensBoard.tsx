@@ -13,6 +13,7 @@ import { hasPermission, PERM_CAP_READ } from '../../lib/rbac'
 import { BarChart3, Flame, RefreshCw } from 'lucide-react'
 import {
   OPENS_COUNT_NOTE,
+  OPENS_DETAIL_RETENTION_DAYS,
   OPENS_PRIVACY_NOTE,
   OPENS_RETENTION_NOTE,
   OPENS_SCOPE_NOTE,
@@ -26,8 +27,8 @@ import {
   summarizeWindow,
   trendValues,
   type EndpointFailure,
-  type OpensPoint,
   type OpensSummary,
+  type OpensTrendPoint,
 } from './opens-contract'
 
 /**
@@ -99,7 +100,7 @@ export default function OpensBoard() {
 
   useEffect(() => { void load() }, [load])
 
-  const trend: OpensPoint[] = data?.trend ?? []
+  const trend: OpensTrendPoint[] = data?.trend ?? []
   /**
    * 窗口汇总：**只有拿到数据才算**。
    *
@@ -113,6 +114,11 @@ export default function OpensBoard() {
   const top = rankTopApps(data?.top_apps, Number(topN))
   const todayPv = data?.today?.pv
   const todayUv = data?.today?.uv
+  /**
+   * 保留期与生效窗口一律**读服务端回显**（§5.1c A/C）：
+   * 前端常量只是回落 —— 服务端要说"只保留了 90 天"，管理员看到的就必须是服务端的那个数。
+   */
+  const retentionDays = data?.detail_retention_days ?? OPENS_DETAIL_RETENTION_DAYS
 
   // 趋势点：缺 pv/uv 的**不画**（补 0 会画出一条"那天没人用"的假线），
   // 跳过数量在图上显式提示（见下面的 opens-trend-skipped）。
@@ -180,6 +186,23 @@ export default function OpensBoard() {
             </Select>
             <span className="text-xs text-muted-foreground">{OPENS_COUNT_NOTE}</span>
           </div>
+
+          {/* 生效区间由**服务端**回显（§5.1c A/C）：不渲染它，管理员就无从察觉
+              服务端是否把窗口收敛过（capped）。 */}
+          {data !== null && (
+            <p className="text-xs text-muted-foreground" data-testid="opens-effective-window">
+              统计区间：{typeof data.from === 'string' && data.from !== '' ? data.from : '—'}
+              {' ~ '}
+              {typeof data.to === 'string' && data.to !== '' ? data.to : '—'}
+              （窗口 {data.days ?? days} 天 · 明细保留 {retentionDays} 天）
+            </p>
+          )}
+          {data?.capped === true && (
+            <p className="text-xs text-destructive" data-testid="opens-capped">
+              请求窗口长于明细保留期（{retentionDays} 天）：服务端已收敛到保留期并如实回报
+              （capped=true）—— 这里显示的是保留期内可算的窗口，不是全部历史。
+            </p>
+          )}
 
           {/* 缺后端 / 形状漂移 / 读失败：明说"不可用"，下面的数字一律显示 —（不是 0）。 */}
           {failure && (
@@ -301,6 +324,7 @@ export default function OpensBoard() {
                   <p>{OPENS_COUNT_NOTE}</p>
                   <p>{OPENS_SCOPE_NOTE}</p>
                   <p>{OPENS_RETENTION_NOTE}</p>
+                  <p data-testid="opens-retention-echo">服务端本次回报：明细保留 {retentionDays} 天（`detail_retention_days`）。</p>
                   <p>{OPENS_PRIVACY_NOTE}</p>
                   <p>按部门聚合在「应用」页的详情抽屉里（granularity=dept）；部门取打开时刻的用户主部门，无部门记 NULL。</p>
                 </CardContent>

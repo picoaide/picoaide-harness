@@ -27,7 +27,8 @@ import (
 // WriteAppNotFound 是应用请求的统一 404。
 //
 // 两条硬要求：
-//   - 不泄露"这个 app_id 是否存在"（未登记 / 已软删 / 已冻结都走它）；
+//   - 不泄露"这个 app_id 是否存在"（未登记 / 已软删都走它 —— 两档**同形同 reason**，
+//     契约 §7.7② 给"已删除"的可见文案就是「应用不存在」）；
 //   - 安全头照样要写（含 4xx/5xx）；是 API 路径时用平台 JSON 信封。
 //
 // selfOrigin 由**调用方**传入（appserver 的 `(*Server).selfOrigin`，唯一构造点是
@@ -39,10 +40,10 @@ func WriteAppNotFound(w http.ResponseWriter, r *http.Request, appLabel, selfOrig
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(apperr.EnvelopeOf(
 			apperr.New(apperr.CodeNotFound, "应用不存在").
-				// reason 是**跨端契约**（契约 §5.1 失败行 / §7.7③）：客户端据此在
-				// 三档之间选文案（不存在 / 已删除 / 已冻结）。这里给的是"未登记"
-				// 那一档；冻结与软删由 appserver 用各自的 reason 单独报
-				// —— 三档**不得塌缩**成同一个"应用不存在"。
+				// reason 是**跨端契约**（契约 §5.1 失败行 / §7.7③）：客户端据此选文案。
+				// 取值只有两档（R2-L1-2 主控裁定 (b)）= `app_not_found`（未登记 / 已软删
+				// 同档）与 `app_frozen`（冻结，由 appserver 单独报）。原先声明的第三个
+				// 取值 `app_deleted` 因 DAO 层 `deleted_at IS NULL` **永不可达**，已删。
 				WithDetail("reason", "app_not_found").
 				WithHint("请确认应用标识是否正确；应用标识一经发布不能改名")))
 		return

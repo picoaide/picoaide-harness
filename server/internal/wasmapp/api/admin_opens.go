@@ -98,15 +98,20 @@ func dayStart(t time.Time) time.Time { return serverstore.LocalDay(t) }
 // 为什么把"列表列 + 看板"合成一个端点：两者要的是同一份数据（每个应用的窗口 PV/UV
 // 与趋势），分成两个端点只会让页面打开时发两次几乎相同的重查询。
 //
-// 响应形状（**冻结**，W5 C2 的判据）：
+// 响应形状（**冻结 = 设计 §5.1c A**，跨端对拍用例逐键断言）：
 //
-//	{"from":"…","to":"…","days":7,"top":10,"capped":false,
-//	 "trend":[{day,pv,uv}…],"apps":[{app_id,pv,uv,today_pv,today_uv}…],"top_apps":[…]}
+//	{"from":"…","to":"…","days":7,"top":10,"capped":false,"detail_retention_days":90,
+//	 "today":{day,pv,uv},"totals":{pv,uv},"trend":[{day,pv,uv}…],
+//	 "apps":[{app_id,title,today_pv,today_uv,window_pv,window_uv}…],
+//	 "top_apps":[{app_id,title,pv,uv}…]}
 //
-// 三个数组**恒在**（空就空数组，绝不 null/省略 —— 与契约 §5.1 同款纪律：前端对
-// null 与空数组的处理不同，省略会让"没有数据"与"字段改名了"不可区分）。
+// 三个数组与 `today`/`totals` **恒在**（空就空数组/零值，绝不 null/省略 —— 与契约
+// §5.1 同款纪律：前端对 null 与空数组的处理不同，省略会让"没有数据"与"字段改名了"
+// 不可区分）。
 //
-// `uv` 是**窗口内按 user_id 去重**（不是逐日相加）：同一个人天天来只算 1。
+// `uv` 是**窗口内按 user_id 去重**（不是逐日相加）：同一个人天天来只算 1；
+// `totals.uv` 更必须是**不带 `GROUP BY app_id` 的一次聚合**（各应用 uv 相加会把
+// "同一个人开了两个应用"重复计数，§5.1c A 明令禁止）。
 // `days` 缺省 7、`top` 缺省 10（与 L6 已实现的前端取值一致）。
 func (h *Handlers) adminOpensSummary(c *gin.Context) {
 	now := h.now()
@@ -127,21 +132,28 @@ func (h *Handlers) adminOpensSummary(c *gin.Context) {
 	}
 	from := now.AddDate(0, 0, -(days - 1))
 
-	apps, trend, capped, err := serverstore.SummarizeWasmAppOpens(c.Request.Context(), h.opt.DB, from, now, now)
+	sum, err := serverstore.SummarizeWasmAppOpens(c.Request.Context(), h.opt.DB, from, now, now)
 	if err != nil {
 		writeErr(c, apperr.New(apperr.CodeInternal, "查询打开概览失败").
 			WithHint("这是平台侧故障（数据库不可达）；请稍后重试"))
 		return
 	}
-	if apps == nil {
-		apps = []serverstore.WasmAppOpenSummaryRow{}
+	if sum.Apps == nil {
+		sum.Apps = []serverstore.WasmAppOpenSummaryRow{}
 	}
-	if trend == nil {
-		trend = []serverstore.WasmOpenTrendPoint{}
+	if sum.Trend == nil {
+		sum.Trend = []serverstore.WasmOpenTrendPoint{}
 	}
-	topApps := apps
-	if len(topApps) > top {
-		topApps = topApps[:top]
+	// TOP N 从**已按窗口 PV 降序**的 apps 里取前 top 行（服务端已排好序；
+	// 前端另有兜底排序与截断）。行形状按 §5.1c A：`{app_id,title,pv,uv}`。
+	topApps := make([]serverstore.WasmAppOpenTopRow, 0, top)
+	for _, a := range sum.Apps {
+		if len(topApps) >= top {
+			break
+		}
+		topApps = append(topApps, serverstore.WasmAppOpenTopRow{
+			AppID: a.AppID, Title: a.Title, PV: a.WindowPV, UV: a.WindowUV,
+		})
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"from": serverstore.LocalDayString(from),
@@ -150,10 +162,15 @@ func (h *Handlers) adminOpensSummary(c *gin.Context) {
 		"top":  top,
 		// capped=true：请求的窗口比明细保留期还长，UV 只能按保留期算（如实说，
 		// 不静默给一个偏小的数字）。
-		"capped":   capped,
-		"trend":    trend,
-		"apps":     apps,
-		"top_apps": topApps,
+		"capped": sum.Capped,
+		// 明细保留期（§5.1c A）：前端据此标注"多久以前的明细已经不在"，
+		// 并在 capped 时说明窗口为什么被收敛。
+		"detail_retention_days": serverstore.WasmAppOpensRetentionDays,
+		"today":                 sum.Today,
+		"totals":                sum.Totals,
+		"trend":                 sum.Trend,
+		"apps":                  sum.Apps,
+		"top_apps":              topApps,
 	})
 }
 
@@ -177,7 +194,19 @@ func (h *Handlers) adminAppAIUsage(c *gin.Context) {
 		return
 	}
 	now := h.now()
-	from, aerr := parseDayParam(c.Query("from"), now.AddDate(0, 0, -6))
+	// `days=` 是契约 §5.1c B 文档化的窗口形态（`?days=|from=&to=`）：只在**没有显式
+	// `from`** 时生效 —— 显式区间永远优先（调用方拿着回显的 from/to 再请求时不能被
+	// 一个残留的 days 覆盖）。缺省仍是近 7 天。
+	//
+	// 为什么要支持它：一个"文档里有、实现里被静默忽略"的参数，与 R2-L6-3 的
+	// "静默窗口"是同一类缺陷（调用方以为窗口变了，数字其实没变）。
+	defFrom := now.AddDate(0, 0, -6)
+	if strings.TrimSpace(c.Query("from")) == "" {
+		if days := atoiDefault(c.Query("days"), 0); days > 0 {
+			defFrom = now.AddDate(0, 0, -(days - 1))
+		}
+	}
+	from, aerr := parseDayParam(c.Query("from"), defFrom)
 	if aerr != nil {
 		writeErr(c, aerr.WithDetail("field", "from"))
 		return

@@ -27,7 +27,8 @@
 
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { atomicWriteFile } from './atomic-write.ts'
+// 原子替换走上游 `@deepseek-ai/dsh-atomic-write`（2026-09-20 W6/W7 切换，见设计总纲 §16.1）。
+import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 
 /** 状态文件名（§16.1 冻结）。 */
 export const APP_WINDOWS_STATE_FILE = 'wasm-apps-windows.json'
@@ -197,13 +198,13 @@ function readMemory(value: unknown): AppWindowMemory | null {
 /**
  * 写状态文件（原子替换 + 目录 0700；失败只记 warn，**不让记忆文件挡住窗口**）。
  *
- * 原子写走唯一助手 {@link atomicWriteFile}（待切换到 `@deepseek-ai/dsh-atomic-write`，
- * 见该文件的偏离声明）。
+ * 原子写走上游 `writeFileAtomic`（`wx` 临时兄弟 + rename，见设计总纲 §16.1 的切换记录）；
+ * 权限位 0600/0700 在这里逐处声明。
  * @param userDataDir - `<userData>` 目录。
  * @param state - 完整状态（整体覆盖，不做增量合并）。
  */
 export async function writeWindowsState(userDataDir: string, state: AppWindowsState): Promise<void> {
-  await atomicWriteFile(join(userDataDir, APP_WINDOWS_STATE_FILE), JSON.stringify(state))
+  await writeFileAtomic(join(userDataDir, APP_WINDOWS_STATE_FILE), JSON.stringify(state), { mode: 0o600, dirMode: 0o700 })
 }
 
 /**

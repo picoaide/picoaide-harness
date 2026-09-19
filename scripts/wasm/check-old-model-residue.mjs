@@ -81,6 +81,10 @@ const SCOPES = [
   { path: 'docs/wasm-app-authoring.md', required: false },
   { path: 'packages/client/wasm-apps/src', required: true },
   { path: 'packages/host/wasm-apps-host/src', required: true },
+  // R2-L1-1（2026-09-20 主控裁定）：宿主企业包也持有应用中心面（目录代理 + wasm_app_* 工具），
+  // 旧模型的 `entry_url` 曾在这里**活着**（绝对化分支 + 两组 spec 钉成预期）而门禁看不见 ⇒
+  // 范围缺口。加入扫描面后 A 桶必须仍为 0（不为它放宽任何预算）。
+  { path: 'packages/host/enterprise/src', required: true },
   { path: 'packages/host/browser/src', required: true },
   // 以下只在白名单里出现（历史/权威文档、发布说明、审计留痕）：扫描但不算业务命中。
   { path: 'docs/planning', required: false },
@@ -293,7 +297,10 @@ const CONTRACT_MODULES = [
 ]
 
 /**
- * **ANN 桶**（R1-L4-3）：仓库范围内"**带显式删除/废弃标注的注释行**"。
+ * **ANN 桶**（R1-L4-3；口径 2026-09-20 经主控复核为**注释块级**）：仓库范围内"带删除/废弃标注的**注释**"——
+ * 标注词允许来自**同一注释块的表头**（±25 行内的连续注释）："表头写『以下为历史/已删除…』
+ * 覆盖块内各行"是注释的正常写法，收窄成"必须逐行自带标注词"只会用假精度换假绿。量具对每条
+ * 命中标注 `[self]`（本行自带）还是 `[blk]`（块级继承），口径与实现一致、可自证。
  *
  * 为什么单列而不是算 A：A 的定义是"业务代码零命中"，而这些行恰恰是 **W4 的成果**
  * —— 例如 `publish.go`/`read.go`/`release.go` 的「⚠️ `entry_url` 已随 W4 从两侧删除」、
@@ -346,7 +353,13 @@ function bucketOf(record) {
 
   // ANN：注释行 + 显式删除/废弃标注（仓库范围）。位置在 B 之后 —— 已声明为契约面的行
   // 仍归 B（口径不变），ANN 只吸收"其余被标注的注释"。
-  if (isCommentLine(record.text) && ANN_MARKER.test(annotations)) return 'ANN'
+  if (isCommentLine(record.text) && ANN_MARKER.test(annotations)) {
+    // R2-L4-1：量具自描述 —— 标注词可能来自**本行**（self）或**同一注释块的表头**（blk，
+    // ±25 行内的连续注释）。注释块级是注释的正常写法（表头写"以下为历史…"覆盖块内各行），
+    // 两种都合法；但要能一眼看出这条凭什么进 ANN —— 报出来，别让人以为每行都自带标注。
+    record.annScope = ANN_MARKER.test(record.text) ? 'self' : 'blk'
+    return 'ANN'
+  }
   return 'A'
 }
 
@@ -373,7 +386,7 @@ for (const record of records) {
 const labelOf = key => ({
   A: 'A 业务代码零命中（必须为 0）',
   B: `B 契约型保留（必须带标识；上限 ${CONTRACT_BUDGET}）`,
-  ANN: `ANN 带显式删除/废弃标注的注释（上限 ${ANN_BUDGET}）`,
+  ANN: `ANN 带删除/废弃标注的注释（注释块级：标注词可来自同行 [self] 或同块表头 [blk]；上限 ${ANN_BUDGET}）`,
   C: 'C 夹具 / 历史文档与不可变迁移',
   D: 'D 生成物 / 演示与技能内容（非本泳道）',
 }[key])
@@ -395,7 +408,7 @@ for (const key of ['B', 'ANN', 'A']) {
   console.log(`  -- ${labelOf(key)}：${items.length} 处${scopeMix}`)
   const shown = key === 'B' || key === 'ANN' || SHOW_ALL ? items : items.slice(0, PER_CATEGORY_LIMIT)
   for (const record of shown) {
-    const tag = key === 'B' ? 'B' : key === 'ANN' ? 'ANN' : 'HIT'
+    const tag = key === 'B' ? 'B' : key === 'ANN' ? `ANN/${record.annScope ?? 'blk'}` : 'HIT'
     console.error(`     [${tag}] ${record.file}:${record.line}: ${record.text.slice(0, 150)}`)
   }
   if (shown.length < items.length) {

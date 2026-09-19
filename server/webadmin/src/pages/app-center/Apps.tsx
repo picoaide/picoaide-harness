@@ -29,7 +29,9 @@ import {
 // F16 打开次数（契约 §8.9 / §19 Q11）+ §21.4 AI 用量：路径、类型、降级与聚合口径
 // 全部收敛在 opens-contract.ts；本页只做渲染与请求编排。
 import {
+  OPENS_MISSING_ROW_NOTE,
   OPENS_SUMMARY_PATH,
+  appOpenCounts,
   classifyEndpointFailure,
   countText,
   requireOpensSummary,
@@ -1107,6 +1109,10 @@ export default function Apps() {
                 const frozen = row.frozen_at !== null && row.frozen_at !== ''
                 const pendingCount = row.pending_count ?? (row.pending_releases ?? []).length
                 const orow = opensRows[row.app_id]
+                // 缺"行"≠ 缺"字段"（R2-L6-4）：聚合可用但服务端没下发该应用的行
+                // （GROUP BY app_id 会省略零打开的应用）⇒ 该窗口内确实没有打开记录
+                // ⇒ **按 0 计** + title 说明；行在而字段缺失 = 形状漂移 ⇒ 仍显示 —。
+                const counts = appOpenCounts(orow)
                 return (
                   <TableRow key={row.app_id}>
                     <TableCell className="max-w-[16rem]">
@@ -1143,20 +1149,25 @@ export default function Apps() {
                     <TableCell className="font-mono text-sm">{row.current_version || '—'}</TableCell>
                     <TableCell className="whitespace-nowrap text-xs">
                       {/* 打开次数（F16）：聚合不可用时整格显示「—」并附页面上方提示。
-                          聚合可用但该应用没有行 ⇒ 窗口内没有打开记录（真 0）。 */}
+                          聚合可用但该应用**没有行** ⇒ 窗口内没有打开记录（服务端 `GROUP BY
+                          app_id` 会省略零打开的应用）⇒ **按 0 计**并带 title 说明；
+                          这与"行在但字段缺失（形状漂移）显示 —"是两件事（R2-L6-4 / CTL-11）。 */}
                       {opensFailure !== null ? (
                         <span data-testid={`app-opens-cell-${row.app_id}`} title={opensFailure.text}>—</span>
                       ) : (
-                        <div data-testid={`app-opens-cell-${row.app_id}`} title="PV=每次打开 +1（不去重）；UV=按用户去重（服务端聚合）">
+                        <div
+                          data-testid={`app-opens-cell-${row.app_id}`}
+                          title={counts.missingRow ? OPENS_MISSING_ROW_NOTE : 'PV=每次打开 +1（不去重）；UV=按用户去重（服务端聚合）'}
+                        >
                           <div>
-                            今日 <span className="font-mono">{countText(orow?.today_pv)}</span>
+                            今日 <span className="font-mono">{countText(counts.todayPv)}</span>
                             {' / '}
-                            <span className="font-mono">{countText(orow?.today_uv)}</span>
+                            <span className="font-mono">{countText(counts.todayUv)}</span>
                           </div>
                           <div className="text-muted-foreground">
-                            近 {OPENS_WINDOW_DAYS} 日 <span className="font-mono">{countText(orow?.window_pv)}</span>
+                            近 {OPENS_WINDOW_DAYS} 日 <span className="font-mono">{countText(counts.windowPv)}</span>
                             {' / '}
-                            <span className="font-mono">{countText(orow?.window_uv)}</span>
+                            <span className="font-mono">{countText(counts.windowUv)}</span>
                           </div>
                         </div>
                       )}
@@ -1681,20 +1692,22 @@ export default function Apps() {
 
           {/* F16 ② 打开次数（契约 §8.9 / §19 Q11：应用页显示打开次数 + 隐私说明）：
               与运行诊断同层，数据源是 :app_id/opens（独立取数，端点在不在都不拖累
-              其他区块）。概览用列表那份跨应用聚合，取不到时该处显示 —。 */}
+              其他区块）。概览用列表那份跨应用聚合；**聚合不可用**（请求失败/形状漂移）
+              时传 null ⇒ 该处显示 —（缺的是数据源，不是"没人用过"）；
+              聚合可用而该应用没有行 ⇒ 按 0 计（R2-L6-4：缺"行"≠ 缺"字段"）。 */}
           {detail && (
             <AppOpensSection
               appId={detail.app_id}
               canRead={canRead}
               overview={(() => {
-                const r = opensRows[detail.app_id]
-                if (r === undefined) return null
+                if (opensFailure !== null) return null
+                const counts = appOpenCounts(opensRows[detail.app_id])
                 return {
                   days: OPENS_WINDOW_DAYS,
-                  todayPv: r.today_pv,
-                  todayUv: r.today_uv,
-                  windowPv: r.window_pv,
-                  windowUv: r.window_uv,
+                  todayPv: counts.todayPv ?? undefined,
+                  todayUv: counts.todayUv ?? undefined,
+                  windowPv: counts.windowPv ?? undefined,
+                  windowUv: counts.windowUv ?? undefined,
                 }
               })()}
             />

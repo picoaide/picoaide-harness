@@ -357,15 +357,42 @@ describe('客户端持有性证明的带出与重签（§20.1/§23.1；R2-X-4/R2
   })
 })
 
-describe('宿主保留命名空间（§21.2 ②③；R2-X-3）', () => {
-  it('`__picoaide/*` 里除 AI 桥之外的路径一律 404，绝不转发平台', async () => {
+describe('宿主保留命名空间（§21.2 ②③；R2-X-3 / R2-L2-3）', () => {
+  /**
+   * 保留面 = 裸前缀 `/__picoaide` **与** `/__picoaide/...`。
+   *
+   * R2-L2-3：只判 `startsWith('/__picoaide/')` 会让裸前缀落进"普通应用请求"分支被
+   * **转发平台**（实测形态）。这里三种形态一起钉住：裸前缀、带尾斜杠、AI 桥之外的子路径。
+   * 变异：把 `isReservedHostPath` 改回 `startsWith('/__picoaide/')` ⇒ 裸前缀那条红。
+   */
+  it('`__picoaide` 裸前缀 / 子路径 / 深路径一律 404，绝不转发平台', async () => {
     const h = harness(async () => new Response('{"status":200,"headers":{},"body":"","truncated":false}', { status: 200 }))
-    for (const path of ['/__picoaide/', '/__picoaide/ai', '/__picoaide/ai/chat/extra', '/__picoaide/secret']) {
+    for (const path of ['/__picoaide', '/__picoaide/', '/__picoaide/ai', '/__picoaide/ai/chat/extra', '/__picoaide/secret']) {
       const response = await h.handler(new Request(`picoaide-app://demo${path}`, { headers: { accept: 'application/json' } }))
       expect(response.status, path).toBe(404)
       expect(await response.text(), path).toContain('no such host bridge')
     }
     // 正向对照：这些请求**一个都没出站**。
+    expect(h.fetch).not.toHaveBeenCalled()
+  })
+
+  it('前缀**不是**被过度拦截：`/__picoaidex` 仍是普通应用请求（走平台）', async () => {
+    const h = harness(async () => new Response('{"status":200,"headers":{},"body":"","truncated":false}', { status: 200 }))
+    const response = await h.handler(new Request('picoaide-app://demo/__picoaidex', { headers: { accept: 'application/json' } }))
+    expect(response.status).toBe(200)
+    expect(h.fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('AI 桥是保留面里**唯一**被本地处理的路径（其余形态连模型都不碰）', async () => {
+    const calls: string[] = []
+    const h = harness(
+      async () => new Response('{"status":200,"headers":{},"body":"","truncated":false}', { status: 200 }),
+      { serverURL: SERVER, token: 'tok', username: 'alice' },
+      {},
+    )
+    void calls
+    const response = await h.handler(appRequest('/__picoaide', { headers: { accept: 'application/json' } }))
+    expect(response.status).toBe(404)
     expect(h.fetch).not.toHaveBeenCalled()
   })
 })

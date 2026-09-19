@@ -113,6 +113,12 @@ func TestServe_SoftDeletedAppIs404(t *testing.T) {
 	if rec := e.get(appID, "/"); rec.Code != http.StatusNotFound {
 		t.Fatalf("软删（退役）应用应 404（R37：退役即停止路由），得到 %d", rec.Code)
 	}
+	// reason = `app_not_found`：软删与"从未登记"**同档**（R2-L1-2 主控裁定 (b)）。
+	// `GetWasmAppByHost` 的 WHERE 带 `deleted_at IS NULL` ⇒ 两档在 DAO 层已经合并，
+	// 契约 §7.7② 给"已删除"的可见文案也正是「应用不存在」。
+	if got := reasonOfUnroutableApp(t, e, appID); got != "app_not_found" {
+		t.Fatalf("软删应用 details.reason = %q, want app_not_found（与未登记同档是契约本意，不是漏区分）", got)
+	}
 }
 
 func TestServe_FrozenAppIs404(t *testing.T) {
@@ -122,6 +128,32 @@ func TestServe_FrozenAppIs404(t *testing.T) {
 	if rec := e.get(appID, "/"); rec.Code != http.StatusNotFound {
 		t.Fatalf("冻结应用应 404（冻结是只读快照，不继续服务），得到 %d", rec.Code)
 	}
+	// 冻结是**唯一**与"不存在"分开的档（文案与下一步动作都不同）；reason 逐个钉死取值 ——
+	// 不是"非空即可"（那在"软删档多出一个 reason"的将来也不会红，见 R2-L1-2）。
+	if got := reasonOfUnroutableApp(t, e, appID); got != "app_frozen" {
+		t.Fatalf("冻结应用 details.reason = %q, want app_frozen", got)
+	}
+}
+
+// reasonOfUnroutableApp 以 **API 形态**（Accept: application/json）重放一次"不可路由
+// 应用"的请求，读出错误信封的 `details.reason`。页面导航形态（HTML 失败页）没有这个
+// 字段，所以判据必须走 API 形态。
+func reasonOfUnroutableApp(t *testing.T, e *env, appID string) string {
+	t.Helper()
+	req := clientRequestFor(t, appID, http.MethodGet, "/api/probe", "", "")
+	req.Header.Set("Accept", "application/json")
+	rec := e.clientDo(req, appID, e.ownerUser)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("API 形态应 404，得到 %d body=%s", rec.Code, rec.Body.String())
+	}
+	envelope := decodeJSONBytes(t, rec.Body.Bytes())
+	errObj, ok := envelope["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("响应不是错误信封: %v", envelope)
+	}
+	details, _ := errObj["details"].(map[string]any)
+	reason, _ := details["reason"].(string)
+	return reason
 }
 
 // ===== 步骤②：生效版本 =====

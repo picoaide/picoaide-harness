@@ -46,6 +46,8 @@ const OPT_IN_SKIPS = [
 
 const failures = []
 const casePasses = new Set()
+/** 报告里出现过的**全部**用例名（含失败/跳过）—— 用来区分"被改名"与"跑了但没过"。 */
+const caseSeen = new Set()
 const caseSkips = []
 const packageSkips = new Set()
 const testFailures = []
@@ -64,6 +66,7 @@ for (const line of readFileSync(report, 'utf8').split('\n')) {
   events += 1
   const test = typeof event.Test === 'string' && event.Test !== '' ? event.Test : null
   const pkg = typeof event.Package === 'string' ? event.Package : ''
+  if (test !== null) caseSeen.add(test)
   if (event.Action === 'pass' && test !== null) casePasses.add(test)
   if (event.Action === 'skip') {
     if (test !== null) caseSkips.push(`${pkg}::${test}${event.Output === undefined ? '' : ''}`)
@@ -104,7 +107,17 @@ if (testFailures.length > 0) {
 }
 for (const name of required) {
   // 子测试（`TestX/case`）pass 不能替代父用例的 pass 事件，但父用例 pass 一定能命中精确名。
-  if (!casePasses.has(name)) failures.push(`关键用例未 pass：${name}`)
+  if (casePasses.has(name)) continue
+  if (!caseSeen.has(name)) {
+    // **被改名**与"跑了但没过"是两件事：前者要改这里的 `--require` 名单（或说明契约变更），
+    // 后者是真失败。混在一起报会让人以为是缺陷（W1 改名 `TestClientFrameUser_*` 时踩过）。
+    const stem = name.replace(/^Test/u, '').slice(0, 12)
+    const candidates = [...caseSeen].filter(seen => seen.includes(stem)).slice(0, 5)
+    failures.push(`关键用例在报告里**不存在**（可能已被改名 ⇒ 请同步 --require 名单）：${name}`
+      + `${candidates.length === 0 ? '' : `；候选：${candidates.join(', ')}`}`)
+  } else {
+    failures.push(`关键用例未 pass（存在但没通过）：${name}`)
+  }
 }
 
 if (failures.length > 0) {

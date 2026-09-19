@@ -13,8 +13,10 @@
  *   - `appAiConsentKey` 去掉 user 维度 ⇒「授权按用户隔离」红。
  */
 import { describe, expect, it } from 'vitest'
+import { HOST_PROOF_PATH, setHostProofToken } from './host-proof.ts'
 import {
   APP_AI_CHAT_PATH,
+  APP_AI_CONSENT_PATH,
   APP_AI_ERROR_CODES,
   APP_AI_MESSAGE_MAX_BYTES,
   APP_AI_MESSAGES_MAX,
@@ -26,6 +28,7 @@ import {
   parseAppAiFrame,
   revokeAppAiConsent,
   streamAppAiChat,
+  syncAppAiConsent,
   validateAppAiRequest,
   type AppAiConsentStore,
   type AppAiMessage,
@@ -283,5 +286,54 @@ describe('首次授权：按 **用户×应用** 记一次，可撤销（§21.1 �
 
   it('默认存储实现：node 环境没有 localStorage ⇒ null（不抛）', () => {
     expect(defaultAppAiConsentStore()).toBeNull()
+  })
+})
+
+
+describe('授权同步：允许/撤销真的写到宿主（§21.1 第 9 条 / §21.6 判据 3）', () => {
+  /** 造一个"宿主机"：引导端点发令牌，授权路由记录请求体。 */
+  function hostStub(consentStatus = 200): { calls: Array<{ url: string, body: unknown }>, fetch: typeof fetch } {
+    const calls: Array<{ url: string, body: unknown }> = []
+    const impl = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (url === HOST_PROOF_PATH) {
+        return new Response(JSON.stringify({ proof: 'p', expires_at: Date.now() + 300_000 }), { status: 200 })
+      }
+      calls.push({ url, body: JSON.parse(String(init?.body ?? 'null')) })
+      return new Response(JSON.stringify(consentStatus === 200 ? { app_id: 'demo', granted: true } : { error: 'nope' }), { status: consentStatus })
+    }) as unknown as typeof fetch
+    return { calls, fetch: impl }
+  }
+
+  it('allow ⇒ POST 到本机授权路由，带 app_id 与 granted:true', async () => {
+    const host = hostStub()
+    const result = await syncAppAiConsent('demo', true, { fetch: host.fetch })
+    expect(result).toEqual({ ok: true })
+    expect(host.calls).toEqual([{ url: APP_AI_CONSENT_PATH, body: { app_id: 'demo', granted: true } }])
+  })
+
+  it('revoke ⇒ 同一个路由、granted:false', async () => {
+    const host = hostStub()
+    await syncAppAiConsent('demo', false, { fetch: host.fetch })
+    expect(host.calls).toEqual([{ url: APP_AI_CONSENT_PATH, body: { app_id: 'demo', granted: false } }])
+  })
+
+  it('宿主拒绝（500）⇒ ok:false（界面据此**不得**显示"已允许"）', async () => {
+    const host = hostStub(500)
+    const result = await syncAppAiConsent('demo', true, { fetch: host.fetch })
+    expect(result.ok).toBe(false)
+  })
+
+  it('拿不到持有性证明 ⇒ 一个业务请求都不发，返回 ok:false', async () => {
+    // 令牌在模块内存里缓存（页面级），先清掉：本用例要证的是"拿不到"这一支。
+    setHostProofToken(null)
+    const calls: string[] = []
+    const refused = (async (input: unknown) => {
+      calls.push(String(input))
+      return new Response('{}', { status: 403 })
+    }) as unknown as typeof fetch
+    const result = await syncAppAiConsent('demo', true, { fetch: refused })
+    expect(result.ok).toBe(false)
+    expect(calls).toEqual([HOST_PROOF_PATH])
   })
 })

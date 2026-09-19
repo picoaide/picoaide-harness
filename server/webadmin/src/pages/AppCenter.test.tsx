@@ -156,10 +156,15 @@ const APP_OPENS_DEPT = {
   detail_retention_days: 90,
 }
 
-/** AI 用量（§21.4）：`points: []` + 全 0 = **还没有归因数据**（不是"0 次调用"）。 */
+/**
+ * AI 用量（§21.4 / §5.1c B）：**服务端真实形状**，`days: []` + 全零合计
+ * + `attribution_available: false` = 「统计尚未上线」，而不是"0 次调用"。
+ */
 const AI_USAGE_EMPTY = {
-  app_id: 'share-note', calls: 0, prompt_tokens: 0, completion_tokens: 0,
-  total_tokens: 0, cost: 0, points: [],
+  app_id: 'share-note', from: '2026-08-21', to: '2026-09-19',
+  days: [],
+  total: { day: '', requests: 0, prompt_tokens: 0, completion_tokens: 0, cache_prompt_tokens: 0, cost: 0 },
+  attribution_available: false,
 }
 
 /** 运行诊断(GET /wasm-apps/:app_id/diagnostics,与员工面同一份口径)。 */
@@ -280,9 +285,10 @@ beforeEach(() => {
       if (aiUsageMode === 'drift') return { app_id: 'share-note' }
       if (aiUsageMode === 'data') {
         return {
-          app_id: 'share-note', calls: 3, prompt_tokens: 900, completion_tokens: 300,
-          total_tokens: 1200, cost: 1.5,
-          points: [{ day: '2026-09-19', calls: 3, tokens: 1200, cost: 1.5 }],
+          app_id: 'share-note', from: '2026-08-21', to: '2026-09-19',
+          days: [{ day: '2026-09-19', requests: 3, prompt_tokens: 900, completion_tokens: 300, cache_prompt_tokens: 0, cost: 1.5 }],
+          total: { day: '', requests: 3, prompt_tokens: 900, completion_tokens: 300, cache_prompt_tokens: 0, cost: 1.5 },
+          attribution_available: true,
         }
       }
       return AI_USAGE_EMPTY
@@ -1439,6 +1445,18 @@ describe('应用中心 · F16 打开次数列与降级', () => {
     expect(perApp).toEqual([])
   })
 
+  it('聚合可用但服务端没下发该应用的行 ⇒ **按 0 计**并带 title 说明（不是 —）', async () => {
+    // R2-L6-4：`GROUP BY app_id` 会省略零打开的应用 ⇒ 缺"行"是"窗口内确实没打开"（0），
+    // 与缺"字段"（形状漂移 ⇒ —）是两件事。变异验证：改回 `countText(orow?.today_pv)`
+    // ⇒ 本用例读到 '—'，必红。
+    await renderList()
+    const cell = await screen.findByTestId('app-opens-cell-legacy-board')
+    expect(cell.textContent).toContain('0')
+    expect(cell.textContent).not.toContain('—')
+    expect(cell.getAttribute('title')).toContain('按 0 计')
+    expect(cell.getAttribute('title')).toContain('没有该应用的打开记录')
+  })
+
   it('聚合端点缺失（404）：列显示 — 且页面明说"服务端尚未提供"，绝不显示 0', async () => {
     // 变异验证：把这里的降级分支去掉（改成 countText(orow?.today_pv ?? 0) 之类），
     // 用例会读到 "0" 而不是 "—"，本用例必红。
@@ -1482,9 +1500,9 @@ describe('应用中心 · F16 打开次数列与降级', () => {
     expect(deptList.textContent).toContain('部门 #1')
     expect(deptList.textContent).toContain('（未归属部门）')
 
-    // ③ AI 用量：默认夹具是"没有归因数据" ⇒ 空状态而不是 0
+    // ③ AI 用量：默认夹具是 attribution_available=false（**统计尚未上线**）⇒ 空状态而不是 0
     expect(await screen.findByTestId('app-ai-usage-block')).toBeInTheDocument()
-    expect(await screen.findByText('该应用还没有 AI 调用记录')).toBeInTheDocument()
+    expect(await screen.findByText('统计尚未上线：暂无应用归因')).toBeInTheDocument()
     expect(screen.queryByTestId('app-ai-calls')).toBeNull()
   })
 
@@ -1493,9 +1511,12 @@ describe('应用中心 · F16 打开次数列与降级', () => {
     await renderList()
     fireEvent.click(within(rowOf('share-note')).getByRole('button', { name: '详情' }))
     expect(await screen.findByTestId('app-ai-calls')).toHaveTextContent('3')
+    // 服务端只给分项 ⇒ 总 token = 输入 900 + 输出 300 = 1200（headline 用千分位）。
     expect(screen.getByTestId('app-ai-tokens')).toHaveTextContent('1,200')
     expect(screen.getByTestId('app-ai-cost').textContent).toContain('1.50')
     expect(screen.getByTestId('app-ai-days').textContent).toContain('2026-09-19')
+    // 生效窗口由服务端回显（R2-L6-3 同款纪律）。
+    expect(screen.getByTestId('app-ai-effective-window').textContent).toContain('2026-08-21 ~ 2026-09-19')
   })
 
   it('详情抽屉：打开次数端点缺失时明说不可用（不把"读不到"当成"没人打开过"）', async () => {

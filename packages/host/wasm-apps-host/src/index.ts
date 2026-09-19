@@ -22,10 +22,12 @@
  */
 
 import { createHash } from 'node:crypto'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { DEFAULT_APP_SCHEME, appOrigin, appSchemePrefix, isValidAppId } from './app-protocol.ts'
 import { AI_CHAT_PATH, handleAiChat, type AiChatAuthorization, type AiChatTurnRunner } from './ai-chat.ts'
+import { AI_CONSENT_FILE_NAME, createAiChatAuthorization } from './ai-authorization.ts'
 import { createAppProofProvider, type InstallKeyStore } from './app-proof.ts'
 import { WasmAppsCache, type CacheScope } from './cache.ts'
 import { createAppOpenGate } from './open-gate.ts'
@@ -76,6 +78,15 @@ export const WASM_APP_OPEN_ROUTE = `${WASM_APPS_LOCAL_PREFIX}/open`
 
 /** 本机只读路由：渲染进程需要的渠道信息（§16.1 冻结；CHN-4/R2I-15）。 */
 export const WASM_APP_CHANNEL_ROUTE = `${WASM_APPS_LOCAL_PREFIX}/channel`
+
+/**
+ * 本机写路由：应用 AI 的**首次授权**记录（§21.1 Q9 的"允许"与"撤销"）。
+ *
+ * 为什么必须有一条宿主路由：授权闸门在宿主（`ai-chat.ts` 的 `AiChatAuthorization`），
+ * 而渲染层的"允许/撤销"只写 `localStorage` —— 两边不连通就等于"勾了允许但每次仍然
+ * 403"。这条路由是两端唯一的连接点（证明头闸门与 `open` 同一条）。
+ */
+export const WASM_APP_AI_CONSENT_ROUTE = `${WASM_APPS_LOCAL_PREFIX}/ai/consent`
 
 /** 打开一个应用时在宿主内部广播的事件（客户端面据此给反馈/开面板）。 */
 export const WASM_APP_OPEN_EVENT = 'pico/wasm-app-open'
@@ -263,7 +274,20 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // ---- 应用 AI 桥（§21）：本地处理，绝不转发平台 ----
   const aiRunner = ctx.get(WASM_APPS_AI_RUNNER_SERVICE) as AiChatTurnRunner | undefined
-  const aiAuthorization = ctx.get(WASM_APPS_AI_AUTHORIZATION_SERVICE) as AiChatAuthorization | undefined
+  /**
+   * 授权记录：桌面壳可以 `provide` 自己的一份（多进程/多账户形态），否则本插件用
+   * `userDataDir` 下的私有文件（0600，原子写）。
+   *
+   * 为什么默认由本插件持有：授权是**闸门**的一部分，而闸门在本模块（`handleAiChat`）。
+   * 闸门依赖一个"别人碰巧 provide 了才有"的服务 ⇒ 未接线时每一次调用都 403/503，
+   * 而客户端会把 403 读成"用户拒绝了"（错误的分层）。文件路径缺席（纯 Node 宿主/
+   * 单测）时退化为内存记录：仍然 fail-closed，且**不假装**记得住。
+   */
+  const providedAuthorization = ctx.get(WASM_APPS_AI_AUTHORIZATION_SERVICE) as AiChatAuthorization | undefined
+  const aiAuthorization = providedAuthorization ?? createAiChatAuthorization({
+    ...(config.userDataDir === undefined ? {} : { file: join(config.userDataDir, AI_CONSENT_FILE_NAME) }),
+    warn,
+  })
   const aiChat = aiRunner === undefined || aiAuthorization === undefined
     ? undefined
     : async (appId: string, body: Uint8Array, signal: AbortSignal) =>
@@ -380,8 +404,18 @@ export function apply(ctx: Context, config: Config = {}): void {
   // ---- 深链队列（§7.6：≤8 条 / TTL 5 min / 未登录入队，登录后按序消费） ----
   const pendingLinks = createDeepLinkQueue({ warn })
 
-  /** 未登录 ⇒ 入队；已登录 ⇒ 立刻打开。返回是否已打开。 */
-  const requestOpen = async (appId: string, path: string): Promise<'opened' | 'queued' | 'unavailable'> => {
+  /**
+   * 未登录 ⇒ 入队；已登录 ⇒ 立刻打开。
+   *
+   * 返回值带上窗口管理器的结论（`opened` = 新建，`focused` = 聚焦已有）—— §5.2 的
+   * `window` 字段是客户端"已打开/已聚焦"反馈的唯一来源，**不能**在路由里按
+   * `windows.has(appId)` 重新推导：新建完成后它当然是 `true`，于是每次都说"已聚焦"
+   * （真实窗口适配器下的必然结果，纯 Node 宿主反而看不出来）。
+   * @param appId - 已校验的 app_id。
+   * @param path - 已净化的相对路径。
+   * @returns 打开结论（`unavailable` = 协议未就绪）。
+   */
+  const requestOpen = async (appId: string, path: string): Promise<'opened' | 'focused' | 'queued' | 'unavailable'> => {
     const session = currentSession()
     if (session === null) {
       pendingLinks.enqueue(appId, path)
@@ -396,7 +430,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     const result = await windows.open(appId, path)
     ctx.emit(WASM_APP_OPEN_EVENT, { app_id: appId, url: result.url })
-    return 'opened'
+    return result.window
   }
 
   /** 登录成功后按 FIFO 消费待打开队列（一条失败不阻塞后面的）。 */
@@ -505,6 +539,19 @@ export function apply(ctx: Context, config: Config = {}): void {
             const alreadyOpen = windows?.has(target) === true
             const gate = await openGate.check(target, knownVersions.get(target) ?? '')
             if (gate.kind === 'denied') {
+              // 生命周期反应（§7.2 / §16.1「触发源 = open 端点响应」；R2-L2-2）：
+              // 平台说这个应用**没了**（404 = 冻结/退役/无可用版本，410 = 已下架）⇒
+              // 关掉还开着的窗口并丢掉缓存。触发点只能是这里（服务端不会主动推），
+              // 且只有"没了"才关：401/403（未登录/白名单）是**可恢复**的拒绝，关窗
+              // 会把一次登录过期变成"应用被卸载"。
+              if (gate.status === 404 || gate.status === 410) {
+                const scope = sessionScope()
+                if (scope !== undefined) await cache?.clearApp(scope, target)
+                knownVersions.delete(target)
+                knownTitles.delete(target)
+                warn(`pico-wasm-apps-host: the platform reported ${target} as unavailable (HTTP ${String(gate.status)} ${gate.code}); closing its window and dropping its cache`)
+                await windows?.close(target)
+              }
               json(reply, gate.status === 401 ? 401 : gate.status, {
                 error: { code: gate.code, message: hostCopy(locale, '平台拒绝了这次打开。', 'The platform refused this open request.') },
               })
@@ -547,7 +594,10 @@ export function apply(ctx: Context, config: Config = {}): void {
             // 默认值；缺省时字段整个不出现，客户端据此**不渲染**该行（不当成 0）。
             const opens = gate.kind === 'ok' ? gate.opens : undefined
             json(reply, 200, {
-              window: windows?.has(target) === true ? 'focused' : 'opened',
+              // §5.2：`window` 是**窗口管理器的结论**（新建/聚焦已有），不是在路由里
+              // 按"管理器里有没有这个 app"重推 —— 新建成功后它总是 true ⇒ 会说成
+              // "已聚焦"（真实适配器下必现）。
+              window: outcome,
               app_id: target,
               url,
               ...(opens === undefined ? {} : { opens }),
@@ -574,6 +624,71 @@ export function apply(ctx: Context, config: Config = {}): void {
               deepLinkScheme: deepLinkScheme ?? '',
               productName,
             })
+          },
+        },
+        {
+          method: 'POST',
+          path: WASM_APP_AI_CONSENT_ROUTE,
+          proof: 'required',
+          handler: async (req, reply) => {
+            const locale = hostLocale(req.headers['accept-language'])
+            const session = currentSession()
+            if (session === null) {
+              json(reply, 401, {
+                error: { code: 'AUTH_REQUIRED', message: hostCopy(locale, '未登录', 'not logged in') },
+              })
+              return
+            }
+            const parsed = parseJsonBody(req.body)
+            const row = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+              ? parsed as Record<string, unknown>
+              : undefined
+            const rawAppId = row?.app_id
+            if (typeof rawAppId !== 'string' || !isValidAppId(rawAppId.trim())) {
+              json(reply, 400, {
+                error: {
+                  code: 'VALIDATION',
+                  message: hostCopy(locale, 'app_id 不合法', 'app_id is invalid'),
+                  hints: ['app_id 由小写字母/数字/单个连字符组成（例如 my-notes）'],
+                },
+              })
+              return
+            }
+            if (typeof row?.granted !== 'boolean') {
+              json(reply, 400, {
+                error: {
+                  code: 'VALIDATION',
+                  message: hostCopy(locale, 'granted 必须是布尔值', 'granted must be a boolean'),
+                },
+              })
+              return
+            }
+            const user = session.username ?? ''
+            if (user === '') {
+              // 授权维度是 **用户 × 应用**：拿不到用户名时写入一条"谁都不是"的记录
+              // 比拒绝更糟（下一次换账号可能撞上它）。fail-closed。
+              json(reply, 401, {
+                error: { code: 'AUTH_REQUIRED', message: hostCopy(locale, '未登录', 'not logged in') },
+              })
+              return
+            }
+            const appId = rawAppId.trim()
+            try {
+              if (row.granted) await aiAuthorization.grant(user, appId)
+              else await aiAuthorization.revoke(user, appId)
+            } catch (cause) {
+              // 写失败**必须**让用户看到：静默成功会让下一次调用仍然 403（"点了允许
+              // 还是不行"），而那看起来像 AI 坏了。
+              warn(`pico-wasm-apps-host: persisting the app AI consent failed (${cause instanceof Error ? cause.message : String(cause)})`)
+              json(reply, 500, {
+                error: {
+                  code: 'CONSENT_NOT_PERSISTED',
+                  message: hostCopy(locale, '授权未能保存', 'the AI consent could not be saved'),
+                },
+              })
+              return
+            }
+            json(reply, 200, { app_id: appId, granted: row.granted })
           },
         },
       ],
