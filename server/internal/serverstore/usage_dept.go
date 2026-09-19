@@ -84,19 +84,46 @@ func RegroupByDept(db *sql.DB, rows []UsageAggregateRow) ([]UsageAggregateRow, e
 		out = append(out, *r)
 	}
 	// 树先序排序:父部门在前,子部门跟随(展示层级感)
+	//
+	// 2026-09-19(审计):旧比较器不满足严格弱序 —— 只要有一个 label 不在 order
+	// 里,混合比较就退化成纯字典序,与"两个已知 label 按先序序号"可以拼成环:
+	// 已知 z(序号 0)、已知 a(序号 1)、未知 b ⇒ z<a(序号)、a<b(字典序)、
+	// b<z(字典序)。sort.Slice 在环下输出未定义,而 out 由 map 遍历构造(每次
+	// 迭代起点随机)⇒ 同一份数据可能给出不同的部门顺序(实测同一进程内连续两次
+	// 得到 [z a b d] 与 [a b d z]/[b d z a])。未知 label 是可达的:userIDToDepts
+	// 的 ancestors() 自带 seen 环保护 ⇒ 部门树带环(迁移/手工数据)是被承认的输入
+	// 形态,此时环内节点既不是 root 也走不到,进不了 preOrderNodes 的前序,却在
+	// agg 里作为部门行出现。
+	// 现在改为全序:已知部门(树内)全部在前,已知之间按先序序号(序号相同再按
+	// 名字),未知部门在后按名字;sort.SliceStable 消除同键并列时的输入依赖。
 	order := map[string]int{}
 	for i, n := range preOrderNodes(nodes) {
 		order[n.name] = i
 	}
-	sort.Slice(out, func(i, j int) bool {
-		oi, oiOK := order[out[i].Label]
-		oj, ojOK := order[out[j].Label]
-		if !oiOK || !ojOK {
-			return out[i].Label < out[j].Label
-		}
-		return oi < oj
+	sort.SliceStable(out, func(i, j int) bool {
+		return lessByDeptPreOrder(order, out[i].Label, out[j].Label)
 	})
 	return out, nil
+}
+
+// lessByDeptPreOrder 部门展示排序的全序比较器:
+//   - 已知部门(在树先序 order 里)一律排在未知部门之前 —— 树先序是展示层级感的
+//     主判据,未知(环内/游离)部门没有位置可言,只能统一退到后面;
+//   - 已知之间按先序序号,序号相同再按名字;
+//   - 未知之间按名字。
+//
+// 这样比较是反对称且传递的(严格弱序),排序结果由行的集合唯一决定,不再依赖
+// sort 的内部交换顺序。对无环部门树(全部 label 都已知)的行为与旧实现逐字相同。
+func lessByDeptPreOrder(order map[string]int, a, b string) bool {
+	oi, oiOK := order[a]
+	oj, ojOK := order[b]
+	if oiOK != ojOK {
+		return oiOK
+	}
+	if oiOK && oi != oj {
+		return oi < oj
+	}
+	return a < b
 }
 
 // deptSubtreeIDs 返回部门名对应的子树 group id 列表(含自身)。

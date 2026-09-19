@@ -298,9 +298,23 @@ func GenerateMonthlyReport(db *sql.DB, month time.Time) (*ReportBody, error) {
 }
 
 // topByCost 费用降序取前 n。
+//
+// 2026-09-19(审计):旧实现只有 `Cost > Cost` 一个判据 + sort.Slice(pdqsort),
+// 等值行(未定价模型 cost 恒 0 最常见,用户/部门成本相同同理)之间没有任何确定
+// 次序:pdqsort 只在 len>12 时走分区重排,等值组会被换成与任何判据无关的顺序,
+// 且第 n/n+1 名等值时"取前 n"选谁不确定(实测 8 个有价 + 12 个零成本模型时,
+// 第 9/10 名取到 um03/um02,把本该入选的 um01 挤掉)。
+// 口径与 internal/serverauth/usage_admin.go 的 usageOverview.top_models 一致:
+// Cost 仍是唯一主判据、仍取前 n,等值时按 Label 升序(⇒ 比较器满足严格弱序,
+// 输出由行集合唯一决定)。
 func topByCost(rows []serverstore.UsageAggregateRow, n int) []serverstore.UsageAggregateRow {
 	sorted := append([]serverstore.UsageAggregateRow{}, rows...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Cost > sorted[j].Cost })
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Cost != sorted[j].Cost {
+			return sorted[i].Cost > sorted[j].Cost
+		}
+		return sorted[i].Label < sorted[j].Label
+	})
 	if len(sorted) > n {
 		sorted = sorted[:n]
 	}
