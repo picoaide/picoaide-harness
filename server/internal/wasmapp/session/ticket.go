@@ -1,6 +1,7 @@
 package session
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -41,6 +42,15 @@ type ticket struct {
 	appID             string
 	employeeSessionID int64
 	expiresAt         time.Time
+	// nonce 是**签发这张票的那次 POST** 同时写进浏览器 Cookie 的随机值
+	// （TicketNonceCookieName）。兑换时必须逐字节匹配 —— 这是"票 + 浏览器"的绑定
+	// （R1-sec-1）：票在 URL 里，任何拿到 URL 的浏览器都能把 code 交上来，但只有
+	// **签发那一刻确实收到了这张票**的浏览器才持有 nonce。
+	//
+	// 空串是一个**明确的降级标记**：主站 Host 写不出覆盖应用基域的 Domain Cookie
+	// （见 ticketNonceCookieDomain），本张票只能靠 Sec-Fetch 判据 —— 这是已知残留，
+	// 见报告 temp/wasm-review-r1/fix-sec1.md 的"残留与约束"。
+	nonce string
 }
 
 // ticketSweepInterval 是过期票清理的时间节流（见 ticketStore.issue）。
@@ -159,6 +169,21 @@ func (m *Manager) TicketPage(w http.ResponseWriter, r *http.Request) {
 // 内存态单次消费、绑 (user, app)、异步写审计，然后 **200 + 跳板页**，
 // 由页面把浏览器送到 `<scheme>://<app_id>.<基域><next>?ticket=<code>`。
 //
+// 同时下发 **nonce Cookie**（R1-sec-1，2026-09-19）：票因此是"URL 里的 code +
+// 浏览器 Cookie 里的 nonce"两半，nonce 值随票存进票记录，兑换时必须匹配
+// （见 RedeemTicket）。**这是"主站 → 应用子域"这条合法链路能成立的关键**：
+// nonce 的 Domain 写成应用基域，浏览器在跳板页导航到 `<app>.<基域>` 时会自动带上它
+// —— 而任何"把链接发给别人"的路径都不会带上（对方的浏览器没有这个 Cookie）。
+//
+// ⚠️ 已知残留（不假装解决，详见报告 temp/wasm-review-r1/fix-sec1.md）：
+//   - **主站 Host 与应用基域不共享可写域**时（如主站 `harness.example.com`、基域
+//     `apps.example.com`），浏览器会拒收这个 Domain Cookie（RFC 6265 的 domain-match
+//     规则）⇒ 本函数**降级**为"不发 nonce"，该票只能靠 Sec-Fetch 判据。降级会在日志里
+//     留一条 error（唯一现场）。
+//   - **地址栏粘贴**：那是"浏览器发起、无 initiator"的顶层导航（`Sec-Fetch-Site: none`），
+//     Strict Cookie 照样会发送、Sec-Fetch 也区分不出 ⇒ 该形态只能靠 nonce 挡；nonce
+//     不可用的场合（降级部署）这条路径仍然可通。
+//
 // ⚠️ 为什么不是 302（2026-09-19 线上 P0，真实 Chromium 复现）：
 //
 //	CSP3 的 `form-action` 不只管"提交到哪"，它**遍历整个重定向链上的每一个 URL**
@@ -185,7 +210,11 @@ func (m *Manager) TicketSubmit(w http.ResponseWriter, r *http.Request) {
 	// 同一份字节（审计探针的"逐字节相同 ⇒ 回落主站"判据因此误报）。
 	// 与 appserver 的 `mainOrigin == ""` 分支同一口径：功能未启用时明确 404，
 	// 而不是假装走到了应用查找。
-	if _, host := ParseBaseDomain(m.baseDomain()); host == "" {
+	// baseHost 是应用基域的主机名（`<app_id>.<baseHost>` 就是应用子域）。后面签发 nonce
+	// Cookie 时还要用它（Domain 属性必须写它，见 ticketNonceCookieDomain），所以这里
+	// 解析一次而不是丢弃。
+	_, baseHost := ParseBaseDomain(m.baseDomain())
+	if baseHost == "" {
 		edge.WriteAppNotFound(w, r, "")
 		return
 	}
@@ -261,6 +290,10 @@ func (m *Manager) TicketSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 4) next 已净化。签发票。
+	//
+	// 票是**两半**：URL 里的 code（给应用子域）与浏览器 Cookie 里的 nonce（给"是不是
+	// 签发那一刻的那只浏览器"）。两半都匹配才兑换 —— 只有 code 的链接（转发/粘贴/钓鱼）
+	// 换不出会话（R1-sec-1）。nonce 必须与票**同一次响应**下发、同寿命、同一次性。
 	code, err := newSecret()
 	if err != nil {
 		writePage(w, http.StatusInternalServerError, loginHTML(lang, loginView{
@@ -269,11 +302,30 @@ func (m *Manager) TicketSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := m.now()
+	nonce := ""
+	if domain := ticketNonceCookieDomain(r, baseHost); domain != "" {
+		nonce, err = newSecret()
+		if err != nil {
+			writePage(w, http.StatusInternalServerError, loginHTML(lang, loginView{
+				Error: copyFor(lang).ErrInternal, ShowForm: false,
+			}))
+			return
+		}
+		http.SetCookie(w, ticketNonceCookie(domain, nonce, now.Add(limits.TicketTTL)))
+	} else {
+		// 降级（要认账）：主站 Host 与"应用基域的祖先域"不共享可写域 ⇒ 浏览器会拒收
+		// 这个 Domain Cookie，合法链路也会失败。本张票因此**只能用 Sec-Fetch 判据**。
+		// 必须留痕：这是"为什么这台部署挡不住伪造链接"的唯一现场。
+		logError("pico-wasm-session: 主站 Host 无法为应用基域下发换票 nonce Cookie（域不匹配，"+
+			"浏览器会拒收）⇒ 该票降级为 Sec-Fetch 判据 base=%q %s",
+			baseHost, edge.OriginDiagFields(r))
+	}
 	m.tickets.issue(code, ticket{
 		userID:            emp.ID,
 		appID:             appID,
 		employeeSessionID: emp.SessionID,
 		expiresAt:         now.Add(limits.TicketTTL),
+		nonce:             nonce,
 	}, now)
 	m.touchEmployeeSession(r.Context(), emp.SessionID, now)
 	// §4.9：换票签发是高频项 ⇒ 异步审计（审计写路径最坏 25 s）。
@@ -403,13 +455,30 @@ func appSessionKey(id int64) string { return strconv.FormatInt(id, 10) }
 // 逐请求校验（§10.4 第 40 项）：
 //   - code 必须存在、未过期、且**绑定的 app_id 等于当前子域的 appID** ——
 //     跨应用兑换一律拒（ticketStore.consume 在锁内比对，不消费不匹配的票）；
-//   - 员工会话必须仍然有效 —— 由 insertAppSession 的 `WHERE EXISTS` 在 SQL 层
-//     原子校验（签发到兑换之间有 ≤60 s 窗口，期间可能已登出，§10.4 第 46 项）；
 //   - **必须 https**（§10.4 第 49 项 fail-closed）：明文连接下不签发应用 Cookie，
-//     直接按未登录处理。
+//     直接按未登录处理；
+//   - **必须带签发时下发的 nonce Cookie 且与票记录的 nonce 逐字节匹配**（R1-sec-1）：
+//     这是把票绑到"签发那一刻的浏览器"上的唯一手段。缺 Cookie 或不匹配 ⇒ 拒，
+//     **绝不签发应用会话 Cookie**；票照旧一次性烧掉（否则一张已知的 code 可以被
+//     反复拿来探测 nonce）；
+//   - **Sec-Fetch-\* 纵深**（`Sec-Fetch-Site ∈ {same-site, same-origin, none}` 且
+//     `Sec-Fetch-Mode: navigate`）：头存在且不符 ⇒ 拒；头缺席（老浏览器/非浏览器
+//     客户端）⇒ **按现状放行但留日志**（不能把老浏览器一刀切）。
+//   - 员工会话必须仍然有效 —— 由 insertAppSession 的 `WHERE EXISTS` 在 SQL 层
+//     原子校验（签发到兑换之间有 ≤60 s 窗口，期间可能已登出，§10.4 第 46 项）。
 //
 // 成功后 302 回**去掉 ticket 参数的干净 URL**（由调用方执行跳转）——
 // 否则票据会留在地址栏、浏览器历史与后续请求的 Referer 里。
+//
+// ⚠️ 认账（不假装解决）：
+//   - nonce 只证明"是同一只浏览器"，不证明"是同一个人"—— 共享机器上无人值守的
+//     已登录浏览器、或整个浏览器 profile 被复制，都不在防护面内；
+//   - **同基域的兄弟应用可以伪造这个 Cookie**（机制与前提见文件下方 nonce 段落的长注释）；
+//   - 地址栏粘贴（`Sec-Fetch-Site: none`）无法与合法场景区分 —— 挡住它的只有 nonce，
+//     而 nonce 只在"签发那一刻的那只浏览器"里；
+//   - nonce Cookie 被浏览器拒收（用户禁用 Cookie / 部署域不匹配的降级票）会让
+//     **合法链路**在"子域兑换失败 ⇒ 回主站换票 ⇒ 再兑换失败"之间来回，直到浏览器报
+//     重定向过多；这是 fail-closed 的代价，见报告 temp/wasm-review-r1/fix-sec1.md。
 func (m *Manager) RedeemTicket(w http.ResponseWriter, r *http.Request, appID string) (cleanURL string, ok bool) {
 	if r == nil {
 		return "", false
@@ -429,6 +498,8 @@ func (m *Manager) RedeemTicket(w http.ResponseWriter, r *http.Request, appID str
 	if !ok {
 		return "", false
 	}
+	// ⚠️ 从这里往下的**每一次拒绝都发生在 consume 之后** ⇒ 票已经被烧掉。
+	// 这是有意的（一次性语义无条件优先）：一张已知的 code 不能被反复拿来探测 nonce。
 	if !m.secureRequest(r) {
 		// fail-closed：非 https 不签发。⚠️ 票**仍然被消费**（一次性语义无条件优先）——
 		// 这张票刚刚在明文线路上传过（它就在 URL 里），任何看到它的人都能重放；
@@ -437,6 +508,35 @@ func (m *Manager) RedeemTicket(w http.ResponseWriter, r *http.Request, appID str
 		m.auditAsync("", "app_ticket_redeem", "app="+appID+" rejected=insecure")
 		return "", false
 	}
+
+	// ===== 浏览器持有性证明（nonce Cookie，R1-sec-1）=====
+	// 票在 URL 里 ⇒ 任何拿到 URL 的浏览器都能把 code 交上来；nonce 只在"签发那一刻
+	// 确实收到这张票"的浏览器里。t.nonce 为空 = 该部署写不出覆盖应用基域的 Domain
+	// Cookie（签发侧已降级并留痕，见 TicketSubmit），此时只剩 Sec-Fetch 判据。
+	if t.nonce != "" {
+		if v, why := ticketNonceVerdict(r, t.nonce); v != 1 {
+			// v == 0：Cookie 缺失/为空；v == -1：值不匹配。
+			m.auditAsync("", "app_ticket_redeem", "app="+appID+" rejected=nonce_"+why)
+			logWarn("pico-wasm-session: 换票兑换被 nonce 判据拒绝 reason=%s app=%s %s",
+				why, appID, edge.OriginDiagFields(r))
+			return "", false
+		}
+	}
+
+	// ===== Sec-Fetch-* 纵深（§4.8 的浏览器元数据判据）=====
+	allow, reason, detail := ticketSecFetchVerdict(r)
+	if !allow {
+		m.auditAsync("", "app_ticket_redeem", "app="+appID+" rejected=sec_fetch_"+reason)
+		logWarn("pico-wasm-session: 换票兑换被 Sec-Fetch 判据拒绝 reason=%s app=%s %s %s",
+			reason, appID, detail, edge.OriginDiagFields(r))
+		return "", false
+	}
+	if reason != "" {
+		// 头缺席 ⇒ 放行（老浏览器），但必须留痕：这是"这台机器为什么没被挡住"的现场。
+		logWarn("pico-wasm-session: 换票兑换缺少 Sec-Fetch-* 头（放行）app=%s nonce_bound=%t %s",
+			appID, t.nonce != "", detail)
+	}
+
 	raw, err := newSecret()
 	if err != nil {
 		logError("pico-wasm-session: app session secret: %v", err)
@@ -483,4 +583,167 @@ func appCookie(raw string, expires time.Time) *http.Cookie {
 		MaxAge:   int(limits.AppSessionTTL.Seconds()),
 		Expires:  expires,
 	}
+}
+
+// ===== 换票的浏览器持有性证明（nonce Cookie，R1-sec-1 / 2026-09-19）=====
+//
+// 攻击形态（真机复现，见报告 temp/wasm-review-r1/fix-sec1.md）：任一登录员工
+// `POST /app-ticket` 拿到 `https://<app>.<基域>/?ticket=<64hex>`，把这条链接发给受害者；
+// 受害者在**全新 cookie jar**（无任何 Cookie）里 GET 它 ⇒ 302 + `Set-Cookie: picoaide_app=…`，
+// 此后帧内身份 = **攻击者**（受害者的一切输入都落在攻击者账号下）。
+// 根因：兑换只校验了"票存在/未过期/单次/绑 (user,app)/https"，**不看请求来自哪只浏览器**。
+//
+// 修法是给票加"第二半"：签发时同时写一个 nonce Cookie（Domain=应用基域 ⇒ 应用子域也收得到），
+// 值存进票记录；兑换时必须携带且匹配。它是一个**持有性证明**，不是新的凭证体系：
+//   - 单独持有它换不出任何东西（没有 code 就没有票记录可比对）；
+//   - 寿命与票一致（limits.TicketTTL）、一次性（票一烧，nonce 就没有比对对象）。
+//
+// 三个刻意的取舍（写在这里，避免日后被"顺手放宽"）：
+//   - **SameSite 必须 Strict，绝不能 Lax**：Lax 会随**跨站顶层 GET 导航**发送，
+//     而"点开别人发来的链接"正是攻击形态本身；
+//   - **HttpOnly**：应用子域是本平台上的任意 HTML/JS 宿主（R8），HttpOnly 除了不让
+//     应用读到，还拦住它用 document.cookie **覆盖**同名 Cookie（RFC 6265 §5.3 第 11.2 步）；
+//   - **不设 Expires 之外的清除逻辑**：nonce 只对自己的那张票有效，票一烧即失效；
+//     每次换票都会覆盖它，因此不需要在兑换成功后额外清 Cookie（多一条 Set-Cookie
+//     只会让"兑换响应里到底有没有会话 Cookie"这件事更难读）。
+//
+// ⚠️ **第三条残留（本次修复挡不住，如实认账；推理自 RFC 6265 + 本平台 CSP，未真机复现）**：
+// 兄弟应用可以**伪造**这个 Cookie。nonce 的 Domain 是应用基域，而 `<app>.<基域>` 上的
+// 页面能跑应用作者自己的 JS（`script-src 'self' 'unsafe-inline'`、`text/html` 在允许集合内）
+// ⇒ 攻击者应用页面的 `document.cookie = "…; Domain=<基域>; Path=/; Secure; SameSite=Strict"`
+// 是合法的。于是攻击者可以：①签发一张**自己的**票拿到 code+nonce；②引导受害者在
+// **自己的应用页**上把这条 nonce 写进浏览器；③再导航到 `<受害应用>/?ticket=code`。
+// 该导航是**同站**的（`Sec-Fetch-Site: same-site`），与主站跳板页那一跳**无法区分** ⇒
+// 会话固定照样成立。HttpOnly 只挡住"覆盖已存在的那条"（同上第 11.2 步），挡不住
+// "在没有旧 Cookie 时新建"（旧 Cookie 的寿命只有 limits.TicketTTL，等 60 s 即可）。
+// 前提是受害者**先加载一个同基域下攻击者可控的页面**（任一员工可发布 wasm 应用；
+// 审核开关会再加一道门），因此本修复把攻击从"发一条链接"抬到"两步 + 一次页面加载"，
+// 但没有在协议层消除它 —— 详见报告 temp/wasm-review-r1/fix-sec1.md 的残留清单。
+
+// ticketNonceCookieDomain 返回可以作为 Cookie `Domain` 属性的值；空串 = 这个部署
+// **写不出**覆盖应用基域的 Cookie，调用方据此降级（见 TicketSubmit / ticket.nonce）。
+//
+// 为什么需要它：Cookie 的 Domain 必须 **domain-match 发起请求的主机名**
+// （RFC 6265 §5.3 第 6 步），否则浏览器**直接丢弃**这条 Set-Cookie（静默失败）。
+// 主站与应用基域同属一个可写域时（`harness.example.com` 对 `harness.example.com`、
+// 或 `harness.example.com` 对 `example.com`）能下发；两者不在同一可写域时
+// （主站 `harness.example.com`、应用基域 `apps.example.com`）浏览器拒收。
+// 那种部署下若照常要求 nonce，**合法链路也会失败** ⇒ 只能降级为 Sec-Fetch 判据并留痕。
+//
+// 注意这里**不猜 registrable domain**（不引 PSL、不写 `Domain=example.com`）：任务口径
+// 就是把 Domain 写成应用基域；越界猜父域会把 Cookie 铺到比应用面更大的范围上。
+func ticketNonceCookieDomain(r *http.Request, baseHost string) string {
+	if r == nil {
+		return ""
+	}
+	baseHost = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(baseHost), "."))
+	if baseHost == "" {
+		return ""
+	}
+	host := strings.ToLower(strings.TrimSpace(r.Host))
+	if host == "" || strings.HasPrefix(host, "[") {
+		// 空 Host / IPv6 字面量：Domain Cookie 在 IP 上没有意义（浏览器不接受），
+		// 直接降级而不是发一条注定被丢弃的 Set-Cookie。
+		return ""
+	}
+	if i := strings.IndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	host = strings.TrimSuffix(host, ".")
+	if host == "" {
+		return ""
+	}
+	if host != baseHost && !strings.HasSuffix(host, "."+baseHost) {
+		return ""
+	}
+	return baseHost
+}
+
+// ticketNonceCookie 构造换票 nonce Cookie。
+//
+// SameSite=Strict + Secure + HttpOnly + Path=/ + **Domain=应用基域**（唯一一个设 Domain
+// 的 Cookie，见 TicketNonceCookieName 的注释）。MaxAge 与票同寿命：票过期后 nonce
+// 没有任何比对对象，留着只会扩大"被误当成凭证"的想象面。
+func ticketNonceCookie(domain, value string, expires time.Time) *http.Cookie {
+	return &http.Cookie{
+		Name:     TicketNonceCookieName,
+		Value:    value,
+		Path:     "/",
+		Domain:   domain,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   true,
+		MaxAge:   int(limits.TicketTTL.Seconds()),
+		Expires:  expires,
+	}
+}
+
+// ticketNonceVerdict 比对请求携带的 nonce 与票记录的 nonce。
+//
+// 返回 (1, "") 表示匹配；(0, "absent") 表示 Cookie 缺失/为空；(-1, "mismatch") 表示不匹配。
+// 两个失败原因在**审计与日志里区分**（便于定位"是隐私浏览器没存 Cookie"还是"有人在探测"），
+// 但对外都是同一句拒绝 —— 不向攻击者区分。
+//
+// 用 crypto/subtle 的常量时间比较：nonce 是随机值、不是用户输入，时序侧信道在这里
+// 并非现实威胁，但比较秘密值的代码没有"够用就行"的理由。
+func ticketNonceVerdict(r *http.Request, want string) (int, string) {
+	c, err := r.Cookie(TicketNonceCookieName)
+	if err != nil || c == nil || c.Value == "" {
+		return 0, "absent"
+	}
+	if subtle.ConstantTimeCompare([]byte(c.Value), []byte(want)) != 1 {
+		return -1, "mismatch"
+	}
+	return 1, ""
+}
+
+// ticketSecFetchVerdict 是换票兑换的**纵深**判据：浏览器元数据头 Sec-Fetch-*。
+//
+// 判定（逐条独立；头缺席即跳过该条，见下）：
+//   - `Sec-Fetch-Site` 存在 ⇒ 必须 ∈ {same-site, same-origin, none}。
+//     `cross-site` 是"别的站点发起的请求"（点开别人发来的链接、被第三方页面 iframe/表单
+//     带上），一律拒；`none` 是"浏览器自己发起、没有 initiator"（地址栏粘贴/书签/新标签
+//     直接输入）—— **无法**与合法场景区分，只能放行（残留，见 RedeemTicket 的注释）。
+//   - `Sec-Fetch-Mode` 存在 ⇒ 必须是 `navigate`。换票只可能发生在顶层导航上
+//     （票在地址栏 URL 里），`cors`/`no-cors` 之流意味着别人在用 fetch/XHR/<img> 试探。
+//
+// **头缺席按现状放行**（老浏览器与非浏览器客户端不发这些头），但调用方必须留日志
+// ——"放行了但判据缺席"是安全事件，不是无事发生。返回的 reason 为空 = 判据齐全且通过；
+// 为 "headers_absent" = 放行但缺席；其余 = 拒绝原因（落审计与日志）。
+//
+// 判据名与拒绝原因都进日志 ⇒ 头值一律经 headerForLog 截断 + 引号转义（防日志注入/放大）。
+func ticketSecFetchVerdict(r *http.Request) (allow bool, reason, detail string) {
+	rawSite := r.Header.Get("Sec-Fetch-Site")
+	rawMode := r.Header.Get("Sec-Fetch-Mode")
+	detail = "sec-fetch-site=" + headerForLog(rawSite) + " sec-fetch-mode=" + headerForLog(rawMode)
+	site := strings.ToLower(strings.TrimSpace(rawSite))
+	mode := strings.ToLower(strings.TrimSpace(rawMode))
+	if site != "" {
+		switch site {
+		case "same-site", "same-origin", "none":
+		default:
+			return false, "site_rejected", detail
+		}
+	}
+	if mode != "" && mode != "navigate" {
+		return false, "mode_rejected", detail
+	}
+	if site == "" || mode == "" {
+		return true, "headers_absent", detail
+	}
+	return true, "", detail
+}
+
+// headerForLog 把请求头值变成可安全写进日志的形态：截断（防日志放大）+ 引号转义
+// （`%q` 语义，防 CR/LF 日志注入）。
+//
+// ⚠️ 只用于**判据类**头（Sec-Fetch-*、Origin、Referer）。**绝不用于 Cookie**：
+// 会话明文或 nonce 进日志等于凭证泄漏（与 checkMainOrigin 的口径一致）。
+func headerForLog(v string) string {
+	const maxLen = 64
+	v = strings.TrimSpace(v)
+	if len(v) > maxLen {
+		v = v[:maxLen] + "..."
+	}
+	return strconv.Quote(v)
 }

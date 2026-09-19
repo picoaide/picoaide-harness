@@ -609,7 +609,14 @@ func (e *env) redeemAppSession(empCookie *http.Cookie, appID string) *http.Cooki
 	if code == "" {
 		e.t.Fatalf("换票跳板页目标里没有 ticket: %q", loc)
 	}
-	rec2 := e.get(appID, "/?ticket="+url.QueryEscape(code))
+	// R1-sec-1（2026-09-19）：票是"URL 里的 code + 浏览器 Cookie 里的 nonce"两半，
+	// nonce 必须由**同一次 POST 响应**下发、并由随后的子域请求带上（真实浏览器由
+	// Domain=应用基域 自动完成）。这个 helper 就是"同一只浏览器"，所以要把它带过去。
+	nonce := cookieByName(rec.Result().Cookies(), session.TicketNonceCookieName)
+	if nonce == nil {
+		e.t.Fatal("主站换票未下发 nonce Cookie：同一浏览器的合法链路将无法兑换")
+	}
+	rec2 := e.get(appID, "/?ticket="+url.QueryEscape(code), nonce)
 	if rec2.Code != http.StatusFound {
 		e.t.Fatalf("子域兑换应 302，得到 %d body=%s", rec2.Code, rec2.Body.String())
 	}
