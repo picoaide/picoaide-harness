@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
+	"github.com/picoaide/picoaide/internal/wasmapp/edge"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
@@ -21,8 +22,16 @@ func assertHostSecurityHeaders(t *testing.T, rec *httptest.ResponseRecorder, wan
 	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Fatalf("X-Content-Type-Options 应为 nosniff，得到 %q", got)
 	}
-	if got := rec.Header().Get("Referrer-Policy"); got != "no-referrer" {
-		t.Fatalf("Referrer-Policy 应为 no-referrer，得到 %q", got)
+	// Referrer-Policy 必须是 same-origin，**绝不能是 no-referrer**（2026-09-19 P0）：
+	// 应用自己的同源表单 POST 在 no-referrer 下会带 `Origin: null`，被 CheckOrigin
+	// 全拒（应用写功能在真实浏览器里必然失败）。详见 edge.HostReferrerPolicy。
+	const wantReferrer = "same-origin"
+	if edge.HostReferrerPolicy != wantReferrer {
+		t.Fatalf("edge.HostReferrerPolicy = %q, want %q", edge.HostReferrerPolicy, wantReferrer)
+	}
+	if got := rec.Header().Get("Referrer-Policy"); got != wantReferrer {
+		t.Fatalf("Referrer-Policy = %q, want %q（no-referrer ⇒ 同源写请求 Origin: null ⇒ 403）",
+			got, wantReferrer)
 	}
 	if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
 		t.Fatalf("X-Frame-Options 应为 DENY，得到 %q", got)

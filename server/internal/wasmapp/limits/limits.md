@@ -68,7 +68,10 @@
 | `sql_max_rows` | 5000 | count | §4.5 | 返回行数上限 | 超出即截断并报错 |
 | `sql_max_result_bytes` | 8388608 | bytes | §4.5 | 返回字节上限 |  |
 | `sql_statement_budget` | 5 | seconds | §4.5 | 单语句硬超时 | 独立于 guest 超时；驱动取消时 sqlite3_interrupt |
-| `app_db_handle_max` | 32 | count | §4.5 | 同时持有的应用库句柄上限 | 每句柄 2 条 SQLite 连接 ⇒ fd 硬上界 |
+| `app_db_readers` | 4 | count | §4.5 | 每应用只读连接数 | WAL 下并发读；写仍只由一个写者串行 |
+| `app_db_readers_max` | 16 | count | §4.5 | 只读连接数上限 | 配置注入的钳位（超出即钳到该值） |
+| `app_db_busy_timeout` | 3 | seconds | §4.5 | 应用库连接 busy_timeout | 连接级不持久 ⇒ 每条连接重设；必须小于 sql_statement_budget |
+| `app_db_handle_max` | 32 | count | §4.5 | 同时持有的应用库句柄上限 | 每句柄 (1 + app_db_readers) 条 SQLite 连接 ⇒ fd 硬上界 |
 | `max_tables_per_app` | 16 | count | §4.5 | 每应用表数上限 | 由 db.define 强制 |
 | `max_columns_per_table` | 16 | count | §4.5 | 每表列数上限 | 由 db.define 强制 |
 | `table_name_pattern` | ^[a-z][a-z0-9_]{0,30}$ |  | §4.5 | 表名规则 |  |
@@ -86,7 +89,7 @@
 | `user_per_app_running` | 1 | count | §4.6 | 单用户同应用在跑 |  |
 | `user_per_app_queued` | 4 | count | §4.6 | 单用户同应用排队 |  |
 | `user_global_running` | 4 | count | §4.6 | 单用户跨应用全局在跑 |  |
-| `app_concurrency` | 1 | count | §4.6 | 每应用并发 | 恒为 1（串行） |
+| `app_concurrency` | 4 | count | §4.6 | 每应用并发 | 同一应用最多 N 个请求同时在跑（控制台对应 app_running）；读并发，写仍串行 |
 | `retry_after_seconds` | 1 | seconds | §4.6 | Retry-After |  |
 | `anon_global_rate_per_min` | 3000 | count | §4.6 | 全局匿名令牌桶 | 次/分 |
 | `anon_global_burst` | 3000 | count | §4.6 | 全局匿名桶容量 |  |

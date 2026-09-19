@@ -39,6 +39,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -590,17 +591,23 @@ func (e *env) redeemAppSession(empCookie *http.Cookie, appID string) *http.Cooki
 	req.AddCookie(empCookie)
 	rec := httptest.NewRecorder()
 	e.mgr.TicketSubmit(rec, req)
-	if rec.Code != http.StatusFound {
+	// 2026-09-19 起 POST /app-ticket 返回**同源跳板页（200）**，不再是跨源 302：
+	// CSP3 的 form-action 会检查重定向链上的每个 URL，跨源 302 会被浏览器整单拦掉
+	// （服务端连 POST 都收不到）。票因此从跳板页的兜底链接上取。
+	if rec.Code != http.StatusOK {
 		e.t.Fatalf("主站签发换票失败 status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	loc := rec.Header().Get("Location")
+	if loc := rec.Header().Get("Location"); loc != "" {
+		e.t.Fatalf("主站换票不得再有 Location（跨源 302 会被 form-action 拦掉）：%q", loc)
+	}
+	loc := jumpPageTarget(e.t, rec.Body.String())
 	u, err := url.Parse(loc)
 	if err != nil {
-		e.t.Fatalf("换票 Location 非法: %q", loc)
+		e.t.Fatalf("换票跳板页目标非法: %q", loc)
 	}
 	code := u.Query().Get("ticket")
 	if code == "" {
-		e.t.Fatalf("换票 Location 里没有 ticket: %q", loc)
+		e.t.Fatalf("换票跳板页目标里没有 ticket: %q", loc)
 	}
 	rec2 := e.get(appID, "/?ticket="+url.QueryEscape(code))
 	if rec2.Code != http.StatusFound {
@@ -614,6 +621,26 @@ func (e *env) redeemAppSession(empCookie *http.Cookie, appID string) *http.Cooki
 		e.t.Fatal("子域兑换未下发应用会话 Cookie")
 	}
 	return c
+}
+
+// jumpPageTarget 从**跳板页**（主站换票 / 应用子域会话失效都用它）里取出跨源那一跳的目标 URL。
+//
+// 只认 `id="picoaide-continue" href="…"`：这是页面上唯一的跨源出口声明，
+// 读它 = 读浏览器真正会用到的那份数据。html/template 会做属性转义（`&`→`&amp;` 等），
+// 因此用 html.UnescapeString 还原。
+func jumpPageTarget(t *testing.T, body string) string {
+	t.Helper()
+	const marker = `id="picoaide-continue" href="`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		t.Fatalf("跳板页没有兜底链接（%s）：%s", marker, body)
+	}
+	rest := body[i+len(marker):]
+	j := strings.IndexByte(rest, '"')
+	if j < 0 {
+		t.Fatalf("兜底链接的 href 没有闭合：%s", body)
+	}
+	return html.UnescapeString(rest[:j])
 }
 
 // loggedInCookie 是"建号 + 登录 + 换票"的一站式入口。

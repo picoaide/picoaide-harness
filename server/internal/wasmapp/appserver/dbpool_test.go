@@ -3,15 +3,19 @@ package appserver
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/appdb"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
@@ -156,8 +160,335 @@ func TestAppDBPool_CapEvictsLeastRecentlyUsed(t *testing.T) {
 	}
 }
 
-// ===== 连接污染：句柄必须回收重建（appdb 侧已可按语句/按会话恢复，池侧仍保守回收）=====
+// ===== 只读连接数（app_db_readers）：1 写 + N 读的真实连接数 + 单飞 =====
+//
+// 这两条用例把"配置面 → 运行期"的最后一跳钉死：池把 app_db_readers 交给 appdb.Open，
+// 而 appdb 真的开出 1 + N 条 SQLite 连接（用 /proc/self/fd 观测，不依赖 appdb 暴露
+// 新接口 —— 它刚落定，接口面不动）。
 
+// countOpenFiles 数出本进程里指向 path 的打开文件描述符个数（Linux /proc/self/fd）。
+//
+// 为什么用 fd 而不是 sql.DB.Stats().OpenConnections：appdb 的 *sql.DB 是包内私有，
+// capapi.DBStats 里没有连接数；而"这个库文件被打开了几次"正是要断言的**外部事实**
+// （1 写 + N 读各持一条连接）。非 Linux 环境直接 Skip（CI 与开发机都是 Linux）。
+func countOpenFiles(t *testing.T, path string) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("读 /proc/self/fd 不可用（非 Linux？）：%v", err)
+	}
+	n := 0
+	for _, e := range entries {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name()))
+		if err != nil {
+			continue // 连接已被关闭（ReadDir 与 Readlink 之间）
+		}
+		if target == path {
+			n++
+		}
+	}
+	return n
+}
+
+// TestAppDBPool_HandleOpensOneWriterPlusReadersConnections：一个句柄恰好持有
+// 1 + app_db_readers 条指向库文件的连接（写 1 + 读 N）。
+//
+// 变异：把 acquire 里的 `Readers: readers` 去掉（回到 appdb 默认 4）⇒ 显式配
+// app_db_readers=1 时本用例必红（实测 5 条而不是 2 条）。
+func TestAppDBPool_HandleOpensOneWriterPlusReadersConnections(t *testing.T) {
+	e := newEnv(t)
+	// 先把只读连接数改成 1（走真实的控制台下发路径 ApplyLimits），证明它是**可达**的。
+	l := applimits.Defaults()
+	l.AppDBReaders = 1
+	if restart := e.srv.ApplyLimits(l); len(restart) != 0 {
+		t.Fatalf("app_db_readers 不该要求重启，得到 %v", restart)
+	}
+	appID := e.appID("dbfds")
+	e.publishApp(appSpec{appID: appID, wasm: appBinary(t, "dbapp")})
+	if rec := e.get(appID, "/define?table=t"); rec.Code != http.StatusOK {
+		t.Fatalf("应 200，得到 %d body=%s", rec.Code, rec.Body.String())
+	}
+	h := e.srv.appdbs.lookup(appID)
+	if h == nil {
+		t.Fatal("首请求后池里应有该应用的句柄")
+	}
+	if got, want := countOpenFiles(t, h.db.Path()), 2; got != want {
+		t.Fatalf("app_db_readers=1 时库文件的打开数 = %d，want %d（1 写 + 1 读）", got, want)
+	}
+
+	// 复位到默认：**已有句柄不受影响**（语义=下一个句柄），空闲回收后才跟上。
+	l = applimits.Defaults()
+	if restart := e.srv.ApplyLimits(l); len(restart) != 0 {
+		t.Fatalf("复位不该要求重启，得到 %v", restart)
+	}
+	if got := countOpenFiles(t, h.db.Path()); got != 2 {
+		t.Fatalf("已有句柄不该被改动：打开数 = %d，want 2（下一个句柄才拿新值）", got)
+	}
+	e.advance(appDBIdleTimeout + time.Minute)
+	if rec := e.get(appID, "/q?sql="+urlQueryEscape("SELECT 1")); rec.Code != http.StatusOK {
+		t.Fatalf("空闲回收后应能重开，得到 %d body=%s", rec.Code, rec.Body.String())
+	}
+	h2 := e.srv.appdbs.lookup(appID)
+	if h2 == nil || h2 == h {
+		t.Fatal("空闲回收后应是一个**新**句柄（旧句柄已关闭）")
+	}
+	if got, want := countOpenFiles(t, h2.db.Path()), 1+limits.AppDBReaders; got != want {
+		t.Fatalf("下一个句柄的打开数 = %d，want %d（1 写 + %d 读）", got, want, limits.AppDBReaders)
+	}
+}
+
+// TestAppDBPool_ConcurrentFirstRequestsShareOneOpen：冷应用的并发首屏只开一次库，
+// 且**每个请求都成功**（不是"一条成功、其余 500"）。
+//
+// 为什么单列一条（实测踩到）：`appdb.Open` 里的 `PRAGMA journal_mode=WAL` 需要库级写锁，
+// 而 SQLite 对改 journal_mode 不套用 busy_timeout 重试 ⇒ 并发 Open 同一个库时，
+// 一条成功、另一条直接 SQLITE_BUSY → 500「应用执行失败」。app_running 默认 1 时队列
+// 把同应用请求串行化，这条路径走不到；默认 4 之后冷应用的并发首屏必然踩到。
+// 修法=池里的同应用单飞（appDBOpenFlight）；本用例是它的护栏。
+//
+// 变异：去掉 acquire 里的 opening 分支 ⇒ 本用例出现 500（且 fd 数 > 1+N）。
+func TestAppDBPool_ConcurrentFirstRequestsShareOneOpen(t *testing.T) {
+	e := newEnv(t)
+	appID := e.appID("dbopenflight")
+	e.publishApp(appSpec{appID: appID, wasm: appBinary(t, "dbapp")})
+
+	const n = 4
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	bodies := make([]string, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			rec := e.get(appID, "/q?sql="+urlQueryEscape("SELECT 1"))
+			codes[i], bodies[i] = rec.Code, rec.Body.String()
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := 0; i < n; i++ {
+		if codes[i] != http.StatusOK {
+			t.Fatalf("并发首屏第 %d 个请求应 200，得到 %d body=%s（并发 Open 同一库撞 WAL 写锁？）",
+				i, codes[i], bodies[i])
+		}
+	}
+	if size := e.srv.appdbs.size(); size != 1 {
+		t.Fatalf("并发首屏后池里应有 1 个句柄，得到 %d（各开一份 = 连接与 fd 白翻 N 倍）", size)
+	}
+	h := e.srv.appdbs.lookup(appID)
+	if h == nil {
+		t.Fatal("应留下一个句柄")
+	}
+	if got, want := countOpenFiles(t, h.db.Path()), 1+limits.AppDBReaders; got != want {
+		t.Fatalf("库文件的打开数 = %d，want %d（只开了一次：1 写 + %d 读）", got, want, limits.AppDBReaders)
+	}
+	if h.inflight != 0 {
+		t.Fatalf("请求都结束后句柄引用应归零，得到 %d（引用预约协议漏还）", h.inflight)
+	}
+}
+
+// ===== 事务所有权（app_running>1 打开的正确性边界）=====
+//
+// 缺陷形态（appdb 作者在交付时点名）：事务挂在句柄的读写连接上，而 db.exec 没有
+// "事务令牌" —— appdb 区分不了"事务持有者的写"与"别的请求的写"。于是同应用另一个
+// 请求的 db.exec 会落进别人已打开的事务里：持有者一回滚，那个写就被**静默丢掉**
+// （数据丢失，不是报错）。app_running=1 时队列串行 + 句柄整请求互斥让这条路径不可达；
+// 默认值调到 4 之后它就是默认行为。
+//
+// 下面两条用例从两个层次闭合它：
+//   - TestAppDBConn_ForeignWriteIsRejectedWhileAnotherRequestHoldsTransaction：包装层
+//     （两个请求 = 两份 appDBConn，共用同一句柄）的**确定性**判据；
+//   - TestServe_ForeignWriteDuringTransactionIsRejected：端到端（真 wasm 应用开事务、
+//     真 HTTP 请求来写）—— 证明接线真的在服务路径上。
+//
+// 变异验证：去掉 Exec/Define 的 lockTxGate（回到直接透传）⇒ 两条用例的"必须被拒"
+// 断言立刻变红；端到端那条还能直接观察到"B 的写随 A 的回滚一起消失"（见测试里的
+// 数据断言：回滚后 B 的行不在库里）。
+
+// assertDBDenied 断言错误是 DB_DENIED/foreign_transaction（事务所有权拒绝）。
+func assertDBDenied(t *testing.T, err error, what string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s：必须被拒（否则会落进别人的事务，随对方回滚被静默丢弃）", what)
+	}
+	e, ok := apperr.As(err)
+	if !ok {
+		t.Fatalf("%s：错误类型不是 *apperr.Error：%T %v", what, err, err)
+	}
+	if e.Code != apperr.CodeDBDenied {
+		t.Fatalf("%s：错误码 = %s，want DB_DENIED（%v）", what, e.Code, e)
+	}
+	if got, _ := e.Details["reason"].(string); got != "foreign_transaction" {
+		t.Fatalf("%s：details.reason = %q，want foreign_transaction", what, got)
+	}
+	if e.Status() != http.StatusForbidden {
+		t.Fatalf("%s：HTTP = %d，want 403（DB_DENIED）", what, e.Status())
+	}
+}
+
+func TestAppDBConn_ForeignWriteIsRejectedWhileAnotherRequestHoldsTransaction(t *testing.T) {
+	e := newEnv(t)
+	appID := e.appID("txguard")
+	e.publishApp(appSpec{appID: appID, wasm: appBinary(t, "dbapp")})
+	if rec := e.get(appID, "/define?table=t"); rec.Code != http.StatusOK {
+		t.Fatalf("建表应 200，得到 %d body=%s", rec.Code, rec.Body.String())
+	}
+	handle := e.srv.appdbs.lookup(appID)
+	if handle == nil {
+		t.Fatal("首请求后池里应有该应用的句柄")
+	}
+
+	ctx := context.Background()
+	// 两个"请求"：serveWasm 每请求构造一份 appDBConn，这里如实复制这个形态。
+	a := &appDBConn{DB: handle.db, handle: handle}
+	b := &appDBConn{DB: handle.db, handle: handle}
+
+	tx, err := a.Begin(ctx)
+	if err != nil {
+		t.Fatalf("A 开事务失败：%v", err)
+	}
+	if tx.TxID == 0 {
+		t.Fatal("tx_begin 应返回非零 tx_id")
+	}
+	if _, err := a.Exec(ctx, abi.SQLParams{
+		SQL:  "INSERT INTO t (id, v) VALUES (?, ?)",
+		Args: []any{9001, "from-A"},
+	}); err != nil {
+		t.Fatalf("A 在事务里写失败：%v", err)
+	}
+	// A 自己读得到自己未提交的写（事务语义不变）。
+	if res, err := a.Query(ctx, abi.SQLParams{SQL: "SELECT id, v FROM t"}); err != nil {
+		t.Fatalf("A 在事务里读失败：%v", err)
+	} else if len(res.Rows) == 0 {
+		t.Fatal("事务持有者应能看到自己未提交的写")
+	}
+
+	// ① 外来写必须被拒（核心判据）。
+	_, werr := b.Exec(ctx, abi.SQLParams{
+		SQL:  "INSERT INTO t (id, v) VALUES (?, ?)",
+		Args: []any{7, "from-B"},
+	})
+	assertDBDenied(t, werr, "事务期间的另一请求 db.exec")
+	// ② 外来 DDL 同样被拒（define 也走写路径）。
+	_, derr := b.Define(ctx, abi.DBDefineParams{Table: "t2", Columns: []abi.ColumnDef{{Name: "id", Type: "int"}}})
+	assertDBDenied(t, derr, "事务期间的另一请求 db.define")
+	// ③ 外来读也被拒：不能让别的请求把未提交数据当已提交读走。
+	_, qerr := b.Query(ctx, abi.SQLParams{SQL: "SELECT id, v FROM t"})
+	assertDBDenied(t, qerr, "事务期间的另一请求 db.query")
+	// ④ 外来 begin 也被拒（appdb 的"同时最多一个事务"在包装层同样成立）。
+	if _, berr := b.Begin(ctx); berr == nil {
+		t.Fatal("事务期间另一个请求不该能再开一个事务")
+	} else {
+		assertDBDenied(t, berr, "事务期间的另一请求 tx_begin")
+	}
+
+	// ⑤ A 回滚 ⇒ B 立即恢复（不依赖任何超时/看门狗）。
+	if err := a.Rollback(ctx, abi.TxParams{TxID: tx.TxID}); err != nil {
+		t.Fatalf("A 回滚失败：%v", err)
+	}
+	if _, err := b.Exec(ctx, abi.SQLParams{
+		SQL:  "INSERT INTO t (id, v) VALUES (?, ?)",
+		Args: []any{7, "from-B"},
+	}); err != nil {
+		t.Fatalf("事务结束后 B 应能写：%v", err)
+	}
+	// 数据判据：A 的行被回滚掉、B 的行在 —— 这正是"没有静默丢写"的形态。
+	res, err := b.Query(ctx, abi.SQLParams{SQL: "SELECT id, v FROM t ORDER BY id"})
+	if err != nil {
+		t.Fatalf("B 查询失败：%v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("表里应只剩 B 的 1 行（A 的写被回滚），得到 %d 行：%v", len(res.Rows), res.Rows)
+	}
+	if got := res.Rows[0][1]; got != "from-B" {
+		t.Fatalf("留下的一行应是 from-B，得到 %v", got)
+	}
+}
+
+// TestServe_ForeignWriteDuringTransactionIsRejected 是上面那条的**端到端**版本：
+// 真 wasm 应用（dbapp 的 /slowtx）开事务并持有，另一个真实 HTTP 请求来写 —— 必须拿到
+// 403 DB_DENIED，而不是 200（200 意味着写进了别人的事务，对方一回滚就没了）。
+//
+// 行为判据（不依赖墙钟）：
+//   - A 进入事务由平台自省面确认（句柄的 InTx()）；
+//   - B 的写/读都是 403 + DB_DENIED/foreign_transaction；
+//   - A 回滚后 B 立刻能写，且库里只有 B 的行（A 的写确实被回滚，没有"B 的写被带走"）。
+func TestServe_ForeignWriteDuringTransactionIsRejected(t *testing.T) {
+	e := newEnv(t)
+	appID := e.appID("txe2e")
+	e.publishApp(appSpec{appID: appID, wasm: appBinary(t, "dbapp")})
+	if rec := e.get(appID, "/define?table=t"); rec.Code != http.StatusOK {
+		t.Fatalf("建表应 200，得到 %d body=%s", rec.Code, rec.Body.String())
+	}
+	handle := e.srv.appdbs.lookup(appID)
+	if handle == nil {
+		t.Fatal("首请求后池里应有该应用的句柄")
+	}
+
+	// A：开事务 → 写一行 → 持有 1.2 s → 回滚（远小于 appdb 的 5 s 事务硬超时）。
+	aDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { aDone <- e.get(appID, "/slowtx?ms=1200&v=from-A") }()
+	waitFor(t, func() bool { return handle.db.InTx() }, "A 进入事务（平台自省面可见）")
+
+	// B：写 → 必须被拒。
+	//
+	// 判据看**应用看到的错误码**而不是 HTTP 状态：dbapp 夹具把宿主调用的错误回显进
+	// 200 响应体（它刻意演示"应用自己决定怎么处理宿主错误"）；平台侧的码是 DB_DENIED，
+	// 一个正常应用会把它映射成 403（apperr.StatusOf(DB_DENIED) = 403）。
+	rec := e.get(appID, "/exec?sql="+urlQueryEscape("INSERT INTO t (id, v) VALUES (7, 'from-B')"))
+	b := decodeJSON(t, rec.Body)
+	if got, _ := b["code"].(string); got != "DB_DENIED" {
+		t.Fatalf("A 持有事务期间，B 的 db.exec 必须拿到 DB_DENIED（否则写会落进别人的事务），"+
+			"得到 code=%q body=%s", got, rec.Body.String())
+	}
+	if got, _ := b["message"].(string); !strings.Contains(got, "事务") {
+		t.Fatalf("拒绝文案应说明「另一个请求正在事务中」，得到 %q", got)
+	}
+	// B：读 → 同样被拒（不把未提交数据当已提交返回）。
+	rec = e.get(appID, "/q?sql="+urlQueryEscape("SELECT id, v FROM t"))
+	b = decodeJSON(t, rec.Body)
+	if got, _ := b["code"].(string); got != "DB_DENIED" {
+		t.Fatalf("A 持有事务期间，B 的 db.query 必须拿到 DB_DENIED，得到 code=%q body=%s",
+			got, rec.Body.String())
+	}
+
+	// A 正常结束（回滚）。
+	aRec := <-aDone
+	if aRec.Code != http.StatusOK {
+		t.Fatalf("A 的慢事务请求应 200，得到 %d body=%s", aRec.Code, aRec.Body.String())
+	}
+	body := decodeJSON(t, aRec.Body)
+	if got, _ := body["write_code"].(string); got != "" {
+		t.Fatalf("A 在事务里的写应成功（write_code 空），得到 %q", got)
+	}
+	if got, _ := body["finish_code"].(string); got != "" {
+		t.Fatalf("A 的回滚应成功（finish_code 空），得到 %q", got)
+	}
+
+	// B 现在能写（事务结束 ⇒ 立刻恢复，不等任何超时）。
+	rec = e.get(appID, "/exec?sql="+urlQueryEscape("INSERT INTO t (id, v) VALUES (7, 'from-B')"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("事务结束后 B 的写应 200，得到 %d body=%s", rec.Code, rec.Body.String())
+	}
+	// 数据判据：只有 B 的行（A 的写随回滚消失，且没有把 B 的写一起带走）。
+	q := e.get(appID, "/q?sql="+urlQueryEscape("SELECT id, v FROM t ORDER BY id"))
+	if q.Code != http.StatusOK {
+		t.Fatalf("查询应 200，得到 %d body=%s", q.Code, q.Body.String())
+	}
+	qb := decodeJSON(t, q.Body)
+	if n, _ := qb["row_count"].(float64); int(n) != 1 {
+		t.Fatalf("库里应只有 B 的 1 行（A 的行被回滚），得到 %v 行：%v", n, qb)
+	}
+	first, _ := qb["first_row"].([]any)
+	if len(first) != 2 || first[1] != "from-B" {
+		t.Fatalf("留下的行应是 from-B，得到 %v", first)
+	}
+}
+
+// ===== 连接污染：句柄必须回收重建（appdb 侧已可按语句/按会话恢复，池侧仍保守回收）=====
 func TestAppDBPool_PoisonedHandleIsRecycled(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("dbpoison")

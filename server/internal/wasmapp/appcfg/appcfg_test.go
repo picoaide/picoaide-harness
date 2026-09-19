@@ -172,6 +172,33 @@ func TestWhitelistAccessRequiresList(t *testing.T) {
 	}
 }
 
+// TestAccessHintValuesDiscloseWhitelistSemantics 是 P2-9 的守卫：服务端 hint 必须
+// 与真实语义（R24）一致 —— **平台不比对名单**，名单只给应用自己读。
+//
+// 为什么这条文案是安全语义而不是措辞问题：说成"要求登录 + 名单准入"会让作者以为
+// 填了名单平台就会拦，于是他写出一个对**所有人**开放的应用（客户端的同名文案早已
+// 是正确口径：`locales.ts` 的 `appCenter.access.whitelistHint`）。
+//
+// 变异方式：把 `accessHintValues` 里 whitelist 那句改回"要求登录 + 名单" ⇒ 本用例红。
+func TestAccessHintValuesDiscloseWhitelistSemantics(t *testing.T) {
+	hint := accessHintValues()
+	for _, want := range []string{string(AccessPublic), string(AccessLogin), string(AccessWhitelist)} {
+		if !strings.Contains(hint, want) {
+			t.Fatalf("access 提示必须列出三个取值，缺 %q: %s", want, hint)
+		}
+	}
+	if !strings.Contains(hint, "平台不比对") {
+		t.Fatalf("whitelist 的提示必须写清「平台不比对名单」（R24；否则作者会以为平台替他拦）: %s", hint)
+	}
+	if !strings.Contains(hint, "应用自己读") {
+		t.Fatalf("whitelist 的提示必须写清「名单只给应用自己读」: %s", hint)
+	}
+	// 反例：旧文案把语义说反了 —— 一旦有人改回去，上面两条断言就会红。
+	if strings.Contains(hint, "名单准入") {
+		t.Fatalf("不得再用「名单准入」这种暗示平台比对的措辞: %s", hint)
+	}
+}
+
 func TestLoginAllowsEmptyWhitelist(t *testing.T) {
 	for _, in := range []string{
 		`{"access":"login"}`,

@@ -21,12 +21,17 @@
  *     「结构化错误逐字段到达」红；
  *   - `submitPublish` 在 base64 > 8 MiB 时自己切分片（复制一份编排）⇒
  *     「大载荷只发一次 /publish」红；
- *   - `encodeBase64` 改回 `String.fromCharCode(...bytes)` ⇒ 「1 MiB 不爆栈」红。
+ *   - `encodeBase64` 改回 `String.fromCharCode(...bytes)` ⇒ 「1 MiB 不爆栈」红；
+ *   - `initialFormState` 不看 target（`access` 固定回缺省）⇒ 「发新版时预填当前值」红；
+ *   - `initialFormState` 给出 `dataSensitivity` 默认值 ⇒ 「没有平台默认值」红；
+ *   - `changesAccess` 恒 false ⇒ 「改动访问范围被识别」红。
  */
 import { describe, expect, it } from 'vitest'
 import {
   buildPublishBody,
+  changesAccess,
   encodeBase64,
+  initialFormState,
   parseErrorEnvelope,
   parsePublishOutcome,
   PUBLISH_PATH,
@@ -34,8 +39,9 @@ import {
   submitPublish,
   validatePublishDraft,
   type PublishDraft,
+  type PublishTarget,
 } from './publish-app.ts'
-import { APP_CONFIG_FIELDS, WHITELIST_MAX } from './appcfg-contract.ts'
+import { APP_CONFIG_FIELDS, DEFAULT_ACCESS, WHITELIST_MAX } from './appcfg-contract.ts'
 import { setActiveLocale } from './locales.ts'
 
 const DRAFT: PublishDraft = {
@@ -424,5 +430,77 @@ describe('模块级常量', () => {
     for (const key of Object.keys(module)) {
       expect(key.toLowerCase().includes('chunk')).toBe(false)
     }
+  })
+})
+
+/**
+ * P1-3：发布表单的**预填**与"访问范围改动"判据。
+ *
+ * 变异验证（改回旧实现必红）：
+ *   - `initialFormState` 忽略 target、`access` 固定回 `DEFAULT_ACCESS`
+ *     ⇒ 「发新版时 access 预填为当前值」红；
+ *   - `initialFormState` 少给 `whitelistText`/`purpose`/`owner`
+ *     ⇒ 对应用例红；
+ *   - 给 `PublishFormInitial` 加一个 `dataSensitivity: 'internal'` 默认
+ *     ⇒ 「没有平台默认值」红；
+ *   - `changesAccess` 恒返回 false（去掉二次确认的判据）
+ *     ⇒ 「改动访问范围被识别」红。
+ */
+describe('P1-3：发新版的预填基线与"访问范围改动"判据', () => {
+  const TARGET: PublishTarget = {
+    appId: 'shift-notes',
+    title: '值班便签',
+    access: 'public',
+    currentVersion: '1.4.2',
+    owner: 'alice',
+    purpose: '值班交接',
+    whitelist: ['alice', 'bob'],
+  }
+
+  it('发新版时 access / whitelist / purpose / owner / title 全部预填', () => {
+    const initial = initialFormState(TARGET)
+    expect(initial.appId).toBe('shift-notes')
+    expect(initial.title).toBe('值班便签')
+    // **核心断言**：access 是当前线上的值，不是硬编码的 login。
+    expect(initial.access).toBe('public')
+    expect(initial.currentAccess).toBe('public')
+    expect(initial.currentVersion).toBe('1.4.2')
+    expect(initial.whitelistText).toBe('alice, bob')
+    expect(initial.purpose).toBe('值班交接')
+    expect(initial.owner).toBe('alice')
+  })
+
+  it('data_sensitivity 没有任何默认值（平台上就没有这个字段的缺省）', () => {
+    const initial = initialFormState(TARGET) as unknown as Record<string, unknown>
+    // 结构性保证：初值类型里根本没有这个键 —— 想塞默认值必须先改类型。
+    expect(Object.keys(initial)).not.toContain('dataSensitivity')
+    expect(Object.keys(initial).some(key => key.toLowerCase().includes('sensitiv'))).toBe(false)
+    // 首版发布同样不带任何默认值。
+    expect(Object.keys(initialFormState() as unknown as Record<string, unknown>)).not.toContain('dataSensitivity')
+  })
+
+  it('首版发布（无基线）：缺省仍是 login，但**没有**"当前值"因而没有改动判定', () => {
+    const initial = initialFormState()
+    expect(initial.access).toBe(DEFAULT_ACCESS)
+    expect(initial.currentAccess).toBeUndefined()
+    expect(initial.appId).toBe('')
+    expect(changesAccess(initial, 'login')).toBe(false)
+    expect(changesAccess(initial, 'public')).toBe(false)
+  })
+
+  it('发布者本人之外的目录行拿不到 whitelist / purpose ⇒ 表单留空而不是编造', () => {
+    // 非发布者的目录行里这两个字段**缺席**（服务端按调用者下发）；用解构剔除，
+    // 因为 `exactOptionalPropertyTypes` 下不能显式传 `undefined`。
+    const { whitelist: _w, purpose: _p, ...withoutAuthorFields } = TARGET
+    const initial = initialFormState(withoutAuthorFields)
+    expect(initial.whitelistText).toBe('')
+    expect(initial.purpose).toBe('')
+  })
+
+  it('改动访问范围被识别（首版以外都算"改动"，值相同则不算）', () => {
+    const initial = initialFormState(TARGET)
+    expect(changesAccess(initial, 'public')).toBe(false)
+    expect(changesAccess(initial, 'login')).toBe(true)
+    expect(changesAccess(initial, 'whitelist')).toBe(true)
   })
 })

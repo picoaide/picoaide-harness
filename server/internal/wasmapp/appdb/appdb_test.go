@@ -40,6 +40,7 @@ package appdb
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,12 +57,118 @@ import (
 // newTestDB 在 t.TempDir() 上开一个应用库。
 func newTestDB(t *testing.T, appID string) *DB {
 	t.Helper()
-	d, err := Open(context.Background(), Options{DataRoot: t.TempDir(), AppID: appID})
+	return newTestDBWithReaders(t, appID, 0)
+}
+
+// newTestDBWithReaders 用指定只读连接数开库（0 = limits.AppDBReaders 的默认值）。
+func newTestDBWithReaders(t *testing.T, appID string, readers int) *DB {
+	t.Helper()
+	d, err := Open(context.Background(), Options{DataRoot: t.TempDir(), AppID: appID, Readers: readers})
 	if err != nil {
-		t.Fatalf("Open(%s) 失败：%v", appID, err)
+		t.Fatalf("Open(%s, readers=%d) 失败：%v", appID, readers, err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
 	return d
+}
+
+// pooledConn 是"池里一条持有连接"的具名视图（测试遍历用）。
+type pooledConn struct {
+	name string
+	conn *sql.Conn
+}
+
+// poolReadConnsForTest 返回当前这一代只读连接的快照（stateMu 下读）。
+//
+// 为什么测试也要走锁：连接代际的发布/清空发生在 connectLocked / closeLocked 里，
+// 后者可能由**别的 goroutine**（看门狗、并发 Close）触发；直接读 d.ros 会被
+// race detector 判为数据竞争。
+func poolReadConnsForTest(d *DB) []*sql.Conn {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return append([]*sql.Conn(nil), d.ros...)
+}
+
+// poisonStateForTest 返回污染标记与事务写闸的快照（stateMu 下读）。
+//
+// 为什么必须走锁（实测）：事务硬超时的看门狗 goroutine（expireTx）会写这两个字段，
+// 测试直接读会被 race detector 判为数据竞争 —— 这是 HEAD 基线上就存在的测试侧竞争
+// （`go test -race -run TestTransactionTimeoutWriteGateAndRecovery` 在未改造的代码上
+// 同样报错），本次一并修掉。
+func poisonStateForTest(d *DB) (poisoned, deadTx *apperr.Error) {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.poisoned, d.deadTx
+}
+
+// allPoolConns 返回池里**全部**持有连接（每条只读连接 + 读写连接），供逐条断言使用。
+//
+// 只读连接每一条都必须单独验：只验 ros[0] 等于给后面几条留默认 LIMIT_ATTACHED=10 的缺口。
+func allPoolConns(d *DB) []pooledConn {
+	ros := poolReadConnsForTest(d)
+	out := make([]pooledConn, 0, len(ros)+1)
+	for i, c := range ros {
+		out = append(out, pooledConn{name: fmt.Sprintf("ro[%d]", i), conn: c})
+	}
+	out = append(out, pooledConn{name: "rw", conn: d.writeConn()})
+	return out
+}
+
+// pragmaInt64 读回一条连接上的整型 PRAGMA（测试用）。
+func pragmaInt64(t *testing.T, conn *sql.Conn, name string) int64 {
+	t.Helper()
+	var got int64
+	if err := conn.QueryRowContext(context.Background(), "PRAGMA "+name).Scan(&got); err != nil {
+		t.Fatalf("读回 PRAGMA %s 失败：%v", name, err)
+	}
+	return got
+}
+
+// sameConnSet 报告两组连接指针是否完全相同（顺序无关；用于"整代连接必须被换掉"的断言）。
+func sameConnSet(a, b []*sql.Conn) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[*sql.Conn]int, len(a))
+	for _, c := range a {
+		seen[c]++
+	}
+	for _, c := range b {
+		seen[c]--
+		if seen[c] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// isReadOnlyPoolConn 报告一条连接是否属于只读池。
+func isReadOnlyPoolConn(d *DB, conn *sql.Conn) bool {
+	if conn == nil {
+		return false
+	}
+	for _, c := range poolReadConnsForTest(d) {
+		if c == conn {
+			return true
+		}
+	}
+	return false
+}
+
+// readConnForTest 按生产规则选一条"本次读要用的连接"并返回归还函数：
+// 事务内是读写连接（看得到未提交的写、不占槽），事务外从只读池取一条（必须归还）。
+//
+// 它复刻的是 withSerialConn 的选取逻辑（生产路径不单独暴露"选连接"这一步），
+// 归还函数保证测试不会把槽位泄漏出去 —— 泄漏会让收尾的 Close() 在 drainReadSlots 上挂死。
+func readConnForTest(t *testing.T, d *DB) (*sql.Conn, func()) {
+	t.Helper()
+	if d.inTx() {
+		return d.writeConn(), func() {}
+	}
+	conn, ok := d.takeReadSlot(context.Background())
+	if !ok {
+		t.Fatalf("无事务时应当能从只读池取到连接（readers=%d）", d.readers)
+	}
+	return conn, func() { d.putReadSlot(conn) }
 }
 
 // newTestDBIn 在指定数据根上开库（用于「同一应用的第二次打开」）。
@@ -211,16 +318,16 @@ func TestOpenReopensExistingDB(t *testing.T) {
 
 // ===== 连接级限额 / 金丝雀（§4.5、§15.1 第 4 条；§10.1 第 12/13 项）=====
 
-// TestConnectionLimitsAppliedAndCanaryHolds 逐条读回两条持有连接的限额，
-// 并直接（绕过语句闸门）验证 ATTACH 被引擎拒绝。
+// TestConnectionLimitsAppliedAndCanaryHolds 逐条读回**池里每一条**持有连接（全部只读 + rw）
+// 的限额，并直接（绕过语句闸门）验证 ATTACH 被引擎拒绝。
+//
+// 2026-09-19 起池里有 1+N 条连接：这里改成遍历全部（只读连接**每一条**都要单独验，
+// 只验第一条就等于给后面几条留了默认 LIMIT_ATTACHED=10 的缺口）。
 func TestConnectionLimitsAppliedAndCanaryHolds(t *testing.T) {
 	d := newTestDB(t, "limits-app")
 	ctx := context.Background()
 
-	for _, c := range []struct {
-		name string
-		conn *sql.Conn
-	}{{"ro", d.ro}, {"rw", d.rw}} {
+	for _, c := range allPoolConns(d) {
 		var got int64
 		if err := c.conn.QueryRowContext(ctx, "PRAGMA max_page_count").Scan(&got); err != nil {
 			t.Fatalf("[%s] 读回 max_page_count 失败：%v", c.name, err)
@@ -239,6 +346,11 @@ func TestConnectionLimitsAppliedAndCanaryHolds(t *testing.T) {
 			}
 			t.Logf("[%s] SQLITE_LIMIT_%-20s 读回 = %d", c.name, lim.name, got)
 		}
+		// busy_timeout 也必须逐条在场（连接级不持久；WAL 下它是"正常争用不退化成
+		// database_busy"的前提）。
+		if bt := pragmaInt64(t, c.conn, "busy_timeout"); bt != limits.AppDBBusyTimeout.Milliseconds() {
+			t.Fatalf("[%s] busy_timeout 应为 %d ms，实际 %d", c.name, limits.AppDBBusyTimeout.Milliseconds(), bt)
+		}
 		// 直接绕过闸门做 ATTACH：引擎层必须拒（原始错误串见 §15.2 实测）。
 		if _, err := c.conn.ExecContext(ctx, "ATTACH ':memory:' AS direct_canary"); err == nil {
 			t.Fatalf("[%s] 直接 ATTACH 竟然成功：LIMIT_ATTACHED 未生效", c.name)
@@ -249,11 +361,12 @@ func TestConnectionLimitsAppliedAndCanaryHolds(t *testing.T) {
 		}
 	}
 	// 只读连接上的写必须被拒（query_only）。
-	if _, err := d.ro.ExecContext(ctx, "INSERT INTO sqlite_master VALUES (1)"); err == nil {
+	ro := poolReadConnsForTest(d)[0]
+	if _, err := ro.ExecContext(ctx, "INSERT INTO sqlite_master VALUES (1)"); err == nil {
 		t.Fatal("只读连接上写竟然成功")
 	}
 	// 只读连接只挂了 main 一个库（§10.1 第 12 项）。
-	rows, err := d.ro.QueryContext(ctx, "PRAGMA database_list")
+	rows, err := ro.QueryContext(ctx, "PRAGMA database_list")
 	if err != nil {
 		t.Fatalf("database_list 失败：%v", err)
 	}
@@ -311,10 +424,7 @@ func TestAppDBConnectionsCarryZeroAttachLimit(t *testing.T) {
 	d := newTestDB(t, "zero-attach-app")
 	ctx := context.Background()
 
-	for _, c := range []struct {
-		name string
-		conn *sql.Conn
-	}{{"ro", d.ro}, {"rw", d.rw}} {
+	for _, c := range allPoolConns(d) {
 		got, err := sqliteLimitCurrent(c.conn, limitsAttachedID())
 		if err != nil {
 			t.Fatalf("[%s] 读回 LIMIT_ATTACHED 失败：%v", c.name, err)
@@ -470,7 +580,7 @@ func TestOpenFailsClosedWhenPageLimitCannotBeApplied(t *testing.T) {
 		mustExec(t, d, "INSERT INTO blobs(v) VALUES (?)", chunk)
 	}
 	var pages int64
-	if err := d.rw.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pages); err != nil {
+	if err := d.writeConn().QueryRowContext(ctx, "PRAGMA page_count").Scan(&pages); err != nil {
 		t.Fatalf("读页数失败：%v", err)
 	}
 	if pages <= 8 {
@@ -493,12 +603,15 @@ func TestOpenFailsClosedWhenPageLimitCannotBeApplied(t *testing.T) {
 	}
 }
 
-// TestHeldConnectionsAreTheOnlyOnes 钉住「只用两条持有连接」：
-// 跑完一轮能力调用后池子里的连接数恒为 2，且第三条连接**拿不到**（fail-closed）。
+// TestHeldConnectionsAreTheOnlyOnes 钉住「池里只有这一代持有的 1+N 条连接」：
+// 跑完一轮能力调用后池子里的连接数恒为 1+readers，且第 2+N 条连接**拿不到**（fail-closed）。
 //
 // 这是 FIX-12 的 L2：即使有人日后写了 `d.sqlDB.QueryContext(...)`（绕过
 // hardenConnLocked 的路径），它也只会阻塞到 ctx 超时——而不是静默拿到一条
-// 没有 SQLITE_LIMIT_* 的连接。变异方式：把 SetMaxOpenConns(2) 调大 ⇒ 本用例变红。
+// 没有 SQLITE_LIMIT_* 的连接。变异方式：把 SetMaxOpenConns(1+readers) 调大 ⇒ 本用例变红。
+//
+// 2026-09-19 改写：池容量从 2 变成 1+readers（WAL 下多读者并发），但"池外新连接
+// 拿不到"这条语义**原样保留**（它才是本用例真正的判据）。
 func TestHeldConnectionsAreTheOnlyOnes(t *testing.T) {
 	d := newTestDB(t, "pool-app")
 	defineTable(t, d, "items", col("title", "text"))
@@ -513,19 +626,20 @@ func TestHeldConnectionsAreTheOnlyOnes(t *testing.T) {
 	if err := d.Commit(context.Background(), abi.TxParams{TxID: tx.TxID}); err != nil {
 		t.Fatalf("Commit 失败：%v", err)
 	}
-	if got := d.sqlDB.Stats().OpenConnections; got != 2 {
-		t.Fatalf("池内连接数应为 2（ro+rw），实际 %d", got)
+	want := 1 + d.readers
+	if got := d.sqlDB.Stats().OpenConnections; got != want {
+		t.Fatalf("池内连接数应为 %d（1 写 + %d 读），实际 %d", want, d.readers, got)
 	}
-	// 第三条连接：池容量 2 且两条被持有 ⇒ 只能等到 ctx 超时。
+	// 第 2+N 条连接：池容量 1+readers 且全部被持有 ⇒ 只能等到 ctx 超时。
 	cctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	if third, cerr := d.sqlDB.Conn(cctx); cerr == nil {
-		_ = third.Close()
-		t.Fatal("池里不该能出现第三条连接（未加固的连接会失去 LIMIT_ATTACHED 否决）")
+	if extra, cerr := d.sqlDB.Conn(cctx); cerr == nil {
+		_ = extra.Close()
+		t.Fatal("池里不该能出现第 2+N 条连接（未加固的连接会失去 LIMIT_ATTACHED 否决）")
 	}
 	// 而且失败不会破坏持有连接：后续语句照常可用。
 	if _, err := d.Query(context.Background(), abi.SQLParams{SQL: "SELECT title FROM items"}); err != nil {
-		t.Fatalf("第三条连接失败后持有连接仍应可用：%v", err)
+		t.Fatalf("第 2+N 条连接失败后持有连接仍应可用：%v", err)
 	}
 }
 
@@ -550,8 +664,8 @@ func TestCloseIsIdempotentAndReopensOnDemand(t *testing.T) {
 	if len(res.Rows) != 1 || res.Rows[0][0] != "keep" {
 		t.Fatalf("重连后数据不对：%+v", res.Rows)
 	}
-	if d.ro == nil || d.rw == nil {
-		t.Fatal("重连后应重新持有两条连接")
+	if got := len(poolReadConnsForTest(d)); got != d.readers || d.writeConn() == nil {
+		t.Fatalf("重连后应重新持有 1+%d 条连接（实际只读 %d 条）", d.readers, got)
 	}
 }
 
@@ -624,7 +738,11 @@ func BenchmarkOpenClose(b *testing.B) {
 // **绝不**带着默认限额继续跑。这里用测试直接改回连接的 LIMIT_ATTACHED 来模拟
 // "限额丢失"（真实世界里只可能来自新连接或有人把限额改了回去）。
 //
-// 变异方式：去掉 checkedConnLocked 里的 verifyConnLocked 调用 ⇒ 本用例变红。
+// 变异方式：去掉 runVerified 里的 verifyConnLocked 调用 ⇒ 本用例变红。
+//
+// 2026-09-19 改写：读路径现在有 N 条只读连接 ⇒ 注入必须打在**每一条**上，
+// 否则单次 Query 可能正好取到没被改坏的那条而让用例假绿（这本身也是"每条连接
+// 都要复检"的反向证明）。
 func TestPerStatementVerifyFailsClosedWhenLimitsAreLost(t *testing.T) {
 	d := newTestDB(t, "verify-l4-app")
 	defineTable(t, d, "items", col("title", "text"))
@@ -637,7 +755,7 @@ func TestPerStatementVerifyFailsClosedWhenLimitsAreLost(t *testing.T) {
 	}
 
 	// (1) 写路径：把读写连接的 ATTACH 否决改回默认 10 ⇒ 下一次写必须 fail-closed。
-	if _, err := sqlite.Limit(d.rw, limitsAttachedID(), 10); err != nil {
+	if _, err := sqlite.Limit(d.writeConn(), limitsAttachedID(), 10); err != nil {
 		t.Fatalf("测试注入 LIMIT_ATTACHED 失败：%v", err)
 	}
 	if _, err := d.Exec(ctx, abi.SQLParams{SQL: "INSERT INTO items(title) VALUES ('y')"}); err == nil {
@@ -645,19 +763,25 @@ func TestPerStatementVerifyFailsClosedWhenLimitsAreLost(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "LIMIT_ATTACHED") {
 		t.Fatalf("错误应点明 LIMIT_ATTACHED 读回不一致，实际：%v", err)
 	}
-	// (2) 读路径：只读连接同理。
-	if _, err := sqlite.Limit(d.ro, limitsAttachedID(), 10); err != nil {
-		t.Fatalf("测试注入 LIMIT_ATTACHED（ro）失败：%v", err)
+	// (2) 读路径：只读连接同理 —— 逐条打坏后，每一路读都必须报错。
+	for i, conn := range poolReadConnsForTest(d) {
+		if _, err := sqlite.Limit(conn, limitsAttachedID(), 10); err != nil {
+			t.Fatalf("测试注入 LIMIT_ATTACHED（ros[%d]）失败：%v", i, err)
+		}
 	}
-	if _, err := d.Query(ctx, abi.SQLParams{SQL: "SELECT count(*) FROM items"}); err == nil {
-		t.Fatal("读路径必须复检 LIMIT_ATTACHED：限额丢失时不得继续执行")
+	for i := 0; i < d.readers+1; i++ {
+		if _, err := d.Query(ctx, abi.SQLParams{SQL: "SELECT count(*) FROM items"}); err == nil {
+			t.Fatalf("读路径必须复检 LIMIT_ATTACHED：限额丢失时不得继续执行（第 %d 次）", i+1)
+		}
 	}
 	// (3) 复检失败不污染对象：限额恢复后立即恢复可用（fail-closed 但可自愈）。
-	if _, err := sqlite.Limit(d.rw, limitsAttachedID(), limits.SQLLimitAttached); err != nil {
+	if _, err := sqlite.Limit(d.writeConn(), limitsAttachedID(), limits.SQLLimitAttached); err != nil {
 		t.Fatalf("恢复 rw 限额失败：%v", err)
 	}
-	if _, err := sqlite.Limit(d.ro, limitsAttachedID(), limits.SQLLimitAttached); err != nil {
-		t.Fatalf("恢复 ro 限额失败：%v", err)
+	for i, conn := range poolReadConnsForTest(d) {
+		if _, err := sqlite.Limit(conn, limitsAttachedID(), limits.SQLLimitAttached); err != nil {
+			t.Fatalf("恢复 ros[%d] 限额失败：%v", i, err)
+		}
 	}
 	res, err := d.Query(ctx, abi.SQLParams{SQL: "SELECT count(*) FROM items"})
 	if err != nil {
@@ -670,7 +794,7 @@ func TestPerStatementVerifyFailsClosedWhenLimitsAreLost(t *testing.T) {
 
 // BenchmarkQuerySelectOne 量化"每条语句前的 L4 复检"的固定开销（FIX-12 的代价）。
 // 复检 = 读回 max_page_count + LIMIT_ATTACHED（+ 只读连接的 query_only），
-// 都是进程内 PRAGMA/limit 读回；把 checkedConnLocked 里的 verifyConnLocked 去掉后
+// 都是进程内 PRAGMA/limit 读回；把 runVerified 里的 verifyConnLocked 去掉后
 // 重跑本 benchmark 即可得到差值（交付说明里给了实测数字）。
 func BenchmarkQuerySelectOne(b *testing.B) {
 	d, err := Open(context.Background(), Options{DataRoot: b.TempDir(), AppID: "bench-query"})
@@ -685,6 +809,29 @@ func BenchmarkQuerySelectOne(b *testing.B) {
 			b.Fatalf("Query 失败：%v", err)
 		}
 	}
+}
+
+// BenchmarkQuerySelectParallel 量化"多读者并发"的吞吐：与 BenchmarkQuerySelectOne
+// 压同一条语句，但用 b.RunParallel 同时打 N 个读（N 默认 GOMAXPROCS）。
+//
+// 读法：单条语句的固定成本（L4 复检等）不变，吞吐应随只读连接数上升直到 CPU 饱和 ——
+// 与改造前（读被对象级互斥量串行化）相比，"每 op 纳秒"在并发下不再随并发度线性放大。
+func BenchmarkQuerySelectParallel(b *testing.B) {
+	d, err := Open(context.Background(), Options{DataRoot: b.TempDir(), AppID: "bench-query-parallel"})
+	if err != nil {
+		b.Fatalf("Open 失败：%v", err)
+	}
+	b.Cleanup(func() { _ = d.Close() })
+	ctx := context.Background()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if _, err := d.Query(ctx, abi.SQLParams{SQL: "SELECT 1"}); err != nil {
+				b.Errorf("Query 失败：%v", err)
+				return
+			}
+		}
+	})
 }
 
 // TestDSNDatabaseFileParsing 钉住连接守卫的路径解析：守卫按"这条连接指向哪个文件"

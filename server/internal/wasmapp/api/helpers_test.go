@@ -301,6 +301,14 @@ func (e *testEnv) mount(r *gin.Engine) {
 	adm.PUT("/domain", e.h.AdminBaseDomainPut)
 	adm.PUT("/:app_id/owner", e.h.AdminTransferOwner)
 	adm.POST("/:app_id/freeze", e.h.AdminFreeze)
+	// 审核队列（P0-1）：与 internal/router 的申报逐条一致。
+	adm.GET("/:app_id/releases", e.h.AdminReleases)
+	adm.POST("/:app_id/releases/:version/approve", e.h.AdminApproveRelease)
+	adm.POST("/:app_id/releases/:version/reject", e.h.AdminRejectRelease)
+	// 管理面诊断与运行时水位（P1-9/P2-4）：同样与 internal/router 逐条一致 ——
+	// 管理面出口必须挂在**生产路径**上，否则测不出路由/路径漂移。
+	adm.GET("/:app_id/diagnostics", e.h.AdminDiagnostics)
+	adm.GET("/runtime", e.h.AdminRuntime)
 
 	// appstore 的归属转移端点（§11 第 17 项授权放开 kind 白名单）：挂同一个路径，
 	// 用同一条用例证明 wasm_app 不再返回 400。

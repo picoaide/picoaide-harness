@@ -29,6 +29,7 @@ package session
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -232,16 +233,27 @@ func (m *Manager) configuredMainOrigin() string {
 // 是浏览器强制写入、页面脚本无法伪造的字段；而一次性 token 需要额外的服务端状态
 // 与页面注入，收益为零（攻击者若能读页面就已有 XSS，token 也一并泄露）。
 // §4.7 对换票端点本身就是这个要求（"POST + Origin == 主站源"）。
+//
+// **失败必须可定位**（2026-09-19）：每一次拒绝都落一条日志，带期望源 / Origin /
+// Referer / Host / X-Forwarded-Proto 与**具体是哪一条判据**失败。此前这里只在
+// "配置与请求源不一致"时打日志、其余分支静默，线上只看到 403 而答不出原因 ——
+// 这正是 no-referrer ⇒ `Origin: null` 这条 P0 拖到用户投诉才定位的直接原因。
+// 日志**只打头、绝不打 Cookie**（会话明文进日志等于凭证泄漏）。
 func (m *Manager) checkMainOrigin(r *http.Request) bool {
 	want := m.mainOrigin(r)
-	if want == "" {
+	reject := func(reason, detail string) bool {
+		logError("pico-wasm-session: 主站来源校验未通过 reason=%s want=%q %s detail=%s",
+			reason, want, edge.OriginDiagFields(r), detail)
 		return false
+	}
+	if want == "" {
+		return reject("no_expected_origin", "MainOrigin 未配置且请求推导不出自身源（Host 头缺失）")
 	}
 	if cfg := m.configuredMainOrigin(); cfg != "" {
 		if self := edge.SelfOrigin(r); !strings.EqualFold(self, cfg) {
-			logError("pico-wasm-session: 请求源 %s 与配置的 MainOrigin %s 不一致，已拒绝"+
-				"（多域名/别名部署请留空 MainOrigin 以按请求推导）", self, cfg)
-			return false
+			return reject("main_origin_config_mismatch",
+				fmt.Sprintf("请求自身源 self=%q 与配置的 MainOrigin %q 不一致"+
+					"（多域名/别名部署请留空 MainOrigin 以按请求推导）", self, cfg))
 		}
 	}
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
@@ -250,20 +262,30 @@ func (m *Manager) checkMainOrigin(r *http.Request) bool {
 		// 先过一次形态闸：Origin 必须是**源**，带路径/query/userinfo 或 "null"
 		// （sandboxed iframe / data: 文档）一律拒 —— 不能靠"截到源再比"来猜。
 		if !edge.IsOriginShaped(origin) {
-			return false
+			return reject("origin_malformed",
+				"Origin 不是合法的源形态（含路径/query/userinfo，或为字面量 \"null\""+
+					" —— no-referrer 策略下浏览器对同源写请求也发 null，见 pages.go 的策略说明）")
 		}
 		norm := edge.NormalizeOrigin(origin)
 		if norm == "" {
-			return false
+			return reject("origin_unparsable", "Origin 解析不出源")
 		}
-		return strings.EqualFold(norm, want)
+		if !strings.EqualFold(norm, want) {
+			return reject("origin_mismatch",
+				fmt.Sprintf("规范化后 norm=%q ≠ want=%q", norm, want))
+		}
+		return true
 	}
 	ref := strings.TrimSpace(r.Header.Get("Referer"))
 	if ref == "" {
-		return false
+		return reject("origin_and_referer_missing",
+			"Origin 与 Referer 都没有（no-referrer 策略下二者都会被浏览器剥掉）")
 	}
 	low := strings.ToLower(ref)
-	return strings.HasPrefix(low, want+"/") || strings.EqualFold(strings.TrimSuffix(low, "/"), want)
+	if strings.HasPrefix(low, want+"/") || strings.EqualFold(strings.TrimSuffix(low, "/"), want) {
+		return true
+	}
+	return reject("referer_mismatch", fmt.Sprintf("Referer 不以 want=%q 为前缀", want))
 }
 
 // sanitizeNext 把 `next` 规范化成**同基域相对路径**，非法一律回落 `/`（§4.7 原话）。

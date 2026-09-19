@@ -1,15 +1,31 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
+	"github.com/picoaide/picoaide/internal/router"
+	"github.com/picoaide/picoaide/internal/serverauth"
+	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
+	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/wasmapp/memprofile"
 	"github.com/picoaide/picoaide/internal/wasmapp/readyz"
 )
 
@@ -153,7 +169,6 @@ func TestWasmPlatformWiringPresent(t *testing.T) {
 		{"checkStartupMemory(enabled, readMemAvailable(), plan, log.Printf)", "内存四笔账自检必须按 enabled 分档（P2-8）且按部署档位算账"},
 		{"memprofile.FromEnv(os.Getenv)", "内存档位必须来自部署配置（未知档位 fail-loud）"},
 		{"MemoryProfile: prof,", "档位必须真的喂给 appserver（声明与执行同一份数）"},
-		{"OnAppEvict: func(appID string) { appSrv.EvictApp(appID) },", "下架/冻结/删除后必须立即释放进程内驻留"},
 		{"mustRefuseStartupForIsolation(mode, usable)", "require 档必须真的拒绝启动（P2-1）"},
 		{"compile.IsolationFromEnv()", "隔离档必须来自部署配置"},
 		{"events.NewCleanupScheduler(", "7 天保留必须有人来删（P1-2）"},
@@ -221,3 +236,396 @@ func TestUploadCleanupSchedulerIsWired(t *testing.T) {
 		t.Fatal("平台关停后 UploadCleanup 仍是 Running：Close 接线缺失")
 	}
 }
+
+// ensureCompileChildNextToTestBinary 把编译子进程构建到**测试二进制同目录**。
+//
+// setupWasmPlatform 刻意不接 ChildBinary 注入（生产路径就是"server 与子进程同目录"），
+// 所以要让它真的装上编译器、让 api.requireReady 放行，只能把产物放在它找的位置。
+// 同包多次调用共享一份（已存在即跳过）。
+func ensureCompileChildNextToTestBinary(t *testing.T) {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("定位测试二进制失败: %v", err)
+	}
+	out := filepath.Join(filepath.Dir(self), compile.ChildBinaryName)
+	if _, err := os.Stat(out); err == nil {
+		return
+	}
+	rootOut, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}").Output()
+	if err != nil {
+		t.Fatalf("定位模块根失败（需要 go 工具链）: %v", err)
+	}
+	cmd := exec.Command("go", "build", "-o", out, "./cmd/picoaide-app-compile")
+	cmd.Dir = strings.TrimSpace(string(rootOut))
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if b, berr := cmd.CombinedOutput(); berr != nil {
+		t.Fatalf("构建编译子进程失败: %v\n%s", berr, b)
+	}
+}
+
+// TestWasmInstanceMemoryComesFromSettingAfterRestart：P0-2 的**装配级**判据。
+//
+// 现场：控制台保存 instance_memory_mb=32 后只显示"需重启"，而装配期用的是部署档位
+// （`prof.InstanceMemoryPages`）—— 重启也不生效；更糟的是装配期 `ApplyLimits` 的返回值
+// 只进日志，于是重启后 restart_pending 被清空、界面显示"无需重启"，而实际值仍是档位值。
+// 后果是"自检按设置算账、实际按档位跑"，2 GB 机器会 OOM（2026-09-18 决策要防的那条）。
+//
+// 判据分三段（都必须真跑装配，不接受源码文本断言）：
+//  1. runtime 实际生效的页数 = **设置值**折算（不是档位值）；
+//  2. 重启后 restart_pending **为空**（装配期已经用上了设置值，没有"待重启"残留）；
+//  3. GET /wasm-apps/limits 如实反映"值来自控制台设置"，且四笔账的来源标签不是
+//     硬写的 settings（旧实现里 profile 字段恒为 "settings"）。
+//
+// 变异验证：把 appserver.New 改回 `MemoryPages: prof.InstanceMemoryPages`
+// ⇒ 第 1 段必红（2048 ≠ 1024 页）；把 limitsHolder.ApplyStartup 的调用去掉
+// ⇒ 第 2 段在"设置值仍与档位值不同的场景"下必红。
+func TestWasmInstanceMemoryComesFromSettingAfterRestart(t *testing.T) {
+	// 档位固定为 small（64 MiB 实例内存），设置值 128 MiB —— 两者必须不同，
+	// 否则这条用例证明不了"设置赢了档位"。
+	t.Setenv(memprofile.EnvMemoryProfile, "small")
+	prof := memprofile.Small()
+	if prof.InstanceMemoryBytes()>>20 == 128 {
+		t.Fatalf("夹具失效：档位 %s 本身就是 128 MiB", prof.Name)
+	}
+	db := requireRealDB(t)
+	ensureCompileChildNextToTestBinary(t)
+
+	saved := applimits.FromProfile(prof)
+	saved.InstanceMemoryMB = 128
+	saved.MaxInstances = prof.Instances // 3：四笔账在 CI 小机器上也能过水位
+	if err := serverstore.SetSetting(db, SettingWasmLimits, saved.Encode()); err != nil {
+		t.Fatalf("保存限制项设置失败: %v", err)
+	}
+
+	// 装配期有两处 fail-closed 只在启用应用子域时生效（可信代理 / 四笔账），
+	// 显式关掉基域，让用例只回答"内存上限来自哪里"。
+	t.Setenv(EnvAppsBaseDomain, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := setupWasmPlatform(ctx, db, nil, t.TempDir(), "127.0.0.1:8080")
+	if p == nil {
+		t.Fatal("setupWasmPlatform 返回 nil")
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			p.Close()
+		}
+	}()
+
+	// ---- ① runtime 实际值 = 设置值 ----
+	// 128 MiB / 64 KiB = 2048 页。
+	wantPages := uint32(128) * 1024 * 1024 / 65536
+	if got := p.AppServer.InstanceMemoryPages(); got != wantPages {
+		t.Fatalf("runtime 单实例内存页 = %d, want %d（设置 128 MiB；档位 %s = %d MiB）——"+
+			"说明装配期仍按档位建 runtime（P0-2 的现场）",
+			got, wantPages, prof.Name, prof.InstanceMemoryBytes()>>20)
+	}
+	// ---- ② 重启后不应再有"待重启"残留 ----
+	if pending := p.Limits.RestartPending(); len(pending) != 0 {
+		t.Fatalf("重启后 restart_pending = %v, want 空（装配期已按设置值建 runtime）", pending)
+	}
+
+	// ---- ③ GET /wasm-apps/limits 的视图 ----
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	// 管理面身份：生产由 AdminAuth 注入，这里直接放上下文（与 api 包测试同一契约）。
+	r.Use(func(c *gin.Context) {
+		c.Set("admin_user", &serverstore.User{Username: "boss", Role: serverstore.RoleSuperAdmin})
+		c.Next()
+	})
+	// 走 AdminRoute 申报：顺带证明路由真的挂上了、权限点是读。
+	serverauth.AdminRoute(r.Group(router.NamespaceServer+"/admin/wasm-apps"),
+		"GET", "/limits", serverauth.PermCapabilityRead, p.API.AdminLimitsGet)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", router.NamespaceServer+"/admin/wasm-apps/limits", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("GET /wasm-apps/limits = %d: %s", w.Code, w.Body.String())
+	}
+	var view struct {
+		Limits struct {
+			InstanceMemoryMB int `json:"instance_memory_mb"`
+		} `json:"limits"`
+		Source         string   `json:"source"`
+		Profile        string   `json:"profile"`
+		SourceLabel    string   `json:"source_label"`
+		RestartPending []string `json:"restart_pending"`
+		Budget         struct {
+			Profile string `json:"profile"`
+		} `json:"budget"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
+		t.Fatalf("解析 /limits 视图失败: %v; body=%s", err, w.Body.String())
+	}
+	if view.Limits.InstanceMemoryMB != 128 {
+		t.Fatalf("视图 instance_memory_mb = %d, want 128", view.Limits.InstanceMemoryMB)
+	}
+	if view.Source != "setting" {
+		t.Fatalf("视图 source = %q, want setting（值来自控制台保存）", view.Source)
+	}
+	if view.Profile != prof.Name {
+		t.Fatalf("视图必须回显部署档位名 %q，得到 %q", prof.Name, view.Profile)
+	}
+	if len(view.RestartPending) != 0 {
+		t.Fatalf("视图 restart_pending = %v, want 空", view.RestartPending)
+	}
+	// 四笔账的来源标签如实反映来源（旧实现恒为 "settings"，与 source 字段矛盾）。
+	if !strings.Contains(view.Budget.Profile, "setting") {
+		t.Fatalf("四笔账来源标签 = %q，应反映「值来自控制台设置」", view.Budget.Profile)
+	}
+	if view.SourceLabel == "" {
+		t.Fatal("视图必须给出一句可直接显示的来源说明（source_label）")
+	}
+
+	closed = true
+	p.Close()
+}
+
+// TestWasmSavedLimitsFromOlderBuildStillApplies：**升级连续性**的装配级判据。
+//
+// 现场（本次要防的）：已发布的 v2.7.6-beta.4 里 `settings.wasm.limits` 存的是**旧字段
+// 集合**（那时还没有 `app_db_readers`）。读取路径若沿用控制台 PUT 的严格 Parse
+// （"字段必须完整"），升级后这条设置会被判为非法 → 回落部署档位 → 管理员眼前的
+// 并发/内存全部变回档位值（"我的设置没了"），而日志只有一条 warning。
+//
+// 判据：塞一份**缺 app_db_readers** 的旧设置进库 → 真装配 → ①来源仍是 setting；
+// ②旧设置里的已知字段逐字生效（instance_memory_mb=128 真的进了 runtime）；
+// ③缺失的新字段补默认（app_db_readers = limits.AppDBReaders）；④不产生"待重启"残留。
+//
+// 变异验证：把 newWasmLimitsHolder 的读取改回 applimits.Parse ⇒ ①立刻变红
+// （来源退化成 profile，instance_memory_mb 回到 64）。
+func TestWasmSavedLimitsFromOlderBuildStillApplies(t *testing.T) {
+	t.Setenv(memprofile.EnvMemoryProfile, "small")
+	db := requireRealDB(t)
+	ensureCompileChildNextToTestBinary(t)
+
+	// 旧版本落库形态：字段集合停在 v2.7.6-beta.4（无 app_db_readers）。
+	const oldSetting = `{"max_instances":3,"app_running":2,"app_queue":16,` +
+		`"user_global_running":2,"user_per_app_running":1,"user_per_app_queued":2,` +
+		`"instance_memory_mb":128,"module_cache_mb":64,"module_cache_idle_min":10,` +
+		`"appdb_idle_min":3,"appdb_cache_kib":512}`
+	if err := serverstore.SetSetting(db, SettingWasmLimits, oldSetting); err != nil {
+		t.Fatalf("写入旧版限制项设置失败: %v", err)
+	}
+
+	t.Setenv(EnvAppsBaseDomain, "") // 关掉两处只在启用子域时生效的 fail-closed
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := setupWasmPlatform(ctx, db, nil, t.TempDir(), "127.0.0.1:8080")
+	if p == nil {
+		t.Fatal("setupWasmPlatform 返回 nil")
+	}
+	defer p.Close()
+
+	if got := p.Limits.Source(); got != "setting" {
+		t.Fatalf("设置来源 = %q，want setting —— 旧字段集合的设置被判非法并回落档位了"+
+			"（读取路径必须前向兼容，见 applimits.ParseStored）", got)
+	}
+	l := p.Limits.Get()
+	if l.InstanceMemoryMB != 128 || l.AppRunning != 2 {
+		t.Fatalf("旧设置里的已知字段必须逐字生效，得到 %s", l.Encode())
+	}
+	if l.AppDBCacheKiB != 512 {
+		t.Fatalf("appdb_cache_kib 应保留 512，得到 %d", l.AppDBCacheKiB)
+	}
+	if l.AppDBReaders != limits.AppDBReaders {
+		t.Fatalf("缺失的新字段应补默认 %d，得到 %d", limits.AppDBReaders, l.AppDBReaders)
+	}
+	// 128 MiB / 64 KiB = 2048 页：证明"设置真的进了执行侧 runtime"，不是只读了个数。
+	wantPages := uint32(128) * 1024 * 1024 / 65536
+	if got := p.AppServer.InstanceMemoryPages(); got != wantPages {
+		t.Fatalf("runtime 单实例内存页 = %d，want %d（旧设置应照常生效）", got, wantPages)
+	}
+	if pending := p.Limits.RestartPending(); len(pending) != 0 {
+		t.Fatalf("旧设置装配后不该有「待重启」残留，得到 %v", pending)
+	}
+}
+
+// ===== P1-8：管理端下架/冻结 → 逐出进程内驻留（装配级行为断言）=====
+//
+// 为什么不再用源码 grep：旧门禁只断言 `OnAppEvict: func(appID string) {...}` 这行
+// 字符串还在，**分不清"接上了"与"handler 从不调用"** —— 而缺陷正是后者（管理端
+// 处置不逐出，发布者路径逐出），于是它一路绿灯。
+//
+// 现在这条用例走完整条链：真装配 → 暖一个真实模块进模块缓存 → 调**真实的**
+// 管理端 handler（经 AdminRoute 挂载、真实鉴权中间件位置）→ 断言缓存条目归零。
+// 模型侧的两个 API 用例（api/admin_evict_test.go）用记账假钩子钉住"handler 调用钩子"，
+// 两条合起来覆盖整条链。
+//
+// 变异验证：去掉 adminUnpublish / adminFreeze 里的 h.evictApp(appID)
+// ⇒ 本用例对应断言必红（缓存条目仍是 1）。
+func TestWasmAdminDisposalEvictsRuntimeCache(t *testing.T) {
+	t.Setenv(EnvAppsBaseDomain, "") // 关掉子域自检；本用例只回答"处置有没有逐出"
+	db := requireRealDB(t)
+	ensureCompileChildNextToTestBinary(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dataRoot := t.TempDir()
+	p := setupWasmPlatform(ctx, db, nil, dataRoot, "127.0.0.1:8080")
+	if p == nil {
+		t.Fatal("setupWasmPlatform 返回 nil")
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			p.Close()
+		}
+	}()
+
+	// ---- 造一个"已生效"的应用：直接落库 + 按 §4.2 布局写资源目录 ----
+	// （不走发布链路：那是 api/appserver 两个包的用例已经覆盖的部分；这里要的是
+	//  "有一个能被真的编译并进入模块缓存的生效版本"。）
+	const appID = "evict-assembly"
+	cfgJSON := `{"access":"public","purpose":"逐出链路测试","data_sensitivity":"internal"}`
+	if _, err := serverstore.CreateUser(db, &serverstore.User{Username: "alice", Source: "local", Status: 1, Role: serverstore.RoleUser}); err != nil {
+		t.Fatalf("建用户失败: %v", err)
+	}
+	if err := serverstore.UpsertWasmApp(ctx, db, serverstore.WasmApp{
+		AppID: appID, Title: "逐出测试", Owner: "alice",
+		Channel: serverstore.AppChannelWasm, Enabled: true,
+		Purpose: "逐出链路测试", DataSensitivity: "internal", ConfigJSON: cfgJSON,
+	}); err != nil {
+		t.Fatalf("落应用行失败: %v", err)
+	}
+	relID, err := serverstore.CreateWasmRelease(ctx, db, serverstore.WasmRelease{
+		AppID: appID, Version: "1.0.0", Title: "逐出测试", Publisher: "alice",
+		Status: serverstore.ReleaseStatusApproved, Wasm: refAppModule(t), ConfigJSON: cfgJSON,
+	})
+	if err != nil {
+		t.Fatalf("落版本行失败: %v", err)
+	}
+	if err := serverstore.SetWasmAppCurrentRelease(ctx, db, appID, relID); err != nil {
+		t.Fatalf("置生效版本失败: %v", err)
+	}
+	assetsDir := filepath.Join(dataRoot, limits.AppsDirName, appID, assets.AssetsDirName,
+		strconv.FormatInt(relID, 10))
+	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
+		t.Fatalf("建资源目录失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(assetsDir, limits.AppConfigFileName), []byte(cfgJSON), 0o644); err != nil {
+		t.Fatalf("写应用配置失败: %v", err)
+	}
+
+	serve := func() {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		p.AppServer.ServeApp(rec, httptest.NewRequest("GET", "http://"+appID+".example.com/", nil), appID)
+		if rec.Code != 200 {
+			t.Fatalf("应用子域请求 = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// ---- 暖机：首个请求冷编译，模块进缓存 ----
+	serve()
+	if got := p.AppServer.CachedModuleCount(); got != 1 {
+		t.Fatalf("暖机后模块缓存条目 = %d, want 1（冷编译没进缓存，后面的断言就没有意义）", got)
+	}
+
+	// ---- 管理端下架 ⇒ 逐出 ----
+	admin := newWasmAdminCaller(t, p)
+	admin.post("/unpublish", appID, nil)
+	if got := p.AppServer.CachedModuleCount(); got != 0 {
+		t.Fatalf("管理员下架后模块缓存仍有 %d 条：管理端没有逐出进程内驻留（P1-8）", got)
+	}
+
+	// ---- 再上架 + 再暖机 + 冻结 ⇒ 逐出 ----
+	admin.post("/publish", appID, nil)
+	serve()
+	if got := p.AppServer.CachedModuleCount(); got != 1 {
+		t.Fatalf("重新上架后暖机条目 = %d, want 1", got)
+	}
+	admin.post("/freeze", appID, nil)
+	if got := p.AppServer.CachedModuleCount(); got != 0 {
+		t.Fatalf("管理员冻结后模块缓存仍有 %d 条：管理端没有逐出进程内驻留（P1-8）", got)
+	}
+
+	closed = true
+	p.Close()
+}
+
+// wasmAdminCaller 把管理端 handler 挂在**生产路径 + AdminRoute** 上调用
+// （参数绑定/权限申报与生产同一形状；身份由中间件直接注入，与 api 包测试同一契约）。
+type wasmAdminCaller struct {
+	t *testing.T
+	r *gin.Engine
+	p *wasmPlatform
+}
+
+func newWasmAdminCaller(t *testing.T, p *wasmPlatform) *wasmAdminCaller {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("admin_user", &serverstore.User{Username: "boss", Role: serverstore.RoleSuperAdmin})
+		c.Next()
+	})
+	g := r.Group(router.NamespaceServer + "/admin/wasm-apps")
+	serverauth.AdminRoute(g, "POST", "/:app_id/unpublish", serverauth.PermCapabilityWrite, p.API.AdminUnpublish)
+	serverauth.AdminRoute(g, "POST", "/:app_id/publish", serverauth.PermCapabilityWrite, p.API.AdminPublish)
+	serverauth.AdminRoute(g, "POST", "/:app_id/freeze", serverauth.PermCapabilityWrite, p.API.AdminFreeze)
+	return &wasmAdminCaller{t: t, r: r, p: p}
+}
+
+func (a *wasmAdminCaller) post(action, appID string, body any) {
+	a.t.Helper()
+	var reader *bytes.Reader
+	if body == nil {
+		reader = bytes.NewReader(nil)
+	} else {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			a.t.Fatalf("序列化请求体失败: %v", err)
+		}
+		reader = bytes.NewReader(raw)
+	}
+	req := httptest.NewRequest("POST",
+		router.NamespaceServer+"/admin/wasm-apps/"+appID+action, reader)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	a.r.ServeHTTP(w, req)
+	if w.Code != 200 {
+		a.t.Fatalf("管理端 %s %s = %d; body=%s", action, appID, w.Code, w.Body.String())
+	}
+}
+
+// refAppModule 现场编译参考实现为 wasip1 模块（整包复用一次）。
+//
+// 用 refapp 而不是最小空模块：它能读请求帧并写出合法响应帧，因此 ServeApp 能真的
+// 走完"编译 → 实例化 → 调用 → 响应"（缓存里才会留下模块）。
+func refAppModule(t *testing.T) []byte {
+	t.Helper()
+	refAppOnce.Do(func() {
+		rootOut, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}").Output()
+		if err != nil {
+			refAppErr = err
+			return
+		}
+		dir, err := os.MkdirTemp("", "picoaide-cmdserver-refapp-")
+		if err != nil {
+			refAppErr = err
+			return
+		}
+		out := filepath.Join(dir, "refapp.wasm")
+		cmd := exec.Command("go", "build", "-o", out, "./internal/wasmapp/refapp")
+		cmd.Dir = strings.TrimSpace(string(rootOut))
+		cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0")
+		if b, berr := cmd.CombinedOutput(); berr != nil {
+			refAppErr = fmt.Errorf("构建 refapp 失败: %v\n%s", berr, b)
+			return
+		}
+		refAppBytes, refAppErr = os.ReadFile(out)
+	})
+	if refAppErr != nil {
+		t.Fatalf("%v", refAppErr)
+	}
+	return refAppBytes
+}
+
+var (
+	refAppOnce  sync.Once
+	refAppBytes []byte
+	refAppErr   error
+)

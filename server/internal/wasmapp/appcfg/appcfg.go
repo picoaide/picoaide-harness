@@ -344,8 +344,13 @@ func (c Config) Validate(requireDeclarations bool) *apperr.Error {
 }
 
 // accessHintValues 是 access 的三选一提示（唯一实现，供多处报错复用）。
+//
+// `whitelist` 那句必须写清**平台不比对名单**（R24）：说成"要求登录 + 名单准入"
+// 会让作者以为填了名单平台就会拦，于是他写出一个对所有人开放的应用 ——
+// 客户端的同名文案（`locales.ts` 的 `appCenter.access.whitelistHint`）已经是正确
+// 口径（"平台不比对名单、由应用自己判"），这里的服务端 hint 与它对齐。
 func accessHintValues() string {
-	return fmt.Sprintf("`access` = %q（允许匿名）｜ %q（要求登录，登录后全员可用，缺省）｜ %q（要求登录 + 名单）",
+	return fmt.Sprintf("`access` = %q（允许匿名）｜ %q（要求登录，登录后全员可用，缺省）｜ %q（要求登录；名单只给应用自己读，平台不比对）",
 		AccessPublic, AccessLogin, AccessWhitelist)
 }
 

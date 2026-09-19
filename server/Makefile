@@ -57,11 +57,11 @@ webadmin:
 # 用法:make docker-image 或 make docker-image IMAGE=ghcr.io/picoaide/picoaide-harness-server TAG=v0.4.0
 docker-image:
 	@echo "  构建镜像 $(IMAGE):$(TAG) (VERSION=$(VERSION))"
-	@# skillassets：内置技能资产（镜像内 /opt/picoaide/skills）。源头是 vendored
-	@# 插件包里的 skills/ —— 只有一份，不在 server/ 下再复制一份（漂移会让员工装到
-	@# 的技能与仓库里评审过的那份不是同一个东西）。
+	@# 内置技能资产（镜像内 /opt/picoaide/skills）就在本构建上下文里：
+	@# server/skills/<name>/ —— 随镜像分发，客户端在能力中心按需安装。
+	@# 曾经用 --build-context skillassets=../packages/vendor/memory-evolve 从
+	@# 客户端 vendored 插件包取，2026-09-19 起源头归位服务端，不再需要该上下文。
 	docker build --build-arg VERSION=$(VERSION) \
-	  --build-context skillassets=../packages/vendor/memory-evolve \
 	  -t $(IMAGE):$(TAG) .
 
 # 离线镜像导出已移出仓库:发布流程由 CI 在 tag 时产出 tar 上传更新服务器,

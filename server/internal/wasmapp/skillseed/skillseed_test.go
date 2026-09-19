@@ -23,7 +23,7 @@ import (
 // repoSkillDir 是本仓真实的内置技能目录（打包资产的源头）。
 // 测试直接打真资产：换成构造样本的话，「内置资产能不能过服务端校验」这条
 // 最该被钉住的断言就变成自说自话。
-const repoSkillDir = "../../../../packages/vendor/memory-evolve/skills/picoaide-app-builder"
+const repoSkillDir = "../../../../server/skills/app-builder"
 
 func testRouter(h *Handlers) *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -83,11 +83,11 @@ func TestRealAssetPassesServerManifestValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListContents: %v", err)
 	}
-	m, err := skillmanifest.Parse(entries, skillMD, "picoaide-app-builder")
+	m, err := skillmanifest.Parse(entries, skillMD, "app-builder")
 	if err != nil {
 		t.Fatalf("skillmanifest.Parse 必须通过（内置技能走与上传完全相同的校验）: %v", err)
 	}
-	if m.AppID != "picoaide-app-builder" || m.Version != "1.0.0" {
+	if m.AppID != "app-builder" || m.Version != "1.0.0" {
 		t.Fatalf("manifest = %q/%q", m.AppID, m.Version)
 	}
 	if m.Title == "" || m.Author == "" || m.Category == "" {
@@ -271,7 +271,7 @@ func TestArchiveutilStillRejectsTraversalArchive(t *testing.T) {
 
 func TestCatalogLoadsRealAssetAndServesContract(t *testing.T) {
 	dir := t.TempDir()
-	copyTree(t, repoSkillDir, filepath.Join(dir, "picoaide-app-builder"))
+	copyTree(t, repoSkillDir, filepath.Join(dir, "app-builder"))
 	c := New(dir)
 	h := NewHandlers(c)
 	r := testRouter(h)
@@ -295,7 +295,7 @@ func TestCatalogLoadsRealAssetAndServesContract(t *testing.T) {
 		t.Fatalf("skills = %d, want 1", len(payload.Skills))
 	}
 	row := payload.Skills[0]
-	if row.Name != "picoaide-app-builder" || row.Version != "1.0.0" || row.Source != "builtin" {
+	if row.Name != "app-builder" || row.Version != "1.0.0" || row.Source != "builtin" {
 		t.Fatalf("row = %+v", row)
 	}
 	if row.Title == "" || row.Description == "" || row.Author == "" || row.Category == "" {
@@ -306,7 +306,7 @@ func TestCatalogLoadsRealAssetAndServesContract(t *testing.T) {
 	}
 
 	// 归档 + 两个契约响应头
-	w = doGet(t, r, "/api/client/v2/skills/builtin/picoaide-app-builder/archive")
+	w = doGet(t, r, "/api/client/v2/skills/builtin/app-builder/archive")
 	if w.Code != http.StatusOK {
 		t.Fatalf("archive = %d %s", w.Code, w.Body.String())
 	}
@@ -324,7 +324,7 @@ func TestCatalogLoadsRealAssetAndServesContract(t *testing.T) {
 	if got := w.Header().Get("X-Skill-Version"); got != "1.0.0" {
 		t.Fatalf("X-Skill-Version = %q", got)
 	}
-	if !strings.Contains(w.Header().Get("Content-Disposition"), "picoaide-app-builder-1.0.0.tar.gz") {
+	if !strings.Contains(w.Header().Get("Content-Disposition"), "app-builder-1.0.0.tar.gz") {
 		t.Fatalf("Content-Disposition = %q", w.Header().Get("Content-Disposition"))
 	}
 	// 正文必须真的是 tar.gz 且能过 archiveutil（客户端装的就是这份字节）。
@@ -350,7 +350,7 @@ func TestCatalogLoadsRealAssetAndServesContract(t *testing.T) {
 // 这里把真资产的 version 删掉 —— manifest 校验少一个必填字段。
 func TestCatalogDropsBrokenAssetAndRecordsProblem(t *testing.T) {
 	root := t.TempDir()
-	target := filepath.Join(root, "picoaide-app-builder")
+	target := filepath.Join(root, "app-builder")
 	copyTree(t, repoSkillDir, target)
 	raw, err := os.ReadFile(filepath.Join(target, SkillFile))
 	if err != nil {
@@ -427,6 +427,167 @@ func TestExportArchiveForE2E(t *testing.T) {
 	}
 	sum := sha256.Sum256(archive)
 	t.Logf("exported %d bytes / %d files / sha256=%s", len(archive), files, hex.EncodeToString(sum[:]))
+}
+
+// ===== 管理端只读诊断面（GET /api/server/admin/skills/builtin，2026-09-19）=====
+//
+// 用户原话「我在能力中心里看不到这个」的背后是管理端**完全没有内置技能面**：
+// 服务端带了什么技能、哪条技能因为什么被跳过，只有启动日志里能看到。这些用例钉住
+// 诊断面的三条形状：正常、坏了（200 + problems 而非空数组）、目录不存在。
+
+// adminTestRouter 与生产同路径（权限/认证在 router 包另行钉住）。
+func adminTestRouter(h *Handlers) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/api/server/admin/skills/builtin", h.AdminListBuiltin)
+	return r
+}
+
+func TestAdminListBuiltinReportsRealAsset(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, repoSkillDir, filepath.Join(dir, "app-builder"))
+	h := NewHandlers(New(dir))
+	w := doGet(t, adminTestRouter(h), "/api/server/admin/skills/builtin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin list = %d %s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Dir      string `json:"dir"`
+		DirExist bool   `json:"dir_exists"`
+		Skills   []struct {
+			Name, Version, Title, Description, Author, Category, SHA256 string
+			Size                                                        int64
+			Files                                                       int
+		} `json:"skills"`
+		Problems []struct{ Name, Reason string } `json:"problems"`
+		Counts   struct {
+			Skills   int `json:"skills"`
+			Problems int `json:"problems"`
+		} `json:"counts"`
+		LoadError string `json:"load_error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("admin list JSON: %v", err)
+	}
+	if payload.Dir != dir || !payload.DirExist {
+		t.Fatalf("诊断面必须回显扫描目录与存在性: dir=%q exists=%v", payload.Dir, payload.DirExist)
+	}
+	if payload.LoadError != "" {
+		t.Fatalf("正常扫描不得带 load_error: %q", payload.LoadError)
+	}
+	if len(payload.Skills) != 1 || payload.Skills[0].Name != "app-builder" {
+		t.Fatalf("skills = %+v", payload.Skills)
+	}
+	row := payload.Skills[0]
+	if row.Version != "1.0.0" || len(row.SHA256) != 64 || row.Size <= 0 || row.Files < 10 {
+		t.Fatalf("管理端清单必须带 version/sha256/size/files: %+v", row)
+	}
+	if row.Title == "" || row.Author == "" || row.Category == "" || row.Description == "" {
+		t.Fatalf("管理端清单必须带展示元数据: %+v", row)
+	}
+	if len(payload.Problems) != 0 {
+		t.Fatalf("正常资产不得有 problems: %+v", payload.Problems)
+	}
+	// 空数组而不是 null：前端不必判空。
+	if !strings.Contains(w.Body.String(), `"problems":[]`) {
+		t.Fatalf("problems 必须是 []（不是 null）: %s", w.Body.String())
+	}
+	if payload.Counts.Skills != 1 || payload.Counts.Problems != 0 {
+		t.Fatalf("counts = %+v", payload.Counts)
+	}
+}
+
+// 这是本次新增面的**核心价值**：技能坏掉时客户端只看到"空清单"，管理端必须看到
+// 「哪条技能 + 为什么」—— 而且必须仍是 200（页面要能渲染出来）。
+func TestAdminListBuiltinReportsSkippedSkillWithReason(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "app-builder")
+	copyTree(t, repoSkillDir, target)
+	raw, err := os.ReadFile(filepath.Join(target, SkillFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken := strings.Replace(string(raw), "version: 1.0.0\n", "", 1)
+	if broken == string(raw) {
+		t.Fatal("前置：未能从 SKILL.md 删掉 version")
+	}
+	if err := os.WriteFile(filepath.Join(target, SkillFile), []byte(broken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandlers(New(root))
+	w := doGet(t, adminTestRouter(h), "/api/server/admin/skills/builtin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("坏资产也必须 200（页面要能显示原因），得到 %d %s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		DirExist bool                            `json:"dir_exists"`
+		Skills   []struct{ Name string }         `json:"skills"`
+		Problems []struct{ Name, Reason string } `json:"problems"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("admin list JSON: %v", err)
+	}
+	if !payload.DirExist {
+		t.Fatal("目录存在（只是内容坏了），dir_exists 必须为 true")
+	}
+	if len(payload.Skills) != 0 {
+		t.Fatalf("坏资产不得进清单: %+v", payload.Skills)
+	}
+	if len(payload.Problems) != 1 || payload.Problems[0].Name != "app-builder" {
+		t.Fatalf("必须点名被跳过的技能: %+v", payload.Problems)
+	}
+	if !strings.Contains(payload.Problems[0].Reason, "version") {
+		t.Fatalf("必须带上原因（含字段名 version）: %q", payload.Problems[0].Reason)
+	}
+}
+
+// 「目录名 ≠ frontmatter name」是**最隐蔽**的一种坏法（skillseed 用目录名当
+// declaredAppID 调 skillmanifest.Parse）：接口 200 + 空数组 + 一句日志。
+// 诊断面必须把它讲清楚。
+func TestAdminListBuiltinExplainsDirNameMismatch(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "app-builder")
+	copyTree(t, repoSkillDir, target)
+	raw, err := os.ReadFile(filepath.Join(target, SkillFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatch := strings.Replace(string(raw), "name: app-builder", "name: picoaide-app-builder", 1)
+	if mismatch == string(raw) {
+		t.Fatal("前置：未能改写 frontmatter name")
+	}
+	if err := os.WriteFile(filepath.Join(target, SkillFile), []byte(mismatch), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w := doGet(t, adminTestRouter(NewHandlers(New(root))), "/api/server/admin/skills/builtin")
+	var payload struct {
+		Skills   []struct{ Name string }         `json:"skills"`
+		Problems []struct{ Name, Reason string } `json:"problems"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("admin list JSON: %v", err)
+	}
+	if w.Code != http.StatusOK || len(payload.Skills) != 0 || len(payload.Problems) != 1 {
+		t.Fatalf("目录名与 name 不一致必须只记问题、不进清单: %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(payload.Problems[0].Reason, "必须等于") {
+		t.Fatalf("原因必须说明目录名/name 一致性: %q", payload.Problems[0].Reason)
+	}
+}
+
+func TestAdminListBuiltinMissingDirIsNotAnError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope")
+	w := doGet(t, adminTestRouter(NewHandlers(New(missing))), "/api/server/admin/skills/builtin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("目录不存在不是故障（本地直跑二进制就是这种形态）: %d %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"dir_exists":false`) || !strings.Contains(body, `"skills":[]`) {
+		t.Fatalf("必须诚实说明「没有这个目录」而不是报错: %s", body)
+	}
+	if !strings.Contains(body, `"problems":[]`) {
+		t.Fatalf("problems 必须是 []: %s", body)
+	}
 }
 
 // copyTree 递归复制目录（测试夹具；符号链接不可用时使用）。

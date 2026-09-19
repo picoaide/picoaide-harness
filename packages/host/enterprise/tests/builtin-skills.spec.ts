@@ -33,7 +33,7 @@ import { APP_BUILDER_SKILL, builtinSkillInstallHint, isBuiltinSkillInstalled } f
 import { readProvenance, resolveSkillsDir } from '../src/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
-const SOURCE_SKILL_DIR = join(__dirname, '..', '..', '..', 'vendor', 'memory-evolve', 'skills', 'picoaide-app-builder')
+const SOURCE_SKILL_DIR = join(__dirname, '..', '..', '..', '..', 'server', 'skills', 'app-builder')
 
 const SESSION: Session = {
   serverURL: 'https://harness.example',
@@ -184,7 +184,7 @@ function stubServer(archive: Buffer, opts: { checksum?: string | null, version?:
     if (href.endsWith('/api/client/v2/skills/builtin')) {
       if (opts.status !== undefined) return new Response('{}', { status: opts.status })
       return new Response(JSON.stringify({
-        skills: [{ name: 'picoaide-app-builder', version: '1.0.0', title: 'PicoAide 应用构建', description: '写一个 WASM 应用', source: 'builtin' }],
+        skills: [{ name: 'app-builder', version: '1.0.0', title: 'PicoAide 应用构建', description: '写一个 WASM 应用', source: 'builtin' }],
       }), { status: 200, headers: { 'content-type': 'application/json' } })
     }
     if (href.includes('/api/client/v2/skills/builtin/') && href.endsWith('/archive')) {
@@ -228,7 +228,7 @@ describe('内置技能：清单与按需安装（服务端下发 → 本机技�
     const h = harness(SESSION)
     const res = await h.call('/api/pico/skills/builtin')
     expect(res.code).toBe(200)
-    expect(res.body.skills?.[0]?.name).toBe('picoaide-app-builder')
+    expect(res.body.skills?.[0]?.name).toBe('app-builder')
     expect(res.body.installed).toEqual([])
   })
 
@@ -236,14 +236,14 @@ describe('内置技能：清单与按需安装（服务端下发 → 本机技�
     const archive = await packSkillTarGz(SOURCE_SKILL_DIR)
     stubServer(archive)
     const h = harness(SESSION)
-    const res = await h.call('/api/pico/skills/builtin/picoaide-app-builder/install', 'POST')
+    const res = await h.call('/api/pico/skills/builtin/app-builder/install', 'POST')
     expect(res.code, JSON.stringify(res.body)).toBe(200)
-    expect(res.body).toMatchObject({ ok: true, name: 'picoaide-app-builder', version: '1.0.0' })
+    expect(res.body).toMatchObject({ ok: true, name: 'app-builder', version: '1.0.0' })
 
     // 落点就是能力中心市场技能那个根（上游 skill-filesystem 的 user-dsh root）。
     const skillsDir = resolveSkillsDir()
     expect(skillsDir).toBe(join(home, 'skills'))
-    const installed = join(skillsDir, 'picoaide-app-builder')
+    const installed = join(skillsDir, 'app-builder')
 
     // 源目录的每个文件都必须在，且逐字节一致（整目录：正文 + references + examples）。
     const source = await listFiles(SOURCE_SKILL_DIR)
@@ -268,41 +268,41 @@ describe('内置技能：清单与按需安装（服务端下发 → 本机技�
     const archive = await packSkillTarGz(SOURCE_SKILL_DIR)
     stubServer(archive, { checksum: 'deadbeef'.repeat(8) })
     const h = harness(SESSION)
-    const res = await h.call('/api/pico/skills/builtin/picoaide-app-builder/install', 'POST')
+    const res = await h.call('/api/pico/skills/builtin/app-builder/install', 'POST')
     expect(res.code).toBe(422)
     expect(String(res.body.error)).toMatch(/checksum/u)
     // 拒绝时必须什么都没落下（不能留半安装状态）。
-    await expect(stat(join(resolveSkillsDir(), 'picoaide-app-builder'))).rejects.toThrow()
+    await expect(stat(join(resolveSkillsDir(), 'app-builder'))).rejects.toThrow()
   })
 
   it('完整性头缺失 → fail-closed 拒绝（内置技能没有"跳过校验"这条路径）', async () => {
     const archive = await packSkillTarGz(SOURCE_SKILL_DIR)
     stubServer(archive, { checksum: null })
     const h = harness(SESSION)
-    const missingChecksum = await h.call('/api/pico/skills/builtin/picoaide-app-builder/install', 'POST')
+    const missingChecksum = await h.call('/api/pico/skills/builtin/app-builder/install', 'POST')
     expect(missingChecksum.code).toBe(502)
     expect(String(missingChecksum.body.error)).toMatch(/integrity headers/u)
 
     stubServer(archive, { version: null })
     const h2 = harness(SESSION)
-    const missingVersion = await h2.call('/api/pico/skills/builtin/picoaide-app-builder/install', 'POST')
+    const missingVersion = await h2.call('/api/pico/skills/builtin/app-builder/install', 'POST')
     expect(missingVersion.code).toBe(502)
-    await expect(stat(join(resolveSkillsDir(), 'picoaide-app-builder'))).rejects.toThrow()
+    await expect(stat(join(resolveSkillsDir(), 'app-builder'))).rejects.toThrow()
   })
 
   it('归档含 ../ 穿越 → 拒绝，且磁盘上不留任何东西', async () => {
     // 手搓一个带 `../evil.txt` 的 tar.gz（绕过打包侧）：安装器必须拒。
     const traversing = packRawTarGz([
       { name: '../evil.txt', body: 'pwned' },
-      { name: 'SKILL.md', body: '---\nname: picoaide-app-builder\ndescription: x\n---\nbody' },
+      { name: 'SKILL.md', body: '---\nname: app-builder\ndescription: x\n---\nbody' },
     ])
 
     stubServer(traversing)
     const h = harness(SESSION)
-    const res = await h.call('/api/pico/skills/builtin/picoaide-app-builder/install', 'POST')
+    const res = await h.call('/api/pico/skills/builtin/app-builder/install', 'POST')
     expect(res.code).toBe(422)
     expect(String(res.body.error)).toMatch(/traversal|unsafe|absolute/u)
-    await expect(stat(join(resolveSkillsDir(), 'picoaide-app-builder'))).rejects.toThrow()
+    await expect(stat(join(resolveSkillsDir(), 'app-builder'))).rejects.toThrow()
   })
 
   it('认证与审计角色：未登录 401、auditor 写面 403（与市场安装同口径）', async () => {
@@ -314,9 +314,9 @@ describe('内置技能：清单与按需安装（服务端下发 → 本机技�
 
     stubServer(archive)
     const auditor = harness({ ...SESSION, role: 'auditor' })
-    const denied = await auditor.call('/api/pico/skills/builtin/picoaide-app-builder/install', 'POST')
+    const denied = await auditor.call('/api/pico/skills/builtin/app-builder/install', 'POST')
     expect(denied.code).toBe(403)
-    await expect(stat(join(resolveSkillsDir(), 'picoaide-app-builder'))).rejects.toThrow()
+    await expect(stat(join(resolveSkillsDir(), 'app-builder'))).rejects.toThrow()
   })
 
   it('旧版服务端没有内置技能端点 → 原样透传状态码（面板据此隐藏整块）', async () => {
@@ -339,11 +339,11 @@ describe('内置技能：清单与按需安装（服务端下发 → 本机技�
 
 describe('工具面用的共享判定：技能装了没有 + 指路文案', () => {
   it('isBuiltinSkillInstalled 只看磁盘事实（<dshHome>/skills/<name>/SKILL.md）', async () => {
-    expect(APP_BUILDER_SKILL).toBe('picoaide-app-builder')
+    expect(APP_BUILDER_SKILL).toBe('app-builder')
     expect(await isBuiltinSkillInstalled()).toBe(false)
-    const dir = join(resolveSkillsDir(), 'picoaide-app-builder')
+    const dir = join(resolveSkillsDir(), 'app-builder')
     await mkdir(dir, { recursive: true })
-    await writeFile(join(dir, 'SKILL.md'), '---\nname: picoaide-app-builder\ndescription: x\n---\nbody', 'utf8')
+    await writeFile(join(dir, 'SKILL.md'), '---\nname: app-builder\ndescription: x\n---\nbody', 'utf8')
     expect(await isBuiltinSkillInstalled()).toBe(true)
     // 目录在但没有 SKILL.md 不算装好（半安装状态不得被当成可用）。
     expect(await isBuiltinSkillInstalled('other-skill')).toBe(false)
@@ -351,11 +351,11 @@ describe('工具面用的共享判定：技能装了没有 + 指路文案', () =
 
   it('指路文案按宿主语言取，并点名技能与可执行入口（能力中心）', () => {
     const zh = builtinSkillInstallHint('zh')
-    expect(zh).toContain('picoaide-app-builder')
+    expect(zh).toContain('app-builder')
     expect(zh).toContain('能力中心')
     expect(zh).toContain('安装')
     const en = builtinSkillInstallHint('en')
-    expect(en).toContain('picoaide-app-builder')
+    expect(en).toContain('app-builder')
     expect(en).toContain('Capability Hub')
     expect(en).toContain('Install')
     expect(zh).not.toBe(en)
@@ -363,7 +363,7 @@ describe('工具面用的共享判定：技能装了没有 + 指路文案', () =
 })
 
 describe('内置技能区：按钮语义与端点（纯函数）', () => {
-  const skill: BuiltinSkill = { name: 'picoaide-app-builder', version: '1.2.0' }
+  const skill: BuiltinSkill = { name: 'app-builder', version: '1.2.0' }
 
   it('未装 → 安装；已装同版本 → 已安装；已装旧版本 → 更新（版本比较是数值感知的）', () => {
     expect(builtinAction('1.0.0', undefined, false)).toBe('install')
@@ -376,8 +376,8 @@ describe('内置技能区：按钮语义与端点（纯函数）', () => {
   })
 
   it('安装端点固定走宿主代理（不直连服务端），覆盖安装带 force', () => {
-    expect(builtinInstallEndpoint(skill.name, false)).toBe('/api/pico/skills/builtin/picoaide-app-builder/install')
-    expect(builtinInstallEndpoint(skill.name, true)).toBe('/api/pico/skills/builtin/picoaide-app-builder/install?force=1')
+    expect(builtinInstallEndpoint(skill.name, false)).toBe('/api/pico/skills/builtin/app-builder/install')
+    expect(builtinInstallEndpoint(skill.name, true)).toBe('/api/pico/skills/builtin/app-builder/install?force=1')
     // 名字里的路径字符必须被转义（不给服务端拼路径的机会）。
     expect(builtinInstallEndpoint('../evil', false)).toBe('/api/pico/skills/builtin/..%2Fevil/install')
   })
@@ -390,9 +390,9 @@ describe('内置技能区：按钮语义与端点（纯函数）', () => {
 describe('内置技能行的按钮区状态：失败只影响那一行', () => {
   it('未装 ⇒ action；装好 ⇒ installed；正在装 ⇒ busy', () => {
     const none = { installed: [], busy: null, failedName: null }
-    expect(builtinRowState('picoaide-app-builder', none)).toBe('action')
-    expect(builtinRowState('picoaide-app-builder', { ...none, installed: ['picoaide-app-builder'] })).toBe('installed')
-    expect(builtinRowState('picoaide-app-builder', { ...none, busy: 'picoaide-app-builder' })).toBe('busy')
+    expect(builtinRowState('app-builder', none)).toBe('action')
+    expect(builtinRowState('app-builder', { ...none, installed: ['app-builder'] })).toBe('installed')
+    expect(builtinRowState('app-builder', { ...none, busy: 'app-builder' })).toBe('busy')
   })
 
   it('**一行失败不影响其它行**（曾经的形态：全局 failed ⇒ 所有行变错误文案、无按钮、无重试）', () => {
@@ -400,7 +400,7 @@ describe('内置技能行的按钮区状态：失败只影响那一行', () => {
     // 失败的那一行：显示错误 + 重试（渲染层据此出重试按钮）。
     expect(builtinRowState('broken-skill', state)).toBe('failed')
     // 其它行：**仍然是可点的 action**，不能被一句全局错误连坐。
-    expect(builtinRowState('picoaide-app-builder', state)).toBe('action')
+    expect(builtinRowState('app-builder', state)).toBe('action')
     expect(builtinRowState('another-skill', state)).toBe('action')
   })
 
@@ -420,19 +420,19 @@ describe('内置技能行的按钮区状态：失败只影响那一行', () => {
 
 describe('内置技能以普通卡片渲染：只渲染未安装的、参与搜索与筛选', () => {
   const ROWS = [
-    { name: 'picoaide-app-builder', version: '1.0.0', title: 'PicoAide 应用构建（WASM 应用）', description: '用 Go 写一个应用平台上的 WASM 应用', author: 'PicoAide', category: '应用开发' },
+    { name: 'app-builder', version: '1.0.0', title: 'PicoAide 应用构建（WASM 应用）', description: '用 Go 写一个应用平台上的 WASM 应用', author: 'PicoAide', category: '应用开发' },
     { name: 'another-builtin', version: '2.0.0', title: '另一个内置技能', description: '无关描述' },
   ]
 
   it('未安装 ⇒ 渲染成卡片', () => {
     const rows = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: '', kindFilter: 'all' })
-    expect(rows.map(r => r.name)).toEqual(['picoaide-app-builder', 'another-builtin'])
+    expect(rows.map(r => r.name)).toEqual(['app-builder', 'another-builtin'])
   })
 
   it('已安装 ⇒ 不再渲染（本机技能库里的普通卡片就是它）', () => {
     const rows = selectBuiltinCards({
       rows: ROWS,
-      installedNames: new Set(['picoaide-app-builder']),
+      installedNames: new Set(['app-builder']),
       query: '',
       kindFilter: 'all',
     })
@@ -441,17 +441,17 @@ describe('内置技能以普通卡片渲染：只渲染未安装的、参与搜�
 
   it('两个事实源任一说"已装"都按已装处理（宁可少一张入口卡，也不要重复卡）', () => {
     // 服务端 installed[] 与面板本地列表可能不同步：并集后仍必须排除。
-    const union = new Set(['picoaide-app-builder'])
+    const union = new Set(['app-builder'])
     expect(selectBuiltinCards({ rows: ROWS, installedNames: union, query: '', kindFilter: 'skill' })).toHaveLength(1)
   })
 
   it('参与搜索：按标题/名字/描述/作者/分类命中（与普通卡片同口径）', () => {
     const byTitle = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: '应用构建', kindFilter: 'all' })
-    expect(byTitle.map(r => r.name)).toEqual(['picoaide-app-builder'])
+    expect(byTitle.map(r => r.name)).toEqual(['app-builder'])
     const byDesc = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: 'wasm', kindFilter: 'all' })
-    expect(byDesc.map(r => r.name)).toEqual(['picoaide-app-builder'])
+    expect(byDesc.map(r => r.name)).toEqual(['app-builder'])
     const byAuthor = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: 'picoaide', kindFilter: 'all' })
-    expect(byAuthor.map(r => r.name)).toEqual(['picoaide-app-builder'])
+    expect(byAuthor.map(r => r.name)).toEqual(['app-builder'])
     const noHit = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: '不存在的东西', kindFilter: 'all' })
     expect(noHit).toEqual([])
   })

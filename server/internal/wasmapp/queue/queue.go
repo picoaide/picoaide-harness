@@ -1,10 +1,14 @@
 // Package queue 实现 WASM 应用平台的**请求准入与排队**（设计基线 §4.6）。
 //
-// 全部上限（每应用并发 1 / 队列 32 / 每用户每应用占槽 4 / 每用户全局在跑 4 /
+// 全部上限（每应用并发 / 队列 32 / 每用户每应用占槽 4 / 每用户全局在跑 4 /
 // 全局实例 32 / 端到端墙钟 60 s）都来自 limits 包，本包不引入新数值。
 //
 // 语义（§4.6 + §10.3 第 32–34 项）：
-//   - **每应用并发恒为 1**：同一应用同一时刻只有一个请求在跑；
+//   - **每应用并发 = limits.AppRuntimeConcurrency（默认 4）**：同一应用同一时刻最多 N 个
+//     请求在跑；第 N+1 个进队列。⚠️ 2026-09-19 之前 N 恒为 1（"每应用串行"）——
+//     那是"应用库一应用一连接"时代的队列侧保证；appdb 改造（WAL + 1 写 N 读连接池 +
+//     读写锁拆分）之后同应用并发读已是真实能力，继续钉在 1 只会让默认部署白排队。
+//     写仍然是串行的：并发控制在 appdb（写走 writeMu），队列在这里只放行，不管读写。
 //   - **每应用队列 32**：超出直接 429 + Retry-After（不排队等待，避免无界内存）；
 //   - **每用户在**同一应用**内**：同时最多 1 个在跑、队列中最多 4 个
 //     ⇒ 防单用户占满该应用队列；
@@ -20,6 +24,7 @@ package queue
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -31,7 +36,10 @@ import (
 type Options struct {
 	// GlobalRunning 是全局并发实例上限（§4.6）。
 	GlobalRunning int
-	// PerAppRunning 是每应用并发（§4.6：恒为 1）。
+	// PerAppRunning 是每应用并发（§4.6：limits.AppRuntimeConcurrency，默认 4）。
+	//
+	// 它是**每应用同时运行数**，不是"是否串行"：超出它的请求进队列（PerAppQueue）。
+	// 写路径的串行由 appdb 的 writeMu 保证，不靠这里。
 	PerAppRunning int
 	// PerAppQueue 是每应用队列长度（§4.6：32）。
 	PerAppQueue int
@@ -111,10 +119,16 @@ type Scheduler struct {
 
 type appState struct {
 	running int
-	// runningUser 是在跑请求的发起者（PerAppRunning 恒为 1 ⇒ 单个值即可）。
-	runningUser int64
-	waiters     []*waiter
-	userQueued  map[int64]int
+	// runningUsers 是在跑请求的发起者计数（userID → 该用户在本应用内的在跑数）。
+	//
+	// 为什么必须是计数表而不是"单个发起者"（2026-09-19）：PerAppRunning 的默认值从 1
+	// 提到 4 之后，同一应用里可以同时有**多个不同用户**在跑。老实现只记最后一个发起者
+	// （runningUser int64 + "恒为 1 ⇒ 单值即可"），一旦有第二个用户进来就把第一个
+	// 覆盖掉 ⇒ userRunningOf(A) 读到 0，"单用户单应用并发 = 1"对**先来的**用户静默失效。
+	// 表随应用条目一起回收（dropIfIdleLocked），不构成新的常驻。
+	runningUsers map[int64]int
+	waiters      []*waiter
+	userQueued   map[int64]int
 }
 
 type waiter struct {
@@ -182,14 +196,15 @@ func (s *Scheduler) Acquire(ctx context.Context, appID string, userID int64) (*T
 		s.mu.Unlock()
 		return nil, apperr.New(apperr.CodeAppQueueFull, "应用队列已满").
 			WithDetail("queue_depth", s.opt.PerAppQueue).
-			WithHint("稍后重试；该应用同时只处理 1 个请求")
+			WithHint(fmt.Sprintf("稍后重试；该应用同时最多处理 %d 个请求", s.opt.PerAppRunning))
 	}
 	if userID != 0 && as.userQueued[userID] >= s.opt.PerUserPerAppQueued {
 		s.dropIfIdleLocked(appID, as)
 		s.mu.Unlock()
 		return nil, apperr.New(apperr.CodeAppQueueFull, "你在该应用排队中的请求过多").
 			WithDetail("per_user_queued", s.opt.PerUserPerAppQueued).
-			WithHint("同一应用内同时最多 1 个请求在跑、4 个排队")
+			WithHint(fmt.Sprintf("同一应用内你同时最多 %d 个请求在跑、%d 个排队",
+				s.opt.PerUserPerAppRunning, s.opt.PerUserPerAppQueued))
 	}
 
 	w := &waiter{userID: userID, ch: make(chan struct{})}
@@ -243,21 +258,24 @@ func (s *Scheduler) canRunLocked(appID string, userID int64) bool {
 	return true
 }
 
-// appRunningOf 统计某用户在该应用内正在运行的请求数。
-// 由于 PerAppRunning 恒为 1，这里最多为 1；保留该函数是为了在
-// PerAppRunning 被调大时仍然正确。
+// userRunningOf 统计某用户在该应用内正在运行的请求数（0 = 该用户在本应用没有在跑）。
 func (as *appState) userRunningOf(userID int64) int {
-	if as.runningUser == userID {
-		return as.running
+	if userID == 0 || as.runningUsers == nil {
+		return 0
 	}
-	return 0
+	return as.runningUsers[userID]
 }
 
 // grantLocked 记账一次授权（调用方必须持锁）。
 func (s *Scheduler) grantLocked(appID string, userID int64) {
 	as := s.appLocked(appID)
 	as.running++
-	as.runningUser = userID
+	if userID != 0 {
+		if as.runningUsers == nil {
+			as.runningUsers = map[int64]int{}
+		}
+		as.runningUsers[userID]++
+	}
 	s.globalRunning++
 	if userID != 0 {
 		s.userRunning[userID]++
@@ -273,8 +291,12 @@ func (s *Scheduler) release(appID string, userID int64) {
 	if as.running > 0 {
 		as.running--
 	}
-	if as.running == 0 {
-		as.runningUser = 0
+	if userID != 0 && as.runningUsers != nil {
+		if as.runningUsers[userID] > 1 {
+			as.runningUsers[userID]--
+		} else {
+			delete(as.runningUsers, userID)
+		}
 	}
 	if s.globalRunning > 0 {
 		s.globalRunning--
@@ -302,9 +324,10 @@ func (s *Scheduler) release(appID string, userID int64) {
 // Acquire+Release 516–811 µs，且全程持全局锁 = 全平台准入吞吐的天花板）。
 // 现在成本只与活跃应用数成正比（全局在跑 ≤32、等待者所属应用数有界）。
 //
-// 跨应用顺序不保证公平（Go map 迭代顺序随机）：这是有意的 —— 每应用并发恒为 1
-// ⇒ 单个应用最多只占 1 个全局槽，不存在某个应用长期霸占全局槽的饿死路径；
-// 而**应用内**的 FIFO 顺序由 pumpAppLocked 保证（§4.6 未要求跨应用公平）。
+// 跨应用顺序不保证公平（Go map 迭代顺序随机）：这是有意的 —— 每个应用最多占用
+// PerAppRunning 个全局槽（默认 4 / 全局 32），不存在"某个应用把全局槽吃光"的
+// 饿死路径（运营把 app_running 调到与 max_instances 同值时会失去这条性质，
+// 需要自己承担）。而**应用内**的 FIFO 顺序由 pumpAppLocked 保证（§4.6 未要求跨应用公平）。
 func (s *Scheduler) pumpAllLocked() {
 	for appID := range s.active {
 		s.pumpScans++ // 性能回归口径：只统计真的被遍历到的活跃条目
@@ -399,7 +422,7 @@ func (s *Scheduler) dropIfIdleLocked(appID string, as *appState) {
 func (s *Scheduler) appLocked(appID string) *appState {
 	as, ok := s.apps[appID]
 	if !ok {
-		as = &appState{userQueued: map[int64]int{}}
+		as = &appState{userQueued: map[int64]int{}, runningUsers: map[int64]int{}}
 		s.apps[appID] = as
 	}
 	return as

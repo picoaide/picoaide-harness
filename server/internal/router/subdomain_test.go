@@ -261,6 +261,11 @@ func TestWasmRoutesRegistered(t *testing.T) {
 		"PUT " + NamespaceServer + "/admin/wasm-apps/:app_id/owner",
 		"POST " + NamespaceServer + "/admin/wasm-apps/:app_id/freeze",
 		"PUT " + NamespaceServer + "/admin/wasm-apps/review",
+		// 审核队列（P0-1）：开关打开后必须有清单与处置出口，否则"开启审核" =
+		// 全组织再也发不出新版本，且界面上看不到积压（审计 P0 的现场形态）。
+		"GET " + NamespaceServer + "/admin/wasm-apps/:app_id/releases",
+		"POST " + NamespaceServer + "/admin/wasm-apps/:app_id/releases/:version/approve",
+		"POST " + NamespaceServer + "/admin/wasm-apps/:app_id/releases/:version/reject",
 		// 员工浏览器会话与换票（R12/R16，主站 HTML 面）
 		"GET /login",
 		"POST /login",

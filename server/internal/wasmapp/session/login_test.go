@@ -1,15 +1,229 @@
 package session
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
+
+// ---- Referrer-Policy：same-origin 是功能正确性，不是风格（2026-09-19 P0）----
+
+// TestPageReferrerPolicyIsSameOrigin 是**防回退门禁**：两个页面的 meta 与响应头
+// 都必须是 same-origin，绝不能是 no-referrer。
+//
+// 为什么这条断言不能松：按 WHATWG Fetch 的 "append a request Origin header" 算法，
+// referrer policy 为 no-referrer 时，**非 GET/HEAD 请求的 Origin 头被写成字面量
+// `null`**（同源也一样）—— 登录页 POST /login、换票页自动提交 POST /app-ticket
+// 都会带 `Origin: null`，而服务端判据是 `Origin == 自身源` ⇒ 必然 403
+// ⇒ 员工浏览器登录入口 100% 不可用。
+//
+// 浏览器侧证据（真实 Chromium，三种策略对照，已落盘）：
+// temp/wasm-probe/micro-referrer.mjs ⇒ no-referrer→`Origin: null`、
+// same-origin→真实 Origin、strict-origin-when-cross-origin→真实 Origin。
+// 服务端判定侧的行为回归见 TestLoginSubmitOriginMatrix。
+//
+// 变异验证：把 mainPageReferrerPolicy 改回 no-referrer ⇒ 本用例必红。
+func TestPageReferrerPolicyIsSameOrigin(t *testing.T) {
+	if mainPageReferrerPolicy != "same-origin" {
+		t.Fatalf("mainPageReferrerPolicy = %q，必须是 same-origin", mainPageReferrerPolicy)
+	}
+	if mainPageReferrerPolicy == "no-referrer" {
+		t.Fatal("策略退回 no-referrer：同源表单 POST 会带 Origin: null，登录与换票必然 403")
+	}
+	// 两个页面的三处下发面必须一致：HTML 里的 meta + writePage 的响应头。
+	// （meta 与响应头取值不同时 meta 会覆盖头 —— 只改一处等于没改。）
+	for _, tc := range []struct {
+		name string
+		html string
+	}{
+		{"登录页", loginHTML("zh", loginView{Title: "登录", ShowForm: true})},
+		{"换票页", ticketHTML("zh", ticketView{Title: "正在打开应用", App: "my-app", Next: "/"})},
+	} {
+		if !strings.Contains(tc.html, `<meta name="referrer" content="same-origin">`) {
+			t.Fatalf("%s 的 meta referrer 不是 same-origin：%s", tc.name, tc.html)
+		}
+		if strings.Contains(tc.html, "no-referrer") {
+			t.Fatalf("%s 仍含 no-referrer 字样（登录/换票会 403）：%s", tc.name, tc.html)
+		}
+	}
+
+	// 响应头（writePage 的落点）：登录页与换票页都要断言，避免只改一条路径。
+	loginRec := httptest.NewRecorder()
+	New(Options{ProductName: "示例产品"}).LoginPage(loginRec, httpsReq(http.MethodGet, testMainOrigin+"/login", nil))
+	if got := loginRec.Header().Get("Referrer-Policy"); got != "same-origin" {
+		t.Fatalf("登录页响应头 Referrer-Policy = %q, want same-origin", got)
+	}
+	ticketRec := httptest.NewRecorder()
+	ticketMgr := New(Options{BaseDomain: func() string { return testBaseDomain }})
+	ticketMgr.TicketPage(ticketRec, httpsReq(http.MethodGet, testMainOrigin+"/app-ticket?app=my-app", nil))
+	if got := ticketRec.Header().Get("Referrer-Policy"); got != "same-origin" {
+		t.Fatalf("换票页响应头 Referrer-Policy = %q, want same-origin", got)
+	}
+}
+
+// TestLoginSubmitOriginMatrix 是"策略 → 浏览器实际会发的头 → 服务端判定"的
+// **行为回归**（比字符串断言更硬）：直接拿浏览器在不同策略下**真实会发**的头
+// 打 POST /login，断言通行/拒绝与安全语义都不退化。
+//
+// 与 TestPageReferrerPolicyIsSameOrigin 一起构成闭环：
+//   - 策略侧：页面必须 same-origin ⇒ 浏览器发真实 Origin（微实验已证）；
+//   - 判定侧：真实 Origin 必须放行，而 `null` / 跨源仍然必须拒。
+//
+// 变异验证：checkMainOrigin 改成"Origin 为 null 也放行"⇒ 本用例红。
+func TestLoginSubmitOriginMatrix(t *testing.T) {
+	env := newEnv(t)
+	env.newUser(t, "alice")
+
+	cases := []struct {
+		name    string
+		origin  string
+		referer string
+		want    int
+	}{
+		{"同源 Origin（same-origin 策略下浏览器的真实形态）", testMainOrigin, "", http.StatusSeeOther},
+		{"Origin: null（no-referrer 策略下浏览器的形态）", "null", "", http.StatusForbidden},
+		{"跨源 Origin", "https://evil.example.com", "", http.StatusForbidden},
+		{"Origin: null 不得靠 Referer 兜底", "null", testMainOrigin + "/login", http.StatusForbidden},
+		{"无 Origin，Referer 同源（老浏览器兜底路径）", "", testMainOrigin + "/login?next=%2F", http.StatusSeeOther},
+		{"无 Origin，Referer 跨源", "", "https://evil.example.com/login", http.StatusForbidden},
+		{"Origin 与 Referer 都缺失", "", "", http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httpsReq(http.MethodPost, testMainOrigin+"/login", strings.NewReader(url.Values{
+				"username": {"alice"}, "password": {testPassword}, "next": {"/"},
+			}.Encode()))
+			if tc.origin != "" {
+				r.Header.Set("Origin", tc.origin)
+			}
+			if tc.referer != "" {
+				r.Header.Set("Referer", tc.referer)
+			}
+			rec := httptest.NewRecorder()
+			env.mgr.LoginSubmit(rec, r)
+			if rec.Code != tc.want {
+				t.Fatalf("Origin=%q Referer=%q ⇒ %d, want %d（body=%s）",
+					tc.origin, tc.referer, rec.Code, tc.want, rec.Body.String())
+			}
+			cookie := cookieByName(rec.Result().Cookies(), EmployeeCookieName)
+			if tc.want == http.StatusSeeOther {
+				if cookie == nil {
+					t.Fatal("同源登录没有下发会话 Cookie")
+				}
+				return
+			}
+			if cookie != nil {
+				t.Fatal("被拒的登录竟然签发了会话 Cookie")
+			}
+			if tc.want == http.StatusForbidden {
+				// 403 页面必须**可重试**：旧实现 ShowForm=false，
+				// 用户落到一个没有任何输入框的死页面（2026-09-19 P0 的用户可见面）。
+				body := rec.Body.String()
+				if !strings.Contains(body, `name="username"`) || !strings.Contains(body, `name="password"`) {
+					t.Fatalf("来源校验失败页没有输入框（用户无从重试）：%s", body)
+				}
+				if !strings.Contains(body, copyZH.ErrOriginRejected) {
+					t.Fatal("来源校验失败页没有可操作指引文案")
+				}
+			}
+		})
+	}
+	// 恰好两次成功（同源 Origin、以及老浏览器的同源 Referer 兜底）⇒ 两行会话；
+	// 被拒的 5 次绝不能落库。
+	if n := countRows(t, env, "SELECT count(*) FROM employee_sessions"); n != 2 {
+		t.Fatalf("employee_sessions 行数 = %d, want 2（被拒的 5 次不得落库）", n)
+	}
+}
+
+// TestCheckMainOriginLogsRejectionContext 是"失败必须可定位"的门禁（2026-09-19）：
+// 线上只看到 403 时，日志必须一条就能回答"期望源、浏览器发了什么、哪条判据没过"。
+//
+// 这条日志是 no-referrer ⇒ `Origin: null` 那个 P0 当时**缺失**的唯一证据面
+// （旧实现只在"配置的 MainOrigin 与请求源不一致"时打日志，其余分支静默）。
+func TestCheckMainOriginLogsRejectionContext(t *testing.T) {
+	prev := logError
+	defer func() { logError = prev }()
+	var lines []string
+	logError = func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+
+	m := New(Options{MainOrigin: testMainOrigin})
+	r := httpsReq(http.MethodPost, testMainOrigin+"/login", nil)
+	r.Header.Set("Origin", "null")
+	r.Header.Set("Referer", testMainOrigin+"/login")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	// 哨兵：Cookie 里的会话明文**绝不能**出现在日志里（凭证泄漏）。
+	r.Header.Set("Cookie", EmployeeCookieName+"="+testPassword)
+
+	if m.checkMainOrigin(r) {
+		t.Fatal("Origin: null 必须被拒")
+	}
+	if len(lines) != 1 {
+		t.Fatalf("一次拒绝应落且只落一条日志，得到 %d 条：%v", len(lines), lines)
+	}
+	line := lines[0]
+	for _, want := range []string{
+		"reason=origin_malformed",
+		`want="` + testMainOrigin + `"`,
+		`origin="null"`,
+		`referer="` + testMainOrigin + `/login"`,
+		`host="` + testMainHost + `"`,
+		`x-forwarded-proto="https"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("日志缺少 %q：%s", want, line)
+		}
+	}
+	if strings.Contains(line, testPassword) || strings.Contains(strings.ToLower(line), "cookie") {
+		t.Fatalf("日志带上了 Cookie/敏感值（凭证泄漏）：%s", line)
+	}
+
+	// 放行时不得打日志（否则正常流量会把日志刷满）。
+	lines = nil
+	ok := httpsReq(http.MethodPost, testMainOrigin+"/login", nil)
+	ok.Header.Set("Origin", testMainOrigin)
+	if !m.checkMainOrigin(ok) {
+		t.Fatal("同源 Origin 应放行")
+	}
+	if len(lines) != 0 {
+		t.Fatalf("放行时打了日志：%v", lines)
+	}
+}
+
+// TestPageCopyCoversBothLanguages 断言 pageCopy 的**每个字段**在中英两份里都非空。
+//
+// 用反射而不是手写清单：手写清单会随着新增字段漂移，而它要防的正是"新增文案只给了
+// 一种语言"（另一种语言的页面上会渲染出一个空行/半句话）。
+func TestPageCopyCoversBothLanguages(t *testing.T) {
+	typ := reflect.TypeOf(pageCopy{})
+	if typ.NumField() < 10 {
+		t.Fatalf("pageCopy 只有 %d 个字段，远低于预期 —— 反射可能失效（假绿防线）", typ.NumField())
+	}
+	for _, tc := range []struct {
+		lang string
+		c    pageCopy
+	}{{"zh", copyZH}, {"en", copyEN}} {
+		v := reflect.ValueOf(tc.c)
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			if f.Name == "Lang" {
+				continue
+			}
+			if strings.TrimSpace(v.Field(i).String()) == "" {
+				t.Fatalf("%s 文案缺字段 %s（两种语言必须都给）", tc.lang, f.Name)
+			}
+		}
+	}
+	if copyZH.Lang != "zh" || copyEN.Lang != "en" {
+		t.Fatalf("Lang 标记错误：%q / %q", copyZH.Lang, copyEN.Lang)
+	}
+}
 
 // ---- 登录页渲染 ----
 
@@ -42,8 +256,22 @@ func TestLoginPageHasNoExternalResources(t *testing.T) {
 	if !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "frame-ancestors 'none'") {
 		t.Fatalf("登录页 CSP = %q，应为 default-src 'none' + frame-ancestors 'none'", csp)
 	}
-	if got := rec.Header().Get("Referrer-Policy"); got != "no-referrer" {
-		t.Fatalf("Referrer-Policy = %q, want no-referrer（防 next 经 Referer 外泄）", got)
+	// Referrer-Policy 必须是 same-origin，**绝不能是 no-referrer**（2026-09-19 P0）：
+	// no-referrer 会让浏览器把本页的同源表单 POST（POST /login、POST /app-ticket）
+	// 写成字面量 `Origin: null`（WHATWG Fetch "append a request Origin header"），
+	// 而 checkMainOrigin 要求 Origin == 自身源 ⇒ 登录与换票必然 403。
+	// 浏览器侧证据：temp/wasm-probe/micro-referrer.mjs（真实 Chromium 三种策略对照）。
+	// 行为回归（同源 Origin 通行 / null 与跨源被拒）见 TestLoginSubmitOriginMatrix。
+	if got := rec.Header().Get("Referrer-Policy"); got != "same-origin" {
+		t.Fatalf("Referrer-Policy = %q, want same-origin（no-referrer 会让同源表单 POST 带 Origin: null）", got)
+	}
+	if got := rec.Header().Get("Referrer-Policy"); got == "no-referrer" {
+		t.Fatal("Referrer-Policy 退回了 no-referrer —— 这会让登录与换票 100% 403，绝不允许")
+	}
+	// 页面内联的 meta 必须与响应头**同一个值**（两者都会决定文档策略，取值不同时
+	// meta 会覆盖头，只改一处等于没改）。
+	if body := rec.Body.String(); !strings.Contains(body, `<meta name="referrer" content="same-origin">`) {
+		t.Fatalf("登录页 meta referrer 不是 same-origin：%s", body)
 	}
 	if strings.Contains(rec.Body.String(), "http") {
 		t.Fatal("实际渲染的页面里出现了 http 字样")

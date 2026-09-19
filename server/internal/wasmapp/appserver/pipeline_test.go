@@ -4,12 +4,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/anonlimit"
+	"github.com/picoaide/picoaide/internal/wasmapp/edge"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/queue"
 )
@@ -194,6 +198,98 @@ func TestServe_LoginRequiredRedirectsToTicket(t *testing.T) {
 	}
 	if strings.Contains(loc, appID+".") {
 		t.Fatalf("换票端点必须在**主站**而不是应用子域: %q", loc)
+	}
+}
+
+// TestServe_LoginRequiredFormPostGetsJumpPage 是 2026-09-19 P0 同族修复的门禁（appserver 侧）。
+//
+// 缺陷形态：应用会话失效时，应用内的**原生表单 POST** 被 appserver 302 到**跨源**的主站换票
+// 端点，而应用子域的 CSP 含 `form-action 'self'`、CSP3 又会检查重定向链上的每个 URL
+// ⇒ 浏览器把这次提交整单拦掉（真实 Chromium 报
+// `Sending form data to 'https://<app>.<基域>/…' violates "form-action 'self'"`），
+// 服务端收不到请求，用户表现为"点了提交没反应"。
+//
+// 修复形态：**非幂等**且不显式要 JSON 的请求返回 200 的同源跳板页（三条出口：
+// location.replace / meta refresh / 可见链接），幂等请求与 JSON 请求保持 302。
+//
+// 变异验证：把 writeRedirectPage 那一行换回 `http.Redirect(..., 302)` ⇒ 本用例第一条断言即红。
+func TestServe_LoginRequiredFormPostGetsJumpPage(t *testing.T) {
+	e := newEnv(t)
+	appID := e.appID("private")
+	e.publishApp(appSpec{appID: appID, config: loginRequiredConfig("alice", "bob")})
+
+	// ① 原生表单 POST（非幂等、不是 JSON）⇒ 200 跳板页，不再是跨源 302。
+	rec := e.post(appID, "/note?keep=1", "application/x-www-form-urlencoded", "note=hello")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("未登录的应用内表单 POST 应得到 200 同源跳板页，得到 %d body=%s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Fatalf("跳板页不得再有 Location（跨源 302 会被应用自己的 form-action 拦掉）：%q", loc)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{`location.replace(a.href)`, `http-equiv="refresh"`, `id="picoaide-continue"`, `content="0;url=`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("跳板页缺少 %q：%s", want, body)
+		}
+	}
+	if n := strings.Count(body, "<script"); n != 1 {
+		t.Fatalf("跳板页有 %d 个 <script（应只有 1 个内联跳转脚本）：%s", n, body)
+	}
+	target := jumpPageTarget(t, body)
+	if !strings.HasPrefix(target, testMainOrigin+"/app-ticket?") {
+		t.Fatalf("跳板页目标应是主站换票端点，得到 %q", target)
+	}
+	u, err := url.Parse(target)
+	if err != nil {
+		t.Fatalf("跳板页目标非法: %q", target)
+	}
+	if got := u.Query().Get("app"); got != appID {
+		t.Fatalf("app 参数应为 %q，得到 %q", appID, got)
+	}
+	if next := u.Query().Get("next"); next != "/note?keep=1" {
+		t.Fatalf("next 应保留原路径与查询（相对路径），得到 %q", next)
+	}
+	if strings.Contains(target, "ticket=") {
+		t.Fatalf("去登录的跳板页目标不该带票：%q", target)
+	}
+	// 安全头：CSP 不得为通过测试而放宽；跳板页必须不落缓存、跨源不带 Referer。
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "form-action 'self'") {
+		t.Fatalf("应用子域 CSP 的 form-action 被放宽了：%q", csp)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", cc)
+	}
+	if rp := rec.Header().Get("Referrer-Policy"); rp != edge.HostReferrerPolicy {
+		t.Fatalf("Referrer-Policy = %q, want %q", rp, edge.HostReferrerPolicy)
+	}
+	// 文案必须说明"这次提交没有被保存"（跳板页走 GET 换票，POST 体不会重放）。
+	if !strings.Contains(body, "没有被保存") {
+		t.Fatalf("跳板页文案没有说明提交未保存：%s", body)
+	}
+
+	// ② 幂等请求（GET）⇒ 仍是 302（导航不受 form-action 约束，行为与修复前一致）。
+	getRec := e.get(appID, "/dashboard?tab=1")
+	if getRec.Code != http.StatusFound {
+		t.Fatalf("未登录 GET 应仍是 302，得到 %d", getRec.Code)
+	}
+	if loc := getRec.Header().Get("Location"); !strings.HasPrefix(loc, testMainOrigin+"/app-ticket?") {
+		t.Fatalf("GET 的 Location 应是主站换票端点，得到 %q", loc)
+	}
+
+	// ③ 显式要 JSON 的 POST（`/api/*` 与 Accept: application/json）⇒ 仍是 302：
+	//    form-action 只管原生表单，fetch/XHR 不受它约束，而把 HTML 跳板页塞给 API 客户端
+	//    会破坏应用的 JSON 契约。
+	apiRec := e.post(appID, "/api/save", "application/json", `{"note":"hi"}`)
+	if apiRec.Code != http.StatusFound {
+		t.Fatalf("未登录的 /api/* POST 应仍是 302，得到 %d body=%s", apiRec.Code, apiRec.Body.String())
+	}
+	jsonReq := httptest.NewRequest(http.MethodPost, appURL(appID, "/save"), strings.NewReader("note=hi"))
+	jsonReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	jsonReq.Header.Set("Accept", "application/json")
+	jsonReq.Header.Set("Origin", "https://"+appID+"."+testBaseDomain)
+	jsonAcceptRec := e.serve(jsonReq)
+	if jsonAcceptRec.Code != http.StatusFound {
+		t.Fatalf("Accept: application/json 的 POST 应仍是 302，得到 %d body=%s", jsonAcceptRec.Code, jsonAcceptRec.Body.String())
 	}
 }
 
@@ -445,6 +541,15 @@ func TestServe_CrossOriginWriteRejected(t *testing.T) {
 		t.Fatalf("错误码应为 FORBIDDEN，得到 %q", code)
 	}
 
+	// Origin: null：**同样拒**。它是 no-referrer 策略下浏览器对同源表单 POST 发的
+	// 形态（2026-09-19 P0）；宿主响应头已改为 same-origin（edge.HostReferrerPolicy）
+	// 让浏览器发真实源，但服务端**绝不能**为了"让应用能用"而放行 null。
+	reqNull := httptest.NewRequest(http.MethodPost, appURL(appID, "/api/save"), strings.NewReader(`{}`))
+	reqNull.Header.Set("Origin", "null")
+	if rec := e.serve(reqNull); rec.Code != http.StatusForbidden {
+		t.Fatalf("Origin: null 的 POST 应 403，得到 %d", rec.Code)
+	}
+
 	// 同基域但**另一个应用**的源：同样拒（这正是"跨应用写"的形态）。
 	req2 := httptest.NewRequest(http.MethodPost, appURL(appID, "/api/save"), strings.NewReader(`{}`))
 	req2.Header.Set("Origin", "https://other."+testBaseDomain)
@@ -520,10 +625,164 @@ func (endlessReader) Read(p []byte) (int, error) {
 
 // ===== 队列（§4.6 / §10.3 第 32/33 项）=====
 
+// TestServe_SameAppRequestsRunConcurrentlyByDefault 是用户问题 3
+// （「wasm 应用怎么支持高并发，不应该是每个请求串行」）的**行为判据**。
+//
+// 判据（不靠"墙钟比大小"，那条在负载高时会假红）：
+//  1. 默认装配下每应用并发 > 1（queue.DefaultOptions 取 limits.AppRuntimeConcurrency）；
+//  2. **执行区间真的重叠**：调度器的在跑计数被**持续**观测到 == 2 —— 执行区间以
+//     "持有执行槽"为准，重叠窗口 ≥ 单次 hold 的一半；
+//  3. **排队等待 ≈ 0**：两个请求的 `queue_wait_ms`（平台自己的调用事件遥测）都远小于
+//     单次 hold ⇒ 第二个请求不是"排队等到第一个跑完"才进的执行。
+//
+// ⚠️ 为什么判据不能写成"[发起,返回] 两个区间相交"（本用例第一版就是那样，已改）：
+// 排队等待也算在"返回"里 —— 串行实现下第二个请求在队列里等到第一个跑完，它的区间
+// 依然与第一个相交 ⇒ 那条断言**恒真**（假绿，也正因如此它在变异下抓不到问题）。
+// 执行区间必须以"真的持有执行槽"为准（判据 2），并用队列遥测排除"等待造成的假重叠"（判据 3）。
+//
+// 墙钟只作**观测值**打印（并发时 ≈ 单次耗时，串行时 ≈ 两次之和）。
+// 变异验证：把 limits.AppRuntimeConcurrency 改回 1 ⇒ 本用例必红（判据 1 先红；
+// 把判据 1 的守卫摘掉后判据 2/3 也必红，已实测）。
+func TestServe_SameAppRequestsRunConcurrentlyByDefault(t *testing.T) {
+	e := newEnv(t) // 不注入 Scheduler：要测的正是**默认配置**
+	appID := e.appID("concurrent")
+	e.publishApp(appSpec{appID: appID})
+
+	perApp := e.srv.scheduler.Options().PerAppRunning
+	if perApp < 2 {
+		t.Fatalf("默认每应用并发 = %d，必须 > 1（否则默认部署下同应用仍是串行）", perApp)
+	}
+
+	const holdMS = 600
+	hold := holdMS * time.Millisecond
+	start := make(chan struct{})
+	type span struct {
+		begin, end time.Time
+		code       int
+		body       string
+	}
+	spans := make([]span, 2)
+	var wg sync.WaitGroup
+	// done 用原子计数（采样 goroutine 不读 spans：那些字段由各自的请求 goroutine 写，
+	// 跨 goroutine 读会撞 -race，而"谁写谁读"在这里并不需要）。
+	var done int32
+	for i := range spans {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start // 屏障：两个请求尽量同时出发
+			spans[i].begin = time.Now()
+			rec := e.get(appID, "/slow?ms="+strconv.Itoa(holdMS))
+			spans[i].code = rec.Code
+			spans[i].body = rec.Body.String()
+			spans[i].end = time.Now()
+			atomic.AddInt32(&done, 1)
+		}(i)
+	}
+	// 采样执行槽水位：running == 2 的**持续窗口**就是两个请求执行区间的重叠部分；
+	// waiting 则用来证明"没有谁在排队等对方跑完"（串行实现下第二个请求会在队列里
+	// 待满第一个请求的执行时长）。
+	maxRunning := 0
+	maxWaiting := 0
+	overlapSamples := 0
+	var firstOverlap, lastOverlap time.Time
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			running, waiting := e.srv.scheduler.AppStats(appID)
+			if waiting > maxWaiting {
+				maxWaiting = waiting
+			}
+			if running >= 2 {
+				now := time.Now()
+				overlapSamples++
+				if firstOverlap.IsZero() {
+					firstOverlap = now
+				}
+				lastOverlap = now
+				if running > maxRunning {
+					maxRunning = running
+				}
+			}
+			if atomic.LoadInt32(&done) == int32(len(spans)) {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	close(start)
+	wg.Wait()
+	<-pollDone
+
+	for i, s := range spans {
+		if s.code != http.StatusOK {
+			t.Logf("平台日志:\n%s", e.logs.String())
+			t.Fatalf("第 %d 个请求应 200，得到 %d body=%s", i, s.code, s.body)
+		}
+	}
+	overlapSpan := lastOverlap.Sub(firstOverlap)
+	d0 := spans[0].end.Sub(spans[0].begin)
+	d1 := spans[1].end.Sub(spans[1].begin)
+	totalBegin := spans[0].begin
+	if spans[1].begin.Before(totalBegin) {
+		totalBegin = spans[1].begin
+	}
+	totalEnd := spans[0].end
+	if spans[1].end.After(totalEnd) {
+		totalEnd = spans[1].end
+	}
+	concurrentWall := totalEnd.Sub(totalBegin)
+
+	// queue_wait_ms 只作**观测**（平台调用事件遥测，§4.9）：判据不依赖 DB 事件表
+	// —— 事件写入是旁路（批量 flush），让它决定这条并发用例的红绿会把"事件链路慢"
+	// 混进"请求是否并发"。主判据用调度器状态（下面的 maxWaiting）。
+	var maxWaitMS int64
+	if n := e.waitForEvents(appID, 2); n == 2 {
+		if err := e.db.QueryRow(
+			`SELECT COALESCE(MAX(queue_wait_ms), 0) FROM wasm_call_events WHERE app_id = $1`, appID).
+			Scan(&maxWaitMS); err != nil {
+			t.Fatalf("查 queue_wait_ms: %v", err)
+		}
+	} else {
+		t.Logf("（观测项缺失：调用事件只落了 %d 条；事件链路的门禁在别处，这里不据此判红）", n)
+	}
+
+	t.Logf("每应用并发上限=%d；请求[发起→返回] %v / %v（含各自排队等待，**不作为判据**）；"+
+		"两请求总跨度 %v；执行槽观测：max_running=%d、max_waiting=%d、重叠窗口 %v（%d 次采样）、"+
+		"最大 queue_wait_ms=%d",
+		perApp, d0.Round(time.Millisecond), d1.Round(time.Millisecond),
+		concurrentWall.Round(time.Millisecond),
+		maxRunning, maxWaiting, overlapSpan.Round(time.Millisecond), overlapSamples, maxWaitMS)
+
+	// 判据 2：两个请求**同时持有执行槽**，且这个重叠窗口是持续的（不是采样撞上的瞬间）。
+	if maxRunning < 2 || overlapSamples == 0 {
+		t.Fatalf("同一应用的在跑数从未达到 2（max=%d，采样 %d 次）—— 请求没有并发进入执行",
+			maxRunning, overlapSamples)
+	}
+	if overlapSpan < hold/2 {
+		t.Fatalf("两个请求同时持槽的窗口只有 %v（< hold/2 = %v）—— 重叠是瞬时的，不构成并发执行",
+			overlapSpan, hold/2)
+	}
+	// 判据 3：没有任何请求在队列里等对方（串行实现下第二个请求会排队待满第一个的执行时长）。
+	if maxWaiting != 0 {
+		t.Fatalf("该应用出现了排队（max_waiting=%d）—— 同应用请求仍被串行化", maxWaiting)
+	}
+	// 队列不变量：两个请求都结束后，该应用的在跑/排队都要归零。
+	if r, w := e.srv.scheduler.AppStats(appID); r != 0 || w != 0 {
+		t.Fatalf("drain 后 running=%d waiting=%d，want 0/0", r, w)
+	}
+}
+
 func TestServe_QueueFullIs429WithRetryAfter(t *testing.T) {
 	e := newEnv(t, func(o *Options) {
 		// 每应用队列 1：A 在跑、B 排队（占满容量）、C 必须 429。
-		o.Scheduler = queue.New(queue.Options{PerAppQueue: 1, PerUserPerAppQueued: 1})
+		//
+		// PerAppRunning 显式取 1：本用例要验证的是**队列容量**这条闸门本身，
+		// 与"每应用能并发几个"无关；用默认值（4）时 B 会直接拿到空槽，
+		// 队列永远填不满（2026-09-19 默认值从 1 改成 4 之后本用例就是这么变的红）。
+		o.Scheduler = queue.New(queue.Options{PerAppRunning: 1, PerAppQueue: 1, PerUserPerAppQueued: 1})
 	})
 	appID := e.appID("queue")
 	e.publishApp(appSpec{appID: appID})

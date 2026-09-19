@@ -16,9 +16,10 @@ import (
 // 连接参数，并回答"哪些改动要重启才生效"。
 //
 // 为什么每一条都写清楚"生效范围"：运营改完最怕的是"以为生效了"。四类里三类是
-// 即时生效（队列上限、模块缓存与空闲 TTL、库句柄池与空闲回收），一类是**下次
-// 新建连接**生效（SQLite 页缓存），一类必须**重启**（单实例内存上限，wazero
-// RuntimeConfig 的字段，进程内 runtime 建好后不可变）。
+// 即时生效（队列上限、模块缓存与空闲 TTL、库句柄池与空闲回收），两类是**下一次
+// 建连/下一个句柄**生效（SQLite 页缓存 appdb_cache_kib；只读连接数 app_db_readers），
+// 一类必须**重启**（单实例内存上限，wazero RuntimeConfig 的字段，进程内 runtime
+// 建好后不可变）。
 
 // ApplyLimits 把限制项下发到运行中的组件，返回**需要重启才生效**的字段名。
 //
@@ -46,9 +47,15 @@ func (s *Server) ApplyLimits(l applimits.Limits) []string {
 			time.Duration(l.ModuleCacheIdleMin)*time.Minute,
 		)
 	}
-	// ③ 应用库句柄池：即时生效（容量收紧时关闭最久未用的空闲句柄）。
+	// ③ 应用库句柄池：容量与空闲回收即时生效（收紧容量时关闭最久未用的空闲句柄）。
+	//
+	// readers（只读连接数）是**下一个句柄**生效：只读连接只能在 appdb 建库的一次性
+	// 令牌窗口内一次建满，运行中的句柄没有"加几条读者"这条路径（见 appDBPool.SetReaders）。
+	// 因此这里下发它、但不在 restart 列表里 —— 与 appdb_cache_kib 同档，
+	// 控制台文案必须如实写"下一个应用库句柄生效"。
 	if s.appdbs != nil {
 		s.appdbs.SetLimits(l.MaxInstances, time.Duration(l.AppDBIdleMin)*time.Minute)
+		s.appdbs.SetReaders(l.AppDBReaders)
 	}
 	// ④ SQLite 每连接页缓存：**下一个新建连接**生效（连接级 PRAGMA）。
 	appdb.SetConnCacheKiB(l.AppDBCacheKiB)
@@ -63,8 +70,8 @@ func (s *Server) ApplyLimits(l applimits.Limits) []string {
 	s.mu.Lock()
 	s.limits = l
 	s.mu.Unlock()
-	s.logf("appserver: 限制项已下发 max_instances=%d app_running=%d instance_memory=%dMiB module_cache=%dMiB idle=%dmin appdb_idle=%dmin restart=%v",
-		l.MaxInstances, l.AppRunning, l.InstanceMemoryMB, l.ModuleCacheMB, l.ModuleCacheIdleMin, l.AppDBIdleMin, restart)
+	s.logf("appserver: 限制项已下发 max_instances=%d app_running=%d instance_memory=%dMiB module_cache=%dMiB idle=%dmin appdb_idle=%dmin appdb_readers=%d restart=%v",
+		l.MaxInstances, l.AppRunning, l.InstanceMemoryMB, l.ModuleCacheMB, l.ModuleCacheIdleMin, l.AppDBIdleMin, l.AppDBReaders, restart)
 	return restart
 }
 
@@ -82,11 +89,23 @@ func (s *Server) CurrentLimits() applimits.Limits {
 	return s.limits
 }
 
-// InstanceMemoryPages 返回**当前生效**的单实例内存页上限（wazero runtime 侧的值；
-// 与 CurrentLimits().InstanceMemoryPages() 不等时说明有待重启生效的改动）。
+// InstanceMemoryPages 返回**当前生效**的单实例内存页上限。
+//
+// 来源纪律（P0-2）：**优先问运行时**（`runtime.MemoryLimitPages`）—— 它才是
+// wazero RuntimeConfig 里真正生效的那个数。装配期另存一份 `runtimePages` 只作
+// 运行时缺失时的兜底；两处若不一致，说明装配没把值交给 runtime，
+// 而"报告一个没生效的数"正是这次审计里最难发现的那类分叉（界面说 32 MiB、
+// 实际按 64 MiB 跑）。
+//
+// 与 CurrentLimits().InstanceMemoryPages() 不等时说明有待重启生效的改动。
 func (s *Server) InstanceMemoryPages() uint32 {
 	if s == nil {
 		return 0
+	}
+	if s.rt != nil {
+		if pages := s.rt.MemoryLimitPages(); pages != 0 {
+			return pages
+		}
 	}
 	s.mu.Lock()
 	pages := s.runtimePages
@@ -95,4 +114,18 @@ func (s *Server) InstanceMemoryPages() uint32 {
 		return pages
 	}
 	return s.profile.InstanceMemoryPages
+}
+
+// CachedModuleCount 返回进程内编译模块缓存的条目数（只读；诊断与装配自检用）。
+//
+// 存在的理由：`EvictApp`（下架/冻结/删除的事件驱动释放）此前只有"返回被逐出数量"
+// 这一条观测路径，而调用方（装配注入的钩子）**丢弃了返回值** —— 于是"钩子到底有没有
+// 接到 appserver 上"在测试里不可观测，只能退化成源码文本断言（假绿）。
+// 有了它，装配级用例可以"先暖一个模块，再走管理端处置，断言条目归零"。
+func (s *Server) CachedModuleCount() int {
+	if s == nil || s.modules == nil {
+		return 0
+	}
+	entries, _ := s.modules.size()
+	return entries
 }

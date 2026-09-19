@@ -1,8 +1,8 @@
 # WASM 应用平台：作者指南
 
 > 面向**员工与 AI** 的完整作者指南。设计基线见
-> `docs/planning/2026-09-17-wasm-app-platform.md`；AI 的操作手册（随客户端分发）
-> 见 `packages/vendor/memory-evolve/skills/picoaide-app-builder/`。
+> `docs/planning/2026-09-17-wasm-app-platform.md`；AI 的操作手册（随服务端镜像分发）
+> 见 `server/skills/app-builder/`。
 >
 > 平台里的每一个上限数字都来自唯一真源 `server/internal/wasmapp/limits/limits.go`
 > （生成物 `limits.md` / `limits.json` 由 `go generate ./internal/wasmapp/limits` 产出，
@@ -18,7 +18,7 @@
 
 两条使用路径：
 
-- **让 AI 写**（推荐）：客户端的 AI 会加载内置技能 `picoaide-app-builder`，
+- **让 AI 写**（推荐）：客户端的 AI 会加载内置技能 `app-builder`，
   按黄金路径生成代码、本机编译、调用平台接口发布。
 - **自己写**：照本文件 + 内置技能的 `references/`（ABI、limits、发布、诊断）即可，
   语言是 Go（`wasm32-wasip1`）。
@@ -94,7 +94,7 @@
 
 完整参考（帧格式 / 请求帧字段 / 每个宿主调用的参数与结果 / 响应信封 / 判别规则 /
 计时规则 / 失败语义表）在：
-`packages/vendor/memory-evolve/skills/picoaide-app-builder/references/abi.md`
+`server/skills/app-builder/references/abi.md`
 
 三条最先要记住的：
 
@@ -111,7 +111,7 @@
 **字段规格（字段名 / 类型 / 必填 / 取值 / 上限）只在生成物里维护，本文件不复制那张表**：
 
 - 机器可读：`server/internal/wasmapp/appcfg/appcfg.json`
-- 人读（同一份内容）：`packages/vendor/memory-evolve/skills/picoaide-app-builder/references/app-config.md`
+- 人读（同一份内容）：`server/skills/app-builder/references/app-config.md`
 - 单一真源（改字段只能改这里）：`server/internal/wasmapp/appcfg/appcfgspec.go`
 
 三份由同一个生成器产出（`go generate ./internal/wasmapp/limits`），构建期逐字节比对；
@@ -197,7 +197,8 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 - 工具的参数说明就是**该填什么**的契约（`config` 的字段集合封闭：`access` / `whitelist` /
   `purpose` / `data_sensitivity` / `owner`，多一个未知字段服务端即拒）；字段规格的机器可读
   真源是服务端生成的 `appcfg.json`，与工具参数、客户端表单、技能参考**四处对拍**。
-- 作者手册技能（`picoaide-app-builder`）**随服务端镜像发布**，在客户端「能力中心 →
+- 作者手册技能（`app-builder`）**随服务端镜像发布**（源码就在服务端仓库的
+  `server/skills/app-builder/`），在客户端「能力中心 →
   平台内置技能」**按需安装**（不自动安装）；没装时工具报错会直接给出安装指路。
 
 要点：
@@ -255,7 +256,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | 编译目标用错 | 上传期导入白名单直接拒，hints 指明 `wasm32-wasip1` |
 | 版本号写错 / 忘写 changelog | 预检明确拒 + 结构化 hints |
 | 写出慢查询 | 每条语句 5 秒硬超时 + `SQLITE_LIMIT_*` + 诊断事件 |
-| 想调并发 / 队列参数 | 没有这类参数：串行执行、队列与占槽全部平台固定 |
+| 想调并发 / 队列参数 | 平台固定（运维可在控制台改全局值）：同一应用默认最多 **4 个请求并发**（读并发；**写仍串行**），超出进队列（32），队列满 429 |
 | 事务里调 `ai.chat` / `log` / `assets.read` / `db.define` / 再开一个事务 | 直接报错（防事务长期持锁 + 占满执行槽）；事务内**只能做数据库读写**：`db.query` / `db.exec` + `tx_commit` / `tx_rollback` |
 
 ## 10. 常见错误与处理（速查）
@@ -291,7 +292,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 
 | 内容 | 位置 |
 | --- | --- |
-| AI 操作手册（随客户端分发） | `packages/vendor/memory-evolve/skills/picoaide-app-builder/SKILL.md` |
+| AI 操作手册（随服务端镜像分发） | `server/skills/app-builder/SKILL.md` |
 | ABI 参考 | 同目录 `references/abi.md` |
 | 上限表（生成物，勿手改） | 同目录 `references/limits.md`；源码真源 `server/internal/wasmapp/limits/limits.go` |
 | 配置字段参考（生成物，勿手改） | 同目录 `references/app-config.md`；源码真源 `server/internal/wasmapp/appcfg/appcfgspec.go` |

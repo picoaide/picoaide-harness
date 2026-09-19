@@ -6,7 +6,7 @@
 // # 管线顺序（顺序本身就是语义，不要调整）
 //
 //	① 应用反查      §4.8   Host 标签 → apps(kind=wasm_app)；查不到/软删/冻结 ⇒ 404，绝不回落主站
-//	② 生效版本      §6.1   LatestApprovedWasmRelease；无生效版本 ⇒ 404（可读页面）
+//	② 生效版本      §6.1   LatestApprovedWasmReleaseMeta（**不含制品字节**，P0-3）；无生效版本 ⇒ 404（可读页面）
 //	③ 换票兑换      §6.1④  ?ticket= ⇒ 一次性 code 换 host-only + HttpOnly + Secure + SameSite=Strict Cookie
 //	④ 身份          §7.1   帧内 user 的唯一来源（宿主构造，应用伪造不了）
 //	⑤ 准入          R24/R25 应用配置的 access 决定是否要求登录；平台**不做**名单校验（名单在应用里）

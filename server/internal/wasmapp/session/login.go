@@ -74,8 +74,16 @@ func (m *Manager) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 	form := loginView{Next: next, ShowForm: true}
 
 	if !m.checkMainOrigin(r) {
-		form.Error = copyFor(lang).ErrForbidden
-		form.ShowForm = false
+		// 来源校验失败**仍然渲染表单**（2026-09-19 P0 修复）。
+		//
+		// 曾经这里是 ShowForm=false：用户落到一个"只有一行报错、没有任何输入框"的
+		// 死页面（用户原话"根本没有地方输入账号密码"），无法重试、也看不出下一步。
+		// 来源校验失败可能是**瞬态**的（隐私扩展、代理改写、扩展注入的 iframe），
+		// 而表单本身没有任何安全价值：POST 到 /login 会再走一次同样的校验。
+		// 文案用专用的 ErrOriginRejected（带可操作指引），与"审计员/禁用账号"那条
+		// 不可重试的 ErrForbidden 区分开。
+		form.Error = copyFor(lang).ErrOriginRejected
+		form.ShowForm = true
 		m.renderLogin(w, r, http.StatusForbidden, form)
 		return
 	}

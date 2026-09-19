@@ -119,6 +119,39 @@ type Entry struct {
 	archive []byte
 }
 
+// Problem 是一个在启动扫描时被**跳过**的技能及其原因（管理端诊断面用）。
+//
+// 为什么单独成形、而不是只留一句日志：技能坏掉在外面的表现是「接口 200 + 空数组」，
+// 客户端只看到"能力中心里没有这条技能"，真正的原因（frontmatter 缺字段、目录名与
+// frontmatter 的 name 不一致、包内出现符号链接…）只在服务端日志里。管理端要能把
+// 这件事显示出来，就必须有**结构化的名字 + 原因**，而不是一句拼好的字符串。
+type Problem struct {
+	// Name 技能目录名（被跳过时唯一还能确定的东西）。
+	Name string `json:"name"`
+	// Reason 被跳过的原因（skillmanifest / archiveutil 的原始错误文本）。
+	Reason string `json:"reason"`
+}
+
+// String 是启动日志用的单行形态（与既有日志文案逐字一致）。
+func (p Problem) String() string { return p.Name + ": " + p.Reason }
+
+// Diagnostics 是管理端「平台内置技能」只读面的快照。
+//
+// 它是**镜像资产**的视图，不是数据库行：没有 owner、没有上架/授权/审批语义
+// （那些属于市场与组织内容）。管理端看它只有两个目的：确认这个部署到底带了哪些
+// 技能、以及**为什么某条技能没上来**。
+type Diagnostics struct {
+	// Dir 实际扫描的资产目录（镜像内缺省 /opt/picoaide/skills）。
+	Dir string `json:"dir"`
+	// DirExists 目录是否存在。false 且 Problems 为空 = 这个部署没有内置技能
+	// （本地直接跑二进制就是这种形态），不是故障。
+	DirExists bool `json:"dir_exists"`
+	// Skills 扫描通过、可下发的技能。
+	Skills []Entry `json:"skills"`
+	// Problems 被跳过的技能及原因（空数组而不是 null：前端不必判空）。
+	Problems []Problem `json:"problems"`
+}
+
 // Catalog 是内置技能目录的只读快照。
 //
 // 扫描 + 打包 + 校验只在第一次访问时做一次（镜像内的资产不会变），结果缓存
@@ -128,9 +161,10 @@ type Catalog struct {
 
 	mu       sync.RWMutex
 	loaded   bool
+	exists   bool
 	entries  []Entry
 	byName   map[string]int
-	problems []string
+	problems []Problem
 }
 
 // New 创建一个指向 dir 的目录快照（此时不读盘）。
@@ -145,7 +179,33 @@ func (c *Catalog) Dir() string { return c.dir }
 func (c *Catalog) Problems() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return append([]string(nil), c.problems...)
+	out := make([]string, 0, len(c.problems))
+	for _, p := range c.problems {
+		out = append(out, p.String())
+	}
+	return out
+}
+
+// ProblemList 返回结构化的被跳过清单（管理端诊断面用；与 Problems 同一份事实）。
+func (c *Catalog) ProblemList() []Problem {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]Problem{}, c.problems...)
+}
+
+// Diagnostics 返回只读诊断快照（管理端「平台内置技能」面）。
+//
+// 不触发扫描：调用方先 Load()（或让 handler 走 Load），本方法只做加锁拷贝 ——
+// 这样"扫描失败"的原因由调用方单独拿到并一并返回，而不是被这里吞掉。
+func (c *Catalog) Diagnostics() Diagnostics {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return Diagnostics{
+		Dir:       c.dir,
+		DirExists: c.exists,
+		Skills:    append([]Entry{}, c.entries...),
+		Problems:  append([]Problem{}, c.problems...),
+	}
 }
 
 // Entries 返回全部可用内置技能的清单行（副本）。
@@ -190,7 +250,10 @@ func (c *Catalog) Reload() error {
 
 func (c *Catalog) loadLocked() error {
 	entries := make([]Entry, 0, 4)
-	problems := make([]string, 0)
+	problems := make([]Problem, 0)
+	// exists 在三条分支里各自置位：诊断面要能区分「没有这个目录」（不是故障）
+	// 与「目录在、但里面每条技能都坏了」（是真故障）。
+	c.exists = false
 	names, err := os.ReadDir(c.dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -200,6 +263,7 @@ func (c *Catalog) loadLocked() error {
 	case err != nil:
 		return fmt.Errorf("skillseed: 读取内置技能目录 %s: %w", c.dir, err)
 	default:
+		c.exists = true
 		for _, de := range names {
 			if !de.IsDir() {
 				continue
@@ -207,7 +271,7 @@ func (c *Catalog) loadLocked() error {
 			name := de.Name()
 			entry, lerr := loadSkill(c.dir, name)
 			if lerr != nil {
-				problems = append(problems, fmt.Sprintf("%s: %v", name, lerr))
+				problems = append(problems, Problem{Name: name, Reason: lerr.Error()})
 				continue
 			}
 			entries = append(entries, entry)
@@ -398,20 +462,9 @@ func NewHandlers(c *Catalog) *Handlers { return &Handlers{catalog: c} }
 // Catalog 暴露目录快照（启动日志与测试用）。
 func (h *Handlers) Catalog() *Catalog { return h.catalog }
 
-// ListBuiltin 处理 GET /api/client/v2/skills/builtin。
-//
-// 形状与市场清单一致（`{"skills":[...]}`），值来自镜像内资产 —— 没有数据库
-// 往返，也没有授权过滤：内置技能对**所有登录员工**可见。
-func (h *Handlers) ListBuiltin(c *gin.Context) {
-	if err := h.catalog.Load(); err != nil {
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "内置技能清单读取失败")
-		return
-	}
-	for _, p := range h.catalog.Problems() {
-		// 内置资产坏掉必须留下可诊断的痕迹（客户端只会看到它不在清单里）。
-		log.Printf("skillseed: 内置技能被跳过 —— %s", p)
-	}
-	entries := h.catalog.Entries()
+// skillRows 把清单行映射成对外 JSON（客户端面与管理端面**共用一份形状**：
+// 两处各写一遍就会漂移，而 sha256/size/files 是客户端安装前对拍的凭据）。
+func skillRows(entries []Entry) []gin.H {
 	skills := make([]gin.H, 0, len(entries))
 	for _, e := range entries {
 		skills = append(skills, gin.H{
@@ -427,7 +480,55 @@ func (h *Handlers) ListBuiltin(c *gin.Context) {
 			"source":      "builtin",
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"skills": skills})
+	return skills
+}
+
+// ListBuiltin 处理 GET /api/client/v2/skills/builtin。
+//
+// 形状与市场清单一致（`{"skills":[...]}`），值来自镜像内资产 —— 没有数据库
+// 往返，也没有授权过滤：内置技能对**所有登录员工**可见。
+func (h *Handlers) ListBuiltin(c *gin.Context) {
+	if err := h.catalog.Load(); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "内置技能清单读取失败")
+		return
+	}
+	for _, p := range h.catalog.Problems() {
+		// 内置资产坏掉必须留下可诊断的痕迹（客户端只会看到它不在清单里）。
+		log.Printf("skillseed: 内置技能被跳过 —— %s", p)
+	}
+	c.JSON(http.StatusOK, gin.H{"skills": skillRows(h.catalog.Entries())})
+}
+
+// AdminListBuiltin 处理 GET /api/server/admin/skills/builtin（管理端只读诊断面）。
+//
+// 为什么需要它：客户端那一半坏掉时的表现是「接口 200 + 空数组」——员工只看到
+// "能力中心里没有这条技能"，管理员在管理后台则**完全看不到平台内置了什么**
+// （2026-09-19 用户原话："我在能力中心里看不到这个"）。本端点把同一份快照
+// 连同**被跳过的技能及原因**一起给出来，让"技能没上来"当场可判。
+//
+// 语义边界（刻意为之）：
+//   - 只读：内置技能是镜像资产，没有上架/授权/审批/owner 这些数据库语义；
+//   - 扫描失败**不返回 5xx**：那样管理页只会显示一句"加载失败"，最该看到的
+//     目录路径与失败原因反而看不到。改为 200 + `load_error` 字段，页面照常渲染
+//     （客户端面的 5xx 语义不变：员工侧不需要这些诊断信息）。
+func (h *Handlers) AdminListBuiltin(c *gin.Context) {
+	loadErr := h.catalog.Load()
+	d := h.catalog.Diagnostics()
+	payload := gin.H{
+		"dir":        d.Dir,
+		"dir_exists": d.DirExists,
+		"skills":     skillRows(d.Skills),
+		"problems":   d.Problems,
+		"counts": gin.H{
+			"skills":   len(d.Skills),
+			"problems": len(d.Problems),
+		},
+	}
+	if loadErr != nil {
+		payload["load_error"] = loadErr.Error()
+		log.Printf("skillseed: 内置技能诊断读取失败（%s）：%v", d.Dir, loadErr)
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 // BuiltinDownload 处理 GET /api/client/v2/skills/builtin/:name/archive。
