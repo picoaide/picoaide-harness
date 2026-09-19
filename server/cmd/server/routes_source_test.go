@@ -243,11 +243,13 @@ func TestRouteAssemblyProbesAndHTMLFacesPresent(t *testing.T) {
 		}
 	}
 
-	// 探针的"注册了但请求必崩"形态（实测 2026-09-19）：productionDeps.Ready 为 nil
-	// 时 /readyz **仍然注册**（gin.WrapH(nil) 在注册期不 panic），但每个请求都会
-	// panic → Recovery → 500 INTERNAL。与 Wasm/WasmSession 的"整片不注册"不同，
-	// 这种漏填在路由表上完全看不出来。因此装配侧要有**接线断言**（见下一条用例），
-	// 而不是靠"路径在不在"判断探针可用性。
+	// 探针的失效形态（2026-09-19 实测 → 当日改为 fail-fast）：productionDeps.Ready
+	// 为 nil 时 /readyz 曾**仍然注册**（gin.WrapH(nil) 在注册期不 panic），每个请求
+	// panic → Recovery → 500 INTERNAL —— 路由表上完全看不出来。现在
+	// registerProductionRoutes 在装配期直接 panic（见 TestReadyDepMissingFailsFast），
+	// 不再有"看起来正常、探针一直红"的形态。
+	// 仍有**接线断言**兜"字段漏填"（见下一条用例），但它只能发现"没写这个字段"，
+	// 发现不了"传了一个必崩的值" —— 值层面的判据在下一条用例里。
 }
 
 // TestRouteAssemblyHasExactlyOneEntryPoint：全仓只允许一个装配入口。
@@ -334,8 +336,7 @@ func TestRouteAssemblyHasExactlyOneEntryPoint(t *testing.T) {
 //
 // ⚠️ 能力边界（不夸大）：这是**源码文本**断言 —— 它能发现"字段没传"，
 // 不能发现"传错了值"（例如 Ready 传了一个必崩的 handler）。值层面的判据靠
-// 装配级行为用例（如 TestUploadCleanupSchedulerIsWired、本文件上一条注释里的
-// nil-Ready 实测事实）。
+// 装配级行为用例（如 TestUploadCleanupSchedulerIsWired、TestReadyDepMissingFailsFast）。
 func TestProductionAssemblyPassesEveryDep(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
@@ -366,4 +367,31 @@ func TestProductionAssemblyPassesEveryDep(t *testing.T) {
 		}
 	}
 	t.Logf("生产装配调用点已传入全部 %d 个依赖字段", 10)
+}
+
+// TestReadyDepMissingFailsFast：Ready 漏填必须在**装配期**炸掉，而不是变成
+// "每个 /readyz 请求 500"。
+//
+// 为什么单独一条：Ready 是唯一"nil 也照注册"的依赖（`gin.WrapH(nil)` 注册期不
+// panic）。改前的实测形态是路由表里有 GET /readyz、启动日志正常、`--version`
+// 正常，只有运维发现健康检查一直红 —— 属于"静默降级成 500"的装配错误。
+// 本用例把判据钉在"装配期 panic 且消息点名 Ready"上：若哪天有人把 fail-fast
+// 删掉（回到运行期 500），这里必红。
+func TestReadyDepMissingFailsFast(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			t.Fatal("Ready 为 nil 时装配没有 fail-fast —— /readyz 会注册成功并在每个请求上 panic→500，" +
+				"路由表与启动日志都看不出异常")
+		}
+		msg := fmt.Sprint(rec)
+		if !strings.Contains(msg, "Ready") {
+			t.Fatalf("装配期 panic 的消息没有点名 Ready（运维拿不到可行动的线索）: %s", msg)
+		}
+		t.Logf("Ready 漏填在装配期 fail-fast: %s", msg)
+	}()
+	// 只传 nil Ready：守卫必须在读其它依赖之前就炸（其它字段留零值，正说明这一点）。
+	registerProductionRoutes(newEngine(), productionDeps{})
+	t.Fatal("registerProductionRoutes 未 panic")
 }
