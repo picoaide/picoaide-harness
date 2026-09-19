@@ -146,7 +146,13 @@ func (h *Handlers) adminOpensSummary(c *gin.Context) {
 	}
 	// TOP N 从**已按窗口 PV 降序**的 apps 里取前 top 行（服务端已排好序；
 	// 前端另有兜底排序与截断）。行形状按 §5.1c A：`{app_id,title,pv,uv}`。
-	topApps := make([]serverstore.WasmAppOpenTopRow, 0, top)
+	// 容量按**实际行数**取（`top` 虽已钳到 opensSummaryMaxTop=100，但没有理由
+	// 预留一个与数据无关的容量 —— 顺带消除「用用户给的值当容量」这一告警面）。
+	capHint := top
+	if len(sum.Apps) < capHint {
+		capHint = len(sum.Apps)
+	}
+	topApps := make([]serverstore.WasmAppOpenTopRow, 0, capHint)
 	for _, a := range sum.Apps {
 		if len(topApps) >= top {
 			break
