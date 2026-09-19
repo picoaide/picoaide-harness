@@ -187,15 +187,44 @@ func SyncIteration(db *sql.DB, fetchFn func(url string) ([]byte, error)) ([]Sync
 	return SyncOnce(db, fetchFn)
 }
 
+// syncIterationLogged 执行一轮同步,并把**逐 provider 的**错误写进日志。
+//
+// 2026-09-19(P2-3):SyncProvider 的 fail-closed(例如"读取模型排除名单失败
+// (已跳过本轮同步)")此前只进 SyncResult.Error,而 SyncLoop 只看 SyncIteration
+// 的**顶层** error ⇒ 名单持久损坏时该 provider 静默停更,只有管理员手点同步
+// 才看得见(把上一提交的"静默复活"换成了"静默停更")。这条日志是该错误在
+// 后台链路唯一的出口。
+//
+// 判据与取舍:
+//   - 每跳每 provider **至多一行**(Error 非空才打),线上间隔 1h ⇒ 不会刷爆
+//     日志;行内同时给出 provider 名与错误原文,可直接定位到 settings 行。
+//   - Skipped(手动型上游无需同步,Error 是设计内说明)不算失败,**不打**失败行,
+//     否则每个手动上游每小时刷一行噪音;它的说明在 sync-all 响应里照旧。
+//   - 不改变 SyncIteration / SyncProvider 的返回语义(仍原样返回 results/error);
+//     SyncIteration 顶层 error 的日志("gateway sync: %v")逐字不变。
+//
+// 抽成独立函数只为可测:用例直接调用它并捕获真实 log 输出,不必起 goroutine +
+// sleep(那种写法既慢又会把 SyncLoop 永久跑在测试进程里)。
+func syncIterationLogged(db *sql.DB, fetchFn func(url string) ([]byte, error)) {
+	results, err := SyncIteration(db, fetchFn)
+	if err != nil {
+		log.Printf("gateway sync: %v", err)
+	}
+	for _, r := range results {
+		if r.Skipped || r.Error == "" {
+			continue
+		}
+		log.Printf("gateway sync: provider %s 同步失败: %s", r.Provider, r.Error)
+	}
+}
+
 // SyncLoop 定时执行 SyncIteration,固定间隔。
 func SyncLoop(db *sql.DB, interval time.Duration, fetchFn func(url string) ([]byte, error)) {
 	if interval <= 0 {
 		interval = time.Hour
 	}
 	for {
-		if _, err := SyncIteration(db, fetchFn); err != nil {
-			log.Printf("gateway sync: %v", err)
-		}
+		syncIterationLogged(db, fetchFn)
 		time.Sleep(interval)
 	}
 }

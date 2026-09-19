@@ -89,10 +89,44 @@ func AddExcludedModel(db *sql.DB, providerID int64, name string) error {
 	return SetSetting(db, excludedModelsKey(providerID), string(b))
 }
 
-// 说明:排除名单是**单向**的(2026-09-15 死代码审计)——删除渠道同步模型后
-// 进名单,此后同步不会把它带回来(webadmin Gateway 页文案:「删除后同步不会
-// 自动恢复,如需恢复请重新添加」)。不存在"移出名单"的接口,原先设计但从未
-// 接线的 RemoveExcludedModel 已删除。
+// RemoveExcludedModel 把模型名移出排除名单(幂等:不在名单里也算成功)。
+//
+// 2026-09-19(P2-4):名单此前是**单向**的,而 webadmin 删除确认文案承诺
+// 「删除后同步不会自动恢复,如需恢复请重新添加」—— 实测重新添加的模型会在
+// 下一轮同步被 RemoveMissingProviderModels 再删一次(它不在上游目录的 keep
+// 列表里),管理员的显式意图被自动同步撤销,承诺不可兑现。管理端"重新添加"
+// 渠道模型时调用本函数(见 llmgateway/admin.go createModel)。
+//
+// 名单被移空时写回 `[]`(而非删除该键):GetExcludedModels 对 `[]` 与"键不存在"
+// 同解,写回空数组让"名单已处理"可见、也避免 settings 行随删随建;该键在删除
+// provider 时仍被整体清理(见 DeleteGatewayProvider)。SetSetting 会失效
+// settings 缓存,下一次同步立即看到新名单。
+func RemoveExcludedModel(db *sql.DB, providerID int64, name string) error {
+	names, err := GetExcludedModels(db, providerID)
+	if err != nil {
+		return err
+	}
+	kept := make([]string, 0, len(names))
+	changed := false
+	for _, n := range names {
+		if n == name {
+			changed = true
+			continue
+		}
+		kept = append(kept, n)
+	}
+	if !changed {
+		return nil
+	}
+	b, _ := json.Marshal(kept)
+	return SetSetting(db, excludedModelsKey(providerID), string(b))
+}
+
+// 说明:名单是**双向**的(2026-09-19 起)——删除渠道同步模型进名单,此后同步
+// 不会把它带回来(webadmin Gateway 页文案:「删除后同步不会自动恢复,如需恢复
+// 请重新添加」);管理端**显式重新添加**同名渠道模型时由 createModel 调用
+// RemoveExcludedModel 移出名单(显式意图优先于自动同步),删除 provider 时整键
+// 清理。此前"单向、无移出接口"的注释已过期。
 
 func scanProvider(scan interface{ Scan(...any) error }) (*GatewayProvider, error) {
 	var p GatewayProvider
