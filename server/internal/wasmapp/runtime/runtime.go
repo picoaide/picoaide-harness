@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -80,6 +81,24 @@ type Options struct {
 	// 起手再覆盖是允许的：该字段**不进编译缓存键**（§4.3.1-a 实测），因此不影响
 	// 与编译进程共用磁盘缓存。
 	MemoryPages uint32
+	// OnModuleClose 是"实例即将关闭"的观察钩子（**测试专用**：生产路径永远为 nil，
+	// 与 compile.Options.ChildArgs 同一口径）。
+	//
+	// 为什么需要一个钩子：R1-rt-18 的判据是"**等 guest 真正结束之后**才关闭实例"，而这件事
+	// 从外部完全不可观测 —— 响应照旧成功、指标照旧一样，唯一的差别是关闭**时刻**与 guest
+	// 当时是否还在跑。只靠 `-race` 抓数据竞争等于把判据押在时序运气上（实测单跑常常不触发）。
+	// 钩子里的 GuestFinished 由 guest goroutine 自己的结束信号判定（不是复述调用点的说法），
+	// 因此"没等就关"会被如实记成 false。
+	OnModuleClose func(ModuleClose)
+}
+
+// ModuleClose 是一次"实例即将关闭"的事件（见 Options.OnModuleClose）。
+type ModuleClose struct {
+	// AppID 是本次请求的应用标识（观测用）。
+	AppID string
+	// GuestFinished 表示关闭那一刻 guest 的 `_start` 调用**确实**已经返回
+	// （由 guest goroutine 关闭的信号通道判定，与调用点是否走过 settle 无关）。
+	GuestFinished bool
 }
 
 // Runtime 是执行侧运行时：持有一个 wazero.Runtime（编译产物缓存 + WASI 宿主模块），
@@ -91,7 +110,9 @@ type Runtime struct {
 	logger *log.Logger
 	// memoryPages 是本运行时的线性内存上限（§4.3 R22），用于与请求侧期望值对拍。
 	memoryPages uint32
-	seq         atomic.Uint64
+	// onModuleClose 是 Options.OnModuleClose 的装配期快照（nil ⇒ 无观察者）。
+	onModuleClose func(ModuleClose)
+	seq           atomic.Uint64
 }
 
 // New 装配执行侧运行时。
@@ -134,7 +155,8 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Runtime{rt: rt, cache: cache, ownCch: own, logger: logger, memoryPages: pages}, nil
+	return &Runtime{rt: rt, cache: cache, ownCch: own, logger: logger, memoryPages: pages,
+		onModuleClose: opts.OnModuleClose}, nil
 }
 
 // Close 关闭运行时与其自建的编译缓存。
@@ -146,6 +168,19 @@ func (r *Runtime) Close(ctx context.Context) error {
 		}
 	}
 	return err
+}
+
+// MemoryLimitPages 返回本运行时**实际生效**的单实例线性内存页上限（只读）。
+//
+// 存在的意义（P0-2）：这个值是 wazero RuntimeConfig 的字段，装配之后再无第二处
+// 可查 —— 而调用方若各自留一份"我以为传进去的值"，就会出现"账本写设置值、
+// runtime 按档位跑"的分叉（旧实现的现场：控制台保存 32 MiB、重启也没生效，
+// 界面却显示"无需重启"）。让访问器直接问运行时，比让调用方记住自己传了什么可靠。
+func (r *Runtime) MemoryLimitPages() uint32 {
+	if r == nil {
+		return 0
+	}
+	return r.memoryPages
 }
 
 // CompileModule 是执行侧的编译入口（与编译进程共用 NewRuntimeConfig 的配置）。
@@ -241,15 +276,26 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 	guestStart := time.Now()
 	mod, err := r.rt.InstantiateModule(guestCtx, module, mc)
 	if err != nil {
-		res.KillReason = classifyInstantiateError(err)
+		res.KillReason = classifyInstantiateError(err, r.memoryPages)
 		res.Metrics.StderrTail = stderr.Tail()
 		fillFailureMetrics(&res.Metrics, res.KillReason)
 		res.Metrics.CPUMs = msSince(guestStart)
 		return res, nil
 	}
+	// guestFinished 在 guest 的 `_start` 调用**真正返回**（含 panic 被兜底）时关闭。
+	//
+	// 两条理由（R1-rt-18）：
+	//  1. 它是"实例可以安全关闭"的地面真值：`rec` 据此判定关闭那一刻 guest 是否还在跑，
+	//     供测试钩子断言（不复述调用点自己的说法，否则断言会退化成自证）；
+	//  2. 关闭它发生在 `done <- callErr` **之前** ⇒ `settle` 收到 done 就等于它已关闭
+	//     （happens-before），判定不会因调度抖动误报。
+	guestFinished := make(chan struct{})
+	// rec 记录"实例关闭"这一时刻（含测试钩子所需的事实：关闭时 guest 是否已结束）。
+	// 只用 Serve 自己的 goroutine 读写，因此不需要锁。
+	rec := &moduleCloseRecord{appID: appIDOr(req.Envelope.AppID), guestFinished: guestFinished}
 	defer func() {
 		// module 关闭放最后：它可能已经被超时路径关掉，重复关闭是幂等的。
-		_ = mod.Close(context.Background())
+		r.closeModule(mod, rec)
 	}()
 
 	startFn := mod.ExportedFunction("_start")
@@ -276,11 +322,26 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 
 	done := make(chan error, 1)
 	go func() {
-		_, callErr := startFn.Call(guestCtx)
-		// guest 结束后**立刻关掉 stdout 写端**：否则宿主的读端永远等不到 EOF
-		// （写端在我们自己手里），"应用直接退出/崩溃、不写响应帧"的路径会一直卡到
-		// 预算到点，把 RUNTIME_TRAP / RUNTIME_GUEST_EXIT 误报成 RUNTIME_TIMEOUT。
-		_ = stdoutW.CloseWithError(io.EOF)
+		var callErr error
+		func() {
+			defer func() {
+				// 兜底 recover：guest 线程（含 WASI 宿主函数）里的 panic **绝不能打死整个
+				// 服务进程** —— §7.4 的归因底线是"一个应用的问题只影响它自己"。wazero 自己
+				// 也用 closeWithExitCodeWithoutClosingResource 规避同类问题，说明"直接
+				// Close 一个正在跑的实例"是误用（它的 ensureResourcesClosed 会把 m.Sys
+				// 置 nil，而仍在执行的 WASI 调用正在读它 ⇒ 数据竞争 ⇒ nil 解引用）。
+				if p := recover(); p != nil {
+					r.logf("guest 执行 panic app=%s: %v", req.Envelope.AppID, p)
+					callErr = fmt.Errorf("runtime: guest panic: %v", p)
+				}
+				// guest 结束后**立刻关掉 stdout 写端**：否则宿主的读端永远等不到 EOF
+				// （写端在我们自己手里），"应用直接退出/崩溃、不写响应帧"的路径会一直卡到
+				// 预算到点，把 RUNTIME_TRAP / RUNTIME_GUEST_EXIT 误报成 RUNTIME_TIMEOUT。
+				_ = stdoutW.CloseWithError(io.EOF)
+				close(guestFinished)
+			}()
+			_, callErr = startFn.Call(guestCtx)
+		}()
 		done <- callErr
 	}()
 
@@ -295,7 +356,17 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 	// 响应帧后自旋 5s ⇒ 耗时 1.000s、code=RUNTIME_TIMEOUT、响应体被丢掉）。
 	// §7.2 把响应信封定义为"应用的答案"，§7.4 的 RUNTIME_TIMEOUT 语义是"**没有答案**的预算耗尽"
 	// ⇒ 丢掉已有的合法答案既增加延迟、又白占执行槽（§7.3 的端到端预算），还与"绝不把失败报成
-	// 成功"的对偶（**也绝不把成功报成失败**）冲突。所以：立刻取消 + 关闭实例，按该响应返回成功。
+	// 成功"的对偶（**也绝不把成功报成失败**）冲突。所以：立刻取消 guest 的预算、按该响应返回成功。
+	//
+	// ⚠️ R1-rt-18（P0，已实测数据竞争）：**取消预算 ≠ 可以立刻关闭实例**。旧实现在这里
+	// `cancelGuest` 之后直接 `mod.Close`，而 guest goroutine 仍在跑 —— wazero 的
+	// `ensureResourcesClosed` 会把 `m.Sys` 置 nil，正在执行的 WASI 调用（Go wasip1 的
+	// nanosleep/time.Now 走 clock_time_get）读到 nil ⇒ 数据竞争 + nil 解引用 panic，而那个
+	// goroutine 没有 recover ⇒ **整个服务端进程崩溃**（多租户同时中断）。现在按正常出口同一
+	// 机制收尸：等 guest 真正结束（最多 postKillGrace），再关闭实例。
+	//
+	// 窗口预算的边界（语义不许退化）：宽限到点**不影响结论** —— 响应早就拿到了，照旧按成功
+	// 返回；只是记一条日志说明"实例未在宽限内退出"（那是一个应用赖着不走的事实，不是请求失败）。
 	//
 	// 注意这只覆盖"**已经拿到结论**"这一条：没有响应帧的路径（预算耗尽 ⇒ RUNTIME_TIMEOUT、
 	// 正常退出 ⇒ RUNTIME_NO_RESPONSE、非零退出 ⇒ RUNTIME_GUEST_EXIT、输出超限 ⇒
@@ -303,7 +374,11 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 	if out.fatal == nil && out.response != nil {
 		samplePeak(mod, &out.peak)
 		cancelGuest(errModuleKilled)
-		_ = mod.Close(context.Background())
+		if _, settled := settle(done, guestCtx, postKillGrace); !settled {
+			// 忽略 settle 的 error：结论已定（这个响应就是应用的答案），guest 怎么结束都不改判。
+			r.logf("实例未在宽限内退出 app=%s（响应已拿到，按成功返回）", req.Envelope.AppID)
+		}
+		r.closeModule(mod, rec)
 		recordLoopMetrics(&res.Metrics, out, stderr, guestStart)
 		res.Response = *out.response
 		res.Metrics.Outcome = capapi.OutcomeOK
@@ -326,6 +401,7 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 		r.logf("guest 未在宽限内退出 app=%s（结论不受影响）", req.Envelope.AppID)
 	}
 	samplePeak(mod, &out.peak)
+	oomHit, _ := stderr.OOMHit()
 
 	// 结论优先级：循环里记下的致命错误 > guest 结束形态。
 	f := failureContext{
@@ -334,6 +410,17 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 		moduleClosed:   mod.IsClosed(),
 		hasResponse:    out.response != nil,
 		guestBudget:    guestBudget,
+		// 生效的单实例上限（R1-rt-7 的文案同源）：错误里说的"多少 MiB"必须是真的。
+		memoryPages: r.memoryPages,
+		// 采样到的内存峰值（R1-e2e-1 的**现场证据**）：Go 运行时 OOM 只留下"退出码 2"，
+		// 要靠"峰值贴近上限"才能把它与"应用自己 os.Exit(2)"区分开。
+		peakMemoryBytes: out.peak,
+		// stderr 里**命中的运行时 OOM 特征行**（R2-DG-1 的证据源，第三轮审计改为滚动匹配）：
+		// 一次性巨块分配的 OOM 峰值只有常态水位，唯一证据是运行时自己打的
+		// `runtime: out of memory: cannot allocate …` 那一行 —— 它出现在 stderr 的**任意
+		// 位置**（应用先打多少日志都不影响判定），由 tailBuffer 的滚动扫描取出。
+		stderrOOMLine:     oomHit.line,
+		stderrOOMAnchored: oomHit.anchored,
 	}
 	fatal := out.fatal
 	if fatal == nil {
@@ -475,7 +562,7 @@ func (r *Runtime) handleRPC(ctx context.Context, req *Request, lim InstanceLimit
 
 	budget := lim.HostBudget(rpc.Method)
 
-	// §7.3：进入宿主调用 ⇒ **暂停 guest 计时**（否则 ai.chat 的 30 s 会被 10 s 的
+	// §7.3：进入宿主调用 ⇒ **暂停 guest 计时**（否则一次慢宿主调用会被 10 s 的
 	// guest 预算误杀）；宿主调用用自己的预算 ctx（父 ctx 仍是请求 ctx，客户端断开
 	// 时能及时中止）。
 	clock.pause()
@@ -589,6 +676,38 @@ func hostMethodAllowed(method string) bool {
 	return false
 }
 
+// moduleCloseRecord 是"实例关闭"这一步的现场记录（每次 Serve 一个，只在 Serve 的
+// goroutine 里读写 ⇒ 不需要锁）。
+type moduleCloseRecord struct {
+	appID string
+	// guestFinished 由 guest goroutine 在 `_start` 真正返回时关闭（地面真值）。
+	guestFinished <-chan struct{}
+	// fired 保证测试钩子每次请求最多上报一次（defer 里的兜底关闭是幂等的第二道）。
+	fired bool
+}
+
+// closeModule 关闭实例，并在关闭**之前**把"guest 是否已经结束"上报给观察钩子。
+//
+// 关闭本身是幂等的（wazero：已关闭时直接返回 nil），所以早退分支显式关闭之后，
+// defer 里的兜底关闭仍可以安全再调一次。
+func (r *Runtime) closeModule(mod api.Module, rec *moduleCloseRecord) {
+	if rec == nil {
+		_ = mod.Close(context.Background())
+		return
+	}
+	if !rec.fired && r.onModuleClose != nil {
+		rec.fired = true
+		ev := ModuleClose{AppID: rec.appID}
+		select {
+		case <-rec.guestFinished:
+			ev.GuestFinished = true
+		default:
+		}
+		r.onModuleClose(ev)
+	}
+	_ = mod.Close(context.Background())
+}
+
 // settle 等 guest 结束：返回 (Call 的错误, 是否等到了)。
 //
 // 等待是**有界**的：guestCtx 已被取消（超时/外部取消）时最多再等 grace 就放弃收尸。
@@ -684,33 +803,257 @@ func (g *guestWriter) writeFrame(ctx context.Context, payload []byte) error {
 	}
 }
 
-// tailBuffer 是 stderr 的有界尾巴（§4.9：保留末尾 limits.StderrTailBytes 字节进诊断）。
+// oomMarkerLineBytes 是"命中的 OOM 特征行"保留的字节数上限。
+//
+// 它与 `limits.StderrTailBytes` 无关：那条是**诊断尾巴**的长度上限，这条只是证据行
+// （分类依据要进错误信封与调用事件，一条超长行会把两个面都刷爆）。
+const oomMarkerLineBytes = 200
+
+// oomMarkerHit 是一处命中的"Go 运行时 OOM 特征行"（滚动扫描的产物，只给分类器/证据面）。
+type oomMarkerHit struct {
+	// line 是命中行的原文（去掉行尾换行、≤ oomMarkerLineBytes 字节）。
+	line string
+	// anchored 表示命中落在**行首**（运行时自己那一行的形态：`runtime: out of memory: …`）。
+	// 非行首命中只可能在没有 `panic: ` 行时成立（见 scanLocked 的判据）。
+	anchored bool
+}
+
+// tailBuffer 是 stderr 的**有界尾巴**缓冲 + **常量内存**的运行时 OOM 特征行滚动匹配。
+//
+// 诊断面（`limits.StderrTailBytes`）只收**末尾**那一段（§4.9：作者最需要的是崩溃前的
+// 最后几行），这一半的语义与上限都不变。分类器要的那份证据则换成**滚动匹配**：
+//
+//   - 旧实现（R2-DG-1）用"开头 2 KiB 窗口"装 OOM 特征串 —— 判据等于绑死在窗口大小上：
+//     应用只要在 OOM 前先往 stderr 打 ≥ 2 KiB 普通日志（一次 log/一行 JSON 就够），
+//     特征串就落出窗口，退回 `RUNTIME_GUEST_EXIT` + "检查 os.Exit"的方向错诊断
+//     （第三轮审计 P2-1 实测：noise=2100/4096 ⇒ GUEST_EXIT）；
+//   - 现在改为**流式扫描**：只保留"当前行的前 ≤200 字节"+ 命中行，状态是**常量级**的
+//     （与 guest 写入量无关），所以"先写任意量噪声、再写真 OOM 特征行"恒能被判出来，
+//     而 guest 也无法借此放大常驻内存（P3-3）。
+//
+// 判据（行首锚定 + panic 排除，见 scanLocked）：命中文本必须是运行时自己的形态；
+// 未见过 `panic: ` 行时允许行内命中，见过之后只认行首命中 —— 普通 panic 的消息里
+// 包装一句同名文本（非恶意）不得被误判成平台内存事故（第三轮审计 P2-2）。
 //
 // 并发安全：guest 在独立 goroutine 里写，宿主在结论处读；收尾宽限用尽后 guest 仍可能
 // 在写（我们不阻塞等它），所以必须有锁，且 Write 永不失败。
 type tailBuffer struct {
 	mu  sync.Mutex
 	max int
+	// buf 是诊断尾巴：长度 ≤ max，**容量恒为 max**（构造时一次性分配，Write 只复用、
+	// 不按写入量放大 —— 旧实现的 `append` 会让一次 8 MiB 写入留下 8 MiB 常驻容量，P3-3）。
 	buf []byte
+
+	// 以下是滚动匹配的全部状态（常量级）：
+	//   line      = 当前行的前 oomMarkerLineBytes 字节（命中行原文的来源）
+	//   lineN     = 当前行已收字节数
+	//   panicLine = 当前行的行首是 `panic: `
+	//   panicSeen = 见过 `panic: ` 行（此后只认行首命中）
+	//   truncated = 当前行超过 oomMarkerLineBytes，剩余部分只跳到换行（不能让行内文本
+	//               冒充"行首"，否则 `panic: …runtime: out of memory…` 的超长消息会被误判）
+	//   pending   = 当前行已判定命中（1=行首、2=行内），但这一行可能还没收完
+	//   refining  = 命中已记录、仍在把**命中那一行**补全（证据行越完整越好：
+	//               `cannot allocate 65011712-byte block` 里的数字就是作者最需要的线索）
+	//   hit       = 第一处命中（只记第一处：分类与证据都只需要一个）
+	line      [oomMarkerLineBytes]byte
+	lineN     int
+	panicLine bool
+	panicSeen bool
+	truncated bool
+	pending   int
+	refining  bool
+	hit       oomMarkerHit
 }
 
-func newTailBuffer(max int) *tailBuffer { return &tailBuffer{max: max} }
+func newTailBuffer(max int) *tailBuffer {
+	if max < 0 {
+		max = 0
+	}
+	return &tailBuffer{max: max, buf: make([]byte, 0, max)}
+}
 
 func (b *tailBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.buf = append(b.buf, p...)
-	if len(b.buf) > b.max {
-		b.buf = append(b.buf[:0], b.buf[len(b.buf)-b.max:]...)
+	b.scanLocked(p)
+	if b.max == 0 {
+		return len(p), nil
 	}
+	// 只保留末尾 max 字节，且**复用同一块容量为 max 的底层数组**：单次巨量写入
+	// （wazero 的 writev 把每个 iovec 整块交给 writer）既不放大常驻内存，也不超过
+	// "stderr 缓冲上限"这一宣称（P3-3）。
+	if len(p) >= b.max {
+		b.buf = append(b.buf[:0], p[len(p)-b.max:]...)
+		return len(p), nil
+	}
+	if drop := len(b.buf) + len(p) - b.max; drop > 0 {
+		b.buf = append(b.buf[:0], b.buf[drop:]...)
+	}
+	b.buf = append(b.buf, p...)
 	return len(p), nil
 }
 
-// Tail 返回当前尾巴（stderr 的末尾 max 字节）。
+// scanLocked 是滚动匹配的全部实现：单遍扫描 + 常量内存（当前行的前 200 字节）。
+//
+// 判定顺序（每一档都有第三轮审计的实测依据）：
+//  1. 行首是 `panic: ` ⇒ 这行是未 recover 的 panic 的输出，它的消息**不算**运行时证据
+//     （panic 与运行时 OOM 共用退出码 2，而 panic 消息是应用可控文本，见 P2-2）；
+//  2. 行首命中 oomStderrMarkers（`runtime: out of memory` / `fatal error: runtime: out of
+//     memory` / `fatal error: out of memory`）⇒ 记证据，不必等整行；
+//  3. 行内命中：只有"从未见过 panic 行"时才成立（`panic: ` 是**行首**判定，所以只要行首
+//     7 字节到齐就能排除掉"这行是 panic"）—— 这样应用先写了半行日志、运行时的 OOM 行接在
+//     同一行后面（没有换行）时仍能捕获（固定窗口方案漏判的另一半）；
+//  4. 命中一旦成立就继续把**同一行**补全（refining），直到换行或 200 字节上限：
+//     证据行的价值在于 `cannot allocate N-byte block` 那个数字，不能在命中前缀处就截断。
+//     若这一行到请求结束都没有换行（运行时的最后一行没有 \n），记录的是目前已收到的部分 ——
+//     分类不受影响（判据只看前缀），只是证据行短一点。
+//
+// 命中所在行收完之后就不再扫描后续字节（证据只要一处）。
+func (b *tailBuffer) scanLocked(p []byte) {
+	for len(p) > 0 && (b.hit.line == "" || b.refining) {
+		if b.truncated {
+			i := bytes.IndexByte(p, '\n')
+			if i < 0 {
+				return
+			}
+			b.resetLineLocked()
+			p = p[i+1:]
+			continue
+		}
+		i := bytes.IndexByte(p, '\n')
+		if i < 0 {
+			b.appendLineLocked(p)
+			if b.lineN == len(b.line) {
+				// 行已达证据上限：按"完整"定论，剩余部分只跳到换行。
+				b.onLineLocked(true)
+				b.truncated = b.pending == 0 // 命中行已定稿，不必再跟着它
+			} else {
+				b.onLineLocked(false)
+			}
+			return
+		}
+		b.appendLineLocked(p[:i])
+		b.onLineLocked(true)
+		p = p[i+1:]
+	}
+}
+
+// appendLineLocked 把 chunk 追加进当前行缓冲（上限 oomMarkerLineBytes）。
+// 放不下的字节直接丢弃并置 truncated（证据行有界，判据只关心行首/行内命中）。
+func (b *tailBuffer) appendLineLocked(chunk []byte) {
+	room := len(b.line) - b.lineN
+	if room <= 0 {
+		if len(chunk) > 0 {
+			b.truncated = true
+		}
+		return
+	}
+	if len(chunk) > room {
+		chunk, b.truncated = chunk[:room], true
+	}
+	b.lineN += copy(b.line[b.lineN:], chunk)
+}
+
+// onLineLocked 判定当前行；full 表示"这一行已经收完（见到换行）或已达 200 字节上限"。
+func (b *tailBuffer) onLineLocked(full bool) {
+	line := b.line[:b.lineN]
+	if !b.panicLine && len(line) >= len(panicStderrPrefix) &&
+		string(line[:len(panicStderrPrefix)]) == panicStderrPrefix {
+		b.panicLine = true
+	}
+	if b.panicLine {
+		// panic 行不产生证据（同一行的行首已经排除"这是运行时输出"）。
+		b.pending = 0
+		b.refining = false
+		if full {
+			b.panicSeen = true
+			b.resetLineLocked()
+		}
+		return
+	}
+	if b.pending == 0 {
+		for _, m := range oomStderrMarkers {
+			if len(line) >= len(m) && string(line[:len(m)]) == m {
+				b.pending = 1
+				break
+			}
+		}
+		// 行内命中：行首 7 字节已到齐（⇒ 这行不可能是 panic 行）且此前没见过 panic 行。
+		// 只在"刚追加的字节是某个特征串的末字节"时才做子串搜索 —— 否则每字节都要扫一遍行缓冲。
+		if b.pending == 0 && !b.panicSeen && len(line) >= len(panicStderrPrefix) &&
+			(full || line[b.lineN-1] == oomMarkerLastByte) {
+			if _, ok := firstMarkerIndex(line); ok {
+				b.pending = 2
+			}
+		}
+	}
+	if b.pending == 0 {
+		if full {
+			b.resetLineLocked()
+		}
+		return
+	}
+	// 命中成立：先把当前（可能还没收完的）行记成证据，整行收完时再定稿。
+	b.hit = oomMarkerHit{line: clipMarkerLine(line), anchored: b.pending == 1}
+	if full {
+		b.refining = false
+		b.resetLineLocked()
+		return
+	}
+	b.refining = true
+}
+
+func (b *tailBuffer) resetLineLocked() {
+	b.lineN = 0
+	b.panicLine = false
+	b.truncated = false
+	b.pending = 0
+}
+
+// firstMarkerIndex 返回行内第一处特征串的偏移（同偏移取列表序，保证证据行稳定）。
+func firstMarkerIndex(line []byte) (int, bool) {
+	best := -1
+	for _, m := range oomStderrMarkers {
+		if i := bytes.Index(line, []byte(m)); i >= 0 && (best < 0 || i < best) {
+			best = i
+		}
+	}
+	return best, best >= 0
+}
+
+// clipMarkerLine 把证据行收成单行文本（去 CR）—— 长度已由行缓冲上限保证有界。
+func clipMarkerLine(line []byte) string {
+	if n := len(line); n > 0 && line[n-1] == '\r' {
+		line = line[:n-1]
+	}
+	return string(line)
+}
+
+// Tail 返回当前尾巴（stderr 的末尾 max 字节）—— 诊断面回给作者的那一份。
 func (b *tailBuffer) Tail() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return string(b.buf)
+}
+
+// OOMHit 返回滚动扫描命中的运行时 OOM 特征行（ok=false 表示 stderr 里没有这种行）。
+//
+// 调用方：`classifyGuestError` 的 5b 分支（"一次性巨块分配"的 OOM 峰值只有常态水位，
+// 唯一证据就是运行时自己打的那一行），见 failureContext.stderrOOMLine。
+func (b *tailBuffer) OOMHit() (oomMarkerHit, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.hit, b.hit.line != ""
+}
+
+// residentBytes 返回滚动匹配占用的常驻字节数（**不含**诊断尾巴缓冲）。
+//
+// 存在的唯一理由：把"匹配只用常量级内存"变成可断言的事实（P2-1 的判据③）——
+// 它不是估算，而是真实持有的缓冲长度之和。
+func (b *tailBuffer) residentBytes() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.line) + len(b.hit.line)
 }
 
 func appIDOr(id string) string {
@@ -744,7 +1087,8 @@ func recordLoopMetrics(m *capapi.CallMetrics, out *loopOutcome, stderr *tailBuff
 	}
 }
 
-// fillFailureMetrics 把失败码写进调用事件字段（§4.9 outcome / reason_code / guest_exit_code）。
+// fillFailureMetrics 把失败码写进调用事件字段（§4.9 outcome / reason_code / guest_exit_code
+// / evidence）。
 func fillFailureMetrics(m *capapi.CallMetrics, e *apperr.Error) {
 	if e == nil {
 		return
@@ -756,6 +1100,23 @@ func fillFailureMetrics(m *capapi.CallMetrics, e *apperr.Error) {
 			m.GuestExitCode = int32(v)
 		}
 	}
+	// 分类依据必须**落库**（第三轮审计 P3-1）：信封是瞬时的，事后分辨"真 OOM / panic
+	// 误报 / 伪造文本"只能靠调用事件表。缺失时留空串（列有 NOT NULL DEFAULT ''）。
+	if ev, ok := e.Details["evidence"].(string); ok {
+		m.Evidence = clipEvidence(ev)
+	}
+}
+
+// clipEvidence 把落库的证据收成有界字符串（上限与错误信封里的证据行同口径）。
+//
+// 为什么要在这里再截一次：Evidence 会进 wasm_call_events 的 TEXT 列，而它的内容里含
+// guest 可控文本（命中的特征行原文）—— 单条超长证据会把诊断面刷爆，也可能让整批
+// INSERT 触碰行大小上限。
+func clipEvidence(s string) string {
+	if len(s) <= capapi.MaxEvidenceBytes {
+		return s
+	}
+	return s[:capapi.MaxEvidenceBytes]
 }
 
 // outcomeFor 把错误码映射到 §4.9 的 outcome 列：

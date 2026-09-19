@@ -27,8 +27,6 @@ const (
 	CodeRuntimeGuestExit        Code = "RUNTIME_GUEST_EXIT"
 	CodeHostCallOverBudget      Code = "HOST_CALL_OVER_BUDGET"
 	CodeAuthRequired            Code = "AUTH_REQUIRED"
-	CodeAIBalanceInsufficient   Code = "AI_BALANCE_INSUFFICIENT"
-	CodeAIRateLimited           Code = "AI_RATE_LIMITED"
 	CodeModuleKilled            Code = "MODULE_KILLED"
 	CodeDBLimit                 Code = "DB_LIMIT"
 	CodeDBDenied                Code = "DB_DENIED"
@@ -81,6 +79,27 @@ const (
 	CodeAssetOversize Code = "ASSET_OVERSIZE"
 	// CodeAssetExists 资源已存在（发布期抽取只写一次，拒绝覆盖）。
 	CodeAssetExists Code = "ASSET_EXISTS"
+
+	// ===== 客户端持有性证明（app-proof，契约 §20.1/§23.1）=====
+	//
+	// ⚠️ 这四个码的**字面值是小写**，与上面所有码的大小写风格不同 —— 这是契约
+	// 给定的线格式（§20.1 原文：缺失 ⇒ 401 `proof_required`；过期 ⇒ 401
+	// `proof_expired`；绑定不匹配 ⇒ 401 `proof_mismatch`），客户端按字面值分流。
+	// 不要为了"统一风格"改成大写：那会静默改变对外契约。
+
+	// CodeProofRequired 请求缺少 proof（端点要求持有性证明）。
+	CodeProofRequired Code = "proof_required"
+	// CodeProofExpired proof 已过期（客户端应重新签发）。
+	CodeProofExpired Code = "proof_expired"
+	// CodeProofMismatch proof 与本请求的绑定不符（用户/bearer/安装/服务端/应用）。
+	CodeProofMismatch Code = "proof_mismatch"
+	// CodeProofReplayed 一次性 nonce 或 proof 的 jti 已被使用过（重放）。
+	//
+	// 契约只点名了前三个码；重放是**第四种**独立失败（绑定完全正确、只是用过了），
+	// 把它并进 proof_mismatch 会让客户端与排障都把"客户端在重试同一个请求"
+	// 误判成"配置/环境不符"。因此显式扩充，并在 L1 status 文件里记为文档缺口 +
+	// 实现补充（不是静默复用别的码）。
+	CodeProofReplayed Code = "proof_replayed"
 )
 
 // Error 是可结构化的平台错误（实现 error，可直接进 JSON 信封）。
@@ -177,6 +196,17 @@ func (e *Error) Status() int {
 	return StatusOf(e.Code)
 }
 
+// WithStatus 覆盖建议状态码（返回自身，便于链式构造）。
+//
+// 存在的理由（契约 §5.1b）：同一个**码**在不同入口可以有不同的 HTTP 状态 ——
+// "应用已下架"在 open 端点按 410 返回（客户端据此显示"已下架"而不是"不存在"），
+// 而复用的是 §7.4 表里语义最接近的 `NOT_FOUND`。没有它就只能要么新增一个码
+// （契约没点名）、要么在 handler 里手写 c.JSON（绕过统一信封）。
+func (e *Error) WithStatus(status int) *Error {
+	e.HTTP = status
+	return e
+}
+
 // codeStatus 是 §7.4 表里显式给出的 code → HTTP 映射。
 var codeStatus = map[Code]int{
 	CodeRuntimeTimeout:          http.StatusGatewayTimeout,      // 504
@@ -187,8 +217,6 @@ var codeStatus = map[Code]int{
 	CodeRuntimeGuestExit:        http.StatusInternalServerError, // 500
 	CodeHostCallOverBudget:      http.StatusGatewayTimeout,      // 504
 	CodeAuthRequired:            http.StatusUnauthorized,        // 401
-	CodeAIBalanceInsufficient:   http.StatusPaymentRequired,     // 402
-	CodeAIRateLimited:           http.StatusTooManyRequests,     // 429
 	CodeModuleKilled:            http.StatusGatewayTimeout,      // 504
 	CodeDBLimit:                 http.StatusInsufficientStorage, // 507
 	CodeDBDenied:                http.StatusForbidden,           // 403
@@ -225,6 +253,14 @@ var codeStatus = map[Code]int{
 	CodeAssetDenied:       http.StatusForbidden,           // 403
 	CodeAssetOversize:     http.StatusUnprocessableEntity, // 422
 	CodeAssetExists:       http.StatusConflict,            // 409
+
+	// 四个 proof 码一律 401（契约 §20.1：缺失/过期/绑定不符 ⇒ 401；
+	// 重放同属"这份证明对本次请求无效"，也用 401 —— 403 会被客户端当成"权限不足"
+	// 而不是"重新签发"）。
+	CodeProofRequired: http.StatusUnauthorized,
+	CodeProofExpired:  http.StatusUnauthorized,
+	CodeProofMismatch: http.StatusUnauthorized,
+	CodeProofReplayed: http.StatusUnauthorized,
 }
 
 // Envelope 是 §8 的错误响应格式：
@@ -288,12 +324,6 @@ var CommonHints = map[Code][]string{
 	CodeAuthRequired: {
 		"该能力需要登录身份：应用应在 access=login（缺省）或 access=whitelist 下使用，或先引导用户登录",
 	},
-	CodeAIBalanceInsufficient: {
-		"使用者余额不足：请在桌面客户端查看余额，或联系管理员充值",
-	},
-	CodeAIRateLimited: {
-		"使用者触发了平台既有用户级限流，请稍后重试",
-	},
 	CodeDBDenied: {
 		"只允许单条 SELECT/INSERT/UPDATE/DELETE；建表请用 db.define",
 	},
@@ -301,6 +331,6 @@ var CommonHints = map[Code][]string{
 		"应用数据库为 100 MB 硬上限，请清理历史数据或联系平台管理员",
 	},
 	CodeAppQueueFull: {
-		"应用当前请求过多（每应用并发 1、队列 32），请稍后重试",
+		"应用当前请求过多（该应用的并发与队列都已占满），请稍后重试",
 	},
 }

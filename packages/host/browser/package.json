@@ -11,6 +11,14 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./guard": {
+      "types": "./lib/types/guard.d.ts",
+      "default": "./lib/guard.js"
+    },
+    "./surface": {
+      "types": "./lib/types/surface.d.ts",
+      "default": "./lib/surface.js"
+    },
     "./client": {
       "types": "./lib/types/client/index.d.ts",
       "default": "./lib/client.js"
@@ -49,7 +57,8 @@
     "@deepseek-ai/dsh-timeout": "0.1.5-rc.2",
     "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
     "@deepseek-ai/dsh-user-approval": "0.1.5-rc.2",
-    "@picoaide/dsh-connectors": "workspace:*"
+    "@picoaide/dsh-connectors": "workspace:*",
+    "@picoaide/dsh-host-locale": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.2",

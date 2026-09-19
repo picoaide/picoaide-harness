@@ -542,6 +542,20 @@ describe('2026-09-15 P2：browser_fill_credentials 的站点绑定', () => {
     expect(error.message).toMatch(/no usable http\(s\) site URL/u)
   })
 
+  /**
+   * 2026-09-19 订正（R2-P0-2）：内置浏览器**不得**导航到应用 scheme。这里从工具面
+   * 断言同一件事（guard 的单测在 guard.spec.ts；两条一起才说明"闸门在真实调用路径上"）。
+   */
+  it('工具面拒绝把浏览器标签导航到应用 scheme（R2-P0-2）', async () => {
+    const harness = track(makeHarness({}, resolverWithOrigin('https://login.example')))
+    // 先开一个标签（闸门在寻址之后检查；没有标签会先报 not-found）。
+    await harness.call('browser_open', { url: 'https://login.example/' })
+    const error = await fail(harness.call('browser_navigate', { url: 'harness-app://demo/' }))
+    expect(error.code).toBe('navigation-blocked')
+    // 正向对照：同一个工具对 http(s) 是放行的（否则上面的拒绝可能来自别的原因）。
+    await expect(harness.call('browser_navigate', { url: 'https://login.example/' })).resolves.toBeDefined()
+  })
+
   it('部署没暴露 origin 能力 ⇒ fail-closed 拒绝（BUG-03：旧的"维持现状"就是漏洞本身）', async () => {
     const resolver = (async () => ({ username: 'alice', password: SECRET })) as CredentialResolverLike
     const harness = track(makeHarness({}, resolver))

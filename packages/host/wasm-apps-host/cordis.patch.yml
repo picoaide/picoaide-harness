@@ -1,0 +1,14 @@
+# dsh-wasm-apps-host Host row: the client-only WASM app origin.
+#
+# The plugin owns NOTHING but transport: it registers the `picoaide-app://`
+# protocol handler, turns every request into the platform's JSON envelope
+# (contract §4.2), and restores the platform response into a Chromium
+# `Response`. Admission, static serving, execution and metering all stay on the
+# server (`appserver.serveApp`); this row must never re-implement them.
+#
+# `deepLinkScheme` is injected by the desktop launcher at assembly time
+# (src/profile.ts, channel-scoped) — the plugin must never hardcode
+# `picoaide://`, and it never reads the packaged channel.json itself.
+- insert:
+    - id: pico-wasm-apps-host
+      name: '@picoaide/dsh-wasm-apps-host'

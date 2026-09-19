@@ -54,6 +54,7 @@ packages/client/wasm-apps/lib/
 packages/host/cron/lib/
 packages/host/connectors/lib/
 packages/host/browser/lib/
+packages/host/wasm-apps-host/lib/
 # dsh-memory-evolve 是 git submodule(独立仓库 github:csyangwen/dsh-memory-evolve),
 # 其 lib/ 在子仓库内跟踪,主仓库只记录 submodule pin。
 community/market/lib/

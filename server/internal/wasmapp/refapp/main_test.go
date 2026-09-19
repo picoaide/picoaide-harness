@@ -37,7 +37,6 @@ var expectedCallSequence = []string{
 	abi.MethodTxBegin,
 	abi.MethodDBExec,
 	abi.MethodTxRollback,
-	abi.MethodAIChat,
 	abi.MethodLog,
 	abi.MethodAssetsRead,
 }
@@ -55,9 +54,6 @@ func fakeHostResult(method string) any {
 		return abi.TxResult{TxID: 7}
 	case abi.MethodTxCommit, abi.MethodTxRollback:
 		return map[string]any{"ok": true}
-	case abi.MethodAIChat:
-		return abi.AIChatResult{Content: "我在演示平台契约。", Model: "deepseek-v4-flash",
-			Usage: &abi.AIUsageView{PromptTokens: 11, CompletionTokens: 7, TotalTokens: 18}}
 	case abi.MethodLog:
 		return abi.LogResult{Accepted: 1}
 	case abi.MethodAssetsRead:
@@ -337,11 +333,14 @@ func bodyMethods(body []callRecord) string {
 }
 
 func TestRunReportsHostErrorsWithoutFailingBusiness(t *testing.T) {
-	// 宿主函数失败（如余额不足）必须原样记进响应体，且应用仍给出 200 —— 业务成败由应用决定。
+	// 宿主函数失败必须原样记进响应体，且应用仍给出 200 —— 业务成败由应用决定。
+	//
+	// ⚠️ 夹具从 DB_LIMIT 取（原用已删除的 AI 能力）：`db.exec` 是参考实现真正会调的
+	// 宿主方法，用它才**真的**走到"业务继续、错误被记录"那条路径。
 	final, _, _, _ := drive(t, abi.Request{ABI: abi.ABIVersion, AppID: "demo"},
 		func(method string, _ json.RawMessage) (any, *abi.RPCErrorBody) {
-			if method == abi.MethodAIChat {
-				return nil, &abi.RPCErrorBody{Code: "AI_BALANCE_INSUFFICIENT", Message: "余额不足"}
+			if method == abi.MethodDBExec {
+				return nil, &abi.RPCErrorBody{Code: "DB_LIMIT", Message: "应用库已满"}
 			}
 			return fakeHostResult(method), nil
 		})
@@ -354,16 +353,16 @@ func TestRunReportsHostErrorsWithoutFailingBusiness(t *testing.T) {
 	}
 	var found bool
 	for _, rec := range summary.HostCalls {
-		if rec.Method != abi.MethodAIChat {
+		if rec.Method != abi.MethodDBExec {
 			continue
 		}
 		found = true
-		if rec.OK || rec.Error == nil || rec.Error.Code != "AI_BALANCE_INSUFFICIENT" {
-			t.Fatalf("ai.chat 的宿主错误没有被记录: %+v", rec)
+		if rec.OK || rec.Error == nil || rec.Error.Code != "DB_LIMIT" {
+			t.Fatalf("db.exec 的宿主错误没有被记录: %+v", rec)
 		}
 	}
 	if !found {
-		t.Fatalf("响应体缺少 ai.chat 记录: %+v", summary.HostCalls)
+		t.Fatalf("响应体缺少 db.exec 记录: %+v", summary.HostCalls)
 	}
 }
 

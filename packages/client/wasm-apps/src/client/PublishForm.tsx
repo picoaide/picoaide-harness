@@ -1,16 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { t, type AppCenterKey } from './locales.ts'
-import { ACCESS_MODES, DEFAULT_ACCESS, type AccessMode } from './appcfg-contract.ts'
+import { WASM_MAX_BYTES, WRITABLE_ACCESS_MODES, type AccessMode } from './appcfg-contract.ts'
+import { appShareLink } from './deep-link.ts'
 import {
   type PublishDraft,
   type PublishFailure,
   type PublishFile,
   type PublishPhase,
   type PublishSuccess,
+  type PublishTarget,
+  type PublishFormInitial,
   type ValidationIssue,
+  changesAccess,
+  initialFormState,
   splitWhitelist,
   submitPublish,
   validatePublishDraft,
+  windowSpecFromText,
 } from './publish-app.ts'
 
 /**
@@ -129,9 +135,13 @@ const ACCESS_HINT: React.CSSProperties = {
 /** "必填"标记（跟随字段标题，不单独占一行）。 */
 const REQUIRED_MARK: React.CSSProperties = { marginLeft: 6, color: 'var(--dsw-alias-label-tertiary)' }
 
-/** 访问级别的选项文案（zh/en 键）。 */
+/**
+ * 访问级别的选项文案（zh/en 键）。
+ *
+ * 2026-09-19（冻结契约 §4.4）：写侧只有 `login | whitelist`（匿名面已删除），
+ * 所以这里没有 `public` —— 选项集合见 {@link WRITABLE_ACCESS_MODES}。
+ */
 const ACCESS_LABEL_KEYS: Record<AccessMode, AppCenterKey> = {
-  public: 'appCenter.access.public',
   login: 'appCenter.access.login',
   whitelist: 'appCenter.access.whitelist',
 }
@@ -143,7 +153,6 @@ const ACCESS_LABEL_KEYS: Record<AccessMode, AppCenterKey> = {
  * —— 作者若以为"填了名单平台就会拦"，他会写出一个对所有人开放的应用。
  */
 const ACCESS_HINT_KEYS: Record<AccessMode, AppCenterKey> = {
-  public: 'appCenter.access.publicHint',
   login: 'appCenter.access.loginHint',
   whitelist: 'appCenter.access.whitelistHint',
 }
@@ -152,31 +161,65 @@ const ACCESS_HINT_KEYS: Record<AccessMode, AppCenterKey> = {
 type FormState =
   | { kind: 'idle' }
   | { kind: 'busy', phase: PublishPhase }
-  | { kind: 'done', result: PublishSuccess }
+  /** `access` = **本次提交**的访问级别（成功块回显它，见 P1-3）。 */
+  | { kind: 'done', result: PublishSuccess, access: AccessMode }
   | { kind: 'failed', failure: PublishFailure }
 
 /**
- * 发布表单。
- * @param props - `onClose` 返回目录；`onPublished` 在成功后被调用（面板据此刷新目录）。
+ * 字节数 → 人类可读（只在错误文案里用；不做单位美化，保留一位小数就够）。
+ * @param bytes - 字节数。
+ * @returns 形如 `33.0 MiB`。
  */
-export function PublishForm({ onClose, onPublished }: { onClose: () => void, onPublished: () => void }) {
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${String(bytes)} B`
+}
+
+/**
+ * 发布表单。
+ *
+ * 三条与"当前值"有关的纪律（P1-3）：
+ *  - **对已有应用发新版时全部预填**（`target`）：作者不动单选框 ⇒ 提交的就是现状，
+ *    不会静默改写线上 `access`；
+ *  - **改动访问范围要显式确认**：选中值与当前值不同时必须勾选确认框才能提交，
+ *    文案写清"当前 X → 提交后 Y"；
+ *  - **`data_sensitivity` 永不预填**：平台没有这个字段的默认值
+ *    （`appcfg.json`：\"不要指望界面或平台替你填\"），留空并在界面上标注要作者声明。
+ *
+ * @param props - `onClose` 返回目录；`onPublished` 在成功后被调用（面板据此刷新目录）；
+ *   `target` 是"对已有应用发新版"的目录行基线（首版发布时不传）。
+ */
+export function PublishForm({ onClose, onPublished, target }: { onClose: () => void, onPublished: () => void, target?: PublishTarget }) {
+  // 预填只发生一次（挂载时）：之后 `target` 再变（目录刷新）也不该覆盖用户的输入。
+  const [initial] = useState<PublishFormInitial>(() => initialFormState(target))
   const [file, setFile] = useState<PublishFile | null>(null)
   const [fileName, setFileName] = useState('')
-  const [appId, setAppId] = useState('')
+  const [appId, setAppId] = useState(initial.appId)
   const [version, setVersion] = useState('')
-  const [title, setTitle] = useState('')
+  const [title, setTitle] = useState(initial.title)
   const [changelog, setChangelog] = useState('')
-  // 访问级别三选一，缺省 login（"登录后使用（默认全员）"）——写漏不该意外变成匿名可达。
-  const [access, setAccess] = useState<AccessMode>(DEFAULT_ACCESS)
-  const [whitelistText, setWhitelistText] = useState('')
-  const [purpose, setPurpose] = useState('')
-  const [dataSensitivity, setDataSensitivity] = useState('internal')
-  const [owner, setOwner] = useState('')
+  // 访问级别：首版缺省 login（"登录后使用"，写漏不该意外变成匿名可达）；
+  // 发新版时是**当前线上的值**（`initial.access`）。
+  const [access, setAccess] = useState<AccessMode>(initial.access)
+  const [whitelistText, setWhitelistText] = useState(initial.whitelistText)
+  const [purpose, setPurpose] = useState(initial.purpose)
+  // **平台没有 data_sensitivity 的默认值**：硬填一个（如 internal）等于把每个应用的
+  // 合规声明统一抹平成同一个值，而作者以为自己声明过了。初值恒为空串。
+  const [dataSensitivity, setDataSensitivity] = useState('')
+  const [owner, setOwner] = useState(initial.owner)
+  // 窗口声明（F3/§6）：三项都可留空 = 不声明（**不是**"锁了缺省比例"）。
+  const [windowRatioText, setWindowRatioText] = useState(initial.windowRatioText)
+  const [windowWidthText, setWindowWidthText] = useState(initial.windowWidthText)
+  const [windowHeightText, setWindowHeightText] = useState(initial.windowHeightText)
+  // 访问范围被改动时的显式确认（勾选后才允许提交）。
+  const [accessConfirmed, setAccessConfirmed] = useState(false)
   const [state, setState] = useState<FormState>({ kind: 'idle' })
   const [localIssues, setLocalIssues] = useState<ValidationIssue[]>([])
   const abortRef = useRef<AbortController | null>(null)
 
   const busy = state.kind === 'busy'
+  const accessChanged = changesAccess(initial, access)
 
   // 卸载时取消在途请求：面板被关掉之后不该还在跑一次 44 MiB 的上传。
   useEffect(() => () => { abortRef.current?.abort() }, [])
@@ -186,6 +229,19 @@ export function PublishForm({ onClose, onPublished }: { onClose: () => void, onP
     if (selected === null) {
       setFile(null)
       setFileName('')
+      return
+    }
+    // **体积闸门必须在读文件之前**（P1-10）：`arrayBuffer()` + base64 + JSON.stringify
+    // 会让渲染进程主线程持 3–4 倍文件大小的峰值内存，超限文件先卡死界面再回
+    // `UPLOAD_TOO_LARGE`。这里按宿主同一个上限（`WASM_MAX_BYTES`）就地拒掉。
+    if (typeof selected.size === 'number' && selected.size > WASM_MAX_BYTES) {
+      setFile(null)
+      setFileName('')
+      setLocalIssues([{
+        field: 'wasm_file',
+        code: 'wasm_file_too_large',
+        message: `${t('appCenter.fileTooLarge')} (${formatBytes(selected.size)} > ${formatBytes(WASM_MAX_BYTES)})`,
+      }])
       return
     }
     try {
@@ -202,6 +258,7 @@ export function PublishForm({ onClose, onPublished }: { onClose: () => void, onP
   }, [])
 
   const submit = useCallback(async (): Promise<void> => {
+    const declaredWindow = windowSpecFromText(windowRatioText, windowWidthText, windowHeightText)
     const draft: PublishDraft = {
       appId,
       version,
@@ -213,6 +270,7 @@ export function PublishForm({ onClose, onPublished }: { onClose: () => void, onP
         purpose: purpose.trim(),
         dataSensitivity: dataSensitivity.trim(),
         owner: owner.trim(),
+        ...(declaredWindow === undefined ? {} : { window: declaredWindow }),
       },
     }
     // 预校验（与服务端 registry/appcfg 同口径）：文件是页面这一侧的事，
@@ -220,6 +278,14 @@ export function PublishForm({ onClose, onPublished }: { onClose: () => void, onP
     const issues: ValidationIssue[] = []
     if (file === null) {
       issues.push({ field: 'wasm_file', code: 'wasm_file_required', message: t('appCenter.needFile') })
+    } else if (file.bytes.byteLength > WASM_MAX_BYTES) {
+      // 兜底（正常在选文件时已被拦下）：体积闸门不能只活在一条路径上。
+      issues.push({ field: 'wasm_file', code: 'wasm_file_too_large', message: t('appCenter.fileTooLarge') })
+    }
+    // 改动访问范围必须显式确认（P1-3）：静默改写线上 access 是安全语义问题，
+    // 不是"多问一句"的体验问题。
+    if (accessChanged && !accessConfirmed) {
+      issues.push({ field: 'access', code: 'access_change_unconfirmed', message: t('appCenter.accessChangeUnconfirmed') })
     }
     issues.push(...validatePublishDraft(draft))
     if (issues.length > 0 || file === null) {
@@ -241,12 +307,12 @@ export function PublishForm({ onClose, onPublished }: { onClose: () => void, onP
       return
     }
     if (result.ok) {
-      setState({ kind: 'done', result })
+      setState({ kind: 'done', result, access })
       onPublished()
       return
     }
     setState({ kind: 'failed', failure: result })
-  }, [access, appId, changelog, dataSensitivity, file, onPublished, owner, purpose, title, version, whitelistText])
+  }, [access, accessChanged, accessConfirmed, appId, changelog, dataSensitivity, file, onPublished, owner, purpose, title, version, whitelistText])
 
   const cancel = useCallback((): void => {
     if (busy) {
@@ -259,6 +325,22 @@ export function PublishForm({ onClose, onPublished }: { onClose: () => void, onP
   return (
     <div className="pico-app-center-publish-form" data-view="publish">
       <p style={{ ...LABEL, marginTop: 0 }}>{t('appCenter.publishHint')}</p>
+
+      {/*
+        「对已有应用发新版」的上下文条（P1-3）：把"这一次发布的基线是哪一版"写在
+        最上面 —— 预填的每一个字段都来自这一行的当前值，作者要能看见这一点。
+      */}
+      {initial.currentAccess !== undefined && (
+        <div style={BOX} data-role="publish-target">
+          <div>
+            {`${t('appCenter.publishingExisting')}: ${initial.appId}`}
+            {initial.currentVersion !== '' && ` · ${t('appCenter.currentVersion')}: ${initial.currentVersion}`}
+          </div>
+          <div data-role="current-access">
+            {`${t('appCenter.currentAccess')}: ${t(ACCESS_LABEL_KEYS[initial.currentAccess])}`}
+          </div>
+        </div>
+      )}
 
       <div style={FIELD}>
         <label style={LABEL} htmlFor="pico-publish-file">{t('appCenter.file')}</label>
@@ -346,7 +428,7 @@ export function PublishForm({ onClose, onPublished }: { onClose: () => void, onP
         */}
         <fieldset style={FIELDSET} data-field="access">
           <legend style={LEGEND}>{t('appCenter.access')}</legend>
-          {ACCESS_MODES.map(mode => (
+          {WRITABLE_ACCESS_MODES.map(mode => (
             <div key={mode} style={ACCESS_OPTION}>
               <div style={{ ...ROW, marginBottom: 0 }}>
                 <input
@@ -359,7 +441,9 @@ export function PublishForm({ onClose, onPublished }: { onClose: () => void, onP
                   value={mode}
                   checked={access === mode}
                   disabled={busy}
-                  onChange={() => { setAccess(mode) }}
+                  // 换一个取值就**撤销**上一次的确认：确认框写的是"当前 X → 提交后 Y"，
+                  // 用户确认的是那一对**具体取值**，不是"随便改点什么"。
+                  onChange={() => { setAccess(mode); setAccessConfirmed(false) }}
                 />
                 <label style={LABEL} htmlFor={`pico-publish-access-${mode}`}>{t(ACCESS_LABEL_KEYS[mode])}</label>
               </div>
@@ -367,6 +451,30 @@ export function PublishForm({ onClose, onPublished }: { onClose: () => void, onP
             </div>
           ))}
         </fieldset>
+
+        {/*
+          访问范围被改动 ⇒ 必须显式确认（P1-3）。文案写清"当前 X → 提交后 Y"：
+          这一改动会立刻决定谁能打开该应用，服务端还会为此写一条
+          `wasm_app_access_change` 审计 —— 它不该发生在"作者没注意单选框"的时候。
+        */}
+        {accessChanged && (
+          <div style={{ ...BOX, marginTop: 8 }} data-role="access-change">
+            <div data-role="access-change-detail">
+              {`${t('appCenter.accessChange')}: ${t(ACCESS_LABEL_KEYS[initial.currentAccess!])} → ${t(ACCESS_LABEL_KEYS[access])}`}
+            </div>
+            <label style={{ ...LABEL, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input
+                className="pico-app-center-access-confirm"
+                data-role="access-change-confirm"
+                type="checkbox"
+                checked={accessConfirmed}
+                disabled={busy}
+                onChange={event => { setAccessConfirmed(event.target.checked) }}
+              />
+              {t('appCenter.accessChangeConfirm')}
+            </label>
+          </div>
+        )}
 
         {/*
           名单输入**只在选中 whitelist 时出现**，并标为必填 —— 服务端对
@@ -426,7 +534,53 @@ export function PublishForm({ onClose, onPublished }: { onClose: () => void, onP
             onChange={event => { setOwner(event.target.value) }}
           />
         </div>
+        {/*
+          `data_sensitivity` **没有平台默认值**（`appcfg.json` 的 hints 原话：
+          "不要指望界面或平台替你填"）——所以这一行必须写出来，而不是让作者以为
+          界面已经替他声明过了（P1-3 第二条：硬填 internal 会把所有应用的合规声明
+          统一抹平成同一个值）。
+        */}
+        <span style={LABEL} data-role="data-sensitivity-note">{t('appCenter.dataSensitivityNoDefault')}</span>
         <span style={LABEL}>{t('appCenter.declarationsHint')}</span>
+
+        {/*
+          窗口声明（F3/§6）：比例与首次打开的尺寸。**留空 = 不声明** ——
+          客户端不替作者填缺省值，也不在界面上声称"已锁比例"（锁定由窗口侧按这里
+          声明的比例执行；没声明就没有可锁的比例）。
+        */}
+        <div style={{ ...ROW, marginTop: 10 }}>
+          <input
+            className="pico-app-center-window-ratio"
+            data-field="window.ratio"
+            style={INPUT}
+            value={windowRatioText}
+            disabled={busy}
+            aria-label={t('appCenter.windowRatio')}
+            placeholder={t('appCenter.windowRatio')}
+            onChange={event => { setWindowRatioText(event.target.value) }}
+          />
+          <input
+            className="pico-app-center-window-width"
+            data-field="window.width"
+            style={INPUT}
+            value={windowWidthText}
+            disabled={busy}
+            aria-label={t('appCenter.windowWidth')}
+            placeholder={t('appCenter.windowWidth')}
+            onChange={event => { setWindowWidthText(event.target.value) }}
+          />
+          <input
+            className="pico-app-center-window-height"
+            data-field="window.height"
+            style={INPUT}
+            value={windowHeightText}
+            disabled={busy}
+            aria-label={t('appCenter.windowHeight')}
+            placeholder={t('appCenter.windowHeight')}
+            onChange={event => { setWindowHeightText(event.target.value) }}
+          />
+        </div>
+        <span style={LABEL} data-role="window-hint">{t('appCenter.windowHint')}</span>
       </div>
 
       {localIssues.length > 0 && (
@@ -446,7 +600,7 @@ export function PublishForm({ onClose, onPublished }: { onClose: () => void, onP
       )}
 
       {state.kind === 'failed' && <PublishErrorBlock failure={state.failure} />}
-      {state.kind === 'done' && <PublishSuccessBlock result={state.result} />}
+      {state.kind === 'done' && <PublishSuccessBlock result={state.result} access={state.access} />}
 
       <div style={{ ...ROW, marginTop: 12, marginBottom: 0 }}>
         <button
@@ -489,12 +643,19 @@ export function PublishForm({ onClose, onPublished }: { onClose: () => void, onP
  *
  * 不合并、不摘要、不翻译：这些字段的第一消费者是 AI（它照着 `hints` 自修），第二消费者
  * 是员工（他要能把 `details` 复制给维护者）。
- * @param props - 结构化失败。
+ *
+ * `title` / `role` 可覆盖：作者生命周期（下架/删除/诊断，`AppCenterPanel`）复用**同一份**
+ * 渲染 —— 一次 403 在发布块与下架块上必须逐字段同形，两处各写一份必然漂移。
+ * @param props - 结构化失败、可选标题与 `data-role`。
  */
-export function PublishErrorBlock({ failure }: { failure: PublishFailure }) {
+export function PublishErrorBlock({ failure, title, role = 'publish-error' }: {
+  failure: PublishFailure
+  title?: string
+  role?: string
+}) {
   return (
-    <div style={BOX} data-role="publish-error" role="alert">
-      <div><strong>{t('appCenter.failed')}</strong></div>
+    <div style={BOX} data-role={role} role="alert">
+      <div><strong>{title ?? t('appCenter.failed')}</strong></div>
       <div data-role="error-code">{`${t('appCenter.errorCode')}: ${failure.code}`}</div>
       <div data-role="error-message">{failure.message}</div>
       {failure.details !== undefined && (
@@ -518,19 +679,49 @@ export function PublishErrorBlock({ failure }: { failure: PublishFailure }) {
 }
 
 /**
- * 成功块：版本 / 状态（已生效 or 待审核）/ 入口链接 —— 员工提交完立刻知道"生效了没有"。
- * @param props - 结构化成功结果。
+ * 成功块：版本 / 状态（已生效 / 待审核 / **已下架**）/ 访问范围 / **分享深链** ——
+ * 员工提交完立刻知道"生效了没有、谁能用、怎么发给同事"。
+ *
+ * 状态三分支（R1-uxc-1）：`app.enabled === false` 时**绝不能**显示"已生效" ——
+ * 服务端确实把版本落了库（`release.status=approved`、`current=true`），但应用处于下架
+ * 状态，打开会被拒，界面说"已生效"就是谎报。这一支必须同时给出**下一步**
+ * （先上架），否则作者只知道"没生效"而不知道怎么办。
+ *
+ * 回显 `access`（P1-3 的兜底要求）：发布是"整体替换配置"的语义，回显是作者唯一
+ * 能事后核对"线上访问范围到底是什么"的地方（服务端发布响应里没有 `access`，
+ * 所以回显的是**本次提交**的值 —— 服务端若没接受它就不会走到这个块）。
+ *
+ * 分享形态（2026-09-19，冻结契约 §4.5）：应用**没有**可贴进浏览器的地址，服务端也
+ * 不再下发 `entry_url`；能发给同事的是**渠道深链** `<渠道 scheme>://app/<app_id>`
+ * （scheme 由随渠道构建/桌面壳注入，见 `deep-link.ts`）。scheme 拿不到时这一行不渲染
+ * —— 宁可少一行，也不显示一条打不开的链接。
+ * @param props - 结构化成功结果 + 本次提交的访问级别 + 可选分享 scheme。
  */
-export function PublishSuccessBlock({ result }: { result: PublishSuccess }) {
+export function PublishSuccessBlock({ result, access, shareScheme }: { result: PublishSuccess, access?: AccessMode, shareScheme?: string }) {
+  const shareLink = appShareLink(result.appId, shareScheme)
   return (
     <div style={BOX} data-role="publish-success">
       <div><strong>{t('appCenter.published')}</strong></div>
       <div data-role="published-version">{`${t('appCenter.versionLabel')}: ${result.version}`}</div>
-      <div data-role="published-status">
-        {result.pending ? t('appCenter.publishedPending') : t('appCenter.publishedLive')}
-      </div>
-      {result.entryURL !== '' && (
-        <div data-role="published-entry">{`${t('appCenter.entry')}: ${result.entryURL}`}</div>
+      {!result.enabled
+        ? (
+            <>
+              <div data-role="published-status" data-enabled="false">{t('appCenter.publishedDisabled')}</div>
+              <div data-role="published-disabled-hint">{t('appCenter.publishedDisabledHint')}</div>
+            </>
+          )
+        : (
+            <div data-role="published-status" data-enabled="true">
+              {result.pending ? t('appCenter.publishedPending') : t('appCenter.publishedLive')}
+            </div>
+          )}
+      {access !== undefined && (
+        <div data-role="published-access" data-access={access}>
+          {`${t('appCenter.access')}: ${t(ACCESS_LABEL_KEYS[access])}`}
+        </div>
+      )}
+      {shareLink !== null && (
+        <div data-role="published-share">{`${t('appCenter.shareLink')}: ${shareLink}`}</div>
       )}
     </div>
   )

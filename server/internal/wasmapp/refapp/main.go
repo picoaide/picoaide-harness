@@ -17,8 +17,8 @@
 //  4. **stdout 只用于协议帧**（RS + 十进制长度 + '\n' + JSON）；日志走 log 宿主调用。
 //     本文件仍演示了一条"非帧输出"——宿主会把它当日志捕获，但那不是推荐做法；
 //  5. **不能联网、不能读文件、不能开线程**；宿主能力只有封闭清单里的七个原语：
-//     db.define / db.query / db.exec / db.tx / ai.chat / log / assets.read，走 stdin/stdout 的 JSON-RPC；
-//  6. 宿主调用是**阻塞**的（含 ai.chat，非流式）：界面要显示等待态。
+//     db.define / db.query / db.exec / db.tx / log / assets.read，走 stdin/stdout 的 JSON-RPC；
+//  6. 宿主调用是**阻塞**的：界面要显示等待态。
 //
 // ⚠️ 注意：宿主能力调用**不是 wasm 导入**（走 JSON-RPC），所以真正的 wasm 导入面只有
 // Go wasip1 运行时的 WASI 符号（fd_read / fd_write / random_get / clock_time_get / …）。
@@ -213,7 +213,7 @@ func (c *hostClient) record(method string, params any) callRecord {
 //   - tx#2 = begin → db.exec（写一份随后被丢弃的数据）→ tx_rollback。
 //
 // ⚠️ 为什么事务体里**必须有真实 SQL**：`db.tx` 的语义就是"事务内的数据库读写"，
-// 事务内只允许 db.query / db.exec（+ 两个出口），ai.chat / log / assets.read /
+// 事务内只允许 db.query / db.exec（+ 两个出口），log / assets.read /
 // db.define / 嵌套 tx_begin 一律被拒（§4.4 的意图是防长期持锁与占执行槽）。
 // 早先的样例写的是"begin 完立刻 commit"（事务体零 SQL），于是"事务内 SQL 全被拒"
 // 这个缺陷在样例与作者文档里都看不出来（模块 H 审计 P0-1）—— 别再把事务写空。
@@ -255,14 +255,12 @@ func callHosts(c *hostClient) []callRecord {
 	}))
 	records = append(records, c.record(abi.MethodTxRollback, abi.TxParams{TxID: txIDOf(begin)}))
 
-	// ai.chat：用**当前使用者**的身份与额度调平台既有 /v1 网关（密钥永不出服务端，§4.7）。
-	// 非流式、阻塞；余额不足是 AI_BALANCE_INSUFFICIENT，限流是 AI_RATE_LIMITED。
-	// 必须在事务外（事务内禁止会阻塞的能力，§4.4）。
-	records = append(records, c.record(abi.MethodAIChat, abi.AIChatParams{
-		Messages: []abi.ChatMessage{
-			{Role: "user", Content: "用一句话说明这个应用在做什么。"},
-		},
-	}))
+	// ⚠️ W4 删除：这里原来是 `ai.chat` 的演示调用（用使用者身份调平台 /v1 网关）。
+	// 服务端 wasm **不再具备任何 AI 能力**（总纲 §21.3）；应用要调模型必须走
+	// **客户端 AI loop**（§21.2）：应用**前端 JS** `fetch('/__picoaide/ai/chat', …)`
+	// 由宿主本地处理，拿到的结果再 POST 回应用、由 wasm 落库。
+	// 因此参考实现不再演示任何宿主 AI 调用 —— 六个原语是
+	// db.define / db.query / db.exec / db.tx / log / assets.read。
 
 	// log：应用日志（单条 ≤ 4 KiB、每请求 ≤ 100 条，超出丢弃并计数）。同样在事务外。
 	records = append(records, c.record(abi.MethodLog, abi.LogParams{

@@ -47,6 +47,7 @@ async function channelRepo(): Promise<string> {
       slug: 'Example-Brand',
       app_id: 'com.example.brand',
       deep_link_scheme: 'examplebrand',
+      app_origin_scheme: 'examplebrand-app',
     },
   }))
   return root
@@ -80,6 +81,18 @@ describe('verifyChannelPackage', () => {
     await expect(
       verifyChannelPackage({ env: { DSH_BUILD_CHANNEL: CHANNEL }, repoRoot: repo, buildDir: empty }),
     ).rejects.toThrow(/缺少随包渠道配置/u)
+  })
+
+  it('渠道包缺 desktop.app_origin_scheme 时构建期就红灯（§10：禁止静默回落官方 origin）', async () => {
+    const { repo, appDir } = await stagedChannelBuild()
+    // 随包 channel.json 少这个字段（存量渠道包的形态）。
+    const stagedPath = join(appDir, 'channel.json')
+    const staged = JSON.parse(readFileSync(stagedPath, 'utf8')) as { desktop: Record<string, unknown> }
+    delete staged.desktop.app_origin_scheme
+    writeFileSync(stagedPath, JSON.stringify(staged))
+    await expect(
+      verifyChannelPackage({ env: { DSH_BUILD_CHANNEL: CHANNEL }, repoRoot: repo, buildDir: appDir }),
+    ).rejects.toThrow(/app_origin_scheme/u)
   })
 
   it('图标不是按本渠道派生时失败（渠道包带官方图标的形态）', async () => {

@@ -16,6 +16,7 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { BrowserRuntime, type WaitForOptions } from './runtime.ts'
 import { browserError } from './errors.ts'
+import type { BrowserSurface } from './surface.ts'
 import { httpOriginOf } from './credential-site.ts'
 import { snapshotNote } from './snapshot.ts'
 import { BROWSER_TOOL_TIMEOUT_MS, BROWSER_WAIT_FOR_DEADLINE_MS, WAIT_FOR_MAX_MS } from './budgets.ts'
@@ -112,7 +113,10 @@ async function assertCredentialOrigin(runtime: BrowserRuntime, tabId: number, co
   // 与 runtime.fillCredentials 临界区内的 TOCTOU 复核同源。
   const actual = runtime.tabOrigin(tabId)
   if (actual === null) {
-    throw browserError('policy', `browser_fill_credentials refused: this tab has no http(s) origin, while connector ${JSON.stringify(connectorId)} is bound to ${expected}. Navigate the tab to that site first.`)
+    // 非 http(s) 文档（客户端内部协议、about:、file: …）没有可绑定站点 ⇒ 如实降级：
+    // 拒绝注入 + 说清出路，而不是让模型以为"页面没加载好"而反复重试。
+    // 文案不出现被观测 URL（S02-01 口径）。
+    throw browserError('policy', `browser_fill_credentials refused: this tab has no http(s) origin, while connector ${JSON.stringify(connectorId)} is bound to ${expected}. Credential autofill applies to http(s) sites only — a non-http(s) document has no site a stored credential can be bound to, so nothing was injected. Enter the value with browser_type instead, or navigate the tab to ${expected} first.`)
   }
   if (actual !== expected) {
     // 比对用 raw origin（runtime.tabOrigin），文案里**一个字节的被观测 origin 都不出现**
@@ -187,6 +191,30 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     return runtime.resolveTab(tab)
   }
 
+  /**
+   * 显式应用窗口寻址（§16.1 冻结）：只有 `app_id` 能把操作指向应用窗口。
+   *
+   * 为什么做成"必须显式"：默认寻址指向浏览器当前标签，是唯一不会误伤的安全默认
+   * —— 用户可能正拿着某个应用窗口的控制权，而模型"顺手"操作它是最危险的行为。
+   * @param appId - 模型给的 `app_id`（可选）。
+   * @returns 应用 surface；没有注册过这个 app_id ⇒ 明确报错（不回落浏览器标签）。
+   */
+  const appSurfaceOf = (appId: string): BrowserSurface => {
+    runtime.syncSurfaces?.()
+    const registry = runtime.surfaces
+    const surface = registry?.appSurface(appId)
+    if (surface === undefined) {
+      throw browserError('not-found', `browser: no open application window for app_id ${JSON.stringify(appId)} — call browser_list_tabs to see open surfaces (an application window must be opened from the app center first)`)
+    }
+    return surface
+  }
+
+  /** 本次调用的目标（浏览器标签），`app_id` 存在时先做显式寻址校验。 */
+  const browserTabOf = async (args: { tab?: number | undefined, app_id?: string | undefined }): Promise<number> => {
+    if (typeof args.app_id === 'string' && args.app_id !== '') appSurfaceOf(args.app_id)
+    return await tabOf(args.tab)
+  }
+
   // ----------------------------------------------------------- Navigate (8)
 
   register(defineTool({
@@ -221,6 +249,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     description: '[navigate] Navigate a tab of your session to a URL (http/https only).',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
+      app_id: { type: 'string', description: 'Address an OPEN application window instead of a browser tab (design §16.1: application windows are never the default target).' },
       url: { type: 'string', required: true, description: 'The URL to navigate to.' },
       waitUntil: { type: 'string', enum: WAIT_UNTILS, description: 'Load milestone to wait for (default domcontentloaded).' },
     },
@@ -237,10 +266,11 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     isConcurrencySafe: () => false,
     presentCall: present('Navigate'),
     async execute(args, exec) {
-      const { tab, url, waitUntil } = args as { tab?: number; url: string; waitUntil?: BrowserWaitUntil }
+      const { tab, app_id: appId, url, waitUntil } = args as { tab?: number; app_id?: string; url: string; waitUntil?: BrowserWaitUntil }
       if (typeof url !== 'string' || url.trim() === '') throw new Error('url must be a non-empty string')
       noteAgent(runtime, exec.agent)
-      const tabId = await tabOf(tab)
+      // §16.1 寻址：给了 app_id ⇒ 显式指向应用窗口；否则默认指向**浏览器当前标签**。
+      const tabId = await browserTabOf({ tab, ...(appId === undefined ? {} : { app_id: appId }) })
       await runtime.navigate(tabId, url.trim(), waitUntil ?? 'domcontentloaded', exec.signal)
       exec.signal.throwIfAborted()
       const state = runtime.tabState(tabId)
@@ -324,6 +354,10 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
               additionalProperties: false,
               properties: {
                 id: { type: 'integer' },
+                // §16.1：kind/app_id 是 AI 寻址的schema 面 —— 没有它，模型无法区分
+                // "浏览器标签"与"应用窗口"，而默认寻址只指向前者。
+                kind: { type: 'string', description: '"browser-tab" or "app".' },
+                app_id: { type: 'string', description: 'Application id (only for kind="app"; pass it as app_id to address that window).' },
                 url: { type: 'string' },
                 title: { type: 'string' },
                 loading: { type: 'boolean' },
@@ -356,9 +390,30 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     presentCall: present('List tabs'),
     async execute(_args, exec) {
       noteAgent(runtime, exec.agent)
+      // 浏览器台账只含浏览器标签；应用窗口单独列出（kind='app' + app_id），
+      // **不占 maxTabs、不进浏览器台账**（§16.1）。
+      runtime.syncSurfaces?.()
       const tabs = runtime.listTabs()
+      const browserTabs = tabs.map((t) => ({
+        id: t.id,
+        kind: 'browser-tab',
+        app_id: '',
+        url: t.url,
+        title: t.title,
+        loading: t.loading,
+        active: t.visible,
+      }))
+      const appTabs = (runtime.surfaces?.appSurfaces() ?? []).map(surface => ({
+        id: surface.id,
+        kind: 'app',
+        app_id: surface.appId ?? '',
+        url: '',
+        title: '',
+        loading: false,
+        active: false,
+      }))
       return {
-        tabs: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title, loading: t.loading, active: t.visible })),
+        tabs: [...browserTabs, ...appTabs],
         control: runtime.controlState(),
       }
     },
@@ -1065,7 +1120,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_fill_credentials',
-    description: '[control] Fill the login form of your tab with credentials stored for a connector (shown to the user; never submitted automatically). SITE-BOUND: the tab must be on the connector\'s own origin — a tab on any other site (or a connector record without a site URL) is refused, so navigate to the real login page first. IMPORTANT: this opens the tab\'s credential window — from now until that tab navigates, browser_eval and browser_screenshot are refused there (a value still in the page can be read back in ways no masking can undo). Read the page with browser_get_snapshot / browser_get_text, submit with browser_click, and eval/screenshots resume automatically on the next document. The injected value stays masked in every text exit of this tab for the rest of the tab\'s life (page text, titles, URLs, history, downloads) — VERBATIM occurrences only: a page that renders the value transformed (base64, reversed, character-split) is not covered by any value-level rule. Treat this as a bound on accidents, not on a hostile page.',
+    description: '[control] Fill the login form of your tab with credentials stored for a connector (shown to the user; never submitted automatically). SITE-BOUND: the tab must be on the connector\'s own origin — a tab on any other site (or a connector record without a site URL) is refused, so navigate to the real login page first. http(s) sites only: a non-http(s) document has no origin a stored credential can be bound to, so autofill is refused there (use browser_type for such pages). IMPORTANT: this opens the tab\'s credential window — from now until that tab navigates, browser_eval and browser_screenshot are refused there (a value still in the page can be read back in ways no masking can undo). Read the page with browser_get_snapshot / browser_get_text, submit with browser_click, and eval/screenshots resume automatically on the next document. The injected value stays masked in every text exit of this tab for the rest of the tab\'s life (page text, titles, URLs, history, downloads) — VERBATIM occurrences only: a page that renders the value transformed (base64, reversed, character-split) is not covered by any value-level rule. Treat this as a bound on accidents, not on a hostile page.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       connectorId: { type: 'string', required: true, description: 'The connector id whose stored credentials to use.' },

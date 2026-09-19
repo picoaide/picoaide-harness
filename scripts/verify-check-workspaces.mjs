@@ -225,6 +225,81 @@ for (const probe of ['.glitchtip-recon/c.txt', '.glitchtip-recon/nested/other.tx
 }
 
 // ---------------------------------------------------------------------------
+// 变异体残留守卫（2026-09-20 事故后的新守卫）：合成正/负例 + 接线
+//
+// 为什么用合成树而不是仓库本身：仓库此刻**必须**是零残留（否则这条断言会与真实
+// 工作区状态耦合，别人一改就红）；而"守卫会不会真的抓"只能靠**已知坏的输入**证明。
+// 三个夹具各自钉一种形态：①代码行尾挂变异注释（必须红）；②纯注释变异块（必须绿）；
+// ③字符串字面量里描述变异（必须绿）。另外断言"夹具内容确实含标记"——
+// 否则夹具写错（比如关键词敲错）会让负例**永远通过**，变成假绿。
+// ---------------------------------------------------------------------------
+
+{
+  const guard = join(root, 'scripts', 'check-no-leftover-mutants.mjs')
+  const tree = tempDir('mutant-guard-tree-')
+  mkdirSync(join(tree, 'src'), { recursive: true })
+  const badBody = "export function pageSize() {\n  return '0' // XX 变异 M-1：改回 0\n}\n"
+  writeFileSync(join(tree, 'src', 'mutant.ts'), badBody)
+  writeFileSync(join(tree, 'src', 'doc.ts'), '// 变异验证：下面这行曾被改成 0，跑完已还原\nexport const size = 20\n')
+  writeFileSync(join(tree, 'src', 'str.ts'), "export const note = '`|| true` 变异无任何静态守卫'\n")
+  writeFileSync(join(tree, 'src', 'regex.mjs'), 'const KEYWORD = /变异|MUTANT/gu\nexport default KEYWORD\n')
+
+  // 防假绿：夹具本身必须真的含标记（写错了就会让负例恒通过）。
+  check(badBody.includes('变异'), '变异守卫自检：坏夹具必须真的含「变异」标记（否则负例是假绿）')
+
+  const bad = spawnSync(process.execPath, [guard, '--root', tree], { cwd: root, encoding: 'utf8' })
+  check(bad.status === 1, `变异守卫：代码行尾挂变异注释必须红（实际 exit=${bad.status}）`)
+  check(bad.stderr.includes('mutant.ts'), `变异守卫：命中必须点名文件（实际 ${JSON.stringify(bad.stderr.slice(0, 200))}）`)
+
+  const good = spawnSync(process.execPath, [guard, '--root', tempDir('mutant-guard-ok-')], { cwd: root, encoding: 'utf8' })
+  check(good.status === 0, `变异守卫：空树必须绿（实际 exit=${good.status}）`)
+
+  // 把两个"必须绿"的形态单独放一棵树里（与坏夹具隔离，失败信息才指得准）。
+  const goodTree = tempDir('mutant-guard-good-')
+  mkdirSync(join(goodTree, 'src'), { recursive: true })
+  writeFileSync(join(goodTree, 'src', 'doc.ts'), '// 变异验证：下面这行曾被改成 0，跑完已还原\nexport const size = 20\n')
+  writeFileSync(join(goodTree, 'src', 'str.ts'), "export const note = '`|| true` 变异无任何静态守卫'\n")
+  writeFileSync(join(goodTree, 'src', 'regex.mjs'), 'const KEYWORD = /变异|MUTANT/gu\nexport default KEYWORD\n')
+  const goodReal = spawnSync(process.execPath, [guard, '--root', goodTree], { cwd: root, encoding: 'utf8' })
+  check(
+    goodReal.status === 0,
+    `变异守卫：纯注释块 / 字符串字面量 / 正则字面量里的标记必须绿（实际 exit=${goodReal.status}：${goodReal.stderr.slice(0, 200)}）`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 迁移区间守卫（2026-09-20 漂移事故后的新守卫）：合成正/负例 + 接线
+//
+// 夹具刻意做"两处都动"：假迁移目录到 0007，假 docs 一处写 0001–0007（必须绿）、
+// 一处写 0001–0003（必须红）。并断言坏夹具真的含那句区间声明 ——
+// 否则夹具写错会让负例**永远通过**（假绿）。
+// ---------------------------------------------------------------------------
+
+{
+  const guard = join(root, 'scripts', 'check-migration-range.mjs')
+  const tree = tempDir('migration-range-tree-')
+  mkdirSync(join(tree, 'server', 'internal', 'serverstore', 'migrations-pg'), { recursive: true })
+  for (const name of ['0001_init.sql', '0002_tokens.sql', '0007_latest.sql']) {
+    writeFileSync(join(tree, 'server', 'internal', 'serverstore', 'migrations-pg', name), '-- migration\n')
+  }
+  mkdirSync(join(tree, 'server', 'docs'), { recursive: true })
+  const staleLine = '服务端迁移编号 0001-0003 已过时\n'
+  writeFileSync(join(tree, 'server', 'docs', 'stale.md'), `# DB\n\n${staleLine}`)
+  writeFileSync(join(tree, 'server', 'AGENTS.md'), '# agents\n\n- DB: 迁移 `internal/serverstore/migrations-pg/` 0001–0007\n')
+  check(staleLine.includes('0001-0003'), '迁移区间守卫自检：坏夹具必须真的含落后区间（否则负例是假绿）')
+
+  const bad = spawnSync(process.execPath, [guard, '--root', tree], { cwd: root, encoding: 'utf8' })
+  check(bad.status === 1, `迁移区间守卫：区间落后必须红（实际 exit=${bad.status}）`)
+  check(bad.stderr.includes('stale.md') && bad.stderr.includes('0007'),
+    `迁移区间守卫：命中必须点名文件与实际 MAX（实际 ${JSON.stringify(bad.stderr.slice(0, 200))}）`)
+
+  // 修好那句之后必须复绿（同一棵树 ⇒ 证明是"那句区间"在判红，不是别的噪声）。
+  writeFileSync(join(tree, 'server', 'docs', 'stale.md'), '# DB\n\n服务端迁移编号 0001-0007\n')
+  const good = spawnSync(process.execPath, [guard, '--root', tree], { cwd: root, encoding: 'utf8' })
+  check(good.status === 0, `迁移区间守卫：区间正确必须绿（实际 exit=${good.status}：${good.stderr.slice(0, 200)}）`)
+}
+
+// ---------------------------------------------------------------------------
 // 接线：本门禁必须在 package.json 与 GUARDS 表里都登记（否则等于没接）
 // ---------------------------------------------------------------------------
 
@@ -241,6 +316,24 @@ for (const probe of ['.glitchtip-recon/c.txt', '.glitchtip-recon/nested/other.tx
     guards.includes('check:check-workspaces'),
     `接线: check-workspaces 的 GUARDS 表必须包含 check:check-workspaces，实际 ${JSON.stringify(guards)}`,
   )
+  // 2026-09-20：变异体残留守卫必须同样双重登记（package.json + GUARDS）——
+  // 少任何一处都等于「事故防线没接上」，而它防的正是"红的变异体进提交"。
+  check(
+    pkg.scripts?.['check:no-leftover-mutants'] === 'node scripts/check-no-leftover-mutants.mjs',
+    `接线: package.json 的 check:no-leftover-mutants 必须指向守卫脚本，实际 ${JSON.stringify(pkg.scripts?.['check:no-leftover-mutants'])}`,
+  )
+  check(
+    guards.includes('check:no-leftover-mutants'),
+    `接线: check-workspaces 的 GUARDS 表必须包含 check:no-leftover-mutants，实际 ${JSON.stringify(guards)}`,
+  )
+  check(
+    pkg.scripts?.['check:migration-range'] === 'node scripts/check-migration-range.mjs',
+    `接线: package.json 的 check:migration-range 必须指向守卫脚本，实际 ${JSON.stringify(pkg.scripts?.['check:migration-range'])}`,
+  )
+  check(
+    guards.includes('check:migration-range'),
+    `接线: check-workspaces 的 GUARDS 表必须包含 check:migration-range，实际 ${JSON.stringify(guards)}`,
+  )
 }
 
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
@@ -251,5 +344,6 @@ if (failures.length > 0) {
 }
 process.stdout.write(
   'verify-check-workspaces: OK — --changed 算不出改动=exit 2、--only 未知/空/被 flag 吃掉=exit 2、'
-  + '有效 --only 真的执行该包、.glitchtip-recon/ 已被忽略、本门禁已接入 package.json 与 GUARDS\n',
+  + '有效 --only 真的执行该包、.glitchtip-recon/ 已被忽略、变异体残留守卫的合成正/负例、'
+  + '迁移区间守卫的合成正/负例、本门禁与两个新守卫都已接入 package.json 与 GUARDS\n',
 )

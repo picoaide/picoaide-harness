@@ -7,8 +7,10 @@
 // `assets.read("picoaide.app.json")` 读自己的配置（§4.2）。
 //
 // 三条容易搞错的语义：
-//   - `access` 缺省 **`login`**（R25，2026-09-18 收敛为三模式）：写漏了不会意外
-//     变成匿名可达；`public` / `login` / `whitelist` 之外的值一律拒。
+//   - `access` 缺省 **`login`**（R25，2026-09-18 收敛为三模式；2026-09-19 契约 §4.4
+//     再收敛为**两模式**）：写漏了不会意外变成匿名可达。**写侧只接受
+//     `login|whitelist`**；`public` 是历史值 —— **读取侧**按 `login` 处理（存量应用不
+//     失效、不 500），但新版本不得再写（见 parseSubmitted / publicAccessRejected）。
 //   - `access="whitelist"` 且 `whitelist` 为空 ⇒ 拒（§10.5 第 56c 项）：这种应用对
 //     **所有人**都不可用，属于发布期就该拦下的形态。注意 `login`（登录后全员）是
 //     合法模式，平台**不再**因为"登录已开但名单为空"拒发布（旧规则已废止）。
@@ -26,7 +28,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
@@ -36,9 +40,19 @@ import (
 
 // 顶层字段名（§4.2 新 schema 的字段集合是**封闭**的：多一个即拒，见 Parse 的未知字段检查）。
 const (
-	FieldAccess          = "access"
-	FieldWhitelist       = "whitelist"
-	FieldPurpose         = "purpose"
+	FieldAccess    = "access"
+	FieldWhitelist = "whitelist"
+	FieldPurpose   = "purpose"
+	// FieldWindow 是**窗口**对象（§6 新增：ratio/width/height 三个子字段）。
+	//
+	// 顶层是一个对象而不是三个扁平键：作者写的是
+	//
+	//	{"window": {"ratio": "16:9", "width": 1280, "height": 720}}
+	//
+	// 而字段规格（appcfgspec.go 的 sub_fields）与 §6 的表格用的是
+	// `window.ratio` / `window.width` / `window.height` 这种**路径名** ——
+	// 两者是同一份契约的两种写法（对象形态 vs 路径形态），不要在这里再发明第三种。
+	FieldWindow          = "window"
 	FieldDataSensitivity = "data_sensitivity"
 	FieldOwner           = "owner"
 )
@@ -64,17 +78,46 @@ var KnownFields = []string{
 	FieldPurpose,
 	FieldDataSensitivity,
 	FieldOwner,
+	FieldWindow,
 }
 
-// Access 是访问模式（§4.2 / R25，2026-09-18 用户拍板收敛为三模式）。
+// 窗口尺寸/比例的合法区间（§6 冻结）。
+//
+// 为什么这些常量住在 appcfg 而**不进** `limits`：`limits` 的每个数值都有一整套
+// 逐字节生成物（limits.json/limits.md/appcfg.json/技能 references），而 W1 只允许
+// 做 appcfg 侧那一次重生成；这些是**作者契约**的取值边界（与 limits 的"平台资源
+// 上限"不是一回事），改它们只需要重跑 appcfg 生成物。
+const (
+	// WindowRatioMin / WindowRatioMax 是 ratio 的合法闭区间（§6：0.25–4.0）。
+	WindowRatioMin = 0.25
+	WindowRatioMax = 4.0
+	// WindowDefaultWidth / WindowDefaultHeight 是作者没写尺寸时的默认值（§6：1280×720）。
+	WindowDefaultWidth  = 1280
+	WindowDefaultHeight = 720
+	// WindowSizeMin / WindowSizeMax 是 width/height 的合法像素区间。
+	//
+	// 下界 320 是"小于它布局必然不可用"，上界 7680（8K 宽）是"再大就不是应用窗口了"。
+	// 区间存在的意义是**发布期就能拦住**手滑多打一个 0 的尺寸（运行期表现为窗口
+	// 开在屏幕外/被系统裁剪，作者只会收到"打不开"）。
+	WindowSizeMin = 320
+	WindowSizeMax = 7680
+)
+
+// Access 是访问模式（§4.2 / R25；2026-09-18 收敛为三模式，2026-09-19 契约 §4.4
+// 收敛为**写侧两模式**）。
 //
 // 它同时是**帧内 auth.mode 的来源**（§7.1）与应用中心目录显示的"访问级别"。
 type Access string
 
 const (
-	// AccessPublic 允许匿名：未登录时帧内 user 为 null，身份相关宿主调用 AUTH_REQUIRED。
+	// AccessPublic 是**历史值，只读**：允许匿名（未登录时帧内 user 为 null）。
+	//
+	// 2026-09-19 契约 §4.4：应用只在桌面客户端内、一律要求登录 ⇒ 平台**不再有匿名面**。
+	// 这个取值仍然能被读出来（存量已发布版本的配置里写着它，读取侧不得因此 500），
+	// 但语义上**等同于 login**（RequiresLogin 为真、AuthMode 为 login），
+	// 而且**发布/校验一律拒**（见 parseSubmitted）。
 	AccessPublic Access = "public"
-	// AccessLogin 要求登录（**缺省**）：未登录 302 主站换票；登录后全员可用。
+	// AccessLogin 要求登录（**缺省**）：登录后全员可用。
 	AccessLogin Access = "login"
 	// AccessWhitelist 要求登录 + 名单准入；**平台不比对名单**（R24），
 	// 名单由应用自己读配置文件判定。
@@ -88,15 +131,29 @@ const (
 // （见包注释的映射表），两条规则方向一致。
 const AccessDefault = AccessLogin
 
-// AccessValues 是 access 的封闭取值（顺序即文档顺序）。
+// AccessValues 是平台**认识**的全部 access 取值（顺序即文档顺序）——
+// 读取侧口径（历史版本里可能写着 public），**不是**可写集合。
+//
+// 可写集合见 AccessWritableValues：发布/校验只接受 login|whitelist。
+// ⚠️ 生成物（internal/wasmapp/appcfg/appcfg.json 与 skill 的 references/app-config.md）
+// 里的取值表来自本变量，因此它们当前仍列出历史值 public；契约 §4.4 的收敛要等
+// 下一次重生成时把 appcfgspec.go 的 access.Values 指向 AccessWritableValues
+// （生成由 C2 统一执行，见任务书 §3 的 C2 格）。
 var AccessValues = []string{string(AccessPublic), string(AccessLogin), string(AccessWhitelist)}
+
+// AccessWritableValues 是**发布/校验**接受的 access 取值（2026-09-19 契约 §4.4）。
+//
+// 之所以与 AccessValues 分开：收敛的方向是"写入面收紧、读取面兼容"——
+// 历史 public 必须继续可读（否则存量应用每请求 500），但新版本不得再写。
+var AccessWritableValues = []string{string(AccessLogin), string(AccessWhitelist)}
 
 // Config 是应用配置文件的解析结果。
 //
 // 字段的 JSON 名是**外部契约**（作者手写、skill 模板生成），改名即破坏已发布应用。
 type Config struct {
-	// Access 是访问模式（三选一，缺省 login）。旧 schema 的 login_required/visible
-	// 在 Parse 里映射/忽略，不落进本结构体 —— 新写出的 JSON 只有 access。
+	// Access 是访问模式（缺省 login；写侧只接受 login|whitelist，历史 public 只读）。
+	// 旧 schema 的 login_required/visible 在 Parse 里映射/忽略，不落进本结构体
+	// —— 新写出的 JSON 只有 access。
 	Access Access `json:"access"`
 	// Whitelist 是作者手填的准入名单（R26）：**平台不校验账号是否存在**，
 	// 也不提供任何目录能力。语义 = "**给应用自己读的名单**"（R24：平台不比对）；
@@ -109,34 +166,137 @@ type Config struct {
 	// Owner 是**负责人**声明（首次发布必填）：写"这个应用出问题找谁"。
 	// 不是平台归属 —— 平台归属在 apps.owner，取自登录态、不可伪造。
 	Owner string `json:"owner"`
+	// Window 是窗口的**默认尺寸与强制宽高比**（§6 新增）。
+	//
+	// nil = 作者没写 ⇒ 客户端按 WindowDefaultWidth×Height 开窗（见 ResolvedWindow）。
+	// 用指针而不是零值结构体：`{"window":{}}`（写了但空）与"整块缺席"在
+	// **版本继承**（inherit.go：缺席=沿用上一版）下语义不同，零值会让两者不可区分。
+	Window *WindowConfig `json:"window,omitempty"`
+}
+
+// WindowConfig 是 `window` 对象的解析结果（§6）。
+//
+// 三个子字段的取值规则（**唯一真源**，客户端与技能文档都从这里派生）：
+//
+//	ratio   —— `"W:H"`（如 "16:9"）或浮点（如 1.7778）；合法区间 [0.25, 4.0]；
+//	           0/负/过大/非数字 ⇒ 发布期 APP_CONFIG_INVALID（§6 的硬限制）。
+//	           **强制锁定**：客户端 resize 时按它约束窗口比例。
+//	width   —— 首次打开的窗口宽度（像素，可省略）。
+//	height  —— 首次打开的窗口高度（像素，可省略）。
+//
+// ratio 与 width/height 冲突时**以 ratio 为准**（§6 的措辞是"按 ratio 校正"）：
+// 只保留作者显式给出的那一边，另一边按比例推导（见 ResolvedWindow）。
+type WindowConfig struct {
+	// Ratio 是宽/高比（0 = 未设置）。解析期已把 "W:H" 折算成浮点。
+	Ratio float64 `json:"ratio,omitempty"`
+	// Width / Height 是像素尺寸（0 = 未设置）。
+	Width  int `json:"width,omitempty"`
+	Height int `json:"height,omitempty"`
+}
+
+// ResolvedWindow 返回**最终生效**的窗口尺寸（把缺省值与 ratio 校正一次算清）。
+//
+// 规则（§6："缺省 1280×720 并按 ratio 校正"）：
+//  1. 起点 = 作者给的值，缺省 WindowDefaultWidth×WindowDefaultHeight；
+//  2. 没写 ratio ⇒ 原样返回（不做任何校正）；
+//  3. 写了 ratio ⇒ 以**作者显式给出的那一边**为准推另一边：
+//     只给了 width ⇒ height = round(width/ratio)；只给了 height ⇒ width = round(height*ratio)；
+//     两个都给了 ⇒ 以 width 为准（宽度是更常用的锚），height = round(width/ratio)；
+//     两个都没给 ⇒ 以默认宽度 1280 为锚，height = round(1280/ratio)。
+//
+// 返回值恒为正整数（ratio 已在 Validate 里保证落在 [0.25,4.0]，不会除出 0）。
+func (c Config) ResolvedWindow() (width, height int) {
+	width, height = WindowDefaultWidth, WindowDefaultHeight
+	if c.Window == nil || c.Window.Ratio <= 0 {
+		if c.Window != nil && c.Window.Width > 0 {
+			width = c.Window.Width
+		}
+		if c.Window != nil && c.Window.Height > 0 {
+			height = c.Window.Height
+		}
+		return width, height
+	}
+	ratio := c.Window.Ratio
+	switch {
+	case c.Window.Width > 0:
+		width = c.Window.Width
+		height = int(float64(width)/ratio + 0.5)
+	case c.Window.Height > 0:
+		height = c.Window.Height
+		width = int(float64(height)*ratio + 0.5)
+	default:
+		width = WindowDefaultWidth
+		height = int(float64(width)/ratio + 0.5)
+	}
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+	return width, height
 }
 
 // AuthMode 把配置映射成帧内 `auth.mode`（§7.1）。
+//
+// 2026-09-19 契约 §4.4：历史 `public` 在**读取侧当作 login** —— 帧里必须如实告诉
+// 应用"本平台一律要求登录"，否则应用会按 public 渲染匿名界面，而平台其实已经认证过
+// 身份（user 非 null）。因此这里 public 映射到 login，而不是原值。
 //
 // 注意：缺省值由 Parse 落定（缺失的 access → login，R25）；
 // **不要手工构造 Config 来决定鉴权**——零值 Config 的 Access 是空串，映射落在
 // login（最严格的一侧，绝不意外公开）。生产路径一律走 Parse。
 func (c Config) AuthMode() abi.AuthMode {
 	switch c.Access {
-	case AccessPublic:
-		return abi.AuthModePublic
 	case AccessWhitelist:
 		return abi.AuthModeWhitelist
 	default:
-		// login 与"未解析的零值"都要求登录（fail-closed）。
+		// login、历史 public 与"未解析的零值"都要求登录（fail-closed）。
 		return abi.AuthModeLogin
 	}
 }
 
 // Public 报告该应用是否允许匿名访问（帧内 user 为 null）。
-func (c Config) Public() bool { return c.Access == AccessPublic }
+//
+// **恒为 false**（2026-09-19 契约 §4.4）：平台不再有匿名面，历史 public 读取侧即
+// login。保留本方法是为了让"谁还在问匿名"这件事在编译期可见。
+func (c Config) Public() bool { return false }
 
-// RequiresLogin 报告未登录时是否必须先走换票（public 之外都要）。
-func (c Config) RequiresLogin() bool { return c.Access != AccessPublic }
+// RequiresLogin 报告未登录时是否必须先登录（契约 §4.4）。
+//
+// **恒为 true**：应用只在桌面客户端内可用，且客户端请求一律持员工 bearer
+// （`POST /api/client/v2/apps/wasm/:app_id/request` 由 BearerAuth 保护）。
+// 历史 public 在读取侧即 login ⇒ 没有任何配置能让平台放行匿名。
+func (c Config) RequiresLogin() bool { return true }
 
-// ValidAccess 报告 s 是否是合法的 access 取值。
+// ValidAccess 报告 s 是否是平台**认识**的 access 取值（读取侧口径，含历史 public）。
+//
+// 写入面的判定见 WritableAccess —— 认识 ≠ 可写。
 func ValidAccess(s Access) bool {
 	for _, v := range AccessValues {
+		if string(s) == v {
+			return true
+		}
+	}
+	return false
+}
+
+// IsLegacyPublicAccess 判定一个 access 取值是否是**历史公开档位**（只读兼容）。
+//
+// 为什么要有这个函数（而不是让调用方直接比常量）：这个取值是**读侧兼容口径的一部分**
+// （读取侧把它当 login 执行、写侧拒绝它），语义属于本包。服务端唯一还需要"识别它"的
+// 另一处是 W4 的一次性磁盘资产改写（`appseed`）—— 那里只该问"这是不是历史取值"，
+// 不该自己拼字面量、也不该直接引用常量（否则"历史取值的语义"就有了两个作者）。
+func IsLegacyPublicAccess(s string) bool {
+	return Access(s) == AccessPublic
+}
+
+// WritableAccess 报告 s 是否是**发布/校验**接受的 access 取值（2026-09-19 契约 §4.4）。
+//
+// 只有 login|whitelist：`public` 被明确拒绝（parseSubmitted 给出结构化
+// APP_CONFIG_INVALID + hints，而不是静默改写成 login）。
+func WritableAccess(s Access) bool {
+	for _, v := range AccessWritableValues {
 		if string(s) == v {
 			return true
 		}
@@ -163,16 +323,41 @@ func AccessOfConfigJSON(raw string) Access {
 	return c.Access
 }
 
-// Parse 解析并校验配置文件字节。
+// Parse 解析并校验配置文件字节（**读取侧**口径）。
 //
 // 检查分两层，**Parse 已经把不依赖"是否首版"的全部检查做完**（含
 // whitelist 模式的名单非空检查，即内部调用 Validate(false)）：
 // 这样调用方忘记调用 Validate 也不会把一个"对所有人不可用"的应用放进来。
 // 首次发布特有的声明字段要求由调用方另行调用 Validate(true)。
 //
+// 读取侧与写入侧的差别只有一条（2026-09-19 契约 §4.4）：**历史 `public` 在这里被
+// 接受**（存量已发布版本的 `picoaide.app.json` 就写着它，拒绝会让应用每请求 500），
+// 但它的语义已经是 login（RequiresLogin/AuthMode）。写入侧走 parseSubmitted，
+// 那里 public 被明确拒绝。
+//
 // 失败一律 `APP_CONFIG_INVALID`(422)，details/hints 指名具体字段（§4.2 / §10.5 第 56b 项）。
 func Parse(data []byte) (Config, *apperr.Error) {
-	c, e := decode(data)
+	return parseAs(data, accessRead)
+}
+
+// parseSubmitted 是**写入侧**（发布/校验）的解析入口：与 Parse 逐条相同，
+// 除了显式/映射出的 `access=public` 一律拒（契约 §4.4「新版本不得再写 public」）。
+func parseSubmitted(data []byte) (Config, *apperr.Error) {
+	return parseAs(data, accessWrite)
+}
+
+// accessMode 区分读取侧与写入侧（唯一差别见 parseSubmitted 的注释）。
+type accessMode int
+
+const (
+	// accessRead 读取侧：接受历史 public（语义等同 login）。
+	accessRead accessMode = iota
+	// accessWrite 写入侧：public 一律拒。
+	accessWrite
+)
+
+func parseAs(data []byte, mode accessMode) (Config, *apperr.Error) {
+	c, e := decodeAs(data, mode)
 	if e != nil {
 		return Config{}, e
 	}
@@ -182,12 +367,14 @@ func Parse(data []byte) (Config, *apperr.Error) {
 	return c, nil
 }
 
-// decode 只做 schema 解析与旧形态映射，**不做语义校验**（不检查"whitelist 模式必须
-// 有名单"）。唯一的外部用途是 AccessOfConfigJSON（显示投影）：鉴权与发布一律走 Parse。
-func decode(data []byte) (Config, *apperr.Error) {
-	var c Config
+// decodeObject 把配置字节解成"字段 → 原始值"的 map，并完成**形态**检查
+// （体积上限 / 合法 JSON / 顶层必须是对象 / 对象之后无多余内容）。
+//
+// 它是 decode 与 ParseUpdate（更新发布的字段继承）共用的第一步：两者对"什么样的
+// 字节算一份配置"必须给出**逐字相同**的结论，否则"先合并再解析"会绕开某条检查。
+func decodeObject(data []byte) (map[string]json.RawMessage, *apperr.Error) {
 	if len(data) > limits.AppConfigMaxBytes {
-		return c, bad("", "应用配置文件超过大小上限").
+		return nil, bad("", "应用配置文件超过大小上限").
 			WithDetail("size", len(data)).
 			WithDetail("max", limits.AppConfigMaxBytes).
 			WithHint(fmt.Sprintf("%s 上限 %d KiB（不计入 wasm 体积上限），请精简声明文本",
@@ -198,21 +385,37 @@ func decode(data []byte) (Config, *apperr.Error) {
 	var raw map[string]json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if err := dec.Decode(&raw); err != nil {
-		return c, bad("", "应用配置文件不是合法 JSON").
+		return nil, bad("", "应用配置文件不是合法 JSON").
 			WithCause(err).
 			WithHint(fmt.Sprintf("%s 必须是 UTF-8 JSON 对象，字段见 skill 模板（references/app-config.md）",
 				limits.AppConfigFileName))
 	}
 	if dec.More() {
-		return c, bad("", "应用配置文件在 JSON 对象之后还有多余内容").
+		return nil, bad("", "应用配置文件在 JSON 对象之后还有多余内容").
 			WithHint("一个文件只能有一个顶层 JSON 对象")
 	}
 	// `null` 解码进 map 是 nil 且不报错（`{}` 才是空 map）⇒ 单独拦一次，
 	// 否则"顶层必须是 JSON 对象"这条契约会被 null 静默绕过。
 	if raw == nil {
-		return c, bad("", "应用配置文件的顶层必须是 JSON 对象").
+		return nil, bad("", "应用配置文件的顶层必须是 JSON 对象").
 			WithDetail("reason", "not_object").
 			WithHint("写成 { ... }；字段见 skill 的 references/app-config.md")
+	}
+	return raw, nil
+}
+
+// decode 只做 schema 解析与旧形态映射（**读取侧**），**不做语义校验**（不检查
+// "whitelist 模式必须有名单"）。外部用途是显示投影（AccessOfConfigJSON /
+// DeclarationsOfConfigJSON）与继承基线（parseBaseline）：鉴权走 Parse、发布走 parseSubmitted。
+func decode(data []byte) (Config, *apperr.Error) { return decodeAs(data, accessRead) }
+
+// decodeAs 是 decode 的实现：mode 只影响 `access=public` 的处置（读取侧接受、
+// 写入侧拒绝），其余逐条相同 —— 两条路对"什么样的字节算一份配置"必须给出同一个结论。
+func decodeAs(data []byte, mode accessMode) (Config, *apperr.Error) {
+	var c Config
+	raw, oerr := decodeObject(data)
+	if oerr != nil {
+		return c, oerr
 	}
 	for _, k := range sortedKeys(raw) {
 		if !knownField(k) {
@@ -260,14 +463,14 @@ func decode(data []byte) (Config, *apperr.Error) {
 		if e := json.Unmarshal(v, &s); e != nil {
 			return Config{}, bad(FieldAccess, "access 必须是字符串").
 				WithCause(e).
-				WithHint("三选一：" + accessHintValues())
+				WithHint("二选一：" + accessHintValues())
 		}
 		c.Access = Access(s)
 		if !ValidAccess(c.Access) {
 			return Config{}, bad(FieldAccess, fmt.Sprintf("access 取值 %q 不合法", s)).
 				WithDetail("reason", "bad_access").
 				WithDetail("values", strings.Join(AccessValues, ",")).
-				WithHint("三选一：" + accessHintValues())
+				WithHint("二选一：" + accessHintValues())
 		}
 	} else {
 		// 兼容 shim：旧 schema → 新 schema（映射成功即可，不报 unknown field）。
@@ -280,6 +483,12 @@ func decode(data []byte) (Config, *apperr.Error) {
 			c.Access = AccessLogin
 		}
 	}
+	// 写入侧（发布/校验）：历史 public 不得再写进新版本（契约 §4.4）。
+	// 显式 `"access":"public"` 与旧 schema `login_required=false` 映射出的 public
+	// 在这里得到**同一个**结构化错误 —— 两者都是"这次提交要求匿名"，都得拒。
+	if mode == accessWrite && c.Access == AccessPublic {
+		return Config{}, publicAccessRejected()
+	}
 
 	if e := decodeString(raw, FieldPurpose, &c.Purpose); e != nil {
 		return Config{}, e
@@ -290,7 +499,187 @@ func decode(data []byte) (Config, *apperr.Error) {
 	if e := decodeString(raw, FieldOwner, &c.Owner); e != nil {
 		return Config{}, e
 	}
+	if e := decodeWindow(raw, &c); e != nil {
+		return Config{}, e
+	}
 	return c, nil
+}
+
+// decodeWindow 解析 `window` 对象（§6）。
+//
+// 三条形态规则（每条都对应一个可单独点红的判据）：
+//   - **未知子键即拒**：`{"window":{"zoom":2}}` 是"作者以为平台会认"的典型形态，
+//     静默忽略会让作者以为生效了（与顶层未知字段同一条纪律）；
+//   - `ratio` 收 `"W:H"` 或数字：字符串按 `:` 拆两段比例（都必须是正数）；
+//   - `width`/`height` 必须是**正整数**（浮点/字符串/0/负一律拒，不做四舍五入猜测）。
+func decodeWindow(raw map[string]json.RawMessage, c *Config) *apperr.Error {
+	body, ok := raw[FieldWindow]
+	if !ok {
+		return nil // 缺席：交给版本继承（inherit.go）与缺省值
+	}
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" || trimmed == "null" {
+		// 显式 `null` = 显式清空（与"缺席=沿用上一版"不同，这条语义由 inherit 承接）。
+		c.Window = nil
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return bad(FieldWindow, "window 必须是对象").
+			WithCause(err).
+			WithHint(`形如 {"window":{"ratio":"16:9","width":1280,"height":720}}`)
+	}
+	out := &WindowConfig{}
+	for key, val := range obj {
+		switch key {
+		case "ratio":
+			ratio, e := decodeWindowRatio(val)
+			if e != nil {
+				return e
+			}
+			// 取值域**在这里**就判（而不是留给 validateWindow 的 `Ratio != 0` 分支）：
+			// 显式写 `"ratio": 0` 与"没写 ratio"在解析结果里都是 0.0，靠零值无法区分
+			// —— 那会让"0"这条最常见的畸形输入悄悄通过（实测踩过）。
+			if e := validateWindowRatio(ratio); e != nil {
+				return e
+			}
+			out.Ratio = ratio
+		case "width":
+			n, e := decodeWindowPixels(val, "width")
+			if e != nil {
+				return e
+			}
+			out.Width = n
+		case "height":
+			n, e := decodeWindowPixels(val, "height")
+			if e != nil {
+				return e
+			}
+			out.Height = n
+		default:
+			return bad(FieldWindow, fmt.Sprintf("window 里的 %q 不是已知字段", key)).
+				WithDetail("field", "window."+key).
+				WithHint("只认三个子字段：window.ratio / window.width / window.height")
+		}
+	}
+	// 校验放到 Validate（与其它字段同一条路径：Parse 只负责形态与取值域）。
+	if e := validateWindow(out); e != nil {
+		return e
+	}
+	c.Window = out
+	return nil
+}
+
+// decodeWindowRatio 解析 ratio：`"W:H"` 或数字（§6）。
+func decodeWindowRatio(val json.RawMessage) (float64, *apperr.Error) {
+	text := strings.TrimSpace(string(val))
+	if text == "" || text == "null" {
+		return 0, bad(FieldWindow, "window.ratio 不能为空").
+			WithDetail("field", "window.ratio").
+			WithHint(`写 "W:H"（如 "16:9"）或浮点数（如 1.7778）`)
+	}
+	// 数字形态（不许字符串数字：`"1.5"` 与 `1.5` 是两种输入，收两种会让文档说不清）。
+	if text[0] != '"' {
+		var f float64
+		if err := json.Unmarshal(val, &f); err != nil {
+			return 0, bad(FieldWindow, `window.ratio 必须是数字或 "W:H" 字符串`).
+				WithDetail("field", "window.ratio").
+				WithHint(`示例：1.7778 或 "16:9"`)
+		}
+		return f, nil
+	}
+	var spec string
+	if err := json.Unmarshal(val, &spec); err != nil {
+		return 0, bad(FieldWindow, "window.ratio 不是合法字符串").WithDetail("field", "window.ratio")
+	}
+	w, h, ok := strings.Cut(strings.TrimSpace(spec), ":")
+	if !ok {
+		return 0, bad(FieldWindow, `window.ratio 字符串必须是 "宽:高" 形态`).
+			WithDetail("field", "window.ratio").
+			WithDetail("value", clipSpecValue(spec)).
+			WithHint(`示例："16:9"、"4:3"；也可以直接写浮点数`)
+	}
+	wn, werr := strconv.ParseFloat(strings.TrimSpace(w), 64)
+	hn, herr := strconv.ParseFloat(strings.TrimSpace(h), 64)
+	if werr != nil || herr != nil || wn <= 0 || hn <= 0 {
+		return 0, bad(FieldWindow, `window.ratio 的 "宽:高" 两侧都必须是正数`).
+			WithDetail("field", "window.ratio").
+			WithDetail("value", clipSpecValue(spec)).
+			WithHint(`示例："16:9"（两侧都是正数）`)
+	}
+	return wn / hn, nil
+}
+
+// decodeWindowPixels 解析 width/height（正整数像素）。
+func decodeWindowPixels(val json.RawMessage, name string) (int, *apperr.Error) {
+	var f float64
+	if err := json.Unmarshal(val, &f); err != nil {
+		return 0, bad(FieldWindow, fmt.Sprintf("window.%s 必须是整数像素值", name)).
+			WithDetail("field", "window."+name).
+			WithHint(`示例：1280；不要写字符串（"1280px" 之类一律拒）`)
+	}
+	if f != float64(int(f)) {
+		return 0, bad(FieldWindow, fmt.Sprintf("window.%s 必须是整数（像素没有小数）", name)).
+			WithDetail("field", "window."+name)
+	}
+	return int(f), nil
+}
+
+// validateWindow 校验 window 的取值域（§6 的硬限制）。
+//
+// 与 `access` 的收敛同一条纪律：**能发布期拒的绝不留给运行期**。ratio 越界在这里
+// 是 APP_CONFIG_INVALID（422），而不是等客户端开出一个畸形窗口。
+func validateWindow(w *WindowConfig) *apperr.Error {
+	if w == nil {
+		return nil
+	}
+	// 0 = 未设置（作者没写 ratio）⇒ 不判；显式写 0 在 decodeWindow 里已被
+	// validateWindowRatio 拒掉（零值无法区分两者，所以两条路径都要有）。
+	if w.Ratio != 0 {
+		if e := validateWindowRatio(w.Ratio); e != nil {
+			return e
+		}
+	}
+	for _, dim := range []struct {
+		name string
+		val  int
+	}{{"width", w.Width}, {"height", w.Height}} {
+		if dim.val == 0 {
+			continue
+		}
+		if dim.val < WindowSizeMin || dim.val > WindowSizeMax {
+			return bad(FieldWindow, fmt.Sprintf("window.%s 必须在 %d 到 %d 像素之间（当前 %d）",
+				dim.name, WindowSizeMin, WindowSizeMax, dim.val)).
+				WithDetail("field", "window."+dim.name).
+				WithDetail("reason", "size_out_of_range").
+				WithDetail("min", WindowSizeMin).
+				WithDetail("max", WindowSizeMax)
+		}
+	}
+	return nil
+}
+
+// validateWindowRatio 校验比例取值域（§6 的硬限制：0.25–4.0，0/负/非数字拒）。
+func validateWindowRatio(ratio float64) *apperr.Error {
+	if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < WindowRatioMin || ratio > WindowRatioMax {
+		return bad(FieldWindow, fmt.Sprintf("window.ratio 必须在 %.2f 到 %.1f 之间（当前 %v）",
+			WindowRatioMin, WindowRatioMax, ratio)).
+			WithDetail("field", "window.ratio").
+			WithDetail("reason", "ratio_out_of_range").
+			WithDetail("min", WindowRatioMin).
+			WithDetail("max", WindowRatioMax).
+			WithHint("0/负/过大/非数字都不是合法比例；窗口比例是**强制锁定**项，越界会让窗口不可用")
+	}
+	return nil
+}
+
+// clipSpecValue 截断回显的作者输入（避免把超长/畸形内容原样回显）。
+func clipSpecValue(s string) string {
+	const max = 32
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
 }
 
 // Validate 校验语义规则。requireDeclarations=true 表示**首次发布**：
@@ -305,7 +694,7 @@ func (c Config) Validate(requireDeclarations bool) *apperr.Error {
 	if !ValidAccess(c.Access) {
 		return bad(FieldAccess, "access 未设置或取值不合法").
 			WithDetail("reason", "bad_access").
-			WithHint("三选一：" + accessHintValues()).
+			WithHint("二选一：" + accessHintValues()).
 			WithHint("生产路径一律走 Parse：它会落定缺省值（login）并校验取值")
 	}
 	if c.Access == AccessWhitelist && len(c.Whitelist) == 0 {
@@ -343,10 +732,32 @@ func (c Config) Validate(requireDeclarations bool) *apperr.Error {
 	return nil
 }
 
-// accessHintValues 是 access 的三选一提示（唯一实现，供多处报错复用）。
+// accessHintValues 是 access 的二选一提示（唯一实现，供多处报错复用）。
+//
+// `whitelist` 那句必须写清**平台不比对名单**（R24）：说成"要求登录 + 名单准入"
+// 会让作者以为填了名单平台就会拦，于是他写出一个对所有人开放的应用 ——
+// 客户端的同名文案（`locales.ts` 的 `appCenter.access.whitelistHint`）已经是正确
+// 口径（"平台不比对名单、由应用自己判"），这里的服务端 hint 与它对齐。
+//
+// 这里**不再列 public**（2026-09-19 契约 §4.4）：历史 public 的说明只在
+// publicAccessRejected 里给一次，混进"合法取值"提示会让作者以为还能写。
 func accessHintValues() string {
-	return fmt.Sprintf("`access` = %q（允许匿名）｜ %q（要求登录，登录后全员可用，缺省）｜ %q（要求登录 + 名单）",
-		AccessPublic, AccessLogin, AccessWhitelist)
+	return fmt.Sprintf("`access` = %q（要求登录，登录后全员可用，缺省）｜ %q（要求登录；名单只给应用自己读，平台不比对）",
+		AccessLogin, AccessWhitelist)
+}
+
+// publicAccessRejected 是"写入侧不接受 access=public"的结构化错误（契约 §4.4）。
+//
+// 用 APP_CONFIG_INVALID(422) 而不是静默改写成 login：静默改写会让作者以为"我要求
+// 匿名"被平台接受了，而实际得到的是一个要求登录的应用（与 inherit.go 头部那条
+// "不猜访问级别"的纪律同一方向）。
+func publicAccessRejected() *apperr.Error {
+	return bad(FieldAccess, `access="public" 不再可用：应用只在桌面客户端内，且一律要求登录`).
+		WithDetail("reason", "public_not_allowed").
+		WithDetail("values", strings.Join(AccessWritableValues, ",")).
+		WithHint("把 `access` 改成 \"login\"（登录后全员可用，缺省）或 \"whitelist\"（要求登录；名单由应用自己判）").
+		WithHint("平台已删除匿名面：应用请求必须持员工令牌（浏览器也不再能打开应用，只有桌面客户端内可用）").
+		WithHint("**历史** public 配置在读取侧按 login 处理（存量应用照常运行、不会 500），但新版本不得再写 public")
 }
 
 // normalizeWhitelist 去首尾空白、拒空串、去重（保留首次出现的顺序）。

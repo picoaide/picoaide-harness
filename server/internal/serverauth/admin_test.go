@@ -482,6 +482,10 @@ func TestDeleteLastAdminRollsBack(t *testing.T) {
 
 func mustDB(t *testing.T) *sql.DB {
 	t.Helper()
+	// 临时库是"每用例一份",登录失败预算也必须是 —— 否则前一个用例打满的
+	// 共享桶(桶键因 db 指针地址复用而跨用例相同)会把本用例的正常登录打成
+	// 429(2026-09-19 定位;机制见 ratelimit_isolation_test.go 顶部说明)。
+	resetSharedLimitersForTest()
 	db, cleanup := serverstore.NewTestDB(t)
 	t.Cleanup(cleanup)
 	return db
@@ -557,6 +561,11 @@ func adminRouter(t *testing.T) (http.Handler, *sql.DB) {
 	}
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	// 与 cmd/server/main.go 同口径:可信代理只含回环(+显式配置);管理面登录
+	// (含 MFA 第二步)的 IP 桶按 ClientIP 计,伪造的 XFF 不参与。
+	if err := r.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
+		t.Fatal(err)
+	}
 	RegisterAdminRoutes(r, db)
 	return r, db
 }

@@ -30,6 +30,12 @@ const (
 
 // seedDemoApps 播种内置演示应用；任何失败都只记日志（不影响服务启动）。
 func seedDemoApps(ctx context.Context, db *sql.DB, dataRoot string) {
+	// W4（设计 §9 的 A 方案）：先把**磁盘资产**里残留的 access=public 一次性收敛为 login。
+	// 放在最前面、且在演示目录的任何提前返回之前：它与"镜像里有没有演示目录"无关 ——
+	// 库里任何 wasm 应用的资源目录里留着 public 都要退场（DB 侧由迁移 0074 同批改写；
+	// 只改一侧就会出现"库说 login、应用自己读到 public"的分叉）。
+	rewritePublicAccessAssets(ctx, db, dataRoot)
+
 	dir := strings.TrimSpace(os.Getenv(EnvDemoAppsDir))
 	if dir == "" {
 		dir = defaultDemoAppsDir
@@ -56,6 +62,14 @@ func seedDemoApps(ctx context.Context, db *sql.DB, dataRoot string) {
 		log.Printf("appseed: 演示目录不存在或清单为空（%s），跳过播种", dir)
 		return
 	}
+	// W4（设计 §9）：**存量**演示应用的标题一次性收敛到清单口径。
+	//
+	// 为什么必须紧挨着播种之前做：`Seed` 对已存在的行跳过、`healIncomplete` 按口径
+	// **不覆盖标题**（否则管理员改过的标题每次启动都会回滚）⇒ 清单改标题对存量部署
+	// 完全无效，只能靠这条一次性改写。它读清单（`seeder.Demos()`），因此天然在
+	// "演示目录存在"之后 —— 目录不存在时既没有新播种、也没有可对齐的清单。
+	rewriteLegacyDemoTitles(ctx, seeder)
+
 	res, err := seeder.Seed(ctx)
 	if err != nil {
 		log.Printf("appseed: ⚠️ 播种失败（其余功能正常）：%v", err)
@@ -68,6 +82,34 @@ func seedDemoApps(ctx context.Context, db *sql.DB, dataRoot string) {
 	for _, sk := range res.Skipped {
 		log.Printf("appseed: 跳过 %s（%s）", sk.AppID, sk.Reason)
 	}
+}
+
+// rewritePublicAccessAssets 是 appseed.RewritePublicAccessAssets 的启动接线。
+//
+// 失败处置与播种一致：**只记日志、不影响服务启动**（跳过数量必须可见 —— 这一轮是
+// 幂等的运维兜底动作，下一次启动会重扫；静默跳过会让人以为"已经改完了"）。
+func rewritePublicAccessAssets(ctx context.Context, db *sql.DB, dataRoot string) {
+	res, err := appseed.RewritePublicAccessAssets(ctx, db, dataRoot, log.Printf)
+	if err != nil {
+		log.Printf("appseed: ⚠️ 磁盘资产 access 归一化未执行（不影响服务启动）：%v", err)
+		return
+	}
+	log.Printf("appseed: 磁盘资产 access 归一化完成：应用 %d / 版本 %d / 可解析配置 %d / 改写 %d / 缺文件 %d / 跳过 %d",
+		res.Apps, res.Releases, res.Files, res.Rewritten, res.Missing, res.Skipped)
+}
+
+// rewriteLegacyDemoTitles 是 appseed.RewriteLegacyDemoTitles 的启动接线。
+//
+// 失败处置与播种一致：**只记日志、不影响服务启动**。计数必须可见（改写 / 刻意不动 /
+// 库里没有）—— 静默跳过会让人以为"已经对齐了"。
+func rewriteLegacyDemoTitles(ctx context.Context, seeder *appseed.Seeder) {
+	res, err := appseed.RewriteLegacyDemoTitles(ctx, seeder, log.Printf)
+	if err != nil {
+		log.Printf("appseed: ⚠️ 演示标题对齐未执行（不影响服务启动）：%v", err)
+		return
+	}
+	log.Printf("appseed: 演示标题对齐完成：清单 %d 条 / 改写 %d / 保留管理员标题 %d / 库里没有 %d / 失败 %d",
+		res.Examined, res.Rewritten, res.Kept, res.Missing, len(res.Problems))
 }
 
 // firstSuperAdmin 返回最早创建的启用超管用户名（没有则空串）。

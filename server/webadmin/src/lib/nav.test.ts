@@ -71,17 +71,32 @@ describe('导航权限过滤(P2-43)', () => {
   })
 
   it('多权限点条目命中任一即可见(能力中心 market:read | capability:read)', () => {
-    // capability:read 同时 gate「能力中心」「应用中心」与「应用平台」(读权限复用同一点;
-    // 后两者的写入要 capability:write);market:read 只 gate 能力中心 —— 下面两条断言正是这条边界。
-    expect(paths({ role: 'auditor', permissions: ['capability:read'] })).toEqual(['/capabilities', '/app-center', '/app-platform'])
+    // capability:read 同时 gate「能力中心」与「应用中心」(读权限复用同一点,
+    // 写入要 capability:write);market:read 只 gate 能力中心 —— 下面两条断言正是这条边界。
+    expect(paths({ role: 'auditor', permissions: ['capability:read'] })).toEqual(['/capabilities', '/app-center'])
     expect(paths({ role: 'auditor', permissions: ['market:read'] })).toEqual(['/capabilities'])
   })
 
-  it('应用平台页:capability:read 可见、普通员工不可见', () => {
-    const entry = NAV_ENTRIES.find((n) => n.to === '/app-platform')!
+  it('应用中心页:capability:read 可见、普通员工不可见', () => {
+    const entry = NAV_ENTRIES.find((n) => n.to === '/app-center')!
     expect(isNavVisible(entry, superAdmin)).toBe(true)
     expect(isNavVisible(entry, { role: 'auditor', permissions: ['capability:read'] })).toBe(true)
     expect(isNavVisible(entry, employee)).toBe(false)
+  })
+
+  it('侧栏没有两条同图标入口(「应用平台」并入「应用中心」后的回归)', () => {
+    // 2026-09-19 页面合并:此前 `/app-center` 与 `/app-platform` 两个条目同用 Boxes
+    // 图标 —— 侧栏看着是两个入口、实际是同一类东西。合并后限制项/设置是应用中心的
+    // 子页(路由表见 App.tsx),侧栏只留一条;`/app-platform` 只剩老书签重定向。
+    const byIcon = new Map<unknown, string>()
+    const dups: string[] = []
+    for (const n of NAV_ENTRIES) {
+      const seen = byIcon.get(n.icon)
+      if (seen !== undefined) dups.push(`${seen} / ${n.to}`)
+      else byIcon.set(n.icon, n.to)
+    }
+    expect(dups).toEqual([])
+    expect(NAV_ENTRIES.map((n) => n.to)).not.toContain('/app-platform')
   })
 
   it('未声明 perms 的条目 fail-closed(仅超管可见)', () => {

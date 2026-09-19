@@ -8,9 +8,12 @@ import {
   latestApprovedVersionByName,
   mergeItems,
   nameTakenError,
+  planSectionCards,
   uninstallEndpoint,
   type CapabilityItem,
+  type SectionCard,
 } from '../src/client/CapabilityCenterPanel.tsx'
+import { planBuiltinCards } from '../src/client/BuiltinSkillsStrip.tsx'
 import { setActiveLocale } from '../src/client/locales.ts'
 
 afterEach(() => { setActiveLocale('zh') })
@@ -89,8 +92,14 @@ describe('installEndpoint / uninstallEndpoint (来源路由 bug 回归)', () => 
     expect(uninstallEndpoint(agent, '1.0.0')).toBe('/api/pico/agent-presets/creative-writer/uninstall')
   })
 
-  it('force install appends ?force=1', () => {
-    expect(installEndpoint(base, '1.0.0', true)).toBe('/api/pico/shared-skills/codeql/1.0.0/install?force=1')
+  it('安装端点不带 query：宿主不读 ?force=1（R2-SK-5），覆盖确认是纯客户端交互', () => {
+    // 曾经的形态：确认后把 `?force=1` 拼进 URL —— 而宿主按 pathname 分发（auth-gate），
+    // 谁都没读它。变异：把 `?force=1` 加回端点 ⇒ 本断言必红。
+    expect(installEndpoint(base, '1.0.0')).toBe('/api/pico/shared-skills/codeql/1.0.0/install')
+    expect(installEndpoint(base, '1.0.0')).not.toContain('?')
+    const market: CapabilityItem = { ...base, source: 'market' }
+    expect(installEndpoint(market, '1.0.0')).toBe('/api/pico/skills/codeql/install')
+    expect(installEndpoint(market, '1.0.0')).not.toContain('?')
   })
 })
 
@@ -224,5 +233,63 @@ describe('nameTakenError（上传预检撞同名，2026-09-16 i18n）', () => {
     expect(nameTakenError('x')).toContain('Name already taken')
     setActiveLocale('zh')
     expect(nameTakenError('x')).toContain('名称已被占用')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R2-SK-6：「我的」里同一个技能只能出一张卡（内置更新卡 vs 本机同名普通卡）
+// ---------------------------------------------------------------------------
+//
+// 现场：R1-pm-8 修好"已装 + 清单有新版 ⇒ 出更新卡"之后，本机技能库里那张同名普通卡
+// （provenance=builtin 的本地卡）仍在 rows 里，而面板直接 `[...builtinCards, ...rows]`
+// 拼接 ⇒ 同一个技能显示两张卡：一张 `[更新到 v1.1.0]`，另一张页脚是误导性的 `[上传]`。
+//
+// 判据是**数量**（同名卡恰好 1 张），不是"存在某种卡"。变异验证：去掉
+// planSectionCards 里的过滤（回到两数组直接拼接）⇒ 前两条必红。
+
+describe('R2-SK-6 内置卡与本机卡去重（数量断言）', () => {
+  const localSkill = (name: string, version: string, originChannel?: string): CapabilityItem => ({
+    kind: 'skill', source: 'local', name, displayName: name, version, description: '',
+    author: 'PicoAide', versions: [version], installed: true, installedVersion: version,
+    ...(originChannel === undefined ? {} : { originChannel }),
+  })
+  /** 与面板真实输入同形：清单 1.1.0 + 本机 1.0.0 ⇒ 出「更新到 v1.1.0」卡。 */
+  const updateCards = () => planBuiltinCards({
+    rows: [{ name: 'app-builder', version: '1.1.0' }],
+    installedNames: new Set(['app-builder']),
+    installedVersions: { 'app-builder': '1.0.0' },
+    query: '',
+    kindFilter: 'all',
+  })
+  const nameOf = (c: SectionCard): string => (c.type === 'builtin' ? c.card.skill.name : c.item.name)
+
+  it('可更新时：内置更新卡吞掉同名本机卡，同名卡恰好 1 张', () => {
+    const rows = mergeItems(itemsForTab([
+      localSkill('app-builder', '1.0.0', 'builtin'),
+      localSkill('codeql', '1.0.0'),
+    ], 'mine'))
+    const cards = planSectionCards({ rows, builtinCards: updateCards() })
+    // 数量断言：两张本机卡 + 一张内置更新卡 ⇒ 去重后恰好 2 张（app-builder 只留内置那张）。
+    expect(cards).toHaveLength(2)
+    expect(cards.filter(c => nameOf(c) === 'app-builder')).toHaveLength(1)
+    const appBuilder = cards.find(c => nameOf(c) === 'app-builder')
+    expect(appBuilder?.type).toBe('builtin')
+    expect(appBuilder?.type === 'builtin' ? appBuilder.card.action : '').toBe('update')
+    // 其它技能不受影响。
+    expect(cards.filter(c => nameOf(c) === 'codeql')).toHaveLength(1)
+  })
+
+  it('没有内置卡时，本机卡照常渲染（去重不得吃掉唯一那张）', () => {
+    const rows = mergeItems(itemsForTab([localSkill('app-builder', '1.0.0', 'builtin')], 'mine'))
+    const cards = planSectionCards({ rows, builtinCards: [] })
+    expect(cards).toHaveLength(1)
+    expect(cards[0]?.type).toBe('item')
+  })
+
+  it('只吞同名**技能**：同名智能体不受影响（复合键语义，技能与 agent 允许同名）', () => {
+    const agent: CapabilityItem = { ...localSkill('app-builder', '1.0.0'), kind: 'agent' }
+    const cards = planSectionCards({ rows: [agent], builtinCards: updateCards() })
+    expect(cards).toHaveLength(2)
+    expect(cards.filter(c => c.type === 'item')).toHaveLength(1)
   })
 })

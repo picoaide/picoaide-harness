@@ -78,6 +78,18 @@ type Options struct {
 	DataRoot string
 	// Isolation 是隔离策略（缺省 IsolationAuto）。
 	Isolation IsolationMode
+	// MemoryPages 是**生效**的单实例线性内存页上限（装配方注入
+	// `applimits.Limits.InstanceMemoryPages()`；0 ⇒ 编译期默认 limits.InstanceMemoryPages）。
+	//
+	// 为什么编译侧也需要它（R1-rt-7b，P1）：wazero 在**编译期**按它校验模块**声明**的
+	// 初始/最大线性内存。用编译期默认会让控制台的 instance_memory_mb 对发布期完全不生效 ——
+	// 调小 ⇒ "发布放行、首个请求 500（还被报成平台故障）"；调大 ⇒ 声明大内存的应用
+	// 永远发不出去。装配侧与执行侧（appserver/options.go）读的是**同一个**
+	// applimits.Limits，因此这里是"同源取生效值"的编译侧一半。
+	//
+	// ⚠️ 与该值同语义的是执行侧的 runtime.Options.MemoryPages：两者都属于各自进程的
+	// wazero RuntimeConfig ⇒ **保存后需重启**才生效（本包在 New 时快照，不做运行期热改）。
+	MemoryPages uint32
 	// MaxQueue 是队列深度（缺省 limits.CompileQueueDepth = 64，满则 429）。
 	MaxQueue int
 	// Timeout 是单次编译超时（缺省 limits.CompileTimeout = 60 s）。
@@ -316,6 +328,12 @@ func New(opt Options) (*Compiler, error) {
 	if opt.Logger == nil {
 		opt.Logger = log.Default()
 	}
+	// 生效的单实例内存上限（R1-rt-7b）：装配方没注入（最小装配/单测）时回落编译期默认。
+	// 与 appserver/options.go 的 `lim.InstanceMemoryPages()` 同一判据、同一取值来源
+	// （装配侧的 applimits.Limits），因此发布期编译与执行期实例化不会各说各话。
+	if opt.MemoryPages == 0 || opt.MemoryPages > maxCompilerMemoryPages {
+		opt.MemoryPages = limits.InstanceMemoryPages
+	}
 
 	// 必须与 internal/wasmapp/runtime 算出**同一个目录**（§4.3.1-a：两侧不一致
 	// 会让"发布期编译暖到执行进程"这条前提静默失效）。推导的唯一入口是
@@ -385,6 +403,17 @@ func (c *Compiler) Compile(ctx context.Context, modulePath string) (*Result, *ap
 		// 不取消它——取消会让"已经跑了一半的编译"丢掉可复用的缓存写入。
 		return nil, apperr.From(ctx.Err()).WithHint("请求已被取消，编译可能仍在后台完成")
 	}
+}
+
+// MemoryPages 返回**生效**的单实例线性内存页上限（装配注入的值，未注入 = 编译期默认）。
+//
+// 与执行侧 `appserver.Server.InstanceMemoryPages()` 同一个用途：让"装配真的把生效值传进来了"
+// 成为可断言的事实（cmd/server 的装配级用例钉住它），而不是只能读代码相信。
+func (c *Compiler) MemoryPages() uint32 {
+	if c == nil {
+		return 0
+	}
+	return c.opt.MemoryPages
 }
 
 // ValidateWasm 做"编译前静态预检"（不发子进程）：体积 + 段表 + 导出面 + 导入面。
@@ -602,7 +631,7 @@ func (c *Compiler) compileOne(modulePath string) (*Result, *apperr.Error) {
 	req := Request{Op: OpCompile, ModulePath: modulePath, CacheDir: c.cache}
 	resp, rerr := proc.request(req, c.opt.Timeout)
 	if rerr != nil {
-		return nil, rerr
+		return nil, c.explainMemoryDeclaration(rerr)
 	}
 
 	afterMtime, afterEntries := c.newestCacheMtime()
@@ -621,6 +650,39 @@ func (c *Compiler) compileOne(modulePath string) (*Result, *apperr.Error) {
 		CacheEntry:  entry,
 	}
 	return res, nil
+}
+
+// memoryDeclarationOverLimit 是 wazero 拒绝"模块声明的线性内存超过生效上限"时的错误特征
+// （原文形如 `section memory: min 1600 pages (100 Mi) over limit of 1024 pages (64 Mi)`）。
+//
+// 判据用错误串而不是错误类型：wazero 不导出类型化错误（与 runtime/errors.go 的
+// memoryErrorPatterns 同一处置），且这段文本正是子进程回传的 details["error"]。
+const memoryDeclarationOverLimit = "over limit of"
+
+// explainMemoryDeclaration 给"模块声明的内存超上限"这类失败补上**生效值**（R1-rt-7b ③）。
+//
+// 为什么需要：子进程回传的原文里的数字来自它自己的 RuntimeConfig —— 修好 rt-7b 之后
+// 那已经是生效值；但父侧再显式回一条结构化明细与提示，作者/AI 就不必从 wazero 的长句里
+// 抠数字，也不会拿到"过期的 64 MiB"。
+//
+// 只对**这一条**特征生效（其余失败原样透传）：给所有编译失败都挂内存提示会把
+// "你的语法错了"误导成"你的内存超了"。
+func (c *Compiler) explainMemoryDeclaration(err *apperr.Error) *apperr.Error {
+	if err == nil {
+		return nil
+	}
+	raw, _ := err.Details["error"].(string)
+	if !strings.Contains(raw, memoryDeclarationOverLimit) {
+		return err
+	}
+	pages := c.opt.MemoryPages
+	mib := int64(pages) * int64(limits.WasmPageSize) >> 20
+	return err.
+		WithDetail("memory_limit_pages", pages).
+		WithDetail("memory_limit_bytes", int64(pages)*int64(limits.WasmPageSize)).
+		WithHint(fmt.Sprintf("平台**当前生效**的单实例线性内存上限是 %d 页（%d MiB）："+
+			"模块声明的初始/最大线性内存不能超过它（工具链的默认初始内存也算：Zig 默认 257 页、Go 的常驻堆另计）；"+
+			"确需更大就把控制台的 instance_memory_mb 调大并重启服务端", pages, mib))
 }
 
 // ensureChild 返回可用的常驻子进程（不存在/已死/已空闲超时/**绑定目录不含本次模块**则重启）。
@@ -670,10 +732,11 @@ func (c *Compiler) ensureChild(modulePath string) (*childProcess, *apperr.Error)
 
 // spawnChild 启动一个常驻子进程。
 //
-// env：**只**传白名单（§4.3）。这不是"清理"，是"白名单"——父环境里的
+// env：**只**传白名单（§4.3）+ 平台自己算出的部署级参数（CompileChildEnv：生效的
+// 单实例内存上限，R1-rt-7b）。这不是"清理"，是"白名单"——父环境里的
 // PG_DSN / master key / PICOAI_* 一律不进子进程（子进程读的是攻击者的字节）。
 func (c *Compiler) spawnChild(moduleDir string) (*childProcess, error) {
-	env := CompileProcessEnv(c.envSource())
+	env := CompileChildEnv(c.envSource(), c.opt.MemoryPages)
 	// 只读绑定集合 = 声明的 ReadableDirs ∪ 本次模块所在目录 ∪ 子进程二进制所在目录。
 	//
 	// 三项都是**必须**的：沙箱内的 `/` 是空 tmpfs（读白名单，见 bwrapReadOnlySystemDirs），

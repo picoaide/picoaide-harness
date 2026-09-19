@@ -298,9 +298,31 @@ func GenerateMonthlyReport(db *sql.DB, month time.Time) (*ReportBody, error) {
 }
 
 // topByCost 费用降序取前 n。
+//
+// 2026-09-19(审计):旧实现只有 `Cost > Cost` 一个判据 —— 等值行(未定价模型
+// cost 恒 0 最常见,用户/部门成本相同同理)之间**没有任何判据**,比较器因此
+// 不是全序:等值组的先后只由"输入顺序 + sort 内部的比较/交换次序"决定,不是
+// 数据的性质。实测(base 实现)对同一组行的输入做置换:**5 行**夹具(3 行同价
+// 0 成本)的全部 120 个置换得到 12 种不同输出(A:5,B:0,C:0 / A:5,B:0,D:0 /
+// A:5,B:0,E:0 / A:5,C:0,B:0 …),18 行与 25 行夹具各 200 个置换分别得到
+// 78 与 200 种输出。这与"sort 用哪种算法"无关:len≤12 时标准库走插入排序,
+// 插入排序同样逐次比较,非全序比较器下输出同样随输入顺序变化(旧注释把因果
+// 挂在 pdqsort 的 len>12 分区阈值上,已实测证伪 —— 5 行夹具就在插入排序路径上)。
+// 输入顺序从哪来:model/user 维度由聚合 SQL 的 `ORDER BY label` 固定(见
+// UsageAggregateWithLedger),部门维度还会变(RegroupByDept 由 map 遍历构造)——
+// 但无论输入是否固定,**等值边界上"取前 n"选谁都不是判据决定的**:第 n/n+1 名
+// 等值时多一个零成本模型/部门就可能把本该入选的行挤出榜单。
+// 口径与 internal/serverauth/usage_admin.go 的 usageOverview.top_models 一致:
+// Cost 仍是唯一主判据、仍取前 n,等值时按 Label 升序(⇒ 比较器满足严格弱序,
+// 输出由行集合唯一决定)。
 func topByCost(rows []serverstore.UsageAggregateRow, n int) []serverstore.UsageAggregateRow {
 	sorted := append([]serverstore.UsageAggregateRow{}, rows...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Cost > sorted[j].Cost })
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Cost != sorted[j].Cost {
+			return sorted[i].Cost > sorted[j].Cost
+		}
+		return sorted[i].Label < sorted[j].Label
+	})
 	if len(sorted) > n {
 		sorted = sorted[:n]
 	}

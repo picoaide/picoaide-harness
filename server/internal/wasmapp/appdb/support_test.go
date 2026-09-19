@@ -57,7 +57,7 @@ func TestProjectReservedColumnsOnlyRowID(t *testing.T) {
 func mapStmtErrorLockedErrorForTest(d *DB) *apperr.Error {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := d.mapStmtErrorLocked(ctx, context.Canceled)
+	err := d.mapStmtError(ctx, context.Canceled)
 	e, _ := apperr.As(err)
 	return e
 }

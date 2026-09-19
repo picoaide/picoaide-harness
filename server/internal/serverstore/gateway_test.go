@@ -321,11 +321,15 @@ func TestDeleteProviderClearsDefaultModel(t *testing.T) {
 	}
 }
 
-// 渠道同步排除名单(审计修复 H2):单向排除是**既定产品行为**——删除渠道同步
-// 模型后进名单,此后同步不会把它带回来(webadmin Gateway 页明确提示「删除后
-// 同步不会自动恢复,如需恢复请重新添加」)。因此名单只增不减,没有"移出名单"
-// 的接口:RemoveExcludedModel 已随 2026-09-15 死代码审计删除,本用例覆盖
-// 添加幂等、读取、以及删除上游时随行清理。
+// 渠道同步排除名单(审计修复 H2):删除渠道同步模型后进名单,此后同步不会把它
+// 带回来(webadmin Gateway 页提示「删除后同步不会自动恢复,如需恢复请重新添加」)。
+//
+// 名单现在是**双向**的(2026-09-19):管理端显式"重新添加"同名渠道模型时移出该名,
+// 否则那句提示不可兑现(实测重新添加的模型会在下一轮同步被再删一次)。移出只有
+// **事务版** `RemoveExcludedModelTx`(必须与建模型行同事务,否则失败请求会撤销
+// 管理员的删除意图);autocommit 版刻意不存在。本用例覆盖添加幂等、读取、以及
+// 删除上游时随行清理 —— 移出与幂等语义由 llmgateway 的
+// TestRemoveExcludedModelIsIdempotentAndKeepsEmptyList 覆盖。
 func TestExcludedModelsAddAndProviderCleanup(t *testing.T) {
 	db := openTestDB(t)
 	if err := ApplyMigrations(db); err != nil {

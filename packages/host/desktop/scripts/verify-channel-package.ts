@@ -35,7 +35,7 @@ import { fileURLToPath } from 'node:url'
 import { prepareBrandAssets } from './brand-prepare.mjs'
 import { defaultChannelAppDir } from './channel-prepare.ts'
 import { resolveChannelBuildContext } from './channel-build.ts'
-import { parseDesktopChannelProfile } from '../src/desktop-channel.ts'
+import { AppOriginSchemeError, parseDesktopChannelProfile } from '../src/desktop-channel.ts'
 import { PRODUCT_DSH_HOME_DIR } from '../src/desktop-home.ts'
 
 /** 必须逐字节与"按本渠道重新派生"一致的文件。 */
@@ -124,7 +124,18 @@ export async function verifyChannelPackage(options: {
     // 断言客户端这次装完会把数据放在哪个目录 —— 白标客户端与官方客户端共用一个
     // 数据根会共享登录 token/settings/会话（跨租户），还会互相顶掉单实例锁。
     // 官方构建走上面"不该有渠道包"的分支，因此天然不受影响。
-    const stagedProfile = parseDesktopChannelProfile(staged)
+    // `desktop.app_origin_scheme` 缺失/非法时运行期解析器**抛**（§10 fail-loud：
+    // 静默回落官方值会让渠道客户端与官方共用应用 origin）。这里把它变成一条带渠道
+    // 上下文的构建期断言：客户拿到包之前就红灯，且错误信息说清要补哪个字段。
+    let stagedProfile: ReturnType<typeof parseDesktopChannelProfile>
+    try {
+      stagedProfile = parseDesktopChannelProfile(staged)
+    } catch (error) {
+      if (error instanceof AppOriginSchemeError) {
+        assert(false, `${stagedPath}：${error.message}`)
+      }
+      throw error
+    }
     assert(
       stagedProfile !== undefined,
       `${stagedPath} 不能被运行期解析器识别（渠道 id 形状/结构不符）—— 客户端会当成"没有渠道包"`,

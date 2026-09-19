@@ -47,6 +47,23 @@ func (h *Handlers) diagnostics(c *gin.Context) {
 		writeErr(c, oerr)
 		return
 	}
+	body, derr := h.diagnosticsPayload(c, appID, app)
+	if derr != nil {
+		writeErr(c, derr)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"diagnostics": body})
+}
+
+// diagnosticsPayload 组装诊断响应体（**员工面与管理面共用**）。
+//
+// 抽出来的唯一理由：两份出口各拼一次必然漂移 —— 同一份 wasm_call_events 在两个
+// 页面上给出不同的 hints/计数时，排障要先花时间吵"哪边是对的"。查询串
+// （limit/minutes）与保留期语义在这里一次解释清楚。
+//
+// app 只用于 enabled/frozen/deleted 三个标记；归属校验由调用方完成
+// （员工面 = ownedApp，管理面 = loadAdminApp）。
+func (h *Handlers) diagnosticsPayload(c *gin.Context, appID string, app *serverstore.WasmApp) (gin.H, *apperr.Error) {
 	limit := atoiDefault(c.Query("limit"), limits.DiagnosticsDefaultLimit)
 	window := windowFromQuery(c.Query("minutes"))
 	since := h.now().UTC().Add(-window)
@@ -54,13 +71,18 @@ func (h *Handlers) diagnostics(c *gin.Context) {
 
 	failures, err := diag.RecentFailures(ctx, h.opt.DB, appID, limit)
 	if err != nil {
-		writeErr(c, internalErr("查询失败", err))
-		return
+		return nil, internalErr("查询失败", err)
 	}
-	summary, err := diag.Summary(ctx, h.opt.DB, appID, since)
+	// 诊断里的内存数字必须跟随**生效**上限（R1-rt-25）：此前走 Summary/HintsFor 取的是
+	// 编译期默认（恒 64 MiB），控制台把单实例上限改小/改大后，作者看到的建议数字与实际
+	// 不符 —— 诊断的第一消费者是 AI，错误数字会把排查带偏。
+	//
+	// R2-DG-2 的加固：`h.instanceMemoryPages()` 取的是**已保存值**（控制台设置），
+	// 而单实例上限要重启才生效 ⇒ 在"保存了但没重启"的窗口里它仍然不是生效值。
+	// 这里统一走 effectiveMemoryPages()（运行时优先，见它的注释）。
+	summary, err := diag.SummaryWithMemoryPages(ctx, h.opt.DB, appID, since, h.effectiveMemoryPages())
 	if err != nil {
-		writeErr(c, internalErr("查询失败", err))
-		return
+		return nil, internalErr("查询失败", err)
 	}
 	// hints 的来源有两条且都要给：
 	//   - summary.Hints（按出现次数排序的失败码对应建议）；
@@ -68,9 +90,9 @@ func (h *Handlers) diagnostics(c *gin.Context) {
 	// 合并后保序去重（同一个 hint 不重复刷屏）。
 	hints := append([]string{}, summary.Hints...)
 	for _, f := range failures {
-		hints = append(hints, diag.HintsFor(f.ReasonCode)...)
+		hints = append(hints, diag.HintsForMemoryPages(f.ReasonCode, h.effectiveMemoryPages())...)
 	}
-	c.JSON(http.StatusOK, gin.H{"diagnostics": gin.H{
+	return gin.H{
 		"app_id":         appID,
 		"app_enabled":    app.Enabled,
 		"app_frozen":     app.FrozenAt != nil,
@@ -81,7 +103,38 @@ func (h *Handlers) diagnostics(c *gin.Context) {
 		"summary":        summary,
 		"failures":       failures,
 		"hints":          dedupeStrings(hints),
-	}})
+	}, nil
+}
+
+// effectiveMemoryPages 返回诊断面要用的单实例内存页数（R2-DG-2）。
+//
+// 来源优先级（**必须按这个顺序**）：
+//  1. `Options.EffectiveMemoryPages`（运行时真正生效的值，装配注入 appserver.InstanceMemoryPages）；
+//  2. `instanceMemoryPages()`（= `Options.Limits().InstanceMemoryPages()`，**已保存值**）。
+//
+// 为什么第 2 条只是兜底而不是主路径：单实例内存上限住在 wazero 的 RuntimeConfig 里，
+// 控制台保存之后**要重启才生效** —— 在那个窗口里已保存值与生效值可以差出几十上百 MiB
+// （审计实测：保存 32 MiB 未重启、实际按 128 MiB 跑），而诊断 hints 说的必须是"这次
+// 运行的上限"，否则第一消费者（AI/作者）会按错的数字优化。
+//
+// 回落到第 2 条只在装配没接线时发生（测试/最小装配），语义与 R1-rt-25 之前一致。
+func (h *Handlers) effectiveMemoryPages() uint32 {
+	if h.opt.EffectiveMemoryPages != nil {
+		if pages := h.opt.EffectiveMemoryPages(); pages != 0 {
+			return pages
+		}
+	}
+	return h.instanceMemoryPages()
+}
+
+// EffectiveMemoryPages 返回诊断面当前会使用的单实例内存页数（**装配自检/装配级判据用**）。
+//
+// 存在的理由与 appserver.CachedModuleCount 同类：装配点漏传 `Options.EffectiveMemoryPages`
+// 时的失败形态是静默的（诊断悄悄退回"已保存值"），没有可观测出口就只能断言源码字符串
+// （而字符串断言分不清"接上了但值是错的"）。生产装配的大小写判据在
+// cmd/server 的 TestDiagnosticsMemoryHintUsesRuntimePagesAtAssembly。
+func (h *Handlers) EffectiveMemoryPages() uint32 {
+	return h.effectiveMemoryPages()
 }
 
 // windowFromQuery 解析诊断窗口（分钟）。缺省 24 h，上限 = 调用事件保留期
@@ -164,7 +217,7 @@ func (h *Handlers) schema(c *gin.Context) {
 	}
 	// §8：自省"仅发布者 + 审计" —— 每次调用都留痕（自省面会暴露应用的数据规模）。
 	h.auditApp(appID, u.Username, "wasm_app_schema_view",
-		auditDetail(appID, app.Title, "查看表结构与占用"))
+		auditDetail(appID, auditTitleOf(app), "查看表结构与占用"))
 
 	report, serr := h.inspectAppDB(c.Request.Context(), appID)
 	if serr != nil {
@@ -261,14 +314,23 @@ func logicalUnderDataRoot(dataRoot, path string) string {
 	return filepath.ToSlash(strings.TrimPrefix(clean, root+string(os.PathSeparator)))
 }
 
-// fileSize 返回文件字节数（不可读时返回 0：自省面不回错误码，占用为 0 已经足够表达
-// "这个库还没有内容"）。
+// fileSize 返回库的**磁盘占用**字节数：主库 + WAL（不可读时按 0 计）。
+//
+// 为什么要算上 `-wal`（2026-09-19，库切到 WAL 之后）：WAL 下已提交的数据可能还躺在
+// `app.db-wal` 里（未检查点），只 stat 主库会系统性低估用量 —— 自省面报的
+// size_bytes / usage_percent 是给管理员看"这个应用占了多少"的，低估会把
+// "快到 100 MB 了"显示成"还很小"。主库的 page_count 口径本来就把 WAL 里的逻辑页
+// 算进去，两边因此一致。
+//
+// 不可读时返回 0：自省面不回错误码，占用为 0 已经足够表达"这个库还没有内容"。
 func fileSize(path string) int64 {
-	st, err := os.Stat(path)
-	if err != nil {
-		return 0
+	var total int64
+	for _, p := range []string{path, path + "-wal"} {
+		if st, err := os.Stat(p); err == nil {
+			total += st.Size()
+		}
 	}
-	return st.Size()
+	return total
 }
 
 func usagePercent(used, max int64) float64 {
@@ -367,7 +429,8 @@ func (h *Handlers) catalog(c *gin.Context) {
 		return
 	}
 	// 目录是**登录后**的可见面（§8：客户端员工面）。不做匿名目录。
-	if _, aerr := h.currentUser(c); aerr != nil {
+	viewer, aerr := h.currentUser(c)
+	if aerr != nil {
 		writeErr(c, aerr)
 		return
 	}
@@ -377,6 +440,25 @@ func (h *Handlers) catalog(c *gin.Context) {
 	apps, err := serverstore.ListWasmApps(c.Request.Context(), h.opt.DB, serverstore.WasmAppFilter{})
 	if err != nil {
 		writeErr(c, internalErr("查询失败", err))
+		return
+	}
+	// 当前版本号（P1-4）：apps 行上只有 current_release_id，批量取一次 —— 与**管理面
+	// 同一份**实现（admin.go 的 WasmAppCurrentVersions），因为它就是同一个问题的答案。
+	//
+	// 为什么目录必须下发它：`wasm_app_list` 的工具描述要求模型"发布前先确认当前版本，
+	// 新版本号必须严格大于它"，而目录行原先**没有版本字段** ⇒ 模型只能猜；猜错的代价
+	// 是一次完整上传（≤32 MiB）+ 审计拒绝 + 消耗上传额度。
+	//
+	// 取不到不算错 —— 版本行可能已被保留策略回收，那一行显示空串（客户端按"未知"渲染）。
+	ids := make([]int64, 0, len(apps))
+	for _, a := range apps {
+		if a.CurrentReleaseID > 0 {
+			ids = append(ids, a.CurrentReleaseID)
+		}
+	}
+	versions, verr := serverstore.WasmAppCurrentVersions(c.Request.Context(), h.opt.DB, ids)
+	if verr != nil {
+		writeErr(c, internalErr("查询版本失败", verr))
 		return
 	}
 	out := make([]gin.H, 0, len(apps))
@@ -398,16 +480,15 @@ func (h *Handlers) catalog(c *gin.Context) {
 		}
 		// 负责人 = picoaide.app.json 的 owner（§4.2 的"负责人"声明）；平台归属
 		// （apps.owner）只是兜底 —— 两者同名不同物，不做互相推导（appcfg 包注释）。
-		responsible := ""
+		var cfg appcfg.Config
 		if a.ConfigJSON != "" {
-			var cfg appcfg.Config
-			if json.Unmarshal([]byte(a.ConfigJSON), &cfg) == nil {
-				responsible = strings.TrimSpace(cfg.Owner)
-			}
+			_ = json.Unmarshal([]byte(a.ConfigJSON), &cfg)
 		}
+		responsible := strings.TrimSpace(cfg.Owner)
 		if responsible == "" {
 			responsible = a.Owner
 		}
+		isOwner := a.Owner == viewer.Username || isSuperAdmin(viewer)
 		row := gin.H{
 			"app_id":      a.AppID,
 			"title":       a.Title,
@@ -422,9 +503,48 @@ func (h *Handlers) catalog(c *gin.Context) {
 			// 见 writeGone），但它仍列在目录里（理由见上面的目录条件）。
 			"enabled":    a.Enabled,
 			"updated_at": a.UpdatedAt,
+			// 当前线上版本（可能为空串：版本行被保留策略回收）。
+			"current_version": versions[a.CurrentReleaseID],
+			// 调用者是不是发布者：客户端据此给出"发新版"入口（非发布者发布必然 404）。
+			"is_owner": isOwner,
 		}
-		if origin := h.appOrigin(c, a.AppID); origin != "" {
-			row["entry_url"] = origin
+		// 窗口的默认尺寸与**强制宽高比**（§6 的 `window.*` 三个字段，R1-L3-9）：
+		// F3 的"强制锁比例"要用它建窗，而目录是客户端在打开前唯一能读到应用配置的地方
+		// （`open` 只回版本/标题/计数，不回配置）。缺席（作者没写）⇒ 整个键不出现，
+		// 客户端按自己的缺省（1280×720 且不锁比例）处理 —— 与 §6 的"缺省 1280×720"一致。
+		//
+		// 归一化后的值（ratio 折算成浮点、尺寸按 ratio 校正）由 appcfg 一处算清：
+		// 让客户端再算一遍 = 两套窗口尺寸口径（比例四舍五入的差异会让"锁定的比例"
+		// 与作者写的对不上）。
+		if cfg.Window != nil {
+			width, height := cfg.ResolvedWindow()
+			window := gin.H{"width": width, "height": height}
+			if cfg.Window.Ratio > 0 {
+				window["ratio"] = cfg.Window.Ratio
+			}
+			row["window"] = window
+		}
+		// ⚠️ `entry_url` 已随 W4 从两侧删除（总纲 §8.4 / §5.2 冻结契约）：服务端不再下发
+		// 任何入口链接，客户端用 `<渠道 app scheme>://<app_id>` 自行构造打开地址。
+		// 发布者本人额外拿到 purpose / whitelist：**发布表单的预填基线**（P1-3）。
+		//
+		// 为什么限定发布者本人：whitelist 是账号名单、purpose 是内部用途声明，而目录对
+		// 全体员工可见（R38）—— 无条件下发等于把每个应用的准入名单摊开。发布新版只能由
+		// 发布者本人做（ownedApp 对非发布者一律 404），所以"作者的发布表单要能预填"与
+		// "名单不外泄"同时成立的唯一形态就是按调用者下发。
+		//
+		// 为什么必须有这两个字段：目录行是发布表单的预填基线。服务端在更新发布时
+		// **会对缺席字段沿用上一版**（publish.go 的 prepare → appcfg.ParseUpdate），
+		// 但作者仍要看得见"现在生效的是什么"才能有意识地改它（预填 + access 变更
+		// 二次确认是人工表单那条路径的护栏）。whitelist 模式的应用若拿不到原名单，
+		// 作者只能凭空重填，而 access=whitelist + 空名单会被服务端一律拒（appcfg.Validate）。
+		if isOwner {
+			row["purpose"] = cfg.Purpose
+			whitelist := cfg.Whitelist
+			if whitelist == nil {
+				whitelist = []string{}
+			}
+			row["whitelist"] = whitelist
 		}
 		// R36：目录**不**显示额度/用量 —— 这里刻意不返回任何用量字段。
 		out = append(out, row)
@@ -433,8 +553,97 @@ func (h *Handlers) catalog(c *gin.Context) {
 }
 
 // ---------------------------------------------------------------------------
+// 我的版本：GET /apps/wasm/:app_id/releases（R1-pm-3）
+// ---------------------------------------------------------------------------
+
+// myReleases 让**发布者本人**读到自己应用的版本历史与审核结论（含被拒理由）。
+//
+// 为什么必须有这条出口（R1-pm-3 / R1-uxw-4）：开启审核（`wasm.review_required`）之后
+// 发布者的全部反馈只有发布那一刻的"待审核（线上仍是旧版本）"一句话 ——
+// `app_releases.reason` 被管理员写进库、却**没有任何读路径**（DTO 无字段、员工面无
+// 端点），而版本号一经提交就**永久占位**（§4.1，被拒也不释放）。结果是：作者收不到
+// 结论、拿不到理由、只能盲升版本号重发；"审核"在作者侧退化成掷骰子。
+//
+// 鉴权沿用 ownedApp（与 publish/unpublish/freeze/export/diagnostics 同一份判定）：
+// **非发布者一律 404「应用不存在」**，且与"应用真的不存在"逐字节同形（`notFoundApp`
+// 对两种情况给出同一个 details/hints）—— 不泄露应用是否存在（R38/§8 的既有纪律）。
+// 平台管理员（super_admin）照旧放行，与其余管理动作同口径。allowDeleted=true：
+// 退役（软删）应用的只读面与 export/diagnostics 一致，保留期内作者仍要能回看结论。
+//
+// 返回每版 version / status / reason / created_at / current / checksum / size，
+// **不含制品字节**（ListWasmReleases 走清单投影，archive 从不进内存）。
+//
+// 不写审计：与 adminReleases 同口径 —— 这是"读自己的版本清单"，发布者每次打开面板
+// 都会调一次，逐次落审计只会把审计链淹掉；状态变更（发布/审批/上下架）仍然条条留痕。
+func (h *Handlers) myReleases(c *gin.Context) {
+	if err := h.requireReady(); err != nil {
+		writeErr(c, err)
+		return
+	}
+	appID := registry.NormalizeAppID(c.Param("app_id"))
+	app, _, oerr := h.ownedApp(c, appID, true)
+	if oerr != nil {
+		writeErr(c, oerr)
+		return
+	}
+	ctx := c.Request.Context()
+	releases, err := serverstore.ListWasmReleases(ctx, h.opt.DB, appID, false)
+	if err != nil {
+		writeErr(c, internalErr("查询版本失败", err))
+		return
+	}
+	// 当前生效版本号：apps 行上只有 current_release_id，翻译成版本号给作者看
+	// （与目录行的 current_version 同一实现，避免两处口径分叉）。
+	current := ""
+	if app.CurrentReleaseID > 0 {
+		if versions, verr := serverstore.WasmAppCurrentVersions(ctx, h.opt.DB, []int64{app.CurrentReleaseID}); verr == nil {
+			current = versions[app.CurrentReleaseID]
+		}
+	}
+	rows := make([]gin.H, 0, len(releases))
+	for _, r := range releases {
+		rows = append(rows, gin.H{
+			"version": r.Version,
+			"status":  r.Status,
+			// 被拒理由：pending/approved 行恒为空串（数据库侧保证），界面据此只在
+			// rejected 行上渲染它。
+			"reason":     r.Reason,
+			"created_at": r.CreatedAt,
+			"current":    r.Version == current && current != "",
+			"checksum":   r.Checksum,
+			"size":       r.Size,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"app_id":          appID,
+		"current_version": current,
+		"releases":        rows,
+		// 审核开关：作者据此解释"为什么这一版还没生效"（关着还停在 pending 只可能是
+		// 开关刚被打开，或这一版是在开关打开期间提交的）。
+		"review_required": h.reviewRequired(),
+	})
+}
+
+// ---------------------------------------------------------------------------
 // 导出：GET .../wasm/:app_id/export（R37 只读快照）
 // ---------------------------------------------------------------------------
+
+// exportTitleSource 标注导出里 `app.title` 的来源（占位不是真实标题）。
+//
+// 与 auditTitleOf 同一口径（真实标题 = 生效版本的标题），只是导出面不能改字段值
+// （format /1 的数据契约）⇒ 用**来源标注**把"这是占位"讲清楚。
+func exportTitleSource(app *serverstore.WasmApp) string {
+	switch {
+	case app == nil:
+		return "empty"
+	case app.CurrentReleaseID > 0 && strings.TrimSpace(app.Title) != "":
+		return "release"
+	case strings.TrimSpace(app.Title) == "":
+		return "empty"
+	default:
+		return "app_id_placeholder"
+	}
+}
 
 func (h *Handlers) export(c *gin.Context) {
 	if err := h.requireReady(); err != nil {
@@ -454,7 +663,7 @@ func (h *Handlers) export(c *gin.Context) {
 		return
 	}
 	h.auditApp(appID, u.Username, "wasm_app_export",
-		auditDetail(appID, app.Title, "导出控制面快照"))
+		auditDetail(appID, auditTitleOf(app), "导出控制面快照"))
 
 	rows := make([]gin.H, 0, len(releases))
 	var currentVersion string
@@ -466,10 +675,13 @@ func (h *Handlers) export(c *gin.Context) {
 			"changelog":   r.Changelog,
 			"publisher":   r.Publisher,
 			"status":      r.Status,
-			"checksum":    r.Checksum,
-			"size":        r.Size,
-			"created_at":  r.CreatedAt,
-			"deleted":     r.DeletedAt != nil,
+			// 审核结论（被拒理由；通过/待审恒为空串）：导出的快照要能回答"这一版
+			// 为什么没上线"，否则退役后的回看只剩一个 status（R1-pm-3）。
+			"reason":     r.Reason,
+			"checksum":   r.Checksum,
+			"size":       r.Size,
+			"created_at": r.CreatedAt,
+			"deleted":    r.DeletedAt != nil,
 		}
 		if r.ConfigJSON != "" {
 			row["config"] = json.RawMessage(r.ConfigJSON)
@@ -488,8 +700,17 @@ func (h *Handlers) export(c *gin.Context) {
 		"format":      "picoaide.wasm-app-export/1",
 		"exported_at": h.now().UTC(),
 		"app": gin.H{
-			"app_id":             app.AppID,
-			"title":              app.Title,
+			"app_id": app.AppID,
+			"title":  app.Title,
+			// 标题的**来源**（审计第三轮 B 区，2026-09-19）：首版待审期间 apps.title 是
+			// app_id 占位而不是任何一版的真实标题 —— 导出是给 AI/运维读的控制面快照，
+			// 光看 `title: "brand-new-tool"` 会把占位当事实（"这个应用叫这个名字"）。
+			// 取值：
+			//   release            = apps.title 是**生效版本**标题的投影（唯一可信的标题来源）；
+			//   app_id_placeholder = 还没有生效版本，title 是 app_id 占位（不是真实标题）；
+			//   empty              = 没有生效版本且行里也没有标题（历史残渣）。
+			// 加字段不改值 ⇒ format 仍是 picoaide.wasm-app-export/1。
+			"title_source":       exportTitleSource(app),
 			"description":        app.Description,
 			"owner":              app.Owner,
 			"channel":            app.Channel,

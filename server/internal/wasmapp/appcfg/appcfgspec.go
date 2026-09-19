@@ -55,6 +55,12 @@ type FieldSpec struct {
 	Desc string `json:"desc"`
 	// Hints 是可操作提示（同样是生成物的内容）。
 	Hints []string `json:"hints,omitempty"`
+	// SubFields 是**对象型字段**的子字段（当前只有 `window` 用到）。
+	//
+	// 存在的理由：`config_fields` 与 Config 结构体逐项对拍（顶层字段一一对应），
+	// 因此对象内部的字段在那里没有位置；而客户端要在表单里渲染它们、技能文档要逐个
+	// 解释它们 —— 那就必须有一份机器可读的，而不是"两处散文各写一遍"。
+	SubFields []FieldSpec `json:"sub_fields,omitempty"`
 }
 
 // RequiredWhen 的封闭取值（不要手写字符串：门禁按这三个值校验表的自洽性）。
@@ -83,12 +89,27 @@ type Spec struct {
 	ABIVersion string `json:"abi_version"`
 	// ConfigFile 是随包提交的配置文件名（limits.AppConfigFileName）。
 	ConfigFile string `json:"config_file"`
-	// AccessDefault / AccessValues 是 access 的缺省与封闭取值（§4.2 / R25）。
+	// AccessDefault / AccessValues 是 access 的缺省与**可写**取值（§4.2 / R25 + §4.4）。
+	//
+	// ⚠️ AccessValues 的取值来源是 `AccessWritableValues`（login|whitelist），
+	// **不是**内部的 `AccessValues`（含历史只读的 public）—— R1-DAT-8/UX-13：
+	// 字段规格是**作者契约**，列出 public 会让作者以为还能写它（写入侧 422 拒绝，
+	// 而且平台已无匿名面）。历史 public 的读取兼容写在 appcfg.go 的 parse 里，
+	// 与"规格怎么写"是两件事。
 	AccessDefault string   `json:"access_default"`
 	AccessValues  []string `json:"access_values"`
 	// ConfigFields / PublishFields 是两张有序表（顺序即文档顺序）。
 	ConfigFields  []FieldSpec `json:"config_fields"`
 	PublishFields []FieldSpec `json:"publish_fields"`
+	// WindowFields 是 `window` 对象的三个子字段（§6 新增），以**路径名**给出
+	// （`window.ratio` / `window.width` / `window.height`）。
+	//
+	// 为什么单列一张表而不是塞进 ConfigFields：ConfigFields 与 Config 结构体的
+	// json 标签**逐项逐序一一对应**（门禁用例 (b) 反射对拍），而 window 在结构体里
+	// 是**一个**对象字段 —— 把三个子字段平铺进去会让那条对拍失效。子字段因此有
+	// 自己的表（消费方 = 客户端表单/预校验与技能文档），并由同一条门禁断言它与
+	// `window` 条目的 sub_fields 同源。
+	WindowFields []FieldSpec `json:"window_fields"`
 }
 
 // SpecSchema 是 appcfg.json 的格式版本（消费者做兼容判断用）。
@@ -105,12 +126,15 @@ func ConfigFields() []FieldSpec {
 			Type:     "enum",
 			Required: false,
 			Default:  string(AccessDefault),
-			Values:   append([]string(nil), AccessValues...),
-			Desc: "访问模式。public=允许匿名（未登录时帧内 user 为 null）；" +
-				"login=要求登录，登录后全员可用（**缺省**）；" +
-				"whitelist=要求登录 + 名单准入（**平台不比对名单**，由应用自己读 whitelist 判定）",
+			Values:   append([]string(nil), AccessWritableValues...),
+			Desc: "访问模式。login=要求登录，登录后全员可用（**缺省**）；" +
+				"whitelist=要求登录 + 名单准入（**平台不比对名单**，由应用自己读 whitelist 判定）。" +
+				"取值只有这两个：平台没有匿名面（应用只在桌面客户端内可用，一律要求登录）",
 			Hints: []string{
 				"写漏了按 login 处理：缺省只会'要求登录'，不会意外变成匿名可达",
+				"历史版本里写过的 `\"public\"` **读取侧仍按 login 执行**（存量应用不会 500），但新版本不得再写它（422 拒绝）",
+				"**更新版本**时省略本字段 = **沿用上一版生效值**（不是回落 login）：纯代码更新不会改写线上访问级别",
+				"要真的改访问级别就**显式**写出来（显式 `\"login\"` 才算改成登录后全员可用）；显式空串不是合法取值，会被拒",
 				"应用中心**不按它过滤**：所有应用都列出来，条目里给出访问级别（供使用者判断该不该点）",
 				"改 access = 发一个新版本（运行期改不了）",
 			},
@@ -126,6 +150,7 @@ func ConfigFields() []FieldSpec {
 				"access=\"whitelist\" 时至少要有一个账号，否则拒绝发布",
 			Hints: []string{
 				"每个条目是一个账号（登录名 login），如 [\"zhangwei\", \"lisi\"]",
+				"**更新版本**时省略本字段 = 沿用上一版的名单；显式给 `[]` 才是“清空名单”（access 仍是 whitelist 时会被拒）",
 				"应用入口第一件事就该读它并比对；无权限页必须显示本人账号（作者发现拼错的唯一途径）",
 				"含空串即拒（不要用空行占位）；条目数上限见 references/limits.md",
 			},
@@ -141,9 +166,10 @@ func ConfigFields() []FieldSpec {
 			Key:          FieldDataSensitivity,
 			Type:         "string",
 			RequiredWhen: RequiredWhenFirstRelease,
-			Desc:         "数据敏感度声明（如 internal）：用于事后追责与合规审查（首次发布必填）",
+			Desc:         "数据敏感度声明（如 internal）：用于事后追责与合规审查（首次发布必填，之后的版本可沿用）",
 			Hints: []string{
 				"平台**没有**这个字段的默认值：不要指望界面或平台替你填（留空会被首版必填校验拒）",
+				"**更新版本**时省略本字段 = 沿用上一版；显式给空串才会把它清空（那不是“没填”，是“填了空”）",
 				"它不改变任何运行时行为，只用于声明与追责",
 			},
 		},
@@ -154,6 +180,59 @@ func ConfigFields() []FieldSpec {
 			Desc: "负责人声明（应用出问题找谁）：**不是平台归属** —— 平台归属取自登录态、" +
 				"不可伪造（首次发布必填，之后的版本可沿用）",
 			Hints: []string{"它与应用中心的'负责人'显示同源；平台不拿它做任何权限判断"},
+		},
+		{
+			Key:      FieldWindow,
+			Type:     "object",
+			Required: false,
+			Desc: "窗口的**默认尺寸与强制宽高比**（子字段见 `window_fields`）：" +
+				"`window.ratio` 是客户端 resize 时强制锁定的比例（\"W:H\" 或浮点，" +
+				"合法区间 0.25–4.0）；`window.width` / `window.height` 是首次打开的默认尺寸" +
+				"（缺省 1280×720，写了 ratio 时按比例校正）",
+			Hints: []string{
+				"ratio 越界（<0.25 / >4.0 / 0 / 负 / 非数字）⇒ 发布期 `APP_CONFIG_INVALID`（不是留到运行期）",
+				"ratio 与 width/height 冲突时**以 ratio 为准**：只保留你显式给出的那一边，另一边按比例推导",
+				"整个 `window` 缺席 = 沿用上一版生效值（与其它字段同一条继承规则）；显式 `null` 才是清空",
+				"未知子键会被拒（例如 `window.zoom`）—— 平台不会静默忽略你没被支持的写法",
+			},
+			SubFields: WindowFields(),
+		},
+	}
+}
+
+// WindowFields 返回 `window` 对象的子字段表（§6；有序 = 文档顺序）。
+//
+// 键名用**路径形态**（`window.ratio`）：§6 的表格与客户端文案用的就是它，
+// 而 JSON 里的形态是嵌套对象（`{"window":{"ratio":…}}`）—— 两者是同一份契约的
+// 两种写法，转换规则只有一条：去掉前缀 `window.` 就是对象里的键。
+func WindowFields() []FieldSpec {
+	return []FieldSpec{
+		{
+			Key:  FieldWindow + ".ratio",
+			Type: "string",
+			Desc: `强制锁定的宽高比：写 "W:H"（如 "16:9"）或浮点数（如 1.7778）；` +
+				"合法区间 0.25–4.0（越界/0/负/非数字 ⇒ `APP_CONFIG_INVALID`）",
+			Hints: []string{
+				"窗口 resize 时按它约束比例：这是**强制**项，不是建议",
+				"只给 ratio 时按默认宽度 1280 推高度（16:9 ⇒ 1280×720）",
+			},
+		},
+		{
+			Key:      FieldWindow + ".width",
+			Type:     "string",
+			Required: false,
+			Desc:     "首次打开的窗口宽度（像素，正整数）：缺省 1280；与 ratio 冲突时以 ratio 为准",
+			Hints: []string{
+				"合法区间见 `window_fields` 的 max（越界 ⇒ `APP_CONFIG_INVALID`）",
+				`写字符串（"1280px"）或小数一律拒`,
+			},
+		},
+		{
+			Key:      FieldWindow + ".height",
+			Type:     "string",
+			Required: false,
+			Desc:     "首次打开的窗口高度（像素，正整数）：缺省 720；与 ratio 冲突时以 ratio 为准",
+			Hints:    []string{"只写 height 时宽度按 ratio 推导"},
 		},
 	}
 }
@@ -170,8 +249,9 @@ func PublishFields() []FieldSpec {
 			Type:     "string",
 			Required: true,
 			Max:      limits.MaxAppIDLen,
-			Desc: "应用标识 = 域名标签（`<app_id>.<应用基域>`）：小写字母/数字/连字符，" +
-				"不超过 63 个字符，不得纯数字、不得以 xn-- 开头、不得是保留字；**不能改名**",
+			Desc: "应用标识（客户端内即 `<渠道 app 源 scheme>://<app_id>` 的 host 段）：" +
+				"小写字母/数字/连字符，不超过 63 个字符，" +
+				"不得纯数字、不得以 xn-- 开头、不得是保留字；**不能改名**",
 			Hints: []string{
 				"也可以由路径 `/apps/wasm/:app_id/releases` 给出；两边都给时必须一致",
 				"显示名（可中文）用 title，不要塞进 app_id",
@@ -190,7 +270,7 @@ func PublishFields() []FieldSpec {
 			Required:     false,
 			RequiredWhen: RequiredWhenFirstRelease,
 			Desc:         "应用中心显示名称（可中文）：**首次发布必填**，之后的版本可省略（沿用上一版）",
-			Hints:        []string{"app_id 是域名标签不能中文；人看的名字写在这里"},
+			Hints:        []string{"app_id 只能小写 ASCII（它也是应用地址的 host 段）；人看的名字写在这里"},
 		},
 		{
 			Key:          "changelog",
@@ -220,6 +300,8 @@ func PublishFields() []FieldSpec {
 			Desc:     "应用配置文件的内容（即 `picoaide.app.json` 的对象形态）：字段见 `config_fields`",
 			Hints: []string{
 				"平台存的是**解析并归一化之后**的配置（名单去空白/去重、access 缺省落定）",
+				"**更新版本**时 config 里**缺席**的字段沿用上一版生效值（access/whitelist/purpose/data_sensitivity/owner 逐字段各自沿用）；显式给值——包括显式空串——以提交为准",
+				"首版没有可沿用的上一版：缺席的 `access` 按缺省 `login` 落定",
 				"改任何一项都要发新版本（§10.5 第 56f 项）",
 			},
 		},
@@ -242,8 +324,11 @@ func Doc() Spec {
 		ABIVersion:    abi.ABIVersion,
 		ConfigFile:    limits.AppConfigFileName,
 		AccessDefault: string(AccessDefault),
-		AccessValues:  append([]string(nil), AccessValues...),
+		// 顶层 access_values 与字段表里的 access.values **同源同值**（都由
+		// AccessWritableValues 派生）—— 两处各写一遍会让"规格文件自己不自洽"。
+		AccessValues:  append([]string(nil), AccessWritableValues...),
 		ConfigFields:  ConfigFields(),
 		PublishFields: PublishFields(),
+		WindowFields:  WindowFields(),
 	}
 }

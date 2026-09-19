@@ -2,11 +2,9 @@ package api
 
 import (
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
-	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 )
 
 // ===========================================================================
@@ -224,92 +222,12 @@ func TestAppstoreTransferOwnerAcceptsWasmApp(t *testing.T) {
 		map[string]any{"owner": "bob"}), http.StatusBadRequest)
 }
 
-// TestAdminBaseDomainGetPut 覆盖「管理端配置应用泛域名」的读写面
-// （2026-09-18 用户要求：应用名 + 泛域名 = 应用访问地址）。
-//
-// 判据：
-//   - GET 回控制台要用的完整视图（当前值 / 来源 / 是否启用 / 可直接展示的 URL 模板）；
-//   - PUT 保存后立即回读新值，并写**组织级**审计（基域是组织级配置，没有 app 维度）；
-//   - 校验失败与"注入侧拒绝"都必须原样回 §8 信封（带 code/hints），不能吞成 500；
-//   - 缺 body 字段要 400 而不是静默清空（清空 = 关闭子域，必须显式）。
-func TestAdminBaseDomainGetPut(t *testing.T) {
-	applied := ""
-	rejectNext := false
-	e := newTestEnv(t, func(o *Options) {
-		o.BaseDomain = func() string { return applied }
-		o.BaseDomainSource = func() string {
-			if applied == "" {
-				return "none"
-			}
-			return "setting"
-		}
-		o.ApplyBaseDomain = func(next string) *apperr.Error {
-			if rejectNext {
-				return apperr.New(apperr.CodeValidation, "模拟注入侧拒绝").
-					WithDetail("reason", "guard_failed").
-					WithHint("这条 hint 必须原样到控制台")
-			}
-			applied = next
-			return nil
-		}
-	})
-
-	// ① 初始（未启用）：enabled=false，url_pattern 为空。
-	var got struct {
-		BaseDomain string `json:"base_domain"`
-		Source     string `json:"source"`
-		Enabled    bool   `json:"enabled"`
-		URLPattern string `json:"url_pattern"`
-		SettingKey string `json:"setting_key"`
-	}
-	e.decodeJSON(e.req(http.MethodGet, "/api/server/admin/wasm-apps/domain", "", nil), http.StatusOK, &got)
-	if got.Enabled || got.URLPattern != "" || got.Source != "none" || got.SettingKey != SettingAppsBaseDomain {
-		t.Fatalf("未启用时的视图不对: %+v", got)
-	}
-
-	// ② 保存：回读新值 + 可直接展示的 URL 模板。
-	e.decodeJSON(e.req(http.MethodPut, "/api/server/admin/wasm-apps/domain", "", map[string]any{
-		"base_domain": "apps.example.com",
-	}), http.StatusOK, &got)
-	if got.BaseDomain != "apps.example.com" || !got.Enabled || got.Source != "setting" {
-		t.Fatalf("保存后视图不对: %+v", got)
-	}
-	if got.URLPattern != "https://<app_id>.apps.example.com" {
-		t.Fatalf("URL 模板不对: %q", got.URLPattern)
-	}
-	// 审计：组织级动作（wasm_apps_base_domain_change），明细带旧值→新值。
-	logs, _, err := serverstore.ListAuditLogsPagedFiltered(e.db, 0, 50, "wasm_apps_base_domain_change", "")
-	if err != nil {
-		t.Fatalf("读审计失败: %v", err)
-	}
-	if len(logs) == 0 {
-		t.Fatal("基域变更必须写审计")
-	}
-	if !strings.Contains(logs[0].Detail, "apps.example.com") {
-		t.Fatalf("审计明细应含新值: %q", logs[0].Detail)
-	}
-
-	// ③ 缺字段 ⇒ 400（清空必须显式传空串，不能靠漏传）。
-	eb := e.decodeErr(e.req(http.MethodPut, "/api/server/admin/wasm-apps/domain", "", map[string]any{}), http.StatusBadRequest)
-	if eb.Error.Code != string(apperr.CodeValidation) {
-		t.Fatalf("缺 base_domain 的 code = %s", eb.Error.Code)
-	}
-
-	// ④ 注入侧拒绝 ⇒ 原样透传（code/details/hints）。
-	rejectNext = true
-	eb = e.decodeErr(e.req(http.MethodPut, "/api/server/admin/wasm-apps/domain", "", map[string]any{
-		"base_domain": "apps.example.com",
-	}), http.StatusBadRequest)
-	if reason, _ := eb.Error.Details["reason"].(string); reason != "guard_failed" {
-		t.Fatalf("注入侧拒绝的 details 丢了: %+v", eb.Error.Details)
-	}
-	if len(eb.Error.Hints) == 0 || !strings.Contains(eb.Error.Hints[0], "原样到控制台") {
-		t.Fatalf("注入侧拒绝的 hints 丢了: %+v", eb.Error.Hints)
-	}
-	if applied != "apps.example.com" {
-		t.Fatalf("被拒的保存不该生效: %q", applied)
-	}
-}
+// ⚠️ `TestAdminBaseDomainGetPut` 已随 W4 删除：应用基域配置面
+// （`SettingAppsBaseDomain` / `GET|PUT /domain` / `ApplyBaseDomain`）整体消失
+// （总纲 §8.4）—— 应用只在桌面客户端内以 `<渠道 app scheme>://<app_id>` 打开，
+// 平台上不再有"应用对外主机名"这个配置项，因此没有可测的读写面。
+// 反向检查：`internal/router` 的 `GET|PUT /domain` 路由申报与
+// `cmd/server` 的 baseDomainHolder 同批删除（改回任一处即编译红）。
 
 // TestAdminPublishIsSymmetricToUnpublish 管理面必须能"上架"（2026-09-18 补）。
 //

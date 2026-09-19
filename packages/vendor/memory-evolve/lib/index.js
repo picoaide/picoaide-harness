@@ -2200,7 +2200,8 @@ export function apply(ctx, rawConfig = {}) {
   //     开关挡住了，员工装完客户端根本看不到这些技能。
   //
   //     ⚠️ 这里同步的**只有本插件自己的技能**（COI 适配器 + memory-consolidate）。
-  //     平台技能 `picoaide-app-builder` 不在此列：它随服务端镜像发布，由员工在
+  //     平台技能 `app-builder`（原名 `picoaide-app-builder`，源目录已搬到服务端
+  //     仓库的 `server/skills/app-builder/`）不在此列：它随服务端镜像发布，由员工在
   //     客户端「能力中心 → 平台内置技能」按需安装（用户口径 2026-09-18）。
   //     开机自动写进技能库会让「按需」名存实亡（独立审计 P1-1），
   //     见 `lib/coi/skills-sync.js` 的 `BUILTIN_SKILLS` / `PLATFORM_SKILLS`。

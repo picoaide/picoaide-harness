@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-desktop",
-  "version": "2.7.6-beta.4",
+  "version": "2.7.6-beta.5",
   "description": "PicoAide Harness: an Electron shell composed as a DeepSeek Harness Cordis plugin",
   "license": "MIT",
   "publishConfig": {
@@ -290,7 +290,10 @@
     "@picoaide/dsh-connectors": "workspace:*",
     "@picoaide/dsh-cron": "workspace:*",
     "@picoaide/dsh-enterprise": "workspace:*",
+    "@picoaide/dsh-host-home": "workspace:*",
+    "@picoaide/dsh-host-locale": "workspace:*",
     "@picoaide/dsh-wasm-apps": "workspace:*",
+    "@picoaide/dsh-wasm-apps-host": "workspace:*",
     "adm-zip": "^0.6.0",
     "dsh-memory-evolve": "workspace:*",
     "koffi": "3.1.5",

@@ -26,23 +26,15 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/picoaide/picoaide/internal/agentshare"
-	"github.com/picoaide/picoaide/internal/appstore"
-	"github.com/picoaide/picoaide/internal/bootstrap"
-	"github.com/picoaide/picoaide/internal/capabilities"
 	"github.com/picoaide/picoaide/internal/channel"
 	"github.com/picoaide/picoaide/internal/clientrelease"
-	"github.com/picoaide/picoaide/internal/connectors"
-	"github.com/picoaide/picoaide/internal/llmgateway"
-	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/portal"
-	"github.com/picoaide/picoaide/internal/reports"
 	"github.com/picoaide/picoaide/internal/router"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
-	"github.com/picoaide/picoaide/internal/sharedskills"
-	"github.com/picoaide/picoaide/internal/telemetry"
 	"github.com/picoaide/picoaide/internal/updatecheck"
+	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
+	"github.com/picoaide/picoaide/internal/wasmapp/readyz"
 	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 	"github.com/picoaide/picoaide/webadmin"
 )
@@ -126,35 +118,69 @@ func requireRealDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// buildRouter 用与 main 相同的 Deps 组装完整路由树(nil DB)。
+// buildRouter 用**生产装配真源**(registerProductionRoutes)组装完整路由树(nil DB)。
+//
+// 为什么必须走生产函数(2026-09-19 P0 审计):此前这里自己抄了一份 router.Register
+// 的 Deps 且不传 Wasm —— 测试树因此比生产树少 33 条路由(33 条 WASM
+// 应用平台 + /login /logout /app-ticket,外加 /healthz /readyz),而"路由完整性"
+// 断言照样全绿:一整片路由从不进测试视野。测试装配现在与生产共用同一段装配代码,
+// 差集由 routes_source_test.go 的守卫常驻断言(数据来自真实调用,不抄路由表)。
 func buildRouter(t *testing.T) *gin.Engine {
+	t.Helper()
+	return buildRouterWithDB(t, nil)
+}
+
+// buildRouterWithDB 与 buildRouter 同源,只是把真实 DB 交给同一批 handler
+// (全路由契约扫描要发真实请求;nil 只够注册路由 —— handler 在请求时才查库)。
+func buildRouterWithDB(t *testing.T, db *sql.DB) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := newEngine() // 与生产同一构造函数(P3-1:RedirectTrailingSlash=false 也在此)
 	// 与生产同序(P1-2):中间件必须在路由注册之前安装,否则 panic 不返回
 	// JSON 信封、也没有访问日志。
 	installAPIMiddleware(r)
-	router.Register(r, router.Deps{
-		DB:            nil,
-		Auth:          serverauth.New(nil).Handlers(),
-		Admin:         (&serverauth.AdminAPI{}).Handlers(),
-		Appstore:      appstore.NewHandlers(nil),
-		Bootstrap:     bootstrap.NewHandlers(nil),
-		Channel:       channel.NewHandlers(),
-		PortalAdmin:   portal.NewAdminHandlers(nil),
-		ClientRelease: clientrelease.NewHandlers(func() string { return "2.7.0" }, "official"),
-		// 内置技能下发面：资产目录用一次性空目录（本地测试没有 /opt/picoaide/skills）。
-		SkillSeed:  skillseed.NewHandlers(skillseed.New(t.TempDir())),
-		Market:     marketplace.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Agentshare: agentshare.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Shared:     sharedskills.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Capability: capabilities.NewHandlers(nil, "/tmp/picoaide-nonexistent-cache"),
-		Connector:  connectors.NewHandlers(nil),
-		Telemetry:  telemetry.NewHandlers(nil),
-		Gateway:    llmgateway.NewHandlers(nil),
-		Reports:    reports.NewHandlers(nil),
-	})
+	registerProductionRoutes(r, testProductionDeps(t, db))
 	return r
+}
+
+// testProductionDeps 构造与 main() **同形**的 productionDeps:字段一一对应,
+// 只有"真实资源"换成测试可构造的等价物(临时目录、可选的真实库)。
+// 漏填的后果有守卫:Wasm 漏填 ⇒ 对应整片路由从测试树
+// 里消失(routes_source_test.go 的差集断言会逐条报出);Ready 等字段漏填 ⇒ 路由仍在
+// 但请求必崩(见 routes_source_test.go 里的 nil-Ready 实测事实与生产侧接线断言)。
+func testProductionDeps(t *testing.T, db *sql.DB) productionDeps {
+	t.Helper()
+	// 与 main() 一致:认证 provider 按 ConfigureProviders 注册(真实库时才可查配置;
+	// nil DB 只构造形状 —— 路由注册不依赖 provider,发请求的用例一律传真实库)。
+	authAPI := serverauth.New(db)
+	if db != nil {
+		authAPI = serverauth.NewConfiguredAPI(db).API
+	}
+	dataDir := t.TempDir()
+	return productionDeps{
+		DB:    db,
+		Auth:  authAPI.Handlers(),
+		Admin: (&serverauth.AdminAPI{DB: db}).Handlers(),
+		// 与 main() 同源:内置技能目录取 skillseed.Dir(镜像内 /opt/picoaide/skills;
+		// 本机没有该目录时清单为空,与"二进制旁边没有技能资产"的生产行为一致)。
+		SkillSeed: skillseed.NewHandlers(skillseed.New(skillseed.Dir)),
+		// WASM 应用平台操作面 + 员工浏览器会话面:必须非 nil,否则 router.Register
+		// 整片跳过(见 productionDeps.Wasm 的注释)。
+		Wasm: wasmapi.NewHandlers(wasmapi.Options{DB: db, DataRoot: dataDir}),
+		// /readyz 探针:与生产同形(真实库时带 Ping)。
+		Ready:     readyz.New(readyz.Options{DataRoot: dataDir, Ping: pingFn(db)}).Handler(),
+		DataDir:   dataDir,
+		Version:   "2.7.0",
+		ChannelID: "official",
+	}
+}
+
+// pingFn 把可选的真实库变成 readyz 的探针函数(nil DB ⇒ nil = 不判)。
+func pingFn(db *sql.DB) func() error {
+	if db == nil {
+		return nil
+	}
+	return db.Ping
 }
 
 // TestAdminRouterNoFallOpen: 每个 /api/server/admin/* 路由(除公开 login/
@@ -437,31 +463,12 @@ func TestV2RealDB(t *testing.T) {
 	db := requireRealDB(t)
 
 	gin.SetMode(gin.TestMode)
-	r := gin.New()
+	// 与生产同一棵路由树(生产装配真源)——登录闭环必须在**完整**路由上成立。
+	r := buildRouterWithDB(t, db)
 	// 创建登录账号(测试库为空)。
 	if _, err := serverstore.CreateUserWithPassword(db, "admin", "admin123456"); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	authCfg := serverauth.NewConfiguredAPI(db)
-	router.Register(r, router.Deps{
-		DB:            db,
-		Auth:          authCfg.API.Handlers(),
-		Admin:         (&serverauth.AdminAPI{DB: db}).Handlers(),
-		Appstore:      appstore.NewHandlers(db),
-		Bootstrap:     bootstrap.NewHandlers(db),
-		Channel:       channel.NewHandlers(),
-		PortalAdmin:   portal.NewAdminHandlers(nil),
-		ClientRelease: clientrelease.NewHandlers(func() string { return "dev" }, "official"),
-		SkillSeed:     skillseed.NewHandlers(skillseed.New(t.TempDir())),
-		Market:        marketplace.NewHandlers(db, t.TempDir()),
-		Agentshare:    agentshare.NewHandlers(db, t.TempDir()),
-		Shared:        sharedskills.NewHandlers(db, t.TempDir()),
-		Capability:    capabilities.NewHandlers(db, t.TempDir()),
-		Connector:     connectors.NewHandlers(db),
-		Telemetry:     telemetry.NewHandlers(db),
-		Gateway:       llmgateway.NewHandlers(db),
-		Reports:       reports.NewHandlers(db),
-	})
 	dist, _ := fs.Sub(webadmin.FS, "dist")
 	fileServer := http.FileServer(http.FS(dist))
 	mountAPIGuards(r, db, fileServer, dist)
@@ -530,14 +537,26 @@ func TestResolveStartupChannelDeepLinkScheme(t *testing.T) {
 		wantErr   bool
 	}{
 		{
-			name:      "官方缺字段通过",
+			// ⚠️ 本用例回答的是 **deep_link_scheme** 的豁免（公共渠道不要求它）；
+			// `app_origin_scheme` 是**全部渠道必填**（§8.3/§10，主控裁决不豁免 official/beta）
+			// ⇒ 夹具必须带上它，否则会因为另一条独立的 fail-loud 提前失败（那不是本用例的问题）。
+			name:      "官方缺 deep_link_scheme 通过",
 			channelID: "official",
-			config:    `{"schema":1,"channel_id":"official","identity":{"display_name":"X"}}`,
+			config: `{"schema":1,"channel_id":"official","identity":{"display_name":"X"},
+				"desktop":{"app_origin_scheme":"picoaide-app"}}`,
 		},
 		{
-			name:      "beta 缺字段通过",
+			name:      "beta 缺 deep_link_scheme 通过",
 			channelID: "beta",
-			config:    `{"schema":1,"channel_id":"beta","identity":{"display_name":"X"}}`,
+			config: `{"schema":1,"channel_id":"beta","identity":{"display_name":"X"},
+				"desktop":{"app_origin_scheme":"picoaide-app"}}`,
+		},
+		{
+			// app_origin_scheme 的**独立** fail-loud：公共渠道同样不豁免（§8.3）。
+			name:      "官方缺 app_origin_scheme 报错",
+			channelID: "official",
+			config:    `{"schema":1,"channel_id":"official","identity":{"display_name":"X"}}`,
+			wantErr:   true,
 		},
 		{
 			name:      "品牌渠道缺字段报错",
@@ -548,13 +567,15 @@ func TestResolveStartupChannelDeepLinkScheme(t *testing.T) {
 		{
 			name:      "品牌渠道畸形 scheme 报错",
 			channelID: "acme",
-			config:    `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"},"desktop":{"deep_link_scheme":"Acme AI"}}`,
-			wantErr:   true,
+			config: `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"},
+				"desktop":{"deep_link_scheme":"Acme AI","app_origin_scheme":"acme-app"}}`,
+			wantErr: true,
 		},
 		{
 			name:      "品牌渠道合法值通过",
 			channelID: "acme",
-			config:    `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"},"desktop":{"deep_link_scheme":"acme-ai"}}`,
+			config: `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"},
+				"desktop":{"deep_link_scheme":"acme-ai","app_origin_scheme":"acme-ai-app"}}`,
 		},
 	}
 	for _, tc := range cases {
@@ -666,7 +687,10 @@ func TestPortalDownloadsRequireSecureOrigin(t *testing.T) {
 // writeChannelDir 造一个只含 channel.json 的渠道目录。
 func writeChannelDir(t *testing.T, channelID string) string {
 	t.Helper()
-	return writeChannelDirRaw(t, `{"schema":1,"channel_id":"`+channelID+`","identity":{"display_name":"X"}}`)
+	// 公共渠道(official/beta)不要求 deep_link_scheme，但 **app_origin_scheme 全部渠道必填**
+	//（§8.3/§10：CI 硬校验，服务端启动期 fail-loud）⇒ 夹具必须带上它。
+	return writeChannelDirRaw(t, `{"schema":1,"channel_id":"`+channelID+`","identity":{"display_name":"X"},
+		"desktop":{"app_origin_scheme":"harness-app"}}`)
 }
 
 // pointChannelDir 把渠道目录与镜像标记文件都指到临时目录(不碰 /opt)。
@@ -685,7 +709,7 @@ func pointChannelDir(t *testing.T, dir string) {
 func TestResolveStartupChannelAcceptsMatchingImageChannel(t *testing.T) {
 	// 品牌渠道必须自带 deep_link_scheme(见 TestResolveStartupChannelDeepLinkScheme)
 	dir := writeChannelDirRaw(t, `{"schema":1,"channel_id":"acme","identity":{"display_name":"X"},
-      "desktop":{"deep_link_scheme":"acme"}}`)
+      "desktop":{"deep_link_scheme":"acme","app_origin_scheme":"acme-app"}}`)
 	pointChannelDir(t, dir)
 	t.Setenv(updatecheck.ChannelEnv, "")
 	t.Setenv(updatecheck.EndpointEnv, "")

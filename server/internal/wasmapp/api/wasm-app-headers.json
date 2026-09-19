@@ -1,0 +1,29 @@
+{
+  "schema": "picoaide-wasm-app-headers/1",
+  "note": "跨端请求头白名单（单一真源 = server/internal/wasmapp/api/headerspec.go）。客户端必须转发且只转发 request_headers 里的头；多一个或少一个都会让导航/请求 400。本文件由 go generate ./internal/wasmapp/api 生成，不要手改。",
+  "request_headers": [
+    "origin",
+    "content-type",
+    "accept",
+    "accept-language",
+    "if-none-match",
+    "if-modified-since",
+    "user-agent",
+    "x-requested-with"
+  ],
+  "limits": {
+    "header_count_max": 24,
+    "header_value_bytes_max": 8192,
+    "header_name_bytes_max": 64,
+    "path_bytes_max": 4096,
+    "query_bytes_max": 4096,
+    "envelope_bytes_max": 1463637,
+    "request_body_bytes_max": 1048576,
+    "response_body_bytes_max": 8388608
+  },
+  "platform_headers": {
+    "proof_request": "X-Pico-App-Proof",
+    "app_version_response": "X-PicoAide-App-Version",
+    "request_id_response": "X-Request-Id"
+  }
+}

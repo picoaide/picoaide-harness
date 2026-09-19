@@ -30,12 +30,12 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
+	"github.com/picoaide/picoaide/internal/wasmapp/appproof"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
 	"github.com/picoaide/picoaide/internal/wasmapp/events"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/readyz"
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
-	"github.com/picoaide/picoaide/internal/wasmapp/session"
 )
 
 // ---------------------------------------------------------------------------
@@ -77,26 +77,9 @@ type Options struct {
 	// 就得先往测试库里灌 1 GiB 的制品字节。生产装配不要设置它。
 	ArtifactUsed func(ctx context.Context, username string) (int64, error)
 
-	// BaseDomain 返回**当前**应用基域（`<app_id>.<BaseDomain>`）。与
-	// internal/wasmapp/session 的同名字段**同源同语义**（同一份配置：session 用它拼
-	// 换票回跳，本包用它拼目录/发布响应里的入口链接）。空 = 未启用应用子域 ⇒
-	// 入口链接回落为按请求 Host 推导。
-	//
-	// 函数而不是字符串：管理端可在运行期改基域（2026-09-18 用户要求）。
-	BaseDomain func() string
-
-	// BaseDomainSource 返回当前基域的**来源**（"setting" / "env" / "none"），
-	// 只给控制台展示用（让管理员一眼看出"这个值是控制台配的还是部署时写死的"）。
-	BaseDomainSource func() string
-
-	// ApplyBaseDomain 由 cmd/server 注入：校验 + 落库 + 同步运行期值，一步完成。
-	//
-	// 为什么放在注入侧而不是本包：启用子域要跑的两条 fail-closed 自检
-	// （R35 可信代理必须显式配置、§4.3 内存四笔账）都住在 cmd/server 的装配代码里，
-	// 本包只负责"发请求 → 拿结果 → 写审计"。返回非 nil 表示**没有生效**
-	// （校验失败/自检不过），错误原样进 §8 信封回给控制台 —— 用 *apperr.Error
-	// 而不是裸 error：控制台要拿到 code/details/hints 才能提示"还差什么条件"。
-	ApplyBaseDomain func(baseDomain string) *apperr.Error
+	// ⚠️ 应用基域（`wasm.apps_base_domain`）与它带来的三件配置面
+	// （`BaseDomain` / `BaseDomainSource` / `ApplyBaseDomain`）已随 W4 删除：
+	// 应用不再有对外主机名，也就没有"基域"这个配置项（总纲 §8.4）。
 	// CompileCacheRoot 覆盖**编译缓存根目录**（缺省 = DataRoot：缓存落在
 	// `<DataRoot>/_compile-cache`）。
 	//
@@ -122,9 +105,24 @@ type Options struct {
 	// 任何一个为 nil ⇒ 对应能力不可用（GET/PUT 会如实报错，不静默给假值）。
 	Limits          func() applimits.Limits
 	LimitsSource    func() string
+	LimitsProfile   func() string
 	LimitsApply     func(raw string) ([]string, *apperr.Error)
 	LimitsRestart   func() []string
 	MemoryAvailable func() int64
+
+	// EffectiveMemoryPages 返回**运行时真正生效**的单实例线性内存页数（0/nil = 未注入）。
+	//
+	// 为什么必须与 Limits 分开（R2-DG-2）：`Limits` 是"控制台**已保存**的值"，而
+	// 单实例内存上限属于 wazero RuntimeConfig —— **改了要重启才生效**。在"刚保存、还没
+	// 重启"的窗口里两者不同（实测差 96 MiB：已保存 32 MiB / 实际按 128 MiB 跑）。
+	//
+	// 分工（必须照此使用，否则旧缺陷会以另一种形态回来）：
+	//   - 诊断 hints 与发布干跑：问"这次运行到底按多少上限跑" ⇒ 必须用本钩子（生效值）；
+	//   - 控制台 limits 视图与"待重启"判定：问"你配了多少" ⇒ 必须用 Limits（已保存值）。
+	//
+	// 生产装配注入 `appserver.Server.InstanceMemoryPages`（它优先问运行时，
+	// 见 limits_apply.go 的来源纪律）；nil ⇒ 回落 Limits（装配未接线时的兼容路径）。
+	EffectiveMemoryPages func() uint32
 
 	// OnAppEvict 是"立即释放该应用的进程内驻留"的钩子（可选）。
 	//
@@ -133,6 +131,54 @@ type Options struct {
 	// （2026-09-18 用户要求"更快释放"）。生产装配注入 appserver.Server.EvictApp；
 	// 不注入 ⇒ 什么都不做（内存由 TTL 兜底），因此本包不依赖 appserver。
 	OnAppEvict func(appID string)
+
+	// ServeClientRequest 是**客户端专属访问模型**的执行入口（决策
+	// docs/decisions/2026-09-19-wasm-client-internal-origin.md）：
+	// 桌面客户端本机代理把应用请求送进平台，身份由客户端注入。
+	//
+	// 生产装配注入 `appserver.Server.ServeClientRequest`（它内部走与旧应用子域
+	// 路径**共用**的 serveApp 管线）。与 OnAppEvict 同理：本包不 import appserver，
+	// 依赖方向保持"api 只知道一个函数签名"。
+	//
+	// nil = 未装配 ⇒ 入口回 INTERNAL（fail-closed，绝不静默按匿名放行）。
+	//
+	// sessionKey 是**会话键**（契约 §8.2 / R1-SRV-5）：调用方显式传参
+	// （= `serverstore.TokenHash(bearer)[:32]`），不走 context —— 空键会让
+	// "在手 AI 令牌"从按（用户,会话）降级为同用户共用一把。
+	ServeClientRequest func(w http.ResponseWriter, r *http.Request, appID string, user *serverstore.User, sessionKey string)
+
+	// AppOrigin 是**客户端专属模型**下应用自身源的构造函数（app_id ⇒ origin）。
+	//
+	// 生产装配注入 `appserver.Server.AppOrigin`（scheme 来自渠道包
+	// `desktop.app_origin_scheme`，见 channel.AppOriginScheme）。nil ⇒ 回落
+	// `appserver.PicoaideAppOrigin`（官方 scheme，未注入时的等价行为）。
+	//
+	// 为什么是函数而不是常量（R2I-9）：`api` 层拿不到 `*Server`，而服务端认的
+	// scheme 与客户端注册的 scheme 必须同源；把构造函数注入进来是唯一能同时满足
+	// "渠道参数化"与"依赖方向 api 不认识 appserver 运行期状态"的形态。
+	//
+	// 用途只有两处：信封 `host` 的规范形态校验（clientreq.go）与错误 hint 里的
+	// 示例值 —— 绝不用它反解调用方身份（app_id 永远来自路由路径）。
+	AppOrigin func(appID string) string
+
+	// AppScheme 是应用 origin 的 scheme（= AppOrigin 的前缀）。信封合成请求的
+	// `URL.Scheme` 用它（clientreq.go 的 u.Scheme）。空 ⇒ `appserver.ClientScheme`。
+	AppScheme string
+
+	// Proof 是客户端持有性证明（契约 §20/§23.1）的服务端实现。
+	//
+	// nil = 未装配 ⇒ 两个应用端点（request/open）一律 fail-closed 回
+	// 401 `proof_required`（绝不"因为没装就放行"）。
+	Proof *appproof.Service
+
+	// Opens 是"记一次打开"（F16，契约 §5.1b/§8.9）的写入出口。
+	//
+	// **best-effort**：返回错误只 warn，不影响 open 端点的响应（§8.9
+	// 「计数失败不影响打开」）。nil = 未装配 ⇒ 不计数（只 warn）。
+	//
+	// 为什么返回 error 而不是让实现自己吞掉：调用方必须能记那条 warn
+	// （"计数失败"要看得见，否则运营数据静默缺失会被当成"没人用"）。
+	Opens func(ctx context.Context, appID string, userID int64, clientVersion string) error
 }
 
 // Handlers 是操作面 handler 集合（§8 全表）。
@@ -149,6 +195,18 @@ type Handlers struct {
 	Diagnostics  gin.HandlerFunc // GET  /apps/wasm/:app_id/diagnostics
 	Schema       gin.HandlerFunc // GET  /apps/wasm/:app_id/schema
 	Catalog      gin.HandlerFunc // GET  /apps/wasm/catalog
+	// MyReleases 是**发布者本人的版本历史**（含被拒理由）—— R1-pm-3 的作者侧闭环：
+	// 审核开启后这是作者唯一能拿到"结论 + 理由"的出口（非发布者一律 404）。
+	MyReleases gin.HandlerFunc // GET  /apps/wasm/:app_id/releases
+
+	// ---- 客户端专属访问模型（2026-09-19）：应用请求的唯一执行入口 ----
+	//
+	// 客户端注册的协议 handler 把 `picoaide-app://<app_id>/…` 上的请求包成信封
+	// 送进来，平台用**与旧应用子域路径共用**的管线执行，再把响应编码回去。
+	// 认证由路由中间件强制（BearerAuth 必需）—— **没有匿名入口**（契约 §4.1/§4.4）。
+	ClientRequest gin.HandlerFunc // POST /apps/wasm/:app_id/request （员工 bearer + app-proof，唯一入口）
+	AppProofIssue gin.HandlerFunc // POST /apps/wasm/proof（员工 bearer；签发持有性证明，§20.1/§23.1）
+	OpenApp       gin.HandlerFunc // POST /apps/wasm/:app_id/open（员工 bearer + app-proof；F16）
 
 	// ---- 客户端面 /api/client/v2/apps/wasm/uploads（§4.2 分片上传）----
 	//
@@ -175,8 +233,19 @@ type Handlers struct {
 	AdminTransferOwner gin.HandlerFunc // PUT    /:app_id/owner
 	AdminFreeze        gin.HandlerFunc // POST   /:app_id/freeze
 	AdminReview        gin.HandlerFunc // PUT    /review  (R17 审核开关)
-	AdminBaseDomainGet gin.HandlerFunc // GET    /domain   (应用泛域名配置，2026-09-18)
-	AdminBaseDomainPut gin.HandlerFunc // PUT    /domain
+	// 审核队列（P0-1）：待审清单 + 通过/拒绝。R17 的开关一旦打开，新版本就停在
+	// pending —— 没有这三条，开关就等于"全组织再也发不出新版本"。
+	AdminReleases       gin.HandlerFunc // GET  /:app_id/releases?status=pending|approved|rejected|all
+	AdminApproveRelease gin.HandlerFunc // POST /:app_id/releases/:version/approve
+	AdminRejectRelease  gin.HandlerFunc // POST /:app_id/releases/:version/reject（可选 body {"reason":"..."}）
+	// 管理面诊断与运行时水位（2026-09-19，P1-9/P2-4）：
+	//   diagnostics —— 同一份 diag 数据，出口从"发布者令牌"扩到管理会话；
+	//   runtime     —— 平台级只读水位（编译/执行/事件/磁盘 + 尚未接线的缺口清单）。
+	AdminDiagnostics  gin.HandlerFunc // GET /:app_id/diagnostics（capability:read）
+	AdminRuntime      gin.HandlerFunc // GET /runtime（capability:read）
+	AdminAppOpens     gin.HandlerFunc // GET /:app_id/opens（capability:read；F16 打开计数，§8.9）
+	AdminOpensSummary gin.HandlerFunc // GET /opens/summary（capability:read；W5 C2 看板概览）
+	AdminAppAIUsage   gin.HandlerFunc // GET /:app_id/ai-usage（capability:read；W5 C4 应用维度 AI 用量）
 }
 
 // SettingReviewRequired 是发布审核开关的 settings 键（R17）。
@@ -199,6 +268,10 @@ func NewHandlers(opt Options) *Handlers {
 	h.Diagnostics = h.diagnostics
 	h.Schema = h.schema
 	h.Catalog = h.catalog
+	h.MyReleases = h.myReleases
+	h.ClientRequest = h.clientRequest
+	h.AppProofIssue = h.appProofIssue
+	h.OpenApp = h.openApp
 	h.UploadCreate = h.uploadCreate
 	h.UploadChunk = h.uploadChunk
 	h.UploadStatus = h.uploadStatus
@@ -210,10 +283,16 @@ func NewHandlers(opt Options) *Handlers {
 	h.AdminTransferOwner = h.adminTransferOwner
 	h.AdminFreeze = h.adminFreeze
 	h.AdminReview = h.adminReview
-	h.AdminBaseDomainGet = h.adminBaseDomainGet
-	h.AdminBaseDomainPut = h.adminBaseDomainPut
+	h.AdminReleases = h.adminReleases
+	h.AdminApproveRelease = h.adminApproveRelease
+	h.AdminRejectRelease = h.adminRejectRelease
 	h.AdminLimitsGet = h.adminLimitsGet
 	h.AdminLimitsPut = h.adminLimitsPut
+	h.AdminDiagnostics = h.adminDiagnostics
+	h.AdminRuntime = h.adminRuntime
+	h.AdminAppOpens = h.adminAppOpens
+	h.AdminOpensSummary = h.adminOpensSummary
+	h.AdminAppAIUsage = h.adminAppAIUsage
 	return h
 }
 
@@ -378,6 +457,40 @@ func auditDetail(appID, title, change string) string {
 	return d
 }
 
+// auditTitleOf 返回审计明细里可以当**证据**用的应用标题（审计第三轮 B 区，2026-09-19）。
+//
+// 为什么不能直接写 `app.Title`：首版待审期间 apps.title 是 **app_id 占位**（publish 的
+// E1 刻意不写未审核标题），把它写进明细的「」里 = 审计把"这个应用叫 brand-new-tool"
+// 记成事实，而它从头到尾只是占位。审计记录的是"当时发生了什么"，不能留错证据。
+//
+// 口径（真实标题 = **生效版本**的标题；没有生效版本就没有真实标题）：
+//   - `current_release_id > 0` 且投影标题非空 ⇒ 标题原文（它就是生效版本的投影）；
+//   - 没有生效版本（首版待审 / 从未通过审核）⇒ `app_id（首版待审，暂无生效标题）`：
+//     显式标注"这不是真实标题"，而不是伪造一个旧标题；
+//   - 有生效版本但投影标题为空（0071 之前的历史行）⇒ `app_id（生效版本标题为空）`，
+//     同样不让空串被读成"标题就是空的"。
+//
+// 与 adminList/导出面的关系：管理端列表仍**原样**下发 apps.title（占位在那里是"待审"
+// 的可见信号，前端卡片另外渲染 rel.title 真值）；导出面用 title_source 标注来源
+// （read.go 的 export）—— 三个面各说各的形态，但都不把占位当真实标题。
+func auditTitleOf(app *serverstore.WasmApp) string {
+	if app == nil {
+		return ""
+	}
+	title := strings.TrimSpace(app.Title)
+	if app.CurrentReleaseID <= 0 {
+		base := title
+		if base == "" {
+			base = app.AppID
+		}
+		return base + "（首版待审，暂无生效标题）"
+	}
+	if title == "" {
+		return app.AppID + "（生效版本标题为空）"
+	}
+	return title
+}
+
 // bindJSONLimited 读取并解析请求体，**自己**套 http.MaxBytesReader（§4.2/R21）。
 //
 // 两条顺序是硬要求（§4.2 原话：「白名单只是豁免 ⇒ handler 内必须自己再套；
@@ -525,32 +638,6 @@ func (h *Handlers) creationAppID(c *gin.Context, bodyAppID string) (string, *app
 // validateAppID 用 registry 规则校验 app_id（§4.1 / §10.5 第 52/53/53b 项）。
 func (h *Handlers) validateAppID(appID string) *apperr.Error {
 	return registry.ValidateAppID(appID, h.opt.AppIDExtraReserved)
-}
-
-// appOrigin 返回应用的入口链接（`scheme://<app_id>.<基域>`）。
-//
-// 基域未配置时按请求 Host 推导（本包只把它当展示字段：不参与任何鉴权判定）。
-// 两个都拿不到就返回空串（调用方据此省略字段）。
-func (h *Handlers) appOrigin(c *gin.Context, appID string) string {
-	// 基域解析规则只允许一份：复用 session.ParseBaseDomain（同一份部署配置的
-	// 两个消费者必须对"带不带 scheme / 大小写 / 尾点"给出相同结论）。
-	raw := ""
-	if h.opt.BaseDomain != nil {
-		raw = h.opt.BaseDomain()
-	}
-	if scheme, host := session.ParseBaseDomain(raw); scheme != "" && host != "" && appID != "" {
-		return scheme + "://" + appID + "." + host
-	}
-	host := strings.TrimSpace(c.Request.Host)
-	if host == "" {
-		return ""
-	}
-	scheme := "https"
-	if c.Request.TLS == nil && !strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") {
-		// 明文直达（本地/内网部署）时不要伪造 https —— 链接点不开比"不安全"更糟。
-		scheme = "http"
-	}
-	return scheme + "://" + appID + "." + host
 }
 
 // reviewRequired 读审核开关（R17，默认关）。

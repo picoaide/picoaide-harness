@@ -18,10 +18,15 @@
 //     而 `sqlite.Limit` 只接受 `*sql.Conn` ⇒ **钩子里设不了 SQLITE_LIMIT_\***，只能设
 //     `PRAGMA max_page_count`。审计 P1-3 因此确认"任何绕过 hardenConnLocked 的新连接
 //     都失去 ATTACH 否决"。本包选择的闭合方式是**四层**（见 connectionGuard 段落）：
-//     L1 两条持有连接显式加固 + 金丝雀；L2 池容量恒为 2 且两条被持有（第三条拿不到）；
+//     L1 全部 1+N 条持有连接逐条显式加固 + 金丝雀（只读连接**每一条**都要单独跑，
+//     只加固第一条就等于给后面几条留了默认 ATTACHED=10）；
+//     L2 池容量恒为 1+N 且 1+N 条全部被持有（第 2+N 条拿不到）；
 //     L3 进程级连接钩子对**未持一次性令牌**的应用库连接 fail-closed 拒绝（只放行
 //     引擎层只读的平台自省连接）；L4 每条语句执行前复检"即将使用的那条连接"仍带全套
 //     限额（读回 max_page_count + LIMIT_ATTACHED），不成立即报错而不是带着默认限额跑。
+//
+//     由此推出一条硬约束：**只读连接数只能在 connectLocked 的一次性令牌窗口内一次建满**
+//     （窗口关闭后新建的连接开不出来）⇒ 不做"按负载弹性扩缩连接"。
 //
 //  3. **语句在进入驱动之前就被闸门拦下**（sqlgate.go）：单语句 + 语句种类白名单 +
 //     保留列（含 SQLite 别名 rowid/_rowid_/oid）拒绝；`ATTACH`/`VACUUM INTO` 的真正闸门是
@@ -29,14 +34,33 @@
 //
 // 连接布局（§4.5「连接级只读分层」）：
 //
-//	ro  = PRAGMA query_only(1)  → 只跑 db.query 的 SELECT
-//	rw  = 读写                    → db.exec / db.define / db.tx / 宿主内部 PRAGMA
+//	rw  = 读写                       → db.exec / db.define / db.tx / 宿主内部 PRAGMA
+//	ros = PRAGMA query_only(1) × N   → 只跑 db.query 的 SELECT（N = limits.AppDBReaders）
 //
-// 两条连接在 Open 时各取一条并全程持有（`db.SetMaxOpenConns(2)`，池子里没有第三条）。
-// 之所以不是「一应用一连接」的字面实现：§4.5 明确要求 SELECT 与写走**分层**连接，
-// 而「不复用」指的是不复用**驱动/库实例**（跨应用绝不共享），不是禁止同库两条连接。
+// 1+N 条连接在 Open（以及每次按需重连）时**一次建满并全程持有**
+// （`db.SetMaxOpenConns(1+N)`，池子里没有第 2+N 条）。之所以不是「一应用一连接」的字面
+// 实现：§4.5 明确要求 SELECT 与写走**分层**连接，而「不复用」指的是不复用**驱动/库实例**
+// （跨应用绝不共享），不是禁止同库多条连接。
 //
-// Close 语义：Close 释放两条连接与池子且**幂等**；之后再调用任何 db.\* 会按需重连
+// 并发语义（2026-09-19，"多读者并发 + 单写者串行"）：
+//
+//   - **库开 WAL**：connectLocked 断言 `PRAGMA journal_mode` 读回 == "wal"（只判 err==nil
+//     会漏掉"返回 delete 却不报错"的静默降级）。WAL 下读不阻塞写、写不阻塞读 —— 这正是
+//     分层连接想要的形态。每条连接另设 busy_timeout（limits.AppDBBusyTimeout，必须 <
+//     单语句 5 s 预算）吸收 WAL 检查点与写事务的正常争用。
+//   - **读**：从只读槽 roSlots 取一条空闲连接，**不持锁执行**（stateMu 只在"判定 + 取槽"
+//     的瞬间持有，语句执行期间没有任何锁）。槽位取不到时**阻塞等待**（受调用方 ctx 约束），
+//     而不是退化成串行：退化路径要拿 writeMu，会让一次高并发读被写者的 5 s 语句拖住。
+//   - **写**：writeMu 独占（Exec / Define / Begin / Commit / Rollback / 超时回滚），
+//     同一时刻只有一条语句能碰 rw ⇒ 单写者语义与改造前完全一致。
+//   - **事务内读**走 rw（必须看到未提交的写），此时它与写者共用 writeMu。
+//
+// 关连接的不变式（破坏它就是 use-after-close）：
+// **任何会走 closeLocked() 的路径都必须先独占全部只读槽（排空在途读者）**。
+// 落地点是 closeLocked 里对 roSlots 的"排空 N 次 + 关闭"；readers 在途的凭据就是
+// "手里拿着一个槽"。写者靠 writeMu 与关连接路径互斥，所以没有第二条排空协议。
+//
+// Close 语义：Close 释放全部连接与池子且**幂等**；之后再调用任何 db.\* 会按需重连
 // （重连同样走全套限额 + 金丝雀，fail-closed）。这是对 capapi.DB 注释
 // （「每请求结束后由运行时调用」）与 §4.5「一应用一连接」两种生命周期的兼容取舍——
 // 每请求 Close 不会把对象变成不可用，但每次重连都要重付一次加固与金丝雀的代价，
@@ -120,27 +144,94 @@ var (
 
 // Options 是 Open 的入参。
 type Options struct {
-	// DataRoot 是平台数据根 `<data_root>`（库落在 <DataRoot>/apps/<AppID>/app.db）。
+	// DataRoot 是平台数据根 `<data_root>`（库落在 <DataRoot>/AppsDirName/<AppID>/app.db）。
 	DataRoot string
 	// AppID 是应用标识（域名标签规则，limits.AppIDPattern）。
 	AppID string
+	// Readers 是只读连接数（0 = limits.AppDBReaders；上限 limits.AppDBReadersMax）。
+	//
+	// 为什么是"建库时的快照"而不是可热改：只读连接必须在 connectLocked 的**一次性令牌
+	// 窗口**内一次建满（窗口关闭后新建的连接会被连接钩子 fail-closed 拒绝，见
+	// connectionGuard）⇒ 只读连接数不可能按负载弹性扩缩。改这个值的语义是
+	// "下一次建连生效"（句柄池的空闲回收 / 污染回收都会重建连接）。
+	Readers int
 }
 
-// DB 是 capapi.DB 的实现。字段只在 d.mu 之外读写的部分用原子量。
+// normalizeReaders 把注入的只读连接数钳到 [1, limits.AppDBReadersMax]（0 = 默认）。
+func normalizeReaders(n int) int {
+	if n <= 0 {
+		n = limits.AppDBReaders
+	}
+	if n > limits.AppDBReadersMax {
+		n = limits.AppDBReadersMax
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// newReadSlots 建一个容量 n 的只读槽通道，并**预填 n 个空槽（nil）**。
+//
+// 为什么预填空槽而不是"建连时再填"：槽位数量守恒（通道内 + 在途 = n）是"关连接路径
+// 靠收齐 n 个槽来排空在途读者"这条不变式的前提。连接还没建好（或刚被关闭）时，
+// 通道里必须是 n 个**空槽**占位 —— 否则第一次建连失败时 closeLocked 的 drainReadSlots
+// 会在"这一代根本没有连接"的状态下永远等下去（实测就是这么死锁的）。
+// 空槽的语义是"这一代没有可用连接"：读者取到它必须**立刻放回**再改走串行路径。
+func newReadSlots(n int) chan *sql.Conn {
+	ch := make(chan *sql.Conn, n)
+	for i := 0; i < n; i++ {
+		ch <- nil
+	}
+	return ch
+}
+
+// DB 是 capapi.DB 的实现。
+//
+// 锁的分工（两把锁的获取顺序恒为 writeMu → stateMu，绝不反向）：
+//
+//	stateMu —— 短临界区：连接/事务状态的判定与字段读写（ros/rw/sqlDB/closed/tx/
+//	           poisoned/deadTx/genClosed/nextTxID）。**绝不在持锁期间执行语句**。
+//	writeMu —— 写者独占：写原语（exec/define/tx）与**所有会关连接/重建连接的路径**
+//	           （Close / 污染恢复 / 按需重连）都持它。读者在正常路径上不碰它。
+//
+// 计数类字段（rows/bytes/tables）用原子量：Stats 在请求路径上被调用，不能去抢锁。
 type DB struct {
 	appID string
 	dir   string
 	path  string
 
-	// maxPageCount / budget 在 Open 时从默认值快照，保证同一对象的加固参数稳定。
+	// maxPageCount / budget / readers 在 Open 时从默认值快照，保证同一对象的加固参数稳定。
 	maxPageCount int
 	budget       time.Duration
+	readers      int
 
-	mu     sync.Mutex // 保护下面全部字段与「一次一条语句」的串行化
-	sqlDB  *sql.DB
-	ro     *sql.Conn // query_only(1)：只跑 SELECT
-	rw     *sql.Conn // 读写：exec / define / tx
-	closed bool
+	stateMu sync.Mutex
+	sqlDB   *sql.DB
+	rw      *sql.Conn // 读写：exec / define / tx
+	// ros 是这一代**全部**只读连接（元素与 roSlots 的内容一一对应，仅用于诊断/关连接）。
+	ros []*sql.Conn
+	// roSlots 是空闲只读连接的槽位（容量 = readers，由 connectLocked 一次填满）。
+	//
+	// 槽位同时是"读者在途"的凭据：关连接路径必须先把 N 个槽全部收回（见 closeLocked），
+	// 才能保证"拿到全部槽时没有任何读者正在执行语句"。
+	roSlots chan *sql.Conn
+	// genClosed 在**这一代连接被关闭**时关闭（读者在 select 里等它 ⇒ 从"等槽"里醒过来
+	// 改走串行路径，而不是永远等一个不会回来的槽）。重连时换成新的 channel。
+	genClosed chan struct{}
+	closed    bool
+	// retired 是**终态**：句柄被池淘汰（或服务端关停）之后置位，此后**不再重连**。
+	//
+	// 为什么需要它（审计 R1-rt-5）：Close 的语义是"之后按需重连"，而句柄池把
+	// `delete(handles) + Close` 当终态。被放弃的宿主调用 goroutine（runtime.callHost 的
+	// 预算到点即返回，Dispatch 仍在跑）能在 Close **之后**才走到 appdb ⇒ ensureConnLocked
+	// 建一组新连接 ⇒ 这一代 1+N 条连接永久无人回收（评审实测 Close 后 fd 0→7），
+	// 而池的 size() 只看得到 1，运维面完全不可见。
+	//
+	// 语义：retired 一旦置位**永不清除**；此后任何 db.* 调用返回一条明确错误
+	// （见 retiredError），绝不静默复活。重连能力只属于"会话内恢复"
+	// （污染回收 / 事务超时），与"句柄已被回收"是两件事。
+	retired bool
 
 	tx       *txSession
 	nextTxID int64
@@ -170,7 +261,12 @@ type DB struct {
 	// 写/建表/新事务继续返回同一条超时错误，直到会话边界（Close / 句柄池回收）清掉。
 	deadTx *apperr.Error
 
-	cachedTables int
+	// writeMu 是写者独占锁。见类型注释的锁分工。
+	writeMu sync.Mutex
+
+	// tables 是应用表数（db.define 与建连时更新；Stats 只读缓存，不查库 —— 它在
+	// 请求路径上被调用，不能在写事务 / 慢查询后面排队）。
+	tables atomic.Int64
 
 	rows  atomic.Int64
 	bytes atomic.Int64
@@ -219,6 +315,9 @@ func Open(ctx context.Context, opt Options) (*DB, error) {
 		path:         path,
 		maxPageCount: defaultMaxPageCount,
 		budget:       defaultStmtBudget,
+		readers:      normalizeReaders(opt.Readers),
+		roSlots:      newReadSlots(normalizeReaders(opt.Readers)),
+		genClosed:    make(chan struct{}),
 	}
 	if err := d.connectLocked(ctx); err != nil {
 		_ = d.closeLocked()
@@ -227,15 +326,25 @@ func Open(ctx context.Context, opt Options) (*DB, error) {
 	return d, nil
 }
 
-// connectLocked 建立两条持有连接并逐条加固。调用方必须持有 d.mu（或处于构造期）。
+// connectLocked 建立 1 条读写 + N 条只读连接，逐条加固，并把库切到 WAL。
+// 调用方必须持有 writeMu（或处于构造期）。
+//
+// 顺序是有讲究的（WAL 是**库级持久**设置，而且只读连接上改它会 SQLITE_READONLY）：
+//
+//  1. 建 sql.DB（池容量 = 1+N）与**读写连接**；
+//  2. 在读写连接上先设 busy_timeout（否则一次瞬时锁争用就会让下一步的 journal_mode
+//     切换拿到 SQLITE_BUSY），再 `PRAGMA journal_mode=WAL` 并**断言读回 == "wal"**；
+//  3. 加固读写连接，再建满 N 条只读连接并**逐条**加固（每条都跑 ATTACH/query_only 金丝雀）；
+//  4. 一次性把这一代连接发布到 d 上（stateMu 下），最后把 N 个槽填进 roSlots。
 //
 // 任一步失败都会把半成品连接关掉并让对象保持「已关闭」：绝不留一条没加固的连接，
 // 也绝不在下次重连时漏掉上一次的池子。
 //
 // DSN 带一个**一次性令牌**（本包私有参数，驱动会原样忽略未知参数、但连接钩子能读到）：
-// 令牌只在"本函数正在创建这两条连接"的窗口内有效，函数返回前即回收
+// 令牌只在"本函数正在创建这 1+N 条连接"的窗口内有效，函数返回前即回收
 // ⇒ 任何**后来**用同一个 DSN（哪怕是本条 DSN 字符串）新建的连接都会被钩子 fail-closed
 // 拒绝。这是 FIX-12 的 L3：把"新连接没加固"从"静默带默认限额跑"变成"根本开不出来"。
+// 也正是这条约束决定了只读连接数只能在**这里**一次建满（不能弹性扩缩）。
 func (d *DB) connectLocked(ctx context.Context) (err error) {
 	defer func() {
 		if err != nil {
@@ -247,53 +356,140 @@ func (d *DB) connectLocked(ctx context.Context) (err error) {
 		return apperr.New(apperr.CodeInternal, "appdb: 生成连接令牌失败").WithCause(terr)
 	}
 	allowConnToken(token)
-	// 一次性：本函数返回时（两条连接都已建好）立刻回收。
+	// 一次性：本函数返回时（1+N 条连接都已建好）立刻回收。
 	defer revokeConnToken(token)
 
 	sqlDB, err := sql.Open("sqlite", appDBDSN(d.path, token))
 	if err != nil {
 		return apperr.New(apperr.CodeInternal, "appdb: 打开应用数据库失败").WithCause(err)
 	}
-	// 池子恰好两条：本对象只会持有 ro/rw 两条连接。任何误用 db.QueryContext 的代码
-	// 会因为拿不到连接而立即暴露（而不是静默走一条没加固的连接）。
-	sqlDB.SetMaxOpenConns(2)
-	sqlDB.SetMaxIdleConns(2)
+	// 池子恰好 1+N 条：本对象只会持有 rw 一条 + readers 条只读。任何误用
+	// db.QueryContext 的代码会因为拿不到连接而立即暴露（而不是静默走一条没加固的连接）。
+	sqlDB.SetMaxOpenConns(1 + d.readers)
+	sqlDB.SetMaxIdleConns(1 + d.readers)
 	sqlDB.SetConnMaxLifetime(0)
 	sqlDB.SetConnMaxIdleTime(0)
 
-	d.sqlDB = sqlDB
-	d.ro, err = sqlDB.Conn(ctx)
+	// (1) 读写连接先建：WAL 与 busy_timeout 都在它上面先落地（这两条都是"库级/连接级
+	// 且必须在只读连接之前"的设置）。
+	rw, err := sqlDB.Conn(ctx)
 	if err != nil {
-		return apperr.New(apperr.CodeInternal, "appdb: 获取只读连接失败").WithCause(err)
-	}
-	d.rw, err = sqlDB.Conn(ctx)
-	if err != nil {
+		_ = sqlDB.Close()
 		return apperr.New(apperr.CodeInternal, "appdb: 获取读写连接失败").WithCause(err)
 	}
-	// 两条连接各设一遍限额（连接级、不持久，§15.1 第 4 条）。
-	if err := d.hardenConnLocked(ctx, d.ro, true); err != nil {
+	if _, err := rw.ExecContext(ctx,
+		fmt.Sprintf("PRAGMA busy_timeout = %d", limits.AppDBBusyTimeout.Milliseconds())); err != nil {
+		_ = rw.Close()
+		_ = sqlDB.Close()
+		return apperr.New(apperr.CodeInternal, "appdb: 设置 busy_timeout 失败").WithCause(err)
+	}
+	if err := enableWALLocked(ctx, rw); err != nil {
+		_ = rw.Close()
+		_ = sqlDB.Close()
 		return err
 	}
-	if err := d.hardenConnLocked(ctx, d.rw, false); err != nil {
+	// (2) 逐条加固（rw 先，只读连接随后；hardenConnLocked 里还会再设一遍 busy_timeout，
+	// 因为它是连接级参数，对每条新连接都必须在场）。
+	if err := d.hardenConnLocked(ctx, rw, false); err != nil {
+		_ = rw.Close()
+		_ = sqlDB.Close()
 		return err
 	}
-	if n, cerr := d.countTablesLocked(ctx); cerr == nil {
-		d.cachedTables = n
+	ros := make([]*sql.Conn, 0, d.readers)
+	for i := 0; i < d.readers; i++ {
+		conn, cerr := sqlDB.Conn(ctx)
+		if cerr != nil {
+			for _, c := range ros {
+				_ = c.Close()
+			}
+			_ = rw.Close()
+			_ = sqlDB.Close()
+			return apperr.Newf(apperr.CodeInternal, "appdb: 获取只读连接失败（第 %d/%d 条）", i+1, d.readers).
+				WithCause(cerr)
+		}
+		// 每条只读连接都要单独跑全套加固 + 金丝雀：漏一条就等于给那一条留下
+		// 驱动默认的 LIMIT_ATTACHED=10（§15.1 第 4/5 条，实测依据见包注释）。
+		if herr := d.hardenConnLocked(ctx, conn, true); herr != nil {
+			_ = conn.Close()
+			for _, c := range ros {
+				_ = c.Close()
+			}
+			_ = rw.Close()
+			_ = sqlDB.Close()
+			return herr
+		}
+		ros = append(ros, conn)
+	}
+	if n, cerr := d.countTablesOn(ctx, rw); cerr == nil {
+		d.tables.Store(int64(n))
+	}
+
+	// (3) 防御性兜底：上一代若留下未排空的槽（不应发生：closeLocked 已排空），
+	// 这里必须清掉，否则下面的填充会超容阻塞。
+	for {
+		select {
+		case c := <-d.roSlots:
+			if c != nil {
+				_ = c.Close()
+			}
+			continue
+		default:
+		}
+		break
+	}
+	// (4) 一次性发布这一代连接：关连接路径持同一把 writeMu，读者在 stateMu 下判定
+	// ready 之后才可能取槽 ⇒ 这里不会与"半建好的一代"交错。
+	d.stateMu.Lock()
+	d.sqlDB = sqlDB
+	d.rw = rw
+	d.ros = ros
+	d.genClosed = make(chan struct{})
+	d.closed = false
+	d.stateMu.Unlock()
+	for _, c := range ros {
+		d.roSlots <- c
 	}
 	if err = d.chmodDBFile(); err != nil {
 		return err
 	}
-	d.closed = false
 	return nil
 }
 
-// chmodDBFile 把库文件权限收紧到 0600（文件在 sql.Open 后即已创建）。
+// enableWALLocked 把库切到 WAL（库级持久设置）并**断言读回字符串 == "wal"**。
+//
+// 为什么必须断言读回值：`PRAGMA journal_mode=WAL` 在库所在文件系统不支持 WAL
+// （例如某些网络文件系统 / 共享内存不可用）时会**静默返回 delete 而 err == nil**——
+// 只判 err 会让"以为开了 WAL"变成一个永不报警的假设，而多读者并发正是建立在 WAL 上
+// （delete 日志下读者与写者互斥，并发读会退化成 SQLITE_BUSY）。
+// 因此这里 fail-closed：宁可不提供服务，也不要带着"其实是 delete 日志"的库跑并发。
+//
+// 该 PRAGMA 必须在**任何 query_only 连接存在之前**执行：只读连接上改 journal_mode
+// 会直接 SQLITE_READONLY，所以它在 connectLocked 里排在"建只读连接"之前。
+func enableWALLocked(ctx context.Context, conn *sql.Conn) error {
+	var mode string
+	if err := conn.QueryRowContext(ctx, "PRAGMA journal_mode = WAL").Scan(&mode); err != nil {
+		return apperr.New(apperr.CodeInternal, "appdb: 开启 WAL 失败").WithCause(err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(mode), "wal") {
+		return apperr.Newf(apperr.CodeInternal, "appdb: 开启 WAL 失败（journal_mode 读回 %q）", mode).
+			WithDetail("want", "wal").
+			WithDetail("got", mode).
+			WithHint("WAL 是多读者并发的前提；库所在文件系统不支持 WAL 时平台拒绝提供服务")
+	}
+	return nil
+}
+
+// chmodDBFile 把库文件与 WAL sidecar 的权限收紧到 0600（文件在 sql.Open 后即已创建）。
+//
+// `-wal` / `-shm` 与主库同口径：它们是**应用数据**的一部分（WAL 里可能有尚未检查点的
+// 已提交事务），目录虽已是 0700，但主库单独收紧了 0600 而 sidecar 只靠 umask
+// 就会在"运维放宽目录权限"时把数据暴露出去。文件不存在时跳过（WAL 由连接创建，
+// 干净关闭后 SQLite 会删掉它们）。
 func (d *DB) chmodDBFile() error {
-	if err := os.Chmod(d.path, dbFileMode); err != nil {
-		if os.IsNotExist(err) {
-			return nil // 延迟创建的库文件：由下一次 Open 或 SQLite 自己创建
+	for _, p := range []string{d.path, d.path + "-wal", d.path + "-shm"} {
+		if err := os.Chmod(p, dbFileMode); err != nil && !os.IsNotExist(err) {
+			return apperr.New(apperr.CodeInternal, "appdb: 设置应用数据库文件权限失败").WithCause(err)
 		}
-		return apperr.New(apperr.CodeInternal, "appdb: 设置应用数据库文件权限失败").WithCause(err)
 	}
 	return nil
 }
@@ -301,9 +497,11 @@ func (d *DB) chmodDBFile() error {
 // appConnCacheKiB 是**每条连接**的 SQLite 页缓存上限（KiB，正数即"多少 KiB"）。
 //
 // 为什么收紧（2026-09-18，"几百个应用 + 小内存机器"目标）：SQLite 默认 cache_size
-// 是 -2000（2 MiB/连接），一个应用库句柄持有 2 条连接（只读 + 读写）⇒ 默认
-// 4 MiB/应用的常驻页缓存；几百个应用被访问过一轮就会叠成几百 MiB。
-// 限到 1 MiB/连接（2 MiB/句柄）对应用查询的影响可忽略（单次查询结果上限 8 MiB，
+// 是 -2000（2 MiB/连接），一个应用库句柄持有 1 + limits.AppDBReaders 条连接
+// （1 写 + N 读）⇒ 默认就是 (1+N) × 2 MiB/应用的常驻页缓存；几百个应用被访问过
+// 一轮就会叠成几百 MiB（甚至上 GiB）。
+// 限到 1 MiB/连接（默认配置下 (1+N) MiB/句柄，见 appserver 的
+// appDBHandleBookkeepingBytes）对应用查询的影响可忽略（单次查询结果上限 8 MiB，
 // 但工作集是几十 KB 级的行集），换来的常驻下降是线性的。
 const appConnCacheKiB = 1024
 
@@ -336,6 +534,9 @@ func ConnCacheKiB() int {
 // 顺序有讲究：先 max_page_count（纯连接参数），再 SQLITE_LIMIT_\*，最后 query_only(1)。
 // 实测确认：query_only 不会拦 ATTACH，所以只读连接上的 ATTACH 金丝雀仍然能验到
 // LIMIT_ATTACHED=0 本身（而不是被只读属性顺带挡住）。
+//
+// 这份清单是**每连接**的（连接级参数不持久）：调用方必须对池里 1+N 条连接**逐条**调用，
+// 漏一条就等于给那一条留下驱动默认值（§15.1 第 4 条）。
 func (d *DB) hardenConnLocked(ctx context.Context, conn *sql.Conn, readonly bool) error {
 	if conn == nil {
 		return apperr.New(apperr.CodeInternal, "appdb: 连接为空")
@@ -343,6 +544,14 @@ func (d *DB) hardenConnLocked(ctx context.Context, conn *sql.Conn, readonly bool
 	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA max_page_count = %d", d.maxPageCount)); err != nil {
 		return apperr.New(apperr.CodeInternal, "appdb: 设置 max_page_count 失败").WithCause(err).
 			WithDetail("max_page_count", d.maxPageCount)
+	}
+	// busy_timeout（连接级、不持久）：WAL 下写者/读者/检查点之间的瞬时争用是常态，
+	// 没有它一次正常争用就会变成应用可见的 database_busy。数值必须 < 单语句预算
+	// （limits.AppDBBusyTimeout 的注释里有完整理由）。
+	if _, err := conn.ExecContext(ctx,
+		fmt.Sprintf("PRAGMA busy_timeout = %d", limits.AppDBBusyTimeout.Milliseconds())); err != nil {
+		return apperr.New(apperr.CodeInternal, "appdb: 设置 busy_timeout 失败").WithCause(err).
+			WithDetail("busy_timeout_ms", limits.AppDBBusyTimeout.Milliseconds())
 	}
 	// 页缓存上限（连接级；负值表示 KiB）。放在 LIMIT 之前：它是纯连接参数，
 	// 不影响后面两条金丝雀的判定。
@@ -431,43 +640,144 @@ func (d *DB) verifyConnLocked(ctx context.Context, conn *sql.Conn, readonly bool
 	return nil
 }
 
-// checkedConnLocked 选出本次要用的连接并做 L4 复检，返回**已确认加固**的连接。
+// ===== 连接选取（读快路径 / 写与退化串行路径）=====
+
+// withReadConn 选出一条"已确认加固"的读连接执行 fn。这是 db.query 的唯一入口路径。
+//
+// 快路径（绝大多数调用）：无事务、未污染、未关闭 ⇒ 从只读槽取一条空闲连接，
+// **不持任何锁执行**（stateMu 只在判定与取槽的瞬间持有）。槽位同时是"读者在途"的凭据：
+// 关连接路径会先把 N 个槽全部收回，才动手关连接（见 closeLocked 的不变式）。
+//
+// 退化路径（保持既有语义的**串行**）：
+//   - 事务内读：必须走读写连接才能看到未提交的写（§5.1 db.tx 语义）；
+//   - 连接被污染 / 已关闭 / 正好落在关连接的窗口里（genClosed 已关）：先按
+//     ensureReadyLocked 的规则恢复连接，再在 writeMu 下执行。
+//
+// 为什么"取不到槽位"选择**阻塞等待**而不是"立刻退化成串行"：退化路径要抢 writeMu，
+// 而写者可能正在跑一条最长 5 s 的语句 —— 那样一次高并发读会被写者拖住。只读槽的
+// 持有者只受自己的单语句 5 s 预算约束，等它更短也更公平；等待本身受调用方 ctx 约束
+// （ctx 到期就落到退化路径，由 stmtContext 立刻报 statement_timeout）。
+func (d *DB) withReadConn(ctx context.Context, fn func(*sql.Conn) error) error {
+	if conn, ok := d.takeReadSlot(ctx); ok {
+		defer d.putReadSlot(conn)
+		return d.runVerified(ctx, conn, true, fn)
+	}
+	return d.withSerialConn(ctx, true, fn)
+}
+
+// takeReadSlot 尝试从只读池取一条连接。ok=false 表示"不该走快路径或这一代正在关闭"，
+// 调用方应改用 withSerialConn（它会按需重连）。
+func (d *DB) takeReadSlot(ctx context.Context) (*sql.Conn, bool) {
+	d.stateMu.Lock()
+	// 事务内读必须走 rw（看未提交写）；污染/已关闭时连接不可信 ⇒ 交给退化路径恢复。
+	degraded := d.tx != nil || d.closed || d.retired || d.poisoned != nil
+	gen := d.genClosed
+	d.stateMu.Unlock()
+	if degraded || gen == nil {
+		return nil, false
+	}
+	select {
+	case conn := <-d.roSlots:
+		if conn == nil {
+			// 空槽（这一代没有可用连接，或连接正在重建）：**必须立刻放回**再退化 ——
+			// 槽位数量守恒是关连接路径能收齐 n 个槽的前提，把空槽带走会让
+			// closeLocked 永远等下去（而退化路径要抢的 writeMu 正握在关连接者手里）。
+			d.roSlots <- nil
+			return nil, false
+		}
+		return conn, true
+	case <-gen:
+		// 这一代连接正在被关闭：不要拿一条马上要被关掉的连接。
+		return nil, false
+	case <-ctx.Done():
+		return nil, false
+	}
+}
+
+// putReadSlot 归还一条只读连接（**不取任何锁**；nil 是空槽，同样要放回）。
+//
+// 归还路径一旦取锁就会和关连接路径互锁（关连接要在持有 writeMu 的同时等槽归还），
+// 所以这里必须是纯 channel 操作。这个 send **不会阻塞**：槽位数量守恒
+// （通道容量 = readers，且在途槽位数 + 通道内槽位数恒等于 readers），
+// 关连接路径每取走一个槽都会在收齐后重新填满。
+func (d *DB) putReadSlot(conn *sql.Conn) {
+	d.roSlots <- conn
+}
+
+// withSerialConn 在**写者锁**下选连接并执行 fn。
+//
+// 三类调用者：写原语（exec/define/tx 语句本身）、事务内读、以及需要按规则恢复连接的
+// 退化读路径。持 writeMu 执行的原因：
+//   - 写原语天然要串行（同一时刻只有一条语句能碰 rw）；
+//   - **所有**关连接/重建连接的路径也持 writeMu ⇒ 这里取到的连接不会在语句执行期间
+//     被关掉，不需要只读槽那套排空协议。
+func (d *DB) withSerialConn(ctx context.Context, readonly bool, fn func(*sql.Conn) error) error {
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	if err := d.ensureReadyLocked(!readonly); err != nil {
+		return err
+	}
+	conn := d.writeConn()
+	verifyReadonly := false
+	if readonly && !d.inTx() {
+		// 无事务的退化读：ensureReadyLocked 之后池里必然有连接；持 writeMu ⇒
+		// 不会有并发的关连接者把这些连接关掉。
+		conn = <-d.roSlots
+		verifyReadonly = true
+		defer d.putReadSlot(conn)
+	}
+	return d.runVerified(ctx, conn, verifyReadonly, fn)
+}
+
+// runVerified 做 L4 复检后执行 fn（复检用**独立于调用方 ctx** 的预算：调用方 ctx 可能
+// 已经到期，但"这条连接是否还安全"的判断不能因此被跳过）。
 //
 // readonly 语义：true = 只读原语（db.query），false = 写原语（db.exec/define/tx）。
 // 事务内 db.query 走的是读写连接（要看得到未提交的写），此时不校验 query_only。
-//
-// 复检用**独立于调用方 ctx** 的预算：调用方 ctx 可能已经到期（例如请求被取消），
-// 但"这条连接是否还安全"的判断不能因此被跳过，也不该把 statement_timeout 变成
-// 一条含糊的内部错误。
-func (d *DB) checkedConnLocked(ctx context.Context, readonly bool) (*sql.Conn, *apperr.Error) {
-	conn := d.rw
-	verifyReadonly := false
-	if readonly {
-		// 读原语走 readConnLocked：事务内是读写连接（要看得到未提交的写），
-		// 事务外是 query_only 连接。
-		conn = d.readConnLocked()
-		verifyReadonly = conn != nil && conn == d.ro
+func (d *DB) runVerified(ctx context.Context, conn *sql.Conn, readonly bool, fn func(*sql.Conn) error) error {
+	if conn == nil {
+		return apperr.New(apperr.CodeInternal, "appdb: 连接不可用（内部状态异常）")
 	}
+	vctx, cancel := context.WithTimeout(context.Background(), d.budget)
+	defer cancel()
+	if err := d.verifyConnLocked(vctx, conn, readonly); err != nil {
+		return apperr.From(err)
+	}
+	return fn(conn)
+}
+
+// writeConn 返回读写连接（值在 stateMu 下取快照）。
+func (d *DB) writeConn() *sql.Conn {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.rw
+}
+
+// checkedWriteConn 取读写连接并做 L4 复检（FIX-12），返回**已确认加固**的连接。
+// 调用方必须持有 writeMu。
+func (d *DB) checkedWriteConn(ctx context.Context) (*sql.Conn, *apperr.Error) {
+	conn := d.writeConn()
 	if conn == nil {
 		return nil, apperr.New(apperr.CodeInternal, "appdb: 连接不可用（内部状态异常）")
 	}
 	vctx, cancel := context.WithTimeout(context.Background(), d.budget)
 	defer cancel()
-	if err := d.verifyConnLocked(vctx, conn, verifyReadonly); err != nil {
+	if err := d.verifyConnLocked(vctx, conn, false); err != nil {
 		return nil, apperr.From(err)
 	}
 	return conn, nil
 }
 
-// readConnLocked 选择读连接：不在事务里走 query_only 连接，在事务里走事务连接
-// （事务内必须看到未提交的写，§5.1 db.tx 语义）。
-func (d *DB) readConnLocked() *sql.Conn {
-	if d.tx != nil {
-		return d.rw
-	}
-	return d.ro
+// inTx 报告当前是否有打开的事务（值在 stateMu 下取快照）。
+func (d *DB) inTx() bool {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.tx != nil
 }
 
+// readonly 语义：true = 只读原语（db.query），false = 写原语（db.exec/define/tx）。
+// 事务内 db.query 走的是读写连接（要看得到未提交的写），此时不校验 query_only。
+//
 // ===== 连接守卫（FIX-12，§15.1 第 4/5 条）=====
 //
 // 背景：驱动连接钩子的签名是 `func(conn sqlite.ExecQuerierContext, dsn string) error`，
@@ -710,108 +1020,232 @@ func (d *DB) Path() string { return d.path }
 // Dir 返回应用数据目录（诊断用）。
 func (d *DB) Dir() string { return d.dir }
 
-// Close 释放两条连接与池子。幂等；之后再调用 db.\* 会按需重连（重连同样加固 + 金丝雀）。
+// Close 释放 1+N 条连接与池子。幂等；之后再调用 db.\* 会按需重连（重连同样加固 + 金丝雀）。
+//
+// ⚠️ "可重连"是**会话边界**的语义。句柄生命周期终点请用 Retire（不可重连的终态）——
+// 句柄池的淘汰/关停路径一律走它，否则被放弃的宿主调用能在回收之后把库复活（R1-rt-5）。
 //
 // **Close 会清掉污染标记与事务写闸**（审计 P0-2 的第二半）：Close 之后对象只剩磁盘上的
 // 库文件，下一次调用走的是全新连接 + 全套加固 + 金丝雀 ⇒ 污染所约束的那条连接已经
 // 不存在了，继续拒绝服务没有任何安全收益，只会把"一次超时"放大成"进程重启前永久不可用"。
 // 这与本包头部注释（「Close 之后按需重连」）以及 capapi.DB 的生命周期口径一致。
+//
+// 关连接前**先排空在途读者**（见 closeLocked 的不变式）：Close 会阻塞到所有正在执行的
+// 只读语句结束（它们各自受单语句 5 s 硬预算约束），绝不在读者脚下关连接。
 func (d *DB) Close() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
 	d.clearPoisonLocked()
-	if d.closed {
+	d.stateMu.Lock()
+	closed := d.closed
+	d.stateMu.Unlock()
+	if closed {
 		return nil
 	}
 	return d.closeLocked()
 }
 
-// clearPoisonLocked 清掉污染标记与事务写闸（幂等）。调用方必须持有 d.mu。
-func (d *DB) clearPoisonLocked() {
-	d.poisoned = nil
-	d.deadTx = nil
+// Retire 把句柄置为**终态**并关闭连接：此后**不可能**再建立连接，db.\* 一律返回
+// ErrRetired 语义的错误（apperr.CodeDBDenied）。
+//
+// 与 Close 的分工（审计 R1-rt-5）：
+//   - Close  = 会话边界：释放连接，但"之后按需重连"（污染恢复、下一次调用都会用到它）；
+//   - Retire = 生命周期终点：句柄已从池里摘除 / 服务端关停 ⇒ 谁还持有这个对象的引用
+//     （最典型的是被放弃的宿主调用 goroutine）都只会拿到一次明确报错。
+//
+// 幂等；Retire 之后 Close 是 no-op。关连接前同样**先排空在途读者**（见 closeLocked
+// 的不变式），所以 Retire 可能阻塞到在途只读语句结束（它们各自受单语句 5 s 预算约束）。
+func (d *DB) Retire() error {
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	d.clearPoisonLocked()
+	d.stateMu.Lock()
+	already := d.retired
+	d.retired = true
+	closed := d.closed
+	d.stateMu.Unlock()
+	if already || closed {
+		return nil
+	}
+	return d.closeLocked()
 }
 
+// Retired 报告句柄是否已进入终态（诊断/测试断言用）。
+func (d *DB) Retired() bool {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.retired
+}
+
+// retiredError 是终态句柄上任何调用的统一错误。
+//
+// 为什么是 DB_DENIED 而不是 INTERNAL：这不是平台内部故障，而是"这个库句柄已经结束了"，
+// 应用侧的应对是**重试请求**（下一个请求会拿到全新句柄）。文案与 hints 都按这个口径写，
+// 绝不 panic（被放弃的 goroutine 里 panic 会打穿宿主边界）。
+func (d *DB) retiredError() *apperr.Error {
+	return apperr.New(apperr.CodeDBDenied, "应用库句柄已被平台回收，本次调用不再执行").
+		WithDetail("reason", "appdb_retired").
+		WithDetail("app_id", d.appID).
+		WithHint("这是宿主调用的兜底路径（原请求已超过预算并被放弃）：重试该请求即可，" +
+			"新请求会拿到全新的应用库句柄")
+}
+
+// clearPoisonLocked 清掉污染标记与事务写闸（幂等）。
+func (d *DB) clearPoisonLocked() {
+	d.stateMu.Lock()
+	d.poisoned = nil
+	d.deadTx = nil
+	d.stateMu.Unlock()
+}
+
+// closeLocked 关闭这一代全部连接与池子。调用方必须持有 writeMu。
+//
+// **不变式（破坏它就是 use-after-close 或 fd 泄漏）：任何会走 closeLocked() 的路径
+// 都必须先独占全部只读槽 —— 排空在途读者。** 落地顺序：
+//
+//  1. stateMu 下把这一代标成已关闭并 `close(genClosed)`：① 让**新**读者不再走
+//     "取槽执行"的快路径（它们会退化成串行路径并在 writeMu 上排队）；② 让卡在
+//     "等一个槽"上的读者立刻醒过来改走串行路径（否则它们会等一个永远不回来的槽）。
+//  2. 排空 roSlots 的 N 个槽：这一步会**阻塞到每一个在途读者归还它的槽**，
+//     所以收齐 N 个槽之后可以保证没有任何读者正在执行语句。
+//  3. 关连接（rw + N 条只读 + sql.DB）。rw 由 writeMu 独占，不需要第 2 步那套协议。
+//
+// 注意步骤 1 之后仍可能有读者"已经拿到槽、正在执行"—— 那正是步骤 2 要等的东西；
+// 也仍可能有读者"在 select 里同时看到空槽与 genClosed"而拿到一个槽，那同样会被
+// 步骤 2 等回来（它执行完必然归还）。
 func (d *DB) closeLocked() error {
+	d.stateMu.Lock()
+	gen := d.genClosed
+	d.genClosed = nil
+	d.closed = true
+	tx := d.tx
+	d.tx = nil
+	d.stateMu.Unlock()
+	if gen != nil {
+		// 只关一次：上面已经把字段置空，重复进入 closeLocked 不会再关同一个 channel。
+		close(gen)
+	}
+
+	// 排空在途读者（收齐 N 个槽才继续）。读者语句有 5 s 硬预算 ⇒ 这一步有界。
+	slots := d.drainReadSlots()
+
+	d.stateMu.Lock()
+	ros := d.ros
+	d.ros = nil
+	rw := d.rw
+	d.rw = nil
+	sqlDB := d.sqlDB
+	d.sqlDB = nil
+	d.stateMu.Unlock()
+
 	var first error
-	if d.tx != nil {
+	if tx != nil {
 		// 事务未结束就关闭：强制回滚（fail-closed，绝不留下半开事务）。
-		if d.tx.timer != nil {
-			d.tx.timer.Stop()
+		if tx.timer != nil {
+			tx.timer.Stop()
 		}
-		if d.tx.cancel != nil {
-			d.tx.cancel()
+		if tx.cancel != nil {
+			tx.cancel()
 		}
-		if d.rw != nil {
+		if rw != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), d.budget)
-			_, _ = d.rw.ExecContext(ctx, "ROLLBACK")
+			_, _ = rw.ExecContext(ctx, "ROLLBACK")
 			cancel()
 		}
-		d.tx = nil
 	}
 	// 这里刻意不再补跑统计查询：关库路径不能被任何（可能还在跑的）查询拖住；
-	// Stats 的 Tables 用最近一次观测值（connectLocked / 每次 Stats 都会刷新）。
-	if d.ro != nil {
-		if err := d.ro.Close(); err != nil && first == nil {
+	// Stats 的 Tables 用最近一次观测值（connectLocked / db.define 维护）。
+	for _, c := range slots {
+		if c == nil {
+			continue // 空槽：这一代从未建满过（例如建连中途失败）
+		}
+		if err := c.Close(); err != nil && first == nil {
 			first = err
 		}
-		d.ro = nil
 	}
-	if d.rw != nil {
-		if err := d.rw.Close(); err != nil && first == nil {
+	// 收齐的槽位**原样填回**（含空槽）：槽位数量守恒是"下一次关连接仍能收齐 n 个槽"
+	// 的前提。此刻通道里的槽已被我们全部取走、且 closed=true（新读者只会退化），
+	// 所以这里的 n 次 send 不会阻塞。
+	for range slots {
+		d.roSlots <- nil
+	}
+	_ = ros // ros 与 slots 是同一批指针；这里只用 slots（它是"收齐"的证据）
+	if rw != nil {
+		if err := rw.Close(); err != nil && first == nil {
 			first = err
 		}
-		d.rw = nil
 	}
-	if d.sqlDB != nil {
-		if err := d.sqlDB.Close(); err != nil && first == nil {
+	if sqlDB != nil {
+		if err := sqlDB.Close(); err != nil && first == nil {
 			first = err
 		}
-		d.sqlDB = nil
 	}
-	d.closed = true
 	return first
+}
+
+// drainReadSlots 收齐这一代的 N 个只读槽（排空在途读者）。调用方必须持有 writeMu。
+//
+// 为什么可以无条件等：每个在途读者的语句都套着单语句硬预算（stmtContext），
+// 到点由驱动中断并归还槽位；而"归还槽位"是纯 channel 操作（不取锁）⇒ 不会与
+// 持 writeMu 的关连接路径互锁。
+func (d *DB) drainReadSlots() []*sql.Conn {
+	out := make([]*sql.Conn, 0, d.readers)
+	for i := 0; i < d.readers; i++ {
+		out = append(out, <-d.roSlots)
+	}
+	return out
 }
 
 // Stats 返回本次请求累计的行数/字节与库结构信息（§4.9 调用事件字段）。
 //
-// Stats 永不返回错误：计量与诊断不能因为库忙/已关闭而失败。闭库后 Tables 取最近一次
-// 观测值，SizeBytes 直接看文件。
+// Stats 永不返回错误、**也不查库**：它在请求路径上被调用（serve.go 收尾），
+// 改造前它持对象锁跑一条 count(*) —— 一次 5 s 的写事务/慢查询会把计量统计一起拖住。
+// 现在只读原子计数（Tables 由 connectLocked 与 db.define 维护）与文件的 stat。
+//
+// SizeBytes 是**主库 + WAL 的和**：WAL 下已提交数据可能还躺在 -wal 里（未检查点），
+// 只 stat 主库会系统性低估用量；100 MB 硬限（max_page_count）本来就是按逻辑页数算的，
+// 两者口径因此一致。
 func (d *DB) Stats() capapi.DBStats {
-	st := capapi.DBStats{
-		Rows:  d.rows.Load(),
-		Bytes: d.bytes.Load(),
+	return capapi.DBStats{
+		Rows:      d.rows.Load(),
+		Bytes:     d.bytes.Load(),
+		Tables:    int(d.tables.Load()),
+		SizeBytes: d.diskSizeBytes(),
 	}
-	if fi, err := os.Stat(d.path); err == nil {
-		st.SizeBytes = fi.Size()
-	}
-	d.mu.Lock()
-	st.Tables = d.cachedTables
-	if !d.closed && d.poisoned == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), d.budget)
-		if n, err := d.countTablesLocked(ctx); err == nil {
-			st.Tables = n
-			d.cachedTables = n
+}
+
+// diskSizeBytes 返回主库 + WAL 的字节数（都不可读时返回 0）。
+func (d *DB) diskSizeBytes() int64 {
+	var total int64
+	for _, p := range []string{d.path, d.path + "-wal"} {
+		if fi, err := os.Stat(p); err == nil {
+			total += fi.Size()
 		}
-		cancel()
 	}
-	d.mu.Unlock()
-	return st
+	return total
 }
 
 // countTablesLocked 统计应用自己的表数（排除 sqlite_ 内部表：AUTOINCREMENT 会建
-// sqlite_sequence）。调用方必须持有 d.mu。
+// sqlite_sequence）。调用方必须持有 writeMu（它跑在 rw 上）。
 func (d *DB) countTablesLocked(ctx context.Context) (int, error) {
-	conn := d.rw
+	return d.countTablesOn(ctx, d.writeConn())
+}
+
+// countTablesOn 在指定连接上统计应用表数。
+//
+// 为什么要能指定连接：connectLocked 里这一代连接**还没发布**到 d 上（发布是最后一步，
+// 见那里的注释），所以只能用局部变量 rw —— 用 d.writeConn() 会拿到 nil 并把表数记成 0
+// （实测：重开既有库时 cachedTables 变成 0，TestOpenReopensExistingDB 因此变红）。
+func (d *DB) countTablesOn(ctx context.Context, conn *sql.Conn) (int, error) {
 	if conn == nil {
-		return d.cachedTables, nil
+		return int(d.tables.Load()), nil
 	}
 	var n int
 	// 用 substr 而不是 LIKE 'sqlite_%'：LIKE 的 `_` 是单字符通配符。
 	err := conn.QueryRowContext(ctx,
 		`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND substr(name, 1, 7) <> 'sqlite_'`).Scan(&n)
 	if err != nil {
-		return d.cachedTables, d.mapStmtErrorLocked(ctx, err)
+		return int(d.tables.Load()), d.mapStmtError(ctx, err)
 	}
 	return n, nil
 }
@@ -834,22 +1268,43 @@ func (d *DB) countTablesLocked(ctx context.Context) (int, error) {
 //     本次调用继续 ⇒ 一次超时的代价是一次重连（毫秒级），不是"永久打死应用"；
 //   - **事务硬超时**（看门狗置位）：同样丢弃整组连接后重连，但**读**继续、**写**继续
 //     返回超时错误（deadTx 写闸），直到会话边界（Close / 句柄池回收句柄）清掉。
+//
+// 调用方必须持有 writeMu：本函数可能在 dropPoisonedConnectionsLocked 里**关掉并重建**
+// 全部 1+N 条连接（那正是"排空在途读者"的那条路径），必须与所有关连接路径互斥。
 func (d *DB) ensureReadyLocked(write bool) error {
-	if d.poisoned != nil {
-		if d.tx != nil {
-			return d.poisoned
+	d.stateMu.Lock()
+	retired := d.retired
+	poisoned := d.poisoned
+	inTx := d.tx != nil
+	deadTx := d.deadTx
+	d.stateMu.Unlock()
+	// 终态优先于一切恢复路径（R1-rt-5）：它**不**允许重连，也不允许污染恢复
+	// （恢复的第一件事就是重连，那正是漏洞本身）。
+	if retired {
+		return d.retiredError()
+	}
+	if poisoned != nil {
+		if inTx {
+			// 事务内不在这里静默重连（那等于把事务体后半段的写降级成自动提交）。
+			return poisoned
 		}
 		d.dropPoisonedConnectionsLocked()
 	}
-	if d.deadTx != nil && write {
-		return d.deadTx
+	if deadTx != nil && write {
+		return deadTx
 	}
 	return d.ensureConnLocked()
 }
 
-// ensureConnLocked 在闭库/缺连接时用**独立宿主预算**建立连接（调用方必须持有 d.mu）。
+// ensureConnLocked 在闭库/缺连接时用**独立宿主预算**建立连接（调用方必须持有 writeMu）。
 func (d *DB) ensureConnLocked() error {
-	if !d.closed && d.sqlDB != nil && d.ro != nil && d.rw != nil {
+	// 防御性复检（R1-rt-5）：调用方是持 writeMu 的恢复路径，而"终态"与"关闭态"的唯一
+	// 区别就是**不许重连** —— 这条判据必须落在真正建连的函数上，而不是只在 ensureReadyLocked
+	// （将来新增一条恢复路径忘了过闸时，这里仍然 fail-closed）。
+	if d.isRetired() {
+		return d.retiredError()
+	}
+	if d.ready() {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), d.budget)
@@ -857,20 +1312,40 @@ func (d *DB) ensureConnLocked() error {
 	return d.connectLocked(ctx)
 }
 
-// dropPoisonedConnectionsLocked 丢弃被污染的一整组连接（含强制回滚）并清掉污染标记。
+// ready 报告这一代连接是否已就绪（stateMu 下判定；调用方须持有 writeMu 才不会与
+// connectLocked/closeLocked 的发布动作交错）。
+func (d *DB) ready() bool {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return !d.closed && !d.retired && d.sqlDB != nil && d.rw != nil && len(d.ros) == d.readers && d.genClosed != nil
+}
+
+// isRetired 报告终态（stateMu 下判定；与 ready 同一把锁的顺序）。
+func (d *DB) isRetired() bool {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.retired
+}
+
+// dropPoisonedConnectionsLocked 丢弃被污染的一整代连接（含强制回滚）并清掉污染标记。
 //
-// "不复用"的落地点就是 closeLocked：两条连接（含被中断的那条）全部关闭；
+// "不复用"的落地点就是 closeLocked：**全部 1+N 条**连接（含被中断的那条）一起关闭，
+// 而且关之前会排空在途读者（closeLocked 的不变式）—— 绝不在别的请求脚下关连接；
 // 重连由调用方接着走 ensureConnLocked（全新的 sql.DB + 全套限额 + 金丝雀，fail-closed）。
-// deadTx 不在这里清（它是"写闸"，只由 Close 清）。调用方必须持有 d.mu。
+// deadTx 不在这里清（它是"写闸"，只由 Close 清）。调用方必须持有 writeMu。
 func (d *DB) dropPoisonedConnectionsLocked() {
 	// closeLocked 的返回值刻意忽略：关库失败不应阻止恢复；重连失败会由 ensureConnLocked 如实返回。
 	_ = d.closeLocked()
+	d.stateMu.Lock()
 	d.poisoned = nil
+	d.stateMu.Unlock()
 }
 
 // poisonLocked 打上连接污染标记（超时/取消后绝不复用连接，§11）。
 // 事务硬超时额外置"写闸" deadTx（见 DB.deadTx 的注释）。
 func (d *DB) poisonLocked(err *apperr.Error) {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
 	if d.poisoned == nil {
 		d.poisoned = err
 	}
@@ -879,15 +1354,21 @@ func (d *DB) poisonLocked(err *apperr.Error) {
 	}
 }
 
-// stmtContextLocked 给单条语句套上预算：事务内额外受事务 ctx 约束（两者取更早的截止）。
-func (d *DB) stmtContextLocked(ctx context.Context) (context.Context, context.CancelFunc) {
-	if d.tx != nil {
-		return context.WithTimeout(d.tx.ctx, d.budget)
+// stmtContext 给单条语句套上预算：事务内额外受事务 ctx 约束（两者取更早的截止）。
+//
+// 调用方必须持有 writeMu（所有语句都跑在串行路径上）；d.tx 的发布/清除在 stateMu 下，
+// 这里取一次快照。
+func (d *DB) stmtContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	d.stateMu.Lock()
+	tx := d.tx
+	d.stateMu.Unlock()
+	if tx != nil {
+		return context.WithTimeout(tx.ctx, d.budget)
 	}
 	return context.WithTimeout(ctx, d.budget)
 }
 
-// mapStmtErrorLocked 把驱动错误映射成平台错误码（§7.4）。
+// mapStmtError 把驱动错误映射成平台错误码（§7.4）。
 //
 // 超时/取消 → DB_DENIED + reason=ReasonStatementTimeout：
 // 设计 §7.4 没有单独的「SQL 超时」码，只有 DB_LIMIT（507）与 DB_DENIED（403，语句被拒类）。
@@ -898,7 +1379,7 @@ func (d *DB) stmtContextLocked(ctx context.Context) (context.Context, context.Ca
 //   - DB_DENIED(403) = 语句被闸门拒 / 超时 / 语法或约束错误 —— 即「这条语句没被执行」；
 //   - DB_LIMIT(507)  **只**表示「库写满」（SQLITE_FULL ⇒ 100 MB 上限）；
 //     返回超行/超字节不走错误码，而是按 §4.5 截断 + QueryResult.Truncated 表达。
-func (d *DB) mapStmtErrorLocked(ctx context.Context, err error) error {
+func (d *DB) mapStmtError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}

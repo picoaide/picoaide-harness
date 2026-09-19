@@ -62,15 +62,18 @@ func TestRingDropsOldestAndCounts(t *testing.T) {
 	}
 }
 
-// TestBuildInsertSQLShape 占位符形状:每行 15 个带括号的 $N、编号连续、多行拼接正确。
+// TestBuildInsertSQLShape 占位符形状:每行 callEventColumns 个带括号的 $N、编号连续、多行拼接正确。
 // (曾经漏掉每行的括号 ⇒ PG 只回一句 "syntax error at or near $1"。)
+//
+// 期望串是**字面量**（不是从常量拼出来的）：加一列时这条用例必须跟着改 —— 那份"刻意的摩擦"
+// 正是它的价值（列清单文本、callEventColumns、args 顺序三者必须同步；0072 加 evidence 列时改过）。
 func TestBuildInsertSQLShape(t *testing.T) {
 	one := buildInsertSQL(1)
-	if !strings.HasSuffix(one, "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)") {
+	if !strings.HasSuffix(one, "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)") {
 		t.Fatalf("单行占位符形状错:\n%s", one)
 	}
 	two := buildInsertSQL(2)
-	if !strings.Contains(two, "),($16,") {
+	if !strings.Contains(two, "),($17,") {
 		t.Fatalf("多行占位符编号/括号错:\n%s", two)
 	}
 	if n := strings.Count(two, "$"); n != 2*callEventColumns {
@@ -156,6 +159,25 @@ func waitRows(t *testing.T, db *sql.DB, appID string, want int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("等待落库超时:app_id=%s 实际 %d 条, want %d", appID, n, want)
+}
+
+// TestInsertBudgetHasFloorForSmallFlushInterval 钉住"预算下限"这条回归门禁。
+//
+// 现场(2026-09-19 CI flake):测试注入 FlushInterval=10ms ⇒ 预算只剩
+// FlushInterval×5 = 50ms;负载下 insert 会在**事务已提交之后**才等到驱动返回,
+// 超时被记成失败并丢掉整批,测试报 `Written = N, want M` 而库里其实已有那些行
+// ("超时 ≠ 未执行")。去掉下限(改回裸乘)本用例必红。
+func TestInsertBudgetHasFloorForSmallFlushInterval(t *testing.T) {
+	s := NewSink(nil, Options{FlushInterval: 10 * time.Millisecond})
+	if got := s.insertBudget(); got < flushInsertBudgetMin {
+		t.Fatalf("小 FlushInterval 下预算 = %v,必须不低于 %v(否则成功批量会被误判为失败)",
+			got, flushInsertBudgetMin)
+	}
+	// 大 FlushInterval 仍按周期数走(下限不改变原有的"卡住也能回来"语义)。
+	s2 := NewSink(nil, Options{FlushInterval: 2 * time.Second})
+	if got, want := s2.insertBudget(), 2*time.Second*flushBudgetIntervals; got != want {
+		t.Fatalf("大 FlushInterval 下预算 = %v, want %v", got, want)
+	}
 }
 
 // TestFlushPersistsBatchFields 批量落库:字段逐项落对(§4.9 字段表)。
@@ -281,5 +303,32 @@ func TestCleanupUsesInjectedNow(t *testing.T) {
 	// 未绑定数据库时必须显式报错,而不是静默"清理成功"。
 	if _, err := NewSink(nil, Options{}).Cleanup(context.Background(), now); err == nil {
 		t.Fatal("nil db 的 Cleanup 必须报错")
+	}
+}
+
+// TestEvidenceBoundedAndEscapedAtInsert 钉住 P3-1 判据③在**落库层**的实现：
+// 证据必须留头截断到 ≤ capapi.MaxEvidenceBytes（前缀 kind=… 是事后分辨真 OOM 与误报的锚点，
+// 截尾会先把它丢掉），且非法 UTF-8 必须被替换 —— PG 的 text 拒绝非法字节，一条坏字节会让
+// 整批 INSERT 失败、连带丢掉同批全部诊断（与 stderr 尾巴同一条已知故障链）。
+//
+// 变异：把 headUTF8 换回 tailUTF8（截尾）⇒ 本用例的前缀断言红；去掉 UTF-8 兜底 ⇒ 第二条红。
+func TestEvidenceBoundedAndEscapedAtInsert(t *testing.T) {
+	s := NewSink(nil, Options{RingSize: 4})
+	s.Record(capapi.CallMetrics{AppID: "app",
+		Evidence: `kind=stderr_oom_line; line="` + strings.Repeat("x", 500) + `"`})
+	s.Record(capapi.CallMetrics{AppID: "app", Evidence: "kind=x\xff\xfe"})
+	got := s.drain(2)
+	if len(got) != 2 {
+		t.Fatalf("应当取到 2 条事件，得到 %d", len(got))
+	}
+	ev := got[0].m.Evidence
+	if len(ev) > capapi.MaxEvidenceBytes {
+		t.Fatalf("证据必须有界 ≤ %d 字节，得到 %d", capapi.MaxEvidenceBytes, len(ev))
+	}
+	if !strings.HasPrefix(ev, "kind=stderr_oom_line; line=") {
+		t.Fatalf("证据必须**留头**截断（判据前缀不能被截掉），得到 %q", ev)
+	}
+	if bad := got[1].m.Evidence; !utf8.ValidString(bad) {
+		t.Fatalf("非法 UTF-8 必须被替换（否则整批 INSERT 会被 PG 拒掉），得到 %q", bad)
 	}
 }

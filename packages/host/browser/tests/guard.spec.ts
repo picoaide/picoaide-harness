@@ -2,17 +2,19 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { URL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   BrowserGuard,
   classifyNavigation,
+  ensureSessionGuard,
+  installAppSchemeRequestGate,
   installPermissionGuard,
   MAX_DOWNLOAD_BYTES,
   navigationDenyReason,
   resolveDownloadPath,
 } from '../src/guard.ts'
 import type { DownloadRecorder } from '../src/guard.ts'
-import type { NativeDownloadItem, NativeSession } from '../src/electron-adapter.ts'
+import type { NativeDownloadItem, NativeSession, NativeWebRequestSession } from '../src/electron-adapter.ts'
 
 describe('navigation policy', () => {
   it('allows https and http', () => {
@@ -32,6 +34,31 @@ describe('navigation policy', () => {
     expect(classifyNavigation('vbscript:x')).toBe('deny')
   })
 
+  it('refuses the client application protocol on a browser tab (R2-P0-2 / §22.2 R4)', () => {
+    // 2026-09-19 订正：内置浏览器**不得**导航到应用 scheme —— 自定义协议下
+    // Origin/Sec-Fetch-* 恒为空，任意被浏览的 http(s) 页面都能发起"带身份的导航"，
+    // 事后无法区分发起者。只有应用窗口可以（见下面那个 surface 用例）。
+    expect(classifyNavigation('picoaide-app://demo/')).toBe('deny')
+    expect(classifyNavigation('picoaide-app://demo/notes?page=2')).toBe('deny')
+    // 渠道化后 scheme 是运行期值：任何非 http(s)/about 的 scheme 一律拒（不含名单）。
+    expect(classifyNavigation('gentech-harness-app://demo/')).toBe('deny')
+    expect(classifyNavigation('electron-app://x')).toBe('deny')
+    expect(classifyNavigation('picoaide://app/demo')).toBe('deny')
+  })
+
+  it('allows the app scheme only on its own application surface (§16.1 按 surface 分流)', () => {
+    const appSurface = { kind: 'app', appScheme: 'gentech-harness-app' } as const
+    expect(classifyNavigation('gentech-harness-app://demo/', appSurface)).toBe('allow')
+    expect(classifyNavigation('gentech-harness-app://demo/notes?page=2', appSurface)).toBe('allow')
+    // 别的渠道的 scheme 与别的自定义协议在应用窗口里也拒（跨渠道隔离）。
+    expect(classifyNavigation('picoaide-app://demo/', appSurface)).toBe('deny')
+    expect(classifyNavigation('javascript:alert(1)', appSurface)).toBe('deny')
+    // 应用窗口里的 http(s) 顶层导航也拒（外链走内置浏览器新标签，§7.2 冻结）。
+    expect(classifyNavigation('https://evil.example/', appSurface)).toBe('deny')
+    // 应用窗口没有 scheme 信息时不放宽任何东西（fail-closed）。
+    expect(classifyNavigation('gentech-harness-app://demo/', { kind: 'app' })).toBe('deny')
+  })
+
   it('denies empty, non-string and oversized URLs', () => {
     expect(classifyNavigation('')).toBe('deny')
     expect(classifyNavigation(42 as unknown as string)).toBe('deny')
@@ -45,6 +72,19 @@ describe('navigation policy', () => {
   it('produces a human-readable deny reason', () => {
     expect(navigationDenyReason('javascript:alert(1)')).toContain('javascript')
     expect(navigationDenyReason('')).toContain('empty or too long')
+  })
+
+  it('deny reason names the allowed schemes and the real reason for an app scheme', () => {
+    const generic = navigationDenyReason('javascript:alert(1)')
+    expect(generic).toContain('javascript')
+    expect(generic).toContain('http')
+    expect(generic).toContain('https')
+    expect(navigationDenyReason('file:///etc/passwd')).toContain('"file:"')
+    // 应用协议被拒的**真因**：它属于应用窗口，而不是"平台不支持这个 scheme"。
+    // 说错方向会让模型绕道重试（审计里已经出现过一次这种误诊）。
+    const appReason = navigationDenyReason('gentech-harness-app://demo/', { kind: 'app', appScheme: 'gentech-harness-app' })
+    expect(appReason).toContain('application window')
+    expect(appReason).toContain('R4')
   })
 })
 
@@ -187,4 +227,109 @@ describe('下载文件名净化（2026-09-15 审计 P2-6）', () => {
     }
   })
 })
+})
+
+/**
+ * 分区级权限守卫（§16.1 冻结：归属 = **分区初始化**，不是建 tab 时）。
+ *
+ * 缺口形态（主控 2026-09-19 只读预审计）：唯一安装点是建 tab 路径 ⇒ **一张浏览器标签都没
+ * 开过就创建应用窗口**时，该分区的 check handler 缺失，而 Electron 缺 check 时**默认放行**
+ * camera/mic/geolocation。
+ */
+describe('ensureSessionGuard：分区级幂等（CLI-2 / §16.1）', () => {
+  /** 假 session：记录两个 handler 的安装次数与最后一次实现。 */
+  function fakeSession() {
+    const requestHandlers: Array<(wc: unknown, permission: string, callback: (grant: boolean) => void) => void> = []
+    let check: ((wc: unknown, permission: string, requestingOrigin: string, details: unknown) => boolean) | undefined
+    const session = {
+      setPermissionRequestHandler(handler: (wc: unknown, permission: string, callback: (grant: boolean) => void) => void) {
+        requestHandlers.push(handler)
+      },
+      setPermissionCheckHandler(handler: (wc: unknown, permission: string, requestingOrigin: string, details: unknown) => boolean) {
+        check = handler
+      },
+    } as unknown as NativeSession
+    return { session, requestHandlers, check: () => check }
+  }
+
+  it('首次调用装两个 handler，重复调用是 no-op（幂等）', () => {
+    const fake = fakeSession()
+    expect(ensureSessionGuard(fake.session)).toBe(true)
+    expect(ensureSessionGuard(fake.session)).toBe(false)
+    expect(ensureSessionGuard(fake.session)).toBe(false)
+    expect(fake.requestHandlers).toHaveLength(1)
+    expect(fake.check()).toBeTypeOf('function')
+  })
+
+  it('未开过任何浏览器标签的 session 也会被装上守卫（应用窗口路径的形态）', () => {
+    // 应用窗口宿主只做一件事：拿到分区 session 就 ensureSessionGuard —— 不需要先有标签。
+    const fake = fakeSession()
+    ensureSessionGuard(fake.session)
+    let granted: boolean | undefined
+    fake.requestHandlers[0]?.({}, 'media', (value) => { granted = value })
+    expect(granted).toBe(false)
+    expect(fake.check()?.({}, 'geolocation', 'https://evil.example', {})).toBe(false)
+    expect(fake.check()?.({}, 'notifications', 'https://evil.example', {})).toBe(false)
+  })
+})
+
+/**
+ * session 级应用 scheme 请求闸门（R2S-7 / §23.2 N6）。
+ *
+ * 为什么必须有：`will-navigate`/`setWindowOpenHandler` 覆盖不到**子资源**请求 —— 任意
+ * http(s) 页面写 `<img src="<scheme>://<app>/…">`、`sendBeacon`、`prefetch`、SW 都能抵达
+ * 协议 handler，而 handler 会**带员工 bearer 转发**。判据按 R2T-7 的纪律：断言"请求**未抵达**
+ * handler"（只看"响应被拦"不算）。
+ */
+describe('installAppSchemeRequestGate：只有应用窗口能触发应用 scheme 请求（N6）', () => {
+  function fakeWebRequestSession() {
+    const listeners: Array<(details: { url: string, webContentsId?: number, resourceType?: string }, callback: (response: { cancel?: boolean }) => void) => void> = []
+    const filters: Array<{ urls: string[] }> = []
+    const session = {
+      webRequest: {
+        onBeforeRequest(filter: { urls: string[] }, listener: (typeof listeners)[number]) {
+          filters.push(filter)
+          listeners.push(listener)
+        },
+      },
+    } as unknown as NativeWebRequestSession
+    /** 模拟一次请求：返回 Electron 会怎么处置它。 */
+    const fire = (url: string, webContentsId: number): { cancel?: boolean } => {
+      let outcome: { cancel?: boolean } = {}
+      listeners[0]?.({ url, webContentsId, resourceType: 'image' }, (response) => { outcome = response })
+      return outcome
+    }
+    return { session, filters, fire }
+  }
+
+  it('取消非应用窗口发起的应用 scheme 请求（img/beacon/prefetch 同一条路）', () => {
+    const warn = vi.fn()
+    const fake = fakeWebRequestSession()
+    installAppSchemeRequestGate(fake.session, { scheme: 'harness-app', isAppSurfaceWebContents: () => false, warn })
+    expect(fake.filters[0]?.urls).toEqual(['harness-app://*/*'])
+    // 请求**根本不会抵达 handler**：Electron 收到的是 cancel。
+    expect(fake.fire('harness-app://my-notes/api/data', 42)).toEqual({ cancel: true })
+    expect(warn).toHaveBeenCalled()
+  })
+
+  it('放行应用窗口自己发出的请求（含子资源），且不碰其它协议', () => {
+    const fake = fakeWebRequestSession()
+    installAppSchemeRequestGate(fake.session, {
+      scheme: 'harness-app',
+      isAppSurfaceWebContents: id => id === 7,
+    })
+    expect(fake.fire('harness-app://my-notes/icon.png', 7)).toEqual({})
+    // 非本 scheme 的请求直接放行（过滤器只覆盖本 scheme）。
+    expect(fake.fire('https://example.com/x', 42)).toEqual({})
+    // 渠道隔离：别的渠道的 scheme 不在过滤器里，也不会被这条闸门"顺手"处理。
+    expect(fake.fire('other-channel-app://my-notes/', 42)).toEqual({})
+  })
+
+  it('注销后不再取消（宿主重建分区时的形态）', () => {
+    const fake = fakeWebRequestSession()
+    const dispose = installAppSchemeRequestGate(fake.session, { scheme: 'harness-app', isAppSurfaceWebContents: () => false })
+    expect(fake.fire('harness-app://my-notes/', 1)).toEqual({ cancel: true })
+    dispose()
+    expect(fake.fire('harness-app://my-notes/', 1)).toEqual({})
+  })
 })

@@ -74,9 +74,27 @@ pg 模式架构(caddy → server → postgres,全部内网固定 IP):
 └──────────────────┘
 ```
 
-- 使用最新镜像(本地 `make docker-image` 或 CI 发布的 `ghcr.io/picoaide/picoaide-harness-server`);PG 支持是当前所有发布镜像的默认能力;
+- 使用最新镜像(**只从更新服务器取**:`https://release.picoaide.com/<channel>/releases/<版本>/picoaide-server-<版本>-amd64.zip`,内含 `image.tar`;本地可用 `make docker-image` 自建。**GHCR 已于 2026-09-10 下线**,仓库与 CI 均不再推送镜像仓库);PG 支持是当前所有发布镜像的默认能力;
 - 服务端首次启动自动应用 `migrations-pg` 建表(幂等,空库即建);
 - usage 明细按月原生分区(保留 N 月可配,默认 6),日/月账本永久保留(见 docs/06-database.md)。
+
+### 0.2 应用(WASM)访问模型(2026-09-19 起)
+
+员工自建的 WASM 应用**只在桌面客户端内**打开:客户端为应用开一个**独立应用窗口**加载自定义协议地址 `<渠道 app 源 scheme>://<app_id>/`(**不是**内置浏览器标签 —— W-C 裁决,见 `../../docs/planning/2026-09-19-wasm-client-only-design.md` §16.1)
+`picoaide-app://<app_id>/`,由客户端协议 handler 转发到服务端唯一入口
+`POST /api/client/v2/apps/wasm/:app_id/request`(Bearer 员工令牌)执行。
+
+因此本部署**不需要**为应用准备任何公网访问面:
+
+- 不需要应用专用域名解析(主站 `DOMAIN` 是唯一对外域名);
+- 不需要应用专用证书(§1 的三种证书模式都只服务主站域名);
+- Caddy 不需要额外的站点块(三个模板都只服务 `{$DOMAIN}`)。
+
+2026-09-19 之前的浏览器访问链路(应用独立域名 + 反代额外站点块 + 企业自备证书)已整体
+删除,以上前置都不再需要。
+
+**升级必须服务端与客户端同版本**:旧客户端依赖已删除的浏览器链路,服务端升级后
+**无法再打开应用**。
 
 ## 1. 证书模式（三选一，由 `.env` 的 `TLS_MODE` 决定挂载哪个模板）
 
@@ -123,3 +141,4 @@ compose 按 `./Caddyfile.${TLS_MODE:-manual}` 挂载模板，三种模式命名�
 | healthz 一直非 200 | 首次启动要跑 60+ 条迁移并建用量分区，等 1–2 分钟；仍失败看 `docker compose logs server` |
 | 镜像拉取失败 | GHCR 不可达时从更新服务器下载镜像包后 `docker load`（AI-DEPLOY §6.4） |
 | 忘了超管密码 | 另一个 super_admin 在 webadmin 重置，或 `docker exec picoaide-server /app/picoaide-server --reset-mfa <user>` |
+| 客户端里应用(WASM)打不开 | 应用只在桌面客户端内打开，且**要求服务端与客户端同版本**（2026-09-19 起浏览器访问链路已删除，见 §0.2）；把员工客户端升级到配套版本 |

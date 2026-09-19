@@ -29,6 +29,38 @@ package serverauth
 //   - report_subscription_* 动作对定位到的任何 URL(含自定义路径、无凭据
 //     标记)无条件整体折叠。
 // 当前写入侧不可达(报表订阅只接受小写 http(s) 前缀),属预防性收口。
+//
+// 2026-09-19(参数形态补漏):凭据型查询参数原先只按 `&` 切分、参数名**全等**
+// 比对 ⇒ `?a=1;key=SECRET`(分号)与 `?key[]=SECRET`(数组式)不脱敏。现在切分
+// 接受 `;`、参数名剥一层尾部 `[]`;其余形态一律不脱敏(见 auditURLNeedsRedaction
+// 的 ⑤ 段与 audit_redact_param_test.go 的正负语料)。影响面仅限**读时**形状,
+// 库内历史行与哈希链不动(redactAuditEntryDetails 只写 logs[i].Detail)。
+//
+// 2026-09-19(凭据参数名补名):白名单原先只有下划线/无分隔形态(access_token、
+// api_key…),于是驼峰 `?accessToken=`、连字符 `?access-token=`/`?api-key=` 与
+// `?authorization=` **全部漏判**。真实可达路径:internal/llmgateway/admin.go 的
+// provider_delete 把上游 base_url 原样写进 detail —— 上游地址带这些参数时,
+// 持 audit:read、不持 report:read 的 auditor 就能从 /audit 读到上游凭据明文。
+// 本轮**显式补名**(accesstoken / access-token / api-key / authorization,以及
+// 同族的 auth-token / authtoken / refresh_token / refresh-token / refreshtoken /
+// x-api-key / bearer),**不引入任何通用归一化**:白名单仍是小写**全等**比对
+// (仅 ToLower + 剥一层尾部 `[]`),没有"去掉所有 `-`/`_` 再比"、没有前缀匹配。
+// 原因:那会把上一轮刻意钉死的负向语料(keyish / keys / tokenizer /
+// signature_v2 / key[][] / key[0] / monkey / authcode)一起卷进脱敏,而判定的是
+// "这个 URL 是否凭据型" —— 误伤正常参数会牺牲审计可读性。
+//
+// **已知边界**(认账;与代码实际行为逐条对拍,用例见
+// audit_20260919_redact_names_test.go 的 TestAuditRedactKnownBoundaries):
+//   - 已覆盖:参数名大小写不敏感(全等比对前 ToLower)、参数名**单层**尾部
+//     `[]`、`&` 与 `;` 两种参数分隔符、`?` 查询串与 `#` 片段两个入口;
+//   - **不覆盖**:①单层 `;` **路径**参数形态(`/path;key=SECRET` —— `;` 在
+//     路径段里,没有 `?`/`#` 入口,整段不进入参数判定);②二次编码
+//     (`%253Bkey%253D`:只解一层百分号编码,解出的 `%3B` 仍不是分隔符);
+//     ③前导 `%20`(`;%20key=`:解码出的前导空格让参数名成为 ` key`,与
+//     `key` 不全等)。
+//   为什么不覆盖:兜住这三种形态只能靠通用归一化(误伤风险见上),而没有任何
+//   已知 webhook 用它们承载凭据 —— 钉钉 access_token / 企微 key / 飞书路径
+//   uuid / Slack /services/ 全在覆盖面内。
 
 import (
 	"regexp"
@@ -40,12 +72,30 @@ import (
 
 // auditSensitiveQueryParams 视为凭据的查询参数名(小写)。
 // 覆盖钉钉/企微/飞书/Slack/通用机器人地址的常见形态。
+// 判定是**全等**比对(调用方先把参数名 ToLower、剥一层尾部 `[]`),
+// 刻意不做通用归一化 —— 详见文件头「已知边界」。
 var auditSensitiveQueryParams = map[string]bool{
 	"key": true, "access_token": true, "token": true, "secret": true,
 	"client_secret": true, "api_key": true, "apikey": true, "auth": true,
 	"sign": true, "signature": true, "sig": true, "ticket": true,
 	"password": true, "passwd": true, "pwd": true, "code": true,
 	"hook_token": true, "webhook": true,
+	// 2026-09-19 补名:白名单原先只有下划线/无分隔形态,驼峰 `?accessToken=`、
+	// 连字符 `?access-token=`/`?api-key=` 与 `?authorization=` 全部漏判。
+	// 这里**显式列举**,不引入"去掉所有 -/_ 再比对"或前缀匹配:每个名字都与
+	// 必须保持不脱敏的负向语料(keyish/keys/tokenizer/signature_v2/key[][]/
+	// key[0]/monkey/authcode…)不全等,用例见 audit_20260919_redact_names_test.go
+	// 的 TestAuditSensitiveQueryParamsExplicitNames。
+	"accesstoken": true, "access-token": true,
+	"api-key": true, "x-api-key": true,
+	"authorization": true, "bearer": true,
+	"auth-token": true, "authtoken": true,
+	"refresh_token": true, "refresh-token": true, "refreshtoken": true,
+	// authorization_code 是 OAuth 回调里**真凭据**(短时票据,可换取 token),
+	// 它出现在 URL 上正是最常见形态;2026-09-19 第三轮审计指出后显式补入。
+	// 注意近似的合成名(authorizationcode / authorization_codes)仍保持不脱敏,
+	// 用例见 audit_20260919_redact_names_test.go 的 auditNearMissNames。
+	"authorization_code": true,
 }
 
 // auditWebhookPathMarkers 凭据藏在**路径**里的 webhook 形态(飞书 /bot/v2/hook/<uuid>)。
@@ -209,8 +259,16 @@ func auditURLNeedsRedaction(raw string, reportAction bool) bool {
 		if k := strings.IndexByte(q, '#'); k >= 0 {
 			q = q[:k]
 		}
-		for _, kv := range strings.Split(q, "&") {
-			name := strings.ToLower(strings.SplitN(kv, "=", 2)[0])
+		// 2026-09-19:切分从只认 `&` 扩到 `&`/`;`(RFC 3986 的子分隔符,
+		// 历史与代理形态常见),参数名再剥**一层**尾部 `[]`(数组式写法)。
+		// 此前 `?a=1;key=SECRET` 整体被当成参数名 `a`、`?key[]=SECRET` 与
+		// `key` 不全等 —— 两种都漏判,auditor(不持 report:read)读到明文。
+		// **刻意不做通用归一化**:`key[][]`/`key[0]`/`keyish`/`signature_v2`
+		// 一律不脱敏(只剥一层 + 不做前缀匹配),负向语料见
+		// audit_redact_param_test.go —— 判定的是"URL 是否凭据型",误伤正常
+		// 参数会牺牲审计可读性,而没有任何已知 webhook 用这些形态承载凭据。
+		for _, kv := range strings.FieldsFunc(q, func(r rune) bool { return r == '&' || r == ';' }) {
+			name := strings.TrimSuffix(strings.ToLower(strings.SplitN(kv, "=", 2)[0]), "[]")
 			if auditSensitiveQueryParams[name] {
 				return true
 			}

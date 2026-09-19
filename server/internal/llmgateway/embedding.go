@@ -238,13 +238,16 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 			estimated = true
 		}
 	}
-	if _, err := serverstore.RecordUsageKindEstimated(a.DB, user.ID, req.Model, tokens, 0, billingKindEmbedding, estimated); err != nil {
+	usageID, err := serverstore.RecordUsageKindEstimated(a.DB, user.ID, req.Model, tokens, 0, billingKindEmbedding, estimated)
+	if err != nil {
 		// FIX-05 + G5b:embedding 走同一条结算事务(RecordUsageKind →
 		// settleUsageCostTx)。**任何**结算失败都必须在这里拒绝 —— 事务已回滚,
 		// 继续 c.JSON 交付向量就是向量白拿、账上一分不扣。
 		rejectSettlementFailure(c, err, "embedding json")
 		return
 	}
+	// 应用维度归因（0076/§21.4，best-effort）。
+	a.bindUsageAppID(c, usageID)
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
 		"data": func() []gin.H {

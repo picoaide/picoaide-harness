@@ -2,9 +2,14 @@ package api
 
 import (
 	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +26,7 @@ import (
 	"github.com/picoaide/picoaide/internal/appstore"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/wasmapp/appproof"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
 )
 
@@ -161,6 +167,61 @@ func uleb(v int) []byte {
 }
 
 // testEnv 是一套完整的测试装配（真 PG + 真编译器 + 生产路径路由树）。
+// openRecorder 是 open 计数出口的测试替身（F16：断言"调用一次 = 一次打开"）。
+//
+// 与生产的差别只有一点：它**不写库**，把每次调用记下来供用例对拍。生产装配是
+// `serverstore.RecordWasmAppOpen`（见 cmd/server/wasmapp.go 的 Opens 闭包）。
+type openRecorder struct {
+	mu    sync.Mutex
+	calls []openCall
+	// fail 为真时让计数失败，用于断言"计数失败不影响打开"（§8.9 / §5.1b 第 2 条）。
+	fail bool
+	// db 非 nil 时按**生产口径**落明细（`serverstore.RecordWasmAppOpen`）——
+	// 这样"计数 +1"与"opens.today 与明细一致"能同时被真实数据验证，而不是只看替身
+	// 记了几次调用。
+	db *sql.DB
+}
+
+type openCall struct {
+	appID         string
+	userID        int64
+	clientVersion string
+}
+
+func (r *openRecorder) record(ctx context.Context, appID string, userID int64, clientVersion string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fail {
+		return errors.New("计数存储故障（用例注入）")
+	}
+	r.calls = append(r.calls, openCall{appID: appID, userID: userID, clientVersion: clientVersion})
+	if r.db == nil {
+		return nil
+	}
+	// 生产同款写路径（含"主部门"口径）。失败只回错误，由 api 层按 best-effort 处理。
+	return serverstore.RecordWasmAppOpen(ctx, r.db, serverstore.WasmAppOpen{
+		AppID:         appID,
+		UserID:        userID,
+		DeptID:        serverstore.PrimaryDeptID(ctx, r.db, userID),
+		ClientVersion: clientVersion,
+	})
+}
+
+func (r *openRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
+}
+
+func (r *openRecorder) last() (openCall, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.calls) == 0 {
+		return openCall{}, false
+	}
+	return r.calls[len(r.calls)-1], true
+}
+
 type testEnv struct {
 	t        *testing.T
 	r        *gin.Engine
@@ -168,6 +229,17 @@ type testEnv struct {
 	compiler *compile.Compiler
 	dataRoot string
 	h        *Handlers
+	// proof 是装配进 handler 的持有性证明服务（签发/校验都走真实现）。
+	proof *appproof.Service
+	// opens 是 open 计数的记录器（断言每次打开 +1）。
+	opens *openRecorder
+	// installPriv / installID 是用例侧的"安装密钥"（Ed25519 私钥只活在用例里）。
+	installPriv ed25519.PrivateKey
+	installID   string
+	// proofRoot 是持有性证明的数据根（密钥环 + 安装注册表）。
+	// 需要"换一个时钟再验同一份 proof"的用例必须复用**同一个**它，否则会加载到另一
+	// 套密钥环（症状：过期用例拿到 proof_mismatch 而不是 proof_expired）。
+	proofRoot string
 	// tokens: alice（普通员工）、bob（普通员工）、boss（super_admin）
 	tokens map[string]string
 	ids    map[string]int64
@@ -226,20 +298,44 @@ func newTestEnv(t *testing.T, mutators ...func(*Options)) *testEnv {
 	}
 	t.Cleanup(func() { _ = comp.Close() })
 
+	// 持有性证明（契约 §20/§23.1）：与生产同样**必装** —— nil 会让 request/open
+	// 一律 401（fail-closed），那是装配事故而不是"没配也能测"。
+	//
+	// ⚠️ proof 的数据根是**独立临时目录**（不是 dataRoot，也不是它的子目录）：
+	// 本夹具让 `dataRoot` 同时扮演"部署数据根"与"应用数据根"（生产里是同一个挂载
+	// 点），而分区上传的用例断言"这个根下只有平台自己写的东西"（upload_test.go 的
+	// 穿越判据 —— 它 walk 到的是 dataRoot 本身，不是 `apps/`）。签名密钥在生产里
+	// 落在 `<dataDir>/app-proof.key`（见 appproof.KeyFileName），位置本身不是被测
+	// 语义；放进独立目录既不污染那条不变量，也不改变任何装载路径。
+	proofRoot := t.TempDir()
+	proof, perr := appproof.New(appproof.Options{DataRoot: proofRoot})
+	if perr != nil {
+		t.Fatalf("构造 app-proof 失败: %v", perr)
+	}
+	opens := &openRecorder{db: db}
+
 	opt := Options{
 		DB:               db,
 		DataRoot:         dataRoot,
 		CompileCacheRoot: cacheRoot,
 		Compiler:         comp,
-		BaseDomain:       func() string { return "apps.example.com" },
 		Now:              func() time.Time { return time.Now().UTC() },
+		Proof:            proof,
+		Opens:            opens.record,
 	}
 	for _, m := range mutators {
 		m(&opt)
 	}
 	h := NewHandlers(opt)
 
-	env := &testEnv{t: t, db: db, compiler: comp, dataRoot: dataRoot, h: h, tokens: map[string]string{}, ids: map[string]int64{}, users: map[string]*serverstore.User{}}
+	installPub, installPriv, kerr := ed25519.GenerateKey(rand.Reader)
+	if kerr != nil {
+		t.Fatalf("生成安装密钥失败: %v", kerr)
+	}
+	_ = installPub
+	env := &testEnv{t: t, db: db, compiler: comp, dataRoot: dataRoot, h: h, proof: proof, opens: opens,
+		installPriv: installPriv, installID: "install-api-0001", proofRoot: proofRoot,
+		tokens: map[string]string{}, ids: map[string]int64{}, users: map[string]*serverstore.User{}}
 	for _, name := range []string{"alice", "bob"} {
 		id, cerr := serverstore.CreateUser(db, &serverstore.User{Username: name, Source: "local", Status: 1, Role: serverstore.RoleUser})
 		if cerr != nil {
@@ -283,6 +379,13 @@ func (e *testEnv) mount(r *gin.Engine) {
 	cli.DELETE("/:app_id", e.h.Delete)
 	cli.GET("/:app_id/diagnostics", e.h.Diagnostics)
 	cli.GET("/:app_id/schema", e.h.Schema)
+	// 发布者本人的版本历史 + 审核结论（R1-pm-3）：与 internal/router 的申报逐条一致。
+	cli.GET("/:app_id/releases", e.h.MyReleases)
+	// 客户端专属访问模型的三个端点（契约 §5.1/§5.1b/§20.1）：
+	// 与 internal/router 的申报逐条一致 —— 测试树与生产树前缀/形状不一致就测不出漂移。
+	cli.POST("/:app_id/request", e.h.ClientRequest)
+	cli.POST("/proof", e.h.AppProofIssue)
+	cli.POST("/:app_id/open", e.h.OpenApp)
 
 	// 管理面：权限由 router 申报（AdminAuth + RequirePermission），测试里用
 	// middleware 直接注入"已登录管理员"（上下文键 "admin_user" 是 serverauth
@@ -297,10 +400,19 @@ func (e *testEnv) mount(r *gin.Engine) {
 	adm.PUT("/review", e.h.AdminReview)
 	adm.POST("/:app_id/unpublish", e.h.AdminUnpublish)
 	adm.POST("/:app_id/publish", e.h.AdminPublish)
-	adm.GET("/domain", e.h.AdminBaseDomainGet)
-	adm.PUT("/domain", e.h.AdminBaseDomainPut)
 	adm.PUT("/:app_id/owner", e.h.AdminTransferOwner)
 	adm.POST("/:app_id/freeze", e.h.AdminFreeze)
+	// 审核队列（P0-1）：与 internal/router 的申报逐条一致。
+	adm.GET("/:app_id/releases", e.h.AdminReleases)
+	adm.POST("/:app_id/releases/:version/approve", e.h.AdminApproveRelease)
+	adm.POST("/:app_id/releases/:version/reject", e.h.AdminRejectRelease)
+	// 管理面诊断与运行时水位（P1-9/P2-4）：同样与 internal/router 逐条一致 ——
+	// 管理面出口必须挂在**生产路径**上，否则测不出路由/路径漂移。
+	adm.GET("/:app_id/diagnostics", e.h.AdminDiagnostics)
+	adm.GET("/runtime", e.h.AdminRuntime)
+	adm.GET("/:app_id/opens", e.h.AdminAppOpens)
+	adm.GET("/opens/summary", e.h.AdminOpensSummary)
+	adm.GET("/:app_id/ai-usage", e.h.AdminAppAIUsage)
 
 	// appstore 的归属转移端点（§11 第 17 项授权放开 kind 白名单）：挂同一个路径，
 	// 用同一条用例证明 wasm_app 不再返回 400。
@@ -311,6 +423,29 @@ func (e *testEnv) mount(r *gin.Engine) {
 		}
 		c.Next()
 	}, ap.TransferOwner)
+}
+
+// installRequest 造一份**合法**的安装签名请求（nonce 每次新，时间戳取当前）。
+//
+// 待签消息 = appproof.InstallMessage（生产同款）：serverURL 取 httptest 的缺省 Host
+// `http://example.com` —— 与请求侧一致，否则 proof 的 serverURL 绑定会不符。
+func (e *testEnv) installRequest(appID string) appproof.InstallRequest {
+	e.t.Helper()
+	nonceBuf := make([]byte, 12)
+	if _, err := rand.Read(nonceBuf); err != nil {
+		e.t.Fatalf("生成 nonce: %v", err)
+	}
+	ts := time.Now().UTC().Unix()
+	nonce := appID + "-" + hex.EncodeToString(nonceBuf)
+	pub := e.installPriv.Public().(ed25519.PublicKey)
+	return appproof.InstallRequest{
+		InstallID: e.installID,
+		PublicKey: base64.StdEncoding.EncodeToString(pub),
+		Nonce:     nonce,
+		TS:        ts,
+		Signature: base64.StdEncoding.EncodeToString(
+			ed25519.Sign(e.installPriv, appproof.InstallMessage(e.installID, nonce, ts, "http://example.com"))),
+	}
 }
 
 // adminFromHeader 决定管理面的身份：缺省是 boss（super_admin），
@@ -369,7 +504,7 @@ func (e *testEnv) payload(appID, version string, wasm []byte, cfg map[string]any
 // goodConfig 是能通过校验的应用配置（access=public 允许匿名）。
 func goodConfig() map[string]any {
 	return map[string]any{
-		"access":           "public",
+		"access":           "login",
 		"whitelist":        []string{},
 		"purpose":          "演示：给团队共享一个小工具",
 		"data_sensitivity": "internal",

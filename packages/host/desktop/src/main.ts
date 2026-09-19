@@ -1,6 +1,6 @@
 /** PicoAide Harness executable: minimal Electron bootstrap around the Host Cordis root. */
 
-import { app, crashReporter } from 'electron'
+import { app, crashReporter, safeStorage } from 'electron'
 import type { Context } from '@deepseek-ai/cordis'
 import { join } from 'node:path'
 import {
@@ -11,7 +11,22 @@ import {
 } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
-import { DEFAULT_DEEP_LINK_SCHEME, OFFICIAL_PRODUCT_NAME, readDesktopChannelProfile } from './desktop-channel.ts'
+import {
+  DEFAULT_APP_ORIGIN_SCHEME,
+  DEFAULT_DEEP_LINK_SCHEME,
+  OFFICIAL_PRODUCT_NAME,
+  readDesktopChannelProfile,
+} from './desktop-channel.ts'
+// 客户端专属 WASM 应用 origin：协议特权注册（whenReady 之前）+ 交给插件的
+// Electron 适配器。子路径 `electron-adapter` 是唯一静态 import electron 的模块，
+// 插件主体（`@picoaide/dsh-wasm-apps-host`）保持纯 Node 可加载。
+import { createRealElectronAdapter, registerAppScheme } from '@picoaide/dsh-wasm-apps-host/electron-adapter'
+import {
+  WASM_APPS_HOST_ADAPTER_SERVICE,
+  WASM_APPS_INSTALL_KEY_SERVICE,
+} from '@picoaide/dsh-wasm-apps-host'
+import { createInstallKeyStore } from '@picoaide/dsh-wasm-apps-host/app-proof'
+import { provideAppAiRunner } from './app-ai-runner.ts'
 import { applyInstallDshHome, isSystemWorkingDirectory } from './desktop-home.ts'
 import { desktopUserDataDirectoryName } from './desktop-user-data.ts'
 import { desktopProductVersion, ElectronDesktopRuntime } from './electron-runtime.ts'
@@ -83,6 +98,16 @@ const PRODUCT_NAME = CHANNEL_PROFILE?.productName ?? OFFICIAL_PRODUCT_NAME
  * 服务端 OIDC 回调拼出的 scheme 三者一致**,否则浏览器回调打不开客户端。
  */
 const DEEP_LINK_SCHEME = CHANNEL_PROFILE?.deepLinkScheme ?? DEFAULT_DEEP_LINK_SCHEME
+
+/**
+ * 应用源 scheme（渠道包 `desktop.app_origin_scheme`，§10）。
+ *
+ * **必须在模块作用域取值**（§7.2/CLI-8 冻结）：`registerSchemesAsPrivileged` 是
+ * 启动期 API，只能早于 `app.whenReady()` 调用，而插件的 Config 要到 apply 期才可见
+ * —— 从 Config 取值在结构上就晚了。渠道包缺失/字段非法时 `readDesktopChannelProfile`
+ * 已经 fail-loud（`AppOriginSchemeError`），这里只会拿到"官方缺省"或合法渠道值。
+ */
+const APP_ORIGIN_SCHEME = CHANNEL_PROFILE?.appOriginScheme ?? DEFAULT_APP_ORIGIN_SCHEME
 
 /** Report optional user UI plugins skipped to keep startup recoverable. */
 function notifySkippedOptionalEntries(
@@ -191,6 +216,11 @@ async function start(): Promise<void> {
     electronLogger.error(`${BIN_NAME}: active run tracking unavailable: ${cause instanceof Error ? cause.message : String(cause)}`)
   }
   removeChildProcessLogging = installDesktopChildProcessLogging(app, electronLogger)
+  // 客户端专属 WASM 应用 origin（`picoaide-app://`）：协议特权注册是**启动期**
+  // API，必须在 `app.whenReady()` 之前执行（晚于 ready 会静默无效/抛错），所以
+  // 它在装配层接线，而不是由插件自己在 apply 里做。权限位与实测约束见契约
+  // `docs/decisions/2026-09-19-wasm-client-internal-origin.md` §2/§3。
+  registerAppScheme(APP_ORIGIN_SCHEME)
   const nativeExit = createDesktopExitCoordinator(
     {
       prepareToQuit: () => { runtime.prepareToQuit() },
@@ -342,6 +372,31 @@ async function start(): Promise<void> {
         )
         hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
         hostCtx.provide('desktopRuntime', runtime)
+        // 协议 handler 的实际注册面（默认 session + 每个浏览器分区）经这个适配器
+        // 交给插件：`provide` 发生在 boot 的 prepare 回调里，**早于** profile 树的
+        // 任何插件 apply（dsh-app-boot 的 boot(): prepare → mountRootInclude）。
+        hostCtx.provide(WASM_APPS_HOST_ADAPTER_SERVICE, createRealElectronAdapter())
+        // 安装密钥仓库（§23.1）：私钥进 OS 钥匙串（`safeStorage`），无钥匙串时
+        // 0600 明文 + 启动 warn（认账 §17）。proof 本身**不落盘**，只有这对密钥落盘。
+        hostCtx.provide(
+          WASM_APPS_INSTALL_KEY_SERVICE,
+          createInstallKeyStore({ dir: app.getPath('userData'), safeStorage }),
+        )
+        // 应用 AI 的执行面（§21.2 步骤③）：在本机协议 handler 的隐藏会话
+        // （`app:<app_id>`）上跑一轮 `ctx.agentLoop`。这里只 `provide` 一个**惰性**
+        // 对象 —— 它内部的 `ctx.get('agents')`/`agentLoop` 在每一轮开始时才解析
+        // （`provide` 发生在 profile 树挂载之前，那一刻 agent 平面还不存在）。
+        //
+        // 接线本身在 `./app-ai-runner.ts` 的 `provideAppAiRunner` 里（**可测**）：
+        // 2026-09-20 独立复核指出"内联在这里 ⇒ 删掉 provide 全绿、生产静默 503"，
+        // 抽出来后由 `tests/app-ai-runner.spec.ts` 用真实 `Context` 断言
+        // `ctx.get(WASM_APPS_AI_RUNNER_SERVICE)` 确实拿得到 runner。
+        provideAppAiRunner(hostCtx, {
+          // 隐藏会话的 `cwd` 元数据：persona 模板的 `{{cwd}}` 需要有值（AI 没有
+          // 文件面，这个路径只落在会话头上）。用 userData 而不是任何工作区 ——
+          // 隐藏会话不隶属任何用户项目目录。
+          cwd: app.getPath('userData'),
+        })
         await hostCtx.plugin(DesktopPluginsService, {
           profileName: activeProfileName,
           homeDir,

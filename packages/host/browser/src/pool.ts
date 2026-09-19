@@ -9,7 +9,7 @@
  * @module @picoaide/dsh-browser
  */
 
-import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
+import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from '@picoaide/dsh-host-locale'
 import { browserError } from './errors.ts'
 import type { BrowserError } from './errors.ts'
 import { TAB_SLOT_WAIT_TIMEOUT_MS, USER_GATE_TIMEOUT_MS } from './budgets.ts'

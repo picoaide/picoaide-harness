@@ -274,6 +274,28 @@ describe('desktop profile composition', {
     expect(rows.map(row => row.id)).not.toContain('desktop-terminal')
     expect(rows.map(row => row.id)).not.toContain('desktop-pnpm')
     expect(rows.map(row => row.id)).not.toContain('desktop-profiles')
+    // 客户端专属 WASM 应用 origin（2026-09-19 契约 §2）：行由随包
+    // cordis.patch.yml 插入，深链 scheme 由组装期**注入**（官方构建 = 产品缺省；
+    // 渠道构建 = 渠道包 desktop.deep_link_scheme）——缺这条注入，插件侧一律
+    // fail-closed 丢弃深链，且只在真机上表现为"分享链接没反应"。
+    expect(rows.find(row => row.id === 'pico-wasm-apps-host')).toEqual(expect.objectContaining({
+      name: '@picoaide/dsh-wasm-apps-host',
+    }))
+    // 三个值同源注入（§10/§16.1）：官方构建 = 产品缺省；渠道构建 = 渠道包字段。
+    // 插件侧与渲染层都不得自己读随包 channel.json（tsdown 内联后那条路径不成立）。
+    expect(patches).toContainEqual(expect.objectContaining({
+      id: 'pico-wasm-apps-host',
+      config: {
+        deepLinkScheme: 'picoaide',
+        appOriginScheme: 'picoaide-app',
+        productName: 'PicoAide Harness',
+      },
+    }))
+    // 浏览器面也要拿到应用源 scheme（导航闸门按 surface 分流要用它）。
+    expect(patches).toContainEqual(expect.objectContaining({
+      id: 'pico-browser',
+      config: expect.objectContaining({ appOriginScheme: 'picoaide-app' }),
+    }))
   })
 
   it('boots the fixed desktop profile with advanced shell rows', async () => {

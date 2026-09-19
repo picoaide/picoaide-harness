@@ -55,7 +55,7 @@ func (s *Server) writeAppResponse(w http.ResponseWriter, r *http.Request, resp a
 	}
 
 	h := w.Header()
-	edge.ApplyHostSecurityHeaders(h, edge.SelfOrigin(r))
+	edge.ApplyHostSecurityHeaders(h, s.selfOrigin(r))
 	for k, v := range edge.StripAppControlledHeaders(headersFromMap(resp.Headers)) {
 		if _, owned := hostOwnedResponseHeaders[strings.ToLower(k)]; owned {
 			// 宿主独占：应用写了也不生效（CSP/nosniff/Referrer-Policy/缓存策略）。
@@ -98,7 +98,7 @@ func (s *Server) writeFailure(w http.ResponseWriter, r *http.Request, e *apperr.
 
 	h := w.Header()
 	// 宿主安全头（含 4xx/5xx）：必须在写任何 body 之前。
-	edge.ApplyHostSecurityHeaders(h, edge.SelfOrigin(r))
+	edge.ApplyHostSecurityHeaders(h, s.selfOrigin(r))
 	if status == http.StatusTooManyRequests {
 		h.Set("Retry-After", strconv.Itoa(limits.RetryAfterSeconds))
 	}
@@ -118,7 +118,7 @@ func (s *Server) writeFailure(w http.ResponseWriter, r *http.Request, e *apperr.
 func (s *Server) writeHTMLFailure(w http.ResponseWriter, r *http.Request, status int, code apperr.Code,
 	title, message string, hints []string) {
 	h := w.Header()
-	edge.ApplyHostSecurityHeaders(h, edge.SelfOrigin(r))
+	edge.ApplyHostSecurityHeaders(h, s.selfOrigin(r))
 	if wantsJSON(r) {
 		h.Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(status)

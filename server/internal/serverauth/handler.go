@@ -19,6 +19,16 @@ import (
 // CtxUserKey is the gin context key for the authenticated user.
 const CtxUserKey = "auth_user"
 
+// notifyUserSessionsRevoked 触发"该用户全部会话已失效"的回调（nil 安全）。
+//
+// 单独包一层是为了让**四个吊销点**（自助改密 / 管理员改密 / 降权禁用删除 / 重置 MFA）
+// 走同一个调用形状 —— 漏接一个点就是一处静默的"旧会话还能用"，而它有四个地方可以漏。
+func (a *API) notifyUserSessionsRevoked(userID int64) {
+	if a != nil && a.OnUserSessionsRevoked != nil {
+		a.OnUserSessionsRevoked(userID)
+	}
+}
+
 // CtxTokenKey is the gin context key for the raw bearer token.
 const CtxTokenKey = "auth_token"
 
@@ -39,6 +49,38 @@ type API struct {
 	providers        map[string]PasswordProvider
 	browsers         map[string]BrowserProvider
 	enabledProviders map[string]bool
+
+	// OnSessionRevoked / OnUserSessionsRevoked 是**会话键失效**的回调
+	// （契约 §8.2 / R1-SRV-5，2026-09-19）。
+	//
+	// 为什么需要：客户端专属模型下没有应用会话行，AI 的在手令牌按
+	// `(user_id, sessionKey)` 缓存在进程内存里（sessionKey = bearer 的 SHA-256
+	// 前 16 字节 hex）。bearer 被吊销后，那些**仍然有效**的在手令牌必须在同一时刻
+	// 一起丢掉 —— 否则"登出/改密/禁用"只挡住了新请求，旧会话手里的令牌还能继续用到
+	// 自然到期（该"在手令牌"已随服务端 AI 能力删除 ⇒ 本钩子暂无消费者，属 §8.2 冻结契约）。
+	//
+	//   OnSessionRevoked(key)     —— 登出：知道确切的那一把 bearer ⇒ 精确吊销一个键；
+	//   OnUserSessionsRevoked(id) —— 改密/降权/禁用/删除/重置 MFA：该用户的**全部**
+	//                                bearer 被清空 ⇒ 按用户维度批量吊销。
+	//
+	// 装配期设置、运行期只读（与 providers 的"热替换"不同：这两个钩子指向装配期
+	// 就已存在的对象，没有运行期变更的需求）。nil = 不回调（最小装配/测试）。
+	OnSessionRevoked      func(sessionKey string)
+	OnUserSessionsRevoked func(userID int64)
+}
+
+// SessionKey 返回一把 bearer 对应的**会话键**（契约 §8.2）。
+//
+// 定义冻结为 `SHA-256(bearer)` 的**前 16 字节 hex**（= TokenHash 的前 32 个字符）。
+// 唯一实现：wasmapi 的 clientRequest 入口与这里的吊销回调必须得出同一个键，
+// 否则"吊销"会吊销一个不存在的键（静默无效）。
+func SessionKey(rawToken string) string {
+	h := serverstore.TokenHash(rawToken)
+	const n = 32
+	if len(h) < n {
+		return h
+	}
+	return h[:n]
 }
 
 // New creates the auth API.
@@ -371,6 +413,9 @@ func (a *API) handleChangePassword(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "修改密码失败")
 		return
 	}
+	// 改密会吊销该用户**全部** api_tokens（serverstore.UpdateUserPassword 内 DELETE）
+	// ⇒ 每个派生会话键都失效，按用户维度回调（契约 §8.2）。
+	a.notifyUserSessionsRevoked(u.ID)
 	_ = serverstore.AuditLog(a.DB, u.Username, "password_change", "self")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -534,6 +579,11 @@ func (a *API) handleLogout(c *gin.Context) {
 	raw, _ := c.Get(CtxTokenKey)
 	if s, ok := raw.(string); ok {
 		_ = RevokeToken(a.DB, s)
+		// 会话级吊销（契约 §8.2 / R1-SRV-5）：这把 bearer 的会话键下的在手 AI 令牌
+		// 必须立刻失效 —— 只吊销 bearer 的话，旧会话手里的 AI 令牌还能用到自然到期。
+		if a.OnSessionRevoked != nil {
+			a.OnSessionRevoked(SessionKey(s))
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

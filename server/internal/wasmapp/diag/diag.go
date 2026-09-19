@@ -25,8 +25,14 @@ type Failure struct {
 	ReasonCode    string    `json:"reason_code"`
 	GuestExitCode int32     `json:"guest_exit_code"`
 	StderrTail    string    `json:"stderr_tail"`
-	CPUMs         int64     `json:"cpu_ms"`
-	PeakMemory    int64     `json:"peak_memory_bytes"`
+	// Evidence 是**分类依据**（第三轮审计 P3-1）：RUNTIME_MEMORY 这类码光看 reason_code +
+	// peak_memory_bytes 无法分辨"真 OOM / panic 误报 / 应用自己打印的同名文本"，而
+	// stderr_tail 往往全是 goroutine 回溯。内容形如
+	// `kind=stderr_oom_line; peak=…; limit=…; exit=2; anchored=true; line="runtime: out of memory: …"`，
+	// 有界（capapi.MaxEvidenceBytes）。空串 = 这次失败没有留下结构化依据（旧行/无依据的码）。
+	Evidence   string `json:"evidence"`
+	CPUMs      int64  `json:"cpu_ms"`
+	PeakMemory int64  `json:"peak_memory_bytes"`
 }
 
 // ReasonCount 是一个失败码的计数 + 它的可操作 hints。
@@ -87,7 +93,7 @@ func RecentFailures(ctx context.Context, db *sql.DB, appID string, limit int) ([
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, `SELECT created_at, outcome, reason_code, guest_exit_code,
-		stderr_tail, cpu_ms, peak_memory_bytes
+		stderr_tail, evidence, cpu_ms, peak_memory_bytes
 		FROM wasm_call_events
 		WHERE app_id = $1 AND outcome <> $2
 		ORDER BY created_at DESC, id DESC
@@ -101,7 +107,7 @@ func RecentFailures(ctx context.Context, db *sql.DB, appID string, limit int) ([
 		var f Failure
 		var created time.Time
 		if err := rows.Scan(&created, &f.Outcome, &f.ReasonCode, &f.GuestExitCode,
-			&f.StderrTail, &f.CPUMs, &f.PeakMemory); err != nil {
+			&f.StderrTail, &f.Evidence, &f.CPUMs, &f.PeakMemory); err != nil {
 			return nil, err
 		}
 		f.CreatedAt = created
@@ -116,7 +122,16 @@ const outcomeOK = "ok"
 
 // Summary 聚合某个应用自 since 以来的调用结果(§4.9 诊断 API)。
 // since 必须由调用方显式给出:诊断窗口是审计口径的一部分,不能隐式取 now。
+//
+// 内存上限类提示按**编译期默认**渲染；装配侧已知生效值时用 SummaryWithMemoryPages。
 func Summary(ctx context.Context, db *sql.DB, appID string, since time.Time) (AppSummary, error) {
+	return SummaryWithMemoryPages(ctx, db, appID, since, 0)
+}
+
+// SummaryWithMemoryPages 与 Summary 同义，但按**生效**的单实例内存页数渲染提示
+// （memoryPages=0 ⇒ 编译期默认 limits.InstanceMemoryPages；见 HintsForMemoryPages）。
+func SummaryWithMemoryPages(ctx context.Context, db *sql.DB, appID string, since time.Time,
+	memoryPages uint32) (AppSummary, error) {
 	out := AppSummary{AppID: appID, Since: since, Reasons: []ReasonCount{}, Hints: []string{}}
 	if err := requireAppID(appID); err != nil {
 		return out, err
@@ -178,7 +193,8 @@ func Summary(ctx context.Context, db *sql.DB, appID string, since time.Time) (Ap
 		return out, err
 	}
 	for code, b := range perReason {
-		out.Reasons = append(out.Reasons, ReasonCount{ReasonCode: code, Count: b.count, Hints: HintsFor(code)})
+		out.Reasons = append(out.Reasons, ReasonCount{
+			ReasonCode: code, Count: b.count, Hints: HintsForMemoryPages(code, memoryPages)})
 	}
 	// 次数降序、同次数按错误码升序:输出稳定,便于 AI 与页面直接对比两次诊断。
 	sortReasons(out.Reasons)
@@ -216,14 +232,39 @@ func sortReasons(rs []ReasonCount) {
 
 // HintsFor 返回某个失败码的可操作提示(§4.9「结构化错误码 + hints」)。
 // 未覆盖的码返回 nil(Summary 会补一条通用建议),不返回空串占位。
+//
+// ⚠️ 内存上限那一条按**编译期默认**渲染。装配侧已知生效值(instance_memory_mb)时用
+// HintsForMemoryPages —— 否则控制台把上限改成 16 MiB 后，提示里还写 64 MiB，
+// 作者会按过期的数字去优化（R1-rt-25）。
 func HintsFor(reasonCode string) []string {
+	return HintsForMemoryPages(reasonCode, 0)
+}
+
+// HintsForMemoryPages 与 HintsFor 同义，但按**生效**的单实例内存页数渲染内存类提示
+// （memoryPages=0 ⇒ 编译期默认 limits.InstanceMemoryPages）。
+func HintsForMemoryPages(reasonCode string, memoryPages uint32) []string {
 	hints, ok := hintTable[apperr.Code(reasonCode)]
 	if !ok {
 		return nil
 	}
 	out := make([]string, len(hints))
 	copy(out, hints)
+	if apperr.Code(reasonCode) == apperr.CodeRuntimeMemory {
+		out[0] = memoryLimitHint(memoryPages)
+	}
 	return out
+}
+
+// memoryLimitHintFormat 是"单实例线性内存上限"这条提示的**唯一**文案真源：
+// 静态表（编译期默认）与按生效值渲染共用它，避免两处文案漂移。
+const memoryLimitHintFormat = "单实例线性内存上限 %d MiB:不要一次性把大结果集读进内存"
+
+// memoryLimitHint 按生效页数渲染内存上限提示（0 ⇒ 编译期默认）。
+func memoryLimitHint(memoryPages uint32) string {
+	if memoryPages == 0 {
+		memoryPages = limits.InstanceMemoryPages
+	}
+	return fmt.Sprintf(memoryLimitHintFormat, int64(memoryPages)*int64(limits.WasmPageSize)>>20)
 }
 
 // hintTable 是失败码 → 可操作建议的唯一真源。每条都说"下一步改什么",
@@ -231,11 +272,11 @@ func HintsFor(reasonCode string) []string {
 var hintTable = map[apperr.Code][]string{
 	apperr.CodeRuntimeTimeout: {
 		fmt.Sprintf("guest 执行预算是 %s:把长任务拆成多次请求,不要在单次请求里做整批计算", limits.GuestBudget),
-		"宿主调用(db.* / ai.chat)期间不计入 guest 计时 ⇒ 超时基本都是应用自己的循环没有收敛",
+		"宿主调用(db.* / log / assets.read)期间不计入 guest 计时 ⇒ 超时基本都是应用自己的循环没有收敛",
 		"检查有没有无退出的重试循环;请求超时后实例被销毁,内存里的中间状态不会保留",
 	},
 	apperr.CodeRuntimeMemory: {
-		fmt.Sprintf("单实例线性内存上限 %d MiB:不要一次性把大结果集读进内存", limits.InstanceMemoryPages*limits.WasmPageSize>>20),
+		fmt.Sprintf(memoryLimitHintFormat, limits.InstanceMemoryPages*limits.WasmPageSize>>20),
 		fmt.Sprintf("db.query 单次最多返回 %d 行 / %d MiB,更大的结果要分页(LIMIT/OFFSET)", limits.SQLMaxRows, limits.SQLMaxResultBytes>>20),
 		"Go 运行时自身常驻数 MiB 堆,留给业务数据的内存比预期少;先在 db.query 里 WHERE 收窄再聚合",
 	},
@@ -260,11 +301,10 @@ var hintTable = map[apperr.Code][]string{
 		fmt.Sprintf("收到 429 不要立刻重试(只会继续撞队列):按 Retry-After 退避,默认 %d 秒", limits.RetryAfterSeconds),
 		"把多次小请求合并成一次请求,或在页面上提示稍后重试",
 	},
-	apperr.CodeAIBalanceInsufficient: {
-		"使用者自己的余额不足:应用不要重试,直接在页面上提示本人去桌面客户端查看余额与用量",
-		"平台不做应用级额度,AI 费用记在登录员工头上;提示语不要暴露具体余额数值",
-		"确需继续使用:让使用者充值,或把 ai.chat 换成不必调模型的本地逻辑",
-	},
+	// ⚠️ `apperr.CodeAIBalanceInsufficient` 的提示已随 W4 删除（总纲 §21.3）：
+	// 服务端 ai.chat 被删后，这条失败码不再由平台产生 —— AI 余额不足改由
+	// **客户端 AI loop** 在应用页里呈现（§21.2 的错误码 `ai_balance_insufficient`），
+	// 服务端诊断面无从也无需给出"应用侧该怎么办"的建议。
 	apperr.CodeRuntimeTrap: {
 		"wasm trap(越界访问 / 除零 / unreachable):先看 stderr_tail 的原始 trap 信息",
 		"Go 里 panic 必须先 recover 再写错误响应,否则 panic 直接变成 guest 退出",
@@ -275,16 +315,14 @@ var hintTable = map[apperr.Code][]string{
 	},
 	apperr.CodeRuntimeOutputOverrun: {
 		fmt.Sprintf("协议帧单行上限 %d MiB:不要把大对象一次性写进响应,分页或改走 db 查询", limits.ProtocolLineMaxBytes>>20),
-		"应用响应体上限 %d MiB,超出的部分客户端也拿不到",
+		fmt.Sprintf("应用响应体上限 %d MiB,超出的部分客户端也拿不到", limits.AppResponseBodyMaxBytes>>20),
 	},
 	apperr.CodeHostCallOverBudget: {
-		fmt.Sprintf("宿主调用超过预算(ai.chat %s):缩小输入或拆成多次调用", limits.HostAIChatBudget),
+		fmt.Sprintf("宿主调用超过预算(%s):缩小输入或拆成多次调用", limits.HostCallBudgetDefault),
 		"宿主调用必须带 ctx,超时后平台按失败处理且不会返回部分结果",
 	},
-	apperr.CodeAIRateLimited: {
-		fmt.Sprintf("平台每用户 %d 次/分的网关限流:应用侧应串行 + 退避,不要并发扇出", limits.AIUserRatePerMin),
-		fmt.Sprintf("每用户在途上限 %d:并发请求会被网关挡住,页面要给可读提示而不是白屏", limits.AIInFlightPerUser),
-	},
+	// ⚠️ `apperr.CodeAIRateLimited` 的提示已随 W4 删除（总纲 §21.3）：平台不再有
+	// 服务端 AI 调用，网关限流由客户端 AI loop 自己退避（§21.2 的 `ai_rate_limited`）。
 	apperr.CodeAuthRequired: {
 		"当前请求是匿名的(未登录):身份相关能力一律不可用",
 		"需要身份时把应用配置的 access 设为 login 或 whitelist(改配置 = 发新版),或在页面上引导登录",

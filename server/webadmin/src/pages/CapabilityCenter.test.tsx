@@ -4,19 +4,36 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import CapabilityCenter from './CapabilityCenter'
 import { request } from '../api'
+import { setCurrentAdmin } from '../lib/rbac'
 
 // 2026-09-02:「市场 · 技能」与「能力中心」合并为单入口(与客户端 IA 对齐)。
-// 默认 Tab = 技能市场;三个一级 Tab:技能/智能体/审批(锁定管理随市场页)。
+// 默认 Tab = 技能市场;四个一级 Tab:技能/智能体/审批/平台内置(最后一个 2026-09-19 新增,
+// 只读展示服务端镜像里带的内置技能 —— 用户原话「我在能力中心里看不到这个」)。
 const mockRequest = vi.mocked(request)
 
 const SKILLS = [
   { id: 1, name: 'data-extract', version: '1.0.0', description: '数据提取', author: 'seed', enabled: true },
 ]
 
+const BUILTIN = [{
+  name: 'app-builder', version: '1.0.0', title: 'PicoAide 应用构建（WASM 应用）',
+  description: '用 Go 写一个应用平台上的 WASM 应用', author: 'PicoAide', category: '应用开发',
+  sha256: 'a'.repeat(64), size: 43282, files: 11, source: 'builtin',
+}]
+
 beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
     if (path === '/api/server/admin/skills') return { skills: SKILLS }
+    if (path === '/api/server/admin/skills/builtin') {
+      return {
+        dir: '/opt/picoaide/skills',
+        dir_exists: true,
+        skills: BUILTIN,
+        problems: [],
+        counts: { skills: BUILTIN.length, problems: 0 },
+      }
+    }
     if (path === '/api/server/admin/departments') return { departments: [] }
     if (path === '/api/server/admin/capability-locks') return { locks: [] }
     if (path.startsWith('/api/server/admin/capabilities/approvals')) {
@@ -25,6 +42,8 @@ beforeEach(() => {
     }
     return {}
   })
+  // 页面按 permissions 收敛(体验层):给足读权限,免得用例被"没有权限"分支短路。
+  setCurrentAdmin({ role: 'super_admin', permissions: ['market:read', 'capability:read', 'capability:write'] })
 })
 
 function renderPage(initialEntry = '/capabilities') {
@@ -60,6 +79,26 @@ describe('CapabilityCenter 能力中心(统一管理面)', () => {
   it('?tab=org 直接定位审批页(旧 /marketplace 重定向兼容)', async () => {
     renderPage('/capabilities?tab=org')
     expect(await screen.findByText(/暂无待处理能力|CodeQL 审计/)).toBeInTheDocument()
+    expect(screen.queryByText('上架技能')).not.toBeInTheDocument()
+  })
+
+  it('「平台内置」Tab 只读展示服务端镜像里的内置技能(2026-09-19)', async () => {
+    const u = userEvent.setup()
+    renderPage()
+    await screen.findByText('上架技能')
+    await u.click(screen.getByRole('tab', { name: '平台内置' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith('/api/server/admin/skills/builtin')
+    })
+    expect(await screen.findByTestId('builtin-row-app-builder')).toHaveTextContent('1.0.0')
+    expect(screen.getByTestId('builtin-dir')).toHaveTextContent('/opt/picoaide/skills')
+    // 只读面：没有任何上架/授权/审批入口。
+    expect(screen.queryByText('上架技能')).not.toBeInTheDocument()
+  })
+
+  it('?tab=builtin 直接定位平台内置页(可分享的稳定地址)', async () => {
+    renderPage('/capabilities?tab=builtin')
+    expect(await screen.findByTestId('builtin-row-app-builder')).toBeInTheDocument()
     expect(screen.queryByText('上架技能')).not.toBeInTheDocument()
   })
 })

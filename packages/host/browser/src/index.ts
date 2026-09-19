@@ -34,11 +34,13 @@ import { credentialSiteOrigin } from './credential-site.ts'
 import { browserPartitionFor, createRealElectronAdapter } from './electron-adapter.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { BrowserRuntime } from './runtime.ts'
+import { BROWSER_SURFACE_SERVICE, createSurfaceRegistry } from './surface.ts'
+import type { NativeSession } from './electron-adapter.ts'
 import { TabPool } from './pool.ts'
 import { BrowserStore } from './store.ts'
 import { applyBrowserTools, parseToolGroups } from './tools.ts'
 import { browserOverlayHtml, browserShellHtml } from './shell-pages.ts'
-import { hostLocaleFrom, type HostLocale } from 'dsh-plugin-desktop/host-locale'
+import { hostLocaleFrom, type HostLocale } from '@picoaide/dsh-host-locale'
 import type { CredentialResolver } from './types.ts'
 import type { DownloadEntry } from './store.ts'
 type DownloadEntryStatus = DownloadEntry['status']
@@ -101,6 +103,9 @@ interface ElectronSessionLike {
     get(filter: { url: string }): Promise<ElectronCookieLike[]>
     set(details: Record<string, unknown>): Promise<void>
   }
+  /** 权限守卫用的两个 handler（ Electron `Session` 满足；测试替身可以不给）。 */
+  setPermissionRequestHandler?(handler: (wc: unknown, permission: string, callback: (grant: boolean) => void) => void): void
+  setPermissionCheckHandler?(handler: (wc: unknown, permission: string, requestingOrigin: string, details: unknown) => boolean): void
 }
 
 interface ElectronLike {
@@ -133,6 +138,14 @@ export interface Config {
    * 模型/页面输入永远不参与。
    */
   credentialSites?: Record<string, string>
+  /**
+   * 应用源 scheme（渠道包 `desktop.app_origin_scheme`，组装期注入；§10/§16.1）。
+   *
+   * 用途只有一处：**导航闸门按 surface 分流**（应用窗口放行它自己的 origin、
+   * 浏览器标签一律拒 http(s)/about 之外的 scheme）。这里**不得**写死任何渠道值
+   * （CHN-3）—— 缺省值只是官方构建的兜底。
+   */
+  appOriginScheme?: string
 }
 
 /**
@@ -148,6 +161,14 @@ export interface Config {
 export function createCredentialResolver(options: {
   currentUser: () => string | null
   credentialSites?: Record<string, string>
+  /**
+   * 应用源 scheme（渠道包 `desktop.app_origin_scheme`，组装期注入；§10/§16.1）。
+   *
+   * 用途只有一处：**导航闸门按 surface 分流**（应用窗口放行它自己的 origin、
+   * 浏览器标签一律拒 http(s)/about 之外的 scheme）。这里**不得**写死任何渠道值
+   * （CHN-3）—— 缺省值只是官方构建的兜底。
+   */
+  appOriginScheme?: string
 }): CredentialResolver | undefined {
   try {
     const require = createRequire(import.meta.url)
@@ -220,6 +241,7 @@ export const Config: z<Config> = z.object({
   downloadDir: z.string(),
   toolGroups: z.array(z.string()),
   credentialSites: z.dict(z.string()),
+  appOriginScheme: z.string(),
 })
 
 /** Cap on browser API request bodies. */
@@ -393,6 +415,32 @@ export function apply(ctx: Context, config: Config = {}): void {
     ...(config.waitTimeoutMs !== undefined ? { waitTimeoutMs: config.waitTimeoutMs } : {}),
     locale: () => hostLocale(),
   })
+  /**
+   * Surface 注册表（§16.1）：本插件是**唯一**的 surface 提供者，`provide` 出去给
+   * 应用窗口宿主（`@picoaide/dsh-wasm-apps-host` 经 `@picoaide/dsh-browser/surface`
+   * 的 `BROWSER_SURFACE_SERVICE` 取得它）。浏览器标签这一半由 runtime 镜像，
+   * 应用窗口那一半由宿主注册 —— 两者共用同一套工具实现与胶囊/遮罩。
+   */
+  const surfaces = createSurfaceRegistry({
+    activeBrowserTab: () => pool.activeTab,
+    warn: (message: string) => { ctx.logger?.warn?.(message) },
+  })
+  // 本安装的应用源 scheme（渠道注入）。工具面在应用窗口 surface 上用**它自己注册时
+  // 带的 scheme** 判导航，所以这里只需要把值保存在 runtime 上供宿主注册时对齐
+  // （§16.1：surface 自带 scheme，浏览器侧不猜）。
+  const appOriginScheme = config.appOriginScheme !== undefined && config.appOriginScheme !== ''
+    ? config.appOriginScheme
+    : undefined
+  // `provide` 只在真实 Cordis 上下文里存在（单测宿主是精简替身）：缺席时静默跳过
+  // —— 那种宿主也不会有人来取这个服务；失败（重复提供）才记一条。
+  const provide = (ctx as unknown as { provide?: (name: string, value: unknown) => void }).provide
+  if (typeof provide === 'function') {
+    try {
+      provide.call(ctx, BROWSER_SURFACE_SERVICE, surfaces)
+    } catch (cause) {
+      ctx.logger?.warn?.(`pico-browser: providing the surface registry failed (${cause instanceof Error ? cause.message : String(cause)})`)
+    }
+  }
   const runtime = new BrowserRuntime(
     createRealElectronAdapter(undefined, () => hostLocale()),
     {
@@ -401,7 +449,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
     credentialResolver,
     browserPartitionFor(currentUser()),
-    { pool, store, currentUsername: currentUser, locale: () => hostLocale() },
+    { pool, store, currentUsername: currentUser, locale: () => hostLocale(), surfaces, ...(appOriginScheme === undefined ? {} : { appOriginScheme }) },
   )
   const shellOrigin = `http://127.0.0.1:${String(ctx.webServer.port)}`
   runtime.setShellOrigin(shellOrigin)
@@ -434,6 +482,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     const from = electron.session?.defaultSession
     const to = electron.session?.fromPartition?.(browserPartitionFor(currentUser()))
+    // 分区初始化即装权限守卫（§16.1 冻结：归属 = 分区初始化，不是建 tab 时）。
+    // 幂等 ⇒ 切账号反复进入也安全；不装的表现是 Electron 的 check 默认放行 camera/mic。
+    if (to !== undefined && typeof to.setPermissionRequestHandler === 'function' && typeof to.setPermissionCheckHandler === 'function') {
+      runtime.ensurePartitionGuard(to as unknown as NativeSession)
+    }
     if (from === undefined || to === undefined) return false
     const cookies = await from.cookies.get({ url: shellOrigin })
     const auth = cookies.filter((cookie) => cookie.name.startsWith(BROWSER_AUTH_COOKIE_PREFIX))

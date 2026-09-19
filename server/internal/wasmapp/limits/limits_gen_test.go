@@ -5,7 +5,7 @@
 // 上限数值一旦漂移，作者会照着错的数字写代码（例如按 "16 MiB" 设计内嵌资源，
 // 实际上限是 32 MiB），而这类错误在运行期只会表现为"线上莫名被拒"。
 //
-// 本文件里的五条门禁（每条都能真的红，变异方式见各用例注释）：
+// 本文件里的六条门禁（每条都能真的红，变异方式见各用例注释）：
 //
 //	(a) TestGeneratedArtifactsAreByteIdentical —— 提交的 limits.json / limits.md /
 //	    skill 里的 references/limits.md 与**生成器实时产物**逐字节一致；
@@ -15,13 +15,17 @@
 //	(d) TestNoUntabledNumericLiterals —— const 声明里的数值字面量，其键必须在表里；
 //	(e) TestSkillDiscipline —— SKILL 的数值全部来自 limits 表、十一条硬约束齐全、
 //	    x-abi-version 与 abi 包一致、不出现真实客户域名、引用的文件都存在；
-//	(f) TestSkillGoExampleBuildsForWasiP1 —— SKILL 的示例**真编译**一次（wasm32-wasip1）。
+//	(f) TestSkillGoExampleBuildsForWasiP1 —— SKILL 的示例**真编译**一次（wasm32-wasip1）；
+//	(g) TestAuthorDocsMatchAppConcurrency —— 作者文档的**并发语义/归因**与真源一致
+//	    （(e) 只守数字，守不住"每应用串行""平台没有并发旋钮""平台固定"这类散文漂移）。
 //
 // 变异验证记录（交付时实跑过，勿删）：
 //   - 改 Table() 里任何一个 Value 的字符串（如 wasm_max_bytes 的 "33554432" → "33554431"）
 //     ⇒ (a)(e) 变红；
 //   - 删 Table() 里的一条（如 instance_memory_pages 整条）⇒ (b)(d) 变红；
-//   - 把 §7.3 的序关系改成 ServerReadTimeout = 90s ⇒ (c) 变红。
+//   - 把 §7.3 的序关系改成 ServerReadTimeout = 90s ⇒ (c) 变红；
+//   - 把 docs/wasm-app-authoring.md 与 references/diagnostics.md 的并发表述改回
+//     "每应用串行 / 平台没有并发旋钮" ⇒ (g) 变红，改回即绿（2026-09-19 实跑）。
 package limits_test
 
 import (
@@ -52,10 +56,12 @@ const (
 	limitsSourceFile = "limits.go"
 	jsonRelPath      = "internal/wasmapp/limits/limits.json"
 	mdRelPath        = "internal/wasmapp/limits/limits.md"
-	// skillDirRelPath 是内置技能目录（仓库根相对）。为什么在 packages/vendor 下：
-	// 客户端的内置技能源头只有一个 —— dsh-memory-evolve 插件的 `skills/` 目录
-	// （lib/coi/index.js 的 PLUGIN_SKILLS_DIR），启动时整目录同步到用户技能库。
-	skillDirRelPath     = "packages/vendor/memory-evolve/skills/picoaide-app-builder"
+	// skillDirRelPath 是内置技能目录（仓库根相对）。源头只有这一个 ——
+	// 技能源就在服务端仓库内的 `server/skills/`（2026-09-19 从客户端 vendored 包
+	// packages/vendor/memory-evolve 搬来）：随服务端镜像分发
+	// （server/Dockerfile 直接 COPY 进 /opt/picoaide/skills），由员工在客户端
+	// 能力中心按需安装。**不在客户端包里**，也不再由 COI 同步链路落盘。
+	skillDirRelPath     = "server/skills/app-builder"
 	skillLimitsRelPath  = skillDirRelPath + "/references/limits.md"
 	skillExampleRelPath = skillDirRelPath + "/examples/go"
 	skillMainFile       = skillDirRelPath + "/SKILL.md"
@@ -263,7 +269,7 @@ func TestCriticalValuesAndOrdering(t *testing.T) {
 		{"GuestBudget==10s", limits.GuestBudget.Milliseconds(), 10_000, "§4.6：guest 执行预算"},
 		{"SQLStatementBudget==5s", limits.SQLStatementBudget.Milliseconds(), 5_000, "R13：单语句硬超时"},
 		{"RequestWallClock==60s", limits.RequestWallClock.Milliseconds(), 60_000, "§4.6：端到端墙钟（含排队）"},
-		{"HostAIChatBudget==30s", limits.HostAIChatBudget.Milliseconds(), 30_000, "§4.6：ai.chat 宿主预算"},
+		{"AIBridgeMaxMessages 与文档一致", int64(limits.AIBridgeMaxMessages) * 1000, 64_000, "§21.2：AI 桥 messages ≤64 条（跨端冻结契约）"},
 	}
 	for _, c := range durations {
 		if c.got != c.want {
@@ -424,6 +430,241 @@ func TestSkillDiscipline(t *testing.T) {
 	doc := readFileString(t, docPath)
 	checkNumbersComeFromLimits(t, authorDocRelPath, doc, facts)
 	checkHostnamesArePlaceholders(t, authorDocRelPath, doc)
+}
+
+// ===== (g) 作者文档的并发语义必须与真源一致 =====
+
+// authorFacingConcurrencyDocs 是三份"作者会照着他写代码"的散文载体。
+//
+// 为什么是这三份：`references/limits.md` 与 `limits.md` 是生成物（(a) 已逐字节守），
+// 而 `SKILL.md`（技能首屏，作者最先读）、`references/diagnostics.md`（排障时读）与仓库级
+// `docs/wasm-app-authoring.md` 是**手写**的并发表述载体 —— 复验（2026-09-19）实测：
+// 往 SKILL.md 塞回旧文案时旧版门禁全绿，所以它必须进扫描集。
+// 仍然不扫全仓：`docs/decisions/**`、`limits.go`、`queue.go` 里的"每应用串行"是**历史叙述**
+// （解释 2026-09-19 之前的行为），全仓扫描会把它们判成漂移。
+// 代价（认账）：`abi.md` / `publishing.md` / `app-config.md` 目前没有并发表述；将来若在这些
+// 文件里新增，需要把它们加进本表。
+var authorFacingConcurrencyDocs = []struct {
+	rel string
+	why string
+}{
+	{authorDocRelPath, "仓库级作者指南：§2.2「从作者视角看不能做」与 §9「容易做错的地方」各有一处并发表述"},
+	{skillMainFile, "SKILL 首屏（作者最先读的那份）：「并发与队列」一节给出口径"},
+	{skillDirRelPath + "/references/diagnostics.md", "SKILL 参考：`APP_QUEUE_FULL` 一行与「只在人多的时候失败」一条都教作者怎么应对排队"},
+}
+
+// concurrencyDriftClaims 是"与真源矛盾"的并发表述（**不是**"出现串行就红"）。
+//
+// 每条只覆盖**平台语义被说错**的说法：写路径确实串行（appdb 单写者），所以
+// "写仍串行" / "每应用写串行" 是**正确**表述，必须放过 —— 这也是模式里不允许出现"写"、
+// 且刻意不收"只能"（"同一应用只串行写"会被误伤）的原因。
+var concurrencyDriftClaims = []struct {
+	name string
+	re   *regexp.Regexp
+}{
+	{
+		// 每应用串行 / 同一应用内请求串行 / 每个应用默认仍然串行 / 同应用顺序执行 …
+		name: "把每应用请求说成串行",
+		re: regexp.MustCompile(
+			`(?:每|同)(?:一)?(?:个)?应用(?:内|上|里)?的?(?:全部|所有)?(?:请求|调用|读|查询)?` +
+				`(?:默认|始终|一律|永远|仍|仍然|依然|还是|都)?(?:是)?(?:串行|顺序执行)`),
+	},
+	{
+		// 平台没有并发旋钮 / 无并发参数 / 不存在并发开关 / 不给并发配置项 …
+		// 作者侧改不了是真的，但**平台有**运维可在控制台改的全局值（应用中心 → 限制项），
+		// 旧文案正是在这里把"作者不可调"错写成"平台没有"。
+		name: "说平台没有并发旋钮",
+		re: regexp.MustCompile(
+			`(?:没有|无|不存在|不给|不带)[^。；\n]{0,8}并发[^。；\n]{0,6}(?:旋钮|参数|选项|开关|配置|设置)`),
+	},
+}
+
+// concurrencyFixednessItems 是"控制台可调、却曾被文档说成固定"的项。
+//
+// 复验（2026-09-19）在 `docs/wasm-app-authoring.md` 抓到的正是这一类：把 `app_queue`
+// （默认 32、可调到 4096）、`max_instances`（默认 32、可调到 256）、`user_per_app_queued` /
+// `user_global_running`（默认 4）写成"平台固定"。它们是**默认值**，运维可在控制台改。
+// name 用于报错；re 是文档里指代该项的说法（含 JSON 键名，便于直接引用控制台字段）。
+var concurrencyFixednessItems = []struct {
+	name string
+	re   *regexp.Regexp
+}{
+	{"每应用队列（app_queue）", regexp.MustCompile(`队列|app_queue`)},
+	{"全局并发实例（max_instances）", regexp.MustCompile(`全局实例|实例上限|实例池|max_instances`)},
+	{"单用户同应用占槽（user_per_app_queued）", regexp.MustCompile(`占槽|同应用排队|user_per_app_queued`)},
+	{"单用户跨应用在跑（user_global_running）", regexp.MustCompile(`跨应用在跑|user_global_running`)},
+	{"单用户同应用在跑（user_per_app_running）", regexp.MustCompile(`同应用在跑|user_per_app_running`)},
+	{"每应用并发（app_running）", regexp.MustCompile(`并发|app_running`)},
+}
+
+// fixednessWordRe 是"说成固定/不可调"的词形。
+var fixednessWordRe = regexp.MustCompile(`固定|不可调|不能调|无法调|改不了|调不了`)
+
+// authorCannotToken 是"作者不可调"的替身。
+//
+// "作者不可调（运维可在控制台改）"是**正确**归因，但字面含"不可调" ⇒ 先换成这个 token：
+// 它既算补正标记（同句说了可调），又不会在 masking 时被拆成"可调"自我洗白。
+const authorCannotToken = "__AUTHOR_CANNOT_TUNE__"
+
+// fixednessCorrectiveRe 是"同句已给出可调/默认值口径"的补正标记。
+// ⚠️ 刻意不含裸"可调"：否则"不可调"会把自己洗白（"不可调整"同理，故 fixednessIsCorrected 先做 masking）。
+var fixednessCorrectiveRe = regexp.MustCompile(
+	`默认值|不是固定|非固定|` + authorCannotToken +
+		`|可调整|可调节|可改|能改|可配置|可设置|可调到|可调至|可调范围|运维可改|运维可调|控制台可改|控制台可调`)
+
+// fixednessIsCorrected 判断一个子句是否已经给出"默认值/可调"的补正。
+func fixednessIsCorrected(clause string) bool {
+	masked := strings.ReplaceAll(clause, "作者不可调", authorCannotToken)
+	for _, f := range []string{"不可调整", "不可调", "不能调", "无法调", "调不了", "改不了"} {
+		masked = strings.ReplaceAll(masked, f, "×")
+	}
+	return fixednessCorrectiveRe.MatchString(masked)
+}
+
+// splitClauses 把散文切成子句（。；与换行；`|` 不切 —— markdown 表格的一行就是一句）。
+func splitClauses(flat string) []string {
+	return strings.FieldsFunc(flat, func(r rune) bool { return r == '。' || r == '；' || r == '\n' })
+}
+
+// clipRunes 按字符（不是字节）截断，避免把中文切成半个字。
+func clipRunes(s string, maxRunes int) string {
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes]) + "…"
+}
+
+// checkAdjustableItemsAreNotCalledFixed 断言"控制台可调项"没有被描述成固定/不可调。
+//
+// 判据是**子句级**的：一个子句里同时出现"可调项"与"固定/不可调"字样，而整句没有任何
+// "默认值 / 可调 / 作者不可调"补正 ⇒ 报错。
+func checkAdjustableItemsAreNotCalledFixed(t *testing.T, rel, flat string) {
+	t.Helper()
+	for _, clause := range splitClauses(flat) {
+		if !fixednessWordRe.MatchString(clause) {
+			continue
+		}
+		for _, item := range concurrencyFixednessItems {
+			hit := item.re.FindString(clause)
+			if hit == "" {
+				continue
+			}
+			if fixednessIsCorrected(clause) {
+				break
+			}
+			t.Errorf("%s 把控制台可调项说成固定/不可调（%s，命中 %q）：…%s…\n"+
+				"  这些项是**默认值**不是固定值：app_queue 默认 32（可调到 4096）、max_instances 默认 32（可调到 256）、"+
+				"user_per_app_queued / user_global_running 默认 4，运维可在控制台「应用中心 → 限制项」改。\n"+
+				"  正确写法：\"作者不可调（运维可在控制台…改）\"＋\"都是默认值\"；不要写\"平台固定 / 全部固定\"。",
+				rel, item.name, hit, clipRunes(clause, 60))
+			break
+		}
+	}
+}
+
+// concurrencyNumberClaimRe 抓"<数字>（个|路）请求？并发"这种把数值写进并发表述的形态。
+var concurrencyNumberClaimRe = regexp.MustCompile(`([0-9]+)\s*(?:个|路)?\s*请求?并发`)
+
+// precededByOtherLimitItem 判断数值前紧邻的是不是别的可调项（如"队列 32 个请求并发"），
+// 是则不算"每应用并发"的数值声明（那是在说队列长度）。
+func precededByOtherLimitItem(flat string, at int) bool {
+	from := max(0, at-24)
+	if from >= at {
+		return false
+	}
+	return regexp.MustCompile(`队列|实例|占槽|排队|在跑|app_queue|max_instances`).MatchString(flat[from:at])
+}
+
+// TestAuthorDocsMatchAppConcurrency 守"作者文档里的并发语义与 limits 真源一致"。
+//
+// 背景（2026-09-19）：平台把"同应用请求串行"改成"每应用默认 4 个并发（**读并发**；
+// 写仍串行），但单个用户在同一应用内默认仍只有 1 路"，队列/实例等上限从编译期常量
+// 变成控制台可改项（默认值不变）。生成物由 (a) 逐字节守住，但**散文**两处漂移了；
+// 而 (e) 只守"数字+单位"，守不住"每应用串行""平台没有并发旋钮""平台固定"这类句子。
+//
+// 判据（全部用真源值，不硬编码 4）：
+//  1. `AppConcurrency > 1` 时，文档不得出现 concurrencyDriftClaims 里的说法（串行/没有旋钮）；
+//  2. 文档不得把 concurrencyFixednessItems 里的**控制台可调项**说成固定/不可调
+//     （子句级，且同句有"默认值/可调"补正时放过）；
+//  3. 每份文档都必须有"并发"与真源数值**同句**（相距 ≤20 字符、不跨句/跨行）出现的表述；
+//  4. 任何"<数字> 个/路 请求并发"的写法都必须等于真源数值（防"文件里两处数字不一致"）；
+//  5. `AppConcurrency == 1`（真回到串行）时整条门禁自动让位 —— 那时"每应用串行"是**对的**，
+//     值驱动的门禁不能把历史语义钉死。
+//
+// 刻意**不**写成"断言某个整句存在"：断言的是"矛盾说法不出现 + 真源数值就在这句话里"。
+// 已知边界（复验 2026-09-19 实测，不假装没有）：
+//   - 换一套完全不含关键词的说法（如"同一应用一次只处理一个请求"）能绕过 1/2；
+//   - 数值锚 3 是**文件级**的（同文件另一行写着真源数值即可满足），只有 4 能抓"同一形态的数字写错"；
+//   - 只守散文不守实现：把 queue/appdb 改回串行而文档不动，本用例抓不到（那是 queue/appdb 测试的活）。
+//
+// 变异方式（2026-09-19 实跑，命令与输出见交付报告）：
+//   - 两处文案改回"每应用串行 / 平台没有并发旋钮" ⇒ 红；
+//   - 把"平台固定"写回并发表述 ⇒ 红（第 2 条）；
+//   - 往 SKILL.md 追加旧文案 ⇒ 红（第 1 条，SKILL.md 已在扫描集里）；
+//   - 把某处写成"2 个请求并发"而别处仍写 4 ⇒ 红（第 4 条）；
+//   - 把 `AppConcurrency` 改回 1（并同步生成物）⇒ 只打 Log 不拦（第 5 条）。
+func TestAuthorDocsMatchAppConcurrency(t *testing.T) {
+	// 两个别名分叉会让"每应用并发到底几个"这句话本身失去指代 —— 先钉住它。
+	if limits.AppRuntimeConcurrency != limits.AppConcurrency {
+		t.Errorf("AppRuntimeConcurrency(%d) != AppConcurrency(%d)：队列槽位与文档口径必须同源",
+			limits.AppRuntimeConcurrency, limits.AppConcurrency)
+	}
+
+	concurrency := limits.AppConcurrency
+	wantNumber := strconv.Itoa(concurrency)
+	repoRoot := repoRootOf(t)
+
+	for _, doc := range authorFacingConcurrencyDocs {
+		text := readFileString(t, filepath.Join(repoRoot, filepath.FromSlash(doc.rel)))
+
+		if concurrency <= 1 {
+			// 串行语义下旧表述是对的：门禁自动让位，只在日志里留一句（免得"门禁悄悄失效"）。
+			t.Logf("%s 未受并发语义约束：AppConcurrency=%d 表示同应用请求仍是串行（%s）",
+				doc.rel, concurrency, doc.why)
+			continue
+		}
+
+		// 中文散文按列宽折行，说法可能被换行切开 ⇒ 先把换行去掉再扫（短句内的跨行拼接
+		// 不会制造误报：两条模式都要求词紧挨着，句子边界上的"。"不在允许的间隔里）。
+		flat := strings.ReplaceAll(text, "\n", "")
+
+		// —— 1. 旧漂移说法（串行 / 没有旋钮）——
+		for _, claim := range concurrencyDriftClaims {
+			if loc := claim.re.FindStringIndex(flat); loc != nil {
+				t.Errorf("%s 出现与真源矛盾的并发表述（%s）：…%s…\n"+
+					"  AppConcurrency=%d 表示同一应用最多 %d 个请求并发（读并发；**写仍串行**；单个用户在同一应用内默认仍只有 1 路），"+
+					"运维可在控制台「应用中心 → 限制项」改全局值。\n"+
+					"  正确口径见 %s 的「想调并发 / 队列参数」一行的写法：写成\"作者不可调（运维可在控制台改）\"，不要写成\"平台没有\"。",
+					doc.rel, claim.name, clip(flat[max(0, loc[0]-24):min(len(flat), loc[1]+24)]),
+					concurrency, concurrency, authorDocRelPath)
+			}
+		}
+
+		// —— 2. 把"控制台可调项"说成固定/不可调 ——
+		checkAdjustableItemsAreNotCalledFixed(t, doc.rel, flat)
+
+		// —— 3. 数值锚（文件级）：必须告诉作者真实的默认并发 ——
+		num := regexp.QuoteMeta(wantNumber)
+		valueAnchor := regexp.MustCompile(`(?:并发[^。；\n]{0,20}?` + num + `|` + num + `[^。；\n]{0,20}?并发)`)
+		if !valueAnchor.MatchString(text) {
+			t.Errorf("%s 里找不到「并发」与真源数值 %d 同句出现的表述 —— 文档必须告诉作者真实的默认并发，"+
+				"只把旧说法删掉不算修好（真源：limits.AppConcurrency）。若默认值真的变了，"+
+				"请同步本文档的并发表述（数值本身以 limits.go 为准）。", doc.rel, concurrency)
+		}
+
+		// —— 4. 数值锚（逐处）："<数字> 个/路 请求并发"必须等于真源值 ——
+		for _, m := range concurrencyNumberClaimRe.FindAllStringSubmatchIndex(flat, -1) {
+			if precededByOtherLimitItem(flat, m[0]) {
+				continue
+			}
+			if got := flat[m[2]:m[3]]; got != wantNumber {
+				t.Errorf("%s 的并发表述写成 %q（…%s…），与真源 AppConcurrency=%d 不一致 —— "+
+					"同一份文档里出现两个并发数字时，作者只会照错的那个设计。",
+					doc.rel, got, clipRunes(flat[max(0, m[0]-16):min(len(flat), m[1]+16)], 40), concurrency)
+			}
+		}
+	}
 }
 
 // skillScannedFiles 返回被扫描的 skill 文本文件（含生成物？**不含** limits.md：
