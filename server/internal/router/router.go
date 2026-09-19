@@ -150,6 +150,12 @@ func registerWasm(r *gin.Engine, d Deps) {
 	wg.DELETE("/:app_id", d.Wasm.Delete)
 	wg.GET("/:app_id/diagnostics", d.Wasm.Diagnostics)
 	wg.GET("/:app_id/schema", d.Wasm.Schema)
+	// 发布者本人的版本历史 + 审核结论（含被拒理由）。R1-pm-3：审核开关一旦打开，
+	// 发布者此前只有发布那一刻的"待审核"一句话，之后**永远**收不到结论
+	// （reason 写了没人读、版本号又永久占位）—— 这条是作者侧唯一的结论出口。
+	// 鉴权沿用 ownedApp：**非发布者一律 404，且与"应用不存在"逐字节同形**
+	// （不泄露存在性）；返回体不含制品字节。
+	wg.GET("/:app_id/releases", d.Wasm.MyReleases)
 	wg.GET("/catalog", d.Wasm.Catalog)
 
 	// ---- 分片上传与续传（§4.2 / §7.3）----

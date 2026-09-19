@@ -135,6 +135,11 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 	// ===== ⑤ 准入（R24/R25）=====
 	// 资源目录：抽取根由 assets 按 (appID, releaseID) 推导（§4.2），应用读到的
 	// 与宿主读到的必须是同一份（应用用 assets.read("picoaide.app.json") 读自己的配置）。
+	//
+	// ⚠️ 目录仍然**每请求打开**（三次 Lstat，实测 ≈30 µs）：它是"平台状态"断言
+	// （目录缺失 = 500 平台故障），不能因为 `(app_id, release_id)` 级缓存里有字节
+	// 就跳过。真正贵的三项（资源配置读盘 + 解析、资源读盘、SHA-256）走 releaseContent
+	// 的缓存（R1-rt-3），命中时零读盘。
 	store, aerr := s.openAssets(appID, rel)
 	if aerr != nil {
 		s.logf("appserver: 资源目录不可用 app=%s release=%d: %v", appID, rel.ID, aerr)
@@ -142,7 +147,8 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 			WithHint("这是平台侧故障（该版本的资源目录缺失）；请告知应用发布者或平台管理员"), false)
 		return
 	}
-	cfg, cerr := loadAppConfig(store)
+	rc := s.openReleaseContent(appID, rel, store)
+	cfg, cerr := rc.Config()
 	if cerr != nil {
 		// ⚠️ 读不到/解析不了应用配置**绝不**当匿名处理：那会把 RequiresLogin 应用
 		// 意外开放（发布期已经校验过的文件，线上读不到属于平台故障）。
@@ -241,7 +247,8 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 	// ===== ⑨ 静态资源（§4.2 / §4.6 响应缓存）=====
 	// 命中"本版本抽取出的资源"就由宿主直接服务（缓存键 app_id + version + path）；
 	// 路由判定规则见 static.go 的 serveStatic 注释（含"要求登录的应用入口不直出"的特例）。
-	if s.serveStatic(w, r, appID, rel, store, !cfg.RequiresLogin()) {
+	// `If-None-Match` 命中的 304 在缓存命中时**不读盘、不算哈希**（R1-rt-2）。
+	if s.serveStatic(w, r, rel, rc, !cfg.RequiresLogin()) {
 		return
 	}
 
@@ -388,6 +395,18 @@ func loadAppConfig(store *assets.Store) (appcfg.Config, *apperr.Error) {
 func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 	rel *serverstore.WasmRelease, cfg appcfg.Config, store *assets.Store, user *abi.User, sessionKey string) {
 
+	// ===== 应用日志（§5.1）=====
+	// 每请求一个 logbuf（它的限额语义唯一实现在那个包），请求结束后由 flushAppLogs
+	// 转写到平台日志出口。
+	//
+	// ⚠️ 刷盘必须发生在**执行槽与库句柄都归还之后**（R1-rt-6）。defer 是后进先出，
+	// 所以这里**最先注册** ⇒ 最后执行。旧实现把它注册在句柄之后（LIFO 最先跑），
+	// 于是 ≤100 条 × 4 KiB 的同步 stderr 写发生在**持有执行槽 + 库句柄 + 模块引用**
+	// 的期间：容器 log driver 慢/磁盘满时，这段写会直接吃掉稀缺的执行槽。
+	// 语义不变（仍然同步、仍然每请求一次、仍然有界），只是移出持有期。
+	logs := logbuf.New()
+	defer s.flushAppLogs(appID, logs)
+
 	// 读体放在**排队之前**：慢客户端不该占着执行槽（执行槽是稀缺资源，
 	// 每应用并发上限见 limits.AppRuntimeConcurrency，§4.6）。
 	body, aerr := readRequestBody(r)
@@ -451,11 +470,6 @@ func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 	// 时，本请求必须把自己的持有者身份收干净 —— 否则同应用的并发请求会在看门狗
 	// （appdb 的 5 s 硬超时）之前一直被 fail-closed 拒绝。
 	defer db.endRequest()
-
-	// 应用日志：每请求一个 logbuf（§5.1 的限额语义唯一实现在那个包），
-	// 请求结束后由 flushAppLogs 转写到平台日志出口。
-	logs := logbuf.New()
-	defer s.flushAppLogs(appID, logs)
 
 	// 宿主能力面（§5.1 封闭清单）：身份由宿主注入，应用伪造不了（§7.1 身份契约）。
 	caps := &hostcap.Capabilities{

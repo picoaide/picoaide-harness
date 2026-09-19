@@ -151,6 +151,9 @@ var wasmGatedRoutes = []string{
 	"DELETE /api/client/v2/apps/wasm/:app_id",
 	"GET /api/client/v2/apps/wasm/:app_id/diagnostics",
 	"GET /api/client/v2/apps/wasm/:app_id/schema",
+	// R1-pm-3：发布者本人的版本历史 + 审核结论（含被拒理由）。条件注册
+	// （d.Wasm == nil 时整片消失）⇒ 新增就必须登记，否则本表反向断言红。
+	"GET /api/client/v2/apps/wasm/:app_id/releases",
 	"GET /api/client/v2/apps/wasm/catalog",
 	// 分片上传（§4.2）
 	"POST /api/client/v2/apps/wasm/uploads",

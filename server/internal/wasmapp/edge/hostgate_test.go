@@ -14,7 +14,11 @@ import (
 
 // 变异验证（§5.5「变异验证」）：
 //   - MatchHost 去掉"多级标签 ⇒ HostUnknown"分支 ⇒ TestMatchHostRejectsNestedLabel 必红；
-//   - HostGate 的 HostUnknown 分支改为回落主站 ⇒ TestGateNeverFallsBackToMain 必红；
+//   - MatchHost 把"非本基域 ⇒ HostUnknown"改回 HostMain（R1-sec-3 的修复点）⇒
+//     TestMatchHost 的 evil.test/IP/localhost 用例与
+//     TestGateUnknownHostIs404ExceptProbePaths 必红；
+//   - HostGate 的 HostUnknown 分支改为无条件回落主站 ⇒ TestGateNeverFallsBackToMain 必红；
+//   - HostGate 去掉探针例外（isProbeRequest）⇒ TestGateProbeEndpointsReachableOnAnyHost 必红；
 //   - CheckOrigin 在 Origin 存在时改为跳过校验 ⇒ TestCheckOriginRejectsCrossOrigin 必红；
 //   - StripAppControlledHeaders 去掉白名单过滤 ⇒ TestStripAppHeaders 必红。
 
@@ -39,9 +43,16 @@ func TestMatchHost(t *testing.T) {
 		{"-bad.apps.example.com", "", HostUnknown, "非法 label 形态"},
 		{"bad-.apps.example.com", "", HostUnknown, "非法 label 形态"},
 		{"bad_underscore.apps.example.com", "", HostUnknown, "下划线不是合法 app_id 字符"},
-		{"other.example.com", "", HostMain, "不是本基域 ⇒ 主站（IP 直连/其它域名反代）"},
-		{"example.com", "", HostMain, "上层域名不是应用子域"},
-		{"", "", HostMain, "空 Host（HTTP/1.0 探测）"},
+		// R1-sec-3：与基域无关的主机名不再回落主站（否则门户/管理台/登录 API 被任意
+		// 主机名镜像，且 Host 变成请求方可选的开关）。
+		{"other.example.com", "", HostUnknown, "不是本基域 ⇒ 404（R1-sec-3，不再回落主站）"},
+		{"example.com", "", HostUnknown, "上层域名不是应用子域 ⇒ 404（主站只能在已声明的主机名上）"},
+		{"evil.test", "", HostUnknown, "任意域名 ⇒ 404"},
+		{"apps.example.com.evil.test", "", HostUnknown, "基域作为前缀的伪造域名 ⇒ 404（后缀判定不认前缀）"},
+		{"127.0.0.1:8080", "", HostUnknown, "IP 直连 ⇒ 404（探针端点例外见 HostGate）"},
+		{"[::1]:8080", "", HostUnknown, "IPv6 直连 ⇒ 404"},
+		{"localhost", "", HostUnknown, "localhost ⇒ 404"},
+		{"", "", HostUnknown, "空 Host（HTTP/1.0 探测）⇒ 也只在探针端点上有例外"},
 	}
 	for _, c := range cases {
 		gotLab, gotKind := MatchHost(c.host, testBase)
@@ -51,11 +62,11 @@ func TestMatchHost(t *testing.T) {
 	}
 }
 
-// TestMatchHostDisabled：未配置基域时全部当主站（既有部署行为不变）。
+// TestMatchHostDisabled：未配置基域时全部当主站（既有部署行为不变，R1-sec-3 的回归判据 ④）。
 func TestMatchHostDisabled(t *testing.T) {
-	for _, h := range []string{"", "a.b", "expense-note.apps.example.com"} {
+	for _, h := range []string{"", "a.b", "expense-note.apps.example.com", "evil.test", "127.0.0.1:8080", "localhost", "[::1]"} {
 		if lab, kind := MatchHost(h, ""); kind != HostMain || lab != "" {
-			t.Errorf("未启用子域时 MatchHost(%q)=(%q,%d)，want 主站", h, lab, kind)
+			t.Errorf("未启用子域时 MatchHost(%q)=(%q,%d)，want 主站（单域部署必须逐字保持原行为）", h, lab, kind)
 		}
 	}
 }
@@ -195,6 +206,7 @@ func TestGateExtraMainHostsRoutesUnknownHostsToMain(t *testing.T) {
 
 // TestGateNeverFallsBackToMain 是 §4.8 的核心判据：
 // 未知/畸形应用主机名一律 404，**绝不**回落主站（否则每个子域都是主站镜像）。
+// R1-sec-3 之后"未知"包含**一切不是本基域的主机名**（任意域名 / IP 直连 / localhost）。
 func TestGateNeverFallsBackToMain(t *testing.T) {
 	main := &recordingHandler{}
 	apps := &recordingHandler{}
@@ -209,8 +221,10 @@ func TestGateNeverFallsBackToMain(t *testing.T) {
 		{"missing." + testBase, 404, ""},
 		{"a.b." + testBase, 404, ""},       // 多级标签
 		{"bad_label." + testBase, 404, ""}, // 非法形态
-		{testBase, 200, "MAIN"},            // 主站
-		{"other.example.com", 200, "MAIN"}, // 非本基域
+		{testBase, 200, "MAIN"},            // 主站（= 基域本身）
+		{"other.example.com", 404, ""},     // 非本基域 ⇒ 404（R1-sec-3）
+		{"evil.test", 404, ""},             // 任意域名 ⇒ 404（R1-sec-3）
+		{"127.0.0.1:8080", 404, ""},        // IP 直连 ⇒ 404（R1-sec-3）
 	}
 	for _, c := range cases {
 		req := httptest.NewRequest("GET", "http://"+c.host+"/", nil)
@@ -224,9 +238,163 @@ func TestGateNeverFallsBackToMain(t *testing.T) {
 			t.Errorf("host=%q body=%q want 含 %q", c.host, w.Body.String(), c.wantBody)
 		}
 	}
-	if main.hits != 2 {
-		t.Fatalf("主站被命中 %d 次，want 2（只有基域本身与非本基域域名）", main.hits)
+	if main.hits != 1 {
+		t.Fatalf("主站被命中 %d 次，want 1（只有基域本身；其余一律 404）", main.hits)
 	}
+}
+
+// TestGateUnknownHostIs404ExceptProbePaths 是 R1-sec-3 的**行为级**判据（判据 ①③⑤）。
+//
+// 语义（配置了基域时）：
+//   - ① 与基域无关的主机名（`evil.test`、容器/Pod IP、`localhost`、反代别名）上的
+//     门户 `/`、`/portal`、管理台 `/admin/*`、管理登录 API、换票端点**一律 404**，
+//     且主站处理器**一次都不被命中**（"不回落"要按调用次数断言，不能只看状态码）；
+//   - ③ `<app>.<基域>` 走应用分支 —— **探针例外不得劫持应用子域**（应用可能有自己的
+//     `/healthz`，把它抢到主站等于改应用行为）；
+//   - ⑤ 任意 Host（**含容器 IP / localhost**）上的 `/healthz`、`/readyz` 必须照常 200
+//     —— 这是 k8s/compose 健康检查的既有姿势，404 掉它们会让编排器杀掉健康实例；
+//   - 例外只按**幂等方法 + 精确路径**开：`POST /healthz` 在未知主机上照旧 404。
+//
+// 变异验证（两条都必须让本用例变红）：
+//   - `MatchHost` 的"非本基域 ⇒ HostUnknown"改回 HostMain ⇒ ① 的每个用例都会命中主站；
+//   - 删掉 `ServeHTTP` 里的 `isProbeRequest` 例外 ⇒ ⑤ 的每个用例都变成 404。
+func TestGateUnknownHostIs404ExceptProbePaths(t *testing.T) {
+	const base = testBase
+	unknownHosts := []string{
+		"evil.test",                  // 任意域名（钓鱼面）
+		"127.0.0.1:8080",             // 容器/Pod IP 直连（编排探针正是这种 Host）
+		"localhost:8080",             // localhost
+		"picoaide-alias.example.org", // 反代别名 / 渠道第二域名
+		"a.b." + base,                // 形态非法的多级子域
+	}
+	mainSitePaths := []string{"/", "/portal", "/admin/", "/api/server/admin/login", "/app-ticket"}
+
+	newGate := func(baseDomain string) (*HostGate, *recordingHandler, *recordingHandler) {
+		main := &recordingHandler{}
+		apps := &recordingHandler{}
+		return &HostGate{BaseDomain: func() string { return baseDomain }, Main: main, Apps: apps}, main, apps
+	}
+	serve := func(g *HostGate, method, host, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, "http://"+host+path, nil)
+		req.Host = host
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, req)
+		return w
+	}
+
+	t.Run("① 未知主机名上的主站面一律 404 且不命中主站", func(t *testing.T) {
+		g, main, apps := newGate(base)
+		for _, host := range unknownHosts {
+			for _, p := range mainSitePaths {
+				w := serve(g, http.MethodGet, host, p)
+				if w.Code != http.StatusNotFound {
+					t.Errorf("host=%q path=%q code=%d，want 404（R1-sec-3：未知主机名不得服务主站）",
+						host, p, w.Code)
+				}
+				if strings.Contains(w.Body.String(), "MAIN") {
+					t.Errorf("host=%q path=%q 返回了主站内容（回落主站）", host, p)
+				}
+			}
+		}
+		if main.hits != 0 {
+			t.Fatalf("主站被命中 %d 次，want 0（未知主机名不得回落主站）", main.hits)
+		}
+		if len(apps.labels) != 0 {
+			t.Fatalf("未知主机名不得进应用分支，labels=%v", apps.labels)
+		}
+	})
+
+	t.Run("② 基域本身照常是主站", func(t *testing.T) {
+		g, main, apps := newGate(base)
+		for _, p := range append([]string{"/healthz", "/readyz"}, mainSitePaths...) {
+			w := serve(g, http.MethodGet, base, p)
+			if !strings.Contains(w.Body.String(), "MAIN") {
+				t.Errorf("基域 %q path=%q 必须走主站，got %d body=%.40q", base, p, w.Code, w.Body.String())
+			}
+		}
+		if main.hits != len(mainSitePaths)+2 || len(apps.labels) != 0 {
+			t.Fatalf("主站命中 %d 次（want %d）、应用标签 %v（want 空）",
+				main.hits, len(mainSitePaths)+2, apps.labels)
+		}
+	})
+
+	t.Run("③ 应用子域走应用分支，探针例外不劫持它", func(t *testing.T) {
+		g, main, apps := newGate(base)
+		for _, p := range []string{"/", "/healthz", "/readyz"} {
+			w := serve(g, http.MethodGet, "expense-note."+base, p)
+			if !strings.Contains(w.Body.String(), "APP") {
+				t.Errorf("应用子域 path=%q 必须走应用分支，got %d body=%.40q", p, w.Code, w.Body.String())
+			}
+		}
+		if main.hits != 0 {
+			t.Fatal("§4.8 硬规则：应用子域绝不回流主站（探针例外只对 HostUnknown 生效）")
+		}
+		if len(apps.labels) != 3 {
+			t.Fatalf("应用标签=%v，want 3 次（应用自己的 /healthz 不能被主站抢走）", apps.labels)
+		}
+	})
+
+	t.Run("⑤ 任意 Host 上的 /healthz、/readyz 都是 200", func(t *testing.T) {
+		// 只列"应当由主站服务探针"的主机名：基域本身 + 未知主机名。应用子域上的
+		// `/healthz` 归应用（见 ③）—— 探针例外绝不能把应用自己的端点抢走。
+		hosts := append([]string{base}, unknownHosts...)
+		g, main, apps := newGate(base)
+		for _, host := range hosts {
+			for _, p := range []string{"/healthz", "/readyz"} {
+				w := serve(g, http.MethodGet, host, p)
+				if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "MAIN") {
+					t.Errorf("host=%q path=%q code=%d body=%.40q，want 200 且由探针端点服务",
+						host, p, w.Code, w.Body.String())
+				}
+			}
+		}
+		if want := 2 * len(hosts); main.hits != want {
+			t.Fatalf("主站命中 %d 次，want %d（探针例外只对未知主机与基域生效）", main.hits, want)
+		}
+		if len(apps.labels) != 0 {
+			t.Fatalf("这些主机名不该进应用分支，labels=%v", apps.labels)
+		}
+	})
+
+	t.Run("例外按精确路径 + 幂等方法开，不是整个 Host 放行", func(t *testing.T) {
+		g, main, _ := newGate(base)
+		// 精确路径：`/healthz/`、`/healthz/x`、`/readyz?x=1` 之外的形态不得借例外进主站。
+		for _, p := range []string{"/healthz/", "/healthz/x", "/ready", "/health"} {
+			if w := serve(g, http.MethodGet, "127.0.0.1:8080", p); w.Code != http.StatusNotFound {
+				t.Errorf("未知主机 path=%q code=%d，want 404（例外必须精确匹配探针路径）", p, w.Code)
+			}
+		}
+		// 非幂等方法：`POST /healthz` 不得借例外进主站写面。
+		if w := serve(g, http.MethodPost, "127.0.0.1:8080", "/healthz"); w.Code != http.StatusNotFound {
+			t.Errorf("POST /healthz 在未知主机上 code=%d，want 404（例外只覆盖 GET/HEAD）", w.Code)
+		}
+		// 带 query 的探针（编排器会带 ?verbose=1 之类）：URL.Path 不含 query ⇒ 仍然放行。
+		if w := serve(g, http.MethodGet, "127.0.0.1:8080", "/readyz?verbose=1"); w.Code != http.StatusOK {
+			t.Errorf("GET /readyz?verbose=1 code=%d，want 200（探针常带 query）", w.Code)
+		}
+		if main.hits != 1 {
+			t.Fatalf("主站命中 %d 次，want 1（只有 /readyz?verbose=1 这一条合法探针）", main.hits)
+		}
+	})
+
+	t.Run("④ 未配基域 ⇒ 任意 Host 照常走主站（回归）", func(t *testing.T) {
+		g, main, apps := newGate("")
+		hosts := append([]string{"anything.example.net"}, unknownHosts...)
+		for _, host := range hosts {
+			for _, p := range []string{"/", "/healthz", "/readyz"} {
+				w := serve(g, http.MethodGet, host, p)
+				if !strings.Contains(w.Body.String(), "MAIN") {
+					t.Errorf("未配基域时 host=%q path=%q 必须走主站，got %d", host, p, w.Code)
+				}
+			}
+		}
+		if len(apps.labels) != 0 {
+			t.Fatalf("未配基域时不该进应用分支，labels=%v", apps.labels)
+		}
+		if want := 3 * len(hosts); main.hits != want {
+			t.Fatalf("主站命中 %d 次，want %d", main.hits, want)
+		}
+	})
 }
 
 // TestGate404WritesSecurityHeaders：§4.8「含 4xx/5xx」。
@@ -657,16 +825,20 @@ func TestGatePicksUpBaseDomainChangeWithoutRestart(t *testing.T) {
 	if rec := serve("expense-note.apps.example.com"); rec.Code != 200 || rec.Body.String() != "APP" {
 		t.Fatalf("配置基域后应用子域必须立刻进应用分支，得到 %d %q", rec.Code, rec.Body.String())
 	}
-	if rec := serve("harness.example.com"); rec.Body.String() != "MAIN" {
-		t.Fatalf("非本基域的主机名仍走主站，得到 %q", rec.Body.String())
+	if rec := serve("harness.example.com"); rec.Code != 404 || strings.Contains(rec.Body.String(), "MAIN") {
+		t.Fatalf("配置基域后非本基域的主机名必须 404（R1-sec-3：不再回落主站），得到 %d %q",
+			rec.Code, rec.Body.String())
 	}
 	if rec := serve("a.b.apps.example.com"); rec.Code != 404 {
 		t.Fatalf("多级标签仍必须 404（通配证书只覆盖一级），得到 %d", rec.Code)
 	}
 
-	// ③ 再清空：立刻回到"全部走主站"。
+	// ③ 再清空：立刻回到"全部走主站"（单域部署的回归判据）。
 	current = ""
 	if rec := serve("expense-note.apps.example.com"); rec.Body.String() != "MAIN" {
 		t.Fatalf("清空基域后应立刻回到主站，得到 %q", rec.Body.String())
+	}
+	if rec := serve("harness.example.com"); rec.Body.String() != "MAIN" {
+		t.Fatalf("清空基域后任意主机名都应回到主站，得到 %q", rec.Body.String())
 	}
 }

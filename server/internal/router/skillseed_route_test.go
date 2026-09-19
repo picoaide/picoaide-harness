@@ -170,9 +170,10 @@ func TestBuiltinSkillsRequireBearerAuth(t *testing.T) {
 	}
 	var payload struct {
 		Skills []struct {
-			Name   string `json:"name"`
-			Source string `json:"source"`
-			SHA256 string `json:"sha256"`
+			Name    string `json:"name"`
+			Source  string `json:"source"`
+			SHA256  string `json:"sha256"`
+			Version string `json:"version"`
 		} `json:"skills"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
@@ -192,8 +193,11 @@ func TestBuiltinSkillsRequireBearerAuth(t *testing.T) {
 	if got := w.Header().Get("X-Skill-Checksum"); got != payload.Skills[0].SHA256 {
 		t.Fatalf("归档 X-Skill-Checksum = %q，清单 sha256 = %q（客户端靠这个头做完整性对照）", got, payload.Skills[0].SHA256)
 	}
-	if got := w.Header().Get("X-Skill-Version"); got != "1.0.0" {
-		t.Fatalf("X-Skill-Version = %q", got)
+	// 头必须与**同一份清单**逐字一致：此前这里钉死字面量 "1.0.0"，技能提版本
+	// （app-builder 于 2026-09-19 提到 1.1.0）后用例就假红 —— 真正的不变量是
+	// "头 == 清单里的版本"，不是某个具体号（谁改版本都不该动这条用例）。
+	if got := w.Header().Get("X-Skill-Version"); got != payload.Skills[0].Version {
+		t.Fatalf("X-Skill-Version = %q，清单 version = %q（客户端靠这个头核对版本）", got, payload.Skills[0].Version)
 	}
 }
 
@@ -277,7 +281,9 @@ func TestBuiltinSkillsAdminFaceRequiresAdminSession(t *testing.T) {
 	if len(payload.Skills) != 1 || payload.Skills[0].Name != "app-builder" {
 		t.Fatalf("诊断面必须显示镜像里的真资产: %+v", payload.Skills)
 	}
-	if payload.Skills[0].Version != "1.0.0" || len(payload.Skills[0].SHA256) != 64 || payload.Skills[0].Files < 10 {
+	// 意图是"这三项**在不在**"，不是"等于某个号"：版本号属技能内容（会随内容提升），
+	// 钉字面量会让每次提版本都假红（2026-09-19 app-builder 1.0.0→1.1.0 即如此）。
+	if payload.Skills[0].Version == "" || len(payload.Skills[0].SHA256) != 64 || payload.Skills[0].Files < 10 {
 		t.Fatalf("诊断面清单行缺 version/sha256/files: %+v", payload.Skills[0])
 	}
 	if len(payload.Problems) != 0 {

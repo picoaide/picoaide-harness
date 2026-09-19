@@ -39,6 +39,46 @@ type failureContext struct {
 	// 错误文案若还硬写"64 MiB"，排障会被直接误导（应用作者按 64 MiB 去优化，
 	// 而真实上限是 128 MiB）。文案与生效值必须同源。
 	memoryPages uint32
+	// peakMemoryBytes 是本次运行采样到的**线性内存峰值**（字节；0 = 没采到）。
+	//
+	// 为什么必须带上它（R1-e2e-1）：Go 运行时 OOM 的表现是**普通非零退出码 2**
+	// （`proc_exit(2)`，实测 stderr 尾巴里只剩上万字节的 goroutine 回溯、特征串已被挤掉），
+	// 只看错误串/退出码永远分不出"内存超限"与"应用自己 os.Exit(2)"。峰值是唯一能区分
+	// 两者的现场证据 ⇒ 判定要"退出码 + 峰值贴近上限"**双条件**（见 memoryNearLimit）。
+	peakMemoryBytes int64
+}
+
+// goOOMExitCode 是 Go 运行时内存耗尽时的退出码（实测 Go 1.26.5 / wazero v1.12.0：
+// `fatal error: out of memory` 之后 proc_exit(2)，见 serve_test.go 的
+// TestServe_MemoryGrowOverLimit 与 §10.3 第 28 项）。
+const goOOMExitCode = 2
+
+// memoryNearLimitRatio 是"峰值贴近上限"的判据（R1-e2e-1 的第二个条件）。
+//
+// 取 90% 的依据（实测，Go 1.26.5 / wazero v1.12.0）：
+//
+//	分块累积到 OOM：峰值 = 上限的 97%–100%（现场 R1-e2e-1：peak_memory_bytes=67108864 = 64 MiB 整）；
+//	应用自己 os.Exit(2)：峰值 = 常态水位 3.25 MiB（= Go 的初始页数，远低于 90%）。
+//
+// 它把"退出码 2"这一个**弱判据**收窄成"退出码 2 且峰值贴着上限"的双条件，代价是
+// "应用恰好在上限 90% 水位上主动 os.Exit(2)"会被误归一次 —— 用这个小误判面换回
+// "内存超限可诊断"，且误归时的 hints 同时写了退出码与峰值，作者一眼能自证。
+//
+// ⚠️ 已知边界（如实记）：峰值 ≥ 上限 − **单次最大分配**。应用若以接近上限量级的巨块累积，
+// 峰值可能落在 90% 以下而仍被归成 GUEST_EXIT（实测 64 MiB 上限 + 一次性 80 MiB 分配：
+// 峰值恒为 3.25 MiB —— 那种形态宿主根本没有"贴近上限"的现场证据，只能靠 stderr 头部的
+// `fatal error: out of memory` 特征，见报告 temp/wasm-review-r1/fix-limitsB.md §3 残留）。
+const memoryNearLimitRatio = 9 // peak*10 >= limit*9 ⇔ peak ≥ 90% 上限
+
+// peakNearLimit 报告"采样到的峰值是否贴近本次运行的内存上限"。
+//
+// 两个条件缺一不可：峰值必须 >0（没采到 ≠ 用满了）且 ≥ 上限的 memoryNearLimitRatio/10。
+func (f failureContext) peakNearLimit() bool {
+	if f.peakMemoryBytes <= 0 {
+		return false
+	}
+	limit := int64(effectivePages(f.memoryPages)) * int64(limits.WasmPageSize)
+	return f.peakMemoryBytes*10 >= limit*int64(memoryNearLimitRatio)
 }
 
 // effectivePages 把"生效页数"折算成可渲染值（0 = 未指定 ⇒ 编译期默认）。
@@ -58,12 +98,14 @@ func effectivePages(pages uint32) uint32 {
 //  3. ExitError.ExitCode==0    → 正常退出（Go 的 main 返回就是 proc_exit(0)）
 //  4. ExitError 的保留码       → MODULE_KILLED（wazero 用 0xffffffff/0xefffffff 表示
 //     "被 ctx 关闭"，与 guest 自己的 proc_exit 区分开）
-//  5. 其他 ExitError(code!=0)  → RUNTIME_GUEST_EXIT(code)（**绝不报成 RUNTIME_NO_RESPONSE**，
-//     §10.3 第 28 项：Go 运行时 OOM 走 proc_exit(2)）
-//  6. err==nil 且 module 已关闭 → MODULE_KILLED（§15.1 第 7 条硬断言）
-//  7. err==nil 且无响应帧       → RUNTIME_NO_RESPONSE
-//  8. 错误串含内存/OOM 特征     → RUNTIME_MEMORY
-//  9. 其余 guest 侧错误         → RUNTIME_TRAP（unreachable / 越界 / 栈溢出…）
+//  5. ExitError(code!=0) 且 峰值贴近上限 且 code==2 → RUNTIME_MEMORY（R1-e2e-1：
+//     Go 运行时 OOM 走 proc_exit(2)，**双条件**收窄，普通 os.Exit(2) 不会被误报）
+//  6. 其他 ExitError(code!=0)  → RUNTIME_GUEST_EXIT(code)（**绝不报成 RUNTIME_NO_RESPONSE**，
+//     §10.3 第 28 项）
+//  7. err==nil 且 module 已关闭 → MODULE_KILLED（§15.1 第 7 条硬断言）
+//  8. err==nil 且无响应帧       → RUNTIME_NO_RESPONSE
+//  9. 错误串含内存/OOM 特征     → RUNTIME_MEMORY
+//  10. 其余 guest 侧错误        → RUNTIME_TRAP（unreachable / 越界 / 栈溢出…）
 func classifyGuestError(err error, f failureContext) *apperr.Error {
 	switch {
 	case f.clockExpired:
@@ -85,6 +127,24 @@ func classifyGuestError(err error, f failureContext) *apperr.Error {
 			// 被 ctx 关闭，但不是我们的预算时钟（否则上面就返回了）⇒ 外部取消。
 			return killError(apperr.CodeModuleKilled, "实例已被关闭（context 取消）")
 		default:
+			// 内存超限走的是**普通非零退出码**（Go 运行时 OOM = proc_exit(2)），因此
+			// 必须在"非零退出"这一支里先用"退出码 + 峰值贴近上限"的双条件识别它 ——
+			// 否则永远只会得到 GUEST_EXIT，而它的 hints 会把作者引向"检查 os.Exit/panic"
+			// （方向错：真实原因是内存超限，R1-e2e-1 实测）。
+			if code == goOOMExitCode && f.peakNearLimit() {
+				limit := int64(effectivePages(f.memoryPages)) * int64(limits.WasmPageSize)
+				e := killErrorPages(apperr.CodeRuntimeMemory,
+					fmt.Sprintf("应用内存用量超过单实例上限（%s）", fmtPages(effectivePages(f.memoryPages))),
+					f.memoryPages).WithDetail("guest_exit_code", code).
+					WithDetail("peak_memory_bytes", f.peakMemoryBytes).
+					WithDetail("memory_limit_bytes", limit)
+				return e.WithHint(
+					fmt.Sprintf("峰值内存 %s 已达到上限的 %d%% 以上、退出码 %d（Go 运行时 OOM 的固定形态）",
+						fmtBytes(int(f.peakMemoryBytes)), memoryNearLimitRatio*10, code),
+					"看诊断里的 peak_memory_bytes：它贴着上限就说明是分配太多，而不是 os.Exit 写错了",
+					"减小一次性分配（分页/流式处理、别把大结果集整体读进内存）；"+
+						"Go 运行时自身还有数 MiB 常驻堆，留给业务数据的内存比上限小")
+			}
 			e := killError(apperr.CodeRuntimeGuestExit,
 				fmt.Sprintf("应用以退出码 %d 结束且没有返回响应帧", code))
 			e.WithDetail("guest_exit_code", code)

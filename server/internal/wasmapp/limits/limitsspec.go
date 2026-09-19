@@ -75,6 +75,8 @@ func Table() []Entry {
 		{"module_cache_max_bytes", itoa(ModuleCacheMaxBytes), "bytes", "§4.3", "进程内编译模块缓存上限", "与磁盘缓存解耦；按部署内存档位可缩放"},
 		{"module_cache_max_entries", itoa(ModuleCacheMaxEntries), "count", "§4.3", "进程内编译模块条目上限", ""},
 		{"module_cache_idle_ttl", secs(ModuleCacheIdleTTL), "seconds", "§4.3", "编译模块空闲淘汰", "空闲即逐出并归还 OS（几百个应用的常驻上界）"},
+		{"release_cache_max_bytes", itoa(ReleaseCacheMaxBytes), "bytes", "§4.3", "静态资源缓存字节上限", "(app_id, release_id) 级缓存；304 复验不读盘、不算哈希（单条超一半只缓存元数据）"},
+		{"release_cache_max_releases", itoa(ReleaseCacheMaxReleases), "count", "§4.3", "静态资源缓存条目上限", "按 (app_id, release_id) 计数；下架/冻结/删除/逐出与换版本都失效"},
 		{"memory_peak_guard_percent", itoa(MemoryPeakGuardPercent), "percent", "§4.3", "启动自检内存水位", "理论峰值超过可用内存该比例即拒绝启动"},
 		{"upload_peak_per_upload_bytes", itoa(UploadPeakPerUploadBytes), "bytes", "§4.3", "单次上传峰值内存账", "base64 单次 ≈ 32+43+43 MB"},
 
@@ -153,6 +155,7 @@ func Table() []Entry {
 		{"diagnostics_default_limit", itoa(DiagnosticsDefaultLimit), "count", "§4.9", "诊断默认条数", ""},
 		{"diagnostics_max_limit", itoa(DiagnosticsMaxLimit), "count", "§4.9", "诊断条数上限", ""},
 		{"stderr_tail_bytes", itoa(StderrTailBytes), "bytes", "§4.9", "stderr 尾巴上限", "诊断回给作者"},
+		{"readyz_snapshot_ttl", secs(ReadyzSnapshotTTL), "seconds", "§4.9", "/readyz 快照缓存时长", "未认证端点；缓存整次采集（目录 walk + statfs + db.Ping）"},
 		{"retirement_snapshot_retention_days", itoa(RetirementSnapshotRetentionDays), "days", "§5.3", "退役快照保留", "冻结/退役后保留快照的时长；到期由平台回收"},
 		{"log_max_line_bytes", itoa(LogMaxLineBytes), "bytes", "§5.1", "单条日志上限", ""},
 		{"log_max_per_request", itoa(LogMaxPerRequest), "count", "§5.1", "每请求日志条数上限", "超出丢弃并计数"},

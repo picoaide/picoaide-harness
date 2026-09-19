@@ -544,9 +544,9 @@ func TestLogoutInvalidatesAppSessionsImmediately(t *testing.T) {
 	// 在两个应用里各兑换一份会话。
 	appCookies := map[string]*http.Cookie{}
 	for _, appID := range []string{"my-app", "other-app"} {
-		code := env.issueTicketViaPOST(t, empCookie, appID, "/")
+		code, nonce := env.issueTicketViaPOST(t, empCookie, appID, "/")
 		rec := httptest.NewRecorder()
-		if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket(appID, code), appID); !ok {
+		if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket(appID, code, nonce), appID); !ok {
 			t.Fatalf("%s 兑换失败", appID)
 		}
 		c := cookieByName(rec.Result().Cookies(), AppCookieName)
@@ -624,9 +624,9 @@ func TestAppCookieIsNotABearerCredential(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 	rec := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); !ok {
+	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); !ok {
 		t.Fatal("兑换失败")
 	}
 	appCookie := cookieByName(rec.Result().Cookies(), AppCookieName)

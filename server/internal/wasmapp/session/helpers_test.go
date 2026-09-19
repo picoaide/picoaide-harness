@@ -58,8 +58,19 @@ import (
 )
 
 // 测试用的占位域名（本仓公开，禁止真实域名）。
+//
+// ⚠️ testBaseDomain 必须同时满足两条（2026-09-19 R1-sec-1 回归审计后）：
+//  1. 主站 Host 必须 **domain-match 基域**（RFC 6265 §5.3 第 6 步：Domain 属性必须
+//     匹配响应所在主机）⇒ 基域要么等于主站 Host、要么是它的祖先域；反过来（基域是
+//     主站的子域）nonce Cookie 在主站上写不进去，部署判定会判成"无法下发 nonce"并
+//     **拒绝签发票**（见 session.ticketNonceDecision）；
+//  2. 主站 Host **不能**是基域的一级子域 —— 那种形态会被 edge.HostGate 判成应用子域
+//     （`<label>.<基域>`），主站路由根本收不到请求。
+//
+// 两条合起来只剩一种可用形态：**基域 == 主站 Host**（应用地址形如 `my-app.harness.example.com`），
+// 与 appserver 测试、以及 appserver.mainOriginNow 的口径一致。
 const (
-	testBaseDomain = "apps.example.com"
+	testBaseDomain = "harness.example.com"
 	testMainHost   = "harness.example.com"
 	testMainOrigin = "https://harness.example.com"
 	testPassword   = "Test-Password-2026"
@@ -273,9 +284,19 @@ func cookieByName(cs []*http.Cookie, name string) *http.Cookie {
 	return nil
 }
 
-// requestWithTicket 构造应用子域上的兑换请求。
-func requestWithTicket(appID, ticket string) *http.Request {
-	return httpsReq(http.MethodGet, "https://"+appID+"."+testBaseDomain+"/?ticket="+url.QueryEscape(ticket), nil)
+// requestWithTicket 构造应用子域上的兑换请求（可带 Cookie —— 兑换需要签发时下发的 nonce）。
+//
+// 2026-09-19 起换票是"URL 里的 code + 浏览器 Cookie 里的 nonce"两半，因此**要兑换成功
+// 就必须把 nonce 带上**（真实浏览器靠 Domain=应用基域 自动完成）；不带 = 模拟
+// "另一个浏览器的全新 cookie jar"，那必须失败。
+func requestWithTicket(appID, ticket string, cookies ...*http.Cookie) *http.Request {
+	r := httpsReq(http.MethodGet, "https://"+appID+"."+testBaseDomain+"/?ticket="+url.QueryEscape(ticket), nil)
+	for _, c := range cookies {
+		if c != nil {
+			r.AddCookie(c)
+		}
+	}
+	return r
 }
 
 // reqWithCookie 构造一个带 Cookie 的 https 请求（主站或应用子域皆可，
@@ -349,12 +370,15 @@ func errorCode(t *testing.T, w *httptest.ResponseRecorder) string {
 	return envelope.Error.Code
 }
 
-// issueTicketViaPOST 走完 POST /app-ticket 并解析出 code。
+// issueTicketViaPOST 走完 POST /app-ticket 并解析出 code 与这次响应下发的 nonce Cookie。
 //
 // 2026-09-19 起 POST 返回的是**同源跳板页（200）**而不是跨源 302（CSP3 的 form-action
 // 会拦掉跨源重定向，见 TicketSubmit 的长注释），因此 code 从页面里的兜底链接上取，
 // 并且先断言"响应头里没有 Location" —— 那正是缺陷的形态。
-func (e *testEnv) issueTicketViaPOST(t *testing.T, empCookie *http.Cookie, appID, next string) string {
+//
+// 第二个返回值是**换票的浏览器持有性证明**（R1-sec-1）：同一只浏览器兑换时必须带上
+// （见 requestWithTicket）；nil = 该部署显式降级（Options.AllowTicketWithoutNonce）。
+func (e *testEnv) issueTicketViaPOST(t *testing.T, empCookie *http.Cookie, appID, next string) (string, *http.Cookie) {
 	t.Helper()
 	r := formReq(t, "/app-ticket", url.Values{"app": {appID}, "next": {next}})
 	r.AddCookie(empCookie)
@@ -378,5 +402,5 @@ func (e *testEnv) issueTicketViaPOST(t *testing.T, empCookie *http.Cookie, appID
 	if code == "" {
 		t.Fatalf("回跳 URL 不含 ticket: %q", loc)
 	}
-	return code
+	return code, cookieByName(rec.Result().Cookies(), TicketNonceCookieName)
 }

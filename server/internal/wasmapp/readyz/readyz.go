@@ -189,6 +189,14 @@ type Options struct {
 	// 上（审计 R1-rt-1 的判据是"读到了什么、从哪读到的"都要看得见）。单测注入临时路径的
 	// 实现即可覆盖 cgroup v2 有上限 / v2=max / v1 / 全读不到四种形态。
 	MemAvailable func() MemoryAvailability
+	// MemoryPlan 提供**当前生效**的内存档位/账本输入（可为 nil ⇒ 档位维度不输出）。
+	//
+	// 为什么必须由装配层注入（R1-rt-10 的另一半）：档位不是本包能推导的东西 ——
+	// 它来自"控制台设置 > 部署档位 > 编译期默认"的解析（cmd/server 的 wasmLimitsHolder）。
+	// 不注入时 `mem_profile` 为空、理论峰值字段为 0：**"没有档位信息"与"档位是空字符串"
+	// 不可区分**这件事以空值显式表达，绝不伪造一个默认档（那会正好掩盖 P0-2 要防的分叉：
+	// 探针显示按默认档算账，实际跑的是控制台配置）。
+	MemoryPlan func() MemoryPlan
 }
 
 // Snapshot 是 `/readyz` 的响应体。
@@ -200,27 +208,45 @@ type Options struct {
 //   - `compile_available` 回答"发布链路能不能编译"：它必须可见（不再与健康态同形），
 //     并且 AllowPublish 把它当**阻止发布**的理由（没有编译器就没有发布）。
 //
-// 内存维（R1-rt-1）：`mem_source` / `mem_available_bytes` 回答"四笔账用的可用内存是
-// 从哪读到的、数值多少"。`mem_source=none`（两个来源都读不到）⇒ 内存自检被跳过，
-// 这件事以非阻塞 reason 显式说出来 —— 零水位与"未知"不能同形（那正是旧实现的 fail-open）。
+// 内存维（R1-rt-1 / R1-rt-10）：`mem_source` / `mem_available_bytes` 回答"四笔账用的
+// 可用内存是从哪读到的、数值多少"；`mem_profile` / `mem_budget_bytes` /
+// `mem_budget_limit_bytes` / `mem_budget_ok` / `mem_budget_known` 回答"当前是哪一档、
+// 理论峰值多少、按可用内存的允许水位判定结果如何"。`mem_source=none`（两个来源都读不到）
+// ⇒ 内存自检被跳过，这件事以非阻塞 reason 显式说出来 —— 零水位与"未知"不能同形
+// （那正是旧实现的 fail-open）。
 type Snapshot struct {
 	OK               bool     `json:"ok"`
 	Reasons          []string `json:"reasons,omitempty"`
 	DiskFreeByte     int64    `json:"disk_free_bytes"`
 	MemSource        string   `json:"mem_source"`
 	MemAvailableByte int64    `json:"mem_available_bytes"`
-	CompileAvailable bool     `json:"compile_available"`
-	CompileQueue     int      `json:"compile_queue_depth"`
-	CompileBusy      bool     `json:"compile_busy"`
-	CacheBytes       int64    `json:"compile_cache_bytes"`
-	CacheFiles       int      `json:"compile_cache_files"`
-	ExecRunning      int      `json:"exec_running"`
-	ExecWaiting      int      `json:"exec_waiting"`
-	EventsDropped    int64    `json:"events_dropped"`
-	EventsFailed     int64    `json:"events_failed"`
-	EventsWritten    int64    `json:"events_written"`
-	DBOK             bool     `json:"db_ok"`
-	CheckedAt        string   `json:"checked_at"`
+	// MemProfile 是本次判定用的内存档位名（空 = 装配层未注入档位提供者）。
+	MemProfile string `json:"mem_profile"`
+	// MemBudgetByte 是理论峰值（实例池 + 编译峰值 + 上传峰值 + 缓存驻留 + 库页缓存）。
+	MemBudgetByte int64 `json:"mem_budget_bytes"`
+	// MemBudgetLimitByte 是允许的上限（可用内存 × memory_peak_guard_percent%）。
+	MemBudgetLimitByte int64 `json:"mem_budget_limit_bytes"`
+	// MemBudgetOK / MemBudgetKnown 是判定结果与"是否真的判定过"
+	//（known=false ⇒ 读不到可用内存，这一维没有判定，不是"判定通过"）。
+	MemBudgetOK      bool   `json:"mem_budget_ok"`
+	MemBudgetKnown   bool   `json:"mem_budget_known"`
+	CompileAvailable bool   `json:"compile_available"`
+	CompileQueue     int    `json:"compile_queue_depth"`
+	CompileBusy      bool   `json:"compile_busy"`
+	CacheBytes       int64  `json:"compile_cache_bytes"`
+	CacheFiles       int    `json:"compile_cache_files"`
+	ExecRunning      int    `json:"exec_running"`
+	ExecWaiting      int    `json:"exec_waiting"`
+	EventsDropped    int64  `json:"events_dropped"`
+	EventsFailed     int64  `json:"events_failed"`
+	EventsWritten    int64  `json:"events_written"`
+	DBOK             bool   `json:"db_ok"`
+	CheckedAt        string `json:"checked_at"`
+	// SnapshotCached 报告这份读数是不是**缓存命中**（R1-rt-4）。
+	//
+	// 为什么必须可见：`/readyz` 现在有秒级缓存（limits.ReadyzSnapshotTTL），
+	// 排障时要能区分"水位真的没变"与"你看到的是 ≤TTL 前的快照"。
+	SnapshotCached bool `json:"snapshot_cached"`
 }
 
 // reasons 的**前缀**常量：AllowPublish 靠它们区分"阻塞原因"与"非阻塞说明"。
@@ -244,11 +270,24 @@ const (
 )
 
 // Checker 是水位探针。
+//
+// 两把锁刻意分开：
+//   - `mu` 只保护 `lastFree`（水位读数，历史遗留）；
+//   - `cacheMu` 保护**快照缓存**并充当单飞闸（见 snapshotCached）。
+//
+// 不合并成一把的理由：`Snapshot()`（不缓存的那条路，发布闸门与控制台预览在用）
+// 会读 lastFree，若与缓存共用一把锁，采集期间持锁就变成"所有 Snapshot 串行"，
+// 那正是我们要避免的（/readyz 与发布闸门互不等待）。
 type Checker struct {
 	opt Options
 
 	mu       sync.Mutex
 	lastFree int64
+
+	cacheMu   sync.Mutex
+	cached    Snapshot
+	cachedAt  time.Time
+	hasCached bool
 }
 
 // New 创建探针。
@@ -266,7 +305,43 @@ func New(opt Options) *Checker {
 }
 
 // Snapshot 采集一次水位并给出是否达标与原因。
+//
+// ⚠️ **本方法永远做真活（不读缓存）**：发布闸门（AllowPublish）与控制台的内存账预览
+// 要的是"此刻"的水位，缓存一份 ≤TTL 前的读数会让"磁盘刚满"在窗口内被放行。
+// 需要缓存的调用点是 HTTP 处理（Handler，见 snapshotCached）。
 func (c *Checker) Snapshot() Snapshot {
+	s := c.collect()
+	s.SnapshotCached = false
+	return s
+}
+
+// snapshotCached 返回**带 TTL 的快照**（`/readyz` 处理路径专用），R1-rt-4。
+//
+// 为什么必须缓存：一次 collect 要做编译缓存目录的全量递归 walk（≤4096 条，
+// 实测 ≈9.5–14 ms）+ statfs + db.Ping，而 `/readyz` 是**未认证**端点、监控每 1–5 s
+// 打一次 ⇒ 每 1 s 一次 ≈1% 单核常驻 + 每秒 4096 次 Lstat + 每秒一次 DB 往返，
+// 任意人都能放大。
+//
+// 单飞：持锁期间完成采集 ⇒ TTL 到点瞬间的并发请求里只有一个做真活，其余拿到
+// 刚写好的同一份快照（旧实现是每个并发请求各做一遍真活）。
+func (c *Checker) snapshotCached() Snapshot {
+	ttl := limits.ReadyzSnapshotTTL
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	now := c.opt.Now()
+	if c.hasCached && ttl > 0 && now.Sub(c.cachedAt) < ttl {
+		s := c.cached
+		s.SnapshotCached = true
+		return s
+	}
+	s := c.collect()
+	s.SnapshotCached = false
+	c.cached, c.cachedAt, c.hasCached = s, now, true
+	return s
+}
+
+// collect 采一次水位（不缓存、不加缓存锁）。
+func (c *Checker) collect() Snapshot {
 	// CompileAvailable 的缺省是 true：没有可用性提供者时"不判"（与既有装配兼容），
 	// 生产装配由 cmd/server 显式注入（见 Options.CompileAvailability）。
 	s := Snapshot{OK: true, CompileAvailable: true, CheckedAt: c.opt.Now().UTC().Format(time.RFC3339)}
@@ -344,6 +419,18 @@ func (c *Checker) Snapshot() Snapshot {
 			}
 			s.Reasons = append(s.Reasons, reason)
 		}
+		// 档位维（R1-rt-10）：哪一档、理论峰值多少、按可用内存判定的结果 ——
+		// 与启动自检/控制台**同一份**输入、同一个判定函数（ComputeMemoryBudgetFor），
+		// 因此探针上不可能出现"界面按档位显示、实际按别的数跑"。
+		if c.opt.MemoryPlan != nil {
+			plan := c.opt.MemoryPlan()
+			b := ComputeMemoryBudgetFor(m.BudgetBytes(), plan)
+			s.MemProfile = b.Profile
+			s.MemBudgetByte = b.Total
+			s.MemBudgetLimitByte = b.Limit
+			s.MemBudgetOK = b.OK
+			s.MemBudgetKnown = b.Known
+		}
 	}
 	if c.opt.Ping != nil {
 		if err := c.opt.Ping(); err != nil {
@@ -358,9 +445,13 @@ func (c *Checker) Snapshot() Snapshot {
 }
 
 // Handler 是 `/readyz` 的 HTTP 处理（JSON；不达标返回 503）。
+//
+// 走**带 TTL 的快照缓存**（R1-rt-4）：这是未认证端点，不能每个请求都做全量目录
+// walk + statfs + db.Ping。TTL 是 limits.ReadyzSnapshotTTL（唯一真源），响应体里
+// 的 `snapshot_cached` 如实报告本次是不是缓存命中。
 func (c *Checker) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		s := c.Snapshot()
+		s := c.snapshotCached()
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		if !s.OK {
@@ -478,6 +569,20 @@ func (l *InstanceLock) Path() string {
 // 也就是说：它之所以不计入，是因为已经被**结构上**消除了，而不是被忽略了。
 // 任何"让请求路径重新持有制品字节"的改动都必须回到这里重新算账
 //（见 serverstore.wasmReleaseServeColumns 与 appserver.serveWasm 的注释）。
+//
+// 2026-09-19 追加（R1-rt-3）：请求热路径新增了 `(app_id, release_id)` 级的
+// **资源/配置缓存**（appserver/releasecache.go），它同样**不进**这里的账，理由与
+// 模块缓存不同、但边界同样硬：
+//
+//   - 它是**单一全局**的有界 LRU，硬上界写在 limits.ReleaseCacheMaxBytes 的注释里
+//     （上限值 + 单个 release 的资源总量 ≤ SectionTotalMaxBytes + 条目元数据）；
+//   - 它**可逐出**：容量越界按 LRU 整条释放、空闲超过 ModuleCacheIdleTTL 释放、
+//     下架/冻结/删除/逐出（EvictApp）立即释放、换版本立即失效旧 release；
+//   - 它不是"并发 × 实例"型的常驻上界（那才是本函数要联立的东西）：32 并发同时
+//     访问 32 个不同应用，缓存的字节总量仍然只有 limits.ReleaseCacheMaxBytes。
+//
+// 因此它属于"有界可回收缓存"这一类（与磁盘编译缓存同性质），而不是第五笔账。
+// 若将来把上限调大、或改成按并发/按实例多份，必须回到这里把它并入 Total。
 
 // MemoryBudget 是四笔账（+ 应用库页缓存这笔）的分解（便于日志与探针展示）。
 type MemoryBudget struct {

@@ -111,6 +111,9 @@ type Server struct {
 	// appdbs 是应用库句柄池（§4.5：一应用一 driver 实例 + 一应用一连接，跨应用不复用；
 	// 淘汰策略与上限见 dbpool.go）。
 	appdbs *appDBPool
+	// releases 是 `(app_id, release_id)` 级的资源/配置缓存（R1-rt-2/3，见 releasecache.go）。
+	// 它有界、可逐出，并在下架/冻结/删除/逐出与换版本时失效。
+	releases *releaseCache
 
 	scheduler *queue.Scheduler
 	limiter   *anonlimit.Limiter
@@ -242,6 +245,8 @@ func New(opt Options) (*Server, error) {
 	// app_db_readers 的部署在重启后会"退回默认"，直到下一次保存才生效。
 	// 它只影响**新建句柄**（语义见 appDBPool.SetReaders）。
 	s.appdbs.SetReaders(lim.AppDBReaders)
+	// (app_id, release_id) 级资源/配置缓存：上限来自 limits 真源（不是本包的常量）。
+	s.releases = newReleaseCache(limits.ReleaseCacheMaxBytes, limits.ReleaseCacheMaxReleases, now)
 	s.reclaim = newReclaimer(freeOSMemory, now, logger)
 	logger("appserver: %s；生效限制项 %s（队列并发/实例内存/模块缓存/库句柄均按它强制）", prof.Report(), lim.Encode())
 
@@ -302,6 +307,16 @@ func (s *Server) sweepOnce() {
 				n, limits.ModuleCacheIdleTTL, bytes>>10)
 		}
 	}
+	// (app_id, release_id) 级资源缓存与编译模块共用同一个空闲 TTL：几百个应用里
+	// 每个都被访问过一次时，只有 LRU 也会让字节长期驻留（R1-rt-3 的有界性一半靠
+	// 容量、一半靠时间维度）。
+	if s.releases != nil {
+		if n, bytes := s.releases.sweepIdle(limits.ModuleCacheIdleTTL); n > 0 {
+			freedBytes += bytes
+			s.logf("appserver: 空闲回收资源缓存 %d 个版本（空闲 > %s，%d KiB）",
+				n, limits.ModuleCacheIdleTTL, bytes>>10)
+		}
+	}
 	if s.appdbs != nil {
 		if n, bytes := s.appdbs.sweepIdle(); n > 0 {
 			freedBytes += bytes
@@ -313,7 +328,7 @@ func (s *Server) sweepOnce() {
 	}
 }
 
-// EvictApp 立即丢掉某应用的进程内驻留（模块 + 库句柄），并把内存还给 OS。
+// EvictApp 立即丢掉某应用的进程内驻留（模块 + 库句柄 + 资源/配置缓存），并把内存还给 OS。
 //
 // 触发点：应用下架 / 冻结 / 删除 —— 这几件事之后该应用大概率长时间不会被访问，
 // 与其等 TTL 扫描，不如事件驱动立刻释放（用户要求的"更快释放"）。
@@ -328,6 +343,12 @@ func (s *Server) EvictApp(appID string) (int, int64) {
 	if s.modules != nil {
 		mods, bytes = s.modules.evictApp(appID)
 	}
+	// 资源/配置缓存（R1-rt-2/3）：下架/冻结/删除/逐出四条处置路径都会走到这里
+	//（api 的 evict 钩子），因此"内容仍然可服务"不会在处置之后继续存在。
+	releases := 0
+	if s.releases != nil {
+		releases = s.releases.evictApp(appID)
+	}
 	var handles int
 	if s.appdbs != nil {
 		if n, b := s.appdbs.evictApp(appID); n > 0 {
@@ -335,8 +356,9 @@ func (s *Server) EvictApp(appID string) (int, int64) {
 			bytes += b
 		}
 	}
-	if mods > 0 || handles > 0 {
-		s.logf("appserver: 事件驱动逐出 app=%s（模块 %d 个 / 库句柄 %d 个，记账 %d KiB）", appID, mods, handles, bytes>>10)
+	if mods > 0 || handles > 0 || releases > 0 {
+		s.logf("appserver: 事件驱动逐出 app=%s（模块 %d 个 / 库句柄 %d 个 / 资源缓存 %d 个版本，记账 %d KiB）",
+			appID, mods, handles, releases, bytes>>10)
 		if s.reclaim != nil {
 			s.reclaim.request("应用处置", bytes)
 		}

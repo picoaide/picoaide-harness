@@ -107,7 +107,11 @@ type pageCopy struct {
 	ErrRateLimited    string
 	// 非 https：明确报错而不是静默下发不安全 Cookie（§10.4 第 49 项）。
 	ErrInsecure string
-	NoticeOut   string
+	// ErrTicketNonceUnavailable 是**换票签发被 fail-closed 拒绝**时的文案
+	// （R1-sec-1 回归审计：本部署无法下发 nonce Cookie ⇒ 宁可不签发票）。
+	// 它是运维可定位的**配置故障**（不是用户错误），文案要让管理员知道去配什么。
+	ErrTicketNonceUnavailable string
+	NoticeOut                 string
 	// Ticket
 	TicketTitle   string
 	TicketHeading string
@@ -145,6 +149,9 @@ var copyZH = pageCopy{
 	ErrRateLimited: "登录尝试过于频繁，请稍后再试",
 	ErrInsecure: "当前连接不是 HTTPS，出于安全考虑平台不会签发登录凭证。" +
 		"请改用 https:// 访问本平台，或联系管理员启用 TLS。",
+	ErrTicketNonceUnavailable: "服务端的对外访问地址与应用域名不匹配，平台无法安全地完成应用登录，" +
+		"因此没有签发访问凭证。请联系管理员检查「服务端对外地址」（控制台设置或 " + publicBaseURLEnvName +
+		" 环境变量）与应用基域配置 —— 两者必须同域。",
 	NoticeOut:     "已退出登录。",
 	TicketTitle:   "正在打开应用",
 	TicketHeading: "正在打开应用",
@@ -177,6 +184,10 @@ var copyEN = pageCopy{
 	ErrRateLimited: "Too many sign-in attempts, please try again later",
 	ErrInsecure: "This connection is not HTTPS, so the platform will not issue a sign-in credential. " +
 		"Please use https:// or ask your administrator to enable TLS.",
+	ErrTicketNonceUnavailable: "The server public address does not match the application domain, so the " +
+		"application sign-in cannot be completed securely and no credential was issued. Please ask your " +
+		"administrator to check the server public address (console setting or the " + publicBaseURLEnvName +
+		" environment variable) and the application base domain - they must share the same domain.",
 	NoticeOut:     "You have been signed out.",
 	TicketTitle:   "Opening application",
 	TicketHeading: "Opening application",

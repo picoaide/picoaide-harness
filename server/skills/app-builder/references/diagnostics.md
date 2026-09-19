@@ -42,7 +42,7 @@
 | `RUNTIME_NO_RESPONSE` | 是否有提前 `return` 的分支没写响应 | 每个分支都写且只写一帧 |
 | `RUNTIME_TRAP` | `stderr_tail` 的 trap 信息 | 越界/除零/`unreachable`；加边界检查 |
 | `HOST_CALL_OVER_BUDGET` | 哪一类宿主调用 | 单条 SQL 不超过 5 秒；`ai.chat` 不超过 30 秒；把长任务拆开 |
-| `DB_DENIED` | 具体被拒的语句 | 一次只发一条语句；只用 `SELECT`/`INSERT`/`UPDATE`/`DELETE`；建表走 `db.define`；值参数化；不碰保留行号列 |
+| `DB_DENIED` | 具体被拒的语句 | 一次只发一条语句；只用 `SELECT`/`INSERT`/`UPDATE`/`DELETE`；建表走 `db.define`；不碰保留行号列。**参数化不是平台检查项**：字面量 SQL 一样通过，值要用 `args` 占位自己挡住注入 |
 | `DB_LIMIT` | 是"库满"还是"行数/字节超" | 库满 100 MB 是硬上限（平台不给扩容旋钮）⇒ 清理历史数据或做汇总表；返回超 5000 行 / 8 MiB ⇒ 加 `LIMIT` 分页 |
 | `APP_QUEUE_FULL` | `max_queue_wait_ms` | 应用侧并发压到 1；收到 429 按 `Retry-After`（1 秒）退避，不要立刻重试；把多次小请求合并 |
 | `AI_BALANCE_INSUFFICIENT` | 使用者是谁 | 提示"请到桌面客户端查看余额"；**不要重试、不要显示金额** |

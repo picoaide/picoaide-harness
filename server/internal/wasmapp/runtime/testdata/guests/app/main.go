@@ -98,6 +98,12 @@ func main() {
 		recurse(0)
 	case "/alloc":
 		doAlloc(query)
+	case "/alloc-chunks":
+		// 分块累积分配（每块 1 MiB、保留引用）：与 /alloc 的"一次性巨块"是**两种真实形态**。
+		// 判据（R1-e2e-1）：一次性巨块的 grow 请求一步就越限 ⇒ 线性内存停在初始大小，
+		// 宿主看不到"贴近上限"的证据；分块累积会一路涨到上限才失败 ⇒ 峰值 = 上限
+		//（这正是现场 `hog?mb=80` 的形态：诊断里 peak_memory_bytes=67108864=上限）。
+		doAllocChunks(query)
 	case "/exit":
 		code, _ := strconv.Atoi(query["code"])
 		if code == 0 {
@@ -184,6 +190,29 @@ func doAlloc(query map[string]string) {
 	}
 	fmt.Fprintf(os.Stderr, "allocated %d bytes\n", len(sink))
 	respond(200, map[string]any{"allocated": len(sink)})
+}
+
+// doAllocChunks 按 1 MiB 一块累积分配（每块都保留引用 ⇒ 线性内存只能一路增长）。
+//
+// 与 doAlloc 的区别就是"grow 的粒度"：Go 的 wasip1 运行时按需向 wasm 申请内存，
+// 一次性巨块会让**单次** grow 越限而立刻失败（内存停在初始页数），分块则是一路涨到
+// 上限、下一次 grow 才失败（内存停在**上限**）。
+func doAllocChunks(query map[string]string) {
+	mib := 200
+	if v, err := strconv.Atoi(query["mib"]); err == nil && v > 0 {
+		mib = v
+	}
+	chunks := make([][]byte, 0, mib)
+	for i := 0; i < mib; i++ {
+		chunk := make([]byte, 1<<20)
+		for j := 0; j < len(chunk); j += 4096 {
+			chunk[j] = byte(i)
+		}
+		chunks = append(chunks, chunk)
+	}
+	sink = chunks[len(chunks)-1]
+	fmt.Fprintf(os.Stderr, "allocated %d chunks\n", len(chunks))
+	respond(200, map[string]any{"allocated_mib": len(chunks)})
 }
 
 func writeStderr() {

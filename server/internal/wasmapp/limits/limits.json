@@ -307,6 +307,22 @@
       "Note": "空闲即逐出并归还 OS（几百个应用的常驻上界）"
     },
     {
+      "Key": "release_cache_max_bytes",
+      "Value": "33554432",
+      "Unit": "bytes",
+      "Section": "§4.3",
+      "Title": "静态资源缓存字节上限",
+      "Note": "(app_id, release_id) 级缓存；304 复验不读盘、不算哈希（单条超一半只缓存元数据）"
+    },
+    {
+      "Key": "release_cache_max_releases",
+      "Value": "256",
+      "Unit": "count",
+      "Section": "§4.3",
+      "Title": "静态资源缓存条目上限",
+      "Note": "按 (app_id, release_id) 计数；下架/冻结/删除/逐出与换版本都失效"
+    },
+    {
       "Key": "memory_peak_guard_percent",
       "Value": "70",
       "Unit": "percent",
@@ -849,6 +865,14 @@
       "Section": "§4.9",
       "Title": "stderr 尾巴上限",
       "Note": "诊断回给作者"
+    },
+    {
+      "Key": "readyz_snapshot_ttl",
+      "Value": "5",
+      "Unit": "seconds",
+      "Section": "§4.9",
+      "Title": "/readyz 快照缓存时长",
+      "Note": "未认证端点；缓存整次采集（目录 walk + statfs + db.Ping）"
     },
     {
       "Key": "retirement_snapshot_retention_days",

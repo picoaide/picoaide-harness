@@ -81,11 +81,22 @@ type WasmRelease struct {
 	Checksum    string
 	Size        int64
 	Status      string
-	Wasm        []byte
-	ConfigJSON  string
-	AssetsDir   string
-	DeletedAt   *time.Time
-	CreatedAt   time.Time
+	// Reason 是**审核结论的理由**（审核不通过时管理员写下的那段话，≤200 字）。
+	//
+	// 为什么它必须在这里（R1-pm-3）：写入侧一直是通的（SetReleaseStatusForReview
+	// 的 rejected 分支把 reason 与"释放归档"写在同一条 UPDATE 里），但读取侧从缺
+	// —— 列集不含 reason、结构体也没有这个字段 ⇒ 作者永远看不到被拒理由，"审核"
+	// 在作者侧退化成掷骰子。反过来，`reason` 只在 rejected 行上有内容：approved
+	// 时被显式清成空串、pending 行从未写过，所以它对"通过/待审"两态恒为空。
+	//
+	// 与 Wasm 的关系：它是**小文本**（≤200 字，非 TOAST），因此清单列集可以带着
+	// 它跑；archive(BYTEA) 才是那个"绝不能被清单查询顺手拉出来"的重量级列。
+	Reason     string
+	Wasm       []byte
+	ConfigJSON string
+	AssetsDir  string
+	DeletedAt  *time.Time
+	CreatedAt  time.Time
 }
 
 // wasmAppColumns 是 apps 上 wasm 应用用到的列(显式列名:既有 skill/agent
@@ -95,8 +106,12 @@ const wasmAppColumns = `app_id, title, description, owner, channel, enabled, pur
 	created_at, updated_at`
 
 // wasmReleaseListColumns 不含 archive blob:清单查询绝不加载全部制品。
+//
+// 含 reason(≤200 字的小文本):它是"审核结论"的唯一读路径(R1-pm-3),作者面与管理
+// 面的审批清单都要显示它。它与 archive 的区别是量级 —— 后者是 ≤32 MiB 的 TOAST
+// 大字段,拉一次就是一份制品常驻内存;reason 只是随行的小列。
 const wasmReleaseListColumns = `id, app_id, version, title, description, changelog, publisher,
-	checksum, size, status, config_json, assets_dir, deleted_at, created_at`
+	checksum, size, status, reason, config_json, assets_dir, deleted_at, created_at`
 
 // wasmReleaseServeColumns 是**应用子域请求路径**用的列:与清单列相同,即不含 archive。
 //
@@ -190,7 +205,7 @@ func scanWasmRelease(row interface{ Scan(...any) error }, withWasm bool) (*WasmR
 	var r WasmRelease
 	var deleted, created any
 	dest := []any{&r.ID, &r.AppID, &r.Version, &r.Title, &r.Description, &r.Changelog,
-		&r.Publisher, &r.Checksum, &r.Size, &r.Status, &r.ConfigJSON, &r.AssetsDir,
+		&r.Publisher, &r.Checksum, &r.Size, &r.Status, &r.Reason, &r.ConfigJSON, &r.AssetsDir,
 		&deleted, &created}
 	if withWasm {
 		dest = append(dest, &r.Wasm)

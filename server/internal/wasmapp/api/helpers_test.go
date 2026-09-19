@@ -283,6 +283,8 @@ func (e *testEnv) mount(r *gin.Engine) {
 	cli.DELETE("/:app_id", e.h.Delete)
 	cli.GET("/:app_id/diagnostics", e.h.Diagnostics)
 	cli.GET("/:app_id/schema", e.h.Schema)
+	// 发布者本人的版本历史 + 审核结论（R1-pm-3）：与 internal/router 的申报逐条一致。
+	cli.GET("/:app_id/releases", e.h.MyReleases)
 
 	// 管理面：权限由 router 申报（AdminAuth + RequirePermission），测试里用
 	// middleware 直接注入"已登录管理员"（上下文键 "admin_user" 是 serverauth

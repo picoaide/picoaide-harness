@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -23,6 +24,12 @@ import (
 //  3. **覆盖面不足**（清单少于任一来源程序实际用到的导入面）→ TestWhitelistCoversEverySource
 //     ——这条防的正是"白名单恰好等于最小样例的导入面 ⇒ 合法应用被拒"的功能缺陷；
 //  4. 安全边界被破坏（有人往清单里塞了别的模块名或能造 socket fd 的符号）→ TestWhitelistSecurityBoundary。
+//
+// R1-pm-18 追加两条（作者面交付）：
+//  5. **作者面文档缺失/漂移**（改了生成器没重跑、或有人手改 references/imports.md）→
+//     TestGeneratorCheckModeAgreesWithDisk（`-check` 现在是双产物门禁）+
+//     TestSkillImportsDocCoversEveryWhitelistSymbol（对真源 ImportWhitelist 逐条覆盖）；
+//  6. **作者读不到这份清单**（SKILL.md / abi.md 忘了指路）→ TestSkillPointsAtImportsDoc。
 //
 // ⚠️ 这四条只盯"**来源程序**用到的面"。来源程序自己退化时（有人把 stdprobe 的 template 段删掉
 // 再重跑生成器），白名单会跟着一起变小而上面四条**全绿** —— 所以另有一条独立于生成来源的
@@ -51,6 +58,19 @@ var whitelistSourcesForTest = []string{
 
 // generatedFileName 是生成产物相对 wasmmod 包目录的文件名。
 const generatedFileName = "imports_gen.go"
+
+// skillImportsDocRelPath 是**作者面**生成物（内置技能里的导入面文档）相对**仓库根**的路径。
+//
+// R1-pm-18 的现场：真源（imports_gen.go）有白名单，而作者面的 `server/skills/app-builder/
+// references/**` 对这些符号**零命中** —— 作者/AI 只能靠 422 `IMPORT_NOT_ALLOWED` 试错。
+// 修复方式与 limits 的 `references/limits.md` 同形态：生成器多出一份产物 + 逐字节门禁。
+const skillImportsDocRelPath = "server/skills/app-builder/references/imports.md"
+
+// skillMainRelPath 是内置技能首屏（它必须指路到 imports.md，否则作者读不到这份清单）。
+const skillMainRelPath = "server/skills/app-builder/SKILL.md"
+
+// skillABIRelPath 是 ABI 参考（失败语义表里 IMPORT_NOT_ALLOWED 那一行必须指路）。
+const skillABIRelPath = "server/skills/app-builder/references/abi.md"
 
 // requiredWASISymbols 是"平台必须放行"的最小符号集，逐条说明为什么不能少（§4.2/§10.2）：
 //
@@ -351,6 +371,8 @@ func TestGeneratorCheckModeAgreesWithDisk(t *testing.T) {
 		t.Skip("-short：跳过 CLI 端到端（需要再编译两份来源程序）")
 	}
 	// 端到端验证生成器的 -check 模式（CI 可直接调它；这里保证它真的能发现不一致）。
+	// ⚠️ `-check` 现在是**双产物**门禁：wasmmod/imports_gen.go **与**作者面的
+	// references/imports.md 都要与实时产物逐字节一致（R1-pm-18）。
 	root := moduleRootForTest(t)
 	cmd := exec.Command("go", "run", "./cmd/picoaide-wasm-imports-gen", "-check")
 	cmd.Dir = root
@@ -365,7 +387,7 @@ func TestGeneratorCheckModeAgreesWithDisk(t *testing.T) {
 		t.Fatalf("生成器 -check 输出不符合预期:\n%s", out.String())
 	}
 
-	// 负向：把输出指到一个空文件上，-check 必须非零退出。
+	// 负向 1：把输出指到一个空文件上，-check 必须非零退出。
 	tmp := filepath.Join(t.TempDir(), "empty.go")
 	if err := os.WriteFile(tmp, []byte("package wasmmod\n"), 0o644); err != nil {
 		t.Fatalf("写临时文件: %v", err)
@@ -379,6 +401,120 @@ func TestGeneratorCheckModeAgreesWithDisk(t *testing.T) {
 	if err := cmd.Run(); err == nil {
 		t.Fatalf("-check 对不一致的文件应非零退出:\n%s", out.String())
 	}
+
+	// 负向 2（R1-pm-18 的判据）：作者面文档单独不一致时同样必须非零退出 ——
+	// 否则"改了生成器没重跑"会只在平台侧红、作者面悄悄漂移。
+	tmpDoc := filepath.Join(t.TempDir(), "imports.md")
+	if err := os.WriteFile(tmpDoc, []byte("# 空文档\n"), 0o644); err != nil {
+		t.Fatalf("写临时文档: %v", err)
+	}
+	cmd = exec.Command("go", "run", "./cmd/picoaide-wasm-imports-gen", "-check", "-imports-md", tmpDoc)
+	cmd.Dir = root
+	cmd.Env = os.Environ()
+	out.Reset()
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("-check 对不一致的 references/imports.md 应非零退出:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "作者面") {
+		t.Fatalf("负向失败信息应点名是哪一份产物（作者面 / 平台侧）:\n%s", out.String())
+	}
+}
+
+// TestSkillImportsDocCoversEveryWhitelistSymbol 是 R1-pm-18 的**覆盖性**判据：
+// 提交的作者面文档必须逐条覆盖真源里的**全部**符号（符号 + 签名 + 模块名），
+// 一条不多、一条不少。
+//
+// 为什么与 -check（逐字节）分开还要再来一条：逐字节守的是"生成器与产物同步"，
+// 而这条直接对**真源** ImportWhitelist 说话 —— 白名单扩面后即使有人手改产物绕过
+// 生成器，这里也会红。变异验证：从 references/imports.md 删掉任意一行 ⇒ 本用例必红
+// （逐字节用例也会红，两条各自承重）。
+func TestSkillImportsDocCoversEveryWhitelistSymbol(t *testing.T) {
+	doc := readRepoFile(t, skillImportsDocRelPath)
+
+	// 解析 Markdown 表格行：| `wasi_snapshot_preview1` | `fd_read` | func | `i32i32i32i32_i32` | … |
+	rowRe := regexp.MustCompile("^\\|\\s*`([^`]+)`\\s*\\|\\s*`([^`]+)`\\s*\\|\\s*([A-Za-z]+)\\s*\\|\\s*`([^`]+)`\\s*\\|")
+	type row struct{ module, name, kind, signature string }
+	seen := map[string]row{}
+	for _, line := range strings.Split(doc, "\n") {
+		m := rowRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		r := row{module: m[1], name: m[2], kind: m[3], signature: m[4]}
+		if _, dup := seen[r.name]; dup {
+			t.Fatalf("%s 里符号 %s 出现了多次（每个符号只允许一行）", skillImportsDocRelPath, r.name)
+		}
+		seen[r.name] = r
+	}
+	if len(seen) == 0 {
+		t.Fatalf("%s 里没有解析到任何符号行（表格被改坏了？）", skillImportsDocRelPath)
+	}
+
+	for _, spec := range ImportWhitelist {
+		r, ok := seen[spec.Name]
+		if !ok {
+			t.Fatalf("%s 缺少白名单符号 %s —— 作者会以为它不被放行（修复：cd server && "+
+				"go run ./cmd/picoaide-wasm-imports-gen）", skillImportsDocRelPath, spec.Name)
+		}
+		if r.module != spec.Module || r.kind != spec.Kind || r.signature != spec.Signature {
+			t.Fatalf("%s 的 %s 与真源不一致：文档 %+v，真源 %+v", skillImportsDocRelPath, spec.Name, r, spec)
+		}
+	}
+	// 反向：文档不得出现真源里没有的符号（防止"抄了一份别的 ABI 的表"）。
+	known := map[string]bool{}
+	for _, spec := range ImportWhitelist {
+		known[spec.Name] = true
+	}
+	for name := range seen {
+		if !known[name] {
+			t.Fatalf("%s 里的 %s 不在真源白名单里（白名单是生成产物，不能手工扩面）", skillImportsDocRelPath, name)
+		}
+	}
+	if len(seen) != len(ImportWhitelist) {
+		t.Fatalf("%s 的符号行数 %d 与真源 %d 不一致", skillImportsDocRelPath, len(seen), len(ImportWhitelist))
+	}
+
+	// 文档必须把"为什么是保守超集"和"撞到 IMPORT_NOT_ALLOWED 怎么办"讲清楚 ——
+	// 这两段是作者唯一的自助出口（否则他只能靠 422 试错，正是 R1-pm-18）。
+	for _, want := range []string{
+		"保守超集",
+		"零 preopen",
+		"IMPORT_NOT_ALLOWED",
+		"details.symbol",
+		"picoaide-wasm-imports-gen",
+		"不要手改",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("%s 缺少 %q（作者面必须自带判据来源 + 出错后怎么办）", skillImportsDocRelPath, want)
+		}
+	}
+}
+
+// TestSkillPointsAtImportsDoc 守"指路"：作者最先读的两份文件（SKILL 首屏与 abi 参考）
+// 都必须把作者送到 references/imports.md。
+//
+// 为什么单独一条：文档写好了但没人指路，等于没交付 —— 作者会在 422 里继续试错。
+// 变异验证：从 SKILL.md 或 abi.md 删掉那处引用 ⇒ 本用例必红。
+func TestSkillPointsAtImportsDoc(t *testing.T) {
+	for _, rel := range []string{skillMainRelPath, skillABIRelPath} {
+		text := readRepoFile(t, rel)
+		if !strings.Contains(text, "references/imports.md") && !strings.Contains(text, "`imports.md`") {
+			t.Fatalf("%s 没有指路到 references/imports.md（导入面白名单是作者写代码前就该读的东西）", rel)
+		}
+	}
+}
+
+// readRepoFile 读仓库根下的文本文件（测试辅助）。
+func readRepoFile(t *testing.T, rel string) string {
+	t.Helper()
+	path := filepath.Join(filepath.Dir(moduleRootForTest(t)), filepath.FromSlash(rel))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读 %s: %v", rel, err)
+	}
+	return string(raw)
 }
 
 // TestGeneratedFileLocationAndHeader 守住三条生成产物纪律：
