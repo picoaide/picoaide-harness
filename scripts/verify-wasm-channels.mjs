@@ -213,8 +213,21 @@ section('2. 仓库 pin 校验（upstream.json / .gitmodules / submodule 实际�
 
   const status = spawnSync('git', ['submodule', 'status', 'deepseek-harness'], { cwd: ROOT, encoding: 'utf8' })
   const line = (status.stdout ?? '').trim()
-  check(status.status === 0 && line.includes(PIN_COMMIT) && line.includes(`(${PIN_TAG})`),
-    `submodule 实际检出 = ${PIN_COMMIT} (${PIN_TAG})（实际 ${JSON.stringify(line)}）`)
+  // 只断言**目标语义**：检出的 submodule commit == pin（`-` = 未初始化，必须失败）。
+  //
+  // 刻意**不**把「describe 段必须是 tag（`(dsh-v0.1.5-rc.2)`）」写进断言 —— 那是"这个克隆有没有
+  // 取到 tag"的**环境性产物**：CI 的 actions/checkout 是浅检出、不带 tag，git 就打印缩写 hash
+  // `(fb2c4b9e)`，于是同一条判据在 CI 恒红，而两端的 commit 其实完全相同（2026-09-20 实测：
+  // PR #101 的 Gate 就红在这一条）。环境性产物一律只 WARN，不拦门禁。
+  // 依据：`temp/wasm-client-only/AUDIT-CHARTER.md` §4.2「把新鲜度/环境守卫与目标断言分开」。
+  const parsed = /^([-+U ])?\s*([0-9a-f]{40})\b/.exec(line)
+  const state = parsed?.[1] ?? ''
+  const commit = parsed?.[2] ?? ''
+  check(status.status === 0 && state !== '-' && commit === PIN_COMMIT,
+    `submodule 实际检出 commit = ${PIN_COMMIT}（实际 ${JSON.stringify(line)}）`)
+  if (commit === PIN_COMMIT && !line.includes(`(${PIN_TAG})`)) {
+    console.log(`  WARN  submodule 的 describe 段不是 tag（${JSON.stringify(line)}）—— 浅检出/未取 tag 属正常，不拦门禁`)
+  }
 
   const doc = readLines(DESIGN_DOC)
   check(doc.text.includes(PIN_TAG),
