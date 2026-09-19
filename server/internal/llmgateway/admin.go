@@ -609,16 +609,17 @@ func createModel(c *gin.Context, db *sql.DB) {
 	// 上游目录的 keep 列表(newNames)里再删一次,承诺不可兑现(实测
 	// create 200 → 下一轮 Removed:1)。
 	//
-	// 顺序:先移名单、后建行。名单写入失败时请求 500 且**不留半套**(模型未建)。
+	// 顺序:先移名单、后建行,且**两步在同一事务内**(2026-09-19,N1)。
+	// 旧实现两步各自 autocommit:"移名单"先提交,于是**失败请求**(建行 500、
+	// 或同名重复 400)也会清空名单 ⇒ 下一轮同步把管理员显式删除的渠道模型
+	// 复活(H2 保护被一次失败请求撤销)。判据="请求失败不留任何状态变化"。
 	// 反过来(先建行再移名单)会把"模型已建但下轮被删"这种最坏的半套状态变成
 	// 常态,而管理员看到的是 200。
-	if prov.Channel != "" {
-		if err := serverstore.RemoveExcludedModel(db, req.ProviderID, req.Name); err != nil {
-			log.Printf("gateway model create: 移出排除名单失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
-			return
-		}
-	}
+	//
+	// 缓存失效必须在 **commit 之后**:AddModelTx 不失效模型缓存、
+	// RemoveExcludedModelTx 走的 SetSettingTx 也不失效 settings 缓存 ⇒
+	// 提交后显式失效三处,否则"保存成功但运行期读旧值"(模型目录 / 排除名单
+	// 静默不生效)。事务回滚路径什么都不失效(缓存里仍是库里的真值)。
 	m := &serverstore.Model{
 		Name: req.Name, ProviderID: req.ProviderID, DisplayName: req.DisplayName,
 		DefaultParams: req.DefaultParams, InputModalities: serverstore.NormalizeInputModalities(req.InputModalities),
@@ -626,16 +627,54 @@ func createModel(c *gin.Context, db *sql.DB) {
 		OutputPricePer1M: req.OutputPricePer1M.Value, CacheInputPricePer1M: req.CacheInputPricePer1M.Value,
 		OffpeakDiscount: req.OffpeakDiscount.Value,
 	}
-	if _, err := serverstore.AddModel(db, m); err != nil {
-		if errors.Is(err, serverstore.ErrDuplicate) {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "模型名已存在")
+	if prov.Channel == "" {
+		// 手动型上游不参与同步,没有排除名单语义:单条 INSERT(autocommit),
+		// 缓存失效由 AddModel 自己完成 —— 行为与历史逐字一致。
+		if _, err := serverstore.AddModel(db, m); err != nil {
+			writeModelCreateError(c, err)
 			return
 		}
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
-		return
+	} else {
+		tx, err := db.Begin()
+		if err != nil {
+			log.Printf("gateway model create: 开启事务失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+			return
+		}
+		defer tx.Rollback() // 提交后为 no-op
+		if _, err := serverstore.RemoveExcludedModelTx(tx, req.ProviderID, req.Name); err != nil {
+			log.Printf("gateway model create: 移出排除名单失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+			return
+		}
+		if _, err := serverstore.AddModelTx(tx, m); err != nil {
+			// 400/500:defer 的 Rollback 会把本次请求对名单的改动一并撤销。
+			writeModelCreateError(c, err)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			log.Printf("gateway model create: 提交失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+			return
+		}
+		// 提交成功后失效:①排除名单(settings 键,RemoveExcludedModelTx 不失效);
+		// ②模型目录/定价(AddModelTx 不失效)。顺序无依赖,都是"提交后立刻可见"。
+		serverstore.InvalidateSettings()
+		serverstore.InvalidateModelConfig()
+		serverstore.InvalidateModelsChanged()
 	}
 	_ = serverstore.AuditLog(db, auditActor(c), "model_create", auditModelDetail(m))
 	c.JSON(http.StatusOK, gin.H{"model": m})
+}
+
+// writeModelCreateError 把建行失败映射为既有错误语义(逐字不变):
+// 同名 → 400「模型名已存在」,其它 → 500「创建失败」。
+func writeModelCreateError(c *gin.Context, err error) {
+	if errors.Is(err, serverstore.ErrDuplicate) {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "模型名已存在")
+		return
+	}
+	serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 }
 
 func updateModel(c *gin.Context, db *sql.DB) {
@@ -1130,14 +1169,18 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	// 顺序也要紧:CleanupUsageRetention 经 EffectiveRetentionMonths 读
 	// usage.retention_months,必须在失效之后才能读到本次写入的值。
 	serverstore.InvalidateSettings()
+	// 审计**先于**破坏性清理(2026-09-19,N2):配置此刻已经提交生效,"谁改了什么"
+	// 的可追溯性不得取决于 CleanupUsageRetention 的成败 —— 旧实现把 AuditLog
+	// 放在清理之后,清理失败(500「保留清理失败」)会留下"配置已生效但零审计"
+	// 的缺口。detail 与成功路径逐字一致(同一次 changes 组装,不掺入清理结果)。
+	if len(changes) > 0 {
+		_ = serverstore.AuditLog(db, auditActor(c), "gateway_config", strings.Join(changes, ", "))
+	}
 	if req.RetentionMonths != nil {
 		if err := serverstore.CleanupUsageRetention(db); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保留清理失败")
 			return
 		}
-	}
-	if len(changes) > 0 {
-		_ = serverstore.AuditLog(db, auditActor(c), "gateway_config", strings.Join(changes, ", "))
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "warnings": warnings})
 }
