@@ -8,9 +8,10 @@ package llmgateway
 // 但下一轮 SyncOnce 返回 `{Added:0 Removed:1}`,模型又被删掉(它不在上游目录的
 // keep 列表 newNames 里)⇒ UI 承诺的恢复路径不可兑现。
 //
-// 修法:恢复 serverstore.RemoveExcludedModel(幂等;名单被移空时写回 `[]`),
-// createModel 在 provider.Channel != "" 时先移名单、再建行 —— 管理员的显式意图
-// 优先于自动同步。deleteModel 的 AddExcludedModel 路径不变(H2 本身不退化)。
+// 修法:serverstore.RemoveExcludedModelTx(事务版,幂等;名单被移空时写回 `[]`),
+// createModel 在 provider.Channel != "" 时把它与建模型行放进**同一事务** ——
+// 管理员的显式意图优先于自动同步,且建行失败不会留下"名单已被清空"的半套状态。
+// deleteModel 的 AddExcludedModel 路径不变(H2 本身不退化)。
 
 import (
 	"database/sql"

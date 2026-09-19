@@ -2,6 +2,8 @@ package reports
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -9,12 +11,19 @@ import (
 
 // 2026-09-19(服务端审计收尾):报表 TOP 榜排序非全序 / 非确定。
 //
-// topByCost 原先只有单一判据 `sorted[i].Cost > sorted[j].Cost` + sort.Slice
-// (pdqsort)。等值行之间没有任何确定的次序 —— 未定价模型(usage.cost 恒 0)是
-// 最常见的一种,用户/部门成本相同同理。pdqsort 只在 len>12 时才走分区重排
-// (≤12 退化为插入排序,单判据下恰好"看起来稳定"),所以真实月报里
-// 「模型数 > 12 且存在等值」时:
-//  1. 等值组的先后顺序与任何判据无关(由 pdqsort 内部交换决定);
+// topByCost 原先只有单一判据 `sorted[i].Cost > sorted[j].Cost` + sort.Slice。
+// 等值行之间没有任何确定的次序 —— 未定价模型(usage.cost 恒 0)是最常见的一种,
+// 用户/部门成本相同同理。根因是**比较器不是全序**(等值键没有次级判据),
+// **与排序算法/长度阈值无关**:等值键一律被判"不小于",组内次序就由输入顺序
+// 决定,于是输出随输入置换变化 —— n≤12 走插入排序的路径同样如此,所以
+// "pdqsort 只在 len>12 分区重排"不是解释(本条注释原先写的正是那个说法,已纠正)。
+// 实测(三处独立夹具数字不同,但都证明"输出不唯一"):
+//   - 5 行**全等值** + 全部 120 种输入置换 ⇒ 旧实现 120 种输出(= 输入顺序本身),
+//     新实现 1 种 —— 见 TestAudit20260919TopByCostPermutationInvariant;
+//   - 5 行(3+2 等值组)⇒ 12 种;18 行 ⇒ 78 种;25 行 ⇒ 200 种
+//     (2026-09-19 第三/四轮独立审计各自实测,夹具在其 temp 探针里)。
+// 后果两条:
+//  1. 等值组的先后顺序与任何判据无关;
 //  2. 第 n 名与第 n+1 名等值时,"取前 n"选谁不确定(多一个等值模型就换人)。
 //
 // 口径与本仓 internal/serverauth/usage_admin.go 的 usageOverview.top_models
@@ -164,6 +173,57 @@ func TestAudit20260919MonthlyReportTopTieOrder(t *testing.T) {
 				t.Fatalf("%s 第 %d 名 = %q, want %q(有价按成本降序,等值按 Label 升序)\n实际 = %v",
 					tc.name, i+1, tc.got[i].Label, w, auditLabels(tc.got))
 			}
+		}
+	}
+}
+
+// TestAudit20260919TopByCostPermutationInvariant：输出必须只由**行集合**决定，
+// 与输入顺序无关 —— 这是"比较器不是全序"的判别式判据（不是"看起来稳定"）。
+//
+// 判据强度与可复现性：本用例只造 5 行**全等值**数据（故意低于任何"分区重排
+// 阈值"），枚举全部 120 种输入置换，要求 distinct 输出恰好 1 种。旧实现
+// （单判据 sort.Slice）在同样的 5 行夹具上得到 **120 种**输出（= 输入顺序本身：
+// 等值键被判"不小于"，插入排序不交换它们）—— 这个夹具本身就足以证伪"根因是
+// pdqsort 分区阈值"那种解释，而且不依赖任何 gitignored 的临时探针。
+func TestAudit20260919TopByCostPermutationInvariant(t *testing.T) {
+	// 等成本（未定价模型最常见的形态）；标签顺序故意与字典序相反。
+	base := []serverstore.UsageAggregateRow{
+		{Label: "m05"}, {Label: "m04"}, {Label: "m03"}, {Label: "m02"}, {Label: "m01"},
+	}
+	idx := []int{0, 1, 2, 3, 4}
+	const total = 120 // 5!
+	seen := map[string]bool{}
+	var permute func(k int)
+	permute = func(k int) {
+		if k == len(idx) {
+			rows := make([]serverstore.UsageAggregateRow, 0, len(base))
+			for _, i := range idx {
+				rows = append(rows, base[i])
+			}
+			seen[strings.Join(auditLabels(topByCost(rows, 10)), "|")] = true
+			return
+		}
+		for i := k; i < len(idx); i++ {
+			idx[k], idx[i] = idx[i], idx[k]
+			permute(k + 1)
+			idx[k], idx[i] = idx[i], idx[k]
+		}
+	}
+	permute(0)
+
+	const want = "m01(cost=0)|m02(cost=0)|m03(cost=0)|m04(cost=0)|m05(cost=0)"
+	if len(seen) != 1 {
+		outs := make([]string, 0, len(seen))
+		for k := range seen {
+			outs = append(outs, k)
+		}
+		sort.Strings(outs)
+		t.Fatalf("同一行集合在 %d 种输入置换下得到 %d 种输出（应当只有 1 种）：\n  %s",
+			total, len(seen), strings.Join(outs, "\n  "))
+	}
+	for out := range seen {
+		if out != want {
+			t.Fatalf("输出 = %q\nwant 按 Label 升序: %q", out, want)
 		}
 	}
 }

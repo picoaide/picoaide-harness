@@ -158,9 +158,10 @@ func removeExcludedName(names []string, name string) ([]string, bool) {
 
 // 说明:名单是**双向**的(2026-09-19 起)——删除渠道同步模型进名单,此后同步
 // 不会把它带回来(webadmin Gateway 页文案:「删除后同步不会自动恢复,如需恢复
-// 请重新添加」);管理端**显式重新添加**同名渠道模型时由 createModel 调用
-// RemoveExcludedModel 移出名单(显式意图优先于自动同步),删除 provider 时整键
-// 清理。此前"单向、无移出接口"的注释已过期。
+// 请重新添加」);管理端**显式重新添加**同名渠道模型时由 createModel 在**同一
+// 事务**里调用 RemoveExcludedModelTx 移出名单(显式意图优先于自动同步),删除
+// provider 时整键清理。此前"单向、无移出接口"的注释已过期;autocommit 版移出
+// 接口已删除(只留事务版,调用方无法把这一步与建模型行拆开)。
 
 func scanProvider(scan interface{ Scan(...any) error }) (*GatewayProvider, error) {
 	var p GatewayProvider
