@@ -24,7 +24,6 @@ import (
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
 	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
-	"github.com/picoaide/picoaide/internal/wasmapp/session"
 	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 )
 
@@ -53,8 +52,7 @@ func buildTestRouter(t *testing.T) *gin.Engine {
 		Reports:       reports.NewHandlers(nil),
 		// WASM 应用平台（§8）：测试树必须与生产树同形 —— 否则
 		// largeBodyRoutes 的"豁免必须对应真实路由"门禁测不出路径写错。
-		Wasm:        wasmapi.NewHandlers(wasmapi.Options{}),
-		WasmSession: session.New(session.Options{}),
+		Wasm: wasmapi.NewHandlers(wasmapi.Options{}),
 		// 内置技能下发面（随镜像发布）。资产目录用一次性空目录。
 		SkillSeed: skillseed.NewHandlers(skillseed.New(t.TempDir())),
 	})
@@ -108,6 +106,9 @@ func TestNamespaces(t *testing.T) {
 		"GET " + nsClient + "/shared-skills",
 		"GET " + nsClient + "/agent-presets",
 		"GET " + nsClient + "/capabilities",
+		// R1-pm-3：审核结论的作者侧出口（发布者本人的版本历史 + 被拒理由）。
+		// 缺了这条，开启审核 = 作者永远收不到结论（客户端拿不到任何数据）。
+		"GET " + nsClient + "/apps/wasm/:app_id/releases",
 		"POST " + nsServer + "/admin/login",
 		"GET " + nsServer + "/admin/auth/methods",
 		"GET " + nsServer + "/admin/users",

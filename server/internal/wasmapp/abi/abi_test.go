@@ -128,10 +128,11 @@ func TestClassify(t *testing.T) {
 
 // TestHostMethodsClosedList：§5.1 封闭清单 + §5.5「多一个即测试红」。
 func TestHostMethodsClosedList(t *testing.T) {
+	// ⚠️ W4：封闭清单从 9 项收敛为 **8 项**（`ai.chat` 随总纲 §21.3 删除）。
 	want := []string{
 		"db.define", "db.query", "db.exec",
 		"tx_begin", "tx_commit", "tx_rollback",
-		"ai.chat", "log", "assets.read",
+		"log", "assets.read",
 	}
 	if len(HostMethods) != len(want) {
 		t.Fatalf("HostMethods 有 %d 项，want %d（§5.1 封闭清单）", len(HostMethods), len(want))

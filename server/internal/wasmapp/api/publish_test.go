@@ -43,7 +43,6 @@ func TestPublishHappyPath(t *testing.T) {
 			Enabled     bool   `json:"enabled"`
 			Owner       string `json:"owner"`
 			Version     string `json:"version"`
-			EntryURL    string `json:"entry_url"`
 		} `json:"app"`
 		Release struct {
 			ID              int64    `json:"id"`
@@ -70,8 +69,13 @@ func TestPublishHappyPath(t *testing.T) {
 	if out.App.Owner != "alice" || !out.App.Enabled || out.App.Version != "1.0.0" {
 		t.Fatalf("app 字段不对: %+v", out.App)
 	}
-	if out.App.EntryURL != "https://demo-tool.apps.example.com" {
-		t.Fatalf("入口链接 = %q（应来自 BaseDomain）", out.App.EntryURL)
+	// ⚠️ 发布响应**不再有** `entry_url`（W4 删除；总纲 §8.4/§5.2）：应用只在桌面客户端内
+	// 以 `<渠道 app scheme>://<app_id>` 打开，入口链接由客户端自行构造。这里断言它
+	// 确实不在响应里 —— 只删服务端 emit 而客户端仍在读的形态会被这条挡住。
+	if raw, err := json.Marshal(out.App); err != nil {
+		t.Fatalf("序列化 app 失败: %v", err)
+	} else if strings.Contains(string(raw), "entry_url") {
+		t.Fatalf("发布响应不得再出现 entry_url: %s", raw)
 	}
 	if out.ReviewRequired {
 		t.Fatal("审核开关缺省必须是关（R17）")
@@ -98,8 +102,8 @@ func TestPublishHappyPath(t *testing.T) {
 		t.Fatalf("current_release_id = %d, want %d", app.CurrentReleaseID, out.Release.ID)
 	}
 	// ⚠️ 2026-09-18：可见性投影列已删（0071）。访问模式从 config_json 现解。
-	if got := appcfg.AccessOfConfigJSON(app.ConfigJSON); got != appcfg.AccessPublic {
-		t.Fatalf("access 投影 = %q, want %q（发布时写的 access=public 必须落进 config_json）", got, appcfg.AccessPublic)
+	if got := appcfg.AccessOfConfigJSON(app.ConfigJSON); got != appcfg.AccessLogin {
+		t.Fatalf("access 投影 = %q, want %q（发布时写的 access=public 必须落进 config_json）", got, appcfg.AccessLogin)
 	}
 	if !app.Enabled {
 		t.Fatal("新建应用即上架（enabled 独立于访问模式）")
@@ -189,7 +193,7 @@ func TestPublishHappyPath(t *testing.T) {
 		}
 		return out
 	}
-	// demo-tool 此时已发过 v1.0.0 与 v1.1.0，两版都是 access=public ⇒ 零变更记录。
+	// demo-tool 此时已发过 v1.0.0 与 v1.1.0，两版都是 access=login ⇒ 零变更记录。
 	if got := accessActions("demo-tool"); len(got) != 0 {
 		t.Fatalf("访问模式没变不该写 wasm_app_access_change: %v", got)
 	}
@@ -200,12 +204,12 @@ func TestPublishHappyPath(t *testing.T) {
 	e.publishOK(e.tokens["alice"], "demo-tool", "1.2.0", guest, gatedCfg)
 	got := accessActions("demo-tool")
 	if len(got) != 1 {
-		t.Fatalf("访问模式 public→whitelist 应恰好记一条 wasm_app_access_change，得到 %v", got)
+		t.Fatalf("访问模式 login→whitelist 应恰好记一条 wasm_app_access_change，得到 %v", got)
 	}
-	if !strings.Contains(got[0], "public") || !strings.Contains(got[0], "whitelist") || !strings.Contains(got[0], "1.2.0") {
+	if !strings.Contains(got[0], "login") || !strings.Contains(got[0], "whitelist") || !strings.Contains(got[0], "1.2.0") {
 		t.Fatalf("访问模式变更明细应含 旧值→新值 与版本号，得到 %q", got[0])
 	}
-	// v1.3.0 从 whitelist 改回 public（名单清空）⇒ 再记一条。
+	// v1.3.0 从 whitelist 改回 login（名单清空）⇒ 再记一条。
 	e.publishOK(e.tokens["alice"], "demo-tool", "1.3.0", guest, goodConfig())
 	if got := accessActions("demo-tool"); len(got) != 2 {
 		t.Fatalf("再改一次应记第二条，得到 %v", got)
@@ -496,9 +500,9 @@ func TestPublishConfigRules(t *testing.T) {
 		if eb.Error.Code != "APP_CONFIG_INVALID" || eb.Error.Details["field"] != "access" {
 			t.Fatalf("应点名 access 字段: %+v", eb.Error)
 		}
-		// 报错必须把三个合法值都列出来（作者照抄即可改对）。
+		// 报错必须把**可写**合法值都列出来（作者照抄即可改对；历史 public 不在其中）。
 		joined := strings.Join(eb.Error.Hints, " ")
-		for _, v := range appcfg.AccessValues {
+		for _, v := range appcfg.AccessWritableValues {
 			if !strings.Contains(joined, v) {
 				t.Fatalf("access 报错应列出合法值 %q: %v", v, eb.Error.Hints)
 			}

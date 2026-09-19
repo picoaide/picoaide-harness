@@ -8,6 +8,12 @@ into the server image and served by the server itself.
 Employee machines need no internet access at all, so the client version naturally follows the server version —
 a state where "the client was upgraded but the server was not" is structurally impossible.
 
+> **The reverse — "the server was upgraded but the client was not" — is possible, and it makes apps unusable**:
+> apps (WASM) open only inside the desktop client and **require the client and server to be on the same version**
+> (the browser access chain has been removed, so old clients cannot open apps). Clients fetch packages from this
+> server, so make sure employees accept the upgrade prompt instead of staying on an old version. Apps themselves
+> need no public entry point (see [Deployment overview](/en/deployment/)).
+
 ## Distribution chain
 
 ```
@@ -110,6 +116,7 @@ curl -sk --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/client/v2/update
 So **the correct way to upgrade a client is to upgrade the server** (see
 [Upgrade, backup & rollback](/en/deployment/upgrade/)); employees need to do nothing, and the next check will
 show the new version.
+But **app (WASM) access requires the client to have been upgraded**: a client left on an old version cannot open apps (see [Deployment overview](/en/deployment/)).
 
 ## How employees install and sign in
 

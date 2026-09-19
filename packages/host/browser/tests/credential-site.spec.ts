@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { bareHostOrigin, credentialSiteOrigin, httpOriginOf, siteOriginFromFields } from '../src/credential-site.ts'
+import { bareHostOrigin, credentialSiteOrigin, httpOriginOf, isFillableSiteURL, siteOriginFromFields } from '../src/credential-site.ts'
 import { createCredentialResolver } from '../src/index.ts'
 import { ConnectorStore } from '@picoaide/dsh-connectors/store'
 
@@ -46,6 +46,35 @@ describe('httpOriginOf', () => {
 
   it('stays strict about scheme-less hostnames (the bare-host normalization is opt-in per key)', () => {
     expect(httpOriginOf('app.glitchtip.com')).toBeNull()
+  })
+})
+
+/**
+ * 2026-09-19：非 http(s) 文档（例如客户端自己的应用源 scheme）不是可填充站点 ——
+ * 这里必须有**可断言**的降级判据：既不能被当成可填充站点（不误绑），也不能让派生
+ * 过程抛错（不误炸）。
+ */
+describe('非 http(s) 的自定义协议不是可填充站点', () => {
+  it('httpOriginOf / isFillableSiteURL 对自定义协议一律判否，且不抛错', () => {
+    for (const value of ['harness-app://demo/', 'harness-app://demo/notes?page=2', 'harness-app://demo']) {
+      expect(httpOriginOf(value), value).toBeNull()
+      expect(isFillableSiteURL(value), value).toBe(false)
+    }
+    // 反向对照（防假绿）：同一判据对 http(s) 判真 —— 否则上面的 false 无意义。
+    expect(isFillableSiteURL('https://login.example/app')).toBe(true)
+    expect(isFillableSiteURL('http://127.0.0.1:8080/')).toBe(true)
+  })
+
+  it('凭据字段/部署声明里写自定义协议都派生不出站点（不误绑连接器）', () => {
+    expect(siteOriginFromFields({ server_url: 'harness-app://demo/' })).toBeNull()
+    expect(siteOriginFromFields({ server_url: 'harness-app://demo/', SITE_URL: 'harness-app://other/' })).toBeNull()
+    // 部署显式声明也不行：`credentialSites` 是可信输入，但可信不等于"可当 http(s) 站点"。
+    expect(credentialSiteOrigin(undefined, 'harness-app://demo/')).toBeNull()
+    expect(credentialSiteOrigin({ server_url: 'harness-app://demo/' }, 'harness-app://demo/')).toBeNull()
+    // 裸主机归一这条旁路也不能把自定义协议放进来（它只接受**没有** scheme 的值）。
+    expect(bareHostOrigin('harness-app://demo')).toBeNull()
+    // 反向对照：同一张记录换成 http(s) 站点就正常绑定（说明拒绝来自 scheme 判据本身）。
+    expect(credentialSiteOrigin({ server_url: 'https://login.example' }, undefined)).toBe('https://login.example')
   })
 })
 

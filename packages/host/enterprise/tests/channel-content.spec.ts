@@ -24,6 +24,8 @@ describe('brandChannel', () => {
       channel_id: 'acme',
       identity: { display_name: 'Acme AI', short_name: 'Acme', title: 'Acme 门户' },
       copy: { login_welcome: '欢迎' },
+      // §10：每个渠道包都必须声明应用源 scheme（缺失 ⇒ fail-loud）。
+      desktop: { app_origin_scheme: 'acme-app' },
     })
     expect(brandChannel(profile?.brand)).toEqual({
       title: 'Acme 门户',
@@ -38,6 +40,7 @@ describe('brandChannel', () => {
     const profile = parseDesktopChannelProfile({
       channel_id: 'acme',
       identity: { display_name: 'Acme AI' },
+      desktop: { app_origin_scheme: 'acme-app' },
     })
     const out = brandChannel(profile?.brand)
     expect(out.client?.short_name).toBe('Acme AI')
@@ -83,7 +86,7 @@ describe('brandChannel', () => {
     // 渠道构建里"包里没写品牌"已经由 desktop-channel.ts 落成中性名再注入,
     // 所以这一层只需要逐字段覆盖。用真实解析链验证:只写 channel_id 的包
     // 不会漏出厂商名。
-    const bare = parseDesktopChannelProfile({ channel_id: 'acme' })
+    const bare = parseDesktopChannelProfile({ channel_id: 'acme', desktop: { app_origin_scheme: 'acme-app' } })
     expect(bare?.brand.client.displayName).toBe('Harness')
     const mapped = brandChannel(bare?.brand)
     expect(mapped.client?.display_name).toBe('Harness')

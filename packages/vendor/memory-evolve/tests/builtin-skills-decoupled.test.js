@@ -7,29 +7,45 @@
  * 「随插件分发的内置技能同步到用户技能库」被一个毫不相干的 COI 调度开关挡住了。
  *
  * 第二次修正（本文件现在钉的契约，来源 = 用户口径 + 独立审计 P1-1）：同步的
- * **只有本插件自己的技能**。平台技能 `picoaide-app-builder` 随**服务端镜像**发布，
- * 由员工在客户端「能力中心 → 平台内置技能」**按需安装**；只要还有一条开机自动
- * 把它写进技能库的旁路，「按需」就名存实亡（实测：apply() 一次之后它已在库里，
- * 面板直接显示"已安装"，安装按钮永远走不到，且没有能力中心的溯源信息）。
+ * **只有本插件自己的技能**。平台技能 `app-builder`（原名 `picoaide-app-builder`）
+ * 随**服务端镜像**发布，由员工在客户端「能力中心 → 平台内置技能」**按需安装**；
+ * 只要还有一条开机自动把它写进技能库的旁路，「按需」就名存实亡（实测：apply()
+ * 一次之后它已在库里，面板直接显示"已安装"，安装按钮永远走不到，且没有能力中心
+ * 的溯源信息）。
+ *
+ * 第三次修正（2026-09-19，技能改名 + 源归位服务端）：它的**源目录已搬出本包**，
+ * 真源在服务端仓库 `server/skills/app-builder/`（`server/Dockerfile` 直接 COPY，
+ * 不再有 `--build-context skillassets`）。因此本文件的"源目录/"frontmatter"两条
+ * 用例按新事实重写：断言它**不在包里**、且**在服务端目录里且契约完好**（目录名 =
+ * frontmatter `name`，缺字段会被 `skillmanifest.Parse` 拒掉 ⇒ 技能被静默跳过）。
  *
  * 本用例钉五条：
  *   1. `coiEnabled` 不传（= 默认 false）时，**本插件的技能**仍然同步；
  *   2. 落点是 `<DSH_HOME>/skills`（上游 skill-filesystem 的 user-dsh root / rank 400）；
- *   3. **平台技能不被同步**（两种开关状态下都不被同步）；
+ *   3. **平台技能不被同步**（两种开关状态下都不被同步），且它已不在包内 `skills/`；
  *   4. `coiSyncSkills: false` 仍然能关掉同步；
- *   5. 平台技能的源目录与 frontmatter **必须完好** —— 它是服务端镜像的构建上下文
- *      （`server/Dockerfile` 的 `--build-context skillassets=<本包>`）。
+ *   5. 平台技能的**新源目录**（`<repo>/server/skills/app-builder`）文件齐备且 frontmatter
+ *      同时满足服务端 `skillmanifest.Parse` 的必填项与客户端同步链用的 `x-version`。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply } from '../lib/index.js'
-import { BUILTIN_SKILLS, PLATFORM_SKILLS } from '../lib/coi/skills-sync.js'
+import { BUILTIN_SKILLS, PLATFORM_SKILLS, syncBuiltinSkills } from '../lib/coi/skills-sync.js'
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+/**
+ * 服务端内置技能资产目录（`server/skills/`）——平台技能的真源。
+ *
+ * 本包是**本仓库内的 vendored 本地插件**（`packages/vendor/memory-evolve`），
+ * 所以按仓库布局向上三级可达仓库根；找不到时**响亮失败**而不是跳过 —— 静默跳过
+ * 只会让"源目录契约"这条断言在真正需要它的时候无声消失。
+ */
+const REPO_ROOT = dirname(dirname(dirname(PACKAGE_ROOT)))
+const SERVER_SKILLS_DIR = join(REPO_ROOT, 'server', 'skills')
 
 function tempDir() {
   return mkdtempSync(join(tmpdir(), 'dsh-me-builtin-skills-'))
@@ -132,6 +148,8 @@ test('平台技能不被开机同步（默认配置）——「按需安装」�
         `平台技能 ${name} 也不得落到 ~/.agents/skills`,
       )
     }
+    // 反向对照（防"同步根本没跑"造成的假绿）：本插件的技能确实落到了技能库。
+    assert.ok(existsSync(join(home, 'skills', 'memory-consolidate', 'SKILL.md')))
   })
 })
 
@@ -162,9 +180,26 @@ test('coiSyncSkills=false 仍然能关掉同步（技能管理 Tab 的既有语�
   })
 })
 
-test('平台技能的源目录必须留在包里（服务端镜像的构建上下文，删了镜像构建就失败）', () => {
+test('平台技能源目录已移出本包（2026-09-19 归位服务端；包内 skills/ 只剩本插件自己的技能）', () => {
   for (const name of PLATFORM_SKILLS) {
-    const dir = join(PACKAGE_ROOT, 'skills', name)
+    assert.equal(
+      existsSync(join(PACKAGE_ROOT, 'skills', name)),
+      false,
+      `平台技能 ${name} 的源目录必须已移出本包（旧位置会让"哪份是真源"再次含糊）`,
+    )
+  }
+  // 反向对照：包内 skills/ 与本插件清单**一一对应** —— 既没有平台技能残留，
+  // 也没有"搬错了目录"造成的缺口（本插件的技能一个都不能少）。
+  const onDisk = readdirSync(join(PACKAGE_ROOT, 'skills'), { withFileTypes: true })
+    .filter((e) => e.isDirectory()).map((e) => e.name).sort()
+  assert.deepEqual(onDisk, [...BUILTIN_SKILLS].sort(), '包内 skills/ 必须与本插件清单一一对应')
+})
+
+test('平台技能的新源目录在服务端仓库里，文件齐备（它就是镜像里下发的那份资产）', () => {
+  assert.ok(existsSync(SERVER_SKILLS_DIR), `找不到服务端技能目录：${SERVER_SKILLS_DIR}（仓库布局变了？）`)
+  for (const name of PLATFORM_SKILLS) {
+    const dir = join(SERVER_SKILLS_DIR, name)
+    assert.ok(existsSync(dir), `服务端技能目录缺失：server/skills/${name}`)
     const rels = listFiles(dir)
     for (const expected of [
       'SKILL.md',
@@ -179,22 +214,26 @@ test('平台技能的源目录必须留在包里（服务端镜像的构建上�
       'examples/go/preview.mjs',
       'examples/go/README.md',
     ]) {
-      assert.ok(rels.includes(expected), `${name} 缺少 ${expected}`)
+      assert.ok(rels.includes(expected), `server/skills/${name} 缺少 ${expected}`)
     }
   }
 })
 
-test('SKILL.md 的 frontmatter 同时带服务端必填字段与客户端同步用的 x-version', () => {
+test('新源目录的 SKILL.md frontmatter：服务端必填字段齐全，且 name 必须等于目录名', () => {
   for (const name of PLATFORM_SKILLS) {
-    const raw = readFileSync(join(PACKAGE_ROOT, 'skills', name, 'SKILL.md'), 'utf8')
+    const raw = readFileSync(join(SERVER_SKILLS_DIR, name, 'SKILL.md'), 'utf8')
     const front = /^---\n([\s\S]*?)\n---/u.exec(raw)
     assert.ok(front !== null, `${name}/SKILL.md 必须有 frontmatter`)
     const text = front[1]
     const value = (key) => new RegExp(`^${key}:\\s*(.+)$`, 'mu').exec(text)?.[1]?.trim()
-    // 服务端 skillmanifest.Parse 的必填字段（缺一个就走不了市场/内置下发通路）。
-    assert.equal(value('name'), name)
+    // 服务端 skillmanifest.Parse 的必填字段（缺一个就走不了内置下发通路）。
+    assert.ok(value('name') !== undefined, `${name}/SKILL.md 缺 name`)
+    // ⚠️ 目录名必须等于 frontmatter name：skillseed 用目录名当 declaredAppID 调
+    // Parse()，不一致会让整条技能在启动扫描时被**静默丢弃**（接口 200 + 空数组）。
+    assert.equal(value('name'), name, 'SKILL.md 的 name 必须等于目录名（否则技能被静默丢弃）')
     assert.match(value('version') ?? '', /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/u)
     assert.ok((value('title') ?? '').length > 0)
+    assert.ok((value('description') ?? '').length > 0)
     assert.ok((value('author') ?? '').length > 0)
     assert.ok((value('category') ?? '').length > 0)
     // 客户端 COI 同步链用的 x-version 必须**保留**（两套版本语义，不合并）。
@@ -238,4 +277,49 @@ test('纵深防御单独承重：清单被改坏（平台技能被加回）时�
       }
     }
   })
+})
+
+test('纵深防御真正承重（夹具源目录）：服务端会下发的每个技能名，插件都不得自动同步', () => {
+  // 2026-09-19：平台技能的源目录搬出本包后，上面那条用例的"拦住"变成了
+  // "源目录本来就不存在 ⇒ 记 missing"，即**就算删掉 PLATFORM_SKILLS 那句守卫也照样绿**。
+  // 守卫要能自己承重，就必须喂一个**真的存在**的平台技能源目录 ——
+  // `syncBuiltinSkills(pluginSkillsDir, userSkillsDir)` 的源目录是入参，正好可以造。
+  //
+  // 覆盖面刻意**不取自 PLATFORM_SKILLS**（否则"名单被清空"时用例跟着变空、假绿）：
+  // 名字来自服务端资产目录 `server/skills/` —— 那才是"平台会下发什么"的真源。
+  // 于是两侧漂移（服务端加了技能但忘了登记进 PLATFORM_SKILLS）也会被这条用例抓住。
+  const delivered = readdirSync(SERVER_SKILLS_DIR, { withFileTypes: true })
+    .filter((e) => e.isDirectory()).map((e) => e.name).sort()
+  assert.ok(delivered.length > 0, `服务端资产目录 ${SERVER_SKILLS_DIR} 里一个技能都没有（前置失败）`)
+
+  const dir = tempDir()
+  const pluginSkills = join(dir, 'plugin-skills')
+  const userSkills = join(dir, 'user-skills')
+  mkdirSync(join(pluginSkills, 'memory-consolidate'), { recursive: true })
+  writeFileSync(join(pluginSkills, 'memory-consolidate', 'SKILL.md'), '---\nx-version: 1\n---\n# 本插件自己的技能\n')
+  for (const name of delivered) {
+    mkdirSync(join(pluginSkills, name), { recursive: true })
+    writeFileSync(join(pluginSkills, name, 'SKILL.md'), `---\nname: ${name}\nversion: 9.9.9\n---\n# 平台技能（不该被同步）\n`)
+  }
+  try {
+    for (const name of delivered) BUILTIN_SKILLS.push(name)
+    const results = syncBuiltinSkills(pluginSkills, userSkills)
+    for (const name of delivered) {
+      assert.equal(
+        results.find((r) => r.name === name),
+        undefined,
+        `平台技能 ${name} 不该出现在同步结果里（连 missing 都不该有：它根本不参与这条链路）`,
+      )
+      assert.equal(existsSync(join(userSkills, name)), false, `平台技能 ${name} 不得被同步装上`)
+    }
+    // 反向对照：同一轮里，本插件自己的技能**确实被同步了**（防"函数没跑"的假绿）。
+    assert.equal(results.find((r) => r.name === 'memory-consolidate')?.action, 'synced')
+    assert.ok(existsSync(join(userSkills, 'memory-consolidate', 'SKILL.md')))
+  } finally {
+    for (const name of delivered) {
+      const i = BUILTIN_SKILLS.indexOf(name)
+      if (i >= 0) BUILTIN_SKILLS.splice(i, 1)
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

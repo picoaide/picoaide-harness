@@ -96,23 +96,85 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/dsh-memory-evolve/skills/memory-consolidate/SKILL.md',
   // 技能辅助文件（上游 v26091501 起技能按整目录同步，scripts/ 要跟着走）。
   'node_modules/dsh-memory-evolve/skills/memory-consolidate/scripts/scan_memory.mjs',
-  // 平台内置技能 `picoaide-app-builder`（WASM 应用平台作者手册，设计 §9.3）：
-  // ⚠️ 它**不在**随包同步清单里（`lib/coi/skills-sync.js` 的 `PLATFORM_SKILLS`）——
-  // 内容随**服务端镜像**发布、由员工在能力中心按需安装；这里断言它在**包里**，
-  // 是因为同一份源目录也是服务端镜像的构建上下文（Dockerfile 的 --build-context），
-  // 整目录都在清单里 —— references/ 是 AI 的操作手册正文，examples/ 是能编译的模板，
-  // 少任何一个文件都会让"作者照着 skill 做"在打包版里断链。
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/SKILL.md',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/abi.md',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/limits.md',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/publishing.md',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/diagnostics.md',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/app-config.md',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/main.go',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/go.mod',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/picoaide.app.json',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/preview.mjs',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/README.md',
+  // 平台内置技能（作者手册，2026-09-19 起叫 `app-builder`）**不在本清单里**，也不在包里：
+  // 它的源目录已从本 vendored 包搬到服务端仓库的 `server/skills/app-builder/`，随服务端
+  // 镜像发布、由员工在能力中心按需安装（`server/Dockerfile` 直接 COPY，客户端产物里
+  // 没有它）。曾经在这里逐条钉住的 11 个条目（`skills/picoaide-app-builder/**`）随搬迁
+  // 一并删除；`tests/verify-packaged-runtime.spec.ts` 的「清单必须覆盖 vendored 源目录
+  // 每个文件、且不得留死条目」用例会自动要求这次同步 —— 源目录里没有它了，清单里也
+  // 就不能再有它。要核对它随镜像分发，改看 scripts/ci-build-channel-images.sh 的
+  // verify_image（镜像内断言 /opt/picoaide/skills/app-builder/SKILL.md）。
+  //
+  // 自有插件（@picoaide/*）必须随包（P2，2026-09-19）。它们**不在** `verify:closure` 的
+  // 覆盖里：`scripts/runtime-closure.mjs:3` 的 `FIRST_PARTY_PREFIX = '@deepseek-ai/'` 只走
+  // 上游包，而 desktop 的 `dependencies` 里有 7 个 `@picoaide` 包 —— 也就是说这 5 个包
+  // （account-card / browser / cron / wasm-apps / wasm-apps-host）此前**没有任何门禁**保证
+  // 它们进了 app.asar，只有 connectors / enterprise 在 REQUIRED_ASAR_EXPORTS 里被点名。
+  // 同类事故已经发生过：`dsh-memory-evolve` 的 skills/ 被 `files` 排除规则静默丢出包
+  // （2026-09-16 修复）。
+  //
+  // 路径形状依据（逐条落在磁盘上的真实产物上核对，2026-09-19）：
+  //   - account-card / browser / cron 的这 5 条在 2026-09-16 打出的 v2.7.5-beta.1
+  //     app.asar（`dist/linux-unpacked/resources/app.asar`）里逐条存在；
+  //   - `@picoaide/dsh-wasm-apps` 建立（2026-09-18）与 `@picoaide/dsh-wasm-apps-host`
+  //     建立（2026-09-19）都晚于那份产物 ⇒ 它们的条目**只**在磁盘上确认过
+  //     （各自的 lib/ 产物 + package.json + cordis.patch.yml，与其余自有包的形状一致），
+  //     **尚未经真实 app.asar 验证**：下一次打包后请复跑 verify-packaged-runtime
+  //     （afterPack 会逐条断言）。wasm-apps-host 另有 `lib/electron-adapter.js`：
+  //     它被 desktop `lib/main.js` 静态 import，缺它是**启动期**失败而非装配期。
+  //   - 为什么这几条：`package.json` + `cordis.patch.yml` 是桌面 profile 在组装期用
+  //     `createRequire(...).resolve('@picoaide/<pkg>/package.json')` 拼绝对路径读的两份
+  //     （src/profile.ts），`lib/index.js` / `lib/client.js` / `lib/invariant.js` 是各包
+  //     声明的入口；缺任何一条都表现为"那一行插件整块不装配"，且只在组装期可见。
+  //   - 覆盖这几包的用例在 tests/verify-packaged-runtime.spec.ts 的
+  //     「every @picoaide dependency is asserted」：新增自有插件依赖而不补清单即红。
+  'node_modules/@picoaide/dsh-account-card/lib/index.js',
+  'node_modules/@picoaide/dsh-account-card/lib/client.js',
+  'node_modules/@picoaide/dsh-account-card/lib/invariant.js',
+  'node_modules/@picoaide/dsh-account-card/package.json',
+  'node_modules/@picoaide/dsh-account-card/cordis.patch.yml',
+  'node_modules/@picoaide/dsh-browser/lib/index.js',
+  'node_modules/@picoaide/dsh-browser/lib/client.js',
+  'node_modules/@picoaide/dsh-browser/lib/invariant.js',
+  'node_modules/@picoaide/dsh-browser/package.json',
+  'node_modules/@picoaide/dsh-browser/cordis.patch.yml',
+  'node_modules/@picoaide/dsh-cron/lib/index.js',
+  'node_modules/@picoaide/dsh-cron/lib/client.js',
+  'node_modules/@picoaide/dsh-cron/lib/invariant.js',
+  'node_modules/@picoaide/dsh-cron/package.json',
+  'node_modules/@picoaide/dsh-cron/cordis.patch.yml',
+  'node_modules/@picoaide/dsh-wasm-apps/lib/index.js',
+  'node_modules/@picoaide/dsh-wasm-apps/lib/client.js',
+  'node_modules/@picoaide/dsh-wasm-apps/lib/invariant.js',
+  'node_modules/@picoaide/dsh-wasm-apps/package.json',
+  'node_modules/@picoaide/dsh-wasm-apps/cordis.patch.yml',
+  // 客户端专属 WASM 应用 origin（2026-09-19，契约 §2）：宿主插件（协议 handler +
+  // 本机打开路由）。三条 lib 产物都是真实入口：`lib/index.js` 由 profile 行加载，
+  // `lib/invariant.js` 是 Cordis 伴生行，`lib/electron-adapter.js` 被 desktop 的
+  // `lib/main.js` 静态 import（协议特权注册 + 适配器实例），缺它 = 启动期
+  // ERR_MODULE_NOT_FOUND（整个应用起不来，而不是某一行插件不装配）。
+  'node_modules/@picoaide/dsh-wasm-apps-host/lib/index.js',
+  'node_modules/@picoaide/dsh-wasm-apps-host/lib/invariant.js',
+  'node_modules/@picoaide/dsh-wasm-apps-host/lib/electron-adapter.js',
+  // 2026-09-20 补：`lib/main.js` 还**值导入** `…/app-proof`（安装密钥仓库）。
+  // 此前该子路径既没被构建、也没进本清单 ⇒ 打包版启动报 ERR_MODULE_NOT_FOUND，
+  // 而 afterPack 断言照样通过（清单不完整 = 门禁瞎）。同批补齐 tsdown 的 entry 列表。
+  'node_modules/@picoaide/dsh-wasm-apps-host/lib/app-proof.js',
+  'node_modules/@picoaide/dsh-wasm-apps-host/package.json',
+  'node_modules/@picoaide/dsh-wasm-apps-host/cordis.patch.yml',
+  // 宿主侧共享工具的**两个零依赖叶子包**（2026-09-20，构建环修复路线 A / A 扩展）。
+  //
+  // 为什么它们在产物里：desktop 的 `dependencies` 里有它们（`src/host-locale.ts` 与
+  // `src/desktop-home.ts` 各是一行 re-export）⇒ `lib/host-locale.js`、
+  // `lib/desktop-home.js`、`lib/main.js`、`scripts/*` 在运行期按包名解析它们；
+  // browser / connectors 的 lib 同理（它们直接 import 叶子包）。缺任何一个都是
+  // **启动期** ERR_MODULE_NOT_FOUND，与 wasm-apps-host 的 electron-adapter 同类。
+  // 路径形状与其余自有包一致（`main`/`exports["."]` 都指向 `lib/index.js`）——
+  // 它们**不是** Cordis 插件，所以没有 `cordis.patch.yml` / `lib/invariant.js` 条目。
+  'node_modules/@picoaide/dsh-host-locale/lib/index.js',
+  'node_modules/@picoaide/dsh-host-locale/package.json',
+  'node_modules/@picoaide/dsh-host-home/lib/index.js',
+  'node_modules/@picoaide/dsh-host-home/package.json',
 ] as const
 
 /** Physical entries that Electron cannot load from ASAR (native binaries). */
@@ -589,12 +651,20 @@ function tryListArchive(archivePath: string, list: ArchiveLister): ReadonlySet<s
  * @returns Nothing; failure rejects missing exports and paths outside app.asar.unpacked.
  */
 /** One required export specifier plus the archive path that answers it. */
-interface RequiredExport {
+export interface RequiredExport {
   readonly specifier: string
   readonly archivePath: string
 }
 
-const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
+/**
+ * 自有（@picoaide/*）与桌面自身导出面的**生产门禁表**（specifier + 它在包内的落点）。
+ *
+ * 导出它（2026-09-19）是为了让 tests/verify-packaged-runtime.spec.ts 能**直接读真源**：
+ * 复验实测，测试里那份本地拷贝（`REQUIRED_ASAR_EXPORT_PATHS`）此前既没有一致性守卫、
+ * 又比这张表多一条早已不存在的 `dsh-connectors/lib/sales-easy.js` —— 往本地拷贝里补假条目
+ * 就能让"每个 @picoaide 依赖都被断言"的覆盖性用例假绿。现在测试同时断言两张表逐字相等。
+ */
+export const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   // The desktop package is the application root (asar /lib, /package.json),
   // not a node_modules entry; its exports resolve from the archive root.
   { specifier: 'dsh-plugin-desktop', archivePath: 'lib/index.js' },

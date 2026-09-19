@@ -41,6 +41,20 @@ export type BuiltinAction = 'install' | 'update' | 'installed'
  * 比 SKILL.md 的 frontmatter 更权威：它记的就是安装时那个版本）。读不到版本
  * 时保守判「已安装」而不谎报可更新（宁可不提示，不可误报 —— 与
  * `hasUpdateFor` 同口径）。
+ *
+ * **判据为什么是 version 而不是 sha256**（R1-pm-8）：清单里的 `sha256` 是**打包后
+ * tar.gz** 的摘要（`server/internal/wasmapp/skillseed` 的打包产物），而本机安装目录
+ * 上没有任何可与之对拍的归档摘要 —— provenance 里的 `archiveChecksum` 是
+ * `computeSkillContentHash()` 算的**解包后的内容树**哈希（该函数自己的注释写明
+ * 「与安装时记录的归档校验和不同源」）。两者是不同对象，直接比大小只会把每一份
+ * 已装技能都判成「有更新」（假报）。因此：
+ *   - `version` 是**唯一端到端可比**的字段（服务端清单 vs 安装时写下的 provenance，
+ *     两者同源：都来自 `X-Skill-Version` / SKILL.md frontmatter）；
+ *   - `sha256` 的真职责是**下载时的完整性凭据**（安装链路逐字节对照，见
+ *     auth-gate 的内置技能分支），不参与「要不要更新」的判定；
+ *   - 「内容变了但 version 不变」由服务端门禁兜住（skillseed 的
+ *     TestBuiltinSkillVersionTracksContent：改内容必须提版本），否则这个判据会失灵。
+ * 客户端**不硬编码任何版本号或摘要**：一切以服务端清单为准。
  * @param latest - 服务端清单里的版本。
  * @param installedVersion - 本机已装版本（未知则 undefined）。
  * @param installed - 本机是否已装（目录存在）。
@@ -52,12 +66,16 @@ export function builtinAction(latest: string, installedVersion: string | undefin
 }
 
 /**
- * 一行按钮区该显示什么（**纯函数**：可单测，与渲染解耦）。
+ * 一行的按钮区状态（**纯函数**：可单测，与渲染解耦）。
  *
  * 抽出来的理由与 {@link builtinAction} 同款，外加一条独立性：失败态必须是**按行**的
  * （独立审计 2026-09-18 P2-5）。原先用一个全局 `failed` 字符串，任意一行失败就让
  * **所有**未安装行都变成错误文案、连按钮都没了 —— 一次网络抖动把整块区域变成死墙。
  * 这个纯函数让"失败只影响那一行"成为可断言的契约，不必依赖 jsdom 渲染。
+ *
+ * ⚠️ 本函数只回答"已装的行显示已安装胶囊"。"**已装但有新版**"的行不是这个态 ——
+ * 它要出的是可点的「更新到 vX」按钮，判定在 {@link planBuiltinCards}（R1-pm-8：
+ * 若把更新行也交回这里，它会显示「已安装」、按钮消失，那正是死代码的形态）。
  * @param name - 技能名。
  * @param state - 已装名单 / 正在装的行 / 失败的行。
  * @returns `installed` | `busy` | `failed` | `action`（可点安装或更新）。
@@ -67,15 +85,39 @@ export function builtinRowState(
   state: { installed: readonly string[], busy: string | null, failedName: string | null },
 ): 'installed' | 'busy' | 'failed' | 'action' {
   if (state.installed.includes(name)) return 'installed'
+  return builtinRowProgress(name, state)
+}
+
+/**
+ * 按钮区的"临时态"：正在装 / 这一行刚失败 / 可点。与"是否已装"无关。
+ *
+ * 单独抽出来是给 {@link planBuiltinCards} 用的：更新行在磁盘上已装，但它的按钮区
+ * 不是「已安装」而是「更新到 vX」（可点 / 进行中 / 失败三态）。
+ * @param name - 技能名。
+ * @param state - 正在装的行与失败的行。
+ * @returns `busy` | `failed` | `action`。
+ */
+export function builtinRowProgress(
+  name: string,
+  state: { busy: string | null, failedName: string | null },
+): 'busy' | 'failed' | 'action' {
   if (state.busy === name) return 'busy'
   if (state.failedName === name) return 'failed'
   return 'action'
 }
 
-/** 安装端点（与市场技能同一前缀的宿主代理；不直连服务端）。 */
-export function builtinInstallEndpoint(name: string, force: boolean): string {
-  const base = `/api/pico/skills/builtin/${encodeURIComponent(name)}/install`
-  return force ? `${base}?force=1` : base
+/**
+ * 安装端点（与市场技能同一前缀的宿主代理；不直连服务端）。
+ *
+ * ⚠️ **不带 query 参数**（R2-SK-5）：宿主按 pathname 分发（`auth-gate` 的
+ * `/^\/api\/pico\/skills\/builtin\/([^/]+)\/install$/`），从不读 `?force=1`；
+ * "更新"之所以能生效，靠的是 `installSkillArchive` 本身的**整树替换**语义
+ * （备份旧目录 → rename 新的进来），而不是某个强制刷新开关。留一个没人读的
+ * 参数只会让人以为它能强制刷新（曾如此）。
+ * @param name - 技能名（服务端清单里的 `name`）。
+ */
+export function builtinInstallEndpoint(name: string): string {
+  return `/api/pico/skills/builtin/${encodeURIComponent(name)}/install`
 }
 
 /**
@@ -127,12 +169,19 @@ export function useBuiltinSkills(onInstalled?: () => void) {
     return () => { alive = false }
   }, [])
 
+  /**
+   * 安装 / **重装（更新）**一行。
+   *
+   * 安装与更新是**同一条链路**（同端点、同宿主处理）：本机已有这一行时再 POST 一次，
+   * `installSkillArchive` 会把整棵树替换成服务端那一份（R1-pm-8 的"更新真的装得上"
+   * 就靠它）。端点不带参数（R2-SK-5）—— 宿主不读 `?force=1`，别再加回来。
+   * @param skill - 清单行。
+   */
   const install = async (skill: BuiltinSkill): Promise<void> => {
-    const isInstalled = installed.includes(skill.name)
     setBusy(skill.name)
     setFailed(null)
     try {
-      const res = await fetch(builtinInstallEndpoint(skill.name, isInstalled), { method: 'POST' })
+      const res = await fetch(builtinInstallEndpoint(skill.name), { method: 'POST' })
       if (!res.ok) {
         const data = await res.json().catch(() => ({})) as { error?: string }
         throw new Error(data.error ?? `HTTP ${String(res.status)}`)
@@ -140,7 +189,8 @@ export function useBuiltinSkills(onInstalled?: () => void) {
       setInstalled(prev => (prev.includes(skill.name) ? prev : [...prev, skill.name]))
       setVersions(prev => ({ ...prev, [skill.name]: skill.version }))
       // 装成功 ⇒ 通知面板刷新「我的」列表：那只技能马上以普通卡片出现
-      // （带「平台内置」来源徽章），同时本入口卡片消失（见面板的 localSkillNames 过滤）。
+      // （带「平台内置」来源徽章），同时本入口卡片消失（已装且同版本 ⇒ planBuiltinCards
+      // 不再出卡；面板的 planSectionCards 保证任一时刻同名技能只有一张卡）。
       onInstalled?.()
     } catch (cause) {
       setFailed({ name: skill.name, message: cause instanceof Error ? cause.message : String(cause) })
@@ -168,28 +218,93 @@ export function matchBuiltinSkill(skill: BuiltinSkill, query: string): boolean {
   return fields.some(f => f.toLowerCase().includes(q))
 }
 
+/** 面板要渲染的一张内置技能卡：动作 / 端点 / 行状态都已定好，渲染层不再做判断。 */
+export interface BuiltinCard {
+  /** 服务端清单里的那一行（版本来自服务端，不在客户端硬编码）。 */
+  skill: BuiltinSkill
+  /** 未装 = install；已装且清单更新 = update（已装且同版本不会出卡）。 */
+  action: 'install' | 'update'
+  /** 点按钮要 POST 的地址；安装与更新共用同一个端点（宿主按整树替换语义处理）。 */
+  endpoint: string
+  /** 本机已装（服务端清单 `installed[]` ∪ 面板本地列表）。 */
+  installed: boolean
+  /** 按钮区状态：可点 / 这一行进行中 / 这一行失败。 */
+  state: 'action' | 'busy' | 'failed'
+  /** 这一行的失败文案（`state === 'failed'` 时非 null）。 */
+  failure: string | null
+}
+
 /**
- * 选出"要以普通卡片渲染"的内置技能行。
+ * 决定「我的」分区里内置技能出哪些卡、每张卡的按钮做什么（**面板唯一的判定入口**）。
  *
- * 口径（2026-09-18 用户要求 + 不重复渲染）：
- *   - **已装的排除**：本机技能库扫描出来的那张普通卡片就是它（带「平台内置」来源
- *     徽章），再渲染一张会变成同一个技能两张卡；
- *   - 只属于「我的」分区，且类型筛选为"智能体"时全部排除（内置的目前都是技能）；
- *   - 参与搜索，口径与普通卡片一致（标题/名字/描述/作者/分类）。
+ * 三条口径（缺任何一条都会回到 R1-pm-8 的现场）：
+ *  1. **未装 ⇒ 出「安装」卡**（原有行为）。
+ *  2. **已装且清单版本更新 ⇒ 出「更新到 vX」卡**，端点与「安装」相同（宿主按整树
+ *     替换语义处理，不读 `?force=1`，R2-SK-5）—— 这一条原先是
+ *     死代码：卡片列表把"已装"整个过滤掉，而 `builtinAction` 只在已装时才返回
+ *     `'update'`，两个条件互斥 ⇒ 平台换了新版手册，装过的人永远拿不到。
+ *  3. **已装且同版本（或读不到本机版本）⇒ 不出卡**：本机技能库扫描出来的那张普通卡片
+ *     就是它，再出第二张会让同一个技能显示两张卡（也避免"读不到版本就谎报有更新"）。
+ *
+ * 版本比较的两侧都是**服务端/安装时**的事实：`skill.version` 来自服务端清单，
+ * `installedVersions[name]` 来自安装时写下的 provenance —— 客户端不硬编码任何版本号。
+ * @param options - 清单行、已装名字集合、本机已装版本、搜索词、类型筛选与忙碌/失败态。
+ * @returns 需要渲染的卡片（保持服务端给出的顺序）。
+ */
+export function planBuiltinCards(options: {
+  rows: readonly BuiltinSkill[]
+  installedNames: ReadonlySet<string>
+  /** 本机已装版本（`/api/pico/capabilities?source=local` 的 provenance 版本）；缺省 = 读不到。 */
+  installedVersions?: Readonly<Record<string, string | undefined>> | undefined
+  query: string
+  kindFilter: 'all' | 'skill' | 'agent'
+  /** 正在安装/更新的技能名（按行，不阻塞其它行）。 */
+  busy?: string | null | undefined
+  /** 刚失败的那一行。 */
+  failed?: { name: string, message: string } | null | undefined
+}): BuiltinCard[] {
+  if (options.kindFilter === 'agent') return []
+  const busy = options.busy ?? null
+  const failed = options.failed ?? null
+  const cards: BuiltinCard[] = []
+  for (const skill of options.rows) {
+    if (!matchBuiltinSkill(skill, options.query)) continue
+    // 端到端可比的两个事实：清单版本（服务端）与本机已装版本（安装时的 provenance）。
+    const installed = options.installedNames.has(skill.name)
+    const action = builtinAction(skill.version, options.installedVersions?.[skill.name], installed)
+    // 已装且与清单同版本：本机技能库里那张普通卡片就是它，再出一张会变成同一技能两张卡。
+    // （读不到本机版本时 builtinAction 也返回 installed ⇒ 宁可不提示，不误报。）
+    if (action === 'installed') continue
+    cards.push({
+      skill,
+      action,
+      endpoint: builtinInstallEndpoint(skill.name),
+      installed,
+      state: builtinRowProgress(skill.name, { busy, failedName: failed?.name ?? null }),
+      failure: failed?.name === skill.name ? failed.message : null,
+    })
+  }
+  return cards
+}
+
+/**
+ * 选出"要以普通卡片渲染"的内置技能行（{@link planBuiltinCards} 的行视图）。
+ *
+ * 口径见 {@link planBuiltinCards}：未装的出卡；**已装但清单有更新的也出卡**
+ * （R1-pm-8）；已装且同版本的不出（本机技能库那张卡就是它）。
  *
  * `installedNames` 请传**两个事实源的并集**（服务端清单里的 installed[] +
  * 面板「我的」列表里的本地技能名）：任一源说"已装"就按已装处理 —— 宁可少一张
  * 入口卡片（用户能在列表里看到它），也不要出现重复卡片。
- * @param options - 候选行、已装名字集合、搜索词与类型筛选。
+ * @param options - 候选行、已装名字集合、本机已装版本、搜索词与类型筛选。
  * @returns 需要渲染的行（保持服务端给出的顺序）。
  */
 export function selectBuiltinCards(options: {
   rows: readonly BuiltinSkill[]
   installedNames: ReadonlySet<string>
+  installedVersions?: Readonly<Record<string, string | undefined>> | undefined
   query: string
   kindFilter: 'all' | 'skill' | 'agent'
 }): BuiltinSkill[] {
-  if (options.kindFilter === 'agent') return []
-  return options.rows.filter(skill =>
-    !options.installedNames.has(skill.name) && matchBuiltinSkill(skill, options.query))
+  return planBuiltinCards(options).map(card => card.skill)
 }

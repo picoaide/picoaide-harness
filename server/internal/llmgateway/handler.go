@@ -459,13 +459,16 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID, providerID 
 		var completionEstimated bool
 		ct, completionEstimated = estimateCompletionFallback(pt, ct, int64(len(body)))
 		estimated = estimated || completionEstimated
-		if _, err := serverstore.RecordUsageKindCachedEstimatedForProvider(a.DB, userID, providerID, model, pt, ct, cch, kind, estimated); err != nil {
+		usageID, err := serverstore.RecordUsageKindCachedEstimatedForProvider(a.DB, userID, providerID, model, pt, ct, cch, kind, estimated)
+		if err != nil {
 			// FIX-05 + G5b(审计 r3):**任何**结算失败都不得交付 —— 事务已回滚,
 			// 继续 200 交付就是"上游花了钱、账上一分没扣"的无限免费调用。
 			// 余额不足 → 429 BALANCE_EXHAUSTED;其它错误 → 503 METERING_FAILED。
 			rejectSettlementFailure(c, err, kind+" json")
 			return
 		}
+		// 应用维度归因（0076/§21.4，best-effort：失败只 warn，不改计费也不改响应）。
+		a.bindUsageAppID(c, usageID)
 	}
 	c.Status(resp.StatusCode)
 	for k, vv := range resp.Header {

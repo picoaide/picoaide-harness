@@ -81,14 +81,6 @@ func (stubAssets) Read(p string) (string, []byte, error) {
 
 func (stubAssets) List() []string { return []string{"picoaide.app.json"} }
 
-// stubAI 记录调用次数；事务体里不应出现它（出现了会被宿主闸门拒）。
-type stubAI struct{ calls int }
-
-func (a *stubAI) Chat(_ context.Context, _ *abi.User, _ abi.AIChatParams) (abi.AIChatResult, error) {
-	a.calls++
-	return abi.AIChatResult{Content: "ok", Model: "stub"}, nil
-}
-
 type stubSink struct{ lines []string }
 
 func (s *stubSink) Log(level, message string) { s.lines = append(s.lines, level+":"+message) }
@@ -128,14 +120,12 @@ func TestGuestTxBodyReadWriteEndToEnd(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	ai := &stubAI{}
 	sink := &stubSink{}
 	caps := &hostcap.Capabilities{
 		AppID:   appID,
 		Version: "1.0.0",
 		User:    &abi.User{ID: 7, Username: "zhangwei", DisplayName: "张伟", Dept: "研发部"},
 		DB:      db,
-		AI:      ai,
 		Assets:  stubAssets{},
 		Logs:    sink,
 	}
@@ -251,11 +241,8 @@ func TestGuestTxBodyReadWriteEndToEnd(t *testing.T) {
 		t.Fatalf("库里的行 = %v, want 只有 [第一条]（rollback 的那条必须不在）", titles)
 	}
 
-	// 5) 事务外的能力照常：ai.chat 恰好一次、log 进了 sink（事务内它们会被拒，
-	//    所以"恰好一次"同时也是"参考实现没有把它们放进事务体"的证据）。
-	if ai.calls != 1 {
-		t.Fatalf("ai.chat 调用次数 = %d, want 1", ai.calls)
-	}
+	// 5) 事务外的能力照常：log 恰好一次（事务内它会被拒，所以"恰好一次"同时也是
+	//    "参考实现没有把它放进事务体"的证据）。
 	if len(sink.lines) != 1 {
 		t.Fatalf("log 落 sink 条数 = %d, want 1（%v）", len(sink.lines), sink.lines)
 	}

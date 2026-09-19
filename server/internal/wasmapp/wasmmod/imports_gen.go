@@ -31,7 +31,7 @@
 //     **造 fd 的那几个 sock_* 符号**与非 wasi_snapshot_preview1 的模块（imports_gen_test.go
 //     有反向断言），而不是把 Go 运行时会发出的 sock_accept / sock_shutdown 一并拒掉。
 //
-// ⚠️ 这里列的是 **WASI 导入**，不是宿主能力：宿主能力（db.* / ai.chat / log / assets.read 等）
+// ⚠️ 这里列的是 **WASI 导入**，不是宿主能力：宿主能力（db.* / log / assets.read 等）
 // 走 stdin/stdout 上的 JSON-RPC（§7.2），根本不经过 wasm 导入段；其中 **fd_read** 是 ABI 读
 // stdin 请求帧的硬要求（§4.2）。
 //

@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { apply, inject, name } from './index.ts'
 import { AppCenterTrigger } from './AppCenterTrigger.tsx'
+import { APP_FOREIGN_DEEP_LINK_EVENT, clearAppToast, currentAppToast } from './app-toast.tsx'
 import { en, setActiveLocale, t, zh } from './locales.ts'
 
 interface Registered {
@@ -26,6 +27,10 @@ interface Fixture {
   components: unknown[]
   locales: Array<{ namespace: string, dictionaries: { zh: unknown, en: unknown } }>
   injected: string[]
+  /** `ctx.on` 注册的宿主事件名（本次新增：异渠道深链 toast 的接缝）。 */
+  events: string[]
+  /** 手动触发某个已注册的宿主事件（模拟宿主 `ctx.emit`）。 */
+  emit: (event: string, payload?: unknown) => void
   setActive: (locale: string) => void
   effects: number
 }
@@ -35,10 +40,20 @@ function fixture(): Fixture {
   const components: unknown[] = []
   const locales: Array<{ namespace: string, dictionaries: { zh: unknown, en: unknown } }> = []
   const injected: string[] = []
+  const events: string[] = []
+  const handlers = new Map<string, Array<(payload?: unknown) => void>>()
   let active = 'zh'
   let effects = 0
   const ctx = {
     effect: (fn: () => unknown) => { effects += 1; fn(); return () => {} },
+    // 宿主事件订阅（客户端半边用 `ctx.on('pico/…')` 接收宿主广播）。
+    on: (event: string, handler: (payload?: unknown) => void) => {
+      events.push(event)
+      const list = handlers.get(event) ?? []
+      list.push(handler)
+      handlers.set(event, list)
+      return () => {}
+    },
     locale: {
       register: (namespace: string, dictionaries: { zh: unknown, en: unknown }) => {
         locales.push({ namespace, dictionaries })
@@ -58,6 +73,8 @@ function fixture(): Fixture {
   } as unknown as ClientContext
   return {
     ctx,
+    events,
+    emit: (event, payload) => { for (const handler of handlers.get(event) ?? []) handler(payload) },
     registered,
     components,
     locales,
@@ -67,7 +84,35 @@ function fixture(): Fixture {
   }
 }
 
-afterEach(() => { setActiveLocale('zh') })
+afterEach(() => {
+  setActiveLocale('zh')
+  clearAppToast()
+})
+
+describe('客户端半边：异渠道深链 toast 的接缝（§5.3/§19 Q5）', () => {
+  /**
+   * 判据：宿主广播**那一个**事件名 ⇒ 客户端弹出一次性提示；别的事件不弹。
+   *
+   * 变异验证：把 `ctx.on(APP_FOREIGN_DEEP_LINK_EVENT, …)` 删掉（或换成别的事件名）
+   * ⇒ 本组两条红。
+   */
+  it('订阅宿主广播的异渠道深链事件，并据此弹出 toast（文案由 store 驱动）', () => {
+    const f = fixture()
+    apply(f.ctx)
+    expect(f.events).toContain(APP_FOREIGN_DEEP_LINK_EVENT)
+    expect(currentAppToast()).toBeNull()
+    f.emit(APP_FOREIGN_DEEP_LINK_EVENT, { url: 'other-channel://app/x' })
+    expect(currentAppToast()).toEqual({ kind: 'foreign-deep-link' })
+  })
+
+  it('别的宿主事件（打开应用 / 渠道变化）不得弹 toast', () => {
+    const f = fixture()
+    apply(f.ctx)
+    f.emit('pico/wasm-app-open', { app_id: 'x' })
+    f.emit('pico/channel-changed', null)
+    expect(currentAppToast()).toBeNull()
+  })
+})
 
 describe('客户端半边：apply 注册面', () => {
   it('声明插件名与服务依赖', () => {

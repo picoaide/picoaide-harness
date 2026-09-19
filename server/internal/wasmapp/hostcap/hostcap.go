@@ -4,24 +4,26 @@
 // # 封闭清单（§5.1 / §5.5）
 //
 // 注册的方法集合**恰好**等于 abi.HostMethods：db.define / db.query / db.exec /
-// tx_begin / tx_commit / tx_rollback / ai.chat / log / assets.read。
+// tx_begin / tx_commit / tx_rollback / log / assets.read（**八个**）。
 // 没有文件、网络、线程、子进程、环境变量、PRAGMA、ATTACH、DDL、扩展；也没有
 // 任何员工目录能力（R26）。**多一个即测试红**（gate_test.go）。
 //
+// ⚠️ W4：原第九个方法 `ai.chat` 已删除（总纲 §21.3）—— 服务端 wasm 不再具备任何
+// AI 能力，应用改走客户端 AI loop（§21.2）。老应用在导入期/发布校验即被拒
+// （`IMPORT_NOT_ALLOWED` + 迁移指引），不静默。
+//
 // # 身份（R24–R27）
 //
-// 身份由调用方（edge/runtime）注入 `User`：帧由宿主构造，应用无法伪造。
-// `User == nil` 表示匿名（仅 access=public 的应用）：
-//   - `ai.chat` 与任何需要身份的能力 ⇒ AUTH_REQUIRED；
-//   - `log` / `assets.read` / `db.*` 匿名可用（R15：应用内数据全员共享，平台不做
-//     "按用户"的假象，也没有可保护的账号信息）。
+// 身份由调用方（runtime）注入 `User`：帧由宿主构造，应用无法伪造。
+// 平台**没有匿名面**（一律要求登录，见 appserver 的准入）：`User == nil` 只可能来自
+// 装配/测试错误，需要身份的能力一律回 AUTH_REQUIRED（fail-closed）。
 //
 // # 事务（§4.4 + §5.1，模块 H 审计裁定）
 //
 // 事务内**只允许数据库读写**：`db.query` / `db.exec` 与 `tx_commit` / `tx_rollback`。
 // 禁止的是三类，每类都给出可操作错误（见 txDenied）：
 //   - 嵌套事务：`tx_begin`；
-//   - 会长时间阻塞 / 占执行槽的能力：`ai.chat`（30 s）/ `log` / `assets.read`；
+//   - 会长时间阻塞 / 占执行槽的能力：`log` / `assets.read`；
 //   - DDL：`db.define`（建表请在事务外做）。
 //
 // 「允不允许」的**唯一**定义在 abi.TxAllowedWhileInTx（本包不再自持局部集合：
@@ -65,13 +67,12 @@ const DefaultLogLevel = "info"
 type Capabilities struct {
 	AppID   string
 	Version string
-	// User 是帧内身份（§7.1 身份契约）；nil = 匿名。
+	// User 是帧内身份（§7.1 身份契约）；nil 只可能来自装配/测试错误
+	//（平台没有匿名面 ⇒ 需要身份的能力一律 AUTH_REQUIRED）。
 	// is_publisher 等身份事实由调用方写在 User 里（宿主注入，应用伪造不了）。
 	User *abi.User
 	// DB 可为 nil（未打开 ⇒ 宿主内部错误）。
 	DB capapi.DB
-	// AI 是 ai.chat 的实现；nil ⇒ 宿主内部错误。
-	AI capapi.AI
 	// Assets 是 assets.read 的实现；nil ⇒ 宿主内部错误。
 	Assets capapi.Assets
 	// Logs 是日志出口；nil 视为"没有日志目的地"（调用仍成功，但计入 dropped，
@@ -95,7 +96,6 @@ var table = map[string]handler{
 	abi.MethodTxBegin:    (*Capabilities).callTxBegin,
 	abi.MethodTxCommit:   (*Capabilities).callTxCommit,
 	abi.MethodTxRollback: (*Capabilities).callTxRollback,
-	abi.MethodAIChat:     (*Capabilities).callAIChat,
 	abi.MethodLog:        (*Capabilities).callLog,
 	abi.MethodAssetsRead: (*Capabilities).callAssetsRead,
 }
@@ -197,7 +197,7 @@ func txDenied(method string) *apperr.Error {
 	case txDeniedDDL:
 		e.WithHint("db.define（DDL）请在事务外做：事务内只允许 db.query / db.exec")
 	case txDeniedBlocking:
-		e.WithHint("ai.chat / log / assets.read 会长时间阻塞或占满执行槽（§4.4）：先 tx_commit / tx_rollback 再做这些事")
+		e.WithHint("log / assets.read 会长时间阻塞或占满执行槽（§4.4）：先 tx_commit / tx_rollback 再做这些事")
 	case txDeniedProbe:
 		e.WithHint("abi.ping 是 validate 干跑探针（不属于能力面），事务内同样不允许：先 tx_commit / tx_rollback")
 	default:
@@ -220,7 +220,7 @@ func txDeniedKind(method string) string {
 	switch method {
 	case abi.MethodTxBegin:
 		return txDeniedNested
-	case abi.MethodAIChat, abi.MethodLog, abi.MethodAssetsRead:
+	case abi.MethodLog, abi.MethodAssetsRead:
 		return txDeniedBlocking
 	case abi.MethodDBDefine:
 		return txDeniedDDL
@@ -405,27 +405,9 @@ type txDoneResult struct {
 	Committed bool `json:"committed"`
 }
 
-func (c *Capabilities) callAIChat(ctx context.Context, raw json.RawMessage) (any, *apperr.Error) {
-	p, e := decodeParams[abi.AIChatParams](abi.MethodAIChat, raw)
-	if e != nil {
-		return nil, e
-	}
-	if c.User == nil || c.User.ID <= 0 {
-		// §4.7 / §10.4：匿名应用调身份相关能力一律 AUTH_REQUIRED。
-		// 与 AI 实现内部的检查重复是有意的：identity gate 属于能力面（宿主），
-		// 不能指望每个能力实现都记得查。
-		return nil, apperr.New(apperr.CodeAuthRequired, "ai.chat 需要登录身份").
-			WithHint("anonymous 应用（access=public）无法使用 AI：请让用户先登录")
-	}
-	if c.AI == nil {
-		return nil, capabilityUnavailable(abi.MethodAIChat)
-	}
-	res, err := c.AI.Chat(ctx, c.User, p)
-	if err != nil {
-		return nil, apperr.From(err)
-	}
-	return res, nil
-}
+// ⚠️ `callAIChat` 已随 W4 删除（总纲 §21.3）：它是 `ai.chat` 的宿主实现，
+// 连同 `Capabilities.AI` 字段、`capapi.AI` 接口与 internal/wasmapp/aichat 整包一起消失。
+// 应用侧的新形态见 abi.go 的 `MethodAIChat` 删除注释（客户端 AI loop，§21.2）。
 
 func (c *Capabilities) callLog(ctx context.Context, raw json.RawMessage) (any, *apperr.Error) {
 	if err := ctx.Err(); err != nil {

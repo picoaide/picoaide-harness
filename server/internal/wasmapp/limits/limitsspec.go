@@ -33,7 +33,7 @@ type Entry struct {
 func Table() []Entry {
 	return []Entry{
 		// ===== §4.1 命名与标识 =====
-		{"max_app_id_len", itoa(MaxAppIDLen), "count", "§4.1", "app_id 长度上限", "DNS label 上限；app_id 本身就是域名标签"},
+		{"max_app_id_len", itoa(MaxAppIDLen), "count", "§4.1", "app_id 长度上限", "DNS label 上限；app_id 是应用标识（客户端内即 `<渠道 app 源 scheme>://<app_id>` 的 host 段）"},
 		{"app_id_pattern", AppIDPattern, "", "§4.1", "app_id 规则", "小写、无连续/首尾连字符"},
 		{"version_pattern", VersionPattern, "", "§4.1", "版本号规则", "严格 x.y.z（可带 -prerelease），必须严格递增"},
 		{"retained_versions", itoa(RetainedVersions), "count", "§5.3", "保留版本数", "最近 N 个曾生效版本；更早的软删并归档置空"},
@@ -75,13 +75,19 @@ func Table() []Entry {
 		{"module_cache_max_bytes", itoa(ModuleCacheMaxBytes), "bytes", "§4.3", "进程内编译模块缓存上限", "与磁盘缓存解耦；按部署内存档位可缩放"},
 		{"module_cache_max_entries", itoa(ModuleCacheMaxEntries), "count", "§4.3", "进程内编译模块条目上限", ""},
 		{"module_cache_idle_ttl", secs(ModuleCacheIdleTTL), "seconds", "§4.3", "编译模块空闲淘汰", "空闲即逐出并归还 OS（几百个应用的常驻上界）"},
+		{"release_cache_max_bytes", itoa(ReleaseCacheMaxBytes), "bytes", "§4.3", "静态资源缓存字节上限", "(app_id, release_id) 级缓存；304 复验不读盘、不算哈希（单条超一半只缓存元数据）"},
+		{"release_cache_max_releases", itoa(ReleaseCacheMaxReleases), "count", "§4.3", "静态资源缓存条目上限", "按 (app_id, release_id) 计数；下架/冻结/删除/逐出与换版本都失效"},
 		{"memory_peak_guard_percent", itoa(MemoryPeakGuardPercent), "percent", "§4.3", "启动自检内存水位", "理论峰值超过可用内存该比例即拒绝启动"},
 		{"upload_peak_per_upload_bytes", itoa(UploadPeakPerUploadBytes), "bytes", "§4.3", "单次上传峰值内存账", "base64 单次 ≈ 32+43+43 MB"},
 
 		// ===== §4.4 宿主能力 =====
 		{"host_call_budget_default", secs(HostCallBudgetDefault), "seconds", "§4.4", "宿主调用兜底预算", ""},
-		{"ai_chat_max_messages", itoa(AIChatMaxMessages), "count", "§4.4", "ai.chat 消息条数上限", ""},
-		{"ai_chat_max_body_bytes", itoa(AIChatMaxBodyBytes), "bytes", "§4.4", "ai.chat 请求体上限", ""},
+
+		// ===== §21.2 客户端 AI 桥（跨端冻结契约）=====
+		// 桥由客户端协议 handler 实现，但形状是跨端契约；作者文档/技能的数字必须
+		// 来自本表（§5.5），否则技能里的"单条 16 KiB"会与实现漂移。
+		{"ai_bridge_max_messages", itoa(AIBridgeMaxMessages), "count", "§21.2", "AI 桥消息条数上限", "应用前端 fetch('/__picoaide/ai/chat') 的 messages 数组长度"},
+		{"ai_bridge_message_max_bytes", itoa(AIBridgeMessageMaxBytes), "bytes", "§21.2", "AI 桥单条消息上限", "单条 message.content 的字节上限（应用侧据此截断/切分）"},
 
 		// ===== §4.5 SQL / 数据层 =====
 		{"app_db_page_size", itoa(AppDBPageSize), "bytes", "§4.5", "应用库页大小", ""},
@@ -103,7 +109,10 @@ func Table() []Entry {
 		{"sql_max_rows", itoa(SQLMaxRows), "count", "§4.5", "返回行数上限", "超出即截断并报错"},
 		{"sql_max_result_bytes", itoa(SQLMaxResultBytes), "bytes", "§4.5", "返回字节上限", ""},
 		{"sql_statement_budget", secs(SQLStatementBudget), "seconds", "§4.5", "单语句硬超时", "独立于 guest 超时；驱动取消时 sqlite3_interrupt"},
-		{"app_db_handle_max", itoa(AppDBHandleMax), "count", "§4.5", "同时持有的应用库句柄上限", "每句柄 2 条 SQLite 连接 ⇒ fd 硬上界"},
+		{"app_db_readers", itoa(AppDBReaders), "count", "§4.5", "每应用只读连接数", "WAL 下并发读；写仍只由一个写者串行"},
+		{"app_db_readers_max", itoa(AppDBReadersMax), "count", "§4.5", "只读连接数上限", "配置注入的钳位（超出即钳到该值）"},
+		{"app_db_busy_timeout", secs(AppDBBusyTimeout), "seconds", "§4.5", "应用库连接 busy_timeout", "连接级不持久 ⇒ 每条连接重设；必须小于 sql_statement_budget"},
+		{"app_db_handle_max", itoa(AppDBHandleMax), "count", "§4.5", "同时持有的应用库句柄上限", "每句柄 (1 + app_db_readers) 条 SQLite 连接 ⇒ fd 硬上界"},
 		{"max_tables_per_app", itoa(MaxTablesPerApp), "count", "§4.5", "每应用表数上限", "由 db.define 强制"},
 		{"max_columns_per_table", itoa(MaxColumnsPerTable), "count", "§4.5", "每表列数上限", "由 db.define 强制"},
 		{"table_name_pattern", TableNamePattern, "", "§4.5", "表名规则", ""},
@@ -113,34 +122,21 @@ func Table() []Entry {
 		{"allowed_statement_kinds", joinCSV(AllowedStatementKinds), "", "§4.5", "语句种类白名单", "其余一律拒（含全部 DDL）"},
 
 		// ===== §4.6 请求与队列 =====
-		{"app_request_body_max_bytes", itoa(AppRequestBodyMaxBytes), "bytes", "§4.6", "应用 API 请求体上限", "子域路由树不在两个 1 MB 中间件分组里 ⇒ 必须自己实现"},
+		{"app_request_body_max_bytes", itoa(AppRequestBodyMaxBytes), "bytes", "§4.6", "应用 API 请求体上限", "客户端请求信封自带上限；管线仍自套 MaxBytesReader 兜住 chunked/长度撒谎"},
 		{"app_response_body_max_bytes", itoa(AppResponseBodyMaxBytes), "bytes", "§4.6", "应用响应体上限", ""},
 		{"protocol_line_max_bytes", itoa(ProtocolLineMaxBytes), "bytes", "§4.6", "协议帧单行上限", "超限 RUNTIME_OUTPUT_OVERRUN"},
 		{"guest_budget", secs(GuestBudget), "seconds", "§4.6", "guest 执行预算", "进入宿主调用时暂停计时"},
-		{"host_ai_chat_budget", secs(HostAIChatBudget), "seconds", "§4.6", "ai.chat 宿主预算", ""},
 		{"request_wall_clock", secs(RequestWallClock), "seconds", "§4.6", "请求端到端墙钟", "含排队等待，到点即拒"},
 		{"app_queue_depth", itoa(AppQueueDepth), "count", "§4.6", "每应用队列长度", "超出 429 + Retry-After"},
 		{"user_per_app_running", itoa(UserPerAppRunning), "count", "§4.6", "单用户同应用在跑", ""},
 		{"user_per_app_queued", itoa(UserPerAppQueued), "count", "§4.6", "单用户同应用排队", ""},
 		{"user_global_running", itoa(UserGlobalRunning), "count", "§4.6", "单用户跨应用全局在跑", ""},
-		{"app_concurrency", itoa(AppConcurrency), "count", "§4.6", "每应用并发", "恒为 1（串行）"},
+		{"app_concurrency", itoa(AppConcurrency), "count", "§4.6", "每应用并发", "同一应用最多 N 个请求同时在跑（控制台对应 app_running）；读并发，写仍串行"},
 		{"retry_after_seconds", itoa(RetryAfterSeconds), "seconds", "§4.6", "Retry-After", ""},
-		{"anon_global_rate_per_min", itoa(AnonGlobalRatePerMin), "count", "§4.6", "全局匿名令牌桶", "次/分"},
-		{"anon_global_burst", itoa(AnonGlobalBurst), "count", "§4.6", "全局匿名桶容量", ""},
-		{"anon_per_ip_rate_per_min", itoa(AnonPerIPRatePerMin), "count", "§4.6", "每 IP 匿名速率", "次/分"},
-		{"anon_per_ip_burst", itoa(AnonPerIPBurst), "count", "§4.6", "每 IP 匿名桶容量", ""},
 
-		// ===== §4.7 账号、AI 与额度 =====
-		{"ticket_ttl", secs(TicketTTL), "seconds", "§4.7", "一次性换票有效期", "code 单次、绑 (user, app)"},
-		{"app_session_ttl", secs(AppSessionTTL), "seconds", "§4.7", "应用子域会话 TTL", "Cookie host-only + HttpOnly + Secure + SameSite=Strict"},
-		{"ai_token_ttl", secs(AITokenTTL), "seconds", "§4.7", "AI 令牌有效期", "宿主内存持有、到期重铸、登出吊销"},
-		{"ai_token_renew_before", secs(AITokenRenewBefore), "seconds", "§4.7", "AI 令牌续期提前量", ""},
-		{"ai_user_rate_per_min", itoa(AIUserRatePerMin), "count", "§4.7", "用户级限流", "平台既有，应用无独立额度"},
-		{"ai_in_flight_per_user", itoa(AIInFlightPerUser), "count", "§4.7", "在途上限", "平台既有 InFlightGuard"},
-		{"session_max_form_bytes", itoa(SessionMaxFormBytes), "bytes", "§4.7", "员工会话表单体上限", "登录/换票两个表单只有几个短字段"},
-		{"session_max_username_bytes", itoa(SessionMaxUsernameBytes), "bytes", "§4.7", "账号字段上限", "与客户端面登录同口径"},
-		{"session_max_password_bytes", itoa(SessionMaxPasswordBytes), "bytes", "§4.7", "密码字段上限", "与客户端面登录同口径"},
-		{"session_max_next_bytes", itoa(SessionMaxNextBytes), "bytes", "§4.7", "换票 next 长度上限", "§4.7「next 只接受同基域相对路径」的一部分"},
+		// ===== §4.7 账号与额度 =====
+		// ⚠️ W4：换票 / 应用会话 / AI 令牌 / 匿名面 / 员工浏览器表单的数值已随它们的
+		// 对象一起删除（总纲 §8.4 + §21.3）；这张表只保留**仍然生效**的数值。
 
 		// ===== §4.9 / §5.1 / §5.3 =====
 		{"call_event_retention_days", itoa(CallEventRetentionDays), "days", "§4.9", "调用事件保留", ""},
@@ -150,6 +146,7 @@ func Table() []Entry {
 		{"diagnostics_default_limit", itoa(DiagnosticsDefaultLimit), "count", "§4.9", "诊断默认条数", ""},
 		{"diagnostics_max_limit", itoa(DiagnosticsMaxLimit), "count", "§4.9", "诊断条数上限", ""},
 		{"stderr_tail_bytes", itoa(StderrTailBytes), "bytes", "§4.9", "stderr 尾巴上限", "诊断回给作者"},
+		{"readyz_snapshot_ttl", secs(ReadyzSnapshotTTL), "seconds", "§4.9", "/readyz 快照缓存时长", "未认证端点；缓存整次采集（目录 walk + statfs + db.Ping）"},
 		{"retirement_snapshot_retention_days", itoa(RetirementSnapshotRetentionDays), "days", "§5.3", "退役快照保留", "冻结/退役后保留快照的时长；到期由平台回收"},
 		{"log_max_line_bytes", itoa(LogMaxLineBytes), "bytes", "§5.1", "单条日志上限", ""},
 		{"log_max_per_request", itoa(LogMaxPerRequest), "count", "§5.1", "每请求日志条数上限", "超出丢弃并计数"},

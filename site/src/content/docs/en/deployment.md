@@ -104,6 +104,19 @@ Employee clients / browsers
 | `certs/` | Manual certificates | `manual` mode only |
 | `deploy-backup/` | Backup output | Written by the backup steps |
 
+## App access model (since 2026-09-19: apps need no public entry point)
+
+Employee-built WASM apps open **only inside the desktop client**: the client opens a dedicated app window that
+loads the custom-scheme address `<channel app-origin scheme>://<app_id>/` (the scheme comes from the channel
+configuration; it is `picoaide-app` for the official channel), and the client forwards it to the server's single
+entry point `POST /api/client/v2/apps/wasm/:app_id/request` (carrying the employee token).
+
+- The server **needs no public access surface** for apps: no app-specific DNS record, no app-specific certificate,
+  and no extra site block in Caddy — the three certificate modes below serve the main site domain only;
+- The pre-2026-09-19 "dedicated app domain + browser access" chain has been removed entirely, so browsers can no longer reach apps;
+- **Upgrades must keep server and client on the same version**: old clients can no longer open apps, so employees' clients must be upgraded to the matching version as well
+  (the client ships inside the server image, see [Client delivery & updates](/en/deployment/client-delivery/)).
+
 ## Certificate modes (choose one of three)
 
 `TLS_MODE` in `.env` decides which Caddyfile template is mounted:

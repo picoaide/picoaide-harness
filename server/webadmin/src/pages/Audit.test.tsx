@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { request } from '../api'
 import { setCurrentAdmin, type MeUser } from '../lib/rbac'
-import Audit from './Audit'
+import Audit, { ACTION_LABEL } from './Audit'
 
 // ---------------------------------------------------------------------------
 // 审计 R7 branding-4:审计日志 CSV 导出必须做公式注入转义 + 带 UTF-8 BOM。
@@ -299,107 +301,241 @@ describe('审计动作表覆盖组织共享库动作(SG-5)', () => {
   })
 })
 
+
 // ---------------------------------------------------------------------------
-// SG-5 残留(r3v 复核,2026-09-17):上一轮只补了组织共享库那一族,漏了
-// `agent_preset_revoke`(server/internal/agentshare/routes.go 的撤销分支)以及
-// capability_lock / capability_unlock / skill_normalize 等一批**服务端一直在写**
-// 的动作 —— 它们在表里回落成裸 id、在筛选下拉里选不到(后端 ?action= 本来就支持)。
+// 审计动作真源对拍（R1-uxw-3,2026-09-19 第三波修复）
 //
-// 下面的清单 = 服务端全部写点(repo 全量 grep `AuditLog(` 的第三个实参,含
-// `action := …` 的双分支与 decide/applyGrant 的参数)。
-// **口径更正(2026-09-17 独立审计 P3-2)**:这张表是**人工维护的清单**,用例只保证
-// "清单内的动作都渲染中文标签、且裸 id 不出现" —— 服务端新增写点而**没人**往这里
-// 补时,本用例**不会**红(原先"少一条 ⇒ 本用例红"的说法与实现不符,已删)。
-// 自动对账机制尚未实现,服务端加审计动作时需人工同步本表。
-// kebab 之外的历史动作(mcp_*/kb_*)只在 ACTION_LABEL 里保留(存量行),不在此表。
+// 上一版这里是**手写夹具** SERVER_ACTIONS —— 拿自己当判据：服务端新增写点而没人
+// 同步本表时用例照样绿（文件里原本就写着这条口径更正）。而 wasm_* 那一族 17 个
+// 动作一条都没登记 ⇒「v1.2.0 为什么被拒」在审计页查不了（R1-uxw-3 的现场）。
+//
+// 现在真源取自**服务端 Go 源码**：扫 server/ 下全部非 `_test.go` 文件，解析审计
+// 写入点的动作实参。写入点形状共五种（这就是"真源"的确切定义，与
+// `server/internal/serverstore/audit.go` 的两个写入函数一一对应）：
+//   serverstore.AuditLog(db, username, ACTION, detail)       ← 通用写入
+//   serverstore.AuditLogApp(db, appID, username, ACTION, …)  ← 应用维度写入
+//   h.auditApp(appID, username, ACTION, detail)              ← wasm 应用级
+//   h.auditOrg(username, ACTION, detail)                     ← wasm 组织级
+//   *.opt.Audit(username, ACTION, detail)                    ← 注入的审计闭包
+// 双向断言（缺任一方向即红）：
+//   ① 服务端有写点、标签表没有 ⇒ 红，且断言筛选下拉里选不到它；
+//   ② 标签表有、服务端抽不到字面量 ⇒ 红，除非落在下面两张**显式白名单**里，
+//      而白名单自己也要过判据：DERIVED 的动作名必须在源码里仍有字面量（helper
+//      参数传进写入点），LEGACY 的动作名必须真的已从源码消失（存量行专用）。
 // ---------------------------------------------------------------------------
-const SERVER_ACTIONS: ReadonlyArray<readonly [action: string, label: string]> = [
-  ['skill_create', '上架技能'],
-  ['skill_update', '更新技能'],
-  ['skill_disable', '下架技能'],
-  ['skill_enable', '重新上架技能'],
-  ['skill_grant', '技能授权'],
-  ['skill_revoke', '技能撤销授权'],
-  ['skill_grants_replace', '技能部门授权替换'],
-  ['skill_normalize', '规范化技能包'],
-  ['shared_skill_upload', '上传共享技能'],
-  ['shared_skill_approve', '通过共享技能'],
-  ['shared_skill_reject', '拒绝共享技能'],
-  ['shared_skill_delete', '删除共享技能'],
-  ['shared_skill_qualify', '设置共享技能质量'],
-  ['shared_skill_grant', '共享技能授权'],
-  ['shared_skill_revoke', '共享技能撤销授权'],
-  ['shared_skill_enable', '重新上架共享技能'],
-  ['shared_skill_disable', '下架共享技能'],
-  ['agent_preset_upload', '上传智能体'],
-  ['agent_preset_approve', '通过智能体'],
-  ['agent_preset_reject', '拒绝智能体'],
-  ['agent_preset_delete', '删除智能体'],
-  ['agent_preset_qualify', '设置智能体质量'],
-  ['agent_preset_grant', '智能体授权'],
-  ['agent_preset_revoke', '智能体撤销授权'],
-  ['agent_preset_enable', '重新上架智能体'],
-  ['agent_preset_disable', '下架智能体'],
-  ['agent_create', '上架市场智能体'],
-  ['agent_update', '更新市场智能体'],
-  ['agent_update_meta', '更新市场智能体信息'],
-  ['agent_disable', '下架市场智能体'],
-  ['agent_enable', '重新上架市场智能体'],
-  ['agent_grant', '市场智能体授权'],
-  ['agent_revoke', '市场智能体撤销授权'],
-  ['agent_grants', '市场智能体部门授权替换'],
-  ['capability_lock', '锁定能力名称'],
-  ['capability_unlock', '解锁能力名称'],
-  ['app_owner_transfer', '转移能力归属'],
-  ['user_create', '创建用户'],
-  ['user_update', '更新用户'],
-  ['user_delete', '删除用户'],
-  ['user_dept', '用户部门变更'],
-  ['user_tokens_revoked', '吊销令牌'],
-  ['role_change', '变更角色'],
-  ['dept_create', '新建部门'],
-  ['dept_update', '更新部门'],
-  ['dept_delete', '删除部门'],
-  ['auth_config', '修改认证配置'],
-  ['ldap_sync', 'LDAP 同步'],
-  ['audit_retention_change', '审计保留策略变更'],
-  ['login_success', '登录成功'],
-  ['login_fail', '登录失败'],
-  ['password_change', '修改密码'],
-  ['admin_password_change', '修改管理员密码'],
-  ['admin_mfa_login', '管理员 MFA 登录'],
-  ['admin_mfa_enable', '开启管理员 MFA'],
-  ['admin_mfa_disable', '关闭管理员 MFA'],
-  ['admin_mfa_reset', '重置管理员 MFA'],
-  ['balance_adjust', '调整余额'],
-  ['balance_grant', '余额发放'],
-  ['balance_settings', '余额策略变更'],
-  ['gateway_config', '网关配置变更'],
-  ['error_reporting_test', '错误上报连通性自检'],
-  ['provider_create', '新建上游'],
-  ['provider_update', '更新上游'],
-  ['provider_delete', '删除上游'],
-  ['model_create', '新建模型'],
-  ['model_update', '更新模型'],
-  ['model_delete', '删除模型'],
-  ['connector_create', '新建连接器'],
-  ['connector_update', '更新连接器'],
-  ['connector_enabled', '连接器上下架'],
-  ['connector_delete', '删除连接器'],
-  ['report_subscription_create', '新建报表订阅'],
-  ['report_subscription_update', '更新报表订阅'],
-  ['report_subscription_delete', '删除报表订阅'],
+
+/**
+ * 服务端源码根（`server/`）。
+ *
+ * 不用 `import.meta.url`：jsdom 环境下它是 `http://localhost/...`（fileURLToPath
+ * 会直接抛 "The URL must be of scheme file"）。改为从 cwd 向上找审计写入点的
+ * 存在性标记 —— 无论从 `server/webadmin` 还是仓库根跑 vitest 都能定位。
+ */
+function findServerDir(): string {
+  let dir = process.cwd()
+  for (let i = 0; i < 6; i++) {
+    if (existsSync(join(dir, 'internal', 'serverstore', 'audit.go'))) return dir
+    if (existsSync(join(dir, 'server', 'internal', 'serverstore', 'audit.go'))) return join(dir, 'server')
+    dir = resolve(dir, '..')
+  }
+  return resolve(process.cwd(), '..')
+}
+
+const SERVER_DIR = findServerDir()
+
+/**
+ * 经**函数参数**进入审计写入点的动作名（源码里是 `AuditLog(db, user, action, …)`
+ * 形态，字面量在 helper 的调用点）。
+ *
+ * 这不是"免检名单"：下面 `DERIVED_ACTIONS` 的用例要求每个动作名在服务端源码里
+ * **仍以字符串字面量出现**（`"<name>"`），改名/删除会立刻红。
+ */
+const DERIVED_ACTIONS: Record<string, string> = {
+  skill_grant: 'marketplace/admin.go applyGrant(..., grantAudit, revokeAudit)',
+  skill_revoke: 'marketplace/admin.go applyGrant(..., grantAudit, revokeAudit)',
+  capability_lock: 'sharedskills/routes.go 的 action 变量',
+  capability_unlock: 'sharedskills/routes.go 的 action 变量',
+  shared_skill_enable: 'sharedskills/routes.go 的 action 变量',
+  shared_skill_disable: 'sharedskills/routes.go 的 action 变量',
+  shared_skill_approve: 'sharedskills/routes.go decide(db, status, auditAction)',
+  shared_skill_reject: 'sharedskills/routes.go decide(db, status, auditAction)',
+  shared_skill_revoke: 'sharedskills/routes.go 的 action 变量',
+  agent_preset_approve: 'agentshare/routes.go decide/decideVersioned(db, status, auditAction)',
+  agent_preset_reject: 'agentshare/routes.go decide/decideVersioned(db, status, auditAction)',
+  agent_preset_enable: 'agentshare/routes.go 的 action 变量',
+  agent_preset_disable: 'agentshare/routes.go 的 action 变量',
+  agent_preset_revoke: 'agentshare/routes.go 的 action 变量',
+  agent_grant: 'marketplace/agent_api.go 的 action 变量',
+  agent_revoke: 'marketplace/agent_api.go 的 action 变量',
+}
+
+/**
+ * 已下线、但存量审计行仍需中文标签与筛选入口的动作（**不许删**）。
+ *
+ * 判据是反的：这些动作名必须**不再出现**在服务端源码里 —— 谁把它们从这张表里
+ * 拿去当"活跃动作"的挡箭牌（比如新写了同名写点却塞进 LEGACY 免检），用例会红。
+ */
+const LEGACY_ACTIONS: Record<string, string> = {
+  mcp_create: 'MCP 功能已下线',
+  mcp_update: 'MCP 功能已下线',
+  mcp_delete: 'MCP 功能已下线',
+  mcp_grant: 'MCP 功能已下线',
+  mcp_revoke: 'MCP 功能已下线',
+  kb_create: '知识库功能已下线',
+  kb_update: '知识库功能已下线',
+  kb_delete: '知识库功能已下线',
+  kb_import: '知识库功能已下线',
+  kb_grant: '知识库功能已下线',
+  kb_revoke: '知识库功能已下线',
+  // 应用基域配置面（应用子域 + 泛域名）随 2026-09-19「客户端专属」改造的 W4 删除波次
+  // 一并删除（服务端已无该写点，见 scripts/wasm/check-old-model-residue.mjs 的 app-subdomain）。
+  // 标签**必须留在 ACTION_LABEL**：存量审计链里仍有这个动作码的行，删标签会让历史
+  // 记录回退成裸码 —— 与 mcp_*/kb_* 同一条"已下线动作"的处置口径。
+  wasm_apps_base_domain_change: '应用基域配置面已随「客户端专属」改造删除（2026-09-19）',
+}
+
+/** 审计写入点形状：sink 名 + 动作实参在参数表里的下标（0 基）。 */
+const AUDIT_SINKS: ReadonlyArray<{ name: string; actionArg: number }> = [
+  { name: 'AuditLogApp', actionArg: 3 },
+  { name: 'AuditLog', actionArg: 2 },
+  { name: 'auditApp', actionArg: 2 },
+  { name: 'auditOrg', actionArg: 1 },
+  { name: 'Audit', actionArg: 1 },
 ]
 
-describe('审计动作表覆盖服务端全部写点(SG-5 残留)', () => {
-  it('清单本身自洽:标签唯一(下拉里同名两项会让管理员无法分辨)', () => {
-    const labels = SERVER_ACTIONS.map(([, label]) => label)
-    expect(new Set(labels).size).toBe(SERVER_ACTIONS.length)
-    expect(new Set(SERVER_ACTIONS.map(([action]) => action)).size).toBe(SERVER_ACTIONS.length)
+/** 递归收集服务端非测试 Go 文件（webadmin/node_modules/data 不是服务端写入面）。 */
+function goSourceFiles(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      if (['node_modules', 'webadmin', 'data', '.git', 'vendor'].includes(entry.name)) continue
+      goSourceFiles(full, out)
+    } else if (entry.name.endsWith('.go') && !entry.name.endsWith('_test.go')) {
+      out.push(full)
+    }
+  }
+  return out
+}
+
+/**
+ * 从一次调用表达式里切出**顶层**实参（跳过字符串与嵌套括号/花括号里的逗号）。
+ * 手写而不是正则：动作实参前面常有 `db, adminUsername(c),` 这类嵌套调用。
+ */
+function callArgs(src: string, start: number): string[] {
+  const args: string[] = []
+  let depth = 0
+  let cur = ''
+  let quote: string | null = null
+  for (let i = start; i < src.length; i++) {
+    const ch = src[i]!
+    if (quote !== null) {
+      cur += ch
+      if (ch === '\\') { cur += src[++i] ?? ''; continue }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === '`' || ch === "'") { quote = ch; cur += ch; continue }
+    if (ch === '(' || ch === '[' || ch === '{') { depth++; cur += ch; continue }
+    if (ch === ')' || ch === ']' || ch === '}') {
+      if (depth === 0) { args.push(cur); return args }
+      depth--; cur += ch; continue
+    }
+    if (ch === ',' && depth === 0) { args.push(cur); cur = ''; continue }
+    cur += ch
+  }
+  return args
+}
+
+/** 扫描服务端源码，返回 `动作名 → 首个出现位置`（只认字面量动作名）。 */
+function extractServerAuditActions(): Map<string, string> {
+  const found = new Map<string, string>()
+  for (const file of goSourceFiles(SERVER_DIR)) {
+    const src = readFileSync(file, 'utf8')
+    for (const sink of AUDIT_SINKS) {
+      const re = new RegExp(`\\b(?:[A-Za-z_][\\w]*\\.)?${sink.name}\\s*\\(`, 'g')
+      let m: RegExpExecArray | null
+      while ((m = re.exec(src)) !== null) {
+        const arg = callArgs(src, m.index + m[0].length)[sink.actionArg]
+        if (arg === undefined) continue
+        const literal = /^"([^"]*)"$/.exec(arg.trim())
+        if (literal === null) continue
+        const action = literal[1]!
+        if (!found.has(action)) found.set(action, file.slice(SERVER_DIR.length))
+      }
+    }
+  }
+  return found
+}
+
+/** 真源不可见时必须红，而不是静默跳过（跳过 = 又一条假绿）。 */
+function assertServerSourceVisible(): void {
+  expect(
+    existsSync(join(SERVER_DIR, 'internal', 'serverstore', 'audit.go')),
+    `服务端审计写入点不可见：${SERVER_DIR}（真源必须可读，动作对拍不能静默跳过）`,
+  ).toBe(true)
+}
+
+const SERVER_AUDIT_ACTIONS = (() => {
+  assertServerSourceVisible()
+  return extractServerAuditActions()
+})()
+
+/** 服务端**字面量**写点全集（排序后，用于渲染用例）。 */
+const SERVER_ACTIONS: readonly string[] = [...SERVER_AUDIT_ACTIONS.keys()].sort()
+
+const RAW_SERVER_SOURCE = (() => {
+  assertServerSourceVisible()
+  return goSourceFiles(SERVER_DIR).map((f) => readFileSync(f, 'utf8')).join('\n')
+})()
+
+describe('审计动作表 = 服务端写点真源（R1-uxw-3 双向对拍）', () => {
+  it('真源本身非空且含 wasm 一族（抽取器坏掉/路径漂移都要红，不许"零动作=全绿"）', () => {
+    expect(SERVER_ACTIONS.length).toBeGreaterThan(60)
+    for (const a of [
+      'wasm_app_release_approve', 'wasm_app_release_reject', 'wasm_app_publish_toggle',
+      'wasm_app_freeze', 'wasm_app_release', 'wasm_app_access_change',
+      'wasm_app_release_pending', 'wasm_app_release_denied', 'wasm_app_release_failed',
+      'wasm_app_delete', 'wasm_app_export', 'wasm_app_prune_failed',
+    ]) {
+      expect(SERVER_AUDIT_ACTIONS.has(a), `真源里应当有 ${a}`).toBe(true)
+    }
+  })
+
+  it('方向①:服务端每个写点都有中文标签（新增写点不补标签即红）', () => {
+    const missing = SERVER_ACTIONS.filter((a) => !(a in ACTION_LABEL))
+    expect(missing, `服务端会写这些审计动作但标签表没有：${missing.join(', ')}`).toEqual([])
+    for (const a of SERVER_ACTIONS) {
+      expect((ACTION_LABEL[a] ?? '').trim(), `${a} 的标签不能为空`).not.toBe('')
+    }
+  })
+
+  it('方向②:标签表每一项都能追溯到服务端（活跃写点 / 参数传入 / 已下线三选一）', () => {
+    const unexplained = Object.keys(ACTION_LABEL).filter(
+      (a) => !SERVER_AUDIT_ACTIONS.has(a) && !(a in DERIVED_ACTIONS) && !(a in LEGACY_ACTIONS),
+    )
+    expect(
+      unexplained,
+      `这些标签既没有活跃写点、也不在白名单里（凭空发明的动作名？）：${unexplained.join(', ')}`,
+    ).toEqual([])
+  })
+
+  it('白名单自证:DERIVED 的动作名在源码里仍有字面量，LEGACY 的动作名真的已消失', () => {
+    const stillDerived = Object.keys(DERIVED_ACTIONS).filter((a) => !RAW_SERVER_SOURCE.includes(`"${a}"`))
+    expect(stillDerived, `白名单里的参数传入动作已从服务端消失，应删标签：${stillDerived.join(', ')}`).toEqual([])
+
+    const resurrected = Object.keys(LEGACY_ACTIONS).filter((a) => RAW_SERVER_SOURCE.includes(`"${a}"`))
+    expect(
+      resurrected,
+      `已下线动作在服务端源码里复活（或被人塞进 LEGACY 免检）：${resurrected.join(', ')}`,
+    ).toEqual([])
+
+    // 双向白名单不许重叠（同一动作不能既"参数传入"又"已下线"）。
+    const overlap = Object.keys(DERIVED_ACTIONS).filter((a) => a in LEGACY_ACTIONS)
+    expect(overlap).toEqual([])
   })
 
   it('每一行都渲染中文标签(不回落成裸 action id),且筛选下拉可选', async () => {
-    const logs = SERVER_ACTIONS.map(([action], i) => ({
+    const logs = SERVER_ACTIONS.map((action, i) => ({
       id: 100 + i,
       username: 'boss',
       action,
@@ -415,24 +551,71 @@ describe('审计动作表覆盖服务端全部写点(SG-5 残留)', () => {
     render(<Audit />)
     await waitForAuditRows(logs.length)
 
-    // 性能与判据（2026-09-17 独立审计 P2-4）：原写法对 74 条动作逐条调
-    // queryByText + getAllByText + getByRole(option)，**每次都是整文档扫描**
-    // （单机 2845ms、负载下会撞用例预算）。改为一次性快照集合比对：
-    // 语义等价（原断言就是精确文本匹配），实测 333ms（-88%）。
+    // 性能与判据（2026-09-17 独立审计 P2-4）：不要对每条动作逐次整文档扫描；
+    // 一次性快照集合比对，语义等价（精确文本匹配）。
     const texts = new Set<string>()
     for (const el of document.querySelectorAll('*')) texts.add((el.textContent ?? '').trim())
 
-    for (const [action, label] of SERVER_ACTIONS) {
+    for (const action of SERVER_ACTIONS) {
       // 裸 id 一个都不许出现在表里(出现 = 未登记,row badge 会回落成 outline + 原串)。
       expect(texts.has(action)).toBe(false)
-      expect(texts.has(label)).toBe(true)
+      expect(texts.has(ACTION_LABEL[action]!)).toBe(true)
     }
 
     fireEvent.click(screen.getByRole('combobox'))
     // 选项在 portal 里，同样一次查询取全集再比对（逐个 getByRole 是 N 次整文档扫描）。
     const options = new Set(screen.getAllByRole('option').map((o) => (o.textContent ?? '').trim()))
-    for (const [, label] of SERVER_ACTIONS) {
-      expect(options.has(label)).toBe(true)
+    for (const action of SERVER_ACTIONS) {
+      expect(options.has(ACTION_LABEL[action]!)).toBe(true)
     }
+  })
+
+  it('下拉派生自同一张表:选项集 = 标签表(不是两处手写)', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/server/admin/audit?')) {
+        return { logs: [{ id: 1, username: 'a', action: 'login_success', detail: 'ip=1', created_at: '2026-09-17T10:00:00+08:00' }], total: 1 }
+      }
+      if (String(path).startsWith('/api/server/admin/audit/settings')) return { retention_days: 180 }
+      return {}
+    })
+    setCurrentAdmin(SUPER)
+    render(<Audit />)
+    // 只等这一行落地（waitForAuditRows 只接受 >=2 行：空态占位行与 1 行同形）。
+    expect(await screen.findByText('登录成功')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('combobox'))
+    const options = new Set(screen.getAllByRole('option').map((o) => (o.textContent ?? '').trim()))
+    // 「全部操作」是固定首项；其余必须是 ACTION_LABEL 的全部取值。
+    const labels = new Set(Object.values(ACTION_LABEL))
+    for (const label of labels) expect(options.has(label), `下拉缺选项：${label}`).toBe(true)
+    for (const opt of options) {
+      expect(opt === '全部操作' || labels.has(opt), `下拉出现标签表里没有的选项：${opt}`).toBe(true)
+    }
+  })
+
+  it('wasm_* 动作可筛可选(驳回理由那条审计从此查得到)', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/server/admin/audit?')) {
+        return {
+          logs: [{ id: 7, username: 'boss', action: 'wasm_app_release_reject', detail: 'review-me v1.2.0 审核拒绝：数据范围超出用途所需', created_at: '2026-09-19T10:00:00+08:00' }],
+          total: 1,
+        }
+      }
+      if (String(path).startsWith('/api/server/admin/audit/settings')) return { retention_days: 180 }
+      return {}
+    })
+    setCurrentAdmin(SUPER)
+    render(<Audit />)
+    // 行内是中文标签 + 理由明细，不是裸 id。
+    expect(await screen.findByText('拒绝应用版本')).toBeInTheDocument()
+    expect(screen.getByText(/数据范围超出用途所需/)).toBeInTheDocument()
+    expect(screen.queryByText('wasm_app_release_reject')).toBeNull()
+
+    fireEvent.click(screen.getByRole('combobox'))
+    fireEvent.click(await screen.findByRole('option', { name: '拒绝应用版本' }))
+    fireEvent.click(screen.getByRole('button', { name: '筛选' }))
+    await waitFor(() => {
+      const hit = mockRequest.mock.calls.find(([p]) => String(p).includes('action=wasm_app_release_reject'))
+      expect(hit, '必须发出带 action=wasm_app_release_reject 的审计查询').toBeTruthy()
+    })
   })
 })

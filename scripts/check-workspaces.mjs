@@ -52,6 +52,27 @@ const GUARDS = [
   // —— 一次静默回退就能让 check:fast 重新变成 0 任务 + exit 0。用真脚本副本在合成 git
   // 仓库里跑（corepack 走桩），不联网、不跑真实包。
   { name: 'check:check-workspaces', args: ['run', 'check:check-workspaces'], path: '门禁编排器自身(--changed/--only/.gitignore)' },
+  // WASM「客户端专属」改造的验收门禁（docs/planning/2026-09-19-wasm-client-only-design.md §13）：
+  // 这里只接**便携子集**（静态守卫 / 三方对拍 / 旧模型零残留 / 渠道约束 / HEAD 绑定）——
+  // 需要真 PG 的 go test 与需要显示器的协议探针归 server job 与 W6 三平台（§16 W6）。
+  //
+  // **已转阻塞 @ 2026-09-20**：W4 删除波次落地、零残留扫描在**修好量具后**达到
+  // A=0（B=34 ≤ 预算、ANN=65 ≤ 预算；量具修复=词边界假红 R1-L4-2 / 注释单列 ANN
+  // R1-L4-3 / B 扩到 appcfg 包 R1-L4-4）。此前它是 advisory（W1–W5 施工期零残留断言
+  // 按设计会如实报出存量命中，只告警不拦门禁）—— 那段历史留在 git 历史里，不再回退。
+  // 判据：本 guard 失败 ⇒ `yarn check` 整体失败（本地 `yarn check` 与 CI gate job 同义）。
+  // 2026-09-20 真实事故：`git add -A` 把某泳道**正在飞的变异体**提交进了基线
+  // （`return '0' // A2-L6 变异 M-D` ⇒ 提交是红的）。本仓把变异验证当一等实践，
+  // 所以"变异体残留"是结构性风险 —— 只能靠这条守卫，不能靠人眼。
+  { name: 'check:no-leftover-mutants', args: ['run', 'check:no-leftover-mutants'], path: '变异体残留（变异验证必须在临时副本或 trap 还原）' },
+  // 2026-09-20 实测漂移：`server/docs/06-database.md` / `08-development.md` 写着「迁移 0001–0060」
+  // 而实际已到 0076。文档里的迁移区间此前**没有任何守卫**，只能靠人记得改 —— 这条把它变成判据。
+  { name: 'check:migration-range', args: ['run', 'check:migration-range'], path: '文档里的迁移区间 ↔ 实际迁移编号' },
+  {
+    name: 'check:wasm-client-only',
+    args: ['run', 'check:wasm-client-only', '--portable'],
+    path: 'WASM 客户端专属（残留/对拍/渠道/W5 文档/HEAD 绑定）；PG 与探针见 §16 W6',
+  },
 ]
 
 /**
@@ -69,16 +90,57 @@ const GUARDS = [
  * 成环,且会让 desktop 的 profile 冒烟与那些包的构建互相踩。
  */
 const PACKAGES = [
-  { name: 'dsh-plugin-desktop', dir: 'packages/host/desktop', needs: [] },
+  // 2026-09-20：desktop 的 Electron 引导（`main.ts`）与 App AI 执行面
+  // （`app-ai-runner.ts`）**构建期** import 该插件包（协议注册 / 真机适配器 /
+  // 安装密钥仓库 / runner 接线）—— 而 desktop 的 tsdown 会把 `@picoaide/*` 内联
+  // （`noExternal` 只放行 `@deepseek-ai/*`+react），所以它的 `lib/` 必须先产出。
+  // 同日（构建环修复，路线 A）：`src/host-locale.ts` / `src/desktop-home.ts` 改成
+  // 两个叶子包的一行 re-export，它的 tsc 因此还读它们的 lib/types ⇒ 那两条边也显式
+  // 登记（传递上已由 wasm-apps-host → browser → connectors → 叶子包保证，但真实边
+  // 就该写在表里 —— `temp/wasm-client-only/cycle-check.mjs` 会逐条对拍）。
+  { name: 'dsh-plugin-desktop', dir: 'packages/host/desktop', needs: ['@picoaide/dsh-wasm-apps-host', '@picoaide/dsh-host-locale', '@picoaide/dsh-host-home'] },
   { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop'] },
-  { name: '@picoaide/dsh-connectors', dir: 'packages/host/connectors', needs: ['dsh-plugin-desktop'] },
+  // 2026-09-20（路线 A / A 扩展）：`host-copy.ts` 的语言解析直接 import 叶子包
+  // `@picoaide/dsh-host-locale`；`user-scope.ts` 的 DSH-home 权威改成
+  // `@picoaide/dsh-host-home` ⇒ **connectors 不再 import 桌面包**，
+  // 那条 `connectors → dsh-plugin-desktop` 边随之删除（它正是四边环的最后一段）。
+  { name: '@picoaide/dsh-connectors', dir: 'packages/host/connectors', needs: ['@picoaide/dsh-host-home', '@picoaide/dsh-host-locale'] },
   { name: '@picoaide/dsh-cron', dir: 'packages/host/cron', needs: ['dsh-plugin-desktop'] },
   { name: '@picoaide/dsh-branding', dir: 'packages/client/branding', needs: [] },
   { name: 'dsh-community-fabric', dir: 'community/fabric', needs: [] },
   { name: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', needs: ['@picoaide/dsh-enterprise'] },
   // WASM 应用平台的客户端半边（应用中心 + 发布编排入口）：读 enterprise 的 lib/types。
   { name: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', needs: [] },
-  { name: '@picoaide/dsh-browser', dir: 'packages/host/browser', needs: ['@picoaide/dsh-connectors'] },
+  // 宿主侧语言的**零依赖叶子包**（2026-09-20，构建环修复路线 A）：实现自
+  // `packages/host/desktop/src/host-locale.ts` 逐字迁入（导出面与语义一字不改）。
+  // 它刻意**没有任何 dependencies**（连 `@picoaide/*` 也没有）⇒ needs 恒空，可以被
+  // 任何包先构建。断环手段就是这一条：让环上的最后一跳指向一个没有出边的节点。
+  // desktop 保留 `./host-locale` 子路径作为 re-export（对外 API 面不变）。
+  { name: '@picoaide/dsh-host-locale', dir: 'packages/host/host-locale', needs: [] },
+  // 宿主侧**产品数据根**的第二个零依赖叶子包（2026-09-20，路线 A 扩展）：实现自
+  // `packages/host/desktop/src/desktop-home.ts` 逐字迁入（只 import `node:os`/
+  // `node:path`，与 host-locale 完全同形）。抽它的目的就是删掉
+  // `connectors → dsh-plugin-desktop/desktop-home` 那条边 —— 该边与
+  // `desktop → wasm-apps-host → browser → connectors` 一起构成四边环。
+  // desktop 保留 `./desktop-home` 子路径作为 re-export（对外 API 面不变）。
+  { name: '@picoaide/dsh-host-home', dir: 'packages/host/host-home', needs: [] },
+  // browser 的两条真实构建边（都实测过，别再凭"看起来是运行期惰性解析"删边）：
+  //   1. `@picoaide/dsh-host-locale` —— 5 个文件 import 它（原先是
+  //      `dsh-plugin-desktop/host-locale`，那条边正是
+  //      `desktop → wasm-apps-host → browser → desktop` 这个真实环的最后一跳）；
+  //   2. `@picoaide/dsh-connectors` —— 2026-09-20 曾被当"虚假边"删掉（依据是
+  //      `tsdown.config.ts` 把它列为 external + `src/index.ts` 用 `createRequire`
+  //      运行期惰性解析）。**那个判断只对"值"成立**：`tsc` 必须读到 connectors 的
+  //      lib/types（`src/index.ts:175/190/402` 的 `as typeof import('@picoaide/dsh-connectors/…')`），
+  //      `tests/credential-site.spec.ts` 还值导入真实 `ConnectorStore`。干净态实测：
+  //      删掉 connectors/lib 后 browser 的 tsc 报 3 条 TS2307 ⇒ 真实边，删掉它就会
+  //      "调度器排得下、实际跑不通"（本地有 lib 时全绿，CI 干净检出必红）。
+  { name: '@picoaide/dsh-browser', dir: 'packages/host/browser', needs: ['@picoaide/dsh-host-locale', '@picoaide/dsh-connectors'] },
+  // 客户端专属 WASM 应用 origin（`picoaide-app://` 协议 handler + 本机打开路由）：
+  // 2026-09-19 起它经 **browser 包导出的 surface seam**（`@picoaide/dsh-browser/surface`）
+  // 取得视图/分区/CDP 能力（设计总纲 §16.1 的 surface 抽象：工具实现只写一份、按 surface
+  // 分派）⇒ 构建期依赖 browser 的 lib/types，必须先于它产出。
+  { name: '@picoaide/dsh-wasm-apps-host', dir: 'packages/host/wasm-apps-host', needs: ['@picoaide/dsh-browser'] },
   // 2026-09-16:vendored 第三方插件(随三平台安装包分发)的测试此前**不在任何门禁
   // 链里**(verify-inventories 的 CHECK_CHAIN_EXEMPTIONS 显式豁免),本地加固
   // (同源守卫/符号链接写落点断言/失败软着陆)只有"手工跑"这一条保证 —— 升级
@@ -102,7 +164,10 @@ const PATH_OWNERS = [
   ['packages/client/wasm-apps/', '@picoaide/dsh-wasm-apps'],
   ['packages/client/branding/', '@picoaide/dsh-branding'],
   ['packages/host/connectors/', '@picoaide/dsh-connectors'],
+  ['packages/host/host-locale/', '@picoaide/dsh-host-locale'],
+  ['packages/host/host-home/', '@picoaide/dsh-host-home'],
   ['packages/host/browser/', '@picoaide/dsh-browser'],
+  ['packages/host/wasm-apps-host/', '@picoaide/dsh-wasm-apps-host'],
   ['packages/host/cron/', '@picoaide/dsh-cron'],
   ['packages/vendor/memory-evolve/', 'dsh-memory-evolve'],
   ['community/fabric/', 'dsh-community-fabric'],
@@ -111,6 +176,23 @@ const PATH_OWNERS = [
 /** 反向依赖:A 改动会波及 B(desktop 的类型/产物是这些包的输入)。 */
 const DEPENDENTS = {
   'dsh-plugin-desktop': ['@picoaide/dsh-enterprise', '@picoaide/dsh-account-card', '@picoaide/dsh-branding'],
+  // 叶子包是 browser / connectors / desktop 的构建输入，而 desktop 的
+  // `lib/types/{host-locale,desktop-home}.d.ts` 又是 enterprise / cron 的输入 ⇒
+  // `--changed` 只展开一层，所以这里把两跳的消费者也列全（宁可多跑几个包）。
+  '@picoaide/dsh-host-locale': [
+    '@picoaide/dsh-browser',
+    '@picoaide/dsh-wasm-apps-host',
+    '@picoaide/dsh-connectors',
+    'dsh-plugin-desktop',
+    '@picoaide/dsh-enterprise',
+    '@picoaide/dsh-cron',
+  ],
+  '@picoaide/dsh-host-home': [
+    '@picoaide/dsh-connectors',
+    'dsh-plugin-desktop',
+    '@picoaide/dsh-enterprise',
+    '@picoaide/dsh-cron',
+  ],
 }
 
 /** 影响全仓的顶层文件(改动即视为全量门禁)。 */
@@ -312,6 +394,21 @@ function seconds(ms) {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
+/**
+ * 记录一个失败任务的归属：`advisory` 任务只告警、不拦门禁。
+ *
+ * 为什么要这个开关（2026-09-19）：WASM「客户端专属」的验收门禁（§13）在 W1–W5 波次
+ * 落地前**按设计就是红的** —— 它的零残留断言必须如实报出存量命中（旧应用子域/换票/
+ * entry_url/access=public/服务端 ai.chat）。若直接接成阻塞，`yarn check` 会在所有泳道
+ * 施工期间恒红；若把它改成"没命中才算"，那条判据就退化成了摆设。
+ * 折中：脚本本身仍然 exit 1（直跑可见），编排器这里只记 advisory 并**显式打印**，
+ * W6 验收前必须删掉条目上的 `advisory:true`。
+ */
+function classifyFailure(result, state) {
+  if (result.task.advisory === true) state.advisory.push(result)
+  else state.failed.push(result)
+}
+
 async function runPool(tasks, limit, state) {
   const queue = [...tasks]
   const workers = Array.from({ length: Math.max(1, Math.min(limit, queue.length)) }, async () => {
@@ -320,8 +417,9 @@ async function runPool(tasks, limit, state) {
       if (task === undefined) return
       const result = await runTask(task)
       state.results.push(result)
-      if (!result.ok) state.failed.push(result)
-      console.log(`${result.ok ? '✓' : '✗'} ${result.task.name.padEnd(28)} ${seconds(result.ms).padStart(8)}`)
+      if (!result.ok) classifyFailure(result, state)
+      const mark = result.ok ? '✓' : result.task.advisory === true ? '!' : '✗'
+      console.log(`${mark} ${result.task.name.padEnd(28)} ${seconds(result.ms).padStart(8)}`)
     }
   })
   await Promise.all(workers)
@@ -342,8 +440,9 @@ async function runScheduler(tasks, limit, state) {
       running.delete(task.name)
       state.results.push(result)
       if (result.ok) succeeded.add(task.name)
-      else state.failed.push(result)
-      console.log(`${result.ok ? '✓' : '✗'} ${task.name.padEnd(28)} ${seconds(result.ms).padStart(8)}`)
+      else classifyFailure(result, state)
+      const mark = result.ok ? '✓' : task.advisory === true ? '!' : '✗'
+      console.log(`${mark} ${task.name.padEnd(28)} ${seconds(result.ms).padStart(8)}`)
     })
     running.set(task.name, promise)
   }
@@ -443,10 +542,12 @@ if (options.list) {
     console.log(`${pkg.name.padEnd(30)} needs: ${pkg.needs.join(', ') || '—'}`)
   }
   console.log(`guards: ${guards.map(guard => guard.name).join(', ') || '—'}`)
+  const advisories = guards.filter(guard => guard.advisory === true).map(guard => guard.name)
+  if (advisories.length > 0) console.log(`guards(advisory,只告警不拦门禁): ${advisories.join(', ')}`)
   process.exit(0)
 }
 
-const state = { results: [], failed: [], skipped: [] }
+const state = { results: [], failed: [], skipped: [], advisory: [] }
 const startedAt = Date.now()
 console.log(`check — 并发 ${concurrency};按构建依赖分层(desktop 必须先产出 lib/types)`)
 
@@ -454,19 +555,33 @@ console.log(`check — 并发 ${concurrency};按构建依赖分层(desktop 必�
 // 其余插件包的 lib/(增量 prebuild),此刻不跑那些包自己的 check,避免与它的
 // profile 冒烟争抢同一份 lib/。firstWave 标记的包(无构建期依赖,如 vendored
 // 插件的 test)也放在这一波,把它们的耗时藏进 desktop 的长任务里。
+// 2026-09-20：desktop **不再无条件进第一波** —— 它现在依赖 wasm-apps-host（见上），
+// 必须由依赖感知调度排在依赖之后。第一波只剩「无构建期依赖」的包与根守卫。
 const firstWave = [
   ...guards,
-  ...packages.filter(task => task.name === 'dsh-plugin-desktop' || task.firstWave === true),
+  ...packages.filter(task => task.firstWave === true),
 ]
 if (firstWave.length > 0) await runPool(firstWave, concurrency, state)
 
 // 阶段 2:依赖感知调度(依赖失败的包直接跳过,不产生级联噪音)。
-const rest = packages.filter(task => task.name !== 'dsh-plugin-desktop' && task.firstWave !== true)
+const rest = packages.filter(task => task.firstWave !== true)
 if (rest.length > 0) await runScheduler(rest, concurrency, state)
 
 const totalMs = Date.now() - startedAt
 const passed = state.results.length - state.failed.length
-console.log(`──── ${state.results.length} 个任务:${passed} 通过、${state.failed.length} 失败、${state.skipped.length} 跳过,总耗时 ${seconds(totalMs)}`)
+console.log(`──── ${state.results.length} 个任务:${passed} 通过、${state.failed.length} 失败、${state.skipped.length} 跳过`
+  + `${state.advisory.length > 0 ? `、${state.advisory.length} 告警(advisory)` : ''},总耗时 ${seconds(totalMs)}`)
+
+if (state.advisory.length > 0) {
+  // advisory 不等于通过：把失败原文（有界）打出来，并明确它何时必须转阻塞。
+  console.error(`\n⚠ ${state.advisory.length} 个 advisory 任务未通过（不拦门禁，但必须处置）：`)
+  for (const advisory of state.advisory) {
+    console.error(`\n----- ${advisory.task.name}（advisory：${advisory.task.path ?? ''}）-----`)
+    console.error(options.fullOutput ? advisory.output.trimEnd() : summarizeFailure(advisory.output))
+  }
+  console.error('\n提示：WASM 客户端专属门禁在 W1–W5 波次落地前按设计就是红的（零残留如实报出存量命中）。')
+  console.error('     W6 验收前必须删掉 scripts/check-workspaces.mjs 里该条目的 advisory:true 转为阻塞。')
+}
 
 if (state.failed.length > 0) {
   for (const failure of state.failed) {

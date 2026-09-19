@@ -32,7 +32,11 @@ interface LogRow {
 }
 
 // M3: 与服务端实际写入的 audit action 全集对齐(用户/部门/技能/令牌等敏感操作)
-const ACTION_LABEL: Record<string, string> = {
+//
+// ⚠️ 这张表是**唯一真源**:筛选下拉(`FILTER_ACTIONS`)由它派生,`Audit.test.tsx`
+// 也从服务端 Go 源码抽出动作全集与它**双向对拍**(缺任一方向即红)。新增服务端写点
+// 必须在这里补标签,否则用例直接红 —— 不再是"人工维护的清单"(见 audit-actions 用例)。
+export const ACTION_LABEL: Record<string, string> = {
   skill_create: '上架技能',
   skill_update: '更新技能',
   skill_disable: '下架技能',
@@ -139,6 +143,32 @@ const ACTION_LABEL: Record<string, string> = {
   report_subscription_create: '新建报表订阅',
   report_subscription_update: '更新报表订阅',
   report_subscription_delete: '删除报表订阅',
+  // WASM 应用平台(wasmapp/api 的 auditApp/auditOrg 写点,R1-uxw-3)。
+  //
+  // 这一族此前**一条都没登记**:驳回理由写进了审计链、却筛不出、读不到标签,
+  // 行内只剩裸 id `wasm_app_release_reject` —— "v1.2.0 为什么被拒"这个问题在
+  // 管理端根本查不了(审计评审 R1-uxw-3 的现场)。动作名与服务端逐字一致,
+  // 由 `Audit.test.tsx` 的双向对拍用例守(DTO/写点改名会立刻红)。
+  wasm_app_release: '发布应用版本',
+  wasm_app_release_pending: '应用版本进入待审',
+  wasm_app_release_approve: '通过应用版本',
+  wasm_app_release_reject: '拒绝应用版本',
+  wasm_app_release_denied: '应用版本发布被拒',
+  wasm_app_release_failed: '应用版本发布失败',
+  wasm_app_publish_toggle: '应用上下架',
+  wasm_app_freeze: '冻结/解冻应用',
+  wasm_app_delete: '删除应用',
+  wasm_app_export: '导出应用',
+  wasm_app_access_change: '应用访问范围变更',
+  wasm_app_prune_failed: '应用版本回收失败',
+  wasm_app_schema_view: '查看应用数据表',
+  wasm_app_seed: '预置内置应用',
+  // 历史保留（2026-09-19 起该动作已废弃：应用基域配置面随「客户端专属」改造删除）：
+  // 这一行**不能删** —— 存量审计链里仍有这个动作码的行，删掉映射会让历史记录
+  // 只显示原始动作码（审计可读性倒退）。属契约型保留，不是残留。
+  wasm_apps_base_domain_change: '应用域名变更',
+  wasm_limits_change: '应用限制项变更',
+  wasm_review_switch: '应用更新审批开关',
 }
 // 注:quota_change / dept_budget_change / quota_default_change 随配额与部门预算
 // 下线一并移除(2026-09-11),不再有新数据产生。

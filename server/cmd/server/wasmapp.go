@@ -4,65 +4,45 @@ import (
 	"context"
 	"database/sql"
 	"log"
-	"net"
 	"os"
+	"path/filepath"
 	"strings"
 
-	"github.com/picoaide/picoaide/internal/channel"
-	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
-	"github.com/picoaide/picoaide/internal/wasmapp/aichat"
-	"github.com/picoaide/picoaide/internal/wasmapp/anonlimit"
 	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+	"github.com/picoaide/picoaide/internal/wasmapp/appproof"
 	"github.com/picoaide/picoaide/internal/wasmapp/appserver"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
-	"github.com/picoaide/picoaide/internal/wasmapp/edge"
 	"github.com/picoaide/picoaide/internal/wasmapp/events"
 	"github.com/picoaide/picoaide/internal/wasmapp/memprofile"
+	"github.com/picoaide/picoaide/internal/wasmapp/opens"
 	"github.com/picoaide/picoaide/internal/wasmapp/queue"
 	"github.com/picoaide/picoaide/internal/wasmapp/readyz"
-	"github.com/picoaide/picoaide/internal/wasmapp/session"
 	"github.com/picoaide/picoaide/internal/wasmapp/upload"
 )
 
-// 环境变量（部署面）——设计基线 R29：企业自备通配域名与证书、管理员配置 Caddy，
-// 平台不做证书自动化。因此"应用基域"是**部署配置**而不是运行期设置项：
-// 改它等于换域名，必须同时改 DNS 与证书。
+// 环境变量（部署面）。
 const (
-	// EnvAppsBaseDomain 是应用基域（如 `apps.example.com`）。
-	//
-	// **留空 = 未启用应用子域**：不挂 HostGate（全部主机名走主站路由），
-	// 不注册 `/app-ticket`。平台的发布/校验链路仍然可用 —— 这样"先让员工把
-	// 应用建起来、再配通配域名"是可行顺序，而不是必须一次配齐。
-	EnvAppsBaseDomain = "PICOAI_APPS_BASE_DOMAIN"
-	// EnvAppsExtraReserved 是部署期注入的**企业既有主机名**（逗号分隔，§4.1）：
-	// 基域是平台资产，应用不得占用这些名字（如 intranet、oa）。
+	// EnvAppsExtraReserved 是部署期注入的**企业既有主机名 / 标识**（逗号分隔，§4.1）：
+	// 应用标识曾等于域名标签，因此这些名字（如 intranet、oa）不得被应用占用。
 	EnvAppsExtraReserved = "PICOAI_APPS_EXTRA_RESERVED"
 )
 
 // wasmPlatform 汇聚 WASM 应用平台的全部运行期组件。
 type wasmPlatform struct {
-	// Enabled 表示是否启用了应用子域（配置了 EnvAppsBaseDomain）。
-	Enabled bool
-	// AppServer 是应用子域请求管线（HostGate 的 Apps 分支）。
+	// AppServer 是客户端专属应用请求管线（身份由客户端注入）。
 	AppServer *appserver.Server
-	// HostGate 是主机名门控（**总是非 nil**：基域可在运行期启用，见
-	// setupWasmPlatform 里的注释 —— 按启动期 enabled 决定装不装会让控制台
-	// 改完必须重启）。
-	HostGate *edge.HostGate
-	// BaseDomain 是应用基域的运行期持有者（控制台保存后同步生效）。
-	BaseDomain *baseDomainHolder
 	// API 是操作面 handler 集合（§8）。
 	API *wasmapi.Handlers
-	// Session 是员工浏览器会话与一次性换票（R12/R16）。
-	Session *session.Manager
 	// Checker 是 /readyz 水位探针（§4.9）。
 	Checker *readyz.Checker
 	// Events 是调用事件 sink（§4.9）。
 	Events *events.Sink
 	// EventCleanup 是调用事件的 7 天保留期清理调度（§4.9/§5.3）。
 	EventCleanup *events.CleanupScheduler
+	// OpensCleanup 是打开计数的日汇总/过期清理调度（F16/§8.9）。
+	OpensCleanup *opens.Scheduler
 	// UploadCleanup 是分片上传会话的保留期回收调度（§4.2：会话有效期 30 分钟）。
 	//
 	// 不挂它的后果是**静默的**：断线客户端留下的会话目录会一直占盘，
@@ -72,30 +52,18 @@ type wasmPlatform struct {
 	Compiler *compile.Compiler
 	// Scheduler 是请求排队/准入（§4.6）。
 	Scheduler *queue.Scheduler
-	// Limiter 是匿名限流（R35）。
-	Limiter *anonlimit.Limiter
-	// AI 是 ai.chat 客户端（§4.7）。
-	AI *aichat.Client
+	// Limits 是平台限制项的运行期持有者（控制台设置 > 部署档位 > 默认）。
+	//
+	// 暴露它是为了**装配级断言**（P0-2）：单实例内存上限这类字段只在装配期写一次，
+	// 没有持有者就只能断言源码字符串（而字符串断言分不清"接上了但值是错的"）。
+	Limits *wasmLimitsHolder
 
 	lock *readyz.InstanceLock
 }
 
-// normalizeLoopbackBaseURL 把监听地址变成宿主可用的回环基址。
-//
-// 为什么必须回环：`ai.chat` 由宿主用 http.Client 直调服务端自己的 `/v1`
-// （§4.7 / D3.1「身份注入，不是令牌传递」）。走公网域名会白绕一圈 DNS/证书/反代，
-// 既慢、又把内部调用放到链路上；走回环最短且不经任何前置代理。
-func normalizeLoopbackBaseURL(addr string) string {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "http://127.0.0.1:8080"
-	}
-	switch host {
-	case "", "0.0.0.0", "::", "[::]":
-		host = "127.0.0.1"
-	}
-	return "http://" + net.JoinHostPort(host, port)
-}
+// ⚠️ `normalizeLoopbackBaseURL` 已随 W4 删除：它唯一的消费者是服务端 `ai.chat`
+// （宿主用 http.Client 直调本机 `/v1`）。服务端 AI 按总纲 §21 彻底删除之后，
+// 平台上不再有任何"服务端自己调自己"的链路。
 
 // compileUnavailableDetail 是编译子系统不可用时**对外**（/readyz 是未认证端点）
 // 暴露的说明：只给一句定性，不回显底层错误（错误里带编译子进程路径与数据根路径）。
@@ -104,30 +72,37 @@ const compileUnavailableDetail = "编译子系统不可用（发布链路已禁�
 
 // checkStartupMemory 执行 §4.3 的内存四笔账启动自检（返回非 nil ⇒ 调用方 log.Fatalf）。
 //
-// 为什么按 enabled 分档（审计 P2-8）：四笔账算的是**运行期**的实例池/编译峰值/上传峰值/
-// 缓存驻留 —— 应用子域没启用时这些资源一分都不会被用到，却按默认档要求机器
-// `MemAvailable ≥ 3.56 GiB`（total 2550 MB ÷ 70%）："没用到这个功能也被它挡住启动"。
-// 未启用时只记一行日志。
+// ⚠️ W4 起**没有"未启用"这一档**（审计 P2-8 的按 enabled 分档随应用子域一起删除）：
+// 应用平台始终在服务（`/api/client/v2/apps/wasm/*` 无条件挂载），四笔账算的实例池/
+// 编译峰值/上传峰值/缓存驻留随时会被用到 ⇒ 判据**全量生效**，这正是 §4.3 的原话
+// "拒绝启动而不是等 OOM"。
 //
-// ⚠️ 启用时判据**一点没放宽**：仍然是 fail-closed（§4.3 原话"拒绝启动而不是等 OOM"）；
+// 判据**一点没放宽**：仍然是 fail-closed；
 // 2026-09-18 起账本按**部署声明的内存档位**算（plan），而同一份档位也喂给 appserver
 // 强制并发/实例上限/模块缓存/库句柄 —— 因此"自检算的账"与"实际跑的账"是同一份。
 //
-// 参数显式传入 availableBytes（而不是函数内部读 /proc）：让"极小 MemAvailable ⇒
-// 拒绝启动 / 不 Fatalf"能被确定性测到，不必真改 /proc/meminfo。
-func checkStartupMemory(enabled bool, availableBytes int64, plan readyz.MemoryPlan, logf func(format string, args ...any)) *apperr.Error {
-	if !enabled {
-		logf("wasm: 应用平台未启用（未配置 %s），跳过内存四笔账自检"+
-			"（实例池/编译峰值/上传峰值/缓存驻留都不会被用到）", EnvAppsBaseDomain)
+// 参数显式传入**读取结果**（而不是函数内部读 /proc）：让"极小 cgroup 剩余 ⇒ 拒绝启动 /
+// 读不到 ⇒ 跳过"都能被确定性测到，不必真改 /proc/meminfo 或真造 cgroup。
+//
+// 读不到可用内存（Source=none）时**跳过判定但大声说**：这是"保留可部署性"的一半
+// （非 Linux 开发机/受限容器不能让整个平台起不来），另一半是"绝不与内存充足同形"——
+// 旧实现只做到前一半，于是读不到时控制台与 /readyz 都看不到任何异常（R1-rt-1）。
+func checkStartupMemory(avail readyz.MemoryAvailability, plan readyz.MemoryPlan, logf func(format string, args ...any)) *apperr.Error {
+	if !avail.Known() {
+		logf("wasm: ⚠️ 未取到可用内存，跳过内存自检（来源=%s：%s）—— 保留可部署性，"+
+			"但 /readyz 的 mem_source=none 与这条日志会如实反映它；"+
+			"请核对部署真的给了 /proc/meminfo 或 cgroup 限额（读不到时四笔账不再判定）",
+			avail.Source, avail.Detail)
 		return nil
 	}
-	budget, berr := readyz.CheckStartupMemoryFor(availableBytes, plan)
+	budget, berr := readyz.CheckStartupMemoryFor(avail.BudgetBytes(), plan)
 	if berr != nil {
 		return berr
 	}
-	logf("wasm: memory budget profile=%s instances=%dMB compile_peak=%dMB upload_peak=%dMB cache_resident=%dMB total=%dMB available=%dMB limit=%dMB",
+	logf("wasm: memory budget profile=%s instances=%dMB compile_peak=%dMB upload_peak=%dMB cache_resident=%dMB appdb_cache=%dMB total=%dMB available=%dMB limit=%dMB mem_source=%s（%s）",
 		budget.Profile, budget.Instances>>20, budget.CompilePeak>>20, budget.UploadPeak>>20,
-		budget.CacheResident>>20, budget.Total>>20, budget.Available>>20, budget.Limit>>20)
+		budget.CacheResident>>20, budget.AppDBCache>>20, budget.Total>>20, budget.Available>>20,
+		budget.Limit>>20, avail.Source, avail.Detail)
 	return nil
 }
 
@@ -140,26 +115,56 @@ func mustRefuseStartupForIsolation(mode compile.IsolationMode, usable bool) bool
 	return mode == compile.IsolationRequire && !usable
 }
 
+// wasmAppEvictor 是 OnAppEvict 需要的最小依赖面（*appserver.Server 满足它）。
+//
+// 抽成接口 + 具名构造函数（而不是内联闭包）是为了**可行为断言**：装配级用例可以
+// 用一个记账假实现验证"钩子真的把处置转发了出去"，而不是像旧门禁那样 grep 源码里
+// 有没有那行字符串 —— 字符串断言分不清"接上了"与"handler 从不调用"（P1-8 的现场）。
+type wasmAppEvictor interface {
+	EvictApp(appID string) (int, int64)
+}
+
+// newWasmAppEvictor 返回 api.Options.OnAppEvict 的装配实现：应用被下架/冻结/删除
+// **成功之后**，立即丢掉它的进程内驻留（编译模块 + 库句柄），把内存还给 OS。
+//
+// 幂等与容错：空 app_id 直接忽略（不把空串送进缓存查找）；被逐出对象为空时
+// EvictApp 自身是 no-op（见 appserver.EvictApp）。
+func newWasmAppEvictor(srv wasmAppEvictor) func(string) {
+	return func(appID string) {
+		if srv == nil || strings.TrimSpace(appID) == "" {
+			return
+		}
+		srv.EvictApp(appID)
+	}
+}
+
 // setupWasmPlatform 装配 WASM 应用平台。
 //
-// **失败策略：装配期一律 log.Fatalf，绝不静默降级。** 设计里有四处明确的
-// fail-closed，都在这里做：
-//   - R35 可信代理自检（启用子域却未显式配置 ⇒ 拒绝启动）；
-//   - §4.3 内存四笔账自检（**启用子域时**理论峰值 > 可用内存 70% ⇒ 拒绝启动）；
+// **失败策略：装配期一律 log.Fatalf，绝不静默降级。** 设计里明确的 fail-closed
+// 都在这里做：
+//   - §4.3 内存四笔账自检（理论峰值 > 可用内存 70% ⇒ 拒绝启动）；
 //   - `PICOAI_COMPILE_ISOLATION=require` 且隔离不可用 ⇒ 拒绝启动（R31 的严格档）；
-//   - §15.1 第 9 条 / R20 单实例自检（advisory lock）。
+//   - §15.1 第 9 条 / R20 单实例自检（advisory lock）；
+//   - 渠道 `app_origin_scheme` 缺失/非法 ⇒ 拒绝启动（§8.3/§10，由调用方校验）。
 //
-// 理由：这几处的失败形态都是**静默的**（匿名流量坍缩进同一桶、OOM 才崩、
-// 带着无隔离的编译进程对外服务、两个副本各持一半票），"暂时跑起来但语义已坏"
-// 比"起不来"危险得多。
-func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API, dataDir, addr string) *wasmPlatform {
-	// 应用基域：**管理端可配置**（2026-09-18 用户要求「应用名 + 泛域名 = 应用访问
-	// 地址」）。优先级：控制台保存过（含显式清空）> 环境变量。取值走 holder
-	// （原子读）—— HostGate 每请求都要判一次，而写路径只有控制台保存。
-	base := newBaseDomainHolder(db, os.Getenv(EnvAppsBaseDomain))
-	baseDomain := func() string { return base.Get() }
+// 理由：这几处的失败形态都是**静默的**（OOM 才崩、带着无隔离的编译进程对外服务、
+// 两个副本各持一半票），"暂时跑起来但语义已坏"比"起不来"危险得多。
+//
+// ⚠️ W4 删除的三项装配：应用基域 holder（`EnvAppsBaseDomain` / 控制台设置）、
+// R35 可信代理自检（`anonlimit`）、员工浏览器会话与换票（`session`）—— 它们都属于
+// "应用有对外主机名"的旧模型；客户端专属模型下应用请求由客户端的协议 handler 合成。
+func setupWasmPlatform(ctx context.Context, db *sql.DB, dataDir string) *wasmPlatform {
+	// 客户端持有性证明（契约 §20/§23.1 A′）：签名密钥**启动期按部署生成、落数据根
+	// 0600、绝不编入镜像**（appproof.KeyFileName）。失败即拒绝启动：拿不到签名密钥
+	// 就无法签发 proof ⇒ 客户端**所有**应用请求 401，而"为什么"只会出现在启动日志里
+	// （§23.1「启动期自检：私钥可读」）。
+	proofSvc, perr := appproof.New(appproof.Options{DataRoot: dataDir})
+	if perr != nil {
+		log.Fatalf("WASM 应用平台启动自检失败：持有性证明不可用：%v", perr)
+	}
+	log.Printf("app-proof: 签名密钥就绪 kid=%s（%s，0600；每部署一份，不随镜像分发）",
+		proofSvc.KID(), filepath.Join(dataDir, appproof.KeyFileName))
 	extraReserved := splitCSV(os.Getenv(EnvAppsExtraReserved))
-	enabled := baseDomain() != ""
 
 	// ---- 内存档位（2026-09-18）：数值同时驱动下面的启动自检与运行期强制 ----
 	// 未知档位名**拒绝启动**（静默回落默认会让小机器在"以为已降档"的状态下 OOM）。
@@ -170,21 +175,13 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 	// 平台限制项（并发/内存）：控制台设置 > 部署档位 > 编译期默认。
 	// 自检与运行期强制都用**这一份**（见 wasmLimitsHolder 的注释）。
 	limitsHolder := newWasmLimitsHolder(db, prof)
-	// 启用子域的合法性自检与控制台/启动自检共用同一份账（见 baseDomainHolder.plan）。
-	base.SetPlanProvider(limitsHolder.Plan)
 	plan := limitsHolder.Plan()
 	log.Printf("wasm: 内存档位 %s；平台限制项来源=%s %s", prof.Report(), limitsHolder.Source(), limitsHolder.Get().Encode())
 
-	// ---- R35：可信代理自检（未启用子域时不校验，既有部署行为不变）----
-	if err := anonlimit.CheckTrustedProxies(os.Getenv, enabled); err != nil {
-		log.Fatalf("WASM 应用平台启动自检失败：%v", err)
-	}
-
 	// ---- §4.3：内存四笔账（实例池 + 编译峰值 + 上传峰值 + 缓存驻留）----
-	// 只在启用应用子域时校验（见 checkStartupMemory 的注释：未启用时这四笔账不会被用到）。
 	// 账本按**本部署声明的档位**算：同一份数值也喂给 appserver（队列并发/实例上限/
 	// 模块缓存/库句柄），因此"自检算的账"与"实际跑的账"是同一份。
-	if berr := checkStartupMemory(enabled, readMemAvailable(), plan, log.Printf); berr != nil {
+	if berr := checkStartupMemory(readMemoryAvailability(), plan, log.Printf); berr != nil {
 		log.Fatalf("WASM 应用平台启动自检失败：%v", berr)
 	}
 
@@ -194,7 +191,6 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		log.Fatalf("WASM 应用平台启动自检失败：%v", lerr)
 	}
 
-	limiter := anonlimit.New(anonlimit.DefaultOptions())
 	// 队列的全局并发取自档位（不是编译期常量）：声明与执行同一份数。
 	qopt := queue.DefaultOptions()
 	qopt.GlobalRunning = limitsHolder.Get().MaxInstances
@@ -231,6 +227,11 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 	compiler, cerr := compile.New(compile.Options{
 		DataRoot:  dataDir,
 		Isolation: isoMode,
+		// 生效的单实例内存上限（R1-rt-7b）：编译子进程要按它与执行侧**同一份**上限校验
+		// 模块声明的线性内存。取值来源与下面 appserver 的 `lim` 完全同一个 holder
+		// （控制台设置 > 部署档位 > 编译期默认），因此"调小 ⇒ 发布期就拦、调大 ⇒ 不再误拒"。
+		// 它是 wazero 的 RuntimeConfig 项 ⇒ 与执行侧同语义：保存后需重启生效。
+		MemoryPages: limitsHolder.Get().InstanceMemoryPages(),
 	})
 	if cerr != nil {
 		if isoMode == compile.IsolationRequire {
@@ -254,66 +255,46 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		log.Printf("wasm: compile isolation = %s", compiler.IsolationPlan())
 	}
 
-	ai := aichat.New(aichat.Options{
-		BaseURL: normalizeLoopbackBaseURL(addr),
-		DB:      db,
-	})
-
-	// 员工浏览器会话（R16）：**复用** serverauth 的 provider 链（local/LDAP 顺序
-	// 与客户端面一致），不复制认证逻辑；审计走高频道 serverstore.AuditLog，
-	// 与既有审计同一条哈希链。
-	//
-	// Auth 回调返回 userID=0：serverauth.UserInfo 不带本地行 id，session.Manager
-	// 会按 username 从 users 表解析（见其 Options.Auth 契约）。
-	authFn := func(username, password string) (string, int64, error) {
-		if authAPI == nil {
-			return "", 0, session.ErrAuthUnavailable
-		}
-		ui, err := authAPI.AuthenticatePassword(username, password)
-		if err != nil {
-			return "", 0, err
-		}
-		return ui.Username, 0, nil
-	}
-	// 登录失败预算：**必须**注入（见 session.Options.Throttle 的注释）——
-	// 员工浏览器登录页是与客户端面 /auth/login 并列的第二个密码入口，
-	// 这里复用 serverauth 的同一套三个桶，两处入口共享同一份失败预算。
-	loginThrottle := sessionLoginThrottle{authAPI}
-	sessMgr := session.New(session.Options{
-		DB:          db,
-		BaseDomain:  baseDomain,
-		Auth:        authFn,
-		Audit:       func(username, action, detail string) { _ = serverstore.AuditLog(db, username, action, detail) },
-		Throttle:    loginThrottle,
-		ProductName: channel.Load().Identity.DisplayName,
-		// 与 appserver.Options 同源：换票端点的 app 形态校验也要挡住企业既有主机名。
-		AppIDExtraReserved: extraReserved,
-		// 应用子域会话被吊销时，丢掉 aichat 在该会话下的在手令牌（§4.7 登出即吊销）。
-		OnAppSessionRevoked: func(key string) { ai.RevokeSession(key) },
-	})
+	// ⚠️ W4 删除的三段装配（总纲 §8.4 / §21）：
+	//   - `aichat.New(...)`：服务端 AI 能力彻底删除，应用改走客户端 AI loop；
+	//   - `session.New(...)` + `sessionLoginThrottle`：员工浏览器会话与一次性换票
+	//     （`/login`、`/logout`、`/app-ticket`）随"应用有对外主机名"的旧模型一起删除；
+	//   - `publicMainOrigin` / `baseDomainHolder`：应用基域配置面删除。
+	// 身份一律由桌面客户端持员工 bearer 注入（见 appserver/client.go）。
 
 	appSrv, aerr := appserver.New(appserver.Options{
 		DB:                 db,
 		DataRoot:           dataDir,
-		BaseDomain:         baseDomain,
-		Sessions:           sessMgr,
-		Limiter:            limiter,
 		Scheduler:          scheduler,
 		Events:             eventSink,
 		Compiler:           compiler,
 		AppIDExtraReserved: extraReserved,
-		AIBaseURL:          normalizeLoopbackBaseURL(addr),
-		Logger:             log.Printf,
-		// 内存档位同时驱动：队列并发、实例内存上限、模块缓存上限、库句柄上限。
+		// 应用 origin scheme（契约 §8.3/§10）：唯一来源 = 渠道包
+		// `desktop.app_origin_scheme`。启动期已由 resolveStartupChannel 的
+		// validateAppOriginScheme 做 fail-loud 校验，这里取值不会再失败；
+		// 兜底默认值只覆盖"渠道目录缺失"（本地开发）那一种情形。
+		AppScheme: appOriginScheme(),
+		Logger:    log.Printf,
+		// 内存档位：**降级为默认值来源**（P0-2）。真正生效的是下面 Limits
+		//（控制台设置 > 档位 > 默认），它同时驱动队列并发、实例内存上限、
+		// 模块缓存上限与库句柄上限 —— 装配期就必须是同一份数。
 		MemoryProfile: prof,
+		Limits:        limitsHolder.Get(),
 	})
 	if aerr != nil {
 		log.Fatalf("wasm 应用子域管线装配失败：%v", aerr)
 	}
 	// 限制项接到运行态：①注入下发钩子（控制台保存后即时生效）
-	// ②首次下发一次（让控制台保存过的设置覆盖档位折算值）。
+	// ②首次下发一次（幂等：把档位折算值之外的可热改字段对齐到当前生效值）。
+	//
+	// ③把返回值**回写持有者**（P0-2）：不回写的话，装配期"仍需重启"的判断只进日志
+	//（界面显示"无需重启"），而实际生效值可能仍与设置值不一致 —— 于是重启也修不好，
+	// 且 nobody 看得见。回写之后：重启后 restart 为空是**被断言过的事实**，
+	// 不为空则如实显示在控制台上。
 	limitsHolder.SetApplier(appSrv.ApplyLimits)
-	if restart := appSrv.ApplyLimits(limitsHolder.Get()); len(restart) > 0 {
+	restart := appSrv.ApplyLimits(limitsHolder.Get())
+	limitsHolder.ApplyStartup(restart)
+	if len(restart) > 0 {
 		log.Printf("wasm: ⚠️ 平台限制项里有需重启才生效的字段：%v（当前进程仍按启动时的值跑）", restart)
 	}
 
@@ -353,6 +334,13 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		},
 		Scheduler: scheduler,
 		Ping:      db.Ping,
+		// 可用内存的来源与数值必须出现在 /readyz 上（R1-rt-1）：这里显式注入与启动自检
+		// **同一个**读取实现，避免"日志读 cgroup、探针读宿主"这种两套口径。
+		MemAvailable: readMemoryAvailability,
+		// 内存档位/理论峰值也必须出现在 /readyz 上（R1-rt-10）：这里注入的是**控制台
+		// 保存后生效的那一份**（limitsHolder.Plan 读的是 h.Get()），因此探针上的
+		// profile/budget 与"实际跑的账"同源 —— 不会出现"界面按档位显示、实际按设置跑"。
+		MemoryPlan: limitsHolder.Plan,
 	})
 
 	api := wasmapi.NewHandlers(wasmapi.Options{
@@ -360,21 +348,50 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		DataRoot:           dataDir,
 		Compiler:           compiler,
 		Events:             eventSink,
-		BaseDomain:         baseDomain,
-		BaseDomainSource:   base.Source,
-		ApplyBaseDomain:    base.Apply,
 		AppIDExtraReserved: extraReserved,
 		Audit:              func(username, action, detail string) { _ = serverstore.AuditLog(db, username, action, detail) },
 		// 发布面的 fail-closed 闸门（审计 P1-1：AllowPublish 此前零调用方）。
 		Ready: checker,
 		// 下架/冻结/删除后立即释放进程内驻留（模块 + 库句柄，见 api.Options.OnAppEvict）。
-		OnAppEvict: func(appID string) { appSrv.EvictApp(appID) },
+		OnAppEvict: newWasmAppEvictor(appSrv),
+		// 客户端专属访问模型的执行入口（2026-09-19 决策）：客户端的本机代理把应用请求
+		// 包成信封送进来，本钩子把它交给**与旧应用子域路径共用**的 serveApp 管线执行
+		// （身份由客户端注入，见 appserver/client.go）。
+		ServeClientRequest: appSrv.ServeClientRequest,
+		// 渠道参数化的应用 origin（契约 §8.3/R2I-9）：api 层拿不到 *Server，
+		// 因此把 appserver 的唯一构造点作为函数注入（两边同源，只有一个实现）。
+		AppOrigin: appSrv.AppOrigin,
+		AppScheme: appOriginScheme(),
+		// 客户端持有性证明（契约 §20/§23.1）：签发/校验/jti 去重全在 appproof 包。
+		// 它**必须**装配到生产（nil ⇒ 两个应用端点 fail-closed 401）。
+		Proof: proofSvc,
+		// 打开计数（F16/§8.9）：best-effort 写明细，失败只 warn。
+		// 部门取"打开时刻的主部门"；拿不到就记无部门（绝不因此丢掉整次计数）。
+		Opens: func(ctx context.Context, appID string, userID int64, clientVersion string) error {
+			return serverstore.RecordWasmAppOpen(ctx, db, serverstore.WasmAppOpen{
+				AppID:         appID,
+				UserID:        userID,
+				DeptID:        serverstore.PrimaryDeptID(ctx, db, userID),
+				ClientVersion: clientVersion,
+			})
+		},
 		// 平台限制项（并发/内存）：读写闭包；校验与下发都在 wasmLimitsHolder/ApplyLimits。
-		Limits:          limitsHolder.Get,
-		LimitsSource:    limitsHolder.Source,
-		LimitsApply:     limitsHolder.Apply,
-		LimitsRestart:   limitsHolder.RestartPending,
-		MemoryAvailable: readMemAvailable,
+		Limits:        limitsHolder.Get,
+		LimitsSource:  limitsHolder.Source,
+		LimitsProfile: limitsHolder.ProfileName,
+		LimitsApply:   limitsHolder.Apply,
+		LimitsRestart: limitsHolder.RestartPending,
+		// 诊断面要的是**运行时生效**的单实例内存上限，不是"控制台已保存值"（R2-DG-2）：
+		// 保存 instance_memory_mb 之后要重启才生效，在重启窗口里两者可以差出几十上百 MiB
+		//（审计实测：保存 32 MiB / 实际按 128 MiB 跑），而诊断 hints 与发布干跑说的必须是
+		// "这次运行的上限"。appserver.InstanceMemoryPages() 优先问 runtime（来源纪律见
+		// appserver/limits_apply.go）。控制台的 limits 视图与"待重启"判定仍读 Limits
+		//（它要如实显示**已保存值**与 restart_pending）。
+		EffectiveMemoryPages: appSrv.InstanceMemoryPages,
+		// 控制台的四笔账预览也要"读不到就如实说"：BudgetBytes() 在未知时给
+		// readyz.MemoryUnknown（<0）⇒ 预览只算不判（Known=false 会显示在响应里），
+		// 而不是拿 0 当"内存充足"。
+		MemoryAvailable: func() int64 { return readMemoryAvailability().BudgetBytes() },
 	})
 
 	// 分片上传会话的保留期回收（§4.2）：与调用事件同款调度器（启动即清一次 + 周期）。
@@ -382,30 +399,32 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		upload.CleanupSchedulerOptions{Logger: log.Printf})
 	uploadCleanup.Start(ctx)
 
+	// 打开计数维护（F16/§8.9）：日汇总 upsert + 明细 90 天清理（**先汇总后清理**）。
+	// 与调用事件同款调度器（启动即跑一次 + 周期），随 wasm ctx 一起退出。
+	opensSched := opens.NewScheduler(db, opens.DefaultTick(), nil)
+	opensSched.Start(ctx)
+
 	p := &wasmPlatform{
-		Enabled:       enabled,
-		BaseDomain:    base,
 		AppServer:     appSrv,
 		API:           api,
-		Session:       sessMgr,
 		Checker:       checker,
 		Events:        eventSink,
 		UploadCleanup: uploadCleanup,
 		EventCleanup:  eventCleanup,
+		OpensCleanup:  opensSched,
 		Compiler:      compiler,
 		Scheduler:     scheduler,
-		Limiter:       limiter,
-		AI:            ai,
+		Limits:        limitsHolder,
 		lock:          lock,
 	}
-	// HostGate **无条件常挂**：空基域时 MatchHost 对所有主机名返回 HostMain ⇒
-	// ServeHTTP 直接交主站，与"没挂门控"逐字节等价；非空时才把应用子域分流。
-	// Main 由 main.go 在拿到 *gin.Engine 后回填。
-	p.HostGate = &edge.HostGate{BaseDomain: baseDomain, Apps: appSrv}
-	log.Printf("wasm: platform ready (subdomain=%v base_domain=%q source=%s extra_reserved=%d)",
-		baseDomain() != "", baseDomain(), base.Source(), len(extraReserved))
+	log.Printf("wasm: platform ready (client-only model; extra_reserved=%d)", len(extraReserved))
 	return p
 }
+
+// ⚠️ `newHostGate` / `extraMainHosts` / `configuredMainHost` 已随 W4 删除
+// （总纲 §8.4）：它们唯一的用途是把"也当主站处理的主机名"喂给 `edge.HostGate`，
+// 而主机名门控整体不存在了 —— 应用请求由客户端的协议 handler 合成并带 app_id
+// 进入 `/api/client/v2/apps/wasm/:app_id/request`，不再按 Host 分流。
 
 // Close 释放平台资源。
 //
@@ -415,9 +434,6 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 func (p *wasmPlatform) Close() {
 	if p == nil {
 		return
-	}
-	if p.HostGate != nil {
-		p.HostGate.Apps = nil
 	}
 	if p.AppServer != nil {
 		if err := p.AppServer.Close(); err != nil {
@@ -447,31 +463,10 @@ func (p *wasmPlatform) Close() {
 	}
 }
 
-// sessionLoginThrottle 把 serverauth 的登录失败预算适配成 session.LoginThrottle。
-//
-// 为什么需要适配而不是让 session 直接依赖 serverauth：session 是平台无关的
-// HTTP 组件（它只知道"有一个预算"，不知道预算怎么实现），而 serverauth 的实现
-// 走 gin/dbLimiterScope。中间的这层薄适配保证两处入口**共享同一份桶**。
-type sessionLoginThrottle struct{ api *serverauth.API }
-
-func (t sessionLoginThrottle) Allow(username, host string) bool {
-	if t.api == nil {
-		return true // 未装配认证时不可能走到登录（Auth 已返回 ErrAuthUnavailable）
-	}
-	return t.api.AllowLoginAttempt(username, host)
-}
-
-func (t sessionLoginThrottle) Failure(username, host string) {
-	if t.api != nil {
-		t.api.RecordLoginFailure(username, host)
-	}
-}
-
-func (t sessionLoginThrottle) Success(username, host string) {
-	if t.api != nil {
-		t.api.ResetLoginSuccess(username, host)
-	}
-}
+// ⚠️ `sessionLoginThrottle` 已随 W4 删除：它把 serverauth 的登录失败预算适配给
+// 员工登录页（`session.LoginThrottle`），而那套入口与 session 包一起消失了。
+// 员工/管理端登录面（`/api/client/v2/auth/login` 与 `/api/server/admin/login`）
+// 各自持有 serverauth 的限流，未受影响。
 
 func boolToInt(b bool) int {
 	if b {
@@ -480,31 +475,17 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-// readMemAvailable 读可用内存；读不到返回 0（readyz 对 ≤0 的语义是"不判定"，
-// 这样容器/受限环境不会因为 /proc/meminfo 不可读而无法部署）。
-func readMemAvailable() int64 {
-	v, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return 0
-	}
-	for _, line := range strings.Split(string(v), "\n") {
-		if !strings.HasPrefix(line, "MemAvailable:") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			break
-		}
-		var kb int64
-		for _, c := range fields[1] {
-			if c < '0' || c > '9' {
-				break
-			}
-			kb = kb*10 + int64(c-'0')
-		}
-		return kb * 1024
-	}
-	return 0
+// readMemoryAvailability 是**可用内存的唯一读取入口**（cgroup 感知 + 宿主回落）。
+//
+// 为什么不再只看 /proc/meminfo（P0-1 / R1-rt-1）：容器里 MemAvailable 是**宿主**的
+// 可用内存，与 cgroup 限额无关 ⇒ `mem_limit: 2g` 的容器按默认档（需 3.6 GiB 可用）
+// 自检通过，随后被内核 OOM-kill。现在取 min(宿主可用, cgroup 剩余)，并把来源
+// （host / cgroup / none）与数值一起带出来。
+//
+// 读不到（Source=none）**不等于**内存充足：调用方必须显式说明"跳过内存自检"
+// （见 checkStartupMemory 与 /readyz 的 mem_source 字段），保留可部署性但不许静默。
+func readMemoryAvailability() readyz.MemoryAvailability {
+	return readyz.ReadMemoryAvailability()
 }
 
 func splitCSV(s string) []string {

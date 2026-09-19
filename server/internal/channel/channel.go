@@ -14,6 +14,7 @@ package channel
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -53,10 +54,17 @@ type Config struct {
 		Favicon  string `json:"favicon"`
 		Accent   string `json:"accent"`
 	} `json:"assets"`
-	// Desktop 是随包分发给**客户端**的那部分渠道配置。服务端只读其中一项:
-	// OIDC 回调要拼的深链 scheme —— 它必须与客户端注册/解析的 scheme 一致。
+	// Desktop 是随包分发给**客户端**的那部分渠道配置。服务端读其中两项:
+	// 深链 scheme(OIDC 回调拼串)与**应用 origin scheme**(客户端专属访问模型里
+	// 应用页的 origin,见下)。
 	Desktop struct {
 		DeepLinkScheme string `json:"deep_link_scheme"`
+		// AppOriginScheme 是应用页在客户端里的 origin scheme(2026-09-19 契约 §10)。
+		//
+		// 为什么服务端必须知道它:客户端协议 handler 把 `picoaide-app://<app_id>/…`
+		// 上的请求转成平台信封,平台要用**同一个** scheme 组装"自身源"做跨源写判据,
+		// 并对信封里的 host 做逐字符校验。两端 scheme 不一致 ⇒ 所有非幂等请求 403。
+		AppOriginScheme string `json:"app_origin_scheme"`
 	} `json:"desktop"`
 }
 
@@ -87,6 +95,106 @@ func ValidDeepLinkScheme(s string) bool {
 	return deepLinkSchemePattern.MatchString(strings.TrimSpace(s))
 }
 
+// DefaultAppOriginScheme 是**没有渠道配置**(本地开发)时应用页 origin 的 scheme。
+//
+// 取值 = 官方渠道的 `desktop.app_origin_scheme`,也是改造前 appserver.ClientScheme
+// 的硬编码值 —— 逐字节相同,所以"没带渠道配置的本地构建"行为不变。
+const DefaultAppOriginScheme = "picoaide-app"
+
+// appOriginSchemePattern 与客户端(open-app.ts / browser guard)及 CI 的校验同源。
+//
+// 形状与 deepLinkSchemePattern 逐字一致(`^[a-z][a-z0-9+.-]{1,31}$`,即总长 2..32):
+// 两端各写一份正则就会漂移,而漂移的后果是"服务端拒绝、客户端照发"(所有非幂等请求
+// 403)或反过来(写入一个浏览器拒绝注册的 scheme)。审计 R1-SRV-9 / CHN-15:
+// **长度上界是 32 不是无界** —— RFC 3986 没有上界,但 Chromium 的
+// registerSchemesAsPrivileged 与 OS 协议注册都有,所以这里冻结成与深链同一个形状。
+var appOriginSchemePattern = deepLinkSchemePattern
+
+// ReservedAppOriginSchemes 是契约 §10 **冻结**的保留 scheme 名单（有序）。
+//
+// 这是**跨端对拍的唯一真源**（CTL-5 / 接缝 J11）：CI 的渠道校验、客户端
+// （desktop-channel.ts / open-app.ts）与本包必须引用同一个集合，任何一处多一个少
+// 一个都会造成"某个渠道能构建、客户端却注册不了"（反过来是"服务端拒绝启动"）。
+//
+// 名单取值直接来自 §10 原文：`http/https/file/data/javascript/about`。
+// **不要**在这里加"我觉得也该拦"的项 —— 加在这里就等于改了对外契约；
+// 服务端自己的额外加固见 ExtraReservedAppOriginSchemes 的注释（两者刻意分开）。
+var ReservedAppOriginSchemes = []string{
+	"http", "https", "file", "data", "javascript", "about",
+}
+
+// ExtraReservedAppOriginSchemes 是**服务端侧的额外加固**（不是契约的一部分）。
+//
+// 这些是 Chromium/OS 自己占用或语义特殊的 scheme：拿它们当应用 origin 的后果不是
+// "不好看"而是"整个客户端坏掉"（`chrome-extension` 无法由应用注册、`blob`/`ws(s)`
+// 有内建语义、`mailto`/`tel` 是外部处理器）。服务端在这里**更严**是安全方向：
+//
+//   - 危险方向 = 服务端接受一个客户端注册不了的 scheme（⇒ 全部非幂等请求 403，
+//     且故障与配置看不出关系）—— 本集合把这类值挡在启动期；
+//   - 反向代价 = 某渠道配了这里的值，CI 不拦而服务端拒绝启动：**fail-loud 且可诊断**
+//     （启动日志点名 scheme），由渠道配置修掉即可。
+//
+// 对拍纪律：`TestReservedAppOriginSchemeContract` 断言 §10 的六项与客户端/CI 的
+// 冻结集合逐字一致，并断言本集合与它**不相交**（否则"唯一真源"就名不副实）。
+var ExtraReservedAppOriginSchemes = []string{
+	"blob", "ws", "wss", "ftp", "chrome", "chrome-extension", "mailto", "tel",
+}
+
+// reservedAppOriginSchemes 是上面两个集合的合并查询视图（由它们派生，不手写）。
+var reservedAppOriginSchemes = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(ReservedAppOriginSchemes)+len(ExtraReservedAppOriginSchemes))
+	for _, s := range ReservedAppOriginSchemes {
+		m[s] = struct{}{}
+	}
+	for _, s := range ExtraReservedAppOriginSchemes {
+		m[s] = struct{}{}
+	}
+	return m
+}()
+
+// ValidAppOriginScheme 报告 s 是否是合法的应用 origin scheme(形状 + 保留名单)。
+func ValidAppOriginScheme(s string) bool {
+	scheme := strings.TrimSpace(s)
+	if !appOriginSchemePattern.MatchString(scheme) {
+		return false
+	}
+	_, reserved := reservedAppOriginSchemes[scheme]
+	return !reserved
+}
+
+// AppOriginScheme 返回本渠道应用页 origin 的 scheme(契约 §10「唯一合法 scheme」)。
+//
+// fail-loud 边界(R1-OPS-4/CHN-6 订正,**不要放宽**):
+//   - **渠道目录/文件缺失** ⇒ 中性 fallback `DefaultAppOriginScheme`,不报错。
+//     渠道配置缺失只意味着"镜像没带渠道配置"(本地开发构建),此时服务端仍应可用
+//     —— 与 Load() 的既有约定完全一致。
+//   - **配置存在但字段缺失或非法** ⇒ 返回错误,由启动期调用方拒绝启动。
+//     发行镜像里这是交付事故:放行等于"服务端猜一个 scheme",而客户端注册的是渠道
+//     自己配的那个 ⇒ 全部非幂等请求 403,且故障现象与配置毫无关系(排障会跑偏)。
+//   - 与 `deep_link_scheme` 同值同样拒绝:两者在客户端里是两个不同的注册项,
+//     同值会让"深链"与"应用页"在协议栈层面撞在一起。
+//
+// 用 **(值, error)** 而不是"直接返回兜底值":唯一的调用方是启动装配,
+// 它必须能区分"没有配置"与"配置写错了"。
+func AppOriginScheme() (string, error) {
+	cfg, present := loadPresent()
+	if !present {
+		return DefaultAppOriginScheme, nil
+	}
+	scheme := strings.TrimSpace(cfg.Desktop.AppOriginScheme)
+	if scheme == "" {
+		return "", fmt.Errorf("渠道配置 %s 缺少 desktop.app_origin_scheme（全部渠道必填；"+
+			"official/beta 取 %q）", filepath.Join(Dir, "channel.json"), DefaultAppOriginScheme)
+	}
+	if !ValidAppOriginScheme(scheme) {
+		return "", fmt.Errorf("渠道配置的 desktop.app_origin_scheme %q 非法（须匹配 ^[a-z][a-z0-9+.-]{1,31}$ 且不是保留协议）", scheme)
+	}
+	if link := strings.TrimSpace(cfg.Desktop.DeepLinkScheme); link != "" && link == scheme {
+		return "", fmt.Errorf("渠道配置的 desktop.app_origin_scheme 不得与 desktop.deep_link_scheme 同值（都是 %q）", scheme)
+	}
+	return scheme, nil
+}
+
 // Dir 渠道目录(测试可改)。
 var Dir = func() string {
 	if v := os.Getenv(DirEnv); v != "" {
@@ -103,16 +211,26 @@ var Dir = func() string {
 // 缺配置的**发行镜像**属交付事故,由 CI 在构建期强制该文件存在(见 ci.yml),
 // 启动期另有一致性校验(见 cmd/server 的 resolveStartupChannel)。
 func Load() Config {
+	cfg, _ := loadPresent()
+	return cfg
+}
+
+// loadPresent 与 Load 同源,但额外报告"渠道配置文件是否**存在且可解析**"。
+//
+// 存在的意义只有一个:让 fail-loud 的边界能落在"配置写错了"而不是"没有配置"
+// (见 AppOriginScheme 的注释)。解析失败按"不存在"处理 —— Load 的既有约定是
+// 坏配置回落中性值,这里不改变它。
+func loadPresent() (Config, bool) {
 	raw, err := os.ReadFile(filepath.Join(Dir, "channel.json"))
 	if err != nil || len(raw) > maxConfigBytes {
-		return fallback()
+		return fallback(), false
 	}
 	var cfg Config
 	if err := json.Unmarshal(raw, &cfg); err != nil || cfg.ChannelID == "" {
-		return fallback()
+		return fallback(), false
 	}
 	applyDefaults(&cfg)
-	return cfg
+	return cfg, true
 }
 
 // fallbackBrandName 渠道配置缺失时的中性占位(刻意不含厂商品牌)。

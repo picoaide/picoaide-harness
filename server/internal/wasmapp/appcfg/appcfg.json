@@ -4,7 +4,6 @@
   "config_file": "picoaide.app.json",
   "access_default": "login",
   "access_values": [
-    "public",
     "login",
     "whitelist"
   ],
@@ -15,13 +14,15 @@
       "required": false,
       "default": "login",
       "values": [
-        "public",
         "login",
         "whitelist"
       ],
-      "desc": "访问模式。public=允许匿名（未登录时帧内 user 为 null）；login=要求登录，登录后全员可用（**缺省**）；whitelist=要求登录 + 名单准入（**平台不比对名单**，由应用自己读 whitelist 判定）",
+      "desc": "访问模式。login=要求登录，登录后全员可用（**缺省**）；whitelist=要求登录 + 名单准入（**平台不比对名单**，由应用自己读 whitelist 判定）。取值只有这两个：平台没有匿名面（应用只在桌面客户端内可用，一律要求登录）",
       "hints": [
         "写漏了按 login 处理：缺省只会'要求登录'，不会意外变成匿名可达",
+        "历史版本里写过的 `\"public\"` **读取侧仍按 login 执行**（存量应用不会 500），但新版本不得再写它（422 拒绝）",
+        "**更新版本**时省略本字段 = **沿用上一版生效值**（不是回落 login）：纯代码更新不会改写线上访问级别",
+        "要真的改访问级别就**显式**写出来（显式 `\"login\"` 才算改成登录后全员可用）；显式空串不是合法取值，会被拒",
         "应用中心**不按它过滤**：所有应用都列出来，条目里给出访问级别（供使用者判断该不该点）",
         "改 access = 发一个新版本（运行期改不了）"
       ]
@@ -36,6 +37,7 @@
       "desc": "准入名单——**给应用自己读的名单**（平台不比对、也不校验账号是否存在）：access=\"whitelist\" 时至少要有一个账号，否则拒绝发布",
       "hints": [
         "每个条目是一个账号（登录名 login），如 [\"zhangwei\", \"lisi\"]",
+        "**更新版本**时省略本字段 = 沿用上一版的名单；显式给 `[]` 才是“清空名单”（access 仍是 whitelist 时会被拒）",
         "应用入口第一件事就该读它并比对；无权限页必须显示本人账号（作者发现拼错的唯一途径）",
         "含空串即拒（不要用空行占位）；条目数上限见 references/limits.md"
       ]
@@ -55,9 +57,10 @@
       "type": "string",
       "required": false,
       "required_when": "first_release",
-      "desc": "数据敏感度声明（如 internal）：用于事后追责与合规审查（首次发布必填）",
+      "desc": "数据敏感度声明（如 internal）：用于事后追责与合规审查（首次发布必填，之后的版本可沿用）",
       "hints": [
         "平台**没有**这个字段的默认值：不要指望界面或平台替你填（留空会被首版必填校验拒）",
+        "**更新版本**时省略本字段 = 沿用上一版；显式给空串才会把它清空（那不是“没填”，是“填了空”）",
         "它不改变任何运行时行为，只用于声明与追责"
       ]
     },
@@ -70,6 +73,49 @@
       "hints": [
         "它与应用中心的'负责人'显示同源；平台不拿它做任何权限判断"
       ]
+    },
+    {
+      "key": "window",
+      "type": "object",
+      "required": false,
+      "desc": "窗口的**默认尺寸与强制宽高比**（子字段见 `window_fields`）：`window.ratio` 是客户端 resize 时强制锁定的比例（\"W:H\" 或浮点，合法区间 0.25–4.0）；`window.width` / `window.height` 是首次打开的默认尺寸（缺省 1280×720，写了 ratio 时按比例校正）",
+      "hints": [
+        "ratio 越界（<0.25 / >4.0 / 0 / 负 / 非数字）⇒ 发布期 `APP_CONFIG_INVALID`（不是留到运行期）",
+        "ratio 与 width/height 冲突时**以 ratio 为准**：只保留你显式给出的那一边，另一边按比例推导",
+        "整个 `window` 缺席 = 沿用上一版生效值（与其它字段同一条继承规则）；显式 `null` 才是清空",
+        "未知子键会被拒（例如 `window.zoom`）—— 平台不会静默忽略你没被支持的写法"
+      ],
+      "sub_fields": [
+        {
+          "key": "window.ratio",
+          "type": "string",
+          "required": false,
+          "desc": "强制锁定的宽高比：写 \"W:H\"（如 \"16:9\"）或浮点数（如 1.7778）；合法区间 0.25–4.0（越界/0/负/非数字 ⇒ `APP_CONFIG_INVALID`）",
+          "hints": [
+            "窗口 resize 时按它约束比例：这是**强制**项，不是建议",
+            "只给 ratio 时按默认宽度 1280 推高度（16:9 ⇒ 1280×720）"
+          ]
+        },
+        {
+          "key": "window.width",
+          "type": "string",
+          "required": false,
+          "desc": "首次打开的窗口宽度（像素，正整数）：缺省 1280；与 ratio 冲突时以 ratio 为准",
+          "hints": [
+            "合法区间见 `window_fields` 的 max（越界 ⇒ `APP_CONFIG_INVALID`）",
+            "写字符串（\"1280px\"）或小数一律拒"
+          ]
+        },
+        {
+          "key": "window.height",
+          "type": "string",
+          "required": false,
+          "desc": "首次打开的窗口高度（像素，正整数）：缺省 720；与 ratio 冲突时以 ratio 为准",
+          "hints": [
+            "只写 height 时宽度按 ratio 推导"
+          ]
+        }
+      ]
     }
   ],
   "publish_fields": [
@@ -78,7 +124,7 @@
       "type": "string",
       "required": true,
       "max": 63,
-      "desc": "应用标识 = 域名标签（`<app_id>.<应用基域>`）：小写字母/数字/连字符，不超过 63 个字符，不得纯数字、不得以 xn-- 开头、不得是保留字；**不能改名**",
+      "desc": "应用标识（客户端内即 `<渠道 app 源 scheme>://<app_id>` 的 host 段）：小写字母/数字/连字符，不超过 63 个字符，不得纯数字、不得以 xn-- 开头、不得是保留字；**不能改名**",
       "hints": [
         "也可以由路径 `/apps/wasm/:app_id/releases` 给出；两边都给时必须一致",
         "显示名（可中文）用 title，不要塞进 app_id"
@@ -100,7 +146,7 @@
       "required_when": "first_release",
       "desc": "应用中心显示名称（可中文）：**首次发布必填**，之后的版本可省略（沿用上一版）",
       "hints": [
-        "app_id 是域名标签不能中文；人看的名字写在这里"
+        "app_id 只能小写 ASCII（它也是应用地址的 host 段）；人看的名字写在这里"
       ]
     },
     {
@@ -132,7 +178,40 @@
       "desc": "应用配置文件的内容（即 `picoaide.app.json` 的对象形态）：字段见 `config_fields`",
       "hints": [
         "平台存的是**解析并归一化之后**的配置（名单去空白/去重、access 缺省落定）",
+        "**更新版本**时 config 里**缺席**的字段沿用上一版生效值（access/whitelist/purpose/data_sensitivity/owner 逐字段各自沿用）；显式给值——包括显式空串——以提交为准",
+        "首版没有可沿用的上一版：缺席的 `access` 按缺省 `login` 落定",
         "改任何一项都要发新版本（§10.5 第 56f 项）"
+      ]
+    }
+  ],
+  "window_fields": [
+    {
+      "key": "window.ratio",
+      "type": "string",
+      "required": false,
+      "desc": "强制锁定的宽高比：写 \"W:H\"（如 \"16:9\"）或浮点数（如 1.7778）；合法区间 0.25–4.0（越界/0/负/非数字 ⇒ `APP_CONFIG_INVALID`）",
+      "hints": [
+        "窗口 resize 时按它约束比例：这是**强制**项，不是建议",
+        "只给 ratio 时按默认宽度 1280 推高度（16:9 ⇒ 1280×720）"
+      ]
+    },
+    {
+      "key": "window.width",
+      "type": "string",
+      "required": false,
+      "desc": "首次打开的窗口宽度（像素，正整数）：缺省 1280；与 ratio 冲突时以 ratio 为准",
+      "hints": [
+        "合法区间见 `window_fields` 的 max（越界 ⇒ `APP_CONFIG_INVALID`）",
+        "写字符串（\"1280px\"）或小数一律拒"
+      ]
+    },
+    {
+      "key": "window.height",
+      "type": "string",
+      "required": false,
+      "desc": "首次打开的窗口高度（像素，正整数）：缺省 720；与 ratio 冲突时以 ratio 为准",
+      "hints": [
+        "只写 height 时宽度按 ratio 推导"
       ]
     }
   ]

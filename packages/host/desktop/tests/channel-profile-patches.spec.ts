@@ -19,7 +19,7 @@ function acmeProfile(): ReturnType<typeof parseDesktopChannelProfile> {
     identity: { display_name: 'Acme AI', short_name: 'Acme', tagline: '企业内部平台' },
     copy: { login_display_name: 'Acme', client_display_name: 'Acme AI' },
     defaults: { server_url: 'https://ai.acme.example.com' },
-    desktop: { product_name: 'Acme AI', deep_link_scheme: 'acmeai' },
+    desktop: { product_name: 'Acme AI', deep_link_scheme: 'acmeai', app_origin_scheme: 'acmeai-app' },
   })
 }
 
@@ -71,7 +71,7 @@ describe('channel package → row config', () => {
       .toEqual({ deepLinkScheme: 'acmeai' })
 
     // 渠道包没配 scheme → 官方值（与 electron-builder protocols / 服务端 OIDC 同序）
-    const bare = parseDesktopChannelProfile({ channel_id: 'acme', identity: { display_name: 'Acme AI' } })
+    const bare = parseDesktopChannelProfile({ channel_id: 'acme', identity: { display_name: 'Acme AI' }, desktop: { app_origin_scheme: 'acme-app' } })
     expect(configOf(channelProfilePatches(bare, ALL_ROWS), 'picoaide-session'))
       .toEqual({ deepLinkScheme: 'picoaide' })
   })
@@ -81,6 +81,7 @@ describe('channel package → row config', () => {
     const profile = parseDesktopChannelProfile({
       channel_id: 'acme',
       identity: { display_name: 'Acme AI', short_name: 'Acme' },
+      desktop: { app_origin_scheme: 'acme-app' },
     })
     const gate = configOf(channelProfilePatches(profile, ALL_ROWS), 'picoaide-auth-gate')
     expect(gate).not.toHaveProperty('defaultServer')
@@ -95,7 +96,7 @@ describe('channel package → row config', () => {
       channel_id: 'acme',
       identity: { display_name: 'Acme AI', short_name: 'Acme' },
       assets: { logo_inline: 'data:image/svg+xml;base64,PHN2Zy8+', logo_dark_inline: 'data:image/svg+xml;base64,PHN2Zy8+' },
-      desktop: { deep_link_scheme: 'acmeai' },
+      desktop: { deep_link_scheme: 'acmeai', app_origin_scheme: 'acmeai-app' },
     })
     const patches = channelProfilePatches(profile, ALL_ROWS)
     for (const id of ['picoaide-auth-gate', 'picoaide-channel-sync']) {
@@ -111,7 +112,7 @@ describe('channel package → row config', () => {
       channel_id: 'acme',
       identity: { display_name: 'Acme AI' },
       assets: { logo_inline: 'https://tracker.example.com/pixel.svg' },
-      desktop: { deep_link_scheme: 'acmeai' },
+      desktop: { deep_link_scheme: 'acmeai', app_origin_scheme: 'acmeai-app' },
     })
     const brand = configOf(channelProfilePatches(profile, ALL_ROWS), 'picoaide-channel-sync').brand as Record<string, unknown>
     expect(brand).not.toHaveProperty('logoURL')
@@ -125,7 +126,7 @@ describe('channel package → row config', () => {
 
   it('never emits a vendor brand for a channel package without brand copy', () => {
     // 渠道包存在但品牌为空 = 注入链断了:中性占位(不是厂商名)。
-    const profile = parseDesktopChannelProfile({ channel_id: 'acme', desktop: { product_name: '' } })
+    const profile = parseDesktopChannelProfile({ channel_id: 'acme', desktop: { product_name: '', app_origin_scheme: 'acme-app' } })
     const brand = configOf(channelProfilePatches(profile, ALL_ROWS), 'picoaide-auth-gate').brand
     expect(JSON.stringify(brand)).not.toContain('PicoAide')
     expect((brand as { client: { displayName: string } }).client.displayName).toBe('Harness')

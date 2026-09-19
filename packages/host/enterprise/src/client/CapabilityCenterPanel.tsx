@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { t } from './locales.ts'
 import { compareVersions } from './version-compare.ts'
-import { builtinAction, builtinRowState, selectBuiltinCards, useBuiltinSkills, type BuiltinSkill } from './BuiltinSkillsStrip.tsx'
+import { planBuiltinCards, useBuiltinSkills, type BuiltinCard } from './BuiltinSkillsStrip.tsx'
 
 /**
  * 能力中心（Capability Hub）——技能商城 / 共享技能 / 共享 Agent 的归一入口。
@@ -20,8 +20,11 @@ import { builtinAction, builtinRowState, selectBuiltinCards, useBuiltinSkills, t
  * - hasUpdate 修复：approved 最高版本 > 已装版本才提示更新（semver 比较）；
  * - 共享技能补齐卸载（旧面板只有安装/更新，无卸载入口）；
  * - 分区独立错误态：一个端点失败仅对应分区显示重试，其余照常；
- * - 同名冲突确认：安装前检测磁盘/installed 同名 → 弹「覆盖确认」→ ?force=1；
+ * - 同名冲突确认：安装前检测磁盘/installed 同名 → 弹「覆盖确认」（纯客户端交互）；
  * - 30s 静默轮询 + Tab focus trap（取旧 Agent 面板的更完善实现）。
+ *
+ * ⚠️ 安装端点**不带 `?force=1`**（R2-SK-5）：宿主按 pathname 分发、从不读这个参数，
+ * 重装/更新靠安装器的"整树替换"语义；留一个宿主不读的参数面只会让人以为它能强制刷新。
  */
 
 type CapabilityKind = 'skill' | 'agent'
@@ -372,8 +375,13 @@ export function itemsForTab<T extends { source?: string, installed?: boolean }>(
  * (网关 marketplace /archive);共享技能走 shared-skills 代理(带版本);
  * 智能体走 agent-presets 代理。合并面板时(57aeffecbb)曾把市场技能误路由
  * 到 shared-skills 端点 → 网关 404 → 面板「操作失败:gateway error」。
+ *
+ * ⚠️ 端点**不带 query 参数**（R2-SK-5）：宿主按 pathname 分发（auth-gate），
+ * 从不读 `?force=1`；"覆盖已装同名内容"是**客户端确认条**决定要不要发这一发请求
+ * （见 `install()` 的 installConfirmKey），不是一个服务端开关。此前拼上的
+ * `?force=1` 是死面：谁都没读它，却让人以为宿主支持"强制刷新"。
  */
-export function installEndpoint(item: CapabilityItem, version: string, force?: boolean): string {
+export function installEndpoint(item: CapabilityItem, version: string): string {
   let base: string
   if (item.kind === 'skill') {
     base = item.source === 'market'
@@ -382,7 +390,39 @@ export function installEndpoint(item: CapabilityItem, version: string, force?: b
   } else {
     base = `/api/pico/agent-presets/${encodeURIComponent(item.name)}/install`
   }
-  return force === true ? `${base}?force=1` : base
+  return base
+}
+
+/** 分区里的一条可见卡：内置入口卡（builtin）或普通条目卡（item）。 */
+export type SectionCard =
+  | { type: 'builtin'; card: BuiltinCard }
+  | { type: 'item'; item: CapabilityItem }
+
+/**
+ * 「我的」分区最终渲染的卡片清单（**唯一真源**：渲染层只做 map，不再自己拼数组）。
+ *
+ * 去重口径（R2-SK-6）：内置入口已经为某个技能出卡（「安装」或「更新到 vX」）时，
+ * 本机技能库里那张**同名技能**普通卡不再渲染 —— 否则"可更新"的技能会在「我的」里
+ * 显示两张卡：一张 `[更新到 v1.1.0]`，另一张是 provenance=builtin 的本地卡（页脚
+ * 还带一个误导性的 `[上传]`）。planBuiltinCards 只处理了"已装且同版本不出卡"，
+ * 可更新这一档两张都出。
+ *
+ * 只吞 `kind === 'skill'` 的同名项：技能与智能体允许同名（复合键语义），不能互相吞。
+ * 顺序不变：内置卡在前（平台自带、数量少），其余保持调用方给出的既有排序。
+ *
+ * 变异验证：去掉这里的过滤（回到 `[...builtinCards, ...rows]` 直接拼接）⇒
+ * `capability-center-panel.spec.ts` 的「同一技能只出一张卡（数量断言）」必红。
+ */
+export function planSectionCards(options: {
+  rows: readonly CapabilityItem[]
+  builtinCards: readonly BuiltinCard[]
+}): SectionCard[] {
+  const claimed = new Set(options.builtinCards.map(card => card.skill.name))
+  const rows = options.rows.filter(item => item.kind !== 'skill' || !claimed.has(item.name))
+  return [
+    ...options.builtinCards.map(card => ({ type: 'builtin' as const, card })),
+    ...rows.map(item => ({ type: 'item' as const, item })),
+  ]
 }
 
 /** 单测用：按（kind, source）解析卸载端点(与安装同一来源规则)。 */
@@ -567,7 +607,9 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   const install = async (item: CapabilityItem, opts?: { force?: boolean; version?: string }): Promise<void> => {
     if (action !== null && (action.kind === 'installing' || action.kind === 'uninstalling' || action.kind === 'uploading')) return
     const key = `${item.kind}:${item.name}`
-    // 同名冲突确认（磁盘/installed 已有同名目录且非覆盖安装）。
+    // 同名冲突确认（磁盘/installed 已有同名目录且用户还没确认）。`force` 只表示
+    // "用户已在确认条上点过覆盖" —— 它**不进 URL**（宿主不读 `?force=1`，R2-SK-5），
+    // 安装器本身就是整树替换语义。
     if (!opts?.force && (item.installed || (item.source !== 'local' && item.isLocal))) {
       setInstallConfirmKey(key)
       return
@@ -576,7 +618,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     setAction({ key, kind: 'installing' })
     try {
       const targetVersion = opts?.version ?? item.version
-      const url = installEndpoint(item, targetVersion, opts?.force)
+      const url = installEndpoint(item, targetVersion)
       const res = await fetch(url, { method: 'POST' })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
@@ -732,22 +774,19 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     )
   }
 
-  /** 内置技能行 → 与普通技能同构的卡片（同一套 CARD / 标题行 / 徽章 / 页脚按钮）。 */
-  const renderBuiltinCard = (skill: BuiltinSkill): React.ReactNode => {
+  /**
+   * 内置技能卡 → 与普通技能同构的卡片（同一套 CARD / 标题行 / 徽章 / 页脚按钮）。
+   *
+   * 判定全部由 `planBuiltinCards` 做完（含"已装且清单更新 ⇒ 出更新卡"，R1-pm-8）：
+   * 这里只按它给出的 `action` / `state` / `endpoint` 渲染，不再自己算一遍
+   * ——两处各判一次就会出现"卡片渲染了但没有按钮"这种死代码。
+   */
+  const renderBuiltinCard = (card: BuiltinCard): React.ReactNode => {
+    const skill = card.skill
     const key = `builtin:${skill.name}`
-    const isInstalled = builtin.installed.includes(skill.name)
-    const rowState = builtinRowState(skill.name, {
-      installed: builtin.installed,
-      busy: builtin.busy,
-      failedName: builtin.failed?.name ?? null,
-    })
-    const failure = builtin.failed?.name === skill.name ? builtin.failed : null
-    const next = builtinAction(skill.version, builtin.versions[skill.name], isInstalled)
-    const label = next === 'install'
-      ? t('capability.builtinInstall')
-      : next === 'update'
-        ? t('capability.updateTo', { version: skill.version })
-        : t('capability.builtinInstalled')
+    const label = card.action === 'update'
+      ? t('capability.updateTo', { version: skill.version })
+      : t('capability.builtinInstall')
     const title = skill.title !== undefined && skill.title !== '' ? skill.title : skill.name
     return (
       <div key={key} className="pico-skill-card" style={CARD}>
@@ -768,14 +807,12 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
           <p style={DESC_CLAMP} title={skill.description}>{skill.description}</p>
         )}
         <div style={CARD_FOOT}>
-          {rowState === 'installed' ? (
-            <span style={{ ...CHIP_SUCCESS, flex: 1, textAlign: 'center' }}>{label}</span>
-          ) : rowState === 'busy' ? (
+          {card.state === 'busy' ? (
             <button type="button" style={{ ...BUTTON_DISABLED, flex: 1 }} disabled>{label}</button>
-          ) : failure !== null ? (
+          ) : card.state === 'failed' && card.failure !== null ? (
             <>
-              <span style={{ ...META, flex: 1, color: 'var(--dsw-alias-state-error-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={failure.message}>
-                {failure.message}
+              <span style={{ ...META, flex: 1, color: 'var(--dsw-alias-state-error-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={card.failure}>
+                {card.failure}
               </span>
               <button type="button" style={BUTTON} onClick={() => { void builtin.install(skill) }}>
                 {t('capability.builtinRetry')}
@@ -899,20 +936,27 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     const rows = visibleByTab
     // 内置技能只属于「我的」（它们是本机可安装的能力，不在市场里），且类型筛选
     // 为"智能体"时不显示；搜索按与普通卡片同一口径过滤。
-    const builtinRows = key === 'mine'
-      ? selectBuiltinCards({
+    // 出卡口径（含"已装但清单有新版 ⇒ 出更新卡"）全在 planBuiltinCards 里，见其文档。
+    const builtinCards = key === 'mine'
+      ? planBuiltinCards({
           rows: builtin.rows,
           // 两个事实源取并集：服务端下发的 installed[] + 面板「我的」列表里的本地技能名。
           installedNames: new Set([...builtin.installed, ...localSkillNames]),
+          // 本机已装版本（provenance 的安装时版本）——"已装且更旧"就靠它与清单版本对比。
+          installedVersions: builtin.versions,
           query: search,
           kindFilter: filter,
+          busy: builtin.busy,
+          failed: builtin.failed,
         })
       : []
-    if (rows.length === 0 && builtinRows.length === 0) {
+    const cards = planSectionCards({ rows, builtinCards })
+    if (cards.length === 0) {
       return renderEmpty(filter === 'all' ? emptyText : t('capability.emptyFilter'))
     }
-    // 内置技能排在前面（数量少且是平台自带），其余按既有排序。
-    return [...builtinRows.map(renderBuiltinCard), ...rows.map(renderCard)]
+    // 内置技能排在前面（数量少且是平台自带），其余按既有排序；同名技能的重复卡
+    // 已在 planSectionCards 里去掉（R2-SK-6）——这里只做渲染，不再自己拼数组。
+    return cards.map(card => (card.type === 'builtin' ? renderBuiltinCard(card.card) : renderCard(card.item)))
   }
 
   // 分区状态驱动内容;全局 loading 已移除(旧实现 setLoading(true) 后同步置

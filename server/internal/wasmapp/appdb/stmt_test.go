@@ -90,7 +90,7 @@ func TestVacuumIntoDeniedAndTargetNotCreated(t *testing.T) {
 	requireReason(t, e, "statement_not_allowed")
 
 	// (2) 引擎层：LIMIT_ATTACHED=0 是 VACUUM INTO 的唯一闸门（实测 §15.2）。
-	if _, err := d.rw.ExecContext(context.Background(), "VACUUM INTO '"+out+"'"); err == nil {
+	if _, err := d.writeConn().ExecContext(context.Background(), "VACUUM INTO '"+out+"'"); err == nil {
 		t.Fatal("引擎层 VACUUM INTO 竟然成功：LIMIT_ATTACHED 未生效")
 	} else if !strings.Contains(err.Error(), canaryAttachErrFragment) {
 		t.Fatalf("VACUUM INTO 原始错误应含 %q，实际：%v", canaryAttachErrFragment, err)
@@ -355,12 +355,13 @@ func TestSQLStatementTimeoutOnSlowQuery(t *testing.T) {
 		t.Fatalf("注入 250 ms 预算却跑了 %v，超时未生效", elapsed)
 	}
 	// 污染标记仍在（保守）：被中断的连接绝不复用 —— 恢复只能靠"换一组新连接"。
-	if d.poisoned == nil {
+	if poisoned, _ := poisonStateForTest(d); poisoned == nil {
 		t.Fatal("超时后必须置污染标记（fail-closed：不复用被中断的连接）")
 	}
 
-	// 恢复路径 1（按语句）：下一次调用直接可用，且用的是**全新的**两条连接。
-	oldRO, oldRW := d.ro, d.rw
+	// 恢复路径 1（按语句）：下一次调用直接可用，且用的是**全新的**整代连接。
+	oldROs := poolReadConnsForTest(d)
+	oldRW := d.writeConn()
 	res, err := d.Query(context.Background(), abi.SQLParams{SQL: "SELECT 1"})
 	if err != nil {
 		t.Fatalf("单语句超时后下一次调用应已恢复（丢弃整组连接重连）：%v", err)
@@ -368,10 +369,10 @@ func TestSQLStatementTimeoutOnSlowQuery(t *testing.T) {
 	if len(res.Rows) != 1 {
 		t.Fatalf("恢复后的查询应返回 1 行：%+v", res.Rows)
 	}
-	if d.ro == oldRO || d.rw == oldRW {
-		t.Fatal("恢复必须换掉被中断的整组连接（ro 与 rw 都要换新），绝不复用")
+	if sameConnSet(poolReadConnsForTest(d), oldROs) || d.writeConn() == oldRW {
+		t.Fatal("恢复必须换掉被中断的整代连接（全部只读 + rw 都要换新），绝不复用")
 	}
-	if d.poisoned != nil {
+	if poisoned, _ := poisonStateForTest(d); poisoned != nil {
 		t.Fatal("恢复后污染标记应已清除")
 	}
 
@@ -412,7 +413,8 @@ func TestUnboundedRecursiveCTEInterruptTiming(t *testing.T) {
 	defer cancel()
 	start := time.Now()
 	var n int64
-	err := d.ro.QueryRowContext(ctx, cte).Scan(&n)
+	// 直接打持有连接（读写连接即可：这里验的是驱动层的中断行为，与连接形态无关）。
+	err := d.writeConn().QueryRowContext(ctx, cte).Scan(&n)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("无界递归 CTE 不应成功返回")
@@ -425,7 +427,7 @@ func TestUnboundedRecursiveCTEInterruptTiming(t *testing.T) {
 	}
 	t.Logf("无界递归 CTE 实测中断耗时：%v（预算 %v，错误 %v）", elapsed.Round(10*time.Millisecond), limits.SQLStatementBudget, err)
 	// 映射路径：超时统一变成 DB_DENIED + statement_timeout。
-	mapped := d.mapStmtErrorLocked(ctx, err)
+	mapped := d.mapStmtError(ctx, err)
 	me := requireAppErr(t, mapped, apperr.CodeDBDenied)
 	requireReason(t, me, "statement_timeout")
 }
@@ -560,7 +562,7 @@ func TestRowIDAliasBypassIsClosedEndToEnd(t *testing.T) {
 	// 宿主视角：平台主键与自增序列的基线（应用看不到 _row_id，宿主可以直接读）。
 	readHostState := func() (ids []int64, seq int64) {
 		t.Helper()
-		rows, err := d.rw.QueryContext(ctx, "SELECT _row_id FROM items ORDER BY _row_id")
+		rows, err := d.writeConn().QueryContext(ctx, "SELECT _row_id FROM items ORDER BY _row_id")
 		if err != nil {
 			t.Fatalf("宿主读 _row_id 失败：%v", err)
 		}
@@ -572,7 +574,7 @@ func TestRowIDAliasBypassIsClosedEndToEnd(t *testing.T) {
 			}
 			ids = append(ids, id)
 		}
-		if err := d.rw.QueryRowContext(ctx, "SELECT seq FROM sqlite_sequence WHERE name = 'items'").Scan(&seq); err != nil {
+		if err := d.writeConn().QueryRowContext(ctx, "SELECT seq FROM sqlite_sequence WHERE name = 'items'").Scan(&seq); err != nil {
 			t.Fatalf("读 sqlite_sequence 失败：%v", err)
 		}
 		return ids, seq

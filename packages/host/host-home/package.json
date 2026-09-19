@@ -1,0 +1,33 @@
+{
+  "name": "@picoaide/dsh-host-home",
+  "version": "0.1.0",
+  "description": "Host-side product home resolution for PicoAide Harness: the single authority for the per-channel data root, shared by the launcher and the host plugins",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.map",
+    "lib/types/**/*.d.ts"
+  ],
+  "scripts": {
+    "build": "tsdown && tsc -p tsconfig.json --emitDeclarationOnly",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "yarn run build && yarn run test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "tsdown": "0.22.2",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}

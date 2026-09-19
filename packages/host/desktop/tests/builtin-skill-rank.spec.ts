@@ -16,8 +16,9 @@
  * 反向对照（证明断言不是空转）：只放 `~/.agents/skills` 那一份时，解析结果必须是
  * `user-agents` —— 也就是说，如果哪天 rank 被对调、或根被写错，第一个用例会红。
  *
- * ⚠️ 平台技能 `picoaide-app-builder` **不再**由插件随包同步（用户口径「按需安装」，
- * 见 `memory-evolve/lib/coi/skills-sync.js` 的 `PLATFORM_SKILLS`），所以这里的
+ * ⚠️ 平台技能 `app-builder` **不再**由插件随包同步（用户口径「按需安装」，
+ * 见 `memory-evolve/lib/coi/skills-sync.js` 的 `PLATFORM_SKILLS`；2026-09-19 起
+ * 它的源目录也不在客户端包里了，真源是 `server/skills/app-builder/`），所以这里的
  * "两份副本"是**构造**出来的场景、不是生产形态；用它的名字只是复用一份现成的
  * frontmatter 夹具，与那个技能的分发路径无关。
  */
@@ -34,7 +35,7 @@ const BUNDLED_BODY = 'BUNDLED-COPY（用户自己放在 ~/.agents/skills 的同�
 
 function skillMd(description: string, marker: string): string {
   return `---
-name: picoaide-app-builder
+name: app-builder
 description: ${description}
 version: 1.0.0
 ---
@@ -43,7 +44,7 @@ ${marker}
 }
 
 async function plant(root: string, marker: string): Promise<void> {
-  const dir = join(root, 'skills', 'picoaide-app-builder')
+  const dir = join(root, 'skills', 'app-builder')
   await mkdir(dir, { recursive: true })
   await writeFile(join(dir, 'SKILL.md'), skillMd('用于 rank 回归测试的技能描述，长度足够通过解析。', marker), 'utf8')
 }
@@ -107,10 +108,10 @@ describe('技能落点 rank：<dshHome>/skills（user-dsh 400）压过 ~/.agents
     const reg = await bootRegistry(dshHome, agentsHome)
     try {
       const rows = await reg.list()
-      const mine = rows.filter(r => r.name === 'picoaide-app-builder')
+      const mine = rows.filter(r => r.name === 'app-builder')
       expect(mine, '同名技能必须归并成一条（不是两条）').toHaveLength(1)
       expect(mine[0]?.source).toBe('user-dsh')
-      const body = await reg.body('picoaide-app-builder')
+      const body = await reg.body('app-builder')
       expect(body).toContain('SERVER-DELIVERED-COPY')
       expect(body).not.toContain('BUNDLED-COPY')
     } finally {
@@ -123,10 +124,10 @@ describe('技能落点 rank：<dshHome>/skills（user-dsh 400）压过 ~/.agents
     const reg = await bootRegistry(dshHome, agentsHome)
     try {
       const rows = await reg.list()
-      const mine = rows.filter(r => r.name === 'picoaide-app-builder')
+      const mine = rows.filter(r => r.name === 'app-builder')
       expect(mine).toHaveLength(1)
       expect(mine[0]?.source).toBe('user-agents')
-      expect(await reg.body('picoaide-app-builder')).toContain('BUNDLED-COPY')
+      expect(await reg.body('app-builder')).toContain('BUNDLED-COPY')
     } finally {
       await reg.dispose()
     }

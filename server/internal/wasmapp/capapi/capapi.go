@@ -7,7 +7,7 @@
 //	   ↑
 //	capapi                       （本包：模块间接口 + 计量结构）
 //	   ↑
-//	appdb / aichat / assets / appcfg / wasmmod / compile  （能力实现）
+//	appdb / assets / appcfg / wasmmod / compile  （能力实现）
 //	   ↑
 //	runtime                      （wazero 宿主，按 capapi 接口调用能力）
 //	   ↑
@@ -33,11 +33,15 @@ type DB interface {
 	Query(ctx context.Context, p abi.SQLParams) (abi.QueryResult, error)
 	// Exec 执行单条写语句（仅 INSERT/UPDATE/DELETE）。
 	Exec(ctx context.Context, p abi.SQLParams) (abi.ExecResult, error)
-	// Begin 开启事务并返回事务标识（每应用并发恒为 1，故同时最多一个事务）。
+	// Begin 开启事务并返回事务标识（同时最多一个事务；每应用并发布放后，宿主按请求
+	// 校验事务所有权 —— 非持有者的读、写**与事务出口**（Commit/Rollback）都会被拒绝，
+	// 见 appserver 的每请求包装层）。
 	Begin(ctx context.Context) (abi.TxResult, error)
 	// Commit 提交当前事务；p.TxID 非零时校验一致性。
+	// 与 Begin 同一条所有权闸：非事务持有者调用一律被拒（p.TxID 为 0 也不例外）。
 	Commit(ctx context.Context, p abi.TxParams) error
 	// Rollback 回滚当前事务；p.TxID 非零时校验一致性。
+	// 同 Commit：非事务持有者一律被拒（否则第三方能把别人的事务回滚掉、连带丢失其写）。
 	Rollback(ctx context.Context, p abi.TxParams) error
 	// InTx 报告当前是否有打开的事务（事务内禁止其他宿主调用，§4.4）。
 	InTx() bool
@@ -59,16 +63,11 @@ type DBStats struct {
 	SizeBytes int64
 }
 
-// AI 是 ai.chat 能力（§4.7：走平台既有 /v1 路径，按使用者身份计费与限流，R36）。
-//
-// 实现方必须保证：
-//   - 匿名（user == nil）⇒ 返回 apperr.CodeAuthRequired；
-//   - 用 http.NewRequestWithContext + 独立预算（limits.HostAIChatBudget）；
-//   - 余额不足 ⇒ AI_BALANCE_INSUFFICIENT（402 语义，不暴露具体余额）；
-//   - 限流 ⇒ AI_RATE_LIMITED；上游错误原文不透出。
-type AI interface {
-	Chat(ctx context.Context, user *abi.User, p abi.AIChatParams) (abi.AIChatResult, error)
-}
+// ⚠️ `AI` 接口已随 W4 **删除**（总纲 §21.3）：服务端 `ai.chat` 宿主能力彻底消失，
+// `internal/wasmapp/aichat/**` 整包删除，能力实现侧不再有任何 AI 依赖。
+// 应用要调模型必须走**客户端 AI loop**（§21.2：应用前端 JS → 宿主保留路径
+// `/__picoaide/ai/chat` → 结果回传 wasm 落库），计费走客户端既有 LLM 链路，
+// 应用维度归因由客户端的出站头 `X-Pico-App-Id` 承担（§21.4）。
 
 // Assets 是包内资源读取能力（§5.1：无文件系统语义、无路径穿越）。
 //
@@ -121,9 +120,26 @@ type CallMetrics struct {
 	GuestExitCode int32
 	// StderrTail 是 guest stderr 尾巴（诊断用，上限 limits.StderrTailBytes）。
 	StderrTail string
+	// Evidence 是**失败分类的依据**（RUNTIME_MEMORY 这类"事后无法分辨"的码尤其需要它）：
+	// 例如 `kind=stderr_oom_line; peak=…; limit=…; exit=2; anchored=true; line="runtime: out of memory: …"`。
+	//
+	// 为什么必须落库（第三轮审计 P3-1）：`oom_evidence` 与命中的证据行此前只存在于瞬时错误
+	// 信封，事后查 wasm_call_events 只能看到 "RUNTIME_MEMORY + peak 3.4 MiB + stderr_tail
+	// 全是 goroutine 回溯" —— 正好是"平台记录反过来证明不是内存问题"那幅自相矛盾的画面，
+	// 且无法分辨真 OOM / panic 误报 / 应用自己打印的同名文本。
+	//
+	// 有界：写入方保证 ≤ MaxEvidenceBytes，events 落库前再截一次（列是 TEXT，
+	// 一条超长证据会把诊断面刷爆）。
+	Evidence string
 	// StdoutLogs 是被判定为日志的 stdout 行数（§7.2「stdout 净化」统计）。
 	StdoutLogs int
 }
+
+// MaxEvidenceBytes 是 CallMetrics.Evidence 的上限（字节）。
+//
+// 200 与错误信封里的证据行上限同口径（runtime 的 `oomMarkerLineBytes` / `stderrFirstLine`）：
+// 一条超长行不该同时刷爆信封与调用事件表。
+const MaxEvidenceBytes = 200
 
 // Outcome 取值（§4.9 调用事件 outcome 列）。
 const (

@@ -137,6 +137,27 @@ const (
 	// 一次，容量未满时 LRU 永不淘汰 ⇒ 内存只涨不落（2026-09-18 实测：全部
 	// Close 后 RSS 只归还约 20%）。空闲即逐出，并触发一次归还 OS。
 	ModuleCacheIdleTTL = 10 * time.Minute
+	// ReleaseCacheMaxBytes 是宿主**静态资源/应用配置**进程内缓存的字节上限（R1-rt-3）。
+	//
+	// 缓存键是 `(app_id, release_id)`（外加资源逻辑路径）：资源在 (app, version, path)
+	// 三元组下**不可变**（§4.2「要改内容只能发新版」，assets.Write 拒绝覆盖），因此
+	// 命中即可直出 —— 包括 `If-None-Match` 复验：304 只需要 ETag，而 ETag 与
+	// content-type 都在缓存里 ⇒ **不读盘、不算哈希**（R1-rt-2）。
+	//
+	// 记账边界（**必须保持有界**）：它是**单一全局** LRU，硬上界 =
+	//
+	//	本值 + 单个 release 的资源总量（≤ SectionTotalMaxBytes，4 MiB）
+	//	    + ReleaseCacheMaxReleases × 每条元数据（几百字节量级）
+	//
+	// 越界即按 LRU 整条释放；单条资源超过本值一半时只缓存元数据（不缓存字节）。
+	// 之所以不进「内存四笔账」：那几笔是"并发 × 实例 / 单次峰值"型的常驻或瞬时上界，
+	// 而本项与 ModuleCacheMaxBytes 同性质 —— 有界、可逐出、随访问增长但有硬顶。
+	// 若将来把它调大或改成多份实例，必须回到 readyz 的记账边界注释重新算账
+	//（见 readyz.MemoryBudget 的「记账边界」段）。
+	ReleaseCacheMaxBytes = 32 << 20
+	// ReleaseCacheMaxReleases 是上述缓存的 `(app_id, release_id)` 条目数上限：
+	// 防"一堆极小应用把索引/元数据撑大"（与 ModuleCacheMaxEntries 同一考虑）。
+	ReleaseCacheMaxReleases = 256
 	// MemoryPeakGuardPercent 是启动自检的内存水位（§4.3）：理论峰值 > 可用内存 70% ⇒ 拒绝启动。
 	MemoryPeakGuardPercent = 70
 	// UploadPeakPerUploadBytes 是单次上传的峰值内存账（§4.3「内存四笔账」）：
@@ -155,6 +176,28 @@ const (
 	AppDBMaxPageCount = 25600
 	// AppDBMaxBytes 是应用库体积上限（R2）：100 MB。
 	AppDBMaxBytes = AppDBMaxPageCount * AppDBPageSize
+	// AppDBReaders 是每个应用库句柄持有的**只读连接数**（§4.5「连接级只读分层」）。
+	//
+	// 为什么要有它（2026-09-19，WAL + 多读者）：SQLite 在 WAL 下允许 N 个读者与
+	// 1 个写者并发，只读连接数决定了"同一应用能同时跑多少条 SELECT"。取 4 的
+	// 理由：每条只读连接都占一份页缓存（appdb 的 appConnCacheKiB）与一个 fd，
+	// 4 在"单应用 4 路并发读"与"每句柄 (1+4) MiB 页缓存"之间取平衡；写路径仍只有一个
+	// 写者（appdb 的 writeMu），所以这里加的是**读者**，不是写者。
+	AppDBReaders = 4
+	// AppDBReadersMax 是只读连接数的上限（注入值超过它即钳到它）。
+	//
+	// 它只是"配置注入的钳位"，不是 SQLite 的能力边界（连接数与 LIMIT_ATTACHED 无关）；
+	// 给出上界是为了让"控制台填了 1000"退化成可诊断的 16，而不是直接把 fd 打满。
+	AppDBReadersMax = 16
+	// AppDBBusyTimeout 是每条应用库连接的 busy_timeout（SQLITE_BUSY 的重试等待）。
+	//
+	// 为什么不是驱动默认的 0（2026-09-19，WAL）：WAL 下写者与读者、检查点与写事务的
+	// 瞬时争用是**正常现象**，busy_timeout=0 会把一次正常争用直接变成应用可见的
+	// database_busy 失败。取 3 s 的理由：必须严格小于 SQLStatementBudget（5 s 单语句
+	// 硬预算）—— 否则"等待"本身会吃掉整条语句的预算，应用看到的是 statement_timeout
+	// 而不是"库忙，稍后重试"。⚠️ 连接级且不持久 ⇒ 每条连接都要重设（与 §15.1 第 4 条
+	// 的 max_page_count 同一纪律）。
+	AppDBBusyTimeout = 3000 * time.Millisecond
 
 	// SQLLimitSQLLength 是单条 SQL 字节上限（§4.5，SQLITE_LIMIT_SQL_LENGTH）：64 KiB。
 	SQLLimitSQLLength = 64 << 10
@@ -195,8 +238,8 @@ const (
 	// AppDBHandleMax 是进程内**同时持有**的应用库句柄上限。
 	//
 	// 取与 GlobalInstances 同值：每请求必须先拿到执行槽才会用到应用库 ⇒ 同一时刻
-	// 最多 32 个应用在跑。每句柄 2 条 SQLite 连接（只读 + 读写）⇒ 最多 64 条连接，
-	// 给文件描述符一个硬上界。
+	// 最多 32 个应用在跑。每句柄 (1 + AppDBReaders) 条 SQLite 连接（1 写 + N 读）
+	// ⇒ 默认配置下最多 32 × 5 = 160 条连接，给文件描述符一个硬上界。
 	AppDBHandleMax = GlobalInstances
 
 	// MaxTablesPerApp 是每应用表数上限（§4.5/§5.3）：16。
@@ -238,7 +281,8 @@ var DeniedStatementKinds = []string{
 
 const (
 	// AppRequestBodyMaxBytes 是应用 API 请求体上限（§4.6）：1 MiB。
-	// ⚠️ 子域路由树不在两个 1 MB 中间件分组里 ⇒ 必须自己实现。
+	// ⚠️ 应用请求走客户端信封（`/api/client/v2/apps/wasm/:app_id/request`）而不是主站
+	// 路由树上的一般端点 ⇒ 管线必须自己套 MaxBytesReader（不能依赖命名空间中间件）。
 	AppRequestBodyMaxBytes = 1 << 20
 	// AppResponseBodyMaxBytes 是应用响应体上限（§4.6，R22）：8 MiB。
 	AppResponseBodyMaxBytes = 8 << 20
@@ -246,8 +290,8 @@ const (
 	ProtocolLineMaxBytes = 1 << 20
 	// GuestBudget 是 guest 执行预算（§4.6）：10 s（进入宿主调用时暂停计时）。
 	GuestBudget = 10 * time.Second
-	// HostAIChatBudget 是 ai.chat 宿主预算（§4.4/§4.6）：30 s。
-	HostAIChatBudget = 30 * time.Second
+	// ⚠️ W4 删除（总纲 §21.3）：服务端宿主 AI 调用的 30 s 预算随该能力一起消失；
+	// 其余宿主调用（db.* / log / assets.read）一律走 HostCallBudgetDefault。
 	// RequestWallClock 是请求端到端墙钟（含排队，§4.6）：60 s，到点即拒。
 	RequestWallClock = 60 * time.Second
 	// AppQueueDepth 是每应用队列长度（§4.6）：32，超出 429 + Retry-After。
@@ -258,41 +302,48 @@ const (
 	UserPerAppQueued = 4
 	// UserGlobalRunning 是单用户跨应用全局在跑上限（§4.6）：4。
 	UserGlobalRunning = 4
-	// AppConcurrency 是每应用并发（§4.6）：恒为 1（串行）。
-	AppConcurrency = 1
+	// AppConcurrency 是每应用并发（§4.6）：同一应用最多 4 个请求同时在跑（读并发）。
+	//
+	// 为什么从 1 改成 4（2026-09-19，第二轮「怎么支持高并发」的最后一公里）：
+	// 「同应用串行」过去有四层叠加 —— 队列（本常量）、句柄池的整请求互斥量、
+	// appdb 的一把大锁（读写共用）、以及池容量 2。2026-09-19 的 appdb 改造
+	// （WAL + 1 写 N 读连接池 + stateMu/writeMu 拆分）把后三层解开了：同应用并发读
+	// 已经是**真实能力**（BenchmarkQuerySelectParallel 36.7µs → 16.5µs，约 2.2–2.4×）。
+	// 此时队列层继续把并发钉在 1，用户看到的就只剩"人为排队"——底层能吃并发，
+	// 默认部署却仍然每请求串行。
+	//
+	// 为什么调大它**不增加内存上界**：实例池那笔账是 max_instances × 单实例内存上限
+	// （见 readyz 的四笔账），与每应用并发无关；而 Validate 强制
+	// app_running ≤ max_instances，全局并发仍由 max_instances（默认 32）封顶。
+	// 需要额外留意的是 SQLite 页缓存这笔**不进四笔账**的常驻
+	// （appdb_cache_kib × (1 + app_db_readers) × 句柄数），它的去向写在
+	// applimits.Budget 的注释里。
+	//
+	// 写仍然是串行的（appdb 的 writeMu）：这一项放宽的是**读者**，不是写者。
+	AppConcurrency = 4
 	// RetryAfterSeconds 是队列满/限流时的 Retry-After 秒数（§4.6/§7.4）。
 	RetryAfterSeconds = 1
 
-	// AnonGlobalRatePerMin 是全局匿名令牌桶速率（R35/§4.6）：3000 次/分。
-	AnonGlobalRatePerMin = 3000
-	// AnonGlobalBurst 是全局匿名桶容量（与速率同量级，取 1 分钟配额）。
-	AnonGlobalBurst = AnonGlobalRatePerMin
-	// AnonPerIPRatePerMin 是每 IP 匿名速率（R35/§4.6）：60 次/分。
-	AnonPerIPRatePerMin = 60
-	// AnonPerIPBurst 是每 IP 匿名桶容量。
-	AnonPerIPBurst = AnonPerIPRatePerMin
+	// ⚠️ W4 删除（总纲 §8.4）：匿名限流的四个数值（全局速率/桶容量、每 IP 速率/桶容量）
+	// 随 `internal/wasmapp/anonlimit/**` 整包删除 —— 客户端专属模型下应用请求一律
+	// 持员工 bearer，平台上不存在匿名请求，因此没有任何"匿名桶"需要数值。
 
 	// AppRuntimeConcurrency 是每应用运行槽（= AppConcurrency，语义别名，供队列实现引用）。
+	//
+	// 控制台把这一项叫 app_running（applimits.Limits.AppRunning），默认值即本常量：
+	// 调大 ⇒ 同应用更多请求并发进入执行（读并发），**写仍串行**；
+	// 超出它的请求进队列（app_queue，默认 32），队列再满才 429。
 	AppRuntimeConcurrency = AppConcurrency
 )
 
 // ===== §4.7 账号、AI 与额度 =====
 
-const (
-	// TicketTTL 是一次性换票 code 的有效期（R12/§4.7）：60 s。
-	TicketTTL = 60 * time.Second
-	// AppSessionTTL 是应用子域会话 Cookie 的 TTL（R12/§4.7）：8 h。
-	AppSessionTTL = 8 * time.Hour
-	// AITokenTTL 是宿主为员工浏览器会话铸造的用户令牌有效期（§4.7）：45 min。
-	AITokenTTL = 45 * time.Minute
-	// AITokenRenewBefore 是令牌续期提前量（到期前多久重铸）。
-	AITokenRenewBefore = 5 * time.Minute
-
-	// AIUserRatePerMin 是平台既有用户级限流（网关已有，§4.7）：60 次/分。
-	AIUserRatePerMin = 60
-	// AIInFlightPerUser 是平台既有在途上限（InFlightGuard，§4.7）：32。
-	AIInFlightPerUser = 32
-)
+// ⚠️ W4 删除（总纲 §8.4 + §21.3）：这一段原本是"员工浏览器会话 + 服务端 AI"的
+// 数值面 —— 换票 code 有效期、应用会话 TTL、宿主铸造的用户令牌 TTL 与续期提前量、
+// 网关的用户级限流与在途上限。它们随 `session/**`、`aichat/**` 与匿名面一起删除：
+//   * 客户端专属模型下身份由桌面客户端持员工 bearer 注入，服务端不再铸造任何令牌；
+//   * 服务端宿主 AI 能力删除后，AI 计费/限流由**客户端既有 LLM 链路**承担（§21.1 Q8），
+//     应用侧要退避的话读的是客户端 AI loop 的错误码（§21.2），不是这里的常量。
 
 // ===== §4.8 响应与浏览器侧 =====
 
@@ -335,6 +386,16 @@ const (
 	DiagnosticsMaxLimit = 200
 	// StderrTailBytes 是诊断里回给作者的 stderr 尾巴上限（§4.9/§7.4）。
 	StderrTailBytes = 2 << 10
+	// ReadyzSnapshotTTL 是 `/readyz` **快照缓存**的有效期（R1-rt-4）。
+	//
+	// 为什么必须有：一次采集要做编译缓存目录**全量递归 walk**（≤ CompileCacheMaxEntries
+	// 条；实测 4096 条目 ≈9.5–14 ms）+ statfs + db.Ping，而 `/readyz` 是**未认证**端点、
+	// 监控/编排通常每 1–5 s 打一次 ⇒ 未认证的放大面（每 1 s 一次 ≈1% 单核常驻 + 每秒
+	// 4096 次 Lstat + 每秒一次 DB 往返）。缓存后稳态单次成本退化为一次内存拷贝。
+	//
+	// 取舍（认账）：`ok` 与各水位读数最多滞后本值；**发布闸门**（AllowPublish）与
+	// 控制台内存预览走不缓存的 `Snapshot()`，不受影响 —— 那条路径要的是"此刻"。
+	ReadyzSnapshotTTL = 5 * time.Second
 )
 
 // RetirementSnapshotRetentionDays 是退役快照保留天数（R37/§5.3）：90 天。
@@ -349,10 +410,18 @@ const (
 	LogMaxPerRequest = 100
 	// HostCallBudgetDefault 是未单列预算的宿主调用的兜底预算。
 	HostCallBudgetDefault = 5 * time.Second
-	// AIChatMaxMessages 是 ai.chat 单次消息条数上限（防单次调用构造超巨载荷）。
-	AIChatMaxMessages = 128
-	// AIChatMaxBodyBytes 是 ai.chat 请求体上限。
-	AIChatMaxBodyBytes = 1 << 20
+
+	// AIBridgeMaxMessages 与 AIBridgeMessageMaxBytes 是**客户端 AI 桥**的载荷形状
+	// （总纲 §21.2 的冻结契约：`messages` ≤64 条、单条 ≤16 KiB）。
+	//
+	// 为什么这两个数值住在服务端的 limits 里（总纲 §5.5「数值单一真源」）：
+	// 桥本身由客户端协议 handler 实现（§21.2），但它的**形状是跨端契约**，而且
+	// 作者文档与 `app-builder` 技能要能引用同一份数 —— 技能内容随服务端镜像分发，
+	// 因此文档里的数字必须由本表生成，不能手写（否则迟早与实现漂移）。
+	// 单条 16 KiB 直接决定"应用侧怎么切分要发给模型的文本"（见技能范例的截断逻辑）。
+	AIBridgeMaxMessages = 64
+	// AIBridgeMessageMaxBytes 是单条 message.content 的字节上限：16 KiB。
+	AIBridgeMessageMaxBytes = 16 << 10
 )
 
 // ===== §4.2 静态资源（assets.read / 发布期抽取）=====
@@ -367,20 +436,9 @@ const (
 	AssetMaxListEntries = 10000
 )
 
-// ===== §4.7 员工浏览器会话的输入形状 =====
-
-const (
-	// SessionMaxFormBytes 是员工登录 / 换票表单的请求体上限（形状约束：
-	// 这两个表单只有几个短字段）。
-	SessionMaxFormBytes = 8 << 10
-	// SessionMaxUsernameBytes 与客户端面登录同口径（serverauth 的账号上限）。
-	SessionMaxUsernameBytes = 128
-	// SessionMaxPasswordBytes 与客户端面登录同口径。
-	SessionMaxPasswordBytes = 1024
-	// SessionMaxNextBytes 是换票 `next` 参数的长度上限（§4.7「next 只接受
-	// 同基域相对路径」，长度上限是它的一部分）。
-	SessionMaxNextBytes = 512
-)
+// ⚠️ W4 删除（总纲 §8.4）：员工浏览器登录/换票表单的四个形状上限随 `session/**`
+// 整包删除 —— 那套 HTML 表单（`/login`、`/app-ticket`）已不在平台上；员工登录面
+// 只剩 `/api/client/v2/auth/login`，它的字段上限归 `serverauth` 自己的校验。
 
 // ===== §4.3.1 编译缓存 =====
 

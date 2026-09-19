@@ -13,6 +13,7 @@ package appcfg
 
 import (
 	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,7 +30,8 @@ func full() string {
 	  "whitelist": ["zhangwei", "lisi"],
 	  "purpose": "报销单自动整理",
 	  "data_sensitivity": "internal",
-	  "owner": "zhangwei"
+	  "owner": "zhangwei",
+	  "window": {"ratio": "16:9", "width": 1600, "height": 900}
 	}`
 }
 
@@ -172,6 +174,38 @@ func TestWhitelistAccessRequiresList(t *testing.T) {
 	}
 }
 
+// TestAccessHintValuesDiscloseWhitelistSemantics 是 P2-9 的守卫：服务端 hint 必须
+// 与真实语义（R24）一致 —— **平台不比对名单**，名单只给应用自己读。
+//
+// 为什么这条文案是安全语义而不是措辞问题：说成"要求登录 + 名单准入"会让作者以为
+// 填了名单平台就会拦，于是他写出一个对**所有人**开放的应用（客户端的同名文案早已
+// 是正确口径：`locales.ts` 的 `appCenter.access.whitelistHint`）。
+//
+// 变异方式：把 `accessHintValues` 里 whitelist 那句改回"要求登录 + 名单" ⇒ 本用例红。
+func TestAccessHintValuesDiscloseWhitelistSemantics(t *testing.T) {
+	hint := accessHintValues()
+	// 2026-09-19 契约 §4.4：可写取值只剩两个 —— 提示里**不得**再把 public 列为可选项
+	//（"历史 public 按 login 读"那句只在 publicAccessRejected 里出现一次）。
+	for _, want := range []string{string(AccessLogin), string(AccessWhitelist)} {
+		if !strings.Contains(hint, want) {
+			t.Fatalf("access 提示必须列出可写取值，缺 %q: %s", want, hint)
+		}
+	}
+	if strings.Contains(hint, string(AccessPublic)) {
+		t.Fatalf("access 提示不得再把 public 写进合法取值（它只在读取侧被接受）: %s", hint)
+	}
+	if !strings.Contains(hint, "平台不比对") {
+		t.Fatalf("whitelist 的提示必须写清「平台不比对名单」（R24；否则作者会以为平台替他拦）: %s", hint)
+	}
+	if !strings.Contains(hint, "应用自己读") {
+		t.Fatalf("whitelist 的提示必须写清「名单只给应用自己读」: %s", hint)
+	}
+	// 反例：旧文案把语义说反了 —— 一旦有人改回去，上面两条断言就会红。
+	if strings.Contains(hint, "名单准入") {
+		t.Fatalf("不得再用「名单准入」这种暗示平台比对的措辞: %s", hint)
+	}
+}
+
 func TestLoginAllowsEmptyWhitelist(t *testing.T) {
 	for _, in := range []string{
 		`{"access":"login"}`,
@@ -187,9 +221,17 @@ func TestLoginAllowsEmptyWhitelist(t *testing.T) {
 			t.Fatalf("access = %q, want %q", c.Access, AccessLogin)
 		}
 	}
-	// public + 空名单同样是合法形态（匿名应用）。
-	if c := mustParse(t, `{"access":"public"}`); !c.Public() || c.AuthMode() != abi.AuthModePublic {
-		t.Fatalf("public 形态不对: %+v", c)
+	// 历史 public 在**读取侧**仍可解析（存量应用不得 500），但语义已经是 login：
+	// RequiresLogin 为真、帧内 auth.mode 为 login、Public 恒 false（契约 §4.4）。
+	if c := mustParse(t, `{"access":"public"}`); c.Public() || !c.RequiresLogin() || c.AuthMode() != abi.AuthModeLogin {
+		t.Fatalf("历史 public 的读取侧语义必须是 login: %+v (public=%v requiresLogin=%v mode=%q)",
+			c, c.Public(), c.RequiresLogin(), c.AuthMode())
+	}
+	// 写入侧（发布/校验）必须拒 —— 与读取侧同一条配置、两个入口两种结论。
+	if _, e := parseSubmitted([]byte(`{"access":"public"}`)); e == nil {
+		t.Fatal("写入侧必须拒绝 access=public（契约 §4.4：新版本不得再写 public）")
+	} else if e.Code != apperr.CodeAppConfigBad || e.Details["reason"] != "public_not_allowed" {
+		t.Fatalf("public 被拒的结构化形态不对: code=%s details=%v", e.Code, e.Details)
 	}
 }
 
@@ -241,9 +283,10 @@ func TestBadConfigRejected(t *testing.T) {
 			}
 		})
 	}
-	// access 取值报错必须把三个合法值都列出来（作者照抄即可改对）。
+	// access 取值报错必须把**可写**取值都列出来（作者照抄即可改对）；
+	// 历史 public 不在其中（它只被读取侧识别，见 TestLoginAllowsEmptyWhitelist）。
 	_, e := Parse([]byte(`{"access":"nobody"}`))
-	for _, v := range AccessValues {
+	for _, v := range AccessWritableValues {
 		if !strings.Contains(strings.Join(e.Hints, " ")+e.Message, v) {
 			t.Fatalf("access 报错没有列出合法值 %q: message=%s hints=%v", v, e.Message, e.Hints)
 		}
@@ -438,7 +481,9 @@ func TestAuthModeValuesMatchABI(t *testing.T) {
 		access Access
 		want   abi.AuthMode
 	}{
-		{AccessPublic, abi.AuthModePublic},
+		// 2026-09-19 契约 §4.4：历史 public **读取侧即 login**（帧里必须如实告诉应用
+		// "本平台一律要求登录"），因此它不再映射到 abi.AuthModePublic。
+		{AccessPublic, abi.AuthModeLogin},
 		{AccessLogin, abi.AuthModeLogin},
 		{AccessWhitelist, abi.AuthModeWhitelist},
 	}
@@ -447,7 +492,9 @@ func TestAuthModeValuesMatchABI(t *testing.T) {
 		if got := c.AuthMode(); got != tc.want {
 			t.Fatalf("AuthMode(%q) = %q, want %q", tc.access, got, tc.want)
 		}
-		if string(tc.want) != string(tc.access) {
+		// 可写取值与帧取值必须逐字一致（跨语言契约）；历史 public 是唯一的例外
+		//（它读作 login，见上一段）。
+		if WritableAccess(tc.access) && string(tc.want) != string(tc.access) {
 			t.Fatalf("abi.%q 与 appcfg.%q 必须逐字一致（帧内取值来自配置文件）", tc.want, tc.access)
 		}
 	}
@@ -474,6 +521,89 @@ func TestAccessOfConfigJSON(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := AccessOfConfigJSON(tc.in); got != tc.want {
 				t.Fatalf("AccessOfConfigJSON(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// ===== `window` 契约（§6，R1-L3-9）=====
+//
+// 四条判据（主控 2026-09-20 下发）：
+//   - `ratio` 越界（0.1 / 5.0）与非法（"abc"）⇒ `APP_CONFIG_INVALID`；
+//   - 一条正例（`ratio: 1.7778`）通过；
+//   - 缺省 1280×720 且按 ratio 校正；
+//   - 未知子键与非法形状拒（不是静默忽略）。
+//
+// 变异验证：把 validateWindow 的区间判定删掉 ⇒ 越界用例红；把 ResolvedWindow 的
+// ratio 校正删掉 ⇒ 校正用例红；把 decodeWindow 的未知子键分支删掉 ⇒ 未知子键用例红。
+func TestWindowRatioValidation(t *testing.T) {
+	badRatios := []string{
+		`{"access":"login","window":{"ratio":0.1}}`,    // 小于下界 0.25
+		`{"access":"login","window":{"ratio":5.0}}`,    // 大于上界 4.0
+		`{"access":"login","window":{"ratio":0}}`,      // 0（除零/畸形窗口）
+		`{"access":"login","window":{"ratio":-1.5}}`,   // 负
+		`{"access":"login","window":{"ratio":"abc"}}`,  // 非数字
+		`{"access":"login","window":{"ratio":"16"}}`,   // 缺少 ":"
+		`{"access":"login","window":{"ratio":"16:0"}}`, // 比例分母为 0
+		`{"access":"login","window":{"zoom":2}}`,       // 未知子键
+		`{"access":"login","window":{"width":"1280px"}}`,
+		`{"access":"login","window":{"height":12.5}}`,
+		`{"access":"login","window":{"width":100}}`,   // 小于 320
+		`{"access":"login","window":{"height":9999}}`, // 大于 7680
+		`{"access":"login","window":"16:9"}`,          // window 本身不是对象
+	}
+	for _, raw := range badRatios {
+		if _, err := Parse([]byte(raw)); err == nil {
+			t.Errorf("Parse(%s) 应当被拒（APP_CONFIG_INVALID），却通过了", raw)
+		} else if err.Code != apperr.CodeAppConfigBad {
+			t.Errorf("Parse(%s) 的码 = %s, want %s", raw, err.Code, apperr.CodeAppConfigBad)
+		}
+	}
+
+	// 正例：`"W:H"` 与浮点两种形态都要通过，且折算成同一个比例。
+	for _, raw := range []string{
+		`{"access":"login","window":{"ratio":"16:9"}}`,
+		`{"access":"login","window":{"ratio":1.7778}}`,
+		`{"access":"login","window":{"ratio":1.7777777777777777,"width":1920,"height":1080}}`,
+		`{"access":"login"}`,
+	} {
+		if _, err := Parse([]byte(raw)); err != nil {
+			t.Errorf("Parse(%s) 应当通过，得到 %v", raw, err)
+		}
+	}
+	cfg, err := Parse([]byte(`{"access":"login","window":{"ratio":"16:9"}}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Window == nil || math.Abs(cfg.Window.Ratio-16.0/9.0) > 1e-9 {
+		t.Fatalf(`"16:9" 应折算成 %.6f，得到 %+v`, 16.0/9.0, cfg.Window)
+	}
+}
+
+func TestWindowResolvedDefaultsAndCorrection(t *testing.T) {
+	cases := []struct {
+		name  string
+		raw   string
+		wantW int
+		wantH int
+	}{
+		{"没写 window ⇒ 1280×720", `{"access":"login"}`, 1280, 720},
+		{"空对象 ⇒ 1280×720", `{"access":"login","window":{}}`, 1280, 720},
+		{"只写 ratio（16:9）⇒ 按默认宽度推高度", `{"access":"login","window":{"ratio":1.7777777777777777}}`, 1280, 720},
+		{"只写 width ⇒ 高度按 ratio 校正", `{"access":"login","window":{"ratio":"16:9","width":1920}}`, 1920, 1080},
+		{"只写 height ⇒ 宽度按 ratio 校正", `{"access":"login","window":{"ratio":2.0,"height":600}}`, 1200, 600},
+		{"两者都与 ratio 冲突 ⇒ 以 ratio 为准（以 width 为锚）", `{"access":"login","window":{"ratio":2.0,"width":1000,"height":999}}`, 1000, 500},
+		{"没有 ratio ⇒ 原样返回作者尺寸", `{"access":"login","window":{"width":1024,"height":768}}`, 1024, 768},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tc.raw))
+			if err != nil {
+				t.Fatalf("Parse(%s): %v", tc.raw, err)
+			}
+			w, h := cfg.ResolvedWindow()
+			if w != tc.wantW || h != tc.wantH {
+				t.Fatalf("ResolvedWindow() = %d×%d, want %d×%d", w, h, tc.wantW, tc.wantH)
 			}
 		})
 	}

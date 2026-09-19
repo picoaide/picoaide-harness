@@ -279,6 +279,36 @@ for id in "${SELECTED[@]}"; do
     if (appId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(appId)) invalid.push("desktop.app_id(须为反向域名形状)")
     const scheme = str(cfg?.desktop?.deep_link_scheme)
     if (scheme !== undefined && !/^[a-z][a-z0-9+.-]{1,31}$/.test(scheme)) invalid.push("desktop.deep_link_scheme(须为小写 RFC 3986 scheme)")
+    // app_origin_scheme(2026-09-19 设计 §10/§8.3):WASM 应用的**客户端协议 origin**。
+    // 客户端按它注册特权 scheme、在合成请求里写 Origin;服务端按它校验来源。
+    //   - **全部渠道必填**(含 official/beta,**不做 publicChannel 豁免**):字段缺失时
+    //     两端各自回落(`<deep_link_scheme>-app` 派生值 / 服务端缺配置的中性 fallback),
+    //     而"派生缺省"只允许存在于本地开发 —— 发行镜像里两侧取值不一致就是"应用打不开"
+    //     且故障现象与配置毫无关系。所以进 missing,fail-loud。
+    //   - 跨渠道唯一性**不在这里**判(逐渠道校验看不见别的渠道):见本脚本末尾的
+    //     独立扫描 pass。
+    const RESERVED_APP_ORIGIN_SCHEMES = new Set(["http", "https", "file", "data", "javascript", "about"])
+    const appOriginScheme = str(cfg?.desktop?.app_origin_scheme)
+    if (appOriginScheme === undefined) {
+      missing.push("desktop.app_origin_scheme")
+    } else {
+      // 形状:与两端既有实现**逐字一致**的 RFC 3986 scheme 正则(总长 2–32,
+      // **有上界**)—— 两端各写一份正则就会漂移,而漂移的后果是"服务端拒绝、客户端
+      // 照发"(所有非幂等请求 403)。合法字段只报字段名,不回显取值。
+      if (!/^[a-z][a-z0-9+.-]{1,31}$/.test(appOriginScheme)) {
+        invalid.push("desktop.app_origin_scheme(须为小写 RFC 3986 scheme:小写字母开头,只含小写字母/数字/加号/点/连字符,2–32 字符)")
+      }
+      // 与同渠道 deep_link_scheme 同值:两者在客户端里是两个不同的注册项,
+      // 同值会让"深链回调"与"应用页 origin"在协议栈层面撞在一起,必须不同。
+      if (scheme !== undefined && appOriginScheme === scheme) {
+        invalid.push("desktop.app_origin_scheme(不得与 desktop.deep_link_scheme 相同 —— 应用 origin 与深链回调必须用两个不同的 scheme)")
+      }
+      // 保留 scheme(§10 冻结名单):浏览器/系统已有既定语义,拿去当应用 origin 会让
+      // 应用页与它们冲突,也过不了特权 scheme 注册。名单是固定常量,不涉渠道取值。
+      if (RESERVED_APP_ORIGIN_SCHEMES.has(appOriginScheme)) {
+        invalid.push("desktop.app_origin_scheme(不得使用保留 scheme:http/https/file/data/javascript/about)")
+      }
+    }
     const serverUrl = str(cfg?.defaults?.server_url)
     if (serverUrl !== undefined) {
       let parsed
@@ -447,7 +477,7 @@ for id in "${SELECTED[@]}"; do
     }
     if (missing.length > 0 || invalid.length > 0) {
       if (missing.length > 0) {
-        console.error("::error::渠道包缺少品牌字段: " + missing.join(", ") + " —— 客户端登录页/侧边栏在服务端不可达时会回落中性占位/厂商名,请补齐后重新发布")
+        console.error("::error::渠道包缺少必需字段: " + missing.join(", ") + " —— 品牌字段缺失时客户端登录页/侧边栏在服务端不可达会回落中性占位/厂商名;desktop.app_origin_scheme 缺失时 WASM 应用的协议 origin 没有权威来源(服务端与客户端必须显式一致,派生缺省只允许存在于本地开发)。请补齐后重新发布")
       }
       if (invalid.length > 0) {
         console.error("::error::渠道包字段不合法: " + invalid.join(", "))
@@ -459,6 +489,65 @@ for id in "${SELECTED[@]}"; do
     exit 1
   fi
 done
+
+# ---- 跨渠道唯一性:desktop.app_origin_scheme(2026-09-19 设计 §10,§8.3)--------
+#
+# 为什么必须单独一个 pass:上面的逐渠道循环只看**本渠道内部**(必填/形状/与深链不同/
+# 非保留字),看不到"两个渠道取了同一个值" —— 而那正是最危险的形态:两个渠道的客户端
+# 应用页同源,可以互相 fetch、读到彼此的应用数据,渠道隔离在协议层直接失效。
+#
+# 扫的是渠道仓里的**全部**渠道(不只本轮选中的):同一个发布面里的渠道可能被装到同一台
+# 机器上,重复在任何一轮构建里都是配置事故,早一轮发现早一轮修。
+#
+# 公共渠道 official/beta 是**一个命名空间**(设计 §16 W3 / §8.3:两者取值同为
+# `picoaide-app`):它们之间相同属预期,**唯一性豁免只给这一种形态**;品牌渠道必须
+# 彼此不同,也不得取公共渠道的值(否则品牌客户端与官方客户端的应用页同源)。
+#
+# 输出纪律(同本脚本头部):扫的是渠道侧配置,输出**只允许出现字段名与中性词** ——
+# 不回显 scheme 取值(渠道包里它就是客户品牌),也不回显渠道 id/目录名(公开 Actions
+# 日志)。所以这里一次性用 node 扫完,失败只报"跨渠道重复"这一个事实。
+if ! DEST="$DEST" node -e '
+  const fs = require("node:fs")
+  const path = require("node:path")
+  const dest = process.env.DEST
+  // 与上面枚举渠道时同一套 id 形状:不合规目录名连读都不读(它们可能是 README、
+  // 备份目录之类,内容不可信)。
+  const ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/
+  // 公共渠道共用一个命名空间;其余目录一律按"品牌渠道"计。
+  const PUBLIC_CHANNELS = new Set(["official", "beta"])
+  const holdersByScheme = new Map()
+  for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !ID_PATTERN.test(entry.name)) continue
+    let cfg
+    try {
+      cfg = JSON.parse(fs.readFileSync(path.join(dest, entry.name, "channel.json"), "utf8"))
+    } catch {
+      // 缺文件/坏 JSON 不在这里报:那是逐渠道校验的职责(且未选中的渠道本轮本就不校验)。
+      continue
+    }
+    const raw = cfg?.desktop?.app_origin_scheme
+    if (typeof raw !== "string" || raw.trim() === "") continue
+    const scheme = raw.trim()
+    const holders = holdersByScheme.get(scheme) ?? { publicCount: 0, brandCount: 0 }
+    if (PUBLIC_CHANNELS.has(entry.name)) holders.publicCount++
+    else holders.brandCount++
+    holdersByScheme.set(scheme, holders)
+  }
+  // 冲突 = 某个取值下有**品牌渠道**且该取值不是它独占:
+  //   - 两个及以上品牌渠道同值;
+  //   - 品牌渠道取了公共渠道的值(公共渠道之间同值是设计,与品牌同值不是)。
+  // 两种都只记数量,不记是谁、也不记取值。
+  let conflicts = 0
+  for (const holders of holdersByScheme.values()) {
+    if (holders.brandCount > 0 && holders.publicCount + holders.brandCount > 1) conflicts++
+  }
+  if (conflicts > 0) {
+    console.error("::error::desktop.app_origin_scheme 跨渠道重复(共 " + conflicts + " 组):多个渠道取了同一个值 —— 该字段是 WASM 应用的协议 origin,重复会让两个渠道的客户端应用页同源、互相可达(渠道隔离失效);每个品牌渠道必须各用不同的值,且不得取公共渠道的值。取值与渠道名刻意不打印")
+    process.exit(1)
+  }
+'; then
+  exit 1
+fi
 
 printf '%s\n' "${SELECTED[@]}" > "$LIST"
 # 只报数量与形态,不回显渠道名。

@@ -1,0 +1,76 @@
+{
+  "name": "@picoaide/dsh-wasm-apps-host",
+  "version": "0.1.0",
+  "description": "Client-only WASM app origin: the picoaide-app:// protocol handler that forwards app requests to the platform",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./app-proof": {
+      "types": "./lib/types/app-proof.d.ts",
+      "default": "./lib/app-proof.js"
+    },
+    "./windows": {
+      "types": "./lib/types/windows.d.ts",
+      "default": "./lib/windows.js"
+    },
+    "./host-request": {
+      "types": "./lib/types/host-request.d.ts",
+      "default": "./lib/host-request.js"
+    },
+    "./ai-chat": {
+      "types": "./lib/types/ai-chat.d.ts",
+      "default": "./lib/ai-chat.js"
+    },
+    "./electron-adapter": {
+      "types": "./lib/types/electron-adapter.d.ts",
+      "default": "./lib/electron-adapter.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "cordis.patch.yml",
+    "lib/**/*.js",
+    "lib/**/*.map",
+    "lib/types/**/*.d.ts"
+  ],
+  "scripts": {
+    "build": "tsdown && tsc -p tsconfig.json --emitDeclarationOnly",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "yarn run build && yarn run test"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-atomic-write": "0.1.5-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "@picoaide/dsh-browser": "workspace:*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "electron": "43.4.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-host-webserver": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-invariants": "0.1.5-rc.2",
+    "@types/node": "^22.20.0",
+    "electron": "43.4.0",
+    "tsdown": "0.22.2",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}

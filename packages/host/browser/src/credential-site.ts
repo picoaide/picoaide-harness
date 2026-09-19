@@ -18,6 +18,11 @@ import { domainToASCII } from 'node:url'
  *
  * 派生不出来就返回 `null`，闸门**拒绝注入**（fail-closed）：工具描述对外承诺的
  * 就是 "a connector record without a site URL is refused"。
+ *
+ * 2026-09-19：非 http(s) 文档（客户端内部协议、about:、file: …）**没有** http(s)
+ * origin ⇒ 自动填充在这类页面上**不适用**：本模块一律派生不出站点、闸门如实降级。
+ * 判据只看"是不是 http(s)"，**不含任何写死的协议名**（渠道参数化后协议名是运行期
+ * 值，写死就会漏掉渠道自己的 scheme）。
  */
 
 /**
@@ -64,9 +69,16 @@ function siteFieldHint(key: string): number {
 /** 不像地址的键：既不优先，也不做裸主机归一。 */
 const SITE_FIELD_HINT_NONE = 2
 
-/** http/https 的 origin；其它一律 `null`（`about:blank` 的 origin 是字符串
+/**
+ * http/https 的 origin；其它一律 `null`（`about:blank` 的 origin 是字符串
  * `"null"`，不能当成可比对的站点）。裸主机名不在这里归一 —— 见
- * {@link bareHostOrigin}，它只用于键名明确像地址的字段。 */
+ * {@link bareHostOrigin}，它只用于键名明确像地址的字段。
+ *
+ * 2026-09-19：任何非 http(s) 的自定义协议（例如客户端自己的应用源 scheme）都
+ * **不是** http(s)，因此这里一律返回 `null`。这条不是遗漏而是边界：这类页面没有
+ * http(s) origin、也没有 cookie，「凭据属于哪个站点」无从谈起 ⇒ 自动填充不适用，
+ * 只能如实降级（见 {@link isFillableSiteURL} 与 tools.ts 里那条可读的拒绝文案）。
+ */
 export function httpOriginOf(value: string | null | undefined): string | null {
   if (typeof value !== 'string' || value.trim() === '') return null
   try {
@@ -75,6 +87,20 @@ export function httpOriginOf(value: string | null | undefined): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * 该 URL 能否作为凭据自动填充的站点基准（**只有 http/https**）。
+ *
+ * 存在的意义是让"应用协议下自动填充不适用"这条边界有一个**命名的**判据，而不是
+ * 散落在若干 `=== null` 里：任何非 http(s) 文档都不是可填充站点 —— 既不会被当成某个连接器的绑定站点（不误绑），也不会因为
+ * "派生不出站点"而抛错（不误炸）。调用方看到 `false` 时应当**如实降级**：拒绝注入
+ * 并给出可读理由，而不是回落到"按当前标签页注入"。
+ * @param value - 候选站点 URL（部署声明或凭据字段里的值）。
+ * @returns true = http(s)，可作为站点基准。
+ */
+export function isFillableSiteURL(value: string | null | undefined): boolean {
+  return httpOriginOf(value) !== null
 }
 
 /**

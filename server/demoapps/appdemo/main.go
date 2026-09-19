@@ -11,7 +11,10 @@
 //  2. 身份卡片：`user` 字段（匿名时为 nil ⇒ 不渲染任何账号信息，§7.1 第 4 条）；
 //  3. 共享留言墙：db.define 建表 + db.query 读 + db.exec 写（同一应用内所有使用者共享）；
 //  4. 宿主能力调用记录：本次请求真实调用过的方法与结果（不是写死的清单）；
-//  5. 一个可选的 ai.chat 按钮（费用记在点击者账上，因此默认不自动触发）。
+//  5. **AI 前端桥范例**：wasm 侧没有任何 AI 调用 —— 服务端的 `ai.chat` 宿主能力已随
+//     「客户端专属」改造**删除**，应用要调 AI 只能由页面里的 JS 直接 fetch 客户端保留路径
+//     （双下划线 `__picoaide`，见下面的 aiChatPath 常量），拿到回答后再 POST 回应用自己的
+//     `/ai-result`，由 wasm 写进应用库（db.define / db.exec / db.query）并在页面回显。
 //
 // 语言面：仅 portable Go 标准库 + 平台内部的 abi 契约包（内置演示随镜像构建，
 // 与外部作者不同：外部作者照 skill 的 examples 自己实现帧协议）。
@@ -81,6 +84,17 @@ func run(stdin io.Reader, stdout io.Writer) error {
 	})
 	traces = append(traces, mkTrace(abi.MethodDBDefine, res, rpcErr, err))
 
+	// 1b) AI 问答的落库表：写它的是前端桥回传的 /ai-result（wasm 自己不调 AI）。
+	res, rpcErr, err = cl.call(abi.MethodDBDefine, abi.DBDefineParams{
+		Table: "ai_says",
+		Columns: []abi.ColumnDef{
+			{Name: "who", Type: "text"},
+			{Name: "prompt", Type: "text"},
+			{Name: "answer", Type: "text"},
+		},
+	})
+	traces = append(traces, mkTrace(abi.MethodDBDefine, res, rpcErr, err))
+
 	// 2) 写一条留言（POST /note，表单字段 note）。
 	posted := ""
 	if req.Method == "POST" && strings.HasPrefix(req.Path, "/note") {
@@ -115,32 +129,54 @@ func run(stdin io.Reader, stdout io.Writer) error {
 		}
 	}
 
-	// 4) 可选：AI 问候（显式点击才调用，费用记在点击者账上）。
-	aiText := ""
-	if req.Method == "GET" && strings.HasPrefix(req.Path, "/ai") && req.User != nil {
-		res, rpcErr, err = cl.call(abi.MethodAIChat, abi.AIChatParams{
-			Messages: []abi.ChatMessage{{
-				Role:    "user",
-				Content: fmt.Sprintf("用一句话向 %s 问好，并说明你正在一个 wasm 应用里回答他。", req.User.Username),
-			}},
-		})
-		traces = append(traces, mkTrace(abi.MethodAIChat, res, rpcErr, err))
-		if rpcErr == nil && err == nil {
-			var cr abi.AIChatResult
-			if json.Unmarshal(res, &cr) == nil {
-				aiText = cr.Content
+	// 4) 前端桥的**回传落库**端点：页面 JS 从宿主 AI 桥拿到回答后 POST 到这里。
+	//    wasm 侧没有任何 AI 调用（服务端 ai.chat 已删除）：本分支只校验、入库、回显。
+	//    结果由页面 JS 送进来，所以上限还得应用自己设（应用库的写入边界归应用管）。
+	aiSaved := ""
+	if req.Method == "POST" && strings.HasPrefix(req.Path, "/ai-result") {
+		ask := formValueMax(req.Body, "prompt", 500)
+		answer := formValueMax(req.Body, "answer", 4000)
+		if answer != "" {
+			who := "（未登录）"
+			if req.User != nil {
+				who = req.User.Username
+			}
+			res, rpcErr, err = cl.call(abi.MethodDBExec, abi.SQLParams{
+				SQL:  "INSERT INTO ai_says (who, prompt, answer) VALUES (?, ?, ?)",
+				Args: []any{who, ask, answer},
+			})
+			traces = append(traces, mkTrace(abi.MethodDBExec, res, rpcErr, err))
+			if rpcErr == nil && err == nil {
+				aiSaved = "AI 回答已写入应用库（作者：" + who + "）"
 			}
 		}
 	}
 
-	// 5) 日志（走 log 宿主调用：有级别与条数管理，不污染 stdout 帧）。
+	// 5) 读回已落库的 AI 问答（最新 5 条）：刷新页面也能看到 ⇒ 证明它真的进了库。
+	var aiRows []aiRow
+	res, rpcErr, err = cl.call(abi.MethodDBQuery, abi.SQLParams{
+		SQL:  "SELECT who, prompt, answer FROM ai_says ORDER BY _row_id DESC LIMIT 5",
+		Args: []any{},
+	})
+	traces = append(traces, mkTrace(abi.MethodDBQuery, res, rpcErr, err))
+	if rpcErr == nil && err == nil {
+		var qr abi.QueryResult
+		if json.Unmarshal(res, &qr) == nil {
+			wi, pi, ai := colIndex(qr.Columns, "who"), colIndex(qr.Columns, "prompt"), colIndex(qr.Columns, "answer")
+			for _, row := range qr.Rows {
+				aiRows = append(aiRows, aiRow{Who: cell(row, wi), Prompt: cell(row, pi), Answer: cell(row, ai)})
+			}
+		}
+	}
+
+	// 6) 日志（走 log 宿主调用：有级别与条数管理，不污染 stdout 帧）。
 	if _, _, lerr := cl.call(abi.MethodLog, abi.LogParams{Level: "info", Message: "appdemo: " + req.Path}); lerr == nil {
 		traces = append(traces, trace{Method: abi.MethodLog, OK: true})
 	} else {
 		traces = append(traces, trace{Method: abi.MethodLog, Note: lerr.Error()})
 	}
 
-	html := render(req, wall, traces, posted, aiText)
+	html := render(req, wall, aiRows, traces, posted, aiSaved)
 	return writeResponse(out, 200, html)
 }
 
@@ -215,20 +251,140 @@ func writeResponse(out *bufio.Writer, status int, body string) error {
 }
 
 func formValue(body, key string) string {
+	return formValueMax(body, key, 200)
+}
+
+// formValueMax 取表单字段并按**字符**（不是字节）截断：AI 回答可以长一些，但仍然要有上限
+// —— 应用库的写入边界归应用自己管（平台另有更硬的行/库上限）。
+func formValueMax(body, key string, max int) string {
 	values, err := url.ParseQuery(body)
 	if err != nil {
 		return ""
 	}
 	v := strings.TrimSpace(values.Get(key))
-	if len(v) > 200 {
-		v = v[:200]
+	if rs := []rune(v); len(rs) > max {
+		v = string(rs[:max])
 	}
 	return v
 }
 
+// ===== AI 前端桥（wasm 侧没有任何 AI 调用）=====
+
+// aiChatPath 是宿主保留的**应用 AI 桥**路径（§21.2 冻结：**双下划线** `__picoaide`）。
+//
+// 它不是"平台接口"：请求由客户端协议 handler **本地**处理、绝不转发服务端；应用也不得
+// 定义同前缀的自己路由（发布校验直接拒），其余 `__picoaide/*` 一律 404。
+// 服务端的 `ai.chat` 宿主能力已删除，应用要 AI 只剩这一条路 —— 页面 JS fetch 它，
+// 拿到回答后 POST 回应用自己的路由，由 wasm 落库。
+//
+// ⚠️ **唯一真源**：页面说明文字与脚本里的路径都从这个常量注入，别处不要再抄一份字面量。
+const aiChatPath = "/__picoaide/ai/chat"
+
+// aiBridgeForm 是「问 AI」表单（原生提交一律被脚本 preventDefault 掉，全程走 fetch）。
+const aiBridgeForm = `<form id="ai-form"><input id="ai-prompt" type="text" maxlength="500" placeholder="问 AI 一句话…" autocomplete="off" required><button type="submit">问 AI</button><span id="ai-state" class="muted"></span></form><pre id="ai-out" class="ai-out" hidden></pre>`
+
+// aiBridgeScriptTemplate 是应用页里的前端桥脚本（`%s` 处由 aiChatPath 注入）。
+//
+// 这一份就是完整范例：**前端 fetch 宿主 AI 桥 → 流式渲染 → 结果回传应用自己的路由 → wasm 落库**。
+// 里面把三件事写全了：保留路径常量、SSE 解析（delta / done / error 三种事件）、
+// 失败一律 JSON 信封（app_ai_denied / app_ai_unavailable / ai_balance_insufficient /
+// ai_rate_limited / ai_cancelled，外加请求体非法的 app_ai_invalid）。
+const aiBridgeScriptTemplate = `<script>
+(function () {
+  var PATH = "%s";
+  var form = document.getElementById("ai-form");
+  var input = document.getElementById("ai-prompt");
+  var state = document.getElementById("ai-state");
+  var out = document.getElementById("ai-out");
+  // 元素缺失就先退出：在可能为 null 的元素上链式调用会抛错，后面的注册就全不执行了。
+  if (!form || !input || !state || !out) return;
+
+  // 读流式回答：text/event-stream，event 为 delta / done / error，data 永远是单行 JSON。
+  function readStream(resp, onDelta) {
+    if (!resp.body || !resp.body.getReader) return resp.text();
+    var reader = resp.body.getReader();
+    var decoder = new TextDecoder();
+    var buffer = "";
+    var acc = "";
+    function handle(block) {
+      var event = "message";
+      var data = "";
+      var lines = block.split("\n");
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i].indexOf("event:") === 0) event = lines[i].slice(6).trim();
+        else if (lines[i].indexOf("data:") === 0) data += lines[i].slice(5).trim();
+      }
+      if (data === "") return;
+      var payload = null;
+      try { payload = JSON.parse(data); } catch (e) { payload = null; }
+      if (event === "delta") {
+        acc += (payload && payload.delta) ? payload.delta : (payload === null ? data : "");
+        onDelta(acc);
+      } else if (event === "done") {
+        if (payload && payload.content) { acc = payload.content; onDelta(acc); }
+      } else if (event === "error") {
+        throw new Error(payload && payload.error ? (payload.error.code + "：" + payload.error.message) : data);
+      }
+    }
+    function pump() {
+      return reader.read().then(function (chunk) {
+        if (chunk.done) return acc;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        var blocks = buffer.split("\n\n");
+        buffer = blocks.pop();
+        for (var i = 0; i < blocks.length; i++) handle(blocks[i]);
+        return pump();
+      });
+    }
+    return pump();
+  }
+
+  form.addEventListener("submit", function (ev) {
+    // 全程走 fetch：原生表单提交会被应用页的安全策略（form-action）挡下，所以先阻止默认提交。
+    ev.preventDefault();
+    var prompt = input.value.trim();
+    if (prompt === "") return;
+    state.textContent = "正在等 AI…（首次使用会先让你授权一次）";
+    out.hidden = true;
+    out.textContent = "";
+    fetch(PATH, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: prompt }], stream: true })
+    }).then(function (resp) {
+      if (!resp.ok) {
+        // 失败一律 JSON 信封 {error:{code,message}} —— 把码显示出来，别只说"失败了"。
+        return resp.json().catch(function () { return {}; }).then(function (body) {
+          var err = (body && body.error) ? body.error : {};
+          throw new Error((err.code || ("HTTP " + resp.status)) + (err.message ? "：" + err.message : ""));
+        });
+      }
+      return readStream(resp, function (text) {
+        out.hidden = false;
+        out.textContent = text;
+      }).then(function (answer) {
+        answer = (answer || "").trim();
+        if (answer === "") throw new Error("AI 返回了空回答");
+        state.textContent = "已拿到回答，正在回传应用落库…";
+        var data = new URLSearchParams();
+        data.set("prompt", prompt);
+        data.set("answer", answer);
+        return fetch("/ai-result", { method: "POST", body: data }).then(function (savedResp) {
+          if (!savedResp.ok) throw new Error("落库失败：HTTP " + savedResp.status);
+          state.textContent = "已写入应用库，正在刷新…";
+          location.reload();
+        });
+      });
+    }).catch(function (err) {
+      state.textContent = "AI 调用失败：" + ((err && err.message) ? err.message : String(err));
+    });
+  });
+})();
+</script>`
+
 // ===== 页面 =====
 
-func render(req abi.Request, rows []wallRow, traces []trace, posted, aiText string) string {
+func render(req abi.Request, rows []wallRow, aiRows []aiRow, traces []trace, posted, saved string) string {
 	var b strings.Builder
 	b.WriteString(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">`)
 	b.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
@@ -278,17 +434,28 @@ func render(req abi.Request, rows []wallRow, traces []trace, posted, aiText stri
 	}
 	b.WriteString(`<p class="muted">同一应用内所有使用者共享这一份数据（平台不做行级隔离）。</p></section>`)
 
-	// AI（可选）
-	b.WriteString(`<section class="card"><h2>让 AI 回一句（可选）</h2>`)
+	// AI 前端桥范例（服务端 ai.chat 已删除：wasm 侧一行 AI 调用都没有）
+	fmt.Fprintf(&b, `<section class="card"><h2>问 AI（前端桥范例）</h2><p class="muted">服务端的 <code>ai.chat</code> 宿主能力<strong>已删除</strong>：wasm 侧不再有任何 AI 调用。下面这个表单由页面里的 JS 直接调宿主保留路径 <code>POST %s</code>（<strong>双下划线</strong> <code>__picoaide</code>；由客户端协议 handler 本地处理、绝不转发平台），拿到回答后再 <code>POST</code> 回应用自己的 <code>/ai-result</code>，由 wasm 写进应用库并在下方回显。</p>`, html.EscapeString(aiChatPath))
 	if req.User == nil {
-		b.WriteString(`<p class="muted">匿名模式下不提供 ai.chat：它需要身份来计费。</p>`)
+		b.WriteString(`<p class="muted">AI 桥要按使用者授权与计费，需要已登录身份：历史 public 帧下不提供。</p>`)
 	} else {
-		b.WriteString(`<p><a class="btn" href="/ai">让 AI 向我问好 →</a> <span class="muted">调用平台的 <code>ai.chat</code>，费用记在你自己账上。</span></p>`)
-		if aiText != "" {
-			fmt.Fprintf(&b, `<blockquote>%s</blockquote>`, html.EscapeString(aiText))
-		}
+		b.WriteString(aiBridgeForm)
+		fmt.Fprintf(&b, aiBridgeScriptTemplate, aiChatPath)
 	}
-	b.WriteString(`</section>`)
+	if saved != "" {
+		fmt.Fprintf(&b, `<p class="ok">%s</p>`, html.EscapeString(saved))
+	}
+	if len(aiRows) == 0 {
+		b.WriteString(`<p class="muted">应用库里还没有 AI 问答记录。</p>`)
+	} else {
+		b.WriteString(`<ul class="wall">`)
+		for _, r := range aiRows {
+			fmt.Fprintf(&b, `<li><strong>%s</strong> 问：%s<br>AI 答：%s</li>`,
+				html.EscapeString(r.Who), html.EscapeString(r.Prompt), html.EscapeString(r.Answer))
+		}
+		b.WriteString(`</ul>`)
+	}
+	b.WriteString(`<p class="muted">AI 桥是页面直接调的保留路径、<strong>不是宿主能力调用</strong>，所以它不会出现在下面的「调用轨迹」里 —— 轨迹里出现的是这一次请求真正发生过的 <code>db.*</code> / <code>log</code> 调用。</p></section>`)
 
 	// 宿主调用轨迹
 	b.WriteString(`<section class="card"><h2>本次请求真实调用过的宿主能力</h2><ul class="traces">`)
@@ -308,6 +475,9 @@ func render(req abi.Request, rows []wallRow, traces []trace, posted, aiText stri
 
 // wallRow 是留言墙的一行（从 QueryResult 的列/行对里取出来）。
 type wallRow struct{ Who, Text string }
+
+// aiRow 是一条已落库的 AI 问答（前端桥回传、wasm 落库，本页读回来回显）。
+type aiRow struct{ Who, Prompt, Answer string }
 
 func colIndex(cols []string, name string) int {
 	for i, c := range cols {
@@ -448,5 +618,6 @@ button,.btn{cursor:pointer;border:0;border-radius:.55rem;background:var(--accent
 .muted{color:var(--muted);font-size:.88rem}.ok{color:var(--ok)}.err{color:var(--err)}
 .traces{margin:.2rem 0 .4rem;padding-left:1.1rem}.traces li{margin:.12rem 0;font-size:.9rem}
 blockquote{margin:.6rem 0 0;padding:.6rem .8rem;border-left:3px solid var(--accent);background:#f7f9ff;border-radius:.3rem}
+pre.ai-out{margin:.6rem 0 0;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.4rem;background:#f7f9ff;white-space:pre-wrap;word-break:break-word;font:inherit}
 .foot{color:var(--muted);font-size:.82rem;margin-top:1.6rem;border-top:1px solid var(--line);padding-top:.8rem}
 </style>`

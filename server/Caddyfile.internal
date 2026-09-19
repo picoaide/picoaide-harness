@@ -9,6 +9,8 @@
 #   - Caddyfile.manual   → 手动证书(部署者提供 PEM,先自签占位)
 #   - 本文件              → 内部自签(tls internal,Caddy 本地 CA)
 # 切换:.env 改 TLS_MODE 后 docker compose up -d(compose 按模式挂载模板)
+# 应用(WASM)访问模型:应用只在桌面客户端内打开(自定义协议 picoaide-app://<app_id>/),
+# 不经本反代 —— 无需为应用添加站点块或证书(2026-09-19 起)。
 # ============================================================
 {$DOMAIN} {
 	# INTERNAL 模式:Caddy 用本地 CA 生成自签名证书(域名/IP 均可)

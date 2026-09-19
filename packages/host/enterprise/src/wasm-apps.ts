@@ -113,6 +113,26 @@ export const UPLOAD_CHUNK_MIN_BYTES = 64 * 1024
  */
 export const CHUNKED_PUBLISH_BUDGET_MS = CLIENT_UPLOAD_TIMEOUT_MS
 
+/**
+ * 单片 PUT 的失败是否**可重试**（P2-8 的唯一判据，独立成函数以便单测钉住）。
+ *
+ * 为什么这条判据必须存在：分片 PUT 原先对**任何**非 2xx 都重试 3 轮 + 每轮一次
+ * 额外 GET，最后统一回 `UPLOAD_INCOMPLETE` + "带同一个 upload_id 重发"。而服务端
+ * 会给确定性 4xx（`VALIDATION` / 411 / 413 这类"这一片本身就错了"），重发三次只是
+ * 把同一句拒绝重复三遍，还把服务端的 `code`/`hints` 压成了我们自己的续传建议。
+ *
+ * 判定：
+ *  - **5xx** ⇒ 可重试（服务端瞬时故障，重发是有意义的）；
+ *  - **408 / 429** ⇒ 可重试（请求超时与限流都是"再来一次"的语义，RFC 9110）；
+ *  - **其余 4xx** ⇒ **终态**：原样回服务端信封，不重试、不改写。
+ * @param status - 上游 HTTP 状态。
+ * @returns true = 值得重试；false = 终态（直接回服务端信封）。
+ */
+export function isRetryableChunkStatus(status: number): boolean {
+  if (status >= 500) return true
+  return status === 408 || status === 429
+}
+
 export const CLIENT_UPLOAD_LIMITS = Object.freeze({
   /** §4.2：`.wasm` 上限 32 MiB。 */
   wasmMaxBytes: WASM_MAX_BYTES,
@@ -333,34 +353,6 @@ export function planChunks(
     slices.push({ start, end: Math.min(start + size, total) })
   }
   return slices
-}
-
-/**
- * 绝对化目录条目的入口链接。
- *
- * 服务端 `appOrigin()` 正常下发绝对地址；这里只处理"相对路径"这一种退化形态
- * （服务端为旧版本 / 未来改下发路径时）：按当前会话的服务端源补齐。
- * **不发明链接**：拿不到服务端地址、或字段本身为空时，保持原样（宁可不显示）。
- * @param serverURL - 当前会话的服务端地址。
- * @param value - 服务端下发的 `entry_url`。
- * @returns 绝对 URL，或原值。
- */
-export function absolutizeEntryURL(serverURL: string, value: unknown): unknown {
-  if (typeof value !== 'string' || value.trim() === '') return value
-  const raw = value.trim()
-  // 已有 scheme（含 `data:`/`mailto:` 这类非 http）一律原样返回：不猜服务端的意图。
-  if (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(raw)) return raw
-  let base: URL
-  try {
-    base = new URL(normalizeServerURL(serverURL))
-  } catch {
-    return value
-  }
-  try {
-    return new URL(raw.startsWith('/') ? raw : `/${raw}`, base.origin).toString()
-  } catch {
-    return value
-  }
 }
 
 /** `realpath` 之后的包含判定（**不是**字符串前缀比较：`/a/bc` 不以 `/a/b` 为父）。 */
@@ -642,6 +634,23 @@ export async function resolveWasmSource(
           code: 'WASM_SOURCE_INVALID',
           message: hostCopy(locale, 'wasm_base64 长度与 base64 规则不符', 'wasm_base64 length does not match base64 encoding'),
           status: 400,
+        }),
+      }
+    }
+    // 体积闸门（P1-10）：base64 分支原先**没有**这条检查，而两条 `wasm_path` 分支
+    // 都有 —— 于是同一个超限产物走 HTTP 页面路径时会一路传到服务端才被拒
+    // （页面侧已经先冻过一次界面：`arrayBuffer()` + base64 + JSON.stringify 的
+    // 3–4 倍峰值内存）。判据与 `wasm_path` 分支逐字相同（同一个 `WASM_MAX_BYTES`），
+    // 因为"多大算超限"只有一个答案。
+    if (bytes.byteLength > WASM_MAX_BYTES) {
+      return {
+        ok: false,
+        response: wasmError({
+          code: 'UPLOAD_TOO_LARGE',
+          message: hostCopy(locale, 'wasm 体积超过上限', 'the wasm payload exceeds the size limit'),
+          status: 413,
+          details: { size_bytes: bytes.byteLength, limit_bytes: WASM_MAX_BYTES },
+          hints: [`§4.2 上限 ${String(WASM_MAX_BYTES / (1024 * 1024))} MiB；与服务端 limits.go 同源`],
         }),
       }
     }
@@ -1198,6 +1207,11 @@ async function publishChunked(
   }
 
   // 每片最多尝试 3 次；两次尝试之间先刷新 received[]（断线续传的核心）。
+  //
+  // **只有可重试的失败才重试**（P2-8）：确定性 4xx（`VALIDATION` / 411 / 413 …）
+  // 重发同一片只会得到同一个答案，而重试把服务端的原话压成 `UPLOAD_INCOMPLETE`
+  // + "带同一个 upload_id 重发" —— 那句建议对确定性拒绝是**错的**，模型照做三次
+  // 之后仍然失败，而真正的修法（改尺寸/改分片声明）从信封里读不到了。
   const MAX_ATTEMPTS_PER_CHUNK = 3
   let lastError: { status: number, text: string } | null = null
   for (let attempt = 0; attempt < MAX_ATTEMPTS_PER_CHUNK; attempt += 1) {
@@ -1224,6 +1238,16 @@ async function publishChunked(
       if (outcome.kind === 'gateway') {
         transportFailure = outcome.response
         break
+      }
+      // **终态**：确定性 4xx（除 408/429）不重试、也不改写成 UPLOAD_INCOMPLETE ——
+      // 直接把服务端的信封原样回出去（同一条 `readUpstreamError` 读到的原文），
+      // 调用方拿到的就是 `VALIDATION` / `UPLOAD_TOO_LARGE` 自己的 code + hints。
+      if (!isRetryableChunkStatus(outcome.status)) {
+        return {
+          status: outcome.status,
+          text: outcome.text,
+          contentType: WASM_JSON_CONTENT_TYPE,
+        }
       }
       lastError = { status: outcome.status, text: outcome.text }
       break
@@ -1386,15 +1410,17 @@ export async function validateApp(ctx: Context, session: Session, input: Validat
 // ---------------------------------------------------------------------------
 
 /**
- * `GET /api/client/v2/apps/wasm/catalog`：代理服务端目录并绝对化入口链接。
+ * `GET /api/client/v2/apps/wasm/catalog`：代理服务端目录（**逐字节透传**）。
  *
  * 展示范围完全由服务端裁决（R38：**客户端不自己过滤** —— 这里再筛一次就会产生
- * "两份可见性规则"，而两份规则迟早给出不同答案）。本函数只做地址补全。
+ * "两份可见性规则"，而两份规则迟早给出不同答案）。本函数也不改字段：目录行的字段
+ * 集合是服务端契约，宿主既不增也不删（旧访问模型的入口链接字段已随 W4 从服务端
+ * 契约删除，因此这里**没有**地址补全 —— 详见 `tests/wasm-apps.spec.ts` 的反向断言）。
  * R36：目录**不得**出现额度/用量字段 —— 客户端也不去补，只原样转发服务端给的字段。
  * @param ctx - Host 上下文（401 时要清本地会话）。
  * @param session - 员工会话。
  * @param signal - 调用方取消信号（宿主工具的 `exec.signal`；路由不传）。
- * @returns 信封（成功 = 绝对化后的目录 JSON）。
+ * @returns 信封（成功 = 服务端目录的原始字节）。
  */
 export async function listCatalog(ctx: Context, session: Session, signal?: AbortSignal): Promise<WasmResponse> {
   let upstream: Response
@@ -1404,27 +1430,14 @@ export async function listCatalog(ctx: Context, session: Session, signal?: Abort
     return gatewayFailure(cause)
   }
   if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
-  const text = await upstream.text().catch(() => '')
-  let payload: unknown
-  try {
-    payload = JSON.parse(text)
-  } catch {
-    // 服务端返回的不是 JSON（门户 HTML / 代理劫持）⇒ 原样透传，让上层看见真实字节。
-    return {
-      status: upstream.status,
-      text,
-      contentType: upstream.headers.get('content-type') ?? WASM_JSON_CONTENT_TYPE,
-    }
+  // 原样透传（含 content-type）：解析再序列化只对"改写字段"有意义，而现在没有任何
+  // 改写 —— 透传还顺带保住了服务端返回的非 JSON 字节（门户 HTML / 代理劫持）与其
+  // 真实 content-type，让上层看见的就是上游的字节。
+  return {
+    status: upstream.status,
+    text: await upstream.text().catch(() => ''),
+    contentType: upstream.headers.get('content-type') ?? WASM_JSON_CONTENT_TYPE,
   }
-  const apps = (payload as { apps?: unknown }).apps
-  if (Array.isArray(apps)) {
-    for (const row of apps) {
-      if (row === null || typeof row !== 'object') continue
-      const entry = row as Record<string, unknown>
-      if ('entry_url' in entry) entry.entry_url = absolutizeEntryURL(session.serverURL, entry.entry_url)
-    }
-  }
-  return { status: upstream.status, text: JSON.stringify(payload), contentType: WASM_JSON_CONTENT_TYPE }
 }
 
 // ---------------------------------------------------------------------------
@@ -1481,11 +1494,11 @@ export async function proxyApp(ctx: Context, session: Session, input: ProxyInput
  *
  * | method | path | 语义 |
  * |---|---|---|
- * | GET | `/` | 应用中心目录（代理 `catalog` + 绝对化 `entry_url`） |
+ * | GET | `/` | 应用中心目录（代理 `catalog`，逐字节透传） |
  * | POST | `/validate` | 预检代理（AI/UI 用来"不占版本号地试一发"） |
  * | POST | `/publish` | **发布编排**：`wasm_base64`/`wasm_path` → 直传或分片续传 |
  * | POST | `/:app_id/publish\|unpublish\|freeze` | 生命周期代理（原样转发 body） |
- * | GET | `/:app_id/diagnostics\|schema\|export` | 只读代理 |
+ * | GET | `/:app_id/diagnostics\|schema\|export\|releases` | 只读代理 |
  * | DELETE | `/:app_id` | 删除代理（R37 冻结→导出→真删） |
  *
  * 这个函数只做**四件 HTTP 层的事**：围栏（guard/持有性证明/auditor）、路径分发、
@@ -1620,8 +1633,13 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
         locale,
       }))
     }
-    // GET /:app_id/(diagnostics|schema|export) —— 只读
-    if (segments.length === 2 && ['diagnostics', 'schema', 'export'].includes(segments[1] ?? '')) {
+    // GET /:app_id/(diagnostics|schema|export|releases) —— 只读
+    //
+    // `releases`（R1-pm-3）是发布者本人的版本历史 + 审核结论（含被拒理由）：服务端
+    // 的员工面出口是 `GET /api/client/v2/apps/wasm/:app_id/releases`。**它必须在这里
+    // 的白名单里** —— 这张表是逐后缀分发的，漏一个后缀就是"服务端做完了、客户端永远
+    // 404"（面板上表现为一条读不出来的结论，而不是功能缺失）。
+    if (segments.length === 2 && ['diagnostics', 'schema', 'export', 'releases'].includes(segments[1] ?? '')) {
       if (method !== 'GET') return fail(res, { code: 'METHOD_NOT_ALLOWED', message: 'method not allowed', status: 405 })
       return write(res, await proxyApp(ctx, session, {
         upstreamPath: `${appPath}/${segments[1]!}`,

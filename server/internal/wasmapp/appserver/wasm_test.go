@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
+	"github.com/picoaide/picoaide/internal/wasmapp/edge"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
@@ -21,8 +22,16 @@ func assertHostSecurityHeaders(t *testing.T, rec *httptest.ResponseRecorder, wan
 	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Fatalf("X-Content-Type-Options 应为 nosniff，得到 %q", got)
 	}
-	if got := rec.Header().Get("Referrer-Policy"); got != "no-referrer" {
-		t.Fatalf("Referrer-Policy 应为 no-referrer，得到 %q", got)
+	// Referrer-Policy 必须是 same-origin，**绝不能是 no-referrer**（2026-09-19 P0）：
+	// 应用自己的同源表单 POST 在 no-referrer 下会带 `Origin: null`，被 CheckOrigin
+	// 全拒（应用写功能在真实浏览器里必然失败）。详见 edge.HostReferrerPolicy。
+	const wantReferrer = "same-origin"
+	if edge.HostReferrerPolicy != wantReferrer {
+		t.Fatalf("edge.HostReferrerPolicy = %q, want %q", edge.HostReferrerPolicy, wantReferrer)
+	}
+	if got := rec.Header().Get("Referrer-Policy"); got != wantReferrer {
+		t.Fatalf("Referrer-Policy = %q, want %q（no-referrer ⇒ 同源写请求 Origin: null ⇒ 403）",
+			got, wantReferrer)
 	}
 	if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
 		t.Fatalf("X-Frame-Options 应为 DENY，得到 %q", got)
@@ -36,27 +45,34 @@ func assertHostSecurityHeaders(t *testing.T, rec *httptest.ResponseRecorder, wan
 
 // ===== 步骤⑩：正常往返 + 帧内容（§7.1）=====
 
-func TestServe_AnonymousFrameHasNullUser(t *testing.T) {
+// TestServe_FrameCarriesRequestFacts 钉住帧里由宿主构造的"请求事实"：
+// app_id / path / query 原样进帧，身份字段来自注入的登录态。
+//
+// 2026-09-19 W4：旧用例（TestServe_AnonymousFrameHasNullUser）断言的
+// "匿名 200 + auth.mode=public + has_user=false" 随匿名面整条删除 —— 没有身份时
+// 请求根本进不到执行侧（401，见 client_test.go 的
+// TestClientRequest_LoginRequiredWithoutIdentityIs401）。
+func TestServe_FrameCarriesRequestFacts(t *testing.T) {
 	e := newEnv(t)
-	appID := e.appID("public")
-	e.publishApp(appSpec{appID: appID, config: publicConfig()})
+	appID := e.appID("frame")
+	e.publishApp(appSpec{appID: appID, config: loginConfig()})
 
 	rec := e.get(appID, "/hello?a=1&b=2")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("public 应用匿名访问应 200，得到 %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("注入身份的请求应 200，得到 %d body=%s", rec.Code, rec.Body.String())
 	}
 	body := decodeJSON(t, rec.Body)
 	if body["app_id"] != appID {
 		t.Fatalf("帧内 app_id 不对: %v", body["app_id"])
 	}
-	if body["has_user"] != false {
-		t.Fatalf("匿名请求帧内 user 必须为 null，得到 %v", body["has_user"])
+	if body["has_user"] != true {
+		t.Fatalf("注入身份的请求帧内必须有 user，得到 %v", body["has_user"])
 	}
-	if body["auth_mode"] != "public" {
-		t.Fatalf("匿名帧 auth.mode 应为 public，得到 %v", body["auth_mode"])
+	if body["auth_mode"] != "login" {
+		t.Fatalf("access=login 的帧内 auth.mode 应为 login，得到 %v", body["auth_mode"])
 	}
-	if body["auth_verified"] != false {
-		t.Fatalf("匿名帧 auth.verified 应为 false，得到 %v", body["auth_verified"])
+	if body["auth_verified"] != true {
+		t.Fatalf("注入身份的帧内 auth.verified 应为 true，得到 %v", body["auth_verified"])
 	}
 	if body["path"] != "/hello" {
 		t.Fatalf("帧内 path 不对: %v", body["path"])
@@ -67,15 +83,18 @@ func TestServe_AnonymousFrameHasNullUser(t *testing.T) {
 	}
 }
 
-func TestServe_LoggedInFrameCarriesUserAndSession(t *testing.T) {
+// TestServe_ClientFrameCarriesUserAndEvent 钉住两件事：注入的身份真的进了帧，
+// 且计量（wasm_call_events）里带同一个 user_id（§4.9 追责底线）。
+//
+// 2026-09-19 W4：旧名里的 Session（应用会话）已随旧路径删除，身份唯一来源是注入。
+func TestServe_ClientFrameCarriesUserAndEvent(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("private")
 	e.publishApp(appSpec{appID: appID, config: loginRequiredConfig(testOwner)})
 
-	userID := e.newUser(testOwner)
-	cookie := e.redeemAppSession(e.loginEmployee(testOwner), appID)
+	user := e.clientUser(testOwner)
 
-	rec := e.get(appID, "/me", cookie)
+	rec := e.doClient(appID, user, http.MethodGet, "/me", "", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("已登录访问应 200，得到 %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -101,8 +120,8 @@ func TestServe_LoggedInFrameCarriesUserAndSession(t *testing.T) {
 		Scan(&gotUser, &outcome); err != nil {
 		t.Fatalf("查调用事件: %v", err)
 	}
-	if gotUser != userID {
-		t.Fatalf("调用事件的 user_id 应为 %d，得到 %d", userID, gotUser)
+	if gotUser != user.ID {
+		t.Fatalf("调用事件的 user_id 应为 %d，得到 %d", user.ID, gotUser)
 	}
 	if outcome != "ok" {
 		t.Fatalf("成功请求的 outcome 应为 ok，得到 %q", outcome)
@@ -112,9 +131,9 @@ func TestServe_LoggedInFrameCarriesUserAndSession(t *testing.T) {
 func TestServe_FrameHeadersAreAllowlisted(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("headers")
-	e.publishApp(appSpec{appID: appID, config: publicConfig()})
+	e.publishApp(appSpec{appID: appID, config: loginConfig()})
 
-	req := httptest.NewRequest(http.MethodGet, appURL(appID, "/"), nil)
+	req := clientRequestFor(t, appID, http.MethodGet, "/", "", "")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept-Language", "zh-CN")
 	req.Header.Set("Accept", "application/json")
@@ -124,7 +143,7 @@ func TestServe_FrameHeadersAreAllowlisted(t *testing.T) {
 	req.Header.Set("X-Forwarded-For", "203.0.113.7")
 	req.Header.Set("X-Real-IP", "203.0.113.7")
 	req.Header.Set("User-Agent", "probe/1.0")
-	rec := e.serve(req)
+	rec := e.clientDo(req, appID, e.ownerUser)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("应 200，得到 %d", rec.Code)
 	}
@@ -152,7 +171,7 @@ func TestServe_FrameHeadersAreAllowlisted(t *testing.T) {
 func TestServe_ResponseHeadersAreHostOwned(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("hostheaders")
-	e.publishApp(appSpec{appID: appID, config: publicConfig()})
+	e.publishApp(appSpec{appID: appID, config: loginConfig()})
 
 	rec := e.get(appID, "/")
 	if rec.Code != http.StatusOK {
@@ -180,7 +199,7 @@ func TestServe_ResponseHeadersAreHostOwned(t *testing.T) {
 func TestServe_AppStatusCodePreserved(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("status")
-	e.publishApp(appSpec{appID: appID, config: publicConfig()})
+	e.publishApp(appSpec{appID: appID, config: loginConfig()})
 	// echoapp 对所有路径都返回 200；这里验证"应用给的 4xx/5xx 不会被宿主改写"，
 	// 用 /slow 的解析分支无法表达，故直接验证宿主写回逻辑（见 units_test.go 的
 	// TestWriteAppResponse_StatusDefaultsAndClamps）。
@@ -271,7 +290,7 @@ func TestServe_BrokenModuleCompileFailsClosed(t *testing.T) {
 func TestServe_MissingStaticPathGoesToWasm(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("fallthrough")
-	e.publishApp(appSpec{appID: appID, config: publicConfig(),
+	e.publishApp(appSpec{appID: appID, config: loginConfig(),
 		assets: map[string]string{"index.html": "<html>shell</html>"}})
 
 	rec := e.get(appID, "/api/items")
@@ -402,8 +421,8 @@ func TestServe_MalformedQueryIsTolerated(t *testing.T) {
 	appID := e.appID("query")
 	e.publishApp(appSpec{appID: appID})
 	// `%zz` 不是合法转义：net/url 的 Query() 会跳过坏对而不是 panic。
-	req := httptest.NewRequest(http.MethodGet, appURL(appID, "/x?bad=%zz&ok=1"), nil)
-	rec := e.serve(req)
+	req := clientRequestFor(t, appID, http.MethodGet, "/x?bad=%zz&ok=1", "", "")
+	rec := e.clientDo(req, appID, e.ownerUser)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("坏 query 不应让请求失败，得到 %d body=%s", rec.Code, rec.Body.String())
 	}

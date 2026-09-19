@@ -552,11 +552,11 @@ func TestSetWasmAppCurrentReleaseOwnershipCheck(t *testing.T) {
 	if err := SetWasmAppCurrentRelease(ctx, db, "app-a", 0); err == nil {
 		t.Fatal("release id=0 必须被拒")
 	}
-	// LatestApprovedWasmRelease 取最新 approved。
-	if rel, err := LatestApprovedWasmRelease(ctx, db, "app-a"); err != nil || rel.ID != mine {
+	// LatestApprovedWasmReleaseFull 取最新 approved（含制品字节）。
+	if rel, err := LatestApprovedWasmReleaseFull(ctx, db, "app-a"); err != nil || rel.ID != mine {
 		t.Fatalf("latest approved = %+v err=%v", rel, err)
 	}
-	if _, err := LatestApprovedWasmRelease(ctx, db, "no-such-app"); !errors.Is(err, ErrNotFound) {
+	if _, err := LatestApprovedWasmReleaseFull(ctx, db, "no-such-app"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("无版本应用 err = %v, want ErrNotFound", err)
 	}
 }

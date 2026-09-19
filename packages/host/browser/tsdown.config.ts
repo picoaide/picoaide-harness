@@ -9,6 +9,12 @@ export default defineConfig([
     entry: {
       index: 'src/index.ts',
       invariant: 'src/invariant.ts',
+      // surface seam（§16.1）：`@picoaide/dsh-wasm-apps-host` 反向依赖它注册/取得
+      // 应用窗口 surface —— 单独一个入口，避免整个 runtime 被拖进那个包。
+      surface: 'src/surface.ts',
+      // 权限守卫 + 应用 scheme 请求闸门（§16.1）：应用窗口宿主经
+      // `@picoaide/dsh-browser/guard` 复用**同一份**实现（浏览器与应用窗口共用）。
+      guard: 'src/guard.ts',
     },
     outDir: 'lib',
     format: 'esm',

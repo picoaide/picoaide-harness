@@ -6,6 +6,11 @@ description: 升级 PicoAide Harness 服务端：版本检查、备份、切换�
 升级只换镜像：`picoaide-data/`、`pg-data/`、`caddy-data/`、`certs/` 与 `.env` 都不动。
 但**数据库迁移不可逆**，所以备份与验证是流程的一部分，不是可选项。
 
+> **服务端与客户端必须同版本升级**：WASM 应用只在桌面客户端内打开，浏览器访问链路已删除 ——
+> 旧客户端在服务端升级后**无法再打开应用**。客户端从这台服务器取包，升级后请确认员工客户端
+> 升到配套版本（见[客户端分发与升级](/deployment/client-delivery/)）。
+> 应用不需要任何公网入口：无需应用专用域名解析、证书或 Caddy 站点块（见[部署总览](/deployment/)）。
+
 ## 1. 检查是否有新版本
 
 ```bash
@@ -134,8 +139,14 @@ curl -sk -o /dev/null -w '%{http_code}\n' --resolve "$DOMAIN:443:127.0.0.1" \
 
 ## 7. 回滚
 
-前提：确认新版本是否引入了数据库迁移。若引入了，回滚镜像后数据库结构仍是新的，服务端可能报错 ——
-此时正确做法是**向前修复**（发布修复版）或**恢复数据库备份**（会丢失升级后的数据）。
+前提：**先判断新版本引入了哪一类迁移**，两种情形做法完全不同。
+
+- **一般迁移（只加列 / 只建表）**：回滚镜像后数据库结构仍是新的，但旧二进制不引用新列，通常可以只换镜像。
+- **`v2.7.6-beta.5` 及之后的 `v2.7.6` 线（含 `0073` `DROP TABLE` 与 `0074` 配置改写）**：这两条**不可逆**，
+  **回滚 ≠ 只换镜像**。正确顺序 = **停服 → 恢复升级前的 `pg_dump` → 回退镜像 → 客户端重装/回退**。
+  只回退镜像会让旧二进制逐请求报 **`42P01`（`undefined_table`）**，而迁移器只跳过"已应用"的版本号、
+  **启动期不报错**（症状：服务能起来、健康检查通过，应用相关请求运行期 500）。
+  **本版不提供降级通道**（不支持新旧访问模型并存，也不支持把服务端降回旧访问模型）。
 
 ```bash
 cd /opt/picoaide
@@ -157,7 +168,7 @@ echo "$OLD" > VERSION
 # tar xzf deploy-backup/picoaide-data-<TS>.tar.gz -C picoaide-data
 # docker compose start server
 
-# 4) 仅当数据库被破坏时才恢复（会丢数据，需明确同意）
+# 4) v2.7.6-beta.5 及之后的 v2.7.6 线：回滚必须做这一步（会丢数据，需明确同意）
 # docker compose stop server
 # docker exec -i picoaide-postgres pg_restore -U picoaide -d picoaide --clean \
 #   < deploy-backup/pg-data-<TS>.dump
@@ -177,6 +188,7 @@ docker compose ps              # 三容器 Up
 ```
 
 员工客户端不需要逐台操作：它们从**这台服务器**取包，下次检查更新时就会看到新版本（见[客户端分发与升级](/deployment/client-delivery/)）。
+但**应用（WASM）访问要求客户端与服务端同版本**：停留在旧版本的客户端无法打开应用，请确认员工接受升级提示（见[部署总览](/deployment/)）。
 
 ## 升级清单
 
@@ -187,5 +199,6 @@ docker compose ps              # 三容器 Up
 - [ ] `.env` 的 `SERVER_IMAGE` 指向新版本
 - [ ] healthz 200 + `--version` == 目标版本 + 数据可查
 - [ ] `client.version` 与安装包下载正常
+- [ ] 已确认员工客户端升到配套版本（应用只在客户端内打开；旧客户端无法打开应用）
 - [ ] 本地 `VERSION` 文件已更新
 - [ ] 没有执行任何[铁律](/deployment/#四条铁律违反会造成不可恢复的数据损失)禁止的命令

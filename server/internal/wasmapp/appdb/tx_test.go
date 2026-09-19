@@ -216,9 +216,11 @@ func TestTransactionQueryDoesNotUseReadOnlyConn(t *testing.T) {
 		t.Fatalf("Begin 失败：%v", err)
 	}
 	defer func() { _ = d.Rollback(ctx, abi.TxParams{TxID: tx.TxID}) }()
-	if d.readConnLocked() != d.rw {
+	connInTx, releaseInTx := readConnForTest(t, d)
+	if connInTx != d.writeConn() {
 		t.Fatal("事务内读连接必须是事务连接（rw）")
 	}
+	releaseInTx()
 	mustExec(t, d, "INSERT INTO items(v) VALUES (?)", "uncommitted")
 	res, err := d.Query(ctx, abi.SQLParams{SQL: "SELECT v FROM items"})
 	if err != nil {
@@ -230,9 +232,11 @@ func TestTransactionQueryDoesNotUseReadOnlyConn(t *testing.T) {
 	if err := d.Rollback(ctx, abi.TxParams{TxID: tx.TxID}); err != nil {
 		t.Fatalf("Rollback 失败：%v", err)
 	}
-	if d.readConnLocked() != d.ro {
-		t.Fatal("事务外读连接必须是只读连接（ro）")
+	connOutTx, releaseOutTx := readConnForTest(t, d)
+	if !isReadOnlyPoolConn(d, connOutTx) {
+		t.Fatal("事务外读连接必须来自只读连接池")
 	}
+	releaseOutTx()
 }
 
 // TestCloseRollsBackOpenTransaction：未结束的事务在 Close 时必须被回滚（fail-closed）。
@@ -291,10 +295,9 @@ func TestTransactionTimeoutWriteGateAndRecovery(t *testing.T) {
 	mustExec(t, d, "INSERT INTO items(v) VALUES (?)", "in-tx")
 	time.Sleep(400 * time.Millisecond) // 超过事务预算，等看门狗强制回滚
 
-	if d.poisoned == nil {
+	if poisoned, deadTx := poisonStateForTest(d); poisoned == nil {
 		t.Fatal("事务硬超时后必须置污染标记（不复用被中断的连接）")
-	}
-	if d.deadTx == nil {
+	} else if deadTx == nil {
 		t.Fatal("事务硬超时后必须置写闸（应用可能仍以为自己在事务里）")
 	}
 
@@ -331,7 +334,7 @@ func TestTransactionTimeoutWriteGateAndRecovery(t *testing.T) {
 	if err := d.Close(); err != nil {
 		t.Fatalf("Close 失败：%v", err)
 	}
-	if d.poisoned != nil || d.deadTx != nil {
+	if poisoned, deadTx := poisonStateForTest(d); poisoned != nil || deadTx != nil {
 		t.Fatal("Close 必须清掉污染标记与写闸")
 	}
 	mustExec(t, d, "INSERT INTO items(v) VALUES (?)", "after-close")
@@ -363,18 +366,19 @@ func TestPoisonRecoveryWorksWhenCallerCtxIsAlreadyDead(t *testing.T) {
 	_, err := d.Query(dead, abi.SQLParams{SQL: "SELECT 1"})
 	e := requireAppErr(t, err, apperr.CodeDBDenied)
 	requireReason(t, e, ReasonStatementTimeout)
-	if d.poisoned == nil {
+	if poisoned, _ := poisonStateForTest(d); poisoned == nil {
 		t.Fatal("超时后必须置污染标记")
 	}
 
 	// 同一个已到期的 ctx 再调一次：恢复必须成功（维护动作走独立 ctx，
 	// 不会因为调用方 ctx 已死而拿不到连接），错误仍是超时语义。
-	oldRO, oldRW := d.ro, d.rw
+	oldROs := poolReadConnsForTest(d)
+	oldRW := d.writeConn()
 	_, err = d.Query(dead, abi.SQLParams{SQL: "SELECT 1"})
 	e = requireAppErr(t, err, apperr.CodeDBDenied)
 	requireReason(t, e, ReasonStatementTimeout)
-	if d.ro == oldRO || d.rw == oldRW {
-		t.Fatal("被污染的整组连接必须被换掉（恢复动作不能因为调用方 ctx 已死而跳过）")
+	if sameConnSet(poolReadConnsForTest(d), oldROs) || d.writeConn() == oldRW {
+		t.Fatal("被污染的整代连接必须被换掉（恢复动作不能因为调用方 ctx 已死而跳过）")
 	}
 	// 换一个健康的 ctx：对象已经完全可用（上一次超时的污染在下一次调用里被清掉）。
 	res, err := d.Query(ctx, abi.SQLParams{SQL: "SELECT 1"})

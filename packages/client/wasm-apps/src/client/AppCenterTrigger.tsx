@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { AppCenterPanel } from './AppCenterPanel.tsx'
+import { AppToastHost } from './app-toast.tsx'
 import { t } from './locales.ts'
 
 /**
@@ -98,6 +99,9 @@ export function AppCenterTrigger(props: PropsRuntime<'sidebar.footer.action'>) {
         </svg>
         {props.wide && <span style={LABEL}>{t('appCenter.title')}</span>}
       </button>
+      {/* 主窗口 toast 的挂载点：侧边栏入口在客户端 UI 存续期间一直挂着，
+          因此异渠道深链的提示不依赖应用中心是否打开（§5.3 是"主窗口"级提示）。 */}
+      <AppToastHost />
       {open && <AppCenterPanel onClose={() => { setOpen(false) }} />}
     </>
   )

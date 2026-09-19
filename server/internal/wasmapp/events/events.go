@@ -67,6 +67,16 @@ func (o Options) withDefaults() Options {
 // 上限):DB 卡住时 worker 必须能回来,否则事件会一直攒在环里被丢。
 const flushBudgetIntervals = 5
 
+// flushInsertBudgetMin 是单次批量落库预算的**下限**。
+//
+// 为什么需要下限(2026-09-19 定位的 CI flake):预算是 `FlushInterval ×
+// flushBudgetIntervals`,而生产默认 FlushInterval 是秒级(5×1s=5s,够用);
+// 但测试为了跑得快注入 10ms ⇒ 预算只剩 50ms —— 负载一高,insert 会在**事务已经
+// 提交之后**才等到驱动返回,超时被记成失败并丢掉整批(dropped/failed 计数上升),
+// 测试随即报 `Written = N, want M`,而库里其实已经有那些行("超时 ≠ 未执行")。
+// 抬到 1s 既不影响"DB 卡住时 worker 能回来"这条初衷,也不再把成功批量误判成失败。
+const flushInsertBudgetMin = time.Second
+
 // event 是入环的一条事件:调用计量 + **记录时刻**(落库时间是批量时刻,
 // 用它当 created_at 会把同一批几百条压到同一个时间点,诊断时间线就糊了)。
 type event struct {
@@ -122,6 +132,9 @@ func (s *Sink) Record(m capapi.CallMetrics) {
 	// guest 的 stderr 是不可信字节:截尾并保证合法 UTF-8,否则一条坏字节会让
 	// 整批 INSERT 被 PG 拒掉(text 不接受非法 UTF-8),连带丢掉 511 条好事件。
 	m.StderrTail = tailUTF8(m.StderrTail, limits.StderrTailBytes)
+	// 分类依据(evidence)同样含 guest 可控文本(命中的特征行原文):**留头**截断 + 同一条
+	// UTF-8 兜底 —— 证据的"kind=…"前缀在头部,截尾会让它先被丢掉。
+	m.Evidence = headUTF8(m.Evidence, capapi.MaxEvidenceBytes)
 	ev := event{at: time.Now().UTC(), m: m}
 
 	s.mu.Lock()
@@ -233,7 +246,12 @@ func (s *Sink) Cleanup(ctx context.Context, now time.Time) (int64, error) {
 }
 
 // flush 把环里的条目分批落库。所有 DB 操作都在锁外(drain 只做内存搬移),
-// 因此无论落库多慢,Record 都不会被拖住。
+// flush 把环里的事件批量落库(每 FlushInterval 一次,由 loop 调用)。
+//
+// 落库失败即丢整批并**停止本轮**(DB 不可用时继续只会再失败并拖长时间)——
+// 因此预算必须给够,否则"已提交但超时"会被记成失败(见 flushInsertBudgetMin)。
+//
+// 无论落库多慢,Record 都不会被拖住(它只入环)。
 func (s *Sink) flush() {
 	if s.db == nil {
 		return
@@ -243,7 +261,7 @@ func (s *Sink) flush() {
 		if len(batch) == 0 {
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), s.opt.FlushInterval*flushBudgetIntervals)
+		ctx, cancel := context.WithTimeout(context.Background(), s.insertBudget())
 		err := s.insert(ctx, batch)
 		cancel()
 		if err != nil {
@@ -255,6 +273,16 @@ func (s *Sink) flush() {
 		}
 		s.written.Add(int64(len(batch)))
 	}
+}
+
+// insertBudget 返回单次批量落库的预算:FlushInterval × flushBudgetIntervals,
+// 但不低于 flushInsertBudgetMin(见该常量的注释)。
+func (s *Sink) insertBudget() time.Duration {
+	b := s.opt.FlushInterval * flushBudgetIntervals
+	if b < flushInsertBudgetMin {
+		return flushInsertBudgetMin
+	}
+	return b
 }
 
 // drain 取出至多 max 条事件(先进先出)。返回的切片由调用方独占。
@@ -287,14 +315,14 @@ func (s *Sink) insert(ctx context.Context, batch []event) error {
 		m := batch[i].m
 		args = append(args, m.AppID, m.UserID, m.Outcome, m.ReasonCode, m.CPUMs, m.PeakMemory,
 			m.HostCalls, m.HostCallMS, m.QueueWaitMS, m.ResponseSize, m.DBRows, m.DBBytes,
-			m.GuestExitCode, m.StderrTail, batch[i].at)
+			m.GuestExitCode, m.StderrTail, m.Evidence, batch[i].at)
 	}
 	_, err := s.db.ExecContext(ctx, buildInsertSQL(len(batch)), args...)
 	return err
 }
 
 // callEventColumns 是 wasm_call_events 的写入列数(与 §4.9 字段表一一对应)。
-const callEventColumns = 15
+const callEventColumns = 16
 
 // buildInsertSQL 生成一条多值 INSERT:列顺序必须与 insert 的 args 顺序严格一致。
 // 单独成函数是为了让占位符拼接可被测试直接断言(拼接错了 PG 只会回一句
@@ -304,7 +332,7 @@ func buildInsertSQL(rows int) string {
 	b.WriteString(`INSERT INTO wasm_call_events
 		(app_id, user_id, outcome, reason_code, cpu_ms, peak_memory_bytes, host_call_count,
 		 host_call_ms, queue_wait_ms, response_bytes, db_rows, db_bytes, guest_exit_code,
-		 stderr_tail, created_at) VALUES `)
+		 stderr_tail, evidence, created_at) VALUES `)
 	for i := 0; i < rows; i++ {
 		if i > 0 {
 			b.WriteByte(',')
@@ -331,6 +359,22 @@ func tailUTF8(s string, max int) string {
 	s = s[len(s)-max:]
 	for len(s) > 0 && !utf8.RuneStart(s[0]) {
 		s = s[1:]
+	}
+	return strings.ToValidUTF8(s, "\uFFFD")
+}
+
+// headUTF8 取字符串**头部**至多 max 字节,与 tailUTF8 同一套口径(对齐 rune 边界 +
+// 用 U+FFFD 替换非法字节)。
+//
+// 与 tailUTF8 唯一的不同是截断方向:证据(evidence)的机器可读前缀在头部
+// (kind=… / peak=…),截尾会把它先丢掉 —— 而它正是"事后分辨真 OOM 与误报"的锚点。
+func headUTF8(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return strings.ToValidUTF8(s, "\uFFFD")
+	}
+	s = s[:max]
+	for len(s) > 0 && !utf8.ValidString(s) && !utf8.RuneStart(s[len(s)-1]) {
+		s = s[:len(s)-1]
 	}
 	return strings.ToValidUTF8(s, "\uFFFD")
 }

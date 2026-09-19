@@ -8,7 +8,7 @@
 
 ### 1.1 阻挡现象（2 GB 测试机）
 
-启用应用子域（`PICOAI_APPS_BASE_DOMAIN`）会触发 §4.3 的内存四笔账启动自检，默认档：
+启用 WASM 应用平台会触发 §4.3 的内存四笔账启动自检，默认档：
 
 | 账 | 值 | 来源 |
 |---|---|---|
@@ -112,10 +112,8 @@ STW 的强制 GC + scavenge，逐出是高频事件，不设间隔会把 CPU 打
   限频归还只按最小间隔触发）、`cmd/server`（接线断言：档位来自环境、喂给 appserver、
   下架/冻结/删除挂上 `EvictApp`）。
 - 部署验证（测试环境，2 GB 机器）：`profile=small` 启动日志
-  `total=630MB available=1222MB limit=855MB` ⇒ 通过；`platform ready (subdomain=true …)`。
-- 端到端（真实浏览器会话链路，curl + cookie jar）：
-  主站员工登录 → 应用子域 302 到 `/app-ticket` → 换票 302 回应用子域并落 `picoaide_app`
-  → 应用页面 200（应用自己的标题）→ 应用内功能：
-  `POST /api/hello` 写库并在"墙"上可见、`/ai` 调 `ai.chat` 得到模型回复且用量记在**发起用户**
-  账上（`usage` 行 cost 非零）、调用事件表 `wasm_call_events` 记 `ok` + `peak≈6 MiB` + `host_calls`。
-- 反向对照：未知应用子域 **404 且不回落主站**；主站证书与站点不受影响。
+  `total=630MB available=1222MB limit=855MB` ⇒ 通过；`platform ready (…)`。
+- 端到端（真服务端 + 真 wasm）：应用页面 200（应用自己的标题）→ 应用内功能：
+  `POST /api/hello` 写库并在"墙"上可见、~~`/ai` 调 `ai.chat` 得到模型回复且用量记在发起用户账上（`usage` 行 cost 非零）~~
+  **已废弃（对象已删除，W4）**：服务端 `ai.chat` 随总纲 §21 彻底删除，该断言的**AI 部分不再成立**；
+  内存结论本身（`peak≈6 MiB` / `host_calls` / 调用事件表 `ok`）不受影响。

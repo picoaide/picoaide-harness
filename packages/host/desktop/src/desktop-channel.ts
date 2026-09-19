@@ -38,6 +38,70 @@ const CHANNEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/u
 /** 官方渠道的深链 scheme(改造前的硬编码值)。 */
 export const DEFAULT_DEEP_LINK_SCHEME = 'picoaide'
 
+/**
+ * 官方渠道的应用源 scheme（§10：official/beta 取 `picoaide-app`，公共渠道共用命名
+ * 空间）。只在**没有渠道包**（官方构建/本地开发）时使用；渠道构建缺
+ * `desktop.app_origin_scheme` 一律 fail-loud（见 {@link resolveAppOriginScheme}）。
+ */
+export const DEFAULT_APP_ORIGIN_SCHEME = 'picoaide-app'
+
+/**
+ * 应用源 scheme 的形状（§8.3 冻结：与 Go `channel.AppOriginScheme()` 及新包
+ * `app-protocol.ts` 的 `APP_SCHEME_PATTERN` **逐字一致**）。三处必须同改。
+ */
+const APP_ORIGIN_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]{1,31}$/u
+
+/** 任何安装都不得占用的 scheme（§10：不得是 http/https/file/data/javascript/about）。 */
+const RESERVED_APP_ORIGIN_SCHEMES = new Set([
+  'http', 'https', 'file', 'data', 'javascript', 'about', 'blob', 'ws', 'wss', 'ftp',
+])
+
+/**
+ * 渠道包里的 `desktop.app_origin_scheme` 非法（缺失也算）时抛这个。
+ *
+ * 与相邻字段的"静默回落"策略**故意不同**（OPS-4 订正）：`deep_link_scheme` 畸形
+ * 时回落官方值至少还能用，而应用源 scheme 决定的是 **origin 隔离面** —— 回落到官方
+ * 值会让渠道客户端与官方客户端共用 origin（跨租户串味），静默降级比启动失败更糟。
+ */
+export class AppOriginSchemeError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'AppOriginSchemeError'
+  }
+}
+
+/**
+ * 解析渠道包里的应用源 scheme（**字段缺失/非法一律 fail-loud**，§10/§16.1）。
+ * @param raw - `desktop.app_origin_scheme` 原文（不可信输入）。
+ * @param deepLinkScheme - 同一渠道包的深链 scheme（两者相同视为配置错误）。
+ * @returns 校验通过的 scheme。
+ * @throws {AppOriginSchemeError} 缺失/形状非法/与深链 scheme 相同/是保留 scheme。
+ */
+export function resolveAppOriginScheme(raw: unknown, deepLinkScheme: string): string {
+  const value = nonEmptyString(raw)
+  if (value === undefined) {
+    throw new AppOriginSchemeError(
+      'channel.json is present but desktop.app_origin_scheme is missing; every channel must declare it (design §10)',
+    )
+  }
+  if (!APP_ORIGIN_SCHEME_PATTERN.test(value)) {
+    throw new AppOriginSchemeError(
+      `desktop.app_origin_scheme ${JSON.stringify(value)} does not match ${String(APP_ORIGIN_SCHEME_PATTERN)} (design §8.3)`,
+    )
+  }
+  if (RESERVED_APP_ORIGIN_SCHEMES.has(value)) {
+    throw new AppOriginSchemeError(
+      `desktop.app_origin_scheme ${JSON.stringify(value)} is a reserved scheme (design §10)`,
+    )
+  }
+  if (value === deepLinkScheme) {
+    throw new AppOriginSchemeError(
+      `desktop.app_origin_scheme must differ from desktop.deep_link_scheme (both are ${JSON.stringify(value)})`,
+    )
+  }
+  return value
+}
+
 /** 官方产品名（没有渠道包时的内置兜底；渠道构建必须由渠道包给出）。 */
 export const OFFICIAL_PRODUCT_NAME = 'PicoAide Harness'
 
@@ -169,6 +233,18 @@ export interface DesktopChannelProfile {
    * 未配置时回落官方 scheme —— 官方行为逐字节不变。
    */
   readonly deepLinkScheme: string
+  /**
+   * 应用源 scheme（渠道包 `desktop.app_origin_scheme`，§10 **全部渠道必填**）。
+   *
+   * 它是应用页的 origin（`<scheme>://<app_id>`），也是**渠道之间的隔离面**：官方与
+   * 渠道、渠道与渠道各用自己的 scheme，跨渠道的链接自然打不开。注入链见
+   * `main.ts`（启动期特权注册）、`profile.ts`（profile 行 config）与本包
+   * `src/index.ts`（本机只读路由 `GET /api/pico/wasm-apps/channel`）。
+   *
+   * 渠道包缺这个字段时**构建/启动即失败**（{@link resolveAppOriginScheme}）：
+   * 静默回落官方值 = 跨租户共用 origin。
+   */
+  readonly appOriginScheme: string
   /** 深链在操作系统里的注册名（Protocols 显示名）；未配置时为 undefined。 */
   readonly deepLinkName: string | undefined
   /**
@@ -268,6 +344,10 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
     ? rawScheme
     : DEFAULT_DEEP_LINK_SCHEME
   const deepLinkName = nonEmptyString(desktopRecord.deep_link_name) ?? productName
+  // 应用源 scheme（§10）：**fail-loud** —— 渠道包存在就必须显式声明它。这里不 try：
+  // 让 AppOriginSchemeError 一路冒到 readDesktopChannelProfile 的调用方（main.ts 在
+  // 启动早期读，报错即中止启动，比"两个渠道共用 origin"早得多也清楚得多）。
+  const appOriginScheme = resolveAppOriginScheme(desktopRecord.app_origin_scheme, deepLinkScheme)
   // 数据目录名：渠道包显式配的家目录（形状校验）> slug 派生 > `.picoaide-harness-<id>`。
   // 运行期**不**因为畸形值而拒绝启动：渠道化是增量能力，最差也要落到一个
   // 只属于本渠道的目录（回落官方目录才是不可接受的 —— 那是跨租户共享）。
@@ -322,6 +402,7 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
     homeDir,
     appId,
     deepLinkScheme,
+    appOriginScheme,
     deepLinkName,
     brand,
   }
@@ -330,9 +411,16 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
 /**
  * 读取随包分发的渠道包内容。
  *
- * 文件不存在（本地开发/未渠道化的构建）或内容损坏时返回 undefined：
- * 渠道化是增量能力，缺失不能变成启动失败。
+ * 三种情形的语义**故意不同**（OPS-4 订正）：
+ *  1. **文件不存在**（本地开发/未渠道化的官方构建）⇒ undefined：调用方沿用官方缺省
+ *     （`DEFAULT_DEEP_LINK_SCHEME` / `DEFAULT_APP_ORIGIN_SCHEME`），行为逐字节不变；
+ *  2. **内容不是 JSON / 不是合法渠道包**（`channel_id` 缺失或畸形）⇒ undefined：
+ *     "这份配置不是给我们的"，回落官方缺省；
+ *  3. **是合法渠道包但 `desktop.app_origin_scheme` 缺失/非法** ⇒ **抛出**
+ *     `AppOriginSchemeError`：那是注入链断了，回落官方值会让渠道客户端与官方客户端
+ *     共用应用 origin（跨租户串味）—— 静默降级比启动失败更糟。
  * @returns 客户端渠道内容，或 undefined。
+ * @throws {AppOriginSchemeError} 渠道包存在但其 `desktop.app_origin_scheme` 不可用。
  */
 export function readDesktopChannelProfile(): DesktopChannelProfile | undefined {
   let raw: string
@@ -342,9 +430,12 @@ export function readDesktopChannelProfile(): DesktopChannelProfile | undefined {
     return undefined
   }
   if (raw.length > 64 * 1024) return undefined
+  let parsed: unknown
   try {
-    return parseDesktopChannelProfile(JSON.parse(raw))
+    parsed = JSON.parse(raw)
   } catch {
     return undefined
   }
+  // 注意：这里**不 catch** —— `AppOriginSchemeError` 必须冒到调用方（fail-loud）。
+  return parseDesktopChannelProfile(parsed)
 }

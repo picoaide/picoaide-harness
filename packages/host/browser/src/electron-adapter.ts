@@ -15,7 +15,7 @@
  */
 
 import { browserDefaultTitle } from './runtime.ts'
-import { DEFAULT_HOST_LOCALE, type HostLocale } from 'dsh-plugin-desktop/host-locale'
+import { DEFAULT_HOST_LOCALE, type HostLocale } from '@picoaide/dsh-host-locale'
 import type { CdpTransport } from './cdp.ts'
 
 /** The minimal native view surface the browser runtime drives. */

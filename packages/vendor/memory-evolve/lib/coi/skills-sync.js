@@ -34,20 +34,22 @@ const STALE_SWAP_MAX_AGE_MS = 6 * 60 * 60 * 1000
  * 插件内置的技能清单（目录名 = 技能名）—— **只含本插件自己的技能**。
  *
  * ⚠️ **平台技能不在这个清单里**（2026-09-18，用户口径 + 独立审计 P1-1 的修复）：
- * `skills/picoaide-app-builder/` 虽然与这些技能放在同一个目录下，但它是
- * **平台内置技能**：内容随服务端镜像发布（`GET /api/client/v2/skills/builtin`），
- * 由员工在客户端「能力中心 → 平台内置技能」**按需安装**。
+ * 平台内置的 WASM 应用作者手册（原名 `picoaide-app-builder`，2026-09-19 改名
+ * `app-builder`）是**平台内置技能**：内容随服务端镜像发布
+ * （`GET /api/client/v2/skills/builtin`），由员工在客户端「能力中心 → 平台内置技能」
+ * **按需安装**。
  *
  * 为什么会踩：要"内置到服务端 + 按需安装"，就不能有一条开机自动把它写进技能库的
  * 旁路 —— 否则员工什么都没点，面板已经显示"已安装"，安装按钮永远走不到，
  * 「按需」名存实亡（审计实测：apply() 一次之后技能就在 `<DSH_HOME>/skills` 里，
  * 且没有能力中心的溯源信息）。
  *
- * 它留在 `skills/` 目录里的原因是**服务端的构建上下文**：`server/Dockerfile` 用
- * `--build-context skillassets=<本包>` 从这里 COPY 进镜像。所以目录必须在、
- * 内容必须完整，但它**不参与**这里的同步。
+ * 2026-09-19 起它的**源目录也不在本包了**：真源在服务端仓库的
+ * `server/skills/app-builder/`（随镜像分发，见 `server/Dockerfile`）—— 所以本包
+ * `skills/` 目录里剩下的**全部**都是本插件自己的技能（{@link BUILTIN_SKILLS} 与
+ * 磁盘内容一一对应，回归用例钉住）。
  *
- * 回归门禁：`tests/coi.test.js` 断言本清单里不含任何平台技能，
+ * 回归门禁：`tests/coi.test.js` 断言本清单里不含任何平台技能、且平台技能目录不在包内；
  * `tests/builtin-skills-decoupled.test.js` 断言 apply() 之后它**没有**被装上。
  */
 export const BUILTIN_SKILLS = [
@@ -59,12 +61,21 @@ export const BUILTIN_SKILLS = [
 ]
 
 /**
- * 由**服务端**分发、客户端按需安装的技能（不属于本插件的同步范围）。
+ * 由**服务端**分发、客户端按需安装的技能名（不属于本插件的同步范围）。
  *
  * 单独列出来是为了让"哪些是平台技能"这件事有唯一真源：同步逻辑与回归测试都读它，
  * 而不是各自写一遍字面量（写两处就会漂移，漂移的后果见 {@link BUILTIN_SKILLS}）。
+ *
+ * ⚠️ **2026-09-19 起清单里的技能已不在本包内**：作者手册改名 `app-builder`，
+ * 源目录搬到服务端仓库的 `server/skills/app-builder/`（随服务端镜像发布；
+ * `server/Dockerfile` 直接 COPY，不再有 `--build-context skillassets`）。
+ *
+ * 清单**保留而不是清空**：它挡的从来不是"目录在哪"，而是"**这个技能名永远不许经
+ * 开机同步落进用户技能库**"。`syncBuiltinSkills` 里那句守卫与两条回归用例都靠它
+ * 承重，清空会让「平台技能不得被自动安装」这条不变量静默失去覆盖 —— 而一旦有人
+ * 手滑把 `app-builder` 目录（连同 BUILTIN_SKILLS 里的一行）加回本包，就该由这里拦住。
  */
-export const PLATFORM_SKILLS = ['picoaide-app-builder']
+export const PLATFORM_SKILLS = ['app-builder']
 
 /**
  * 技能名白名单（kebab-case，与 dsh-skill 的公开规则一致）。

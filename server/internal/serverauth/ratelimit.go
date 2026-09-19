@@ -209,6 +209,11 @@ func loginHost(c *gin.Context) string {
 // 重置 per-IP 预算。反代部署时 RemoteAddr 会坍缩为代理 IP(审计 2026-08-25
 // F-02)导致单账号 DoS——因此 allow 额外维护一个 per-username 桶(见
 // allowLogin),反代下攻击者炸同一用户名仍会在 username 桶被限。
+//
+// 2026-09-19:本桶(ip|username)**保留 RemoteAddr** 不变 —— 它与 u:username
+// 桶是同一份 10 次预算,坍缩只是"更严"而不会放大任何人的攻击面(攻击者炸
+// 某账号时 u: 桶必然同时打满)。真正会被坍缩变成全组织 DoS 的是**只按 IP**
+// 的那个 60 次桶,它已改走 clientIPKey(见该函数)。
 func loginKey(c *gin.Context, username string) string {
 	return loginHost(c) + "|" + username
 }
@@ -220,15 +225,41 @@ func dbLimiterScope(db *sql.DB) string {
 	return fmt.Sprintf("db:%p|", db)
 }
 
-// clientIPKey is the IP-only rate-limit key (OIDC callbacks).
+// clientIPKey 是**IP 维度失败预算**的统一桶键(登录 IP 桶 + OIDC 回调桶 +
+// /auth/oidc|openid/login 流程桶),全部按真实客户端 IP 计。
 //
-// 审计 2026-09-13 P1-3:此前用 **RemoteAddr**,而反代(生产 compose 的 Caddy)
-// 部署下所有用户共享同一个代理 IP ⇒ 一个未认证者用 60 次失败回调即可把
+// 审计 2026-09-13 P1-3:回调桶此前用 **RemoteAddr**,而反代(生产 compose 的
+// Caddy)部署下所有用户共享同一个代理 IP ⇒ 一个未认证者用 60 次失败回调即可把
 // **全组织**的 SSO 回调打成 429(实测:第 61 个请求即便来自不同
-// X-Forwarded-For 也照样 429)。改用 gin 的 ClientIP():SetTrustedProxies
-// 已把可信代理限定为环回+显式配置,只有来自可信代理的 XFF 才会被采纳。
+// X-Forwarded-For 也照样 429)。改用 gin 的 ClientIP():SetTrustedProxies 已把
+// 可信代理限定为环回+显式配置(cmd/server/main.go),只有来自可信代理的 XFF
+// 才会被采纳;不可信来源伪造的 XFF 不改变桶键(C-1,比采信 XFF 更严格)。
+//
+// 2026-09-19:上一条修复只覆盖了回调,**登录 IP 桶漏了** —— loginAllowed()、
+// 管理面 handleLogin() 的 srcIPKey、MFA 第二步的 mfaIPKey 仍在用
+// loginHost()(= RemoteAddr)。同一个坍缩在登录面依旧成立:反代下 60 次失败
+// 登录(loginIPMaxAttempts)即可让**所有人**——包括密码完全正确的用户——在
+// 整个 5 分钟窗口内登不进来(第 61 个请求在鉴权之前就被 429,成功登录也没有
+// 机会去 reset 桶)。现三处统一走本函数。
 func clientIPKey(c *gin.Context) string {
 	return "ip:" + c.ClientIP()
+}
+
+// loginIPBudgetKey 是**登录 IP 桶**的完整键,也是它唯一的构造点。
+//
+// allow/record/reset 必须用同一个键:此前三处各自拼 "ip:"+loginHost(c),
+// 改成按 ClientIP 计以后只要漏改其中一处,就会出现"判定键 ≠ 记账键"——
+// 桶永远判不满,**限流静默失效**(回归测试
+// TestLoginIPBudgetKeyUsesTrustedProxyClientIP 正是靠这一点发现 loginFailed
+// 还在用 RemoteAddr)。键的 IP 维度只能按真实客户端 IP(见 clientIPKey)。
+func loginIPBudgetKey(db *sql.DB, c *gin.Context) string {
+	return loginIPBudgetKeyForHost(db, c.ClientIP())
+}
+
+// loginIPBudgetKeyForHost 与 loginIPBudgetKey 同形,供非 gin 入口
+// (wasmapp/session 的 net/http 登录页)复用 —— host 由调用方按其信任边界解析。
+func loginIPBudgetKeyForHost(db *sql.DB, host string) string {
+	return dbLimiterScope(db) + "ip:" + host
 }
 
 // loginAllowed guards one login attempt through **three** buckets:
@@ -237,10 +268,9 @@ func clientIPKey(c *gin.Context) string {
 // 绕过前两桶做 argon2 放大,P1-2)。审计 2026-08-25 F-02 / 2026-09-13 P1-2。
 func (a *API) loginAllowed(c *gin.Context, username string) bool {
 	scope := dbLimiterScope(a.DB)
-	ipKey := scope + "ip:" + loginHost(c)
 	if !a.limiter.allow(scope+loginKey(c, username)) ||
 		!a.limiter.allow(scope+"u:"+username) ||
-		!a.loginIPLimiter.allow(ipKey) {
+		!a.loginIPLimiter.allow(loginIPBudgetKey(a.DB, c)) {
 		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 		return false
 	}
@@ -262,7 +292,7 @@ func (a *API) AllowLoginAttempt(username, host string) bool {
 	scope := dbLimiterScope(a.DB)
 	return a.limiter.allow(scope+host+"|"+username) &&
 		a.limiter.allow(scope+"u:"+username) &&
-		a.loginIPLimiter.allow(scope+"ip:"+host)
+		a.loginIPLimiter.allow(loginIPBudgetKeyForHost(a.DB, host))
 }
 
 // RecordLoginFailure 记一次登录失败（三个桶同时计数）。
@@ -270,7 +300,7 @@ func (a *API) RecordLoginFailure(username, host string) {
 	scope := dbLimiterScope(a.DB)
 	a.limiter.record(scope + host + "|" + username)
 	a.limiter.record(scope + "u:" + username)
-	a.loginIPLimiter.record(scope + "ip:" + host)
+	a.loginIPLimiter.record(loginIPBudgetKeyForHost(a.DB, host))
 }
 
 // ResetLoginSuccess 在认证成功后清空三个桶（合法登录不应消耗失败预算）。
@@ -278,7 +308,7 @@ func (a *API) ResetLoginSuccess(username, host string) {
 	scope := dbLimiterScope(a.DB)
 	a.limiter.reset(scope + host + "|" + username)
 	a.limiter.reset(scope + "u:" + username)
-	a.loginIPLimiter.reset(scope + "ip:" + host)
+	a.loginIPLimiter.reset(loginIPBudgetKeyForHost(a.DB, host))
 }
 
 // loginFailed records a failed authentication against all three buckets.
@@ -286,7 +316,7 @@ func (a *API) loginFailed(c *gin.Context, username string) {
 	scope := dbLimiterScope(a.DB)
 	a.limiter.record(scope + loginKey(c, username))
 	a.limiter.record(scope + "u:" + username)
-	a.loginIPLimiter.record(scope + "ip:" + loginHost(c))
+	a.loginIPLimiter.record(loginIPBudgetKey(a.DB, c))
 }
 
 // loginSucceeded clears the buckets after a successful authentication
@@ -296,7 +326,7 @@ func (a *API) loginSucceeded(c *gin.Context, username string) {
 	scope := dbLimiterScope(a.DB)
 	a.limiter.reset(scope + loginKey(c, username))
 	a.limiter.reset(scope + "u:" + username)
-	a.loginIPLimiter.reset(scope + "ip:" + loginHost(c))
+	a.loginIPLimiter.reset(loginIPBudgetKey(a.DB, c))
 }
 
 // oidcCallbackAllowed guards one OIDC callback through a dedicated IP-only

@@ -197,6 +197,9 @@ func TestManagementPlaneOwnerIsolation(t *testing.T) {
 		{http.MethodGet, "/api/client/v2/apps/wasm/mine-tool/export"},
 		{http.MethodGet, "/api/client/v2/apps/wasm/mine-tool/diagnostics"},
 		{http.MethodGet, "/api/client/v2/apps/wasm/mine-tool/schema"},
+		// R1-pm-3：版本历史（含被拒理由）同样只属于发布者本人 —— 这条出口最容易漏，
+		// 因为它是"读"，而读侧的归属判定一旦缺失就是所有人的审核意见都公开。
+		{http.MethodGet, "/api/client/v2/apps/wasm/mine-tool/releases"},
 		{http.MethodPost, "/api/client/v2/apps/wasm/mine-tool/freeze"},
 		{http.MethodPost, "/api/client/v2/apps/wasm/mine-tool/unpublish"},
 		{http.MethodDelete, "/api/client/v2/apps/wasm/mine-tool"},

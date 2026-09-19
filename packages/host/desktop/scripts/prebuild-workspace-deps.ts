@@ -12,6 +12,17 @@
  * branding(它们 tsc 需 desktop 类型)。desktop build 不依赖 enterprise lib
  * (已验证),故无循环。
  *
+ * 2026-09-20(构建环修复,路线 A + A 扩展)**修正这段顺序**:desktop 有三条真实的
+ * 前置构建边——`src/host-locale.ts` / `src/desktop-home.ts` 各是一行 re-export
+ * (两个零依赖叶子包 `@picoaide/dsh-host-locale` / `@picoaide/dsh-host-home` 的
+ * lib/types),`src/main.ts`/`src/app-ai-runner.ts` 静态 import
+ * `@picoaide/dsh-wasm-apps-host`(它自己又读 `@picoaide/dsh-browser/guard`)。
+ * 而 browser 的 tsc 读 connectors 的 lib/types,connectors 只读两个叶子包 ⇒
+ * 正确顺序是:**叶子包 → connectors → browser → wasm-apps-host → desktop → 其余**。
+ * 旧顺序(desktop 最先、wasm-apps-host 垫底)在**干净检出**下会让 desktop 的
+ * `tsc` 找不到那两个包的声明文件——`yarn check` 因为调度器已先把它们建好而看不
+ * 出来,`yarn dist:*`(入口就是本函数)则直接失败。
+ *
  * 2026-09-10 增量化:每个包构建前先判定「产物是否已是最新」——产物 mtime 不早于
  * 全部输入(src/ 递归 + package.json/tsconfig/tsdown 配置 + 依赖包产物)即跳过。
  * 动因:`yarn check` 里 desktop 的 verify:profile 会再跑一遍本函数,而此刻
@@ -48,14 +59,44 @@ interface WorkspacePackage {
 }
 
 const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
-  { workspace: null, dir: 'packages/host/desktop' },
+  // 0) 两个**零依赖叶子包**最先：browser / connectors / desktop 的 tsc 都读它们的
+  //    lib/types（desktop 的 `src/{host-locale,desktop-home}.ts` 各是一行 re-export）。
+  { workspace: '@picoaide/dsh-host-locale', dir: 'packages/host/host-locale', deps: [] },
+  { workspace: '@picoaide/dsh-host-home', dir: 'packages/host/host-home', deps: [] },
+  // 1) connectors：只读两个叶子包（`host-copy.ts` / `user-scope.ts`）—— 路线 A 扩展
+  //    之后它**不再** import 桌面包，所以排在叶子包之后即可。
+  {
+    workspace: '@picoaide/dsh-connectors',
+    dir: 'packages/host/connectors',
+    deps: ['packages/host/host-home', 'packages/host/host-locale'],
+  },
+  // 2) browser：读叶子包 + **connectors 的 lib/types**（`src/index.ts` 的
+  //    `typeof import('@picoaide/dsh-connectors/…')` 与
+  //    `tests/credential-site.spec.ts` 的真实 `ConnectorStore`）⇒ 必须排在 connectors 之后。
+  {
+    workspace: '@picoaide/dsh-browser',
+    dir: 'packages/host/browser',
+    deps: ['packages/host/host-locale', 'packages/host/connectors'],
+  },
+  // 3) 客户端专属 WASM 应用 origin：`electron-adapter.ts` 值导入
+  //    `@picoaide/dsh-browser/guard` ⇒ 必须排在 browser 之后、desktop 之前
+  //    （desktop 的 main.ts/app-ai-runner.ts 静态 import 它）。
+  { workspace: '@picoaide/dsh-wasm-apps-host', dir: 'packages/host/wasm-apps-host', deps: ['packages/host/browser'] },
+  // 4) desktop：读叶子包与 wasm-apps-host 的 lib/types，产出全仓共用的
+  //    lib/types + build/。
+  {
+    workspace: null,
+    dir: 'packages/host/desktop',
+    deps: ['packages/host/host-home', 'packages/host/host-locale', 'packages/host/wasm-apps-host'],
+  },
   { workspace: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', deps: ['packages/host/desktop'] },
   { workspace: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', deps: ['packages/host/desktop'] },
   { workspace: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', deps: [] },
   { workspace: '@picoaide/dsh-branding', dir: 'packages/client/branding', deps: ['packages/host/desktop'] },
-  { workspace: '@picoaide/dsh-cron', dir: 'packages/host/cron' },
-  { workspace: '@picoaide/dsh-connectors', dir: 'packages/host/connectors' },
-  { workspace: '@picoaide/dsh-browser', dir: 'packages/host/browser' },
+  // cron 的 tsc 仍读 desktop 的 lib/types（`dsh-plugin-desktop/host-locale` 与
+  // `dsh-plugin-desktop/desktop-home` 两条 re-export 子路径）—— 它不在环上，
+  // 两条子路径都保留，故这条边继续登记。
+  { workspace: '@picoaide/dsh-cron', dir: 'packages/host/cron', deps: ['packages/host/desktop'] },
 ]
 
 /** 执行一个 yarn 命令,失败即抛错。 */
