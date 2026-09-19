@@ -775,26 +775,64 @@ func sweepSilenceAccessLog(t *testing.T) {
 	t.Cleanup(func() { gin.DefaultWriter = prev })
 }
 
+// sweepBuiltinSkillsDir 解析"这次跑要用哪个内置技能资产目录"。
+//
+// 优先用仓库里的真实资产（server/skills，即镜像 /opt/picoaide/skills 的源头）；
+// 没有就**自建一个夹具技能**。
+//
+// 为什么必须有回退（2026-09-19 实测踩到）：本用例举证的是**路由的内容类型契约**
+// （application/gzip + 真 gzip 字节），不是"某个具体技能的内容对不对"。而
+// server/skills 属于镜像交付面，在不同分支/提交上存在与否不同 —— 之前直接
+// t.Fatalf 依赖它，导致"只有 Go 侧修复的提交态"上这个契约用例必红（资产在别的
+// 分支还没提交），把无关分支的进度绑成了本用例的前置。真实资产的校验归
+// skillseed 包；这里只保证网关出口的字节形态。
+func sweepBuiltinSkillsDir(t *testing.T) (dir string, name string) {
+	t.Helper()
+	if real, err := filepath.Abs(filepath.Join("..", "..", "skills")); err == nil {
+		if st, serr := os.Stat(filepath.Join(real, "app-builder", skillseed.SkillFile)); serr == nil && !st.IsDir() {
+			return real, "app-builder"
+		}
+	}
+	dir = t.TempDir()
+	name = "sweep-fixture"
+	if err := os.MkdirAll(filepath.Join(dir, name), 0o755); err != nil {
+		t.Fatalf("建夹具技能目录: %v", err)
+	}
+	// frontmatter 必须能过 skillmanifest.Parse（与管理员上传技能包同一套规则）：
+	// name 必须等于目录名、version 是严格 semver，title/description/author/category 必填，
+	// 正文还不能是空壳（BODY_EMPTY：至少 50 字）。
+	md := "---\n" +
+		"name: " + name + "\n" +
+		"version: 1.0.0\n" +
+		"title: 全路由扫描夹具技能\n" +
+		"description: 全路由扫描的夹具技能，只用于举证内置技能归档端点返回 application/gzip 二进制流。\n" +
+		"author: api-sweep\n" +
+		"category: fixture\n" +
+		"---\n\n" +
+		"## 用途\n\n" +
+		"本技能是服务端全路由 API 契约扫描的夹具：它存在**只**为证明内置技能归档端点\n" +
+		"下发的是 application/gzip 二进制流（而不是 JSON 信封），因此它不参与任何发布面。\n" +
+		"真实的随镜像内置技能由 server/skills 提供，其内容校验归 skillseed 包负责。\n"
+	if err := os.WriteFile(filepath.Join(dir, name, skillseed.SkillFile), []byte(md), 0o644); err != nil {
+		t.Fatalf("写夹具技能: %v", err)
+	}
+	t.Logf("server/skills 资产不在本提交上，改用夹具技能 %s（本用例只举证内容类型契约）", name)
+	return dir, name
+}
+
 // TestAPISweepExceptionEvidenceBinaryArchive：非 JSON 例外「二进制归档下载
 // （application/gzip）」的**正向举证**。
 //
 // 为什么需要它：扫描是未认证的，BearerAuth 闸先于内容类型生效 ⇒ 归档路由在扫描里
-// 逐条都是 JSON 401，看不到真实内容类型。这里带真令牌打一次内置技能归档
-// （资产用仓库真实的内置技能目录 server/skills，即镜像里 /opt/picoaide/skills 的源头），
-// 断言它确实是 application/gzip + 真 gzip 字节。
+// 逐条都是 JSON 401，看不到真实内容类型。这里带真令牌打一次内置技能归档，断言它
+// 确实是 application/gzip + 真 gzip 字节。
 func TestAPISweepExceptionEvidenceBinaryArchive(t *testing.T) {
 	db := requireRealDB(t)
 
-	// 内置技能目录：把 skillseed.Dir 指到仓库真实资产（生产里由镜像提供）。
-	skillsDir, err := filepath.Abs(filepath.Join("..", "..", "skills"))
-	if err != nil {
-		t.Fatalf("解析技能资产目录: %v", err)
-	}
-	if st, err := os.Stat(filepath.Join(skillsDir, "app-builder", skillseed.SkillFile)); err != nil {
-		t.Fatalf("前置失败：仓库内置技能资产缺失（%s）：%v", skillsDir, err)
-	} else if st.IsDir() {
-		t.Fatalf("前置失败：%s 是目录", skillsDir)
-	}
+	// 内置技能目录：优先用仓库真实资产（server/skills = 镜像 /opt/picoaide/skills
+	// 的源头），没有就自建夹具（见 sweepBuiltinSkillsDir 的注释：本用例举证的是
+	// **内容类型契约**，不该因为无关分支的资产没提交而红）。
+	skillsDir, skillName := sweepBuiltinSkillsDir(t)
 	prevDir := skillseed.Dir
 	skillseed.Dir = skillsDir
 	t.Cleanup(func() { skillseed.Dir = prevDir })
@@ -808,7 +846,7 @@ func TestAPISweepExceptionEvidenceBinaryArchive(t *testing.T) {
 	token := sweepIssueToken(t, db, "sweep-archive")
 
 	h := sweepDoAuthed(r, "GET", "/api/client/v2/skills/builtin/:name/archive",
-		"/api/client/v2/skills/builtin/app-builder/archive", token)
+		"/api/client/v2/skills/builtin/"+skillName+"/archive", token)
 	if h.status != 200 {
 		t.Fatalf("%s：status=%d want 200；content-type=%q body=%s",
 			h.label(), h.status, h.ct, h.bodySummary())
