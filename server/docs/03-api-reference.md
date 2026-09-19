@@ -33,11 +33,11 @@
 | POST | `/api/client/v2/auth/login` | 无 | 密码登录(local/LDAP);body `{username, password}` → `{token, user, must_change_password}`(0057:must_change_password=true 时客户端进入强制改密页,改密前业务 API 均 403 `PASSWORD_CHANGE_REQUIRED`) |
 | POST | `/api/client/v2/auth/password` | Bearer | 员工自助改密(0057):body `{old_password, new_password}` → `{ok}`;仅本地认证(`source=local`)用户;成功后吊销该用户全部 api_tokens 与 admin_sessions(含当前),客户端须重新登录 |
 | POST | `/api/client/v2/auth/logout` | Bearer | 吊销当前 token |
-| GET | `/api/client/v2/auth/me` | Bearer | 当前用户 `{user:{id, username, display_name, email, is_admin, role, permissions, status, quota_tokens, quota_money, source, password_changeable, password_must_change, password_changed_at, mfa_enabled}}`(0057 起 source/password_changeable 供客户端判断改密入口;mfa_enabled 供管理端列表) |
-| GET | `/api/client/v2/auth/usage` | Bearer | 员工用量概览(自查询):`{is_admin, quota_tokens, quota_money, monthly_usage/cost, remaining_tokens/money(不限=null), today_usage/cost, yesterday_usage/cost, total_usage/cost}`;有效配额 = 个人覆盖→全局默认,admin 豁免 |
+| GET | `/api/client/v2/auth/me` | Bearer | 当前用户 `{user:{id, username, display_name, email, is_admin, role, permissions, status, balance_money, balance_activated, source, password_changeable, password_must_change, password_changed_at, mfa_enabled}}`(0057 起 source/password_changeable 供客户端判断改密入口;mfa_enabled 供管理端列表。**2026-09-11 起不再下发 `quota_tokens`/`quota_money`** —— token/金额配额已下线,余额是唯一闸门) |
+| GET | `/api/client/v2/auth/usage` | Bearer | 员工用量概览(自查询):`{balance_money, balance_activated, balance_enabled, balance_monthly, balance_mode, is_admin, monthly_usage, monthly_cost, today_usage, today_cost, yesterday_usage, yesterday_cost, total_usage, total_cost}`。`balance_activated=false`(从未入账)时客户端**不展示**余额行(与网关"未开通不拦"同判据);字段集合是**跨语言契约**,由 `internal/serverauth/usage_contract_test.go` 与 `packages/client/account-card/src/usage-contract.ts` 对拍 |
 | GET | `/api/client/v2/auth/methods` | 无 | 登录方式发现(`public methods`,登录页未登录时探测) |
-| GET | `/api/client/v2/auth/:provider/login` | 无 | 跳转 OIDC/OpenID 授权页(provider 由配置注册,如 `oidc`、`openid`) |
-| GET | `/api/client/v2/auth/:provider/callback` | 无 | OIDC 回调,换取服务端 token |
+| GET | `/api/client/v2/auth/oidc/login`、`/api/client/v2/auth/openid/login` | 无 | 跳转 OIDC/OpenID 授权页。两条路由是**固定注册**的(provider 在请求时按配置解析),不是 `:provider` 通配 —— 只有已注册的这两条存在 |
+| GET | `/api/client/v2/auth/oidc/callback`、`/api/client/v2/auth/openid/callback` | 无 | OIDC 回调,换取服务端 token(失败回调同样计入限流桶) |
 
 ## 4. 管理端(webadmin,全部 session 鉴权 + RBAC)
 
