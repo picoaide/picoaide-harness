@@ -152,7 +152,9 @@ const APP_CONFIG_PROPERTIES = {
 const APP_CONFIG_DESCRIPTION = [
   '应用配置声明（`picoaide.app.json` 的内容；**发布必填**，服务端字段表里 `config` 就是必填项）。',
   '字段集合是**封闭**的：access / whitelist / purpose / data_sensitivity / owner —— ',
-  '多一个未知字段（例如已删除的 visible / login_required）服务端会直接拒。',
+  '多一个**未知**字段服务端会直接拒。',
+  '旧 schema 的 visible / login_required 是**兼容形态**（`access` 缺席时它们参与映射、`visible` 被忽略，',
+  '见 appcfg 的兼容 shim），但新版一律不要发：它们对 `access` 没有加成，混进来只会让"这次改了什么"读不出来。',
   '首次发布时 purpose / data_sensitivity / owner 三个声明缺一不可；更新版本时可以省略未改动的（服务端沿用原值），',
   '但要改访问方式或名单就必须给全五个字段。注意**改配置 = 发新版本**，运行期改不了。',
 ].join('')
@@ -161,7 +163,8 @@ const APP_CONFIG_DESCRIPTION = [
 const APP_CONFIG_DESCRIPTION_OPTIONAL = [
   '可选：应用配置声明（`picoaide.app.json` 的内容）。',
   '预检时带上它会**一起校验**：access 取值、access=whitelist 时的名单是否为空、首版三个声明是否齐全都能提前发现。',
-  '字段集合是**封闭**的：access / whitelist / purpose / data_sensitivity / owner —— 多一个未知字段（例如已删除的 visible / login_required）服务端会直接拒。',
+  '字段集合是**封闭**的：access / whitelist / purpose / data_sensitivity / owner —— 多一个**未知**字段服务端会直接拒；',
+  '旧 schema 的 visible / login_required 会被兼容映射（`access` 缺席时才参与），但新版不要发它们。',
 ].join('')
 
 // ---------------------------------------------------------------------------
@@ -410,7 +413,13 @@ export function registerWasmAppTools(ctx: Context, options: WasmAppToolOptions):
     description: [
       '列出应用中心里的 WASM 应用（应用标识、标题、负责人、访问模式 access、是否上架 enabled、当前版本、入口链接）。',
       '发布前用它确认两件事：app_id 有没有被占用、以及已有应用的**当前版本号**（新版本号必须严格大于它）。',
-      '**已下架**（enabled=false）的应用也会列出（它的域名仍然可访问，只是不在应用中心推荐），不要据此认为标识空闲。',
+      // ⚠️ 这句曾经写成"下架的域名仍然可访问，只是不在应用中心推荐"，**两个分句都与实现相反**
+      // （独立评审 R1-pm-5 / R1-uxc-1）：
+      //   - 访问：`enabled=false` ⇒ 应用子域 **410 Gone**（server/internal/wasmapp/appserver/serve.go:80-85
+      //     的 writeGone，文案见 respond.go:149-155："应用已下架…数据仍然保留"）；
+      //   - 目录：下架条目**照样列在应用中心**（api/read.go:432-441 的目录条件，
+      //     服务端同一处注释已就地勘误）。
+      '**已下架**（enabled=false）的应用也会列出，但它的域名**不能访问**：应用子域对下架应用一律返回 410 Gone（数据保留、恢复上架后链接不变），不要据此认为标识空闲。',
       '只读，不改变任何状态。',
     ].join(''),
     parameters: {},
@@ -478,7 +487,13 @@ export function registerWasmAppTools(ctx: Context, options: WasmAppToolOptions):
       'config **必填**（首次发布时 purpose / data_sensitivity / owner 三个声明缺一不可；更新版本时未改动的可以省略，服务端沿用原值）；',
       '给已有应用发新版本必须写 changelog（首版可以省略）。',
       '失败不占版本号：按返回的 error.code / details / hints 改完，用同一个版本号重发即可。',
-      '若企业开启了更新审批，新版本会进待审队列（结果里 status=pending，线上仍是旧版本，不影响正在使用的用户）。',
+      // 待审语义分两种（原句只写了第一种，"首版"那半句与实现不符）：
+      // 已有应用：目录与子域都继续用生效版本（serve.go 取 LatestApproved）；
+      // **首版**：没有任何 approved 版本 ⇒ 目录直接不列（api/read.go:440 的
+      // `CurrentReleaseID <= 0 → continue`）、子域 404"应用还没有可用版本"
+      // （appserver/serve.go:96-103）。写"线上仍是旧版本"会让模型以为首版也在服务。
+      '若企业开启了更新审批，新版本会进待审队列（结果里 status=pending）：已有应用线上仍是旧版本、不影响正在使用的用户；',
+      '**首版**发布时则是"审核通过前应用还没有可用版本"（应用中心里也还看不到它）。',
       SKILL_POINTER,
     ].join(''),
     parameters: {

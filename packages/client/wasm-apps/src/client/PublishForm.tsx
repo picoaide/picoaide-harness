@@ -593,12 +593,19 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
  *
  * 不合并、不摘要、不翻译：这些字段的第一消费者是 AI（它照着 `hints` 自修），第二消费者
  * 是员工（他要能把 `details` 复制给维护者）。
- * @param props - 结构化失败。
+ *
+ * `title` / `role` 可覆盖：作者生命周期（下架/删除/诊断，`AppCenterPanel`）复用**同一份**
+ * 渲染 —— 一次 403 在发布块与下架块上必须逐字段同形，两处各写一份必然漂移。
+ * @param props - 结构化失败、可选标题与 `data-role`。
  */
-export function PublishErrorBlock({ failure }: { failure: PublishFailure }) {
+export function PublishErrorBlock({ failure, title, role = 'publish-error' }: {
+  failure: PublishFailure
+  title?: string
+  role?: string
+}) {
   return (
-    <div style={BOX} data-role="publish-error" role="alert">
-      <div><strong>{t('appCenter.failed')}</strong></div>
+    <div style={BOX} data-role={role} role="alert">
+      <div><strong>{title ?? t('appCenter.failed')}</strong></div>
       <div data-role="error-code">{`${t('appCenter.errorCode')}: ${failure.code}`}</div>
       <div data-role="error-message">{failure.message}</div>
       {failure.details !== undefined && (
@@ -622,8 +629,13 @@ export function PublishErrorBlock({ failure }: { failure: PublishFailure }) {
 }
 
 /**
- * 成功块：版本 / 状态（已生效 or 待审核）/ **访问范围** / 入口链接 —— 员工提交完
+ * 成功块：版本 / 状态（已生效 / 待审核 / **已下架**）/ 访问范围 / 入口链接 —— 员工提交完
  * 立刻知道"生效了没有、谁能用"。
+ *
+ * 状态三分支（R1-uxc-1）：`app.enabled === false` 时**绝不能**显示"已生效" ——
+ * 服务端确实把版本落了库（`release.status=approved`、`current=true`），但应用处于下架
+ * 状态，应用子域返回 410 Gone，界面说"已生效"就是谎报。这一支必须同时给出**下一步**
+ * （先上架），否则作者只知道"没生效"而不知道怎么办。
  *
  * 回显 `access`（P1-3 的兜底要求）：发布是"整体替换配置"的语义，回显是作者唯一
  * 能事后核对"线上访问范围到底是什么"的地方（服务端发布响应里没有 `access`，
@@ -635,9 +647,18 @@ export function PublishSuccessBlock({ result, access }: { result: PublishSuccess
     <div style={BOX} data-role="publish-success">
       <div><strong>{t('appCenter.published')}</strong></div>
       <div data-role="published-version">{`${t('appCenter.versionLabel')}: ${result.version}`}</div>
-      <div data-role="published-status">
-        {result.pending ? t('appCenter.publishedPending') : t('appCenter.publishedLive')}
-      </div>
+      {!result.enabled
+        ? (
+            <>
+              <div data-role="published-status" data-enabled="false">{t('appCenter.publishedDisabled')}</div>
+              <div data-role="published-disabled-hint">{t('appCenter.publishedDisabledHint')}</div>
+            </>
+          )
+        : (
+            <div data-role="published-status" data-enabled="true">
+              {result.pending ? t('appCenter.publishedPending') : t('appCenter.publishedLive')}
+            </div>
+          )}
       {access !== undefined && (
         <div data-role="published-access" data-access={access}>
           {`${t('appCenter.access')}: ${t(ACCESS_LABEL_KEYS[access])}`}

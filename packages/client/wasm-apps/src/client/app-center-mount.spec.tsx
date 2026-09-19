@@ -40,7 +40,8 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppCenterPanel } from './AppCenterPanel.tsx'
-import { PUBLISH_PATH } from './publish-app.ts'
+import { PublishForm } from './PublishForm.tsx'
+import { PUBLISH_PATH, type PublishTarget } from './publish-app.ts'
 import { setActiveLocale } from './locales.ts'
 
 // React 18.3 在非测试构建下要求这个全局标记才认 `act()`。
@@ -734,5 +735,323 @@ describe('P1-10：超限文件在选文件时就被本地拦下（不读字节�
     await pickFile('.pico-app-center-file', 'exact.wasm', new Uint8Array([0, 97, 115, 109]), { size: 32 * 1024 * 1024 })
     expect(container.querySelector('[data-role="local-error"]')).toBeNull()
     expect(container.querySelector('[data-role="file-state"]')!.textContent).toContain('exact.wasm')
+  })
+})
+
+/** 找一张目录卡片（同一个选择器会命中多行，必须按标题锚定）。 */
+function cardOf(title: string): HTMLElement {
+  const card = [...container.querySelectorAll<HTMLElement>('.pico-app-center-card')]
+    .find(node => (node.textContent ?? '').includes(title))
+  if (card === undefined) throw new Error(`missing card: ${title}`)
+  return card
+}
+
+/** 在指定卡片里点一个元素（真 DOM 事件 + act）。 */
+async function clickIn(title: string, selector: string): Promise<void> {
+  const element = cardOf(title).querySelector<HTMLElement>(selector)
+  if (element === null) throw new Error(`missing ${selector} in ${title}`)
+  await act(async () => { element.click() })
+}
+
+/**
+ * R1-uxc-1：**已下架应用发新版**不得谎报"已生效"。
+ *
+ * 现场缺陷：`canPublish` 不判 `enabled`（同一行的"打开"判了）、`parsePublishOutcome`
+ * 把服务端确实下发的 `app.enabled` 丢掉、成功块无条件写"已生效" —— 于是作者上传 30 s+
+ * 之后看到"发布成功 · 已生效"，而应用子域仍是 410 Gone（服务端下架语义见
+ * `server/internal/wasmapp/appserver/serve.go` 的 writeGone；发布响应带 `enabled`
+ * 见 `server/internal/wasmapp/api/publish.go`）。
+ *
+ * ---- 变异验证 ----
+ *   - `parsePublishOutcome` 不读 `app.enabled`（P1 前的实现）⇒ (a) 红（成功块会出现
+ *     "已生效"且没有下架说明）；
+ *   - `PublishSuccessBlock` 的状态行改回 `pending ? … : 已生效`（不看 enabled）⇒ (a) 红；
+ *   - 目录行改回"下架就不渲染发新版按钮"（静默隐藏）⇒ 「按钮保留但禁用并写明原因」红；
+ *   - `live` 改回 `current === true || !pending`（不看 enabled）⇒ publish-app.spec 的
+ *     `live === false` 那条红。
+ */
+describe('R1-uxc-1：下架应用发新版（成功文案按服务端 enabled 分流）', () => {
+  /** 直接挂发布表单：下架应用的行内入口是**禁用**的（见下一条），因此要走表单本身。 */
+  async function mountForm(target?: PublishTarget): Promise<void> {
+    await act(async () => {
+      root.render(
+        <PublishForm
+          {...(target === undefined ? {} : { target })}
+          onClose={() => { closeCount += 1 }}
+          onPublished={() => {}}
+        />,
+      )
+    })
+  }
+
+  const DISABLED_TARGET: PublishTarget = {
+    appId: 'gone-tool', title: '已下线的工具', access: 'login', currentVersion: '1.0.0', owner: 'dave', purpose: '值班排班',
+  }
+
+  /** 服务端发布响应（`api/publish.go` 的 `{app,release,review_required}`）。 */
+  const publishResponse = (enabled: boolean): Response => jsonResponse(201, {
+    app: { app_id: 'gone-tool', title: '已下线的工具', enabled, entry_url: 'https://gone.apps.example.com/' },
+    release: { id: 2, version: '1.1.0', status: 'approved', current: true, checksum: 'abc', size: 8 },
+    review_required: false,
+  })
+
+  /** 填好必填项并提交。 */
+  async function submitRelease(): Promise<void> {
+    await pickFile('.pico-app-center-file', 'gone-tool.wasm', new Uint8Array([0, 97, 115, 109]))
+    await typeIntoPublishForm({ version: '1.1.0', sensitivity: 'internal' })
+    await click('.pico-app-center-submit')
+  }
+
+  it('(a) 服务端回 enabled=false ⇒ 成功块没有"已生效"，有下架说明 + 上架指引（并回显版本）', async () => {
+    stubFetch(url => (url === PUBLISH_PATH ? publishResponse(false) : jsonResponse(200, { apps: [] })))
+    await mountForm(DISABLED_TARGET)
+    await submitRelease()
+
+    const success = container.querySelector('[data-role="publish-success"]')
+    expect(success).not.toBeNull()
+    // 版本确实发布成功（这一点不能一起否认掉）。
+    expect(success!.textContent).toContain('1.1.0')
+    // ① 不得出现"已生效"（线上仍是 410 Gone，说已生效就是谎报）。
+    expect(success!.textContent).not.toContain('已生效')
+    expect(success!.querySelector('[data-role="published-status"]')!.getAttribute('data-enabled')).toBe('false')
+    // ② 必须说清"已下架 + 访问是 410"。
+    expect(success!.querySelector('[data-role="published-status"]')!.textContent).toContain('已下架')
+    expect(success!.querySelector('[data-role="published-status"]')!.textContent).toContain('410')
+    // ③ 必须给出下一步（先上架），否则作者只知道"没生效"而不知道怎么办。
+    expect(success!.querySelector('[data-role="published-disabled-hint"]')!.textContent).toContain('上架')
+  })
+
+  it('(b) 服务端回 enabled=true ⇒ 行为不变（仍是"已生效"，没有下架提示）', async () => {
+    stubFetch(url => (url === PUBLISH_PATH ? publishResponse(true) : jsonResponse(200, { apps: [] })))
+    await mountForm(DISABLED_TARGET)
+    await submitRelease()
+
+    const success = container.querySelector('[data-role="publish-success"]')!
+    expect(success.textContent).toContain('已生效')
+    expect(success.textContent).not.toContain('已下架')
+    expect(success.querySelector('[data-role="published-status"]')!.getAttribute('data-enabled')).toBe('true')
+    expect(success.querySelector('[data-role="published-disabled-hint"]')).toBeNull()
+  })
+
+  it('行内：已下架应用的"发新版"保留但禁用并写明原因（不静默隐藏），上架应用不受影响', async () => {
+    stubFetch(() => jsonResponse(200, CATALOG_FROM_ROUTE))
+    await mount()
+
+    const disabledRow = cardOf('已下线的工具')
+    const button = disabledRow.querySelector<HTMLButtonElement>('.pico-app-center-publish-new')
+    // ① 按钮还在（静默隐藏会让作者以为"这个应用不能发新版"）。
+    expect(button).not.toBeNull()
+    expect(button!.disabled).toBe(true)
+    expect(button!.getAttribute('aria-disabled')).toBe('true')
+    // ② 原因写在**可见文本**里（不靠 hover title）：已下架 + 410 + 先上架。
+    const reason = disabledRow.querySelector('[data-role="publish-new-disabled-reason"]')!.textContent ?? ''
+    expect(reason).toContain('已下架')
+    expect(reason).toContain('410')
+    expect(reason).toContain('上架')
+
+    // ③ 上架的应用行为不变：按钮可点。
+    expect(cardOf('隐藏工具').querySelector<HTMLButtonElement>('.pico-app-center-publish-new')!.disabled).toBe(false)
+    expect(cardOf('隐藏工具').querySelector('[data-role="publish-new-disabled-reason"]')).toBeNull()
+  })
+})
+
+/**
+ * R1-pm-1：作者的生命周期出口（下架/上架、删除、诊断）。
+ *
+ * 宿主早已把 `POST :app_id/(publish|unpublish)`、`DELETE :app_id`、
+ * `GET :app_id/diagnostics` 代理到本机面，而客户端面板此前只有"发布/发新版" ——
+ * 作者发错内容无法止损，排障只能靠猜（作者指南又明写"不要用 curl"）。
+ *
+ * ---- 变异验证 ----
+ *   - 删掉下架/删除的确认块（点按钮直接发请求）⇒ 两条"确认前 0 请求"红；
+ *   - 用请求里的值更新行（`setItem({enabled})` 而不是服务端的 `result.enabled`）⇒
+ *     「服务端说 unchanged 时行不跟着变」那条红（见下一条用例的服务端回包）；
+ *   - 删除后不等服务端 `deleted:true` 就收行 ⇒ 「DELETE 未返回 deleted 时行不消失」红；
+ *   - 诊断失败只显示"失败"（丢掉 code/message/hints）⇒ 「诊断失败时信封可见」红。
+ */
+describe('R1-pm-1：作者自服务（下架/上架、删除、诊断）', () => {
+  const OWNED_CATALOG = {
+    apps: [
+      { app_id: 'roster', title: '值班表', description: '', responsible: 'carol', entry_url: 'https://roster.apps.example.com/', access: 'login', enabled: true, current_version: '2.0.0', is_owner: true, purpose: '值班', whitelist: [] },
+      { app_id: 'other', title: '别人的应用', description: '', responsible: 'dave', entry_url: 'https://other.apps.example.com/', access: 'login', enabled: true, current_version: '1.0.0', is_owner: false },
+    ],
+  }
+
+  const lifecycleCalls = (suffix: string): Call[] => calls.filter(call => call.url.endsWith(suffix))
+
+  it('下架：二次确认（确认前 0 请求、确认后可键盘操作）⇒ 行按服务端 enabled 变已下架，并可再上架', async () => {
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, OWNED_CATALOG)
+      if (url === '/api/pico/apps/wasm/roster/unpublish') {
+        return jsonResponse(200, { app: { app_id: 'roster', enabled: false, changed: true } })
+      }
+      if (url === '/api/pico/apps/wasm/roster/publish') {
+        return jsonResponse(200, { app: { app_id: 'roster', enabled: true, changed: true, entry_url: 'https://roster.apps.example.com/' } })
+      }
+      throw new Error(`unexpected url: ${url}`)
+    })
+    await mount()
+
+    // 非发布者一个管理按钮都没有（服务端 ownedApp 对非发布者一律 404）。
+    expect(cardOf('别人的应用').querySelector('[data-role="row-actions"]')).toBeNull()
+
+    await clickIn('值班表', '.pico-app-center-take-offline')
+    const confirmBlock = cardOf('值班表').querySelector('[data-role="confirm-take-offline"]')
+    expect(confirmBlock).not.toBeNull()
+    // 说明里必须写清后果（所有访问者立刻 410）。
+    expect(confirmBlock!.querySelector('[data-role="confirm-message"]')!.textContent).toContain('410')
+    // ① **确认前不许发请求** —— 这就是"二次确认"的行为判据（去掉确认步骤即红）。
+    expect(lifecycleCalls('/unpublish')).toHaveLength(0)
+    // ② 键盘可达：确认按钮是真 <button>，出现后自动获得焦点。
+    const confirmButton = cardOf('值班表').querySelector<HTMLButtonElement>('.pico-app-center-confirm-take-offline')
+    expect(confirmButton!.tagName).toBe('BUTTON')
+    expect(document.activeElement).toBe(confirmButton)
+
+    await clickIn('值班表', '.pico-app-center-confirm-take-offline')
+    const unpublish = lifecycleCalls('/unpublish')
+    expect(unpublish).toHaveLength(1)
+    expect(unpublish[0]!.init.method).toBe('POST')
+    // ③ 行状态 = 服务端返回的 enabled（不是"我点了下架"）。
+    expect(cardOf('值班表').querySelector('[data-role="app-disabled"]')).not.toBeNull()
+    expect(cardOf('值班表').querySelector('.pico-app-center-bring-online')).not.toBeNull()
+    expect(cardOf('值班表').querySelector('.pico-app-center-take-offline')).toBeNull()
+    // 下架状态下"发新版"被禁用（发完仍是 410）。
+    expect(cardOf('值班表').querySelector<HTMLButtonElement>('.pico-app-center-publish-new')!.disabled).toBe(true)
+
+    // ④ 可再上架：服务端说 enabled=true 才回到上架态。
+    await clickIn('值班表', '.pico-app-center-bring-online')
+    expect(lifecycleCalls('/publish')).toHaveLength(1)
+    expect(cardOf('值班表').querySelector('[data-role="app-disabled"]')).toBeNull()
+    expect(cardOf('值班表').querySelector('.pico-app-center-take-offline')).not.toBeNull()
+    expect(cardOf('值班表').querySelector<HTMLButtonElement>('.pico-app-center-publish-new')!.disabled).toBe(false)
+  })
+
+  it('下架：服务端返回"状态没变"（changed=false, enabled=true）时行不得跟着请求走', async () => {
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, OWNED_CATALOG)
+      // 服务端幂等分支：状态本来就一致（api/release.go:69-73）。
+      return jsonResponse(200, { app: { app_id: 'roster', enabled: true, changed: false } })
+    })
+    await mount()
+    await clickIn('值班表', '.pico-app-center-take-offline')
+    await clickIn('值班表', '.pico-app-center-confirm-take-offline')
+    // 请求发出去了，但服务端说它仍然是上架的 ⇒ 行必须保持上架（乐观更新会在这里变已下架）。
+    expect(lifecycleCalls('/unpublish')).toHaveLength(1)
+    expect(cardOf('值班表').querySelector('[data-role="app-disabled"]')).toBeNull()
+    expect(cardOf('值班表').querySelector('.pico-app-center-take-offline')).not.toBeNull()
+  })
+
+  it('删除：二次确认后才发 DELETE；服务端确认 deleted 后行消失，并显示服务端说明与保留期', async () => {
+    const NOTE = 'R37 的"真删"由后台任务执行（当前未实现）：在此之前资源目录与应用库都会保留'
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, OWNED_CATALOG)
+      if (url === '/api/pico/apps/wasm/roster') {
+        return jsonResponse(200, { app: { app_id: 'roster', deleted: true, deleted_at: '2026-09-19T00:00:00Z' }, retention_days: 90, note: NOTE })
+      }
+      throw new Error(`unexpected url: ${url}`)
+    })
+    await mount()
+
+    await clickIn('值班表', '.pico-app-center-delete')
+    const confirm = cardOf('值班表').querySelector('[data-role="confirm-delete"]')
+    expect(confirm).not.toBeNull()
+    // 说明里必须写清"不可恢复"与"保留期以服务端为准"。
+    const message = confirm!.querySelector('[data-role="confirm-message"]')!.textContent ?? ''
+    expect(message).toContain('不可恢复')
+    expect(message).toContain('保留期')
+    // ① 确认前 0 请求。
+    expect(lifecycleCalls('/roster')).toHaveLength(0)
+
+    await clickIn('值班表', '.pico-app-center-confirm-delete')
+    const deletes = calls.filter(call => call.url === '/api/pico/apps/wasm/roster')
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0]!.init.method).toBe('DELETE')
+    // ② 行消失（按服务端确认的结果，不是本地先抹掉）。
+    expect(container.textContent).not.toContain('值班表')
+    // ③ 通知里是**服务端返回的**说明与保留期（客户端不复述"90 天后自动删除"）。
+    const notice = container.querySelector('[data-role="catalog-notice"]')
+    expect(notice).not.toBeNull()
+    expect(notice!.querySelector('[data-role="notice-note"]')!.textContent).toContain('由后台任务执行（当前未实现）')
+    expect(notice!.querySelector('[data-role="notice-retention"]')!.textContent).toContain('90')
+    // 别人的应用没被误删。
+    expect(container.textContent).toContain('别人的应用')
+  })
+
+  it('删除：服务端没确认 deleted ⇒ 行不消失，且信封可见（不假装删掉了）', async () => {
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, OWNED_CATALOG)
+      return jsonResponse(500, { error: { code: 'INTERNAL', message: '删除失败', hints: ['稍后重试'] } })
+    })
+    await mount()
+    await clickIn('值班表', '.pico-app-center-delete')
+    await clickIn('值班表', '.pico-app-center-confirm-delete')
+    // 行还在（服务端拒绝了），并显示了服务端信封。
+    expect(container.textContent).toContain('值班表')
+    const failure = cardOf('值班表').querySelector('[data-role="lifecycle-error"]')
+    expect(failure).not.toBeNull()
+    expect(failure!.querySelector('[data-role="error-code"]')!.textContent).toContain('INTERNAL')
+    expect(failure!.querySelector('[data-role="error-message"]')!.textContent).toContain('删除失败')
+    expect(failure!.querySelector('[data-role="error-hints"]')!.textContent).toContain('稍后重试')
+  })
+
+  it('诊断：只读展示服务端的最近失败（reason_code）与 hints，不改行状态', async () => {
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, OWNED_CATALOG)
+      if (url === '/api/pico/apps/wasm/roster/diagnostics') {
+        return jsonResponse(200, {
+          diagnostics: {
+            app_id: 'roster', app_enabled: true, app_frozen: false, app_deleted: false,
+            since: '2026-09-18T00:00:00Z', window_minutes: 1440, retention_days: 30,
+            summary: { app_id: 'roster', total: 12, ok: 9, error: 2, killed: 1, failed: 3, reasons: [], hints: [] },
+            failures: [
+              { created_at: '2026-09-19T01:00:00Z', outcome: 'error', reason_code: 'COMPILE_TIMEOUT', guest_exit_code: 1, stderr_tail: 'timeout', cpu_ms: 60000, peak_memory_bytes: 1024 },
+            ],
+            hints: ['把单次处理拆小：编译超时是 60 秒，超时会被杀'],
+          },
+        })
+      }
+      throw new Error(`unexpected url: ${url}`)
+    })
+    await mount()
+
+    const toggle = cardOf('值班表').querySelector<HTMLButtonElement>('.pico-app-center-diagnostics-toggle')
+    expect(toggle!.getAttribute('aria-expanded')).toBe('false')
+    await clickIn('值班表', '.pico-app-center-diagnostics-toggle')
+    // aria-expanded 与面板同步（键盘/读屏用户要知道它展开了）。
+    expect(cardOf('值班表').querySelector<HTMLButtonElement>('.pico-app-center-diagnostics-toggle')!.getAttribute('aria-expanded')).toBe('true')
+
+    const panel = cardOf('值班表').querySelector('[data-role="diagnostics"]')
+    expect(panel).not.toBeNull()
+    expect(panel!.querySelector('[data-role="diagnostics-summary"]')!.textContent).toContain('12')
+    expect(panel!.querySelector('[data-role="diagnostics-summary"]')!.textContent).toContain('3')
+    // reason_code 是排障的第一判据，必须显示。
+    expect(panel!.querySelector('[data-role="diagnostics-failure"]')!.textContent).toContain('COMPILE_TIMEOUT')
+    expect(panel!.querySelector('[data-role="diagnostics-hints"]')!.textContent).toContain('60 秒')
+    // 只读：行状态一个字节都没变。
+    expect(cardOf('值班表').querySelector('[data-role="app-disabled"]')).toBeNull()
+  })
+
+  it('诊断：服务端拒绝时错误可见（code/message/hints 逐字段，不只说"失败"）', async () => {
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, OWNED_CATALOG)
+      return jsonResponse(404, {
+        error: {
+          code: 'NOT_FOUND',
+          message: '应用不存在',
+          hints: ['只有发布者本人（或平台管理员）能管理该应用；应用标识一经发布不能改名'],
+        },
+      })
+    })
+    await mount()
+    await clickIn('值班表', '.pico-app-center-diagnostics-toggle')
+
+    const block = cardOf('值班表').querySelector('[data-role="diagnostics-error"]')
+    expect(block).not.toBeNull()
+    expect(block!.querySelector('[data-role="error-code"]')!.textContent).toContain('NOT_FOUND')
+    expect(block!.querySelector('[data-role="error-message"]')!.textContent).toContain('应用不存在')
+    expect(block!.querySelector('[data-role="error-hints"]')!.textContent).toContain('只有发布者本人')
+    // 诊断失败不得把行状态改掉，也不得退化成"没有失败记录"的假报告。
+    expect(cardOf('值班表').querySelector('[data-role="diagnostics-empty"]')).toBeNull()
+    expect(cardOf('值班表').querySelector('[data-role="app-disabled"]')).toBeNull()
   })
 })
