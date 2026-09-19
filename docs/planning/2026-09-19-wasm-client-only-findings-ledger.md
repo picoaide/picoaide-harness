@@ -759,6 +759,19 @@ GET /api/server/admin/wasm-apps/opens/summary
 **D. 未跑整仓打包/afterPack 实测**：F3 的新依赖在安装包内的解析靠 `verify:closure` 247 节点闭合推断（`REQUIRED_PACKAGED_RUNTIME_ENTRIES` 不逐条断言第三方 leaf，属既有盲区）。
 **E. L2 认账主体**（§T）：应用窗口 webContents 未采纳进 browser runtime（页面级动作仍只作用于浏览器标签）、真实 `WasmAppsWindowAdapter` 未实现、F16 `open` 真机联调未做。
 
+## AB. 发布与部署（2026-09-20）—— **已上线测试环境并端到端验证**
+
+**发版链**：PR **#101** → 五个必需检查全绿（Gate / Go server / Desktop Linux·Windows·macOS）→ squash 合并 master **`9c291df82c`**（版本 2.7.6-beta.5 已同步 root + desktop；拓扑检查：v2.7.6-beta.4 是祖先、无分叉）→ annotated tag **`v2.7.6-beta.5`** → tag CI **success**（含 Release 镜像归档）→ GitHub Release（zip 507,004,819 B + SHA256SUMS）+ R2 `beta/latest.json` 指向 2.7.6-beta.5（sha256 `b22a4197…`）。
+
+**部署**：`scp` → 远端 `sha256sum -c` 通过 → `/root/upgrade-beta.sh … beta /opt/picoaide 2.7.6-beta.5 …`（备份 → load → **按渠道重打 `beta-2.7.6-beta.5`** → 切 `.env` → 重建 → **healthy** → 自检），`UPGRADE_EXIT=0`。**回滚点**：`SERVER_IMAGE=picoaide-harness-server:beta-2.7.6-beta.4` 写回 `/opt/picoaide/.env` + `docker compose up -d server`。
+
+**端到端验证（从部署后的域名实拉）**：`/healthz`=`{"ok":true}`；manifest server/client 均 **2.7.6-beta.5**；实拉 AppImage size **153,643,408** 与 **sha256 与清单逐字一致**；解包 `app.asar` 的 `build/channel.json` = `channel_id=beta`、**`home_dir=.picoaide-harness`**（数据根未回归）、**`app_origin_scheme=picoaide-app`**（本期新字段真的进了随包配置）；asar 内含 `@picoaide/dsh-host-locale` 9 条、`dsh-host-home` 9 条、`wasm-apps-host/lib/app-proof.js` ✓。
+
+**发版途中修掉的三个真缺陷（都带判据/变异）**：① **构建期依赖环**（Gate 必红根因，且不存在任何构建顺序能产出全部产物）⇒ 抽出两个**零依赖叶子包** + desktop 保留 re-export 兼容面，边表按实测改写，`cycle-check.mjs` 断言「声明无环 ∧ 实测无环 ∧ 声明==实测」；干净态 `yarn check` 连续两次 25/25，强制全量 prebuild 后第三次同样绿（决策记录 `docs/decisions/2026-09-20-host-leaf-packages-build-graph.md`）。② **打包版 P0**：插件包声明 8 个 `exports` 却只构建 3 个 ⇒ `lib/app-proof.js` 从未产出，而 `desktop/lib/main.js` 值导入它 ⇒ 真实 asar 启动即 `ERR_MODULE_NOT_FOUND`（症状＝Linux e2e「app did not expose CDP within 30s」），**且 afterPack 清单不完整导致断言放过坏包** ⇒ 补齐 tsdown 四个 entry + 必需条目 + 新增判据「desktop 产物 import 的每个 `@picoaide/*` 子路径都必须在必需清单里」（变异验证过）。③ **守卫与环境耦合**：submodule 校验把 describe 段必须是 tag 当目标断言 ⇒ CI 浅检出恒红 ⇒ 降为 WARN（章程 §4.2）。
+**CodeQL**（非必需检查，不阻塞合并）：10 条中 2 条实缺陷已修（`check-workflows.mjs` 的 **ReDoS** 正则 → `[ \t]+`；`admin_opens.go` 用请求参数当 slice 容量 → 按实际行数），其余 7 条经核实为误报（`app_id` 经 `limits.AppIDPattern+MaxAppIDLen` 校验、`DataRoot` 为运维根、另有 `filepath.Dir` 越界断言）并逐条入库处置理由。
+
+**本次未带上**：Windows/macOS 探针（§H3）；应用维度 AI 用量归因（替代路径待实施）；客户端 UI 侧 AI 面板聊天（待拍板）；`atomic-write` 无 fsync；W4-12（L5 三文件七行）；**example-b / example-a 两栈未升级**（预发 tag 只构建 beta）。
+
 ## H. 发布前置（**非本仓可完成**；主控登记，需人工/私有仓/真机）
 
 | # | 前置 | 为什么必须做 | 完成判据 | 责任 |
