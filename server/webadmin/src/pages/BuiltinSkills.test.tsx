@@ -36,7 +36,7 @@ const VIEW = {
   dir: '/opt/picoaide/skills',
   dir_exists: true,
   skills: [SKILL],
-  problems: [] as Array<{ name: string; reason: string }>,
+  problems: [] as Array<{ name: string; name_bytes_hex?: string; reason: string }>,
   counts: { skills: 1, problems: 0 },
 }
 
@@ -64,7 +64,7 @@ describe('BuiltinSkills 平台内置技能（只读诊断面）', () => {
     expect(screen.queryByTestId('builtin-load-error')).not.toBeInTheDocument()
   })
 
-  it('技能被跳过时点名技能与原因（这正是"接口 200 + 空数组"看不见的部分）', async () => {
+  it('未收录条目点名技能与原因（这正是"接口 200 + 空数组"看不见的部分）', async () => {
     mockRequest.mockResolvedValueOnce({
       ...VIEW,
       skills: [],
@@ -77,11 +77,67 @@ describe('BuiltinSkills 平台内置技能（只读诊断面）', () => {
     render(<BuiltinSkills />)
 
     const box = await screen.findByTestId('builtin-problems')
-    expect(box).toHaveTextContent('1 条技能被跳过')
+    expect(box).toHaveTextContent('1 条未收录')
     expect(box).toHaveTextContent('app-builder')
     expect(box).toHaveTextContent('必须等于应用 ID')
     // 空清单 + 有原因 ⇒ 不能说成"目录不存在"。
     expect(await screen.findByTestId('builtin-empty')).toHaveTextContent('没有一条技能通过校验')
+  })
+
+  // F3-7（2026-09-19 第三轮审计）：标题的计数与列表口径必须一致。
+  // 历史问题：标题写「N 条技能被跳过」，而列表里已经包含"资产根散文件"这类**不是技能**
+  // 的条目（服务端 Problem 的语义早就扩了），两个口径打架 ⇒ 管理员按标题理解会漏判。
+  // 判据是**数量语义一致**（标题里的数字 == 列表条目数 == 服务端 problems 长度），
+  // 不是"文案里出现某个词"。
+  it('标题计数与列表条目数是同一个口径（散文件也算未收录条目）', async () => {
+    mockRequest.mockResolvedValueOnce({
+      ...VIEW,
+      skills: [SKILL],
+      problems: [
+        { name: 'SKILL.md', reason: '资产根目录只放技能子目录（<name>/SKILL.md）；散文件不会被打包下发' },
+        { name: '.DS_Store', reason: '资产根目录只放技能子目录（<name>/SKILL.md）；散文件不会被打包下发' },
+        { name: 'broken-skill', reason: 'manifest 校验未通过: 缺少 name' },
+      ],
+      counts: { skills: 1, problems: 3 },
+    } as never)
+    render(<BuiltinSkills />)
+
+    const count = await screen.findByTestId('builtin-count')
+    const list = await screen.findByTestId('builtin-problem-list')
+    const items = screen.getAllByTestId('builtin-problem-item')
+    // 标题里的数字必须等于列表条目数（3），且与可用技能数 1 并列显示。
+    expect(count).toHaveTextContent('1 条可用')
+    expect(count).toHaveTextContent('3 条未收录')
+    expect(items).toHaveLength(3)
+    expect(list).toHaveTextContent('.DS_Store')
+    expect(list).toHaveTextContent('broken-skill')
+    // 口径一致性断言（不是"存在某个词"）：标题里的数字 == 真实条目数。
+    const badgeText = count.textContent ?? ''
+    const shown = Number(/·\s*(\d+)\s*条未收录/u.exec(badgeText)?.[1] ?? '-1')
+    expect(shown).toBe(items.length)
+  })
+
+  // F3-6（2026-09-19 第三轮审计）：非法 UTF-8 文件名在 JSON 里退化成 `\ufffd`
+  // （两个不同的坏名字会显示成同一个 `��A`）⇒ 服务端补 name_bytes_hex，管理端必须
+  // 把它渲染出来，管理员才能定位到具体文件。
+  it('非法 UTF-8 名字渲染精确字节形态（两个坏名字可区分）', async () => {
+    mockRequest.mockResolvedValueOnce({
+      ...VIEW,
+      skills: [],
+      problems: [
+        { name: '\ufffd\ufffdA', name_bytes_hex: 'ff fe 41', reason: '资产根目录只放技能子目录（<name>/SKILL.md）；散文件不会被打包下发' },
+        { name: '\ufffd\ufffdB', name_bytes_hex: 'ff fd 42', reason: '资产根目录只放技能子目录（<name>/SKILL.md）；散文件不会被打包下发' },
+      ],
+      counts: { skills: 0, problems: 2 },
+    } as never)
+    render(<BuiltinSkills />)
+
+    const hexes = await screen.findAllByTestId('builtin-problem-name-hex')
+    expect(hexes).toHaveLength(2)
+    // 精确且**互不相同**：这正是 Name 里 `��` 做不到的事。
+    expect(hexes[0]).toHaveTextContent('ff fe 41')
+    expect(hexes[1]).toHaveTextContent('ff fd 42')
+    expect(hexes[0].textContent).not.toBe(hexes[1].textContent)
   })
 
   it('目录存在但里面什么都没有时，不得指向不存在的「被跳过」块（R2-SK-2）', async () => {
@@ -99,7 +155,7 @@ describe('BuiltinSkills 平台内置技能（只读诊断面）', () => {
     const empty = await screen.findByTestId('builtin-empty')
     // 判据：引用与真实存在的块一致 —— 没有块就不能引用它；文案要指向真实的排查动作。
     expect(screen.queryByTestId('builtin-problems')).not.toBeInTheDocument()
-    expect(empty).not.toHaveTextContent('被跳过')
+    expect(empty).not.toHaveTextContent('未收录')
     expect(empty).toHaveTextContent('没有任何条目')
   })
 

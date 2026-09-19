@@ -125,9 +125,26 @@ type CallMetrics struct {
 	GuestExitCode int32
 	// StderrTail 是 guest stderr 尾巴（诊断用，上限 limits.StderrTailBytes）。
 	StderrTail string
+	// Evidence 是**失败分类的依据**（RUNTIME_MEMORY 这类"事后无法分辨"的码尤其需要它）：
+	// 例如 `kind=stderr_oom_line; peak=…; limit=…; exit=2; anchored=true; line="runtime: out of memory: …"`。
+	//
+	// 为什么必须落库（第三轮审计 P3-1）：`oom_evidence` 与命中的证据行此前只存在于瞬时错误
+	// 信封，事后查 wasm_call_events 只能看到 "RUNTIME_MEMORY + peak 3.4 MiB + stderr_tail
+	// 全是 goroutine 回溯" —— 正好是"平台记录反过来证明不是内存问题"那幅自相矛盾的画面，
+	// 且无法分辨真 OOM / panic 误报 / 应用自己打印的同名文本。
+	//
+	// 有界：写入方保证 ≤ MaxEvidenceBytes，events 落库前再截一次（列是 TEXT，
+	// 一条超长证据会把诊断面刷爆）。
+	Evidence string
 	// StdoutLogs 是被判定为日志的 stdout 行数（§7.2「stdout 净化」统计）。
 	StdoutLogs int
 }
+
+// MaxEvidenceBytes 是 CallMetrics.Evidence 的上限（字节）。
+//
+// 200 与错误信封里的证据行上限同口径（runtime 的 `oomMarkerLineBytes` / `stderrFirstLine`）：
+// 一条超长行不该同时刷爆信封与调用事件表。
+const MaxEvidenceBytes = 200
 
 // Outcome 取值（§4.9 调用事件 outcome 列）。
 const (

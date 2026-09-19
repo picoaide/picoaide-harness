@@ -40,6 +40,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -130,9 +131,39 @@ type Entry struct {
 // 下发，同样必须可见）—— 见 loadLocked。
 type Problem struct {
 	// Name 被跳过条目的名字（技能目录名，或资产根目录下的散文件名）。
+	//
+	// **可能含 U+FFFD**：Linux 文件名是任意字节串，非法 UTF-8 的名字经
+	// `encoding/json` 编码后每个非法字节都变成 `\ufffd`（`��A`），两个不同的非法名
+	// 会显示成同一个名字 —— 管理员据此定位不到具体文件（2026-09-19 第三轮审计 F3-6）。
+	// 因此这里**原样保留**（诊断面不撒谎：名字确实是那个字节串），另外用
+	// NameBytesHex 给出精确且唯一的字节形态。
 	Name string `json:"name"`
+	// NameBytesHex 是 Name 的 UTF-8 字节十六进制（空格分隔），**仅当名字不是合法
+	// UTF-8 时**才填充 —— 它就是"到底是哪个文件"的精确答案：
+	// 两个不同的非法名在这里一定不同，而 Name 里可能显示成同一个 `��`。
+	// 合法 UTF-8 名字留空，前端不必为正常路径多显示一列。
+	NameBytesHex string `json:"name_bytes_hex,omitempty"`
 	// Reason 被跳过的原因（skillmanifest / archiveutil 的原始错误文本）。
 	Reason string `json:"reason"`
+}
+
+// nameBytesHex 返回非法 UTF-8 名字的字节十六进制；合法 UTF-8 返回空串。
+//
+// 为什么不直接替换 Name 里的非法字节：诊断面的职责是"让管理员找到那个文件"。
+// 替换会掩盖"这个名字根本不是合法 UTF-8"这个事实（人可能以为是终端渲染问题），
+// 而十六进制可以让运维直接 `printf '\x62\x61\x64'` 还原出来对照 `ls`。
+func nameBytesHex(name string) string {
+	if utf8.ValidString(name) {
+		return ""
+	}
+	var b strings.Builder
+	for i := 0; i < len(name); i++ {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "%02x", name[i])
+	}
+	return b.String()
 }
 
 // String 是启动日志用的单行形态（与既有日志文案逐字一致）。
@@ -274,15 +305,16 @@ func (c *Catalog) loadLocked() error {
 				// 「目录存在 + 空清单 + 零问题」，也就是"接口 200 + 空数组"的复现。
 				// 现在记一条 problem：不改判定（散文件确实不是技能），但必须可见。
 				problems = append(problems, Problem{
-					Name:   de.Name(),
-					Reason: "资产根目录只放技能子目录（<name>/SKILL.md）；散文件不会被打包下发",
+					Name:         de.Name(),
+					NameBytesHex: nameBytesHex(de.Name()),
+					Reason:       "资产根目录只放技能子目录（<name>/SKILL.md）；散文件不会被打包下发",
 				})
 				continue
 			}
 			name := de.Name()
 			entry, lerr := loadSkill(c.dir, name)
 			if lerr != nil {
-				problems = append(problems, Problem{Name: name, Reason: lerr.Error()})
+				problems = append(problems, Problem{Name: name, NameBytesHex: nameBytesHex(name), Reason: lerr.Error()})
 				continue
 			}
 			entries = append(entries, entry)

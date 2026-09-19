@@ -25,8 +25,14 @@ type Failure struct {
 	ReasonCode    string    `json:"reason_code"`
 	GuestExitCode int32     `json:"guest_exit_code"`
 	StderrTail    string    `json:"stderr_tail"`
-	CPUMs         int64     `json:"cpu_ms"`
-	PeakMemory    int64     `json:"peak_memory_bytes"`
+	// Evidence 是**分类依据**（第三轮审计 P3-1）：RUNTIME_MEMORY 这类码光看 reason_code +
+	// peak_memory_bytes 无法分辨"真 OOM / panic 误报 / 应用自己打印的同名文本"，而
+	// stderr_tail 往往全是 goroutine 回溯。内容形如
+	// `kind=stderr_oom_line; peak=…; limit=…; exit=2; anchored=true; line="runtime: out of memory: …"`，
+	// 有界（capapi.MaxEvidenceBytes）。空串 = 这次失败没有留下结构化依据（旧行/无依据的码）。
+	Evidence   string `json:"evidence"`
+	CPUMs      int64  `json:"cpu_ms"`
+	PeakMemory int64  `json:"peak_memory_bytes"`
 }
 
 // ReasonCount 是一个失败码的计数 + 它的可操作 hints。
@@ -87,7 +93,7 @@ func RecentFailures(ctx context.Context, db *sql.DB, appID string, limit int) ([
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, `SELECT created_at, outcome, reason_code, guest_exit_code,
-		stderr_tail, cpu_ms, peak_memory_bytes
+		stderr_tail, evidence, cpu_ms, peak_memory_bytes
 		FROM wasm_call_events
 		WHERE app_id = $1 AND outcome <> $2
 		ORDER BY created_at DESC, id DESC
@@ -101,7 +107,7 @@ func RecentFailures(ctx context.Context, db *sql.DB, appID string, limit int) ([
 		var f Failure
 		var created time.Time
 		if err := rows.Scan(&created, &f.Outcome, &f.ReasonCode, &f.GuestExitCode,
-			&f.StderrTail, &f.CPUMs, &f.PeakMemory); err != nil {
+			&f.StderrTail, &f.Evidence, &f.CPUMs, &f.PeakMemory); err != nil {
 			return nil, err
 		}
 		f.CreatedAt = created

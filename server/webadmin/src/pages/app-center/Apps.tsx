@@ -96,7 +96,14 @@ interface PendingRelease {
   id: number
   version: string
   status: string
+  /** 提交的标题(版本行自己的值;approve 是它进全组织目录的唯一入口)。 */
   title: string
+  /**
+   * 提交的描述(版本行自己的值;与 title 同源,approve 会把这两列一起公开)。
+   *
+   * 老版本服务端不下发它 ⇒ 消费侧一律 `?? ''`(旧服务端 + 新前端不炸)。
+   */
+  description?: string
   publisher: string
   /** 制品体积(字节);服务端字段名是 size。 */
   size: number
@@ -114,6 +121,44 @@ interface PendingRelease {
    * 依赖清单见 `temp/wasm-review-r1/fix-wave3.md` 的 R1-uxw-4 条目。
    */
   reason?: string
+}
+
+/**
+ * 待审版本**将公开的显示面**(标题/描述)与它相对线上生效版本的差异。
+ *
+ * 为什么必须在审批卡片上渲染(审计第三轮 B 区 CONFIRMED,2026-09-19):approve 是
+ * title/description 进全组织目录的**唯一入口**(待审期间 `apps.title` 刻意不写),
+ * 而首版待审时 `apps.title` 是 app_id 占位、按提交标题也搜不到 ⇒ 审批人此前只看到
+ * 版本号/提交人/时间/体积/变更说明,对"改名/换描述"是在看不到新值的情况下点「通过」
+ * 的(与上一批修掉的免审仿冒面同族)。
+ *
+ * 语义(占位不是标题,不伪造旧值):
+ *   - 有生效版本(`current_release_id > 0`)且与待审值不同 ⇒ `changed`,界面渲染
+ *     「现标题 X → 待审标题 Y」;
+ *   - 首版待审(没有生效版本)⇒ `firstRelease`,只渲染待审值并明说目录暂以应用标识占位;
+ *   - 值相同 ⇒ 只渲染一行现值(不制造"变更"的假象)。
+ */
+function pendingDisclosure(rel: PendingRelease, live: WasmApp): {
+  key: 'title' | 'description'
+  label: string
+  current: string
+  next: string
+  changed: boolean
+  firstRelease: boolean
+}[] {
+  const firstRelease = live.current_release_id <= 0
+  const rows = [
+    { key: 'title' as const, label: '标题', current: live.title ?? '', next: rel.title ?? '' },
+    { key: 'description' as const, label: '描述', current: live.description ?? '', next: rel.description ?? '' },
+  ]
+  return rows
+    .filter((row) => row.next !== '' || row.current !== '')
+    .map((row) => ({
+      ...row,
+      // 首版待审时 `live.title` 是 app_id 占位 ⇒ 那不是"现标题",不构成"变更"。
+      changed: !firstRelease && row.current !== '' && row.current !== row.next,
+      firstRelease,
+    }))
 }
 
 interface ReleasesResponse {
@@ -694,7 +739,12 @@ export default function Apps() {
         </p>
       )}
 
-      {/* 搜索 + 状态筛选(P1-7):两者都进查询串由服务端过滤,第 201 个应用可被检索。 */}
+      {/* 搜索 + 状态筛选(P1-7):两者都进查询串由服务端过滤,第 201 个应用可被检索。
+          ⚠️ 搜索**搜不到待审版本的新标题**:`q` 在服务端只匹配 apps 行的
+          title/owner/app_id,而待审标题刻意不写进 apps.title(那会重开"不过审就改名"
+          的免审仿冒面,见 publish.go 的 E1 注释)。取舍:审批人按 app_id/负责人/现标题
+          定位到应用,再在详情抽屉的待审卡片上核对「现标题 → 待审标题」(卡片渲染真值)。
+          不要为了搜索命中把待审标题写回 apps.title。 */}
       <form className="flex flex-wrap items-center gap-2" onSubmit={submitSearch}>
         <Input
           aria-label="搜索应用"
@@ -1250,6 +1300,42 @@ export default function Apps() {
                         <div className="text-xs text-muted-foreground">
                           提交人 {rel.publisher || '—'} · {fmtTime(rel.created_at)} · {fmtSize(rel.size)}
                         </div>
+                        {/* 待审版本将公开的显示面(审计第三轮 B 区 CONFIRMED):approve 是
+                            title/description 生效的唯一入口,审批人必须在**批准前**看到它们;
+                            与线上不同时用「现 X → 待审 Y」把变更顶到眼前(首版待审没有
+                            "现标题"—— 那时 apps.title 是 app_id 占位,不伪造旧值)。 */}
+                        {pendingDisclosure(rel, detail).map((row) => (
+                          <div
+                            key={row.key}
+                            className="text-xs"
+                            data-testid={`pending-${row.key}-${rel.version}`}
+                          >
+                            {row.changed ? (
+                              <>
+                                <span className="text-muted-foreground">现{row.label}</span>{' '}
+                                <span data-testid={`pending-${row.key}-current-${rel.version}`}>{row.current}</span>
+                                <span className="mx-1" aria-hidden="true">→</span>
+                                <span className="sr-only">改为</span>
+                                <span className="text-muted-foreground">待审{row.label}</span>{' '}
+                                <span className="font-medium" data-testid={`pending-${row.key}-next-${rel.version}`}>
+                                  {row.next || '(空)'}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="text-muted-foreground">{row.label}:</span>{' '}
+                                <span className="font-medium" data-testid={`pending-${row.key}-next-${rel.version}`}>
+                                  {row.next || '—'}
+                                </span>
+                                {row.firstRelease && row.key === 'title' && (
+                                  <span className="ml-1 text-muted-foreground">
+                                    (首版待审;目录暂以应用标识占位)
+                                  </span>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        ))}
                         {rel.changelog && (
                           <div className="text-xs text-muted-foreground">变更说明:{rel.changelog}</div>
                         )}

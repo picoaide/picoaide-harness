@@ -157,6 +157,25 @@ export default function Settings() {
             <span className="font-mono">*.该域名</span> 通配证书 ②通配 DNS 解析到本服务端
             ③在部署 .env 里显式配置可信反向代理（PICOAI_TRUSTED_PROXIES）。留空 = 关闭应用子域。
           </p>
+          {/* 保存期的两条硬要求（2026-09-19 第三轮对抗审计 A-6）：服务端保存时会 fail-closed
+              校验这两条（判据与换票签发侧同一份），这里把结论讲给管理员。
+              只做**告知**，不在前端拦（服务端才是权威，前端硬校验反而会挡住合法形态）。 */}
+          <p className="text-[11px] text-muted-foreground" data-testid="settings-domain-rules">
+            <strong>两条硬要求</strong>（不满足时保存会被拒绝；已经在跑旧配置的部署会让
+            <strong>登录可见 / 白名单应用一律拒绝签发票</strong> —— 员工打开就是 500，日志里带原因）：
+            <br />
+            ① <strong>能承载 Cookie 的域名</strong>：两级以上的普通域名。不能是 IP、单标签
+            （<span className="font-mono">intranet</span>）、公网后缀（<span className="font-mono">co.uk</span>）、
+            保留名（<span className="font-mono">localhost</span>）、含下划线，也不能多写结尾点
+            （<span className="font-mono">example.com..</span>）。
+            <br />
+            ② <strong>必须与对外地址同域</strong>：控制台里的
+            <span className="font-mono">server.base_url</span> 或部署环境的
+            <span className="font-mono">PICOAI_PUBLIC_BASE_URL</span> 要写成
+            <span className="font-mono">https://该域名</span> 本身（应用地址是它的子域，
+            同一张通配证书覆盖两者）。两者不同域时保存会被拒绝；要保留原来的对外地址，
+            就得把基域改成那个地址的主机名，或留空关闭应用子域。
+          </p>
           <div className="flex flex-wrap items-center gap-2">
             <Input
               id="wasm-base-domain"

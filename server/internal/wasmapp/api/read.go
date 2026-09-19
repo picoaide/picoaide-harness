@@ -217,7 +217,7 @@ func (h *Handlers) schema(c *gin.Context) {
 	}
 	// §8：自省"仅发布者 + 审计" —— 每次调用都留痕（自省面会暴露应用的数据规模）。
 	h.auditApp(appID, u.Username, "wasm_app_schema_view",
-		auditDetail(appID, app.Title, "查看表结构与占用"))
+		auditDetail(appID, auditTitleOf(app), "查看表结构与占用"))
 
 	report, serr := h.inspectAppDB(c.Request.Context(), appID)
 	if serr != nil {
@@ -613,6 +613,23 @@ func (h *Handlers) myReleases(c *gin.Context) {
 // 导出：GET .../wasm/:app_id/export（R37 只读快照）
 // ---------------------------------------------------------------------------
 
+// exportTitleSource 标注导出里 `app.title` 的来源（占位不是真实标题）。
+//
+// 与 auditTitleOf 同一口径（真实标题 = 生效版本的标题），只是导出面不能改字段值
+// （format /1 的数据契约）⇒ 用**来源标注**把"这是占位"讲清楚。
+func exportTitleSource(app *serverstore.WasmApp) string {
+	switch {
+	case app == nil:
+		return "empty"
+	case app.CurrentReleaseID > 0 && strings.TrimSpace(app.Title) != "":
+		return "release"
+	case strings.TrimSpace(app.Title) == "":
+		return "empty"
+	default:
+		return "app_id_placeholder"
+	}
+}
+
 func (h *Handlers) export(c *gin.Context) {
 	if err := h.requireReady(); err != nil {
 		writeErr(c, err)
@@ -631,7 +648,7 @@ func (h *Handlers) export(c *gin.Context) {
 		return
 	}
 	h.auditApp(appID, u.Username, "wasm_app_export",
-		auditDetail(appID, app.Title, "导出控制面快照"))
+		auditDetail(appID, auditTitleOf(app), "导出控制面快照"))
 
 	rows := make([]gin.H, 0, len(releases))
 	var currentVersion string
@@ -668,8 +685,17 @@ func (h *Handlers) export(c *gin.Context) {
 		"format":      "picoaide.wasm-app-export/1",
 		"exported_at": h.now().UTC(),
 		"app": gin.H{
-			"app_id":             app.AppID,
-			"title":              app.Title,
+			"app_id": app.AppID,
+			"title":  app.Title,
+			// 标题的**来源**（审计第三轮 B 区，2026-09-19）：首版待审期间 apps.title 是
+			// app_id 占位而不是任何一版的真实标题 —— 导出是给 AI/运维读的控制面快照，
+			// 光看 `title: "brand-new-tool"` 会把占位当事实（"这个应用叫这个名字"）。
+			// 取值：
+			//   release            = apps.title 是**生效版本**标题的投影（唯一可信的标题来源）；
+			//   app_id_placeholder = 还没有生效版本，title 是 app_id 占位（不是真实标题）；
+			//   empty              = 没有生效版本且行里也没有标题（历史残渣）。
+			// 加字段不改值 ⇒ format 仍是 picoaide.wasm-app-export/1。
+			"title_source":       exportTitleSource(app),
 			"description":        app.Description,
 			"owner":              app.Owner,
 			"channel":            app.Channel,

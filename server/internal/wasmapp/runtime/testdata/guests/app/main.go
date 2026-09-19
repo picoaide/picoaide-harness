@@ -110,6 +110,39 @@ func main() {
 			code = 7
 		}
 		os.Exit(code)
+	case "/stderr-then-alloc":
+		// 第三轮审计 P2-1 的行为级护栏：先往 stderr 写 noise 字节**普通日志**，再做
+		// 一次性巨块分配（真 Go 运行时 OOM ⇒ proc_exit(2)）。
+		//
+		// 旧实现的判据绑在"stderr 开头 2 KiB 窗口"上：应用在 OOM 前打 ≥ ~2 KiB 日志就把
+		// 运行时的特征行挤出窗口 ⇒ 退回 RUNTIME_GUEST_EXIT（hints 把作者引向 os.Exit，
+		// 方向错）。改成滚动匹配后，noise 取多少都必须仍是 RUNTIME_MEMORY。
+		noise := queryInt(query, "noise", 0)
+		if noise > 0 {
+			blob := make([]byte, noise)
+			for i := range blob {
+				blob[i] = 'L'
+			}
+			blob[len(blob)-1] = '\n' // 噪声结束在行尾（运行时的输出从行首开始）
+			if _, err := os.Stderr.Write(blob); err != nil {
+				os.Exit(9)
+			}
+		}
+		doAlloc(query)
+	case "/panic-oom":
+		// 第三轮审计 P2-2 的行为级护栏：普通 panic，消息里**恰好含** "out of memory"
+		// （非恶意：包装一句上游错误串是常见写法）。未 recover 的 panic 与运行时 OOM
+		// **共用退出码 2**，所以判据只能是"运行时形态的特征行"而不是裸子串 ——
+		// 这一档必须仍是 RUNTIME_GUEST_EXIT。
+		panic("tool failed: upstream returned: out of memory while reading resultset")
+	case "/forge-oom":
+		// 伪造形态（审计探针）：打印**裸的** "out of memory" 再 os.Exit(2)。
+		// 旧判据（子串命中）会把它归成 RUNTIME_MEMORY；收紧到运行时前缀后它必须仍是
+		// GUEST_EXIT。⚠️ 逐字打印运行时那一行仍然可以伪造成功（guest 控制 stderr，
+		// wazero 没有宿主侧分配失败回调）—— 这条边界在 errors.go 的 stderrOOMEvidence
+		// 注释里如实记着，不在本用例的断言范围内。
+		fmt.Fprintf(os.Stderr, "out of memory\n")
+		os.Exit(2)
 	case "/silent":
 		// 什么都不写就正常退出：宿主必须报 RUNTIME_NO_RESPONSE（绝不 200）。
 		return

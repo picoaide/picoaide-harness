@@ -59,7 +59,10 @@ const APP_LIST = [LIVE, OFF, FROZEN, REVIEWING]
 /** 待审版本清单(GET /wasm-apps/:app_id/releases?status=pending)。 */
 const PENDING_RELEASES = [
   {
-    id: 21, version: '1.2.0', status: 'pending', title: '待审应用', publisher: 'dave',
+    id: 21, version: '1.2.0', status: 'pending', title: '待审应用',
+    // 描述与线上一致(夹具默认场景 = 只改代码不改门面)⇒ 卡片不得制造"变更"假象。
+    description: '团队共享的便签墙',
+    publisher: 'dave',
     size: 2 * 1024 * 1024, checksum: 'ab12', changelog: '加了导出',
     created_at: '2026-09-19T02:00:00Z', current: false,
   },
@@ -588,6 +591,107 @@ describe('应用中心 · 更新审批闭环', () => {
     expect(block).toHaveTextContent('当前生效版本')
     expect(block).toHaveTextContent('1.0.2')
     expect(block).toHaveTextContent('加了导出')
+  })
+
+  // -------------------------------------------------------------------------
+  // 审计第三轮 B 区 CONFIRMED(2026-09-19):审批人看不到待审标题 ⇒ 盲批。
+  //
+  // approve 是 title/description 进全组织目录的**唯一入口**(待审期间 apps.title
+  // 刻意不写),而首版待审时 apps.title 是 app_id 占位、按提交标题也搜不到 ⇒ 卡片
+  // 必须自己把待审显示面渲染出来。判据是**结果级**的:DOM 文本里必须出现待审标题。
+  // -------------------------------------------------------------------------
+
+  it('待审卡片渲染将公开的标题/描述(与线上不同 ⇒ 「现 X → 待审 Y」对照)', async () => {
+    const renamed = [{
+      ...PENDING_RELEASES[0]!,
+      title: 'IT 密码重置',
+      description: 'IT 密码重置:请在此输入你的域账号密码',
+    }]
+    mockRequest.mockImplementation(async (path: string) => {
+      const full = String(path)
+      const base = full.split('?')[0]!
+      if (base === '/api/server/admin/wasm-apps') return listPage(new URLSearchParams())
+      if (base.includes('/releases')) {
+        const wanted = new URLSearchParams(full.split('?')[1] ?? '').get('status') ?? 'pending'
+        return {
+          app_id: 'review-me', status: wanted, current_version: '1.0.2',
+          releases: wanted === 'rejected' ? REJECTED_RELEASES : renamed,
+          pending_count: 1,
+        }
+      }
+      if (base.endsWith('/diagnostics')) return { diagnostics: DIAGNOSTICS }
+      throw new Error(`unexpected ${path}`)
+    })
+    await renderList()
+    fireEvent.click(within(rowOf('review-me')).getByRole('button', { name: '详情' }))
+
+    const block = await screen.findByTestId('pending-block')
+    await within(block).findByTestId('pending-list')
+    // ① 待审标题必须真的出现在 DOM 里(而不是只存在于接口响应里)。
+    expect(within(block).getByTestId('pending-title-next-1.2.0')).toHaveTextContent('IT 密码重置')
+    // ② 与线上标题不同 ⇒ 「现标题 → 待审标题」对照(旧值也必须在场,否则看不出改了什么)。
+    expect(within(block).getByTestId('pending-title-current-1.2.0')).toHaveTextContent('待审应用')
+    expect(within(block).getByTestId('pending-title-1.2.0')).toHaveTextContent('现标题')
+    expect(within(block).getByTestId('pending-title-1.2.0')).toHaveTextContent('待审标题')
+    // 描述同理(approve 会把 description 一起公开)。
+    expect(within(block).getByTestId('pending-description-next-1.2.0'))
+      .toHaveTextContent('请在此输入你的域账号密码')
+    expect(within(block).getByTestId('pending-description-current-1.2.0'))
+      .toHaveTextContent('团队共享的便签墙')
+  })
+
+  it('首版待审:渲染待审标题并明说目录暂以应用标识占位(不伪造"现标题")', async () => {
+    const first = [{
+      ...PENDING_RELEASES[0]!,
+      version: '1.0.0',
+      title: 'IT 密码重置',
+      description: 'IT 密码重置:请在此输入你的域账号密码',
+    }]
+    // apps 行还是 app_id 占位(首版待审:current_release_id = 0)。
+    appsFixture = [{
+      ...REVIEWING, app_id: 'brand-new-tool', title: 'brand-new-tool', description: '',
+      current_release_id: 0, current_version: '', pending_releases: ['1.0.0'], pending_count: 1,
+    }] as typeof APP_LIST
+    mockRequest.mockImplementation(async (path: string) => {
+      const full = String(path)
+      const base = full.split('?')[0]!
+      if (base === '/api/server/admin/wasm-apps') return listPage(new URLSearchParams())
+      if (base.includes('/releases')) {
+        const wanted = new URLSearchParams(full.split('?')[1] ?? '').get('status') ?? 'pending'
+        return {
+          app_id: 'brand-new-tool', status: wanted, current_version: '',
+          releases: wanted === 'rejected' ? [] : first,
+          pending_count: 1,
+        }
+      }
+      if (base.endsWith('/diagnostics')) return { diagnostics: DIAGNOSTICS }
+      throw new Error(`unexpected ${path}`)
+    })
+    render(<Apps />)
+    // 占位场景里 title 与 app_id 同值(两列文本相同)⇒ 取第一个命中所在的 <tr>。
+    const cells = await screen.findAllByText('brand-new-tool')
+    const row = cells[0]!.closest('tr')
+    if (row === null) throw new Error('未找到 brand-new-tool 所在的行')
+    fireEvent.click(within(row).getByRole('button', { name: '详情' }))
+
+    const block = await screen.findByTestId('pending-block')
+    await within(block).findByTestId('pending-list')
+    expect(within(block).getByTestId('pending-title-next-1.0.0')).toHaveTextContent('IT 密码重置')
+    expect(within(block).getByTestId('pending-title-1.0.0')).toHaveTextContent('首版待审')
+    // 占位不是"现标题":不得渲染成"现标题 brand-new-tool → ..."(那是伪造旧值)。
+    expect(within(block).queryByTestId('pending-title-current-1.0.0')).toBeNull()
+    expect(within(block).getByTestId('pending-title-1.0.0')).not.toHaveTextContent('→')
+  })
+
+  it('待审值与线上相同 ⇒ 不制造"变更"假象(只渲染现值一行)', async () => {
+    await renderList()
+    fireEvent.click(within(rowOf('review-me')).getByRole('button', { name: '详情' }))
+    const block = await screen.findByTestId('pending-block')
+    await within(block).findByTestId('pending-list')
+    // 夹具里待审标题/描述与线上一致(待审应用 / 团队共享的便签墙)⇒ 不出现对照。
+    expect(within(block).getByTestId('pending-title-next-1.2.0')).toHaveTextContent('待审应用')
+    expect(within(block).queryByTestId('pending-title-current-1.2.0')).toBeNull()
+    expect(within(block).queryByTestId('pending-description-current-1.2.0')).toBeNull()
   })
 
   it('详情抽屉渲染「最近被拒」版本与**驳回理由**(R1-uxw-4:理由此前只躺在审计详情里)', async () => {

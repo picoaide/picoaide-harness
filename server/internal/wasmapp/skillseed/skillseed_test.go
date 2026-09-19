@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -658,6 +659,89 @@ func TestAdminListBuiltinReportsLooseFilesAtAssetRoot(t *testing.T) {
 	// 启动日志与诊断面同一份事实（main.go 打的就是这个）。
 	if got := h.Catalog().Problems(); len(got) != 2 {
 		t.Fatalf("Catalog.Problems() 必须与诊断面一致（启动日志用）: %v", got)
+	}
+}
+
+// 非 UTF-8 的散文件名：Linux 文件名是任意字节串，`encoding/json` 会把每个非法字节
+// 编码成 U+FFFD，于是两个**不同**的坏名字在管理端显示成同一个 `��A` —— 管理员据此
+// 定位不到具体是哪个文件（2026-09-19 第三轮审计 F3-6）。
+//
+// 判据不是"名字里出现某个字符"，而是**可区分性**：两个不同非法名在诊断面必须给出
+// 不同的表示，且 JSON 必须可解析、无非法编码（非法字节绝不能原样进 JSON —— 那会让
+// 前端 JSON.parse 抛错或静默丢字符）。
+func TestAdminListBuiltinDisambiguatesNonUTF8Names(t *testing.T) {
+	root := t.TempDir()
+	// `\xff\xfeA` 与 `\xff\xfdA`：经 JSON 编码后都是 "\ufffd\ufffdA"。
+	names := []string{"\xff\xfeA", "\xff\xfdA"}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o644); err != nil {
+			t.Skipf("本文件系统不接受非 UTF-8 文件名（%v）—— 该缺陷只在 Linux/Ext4 类文件系统上可复现", err)
+		}
+	}
+	// 先确认文件系统真的把字节原样存下来了（某些文件系统会归一化/拒绝，测试跳过而不是假绿）。
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if utf8.ValidString(e.Name()) {
+			t.Skipf("文件系统把非法字节归一化了（%q 成了合法 UTF-8）—— 该缺陷在此不可复现", e.Name())
+		}
+		stored[nameBytesHex(e.Name())] = true
+	}
+	if len(stored) != 2 {
+		t.Skipf("文件系统只存下 %d 个非法名（want 2）", len(stored))
+	}
+
+	h := NewHandlers(New(root))
+	w := doGet(t, adminTestRouter(h), "/api/server/admin/skills/builtin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("非法文件名也必须 200（页面要能显示原因），得到 %d %s", w.Code, w.Body.String())
+	}
+	// ① JSON 必须可解析（非法字节不得原样进响应体）。
+	var payload struct {
+		Problems []struct {
+			Name         string `json:"name"`
+			NameBytesHex string `json:"name_bytes_hex"`
+		} `json:"problems"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("诊断面 JSON 必须可解析（非法 UTF-8 不得原样进 JSON）: %v", err)
+	}
+	if len(payload.Problems) != 2 {
+		t.Fatalf("两个非法名散文件都要登记（want 2）: %+v", payload.Problems)
+	}
+	// ② 每个问题项都必须带精确字节形态，且**覆盖到全部两个真实文件名** ——
+	// 这才是"可区分"的判据：只断言"字段非空"会让两个都指向同一个文件的实现通过。
+	got := map[string]bool{}
+	for _, p := range payload.Problems {
+		if p.NameBytesHex == "" {
+			t.Fatalf("非法 UTF-8 名字必须给出 name_bytes_hex（否则两个坏名字在页面上不可区分）: %+v", p)
+		}
+		raw, err := hex.DecodeString(strings.ReplaceAll(p.NameBytesHex, " ", ""))
+		if err != nil {
+			t.Fatalf("name_bytes_hex 必须是空格分隔的十六进制: %q (%v)", p.NameBytesHex, err)
+		}
+		if utf8.Valid(raw) {
+			t.Fatalf("name_bytes_hex 对应的字节不该是合法 UTF-8（否则它没必要单列）: %q", p.NameBytesHex)
+		}
+		got[p.NameBytesHex] = true
+	}
+	if len(got) != 2 {
+		t.Fatalf("两个不同非法名必须给出**不同**的 name_bytes_hex（现在 %d 个不同值）⇒ 管理员仍分不清", len(got))
+	}
+	for want := range stored {
+		if !got[want] {
+			t.Fatalf("诊断面漏了真实文件 %q（实际给出 %v）", want, got)
+		}
+	}
+	// ③ 反向断言：合法 UTF-8 名字**不得**填充 name_bytes_hex（正常路径不许多一列噪音）。
+	if got := nameBytesHex("SKILL.md"); got != "" {
+		t.Fatalf("合法 UTF-8 名字不该有 name_bytes_hex，得到 %q", got)
+	}
+	if got := nameBytesHex("技能.md"); got != "" {
+		t.Fatalf("合法 UTF-8（非 ASCII）名字不该有 name_bytes_hex，得到 %q", got)
 	}
 }
 

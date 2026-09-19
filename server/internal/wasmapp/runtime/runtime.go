@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -400,6 +401,7 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 		r.logf("guest 未在宽限内退出 app=%s（结论不受影响）", req.Envelope.AppID)
 	}
 	samplePeak(mod, &out.peak)
+	oomHit, _ := stderr.OOMHit()
 
 	// 结论优先级：循环里记下的致命错误 > guest 结束形态。
 	f := failureContext{
@@ -413,10 +415,12 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 		// 采样到的内存峰值（R1-e2e-1 的**现场证据**）：Go 运行时 OOM 只留下"退出码 2"，
 		// 要靠"峰值贴近上限"才能把它与"应用自己 os.Exit(2)"区分开。
 		peakMemoryBytes: out.peak,
-		// stderr 的**开头**（R2-DG-1 的证据）：一次性巨块分配的 OOM 峰值只有常态水位，
-		// 但它必然在 stderr 最前面打 `fatal error: out of memory` —— 那份特征串只存在于
-		// 开头窗口里（尾巴早被 goroutine 回溯挤满）。
-		stderrHead: stderr.Head(),
+		// stderr 里**命中的运行时 OOM 特征行**（R2-DG-1 的证据源，第三轮审计改为滚动匹配）：
+		// 一次性巨块分配的 OOM 峰值只有常态水位，唯一证据是运行时自己打的
+		// `runtime: out of memory: cannot allocate …` 那一行 —— 它出现在 stderr 的**任意
+		// 位置**（应用先打多少日志都不影响判定），由 tailBuffer 的滚动扫描取出。
+		stderrOOMLine:     oomHit.line,
+		stderrOOMAnchored: oomHit.anchored,
 	}
 	fatal := out.fatal
 	if fatal == nil {
@@ -799,43 +803,230 @@ func (g *guestWriter) writeFrame(ctx context.Context, payload []byte) error {
 	}
 }
 
-// tailBuffer 是 stderr 的**有界开头 + 有界尾巴**缓冲。
+// oomMarkerLineBytes 是"命中的 OOM 特征行"保留的字节数上限。
+//
+// 它与 `limits.StderrTailBytes` 无关：那条是**诊断尾巴**的长度上限，这条只是证据行
+// （分类依据要进错误信封与调用事件，一条超长行会把两个面都刷爆）。
+const oomMarkerLineBytes = 200
+
+// oomMarkerHit 是一处命中的"Go 运行时 OOM 特征行"（滚动扫描的产物，只给分类器/证据面）。
+type oomMarkerHit struct {
+	// line 是命中行的原文（去掉行尾换行、≤ oomMarkerLineBytes 字节）。
+	line string
+	// anchored 表示命中落在**行首**（运行时自己那一行的形态：`runtime: out of memory: …`）。
+	// 非行首命中只可能在没有 `panic: ` 行时成立（见 scanLocked 的判据）。
+	anchored bool
+}
+
+// tailBuffer 是 stderr 的**有界尾巴**缓冲 + **常量内存**的运行时 OOM 特征行滚动匹配。
 //
 // 诊断面（`limits.StderrTailBytes`）只收**末尾**那一段（§4.9：作者最需要的是崩溃前的
-// 最后几行），这一半保持不变。但分类器还需要**开头**：Go 运行时 OOM 的特征串
-// （`fatal error: out of memory` / `runtime: out of memory: cannot allocate …`）打在
-// stderr 的**最前面**，随后是上万字节的 goroutine 回溯 —— 只留尾巴时特征串必然被挤掉，
-// 于是"一次性巨块分配"这条最需要方向正确的路径反而失去了唯一的证据（R2-DG-1）。
+// 最后几行），这一半的语义与上限都不变。分类器要的那份证据则换成**滚动匹配**：
 //
-// 因此这里再多留一份**等长**的开头（同样 2 KiB，不进诊断面、只给分类器）：内存代价是
-// 每请求多 2 KiB，换来"OOM 的两种形态（分块累积 / 一次性巨块）都判得出来"。
+//   - 旧实现（R2-DG-1）用"开头 2 KiB 窗口"装 OOM 特征串 —— 判据等于绑死在窗口大小上：
+//     应用只要在 OOM 前先往 stderr 打 ≥ 2 KiB 普通日志（一次 log/一行 JSON 就够），
+//     特征串就落出窗口，退回 `RUNTIME_GUEST_EXIT` + "检查 os.Exit"的方向错诊断
+//     （第三轮审计 P2-1 实测：noise=2100/4096 ⇒ GUEST_EXIT）；
+//   - 现在改为**流式扫描**：只保留"当前行的前 ≤200 字节"+ 命中行，状态是**常量级**的
+//     （与 guest 写入量无关），所以"先写任意量噪声、再写真 OOM 特征行"恒能被判出来，
+//     而 guest 也无法借此放大常驻内存（P3-3）。
+//
+// 判据（行首锚定 + panic 排除，见 scanLocked）：命中文本必须是运行时自己的形态；
+// 未见过 `panic: ` 行时允许行内命中，见过之后只认行首命中 —— 普通 panic 的消息里
+// 包装一句同名文本（非恶意）不得被误判成平台内存事故（第三轮审计 P2-2）。
 //
 // 并发安全：guest 在独立 goroutine 里写，宿主在结论处读；收尾宽限用尽后 guest 仍可能
 // 在写（我们不阻塞等它），所以必须有锁，且 Write 永不失败。
 type tailBuffer struct {
-	mu   sync.Mutex
-	max  int
-	head []byte
-	buf  []byte
+	mu  sync.Mutex
+	max int
+	// buf 是诊断尾巴：长度 ≤ max，**容量恒为 max**（构造时一次性分配，Write 只复用、
+	// 不按写入量放大 —— 旧实现的 `append` 会让一次 8 MiB 写入留下 8 MiB 常驻容量，P3-3）。
+	buf []byte
+
+	// 以下是滚动匹配的全部状态（常量级）：
+	//   line      = 当前行的前 oomMarkerLineBytes 字节（命中行原文的来源）
+	//   lineN     = 当前行已收字节数
+	//   panicLine = 当前行的行首是 `panic: `
+	//   panicSeen = 见过 `panic: ` 行（此后只认行首命中）
+	//   truncated = 当前行超过 oomMarkerLineBytes，剩余部分只跳到换行（不能让行内文本
+	//               冒充"行首"，否则 `panic: …runtime: out of memory…` 的超长消息会被误判）
+	//   pending   = 当前行已判定命中（1=行首、2=行内），但这一行可能还没收完
+	//   refining  = 命中已记录、仍在把**命中那一行**补全（证据行越完整越好：
+	//               `cannot allocate 65011712-byte block` 里的数字就是作者最需要的线索）
+	//   hit       = 第一处命中（只记第一处：分类与证据都只需要一个）
+	line      [oomMarkerLineBytes]byte
+	lineN     int
+	panicLine bool
+	panicSeen bool
+	truncated bool
+	pending   int
+	refining  bool
+	hit       oomMarkerHit
 }
 
-func newTailBuffer(max int) *tailBuffer { return &tailBuffer{max: max} }
+func newTailBuffer(max int) *tailBuffer {
+	if max < 0 {
+		max = 0
+	}
+	return &tailBuffer{max: max, buf: make([]byte, 0, max)}
+}
 
 func (b *tailBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if len(b.head) < b.max {
-		n := b.max - len(b.head)
-		if n > len(p) {
-			n = len(p)
-		}
-		b.head = append(b.head, p[:n]...)
+	b.scanLocked(p)
+	if b.max == 0 {
+		return len(p), nil
+	}
+	// 只保留末尾 max 字节，且**复用同一块容量为 max 的底层数组**：单次巨量写入
+	// （wazero 的 writev 把每个 iovec 整块交给 writer）既不放大常驻内存，也不超过
+	// "stderr 缓冲上限"这一宣称（P3-3）。
+	if len(p) >= b.max {
+		b.buf = append(b.buf[:0], p[len(p)-b.max:]...)
+		return len(p), nil
+	}
+	if drop := len(b.buf) + len(p) - b.max; drop > 0 {
+		b.buf = append(b.buf[:0], b.buf[drop:]...)
 	}
 	b.buf = append(b.buf, p...)
-	if len(b.buf) > b.max {
-		b.buf = append(b.buf[:0], b.buf[len(b.buf)-b.max:]...)
-	}
 	return len(p), nil
+}
+
+// scanLocked 是滚动匹配的全部实现：单遍扫描 + 常量内存（当前行的前 200 字节）。
+//
+// 判定顺序（每一档都有第三轮审计的实测依据）：
+//  1. 行首是 `panic: ` ⇒ 这行是未 recover 的 panic 的输出，它的消息**不算**运行时证据
+//     （panic 与运行时 OOM 共用退出码 2，而 panic 消息是应用可控文本，见 P2-2）；
+//  2. 行首命中 oomStderrMarkers（`runtime: out of memory` / `fatal error: runtime: out of
+//     memory` / `fatal error: out of memory`）⇒ 记证据，不必等整行；
+//  3. 行内命中：只有"从未见过 panic 行"时才成立（`panic: ` 是**行首**判定，所以只要行首
+//     7 字节到齐就能排除掉"这行是 panic"）—— 这样应用先写了半行日志、运行时的 OOM 行接在
+//     同一行后面（没有换行）时仍能捕获（固定窗口方案漏判的另一半）；
+//  4. 命中一旦成立就继续把**同一行**补全（refining），直到换行或 200 字节上限：
+//     证据行的价值在于 `cannot allocate N-byte block` 那个数字，不能在命中前缀处就截断。
+//     若这一行到请求结束都没有换行（运行时的最后一行没有 \n），记录的是目前已收到的部分 ——
+//     分类不受影响（判据只看前缀），只是证据行短一点。
+//
+// 命中所在行收完之后就不再扫描后续字节（证据只要一处）。
+func (b *tailBuffer) scanLocked(p []byte) {
+	for len(p) > 0 && (b.hit.line == "" || b.refining) {
+		if b.truncated {
+			i := bytes.IndexByte(p, '\n')
+			if i < 0 {
+				return
+			}
+			b.resetLineLocked()
+			p = p[i+1:]
+			continue
+		}
+		i := bytes.IndexByte(p, '\n')
+		if i < 0 {
+			b.appendLineLocked(p)
+			if b.lineN == len(b.line) {
+				// 行已达证据上限：按"完整"定论，剩余部分只跳到换行。
+				b.onLineLocked(true)
+				b.truncated = b.pending == 0 // 命中行已定稿，不必再跟着它
+			} else {
+				b.onLineLocked(false)
+			}
+			return
+		}
+		b.appendLineLocked(p[:i])
+		b.onLineLocked(true)
+		p = p[i+1:]
+	}
+}
+
+// appendLineLocked 把 chunk 追加进当前行缓冲（上限 oomMarkerLineBytes）。
+// 放不下的字节直接丢弃并置 truncated（证据行有界，判据只关心行首/行内命中）。
+func (b *tailBuffer) appendLineLocked(chunk []byte) {
+	room := len(b.line) - b.lineN
+	if room <= 0 {
+		if len(chunk) > 0 {
+			b.truncated = true
+		}
+		return
+	}
+	if len(chunk) > room {
+		chunk, b.truncated = chunk[:room], true
+	}
+	b.lineN += copy(b.line[b.lineN:], chunk)
+}
+
+// onLineLocked 判定当前行；full 表示"这一行已经收完（见到换行）或已达 200 字节上限"。
+func (b *tailBuffer) onLineLocked(full bool) {
+	line := b.line[:b.lineN]
+	if !b.panicLine && len(line) >= len(panicStderrPrefix) &&
+		string(line[:len(panicStderrPrefix)]) == panicStderrPrefix {
+		b.panicLine = true
+	}
+	if b.panicLine {
+		// panic 行不产生证据（同一行的行首已经排除"这是运行时输出"）。
+		b.pending = 0
+		b.refining = false
+		if full {
+			b.panicSeen = true
+			b.resetLineLocked()
+		}
+		return
+	}
+	if b.pending == 0 {
+		for _, m := range oomStderrMarkers {
+			if len(line) >= len(m) && string(line[:len(m)]) == m {
+				b.pending = 1
+				break
+			}
+		}
+		// 行内命中：行首 7 字节已到齐（⇒ 这行不可能是 panic 行）且此前没见过 panic 行。
+		// 只在"刚追加的字节是某个特征串的末字节"时才做子串搜索 —— 否则每字节都要扫一遍行缓冲。
+		if b.pending == 0 && !b.panicSeen && len(line) >= len(panicStderrPrefix) &&
+			(full || line[b.lineN-1] == oomMarkerLastByte) {
+			if _, ok := firstMarkerIndex(line); ok {
+				b.pending = 2
+			}
+		}
+	}
+	if b.pending == 0 {
+		if full {
+			b.resetLineLocked()
+		}
+		return
+	}
+	// 命中成立：先把当前（可能还没收完的）行记成证据，整行收完时再定稿。
+	b.hit = oomMarkerHit{line: clipMarkerLine(line), anchored: b.pending == 1}
+	if full {
+		b.refining = false
+		b.resetLineLocked()
+		return
+	}
+	b.refining = true
+}
+
+func (b *tailBuffer) resetLineLocked() {
+	b.lineN = 0
+	b.panicLine = false
+	b.truncated = false
+	b.pending = 0
+}
+
+// firstMarkerIndex 返回行内第一处特征串的偏移（同偏移取列表序，保证证据行稳定）。
+func firstMarkerIndex(line []byte) (int, bool) {
+	best := -1
+	for _, m := range oomStderrMarkers {
+		if i := bytes.Index(line, []byte(m)); i >= 0 && (best < 0 || i < best) {
+			best = i
+		}
+	}
+	return best, best >= 0
+}
+
+// clipMarkerLine 把证据行收成单行文本（去 CR）—— 长度已由行缓冲上限保证有界。
+func clipMarkerLine(line []byte) string {
+	if n := len(line); n > 0 && line[n-1] == '\r' {
+		line = line[:n-1]
+	}
+	return string(line)
 }
 
 // Tail 返回当前尾巴（stderr 的末尾 max 字节）—— 诊断面回给作者的那一份。
@@ -845,14 +1036,24 @@ func (b *tailBuffer) Tail() string {
 	return string(b.buf)
 }
 
-// Head 返回当前开头（stderr 的前 max 字节）—— **只给分类器**，不进诊断面。
+// OOMHit 返回滚动扫描命中的运行时 OOM 特征行（ok=false 表示 stderr 里没有这种行）。
 //
-// 调用方：`classifyGuestError` 用它识别"一次性巨块分配导致的 OOM"（特征串在头部），
-// 见 failureContext.stderrHead。
-func (b *tailBuffer) Head() string {
+// 调用方：`classifyGuestError` 的 5b 分支（"一次性巨块分配"的 OOM 峰值只有常态水位，
+// 唯一证据就是运行时自己打的那一行），见 failureContext.stderrOOMLine。
+func (b *tailBuffer) OOMHit() (oomMarkerHit, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return string(b.head)
+	return b.hit, b.hit.line != ""
+}
+
+// residentBytes 返回滚动匹配占用的常驻字节数（**不含**诊断尾巴缓冲）。
+//
+// 存在的唯一理由：把"匹配只用常量级内存"变成可断言的事实（P2-1 的判据③）——
+// 它不是估算，而是真实持有的缓冲长度之和。
+func (b *tailBuffer) residentBytes() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.line) + len(b.hit.line)
 }
 
 func appIDOr(id string) string {
@@ -886,7 +1087,8 @@ func recordLoopMetrics(m *capapi.CallMetrics, out *loopOutcome, stderr *tailBuff
 	}
 }
 
-// fillFailureMetrics 把失败码写进调用事件字段（§4.9 outcome / reason_code / guest_exit_code）。
+// fillFailureMetrics 把失败码写进调用事件字段（§4.9 outcome / reason_code / guest_exit_code
+// / evidence）。
 func fillFailureMetrics(m *capapi.CallMetrics, e *apperr.Error) {
 	if e == nil {
 		return
@@ -898,6 +1100,23 @@ func fillFailureMetrics(m *capapi.CallMetrics, e *apperr.Error) {
 			m.GuestExitCode = int32(v)
 		}
 	}
+	// 分类依据必须**落库**（第三轮审计 P3-1）：信封是瞬时的，事后分辨"真 OOM / panic
+	// 误报 / 伪造文本"只能靠调用事件表。缺失时留空串（列有 NOT NULL DEFAULT ''）。
+	if ev, ok := e.Details["evidence"].(string); ok {
+		m.Evidence = clipEvidence(ev)
+	}
+}
+
+// clipEvidence 把落库的证据收成有界字符串（上限与错误信封里的证据行同口径）。
+//
+// 为什么要在这里再截一次：Evidence 会进 wasm_call_events 的 TEXT 列，而它的内容里含
+// guest 可控文本（命中的特征行原文）—— 单条超长证据会把诊断面刷爆，也可能让整批
+// INSERT 触碰行大小上限。
+func clipEvidence(s string) string {
+	if len(s) <= capapi.MaxEvidenceBytes {
+		return s
+	}
+	return s[:capapi.MaxEvidenceBytes]
 }
 
 // outcomeFor 把错误码映射到 §4.9 的 outcome 列：

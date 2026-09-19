@@ -19,6 +19,10 @@ jobs:
     steps:
       - name: Materialize App Store Connect API key
         run: |
+          # 显式声明退出语义(与 ci.yml 同一口径):块中间某条命令失败必须让 step 红。
+          # 这里用 `set -eo pipefail` 而不是 `-u`:几个 APPLE_* 都来自可选 secrets,
+          # nounset 会把"没配这个 secret"变成 shell 层报错,盖掉真正的失败原因。
+          set -eo pipefail
           mkdir -p "$RUNNER_TEMP/notary"
           printf '%s' "$APPLE_API_KEY" > "$RUNNER_TEMP/notary/AuthKey.p8"
           chmod 600 "$RUNNER_TEMP/notary/AuthKey.p8"
@@ -26,6 +30,8 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
       - name: Submission history
         run: |
+          # 同上:`|| echo` 已按 P3 去掉,这里补上显式 errexit,探针失败必须让 step 红。
+          set -eo pipefail
           echo "== notarytool history =="
           # P3: 去掉 `|| echo` —— 探针失败必须让 step 红(GitHub bash 默认 -e)。
           xcrun notarytool history \
@@ -37,6 +43,10 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       - name: Logs for known submissions
         run: |
+          # 这个块**不加** errexit:它要"逐条查询、单条失败也继续跑完其余条",最后按
+          # `failed` 计数统一 exit 1(加 -e 会让第一条失败就中断,后面的日志全丢)。
+          # 汇总退出码的语义由块末尾的 `if [ "$failed" -ne 0 ]; then … exit 1; fi` 保证。
+          #
           # P3: 逐个查询,失败不再 `|| echo` 静默吞掉 —— 记 ::error:: 并让 step 退出非零,
           # 但仍继续查询其余 submission(单条失败不掩盖其它条日志)。
           failed=0

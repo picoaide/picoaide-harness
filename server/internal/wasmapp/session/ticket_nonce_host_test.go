@@ -399,6 +399,59 @@ func TestTicketNoncePromisesStayActionable(t *testing.T) {
 				"登录可见 / 白名单应用一律拒绝签发票（审计 §1.3 的现场）", baseHost, publicURL.Hostname())
 		}
 	})
+
+	// 控制台基域设置页（A-6，2026-09-19 第三轮审计）：保存期有两条硬要求，管理员必须在
+	// **保存之前**就看到它们 —— 判据与运行期签发侧同一份，所以文案也必须说同一件事。
+	//
+	// 为什么断言源文件而不是渲染结果：该页的组件测试与另一路并行修改在同一个文件
+	// （webadmin/src/pages/AppCenter.test.tsx），渲染级断言由那一路的用例覆盖；
+	// 这里的语义要点（两条要求 + 具体配置键 + 后果）是跨两处的**约定**，钉在源文件上。
+	t.Run("控制台基域设置页必须写明两条硬要求", func(t *testing.T) {
+		rel := filepath.Join("server", "webadmin", "src", "pages", "app-center", "Settings.tsx")
+		body, err := os.ReadFile(repoFile(t, rel))
+		if err != nil {
+			t.Fatalf("读 %s 失败: %v", rel, err)
+		}
+		text := string(body)
+		if strings.Contains(text, "AllowTicketWithoutNonce") {
+			t.Fatalf("%s 里出现了 Go 字段名：管理员没有配置面，任何指向它的措辞都是做不到的承诺", rel)
+		}
+		// ① 能承载 Cookie 的域名（并点名几个典型不可用形态）② 必须与对外地址同域
+		// （点名两个配置真源）③ 后果（拒绝签发票 ⇒ 员工打开 500）。
+		for _, want := range []string{
+			"能承载 Cookie",             // 要求 ①
+			"单标签",                    // 形态：intranet 这类
+			"公网后缀",                   // 形态：co.uk 这类
+			"同域",                     // 要求 ②
+			"server.base_url",        // 配置真源（控制台）
+			"PICOAI_PUBLIC_BASE_URL", // 配置真源（部署环境变量）
+			"500",                    // 后果：员工侧看到的是 500
+		} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%s 的基域文案缺少要点 %q（管理员必须在保存前就看到这条要求与后果）", rel, want)
+			}
+		}
+	})
+
+	// 发布说明第九节（A-5，2026-09-19 第三轮审计）：必须与**修好之后**的代码一致 ——
+	// 两条 Cookie、闸门覆盖的形态、被拒时运维看到什么；不得再写"下发一个 nonce Cookie"，
+	// 也不得写成"静默死已消除"这种过强表述。
+	t.Run("发布说明第九节与代码一致", func(t *testing.T) {
+		rel := filepath.Join("docs", "releases", "v2.7.6-beta.5.md")
+		body, err := os.ReadFile(repoFile(t, rel))
+		if err != nil {
+			t.Fatalf("读 %s 失败: %v", rel, err)
+		}
+		text := string(body)
+		for _, want := range []string{"专属名", "固定名", "单标签", "结尾点", "启动"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%s 第九节缺少要点 %q（要与修好之后的真实行为一致）", rel, want)
+			}
+		}
+		if strings.Contains(text, "下发**一个** nonce Cookie") || strings.Contains(text, "下发一个 nonce Cookie") {
+			t.Fatalf("%s 仍写「下发一个 nonce Cookie」（实为专属名 + 固定名两条）", rel)
+		}
+	})
 }
 
 // exampleValue 取出 `.env.example` 里某个变量的**注释示例值**（`# NAME=value`）。

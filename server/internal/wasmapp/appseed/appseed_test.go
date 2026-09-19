@@ -351,8 +351,8 @@ func TestSeedHalfSeededIsHealedAndNeverPointsAtMissingAssets(t *testing.T) {
 		t.Fatalf("三次播种应全部跳过：seeded=%v skipped=%+v", res.Seeded, res.Skipped)
 	}
 	for _, sk := range res.Skipped {
-		if strings.Contains(sk.Reason, "补齐") {
-			t.Fatalf("%s 第三次播种仍在补齐（补齐不幂等）：%q", sk.AppID, sk.Reason)
+		if sk.Healed {
+			t.Fatalf("%s 第三次播种仍在自愈（补齐不幂等）：%q", sk.AppID, sk.Reason)
 		}
 	}
 }
@@ -467,8 +467,8 @@ func TestSeedHealsAppRowWithoutAnyRelease(t *testing.T) {
 		t.Fatalf("三次播种: %v", err)
 	}
 	for _, sk := range res.Skipped {
-		if strings.Contains(sk.Reason, "补齐") {
-			t.Fatalf("补齐必须幂等，第三次播种仍在补：%q", sk.Reason)
+		if sk.Healed {
+			t.Fatalf("补齐必须幂等，第三次播种仍在动手：%q", sk.Reason)
 		}
 	}
 }
@@ -581,10 +581,235 @@ func TestSeedDoesNotHealRetiredStates(t *testing.T) {
 				t.Fatalf("%s 的应用不得被补齐资源目录（「删了不再回来」），stat err=%v", tc.name, serr)
 			}
 			for _, sk := range res.Skipped {
-				if strings.Contains(sk.Reason, "补齐") {
-					t.Fatalf("%s 的应用被当成半成品补齐了：%+v", tc.name, sk)
+				if sk.Healed {
+					t.Fatalf("%s 的应用被当成半成品补齐了（「删了不再回来」被破坏）：%+v", tc.name, sk)
 				}
 			}
 		})
+	}
+}
+
+// ===== 第三轮对抗式审计 C 区（P3-4）的行为级护栏 =====
+
+// seedDemoPublic 播种一次并返回 (dataRoot, 配置路径, 原始配置字节, 版本行 id 列表)。
+func seedDemoPublic(t *testing.T, s *appseed.Seeder, db *sql.DB, dataRoot string) (string, []byte, []int64) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("首次播种: %v", err)
+	}
+	app, err := serverstore.GetWasmApp(ctx, db, "demo-public")
+	if err != nil {
+		t.Fatalf("GetWasmApp: %v", err)
+	}
+	cfgPath := demoAssetsPath(dataRoot, "demo-public", app.CurrentReleaseID)
+	orig, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("读配置: %v", err)
+	}
+	rels, err := serverstore.ListWasmReleases(ctx, db, "demo-public", true)
+	if err != nil {
+		t.Fatalf("ListWasmReleases: %v", err)
+	}
+	ids := make([]int64, 0, len(rels))
+	for _, r := range rels {
+		ids = append(ids, r.ID)
+	}
+	return cfgPath, orig, ids
+}
+
+// skippedHealed 找出某个演示这一趟的处置结论（Healed 是机器可读的"动了手"事实）。
+func skippedHealed(res appseed.Result, appID string) (appseed.SkipReason, bool) {
+	for _, sk := range res.Skipped {
+		if sk.AppID == appID {
+			return sk, true
+		}
+	}
+	return appseed.SkipReason{}, false
+}
+
+// TestSeedHealsTruncatedReleaseConfig 是 **P3-4** 的核心判据：
+// "存在但内容不完整"的配置（半写/截断）必须被自愈，而不是被当成"已存在"跳过。
+//
+// 缺陷现场（审计实测，真 PG）：`releaseAssetsPresent` 只做 os.Stat ⇒ 截断到 49 字节的
+// `picoaide.app.json` 被认为完整，二次播种不动手、日志理由"已存在（含已删除/已冻结）"，
+// 而线上 `loadAppConfig` 解析失败 ⇒ 应用子域**每请求 500**，且重启也不自愈
+// （只有人工删文件才触发补齐）。
+//
+// 判据四段：
+//  1. 截断（原长的一半 / 原长减一，覆盖 49 与 99 字节两个现场尺寸）⇒ 二次播种**修复**：
+//     文件逐字节等于原始配置，且能过 appcfg.Parse（= 请求路径给出 200 的前提）；
+//  2. 处置结论必须**如实**：SkipReason.Healed=true 且理由点名"内容不完整 ⇒ 已重写"；
+//  3. 修复**不得**覆盖既有 approved 版本行（版本行 id 集合不变）——自愈不是"再发一版"；
+//  4. 修好之后再播种 ⇒ 幂等：Healed=false、代码不再写盘（inode/ModTime 都不变），
+//     且资源目录里没有留下原子写用的临时文件。
+func TestSeedHealsTruncatedReleaseConfig(t *testing.T) {
+	cases := []struct {
+		name   string
+		trunc  func(orig []byte) []byte
+		expect string // 理由里必须出现的关键词
+	}{
+		{"截断到一半（49 字节）", func(o []byte) []byte { return o[:len(o)/2] }, "内容不完整"},
+		{"截断到只差一字节（99 字节）", func(o []byte) []byte { return o[:len(o)-1] }, "内容不完整"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, cleanup := serverstore.NewTestDB(t)
+			defer cleanup()
+			ctx := context.Background()
+			dataRoot := t.TempDir()
+			s, err := appseed.New(appseed.Options{DB: db, DataRoot: dataRoot, Dir: writeDemoDir(t), Owner: "admin"})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			cfgPath, orig, relIDs := seedDemoPublic(t, s, db, dataRoot)
+			broken := tc.trunc(orig)
+			if _, perr := appcfg.Parse(broken); perr == nil {
+				t.Fatalf("夹具失效：截断后的配置仍能解析（%d 字节）", len(broken))
+			}
+			fiBefore, err := os.Stat(cfgPath)
+			if err != nil {
+				t.Fatalf("Stat: %v", err)
+			}
+			if err := os.WriteFile(cfgPath, broken, 0o644); err != nil {
+				t.Fatalf("写坏配置: %v", err)
+			}
+
+			res, err := s.Seed(ctx)
+			if err != nil {
+				t.Fatalf("二次播种: %v", err)
+			}
+			// ① 修复：内容恢复成原始配置，且请求路径能解析（= 应用子域回到 200 的前提）。
+			after, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatalf("复读配置: %v", err)
+			}
+			if string(after) != string(orig) {
+				t.Fatalf("截断到 %d 字节的配置没有被修复：盘上 %d 字节（原始 %d 字节）\n"+
+					"（旧判据是『文件存在即完整』⇒ 永不修复、线上每请求 500）",
+					len(broken), len(after), len(orig))
+			}
+			if _, perr := appcfg.Parse(after); perr != nil {
+				t.Fatalf("修复后的配置仍不可解析（请求路径会 500）：%v", perr)
+			}
+			// ② 处置理由必须与行为一致。
+			sk, ok := skippedHealed(res, "demo-public")
+			if !ok {
+				t.Fatalf("二次播种没有 demo-public 的处置结论：%+v", res.Skipped)
+			}
+			if !sk.Healed {
+				t.Fatalf("半写配置必须被自愈（Healed=true），得到 %+v", sk)
+			}
+			if !strings.Contains(sk.Reason, tc.expect) || !strings.Contains(sk.Reason, "重写") {
+				t.Fatalf("理由必须如实说明『已存在但内容不完整 ⇒ 重写』，得到 %q", sk.Reason)
+			}
+			// 原子替换：文件是**另一个** inode（rename），不是原地覆盖。
+			fiHealed, err := os.Stat(cfgPath)
+			if err != nil {
+				t.Fatalf("Stat: %v", err)
+			}
+			if os.SameFile(fiBefore, fiHealed) {
+				t.Fatalf("自愈必须走原子替换（临时文件 + rename），不能原地 O_TRUNC 覆盖（同一 inode）")
+			}
+			// ③ 既有 approved 版本行不得被覆盖/新增。
+			rels, err := serverstore.ListWasmReleases(ctx, db, "demo-public", true)
+			if err != nil {
+				t.Fatalf("ListWasmReleases: %v", err)
+			}
+			var ids []int64
+			for _, r := range rels {
+				if r.Status != serverstore.ReleaseStatusApproved {
+					t.Fatalf("版本行状态被改写：%+v", r)
+				}
+				ids = append(ids, r.ID)
+			}
+			if len(ids) != len(relIDs) {
+				t.Fatalf("版本行数从 %d 变成 %d（自愈不得新建/删除版本行）", len(relIDs), len(ids))
+			}
+			for i := range ids {
+				if ids[i] != relIDs[i] {
+					t.Fatalf("版本行 id 被改写：%v → %v", relIDs, ids)
+				}
+			}
+			// ④ 幂等 + 完好文件不动手：再播种必须一个字节都不写。
+			res2, err := s.Seed(ctx)
+			if err != nil {
+				t.Fatalf("三次播种: %v", err)
+			}
+			sk2, _ := skippedHealed(res2, "demo-public")
+			if sk2.Healed {
+				t.Fatalf("完好文件不得再动手（自愈不幂等）：%+v", sk2)
+			}
+			if !strings.Contains(sk2.Reason, "完整") {
+				t.Fatalf("完好文件的理由必须说明『内容完整』，得到 %q", sk2.Reason)
+			}
+			fiAfter, err := os.Stat(cfgPath)
+			if err != nil {
+				t.Fatalf("Stat: %v", err)
+			}
+			if !os.SameFile(fiHealed, fiAfter) || !fiHealed.ModTime().Equal(fiAfter.ModTime()) {
+				t.Fatalf("完好文件被重写了（inode/mtime 变化）：%v → %v", fiHealed.ModTime(), fiAfter.ModTime())
+			}
+			entries, err := os.ReadDir(filepath.Dir(cfgPath))
+			if err != nil {
+				t.Fatalf("ReadDir: %v", err)
+			}
+			for _, en := range entries {
+				if strings.HasPrefix(en.Name(), ".") {
+					t.Fatalf("资源目录里留下了原子写的临时文件：%s", en.Name())
+				}
+			}
+		})
+	}
+}
+
+// TestSeedRewritesConfigWithForeignOwner 守住 P3-4 判据里的"归属人一致"：
+// 内容能解析、但与随安装清单的归属人不同的配置**同样**不是"完整"——它会被重写成
+// 版本快照（自愈只碰"制品指纹 = 随安装"的版本，所以这不是改写别人的应用）。
+func TestSeedRewritesConfigWithForeignOwner(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	dataRoot := t.TempDir()
+	s, err := appseed.New(appseed.Options{DB: db, DataRoot: dataRoot, Dir: writeDemoDir(t), Owner: "admin"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfgPath, orig, _ := seedDemoPublic(t, s, db, dataRoot)
+
+	// 合法 JSON、必需字段齐备，但归属人是别人（半成品/被手工改写的形态）。
+	var cfg map[string]any
+	if err := json.Unmarshal(orig, &cfg); err != nil {
+		t.Fatalf("解析原始配置: %v", err)
+	}
+	cfg["owner"] = "someone-else"
+	tampered, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("编码: %v", err)
+	}
+	if _, perr := appcfg.Parse(tampered); perr != nil {
+		t.Fatalf("夹具失效：改写归属人后的配置不可解析：%v", perr)
+	}
+	if err := os.WriteFile(cfgPath, tampered, 0o644); err != nil {
+		t.Fatalf("写配置: %v", err)
+	}
+
+	res, err := s.Seed(ctx)
+	if err != nil {
+		t.Fatalf("二次播种: %v", err)
+	}
+	sk, _ := skippedHealed(res, "demo-public")
+	if !sk.Healed {
+		t.Fatalf("归属人不一致的配置必须被重写，得到 %+v", sk)
+	}
+	if !strings.Contains(sk.Reason, "归属人") {
+		t.Fatalf("理由必须点名归属人不一致，得到 %q", sk.Reason)
+	}
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("复读: %v", err)
+	}
+	if string(after) != string(orig) {
+		t.Fatalf("重写后的配置必须等于版本快照：%q ≠ %q", after, orig)
 	}
 }

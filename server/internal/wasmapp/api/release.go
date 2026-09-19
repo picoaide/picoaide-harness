@@ -76,7 +76,7 @@ func (h *Handlers) setPublished(c *gin.Context) {
 		return
 	}
 	h.auditApp(appID, u.Username, "wasm_app_publish_toggle",
-		auditDetail(appID, app.Title, fmt.Sprintf("enabled %t → %t", app.Enabled, target)))
+		auditDetail(appID, auditTitleOf(app), fmt.Sprintf("enabled %t → %t", app.Enabled, target)))
 	if !target {
 		// 下架即释放进程内驻留（编译模块 + 库句柄；上架不动，见 OnAppEvict 注释）。
 		h.evictApp(appID)
@@ -164,7 +164,7 @@ func (h *Handlers) freeze(c *gin.Context) {
 			}
 		}
 		h.auditApp(appID, u.Username, "wasm_app_freeze",
-			auditDetail(appID, app.Title, fmt.Sprintf("冻结（停止服务，快照保留 %d 天）", limits.RetirementSnapshotRetentionDays)))
+			auditDetail(appID, auditTitleOf(app), fmt.Sprintf("冻结（停止服务，快照保留 %d 天）", limits.RetirementSnapshotRetentionDays)))
 		c.JSON(http.StatusOK, gin.H{"app": gin.H{"app_id": appID, "frozen": true, "changed": true,
 			"frozen_at": now, "enabled": false}})
 		return
@@ -180,7 +180,7 @@ func (h *Handlers) freeze(c *gin.Context) {
 		return
 	}
 	h.auditApp(appID, u.Username, "wasm_app_freeze",
-		auditDetail(appID, app.Title, "解冻（enabled 保持不变，需要重新上架才恢复服务）"))
+		auditDetail(appID, auditTitleOf(app), "解冻（enabled 保持不变，需要重新上架才恢复服务）"))
 	c.JSON(http.StatusOK, gin.H{"app": gin.H{"app_id": appID, "frozen": false, "changed": true,
 		"enabled": app.Enabled, "note": "解冻不会自动上架：请显式调用 publish"}})
 }
@@ -216,7 +216,7 @@ func (h *Handlers) deleteApp(c *gin.Context) {
 		return
 	}
 	h.auditApp(appID, u.Username, "wasm_app_delete",
-		auditDetail(appID, app.Title, fmt.Sprintf("软删（标识与版本号永久占位；资源与库保留 %d 天待真删）",
+		auditDetail(appID, auditTitleOf(app), fmt.Sprintf("软删（标识与版本号永久占位；资源与库保留 %d 天待真删）",
 			limits.RetirementSnapshotRetentionDays)))
 	// 删除（软删）即释放进程内驻留：模块与库句柄都没有再留着的理由。
 	h.evictApp(appID)

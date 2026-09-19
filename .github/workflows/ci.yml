@@ -107,6 +107,7 @@ jobs:
       - name: Require curated release notes for stable tags
         if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
         run: |
+          set -euo pipefail
           test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
             echo "::error::正式版缺少发布说明 docs/releases/${GITHUB_REF_NAME}.md(模板见 docs/releases/TEMPLATE.md)"
             exit 1
@@ -134,6 +135,7 @@ jobs:
       # **故意 fail-loud**(不静默跳过),所以装不上会红,而不是悄悄变绿。
       - name: Ensure xvfb for the graphical gate
         run: |
+          set -euo pipefail
           if ! command -v xvfb-run >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y xvfb
           fi
@@ -144,6 +146,7 @@ jobs:
       # 结构(下载后 lib/ 树丢失),故先 tar 打包为单文件,目录结构自控。
       - name: Package workspace build products
         run: |
+          set -euo pipefail
           tar -czf workspace-build.tgz \
             packages/host/desktop/lib packages/host/desktop/build \
             packages/host/enterprise/lib packages/host/connectors/lib \
@@ -184,6 +187,7 @@ jobs:
       # CI 实测),与 docker.yml Verify 步骤同构。
       - name: Start PostgreSQL
         run: |
+          set -euo pipefail
           docker run -d --name pg-ci \
             -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
             -p 5432:5432 postgres:18-alpine postgres -c max_connections=500
@@ -209,6 +213,7 @@ jobs:
       # server/Makefile check 中,CI 从未执行。
       - name: gofmt check
         run: |
+          set -euo pipefail
           FILES="$(gofmt -l cmd internal)"
           if [ -n "$FILES" ]; then
             echo "::error::gofmt 未通过: $FILES"
@@ -234,6 +239,7 @@ jobs:
         # 仍然发货的部署资产:镜像 entrypoint 的 shell 语法 + compose 配置。
         # defaults.run.working-directory 已是 server/,此处路径不用 server/ 前缀。
         run: |
+          # errexit 不适用:本块要跑完三条互斥的资产检查再判定(见 BLOCK_ERREXIT_ALLOWLIST)。
           bash -n docker/entrypoint.sh
           if command -v docker >/dev/null 2>&1; then
             # 单 compose 文件(caddy+server+postgres):PG_PASSWORD 强必填,
@@ -320,6 +326,7 @@ jobs:
       - name: Restore workspace build products
         shell: bash
         run: |
+          set -euo pipefail
           tar -xzf package-input/workspace-build.tgz
           [ -d packages/host/desktop/lib ] || { echo "::error::workspace-build 解压后缺少 desktop lib"; exit 1; }
           [ -d packages/host/desktop/build ] || { echo "::error::workspace-build 解压后缺少 desktop build 产物"; exit 1; }
@@ -339,6 +346,7 @@ jobs:
       - name: Package client installers for every selected channel
         if: ${{ !github.event.pull_request.head.repo.fork }}
         run: |
+          set -euo pipefail
           bash scripts/ci-package-clients.sh --official-last \
             --list channels.list --stage-dir client-assets \
             --patterns '*.AppImage' \
@@ -367,6 +375,7 @@ jobs:
       - name: Package the official client only (fork PR without channel access)
         if: ${{ github.event.pull_request.head.repo.fork }}
         run: |
+          set -euo pipefail
           yarn workspace dsh-plugin-desktop dist:linux --no-prebuild
           mkdir -p client-assets/official
           cp packages/host/desktop/dist/*.AppImage client-assets/official/
@@ -374,6 +383,7 @@ jobs:
       # (mock gateway + Xvfb + CDP),报告与截图随后上传。
       - name: Client E2E (packaged app, Xvfb)
         run: |
+          set -euo pipefail
           if ! command -v Xvfb >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y xvfb
           fi
@@ -390,6 +400,7 @@ jobs:
       - name: Collect E2E report & screenshots
         if: always()
         run: |
+          # errexit 不适用:本块要逐个尝试收集三份证据再上传(见 BLOCK_ERREXIT_ALLOWLIST)。
           # upload-artifact v4+ 不收录点开头文件/目录(.e2e-report.md/.e2e-shots),
           # 复制并重命名为非点名称再上传(2026-09-06 两轮实测缺失)。
           mkdir -p packages/host/desktop/e2e-results
@@ -461,6 +472,7 @@ jobs:
       - name: Restore workspace build products
         shell: bash
         run: |
+          set -euo pipefail
           tar -xzf package-input/workspace-build.tgz
           [ -d packages/host/desktop/lib ] || { echo "::error::workspace-build 解压后缺少 desktop lib"; exit 1; }
           [ -d packages/host/desktop/build ] || { echo "::error::workspace-build 解压后缺少 desktop build 产物"; exit 1; }
@@ -480,6 +492,7 @@ jobs:
         if: ${{ !github.event.pull_request.head.repo.fork }}
         shell: bash
         run: |
+          set -euo pipefail
           bash scripts/ci-package-clients.sh --official-last \
             --list channels.list --stage-dir client-assets \
             --patterns '*Setup*.exe' \
@@ -512,6 +525,7 @@ jobs:
         if: ${{ github.event.pull_request.head.repo.fork }}
         shell: bash
         run: |
+          set -euo pipefail
           yarn workspace dsh-plugin-desktop dist:win --no-prebuild --no-gates
           mkdir -p client-assets/official
           cp packages/host/desktop/dist/*Setup*.exe client-assets/official/
@@ -573,6 +587,7 @@ jobs:
           path: package-input
       - name: Restore workspace build products
         run: |
+          set -euo pipefail
           tar -xzf package-input/workspace-build.tgz
           [ -d packages/host/desktop/lib ] || { echo "::error::workspace-build 解压后缺少 desktop lib"; exit 1; }
           [ -d packages/host/desktop/build ] || { echo "::error::workspace-build 解压后缺少 desktop build 产物"; exit 1; }
@@ -580,6 +595,7 @@ jobs:
       # 以路径形式传给 electron-builder(正式分支专用;冒烟分支不ary用)。
       - name: Materialize App Store Connect API key
         run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/notary"
           printf '%s' "$APPLE_API_KEY" > "$RUNNER_TEMP/notary/AuthKey.p8"
           chmod 600 "$RUNNER_TEMP/notary/AuthKey.p8"
@@ -603,6 +619,7 @@ jobs:
       - name: Notarize and build DMG (resumable)
         if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
         run: |
+          set -euo pipefail
           for attempt in 1 2 3; do
             echo "attempt ${attempt}/3: yarn dist:mac:notarize"
             if yarn workspace dsh-plugin-desktop dist:mac:notarize --no-prebuild; then
@@ -680,6 +697,9 @@ jobs:
           # 唯一真源:渠道包是交付物,不含"只签名"的例外。
           CHANNEL_NOTARIZE: 'true'
         run: |
+          # 显式声明**外层**脚本的退出语义;传给 `bash -c` 的内层脚本自带一份(两者互不覆盖:
+          # 内层那句约束的是内层,见 scripts/check-workflows.mjs 的 hasErrexitGuard 注释)。
+          set -eo pipefail
           bash scripts/ci-package-clients.sh --skip-official \
             --dist packages/host/desktop/dist/mac-release \
             --list channels.list --stage-dir client-assets --patterns '*.dmg' \
@@ -768,6 +788,7 @@ jobs:
       # 唯一真源;版本号只改一处会让发布成功但升级源永久对不上)。不一致 fail-loud。
       - name: Verify tag matches package versions
         run: |
+          set -euo pipefail
           node scripts/version.mjs check "$GITHUB_REF_NAME"
 
       # 渠道发现 + 逐渠道构建(2026-09-10 定案):
@@ -803,6 +824,7 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
           bash scripts/ci-build-channel-images.sh \
             --list channels.list --artifacts release-artifacts --out release-bundle
 
@@ -826,6 +848,7 @@ jobs:
 
       - name: Create GitHub Release
         run: |
+          set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           REPO="picoaide/picoaide-harness"
           # 说明(**公开发布面**,2026-09-11 定案):正式 tag 必须有策展发布说明

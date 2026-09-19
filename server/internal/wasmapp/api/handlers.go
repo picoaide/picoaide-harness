@@ -412,6 +412,40 @@ func auditDetail(appID, title, change string) string {
 	return d
 }
 
+// auditTitleOf 返回审计明细里可以当**证据**用的应用标题（审计第三轮 B 区，2026-09-19）。
+//
+// 为什么不能直接写 `app.Title`：首版待审期间 apps.title 是 **app_id 占位**（publish 的
+// E1 刻意不写未审核标题），把它写进明细的「」里 = 审计把"这个应用叫 brand-new-tool"
+// 记成事实，而它从头到尾只是占位。审计记录的是"当时发生了什么"，不能留错证据。
+//
+// 口径（真实标题 = **生效版本**的标题；没有生效版本就没有真实标题）：
+//   - `current_release_id > 0` 且投影标题非空 ⇒ 标题原文（它就是生效版本的投影）；
+//   - 没有生效版本（首版待审 / 从未通过审核）⇒ `app_id（首版待审，暂无生效标题）`：
+//     显式标注"这不是真实标题"，而不是伪造一个旧标题；
+//   - 有生效版本但投影标题为空（0071 之前的历史行）⇒ `app_id（生效版本标题为空）`，
+//     同样不让空串被读成"标题就是空的"。
+//
+// 与 adminList/导出面的关系：管理端列表仍**原样**下发 apps.title（占位在那里是"待审"
+// 的可见信号，前端卡片另外渲染 rel.title 真值）；导出面用 title_source 标注来源
+// （read.go 的 export）—— 三个面各说各的形态，但都不把占位当真实标题。
+func auditTitleOf(app *serverstore.WasmApp) string {
+	if app == nil {
+		return ""
+	}
+	title := strings.TrimSpace(app.Title)
+	if app.CurrentReleaseID <= 0 {
+		base := title
+		if base == "" {
+			base = app.AppID
+		}
+		return base + "（首版待审，暂无生效标题）"
+	}
+	if title == "" {
+		return app.AppID + "（生效版本标题为空）"
+	}
+	return title
+}
+
 // bindJSONLimited 读取并解析请求体，**自己**套 http.MaxBytesReader（§4.2/R21）。
 //
 // 两条顺序是硬要求（§4.2 原话：「白名单只是豁免 ⇒ handler 内必须自己再套；
