@@ -65,14 +65,14 @@ func newWasmLimitsHolder(db *sql.DB, profile memprofile.Profile) *wasmLimitsHold
 			if l, aerr := applimits.ParseStored(raw); aerr != nil {
 				// 坏设置**不阻塞启动**（与"设置读不出来"同一条降级路径），但必须点名。
 				log.Printf("wasm: ⚠️ 已保存的平台限制项不合法，已回落到部署档位 %s：%v", profile.Name, aerr)
-			} else if b := l.Budget(readMemAvailable()); !b.OK {
+			} else if b := l.Budget(readMemoryAvailability().BudgetBytes()); !b.OK {
 				// 保存时是合法的，但**后来**机器变忙/内存变小 ⇒ 现在超水位。
 				//
 				// 这里刻意**不让服务端起不来**：保存路径已经 fail-loud（改的时候就被拒），
 				// 而"存进去之后环境变了"如果也拒绝启动，运维会被一条设置锁死在启动失败上
 				// ——那时连控制台都进不去，只能改库。因此回落档位 + 大声记日志。
 				log.Printf("wasm: ⚠️ 已保存的平台限制项当前超出内存水位（total=%dMiB > limit=%dMiB，可用 %dMiB），"+
-					"本次启动回落到部署档位 %s；请调小并发/实例内存/模块缓存后重新保存",
+					"本次启动回落到部署档位 %s；请调小并发/实例内存/模块缓存/页缓存后重新保存",
 					b.Total>>20, b.Limit>>20, b.Available>>20, profile.Name)
 			} else {
 				value, source = l, "setting"
@@ -162,17 +162,18 @@ func (h *wasmLimitsHolder) ApplyStartup(restart []string) {
 // 三个输入对应四笔账里"随限制项变化"的部分：实例池 = Instances × InstanceMemoryBytes，
 // 缓存驻留 = ModuleCacheBytes（编译峰值与上传峰值是常量，见 readyz.MemoryPlan）。
 //
-// ⚠️ 这里**刻意不含** app_db_readers / appdb_cache_kib：SQLite 页缓存不进四笔账
-// （它是可回收的缓存，不是实例），去向与上界写在 applimits.Budget 的注释里
-// —— appdb_cache_kib × (1 + app_db_readers) × 句柄数（≤ max_instances）。
-// 因此控制台改这两个字段不会移动四笔账预览，这是**有意**的，不是漏接。
+// ⚠️ app_db_readers / appdb_cache_kib **现在也在这笔账里**（R1-rt-8，2026-09-19）：
+// 这两个字段决定"每应用库句柄页缓存"的单价，而句柄数 ≤ max_instances ⇒ 这一笔
+// = 单价 × Instances，与实例池那笔账同一个乘数。此前它不在账里，控制台可以把组合
+// 配到 272 GiB（17 条连接 × 64 MiB × 256 句柄）而保存判据一字不变。
 func (h *wasmLimitsHolder) Plan() readyz.MemoryPlan {
 	l := h.Get()
 	return readyz.MemoryPlan{
-		Profile:             h.ProfileLabel(),
-		Instances:           l.MaxInstances,
-		InstanceMemoryBytes: int64(l.InstanceMemoryMB) << 20,
-		ModuleCacheBytes:    int64(l.ModuleCacheMB) << 20,
+		Profile:                      h.ProfileLabel(),
+		Instances:                    l.MaxInstances,
+		InstanceMemoryBytes:          int64(l.InstanceMemoryMB) << 20,
+		ModuleCacheBytes:             int64(l.ModuleCacheMB) << 20,
+		AppDBPageCachePerHandleBytes: l.AppDBPageCachePerHandleBytes(),
 	}
 }
 
@@ -201,15 +202,23 @@ func (h *wasmLimitsHolder) Apply(raw string) ([]string, *apperr.Error) {
 	if strings.TrimSpace(raw) == "" {
 		label = "limits/profile:" + h.profile.Name
 	}
-	budget := next.BudgetFor(readMemAvailable(), label)
+	avail := readMemoryAvailability()
+	if !avail.Known() {
+		// 读不到可用内存 ⇒ 只算不判（与启动自检同一条降级路径），但**必须留痕**：
+		// 否则控制台会看到"保存成功"而不知道这次没有过水位判定。
+		log.Printf("wasm: ⚠️ 未取到可用内存（来源=%s：%s），本次保存跳过四笔账水位判定", avail.Source, avail.Detail)
+	}
+	budget := next.BudgetFor(avail.BudgetBytes(), label)
 	if !budget.OK {
 		return nil, apperr.New(apperr.CodeValidation, "这组限制项的理论内存峰值超过可用内存的安全水位").
 			WithDetail("total_bytes", budget.Total).
+			WithDetail("appdb_cache_bytes", budget.AppDBCache).
 			WithDetail("limit_bytes", budget.Limit).
 			WithDetail("available_bytes", budget.Available).
 			WithDetail("guard_percent", limits.MemoryPeakGuardPercent).
-			WithHint("§4.3 四笔账 = 并发 × 单实例上限 + 编译峰值 + 上传峰值 + 模块缓存驻留；" +
-				"调小全局并发、单实例内存上限或模块缓存上限，或扩容机器内存")
+			WithHint("§4.3 的内存账 = 并发 × 单实例上限 + 编译峰值 + 上传峰值 + 模块缓存驻留 + " +
+				"应用库页缓存（(1 + app_db_readers) × appdb_cache_kib × max_instances）；" +
+				"调小全局并发、单实例内存上限、模块缓存上限或 appdb_cache_kib，或扩容机器内存")
 	}
 	if h.db != nil {
 		if err := serverstore.SetSetting(h.db, SettingWasmLimits, next.Encode()); err != nil {

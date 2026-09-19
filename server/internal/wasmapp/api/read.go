@@ -480,9 +480,11 @@ func (h *Handlers) catalog(c *gin.Context) {
 		// 发布者本人做（ownedApp 对非发布者一律 404），所以"作者的发布表单要能预填"与
 		// "名单不外泄"同时成立的唯一形态就是按调用者下发。
 		//
-		// 为什么必须有这两个字段：发布是**整体替换配置**（publish.go 的 prepare 不做
-		// 逐字段合并）。whitelist 模式的应用若拿不到原名单，作者只能凭空重填，而
-		// access=whitelist + 空名单会被服务端一律拒（appcfg.Validate）。
+		// 为什么必须有这两个字段：目录行是发布表单的预填基线。服务端在更新发布时
+		// **会对缺席字段沿用上一版**（publish.go 的 prepare → appcfg.ParseUpdate），
+		// 但作者仍要看得见"现在生效的是什么"才能有意识地改它（预填 + access 变更
+		// 二次确认是人工表单那条路径的护栏）。whitelist 模式的应用若拿不到原名单，
+		// 作者只能凭空重填，而 access=whitelist + 空名单会被服务端一律拒（appcfg.Validate）。
 		if isOwner {
 			row["purpose"] = cfg.Purpose
 			whitelist := cfg.Whitelist

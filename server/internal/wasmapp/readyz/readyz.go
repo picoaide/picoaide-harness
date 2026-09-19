@@ -10,7 +10,6 @@
 package readyz
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -71,17 +70,36 @@ type MemoryPlan struct {
 	CompilePeakBytes int64
 	// UploadPeakBytes 是上传峰值这笔账（0 ⇒ 用 limits.UploadPeakPerUploadBytes）。
 	UploadPeakBytes int64
+	// AppDBPageCachePerHandleBytes 是**每应用库句柄**的 SQLite 页缓存这笔账的单价
+	// （0 ⇒ 用 DefaultAppDBPageCachePerHandleBytes）。
+	//
+	// 为什么是"单价 × Instances"而不是一个总数：句柄池容量 = max_instances
+	// （appserver 的 newAppDBPoolWithMax(…, lim.MaxInstances)），所以这笔账的乘数与
+	// 实例池那笔账**同一个**（plan.Instances）；控制台把 appdb_cache_kib / app_db_readers
+	// 调大时，单价随之上抬，账本才不会"配到 272 GiB 还 ok:true"（R1-rt-8）。
+	AppDBPageCachePerHandleBytes int64
 }
+
+// DefaultAppDBPageCachePerHandleBytes 是"每应用库句柄页缓存"的默认估算：
+// (1 写 + limits.AppDBReaders 只读) 条连接 × 每条 1 MiB。
+//
+// 两个输入的默认值来源：只读连接数 = limits.AppDBReaders（真源）；
+// 每连接页缓存 = appdb 的 appConnCacheKiB / applimits.Defaults().AppDBCacheKiB
+// （两者由 applimits_test 的跨包断言钉住与这里同值 —— readyz 不能 import 那两个包：
+// applimits 依赖本包，会成环）。生产路径一律由 applimits 传**生效值**，这里只是
+// `ComputeMemoryBudget()`（无参数便捷入口）与最小装配的兜底。
+const DefaultAppDBPageCachePerHandleBytes = int64(1+limits.AppDBReaders) * (1 << 20)
 
 // DefaultMemoryPlan 返回默认档的四笔账输入（与 2026-09-18 之前的编译期常量逐一相同）。
 func DefaultMemoryPlan() MemoryPlan {
 	return MemoryPlan{
-		Profile:             "default",
-		Instances:           limits.GlobalInstances,
-		InstanceMemoryBytes: int64(limits.InstanceMemoryPages) * int64(limits.WasmPageSize),
-		ModuleCacheBytes:    limits.ModuleCacheMaxBytes,
-		CompilePeakBytes:    CompilePeakBytes,
-		UploadPeakBytes:     limits.UploadPeakPerUploadBytes,
+		Profile:                      "default",
+		Instances:                    limits.GlobalInstances,
+		InstanceMemoryBytes:          int64(limits.InstanceMemoryPages) * int64(limits.WasmPageSize),
+		ModuleCacheBytes:             limits.ModuleCacheMaxBytes,
+		CompilePeakBytes:             CompilePeakBytes,
+		UploadPeakBytes:              limits.UploadPeakPerUploadBytes,
+		AppDBPageCachePerHandleBytes: DefaultAppDBPageCachePerHandleBytes,
 	}
 }
 
@@ -105,6 +123,9 @@ func (p MemoryPlan) withDefaults() MemoryPlan {
 	}
 	if p.UploadPeakBytes <= 0 {
 		p.UploadPeakBytes = d.UploadPeakBytes
+	}
+	if p.AppDBPageCachePerHandleBytes <= 0 {
+		p.AppDBPageCachePerHandleBytes = d.AppDBPageCachePerHandleBytes
 	}
 	return p
 }
@@ -162,8 +183,12 @@ type Options struct {
 	Now func() time.Time
 	// DiskFree 可注入磁盘余量读取（默认 syscall.Statfs）。
 	DiskFree func(path string) (int64, error)
-	// MemAvailable 可注入可用内存读取（默认读 /proc/meminfo）。
-	MemAvailable func() (int64, error)
+	// MemAvailable 可注入可用内存读取（默认 ReadMemoryAvailability：cgroup 感知 + 宿主回落）。
+	//
+	// 返回**带来源**的结构（host / cgroup / none）而不是裸字节数：来源必须出现在 `/readyz`
+	// 上（审计 R1-rt-1 的判据是"读到了什么、从哪读到的"都要看得见）。单测注入临时路径的
+	// 实现即可覆盖 cgroup v2 有上限 / v2=max / v1 / 全读不到四种形态。
+	MemAvailable func() MemoryAvailability
 }
 
 // Snapshot 是 `/readyz` 的响应体。
@@ -174,10 +199,16 @@ type Options struct {
 //     维度：没有编译器时子域请求照常服务，编排不该因此摘掉一个还在正常干活的实例）；
 //   - `compile_available` 回答"发布链路能不能编译"：它必须可见（不再与健康态同形），
 //     并且 AllowPublish 把它当**阻止发布**的理由（没有编译器就没有发布）。
+//
+// 内存维（R1-rt-1）：`mem_source` / `mem_available_bytes` 回答"四笔账用的可用内存是
+// 从哪读到的、数值多少"。`mem_source=none`（两个来源都读不到）⇒ 内存自检被跳过，
+// 这件事以非阻塞 reason 显式说出来 —— 零水位与"未知"不能同形（那正是旧实现的 fail-open）。
 type Snapshot struct {
 	OK               bool     `json:"ok"`
 	Reasons          []string `json:"reasons,omitempty"`
 	DiskFreeByte     int64    `json:"disk_free_bytes"`
+	MemSource        string   `json:"mem_source"`
+	MemAvailableByte int64    `json:"mem_available_bytes"`
 	CompileAvailable bool     `json:"compile_available"`
 	CompileQueue     int      `json:"compile_queue_depth"`
 	CompileBusy      bool     `json:"compile_busy"`
@@ -203,6 +234,13 @@ const (
 	// reasonCompileUnavailable：编译子系统不可用 —— 非阻塞（ok 仍可为 true），
 	// 但**阻止发布**（没有编译器就没有发布；审计 P2-2 的第二个要求）。
 	reasonCompileUnavailable = "编译子系统不可用"
+	// reasonMemUnavailable：未取到可用内存 ⇒ 内存四笔账被跳过 —— **非阻塞**。
+	//
+	// 为什么不阻止发布、也不把 ok 打成 false：这是"保留可部署性"的那一半 ——
+	// 非 Linux 开发机、受限容器都可能读不到 /proc/meminfo，拒绝启动/拒绝发布会让平台
+	// 在这些环境里完全不可用。但"跳过"这件事必须**可见**（旧实现里它与"内存充足"
+	// 逐字段同形，是本条审计认定的 fail-open）。
+	reasonMemUnavailable = "未取到可用内存（跳过内存自检）"
 )
 
 // Checker 是水位探针。
@@ -222,7 +260,7 @@ func New(opt Options) *Checker {
 		opt.DiskFree = diskFree
 	}
 	if opt.MemAvailable == nil {
-		opt.MemAvailable = memAvailable
+		opt.MemAvailable = ReadMemoryAvailability
 	}
 	return &Checker{opt: opt}
 }
@@ -293,6 +331,20 @@ func (c *Checker) Snapshot() Snapshot {
 		es := c.opt.Events()
 		s.EventsDropped, s.EventsFailed, s.EventsWritten = es.Dropped, es.Failed, es.Written
 	}
+	// 内存维（R1-rt-1）：把读到的来源与数值暴露出来；读不到时显式说明"自检被跳过"。
+	// 这是**非阻塞**说明项（见 reasonMemUnavailable），AllowPublish 也把它过滤掉。
+	if c.opt.MemAvailable != nil {
+		m := c.opt.MemAvailable()
+		s.MemSource = string(m.Source)
+		s.MemAvailableByte = m.Bytes
+		if !m.Known() {
+			reason := reasonMemUnavailable
+			if strings.TrimSpace(m.Detail) != "" {
+				reason += "：" + m.Detail
+			}
+			s.Reasons = append(s.Reasons, reason)
+		}
+	}
 	if c.opt.Ping != nil {
 		if err := c.opt.Ping(); err != nil {
 			s.OK = false
@@ -321,8 +373,10 @@ func (c *Checker) Handler() http.HandlerFunc {
 // AllowPublish 是**发布前的 fail-closed 闸门**（§4.9：低于阈值拒绝发布）。
 //
 // 与 Snapshot 的区别：这里只关心"能不能安全地接一次编译 + 落盘"，
-// 因此两类**非阻塞说明项**不阻止发布：
+// 因此三类**非阻塞说明项**不阻止发布：
 //   - 执行槽满载：发布不占执行槽（满载时连发布都做不了反而无法排障）；
+//   - 未取到可用内存：这是"保留可部署性"的降级路径（读不到 /proc 与 cgroup 时不拦人），
+//     它已经在启动日志与 /readyz 上**显式**说明，不该再让发布链路不可用；
 //   - 编译子系统不可用：**会**阻止（没有编译器就没有发布）—— 它不是"说明项"而是
 //     实打实的发布面缺失（审计 P2-2 的第二个要求）。
 //
@@ -333,7 +387,7 @@ func (c *Checker) AllowPublish() *apperr.Error {
 	s := c.Snapshot()
 	blocking := make([]string, 0, len(s.Reasons))
 	for _, reason := range s.Reasons {
-		if strings.HasPrefix(reason, reasonExecutorFull) {
+		if strings.HasPrefix(reason, reasonExecutorFull) || strings.HasPrefix(reason, reasonMemUnavailable) {
 			continue
 		}
 		blocking = append(blocking, reason)
@@ -425,7 +479,7 @@ func (l *InstanceLock) Path() string {
 // 任何"让请求路径重新持有制品字节"的改动都必须回到这里重新算账
 //（见 serverstore.wasmReleaseServeColumns 与 appserver.serveWasm 的注释）。
 
-// MemoryBudget 是四笔账的分解（便于日志与探针展示）。
+// MemoryBudget 是四笔账（+ 应用库页缓存这笔）的分解（便于日志与探针展示）。
 type MemoryBudget struct {
 	// Profile 是本次判定用的内存档位名（default / small / large）。
 	Profile       string `json:"profile"`
@@ -433,21 +487,37 @@ type MemoryBudget struct {
 	CompilePeak   int64  `json:"compile_peak_bytes"`
 	UploadPeak    int64  `json:"upload_peak_bytes"`
 	CacheResident int64  `json:"cache_resident_bytes"`
-	Total         int64  `json:"total_bytes"`
-	Available     int64  `json:"available_bytes"`
+	// AppDBCache 是"应用库页缓存"这笔账（R1-rt-8）：
+	// (1 + app_db_readers) × appdb_cache_kib × 句柄数（≤ max_instances）。
+	//
+	// 它过去**不在账里**（旧注释的理由是"可回收的缓存，不是实例"），于是控制台可以把
+	// 组合配到 272 GiB 而保存判据一字不变。现在它是独立一笔（不并入模块缓存：两者的
+	// 生命周期与失效路径完全不同，合并会让"调小哪一项"变得不可读）。
+	AppDBCache int64 `json:"appdb_cache_bytes"`
+	Total      int64 `json:"total_bytes"`
+	Available  int64 `json:"available_bytes"`
+	// Known 报告 Available 是不是**真的读到的**（false = 读不到 ⇒ 未判定）。
+	//
+	// 旧实现把"读不到"与"内存充足"表达成同一个 ok=true，控制台与 /readyz 都区分不出来
+	// （R1-rt-1 的 fail-open）。现在 ok 旁边多了这个字段：`known=false, ok=true` 的
+	// 含义是"没有判定"，而不是"判定通过"。
+	Known bool `json:"known"`
 	// Limit 是允许的上限（可用内存 × limits.MemoryPeakGuardPercent%）。
 	Limit int64 `json:"limit_bytes"`
 	OK    bool  `json:"ok"`
 }
 
 // ComputeMemoryBudget 计算**默认档**的理论峰值并判定是否超过可用内存的允许比例。
-// availableBytes ≤ 0 表示读不到 ⇒ **不判定**（返回 OK=true 并标注），
-// 因为"读不到就拒绝启动"会让容器/受限环境无法部署；此时由部署文档兜住。
+//
+// availableBytes < 0（MemoryUnknown）表示"读不到可用内存" ⇒ **不判定**（返回 OK=true
+// 且 Known=false），因为"读不到就拒绝启动"会让容器/受限环境无法部署；此时由部署文档兜住，
+// 并且调用方**必须**把"跳过自检"这件事写进启动日志与 /readyz（不许静默）。
+// availableBytes == 0 是**真的没有可用内存** ⇒ 判定失败（fail-loud）。
 func ComputeMemoryBudget(availableBytes int64) MemoryBudget {
 	return ComputeMemoryBudgetFor(availableBytes, DefaultMemoryPlan())
 }
 
-// ComputeMemoryBudgetFor 按给定档位计算理论峰值并判定（§4.3 内存四笔账）。
+// ComputeMemoryBudgetFor 按给定档位计算理论峰值并判定（§4.3 内存四笔账 + 页缓存一笔）。
 func ComputeMemoryBudgetFor(availableBytes int64, plan MemoryPlan) MemoryBudget {
 	p := plan.withDefaults()
 	b := MemoryBudget{
@@ -456,13 +526,17 @@ func ComputeMemoryBudgetFor(availableBytes int64, plan MemoryPlan) MemoryBudget 
 		CompilePeak:   p.CompilePeakBytes,
 		UploadPeak:    p.UploadPeakBytes,
 		CacheResident: p.ModuleCacheBytes,
-		Available:     availableBytes,
+		// 页缓存的乘数与实例池同一份（句柄数 ≤ max_instances = plan.Instances）。
+		AppDBCache: int64(p.Instances) * p.AppDBPageCachePerHandleBytes,
+		Available:  availableBytes,
 	}
-	b.Total = b.Instances + b.CompilePeak + b.UploadPeak + b.CacheResident
-	if availableBytes <= 0 {
+	b.Total = b.Instances + b.CompilePeak + b.UploadPeak + b.CacheResident + b.AppDBCache
+	if availableBytes < 0 {
+		b.Known = false
 		b.OK = true
 		return b
 	}
+	b.Known = true
 	b.Limit = availableBytes * limits.MemoryPeakGuardPercent / 100
 	b.OK = b.Total <= b.Limit
 	return b
@@ -500,31 +574,8 @@ func diskFree(path string) (int64, error) {
 	return int64(st.Bavail) * int64(st.Bsize), nil
 }
 
-// memAvailable 读 Linux 的 MemAvailable（容器里也反映 cgroup 限制后的可用量）。
-func memAvailable() (int64, error) {
-	f, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		if !strings.HasPrefix(line, "MemAvailable:") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			break
-		}
-		kb, err := strconv.ParseInt(fields[1], 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		return kb * 1024, nil
-	}
-	if err := sc.Err(); err != nil {
-		return 0, err
-	}
-	return 0, fmt.Errorf("readyz: /proc/meminfo 缺少 MemAvailable")
-}
+// 可用内存的读取实现只有一份：ReadMemoryAvailabilityAt（meminfo.go）。
+//
+// 这里曾经有第二份 memAvailable()（只看 /proc/meminfo），注释还断言"容器里也反映
+// cgroup 限制后的可用量" —— 与事实相反（容器里读到的是宿主可用内存），而它本身零调用方
+// （R1-rt-1 的死代码）。已删除：重复实现与错误注释都会让下一个人算错这笔账。

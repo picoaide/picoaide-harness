@@ -80,7 +80,7 @@ type Options struct {
 	// BaseDomain 返回**当前**应用基域（`<app_id>.<BaseDomain>`）。与
 	// internal/wasmapp/session 的同名字段**同源同语义**（同一份配置：session 用它拼
 	// 换票回跳，本包用它拼目录/发布响应里的入口链接）。空 = 未启用应用子域 ⇒
-	// 入口链接回落为按请求 Host 推导。
+	// **没有**入口链接（appOrigin 返回空串、字段整体省略），不按请求 Host 编造。
 	//
 	// 函数而不是字符串：管理端可在运行期改基域（2026-09-18 用户要求）。
 	BaseDomain func() string
@@ -545,8 +545,11 @@ func (h *Handlers) validateAppID(appID string) *apperr.Error {
 
 // appOrigin 返回应用的入口链接（`scheme://<app_id>.<基域>`）。
 //
-// 基域未配置时按请求 Host 推导（本包只把它当展示字段：不参与任何鉴权判定）。
-// 两个都拿不到就返回空串（调用方据此省略字段）。
+// **基域未配置 / 解析失败 ⇒ 返回空串**（调用方据此省略 `entry_url`，客户端据此禁用
+// 「打开」）。绝不按请求 Host 编造 `<app_id>.<主站 Host>`：那个主机名多半没有通配
+// DNS/证书，而且 HostGate 在基域为空时把**一切**主机名判成主站（edge/hostgate.go）
+// ⇒ 点「打开」要么 DNS 失败、要么命中主站/门户。发布说明的承诺就是"不配基域时
+// 应用**没有**对外地址"，界面不得发明一个（R1-pm-2）。
 func (h *Handlers) appOrigin(c *gin.Context, appID string) string {
 	// 基域解析规则只允许一份：复用 session.ParseBaseDomain（同一份部署配置的
 	// 两个消费者必须对"带不带 scheme / 大小写 / 尾点"给出相同结论）。
@@ -554,17 +557,12 @@ func (h *Handlers) appOrigin(c *gin.Context, appID string) string {
 	if h.opt.BaseDomain != nil {
 		raw = h.opt.BaseDomain()
 	}
-	if scheme, host := session.ParseBaseDomain(raw); scheme != "" && host != "" && appID != "" {
-		return scheme + "://" + appID + "." + host
-	}
-	host := strings.TrimSpace(c.Request.Host)
-	if host == "" {
+	if appID == "" {
 		return ""
 	}
-	scheme := "https"
-	if c.Request.TLS == nil && !strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") {
-		// 明文直达（本地/内网部署）时不要伪造 https —— 链接点不开比"不安全"更糟。
-		scheme = "http"
+	scheme, host := session.ParseBaseDomain(raw)
+	if scheme == "" || host == "" {
+		return ""
 	}
 	return scheme + "://" + appID + "." + host
 }

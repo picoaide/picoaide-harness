@@ -118,21 +118,33 @@ const compileUnavailableDetail = "编译子系统不可用（发布链路已禁�
 // 2026-09-18 起账本按**部署声明的内存档位**算（plan），而同一份档位也喂给 appserver
 // 强制并发/实例上限/模块缓存/库句柄 —— 因此"自检算的账"与"实际跑的账"是同一份。
 //
-// 参数显式传入 availableBytes（而不是函数内部读 /proc）：让"极小 MemAvailable ⇒
-// 拒绝启动 / 不 Fatalf"能被确定性测到，不必真改 /proc/meminfo。
-func checkStartupMemory(enabled bool, availableBytes int64, plan readyz.MemoryPlan, logf func(format string, args ...any)) *apperr.Error {
+// 参数显式传入**读取结果**（而不是函数内部读 /proc）：让"极小 cgroup 剩余 ⇒ 拒绝启动 /
+// 读不到 ⇒ 跳过"都能被确定性测到，不必真改 /proc/meminfo 或真造 cgroup。
+//
+// 读不到可用内存（Source=none）时**跳过判定但大声说**：这是"保留可部署性"的一半
+// （非 Linux 开发机/受限容器不能让整个平台起不来），另一半是"绝不与内存充足同形"——
+// 旧实现只做到前一半，于是读不到时控制台与 /readyz 都看不到任何异常（R1-rt-1）。
+func checkStartupMemory(enabled bool, avail readyz.MemoryAvailability, plan readyz.MemoryPlan, logf func(format string, args ...any)) *apperr.Error {
 	if !enabled {
 		logf("wasm: 应用平台未启用（未配置 %s），跳过内存四笔账自检"+
 			"（实例池/编译峰值/上传峰值/缓存驻留都不会被用到）", EnvAppsBaseDomain)
 		return nil
 	}
-	budget, berr := readyz.CheckStartupMemoryFor(availableBytes, plan)
+	if !avail.Known() {
+		logf("wasm: ⚠️ 未取到可用内存，跳过内存自检（来源=%s：%s）—— 保留可部署性，"+
+			"但 /readyz 的 mem_source=none 与这条日志会如实反映它；"+
+			"请核对部署真的给了 /proc/meminfo 或 cgroup 限额（读不到时四笔账不再判定）",
+			avail.Source, avail.Detail)
+		return nil
+	}
+	budget, berr := readyz.CheckStartupMemoryFor(avail.BudgetBytes(), plan)
 	if berr != nil {
 		return berr
 	}
-	logf("wasm: memory budget profile=%s instances=%dMB compile_peak=%dMB upload_peak=%dMB cache_resident=%dMB total=%dMB available=%dMB limit=%dMB",
+	logf("wasm: memory budget profile=%s instances=%dMB compile_peak=%dMB upload_peak=%dMB cache_resident=%dMB appdb_cache=%dMB total=%dMB available=%dMB limit=%dMB mem_source=%s（%s）",
 		budget.Profile, budget.Instances>>20, budget.CompilePeak>>20, budget.UploadPeak>>20,
-		budget.CacheResident>>20, budget.Total>>20, budget.Available>>20, budget.Limit>>20)
+		budget.CacheResident>>20, budget.AppDBCache>>20, budget.Total>>20, budget.Available>>20,
+		budget.Limit>>20, avail.Source, avail.Detail)
 	return nil
 }
 
@@ -212,7 +224,7 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 	// 只在启用应用子域时校验（见 checkStartupMemory 的注释：未启用时这四笔账不会被用到）。
 	// 账本按**本部署声明的档位**算：同一份数值也喂给 appserver（队列并发/实例上限/
 	// 模块缓存/库句柄），因此"自检算的账"与"实际跑的账"是同一份。
-	if berr := checkStartupMemory(enabled, readMemAvailable(), plan, log.Printf); berr != nil {
+	if berr := checkStartupMemory(enabled, readMemoryAvailability(), plan, log.Printf); berr != nil {
 		log.Fatalf("WASM 应用平台启动自检失败：%v", berr)
 	}
 
@@ -391,6 +403,9 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		},
 		Scheduler: scheduler,
 		Ping:      db.Ping,
+		// 可用内存的来源与数值必须出现在 /readyz 上（R1-rt-1）：这里显式注入与启动自检
+		// **同一个**读取实现，避免"日志读 cgroup、探针读宿主"这种两套口径。
+		MemAvailable: readMemoryAvailability,
 	})
 
 	api := wasmapi.NewHandlers(wasmapi.Options{
@@ -408,12 +423,15 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		// 下架/冻结/删除后立即释放进程内驻留（模块 + 库句柄，见 api.Options.OnAppEvict）。
 		OnAppEvict: newWasmAppEvictor(appSrv),
 		// 平台限制项（并发/内存）：读写闭包；校验与下发都在 wasmLimitsHolder/ApplyLimits。
-		Limits:          limitsHolder.Get,
-		LimitsSource:    limitsHolder.Source,
-		LimitsProfile:   limitsHolder.ProfileName,
-		LimitsApply:     limitsHolder.Apply,
-		LimitsRestart:   limitsHolder.RestartPending,
-		MemoryAvailable: readMemAvailable,
+		Limits:        limitsHolder.Get,
+		LimitsSource:  limitsHolder.Source,
+		LimitsProfile: limitsHolder.ProfileName,
+		LimitsApply:   limitsHolder.Apply,
+		LimitsRestart: limitsHolder.RestartPending,
+		// 控制台的四笔账预览也要"读不到就如实说"：BudgetBytes() 在未知时给
+		// readyz.MemoryUnknown（<0）⇒ 预览只算不判（Known=false 会显示在响应里），
+		// 而不是拿 0 当"内存充足"。
+		MemoryAvailable: func() int64 { return readMemoryAvailability().BudgetBytes() },
 	})
 
 	// 分片上传会话的保留期回收（§4.2）：与调用事件同款调度器（启动即清一次 + 周期）。
@@ -520,31 +538,17 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-// readMemAvailable 读可用内存；读不到返回 0（readyz 对 ≤0 的语义是"不判定"，
-// 这样容器/受限环境不会因为 /proc/meminfo 不可读而无法部署）。
-func readMemAvailable() int64 {
-	v, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return 0
-	}
-	for _, line := range strings.Split(string(v), "\n") {
-		if !strings.HasPrefix(line, "MemAvailable:") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			break
-		}
-		var kb int64
-		for _, c := range fields[1] {
-			if c < '0' || c > '9' {
-				break
-			}
-			kb = kb*10 + int64(c-'0')
-		}
-		return kb * 1024
-	}
-	return 0
+// readMemoryAvailability 是**可用内存的唯一读取入口**（cgroup 感知 + 宿主回落）。
+//
+// 为什么不再只看 /proc/meminfo（P0-1 / R1-rt-1）：容器里 MemAvailable 是**宿主**的
+// 可用内存，与 cgroup 限额无关 ⇒ `mem_limit: 2g` 的容器按默认档（需 3.6 GiB 可用）
+// 自检通过，随后被内核 OOM-kill。现在取 min(宿主可用, cgroup 剩余)，并把来源
+// （host / cgroup / none）与数值一起带出来。
+//
+// 读不到（Source=none）**不等于**内存充足：调用方必须显式说明"跳过内存自检"
+// （见 checkStartupMemory 与 /readyz 的 mem_source 字段），保留可部署性但不许静默。
+func readMemoryAvailability() readyz.MemoryAvailability {
+	return readyz.ReadMemoryAvailability()
 }
 
 func splitCSV(s string) []string {

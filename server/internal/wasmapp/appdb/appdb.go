@@ -220,6 +220,18 @@ type DB struct {
 	// 改走串行路径，而不是永远等一个不会回来的槽）。重连时换成新的 channel。
 	genClosed chan struct{}
 	closed    bool
+	// retired 是**终态**：句柄被池淘汰（或服务端关停）之后置位，此后**不再重连**。
+	//
+	// 为什么需要它（审计 R1-rt-5）：Close 的语义是"之后按需重连"，而句柄池把
+	// `delete(handles) + Close` 当终态。被放弃的宿主调用 goroutine（runtime.callHost 的
+	// 预算到点即返回，Dispatch 仍在跑）能在 Close **之后**才走到 appdb ⇒ ensureConnLocked
+	// 建一组新连接 ⇒ 这一代 1+N 条连接永久无人回收（评审实测 Close 后 fd 0→7），
+	// 而池的 size() 只看得到 1，运维面完全不可见。
+	//
+	// 语义：retired 一旦置位**永不清除**；此后任何 db.* 调用返回一条明确错误
+	// （见 retiredError），绝不静默复活。重连能力只属于"会话内恢复"
+	// （污染回收 / 事务超时），与"句柄已被回收"是两件事。
+	retired bool
 
 	tx       *txSession
 	nextTxID int64
@@ -658,7 +670,7 @@ func (d *DB) withReadConn(ctx context.Context, fn func(*sql.Conn) error) error {
 func (d *DB) takeReadSlot(ctx context.Context) (*sql.Conn, bool) {
 	d.stateMu.Lock()
 	// 事务内读必须走 rw（看未提交写）；污染/已关闭时连接不可信 ⇒ 交给退化路径恢复。
-	degraded := d.tx != nil || d.closed || d.poisoned != nil
+	degraded := d.tx != nil || d.closed || d.retired || d.poisoned != nil
 	gen := d.genClosed
 	d.stateMu.Unlock()
 	if degraded || gen == nil {
@@ -1010,6 +1022,9 @@ func (d *DB) Dir() string { return d.dir }
 
 // Close 释放 1+N 条连接与池子。幂等；之后再调用 db.\* 会按需重连（重连同样加固 + 金丝雀）。
 //
+// ⚠️ "可重连"是**会话边界**的语义。句柄生命周期终点请用 Retire（不可重连的终态）——
+// 句柄池的淘汰/关停路径一律走它，否则被放弃的宿主调用能在回收之后把库复活（R1-rt-5）。
+//
 // **Close 会清掉污染标记与事务写闸**（审计 P0-2 的第二半）：Close 之后对象只剩磁盘上的
 // 库文件，下一次调用走的是全新连接 + 全套加固 + 金丝雀 ⇒ 污染所约束的那条连接已经
 // 不存在了，继续拒绝服务没有任何安全收益，只会把"一次超时"放大成"进程重启前永久不可用"。
@@ -1028,6 +1043,51 @@ func (d *DB) Close() error {
 		return nil
 	}
 	return d.closeLocked()
+}
+
+// Retire 把句柄置为**终态**并关闭连接：此后**不可能**再建立连接，db.\* 一律返回
+// ErrRetired 语义的错误（apperr.CodeDBDenied）。
+//
+// 与 Close 的分工（审计 R1-rt-5）：
+//   - Close  = 会话边界：释放连接，但"之后按需重连"（污染恢复、下一次调用都会用到它）；
+//   - Retire = 生命周期终点：句柄已从池里摘除 / 服务端关停 ⇒ 谁还持有这个对象的引用
+//     （最典型的是被放弃的宿主调用 goroutine）都只会拿到一次明确报错。
+//
+// 幂等；Retire 之后 Close 是 no-op。关连接前同样**先排空在途读者**（见 closeLocked
+// 的不变式），所以 Retire 可能阻塞到在途只读语句结束（它们各自受单语句 5 s 预算约束）。
+func (d *DB) Retire() error {
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	d.clearPoisonLocked()
+	d.stateMu.Lock()
+	already := d.retired
+	d.retired = true
+	closed := d.closed
+	d.stateMu.Unlock()
+	if already || closed {
+		return nil
+	}
+	return d.closeLocked()
+}
+
+// Retired 报告句柄是否已进入终态（诊断/测试断言用）。
+func (d *DB) Retired() bool {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.retired
+}
+
+// retiredError 是终态句柄上任何调用的统一错误。
+//
+// 为什么是 DB_DENIED 而不是 INTERNAL：这不是平台内部故障，而是"这个库句柄已经结束了"，
+// 应用侧的应对是**重试请求**（下一个请求会拿到全新句柄）。文案与 hints 都按这个口径写，
+// 绝不 panic（被放弃的 goroutine 里 panic 会打穿宿主边界）。
+func (d *DB) retiredError() *apperr.Error {
+	return apperr.New(apperr.CodeDBDenied, "应用库句柄已被平台回收，本次调用不再执行").
+		WithDetail("reason", "appdb_retired").
+		WithDetail("app_id", d.appID).
+		WithHint("这是宿主调用的兜底路径（原请求已超过预算并被放弃）：重试该请求即可，" +
+			"新请求会拿到全新的应用库句柄")
 }
 
 // clearPoisonLocked 清掉污染标记与事务写闸（幂等）。
@@ -1213,10 +1273,16 @@ func (d *DB) countTablesOn(ctx context.Context, conn *sql.Conn) (int, error) {
 // 全部 1+N 条连接（那正是"排空在途读者"的那条路径），必须与所有关连接路径互斥。
 func (d *DB) ensureReadyLocked(write bool) error {
 	d.stateMu.Lock()
+	retired := d.retired
 	poisoned := d.poisoned
 	inTx := d.tx != nil
 	deadTx := d.deadTx
 	d.stateMu.Unlock()
+	// 终态优先于一切恢复路径（R1-rt-5）：它**不**允许重连，也不允许污染恢复
+	// （恢复的第一件事就是重连，那正是漏洞本身）。
+	if retired {
+		return d.retiredError()
+	}
 	if poisoned != nil {
 		if inTx {
 			// 事务内不在这里静默重连（那等于把事务体后半段的写降级成自动提交）。
@@ -1232,6 +1298,12 @@ func (d *DB) ensureReadyLocked(write bool) error {
 
 // ensureConnLocked 在闭库/缺连接时用**独立宿主预算**建立连接（调用方必须持有 writeMu）。
 func (d *DB) ensureConnLocked() error {
+	// 防御性复检（R1-rt-5）：调用方是持 writeMu 的恢复路径，而"终态"与"关闭态"的唯一
+	// 区别就是**不许重连** —— 这条判据必须落在真正建连的函数上，而不是只在 ensureReadyLocked
+	// （将来新增一条恢复路径忘了过闸时，这里仍然 fail-closed）。
+	if d.isRetired() {
+		return d.retiredError()
+	}
 	if d.ready() {
 		return nil
 	}
@@ -1245,7 +1317,14 @@ func (d *DB) ensureConnLocked() error {
 func (d *DB) ready() bool {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
-	return !d.closed && d.sqlDB != nil && d.rw != nil && len(d.ros) == d.readers && d.genClosed != nil
+	return !d.closed && !d.retired && d.sqlDB != nil && d.rw != nil && len(d.ros) == d.readers && d.genClosed != nil
+}
+
+// isRetired 报告终态（stateMu 下判定；与 ready 同一把锁的顺序）。
+func (d *DB) isRetired() bool {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.retired
 }
 
 // dropPoisonedConnectionsLocked 丢弃被污染的一整代连接（含强制回滚）并清掉污染标记。
