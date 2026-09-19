@@ -25,9 +25,15 @@ type SyncResult struct {
 // httpFetch15s 返回带 15s 请求内超时的 fetchFn(审计修复 M5):慢/黑洞上游
 // 不得把 admin 同步请求挂到 channels.HTTPFetch 的 120s 客户端超时。
 // 与 syncProviderNow 即时同步口径一致;测试经 syncFetchFn 注入。
+//
+// 2026-09-19:ctx/cancel **按调用**创建。此前建在闭包外、cancel 在闭包内 defer
+// ⇒ 同一闭包第二次调用必然拿到已取消的 ctx、立刻以 `context canceled` 失败
+// (看起来像上游抖动,极难排查)。当前 3 个调用点都是"建一次闭包只调一次"所以
+// 不可达,但这是随时会被下一个重构打破的陷阱;按调用创建对单次调用逐字等价,
+// 且未调用时不再挂着一个永不 cancel 的 15s timer。
 func httpFetch15s(key string) func(url string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	return func(url string) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		return channels.HTTPFetch(ctx, url, key)
 	}
@@ -103,20 +109,30 @@ func SyncProvider(db *sql.DB, ch channels.Channel, p *serverstore.GatewayProvide
 		return SyncResult{Provider: p.Name, Added: 0, Removed: 0}
 	}
 	// 排除名单:管理端删除的渠道同步模型不自动恢复(审计修复 H2)
+	//
+	// 2026-09-19(审计):读失败必须 fail-closed **跳过本轮同步**。此前
+	// `excluded = nil` 把"读不出来"当成"名单为空" ⇒ SyncLoop 的下一跳就把
+	// 管理员删掉的模型重新建回来,绕过 H2(排除名单是该修复的唯一载体)。
+	// 与上文"空模型列表不当成全部下架"同一条纪律:拿不准就不动目录。
 	excluded, err := serverstore.GetExcludedModels(db, p.ID)
 	if err != nil {
-		excluded = nil
+		return SyncResult{Provider: p.Name, Error: "读取模型排除名单失败(已跳过本轮同步):" + err.Error()}
 	}
 	excludedSet := make(map[string]bool, len(excluded))
 	for _, e := range excluded {
 		excludedSet[e] = true
 	}
-	// 同步前目录集合:计算 added 的基线(审计修复 M5)
+	// 同步前目录集合:计算 added 的基线(审计修复 M5)。
+	// 读失败时退化成空集合 ⇒ added 报成全量新增(仅计数偏差,不改库)。
+	// 判定:可接受 —— 为一次统计读失败而让整个 provider 同步失败,代价大于收益;
+	// 因此保留该降级,只把它记进日志以免静默。
 	beforeSet := make(map[string]bool)
 	if before, err := syncedModelNames(db, p.ID); err == nil {
 		for _, n := range before {
 			beforeSet[n] = true
 		}
+	} else {
+		log.Printf("gateway sync: provider %d 同步前模型清单读取失败,Added 计数可能偏大: %v", p.ID, err)
 	}
 	cl, mo := ch.DefaultModelCaps()
 	type caps struct {

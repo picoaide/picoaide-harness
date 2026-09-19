@@ -79,7 +79,17 @@ func (a *AdminAPI) usageOverview(c *gin.Context) {
 	}
 	top := make([]serverstore.UsageAggregateRow, 0, len(modelRows))
 	top = append(top, modelRows...)
-	sort.Slice(top, func(i, j int) bool { return top[i].Cost > top[j].Cost })
+	// 2026-09-19(审计):改用稳定排序 + 次级键(模型名)。
+	// 唯一判据仍是 Cost 降序、仍取前 10;但等值行(未定价模型成本全 0 是最常见
+	// 的一种)原先由 sort.Slice(pdqsort)的内部行为决定次序 —— 一旦同时存在
+	// 不同成本与等值行,等值组会被重排成与任何判据无关的顺序,且第 10/11 名
+	// 等值时"取前 10"选谁不确定(多一个等值模型就可能换人)。
+	sort.SliceStable(top, func(i, j int) bool {
+		if top[i].Cost != top[j].Cost {
+			return top[i].Cost > top[j].Cost
+		}
+		return top[i].Label < top[j].Label
+	})
 	if len(top) > 10 {
 		top = top[:10]
 	}
