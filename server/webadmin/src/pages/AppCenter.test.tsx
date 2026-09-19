@@ -220,6 +220,8 @@ describe('AppCenter 应用中心', () => {
   it('点「下架」→ POST /wasm-apps/<id>/unpublish，并按响应把该行切回「上架」', async () => {
     await renderList()
     fireEvent.click(within(rowOf('share-note')).getByRole('button', { name: '下架' }))
+    // R1-uxw-13:下架现在必须过二次确认(确认前不发请求)。
+    fireEvent.click(await screen.findByTestId('unpublish-confirm'))
     await waitFor(() => {
       expect(mockRequest).toHaveBeenCalledWith(
         '/api/server/admin/wasm-apps/share-note/unpublish',
@@ -351,6 +353,8 @@ describe('AppCenter 应用中心', () => {
     })
     await renderList()
     fireEvent.click(within(rowOf('share-note')).getByRole('button', { name: '下架' }))
+    // R1-uxw-13:下架是影响全部使用者的危险动作,现在必须过二次确认(确认前不发请求)。
+    fireEvent.click(await screen.findByTestId('unpublish-confirm'))
     expect(await screen.findByText('下架失败:应用已被冻结')).toBeInTheDocument()
     // 该行仍是上架态(不乐观改本地状态)
     expect(within(rowOf('share-note')).getByText('上架')).toBeInTheDocument()
@@ -581,7 +585,9 @@ describe('应用中心 · 更新审批闭环', () => {
     await renderList()
     fireEvent.click(within(rowOf('review-me')).getByRole('button', { name: '详情' }))
     fireEvent.click(await screen.findByTestId('pending-approve-1.2.0'))
-    expect(await screen.findByTestId('apps-error')).toHaveTextContent('需要 capability:write 权限')
+    // R1-uxw-1:审核成败反馈渲染在**对话框内部**(detail-feedback) —— 页面级的
+    // apps-error 会被 Radix 的整屏遮罩压住,管理员看到的是"点了没反应"。
+    expect(await screen.findByTestId('detail-feedback')).toHaveTextContent('需要 capability:write 权限')
   })
 
   it('列表错误信封的 hints 与 details.field 都被渲染(P1-6)', async () => {
@@ -590,7 +596,8 @@ describe('应用中心 · 更新审批闭环', () => {
       throw new ApiError(400, 'VALIDATION', 'status 取值不合法', undefined, ['待审批队列用 status=pending'], { field: 'status' })
     })
     render(<Apps />)
-    const err = await screen.findByTestId('apps-error')
+    // R1-uxw-2:列表读取失败是页面级确定态,渲染在 apps-load-error(且不渲染任何行)。
+    const err = await screen.findByTestId('apps-load-error')
     expect(err).toHaveTextContent('status 取值不合法')
     expect(err).toHaveTextContent('字段 status')
     expect(err).toHaveTextContent('待审批队列用 status=pending')

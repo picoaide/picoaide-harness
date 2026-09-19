@@ -58,8 +58,17 @@ interface Budget {
   compile_peak_bytes: number
   upload_peak_bytes: number
   cache_resident_bytes: number
+  /**
+   * 应用库页缓存这笔账（R1-rt-8）：(1 + app_db_readers) × appdb_cache_kib × max_instances。
+   *
+   * 它过去不在账里，于是控制台能把组合配到 272 GiB 而保存判据一字不变 —— 现在它既进
+   * 服务端判定，也进这里的编辑期估算（否则界面显示"未超水位"而保存被服务端拒绝）。
+   */
+  appdb_cache_bytes: number
   total_bytes: number
   available_bytes: number
+  /** known=false 表示服务端**没读到**可用内存（available_bytes = -1）⇒ 只算不判。 */
+  known: boolean
   limit_bytes: number
   ok: boolean
 }
@@ -192,17 +201,27 @@ export default function Limits() {
   useEffect(() => { void load() }, [load])
   useEffect(() => { void loadRuntime() }, [loadRuntime])
 
-  /** 编辑期估算：与后端 applimits.Budget 同一公式（三个常量由服务端下发）。 */
+  /**
+   * 编辑期估算：与后端 applimits.Budget 同一公式（固定项由服务端下发，随限制项变化的
+   * 三项按**表单当前值**重算）。
+   *
+   * 页缓存那笔（R1-rt-8）的公式与 Go 侧 applimits.Limits.AppDBPageCachePerHandleBytes 一致：
+   * (1 写 + app_db_readers 读) × 每条连接 appdb_cache_kib × 句柄数（≤ max_instances）。
+   * 必须按表单值重算而不是直接用服务端的 appdb_cache_bytes —— 后者是**已保存值**的账，
+   * 管理员改这两个旋钮时它不会动，界面就会在"马上要被拒"的组合上显示正常。
+   */
   const preview = useMemo(() => {
     if (!view || !form) return null
     const instances = form.max_instances * form.instance_memory_mb * (1 << 20)
     const cache = form.module_cache_mb * (1 << 20)
-    const total = instances + view.budget.compile_peak_bytes + view.budget.upload_peak_bytes + cache
+    const appdbCache = (1 + form.app_db_readers) * form.appdb_cache_kib * 1024 * form.max_instances
+    const total = instances + view.budget.compile_peak_bytes + view.budget.upload_peak_bytes + cache + appdbCache
     const limit = Math.floor((view.budget.available_bytes * view.guard_percent) / 100)
     return {
-      instances, cache, total, limit,
+      instances, cache, appdbCache, total, limit,
       ok: view.budget.available_bytes <= 0 || total <= limit,
       available: view.budget.available_bytes,
+      known: view.budget.known !== false,
     }
   }, [view, form])
 
@@ -360,7 +379,7 @@ export default function Limits() {
               </Button>
             ))}
           </div>
-          <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
             <div>
               <div className="text-muted-foreground">实例池（并发 × 单实例上限）</div>
               <div className="font-medium">{mb(preview.instances)} MiB</div>
@@ -377,11 +396,17 @@ export default function Limits() {
               <div className="text-muted-foreground">模块缓存驻留</div>
               <div className="font-medium">{mb(preview.cache)} MiB</div>
             </div>
+            <div>
+              <div className="text-muted-foreground">应用库页缓存（SQLite）</div>
+              <div className="font-medium">{mb(preview.appdbCache)} MiB</div>
+            </div>
           </div>
           <div className={`rounded-md border px-3 py-2 text-sm ${preview.ok ? 'border-border' : 'border-destructive/40 bg-destructive/10 text-destructive'}`} data-testid="budget-line">
             理论峰值 <span className="font-semibold">{mb(preview.total)} MiB</span>
             {' / '}可用 {mb(preview.available)} MiB 的 {view.guard_percent}% = {mb(preview.limit)} MiB
-            {preview.ok ? '：可以保存' : '：超出水位，保存会被拒绝（请调小并发/实例内存/模块缓存）'}
+            {preview.ok
+              ? (preview.known ? '：可以保存' : '：未取到可用内存，保存时不判定水位')
+              : '：超出水位，保存会被拒绝（请调小并发/实例内存/模块缓存/页缓存）'}
           </div>
         </CardContent>
       </Card>

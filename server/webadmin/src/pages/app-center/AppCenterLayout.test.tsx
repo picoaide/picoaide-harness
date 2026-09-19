@@ -30,7 +30,8 @@ const LIMITS_VIEW = {
   ranges: {},
   budget: {
     profile: 'settings', instances_bytes: 0, compile_peak_bytes: 0, upload_peak_bytes: 0,
-    cache_resident_bytes: 0, total_bytes: 0, available_bytes: 0, limit_bytes: 0, ok: true,
+    cache_resident_bytes: 0, appdb_cache_bytes: 0, total_bytes: 0, available_bytes: 0,
+    known: true, limit_bytes: 0, ok: true,
   },
   guard_percent: 70,
   restart_fields: [],
