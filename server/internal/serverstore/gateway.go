@@ -89,40 +89,19 @@ func AddExcludedModel(db *sql.DB, providerID int64, name string) error {
 	return SetSetting(db, excludedModelsKey(providerID), string(b))
 }
 
-// RemoveExcludedModel 把模型名移出排除名单(幂等:不在名单里也算成功)。
-//
-// 2026-09-19(P2-4):名单此前是**单向**的,而 webadmin 删除确认文案承诺
-// 「删除后同步不会自动恢复,如需恢复请重新添加」—— 实测重新添加的模型会在
-// 下一轮同步被 RemoveMissingProviderModels 再删一次(它不在上游目录的 keep
-// 列表里),管理员的显式意图被自动同步撤销,承诺不可兑现。管理端"重新添加"
-// 渠道模型时调用本函数(见 llmgateway/admin.go createModel)。
-//
-// 名单被移空时写回 `[]`(而非删除该键):GetExcludedModels 对 `[]` 与"键不存在"
-// 同解,写回空数组让"名单已处理"可见、也避免 settings 行随删随建;该键在删除
-// provider 时仍被整体清理(见 DeleteGatewayProvider)。SetSetting 会失效
-// settings 缓存,下一次同步立即看到新名单。
-//
-// 单条 autocommit 版本;**要与建模型行同事务请用 RemoveExcludedModelTx**
-// (后者不失效缓存,提交后调用方须 InvalidateSettings())。
-func RemoveExcludedModel(db *sql.DB, providerID int64, name string) error {
-	names, err := GetExcludedModels(db, providerID)
-	if err != nil {
-		return err
-	}
-	kept, changed := removeExcludedName(names, name)
-	if !changed {
-		return nil
-	}
-	b, _ := json.Marshal(kept)
-	return SetSetting(db, excludedModelsKey(providerID), string(b))
-}
-
 // RemoveExcludedModelTx 在调用方事务内把模型名移出排除名单,返回"是否真的
 // 改了"(幂等:不在名单里返回 (false, nil),且不写库)。
 //
-// 2026-09-19(N1):llmgateway.createModel 的"移名单 + 建模型行"必须在**同一
-// 事务**里 —— 旧实现两步各自 autocommit,建行失败(500)或同重名(400)时名单
-// 已经被清空,下一个同步轮次会把管理员显式删除的渠道模型复活。
+// 2026-09-19(P2-4 + N1):名单此前是**单向**的,而 webadmin 删除确认文案承诺
+// 「删除后同步不会自动恢复,如需恢复请重新添加」—— 实测重新添加的模型会在
+// 下一轮同步被 RemoveMissingProviderModels 再删一次(它不在上游目录的 keep
+// 列表里),管理员的显式意图被自动同步撤销。修法 = 管理端"重新添加"渠道模型时
+// 移出该名(见 llmgateway/admin.go createModel)。
+//
+// 为什么只有事务版(2026-09-19 第三轮审计后:**刻意不提供 autocommit 版**):
+// "移名单 + 建模型行"必须原子 —— 旧实现两步各自 autocommit,建行失败(500)或
+// 撞重名(400)时名单已经被清空,下一个同步轮次就把管理员显式删除的渠道模型
+// 复活(H2 保护被一次失败请求撤销)。只留事务版 ⇒ 调用方不可能漏掉这一步。
 //
 // 名单读的是**事务内**的 settings 行(不走 settingsCache:缓存不参与事务,
 // 读-改-写必须以事务快照为准);写走 SetSettingTx,**不失效缓存**,提交后由
@@ -162,8 +141,8 @@ func excludedModelsTx(tx *sql.Tx, providerID int64) ([]string, error) {
 }
 
 // removeExcludedName 从名单里删掉一个名字,返回新名单与"是否真的删掉了"。
-// 唯一实现:autocommit 版与事务版共用(kept 始终是非 nil 切片 ⇒ 移空时
-// json.Marshal 得到 `[]` 而不是 `null`)。
+// 唯一实现(kept 始终是非 nil 切片 ⇒ 移空时 json.Marshal 得到 `[]` 而不是
+// `null`,与"键不存在"同解但可自证已处理)。
 func removeExcludedName(names []string, name string) ([]string, bool) {
 	kept := make([]string, 0, len(names))
 	changed := false

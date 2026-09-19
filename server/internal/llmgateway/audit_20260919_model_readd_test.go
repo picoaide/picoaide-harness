@@ -82,30 +82,55 @@ func TestReAddExcludedChannelModelSurvivesNextSync(t *testing.T) {
 
 // TestRemoveExcludedModelIsIdempotentAndKeepsEmptyList:移出接口的幂等与空名单
 // 形态(写回 `[]`,与"键不存在"同解但可自证已处理)。
+//
+// 走**事务版**(`RemoveExcludedModelTx`)—— 生产路径(createModel)就是它,而且
+// 刻意不再提供 autocommit 版:只留事务版,调用方不可能把"移名单 + 建模型行"
+// 拆成两步(那正是 P2 的成因)。事务版**不失效缓存**,所以这里提交后显式
+// `InvalidateSettings()`,顺带把这条契约钉在用例里(漏掉 ⇒ 下面的读取断言会红)。
 func TestRemoveExcludedModelIsIdempotentAndKeepsEmptyList(t *testing.T) {
 	_, db, _ := adminTestSetup(t)
 	defer db.Close()
 
 	const providerID int64 = 42 // 名单只是 settings 键,不需要 provider 行存在
 	key := "gateway.excluded_models.42"
+	remove := func(name string) (bool, error) {
+		tx, err := db.Begin()
+		if err != nil {
+			return false, err
+		}
+		defer tx.Rollback()
+		changed, err := serverstore.RemoveExcludedModelTx(tx, providerID, name)
+		if err != nil {
+			return false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		serverstore.InvalidateSettings()
+		return changed, nil
+	}
 	if err := serverstore.AddExcludedModel(db, providerID, "a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := serverstore.AddExcludedModel(db, providerID, "b"); err != nil {
 		t.Fatal(err)
 	}
-	// 移出一个:另一个保留。
-	if err := serverstore.RemoveExcludedModel(db, providerID, "a"); err != nil {
+	// 移出一个:另一个保留;返回值证明"确实改了"。
+	if changed, err := remove("a"); err != nil {
 		t.Fatalf("remove a: %v", err)
+	} else if !changed {
+		t.Fatal("remove a: changed=false, want true")
 	}
 	assertExcluded0919(t, db, providerID, []string{"b"})
-	// 幂等:不在名单里也算成功(不写、不报错)。
-	if err := serverstore.RemoveExcludedModel(db, providerID, "a"); err != nil {
+	// 幂等:不在名单里也算成功(不写、不报错),且 changed=false。
+	if changed, err := remove("a"); err != nil {
 		t.Fatalf("remove a again (幂等): %v", err)
+	} else if changed {
+		t.Fatal("remove a again: changed=true, want false")
 	}
 	assertExcluded0919(t, db, providerID, []string{"b"})
 	// 移空 ⇒ 名单写回 `[]`(不删键)。
-	if err := serverstore.RemoveExcludedModel(db, providerID, "b"); err != nil {
+	if _, err := remove("b"); err != nil {
 		t.Fatalf("remove b: %v", err)
 	}
 	assertExcluded0919(t, db, providerID, nil)
@@ -117,7 +142,7 @@ func TestRemoveExcludedModelIsIdempotentAndKeepsEmptyList(t *testing.T) {
 		t.Fatalf("空名单形态 = %q, want []", raw)
 	}
 	// 空名单上再移出仍是幂等成功。
-	if err := serverstore.RemoveExcludedModel(db, providerID, "b"); err != nil {
+	if _, err := remove("b"); err != nil {
 		t.Fatalf("remove on empty list: %v", err)
 	}
 	assertExcluded0919(t, db, providerID, nil)
