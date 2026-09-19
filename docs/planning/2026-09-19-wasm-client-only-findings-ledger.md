@@ -523,6 +523,8 @@
 | R2-X-7 | P2 | §22.2 R2 的 grep 判据在 seam 之外仍有 1 处命中（`index.spec.ts:273` 的夹具 Origin） | 夹具若必须带 Origin，则把判据的排除范围写明（测试夹具 vs 生产代码），不要放宽整条规则 | L2 | **已转** |
 | R2-X-8 | P2 | `open` 恒消费 jti + 宿主用缓存 proof ⇒ TTL 内第 2 次起每次 `open` **多一次 401 往返** | 要么 `open` 的 jti 语义按"每次打开是状态变更"接受（写明理由），要么宿主对 `open` 走"每 TTL 重签一次"而不是复用缓存 proof | L2（+L1 确认语义） | **已转** |
 
+**R2-X-2 精度订正与闭合（2026-09-20，主控）**：本行原写「三档不得塌缩」易被读成「三个 reason 码」。裁决 (b) 的准确口径 = **呈现三档**（冻结「已被管理员停用」/ 下架「已下架」/ 删除「应用不存在」——§7.7② 的用户可见文案，三档语义确实不同、不得塌缩），**reason 码两档**（`app_frozen` 独立；软删与未登记同为 `app_not_found`；下架由 **410** 状态码承载）；不可达的 `app_deleted` 分支已删。F4 已补「取值逐个钉死」的断言（含两档相等的显式断言）与 7/7 变异。**闭合**。
+
 **PASS 项（可直接引用）**：**J1**（三端逐字 `/api/pico/wasm-apps/open`，对拍 spec 7 passed，客户端常量仍是字面量）｜**J5**（8 项白名单逐字同序 + 禁止头正负对照，4 passed；服务端生成物守卫三件套在位）｜**J7/J7b**（`{version,release_id,title,changed,opens:{today:{pv,uv}}}` 三端一致；缺省一律省略且不显示 0；管理端 `from/to/granularity` 与 webadmin 逐字一致）｜**J8**（四端只认 `login\|whitelist`，读侧 `public→login`、webadmin legacy 不可选、客户端与生成物对拍）｜**§22.2 R1**（`ctx.webServer` 仅 `host-request.ts`）｜**R3**、**R4**（unit 级）。
 **PARTIAL**：**J2**（①由 `main.ts` 模块作用域读值 ⇒ 仅能源码级断言；缺单条"①=②=③"端到端探针）｜**J4**｜**J12**（宿主 chrome 文案零消费者，与 R2-X-2 同根因）。
 **未判定**：J10（属 L4/L7 判据面）、R4 的真机 `onBeforeRequest` 探针（台账 §J 的 **R1-L2-1** 仍开）。

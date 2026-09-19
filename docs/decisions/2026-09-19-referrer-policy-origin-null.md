@@ -1,5 +1,8 @@
 # WASM 应用平台：Referrer-Policy `no-referrer` 让登录与换票 100% 失败（2026-09-19）
 
+> ⚠️ **历史记录 · 对象已删除（2026-09-20 追记，W4-12）**：本文件引用的下列对象已随「WASM 应用客户端专属」改造的 **W4 删除波次**（2026-09-19/20）**从源码整体删除** —— `internal/wasmapp/session/**`（应用会话 + 主站登录/换票 HTML 面）、`internal/wasmapp/anonlimit/**`、`internal/wasmapp/edge/hostgate.go`（主机名门控）、`internal/wasmapp/aichat/**`、应用子域与应用基域配置面、`entry_url`。
+> **阅读口径**：本文件是**当时的审计/决策记录**，凡出现上述对象一律按历史理解，**不得据此实施、也不得当作现行契约**。现行模型见 `docs/planning/2026-09-19-wasm-client-only-design.md`，接口面见 `server/docs/03-api-reference.md` §11b。
+
 > ⚠️ **状态：`superseded`（已作废，2026-09-19）—— 已废弃，不得据此实施。**
 > 本文描述的浏览器访问链路（应用子域 / 换票 / `/app-ticket` / 会话 Cookie / 基域 / 通配证书）
 > 已在「客户端专属」改造中**整体删除**；本文仅作历史记录保留，其中的机制、配置、操作步骤与结论
@@ -151,6 +154,7 @@
 ```bash
 cd server
 go build ./... && go vet ./internal/wasmapp/...
+# ⚠️ 已失效（W4 已删除 `internal/wasmapp/session`）：此命令**现在必然失败**，仅作历史复现记录。
 gofmt -l internal/wasmapp cmd/server          # 必须为空
 PG_DSN_TEST='postgres://postgres:postgres@127.0.0.1:5432/picoaide_test' \
   go test ./internal/wasmapp/session/... ./internal/wasmapp/edge/... \
@@ -187,6 +191,7 @@ PG_DSN_TEST='postgres://postgres:postgres@127.0.0.1:5432/picoaide_test' \
 一次性导出真实渲染字节（探针文件不随交付物提交）：
 
 ```bash
+# ⚠️ 已失效（W4 已删除 `internal/wasmapp/session`）：此命令**现在必然失败**，仅作历史复现记录。
 PICOAI_PROBE_DIR=temp/wasm-probe/pages-dump \
   go test ./internal/wasmapp/session/ -run ZZDump -count=1
 node temp/wasm-probe/verify-same-origin.mjs temp/wasm-probe/pages-dump
