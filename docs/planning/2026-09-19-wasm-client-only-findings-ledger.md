@@ -713,6 +713,50 @@ GET /api/server/admin/wasm-apps/opens/summary
 
 **⑧ 一条待销账的旧结论**：A2-L2 实测 enterprise = **534 passed / 1 skipped / 0 failed**，故台账 §T 的「L2 认账⑦（enterprise 的 8 MiB 分片上传 2 例非 L2、不作基线）」与 §19 R2-S-3 应**销账**（原结论过度保守）。
 
+## AA. 终局：双门禁全绿 + 第二轮审计 P0–P2 全部闭合（2026-09-20 02:18–02:40）
+
+### AA.1 冻结验证与终局判据（都在**同一条提交链的最后一版**上实跑）
+
+**冻结成立**：门禁前后 `git status --porcelain` = **0**（无任何在飞写入）；HEAD = **`114d9c1475`**。
+**提交链（三条，构成完整交付）**：
+1. `d3fe68de61` `feat(wasm): 应用平台改为客户端专属并彻底删除浏览器换票链` —— 350 文件 / +39103 / −17620（含 §W 的清理与 mutant `--amend`）。
+2. `eb7da457c6` `fix(wasm): 第二轮审计整改、两道漂移守卫与应用 AI 链路闭环` —— 四条修复泳道（F1/F2/F3/F4）的全部改动。
+3. `114d9c1475` `chore(release): v2.7.6-beta.5 版本号、认账项与发布说明同步`。
+
+**终局双门禁（`temp/wasm-client-only/FINAL-gates-eb7da457.log`）**：
+- `corepack yarn check` ⇒ **23 个任务：23 通过、0 失败、0 跳过**，150.8s，**`YARN_CHECK_EXIT=0`**（任务数 21→23 = 新增两道守卫；含 `check:wasm-client-only`、`check:no-leftover-mutants`、`check:migration-range`）。
+- `PG_DSN_TEST=… go test ./... -count=1 -p 2 -timeout 1800s` ⇒ **51 个包 ok、`FAIL`/`--- FAIL` 行 0**，**`GO_TEST_EXIT=0`**。
+- 五桶（终局）：**A=0**（必须为 0）／**B=34 ≤ 34**／**ANN=64 ≤ 65**／**C=466**／**D=14**，scanner exit 0。
+- 两道新守卫：`check-no-leftover-mutants`（5382 文件）**零残留**；`check-migration-range`（0001–0076）**一致**。
+
+### AA.2 第二轮审计 P0–P2 闭合总账
+
+| 来源 | P0 | P1 | P2 | 处置 |
+| --- | --- | --- | --- | --- |
+| A2-X（§P） | 1 | 3 | 4 | 全部闭合（§T：P0 两端闭合 + 三条 P1 + 三条 P2，X-6 认账） |
+| A2-L6（§Y） | 0 | 3 | 1 | **F1 闭合**（§5.1c 统一形状 + 真实形状对拍 spec 6 例 + 8/8 变异红） |
+| A2-L1（§Z.2） | 0 | 1 | 5 | **F4 闭合**（含唯一 P1：删 `entry_url` 活代码 + enterprise 纳入 SCOPES；7/7 变异红） |
+| A2-L2（§Z.2） | 0 | 0 | 5 | **F2 闭合 3 条**（裸前缀闸门 / adapter→guard 转发判据 / open 响应关窗清缓存）；**R2-L2-1 认账**（消费者在 `packages/host/browser/**`）；R2-L2-4 证据绑定已修 |
+| A2-L4（§Z.3） | 0 | 0 | 3 | 全部闭合（ANN 量具自描述 / `AITokenTTL` 主控修 / status 自相矛盾） |
+| A2-L5 | 0 | 0 | 0 | 无新增 |
+| **合计** | **1** | **7** | **18** | **除 1 条认账（R2-L2-1）外全部闭合** |
+
+**顺带修掉两条审计没抓到的真实缺陷**：① F2 发现打开路由把 `window` 按 `windows.has()` 重推 ⇒ **真实适配器下新建窗口永远报"已聚焦"**（既有用例只在无窗口适配器形态跑，一直绿）；② F4 发现未设 TZ 时 SQL 按 UTC 而 Go `LocalDay` 按本地时区 ⇒ 两套本地日（并补 `/etc/localtime` 反解）。
+
+### AA.3 仍未闭环（**不得说成已完工**；每条都有证据与责任面）
+
+**A. 本版认账（已写入设计 §21.7 ⑤–⑨ 与发布说明「已知限制」，客户面已如实披露）**
+- ⑤ **应用维度 AI 用量不出数**：`X-Pico-App-Id` 在出站头唯一构造点（上游 `llm-deepseek` 适配器）**没有 header 通道**，且服务端 `app_attribution.go` 只读头、不校验会话链路。**替代路径已定**（隐藏会话 id 即 `app:<app_id>`，出站 `x-deepseek-harness-session-id` 天然带身份 ⇒ 服务端按前缀派生，**不需要新头**），**待实施**（改 `server/**`）。
+- ⑥ **隐藏会话"元数据含 `app_id`"做不到**（`SessionHeader` 字段集封闭 + jsonl 头白名单）⇒ §21.6 判据 5 应改为"会话 id 前缀可判定"。
+- ⑦ **客户端 UI 侧的应用 AI 面板聊天不通**（面板在客户端页面源，`/__picoaide/ai/chat` 只有协议 handler 一处）⇒ 待拍板：给它补本机 HTTP 路由，或改成只做授权/用量说明。
+- ⑧ **R2-L2-2 只做一半**（`open` 响应触发已实现；"客户端按目录对比"未做）。
+- ⑨ **原子写无 fsync**（本地助手与上游包都没有）⇒ 掉电窗口自 W2 起存在。
+
+**B. 仓外/需真机（§H）**：H1 私有渠道仓四渠道补 `desktop.app_origin_scheme` 并 push（**不 push 则 tag 构建 fail-loud**）；H2 渠道仓 pin 或把 commit 写进产物；H3 Windows/macOS 协议与存储探针（§17 认账 1 只在 Linux 实测）；H4 `advisory` 已转阻塞并接入 `yarn check`（**已闭合**）。
+**C. W4-12（属 L5，未做）**：3 个文档文件 7 行仍把已删除包当现存实现（其中 `docs/decisions/2026-09-19-referrer-policy-origin-null.md:156/:191` 的 `go test ./internal/wasmapp/session/...` **现在必然失败**）——需 L5 补标注。
+**D. 未跑整仓打包/afterPack 实测**：F3 的新依赖在安装包内的解析靠 `verify:closure` 247 节点闭合推断（`REQUIRED_PACKAGED_RUNTIME_ENTRIES` 不逐条断言第三方 leaf，属既有盲区）。
+**E. L2 认账主体**（§T）：应用窗口 webContents 未采纳进 browser runtime（页面级动作仍只作用于浏览器标签）、真实 `WasmAppsWindowAdapter` 未实现、F16 `open` 真机联调未做。
+
 ## H. 发布前置（**非本仓可完成**；主控登记，需人工/私有仓/真机）
 
 | # | 前置 | 为什么必须做 | 完成判据 | 责任 |
