@@ -90,16 +90,52 @@ const GUARDS = [
  * 成环,且会让 desktop 的 profile 冒烟与那些包的构建互相踩。
  */
 const PACKAGES = [
-  { name: 'dsh-plugin-desktop', dir: 'packages/host/desktop', needs: [] },
+  // 2026-09-20：desktop 的 Electron 引导（`main.ts`）与 App AI 执行面
+  // （`app-ai-runner.ts`）**构建期** import 该插件包（协议注册 / 真机适配器 /
+  // 安装密钥仓库 / runner 接线）—— 而 desktop 的 tsdown 会把 `@picoaide/*` 内联
+  // （`noExternal` 只放行 `@deepseek-ai/*`+react），所以它的 `lib/` 必须先产出。
+  // 同日（构建环修复，路线 A）：`src/host-locale.ts` / `src/desktop-home.ts` 改成
+  // 两个叶子包的一行 re-export，它的 tsc 因此还读它们的 lib/types ⇒ 那两条边也显式
+  // 登记（传递上已由 wasm-apps-host → browser → connectors → 叶子包保证，但真实边
+  // 就该写在表里 —— `temp/wasm-client-only/cycle-check.mjs` 会逐条对拍）。
+  { name: 'dsh-plugin-desktop', dir: 'packages/host/desktop', needs: ['@picoaide/dsh-wasm-apps-host', '@picoaide/dsh-host-locale', '@picoaide/dsh-host-home'] },
   { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop'] },
-  { name: '@picoaide/dsh-connectors', dir: 'packages/host/connectors', needs: ['dsh-plugin-desktop'] },
+  // 2026-09-20（路线 A / A 扩展）：`host-copy.ts` 的语言解析直接 import 叶子包
+  // `@picoaide/dsh-host-locale`；`user-scope.ts` 的 DSH-home 权威改成
+  // `@picoaide/dsh-host-home` ⇒ **connectors 不再 import 桌面包**，
+  // 那条 `connectors → dsh-plugin-desktop` 边随之删除（它正是四边环的最后一段）。
+  { name: '@picoaide/dsh-connectors', dir: 'packages/host/connectors', needs: ['@picoaide/dsh-host-home', '@picoaide/dsh-host-locale'] },
   { name: '@picoaide/dsh-cron', dir: 'packages/host/cron', needs: ['dsh-plugin-desktop'] },
   { name: '@picoaide/dsh-branding', dir: 'packages/client/branding', needs: [] },
   { name: 'dsh-community-fabric', dir: 'community/fabric', needs: [] },
   { name: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', needs: ['@picoaide/dsh-enterprise'] },
   // WASM 应用平台的客户端半边（应用中心 + 发布编排入口）：读 enterprise 的 lib/types。
   { name: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', needs: [] },
-  { name: '@picoaide/dsh-browser', dir: 'packages/host/browser', needs: ['@picoaide/dsh-connectors'] },
+  // 宿主侧语言的**零依赖叶子包**（2026-09-20，构建环修复路线 A）：实现自
+  // `packages/host/desktop/src/host-locale.ts` 逐字迁入（导出面与语义一字不改）。
+  // 它刻意**没有任何 dependencies**（连 `@picoaide/*` 也没有）⇒ needs 恒空，可以被
+  // 任何包先构建。断环手段就是这一条：让环上的最后一跳指向一个没有出边的节点。
+  // desktop 保留 `./host-locale` 子路径作为 re-export（对外 API 面不变）。
+  { name: '@picoaide/dsh-host-locale', dir: 'packages/host/host-locale', needs: [] },
+  // 宿主侧**产品数据根**的第二个零依赖叶子包（2026-09-20，路线 A 扩展）：实现自
+  // `packages/host/desktop/src/desktop-home.ts` 逐字迁入（只 import `node:os`/
+  // `node:path`，与 host-locale 完全同形）。抽它的目的就是删掉
+  // `connectors → dsh-plugin-desktop/desktop-home` 那条边 —— 该边与
+  // `desktop → wasm-apps-host → browser → connectors` 一起构成四边环。
+  // desktop 保留 `./desktop-home` 子路径作为 re-export（对外 API 面不变）。
+  { name: '@picoaide/dsh-host-home', dir: 'packages/host/host-home', needs: [] },
+  // browser 的两条真实构建边（都实测过，别再凭"看起来是运行期惰性解析"删边）：
+  //   1. `@picoaide/dsh-host-locale` —— 5 个文件 import 它（原先是
+  //      `dsh-plugin-desktop/host-locale`，那条边正是
+  //      `desktop → wasm-apps-host → browser → desktop` 这个真实环的最后一跳）；
+  //   2. `@picoaide/dsh-connectors` —— 2026-09-20 曾被当"虚假边"删掉（依据是
+  //      `tsdown.config.ts` 把它列为 external + `src/index.ts` 用 `createRequire`
+  //      运行期惰性解析）。**那个判断只对"值"成立**：`tsc` 必须读到 connectors 的
+  //      lib/types（`src/index.ts:175/190/402` 的 `as typeof import('@picoaide/dsh-connectors/…')`），
+  //      `tests/credential-site.spec.ts` 还值导入真实 `ConnectorStore`。干净态实测：
+  //      删掉 connectors/lib 后 browser 的 tsc 报 3 条 TS2307 ⇒ 真实边，删掉它就会
+  //      "调度器排得下、实际跑不通"（本地有 lib 时全绿，CI 干净检出必红）。
+  { name: '@picoaide/dsh-browser', dir: 'packages/host/browser', needs: ['@picoaide/dsh-host-locale', '@picoaide/dsh-connectors'] },
   // 客户端专属 WASM 应用 origin（`picoaide-app://` 协议 handler + 本机打开路由）：
   // 2026-09-19 起它经 **browser 包导出的 surface seam**（`@picoaide/dsh-browser/surface`）
   // 取得视图/分区/CDP 能力（设计总纲 §16.1 的 surface 抽象：工具实现只写一份、按 surface
@@ -128,6 +164,8 @@ const PATH_OWNERS = [
   ['packages/client/wasm-apps/', '@picoaide/dsh-wasm-apps'],
   ['packages/client/branding/', '@picoaide/dsh-branding'],
   ['packages/host/connectors/', '@picoaide/dsh-connectors'],
+  ['packages/host/host-locale/', '@picoaide/dsh-host-locale'],
+  ['packages/host/host-home/', '@picoaide/dsh-host-home'],
   ['packages/host/browser/', '@picoaide/dsh-browser'],
   ['packages/host/wasm-apps-host/', '@picoaide/dsh-wasm-apps-host'],
   ['packages/host/cron/', '@picoaide/dsh-cron'],
@@ -138,6 +176,23 @@ const PATH_OWNERS = [
 /** 反向依赖:A 改动会波及 B(desktop 的类型/产物是这些包的输入)。 */
 const DEPENDENTS = {
   'dsh-plugin-desktop': ['@picoaide/dsh-enterprise', '@picoaide/dsh-account-card', '@picoaide/dsh-branding'],
+  // 叶子包是 browser / connectors / desktop 的构建输入，而 desktop 的
+  // `lib/types/{host-locale,desktop-home}.d.ts` 又是 enterprise / cron 的输入 ⇒
+  // `--changed` 只展开一层，所以这里把两跳的消费者也列全（宁可多跑几个包）。
+  '@picoaide/dsh-host-locale': [
+    '@picoaide/dsh-browser',
+    '@picoaide/dsh-wasm-apps-host',
+    '@picoaide/dsh-connectors',
+    'dsh-plugin-desktop',
+    '@picoaide/dsh-enterprise',
+    '@picoaide/dsh-cron',
+  ],
+  '@picoaide/dsh-host-home': [
+    '@picoaide/dsh-connectors',
+    'dsh-plugin-desktop',
+    '@picoaide/dsh-enterprise',
+    '@picoaide/dsh-cron',
+  ],
 }
 
 /** 影响全仓的顶层文件(改动即视为全量门禁)。 */
@@ -500,14 +555,16 @@ console.log(`check — 并发 ${concurrency};按构建依赖分层(desktop 必�
 // 其余插件包的 lib/(增量 prebuild),此刻不跑那些包自己的 check,避免与它的
 // profile 冒烟争抢同一份 lib/。firstWave 标记的包(无构建期依赖,如 vendored
 // 插件的 test)也放在这一波,把它们的耗时藏进 desktop 的长任务里。
+// 2026-09-20：desktop **不再无条件进第一波** —— 它现在依赖 wasm-apps-host（见上），
+// 必须由依赖感知调度排在依赖之后。第一波只剩「无构建期依赖」的包与根守卫。
 const firstWave = [
   ...guards,
-  ...packages.filter(task => task.name === 'dsh-plugin-desktop' || task.firstWave === true),
+  ...packages.filter(task => task.firstWave === true),
 ]
 if (firstWave.length > 0) await runPool(firstWave, concurrency, state)
 
 // 阶段 2:依赖感知调度(依赖失败的包直接跳过,不产生级联噪音)。
-const rest = packages.filter(task => task.name !== 'dsh-plugin-desktop' && task.firstWave !== true)
+const rest = packages.filter(task => task.firstWave !== true)
 if (rest.length > 0) await runScheduler(rest, concurrency, state)
 
 const totalMs = Date.now() - startedAt

@@ -55,6 +55,11 @@ const packageNameTable = new Map([
   ['packages/host/enterprise', '@picoaide/dsh-enterprise'],
   ['packages/host/connectors', '@picoaide/dsh-connectors'],
   ['packages/host/browser', '@picoaide/dsh-browser'],
+  // 2026-09-20（构建环修复，路线 A / A 扩展）：宿主侧共享工具的**两个零依赖
+  // 叶子包**。目录名与包名都跟角色走（host-locale / host-home ↔
+  // @picoaide/dsh-host-*），严格按本表比对。
+  ['packages/host/host-locale', '@picoaide/dsh-host-locale'],
+  ['packages/host/host-home', '@picoaide/dsh-host-home'],
   ['packages/host/wasm-apps-host', '@picoaide/dsh-wasm-apps-host'],
   ['packages/host/cron', '@picoaide/dsh-cron'],
   ['packages/client/account-card', '@picoaide/dsh-account-card'],

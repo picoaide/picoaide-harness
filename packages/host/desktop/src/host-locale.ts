@@ -1,144 +1,26 @@
 /**
- * Host-side UI locale — the single source for user-visible copy rendered
- * OUTSIDE the DSH client face.
+ * Host-side UI locale — **compatibility re-export** of the leaf package.
  *
- * `ctx.locale` is a **client-face** service (`@deepseek-ai/dsh-client-locale`
- * exports it from its `./client` entry only), so host plugins cannot reach it.
- * That is why the pre-auth pages, the embedded browser window and the host
- * halves' user-visible payloads had no translation channel at all.
+ * 2026-09-20（构建环修复，路线 A）：实现迁到零依赖叶子包
+ * `@picoaide/dsh-host-locale`（`packages/host/host-locale`，语义真源
+ * = `src/index.ts`，逐字迁移）。
  *
- * The desktop launcher is the only host authority for the language the user
- * actually sees, and it already keeps that value current: the stored DSH
- * preference when set, otherwise the resolved application locale. Plugins read
- * it through the probed `desktopRuntime` service (the same structural probe
- * `desktop-loop-notify` uses), so this module stays free of a hard dependency
- * on the launcher.
+ * 为什么必须留这一层：`@picoaide/dsh-browser` 曾静态 import 本子路径，而
+ * `desktop → wasm-apps-host → browser → dsh-plugin-desktop/host-locale → desktop`
+ * 是**真实构建环** —— 不存在任何构建顺序能产出全部产物（CI 的 Gate 在
+ * `browser/src/shell-pages.ts` 与 `desktop/src/main.ts` 上必然 TS2307）。
+ * 现在 browser 与 connectors 直接依赖叶子包，环断开。
  *
- * Two fallbacks keep the helpers usable where no launcher is composed
- * (headless loader smokes, a plain browser deployment of the enterprise face):
- * the request's `Accept-Language`, then {@link DEFAULT_HOST_LOCALE}.
+ * 保留本文件是为了**不破坏对外 API 面**：desktop 自己的内部 import
+ * （`main.ts` 的 `./host-locale.ts`）以及 enterprise/cron 的
+ * `dsh-plugin-desktop/host-locale` 继续从这里取，导出面与语义一字不改。
+ * 子路径契约由 `tests/host-locale-reexport.spec.ts` 钉住（含运行期解析，
+ * 不只是类型层面）。
+ *
+ * **新增消费方请直接依赖 `@picoaide/dsh-host-locale`** —— 走 desktop 只会在
+ * 构建图上多绕一跳。
+ *
+ * @module dsh-plugin-desktop/host-locale
  */
 
-/** Locales the product ships user-visible copy for. */
-export type HostLocale = 'zh' | 'en'
-
-/**
- * Product-default host locale. Matches the client dictionaries, whose
- * module-level default is also Chinese (`setActiveLocale` falls back to `zh`
- * for any unknown id).
- */
-export const DEFAULT_HOST_LOCALE: HostLocale = 'zh'
-
-/** Locale ids in preference order, for callers that need to enumerate them. */
-export const HOST_LOCALES: readonly HostLocale[] = ['zh', 'en']
-
-/**
- * Structural view of the probed desktop runtime.
- *
- * Deliberately not typed against `DesktopRuntime`: the caller probes a service
- * that is absent in headless compositions, and `locale` is narrowed at runtime
- * so a launcher that grows a new id can never leak an unsupported value into
- * copy selection.
- */
-export interface LocaleBearingRuntime {
-  /** Locale currently used for native contributions (`DesktopRuntime.locale`). */
-  readonly locale?: unknown
-}
-
-/**
- * Narrow any runtime value to a shipped host locale, or `undefined` when the
- * value names a language this product does not ship.
- *
- * Prefix matching keeps region subtags working (`zh-CN`/`en_US`); an
- * unsupported id returns `undefined` (rather than the default) so
- * {@link hostLocaleFrom} can keep looking at the request header.
- * @param value - raw runtime or platform language tag.
- * @returns the shipped locale, or undefined.
- */
-export function tryNormalizeHostLocale(value: unknown): HostLocale | undefined {
-  if (typeof value !== 'string') return undefined
-  const primary = value.trim().toLowerCase().split(/[-_]/u)[0] ?? ''
-  if (primary === 'en') return 'en'
-  if (primary === 'zh') return 'zh'
-  return undefined
-}
-
-/** Narrow any runtime value to a shipped host locale (defaults to zh). */
-export function normalizeHostLocale(value: unknown): HostLocale {
-  return tryNormalizeHostLocale(value) ?? DEFAULT_HOST_LOCALE
-}
-
-/**
- * Resolve the host locale from the probed desktop runtime, then the request's
- * `Accept-Language`, then {@link DEFAULT_HOST_LOCALE}.
- *
- * The runtime wins over the header on purpose: it carries the user's explicit
- * in-app choice, which must beat anything the client advertises.
- * @param runtime - probed `desktopRuntime`, or `undefined` when absent.
- * @param acceptLanguage - raw `Accept-Language` request header, when there is a request.
- * @returns the locale to render host copy in.
- */
-export function hostLocaleFrom(
-  runtime: LocaleBearingRuntime | undefined,
-  acceptLanguage?: string | undefined,
-): HostLocale {
-  // Only a SHIPPED runtime locale wins. An empty or unsupported tag (a future
-  // language pack, a half-written setting) must not shadow the request header —
-  // it falls through to Accept-Language, then the product default.
-  const fromRuntime = tryNormalizeHostLocale(runtime?.locale)
-  if (fromRuntime !== undefined) return fromRuntime
-  return preferredLocaleFromAcceptLanguage(acceptLanguage) ?? DEFAULT_HOST_LOCALE
-}
-
-/** Pick the copy for a locale (zh is the source, en mirrors the full set). */
-export function hostCopy<T>(locale: HostLocale, zh: T, en: T): T {
-  return locale === 'en' ? en : zh
-}
-
-/**
- * First supported locale named by an `Accept-Language` header.
- *
- * Parses the q-value order rather than trusting positional order, because
- * clients emit `*` and zero-quality entries that must not win. Unsupported
- * languages are skipped so a `ja,zh;q=0.8` client still gets Chinese.
- * @param header - raw header value, possibly absent or malformed.
- * @returns a supported locale, or `undefined` when the header names none.
- */
-export function preferredLocaleFromAcceptLanguage(header: string | undefined): HostLocale | undefined {
-  if (typeof header !== 'string' || header.trim() === '') return undefined
-  const ranked = header
-    .split(',')
-    .map((part, index) => {
-      const [tag = '', ...params] = part.split(';')
-      const quality = params
-        .map(param => param.trim())
-        .filter(param => param.startsWith('q='))
-        .map(param => Number.parseFloat(param.slice(2)))
-        .find(value => Number.isFinite(value))
-      return { tag: tag.trim().toLowerCase(), quality: quality ?? 1, index }
-    })
-    .filter(entry => entry.tag !== '' && entry.quality > 0)
-    .sort((left, right) => right.quality - left.quality || left.index - right.index)
-  for (const { tag } of ranked) {
-    // `*` accepts anything and therefore decides nothing.
-    if (tag === '*') continue
-    if (tag === 'zh' || tag.startsWith('zh-') || tag.startsWith('zh_')) return 'zh'
-    if (tag === 'en' || tag.startsWith('en-') || tag.startsWith('en_')) return 'en'
-  }
-  return undefined
-}
-
-/**
- * Render one locale's variant of a bilingual template.
- *
- * The injected HTML pages carry their copy inline, so they are built per
- * request from a `{ zh, en }` pair rather than substituted placeholder by
- * placeholder. Keeping the pick here means every host surface resolves the
- * locale the same way.
- * @param locale - active host locale.
- * @param variants - the two renderings.
- * @returns the rendering for `locale`.
- */
-export function selectHostVariant<T>(locale: HostLocale, variants: Readonly<Record<HostLocale, T>>): T {
-  return variants[locale]
-}
+export * from '@picoaide/dsh-host-locale'

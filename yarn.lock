@@ -5620,6 +5620,7 @@ __metadata:
     "@deepseek-ai/dsh-user-approval": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-util-values": "npm:0.1.5-rc.2"
     "@picoaide/dsh-connectors": "workspace:*"
+    "@picoaide/dsh-host-locale": "workspace:*"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
     dsh-plugin-desktop: "workspace:*"
@@ -5657,9 +5658,10 @@ __metadata:
     "@deepseek-ai/dsh-system-prompt": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-tools": "npm:0.1.5-rc.2"
     "@modelcontextprotocol/sdk": "npm:^1.12.0"
+    "@picoaide/dsh-host-home": "workspace:*"
+    "@picoaide/dsh-host-locale": "workspace:*"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
-    dsh-plugin-desktop: "workspace:*"
     react: "npm:18.3.1"
     tsdown: "npm:0.22.2"
     typescript: "npm:6.0.3"
@@ -5756,6 +5758,28 @@ __metadata:
     yaml: "npm:^2.9.0"
   peerDependencies:
     "@deepseek-ai/cordis": 4.0.2
+  languageName: unknown
+  linkType: soft
+
+"@picoaide/dsh-host-home@workspace:*, @picoaide/dsh-host-home@workspace:packages/host/host-home":
+  version: 0.0.0-use.local
+  resolution: "@picoaide/dsh-host-home@workspace:packages/host/host-home"
+  dependencies:
+    "@types/node": "npm:^22.20.0"
+    tsdown: "npm:0.22.2"
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
+  languageName: unknown
+  linkType: soft
+
+"@picoaide/dsh-host-locale@workspace:*, @picoaide/dsh-host-locale@workspace:packages/host/host-locale":
+  version: 0.0.0-use.local
+  resolution: "@picoaide/dsh-host-locale@workspace:packages/host/host-locale"
+  dependencies:
+    "@types/node": "npm:^22.20.0"
+    tsdown: "npm:0.22.2"
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
   languageName: unknown
   linkType: soft
 
@@ -8057,6 +8081,8 @@ __metadata:
     "@picoaide/dsh-connectors": "workspace:*"
     "@picoaide/dsh-cron": "workspace:*"
     "@picoaide/dsh-enterprise": "workspace:*"
+    "@picoaide/dsh-host-home": "workspace:*"
+    "@picoaide/dsh-host-locale": "workspace:*"
     "@picoaide/dsh-wasm-apps": "workspace:*"
     "@picoaide/dsh-wasm-apps-host": "workspace:*"
     "@types/node": "npm:^22.20.0"

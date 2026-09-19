@@ -16,11 +16,15 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 
-// P2-36: the DSH-home constants/resolution used to be inlined copies of
-// `dsh-plugin-desktop/desktop-home` (the single authority). Re-export them
-// instead, exactly like `@picoaide/dsh-cron`'s dsh-home module. tsdown bundles
-// the module into this package's lib, so consumers still need no runtime
-// dependency on the desktop package.
+// P2-36: the DSH-home constants/resolution used to be inlined copies of the
+// single authority (`dsh-plugin-desktop/desktop-home` at the time). Re-export it
+// instead, exactly like `@picoaide/dsh-cron`'s dsh-home module.
+//
+// 2026-09-20（构建环修复，路线 A 扩展）：权威搬到了零依赖叶子包
+// `@picoaide/dsh-host-home`，本包改指它 —— 原来那条
+// `connectors → dsh-plugin-desktop/desktop-home` 是真实构建环的一段
+// （`desktop → wasm-apps-host → browser → connectors → desktop`），
+// 改指叶子包后 connectors 不再依赖桌面包，环断开。
 export {
   DSH_HOME_ENV,
   PRODUCT_DSH_HOME_DIR,
@@ -29,9 +33,9 @@ export {
   resolveDshHome,
   dshHome,
   dshHomePath,
-} from 'dsh-plugin-desktop/desktop-home'
+} from '@picoaide/dsh-host-home'
 
-import { resolveDshHome } from 'dsh-plugin-desktop/desktop-home'
+import { resolveDshHome } from '@picoaide/dsh-host-home'
 
 /**
  * Filesystem-safe encoding of a username for a directory segment. Hex-encodes

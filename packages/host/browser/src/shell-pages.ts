@@ -13,13 +13,13 @@
  * hidden behind the tabs — this split is what keeps the AI UI visible.
  *
  * Both pages are BUILT PER CALL from the locale the host resolved for that
- * request (`dsh-plugin-desktop/host-locale`), because the language can change
+ * request (`@picoaide/dsh-host-locale`), because the language can change
  * while the app runs: a module-level table selected once would freeze the
  * copy the page was first served with.
  * @module @picoaide/dsh-browser
  */
 
-import type { HostLocale } from 'dsh-plugin-desktop/host-locale'
+import type { HostLocale } from '@picoaide/dsh-host-locale'
 
 /**
  * Failure copy shared by BOTH pages: each page's `failureText` maps a failed

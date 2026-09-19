@@ -158,6 +158,19 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@picoaide/dsh-wasm-apps-host/lib/electron-adapter.js',
   'node_modules/@picoaide/dsh-wasm-apps-host/package.json',
   'node_modules/@picoaide/dsh-wasm-apps-host/cordis.patch.yml',
+  // 宿主侧共享工具的**两个零依赖叶子包**（2026-09-20，构建环修复路线 A / A 扩展）。
+  //
+  // 为什么它们在产物里：desktop 的 `dependencies` 里有它们（`src/host-locale.ts` 与
+  // `src/desktop-home.ts` 各是一行 re-export）⇒ `lib/host-locale.js`、
+  // `lib/desktop-home.js`、`lib/main.js`、`scripts/*` 在运行期按包名解析它们；
+  // browser / connectors 的 lib 同理（它们直接 import 叶子包）。缺任何一个都是
+  // **启动期** ERR_MODULE_NOT_FOUND，与 wasm-apps-host 的 electron-adapter 同类。
+  // 路径形状与其余自有包一致（`main`/`exports["."]` 都指向 `lib/index.js`）——
+  // 它们**不是** Cordis 插件，所以没有 `cordis.patch.yml` / `lib/invariant.js` 条目。
+  'node_modules/@picoaide/dsh-host-locale/lib/index.js',
+  'node_modules/@picoaide/dsh-host-locale/package.json',
+  'node_modules/@picoaide/dsh-host-home/lib/index.js',
+  'node_modules/@picoaide/dsh-host-home/package.json',
 ] as const
 
 /** Physical entries that Electron cannot load from ASAR (native binaries). */

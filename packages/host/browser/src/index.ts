@@ -40,7 +40,7 @@ import { TabPool } from './pool.ts'
 import { BrowserStore } from './store.ts'
 import { applyBrowserTools, parseToolGroups } from './tools.ts'
 import { browserOverlayHtml, browserShellHtml } from './shell-pages.ts'
-import { hostLocaleFrom, type HostLocale } from 'dsh-plugin-desktop/host-locale'
+import { hostLocaleFrom, type HostLocale } from '@picoaide/dsh-host-locale'
 import type { CredentialResolver } from './types.ts'
 import type { DownloadEntry } from './store.ts'
 type DownloadEntryStatus = DownloadEntry['status']
