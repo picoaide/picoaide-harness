@@ -158,6 +158,25 @@ func waitRows(t *testing.T, db *sql.DB, appID string, want int) {
 	t.Fatalf("等待落库超时:app_id=%s 实际 %d 条, want %d", appID, n, want)
 }
 
+// TestInsertBudgetHasFloorForSmallFlushInterval 钉住"预算下限"这条回归门禁。
+//
+// 现场(2026-09-19 CI flake):测试注入 FlushInterval=10ms ⇒ 预算只剩
+// FlushInterval×5 = 50ms;负载下 insert 会在**事务已提交之后**才等到驱动返回,
+// 超时被记成失败并丢掉整批,测试报 `Written = N, want M` 而库里其实已有那些行
+// ("超时 ≠ 未执行")。去掉下限(改回裸乘)本用例必红。
+func TestInsertBudgetHasFloorForSmallFlushInterval(t *testing.T) {
+	s := NewSink(nil, Options{FlushInterval: 10 * time.Millisecond})
+	if got := s.insertBudget(); got < flushInsertBudgetMin {
+		t.Fatalf("小 FlushInterval 下预算 = %v,必须不低于 %v(否则成功批量会被误判为失败)",
+			got, flushInsertBudgetMin)
+	}
+	// 大 FlushInterval 仍按周期数走(下限不改变原有的"卡住也能回来"语义)。
+	s2 := NewSink(nil, Options{FlushInterval: 2 * time.Second})
+	if got, want := s2.insertBudget(), 2*time.Second*flushBudgetIntervals; got != want {
+		t.Fatalf("大 FlushInterval 下预算 = %v, want %v", got, want)
+	}
+}
+
 // TestFlushPersistsBatchFields 批量落库:字段逐项落对(§4.9 字段表)。
 func TestFlushPersistsBatchFields(t *testing.T) {
 	db, cleanup := serverstore.NewTestDB(t)
