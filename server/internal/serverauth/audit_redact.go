@@ -91,6 +91,11 @@ var auditSensitiveQueryParams = map[string]bool{
 	"authorization": true, "bearer": true,
 	"auth-token": true, "authtoken": true,
 	"refresh_token": true, "refresh-token": true, "refreshtoken": true,
+	// authorization_code 是 OAuth 回调里**真凭据**(短时票据,可换取 token),
+	// 它出现在 URL 上正是最常见形态;2026-09-19 第三轮审计指出后显式补入。
+	// 注意近似的合成名(authorizationcode / authorization_codes)仍保持不脱敏,
+	// 用例见 audit_20260919_redact_names_test.go 的 auditNearMissNames。
+	"authorization_code": true,
 }
 
 // auditWebhookPathMarkers 凭据藏在**路径**里的 webhook 形态(飞书 /bot/v2/hook/<uuid>)。
