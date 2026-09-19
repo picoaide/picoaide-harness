@@ -123,8 +123,7 @@ func main() {
 		}
 	case "/bigframe":
 		// 响应帧本身超过单帧上限（1 MiB）：ReadFrame 侧报 ErrFrameTooLarge。
-		big := strings.Repeat("C", 2<<20)
-		respond(200, map[string]any{"big": big})
+		writeOversizedFrame()
 	case "/flood":
 		// 非帧起始、且单行远超 1 MiB：RUNTIME_OUTPUT_OVERRUN。
 		buf := make([]byte, 2<<20)
@@ -318,6 +317,52 @@ func respond(status int, body any) {
 		fmt.Fprintf(os.Stderr, "write response frame: %v\n", err)
 		os.Exit(4)
 	}
+}
+
+// writeOversizedFrame 写一个**声明长度超过单帧上限**的响应帧（§4.6：单帧 1 MiB）：
+// 形状与 respond 一致（同一个响应信封的 JSON 文本），但**先写帧头、再分块流式写载荷**，
+// 不把整帧物化到内存里。
+//
+// ⚠️ 为什么必须流式（2026-09-19 缺陷定位，见 docs/AUDIT-2026-09-19-WASM-FRAME-LIMIT.md）：
+// "strings.Repeat 造 2 MiB 字符串 + 两次 json.Marshal"在 wasm 里要烧 **1.4–2.4 s** 的
+// guest CPU（实测 inner 0.9–1.2 s、outer 1.1–1.2 s），而这条用例的 guest 预算是**墙钟**
+// 3 s（见 testRequest）⇒ 机器一有负载，guest 光"造帧"就把预算烧完，宿主的单帧判据
+// 根本来不及被触发，结论被洗成 RUNTIME_TIMEOUT（现场必现，见该报告的复现命令）。
+//
+// 判据在宿主的 abi.ReadFrame：读到长度前缀 n > 1 MiB 立即返回 ErrFrameTooLarge
+// （pump ⇒ RUNTIME_OUTPUT_OVERRUN），**不会读载荷** ⇒ 这里载荷写多少都不影响结论；
+// 写失败（管道已被宿主关闭）是预期结局，不报错、不退出。
+func writeOversizedFrame() {
+	const (
+		total = 2 << 20
+		// 与 respond 的信封逐字节同形：body 是内层 JSON 的**转义后**文本。
+		head = `{"status":200,"headers":{"content-type":"application/json"},"body":"{\"big\":\"`
+		tail = `\"}"}`
+	)
+	hdr := []byte{frameMagic}
+	hdr = strconv.AppendInt(hdr, int64(total), 10)
+	hdr = append(hdr, '\n')
+	if _, err := os.Stdout.Write(hdr); err != nil {
+		return
+	}
+	if _, err := os.Stdout.Write([]byte(head)); err != nil {
+		return
+	}
+	chunk := make([]byte, 64<<10)
+	for i := range chunk {
+		chunk[i] = 'C'
+	}
+	for pad := total - len(head) - len(tail); pad > 0; {
+		n := len(chunk)
+		if pad < n {
+			n = pad
+		}
+		if _, err := os.Stdout.Write(chunk[:n]); err != nil {
+			return
+		}
+		pad -= n
+	}
+	_, _ = os.Stdout.Write([]byte(tail))
 }
 
 func rawString(raw json.RawMessage) string {

@@ -19,10 +19,18 @@ import (
 
 func newTestAPI(t *testing.T) (*gin.Engine, *sql.DB, func()) {
 	t.Helper()
+	// 每个用例从干净的失败预算开始:限流器是包级单例,而桶键里的 db 作用域会因
+	// 指针地址复用而跨用例相同(机制见 ratelimit_isolation_test.go 顶部说明)。
+	resetSharedLimitersForTest()
 	db, cleanup := serverstore.NewTestDB(t)
 	api := New(db)
 	api.RegisterProvider(NewLocalProvider(db))
 	r := gin.New()
+	// 与 cmd/server/main.go 同口径:可信代理只含回环(+显式配置),不可信来源
+	// 伪造的 X-Forwarded-For 不参与 ClientIP(登录 IP 桶按 ClientIP 计)。
+	if err := r.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
+		t.Fatal(err)
+	}
 	api.RegisterRoutes(r)
 	return r, db, cleanup
 }
