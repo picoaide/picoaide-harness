@@ -242,6 +242,12 @@ func TestRouteAssemblyProbesAndHTMLFacesPresent(t *testing.T) {
 			t.Errorf("测试路由树缺少员工 HTML 面 %s（WasmSession 为 nil 时整片消失）", want)
 		}
 	}
+
+	// 探针的"注册了但请求必崩"形态（实测 2026-09-19）：productionDeps.Ready 为 nil
+	// 时 /readyz **仍然注册**（gin.WrapH(nil) 在注册期不 panic），但每个请求都会
+	// panic → Recovery → 500 INTERNAL。与 Wasm/WasmSession 的"整片不注册"不同，
+	// 这种漏填在路由表上完全看不出来。因此装配侧要有**接线断言**（见下一条用例），
+	// 而不是靠"路径在不在"判断探针可用性。
 }
 
 // TestRouteAssemblyHasExactlyOneEntryPoint：全仓只允许一个装配入口。
@@ -316,4 +322,48 @@ func TestRouteAssemblyHasExactlyOneEntryPoint(t *testing.T) {
 				"（自建装配正是「测试树少一整片」的成因）", f, marker)
 		}
 	}
+}
+
+// TestProductionAssemblyPassesEveryDep：main() 的 productionDeps 字面量必须把
+// **每一个**字段都传上。
+//
+// 为什么需要它：运行期守卫证明的是"给定同一组依赖，测试树 == 生产函数输出"，
+// 它管不到 main() 自己漏填依赖 —— 而那正是本次 P0 的成因（旧 buildRouter 漏传
+// Wasm / WasmSession）。生产侧漏填一整片路由的失败形态是静默的（没有编译错误、
+// 路由表少几条、日志里没有一行）。
+//
+// ⚠️ 能力边界（不夸大）：这是**源码文本**断言 —— 它能发现"字段没传"，
+// 不能发现"传错了值"（例如 Ready 传了一个必崩的 handler）。值层面的判据靠
+// 装配级行为用例（如 TestUploadCleanupSchedulerIsWired、本文件上一条注释里的
+// nil-Ready 实测事实）。
+func TestProductionAssemblyPassesEveryDep(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("读 main.go: %v", err)
+	}
+	text := string(src)
+	const call = "registerProductionRoutes(r, productionDeps{"
+	start := strings.Index(text, call)
+	if start < 0 {
+		t.Fatalf("main.go 里找不到 %q 调用点", call)
+	}
+	rest := text[start+len(call):]
+	// 取到该字面量的结尾（生产调用点是一段连续的 productionDeps{...} 字面量）。
+	end := strings.Index(rest, "})")
+	if end < 0 {
+		t.Fatal("main.go 的 productionDeps 字面量没有闭合")
+	}
+	literal := rest[:end]
+
+	// 字段清单来自 productionDeps 的结构体定义（新增字段会被强制登记）。
+	for _, field := range []string{
+		"DB:", "Auth:", "Admin:", "Wasm:", "WasmSession:", "Ready:",
+		"SkillSeed:", "DataDir:", "Version:", "ChannelID:",
+	} {
+		if !strings.Contains(literal, field) {
+			t.Errorf("main() 的 productionDeps 漏传 %s —— 依赖漏填会让对应路由整片消失"+
+				"（或探针注册了却必崩），且在路由表上完全看不出来", field)
+		}
+	}
+	t.Logf("生产装配调用点已传入全部 %d 个依赖字段", 10)
 }
