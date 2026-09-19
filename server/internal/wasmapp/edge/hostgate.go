@@ -11,7 +11,9 @@
 //     `/admin/*` 都在 NoRoute 分支、`/healthz` 在根引擎上 ⇒ 清单式"禁命中"必然漏，
 //     没有门控时每个应用子域都会渲染门户与**管理台登录页**。
 //  2. **未知主机名一律 404，绝不回落主站**（§4.8）：否则任何 `<随机>.<基域>`
-//     都会变成主站的镜像（钓鱼面）。
+//     ——以及任何与基域无关的主机名（任意域名 / IP 直连 / 反代别名，R1-sec-3）——
+//     都会变成主站的镜像（门户与管理台登录页的钓鱼面）。唯一的例外是编排探针端点
+//     （`/healthz`、`/readyz`，见 `IsProbePath`）。
 //  3. **安全头由宿主独占**（§4.8/§15.1 第 13 条）：应用子域是公司域名下的
 //     任意 HTML/JS 宿主（R8/R37），应用自带的同名头一律剥离，且 4xx/5xx 也要写。
 package edge
@@ -38,7 +40,9 @@ const (
 	HostMain HostKind = iota
 	// HostApp 是应用子域：第一级标签即 app_id。
 	HostApp
-	// HostUnknown 是"看起来属于基域但形态非法"的主机名 ⇒ 一律 404，不回落主站。
+	// HostUnknown 是"**不是本基域的主机名**"（任意其它域名、IP 直连、localhost、旧域名、
+	// 反代别名）或"看起来属于基域但形态非法"（多级标签 / 非法 label）的主机名
+	// ⇒ 一律 404，不回落主站（R1-sec-3）。
 	HostUnknown
 )
 
@@ -46,12 +50,24 @@ const (
 //
 // base 为空 ⇒ 未启用应用子域，全部视为主站（HostMain），保持既有部署行为不变。
 //
-// 规则：
+// 规则（base 非空时是**闭合的两支**：主站 = 基域本身，应用 = 一级子域）：
 //   - 去掉端口、转小写、去尾部点（域名不区分大小写；入库统一小写）；
 //   - host == base ⇒ 主站；
 //   - host == "<label>.<base>" 且 label 只有一级（**通配证书只覆盖一级标签**，
 //     R29/§4.2 ⇒ 不允许 `a.b.<base>`）且符合 app_id 规则 ⇒ 应用子域；
-//   - 其他（更深的层级、非法 label、其它域名）⇒ 主站（不是我们的基域）。
+//   - 其余一切主机名 ⇒ HostUnknown（404，**绝不回落主站**）。
+//
+// ⚠️ 最后一条曾经写成"其它域名 ⇒ 主站（不是我们的基域）"，那是 R1-sec-3（P2）：
+// 任何与基域无关的主机名（`evil.test`、任意域名、IP 直连、`localhost`）都拿到完整主站，
+// 于是门户、管理台 SPA（带账密表单）、管理登录 API 可以被任意主机名镜像（凭据钓鱼面），
+// 而且 `Host` 变成**请求方可以自己选的开关**（审计 §1.1：换票 nonce 的"能否下发"曾按
+// r.Host 判定 ⇒ 别名主机名上就能签出没有持有性证明的票）。
+//
+// 例外只有一个，且不在本函数里：编排探针端点（`/healthz`、`/readyz`）在任意 Host 下
+// 都要可达 —— 由 `HostGate.ServeHTTP` 的 HostUnknown 分支放行（见 `IsProbePath`）。
+//
+// 本条只能这样收口：门控是 allow-list，"主站也服务哪些主机名"必须**显式**声明
+// （`HostGate.ExtraMainHosts`），不能靠"不认识就当主站"。
 func MatchHost(host, base string) (label string, kind HostKind) {
 	h := normalizeHost(host)
 	b := normalizeHost(base)
@@ -63,9 +79,10 @@ func MatchHost(host, base string) (label string, kind HostKind) {
 	}
 	suffix := "." + b
 	if !strings.HasSuffix(h, suffix) {
-		// 不是本基域下的主机名 ⇒ 主站路由自己会按 Host 处理（例如 IP 直连、
-		// 本地探测、其它域名反代到同一进程）。
-		return "", HostMain
+		// 不是本基域下的主机名（任意域名 / IP 直连 / localhost / 反代别名 / 空 Host）
+		// ⇒ 既不进应用、也不服务主站。需要额外主机名也服务主站的部署走
+		// HostGate.ExtraMainHosts 显式声明。
+		return "", HostUnknown
 	}
 	prefix := strings.TrimSuffix(h, suffix)
 	if prefix == "" {

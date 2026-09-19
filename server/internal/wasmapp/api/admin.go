@@ -291,6 +291,9 @@ func auditText(s string, max int) string {
 //
 // 查询串：status=pending|approved|rejected|all（缺省 pending）。
 // 返回的每行**不含制品字节**（store 走清单投影）—— 审批只需要状态与体积。
+// 每行带 `reason`（审核结论，R1-uxw-4）：审批面要能回看自己写过的拒绝理由
+// （status=rejected 时正是"最近被拒的版本 + 理由"），发布者侧的同源出口是
+// 员工面的 GET …/apps/wasm/:app_id/releases（MyReleases）。
 func (h *Handlers) adminReleases(c *gin.Context) {
 	if err := h.requireReady(); err != nil {
 		writeErr(c, err)
@@ -354,6 +357,10 @@ func (h *Handlers) adminReleases(c *gin.Context) {
 			"checksum":   r.Checksum,
 			"changelog":  r.Changelog,
 			"created_at": r.CreatedAt,
+			// 审核结论（被拒理由）。R1-uxw-4：管理员写下的理由此前只落在审计详情里 ——
+			// 审批面自己都回看不了"我上次为什么拒的"，发布者更无从得知。
+			// pending/approved 行恒为空串（数据库侧保证），前端只在 rejected 行渲染它。
+			"reason": r.Reason,
 			// 这一行是不是线上正在跑的版本（前端据此禁用"拒绝"按钮）。
 			"current": r.Version == current && current != "",
 		})

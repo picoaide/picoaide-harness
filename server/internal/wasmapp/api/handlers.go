@@ -150,6 +150,9 @@ type Handlers struct {
 	Diagnostics  gin.HandlerFunc // GET  /apps/wasm/:app_id/diagnostics
 	Schema       gin.HandlerFunc // GET  /apps/wasm/:app_id/schema
 	Catalog      gin.HandlerFunc // GET  /apps/wasm/catalog
+	// MyReleases 是**发布者本人的版本历史**（含被拒理由）—— R1-pm-3 的作者侧闭环：
+	// 审核开启后这是作者唯一能拿到"结论 + 理由"的出口（非发布者一律 404）。
+	MyReleases gin.HandlerFunc // GET  /apps/wasm/:app_id/releases
 
 	// ---- 客户端面 /api/client/v2/apps/wasm/uploads（§4.2 分片上传）----
 	//
@@ -210,6 +213,7 @@ func NewHandlers(opt Options) *Handlers {
 	h.Diagnostics = h.diagnostics
 	h.Schema = h.schema
 	h.Catalog = h.catalog
+	h.MyReleases = h.myReleases
 	h.UploadCreate = h.uploadCreate
 	h.UploadChunk = h.uploadChunk
 	h.UploadStatus = h.uploadStatus

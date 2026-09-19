@@ -26,6 +26,14 @@ package appserver
 //   - 去掉污染探测 / 被杀请求回收（release 恒不回收）⇒ TestAppDBPool_PoisonedHandleIsRecycled、
 //     TestAppDBConn_PoisonMarkersFromRealErrors 红；
 //   - 把 logbuf 换成自建 sink（丢掉 §5.1 的统一限额实现）⇒ TestServe_AppLogsGoToPlatformLog 红；
+//   - 把 `defer s.flushAppLogs` 挪回"获取句柄之后"（旧顺序：刷盘发生在持执行槽/句柄期间）
+//     ⇒ TestServe_AppLogFlushHoldsNoSlotOrHandle 红（R1-rt-6）；
+//   - 把 serveStatic 改回"先整份读盘 + 算 sha256，再判 If-None-Match"（绕过缓存）
+//     ⇒ TestStatic_NotModifiedDoesNotTouchDisk / TestStatic_CachedBytesSurviveFileRemoval 红（R1-rt-2/3）；
+//   - 让 releaseContent.Config() 每次读盘解析 ⇒ TestReleaseCache_ConfigIsCachedPerRelease 红；
+//   - 让 dropOtherReleasesLocked 变 no-op ⇒ TestReleaseCache_VersionChangeDropsOldRelease 红；
+//   - 去掉 EvictApp 里的 releases.evictApp ⇒ TestStatic_EvictAppInvalidatesCache 红；
+//   - 去掉 releaseCache.evictLocked 的容量淘汰 ⇒ TestReleaseCache_IsBounded 红（有界性）；
 //   - **让平台自己比对白名单**（R24 / A3：只注入身份与模式，名单由应用判）
 //     ⇒ TestServe_WhitelistOutsiderStillReachesWasm 红（2026-09-18 独立审计补的回归网：
 //     这条性质在该用例之前没有任何用例咬住）。

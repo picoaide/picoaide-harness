@@ -137,6 +137,27 @@ const (
 	// 一次，容量未满时 LRU 永不淘汰 ⇒ 内存只涨不落（2026-09-18 实测：全部
 	// Close 后 RSS 只归还约 20%）。空闲即逐出，并触发一次归还 OS。
 	ModuleCacheIdleTTL = 10 * time.Minute
+	// ReleaseCacheMaxBytes 是宿主**静态资源/应用配置**进程内缓存的字节上限（R1-rt-3）。
+	//
+	// 缓存键是 `(app_id, release_id)`（外加资源逻辑路径）：资源在 (app, version, path)
+	// 三元组下**不可变**（§4.2「要改内容只能发新版」，assets.Write 拒绝覆盖），因此
+	// 命中即可直出 —— 包括 `If-None-Match` 复验：304 只需要 ETag，而 ETag 与
+	// content-type 都在缓存里 ⇒ **不读盘、不算哈希**（R1-rt-2）。
+	//
+	// 记账边界（**必须保持有界**）：它是**单一全局** LRU，硬上界 =
+	//
+	//	本值 + 单个 release 的资源总量（≤ SectionTotalMaxBytes，4 MiB）
+	//	    + ReleaseCacheMaxReleases × 每条元数据（几百字节量级）
+	//
+	// 越界即按 LRU 整条释放；单条资源超过本值一半时只缓存元数据（不缓存字节）。
+	// 之所以不进「内存四笔账」：那几笔是"并发 × 实例 / 单次峰值"型的常驻或瞬时上界，
+	// 而本项与 ModuleCacheMaxBytes 同性质 —— 有界、可逐出、随访问增长但有硬顶。
+	// 若将来把它调大或改成多份实例，必须回到 readyz 的记账边界注释重新算账
+	//（见 readyz.MemoryBudget 的「记账边界」段）。
+	ReleaseCacheMaxBytes = 32 << 20
+	// ReleaseCacheMaxReleases 是上述缓存的 `(app_id, release_id)` 条目数上限：
+	// 防"一堆极小应用把索引/元数据撑大"（与 ModuleCacheMaxEntries 同一考虑）。
+	ReleaseCacheMaxReleases = 256
 	// MemoryPeakGuardPercent 是启动自检的内存水位（§4.3）：理论峰值 > 可用内存 70% ⇒ 拒绝启动。
 	MemoryPeakGuardPercent = 70
 	// UploadPeakPerUploadBytes 是单次上传的峰值内存账（§4.3「内存四笔账」）：
@@ -378,6 +399,16 @@ const (
 	DiagnosticsMaxLimit = 200
 	// StderrTailBytes 是诊断里回给作者的 stderr 尾巴上限（§4.9/§7.4）。
 	StderrTailBytes = 2 << 10
+	// ReadyzSnapshotTTL 是 `/readyz` **快照缓存**的有效期（R1-rt-4）。
+	//
+	// 为什么必须有：一次采集要做编译缓存目录**全量递归 walk**（≤ CompileCacheMaxEntries
+	// 条；实测 4096 条目 ≈9.5–14 ms）+ statfs + db.Ping，而 `/readyz` 是**未认证**端点、
+	// 监控/编排通常每 1–5 s 打一次 ⇒ 未认证的放大面（每 1 s 一次 ≈1% 单核常驻 + 每秒
+	// 4096 次 Lstat + 每秒一次 DB 往返）。缓存后稳态单次成本退化为一次内存拷贝。
+	//
+	// 取舍（认账）：`ok` 与各水位读数最多滞后本值；**发布闸门**（AllowPublish）与
+	// 控制台内存预览走不缓存的 `Snapshot()`，不受影响 —— 那条路径要的是"此刻"。
+	ReadyzSnapshotTTL = 5 * time.Second
 )
 
 // RetirementSnapshotRetentionDays 是退役快照保留天数（R37/§5.3）：90 天。

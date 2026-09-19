@@ -45,11 +45,18 @@ import (
 //	G 投影        （仅 approved 时）SetWasmAppConfig + SetWasmAppCurrentRelease
 //	H 收尾        审计 → 版本 GC（保留 3 版，顺带清掉被回收版本的资源目录）
 //
-// ⚠️ G 的两条写都必须被 `status == approved` 罩住（R1-pm-9）：apps 行是**目录对全员
-// 下发的投影**（access 徽标/负责人/当前版本）。待审版本没有生效，投影就必须一字不动
-// —— 否则作者提交一个"改成 public"的待审版本，全公司先看到"公开"徽标，点进去却
-// 仍被要求登录（审核只剩"卡制品"，配置展示不受控）。待审版本被**拒绝**时同样不能
-// 留下未生效的投影；两条审核路径的收口见 admin.go 的 recomputeProjection。
+// ⚠️ 配置投影有**两条**写路径，两条都必须被 `status == approved` 罩住：
+//   - G1/G2（SetWasmAppConfig + SetWasmAppCurrentRelease）；
+//   - E1 的 INSERT 分支（首版落行时随 UPSERT 写 config_json/purpose/data_sensitivity）——
+//     首版待审时它曾照写，让"没被任何人批准过的配置"成了后续版本的继承基线（审计 §1.2）。
+//
+// 理由（R1-pm-9）：apps 行是**目录对全员下发的投影**（access 徽标/负责人/当前版本），
+// 也是"上一版生效配置"的显示面。待审版本没有生效，投影就必须一字不动 —— 否则作者提交
+// 一个"改成 public"的待审版本，全公司先看到"公开"徽标，点进去却仍被要求登录（审核只剩
+// "卡制品"，配置展示不受控），而且下一版会拿这个未审核的 public 当缺省。待审版本被
+// **拒绝**时同样不能留下未生效的投影；两条审核路径的收口见 admin.go 的
+// recomputeProjection。继承基线的真源已经是版本行（inheritBase 走
+// LatestApprovedWasmReleaseMeta），投影列因此只是显示面 —— 但显示面同样不能提前变。
 //
 // **为什么把全部文件系统工作放在落库之前**：R18 的判据是"失败的发布不占版本号"。
 // 磁盘写失败（满、权限、只读挂载）是这条链路上**最可能**的失败，把它排在落库之前
@@ -126,10 +133,12 @@ var toolchainSections = map[string]struct{}{
 // 就能先验证"能不能编译、能不能跑"）；publish 一律 needConfig=true（§10.5 第 56b 项
 // 明写"配置文件缺失 ⇒ 拒发布"）。
 //
-// prevConfigJSON 是**更新发布**的继承基线（上一版生效配置的 config_json，见
+// prevConfigJSON 是**更新发布**的继承基线（最新 approved 版本的 config_json，见
 // inheritBase）：非空时提交里缺席的字段沿用它的值（R1-pm-10/R1-uxc-8），空串 =
-// 首版语义（缺省仍按 schema）。publish 传 existing.ConfigJSON、validate 传同一份基线
-// —— 预检与发布必须对同一份载荷给出同一个结论，否则 AI 会看到"预检通过、发布被拒"。
+// 首版语义（缺省仍按 schema）。publish 传 inheritBase 的结果、validate 传
+// inheritBaseForApp 的结果（同一份基线）—— 预检与发布必须对同一份载荷给出同一个
+// 结论，否则 AI 会看到"预检通过、发布被拒"。基线不可用时调用方**在进来之前**就已
+// 拒绝（两个入口都先过 inheritBase*），因此这里的 byte 一定可用。
 func (h *Handlers) prepare(c *gin.Context, appID string, wasm []byte, rawConfig json.RawMessage, version string, needConfig, requireDeclarations bool, prevConfigJSON string) (*staged, *apperr.Error) {
 	st := &staged{appID: appID, wasm: wasm, wasmBytes: int64(len(wasm))}
 	sum := sha256.Sum256(wasm)
@@ -434,8 +443,14 @@ func (h *Handlers) validate(c *gin.Context) {
 		writeErr(c, derr)
 		return
 	}
-	st, perr := h.prepare(c, appID, wasm, p.Config, releaseVersion(p.Version), false, first,
-		h.inheritBaseForApp(c.Request.Context(), appID))
+	// 继承基线要在预检里先解出来：基线不可用时预检也必须给出与发布**同一个**结论
+	// （否则 AI 会看到"预检通过、发布被拒"）。
+	base, berr := h.inheritBaseForApp(c.Request.Context(), appID)
+	if berr != nil {
+		writeErr(c, berr)
+		return
+	}
+	st, perr := h.prepare(c, appID, wasm, p.Config, releaseVersion(p.Version), false, first, base)
 	if perr != nil {
 		writeErr(c, perr)
 		return
@@ -633,11 +648,17 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 
 	// ---- A–D：预检 + 编译 + 抽取 + 干跑（失败 ⇒ 不落行，R18）----
 	//
-	// 更新发布（existing != nil）时传上一版生效配置作为继承基线：提交里缺席的
-	// access/whitelist/purpose/data_sensitivity/owner 沿用上一版（R1-pm-10/R1-uxc-8），
-	// 显式给值以提交为准。这是"给这个应用发个小修复"不会静默改写线上访问级别的唯一落点。
-	st, perr := h.prepare(c, appID, wasm, in.config, version, true, len(hist) == 0,
-		h.inheritBase(c.Request.Context(), existing))
+	// 继承基线 = **最新 approved 版本**的配置（inheritBase；不是 apps.config_json
+	// 投影列，也不是"最后一次提交"）。提交里缺席的 access/whitelist/purpose/
+	// data_sensitivity/owner 沿用那一版（R1-pm-10/R1-uxc-8），显式给值以提交为准 ——
+	// 这是"给这个应用发个小修复"不会静默改写线上访问级别的唯一落点。
+	// 基线不可用（生效版本的 config_json 是坏行）⇒ 拒绝发布，不猜（见 inheritBase）。
+	base, berr := h.inheritBase(c.Request.Context(), existing)
+	if berr != nil {
+		h.auditFailed(u, appID, version, berr)
+		return nil, berr
+	}
+	st, perr := h.prepare(c, appID, wasm, in.config, version, true, len(hist) == 0, base)
 	if perr != nil {
 		h.auditFailed(u, appID, version, perr)
 		return nil, perr
@@ -702,13 +723,16 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 		auditDetail(appID, title, fmt.Sprintf("v%s %s checksum=%s size=%d", version, rel.Status, st.checksum, st.wasmBytes)))
 	// 访问模式变更写审计：动作名从 wasm_app_visibility_change 改为
 	// wasm_app_access_change（2026-09-18 收敛为 access 三模式；旧动作名不再产生）。
-	// 旧值从既有 config_json 现解（解析失败回落 login）。
+	// 旧值从**继承基线**（= 最新 approved 版本的配置，就是本次沿用/对比的那一份）
+	// 现解，而不是 apps.config_json 投影列：投影可能停在脏值上（历史上待审版本也
+	// 写过它），而"变更前的线上访问级别"只有一个真源（见 inheritBase）。基线为空
+	// （没有生效版本）时回落 login —— 与缺省一致。
 	//
 	// ⚠️ 明细里的"生效"必须与真相一致（R1-pm-9 的同一条纪律）：待审版本的提交
 	// **没有**生效（投影与生效版本都不动），把它写成"随 vX 生效"会让运维面把一次
 	// 提交读成一次已生效的访问级别变更。
 	if existing != nil {
-		if prev := appcfg.AccessOfConfigJSON(existing.ConfigJSON); prev != st.config.Access {
+		if prev := appcfg.AccessOfConfigJSON(base); prev != st.config.Access {
 			effect := fmt.Sprintf("随 v%s 生效", version)
 			if review {
 				effect = fmt.Sprintf("随 v%s 提交（待审，尚未生效）", version)
@@ -798,11 +822,23 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 	}
 
 	// E1 占名（owner 首占且不可改写：DAO 的 COALESCE 保证）。
+	//
+	// **配置投影三列（config_json/purpose/data_sensitivity）只在"已生效"时随 E1 落行**
+	// （与 G1 同一条纪律，R1-pm-9）：待审版本的配置没有经过任何人批准，写进 apps 行
+	// 会让它成为下一版的**继承基线**（2026-09-19 审计 §1.2 —— 首版待审时 E1 的 INSERT
+	// 分支曾照写，G1 守卫只挡住了半条路）。首版待审 ⇒ INSERT 落空串 = "没有可交付的
+	// 配置"（read.go 对空 config_json 的兜底：access 回落 login、负责人回落 apps.owner），
+	// 等 approve 时由 admin.go 的审核分支按最新 approved 版本写入。
+	// 冲突分支本来就不写这三列 ⇒ 已生效应用的投影不会被一次待审提交改写。
+	projConfig, projPurpose, projSensitivity := "", "", ""
+	if in.status == serverstore.ReleaseStatusApproved {
+		projConfig, projPurpose, projSensitivity = string(st.configJSON), st.config.Purpose, st.config.DataSensitivity
+	}
 	if err := serverstore.UpsertWasmApp(ctx, h.opt.DB, serverstore.WasmApp{
 		AppID: in.appID, Title: in.title, Description: st.config.Purpose,
 		Owner: in.publisher, Channel: serverstore.AppChannelWasm, Enabled: in.enabled,
-		Purpose: st.config.Purpose, DataSensitivity: st.config.DataSensitivity,
-		ConfigJSON: string(st.configJSON),
+		Purpose: projPurpose, DataSensitivity: projSensitivity,
+		ConfigJSON: projConfig,
 	}); err != nil {
 		return nil, internalErr("应用元数据保存失败", err)
 	}
@@ -1073,43 +1109,47 @@ func (h *Handlers) loadForPublish(ctx context.Context, appID string) (*serversto
 	return app, hist, nil
 }
 
-// inheritBase 返回**更新发布**的字段继承基线 = 上一版**生效**配置的 config_json
+// inheritBase 返回**更新发布**的字段继承基线 = 最新 approved 版本的 `config_json`
 // （语义与判据见 appcfg.ParseUpdate）。空串 = 没有基线（首版）。
 //
-// 取值顺序：
-//  1. `apps.config_json` —— 当前生效版本的配置投影。R1-pm-9 之后它只由 approved
-//     版本写入，所以它就是"线上那一版"的配置，而不是"最后一次提交"；
-//  2. 最新 approved 版本的 config_json —— 投影为空/坏行的兜底（例如迁移前的历史行）；
-//  3. 空串 —— 没有可继承的基线，缺省按 schema 走（access 落 login = 更严格的一侧）。
+// 真源是**版本行**（app_releases）里最新 approved 的那一版，**不是** `apps.config_json`
+// 投影列：后者是显示面，待审版本也曾被写进去（2026-09-19 审计 §1.2）—— 拿它当基线
+// 等于让一个没人批准过的配置成为后续版本的默认值。这里与交付面（appserver 的
+// LatestApprovedWasmReleaseMeta）、审批面（admin.go 重算投影用同一个入口）**同源**：
+// 继承基线永远是"线上正在交付的那一版"。
 //
-// 为什么不用"最新一次发布"当基线：审核开启时最新版本可能还是 pending（没人批准过），
-// 让它成为下一版的默认值等于把未审核的配置洗成默认。
-func (h *Handlers) inheritBase(ctx context.Context, existing *serverstore.WasmApp) string {
+// 基线不可用（非空但解析不了）⇒ **拒绝发布**（appcfg.UnusableBaselineError）：
+// 此时按缺省回落 login 对白名单应用是放宽，而"静默放宽"在作者侧零信号。
+func (h *Handlers) inheritBase(ctx context.Context, existing *serverstore.WasmApp) (string, *apperr.Error) {
 	if existing == nil {
-		return ""
+		return "", nil
 	}
-	if s := strings.TrimSpace(existing.ConfigJSON); s != "" {
-		return s
-	}
-	latest, err := serverstore.LatestApprovedWasmReleaseMeta(ctx, h.opt.DB, existing.AppID)
-	if err != nil || latest == nil {
-		// 没有生效版本（或读取失败）：没有基线。读取失败不升级成发布失败 ——
-		// 缺省方向是 login（更严格），作者不该为一次读数失败付出一次发布失败。
-		return ""
-	}
-	return latest.ConfigJSON
+	return h.inheritBaseForApp(ctx, existing.AppID)
 }
 
 // inheritBaseForApp 是 inheritBase 的"按 app_id 现查"形态（validate 用：预检与发布
 // 必须对同一份载荷给出同一个结论，否则 AI 会看到"预检通过、发布被拒"）。
-//
-// 查不到（首版）/读失败 ⇒ 空串（无基线），与 inheritBase 同向。
-func (h *Handlers) inheritBaseForApp(ctx context.Context, appID string) string {
-	app, err := serverstore.GetWasmApp(ctx, h.opt.DB, appID)
-	if err != nil {
-		return ""
+func (h *Handlers) inheritBaseForApp(ctx context.Context, appID string) (string, *apperr.Error) {
+	latest, err := serverstore.LatestApprovedWasmReleaseMeta(ctx, h.opt.DB, appID)
+	switch {
+	case errors.Is(err, serverstore.ErrNotFound):
+		// 没有任何已通过版本（首版，或全部被拒/被回收）：没有可继承的基线，
+		// 缺省按 schema 走（access 落 login）。这不是错误 —— 首版语义不回归。
+		return "", nil
+	case err != nil:
+		// 读失败**不**降级成"没有基线"：那会把一次数据库故障翻译成一次访问级别的
+		// 静默回落，正是本次要消灭的形态。如实报平台侧错误。
+		return "", internalErr("查询生效版本失败", err)
 	}
-	return h.inheritBase(ctx, app)
+	if appcfg.BaselineStateOf(latest.ConfigJSON) != appcfg.BaselineUnusable {
+		return latest.ConfigJSON, nil
+	}
+	// 点名坏的是哪一版：错误文案是作者/管理员唯一的线索（§8：第一消费者是 AI，
+	// 丢掉可操作性等于让它自己猜）。
+	return "", appcfg.UnusableBaselineError().
+		WithDetail("baseline_version", latest.Version).
+		WithHint(fmt.Sprintf("已生效版本 v%s 的配置行读不出来：修好它（app_releases.config_json），"+
+			"或先审批一个配置完整的历史待审版本，之后即可正常发布", latest.Version))
 }
 
 // newestVersion 返回历史版本中的最高版本（空 = 尚无版本）。

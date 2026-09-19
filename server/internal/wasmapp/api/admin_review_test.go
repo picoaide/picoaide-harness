@@ -130,6 +130,9 @@ type releaseRows struct {
 		CreatedAt string `json:"created_at"`
 		Current   bool   `json:"current"`
 		Changelog string `json:"changelog"`
+		// 审核结论（被拒理由）。R1-uxw-4：审批面必须能回看自己写过的理由 ——
+		// 在此之前它只落在审计详情里，连管理员自己都读不回来。
+		Reason string `json:"reason"`
 	} `json:"releases"`
 }
 
@@ -429,6 +432,46 @@ func TestAdminReviewStatusAllListsEveryVersion(t *testing.T) {
 	}
 	if rows.Releases[1].Current {
 		t.Fatalf("待审版本不应被标记为 current：%+v", rows.Releases[1])
+	}
+}
+
+// TestAdminReleasesRowCarriesRejectReason：审批队列的**每一行**都带审核结论
+// （R1-uxw-4）—— 之前理由只落审计详情，管理端自己都回看不了「我上次为什么拒的」，
+// 发布者更是无从得知。判据三条：rejected 行有理由、approved 行空理由、
+// status=rejected 正是管理端「最近被拒」子清单的数据源。
+func TestAdminReleasesRowCarriesRejectReason(t *testing.T) {
+	e := newTestEnv(t)
+	e.publishOK(e.tokens["alice"], "reason-tool", "1.0.0", testGuestModule(t), goodConfig())
+	e.setReviewRequired(true)
+	e.publishOK(e.tokens["alice"], "reason-tool", "1.1.0", testGuestModule(t), goodConfig())
+
+	const reason = "访问范围声明过宽：请改成登录后使用"
+	e.decodeJSON(e.req(http.MethodPost, "/api/server/admin/wasm-apps/reason-tool/releases/1.1.0/reject", "",
+		map[string]any{"reason": reason}), http.StatusOK, &struct {
+		Reason string `json:"reason"`
+	}{})
+
+	rows := e.releaseRows("reason-tool", "status=rejected")
+	if len(rows.Releases) != 1 {
+		t.Fatalf("status=rejected 应列出被拒版本（管理端「最近被拒」子清单的数据源）：%+v", rows.Releases)
+	}
+	if got := rows.Releases[0].Reason; got != reason {
+		t.Fatalf("被拒行的 reason = %q, want %q", got, reason)
+	}
+	if rows.Releases[0].Status != serverstore.ReleaseStatusRejected {
+		t.Fatalf("状态应为 rejected：%+v", rows.Releases[0])
+	}
+	// approved 行不得带理由（数据库在通过时把 reason 清成空串）。
+	all := e.releaseRows("reason-tool", "status=all")
+	for _, r := range all.Releases {
+		if r.Version == "1.0.0" && r.Reason != "" {
+			t.Fatalf("approved 行不应有审核理由：%+v", r)
+		}
+	}
+	// 待审队列（缺省视图）本身不含被拒版本，理由由 rejected 视图承载。
+	pending := e.releaseRows("reason-tool", "")
+	if len(pending.Releases) != 0 {
+		t.Fatalf("拒绝后待审队列应为空：%+v", pending.Releases)
 	}
 }
 

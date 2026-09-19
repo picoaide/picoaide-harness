@@ -73,7 +73,10 @@ func (h *Handlers) diagnosticsPayload(c *gin.Context, appID string, app *servers
 	if err != nil {
 		return nil, internalErr("查询失败", err)
 	}
-	summary, err := diag.Summary(ctx, h.opt.DB, appID, since)
+	// 诊断里的内存数字必须跟随**生效**上限（R1-rt-25）：此前走 Summary/HintsFor 取的是
+	// 编译期默认（恒 64 MiB），控制台把单实例上限改小/改大后，作者看到的建议数字与实际
+	// 不符 —— 诊断的第一消费者是 AI，错误数字会把排查带偏。
+	summary, err := diag.SummaryWithMemoryPages(ctx, h.opt.DB, appID, since, h.instanceMemoryPages())
 	if err != nil {
 		return nil, internalErr("查询失败", err)
 	}
@@ -83,7 +86,7 @@ func (h *Handlers) diagnosticsPayload(c *gin.Context, appID string, app *servers
 	// 合并后保序去重（同一个 hint 不重复刷屏）。
 	hints := append([]string{}, summary.Hints...)
 	for _, f := range failures {
-		hints = append(hints, diag.HintsFor(f.ReasonCode)...)
+		hints = append(hints, diag.HintsForMemoryPages(f.ReasonCode, h.instanceMemoryPages())...)
 	}
 	return gin.H{
 		"app_id":         appID,
@@ -500,6 +503,78 @@ func (h *Handlers) catalog(c *gin.Context) {
 }
 
 // ---------------------------------------------------------------------------
+// 我的版本：GET /apps/wasm/:app_id/releases（R1-pm-3）
+// ---------------------------------------------------------------------------
+
+// myReleases 让**发布者本人**读到自己应用的版本历史与审核结论（含被拒理由）。
+//
+// 为什么必须有这条出口（R1-pm-3 / R1-uxw-4）：开启审核（`wasm.review_required`）之后
+// 发布者的全部反馈只有发布那一刻的"待审核（线上仍是旧版本）"一句话 ——
+// `app_releases.reason` 被管理员写进库、却**没有任何读路径**（DTO 无字段、员工面无
+// 端点），而版本号一经提交就**永久占位**（§4.1，被拒也不释放）。结果是：作者收不到
+// 结论、拿不到理由、只能盲升版本号重发；"审核"在作者侧退化成掷骰子。
+//
+// 鉴权沿用 ownedApp（与 publish/unpublish/freeze/export/diagnostics 同一份判定）：
+// **非发布者一律 404「应用不存在」**，且与"应用真的不存在"逐字节同形（`notFoundApp`
+// 对两种情况给出同一个 details/hints）—— 不泄露应用是否存在（R38/§8 的既有纪律）。
+// 平台管理员（super_admin）照旧放行，与其余管理动作同口径。allowDeleted=true：
+// 退役（软删）应用的只读面与 export/diagnostics 一致，保留期内作者仍要能回看结论。
+//
+// 返回每版 version / status / reason / created_at / current / checksum / size，
+// **不含制品字节**（ListWasmReleases 走清单投影，archive 从不进内存）。
+//
+// 不写审计：与 adminReleases 同口径 —— 这是"读自己的版本清单"，发布者每次打开面板
+// 都会调一次，逐次落审计只会把审计链淹掉；状态变更（发布/审批/上下架）仍然条条留痕。
+func (h *Handlers) myReleases(c *gin.Context) {
+	if err := h.requireReady(); err != nil {
+		writeErr(c, err)
+		return
+	}
+	appID := registry.NormalizeAppID(c.Param("app_id"))
+	app, _, oerr := h.ownedApp(c, appID, true)
+	if oerr != nil {
+		writeErr(c, oerr)
+		return
+	}
+	ctx := c.Request.Context()
+	releases, err := serverstore.ListWasmReleases(ctx, h.opt.DB, appID, false)
+	if err != nil {
+		writeErr(c, internalErr("查询版本失败", err))
+		return
+	}
+	// 当前生效版本号：apps 行上只有 current_release_id，翻译成版本号给作者看
+	// （与目录行的 current_version 同一实现，避免两处口径分叉）。
+	current := ""
+	if app.CurrentReleaseID > 0 {
+		if versions, verr := serverstore.WasmAppCurrentVersions(ctx, h.opt.DB, []int64{app.CurrentReleaseID}); verr == nil {
+			current = versions[app.CurrentReleaseID]
+		}
+	}
+	rows := make([]gin.H, 0, len(releases))
+	for _, r := range releases {
+		rows = append(rows, gin.H{
+			"version": r.Version,
+			"status":  r.Status,
+			// 被拒理由：pending/approved 行恒为空串（数据库侧保证），界面据此只在
+			// rejected 行上渲染它。
+			"reason":     r.Reason,
+			"created_at": r.CreatedAt,
+			"current":    r.Version == current && current != "",
+			"checksum":   r.Checksum,
+			"size":       r.Size,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"app_id":          appID,
+		"current_version": current,
+		"releases":        rows,
+		// 审核开关：作者据此解释"为什么这一版还没生效"（关着还停在 pending 只可能是
+		// 开关刚被打开，或这一版是在开关打开期间提交的）。
+		"review_required": h.reviewRequired(),
+	})
+}
+
+// ---------------------------------------------------------------------------
 // 导出：GET .../wasm/:app_id/export（R37 只读快照）
 // ---------------------------------------------------------------------------
 
@@ -533,10 +608,13 @@ func (h *Handlers) export(c *gin.Context) {
 			"changelog":   r.Changelog,
 			"publisher":   r.Publisher,
 			"status":      r.Status,
-			"checksum":    r.Checksum,
-			"size":        r.Size,
-			"created_at":  r.CreatedAt,
-			"deleted":     r.DeletedAt != nil,
+			// 审核结论（被拒理由；通过/待审恒为空串）：导出的快照要能回答"这一版
+			// 为什么没上线"，否则退役后的回看只剩一个 status（R1-pm-3）。
+			"reason":     r.Reason,
+			"checksum":   r.Checksum,
+			"size":       r.Size,
+			"created_at": r.CreatedAt,
+			"deleted":    r.DeletedAt != nil,
 		}
 		if r.ConfigJSON != "" {
 			row["config"] = json.RawMessage(r.ConfigJSON)

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
-	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/edge"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
@@ -57,10 +56,17 @@ const staticCacheMaxAge = 5 * time.Minute
 // ETag = hash(app_id ‖ version ‖ path ‖ content)。**键必须含 app_id + version**：
 // 少了 version 会让"同一路径不同版本"互相命中（本包的测试 explicitly 钉死这一条），
 // 少了 app_id 会让不同应用的 `/index.html` 共用一个 ETag。
-func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request, appID string,
-	rel *serverstore.WasmRelease, store *assets.Store, allowEntry bool) bool {
+//
+// # 顺序即语义（R1-rt-2）
+//
+// `If-None-Match` 命中时**先判 304、再决定要不要正文**：命中缓存的资源只需要
+// (content-type, ETag)，而这两个都在 `(app_id, release_id, path)` 级缓存里
+// （见 releasecache.go）⇒ 304 复验**不读盘、不算哈希**。旧实现是"先整份读盘 →
+// 算 sha256 → 才判 If-None-Match"，304 与 200 一样贵（实测 200 KiB 资源 ≈256 µs）。
+func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request,
+	rel *serverstore.WasmRelease, rc *releaseContent, allowEntry bool) bool {
 
-	if r == nil || store == nil || rel == nil {
+	if r == nil || rc == nil || rel == nil {
 		return false
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -78,44 +84,64 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request, appID strin
 	if isEntry && !allowEntry {
 		return false
 	}
-	contentType, data, aerr := store.Read(logical)
+
+	// ① 304 复验（**不读盘、不算哈希**）：缓存里有 ETag 就足够回答"内容变了吗"。
+	// 关键：这一段在**任何**磁盘访问之前，并且不写任何响应头 —— 万一接下来发现
+	// 资源不可用要交给 wasm，响应头必须还是干净的。
+	if cached, hit := rc.CachedAsset(logical); hit && cached.ETag != "" {
+		if etagMatches(r.Header.Get("If-None-Match"), cached.ETag) {
+			writeStaticHeaders(w.Header(), r, cached)
+			// 304：不带 body，也不带 Content-Length（RFC 9110：304 不得有消息体）。
+			w.WriteHeader(http.StatusNotModified)
+			return true
+		}
+	}
+
+	// ② 需要正文：缓存命中（含字节）⇒ 同样零读盘；只有冷路径才读盘 + 算哈希。
+	// 资源不存在 / 路径非法 / 超限都不是"静态资源命中"，交给 wasm 决定
+	//（应用的 404 页面比宿主代答更准确，且这里绝不能因为一个坏资源就 500）。
+	asset, aerr := rc.Asset(logical)
 	if aerr != nil {
-		// 资源不存在 / 路径非法 / 超限：都不是"静态资源命中"，交给 wasm 决定
-		// （应用的 404 页面比宿主代答更准确，且这里绝不能因为一个坏资源就 500）。
 		return false
+	}
+	writeStaticHeaders(w.Header(), r, asset)
+
+	// 冷路径的 304：If-None-Match 与刚刚算出的 ETag 比对（此时已经付过读盘代价）。
+	if etagMatches(r.Header.Get("If-None-Match"), asset.ETag) {
+		w.WriteHeader(http.StatusNotModified)
+		return true
 	}
 
 	h := w.Header()
+	h.Set("Content-Length", strconv.Itoa(asset.Size))
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(asset.Data)
+	}
+	return true
+}
+
+// writeStaticHeaders 写静态资源的响应头（宿主安全头 + 应用可控头白名单 + ETag + 缓存策略）。
+//
+// 304 与 200 共用同一份实现：两条路径的**头必须逐字段一致**，否则"复验过的那份
+// 缓存"与"首次拿到的那份"在浏览器里会表现出不同的安全/缓存语义。
+func writeStaticHeaders(h http.Header, r *http.Request, a assetEntry) {
 	// 宿主安全头（§4.8：含 4xx/5xx，这里也含 304）。
 	edge.ApplyHostSecurityHeaders(h, edge.SelfOrigin(r))
 
 	// 应用可控头的白名单过滤（§4.8）：静态资源的头是宿主产物，但统一过一遍
 	// 同一条策略 —— content-type 必须在允许集合内，否则宁可不写（由 Go 嗅探）。
 	appHeaders := http.Header{}
-	appHeaders.Set("Content-Type", contentType)
+	appHeaders.Set("Content-Type", a.ContentType)
 	for k, vs := range edge.StripAppControlledHeaders(appHeaders) {
 		h[k] = vs
 	}
 
-	etag := assetETag(appID, rel.Version, logical, data)
-	h.Set("ETag", etag)
+	h.Set("ETag", a.ETag)
 	// §4.6：「响应缓存 仅缓存 assets.read 的静态资源」—— 这里覆盖
 	// ApplyHostSecurityHeaders 写的 no-store（那是给**动态响应**的口径，
 	// §4.6 明写"动态响应一律不缓存"）。两条一起读才是完整语义。
 	h.Set("Cache-Control", "private, max-age="+strconv.Itoa(int(staticCacheMaxAge.Seconds())))
-
-	if etagMatches(r.Header.Get("If-None-Match"), etag) {
-		// 304：不带 body，也不带 Content-Length（RFC 9110：304 不得有消息体）。
-		w.WriteHeader(http.StatusNotModified)
-		return true
-	}
-
-	h.Set("Content-Length", strconv.Itoa(len(data)))
-	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(data)
-	}
-	return true
 }
 
 // isReservedAsset 判定一个包内逻辑路径是否是**平台保留资源**（不直出）。

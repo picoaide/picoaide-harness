@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -24,6 +25,25 @@ import (
 // 测试直接打真资产：换成构造样本的话，「内置资产能不能过服务端校验」这条
 // 最该被钉住的断言就变成自说自话。
 const repoSkillDir = "../../../../server/skills/app-builder"
+
+// seededSkillVersion 是真资产 SKILL.md 里的 version。
+//
+// ⚠️ 改技能内容必须**同步提这个版本号**（R1-pm-8：内容变了版本没变 ⇒ 客户端判不出
+// "有更新"，装过的员工永远拿不到新版手册）。这条纪律由 skill_version_test.go 的
+// TestBuiltinSkillVersionTracksContent 用"内容摘要 → 版本"登记表守住；这里只是把
+// 断言里的字面量收敛到一处。
+const seededSkillVersion = "1.1.0"
+
+// dropSkillVersion 从 SKILL.md 文本里删掉 version 那一行（坏资产夹具）。
+// 用正则而不是字面量替换：版本号提级时夹具不会跟着烂掉。
+func dropSkillVersion(t *testing.T, raw string) string {
+	t.Helper()
+	broken := regexp.MustCompile(`(?m)^version: .*\n`).ReplaceAllString(raw, "")
+	if broken == raw {
+		t.Fatal("前置：未能从 SKILL.md 删掉 version")
+	}
+	return broken
+}
 
 func testRouter(h *Handlers) *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -87,7 +107,7 @@ func TestRealAssetPassesServerManifestValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("skillmanifest.Parse 必须通过（内置技能走与上传完全相同的校验）: %v", err)
 	}
-	if m.AppID != "app-builder" || m.Version != "1.0.0" {
+	if m.AppID != "app-builder" || m.Version != seededSkillVersion {
 		t.Fatalf("manifest = %q/%q", m.AppID, m.Version)
 	}
 	if m.Title == "" || m.Author == "" || m.Category == "" {
@@ -100,6 +120,7 @@ func TestRealAssetPassesServerManifestValidation(t *testing.T) {
 	for _, want := range []string{
 		"SKILL.md",
 		"references/abi.md",
+		"references/imports.md",
 		"references/limits.md",
 		"references/publishing.md",
 		"references/diagnostics.md",
@@ -295,7 +316,7 @@ func TestCatalogLoadsRealAssetAndServesContract(t *testing.T) {
 		t.Fatalf("skills = %d, want 1", len(payload.Skills))
 	}
 	row := payload.Skills[0]
-	if row.Name != "app-builder" || row.Version != "1.0.0" || row.Source != "builtin" {
+	if row.Name != "app-builder" || row.Version != seededSkillVersion || row.Source != "builtin" {
 		t.Fatalf("row = %+v", row)
 	}
 	if row.Title == "" || row.Description == "" || row.Author == "" || row.Category == "" {
@@ -321,10 +342,10 @@ func TestCatalogLoadsRealAssetAndServesContract(t *testing.T) {
 	if got := w.Header().Get("X-Skill-Checksum"); got != row.SHA256 {
 		t.Fatalf("清单 sha256(%s) 与响应头(%s) 必须一致", row.SHA256, got)
 	}
-	if got := w.Header().Get("X-Skill-Version"); got != "1.0.0" {
+	if got := w.Header().Get("X-Skill-Version"); got != seededSkillVersion {
 		t.Fatalf("X-Skill-Version = %q", got)
 	}
-	if !strings.Contains(w.Header().Get("Content-Disposition"), "app-builder-1.0.0.tar.gz") {
+	if !strings.Contains(w.Header().Get("Content-Disposition"), "app-builder-"+seededSkillVersion+".tar.gz") {
 		t.Fatalf("Content-Disposition = %q", w.Header().Get("Content-Disposition"))
 	}
 	// 正文必须真的是 tar.gz 且能过 archiveutil（客户端装的就是这份字节）。
@@ -356,10 +377,7 @@ func TestCatalogDropsBrokenAssetAndRecordsProblem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	broken := strings.Replace(string(raw), "version: 1.0.0\n", "", 1)
-	if broken == string(raw) {
-		t.Fatal("前置：未能从 SKILL.md 删掉 version")
-	}
+	broken := dropSkillVersion(t, string(raw))
 	if err := os.WriteFile(filepath.Join(target, SkillFile), []byte(broken), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +497,7 @@ func TestAdminListBuiltinReportsRealAsset(t *testing.T) {
 		t.Fatalf("skills = %+v", payload.Skills)
 	}
 	row := payload.Skills[0]
-	if row.Version != "1.0.0" || len(row.SHA256) != 64 || row.Size <= 0 || row.Files < 10 {
+	if row.Version != seededSkillVersion || len(row.SHA256) != 64 || row.Size <= 0 || row.Files < 10 {
 		t.Fatalf("管理端清单必须带 version/sha256/size/files: %+v", row)
 	}
 	if row.Title == "" || row.Author == "" || row.Category == "" || row.Description == "" {
@@ -507,10 +525,7 @@ func TestAdminListBuiltinReportsSkippedSkillWithReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	broken := strings.Replace(string(raw), "version: 1.0.0\n", "", 1)
-	if broken == string(raw) {
-		t.Fatal("前置：未能从 SKILL.md 删掉 version")
-	}
+	broken := dropSkillVersion(t, string(raw))
 	if err := os.WriteFile(filepath.Join(target, SkillFile), []byte(broken), 0o644); err != nil {
 		t.Fatal(err)
 	}

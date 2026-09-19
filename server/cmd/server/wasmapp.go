@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 
 	"github.com/picoaide/picoaide/internal/channel"
+	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/aichat"
@@ -40,6 +42,28 @@ const (
 	// 基域是平台资产，应用不得占用这些名字（如 intranet、oa）。
 	EnvAppsExtraReserved = "PICOAI_APPS_EXTRA_RESERVED"
 )
+
+// publicMainOrigin 返回**服务端配置**的本服务对外地址（主站源），未配置返回空串。
+//
+// 真源与客户端下载地址完全相同（不新造一套），优先级也照抄 clientrelease.resolveOrigin：
+// `PICOAI_PUBLIC_BASE_URL`（显式配置即唯一权威）→ settings `server.base_url`
+// （管理员在控制台配置，main.go 装进 clientrelease.PublicBaseResolver）。
+//
+// 为什么要有它：员工浏览器会话（/login、/app-ticket）的主站源**只能来自配置**。
+// 留空时 session.checkMainOrigin 会按请求 Host 推导，而 Host 是攻击者可选的 ——
+// 任何别名主机名（IP 直连/旧域名/反代域名/渠道第二域名）都会被 edge.HostGate 判成
+// HostMain 并照常拿到票，同时换票的 nonce（浏览器持有性证明）若按请求 Host 判定
+// 还会被"按请求降级"关掉（R1-sec-1 回归审计 P0）。返回空串时换票端点会 fail-closed
+// 拒绝签发票，并在启动日志里点名要配哪一项。
+func publicMainOrigin() string {
+	if raw := strings.TrimSpace(os.Getenv(clientrelease.PublicBaseURLEnv)); raw != "" {
+		return raw
+	}
+	if clientrelease.PublicBaseResolver != nil {
+		return strings.TrimSpace(clientrelease.PublicBaseResolver())
+	}
+	return ""
+}
 
 // wasmPlatform 汇聚 WASM 应用平台的全部运行期组件。
 type wasmPlatform struct {
@@ -271,6 +295,11 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 	compiler, cerr := compile.New(compile.Options{
 		DataRoot:  dataDir,
 		Isolation: isoMode,
+		// 生效的单实例内存上限（R1-rt-7b）：编译子进程要按它与执行侧**同一份**上限校验
+		// 模块声明的线性内存。取值来源与下面 appserver 的 `lim` 完全同一个 holder
+		// （控制台设置 > 部署档位 > 编译期默认），因此"调小 ⇒ 发布期就拦、调大 ⇒ 不再误拒"。
+		// 它是 wazero 的 RuntimeConfig 项 ⇒ 与执行侧同语义：保存后需重启生效。
+		MemoryPages: limitsHolder.Get().InstanceMemoryPages(),
 	})
 	if cerr != nil {
 		if isoMode == compile.IsolationRequire {
@@ -320,17 +349,32 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 	// 这里复用 serverauth 的同一套三个桶，两处入口共享同一份失败预算。
 	loginThrottle := sessionLoginThrottle{authAPI}
 	sessMgr := session.New(session.Options{
-		DB:          db,
-		BaseDomain:  baseDomain,
-		Auth:        authFn,
-		Audit:       func(username, action, detail string) { _ = serverstore.AuditLog(db, username, action, detail) },
-		Throttle:    loginThrottle,
-		ProductName: channel.Load().Identity.DisplayName,
+		DB:         db,
+		BaseDomain: baseDomain,
+		Auth:       authFn,
+		Audit:      func(username, action, detail string) { _ = serverstore.AuditLog(db, username, action, detail) },
+		Throttle:   loginThrottle,
+		// ⚠️ 主站源必须**由配置固定**（R1-sec-1 回归审计 P0）：留空会让
+		// checkMainOrigin 按请求 Host 推导，而 Host 是攻击者可选的 —— 任何别名主机名
+		// （IP 直连/旧域名/反代域名）都能拿到票，且换票 nonce（浏览器持有性证明）会被
+		// "按请求降级"关掉。publicMainOrigin 读的是**与客户端下载地址同一份真源**。
+		MainOriginResolver: publicMainOrigin,
+		ProductName:        channel.Load().Identity.DisplayName,
 		// 与 appserver.Options 同源：换票端点的 app 形态校验也要挡住企业既有主机名。
 		AppIDExtraReserved: extraReserved,
 		// 应用子域会话被吊销时，丢掉 aichat 在该会话下的在手令牌（§4.7 登出即吊销）。
 		OnAppSessionRevoked: func(key string) { ai.RevokeSession(key) },
 	})
+	// 启用应用子域却没有配置对外地址 ⇒ **启动期说清**（R1-sec-1 回归审计加固）：
+	// 换票按**应用基域**推导主站源（`<基域 scheme>://<基域>`），与 edge.MatchHost 的
+	// 「基域主机 == 主站」模型一致 ⇒ 功能不受影响；但推导值不如显式配置可审计，
+	// 所以这里点明建议配置哪一项（现网 .env / compose 的默认都没配，不能因此判成故障）。
+	if baseDomain() != "" && publicMainOrigin() == "" {
+		log.Printf("wasm: 未配置服务端对外地址（控制台设置 server.base_url 或环境变量 %s）；"+
+			"员工换票将按应用基域推导主站源（%s，与「基域主机即主站」的既有模型一致）⇒ "+
+			"换票功能不受影响；建议显式配置对外地址以消除歧义",
+			clientrelease.PublicBaseURLEnv, baseDomain())
+	}
 
 	appSrv, aerr := appserver.New(appserver.Options{
 		DB:                 db,
@@ -406,6 +450,10 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		// 可用内存的来源与数值必须出现在 /readyz 上（R1-rt-1）：这里显式注入与启动自检
 		// **同一个**读取实现，避免"日志读 cgroup、探针读宿主"这种两套口径。
 		MemAvailable: readMemoryAvailability,
+		// 内存档位/理论峰值也必须出现在 /readyz 上（R1-rt-10）：这里注入的是**控制台
+		// 保存后生效的那一份**（limitsHolder.Plan 读的是 h.Get()），因此探针上的
+		// profile/budget 与"实际跑的账"同源 —— 不会出现"界面按档位显示、实际按设置跑"。
+		MemoryPlan: limitsHolder.Plan,
 	})
 
 	api := wasmapi.NewHandlers(wasmapi.Options{
@@ -459,10 +507,84 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 	// HostGate **无条件常挂**：空基域时 MatchHost 对所有主机名返回 HostMain ⇒
 	// ServeHTTP 直接交主站，与"没挂门控"逐字节等价；非空时才把应用子域分流。
 	// Main 由 main.go 在拿到 *gin.Engine 后回填。
-	p.HostGate = &edge.HostGate{BaseDomain: baseDomain, Apps: appSrv}
-	log.Printf("wasm: platform ready (subdomain=%v base_domain=%q source=%s extra_reserved=%d)",
-		baseDomain() != "", baseDomain(), base.Source(), len(extraReserved))
+	// ExtraMainHosts 与员工会话的主站源**同源**：R1-sec-3 之后 MatchHost 把"不是本基域的
+	// 主机名"判成 HostUnknown ⇒ 404（不再回落主站），而"主站 Host ≠ 应用基域"是真实部署
+	// （.env.example 的示例就是基域 apps.example.com、主站 example.com）⇒ 不显式声明
+	// 就会升级后主站/管理台 404。
+	_, baseHostAtStartup := session.ParseBaseDomain(baseDomain())
+	p.HostGate = newHostGate(baseDomain, baseHostAtStartup, appSrv)
+	log.Printf("wasm: platform ready (subdomain=%v base_domain=%q source=%s extra_reserved=%d extra_main_hosts=%v)",
+		baseDomain() != "", baseDomain(), base.Source(), len(extraReserved), p.HostGate.ExtraMainHosts)
 	return p
+}
+
+// newHostGate 构造主机名门控（**唯一装配点**）。
+//
+// 单独成函数的原因：`ExtraMainHosts` 必须与"主站源"**同源**（同一个 extraMainHosts），
+// 而"装配时忘了传这个字段"的后果是主站/管理台静默 404 —— 抽成函数后测试可以直接驱动
+// 生产用的这段装配代码（见 wasmapp_hostgate_test.go），而不是靠人读代码。
+func newHostGate(baseDomain func() string, baseHostAtStartup string, apps edge.AppHandler) *edge.HostGate {
+	return &edge.HostGate{
+		BaseDomain:     baseDomain,
+		Apps:           apps,
+		ExtraMainHosts: extraMainHosts(baseHostAtStartup),
+	}
+}
+
+// extraMainHosts 返回要显式声明"也当主站处理"的额外主机名（edge.HostGate.ExtraMainHosts）。
+//
+// 为什么需要它（R1-sec-3 的配套装配）：edge.MatchHost 现在只认两支 —— 主站（`host == 基域`）
+// 与应用子域（`<label>.<基域>`）；**其余主机名一律 HostUnknown ⇒ 404**（不再回落主站，
+// 否则任意域名都能镜像门户与管理台登录页）。而"主站主机名 ≠ 应用基域"是**真实存在**的部署
+// （server/.env.example 的示例就是基域 `apps.example.com`、主站 `example.com`）⇒ 必须显式
+// 把主站主机名列进来，否则这类部署升级后主站与管理台全部 404。
+//
+// 真源与主站源完全相同，**绝不看请求 Host**（请求 Host 是攻击者可选的，见
+// session.Options.MainOriginResolver 的注释）：
+//   - 对外地址已配置 ⇒ 取它的 host（`PICOAI_PUBLIC_BASE_URL` > 控制台 `server.base_url`）；
+//   - 未配置/不可解析 ⇒ 与 session.ticketNonceDecision 同口径，按**应用基域**推导
+//     （此时清单项与基域相同，MatchHost 的 `h == b` 本来就判主站 —— 留着只是让规则统一，
+//     并让"主站源"只有一份推导口径）；
+//   - 基域也未配置 ⇒ 空清单（MatchHost 全判主站，门控不涉及，行为与升级前逐字节相同）。
+//
+// ⚠️ 这是**启动期快照**：控制台运行期改基域不会更新它。后果可接受（旧主站主机名继续服务主站，
+// 新基域主机名走 `h == b`），但若将来"对外地址"也变成运行期可改、且主站域与基域不同域，
+// 这里要改成函数形式（与 BaseDomain 同形）。
+//
+// ⚠️ 部署约束（要认账）：主站域 ≠ 基域的部署**必须**把对外地址配成主站域 —— 否则本函数
+// 只能推导出基域主机名，真正的主站（例如 .env.example 示例里的主站 `example.com` +
+// 基域 `apps.example.com`）会被 R1-sec-3 的门控 404 掉；而配了主站域之后，换票又会因
+// "对外地址与基域不同域"而拒绝签发票（需显式打开 Options.AllowTicketWithoutNonce）——
+// 那种部署本来也无法安全下发 nonce Cookie。详见 temp/wasm-review-r1/fix-sec1b.md。
+func extraMainHosts(baseHost string) []string {
+	host := configuredMainHost()
+	if host == "" {
+		host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(baseHost)), ".")
+	}
+	if host == "" {
+		return nil
+	}
+	return []string{host}
+}
+
+// configuredMainHost 从**配置的对外地址**里取主机名（空 = 未配置或取不出主机名）。
+//
+// 与 session.configuredMainOrigin 同口径：必须有 scheme（`url.Parse("h.example.com")` 的
+// Host 为空 ⇒ 当作未配置），端口剥掉（Cookie/Host 匹配都不看端口），IPv6 字面量视为不可用。
+func configuredMainHost() string {
+	raw := strings.TrimSpace(publicMainOrigin())
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "" || strings.Contains(host, ":") { // 剩下的 ':' 只可能是 IPv6 字面量
+		return ""
+	}
+	return host
 }
 
 // Close 释放平台资源。

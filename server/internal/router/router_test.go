@@ -108,6 +108,9 @@ func TestNamespaces(t *testing.T) {
 		"GET " + nsClient + "/shared-skills",
 		"GET " + nsClient + "/agent-presets",
 		"GET " + nsClient + "/capabilities",
+		// R1-pm-3：审核结论的作者侧出口（发布者本人的版本历史 + 被拒理由）。
+		// 缺了这条，开启审核 = 作者永远收不到结论（客户端拿不到任何数据）。
+		"GET " + nsClient + "/apps/wasm/:app_id/releases",
 		"POST " + nsServer + "/admin/login",
 		"GET " + nsServer + "/admin/auth/methods",
 		"GET " + nsServer + "/admin/users",

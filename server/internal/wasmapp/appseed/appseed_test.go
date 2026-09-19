@@ -243,3 +243,115 @@ func TestMissingDirIsNotAnError(t *testing.T) {
 		t.Fatal("目录不存在时应返回 nil 播种器（调用方据此跳过）")
 	}
 }
+
+// TestSeedHalfSeededIsHealedAndNeverPointsAtMissingAssets 是 **R1-rt-19** 的护栏。
+//
+// 缺陷现场（旧顺序 `SetWasmAppCurrentRelease` → `writeReleaseAssets`）：资源目录写失败时
+// 库里留下一个**已经指向不存在目录**的应用（子域每请求 500，报"资源目录不可用"），
+// 而播种判据是"库里是否已有该 app_id" ⇒ **重启也不自愈**，只能人工删行。
+//
+// 本用例不用 mock 注入失败，而是制造一个真实的写失败：把 `<dataRoot>/apps` 放成**普通文件**
+// ⇒ MkdirAll 报 ENOTDIR（与磁盘满/只读同一类"写不进去"，见报告 R1-rt-19 的触发条件）。
+//
+// 判据三段（缺一不可）：
+//  1. 失败后：应用行/版本行已落，但 `current_release_id` **必须是 0**（不许指向不存在的目录）；
+//  2. 修好磁盘后**重跑播种必须自愈**：不重建版本，但要补齐资源目录 + 生效版本；
+//  3. 第三次播种完全幂等（全部跳过、无写入）。
+//
+// 变异验证（实测）：把 seedOne 的两个写动作换回旧顺序（先置当前版本、后写资源目录）
+// ⇒ 第 1 段必红（current_release_id ≠ 0）；把 healIncomplete 的调用去掉（退回"存在即跳过"）
+// ⇒ 第 2 段必红（重启后仍是半成品）。
+func TestSeedHalfSeededIsHealedAndNeverPointsAtMissingAssets(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	dataRoot := t.TempDir()
+	dir := writeDemoDir(t)
+
+	// 制造写失败：<dataRoot>/apps 是普通文件 ⇒ 任何 <root>/apps/... 的 MkdirAll 都报 ENOTDIR。
+	appsPath := filepath.Join(dataRoot, "apps")
+	if err := os.WriteFile(appsPath, []byte("占位：不是目录"), 0o644); err != nil {
+		t.Fatalf("制造写失败现场: %v", err)
+	}
+
+	s, err := appseed.New(appseed.Options{DB: db, DataRoot: dataRoot, Dir: dir, Owner: "admin"})
+	if err != nil {
+		t.Fatalf("appseed.New: %v", err)
+	}
+	res, err := s.Seed(ctx)
+	if err != nil {
+		t.Fatalf("单个演示播种失败不该让整次播种报错: %v", err)
+	}
+	if len(res.Seeded) != 0 {
+		t.Fatalf("资源目录写不出去时不得报告播种成功：%v", res.Seeded)
+	}
+	if len(res.Skipped) != 3 {
+		t.Fatalf("三个演示都应记为跳过（附失败原因）：%+v", res.Skipped)
+	}
+
+	// ---- ① 失败后：不置生效版本 ----
+	demos := []string{"demo-public", "demo-login", "demo-whitelist"}
+	for _, appID := range demos {
+		app, gerr := serverstore.GetWasmApp(ctx, db, appID)
+		if gerr != nil {
+			t.Fatalf("失败点之前的应用行应已落库（%s）：%v", appID, gerr)
+		}
+		if app.CurrentReleaseID != 0 {
+			t.Fatalf("%s 在资源目录写失败后 current_release_id=%d（应为 0）：应用指向了一个不存在的"+
+				"资源目录 ⇒ 子域每请求 500（R1-rt-19）", appID, app.CurrentReleaseID)
+		}
+	}
+
+	// ---- ② 修好磁盘后重跑：自愈（补齐资源目录 + 生效版本，不重建版本）----
+	if err := os.Remove(appsPath); err != nil {
+		t.Fatalf("恢复数据根: %v", err)
+	}
+	res, err = s.Seed(ctx)
+	if err != nil {
+		t.Fatalf("二次播种: %v", err)
+	}
+	if len(res.Seeded) != 0 {
+		t.Fatalf("应用行已存在 ⇒ 二次播种不得重新播种（否则版本号会撞唯一约束），得到 %v", res.Seeded)
+	}
+	for _, appID := range demos {
+		app, gerr := serverstore.GetWasmApp(ctx, db, appID)
+		if gerr != nil {
+			t.Fatalf("GetWasmApp(%s): %v", appID, gerr)
+		}
+		if app.CurrentReleaseID <= 0 {
+			t.Fatalf("%s 二次播种后仍没有生效版本（current_release_id=0）：半成品没有自愈 —— "+
+				"这正是「重启不自愈」的现场", appID)
+		}
+		cfgPath := filepath.Join(dataRoot, "apps", appID, "assets",
+			strconv.FormatInt(app.CurrentReleaseID, 10), "picoaide.app.json")
+		raw, rerr := os.ReadFile(cfgPath)
+		if rerr != nil {
+			t.Fatalf("%s 的资源目录没被补齐（%s）：%v", appID, cfgPath, rerr)
+		}
+		if appcfg.AccessOfConfigJSON(string(raw)) == "" {
+			t.Fatalf("%s 补齐的资源目录里配置不可解析：%q", appID, string(raw))
+		}
+		// 版本行不得因为补齐而多出一份（补齐不是"再发一版"）。
+		rels, lerr := serverstore.ListWasmReleases(ctx, db, appID, false)
+		if lerr != nil {
+			t.Fatalf("ListWasmReleases(%s): %v", appID, lerr)
+		}
+		if len(rels) != 1 {
+			t.Fatalf("%s 的版本行数 = %d，应为 1（补齐只写资源目录/生效版本）", appID, len(rels))
+		}
+	}
+
+	// ---- ③ 三次播种：完全幂等 ----
+	res, err = s.Seed(ctx)
+	if err != nil {
+		t.Fatalf("三次播种: %v", err)
+	}
+	if len(res.Seeded) != 0 || len(res.Skipped) != 3 {
+		t.Fatalf("三次播种应全部跳过：seeded=%v skipped=%+v", res.Seeded, res.Skipped)
+	}
+	for _, sk := range res.Skipped {
+		if strings.Contains(sk.Reason, "补齐") {
+			t.Fatalf("%s 第三次播种仍在补齐（补齐不幂等）：%q", sk.AppID, sk.Reason)
+		}
+	}
+}

@@ -410,6 +410,9 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 		guestBudget:    guestBudget,
 		// 生效的单实例上限（R1-rt-7 的文案同源）：错误里说的"多少 MiB"必须是真的。
 		memoryPages: r.memoryPages,
+		// 采样到的内存峰值（R1-e2e-1 的**现场证据**）：Go 运行时 OOM 只留下"退出码 2"，
+		// 要靠"峰值贴近上限"才能把它与"应用自己 os.Exit(2)"区分开。
+		peakMemoryBytes: out.peak,
 	}
 	fatal := out.fatal
 	if fatal == nil {

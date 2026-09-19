@@ -166,14 +166,14 @@ func TestTicketSubmitRejectsMalformedApp(t *testing.T) {
 	}
 
 	// 反向对照：合法 app 正常签发并 302（防"一刀切全禁"）。
-	code := env.issueTicketViaPOST(t, empCookie, "real-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "real-app", "/")
 	if code == "" {
 		t.Fatal("合法 app 必须照常签发票")
 	}
 	// 签出的票能在真实子域上兑换 —— 这才是"票有效"的判据。
 	// （RedeemTicket 只负责写 Cookie 并回干净 URL，最终 302 由 appserver 发。）
 	rec := httptest.NewRecorder()
-	clean, ok := env.mgr.RedeemTicket(rec, requestWithTicket("real-app", code), "real-app")
+	clean, ok := env.mgr.RedeemTicket(rec, requestWithTicket("real-app", code, nonce), "real-app")
 	if !ok {
 		t.Fatal("合法 app 签出的票必须可兑换")
 	}
@@ -247,7 +247,7 @@ func TestTicketSubmitRefusesNonHTTPS(t *testing.T) {
 	}
 
 	// 反向对照：同一账号在 https 下照常签发（否则"一律拒绝"也能假绿）。
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, _ := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 	if code == "" {
 		t.Fatal("https 下必须照常签发票（反向对照）")
 	}
@@ -645,11 +645,11 @@ func TestTicketExpiresAfterTTL(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 
 	env.advance(limits.TicketTTL + time.Second)
 	rec := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); ok {
+	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); ok {
 		t.Fatal("过期票据被接受了")
 	}
 	if len(rec.Result().Cookies()) != 0 {
@@ -666,10 +666,10 @@ func TestTicketUsableJustBeforeTTL(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 	env.advance(limits.TicketTTL - time.Second)
 	rec := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); !ok {
+	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); !ok {
 		t.Fatal("TTL 内的票据被拒了")
 	}
 }
@@ -680,7 +680,7 @@ func TestConcurrentRedeemOnlyOneWins(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 
 	const workers = 64
 	var wg sync.WaitGroup
@@ -693,7 +693,7 @@ func TestConcurrentRedeemOnlyOneWins(t *testing.T) {
 			defer wg.Done()
 			rec := httptest.NewRecorder()
 			<-start
-			if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); ok {
+			if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); ok {
 				mu.Lock()
 				wins++
 				mu.Unlock()
@@ -715,14 +715,14 @@ func TestRedeemReplayRejected(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 
 	first := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(first, requestWithTicket("my-app", code), "my-app"); !ok {
+	if _, ok := env.mgr.RedeemTicket(first, requestWithTicket("my-app", code, nonce), "my-app"); !ok {
 		t.Fatal("首次兑换失败")
 	}
 	second := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(second, requestWithTicket("my-app", code), "my-app"); ok {
+	if _, ok := env.mgr.RedeemTicket(second, requestWithTicket("my-app", code, nonce), "my-app"); ok {
 		t.Fatal("重放票据被接受了")
 	}
 	if len(second.Result().Cookies()) != 0 {
@@ -737,10 +737,10 @@ func TestCrossAppTicketRejected(t *testing.T) {
 	env.newApp(t, "app-a", "alice")
 	env.newApp(t, "app-b", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "app-a", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "app-a", "/")
 
 	rec := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("app-b", code), "app-b"); ok {
+	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("app-b", code, nonce), "app-b"); ok {
 		t.Fatal("跨应用兑换成功了")
 	}
 	if len(rec.Result().Cookies()) != 0 {
@@ -748,7 +748,7 @@ func TestCrossAppTicketRejected(t *testing.T) {
 	}
 	// 票没被烧掉：正确的应用仍然可以兑换。
 	right := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(right, requestWithTicket("app-a", code), "app-a"); !ok {
+	if _, ok := env.mgr.RedeemTicket(right, requestWithTicket("app-a", code, nonce), "app-a"); !ok {
 		t.Fatal("跨应用尝试把票烧掉了（错误的应用不应有权消费他人票据）")
 	}
 }
@@ -758,9 +758,10 @@ func TestRedeemReturnsCleanURL(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/dash?tab=1")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/dash?tab=1")
 
 	r := httpsReq(http.MethodGet, "https://my-app."+testBaseDomain+"/dash?tab=1&ticket="+code, nil)
+	r.AddCookie(nonce) // 同一只浏览器：签发时收到的 nonce（R1-sec-1）
 	rec := httptest.NewRecorder()
 	clean, ok := env.mgr.RedeemTicket(rec, r, "my-app")
 	if !ok {
@@ -779,10 +780,10 @@ func TestAppCookieAttributes(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 
 	rec := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); !ok {
+	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); !ok {
 		t.Fatal("兑换失败")
 	}
 	c := cookieByName(rec.Result().Cookies(), AppCookieName)
@@ -828,7 +829,7 @@ func TestRedeemRefusesNonHTTPS(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, _ := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 
 	r := httpsReq(http.MethodGet, "http://my-app."+testBaseDomain+"/?ticket="+code, nil)
 	rec := httptest.NewRecorder()
@@ -849,13 +850,13 @@ func TestRedeemAfterLogoutFails(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, emp := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 
 	if err := env.mgr.RevokeSession(t.Context(), emp.SessionID); err != nil {
 		t.Fatalf("RevokeSession: %v", err)
 	}
 	rec := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); ok {
+	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); ok {
 		t.Fatal("员工会话已吊销，仍然换出了应用会话")
 	}
 	if n := countRows(t, env, "SELECT count(*) FROM app_sessions"); n != 0 {
@@ -880,9 +881,9 @@ func TestCurrentUserAndSessionKey(t *testing.T) {
 		t.Fatalf("无 Cookie 时 SessionKey = %q", k)
 	}
 
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 	rec := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); !ok {
+	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); !ok {
 		t.Fatal("兑换失败")
 	}
 	appCookie := cookieByName(rec.Result().Cookies(), AppCookieName)
@@ -911,9 +912,9 @@ func TestCurrentUserAndSessionKey(t *testing.T) {
 	}
 
 	// 另一个应用兑换 ⇒ 会话键必须不同（每个 (会话, 应用) 一份）。
-	code2 := env.issueTicketViaPOST(t, empCookie, "other-app", "/")
+	code2, nonce2 := env.issueTicketViaPOST(t, empCookie, "other-app", "/")
 	rec2 := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec2, requestWithTicket("other-app", code2), "other-app"); !ok {
+	if _, ok := env.mgr.RedeemTicket(rec2, requestWithTicket("other-app", code2, nonce2), "other-app"); !ok {
 		t.Fatal("第二个应用兑换失败")
 	}
 	key2 := env.mgr.SessionKey(reqWithCookie(cookieByName(rec2.Result().Cookies(), AppCookieName)), "other-app")
@@ -930,9 +931,9 @@ func TestSessionKeyDiffersPerEmployeeSession(t *testing.T) {
 	keys := map[string]bool{}
 	for i := 0; i < 2; i++ {
 		empCookie, _ := env.loginAs(t, "alice")
-		code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+		code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 		rec := httptest.NewRecorder()
-		if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); !ok {
+		if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); !ok {
 			t.Fatal("兑换失败")
 		}
 		k := env.mgr.SessionKey(reqWithCookie(cookieByName(rec.Result().Cookies(), AppCookieName)), "my-app")
@@ -1012,8 +1013,11 @@ func TestFullTicketFlowFromAppSubdomainToCleanURL(t *testing.T) {
 	}
 
 	// ⑥ 子域兑换 ⇒ 干净 URL + Cookie。
+	redeemBrowser := httpsReq(http.MethodGet, loc, nil)
+	// 同一只浏览器：带上 ⑤ 那次签发响应下发的 nonce（R1-sec-1 的浏览器持有性证明）。
+	redeemBrowser.AddCookie(cookieByName(issue.Result().Cookies(), TicketNonceCookieName))
 	redeem := httptest.NewRecorder()
-	clean, ok := env.mgr.RedeemTicket(redeem, httpsReq(http.MethodGet, loc, nil), "my-app")
+	clean, ok := env.mgr.RedeemTicket(redeem, redeemBrowser, "my-app")
 	if !ok {
 		t.Fatal("兑换失败")
 	}
@@ -1078,9 +1082,9 @@ func TestRevokeNotifiesAppSessionHook(t *testing.T) {
 
 	want := map[string]bool{}
 	for _, appID := range []string{"app-a", "app-b"} {
-		code := env.issueTicketViaPOST(t, empCookie, appID, "/")
+		code, nonce := env.issueTicketViaPOST(t, empCookie, appID, "/")
 		rec := httptest.NewRecorder()
-		if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket(appID, code), appID); !ok {
+		if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket(appID, code, nonce), appID); !ok {
 			t.Fatalf("%s 兑换失败", appID)
 		}
 		want[env.mgr.SessionKey(reqWithCookie(cookieByName(rec.Result().Cookies(), AppCookieName)), appID)] = true
@@ -1115,8 +1119,8 @@ func TestAuditPanicDoesNotCrash(t *testing.T) {
 	})
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
-	if _, ok := env.mgr.RedeemTicket(httptest.NewRecorder(), requestWithTicket("my-app", code), "my-app"); !ok {
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	if _, ok := env.mgr.RedeemTicket(httptest.NewRecorder(), requestWithTicket("my-app", code, nonce), "my-app"); !ok {
 		t.Fatal("兑换失败")
 	}
 	deadline := time.Now().Add(2 * time.Second)

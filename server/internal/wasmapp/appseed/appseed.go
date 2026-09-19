@@ -155,6 +155,10 @@ func (s *Seeder) Demos() []Demo {
 }
 
 // Seed 播种全部缺失的演示应用；已存在（含已删除/已冻结）的一律跳过。
+//
+// 唯一的例外是**半成品**（库里已存在、但资源目录或生效版本缺一项）：那是上一次播种
+// 中途失败的残留，只跳过就会永久留着（重启不自愈）⇒ 这里补齐（见 healIncomplete）。
+// 已软删/已冻结的演示**不补**（"删了不再回来"是产品语义）。
 func (s *Seeder) Seed(ctx context.Context) (Result, error) {
 	var res Result
 	if s == nil {
@@ -166,11 +170,24 @@ func (s *Seeder) Seed(ctx context.Context) (Result, error) {
 			res.Skipped = append(res.Skipped, SkipReason{d.AppID, "app_id 非法（清单错误）"})
 			continue
 		}
-		if _, err := serverstore.GetWasmApp(ctx, s.opt.DB, appID); err == nil {
+		existing, err := serverstore.GetWasmApp(ctx, s.opt.DB, appID)
+		switch {
+		case err == nil:
 			// 存在即跳过：**这是"删了不再回来"的实现**（软删的行仍存在）。
-			res.Skipped = append(res.Skipped, SkipReason{appID, "已存在（含已删除/已冻结）"})
+			reason := "已存在（含已删除/已冻结）"
+			healed, herr := s.healIncomplete(ctx, appID, existing)
+			if herr != nil {
+				// 补齐失败如实记录（与播种失败同一处置：不阻断其它演示）。
+				res.Skipped = append(res.Skipped, SkipReason{appID, "补齐半成品失败: " + herr.Error()})
+				continue
+			}
+			if healed {
+				reason = "已存在；补齐了缺失的资源目录/生效版本"
+				s.logger("appseed: 已补齐内置演示应用 %s 的半成品（资源目录/生效版本）", appID)
+			}
+			res.Skipped = append(res.Skipped, SkipReason{appID, reason})
 			continue
-		} else if !errors.Is(err, serverstore.ErrNotFound) {
+		case !errors.Is(err, serverstore.ErrNotFound):
 			res.Skipped = append(res.Skipped, SkipReason{appID, "查询失败: " + err.Error()})
 			continue
 		}
@@ -252,24 +269,110 @@ func (s *Seeder) seedOne(ctx context.Context, d Demo, appID string) error {
 	if err != nil {
 		return fmt.Errorf("写版本行: %w", err)
 	}
-	if err := serverstore.SetWasmAppCurrentRelease(ctx, s.opt.DB, appID, relID); err != nil {
-		return fmt.Errorf("指向当前版本: %w", err)
-	}
 	// 资源目录：应用子域管线按 <data_root>/apps/<app_id>/assets/<release_id>/ 推导，
 	// **缺了直接 500**（不是可选项）。演示应用把配置写进去（应用自己 assets.read 读它）。
+	//
+	// ⚠️ 顺序是不变量（R1-rt-19）：**资源目录先写、失败则不置当前版本** —— 与
+	// api/publish.go 的同一条顺序一致（"否则会有一个窗口让应用指向一个资源目录还不存在的
+	// 版本"）。反过来写会留下指向不存在目录的应用：子域每请求 500，而且播种判据是
+	// "库里是否已有该 app_id" ⇒ 重启也不自愈。
+	//
+	// 两个写动作都不建新版本：资源目录写失败 ⇒ 应用行/版本行已在，下次播种由
+	// healIncomplete 补齐（幂等，不需要人工删行）。
 	if err := writeReleaseAssets(s.opt.DataRoot, appID, relID, cfgJSON); err != nil {
 		return err
+	}
+	if err := serverstore.SetWasmAppCurrentRelease(ctx, s.opt.DB, appID, relID); err != nil {
+		return fmt.Errorf("指向当前版本: %w", err)
 	}
 	return nil
 }
 
+// healIncomplete 补齐"库里已存在、但处于半成品"的演示应用（R1-rt-19 的自愈那一半）。
+//
+// 半成品只有两种形态（其余一律不碰）：
+//
+//	A. 没有生效版本（current_release_id = 0）：旧顺序在"置当前版本"之后写资源目录失败
+//	   ⇒ 库里留着应用行 + approved 版本行，却没有指向它的当前版本。旧实现按"存在即跳过"
+//	   会把这份半成品永久留着（子域 404/500，重启也不变）。
+//	B. 有生效版本，但资源目录（或目录里的 picoaide.app.json）不在：应用子域按"最新
+//	   approved 版本"推导目录 ⇒ 每请求 500。数据盘被换过、目录被手工删掉都会落到这一支。
+//
+// 补齐动作为什么安全（幂等、只碰自己的东西）：
+//   - 只认 checksum 与**本次随安装的演示制品逐字节相同**的版本行（s.sum）——app_id 被别人
+//     占用/被重新发布的情况下一律不碰（判断依据是内容，不是名字）；
+//   - 只做两件事：写回资源目录（应用配置来自该版本行）+ 在没有生效版本时把它指过去，
+//     不建新版本、不改配置、不写审计；
+//   - 资源目录**已经在**就一个字节都不写（idempotent：二次播种只跳过）。
+//
+// 返回值：healed 表示"真的动了手"（用于日志/用例）；err 只在 IO/DB 失败时非 nil。
+func (s *Seeder) healIncomplete(ctx context.Context, appID string, app *serverstore.WasmApp) (bool, error) {
+	if app == nil || app.DeletedAt != nil || app.FrozenAt != nil {
+		// 软删 = "删了不再回来"；冻结 = 管理员的只读处置。两者都不是"半成品"，不补。
+		return false, nil
+	}
+	relID := app.CurrentReleaseID
+	if relID <= 0 {
+		// A：找我们这一版（演示版本号固定 defaultVersion），并核对制品指纹与审核态。
+		rel, err := serverstore.GetWasmRelease(ctx, s.opt.DB, appID, defaultVersion)
+		switch {
+		case errors.Is(err, serverstore.ErrNotFound):
+			return false, nil // 同名应用不是我们播的：不碰
+		case err != nil:
+			return false, fmt.Errorf("查演示版本行: %w", err)
+		}
+		if rel.Status != serverstore.ReleaseStatusApproved || rel.Checksum != s.sum {
+			return false, nil // 状态/制品不是随安装的这一份：不碰
+		}
+		relID = rel.ID
+		if !releaseAssetsPresent(s.opt.DataRoot, appID, relID) {
+			if err := writeReleaseAssets(s.opt.DataRoot, appID, relID, rel.ConfigJSON); err != nil {
+				return false, err
+			}
+		}
+		// 资源目录就位后才置生效版本（同一不变量）。
+		if err := serverstore.SetWasmAppCurrentRelease(ctx, s.opt.DB, appID, relID); err != nil {
+			return false, fmt.Errorf("指向当前版本: %w", err)
+		}
+		return true, nil
+	}
+
+	// B：有生效版本时先确认"生效的那一版"确实是我们的制品（判据 = 最新 approved 版本
+	// 既是当前版本、checksum 又与随安装的演示一致）。
+	rel, err := serverstore.LatestApprovedWasmReleaseMeta(ctx, s.opt.DB, appID)
+	if err != nil || rel == nil || rel.ID != relID || rel.Checksum != s.sum {
+		return false, nil
+	}
+	if releaseAssetsPresent(s.opt.DataRoot, appID, relID) {
+		return false, nil // 完整：跳过（不写任何字节）
+	}
+	if err := writeReleaseAssets(s.opt.DataRoot, appID, relID, rel.ConfigJSON); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// releaseAssetsPresent 判断版本的资源目录里有没有应用配置（= 应用子域准入路径要读的那份）。
+//
+// 判据取**文件**而不是目录：目录在、配置不在时，loadAppConfig 同样是 500（"资源目录不可用"），
+// 所以"目录存在"不足以判定完整。
+func releaseAssetsPresent(dataRoot, appID string, relID int64) bool {
+	fi, err := os.Stat(releaseAssetsConfigPath(dataRoot, appID, relID))
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// releaseAssetsConfigPath 返回版本资源目录里应用配置的路径（唯一推导点，写与判据共用）。
+func releaseAssetsConfigPath(dataRoot, appID string, relID int64) string {
+	return filepath.Join(dataRoot, limits.AppsDirName, appID, assets.AssetsDirName,
+		strconv.FormatInt(relID, 10), limits.AppConfigFileName)
+}
+
 // writeReleaseAssets 写出版本的资源目录（只放应用配置；演示应用没有额外的静态资源）。
 func writeReleaseAssets(dataRoot, appID string, relID int64, cfgJSON string) error {
-	dir := filepath.Join(dataRoot, limits.AppsDirName, appID, assets.AssetsDirName, strconv.FormatInt(relID, 10))
-	if err := os.MkdirAll(dir, os.FileMode(limits.DataDirMode)); err != nil {
+	cfgPath := releaseAssetsConfigPath(dataRoot, appID, relID)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), os.FileMode(limits.DataDirMode)); err != nil {
 		return fmt.Errorf("创建资源目录: %w", err)
 	}
-	cfgPath := filepath.Join(dir, limits.AppConfigFileName)
 	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o644); err != nil {
 		return fmt.Errorf("写应用配置: %w", err)
 	}
