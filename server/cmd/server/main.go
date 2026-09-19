@@ -592,6 +592,15 @@ type productionDeps struct {
 // （gin 在注册路由时快照当前中间件链；顺序反了会让 panic 不返回 JSON 信封、
 // 也没有访问日志 —— 见 installAPIMiddleware 的注释与审计 P1-2）。
 func registerProductionRoutes(r *gin.Engine, d productionDeps) {
+	// 装配期 fail-fast(2026-09-19 审计):Ready 的失效形态与 Wasm/WasmSession
+	// **不同** —— 后两者为 nil 时 router 整片不注册(路由表上直接看得出来,已有
+	// 差集断言兜着),而 /readyz 是**无条件**注册的:`gin.WrapH(nil)` 在注册期
+	// 不 panic,于是漏填会变成"每个探针请求 panic → Recovery → 500 INTERNAL",
+	// 而路由表、--version、启动日志全都正常,只表现为"健康检查一直红"。
+	// 这种"静默降级成 500"的装配错误必须在启动期就炸掉,不能留给运行期。
+	if d.Ready == nil {
+		panic("registerProductionRoutes: productionDeps.Ready 为 nil —— /readyz 会每个请求 panic→500;生产应传 wasmPlat.Checker.Handler()")
+	}
 	// 工程化重构(2026-09): 全部 API 路由集中在 internal/router 包声明 ——
 	// /api/server(管理面) + /api/client/v2(员工面),旧命名空间(/api、/v1、
 	// /v2/api、/v2/v1)迁移后不再注册。
