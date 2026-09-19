@@ -13,6 +13,7 @@ import {
   PACKAGED_WEB_BRAND_FAVICON,
   PACKAGED_WEB_BRAND_OFFICIAL,
   REQUIRED_PACKAGED_RUNTIME_ENTRIES,
+  REQUIRED_ASAR_EXPORTS,
   REQUIRED_UNPACKED_RUNTIME_ENTRIES,
   REQUIRED_MACOS_UNIVERSAL_ENTRIES,
   nativeAddonPlatformPackages,
@@ -72,7 +73,11 @@ const REQUIRED_ASAR_EXPORT_PATHS = [
   'node_modules/@picoaide/dsh-enterprise/lib/channel-sync.js',
   'node_modules/@picoaide/dsh-enterprise/lib/invariant.js',
   'node_modules/@picoaide/dsh-enterprise/package.json',
-  'node_modules/@picoaide/dsh-connectors/lib/sales-easy.js',
+  // ⚠️ 下面这张表是 `completeArchiveEntries()` 搭夹具用的**本地拷贝**，真源是脚本里的
+  // `REQUIRED_ASAR_EXPORTS`（已导出）。2026-09-19 之前两份没有一致性守卫，而且这里多出过一条
+  // 早就删掉的 `dsh-connectors/lib/sales-easy.js`（磁盘上不存在、connectors 也没这个导出）——
+  // 于是"往本地拷贝补假条目"就能让覆盖性用例假绿。现在由
+  // 'keeps the local export-path mirror identical to the production table' 逐字守住。
   'node_modules/@picoaide/dsh-connectors/lib/client.js',
   'node_modules/@picoaide/dsh-connectors/package.json',
 ]
@@ -543,6 +548,121 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       expect([...manifest]
         .filter(entry => entry.startsWith(prefix))
         .filter(entry => !files.includes(entry.slice(prefix.length)))).toEqual([])
+    })
+  })
+
+  describe('self-owned plugin runtime coverage (P2)', () => {
+    // P2(2026-09-19):`verify:closure` 只走 `@deepseek-ai/*`
+    // (scripts/runtime-closure.mjs:3 的 FIRST_PARTY_PREFIX),而桌面包 dependencies 里有 6 个
+    // `@picoaide` 包 —— 此前只有 connectors / enterprise 在 REQUIRED_ASAR_EXPORTS 里被点名,
+    // 另外 4 个(account-card / browser / cron / wasm-apps)**没有任何门禁**保证它们进了 app.asar。
+    // 同族事故已发生过:dsh-memory-evolve 的 skills/ 被 files 排除规则静默丢出包。
+    // 这里用**依赖表**当期望来源:新增一个自有插件依赖而不补清单即红(而不是靠人记得补)。
+    //
+    // 复验(2026-09-19)实测的两个假绿口子已堵:
+    //  1. 有效清单改为读**生产表** `REQUIRED_ASAR_EXPORTS`(脚本真源),不再读 spec 本地拷贝
+    //     —— 本地拷贝另由下面的逐字守卫对齐;
+    //  2. 依赖集合 = `dependencies` ∪ `optionalDependencies` —— 自有插件不许靠 optional 蒙过去。
+    function desktopManifest(): {
+      dependencies?: Record<string, string>
+      optionalDependencies?: Record<string, string>
+    } {
+      const manifestPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
+      return JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+        dependencies?: Record<string, string>
+        optionalDependencies?: Record<string, string>
+      }
+    }
+
+    function picoaideDependencies(): string[] {
+      const manifest = desktopManifest()
+      return [...new Set([
+        ...Object.keys(manifest.dependencies ?? {}),
+        ...Object.keys(manifest.optionalDependencies ?? {}),
+      ])].filter(name => name.startsWith('@picoaide/'))
+    }
+
+    /** 该包自己声明的入口(相对包根):main + exports 的每个目标 + 固定的两份。 */
+    function declaredEntriesFor(dep: string): Set<string> {
+      const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'node_modules', dep)
+      const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as {
+        main?: string
+        exports?: unknown
+      }
+      const declared = new Set<string>(['package.json', 'cordis.patch.yml'])
+      const add = (value: unknown): void => {
+        if (typeof value === 'string') {
+          declared.add(value.replace(/^\.\//u, ''))
+          return
+        }
+        if (value !== null && typeof value === 'object') {
+          for (const nested of Object.values(value)) add(nested)
+        }
+      }
+      if (typeof manifest.main === 'string') add(manifest.main)
+      add(manifest.exports)
+      return declared
+    }
+
+    it('asserts every @picoaide dependency owns required runtime entries', () => {
+      const deps = picoaideDependencies()
+      // 防"依赖表读空/读错"的假绿:桌面包当前有 6 个自有插件依赖。
+      expect(deps.length).toBeGreaterThanOrEqual(6)
+      // 有效清单是**两张生产表**的并集:connectors / enterprise 走 specifier+archivePath 的
+      // REQUIRED_ASAR_EXPORTS(脚本真源),其余自有包走扁平清单。
+      const entries = new Set<string>([
+        ...REQUIRED_PACKAGED_RUNTIME_ENTRIES,
+        ...REQUIRED_ASAR_EXPORTS.map(entry => entry.archivePath),
+      ])
+      for (const dep of deps) {
+        const prefix = `node_modules/${dep}/`
+        const owned = [...entries].filter(entry => entry.startsWith(prefix))
+        // 只要求"至少一条"等于空转(塞一个无关文件也能过) ⇒ 要求 package.json + 至少一个 lib/ 产物。
+        expect(owned, `${dep} 没有任何打包断言条目`).toContain(`${prefix}package.json`)
+        const libEntries = owned.filter(entry => entry.startsWith(`${prefix}lib/`))
+        expect(libEntries.length, `${dep} 没有 lib/ 产物条目`).toBeGreaterThan(0)
+        // 条目必须"是真的":每个 lib/ 路径都要是该包 package.json 里声明的入口
+        // (main 或 exports 的某个目标)—— 往清单里塞假路径即红,不必等到 afterPack。
+        const declared = declaredEntriesFor(dep)
+        for (const entry of libEntries) {
+          const relative = entry.slice(prefix.length)
+          expect([...declared], `${dep} 的断言条目 ${relative} 不在该包声明的入口里(main/exports)`)
+            .toContain(relative)
+        }
+      }
+    })
+
+    it('keeps the local export-path mirror identical to the production table', () => {
+      // 本地拷贝只用于搭夹具(completeArchiveEntries),但它一旦与生产表漂移,夹具就会替假条目背书
+      // (复验 B2:往本地拷贝补两行假条目 ⇒ 覆盖性用例绿)。双向比较:缺项、多项都红。
+      expect([...REQUIRED_ASAR_EXPORT_PATHS].sort()).toEqual(
+        REQUIRED_ASAR_EXPORTS.map(entry => entry.archivePath).sort(),
+      )
+    })
+
+    it('does not let a @picoaide plugin hide in optionalDependencies', () => {
+      // optionalDependencies 同样会被 electron-builder 打进包;自有插件若只写在这里,
+      // 安装失败不会让构建红 —— 所以它必须既被断言、也不能只出现在 optional 里。
+      const manifest = desktopManifest()
+      const optional = Object.keys(manifest.optionalDependencies ?? {})
+        .filter(name => name.startsWith('@picoaide/'))
+      for (const dep of optional) {
+        expect(Object.keys(manifest.dependencies ?? {})).toContain(dep)
+      }
+    })
+
+    it('names the wasm apps client face and its profile patch explicitly', () => {
+      // wasm-apps 是 2026-09-18 建立的自有插件,此前连"存在性"都没被断言;
+      // cordis.patch.yml 是桌面 profile 组装期要读的那一份(src/profile.ts 的
+      // WASM_APPS_PATCH_PATH),缺了它那一行插件整块不装配。
+      for (const entry of [
+        'node_modules/@picoaide/dsh-wasm-apps/lib/client.js',
+        'node_modules/@picoaide/dsh-wasm-apps/lib/index.js',
+        'node_modules/@picoaide/dsh-wasm-apps/package.json',
+        'node_modules/@picoaide/dsh-wasm-apps/cordis.patch.yml',
+      ]) {
+        expect(REQUIRED_PACKAGED_RUNTIME_ENTRIES).toContain(entry)
+      }
     })
   })
 

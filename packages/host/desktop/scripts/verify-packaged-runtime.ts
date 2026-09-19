@@ -104,6 +104,47 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   // 每个文件、且不得留死条目」用例会自动要求这次同步 —— 源目录里没有它了，清单里也
   // 就不能再有它。要核对它随镜像分发，改看 scripts/ci-build-channel-images.sh 的
   // verify_image（镜像内断言 /opt/picoaide/skills/app-builder/SKILL.md）。
+  //
+  // 自有插件（@picoaide/*）必须随包（P2，2026-09-19）。它们**不在** `verify:closure` 的
+  // 覆盖里：`scripts/runtime-closure.mjs:3` 的 `FIRST_PARTY_PREFIX = '@deepseek-ai/'` 只走
+  // 上游包，而 desktop 的 `dependencies` 里有 6 个 `@picoaide` 包 —— 也就是说这 4 个包
+  // （account-card / browser / cron / wasm-apps）此前**没有任何门禁**保证它们进了 app.asar，
+  // 只有 connectors / enterprise 在 REQUIRED_ASAR_EXPORTS 里被点名。同类事故已经发生过：
+  // `dsh-memory-evolve` 的 skills/ 被 `files` 排除规则静默丢出包（2026-09-16 修复）。
+  //
+  // 路径形状依据（逐条落在磁盘上的真实产物上核对，2026-09-19）：
+  //   - account-card / browser / cron 的这 5 条在 2026-09-16 打出的 v2.7.5-beta.1
+  //     app.asar（`dist/linux-unpacked/resources/app.asar`）里逐条存在；
+  //   - `@picoaide/dsh-wasm-apps` 建立（2026-09-18）晚于那份产物 ⇒ 它的 5 条**只**在磁盘上
+  //     确认过（packages/client/wasm-apps 的 lib/ 产物 + package.json + cordis.patch.yml，
+  //     与其余 5 个自有包的形状一致），**尚未经真实 app.asar 验证**：下一次打包后请复跑
+  //     verify-packaged-runtime（afterPack 会逐条断言）。
+  //   - 为什么这 5 条：`package.json` + `cordis.patch.yml` 是桌面 profile 在组装期用
+  //     `createRequire(...).resolve('@picoaide/<pkg>/package.json')` 拼绝对路径读的两份
+  //     （src/profile.ts），`lib/index.js` / `lib/client.js` / `lib/invariant.js` 是各包
+  //     声明的入口；缺任何一条都表现为"那一行插件整块不装配"，且只在组装期可见。
+  //   - 覆盖这几包的用例在 tests/verify-packaged-runtime.spec.ts 的
+  //     「every @picoaide dependency is asserted」：新增自有插件依赖而不补清单即红。
+  'node_modules/@picoaide/dsh-account-card/lib/index.js',
+  'node_modules/@picoaide/dsh-account-card/lib/client.js',
+  'node_modules/@picoaide/dsh-account-card/lib/invariant.js',
+  'node_modules/@picoaide/dsh-account-card/package.json',
+  'node_modules/@picoaide/dsh-account-card/cordis.patch.yml',
+  'node_modules/@picoaide/dsh-browser/lib/index.js',
+  'node_modules/@picoaide/dsh-browser/lib/client.js',
+  'node_modules/@picoaide/dsh-browser/lib/invariant.js',
+  'node_modules/@picoaide/dsh-browser/package.json',
+  'node_modules/@picoaide/dsh-browser/cordis.patch.yml',
+  'node_modules/@picoaide/dsh-cron/lib/index.js',
+  'node_modules/@picoaide/dsh-cron/lib/client.js',
+  'node_modules/@picoaide/dsh-cron/lib/invariant.js',
+  'node_modules/@picoaide/dsh-cron/package.json',
+  'node_modules/@picoaide/dsh-cron/cordis.patch.yml',
+  'node_modules/@picoaide/dsh-wasm-apps/lib/index.js',
+  'node_modules/@picoaide/dsh-wasm-apps/lib/client.js',
+  'node_modules/@picoaide/dsh-wasm-apps/lib/invariant.js',
+  'node_modules/@picoaide/dsh-wasm-apps/package.json',
+  'node_modules/@picoaide/dsh-wasm-apps/cordis.patch.yml',
 ] as const
 
 /** Physical entries that Electron cannot load from ASAR (native binaries). */
@@ -580,12 +621,20 @@ function tryListArchive(archivePath: string, list: ArchiveLister): ReadonlySet<s
  * @returns Nothing; failure rejects missing exports and paths outside app.asar.unpacked.
  */
 /** One required export specifier plus the archive path that answers it. */
-interface RequiredExport {
+export interface RequiredExport {
   readonly specifier: string
   readonly archivePath: string
 }
 
-const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
+/**
+ * 自有（@picoaide/*）与桌面自身导出面的**生产门禁表**（specifier + 它在包内的落点）。
+ *
+ * 导出它（2026-09-19）是为了让 tests/verify-packaged-runtime.spec.ts 能**直接读真源**：
+ * 复验实测，测试里那份本地拷贝（`REQUIRED_ASAR_EXPORT_PATHS`）此前既没有一致性守卫、
+ * 又比这张表多一条早已不存在的 `dsh-connectors/lib/sales-easy.js` —— 往本地拷贝里补假条目
+ * 就能让"每个 @picoaide 依赖都被断言"的覆盖性用例假绿。现在测试同时断言两张表逐字相等。
+ */
+export const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   // The desktop package is the application root (asar /lib, /package.json),
   // not a node_modules entry; its exports resolve from the archive root.
   { specifier: 'dsh-plugin-desktop', archivePath: 'lib/index.js' },
