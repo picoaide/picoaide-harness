@@ -35,7 +35,9 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign as edSign } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { atomicWriteFile } from './atomic-write.ts'
+// 原子替换走上游 `@deepseek-ai/dsh-atomic-write`（2026-09-20 W6/W7 切换，见设计总纲 §16.1）：
+// 包内不再有本地助手；权限位由调用点逐处声明（上游 API 的 mode 必填就是这个用意）。
+import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 
 /** 平台签发端点（§23.1 冻结路径）。 */
 export const APP_PROOF_PATH = '/api/client/v2/apps/wasm/proof'
@@ -199,9 +201,9 @@ export function createInstallKeyStore(options: InstallKeyStoreOptions): InstallK
         encrypted: encrypt,
         private_key: encrypt ? storage.encryptString(key.privateKeyPem).toString('base64') : key.privateKeyPem,
       })
-      // 原子替换 + 0600（唯一助手，见 atomic-write.ts 的偏离声明）：半写的密钥文件
-      // 比没有密钥更糟（启动自检会把它当损坏，用户表现为"应用功能不可用"）。
-      await atomicWriteFile(file, body)
+      // 原子替换 + 0600/0700（上游 `writeFileAtomic`：`wx` 临时兄弟 + rename）：
+      // 半写的密钥文件比没有密钥更糟（启动自检会把它当损坏，用户表现为"应用功能不可用"）。
+      await writeFileAtomic(file, body, { mode: 0o600, dirMode: 0o700 })
     },
   }
 }

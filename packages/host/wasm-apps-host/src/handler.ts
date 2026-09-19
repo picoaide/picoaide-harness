@@ -40,6 +40,7 @@ import {
 import { hostCopy, type HostLocale } from './locale.ts'
 import { AI_CHAT_PATH, AI_CHAT_SSE_HEADERS, type AiChatOutcome } from './ai-chat.ts'
 import { APP_PROOF_HEADER } from './app-proof.ts'
+import { isReservedHostPath } from './host-request.ts'
 import {
   appErrorPage,
   invalidRequestPage,
@@ -193,7 +194,11 @@ export function createAppSchemeHandler(
     // §21.2 规则②③（R2-X-3）：其余 `__picoaide/*` 一律 **404**，**绝不**当普通应用
     // 请求转发平台 —— 否则"保留路径"就成了一句空话（转发出去等于把宿主内部命名空间
     // 暴露成应用可探测/可打穿的面，且平台会把它当应用自己的路径处理）。
-    if (url.path.startsWith('/__picoaide/') && url.path !== AI_CHAT_PATH) {
+    //
+    // R2-L2-3：**`/__picoaide`（无尾斜杠）也是保留面**。只判 `startsWith('/__picoaide/')`
+    // 会把该形态漏进"普通应用请求"分支（转发平台）。判据集中在
+    // {@link isReservedHostPath}，与服务端 `reservedPathPrefix` 的口径一致（两端一起改）。
+    if (isReservedHostPath(url.path) && url.path !== AI_CHAT_PATH) {
       warn(`pico-wasm-apps-host: refused a reserved host path (${url.path.slice(0, 80)})`)
       return new Response(JSON.stringify({ error: { code: 'NOT_FOUND', message: 'no such host bridge' } }), {
         status: 404,

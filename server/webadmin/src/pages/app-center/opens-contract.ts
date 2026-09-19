@@ -4,15 +4,32 @@
  * 这个文件是 webadmin 侧的唯一真源：路径、类型、形状守卫、降级分类与聚合口径。
  * 页面（`OpensBoard` / `Apps` / 详情抽屉两个面板）只做渲染与编排，不再各写一份。
  *
- * ## 对 L1 的契约依赖（缺任一条 ⇒ 前端**降级并显式提示**，绝不显示 0）
+ * ## 对服务端的契约依赖（**逐字来自设计 §5.1c**；缺任一条 ⇒ 前端**降级并显式提示**，绝不显示 0）
+ *
+ * ⚠️ 这一节以前是"前端自己钉的字面量"：服务端把键写在 `admin_opens.go` 的 `gin.H{}`、
+ * 前端把契约写在本注释里，**两侧都没读到对方** ⇒ 真实环境看板不出数（A2-L6 第二轮审计
+ * **R2-L6-1/R2-L6-2，P1**）。现在**唯一权威 = 设计 §5.1c**，并由
+ * [`opens-contract-parity.spec.ts`](./opens-contract-parity.spec.ts) **读 Go 侧源码**
+ * （`serverstore` 的 json tag + `admin_opens.go` 的响应键）与本文件的 `interface` 声明
+ * **逐键对拍（集合相等）**。**改这里任何一个键名都必须同时改 Go 侧**，否则对拍用例立刻变红
+ * —— 各用各的夹具（章程 §3「各钉自己的字面量」）正是这次漏检的原因。
  *
  * ① 列表列 + 运营看板（跨应用聚合，`capability:read`）：
- *    `GET /api/server/admin/wasm-apps/opens/summary?days=<1..365>&top=<1..50>`
- *    200 `{days, top, today:{day,pv,uv}, totals:{pv,uv}, trend:[{day,pv,uv}…],
- *         apps:[{app_id,today_pv,today_uv,window_pv,window_uv}…],
- *         top_apps:[{app_id,title,pv,uv}…], detail_retention_days}`
- *    - 数据源 = `wasm_app_opens_daily`（日汇总，长期保留）；`uv` = 服务端**按窗口去重**。
- *    - 数组恒为数组（空就空，不要 null/omit）—— 契约 §5.1 同款纪律。
+ *    `GET /api/server/admin/wasm-apps/opens/summary?days=&top=`
+ *    200 `{from,to,days,top,capped,detail_retention_days,
+ *         today:{day,pv,uv}, totals:{pv,uv}, trend:[{day,pv,uv}…],
+ *         apps:[{app_id,title,today_pv,today_uv,window_pv,window_uv}…],
+ *         top_apps:[{app_id,title,pv,uv}…]}`
+ *    - **读源（§5.1c A，双读源是有意的，不是 bug）**：`apps[]`/`today`/`totals` 读**明细表**
+ *      `wasm_app_opens`（与 §5.1b 的 `opens.today` 同源，保证"本次调用计数在内"）；
+ *      `trend[]` 读**日汇总** `wasm_app_opens_daily`（长期保留，明细 90 天过期后曲线不断档）。
+ *    - `uv` = `count(DISTINCT user_id)`（§5.1c A 的硬约束）：**禁止**把逐日 `uv` 相加、
+ *      **禁止**把各应用 `uv` 相加（同一个人开两个应用会重复计）⇒ `totals.uv` / `today.uv`
+ *      只能取服务端那一次**不带 `GROUP BY app_id`** 的聚合值。
+ *    - `capped=true`：请求窗口长于明细保留期 ⇒ 服务端收敛到保留期并如实回报，界面必须显示。
+ *    - `title` 来自应用登记表；**查不到就是空串**（界面回落显示 `app_id`），不得编造。
+ *    - 三个数组与 `today`/`totals` **恒在**（空就空数组/零值）⇒ 前端据此区分
+ *      "端点不支持"与"确实是 0"。
  * ② 应用详情（**设计已冻结的路径**，契约 §8.9 管理端出口 ④，`capability:read`）：
  *    `GET /api/server/admin/wasm-apps/:app_id/opens?from=YYYY-MM-DD&to=YYYY-MM-DD&granularity=day|dept`
  *    200 `{app_id, from, to, granularity, points:[{app_id,day,dept_id,pv,uv}…],
@@ -27,13 +44,18 @@
  *        显示 `#<id>`，不伪造名字。
  *      · `total_uv` = 按 (日 × 部门) 去重后**加总**，不是区间去重人数（见
  *        `OPENS_DETAIL_UV_SUM_NOTE`）。
- * ③ AI 用量（§21.4，`usage` 表加应用维度 = 新迁移 0076，`capability:read`）：
- *    `GET /api/server/admin/wasm-apps/:app_id/ai-usage?from=&to=`
- *    200 `{app_id, calls, prompt_tokens, completion_tokens, total_tokens, cost,
- *         points:[{day,calls,tokens,cost}…]}`
+ *    - **窗口不得静默退化**（§5.1c C / R2-L6-3）：服务端回落的窗口**必须回显 `from`/`to`**，
+ *      前端**必须渲染出来**；「全部（长期日汇总）」档必须**显式请求 90 天窗口**。
+ * ③ AI 用量（§21.4 / §5.1c B，`capability:read`）：
+ *    `GET /api/server/admin/wasm-apps/:app_id/ai-usage?days=|from=&to=`
+ *    200 `{app_id, from, to,
+ *         days:[{day,requests,prompt_tokens,completion_tokens,cache_prompt_tokens,cost}…],
+ *         total:{同结构}, attribution_available}`
+ *    - **必须消费 `attribution_available`**（§5.1c B + §21.4）：`false` ⇒ 渲染
+ *      "统计尚未上线/无归因"；`true` 且全零 ⇒ 渲染"确实零调用"。
+ *      **两者数字都是 0、含义相反，合并渲染即违反 §21.4。**
  *    - 归因来自客户端出站头 `X-Pico-App-Id`（只有客户端会话链路才记录；伪造头忽略 + warn）。
- *    - 老客户端不带该头 ⇒ **归因缺失但计费正常**（§21.4 认账）⇒ 面板必须能表达
- *      "还没有归因数据"，不能把缺失渲染成"0 次调用"。
+ *    - 老客户端不带该头 ⇒ **归因缺失但计费正常**（§21.4 认账）。
  * ④ 计数是 best-effort：接口失败/计数异常**不影响打开**（§5.1b）；管理端同理 ——
  *    拿不到数据就显示"不可用"。
  */
@@ -58,6 +80,15 @@ export function aiUsagePath(appId: string, query = ''): string {
   const base = `${ADMIN_API}/wasm-apps/${appId}/ai-usage`
   return query === '' ? base : `${base}?${query}`
 }
+
+/**
+ * AI 用量面板**显式**请求的窗口（天）。
+ *
+ * 为什么不能省这个参数：端点的 from/to 缺省是"近 7 天"，省掉它就等于又一个
+ * "静默窗口"（与 R2-L6-3 同类的缺陷形态）。显式传 `days` + 把服务端回显的
+ * `from`~`to` 渲染出来，管理员才知道自己看的是哪一段。
+ */
+export const AI_USAGE_WINDOW_DAYS = 30
 
 /** 口径说明（页面统一引用，避免三处各写一份说法）。 */
 export const OPENS_COUNT_NOTE =
@@ -84,32 +115,68 @@ export interface OpensPoint {
   uv: number
 }
 
-/** 列表行的窗口/今日概览（服务端按 app_id 下发）。 */
+/**
+ * `opens/summary` 的 `trend[]` 一点（§5.1c A）。
+ *
+ * 与 `OpensPoint`（详情端点 `:app_id/opens` 的点，还带部门维度）**分开声明**：
+ * 两者不是同一个形状，共用一个 interface 会让跨端对拍无法断言"逐键一致"。
+ */
+export interface OpensTrendPoint {
+  day?: string
+  pv?: number
+  uv?: number
+}
+
+/** `opens/summary` 的 `today`（今日 PV/UV，读**明细表**；§5.1c A）。 */
+export interface OpensToday {
+  day?: string
+  pv?: number
+  uv?: number
+}
+
+/** `opens/summary` 的 `totals`（窗口合计，**不带 `GROUP BY app_id`** 的一次聚合）。 */
+export interface OpensTotals {
+  pv?: number
+  uv?: number
+}
+
+/**
+ * 列表行的窗口/今日概览（服务端 `GROUP BY app_id` 下发）。
+ *
+ * ⚠️ 键名是 §5.1c A 的权威键：窗口列叫 `window_pv`/`window_uv`（不是 `pv`/`uv`），
+ * 另有 `title`（来自应用登记表，查不到为空串）。
+ */
 export interface OpensAppRow {
   app_id: string
+  title?: string
   today_pv?: number
   today_uv?: number
   window_pv?: number
   window_uv?: number
 }
 
-/** 看板 TOP N 的一行。 */
+/** 看板 TOP N 的一行（§5.1c A：`{app_id,title,pv,uv}`）。 */
 export interface OpensTopRow {
   app_id: string
   title?: string
-  pv: number
-  uv: number
+  pv?: number
+  uv?: number
 }
 
 export interface OpensSummary {
+  from?: string
+  to?: string
   days?: number
   top?: number
-  today?: { day?: string; pv?: number; uv?: number } | null
-  totals?: { pv?: number; uv?: number } | null
-  trend?: OpensPoint[]
+  /** 请求窗口被收敛到明细保留期时为 true（§5.1c A）—— 界面必须如实显示。 */
+  capped?: boolean
+  /** 明细保留期（服务端权威值；前端常量只是回落）。 */
+  detail_retention_days?: number
+  today?: OpensToday | null
+  totals?: OpensTotals | null
+  trend?: OpensTrendPoint[]
   apps?: OpensAppRow[]
   top_apps?: OpensTopRow[]
-  detail_retention_days?: number
 }
 
 export interface OpensDetail {
@@ -134,21 +201,37 @@ export interface OpensDetail {
   detail_retention_days?: number
 }
 
-export interface AiUsagePoint {
+/**
+ * AI 用量的一天 / 合计（服务端 `serverstore.WasmAppAIUsageDay`，**逐键对照** §5.1c B）。
+ *
+ * 注意键名：`requests`（不是 `calls`）、`prompt_tokens`/`completion_tokens`/
+ * `cache_prompt_tokens`（没有 `total_tokens` —— 总数由前端把输入+输出相加，
+ * 见 `aiUsageTokens`）。旧契约里的 `calls`/`tokens`/`points` 是**前端自己钉的字面量**，
+ * 与真实响应不符 ⇒ 面板整块不出数（R2-L6-2）。
+ */
+export interface AiUsageDay {
   day?: string
-  calls?: number
-  tokens?: number
+  requests?: number
+  prompt_tokens?: number
+  completion_tokens?: number
+  cache_prompt_tokens?: number
   cost?: number
 }
 
+/**
+ * `GET …/:app_id/ai-usage` 的响应（§5.1c B：**契约以服务端 `WasmAppAIUsage` 为准**）。
+ *
+ * `attribution_available` **必须被消费**：`false` = 平台在该窗口内还没有任何带应用归因的
+ * usage 行（"统计尚未上线"）；`true` 而本应用全零 = "确实没调过模型"。两者数字都是 0，
+ * 含义相反（§21.4）—— 合并渲染就是在编数据。
+ */
 export interface AiUsage {
   app_id?: string
-  calls?: number
-  prompt_tokens?: number
-  completion_tokens?: number
-  total_tokens?: number
-  cost?: number
-  points?: AiUsagePoint[]
+  from?: string
+  to?: string
+  days?: AiUsageDay[]
+  total?: AiUsageDay | null
+  attribution_available?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -237,15 +320,31 @@ export function requireOpensDetail(raw: unknown): { ok: true; value: OpensDetail
 }
 
 /** 校验 AI 用量响应：`points` 必须是数组（空数组 = 有归因能力但确实没有调用）。 */
+/**
+ * 校验 AI 用量响应：`days` 必须是数组（§5.1c B 的权威形状）。
+ *
+ * 空数组 = 有归因能力但确实没有调用；**缺 `days` = 形状漂移**（旧契约要的 `points`
+ * 服务端从不下发 ⇒ 面板整块被这条判成漂移、永远不出数，R2-L6-2 的现场）。
+ */
 export function requireAiUsage(raw: unknown): { ok: true; value: AiUsage } | { ok: false; detail: string } {
   if (!isRecord(raw)) return { ok: false, detail: '响应不是对象' }
-  if (!Array.isArray((raw as Record<string, unknown>).points)) return { ok: false, detail: '缺少数组字段 points' }
+  if (!Array.isArray((raw as Record<string, unknown>).days)) return { ok: false, detail: '缺少数组字段 days' }
   return { ok: true, value: raw as AiUsage }
 }
 
 // ---------------------------------------------------------------------------
 // 聚合口径（PV 不去重 / UV 不本地求和 / TOP N 排序）
 // ---------------------------------------------------------------------------
+
+/**
+ * **只带 PV/UV** 的最小点形状：趋势点（`OpensTrendPoint`）与详情点（`OpensPoint`）
+ * 都满足它。聚合函数（`sumOpenPv` / `windowUv` / `summarizeWindow`）按它取参，
+ * 于是"两个读源（明细 / 日汇总）的点"共用同一份口径实现，不会各写一遍、也不会各错一遍。
+ */
+export interface PvUvPoint {
+  pv?: number
+  uv?: number
+}
 
 /**
  * **唯一**的"可能是数字"归一化入口：非数字 / 非有限 ⇒ `null`（**不是 0**）。
@@ -270,7 +369,7 @@ export function numOrNull(v: unknown): number | null {
  *   ① 改成"按天去重/取最大值"（`points.length` 或 `max(pv)`）⇒ PV 用例红；
  *   ② 把缺字段的点当 0（`num()`）⇒ 漂移用例红。
  */
-export function sumOpenPv(points: OpensPoint[] | null | undefined): number | null {
+export function sumOpenPv(points: PvUvPoint[] | null | undefined): number | null {
   if (!Array.isArray(points)) return null
   let total = 0
   for (const p of points) {
@@ -291,7 +390,7 @@ export function sumOpenPv(points: OpensPoint[] | null | undefined): number | nul
  * 变异验证：改成 Σ `points.uv` ⇒ 对应用例必红（会给 3，而不是服务端值 2 / null）。
  */
 export function windowUv(
-  points: OpensPoint[] | null | undefined,
+  points: PvUvPoint[] | null | undefined,
   serverUv: number | null | undefined,
 ): { uv: number | null; note: string } {
   if (typeof serverUv === 'number' && Number.isFinite(serverUv)) return { uv: serverUv, note: '' }
@@ -397,6 +496,61 @@ export function detailTotals(d: OpensDetail | null | undefined): { pv: number | 
 }
 
 /**
+ * 服务端**实际生效**的窗口文本（§5.1c C：**必须渲染**）。
+ *
+ * 适用于两个都回显 `from`/`to` 的响应（详情 `OpensDetail` 与 AI 用量 `AiUsage`）。
+ *
+ * 为什么强制：服务端的 `from`/`to` 缺省是"近 7 天"，而这一回落**只体现在响应里**；
+ * 前端不渲染它，管理员就无法察觉自己看的是 7 天而不是所选档位（R2-L6-3 的现场：
+ * 「全部（长期日汇总）」曾经 `days:0` ⇒ 不传参 ⇒ 静默退化成 7 天）。
+ * 缺 `from`/`to` 时如实说"无法确认区间"，**不猜**。
+ */
+export function effectiveWindowText(d: { from?: string; to?: string } | null | undefined): string {
+  const from = typeof d?.from === 'string' && d.from !== '' ? d.from : null
+  const to = typeof d?.to === 'string' && d.to !== '' ? d.to : null
+  if (from === null || to === null) {
+    return '生效窗口：—（服务端未回显 from/to，无法确认实际统计区间）'
+  }
+  return `生效窗口：${from} ~ ${to}`
+}
+
+/**
+ * 列表列 / 详情概览的四个计数：**缺"行"与缺"字段"是两件事**（R2-L6-4）。
+ *
+ *   - 服务端聚合可用但**没有这个应用的行** ⇒ 该应用在窗口内确实没有打开记录
+ *     （服务端 `GROUP BY app_id` 会省略零打开的应用）⇒ **按 0 计**并带说明；
+ *   - 行在、但**字段缺失**（响应形状漂移）⇒ `null` ⇒ 显示 `—`，**不是 0**（CTL-11）。
+ *
+ * 旧实现把这行当 `—`，与"前端按 0 处理并带 title 说明"的声明冲突，而真实服务端
+ * 一定会省略零打开的应用 ⇒ 整列大面积显示 `—`（真值是 0）。这里把两者分开。
+ */
+export const OPENS_MISSING_ROW_NOTE =
+  '窗口内没有该应用的打开记录（服务端聚合只下发有记录的应用）—— 按 0 计；'
+  + '与"字段缺失（形状漂移）显示 —"是两件事。'
+
+export interface AppOpenCounts {
+  todayPv: number | null
+  todayUv: number | null
+  windowPv: number | null
+  windowUv: number | null
+  /** true = 服务端没有下发该应用的行（按 0 计），false = 行在（字段仍可能缺失）。 */
+  missingRow: boolean
+}
+
+export function appOpenCounts(orow: OpensAppRow | null | undefined): AppOpenCounts {
+  if (orow === null || orow === undefined) {
+    return { todayPv: 0, todayUv: 0, windowPv: 0, windowUv: 0, missingRow: true }
+  }
+  return {
+    todayPv: numOrNull(orow.today_pv),
+    todayUv: numOrNull(orow.today_uv),
+    windowPv: numOrNull(orow.window_pv),
+    windowUv: numOrNull(orow.window_uv),
+    missingRow: false,
+  }
+}
+
+/**
  * 看板/列表的窗口汇总。
  *
  * 优先级：服务端 `totals` > 本地按日累加（仅 PV 可累加）。
@@ -404,7 +558,7 @@ export function detailTotals(d: OpensDetail | null | undefined): { pv: number | 
  */
 export function summarizeWindow(input: {
   totals?: { pv?: number; uv?: number } | null
-  trend?: OpensPoint[] | null
+  trend?: PvUvPoint[] | null
 }): WindowSummary {
   const trend = Array.isArray(input.trend) ? input.trend : null
   const serverPv = input.totals?.pv
@@ -466,20 +620,53 @@ export function rankTopApps(rows: OpensTopRow[] | null | undefined, limit: numbe
 }
 
 /**
- * AI 用量是否"无数据"（§21.4 认账：老客户端不带归因头）。
+ * AI 用量面板的四种状态（§5.1c B 要求 `attribution_available` **必须被消费**）：
  *
- * 判据 = 次数/费用/token 全为 0 **且**没有按日点：此时面板必须显示空状态，
- * 而不是"0 次调用 / ¥0.00" —— 后者会被读成"这个应用没人用 AI"，
- * 而真实语义是"还没有归因数据"（可能只是客户端版本老）。
+ *   - `data`：有归因数据（任一计数 > 0，或有按日行）⇒ 渲染数字；
+ *   - `zero_calls`：归因统计**可用**（`attribution_available=true`）而本应用全零
+ *     ⇒ "确实零调用"；
+ *   - `no_attribution`：归因统计**尚未上线**（`attribution_available=false`）
+ *     ⇒ "统计尚未上线 / 无归因"，**不得**写成"0 次调用"；
+ *   - `indeterminate`：响应缺字段（形状漂移）⇒ 既不能说"零调用"也不能渲染 0。
  *
- * 缺字段（形状漂移）按 0 处理是**安全**的：此时 three 个计数都读不到 ⇒ 走空状态
- * （"暂无归因数据"），而不会渲染出一个假的 0 次调用明细。
+ * 为什么不是一个布尔 `isEmpty`：旧实现只有一种"空"，于是"平台还没上线归因"与
+ * "这个应用确实没调过模型"被渲染成同一句话 —— 两者数字都是 0、含义相反（§21.4）。
+ *
+ * 变异验证：把 `attribution_available` 的两条分支删掉（都走 `zero_calls`）⇒
+ * `AppOpensAi.test.tsx` 的"未上线 ⇒ 不得说成零调用"用例必红。
  */
-export function aiUsageIsEmpty(u: AiUsage | null | undefined): boolean {
-  if (u === null || u === undefined) return true
-  const points = Array.isArray(u.points) ? u.points : []
-  const zero = (v: unknown) => (numOrNull(v) ?? 0) <= 0
-  return zero(u.calls) && zero(u.cost) && zero(u.total_tokens) && points.length === 0
+export type AiUsageView = 'data' | 'zero_calls' | 'no_attribution' | 'indeterminate'
+
+export function aiUsageView(u: AiUsage | null | undefined): AiUsageView {
+  if (u === null || u === undefined) return 'indeterminate'
+  const days = Array.isArray(u.days) ? u.days : null
+  const requests = numOrNull(u.total?.requests)
+  const cost = numOrNull(u.total?.cost)
+  const prompt = numOrNull(u.total?.prompt_tokens)
+  const completion = numOrNull(u.total?.completion_tokens)
+  // 判"确实零调用"必须四个分项都可读：任一项缺失都不能说"是 0"（CTL-11）。
+  const readable = days !== null && requests !== null && cost !== null && prompt !== null && completion !== null
+  const positive = (v: number | null): boolean => v !== null && v > 0
+  if (positive(requests) || positive(cost) || positive(prompt) || positive(completion) || (days?.length ?? 0) > 0) {
+    return 'data'
+  }
+  if (!readable) return 'indeterminate'
+  if (u.attribution_available === false) return 'no_attribution'
+  if (u.attribution_available === true) return 'zero_calls'
+  return 'indeterminate'
+}
+
+/**
+ * 总数 tokens = 输入 + 输出（服务端只下发分项：`prompt_tokens`/`completion_tokens`）。
+ *
+ * `cache_prompt_tokens` 是输入里**命中前缀缓存**的那部分（已含在 `prompt_tokens` 里），
+ * 再加一次就把同一批 token 算两遍。任一分项缺失 ⇒ `null`（界面显示 `—`，不是 0）。
+ */
+export function aiUsageTokens(total: AiUsageDay | null | undefined): number | null {
+  const p = numOrNull(total?.prompt_tokens)
+  const c = numOrNull(total?.completion_tokens)
+  if (p === null || c === null) return null
+  return p + c
 }
 
 /** 计数展示：`null` / 非有限数 ⇒ `—`（**不是 0**）。 */

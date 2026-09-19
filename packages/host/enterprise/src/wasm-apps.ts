@@ -355,34 +355,6 @@ export function planChunks(
   return slices
 }
 
-/**
- * 绝对化目录条目的入口链接。
- *
- * 服务端 `appOrigin()` 正常下发绝对地址；这里只处理"相对路径"这一种退化形态
- * （服务端为旧版本 / 未来改下发路径时）：按当前会话的服务端源补齐。
- * **不发明链接**：拿不到服务端地址、或字段本身为空时，保持原样（宁可不显示）。
- * @param serverURL - 当前会话的服务端地址。
- * @param value - 服务端下发的 `entry_url`。
- * @returns 绝对 URL，或原值。
- */
-export function absolutizeEntryURL(serverURL: string, value: unknown): unknown {
-  if (typeof value !== 'string' || value.trim() === '') return value
-  const raw = value.trim()
-  // 已有 scheme（含 `data:`/`mailto:` 这类非 http）一律原样返回：不猜服务端的意图。
-  if (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(raw)) return raw
-  let base: URL
-  try {
-    base = new URL(normalizeServerURL(serverURL))
-  } catch {
-    return value
-  }
-  try {
-    return new URL(raw.startsWith('/') ? raw : `/${raw}`, base.origin).toString()
-  } catch {
-    return value
-  }
-}
-
 /** `realpath` 之后的包含判定（**不是**字符串前缀比较：`/a/bc` 不以 `/a/b` 为父）。 */
 export function isInsideRoot(root: string, candidate: string): boolean {
   if (candidate === root) return true
@@ -1438,15 +1410,17 @@ export async function validateApp(ctx: Context, session: Session, input: Validat
 // ---------------------------------------------------------------------------
 
 /**
- * `GET /api/client/v2/apps/wasm/catalog`：代理服务端目录并绝对化入口链接。
+ * `GET /api/client/v2/apps/wasm/catalog`：代理服务端目录（**逐字节透传**）。
  *
  * 展示范围完全由服务端裁决（R38：**客户端不自己过滤** —— 这里再筛一次就会产生
- * "两份可见性规则"，而两份规则迟早给出不同答案）。本函数只做地址补全。
+ * "两份可见性规则"，而两份规则迟早给出不同答案）。本函数也不改字段：目录行的字段
+ * 集合是服务端契约，宿主既不增也不删（旧访问模型的入口链接字段已随 W4 从服务端
+ * 契约删除，因此这里**没有**地址补全 —— 详见 `tests/wasm-apps.spec.ts` 的反向断言）。
  * R36：目录**不得**出现额度/用量字段 —— 客户端也不去补，只原样转发服务端给的字段。
  * @param ctx - Host 上下文（401 时要清本地会话）。
  * @param session - 员工会话。
  * @param signal - 调用方取消信号（宿主工具的 `exec.signal`；路由不传）。
- * @returns 信封（成功 = 绝对化后的目录 JSON）。
+ * @returns 信封（成功 = 服务端目录的原始字节）。
  */
 export async function listCatalog(ctx: Context, session: Session, signal?: AbortSignal): Promise<WasmResponse> {
   let upstream: Response
@@ -1456,27 +1430,14 @@ export async function listCatalog(ctx: Context, session: Session, signal?: Abort
     return gatewayFailure(cause)
   }
   if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
-  const text = await upstream.text().catch(() => '')
-  let payload: unknown
-  try {
-    payload = JSON.parse(text)
-  } catch {
-    // 服务端返回的不是 JSON（门户 HTML / 代理劫持）⇒ 原样透传，让上层看见真实字节。
-    return {
-      status: upstream.status,
-      text,
-      contentType: upstream.headers.get('content-type') ?? WASM_JSON_CONTENT_TYPE,
-    }
+  // 原样透传（含 content-type）：解析再序列化只对"改写字段"有意义，而现在没有任何
+  // 改写 —— 透传还顺带保住了服务端返回的非 JSON 字节（门户 HTML / 代理劫持）与其
+  // 真实 content-type，让上层看见的就是上游的字节。
+  return {
+    status: upstream.status,
+    text: await upstream.text().catch(() => ''),
+    contentType: upstream.headers.get('content-type') ?? WASM_JSON_CONTENT_TYPE,
   }
-  const apps = (payload as { apps?: unknown }).apps
-  if (Array.isArray(apps)) {
-    for (const row of apps) {
-      if (row === null || typeof row !== 'object') continue
-      const entry = row as Record<string, unknown>
-      if ('entry_url' in entry) entry.entry_url = absolutizeEntryURL(session.serverURL, entry.entry_url)
-    }
-  }
-  return { status: upstream.status, text: JSON.stringify(payload), contentType: WASM_JSON_CONTENT_TYPE }
 }
 
 // ---------------------------------------------------------------------------
@@ -1533,7 +1494,7 @@ export async function proxyApp(ctx: Context, session: Session, input: ProxyInput
  *
  * | method | path | 语义 |
  * |---|---|---|
- * | GET | `/` | 应用中心目录（代理 `catalog` + 绝对化 `entry_url`） |
+ * | GET | `/` | 应用中心目录（代理 `catalog`，逐字节透传） |
  * | POST | `/validate` | 预检代理（AI/UI 用来"不占版本号地试一发"） |
  * | POST | `/publish` | **发布编排**：`wasm_base64`/`wasm_path` → 直传或分片续传 |
  * | POST | `/:app_id/publish\|unpublish\|freeze` | 生命周期代理（原样转发 body） |

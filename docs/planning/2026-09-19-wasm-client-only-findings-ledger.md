@@ -576,7 +576,7 @@ func IsLegacyPublicAccess(s string) bool { return Access(s) == AccessPublic }
 
 **主控裁决**：
 1. **客户端出站超时是否纳入 `limits.json`** ⇒ **不纳入**。理由：`limits.json` 是**服务端**平台上限的单一真源；客户端出站超时是**客户端本地配置**（UX 取向），把它塞进服务端生成物会让"服务端 dictating 客户端"且把客户端耦合到服务端产物。**§5.1 的序关系靠 `budget-parity.spec.ts` 的跨包对拍保证**（已落地、已变异验证）—— 这正是"契约是序关系，不是同一份常量"的正确形态。已回写 §5.1 说明该值属客户端常量 + 对拍判据。
-2. **`atomic-write.ts` → `@deepseek-ai/dsh-atomic-write`**：**W6/W7 全部静默后切换**（现在唯一实现 + 偏离声明已入 §16.1）✓ 维持原判。
+2. **`atomic-write.ts` → `@deepseek-ai/dsh-atomic-write`**：**W6/W7 全部静默后切换**（现在唯一实现 + 偏离声明已入 §16.1）✓ 维持原判。**已于 2026-09-20 执行**（依赖入 `dependencies`、三处调用点切上游、本地助手删除、判据迁移为语义 + 接线并通过 4 个变异体；设计 §16.1 的偏离段已整段改写为「已完成」并补两处口径勘误）。**该泳道抓到一处文档与实现不符**：§16.1 原写 `temp + fsync + rename`，而**本地助手与上游包都没有 fsync**（上游 `.d.ts` 明写 *Crash durability (fsync) is out of scope*）⇒ 持久性缺口**自 W2 起存在、本版未修**，已如实认账；另上游 `mode` 必填、`dirMode` 漏传即回落 ⇒「唯一实现」的约束改为「一处语义 + 每调用点可见权限位 + 接线判据」。报告 `temp/wasm-client-only/fix-atomic-write.md`。
 
 **L2 认账（未闭环，不得说成已解决）**：①应用窗口 webContents **采纳进 browser runtime**（CDP 附着 + 同一套页面级实现）**未接线** ⇒ `app_id` 可解析/校验、`list_tabs` 有 `kind/app_id`、闸门就位，但**页面级动作仍只作用于浏览器标签**；②真实 `WasmAppsWindowAdapter`（`BrowserWindow`）未实现；③F16 `open` 端点真机联调未做（端点缺失时按滚动升级继续打开）；④**AI runner 未 provide**（当前真实返回 `app_ai_unavailable`）；⑤缓存键 version 未接线（X-6 已认账）；⑥真机三平台判据（W6）；⑦enterprise 的 8 MiB 分片上传 2 例非 L2（未动、不作基线）。
 
@@ -626,6 +626,92 @@ GET /api/server/admin/wasm-apps/opens/summary
 **④ 冻结被打破（在飞施工，主控当场发现）**：`FREEZE-PROTOCOL` 要求"变异期不得跑全量门禁"，而 01:25–01:28 仍有写入落在 `server/internal/wasmapp/api/{admin,publish,open,admin_opens}.go`、`server/internal/serverstore/wasm_app_opens_summary.go`（`admin.go` 新增 `?access=` 筛选 + **回显**、`publish.go` 同步 ⇒ 即 **W5 C1 / R2-L6-1** 的施工），`§V` 的"`server/**` 不再写入"已被事实推翻。审计方也各自做了前后哈希快照（`temp/wasm-client-only/audit-round2/.l2-pre-sha256.txt`、`.l4-sha256-before.txt`，01:30）。
 **裁决**：**在写入方给出停写声明之前，不跑终局全量门禁**（否则结果既不能证真也不能证伪）。已向 A2-L1、A2-L6、L7 索取「在写文件 / 所属审计 ID / 停写时刻」。
 **门禁纪律（本轮定案，写入 `FREEZE-PROTOCOL.md`）**：终局全量判据的**前置条件**是「冻结声明 + 前后哈希一致」，不是「没人说自己在改」。
+
+**⑤ 交付基线提交（主控）**：工作树在冻结期实际是 **199 改 / 72 未跟踪 / 29 删除**（整个「客户端专属」改造一直未提交 ⇒ 一旦机器出事全丢，这是当时**第一风险**）。主控做了机械门禁（`gofmt -l internal cmd` 空、`go build ./...` 0）后提交为 **`d3fe68de61`**（350 文件、+39103/−17620）。提交前的三次清理（都属"防止污染公开仓"，值得复用）：
+- **`server/appdemo` 3.1 MB 原生 ELF**：`go build -o` 手误留下的构建产物（`file` 判定 ELF x86-64，**非** wasm；全仓零引用）。演示应用的真实资产是**构建期**产出 `/opt/picoaide/demo-apps/app.wasm`，入库的只有 `server/demoapps/{appdemo/main.go,demos.json}` ⇒ 删除。**规则：提交前对所有新增文件做二进制特征扫描**（`file -b --mime-encoding` ⇒ `binary*`）。
+- **`H` / `S` 两个根目录垃圾文件**（00:23 误重定向：一个是 `git grep` 输出 276 行、一个是文件清单 357 行）⇒ 删除。**规则：`git add -A` 前逐个看未跟踪条目，仓库根出现单字母/无扩展名文件一律先查。**
+- **`.git/index.lock` 残留**：0 字节、95 分钟无变化、无任何 git 进程 ⇒ 判定残留锁后删除（与 2026-09-17 `.git/HEAD.lock` 同族，取证三连=大小/时间/git 进程）。
+
+**⑥ ⚠️ 事故：变异体被扫进提交（新失败模式，已处置 + 已派守卫）**。`git add -A` 的目录遍历瞬间，A2-L6 的变异正在飞 ⇒ `server/webadmin/src/pages/app-center/opens-contract.ts` 的 `return '0' // A2-L6 变异 M-D：— 改回 0` **进了提交**（该变异会让 vitest 变红 ⇒ **提交是红的**）。主控在提交后复核工作树时发现，用 `--amend` 就地修订（提交未推送），HEAD 现为 `d3fe68de61`，`countText` 已复原为 `'—'`；**修订后全库复查：HEAD 里"代码行 + 变异标记"形态命中数 = 0**（另两处命中是 `check-workflows.mjs` 的字符串与警告文案，属误报）。
+**精确时刻（reflog + A2-L6 的 sha256 证据，双方独立可复核）**：A2-L6 的 M-D 变异窗口 = **01:35:45–01:36:03**（还原完成于 01:36:03，`opens-contract.ts` mtime 01:36:03）；主控成功的 `git add -A` 落在 **01:35:5x（窗口之内）**；`git commit` = **01:36:15**（用的是那份已污染索引）；`--amend` = **01:36:49**（此时文件已还原 ⇒ 修订版正确）。**教训精确表述：不是"没检查"，而是"暂存与提交之间隔了 20+ 秒、而变异窗口正好覆盖暂存动作"** —— 所以判据不能只看"提交那一刻工作树对不对"，必须**在提交前对暂存内容本身做变异扫描**（已派守卫）。
+- **可复用判据**：`git grep -nE '变异|MUTANT' HEAD -- '*.ts' '*.tsx' '*.go' '*.mjs' '*.js' '*.sh' | grep -vE ':[0-9]+:[[:space:]]*(//|\*|/\*|#)'` —— 剥掉行首注释后仍有余量的行才是"代码行挂变异注释"。**注意 `git grep` 默认搜工作树，必须显式给 `HEAD`**（否则还原后查不出来，会得到假绿）。
+- **根因**：本仓把变异验证当一等实践，但**没有任何守卫防"变异体残留"** —— 只能靠人眼与运气。已派 L4 新增 `scripts/check-no-leftover-mutants.mjs`（只抓上述形态，含三类合成正反例）+ 接入 `check-workspaces.mjs`。
+- **同时向 A2-L6 追认**：它自称"全程只读"与事实不符（变异确实改了生产文件），已要求逐条复核 M-A…M-N 的还原证据、**此后变异只允许在 `temp/` 临时副本上做**。**规则：审计方的变异验证同样受"冻结期不得写受管源码"约束；变异必须在副本上或 `trap` 保证还原。**
+
+## X. 终局门禁第 1 轮的结果、文档空洞补齐与两条新修复泳道（2026-09-20 01:37–01:55）
+
+**① 服务端整轮门禁（主控，`FINAL-server-test.log`）**：`go test ./... -count=1 -p 2 -timeout 1800s`（显式超时+固定并行度，见 §W①）。已确认 **`cmd/server` ok** —— 即 §W③ 的路由表补登在**真实门禁上下文**里成立，不是单测孤立绿。L7 独立复跑同一条也是 `ok … 27.626s`。
+
+**② L7 最终交付（W4 删除波次闭环）**：`gofmt -l` 空、`go build` 绿、`go vet` **exit 0**、`go test ./... -count=1 -p 2` **50 包 ok**；五桶 **A 621→0 / B 13→34 / C 934→460 / D 26→14 / ANN 65/65**、scanner exit 0；真 PG 验收 SQL：`kind='wasm_app' AND config_json->>'access'='public'` 计数 **0**、`to_regclass('app_sessions') IS NULL AND to_regclass('employee_sessions') IS NULL` **true**；五条变异（`ai.chat` 残留 / `entry_url` 残留 / 删 `edge.MaxBodyBytes` / 0074 去 `kind` 限定 / 0073 顺序颠倒）**全部改坏即红、还原 sha256 逐字节一致**。**R2-L7-1（并发身份假绿风险）逐条审计后结论：未发现"单员工 + 真并发"的假绿用例**，10 条并发用例逐条给出「身份数 / 并发如何成立」并区分"两员工真并发""显式放宽 `PerUserPerAppRunning`""不经调度器"三种正当形态 —— 这条把一个**假设风险**收敛成**有清单的结论**。
+
+**③ 文档空洞补齐（主控，本轮最重要的文档动作）**：设计总纲**从未钉过管理端看板的响应键** —— §5.1b 只钉了 `open` 的响应，于是服务端（把键写在 `admin_opens.go` 的 `gin.H{}`）与 webadmin（把契约写在自己 `opens-contract.ts` 的注释里）**各自钉了一半**，真实环境里看板出不数（§Y）。新增 **§5.1c「服务端：管理端看板两端的响应契约」**：逐字给出 `opens/summary` 与 `ai-usage` 的键集与语义（含 **UV 必须真实去重、禁止把日汇总逐日 uv 或各应用 uv 相加**；`totals/today` 必须是不带 `GROUP BY app_id` 的一次聚合；`title` 查不到就缺省不得编造；`attribution_available` 必须被 UI 消费以区分"未上线"与"零调用"；详情窗口回落必须回显 `from/to`）。**并明文要求跨端对拍用例（读对方源码、集合相等），禁止再用"各用各的夹具"。**
+
+**④ 两条新修复泳道（并行，主控派工）**
+- **F1「C2/C4 看板接缝」**：按 §5.1c 修 R2-L6-1/2/3/4（服务端 + webadmin + **真实形状跨端对拍 spec** + 每条变异）。约束：先做前端侧，Go 文件等 `FINAL-server-test.log` 出现 `### EXIT=` 再动（否则那轮门禁失效）；变异只在副本上做。
+- **F2「应用 AI 链路闭环」**：**这是主控独立核实出的、比审计发现更严重的一处缺口** —— 设计 §21.2 步骤③ 要求「在隐藏会话上跑一轮 `ctx.agentLoop`」，而 `packages/host/wasm-apps-host/src/index.ts:265` 用 `ctx.get('wasmAppsAiRunner')` 取 runner、**全仓无人 `provide` 它**（`grep -rni airunner packages` 只有该文件与它的 `lib/` 产物）⇒ **每次应用 AI 调用都返回 `app_ai_unavailable`，功能端到端不可用**。L2 把它记为"认账④"，但**设计 §21.7 的认账清单里没有这一条** ⇒ 它是**未实施的既定交付项**，不是被批准的延后。已探明上游 `agentLoop` 服务存在（`deepseek-harness/packages/core/agent-loop/src/index.ts`，`super(ctx,'agentLoop')`）且桌面宿主 node_modules 里有 `@deepseek-ai/dsh-agent-loop` ⇒ 结构上可做。要求：按 §21.6 九条判据（每条带变异）实现，**若调研发现结构上不可行必须停下给证据，不许造假 runner、不许把"未实现"写成"已实现"**。顺带闭合 L7 §五② 的 `AI_CHAT_PATH` 跨包对拍缺口。
+
+**⑤ `server/docs` 迁移区间真实漂移（已修）**：`06-database.md:6` 与 `08-development.md:64` 都写「0001–0060」，实际已到 **0076**。已改为 0001–0076 并把 0061–0076 条目补齐（含 0073–0076 随本次改造落地的四条；0075 经核实建 `wasm_app_opens` 明细 + `wasm_app_opens_daily` 日汇总，0076 加 `usage.app_id` + 部分索引）。**并派 L4 新增静态守卫**（`scripts/check-migration-range.mjs`：实际最大编号 == 文档区间上限；`server/AGENTS.md` 提到的每个迁移号都必须在实际文件集合内；带合成正反例 + `migration-range:allow` 行内豁免）。
+
+**⑥ 已核实的"非问题"（避免重复劳动）**：`imports_gen.go` 在门禁期间（01:40）mtime 变动，但 `git status`/`git diff` **均为空 ⇒ 与 HEAD 逐字节相同**（`go generate` 幂等重写）。**判据取 sha256 而非 mtime** —— 这正是 `freeze-snapshot.sh` 用 `sha256sum` 的理由。
+
+**⑦ 协调动作（防撞车）**：A2-L2 拟在 `packages/host/**` 做写入式变异至 ~01:55，而 F2 正在编辑 `packages/host/wasm-apps-host/**` ⇒ 已划界：**该包禁止写入式变异**（改纯静态核查 + 实跑既有测试，并在报告写明原因），`browser/desktop/enterprise` 照做；A2-L2 已承诺结束后明确声明"变异已全部还原"再让主控开客户端侧门禁。
+
+## Y. 第二轮独立审计 · A2-L6（webadmin）（报告 `temp/wasm-client-only/audit-round2/L6.md`，320 行）
+
+**绑定**：HEAD `d3fe68de61…`（不脏：`git status --porcelain -- server/webadmin server/internal` 空）。**必核 9 项：PASS 6 / FAIL 2 / PARTIAL 1**。`npx tsc --noEmit` exit 0；`npx vitest run` = **32 files / 536 tests / exit 0**（与 L6 自述逐字一致）。**自做 4 条变异全部"改坏即红 + sha256 逐字还原"**（M-A…M-D；其中 **M-D 的变异窗口 01:35:45–01:36:03 与主控 `git add -A` 重叠 ⇒ 变异体被扫进提交**，主控已 `--amend` 清掉，见 §W⑥）。
+
+| ID | 严重度 | 发现 | 处置 | 状态 |
+| --- | --- | --- | --- | --- |
+| **R2-L6-1** | **P1** | **C2 `opens/summary` 响应形状与前端不一致**：服务端 `{from,to,days,top,capped,trend,apps:[{app_id,pv,uv,today_pv,today_uv}],top_apps}` vs 前端读 `today{}`/`totals{}`/`apps[].window_pv|window_uv` ⇒ **真实环境恒 `—`**（看板「今日 PV/UV」「窗口 UV」、列表「近 7 日 PV/UV」；只剩 trend 累加的窗口 PV 与列表今日 PV/UV）。证据=A2-L6 自建**真实形状**对拍用例 2 passed（=读取点全落空），夹具逐字取自 Go 源码 | 主控补 **设计总纲 §5.1c** 钉死键集与语义；**F1 泳道**按它改（服务端 + 前端 + **真实形状跨端对拍 spec**） | **已派 F1** |
+| **R2-L6-2** | **P1** | **C4 `ai-usage` 形状不一致 + `attribution_available` 零消费**：服务端 `{app_id,from,to,days:[…],total{},attribution_available}` vs 前端要 `{calls,total_tokens,points[]}` ⇒ `requireAiUsage` 判"缺少 points" ⇒ **整块面板永不显示数据**；`grep attribution_available server/webadmin/src` **零命中** ⇒ §21.4「未上线 vs 零调用必须区分」未落地 | 同上（§5.1c B 节） | **已派 F1** |
+| **R2-L6-3** | **P1** | **详情「全部（长期日汇总）」静默退化为近 7 天**：`AppOpensSection.tsx:72` 传 `days:0` ⇒ 不传 `from`/`to` ⇒ 服务端回落 `now-6…now`；且 `from`/`to` 前端不渲染 ⇒ **管理员无从察觉少数据**（与 §W② 的 `parseDayParam` UTC 错位同族：静默少数据） | §5.1c C 节：显式请求 90 天 + 必须渲染生效窗口 | **已派 F1** |
+| **R2-L6-4** | P2 | 列表对"服务端未下发该应用行"（`GROUP BY app_id` 省略零打开应用）渲染 `—`，与"按 0 处理并带 title 说明"的自身声明冲突 | 二者取一并与声明一致 | **已派 F1** |
+
+**PASS 项（可直接引用）**：CTL-11（6 个归一化入口无回填；形状漂移是**行为级**断言）｜访问级别两值收敛（历史值文案 + 不可选 + `?access=public` 显式拒绝 + **`login` 含历史 `public`**，与服务端 `admin.go:251-258` **同口径**）｜能力位（只读全走 `capability:read`，diff 零新增权限点）｜历史审计标签｜变异 4/4。**PARTIAL**：`R2C-14`（降级 vs 出数）。
+**路径与参数名 3/3 逐字一致**（summary `days/top`、detail `from/to/granularity`、ai-usage）；C3 详情**确实能出数**（除「全部」档）。
+**A2-L6 已声明停写**：自 01:36:03 起不再对受管源码做任何写入（含变异与还原）；报告 §7 的反向变异因此未做并**如实降级标注**。
+
+## Z. 终局门禁第 1 轮全绿 + 第二轮审计四份报告收齐 + 两条新泳道（2026-09-20 01:45–02:05）
+
+### Z.1 终局服务端全量门禁 = **绿**（`temp/wasm-client-only/FINAL-server-test.log`）
+`go test ./... -count=1 -p 2 -timeout 1800s`（真 PG `pg-test:5432`）⇒ **`### EXIT=0`**，含 `cmd/server`（路由装配 4 条）、`internal/wasmapp/**`、`internal/serverstore`、`internal/llmgateway` 等全部包；`? no test files` 的包（`webadmin`、`temp/skillseed-probe`）无失败。**这一轮是"冻结基线 `d3fe68de61` 干净"的权威判据**（过程事实：`imports_gen.go` 在 01:40 mtime 变动但 sha256 与 HEAD 一致 ⇒ 不构成污染，见 §X⑥）。
+
+### Z.2 第二轮审计四份报告全部收齐 —— 汇总
+
+| 审计 | 范围 | P0 | P1 | P2 | 必核 |
+| --- | --- | --- | --- | --- | --- |
+| **A2-L1** | `server/**` | **0** | **1** | 5 | 6 PASS / 3 PARTIAL / 1 未做（W4-12 属 L5） |
+| **A2-L2** | `packages/host/**` | **0** | **0** | 5 | 7 PASS / 3 PARTIAL（均为已认账面）；**§T 认账⑦ 已过时**（enterprise 实跑 **534 passed / 1 skip / 0 failed / exit 0** ⇒ 应销账） |
+| **A2-L4** | `scripts/**`、渠道 | **0** | **0** | 3 | 8/8 **全 PASS** |
+| **A2-L6** | `server/webadmin/**` | **0** | **3** | 1 | 6 PASS / 2 FAIL / 1 PARTIAL（见 §Y） |
+
+**A2-L2 的点名判据（可直接引用）**：R2-X-1 两端闭合**PASS**（头名 lower 相等 + 引导路径逐字相等，`index.spec.ts:263-308` **无手工注入**）；R1-L2-1 真机探针 **PASS**（`probe-app://*/*` 触发 6 次、装闸门后 http/跨应用 handler 增量 **0**、对照各 1）；R2-X-3 **PASS**（4 条负例 404 且断言 `fetch` **零调用**）；R2-X-4 **PASS**（断言**实际 headers**含头 + 四条重签分支）；J13 **PASS**（两端逐字 + 桌面跨包对拍 8/8）。
+**A2-L4 的关键自证**：五桶 `A=0/B=34顶格/ANN=65顶格/C=460/D=14`；**三处预算改小（34→33 / 模块 14→13 / ANN 65→64）全部 FAIL** ⇒ 预算不是摆设；`[新迁移需人工复核]` 含 0073–0076；另外它自造了"品牌 vs 品牌"跨渠道重复与 32/33 字符边界两个**脚本没覆盖的形态**去试渠道 CI。
+**A2-L1 的关键自证**：`clientreq.go:187` 与 `open.go:52` **共用** `proof.go:205` 同一实现；删调用变异 ⇒ `status = 200, want 401`（sha `9ad193060e…`→`dc4ed70e…`→还原一致）；时区判据用**绝对墙钟探针**在 CST/UTC 都过、UTC 归一变异必红；生成物 2×limits-gen + headers-gen + imports-gen 后 **8 产物逐字节不变**。
+
+### Z.3 主控对新发现的分派与裁定
+
+**① R2-L1-1（唯一 P1）：`entry_url` 活代码 + 门禁看不见 ⇒ 裁定"删代码 + 让门禁看得见"。**
+事实：`packages/host/enterprise/src/wasm-apps.ts:1476` 仍有活代码 `if ('entry_url' in entry) entry.entry_url = absolutizeEntryURL(...)`，两组 spec 把它**钉成预期**，而零残留门禁的 `SCOPES` **不扫 `packages/host/enterprise/src`** ⇒ 台账 §D W4-4 的"全仓 `entry_url` 零命中"**声明不成立且门禁看不见**。
+**裁定 (a)**：删那段活代码与随之无用的死代码；两组 spec 改成**反向断言**（`entry_url` 不得出现/不得被改写）并写明理由；**把 `packages/host/enterprise/src` 纳入 `SCOPES`**（该文件归 L4，但 **L4 已停写 `scripts/**`** ⇒ 主控**授权 F4 只改这一行**）。理由＝本项目的既定方针是「把老方案从源码库和文档里**彻底**清理掉，防止以后污染项目」——留一个"运行时无害但语义已死"的分支，正是以后被人当活契约的依据。并要求：纳入后若 A>0，**不得放宽预算**，必须修掉真实残留。
+
+**② F4 泳道（新派）**：R2-L1-1（P1，上述裁定）+ R2-L1-2（软删档与"未登记"的 reason 塌缩 + `app_deleted` 死分支：**二选一**并写明理由）+ R2-L1-3（`localZoneName()` 把 `TZ=:/usr/share/zoneinfo/...` 的**路径**交给 PG ⇒ ai-usage **500**，C1/C2 正常）+ R2-L1-4（`dbpool_test.go:256-260` 注释谎称"4 个员工"，实为 1 员工 + 放宽 `PerUser*`）+ R2-L1-5（OPS-6 的 `admissionFailed`/`Events.Record` **实现有、判据无**）+ **核实** W4-12（属 L5，只报告不改）。
+
+**③ F2 泳道追加范围**（A2-L2 的 4 条 P2，都在它正在写的包里，别人不便改）：R2-L2-3（**`/__picoaide` 无尾斜杠**不在保留前缀闸门内 ⇒ 会被转发平台；两端一致地漏）+ R2-L2-1（`dropAppSchemeLedgerEntries` 零生产消费者）+ R2-L2-2（「冻结/下架/删除 ⇒ 关窗清缓存」无实现路径）+ R2-L2-5（**session 闸门的生产接线无判据**：真机探针自己重实现闸门、`createRealElectronAdapter()` 的转发无 spec ⇒ scheme/partition 传错时探针与单测**都会绿**）。
+
+**④ A2-L4 的三条 P2（已闭环）**：R2-L4-1 ⇒ 主控裁决**保留 ANN 块级语义**（收窄成"逐行自带标注词"会强迫补 19 行人工标注，是"用假精度换假绿"），但量具改**自描述**：每条标 `[self]`/`[blk]`，口径写明"注释块级（±25 行）"，删掉"65 条显式标注"这类与实现不符的措辞；预算仍 65。现状 **ANN=64 = self 46 + blk 18**。R2-L4-2 ⇒ **主控已修**（`handler.go:60` 删掉已删除的 `limits.AITokenTTL`，改写成"该在手令牌已随服务端 AI 能力删除 ⇒ 本钩子暂无消费者，属 §8.2 冻结契约"，与 `ServeClientRequest(sessionKey)` 同批认账）；`grep AITokenTTL server --include='*.go'`=**0**。R2-L4-3 ⇒ L4 已把 status 的自相矛盾改成单一结论（W0-D **4/4 PASS**、C=**462**）。
+
+**⑤ 两道新守卫（L4 交付，已接线 + 自证 + 变异）**
+- `scripts/check-no-leftover-mutants.mjs`：抓"代码行尾挂变异注释"（豁免纯注释块/字符串/正则字面量）；实跑 **5372 文件零残留 exit 0**；负例实跑 `[MUTANT] … exit=1`，正例三形态 exit 0；**自检显式断言夹具真的含违规行**（防夹具写错导致假绿），变异 M7（检测行恒 null）⇒ 自检红 2 条。
+- `scripts/check-migration-range.mjs`：读实际迁移取 MIN/MAX（现 **0001–0076，68 个**），文档区间上限必须 == MAX；豁免含"记录面"（`docs/planning|decisions|releases`、`docs/AUDIT-*`、带日期文件名）—— 因为审计报告里"迁移 0001-0016 过时(实际 0001-0017)"是**当时**的发现，不该跟着 MAX 走（实测踩到并写进注释）。负例实跑 `[RANGE] … exit=1`；变异 M8（上限比较恒真）⇒ 自检红 2 条。
+- 冻结态实测 `corepack yarn check` = **12/12 根守卫全绿**（含 `check:no-leftover-mutants 6.9s`、`check:migration-range 3.6s`、`check:wasm-client-only 17.1s`）。
+- **L4 已声明停写** `scripts/**` 与根 `package.json`（未提交变更 8 个路径）。
+
+**⑥ W6/W7 到期项：`atomic-write` 切换（F3 泳道）**：设计 §16.1 允许的"包内临时助手"**已按约删除**，`packages/host/wasm-apps-host` 改用上游 `@deepseek-ai/dsh-atomic-write`（`writeFileAtomic`，权限位保持 `{mode:0o600, dirMode:0o700}`）。**并发冲突已发生并已最小改动处置**：F2 在该窗口新建的 `ai-authorization.ts:22` 引入了第三个调用点指向已删助手 ⇒ F3 把那一处也切到上游（只改 import 行与该行调用）。**给 F2 的复发警告已转达**：若用旧内容覆盖该文件会把坏 import 带回来。F3 实跑 `workspace @picoaide/dsh-wasm-apps-host check` = exit 0（18 文件 / 196 用例）。
+
+**⑦ 冻结纪律的两处文档修正（主控）**：`FREEZE-PROTOCOL.md` §1 的零残留期望值原写「B≤31」是**旧预算**（现 **B≤34**、ANN≤65、且 ANN 允许块级继承）⇒ 已改，否则冻结期照字面读会把 B=34 误判为超限；同时把已 gitignore 的 `l5-acceptance.sh` 换成**门禁组 8**（5 条文案判据已机器化），并补入两道新守卫。
+
+**⑧ 一条待销账的旧结论**：A2-L2 实测 enterprise = **534 passed / 1 skipped / 0 failed**，故台账 §T 的「L2 认账⑦（enterprise 的 8 MiB 分片上传 2 例非 L2、不作基线）」与 §19 R2-S-3 应**销账**（原结论过度保守）。
 
 ## H. 发布前置（**非本仓可完成**；主控登记，需人工/私有仓/真机）
 

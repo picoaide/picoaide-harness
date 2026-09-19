@@ -3,14 +3,24 @@
 ## 1. 服务端(PostgreSQL,PG-only 2026-08)
 
 > 2026-08 起 SQLite 已全面下线:服务端数据库为 PostgreSQL(内置容器或外部实例)。
-> 迁移在 `internal/serverstore/migrations-pg/`(0001–0060;0007 已废弃;0028 下线
+> 迁移在 `internal/serverstore/migrations-pg/`(0001–0076;0007 已废弃;0028 下线
 > 知识库/MCP 表并独立审计表 audit_logs;0039 usage 按月原生分区 + 日/月账本;
 > 0040/0041 归档直存 DB;0042 connectors;0043/0044 provider protocol;
 > 0045 glitchtip 下架;0046 rbac 角色;0047 brand 快照;0048 审计哈希链;
 > 0049 按模型并发峰值 model_concurrency_stats;0050-0056 能力中心/用量中心与
 > 报表订阅;0057 密码改密字段 + 管理员 MFA(admin_mfa_challenges);
 > 0058 模型输入模态 `models.input_modalities`;0059 能力中心「官方」`apps.official`;
-> 0060 LDAP 目录同步标记 ldap_synced_users(OIDC 用户不再被 LDAP 对账误停)
+> 0060 LDAP 目录同步标记 ldap_synced_users(OIDC 用户不再被 LDAP 对账误停);
+> 0061/0062 员工账户余额与账本(`users.balance_money`/`balance_ledger`,唯一计费
+> 闸门);0063 `usage.estimated`;0064 TOTP 防重放(`users.last_totp_step`);
+> 0065 `usage.provider_id`;0066 管理会话只存哈希(`admin_sessions.secret_hash`);
+> 0067 外部身份绑定(`users.external_id`/`external_source`);0068 客户端错误上报状态;
+> 0069-0072 WASM 应用平台与员工会话(应用登记/员工会话/访问级别/调用事件证据);
+> **0073 删除应用会话与员工会话表(`app_sessions`/`employee_sessions`)、0074 把存量
+> `access='public'` 改写为 `login`、0075 应用打开计数(`wasm_app_opens` 明细 +
+> `wasm_app_opens_daily` 日汇总)、0076 `usage.app_id`(应用维度归因)** —— 后四条随
+> 2026-09-19「WASM 应用客户端专属」改造落地(应用子域/换票/匿名面/服务端 `ai.chat`
+> 同批删除,见 03-api-reference.md §11b)
 > ——以 `migrations-pg/` 目录实际文件为准)。
 
 ### users(0001, 0046 起 role 取代 is_admin)

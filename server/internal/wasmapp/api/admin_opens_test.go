@@ -13,7 +13,14 @@ package api
 //   - 把响应里的 "access" 回显删掉 ⇒ C1 的回显用例红；
 //   - 把 summary 的 apps/trend/top_apps 任一置 nil（JSON 里变 null）⇒ C2 的"数组恒在"用例红；
 //   - 把 summary 的 UV 改成逐日相加 ⇒ C2 的去重用例红；
-//   - 把 attribution_available 恒 true ⇒ C4 的"暂无归因"用例红。
+//   - 把 totals.uv 改成"各应用 window_uv 相加" ⇒ C2 的 totals 用例红
+//     （TestAdminOpensSummaryTotalsUVNotSumOfApps：同一个人开两个应用时 1 ≠ 2）；
+//   - 把 attribution_available 恒 true ⇒ C4 的"暂无归因"用例红；
+//   - 把 AI 用量的 days= 忽略掉（只用缺省近 7 天）⇒ 窗口用例红。
+//
+// ⚠️ 响应形状（键名）是**跨端契约**（设计 §5.1c），由 webadmin 的
+// `opens-contract-parity.spec.ts` 读本包的 `gin.H{}` 与 serverstore 的 json tag
+// 与前端 interface 逐键对拍；本文件只负责**行为与语义**（去重、窗口、标题、恒在）。
 
 import (
 	"context"
@@ -88,10 +95,14 @@ func TestAdminOpensSummaryShapeAndWindowUV(t *testing.T) {
 	// 无法区分（实测踩过：只测有数据的场景时，把两处 `!= nil` 兜底全删掉仍然绿）。
 	emptyRec := e.req(http.MethodGet, "/api/server/admin/wasm-apps/opens/summary", e.tokens["boss"], nil)
 	emptyRaw := emptyRec.Body.String()
-	for _, want := range []string{`"apps":[]`, `"trend":[]`, `"top_apps":[]`} {
+	for _, want := range []string{`"apps":[]`, `"trend":[]`, `"top_apps":[]`, `"today":{`, `"totals":{`} {
 		if !strings.Contains(emptyRaw, want) {
-			t.Fatalf("无数据时必须是 %s（空数组而不是 null）: %s", want, emptyRaw)
+			t.Fatalf("无数据时必须是 %s（空数组/零值而不是 null 或省略）: %s", want, emptyRaw)
 		}
+	}
+	// 保留期是 §5.1c A 的契约字段（前端据此标注"多久以前的明细已经不在"）。
+	if !strings.Contains(emptyRaw, `"detail_retention_days":90`) {
+		t.Fatalf("响应必须带 detail_retention_days=90: %s", emptyRaw)
 	}
 
 	now := e.h.now().UTC()
@@ -114,20 +125,36 @@ func TestAdminOpensSummaryShapeAndWindowUV(t *testing.T) {
 
 	w := e.req(http.MethodGet, "/api/server/admin/wasm-apps/opens/summary?days=7&top=5", e.tokens["boss"], nil)
 	var out struct {
-		From   string            `json:"from"`
-		To     string            `json:"to"`
-		Days   int               `json:"days"`
-		Top    int               `json:"top"`
-		Capped bool              `json:"capped"`
-		Trend  []json.RawMessage `json:"trend"`
-		Apps   []struct {
-			AppID   string `json:"app_id"`
-			PV      int64  `json:"pv"`
-			UV      int64  `json:"uv"`
-			TodayPV int64  `json:"today_pv"`
-			TodayUV int64  `json:"today_uv"`
+		From                string `json:"from"`
+		To                  string `json:"to"`
+		Days                int    `json:"days"`
+		Top                 int    `json:"top"`
+		Capped              bool   `json:"capped"`
+		DetailRetentionDays int    `json:"detail_retention_days"`
+		Today               struct {
+			Day string `json:"day"`
+			PV  int64  `json:"pv"`
+			UV  int64  `json:"uv"`
+		} `json:"today"`
+		Totals struct {
+			PV int64 `json:"pv"`
+			UV int64 `json:"uv"`
+		} `json:"totals"`
+		Trend []json.RawMessage `json:"trend"`
+		Apps  []struct {
+			AppID    string `json:"app_id"`
+			Title    string `json:"title"`
+			WindowPV int64  `json:"window_pv"`
+			WindowUV int64  `json:"window_uv"`
+			TodayPV  int64  `json:"today_pv"`
+			TodayUV  int64  `json:"today_uv"`
 		} `json:"apps"`
-		TopApps []json.RawMessage `json:"top_apps"`
+		TopApps []struct {
+			AppID string `json:"app_id"`
+			Title string `json:"title"`
+			PV    int64  `json:"pv"`
+			UV    int64  `json:"uv"`
+		} `json:"top_apps"`
 	}
 	e.decodeJSON(w, http.StatusOK, &out)
 
@@ -145,19 +172,94 @@ func TestAdminOpensSummaryShapeAndWindowUV(t *testing.T) {
 		t.Fatalf("apps 应有 1 行，得到 %+v", out.Apps)
 	}
 	// ② UV 按**窗口**去重（3 次打开、2 个人 ⇒ uv=2，不是 3）。
-	if out.Apps[0].PV != 3 || out.Apps[0].UV != 2 {
-		t.Fatalf("窗口 pv/uv = %d/%d, want 3/2（uv 必须跨天去重，不是逐日相加）",
-			out.Apps[0].PV, out.Apps[0].UV)
+	//    键名是 `window_pv`/`window_uv`（§5.1c A：曾经这里发 pv/uv、前端读 window_*，
+	//    真实环境恒显示 —，即 R2-L6-1）。
+	if out.Apps[0].WindowPV != 3 || out.Apps[0].WindowUV != 2 {
+		t.Fatalf("窗口 window_pv/window_uv = %d/%d, want 3/2（uv 必须跨天去重，不是逐日相加）",
+			out.Apps[0].WindowPV, out.Apps[0].WindowUV)
 	}
 	// ③ 今日列：今天两次打开、两个人 ⇒ pv2/uv2。
 	if out.Apps[0].TodayPV != 2 || out.Apps[0].TodayUV != 2 {
 		t.Fatalf("今日 pv/uv = %d/%d, want 2/2", out.Apps[0].TodayPV, out.Apps[0].TodayUV)
+	}
+	// ④ `title` 来自应用登记表（§5.1c A：查不到就缺省，不得编造）。
+	if out.Apps[0].Title != "备忘工具" {
+		t.Fatalf("apps[].title = %q, want 备忘工具（来自 apps 登记表）", out.Apps[0].Title)
+	}
+	// ⑤ `today` / `totals`：读明细表的一次聚合（不是各行相加）。
+	if out.Today.Day == "" || out.Today.PV != 2 || out.Today.UV != 2 {
+		t.Fatalf("today = %+v, want day 非空 + pv2/uv2", out.Today)
+	}
+	if out.Totals.PV != 3 || out.Totals.UV != 2 {
+		t.Fatalf("totals = %+v, want pv3/uv2", out.Totals)
+	}
+	if out.DetailRetentionDays != serverstore.WasmAppOpensRetentionDays {
+		t.Fatalf("detail_retention_days = %d, want %d", out.DetailRetentionDays, serverstore.WasmAppOpensRetentionDays)
 	}
 	if out.Days != 7 || out.Top != 5 || out.Capped {
 		t.Fatalf("分页/窗口元数据不符: %+v", out)
 	}
 	if len(out.Trend) == 0 {
 		t.Fatal("趋势不应为空（已汇总过两天）")
+	}
+	// ⑥ top_apps：§5.1c A 的行形状 `{app_id,title,pv,uv}`，按窗口 PV 降序截断。
+	if len(out.TopApps) != 1 {
+		t.Fatalf("top_apps 应有 1 行，得到 %+v", out.TopApps)
+	}
+	if out.TopApps[0].AppID != "notes" || out.TopApps[0].Title != "备忘工具" ||
+		out.TopApps[0].PV != 3 || out.TopApps[0].UV != 2 {
+		t.Fatalf("top_apps[0] = %+v, want {notes 备忘工具 3 2}", out.TopApps[0])
+	}
+}
+
+// TestAdminOpensSummaryTotalsUVNotSumOfApps 钉住 §5.1c A 的**UV 禁令**：
+// `totals.uv` 必须是"不带 GROUP BY app_id 的一次聚合"，而**不是**各应用 uv 相加 ——
+// 同一个人打开两个应用时前者是 1、后者是 2（人数 vs 次数）。
+//
+// 变异验证：把 handler 里的 `sum.Totals` 换成"遍历 apps 累加 window_uv" ⇒ 本用例红。
+func TestAdminOpensSummaryTotalsUVNotSumOfApps(t *testing.T) {
+	e := newTestEnv(t)
+	seedOpenApp(t, e, "notes", "1.0.0", "备忘工具", true)
+	seedOpenApp(t, e, "board", "1.0.0", "看板", true)
+	now := e.h.now().UTC()
+
+	// **同一个人**今天打开了两个应用。
+	for _, appID := range []string{"notes", "board"} {
+		if err := serverstore.RecordWasmAppOpen(context.Background(), e.db, serverstore.WasmAppOpen{
+			AppID: appID, UserID: 1, At: now}); err != nil {
+			t.Fatalf("写明细(%s): %v", appID, err)
+		}
+	}
+	w := e.req(http.MethodGet, "/api/server/admin/wasm-apps/opens/summary?days=7&top=10", e.tokens["boss"], nil)
+	var out struct {
+		Today struct {
+			PV int64 `json:"pv"`
+			UV int64 `json:"uv"`
+		} `json:"today"`
+		Totals struct {
+			PV int64 `json:"pv"`
+			UV int64 `json:"uv"`
+		} `json:"totals"`
+		Apps []struct {
+			AppID    string `json:"app_id"`
+			WindowUV int64  `json:"window_uv"`
+		} `json:"apps"`
+	}
+	e.decodeJSON(w, http.StatusOK, &out)
+
+	var sumAppsUV int64
+	for _, a := range out.Apps {
+		sumAppsUV += a.WindowUV
+	}
+	if len(out.Apps) != 2 || sumAppsUV != 2 {
+		t.Fatalf("前置：两个应用各 1 个窗口 UV（合计 2），得到 %+v", out.Apps)
+	}
+	if out.Totals.UV != 1 {
+		t.Fatalf("totals.uv = %d, want 1 —— 同一个人开两个应用只算 1 个人；把各应用 uv 相加会得到 2（§5.1c A 明令禁止）",
+			out.Totals.UV)
+	}
+	if out.Totals.PV != 2 || out.Today.PV != 2 || out.Today.UV != 1 {
+		t.Fatalf("totals/today = %+v / %+v, want pv2 + uv1", out.Totals, out.Today)
 	}
 }
 
@@ -213,4 +315,41 @@ func TestAdminAppAIUsageDistinguishesMissingAttribution(t *testing.T) {
 		t.Fatalf("按日明细应有 1 行: %+v", out.Days)
 	}
 	_ = now
+}
+
+// TestAdminAppAIUsageDaysWindow 钉住契约 §5.1c B 文档化的 `?days=` 形态：
+// 文档里写着 `?days=|from=&to=`，实现静默忽略 days 会让调用方以为窗口变了、
+// 数字其实没变（与 R2-L6-3 的"静默窗口"同类）。
+//
+// 变异验证：把 handler 里 days 分支删掉（只用缺省近 7 天）⇒ 本用例红。
+func TestAdminAppAIUsageDaysWindow(t *testing.T) {
+	e := newTestEnv(t)
+	seedApp(t, e, "notes", "备忘工具", "alice", true)
+	now := e.h.now()
+
+	// ① days=30 ⇒ 近 30 天（含今天）。
+	w := e.req(http.MethodGet, "/api/server/admin/wasm-apps/notes/ai-usage?days=30", e.tokens["boss"], nil)
+	var out serverstore.WasmAppAIUsage
+	e.decodeJSON(w, http.StatusOK, &out)
+	if want := serverstore.LocalDayString(now.AddDate(0, 0, -29)); out.From != want {
+		t.Fatalf("days=30 ⇒ from=%s（近 30 天含今天），得到 %s", want, out.From)
+	}
+	if want := serverstore.LocalDayString(now); out.To != want {
+		t.Fatalf("to 缺省 = 今天 %s，得到 %s", want, out.To)
+	}
+
+	// ② 显式 from/to 优先于 days（拿到回显窗口再请求的场景不能被 days 覆盖）。
+	explicit := "from=2026-01-05&to=2026-01-09"
+	w = e.req(http.MethodGet, "/api/server/admin/wasm-apps/notes/ai-usage?"+explicit+"&days=30", e.tokens["boss"], nil)
+	e.decodeJSON(w, http.StatusOK, &out)
+	if out.From != "2026-01-05" || out.To != "2026-01-09" {
+		t.Fatalf("显式区间优先: from/to = %s/%s, want 2026-01-05/2026-01-09", out.From, out.To)
+	}
+
+	// ③ 不传 days / from ⇒ 仍是近 7 天（缺省不变）。
+	w = e.req(http.MethodGet, "/api/server/admin/wasm-apps/notes/ai-usage", e.tokens["boss"], nil)
+	e.decodeJSON(w, http.StatusOK, &out)
+	if want := serverstore.LocalDayString(now.AddDate(0, 0, -6)); out.From != want {
+		t.Fatalf("缺省仍是近 7 天（from=%s），得到 %s", want, out.From)
+	}
 }

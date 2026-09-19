@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -18,17 +20,56 @@ import (
 // 时间口径与 §5.1b 第 3 条冻结一致：`day` / `today` 都是**服务端本地日**
 // （`LocalDay` / `LocalDayString`），聚合窗口 [from, to] 按本地自然日（含两端）。
 
-// WasmAppOpenSummaryRow 是"一个应用在窗口内"的打开汇总。
+// WasmAppOpenSummaryRow 是"一个应用在窗口内"的打开汇总（`opens/summary` 的 `apps[]` 行）。
+//
+// 键名是**冻结契约**（设计 §5.1c A）：`window_pv`/`window_uv`（不是 `pv`/`uv`）+ `title`。
+// 曾经服务端发 `pv`/`uv`、webadmin 读 `window_pv`/`window_uv` ⇒ 真实环境里列表
+// 「近 N 日 PV/UV」两列恒显示 `—`（R2-L6-1，P1）。webadmin 的
+// `opens-contract-parity.spec.ts` 读本文件的 json tag 与前端 interface **逐键对拍**，
+// 任何一侧改名都会立刻变红。
 type WasmAppOpenSummaryRow struct {
 	AppID string `json:"app_id"`
-	// PV 是窗口内的打开次数（每次打开 +1，不去重）。
-	PV int64 `json:"pv"`
-	// UV 是**窗口内按 user_id 去重**的人数（不是逐日 UV 相加 —— 相加会把
-	// "同一个人天天来"算成 N 个人，正是 W5 C2 明确禁止的口径）。
-	UV int64 `json:"uv"`
+	// Title 来自应用登记表（`apps`）。登记行不存在或标题为空时是**空串** ——
+	// 调用方按缺省渲染（前端回落显示 app_id），**不得编造**（§5.1c A）。
+	Title string `json:"title"`
 	// TodayPV / TodayUV 是**今天**（本地日）的对应值，给列表列用。
 	TodayPV int64 `json:"today_pv"`
 	TodayUV int64 `json:"today_uv"`
+	// WindowPV 是窗口内的打开次数（每次打开 +1，不去重）。
+	WindowPV int64 `json:"window_pv"`
+	// WindowUV 是**窗口内按 user_id 去重**的人数（不是逐日 UV 相加 —— 相加会把
+	// "同一个人天天来"算成 N 个人，正是 W5 C2 明确禁止的口径）。
+	WindowUV int64 `json:"window_uv"`
+}
+
+// WasmAppOpenTopRow 是看板 TOP N 的一行（契约 §5.1c A：`{app_id,title,pv,uv}`）。
+//
+// 为什么**不复用** WasmAppOpenSummaryRow：契约给 `apps[]` 的窗口列起名
+// `window_pv`/`window_uv`，给 `top_apps[]` 起名 `pv`/`uv`。复用会让其中一侧多带
+// 对方的名字，而跨端对拍用例断言的是**集合相等**（多一个键也算漂移）。
+type WasmAppOpenTopRow struct {
+	AppID string `json:"app_id"`
+	Title string `json:"title"`
+	PV    int64  `json:"pv"`
+	UV    int64  `json:"uv"`
+}
+
+// WasmAppOpenSummaryToday 是 `today` 块（契约 §5.1c A：`{day,pv,uv}`）。
+//
+// 读**明细表**（与 §5.1b 的 `opens.today` 同源），保证"本次调用计数在内"。
+type WasmAppOpenSummaryToday struct {
+	Day string `json:"day"`
+	PV  int64  `json:"pv"`
+	UV  int64  `json:"uv"`
+}
+
+// WasmAppOpenSummaryTotals 是 `totals` 块（窗口合计）。
+//
+// ⚠️ 契约 §5.1c A 的硬约束：它必须是**不带 `GROUP BY app_id` 的一次聚合** ——
+// 把各应用的 `uv` 相加会把"同一个人开了两个应用"重复计数（UV 是人数，不是次数）。
+type WasmAppOpenSummaryTotals struct {
+	PV int64 `json:"pv"`
+	UV int64 `json:"uv"`
 }
 
 // WasmOpenTrendPoint 是趋势曲线上的一个点（按本地自然日）。
@@ -39,15 +80,32 @@ type WasmOpenTrendPoint struct {
 	UV int64 `json:"uv"`
 }
 
+// WasmAppOpensSummary 是看板概览的数据面（契约 §5.1c A 的 `apps`/`today`/`totals`/`trend`）。
+type WasmAppOpensSummary struct {
+	Apps   []WasmAppOpenSummaryRow
+	Trend  []WasmOpenTrendPoint
+	Today  WasmAppOpenSummaryToday
+	Totals WasmAppOpenSummaryTotals
+	Capped bool
+}
+
 // SummarizeWasmAppOpens 汇总窗口内的打开数据（W5 C2 的 `trend` / `apps` / `top_apps` 数据源）。
 //
-// 为什么 PV/UV 读**明细**而不是日汇总：窗口 UV 需要按 user_id 跨天去重，而日汇总表
-// 只有"每天每部门"的计数 —— 跨天去重不可能从它算出来（相加会重复计数）。
+// 三个读源口径（§5.1c A，**双读源是有意的**）：
+//   - `apps[]`（含每应用的今日/窗口 PV+UV）、`today`、`totals` 读**明细表**
+//     `wasm_app_opens`：窗口 UV 需要按 user_id 跨天去重，日汇总表只有"每天每部门"
+//     的计数，跨天去重不可能从它算出来（相加会重复计数）；
+//   - `trend[]` 读**日汇总** `wasm_app_opens_daily`（长期保留）—— 明细过期（90 天）后
+//     曲线仍在，不会出现"使用量断崖"的假象。
+//
+// `totals` 是**一次不带 `GROUP BY app_id` 的聚合**（不是把各行相加）：后者会把
+// "同一个人开两个应用"算成 2 个人。
+//
 // 明细保留 `WasmAppOpensRetentionDays`（90 天），因此窗口上限就是它；超过时
 // **收敛到 90 天**并把 `capped=true` 如实回报（不静默给一个偏小的数）。
 //
-// now 只用于"今天"那一列（本地日）。
-func SummarizeWasmAppOpens(ctx context.Context, db *sql.DB, from, to time.Time, now time.Time) (apps []WasmAppOpenSummaryRow, trend []WasmOpenTrendPoint, capped bool, err error) {
+// now 用于"今天"那一列与 `today.day`（本地日）。
+func SummarizeWasmAppOpens(ctx context.Context, db *sql.DB, from, to time.Time, now time.Time) (*WasmAppOpensSummary, error) {
 	start := LocalDay(from)
 	end := LocalDay(to)
 	if end.Before(start) {
@@ -55,6 +113,7 @@ func SummarizeWasmAppOpens(ctx context.Context, db *sql.DB, from, to time.Time, 
 	}
 	// 窗口上限：明细只保留 90 天。capped=true 让调用方（与前端）知道"你要的窗口
 	// 比数据活得更久"，而不是以为"那么久以前没人用"。
+	capped := false
 	if maxStart := LocalDay(now).AddDate(0, 0, -(WasmAppOpensRetentionDays - 1)); start.Before(maxStart) {
 		start, capped = maxStart, true
 	}
@@ -62,55 +121,83 @@ func SummarizeWasmAppOpens(ctx context.Context, db *sql.DB, from, to time.Time, 
 	todayAt := LocalDay(now).UTC()
 	todayEnd := LocalDay(now).AddDate(0, 0, 1).UTC()
 
-	apps = []WasmAppOpenSummaryRow{}
+	out := &WasmAppOpensSummary{
+		Apps:   []WasmAppOpenSummaryRow{},
+		Trend:  []WasmOpenTrendPoint{},
+		Capped: capped,
+		Today:  WasmAppOpenSummaryToday{Day: LocalDayString(now)},
+	}
+
+	// ① 每个应用的窗口/今日计数（**明细表**）+ 应用标题（左连登记表；查不到就是空串）。
+	//
+	// 为什么要连 `apps`：`title` 是契约字段（§5.1c A），而明细表只有 app_id。
+	// `apps` 的主键是 (kind, app_id) ⇒ 这是一对一左连，不会让聚合行翻倍；
+	// 软删（deleted_at 非空）的登记行**照样取标题** —— 历史打开记录仍要显示得懂。
 	rows, qerr := db.QueryContext(ctx, `
-		SELECT app_id,
+		SELECT o.app_id, COALESCE(a.title, '') AS title,
 		       count(*) AS pv,
-		       count(DISTINCT user_id) AS uv,
-		       count(*) FILTER (WHERE opened_at >= $3 AND opened_at < $4) AS today_pv,
-		       count(DISTINCT user_id) FILTER (WHERE opened_at >= $3 AND opened_at < $4) AS today_uv
-		  FROM wasm_app_opens
-		 WHERE opened_at >= $1 AND opened_at < $2
-		 GROUP BY app_id
-		 ORDER BY pv DESC, app_id`, startAt, endAt, todayAt, todayEnd)
+		       count(DISTINCT o.user_id) AS uv,
+		       count(*) FILTER (WHERE o.opened_at >= $3 AND o.opened_at < $4) AS today_pv,
+		       count(DISTINCT o.user_id) FILTER (WHERE o.opened_at >= $3 AND o.opened_at < $4) AS today_uv
+		  FROM wasm_app_opens o
+		  LEFT JOIN apps a ON a.kind = $5 AND a.app_id = o.app_id
+		 WHERE o.opened_at >= $1 AND o.opened_at < $2
+		 GROUP BY o.app_id, a.title
+		 ORDER BY pv DESC, o.app_id`, startAt, endAt, todayAt, todayEnd, AppKindWasmApp)
 	if qerr != nil {
-		return nil, nil, capped, fmt.Errorf("汇总应用打开: %w", qerr)
+		return nil, fmt.Errorf("汇总应用打开: %w", qerr)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var r WasmAppOpenSummaryRow
-		if serr := rows.Scan(&r.AppID, &r.PV, &r.UV, &r.TodayPV, &r.TodayUV); serr != nil {
-			return nil, nil, capped, serr
+		if serr := rows.Scan(&r.AppID, &r.Title, &r.WindowPV, &r.WindowUV, &r.TodayPV, &r.TodayUV); serr != nil {
+			return nil, serr
 		}
-		apps = append(apps, r)
+		out.Apps = append(out.Apps, r)
 	}
 	if rerr := rows.Err(); rerr != nil {
-		return nil, nil, capped, rerr
+		return nil, rerr
 	}
 
-	// 趋势按**日汇总**读（长期保留；明细过期后曲线仍在），与 apps 的窗口口径不同源
+	// ② `today` / `totals`：**同一次聚合**（都读明细表，都不带 `GROUP BY app_id`）。
+	//
+	// `today` 与 `apps[].today_*` 用同一个窗口条件（`to` 通常就是 now）⇒ 两块数字
+	// 永远同源一致；`totals.uv` / `today.uv` 是真正的人数去重（不是各行相加）。
+	var totPV, totUV, todayPV, todayUV int64
+	if qerr := db.QueryRowContext(ctx, `
+		SELECT count(*), count(DISTINCT user_id),
+		       count(*) FILTER (WHERE opened_at >= $3 AND opened_at < $4),
+		       count(DISTINCT user_id) FILTER (WHERE opened_at >= $3 AND opened_at < $4)
+		  FROM wasm_app_opens
+		 WHERE opened_at >= $1 AND opened_at < $2`, startAt, endAt, todayAt, todayEnd).
+		Scan(&totPV, &totUV, &todayPV, &todayUV); qerr != nil {
+		return nil, fmt.Errorf("汇总窗口合计: %w", qerr)
+	}
+	out.Totals = WasmAppOpenSummaryTotals{PV: totPV, UV: totUV}
+	out.Today.PV, out.Today.UV = todayPV, todayUV
+
+	// ③ 趋势按**日汇总**读（长期保留；明细过期后曲线仍在），与 apps 的窗口口径不同源
 	// 是有意的：趋势是"历史形状"，不该因为明细过期而断档。
-	trend = []WasmOpenTrendPoint{}
 	trows, terr := db.QueryContext(ctx, `
 		SELECT day::text, SUM(pv), SUM(uv) FROM wasm_app_opens_daily
 		 WHERE day >= $1 AND day <= $2
 		 GROUP BY 1 ORDER BY 1`,
 		LocalDayString(start), LocalDayString(end))
 	if terr != nil {
-		return nil, nil, capped, fmt.Errorf("汇总应用打开趋势: %w", terr)
+		return nil, fmt.Errorf("汇总应用打开趋势: %w", terr)
 	}
 	defer trows.Close()
 	for trows.Next() {
 		var p WasmOpenTrendPoint
 		if serr := trows.Scan(&p.Day, &p.PV, &p.UV); serr != nil {
-			return nil, nil, capped, serr
+			return nil, serr
 		}
-		trend = append(trend, p)
+		out.Trend = append(out.Trend, p)
 	}
 	if rerr := trows.Err(); rerr != nil {
-		return nil, nil, capped, rerr
+		return nil, rerr
 	}
-	return apps, trend, capped, nil
+	return out, nil
 }
 
 // WasmAppAIUsageDay 是应用维度 AI 用量的一天。
@@ -199,16 +286,95 @@ func QueryWasmAppAIUsage(ctx context.Context, db *sql.DB, appID string, from, to
 	return out, nil
 }
 
-// localZoneName 返回服务端本地时区的**IANA 名**（给 SQL 的 `AT TIME ZONE` 用）。
+// localZoneName 返回服务端本地时区的**PG 时区名**（给 SQL 的 `AT TIME ZONE` 用）。
 //
 // 与 LocalDay 的分工：LocalDay 在 Go 侧算日边界（明细/汇总的写入口径），这里只是
 // 让 **usage 的分组**也按同一个本地日显示 —— usage.created_at 是分区键，按它
 // 分组必须带时区，否则会按 PG 会话时区分桶（与应用侧口径不同源）。
-// 取不到名字（TZ 是 POSIX 形态/固定偏移）时回落 'UTC' 并在数据上如实体现（不猜）。
+//
+// ⚠️ `time.Local.String()` **不保证**是 PG 认识的名字（R2-L1-3，2026-09-20）：
+//
+//	TZ=Asia/Shanghai                       → "Asia/Shanghai"（IANA 名，直接用）
+//	TZ=:/usr/share/zoneinfo/Asia/Shanghai  → Go 的 initLocal 把**路径本身**当名字
+//	                                         ⇒ PG 报 `time zone "…" not recognized` ⇒ 500
+//	未设 TZ（名字是 "Local"）              → 只有 /etc/localtime 的符号链接能反解出名字
+//	TZ=CST-8 / TZ=Not/AZone（POSIX/非法）  → Go 自己回落 UTC（名字就是 "UTC"，一致）
+//
+// ⇒ 只把**经 `time.LoadLocation` 认过的 IANA 名**交给 PG；解不出就回落 "UTC" 并 warn
+// （回落与 Go 侧一致：POSIX/非法 TZ 时 Go 的 `time.Local` 本身就是 UTC）。绝不把
+// 路径、POSIX 串或任意字符串当"时区名"递给 PG —— 那会让 C4 端点 500（C1/C2 正常，
+// 因为它们走纯 Go 的 LocalDay）。
 func localZoneName() string {
 	name := time.Local.String()
-	if name == "" || name == "Local" {
-		return "UTC"
+	if zone, ok := zoneNameForSQL(name); ok {
+		return zone
 	}
-	return name
+	// "Local" = 未设 TZ：Go 从 /etc/localtime 拿到了**真实偏移**但把名字置成 "Local"。
+	// 能从符号链接反解出 IANA 名就用它 —— 否则 SQL 按 UTC 分日而 Go 侧 LocalDay 用
+	// 真实偏移，同一份数据会出现两套"本地日"（两处口径必须同源）。
+	if name == "" || name == "Local" {
+		if zone, ok := zoneNameFromLocaltime("/etc/localtime"); ok {
+			return zone
+		}
+	}
+	log.Printf("wasm_app_opens: 本地时区名 %q 不能作为 PG 时区（AT TIME ZONE 只认 IANA 名）"+
+		"⇒ 按日分组回落 UTC；要按本地日分组请把 TZ 设为 IANA 名（如 Asia/Shanghai）", name)
+	return "UTC"
+}
+
+// zoneNameForSQL 把 `time.Local.String()` 的形态规范成 PG 认识的时区名。
+//
+// 只有两种形态能过：① IANA 名（`time.LoadLocation` 认）；② zoneinfo 下的**路径**
+// （TZ 写成 `:/usr/share/zoneinfo/Asia/Shanghai` 时 Go 会原样把路径当名字）—— 后者
+// 剥掉根前缀后仍要经 `time.LoadLocation` 复核，避免把 `..` 或任意路径拼成"名字"。
+func zoneNameForSQL(name string) (string, bool) {
+	candidate := strings.TrimSpace(name)
+	// "Local" 必须在 LoadLocation 之前挡掉：`time.LoadLocation("Local")` 会成功返回
+	// `time.Local`（名字仍是 "Local"），而 "Local" 不是 PG 认识的时区名。
+	if candidate == "" || candidate == "Local" {
+		return "", false
+	}
+	if _, err := time.LoadLocation(candidate); err == nil {
+		return candidate, true
+	}
+	return zoneNameFromZoneinfoPath(candidate)
+}
+
+// zoneinfoRoots 是 zoneinfo 的候选根（与 `time` 包的 platformZoneSources 同口径；
+// 最后一条是 macOS 的布局，Linux 服务器上不存在也不影响）。
+var zoneinfoRoots = []string{
+	"/usr/share/zoneinfo/",
+	"/usr/share/lib/zoneinfo/",
+	"/usr/lib/zoneinfo/",
+	"/usr/local/share/zoneinfo/",
+	"/var/db/timezone/zoneinfo/",
+}
+
+// zoneNameFromZoneinfoPath 从 zoneinfo 下的**绝对路径**反解 IANA 名（解不出返回 false）。
+func zoneNameFromZoneinfoPath(path string) (string, bool) {
+	if !filepath.IsAbs(path) {
+		return "", false
+	}
+	clean := filepath.Clean(path)
+	for _, root := range zoneinfoRoots {
+		rel, err := filepath.Rel(filepath.Clean(root), clean)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		zone := filepath.ToSlash(rel)
+		if _, err := time.LoadLocation(zone); err == nil {
+			return zone, true
+		}
+	}
+	return "", false
+}
+
+// zoneNameFromLocaltime 从 localtime（通常是指向 zoneinfo 的符号链接）反解 IANA 名。
+// 纯函数（path 由调用方给），因此"未设 TZ"这条路径可以在不依赖宿主环境的前提下被测试。
+func zoneNameFromLocaltime(path string) (string, bool) {
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", false
+	}
+	return zoneNameFromZoneinfoPath(target)
 }

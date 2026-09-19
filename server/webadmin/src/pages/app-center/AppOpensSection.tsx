@@ -19,6 +19,7 @@ import {
   countText,
   daySeries,
   detailTotals,
+  effectiveWindowText,
   numOrNull,
   opensDetailPath,
   requireOpensDetail,
@@ -65,11 +66,25 @@ export interface OpensOverview {
 type DeptNames = Record<string, string>
 
 
-/** 查询窗口选项：明细上限 90 天之外只有日汇总，所以第三档是"全部（长期日汇总）"。 */
+/**
+ * 查询窗口选项。
+ *
+ * ⚠️ **「全部（长期日汇总）」必须显式请求 90 天窗口**（§5.1c C，R2-L6-3）：
+ * 这一档曾经写成 `days: 0` ⇒ 不传 `from`/`to` ⇒ 服务端按缺省回落"近 7 天"，
+ * 而响应里的 `from`/`to` 前端又不渲染 ⇒ 管理员以为看的是全部历史，实际是 7 天
+ * （静默少数据，且无从察觉）。现在这一档与「近 90 天」是同一个窗口，
+ * 所以合并成一档：标签直说"实取近 90 天"，页面另外**渲染服务端回显的生效窗口**。
+ *
+ * 明细只保留 90 天（`OPENS_DETAIL_RETENTION_DAYS`），更早的只有日汇总 ——
+ * 想要更长区间需要服务端新增"读汇总"的窗口参数，不在本期（如实标注，不假装能看全部）。
+ */
 const RANGES: { value: string; label: string; days: number }[] = [
   { value: '30', label: '近 30 天', days: 30 },
-  { value: '90', label: `近 ${OPENS_DETAIL_RETENTION_DAYS} 天（明细上限）`, days: OPENS_DETAIL_RETENTION_DAYS },
-  { value: 'all', label: '全部（长期日汇总）', days: 0 },
+  {
+    value: 'all',
+    label: `全部（长期日汇总 · 实取近 ${OPENS_DETAIL_RETENTION_DAYS} 天）`,
+    days: OPENS_DETAIL_RETENTION_DAYS,
+  },
 ]
 
 const GRANULARITIES: { value: 'day' | 'dept'; label: string }[] = [
@@ -100,11 +115,12 @@ export function AppOpensSection({ appId, canRead, overview }: {
     setFailure(null)
     const qs = new URLSearchParams()
     const r = RANGES.find((x) => x.value === range)
-    if (r && r.days > 0) {
-      const preset = rangePreset(r.days)
-      qs.set('from', preset.from)
-      qs.set('to', preset.to)
-    }
+    // **每一档都带显式 from/to**（含「全部」）：把窗口表达成"不传参"会让服务端
+    // 按缺省回落（近 7 天）而前端无从察觉（§5.1c C / R2-L6-3）。
+    const days = r?.days ?? RANGES[0].days
+    const preset = rangePreset(days)
+    qs.set('from', preset.from)
+    qs.set('to', preset.to)
     qs.set('granularity', granularity)
     const query = qs.toString()
     try {
@@ -263,6 +279,16 @@ export function AppOpensSection({ appId, canRead, overview }: {
           {' · '}UV <span className="font-mono text-foreground" data-testid="app-opens-range-uv">{countText(totals.uv)}</span>
         </span>
       </div>
+
+      {/* 生效窗口**必须渲染**（§5.1c C / R2-L6-3）：服务端的 from/to 缺省回落
+          （近 7 天）只体现在响应里；不显示它，管理员就无从察觉档位被静默改写。 */}
+      {!failure && data !== null && (
+        <p className="text-[11px] text-muted-foreground" data-testid="app-opens-effective-window">
+          {effectiveWindowText(data)}
+          {' · '}
+          明细保留 {data.detail_retention_days ?? OPENS_DETAIL_RETENTION_DAYS} 天
+        </p>
+      )}
 
       {/* UV 口径（服务端 `total_uv` = 按日×部门去重后加总）：多部门日在图里说清，
           单部门日才敢说"当日去重人数"。**不把加总值写成区间去重人数。** */}

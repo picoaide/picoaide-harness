@@ -1,16 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import {
   AI_ATTRIBUTION_NOTE,
+  AI_USAGE_WINDOW_DAYS,
   OPENS_DETAIL_RETENTION_DAYS,
+  OPENS_MISSING_ROW_NOTE,
   OPENS_PRIVACY_NOTE,
   OPENS_RETENTION_NOTE,
   OPENS_SUMMARY_PATH,
-  aiUsageIsEmpty,
   aiUsagePath,
+  aiUsageTokens,
+  aiUsageView,
+  appOpenCounts,
   classifyEndpointFailure,
   countText,
   daySeries,
   detailTotals,
+  effectiveWindowText,
   opensDetailPath,
   rankTopApps,
   requireAiUsage,
@@ -48,7 +53,7 @@ describe('打开次数 · PV 不去重', () => {
     // 变异验证：改成 points.length（=3）或 max(pv)（=3）⇒ 本用例必红。
     expect(sumOpenPv(POINTS)).toBe(6)
     // 同一天内同一个人的多次打开会各占一次 PV（这正是"不去重"的含义）。
-    expect(sumOpenPv([{ day: '2026-09-19', pv: 5, uv: 1 }])).toBe(5)
+    expect(sumOpenPv([{ pv: 5, uv: 1 }])).toBe(5)
     // 空窗口 = 确实没有打开（0 是真值）；**没有数组** = 读不到（null ⇒ 界面 —）。
     expect(sumOpenPv([])).toBe(0)
     expect(sumOpenPv(null)).toBeNull()
@@ -131,19 +136,44 @@ describe('热门应用 TOP N · 排序与截断', () => {
   })
 })
 
-describe('AI 用量 · 空状态（§21.4 无归因 ≠ 0 次）', () => {
-  it('全 0 且没有按日点 ⇒ 空（面板渲染空状态而不是 0 次 / ¥0.00）', () => {
-    // 变异验证：把 aiUsageIsEmpty 改成恒 false ⇒ 本用例必红（面板会渲染 0）。
-    expect(aiUsageIsEmpty({ calls: 0, cost: 0, total_tokens: 0, points: [] })).toBe(true)
-    expect(aiUsageIsEmpty(null)).toBe(true)
-    // 有按日点但统计字段缺省，也不算空（服务端给了明细就说明有归因数据）。
-    expect(aiUsageIsEmpty({ points: [{ day: '2026-09-19', calls: 1, tokens: 10, cost: 0.1 }] })).toBe(false)
+describe('AI 用量 · 三态（§5.1c B：「统计未上线」≠「零调用」）', () => {
+  /** 服务端真实形状的全零合计（§5.1c B）。 */
+  const ZERO_TOTAL = { day: '', requests: 0, prompt_tokens: 0, completion_tokens: 0, cache_prompt_tokens: 0, cost: 0 }
+
+  it('attribution_available=false（统计未上线）与 true（确实零调用）**必须分开**', () => {
+    // 变异验证：把 aiUsageView 的两条 attribution 分支删掉（都返回 zero_calls）⇒
+    // 本用例第一条断言必红 —— 两者数字都是 0、含义相反（§21.4）。
+    expect(aiUsageView({ days: [], total: ZERO_TOTAL, attribution_available: false })).toBe('no_attribution')
+    expect(aiUsageView({ days: [], total: ZERO_TOTAL, attribution_available: true })).toBe('zero_calls')
+    // 缺 attribution_available ⇒ 既不能说"零调用"也不能渲染 0。
+    expect(aiUsageView({ days: [], total: ZERO_TOTAL })).toBe('indeterminate')
+    expect(aiUsageView(null)).toBe('indeterminate')
+    // 分项缺失（形状漂移）同样不许判成"确实零调用"。
+    expect(aiUsageView({ days: [], attribution_available: true })).toBe('indeterminate')
   })
 
-  it('任意一项非 0 ⇒ 不是空状态', () => {
-    expect(aiUsageIsEmpty({ calls: 3, cost: 0, total_tokens: 0, points: [] })).toBe(false)
-    expect(aiUsageIsEmpty({ calls: 0, cost: 0.5, total_tokens: 0, points: [] })).toBe(false)
-    expect(aiUsageIsEmpty({ calls: 0, cost: 0, total_tokens: 900, points: [] })).toBe(false)
+  it('有数据（任一计数 > 0 或存在按日行）⇒ data', () => {
+    expect(aiUsageView({
+      days: [], total: { ...ZERO_TOTAL, requests: 3 }, attribution_available: true,
+    })).toBe('data')
+    expect(aiUsageView({
+      days: [], total: { ...ZERO_TOTAL, cost: 0.5 }, attribution_available: true,
+    })).toBe('data')
+    expect(aiUsageView({
+      days: [], total: { ...ZERO_TOTAL, prompt_tokens: 900 }, attribution_available: true,
+    })).toBe('data')
+    // 合计全零但有按日行 ⇒ 仍算有数据（明细在，说明有归因）。
+    expect(aiUsageView({
+      days: [{ day: '2026-09-19', requests: 1, cost: 0.1 }], total: ZERO_TOTAL, attribution_available: true,
+    })).toBe('data')
+  })
+
+  it('总 token = 输入 + 输出（缓存命中已含在输入里，不重复加）；缺分项 ⇒ null', () => {
+    // 变异验证：把 cache_prompt_tokens 也加进来 ⇒ 第一条断言红（900 ≠ 1000）。
+    expect(aiUsageTokens({ prompt_tokens: 600, completion_tokens: 300, cache_prompt_tokens: 100 })).toBe(900)
+    expect(aiUsageTokens({ prompt_tokens: 600 })).toBeNull()
+    expect(aiUsageTokens(undefined)).toBeNull()
+    expect(countText(aiUsageTokens({ prompt_tokens: 600 }))).toBe('—')
   })
 
   it('归因说明写清"账单归使用者账号 / 老客户端无归因"', () => {
@@ -191,7 +221,9 @@ describe('降级分类 · 缺后端不得显示 0', () => {
     expect(badDetail.ok).toBe(false)
     if (!badDetail.ok) expect(badDetail.detail).toContain('points')
 
-    expect(requireAiUsage({ points: [] }).ok).toBe(true)
+    expect(requireAiUsage({ days: [] }).ok).toBe(true)
+    // 旧契约的 `points` 不是服务端的字段（R2-L6-2 的病根）：只有它必须判漂移。
+    expect(requireAiUsage({ points: [] }).ok).toBe(false)
     expect(requireAiUsage({ calls: 3 }).ok).toBe(false)
   })
 })
@@ -282,5 +314,49 @@ describe('明细缺失语义 · 不把"读不到"渲染成 0（CTL-11）', () =>
     expect(detailTotals({ total_pv: 6, total_uv: 3 })).toEqual({ pv: 6, uv: 3 })
     expect(detailTotals({})).toEqual({ pv: null, uv: null })
     expect(detailTotals(null)).toEqual({ pv: null, uv: null })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R2-L6-3 / R2-L6-4 的机器判据：
+//   ③ 生效窗口**必须**渲染（服务端 from/to 缺省回落只体现在响应里）；
+//   ④ 缺「行」（服务端省略零打开的应用）⇒ 按 0 计；缺「字段」⇒ —（两件事不许混）。
+// ---------------------------------------------------------------------------
+describe('生效窗口与"缺行 vs 缺字段"（R2-L6-3 / R2-L6-4）', () => {
+  it('effectiveWindowText：回显服务端 from/to；缺失时如实说"无法确认"，不猜', () => {
+    // 变异验证：改成回落到本地请求窗口（或直接返回空串）⇒ 前两条断言必红，
+    // 而"静默退化成近 7 天"正是 R2-L6-3。
+    expect(effectiveWindowText({ from: '2026-06-22', to: '2026-09-19' }))
+      .toBe('生效窗口：2026-06-22 ~ 2026-09-19')
+    expect(effectiveWindowText({ from: '2026-06-22' })).toContain('无法确认')
+    expect(effectiveWindowText({})).toContain('无法确认')
+    expect(effectiveWindowText(null)).toContain('无法确认')
+  })
+
+  it('appOpenCounts：服务端没有该应用的行 ⇒ 四项按 **0** 计（不是 —）', () => {
+    // 变异验证：把缺失行改回 `null`（界面显示 —）⇒ 本用例必红 ——
+    // 服务端 `GROUP BY app_id` 一定会省略零打开的应用，整列会大面积显示 —（真值是 0）。
+    expect(appOpenCounts(undefined)).toEqual({
+      todayPv: 0, todayUv: 0, windowPv: 0, windowUv: 0, missingRow: true,
+    })
+    expect(appOpenCounts(null).missingRow).toBe(true)
+    expect(OPENS_MISSING_ROW_NOTE).toContain('按 0 计')
+    expect(OPENS_MISSING_ROW_NOTE).toContain('形状漂移')
+  })
+
+  it('appOpenCounts：行在而字段缺失 ⇒ null（显示 —，CTL-11；不与"缺行"混为一谈）', () => {
+    const counts = appOpenCounts({ app_id: 'a', title: '甲', window_pv: 5 })
+    expect(counts.missingRow).toBe(false)
+    expect(counts.windowPv).toBe(5)
+    expect(counts.windowUv).toBeNull()
+    expect(counts.todayPv).toBeNull()
+    expect(countText(counts.windowUv)).toBe('—')
+    // 行在且四项齐全 ⇒ 原值。
+    expect(appOpenCounts({ app_id: 'a', today_pv: 1, today_uv: 1, window_pv: 5, window_uv: 2 }))
+      .toEqual({ todayPv: 1, todayUv: 1, windowPv: 5, windowUv: 2, missingRow: false })
+  })
+
+  it('AI 用量面板显式请求窗口（不靠服务端缺省）——常量存在且为正', () => {
+    expect(AI_USAGE_WINDOW_DAYS).toBeGreaterThan(0)
   })
 })

@@ -33,6 +33,8 @@
  * @module @picoaide/dsh-wasm-apps/client/app-ai
  */
 
+import { fetchWithHostProof } from './host-proof.ts'
+
 /**
  * 本机保留路径（§21.2 冻结：协议 handler 本地处理，绝不转发平台）。
  *
@@ -499,4 +501,53 @@ export function revokeAppAiConsent(userId: string, appId: string, store: AppAiCo
   try {
     store.removeItem(appAiConsentKey(userId, appId))
   } catch { /* 同上 */ }
+}
+
+/**
+ * 宿主侧的授权路由（**唯一入口**；`wasm-apps-host` 的 `WASM_APP_AI_CONSENT_ROUTE`）。
+ *
+ * 为什么需要它：本模块上面那三个函数只写渲染层的 `localStorage` —— 那是**UI 记忆**
+ * （决定"要不要再弹一次说明卡"），而真正的闸门在宿主（`ai-chat.ts` 的
+ * `AiChatAuthorization`，`handleAiChat` 先查它再碰模型）。两边不连通就会出现
+ * "点了允许、界面上也不再问，但每次调用仍然 403" —— 一条只在真机上才看得见的缝。
+ */
+export const APP_AI_CONSENT_PATH = '/api/pico/wasm-apps/ai/consent'
+
+/** 授权同步的结果（失败时 `message` 是给维护者看的诊断细节）。 */
+export type AppAiConsentSync = { ok: true } | { ok: false, message: string }
+
+/**
+ * 把"允许/撤销"写到宿主（本机写路由，带持有性证明；**不是**平台调用）。
+ *
+ * 失败**永不抛**：返回结构化结果，调用方据此决定是否放行 UI —— 宿主没记住的授权
+ * 不能让界面看起来"已经允许"（下一次调用会 403）。
+ * @param appId - 应用标识。
+ * @param granted - true = 允许，false = 撤销。
+ * @param deps - 可注入 fetch（测试用）。
+ * @returns 同步结果。
+ */
+export async function syncAppAiConsent(
+  appId: string,
+  granted: boolean,
+  deps: AppAiDeps = { fetch: (...args: Parameters<typeof fetch>) => fetch(...args) },
+): Promise<AppAiConsentSync> {
+  let response: Response | null
+  try {
+    response = await fetchWithHostProof(APP_AI_CONSENT_PATH, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ app_id: appId, granted }),
+      credentials: 'same-origin',
+    }, { fetch: deps.fetch })
+  } catch (cause) {
+    return { ok: false, message: `the host consent route is unreachable: ${cause instanceof Error ? cause.message : String(cause)}` }
+  }
+  // `null` = 拿不到持有性证明（宿主 fail-closed）；调用方按"没同步"处理。
+  if (response === null) return { ok: false, message: 'the host proof could not be issued; the consent was not persisted' }
+  if (!response.ok) {
+    let body = ''
+    try { body = (await response.text()).slice(0, 200) } catch { body = '' }
+    return { ok: false, message: `the host refused the consent (HTTP ${String(response.status)}): ${body}` }
+  }
+  return { ok: true }
 }

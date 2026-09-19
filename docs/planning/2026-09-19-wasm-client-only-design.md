@@ -140,6 +140,37 @@
 | 版本比较（冻结） | 客户端缓存目录名含 version；`changed=true` ⇒ **清掉该应用在当前 `session-scope` 下的全部版本缓存**（不是只清旧版本），然后按新版本重新填充 |
 | **明确不动** | 应用数据库（服务端 SQLite，`db.*` 写入的数据）、应用资源抽取目录、平台数据根 —— 清缓存只清客户端内容缓存 |
 
+### 5.1c 服务端：管理端看板两端的响应契约（主控 2026-09-20 补齐文档空洞）
+
+> **为什么补这一节**：§5.1b 只钉了 `open` 的响应，**从未钉过管理端看板的响应键**，于是服务端（L1）与 webadmin（L6）各自钉了自己的字面量（前端把契约写在 `opens-contract.ts` 的注释里、服务端写在 `admin_opens.go` 的 `gin.H{}` 里，两侧都没读到对方）⇒ 真实环境里 **C2 打开概览与 C4 AI 用量出不了数**（A2-L6 第二轮审计 **R2-L6-1/R2-L6-2，P1**；症状是看板「今日 PV/UV」「窗口 UV」与列表「近 N 日」恒显示 `—`）。**本节的键集即权威**：两端逐字一致，并由**跨端对拍用例**守住（读 Go 侧结构体/处理器键 + 前端声明键，集合相等），**禁止再各用各的夹具**（章程 §3「各钉自己的字面量」）。
+
+**A. 打开看板概览 `GET /api/server/admin/wasm-apps/opens/summary?days=&top=`**
+
+```json
+{
+  "from": "YYYY-MM-DD", "to": "YYYY-MM-DD", "days": 7, "top": 10,
+  "capped": false, "detail_retention_days": 90,
+  "today":  { "day": "YYYY-MM-DD", "pv": 0, "uv": 0 },
+  "totals": { "pv": 0, "uv": 0 },
+  "trend":  [{ "day": "YYYY-MM-DD", "pv": 0, "uv": 0 }],
+  "apps":   [{ "app_id": "…", "title": "…", "today_pv": 0, "today_uv": 0, "window_pv": 0, "window_uv": 0 }],
+  "top_apps": [{ "app_id": "…", "title": "…", "pv": 0, "uv": 0 }]
+}
+```
+
+语义（**冻结，逐条要有判据**）：
+- **读源**：`apps[]` / `today` / `totals` 读**明细表** `wasm_app_opens`（与 §5.1b 的 `opens.today` 同源，保证"本次调用计数在内"）；`trend[]` 读**日汇总**（长期保留，明细过期后曲线不断档）。**两个读源并存是有意的，不是 bug**。
+- **UV 一律真实去重**：`uv` = `count(DISTINCT user_id)`。**禁止**把日汇总的逐日 `uv` 相加，**禁止**把各应用的 `uv` 相加（同一个人开两个应用会被重复计）⇒ `totals.uv` / `today.uv` 必须是**不带 `GROUP BY app_id` 的一次聚合**。这是 W5 C2 既有禁令的延伸。
+- **`capped=true`**：请求窗口长于明细保留期（90 天）时收敛到保留期并**如实回报**，不静默给一个偏小的数。
+- **`title`**：来自应用登记表；**查不到就缺省**（前端按缺省渲染），**不得编造**。
+- 三个数组与 `today` / `totals` **恒在**（空就空数组/零值）⇒ 前端据此区分"端点不支持"与"确实是 0"。
+
+**B. 应用 AI 用量 `GET /api/server/admin/wasm-apps/:app_id/ai-usage?days=|from=&to=`**
+
+契约以服务端 `WasmAppAIUsage` 为准：`{app_id,from,to,days:[{day,requests,prompt_tokens,completion_tokens,cache_prompt_tokens,cost}],total:{…},attribution_available}`。webadmin **必须**按此形状读取，且**必须消费 `attribution_available`**：`false` ⇒ 渲染"统计尚未上线/无归因"的说明；`true` 且全零 ⇒ 渲染"确实零调用"。**两者在数字上都是 0、含义相反，混淆即违反 §21.4。**
+
+**C. 详情窗口不得静默退化（R2-L6-3）**：`GET …/:app_id/opens` 缺 `from`/`to` 时服务端回落的窗口**必须回显**（`from`/`to`），前端**必须**渲染出来；"全部（长期日汇总）"档必须**显式请求 90 天窗口**，不得让管理员以为看到的是全部历史。
+
 ### 5.2 客户端：本机打开路由（冻结）
 
 | 项 | 值 |
@@ -545,7 +576,7 @@ desktop 组装期把 `deepLinkScheme` 与 `appOriginScheme` 注入新包（profi
 | 胶囊/蒙版 | 从 browser 的 shell 页**抽成共享组件**（同一份实现），应用窗口自带一份挂载点；**控制权状态仍按 surface 记**（每个应用窗口独立"人/AI"归属），不再依赖池级 `pool.controlled` |
 | 权限守卫 | 归属 = **分区初始化**（不是建 tab 时）；`installPermissionGuard` 提升为分区级 `ensureSessionGuard`，浏览器与应用窗口共用；request + check 两个 handler 都必须装 |
 | 导航闸门 | 归属 = **应用窗口模块**（`will-navigate`/`will-frame-navigate`/`setWindowOpenHandler` 判"同 app origin"）+ **session 级 `webRequest.onBeforeRequest`**（按 webContentsId/initiator 判"只有应用窗口能请求 app scheme"）；`classifyNavigation` 要按 surface kind 分流（浏览器标签不得导航到 app scheme，但 AI 对应用窗口的 navigate 必须放行） |
-| `windows.ts` 契约 | `inject: ['picoSession','webServer'(seam), 'browserSurface']`；建窗适配器扩 `WasmAppsHostAdapter`（`createAppWindow/openAppWindow/focusAppWindow/closeAppWindow/setAspectRatio` + `onBeforeRequest`/`will-navigate` 钩子）；状态文件 `<userData>/wasm-apps-windows.json`（schema：`{version, apps: {<app_id>: {width,height,x,y,ratio?,lastPath?}}}`，**原子写优先复用 `@deepseek-ai/dsh-atomic-write`**；⚠️ **已知偏离（主控 2026-09-20 裁定，L2 实施）**：该依赖不在 `dsh-wasm-apps-host` 的 node_modules 里，而在多泳道并行期间跑 `yarn install` 改依赖图风险过高 ⇒ **本版允许包内单一 `atomicWriteFile` 助手**（`temp + fsync + rename + 0600/0700`，**只允许一处实现**，两处调用点共用），实现处必须标注"待切换到 `@deepseek-ai/dsh-atomic-write`"，并在 **W6/W7（全部泳道静默后）**做切换；切换前该助手必须有单测覆盖"写失败不留半个文件 + 权限位正确"）；旧标签账本迁移 = browser store 的 groups 账本，**丢弃 `url` 以 app scheme 开头的条目并 warn** |
+| `windows.ts` 契约 | `inject: ['picoSession','webServer'(seam), 'browserSurface']`；建窗适配器扩 `WasmAppsHostAdapter`（`createAppWindow/openAppWindow/focusAppWindow/closeAppWindow/setAspectRatio` + `onBeforeRequest`/`will-navigate` 钩子）；状态文件 `<userData>/wasm-apps-windows.json`（schema：`{version, apps: {<app_id>: {width,height,x,y,ratio?,lastPath?}}}`，**原子写优先复用 `@deepseek-ai/dsh-atomic-write`**；**原子写已复用上游 `@deepseek-ai/dsh-atomic-write`（2026-09-20，W6/W7 切换完成）**：`dsh-wasm-apps-host` 的 `dependencies` 已声明 `"@deepseek-ai/dsh-atomic-write": "0.1.5-rc.2"`（与 `packages/host/desktop` 同值；`yarn.lock` 仅新增该 workspace 条目、离线 install 7.3 s）；**包内本地 `atomicWriteFile` 助手已删除**，全部写入点（`windows.ts` 窗口状态 / `app-proof.ts` 安装密钥 / `ai-authorization.ts` AI 授权记录）统一走 `writeFileAtomic(path, body, { mode: 0o600, dirMode: 0o700 })`；判据 = `atomic-write.spec.ts`（原子提交 / 失败不留半个文件 / 权限位）+ `atomic-write-wiring.spec.ts`（模块解析到上游包、调用点经替身计数确实调用它、本地同名符号不得复活）。**两处口径勘误**：① **上游与本地助手都不做 fsync**（上游 `.d.ts` 明写 *Crash durability (fsync) is out of scope*）⇒ 原句 `temp + fsync + rename` 与两版实现**均不符**，该持久性缺口**自 W2 起存在、本版未修**（如实认账，未擅自扩大改动）；② 上游权限位**必须逐调用点显式声明**（`mode` 必填、`dirMode` 漏传即回落 mkdir 默认）⇒"唯一实现"的约束从"一份代码"改为「**一处语义 + 每个调用点可见的权限位 + 接线判据**」；旧标签账本迁移 = browser store 的 groups 账本，**丢弃 `url` 以 app scheme 开头的条目并 warn** |
 | 生命周期触发源 | 应用下架/冻结/删除 ⇒ 关窗清缓存的触发源 = **下次打开时的 `open` 端点响应**（`enabled=false`/`frozen`）+ 客户端在 `pico/session-changed`/应用中心刷新时按目录对比（**不做服务端推送**，R2I-3 明确） |
 | sessionKey 接缝 | `ServeClientRequest(w, r, appID, user, **sessionKey**)` 显式传参（不用 context）；sessionKey = `serverstore.TokenHash(bearer)[:32]`；登出/改密/禁用的回调点 = `serverauth` 的四处（`handler.go:533` 登出、`:370` 改密、`admin.go:551/735/1058` 重置/禁用/删除）——若本期不接回调，按 §17 认账 |
 | 0075 维护者 | UV 与日汇总由 **Go 定时器**（照 `internal/balance` 范式）每分钟/每五分钟 upsert（`usage_ledger.go:122` 同款批算）；**明细先汇总后清理**（不得先删后汇，否则 UV 永久丢失）；用户当天换部门 ⇒ 以**打开时刻**的部门为准（同一用户当天可出现在两个部门行，UV 按 `(app_id,day,dept)` 去重） |

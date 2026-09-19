@@ -22,7 +22,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppCenterPanel } from './AppCenterPanel.tsx'
 import { setAppChannel, type AppChannel } from './channel-seam.ts'
-import { APP_AI_CHAT_PATH } from './app-ai.ts'
+import { APP_AI_CHAT_PATH, APP_AI_CONSENT_PATH } from './app-ai.ts'
 import type { OnboardingStore } from './onboarding.ts'
 import { setAppShareScheme } from './deep-link.ts'
 import type { AppAiConsentStore } from './app-ai.ts'
@@ -98,17 +98,44 @@ function stubCatalog(reply: (url: string, init: RequestInit) => Response | Promi
   }))
 }
 
-/** 应用 AI 的假 fetch（只答保留路径）。 */
+/**
+ * 应用 AI 的假 fetch（面板注入的 `aiDeps.fetch`）。
+ *
+ * 它同时承载三条本机路径（§21.1 Q9 / §22.2 R2）：持有性证明引导、授权路由（"允许/撤销"
+ * 必须落到宿主，否则界面已允许而闸门仍然 403）、以及应用页的保留路径。**只有保留路径
+ * 计入 {@link aiCalls}**（授权与引导不是"聊天调用"，用例的条数断言按聊天算）。
+ */
 function stubAi(reply: (init: RequestInit) => Response | Promise<Response>): void {
   aiCalls = []
-  vi.stubGlobal('aiFetch', undefined)
-  // AppAiPanel 的 deps 走 props（下面 mount 时注入），这里只准备实现。
-  aiReply = async (input: unknown, init?: RequestInit) => {
-    aiCalls.push({ url: String(input), init: init ?? {} })
-    return await reply(init ?? {})
-  }
+  aiScript = async (_input: unknown, init?: RequestInit) => await reply(init ?? {})
 }
-let aiReply: (input: unknown, init?: RequestInit) => Promise<Response>
+
+/** 聊天路径的脚本（缺省：没有调用就该发生的用例会拿到一条可辨的错误）。 */
+let aiScript: (input: unknown, init?: RequestInit) => Promise<Response> = async () => {
+  throw new Error('no app AI chat was expected in this case')
+}
+
+/** 授权路由收到的请求体（断言"允许/撤销真的写了宿主"）。 */
+let consentCalls: Array<{ app_id: string, granted: boolean }>
+
+/** 授权路由的回答（缺省成功；用例可覆盖成失败）。 */
+let consentReply: (body: { app_id: string, granted: boolean }) => Response =
+  body => jsonResponse(200, { app_id: body.app_id, granted: body.granted })
+
+/** 面板注入的取数实现：先答本机引导/授权，再把保留路径交给脚本。 */
+async function aiReply(input: unknown, init?: RequestInit): Promise<Response> {
+  const url = String(input)
+  if (url === HOST_PROOF_PATH) {
+    return jsonResponse(200, { proof: 'host-proof-test', expires_at: Date.now() + 5 * 60_000 })
+  }
+  if (url === APP_AI_CONSENT_PATH) {
+    const body = JSON.parse(String(init?.body ?? '{}')) as { app_id: string, granted: boolean }
+    consentCalls.push(body)
+    return consentReply(body)
+  }
+  aiCalls.push({ url, init: init ?? {} })
+  return await aiScript(url, init)
+}
 
 /** SSE 响应体。 */
 function sse(chunks: string[], status = 200): Response {
@@ -133,6 +160,8 @@ async function mount(options: {
   now?: () => number
 } = {}): Promise<void> {
   const channel = options.channel === undefined ? CHANNEL : options.channel
+  consentCalls = []
+  consentReply = body => jsonResponse(200, { app_id: body.app_id, granted: body.granted })
   await act(async () => {
     root.render(
       <AppCenterPanel
@@ -162,6 +191,22 @@ function memoryIntent(seed: Record<string, string> = {}): OpenIntentStore & { va
     setItem: (key, value) => { values.set(key, value) },
     removeItem: key => { values.delete(key) },
   }
+}
+
+/**
+ * 冲一次宏任务：授权同步是 **async** 的（面板要等宿主写完才放行输入框），
+ * `act()` 只冲微任务，单靠它读到的是中间态。
+ */
+async function settle(rounds = 3): Promise<void> {
+  for (let index = 0; index < rounds; index += 1) {
+    await act(async () => { await new Promise(resolve => { setTimeout(resolve, 0) }) })
+  }
+}
+
+/** 点「允许」并等宿主确认（§21.1 Q9：授权是宿主侧的，不是渲染层的一次性开关）。 */
+async function allowAi(): Promise<void> {
+  await click('.pico-app-ai-allow')
+  await settle()
 }
 
 /** 点一个元素（真 DOM 事件）。 */
@@ -199,8 +244,9 @@ beforeEach(() => {
   setHostProofToken(null)
   // 授权存储缺省走 `localStorage`：每个用例都注入新的内存存储，这里再清一次兜底。
   try { window.localStorage.clear() } catch { /* jsdom 一定有，防御而已 */ }
-  // 默认：AI 未配置（用例自己覆盖）。
-  aiReply = async () => jsonResponse(404, { error: { code: 'app_ai_unavailable' } })
+  // 默认：AI 未配置（用例自己覆盖）。注意只换**聊天路径**的脚本 —— 引导与授权路由
+  // 由 `aiReply` 固定答掉（重写整个 `aiReply` 会让面板拿不到宿主证明）。
+  aiScript = async () => jsonResponse(404, { error: { code: 'app_ai_unavailable' } })
 })
 
 afterEach(async () => {
@@ -595,7 +641,7 @@ describe('详情页：信息 / 分享 / 应用 AI（§21）', () => {
     expect(container.querySelectorAll('.pico-app-center-card')).toHaveLength(3)
   })
 
-  it('首次使用弹一次性授权卡：未授权时**没有**输入框；允许后出现', async () => {
+  it('首次使用弹一次性授权卡：未授权时**没有**输入框；允许后出现（且允许真的写了宿主）', async () => {
     stubCatalog(() => jsonResponse(200, CATALOG))
     await mount()
     await click('.pico-app-center-detail')
@@ -603,9 +649,40 @@ describe('详情页：信息 / 分享 / 应用 AI（§21）', () => {
     expect(consent).not.toBeNull()
     expect(consent!.textContent).toContain('只发送本次对话内容')
     expect(container.querySelector('.pico-app-ai-input')).toBeNull()
-    await click('.pico-app-ai-allow')
+    await allowAi()
+    // 授权必须落到**宿主**：渲染层 localStorage 只是 UI 记忆（闸门在宿主，
+    // `handleAiChat` 先查它再碰模型）。变异：allow 只写 localStorage ⇒ 这条红，
+    // 且真机上表现为"允许了但每次仍然 403"。
+    expect(consentCalls).toEqual([{ app_id: 'shift-notes', granted: true }])
     expect(container.querySelector('[data-role="ai-consent"]')).toBeNull()
     expect(container.querySelector('.pico-app-ai-input')).not.toBeNull()
+  })
+
+  it('宿主没记住授权（写失败）⇒ 不放行输入框，并给出可辨文案', async () => {
+    stubCatalog(() => jsonResponse(200, CATALOG))
+    await mount()
+    // 授权路由答 500：界面**不得**表现成"已允许"（下一次调用会 403）。
+    consentReply = () => jsonResponse(500, { error: { code: 'CONSENT_NOT_PERSISTED' } })
+    await click('.pico-app-center-detail')
+    await allowAi()
+    expect(container.querySelector('.pico-app-ai-input')).toBeNull()
+    expect(container.querySelector('[data-role="ai-consent-failed"]')).not.toBeNull()
+  })
+
+  it('撤销授权 ⇒ 也写宿主（granted:false），界面回到说明卡', async () => {
+    stubCatalog(() => jsonResponse(200, CATALOG))
+    await mount({ consent: memoryConsent() })
+    await click('.pico-app-center-detail')
+    await allowAi()
+    expect(container.querySelector('.pico-app-ai-input')).not.toBeNull()
+    await click('.pico-app-ai-revoke')
+    await settle()
+    expect(consentCalls).toEqual([
+      { app_id: 'shift-notes', granted: true },
+      { app_id: 'shift-notes', granted: false },
+    ])
+    expect(container.querySelector('.pico-app-ai-input')).toBeNull()
+    expect(container.querySelector('[data-role="ai-revoked"]')).not.toBeNull()
   })
 
   it('拒绝授权 ⇒ 明确说不能使用 AI，且没有输入框', async () => {
@@ -627,9 +704,10 @@ describe('详情页：信息 / 分享 / 应用 AI（§21）', () => {
     ]))
     await mount()
     await click('.pico-app-center-detail')
-    await click('.pico-app-ai-allow')
+    await allowAi()
     await type('.pico-app-ai-input', '帮我看一下')
     await click('.pico-app-ai-send')
+    await settle()
     expect(aiCalls).toHaveLength(1)
     expect(aiCalls[0]!.url).toBe(APP_AI_CHAT_PATH)
     expect(JSON.parse(String(aiCalls[0]!.init.body))).toMatchObject({ stream: true })
@@ -643,9 +721,10 @@ describe('详情页：信息 / 分享 / 应用 AI（§21）', () => {
     stubAi(() => jsonResponse(403, { error: { code: 'ai_balance_insufficient', message: 'no funds' } }))
     await mount()
     await click('.pico-app-center-detail')
-    await click('.pico-app-ai-allow')
+    await allowAi()
     await type('.pico-app-ai-input', '你好')
     await click('.pico-app-ai-send')
+    await settle()
     const error = container.querySelector('[data-role="ai-error"]')
     expect(error).not.toBeNull()
     expect(error!.getAttribute('data-code')).toBe('ai_balance_insufficient')
@@ -656,7 +735,7 @@ describe('详情页：信息 / 分享 / 应用 AI（§21）', () => {
   it('取消：面板卸载 ⇒ 在跑的那一轮被 abort（§21.1 第 15 条：仅前台）', async () => {
     stubCatalog(() => jsonResponse(200, CATALOG))
     let seen: AbortSignal | null = null
-    aiReply = async (_input: unknown, init?: RequestInit) => {
+    aiScript = async (_input: unknown, init?: RequestInit) => {
       const signal = (init?.signal ?? null) as AbortSignal | null
       seen = signal
       // 请求悬着（"回复还在流式输出"），只在被 abort 时结束 —— 卸载后不应留下挂起的
@@ -669,9 +748,10 @@ describe('详情页：信息 / 分享 / 应用 AI（§21）', () => {
     }
     await mount()
     await click('.pico-app-center-detail')
-    await click('.pico-app-ai-allow')
+    await allowAi()
     await type('.pico-app-ai-input', '长回复')
     await click('.pico-app-ai-send')
+    await settle()
     expect(seen).not.toBeNull()
     expect(seen!.aborted).toBe(false)
     await act(async () => { root.unmount() })

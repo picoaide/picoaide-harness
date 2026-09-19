@@ -55,6 +55,7 @@
     "check": "yarn run build && yarn run test"
   },
   "dependencies": {
+    "@deepseek-ai/dsh-atomic-write": "0.1.5-rc.2",
     "@deepseek-ai/schemastery": "^3.18.2",
     "@picoaide/dsh-browser": "workspace:*"
   },

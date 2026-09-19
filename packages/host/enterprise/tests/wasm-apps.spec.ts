@@ -28,6 +28,8 @@
  *     → 「符号链接逃逸被拒」「越界路径被拒」红；
  *   - 写面去掉 `requireWriteProof` → 「POST 缺持有性证明被拒（403）」红；
  *   - catalog 自己按 `access`/`enabled` 过滤（或补字段） → 「目录原样透传（客户端不二次过滤）」红；
+ *   - catalog 重新加回入口链接补全（旧 `absolutizeEntryURL` 那套）→
+ *     「目录逐字节透传：**不做**入口链接补全」红（相对地址会变成绝对地址，实测见 R2-L1-1）；
  *   - `readRoots` 的允许面改回整个数据根（`dataRoot` 取代 `appsRoot`）
  *     → 「session.json / .credentials.yaml / data/master.key 被拒且零出站」三条红（FIX-39）；
  *   - `decodePathSegments` 去掉 try/catch（改回裸 `decodeURIComponent`）
@@ -51,7 +53,6 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply, type Config as AuthGateConfig } from '../src/auth-gate.ts'
 import {
-  absolutizeEntryURL,
   base64Length,
   CLIENT_UPLOAD_LIMITS,
   CHUNKED_PUBLISH_BUDGET_MS,
@@ -516,13 +517,24 @@ describe('应用中心目录：只做地址补全，不二次过滤、不加额�
     ],
   }
 
-  it('相对 entry_url 补成绝对地址，绝对地址与缺失字段保持原样', async () => {
+  // ⚠️ **反向断言**（R2-L1-1，2026-09-20 主控裁定）：这条用例原先钉的是"相对
+  // `entry_url` 补成绝对地址"——那正是被 W4 删除的**旧访问模型**字段（应用曾在
+  // `https://<app_id>.<基域>/` 上服务，客户端才需要把服务端下发的入口链接补全）。
+  // 现在服务端契约里（emit 已删、字段已不再下发）根本没有这个键，宿主再留一段
+  // "补全"逻辑就是**语义已死却仍可被当成活契约**的依据 ⇒ 代码已删，用例改为
+  // 反向断言：宿主不认这个字段、不改写它、更不发明它。
+  it('目录逐字节透传：**不做**入口链接补全（旧模型的相对地址保持相对）', async () => {
     const h = harness(() => json(200, catalogPayload))
     const res = await h.call(WASM_APPS_PREFIX)
     expect(res.code).toBe(200)
+    // 相对地址**必须保持相对**：旧实现会把它拼成 `https://harness.example/hidden`。
+    expect(res.body.apps[1].entry_url).toBe('/hidden')
+    // 服务端下发的原值原样穿过（不是"重新序列化后的等价物"）。
     expect(res.body.apps[0].entry_url).toBe('https://notes.apps.example.com')
-    expect(res.body.apps[1].entry_url).toBe('https://harness.example/hidden')
+    // 服务端没下发的行，宿主**不得**发明这个键。
     expect('entry_url' in res.body.apps[2]).toBe(false)
+    // 最强形态：整份响应与出站收到的字节逐字一致（透传 = 不解析、不改写、不重排）。
+    expect(res.text).toBe(JSON.stringify(catalogPayload))
   })
 
   /**
@@ -561,15 +573,9 @@ describe('应用中心目录：只做地址补全，不二次过滤、不加额�
     expect(res.text).not.toMatch(/quota|balance|usage|budget|余额|用量|额度/iu)
   })
 
-  it('绝对化辅助函数：相对路径拼源、绝对地址不动、空值不发明链接', () => {
-    expect(absolutizeEntryURL('https://harness.example', '/x')).toBe('https://harness.example/x')
-    expect(absolutizeEntryURL('https://harness.example', 'x/y')).toBe('https://harness.example/x/y')
-    expect(absolutizeEntryURL('https://harness.example', 'https://a.example/x')).toBe('https://a.example/x')
-    expect(absolutizeEntryURL('https://harness.example', '')).toBe('')
-    expect(absolutizeEntryURL('not a url', '/x')).toBe('/x')
-    expect(absolutizeEntryURL('https://harness.example', 42)).toBe(42)
-  })
-
+  // 旧模型的入口链接补全助手（`absolutizeEntryURL`）已随 R2-L1-1 删除 —— 那组
+  // 单元断言与其实现一并消失（"绝不被重新引入"由上面那条目录透传的反向断言承担：
+  // 重新加回补全逻辑 ⇒ 相对地址不再是 `/hidden` ⇒ 立刻红）。
   it('isInsideRoot 不是字符串前缀比较（/a/bc 不属于 /a/b）', () => {
     expect(isInsideRoot('/a/b', '/a/b/c')).toBe(true)
     expect(isInsideRoot('/a/b', '/a/b')).toBe(true)

@@ -5764,6 +5764,7 @@ __metadata:
   resolution: "@picoaide/dsh-wasm-apps-host@workspace:packages/host/wasm-apps-host"
   dependencies:
     "@deepseek-ai/cordis": "npm:4.0.2"
+    "@deepseek-ai/dsh-atomic-write": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-host-webserver": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-invariants": "npm:0.1.5-rc.2"
     "@deepseek-ai/schemastery": "npm:^3.18.2"
