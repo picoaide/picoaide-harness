@@ -6,6 +6,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Skeleton } from '../components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { hasPermission, PERM_CAP_READ } from '../lib/rbac'
+/** 服务端错误信封的 message + details.field + hints 统一渲染(P1-6,见 lib/api-error.ts)。 */
+import { errorText } from '../lib/api-error'
 import { AlertTriangle, Boxes, FolderOpen, PackageCheck, RefreshCw } from 'lucide-react'
 
 /**
@@ -77,7 +79,10 @@ export default function BuiltinSkills() {
       setView(data)
       setErr('')
     } catch (e: unknown) {
-      setErr((e as { message?: string })?.message || '读取平台内置技能失败')
+      // P1-6 的残留（R1-uxw-12）：本页此前只读 `message`，把服务端错误信封里的
+      // hints（"还差什么条件"）与 details.field（"哪个字段"）整段丢掉 —— 同波次的
+      // 应用中心三页已统一走 errorText，这一页漏了。现在与其他页同一口径。
+      setErr(errorText(e, '读取平台内置技能失败'))
     } finally {
       setLoading(false)
     }
@@ -141,7 +146,12 @@ export default function BuiltinSkills() {
           </div>
 
           {err !== '' && (
-            <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-[13px] text-destructive" data-testid="builtin-error">
+            <div
+              className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-[13px] text-destructive"
+              data-testid="builtin-error"
+              role="alert"
+              aria-live="assertive"
+            >
               {err}
             </div>
           )}

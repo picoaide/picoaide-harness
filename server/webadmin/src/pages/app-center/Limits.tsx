@@ -50,6 +50,15 @@ interface Limits {
    * 已有句柄要等空闲回收后重建才拿到新值 —— 与 appdb_cache_kib 同一档语义。
    */
   app_db_readers: number
+  /**
+   * 服务端**新加**的旋钮也走这里。
+   *
+   * R1-uxw-10：字段集以服务端下发的 JSON 为准（`applimits.Limits` 的 json tag），
+   * 前端不认得的字段也要在表单里出现（用字段名占位 + 提示待补），否则"服务端加了第 13
+   * 个旋钮、控制台静默少一格、门禁全绿"就是一而再的现场。跨语言覆盖门禁见
+   * `AppPlatform.test.tsx` 的「表单字段集覆盖 applimits.Limits 的全部 json 字段」。
+   */
+  [key: string]: number
 }
 
 interface Budget {
@@ -130,9 +139,25 @@ interface RuntimeView {
   unavailable?: { name: string; reason: string; wiring: string }[]
 }
 
-type FieldKey = keyof Limits
+type FieldKey = string
 
-const FIELDS: { key: FieldKey; label: string; group: '并发' | '内存'; hint: string }[] = [
+/** 表单分组：两组已知字段 + 一组"服务端新加、本页还没有描述"的兜底分组。 */
+type FieldGroup = '并发' | '内存' | '服务端新增'
+
+interface FieldRow {
+  key: FieldKey
+  label: string
+  group: FieldGroup
+  hint: string
+}
+
+/**
+ * 已知字段的**元数据**（标签/分组/说明）。
+ *
+ * 注意它只是元数据：**字段集**的真源是服务端下发的 `limits`（见 fieldRows）。
+ * 这里少写一项，字段仍会出现在表单里（占位分组），并由覆盖门禁要求补上标签。
+ */
+const FIELDS: FieldRow[] = [
   { key: 'max_instances', label: '全局并发实例数', group: '并发', hint: '同时运行的 wasm 实例上限；同时决定进程内应用库句柄上限' },
   { key: 'app_running', label: '单应用并发', group: '并发', hint: '同一应用最多 N 个请求同时在跑（读并发；写仍串行；某请求在事务中时其他请求的读写会被拒并需重试）；超限进队列。调大不增加内存上界（实例池乘数是全局并发）' },
   { key: 'app_queue', label: '单应用队列长度', group: '并发', hint: '超过并发后允许排队的请求数，再多的直接 429' },
@@ -146,6 +171,25 @@ const FIELDS: { key: FieldKey; label: string; group: '并发' | '内存'; hint: 
   { key: 'appdb_cache_kib', label: 'SQLite 页缓存/连接', group: '内存', hint: '每条应用库连接的页缓存上限；下一个新建连接生效' },
   { key: 'app_db_readers', label: '应用库只读连接数', group: '内存', hint: '每个应用库句柄的只读连接数：库已开启 WAL，多个读请求可真正并发（写仍串行）。值越大并发读越高，代价是每句柄多占 (1+N) 份页缓存与文件描述符；**下一个应用库句柄生效**（不是立即）' },
 ]
+
+/** 按 key 索引的元数据（未知 key ⇒ 用兜底行，见 fieldRows）。 */
+const FIELD_META: Record<string, FieldRow> = Object.fromEntries(FIELDS.map((f) => [f.key, f]))
+
+/** 服务端新增字段的兜底分组名（标签留空会让人以为"没这一项"，这里显式占位）。 */
+const UNKNOWN_FIELD_GROUP: FieldGroup = '服务端新增'
+
+/**
+ * 账目项 key（与 `readyz.MemoryBudget` 的 json tag 逐字一致，五笔）。
+ *
+ * 覆盖门禁（AppPlatform.test.tsx）从 Go 源码里读这组 tag 并要求每笔都有渲染行 ——
+ * 2026-09-19 服务端把"应用库页缓存"加成第五笔时，既有 421 条用例一条都没红，正是缺口。
+ */
+const ACCOUNT_KEYS = [
+  'instances_bytes', 'compile_peak_bytes', 'upload_peak_bytes', 'cache_resident_bytes', 'appdb_cache_bytes',
+] as const
+
+/** 不是"账目项"的 `*_bytes`：预算入参 available、派生上限 limit、合计 total。 */
+const NON_ACCOUNT_BYTES = new Set(['available_bytes', 'limit_bytes', 'total_bytes'])
 
 const mb = (v: number) => Math.round(v / (1 << 20))
 
@@ -216,14 +260,50 @@ export default function Limits() {
     const cache = form.module_cache_mb * (1 << 20)
     const appdbCache = (1 + form.app_db_readers) * form.appdb_cache_kib * 1024 * form.max_instances
     const total = instances + view.budget.compile_peak_bytes + view.budget.upload_peak_bytes + cache + appdbCache
-    const limit = Math.floor((view.budget.available_bytes * view.guard_percent) / 100)
+    const available = view.budget.available_bytes
+    // 服务端语义（readyz.ComputeMemoryBudgetFor 是唯一真源）：
+    //   available < 0（MemoryUnknown）⇒ 读不到可用内存 ⇒ **不判定**（known=false）；
+    //   available == 0 ⇒ 真的没有可用内存 ⇒ **判定失败**（fail-loud）。
+    // 旧实现 `available <= 0 || total <= limit` 把两者混成一种，于是"读不到"与
+    // "可用内存恰好是 0"都被显示成"内存水位正常 / 可以保存"（R1-uxw-6 的实测现场）。
+    const judged = view.budget.known !== false && available >= 0
+    const limit = judged ? Math.floor((available * view.guard_percent) / 100) : 0
     return {
       instances, cache, appdbCache, total, limit,
-      ok: view.budget.available_bytes <= 0 || total <= limit,
-      available: view.budget.available_bytes,
-      known: view.budget.known !== false,
+      available,
+      judged,
+      /** 判定通过；没判定时恒 false —— 界面必须用 judged 区分"没判"与"判过没过"。 */
+      ok: judged && total <= limit,
     }
   }, [view, form])
+
+  /**
+   * 表单行 = 已知字段（FIELDS 给标签/分组/hint）**∪ 服务端实际下发的字段**。
+   *
+   * R1-uxw-10：此前字段集是前端手写的 12 项，服务端加第 13 个旋钮时控制台静默少一格、
+   * 而 Go 门禁只覆盖生成物 ⇒ "看不见的旋钮"。现在按响应里的字段集渲染：不认识的字段
+   * 也会出现（字段名占位 + "待补描述"），另有跨语言覆盖门禁要求补上标签与默认值。
+   */
+  const fieldRows = useMemo<FieldRow[]>(() => {
+    if (!form) return []
+    return Object.keys(form).map((key) => FIELD_META[key] ?? {
+      key,
+      label: key,
+      group: UNKNOWN_FIELD_GROUP,
+      hint: '服务端下发了本页尚未描述的限制项：名称/语义待补（数值与取值范围一律以服务端为准）。',
+    })
+  }, [form])
+
+  /** 服务端新增、本页还没有明细的账目项：必须在页面上占位（又是一枚"看不见的旋钮"）。 */
+  const unknownAccounts = useMemo(
+    () => (view
+      ? Object.keys(view.budget).filter((k) =>
+        k.endsWith('_bytes') &&
+        !NON_ACCOUNT_BYTES.has(k) &&
+        !(ACCOUNT_KEYS as readonly string[]).includes(k))
+      : []),
+    [view],
+  )
 
   const dirty = useMemo(() => {
     if (!view || !form) return false
@@ -294,9 +374,6 @@ export default function Limits() {
   // P2-1:首屏读取失败此前 = **永久骨架屏** —— 错误块写在 `return <Skeleton/>` 之后,
   // 永远不可达(骨架屏把错误态整段挡在后面)。现在错误态**先于**骨架屏判定,
   // 并给一个重试按钮(否则唯一的出路是刷新整页)。
-  // P2-1:首屏读取失败此前 = **永久骨架屏** —— 错误块写在 `return <Skeleton/>` 之后,
-  // 永远不可达(骨架屏把错误态整段挡在后面)。现在错误态**先于**骨架屏判定,
-  // 并给一个重试按钮(否则唯一的出路是刷新整页)。
   if (err !== '' && (!view || !form)) {
     return (
       <div className="space-y-4 p-6">
@@ -306,6 +383,8 @@ export default function Limits() {
         />
         <div
           data-testid="limits-error"
+          role="alert"
+          aria-live="assertive"
           className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
           {err}
@@ -326,7 +405,7 @@ export default function Limits() {
     )
   }
 
-  const groups: ('并发' | '内存')[] = ['并发', '内存']
+  const groups = Array.from(new Set(fieldRows.map((f) => f.group)))
 
   return (
     <div className="space-y-4 p-6">
@@ -339,11 +418,25 @@ export default function Limits() {
           </Button>
         }
       />
+      {/* R1-uxw-14：保存成功/失败都必须进 live 区，否则读屏用户点完"保存并生效"
+          听不到任何结果（保存失败此前只有一个普通 div）。 */}
       {flashMsg && (
-        <div data-testid="limits-flash" className="rounded-md border border-border bg-muted px-3 py-2 text-sm">{flashMsg}</div>
+        <div
+          data-testid="limits-flash"
+          role="status"
+          aria-live="polite"
+          className="rounded-md border border-border bg-muted px-3 py-2 text-sm"
+        >
+          {flashMsg}
+        </div>
       )}
       {err && (
-        <div data-testid="limits-error" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <div
+          data-testid="limits-error"
+          role="alert"
+          aria-live="assertive"
+          className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {err}
         </div>
       )}
@@ -366,8 +459,13 @@ export default function Limits() {
                 待重启：{view.restart_pending.join('、')}
               </Badge>
             )}
-            <Badge variant={preview.ok ? 'secondary' : 'destructive'} data-testid="budget-badge">
-              {preview.ok ? '内存水位正常' : '超出可用内存水位'}
+            <Badge
+              variant={!preview.judged ? 'outline' : preview.ok ? 'secondary' : 'destructive'}
+              data-testid="budget-badge"
+            >
+              {!preview.judged
+                ? '可用内存未知，未判定'
+                : preview.ok ? '内存水位正常' : '超出可用内存水位'}
             </Badge>
           </div>
         </CardHeader>
@@ -380,33 +478,51 @@ export default function Limits() {
             ))}
           </div>
           <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
-            <div>
+            <div data-testid="budget-account-instances_bytes">
               <div className="text-muted-foreground">实例池（并发 × 单实例上限）</div>
               <div className="font-medium">{mb(preview.instances)} MiB</div>
             </div>
-            <div>
+            <div data-testid="budget-account-compile_peak_bytes">
               <div className="text-muted-foreground">编译峰值（固定）</div>
               <div className="font-medium">{mb(view.budget.compile_peak_bytes)} MiB</div>
             </div>
-            <div>
+            <div data-testid="budget-account-upload_peak_bytes">
               <div className="text-muted-foreground">上传峰值（固定）</div>
               <div className="font-medium">{mb(view.budget.upload_peak_bytes)} MiB</div>
             </div>
-            <div>
+            <div data-testid="budget-account-cache_resident_bytes">
               <div className="text-muted-foreground">模块缓存驻留</div>
               <div className="font-medium">{mb(preview.cache)} MiB</div>
             </div>
-            <div>
+            <div data-testid="budget-account-appdb_cache_bytes">
               <div className="text-muted-foreground">应用库页缓存（SQLite）</div>
               <div className="font-medium">{mb(preview.appdbCache)} MiB</div>
             </div>
           </div>
-          <div className={`rounded-md border px-3 py-2 text-sm ${preview.ok ? 'border-border' : 'border-destructive/40 bg-destructive/10 text-destructive'}`} data-testid="budget-line">
+          {/* 服务端新增了本页还不认识的账目项 ⇒ 明说，而不是让它静静地计入 total_bytes。 */}
+          {unknownAccounts.length > 0 && (
+            <div
+              className="rounded-md border border-dashed border-destructive/40 px-3 py-2 text-xs text-destructive"
+              data-testid="budget-unknown-accounts"
+            >
+              服务端下发了本页尚未列出明细的账目项：{unknownAccounts.join('、')}
+              （已计入上面的理论峰值，但这里看不到它是多少 —— 请补齐这一页的明细行）。
+            </div>
+          )}
+          {/* 三种形态必须互不同形（R1-uxw-6）：判定通过 / 判定失败 / **没有判定**。
+              "读不到可用内存"绝不能再显示成"可以保存" —— 服务端是 fail-loud：
+              available<0 未知 ⇒ 不判定；available==0 ⇒ 真的没有 ⇒ 判定失败。 */}
+          <div className={`rounded-md border px-3 py-2 text-sm ${preview.judged && !preview.ok ? 'border-destructive/40 bg-destructive/10 text-destructive' : 'border-border'}`} data-testid="budget-line">
             理论峰值 <span className="font-semibold">{mb(preview.total)} MiB</span>
-            {' / '}可用 {mb(preview.available)} MiB 的 {view.guard_percent}% = {mb(preview.limit)} MiB
-            {preview.ok
-              ? (preview.known ? '：可以保存' : '：未取到可用内存，保存时不判定水位')
-              : '：超出水位，保存会被拒绝（请调小并发/实例内存/模块缓存/页缓存）'}
+            {' / '}
+            {preview.judged
+              ? `可用 ${mb(preview.available)} MiB 的 ${view.guard_percent}% = ${mb(preview.limit)} MiB`
+              : '可用内存：读不到（不是 0，是取不到）'}
+            {!preview.judged
+              ? '：不判定水位、保存时不拦（服务端同样跳过内存自检；请确认部署给了 /proc/meminfo 或 cgroup 限额）'
+              : preview.ok
+                ? '：可以保存'
+                : `：超出水位，保存会被拒绝（请调小并发/实例内存/模块缓存/页缓存${preview.available === 0 ? '；当前可用内存为 0，确实没有余量' : ''}）`}
           </div>
         </CardContent>
       </Card>
@@ -425,11 +541,43 @@ export default function Limits() {
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
           {runtimeErr && (
-            <p className="text-destructive" data-testid="runtime-error">{runtimeErr}</p>
+            <p className="text-destructive" role="alert" aria-live="assertive" data-testid="runtime-error">{runtimeErr}</p>
           )}
           {!runtimeErr && !runtime && <p className="text-muted-foreground">读取中…</p>}
           {!runtimeErr && runtime && (
             <>
+              {/* 平台是否就绪（R1-uxw-11）：`/readyz` 的同一份判定（ready + ready_reasons）
+                  此前没有任何管理面出口 —— 平台不健康时这一页反而最安静。
+                  ready_reasons 里既有阻塞原因也有非阻塞说明（如"内存来源读不到"），
+                  因此**按 ready 着色但一律显示**：把"没读到"读成"健康"正是旧实现的 fail-open。 */}
+              {runtime.ready === undefined && (
+                <div
+                  className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground"
+                  data-testid="runtime-ready"
+                >
+                  平台状态：服务端未下发这一项（不是"健康"，是这一项没有出口）—— 请核对 /readyz 探针的装配。
+                </div>
+              )}
+              {runtime.ready !== undefined && (
+                <div
+                  data-testid="runtime-ready"
+                  className={`rounded-md border px-3 py-2 ${runtime.ready
+                    ? 'border-border'
+                    : 'border-destructive/40 bg-destructive/10 text-destructive'}`}
+                >
+                  <div className="font-medium">
+                    {runtime.ready ? '平台就绪' : '平台未就绪'}
+                    <span className="ml-2 text-xs font-normal text-muted-foreground">
+                      /readyz：{runtime.ready ? '可以服务应用请求' : '应用请求会被拒绝或降级'}
+                    </span>
+                  </div>
+                  {(runtime.ready_reasons ?? []).length > 0 && (
+                    <ul className="mt-1 list-disc pl-5 text-xs" data-testid="runtime-ready-reasons">
+                      {(runtime.ready_reasons ?? []).map((r) => <li key={r}>{r}</li>)}
+                    </ul>
+                  )}
+                </div>
+              )}
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <div>
                   <div className="text-muted-foreground">编译队列</div>
@@ -440,9 +588,12 @@ export default function Limits() {
                 </div>
                 <div>
                   <div className="text-muted-foreground">编译缓存</div>
+                  {/* 上限也要显示（R1-uxw-11）：只报"7 条 / 128 MiB"看不出离上限多远，
+                      而 cache_max_bytes/cache_max_entries 服务端一直在下发。 */}
                   <div className="font-medium" data-testid="runtime-compile-cache">
                     {runtime.compile
                       ? `${runtime.compile.cache_entries} 条 / ${mb(runtime.compile.cache_bytes)} MiB`
+                        + `（上限 ${runtime.compile.cache_max_entries} 条 / ${mb(runtime.compile.cache_max_bytes)} MiB）`
                       : '—'}
                   </div>
                 </div>
@@ -478,7 +629,11 @@ export default function Limits() {
                   </div>
                   <ul className="mt-1 list-disc pl-5 text-xs text-muted-foreground">
                     {(runtime.unavailable ?? []).map((u) => (
-                      <li key={u.name}><span className="font-mono">{u.name}</span>：{u.reason}</li>
+                      <li key={u.name}>
+                        <span className="font-mono">{u.name}</span>：{u.reason}
+                        {/* wiring 是"接哪里"（排障工单要的就是这一行），服务端一直在下发。 */}
+                        {u.wiring ? <span className="block pl-4">接线位置：{u.wiring}</span> : null}
+                      </li>
                     ))}
                   </ul>
                 </div>
@@ -494,13 +649,20 @@ export default function Limits() {
             <CardTitle className="text-base">{g}</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
-            {FIELDS.filter((f) => f.group === g).map((f) => {
+            {fieldRows.filter((f) => f.group === g).map((f) => {
               const r = view.ranges[f.key]
+              const def = view.defaults?.[f.key]
+              const deviated = typeof def === 'number' && form[f.key] !== def
               return (
                 <div key={f.key} className="space-y-1">
-                  <Label htmlFor={`lim-${f.key}`} className="flex items-center gap-2">
+                  <Label htmlFor={`lim-${f.key}`} data-testid={`lim-label-${f.key}`} className="flex flex-wrap items-center gap-2">
                     {f.label}
                     {r?.restart && <Badge variant="outline" className="text-[10px]">需重启</Badge>}
+                    {deviated && (
+                      <Badge variant="outline" className="text-[10px]" data-testid={`lim-deviated-${f.key}`}>
+                        已偏离默认
+                      </Badge>
+                    )}
                   </Label>
                   <div className="flex items-center gap-2">
                     <Input
@@ -519,6 +681,11 @@ export default function Limits() {
                     {f.hint}
                     {r && `（${r.min}–${r.max}）`}
                   </p>
+                  {/* 默认值（R1-uxw-10）：服务端 `defaults` 一直在下发却从不渲染，
+                      "恢复默认/档位"因此是盲操作 —— 不知道默认是多少、当前是否已是默认。 */}
+                  <p className="text-xs text-muted-foreground" data-testid={`lim-default-${f.key}`}>
+                    {typeof def === 'number' ? `默认 ${def}${r?.unit ? ` ${r.unit}` : ''}` : '默认值：服务端未下发'}
+                  </p>
                 </div>
               )
             })}
@@ -527,15 +694,29 @@ export default function Limits() {
       ))}
 
       <div className="flex items-center gap-2">
-        <Button onClick={save} disabled={!canWrite || busy || !dirty} data-testid="save-limits">
+        {/* R1-uxw-14：禁用原因不能只写在 title 上（禁用按钮不可聚焦 ⇒ 键盘/读屏
+            用户拿不到"为什么点不动"）。可读原因放常驻节点，禁用按钮用
+            aria-describedby 指过去；只读说明本身是**可见文本**，不藏在 tooltip 里。 */}
+        <Button
+          onClick={save}
+          disabled={!canWrite || busy || !dirty}
+          aria-describedby={!canWrite ? 'limits-readonly-note' : undefined}
+          data-testid="save-limits"
+        >
           <Save className="mr-1 h-4 w-4" />保存并生效
         </Button>
-        <Button variant="outline" onClick={reset} disabled={!canWrite || busy} data-testid="reset-limits">
+        <Button
+          variant="outline"
+          onClick={reset}
+          disabled={!canWrite || busy}
+          aria-describedby={!canWrite ? 'limits-readonly-note' : undefined}
+          data-testid="reset-limits"
+        >
           <RotateCcw className="mr-1 h-4 w-4" />恢复默认/档位
         </Button>
         {!canWrite && (
-          <span className="text-xs text-muted-foreground">
-            <AlertTriangle className="mr-1 inline h-3 w-3" />当前账号只读（需要能力中心写入权限）
+          <span id="limits-readonly-note" data-testid="limits-readonly-note" className="text-xs text-muted-foreground">
+            <AlertTriangle className="mr-1 inline h-3 w-3" />当前账号只读（需要能力中心写入权限），保存/恢复默认都已禁用
           </span>
         )}
       </div>

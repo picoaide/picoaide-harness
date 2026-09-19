@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import BuiltinSkills from './BuiltinSkills'
-import { request } from '../api'
+import { ApiError, request } from '../api'
 import { setCurrentAdmin } from '../lib/rbac'
 
 /**
@@ -129,5 +129,26 @@ describe('BuiltinSkills 平台内置技能（只读诊断面）', () => {
     render(<BuiltinSkills />)
     expect(screen.getByText(/没有查看权限/)).toBeInTheDocument()
     expect(mockRequest).not.toHaveBeenCalled()
+  })
+  it('错误信封的 hints 与 details.field 都要显示(P1-6 残留:R1-uxw-12)', async () => {
+    // 服务端同波次的口径:403/500 时会带 hints("还差什么条件")与 details.field
+    // ("哪个字段被拒")。本页此前只读 message,把这两段整段丢掉 —— 与成本页/
+    // 能力页的处理不一致。这里用**真实信封**断言三段都在。
+    mockRequest.mockRejectedValueOnce(new ApiError(
+      403, 'FORBIDDEN', '内置技能面不可用',
+      undefined,
+      ['需要 capability:read 权限', '联系平台管理员为该角色补权限点'],
+      { field: 'skills' },
+    ) as never)
+    render(<BuiltinSkills />)
+
+    const box = await screen.findByTestId('builtin-error')
+    expect(box).toHaveTextContent('内置技能面不可用')       // message
+    expect(box).toHaveTextContent('字段 skills')            // details.field
+    expect(box).toHaveTextContent('需要 capability:read 权限') // hints
+    expect(box).toHaveTextContent('联系平台管理员为该角色补权限点')
+    // R1-uxw-14:错误反馈必须进 live 区(读屏用户此前听不到)。
+    expect(box).toHaveAttribute('role', 'alert')
+    expect(box).toHaveAttribute('aria-live', 'assertive')
   })
 })
