@@ -273,6 +273,19 @@ func TestRouteAssemblyProbesAndHTMLFacesPresent(t *testing.T) {
 // 入口本身钉死：生产侧 router.Register 只能出现在 registerProductionRoutes 体内
 // （main() 里出现第二个调用点 = 又一片路由游离在真源之外）；测试侧**零个**
 // （测试必须走生产函数，不许自建）。
+//
+// ⚠️ 能力边界（2026-09-19 第四轮审计逐条实测，不夸大）：判据是**字面文本**
+// `router.Register(`，因此
+//   - 可被绕过：别名导入（`rt.Register(`）、取函数值（`f := router.Register`）
+//     都能编译出第二棵装配树而这里看不见 —— 它拦的是"顺手再抄一份 Deps"，
+//     不是蓄意规避；
+//   - 会误报：注释或字符串里出现该字面量也算命中（代价可接受：本包的注释里
+//     刻意写成 "router.Register" + "(" 拼接，正是为了不自己举报自己）；
+//   - 范围：只扫生产文件（`_test.go` 一律不看）+ `cmd/`、`internal/`；
+//     `testdata/`、`node_modules/`、点目录与 `temp/` 被跳过 —— 前几类 Go 工具链
+//     自己就忽略，`server/temp/` 虽会被 `go list ./...` 编译但它是 gitignored 的
+//     探针区（进不了发布面）。别的包的 `_test.go` 自建最小树是不可避免的
+//     （够不到 main 包函数），它们由运行期守卫负责。
 func TestRouteAssemblyHasExactlyOneEntryPoint(t *testing.T) {
 	// ---- 生产侧：整个服务端源码树（cmd/ + internal/ …），非测试文件 ----
 	//
