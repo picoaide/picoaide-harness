@@ -200,10 +200,12 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 ## 8d. 内置技能(客户端用,Bearer,随服务端镜像发布)
 
 > 「技能内置到服务端、客户端按需安装」：技能内容放在**镜像层**的
-> `/opt/picoaide/skills/<name>/`(Dockerfile 逐技能 COPY，可用 `PICOAI_SKILL_SEED_DIR`
-> 覆盖)，服务端直接把它打包下发 —— 内容随镜像升级而更新，客户端**不自动安装**，
+> `/opt/picoaide/skills/<name>/`(Dockerfile 逐技能 COPY **服务端仓库内的 `server/skills/<name>/`**，
+> 可用 `PICOAI_SKILL_SEED_DIR` 覆盖；2026-09-19 起源码就在这里，不再从客户端 vendored 包取)，
+> 服务端直接把它打包下发 —— 内容随镜像升级而更新，客户端**不自动安装**，
 > 员工在能力中心的「平台内置技能」区点一次安装(复用市场那条安装链路:
 > 下载 → sha256 对照 → 整树解包 → `<dshHome>/skills`)。实现见 `internal/wasmapp/skillseed`。
+> 当前内置一个技能:`app-builder`(WASM 应用平台作者手册；2026-09-19 由 `picoaide-app-builder` 改名)。
 > 与 §6/§8b 的差别只有一处:**没有授权门**(平台自带、对全部登录员工可见)，
 > 认证口径与它们完全一致(BearerAuth)。
 
@@ -214,7 +216,18 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 
 包格式:根部 `SKILL.md`(frontmatter 必须含 `name`/`version`(严格 semver)/`title`/`description`/`author`/`category`)，
 与管理员上传技能包走**同一套**校验(`archiveutil` + `skillmanifest`)，不合规的内置技能在服务端
-启动扫描时被丢弃并记日志,不会以"能装上一个坏技能"的形式下发。
+启动扫描时被丢弃并记日志,不会以"能装上一个坏技能"的形式下发。**注意目录名必须等于 frontmatter 的
+`name`**(`skillseed` 用目录名当 declaredAppID 调 `Parse`)—— 不一致会让整条技能被静默跳过
+(客户端接口 200 + 空数组),这正是下面这条管理端诊断面要回答的问题。
+
+### 管理端只读诊断面(Admin,会话 + CSRF,`capability:read`)
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/server/admin/skills/builtin` | `{dir, dir_exists, skills:[…与客户端清单同形状…], problems:[{name, reason}], counts:{skills, problems}, load_error?}`;**只读**:内置技能是镜像资产,没有上架/授权/审批/owner 语义(故无对应写端点);扫描失败与"有技能被跳过"一律 200 + 原因(客户端面仍 401/5xx 口径不变) |
+
+> ⚠️ 路径与市场技能的 `GET /skills/:name` 同级(gin 静态段优先):名字恰为 `builtin`
+> 的市场技能在这一条 GET 上不可达,其余 `/skills/:name/*` 端点不受影响。
 
 ### 客户端侧(本地回环代理,不是服务端端点)
 
@@ -250,18 +263,21 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 | `/`、`/portal` | 门户首页(首屏 = 三平台客户端下载,其后是客户端功能说明;**管理后台入口只在页脚**一行低调文字链接,`portal.public` 控制开放性;产品 HTML 面) |
 | `/admin/` | webadmin SPA(未构建返回 "webadmin 未构建") |
 | `/healthz` | 健康探针(JSON,DB Ping,503=DB 不可用) |
-| `/api/client/v2/brand`、`/api/client/v2/brand/logo/:name`、`/api/client/v2/portal` | 品牌/门户公开端点(未认证) |
+| `/api/client/v2/channel`、`/api/client/v2/channel/{logo,logo-dark,favicon}` | 渠道内容公开端点(未认证,登录页登录前就要用)。`/channel` 是 JSON;三个素材端点是**二进制**(`image/*`,未配置时 404 JSON 信封),属"API 强制 JSON"的**声明式例外** —— 权威例外表与逐条断言见 `cmd/server/api_sweep_test.go` |
 | 其他 | 404 JSON 信封 "not found" |
 
-## 11. 品牌与门户(公开)
+## 11. 渠道与门户(公开)
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/client/v2/brand` | 公开品牌配置 `{enabled, login:{logo_url, display_name, tagline, welcome}, client:{logo_url, display_name, tagline}, favicon_url, title}`(无 accent 主题色) |
-| GET/HEAD | `/api/client/v2/brand/logo/:name` | logo 文件(name ∈ login/client/favicon,白名单 + SVG sanitize + ETag) |
-| GET | `/api/client/v2/portal` | 公开门户首页配置 `{enabled, public, welcome, subtitle, client_download_linux/mac/win, client_download_note, landing_path}` |
+| GET | `/api/client/v2/channel` | 渠道内容(公开:登录页在未登录时就要拿到名称/标语/欢迎语/主题色/logo 相对地址)。唯一真源是镜像内 `/opt/picoaide/channel/`(构建期由私有渠道仓注入),**没有在线编辑接口** —— 改内容 = 改渠道配置并重新构建镜像,这样内容可审计 |
+| GET/HEAD | `/api/client/v2/channel/logo`、`/api/client/v2/channel/logo-dark`、`/api/client/v2/channel/favicon` | 渠道素材(**二进制** `image/*`;未配置时 404 JSON 信封)。三张图是**各自独立**的端点:曾把三张图都指向 `/channel/logo` 且恒发浅色版,导致 favicon 与暗色 logo 的字节永远下发不了(客户端深色主题因此只能显示浅色标) |
 
-管理端点:`GET/PUT /api/server/admin/brand`、`POST/DELETE /api/server/admin/brand/logo`、`GET /api/server/admin/brand/snapshots`、`POST /api/server/admin/brand/restore`(0047 快照)、`GET/PUT /api/server/admin/portal`。
+管理端点:`GET/PUT /api/server/admin/portal`(门户公开开关/下载地址覆盖/说明文字)。
+
+> **2026-09-10 起 `brand:*` 已全线下线**:品牌与门户的名称/标语/欢迎语/标识只来自**渠道配置**,
+> `/api/client/v2/brand`、`/api/client/v2/brand/logo/:name`、`/api/client/v2/portal` 与
+> `/api/server/admin/brand*` 均已删除。按旧文档对接这些路径会拿到 404 JSON 信封。
 
 ## 12. 连接器(admin)
 
