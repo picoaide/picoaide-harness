@@ -1000,7 +1000,7 @@ export function isSilentSuccessTail(skeleton) {
   // SWALLOW_ALLOWLIST **逐条登记 + 写明理由**放行的,不靠启发式放过:启发式一旦放宽,
   // 下一个真正危险的 `|| true` 就会搭同一条便车。
   const prefix = skeleton.slice(0, match.index).trim()
-  if (/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s*)*(?:echo|printf|true|:|break|continue|return)\b/u.test(prefix)) {
+  if (/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)[ \t]+)*(?:echo|printf|true|:|break|continue|return)\b/u.test(prefix)) {
     // `cmd && echo …; exit 0` 这种链里 `cmd` 仍可能失败 —— 前缀含 `&&`/`||`/`;` 时要看链条。
     if (!/[&|;]/u.test(prefix)) return false
   }
