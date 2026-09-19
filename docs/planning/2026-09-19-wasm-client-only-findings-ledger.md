@@ -738,7 +738,7 @@ GET /api/server/admin/wasm-apps/opens/summary
 | A2-X（§P） | 1 | 3 | 4 | 全部闭合（§T：P0 两端闭合 + 三条 P1 + 三条 P2，X-6 认账） |
 | A2-L6（§Y） | 0 | 3 | 1 | **F1 闭合**（§5.1c 统一形状 + 真实形状对拍 spec 6 例 + 8/8 变异红） |
 | A2-L1（§Z.2） | 0 | 1 | 5 | **F4 闭合**（含唯一 P1：删 `entry_url` 活代码 + enterprise 纳入 SCOPES；7/7 变异红） |
-| A2-L2（§Z.2） | 0 | 0 | 5 | **F2 闭合 3 条**（裸前缀闸门 / adapter→guard 转发判据 / open 响应关窗清缓存）；**R2-L2-1 认账**（消费者在 `packages/host/browser/**`）；R2-L2-4 证据绑定已修 |
+| A2-L2（§Z.2） | 0 | 0 | 5 | **F2 闭合 3 条**（裸前缀闸门 / adapter→guard 转发判据 / open 响应关窗清缓存）；**R2-L2-1 认账**（消费者在 `packages/host/browser/**`）；**R2-L2-4 = 未修/认账**（原写「证据绑定已修」属不实声明，2026-09-20 独立复核指出后订正：L2 记录的 before-sha 是 W4-9 重生成**之前**的快照，现 `limits.json` = `d6312114…`；A2-L2 已在当前 revision 复跑确认**判据有效**，但该证据不得当冻结 revision 的凭据） |
 | A2-L4（§Z.3） | 0 | 0 | 3 | 全部闭合（ANN 量具自描述 / `AITokenTTL` 主控修 / status 自相矛盾） |
 | A2-L5 | 0 | 0 | 0 | 无新增 |
 | **合计** | **1** | **7** | **18** | **除 1 条认账（R2-L2-1）外全部闭合** |

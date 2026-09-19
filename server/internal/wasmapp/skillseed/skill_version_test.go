@@ -76,6 +76,10 @@ var seededSkillDigests = map[string]string{
 	// 为什么必须提版本：交付给员工的手册字节变了，已安装的客户端靠 version 判「有更新」
 	//（R1-pm-8）。W4-11 把这次登记分配给 W4，且明确**不得**在 1.2.0 上就地改写。
 	"fd832c3efbd22a212bc07f39093f63c949998aa85334cd988e2cdf5323994f56": "1.3.0",
+	// 1.4.0 = 示例预览宿主（`examples/go/preview.mjs`）改为按 `db.define` 登记的表名分派
+	//（此前任何 `db.query` 都当 notes、`db.exec` 只认 `INSERT INTO notes` ⇒ 作者照抄示例、
+	// 一用第二张表（AI 总结 summaries）就在预览里 DB_DENIED）。示例文件属技能内容 ⇒ 摘要随之变。
+	"c2232f8835d891e1fe3c335cf2101925d84c4fd4d6331e53849d27b2f7d95aa6": "1.4.0",
 }
 
 // TestBuiltinSkillVersionTracksContent 断言当前技能内容的摘要已在登记表里，且登记的
