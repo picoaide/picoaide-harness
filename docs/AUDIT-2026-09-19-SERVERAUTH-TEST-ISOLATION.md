@@ -1,5 +1,8 @@
 # 审计：`internal/serverauth` 跨用例状态污染（登录失败预算被前一个用例打满）
 
+> ⚠️ **历史记录 · 对象已删除（2026-09-20 追记，W4-12）**：本文件引用的下列对象已随「WASM 应用客户端专属」改造的 **W4 删除波次**（2026-09-19/20）**从源码整体删除** —— `internal/wasmapp/session/**`（应用会话 + 主站登录/换票 HTML 面）、`internal/wasmapp/anonlimit/**`、`internal/wasmapp/edge/hostgate.go`（主机名门控）、`internal/wasmapp/aichat/**`、应用子域与应用基域配置面、`entry_url`。
+> **阅读口径**：本文件是**当时的审计/决策记录**，凡出现上述对象一律按历史理解，**不得据此实施、也不得当作现行契约**。现行模型见 `docs/planning/2026-09-19-wasm-client-only-design.md`，接口面见 `server/docs/03-api-reference.md` §11b。
+
 **结论速览**：`TestAdminUsageDept` 的失败是**跨用例状态污染**，不是该用例或被它测的接口有缺陷。
 包级共享的登录失败预算桶（`sharedLoginLimiter` / `sharedLoginIPLimiter`）在产品里是**有意共享**的
 （客户端面与管理面必须共用一份预算），但它的**桶键里那段"每库作用域"是假的**：
@@ -288,7 +291,7 @@ CI 跑的是 `go test ./... -count=1 -p 1`（`.github/workflows/ci.yml:216`，
 | 11 | `llmgateway/handler.go:37,44,55 maxUpstreamBody/streamIdleTimeout/maxStreamLineBytes` 等 | 可替换钩子 | 低（已规范） | `handler_test.go:380`、`failover_test.go:266`、`handler_stream_limit_test.go:59` 都 defer 还原 |
 | 12 | `llmgateway/audit_r3_billing_test.go:137` | `DecryptSecret` 钩子**未还原**（同文件后续用例不再需要它） | 低 | 泄漏后的取值与其它用例一致（`return s,nil`），行为中性；但属"未还原的全局钩子"，建议补 `t.Cleanup` |
 | 13 | `updatecheck/updatecheck.go:178 ChannelFile`、`clientrelease/clientrelease.go:30 Dir`、`skillseed/skillseed.go:53 Dir`、`appserver.isolationProbeRunner` | 可替换的全局钩子 | 低 | 前两个用例都配 `t.Cleanup`；其余按只读默认值使用 |
-| 14 | `wasmapp/anonlimit`、`llmgateway` 的 `rateLimiter` | 均为**实例化**（`anonlimit.New` / `newRateLimiter`），非包级 | — | 无跨用例共享 |
+| 14 | ⚠️ **对象已删除（W4）**：`wasmapp/anonlimit` 已随客户端专属改造删除（保留列仅作历史）；`llmgateway` 的 `rateLimiter` | 均为**实例化**（`anonlimit.New` / `newRateLimiter`），非包级 | — | 无跨用例共享 |
 
 **给主控的建议（本次不做）**：把"包级单例 + 进程级累积状态"的测试隔离做成一条可检查的纪律 ——
 新增此类单例时，必须在同包 `_test.go` 里提供 `resetXxxForTest()` 并在统一测试入口调用

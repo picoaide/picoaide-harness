@@ -106,6 +106,44 @@ async function runFakeHost() {
   await new Promise(resolvePromise => child.on('close', resolvePromise))
 }
 
+/**
+ * 解析预览宿主支持的 **SELECT 最小形态**：
+ *   `SELECT <列…> FROM <表> [ORDER BY created_at DESC] [LIMIT ?]`
+ *
+ * 为什么刻意窄：预览宿主不是数据库，它的职责是让示例的**分支**都能走通。认不出来的
+ * SQL 一律返回 `null` ⇒ 调用方 fail-loud（`DB_DENIED` + 原 SQL），**绝不猜、也绝不
+ * 静默返回空集** —— 后者会让"查询写错了"看起来像"表里没数据"。
+ */
+function parseSelect(sql) {
+  const m = /^\s*SELECT\s+(.+?)\s+FROM\s+([A-Za-z_][A-Za-z0-9_]*)\s*(.*?)\s*;?\s*$/is.exec(sql)
+  if (m === null) return null
+  const columns = m[1].split(',').map(s => s.trim())
+  if (columns.length === 0) return null
+  if (columns.some(c => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(c))) return null
+  return {
+    columns,
+    table: m[2],
+    orderByCreatedAtDesc: /ORDER\s+BY\s+created_at\s+DESC/is.test(m[3]),
+  }
+}
+
+/**
+ * 解析预览宿主支持的 **INSERT 最小形态**：
+ *   `INSERT INTO <表> (<列…>) VALUES (?, …)`
+ * 参数按**位置**对应列（与平台的参数化语义一致）；占位符只认 `?`。
+ */
+function parseInsert(sql) {
+  const m = /^\s*INSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)\s*;?\s*$/is.exec(sql)
+  if (m === null) return null
+  const columns = m[2].split(',').map(s => s.trim())
+  if (columns.length === 0) return null
+  if (columns.some(c => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(c))) return null
+  const placeholders = m[3].split(',').map(s => s.trim())
+  if (placeholders.length !== columns.length) return null
+  if (placeholders.some(p => p !== '?')) return null
+  return { table: m[1], columns }
+}
+
 /** 假宿主：把宿主函数实现成内存版，让应用的分支都能走通。 */
 class FakeHost {
   constructor(stdin, reader, config, args) {
@@ -113,9 +151,15 @@ class FakeHost {
     this.reader = reader
     this.config = config
     this.args = args
-    this.notes = []
+    // 内存表：表名 → { columns, rows }。
+    //
+    // **按 SQL 里的表名分派，不再把任何查询都当 notes**（2026-09-20 修）。此前
+    // `db.exec` 只认 `INSERT INTO notes` ⇒ 作者照抄这个示例、用例里的第二张表
+    // （`summaries`，AI 总结落库）一写就在预览里 `DB_DENIED`；而 `db.query` 更是
+    // **任何** SQL 都回便签行（示例的 `main.go` 里专门写了一段防御来识别这种"问 A 答 B"）。
+    // 现在按 `db.define` 登记的表各自存行，示例与作者自己的表都能跑通。
+    this.tables = new Map()
     this.nextRowId = 1
-    this.definedTables = new Set()
   }
 
   answer(frame) {
@@ -124,24 +168,45 @@ class FakeHost {
     const fail = (code, message) => ({ jsonrpc: '2.0', id, error: { code, message } })
     switch (method) {
       case 'db.define': {
-        const created = !this.definedTables.has(params.table)
-        this.definedTables.add(params.table)
-        return ok({ created, table: params.table, columns: params.columns.map(c => c.name) })
+        const columns = params.columns.map(c => c.name)
+        const created = !this.tables.has(params.table)
+        if (created) this.tables.set(params.table, { columns, rows: [] })
+        return ok({ created, table: params.table, columns })
       }
       case 'db.query': {
+        const sql = String(params.sql ?? '')
+        const parsed = parseSelect(sql)
+        if (parsed === null) {
+          return fail('DB_DENIED', `preview 只支持 "SELECT <列…> FROM <表> [ORDER BY created_at DESC] [LIMIT ?]"，收到: ${sql}`)
+        }
         const limit = Number(params.args?.[0] ?? 50)
-        const rows = [...this.notes]
-          .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
-          .slice(0, limit)
-          .map(n => [n.author, n.body, n.created_at])
-        return ok({ columns: ['author', 'body', 'created_at'], rows, truncated: false })
+        const rows = [...(this.tables.get(parsed.table)?.rows ?? [])]
+        if (parsed.orderByCreatedAtDesc) {
+          rows.sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
+        }
+        return ok({
+          columns: parsed.columns,
+          rows: rows.slice(0, limit).map(row => parsed.columns.map(c => (c in row ? row[c] : null))),
+          truncated: false,
+        })
       }
       case 'db.exec': {
-        if (!/^INSERT INTO notes/i.test(params.sql)) {
-          return fail('DB_DENIED', `preview 只实现了 notes 表的 INSERT，收到: ${params.sql}`)
+        const sql = String(params.sql ?? '')
+        const parsed = parseInsert(sql)
+        if (parsed === null) {
+          return fail('DB_DENIED', `preview 只支持 "INSERT INTO <表> (<列…>) VALUES (?, …)"，收到: ${sql}`)
         }
-        const [author, body, created_at] = params.args ?? []
-        this.notes.push({ rowId: this.nextRowId++, author, body, created_at })
+        const values = params.args ?? []
+        if (values.length !== parsed.columns.length) {
+          return fail('DB_DENIED', `参数个数(${values.length})与列数(${parsed.columns.length})不符: ${sql}`)
+        }
+        const table = this.tables.get(parsed.table) ?? { columns: parsed.columns, rows: [] }
+        this.tables.set(parsed.table, table)
+        const row = {}
+        parsed.columns.forEach((column, index) => { row[column] = values[index] })
+        // 平台自动维护行号列（应用看不到）；预览里也留一份，与线上语义对齐。
+        row.rowId = this.nextRowId++
+        table.rows.push(row)
         return ok({ rows_affected: 1 })
       }
       case 'log':

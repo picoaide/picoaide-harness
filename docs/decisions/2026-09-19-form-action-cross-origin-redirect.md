@@ -1,5 +1,8 @@
 # 决策：跨源那一跳用「同源跳板页」，而不是 302（CSP `form-action` 会拦跨源重定向）
 
+> ⚠️ **历史记录 · 对象已删除（2026-09-20 追记，W4-12）**：本文件引用的下列对象已随「WASM 应用客户端专属」改造的 **W4 删除波次**（2026-09-19/20）**从源码整体删除** —— `internal/wasmapp/session/**`（应用会话 + 主站登录/换票 HTML 面）、`internal/wasmapp/anonlimit/**`、`internal/wasmapp/edge/hostgate.go`（主机名门控）、`internal/wasmapp/aichat/**`、应用子域与应用基域配置面、`entry_url`。
+> **阅读口径**：本文件是**当时的审计/决策记录**，凡出现上述对象一律按历史理解，**不得据此实施、也不得当作现行契约**。现行模型见 `docs/planning/2026-09-19-wasm-client-only-design.md`，接口面见 `server/docs/03-api-reference.md` §11b。
+
 > ⚠️ **状态：`superseded`（已作废，2026-09-19）—— 已废弃，不得据此实施。**
 > 本文描述的浏览器访问链路（应用子域 / 换票 / `/app-ticket` / 会话 Cookie / 基域 / 通配证书）
 > 已在「客户端专属」改造中**整体删除**；本文仅作历史记录保留，其中的机制、配置、操作步骤与结论
@@ -50,7 +53,8 @@ appserver 把请求送到主站换票端点；对 GET 是普通导航（不受�
 3. 可见的 `<a href="…">` —— 链接导航不受 `form-action` 约束，用户总有能走通的一条路。
 
 实现只有一份：`session.RedirectPage(lang, kind, target, title, product)`
-（`server/internal/wasmapp/session/pages.go`），两处使用场景只差文案：
+（`server/internal/wasmapp/session/pages.go`）—— ⚠️ **该包已随 W4 整体删除**（连同换票链路，
+应用改为客户端自定义协议窗口承载）；本段是**当时**的实现记录，两处使用场景只差文案：
 
 | 场景 | 调用方 | target | 文案 |
 |---|---|---|---|
