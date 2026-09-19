@@ -166,14 +166,14 @@ func TestTicketSubmitRejectsMalformedApp(t *testing.T) {
 	}
 
 	// 反向对照：合法 app 正常签发并 302（防"一刀切全禁"）。
-	code := env.issueTicketViaPOST(t, empCookie, "real-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "real-app", "/")
 	if code == "" {
 		t.Fatal("合法 app 必须照常签发票")
 	}
 	// 签出的票能在真实子域上兑换 —— 这才是"票有效"的判据。
 	// （RedeemTicket 只负责写 Cookie 并回干净 URL，最终 302 由 appserver 发。）
 	rec := httptest.NewRecorder()
-	clean, ok := env.mgr.RedeemTicket(rec, requestWithTicket("real-app", code), "real-app")
+	clean, ok := env.mgr.RedeemTicket(rec, requestWithTicket("real-app", code, nonce), "real-app")
 	if !ok {
 		t.Fatal("合法 app 签出的票必须可兑换")
 	}
@@ -247,7 +247,7 @@ func TestTicketSubmitRefusesNonHTTPS(t *testing.T) {
 	}
 
 	// 反向对照：同一账号在 https 下照常签发（否则"一律拒绝"也能假绿）。
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, _ := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 	if code == "" {
 		t.Fatal("https 下必须照常签发票（反向对照）")
 	}
@@ -283,6 +283,44 @@ func TestTicketSubmitRejectsForeignOrigin(t *testing.T) {
 	env.mgr.TicketSubmit(rec2, r2)
 	if rec2.Code != http.StatusForbidden {
 		t.Fatalf("无 Origin/Referer 状态码 = %d, want 403", rec2.Code)
+	}
+}
+
+// TestTicketSubmitOriginFailureKeepsLoginForm 覆盖 2026-09-19 P0 的**第一现场**：
+// 换票页加载即自动提交 POST /app-ticket，来源校验失败时页面必须仍然给出账号密码
+// 输入框（旧实现 ShowForm=false ⇒ 用户"根本没有地方输入账号密码"），并把 next
+// 指回换票端点，登录后自动把换票流程走完。
+//
+// `Origin: null` 正是 no-referrer 策略下浏览器对**同源表单 POST** 发的形态
+// （WHATWG Fetch；微实验 temp/wasm-probe/micro-referrer.mjs）。
+func TestTicketSubmitOriginFailureKeepsLoginForm(t *testing.T) {
+	env := newEnv(t)
+	env.newApp(t, "my-app", "alice")
+
+	r := formReq(t, "/app-ticket", url.Values{"app": {"my-app"}, "next": {"/dash"}})
+	r.Header.Set("Origin", "null")
+	rec := httptest.NewRecorder()
+	env.mgr.TicketSubmit(rec, r)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("状态码 = %d, want 403", rec.Code)
+	}
+	body := html.UnescapeString(rec.Body.String())
+	if !strings.Contains(body, `name="username"`) || !strings.Contains(body, `name="password"`) {
+		t.Fatalf("来源校验失败页没有输入框（用户无从重试）：%s", body)
+	}
+	if !strings.Contains(body, copyZH.ErrOriginRejected) {
+		t.Fatal("来源校验失败页没有可操作指引文案")
+	}
+	// next 必须指回换票端点（与未登录 302 的 next 逐字节同一形状）。
+	wantNext := `name="next" value="` + ticketLoginNext("my-app", "/dash") + `"`
+	if !strings.Contains(body, wantNext) {
+		t.Fatalf("登录表单的 next 不是换票回跳目标（want %s）：%s", wantNext, body)
+	}
+	if got := sanitizeNext(ticketLoginNext("my-app", "/dash")); !strings.HasPrefix(got, "/app-ticket?") {
+		t.Fatalf("回跳目标被 sanitizeNext 抹掉了：%q", got)
+	}
+	if env.mgr.tickets.size() != 0 {
+		t.Fatal("来源校验失败竟然签发了票据")
 	}
 }
 
@@ -334,8 +372,23 @@ func TestTicketSubmitUnknownOrDeletedAppIs404(t *testing.T) {
 	}
 }
 
-// TestTicketSubmitIssuesTicketAndRedirects 覆盖 §4.7 的签发与 §6.1 ③ 的回跳形态。
-func TestTicketSubmitIssuesTicketAndRedirects(t *testing.T) {
+// TestTicketSubmitRendersSameOriginJumpPage 是 2026-09-19 P0 的门禁（§4.7 签发 + §6.1 ③ 的回跳形态）。
+//
+// 缺陷形态：签发成功后 `http.Redirect(..., 302)` 直接跳**跨源**的应用子域，而 CSP3 的
+// `form-action` 会遍历重定向链上的每一个 URL ⇒ 浏览器把这次 POST 整体拦掉
+// （真实 Chromium 报 `Sending form data to '…/app-ticket' violates "form-action 'self'"`），
+// 服务端根本没收到请求，用户停在换票页且页面上没有任何可点元素。
+//
+// 修复形态：POST 返回 **200 的同源跳板页**，跨源那一跳由页面自己完成。本用例逐条钉住：
+//  1. 200，且**没有 Location 头**（票不出现在任何响应头里）；
+//  2. 页面同时给出三条出口：`location.replace(...)`、`http-equiv="refresh"`、可见 `<a href>`；
+//  3. 目标 URL 与服务端唯一实现 `appTicketURL(...)` **逐字节一致**（不存在第二份拼接）；
+//  4. CSP 仍然是 `form-action 'self'`（**防"为了让测试过而放宽 CSP"**）+ `no-store`
+//     + `Referrer-Policy: same-origin`（跨源跳转不带 Referer ⇒ 票不经 Referer 泄漏）；
+//  5. 审计 / 在途票数照旧（`app_ticket_issue` 与一次性语义不因这次改动而变）。
+//
+// 变异验证：把成功分支改回 `http.Redirect(..., http.StatusFound)` ⇒ 本用例在第 1 条即红。
+func TestTicketSubmitRendersSameOriginJumpPage(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
@@ -344,29 +397,181 @@ func TestTicketSubmitIssuesTicketAndRedirects(t *testing.T) {
 	r.AddCookie(empCookie)
 	rec := httptest.NewRecorder()
 	env.mgr.TicketSubmit(rec, r)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("状态码 = %d, want 302", rec.Code)
+
+	// 1) 200 的同源页面；跨源 302 已经不存在（连 Location 头都没有）。
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d, want 200（同源跳板页，而不是跨源 302）", rec.Code)
 	}
-	loc := rec.Header().Get("Location")
-	if !strings.HasPrefix(loc, "https://my-app."+testBaseDomain+"/dash?") {
-		t.Fatalf("回跳地址 = %q（必须是 https 且落在应用子域）", loc)
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Fatalf("跳板页不得再有 Location（跨源 302 会被 form-action 拦掉）：%q", loc)
 	}
-	u, err := url.Parse(loc)
+	body := rec.Body.String()
+
+	// 2) 三条出口齐全。
+	for _, want := range []string{
+		`location.replace(a.href)`,
+		`http-equiv="refresh"`,
+		`content="0;url=`,
+		`id="picoaide-continue"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("跳板页缺少 %q：%s", want, body)
+		}
+	}
+	// 兜底入口必须是**可点的链接**（文案承诺的"点击下面的链接"）。
+	if !strings.Contains(body, `<a class="go" id="picoaide-continue" href="`) {
+		t.Fatalf("跳板页缺少可见的兜底链接：%s", body)
+	}
+	// 只允许我们自己的那一个内联脚本（多出来的 <script 就是注入面）。
+	if n := strings.Count(body, "<script"); n != 1 {
+		t.Fatalf("跳板页有 %d 个 <script（应只有 1 个内联跳转脚本）：%s", n, body)
+	}
+
+	// 3) 目标 URL 与唯一实现 appTicketURL 一致（host/scheme/路径/参数逐项 + 逐字节）。
+	target := jumpTarget(t, body)
+	u, err := url.Parse(target)
 	if err != nil {
-		t.Fatalf("Location 解析失败: %v", err)
+		t.Fatalf("目标 URL 解析失败 %q: %v", target, err)
+	}
+	if u.Scheme != "https" || u.Host != "my-app."+testBaseDomain {
+		t.Fatalf("目标 = %q（必须是 https 且落在应用子域）", target)
+	}
+	if u.Path != "/dash" || u.Query().Get("tab") != "1" {
+		t.Fatalf("目标路径/参数丢失：%q", target)
 	}
 	code := u.Query().Get("ticket")
 	if len(code) != 64 {
 		t.Fatalf("ticket 长度 = %d, want 64（32 字节 hex）", len(code))
 	}
-	if u.Query().Get("tab") != "1" {
-		t.Fatalf("原始 query 参数丢失：%q", loc)
+	if want := env.mgr.appTicketURL("my-app", "/dash?tab=1", code); target != want {
+		t.Fatalf("跳板页目标 = %q，appTicketURL = %q（出现了第二份拼接实现）", target, want)
 	}
+	// 票只允许出现在页面体的两个 URL 出口（链接 + meta），不得散落到别处。
+	if n := strings.Count(body, code); n != 2 {
+		t.Fatalf("响应体里 ticket 出现 %d 次，want 2（兜底链接 + meta refresh）：%s", n, body)
+	}
+
+	// 4) 安全头：CSP 不放宽，缓存不落盘，跨源不带 Referer。
+	if csp := rec.Header().Get("Content-Security-Policy"); csp != mainPageCSP {
+		t.Fatalf("跳板页 CSP = %q，want %q（不得为通过测试而放宽）", csp, mainPageCSP)
+	}
+	if !strings.Contains(mainPageCSP, "form-action 'self'") {
+		t.Fatalf("mainPageCSP 里的 form-action 被放宽了：%q", mainPageCSP)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store（带票页面不得落缓存）", cc)
+	}
+	if rp := rec.Header().Get("Referrer-Policy"); rp != mainPageReferrerPolicy {
+		t.Fatalf("Referrer-Policy = %q, want %q（跨源跳转必须不带 Referer）", rp, mainPageReferrerPolicy)
+	}
+
+	// 5) 审计与一次性票语义照旧。
 	if env.audit.waitFor(t, "app_ticket_issue") == "" {
 		t.Fatal("换票签发未写审计（§4.9）")
 	}
 	if env.mgr.tickets.size() != 1 {
 		t.Fatalf("在途票数 = %d, want 1", env.mgr.tickets.size())
+	}
+}
+
+// TestTicketSubmitJumpPageEscapesHostileNext 断言跳板页把 `next` 当**不可信数据**转义。
+//
+// `next` 在进入这里之前已经过 sanitizeNext（`//`/`:`/`\`/`#`/控制字符一律回落 `/`），
+// 但这些字符**都能通过**净化：`"` `'` `<` `>` `&`。它们一旦被裸拼进属性就会闭合引号、
+// 注入标签 —— 所以本用例专挑"能过净化的恶意形态"。
+//
+// 变异验证：把 `<a href="{{.Target}}">` 改成 `template.HTML` 拼接（或把 Target 标成
+// template.URL/template.HTML），`<script`/`onmouseover=` 断言即红。
+func TestTicketSubmitJumpPageEscapesHostileNext(t *testing.T) {
+	env := newEnv(t)
+	env.newApp(t, "my-app", "alice")
+	empCookie, _ := env.loginAs(t, "alice")
+
+	hostile := []string{
+		`/%22%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E`,      // "><script>alert(1)</script>
+		`/%27%3E%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E`, // '><img src=x onerror=alert(1)>
+		`/a&b=%3Cx%3E`,
+		`/quote%22and%27apos`,
+	}
+	for _, next := range hostile {
+		r := formReq(t, "/app-ticket", url.Values{"app": {"my-app"}, "next": {next}})
+		r.AddCookie(empCookie)
+		rec := httptest.NewRecorder()
+		env.mgr.TicketSubmit(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("next=%q 状态码 = %d, want 200", next, rec.Code)
+		}
+		body := rec.Body.String()
+
+		// 注入形态一个都不许出现（我们自己的那一个内联脚本除外）。
+		for _, bad := range []string{"<script>alert", "</a><script", "<img", "onerror=", "onmouseover="} {
+			if strings.Contains(body, bad) {
+				t.Fatalf("next=%q 注入出了 %q：%s", next, bad, body)
+			}
+		}
+		if n := strings.Count(body, "<script"); n != 1 {
+			t.Fatalf("next=%q 页面有 %d 个 <script，want 1：%s", next, n, body)
+		}
+		// 属性里的裸引号必须被转义（html/template 会写成 &#34; / &#39;）。
+		if strings.Contains(body, `"`+next+`"`) {
+			t.Fatalf("next=%q 未被转义地出现在属性里：%s", next, body)
+		}
+
+		// 恶意字符必须**作为数据**完整送达应用（而不是被吞掉/截断）：
+		// 目标仍然由唯一实现 appTicketURL 生成，输入的 next 是 sanitizeNext 的结果
+		// （这些形态都能通过净化 —— `"` `'` `<` `>` `&` 不在拒绝集合里）。
+		target := jumpTarget(t, body)
+		u, err := url.Parse(target)
+		if err != nil {
+			t.Fatalf("next=%q 目标解析失败 %q: %v", next, target, err)
+		}
+		if u.Host != "my-app."+testBaseDomain {
+			t.Fatalf("next=%q 把目标主机改成了 %q", next, u.Host)
+		}
+		code := u.Query().Get("ticket")
+		if len(code) != 64 {
+			t.Fatalf("next=%q 的票被破坏（ticket=%q）", next, code)
+		}
+		if want := env.mgr.appTicketURL("my-app", sanitizeNext(next), code); target != want {
+			// html/template 在 URL 属性上下文里会对目标做**百分号规范化**（例如把 `(` `)`
+			// 写成 `%28%29`），所以退回比较"解析后的组件"：主机不得变，路径（解码后）
+			// 必须与 sanitizeNext 的结果（解码后）逐字符相同 —— 这正是
+			// "恶意字符作为数据完整送达、没有被吞掉/截断/改变主机"的判据。
+			wu, werr := url.Parse(want)
+			if werr != nil {
+				t.Fatalf("appTicketURL(next=%q) 解析失败: %v", next, werr)
+			}
+			if u.Scheme != wu.Scheme || u.Host != wu.Host || u.Path != wu.Path {
+				t.Fatalf("next=%q 的目标 = %q（host=%q path=%q），appTicketURL = %q（host=%q path=%q）",
+					next, target, u.Host, u.Path, want, wu.Host, wu.Path)
+			}
+		}
+	}
+}
+
+// TestTicketSubmitJumpPageLocalePerRequest 断言跳板页与其他注入式页面一样按请求解析语言
+// （新增文案必须中英都给，见 TestPageCopyCoversBothLanguages）。
+func TestTicketSubmitJumpPageLocalePerRequest(t *testing.T) {
+	env := newEnv(t)
+	env.newApp(t, "my-app", "alice")
+	empCookie, _ := env.loginAs(t, "alice")
+
+	render := func(lang string) string {
+		r := formReq(t, "/app-ticket", url.Values{"app": {"my-app"}, "next": {"/"}})
+		r.AddCookie(empCookie)
+		r.Header.Set("Accept-Language", lang)
+		rec := httptest.NewRecorder()
+		env.mgr.TicketSubmit(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("lang=%s 状态码 = %d", lang, rec.Code)
+		}
+		return rec.Body.String()
+	}
+	if body := render("en"); !strings.Contains(body, "Continue to the application") {
+		t.Fatalf("英文请求没有拿到英文跳板页：%s", body)
+	}
+	if body := render("zh"); !strings.Contains(body, "继续前往应用") {
+		t.Fatalf("中文请求没有拿到中文跳板页：%s", body)
 	}
 }
 
@@ -380,15 +585,16 @@ func TestTicketSubmitNextFallsBackToRoot(t *testing.T) {
 		r.AddCookie(empCookie)
 		rec := httptest.NewRecorder()
 		env.mgr.TicketSubmit(rec, r)
-		if rec.Code != http.StatusFound {
-			t.Fatalf("next=%q 状态码 = %d, want 302（非法 next 只回落，不拒整单）", next, rec.Code)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("next=%q 状态码 = %d, want 200（非法 next 只回落，不拒整单）", next, rec.Code)
 		}
-		u, err := url.Parse(rec.Header().Get("Location"))
+		target := jumpTarget(t, rec.Body.String())
+		u, err := url.Parse(target)
 		if err != nil {
-			t.Fatalf("next=%q Location 解析失败: %v", next, err)
+			t.Fatalf("next=%q 目标解析失败: %v", next, err)
 		}
 		if u.Host != "my-app."+testBaseDomain || u.Path != "/" {
-			t.Fatalf("next=%q 的回跳 = %q（必须回落应用根）", next, rec.Header().Get("Location"))
+			t.Fatalf("next=%q 的回跳 = %q（必须回落应用根）", next, target)
 		}
 	}
 }
@@ -403,16 +609,17 @@ func TestTicketSubmitTicketParamComesFirst(t *testing.T) {
 	r.AddCookie(empCookie)
 	rec := httptest.NewRecorder()
 	env.mgr.TicketSubmit(rec, r)
-	u, err := url.Parse(rec.Header().Get("Location"))
+	target := jumpTarget(t, rec.Body.String())
+	u, err := url.Parse(target)
 	if err != nil {
-		t.Fatalf("Location 解析失败: %v", err)
+		t.Fatalf("目标解析失败: %v", err)
 	}
 	got := u.Query().Get("ticket")
 	if got == "evil" || len(got) != 64 {
 		t.Fatalf("应用会读到的 ticket = %q（应为本次签发的 64 位十六进制码）", got)
 	}
-	if !strings.Contains(rec.Header().Get("Location"), "?ticket="+got+"&ticket=evil") {
-		t.Fatalf("ticket 参数顺序不对：%q", rec.Header().Get("Location"))
+	if !strings.Contains(target, "?ticket="+got+"&ticket=evil") {
+		t.Fatalf("ticket 参数顺序不对：%q", target)
 	}
 }
 
@@ -438,11 +645,11 @@ func TestTicketExpiresAfterTTL(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 
 	env.advance(limits.TicketTTL + time.Second)
 	rec := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); ok {
+	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); ok {
 		t.Fatal("过期票据被接受了")
 	}
 	if len(rec.Result().Cookies()) != 0 {
@@ -459,10 +666,10 @@ func TestTicketUsableJustBeforeTTL(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 	env.advance(limits.TicketTTL - time.Second)
 	rec := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); !ok {
+	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); !ok {
 		t.Fatal("TTL 内的票据被拒了")
 	}
 }
@@ -473,7 +680,7 @@ func TestConcurrentRedeemOnlyOneWins(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 
 	const workers = 64
 	var wg sync.WaitGroup
@@ -486,7 +693,7 @@ func TestConcurrentRedeemOnlyOneWins(t *testing.T) {
 			defer wg.Done()
 			rec := httptest.NewRecorder()
 			<-start
-			if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); ok {
+			if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); ok {
 				mu.Lock()
 				wins++
 				mu.Unlock()
@@ -508,14 +715,14 @@ func TestRedeemReplayRejected(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 
 	first := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(first, requestWithTicket("my-app", code), "my-app"); !ok {
+	if _, ok := env.mgr.RedeemTicket(first, requestWithTicket("my-app", code, nonce), "my-app"); !ok {
 		t.Fatal("首次兑换失败")
 	}
 	second := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(second, requestWithTicket("my-app", code), "my-app"); ok {
+	if _, ok := env.mgr.RedeemTicket(second, requestWithTicket("my-app", code, nonce), "my-app"); ok {
 		t.Fatal("重放票据被接受了")
 	}
 	if len(second.Result().Cookies()) != 0 {
@@ -530,10 +737,10 @@ func TestCrossAppTicketRejected(t *testing.T) {
 	env.newApp(t, "app-a", "alice")
 	env.newApp(t, "app-b", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "app-a", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "app-a", "/")
 
 	rec := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("app-b", code), "app-b"); ok {
+	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("app-b", code, nonce), "app-b"); ok {
 		t.Fatal("跨应用兑换成功了")
 	}
 	if len(rec.Result().Cookies()) != 0 {
@@ -541,7 +748,7 @@ func TestCrossAppTicketRejected(t *testing.T) {
 	}
 	// 票没被烧掉：正确的应用仍然可以兑换。
 	right := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(right, requestWithTicket("app-a", code), "app-a"); !ok {
+	if _, ok := env.mgr.RedeemTicket(right, requestWithTicket("app-a", code, nonce), "app-a"); !ok {
 		t.Fatal("跨应用尝试把票烧掉了（错误的应用不应有权消费他人票据）")
 	}
 }
@@ -551,9 +758,10 @@ func TestRedeemReturnsCleanURL(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/dash?tab=1")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/dash?tab=1")
 
 	r := httpsReq(http.MethodGet, "https://my-app."+testBaseDomain+"/dash?tab=1&ticket="+code, nil)
+	r.AddCookie(nonce) // 同一只浏览器：签发时收到的 nonce（R1-sec-1）
 	rec := httptest.NewRecorder()
 	clean, ok := env.mgr.RedeemTicket(rec, r, "my-app")
 	if !ok {
@@ -572,10 +780,10 @@ func TestAppCookieAttributes(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 
 	rec := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); !ok {
+	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); !ok {
 		t.Fatal("兑换失败")
 	}
 	c := cookieByName(rec.Result().Cookies(), AppCookieName)
@@ -621,7 +829,7 @@ func TestRedeemRefusesNonHTTPS(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, _ := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 
 	r := httpsReq(http.MethodGet, "http://my-app."+testBaseDomain+"/?ticket="+code, nil)
 	rec := httptest.NewRecorder()
@@ -642,13 +850,13 @@ func TestRedeemAfterLogoutFails(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
 	empCookie, emp := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 
 	if err := env.mgr.RevokeSession(t.Context(), emp.SessionID); err != nil {
 		t.Fatalf("RevokeSession: %v", err)
 	}
 	rec := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); ok {
+	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); ok {
 		t.Fatal("员工会话已吊销，仍然换出了应用会话")
 	}
 	if n := countRows(t, env, "SELECT count(*) FROM app_sessions"); n != 0 {
@@ -673,9 +881,9 @@ func TestCurrentUserAndSessionKey(t *testing.T) {
 		t.Fatalf("无 Cookie 时 SessionKey = %q", k)
 	}
 
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 	rec := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); !ok {
+	if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); !ok {
 		t.Fatal("兑换失败")
 	}
 	appCookie := cookieByName(rec.Result().Cookies(), AppCookieName)
@@ -704,9 +912,9 @@ func TestCurrentUserAndSessionKey(t *testing.T) {
 	}
 
 	// 另一个应用兑换 ⇒ 会话键必须不同（每个 (会话, 应用) 一份）。
-	code2 := env.issueTicketViaPOST(t, empCookie, "other-app", "/")
+	code2, nonce2 := env.issueTicketViaPOST(t, empCookie, "other-app", "/")
 	rec2 := httptest.NewRecorder()
-	if _, ok := env.mgr.RedeemTicket(rec2, requestWithTicket("other-app", code2), "other-app"); !ok {
+	if _, ok := env.mgr.RedeemTicket(rec2, requestWithTicket("other-app", code2, nonce2), "other-app"); !ok {
 		t.Fatal("第二个应用兑换失败")
 	}
 	key2 := env.mgr.SessionKey(reqWithCookie(cookieByName(rec2.Result().Cookies(), AppCookieName)), "other-app")
@@ -723,9 +931,9 @@ func TestSessionKeyDiffersPerEmployeeSession(t *testing.T) {
 	keys := map[string]bool{}
 	for i := 0; i < 2; i++ {
 		empCookie, _ := env.loginAs(t, "alice")
-		code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+		code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
 		rec := httptest.NewRecorder()
-		if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code), "my-app"); !ok {
+		if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket("my-app", code, nonce), "my-app"); !ok {
 			t.Fatal("兑换失败")
 		}
 		k := env.mgr.SessionKey(reqWithCookie(cookieByName(rec.Result().Cookies(), AppCookieName)), "my-app")
@@ -741,7 +949,7 @@ func TestSessionKeyDiffersPerEmployeeSession(t *testing.T) {
 
 // TestFullTicketFlowFromAppSubdomainToCleanURL 是 §6.1 链路①–⑤ 的端到端回归：
 // 子域无 Cookie ⇒ 主站换票页（GET）⇒ 未登录跳登录页 ⇒ 登录 ⇒ 回到 /app-ticket
-// ⇒ 同源 POST 发票 ⇒ 302 回子域 ⇒ 兑换 ⇒ 干净 URL。
+// ⇒ 同源 POST 发票 ⇒ 同源跳板页指向子域（**不是跨源 302**）⇒ 兑换 ⇒ 干净 URL。
 func TestFullTicketFlowFromAppSubdomainToCleanURL(t *testing.T) {
 	env := newEnv(t)
 	env.newApp(t, "my-app", "alice")
@@ -787,15 +995,15 @@ func TestFullTicketFlowFromAppSubdomainToCleanURL(t *testing.T) {
 		t.Fatalf("换票页 next = %q, want /deep/path?x=1（嵌套编码还原失败）", innerNext)
 	}
 
-	// ⑤ 同源 POST 发票 ⇒ 302 回子域。
+	// ⑤ 同源 POST 发票 ⇒ 200 跳板页，目标指向子域。
 	sub := formReq(t, "/app-ticket", url.Values{"app": {"my-app"}, "next": {innerNext}})
 	sub.AddCookie(empCookie)
 	issue := httptest.NewRecorder()
 	env.mgr.TicketSubmit(issue, sub)
-	if issue.Code != http.StatusFound {
-		t.Fatalf("换票状态码 = %d", issue.Code)
+	if issue.Code != http.StatusOK {
+		t.Fatalf("换票状态码 = %d, want 200", issue.Code)
 	}
-	loc := issue.Header().Get("Location")
+	loc := jumpTarget(t, issue.Body.String())
 	u, err := url.Parse(loc)
 	if err != nil || u.Host != "my-app."+testBaseDomain {
 		t.Fatalf("回跳 = %q", loc)
@@ -805,8 +1013,11 @@ func TestFullTicketFlowFromAppSubdomainToCleanURL(t *testing.T) {
 	}
 
 	// ⑥ 子域兑换 ⇒ 干净 URL + Cookie。
+	redeemBrowser := httpsReq(http.MethodGet, loc, nil)
+	// 同一只浏览器：带上 ⑤ 那次签发响应下发的 nonce（R1-sec-1 的浏览器持有性证明）。
+	redeemBrowser.AddCookie(cookieByName(issue.Result().Cookies(), TicketNonceCookieName))
 	redeem := httptest.NewRecorder()
-	clean, ok := env.mgr.RedeemTicket(redeem, httpsReq(http.MethodGet, loc, nil), "my-app")
+	clean, ok := env.mgr.RedeemTicket(redeem, redeemBrowser, "my-app")
 	if !ok {
 		t.Fatal("兑换失败")
 	}
@@ -816,6 +1027,25 @@ func TestFullTicketFlowFromAppSubdomainToCleanURL(t *testing.T) {
 	if cookieByName(redeem.Result().Cookies(), AppCookieName) == nil {
 		t.Fatal("兑换未下发应用 Cookie")
 	}
+}
+
+// jumpTarget 从跳板页响应体里取出兜底链接的目标 URL（html/template 会做属性转义，需还原）。
+//
+// 只认 `id="picoaide-continue" href="…"`：这是页面上**唯一**的跨源出口声明，
+// 测试读它 = 读浏览器会用到的那份数据（而不是另拼一份"期望值"）。
+func jumpTarget(t *testing.T, body string) string {
+	t.Helper()
+	marker := `id="picoaide-continue" href="`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		t.Fatalf("跳板页没有兜底链接（%s）：%s", marker, body)
+	}
+	rest := body[i+len(marker):]
+	j := strings.IndexByte(rest, '"')
+	if j < 0 {
+		t.Fatalf("兜底链接的 href 没有闭合：%s", body)
+	}
+	return html.UnescapeString(rest[:j])
 }
 
 // hiddenValue 从渲染出的表单里取隐藏域的值（html/template 会做属性转义，需还原）。
@@ -852,9 +1082,9 @@ func TestRevokeNotifiesAppSessionHook(t *testing.T) {
 
 	want := map[string]bool{}
 	for _, appID := range []string{"app-a", "app-b"} {
-		code := env.issueTicketViaPOST(t, empCookie, appID, "/")
+		code, nonce := env.issueTicketViaPOST(t, empCookie, appID, "/")
 		rec := httptest.NewRecorder()
-		if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket(appID, code), appID); !ok {
+		if _, ok := env.mgr.RedeemTicket(rec, requestWithTicket(appID, code, nonce), appID); !ok {
 			t.Fatalf("%s 兑换失败", appID)
 		}
 		want[env.mgr.SessionKey(reqWithCookie(cookieByName(rec.Result().Cookies(), AppCookieName)), appID)] = true
@@ -889,8 +1119,8 @@ func TestAuditPanicDoesNotCrash(t *testing.T) {
 	})
 	env.newApp(t, "my-app", "alice")
 	empCookie, _ := env.loginAs(t, "alice")
-	code := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
-	if _, ok := env.mgr.RedeemTicket(httptest.NewRecorder(), requestWithTicket("my-app", code), "my-app"); !ok {
+	code, nonce := env.issueTicketViaPOST(t, empCookie, "my-app", "/")
+	if _, ok := env.mgr.RedeemTicket(httptest.NewRecorder(), requestWithTicket("my-app", code, nonce), "my-app"); !ok {
 		t.Fatal("兑换失败")
 	}
 	deadline := time.Now().Add(2 * time.Second)

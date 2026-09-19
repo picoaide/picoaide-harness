@@ -66,6 +66,17 @@ type Options struct {
 	// 它不只是记账口径：队列的全局并发、执行侧实例内存上限、进程内模块缓存上限、
 	// 应用库句柄上限**全部**取自它 —— 声明与执行同一份数（见 memprofile 包注释）。
 	MemoryProfile memprofile.Profile
+	// Limits 是**当前生效**的平台限制项（可选；零值 ⇒ 按 MemoryProfile 折算，与历史行为一致）。
+	//
+	// ⚠️ 自 2026-09-19（P0-2）起 MemoryProfile 降级为**默认值来源**：真正生效的数值
+	// 是这一份（控制台设置 > 部署档位 > 编译期默认，解析在 cmd/server 的 wasmLimitsHolder）。
+	//
+	// 为什么必须由装配方注入：单实例内存上限是 wazero RuntimeConfig 的字段，runtime
+	// 建好之后**不可变** —— 装配期若只认部署档位，控制台保存的值就永远只是一个
+	// "待重启"标记：重启后仍是档位值，而 restart_pending 又被清空（界面显示"无需重启"），
+	// 于是"自检算的账"与"实际跑的账"分叉。同一份数值还驱动队列并发、模块缓存与库句柄
+	// 上限，因此必须一次注入齐（否则又会出现"界面按设置显示、实际按档位跑"）。
+	Limits applimits.Limits
 	// AppIDExtraReserved 是部署期注入的企业既有主机名（§4.1）：
 	// 本包用它做**纵深防御** —— 即使库里存在同名应用行，也不给这些主机名提供内容。
 	AppIDExtraReserved []string
@@ -100,6 +111,9 @@ type Server struct {
 	// appdbs 是应用库句柄池（§4.5：一应用一 driver 实例 + 一应用一连接，跨应用不复用；
 	// 淘汰策略与上限见 dbpool.go）。
 	appdbs *appDBPool
+	// releases 是 `(app_id, release_id)` 级的资源/配置缓存（R1-rt-2/3，见 releasecache.go）。
+	// 它有界、可逐出，并在下架/冻结/删除/逐出与换版本时失效。
+	releases *releaseCache
 
 	scheduler *queue.Scheduler
 	limiter   *anonlimit.Limiter
@@ -167,18 +181,27 @@ func New(opt Options) (*Server, error) {
 	}
 	s := &Server{opt: opt, logger: logger, now: now, drained: make(chan struct{})}
 
-	// 内存档位：零值 ⇒ 默认档（与历史行为一致）。数值同时驱动下面四处的强制。
+	// 内存档位：零值 ⇒ 默认档（与历史行为一致）。
 	prof := opt.MemoryProfile
 	if prof.Name == "" {
 		prof = memprofile.Default()
 	}
 	s.profile = prof
 
+	// 生效限制项（P0-2）：装配方注入的 Limits 优先（它已是"控制台设置 > 部署档位 >
+	// 编译期默认"的解析结果）；零值才回落档位折算。下面**所有**运行期强制
+	//（队列并发 / 实例内存上限 / 模块缓存 / 库句柄）都读这一份，保证"自检算的账"
+	// 与"实际跑的账"是同一份数。
+	lim := opt.Limits
+	if lim.MaxInstances <= 0 {
+		lim = applimits.FromProfile(prof)
+	}
+
 	scheduler := opt.Scheduler
 	if scheduler == nil {
 		qopt := queue.DefaultOptions()
-		// 全局并发实例取自档位（不是编译期常量）：声明与执行同一份数。
-		qopt.GlobalRunning = prof.Instances
+		// 全局并发实例取自生效限制项（不是编译期常量、也不是档位）：声明与执行同一份数。
+		qopt.GlobalRunning = lim.MaxInstances
 		scheduler = queue.New(qopt)
 	}
 	s.scheduler = scheduler
@@ -200,24 +223,32 @@ func New(opt Options) (*Server, error) {
 	}
 
 	// 运行时装配：DataRoot 非空 ⇒ 用 wazero 的磁盘编译缓存（与编译子进程共用）。
-	// 单实例内存上限取自档位（wazero 侧是"上限"，线性内存按需增长）。
+	// 单实例内存上限取自**生效限制项**（wazero 侧是"上限"，线性内存按需增长）；
+	// 它属于 RuntimeConfig ⇒ 建好之后不可变，所以"控制台改了要重启"这件事只剩
+	// 一次重启的距离（重启后这里读到的就是设置值，见 P0-2）。
 	rt, err := runtime.New(context.Background(), runtime.Options{
 		DataRoot:    opt.DataRoot,
-		MemoryPages: prof.InstanceMemoryPages,
+		MemoryPages: lim.InstanceMemoryPages(),
 		Logger:      log.New(fnWriter{fn: logger}, "", 0),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("appserver: 装配执行侧运行时失败: %w", err)
 	}
 	s.rt = rt
-	s.runtimePages = prof.InstanceMemoryPages
-	s.limits = applimits.FromProfile(prof)
-	// 进程内模块缓存：上限与磁盘缓存解耦，并按档位缩放；空闲 TTL 由后台 sweep 执行。
-	s.modules = newModuleCacheWith(prof.ModuleCacheBytes, limits.ModuleCacheMaxEntries,
+	s.runtimePages = lim.InstanceMemoryPages()
+	s.limits = lim
+	// 进程内模块缓存：上限与磁盘缓存解耦，并按生效限制项缩放；空闲 TTL 由后台 sweep 执行。
+	s.modules = newModuleCacheWith(int64(lim.ModuleCacheMB)<<20, limits.ModuleCacheMaxEntries,
 		limits.ModuleCacheIdleTTL, now)
-	s.appdbs = newAppDBPoolWithMax(now, prof.Instances)
+	s.appdbs = newAppDBPoolWithMax(now, lim.MaxInstances)
+	// 只读连接数按**生效限制项**初始化（不是 appdb 的编译期默认）：否则控制台保存过
+	// app_db_readers 的部署在重启后会"退回默认"，直到下一次保存才生效。
+	// 它只影响**新建句柄**（语义见 appDBPool.SetReaders）。
+	s.appdbs.SetReaders(lim.AppDBReaders)
+	// (app_id, release_id) 级资源/配置缓存：上限来自 limits 真源（不是本包的常量）。
+	s.releases = newReleaseCache(limits.ReleaseCacheMaxBytes, limits.ReleaseCacheMaxReleases, now)
 	s.reclaim = newReclaimer(freeOSMemory, now, logger)
-	logger("appserver: %s（队列并发/实例内存/模块缓存/库句柄均按此档位强制）", prof.Report())
+	logger("appserver: %s；生效限制项 %s（队列并发/实例内存/模块缓存/库句柄均按它强制）", prof.Report(), lim.Encode())
 
 	// §4.7 / D3.1：ai.chat 由宿主用 http.Client 直调本地 /v1（不经出站白名单），
 	// 令牌按 (用户, 会话) 缓存在内存里。BaseURL 缺失时 aichat 自己 fail-closed。
@@ -276,6 +307,16 @@ func (s *Server) sweepOnce() {
 				n, limits.ModuleCacheIdleTTL, bytes>>10)
 		}
 	}
+	// (app_id, release_id) 级资源缓存与编译模块共用同一个空闲 TTL：几百个应用里
+	// 每个都被访问过一次时，只有 LRU 也会让字节长期驻留（R1-rt-3 的有界性一半靠
+	// 容量、一半靠时间维度）。
+	if s.releases != nil {
+		if n, bytes := s.releases.sweepIdle(limits.ModuleCacheIdleTTL); n > 0 {
+			freedBytes += bytes
+			s.logf("appserver: 空闲回收资源缓存 %d 个版本（空闲 > %s，%d KiB）",
+				n, limits.ModuleCacheIdleTTL, bytes>>10)
+		}
+	}
 	if s.appdbs != nil {
 		if n, bytes := s.appdbs.sweepIdle(); n > 0 {
 			freedBytes += bytes
@@ -287,7 +328,7 @@ func (s *Server) sweepOnce() {
 	}
 }
 
-// EvictApp 立即丢掉某应用的进程内驻留（模块 + 库句柄），并把内存还给 OS。
+// EvictApp 立即丢掉某应用的进程内驻留（模块 + 库句柄 + 资源/配置缓存），并把内存还给 OS。
 //
 // 触发点：应用下架 / 冻结 / 删除 —— 这几件事之后该应用大概率长时间不会被访问，
 // 与其等 TTL 扫描，不如事件驱动立刻释放（用户要求的"更快释放"）。
@@ -302,6 +343,12 @@ func (s *Server) EvictApp(appID string) (int, int64) {
 	if s.modules != nil {
 		mods, bytes = s.modules.evictApp(appID)
 	}
+	// 资源/配置缓存（R1-rt-2/3）：下架/冻结/删除/逐出四条处置路径都会走到这里
+	//（api 的 evict 钩子），因此"内容仍然可服务"不会在处置之后继续存在。
+	releases := 0
+	if s.releases != nil {
+		releases = s.releases.evictApp(appID)
+	}
 	var handles int
 	if s.appdbs != nil {
 		if n, b := s.appdbs.evictApp(appID); n > 0 {
@@ -309,8 +356,9 @@ func (s *Server) EvictApp(appID string) (int, int64) {
 			bytes += b
 		}
 	}
-	if mods > 0 || handles > 0 {
-		s.logf("appserver: 事件驱动逐出 app=%s（模块 %d 个 / 库句柄 %d 个，记账 %d KiB）", appID, mods, handles, bytes>>10)
+	if mods > 0 || handles > 0 || releases > 0 {
+		s.logf("appserver: 事件驱动逐出 app=%s（模块 %d 个 / 库句柄 %d 个 / 资源缓存 %d 个版本，记账 %d KiB）",
+			appID, mods, handles, releases, bytes>>10)
 		if s.reclaim != nil {
 			s.reclaim.request("应用处置", bytes)
 		}

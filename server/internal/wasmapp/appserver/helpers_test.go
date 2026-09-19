@@ -26,6 +26,14 @@ package appserver
 //   - 去掉污染探测 / 被杀请求回收（release 恒不回收）⇒ TestAppDBPool_PoisonedHandleIsRecycled、
 //     TestAppDBConn_PoisonMarkersFromRealErrors 红；
 //   - 把 logbuf 换成自建 sink（丢掉 §5.1 的统一限额实现）⇒ TestServe_AppLogsGoToPlatformLog 红；
+//   - 把 `defer s.flushAppLogs` 挪回"获取句柄之后"（旧顺序：刷盘发生在持执行槽/句柄期间）
+//     ⇒ TestServe_AppLogFlushHoldsNoSlotOrHandle 红（R1-rt-6）；
+//   - 把 serveStatic 改回"先整份读盘 + 算 sha256，再判 If-None-Match"（绕过缓存）
+//     ⇒ TestStatic_NotModifiedDoesNotTouchDisk / TestStatic_CachedBytesSurviveFileRemoval 红（R1-rt-2/3）；
+//   - 让 releaseContent.Config() 每次读盘解析 ⇒ TestReleaseCache_ConfigIsCachedPerRelease 红；
+//   - 让 dropOtherReleasesLocked 变 no-op ⇒ TestReleaseCache_VersionChangeDropsOldRelease 红；
+//   - 去掉 EvictApp 里的 releases.evictApp ⇒ TestStatic_EvictAppInvalidatesCache 红；
+//   - 去掉 releaseCache.evictLocked 的容量淘汰 ⇒ TestReleaseCache_IsBounded 红（有界性）；
 //   - **让平台自己比对白名单**（R24 / A3：只注入身份与模式，名单由应用判）
 //     ⇒ TestServe_WhitelistOutsiderStillReachesWasm 红（2026-09-18 独立审计补的回归网：
 //     这条性质在该用例之前没有任何用例咬住）。
@@ -39,6 +47,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -590,19 +599,32 @@ func (e *env) redeemAppSession(empCookie *http.Cookie, appID string) *http.Cooki
 	req.AddCookie(empCookie)
 	rec := httptest.NewRecorder()
 	e.mgr.TicketSubmit(rec, req)
-	if rec.Code != http.StatusFound {
+	// 2026-09-19 起 POST /app-ticket 返回**同源跳板页（200）**，不再是跨源 302：
+	// CSP3 的 form-action 会检查重定向链上的每个 URL，跨源 302 会被浏览器整单拦掉
+	// （服务端连 POST 都收不到）。票因此从跳板页的兜底链接上取。
+	if rec.Code != http.StatusOK {
 		e.t.Fatalf("主站签发换票失败 status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	loc := rec.Header().Get("Location")
+	if loc := rec.Header().Get("Location"); loc != "" {
+		e.t.Fatalf("主站换票不得再有 Location（跨源 302 会被 form-action 拦掉）：%q", loc)
+	}
+	loc := jumpPageTarget(e.t, rec.Body.String())
 	u, err := url.Parse(loc)
 	if err != nil {
-		e.t.Fatalf("换票 Location 非法: %q", loc)
+		e.t.Fatalf("换票跳板页目标非法: %q", loc)
 	}
 	code := u.Query().Get("ticket")
 	if code == "" {
-		e.t.Fatalf("换票 Location 里没有 ticket: %q", loc)
+		e.t.Fatalf("换票跳板页目标里没有 ticket: %q", loc)
 	}
-	rec2 := e.get(appID, "/?ticket="+url.QueryEscape(code))
+	// R1-sec-1（2026-09-19）：票是"URL 里的 code + 浏览器 Cookie 里的 nonce"两半，
+	// nonce 必须由**同一次 POST 响应**下发、并由随后的子域请求带上（真实浏览器由
+	// Domain=应用基域 自动完成）。这个 helper 就是"同一只浏览器"，所以要把它带过去。
+	nonce := cookieByName(rec.Result().Cookies(), session.TicketNonceCookieName)
+	if nonce == nil {
+		e.t.Fatal("主站换票未下发 nonce Cookie：同一浏览器的合法链路将无法兑换")
+	}
+	rec2 := e.get(appID, "/?ticket="+url.QueryEscape(code), nonce)
 	if rec2.Code != http.StatusFound {
 		e.t.Fatalf("子域兑换应 302，得到 %d body=%s", rec2.Code, rec2.Body.String())
 	}
@@ -614,6 +636,26 @@ func (e *env) redeemAppSession(empCookie *http.Cookie, appID string) *http.Cooki
 		e.t.Fatal("子域兑换未下发应用会话 Cookie")
 	}
 	return c
+}
+
+// jumpPageTarget 从**跳板页**（主站换票 / 应用子域会话失效都用它）里取出跨源那一跳的目标 URL。
+//
+// 只认 `id="picoaide-continue" href="…"`：这是页面上唯一的跨源出口声明，
+// 读它 = 读浏览器真正会用到的那份数据。html/template 会做属性转义（`&`→`&amp;` 等），
+// 因此用 html.UnescapeString 还原。
+func jumpPageTarget(t *testing.T, body string) string {
+	t.Helper()
+	const marker = `id="picoaide-continue" href="`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		t.Fatalf("跳板页没有兜底链接（%s）：%s", marker, body)
+	}
+	rest := body[i+len(marker):]
+	j := strings.IndexByte(rest, '"')
+	if j < 0 {
+		t.Fatalf("兜底链接的 href 没有闭合：%s", body)
+	}
+	return html.UnescapeString(rest[:j])
 }
 
 // loggedInCookie 是"建号 + 登录 + 换票"的一站式入口。

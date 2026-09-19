@@ -537,13 +537,73 @@ func zipExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 
 // ---- tar.gz implementation (legacy format, still accepted) ----
 
+// tarClientReader 把 Go stdlib 的 tar 解析校正到**真实客户端**的口径。
+//
+// 客户端是 node-tar 7.5.x(packages/host/enterprise 的技能安装链路),
+// header.js:119-133:
+//
+//	if (types.isCode(t)) { this.#type = t || '0' }      // '\x00' 归一成 '0'
+//	if (this.#type === '0' && path.endsWith('/')) ...    // 旧式目录标记 ⇒ '5'
+//	if (this.#type === '5') this.size = 0                // 目录没有数据段
+//
+// 即 ASCII '0' 与 '\x00' **同等对待**:名字以 "/" 结尾就是目录、声明的 Size 被强制
+// 为 0,于是它**不会跳过**头里声明的数据区,而是把数据区当成后续条目链继续解析。
+// Go stdlib 只对 '\x00'(TypeRegA)做这条归一(reader.go:145-151);ASCII '0' 会被
+// 当成普通文件、声明的字节被整段跳过 —— 同一份归档,服务端看到的条目集合与客户端
+// 实际装出的内容不同(审核所见 ≠ 员工所装:可在数据区夹带 scripts/ 等审核页
+// 看不见的文件,而客户端照装不误)。
+//
+// 这里按客户端口径补齐:该条目本身按目录返回(TypeDir/Size=0),解析改由**底层字节流**
+// 上的新 tar.Reader 继续 —— stdlib 逐块读且不预读,所以换层的时刻底层流恰好停在
+// 「数据区第一个字节」,新 reader 于是从数据区开始当条目链解析,并且能**无缝越过声明
+// 长度的边界**继续读后面的真实条目(声明长度只是个谎报的上界)。这正是客户端的行为:
+// 它把声明的 size 丢弃后,剩下的解析完全不看这个数字。
+type tarClientReader struct {
+	tr *tar.Reader
+	// r 是底层字节流(gzip 解压后),换层时用它重新起一个 tar.Reader。
+	r io.Reader
+}
+
+func newTarClientReader(r io.Reader) *tarClientReader {
+	return &tarClientReader{tr: tar.NewReader(r), r: r}
+}
+
+// Read 读取当前条目的数据段(预览/完整性校验用),语义与 tar.Reader.Read 相同。
+func (c *tarClientReader) Read(p []byte) (int, error) { return c.tr.Read(p) }
+
+// Next 返回下一条目。
+//
+// 对客户端判为目录的旧式标记条目('0'/'\x00' + 尾斜杠):返回值已被改写成
+// TypeDir/Size=0(与客户端一致),声明数据区已改由新一层 tar.Reader 从底层流解析,
+// 调用方按目录处理即可(continue),下一条目就是数据区里的第一个条目。
+func (c *tarClientReader) Next() (*tar.Header, error) {
+	hdr, err := c.tr.Next()
+	if err != nil {
+		return nil, err
+	}
+	// '\x00'(TypeRegA)已被 stdlib 归一掉,这里实际只会命中 ASCII '0';两个条件
+	// 都写是为了与客户端条件逐字对应(见类型注释)。
+	if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+		return hdr, nil
+	}
+	if !strings.HasSuffix(hdr.Name, "/") {
+		return hdr, nil
+	}
+	c.tr = tar.NewReader(c.r)
+	hdr.Typeflag = tar.TypeDir
+	hdr.Size = 0
+	return hdr, nil
+}
+
 func validateTar(data []byte, lim Limits) error {
 	zr, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return ErrUnsafe
 	}
 	defer zr.Close()
-	tr := tar.NewReader(zr)
+	// P0(审计 2026-09-19):tarClientReader 按**真实客户端**口径归一旧式目录标记
+	// ('0'/'\x00' + 尾斜杠),不再让它声明的数据区被静默跳过。
+	tr := newTarClientReader(zr)
 	// FIX-24(审计 2026-09-12,P1-6):tar.gz 分支此前**完全没有**重复条目检查,
 	// 而 zip 分支有(checkZipDuplicates,三个入口都调)。后果是同一份归档在
 	// 四个入口里给出**两个不同的 SKILL.md**:
@@ -623,7 +683,7 @@ func tarList(data []byte, lim Limits, maxPreview int64) ([]string, string, error
 		return nil, "", ErrUnsafe
 	}
 	defer zr.Close()
-	tr := tar.NewReader(zr)
+	tr := newTarClientReader(zr)
 	set := map[string]bool{}
 	// FIX-24:与 zipList 的 checkZipDuplicates 同语义 —— 重复条目一律拒绝,
 	// 不做"第一个生效"的静默挑选。四个入口必须给出一致的结论。
@@ -689,7 +749,7 @@ func tarExtract(data []byte, target string, maxPreview int64) (string, int64, bo
 		return "", 0, false, false, false, ErrUnsafe
 	}
 	defer zr.Close()
-	tr := tar.NewReader(zr)
+	tr := newTarClientReader(zr)
 	// FIX-24:与 zipExtract 的 checkZipDuplicates 同语义 —— 重复条目一律拒绝,
 	// 而不是"命中第一个就返回"。
 	//
@@ -902,7 +962,7 @@ func tarReadAll(data []byte, lim Limits) (map[string][]byte, error) {
 		return nil, ErrInvalid
 	}
 	defer gz.Close()
-	tr := tar.NewReader(gz)
+	tr := newTarClientReader(gz)
 	out := map[string][]byte{}
 	// FIX-24:重复条目一律拒绝。这是审计里"审核所见 ≠ 安装产物"的**直接**
 	// 现场 —— `out[name] = buf` 是末条覆盖,而 tarList/tarExtract 取第一条,

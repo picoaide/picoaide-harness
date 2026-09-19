@@ -44,6 +44,8 @@
 | `module_cache_max_bytes` | 134217728 | bytes | §4.3 | 进程内编译模块缓存上限 | 与磁盘缓存解耦；按部署内存档位可缩放 |
 | `module_cache_max_entries` | 128 | count | §4.3 | 进程内编译模块条目上限 |  |
 | `module_cache_idle_ttl` | 600 | seconds | §4.3 | 编译模块空闲淘汰 | 空闲即逐出并归还 OS（几百个应用的常驻上界） |
+| `release_cache_max_bytes` | 33554432 | bytes | §4.3 | 静态资源缓存字节上限 | (app_id, release_id) 级缓存；304 复验不读盘、不算哈希（单条超一半只缓存元数据） |
+| `release_cache_max_releases` | 256 | count | §4.3 | 静态资源缓存条目上限 | 按 (app_id, release_id) 计数；下架/冻结/删除/逐出与换版本都失效 |
 | `memory_peak_guard_percent` | 70 | percent | §4.3 | 启动自检内存水位 | 理论峰值超过可用内存该比例即拒绝启动 |
 | `upload_peak_per_upload_bytes` | 123731968 | bytes | §4.3 | 单次上传峰值内存账 | base64 单次 ≈ 32+43+43 MB |
 | `host_call_budget_default` | 5 | seconds | §4.4 | 宿主调用兜底预算 |  |
@@ -68,7 +70,10 @@
 | `sql_max_rows` | 5000 | count | §4.5 | 返回行数上限 | 超出即截断并报错 |
 | `sql_max_result_bytes` | 8388608 | bytes | §4.5 | 返回字节上限 |  |
 | `sql_statement_budget` | 5 | seconds | §4.5 | 单语句硬超时 | 独立于 guest 超时；驱动取消时 sqlite3_interrupt |
-| `app_db_handle_max` | 32 | count | §4.5 | 同时持有的应用库句柄上限 | 每句柄 2 条 SQLite 连接 ⇒ fd 硬上界 |
+| `app_db_readers` | 4 | count | §4.5 | 每应用只读连接数 | WAL 下并发读；写仍只由一个写者串行 |
+| `app_db_readers_max` | 16 | count | §4.5 | 只读连接数上限 | 配置注入的钳位（超出即钳到该值） |
+| `app_db_busy_timeout` | 3 | seconds | §4.5 | 应用库连接 busy_timeout | 连接级不持久 ⇒ 每条连接重设；必须小于 sql_statement_budget |
+| `app_db_handle_max` | 32 | count | §4.5 | 同时持有的应用库句柄上限 | 每句柄 (1 + app_db_readers) 条 SQLite 连接 ⇒ fd 硬上界 |
 | `max_tables_per_app` | 16 | count | §4.5 | 每应用表数上限 | 由 db.define 强制 |
 | `max_columns_per_table` | 16 | count | §4.5 | 每表列数上限 | 由 db.define 强制 |
 | `table_name_pattern` | ^[a-z][a-z0-9_]{0,30}$ |  | §4.5 | 表名规则 |  |
@@ -86,7 +91,7 @@
 | `user_per_app_running` | 1 | count | §4.6 | 单用户同应用在跑 |  |
 | `user_per_app_queued` | 4 | count | §4.6 | 单用户同应用排队 |  |
 | `user_global_running` | 4 | count | §4.6 | 单用户跨应用全局在跑 |  |
-| `app_concurrency` | 1 | count | §4.6 | 每应用并发 | 恒为 1（串行） |
+| `app_concurrency` | 4 | count | §4.6 | 每应用并发 | 同一应用最多 N 个请求同时在跑（控制台对应 app_running）；读并发，写仍串行 |
 | `retry_after_seconds` | 1 | seconds | §4.6 | Retry-After |  |
 | `anon_global_rate_per_min` | 3000 | count | §4.6 | 全局匿名令牌桶 | 次/分 |
 | `anon_global_burst` | 3000 | count | §4.6 | 全局匿名桶容量 |  |
@@ -109,6 +114,7 @@
 | `diagnostics_default_limit` | 50 | count | §4.9 | 诊断默认条数 |  |
 | `diagnostics_max_limit` | 200 | count | §4.9 | 诊断条数上限 |  |
 | `stderr_tail_bytes` | 2048 | bytes | §4.9 | stderr 尾巴上限 | 诊断回给作者 |
+| `readyz_snapshot_ttl` | 5 | seconds | §4.9 | /readyz 快照缓存时长 | 未认证端点；缓存整次采集（目录 walk + statfs + db.Ping） |
 | `retirement_snapshot_retention_days` | 90 | days | §5.3 | 退役快照保留 | 冻结/退役后保留快照的时长；到期由平台回收 |
 | `log_max_line_bytes` | 4096 | bytes | §5.1 | 单条日志上限 |  |
 | `log_max_per_request` | 100 | count | §5.1 | 每请求日志条数上限 | 超出丢弃并计数 |

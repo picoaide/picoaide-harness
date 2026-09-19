@@ -29,10 +29,12 @@ package session
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/edge"
@@ -42,6 +44,16 @@ import (
 
 // logError 是内部错误的落点（与 clientrelease.logWarn 同形，测试可替换以静音）。
 var logError = log.Printf
+
+// logWarn 是**非错误**但需要留痕的诊断落点（与 edge.logWarn 同形，测试可替换以静音）。
+//
+// 只用于两类分支：①被拒的安全判据（换票 nonce / Sec-Fetch）；②**放行了但判据缺席**
+// （老浏览器不发 Sec-Fetch-*）——后者必须留痕，否则"这台机器为什么没被挡住"无从查证。
+var logWarn = log.Printf
+
+// logInfo 是**部署级事实**的说明落点（既不是错误也不是安全事件），例如
+// "对外地址未配置，已按应用基域推导主站源"。与 logError/logWarn 同形，测试可替换。
+var logInfo = log.Printf
 
 const (
 	// EmployeeCookieName 是主站员工浏览器会话 Cookie 名。
@@ -54,6 +66,19 @@ const (
 	// （host-only 天然不共享），因此同一员工在不同应用里有不同会话，
 	// 一个应用被下架/吊销不影响另一个（§4.7 / §10.4 第 40 项）。
 	AppCookieName = "picoaide_app"
+	// TicketNonceCookieName 是换票的**浏览器持有性证明** Cookie 名（R1-sec-1，
+	// 2026-09-19 登录 CSRF / 会话固定修复）。
+	//
+	// 它不是会话凭证、也不是票本身：值是签发那一刻随机生成的 nonce，与票记录一一对应、
+	// 同寿命（limits.TicketTTL），兑换时只与**那张票**的 nonce 比对（见 RedeemTicket）。
+	// 与另外两个会话 Cookie 的差别是它是**唯一设 Domain 的**：必须让 `<app>.<基域>` 也能收到
+	// （浏览器只把 Cookie 发给 Domain 覆盖到的主机），因此它是域 Cookie 而非 host-only。
+	// HttpOnly 在这里不只是"应用读不到会话"：它还挡住应用子域里的 JS 用 document.cookie
+	// **覆盖**它（RFC 6265 §5.3 第 11.2 步：非 HTTP API 不得覆盖已存在的 HttpOnly Cookie）
+	// —— 应用是本平台上的任意 HTML/JS 宿主（R8），这一条是必需的。
+	// ⚠️ 但它挡不住"在**没有旧 Cookie 时新建**"（旧 Cookie 只活 60 s）：兄弟应用仍可
+	// 伪造这个 Cookie，这是本设计的已知残留 R-3，机制见 ticket.go 的 nonce 段落。
+	TicketNonceCookieName = "picoaide_ticket_nonce"
 
 	// MaxNextLen 是换票/登录 `next` 参数的字节上限（§4.7：非法回落 `/`）。
 	MaxNextLen = 512
@@ -84,7 +109,7 @@ type Options struct {
 	// 基域从启动期部署配置变成运行期设置，换票回跳地址必须按**改后的**基域生成，
 	// owning 一份启动期快照会让"控制台改完要重启才生效"。
 	BaseDomain func() string
-	// MainOrigin 是主站源（如 `https://harness.example.com`）。
+	// MainOrigin 是主站源（如 `https://harness.example.com`）——**静态**配置形态。
 	//
 	// 空 = 按请求推导（edge.SelfOrigin）。非空时它同时是**断言**：请求自身的源
 	// 必须与之相等，否则拒 —— 因为员工会话 Cookie 是 host-only，换票只能在
@@ -93,7 +118,33 @@ type Options struct {
 	// 比较两侧都过 `edge.NormalizeOrigin`（小写、去尾斜杠、**默认端口省略、
 	// 非默认端口保留**）：配置里多写一个 `:443` 不会让断言恒不成立，
 	// 而 `https://h:8443` 这种非默认端口部署也不会被误判成跨源（FIX-26）。
+	//
+	// ⚠️ 生产装配请用 MainOriginResolver（settings `server.base_url` 是控制台可改的
+	// 运行期设置，快照成静态串会让"控制台改完要重启才生效"，与 BaseDomain 同理）。
 	MainOrigin string
+	// MainOriginResolver 按**服务端配置**给出主站源（返回空串 = 未配置）。
+	//
+	// 生产装配注入的是**与客户端下载地址同一份真源**：`PICOAI_PUBLIC_BASE_URL`
+	// （显式配置即唯一权威）> settings `server.base_url`（见 cmd/server 的
+	// publicMainOrigin 与 clientrelease.resolveOrigin 的同一优先级）。
+	//
+	// ⚠️ 为什么必须是"函数 + 只认配置"，而不是看请求 Host（R1-sec-1 回归审计 P0）：
+	// 请求 Host 是**攻击者可选的**——任何别名主机名（IP 直连/旧域名/反代域名/渠道第二域名）
+	// 都被 edge.HostGate 判成 HostMain，主站路由（含 /app-ticket）照常服务。若"能否下发
+	// 换票 nonce Cookie"由 r.Host 决定，攻击者就能用自己的 Host 把这道闸门**按请求关掉**
+	// （实测：别名 Host 签出的票 nonce 为空，受害者在全新 cookie jar 里照样兑换成功）。
+	// 配置是请求方改不了的，因此它是唯一可用的判定输入。
+	//
+	// 同时它把 checkMainOrigin 从"按请求推导"升级为**严格断言**（多域名/别名部署在
+	// 非规范主机上将得到 403 —— 有意的 fail-closed；员工会话 Cookie 本来就是 host-only）。
+	MainOriginResolver func() string
+	// AllowTicketWithoutNonce 显式声明"本部署**无法**为应用基域下发换票 nonce Cookie"，
+	// 接受只受 Sec-Fetch 判据保护的换票。
+	//
+	// 默认 false = fail-closed：签发侧在"主站源未配置 / 与基域不匹配"时**拒绝签发票据**
+	// （500 + ERROR 日志 + 审计），兑换侧遇到 nonce 为空的票**一律拒**。
+	// 置 true 只在部署方明确接受该风险时才允许（此时每次签发/兑换都落 ERROR 日志 + 审计）。
+	AllowTicketWithoutNonce bool
 	// AppIDExtraReserved 是**部署期注入**的企业既有主机名（§4.1），
 	// 与 appserver.Options.AppIDExtraReserved 同源（同一个环境变量：
 	// `PICOAI_APPS_EXTRA_RESERVED`）。
@@ -170,6 +221,9 @@ type Manager struct {
 	opt     Options
 	now     func() time.Time
 	tickets *ticketStore
+	// derivedOriginOnce 让"对外地址未配置 ⇒ 按应用基域推导主站源"这条**部署级**说明
+	// 只落一条日志（换票签发每次应用登录都会发生，逐次打印会刷满日志）。
+	derivedOriginOnce sync.Once
 }
 
 // New 构造 Manager。DB 为 nil 时只有纯函数路径可用（测试与形状校验），
@@ -199,20 +253,36 @@ func (m *Manager) secureRequest(r *http.Request) bool {
 // 配置值走 `edge.NormalizeOrigin`（默认端口省略、非默认端口保留），与请求侧
 // `edge.SelfOrigin` 完全同一套规范化 —— 否则 `MainOrigin=https://h:443` 会让
 // 后面那条"请求源必须等于配置"的断言恒不成立（永久 403，FIX-26）。
+//
+// **只有完全未配置时才按请求推导**（见 configuredMainOrigin 与 Options.MainOriginResolver：
+// 生产装配会把主站源固定成服务端配置，因为"按请求 Host 推导"等于把判定输入交给请求方）。
 func (m *Manager) mainOrigin(r *http.Request) string {
-	if s := strings.TrimSpace(m.opt.MainOrigin); s != "" {
-		if norm := edge.NormalizeOrigin(s); norm != "" {
-			return norm
-		}
-		// 配置写了但解析不出源（例如漏了 scheme）：按请求推导，并且下面
-		// checkMainOrigin 会用原始配置做一次 fail-closed 断言 + 日志。
-		return edge.SelfOrigin(r)
+	if cfg := m.configuredMainOrigin(); cfg != "" {
+		return cfg
 	}
+	// 配置缺失或解析不出源（例如漏了 scheme）：按请求推导。这一分支的后果是
+	// **换票签发会被拒绝**（ticketNonceDecision 判为 unavailable，见 TicketSubmit）——
+	// 而不是"按请求 Host 静默降级"，那正是 R1-sec-1 回归审计的 P0。
 	return edge.SelfOrigin(r)
 }
 
-// configuredMainOrigin 返回规范化后的配置主站源（空 = 未配置或解析不出）。
+// configuredMainOrigin 返回规范化后的**配置**主站源（空 = 未配置或解析不出）。
+//
+// 取值优先级：MainOriginResolver（生产：settings server.base_url > PICOAI_PUBLIC_BASE_URL）
+// > 静态 MainOrigin（测试/简单装配）。两者都是**服务端配置**，与请求无关。
+//
+// ⚠️ 这里**不**做"按应用基域推导"（推导只发生在 ticketNonceDecision 里，作用域是
+// "这张票能不能带 nonce"）。原因：checkMainOrigin 一旦拿到期望源就是**严格断言**，
+// 若把推导值也喂给它，任何"主站可达但不是基域主机"的部署（反代别名/内外双域名/运维用
+// IP:端口）都会在 **/login** 上 403 —— 那是比换票保护面更大的功能回归，而 /login
+// 本身没有 nonce 要保护。换票那条链路不受影响：推导值仍保证票带 nonce，别名主机存不下
+// 域 Cookie ⇒ 不可兑换（fail-closed）。
 func (m *Manager) configuredMainOrigin() string {
+	if m.opt.MainOriginResolver != nil {
+		if norm := edge.NormalizeOrigin(m.opt.MainOriginResolver()); norm != "" {
+			return norm
+		}
+	}
 	return edge.NormalizeOrigin(m.opt.MainOrigin)
 }
 
@@ -222,26 +292,42 @@ func (m *Manager) configuredMainOrigin() string {
 // 两者都缺 ⇒ 拒），差别只有一处：期望的源可由配置固定（MainOrigin），并且在
 // MainOrigin 非空时**额外断言请求自身的源等于它**。
 //
-// ⚠️ 部署提醒（口径已定，写在这里避免踩）：MainOrigin 一旦配置就是**严格断言** ——
-// 若站点可通过多个主机名访问（反代别名/内外双域名），别名主机上的登录与换票会被
-// 403 挡住（员工会话 Cookie 是 host-only，别名主机本来也没有那份 Cookie）。
-// 多域名部署请**留空 MainOrigin**，让本函数按请求推导主站源（每个主机名各自一份
-// 浏览器会话，这正是 host-only 的语义）。断言失败会落一条日志，便于当场定位。
+// ⚠️ 部署提醒（2026-09-19 R1-sec-1 回归审计后两次更新）：主站源**应当**由装配固定
+// （Options.MainOriginResolver = 服务端配置的对外地址），一旦配置就是**严格断言** ——
+// 若站点可通过多个主机名访问（反代别名/内外双域名），非规范主机上的登录与换票会被
+// 403 挡住（这是有意的 fail-closed：员工会话 Cookie 是 host-only，别名主机本来
+// 也没有那份 Cookie；更重要的是，请求 Host 绝不能成为安全判定的输入）。
+// **留空不等于"支持多域名"**：留空时换票按**应用基域**推导主站源（配置事实）——
+// 正常主机上功能不受影响，但别名主机存不下 Domain=基域的 nonce Cookie ⇒ 那些主机上
+// 的换票不可兑换。换票端点只在"配置的对外地址与基域不同域"时**拒绝签发票据**
+// （见 TicketSubmit 的 ticketNonceDecision），只有显式开启 Options.AllowTicketWithoutNonce
+// 才回落到"只靠 Sec-Fetch"的降级形态。断言失败会落一条日志，便于当场定位。
 //
 // 为什么不用一次性 token：本端点由主站自己的页面同源 POST 发起，Origin/Referer
 // 是浏览器强制写入、页面脚本无法伪造的字段；而一次性 token 需要额外的服务端状态
 // 与页面注入，收益为零（攻击者若能读页面就已有 XSS，token 也一并泄露）。
 // §4.7 对换票端点本身就是这个要求（"POST + Origin == 主站源"）。
+//
+// **失败必须可定位**（2026-09-19）：每一次拒绝都落一条日志，带期望源 / Origin /
+// Referer / Host / X-Forwarded-Proto 与**具体是哪一条判据**失败。此前这里只在
+// "配置与请求源不一致"时打日志、其余分支静默，线上只看到 403 而答不出原因 ——
+// 这正是 no-referrer ⇒ `Origin: null` 这条 P0 拖到用户投诉才定位的直接原因。
+// 日志**只打头、绝不打 Cookie**（会话明文进日志等于凭证泄漏）。
 func (m *Manager) checkMainOrigin(r *http.Request) bool {
 	want := m.mainOrigin(r)
-	if want == "" {
+	reject := func(reason, detail string) bool {
+		logError("pico-wasm-session: 主站来源校验未通过 reason=%s want=%q %s detail=%s",
+			reason, want, edge.OriginDiagFields(r), detail)
 		return false
+	}
+	if want == "" {
+		return reject("no_expected_origin", "MainOrigin 未配置且请求推导不出自身源（Host 头缺失）")
 	}
 	if cfg := m.configuredMainOrigin(); cfg != "" {
 		if self := edge.SelfOrigin(r); !strings.EqualFold(self, cfg) {
-			logError("pico-wasm-session: 请求源 %s 与配置的 MainOrigin %s 不一致，已拒绝"+
-				"（多域名/别名部署请留空 MainOrigin 以按请求推导）", self, cfg)
-			return false
+			return reject("main_origin_config_mismatch",
+				fmt.Sprintf("请求自身源 self=%q 与配置的 MainOrigin %q 不一致"+
+					"（多域名/别名部署请留空 MainOrigin 以按请求推导）", self, cfg))
 		}
 	}
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
@@ -250,20 +336,30 @@ func (m *Manager) checkMainOrigin(r *http.Request) bool {
 		// 先过一次形态闸：Origin 必须是**源**，带路径/query/userinfo 或 "null"
 		// （sandboxed iframe / data: 文档）一律拒 —— 不能靠"截到源再比"来猜。
 		if !edge.IsOriginShaped(origin) {
-			return false
+			return reject("origin_malformed",
+				"Origin 不是合法的源形态（含路径/query/userinfo，或为字面量 \"null\""+
+					" —— no-referrer 策略下浏览器对同源写请求也发 null，见 pages.go 的策略说明）")
 		}
 		norm := edge.NormalizeOrigin(origin)
 		if norm == "" {
-			return false
+			return reject("origin_unparsable", "Origin 解析不出源")
 		}
-		return strings.EqualFold(norm, want)
+		if !strings.EqualFold(norm, want) {
+			return reject("origin_mismatch",
+				fmt.Sprintf("规范化后 norm=%q ≠ want=%q", norm, want))
+		}
+		return true
 	}
 	ref := strings.TrimSpace(r.Header.Get("Referer"))
 	if ref == "" {
-		return false
+		return reject("origin_and_referer_missing",
+			"Origin 与 Referer 都没有（no-referrer 策略下二者都会被浏览器剥掉）")
 	}
 	low := strings.ToLower(ref)
-	return strings.HasPrefix(low, want+"/") || strings.EqualFold(strings.TrimSuffix(low, "/"), want)
+	if strings.HasPrefix(low, want+"/") || strings.EqualFold(strings.TrimSuffix(low, "/"), want) {
+		return true
+	}
+	return reject("referer_mismatch", fmt.Sprintf("Referer 不以 want=%q 为前缀", want))
 }
 
 // sanitizeNext 把 `next` 规范化成**同基域相对路径**，非法一律回落 `/`（§4.7 原话）。

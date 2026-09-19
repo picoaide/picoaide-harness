@@ -397,6 +397,37 @@ func (c *moduleCache) size() (entries int, bytes int64) {
 
 // ===== 冷编译（执行侧）=====
 
+// loadReleaseWasm 返回带制品字节的版本对象 —— **只在冷编译路径上调用**（P0-3）。
+//
+// 请求路径拿到的 rel 是元数据投影（LatestApprovedWasmReleaseMeta，不含 archive）：
+// 模块缓存命中时字节没有读者，每请求拉一份 TOAST 大字段纯属浪费（见 serve.go ②
+// 的注释与 serverstore.wasmReleaseServeColumns）。缓存未命中时这里补一次查询取字节
+// ——冷编译本来就是秒级（读盘缓存 + wazero 反序列化/编译），多一次按主键查询可忽略。
+//
+// rel.Wasm 非空（调用方自己已经带了字节，如未来的预热路径）则直接用，不重复查询。
+func (s *Server) loadReleaseWasm(ctx context.Context, rel *serverstore.WasmRelease) (*serverstore.WasmRelease, *apperr.Error) {
+	if rel == nil {
+		return nil, apperr.New(apperr.CodeInternal, "版本元数据缺失（平台故障）").
+			WithHint("请求路径应已取到生效版本；请联系平台管理员检查该应用")
+	}
+	if len(rel.Wasm) > 0 {
+		return rel, nil
+	}
+	full, err := serverstore.GetWasmRelease(ctx, s.opt.DB, rel.AppID, rel.Version)
+	if err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			// 元数据刚查到、字节这一刻查不到：版本被并发软删/回收了。
+			return nil, apperr.New(apperr.CodeInternal, "版本制品不可用（平台故障）").
+				WithDetail("version", rel.Version).
+				WithHint("该版本的归档已被回收（软删/GC）；请让应用发布者发布新版本")
+		}
+		s.logf("appserver: 冷编译前取制品字节失败 app=%s v=%s: %v", rel.AppID, rel.Version, err)
+		return nil, apperr.New(apperr.CodeInternal, "平台暂时不可用").
+			WithHint("这是平台侧故障（数据库不可达）；请稍后重试")
+	}
+	return full, nil
+}
+
 // compileRelease 在**执行进程内**把一个版本的 wasm 编译成 CompiledModule。
 //
 // 为什么执行进程也允许编译（而不是"只读编译子进程的缓存、编不出来就报错"）：

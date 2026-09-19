@@ -19,9 +19,13 @@ type AppHandler interface {
 
 // HostGate 是挂在 HTTP 服务最外层的**主机名门控**（§4.8 / §15.1 第 2 条）。
 //
-// 它保证：应用子域只可能进入 Apps 分支，主站路由在子域**结构上不可达**。
-// 这是 allow-list 语义 —— 而不是在庞大的主站路由表上维护"禁命中清单"
-// （全仓 Go 代码零 host 维度判断，清单式禁命中必然漏）。
+// 它保证两件事（都是 allow-list 语义，而不是在庞大的主站路由表上维护"禁命中清单"
+// —— 全仓 Go 代码零 host 维度判断，清单式禁命中必然漏）：
+//  1. 应用子域只可能进入 Apps 分支，主站路由在子域**结构上不可达**；
+//  2. 主站只在**已声明的主机名**上服务：基域本身、显式列进 ExtraMainHosts 的主机名、
+//     以及无会话的编排探针（`/healthz`、`/readyz`）；其余一切主机名（任意域名、IP 直连、
+//     localhost、反代别名）一律 404 —— 不回落主站（R1-sec-3：否则门户与管理台登录页
+//     可被任意主机名镜像）。
 type HostGate struct {
 	// BaseDomain 返回**当前**应用基域（空 = 未启用应用子域，全部走主站）。
 	//
@@ -42,15 +46,59 @@ type HostGate struct {
 	// 默认**不**自动成为主站主机名 —— 否则 `admin.<基域>` 会渲染管理台登录页，
 	// 正是 §10.1 第 13b 项要挡住的形态。需要额外主机名也服务主站的部署显式加进来。
 	//
-	// **生效范围（读清楚再改）**：只看 `HostUnknown`（形态非法/多级标签）这一支。
-	// 命中即走主站，用于"`a.b.<基域>` 这类拿不到通配证书但企业确实在用的主机名
-	// 要服务主站"这种真实部署需求。
+	// **生效范围（读清楚再改）**：只看 `HostUnknown` 这一支。R1-sec-3 之后 `HostUnknown`
+	// 的含义是"**一切不是本基域的主机名**"（任意其它域名、IP 直连、localhost、旧域名、
+	// 反代别名、空 Host）加上"形态非法的子域"（多级标签 / 非法 label）。也就是说：
+	// 主站若部署在与基域**不同**的主机名上（例如应用基域 `apps.example.com`、主站在
+	// `example.com`），**必须**把那个主机名显式列进本字段，否则主站会 404。
 	//
 	// **`HostApp`（合法的一级标签）不受影响**：应用子域永远进应用分支，绝不回流主站
 	// ——这是 §4.8 的硬规则（回落会让任何子域变成主站镜像 = 钓鱼面）。
 	// 保留字主机名（`admin.<基域>` 等）走 `HostApp`，因此也不在本字段的管辖范围：
 	// 它们会在 appserver 的 registry 校验层拿到 404（纵深防御）。
 	ExtraMainHosts []string
+}
+
+// probePaths 是"**在任意 Host 下都必须照常可达**"的编排探针端点（见 ServeHTTP）。
+//
+// 为什么必须留这个例外：k8s / docker compose / systemd 的健康检查打的是 **Pod IP、
+// 容器名、localhost**（`http://127.0.0.1:8080/healthz`、`http://<pod-ip>:8080/readyz`）
+// ——配置了应用基域之后这些主机名既不是基域、也不是它的子域 ⇒ 属于 HostUnknown。
+// 若把 404 一并施加到它们身上，编排器会把**完全健康**的实例判成挂掉并反复重启
+// （"修好漏洞、弄坏编排"）。
+//
+// 为什么它不与 R1-sec-3 的钓鱼面冲突（两条都是事实）：
+//   - 这两个端点**无会话、不接受任何凭据**（GET-only 探针），响应里没有任何用户数据、
+//     没有 HTML 页面、没有可被镜像的登录表单 —— 攻击者把它们反代到自己的域名上，拿到的
+//     只是"服务活着吗 / 还剩多少磁盘水位"这两个事实；
+//   - 门户 `/`、`/portal`、管理台 `/admin/*`、管理登录 API `/api/server/admin/login`、
+//     换票端点 `/app-ticket` 在未知主机上**全部仍然 404**（本例外按路径精确匹配这两条）。
+//
+// ⚠️ 与 `cmd/server/main.go` 的 `r.GET("/healthz")` / `r.GET("/readyz")` 是**同一份清单的
+// 两处字面量**：新增"任意 Host 可达"的探针时必须两边同时改（`IsProbePath` 供装配层复用；
+// 见报告 temp/wasm-review-r1/fix-hosthook.md 的未决项）。
+var probePaths = []string{"/healthz", "/readyz"}
+
+// IsProbePath 判定路径是否是"任意 Host 可达"的编排探针端点（probePaths 的唯一读取点）。
+func IsProbePath(path string) bool {
+	for _, p := range probePaths {
+		if path == p {
+			return true
+		}
+	}
+	return false
+}
+
+// isProbeRequest 判定本次请求是否命中探针例外。
+//
+// 收紧到**幂等方法**（GET/HEAD）：探针本身就是 GET，而这两条路径的宿主端点也只在主站的
+// 根引擎上注册了 GET ⇒ 收紧之后这条例外不可能被当成"任意 Host 下打主站写面"的通道
+// （`POST /healthz` 在未知主机上照旧 404）。
+func isProbeRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	return IsIdempotent(r.Method) && IsProbePath(r.URL.Path)
 }
 
 // currentBaseDomain 读当前基域（取值函数可能为 nil —— 早期装配/测试里只给字符串。
@@ -73,10 +121,16 @@ func (g *HostGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		g.Apps.ServeApp(w, r, label)
 	case HostUnknown:
-		// 形态非法（多级标签 / 非法字符）：默认既不进应用也不回落主站。
+		// 未知主机名（非本基域 / 形态非法的子域）：默认既不进应用也不回落主站。
 		//
-		// 唯一例外是**显式**列进 ExtraMainHosts 的主机名（部署者明确声明"这个
-		// 主机名也服务主站"）。没有这条，ExtraMainHosts 就是个死配置：
+		// 例外一：**编排探针** `/healthz`、`/readyz`（见 probePaths 的注释 —— 探针打的是
+		// Pod IP / localhost，无会话、不泄露凭据；404 掉它们等于让编排器杀掉健康实例）。
+		if isProbeRequest(r) {
+			g.Main.ServeHTTP(w, r)
+			return
+		}
+		// 例外二：**显式**列进 ExtraMainHosts 的主机名（部署者明确声明"这个主机名也服务
+		// 主站"，例如主站部署在基域的祖先域上）。没有这条，ExtraMainHosts 就是个死配置：
 		// `HostMain` 本来就进主站、`HostApp` 不该被它劫走，只剩 `HostUnknown`
 		// 是它唯一有意义的落点。
 		if g.isExtraMainHost(r.Host) {

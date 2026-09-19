@@ -81,11 +81,22 @@ type WasmRelease struct {
 	Checksum    string
 	Size        int64
 	Status      string
-	Wasm        []byte
-	ConfigJSON  string
-	AssetsDir   string
-	DeletedAt   *time.Time
-	CreatedAt   time.Time
+	// Reason 是**审核结论的理由**（审核不通过时管理员写下的那段话，≤200 字）。
+	//
+	// 为什么它必须在这里（R1-pm-3）：写入侧一直是通的（SetReleaseStatusForReview
+	// 的 rejected 分支把 reason 与"释放归档"写在同一条 UPDATE 里），但读取侧从缺
+	// —— 列集不含 reason、结构体也没有这个字段 ⇒ 作者永远看不到被拒理由，"审核"
+	// 在作者侧退化成掷骰子。反过来，`reason` 只在 rejected 行上有内容：approved
+	// 时被显式清成空串、pending 行从未写过，所以它对"通过/待审"两态恒为空。
+	//
+	// 与 Wasm 的关系：它是**小文本**（≤200 字，非 TOAST），因此清单列集可以带着
+	// 它跑；archive(BYTEA) 才是那个"绝不能被清单查询顺手拉出来"的重量级列。
+	Reason     string
+	Wasm       []byte
+	ConfigJSON string
+	AssetsDir  string
+	DeletedAt  *time.Time
+	CreatedAt  time.Time
 }
 
 // wasmAppColumns 是 apps 上 wasm 应用用到的列(显式列名:既有 skill/agent
@@ -95,8 +106,24 @@ const wasmAppColumns = `app_id, title, description, owner, channel, enabled, pur
 	created_at, updated_at`
 
 // wasmReleaseListColumns 不含 archive blob:清单查询绝不加载全部制品。
+//
+// 含 reason(≤200 字的小文本):它是"审核结论"的唯一读路径(R1-pm-3),作者面与管理
+// 面的审批清单都要显示它。它与 archive 的区别是量级 —— 后者是 ≤32 MiB 的 TOAST
+// 大字段,拉一次就是一份制品常驻内存;reason 只是随行的小列。
 const wasmReleaseListColumns = `id, app_id, version, title, description, changelog, publisher,
-	checksum, size, status, config_json, assets_dir, deleted_at, created_at`
+	checksum, size, status, reason, config_json, assets_dir, deleted_at, created_at`
+
+// wasmReleaseServeColumns 是**应用子域请求路径**用的列:与清单列相同,即不含 archive。
+//
+// 为什么要显式命名(P0-3,2026-09-19):执行侧每请求都要取"当前生效版本",而模块缓存
+// 命中(暖机常态)时 rel.Wasm **没有任何读者** —— 唯一读者是冷编译
+// (appserver.compileRelease)。用 wasmReleaseFullColumns 查这一行,等于每个请求都从
+// PostgreSQL 拉一份 ≤32 MiB 的 TOAST 大字段再丢掉:单请求瞬时堆可达 `并发 × 制品`,
+// 默认档 32 并发下约 1 GiB,而 §4.3 的四笔账里**没有这一笔**。
+//
+// 所以:请求路径一律用本常量(+ LatestApprovedWasmReleaseMeta);需要字节时在冷编译
+// 那一刻调 GetWasmRelease 按需加载。改这一行之前先回答"谁要在请求路径上读制品字节"。
+const wasmReleaseServeColumns = wasmReleaseListColumns
 
 const wasmReleaseFullColumns = wasmReleaseListColumns + ", archive"
 
@@ -178,7 +205,7 @@ func scanWasmRelease(row interface{ Scan(...any) error }, withWasm bool) (*WasmR
 	var r WasmRelease
 	var deleted, created any
 	dest := []any{&r.ID, &r.AppID, &r.Version, &r.Title, &r.Description, &r.Changelog,
-		&r.Publisher, &r.Checksum, &r.Size, &r.Status, &r.ConfigJSON, &r.AssetsDir,
+		&r.Publisher, &r.Checksum, &r.Size, &r.Status, &r.Reason, &r.ConfigJSON, &r.AssetsDir,
 		&deleted, &created}
 	if withWasm {
 		dest = append(dest, &r.Wasm)
@@ -432,9 +459,45 @@ func GetWasmRelease(ctx context.Context, db *sql.DB, appID, version string) (*Wa
 	return r, err
 }
 
-// LatestApprovedWasmRelease 取最新的**已批准且未软删**版本(应用子域交付的
-// 候选版本)。版本号严格递增 ⇒ id 顺序即版本顺序,取 max(id) 即可。
-func LatestApprovedWasmRelease(ctx context.Context, db *sql.DB, appID string) (*WasmRelease, error) {
+// GetWasmReleaseMeta 取一个版本的**元数据**(不含制品字节)。
+//
+// 与 GetWasmRelease 的分工:审核/清单/诊断只关心状态与体积,不需要字节。
+// 判定"待审⇒通过"这类动作先读它拿状态(友好的幂等响应),真正的不变量仍由
+// SetReleaseStatusForReview 的条件 UPDATE 在写入时保证(check-then-act 只是文案)。
+func GetWasmReleaseMeta(ctx context.Context, db *sql.DB, appID, version string) (*WasmRelease, error) {
+	r, err := scanWasmRelease(db.QueryRowContext(ctx, `SELECT `+wasmReleaseServeColumns+`
+		FROM app_releases WHERE kind = $1 AND app_id = $2 AND version = $3`,
+		AppKindWasmApp, normalizeWasmAppID(appID), version), false)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return r, err
+}
+
+// LatestApprovedWasmReleaseMeta 取最新的**已批准且未软删**版本的元数据 ——
+// **应用子域请求路径的唯一入口**(不含制品字节)。版本号严格递增 ⇒ id 顺序即版本
+// 顺序,取 max(id) 即可。
+//
+// 字节按需加载:冷编译那一刻由调用方调 GetWasmRelease(P0-3)。模块缓存命中时
+// 没有任何人需要字节,因此这里**绝不**能换成全列查询。
+func LatestApprovedWasmReleaseMeta(ctx context.Context, db *sql.DB, appID string) (*WasmRelease, error) {
+	r, err := scanWasmRelease(db.QueryRowContext(ctx, `SELECT `+wasmReleaseServeColumns+`
+		FROM app_releases
+		WHERE kind = $1 AND app_id = $2 AND status = $3 AND deleted_at IS NULL
+		ORDER BY id DESC LIMIT 1`,
+		AppKindWasmApp, normalizeWasmAppID(appID), ReleaseStatusApproved), false)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return r, err
+}
+
+// LatestApprovedWasmReleaseFull 取最新已批准版本的**全部字段(含 archive 字节)**。
+//
+// 名字里的 Full 是**成本提示**,不是风格:这个函数会把整份 ≤32 MiB 的制品从
+// PostgreSQL 拉进内存。允许的调用点只有"本来就要字节"的地方 —— 发布/播种期的
+// 校验与离线诊断;**请求路径一律用 LatestApprovedWasmReleaseMeta**(P0-3)。
+func LatestApprovedWasmReleaseFull(ctx context.Context, db *sql.DB, appID string) (*WasmRelease, error) {
 	r, err := scanWasmRelease(db.QueryRowContext(ctx, `SELECT `+wasmReleaseFullColumns+`
 		FROM app_releases
 		WHERE kind = $1 AND app_id = $2 AND status = $3 AND deleted_at IS NULL
@@ -444,6 +507,31 @@ func LatestApprovedWasmRelease(ctx context.Context, db *sql.DB, appID string) (*
 		return nil, ErrNotFound
 	}
 	return r, err
+}
+
+// PendingWasmReleases 返回全组织**待审版本**的 app_id → 版本号(按写入顺序)。
+//
+// 用途:管理面列表的"积压"视图(P0-1)——审核开关打开后新版本停在 pending,
+// 管理员必须一眼看到"有多少个版本在等审批"。一次查询取全量待审行(待审是**小集合**:
+// 每个应用同时最多积压用户提交的那些版本),调用方按自己列出的 app_id 过滤,
+// 因此不需要 (N 个应用 → N 次查询) 的 N+1。
+func PendingWasmReleases(ctx context.Context, db *sql.DB) (map[string][]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT app_id, version FROM app_releases
+		WHERE kind = $1 AND status = $2 AND deleted_at IS NULL
+		ORDER BY app_id, id`, AppKindWasmApp, ReleaseStatusPending)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var appID, version string
+		if err := rows.Scan(&appID, &version); err != nil {
+			return nil, err
+		}
+		out[appID] = append(out[appID], version)
+	}
+	return out, rows.Err()
 }
 
 // SoftDeleteWasmRelease 软删一个版本(按 id)。版本号仍永久占位;释放字节是

@@ -11,18 +11,26 @@
 //     `/admin/*` 都在 NoRoute 分支、`/healthz` 在根引擎上 ⇒ 清单式"禁命中"必然漏，
 //     没有门控时每个应用子域都会渲染门户与**管理台登录页**。
 //  2. **未知主机名一律 404，绝不回落主站**（§4.8）：否则任何 `<随机>.<基域>`
-//     都会变成主站的镜像（钓鱼面）。
+//     ——以及任何与基域无关的主机名（任意域名 / IP 直连 / 反代别名，R1-sec-3）——
+//     都会变成主站的镜像（门户与管理台登录页的钓鱼面）。唯一的例外是编排探针端点
+//     （`/healthz`、`/readyz`，见 `IsProbePath`）。
 //  3. **安全头由宿主独占**（§4.8/§15.1 第 13 条）：应用子域是公司域名下的
 //     任意 HTML/JS 宿主（R8/R37），应用自带的同名头一律剥离，且 4xx/5xx 也要写。
 package edge
 
 import (
+	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
+
+// logWarn 是本包的告警落点（与 session.logError / clientrelease.logWarn 同形，
+// 测试可替换以静音）。只在**来源校验被拒**这类低频分支调用。
+var logWarn = log.Printf
 
 // HostKind 是主机名判别结果（三态：主站 / 应用子域 / 未知）。
 type HostKind int
@@ -32,7 +40,9 @@ const (
 	HostMain HostKind = iota
 	// HostApp 是应用子域：第一级标签即 app_id。
 	HostApp
-	// HostUnknown 是"看起来属于基域但形态非法"的主机名 ⇒ 一律 404，不回落主站。
+	// HostUnknown 是"**不是本基域的主机名**"（任意其它域名、IP 直连、localhost、旧域名、
+	// 反代别名）或"看起来属于基域但形态非法"（多级标签 / 非法 label）的主机名
+	// ⇒ 一律 404，不回落主站（R1-sec-3）。
 	HostUnknown
 )
 
@@ -40,12 +50,24 @@ const (
 //
 // base 为空 ⇒ 未启用应用子域，全部视为主站（HostMain），保持既有部署行为不变。
 //
-// 规则：
+// 规则（base 非空时是**闭合的两支**：主站 = 基域本身，应用 = 一级子域）：
 //   - 去掉端口、转小写、去尾部点（域名不区分大小写；入库统一小写）；
 //   - host == base ⇒ 主站；
 //   - host == "<label>.<base>" 且 label 只有一级（**通配证书只覆盖一级标签**，
 //     R29/§4.2 ⇒ 不允许 `a.b.<base>`）且符合 app_id 规则 ⇒ 应用子域；
-//   - 其他（更深的层级、非法 label、其它域名）⇒ 主站（不是我们的基域）。
+//   - 其余一切主机名 ⇒ HostUnknown（404，**绝不回落主站**）。
+//
+// ⚠️ 最后一条曾经写成"其它域名 ⇒ 主站（不是我们的基域）"，那是 R1-sec-3（P2）：
+// 任何与基域无关的主机名（`evil.test`、任意域名、IP 直连、`localhost`）都拿到完整主站，
+// 于是门户、管理台 SPA（带账密表单）、管理登录 API 可以被任意主机名镜像（凭据钓鱼面），
+// 而且 `Host` 变成**请求方可以自己选的开关**（审计 §1.1：换票 nonce 的"能否下发"曾按
+// r.Host 判定 ⇒ 别名主机名上就能签出没有持有性证明的票）。
+//
+// 例外只有一个，且不在本函数里：编排探针端点（`/healthz`、`/readyz`）在任意 Host 下
+// 都要可达 —— 由 `HostGate.ServeHTTP` 的 HostUnknown 分支放行（见 `IsProbePath`）。
+//
+// 本条只能这样收口：门控是 allow-list，"主站也服务哪些主机名"必须**显式**声明
+// （`HostGate.ExtraMainHosts`），不能靠"不认识就当主站"。
 func MatchHost(host, base string) (label string, kind HostKind) {
 	h := normalizeHost(host)
 	b := normalizeHost(base)
@@ -57,9 +79,10 @@ func MatchHost(host, base string) (label string, kind HostKind) {
 	}
 	suffix := "." + b
 	if !strings.HasSuffix(h, suffix) {
-		// 不是本基域下的主机名 ⇒ 主站路由自己会按 Host 处理（例如 IP 直连、
-		// 本地探测、其它域名反代到同一进程）。
-		return "", HostMain
+		// 不是本基域下的主机名（任意域名 / IP 直连 / localhost / 反代别名 / 空 Host）
+		// ⇒ 既不进应用、也不服务主站。需要额外主机名也服务主站的部署走
+		// HostGate.ExtraMainHosts 显式声明。
+		return "", HostUnknown
 	}
 	prefix := strings.TrimSuffix(h, suffix)
 	if prefix == "" {
@@ -335,13 +358,31 @@ func NormalizeOrigin(raw string) string {
 //   - 两者都缺失 ⇒ 拒（宁可拒一次合法请求，也不放过一次跨源写）。
 //
 // 必须在任何重定向/重写**之前**执行（本包由 HostGate 在最外层调用）。
+//
+// 被拒时落**一条**上下文日志（每个被拒的写请求一条，低频；绝不打请求体/Cookie）。
+// 这条日志是"应用写请求全 403"这类线上故障的唯一现场：`Origin: null` 说明页面
+// 下发了 no-referrer（见 HostReferrerPolicy），`Origin` 与 `self` 只差端口说明
+// 反代的 X-Forwarded-Proto / Host 与浏览器实际访问的源不一致。
 func CheckOrigin(r *http.Request) bool {
+	ok, reason, detail := checkOriginReason(r)
+	if !ok {
+		logWarn("pico-wasm-edge: 应用子域写请求来源校验未通过 reason=%s self=%q %s detail=%s",
+			reason, SelfOrigin(r), OriginDiagFields(r), detail)
+	}
+	return ok
+}
+
+// checkOriginReason 是 CheckOrigin 的判定本体：返回 (是否放行, 判据名, 人读补充)。
+//
+// 拆出来是为了让**失败原因**可枚举（日志与测试都盯着同一份判据名），
+// 判定语义与拆之前逐条相同。
+func checkOriginReason(r *http.Request) (bool, string, string) {
 	if r == nil {
-		return false
+		return false, "nil_request", "请求对象为空"
 	}
 	self := SelfOrigin(r)
 	if self == "" {
-		return false
+		return false, "no_self_origin", "推导不出自身源（Host 头缺失）"
 	}
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
 		// Origin 必须是**源**（scheme + host[:port]），不带路径/query/fragment/userinfo。
@@ -349,7 +390,8 @@ func CheckOrigin(r *http.Request) bool {
 		//（合法实现不会发），一律拒 —— 不能靠"剥掉多余部分再比"来猜它想表达什么：
 		// 那会把 `https://a.<基域>/x` 这类伪造值当成 `https://a.<基域>` 放行。
 		if !IsOriginShaped(origin) {
-			return false
+			return false, "origin_malformed",
+				"Origin 不是合法的源形态（含路径/query/userinfo，或为字面量 \"null\" —— no-referrer 策略下浏览器对同源写请求也发 null）"
 		}
 		// 与自身源走**同一套规范化**（小写、默认端口省略）后再比：
 		// 浏览器可能发 `https://h:443` 这种带默认端口的形态，而自身源按 Origin 的
@@ -357,16 +399,35 @@ func CheckOrigin(r *http.Request) bool {
 		// "null"（sandboxed iframe / data: 文档）形态不符 ⇒ 上面已拒。
 		norm := NormalizeOrigin(origin)
 		if norm == "" {
-			return false
+			return false, "origin_unparsable", "Origin 解析不出源"
 		}
-		return strings.EqualFold(norm, self)
+		if !strings.EqualFold(norm, self) {
+			return false, "origin_mismatch", "Origin 与自身源不一致（规范化后仍不等）"
+		}
+		return true, "", ""
 	}
 	ref := strings.TrimSpace(r.Header.Get("Referer"))
 	if ref == "" {
-		return false
+		return false, "origin_and_referer_missing",
+			"Origin 与 Referer 都没有（no-referrer 策略下二者都会被剥掉）"
 	}
-	return strings.HasPrefix(strings.ToLower(ref), strings.ToLower(self)+"/") ||
-		strings.EqualFold(strings.TrimSuffix(ref, "/"), self)
+	low := strings.ToLower(ref)
+	if strings.HasPrefix(low, strings.ToLower(self)+"/") || strings.EqualFold(strings.TrimSuffix(low, "/"), self) {
+		return true, "", ""
+	}
+	return false, "referer_mismatch", "Referer 不以自身源为前缀"
+}
+
+// OriginDiagFields 汇总一次来源校验失败的可观测面（Host / Origin / Referer /
+// X-Forwarded-Proto）。**绝不含 Cookie**：会话明文进日志等于凭证泄漏。
+//
+// 导出是给 session.checkMainOrigin 复用（同一份日志口径，两处各写一遍必然漂移）。
+func OriginDiagFields(r *http.Request) string {
+	if r == nil {
+		return `host="" origin="" referer="" x-forwarded-proto=""`
+	}
+	return fmt.Sprintf("host=%q origin=%q referer=%q x-forwarded-proto=%q",
+		r.Host, r.Header.Get("Origin"), r.Header.Get("Referer"), r.Header.Get("X-Forwarded-Proto"))
 }
 
 // IsIdempotent 判定方法是否幂等（幂等方法不做 Origin 校验）。
@@ -379,15 +440,34 @@ func IsIdempotent(method string) bool {
 	return false
 }
 
+// HostReferrerPolicy 是宿主为应用子域强制写入的 referrer 策略。
+//
+// **必须是 same-origin，绝不能是 no-referrer。** 应用子域的页面是应用自己的 HTML，
+// 它最常见的写路径就是**同源表单 POST**（例如内置演示应用的留言墙
+// `<form method="post" action="/note">`）。而按 WHATWG Fetch 的
+// "append a request Origin header" 算法，referrer policy 为 no-referrer 时，
+// **非 GET/HEAD 请求的 `Origin` 头会被写成字面量 `null`**（同源也一样）——
+// 本包的 CheckOrigin 要求 `Origin == 自身源`，于是应用内所有同源写请求必然 403
+// （「跨源写请求被拒」），应用功能在真实浏览器里 100% 不可用（2026-09-19 线上 P0）。
+//
+// same-origin 与原意图一致：同源才发 Referer、跨源一个字节都不发；区别只是同源
+// 写请求仍带真实 Origin。别"为了更严"改回 no-referrer —— 那等于关掉应用写功能。
+// 判据：temp/wasm-probe/micro-referrer.mjs 与
+// docs/decisions/2026-09-19-referrer-policy-origin-null.md。
+const HostReferrerPolicy = "same-origin"
+
 // ApplyHostSecurityHeaders 写宿主独占的响应安全头（§4.8）。
 //
 // **含 4xx/5xx**：调用方必须在写任何响应体之前调用它，包括错误分支。
 // 应用自带的同名头一律剥离 —— 由 StripAppControlledHeaders 完成（在把应用的
 // 响应头写回客户端之前调用）。
+//
+// Referrer-Policy 取 HostReferrerPolicy（= same-origin，**不是 no-referrer**），
+// 理由见该常量的注释：no-referrer ⇒ 同源写请求 Origin: null ⇒ CheckOrigin 全拒。
 func ApplyHostSecurityHeaders(h http.Header, selfOrigin string) {
 	h.Set("Content-Security-Policy", limits.AppContentSecurityPolicy(selfOrigin))
 	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Referrer-Policy", HostReferrerPolicy)
 	// 应用子域绝不希望被搜索引擎或第三方嵌帧收录（frame-ancestors 已在 CSP 中）。
 	h.Set("X-Frame-Options", "DENY")
 	// 宿主独占 Cookie，因此禁止应用设置 Cookie 头（白名单里也没有 cookie）。

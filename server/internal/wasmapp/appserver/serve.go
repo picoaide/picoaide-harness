@@ -22,6 +22,7 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/logbuf"
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
 	"github.com/picoaide/picoaide/internal/wasmapp/runtime"
+	"github.com/picoaide/picoaide/internal/wasmapp/session"
 )
 
 // ServeApp 处理一次应用子域请求（实现 edge.AppHandler）。
@@ -86,7 +87,13 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 	// ===== ② 生效版本（§6.1 ⑤ / §8）=====
 	// 生效版本 = 最新 approved 且未软删的版本。审核开关开启时，新版停在 pending
 	//（线上仍旧版本），因此"最新 approved"就是线上版本，无需另判开关。
-	rel, rerr := serverstore.LatestApprovedWasmRelease(r.Context(), s.opt.DB, appID)
+	//
+	// ⚠️ 这里取的是**不含制品字节**的元数据（P0-3，2026-09-19）：模块缓存命中
+	//（暖机常态）时 rel.Wasm 没有任何读者，用全列查询等于每请求从 PG 拉一份
+	// ≤32 MiB 的 TOAST 大字段再丢掉（默认档 32 并发下瞬时堆约 1 GiB，而 §4.3 的
+	// 四笔账里没有这一笔）。字节在**冷编译**那一刻按需加载 —— 见 serveWasm 的
+	// acquire 回调与 loadReleaseWasm。
+	rel, rerr := serverstore.LatestApprovedWasmReleaseMeta(r.Context(), s.opt.DB, appID)
 	switch {
 	case errors.Is(rerr, serverstore.ErrNotFound):
 		s.writeHTMLFailure(w, r, http.StatusNotFound, apperr.CodeNotFound,
@@ -128,6 +135,11 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 	// ===== ⑤ 准入（R24/R25）=====
 	// 资源目录：抽取根由 assets 按 (appID, releaseID) 推导（§4.2），应用读到的
 	// 与宿主读到的必须是同一份（应用用 assets.read("picoaide.app.json") 读自己的配置）。
+	//
+	// ⚠️ 目录仍然**每请求打开**（三次 Lstat，实测 ≈30 µs）：它是"平台状态"断言
+	// （目录缺失 = 500 平台故障），不能因为 `(app_id, release_id)` 级缓存里有字节
+	// 就跳过。真正贵的三项（资源配置读盘 + 解析、资源读盘、SHA-256）走 releaseContent
+	// 的缓存（R1-rt-3），命中时零读盘。
 	store, aerr := s.openAssets(appID, rel)
 	if aerr != nil {
 		s.logf("appserver: 资源目录不可用 app=%s release=%d: %v", appID, rel.ID, aerr)
@@ -135,7 +147,8 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 			WithHint("这是平台侧故障（该版本的资源目录缺失）；请告知应用发布者或平台管理员"), false)
 		return
 	}
-	cfg, cerr := loadAppConfig(store)
+	rc := s.openReleaseContent(appID, rel, store)
+	cfg, cerr := rc.Config()
 	if cerr != nil {
 		// ⚠️ 读不到/解析不了应用配置**绝不**当匿名处理：那会把 RequiresLogin 应用
 		// 意外开放（发布期已经校验过的文件，线上读不到属于平台故障）。
@@ -168,7 +181,30 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 				WithHint("请通过 https 访问，或让前置反向代理回传 X-Forwarded-Proto: https"), false)
 			return
 		}
-		http.Redirect(w, r, s.ticketURL(r, appID), http.StatusFound)
+		// 跨源那一跳的**形态**按方法分流（2026-09-19 P0 的同族修复，与主站换票同一根因）：
+		//
+		//   - 幂等请求（GET/HEAD/OPTIONS/TRACE）：302 直接跳。导航不受 CSP 约束，
+		//     302 是最省的一跳，行为与修复前完全一致。
+		//   - 非幂等的普通请求（原生表单 POST 等）：**同源跳板页（200）**。
+		//     原因：应用子域的 CSP（limits.AppContentSecurityPolicy）含 `form-action 'self'`，
+		//     而 CSP3 的 form-action 会检查**重定向链上的每一个 URL**；这里是跨源跳转
+		//     （应用子域 → 主站换票端点）⇒ 浏览器把这次提交整单拦掉
+		//     （`Sending form data to 'https://<app>.<基域>/…' violates "form-action 'self'"`），
+		//     服务端从未收到它，用户表现为"点了提交没反应，只有刷新（GET）才恢复"。
+		//     跳板页把跨源那一跳交给页面自己（location.replace / meta refresh / 链接），
+		//     三者都不受 form-action 约束 —— 因此**不放宽 CSP**。
+		//   - 显式要 JSON 的请求（`/api/*`、`Accept: application/json`）：保持 302。
+		//     form-action 只管原生表单提交，fetch/XHR 不受它约束；把 API 客户端改成
+		//     收 HTML 跳板页反而会破坏应用的 JSON 契约（parse 失败比 CORS 报错更难查）。
+		//
+		// 代价（要认账）：跳板页走的是 GET 换票，**原始 POST 体不会重放** ⇒ 用户重新
+		// 登录回来后需要再提交一次；页面文案已明确写出"这次提交没有被保存"。
+		target := s.ticketURL(r, appID)
+		if edge.IsIdempotent(r.Method) || wantsJSON(r) {
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+		s.writeRedirectPage(w, r, target)
 		return
 	}
 	// R24（用户 2026-09-18 明确保持）：平台**不做**名单校验 —— access=whitelist 的
@@ -211,7 +247,8 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 	// ===== ⑨ 静态资源（§4.2 / §4.6 响应缓存）=====
 	// 命中"本版本抽取出的资源"就由宿主直接服务（缓存键 app_id + version + path）；
 	// 路由判定规则见 static.go 的 serveStatic 注释（含"要求登录的应用入口不直出"的特例）。
-	if s.serveStatic(w, r, appID, rel, store, !cfg.RequiresLogin()) {
+	// `If-None-Match` 命中的 304 在缓存命中时**不读盘、不算哈希**（R1-rt-2）。
+	if s.serveStatic(w, r, rel, rc, !cfg.RequiresLogin()) {
 		return
 	}
 
@@ -236,6 +273,31 @@ func secureRequest(r *http.Request) bool {
 		proto = proto[:i]
 	}
 	return strings.EqualFold(strings.TrimSpace(proto), "https")
+}
+
+// writeRedirectPage 写**同源跳板页**（应用会话失效 + 非幂等请求时的跨源那一跳）。
+//
+// 与主站换票成功后的跳板页共用**同一份实现**（`session.RedirectPage`）：三条出口
+// （location.replace / meta refresh / 可见链接）、同一份中英文案表、同一套属性转义。
+//
+// 安全头由宿主独占函数写（§4.8）：
+//   - CSP = `limits.AppContentSecurityPolicy`（含 `form-action 'self'`，**不放宽**：
+//     本页没有任何表单，跨源那一跳是页面导航）；
+//   - `Referrer-Policy` = `edge.HostReferrerPolicy`（same-origin）⇒ 从这里跳到主站时
+//     浏览器**不带 Referer**（本页 URL 里没有票，target 的 query 里也没有票）；
+//   - `Cache-Control: no-store`（带登录上下文的页面不得落缓存）。
+func (s *Server) writeRedirectPage(w http.ResponseWriter, r *http.Request, target string) {
+	h := w.Header()
+	edge.ApplyHostSecurityHeaders(h, edge.SelfOrigin(r))
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r != nil && r.Method == http.MethodHead {
+		return
+	}
+	_, _ = io.WriteString(w, session.RedirectPage(
+		session.PreferredLocale(r.Header.Get("Accept-Language")),
+		session.RedirectAppSessionExpired,
+		target, "", ""))
 }
 
 // ticketURL 拼主站换票地址（§6.1 ①：`https://<基域>/app-ticket?app=<app_id>&next=<相对路径>`）。
@@ -333,7 +395,20 @@ func loadAppConfig(store *assets.Store) (appcfg.Config, *apperr.Error) {
 func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 	rel *serverstore.WasmRelease, cfg appcfg.Config, store *assets.Store, user *abi.User, sessionKey string) {
 
-	// 读体放在**排队之前**：慢客户端不该占着执行槽（每应用并发恒为 1，§4.6）。
+	// ===== 应用日志（§5.1）=====
+	// 每请求一个 logbuf（它的限额语义唯一实现在那个包），请求结束后由 flushAppLogs
+	// 转写到平台日志出口。
+	//
+	// ⚠️ 刷盘必须发生在**执行槽与库句柄都归还之后**（R1-rt-6）。defer 是后进先出，
+	// 所以这里**最先注册** ⇒ 最后执行。旧实现把它注册在句柄之后（LIFO 最先跑），
+	// 于是 ≤100 条 × 4 KiB 的同步 stderr 写发生在**持有执行槽 + 库句柄 + 模块引用**
+	// 的期间：容器 log driver 慢/磁盘满时，这段写会直接吃掉稀缺的执行槽。
+	// 语义不变（仍然同步、仍然每请求一次、仍然有界），只是移出持有期。
+	logs := logbuf.New()
+	defer s.flushAppLogs(appID, logs)
+
+	// 读体放在**排队之前**：慢客户端不该占着执行槽（执行槽是稀缺资源，
+	// 每应用并发上限见 limits.AppRuntimeConcurrency，§4.6）。
 	body, aerr := readRequestBody(r)
 	if aerr != nil {
 		s.writeFailure(w, r, aerr, true)
@@ -354,9 +429,16 @@ func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 	defer ticket.Release()
 
 	// 编译模块缓存：键含 (app_id, version, release_id)，避免任何"版本回滚后拿到旧字节"的可能。
+	//
+	// 回调**只在缓存未命中（冷编译）时执行**：制品字节也就在那一刻按需加载
+	//（P0-3）。命中时既不查 archive，也不碰 loadReleaseWasm。
 	key := moduleKey{AppID: appID, Version: rel.Version, ReleaseID: rel.ID}
 	mod, release, aerr := s.modules.acquire(ctx, key, func(cctx context.Context) (compiledResult, *apperr.Error) {
-		return s.compileRelease(cctx, rel)
+		full, lerr := s.loadReleaseWasm(cctx, rel)
+		if lerr != nil {
+			return compiledResult{}, lerr
+		}
+		return s.compileRelease(cctx, full)
 	})
 	if aerr != nil {
 		s.logf("appserver: 取编译模块失败 app=%s v=%s: %v", appID, rel.Version, aerr)
@@ -366,9 +448,12 @@ func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 	defer release()
 
 	// §4.5：一应用一 driver 实例 + 一应用一连接，**跨应用不复用**。
-	// 句柄池（dbpool.go）：同一应用复用同一句柄（由队列串行 + 每句柄互斥量保证不并发共享），
-	// 空闲 10 分钟或超过上限（limits.GlobalInstances）时回收；
-	// 连接被污染 / 语句可能被放弃的请求结束后，句柄在 release 时关闭重建。
+	// 句柄池（dbpool.go）：同一应用复用同一句柄；同一句柄可被同应用的多个请求**同时**
+	// 持有（2026-09-19 起并发控制下沉到 appdb：读走只读连接池、写由 writeMu 串行，
+	// 见 appdb 的包注释），队列槽位只决定"同时能跑多少请求"；
+	// 空闲 3 分钟或超过上限（limits.GlobalInstances）时回收；
+	// 连接被污染 / 语句可能被放弃的请求结束后，句柄在 release 时（最后一个使用者）
+	// 关闭重建 —— 关库前 appdb 会排空在途读者，不会抽走并发请求脚下的连接。
 	handle, aerr := s.appdbs.acquire(ctx, s.opt.DataRoot, appID)
 	if aerr != nil {
 		s.logf("appserver: 打开应用库失败 app=%s: %v", appID, aerr)
@@ -376,13 +461,15 @@ func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 		return
 	}
 	recycle := false
+	// 归还顺序有讲究：**先收事务、再还句柄**（endRequest 可能回滚一个被应用遗弃的事务，
+	// 若反过来，句柄可能已经被 release 关掉/回收）。defer 是后进先出，所以 endRequest
+	// 要写在 release 之后。
 	defer func() { s.appdbs.release(handle, recycle) }()
 	db := &appDBConn{DB: handle.db, handle: handle}
-
-	// 应用日志：每请求一个 logbuf（§5.1 的限额语义唯一实现在那个包），
-	// 请求结束后由 flushAppLogs 转写到平台日志出口。
-	logs := logbuf.New()
-	defer s.flushAppLogs(appID, logs)
+	// 事务所有权收尾（见 appDBConn.endRequest）：应用在事务里结束（忘了 commit/被杀/超时）
+	// 时，本请求必须把自己的持有者身份收干净 —— 否则同应用的并发请求会在看门狗
+	// （appdb 的 5 s 硬超时）之前一直被 fail-closed 拒绝。
+	defer db.endRequest()
 
 	// 宿主能力面（§5.1 封闭清单）：身份由宿主注入，应用伪造不了（§7.1 身份契约）。
 	caps := &hostcap.Capabilities{

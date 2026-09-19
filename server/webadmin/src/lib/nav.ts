@@ -58,10 +58,11 @@ export const NAV_ENTRIES: NavEntry[] = [
   // 2026-09-18:员工自建 WASM 应用的平台管理员面(列表/上下架/冻结/转移归属/更新审批)。
   // 读权限复用 capability:read(与后端路由申报的权限点一致);写动作在页面内另按
   // capability:write 收敛(体验层,服务端 RequirePermission 才是护栏)。
+  // 2026-09-19:原独立条目「应用平台」(`/app-platform`,并发/内存限制项)已并入本页
+  // 成为「限制项」子页(应用域名在「设置」子页)—— 两个条目此前同用 Boxes 图标,
+  // 侧栏看起来像重复入口,合并后一条。
   { to: '/app-center', label: '应用中心', icon: Boxes, section: '运维', perms: [PERM_CAP_READ] },
   { to: '/connectors', label: '连接器', icon: Plug, section: '运维', perms: [PERM_CONNECTOR_READ] },
-  // 2026-09-19:员工自建 WASM 应用的并发/内存限制项（用户要求"后台要有配置页面"）。
-  { to: '/app-platform', label: '应用平台', icon: Boxes, section: '运维', perms: [PERM_CAP_READ] },
   { to: '/server-info', label: '服务器信息', icon: Server, section: '运维', perms: [PERM_SERVERINFO_READ] },
   // 审计分区(auditor + super_admin 只读)
   { to: '/audit', label: '审计日志', icon: ScrollText, section: '审计', perms: [PERM_AUDIT_READ] },

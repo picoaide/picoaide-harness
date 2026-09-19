@@ -1,8 +1,8 @@
 # WASM 应用平台：作者指南
 
 > 面向**员工与 AI** 的完整作者指南。设计基线见
-> `docs/planning/2026-09-17-wasm-app-platform.md`；AI 的操作手册（随客户端分发）
-> 见 `packages/vendor/memory-evolve/skills/picoaide-app-builder/`。
+> `docs/planning/2026-09-17-wasm-app-platform.md`；AI 的操作手册（随服务端镜像分发）
+> 见 `server/skills/app-builder/`。
 >
 > 平台里的每一个上限数字都来自唯一真源 `server/internal/wasmapp/limits/limits.go`
 > （生成物 `limits.md` / `limits.json` 由 `go generate ./internal/wasmapp/limits` 产出，
@@ -18,7 +18,7 @@
 
 两条使用路径：
 
-- **让 AI 写**（推荐）：客户端的 AI 会加载内置技能 `picoaide-app-builder`，
+- **让 AI 写**（推荐）：客户端的 AI 会加载内置技能 `app-builder`，
   按黄金路径生成代码、本机编译、调用平台接口发布。
 - **自己写**：照本文件 + 内置技能的 `references/`（ABI、limits、发布、诊断）即可，
   语言是 Go（`wasm32-wasip1`）。
@@ -30,7 +30,7 @@
 | 原语 | 用途 | 固定约束 |
 | --- | --- | --- |
 | `db.define(table, columns[])` | 建表（平台代执行，重复调用幂等） | 表名/列名 `^[a-z][a-z0-9_]{0,30}$`；列类型枚举 `text/int/real/bool/datetime`；列不超过 16、表不超过 16/应用；**不能指定主键/外键/索引/触发器** |
-| `db.query(sql, args)` | 单条 `SELECT` | 单语句、必须参数化、受 `SQLITE_LIMIT_*` 约束、最多返回 5000 行 / 8 MiB |
+| `db.query(sql, args)` | 单条 `SELECT` | 单语句；值用 `args` 占位（**平台不检查你是否参数化**，见 §10）、受 `SQLITE_LIMIT_*` 约束、最多返回 5000 行 / 8 MiB |
 | `db.exec(sql, args)` | 单条写语句 | 仅 `INSERT`/`UPDATE`/`DELETE`；禁 DDL |
 | `db.tx` | 事务 | ABI 层是 `tx_begin`/`tx_commit`/`tx_rollback`；事务内**只允许数据库读写**（`db.query`/`db.exec` + 两个出口），`ai.chat`/`log`/`assets.read`/`db.define` 与嵌套 `tx_begin` 一律拒；超时 5 秒强制回滚 |
 | `ai.chat(messages, model?)` | 调 AI（阻塞、非流式） | 模型由服务端裁决；预算 30 秒；不注入系统提示；按**使用者**身份计费与限流 |
@@ -59,6 +59,26 @@
   （404/403）页面。
 - 包内资源是**不改名、不发新版就改不掉**的：要改内容必须发新版本（§4.2）。
 
+#### 把静态资源编进包里：用官方打包器
+
+"把 HTML/CSS/JS 编进 wasm"是**一等用法**，但自定义段的二进制格式（段名 = 包内逻辑路径，
+段长度前缀是 LEB128 且**必须含段名的长度前缀与段名本身**）不该由作者手拼 —— 技能目录里
+带了官方打包脚本：
+
+```bash
+node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
+  web/index.html=index.html web/app.css=static/app.css
+```
+
+- 位置：`server/skills/app-builder/scripts/pack-assets.mjs`（随技能一起分发到
+  `<dshHome>/skills/app-builder/scripts/`），用法与全部规则见同目录 `README.md`。
+- `SRC=DEST`：`DEST` 就是**包内逻辑路径**（段名）；规则与平台同源（相对、以 `/` 分隔、
+  不含 `..` 与 `:`；整条路径不超过 256 字节、单段不超过 255 字节；自定义段总量不超过 4 MiB）。
+- **`--out` 必填且必须是新路径**：脚本绝不就地覆盖输入（原模块要留着继续编译/重打包；
+  顺带一提，`go build -o 已存在文件` 不截断旧文件、会留尾部垃圾，编译产物也别就地覆盖）。
+- **保留资源不能这样加**：`picoaide.app.json` 由平台在发布期写入（内容 = 随包提交的
+  `config`），模块里的同名段会被平台忽略 —— 脚本会直接拒绝，别把名单塞进这种会被直出的资源。
+
 ### 2.1b 页面渲染：`html/template` / `text/template` 可以直接用
 
 **渲染 HTML 页面的标准做法就是把模板编译进 wasm**（R8：静态资源/HTML/JS 全部编入）。
@@ -81,7 +101,7 @@
 | 用全局变量存会话状态 | 无效：实例每个请求新建 |
 | 让每个用户只看自己的数据 | 平台不做行级隔离：同一应用内数据全员共享（要区分就自己加一列存 `user.username`） |
 | 运行期改配置 / 改准入名单 | 不行：配置随包，改动 = 发新版本 |
-| 给应用调并发 / 加缓存旋钮 | 没有这类参数：每应用串行、队列固定、实例上限固定 |
+| 给应用调并发 / 加缓存旋钮 | 作者不可调（**运维可在控制台改**）：同一应用默认最多 **4 个请求并发**（读并发；**写仍串行**），但**单个用户在同一应用内默认只有 1 路**（`user_per_app_running=1`，自测时用同一账号看不到 4 路是排队规则、不是平台串行）；队列 32、占槽 4、全局实例 32 都是**默认值不是固定值**（控制台「应用中心 → 限制项」可改，队列上限 4096、全局实例上限 256）；缓存无参数 |
 | 指望平台自动迁移表结构 | 没有自动迁移：加字段请用新表名或新列并自己搬数据 |
 
 ### 2.3 平台保留列
@@ -94,7 +114,7 @@
 
 完整参考（帧格式 / 请求帧字段 / 每个宿主调用的参数与结果 / 响应信封 / 判别规则 /
 计时规则 / 失败语义表）在：
-`packages/vendor/memory-evolve/skills/picoaide-app-builder/references/abi.md`
+`server/skills/app-builder/references/abi.md`
 
 三条最先要记住的：
 
@@ -111,7 +131,7 @@
 **字段规格（字段名 / 类型 / 必填 / 取值 / 上限）只在生成物里维护，本文件不复制那张表**：
 
 - 机器可读：`server/internal/wasmapp/appcfg/appcfg.json`
-- 人读（同一份内容）：`packages/vendor/memory-evolve/skills/picoaide-app-builder/references/app-config.md`
+- 人读（同一份内容）：`server/skills/app-builder/references/app-config.md`
 - 单一真源（改字段只能改这里）：`server/internal/wasmapp/appcfg/appcfgspec.go`
 
 三份由同一个生成器产出（`go generate ./internal/wasmapp/limits`），构建期逐字节比对；
@@ -197,7 +217,8 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 - 工具的参数说明就是**该填什么**的契约（`config` 的字段集合封闭：`access` / `whitelist` /
   `purpose` / `data_sensitivity` / `owner`，多一个未知字段服务端即拒）；字段规格的机器可读
   真源是服务端生成的 `appcfg.json`，与工具参数、客户端表单、技能参考**四处对拍**。
-- 作者手册技能（`picoaide-app-builder`）**随服务端镜像发布**，在客户端「能力中心 →
+- 作者手册技能（`app-builder`）**随服务端镜像发布**（源码就在服务端仓库的
+  `server/skills/app-builder/`），在客户端「能力中心 →
   平台内置技能」**按需安装**（不自动安装）；没装时工具报错会直接给出安装指路。
 
 要点：
@@ -255,7 +276,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | 编译目标用错 | 上传期导入白名单直接拒，hints 指明 `wasm32-wasip1` |
 | 版本号写错 / 忘写 changelog | 预检明确拒 + 结构化 hints |
 | 写出慢查询 | 每条语句 5 秒硬超时 + `SQLITE_LIMIT_*` + 诊断事件 |
-| 想调并发 / 队列参数 | 没有这类参数：串行执行、队列与占槽全部平台固定 |
+| 想调并发 / 队列参数 | 作者不可调（运维可在控制台「应用中心 → 限制项」改全局值）：同一应用默认最多 **4 个请求并发**（读并发；**写仍串行**），**单个用户在同一应用内默认只有 1 路**（`user_per_app_running`），超出进队列（默认 32，可调到 4096），队列满 429 |
 | 事务里调 `ai.chat` / `log` / `assets.read` / `db.define` / 再开一个事务 | 直接报错（防事务长期持锁 + 占满执行槽）；事务内**只能做数据库读写**：`db.query` / `db.exec` + `tx_commit` / `tx_rollback` |
 
 ## 10. 常见错误与处理（速查）
@@ -273,7 +294,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | `RUNTIME_NO_RESPONSE` | 有分支没写响应帧 | 每个分支都写且只写一帧（`preview.mjs` 能提前发现） |
 | `RUNTIME_TIMEOUT` | 单请求里做了整批计算 | 拆成多次请求；检查不收敛的循环 |
 | `RUNTIME_MEMORY` | 一次把大结果集读进内存 | 用 `WHERE` 收窄 + `LIMIT` 分页 |
-| `DB_DENIED` | 多语句 / DDL / `PRAGMA` / 提到保留列 / 没参数化；**事务内调了被禁能力**（`details.kind` = `nested_tx` / `blocking_capability` / `ddl`） | 建表走 `db.define`；语句只留四个动词；值放 `args`；事务里只留 `db.query`/`db.exec` |
+| `DB_DENIED` | 多语句 / DDL / `PRAGMA` / `ATTACH` / `VACUUM` / 提到保留列；**事务内调了被禁能力**（`details.kind` = `nested_tx` / `blocking_capability` / `ddl`） | 建表走 `db.define`；语句只留四个动词；事务里只留 `db.query`/`db.exec` |
 | `ASSET_DENIED` | `assets.read` 的包内路径非法/越界，或抽取目录异常 | 路径用相对、`/` 分隔、不含 `..`；不要读自己没有的资源 |
 | `ASSET_OVERSIZE` | 单个随包资源超过 4 MiB（与自定义段总量同源） | 精简资源；HTML/JS 先 gzip 再内嵌 |
 | `ASSET_EXISTS` | 发布期抽取要写的资源已存在（抽取只写一次） | 改资源 = 发新版本，不要指望覆盖 |
@@ -285,18 +306,26 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | `FORBIDDEN` | 不是该应用的发布者（或应用已冻结） | 只能改自己发布的应用 |
 | `NAME_TAKEN` | 应用名被占用 | 换名字（同名不同人是不同应用） |
 
+> ⚠️ **平台不检查你是否参数化**。`db.query` / `db.exec` 的 SQL 闸门只检查：语句种类
+> （四个动词）、单语句、平台保留列、以及 DDL/`PRAGMA`/`ATTACH`/`VACUUM` —— **把字面量
+> 拼进 SQL 平台不会拦**（`SELECT … WHERE author='emp1'`、`DELETE … WHERE body='x'` 都会通过）。
+> 也就是说 **SQL 注入没有任何平台侧防线**：值一律用 `db.query(sql, args)` / `db.exec(sql, args)`
+> 的 `?` 占位参数传，不要用字符串拼接（`"... WHERE author='" + name + "'"` 就是漏洞）。
+> 这条只有你自己守；把它当成"平台会替我兜住"，等于没有防线。
+
 更细的读法与处置：`references/diagnostics.md`（在技能目录里）。
 
 ## 11. 文档与生成物位置
 
 | 内容 | 位置 |
 | --- | --- |
-| AI 操作手册（随客户端分发） | `packages/vendor/memory-evolve/skills/picoaide-app-builder/SKILL.md` |
+| AI 操作手册（随服务端镜像分发） | `server/skills/app-builder/SKILL.md` |
 | ABI 参考 | 同目录 `references/abi.md` |
 | 上限表（生成物，勿手改） | 同目录 `references/limits.md`；源码真源 `server/internal/wasmapp/limits/limits.go` |
 | 配置字段参考（生成物，勿手改） | 同目录 `references/app-config.md`；源码真源 `server/internal/wasmapp/appcfg/appcfgspec.go` |
 | **发布字段规格（机器可读单一真源）** | `server/internal/wasmapp/appcfg/appcfg.json`（`schema=picoaide-app-config/1`）。被四处对拍：服务端解析行为 / 宿主工具参数 / 客户端表单与提交体 / 上面的字段参考 |
 | 发布与运维 | 同目录 `references/publishing.md` |
+| 静态资源打包器（官方，零依赖） | `server/skills/app-builder/scripts/pack-assets.mjs` + 同目录 `README.md`（随技能分发） |
 | 诊断 | 同目录 `references/diagnostics.md` |
 | 可编译示例（共享便签） | 同目录 `examples/go/`（`GOOS=wasip1 GOARCH=wasm go build` 通过，门禁真题编译） |
 | 上限生成器 | `server/cmd/picoaide-limits-gen`（`-check` 是 CI 门禁入口） |

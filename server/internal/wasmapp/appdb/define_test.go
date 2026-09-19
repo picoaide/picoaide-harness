@@ -25,7 +25,7 @@ type tableInfoRow struct {
 // readTableInfo 用宿主内部 PRAGMA 读表结构（应用提交的 PRAGMA 一律拒，但宿主自己要用）。
 func readTableInfo(t *testing.T, d *DB, table string) []tableInfoRow {
 	t.Helper()
-	rows, err := d.rw.QueryContext(context.Background(), `SELECT cid, name, type, "notnull", dflt_value, pk FROM pragma_table_info(?)`, table)
+	rows, err := d.writeConn().QueryContext(context.Background(), `SELECT cid, name, type, "notnull", dflt_value, pk FROM pragma_table_info(?)`, table)
 	if err != nil {
 		t.Fatalf("读 table_info(%s) 失败：%v", table, err)
 	}
@@ -402,7 +402,7 @@ func TestDefineIgnoresStructuralFieldsAndRejectsRowIDColumn(t *testing.T) {
 	}
 	// 索引/触发器不得被创建。
 	var n int
-	if err := d.rw.QueryRowContext(context.Background(),
+	if err := d.writeConn().QueryRowContext(context.Background(),
 		`SELECT count(*) FROM sqlite_master WHERE type IN ('index','trigger') AND tbl_name = 'items'`).Scan(&n); err != nil {
 		t.Fatalf("统计索引失败：%v", err)
 	}

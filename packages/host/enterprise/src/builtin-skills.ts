@@ -21,10 +21,12 @@ import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-deskt
 /**
  * 平台内置的 WASM 应用作者手册技能名（服务端资产目录名 = 技能运行时名）。
  *
- * 与 `packages/vendor/memory-evolve/skills/picoaide-app-builder/` 是**同一份内容**：
- * 随包副本由插件同步到技能库，服务端副本由能力中心按需安装，两者同名同源。
+ * 名字必须与 `server/skills/app-builder/` 的**目录名**和 SKILL.md frontmatter 的
+ * `name` 逐字一致（2026-09-19 由 `picoaide-app-builder` 改名而来）：服务端
+ * `skillseed` 用目录名当 declaredAppID 调 `skillmanifest.Parse`，不一致会让整条
+ * 技能在启动扫描时被静默丢弃（接口 200 + 空数组），客户端这里也就永远提示"未安装"。
  */
-export const APP_BUILDER_SKILL = 'picoaide-app-builder'
+export const APP_BUILDER_SKILL = 'app-builder'
 
 /**
  * 该内置技能是否已装到本机（`<dshHome>/skills/<name>/SKILL.md` 存在）。

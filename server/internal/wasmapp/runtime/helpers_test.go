@@ -39,6 +39,13 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	// 预热：把**一次性**开销（guest 现场编译 + wazero 冷编译）在任何用例开始计时之前付掉。
+	// 不预热的话，"-run 单跑"会把冷编译算进"耗时必须接近预算"那些断言的窗口里
+	// （2026-09-19 实测 8–20 s ⇒ 必红）。详见 warmUpGuestFixture。
+	if err := warmUpGuestFixture(); err != nil {
+		fmt.Fprintf(os.Stderr, "预热 guest 夹具失败（本包用例依赖现场编译的 wasip1 guest）: %v\n", err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	if guestDir != "" {
 		_ = os.RemoveAll(guestDir)
@@ -46,41 +53,96 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// warmUpGuestFixture 在**任何用例开始计时之前**付掉两笔一次性开销：
+//
+//  1. guest 源码 → wasm 的现场编译（`GOOS=wasip1 go build`）；
+//  2. wazero 对 3.4 MiB 模块的**冷编译**（实测 ~1–8 s CPU，慢机器/有负载时更长）。
+//
+// 为什么必须是**包级**不变量（而不是各用例自己热身）：本包多条断言是"耗时必须接近
+// 预算"——serve_test.go 的 TestServe_InfiniteLoopTimeout（> budget+3s 即红）、
+// TestServe_HostCallOverBudgetIgnoringCtx（> 1200ms 即红）、
+// TestServe_ResponseThenLingerIsConclusive（>= 500ms 即红）、
+// TestServe_TimeoutWhileGuestBlockedOnRead（> budget+3s 即红）、
+// TestServe_CallerCancel（> 3s 即红）。冷编译留在计时窗口内 ⇒ **-run 单跑必红**
+// （2026-09-19 实测：8–20 s 被算成 guest 耗时），而整包跑时被前面的用例预热 ⇒
+// 缺陷长期不可见（CI 只跑整包）。TestServe_NanosleepDoesNotBurnCPU 早就用手写的
+// "先热身一次"绕开了它（nanosleep_test.go:28-30 的注释），这里把它提升成整包的
+// 不变量：**任何计时窗口里都不得包含一次性开销**。移植到别的语言/测试框架时必须
+// 保持这条（Rust 侧同样有首次编译开销）。
+func warmUpGuestFixture() error {
+	bin, err := guestBinaryBytes("app")
+	if err != nil {
+		return err
+	}
+	rt, err := newSharedRuntime()
+	if err != nil {
+		return err
+	}
+	cm, err := rt.CompileModule(context.Background(), bin)
+	if err != nil {
+		return fmt.Errorf("wazero 冷编译 app guest 失败: %w", err)
+	}
+	appModOnce.Do(func() { appMod = cm })
+	// 再跑一次**真实请求**：首次实例化（wazero 实例化 + guest 侧 Go 运行时启动 + 页错误/
+	// 分配器预热）同样是一次性开销，留在计时窗口里会让最紧的断言（例如
+	// TestServe_ResponseThenLingerIsConclusive 的 500ms 上界，其注释本来就写着
+	// "CI 上首次实例化可能有冷启动抖动"）失去余量。与 TestServe_NanosleepDoesNotBurnCPU
+	// 的手写预热同一口径（nanosleep_test.go:28-30）。
+	res, err := rt.Serve(context.Background(), cm, testRequest("/ok", newFakeHost()))
+	if err != nil {
+		return fmt.Errorf("预热请求装配失败: %w", err)
+	}
+	if res == nil || !res.OK() {
+		return fmt.Errorf("预热请求 /ok 未成功（夹具或运行时已坏，后续断言都不可信）: %+v", res)
+	}
+	return nil
+}
+
 // guestBinary 返回 testdata/guests/<pkg> 编译出的 wasip1 模块字节。
 func guestBinary(t *testing.T, pkg string) []byte {
 	t.Helper()
+	bin, err := guestBinaryBytes(pkg)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return bin
+}
+
+// guestBinaryBytes 是 guestBinary 的无 *testing.T 版本（TestMain 预热需要：
+// TestMain 里没有 *testing.T，失败只能靠返回值 + os.Exit）。
+func guestBinaryBytes(pkg string) ([]byte, error) {
 	guestBinMu.Lock()
 	defer guestBinMu.Unlock()
 	if bin, ok := guestBins[pkg]; ok {
-		return bin
+		return bin, nil
 	}
 	guestDirOnce.Do(func() {
 		guestDir, guestErr = os.MkdirTemp("", "wasmapp-runtime-guests-")
 	})
 	if guestErr != nil {
-		t.Fatalf("创建 guest 编译目录失败: %v", guestErr)
+		return nil, fmt.Errorf("创建 guest 编译目录失败: %w", guestErr)
 	}
 	goTool, err := exec.LookPath("go")
 	if err != nil {
 		// 不 skip：本包的用例全部依赖现场编译 wasm，"跳过"会让门禁变成空转。
-		t.Fatalf("找不到 go 工具链（本包用例需要现场编译 wasip1 guest）: %v", err)
+		return nil, fmt.Errorf("找不到 go 工具链（本包用例需要现场编译 wasip1 guest）: %w", err)
 	}
 	out := filepath.Join(guestDir, pkg+".wasm")
 	cmd := exec.Command(goTool, "build", "-o", out, "./"+pkg)
 	cmd.Dir = filepath.Join("testdata", "guests")
 	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0")
 	if buildOut, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("编译 guest %s 失败: %v\n%s", pkg, err, buildOut)
+		return nil, fmt.Errorf("编译 guest %s 失败: %w\n%s", pkg, err, buildOut)
 	}
 	bin, err := os.ReadFile(out)
 	if err != nil {
-		t.Fatalf("读取 guest 产物失败: %v", err)
+		return nil, fmt.Errorf("读取 guest 产物失败: %w", err)
 	}
 	if len(bin) == 0 {
-		t.Fatalf("guest %s 产物为空", pkg)
+		return nil, fmt.Errorf("guest %s 产物为空", pkg)
 	}
 	guestBins[pkg] = bin
-	return bin
+	return bin, nil
 }
 
 // ===== 共享测试运行时 =====
@@ -115,14 +177,23 @@ func (b *lockedBuffer) String() string {
 // 每个请求都会新建实例，共享 Runtime 正是生产形态）。
 func sharedRuntime(t *testing.T) *Runtime {
 	t.Helper()
+	rt, err := newSharedRuntime()
+	if err != nil {
+		t.Fatalf("装配 Runtime 失败: %v", err)
+	}
+	return rt
+}
+
+// newSharedRuntime 是 sharedRuntime 的无 *testing.T 版本（TestMain 预热需要）。
+func newSharedRuntime() (*Runtime, error) {
 	testRTOnce.Do(func() {
 		testRTLog = &lockedBuffer{}
 		testRT, testRTErr = New(context.Background(), Options{Logger: log.New(testRTLog, "", 0)})
 	})
 	if testRTErr != nil {
-		t.Fatalf("装配 Runtime 失败: %v", testRTErr)
+		return nil, testRTErr
 	}
-	return testRT
+	return testRT, nil
 }
 
 // appModule 返回 app guest 编译后的模块（包级共享：编译 3.4 MiB 的 Go 产物约 1–2 s）。

@@ -2,7 +2,10 @@ package compile
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件是**编译子进程环境变量的白名单**（§4.3「参数 / 环境变量」+ R31 的 env 纪律）。
@@ -72,6 +75,28 @@ func CompileProcessEnvKeys(env []string) []string {
 		}
 	}
 	return out
+}
+
+// CompileChildEnv 在**白名单结果**之上追加平台自己算出来的部署级参数（R1-rt-7b）。
+//
+// 只追加一项：CompilerMemoryPagesEnvVar = 生效的单实例线性内存页数。它让"发布期编译"
+// 与"执行期实例化"用同一个上限（否则控制台调小 ⇒ 发布放行、首个请求 500；调大 ⇒
+// 声明大内存的应用被误拒）。
+//
+// ⚠️ 安全边界（不许放松）：**父环境里的同名变量不会被透传**（它不在 compileEnvAllowlist）。
+// 这里的值永远由平台算出来 —— `parent` 只提供 PATH/TMPDIR/TZ/LANG 四项。测试注入
+// `PICOAI_COMPILE_MEMORY_PAGES=999` 的父环境时，子进程读到的仍是实参 memoryPages。
+//
+// memoryPages=0 ⇒ 编译期默认（limits.InstanceMemoryPages）：调用方没解析出生效值时的
+// 回落，与 runtime.New 的 MemoryPages=0 分支同语义。
+func CompileChildEnv(parent []string, memoryPages uint32) []string {
+	if memoryPages == 0 || memoryPages > maxCompilerMemoryPages {
+		memoryPages = limits.InstanceMemoryPages
+	}
+	env := CompileProcessEnv(parent)
+	// os/exec 的 dedupEnv 保留**最后**一条同键项，因此这里 append 一定是生效值
+	// （即便父环境里混进了同名项，它也已经被白名单滤掉了）。
+	return append(env, CompilerMemoryPagesEnvVar+"="+strconv.FormatUint(uint64(memoryPages), 10))
 }
 
 // isolationPlan 是"如何启动编译子进程"的最终决策（与具体后端解耦）。

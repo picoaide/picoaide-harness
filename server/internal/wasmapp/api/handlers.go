@@ -80,7 +80,7 @@ type Options struct {
 	// BaseDomain 返回**当前**应用基域（`<app_id>.<BaseDomain>`）。与
 	// internal/wasmapp/session 的同名字段**同源同语义**（同一份配置：session 用它拼
 	// 换票回跳，本包用它拼目录/发布响应里的入口链接）。空 = 未启用应用子域 ⇒
-	// 入口链接回落为按请求 Host 推导。
+	// **没有**入口链接（appOrigin 返回空串、字段整体省略），不按请求 Host 编造。
 	//
 	// 函数而不是字符串：管理端可在运行期改基域（2026-09-18 用户要求）。
 	BaseDomain func() string
@@ -122,6 +122,7 @@ type Options struct {
 	// 任何一个为 nil ⇒ 对应能力不可用（GET/PUT 会如实报错，不静默给假值）。
 	Limits          func() applimits.Limits
 	LimitsSource    func() string
+	LimitsProfile   func() string
 	LimitsApply     func(raw string) ([]string, *apperr.Error)
 	LimitsRestart   func() []string
 	MemoryAvailable func() int64
@@ -149,6 +150,9 @@ type Handlers struct {
 	Diagnostics  gin.HandlerFunc // GET  /apps/wasm/:app_id/diagnostics
 	Schema       gin.HandlerFunc // GET  /apps/wasm/:app_id/schema
 	Catalog      gin.HandlerFunc // GET  /apps/wasm/catalog
+	// MyReleases 是**发布者本人的版本历史**（含被拒理由）—— R1-pm-3 的作者侧闭环：
+	// 审核开启后这是作者唯一能拿到"结论 + 理由"的出口（非发布者一律 404）。
+	MyReleases gin.HandlerFunc // GET  /apps/wasm/:app_id/releases
 
 	// ---- 客户端面 /api/client/v2/apps/wasm/uploads（§4.2 分片上传）----
 	//
@@ -175,8 +179,18 @@ type Handlers struct {
 	AdminTransferOwner gin.HandlerFunc // PUT    /:app_id/owner
 	AdminFreeze        gin.HandlerFunc // POST   /:app_id/freeze
 	AdminReview        gin.HandlerFunc // PUT    /review  (R17 审核开关)
-	AdminBaseDomainGet gin.HandlerFunc // GET    /domain   (应用泛域名配置，2026-09-18)
-	AdminBaseDomainPut gin.HandlerFunc // PUT    /domain
+	// 审核队列（P0-1）：待审清单 + 通过/拒绝。R17 的开关一旦打开，新版本就停在
+	// pending —— 没有这三条，开关就等于"全组织再也发不出新版本"。
+	AdminReleases       gin.HandlerFunc // GET  /:app_id/releases?status=pending|approved|rejected|all
+	AdminApproveRelease gin.HandlerFunc // POST /:app_id/releases/:version/approve
+	AdminRejectRelease  gin.HandlerFunc // POST /:app_id/releases/:version/reject（可选 body {"reason":"..."}）
+	AdminBaseDomainGet  gin.HandlerFunc // GET    /domain   (应用泛域名配置，2026-09-18)
+	AdminBaseDomainPut  gin.HandlerFunc // PUT    /domain
+	// 管理面诊断与运行时水位（2026-09-19，P1-9/P2-4）：
+	//   diagnostics —— 同一份 diag 数据，出口从"发布者令牌"扩到管理会话；
+	//   runtime     —— 平台级只读水位（编译/执行/事件/磁盘 + 尚未接线的缺口清单）。
+	AdminDiagnostics gin.HandlerFunc // GET /:app_id/diagnostics（capability:read）
+	AdminRuntime     gin.HandlerFunc // GET /runtime（capability:read）
 }
 
 // SettingReviewRequired 是发布审核开关的 settings 键（R17）。
@@ -199,6 +213,7 @@ func NewHandlers(opt Options) *Handlers {
 	h.Diagnostics = h.diagnostics
 	h.Schema = h.schema
 	h.Catalog = h.catalog
+	h.MyReleases = h.myReleases
 	h.UploadCreate = h.uploadCreate
 	h.UploadChunk = h.uploadChunk
 	h.UploadStatus = h.uploadStatus
@@ -210,10 +225,15 @@ func NewHandlers(opt Options) *Handlers {
 	h.AdminTransferOwner = h.adminTransferOwner
 	h.AdminFreeze = h.adminFreeze
 	h.AdminReview = h.adminReview
+	h.AdminReleases = h.adminReleases
+	h.AdminApproveRelease = h.adminApproveRelease
+	h.AdminRejectRelease = h.adminRejectRelease
 	h.AdminBaseDomainGet = h.adminBaseDomainGet
 	h.AdminBaseDomainPut = h.adminBaseDomainPut
 	h.AdminLimitsGet = h.adminLimitsGet
 	h.AdminLimitsPut = h.adminLimitsPut
+	h.AdminDiagnostics = h.adminDiagnostics
+	h.AdminRuntime = h.adminRuntime
 	return h
 }
 
@@ -529,8 +549,11 @@ func (h *Handlers) validateAppID(appID string) *apperr.Error {
 
 // appOrigin 返回应用的入口链接（`scheme://<app_id>.<基域>`）。
 //
-// 基域未配置时按请求 Host 推导（本包只把它当展示字段：不参与任何鉴权判定）。
-// 两个都拿不到就返回空串（调用方据此省略字段）。
+// **基域未配置 / 解析失败 ⇒ 返回空串**（调用方据此省略 `entry_url`，客户端据此禁用
+// 「打开」）。绝不按请求 Host 编造 `<app_id>.<主站 Host>`：那个主机名多半没有通配
+// DNS/证书，而且 HostGate 在基域为空时把**一切**主机名判成主站（edge/hostgate.go）
+// ⇒ 点「打开」要么 DNS 失败、要么命中主站/门户。发布说明的承诺就是"不配基域时
+// 应用**没有**对外地址"，界面不得发明一个（R1-pm-2）。
 func (h *Handlers) appOrigin(c *gin.Context, appID string) string {
 	// 基域解析规则只允许一份：复用 session.ParseBaseDomain（同一份部署配置的
 	// 两个消费者必须对"带不带 scheme / 大小写 / 尾点"给出相同结论）。
@@ -538,17 +561,12 @@ func (h *Handlers) appOrigin(c *gin.Context, appID string) string {
 	if h.opt.BaseDomain != nil {
 		raw = h.opt.BaseDomain()
 	}
-	if scheme, host := session.ParseBaseDomain(raw); scheme != "" && host != "" && appID != "" {
-		return scheme + "://" + appID + "." + host
-	}
-	host := strings.TrimSpace(c.Request.Host)
-	if host == "" {
+	if appID == "" {
 		return ""
 	}
-	scheme := "https"
-	if c.Request.TLS == nil && !strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") {
-		// 明文直达（本地/内网部署）时不要伪造 https —— 链接点不开比"不安全"更糟。
-		scheme = "http"
+	scheme, host := session.ParseBaseDomain(raw)
+	if scheme == "" || host == "" {
+		return ""
 	}
 	return scheme + "://" + appID + "." + host
 }

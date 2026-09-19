@@ -32,6 +32,61 @@ type failureContext struct {
 	hasResponse bool
 	// guestBudget 是本次请求生效的 guest 预算（只用于错误文案）。
 	guestBudget time.Duration
+	// memoryPages 是本次运行**生效**的单实例线性内存页数（只用于错误文案；
+	// 0 ⇒ 编译期默认 limits.InstanceMemoryPages）。
+	//
+	// 为什么必须带上它（R1-rt-7）：控制台把 instance_memory_mb 改成 128 MiB 后，
+	// 错误文案若还硬写"64 MiB"，排障会被直接误导（应用作者按 64 MiB 去优化，
+	// 而真实上限是 128 MiB）。文案与生效值必须同源。
+	memoryPages uint32
+	// peakMemoryBytes 是本次运行采样到的**线性内存峰值**（字节；0 = 没采到）。
+	//
+	// 为什么必须带上它（R1-e2e-1）：Go 运行时 OOM 的表现是**普通非零退出码 2**
+	// （`proc_exit(2)`，实测 stderr 尾巴里只剩上万字节的 goroutine 回溯、特征串已被挤掉），
+	// 只看错误串/退出码永远分不出"内存超限"与"应用自己 os.Exit(2)"。峰值是唯一能区分
+	// 两者的现场证据 ⇒ 判定要"退出码 + 峰值贴近上限"**双条件**（见 memoryNearLimit）。
+	peakMemoryBytes int64
+}
+
+// goOOMExitCode 是 Go 运行时内存耗尽时的退出码（实测 Go 1.26.5 / wazero v1.12.0：
+// `fatal error: out of memory` 之后 proc_exit(2)，见 serve_test.go 的
+// TestServe_MemoryGrowOverLimit 与 §10.3 第 28 项）。
+const goOOMExitCode = 2
+
+// memoryNearLimitRatio 是"峰值贴近上限"的判据（R1-e2e-1 的第二个条件）。
+//
+// 取 90% 的依据（实测，Go 1.26.5 / wazero v1.12.0）：
+//
+//	分块累积到 OOM：峰值 = 上限的 97%–100%（现场 R1-e2e-1：peak_memory_bytes=67108864 = 64 MiB 整）；
+//	应用自己 os.Exit(2)：峰值 = 常态水位 3.25 MiB（= Go 的初始页数，远低于 90%）。
+//
+// 它把"退出码 2"这一个**弱判据**收窄成"退出码 2 且峰值贴着上限"的双条件，代价是
+// "应用恰好在上限 90% 水位上主动 os.Exit(2)"会被误归一次 —— 用这个小误判面换回
+// "内存超限可诊断"，且误归时的 hints 同时写了退出码与峰值，作者一眼能自证。
+//
+// ⚠️ 已知边界（如实记）：峰值 ≥ 上限 − **单次最大分配**。应用若以接近上限量级的巨块累积，
+// 峰值可能落在 90% 以下而仍被归成 GUEST_EXIT（实测 64 MiB 上限 + 一次性 80 MiB 分配：
+// 峰值恒为 3.25 MiB —— 那种形态宿主根本没有"贴近上限"的现场证据，只能靠 stderr 头部的
+// `fatal error: out of memory` 特征，见报告 temp/wasm-review-r1/fix-limitsB.md §3 残留）。
+const memoryNearLimitRatio = 9 // peak*10 >= limit*9 ⇔ peak ≥ 90% 上限
+
+// peakNearLimit 报告"采样到的峰值是否贴近本次运行的内存上限"。
+//
+// 两个条件缺一不可：峰值必须 >0（没采到 ≠ 用满了）且 ≥ 上限的 memoryNearLimitRatio/10。
+func (f failureContext) peakNearLimit() bool {
+	if f.peakMemoryBytes <= 0 {
+		return false
+	}
+	limit := int64(effectivePages(f.memoryPages)) * int64(limits.WasmPageSize)
+	return f.peakMemoryBytes*10 >= limit*int64(memoryNearLimitRatio)
+}
+
+// effectivePages 把"生效页数"折算成可渲染值（0 = 未指定 ⇒ 编译期默认）。
+func effectivePages(pages uint32) uint32 {
+	if pages == 0 {
+		return limits.InstanceMemoryPages
+	}
+	return pages
 }
 
 // classifyGuestError 把 guest 的结束形态映射成平台错误码；nil 表示"正常结束"。
@@ -43,12 +98,14 @@ type failureContext struct {
 //  3. ExitError.ExitCode==0    → 正常退出（Go 的 main 返回就是 proc_exit(0)）
 //  4. ExitError 的保留码       → MODULE_KILLED（wazero 用 0xffffffff/0xefffffff 表示
 //     "被 ctx 关闭"，与 guest 自己的 proc_exit 区分开）
-//  5. 其他 ExitError(code!=0)  → RUNTIME_GUEST_EXIT(code)（**绝不报成 RUNTIME_NO_RESPONSE**，
-//     §10.3 第 28 项：Go 运行时 OOM 走 proc_exit(2)）
-//  6. err==nil 且 module 已关闭 → MODULE_KILLED（§15.1 第 7 条硬断言）
-//  7. err==nil 且无响应帧       → RUNTIME_NO_RESPONSE
-//  8. 错误串含内存/OOM 特征     → RUNTIME_MEMORY
-//  9. 其余 guest 侧错误         → RUNTIME_TRAP（unreachable / 越界 / 栈溢出…）
+//  5. ExitError(code!=0) 且 峰值贴近上限 且 code==2 → RUNTIME_MEMORY（R1-e2e-1：
+//     Go 运行时 OOM 走 proc_exit(2)，**双条件**收窄，普通 os.Exit(2) 不会被误报）
+//  6. 其他 ExitError(code!=0)  → RUNTIME_GUEST_EXIT(code)（**绝不报成 RUNTIME_NO_RESPONSE**，
+//     §10.3 第 28 项）
+//  7. err==nil 且 module 已关闭 → MODULE_KILLED（§15.1 第 7 条硬断言）
+//  8. err==nil 且无响应帧       → RUNTIME_NO_RESPONSE
+//  9. 错误串含内存/OOM 特征     → RUNTIME_MEMORY
+//  10. 其余 guest 侧错误        → RUNTIME_TRAP（unreachable / 越界 / 栈溢出…）
 func classifyGuestError(err error, f failureContext) *apperr.Error {
 	switch {
 	case f.clockExpired:
@@ -70,6 +127,24 @@ func classifyGuestError(err error, f failureContext) *apperr.Error {
 			// 被 ctx 关闭，但不是我们的预算时钟（否则上面就返回了）⇒ 外部取消。
 			return killError(apperr.CodeModuleKilled, "实例已被关闭（context 取消）")
 		default:
+			// 内存超限走的是**普通非零退出码**（Go 运行时 OOM = proc_exit(2)），因此
+			// 必须在"非零退出"这一支里先用"退出码 + 峰值贴近上限"的双条件识别它 ——
+			// 否则永远只会得到 GUEST_EXIT，而它的 hints 会把作者引向"检查 os.Exit/panic"
+			// （方向错：真实原因是内存超限，R1-e2e-1 实测）。
+			if code == goOOMExitCode && f.peakNearLimit() {
+				limit := int64(effectivePages(f.memoryPages)) * int64(limits.WasmPageSize)
+				e := killErrorPages(apperr.CodeRuntimeMemory,
+					fmt.Sprintf("应用内存用量超过单实例上限（%s）", fmtPages(effectivePages(f.memoryPages))),
+					f.memoryPages).WithDetail("guest_exit_code", code).
+					WithDetail("peak_memory_bytes", f.peakMemoryBytes).
+					WithDetail("memory_limit_bytes", limit)
+				return e.WithHint(
+					fmt.Sprintf("峰值内存 %s 已达到上限的 %d%% 以上、退出码 %d（Go 运行时 OOM 的固定形态）",
+						fmtBytes(int(f.peakMemoryBytes)), memoryNearLimitRatio*10, code),
+					"看诊断里的 peak_memory_bytes：它贴着上限就说明是分配太多，而不是 os.Exit 写错了",
+					"减小一次性分配（分页/流式处理、别把大结果集整体读进内存）；"+
+						"Go 运行时自身还有数 MiB 常驻堆，留给业务数据的内存比上限小")
+			}
 			e := killError(apperr.CodeRuntimeGuestExit,
 				fmt.Sprintf("应用以退出码 %d 结束且没有返回响应帧", code))
 			e.WithDetail("guest_exit_code", code)
@@ -91,7 +166,8 @@ func classifyGuestError(err error, f failureContext) *apperr.Error {
 
 	msg := err.Error()
 	if containsAny(msg, memoryErrorPatterns) {
-		return killError(apperr.CodeRuntimeMemory, "应用内存用量超过单实例上限（"+fmtPages(limits.InstanceMemoryPages)+"）").WithCause(err)
+		return killErrorPages(apperr.CodeRuntimeMemory,
+			"应用内存用量超过单实例上限（"+fmtPages(effectivePages(f.memoryPages))+"）", f.memoryPages).WithCause(err)
 	}
 	if containsAny(msg, trapPatterns) {
 		return killError(apperr.CodeRuntimeTrap, "应用内部错误（wasm 陷阱）").WithCause(err)
@@ -139,47 +215,67 @@ func containsAny(s string, patterns []string) bool {
 }
 
 // killError 构造一个带可操作提示的失败（§7.4：第一消费者是 AI）。
+// 它用编译期默认的单实例上限渲染提示；已知生效值时用 killErrorPages（R1-rt-7）。
 func killError(code apperr.Code, msg string) *apperr.Error {
+	return killErrorPages(code, msg, 0)
+}
+
+// killErrorPages 与 killError 同义，但按**生效**页数渲染与内存上限有关的提示（0 = 默认）。
+func killErrorPages(code apperr.Code, msg string, pages uint32) *apperr.Error {
 	e := apperr.New(code, msg)
-	if hints, ok := runtimeHints[code]; ok {
+	if hints := runtimeHints(code, pages); len(hints) > 0 {
 		e.WithHint(hints...)
 	}
 	return e
 }
 
-// runtimeHints 是执行侧失败码的可操作提示（与 apperr.CommonHints 同精神，按需扩展）。
-var runtimeHints = map[apperr.Code][]string{
-	apperr.CodeRuntimeTimeout: {
-		"把重活放到宿主能力里做（db.query / ai.chat），不要在 guest 里自旋",
-		"检查是否有死循环或忘了 return 的循环",
-	},
-	apperr.CodeRuntimeTrap: {
-		"常见原因：数组越界、空指针解引用、除零、递归过深",
-		"在本地用同样的 wasm 产物跑一遍（平台执行环境与本地 wasip1 一致）",
-	},
-	apperr.CodeRuntimeMemory: {
-		"单实例线性内存上限由平台固定（" + fmtPages(limits.InstanceMemoryPages) + "），应用无法调整",
-		"避免一次性把大结果集读进内存：用 db.query 的分页/聚合在宿主侧完成",
-	},
-	apperr.CodeRuntimeOutputOverrun: {
-		"协议帧单行上限 " + fmtBytes(limits.ProtocolLineMaxBytes) + "：响应必须写成**一个** RS 帧",
-		"不要在 stdout 里打印巨长的调试内容（stdout 只用于帧协议，日志请用 log 宿主函数）",
-	},
-	apperr.CodeRuntimeNoResponse: {
-		"应用必须写出一个最终响应帧（status/headers/body）后结束",
-		"不要 print 调试信息后直接 return",
-	},
-	apperr.CodeRuntimeGuestExit: {
-		"退出码在诊断里回传（guest_exit_code）：Go 运行时 OOM 是 2",
-		"检查应用的 os.Exit 调用与致命错误分支",
-	},
-	apperr.CodeModuleKilled: {
-		"请求已被取消或实例已被关闭：通常是客户端断开、服务关停或上游超时",
-	},
-	apperr.CodeHostCallOverBudget: {
-		"宿主调用超过了它的预算：不要在一次调用里做无界的工作",
-		"预算按方法给出（ai.chat 单独 30 s）",
-	},
+// runtimeHints 返回执行侧失败码的可操作提示（与 apperr.CommonHints 同精神，按需扩展）。
+//
+// 形参 pages 是**生效**的单实例线性内存页数（0 ⇒ 编译期默认）：只有"内存上限"这一类
+// 提示随它变化（R1-rt-7 的硬写 64 MiB 就是在这里被修掉的），其余提示是常量。
+func runtimeHints(code apperr.Code, pages uint32) []string {
+	switch code {
+	case apperr.CodeRuntimeMemory:
+		return []string{
+			"单实例线性内存上限由平台固定（" + fmtPages(effectivePages(pages)) + "），应用无法调整",
+			"避免一次性把大结果集读进内存：用 db.query 的分页/聚合在宿主侧完成",
+		}
+	case apperr.CodeRuntimeTimeout:
+		return []string{
+			"把重活放到宿主能力里做（db.query / ai.chat），不要在 guest 里自旋",
+			"检查是否有死循环或忘了 return 的循环",
+		}
+	case apperr.CodeRuntimeTrap:
+		return []string{
+			"常见原因：数组越界、空指针解引用、除零、递归过深",
+			"在本地用同样的 wasm 产物跑一遍（平台执行环境与本地 wasip1 一致）",
+		}
+	case apperr.CodeRuntimeOutputOverrun:
+		return []string{
+			"协议帧单行上限 " + fmtBytes(limits.ProtocolLineMaxBytes) + "：响应必须写成**一个** RS 帧",
+			"不要在 stdout 里打印巨长的调试内容（stdout 只用于帧协议，日志请用 log 宿主函数）",
+		}
+	case apperr.CodeRuntimeNoResponse:
+		return []string{
+			"应用必须写出一个最终响应帧（status/headers/body）后结束",
+			"不要 print 调试信息后直接 return",
+		}
+	case apperr.CodeRuntimeGuestExit:
+		return []string{
+			"退出码在诊断里回传（guest_exit_code）：Go 运行时 OOM 是 2",
+			"检查应用的 os.Exit 调用与致命错误分支",
+		}
+	case apperr.CodeModuleKilled:
+		return []string{
+			"请求已被取消或实例已被关闭：通常是客户端断开、服务关停或上游超时",
+		}
+	case apperr.CodeHostCallOverBudget:
+		return []string{
+			"宿主调用超过了它的预算：不要在一次调用里做无界的工作",
+			"预算按方法给出（ai.chat 单独 30 s）",
+		}
+	}
+	return nil
 }
 
 func fmtBytes(n int) string {
@@ -205,7 +301,7 @@ func fmtPages(pages uint32) string {
 //	签名不匹配 ⇒ IMPORT_SIGNATURE_MISMATCH
 //	内存声明超限 / OOM ⇒ RUNTIME_MEMORY
 //	其余 ⇒ RUNTIME_TRAP（当作"这个模块跑不起来"）
-func classifyInstantiateError(err error) *apperr.Error {
+func classifyInstantiateError(err error, memoryPages uint32) *apperr.Error {
 	if err == nil {
 		return nil
 	}
@@ -218,7 +314,8 @@ func classifyInstantiateError(err error) *apperr.Error {
 		}
 		return e.WithCause(err)
 	case containsAny(msg, memoryErrorPatterns):
-		return killError(apperr.CodeRuntimeMemory, "模块的线性内存声明超过平台上限（"+fmtPages(limits.InstanceMemoryPages)+"）").WithCause(err)
+		return killErrorPages(apperr.CodeRuntimeMemory,
+			"模块的线性内存声明超过平台上限（"+fmtPages(effectivePages(memoryPages))+"）", memoryPages).WithCause(err)
 	default:
 		return killError(apperr.CodeRuntimeTrap, "模块实例化失败").WithCause(err)
 	}

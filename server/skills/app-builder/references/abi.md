@@ -101,7 +101,10 @@ RS(0x1e) + 十进制长度 + '\n' + UTF-8 JSON
 - 一次**只能一条语句**；分号后还有内容即拒（`INSERT …; SELECT …` 一定失败）。
 - 语句种类只允许 `SELECT` / `INSERT` / `UPDATE` / `DELETE`
   （`CREATE` / `DROP` / `ALTER` / `ATTACH` / `VACUUM` / `PRAGMA` 等一律拒）。
-- **必须参数化**：把值放在 `args` 里，不要把字符串拼进 SQL。
+- **值一律放在 `args` 里**（`?` 占位），不要把字符串拼进 SQL。注意：**平台不检查你是否
+  参数化** —— 字面量拼进 SQL 照样通过闸门（`WHERE author='emp1'`、`DELETE … WHERE body='x'`
+  都不会被拒），它只查语句种类/单语句/保留列/DDL·`PRAGMA`·`ATTACH`·`VACUUM`。
+  **SQL 注入没有任何平台侧防线，只有你自己用参数占位挡住**。
 - 单条 SQL 不超过 64 KiB、单值不超过 1 MiB、返回最多 5000 行 / 8 MiB
   （超出会截断并置 `truncated`，或被拒）。
 - 每条语句最长 5 秒，超时被中断并报 `DB_LIMIT`。
@@ -161,6 +164,20 @@ RS(0x1e) + 十进制长度 + '\n' + UTF-8 JSON
   （`access` 只决定**入口文档**交给谁：要求登录时未登录先换票；子资源照样直出）。
 - **名单放 `picoaide.app.json`**：它是平台保留资源，**不会被直出**；只有应用自己
   用 `assets.read` 读得到它，访问者拿到的是应用自己写的（404/403）页面。
+
+**怎么把静态资源放进包里**：用官方打包器 `scripts/pack-assets.mjs`（就在技能目录里，
+用法见同目录 `README.md`）—— 它把「磁盘文件 → 包内逻辑路径」追加进**已编译好**的 wasm
+自定义段，规则与平台同源（路径不超过 256 字节、单段不超过 255 字节、自定义段总量不超过
+4 MiB），`--out` 必须给一个新路径（**绝不就地覆盖输入**）：
+
+```bash
+node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
+  web/index.html=index.html web/app.css=static/app.css
+```
+
+⚠️ **保留资源不能这样加**：`picoaide.app.json` 由平台在发布期写入（内容 = 随包提交的
+`config`），模块里的同名段会被平台忽略；脚本会直接拒绝。名单要放就放 `config` 的
+`whitelist`，不要塞进会被直出的非保留资源。
 
 ## 4. 最终响应信封（应用 → 宿主）
 
@@ -229,8 +246,8 @@ RS(0x1e) + 十进制长度 + '\n' + UTF-8 JSON
 | `DB_LIMIT` | 507 | 库满 100 MB / 返回超行数 / 语句超时 | 清理旧数据或做汇总表；加 `WHERE` + `LIMIT` |
 | `DB_DENIED` | 403 | 语句被拒（DDL / 多语句 / `PRAGMA` / 保留列 / 类型不符） | 建表用 `db.define`，语句只留四个动词，值走 `args` |
 | `APP_QUEUE_FULL` | 429 | 该应用排队已满 | 按 `Retry-After` 退避；合并小请求 |
-| `IMPORT_NOT_ALLOWED` | 422 | 导入面不在白名单（`env.*` / `js.*` 等） | 用官方骨架；不要引入平台外的运行时 |
-| `IMPORT_SIGNATURE_MISMATCH` | 422 | 导入符号在名单内但类型不符 | 按骨架的读帧/写帧写法重写；目标必须是 `wasm32-wasip1` |
+| `IMPORT_NOT_ALLOWED` | 422 | 导入面不在白名单（`env.*` / `js.*` 等） | 用官方骨架；不要引入平台外的运行时。**放行清单见 `references/imports.md`**（逐符号 + 签名 + 为什么放行） |
+| `IMPORT_SIGNATURE_MISMATCH` | 422 | 导入符号在名单内但类型不符 | 按骨架的读帧/写帧写法重写；目标必须是 `wasm32-wasip1`（签名对照 `references/imports.md`） |
 | `COMPONENT_MODEL_UNSUPPORTED` | 422 | 产物是组件模型（不是 core module） | 换回 `wasm32-wasip1` 目标 |
 | `SECTION_MALFORMED` | 422 | 自定义段结构非法 | 换官方工具链/骨架重新构建 |
 | `SECTION_OVERRIDE_OVERSIZE` | 422 | 自定义段超过 4 MiB | 精简内嵌资源；**HTML/JS 建议 gzip 后再内嵌** |
@@ -294,5 +311,6 @@ if err := page.Execute(&buf, map[string]string{"User": user}); err != nil { /* 5
 （平台不传 `args` / `env`，别把配置放进去）。
 
 > 判据来源：白名单由参考程序**真编译**生成（`server/cmd/picoaide-wasm-imports-gen`），
-> 并且有一条独立的覆盖性门禁真编译"`html/template` 渲染 + `ReadAt`"的最小程序断言它落在白名单内
-> （`server/internal/wasmapp/wasmmod/imports_coverage_test.go`）。
+> **放行的全部符号 + 签名 + 逐条"为什么放行"见 `references/imports.md`**（同一生成器产出，
+> 与真源逐字节对拍），并且有一条独立的覆盖性门禁真编译"`html/template` 渲染 + `ReadAt`"的最小程序
+> 断言它落在白名单内（`server/internal/wasmapp/wasmmod/imports_coverage_test.go`）。

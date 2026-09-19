@@ -150,6 +150,12 @@ func registerWasm(r *gin.Engine, d Deps) {
 	wg.DELETE("/:app_id", d.Wasm.Delete)
 	wg.GET("/:app_id/diagnostics", d.Wasm.Diagnostics)
 	wg.GET("/:app_id/schema", d.Wasm.Schema)
+	// 发布者本人的版本历史 + 审核结论（含被拒理由）。R1-pm-3：审核开关一旦打开，
+	// 发布者此前只有发布那一刻的"待审核"一句话，之后**永远**收不到结论
+	// （reason 写了没人读、版本号又永久占位）—— 这条是作者侧唯一的结论出口。
+	// 鉴权沿用 ownedApp：**非发布者一律 404，且与"应用不存在"逐字节同形**
+	// （不泄露存在性）；返回体不含制品字节。
+	wg.GET("/:app_id/releases", d.Wasm.MyReleases)
 	wg.GET("/catalog", d.Wasm.Catalog)
 
 	// ---- 分片上传与续传（§4.2 / §7.3）----
@@ -184,6 +190,15 @@ func registerWasm(r *gin.Engine, d Deps) {
 	serverauth.AdminRoute(ag, "PUT", "/:app_id/owner", serverauth.PermCapabilityWrite, d.Wasm.AdminTransferOwner)
 	serverauth.AdminRoute(ag, "POST", "/:app_id/freeze", serverauth.PermCapabilityWrite, d.Wasm.AdminFreeze)
 	serverauth.AdminRoute(ag, "PUT", "/review", serverauth.PermCapabilityWrite, d.Wasm.AdminReview)
+	// 审核队列（P0-1）：待审清单 + 通过/拒绝。
+	//
+	// 为什么必须有这三条：R17 的开关一旦打开，publish.go 就把新版本落成 pending，
+	// 而生效版本只认 approved —— 没有审批出口时"开启审核"= 全组织再也发不出新版本，
+	// 且界面上没有任何地方能看到积压。读写权限点与既有列表/处置一致
+	// （capability:read 看队列 / capability:write 处置）。
+	serverauth.AdminRoute(ag, "GET", "/:app_id/releases", serverauth.PermCapabilityRead, d.Wasm.AdminReleases)
+	serverauth.AdminRoute(ag, "POST", "/:app_id/releases/:version/approve", serverauth.PermCapabilityWrite, d.Wasm.AdminApproveRelease)
+	serverauth.AdminRoute(ag, "POST", "/:app_id/releases/:version/reject", serverauth.PermCapabilityWrite, d.Wasm.AdminRejectRelease)
 	// 应用泛域名配置（2026-09-18 用户要求：应用名 + 泛域名 = 应用访问地址）。
 	// 读用 capability:read（与列表同权限点），写用 capability:write。
 	serverauth.AdminRoute(ag, "GET", "/domain", serverauth.PermCapabilityRead, d.Wasm.AdminBaseDomainGet)
@@ -192,6 +207,18 @@ func registerWasm(r *gin.Engine, d Deps) {
 	// 读用 capability:read（与列表同权限点），写用 capability:write。
 	serverauth.AdminRoute(ag, "GET", "/limits", serverauth.PermCapabilityRead, d.Wasm.AdminLimitsGet)
 	serverauth.AdminRoute(ag, "PUT", "/limits", serverauth.PermCapabilityWrite, d.Wasm.AdminLimitsPut)
+	// 管理面诊断与运行时水位（2026-09-19，P1-9/P2-4）：两条都是**只读**，
+	// 因此都用 capability:read。
+	//
+	// 为什么管理面必须有诊断出口：诊断能力（diag 包 + wasm_call_events）此前只有
+	// 员工 Bearer 面一条出口，鉴权是"发布者本人" —— 管理员排障调不到，页面也没有
+	// 入口，只能找发布者或用员工令牌手搓 curl。这里只**新增**管理面出口，
+	// 员工面的鉴权语义一字未改（发布者仍只看得到自己的应用）。
+	serverauth.AdminRoute(ag, "GET", "/:app_id/diagnostics", serverauth.PermCapabilityRead, d.Wasm.AdminDiagnostics)
+	// runtime 是平台级（无 app 维度）的只读水位：编译队列/缓存、执行槽、调用事件
+	// 丢包计数、磁盘余量，以及"还没有出口"的水位清单。挂在 /limits 同级的静态段上，
+	// 与既有的 /review、/domain、/limits 一样不参与 /:app_id 的通配。
+	serverauth.AdminRoute(ag, "GET", "/runtime", serverauth.PermCapabilityRead, d.Wasm.AdminRuntime)
 }
 
 // maxJSONBody 是 /api/client/v2 与 /api/server 下全部端点的默认请求体上限
@@ -437,6 +464,15 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 
 	// 技能商城管理
 	serverauth.AdminRoute(authed, "GET", "/skills", serverauth.PermMarketRead, d.Market.ListSkillsAdmin)
+	// 平台内置技能（**只读诊断面**，2026-09-19）：镜像资产，不是数据库行 ——
+	// 没有上架/授权/审批/owner 语义，所以这里只有一条 GET，权限点用 capability:read
+	// （与 /wasm-apps/* 的读端点同口径）。
+	//
+	// ⚠️ 路径与市场技能的 `GET /skills/:name` 同级：gin 的静态段优先于参数段，
+	// 因此名字恰为 `builtin` 的市场技能在这一条 GET 上不可达（其余
+	// `/skills/:name/*` 端点不受影响）。这是刻意接受的代价：内置技能是"平台带了
+	// 什么"的基础事实，比一个极端命名更该有稳定入口。
+	serverauth.AdminRoute(authed, "GET", "/skills/builtin", serverauth.PermCapabilityRead, d.SkillSeed.AdminListBuiltin)
 	serverauth.AdminRoute(authed, "POST", "/skills", serverauth.PermMarketWrite, d.Market.CreateSkillAdmin)
 	serverauth.AdminRoute(authed, "POST", "/skills/:name/archive", serverauth.PermMarketWrite, d.Market.UploadSkillArchiveAdmin)
 	serverauth.AdminRoute(authed, "PUT", "/skills/:name", serverauth.PermMarketWrite, d.Market.UpdateSkillAdmin)

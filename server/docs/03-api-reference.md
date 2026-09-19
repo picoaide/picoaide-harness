@@ -33,11 +33,11 @@
 | POST | `/api/client/v2/auth/login` | 无 | 密码登录(local/LDAP);body `{username, password}` → `{token, user, must_change_password}`(0057:must_change_password=true 时客户端进入强制改密页,改密前业务 API 均 403 `PASSWORD_CHANGE_REQUIRED`) |
 | POST | `/api/client/v2/auth/password` | Bearer | 员工自助改密(0057):body `{old_password, new_password}` → `{ok}`;仅本地认证(`source=local`)用户;成功后吊销该用户全部 api_tokens 与 admin_sessions(含当前),客户端须重新登录 |
 | POST | `/api/client/v2/auth/logout` | Bearer | 吊销当前 token |
-| GET | `/api/client/v2/auth/me` | Bearer | 当前用户 `{user:{id, username, display_name, email, is_admin, role, permissions, status, quota_tokens, quota_money, source, password_changeable, password_must_change, password_changed_at, mfa_enabled}}`(0057 起 source/password_changeable 供客户端判断改密入口;mfa_enabled 供管理端列表) |
-| GET | `/api/client/v2/auth/usage` | Bearer | 员工用量概览(自查询):`{is_admin, quota_tokens, quota_money, monthly_usage/cost, remaining_tokens/money(不限=null), today_usage/cost, yesterday_usage/cost, total_usage/cost}`;有效配额 = 个人覆盖→全局默认,admin 豁免 |
+| GET | `/api/client/v2/auth/me` | Bearer | 当前用户 `{user:{id, username, display_name, email, is_admin, role, permissions, status, balance_money, balance_activated, source, password_changeable, password_must_change, password_changed_at, mfa_enabled}}`(0057 起 source/password_changeable 供客户端判断改密入口;mfa_enabled 供管理端列表。**2026-09-11 起不再下发 `quota_tokens`/`quota_money`** —— token/金额配额已下线,余额是唯一闸门) |
+| GET | `/api/client/v2/auth/usage` | Bearer | 员工用量概览(自查询):`{balance_money, balance_activated, balance_enabled, balance_monthly, balance_mode, is_admin, monthly_usage, monthly_cost, today_usage, today_cost, yesterday_usage, yesterday_cost, total_usage, total_cost}`。`balance_activated=false`(从未入账)时客户端**不展示**余额行(与网关"未开通不拦"同判据);字段集合是**跨语言契约**,由 `internal/serverauth/usage_contract_test.go` 与 `packages/client/account-card/src/usage-contract.ts` 对拍 |
 | GET | `/api/client/v2/auth/methods` | 无 | 登录方式发现(`public methods`,登录页未登录时探测) |
-| GET | `/api/client/v2/auth/:provider/login` | 无 | 跳转 OIDC/OpenID 授权页(provider 由配置注册,如 `oidc`、`openid`) |
-| GET | `/api/client/v2/auth/:provider/callback` | 无 | OIDC 回调,换取服务端 token |
+| GET | `/api/client/v2/auth/oidc/login`、`/api/client/v2/auth/openid/login` | 无 | 跳转 OIDC/OpenID 授权页。两条路由是**固定注册**的(provider 在请求时按配置解析),不是 `:provider` 通配 —— 只有已注册的这两条存在 |
+| GET | `/api/client/v2/auth/oidc/callback`、`/api/client/v2/auth/openid/callback` | 无 | OIDC 回调,换取服务端 token(失败回调同样计入限流桶) |
 
 ## 4. 管理端(webadmin,全部 session 鉴权 + RBAC)
 
@@ -54,9 +54,9 @@
 | GET | `/api/server/admin/auth/methods` | 登录方式发现(公开) |
 | GET | `/api/server/admin/me` | 当前管理员信息(含 role/permissions) |
 | POST | `/api/server/admin/logout` | 登出(清 session) |
-| GET | `/api/server/admin/users` | 用户列表(附带 `quota_tokens`/`quota_money`/`role` 与 `monthly_usage`/`monthly_cost` 本月用量/费用) |
+| GET | `/api/server/admin/users` | 用户列表(附带 `role`、余额字段与 `monthly_usage`/`monthly_cost` 本月用量/费用。**2026-09-11 起不再含 `quota_tokens`/`quota_money`** —— 员工配额已下线) |
 | POST | `/api/server/admin/users` | 创建用户 `{username, password?, display_name?, email?, role?|is_admin?, source?}`(role ∈ super_admin/auditor/user;is_admin 为兼容别名) |
-| PUT | `/api/server/admin/users/:id` | 更新用户(改密/角色/启用停用;`quota_tokens`/`quota_money` 设置月度配额(0=不限),`quota_clear:true`/`quota_money_clear:true` 恢复跟随全局默认;改密/降权/禁用自动吊销 token) |
+| PUT | `/api/server/admin/users/:id` | 更新用户(改密/角色/启用停用;改密/降权/禁用自动吊销 token)。⚠️ **`quota_tokens`/`quota_money`/`quota_clear`/`quota_money_clear` 已被 handler 显式忽略:请求照常 200,但零写入**(2026-09-11 配额下线;列与这些字段保留只是为了不砸旧客户端)。要控额度请用余额:`POST /users/:id/balance` 与 `PUT /balance` |
 | DELETE | `/api/server/admin/users/:id` | 删除用户 |
 | PUT | `/api/server/admin/users/:id/department` | 设置用户部门归属(2026-09 多部门):body `{group_ids:[n1,n2,...]}`(空=清空);兼容旧 `{group_id:n}`。授权 = 全部所属部门+祖先链同时生效 |
 | GET | `/api/server/admin/users/:id/groups` | 用户组/部门列表 |
@@ -75,8 +75,8 @@
 | POST | `/api/server/admin/models` | 创建模型 `{name, provider_id, display_name?, default_params?, input_modalities?(['text'/'image' 数组,0058,缺省仅 text]), input_price_per_1m?, output_price_per_1m?, cache_input_price_per_1m?, offpeak_discount?}`(价格 = 元/百万 token,缺省 = 未定价;0029 缓存命中输入价) |
 | PUT | `/api/server/admin/models/:id` | 更新模型(价格/折扣留空不覆盖;修改只影响之后产生的费用)。`input_modalities`(0058)显式数组 = 设置、缺省 = 不覆盖;name 改名受保护(有用量记录/渠道同步模型拒绝);`offpeak_discount` 0<d≤1 |
 | DELETE | `/api/server/admin/models/:id` | 删除模型 |
-| GET | `/api/server/admin/gateway` | 网关配置:`{rate_limit, monthly_quota, monthly_quota_money, peak_windows, retention_months, default_model, default_thinking_level, server_base_url, error_reporting_dsn/enabled/level, glitchtip_base_url/organization}` |
-| PUT | `/api/server/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.monthly_quota`、`usage.monthly_quota_money`、`usage.peak_windows`、`usage.retention_months`、`web.default_thinking_level`、`server.base_url`、`web.error_reporting_*`、`web.glitchtip_*`) |
+| GET | `/api/server/admin/gateway` | 网关配置:`{rate_limit, peak_windows, retention_months, default_model, default_thinking_level, server_base_url, error_reporting_dsn/enabled/level/heartbeat, glitchtip_base_url, glitchtip_organization}`(**2026-09-11 起不含 `monthly_quota`/`monthly_quota_money`** —— 员工配额已下线) |
+| PUT | `/api/server/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.peak_windows`、`usage.retention_months`、`web.default_thinking_level`、`server.base_url`、`web.error_reporting_*`、`web.glitchtip_*`)。⚠️ 请求体里的 `monthly_quota`/`monthly_quota_money`(旧文档曾写作 `usage.monthly_quota*`)**已不在请求结构里 ⇒ 被 JSON 绑定直接忽略:返回 200 但零写入** —— 保留这些键的说法只是为了不砸旧客户端;控额度请用余额端点(`PUT /balance`、`POST /users/:id/balance`) |
 | GET | `/api/server/admin/channels` | 渠道列表 |
 | GET/PUT | `/api/server/admin/connectors`、`/connectors/:id` | 连接器目录 CRUD(0042;示例企业/sales-easy 等定义服务端下发) |
 | GET | `/api/server/admin/audit` | 审计日志分页 `?page=&size=&action=&username=`(90 天保留 → 默认 180 天,settings `audit.retention_days`;0048 起哈希链) |
@@ -200,10 +200,12 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 ## 8d. 内置技能(客户端用,Bearer,随服务端镜像发布)
 
 > 「技能内置到服务端、客户端按需安装」：技能内容放在**镜像层**的
-> `/opt/picoaide/skills/<name>/`(Dockerfile 逐技能 COPY，可用 `PICOAI_SKILL_SEED_DIR`
-> 覆盖)，服务端直接把它打包下发 —— 内容随镜像升级而更新，客户端**不自动安装**，
+> `/opt/picoaide/skills/<name>/`(Dockerfile 逐技能 COPY **服务端仓库内的 `server/skills/<name>/`**，
+> 可用 `PICOAI_SKILL_SEED_DIR` 覆盖；2026-09-19 起源码就在这里，不再从客户端 vendored 包取)，
+> 服务端直接把它打包下发 —— 内容随镜像升级而更新，客户端**不自动安装**，
 > 员工在能力中心的「平台内置技能」区点一次安装(复用市场那条安装链路:
 > 下载 → sha256 对照 → 整树解包 → `<dshHome>/skills`)。实现见 `internal/wasmapp/skillseed`。
+> 当前内置一个技能:`app-builder`(WASM 应用平台作者手册；2026-09-19 由 `picoaide-app-builder` 改名)。
 > 与 §6/§8b 的差别只有一处:**没有授权门**(平台自带、对全部登录员工可见)，
 > 认证口径与它们完全一致(BearerAuth)。
 
@@ -214,7 +216,18 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 
 包格式:根部 `SKILL.md`(frontmatter 必须含 `name`/`version`(严格 semver)/`title`/`description`/`author`/`category`)，
 与管理员上传技能包走**同一套**校验(`archiveutil` + `skillmanifest`)，不合规的内置技能在服务端
-启动扫描时被丢弃并记日志,不会以"能装上一个坏技能"的形式下发。
+启动扫描时被丢弃并记日志,不会以"能装上一个坏技能"的形式下发。**注意目录名必须等于 frontmatter 的
+`name`**(`skillseed` 用目录名当 declaredAppID 调 `Parse`)—— 不一致会让整条技能被静默跳过
+(客户端接口 200 + 空数组),这正是下面这条管理端诊断面要回答的问题。
+
+### 管理端只读诊断面(Admin,会话 + CSRF,`capability:read`)
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/server/admin/skills/builtin` | `{dir, dir_exists, skills:[…与客户端清单同形状…], problems:[{name, reason}], counts:{skills, problems}, load_error?}`;**只读**:内置技能是镜像资产,没有上架/授权/审批/owner 语义(故无对应写端点);扫描失败与"有技能被跳过"一律 200 + 原因(客户端面仍 401/5xx 口径不变) |
+
+> ⚠️ 路径与市场技能的 `GET /skills/:name` 同级(gin 静态段优先):名字恰为 `builtin`
+> 的市场技能在这一条 GET 上不可达,其余 `/skills/:name/*` 端点不受影响。
 
 ### 客户端侧(本地回环代理,不是服务端端点)
 
@@ -250,18 +263,21 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 | `/`、`/portal` | 门户首页(首屏 = 三平台客户端下载,其后是客户端功能说明;**管理后台入口只在页脚**一行低调文字链接,`portal.public` 控制开放性;产品 HTML 面) |
 | `/admin/` | webadmin SPA(未构建返回 "webadmin 未构建") |
 | `/healthz` | 健康探针(JSON,DB Ping,503=DB 不可用) |
-| `/api/client/v2/brand`、`/api/client/v2/brand/logo/:name`、`/api/client/v2/portal` | 品牌/门户公开端点(未认证) |
+| `/api/client/v2/channel`、`/api/client/v2/channel/{logo,logo-dark,favicon}` | 渠道内容公开端点(未认证,登录页登录前就要用)。`/channel` 是 JSON;三个素材端点是**二进制**(`image/*`,未配置时 404 JSON 信封),属"API 强制 JSON"的**声明式例外** —— 权威例外表与逐条断言见 `cmd/server/api_sweep_test.go` |
 | 其他 | 404 JSON 信封 "not found" |
 
-## 11. 品牌与门户(公开)
+## 11. 渠道与门户(公开)
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/client/v2/brand` | 公开品牌配置 `{enabled, login:{logo_url, display_name, tagline, welcome}, client:{logo_url, display_name, tagline}, favicon_url, title}`(无 accent 主题色) |
-| GET/HEAD | `/api/client/v2/brand/logo/:name` | logo 文件(name ∈ login/client/favicon,白名单 + SVG sanitize + ETag) |
-| GET | `/api/client/v2/portal` | 公开门户首页配置 `{enabled, public, welcome, subtitle, client_download_linux/mac/win, client_download_note, landing_path}` |
+| GET | `/api/client/v2/channel` | 渠道内容(公开:登录页在未登录时就要拿到名称/标语/欢迎语/主题色/logo 相对地址)。唯一真源是镜像内 `/opt/picoaide/channel/`(构建期由私有渠道仓注入),**没有在线编辑接口** —— 改内容 = 改渠道配置并重新构建镜像,这样内容可审计 |
+| GET/HEAD | `/api/client/v2/channel/logo`、`/api/client/v2/channel/logo-dark`、`/api/client/v2/channel/favicon` | 渠道素材(**二进制** `image/*`;未配置时 404 JSON 信封)。三张图是**各自独立**的端点:曾把三张图都指向 `/channel/logo` 且恒发浅色版,导致 favicon 与暗色 logo 的字节永远下发不了(客户端深色主题因此只能显示浅色标) |
 
-管理端点:`GET/PUT /api/server/admin/brand`、`POST/DELETE /api/server/admin/brand/logo`、`GET /api/server/admin/brand/snapshots`、`POST /api/server/admin/brand/restore`(0047 快照)、`GET/PUT /api/server/admin/portal`。
+管理端点:`GET/PUT /api/server/admin/portal`(门户公开开关/下载地址覆盖/说明文字)。
+
+> **2026-09-10 起 `brand:*` 已全线下线**:品牌与门户的名称/标语/欢迎语/标识只来自**渠道配置**,
+> `/api/client/v2/brand`、`/api/client/v2/brand/logo/:name`、`/api/client/v2/portal` 与
+> `/api/server/admin/brand*` 均已删除。按旧文档对接这些路径会拿到 404 JSON 信封。
 
 ## 12. 连接器(admin)
 

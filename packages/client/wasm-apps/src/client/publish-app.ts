@@ -78,6 +78,104 @@ export interface PublishFile {
   bytes: Uint8Array
 }
 
+/**
+ * 「对已有应用发新版」时目录行提供的**预填基线**（P1-3）。
+ *
+ * 为什么必须有它：发布表单原先的初值是硬编码的（`access = login`、
+ * `data_sensitivity = internal`），而对已有应用发新版时提交会**无条件**带上全部
+ * 五个配置字段 —— 作者不动单选框，一个 `access=public` 的应用就会静默变成
+ * `login`（访问范围被改写，服务端还会因此写一条 `wasm_app_access_change` 审计）。
+ * 预填是这条链路上唯一的"当前值"来源。
+ *
+ * `purpose` / `whitelist` 只在**发布者本人**的目录行里出现（服务端按调用者下发，
+ * 理由见 `appcfg-contract.ts` 的 `CATALOG_ROW_AUTHOR_FIELDS`）：它们缺席时表单
+ * 留空，由作者补填，而不是拿一个编造的默认值凑数。
+ */
+export interface PublishTarget {
+  appId: string
+  title: string
+  /** 当前线上的访问级别（服务端目录行的 `access`）。 */
+  access: AccessMode
+  /** 当前线上版本（服务端目录行的 `current_version`；空串 = 服务端没有版本行）。 */
+  currentVersion: string
+  /** 负责人声明（目录行的 `responsible`；不是平台归属）。 */
+  owner: string
+  /** 用途声明（仅发布者本人可见）。 */
+  purpose?: string
+  /** 准入名单（仅发布者本人可见）。 */
+  whitelist?: string[]
+}
+
+/**
+ * 发布表单的**初始值**（从 {@link PublishTarget} 推出；纯函数，便于单测）。
+ *
+ * 纪律（P1-3）：
+ *  - 有基线 ⇒ `access` / `whitelist` / `purpose` / `owner` / `title` **全部预填**；
+ *  - `data_sensitivity` **不在这个类型里** —— 平台没有它的默认值
+ *    （`appcfg.json` 的 `data_sensitivity.hints` 原话："不要指望界面或平台替你填"），
+ *    表单初值恒为空串，必须由作者声明。类型里没有这个键是**结构性**保证：
+ *    想给它塞默认值就得先改这个类型（那时对拍用例会红）。
+ */
+export interface PublishFormInitial {
+  appId: string
+  title: string
+  access: AccessMode
+  /**
+   * 当前线上的访问级别；`undefined` = **首版**（没有"当前值"可比，
+   * 因此也不会有"改范围"的二次确认）。
+   */
+  currentAccess: AccessMode | undefined
+  /** 当前线上版本（展示用；**不预填版本号输入框** —— 预填必然撞"严格递增"）。 */
+  currentVersion: string
+  whitelistText: string
+  purpose: string
+  owner: string
+}
+
+/**
+ * 由目录行基线推出表单初值。
+ *
+ * 无基线（首版发布）时 `access` 仍是 {@link DEFAULT_ACCESS}（写漏不该让应用意外
+ * 变成匿名可达），但 `currentAccess` 为 `undefined` —— "缺省选中"与"已有当前值"
+ * 是两件事，混在一起就没了"访问范围要被改动"的判据。
+ * @param target - 目录行基线；首版发布时为 `undefined`。
+ * @returns 表单初值。
+ */
+export function initialFormState(target?: PublishTarget): PublishFormInitial {
+  if (target === undefined) {
+    return {
+      appId: '',
+      title: '',
+      access: DEFAULT_ACCESS,
+      currentAccess: undefined,
+      currentVersion: '',
+      whitelistText: '',
+      purpose: '',
+      owner: '',
+    }
+  }
+  return {
+    appId: target.appId,
+    title: target.title,
+    access: target.access,
+    currentAccess: target.access,
+    currentVersion: target.currentVersion,
+    whitelistText: (target.whitelist ?? []).join(', '),
+    purpose: target.purpose ?? '',
+    owner: target.owner,
+  }
+}
+
+/**
+ * 这次提交是否**改动了访问范围**（决定要不要二次确认）。
+ * @param initial - 表单初值。
+ * @param submitted - 本次选中的访问级别。
+ * @returns true = 与当前线上值不同（首版发布恒为 false：没有"当前值"）。
+ */
+export function changesAccess(initial: PublishFormInitial, submitted: AccessMode): boolean {
+  return initial.currentAccess !== undefined && initial.currentAccess !== submitted
+}
+
 /** 失败：服务端结构化错误**原样**（`details`/`hints` 一字不改）。 */
 export interface PublishFailure {
   ok: false
@@ -99,10 +197,25 @@ export interface PublishSuccess {
   version: string
   /** 服务端 release.status（`approved` / `pending` / …）。 */
   status: string
-  /** true = 这个版本就是当前线上版本。 */
+  /**
+   * true = 这个版本**对使用者生效**（既是当前版本，应用也没被下架）。
+   *
+   * `enabled` 进这个判据是 R1-uxc-1 的修正：旧实现只看 `release.current`/`pending`，
+   * 于是一个**已下架**（`enabled=false`，应用子域 410 Gone）的应用发布成功后，
+   * 成功块照样写"已生效" —— 界面说的话与线上状态相反。
+   */
   live: boolean
   /** true = 进了待审队列（线上仍是旧版本，R17）。 */
   pending: boolean
+  /**
+   * 应用**当前是否上架**（服务端 `app.enabled`）。
+   *
+   * 服务端的发布响应**确实**带这个字段（`api/publish.go:682`；已存在应用的
+   * `enabled` 保留原值，`:637-639`）—— 旧客户端把它丢掉了，于是"下架应用发新版"
+   * 这条路上界面永远是"已生效"。字段缺席时按 `true` 处理（不能凭缺席就宣称
+   * 应用已下架；服务端一旦下发就以它为准）。
+   */
+  enabled: boolean
   entryURL: string
   checksum: string
   sizeBytes: number
@@ -111,11 +224,89 @@ export interface PublishSuccess {
 /** 提交过程中的两个可观察阶段（同步 publish 只有"读文件 / 等一次请求"两态，不做假进度条）。 */
 export type PublishPhase = 'reading' | 'uploading'
 
-/** {@link submitPublish} 的可注入依赖（测试与 UI 共用同一条实现）。 */
-export interface SubmitDeps {
+/** 一次本机 JSON 往返的可注入依赖（测试与 UI 共用同一条实现）。 */
+export interface RequestDeps {
   fetch?: typeof fetch
   signal?: AbortSignal
+}
+
+/** {@link submitPublish} 的可注入依赖。 */
+export interface SubmitDeps extends RequestDeps {
   onPhase?: (phase: PublishPhase) => void
+}
+
+/** {@link requestJSON} 的结果：成功给解析后的载荷，失败给结构化失败（永不抛）。 */
+export type JsonOutcome =
+  | { ok: true, status: number, payload: unknown }
+  | PublishFailure
+
+/**
+ * 发一次本机 JSON 请求并解析（**错误信封的唯一读法**）。
+ *
+ * 抽出来的理由不是"少写几行"，而是发布与作者生命周期（`app-lifecycle.ts`）两条
+ * 链路必须**逐字段同形**地读 `{error:{code,message,details,hints}}`：分开实现的话，
+ * 同一次 403 在两个面板上会给出不同的 code/hints，"哪边是对的"就要靠读代码回答。
+ *
+ * 三条纪律（与旧 `submitPublish` 尾部逐字相同）：
+ *  - 非 2xx：解析信封（`.text()` 兜底成 `request failed`），**不丢响应体**；
+ *  - 2xx 但不是 JSON：回落 `UNEXPECTED_RESPONSE` + 原文前缀（不假装成功）；
+ *  - 传输层失败：`NETWORK_ERROR`（AbortError ⇒ `ABORTED`，`transport: true`）。
+ * @param path - 本机路径（`/api/pico/...`）。
+ * @param init - method 与可选 body / headers。
+ * @param deps - 可注入的 fetch / 取消信号。
+ * @returns 成功载荷或结构化失败。
+ */
+export async function requestJSON(
+  path: string,
+  init: { method: string, body?: string, headers?: Record<string, string> },
+  deps: RequestDeps = {},
+): Promise<JsonOutcome> {
+  const doFetch = deps.fetch ?? globalThis.fetch
+  let response: Response
+  try {
+    response = await doFetch(path, {
+      method: init.method,
+      ...(init.headers === undefined ? {} : { headers: init.headers }),
+      ...(init.body === undefined ? {} : { body: init.body }),
+      ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+    })
+  } catch (cause) {
+    const aborted = cause instanceof Error && cause.name === 'AbortError'
+    return {
+      ok: false,
+      status: null,
+      code: aborted ? 'ABORTED' : 'NETWORK_ERROR',
+      message: cause instanceof Error ? cause.message : String(cause),
+      details: { url: path },
+      hints: aborted
+        ? ['已取消本次操作；重发同一条 publish 时宿主会从已收到的分片继续（不会从头再来）']
+        : ['确认本机宿主仍在运行（这是本机路由，不是外网请求）'],
+      transport: true,
+    }
+  }
+  const text = await response.text().catch(() => '')
+  let payload: unknown = null
+  try {
+    payload = text === '' ? null : JSON.parse(text)
+  } catch {
+    payload = null
+  }
+  if (!response.ok) {
+    return parseErrorEnvelope(response.status, payload, text.slice(0, 400) !== '' ? text.slice(0, 400) : 'request failed')
+  }
+  if (payload === null) {
+    // 2xx 但不是 JSON：宿主/网关被换掉了（门户 HTML 之类）。原样回显，不假装成功。
+    return {
+      ok: false,
+      status: response.status,
+      code: 'UNEXPECTED_RESPONSE',
+      message: '本机接口返回的不是 JSON',
+      details: { body: text.slice(0, 800) },
+      hints: ['检查是否有反向代理把本机路由劫持到了门户页面'],
+      transport: false,
+    }
+  }
+  return { ok: true, status: response.status, payload }
 }
 
 /**
@@ -316,6 +507,10 @@ export function parseErrorEnvelope(
  *
  * 形状不对（缺 `release.version`）时**不假装成功**：回落成结构化失败并把原始体放进
  * `details`，这样"服务端改了下发形状"会立刻被看见，而不是显示一个空白的成功页。
+ *
+ * **`app.enabled` 必须接住**（R1-uxc-1）：服务端下发它（`publish.go:682`），而旧实现
+ * 只取 `app_id`/`title`/`entry_url` —— 于是"已下架应用发新版"成功块写"已生效"，
+ * 而应用子域仍是 410 Gone。
  * @param payload - 解析后的响应体。
  * @returns 成功对象，或结构化失败。
  */
@@ -336,14 +531,18 @@ export function parsePublishOutcome(payload: unknown): PublishSuccess | PublishF
     }
   }
   const pending = root.review_required === true || release.status === 'pending'
+  // `app.enabled` 是服务端下发的事实（下架应用发新版时它保持 false）。
+  // 缺席 ⇒ true：不能因为服务端没说话就宣称应用已下架（本仓"缺席不等于否定"的口径）。
+  const enabled = app.enabled !== false
   return {
     ok: true,
     appId: typeof app.app_id === 'string' ? app.app_id : '',
     title: typeof app.title === 'string' ? app.title : '',
     version,
     status: typeof release.status === 'string' ? release.status : '',
-    live: release.current === true || !pending,
+    live: (release.current === true || !pending) && enabled,
     pending,
+    enabled,
     entryURL: typeof app.entry_url === 'string' ? app.entry_url : '',
     checksum: typeof release.checksum === 'string' ? release.checksum : '',
     sizeBytes: typeof release.size === 'number' ? release.size : 0,
@@ -366,7 +565,6 @@ export async function submitPublish(
   file: PublishFile,
   deps: SubmitDeps = {},
 ): Promise<PublishSuccess | PublishFailure> {
-  const doFetch = deps.fetch ?? globalThis.fetch
   deps.onPhase?.('reading')
   let wasmBase64: string
   try {
@@ -383,49 +581,13 @@ export async function submitPublish(
     }
   }
   deps.onPhase?.('uploading')
-  let response: Response
-  try {
-    response = await doFetch(PUBLISH_PATH, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildPublishBody(draft, wasmBase64)),
-      ...(deps.signal === undefined ? {} : { signal: deps.signal }),
-    })
-  } catch (cause) {
-    const aborted = cause instanceof Error && cause.name === 'AbortError'
-    return {
-      ok: false,
-      status: null,
-      code: aborted ? 'ABORTED' : 'NETWORK_ERROR',
-      message: cause instanceof Error ? cause.message : String(cause),
-      details: { url: PUBLISH_PATH },
-      hints: aborted
-        ? ['已取消本次发布；重发同一条 publish 时宿主会从已收到的分片继续（不会从头再来）']
-        : ['确认本机宿主仍在运行（这是本机路由，不是外网请求）'],
-      transport: true,
-    }
-  }
-  const text = await response.text().catch(() => '')
-  let payload: unknown = null
-  try {
-    payload = text === '' ? null : JSON.parse(text)
-  } catch {
-    payload = null
-  }
-  if (!response.ok) {
-    return parseErrorEnvelope(response.status, payload, text.slice(0, 400) !== '' ? text.slice(0, 400) : 'request failed')
-  }
-  if (payload === null) {
-    // 2xx 但不是 JSON：宿主/网关被换掉了（门户 HTML 之类）。原样回显，不假装成功。
-    return {
-      ok: false,
-      status: response.status,
-      code: 'UNEXPECTED_RESPONSE',
-      message: '发布接口返回的不是 JSON',
-      details: { body: text.slice(0, 800) },
-      hints: ['检查是否有反向代理把本机路由劫持到了门户页面'],
-      transport: false,
-    }
-  }
-  return parsePublishOutcome(payload)
+  // 一次往返（含错误信封读法）走**共享**实现：作者生命周期（app-lifecycle.ts）用的是
+  // 同一个 `requestJSON`，两条链路不会给出两套 code/hints 读法。
+  const outcome = await requestJSON(PUBLISH_PATH, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(buildPublishBody(draft, wasmBase64)),
+  }, deps)
+  if (!outcome.ok) return outcome
+  return parsePublishOutcome(outcome.payload)
 }

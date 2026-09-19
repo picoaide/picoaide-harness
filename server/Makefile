@@ -21,8 +21,14 @@ VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
 # 那里串行是为了 service 容器的 max_connections,不是性能考虑)。
 TEST_PARALLEL ?= 4
 
+# 单包测试超时(2026-09-19):Go 默认 10m **会被负载撞穿**——`internal/serverstore`
+# 在空闲机器上单跑 560s(紧贴 600s),并发跑测试时会以 "panic: test timed out after 10m0s"
+# 假红(实测本仓门禁连续两次踩到,单跑即绿)。这里显式放宽到 25m:它只影响"真的挂了"
+# 的判定时刻,不放宽任何断言;CI 负载更低时可自行覆盖 TEST_TIMEOUT=10m 恢复默认。
+TEST_TIMEOUT ?= 25m
+
 test:
-	go test ./... -count=1
+	go test ./... -count=1 -timeout $(TEST_TIMEOUT)
 
 # CI 门禁(审计 2026-08-25 G2):必须覆盖全部业务包——agentshare/sharedskills
 # 曾是两个游离于自动化之外的新商城包,其越权/多版本缺陷零拦截。
@@ -32,7 +38,7 @@ test:
 # router/skillmanifest/telemetry/cmd/server),新增包也会再次漏跑。
 # 与 CI 的 `go test ./...` 同义(internal/ + cmd/ 即全部业务包;scripts/ 无测试)。
 test-server:
-	go test ./internal/... ./cmd/... -count=1 -p $(TEST_PARALLEL)
+	go test ./internal/... ./cmd/... -count=1 -p $(TEST_PARALLEL) -timeout $(TEST_TIMEOUT)
 
 # 开发循环用的快速测试:不加 -count=1,未改动的包直接命中 go test 结果缓存
 # (实测全仓无改动 0.3s;改一个包只重跑那一个包)。发布门禁请用 test-server/check。
@@ -57,11 +63,11 @@ webadmin:
 # 用法:make docker-image 或 make docker-image IMAGE=ghcr.io/picoaide/picoaide-harness-server TAG=v0.4.0
 docker-image:
 	@echo "  构建镜像 $(IMAGE):$(TAG) (VERSION=$(VERSION))"
-	@# skillassets：内置技能资产（镜像内 /opt/picoaide/skills）。源头是 vendored
-	@# 插件包里的 skills/ —— 只有一份，不在 server/ 下再复制一份（漂移会让员工装到
-	@# 的技能与仓库里评审过的那份不是同一个东西）。
+	@# 内置技能资产（镜像内 /opt/picoaide/skills）就在本构建上下文里：
+	@# server/skills/<name>/ —— 随镜像分发，客户端在能力中心按需安装。
+	@# 曾经用 --build-context skillassets=../packages/vendor/memory-evolve 从
+	@# 客户端 vendored 插件包取，2026-09-19 起源头归位服务端，不再需要该上下文。
 	docker build --build-arg VERSION=$(VERSION) \
-	  --build-context skillassets=../packages/vendor/memory-evolve \
 	  -t $(IMAGE):$(TAG) .
 
 # 离线镜像导出已移出仓库:发布流程由 CI 在 tag 时产出 tar 上传更新服务器,

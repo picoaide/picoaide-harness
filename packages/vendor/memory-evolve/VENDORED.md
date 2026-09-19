@@ -167,6 +167,28 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
 残留锁无需人工清理：0 字节锁会被 `isStaleLock` 判为 stale 并自动删除（客户机器
 重启客户端后首次写入即自愈）。
 
+### G. 平台内置技能已移出本目录（2026-09-19；升级合并时**不要**把它恢复回来）
+
+**`skills/picoaide-app-builder/` 已不在本包**：它是**本仓自己的产品内容**（本仓提交
+`b943a2e03d` 新增，不属于上游任何 tag），2026-09-19 随改名 `picoaide-app-builder` →
+`app-builder` 一起搬到了服务端目录 **`server/skills/app-builder/`**（`git mv`，历史保留）。
+搬迁理由（用户口径）：「这个技能应该默认放在服务端的技能库里，而不是放在客户端里」。
+
+- **上游没有这个技能**（`git log --follow -- packages/vendor/memory-evolve/skills/picoaide-app-builder`
+  只有本仓两个功能提交），所以三方合并不会把它带回来 —— 但合并前若看到
+  `/tmp/me-merge/skills/picoaide-app-builder/` 之类的残留，那是**本地旧副本**，删掉即可，
+  **不要**再落回本目录（两份真源漂移比缺文件更难查）。
+- 平台技能的分发路径改成：源在 `server/skills/app-builder/` → `server/Dockerfile` 直接
+  `COPY skills/app-builder/ /opt/picoaide/skills/app-builder/`（**已无** `--build-context
+  skillassets=<本包>`）→ 服务端 `GET /api/client/v2/skills/builtin` 下发 → 员工在能力中心
+  按需安装。本包不再参与它的分发。
+- `lib/coi/skills-sync.js` 的 `PLATFORM_SKILLS` 保留为 `['app-builder']`（**不是**清空）：
+  它是"这个技能名永远不许经开机同步落进用户技能库"的守卫，`BUILTIN_SKILLS` 里也不含它。
+- 合并后自查：`node --test tests/builtin-skills-decoupled.test.js`（其中两条用例已按新事实
+  重写为"平台技能**不在**包内 + 服务端 `server/skills/app-builder` 文件齐备且
+  `name == 目录名`"）；`tests/coi.test.js` 的 skills-sync 用例同样钉住"包内 `skills/`
+  与本插件清单一一对应"。
+
 ## 本次升级（`b4994fa` → `c337dc1a`）拿到了什么
 
 | 上游提交 | 内容 | 落地文件 |

@@ -9,6 +9,13 @@
 //	/q?sql=SELECT%201          db.query（返回行数/首行）
 //	/exec?sql=...              db.exec
 //	/log?msg=xx&level=info     log 宿主调用（验证 logbuf 与宿主日志出口）
+//	/slowtx?ms=800&v=x&mode=rollback
+//	                           tx_begin → db.exec(INSERT) → sleep ms → tx_rollback|tx_commit
+//	                           （事务所有权判据的夹具：事务存续期间让别的请求来写）
+//	/txfin?op=commit|rollback[&tx_id=N]
+//	                           **只**调事务出口（tx_commit / tx_rollback），不 begin：
+//	                           tx_id 省略或 0 时请求里不带该字段（= "提交/回滚别人的事务"
+//	                           这条越权入口的形态，见 2026-09-19 独立验证 F1）
 package main
 
 import (
@@ -18,6 +25,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const frameMagic = 0x1e
@@ -121,6 +129,51 @@ func main() {
 			"level":   orDefault(req.Query["level"], "info"),
 			"message": orDefault(req.Query["msg"], "dbapp log"),
 		})
+		record(out, res, code, msg)
+	case "/slowtx":
+		// 事务所有权判据的夹具（2026-09-19，app_running>1）：开事务 → 写一行 →
+		// 持有 ms 毫秒 → 回滚（默认）或提交。事务存续期间，同应用的**另一个请求**
+		// 的 db.exec 必须被拒（否则它的写会随本次回滚一起消失）。
+		ms, _ := strconv.Atoi(req.Query["ms"])
+		if ms <= 0 {
+			ms = 500
+		}
+		v := orDefault(req.Query["v"], "tx-row")
+		res, code, msg := call("tx_begin", map[string]any{})
+		record(out, res, code, msg)
+		if code != "" {
+			break
+		}
+		var tx struct {
+			TxID int64 `json:"tx_id"`
+		}
+		_ = json.Unmarshal(res, &tx)
+		out["tx_id"] = tx.TxID
+		_, wcode, wmsg := call("db.exec", map[string]any{
+			"sql":  "INSERT INTO t (id, v) VALUES (?, ?)",
+			"args": []any{9001, v},
+		})
+		out["write_code"], out["write_message"] = wcode, wmsg
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		method := "tx_rollback"
+		if req.Query["mode"] == "commit" {
+			method = "tx_commit"
+		}
+		_, fcode, fmsg := call(method, map[string]any{"tx_id": tx.TxID})
+		out["finish_code"], out["finish_message"] = fcode, fmsg
+	case "/txfin":
+		// 事务出口的**独立**夹具（不 begin）：用来验证"没有事务所有权的请求调
+		// tx_commit / tx_rollback 必须被拒"。请求里**故意支持**不带 tx_id
+		// （tx_id 可省略 = appdb 跳过串号校验的那条路径），平台侧必须自己拦。
+		method := "tx_commit"
+		if req.Query["op"] == "rollback" {
+			method = "tx_rollback"
+		}
+		params := map[string]any{}
+		if id, _ := strconv.Atoi(req.Query["tx_id"]); id != 0 {
+			params["tx_id"] = id
+		}
+		res, code, msg := call(method, params)
 		record(out, res, code, msg)
 	default:
 		out["error"] = "unknown path"

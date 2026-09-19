@@ -340,7 +340,10 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 	scope := dbLimiterScope(a.DB)
 	ipKey, userKey := scope+loginKey(c, req.Username), scope+"u:"+req.Username
 	// P1-2:IP 桶(随机用户名绕过账号桶做 argon2 放大的入口)。
-	srcIPKey := scope + "ip:" + loginHost(c)
+	// 2026-09-19:必须按**真实客户端 IP** 计(loginHost/RemoteAddr 在反代下
+	// 坍缩为代理 IP ⇒ 60 次失败登录即可锁死全组织登录,含密码正确的用户;
+	// 与客户端面 loginAllowed 共用同一个键构造点 loginIPBudgetKey)。
+	srcIPKey := loginIPBudgetKey(a.DB, c)
 	if !lim.allow(ipKey) || !lim.allow(userKey) || !a.ipLimiter().allow(srcIPKey) {
 		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 		return
@@ -392,8 +395,10 @@ func (a *AdminAPI) handleLoginMFA(c *gin.Context) {
 	// 即无限重签票据(每票 5 次),配合下面的原子占用修复前还可并发放大,
 	// 使"已知密码即可爆破 TOTP"。这里用与密码入口同一实例的**独立键**:
 	// ip:<ip>|mfa(防单机并发爆破)+ u:<user>|mfa(跨 IP 防账号级爆破)。
+	// 2026-09-19:IP 维度同 srcIPKey —— 用真实客户端 IP;用 RemoteAddr 时反代下
+	// 全组织共用一个 10 次预算,10 个错误动态码即可让所有管理员的第二步 429。
 	lim := adminLoginLimiter()
-	mfaIPKey := "mfa-ip:" + loginHost(c)
+	mfaIPKey := "mfa-ip:" + c.ClientIP()
 	if !lim.allow(mfaIPKey) {
 		_ = serverstore.AuditLog(a.DB, "mfa", "login_fail", "rate_limited ip="+c.ClientIP())
 		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "验证尝试过于频繁,请稍后再试")

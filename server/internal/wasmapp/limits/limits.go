@@ -137,6 +137,27 @@ const (
 	// 一次，容量未满时 LRU 永不淘汰 ⇒ 内存只涨不落（2026-09-18 实测：全部
 	// Close 后 RSS 只归还约 20%）。空闲即逐出，并触发一次归还 OS。
 	ModuleCacheIdleTTL = 10 * time.Minute
+	// ReleaseCacheMaxBytes 是宿主**静态资源/应用配置**进程内缓存的字节上限（R1-rt-3）。
+	//
+	// 缓存键是 `(app_id, release_id)`（外加资源逻辑路径）：资源在 (app, version, path)
+	// 三元组下**不可变**（§4.2「要改内容只能发新版」，assets.Write 拒绝覆盖），因此
+	// 命中即可直出 —— 包括 `If-None-Match` 复验：304 只需要 ETag，而 ETag 与
+	// content-type 都在缓存里 ⇒ **不读盘、不算哈希**（R1-rt-2）。
+	//
+	// 记账边界（**必须保持有界**）：它是**单一全局** LRU，硬上界 =
+	//
+	//	本值 + 单个 release 的资源总量（≤ SectionTotalMaxBytes，4 MiB）
+	//	    + ReleaseCacheMaxReleases × 每条元数据（几百字节量级）
+	//
+	// 越界即按 LRU 整条释放；单条资源超过本值一半时只缓存元数据（不缓存字节）。
+	// 之所以不进「内存四笔账」：那几笔是"并发 × 实例 / 单次峰值"型的常驻或瞬时上界，
+	// 而本项与 ModuleCacheMaxBytes 同性质 —— 有界、可逐出、随访问增长但有硬顶。
+	// 若将来把它调大或改成多份实例，必须回到 readyz 的记账边界注释重新算账
+	//（见 readyz.MemoryBudget 的「记账边界」段）。
+	ReleaseCacheMaxBytes = 32 << 20
+	// ReleaseCacheMaxReleases 是上述缓存的 `(app_id, release_id)` 条目数上限：
+	// 防"一堆极小应用把索引/元数据撑大"（与 ModuleCacheMaxEntries 同一考虑）。
+	ReleaseCacheMaxReleases = 256
 	// MemoryPeakGuardPercent 是启动自检的内存水位（§4.3）：理论峰值 > 可用内存 70% ⇒ 拒绝启动。
 	MemoryPeakGuardPercent = 70
 	// UploadPeakPerUploadBytes 是单次上传的峰值内存账（§4.3「内存四笔账」）：
@@ -155,6 +176,28 @@ const (
 	AppDBMaxPageCount = 25600
 	// AppDBMaxBytes 是应用库体积上限（R2）：100 MB。
 	AppDBMaxBytes = AppDBMaxPageCount * AppDBPageSize
+	// AppDBReaders 是每个应用库句柄持有的**只读连接数**（§4.5「连接级只读分层」）。
+	//
+	// 为什么要有它（2026-09-19，WAL + 多读者）：SQLite 在 WAL 下允许 N 个读者与
+	// 1 个写者并发，只读连接数决定了"同一应用能同时跑多少条 SELECT"。取 4 的
+	// 理由：每条只读连接都占一份页缓存（appdb 的 appConnCacheKiB）与一个 fd，
+	// 4 在"单应用 4 路并发读"与"每句柄 (1+4) MiB 页缓存"之间取平衡；写路径仍只有一个
+	// 写者（appdb 的 writeMu），所以这里加的是**读者**，不是写者。
+	AppDBReaders = 4
+	// AppDBReadersMax 是只读连接数的上限（注入值超过它即钳到它）。
+	//
+	// 它只是"配置注入的钳位"，不是 SQLite 的能力边界（连接数与 LIMIT_ATTACHED 无关）；
+	// 给出上界是为了让"控制台填了 1000"退化成可诊断的 16，而不是直接把 fd 打满。
+	AppDBReadersMax = 16
+	// AppDBBusyTimeout 是每条应用库连接的 busy_timeout（SQLITE_BUSY 的重试等待）。
+	//
+	// 为什么不是驱动默认的 0（2026-09-19，WAL）：WAL 下写者与读者、检查点与写事务的
+	// 瞬时争用是**正常现象**，busy_timeout=0 会把一次正常争用直接变成应用可见的
+	// database_busy 失败。取 3 s 的理由：必须严格小于 SQLStatementBudget（5 s 单语句
+	// 硬预算）—— 否则"等待"本身会吃掉整条语句的预算，应用看到的是 statement_timeout
+	// 而不是"库忙，稍后重试"。⚠️ 连接级且不持久 ⇒ 每条连接都要重设（与 §15.1 第 4 条
+	// 的 max_page_count 同一纪律）。
+	AppDBBusyTimeout = 3000 * time.Millisecond
 
 	// SQLLimitSQLLength 是单条 SQL 字节上限（§4.5，SQLITE_LIMIT_SQL_LENGTH）：64 KiB。
 	SQLLimitSQLLength = 64 << 10
@@ -195,8 +238,8 @@ const (
 	// AppDBHandleMax 是进程内**同时持有**的应用库句柄上限。
 	//
 	// 取与 GlobalInstances 同值：每请求必须先拿到执行槽才会用到应用库 ⇒ 同一时刻
-	// 最多 32 个应用在跑。每句柄 2 条 SQLite 连接（只读 + 读写）⇒ 最多 64 条连接，
-	// 给文件描述符一个硬上界。
+	// 最多 32 个应用在跑。每句柄 (1 + AppDBReaders) 条 SQLite 连接（1 写 + N 读）
+	// ⇒ 默认配置下最多 32 × 5 = 160 条连接，给文件描述符一个硬上界。
 	AppDBHandleMax = GlobalInstances
 
 	// MaxTablesPerApp 是每应用表数上限（§4.5/§5.3）：16。
@@ -258,8 +301,25 @@ const (
 	UserPerAppQueued = 4
 	// UserGlobalRunning 是单用户跨应用全局在跑上限（§4.6）：4。
 	UserGlobalRunning = 4
-	// AppConcurrency 是每应用并发（§4.6）：恒为 1（串行）。
-	AppConcurrency = 1
+	// AppConcurrency 是每应用并发（§4.6）：同一应用最多 4 个请求同时在跑（读并发）。
+	//
+	// 为什么从 1 改成 4（2026-09-19，第二轮「怎么支持高并发」的最后一公里）：
+	// 「同应用串行」过去有四层叠加 —— 队列（本常量）、句柄池的整请求互斥量、
+	// appdb 的一把大锁（读写共用）、以及池容量 2。2026-09-19 的 appdb 改造
+	// （WAL + 1 写 N 读连接池 + stateMu/writeMu 拆分）把后三层解开了：同应用并发读
+	// 已经是**真实能力**（BenchmarkQuerySelectParallel 36.7µs → 16.5µs，约 2.2–2.4×）。
+	// 此时队列层继续把并发钉在 1，用户看到的就只剩"人为排队"——底层能吃并发，
+	// 默认部署却仍然每请求串行。
+	//
+	// 为什么调大它**不增加内存上界**：实例池那笔账是 max_instances × 单实例内存上限
+	// （见 readyz 的四笔账），与每应用并发无关；而 Validate 强制
+	// app_running ≤ max_instances，全局并发仍由 max_instances（默认 32）封顶。
+	// 需要额外留意的是 SQLite 页缓存这笔**不进四笔账**的常驻
+	// （appdb_cache_kib × (1 + app_db_readers) × 句柄数），它的去向写在
+	// applimits.Budget 的注释里。
+	//
+	// 写仍然是串行的（appdb 的 writeMu）：这一项放宽的是**读者**，不是写者。
+	AppConcurrency = 4
 	// RetryAfterSeconds 是队列满/限流时的 Retry-After 秒数（§4.6/§7.4）。
 	RetryAfterSeconds = 1
 
@@ -273,6 +333,10 @@ const (
 	AnonPerIPBurst = AnonPerIPRatePerMin
 
 	// AppRuntimeConcurrency 是每应用运行槽（= AppConcurrency，语义别名，供队列实现引用）。
+	//
+	// 控制台把这一项叫 app_running（applimits.Limits.AppRunning），默认值即本常量：
+	// 调大 ⇒ 同应用更多请求并发进入执行（读并发），**写仍串行**；
+	// 超出它的请求进队列（app_queue，默认 32），队列再满才 429。
 	AppRuntimeConcurrency = AppConcurrency
 )
 
@@ -335,6 +399,16 @@ const (
 	DiagnosticsMaxLimit = 200
 	// StderrTailBytes 是诊断里回给作者的 stderr 尾巴上限（§4.9/§7.4）。
 	StderrTailBytes = 2 << 10
+	// ReadyzSnapshotTTL 是 `/readyz` **快照缓存**的有效期（R1-rt-4）。
+	//
+	// 为什么必须有：一次采集要做编译缓存目录**全量递归 walk**（≤ CompileCacheMaxEntries
+	// 条；实测 4096 条目 ≈9.5–14 ms）+ statfs + db.Ping，而 `/readyz` 是**未认证**端点、
+	// 监控/编排通常每 1–5 s 打一次 ⇒ 未认证的放大面（每 1 s 一次 ≈1% 单核常驻 + 每秒
+	// 4096 次 Lstat + 每秒一次 DB 往返）。缓存后稳态单次成本退化为一次内存拷贝。
+	//
+	// 取舍（认账）：`ok` 与各水位读数最多滞后本值；**发布闸门**（AllowPublish）与
+	// 控制台内存预览走不缓存的 `Snapshot()`，不受影响 —— 那条路径要的是"此刻"。
+	ReadyzSnapshotTTL = 5 * time.Second
 )
 
 // RetirementSnapshotRetentionDays 是退役快照保留天数（R37/§5.3）：90 天。

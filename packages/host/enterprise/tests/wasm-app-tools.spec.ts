@@ -644,6 +644,10 @@ describe('wasm_app_list：列出目录（只读）', () => {
     expect(result.status).toBe(200)
     expect(result.body.apps[0].app_id).toBe('shared-notes')
     expect(result.body.apps[0].entry_url).toBe('https://harness.example/shared-notes')
+    // P1-4：工具描述承诺输出"当前版本"（模型据此算出严格递增的新版本号），而目录行
+    // 原先**没有**这个字段 —— 猜错版本号的代价是一次完整上传（≤32 MiB）+ 审计拒绝
+    // + 消耗上传额度。这条断言钉住"承诺的数据真的在工具输出里"。
+    expect(result.body.apps[0].current_version).toBe('1.2.0')
     // 红线 3：结果里不得出现令牌。
     expect(JSON.stringify(result)).not.toContain(TOKEN)
   })
@@ -1170,5 +1174,88 @@ describe('内置作者手册缺失时，工具失败必须给出安装指路', (
     expect(result.error.hints ?? []).not.toContain(expect.stringContaining(APP_BUILDER_SKILL))
     expect(JSON.stringify(result)).not.toContain(APP_BUILDER_SKILL)
     expect(h.outbound).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 3. 工具描述与服务端实现一致（文本侧的反向断言）
+// ---------------------------------------------------------------------------
+
+/**
+ * 模型关于"下架"与"旧配置字段"的唯一知识来源就是这几句描述 —— 描述与实现相反时，
+ * 模型会自信地给出错误结论（独立评审 R1-pm-5 / R1-uxc-8 的文本侧）。
+ *
+ * 这一组因此不满足于"描述里有某个词"，而是**两端一起钉**：
+ *  - 先断言服务端实现仍然是那个语义（`enabled=false` ⇒ 410 Gone；未知字段才拒、
+ *    `visible`/`login_required` 走兼容映射）—— 实现改了这里先红，逼人回来同步描述；
+ *  - 再断言描述说的就是那个语义，且**旧的错误说法不再出现**（把描述改回去即红）。
+ */
+describe('工具描述与服务端实现一致（下架语义 / 旧配置字段语义）', () => {
+  const h = harness(() => json(200, {}))
+  const byName = (name: string): ToolDef => h.tools.find(tool => tool.name === name)!
+
+  const SERVE_GO = readFileSync(join(REPO_ROOT, 'server/internal/wasmapp/appserver/serve.go'), 'utf8')
+  const READ_GO = readFileSync(join(REPO_ROOT, 'server/internal/wasmapp/api/read.go'), 'utf8')
+  const APPCFG_GO = readFileSync(join(REPO_ROOT, 'server/internal/wasmapp/appcfg/appcfg.go'), 'utf8')
+  const INHERIT_GO = readFileSync(join(REPO_ROOT, 'server/internal/wasmapp/appcfg/inherit.go'), 'utf8')
+
+  it('服务端实现：enabled=false 走 writeGone（410），下架条目**照样**列在目录里', () => {
+    // 先证明"实现是 410"仍然是事实（否则下面的描述断言没有意义）。
+    expect(SERVE_GO, 'serve.go 的 !app.Enabled 分支不再 writeGone：请连同工具描述一起复核').toMatch(/if\s*!app\.Enabled\s*\{[\s\S]{0,240}?writeGone\(/)
+    // 目录条件只排除冻结与无版本行 —— 下架**不在**排除项里。
+    expect(READ_GO).toMatch(/if\s*a\.FrozenAt\s*!=\s*nil\s*\|\|\s*a\.CurrentReleaseID\s*<=\s*0\s*\{\s*\n\s*continue/)
+    expect(READ_GO).toContain('"enabled":    a.Enabled')
+  })
+
+  it('wasm_app_list 描述说"下架即不能访问（410）"，且不再说"域名仍然可访问/不在应用中心推荐"', () => {
+    const description = byName('wasm_app_list').description
+    // ① 下架语义与实现一致（旧描述说"可访问"，正是被勘误的那句）。
+    expect(description).toContain('410')
+    expect(description).toContain('不能访问')
+    expect(description).not.toContain('仍然可访问')
+    // ② 目录语义：下架条目**也列出**（旧描述说"不在应用中心推荐"是反的）。
+    expect(description).toContain('也会列出')
+    expect(description).not.toContain('不在应用中心推荐')
+  })
+
+  it('config 描述说清"未知字段才拒"与旧字段的真实后果（与 appcfg 的 decode + mergeMissing 一致）', () => {
+    // 服务端事实：只有 !knownField(k) 才报 unknown_field；旧字段被显式解析（decode
+    // 的 shim 仍在，首版/无基线时参与映射）。
+    expect(APPCFG_GO).toMatch(/if\s*!knownField\(k\)/)
+    expect(APPCFG_GO).toContain('legacyFieldLoginRequired')
+    expect(APPCFG_GO).toContain('legacyFieldVisible')
+    // 而**继承**一侧不得再看这两个键：旧字段不参与"字段是否缺席"的判定
+    // （2026-09-19 审计 §1.3：带 visible 的更新曾让白名单应用静默变 login）。
+    // 变异：把 legacy 键重新计入 mergeMissing 的缺席判定 ⇒ 本断言红。
+    const mergeMissing = /func mergeMissing\([\s\S]*?\n}/.exec(INHERIT_GO)?.[0] ?? ''
+    expect(mergeMissing, 'inherit.go 里找不到 mergeMissing').not.toBe('')
+    expect(mergeMissing).not.toContain('legacyField')
+    expect(mergeMissing).toContain('KnownFields')
+
+    const publishConfig = String(byName('wasm_app_publish').parameters.properties!.config!.description)
+    const validateConfig = String(byName('wasm_app_validate').parameters.properties!.config!.description)
+    for (const description of [publishConfig, validateConfig]) {
+      // 旧说法：把这两个**兼容字段**当成"会被拒的未知字段"的例子（与实现相反）。
+      expect(description).not.toContain('例如已删除的 visible / login_required')
+      // 未知字段才拒 + 旧字段是兼容形态。
+      expect(description).toContain('未知')
+      expect(description).toContain('兼容')
+      // 关键（本次修复的契约）：旧字段**不参与缺席判定** ⇒ 带了它们也照样沿用上一版，
+      // 访问级别不会被它们改写。
+      expect(description).toContain('不参与')
+      expect(description).toContain('沿用')
+      // 基线坏行的语义也说清：拒绝发布（不是静默回落成缺省），模型据此不再盲目重试。
+      expect(description).toContain('baseline_unusable')
+      expect(description).toContain('拒绝')
+    }
+  })
+
+  it('待审语义分首版与已有应用（原句只对已有应用成立）', () => {
+    // 服务端事实：首版在审核通过前既不在目录里（read.go 的 CurrentReleaseID<=0 跳过），
+    // 子域也是 404"应用还没有可用版本"（serve.go）。
+    expect(SERVE_GO).toContain('应用还没有可用版本')
+    const description = byName('wasm_app_publish').description
+    expect(description).toContain('首版')
+    expect(description).toContain('还没有可用版本')
   })
 })

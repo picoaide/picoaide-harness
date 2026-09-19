@@ -58,6 +58,16 @@ export const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/u
 /** 白名单条目上限。 */
 export const WHITELIST_MAX = 2000
 
+/**
+ * `.wasm` 体积上限：32 MiB（与服务端 `limits.WasmMaxBytes` 同源）。
+ *
+ * 为什么这个数字必须出现在**客户端契约**里（P1-10）：发布表单在选文件时就要判它 ——
+ * 32 MiB 的产物经 `arrayBuffer()` + base64 + `JSON.stringify` 会在渲染进程里产生
+ * 3–4 倍峰值内存，等宿主回 `UPLOAD_TOO_LARGE` 时界面已经冻过一次了。这里的取值
+ * 由 `appcfg-contract.spec.ts` 与 `server/internal/wasmapp/limits/limits.go` 对拍。
+ */
+export const WASM_MAX_BYTES = 32 * 1024 * 1024
+
 /** 首版必填的声明字段（`title` 是请求体字段，其余在 `picoaide.app.json` 里）。 */
 export const FIRST_RELEASE_REQUIRED_FIELDS = ['title', 'purpose', 'data_sensitivity', 'owner'] as const
 
@@ -85,6 +95,54 @@ export const REMOVED_APP_CONFIG_FIELDS = ['visible', 'login_required'] as const
 export const PUBLISH_PAYLOAD_FIELDS = ['app_id', 'version', 'wasm_base64', 'config', 'title', 'changelog'] as const
 
 /**
+ * 应用中心**目录行**的字段契约（服务端 `read.go` 的 `catalog` 行 ↔ 客户端解析）。
+ *
+ * 为什么把它也写成契约（P2-10）：这张面刚经历过一次字段改名
+ * （`visible`/`login_required` → `access`），而两侧只有各自手写的夹具在守 ——
+ * 服务端把 `app_id` 改成 `appId` 时，客户端 `parseCatalog` 只会**跳过整行**
+ * （没有合法 `app_id`），面板于是显示"还没有可用的应用"，一声不响。
+ * `appcfg-contract.spec.ts` 直接从 `read.go` 里抠出这张等价表并对拍：
+ * 任何一侧改名 ⇒ 用例红。
+ *
+ * 这里列的是**无条件**字段（服务端每行都给）。按行才有/按调用者才有的字段
+ * 见 {@link CATALOG_ROW_CONDITIONAL_FIELDS} / {@link CATALOG_ROW_AUTHOR_FIELDS}。
+ */
+export const CATALOG_ROW_FIELDS = [
+  'app_id',
+  'title',
+  'description',
+  'responsible',
+  'owner',
+  'access',
+  'enabled',
+  'current_version',
+  'is_owner',
+  'updated_at',
+] as const
+
+/**
+ * **有条件**出现的目录行字段（字段名本身固定在契约里，出现与否取决于该行）。
+ *
+ *  - `entry_url`：未配置应用泛域名时服务端不给这一行字段（客户端按"没有入口"渲染）；
+ *  - {@link CATALOG_ROW_AUTHOR_FIELDS}：只给**发布者本人**（预填发布表单用）。
+ */
+export const CATALOG_ROW_CONDITIONAL_FIELDS = ['entry_url'] as const
+
+/**
+ * 只下发给**发布者本人**的目录行字段。
+ *
+ * 为什么必须限定调用者：`whitelist` 是账号名单，`purpose` 是内部用途声明 ——
+ * 目录对所有员工可见（R38），把它们下发给所有人等于把每个应用的准入名单摊开。
+ * 而发布新版只能由发布者本人做（服务端 `ownedApp` 对非发布者一律 404），
+ * 所以"作者的发布表单要能预填"与"名单不外泄"这两件事同时成立的唯一形态就是
+ * 按调用者下发。
+ */
+export const CATALOG_ROW_AUTHOR_FIELDS = ['purpose', 'whitelist'] as const
+
+/** 目录里已删除/已改名的字段名（改名后必须从两侧一起消失）。 */
+export const REMOVED_CATALOG_ROW_FIELDS = ['visible', 'login_required'] as const
+
+/**
  * `appcfg.json` 里两张**必须存在**的表，以及各自的期望字段集合。
  *
  * 改名/搬走这两张表 ⇒ 直报 mismatch（而不是"认不出来所以跳过"）：认不出来的维度
@@ -101,6 +159,14 @@ export const APPCFG_JSON_REPO_PATH = 'server/internal/wasmapp/appcfg/appcfg.json
 
 /** `limits.go` 相对于仓库根的位置（app_id / 版本号 / 白名单上限的 Go 侧真源）。 */
 export const LIMITS_GO_REPO_PATH = 'server/internal/wasmapp/limits/limits.go'
+
+/**
+ * `read.go` 相对于仓库根的位置（**应用中心目录行**的服务端真源）。
+ *
+ * 由 `appcfg-contract.spec.ts` 读它并对拍 {@link CATALOG_ROW_FIELDS}
+ * —— 客户端不能 import Go 包，这张表的对拍只能落在源码文本上（P2-10）。
+ */
+export const READ_GO_REPO_PATH = 'server/internal/wasmapp/api/read.go'
 
 /** 一条对拍差异。 */
 export interface AppcfgMismatch {

@@ -113,6 +113,26 @@ export const UPLOAD_CHUNK_MIN_BYTES = 64 * 1024
  */
 export const CHUNKED_PUBLISH_BUDGET_MS = CLIENT_UPLOAD_TIMEOUT_MS
 
+/**
+ * 单片 PUT 的失败是否**可重试**（P2-8 的唯一判据，独立成函数以便单测钉住）。
+ *
+ * 为什么这条判据必须存在：分片 PUT 原先对**任何**非 2xx 都重试 3 轮 + 每轮一次
+ * 额外 GET，最后统一回 `UPLOAD_INCOMPLETE` + "带同一个 upload_id 重发"。而服务端
+ * 会给确定性 4xx（`VALIDATION` / 411 / 413 这类"这一片本身就错了"），重发三次只是
+ * 把同一句拒绝重复三遍，还把服务端的 `code`/`hints` 压成了我们自己的续传建议。
+ *
+ * 判定：
+ *  - **5xx** ⇒ 可重试（服务端瞬时故障，重发是有意义的）；
+ *  - **408 / 429** ⇒ 可重试（请求超时与限流都是"再来一次"的语义，RFC 9110）；
+ *  - **其余 4xx** ⇒ **终态**：原样回服务端信封，不重试、不改写。
+ * @param status - 上游 HTTP 状态。
+ * @returns true = 值得重试；false = 终态（直接回服务端信封）。
+ */
+export function isRetryableChunkStatus(status: number): boolean {
+  if (status >= 500) return true
+  return status === 408 || status === 429
+}
+
 export const CLIENT_UPLOAD_LIMITS = Object.freeze({
   /** §4.2：`.wasm` 上限 32 MiB。 */
   wasmMaxBytes: WASM_MAX_BYTES,
@@ -642,6 +662,23 @@ export async function resolveWasmSource(
           code: 'WASM_SOURCE_INVALID',
           message: hostCopy(locale, 'wasm_base64 长度与 base64 规则不符', 'wasm_base64 length does not match base64 encoding'),
           status: 400,
+        }),
+      }
+    }
+    // 体积闸门（P1-10）：base64 分支原先**没有**这条检查，而两条 `wasm_path` 分支
+    // 都有 —— 于是同一个超限产物走 HTTP 页面路径时会一路传到服务端才被拒
+    // （页面侧已经先冻过一次界面：`arrayBuffer()` + base64 + JSON.stringify 的
+    // 3–4 倍峰值内存）。判据与 `wasm_path` 分支逐字相同（同一个 `WASM_MAX_BYTES`），
+    // 因为"多大算超限"只有一个答案。
+    if (bytes.byteLength > WASM_MAX_BYTES) {
+      return {
+        ok: false,
+        response: wasmError({
+          code: 'UPLOAD_TOO_LARGE',
+          message: hostCopy(locale, 'wasm 体积超过上限', 'the wasm payload exceeds the size limit'),
+          status: 413,
+          details: { size_bytes: bytes.byteLength, limit_bytes: WASM_MAX_BYTES },
+          hints: [`§4.2 上限 ${String(WASM_MAX_BYTES / (1024 * 1024))} MiB；与服务端 limits.go 同源`],
         }),
       }
     }
@@ -1198,6 +1235,11 @@ async function publishChunked(
   }
 
   // 每片最多尝试 3 次；两次尝试之间先刷新 received[]（断线续传的核心）。
+  //
+  // **只有可重试的失败才重试**（P2-8）：确定性 4xx（`VALIDATION` / 411 / 413 …）
+  // 重发同一片只会得到同一个答案，而重试把服务端的原话压成 `UPLOAD_INCOMPLETE`
+  // + "带同一个 upload_id 重发" —— 那句建议对确定性拒绝是**错的**，模型照做三次
+  // 之后仍然失败，而真正的修法（改尺寸/改分片声明）从信封里读不到了。
   const MAX_ATTEMPTS_PER_CHUNK = 3
   let lastError: { status: number, text: string } | null = null
   for (let attempt = 0; attempt < MAX_ATTEMPTS_PER_CHUNK; attempt += 1) {
@@ -1224,6 +1266,16 @@ async function publishChunked(
       if (outcome.kind === 'gateway') {
         transportFailure = outcome.response
         break
+      }
+      // **终态**：确定性 4xx（除 408/429）不重试、也不改写成 UPLOAD_INCOMPLETE ——
+      // 直接把服务端的信封原样回出去（同一条 `readUpstreamError` 读到的原文），
+      // 调用方拿到的就是 `VALIDATION` / `UPLOAD_TOO_LARGE` 自己的 code + hints。
+      if (!isRetryableChunkStatus(outcome.status)) {
+        return {
+          status: outcome.status,
+          text: outcome.text,
+          contentType: WASM_JSON_CONTENT_TYPE,
+        }
       }
       lastError = { status: outcome.status, text: outcome.text }
       break
@@ -1485,7 +1537,7 @@ export async function proxyApp(ctx: Context, session: Session, input: ProxyInput
  * | POST | `/validate` | 预检代理（AI/UI 用来"不占版本号地试一发"） |
  * | POST | `/publish` | **发布编排**：`wasm_base64`/`wasm_path` → 直传或分片续传 |
  * | POST | `/:app_id/publish\|unpublish\|freeze` | 生命周期代理（原样转发 body） |
- * | GET | `/:app_id/diagnostics\|schema\|export` | 只读代理 |
+ * | GET | `/:app_id/diagnostics\|schema\|export\|releases` | 只读代理 |
  * | DELETE | `/:app_id` | 删除代理（R37 冻结→导出→真删） |
  *
  * 这个函数只做**四件 HTTP 层的事**：围栏（guard/持有性证明/auditor）、路径分发、
@@ -1620,8 +1672,13 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
         locale,
       }))
     }
-    // GET /:app_id/(diagnostics|schema|export) —— 只读
-    if (segments.length === 2 && ['diagnostics', 'schema', 'export'].includes(segments[1] ?? '')) {
+    // GET /:app_id/(diagnostics|schema|export|releases) —— 只读
+    //
+    // `releases`（R1-pm-3）是发布者本人的版本历史 + 审核结论（含被拒理由）：服务端
+    // 的员工面出口是 `GET /api/client/v2/apps/wasm/:app_id/releases`。**它必须在这里
+    // 的白名单里** —— 这张表是逐后缀分发的，漏一个后缀就是"服务端做完了、客户端永远
+    // 404"（面板上表现为一条读不出来的结论，而不是功能缺失）。
+    if (segments.length === 2 && ['diagnostics', 'schema', 'export', 'releases'].includes(segments[1] ?? '')) {
       if (method !== 'GET') return fail(res, { code: 'METHOD_NOT_ALLOWED', message: 'method not allowed', status: 405 })
       return write(res, await proxyApp(ctx, session, {
         upstreamPath: `${appPath}/${segments[1]!}`,

@@ -43,8 +43,8 @@ afterEach(() => { setActiveLocale('zh') })
 const QUOTA_PATTERN = /quota|balance|budget|usage|credit|额度|用量|余额|计费/iu
 
 const ITEMS: AppCenterItem[] = [
-  { appId: 'shared-notes', title: '共享便签', description: '值班记录与交接备注', responsible: 'alice', entryURL: 'https://shared-notes.apps.example.com', access: 'public', enabled: true },
-  { appId: 'roster', title: '值班表', description: '', responsible: 'bob', entryURL: 'https://roster.apps.example.com', access: 'whitelist', enabled: true },
+  { appId: 'shared-notes', title: '共享便签', description: '值班记录与交接备注', responsible: 'alice', entryURL: 'https://shared-notes.apps.example.com', access: 'public', enabled: true, currentVersion: '1.2.0', isOwner: true },
+  { appId: 'roster', title: '值班表', description: '', responsible: 'bob', entryURL: 'https://roster.apps.example.com', access: 'whitelist', enabled: true, currentVersion: '2.0.0', isOwner: false },
 ]
 
 describe('应用中心字典（zh 是 key 真源，en 必须对齐）', () => {
@@ -57,6 +57,21 @@ describe('应用中心字典（zh 是 key 真源，en 必须对齐）', () => {
   it('两种语言下都不含额度/用量词（字典里连词都没有）', () => {
     expect(JSON.stringify(zh)).not.toMatch(QUOTA_PATTERN)
     expect(JSON.stringify(en)).not.toMatch(QUOTA_PATTERN)
+  })
+
+  /**
+   * P2-9 第二条：文案里的 `**` 在普通文本节点里会**原样显示成星号**（这些串直接进
+   * `{t('…')}`、没有任何 markdown 渲染）。旧字典里 `whitelist` 帮助文字与
+   * `declarationsHint` 都带 `**`，用户在界面上看到的就是 `平台**不比对名单**`。
+   *
+   * 变异验证：把 `**` 加回任意一条文案 ⇒ 本条红。
+   */
+  it('字典里没有 markdown 强调标记（普通文本节点会把 ** 原样显示出来）', () => {
+    for (const [locale, dict] of [['zh', zh], ['en', en]] as const) {
+      for (const [key, value] of Object.entries(dict)) {
+        expect(value, `${locale} 的 ${key} 含 ** —— 界面上会显示成星号`).not.toContain('**')
+      }
+    }
   })
 })
 
@@ -71,6 +86,8 @@ describe('目录解析：只归一化，不新增筛选规则（展示全部应�
     expect(items).toHaveLength(2)
     expect(items[0]).toEqual({
       appId: 'a', title: 'A 工具', description: '一句话', responsible: 'alice', entryURL: 'https://a.apps.example.com', access: 'public', enabled: true,
+      // P1-4 / P1-3：服务端没下发就**留空 / false**，不编造版本号、也不假装是发布者。
+      currentVersion: '', isOwner: false,
     })
     expect(items[1]!.title).toBe('b')
     expect(items[1]!.description).toBe('')
@@ -170,7 +187,7 @@ describe('目录渲染（R34 / R36）', () => {
 
   it('下架的条目仍然展示，标出"已下架"且打开按钮禁用（不假装不存在）', () => {
     const items: AppCenterItem[] = [
-      { appId: 'gone', title: '已下线的工具', description: '', responsible: '', entryURL: 'https://gone.apps.example.com', access: 'public', enabled: false },
+      { appId: 'gone', title: '已下线的工具', description: '', responsible: '', entryURL: 'https://gone.apps.example.com', access: 'public', enabled: false, currentVersion: '', isOwner: false },
     ]
     const html = renderToStaticMarkup(<AppCenterBody state={{ kind: 'ready', items }} onRetry={() => {}} />)
     expect(html).toContain('已下线的工具')
@@ -194,7 +211,7 @@ describe('目录渲染（R34 / R36）', () => {
   it('加载中与失败态各自可读，失败态有重试', () => {
     const loading = renderToStaticMarkup(<AppCenterBody state={{ kind: 'loading' }} onRetry={() => {}} />)
     expect(loading).toContain('正在加载应用')
-    const failed = renderToStaticMarkup(<AppCenterBody state={{ kind: 'error', message: '加载失败 (HTTP 502)' }} onRetry={() => {}} />)
+    const failed = renderToStaticMarkup(<AppCenterBody state={{ kind: 'error', error: { code: 'GATEWAY_UNAVAILABLE', message: '加载失败 (HTTP 502)', hints: [] } }} onRetry={() => {}} />)
     expect(failed).toContain('加载失败 (HTTP 502)')
     expect(failed).toContain('重试')
   })
@@ -204,7 +221,7 @@ describe('目录渲染（R34 / R36）', () => {
       setActiveLocale(locale)
       const list = renderToStaticMarkup(<AppCenterBody state={{ kind: 'ready', items: ITEMS }} onRetry={() => {}} />)
       const empty = renderToStaticMarkup(<AppCenterBody state={{ kind: 'ready', items: [] }} onRetry={() => {}} />)
-      const error = renderToStaticMarkup(<AppCenterBody state={{ kind: 'error', message: 'x' }} onRetry={() => {}} />)
+      const error = renderToStaticMarkup(<AppCenterBody state={{ kind: 'error', error: { code: 'INTERNAL', message: 'x', hints: [] } }} onRetry={() => {}} />)
       for (const html of [list, empty, error]) expect(html).not.toMatch(QUOTA_PATTERN)
     }
   })

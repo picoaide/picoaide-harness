@@ -1,6 +1,6 @@
 ---
-name: picoaide-app-builder
-version: 1.0.0
+name: app-builder
+version: 1.1.0
 title: PicoAide 应用构建（WASM 应用）
 description: 用 Go 写一个 PicoAide 应用平台上的 WASM 应用并发布（员工自建小工具）。当用户说"做个内部小工具/应用/页面"、"把这个流程做成应用"、"发布到应用中心"、"能不能在平台上加个功能"时用本技能。
 author: PicoAide
@@ -47,6 +47,8 @@ x-abi-version: picoaide-app/1
 5. **预检 → 发布**：用 `wasm_app_validate` 预检（不占版本号），通过后用 `wasm_app_publish` 发布
    （`wasm_app_list` 可查标识是否被占用、当前版本号是多少）；
    任何失败都带 `code` / `details` / `hints`，按 hints 改完重发即可 —— **失败的发布不占版本号**。
+   `IMPORT_NOT_ALLOWED` / `IMPORT_SIGNATURE_MISMATCH` 这类**导入面**问题不要靠试错：平台放行的
+   全部符号与签名在 `references/imports.md` 里，先对照它再改代码。
 6. **交付**：把 `https://<app_id>.<应用基域>` 给用户，并提醒他：不在名单里的人打开会看到
    一页"你不在名单里 + 你的账号是 xxx"，让用户自己核对名单拼写（平台不校验账号是否存在）。
 
@@ -69,6 +71,16 @@ x-abi-version: picoaide-app/1
 11. **应用名就是域名**：`<app_id>.<应用基域>`；小写字母/数字/连字符、不超过 63 个字符、
     不能纯数字、不能 `xn--` 开头、不能是平台保留字；**一经发布不能改名**（改名等于换域名）。
 
+## 并发与队列（默认值，运维可在控制台改）
+
+同一应用默认最多 **4 个请求并发**（读并发；**写仍串行**，SQLite 只有一个写者）。
+但**单个用户在同一应用内默认只有 1 路**（`user_per_app_running=1`）：自测时用同一个账号
+打并发看不到 4 路，这是**排队规则不是平台串行**（被排队的只是同一个用户）——不同账号才吃满 4 路。
+
+队列 32、每用户同应用排队 4 个、每用户跨应用在跑 4 个、全局实例 32 都是**默认值**，
+不是固定值：运维可在控制台「应用中心 → 限制项」改（队列可调到 4096、全局实例可调到 256）。
+作者不可调这些值；撞到 `APP_QUEUE_FULL` / 429 时按 `references/diagnostics.md` 处理。
+
 ## 包内资源与保密（放机密之前必读）
 
 `assets.read` 读到的资源**默认不对外公开**（它只在宿主磁盘上，按包内逻辑路径读，
@@ -89,6 +101,9 @@ x-abi-version: picoaide-app/1
 
 - `references/abi.md` —— 帧格式、请求帧字段、全部宿主调用（参数 / 结果 JSON）、
   最终响应信封、判别规则、计时规则、失败语义表
+- `references/imports.md` —— **导入面白名单**：平台放行的全部 `wasi_snapshot_preview1`
+  符号 + 签名 + 每条为什么放行（**从白名单真源生成，不要凭记忆猜**）；撞到
+  `IMPORT_NOT_ALLOWED` 时照它的第 2 步办
 - `references/limits.md` —— 平台全部上限（**从 `limits.go` 生成，不要手抄数字**）
 - `references/app-config.md` —— **字段规格**（应用配置文件 + 发布载荷；从平台源码生成）
 - `references/publishing.md` —— 本地编译与预览、validate、publish、上下架、诊断、自省

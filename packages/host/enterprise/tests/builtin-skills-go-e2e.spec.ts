@@ -27,7 +27,7 @@ import type { Session } from '../src/server-connector/config.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, '..', '..', '..', '..')
 const SERVER_DIR = join(REPO_ROOT, 'server')
-const SOURCE_SKILL_DIR = join(REPO_ROOT, 'packages', 'vendor', 'memory-evolve', 'skills', 'picoaide-app-builder')
+const SOURCE_SKILL_DIR = join(REPO_ROOT, 'server', 'skills', 'app-builder')
 
 const enabled = process.env.SKILLSEED_GO_E2E === '1'
 const SESSION: Session = {
@@ -153,7 +153,7 @@ it.skipIf(!enabled)('服务端（Go）打的包 → 真安装器 → <dshHome>/s
 
   vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
     const href = String(url)
-    if (href.endsWith('/api/client/v2/skills/builtin/picoaide-app-builder/archive')) {
+    if (href.endsWith('/api/client/v2/skills/builtin/app-builder/archive')) {
       return new Response(archive, {
         status: 200,
         headers: { 'content-type': 'application/gzip', 'x-skill-checksum': jsSha, 'x-skill-version': '1.0.0' },
@@ -164,11 +164,11 @@ it.skipIf(!enabled)('服务端（Go）打的包 → 真安装器 → <dshHome>/s
 
   const handler = skillsRoute()
   const { res, read } = fakeRes()
-  await handler(fakeReq('/api/pico/skills/builtin/picoaide-app-builder/install', 'POST'), res)
+  await handler(fakeReq('/api/pico/skills/builtin/app-builder/install', 'POST'), res)
   const result = read()
   expect(result.code, JSON.stringify(result.body)).toBe(200)
 
-  const installed = join(resolveSkillsDir(), 'picoaide-app-builder')
+  const installed = join(resolveSkillsDir(), 'app-builder')
   expect(resolveSkillsDir()).toBe(join(home, 'skills'))
   const source = await listFiles(SOURCE_SKILL_DIR)
   for (const rel of source) {

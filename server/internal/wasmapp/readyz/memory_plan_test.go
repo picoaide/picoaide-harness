@@ -34,6 +34,13 @@ func TestDefaultPlanPreservesHistoricalNumbers(t *testing.T) {
 	if b.Profile != "default" {
 		t.Fatalf("默认档名应为 default，得到 %q", b.Profile)
 	}
+	// 页缓存这笔也必须进默认档的账（R1-rt-8）：默认 = 32 句柄 × (1+4) MiB = 160 MiB。
+	if want := int64(limits.GlobalInstances) * readyz.DefaultAppDBPageCachePerHandleBytes; b.AppDBCache != want {
+		t.Fatalf("默认档页缓存账 = %d，期望 %d", b.AppDBCache, want)
+	}
+	if b.Total != b.Instances+b.CompilePeak+b.UploadPeak+b.CacheResident+b.AppDBCache {
+		t.Fatalf("总账必须包含页缓存这笔：%+v", b)
+	}
 }
 
 // TestPlanScalesFourAccounts：换档位必须真的改变四笔账（而不是只改个名字）。
@@ -46,9 +53,13 @@ func TestPlanScalesFourAccounts(t *testing.T) {
 		ModuleCacheBytes:    64 << 20,
 	}
 	b := readyz.ComputeMemoryBudgetFor(available, small)
-	// 3 × 64 MiB = 192 MiB；+256 +118 +64 = 630 MiB
-	if want := int64(630 << 20); b.Total != want {
+	// 3 × 64 MiB = 192 MiB；+256 +118 +64 = 630 MiB；再 + 应用库页缓存这笔
+	// （3 句柄 × 默认每句柄 (1+4) MiB = 15 MiB）⇒ 645 MiB。
+	if want := int64(645 << 20); b.Total != want {
 		t.Fatalf("small 档 total = %dMiB，期望 %dMiB", b.Total>>20, want>>20)
+	}
+	if want := int64(15 << 20); b.AppDBCache != want {
+		t.Fatalf("small 档的页缓存这笔 = %dMiB，期望 %dMiB（句柄数 = plan.Instances）", b.AppDBCache>>20, want>>20)
 	}
 	if !b.OK {
 		t.Fatalf("small 档应通过 992 MiB 机器的水位检查：limit=%dMiB", b.Limit>>20)
@@ -101,7 +112,11 @@ func TestCheckStartupMemoryForCarriesProfile(t *testing.T) {
 	if !strings.Contains(body, `"profile":"default"`) {
 		t.Fatalf("错误应带本次判定用的档位名：%s", body)
 	}
-	if _, err := readyz.CheckStartupMemoryFor(0, readyz.DefaultMemoryPlan()); err != nil {
-		t.Fatalf("读不到可用内存（≤0）时不得拒绝启动：%v", err)
+	if _, err := readyz.CheckStartupMemoryFor(readyz.MemoryUnknown, readyz.DefaultMemoryPlan()); err != nil {
+		t.Fatalf("读不到可用内存（MemoryUnknown）时不得拒绝启动：%v", err)
+	}
+	// 0 = **真的**没有可用内存 ⇒ 必须拒绝（旧实现把 0 与"读不到"混为一谈）。
+	if _, err := readyz.CheckStartupMemoryFor(0, readyz.DefaultMemoryPlan()); err == nil {
+		t.Fatal("可用内存为 0 必须拒绝启动（0 ≠ 未知）")
 	}
 }

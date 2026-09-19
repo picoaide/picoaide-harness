@@ -67,6 +67,16 @@ func (o Options) withDefaults() Options {
 // 上限):DB 卡住时 worker 必须能回来,否则事件会一直攒在环里被丢。
 const flushBudgetIntervals = 5
 
+// flushInsertBudgetMin 是单次批量落库预算的**下限**。
+//
+// 为什么需要下限(2026-09-19 定位的 CI flake):预算是 `FlushInterval ×
+// flushBudgetIntervals`,而生产默认 FlushInterval 是秒级(5×1s=5s,够用);
+// 但测试为了跑得快注入 10ms ⇒ 预算只剩 50ms —— 负载一高,insert 会在**事务已经
+// 提交之后**才等到驱动返回,超时被记成失败并丢掉整批(dropped/failed 计数上升),
+// 测试随即报 `Written = N, want M`,而库里其实已经有那些行("超时 ≠ 未执行")。
+// 抬到 1s 既不影响"DB 卡住时 worker 能回来"这条初衷,也不再把成功批量误判成失败。
+const flushInsertBudgetMin = time.Second
+
 // event 是入环的一条事件:调用计量 + **记录时刻**(落库时间是批量时刻,
 // 用它当 created_at 会把同一批几百条压到同一个时间点,诊断时间线就糊了)。
 type event struct {
@@ -233,7 +243,12 @@ func (s *Sink) Cleanup(ctx context.Context, now time.Time) (int64, error) {
 }
 
 // flush 把环里的条目分批落库。所有 DB 操作都在锁外(drain 只做内存搬移),
-// 因此无论落库多慢,Record 都不会被拖住。
+// flush 把环里的事件批量落库(每 FlushInterval 一次,由 loop 调用)。
+//
+// 落库失败即丢整批并**停止本轮**(DB 不可用时继续只会再失败并拖长时间)——
+// 因此预算必须给够,否则"已提交但超时"会被记成失败(见 flushInsertBudgetMin)。
+//
+// 无论落库多慢,Record 都不会被拖住(它只入环)。
 func (s *Sink) flush() {
 	if s.db == nil {
 		return
@@ -243,7 +258,7 @@ func (s *Sink) flush() {
 		if len(batch) == 0 {
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), s.opt.FlushInterval*flushBudgetIntervals)
+		ctx, cancel := context.WithTimeout(context.Background(), s.insertBudget())
 		err := s.insert(ctx, batch)
 		cancel()
 		if err != nil {
@@ -255,6 +270,16 @@ func (s *Sink) flush() {
 		}
 		s.written.Add(int64(len(batch)))
 	}
+}
+
+// insertBudget 返回单次批量落库的预算:FlushInterval × flushBudgetIntervals,
+// 但不低于 flushInsertBudgetMin(见该常量的注释)。
+func (s *Sink) insertBudget() time.Duration {
+	b := s.opt.FlushInterval * flushBudgetIntervals
+	if b < flushInsertBudgetMin {
+		return flushInsertBudgetMin
+	}
+	return b
 }
 
 // drain 取出至多 max 条事件(先进先出)。返回的切片由调用方独占。

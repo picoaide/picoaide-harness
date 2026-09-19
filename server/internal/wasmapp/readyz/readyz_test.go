@@ -30,10 +30,12 @@ import (
 
 func fixedOpts(free int64, cs *CompilerStatsSnapshot) Options {
 	o := Options{
-		DataRoot:     "/tmp",
-		Now:          func() time.Time { return time.Unix(1_700_000_000, 0) },
-		DiskFree:     func(string) (int64, error) { return free, nil },
-		MemAvailable: func() (int64, error) { return 8 << 30, nil },
+		DataRoot: "/tmp",
+		Now:      func() time.Time { return time.Unix(1_700_000_000, 0) },
+		DiskFree: func(string) (int64, error) { return free, nil },
+		MemAvailable: func() MemoryAvailability {
+			return MemoryAvailability{Bytes: 8 << 30, Source: MemorySourceHost}
+		},
 	}
 	if cs != nil {
 		c := *cs
@@ -97,7 +99,8 @@ func TestSnapshotExecutorFull(t *testing.T) {
 	o.Scheduler = sch
 	// 占满全局槽。
 	var tickets []*queue.Ticket
-	// 每应用并发恒为 1（§4.6）⇒ 占满全局槽必须用不同应用。
+	// 占满全局槽要用不同应用：同应用的并发另有上限（app_running，默认 4），
+	// 用它占槽会让"全局满载"与"单应用满载"混淆。
 	for i := 0; i < limits.GlobalInstances; i++ {
 		tk, err := sch.Acquire(t.Context(), "app-"+strconv.Itoa(i), int64(i+1))
 		if err != nil {
@@ -188,7 +191,9 @@ func TestAllowPublishIgnoresExecutorFull(t *testing.T) {
 
 // TestMemoryBudget：§4.3「理论峰值 > 可用内存 70% ⇒ 拒绝启动」。
 func TestMemoryBudget(t *testing.T) {
-	need := int64(InstancePoolBytes + CompilePeakBytes + limits.UploadPeakPerUploadBytes + CacheResidentBytes)
+	plan := DefaultMemoryPlan()
+	need := int64(InstancePoolBytes+CompilePeakBytes+limits.UploadPeakPerUploadBytes+CacheResidentBytes) +
+		int64(plan.Instances)*plan.AppDBPageCachePerHandleBytes
 	// 恰好卡在 70% 边界：available × 70% >= need ⇒ 通过。
 	// 用向上取整，否则整数除法会让 limit 差 1 字节而误判（这正是本用例要钉的边界）。
 	avail := (need*100 + int64(limits.MemoryPeakGuardPercent) - 1) / int64(limits.MemoryPeakGuardPercent)
@@ -199,14 +204,26 @@ func TestMemoryBudget(t *testing.T) {
 	if _, err := CheckStartupMemory(avail - 1); err == nil {
 		t.Fatal("超过水位必须拒绝启动（§4.3：拒绝启动而不是等 OOM）")
 	}
-	// 读不到可用内存（≤0）⇒ 不判定，避免容器里无法部署。
-	if b, err := CheckStartupMemory(0); err != nil || !b.OK {
+	// 读不到可用内存（MemoryUnknown）⇒ 不判定，避免容器里无法部署；但**必须**标成
+	// "没有判定"（Known=false），不许与"判定通过"同形（R1-rt-1 的 fail-open）。
+	b, err := CheckStartupMemory(MemoryUnknown)
+	if err != nil || !b.OK {
 		t.Fatalf("读不到内存时不应拒绝启动：%v %+v", err, b)
 	}
-	// 四笔账都要在分解里可见（不能只算一笔）。
-	b := ComputeMemoryBudget(64 << 30)
-	if b.Instances == 0 || b.CompilePeak == 0 || b.UploadPeak == 0 || b.CacheResident == 0 {
-		t.Fatalf("四笔账必须各自可见：%+v", b)
+	if b.Known {
+		t.Fatal("读不到可用内存时 Known 必须为 false（'没有判定' ≠ '判定通过'）")
+	}
+	// 真的是 0 可用内存 ⇒ 判定失败（fail-loud）。旧实现把 0 与"读不到"混为一谈，是 fail-open。
+	if _, err := CheckStartupMemory(0); err == nil {
+		t.Fatal("可用内存为 0 必须拒绝启动（0 ≠ 未知）")
+	}
+	// 各笔账都要在分解里可见（不能只算一笔）。
+	b = ComputeMemoryBudget(64 << 30)
+	if b.Instances == 0 || b.CompilePeak == 0 || b.UploadPeak == 0 || b.CacheResident == 0 || b.AppDBCache == 0 {
+		t.Fatalf("各笔账必须各自可见（含应用库页缓存）：%+v", b)
+	}
+	if !b.Known {
+		t.Fatal("给出了可用内存就必须标成已知")
 	}
 	if b.Instances != int64(limits.GlobalInstances)*int64(limits.InstanceMemoryPages)*int64(limits.WasmPageSize) {
 		t.Fatalf("实例池这笔账算错：%d", b.Instances)
@@ -399,5 +416,69 @@ func TestSnapshotExecutorFullIsNonBlockingReason(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("执行槽满必须在 reasons 里可见：%v", s.Reasons)
+	}
+}
+
+// TestSnapshotExposesMemSource：R1-rt-1 —— `/readyz` 必须回答"这笔账的可用内存是从哪读的"。
+//
+// 变异：把 Snapshot 里的 MemSource/MemAvailableByte 赋值删掉 ⇒ 本用例必红
+// （旧实现里内存这一维在 /readyz 上根本不存在，排障只能靠猜）。
+func TestSnapshotExposesMemSource(t *testing.T) {
+	o := fixedOpts(MinDiskFreeBytes, nil)
+	o.MemAvailable = func() MemoryAvailability {
+		return MemoryAvailability{Bytes: 192 << 20, Source: MemorySourceCgroup, Detail: "cgroup 限额 256 MiB − 用量 64 MiB"}
+	}
+	s := New(o).Snapshot()
+	if s.MemSource != string(MemorySourceCgroup) {
+		t.Fatalf("mem_source 必须暴露来源，得到 %q", s.MemSource)
+	}
+	if s.MemAvailableByte != 192<<20 {
+		t.Fatalf("mem_available_bytes=%d，期望 %d", s.MemAvailableByte, int64(192<<20))
+	}
+	if !s.OK {
+		t.Fatalf("内存维不是阻塞项（ok 讲的是执行面）：%v", s.Reasons)
+	}
+	// JSON 契约：字段名是 webadmin/运维脚本读的（改名字必须同步两端）。
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"mem_source":"cgroup"`, `"mem_available_bytes":201326592`} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("响应体缺少 %s：%s", want, b)
+		}
+	}
+}
+
+// TestSnapshotMemUnavailableIsSaidOutLoud：读不到可用内存时必须**显式说出来**
+// （"未取到可用内存（跳过内存自检）"），且这条说明**不阻塞**发布。
+//
+// 这一条正是 R1-rt-1 要求的那半：保留可部署性（不拒绝启动/不拒绝发布），
+// 但"跳过"必须可见 —— 旧实现里它与"内存充足"逐字段同形（fail-open）。
+func TestSnapshotMemUnavailableIsSaidOutLoud(t *testing.T) {
+	o := fixedOpts(MinDiskFreeBytes, nil)
+	o.MemAvailable = func() MemoryAvailability {
+		return MemoryAvailability{Source: MemorySourceNone, Detail: "读 /proc/meminfo 失败: 文件不存在"}
+	}
+	c := New(o)
+	s := c.Snapshot()
+	if s.MemSource != string(MemorySourceNone) {
+		t.Fatalf("mem_source 必须如实写 none，得到 %q", s.MemSource)
+	}
+	found := false
+	for _, r := range s.Reasons {
+		if strings.HasPrefix(r, reasonMemUnavailable) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("读不到可用内存必须在 reasons 里显式说明（不许静默）：%v", s.Reasons)
+	}
+	// 可部署性：读不到不把实例判成不健康，也不阻止发布。
+	if !s.OK {
+		t.Fatalf("读不到可用内存不该让 ok=false（那是部署环境问题，不是执行面故障）：%v", s.Reasons)
+	}
+	if err := c.AllowPublish(); err != nil {
+		t.Fatalf("读不到可用内存不该阻止发布（否则受限环境完全不可用）：%v", err)
 	}
 }

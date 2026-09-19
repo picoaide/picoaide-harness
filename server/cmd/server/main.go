@@ -38,7 +38,9 @@ import (
 	"github.com/picoaide/picoaide/internal/telemetry"
 	"github.com/picoaide/picoaide/internal/updatecheck"
 	"github.com/picoaide/picoaide/internal/util"
+	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/wasmapp/session"
 	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 	"github.com/picoaide/picoaide/webadmin"
 )
@@ -216,41 +218,18 @@ func main() {
 		log.Printf("内置技能：%d 个（%s）", len(skillCatalog.Entries()), skillCatalog.Dir())
 	}
 
-	router.Register(r, router.Deps{
-		DB:        db,
-		Auth:      auth.Handlers(),
-		Admin:     adminAPI.Handlers(),
-		Appstore:  appstore.NewHandlers(db),
-		Bootstrap: bootstrap.NewHandlers(db),
-		// 客户端安装包随镜像发布:服务端把它所在的镜像目录直接对外提供
-		// (GET /api/client/v2/updates/manifest 与 /updates/client/<file>)。
-		ClientRelease: clientrelease.NewHandlers(func() string { return version }, channelID),
-		// 内置技能下发面（随镜像发布：/opt/picoaide/skills）。
-		SkillSeed: skillseed.NewHandlers(skillCatalog),
-		// 渠道内容随镜像发布(channels/<id>/ → /opt/picoaide/channel/),服务端读文件下发。
-		Channel: channel.NewHandlers(),
-		// 门户页配置:只管"是否公开 / 下载地址覆盖 / 说明文字"。
-		// 站点名与欢迎语来自渠道配置(上一行),因此没有在线编辑名称的入口。
-		PortalAdmin: portal.NewAdminHandlers(db),
-		Market:      marketplace.NewHandlers(db, *dataDir+"/skills-cache"),
-		Agentshare:  agentshare.NewHandlers(db, *dataDir+"/agent-presets-cache"),
-		Shared:      sharedskills.NewHandlers(db, *dataDir+"/shared-skills-cache"),
-		Capability:  capabilities.NewHandlers(db, *dataDir+"/skills-cache"),
-		Connector:   connectors.NewHandlers(db),
-		Telemetry:   telemetry.NewHandlers(db),
-		Gateway:     llmgateway.NewHandlers(db),
-		Reports:     reports.NewHandlers(db),
-		// WASM 应用平台操作面（§8）+ 员工浏览器会话/换票（R12/R16）。
-		// 管理面只在主站暴露：应用子域走 edge.HostGate 的独立路由树，
-		// 主站路由在子域结构上不可达（§4.8 / F-52e）。
+	registerProductionRoutes(r, productionDeps{
+		DB:          db,
+		Auth:        auth.Handlers(),
+		Admin:       adminAPI.Handlers(),
+		SkillSeed:   skillseed.NewHandlers(skillCatalog),
 		Wasm:        wasmPlat.API,
 		WasmSession: wasmPlat.Session,
+		Ready:       wasmPlat.Checker.Handler(),
+		DataDir:     *dataDir,
+		Version:     version,
+		ChannelID:   channelID,
 	})
-	// 固定探针(不属于两命名空间)。
-	r.GET("/healthz", bootstrap.NewHandlers(db).Health)
-	// §4.9 运维面：磁盘余量 / 编译队列 / 执行队列 / 编译缓存水位。
-	// 现网 healthz 只做 db.Ping —— 磁盘满仍 healthy，那正是本探针要补的洞。
-	r.GET("/readyz", gin.WrapH(wasmPlat.Checker.Handler()))
 	// 审计日志保留策略(v3b: settings audit.retention_days, 默认 180 天;
 	// 安全/权限类事件 365 天由应用策略保证, 这里按全局保留清理)。
 	retentionDays := 180
@@ -573,6 +552,93 @@ func installAPIMiddleware(r *gin.Engine) {
 	r.Use(accessLogger(), gin.CustomRecoveryWithWriter(gin.DefaultErrorWriter, func(c *gin.Context, _ any) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "服务端内部错误")
 	}))
+}
+
+// productionDeps 汇聚生产路由表装配的输入（main 与 golden 导出测试共用）。
+//
+// 为什么把它抽出来（2026-09-19，Rust 迁移契约 I1）：路由表是**冻结基准**
+// （server-rs/golden/routes.json），必须由一段**唯一**的装配代码产出。
+// 一旦 main 与测试各写一份 Deps，测试少传一个依赖就会静默漏掉一整片路由 ——
+// main_test.go 的 buildRouter 漏传 Wasm / WasmSession 正是这类前车之鉴
+// （漏掉 WASM 应用平台全部路由与员工登录 HTML 面）。
+type productionDeps struct {
+	DB *sql.DB
+	// Auth / Admin 是两套认证 handler 集合（客户端 Bearer 面 / 管理会话面）。
+	Auth  *serverauth.ClientHandlers
+	Admin *serverauth.AdminHandlers
+	// Wasm / WasmSession 是 WASM 应用平台的操作面与员工会话面。
+	//
+	// ⚠️ 必须非 nil：为 nil 时 router 会整片跳过
+	// /api/client/v2/apps/wasm/*、/api/server/admin/wasm-apps/*（registerWasm
+	// 的 `d.Wasm == nil`）与 /login、/logout、/app-ticket（Register 的
+	// `deps.WasmSession != nil`）。
+	Wasm        *wasmapi.Handlers
+	WasmSession *session.Manager
+	// Ready 是 /readyz 探针（生产 = wasmPlat.Checker.Handler()）。
+	Ready http.Handler
+	// SkillSeed 是内置技能下发面（生产随镜像发布：/opt/picoaide/skills）。
+	SkillSeed *skillseed.Handlers
+	// DataDir 是应用数据根（商城/共享内容的磁盘缓存挂在它下面）。
+	DataDir string
+	// Version 是服务端版本（--version 与客户端安装包清单同一来源）。
+	Version string
+	// ChannelID 是启动时解析并校验过的部署渠道。
+	ChannelID string
+}
+
+// registerProductionRoutes 声明生产路由表（唯一真源：main 与 golden 导出测试）。
+//
+// 调用顺序有硬要求：必须先用 newEngine() + installAPIMiddleware() 建好引擎
+// （gin 在注册路由时快照当前中间件链；顺序反了会让 panic 不返回 JSON 信封、
+// 也没有访问日志 —— 见 installAPIMiddleware 的注释与审计 P1-2）。
+func registerProductionRoutes(r *gin.Engine, d productionDeps) {
+	// 装配期 fail-fast(2026-09-19 审计):Ready 的失效形态与 Wasm/WasmSession
+	// **不同** —— 后两者为 nil 时 router 整片不注册(路由表上直接看得出来,已有
+	// 差集断言兜着),而 /readyz 是**无条件**注册的:`gin.WrapH(nil)` 在注册期
+	// 不 panic,于是漏填会变成"每个探针请求 panic → Recovery → 500 INTERNAL",
+	// 而路由表、--version、启动日志全都正常,只表现为"健康检查一直红"。
+	// 这种"静默降级成 500"的装配错误必须在启动期就炸掉,不能留给运行期。
+	if d.Ready == nil {
+		panic("registerProductionRoutes: productionDeps.Ready 为 nil —— /readyz 会每个请求 panic→500;生产应传 wasmPlat.Checker.Handler()")
+	}
+	// 工程化重构(2026-09): 全部 API 路由集中在 internal/router 包声明 ——
+	// /api/server(管理面) + /api/client/v2(员工面),旧命名空间(/api、/v1、
+	// /v2/api、/v2/v1)迁移后不再注册。
+	router.Register(r, router.Deps{
+		DB:        d.DB,
+		Auth:      d.Auth,
+		Admin:     d.Admin,
+		Appstore:  appstore.NewHandlers(d.DB),
+		Bootstrap: bootstrap.NewHandlers(d.DB),
+		// 客户端安装包随镜像发布:服务端把它所在的镜像目录直接对外提供
+		// (GET /api/client/v2/updates/manifest 与 /updates/client/<file>)。
+		ClientRelease: clientrelease.NewHandlers(func() string { return d.Version }, d.ChannelID),
+		// 内置技能下发面（随镜像发布：/opt/picoaide/skills）。
+		SkillSeed: d.SkillSeed,
+		// 渠道内容随镜像发布(channels/<id>/ → /opt/picoaide/channel/),服务端读文件下发。
+		Channel: channel.NewHandlers(),
+		// 门户页配置:只管"是否公开 / 下载地址覆盖 / 说明文字"。
+		// 站点名与欢迎语来自渠道配置(上一行),因此没有在线编辑名称的入口。
+		PortalAdmin: portal.NewAdminHandlers(d.DB),
+		Market:      marketplace.NewHandlers(d.DB, d.DataDir+"/skills-cache"),
+		Agentshare:  agentshare.NewHandlers(d.DB, d.DataDir+"/agent-presets-cache"),
+		Shared:      sharedskills.NewHandlers(d.DB, d.DataDir+"/shared-skills-cache"),
+		Capability:  capabilities.NewHandlers(d.DB, d.DataDir+"/skills-cache"),
+		Connector:   connectors.NewHandlers(d.DB),
+		Telemetry:   telemetry.NewHandlers(d.DB),
+		Gateway:     llmgateway.NewHandlers(d.DB),
+		Reports:     reports.NewHandlers(d.DB),
+		// WASM 应用平台操作面（§8）+ 员工浏览器会话/换票（R12/R16）。
+		// 管理面只在主站暴露：应用子域走 edge.HostGate 的独立路由树，
+		// 主站路由在子域结构上不可达（§4.8 / F-52e）。
+		Wasm:        d.Wasm,
+		WasmSession: d.WasmSession,
+	})
+	// 固定探针(不属于两命名空间)。
+	r.GET("/healthz", bootstrap.NewHandlers(d.DB).Health)
+	// §4.9 运维面：磁盘余量 / 编译队列 / 执行队列 / 编译缓存水位。
+	// 现网 healthz 只做 db.Ping —— 磁盘满仍 healthy，那正是本探针要补的洞。
+	r.GET("/readyz", gin.WrapH(d.Ready))
 }
 
 // accessLogger 是访问日志中间件:语义与 gin.Logger() 一致,但**丢弃查询串**。
