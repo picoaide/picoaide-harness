@@ -76,6 +76,11 @@ type wasmPlatform struct {
 	Limiter *anonlimit.Limiter
 	// AI 是 ai.chat 客户端（§4.7）。
 	AI *aichat.Client
+	// Limits 是平台限制项的运行期持有者（控制台设置 > 部署档位 > 默认）。
+	//
+	// 暴露它是为了**装配级断言**（P0-2）：单实例内存上限这类字段只在装配期写一次，
+	// 没有持有者就只能断言源码字符串（而字符串断言分不清"接上了但值是错的"）。
+	Limits *wasmLimitsHolder
 
 	lock *readyz.InstanceLock
 }
@@ -138,6 +143,29 @@ func checkStartupMemory(enabled bool, availableBytes int64, plan readyz.MemoryPl
 // "照常启动"（审计 P2-1 的现场形态：文档三处写"拒绝启动"，实际只有一行日志）。
 func mustRefuseStartupForIsolation(mode compile.IsolationMode, usable bool) bool {
 	return mode == compile.IsolationRequire && !usable
+}
+
+// wasmAppEvictor 是 OnAppEvict 需要的最小依赖面（*appserver.Server 满足它）。
+//
+// 抽成接口 + 具名构造函数（而不是内联闭包）是为了**可行为断言**：装配级用例可以
+// 用一个记账假实现验证"钩子真的把处置转发了出去"，而不是像旧门禁那样 grep 源码里
+// 有没有那行字符串 —— 字符串断言分不清"接上了"与"handler 从不调用"（P1-8 的现场）。
+type wasmAppEvictor interface {
+	EvictApp(appID string) (int, int64)
+}
+
+// newWasmAppEvictor 返回 api.Options.OnAppEvict 的装配实现：应用被下架/冻结/删除
+// **成功之后**，立即丢掉它的进程内驻留（编译模块 + 库句柄），把内存还给 OS。
+//
+// 幂等与容错：空 app_id 直接忽略（不把空串送进缓存查找）；被逐出对象为空时
+// EvictApp 自身是 no-op（见 appserver.EvictApp）。
+func newWasmAppEvictor(srv wasmAppEvictor) func(string) {
+	return func(appID string) {
+		if srv == nil || strings.TrimSpace(appID) == "" {
+			return
+		}
+		srv.EvictApp(appID)
+	}
 }
 
 // setupWasmPlatform 装配 WASM 应用平台。
@@ -304,16 +332,26 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		AppIDExtraReserved: extraReserved,
 		AIBaseURL:          normalizeLoopbackBaseURL(addr),
 		Logger:             log.Printf,
-		// 内存档位同时驱动：队列并发、实例内存上限、模块缓存上限、库句柄上限。
+		// 内存档位：**降级为默认值来源**（P0-2）。真正生效的是下面 Limits
+		//（控制台设置 > 档位 > 默认），它同时驱动队列并发、实例内存上限、
+		// 模块缓存上限与库句柄上限 —— 装配期就必须是同一份数。
 		MemoryProfile: prof,
+		Limits:        limitsHolder.Get(),
 	})
 	if aerr != nil {
 		log.Fatalf("wasm 应用子域管线装配失败：%v", aerr)
 	}
 	// 限制项接到运行态：①注入下发钩子（控制台保存后即时生效）
-	// ②首次下发一次（让控制台保存过的设置覆盖档位折算值）。
+	// ②首次下发一次（幂等：把档位折算值之外的可热改字段对齐到当前生效值）。
+	//
+	// ③把返回值**回写持有者**（P0-2）：不回写的话，装配期"仍需重启"的判断只进日志
+	//（界面显示"无需重启"），而实际生效值可能仍与设置值不一致 —— 于是重启也修不好，
+	// 且 nobody 看得见。回写之后：重启后 restart 为空是**被断言过的事实**，
+	// 不为空则如实显示在控制台上。
 	limitsHolder.SetApplier(appSrv.ApplyLimits)
-	if restart := appSrv.ApplyLimits(limitsHolder.Get()); len(restart) > 0 {
+	restart := appSrv.ApplyLimits(limitsHolder.Get())
+	limitsHolder.ApplyStartup(restart)
+	if len(restart) > 0 {
 		log.Printf("wasm: ⚠️ 平台限制项里有需重启才生效的字段：%v（当前进程仍按启动时的值跑）", restart)
 	}
 
@@ -368,10 +406,11 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		// 发布面的 fail-closed 闸门（审计 P1-1：AllowPublish 此前零调用方）。
 		Ready: checker,
 		// 下架/冻结/删除后立即释放进程内驻留（模块 + 库句柄，见 api.Options.OnAppEvict）。
-		OnAppEvict: func(appID string) { appSrv.EvictApp(appID) },
+		OnAppEvict: newWasmAppEvictor(appSrv),
 		// 平台限制项（并发/内存）：读写闭包；校验与下发都在 wasmLimitsHolder/ApplyLimits。
 		Limits:          limitsHolder.Get,
 		LimitsSource:    limitsHolder.Source,
+		LimitsProfile:   limitsHolder.ProfileName,
 		LimitsApply:     limitsHolder.Apply,
 		LimitsRestart:   limitsHolder.RestartPending,
 		MemoryAvailable: readMemAvailable,
@@ -396,6 +435,7 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		Scheduler:     scheduler,
 		Limiter:       limiter,
 		AI:            ai,
+		Limits:        limitsHolder,
 		lock:          lock,
 	}
 	// HostGate **无条件常挂**：空基域时 MatchHost 对所有主机名返回 HostMain ⇒

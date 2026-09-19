@@ -3,6 +3,7 @@ package edge
 import (
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -326,6 +327,60 @@ func TestCheckOriginRefererFallback(t *testing.T) {
 	}
 }
 
+// TestCheckOriginLogsRejectionContext 钉死"应用子域写请求全 403"的现场可定位性
+// （2026-09-19）：每个被拒的写请求落**一条**上下文日志（自身源 / 判据名 / Origin /
+// Referer / Host / X-Forwarded-Proto），且**绝不含 Cookie**；放行时一条都不打。
+//
+// `origin="null"` 就是 no-referrer 策略下浏览器对同源表单 POST 发的形态
+// （HostReferrerPolicy 的注释与 docs/decisions/2026-09-19-referrer-policy-origin-null.md）。
+func TestCheckOriginLogsRejectionContext(t *testing.T) {
+	prev := logWarn
+	defer func() { logWarn = prev }()
+	var lines []string
+	logWarn = func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+
+	req := httptest.NewRequest("POST", "https://b."+testBase+"/note", nil)
+	req.TLS = &tls.ConnectionState{}
+	req.Header.Set("Origin", "null")
+	req.Header.Set("Referer", "https://b."+testBase+"/")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	// 哨兵：应用会话明文绝不能被日志带出来。
+	req.Header.Set("Cookie", "picoaide_app=secret-token-sentinel")
+
+	if CheckOrigin(req) {
+		t.Fatal("Origin: null 必须拒")
+	}
+	if len(lines) != 1 {
+		t.Fatalf("一次拒绝应落且只落一条日志，得到 %d 条：%v", len(lines), lines)
+	}
+	line := lines[0]
+	for _, want := range []string{
+		"reason=origin_malformed",
+		`self="https://b.` + testBase + `"`,
+		`origin="null"`,
+		`referer="https://b.` + testBase + `/"`,
+		`host="b.` + testBase + `"`,
+		`x-forwarded-proto="https"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("日志缺少 %q：%s", want, line)
+		}
+	}
+	if strings.Contains(line, "secret-token-sentinel") || strings.Contains(strings.ToLower(line), "cookie") {
+		t.Fatalf("日志带上了 Cookie/敏感值（凭证泄漏）：%s", line)
+	}
+
+	// 放行不打日志（低频：只有真被拒才写）。
+	lines = nil
+	req.Header.Set("Origin", "https://b."+testBase)
+	if !CheckOrigin(req) {
+		t.Fatal("同源写必须放行")
+	}
+	if len(lines) != 0 {
+		t.Fatalf("放行时打了日志：%v", lines)
+	}
+}
+
 func TestIsIdempotent(t *testing.T) {
 	for _, m := range []string{"GET", "HEAD", "OPTIONS"} {
 		if !IsIdempotent(m) {
@@ -552,8 +607,17 @@ func TestSecurityHeadersIncludeFrameAncestors(t *testing.T) {
 	if !strings.Contains(h.Get("Content-Security-Policy"), "default-src 'none'") {
 		t.Fatal("CSP 必须 default-src 'none'（§4.8）")
 	}
-	if h.Get("Referrer-Policy") != "no-referrer" {
-		t.Fatal("必须 no-referrer（§4.8）")
+	// Referrer-Policy 必须是 same-origin，**绝不能是 no-referrer**（2026-09-19 P0）：
+	// 应用子域最常见的写路径是应用自己的同源表单 POST（如内置演示应用的留言墙
+	// `<form method="post" action="/note">`），而 no-referrer 会让浏览器把它写成
+	// `Origin: null`（WHATWG Fetch "append a request Origin header"），CheckOrigin
+	// 于是全拒 ⇒ 应用写在真实浏览器里 100% 不可用。
+	// 变异验证：把 HostReferrerPolicy 改回 no-referrer ⇒ 本用例必红。
+	if got := h.Get("Referrer-Policy"); got != "same-origin" {
+		t.Fatalf("Referrer-Policy = %q，必须 same-origin（no-referrer 会让同源写请求带 Origin: null）", got)
+	}
+	if HostReferrerPolicy == "no-referrer" {
+		t.Fatal("HostReferrerPolicy 退回 no-referrer —— 应用内同源写请求会全部 403")
 	}
 }
 

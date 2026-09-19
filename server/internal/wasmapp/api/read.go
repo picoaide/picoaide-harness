@@ -47,6 +47,23 @@ func (h *Handlers) diagnostics(c *gin.Context) {
 		writeErr(c, oerr)
 		return
 	}
+	body, derr := h.diagnosticsPayload(c, appID, app)
+	if derr != nil {
+		writeErr(c, derr)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"diagnostics": body})
+}
+
+// diagnosticsPayload 组装诊断响应体（**员工面与管理面共用**）。
+//
+// 抽出来的唯一理由：两份出口各拼一次必然漂移 —— 同一份 wasm_call_events 在两个
+// 页面上给出不同的 hints/计数时，排障要先花时间吵"哪边是对的"。查询串
+// （limit/minutes）与保留期语义在这里一次解释清楚。
+//
+// app 只用于 enabled/frozen/deleted 三个标记；归属校验由调用方完成
+// （员工面 = ownedApp，管理面 = loadAdminApp）。
+func (h *Handlers) diagnosticsPayload(c *gin.Context, appID string, app *serverstore.WasmApp) (gin.H, *apperr.Error) {
 	limit := atoiDefault(c.Query("limit"), limits.DiagnosticsDefaultLimit)
 	window := windowFromQuery(c.Query("minutes"))
 	since := h.now().UTC().Add(-window)
@@ -54,13 +71,11 @@ func (h *Handlers) diagnostics(c *gin.Context) {
 
 	failures, err := diag.RecentFailures(ctx, h.opt.DB, appID, limit)
 	if err != nil {
-		writeErr(c, internalErr("查询失败", err))
-		return
+		return nil, internalErr("查询失败", err)
 	}
 	summary, err := diag.Summary(ctx, h.opt.DB, appID, since)
 	if err != nil {
-		writeErr(c, internalErr("查询失败", err))
-		return
+		return nil, internalErr("查询失败", err)
 	}
 	// hints 的来源有两条且都要给：
 	//   - summary.Hints（按出现次数排序的失败码对应建议）；
@@ -70,7 +85,7 @@ func (h *Handlers) diagnostics(c *gin.Context) {
 	for _, f := range failures {
 		hints = append(hints, diag.HintsFor(f.ReasonCode)...)
 	}
-	c.JSON(http.StatusOK, gin.H{"diagnostics": gin.H{
+	return gin.H{
 		"app_id":         appID,
 		"app_enabled":    app.Enabled,
 		"app_frozen":     app.FrozenAt != nil,
@@ -81,7 +96,7 @@ func (h *Handlers) diagnostics(c *gin.Context) {
 		"summary":        summary,
 		"failures":       failures,
 		"hints":          dedupeStrings(hints),
-	}})
+	}, nil
 }
 
 // windowFromQuery 解析诊断窗口（分钟）。缺省 24 h，上限 = 调用事件保留期
@@ -261,14 +276,23 @@ func logicalUnderDataRoot(dataRoot, path string) string {
 	return filepath.ToSlash(strings.TrimPrefix(clean, root+string(os.PathSeparator)))
 }
 
-// fileSize 返回文件字节数（不可读时返回 0：自省面不回错误码，占用为 0 已经足够表达
-// "这个库还没有内容"）。
+// fileSize 返回库的**磁盘占用**字节数：主库 + WAL（不可读时按 0 计）。
+//
+// 为什么要算上 `-wal`（2026-09-19，库切到 WAL 之后）：WAL 下已提交的数据可能还躺在
+// `app.db-wal` 里（未检查点），只 stat 主库会系统性低估用量 —— 自省面报的
+// size_bytes / usage_percent 是给管理员看"这个应用占了多少"的，低估会把
+// "快到 100 MB 了"显示成"还很小"。主库的 page_count 口径本来就把 WAL 里的逻辑页
+// 算进去，两边因此一致。
+//
+// 不可读时返回 0：自省面不回错误码，占用为 0 已经足够表达"这个库还没有内容"。
 func fileSize(path string) int64 {
-	st, err := os.Stat(path)
-	if err != nil {
-		return 0
+	var total int64
+	for _, p := range []string{path, path + "-wal"} {
+		if st, err := os.Stat(p); err == nil {
+			total += st.Size()
+		}
 	}
-	return st.Size()
+	return total
 }
 
 func usagePercent(used, max int64) float64 {
@@ -367,7 +391,8 @@ func (h *Handlers) catalog(c *gin.Context) {
 		return
 	}
 	// 目录是**登录后**的可见面（§8：客户端员工面）。不做匿名目录。
-	if _, aerr := h.currentUser(c); aerr != nil {
+	viewer, aerr := h.currentUser(c)
+	if aerr != nil {
 		writeErr(c, aerr)
 		return
 	}
@@ -377,6 +402,25 @@ func (h *Handlers) catalog(c *gin.Context) {
 	apps, err := serverstore.ListWasmApps(c.Request.Context(), h.opt.DB, serverstore.WasmAppFilter{})
 	if err != nil {
 		writeErr(c, internalErr("查询失败", err))
+		return
+	}
+	// 当前版本号（P1-4）：apps 行上只有 current_release_id，批量取一次 —— 与**管理面
+	// 同一份**实现（admin.go 的 WasmAppCurrentVersions），因为它就是同一个问题的答案。
+	//
+	// 为什么目录必须下发它：`wasm_app_list` 的工具描述要求模型"发布前先确认当前版本，
+	// 新版本号必须严格大于它"，而目录行原先**没有版本字段** ⇒ 模型只能猜；猜错的代价
+	// 是一次完整上传（≤32 MiB）+ 审计拒绝 + 消耗上传额度。
+	//
+	// 取不到不算错 —— 版本行可能已被保留策略回收，那一行显示空串（客户端按"未知"渲染）。
+	ids := make([]int64, 0, len(apps))
+	for _, a := range apps {
+		if a.CurrentReleaseID > 0 {
+			ids = append(ids, a.CurrentReleaseID)
+		}
+	}
+	versions, verr := serverstore.WasmAppCurrentVersions(c.Request.Context(), h.opt.DB, ids)
+	if verr != nil {
+		writeErr(c, internalErr("查询版本失败", verr))
 		return
 	}
 	out := make([]gin.H, 0, len(apps))
@@ -398,16 +442,15 @@ func (h *Handlers) catalog(c *gin.Context) {
 		}
 		// 负责人 = picoaide.app.json 的 owner（§4.2 的"负责人"声明）；平台归属
 		// （apps.owner）只是兜底 —— 两者同名不同物，不做互相推导（appcfg 包注释）。
-		responsible := ""
+		var cfg appcfg.Config
 		if a.ConfigJSON != "" {
-			var cfg appcfg.Config
-			if json.Unmarshal([]byte(a.ConfigJSON), &cfg) == nil {
-				responsible = strings.TrimSpace(cfg.Owner)
-			}
+			_ = json.Unmarshal([]byte(a.ConfigJSON), &cfg)
 		}
+		responsible := strings.TrimSpace(cfg.Owner)
 		if responsible == "" {
 			responsible = a.Owner
 		}
+		isOwner := a.Owner == viewer.Username || isSuperAdmin(viewer)
 		row := gin.H{
 			"app_id":      a.AppID,
 			"title":       a.Title,
@@ -422,9 +465,31 @@ func (h *Handlers) catalog(c *gin.Context) {
 			// 见 writeGone），但它仍列在目录里（理由见上面的目录条件）。
 			"enabled":    a.Enabled,
 			"updated_at": a.UpdatedAt,
+			// 当前线上版本（可能为空串：版本行被保留策略回收）。
+			"current_version": versions[a.CurrentReleaseID],
+			// 调用者是不是发布者：客户端据此给出"发新版"入口（非发布者发布必然 404）。
+			"is_owner": isOwner,
 		}
 		if origin := h.appOrigin(c, a.AppID); origin != "" {
 			row["entry_url"] = origin
+		}
+		// 发布者本人额外拿到 purpose / whitelist：**发布表单的预填基线**（P1-3）。
+		//
+		// 为什么限定发布者本人：whitelist 是账号名单、purpose 是内部用途声明，而目录对
+		// 全体员工可见（R38）—— 无条件下发等于把每个应用的准入名单摊开。发布新版只能由
+		// 发布者本人做（ownedApp 对非发布者一律 404），所以"作者的发布表单要能预填"与
+		// "名单不外泄"同时成立的唯一形态就是按调用者下发。
+		//
+		// 为什么必须有这两个字段：发布是**整体替换配置**（publish.go 的 prepare 不做
+		// 逐字段合并）。whitelist 模式的应用若拿不到原名单，作者只能凭空重填，而
+		// access=whitelist + 空名单会被服务端一律拒（appcfg.Validate）。
+		if isOwner {
+			row["purpose"] = cfg.Purpose
+			whitelist := cfg.Whitelist
+			if whitelist == nil {
+				whitelist = []string{}
+			}
+			row["whitelist"] = whitelist
 		}
 		// R36：目录**不**显示额度/用量 —— 这里刻意不返回任何用量字段。
 		out = append(out, row)

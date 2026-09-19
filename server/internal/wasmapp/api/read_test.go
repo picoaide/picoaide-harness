@@ -248,6 +248,11 @@ func TestCatalogListsEveryAppWithAccessAndState(t *testing.T) {
 		if _, ok := row["visible"]; ok {
 			t.Fatalf("目录行不得再有 visible 字段（2026-09-18 收敛为 access）: %+v", row)
 		}
+		// P1-4：目录必须下发**当前版本**（`wasm_app_list` 的工具描述要求模型"先查
+		// 当前版本，新版本号必须严格大于它"，没有这个字段模型只能猜）。
+		if row["current_version"] != "1.0.0" {
+			t.Fatalf("%s 的 current_version = %v, want 1.0.0（与 /wasm-apps 管理面同源）", appID, row["current_version"])
+		}
 	}
 	// 下架的应用仍在目录里，但带 enabled=false（UI 据此标"已下架"）。
 	if row, ok := seen["offline-tool"]; !ok {
@@ -277,5 +282,47 @@ func TestCatalogListsEveryAppWithAccessAndState(t *testing.T) {
 		if _, ok := row[banned]; ok {
 			t.Fatalf("目录不得含 %q（R36）: %+v", banned, row)
 		}
+	}
+	// ---- P1-3：`is_owner` 与"发布者专有字段"按调用者下发 ----
+	//
+	// bob 不是任何一行的发布者：不得拿到 whitelist / purpose（账号名单与内部用途
+	// 不该摊给全体员工），is_owner 一律 false。
+	for appID, row := range seen {
+		if row["is_owner"] != false {
+			t.Fatalf("非发布者看到的 %s 必须 is_owner=false: %+v", appID, row)
+		}
+		for _, authorOnly := range []string{"purpose", "whitelist"} {
+			if _, ok := row[authorOnly]; ok {
+				t.Fatalf("非发布者不得拿到 %s（账号名单/用途声明只给发布者；P1-3）: %+v", authorOnly, row)
+			}
+		}
+	}
+	// alice 是全部应用的发布者：必须拿到预填所需的三样东西（access 上面已断言）。
+	wa := e.req(http.MethodGet, "/api/client/v2/apps/wasm/catalog", e.tokens["alice"], nil)
+	var owned struct {
+		Apps []map[string]any `json:"apps"`
+	}
+	e.decodeJSON(wa, http.StatusOK, &owned)
+	byID := map[string]map[string]any{}
+	for _, a := range owned.Apps {
+		byID[a["app_id"].(string)] = a
+	}
+	own := byID["listed-tool"]
+	if own == nil {
+		t.Fatalf("发布者本人也必须能列出该应用: %v", byID)
+	}
+	if own["is_owner"] != true {
+		t.Fatalf("发布者本人的行必须 is_owner=true（客户端据此给出「发新版」入口）: %+v", own)
+	}
+	if own["purpose"] != "演示：给团队共享一个小工具" {
+		t.Fatalf("发布者必须拿到 purpose（发布表单预填基线）: %v", own["purpose"])
+	}
+	if _, ok := own["whitelist"]; !ok {
+		t.Fatalf("发布者必须拿到 whitelist（发布是整体替换配置，名单拿不回来只能凭空重填）: %+v", own)
+	}
+	// 名单内容逐条对拍（whitelist-tool 配了 alice）。
+	wl, ok := byID["whitelist-tool"]["whitelist"].([]any)
+	if !ok || len(wl) != 1 || wl[0] != "alice" {
+		t.Fatalf("发布者拿到的 whitelist 必须是配置里的那份: %+v", byID["whitelist-tool"]["whitelist"])
 	}
 }

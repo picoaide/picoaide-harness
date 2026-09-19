@@ -97,7 +97,8 @@ func TestSnapshotExecutorFull(t *testing.T) {
 	o.Scheduler = sch
 	// 占满全局槽。
 	var tickets []*queue.Ticket
-	// 每应用并发恒为 1（§4.6）⇒ 占满全局槽必须用不同应用。
+	// 占满全局槽要用不同应用：同应用的并发另有上限（app_running，默认 4），
+	// 用它占槽会让"全局满载"与"单应用满载"混淆。
 	for i := 0; i < limits.GlobalInstances; i++ {
 		tk, err := sch.Acquire(t.Context(), "app-"+strconv.Itoa(i), int64(i+1))
 		if err != nil {

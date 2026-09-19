@@ -209,7 +209,7 @@
 | 每应用队列长度 | **32** | 超出 429 + `Retry-After` |
 | 每用户占槽 | **按应用计**：同时最多 1 个在跑、队列中最多 4 个 | 防单用户占满该应用队列 |
 | **每用户全局在跑上限** | **4**（跨应用聚合） | 否则单用户 20 个应用可占满全局 32 槽 |
-| 每应用并发 | **恒为 1**（串行） | 与"每应用一连接"一致 |
+| 每应用并发 | **4**（读并发；写仍串行） | 2026-09-19 起 appdb 已开 WAL + 1 写 N 读连接池，队列默认值随之上调（控制台 `app_running` 可在 1–全局并发之间调）；决策与回退见 `docs/decisions/2026-09-19-wasm-app-concurrency-default.md` |
 | 全局并发实例 | **32**（配合 64 MiB/实例 ≈ 2 GiB 上界） | 防跨应用耗尽 |
 | **匿名限流**（R35） | 全局匿名令牌桶（默认 3000 次/分）+ 每 IP 60 次/分；**启用子域却未显式配置 `PICOAI_TRUSTED_PROXIES` ⇒ 拒绝启动**；⚠️ `docker-compose.yml:98` 默认注入 `172.28.0.2` ⇒ 自检必须能区分"compose 默认值"与"管理员显式配置"，否则要么永远拒启、要么形同虚设 | 缺省只信回环；错配会让全部匿名流量坍缩进同一桶 = 全组织 429（本仓已有同族事故） |
 | 响应缓存 | 仅缓存 `assets.read` 的静态资源；键 `app_id + version + path`；动态响应一律不缓存 | 键必须含 `app_id` |
@@ -235,12 +235,55 @@
 
 | 项 | 值 | 说明 |
 |---|---|---|
-| **应用响应安全头（宿主独占，含 4xx/5xx）** | 宿主**强制**写 `Content-Security-Policy`（`default-src 'none'` + 自身源 `script`/`style`/`img`；`frame-ancestors 'none'`）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`；应用自带的同名头一律剥离 | 应用子域是公司域名下的任意 HTML/JS 宿主（R8/R37）⇒ **"谁写安全头"必须落在宿主**；对照渠道 SVG 的既有口径（`channel/svg_guard.go`） |
+| **应用响应安全头（宿主独占，含 4xx/5xx）** | 宿主**强制**写 `Content-Security-Policy`（`default-src 'none'` + 自身源 `script`/`style`/`img`；`frame-ancestors 'none'`）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: same-origin`；应用自带的同名头一律剥离 | 应用子域是公司域名下的任意 HTML/JS 宿主（R8/R37）⇒ **"谁写安全头"必须落在宿主**；对照渠道 SVG 的既有口径（`channel/svg_guard.go`）。⚠️ **Referrer-Policy 必须是 `same-origin`，绝不能是 `no-referrer`**（2026-09-19 修正，见 §4.8.1）：no-referrer 下浏览器把应用/主站的**同源表单 POST** 写成 `Origin: null`，跨源写防护与换票的 `Origin == 自身源` 判据必然失败 ⇒ 应用写功能与员工登录 100% 不可用 |
 | 响应头白名单 | `content-type`（限定集合）、`cache-control`、`content-disposition`（仅 `inline`）、`x-content-type-options` | Cookie 由宿主独占 |
 | CR/LF | 头值中出现即拒 | 防响应拆分 |
 | 主机名反查 | `Host` 的**第一级标签** → `apps.app_id`（`kind=wasm_app`）；查不到**直接 404**，绝不回落主站 | 域名标签即 `app_id` |
 | **host 门控（allow-list）** | 应用子域**只挂应用路由树**——主站路由在子域**一律不注册**，而不是维护一份"禁命中清单"。至少覆盖：`/`、`/portal`、`/admin/*`（webadmin SPA，带账密表单）、`/healthz`、`/models`、`/chat/completions`、`/v1/*`、`/api/server/*`、`/updates/client/*` | 全仓 Go 代码**零 host 维度判断**（`Request.Host` 仅 `clientrelease.go:200` 一处、用于拼下载 URL），`/`、`/portal`、`/admin/*` 都在 NoRoute 分支、`/healthz` 在根引擎上 ⇒ 清单式禁命中必然漏（2026-09-17 复核）；断言见 §10.1 13a–13d |
 | 跨应用写防护 | 子域路由树最外层**无条件**校验：非幂等方法要求 `Origin == https://<app_id>.<应用基域>`（无 Origin 校验 Referer 前缀），且**早于**任何重定向/重写 | 同 eTLD+1 下 `SameSite=Strict` 挡不住 `<a>.<基域>` → `<b>.<基域>` 的跨源写 |
+
+#### 4.8.1 Referrer-Policy 必须是 `same-origin`（2026-09-19 P0 修正）
+
+**结论**：主站登录页 / 换票页（`session/pages.go`：两处 `<meta name="referrer">` +
+`writePage` 响应头）与应用子域（`edge.ApplyHostSecurityHeaders`）一律下发
+`Referrer-Policy: same-origin`。**任何一处退回 `no-referrer` 都会同时关掉员工登录与
+应用内的原生表单写**（同源 `fetch`/XHR 不受影响，见下），这不是"更严"而是故障。
+
+**根因**：按 WHATWG Fetch 的「append a request `Origin` header」算法，请求的 referrer
+policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面量 `null`**
+（同源也一样；只有 `cors` / `websocket` 模式才无条件写真实源）。
+⚠️ 实测口径（2026-09-19，真实 Chromium 微实验）：这里的"非 GET/HEAD 请求"指
+**navigation 模式**（原生表单提交/导航）；同源 `fetch()` 缺省 `mode=cors`，即使
+`no-referrer` 也照发真实 `Origin` —— 证据见 `temp/wasm-verify-indep/probe-micro-referrer.mjs`
+的对照表（`no-referrer` 行：form=`null`、fetch=真实源）；早前把 `fetch` 一并列入属过度声称，已收窄。
+本平台的写请求判据全部是 `Origin == 自身源`：
+
+| 端点 | 形态 | `no-referrer` 下 | 后果 |
+|---|---|---|---|
+| `POST /login` | 主站登录表单 | `Origin: null` ⇒ 403 | 员工浏览器登录入口 100% 不可用 |
+| `POST /app-ticket` | 换票页加载即自动提交 | `Origin: null` ⇒ 403 | 登录可见应用**完全无法进入** |
+| 应用子域同源写（如演示应用留言墙 `POST /note`） | 应用自己的 `<form method="post">` | `Origin: null` ⇒ 403「跨源写请求被拒」 | 应用功能在真实浏览器里必然失败 |
+
+同一根因的第四个面是**可观测性**：`checkMainOrigin` 只在"配置的 MainOrigin 与请求源
+不一致"时打日志，其余分支静默 ⇒ 线上只看到 403 而答不出原因。现已补齐：每次拒绝落一条
+含 `reason` / 期望源 / `Origin` / `Referer` / `Host` / `X-Forwarded-Proto` 的日志
+（`edge.CheckOrigin` 同款，且**不打 Cookie**）。
+
+**为什么是 `same-origin` 而不是别的**：跨源请求它一个字节都不发 Referer（原有"不向第三方
+泄漏页面 URL"的意图不变），同源请求仍带真实 `Origin`；`strict-origin-when-cross-origin`
+同样可用，但它会在 HTTPS→HTTP 降级时把 `Origin` 也写成 `null`（同一类故障的降级版本），
+而本平台这两个端点本来就 fail-closed 要求 https，`same-origin` 语义最窄、最贴合意图。
+
+**证据与判据**：真实 Chromium 微实验 `temp/wasm-probe/micro-referrer.mjs`
+（`no-referrer`→`Origin=null`、`same-origin`→真实 Origin）；服务端行为回归
+`TestLoginSubmitOriginMatrix`（同源 Origin 通行 / `null` 与跨源拒绝 / Referer 兜底仍在）；
+策略防回退 `TestPageReferrerPolicyIsSameOrigin`、`TestSecurityHeadersIncludeFrameAncestors`、
+`assertHostSecurityHeaders`。完整记录见
+`docs/decisions/2026-09-19-referrer-policy-origin-null.md`。
+
+**不在本次范围**：门户页（`/`、`/portal`，零脚本、无同源表单 POST）与管理台 SPA
+（`/admin/*`，CSRF 靠 token 而非 Origin）保持 `no-referrer`。若日后给管理面加
+**Origin 校验**，必须先改这两处 —— 否则管理端会踩同一个坑。
 
 ### 4.9 审计与可观测
 
@@ -303,7 +346,7 @@
 | 用错编译目标 | 上传期导入白名单直接拒 + hints 指明 `wasm32-wasip1` |
 | 版本号写错 / 忘写 changelog | 预检接口明确拒 + 结构化 hints |
 | 写出慢查询 | 每语句 5 s ctx 硬超时 + `SQLITE_LIMIT_*` + 诊断事件 |
-| 并发/队列参数想调优 | 没有这类参数——串行执行、队列 32、占槽 4、全局 32 全部平台固定 |
+| 并发/队列参数想调优 | 控制台可调（运维 → 应用中心 → 限制项）：`app_running`（每应用读并发，默认 4）、`app_db_readers`（每应用只读连接数，默认 4）；队列 32、占槽 4、全局 32 仍是平台固定；**写仍由平台串行**（SQLite 单写者） |
 
 ### 5.5 自动化约束（防止"护栏写在文档里但代码里没有"）
 
@@ -508,7 +551,7 @@
 
 ### 9.3 SKILL.md（AI 的操作手册）
 
-- 位置：随客户端分发的内置技能（`skills/picoaide-app-builder/`），**按 frontmatter 整目录同步**（沿用 `memory-evolve/skills/` 的既有语义）
+- 位置：**随服务端镜像发布**的内置技能（源码在服务端仓库的 `server/skills/app-builder/`，镜像内 `/opt/picoaide/skills/`；2026-09-19 从客户端 vendored 包迁入并改名 `picoaide-app-builder` → `app-builder`），由服务端 `skillseed` 打包下发（`GET /api/client/v2/skills/builtin`）、客户端在能力中心**按需安装**；**不再**走客户端插件的整目录同步
 - 结构：小 `SKILL.md`（何时用 + 黄金路径 + 硬约束）+ `references/`（ABI、宿主函数、`limits`、发布、诊断）+ `examples/`（Go 一份，进 CI 真编译，白名单由它 dump 生成）
 - **单一真源**：约束表与 ABI 参考**从 `limits.go` / 契约定义生成**（`go generate` 出产物并提交，构建期比对），skill 带 `x-abi-version`
 - ⚠️ skill 是**客户可见交付物**：不得出现真实客户域名（用占位符）

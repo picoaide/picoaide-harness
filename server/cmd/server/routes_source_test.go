@@ -169,11 +169,15 @@ var wasmGatedRoutes = []string{
 	"PUT /api/server/admin/wasm-apps/domain",
 	"GET /api/server/admin/wasm-apps/limits",
 	"PUT /api/server/admin/wasm-apps/limits",
-	// ⚠️ 2026-09-19 二次踩坑记录：这里曾被写入 5 条**只存在于并发会话工作树、
-	// 从未提交**的管理路由（`:app_id/releases`、`:app_id/releases/:version/
-	// approve|reject`、`:app_id/diagnostics`、`runtime`）—— 后果是"提交态"
-	// 直接失败（干净 `git archive HEAD` 上 TestRouteAssemblyGatedSlicesAreDeclared
-	// 报"声明表里的路由并未消失"）。它们提交后（连同 router.go）再登记到这里。
+	// 2026-09-19 审核闭环 + 运行诊断（router.go 已随本轮提交进仓 ⇒ 按约定登记）。
+	// 与本站的历史注释对照：这 5 条曾只存在于并发会话工作树、未提交，那时把它们
+	// 写进本表会让"干净提交态"报"声明表里的路由并未消失"；现在它们已在提交面内，
+	// 不登记则反向报"消失却没登记"。
+	"GET /api/server/admin/wasm-apps/:app_id/releases",
+	"POST /api/server/admin/wasm-apps/:app_id/releases/:version/approve",
+	"POST /api/server/admin/wasm-apps/:app_id/releases/:version/reject",
+	"GET /api/server/admin/wasm-apps/:app_id/diagnostics",
+	"GET /api/server/admin/wasm-apps/runtime",
 }
 
 // sessionGatedRoutes：d.WasmSession == nil 时消失（router.Register 的
@@ -275,7 +279,7 @@ func TestRouteAssemblyProbesAndHTMLFacesPresent(t *testing.T) {
 // （测试必须走生产函数，不许自建）。
 //
 // ⚠️ 能力边界（2026-09-19 第四轮审计逐条实测，不夸大）：判据是**字面文本**
-// `router.Register(`，因此
+// `router.Register` + `(`（本文件里一律这样拼接书写 —— 见下方"会误报"一条），因此
 //   - 可被绕过：别名导入（`rt.Register(`）、取函数值（`f := router.Register`）
 //     都能编译出第二棵装配树而这里看不见 —— 它拦的是"顺手再抄一份 Deps"，
 //     不是蓄意规避；

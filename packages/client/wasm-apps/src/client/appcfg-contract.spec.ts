@@ -21,7 +21,11 @@
  *   - 把 `appcfg-contract.ts` 的 `ACCESS_MODES` 改成 `['public','login']`（少一个模式）
  *     ⇒ 「access 三模式」红（`compareWithAppcfgJson` 自身的一致性用例）；
  *   - 把 `WHITELIST_MAX` 改成 1000 ⇒ 「白名单上限与 limits.go 一致」红；
- *   - 把 `APP_ID_PATTERN` 放宽成 `/^[a-z0-9-]+$/` ⇒ 同上红。
+ *   - 把 `APP_ID_PATTERN` 放宽成 `/^[a-z0-9-]+$/` ⇒ 同上红；
+ *   - 把 `WASM_MAX_BYTES` 改成 64 MiB（或把 limits.go 的 `WasmMaxBytes` 改成 64<<20）
+ *     ⇒ 「.wasm 体积上限与 limits.go 一致」红；
+ *   - 把 `read.go` catalog 行的 `"app_id"` 改成 `"appId"`（P2-10 的场景）
+ *     ⇒ 「目录行字段对拍」整组红（含一条对改写文本自证的用例）。
  */
 import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -33,11 +37,17 @@ import {
   APP_ID_MAX_LENGTH,
   APP_CONFIG_FIELDS,
   APP_ID_PATTERN,
+  CATALOG_ROW_AUTHOR_FIELDS,
+  CATALOG_ROW_CONDITIONAL_FIELDS,
+  CATALOG_ROW_FIELDS,
   DEFAULT_ACCESS,
   FIRST_RELEASE_REQUIRED_FIELDS,
   LIMITS_GO_REPO_PATH,
+  READ_GO_REPO_PATH,
   REMOVED_APP_CONFIG_FIELDS,
+  REMOVED_CATALOG_ROW_FIELDS,
   VERSION_PATTERN,
+  WASM_MAX_BYTES,
   WHITELIST_MAX,
   compareWithAppcfgJson,
 } from './appcfg-contract.ts'
@@ -64,6 +74,59 @@ function goBacktickConst(source: string, name: string): string | null {
 function goNumberConst(source: string, name: string): number | null {
   const match = new RegExp(`${name}\\s*=\\s*(\\d+)`, 'u').exec(source)
   return match === null ? null : Number(match[1])
+}
+
+/**
+ * 从 Go 源码里抠一个**可能写成左移**的字节常量（`32 << 20` / `2000`）。
+ *
+ * `limits.go` 的体积上限全部写作 `N << 20`，而 `goNumberConst` 只认裸数字 ——
+ * 用它读 `WasmMaxBytes` 会得到 `32`，对拍就永远"相等"（把 32 当成 32 MiB）。
+ * @param source - Go 源码。
+ * @param name - 常量名。
+ * @returns 数值；找不到返回 `null`。
+ */
+function goByteSizeConst(source: string, name: string): number | null {
+  const match = new RegExp(`${name}\\s*=\\s*(\\d+)(?:\\s*<<\\s*(\\d+))?`, 'u').exec(source)
+  if (match === null) return null
+  const base = Number(match[1])
+  const shift = match[2] === undefined ? 0 : Number(match[2])
+  return base * 2 ** shift
+}
+
+/**
+ * 抠出 `read.go` 里 **catalog 行**的字段名（`gin.H{…}` 字面量 + `row["…"] = ` 赋值）。
+ *
+ * 为什么用正则抠源码而不是跑 Go（P2-10）：这是客户端包唯一能对拍服务端字段集合的
+ * 位置（客户端不能 import Go 包，也不该为一条契约断言引入代码生成）。抠法只依赖
+ * "字段名写成字符串键"这一个稳定形状；抠不出来（函数改名/搬走）⇒ 返回 `null`，
+ * 用例红 —— 而不是静默通过。
+ * @param source - `server/internal/wasmapp/api/read.go` 的全文。
+ * @returns 字面量键与赋值键；找不到 `catalog` 函数时返回 `null`。
+ */
+export function catalogRowKeysFromReadGo(source: string): { literal: string[], assigned: string[] } | null {
+  const start = source.indexOf('func (h *Handlers) catalog(')
+  if (start < 0) return null
+  const nextFunc = source.indexOf('\nfunc ', start)
+  const body = source.slice(start, nextFunc < 0 ? undefined : nextFunc)
+  // 去掉行注释：注释里的大括号会让下面的花括号配对跑偏。
+  const stripped = body.replace(/\/\/[^\n]*/gu, '')
+  const literal: string[] = []
+  const marker = 'row := gin.H{'
+  const blockStart = stripped.indexOf(marker)
+  if (blockStart >= 0) {
+    let depth = 0
+    let end = stripped.length - 1
+    for (let i = blockStart + marker.length - 1; i < stripped.length; i += 1) {
+      if (stripped[i] === '{') depth += 1
+      else if (stripped[i] === '}') {
+        depth -= 1
+        if (depth === 0) { end = i; break }
+      }
+    }
+    for (const match of stripped.slice(blockStart, end + 1).matchAll(/"([A-Za-z_]+)":/gu)) literal.push(match[1]!)
+  }
+  const assigned = [...stripped.matchAll(/row\["([A-Za-z_]+)"\]/gu)].map(match => match[1]!)
+  return { literal, assigned }
 }
 
 /**
@@ -167,6 +230,97 @@ describe('单一真源对拍：limits.go（app_id / 版本号 / 白名单上限�
     const max = goNumberConst(limits ?? '', 'AppConfigWhitelistMax')
     expect(max, missingHint('AppConfigWhitelistMax')).not.toBeNull()
     expect(WHITELIST_MAX).toBe(max)
+  })
+
+  /**
+   * P1-10：体积上限的跨端契约。
+   *
+   * 变异验证：把 `appcfg-contract.ts` 的 `WASM_MAX_BYTES` 改成 `64 * 1024 * 1024`
+   * ⇒ 本条红；把 `limits.go` 的 `WasmMaxBytes` 改成 `64 << 20` ⇒ 同样红。
+   */
+  it('.wasm 体积上限与 limits.go 的 WasmMaxBytes 一致（发新版时的本地闸门用它）', () => {
+    const max = goByteSizeConst(limits ?? '', 'WasmMaxBytes')
+    expect(max, missingHint('WasmMaxBytes')).not.toBeNull()
+    expect(WASM_MAX_BYTES).toBe(max)
+    // 顺带钉住"确实是 32 MiB"：`<< 20` 的读法错了会得到 32（对拍会假绿）。
+    expect(WASM_MAX_BYTES).toBe(32 * 1024 * 1024)
+  })
+})
+
+/**
+ * P2-10：**目录行的字段契约**对拍（服务端 `read.go` 的 catalog 行 ↔ 客户端解析）。
+ *
+ * 为什么这条闸必须存在：目录面刚经历过一次字段改名（`visible`/`login_required`
+ * → `access`），而两侧只有各自手写的夹具在守。字段一改名，客户端 `parseCatalog`
+ * 会把**每一行**都跳过（没有合法 `app_id`），面板显示"还没有可用的应用" ——
+ * 一个把契约漂移说成"你没有应用"的假答案，没有任何错误提示。
+ *
+ * 变异验证（改回旧实现/改坏服务端必红）：
+ *   - 把 `read.go` catalog 行的 `"app_id"` 改成 `"appId"` ⇒ 本组第 1 条红
+ *     （第 2 条用合成的改写文本自证这条闸真的会红）；
+ *   - 客户端 `CATALOG_ROW_FIELDS` 少一个字段（或服务端多一个）⇒ 第 1 条红。
+ */
+describe('单一真源对拍：目录行字段（read.go 的 catalog ↔ 客户端解析）', () => {
+  const readGo = readRepoFile(READ_GO_REPO_PATH)
+
+  /** 客户端声明的**全部可能键**（无条件 + 有条件 + 仅发布者）。 */
+  const expectedKeys = [
+    ...CATALOG_ROW_FIELDS,
+    ...CATALOG_ROW_CONDITIONAL_FIELDS,
+    ...CATALOG_ROW_AUTHOR_FIELDS,
+  ].slice().sort()
+
+  /** 把服务端源码里的键集合抠出来（抠不出来 ⇒ 抛，用例红）。 */
+  const actualKeys = (source: string): string[] => {
+    const keys = catalogRowKeysFromReadGo(source)
+    if (keys === null) throw new Error(`${READ_GO_REPO_PATH} 里找不到 catalog 的 row 构造（函数被改名/搬走了？）`)
+    return [...new Set([...keys.literal, ...keys.assigned])].sort()
+  }
+
+  /** 只在 **catalog 函数体内**做替换（整文件第一处 `"app_id":` 在 diagnostics 里）。 */
+  const mutateCatalog = (source: string, from: string, to: string): string => {
+    const start = source.indexOf('func (h *Handlers) catalog(')
+    expect(start, 'read.go 里必须还有 catalog 函数').toBeGreaterThanOrEqual(0)
+    const nextFunc = source.indexOf('\nfunc ', start)
+    const body = source.slice(start, nextFunc < 0 ? undefined : nextFunc)
+    expect(body, `catalog 函数体里必须有 ${from}`).toContain(from)
+    return source.slice(0, start) + body.replace(from, to) + source.slice(nextFunc < 0 ? source.length : nextFunc)
+  }
+
+  it('read.go 可读，且 catalog 行的键集合与客户端声明的完全相等', () => {
+    expect(readGo, `${READ_GO_REPO_PATH} 读不到`).not.toBeNull()
+    expect(actualKeys(readGo ?? '')).toEqual(expectedKeys)
+  })
+
+  it('已删除的字段名不得复活（visible / login_required 两侧都不许有）', () => {
+    const keys = actualKeys(readGo ?? '')
+    for (const removed of REMOVED_CATALOG_ROW_FIELDS) {
+      expect(keys, `目录行不得再有 ${removed}（2026-09-18 收敛为 access）`).not.toContain(removed)
+    }
+  })
+
+  it('这份对拍真的会因改名变红（对改写后的 read.go 自证）', () => {
+    const source = readGo ?? ''
+    // 模拟"服务端把 app_id 改成 appId"这一次改名：键集合必须因此不等。
+    const mutated = mutateCatalog(source, '"app_id":', '"appId":')
+    expect(mutated).not.toBe(source)
+    expect(actualKeys(mutated)).not.toEqual(expectedKeys)
+    // 反向自证：原文件必须**相等** —— 否则上面那条"不等"可能只是因为抠不出来。
+    expect(actualKeys(source)).toEqual(expectedKeys)
+  })
+
+  it('发布者专有字段确实只写在 `if isOwner` 里（名单不下发给所有人）', () => {
+    const source = readGo ?? ''
+    const keys = catalogRowKeysFromReadGo(source)
+    expect(keys).not.toBeNull()
+    // 字面量（无条件）里不许出现 author 字段 —— 它们只能走 `row["…"] =` 赋值。
+    for (const field of CATALOG_ROW_AUTHOR_FIELDS) {
+      expect(keys!.literal, `${field} 不得是无条件下发的字面量键`).not.toContain(field)
+      expect(keys!.assigned, `${field} 必须按调用者赋值下发`).toContain(field)
+    }
+    // 自证：把 `whitelist` 挪成 gin.H 的字面量键（= 对所有人下发），这条判据变红。
+    const leaked = mutateCatalog(source, '"enabled":    a.Enabled,', '"enabled": a.Enabled,\n\t\t\t"whitelist": cfg.Whitelist,')
+    expect(catalogRowKeysFromReadGo(leaked)!.literal).toContain('whitelist')
   })
 })
 

@@ -9,6 +9,9 @@
 //	/q?sql=SELECT%201          db.query（返回行数/首行）
 //	/exec?sql=...              db.exec
 //	/log?msg=xx&level=info     log 宿主调用（验证 logbuf 与宿主日志出口）
+//	/slowtx?ms=800&v=x&mode=rollback
+//	                           tx_begin → db.exec(INSERT) → sleep ms → tx_rollback|tx_commit
+//	                           （事务所有权判据的夹具：事务存续期间让别的请求来写）
 package main
 
 import (
@@ -18,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const frameMagic = 0x1e
@@ -122,6 +126,37 @@ func main() {
 			"message": orDefault(req.Query["msg"], "dbapp log"),
 		})
 		record(out, res, code, msg)
+	case "/slowtx":
+		// 事务所有权判据的夹具（2026-09-19，app_running>1）：开事务 → 写一行 →
+		// 持有 ms 毫秒 → 回滚（默认）或提交。事务存续期间，同应用的**另一个请求**
+		// 的 db.exec 必须被拒（否则它的写会随本次回滚一起消失）。
+		ms, _ := strconv.Atoi(req.Query["ms"])
+		if ms <= 0 {
+			ms = 500
+		}
+		v := orDefault(req.Query["v"], "tx-row")
+		res, code, msg := call("tx_begin", map[string]any{})
+		record(out, res, code, msg)
+		if code != "" {
+			break
+		}
+		var tx struct {
+			TxID int64 `json:"tx_id"`
+		}
+		_ = json.Unmarshal(res, &tx)
+		out["tx_id"] = tx.TxID
+		_, wcode, wmsg := call("db.exec", map[string]any{
+			"sql":  "INSERT INTO t (id, v) VALUES (?, ?)",
+			"args": []any{9001, v},
+		})
+		out["write_code"], out["write_message"] = wcode, wmsg
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		method := "tx_rollback"
+		if req.Query["mode"] == "commit" {
+			method = "tx_commit"
+		}
+		_, fcode, fmsg := call(method, map[string]any{"tx_id": tx.TxID})
+		out["finish_code"], out["finish_message"] = fcode, fmsg
 	default:
 		out["error"] = "unknown path"
 	}

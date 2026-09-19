@@ -33,7 +33,8 @@ type DB interface {
 	Query(ctx context.Context, p abi.SQLParams) (abi.QueryResult, error)
 	// Exec 执行单条写语句（仅 INSERT/UPDATE/DELETE）。
 	Exec(ctx context.Context, p abi.SQLParams) (abi.ExecResult, error)
-	// Begin 开启事务并返回事务标识（每应用并发恒为 1，故同时最多一个事务）。
+	// Begin 开启事务并返回事务标识（同时最多一个事务；每应用并发布放后，宿主按请求
+	// 校验事务所有权 —— 非持有者的读写会被拒绝，见 appserver 的每请求包装层）。
 	Begin(ctx context.Context) (abi.TxResult, error)
 	// Commit 提交当前事务；p.TxID 非零时校验一致性。
 	Commit(ctx context.Context, p abi.TxParams) error

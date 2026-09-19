@@ -10,11 +10,38 @@ export class ApiError extends Error {
    * 缺省 undefined,既有调用方行为不变。
    */
   detail?: Record<string, unknown>
-  constructor(status: number, code: string, message: string, detail?: Record<string, unknown>) {
+  /**
+   * wasm 平台错误信封的结构化段(2026-09-19,P1-6):
+   * `{"error":{code,message,details,hints}}`(服务端 apperr.EnvelopeOf)。
+   *
+   * 与 `detail` 的分工:通用信封把附加信息放在**顶层** `detail`(错误上报分类),
+   * wasm 平台放在 `error.details`。两者都读进 `details`(优先 error.details),
+   * `detail` 字段保持不变,免得既有分类链路被这条改动带塌。
+   */
+  details?: Record<string, unknown>
+  /**
+   * 服务端的**可操作建议**(hints)。恒为数组(缺省 []),调用方不必判空。
+   *
+   * 为什么必须有这一条:hints 是 wasm 平台错误信封的一等公民(设计基线明写
+   * "第一消费者是 AI"),此前 `ApiError` 根本没有这个字段 —— 页面里
+   * `err?.hints` 是死代码,服务端说的"还差什么条件"在管理端全部丢失,
+   * 管理员只能看到一句 message。
+   */
+  hints: string[]
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    detail?: Record<string, unknown>,
+    hints: string[] = [],
+    details?: Record<string, unknown>,
+  ) {
     super(message)
     this.code = code
     this.status = status
     this.detail = detail
+    this.hints = hints
+    this.details = details
   }
 }
 
@@ -87,6 +114,8 @@ export async function request<T = any>(path: string, init: RequestInit = {}, ret
     let code = 'INTERNAL'
     let message = fallbackMessage(res.status)
     let detail: Record<string, unknown> | undefined
+    let details: Record<string, unknown> | undefined
+    let hints: string[] = []
     try {
       const body = await res.json()
       code = body?.error?.code ?? code
@@ -95,6 +124,17 @@ export async function request<T = any>(path: string, init: RequestInit = {}, ret
       // 由服务端放在 detail 段;带上它页面才能给出可读原因。
       if (body?.detail && typeof body.detail === 'object') {
         detail = body.detail as Record<string, unknown>
+      }
+      // wasm 平台信封(P1-6):可操作建议在 error.hints、结构化字段在 error.details。
+      // 两处都从**嵌套的 error 段**读 —— 只读顶层 body.detail 会让管理端把
+      // 服务端说清楚的原因/hints 全部丢掉(页面上只剩一句 message)。
+      const rawHints = body?.error?.hints
+      if (Array.isArray(rawHints)) {
+        hints = rawHints.filter((h: unknown): h is string => typeof h === 'string' && h !== '')
+      }
+      const rawDetails = body?.error?.details ?? body?.detail
+      if (rawDetails && typeof rawDetails === 'object') {
+        details = rawDetails as Record<string, unknown>
       }
     } catch {
       /* keep the Chinese fallback */
@@ -109,7 +149,7 @@ export async function request<T = any>(path: string, init: RequestInit = {}, ret
       await refreshCsrf()
       return request<T>(path, init, true)
     }
-    throw new ApiError(res.status, code, message, detail)
+    throw new ApiError(res.status, code, message, detail, hints, details)
   }
   return res.json() as Promise<T>
 }

@@ -78,6 +78,104 @@ export interface PublishFile {
   bytes: Uint8Array
 }
 
+/**
+ * 「对已有应用发新版」时目录行提供的**预填基线**（P1-3）。
+ *
+ * 为什么必须有它：发布表单原先的初值是硬编码的（`access = login`、
+ * `data_sensitivity = internal`），而对已有应用发新版时提交会**无条件**带上全部
+ * 五个配置字段 —— 作者不动单选框，一个 `access=public` 的应用就会静默变成
+ * `login`（访问范围被改写，服务端还会因此写一条 `wasm_app_access_change` 审计）。
+ * 预填是这条链路上唯一的"当前值"来源。
+ *
+ * `purpose` / `whitelist` 只在**发布者本人**的目录行里出现（服务端按调用者下发，
+ * 理由见 `appcfg-contract.ts` 的 `CATALOG_ROW_AUTHOR_FIELDS`）：它们缺席时表单
+ * 留空，由作者补填，而不是拿一个编造的默认值凑数。
+ */
+export interface PublishTarget {
+  appId: string
+  title: string
+  /** 当前线上的访问级别（服务端目录行的 `access`）。 */
+  access: AccessMode
+  /** 当前线上版本（服务端目录行的 `current_version`；空串 = 服务端没有版本行）。 */
+  currentVersion: string
+  /** 负责人声明（目录行的 `responsible`；不是平台归属）。 */
+  owner: string
+  /** 用途声明（仅发布者本人可见）。 */
+  purpose?: string
+  /** 准入名单（仅发布者本人可见）。 */
+  whitelist?: string[]
+}
+
+/**
+ * 发布表单的**初始值**（从 {@link PublishTarget} 推出；纯函数，便于单测）。
+ *
+ * 纪律（P1-3）：
+ *  - 有基线 ⇒ `access` / `whitelist` / `purpose` / `owner` / `title` **全部预填**；
+ *  - `data_sensitivity` **不在这个类型里** —— 平台没有它的默认值
+ *    （`appcfg.json` 的 `data_sensitivity.hints` 原话："不要指望界面或平台替你填"），
+ *    表单初值恒为空串，必须由作者声明。类型里没有这个键是**结构性**保证：
+ *    想给它塞默认值就得先改这个类型（那时对拍用例会红）。
+ */
+export interface PublishFormInitial {
+  appId: string
+  title: string
+  access: AccessMode
+  /**
+   * 当前线上的访问级别；`undefined` = **首版**（没有"当前值"可比，
+   * 因此也不会有"改范围"的二次确认）。
+   */
+  currentAccess: AccessMode | undefined
+  /** 当前线上版本（展示用；**不预填版本号输入框** —— 预填必然撞"严格递增"）。 */
+  currentVersion: string
+  whitelistText: string
+  purpose: string
+  owner: string
+}
+
+/**
+ * 由目录行基线推出表单初值。
+ *
+ * 无基线（首版发布）时 `access` 仍是 {@link DEFAULT_ACCESS}（写漏不该让应用意外
+ * 变成匿名可达），但 `currentAccess` 为 `undefined` —— "缺省选中"与"已有当前值"
+ * 是两件事，混在一起就没了"访问范围要被改动"的判据。
+ * @param target - 目录行基线；首版发布时为 `undefined`。
+ * @returns 表单初值。
+ */
+export function initialFormState(target?: PublishTarget): PublishFormInitial {
+  if (target === undefined) {
+    return {
+      appId: '',
+      title: '',
+      access: DEFAULT_ACCESS,
+      currentAccess: undefined,
+      currentVersion: '',
+      whitelistText: '',
+      purpose: '',
+      owner: '',
+    }
+  }
+  return {
+    appId: target.appId,
+    title: target.title,
+    access: target.access,
+    currentAccess: target.access,
+    currentVersion: target.currentVersion,
+    whitelistText: (target.whitelist ?? []).join(', '),
+    purpose: target.purpose ?? '',
+    owner: target.owner,
+  }
+}
+
+/**
+ * 这次提交是否**改动了访问范围**（决定要不要二次确认）。
+ * @param initial - 表单初值。
+ * @param submitted - 本次选中的访问级别。
+ * @returns true = 与当前线上值不同（首版发布恒为 false：没有"当前值"）。
+ */
+export function changesAccess(initial: PublishFormInitial, submitted: AccessMode): boolean {
+  return initial.currentAccess !== undefined && initial.currentAccess !== submitted
+}
+
 /** 失败：服务端结构化错误**原样**（`details`/`hints` 一字不改）。 */
 export interface PublishFailure {
   ok: false

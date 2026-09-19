@@ -50,13 +50,16 @@ type typeColumn struct {
 }
 
 // Define 建表（宿主代执行，重复调用幂等）。实现 capapi.DB。
+//
+// 锁语义：整条 DDL 在 writeMu 下执行（写者独占）。db.define 是写原语，与 db.exec 互斥，
+// 但与 db.query 的读**不再互斥**（读走只读连接池）——读一条 SELECT 不会被建表挡住。
 func (d *DB) Define(ctx context.Context, p abi.DBDefineParams) (abi.DBDefineResult, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
 	if err := d.ensureReadyLocked(true); err != nil {
 		return abi.DBDefineResult{}, err
 	}
-	if d.tx != nil {
+	if d.inTx() {
 		// 事务内只允许 db.query/db.exec（§4.4「事务内宿主调用禁止」）：建表是 DDL，
 		// 放进事务会把「5 s 强制回滚」的语义搅浑（表结构变更回滚的边界由作者负责）。
 		return abi.DBDefineResult{}, denied("define_in_transaction",
@@ -65,7 +68,7 @@ func (d *DB) Define(ctx context.Context, p abi.DBDefineParams) (abi.DBDefineResu
 	}
 
 	// L4：本原语的每条宿主语句都跑在读写连接上，执行前复检它仍带全套限额（FIX-12）。
-	if _, cerr := d.checkedConnLocked(ctx, false); cerr != nil {
+	if _, cerr := d.checkedWriteConn(ctx); cerr != nil {
 		return abi.DBDefineResult{}, cerr
 	}
 
@@ -98,7 +101,7 @@ func (d *DB) Define(ctx context.Context, p abi.DBDefineParams) (abi.DBDefineResu
 		if _, err := d.execHostLocked(ctx, buildCreateTable(p.Table, cols)); err != nil {
 			return abi.DBDefineResult{}, err
 		}
-		d.cachedTables = n + 1
+		d.tables.Store(int64(n + 1))
 		return abi.DBDefineResult{Created: true, Table: p.Table, Columns: names}, nil
 	}
 
@@ -293,34 +296,42 @@ func buildCreateTable(table string, cols []abi.ColumnDef) string {
 
 // tableInfoLocked 读取表结构；表不存在时 exists=false。
 func (d *DB) tableInfoLocked(ctx context.Context, table string) (bool, []typeColumn, error) {
-	cctx, cancel := d.stmtContextLocked(ctx)
+	cctx, cancel := d.stmtContext(ctx)
 	defer cancel()
-	rows, err := d.rw.QueryContext(cctx, `SELECT name, type FROM pragma_table_info(?)`, table)
+	conn := d.writeConn()
+	if conn == nil {
+		return false, nil, apperr.New(apperr.CodeInternal, "appdb: 连接不可用（内部状态异常）")
+	}
+	rows, err := conn.QueryContext(cctx, `SELECT name, type FROM pragma_table_info(?)`, table)
 	if err != nil {
-		return false, nil, d.mapStmtErrorLocked(cctx, err)
+		return false, nil, d.mapStmtError(cctx, err)
 	}
 	defer rows.Close()
 	var out []typeColumn
 	for rows.Next() {
 		var c typeColumn
 		if err := rows.Scan(&c.name, &c.declType); err != nil {
-			return false, nil, d.mapStmtErrorLocked(cctx, err)
+			return false, nil, d.mapStmtError(cctx, err)
 		}
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
-		return false, nil, d.mapStmtErrorLocked(cctx, err)
+		return false, nil, d.mapStmtError(cctx, err)
 	}
 	return len(out) > 0, out, nil
 }
 
 // execHostLocked 执行宿主代写的语句（DDL 等），带预算与错误映射。
 func (d *DB) execHostLocked(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	cctx, cancel := d.stmtContextLocked(ctx)
+	cctx, cancel := d.stmtContext(ctx)
 	defer cancel()
-	res, err := d.rw.ExecContext(cctx, query, args...)
+	conn := d.writeConn()
+	if conn == nil {
+		return nil, apperr.New(apperr.CodeInternal, "appdb: 连接不可用（内部状态异常）")
+	}
+	res, err := conn.ExecContext(cctx, query, args...)
 	if err != nil {
-		return nil, d.mapStmtErrorLocked(cctx, err)
+		return nil, d.mapStmtError(cctx, err)
 	}
 	return res, nil
 }

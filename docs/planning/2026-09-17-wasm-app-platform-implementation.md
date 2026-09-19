@@ -35,7 +35,7 @@
 | 22 | 标识与版本规则 | `internal/wasmapp/registry/*` | §4.1、§10.5、§5.3 |
 | 23 | 数据模型与审计 app 维度 | `serverstore/wasmapps.go` + 迁移 `0069` + `audit.go`（追加） | §4.9、§5.3、§13 |
 | 24 | 路由与装配 | `internal/router/router.go`（追加）、`cmd/server/{main,wasmapp}.go` | §8、§6.1 |
-| 25 | AI 操作手册与作者文档 | `packages/vendor/memory-evolve/skills/picoaide-app-builder/*`、`docs/wasm-app-authoring.md` | §9.3、§9.4、R40/R42 |
+| 25 | AI 操作手册与作者文档 | `server/skills/app-builder/*`（2026-09-19 从 `packages/vendor/memory-evolve/skills/picoaide-app-builder/*` 迁入并改名）、`docs/wasm-app-authoring.md` | §9.3、§9.4、R40/R42 |
 
 ---
 

@@ -49,11 +49,25 @@ vi.mock('../api', () => ({
     // DNS/CONNECT/TLS/TIMEOUT/HTTP_4XX/HTTP_5XX 分类放在这里)。替身必须与
     // 真源同形,否则页面里 `err.detail.kind` 永远 undefined,失败分类静默丢失。
     detail?: Record<string, unknown>
-    constructor(status = 0, code = 'INTERNAL', message = '', detail?: Record<string, unknown>) {
+    // 2026-09-19(P1-6):真源还解析 wasm 平台信封的 error.details/error.hints,
+    // 替身缺这两个字段会让页面的 errorText() 恒等于 message —— 又一次
+    // "测试替身与真源不同形"的假绿。
+    details?: Record<string, unknown>
+    hints: string[]
+    constructor(
+      status = 0,
+      code = 'INTERNAL',
+      message = '',
+      detail?: Record<string, unknown>,
+      hints: string[] = [],
+      details?: Record<string, unknown>,
+    ) {
       super(message)
       this.status = status
       this.code = code
       this.detail = detail
+      this.hints = hints
+      this.details = details
     }
   },
 }))

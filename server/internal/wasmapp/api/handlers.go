@@ -122,6 +122,7 @@ type Options struct {
 	// 任何一个为 nil ⇒ 对应能力不可用（GET/PUT 会如实报错，不静默给假值）。
 	Limits          func() applimits.Limits
 	LimitsSource    func() string
+	LimitsProfile   func() string
 	LimitsApply     func(raw string) ([]string, *apperr.Error)
 	LimitsRestart   func() []string
 	MemoryAvailable func() int64
@@ -175,8 +176,18 @@ type Handlers struct {
 	AdminTransferOwner gin.HandlerFunc // PUT    /:app_id/owner
 	AdminFreeze        gin.HandlerFunc // POST   /:app_id/freeze
 	AdminReview        gin.HandlerFunc // PUT    /review  (R17 审核开关)
-	AdminBaseDomainGet gin.HandlerFunc // GET    /domain   (应用泛域名配置，2026-09-18)
-	AdminBaseDomainPut gin.HandlerFunc // PUT    /domain
+	// 审核队列（P0-1）：待审清单 + 通过/拒绝。R17 的开关一旦打开，新版本就停在
+	// pending —— 没有这三条，开关就等于"全组织再也发不出新版本"。
+	AdminReleases       gin.HandlerFunc // GET  /:app_id/releases?status=pending|approved|rejected|all
+	AdminApproveRelease gin.HandlerFunc // POST /:app_id/releases/:version/approve
+	AdminRejectRelease  gin.HandlerFunc // POST /:app_id/releases/:version/reject（可选 body {"reason":"..."}）
+	AdminBaseDomainGet  gin.HandlerFunc // GET    /domain   (应用泛域名配置，2026-09-18)
+	AdminBaseDomainPut  gin.HandlerFunc // PUT    /domain
+	// 管理面诊断与运行时水位（2026-09-19，P1-9/P2-4）：
+	//   diagnostics —— 同一份 diag 数据，出口从"发布者令牌"扩到管理会话；
+	//   runtime     —— 平台级只读水位（编译/执行/事件/磁盘 + 尚未接线的缺口清单）。
+	AdminDiagnostics gin.HandlerFunc // GET /:app_id/diagnostics（capability:read）
+	AdminRuntime     gin.HandlerFunc // GET /runtime（capability:read）
 }
 
 // SettingReviewRequired 是发布审核开关的 settings 键（R17）。
@@ -210,10 +221,15 @@ func NewHandlers(opt Options) *Handlers {
 	h.AdminTransferOwner = h.adminTransferOwner
 	h.AdminFreeze = h.adminFreeze
 	h.AdminReview = h.adminReview
+	h.AdminReleases = h.adminReleases
+	h.AdminApproveRelease = h.adminApproveRelease
+	h.AdminRejectRelease = h.adminRejectRelease
 	h.AdminBaseDomainGet = h.adminBaseDomainGet
 	h.AdminBaseDomainPut = h.adminBaseDomainPut
 	h.AdminLimitsGet = h.adminLimitsGet
 	h.AdminLimitsPut = h.adminLimitsPut
+	h.AdminDiagnostics = h.adminDiagnostics
+	h.AdminRuntime = h.adminRuntime
 	return h
 }
 

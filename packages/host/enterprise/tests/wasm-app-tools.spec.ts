@@ -644,6 +644,10 @@ describe('wasm_app_list：列出目录（只读）', () => {
     expect(result.status).toBe(200)
     expect(result.body.apps[0].app_id).toBe('shared-notes')
     expect(result.body.apps[0].entry_url).toBe('https://harness.example/shared-notes')
+    // P1-4：工具描述承诺输出"当前版本"（模型据此算出严格递增的新版本号），而目录行
+    // 原先**没有**这个字段 —— 猜错版本号的代价是一次完整上传（≤32 MiB）+ 审计拒绝
+    // + 消耗上传额度。这条断言钉住"承诺的数据真的在工具输出里"。
+    expect(result.body.apps[0].current_version).toBe('1.2.0')
     // 红线 3：结果里不得出现令牌。
     expect(JSON.stringify(result)).not.toContain(TOKEN)
   })

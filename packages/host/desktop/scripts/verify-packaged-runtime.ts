@@ -96,23 +96,14 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/dsh-memory-evolve/skills/memory-consolidate/SKILL.md',
   // 技能辅助文件（上游 v26091501 起技能按整目录同步，scripts/ 要跟着走）。
   'node_modules/dsh-memory-evolve/skills/memory-consolidate/scripts/scan_memory.mjs',
-  // 平台内置技能 `picoaide-app-builder`（WASM 应用平台作者手册，设计 §9.3）：
-  // ⚠️ 它**不在**随包同步清单里（`lib/coi/skills-sync.js` 的 `PLATFORM_SKILLS`）——
-  // 内容随**服务端镜像**发布、由员工在能力中心按需安装；这里断言它在**包里**，
-  // 是因为同一份源目录也是服务端镜像的构建上下文（Dockerfile 的 --build-context），
-  // 整目录都在清单里 —— references/ 是 AI 的操作手册正文，examples/ 是能编译的模板，
-  // 少任何一个文件都会让"作者照着 skill 做"在打包版里断链。
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/SKILL.md',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/abi.md',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/limits.md',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/publishing.md',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/diagnostics.md',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/references/app-config.md',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/main.go',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/go.mod',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/picoaide.app.json',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/preview.mjs',
-  'node_modules/dsh-memory-evolve/skills/picoaide-app-builder/examples/go/README.md',
+  // 平台内置技能（作者手册，2026-09-19 起叫 `app-builder`）**不在本清单里**，也不在包里：
+  // 它的源目录已从本 vendored 包搬到服务端仓库的 `server/skills/app-builder/`，随服务端
+  // 镜像发布、由员工在能力中心按需安装（`server/Dockerfile` 直接 COPY，客户端产物里
+  // 没有它）。曾经在这里逐条钉住的 11 个条目（`skills/picoaide-app-builder/**`）随搬迁
+  // 一并删除；`tests/verify-packaged-runtime.spec.ts` 的「清单必须覆盖 vendored 源目录
+  // 每个文件、且不得留死条目」用例会自动要求这次同步 —— 源目录里没有它了，清单里也
+  // 就不能再有它。要核对它随镜像分发，改看 scripts/ci-build-channel-images.sh 的
+  // verify_image（镜像内断言 /opt/picoaide/skills/app-builder/SKILL.md）。
 ] as const
 
 /** Physical entries that Electron cannot load from ASAR (native binaries). */

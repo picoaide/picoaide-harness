@@ -148,6 +148,19 @@ func (r *Runtime) Close(ctx context.Context) error {
 	return err
 }
 
+// MemoryLimitPages 返回本运行时**实际生效**的单实例线性内存页上限（只读）。
+//
+// 存在的意义（P0-2）：这个值是 wazero RuntimeConfig 的字段，装配之后再无第二处
+// 可查 —— 而调用方若各自留一份"我以为传进去的值"，就会出现"账本写设置值、
+// runtime 按档位跑"的分叉（旧实现的现场：控制台保存 32 MiB、重启也没生效，
+// 界面却显示"无需重启"）。让访问器直接问运行时，比让调用方记住自己传了什么可靠。
+func (r *Runtime) MemoryLimitPages() uint32 {
+	if r == nil {
+		return 0
+	}
+	return r.memoryPages
+}
+
 // CompileModule 是执行侧的编译入口（与编译进程共用 NewRuntimeConfig 的配置）。
 //
 // 它存在的意义是"同配置"这一条：执行进程若用别的配置编译，磁盘缓存就永远命中不了

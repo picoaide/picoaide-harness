@@ -29,6 +29,14 @@ package session
 //     → TestTicketSubmitRefusesNonHTTPS 红
 //   - mainOrigin 改回"只小写 + 去尾斜杠"（不规范化默认端口）
 //     → TestMainOriginNormalizedAgainstRequest 红
+//   - TicketSubmit 成功分支改回 `http.Redirect(..., http.StatusFound)`（跨源 302）
+//     → TestTicketSubmitRendersSameOriginJumpPage / TestTicketSubmitJumpPageEscapesHostileNext
+//     / TestTicketSubmitNextFallsBackToRoot 红（并且真实浏览器端到端也会红：
+//     探针 temp/wasm-verify/probe-e2e-login-app.mjs 断言登录后必须落在应用子域）
+//   - 跳板页的兜底 `<a>` 去掉（只剩脚本/meta）
+//     → TestTicketSubmitRendersSameOriginJumpPage 红（文案承诺的"继续"入口不能是空的）
+//   - 为通过测试把 mainPageCSP 的 `form-action 'self'` 放宽成允许跨源
+//     → TestTicketSubmitRendersSameOriginJumpPage 的 CSP 断言红
 
 import (
 	"database/sql"
@@ -342,19 +350,26 @@ func errorCode(t *testing.T, w *httptest.ResponseRecorder) string {
 }
 
 // issueTicketViaPOST 走完 POST /app-ticket 并解析出 code。
+//
+// 2026-09-19 起 POST 返回的是**同源跳板页（200）**而不是跨源 302（CSP3 的 form-action
+// 会拦掉跨源重定向，见 TicketSubmit 的长注释），因此 code 从页面里的兜底链接上取，
+// 并且先断言"响应头里没有 Location" —— 那正是缺陷的形态。
 func (e *testEnv) issueTicketViaPOST(t *testing.T, empCookie *http.Cookie, appID, next string) string {
 	t.Helper()
 	r := formReq(t, "/app-ticket", url.Values{"app": {appID}, "next": {next}})
 	r.AddCookie(empCookie)
 	rec := httptest.NewRecorder()
 	e.mgr.TicketSubmit(rec, r)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("换票状态码 = %d, want 302；body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("换票状态码 = %d, want 200（同源跳板页）；body=%s", rec.Code, rec.Body.String())
 	}
-	loc := rec.Header().Get("Location")
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Fatalf("换票仍产生 Location（跨源 302 会被 form-action 拦掉）：%q", loc)
+	}
+	loc := jumpTarget(t, rec.Body.String())
 	u, err := url.Parse(loc)
 	if err != nil {
-		t.Fatalf("Location 解析失败 %q: %v", loc, err)
+		t.Fatalf("跳板页目标解析失败 %q: %v", loc, err)
 	}
 	if u.Host != appID+"."+testBaseDomain {
 		t.Fatalf("回跳主机 = %q, want %q", u.Host, appID+"."+testBaseDomain)

@@ -99,9 +99,9 @@ func TestSeedCreatesThreeAccessModes(t *testing.T) {
 		if app.CurrentReleaseID == 0 {
 			t.Fatalf("%s 应指向一个当前版本", appID)
 		}
-		rel, err := serverstore.LatestApprovedWasmRelease(ctx, db, appID)
+		rel, err := serverstore.LatestApprovedWasmReleaseFull(ctx, db, appID)
 		if err != nil {
-			t.Fatalf("LatestApprovedWasmRelease(%s): %v", appID, err)
+			t.Fatalf("LatestApprovedWasmReleaseFull(%s): %v", appID, err)
 		}
 		if rel.Status != serverstore.ReleaseStatusApproved {
 			t.Fatalf("%s 的版本应为 approved，得到 %s", appID, rel.Status)

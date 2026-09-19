@@ -44,8 +44,9 @@ import (
 // 路径常量（**只有这一处**：产物或 SKILL 换位置时改这里）。
 const (
 	appcfgJSONRelPath = "internal/wasmapp/appcfg/appcfg.json"
-	// skillDirRelPath 是内置技能目录（仓库根相对）。
-	skillDirRelPath       = "packages/vendor/memory-evolve/skills/picoaide-app-builder"
+	// skillDirRelPath 是内置技能目录（仓库根相对）。源在服务端仓库内（2026-09-19
+	// 从客户端 vendored 包搬来），随镜像分发、客户端按需安装。
+	skillDirRelPath       = "server/skills/app-builder"
 	skillAppConfigRelPath = skillDirRelPath + "/references/app-config.md"
 	// designDocRelPath 是唯一设计基线（access 三取值/缺省必须与它一致）。
 	designDocRelPath = "docs/planning/2026-09-17-wasm-app-platform.md"

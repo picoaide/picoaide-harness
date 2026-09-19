@@ -15,7 +15,7 @@ import (
 
 // ===== 一次性换票（§4.7 换票端点 + §6.1 链路①–⑤）=====
 //
-// 为什么是「GET 渲染确认页 → 同源 POST」这两步（本模块最容易看不懂的一处）：
+// 为什么是「GET 渲染确认页 → 同源 POST → 同源跳板页」这三步（本模块最容易看不懂的一处）：
 //
 //	应用子域发现没有有效 Cookie 时，只能对浏览器下发 **302**（§6.1 ①），
 //	而浏览器跟随 302 只能用 **GET** —— 它无法替页面发一个 POST。
@@ -25,7 +25,14 @@ import (
 //	（不签发任何东西），由这个页面发起对 /app-ticket 的 POST —— 此时浏览器写入的
 //	Origin 就是主站源本身（同源表单提交），既满足 §4.7，又不给第三方页面任何入口。
 //
-// 一句话：**GET 负责把浏览器带到主站，POST 负责在"确有主站源"的前提下签发票。**
+//	第三步是**跨源那一跳**：POST 成功后要把浏览器送到应用子域，但换票页的 CSP 是
+//	`form-action 'self'`，而 CSP3 会检查重定向链上的每一个 URL ⇒ 用 `302` 直接跳跨源
+//	会被浏览器整单拦下（服务端连 POST 都收不到，2026-09-19 线上 P0）。
+//	因此 POST 返回的是**同源跳板页**，跨源导航由页面自己完成（脚本/meta/链接，见
+//	ticketRedirectTmpl 的长注释）—— **表单始终只提交到同源，CSP 无需放宽**。
+//
+// 一句话：**GET 把浏览器带到主站，POST 在"确有主站源"的前提下签发票，
+// 跳板页把票交给应用子域。**
 
 // ticket 是一次性换票的载荷：绑 (user, app)，不绑具体路径 ——
 // next 只是"换完票回哪儿"，与凭据本身无关。
@@ -136,7 +143,7 @@ func (m *Manager) TicketPage(w http.ResponseWriter, r *http.Request) {
 	}))
 }
 
-// TicketSubmit 签发票并 302 回应用子域（POST /app-ticket）。
+// TicketSubmit 签发票并返回**同源跳板页**（POST /app-ticket）。
 //
 // 校验顺序（§4.7，任一不满足即拒）：
 //  0. **必须 https**（fail-closed：明文下换出的票永远兑换不出来，见下方注释）；
@@ -149,8 +156,26 @@ func (m *Manager) TicketPage(w http.ResponseWriter, r *http.Request) {
 //  4. `next` 必须是同基域相对路径（sanitizeNext，非法回落 `/`）。
 //
 // 通过后：32 字节 crypto/rand 的 code（hex）、TTL limits.TicketTTL（60 s）、
-// 内存态单次消费、绑 (user, app)、异步写审计，然后 302 到
-// `<scheme>://<app_id>.<基域><next>?ticket=<code>`。
+// 内存态单次消费、绑 (user, app)、异步写审计，然后 **200 + 跳板页**，
+// 由页面把浏览器送到 `<scheme>://<app_id>.<基域><next>?ticket=<code>`。
+//
+// ⚠️ 为什么不是 302（2026-09-19 线上 P0，真实 Chromium 复现）：
+//
+//	CSP3 的 `form-action` 不只管"提交到哪"，它**遍历整个重定向链上的每一个 URL**
+//	（Chromium 实测：同源 302 放行、跨源 302 被拦）。本页的 POST 是同源 `/app-ticket`，
+//	而签发后要落到**跨源**的应用子域 —— 于是 `302` 让浏览器把这次提交整体拦掉：
+//	`Sending form data to 'https://<基域>/app-ticket' violates "form-action 'self'"`
+//	服务端**从未收到那次 POST**，用户停在换票页。跳板页把跨源那一跳从"表单提交的一部分"
+//	变成"页面自己发起的顶层导航"（`location.replace` / meta refresh / 链接），
+//	三者都不受 `form-action` 约束 —— 因此**不需要**放宽 CSP（`form-action 'self'` 原样保留：
+//	表单永远只提交到同源 `/app-ticket`）。
+//
+// HTTP 语义变化（要认账）：旧实现是 302，POST/Redirect/GET 天然成立；现在 POST 返回 200 页面，
+// 因此**刷新会重复提交**（多签一张票、多一条 `app_ticket_issue` 审计）。影响已被压到最小：
+// `writePage` 的 `Cache-Control: no-store` + 跳板页的 `location.replace` 让这一页几乎不会
+// 成为"用户手动刷新"的对象；重复签发也不构成安全问题 —— 每张票仍是一次性、60 s、绑 (user, app)，
+// 且 POST 本身要求有效员工会话 + 同源 Origin（第三方页面无法替用户触发）。
+// 因此这里**不引入**额外的"已签发集合/防重放"（那会新增一份带 TTL 的状态，却不改变任何安全属性）。
 func (m *Manager) TicketSubmit(w http.ResponseWriter, r *http.Request) {
 	// 未启用应用子域（BaseDomain 为空）⇒ 换票端点与 TicketPage 同语义：**不存在**。
 	//
@@ -209,8 +234,15 @@ func (m *Manager) TicketSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// 1) Origin / Referer 必须是主站源。
 	if !m.checkMainOrigin(r) {
+		// 与 LoginSubmit 同一条修复（2026-09-19 P0）：来源校验失败**仍然渲染
+		// 登录表单**。这是用户投诉"根本没有地方输入账号密码"的**第一现场** ——
+		// 换票页加载即自动提交本 POST，被拒后旧实现只给一行报错、没有任何输入框。
+		// next 指回换票端点：用户重新输入账号密码后会自动把换票流程走完，
+		// 而不是停在这一页。
 		writePage(w, http.StatusForbidden, loginHTML(lang, loginView{
-			Error: copyFor(lang).ErrForbidden, ShowForm: false,
+			Error:    copyFor(lang).ErrOriginRejected,
+			Next:     ticketLoginNext(appID, next),
+			ShowForm: true,
 		}))
 		return
 	}
@@ -247,7 +279,10 @@ func (m *Manager) TicketSubmit(w http.ResponseWriter, r *http.Request) {
 	// §4.9：换票签发是高频项 ⇒ 异步审计（审计写路径最坏 25 s）。
 	m.auditAsync(emp.Username, "app_ticket_issue", "app="+appID+" ip="+clientIP(r))
 
-	http.Redirect(w, r, m.appTicketURL(appID, next, code), http.StatusFound)
+	// 目标 URL 只有这一份拼接实现（appTicketURL）—— 跳板页、测试与将来的诊断都读它，
+	// 绝不在页面里再拼一遍（两处拼接必然漂移）。
+	writePage(w, http.StatusOK, RedirectPage(lang, RedirectTicketIssued,
+		m.appTicketURL(appID, next, code), m.ticketTitle(lang), strings.TrimSpace(m.opt.ProductName)))
 }
 
 // redirectToLogin 把未登录的用户送到登录页，并记住"登录后回到 /app-ticket"。
@@ -257,8 +292,16 @@ func (m *Manager) TicketSubmit(w http.ResponseWriter, r *http.Request) {
 // 作为 /login 的 next。sanitizeNext 只解码一次做校验，正好还原这一层
 // （多一层编码会因为还原出 `%`/控制字符而被拒，见 sanitizeNext 的容忍度说明）。
 func (m *Manager) redirectToLogin(w http.ResponseWriter, r *http.Request, appID, next string) {
-	target := "/app-ticket?app=" + url.QueryEscape(appID) + "&next=" + url.QueryEscape(next)
-	http.Redirect(w, r, "/login?next="+url.QueryEscape(target), http.StatusFound)
+	http.Redirect(w, r, "/login?next="+url.QueryEscape(ticketLoginNext(appID, next)), http.StatusFound)
+}
+
+// ticketLoginNext 拼"登录后回到换票端点"的 next 值（同基域相对路径）。
+//
+// 只有一处实现：redirectToLogin（未登录 302）与 TicketSubmit 的来源校验失败页
+// （渲染登录表单，让用户当场重试）必须给出**逐字节相同**的回跳目标 ——
+// 两处各写一遍就会出现"302 能回到换票、表单重试却回到首页"的分叉。
+func ticketLoginNext(appID, next string) string {
+	return "/app-ticket?app=" + url.QueryEscape(appID) + "&next=" + url.QueryEscape(next)
 }
 
 // appTicketURL 拼换票回跳地址（§4.7：「302 到 https://<app_id>.<BaseDomain><next>?ticket=…」）。

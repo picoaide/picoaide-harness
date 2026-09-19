@@ -35,7 +35,12 @@
  *   - 去掉"必须是普通文件"的 `stat().isFile()` 判定
  *     → 「目录不是产物」红（EISDIR 抛穿，FIX-41）；
  *   - 分片开会话字段改回 `{app_id,size,chunks}`、或 complete 带 `app_id`/`version`
- *     → 「分片上传字段契约」整组红（FIX-43，与服务端 upload.go 漂移）。
+ *     → 「分片上传字段契约」整组红（FIX-43，与服务端 upload.go 漂移）；
+ *   - 分片 PUT 对确定性 4xx 也重试（`isRetryableChunkStatus` 恒 true，P2-8 前的实现）
+ *     → 「确定性 4xx 只发 1 次 PUT、0 次 GET、原样回 code」红；
+ *   - `resolveWasmSource` 的 base64 分支去掉体积闸门（P1-10 前的实现）
+ *     → 「base64 载荷超过 32 MiB 本地就拒」红；
+ *   - 目录行丢掉 `current_version`（P1-4 前的实现）→ 「current_version 原样穿过」红。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
@@ -52,6 +57,7 @@ import {
   CHUNKED_PUBLISH_BUDGET_MS,
   CLIENT_UPLOAD_TIMEOUT_MS,
   isInsideRoot,
+  isRetryableChunkStatus,
   decodePathSegments,
   planChunks,
   readRoots,
@@ -325,6 +331,22 @@ describe('客户端上限常量与设计基线同源（§4.2 / §10.5 第 58 项
       expect(base64Length(size)).toBe(buf.toString('base64').length)
     }
   })
+
+  /**
+   * P2-8：分片 PUT 的**可重试**判据。
+   *
+   * 变异验证：把 `isRetryableChunkStatus` 改成恒 `true`（旧行为：任何非 2xx 都重试）
+   * ⇒ 「确定性 4xx 是终态」红；改成恒 `false` ⇒ 「5xx / 408 / 429 可重试」红。
+   */
+  it('分片失败的可重试判定：5xx / 408 / 429 可重试，其余 4xx 是终态', () => {
+    for (const status of [500, 502, 503, 504]) expect(isRetryableChunkStatus(status), String(status)).toBe(true)
+    expect(isRetryableChunkStatus(408)).toBe(true)
+    expect(isRetryableChunkStatus(429)).toBe(true)
+    // 确定性 4xx：重发同一片只会得到同一个答案 —— 终态，原样回服务端信封。
+    for (const status of [400, 401, 403, 404, 409, 411, 413, 422]) {
+      expect(isRetryableChunkStatus(status), String(status)).toBe(false)
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -484,8 +506,8 @@ describe('错误语义：业务信封原样透传，只有传输层失败才回�
 describe('应用中心目录：只做地址补全，不二次过滤、不加额度字段', () => {
   const catalogPayload = {
     apps: [
-      { app_id: 'notes', title: '共享便签', description: '值班记录', responsible: 'alice', entry_url: 'https://notes.apps.example.com', access: 'public', enabled: true },
-      { app_id: 'offline', title: '内部工具', description: '', responsible: 'bob', entry_url: '/hidden', access: 'whitelist', enabled: false },
+      { app_id: 'notes', title: '共享便签', description: '值班记录', responsible: 'alice', entry_url: 'https://notes.apps.example.com', access: 'public', enabled: true, current_version: '1.4.2', is_owner: true, purpose: '值班记录', whitelist: [] },
+      { app_id: 'offline', title: '内部工具', description: '', responsible: 'bob', entry_url: '/hidden', access: 'whitelist', enabled: false, current_version: '2.0.0', is_owner: false },
       { app_id: 'no-link', title: '未配基域', description: '', responsible: 'carol' },
     ],
   }
@@ -497,6 +519,25 @@ describe('应用中心目录：只做地址补全，不二次过滤、不加额�
     expect(res.body.apps[0].entry_url).toBe('https://notes.apps.example.com')
     expect(res.body.apps[1].entry_url).toBe('https://harness.example/hidden')
     expect('entry_url' in res.body.apps[2]).toBe(false)
+  })
+
+  /**
+   * P1-4：`current_version` 必须原样穿过宿主到客户端。
+   *
+   * 宿主这一层对目录只做地址补全（不增删字段），所以这条断言的价值是**钉住
+   * "字段确实在这一跳活下来"**：`wasm_app_list` 的工具描述要求模型"先查当前版本"，
+   * 端到端少一站这份数据就到不了模型手里。
+   */
+  it('P1-4：current_version / is_owner / 发布者字段原样穿过（宿主不增删目录字段）', async () => {
+    const h = harness(() => json(200, catalogPayload))
+    const res = await h.call(WASM_APPS_PREFIX)
+    expect(res.body.apps.map((a: { current_version?: string }) => a.current_version)).toEqual(['1.4.2', '2.0.0', undefined])
+    expect(res.body.apps.map((a: { is_owner?: boolean }) => a.is_owner)).toEqual([true, false, undefined])
+    // 发布者专属字段也在（服务端只对发布者下发；宿主原样转发，不替它过滤）。
+    expect(res.body.apps[0].whitelist).toEqual([])
+    expect(res.body.apps[0].purpose).toBe('值班记录')
+    // 未知字段仍然不增删（原有口径不变）。
+    expect('whitelist' in res.body.apps[1]).toBe(false)
   })
 
   it('目录原样透传：**下架条目也照列**，客户端既不按 access 过滤也不补字段（R38）', async () => {
@@ -663,6 +704,75 @@ describe('发布编排：wasm 来源、>8 MiB 分片、续传只补缺失片', (
     expect(h.outbound.some(o => o.method === 'GET' && o.url.endsWith('/uploads/UP-3'))).toBe(true)
   })
 
+  /**
+   * P2-8：确定性 4xx 是**终态** —— 不重试、不补 GET、不改写成 `UPLOAD_INCOMPLETE`。
+   *
+   * 旧行为：任何一片非 2xx 都重试 3 轮 + 每轮一次额外 GET，最后统一回
+   * `UPLOAD_INCOMPLETE` + "带同一个 upload_id 重发"。对确定性拒绝（这一片本身就错）
+   * 那句建议是**错的**，而且把服务端的 `VALIDATION` / hints 压没了。
+   *
+   * 变异验证：把分片循环里的 `!isRetryableChunkStatus(...)` 终态分支删掉 ⇒
+   * 本条红（会变成 3 次 PUT + 2 次 GET + `UPLOAD_INCOMPLETE`）。
+   */
+  it('P2-8：某一片被确定性 4xx 拒 ⇒ 只发 1 次 PUT、0 次额外 GET、原样回服务端 code', async () => {
+    const wasm = Buffer.alloc(17 * 1024 * 1024, 3)
+    const put: string[] = []
+    let gets = 0
+    const h = harness((method, url) => {
+      if (url.endsWith('/uploads') && method === 'POST') return json(201, { upload_id: 'UP-T', received: [] })
+      if (method === 'GET') { gets += 1; return json(200, { received: [] }) }
+      if (method === 'PUT') {
+        const index = url.split('/').pop()!
+        put.push(index)
+        // 服务端对"这一片本身不合法"的确定性裁决（upload.go 的 VALIDATION）。
+        return json(400, {
+          error: {
+            code: 'VALIDATION',
+            message: '分片大小与开会话时声明的 chunk_bytes 不符',
+            details: { chunk_index: Number(index), reason: 'chunk_size_mismatch' },
+            hints: ['用同一个 upload_id 重开会话并声明正确的 chunk_bytes；重发同一片不会成功'],
+          },
+        })
+      }
+      throw new Error(`unexpected ${method} ${url}`)
+    })
+    const res = await h.call(`${WASM_APPS_PREFIX}/publish`, 'POST', JSON.stringify({
+      app_id: 'demo-tool', version: '1.0.0', wasm_base64: wasm.toString('base64'),
+    }))
+    // ① 只试了一次（旧实现是 3 次）。
+    expect(put).toHaveLength(1)
+    // ② 没有"每轮一次额外 GET"（旧实现 2 次）。
+    expect(gets).toBe(0)
+    // ③ 返回的就是服务端的信封（code/details/hints 一个不丢），不是 UPLOAD_INCOMPLETE。
+    expect(res.code).toBe(400)
+    expect(res.body.error.code).toBe('VALIDATION')
+    expect(res.body.error.details.reason).toBe('chunk_size_mismatch')
+    expect(res.body.error.hints[0]).toContain('chunk_bytes')
+  })
+
+  it('P2-8 对照：5xx 仍然重试（可自愈的故障不该被当成终态）', async () => {
+    const wasm = Buffer.alloc(17 * 1024 * 1024, 4)
+    const put: string[] = []
+    let failures = 2
+    const h = harness((method, url) => {
+      if (url.endsWith('/uploads') && method === 'POST') return json(201, { upload_id: 'UP-R', received: [] })
+      if (method === 'GET') return json(200, { received: [] })
+      if (method === 'PUT') {
+        const index = url.split('/').pop()!
+        if (failures > 0) { failures -= 1; return json(503, { error: { code: 'COMPILE_BUSY', message: '编译器忙' } }) }
+        put.push(index)
+        return new Response(null, { status: 204 })
+      }
+      if (url.endsWith('/complete')) return json(200, { ok: true })
+      throw new Error(`unexpected ${method} ${url}`)
+    })
+    const res = await h.call(`${WASM_APPS_PREFIX}/publish`, 'POST', JSON.stringify({
+      app_id: 'demo-tool', version: '1.0.0', wasm_base64: wasm.toString('base64'),
+    }))
+    expect(res.code).toBe(200)
+    expect(new Set(put)).toEqual(new Set(['0', '1', '2']))
+  })
+
   it('始终收不齐时给出可续传的错误（带 upload_id 与已收片）', async () => {
     const wasm = Buffer.alloc(17 * 1024 * 1024, 2)
     const h = harness((method, url) => {
@@ -695,6 +805,29 @@ describe('发布编排：wasm 来源、>8 MiB 分片、续传只补缺失片', (
     expect(noApp.body.error.code).toBe('MISSING_FIELD')
     const noVersion = await h.call(`${WASM_APPS_PREFIX}/publish`, 'POST', JSON.stringify({ app_id: 'a', wasm_base64: 'AA==' }))
     expect(noVersion.body.error.code).toBe('MISSING_FIELD')
+    expect(h.outbound).toHaveLength(0)
+  })
+
+  /**
+   * P1-10：base64 分支的**体积闸门**（此前只有两条 `wasm_path` 分支有）。
+   *
+   * 变异验证：把 `resolveWasmSource` 里新增的 `bytes.byteLength > WASM_MAX_BYTES`
+   * 分支删掉 ⇒ 本条红（会一路出站到服务端才被拒）。
+   */
+  it('P1-10：base64 载荷超过 32 MiB 时本地就拒（UPLOAD_TOO_LARGE，零出站）', async () => {
+    const h = harness(() => json(200, {}))
+    // 构造恰好解码为 `WASM_MAX_BYTES + 1` 字节的合法 base64（避免真的分配 44 MB 字符串
+    // 再逐字节编码）：`'A'` 的重复串按 3 字节/4 字符解码。
+    const oversize = 'A'.repeat(Math.ceil((WASM_MAX_BYTES + 1) / 3) * 4)
+    expect(Buffer.from(oversize, 'base64').byteLength).toBeGreaterThan(WASM_MAX_BYTES)
+    const res = await h.call(`${WASM_APPS_PREFIX}/publish`, 'POST', JSON.stringify({
+      app_id: 'demo-tool', version: '1.0.0', wasm_base64: oversize,
+    }))
+    expect(res.code).toBe(413)
+    expect(res.body.error.code).toBe('UPLOAD_TOO_LARGE')
+    expect(res.body.error.details.limit_bytes).toBe(WASM_MAX_BYTES)
+    expect(res.body.error.details.size_bytes).toBeGreaterThan(WASM_MAX_BYTES)
+    // 关键：**零出站**（不浪费一次上传与一次编译）。
     expect(h.outbound).toHaveLength(0)
   })
 })

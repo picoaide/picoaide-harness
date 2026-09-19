@@ -33,32 +33,37 @@ type txSession struct {
 }
 
 // Begin 开启事务并返回事务标识。实现 capapi.DB。
+//
+// 锁语义（2026-09-19）：BEGIN 本身在 writeMu 下执行（写者独占），但 writeMu **不**在
+// 事务存续期间一直持有 —— "同时最多一个事务"由 d.tx 状态保证（第二个 Begin 报
+// tx_already_open），事务体里的每条 db.exec/db.query 各自短暂地取 writeMu。
 func (d *DB) Begin(ctx context.Context) (abi.TxResult, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
 	if err := d.ensureReadyLocked(true); err != nil {
 		return abi.TxResult{}, err
 	}
-	if d.tx != nil {
+	if cur := d.currentTx(); cur != nil {
 		return abi.TxResult{}, denied("tx_already_open",
 			"已经有一个进行中的事务：同一时刻只允许一个事务").
-			WithDetail("tx_id", d.tx.id).
+			WithDetail("tx_id", cur.id).
 			WithHint("请先 tx_commit 或 tx_rollback 再开新事务")
 	}
 	cctx, cancel := context.WithTimeout(ctx, d.budget)
 	defer cancel()
 	// L4：执行前复检即将使用的那条读写连接仍带全套限额（FIX-12）。
-	conn, cerr := d.checkedConnLocked(ctx, false)
+	conn, cerr := d.checkedWriteConn(ctx)
 	if cerr != nil {
 		return abi.TxResult{}, cerr
 	}
 	// BEGIN IMMEDIATE：开事务即取写锁，避免「先读后写」在同一连接上升级锁失败
 	// （SQLITE_BUSY）这种难以诊断的失败形态。
 	if _, err := conn.ExecContext(cctx, "BEGIN IMMEDIATE"); err != nil {
-		return abi.TxResult{}, d.mapStmtErrorLocked(cctx, err)
+		return abi.TxResult{}, d.mapStmtError(cctx, err)
 	}
-	d.nextTxID++
 	txCtx, txCancel := context.WithTimeout(context.Background(), d.budget)
+	d.stateMu.Lock()
+	d.nextTxID++
 	tx := &txSession{
 		id:       d.nextTxID,
 		ctx:      txCtx,
@@ -66,6 +71,7 @@ func (d *DB) Begin(ctx context.Context) (abi.TxResult, error) {
 		deadline: time.Now().Add(d.budget),
 	}
 	d.tx = tx
+	d.stateMu.Unlock()
 	// 看门狗：到点强制回滚（§5.1「事务硬超时 5 s 强制回滚」）。
 	tx.timer = time.AfterFunc(d.budget, func() { d.expireTx(tx) })
 	return abi.TxResult{TxID: tx.id}, nil
@@ -82,21 +88,17 @@ func (d *DB) Rollback(ctx context.Context, p abi.TxParams) error {
 }
 
 // InTx 报告当前是否有打开的事务（事务内禁止其他宿主调用，§4.4）。实现 capapi.DB。
-func (d *DB) InTx() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.tx != nil
-}
+func (d *DB) InTx() bool { return d.inTx() }
 
 func (d *DB) finishTx(ctx context.Context, p abi.TxParams, commit bool) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
 	// write=true：事务硬超时后的"写闸"（deadTx）在这里生效 —— 应用可能仍以为自己在
 	// 事务里，必须继续看到同一条超时错误，而不是含糊的 no_transaction。
 	if err := d.ensureReadyLocked(true); err != nil {
 		return err
 	}
-	tx := d.tx
+	tx := d.currentTx()
 	if tx == nil {
 		return denied("no_transaction", "没有进行中的事务").WithDetail("tx_id", p.TxID)
 	}
@@ -117,24 +119,27 @@ func (d *DB) finishTx(ctx context.Context, p abi.TxParams, commit bool) error {
 	}
 	cctx, cancel := context.WithTimeout(ctx, d.budget)
 	defer cancel()
-	conn, cerr := d.checkedConnLocked(ctx, false)
+	conn, cerr := d.checkedWriteConn(ctx)
 	if cerr != nil {
 		return cerr
 	}
 	if _, err := conn.ExecContext(cctx, stmt); err != nil {
 		// 引擎已经结束了这个事务（例如锁冲突）：清状态并如实返回，绝不谎报成功。
 		d.clearTxLocked(tx)
-		return d.mapStmtErrorLocked(cctx, err)
+		return d.mapStmtError(cctx, err)
 	}
 	d.clearTxLocked(tx)
 	return nil
 }
 
 // expireTx 是硬超时看门狗：强制回滚 + 污染标记（fail-closed）。
+//
+// 走 writeMu：强制回滚要独占读写连接，而 writeMu 正是"独占 rw"的那把锁
+// （事务体里的语句也在它下面执行 ⇒ 看门狗不会在语句中途插进去）。
 func (d *DB) expireTx(tx *txSession) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.tx != tx || tx.done {
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	if d.currentTx() != tx || tx.done {
 		return
 	}
 	tx.timedOut = true
@@ -142,7 +147,7 @@ func (d *DB) expireTx(tx *txSession) {
 	d.poisonLocked(txTimeoutError())
 }
 
-// rollbackLocked 尽最大努力回滚并清理事务状态。
+// rollbackLocked 尽最大努力回滚并清理事务状态。调用方必须持有 writeMu。
 //
 // 注意 ctx 已经无关（超时路径下事务 ctx 必然已到期），这里用**独立**的短预算
 // context.Background()：回滚是安全动作，不能因为调用方 ctx 已取消就不做。
@@ -150,15 +155,19 @@ func (d *DB) rollbackLocked(tx *txSession) {
 	if tx.cancel != nil {
 		tx.cancel()
 	}
-	if d.rw != nil {
+	if rw := d.writeConn(); rw != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), d.budget)
-		_, _ = d.rw.ExecContext(ctx, "ROLLBACK")
+		_, _ = rw.ExecContext(ctx, "ROLLBACK")
 		cancel()
 	}
 	d.clearTxLocked(tx)
 }
 
-// clearTxLocked 停表、取消事务 ctx、清空当前事务（幂等）。
+// clearTxLocked 停表、取消事务 ctx、清空当前事务（幂等）。调用方必须持有 writeMu。
+//
+// 顺序有讲究：先停看门狗（否则已到点的 AfterFunc 正在等 writeMu，会在我们清完状态后
+// 又跑一次 —— 不过 expireTx 开头会重新确认 `d.currentTx() != tx` 后直接返回），
+// 再清 d.tx。
 func (d *DB) clearTxLocked(tx *txSession) {
 	tx.done = true
 	if tx.timer != nil {
@@ -167,9 +176,18 @@ func (d *DB) clearTxLocked(tx *txSession) {
 	if tx.cancel != nil {
 		tx.cancel()
 	}
+	d.stateMu.Lock()
 	if d.tx == tx {
 		d.tx = nil
 	}
+	d.stateMu.Unlock()
+}
+
+// currentTx 返回当前事务（stateMu 下取快照；nil = 没有打开的事务）。
+func (d *DB) currentTx() *txSession {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.tx
 }
 
 // txTimeoutError 是事务硬超时的统一错误（DB_DENIED + ReasonTransactionTimeout）。

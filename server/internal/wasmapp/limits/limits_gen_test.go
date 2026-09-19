@@ -52,10 +52,12 @@ const (
 	limitsSourceFile = "limits.go"
 	jsonRelPath      = "internal/wasmapp/limits/limits.json"
 	mdRelPath        = "internal/wasmapp/limits/limits.md"
-	// skillDirRelPath 是内置技能目录（仓库根相对）。为什么在 packages/vendor 下：
-	// 客户端的内置技能源头只有一个 —— dsh-memory-evolve 插件的 `skills/` 目录
-	// （lib/coi/index.js 的 PLUGIN_SKILLS_DIR），启动时整目录同步到用户技能库。
-	skillDirRelPath     = "packages/vendor/memory-evolve/skills/picoaide-app-builder"
+	// skillDirRelPath 是内置技能目录（仓库根相对）。源头只有这一个 ——
+	// 技能源就在服务端仓库内的 `server/skills/`（2026-09-19 从客户端 vendored 包
+	// packages/vendor/memory-evolve 搬来）：随服务端镜像分发
+	// （server/Dockerfile 直接 COPY 进 /opt/picoaide/skills），由员工在客户端
+	// 能力中心按需安装。**不在客户端包里**，也不再由 COI 同步链路落盘。
+	skillDirRelPath     = "server/skills/app-builder"
 	skillLimitsRelPath  = skillDirRelPath + "/references/limits.md"
 	skillExampleRelPath = skillDirRelPath + "/examples/go"
 	skillMainFile       = skillDirRelPath + "/SKILL.md"

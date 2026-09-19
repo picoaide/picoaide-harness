@@ -123,28 +123,29 @@ ENV PICOAI_CLIENT_RELEASE_DIR=/opt/picoaide/client
 # ENV PICOAI_PUBLIC_BASE_URL=https://ai.example.com
 
 # --- 内置技能随镜像分发（"技能内置到服务端、客户端按需安装"） ---
-# 平台自带技能（当前是 WASM 应用作者手册 picoaide-app-builder）放在镜像层里，
-# 服务端把 /opt/picoaide/skills 直接对外提供：
+# 平台自带技能（当前是 WASM 应用作者手册 app-builder）放在镜像层里，服务端把
+# /opt/picoaide/skills 直接对外提供：
 #   GET /api/client/v2/skills/builtin                 清单（name/version/sha256/size…）
 #   GET /api/client/v2/skills/builtin/:name/archive   tar.gz 包（响应头带 sha256/version）
 # 客户端在能力中心**按需安装**（下载 → sha256 对照 → 整树解包 → <dshHome>/skills），
 # 不自动安装、不需要管理员。技能内容随镜像升级而更新，正是"内置"要的语义。
 #
-# 构建上下文契约（与 clientassets 同规矩）：
-#   skillassets/skills/<name>/SKILL.md   必须存在（源头在 vendored 插件包
-#                                        packages/vendor/memory-evolve/skills/）
-# 构建命令必须带 `--build-context skillassets=<仓库根>/packages/vendor/memory-evolve`
-# （见 server/Makefile 的 docker-image 与 scripts/ci-build-channel-images.sh）。
-# ⚠️ 源头只有一份：不要在 server/ 下再放一份技能副本，两边漂移会让"员工装到的
-# 技能"与"仓库里评审过的技能"不是同一份。
+# ⚠️ 技能源在**服务端仓库内的 `server/skills/`**（就是本 Dockerfile 的构建上下文），
+# 随镜像分发、客户端按需安装 —— 不再依赖客户端 vendored 包（历史上曾用
+# `--build-context skillassets=<仓库根>/packages/vendor/memory-evolve` 从
+# dsh-memory-evolve 插件的 skills/ 目录取，2026-09-19 把作者手册搬进服务端并
+# 去掉了那个构建上下文）。源只有这一份：不要在别处再放副本，两边漂移会让
+# "员工装到的技能"与"仓库里评审过的技能"不是同一份。
+# 客户端插件 `dsh-memory-evolve` 自己的 skills/（kimi/codex/grok/hermes-cli-calling、
+# memory-consolidate）与本目录无关：它们是插件的 COI 同步资产，不是平台内置技能。
 #
-# **逐个列出，不用 `skills/*/` 通配**：那个目录里还有 5 个随客户端分发的 COI 适配器
-# 技能（kimi/codex/grok/hermes-cli-calling、memory-consolidate），它们是插件自己的
-# 同步链路的资产、不是平台内置技能，也没有平台必需的 frontmatter（version/title/…）——
-# 通配进来只会让 skillseed 每次启动都把它们记成"被跳过的坏资产"，把真正的告警淹掉。
-# 新增一个平台内置技能 = 这里加一行 + 该技能带齐平台 frontmatter（缺字段会被
-# skillmanifest 校验拒掉，且启动日志会点名）。
-COPY --from=skillassets skills/picoaide-app-builder/ /opt/picoaide/skills/picoaide-app-builder/
+# **逐个列出，不用 `skills/*/` 通配**：通配会把误放进来的非技能目录（或将来某个
+# 没有平台必需 frontmatter 的目录）一起 COPY 进镜像，而 skillseed 只会把它们记成
+# "被跳过的坏资产"，把真正的告警淹掉。新增一个平台内置技能 = 这里加一行 + 该技能
+# 带齐平台 frontmatter（version/title/description/author/category 缺一不可，且
+# 目录名必须等于 frontmatter 的 name —— 不一致会被 skillmanifest 校验拒掉、
+# 整条技能被静默跳过，只能在启动日志里看到）。
+COPY skills/app-builder/ /opt/picoaide/skills/app-builder/
 # 目录位置固定，服务端直接读（无需 entrypoint 落盘）。可用该 env 覆盖成
 # 别的路径（如挂载宿主机目录做现场排查），照 clientrelease 的
 # PICOAI_CLIENT_RELEASE_DIR 风格。

@@ -627,19 +627,25 @@ test('skills sync: version-gated copy protects user edits', async () => {
   const { syncBuiltinSkills, BUILTIN_SKILLS } = await import('../lib/coi/skills-sync.js')
   // 清单是**冻结**的：新增内置技能必须同时改这里（防止"目录加了但忘了登记"）。
   // 2026-09-18：**平台技能不得进入随包同步清单**（用户口径「客户端可以按需安装」
-  // + 独立审计 P1-1）。picoaide-app-builder 随服务端镜像发布、由能力中心按需安装；
-  // 把它放进这张表就等于开机自动装上，「按需」名存实亡。
+  // + 独立审计 P1-1）。app-builder（原名 picoaide-app-builder）随服务端镜像发布、
+  // 由能力中心按需安装；把它放进这张表就等于开机自动装上，「按需」名存实亡。
   assert.deepEqual(BUILTIN_SKILLS, ['kimi-cli-calling', 'codex-cli-calling', 'grok-cli-calling', 'hermes-cli-calling', 'memory-consolidate'])
   const { PLATFORM_SKILLS } = await import('../lib/coi/skills-sync.js')
   for (const name of PLATFORM_SKILLS) {
     assert.ok(!BUILTIN_SKILLS.includes(name), `平台技能 ${name} 不得出现在随包同步清单里`)
   }
-  // 平台技能仍然留在包内 `skills/` 目录：服务端 Dockerfile 用
-  // `--build-context skillassets=<本包>` 从这里 COPY 进镜像，删目录会让镜像构建失败。
-  const { existsSync } = await import('node:fs')
+  // 2026-09-19（技能源归位服务端）：平台技能**不再**留在包内 `skills/` 目录 ——
+  // 真源是服务端仓库的 `server/skills/<name>/`，随镜像分发（Dockerfile 直接 COPY，
+  // 已无 `--build-context skillassets`）。这里断言它**确实不在包里**：既防"搬走了
+  // 一半还留着旧副本"（两份漂移），也防它被当作本插件的技能同步出去。
+  const { existsSync, readdirSync } = await import('node:fs')
   for (const name of PLATFORM_SKILLS) {
-    assert.ok(existsSync(new URL(`../skills/${name}/SKILL.md`, import.meta.url)), `平台技能源目录必须留在包里：skills/${name}`)
+    assert.ok(!existsSync(new URL(`../skills/${name}`, import.meta.url)), `平台技能源目录必须已移出本包：skills/${name}`)
   }
+  // 反向对照（防"整个 skills/ 都没了"造成的假绿）：本插件自己的技能目录一个都不能少。
+  const onDisk = readdirSync(new URL('../skills/', import.meta.url), { withFileTypes: true })
+    .filter((e) => e.isDirectory()).map((e) => e.name).sort()
+  assert.deepEqual(onDisk, [...BUILTIN_SKILLS].sort(), '包内 skills/ 目录必须与本插件清单一一对应')
   const results = syncBuiltinSkills(pluginSkills, userSkills)
   assert.equal(results.find((r) => r.name === 'kimi-cli-calling').action, 'synced')
   assert.equal(results.find((r) => r.name === 'codex-cli-calling').action, 'missing')
