@@ -130,6 +130,13 @@ func TestRouteAssemblyMatchesProductionSource(t *testing.T) {
 // 这张表是"曾经发生过的静默漏测"的永久固化：改前测试树少的正是这 33 条。
 // 它同时是双向断言 —— 声明了却没消失（注册不再依赖该字段）、或消失了却没声明
 // （新增一片条件注册）都会红，逼着改动者把"哪片路由会被依赖漏掉"写清楚。
+//
+// ⚠️ 唯一判据是**本提交的** router.go：本表必须与已提交的路由逐条相等。
+// 共享工作目录里别人**未提交**的新路由不要登记进来 —— 那会让"提交态"必红
+// （2026-09-19 实测踩到：表里混进了其它会话工作树里的 5 条 wasm 管理路由，
+// 于是干净提交上 TestRouteAssemblyGatedSlicesAreDeclared 直接失败）。
+// 反过来，**你新加了一条条件注册路由就必须把它登记进来**：失败信息会逐条
+// 列出"消失了却没声明"的路由，照着补一行即可。
 
 // wasmGatedRoutes：d.Wasm == nil 时整片消失（internal/router/registerWasm 的首行）。
 var wasmGatedRoutes = []string{
@@ -157,9 +164,6 @@ var wasmGatedRoutes = []string{
 	"PUT /api/server/admin/wasm-apps/:app_id/owner",
 	"POST /api/server/admin/wasm-apps/:app_id/freeze",
 	"PUT /api/server/admin/wasm-apps/review",
-	"GET /api/server/admin/wasm-apps/:app_id/releases",
-	"POST /api/server/admin/wasm-apps/:app_id/releases/:version/approve",
-	"POST /api/server/admin/wasm-apps/:app_id/releases/:version/reject",
 	"GET /api/server/admin/wasm-apps/domain",
 	"PUT /api/server/admin/wasm-apps/domain",
 	"GET /api/server/admin/wasm-apps/limits",
