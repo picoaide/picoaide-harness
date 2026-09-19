@@ -413,6 +413,10 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 		// 采样到的内存峰值（R1-e2e-1 的**现场证据**）：Go 运行时 OOM 只留下"退出码 2"，
 		// 要靠"峰值贴近上限"才能把它与"应用自己 os.Exit(2)"区分开。
 		peakMemoryBytes: out.peak,
+		// stderr 的**开头**（R2-DG-1 的证据）：一次性巨块分配的 OOM 峰值只有常态水位，
+		// 但它必然在 stderr 最前面打 `fatal error: out of memory` —— 那份特征串只存在于
+		// 开头窗口里（尾巴早被 goroutine 回溯挤满）。
+		stderrHead: stderr.Head(),
 	}
 	fatal := out.fatal
 	if fatal == nil {
@@ -795,14 +799,24 @@ func (g *guestWriter) writeFrame(ctx context.Context, payload []byte) error {
 	}
 }
 
-// tailBuffer 是 stderr 的有界尾巴（§4.9：保留末尾 limits.StderrTailBytes 字节进诊断）。
+// tailBuffer 是 stderr 的**有界开头 + 有界尾巴**缓冲。
+//
+// 诊断面（`limits.StderrTailBytes`）只收**末尾**那一段（§4.9：作者最需要的是崩溃前的
+// 最后几行），这一半保持不变。但分类器还需要**开头**：Go 运行时 OOM 的特征串
+// （`fatal error: out of memory` / `runtime: out of memory: cannot allocate …`）打在
+// stderr 的**最前面**，随后是上万字节的 goroutine 回溯 —— 只留尾巴时特征串必然被挤掉，
+// 于是"一次性巨块分配"这条最需要方向正确的路径反而失去了唯一的证据（R2-DG-1）。
+//
+// 因此这里再多留一份**等长**的开头（同样 2 KiB，不进诊断面、只给分类器）：内存代价是
+// 每请求多 2 KiB，换来"OOM 的两种形态（分块累积 / 一次性巨块）都判得出来"。
 //
 // 并发安全：guest 在独立 goroutine 里写，宿主在结论处读；收尾宽限用尽后 guest 仍可能
 // 在写（我们不阻塞等它），所以必须有锁，且 Write 永不失败。
 type tailBuffer struct {
-	mu  sync.Mutex
-	max int
-	buf []byte
+	mu   sync.Mutex
+	max  int
+	head []byte
+	buf  []byte
 }
 
 func newTailBuffer(max int) *tailBuffer { return &tailBuffer{max: max} }
@@ -810,6 +824,13 @@ func newTailBuffer(max int) *tailBuffer { return &tailBuffer{max: max} }
 func (b *tailBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if len(b.head) < b.max {
+		n := b.max - len(b.head)
+		if n > len(p) {
+			n = len(p)
+		}
+		b.head = append(b.head, p[:n]...)
+	}
 	b.buf = append(b.buf, p...)
 	if len(b.buf) > b.max {
 		b.buf = append(b.buf[:0], b.buf[len(b.buf)-b.max:]...)
@@ -817,11 +838,21 @@ func (b *tailBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Tail 返回当前尾巴（stderr 的末尾 max 字节）。
+// Tail 返回当前尾巴（stderr 的末尾 max 字节）—— 诊断面回给作者的那一份。
 func (b *tailBuffer) Tail() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return string(b.buf)
+}
+
+// Head 返回当前开头（stderr 的前 max 字节）—— **只给分类器**，不进诊断面。
+//
+// 调用方：`classifyGuestError` 用它识别"一次性巨块分配导致的 OOM"（特征串在头部），
+// 见 failureContext.stderrHead。
+func (b *tailBuffer) Head() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.head)
 }
 
 func appIDOr(id string) string {

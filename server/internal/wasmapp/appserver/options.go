@@ -345,9 +345,17 @@ func (s *Server) EvictApp(appID string) (int, int64) {
 	}
 	// 资源/配置缓存（R1-rt-2/3）：下架/冻结/删除/逐出四条处置路径都会走到这里
 	//（api 的 evict 钩子），因此"内容仍然可服务"不会在处置之后继续存在。
-	releases := 0
+	//
+	// 记账字节必须包含这一笔（R2-CA-2）：只回条目数会让一次真实释放（实测 2 MiB）
+	// 在日志与返回值里都写成 0 —— `reclaim.request(reason, freedBytes)` 与容量核算
+	// 都读这个数，"下架后内存为什么没降"这类排查会直接卡在假数字上。
+	// sweepOnce 里同一笔账**是**计入的（两条路径口径必须一致）。
+	var releases int
 	if s.releases != nil {
-		releases = s.releases.evictApp(appID)
+		if n, b := s.releases.evictApp(appID); n > 0 {
+			releases = n
+			bytes += b
+		}
 	}
 	var handles int
 	if s.appdbs != nil {

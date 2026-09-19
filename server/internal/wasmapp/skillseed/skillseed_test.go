@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -602,6 +604,60 @@ func TestAdminListBuiltinMissingDirIsNotAnError(t *testing.T) {
 	}
 	if !strings.Contains(body, `"problems":[]`) {
 		t.Fatalf("problems 必须是 []: %s", body)
+	}
+}
+
+// 资产根目录里的**散文件**：把 SKILL.md 放错层（放在 /opt/picoaide/skills/ 而不是
+// /opt/picoaide/skills/<name>/）是最可能的部署配置错误。它们确实不该进清单，但
+// **不能静默**：原先 `if !de.IsDir() { continue }` 让管理端只看到"目录存在 + 空清单 +
+// 零问题"，而空态文案还指向一个不存在的「被跳过」块（R2-SK-2）。
+func TestAdminListBuiltinReportsLooseFilesAtAssetRoot(t *testing.T) {
+	root := t.TempDir()
+	raw, err := os.ReadFile(filepath.Join(repoSkillDir, SkillFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{SkillFile: raw, "notes.txt": []byte("随手放的文件")} {
+		if err := os.WriteFile(filepath.Join(root, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := NewHandlers(New(root))
+	w := doGet(t, adminTestRouter(h), "/api/server/admin/skills/builtin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("散文件形态也必须 200（页面要能显示原因），得到 %d %s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		DirExist bool                            `json:"dir_exists"`
+		Skills   []struct{ Name string }         `json:"skills"`
+		Problems []struct{ Name, Reason string } `json:"problems"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("admin list JSON: %v", err)
+	}
+	if !payload.DirExist {
+		t.Fatal("目录存在（只是内容没按 <name>/SKILL.md 放），dir_exists 必须为 true")
+	}
+	if len(payload.Skills) != 0 {
+		t.Fatalf("散文件不是技能，不得进清单: %+v", payload.Skills)
+	}
+	// 数量断言（不是"存在"断言）：两个散文件都要登记 —— 漏一个就是静默丢弃。
+	if len(payload.Problems) != 2 {
+		t.Fatalf("资产根的两个散文件都必须登记为 problem（want 2）: %+v", payload.Problems)
+	}
+	names := []string{payload.Problems[0].Name, payload.Problems[1].Name}
+	sort.Strings(names)
+	if !reflect.DeepEqual(names, []string{SkillFile, "notes.txt"}) {
+		t.Fatalf("problem 必须点名具体文件: %v", names)
+	}
+	for _, p := range payload.Problems {
+		if !strings.Contains(p.Reason, "散文件不会被打包下发") {
+			t.Fatalf("原因必须给出可执行结论（散文件不下发 + 正确形态）: %q", p.Reason)
+		}
+	}
+	// 启动日志与诊断面同一份事实（main.go 打的就是这个）。
+	if got := h.Catalog().Problems(); len(got) != 2 {
+		t.Fatalf("Catalog.Problems() 必须与诊断面一致（启动日志用）: %v", got)
 	}
 }
 

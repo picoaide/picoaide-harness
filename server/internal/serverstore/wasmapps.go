@@ -367,6 +367,21 @@ func SetWasmAppConfig(ctx context.Context, db *sql.DB, appID, configJSON, purpos
 		configJSON, purpose, sensitivity, AppKindWasmApp, normalizeWasmAppID(appID)))
 }
 
+// SetWasmAppDisplay 写入 apps 行的**显示面两列**(title/description)。
+//
+// 真源是 app_releases 里**最新 approved 版本**的那一行(R2-1,2026-09-19 第二轮审计
+// §1.1):这两列与 config_json/purpose/data_sensitivity 一样是"目录对全员下发的投影",
+// 只有审核落定的那一刻才允许随生效版本切走 —— 待审版本曾直接经 UpsertWasmApp 的无条件
+// 写入改掉它们,作者不需要过审就能把已上线应用改名/换描述(点进去执行的仍是旧代码)。
+//
+// 与 SetWasmAppConfig 同样只对未软删的行生效(影响 0 行 = ErrNotFound)。
+func SetWasmAppDisplay(ctx context.Context, db *sql.DB, appID, title, description string) error {
+	return wasmAppRowsAffected(db.ExecContext(ctx, `UPDATE apps
+		SET title = $1, description = $2, updated_at = now()
+		WHERE kind = $3 AND app_id = $4 AND deleted_at IS NULL`,
+		title, description, AppKindWasmApp, normalizeWasmAppID(appID)))
+}
+
 // SetWasmAppCurrentRelease 把某个版本置为**当前生效版本**(§8:开启审核时新版进
 // 待审队列,线上仍旧版本 ⇒ 生效版本必须显式落库)。
 //

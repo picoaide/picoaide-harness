@@ -89,7 +89,7 @@
 4. **补齐能力不对称（现有缺陷）**：共享技能 host 代理已有 `POST /api/pico/shared-skills/:name/:version/uninstall`（auth-gate.ts:761），但 `SkillCenterPanel` 无卸载入口——合并时对齐 Agent 的卸载/确认卸载（走现有 confirm 条交互）。
 5. **修复 hasUpdate 误报（现有缺陷）**：`SkillCenterPanel.hasUpdate` 现只要存在 approved 行即提示更新（不比较版本大小，已装 2.0.0 会误导「更新到 v1.0.0」）；统一为「approved 最高版本 > 已装版本」才提示（复用项目内既有 semver 比较，无则抽 `compareVersions` 公共函数 + 单测）。
 6. **轮询与无障碍取更完善实现**：AgentSharePanel 的 30s 静默轮询（pending→approved/rejected 刷新）+ Tab focus trap 统一到新面板（SkillCenterPanel 两者皆无）。
-7. **同名校验与确认**：并发加载三个端点（`/api/pico/skills` + `/api/pico/shared-skills` + `/api/pico/agent-presets`，Promise.all 并行）时，安装前检测目标名冲突：磁盘/installed 已有同名 → 弹「将覆盖本地同名目录/已安装内容」确认；确认后携带 `?force=1` 重发（见 §六 409/CONFLICT 契约）。
+7. **同名校验与确认**：并发加载三个端点（`/api/pico/skills` + `/api/pico/shared-skills` + `/api/pico/agent-presets`，Promise.all 并行）时，安装前检测目标名冲突：磁盘/installed 已有同名 → 弹「将覆盖本地同名目录/已安装内容」确认；确认后携带 `?force=1` 重发（见 §六 409/CONFLICT 契约）。**⚠️ 实际未按此落地：宿主不读 `?force=1`，参数面已于 2026-09-19 从客户端删除，见 §九.1（R2-SK-5）。**
 8. **分区独立错误态**：一个端点失败仅该分区显示「加载失败+重试」，其他分区照常渲染（现状是整个面板 error+整体重试）。
 9. **文案同步**：`desktop/scripts/e2e-client.mjs:237/243` 硬断言「技能中心」与截图 marker `04-skills` 改为「能力中心」/新 marker；`skill-center-panel.spec.ts`、`agent-share-panel.spec.ts` 更新/合并为 `capability-center-panel.spec.ts`（含 `splitCatalog`/`latestApproved*`/`avatarColor`/`hasUpdate` 用例）。
 10. **设置页排查项**：07-marketplace.md 提到「设置页可管理建议安装」；该入口若在上游客户端则**不改**（上游只读约束，仅备注）；若在 enterprise 侧则跟随改名。
@@ -98,7 +98,7 @@
 
 1. 员工侧：新增 `GET /api/client/v2/capabilities`（Bearer），聚合 `listVisible` 语义：`source=market` 走 marketplace 已授权清单、`source=org` 走 shared-skills + agent-presets 的已授权+自己的全部状态；响应统一 `CapabilityItem[]`；`installed`/`hasUpdate` 由 host 代理层（`/api/pico/capabilities`）合并本地状态（沿 `/api/pico/shared-skills` 现模式）。
 2. **组织库质量标记（新迁移 0037）**：`shared_skills` 与 `agent_presets` 各加 `quality TEXT NOT NULL DEFAULT ''`（`''`/`official`/`featured`，互斥）；授权表不动。管理端审核页在 approve 时可勾选「官方/精选」，并支持事后修改（新增 `PUT .../quality` 或并入现有编辑端点），审计动作 `shared_skill_qualify`/`agent_preset_qualify`（沿用 audit 90 天契约）。**注意 0037 必须同时落地 sqlite（migrations/）与 pg（migrations-pg/）两套迁移**。
-3. **安装冲突契约**：host 代理安装端点检测目标目录已存在且非同源 → 409 `{"error":{"code":"CONFLICT"}}`；客户端确认后带 `?force=1` 重试（服务端/host 放行，仍做归档安全校验）。市场与组织同名、与本地手工同名统一走此路径。
+3. **安装冲突契约**：host 代理安装端点检测目标目录已存在且非同源 → 409 `{"error":{"code":"CONFLICT"}}`；客户端确认后带 `?force=1` 重试（服务端/host 放行，仍做归档安全校验）。市场与组织同名、与本地手工同名统一走此路径。**（未实现：宿主无 409/CONFLICT 与 force 分支，见 §九.1 / R2-SK-5）**
 4. 管理端：新增 `GET /api/server/admin/approvals?type=skill|agent|all&status=` 统一审批队列（内部复用两个域的 listAll + decide，**不复制审核逻辑**）；单资源 approve/reject/delete/grants 仍走各自原路由，避免破坏性重命名。
 5. **不动表**：`shared_skills` / `agent_presets` / `skills` 及 grants 表全部保留（多版本+授权已各自闭环）；聚合面只是读侧 facade（+0037 两列）。
 6. 审计动作名不变（`shared_skill_approve`/`agent_preset_approve` 等），新动作仅 `*_qualify`。
@@ -139,7 +139,7 @@ interface CapabilityItem {
 
 - `GET /api/client/v2/capabilities?source=&type=&q=`（员工 Bearer）；`GET /api/server/admin/approvals?type=&status=pending`（Admin）。
 - 后端只返回当前用户可见/已授权条目（坚持「默认拒绝」，不泄露存在性）；`installed/installedVersion/hasUpdate` 由 host 代理补齐。
-- 安装冲突：`POST .../install`（无 force）→ 409 `CONFLICT`；`?force=1` 放行。
+- 安装冲突：`POST .../install`（无 force）→ 409 `CONFLICT`；`?force=1` 放行。**（未实现：宿主无 force 分支，见 §九.1 / R2-SK-5）**
 - 后端实现建议：**同包聚合，不跨域 import**——`/api/client/v2/capabilities` 放在新包 `server/internal/capabilities/`，内部复用 `serverstore` 函数（`ListVisibleSharedSkills`/`AccessibleSharedResourceNames`/marketplace 的可见性函数），不复制审核与归档安全逻辑。
 
 ## 七、术语对照（界面旧 → 新）
@@ -157,7 +157,7 @@ interface CapabilityItem {
 
 ## 八、验收
 
-1. **Phase 1**：客户端侧边栏仅一个「能力中心」入口；面板三分区（我的/市场/组织）× 类型筛选（全部/技能/智能体）；同名技能与智能体不串卡（复合键）；共享技能可卸载、卸载走确认条；hasUpdate 只在「approved 最高版本 > 已装」时出现；30s 轮询与 Tab focus trap 生效；分区独立错误态；同名安装先确认后 `?force=1`；多版本归并一张卡且历史版本可展开安装；`capability-center-panel.spec.ts` 与 `e2e-client.mjs`（新 marker）全绿；`yarn check` 全绿。
+1. **Phase 1**：客户端侧边栏仅一个「能力中心」入口；面板三分区（我的/市场/组织）× 类型筛选（全部/技能/智能体）；同名技能与智能体不串卡（复合键）；共享技能可卸载、卸载走确认条；hasUpdate 只在「approved 最高版本 > 已装」时出现；30s 轮询与 Tab focus trap 生效；分区独立错误态；同名安装先确认（**纯客户端确认条**，`?force=1` 未落地且该参数面已于 2026-09-19 删除，见 §九.1）；多版本归并一张卡且历史版本可展开安装；`capability-center-panel.spec.ts` 与 `e2e-client.mjs`（新 marker）全绿；`yarn check` 全绿。
 2. **Phase 2**：`/api/client/v2/capabilities` 对非授权用户不泄露 pending/rejected 存在性；聚合层单测覆盖同名 `kind` 冲突、多版本 hasUpdate（semver）、409 CONFLICT→force 流程、0037 quality 迁移（sqlite+pg 双跑）；`make test` / `make check` 全绿。
 3. **Phase 3**：webadmin 新导航生效（能力中心分组/市场·技能）；统一审批页仅使用下沉共享组件；approve 可勾选官方/精选且落 `*_qualify` 审计；`make webadmin` 通过。
 4. 各 Phase 独立 commit（`feat:|refactor:|chore:` 单行 ≤72 字符），不混入行为无关改动。
@@ -189,6 +189,7 @@ interface CapabilityItem {
 ### 实现偏离（决策修订，2026-08-25）
 
 1. **409/force 契约不落地**（原 §五.3）：两安装器语义相反（技能备份后覆盖更新、Agent 同名拒绝），客户端弹「同名将覆盖」确认框已达成提示并确认目标；服务端不新增 409 CONFLICT/`?force=1` 假设接口，避免破坏现有安全替换设计。仅保留客户端侧确认（`capability.conflictConfirm`）。
+   - **2026-09-19 补（R2-SK-5）**：客户端曾把确认结果拼成 `POST …/install?force=1`，但宿主按 pathname 分发、**从来不读这个 query**（`packages/host/enterprise/src/auth-gate.ts`），"更新/重装"能生效靠的是 `installSkillArchive` 的整树替换语义。该参数面已从客户端**删除**（`installEndpoint` / `builtinInstallEndpoint` 不再带 query，守卫用例断言端点不含 `?`），"同名覆盖"仍是纯客户端确认交互；不要把它加回来。
 2. **Agent 同名**：host 侧 `installedPresets.has(name)` 已覆盖本地同名 → org 卡显示「已安装+卸载」，不提供覆盖安装入口（贴合后端「不覆盖」语义）。
 3. **质量标记追加**：webadmin 通过 `<Select>`（官方/精选/无）设置 `quality`，仅 approved 行可选。
 
@@ -197,5 +198,5 @@ interface CapabilityItem {
 - **合并面板是纯 UI 重构**：两面板都已是「卡片网格 + 分区标题」同构骨架，合并成本低；退出点：若合并后信息密度不达标，可退化为「能力中心」容器内两个 tab（技能 / 智能体），IA 不变。
 - **保留旧路由而非重命名**：`/api/client/v2/shared-skills` 等内容语义仍准确（「共享」描述的是组织内分发机制），重命名收益低、破坏 host 代理与第三方接入方；新词只落在界面与聚合面上。
 - **「专业」的词性**：词表内把它固定为「等级」语义（市场定价层），全产品内不复用为别的含义，避免再次单维度化命名；组织库质量标记另起「官方/精选」词表。
-- **强制 force 的边界**：`?force=1` 只豁免「同名目录已存在」这一项检查；归档安全校验、大小上限、拒绝符号链接等**永远不会**因 force 豁免。
+- **强制 force 的边界（该接口从未落地，2026-09-19 起参数面也已删除）**：原设计里 `?force=1` 只豁免「同名目录已存在」这一项检查；归档安全校验、大小上限、拒绝符号链接等**永远不会**因 force 豁免。实际实现见 §九.1 —— 宿主不读 force，安装器恒为整树替换（R2-SK-5）。
 - **0037 双后端（已过时，2026-08-27 PG-only 迁移后修正）**：当时 sqlite 与 pg 迁移目录并存（`migrations/` 与 `migrations-pg/`），需双落地。**现在 PostgreSQL 是唯一后端**：旧 `migrations/` 与 SQLite 驱动已整体删除，表结构改动只需落在 `server/internal/serverstore/migrations-pg/`（当前 0001–0059）。

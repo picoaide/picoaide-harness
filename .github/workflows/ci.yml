@@ -162,7 +162,12 @@ jobs:
     needs: changes
     if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 45 min 的依据(2026-09-19,R2-SK-7):happy path ≈ 26 min 测试 + PG 启动/
+    # npm ci/gofmt/go vet/npm test/make build-server ≈ 5 min ⇒ 留 ~1.4× 余量;
+    # 且覆盖"单包挂满 15m + 其余 ~21m ≈ 36 min"的最坏路径,使 -timeout 的
+    # goroutine dump 一定能打出来(取 30 min 时这两条都不成立:余量仅 ~13%,
+    # runner 稍慢即同提交红,真挂则无 dump)。
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: server
@@ -211,9 +216,16 @@ jobs:
           fi
       - run: go vet ./...
       # -p 1 串行跑测试包:多个包并行时总连接数仍可能挤压 service 的
-      # max_connections(500),串行换取确定性(耗时 ~5-10 分钟,在 30 分钟
-      # 窗口内)。
-      - run: go test ./... -count=1 -p 1 -timeout 25m
+      # max_connections(500),串行换取确定性。实测全量 wall ≈ 26 min
+      # (2026-09-19,4 vCPU 与 runner 同规格,51 包全绿;最慢单包
+      # llmgateway 298.9s、serverstore 165-189s)。
+      #
+      # 单包 -timeout 必须远小于 job 预算,否则"真挂"的诊断会丢:取 25m 时,
+      # 挂起的那个包要烧满 25 min,其余包还要 ~21 min ⇒ 必然先撞 job 上限被
+      # 整体取消,产物从 `panic: test timed out after Nm` + goroutine dump +
+      # 用例名,退化成"gate 红、查不出原因"(第二轮审计 R2-SK-7,P2)。
+      # 15m 对最慢包(299s)有 3× 余量,且保留 dump 机会。
+      - run: go test ./... -count=1 -p 1 -timeout 15m
       - run: npm test
         working-directory: server/webadmin
       - run: make build-server

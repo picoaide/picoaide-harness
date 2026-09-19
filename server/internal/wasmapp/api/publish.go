@@ -45,12 +45,15 @@ import (
 //	G 投影        （仅 approved 时）SetWasmAppConfig + SetWasmAppCurrentRelease
 //	H 收尾        审计 → 版本 GC（保留 3 版，顺带清掉被回收版本的资源目录）
 //
-// ⚠️ 配置投影有**两条**写路径，两条都必须被 `status == approved` 罩住：
+// ⚠️ 投影有**两条**写路径，两条都必须被 `status == approved` 罩住：
 //   - G1/G2（SetWasmAppConfig + SetWasmAppCurrentRelease）；
-//   - E1 的 INSERT 分支（首版落行时随 UPSERT 写 config_json/purpose/data_sensitivity）——
-//     首版待审时它曾照写，让"没被任何人批准过的配置"成了后续版本的继承基线（审计 §1.2）。
+//   - E1 的 UPSERT（首版落行 / 已有应用的更新都走它），罩住的列 =
+//     config_json/purpose/data_sensitivity（首版待审时它们曾照写，让"没被任何人批准过的
+//     配置"成了后续版本的继承基线，审计 §1.2）**以及 title/description**（2026-09-19
+//     第二轮审计 §1.1：这两列漏在守卫外，而目录门面直接读它们 ⇒ 待审版本能立刻把
+//     已上线应用改名成"IT 密码重置"，仿冒不需要过审）。
 //
-// 理由（R1-pm-9）：apps 行是**目录对全员下发的投影**（access 徽标/负责人/当前版本），
+// 理由（R1-pm-9 / R2-1）：apps 行是**目录对全员下发的投影**（access 徽标/负责人/当前版本/标题/描述），
 // 也是"上一版生效配置"的显示面。待审版本没有生效，投影就必须一字不动 —— 否则作者提交
 // 一个"改成 public"的待审版本，全公司先看到"公开"徽标，点进去却仍被要求登录（审核只剩
 // "卡制品"，配置展示不受控），而且下一版会拿这个未审核的 public 当缺省。待审版本被
@@ -291,13 +294,20 @@ func (h *Handlers) dryRun(c *gin.Context, appID, version string, wasm []byte, cf
 	// 干跑与执行进程共用同一份磁盘编译缓存 ⇒ 这里命中的就是发布期编译过的那一条
 	// （§4.3.1-a：两侧 RuntimeConfig 必须一致，由 runtime/compile 各自的自检保证）。
 	//
-	// ⚠️ 单实例内存上限必须取**生效限制项**（R1-rt-7）：这条路径原先只传 DataRoot，
-	// 于是回落编译期 64 MiB（runtime.New 的 MemoryPages=0 分支）——控制台把
+	// ⚠️ 单实例内存上限必须取**运行时生效值**（R1-rt-7 + R5）：这条路径原先只传
+	// DataRoot，于是回落编译期 64 MiB（runtime.New 的 MemoryPages=0 分支）——控制台把
 	// instance_memory_mb 调小 ⇒ 干跑在 64 MiB 下放行线上跑不起来的应用；调大 ⇒ 误拒。
 	// 干跑存在的理由正是"编译通过 ≠ 能跑"，用错上限就把它变成了摆设。
+	//
+	// ⚠️ 为什么是 effectiveMemoryPages 而不是 instanceMemoryPages（R5，2026-09-19）：
+	// 单实例上限住在 wazero 的 RuntimeConfig 里，**改了要重启才生效** —— 在"刚保存、
+	// 还没重启"的窗口里，`Options.Limits()`（已保存值）与运行时真正在跑的上限可以差出
+	// 几十上百 MiB（实测：已保存 32 MiB / 实际按 128 MiB 跑）。干跑要回答的是"这次运行
+	// 到底能不能跑起来"，所以取生效值；已保存值只有"运行时钩子没接线"时才兜底
+	// （见 read.go 的 effectiveMemoryPages：运行时优先、已保存值兜底，只有这一份实现）。
 	rt, err := runtime.New(c.Request.Context(), runtime.Options{
 		DataRoot:    h.cacheRoot(),
-		MemoryPages: h.instanceMemoryPages(),
+		MemoryPages: h.effectiveMemoryPages(),
 	})
 	if err != nil {
 		return internalErr("执行侧运行时装配失败", err).WithHint("这是平台装配问题，请联系平台管理员")
@@ -360,12 +370,19 @@ func (h *Handlers) dryRun(c *gin.Context, appID, version string, wasm []byte, cf
 	return nil
 }
 
-// instanceMemoryPages 返回**当前生效**的单实例线性内存页数（装配侧注入的
-// applimits 闭包；未注入 —— 最小装配/单测 —— 时返回 0，让 runtime.New 回落编译期默认）。
+// instanceMemoryPages 返回**已保存**的单实例线性内存页数（装配侧注入的 applimits 闭包；
+// 未注入 —— 最小装配/单测 —— 时返回 0，让 runtime.New 回落编译期默认）。
 //
 // 为什么走闭包而不是让 api 包自己读设置：解析优先级（控制台设置 > 部署档位 > 编译期默认）
 // 与运行期下发都住在装配侧（cmd/server 的 wasmLimitsHolder），api 只负责"取当前值"。
-// 执行侧（appserver/options.go）读的是**同一个**闭包产物 ⇒ 干跑与线上同源。
+//
+// ⚠️ 这是"控制台配了多少"，**不是"这次运行按多少跑"**（R5）：单实例上限要重启才生效，
+// 两者的窗口差可以到几十上百 MiB。因此：
+//   - 诊断 hints 与**发布干跑**（要回答"现在能不能跑起来"）⇒ 必须走
+//     `effectiveMemoryPages()`（运行时优先，见 read.go）—— 本函数只是它的兜底；
+//   - 控制台 limits 视图与"待重启"判定（要回答"你配了多少"）⇒ 用本函数/Limits。
+//
+// 别在调用点直接用它来跑 guest：那正是 R5 的缺陷形态（干跑按一个并不生效的上限给结论）。
 func (h *Handlers) instanceMemoryPages() uint32 {
 	if h.opt.Limits == nil {
 		return 0
@@ -823,19 +840,40 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 
 	// E1 占名（owner 首占且不可改写：DAO 的 COALESCE 保证）。
 	//
-	// **配置投影三列（config_json/purpose/data_sensitivity）只在"已生效"时随 E1 落行**
-	// （与 G1 同一条纪律，R1-pm-9）：待审版本的配置没有经过任何人批准，写进 apps 行
-	// 会让它成为下一版的**继承基线**（2026-09-19 审计 §1.2 —— 首版待审时 E1 的 INSERT
-	// 分支曾照写，G1 守卫只挡住了半条路）。首版待审 ⇒ INSERT 落空串 = "没有可交付的
-	// 配置"（read.go 对空 config_json 的兜底：access 回落 login、负责人回落 apps.owner），
-	// 等 approve 时由 admin.go 的审核分支按最新 approved 版本写入。
-	// 冲突分支本来就不写这三列 ⇒ 已生效应用的投影不会被一次待审提交改写。
+	// **投影列只在"已生效"时随 E1 落行**（与 G1 同一条纪律，R1-pm-9 + R2-1）：
+	// 待审版本没有经过任何人批准，写进 apps 行会让它成为下一版的**继承基线**
+	// （2026-09-19 审计 §1.2 —— 首版待审时 E1 的 INSERT 分支曾照写，G1 守卫只挡住了
+	// 半条路），也会**立刻改写全组织可见的目录门面**（2026-09-19 第二轮审计 §1.1 ——
+	// title/description 是同一次 UPSERT 里唯一没被守卫罩住的两列，而员工面目录直接
+	// 读它们：作者发一个待审版本就能把已上线应用改名成"IT 密码重置"并写诱导描述，
+	// 点进去执行的却仍是已审核的旧代码 ⇒ 仿冒不需要过审）。
+	//
+	// 三条分支的口径（read.go 的目录/详情/导出都是"读 apps 行"）：
+	//   - **approved**：投影 = 本次版本（title/description + 配置三列，与 G1 同源同版）；
+	//   - **待审 + 已存在应用**：投影**一字不动** —— 传 in.existing 的现值，不是待审
+	//     标题/描述（UPSERT 的冲突分支会照写这两列）；
+	//   - **首版待审**：apps 行还没有任何生效版本，显示面用 **app_id 占位**（不是待审
+	//     标题：未审核内容不进投影列；也不是空串：目录/详情/导出读的就是这一列，
+	//     read.go 对空值没有 title 兜底 ⇒ 空标题会先出现在管理面与导出里）。目录此时
+	//     不列它（read.go 的目录条件要求 current_release_id > 0）。
+	// 首版待审的空配置不是缺陷：read.go 对空 config_json 的兜底是 access 回落 login、
+	// 负责人回落 apps.owner。approve/reject 时由 admin.go 的审核分支按**最新 approved
+	// 版本**重算全部投影列（配置三列 + title/description）。
+	//
+	// 残留（要认账）：首版待审期间再发新版若省略 title，继承源是 apps 行的占位
+	// （app_id）而不是上一份草稿标题 ⇒ 作者需重填一次。宁可让作者多打一次，也不让
+	// "没人批准过的标题"成为下一版的缺省（与继承基线同一条纪律）。
 	projConfig, projPurpose, projSensitivity := "", "", ""
-	if in.status == serverstore.ReleaseStatusApproved {
+	projTitle, projDescription := in.appID, ""
+	switch {
+	case in.status == serverstore.ReleaseStatusApproved:
 		projConfig, projPurpose, projSensitivity = string(st.configJSON), st.config.Purpose, st.config.DataSensitivity
+		projTitle, projDescription = in.title, st.config.Purpose
+	case in.existing != nil:
+		projTitle, projDescription = in.existing.Title, in.existing.Description
 	}
 	if err := serverstore.UpsertWasmApp(ctx, h.opt.DB, serverstore.WasmApp{
-		AppID: in.appID, Title: in.title, Description: st.config.Purpose,
+		AppID: in.appID, Title: projTitle, Description: projDescription,
 		Owner: in.publisher, Channel: serverstore.AppChannelWasm, Enabled: in.enabled,
 		Purpose: projPurpose, DataSensitivity: projSensitivity,
 		ConfigJSON: projConfig,

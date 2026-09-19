@@ -288,6 +288,68 @@ describe('AppCenter 应用中心', () => {
     })
   })
 
+  // -------------------------------------------------------------------------
+  // F2（审计第二轮 A2-F2）：上下架的回填此前在响应缺 `enabled` 时回落到**乐观值**
+  // `next`，于是一个不带该字段的 200 就把行翻成「已下架」；而同一文件的冻结路径
+  // 写着"响应缺字段时不臆测"。以下两条钉住"只认服务端回填"。
+  // -------------------------------------------------------------------------
+
+  it('上下架响应缺 enabled ⇒ 不臆测：行状态保持不变(F2)', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      const base = String(path).split('?')[0]!
+      if (base === '/api/server/admin/wasm-apps') return listPage(new URLSearchParams())
+      // 200 但没有 enabled（旧实现 ⇒ 乐观值 true ⇒ 行被翻成「上架」）
+      if (base.endsWith('/publish')) return { app: { app_id: 'ops-tool', changed: true } }
+      throw new Error(`unexpected ${path}`)
+    })
+    await renderList()
+    fireEvent.click(within(rowOf('ops-tool')).getByRole('button', { name: '上架' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith(
+        '/api/server/admin/wasm-apps/ops-tool/publish',
+        { method: 'POST' },
+      )
+    })
+    await waitFor(() => {
+      expect(within(rowOf('ops-tool')).getByText('已下架')).toBeInTheDocument()
+      expect(within(rowOf('ops-tool')).queryByRole('button', { name: '下架' })).toBeNull()
+    })
+  })
+
+  it('上下架以服务端回填为准（与乐观值相反时听服务端的）', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      const base = String(path).split('?')[0]!
+      if (base === '/api/server/admin/wasm-apps') return listPage(new URLSearchParams())
+      // 乐观值 = !false = true，服务端却回 false ⇒ 必须显示「已下架」
+      if (base.endsWith('/publish')) return { app: { app_id: 'ops-tool', enabled: false, changed: true } }
+      throw new Error(`unexpected ${path}`)
+    })
+    await renderList()
+    fireEvent.click(within(rowOf('ops-tool')).getByRole('button', { name: '上架' }))
+    await waitFor(() => {
+      expect(within(rowOf('ops-tool')).getByText('已下架')).toBeInTheDocument()
+      expect(within(rowOf('ops-tool')).queryByRole('button', { name: '下架' })).toBeNull()
+    })
+  })
+
+  it('上下架请求失败 ⇒ 界面不呈现未落库的状态（结果级断言，不是"存在某个元素"）', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      const base = String(path).split('?')[0]!
+      if (base === '/api/server/admin/wasm-apps') return listPage(new URLSearchParams())
+      if (base.endsWith('/publish')) throw new ApiError(500, 'INTERNAL', '上架失败:数据库不可达')
+      throw new Error(`unexpected ${path}`)
+    })
+    await renderList()
+    fireEvent.click(within(rowOf('ops-tool')).getByRole('button', { name: '上架' }))
+
+    // 失败 = 什么都没有落库 ⇒ 行必须**仍是**「已下架」（按钮仍是「上架」），
+    // 而不是先把乐观值画上去再撤销（那正是"界面呈现未落库状态"）。
+    expect(await screen.findByTestId('apps-error')).toHaveTextContent('数据库不可达')
+    const row = rowOf('ops-tool')
+    expect(within(row).getByText('已下架')).toBeInTheDocument()
+    expect(within(row).queryByRole('button', { name: '下架' })).toBeNull()
+  })
+
   it('冻结必须先确认(P2-6):确认框列出停服/保留期/到期/解冻,确认后才发请求', async () => {
     await renderList()
 
@@ -563,6 +625,52 @@ describe('应用中心 · 更新审批闭环', () => {
     expect(await within(block).findByTestId('rejected-empty')).toHaveTextContent('没有被拒的版本')
     expect(within(block).queryByTestId('rejected-list')).toBeNull()
     expect(within(block).queryByTestId('rejected-error')).toBeNull()
+  })
+
+  // -------------------------------------------------------------------------
+  // F6（审计第二轮 A2-F6）：`out.releases ?? []` 会把"响应里没有版本清单"渲染成
+  // "没有被拒的版本。"（对管理员是假陈述）。客户端半边 `app-releases.ts` 对同一份
+  // 响应是结构化失败 ⇒ 管理端必须与它同口径：明说读失败，不显示空态。
+  // -------------------------------------------------------------------------
+
+  it('被拒清单响应缺 releases ⇒ 明说读取失败，不显示"没有被拒的版本"(F6)', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      const full = String(path)
+      const base = full.split('?')[0]!
+      if (base === '/api/server/admin/wasm-apps') return listPage(new URLSearchParams())
+      if (base.includes('/releases')) {
+        // 形状漂移：200，但 releases 键缺席；待审那条走正常形状，免得两块错误互相掩盖。
+        return full.includes('status=rejected')
+          ? { app_id: 'review-me', status: 'rejected', current_version: '1.0.2', pending_count: 0 }
+          : { app_id: 'review-me', status: 'pending', current_version: '1.0.2', releases: PENDING_RELEASES, pending_count: 1 }
+      }
+      if (base.endsWith('/diagnostics')) return { diagnostics: DIAGNOSTICS }
+      throw new Error(`unexpected ${path}`)
+    })
+    await renderList()
+    fireEvent.click(within(rowOf('review-me')).getByRole('button', { name: '详情' }))
+    const block = await screen.findByTestId('rejected-block')
+    expect(await within(block).findByTestId('rejected-error')).toHaveTextContent('没有版本清单')
+    expect(within(block).queryByTestId('rejected-empty')).toBeNull()
+  })
+
+  it('待审清单响应缺 releases ⇒ 同样明说读取失败，不显示"没有待审版本"(F6)', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      const full = String(path)
+      const base = full.split('?')[0]!
+      if (base === '/api/server/admin/wasm-apps') return listPage(new URLSearchParams())
+      if (base.includes('/releases')) {
+        return full.includes('status=rejected')
+          ? { app_id: 'review-me', status: 'rejected', current_version: '1.0.2', releases: REJECTED_RELEASES, pending_count: 0 }
+          : { app_id: 'review-me', status: 'pending', current_version: '1.0.2', pending_count: 1 }
+      }
+      if (base.endsWith('/diagnostics')) return { diagnostics: DIAGNOSTICS }
+      throw new Error(`unexpected ${path}`)
+    })
+    await renderList()
+    fireEvent.click(within(rowOf('review-me')).getByRole('button', { name: '详情' }))
+    expect(await screen.findByTestId('pending-error')).toHaveTextContent('没有版本清单')
+    expect(screen.queryByTestId('pending-empty')).toBeNull()
   })
 
   it('点「通过」→ POST .../releases/<version>/approve,并刷新列表与待审清单', async () => {
@@ -1054,6 +1162,54 @@ describe('应用中心 · 设置(应用域名/泛域名)', () => {
       ([, init]) => (init as RequestInit | undefined)?.method && (init as RequestInit).method !== 'GET',
     )
     expect(writes).toEqual([])
+  })
+
+  // -------------------------------------------------------------------------
+  // F3（审计第二轮 A2-F3）：设置页这组无障碍判据（只读原因常驻文本 + 三处
+  // aria-describedby + 保存错误的 live 区）**此前零用例** —— 删掉后 52 条全绿。
+  // 下面两条把它们钉住。
+  // -------------------------------------------------------------------------
+
+  it('只读原因常驻且被三个禁用控件引用（不是只藏在 title 里）(F3)', async () => {
+    setCurrentAdmin(READONLY)
+    render(<Settings />)
+    const input = await screen.findByLabelText('应用域名')
+
+    const note = screen.getByTestId('settings-readonly-note')
+    expect(note.textContent).toContain('只读')
+    // 引用必须指向**真实存在**的节点（悬空 aria-describedby 等于没说）
+    expect(document.getElementById('settings-readonly-note')).toBe(note)
+    for (const el of [
+      input,
+      screen.getByRole('button', { name: '保存' }),
+      screen.getByRole('button', { name: '关闭应用子域' }),
+    ]) {
+      expect(el.getAttribute('aria-describedby')).toBe('settings-readonly-note')
+    }
+  })
+
+  it('保存失败的提示是 alert live 区（读屏用户能听到保存被拒）(F3)', async () => {
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/wasm-apps/domain' && (init as RequestInit | undefined)?.method === 'PUT') {
+        throw new ApiError(400, 'VALIDATION', '未配置 PICOAI_TRUSTED_PROXIES')
+      }
+      if (path === '/api/server/admin/wasm-apps/domain') {
+        return {
+          base_domain: 'apps.example.com', source: 'setting', enabled: true,
+          url_pattern: 'https://<app_id>.apps.example.com', setting_key: 'wasm.apps_base_domain',
+        }
+      }
+      return {}
+    })
+    render(<Settings />)
+    const input = await screen.findByLabelText('应用域名')
+    fireEvent.change(input, { target: { value: 'harness.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+
+    const err = await screen.findByTestId('settings-save-error')
+    expect(err).toHaveTextContent('未配置 PICOAI_TRUSTED_PROXIES')
+    expect(err).toHaveAttribute('role', 'alert')
+    expect(err).toHaveAttribute('aria-live', 'assertive')
   })
 })
 

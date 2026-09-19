@@ -21,11 +21,17 @@ VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
 # 那里串行是为了 service 容器的 max_connections,不是性能考虑)。
 TEST_PARALLEL ?= 4
 
-# 单包测试超时(2026-09-19):Go 默认 10m **会被负载撞穿**——`internal/serverstore`
-# 在空闲机器上单跑 560s(紧贴 600s),并发跑测试时会以 "panic: test timed out after 10m0s"
-# 假红(实测本仓门禁连续两次踩到,单跑即绿)。这里显式放宽到 25m:它只影响"真的挂了"
-# 的判定时刻,不放宽任何断言;CI 负载更低时可自行覆盖 TEST_TIMEOUT=10m 恢复默认。
-TEST_TIMEOUT ?= 25m
+# 单包测试超时(2026-09-19 修订,第二轮审计 R2-SK-7):Go 默认 10m 曾在本仓门禁里
+# 连续两次以 "panic: test timed out after 10m0s" 假红——但那两次是**并发跑多套
+# 重型测试**造成的负载假象,不是真实耗时。第二轮审计按 CI 同形命令在本机
+# (4 vCPU,与 runner 同规格)实测:全量 EXIT=0,最慢单包 llmgateway 298.9s、
+# serverstore 165-189s ⇒ 旧注释声称的"serverstore 空闲单跑 560s,紧贴 600s"
+# **不可复现**;默认 10m 本来就有 ≥2× 余量。故收到 15m:对最慢包 3× 余量,
+# 又远小于 job 预算,真挂时仍能拿到 goroutine dump 与用例名。
+# 注意:放宽单包超时不能替代 CI 的 job 预算——两者必须满足
+# 「job timeout > 单包超时 + 其余包耗时」,否则真挂时 job 先被整体取消,
+# 诊断反而比默认 10m 更差(见 .github/workflows/ci.yml 的 server job)。
+TEST_TIMEOUT ?= 15m
 
 test:
 	go test ./... -count=1 -timeout $(TEST_TIMEOUT)

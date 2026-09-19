@@ -512,15 +512,18 @@ func (h *Handlers) reviewRelease(c *gin.Context, approve bool) {
 		return
 	}
 
-	// 审核落定之后把 apps 行的**投影**重算为"最新 approved 版本"的配置
-	// （R1-pm-9）：current_release_id 与 config_json/purpose/data_sensitivity 是同一份
-	// 配置的三个投影列，必须一起回到同一版。
+	// 审核落定之后把 apps 行的**投影**重算为"最新 approved 版本"
+	// （R1-pm-9 + R2-1）：current_release_id 与 config_json/purpose/data_sensitivity
+	// 以及 title/description 是同一份版本的投影列，必须一起回到同一版。
 	//
 	// 两条路径共用同一段，因为它们要的是同一个答案：
-	//   - **approve**：新版本成为生效版本 ⇒ 投影切到它（目录徽标/生效版本随审批生效）；
+	//   - **approve**：新版本成为生效版本 ⇒ 投影切到它（目录徽标/标题/描述/生效版本随
+	//     审批生效 —— 待审期间 E1 刻意不写 title/description，所以这里是它们唯一的
+	//     生效入口，漏掉就等于"批准了却永远看不到新标题"）；
 	//   - **reject** ：被拒版本从未生效 ⇒ 投影**恢复**成仍在生效的那一版 ——
 	//     否则待审版本带来的 access/负责人/用途会永久留在目录上（审核期间展示一个
-	//     没被任何人批准的访问级别，正是这条缺陷的下游后果）。
+	//     没被任何人批准的访问级别，正是这条缺陷的下游后果），标题/描述同理
+	//     （这条路同时把老实现留下的"脏标题"投影治好）。
 	//
 	// 取最新 approved 而不是本次版本：审批一个**更旧**的待审版本时（例如 v2 待审、
 	// v3 已通过），生效版本仍然是更新的那个 approved 版本 —— 与线上交付
@@ -557,6 +560,15 @@ func (h *Handlers) reviewRelease(c *gin.Context, approve bool) {
 				writeErr(c, internalErr("审核结果已落库，但配置投影更新失败（请重试一次）", serr))
 				return
 			}
+		}
+		// 显示面两列（title/description）也取**该版本行自己的值**（R2-1）：
+		// 这两个字段是版本的属性（publish 时与 config 一起写进 app_releases），
+		// 与 purpose 不同源时也要以版本行为准 —— 目录门面必须与生效版本逐字一致。
+		// 这里**无条件**写（不像 config 那样跳过空行）：标题/描述为空是合法状态，
+		// 且首版待审用的 app_id 占位必须在这一刻被真值替掉。
+		if serr := serverstore.SetWasmAppDisplay(ctx, h.opt.DB, appID, latest.Title, latest.Description); serr != nil {
+			writeErr(c, internalErr("审核结果已落库，但显示面投影更新失败（请重试一次）", serr))
+			return
 		}
 		current = latest.Version
 	}

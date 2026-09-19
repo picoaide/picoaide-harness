@@ -38,6 +38,12 @@ import (
 // `ReleaseCacheMaxBytes + SectionTotalMaxBytes + maxReleases × 元数据`。
 // 另有空闲淘汰（与编译模块缓存同一个 TTL）：长时间没人访问的应用会被释放。
 //
+// 上面那个 `+ SectionTotalMaxBytes` 曾经只是**跨模块假设**（"单个 release 的资源总量
+// ≤ 自定义段总量上限"由 wasmmod 校验，本包没有任何断言把它绑住）：现在它有两道护栏 ——
+// `enforceByteBoundLocked` 让超额那一份退化成元数据（上界回到 `maxBytes` 以内，不依赖
+// 任何外部常量），`TestReleaseCache_BudgetCoversSingleReleaseWorstCase` 把两个常量绑在一起
+// （调大段总量上限而忘了算这笔账时会红）。
+//
 // # 失效（换版本 / 下架 / 冻结 / 删除 / 逐出）
 //
 //   - **换版本**：键含 `release_id` ⇒ 新版本天然不命中；并且新条目的第一次插入会
@@ -82,6 +88,12 @@ type releaseEntry struct {
 	cfg    appcfg.Config
 	cfgErr *apperr.Error
 	cfgSet bool
+	// cfgAt 是这份配置**读盘成功**的时刻（TTL 复验用它；由注入的时钟给）。
+	//
+	// 存在的理由（R2-CA-1）：配置是准入判定的输入，而它在磁盘上**不是**只随版本变化 ——
+	// 文件可能被平台故障/人为操作删掉或改坏。没有这个时刻时，暖缓存下的删除/损坏
+	// 永远不被察觉（"配置读不到 = 500 平台故障"这条 fail-loud 只在冷路径成立）。
+	cfgAt time.Time
 
 	// lastUsed 是最近一次命中/写入的时间（空闲淘汰用它；由注入的时钟给）。
 	lastUsed time.Time
@@ -193,9 +205,62 @@ func (c *releaseCache) putAsset(k releaseKey, logical string, a assetEntry) {
 	}
 	e.lastUsed = c.now()
 	c.evictLocked()
+	c.enforceByteBoundLocked()
 }
 
-// config 查解析后的应用配置（**不读盘**）。
+// enforceByteBoundLocked 给"唯一那条不逐出"造成的超额补一道**结构性**上界（R2-CA-5）。
+//
+// 背景：`evictLocked` 刻意不逐出最后一条（否则"刚写进去就被自己赶出来"，缓存永不命中），
+// 代价是允许一份超额。文件头把这个超额写成"≤ 单个 release 的资源总量"，而那个"≤"来自
+// **另一个模块**的校验（wasm 自定义段总量 ≤ `SectionTotalMaxBytes`）—— 本包此前没有任何
+// 断言把它绑住：段总量上限一旦被调大（或资源改走别的抽取通道），单条自身就可能超过
+// `maxBytes`，此时 `c.bytes` 会无界超出文档承诺的硬上界。
+//
+// 这里不依赖那条跨模块假设：淘汰跑完仍有超额 ⇒ 只可能是唯一剩下的那条自己超了预算，
+// 把它退化成"只缓存元数据"（304 复验只要 ETag，正文回源读盘），上界回到 `maxBytes` 以内。
+// 与 putAsset 里"单条超预算一半只缓存元数据"是同一种降级，只是判据从"单条 vs 一半"改成
+// "整条 vs 全部"。
+func (c *releaseCache) enforceByteBoundLocked() {
+	if c.bytes <= c.maxBytes {
+		return
+	}
+	front := c.lru.Front()
+	if front == nil {
+		return
+	}
+	e, _ := front.Value.(*releaseEntry)
+	if e == nil {
+		return
+	}
+	for logical, a := range e.assets {
+		if !a.BytesCached {
+			continue
+		}
+		a.Data, a.BytesCached = nil, false
+		e.assets[logical] = a
+	}
+	c.bytes -= e.bytes
+	e.bytes = 0
+	if c.bytes < 0 {
+		c.bytes = 0
+	}
+}
+
+// ConfigRevalidateTTL 是"解析后的应用配置"在缓存里的**有效期**（R2-CA-1）。
+//
+// 资源字节在 `(app_id, release_id, path)` 下不可变，但**配置文件的在盘存在性**不是：
+// 目录被换过、文件被删掉/改坏都属于平台故障，而平台对它的承诺是 fail-loud（读不到 ⇒
+// 500，绝不按匿名放行）。若配置像资源字节那样无限期缓存，暖缓存下这次故障就永远不被
+// 察觉（宿主用旧配置准入、应用自己 `assets.read` 拿到 404 ⇒ 两边对"配置是什么"分叉）。
+//
+// 因此成功的解析结果只缓存本值：到期后第一个请求重新读盘 + 解析（每个应用每窗口一次，
+// 相对"每请求都读"仍然省掉了绝大多数开销），故障与修复都在一个窗口内可见。
+//
+// 取 5 分钟与 `staticCacheMaxAge`（浏览器侧资源缓存窗口）同量级：两者都是"平台状态多久
+// 必须被重新确认一次"的口径，排障时只有一个数字要记。
+const ConfigRevalidateTTL = 5 * time.Minute
+
+// config 查解析后的应用配置（**不读盘**；超过有效期按未命中处理，见 ConfigRevalidateTTL）。
 func (c *releaseCache) config(k releaseKey) (appcfg.Config, *apperr.Error, bool) {
 	if c == nil {
 		return appcfg.Config{}, nil, false
@@ -203,7 +268,7 @@ func (c *releaseCache) config(k releaseKey) (appcfg.Config, *apperr.Error, bool)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[k]
-	if !ok || !e.cfgSet {
+	if !ok || !e.cfgSet || c.now().Sub(e.cfgAt) > ConfigRevalidateTTL {
 		c.cfgMisses++
 		return appcfg.Config{}, nil, false
 	}
@@ -215,37 +280,48 @@ func (c *releaseCache) config(k releaseKey) (appcfg.Config, *apperr.Error, bool)
 	return e.cfg, e.cfgErr, true
 }
 
-// putConfig 写入解析结果。**错误也缓存**（配置缺失/非法在同一个 release 下是常量：
-// 平台故障要么被修好=换版本，要么一直存在；缓存它免得每个请求都读一次必失败的盘）。
+// putConfig 写入解析结果。
+//
+// **只缓存成功**（R2-CA-1）：失败不是常量 —— EIO/EMFILE/挂载抖动/文件被删都是可以
+// **就地修好**的（把文件恢复原样即可），而"读失败"一旦进缓存就再没有任何请求会去
+// 重读它：故障被固化成持续 500，且因为命中（含命中失败）会刷新 lastUsed，连空闲淘汰
+// 也永不触发（越多请求越修不好），唯一出口只剩 EvictApp/重启。
+//
+// 与 `Asset()` 对失败的处理对称（"失败可能只是这一次的状态，不缓存失败"）。
 func (c *releaseCache) putConfig(k releaseKey, cfg appcfg.Config, err *apperr.Error) {
-	if c == nil {
+	if c == nil || err != nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e := c.ensureLocked(k)
-	e.cfg, e.cfgErr, e.cfgSet = cfg, err, true
-	e.lastUsed = c.now()
+	e.cfg, e.cfgErr, e.cfgSet = cfg, nil, true
+	e.cfgAt = c.now()
+	e.lastUsed = e.cfgAt
 	c.evictLocked()
 }
 
 // evictApp 丢掉某应用的全部条目（下架 / 冻结 / 删除 / 逐出时的唯一入口）。
-// 返回被丢掉的条目数。
-func (c *releaseCache) evictApp(appID string) int {
+//
+// 返回被丢掉的条目数与**这些条目实际持有的资源字节数**（R2-CA-2：调用方要拿它记账 ——
+// 此前只回条目数，2 MiB 的释放被写成"记账 0 KiB"，容量核算与内存归还的入参都失真）。
+func (c *releaseCache) evictApp(appID string) (int, int64) {
 	if c == nil || appID == "" {
-		return 0
+		return 0, 0
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n := 0
+	var freed int64
 	for k, e := range c.entries {
 		if k.AppID != appID {
 			continue
 		}
+		freed += e.bytes
 		c.removeLocked(e)
 		n++
 	}
-	return n
+	return n, freed
 }
 
 // sweepIdle 释放空闲超过 idle 的条目（与编译模块缓存同一个后台循环调用）。

@@ -84,6 +84,25 @@ describe('BuiltinSkills 平台内置技能（只读诊断面）', () => {
     expect(await screen.findByTestId('builtin-empty')).toHaveTextContent('没有一条技能通过校验')
   })
 
+  it('目录存在但里面什么都没有时，不得指向不存在的「被跳过」块（R2-SK-2）', async () => {
+    // 服务端在"资产根目录放错层/放空目录"时给出的真实形状：skills 空、problems 空 ——
+    // 空态文案此前无条件写"请看上面的「被跳过」原因"，而那个块根本不会渲染。
+    mockRequest.mockResolvedValueOnce({
+      dir: '/opt/picoaide/skills',
+      dir_exists: true,
+      skills: [],
+      problems: [],
+      counts: { skills: 0, problems: 0 },
+    } as never)
+    render(<BuiltinSkills />)
+
+    const empty = await screen.findByTestId('builtin-empty')
+    // 判据：引用与真实存在的块一致 —— 没有块就不能引用它；文案要指向真实的排查动作。
+    expect(screen.queryByTestId('builtin-problems')).not.toBeInTheDocument()
+    expect(empty).not.toHaveTextContent('被跳过')
+    expect(empty).toHaveTextContent('没有任何条目')
+  })
+
   it('目录不存在是"没有内置技能"而不是故障（本地直跑二进制就是这个形态）', async () => {
     mockRequest.mockResolvedValueOnce({
       dir: '/opt/picoaide/skills',

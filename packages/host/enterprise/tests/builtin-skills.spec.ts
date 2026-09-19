@@ -377,11 +377,12 @@ describe('内置技能区：按钮语义与端点（纯函数）', () => {
     expect(builtinAction('9.9.9', '', true)).toBe('installed')
   })
 
-  it('安装端点固定走宿主代理（不直连服务端），覆盖安装带 force', () => {
-    expect(builtinInstallEndpoint(skill.name, false)).toBe('/api/pico/skills/builtin/app-builder/install')
-    expect(builtinInstallEndpoint(skill.name, true)).toBe('/api/pico/skills/builtin/app-builder/install?force=1')
+  it('安装端点固定走宿主代理（不直连服务端），且**不带 query 参数**（R2-SK-5）', () => {
+    expect(builtinInstallEndpoint(skill.name)).toBe('/api/pico/skills/builtin/app-builder/install')
+    // 宿主按 pathname 分发、从不读 ?force=1（auth-gate）—— 端点带 query 就是假接口。
+    expect(builtinInstallEndpoint(skill.name)).not.toContain('?')
     // 名字里的路径字符必须被转义（不给服务端拼路径的机会）。
-    expect(builtinInstallEndpoint('../evil', false)).toBe('/api/pico/skills/builtin/..%2Fevil/install')
+    expect(builtinInstallEndpoint('../evil')).toBe('/api/pico/skills/builtin/..%2Fevil/install')
   })
 })
 
@@ -478,7 +479,7 @@ describe('内置技能以普通卡片渲染：只渲染未安装的、参与搜�
 //   把 planBuiltinCards 的 `if (action === 'installed') continue` 改回
 //   `if (installed) continue`（等价于旧实现）⇒ 前两条用例必红。
 
-describe('R1-pm-8：已装且更旧 ⇒ 出「更新」卡并走 ?force=1 重装路径', () => {
+describe('R1-pm-8：已装且更旧 ⇒ 出「更新」卡，端点与安装同一条链路', () => {
   const row = (version: string): BuiltinSkill => ({ name: 'app-builder', version, title: 'PicoAide 应用构建手册' })
   const installedState = (installedVersion: string | undefined): {
     installedNames: ReadonlySet<string>
@@ -488,14 +489,14 @@ describe('R1-pm-8：已装且更旧 ⇒ 出「更新」卡并走 ?force=1 重装
     installedVersions: installedVersion === undefined ? {} : { 'app-builder': installedVersion },
   })
 
-  it('已装 1.0.0 + 清单 1.1.0 ⇒ 出卡、动作 update、端点 = 既有重装路径（force=1）', () => {
+  it('已装 1.0.0 + 清单 1.1.0 ⇒ 出卡、动作 update、端点 = 安装同一条链路（无 query）', () => {
     const cards = planBuiltinCards({ rows: [row('1.1.0')], ...installedState('1.0.0'), query: '', kindFilter: 'all' })
     expect(cards).toHaveLength(1)
     expect(cards[0]?.action).toBe('update')
     // 关键：这一行必须是**可点**的 action 态，不能落回「已安装」胶囊（那正是死代码形态）。
     expect(cards[0]?.state).toBe('action')
     expect(cards[0]?.installed).toBe(true)
-    expect(cards[0]?.endpoint).toBe('/api/pico/skills/builtin/app-builder/install?force=1')
+    expect(cards[0]?.endpoint).toBe('/api/pico/skills/builtin/app-builder/install')
   })
 
   it('已装且与清单同版本 ⇒ 不出卡（本机技能库那张普通卡片就是它，不重复）', () => {
@@ -509,7 +510,7 @@ describe('R1-pm-8：已装且更旧 ⇒ 出「更新」卡并走 ?force=1 重装
     expect(planBuiltinCards({ rows: [row('9.9.9')], ...installedState(undefined), query: '', kindFilter: 'all' })).toEqual([])
   })
 
-  it('未装 ⇒ 仍是「安装」卡，端点不带 force', () => {
+  it('未装 ⇒ 仍是「安装」卡，端点不带 query（宿主不读 force，R2-SK-5）', () => {
     const cards = planBuiltinCards({ rows: [row('1.1.0')], installedNames: new Set(), installedVersions: {}, query: '', kindFilter: 'all' })
     expect(cards.map(c => [c.action, c.state, c.endpoint])).toEqual([
       ['install', 'action', '/api/pico/skills/builtin/app-builder/install'],
@@ -521,7 +522,7 @@ describe('R1-pm-8：已装且更旧 ⇒ 出「更新」卡并走 ?force=1 重装
     expect(planBuiltinCards({ rows: [row('1.1.0')], ...local })).toEqual([])
     const bumped = planBuiltinCards({ rows: [row('2.0.0')], ...local })
     expect(bumped.map(c => [c.action, c.endpoint])).toEqual([
-      ['update', '/api/pico/skills/builtin/app-builder/install?force=1'],
+      ['update', '/api/pico/skills/builtin/app-builder/install'],
     ])
   })
 
@@ -551,13 +552,13 @@ describe('R1-pm-8：已装且更旧 ⇒ 出「更新」卡并走 ?force=1 重装
 })
 
 // ---------------------------------------------------------------------------
-// R1-pm-8 端到端：装 1.0.0 → 清单升到 1.1.0 → 出「更新」卡 → force 重装真的换内容
+// R1-pm-8 端到端：装 1.0.0 → 清单升到 1.1.0 → 出「更新」卡 → 再 POST 一次真的换内容
 // ---------------------------------------------------------------------------
 //
 // 只断言"卡片存在"是不够的：R1-pm-8 的另一半是"更新**真的能装上**"。这里用真实现
 // 走完 清单 → 决策 → 既有安装链路（installSkillArchive），最后核对磁盘字节。
 
-describe('R1-pm-8 端到端：更新卡 → ?force=1 → 本机整树换成新版', () => {
+describe('R1-pm-8 端到端：更新卡 → 同一安装端点 → 本机整树换成新版', () => {
   it('旧版装好后，服务端升版 ⇒ 决策出更新卡；点它真的把内容换成新版（含 provenance 版本）', async () => {
     const installedDir = join(resolveSkillsDir(), 'app-builder')
 
@@ -596,10 +597,10 @@ describe('R1-pm-8 端到端：更新卡 → ?force=1 → 本机整树换成新�
       kindFilter: 'all',
     })
     expect(cards.map(c => [c.skill.name, c.action, c.state, c.endpoint])).toEqual([
-      ['app-builder', 'update', 'action', '/api/pico/skills/builtin/app-builder/install?force=1'],
+      ['app-builder', 'update', 'action', '/api/pico/skills/builtin/app-builder/install'],
     ])
 
-    // 4) 点那一张卡：走既有安装链路（force=1）⇒ 整树换成新版。
+    // 4) 点那一张卡：走既有安装链路（宿主整树替换；端点不带 force）⇒ 整树换成新版。
     const upgraded = await h.call(cards[0]!.endpoint, 'POST')
     expect(upgraded.code, JSON.stringify(upgraded.body)).toBe(200)
     expect(upgraded.body).toMatchObject({ ok: true, name: 'app-builder', version: '1.1.0' })

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
@@ -353,5 +354,237 @@ func TestSeedHalfSeededIsHealedAndNeverPointsAtMissingAssets(t *testing.T) {
 		if strings.Contains(sk.Reason, "补齐") {
 			t.Fatalf("%s 第三次播种仍在补齐（补齐不幂等）：%q", sk.AppID, sk.Reason)
 		}
+	}
+}
+
+// ===== 第二轮对抗式审计（诊断与播种区域 R2-DG-4/5/6）的行为级护栏 =====
+
+// demoAssetsPath 返回某个演示版本的资源目录（与 appseed 的推导一致）。
+func demoAssetsPath(dataRoot, appID string, relID int64) string {
+	return filepath.Join(dataRoot, "apps", appID, "assets", strconv.FormatInt(relID, 10),
+		"picoaide.app.json")
+}
+
+// TestSeedHealsAppRowWithoutAnyRelease 守住 R2-DG-4：**apps 行已落、一个版本行都没有**
+// 这种半成品必须自愈（旧实现把它当"不是我们播的"跳过 ⇒ 应用永久没有可交付版本，
+// 而日志给的理由是误导性的"已存在"；触发条件 = 首次启动时 CreateWasmRelease 失败）。
+//
+// 现场构造（与真实失败点同形）：正常播种后删掉该应用的**全部版本行**并把
+// current_release_id 归零、资源目录删掉 —— 这正是 seedOne 在 "UpsertWasmApp 成功、
+// CreateWasmRelease 失败" 之后留在库里的状态（应用行/归属/配置齐备，版本什么都没有）。
+//
+// 判据（三段）：
+//  1. 重跑播种后必须补出**恰好一条** approved 版本行，且 current_release_id 指向它；
+//  2. 资源目录必须就位，内容与库内 config_json 逐字节相同（应用自己 assets.read 读它）；
+//  3. 应用行不得被改写（标题/归属/配置不变）—— 补齐不是"重新播种"。
+//
+// 变异验证：把 healMissingRelease 的调用换回 `return false, nil`（旧行为）⇒ 第 1 段必红。
+func TestSeedHealsAppRowWithoutAnyRelease(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	dataRoot := t.TempDir()
+	dir := writeDemoDir(t)
+	s, err := appseed.New(appseed.Options{DB: db, DataRoot: dataRoot, Dir: dir, Owner: "admin"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("首次播种: %v", err)
+	}
+	const appID = "demo-public"
+	before, err := serverstore.GetWasmApp(ctx, db, appID)
+	if err != nil {
+		t.Fatalf("GetWasmApp: %v", err)
+	}
+	oldRelID := before.CurrentReleaseID
+	assetsDir := filepath.Dir(demoAssetsPath(dataRoot, appID, oldRelID))
+
+	// ---- 制造"A2 半成品"：版本行全没、current 归零、资源目录不在 ----
+	if _, err := db.ExecContext(ctx, `DELETE FROM app_releases WHERE app_id = $1`, appID); err != nil {
+		t.Fatalf("删除版本行: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE apps SET current_release_id = 0 WHERE app_id = $1`, appID); err != nil {
+		t.Fatalf("归零 current_release_id: %v", err)
+	}
+	if err := os.RemoveAll(assetsDir); err != nil {
+		t.Fatalf("删除资源目录: %v", err)
+	}
+	if rels, _ := serverstore.ListWasmReleases(ctx, db, appID, true); len(rels) != 0 {
+		t.Fatalf("夹具失效：版本行应为 0，得到 %d", len(rels))
+	}
+
+	// ---- 重跑播种：必须自愈 ----
+	res, err := s.Seed(ctx)
+	if err != nil {
+		t.Fatalf("二次播种: %v", err)
+	}
+	app, err := serverstore.GetWasmApp(ctx, db, appID)
+	if err != nil {
+		t.Fatalf("GetWasmApp: %v", err)
+	}
+	if app.CurrentReleaseID <= 0 {
+		t.Fatalf("半成品没有自愈：current_release_id 仍为 0（seeded=%v skipped=%+v）", res.Seeded, res.Skipped)
+	}
+	rels, err := serverstore.ListWasmReleases(ctx, db, appID, false)
+	if err != nil {
+		t.Fatalf("ListWasmReleases: %v", err)
+	}
+	if len(rels) != 1 {
+		t.Fatalf("补齐后版本行数 = %d，应为 1（补齐只补这一条，不重复建版本）", len(rels))
+	}
+	if rels[0].ID != app.CurrentReleaseID {
+		t.Fatalf("current_release_id=%d 必须指向补齐出来的版本 %d", app.CurrentReleaseID, rels[0].ID)
+	}
+	if rels[0].Status != serverstore.ReleaseStatusApproved {
+		t.Fatalf("补齐的版本必须是 approved，得到 %s", rels[0].Status)
+	}
+	full, err := serverstore.LatestApprovedWasmReleaseFull(ctx, db, appID)
+	if err != nil {
+		t.Fatalf("LatestApprovedWasmReleaseFull: %v", err)
+	}
+	if len(full.Wasm) == 0 {
+		t.Fatal("补齐的版本必须带制品字节（否则冷启动编译一定失败）")
+	}
+	if full.Checksum != rels[0].Checksum {
+		t.Fatalf("补齐的版本指纹与列表不一致：%q vs %q", full.Checksum, rels[0].Checksum)
+	}
+	// 资源目录 + 内容与库内一致。
+	raw, err := os.ReadFile(demoAssetsPath(dataRoot, appID, app.CurrentReleaseID))
+	if err != nil {
+		t.Fatalf("资源目录没被补齐（%s）：%v", demoAssetsPath(dataRoot, appID, app.CurrentReleaseID), err)
+	}
+	if string(raw) != app.ConfigJSON {
+		t.Fatalf("资源目录里的配置必须与库内逐字节相同：\n库内=%q\n盘上=%q", app.ConfigJSON, string(raw))
+	}
+	// 应用行不得被改写。
+	if app.Owner != before.Owner || app.Title != before.Title || app.ConfigJSON != before.ConfigJSON {
+		t.Fatalf("补齐不得改写应用行：before=%+v after=%+v", before, app)
+	}
+	// 幂等：再播一次不再动手。
+	res, err = s.Seed(ctx)
+	if err != nil {
+		t.Fatalf("三次播种: %v", err)
+	}
+	for _, sk := range res.Skipped {
+		if strings.Contains(sk.Reason, "补齐") {
+			t.Fatalf("补齐必须幂等，第三次播种仍在补：%q", sk.Reason)
+		}
+	}
+}
+
+// TestSeedRefusesForeignAppWithoutReleases 是 R2-DG-4 的**反向判据**：
+// "应用行存在、没有任何版本行"**不足以**证明这是我们播的 —— 判据是内容。
+//
+// 同名但归属人/配置不同的应用（他人占用同一 app_id、或管理员改过配置）一律不碰：
+// 否则一次启动就会把一个别人的空应用塞上我们的演示制品与配置。
+//
+// 变异：把 healMissingRelease 里的内容判据（Owner/ConfigJSON 比对）去掉 ⇒ 本用例红。
+func TestSeedRefusesForeignAppWithoutReleases(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	dataRoot := t.TempDir()
+	s, err := appseed.New(appseed.Options{DB: db, DataRoot: dataRoot, Dir: writeDemoDir(t), Owner: "admin"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// 构造"同名但不是我们播的"应用行：归属人不同 + 配置不同（此处刻意不用 list 里的任何一个）。
+	foreign := serverstore.WasmApp{
+		AppID:      "demo-public",
+		Title:      "别人的同名应用",
+		Owner:      "someone-else",
+		Channel:    serverstore.AppChannelWasm,
+		Enabled:    true,
+		ConfigJSON: `{"access":"login","owner":"someone-else"}`,
+	}
+	if err := serverstore.UpsertWasmApp(ctx, db, foreign); err != nil {
+		t.Fatalf("UpsertWasmApp: %v", err)
+	}
+
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	rels, err := serverstore.ListWasmReleases(ctx, db, "demo-public", true)
+	if err != nil {
+		t.Fatalf("ListWasmReleases: %v", err)
+	}
+	if len(rels) != 0 {
+		t.Fatalf("他人的同名应用不得被塞入我们的演示版本，得到 %d 条版本行", len(rels))
+	}
+	app, err := serverstore.GetWasmApp(ctx, db, "demo-public")
+	if err != nil {
+		t.Fatalf("GetWasmApp: %v", err)
+	}
+	if app.Owner != "someone-else" || app.ConfigJSON != foreign.ConfigJSON {
+		t.Fatalf("他人的应用行不得被改写：%+v", app)
+	}
+}
+
+// TestSeedDoesNotHealRetiredStates 守住 R2-DG-5/R2-DG-6：**软删 / 冻结 / 下架**三种
+// "不要再服务它"的处置态都不是半成品，heal 一律不补（此前只判了软删与冻结，且**没有任何
+// 用例覆盖**：删掉那一行守卫全部用例仍绿）。
+//
+// 判据（行为级）：三种状态下都先把资源目录删掉，再跑播种 —— 目录**必须仍然不存在**
+// （一个字节都不写），且跳过理由里不得出现"补齐"。
+//
+// 变异：去掉 `!app.Enabled` ⇒ 下架子用例红；去掉 `app.DeletedAt/FrozenAt` ⇒ 对应子用例红。
+func TestSeedDoesNotHealRetiredStates(t *testing.T) {
+	cases := []struct {
+		name   string
+		retire func(t *testing.T, db *sql.DB, appID string)
+	}{
+		{"软删", func(t *testing.T, db *sql.DB, appID string) {
+			if err := serverstore.SoftDeleteWasmApp(context.Background(), db, appID); err != nil {
+				t.Fatalf("软删: %v", err)
+			}
+		}},
+		{"冻结", func(t *testing.T, db *sql.DB, appID string) {
+			if err := serverstore.FreezeWasmApp(context.Background(), db, appID, time.Now().UTC()); err != nil {
+				t.Fatalf("冻结: %v", err)
+			}
+		}},
+		{"下架", func(t *testing.T, db *sql.DB, appID string) {
+			if err := serverstore.SetWasmAppEnabled(context.Background(), db, appID, false); err != nil {
+				t.Fatalf("下架: %v", err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, cleanup := serverstore.NewTestDB(t)
+			defer cleanup()
+			ctx := context.Background()
+			dataRoot := t.TempDir()
+			s, err := appseed.New(appseed.Options{DB: db, DataRoot: dataRoot, Dir: writeDemoDir(t), Owner: "admin"})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if _, err := s.Seed(ctx); err != nil {
+				t.Fatalf("首次播种: %v", err)
+			}
+			app, err := serverstore.GetWasmApp(ctx, db, "demo-public")
+			if err != nil {
+				t.Fatalf("GetWasmApp: %v", err)
+			}
+			assetsDir := filepath.Dir(demoAssetsPath(dataRoot, "demo-public", app.CurrentReleaseID))
+			tc.retire(t, db, "demo-public")
+			if err := os.RemoveAll(assetsDir); err != nil {
+				t.Fatalf("删除资源目录: %v", err)
+			}
+
+			res, err := s.Seed(ctx)
+			if err != nil {
+				t.Fatalf("二次播种: %v", err)
+			}
+			if _, serr := os.Stat(assetsDir); !os.IsNotExist(serr) {
+				t.Fatalf("%s 的应用不得被补齐资源目录（「删了不再回来」），stat err=%v", tc.name, serr)
+			}
+			for _, sk := range res.Skipped {
+				if strings.Contains(sk.Reason, "补齐") {
+					t.Fatalf("%s 的应用被当成半成品补齐了：%+v", tc.name, sk)
+				}
+			}
+		})
 	}
 }

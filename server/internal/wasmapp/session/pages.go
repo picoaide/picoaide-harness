@@ -151,7 +151,8 @@ var copyZH = pageCopy{
 		"请改用 https:// 访问本平台，或联系管理员启用 TLS。",
 	ErrTicketNonceUnavailable: "服务端的对外访问地址与应用域名不匹配，平台无法安全地完成应用登录，" +
 		"因此没有签发访问凭证。请联系管理员检查「服务端对外地址」（控制台设置或 " + publicBaseURLEnvName +
-		" 环境变量）与应用基域配置 —— 两者必须同域。",
+		" 环境变量）与应用基域配置 —— 两者必须同域，且应用基域必须是能承载 Cookie 的普通域名" +
+		"（不能是 IP 地址，也不能含下划线）。",
 	NoticeOut:     "已退出登录。",
 	TicketTitle:   "正在打开应用",
 	TicketHeading: "正在打开应用",
@@ -187,7 +188,8 @@ var copyEN = pageCopy{
 	ErrTicketNonceUnavailable: "The server public address does not match the application domain, so the " +
 		"application sign-in cannot be completed securely and no credential was issued. Please ask your " +
 		"administrator to check the server public address (console setting or the " + publicBaseURLEnvName +
-		" environment variable) and the application base domain - they must share the same domain.",
+		" environment variable) and the application base domain - they must share the same domain, and the " +
+		"base domain must be a plain domain name that can carry cookies (not an IP address, and without underscores).",
 	NoticeOut:     "You have been signed out.",
 	TicketTitle:   "Opening application",
 	TicketHeading: "Opening application",

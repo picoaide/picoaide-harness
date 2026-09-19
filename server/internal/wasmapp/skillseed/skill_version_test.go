@@ -1,6 +1,7 @@
 package skillseed
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -21,11 +22,13 @@ import (
 // **都是 1.0.0**，客户端 `builtinAction()` 永远返回"已安装"，判不出有更新 ——
 // 平台修正过的作者手册永远到不了已安装的员工手上（配合"更新入口是死代码"就是永久静默陈旧）。
 //
-// 判据：把整个技能目录（相对路径 + 逐字节内容，按路径排序）摘要成 sha256；
-// **每个摘要只允许对应一个 version**。于是三种破坏都会红：
+// 判据：把整个技能目录（相对路径 + 逐字节内容，按路径排序，**目录条目也计入**）摘要成
+// sha256；**每个摘要只允许对应一个 version**。于是四种破坏都会红：
 //   - 改内容不提版本 ⇒ 摘要查不到 ⇒ TestBuiltinSkillVersionTracksContent 红；
 //   - 提了版本不登记 ⇒ 摘要登记的仍是旧版本 ⇒ 红；
-//   - 复用旧版本号（改内容 + 把新摘要也标成 1.0.0）⇒ "一个 version 只能有一个摘要" 红。
+//   - 复用旧版本号（改内容 + 把新摘要也标成 1.0.0）⇒ "一个 version 只能有一个摘要" 红；
+//   - **加/删一个空目录**（不新增任何文件）⇒ 摘要变 ⇒ 红（R2-SK-4：PackDir 为每个
+//     目录产出 tar 条目，下发字节确实变了）。
 //
 // 登记表**只增不减**：它同时是"这个版本交付了什么内容"的对账依据。
 //
@@ -47,7 +50,10 @@ var seededSkillDigests = map[string]string{
 	//   - references/imports.md（导入面白名单，R1-pm-18）+ abi/SKILL 指路；
 	//   - SKILL 黄金路径第 5 步的导入面自查指引（R1-pm-8 的第二半：内容变 ⇒ 版本必须跟着变）；
 	//   - scripts/pack-assets.mjs + scripts/README.md（自定义段打包脚本，R1-e2e-6，同分支并行改动）。
-	"488e021eab1c3342f55c12592b05f865ac470023ed78a88b6265862cf080748e": "1.1.0",
+	//
+	// 2026-09-19（R2-SK-4）：摘要口径加入**目录条目**（含空目录）后重算，内容本身未变、
+	// 交付字节未变 ⇒ 版本仍是 1.1.0，就地替换这一条（同一版本只留一条摘要）。
+	"4cfa5c266e3eaa50ec944b3b7632827e76592a13a52d79274cc433e5475a0f91": "1.1.0",
 }
 
 // TestBuiltinSkillVersionTracksContent 断言当前技能内容的摘要已在登记表里，且登记的
@@ -94,31 +100,50 @@ func TestSeededSkillVersionMatchesManifestGate(t *testing.T) {
 // skillContentDigest 把技能目录摘要成确定性 sha256（相对路径 + 逐字节内容，按路径排序）。
 //
 // 刻意**不**看 mtime / 文件模式 / 目录项顺序：同一份内容在任意机器上都是同一个摘要
-// （否则登记表会变成"每台机器一份"的噪音）。返回 (摘要, 参与摘要的普通文件数)。
+// （否则登记表会变成"每台机器一份"的噪音）。
+//
+// 口径（R2-SK-4）：**目录也进摘要**（含空目录）—— `PackDir` 为每个目录产出 tar
+// 条目（`items = append(items, item{name: clean + "/", dir: true, …})`），所以哪怕
+// 只加一个空目录，下发的 archive sha256/size（客户端 `X-Skill-Checksum` 对拍的那两个
+// 值）都会变。此前只收 `d.Type().IsRegular()`，于是"下发字节变了、版本门禁仍绿"。
+// 返回 (摘要, 参与摘要的**普通文件**数)。
 func skillContentDigest(t *testing.T, dir string) (string, int) {
 	t.Helper()
-	var rels []string
+	var entries []string
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !d.Type().IsRegular() {
-			return nil
+		if path == dir {
+			return nil // 包根自身不入摘要（PackDir 也不为它产出条目）
 		}
 		rel, rerr := filepath.Rel(dir, path)
 		if rerr != nil {
 			return rerr
 		}
-		rels = append(rels, filepath.ToSlash(rel))
+		relSlash := filepath.ToSlash(rel)
+		switch {
+		case d.IsDir():
+			entries = append(entries, "D:"+relSlash)
+		case d.Type().IsRegular():
+			entries = append(entries, "F:"+relSlash)
+		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("遍历 %s: %v", dir, err)
 	}
-	sort.Strings(rels)
+	sort.Strings(entries)
 
 	h := sha256.New()
-	for _, rel := range rels {
+	files := 0
+	for _, e := range entries {
+		if kind, rel, ok := strings.Cut(e, ":"); ok && kind == "D" {
+			// 目录只记路径：空目录与"目录本身"同样是下发字节的一部分。
+			fmt.Fprintf(h, "D:%s\n", rel)
+			continue
+		}
+		_, rel, _ := strings.Cut(e, ":")
 		content, rerr := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
 		if rerr != nil {
 			t.Fatalf("读 %s: %v", rel, rerr)
@@ -127,8 +152,62 @@ func skillContentDigest(t *testing.T, dir string) (string, int) {
 		fmt.Fprintf(h, "F:%s:%d\n", rel, len(content))
 		h.Write(content)
 		h.Write([]byte{'\n'})
+		files++
 	}
-	return hex.EncodeToString(h.Sum(nil)), len(rels)
+	return hex.EncodeToString(h.Sum(nil)), files
+}
+
+// R2-SK-4：目录摘要必须覆盖**空目录**。
+//
+// PackDir 为每个目录产出 tar 条目，所以"只加一个空目录、不加任何文件"同样改变下发
+// 的字节（archive sha256/size、客户端下载时的 X-Skill-Checksum 都会变）；摘要若只收
+// 普通文件，这种变化就完全不可见，版本门禁照绿。
+//
+// 变异验证（实跑过）：把 skillContentDigest 的目录分支删掉（回到只收
+// `d.Type().IsRegular()` 的旧形态）⇒ 本用例在"空目录没进摘要"那条必红。
+func TestSkillContentDigestCoversEmptyDirectories(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, SkillFile), []byte("---\nname: x\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mkdir := func(rel string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, rel), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mkdir("references")
+	before, beforeFiles := skillContentDigest(t, dir)
+	beforeArchive, _, err := PackDir(dir)
+	if err != nil {
+		t.Fatalf("PackDir: %v", err)
+	}
+
+	// 只加一个空目录：一个文件都不新增。
+	mkdir("references/zz-empty")
+	after, afterFiles := skillContentDigest(t, dir)
+	afterArchive, _, err := PackDir(dir)
+	if err != nil {
+		t.Fatalf("PackDir: %v", err)
+	}
+
+	// 前置：PackDir 确实为目录产出条目（否则"空目录进摘要"就无从谈起）。
+	if bytes.Equal(beforeArchive, afterArchive) {
+		t.Fatal("前置失败：加一个空目录后下发归档必须变（PackDir 为每个目录产出条目）")
+	}
+	if afterFiles != beforeFiles {
+		t.Fatalf("空目录不得增加普通文件数：%d → %d", beforeFiles, afterFiles)
+	}
+	if before == after {
+		t.Fatalf("空目录没进摘要：下发归档已变（len %d → %d）而版本门禁仍绿 —— R2-SK-4 的缺口",
+			len(beforeArchive), len(afterArchive))
+	}
+	// 反向对照：同一份内容（含空目录）重复计算必须稳定（摘要确定性）。
+	again, _ := skillContentDigest(t, dir)
+	if again != after {
+		t.Fatalf("摘要必须确定性：%s vs %s", after, again)
+	}
 }
 
 // frontmatterVersionRe 抠 frontmatter 里的 version 行（只认文件开头的 `---` 块）。

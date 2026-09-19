@@ -106,10 +106,18 @@ export function builtinRowProgress(
   return 'action'
 }
 
-/** 安装端点（与市场技能同一前缀的宿主代理；不直连服务端）。 */
-export function builtinInstallEndpoint(name: string, force: boolean): string {
-  const base = `/api/pico/skills/builtin/${encodeURIComponent(name)}/install`
-  return force ? `${base}?force=1` : base
+/**
+ * 安装端点（与市场技能同一前缀的宿主代理；不直连服务端）。
+ *
+ * ⚠️ **不带 query 参数**（R2-SK-5）：宿主按 pathname 分发（`auth-gate` 的
+ * `/^\/api\/pico\/skills\/builtin\/([^/]+)\/install$/`），从不读 `?force=1`；
+ * "更新"之所以能生效，靠的是 `installSkillArchive` 本身的**整树替换**语义
+ * （备份旧目录 → rename 新的进来），而不是某个强制刷新开关。留一个没人读的
+ * 参数只会让人以为它能强制刷新（曾如此）。
+ * @param name - 技能名（服务端清单里的 `name`）。
+ */
+export function builtinInstallEndpoint(name: string): string {
+  return `/api/pico/skills/builtin/${encodeURIComponent(name)}/install`
 }
 
 /**
@@ -164,17 +172,16 @@ export function useBuiltinSkills(onInstalled?: () => void) {
   /**
    * 安装 / **重装（更新）**一行。
    *
-   * `force` 由**判据**决定而不是调用方随手传：只要本机已经有这一行（已装）就走既有的
-   * `?force=1` 重装路径（`builtinInstallEndpoint`），未装则是普通安装。这样"更新"
-   * 按钮与"安装"按钮共用同一条链路，不会出现"看起来能更新、实际装不上"的第二条路径。
+   * 安装与更新是**同一条链路**（同端点、同宿主处理）：本机已有这一行时再 POST 一次，
+   * `installSkillArchive` 会把整棵树替换成服务端那一份（R1-pm-8 的"更新真的装得上"
+   * 就靠它）。端点不带参数（R2-SK-5）—— 宿主不读 `?force=1`，别再加回来。
    * @param skill - 清单行。
    */
   const install = async (skill: BuiltinSkill): Promise<void> => {
-    const force = builtinAction(skill.version, versions[skill.name], installed.includes(skill.name)) !== 'install'
     setBusy(skill.name)
     setFailed(null)
     try {
-      const res = await fetch(builtinInstallEndpoint(skill.name, force), { method: 'POST' })
+      const res = await fetch(builtinInstallEndpoint(skill.name), { method: 'POST' })
       if (!res.ok) {
         const data = await res.json().catch(() => ({})) as { error?: string }
         throw new Error(data.error ?? `HTTP ${String(res.status)}`)
@@ -182,7 +189,8 @@ export function useBuiltinSkills(onInstalled?: () => void) {
       setInstalled(prev => (prev.includes(skill.name) ? prev : [...prev, skill.name]))
       setVersions(prev => ({ ...prev, [skill.name]: skill.version }))
       // 装成功 ⇒ 通知面板刷新「我的」列表：那只技能马上以普通卡片出现
-      // （带「平台内置」来源徽章），同时本入口卡片消失（见面板的 localSkillNames 过滤）。
+      // （带「平台内置」来源徽章），同时本入口卡片消失（已装且同版本 ⇒ planBuiltinCards
+      // 不再出卡；面板的 planSectionCards 保证任一时刻同名技能只有一张卡）。
       onInstalled?.()
     } catch (cause) {
       setFailed({ name: skill.name, message: cause instanceof Error ? cause.message : String(cause) })
@@ -216,7 +224,7 @@ export interface BuiltinCard {
   skill: BuiltinSkill
   /** 未装 = install；已装且清单更新 = update（已装且同版本不会出卡）。 */
   action: 'install' | 'update'
-  /** 点按钮要 POST 的地址；`update` 走既有的 `?force=1` 重装路径。 */
+  /** 点按钮要 POST 的地址；安装与更新共用同一个端点（宿主按整树替换语义处理）。 */
   endpoint: string
   /** 本机已装（服务端清单 `installed[]` ∪ 面板本地列表）。 */
   installed: boolean
@@ -231,7 +239,8 @@ export interface BuiltinCard {
  *
  * 三条口径（缺任何一条都会回到 R1-pm-8 的现场）：
  *  1. **未装 ⇒ 出「安装」卡**（原有行为）。
- *  2. **已装且清单版本更新 ⇒ 出「更新到 vX」卡**，端点是 `?force=1` —— 这一条原先是
+ *  2. **已装且清单版本更新 ⇒ 出「更新到 vX」卡**，端点与「安装」相同（宿主按整树
+ *     替换语义处理，不读 `?force=1`，R2-SK-5）—— 这一条原先是
  *     死代码：卡片列表把"已装"整个过滤掉，而 `builtinAction` 只在已装时才返回
  *     `'update'`，两个条件互斥 ⇒ 平台换了新版手册，装过的人永远拿不到。
  *  3. **已装且同版本（或读不到本机版本）⇒ 不出卡**：本机技能库扫描出来的那张普通卡片
@@ -269,7 +278,7 @@ export function planBuiltinCards(options: {
     cards.push({
       skill,
       action,
-      endpoint: builtinInstallEndpoint(skill.name, action === 'update'),
+      endpoint: builtinInstallEndpoint(skill.name),
       installed,
       state: builtinRowProgress(skill.name, { busy, failedName: failed?.name ?? null }),
       failure: failed?.name === skill.name ? failed.message : null,

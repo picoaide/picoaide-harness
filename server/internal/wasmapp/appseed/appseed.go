@@ -175,7 +175,7 @@ func (s *Seeder) Seed(ctx context.Context) (Result, error) {
 		case err == nil:
 			// 存在即跳过：**这是"删了不再回来"的实现**（软删的行仍存在）。
 			reason := "已存在（含已删除/已冻结）"
-			healed, herr := s.healIncomplete(ctx, appID, existing)
+			healed, herr := s.healIncomplete(ctx, appID, existing, d)
 			if herr != nil {
 				// 补齐失败如实记录（与播种失败同一处置：不阻断其它演示）。
 				res.Skipped = append(res.Skipped, SkipReason{appID, "补齐半成品失败: " + herr.Error()})
@@ -207,6 +207,54 @@ func (s *Seeder) Seed(ctx context.Context) (Result, error) {
 
 // seedOne 播种单个演示：apps 行 + 一个 approved 版本 + 指向它 + 上架。
 func (s *Seeder) seedOne(ctx context.Context, d Demo, appID string) error {
+	cfgJSON, err := s.demoConfigJSON(d)
+	if err != nil {
+		return err
+	}
+	purpose, sensitivity := d.Purpose, d.DataSensitivity
+	app := serverstore.WasmApp{
+		AppID:           appID,
+		Title:           strings.TrimSpace(d.Title),
+		Description:     strings.TrimSpace(d.Description),
+		Owner:           s.opt.Owner,
+		Channel:         serverstore.AppChannelWasm,
+		Enabled:         true,
+		Purpose:         purpose,
+		DataSensitivity: sensitivity,
+		ConfigJSON:      cfgJSON,
+	}
+	if err := serverstore.UpsertWasmApp(ctx, s.opt.DB, app); err != nil {
+		return fmt.Errorf("写应用行: %w", err)
+	}
+	relID, err := s.createSeedRelease(ctx, appID, app.Title, app.Description, cfgJSON)
+	if err != nil {
+		return err
+	}
+	// 资源目录：应用子域管线按 <data_root>/apps/<app_id>/assets/<release_id>/ 推导，
+	// **缺了直接 500**（不是可选项）。演示应用把配置写进去（应用自己 assets.read 读它）。
+	//
+	// ⚠️ 顺序是不变量（R1-rt-19）：**资源目录先写、失败则不置当前版本** —— 与
+	// api/publish.go 的同一条顺序一致（"否则会有一个窗口让应用指向一个资源目录还不存在的
+	// 版本"）。反过来写会留下指向不存在目录的应用：子域每请求 500，而且播种判据是
+	// "库里是否已有该 app_id" ⇒ 重启也不自愈。
+	//
+	// 两个写动作都不建新版本：资源目录写失败 ⇒ 应用行/版本行已在，下次播种由
+	// healIncomplete 补齐（幂等，不需要人工删行）。
+	if err := writeReleaseAssets(s.opt.DataRoot, appID, relID, cfgJSON); err != nil {
+		return err
+	}
+	if err := serverstore.SetWasmAppCurrentRelease(ctx, s.opt.DB, appID, relID); err != nil {
+		return fmt.Errorf("指向当前版本: %w", err)
+	}
+	return nil
+}
+
+// demoConfigJSON 把一条演示定义折算成应用配置 JSON（播种的唯一一份实现）。
+//
+// 抽取的理由：播种（seedOne）与"补齐缺版本行的半成品"（healMissingRelease）必须写出
+// **逐字节相同**的配置 —— 后者还要拿它当"这个 app_id 是不是我们播的"的判据
+// （两处各拼一份，判据迟早与播种产物漂移，于是半成品永远补不上）。
+func (s *Seeder) demoConfigJSON(d Demo) (string, error) {
 	cfg := appcfg.Config{
 		Access:          appcfg.Access(strings.TrimSpace(d.Access)),
 		Purpose:         d.Purpose,
@@ -233,31 +281,25 @@ func (s *Seeder) seedOne(ctx context.Context, d Demo, appID string) error {
 	// 配置 JSON 的形态与作者手写的一致（appcfg 负责解析/校验；写出用标准 json）。
 	raw, err := json.Marshal(cfg)
 	if err != nil {
-		return fmt.Errorf("编码应用配置: %w", err)
+		return "", fmt.Errorf("编码应用配置: %w", err)
 	}
 	if _, perr := appcfg.Parse(raw); perr != nil {
-		return fmt.Errorf("应用配置不合规: %v", perr)
+		return "", fmt.Errorf("应用配置不合规: %v", perr)
 	}
-	cfgJSON := string(raw)
-	app := serverstore.WasmApp{
-		AppID:           appID,
-		Title:           strings.TrimSpace(d.Title),
-		Description:     strings.TrimSpace(d.Description),
-		Owner:           s.opt.Owner,
-		Channel:         serverstore.AppChannelWasm,
-		Enabled:         true,
-		Purpose:         cfg.Purpose,
-		DataSensitivity: cfg.DataSensitivity,
-		ConfigJSON:      cfgJSON,
-	}
-	if err := serverstore.UpsertWasmApp(ctx, s.opt.DB, app); err != nil {
-		return fmt.Errorf("写应用行: %w", err)
-	}
-	relID, err := serverstore.CreateWasmRelease(ctx, s.opt.DB, serverstore.WasmRelease{
+	return string(raw), nil
+}
+
+// createSeedRelease 写下一个内置版本行（approved，带随安装的制品字节）。
+//
+// 抽取同一份实现的两个调用点：首次播种（seedOne）与"补齐缺版本行"（healMissingRelease）。
+// 版本号固定 defaultVersion、publisher 固定归属人、changelog 同一句话 —— 三处若各写一份，
+// "补齐出来的版本行"就会与真实播种产物不是同一形态（审计面/归属都会漂移）。
+func (s *Seeder) createSeedRelease(ctx context.Context, appID, title, description, cfgJSON string) (int64, error) {
+	return serverstore.CreateWasmRelease(ctx, s.opt.DB, serverstore.WasmRelease{
 		AppID:       appID,
 		Version:     defaultVersion,
-		Title:       app.Title,
-		Description: app.Description,
+		Title:       title,
+		Description: description,
 		Changelog:   "随安装内置的演示应用",
 		Publisher:   s.opt.Owner,
 		Checksum:    s.sum,
@@ -266,49 +308,42 @@ func (s *Seeder) seedOne(ctx context.Context, d Demo, appID string) error {
 		Wasm:        s.wasm,
 		ConfigJSON:  cfgJSON,
 	})
-	if err != nil {
-		return fmt.Errorf("写版本行: %w", err)
-	}
-	// 资源目录：应用子域管线按 <data_root>/apps/<app_id>/assets/<release_id>/ 推导，
-	// **缺了直接 500**（不是可选项）。演示应用把配置写进去（应用自己 assets.read 读它）。
-	//
-	// ⚠️ 顺序是不变量（R1-rt-19）：**资源目录先写、失败则不置当前版本** —— 与
-	// api/publish.go 的同一条顺序一致（"否则会有一个窗口让应用指向一个资源目录还不存在的
-	// 版本"）。反过来写会留下指向不存在目录的应用：子域每请求 500，而且播种判据是
-	// "库里是否已有该 app_id" ⇒ 重启也不自愈。
-	//
-	// 两个写动作都不建新版本：资源目录写失败 ⇒ 应用行/版本行已在，下次播种由
-	// healIncomplete 补齐（幂等，不需要人工删行）。
-	if err := writeReleaseAssets(s.opt.DataRoot, appID, relID, cfgJSON); err != nil {
-		return err
-	}
-	if err := serverstore.SetWasmAppCurrentRelease(ctx, s.opt.DB, appID, relID); err != nil {
-		return fmt.Errorf("指向当前版本: %w", err)
-	}
-	return nil
 }
 
 // healIncomplete 补齐"库里已存在、但处于半成品"的演示应用（R1-rt-19 的自愈那一半）。
 //
-// 半成品只有两种形态（其余一律不碰）：
+// 半成品只有三种形态（其余一律不碰）：
 //
-//	A. 没有生效版本（current_release_id = 0）：旧顺序在"置当前版本"之后写资源目录失败
-//	   ⇒ 库里留着应用行 + approved 版本行，却没有指向它的当前版本。旧实现按"存在即跳过"
-//	   会把这份半成品永久留着（子域 404/500，重启也不变）。
+//	A. 没有生效版本（current_release_id = 0），但**有** approved 版本行：旧顺序在"置当前
+//	   版本"之后写资源目录失败 ⇒ 库里留着应用行 + 版本行，却没有指向它的当前版本。旧实现
+//	   按"存在即跳过"会把这份半成品永久留着（子域 404/500，重启也不变）。
+//	A2. 有应用行但**一个版本行都没有**：seedOne 的 CreateWasmRelease 失败（PG 抖动/磁盘满/
+//	   连接中断）就会留下这个状态。旧实现把它当"同名应用不是我们播的"跳过 ⇒ 应用永久没有
+//	   可交付版本，日志还说"已存在"（R2-DG-4）。判据只认内容：归属人 + 配置与本次清单
+//	   逐字节相同（版本行不存在时没有 checksum 可对）。
 //	B. 有生效版本，但资源目录（或目录里的 picoaide.app.json）不在：应用子域按"最新
 //	   approved 版本"推导目录 ⇒ 每请求 500。数据盘被换过、目录被手工删掉都会落到这一支。
 //
 // 补齐动作为什么安全（幂等、只碰自己的东西）：
 //   - 只认 checksum 与**本次随安装的演示制品逐字节相同**的版本行（s.sum）——app_id 被别人
-//     占用/被重新发布的情况下一律不碰（判断依据是内容，不是名字）；
-//   - 只做两件事：写回资源目录（应用配置来自该版本行）+ 在没有生效版本时把它指过去，
-//     不建新版本、不改配置、不写审计；
+//     占用/被重新发布的情况下一律不碰（判断依据是内容，不是名字；A2 没有版本行时退化为
+//     对应用行做同一口径的内容比对）；
+//   - 只做三件事：写回资源目录（应用配置来自该版本行）+ 在没有生效版本时把它指过去 +
+//     A2 补一条内容与 seedOne 逐字节相同的版本行，不改配置、不改标题、不写审计；
 //   - 资源目录**已经在**就一个字节都不写（idempotent：二次播种只跳过）。
 //
+// 三种处置态**一律不补**（软删 / 冻结 / 下架）：它们表达的都是"不要再服务它"
+// （子域分别返回 404 / 404 / 410），此时把资源目录写回来与产品语义相反（R2-DG-5）。
+//
 // 返回值：healed 表示"真的动了手"（用于日志/用例）；err 只在 IO/DB 失败时非 nil。
-func (s *Seeder) healIncomplete(ctx context.Context, appID string, app *serverstore.WasmApp) (bool, error) {
-	if app == nil || app.DeletedAt != nil || app.FrozenAt != nil {
-		// 软删 = "删了不再回来"；冻结 = 管理员的只读处置。两者都不是"半成品"，不补。
+func (s *Seeder) healIncomplete(ctx context.Context, appID string, app *serverstore.WasmApp, d Demo) (bool, error) {
+	if app == nil || app.DeletedAt != nil || app.FrozenAt != nil || !app.Enabled {
+		// 软删 = "删了不再回来"；冻结 = 管理员的只读处置；**下架（enabled=false）也算
+		// "不要再服务它"**（子域对下架应用直接 410，见 appserver.serveWasm）。
+		// 三者都不是"半成品"，不补 —— 否则管理员"下架 + 腾磁盘"之后，重启会把资源
+		// 目录悄悄写回来，与"删了不再回来"的产品语义相反（R2-DG-5）。
+		// 代价认账：下架期间不补；管理员重新上架后，下一次重启/重新播种会把资源目录
+		// 补齐（下架态永远不服务，所以这个窗口不会让用户看到 500）。
 		return false, nil
 	}
 	relID := app.CurrentReleaseID
@@ -317,7 +352,11 @@ func (s *Seeder) healIncomplete(ctx context.Context, appID string, app *serverst
 		rel, err := serverstore.GetWasmRelease(ctx, s.opt.DB, appID, defaultVersion)
 		switch {
 		case errors.Is(err, serverstore.ErrNotFound):
-			return false, nil // 同名应用不是我们播的：不碰
+			// A2（第三种半成品，R2-DG-4）：apps 行已落，但**一个版本行都没有** ——
+			// seedOne 的 CreateWasmRelease 失败（PG 抖动/磁盘满/连接中断）就会留下这个
+			// 状态。旧实现把它当"同名应用不是我们播的"跳过 ⇒ 该应用永久没有可交付版本
+			//（子域 404/500），而日志给的理由是误导性的"已存在"。
+			return s.healMissingRelease(ctx, appID, app, d)
 		case err != nil:
 			return false, fmt.Errorf("查演示版本行: %w", err)
 		}
@@ -348,6 +387,43 @@ func (s *Seeder) healIncomplete(ctx context.Context, appID string, app *serverst
 	}
 	if err := writeReleaseAssets(s.opt.DataRoot, appID, relID, rel.ConfigJSON); err != nil {
 		return false, err
+	}
+	return true, nil
+}
+
+// healMissingRelease 补上"apps 行已落但没有任何版本行"的半成品（R2-DG-4）。
+//
+// 身份判据只认**内容**（与 healIncomplete 其余分支同一精神）：app 行的归属人与配置必须与
+// 本次清单要播的那一份逐字节相同 —— 同名但由别人发布/配置不同的应用一律不碰。版本行
+// 不存在时没有 checksum 可对，配置就是唯一可用的"这是我们播的"锚点。
+//
+// 只做三件事：补版本行（内容与 seedOne 逐字节相同）、写资源目录、置生效版本；不新建
+// app 行、不改标题/配置、不写审计。
+func (s *Seeder) healMissingRelease(ctx context.Context, appID string, app *serverstore.WasmApp, d Demo) (bool, error) {
+	cfgJSON, err := s.demoConfigJSON(d)
+	if err != nil {
+		return false, err
+	}
+	if app.Owner != s.opt.Owner || app.ConfigJSON != cfgJSON {
+		return false, nil // 不是随安装播种出来的那一份：不碰
+	}
+	// 有任何版本行（含软删）就说明这不是"版本行没落"的形态 ⇒ 交给别处的处置，不在这里补。
+	rels, err := serverstore.ListWasmReleases(ctx, s.opt.DB, appID, true)
+	if err != nil {
+		return false, fmt.Errorf("查版本行: %w", err)
+	}
+	if len(rels) > 0 {
+		return false, nil
+	}
+	relID, err := s.createSeedRelease(ctx, appID, app.Title, app.Description, cfgJSON)
+	if err != nil {
+		return false, fmt.Errorf("重建版本行: %w", err)
+	}
+	if err := writeReleaseAssets(s.opt.DataRoot, appID, relID, cfgJSON); err != nil {
+		return false, err
+	}
+	if err := serverstore.SetWasmAppCurrentRelease(ctx, s.opt.DB, appID, relID); err != nil {
+		return false, fmt.Errorf("指向当前版本: %w", err)
 	}
 	return true, nil
 }

@@ -119,14 +119,17 @@ type Entry struct {
 	archive []byte
 }
 
-// Problem 是一个在启动扫描时被**跳过**的技能及其原因（管理端诊断面用）。
+// Problem 是一个在启动扫描时被**跳过**的条目及其原因（管理端诊断面用）。
 //
 // 为什么单独成形、而不是只留一句日志：技能坏掉在外面的表现是「接口 200 + 空数组」，
 // 客户端只看到"能力中心里没有这条技能"，真正的原因（frontmatter 缺字段、目录名与
 // frontmatter 的 name 不一致、包内出现符号链接…）只在服务端日志里。管理端要能把
 // 这件事显示出来，就必须有**结构化的名字 + 原因**，而不是一句拼好的字符串。
+//
+// 条目不止"坏技能目录"一种：资产根目录里的**散文件**也记在这里（它们同样不会
+// 下发，同样必须可见）—— 见 loadLocked。
 type Problem struct {
-	// Name 技能目录名（被跳过时唯一还能确定的东西）。
+	// Name 被跳过条目的名字（技能目录名，或资产根目录下的散文件名）。
 	Name string `json:"name"`
 	// Reason 被跳过的原因（skillmanifest / archiveutil 的原始错误文本）。
 	Reason string `json:"reason"`
@@ -266,6 +269,14 @@ func (c *Catalog) loadLocked() error {
 		c.exists = true
 		for _, de := range names {
 			if !de.IsDir() {
+				// 资产根目录里的**散文件**（把 SKILL.md 放错层是最常见的部署配置错误）
+				// 既不进 skills，也不产出归档 —— 原先这里直接 continue，管理端只会看到
+				// 「目录存在 + 空清单 + 零问题」，也就是"接口 200 + 空数组"的复现。
+				// 现在记一条 problem：不改判定（散文件确实不是技能），但必须可见。
+				problems = append(problems, Problem{
+					Name:   de.Name(),
+					Reason: "资产根目录只放技能子目录（<name>/SKILL.md）；散文件不会被打包下发",
+				})
 				continue
 			}
 			name := de.Name()
