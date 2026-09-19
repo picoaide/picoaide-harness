@@ -44,6 +44,12 @@ import (
 // logError 是内部错误的落点（与 clientrelease.logWarn 同形，测试可替换以静音）。
 var logError = log.Printf
 
+// logWarn 是**非错误**但需要留痕的诊断落点（与 edge.logWarn 同形，测试可替换以静音）。
+//
+// 只用于两类分支：①被拒的安全判据（换票 nonce / Sec-Fetch）；②**放行了但判据缺席**
+// （老浏览器不发 Sec-Fetch-*）——后者必须留痕，否则"这台机器为什么没被挡住"无从查证。
+var logWarn = log.Printf
+
 const (
 	// EmployeeCookieName 是主站员工浏览器会话 Cookie 名。
 	//
@@ -55,6 +61,19 @@ const (
 	// （host-only 天然不共享），因此同一员工在不同应用里有不同会话，
 	// 一个应用被下架/吊销不影响另一个（§4.7 / §10.4 第 40 项）。
 	AppCookieName = "picoaide_app"
+	// TicketNonceCookieName 是换票的**浏览器持有性证明** Cookie 名（R1-sec-1，
+	// 2026-09-19 登录 CSRF / 会话固定修复）。
+	//
+	// 它不是会话凭证、也不是票本身：值是签发那一刻随机生成的 nonce，与票记录一一对应、
+	// 同寿命（limits.TicketTTL），兑换时只与**那张票**的 nonce 比对（见 RedeemTicket）。
+	// 与另外两个会话 Cookie 的差别是它是**唯一设 Domain 的**：必须让 `<app>.<基域>` 也能收到
+	// （浏览器只把 Cookie 发给 Domain 覆盖到的主机），因此它是域 Cookie 而非 host-only。
+	// HttpOnly 在这里不只是"应用读不到会话"：它还挡住应用子域里的 JS 用 document.cookie
+	// **覆盖**它（RFC 6265 §5.3 第 11.2 步：非 HTTP API 不得覆盖已存在的 HttpOnly Cookie）
+	// —— 应用是本平台上的任意 HTML/JS 宿主（R8），这一条是必需的。
+	// ⚠️ 但它挡不住"在**没有旧 Cookie 时新建**"（旧 Cookie 只活 60 s）：兄弟应用仍可
+	// 伪造这个 Cookie，这是本设计的已知残留 R-3，机制见 ticket.go 的 nonce 段落。
+	TicketNonceCookieName = "picoaide_ticket_nonce"
 
 	// MaxNextLen 是换票/登录 `next` 参数的字节上限（§4.7：非法回落 `/`）。
 	MaxNextLen = 512
