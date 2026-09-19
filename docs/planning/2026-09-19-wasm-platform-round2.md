@@ -181,7 +181,7 @@ navigation 模式（原生表单提交/导航）的非 GET/HEAD 请求的 `Origi
 | 侧栏「应用中心」→ `/app-center`（应用列表 + 页顶「应用域名」卡片） | 侧栏「应用中心」→ `/app-center`；页内子导航**应用**（索引，应用列表） |
 | 侧栏「应用平台」→ `/app-platform`（并发/内存限制项） | 同页子导航**限制项** ← 原应用平台主体原样搬入 |
 | （无） | 同页子导航**设置** ← 应用域名（泛域名）卡片搬入 |
-| 老路径 `/app-platform` | 重定向到 `/app-center/settings`（`replace`，防老书签 404；先例 `/marketplace`→`/capabilities`） |
+| 老路径 `/app-platform` | 重定向到 `/app-center/limits`（`replace`，防老书签 404；先例 `/marketplace`→`/capabilities`）。**注（2026-09-19 复核）**：原「应用平台」页本身就是"并发/内存限制项"，所以忠实映射是 `limits` 而不是 `settings`——代码 `server/webadmin/src/App.tsx` 即如此，本文此前写成 `settings` 是笔误 |
 
 侧栏真源 `src/lib/nav.ts` 删掉 `/app-platform` 条目：这两个条目此前**同用 `Boxes` 图标**，
 侧栏看起来是两个入口、实际是同一类东西；合并后侧栏只留一条「应用中心」。
@@ -216,7 +216,7 @@ navigation 模式（原生表单提交/导航）的非 GET/HEAD 请求的 `Origi
   `app-center/Settings`）、`AppPlatform.test.tsx`（五条渲染 `app-center/Limits`）。
 - 改导航断言：`nav.test.ts` 的 `/app-platform` 期望与用例改写为新结构。
 - 新增：① `app-center/AppCenterLayout.test.tsx` —— 子导航三项 href、三个子路由深链接各自渲染
-  正确组件、点击切换、**`/app-platform` → `/app-center/settings` 重定向**（防老书签 404）；
+  正确组件、点击切换、**`/app-platform` → `/app-center/limits` 重定向**（防老书签 404）；
   ② `nav.test.ts` —— 侧栏不再有两条同图标入口；③ `AppCenter.test.tsx` —— 设置页读取失败的
   页面级错误 + 重试恢复。
 - 门禁：`cd server/webadmin && npm test` = **27 个测试文件 / 374 条用例全绿**；`npm run typecheck` 通过。

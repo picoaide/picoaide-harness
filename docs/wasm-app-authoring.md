@@ -30,7 +30,7 @@
 | 原语 | 用途 | 固定约束 |
 | --- | --- | --- |
 | `db.define(table, columns[])` | 建表（平台代执行，重复调用幂等） | 表名/列名 `^[a-z][a-z0-9_]{0,30}$`；列类型枚举 `text/int/real/bool/datetime`；列不超过 16、表不超过 16/应用；**不能指定主键/外键/索引/触发器** |
-| `db.query(sql, args)` | 单条 `SELECT` | 单语句、必须参数化、受 `SQLITE_LIMIT_*` 约束、最多返回 5000 行 / 8 MiB |
+| `db.query(sql, args)` | 单条 `SELECT` | 单语句；值用 `args` 占位（**平台不检查你是否参数化**，见 §10）、受 `SQLITE_LIMIT_*` 约束、最多返回 5000 行 / 8 MiB |
 | `db.exec(sql, args)` | 单条写语句 | 仅 `INSERT`/`UPDATE`/`DELETE`；禁 DDL |
 | `db.tx` | 事务 | ABI 层是 `tx_begin`/`tx_commit`/`tx_rollback`；事务内**只允许数据库读写**（`db.query`/`db.exec` + 两个出口），`ai.chat`/`log`/`assets.read`/`db.define` 与嵌套 `tx_begin` 一律拒；超时 5 秒强制回滚 |
 | `ai.chat(messages, model?)` | 调 AI（阻塞、非流式） | 模型由服务端裁决；预算 30 秒；不注入系统提示；按**使用者**身份计费与限流 |
@@ -58,6 +58,26 @@
   `assets.read("picoaide.app.json")` 读它，读不到的访问者只会拿到应用自己的
   （404/403）页面。
 - 包内资源是**不改名、不发新版就改不掉**的：要改内容必须发新版本（§4.2）。
+
+#### 把静态资源编进包里：用官方打包器
+
+"把 HTML/CSS/JS 编进 wasm"是**一等用法**，但自定义段的二进制格式（段名 = 包内逻辑路径，
+段长度前缀是 LEB128 且**必须含段名的长度前缀与段名本身**）不该由作者手拼 —— 技能目录里
+带了官方打包脚本：
+
+```bash
+node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
+  web/index.html=index.html web/app.css=static/app.css
+```
+
+- 位置：`server/skills/app-builder/scripts/pack-assets.mjs`（随技能一起分发到
+  `<dshHome>/skills/app-builder/scripts/`），用法与全部规则见同目录 `README.md`。
+- `SRC=DEST`：`DEST` 就是**包内逻辑路径**（段名）；规则与平台同源（相对、以 `/` 分隔、
+  不含 `..` 与 `:`；整条路径不超过 256 字节、单段不超过 255 字节；自定义段总量不超过 4 MiB）。
+- **`--out` 必填且必须是新路径**：脚本绝不就地覆盖输入（原模块要留着继续编译/重打包；
+  顺带一提，`go build -o 已存在文件` 不截断旧文件、会留尾部垃圾，编译产物也别就地覆盖）。
+- **保留资源不能这样加**：`picoaide.app.json` 由平台在发布期写入（内容 = 随包提交的
+  `config`），模块里的同名段会被平台忽略 —— 脚本会直接拒绝，别把名单塞进这种会被直出的资源。
 
 ### 2.1b 页面渲染：`html/template` / `text/template` 可以直接用
 
@@ -274,7 +294,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | `RUNTIME_NO_RESPONSE` | 有分支没写响应帧 | 每个分支都写且只写一帧（`preview.mjs` 能提前发现） |
 | `RUNTIME_TIMEOUT` | 单请求里做了整批计算 | 拆成多次请求；检查不收敛的循环 |
 | `RUNTIME_MEMORY` | 一次把大结果集读进内存 | 用 `WHERE` 收窄 + `LIMIT` 分页 |
-| `DB_DENIED` | 多语句 / DDL / `PRAGMA` / 提到保留列 / 没参数化；**事务内调了被禁能力**（`details.kind` = `nested_tx` / `blocking_capability` / `ddl`） | 建表走 `db.define`；语句只留四个动词；值放 `args`；事务里只留 `db.query`/`db.exec` |
+| `DB_DENIED` | 多语句 / DDL / `PRAGMA` / `ATTACH` / `VACUUM` / 提到保留列；**事务内调了被禁能力**（`details.kind` = `nested_tx` / `blocking_capability` / `ddl`） | 建表走 `db.define`；语句只留四个动词；事务里只留 `db.query`/`db.exec` |
 | `ASSET_DENIED` | `assets.read` 的包内路径非法/越界，或抽取目录异常 | 路径用相对、`/` 分隔、不含 `..`；不要读自己没有的资源 |
 | `ASSET_OVERSIZE` | 单个随包资源超过 4 MiB（与自定义段总量同源） | 精简资源；HTML/JS 先 gzip 再内嵌 |
 | `ASSET_EXISTS` | 发布期抽取要写的资源已存在（抽取只写一次） | 改资源 = 发新版本，不要指望覆盖 |
@@ -285,6 +305,13 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | `AI_RATE_LIMITED` | 调用过于频繁 | 减少循环内调用，合并提示词 |
 | `FORBIDDEN` | 不是该应用的发布者（或应用已冻结） | 只能改自己发布的应用 |
 | `NAME_TAKEN` | 应用名被占用 | 换名字（同名不同人是不同应用） |
+
+> ⚠️ **平台不检查你是否参数化**。`db.query` / `db.exec` 的 SQL 闸门只检查：语句种类
+> （四个动词）、单语句、平台保留列、以及 DDL/`PRAGMA`/`ATTACH`/`VACUUM` —— **把字面量
+> 拼进 SQL 平台不会拦**（`SELECT … WHERE author='emp1'`、`DELETE … WHERE body='x'` 都会通过）。
+> 也就是说 **SQL 注入没有任何平台侧防线**：值一律用 `db.query(sql, args)` / `db.exec(sql, args)`
+> 的 `?` 占位参数传，不要用字符串拼接（`"... WHERE author='" + name + "'"` 就是漏洞）。
+> 这条只有你自己守；把它当成"平台会替我兜住"，等于没有防线。
 
 更细的读法与处置：`references/diagnostics.md`（在技能目录里）。
 
@@ -298,6 +325,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | 配置字段参考（生成物，勿手改） | 同目录 `references/app-config.md`；源码真源 `server/internal/wasmapp/appcfg/appcfgspec.go` |
 | **发布字段规格（机器可读单一真源）** | `server/internal/wasmapp/appcfg/appcfg.json`（`schema=picoaide-app-config/1`）。被四处对拍：服务端解析行为 / 宿主工具参数 / 客户端表单与提交体 / 上面的字段参考 |
 | 发布与运维 | 同目录 `references/publishing.md` |
+| 静态资源打包器（官方，零依赖） | `server/skills/app-builder/scripts/pack-assets.mjs` + 同目录 `README.md`（随技能分发） |
 | 诊断 | 同目录 `references/diagnostics.md` |
 | 可编译示例（共享便签） | 同目录 `examples/go/`（`GOOS=wasip1 GOARCH=wasm go build` 通过，门禁真题编译） |
 | 上限生成器 | `server/cmd/picoaide-limits-gen`（`-check` 是 CI 门禁入口） |

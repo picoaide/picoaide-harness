@@ -44,7 +44,7 @@
   > 2026-09-19 页面合并（用户要求）：原独立页 **运维 → 应用平台**（`/app-platform`）并入
   > 「应用中心」成为**限制项**子页，应用域名（泛域名）搬进新增的**设置**子页；侧栏去掉
   > 「应用平台」条目（它与「应用中心」同图标，看起来像重复入口），老路径 `/app-platform`
-  > 重定向到 `/app-center/settings`。**后端与权限点未动**（`/wasm-apps/{,domain,limits}`
+  > 重定向到 `/app-center/limits`（原「应用平台」页就是并发/内存限制项，忠实映射是 `limits`；代码 `App.tsx` 即如此）。**后端与权限点未动**（`/wasm-apps/{,domain,limits}`
   > 仍在同一组，读 `capability:read` / 写 `capability:write`）。见
   > `docs/planning/2026-09-19-wasm-platform-round2.md` 的实施记录（问题 6）。
 
