@@ -22,6 +22,7 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -168,6 +169,13 @@ var wasmGatedRoutes = []string{
 	"PUT /api/server/admin/wasm-apps/domain",
 	"GET /api/server/admin/wasm-apps/limits",
 	"PUT /api/server/admin/wasm-apps/limits",
+	// 发布审核 + 诊断 + 运行期水位（2026-09-19 新增：开启审核后需要审批出口，
+	// 否则"开启审核"= 全组织再也发不出新版本；runtime 是平台级只读水位）。
+	"GET /api/server/admin/wasm-apps/:app_id/releases",
+	"POST /api/server/admin/wasm-apps/:app_id/releases/:version/approve",
+	"POST /api/server/admin/wasm-apps/:app_id/releases/:version/reject",
+	"GET /api/server/admin/wasm-apps/:app_id/diagnostics",
+	"GET /api/server/admin/wasm-apps/runtime",
 }
 
 // sessionGatedRoutes：d.WasmSession == nil 时消失（router.Register 的
@@ -263,16 +271,25 @@ func TestRouteAssemblyProbesAndHTMLFacesPresent(t *testing.T) {
 // （main() 里出现第二个调用点 = 又一片路由游离在真源之外）；测试侧**零个**
 // （测试必须走生产函数，不许自建）。
 func TestRouteAssemblyHasExactlyOneEntryPoint(t *testing.T) {
-	// ---- 生产侧：main.go / wasmapp.go 等非测试文件 ----
-	files, err := filepath.Glob("*.go")
+	// ---- 生产侧：整个服务端源码树（cmd/ + internal/ …），非测试文件 ----
+	//
+	// 扫描面在 2026-09-19 第三轮审计后从"本包 *.go"扩到**整个 server 树**：
+	// 旧实现的注释写着"全仓"，实际只 Glob 了 cmd/server 一个目录 ——
+	// internal/ 下若有人再抄一份 router.Register 的 Deps（生产或测试），
+	// 这条守卫根本看不见（实测 internal/reports 的测试里就有一处自建装配）。
+	prodRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
-		t.Fatalf("列举包内文件: %v", err)
+		t.Fatalf("解析服务端源码根: %v", err)
+	}
+	prodFiles, err := collectGoFiles(prodRoot)
+	if err != nil {
+		t.Fatalf("列举服务端源码树: %v", err)
 	}
 	// 字面量拼接：本文件自己也不能出现该调用形态（否则这条守卫会举报自己）。
 	const marker = "router.Register" + "("
 	prodHits := 0
 	prodFile := ""
-	for _, f := range files {
+	for _, f := range prodFiles {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
 		}
@@ -283,14 +300,16 @@ func TestRouteAssemblyHasExactlyOneEntryPoint(t *testing.T) {
 		n := strings.Count(string(src), marker)
 		prodHits += n
 		if n > 0 {
-			prodFile = f
+			if rel, rerr := filepath.Rel(prodRoot, f); rerr == nil {
+				prodFile = filepath.ToSlash(rel)
+			}
 		}
 	}
 	if prodHits != 1 {
-		t.Fatalf("生产代码里 %q 出现 %d 次，必须恰好 1 次（唯一真源）", marker, prodHits)
+		t.Fatalf("生产代码(server 树内非测试文件)里 %q 出现 %d 次，必须恰好 1 次（唯一真源）", marker, prodHits)
 	}
-	if prodFile != "main.go" {
-		t.Fatalf("router.Register 出现在 %s，预期在 main.go 的 registerProductionRoutes 体内", prodFile)
+	if prodFile != "cmd/server/main.go" {
+		t.Fatalf("router.Register 出现在 %s，预期只在 cmd/server/main.go 的 registerProductionRoutes 体内", prodFile)
 	}
 	src, err := os.ReadFile("main.go")
 	if err != nil {
@@ -314,20 +333,61 @@ func TestRouteAssemblyHasExactlyOneEntryPoint(t *testing.T) {
 			"那片路由游离在唯一真源之外", registerAt+1, entryAt+1)
 	}
 
-	// ---- 测试侧：任何测试文件都不得自建路由树 ----
-	for _, f := range files {
-		if !strings.HasSuffix(f, "_test.go") {
-			continue
-		}
+	// ---- 测试侧：本包的测试文件都不得自建路由树 ----
+	//
+	// 范围**只到 cmd/server 这一个包**（不夸大）：本包能直接调
+	// registerProductionRoutes，所以"自建装配"在这里没有任何正当理由。
+	// 别的包（例：internal/reports 的凭据读侧用例）**够不到**这个 main 包里的
+	// 函数，它们为本地断言自建一棵最小树是不可避免的 —— 那些树的漂移由
+	// 运行期守卫（测试树 vs 生产装配树）与各自用例负责，不由这条静态断言负责。
+	localTests, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatalf("列举本包测试文件: %v", err)
+	}
+	for _, f := range localTests {
 		src, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("读 %s: %v", f, err)
 		}
 		if strings.Contains(string(src), marker) {
-			t.Errorf("%s 里出现了 %q：测试必须经 registerProductionRoutes 建树"+
+			t.Errorf("%s 里出现了 %q：本包测试必须经 registerProductionRoutes 建树"+
 				"（自建装配正是「测试树少一整片」的成因）", f, marker)
 		}
 	}
+}
+
+// collectGoFiles 递归收集 root 下的 .go 文件（返回**绝对**路径，便于调用方
+// 直接 os.ReadFile，不受测试 cwd 影响）。
+//
+// 跳过：testdata/、node_modules/、以 . 开头的目录、以及 temp/（那是探针与
+// 一次性脚本的地盘，不属于生产源码面）。
+func collectGoFiles(root string) ([]string, error) {
+	base, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	err = filepath.WalkDir(base, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if path != base && (name == "testdata" || name == "node_modules" || name == "temp" || strings.HasPrefix(name, ".")) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".go") {
+			return nil
+		}
+		out = append(out, path)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // TestProductionAssemblyPassesEveryDep：main() 的 productionDeps 字面量必须把
