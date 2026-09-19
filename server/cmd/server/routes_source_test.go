@@ -169,13 +169,11 @@ var wasmGatedRoutes = []string{
 	"PUT /api/server/admin/wasm-apps/domain",
 	"GET /api/server/admin/wasm-apps/limits",
 	"PUT /api/server/admin/wasm-apps/limits",
-	// 发布审核 + 诊断 + 运行期水位（2026-09-19 新增：开启审核后需要审批出口，
-	// 否则"开启审核"= 全组织再也发不出新版本；runtime 是平台级只读水位）。
-	"GET /api/server/admin/wasm-apps/:app_id/releases",
-	"POST /api/server/admin/wasm-apps/:app_id/releases/:version/approve",
-	"POST /api/server/admin/wasm-apps/:app_id/releases/:version/reject",
-	"GET /api/server/admin/wasm-apps/:app_id/diagnostics",
-	"GET /api/server/admin/wasm-apps/runtime",
+	// ⚠️ 2026-09-19 二次踩坑记录：这里曾被写入 5 条**只存在于并发会话工作树、
+	// 从未提交**的管理路由（`:app_id/releases`、`:app_id/releases/:version/
+	// approve|reject`、`:app_id/diagnostics`、`runtime`）—— 后果是"提交态"
+	// 直接失败（干净 `git archive HEAD` 上 TestRouteAssemblyGatedSlicesAreDeclared
+	// 报"声明表里的路由并未消失"）。它们提交后（连同 router.go）再登记到这里。
 }
 
 // sessionGatedRoutes：d.WasmSession == nil 时消失（router.Register 的
@@ -217,11 +215,16 @@ func TestRouteAssemblyGatedSlicesAreDeclared(t *testing.T) {
 	stale := diffKeys(declared, keysToSet(gated))
 
 	if len(undeclared) > 0 {
-		t.Errorf("有路由因依赖为 nil 而消失却没有登记（新增了条件注册却没人更新声明表）：\n  %s",
-			strings.Join(undeclared, "\n  "))
+		t.Errorf("有路由因依赖为 nil 而消失却没有登记（新增了条件注册却没人更新声明表）：\n  %s\n"+
+			"修法：把上面每条按原样加进 wasmGatedRoutes / sessionGatedRoutes。", strings.Join(undeclared, "\n  "))
 	}
 	if len(stale) > 0 {
-		t.Errorf("声明表里的路由并未消失（依赖不再影响它，或路由被删）：\n  %s",
+		t.Errorf("声明表里的路由并未消失（依赖不再影响它，或路由被删）：\n  %s\n"+
+			"⚠️ 两种情形要分清：\n"+
+			"  1. 本提交里这些路由真的被删/不再依赖该字段 ⇒ 从声明表里删掉；\n"+
+			"  2. 共享工作目录里别人有**未提交**的 router.go 改动、而你看的是干净提交态\n"+
+			"     ⇒ **不要**为了让它变绿而把「别人未提交的路由」写进本表：那会让本提交\n"+
+			"     自己必红（本表只与**已提交**的 router.go 对齐），等它们被提交后再登记。",
 			strings.Join(stale, "\n  "))
 	}
 	if len(undeclared) > 0 || len(stale) > 0 {
