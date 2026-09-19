@@ -1537,7 +1537,7 @@ export async function proxyApp(ctx: Context, session: Session, input: ProxyInput
  * | POST | `/validate` | 预检代理（AI/UI 用来"不占版本号地试一发"） |
  * | POST | `/publish` | **发布编排**：`wasm_base64`/`wasm_path` → 直传或分片续传 |
  * | POST | `/:app_id/publish\|unpublish\|freeze` | 生命周期代理（原样转发 body） |
- * | GET | `/:app_id/diagnostics\|schema\|export` | 只读代理 |
+ * | GET | `/:app_id/diagnostics\|schema\|export\|releases` | 只读代理 |
  * | DELETE | `/:app_id` | 删除代理（R37 冻结→导出→真删） |
  *
  * 这个函数只做**四件 HTTP 层的事**：围栏（guard/持有性证明/auditor）、路径分发、
@@ -1672,8 +1672,13 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
         locale,
       }))
     }
-    // GET /:app_id/(diagnostics|schema|export) —— 只读
-    if (segments.length === 2 && ['diagnostics', 'schema', 'export'].includes(segments[1] ?? '')) {
+    // GET /:app_id/(diagnostics|schema|export|releases) —— 只读
+    //
+    // `releases`（R1-pm-3）是发布者本人的版本历史 + 审核结论（含被拒理由）：服务端
+    // 的员工面出口是 `GET /api/client/v2/apps/wasm/:app_id/releases`。**它必须在这里
+    // 的白名单里** —— 这张表是逐后缀分发的，漏一个后缀就是"服务端做完了、客户端永远
+    // 404"（面板上表现为一条读不出来的结论，而不是功能缺失）。
+    if (segments.length === 2 && ['diagnostics', 'schema', 'export', 'releases'].includes(segments[1] ?? '')) {
       if (method !== 'GET') return fail(res, { code: 'METHOD_NOT_ALLOWED', message: 'method not allowed', status: 405 })
       return write(res, await proxyApp(ctx, session, {
         upstreamPath: `${appPath}/${segments[1]!}`,

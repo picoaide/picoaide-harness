@@ -26,7 +26,6 @@ export const zh = {
   'capability.officialLocked': '官方内容仅管理员可更新',
   // 内置技能区（随服务端镜像发布、客户端按需安装）
   'capability.builtinInstall': '安装',
-  'capability.builtinInstalled': '已安装',
   'capability.builtinRetry': '重试',
   'capability.builtinBadge': '平台内置',
   'capability.dirty': '已本地修改',
@@ -133,7 +132,6 @@ export const en: Record<keyof typeof zh, string> = {
   'capability.sourceOther': 'Other install',
   'capability.officialLocked': 'Official content: updates by admin only',
   'capability.builtinInstall': 'Install',
-  'capability.builtinInstalled': 'Installed',
   'capability.builtinRetry': 'Retry',
   'capability.builtinBadge': 'Built-in',
   'capability.dirty': 'Locally modified',

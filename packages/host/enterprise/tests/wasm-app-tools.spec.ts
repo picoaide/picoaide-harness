@@ -1197,6 +1197,7 @@ describe('工具描述与服务端实现一致（下架语义 / 旧配置字段�
   const SERVE_GO = readFileSync(join(REPO_ROOT, 'server/internal/wasmapp/appserver/serve.go'), 'utf8')
   const READ_GO = readFileSync(join(REPO_ROOT, 'server/internal/wasmapp/api/read.go'), 'utf8')
   const APPCFG_GO = readFileSync(join(REPO_ROOT, 'server/internal/wasmapp/appcfg/appcfg.go'), 'utf8')
+  const INHERIT_GO = readFileSync(join(REPO_ROOT, 'server/internal/wasmapp/appcfg/inherit.go'), 'utf8')
 
   it('服务端实现：enabled=false 走 writeGone（410），下架条目**照样**列在目录里', () => {
     // 先证明"实现是 410"仍然是事实（否则下面的描述断言没有意义）。
@@ -1217,20 +1218,35 @@ describe('工具描述与服务端实现一致（下架语义 / 旧配置字段�
     expect(description).not.toContain('不在应用中心推荐')
   })
 
-  it('config 描述说清"未知字段才拒、visible/login_required 是兼容形态"（与 appcfg 的 decode 一致）', () => {
-    // 服务端事实：只有 !knownField(k) 才报 unknown_field；旧字段被显式解析并参与映射。
+  it('config 描述说清"未知字段才拒"与旧字段的真实后果（与 appcfg 的 decode + mergeMissing 一致）', () => {
+    // 服务端事实：只有 !knownField(k) 才报 unknown_field；旧字段被显式解析（decode
+    // 的 shim 仍在，首版/无基线时参与映射）。
     expect(APPCFG_GO).toMatch(/if\s*!knownField\(k\)/)
     expect(APPCFG_GO).toContain('legacyFieldLoginRequired')
     expect(APPCFG_GO).toContain('legacyFieldVisible')
+    // 而**继承**一侧不得再看这两个键：旧字段不参与"字段是否缺席"的判定
+    // （2026-09-19 审计 §1.3：带 visible 的更新曾让白名单应用静默变 login）。
+    // 变异：把 legacy 键重新计入 mergeMissing 的缺席判定 ⇒ 本断言红。
+    const mergeMissing = /func mergeMissing\([\s\S]*?\n}/.exec(INHERIT_GO)?.[0] ?? ''
+    expect(mergeMissing, 'inherit.go 里找不到 mergeMissing').not.toBe('')
+    expect(mergeMissing).not.toContain('legacyField')
+    expect(mergeMissing).toContain('KnownFields')
 
     const publishConfig = String(byName('wasm_app_publish').parameters.properties!.config!.description)
     const validateConfig = String(byName('wasm_app_validate').parameters.properties!.config!.description)
     for (const description of [publishConfig, validateConfig]) {
       // 旧说法：把这两个**兼容字段**当成"会被拒的未知字段"的例子（与实现相反）。
       expect(description).not.toContain('例如已删除的 visible / login_required')
-      // 新说法：未知字段才拒 + 旧字段是兼容形态。
+      // 未知字段才拒 + 旧字段是兼容形态。
       expect(description).toContain('未知')
       expect(description).toContain('兼容')
+      // 关键（本次修复的契约）：旧字段**不参与缺席判定** ⇒ 带了它们也照样沿用上一版，
+      // 访问级别不会被它们改写。
+      expect(description).toContain('不参与')
+      expect(description).toContain('沿用')
+      // 基线坏行的语义也说清：拒绝发布（不是静默回落成缺省），模型据此不再盲目重试。
+      expect(description).toContain('baseline_unusable')
+      expect(description).toContain('拒绝')
     }
   })
 

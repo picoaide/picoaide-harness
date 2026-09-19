@@ -153,10 +153,15 @@ const APP_CONFIG_DESCRIPTION = [
   '应用配置声明（`picoaide.app.json` 的内容；**发布必填**，服务端字段表里 `config` 就是必填项）。',
   '字段集合是**封闭**的：access / whitelist / purpose / data_sensitivity / owner —— ',
   '多一个**未知**字段服务端会直接拒。',
-  '旧 schema 的 visible / login_required 是**兼容形态**（`access` 缺席时它们参与映射、`visible` 被忽略，',
-  '见 appcfg 的兼容 shim），但新版一律不要发：它们对 `access` 没有加成，混进来只会让"这次改了什么"读不出来。',
+  '旧 schema 的 visible / login_required 是**兼容形态**，但它们**不参与"字段是否缺席"的判定**：',
+  '既有生效版本时，带了它们也照样从上一版沿用 access/whitelist（它们既不算 access 的显式声明，也不会关掉继承），',
+  '只有首版（没有可沿用的上一版）才按兼容表映射。所以新版一律不要发它们：发它们不会改变访问级别，',
+  '只会让"这次改了什么"读不出来。',
   '首次发布时 purpose / data_sensitivity / owner 三个声明缺一不可；更新版本时可以省略未改动的（服务端沿用原值），',
   '但要改访问方式或名单就必须给全五个字段。注意**改配置 = 发新版本**，运行期改不了。',
+  '沿用只发生在"上一版生效配置读得出来"时：若它在平台侧是坏行，服务端会**拒绝发布**',
+  '（APP_CONFIG_INVALID / details.reason=baseline_unusable）并点名是哪一版 —— 那是平台数据问题，',
+  '改本机产物没有用，按 hints 让管理员修复那一行后再发（绝不会静默改掉访问级别）。',
 ].join('')
 
 /** `config` 参数的说明（validate 的可选形态：预检时带上会一起校验）。 */
@@ -164,7 +169,10 @@ const APP_CONFIG_DESCRIPTION_OPTIONAL = [
   '可选：应用配置声明（`picoaide.app.json` 的内容）。',
   '预检时带上它会**一起校验**：access 取值、access=whitelist 时的名单是否为空、首版三个声明是否齐全都能提前发现。',
   '字段集合是**封闭**的：access / whitelist / purpose / data_sensitivity / owner —— 多一个**未知**字段服务端会直接拒；',
-  '旧 schema 的 visible / login_required 会被兼容映射（`access` 缺席时才参与），但新版不要发它们。',
+  '旧 schema 的 visible / login_required 不参与"字段是否缺席"的判定（既有生效版本时照样沿用上一版的 access/whitelist），',
+  '只有首版才按兼容表映射，但新版不要发它们。',
+  '上一版生效配置在平台侧读不出来时，预检与发布都会拒绝（details.reason=baseline_unusable）——',
+  '不是让你改 config，而是平台数据需要管理员修复。',
 ].join('')
 
 // ---------------------------------------------------------------------------

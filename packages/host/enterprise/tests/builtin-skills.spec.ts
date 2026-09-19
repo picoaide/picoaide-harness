@@ -22,13 +22,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createHash } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, cp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply, type Config } from '../src/auth-gate.ts'
-import { builtinAction, builtinInstallEndpoint, builtinRowState, selectBuiltinCards, type BuiltinSkill } from '../src/client/BuiltinSkillsStrip.tsx'
+import { builtinAction, builtinInstallEndpoint, builtinRowState, planBuiltinCards, selectBuiltinCards, type BuiltinSkill } from '../src/client/BuiltinSkillsStrip.tsx'
 import { APP_BUILDER_SKILL, builtinSkillInstallHint, isBuiltinSkillInstalled } from '../src/builtin-skills.ts'
 import { readProvenance, resolveSkillsDir } from '../src/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
@@ -176,15 +176,17 @@ function packRawTarGz(entries: ReadonlyArray<{ name: string, body: string }>): B
 }
 
 /** 组装一个假服务端：只实现内置技能的两个端点（与真实服务端同形状）。 */
-function stubServer(archive: Buffer, opts: { checksum?: string | null, version?: string | null, status?: number } = {}): void {
+function stubServer(archive: Buffer, opts: { checksum?: string | null, version?: string | null, status?: number, manifestVersion?: string } = {}): void {
   const checksum = opts.checksum === undefined ? createHash('sha256').update(archive).digest('hex') : opts.checksum
   const version = opts.version === undefined ? '1.0.0' : opts.version
+  // 清单里的版本与归档头同源（真实服务端两者都取自 SKILL.md frontmatter 的 version）。
+  const manifestVersion = opts.manifestVersion ?? '1.0.0'
   vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
     const href = String(url)
     if (href.endsWith('/api/client/v2/skills/builtin')) {
       if (opts.status !== undefined) return new Response('{}', { status: opts.status })
       return new Response(JSON.stringify({
-        skills: [{ name: 'app-builder', version: '1.0.0', title: 'PicoAide 应用构建', description: '写一个 WASM 应用', source: 'builtin' }],
+        skills: [{ name: 'app-builder', version: manifestVersion, title: 'PicoAide 应用构建', description: '写一个 WASM 应用', source: 'builtin' }],
       }), { status: 200, headers: { 'content-type': 'application/json' } })
     }
     if (href.includes('/api/client/v2/skills/builtin/') && href.endsWith('/archive')) {
@@ -458,5 +460,160 @@ describe('内置技能以普通卡片渲染：只渲染未安装的、参与搜�
 
   it('类型筛选为"智能体"时不渲染（内置的目前都是技能）', () => {
     expect(selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: '', kindFilter: 'agent' })).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R1-pm-8：已安装的内置技能必须拿得到更新（清单版本 vs 本机 provenance 版本）
+// ---------------------------------------------------------------------------
+//
+// 现场（审计 R1-pm-8 / SK-1）：内置技能卡列表把"已装"的行整个过滤掉，而"更新"
+// 这个动作只在已装时才成立 ⇒ 「更新到 vX」是**死代码**：平台换了新版作者手册，
+// 装过的人永远拿不到（唯一办法是先卸载再装，界面无提示）。
+//
+// 这一组用**假清单 + 假本机状态**驱动真实现，断言的是"出不出卡、按钮干什么"，
+// 不是"页面上有没有某个元素"。
+//
+// 变异验证（改回过滤条件即红）：
+//   把 planBuiltinCards 的 `if (action === 'installed') continue` 改回
+//   `if (installed) continue`（等价于旧实现）⇒ 前两条用例必红。
+
+describe('R1-pm-8：已装且更旧 ⇒ 出「更新」卡并走 ?force=1 重装路径', () => {
+  const row = (version: string): BuiltinSkill => ({ name: 'app-builder', version, title: 'PicoAide 应用构建手册' })
+  const installedState = (installedVersion: string | undefined): {
+    installedNames: ReadonlySet<string>
+    installedVersions: Readonly<Record<string, string | undefined>>
+  } => ({
+    installedNames: new Set(['app-builder']),
+    installedVersions: installedVersion === undefined ? {} : { 'app-builder': installedVersion },
+  })
+
+  it('已装 1.0.0 + 清单 1.1.0 ⇒ 出卡、动作 update、端点 = 既有重装路径（force=1）', () => {
+    const cards = planBuiltinCards({ rows: [row('1.1.0')], ...installedState('1.0.0'), query: '', kindFilter: 'all' })
+    expect(cards).toHaveLength(1)
+    expect(cards[0]?.action).toBe('update')
+    // 关键：这一行必须是**可点**的 action 态，不能落回「已安装」胶囊（那正是死代码形态）。
+    expect(cards[0]?.state).toBe('action')
+    expect(cards[0]?.installed).toBe(true)
+    expect(cards[0]?.endpoint).toBe('/api/pico/skills/builtin/app-builder/install?force=1')
+  })
+
+  it('已装且与清单同版本 ⇒ 不出卡（本机技能库那张普通卡片就是它，不重复）', () => {
+    expect(planBuiltinCards({ rows: [row('1.1.0')], ...installedState('1.1.0'), query: '', kindFilter: 'all' })).toEqual([])
+    // 纯函数层面的对照：同版本时按钮语义就是「已安装」。
+    expect(builtinAction('1.1.0', '1.1.0', true)).toBe('installed')
+  })
+
+  it('本机比清单还新（装过预发版）⇒ 不提示更新；本机版本读不到 ⇒ 也不谎报', () => {
+    expect(planBuiltinCards({ rows: [row('1.1.0')], ...installedState('1.2.0'), query: '', kindFilter: 'all' })).toEqual([])
+    expect(planBuiltinCards({ rows: [row('9.9.9')], ...installedState(undefined), query: '', kindFilter: 'all' })).toEqual([])
+  })
+
+  it('未装 ⇒ 仍是「安装」卡，端点不带 force', () => {
+    const cards = planBuiltinCards({ rows: [row('1.1.0')], installedNames: new Set(), installedVersions: {}, query: '', kindFilter: 'all' })
+    expect(cards.map(c => [c.action, c.state, c.endpoint])).toEqual([
+      ['install', 'action', '/api/pico/skills/builtin/app-builder/install'],
+    ])
+  })
+
+  it('**判据完全来自服务端清单**：清单升到 2.0.0，同一份本机状态立刻变成"有更新"（客户端不硬编码版本）', () => {
+    const local = { ...installedState('1.1.0'), query: '', kindFilter: 'all' as const }
+    expect(planBuiltinCards({ rows: [row('1.1.0')], ...local })).toEqual([])
+    const bumped = planBuiltinCards({ rows: [row('2.0.0')], ...local })
+    expect(bumped.map(c => [c.action, c.endpoint])).toEqual([
+      ['update', '/api/pico/skills/builtin/app-builder/install?force=1'],
+    ])
+  })
+
+  it('更新卡也参与搜索与类型筛选（它就是"我的"里的一张普通卡）', () => {
+    const base = { rows: [row('1.1.0')], ...installedState('1.0.0'), kindFilter: 'all' as const }
+    expect(planBuiltinCards({ ...base, query: '应用构建' })).toHaveLength(1)
+    expect(planBuiltinCards({ ...base, query: '不存在的东西' })).toEqual([])
+    expect(planBuiltinCards({ ...base, query: '', kindFilter: 'agent' })).toEqual([])
+  })
+
+  it('失败/进行中态按行：更新行失败只影响它自己，其它行仍可点', () => {
+    const cards = planBuiltinCards({
+      rows: [row('1.1.0'), { name: 'other', version: '1.0.0' }],
+      ...installedState('1.0.0'),
+      query: '',
+      kindFilter: 'all',
+      failed: { name: 'app-builder', message: '校验和不一致' },
+    })
+    const updating = cards.find(c => c.skill.name === 'app-builder')
+    const other = cards.find(c => c.skill.name === 'other')
+    expect(updating).toMatchObject({ state: 'failed', failure: '校验和不一致' })
+    expect(other).toMatchObject({ state: 'action', failure: null })
+
+    const busy = planBuiltinCards({ rows: [row('1.1.0')], ...installedState('1.0.0'), query: '', kindFilter: 'all', busy: 'app-builder' })
+    expect(busy[0]).toMatchObject({ state: 'busy', action: 'update' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R1-pm-8 端到端：装 1.0.0 → 清单升到 1.1.0 → 出「更新」卡 → force 重装真的换内容
+// ---------------------------------------------------------------------------
+//
+// 只断言"卡片存在"是不够的：R1-pm-8 的另一半是"更新**真的能装上**"。这里用真实现
+// 走完 清单 → 决策 → 既有安装链路（installSkillArchive），最后核对磁盘字节。
+
+describe('R1-pm-8 端到端：更新卡 → ?force=1 → 本机整树换成新版', () => {
+  it('旧版装好后，服务端升版 ⇒ 决策出更新卡；点它真的把内容换成新版（含 provenance 版本）', async () => {
+    const installedDir = join(resolveSkillsDir(), 'app-builder')
+
+    // 1) 先用"旧内容"装一次：真源目录 + 把 SKILL.md 的 version 改回 1.0.0。
+    const oldDir = await mkdtemp(join(tmpdir(), 'pico-builtin-old-'))
+    try {
+      await cp(SOURCE_SKILL_DIR, oldDir, { recursive: true })
+      const sourceRaw = await readFile(join(SOURCE_SKILL_DIR, 'SKILL.md'), 'utf8')
+      // 前置：真源已经提过版本（R1-pm-8 的第二半 —— 内容变则版本必须跟着变），
+      // 否则"本机更旧"这个场景根本构造不出来。
+      expect(/^version: (.*)$/mu.exec(sourceRaw)?.[1]).not.toBe('1.0.0')
+      const oldRaw = sourceRaw.replace(/^version: .*$/mu, 'version: 1.0.0')
+      expect(oldRaw).not.toBe(sourceRaw)
+      await writeFile(join(oldDir, 'SKILL.md'), oldRaw)
+      stubServer(await packSkillTarGz(oldDir), { version: '1.0.0', manifestVersion: '1.0.0' })
+      const first = await harness(SESSION).call('/api/pico/skills/builtin/app-builder/install', 'POST')
+      expect(first.code, JSON.stringify(first.body)).toBe(200)
+    } finally {
+      await rm(oldDir, { recursive: true, force: true })
+    }
+    expect((await readProvenance(installedDir))?.version).toBe('1.0.0')
+
+    // 2) 服务端升版：清单与归档都变成真源那一份（SKILL.md 已提到 1.1.0）。
+    stubServer(await packSkillTarGz(SOURCE_SKILL_DIR), { version: '1.1.0', manifestVersion: '1.1.0' })
+
+    // 3) 面板那一步：服务端清单 + 磁盘上的本机状态 → 出一张更新卡。
+    const h = harness(SESSION)
+    const listed = await h.call('/api/pico/skills/builtin')
+    expect(listed.code).toBe(200)
+    const local = await readProvenance(installedDir)
+    const cards = planBuiltinCards({
+      rows: listed.body.skills as BuiltinSkill[],
+      installedNames: new Set<string>(listed.body.installed as string[]),
+      installedVersions: { 'app-builder': local?.version ?? '' },
+      query: '',
+      kindFilter: 'all',
+    })
+    expect(cards.map(c => [c.skill.name, c.action, c.state, c.endpoint])).toEqual([
+      ['app-builder', 'update', 'action', '/api/pico/skills/builtin/app-builder/install?force=1'],
+    ])
+
+    // 4) 点那一张卡：走既有安装链路（force=1）⇒ 整树换成新版。
+    const upgraded = await h.call(cards[0]!.endpoint, 'POST')
+    expect(upgraded.code, JSON.stringify(upgraded.body)).toBe(200)
+    expect(upgraded.body).toMatchObject({ ok: true, name: 'app-builder', version: '1.1.0' })
+    expect((await readFile(join(installedDir, 'SKILL.md'))).equals(await readFile(join(SOURCE_SKILL_DIR, 'SKILL.md')))).toBe(true)
+    expect((await readProvenance(installedDir))?.version).toBe('1.1.0')
+
+    // 5) 再取清单：同版本 ⇒ 不再出卡（不会无限提示"有更新"）。
+    const after = await h.call('/api/pico/skills/builtin')
+    expect(planBuiltinCards({
+      rows: after.body.skills as BuiltinSkill[],
+      installedNames: new Set<string>(after.body.installed as string[]),
+      installedVersions: { 'app-builder': '1.1.0' },
+      query: '',
+      kindFilter: 'all',
+    })).toEqual([])
   })
 })

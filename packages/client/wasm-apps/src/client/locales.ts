@@ -159,6 +159,26 @@ export const zh = {
   'appCenter.requiredPurpose': '用途是首版必填项',
   'appCenter.requiredDataSensitivity': '数据敏感度是首版必填项',
   'appCenter.requiredOwner': '负责人是首版必填项',
+
+  // ---- 版本历史与审核结论（R1-pm-3：审核开启后作者侧的结论出口）----
+  // 为什么这一组是必需的：审核开启后，作者此前只看到发布那一刻的"待审核"，
+  // 被拒也收不到任何结论（reason 写了没人读、版本号又永久占位）⇒ 只能盲升版本号重发。
+  'appCenter.releases': '版本历史',
+  'appCenter.releasesAria': '查看该应用的版本历史与审核结论',
+  'appCenter.releasesLoading': '正在读取版本历史…',
+  'appCenter.releasesEmpty': '还没有版本记录',
+  'appCenter.releasesFailed': '版本历史读取失败',
+  'appCenter.releasesShapeMismatch': '服务端返回的版本历史形状与客户端预期不一致',
+  'appCenter.releaseStatus.approved': '已生效',
+  'appCenter.releaseStatus.pending': '待审核',
+  'appCenter.releaseStatus.rejected': '已拒绝',
+  'appCenter.releaseCurrent': '线上',
+  'appCenter.releaseReason': '拒绝理由',
+  'appCenter.releaseReasonMissing': '管理员没有填写理由',
+  // 「被拒后怎么办」：被拒版本的版本号**永久占位**、不能复用，唯一出路是升版本号重发。
+  // 这句话必须与理由一起出现，否则作者只知道"没过"而不知道下一步做什么。
+  'appCenter.releaseResubmitHint': '被拒后可以改好内容、用「更高的版本号」重新提交（例如 1.1.0 被拒 → 发 1.1.1）；被拒版本的版本号已永久占位，不能复用。',
+  'appCenter.releasePendingHint': '待审核：线上仍是当前生效版本，审核通过后才会切换。',
 } as const
 
 /** English mirror of {@link zh}. */
@@ -297,6 +317,22 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.requiredPurpose': 'Purpose is required on the first release',
   'appCenter.requiredDataSensitivity': 'Data sensitivity is required on the first release',
   'appCenter.requiredOwner': 'Responsible person is required on the first release',
+
+  // ---- Version history and review verdicts (R1-pm-3) ----
+  'appCenter.releases': 'Version history',
+  'appCenter.releasesAria': 'View this app version history and review verdicts',
+  'appCenter.releasesLoading': 'Loading version history…',
+  'appCenter.releasesEmpty': 'No releases yet',
+  'appCenter.releasesFailed': 'Failed to load the version history',
+  'appCenter.releasesShapeMismatch': 'The version history does not match the shape this client expects',
+  'appCenter.releaseStatus.approved': 'Live',
+  'appCenter.releaseStatus.pending': 'Pending review',
+  'appCenter.releaseStatus.rejected': 'Rejected',
+  'appCenter.releaseCurrent': 'Live',
+  'appCenter.releaseReason': 'Rejection reason',
+  'appCenter.releaseReasonMissing': 'the reviewer left no reason',
+  'appCenter.releaseResubmitHint': 'After a rejection, fix the content and resubmit with a HIGHER version number (e.g. 1.1.0 rejected → publish 1.1.1); a rejected version number stays reserved forever and cannot be reused.',
+  'appCenter.releasePendingHint': 'Pending review: the live version is unchanged until the review passes.',
 }
 
 /** Dictionary key type (zh is authoritative). */
