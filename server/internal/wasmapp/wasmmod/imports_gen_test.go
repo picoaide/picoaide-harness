@@ -420,6 +420,30 @@ func TestGeneratorCheckModeAgreesWithDisk(t *testing.T) {
 	if !strings.Contains(out.String(), "作者面") {
 		t.Fatalf("负向失败信息应点名是哪一份产物（作者面 / 平台侧）:\n%s", out.String())
 	}
+
+	// 负向 3（R2-SK-3 的判据）：**只改行尾/EOF 空行**同样是"下发字节变了"。
+	// references/imports.md 会原样下发到员工磁盘，所以换行风格也算内容；
+	// 此前 -check 走 normalize（CRLF→LF + 去尾空行）⇒ 这种情况静默绿。
+	rawDoc, rerr := os.ReadFile(filepath.Join(filepath.Dir(root), filepath.FromSlash(skillImportsDocRelPath)))
+	if rerr != nil {
+		t.Fatalf("读 %s: %v", skillImportsDocRelPath, rerr)
+	}
+	crlfDoc := filepath.Join(t.TempDir(), "imports-crlf.md")
+	if werr := os.WriteFile(crlfDoc, bytes.ReplaceAll(rawDoc, []byte("\n"), []byte("\r\n")), 0o644); werr != nil {
+		t.Fatalf("写 CRLF 临时文档: %v", werr)
+	}
+	cmd = exec.Command("go", "run", "./cmd/picoaide-wasm-imports-gen", "-check", "-imports-md", crlfDoc)
+	cmd.Dir = root
+	cmd.Env = os.Environ()
+	out.Reset()
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("-check 对**只有行尾不同**（CRLF）的 references/imports.md 必须非零退出:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "逐行内容相同") {
+		t.Fatalf("CRLF 差异的报错应讲清「差异只在行尾」（而不是让人以为内容被改了）:\n%s", out.String())
+	}
 }
 
 // TestSkillImportsDocCoversEveryWhitelistSymbol 是 R1-pm-18 的**覆盖性**判据：

@@ -8,8 +8,9 @@
 //
 // 判据：
 //
-//	① 首版待审 ⇒ apps 行的配置投影三列**保持空**（"没有可交付配置"），
-//	   title/description/owner/enabled 等身份列照写；approve 后由审核分支写入投影
+//	① 首版待审 ⇒ apps 行的投影列**保持空/占位**（配置三列 = "没有可交付配置"，
+//	   title = app_id 占位、description 空；R2-1）；owner/enabled 等平台列照写；
+//	   approve 后由审核分支把配置与显示面一起写进去
 //	② 首版被拒（没有任何 approved 版本）⇒ 下一版省略 access **不得**继承被拒版本的
 //	   配置：即使 apps.config_json 里还留着那行（老实现/人工改动的形态），也必须落 login
 //	③ 已有 approved 版本 ⇒ 更新省略 access 继承的是**那一版**：
@@ -99,9 +100,12 @@ func TestPendingFirstReleaseDoesNotSeedAppsConfigProjection(t *testing.T) {
 		t.Fatalf("首版待审不得把未生效配置写进 apps 行（老实现会，且它随后会成为继承基线）: "+
 			"config=%q purpose=%q sensitivity=%q", app.ConfigJSON, app.Purpose, app.DataSensitivity)
 	}
-	// 但身份列必须照写：列表/详情读的是它们（read.go 对空 config_json 有兜底）。
-	if app.Title != "示例应用 seed-tool" || app.Description == "" || app.Owner != "alice" || !app.Enabled {
-		t.Fatalf("待审首版的应用身份列丢了（列表/详情会显示成空行）: %+v", app)
+	// 身份列也要按同一条纪律处理（R2-1，2026-09-19 第二轮审计 §1.1）：待审版本的
+	// title/description **不进投影**，首版用 app_id 占位（非空 —— read.go 对 title
+	// 没有兜底，空标题会先出现在管理面/导出里）。owner/enabled 是平台归属与上架位，
+	// 与"内容是否过审"无关，照写。
+	if app.Title != "seed-tool" || app.Description != "" || app.Owner != "alice" || !app.Enabled {
+		t.Fatalf("首版待审的显示面投影应停在 app_id 占位（不写待审标题/描述），实际: %+v", app)
 	}
 	// 空投影下的读取兜底必须成立：access 回落 login（不是"未知"、更不是 public），负责人回落平台归属。
 	if got := appcfg.AccessOfConfigJSON(app.ConfigJSON); got != appcfg.AccessLogin {
@@ -121,6 +125,11 @@ func TestPendingFirstReleaseDoesNotSeedAppsConfigProjection(t *testing.T) {
 	}
 	if after.Purpose != "值班排班" || after.DataSensitivity != "internal" {
 		t.Fatalf("通过审核后声明投影 = (%q, %q)，want (值班排班, internal)", after.Purpose, after.DataSensitivity)
+	}
+	// 显示面投影也由审核分支落到该版本行上（R2-1 —— 待审期间它们是占位/空）。
+	if after.Title != "示例应用 seed-tool" || after.Description != "值班排班" {
+		t.Fatalf("通过审核后显示面投影 = (%q, %q)，want (示例应用 seed-tool, 值班排班)：%+v",
+			after.Title, after.Description, after)
 	}
 }
 

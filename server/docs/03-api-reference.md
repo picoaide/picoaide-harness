@@ -224,7 +224,7 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/server/admin/skills/builtin` | `{dir, dir_exists, skills:[…与客户端清单同形状…], problems:[{name, reason}], counts:{skills, problems}, load_error?}`;**只读**:内置技能是镜像资产,没有上架/授权/审批/owner 语义(故无对应写端点);扫描失败与"有技能被跳过"一律 200 + 原因(客户端面仍 401/5xx 口径不变) |
+| GET | `/api/server/admin/skills/builtin` | `{dir, dir_exists, skills:[…与客户端清单同形状…], problems:[{name, reason}], counts:{skills, problems}, load_error?}`;**只读**:内置技能是镜像资产,没有上架/授权/审批/owner 语义(故无对应写端点);扫描失败与"有技能被跳过"一律 200 + 原因(客户端面仍 401/5xx 口径不变)。`problems` 覆盖两类:**坏技能目录**(frontmatter 缺字段/目录名≠name/…)与**资产根目录里的散文件**(放错层的 SKILL.md、notes.txt 等 —— 它们不会被打包下发,但必须可见;2026-09-19 R2-SK-2) |
 
 > ⚠️ 路径与市场技能的 `GET /skills/:name` 同级(gin 静态段优先):名字恰为 `builtin`
 > 的市场技能在这一条 GET 上不可达,其余 `/skills/:name/*` 端点不受影响。
@@ -234,7 +234,7 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/pico/skills/builtin` | 透传服务端清单并附本机 `installed` 目录名列表 |
-| POST | `/api/pico/skills/builtin/:name/install` | 下载 + 校验 + 装到 `<dshHome>/skills/<name>`;`?force=1` 覆盖安装;**缺 `x-skill-checksum`/`x-skill-version` 一律拒绝**(502) |
+| POST | `/api/pico/skills/builtin/:name/install` | 下载 + 校验 + 装到 `<dshHome>/skills/<name>`;**宿主只按 pathname 分发、不读 query**(`?force=1` 已于 2026-09-19 移除:重装/更新靠安装器的整树替换语义,同名覆盖确认是纯客户端交互);**缺 `x-skill-checksum`/`x-skill-version` 一律拒绝**(502) |
 
 ## 9. Bootstrap
 

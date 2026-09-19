@@ -476,6 +476,13 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 		LimitsProfile: limitsHolder.ProfileName,
 		LimitsApply:   limitsHolder.Apply,
 		LimitsRestart: limitsHolder.RestartPending,
+		// 诊断面要的是**运行时生效**的单实例内存上限，不是"控制台已保存值"（R2-DG-2）：
+		// 保存 instance_memory_mb 之后要重启才生效，在重启窗口里两者可以差出几十上百 MiB
+		//（审计实测：保存 32 MiB / 实际按 128 MiB 跑），而诊断 hints 与发布干跑说的必须是
+		// "这次运行的上限"。appserver.InstanceMemoryPages() 优先问 runtime（来源纪律见
+		// appserver/limits_apply.go）。控制台的 limits 视图与"待重启"判定仍读 Limits
+		//（它要如实显示**已保存值**与 restart_pending）。
+		EffectiveMemoryPages: appSrv.InstanceMemoryPages,
 		// 控制台的四笔账预览也要"读不到就如实说"：BudgetBytes() 在未知时给
 		// readyz.MemoryUnknown（<0）⇒ 预览只算不判（Known=false 会显示在响应里），
 		// 而不是拿 0 当"内存充足"。
@@ -508,9 +515,10 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, authAPI *serverauth.API,
 	// ServeHTTP 直接交主站，与"没挂门控"逐字节等价；非空时才把应用子域分流。
 	// Main 由 main.go 在拿到 *gin.Engine 后回填。
 	// ExtraMainHosts 与员工会话的主站源**同源**：R1-sec-3 之后 MatchHost 把"不是本基域的
-	// 主机名"判成 HostUnknown ⇒ 404（不再回落主站），而"主站 Host ≠ 应用基域"是真实部署
-	// （.env.example 的示例就是基域 apps.example.com、主站 example.com）⇒ 不显式声明
-	// 就会升级后主站/管理台 404。
+	// 主机名"判成 HostUnknown ⇒ 404（不再回落主站），而"主站 Host ≠ 应用基域"是**存量**
+	// 部署可能存在的形态（历史上 `.env.example` 就是基域 apps.example.com + 主站
+	// example.com；该示例已改为两者同域，因为这种组合下登录可见应用**无法**换票，见
+	// extraMainHosts 的部署约束）⇒ 不显式声明就会升级后主站/管理台 404。
 	_, baseHostAtStartup := session.ParseBaseDomain(baseDomain())
 	p.HostGate = newHostGate(baseDomain, baseHostAtStartup, appSrv)
 	log.Printf("wasm: platform ready (subdomain=%v base_domain=%q source=%s extra_reserved=%d extra_main_hosts=%v)",
@@ -535,9 +543,9 @@ func newHostGate(baseDomain func() string, baseHostAtStartup string, apps edge.A
 //
 // 为什么需要它（R1-sec-3 的配套装配）：edge.MatchHost 现在只认两支 —— 主站（`host == 基域`）
 // 与应用子域（`<label>.<基域>`）；**其余主机名一律 HostUnknown ⇒ 404**（不再回落主站，
-// 否则任意域名都能镜像门户与管理台登录页）。而"主站主机名 ≠ 应用基域"是**真实存在**的部署
-// （server/.env.example 的示例就是基域 `apps.example.com`、主站 `example.com`）⇒ 必须显式
-// 把主站主机名列进来，否则这类部署升级后主站与管理台全部 404。
+// 否则任意域名都能镜像门户与管理台登录页）。而"主站主机名 ≠ 应用基域"是**存量**部署可能
+// 存在的形态（历史上 server/.env.example 的示例就是基域 `apps.example.com`、主站
+// `example.com`）⇒ 必须显式把主站主机名列进来，否则这类部署升级后主站与管理台全部 404。
 //
 // 真源与主站源完全相同，**绝不看请求 Host**（请求 Host 是攻击者可选的，见
 // session.Options.MainOriginResolver 的注释）：
@@ -551,11 +559,12 @@ func newHostGate(baseDomain func() string, baseHostAtStartup string, apps edge.A
 // 新基域主机名走 `h == b`），但若将来"对外地址"也变成运行期可改、且主站域与基域不同域，
 // 这里要改成函数形式（与 BaseDomain 同形）。
 //
-// ⚠️ 部署约束（要认账）：主站域 ≠ 基域的部署**必须**把对外地址配成主站域 —— 否则本函数
-// 只能推导出基域主机名，真正的主站（例如 .env.example 示例里的主站 `example.com` +
-// 基域 `apps.example.com`）会被 R1-sec-3 的门控 404 掉；而配了主站域之后，换票又会因
-// "对外地址与基域不同域"而拒绝签发票（需显式打开 Options.AllowTicketWithoutNonce）——
-// 那种部署本来也无法安全下发 nonce Cookie。详见 temp/wasm-review-r1/fix-sec1b.md。
+// ⚠️ 部署约束（要认账）：主站域 ≠ 应用基域的部署**必须**把对外地址配成主站域 —— 否则本函数
+// 只能推导出基域主机名，真正的主站会被 R1-sec-3 的门控 404 掉；而配了主站域之后，换票又会因
+// "对外地址与基域不同域"被 fail-closed 拒绝签发（**没有**运维开关可以放开：
+// `Options.AllowTicketWithoutNonce` 是 Go 字段，只服务内嵌方）。⇒ 这类部署要么把应用基域
+// 改成主站主机本身（主站是基域、应用是它的子域），要么停用应用子域。可执行的配置动作见
+// session 包的 ticketNonceRemedyAlignOrigin；历史记录 temp/wasm-review-r1/fix-sec1b.md。
 func extraMainHosts(baseHost string) []string {
 	host := configuredMainHost()
 	if host == "" {

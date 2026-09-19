@@ -454,3 +454,282 @@ func TestReleaseCache_ConfigIsCachedPerRelease(t *testing.T) {
 	}
 	_ = rel
 }
+
+// ===== 第二轮对抗式审计（性能缓存区域 R2-CA-1/2/3/5）的行为级护栏 =====
+
+// TestReleaseCache_ConfigReadFailureIsNotCached 是 R2-CA-1 的核心判据：
+// **一次瞬时读失败不得把应用固化成持续 500**。
+//
+// 判据怎么做到行为级：把配置文件删掉（模拟 EIO/误删/挂载抖动这一类的"可就地修好"的
+// 平台故障）→ 期望 500（fail-loud：读不到配置绝不当匿名）；然后把文件**逐字节恢复**
+// → 下一个请求必须自己恢复 200，**不许**要求先 EvictApp/重启。
+//
+// 旧实现把失败也写进缓存（"平台故障要么被修好=换版本，要么一直存在"），于是恢复文件
+// 之后每一个请求都命中那份失败记录，永远 500；且命中会刷新 lastUsed ⇒ 空闲淘汰也
+// 永不触发（"越多请求越修不好"）。变异：让 putConfig 重新缓存 err ⇒ 本用例红。
+func TestReleaseCache_ConfigReadFailureIsNotCached(t *testing.T) {
+	e := newEnv(t)
+	appID := e.appID("rtcfgfail")
+	spec := appSpec{appID: appID, config: publicConfig(), assets: map[string]string{"index.html": "x"}}
+	rel := e.publishApp(spec)
+	cfgPath := filepath.Join(releaseDirOf(t, e, spec, rel.ID), limits.AppConfigFileName)
+	orig, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("读配置夹具失败: %v", err)
+	}
+
+	if err := os.Remove(cfgPath); err != nil {
+		t.Fatalf("删除配置失败: %v", err)
+	}
+	broken := e.get(appID, "/index.html")
+	if broken.Code != http.StatusInternalServerError {
+		t.Fatalf("配置读不到必须 500（平台故障，绝不按匿名放行），得到 %d body=%.200s", broken.Code, broken.Body.String())
+	}
+	// 恢复成与原来**逐字节相同**的内容：平台故障已经修好。
+	if err := os.WriteFile(cfgPath, orig, 0o600); err != nil {
+		t.Fatalf("恢复配置失败: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		rec := e.get(appID, "/index.html")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("配置已恢复（第 %d 次请求）应自愈为 200，得到 %d body=%.200s（不得要求 EvictApp/重启）",
+				i+1, rec.Code, rec.Body.String())
+		}
+	}
+	// 反向对照：读失败期间**每次**都要真的重读盘（不缓存失败），否则自愈无从谈起。
+	if st := e.srv.releases.stats(); st.CfgMisses < 2 {
+		t.Fatalf("读失败不得进缓存：CfgMisses=%d，期望每次请求都未命中（≥2）", st.CfgMisses)
+	}
+}
+
+// TestReleaseCache_ConfigCacheRevalidatesAfterTTL 是 R2-CA-1 的"镜像面"判据：
+// 暖缓存下的**删除**也必须在一个窗口内被察觉 —— 配置进缓存不代表它可以被无限期信任。
+//
+// 判据：预热（成功进缓存）→ 删掉磁盘上的配置 → 推进时钟超过 ConfigRevalidateTTL →
+// 请求必须变成 500（fail-loud 恢复）；把文件恢复 → 再推进一个窗口 → 请求回到 200。
+//
+// 变异：去掉 config() 里的 TTL 判断（无限期信任缓存）⇒ 删除后仍然 200 ⇒ 本用例红。
+func TestReleaseCache_ConfigCacheRevalidatesAfterTTL(t *testing.T) {
+	e := newEnv(t)
+	appID := e.appID("rtcfgttl")
+	spec := appSpec{appID: appID, config: publicConfig(), assets: map[string]string{"index.html": "x"}}
+	rel := e.publishApp(spec)
+	cfgPath := filepath.Join(releaseDirOf(t, e, spec, rel.ID), limits.AppConfigFileName)
+	orig, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("读配置夹具失败: %v", err)
+	}
+	if rec := e.get(appID, "/index.html"); rec.Code != http.StatusOK {
+		t.Fatalf("预热失败: %d", rec.Code)
+	}
+	warm := e.srv.releases.stats()
+
+	// 窗口内：仍然命中缓存（不读盘）——否则"缓存配置"这件事就没有发生。
+	e.advance(ConfigRevalidateTTL / 2)
+	if rec := e.get(appID, "/index.html"); rec.Code != http.StatusOK {
+		t.Fatalf("窗口内应命中缓存并 200，得到 %d", rec.Code)
+	}
+	if st := e.srv.releases.stats(); st.CfgMisses != warm.CfgMisses {
+		t.Fatalf("窗口内不得重新解析配置：CfgMisses %d → %d", warm.CfgMisses, st.CfgMisses)
+	}
+
+	// 跨窗口 + 磁盘上配置消失 ⇒ 必须被察觉（fail-loud）。
+	if err := os.Remove(cfgPath); err != nil {
+		t.Fatalf("删除配置失败: %v", err)
+	}
+	e.advance(ConfigRevalidateTTL + time.Second)
+	if rec := e.get(appID, "/index.html"); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("配置在窗口后被删除必须变成 500，得到 %d body=%.200s", rec.Code, rec.Body.String())
+	}
+
+	// 修好后同样在一个窗口内恢复。
+	if err := os.WriteFile(cfgPath, orig, 0o600); err != nil {
+		t.Fatalf("恢复配置失败: %v", err)
+	}
+	if rec := e.get(appID, "/index.html"); rec.Code != http.StatusOK {
+		t.Fatalf("配置恢复后应立刻 200（失败不缓存），得到 %d", rec.Code)
+	}
+}
+
+// TestStatic_NotModifiedHeadersMatch200Exactly 把"304 与 200 的头逐字段一致"从
+// **半护栏**补成真护栏（R2-CA-3）。
+//
+// 旧断言只查 ETag/Cache-Control/CSP 两个子串/X-Content-Type-Options/Referrer-Policy/
+// X-Frame-Options：实测把"缓存命中 304"那条路径的 `Content-Type` 抹掉，整包用例
+// （appserver+readyz）仍全绿。这里改成对**整个 header 集合**做对拍：200 与 304 的每个
+// 键、每个值都必须相同（唯一允许的差异是 304 按 RFC 9110 不得有 Content-Length）；
+// 另附 HEAD 与 GET 的对拍（HEAD 不得有 body，但头必须与 GET 相同）。
+//
+// 变异：只把缓存命中 304 路径的 Content-Type 删掉 ⇒ 本用例红。
+func TestStatic_NotModifiedHeadersMatch200Exactly(t *testing.T) {
+	e := newEnv(t)
+	appID := e.appID("rthdr")
+	spec := appSpec{appID: appID, config: publicConfig(), assets: map[string]string{
+		"index.html": "<html><body>hi</body></html>",
+		"app.js":     "console.log(1)",
+		"style.css":  "body{color:red}",
+	}}
+	e.publishApp(spec)
+
+	// 允许的差异白名单：304 不带消息体 ⇒ 不带 Content-Length（RFC 9110 §15.4.5）。
+	allowed304Only := map[string]bool{"Content-Length": true}
+
+	for _, p := range []string{"/index.html", "/", "/app.js", "/style.css"} {
+		first := e.get(appID, p)
+		if first.Code != http.StatusOK {
+			t.Fatalf("%s 首次 GET 应 200，得到 %d", p, first.Code)
+		}
+		rec := e.getWithETag(appID, p, first.Header().Get("ETag"))
+		if rec.Code != http.StatusNotModified {
+			t.Fatalf("%s 条件 GET 应 304，得到 %d", p, rec.Code)
+		}
+		h200, h304 := first.Header(), rec.Header()
+		// ① 200 的每个键都必须在 304 上逐值出现（Content-Length 除外）。
+		for k, vs := range h200 {
+			if allowed304Only[k] {
+				continue
+			}
+			got := h304.Values(k)
+			if len(got) != len(vs) {
+				t.Fatalf("%s 的 304 缺少头 %s：200=%v 304=%v", p, k, vs, got)
+			}
+			for i := range vs {
+				if got[i] != vs[i] {
+					t.Fatalf("%s 的 304 头 %s 不一致：200=%q 304=%q", p, k, vs[i], got[i])
+				}
+			}
+		}
+		// ② 304 不得**多出**任何 200 没有的键（除白名单），否则同一份实现在两条路径上漂移。
+		for k := range h304 {
+			if allowed304Only[k] {
+				continue
+			}
+			if _, ok := h200[k]; !ok {
+				t.Fatalf("%s 的 304 多出头 %s=%v（200 没有）", p, k, h304.Values(k))
+			}
+		}
+	}
+
+	// HEAD 与 GET 的头必须一致（HEAD 只是不要 body）。
+	headReq := httptest.NewRequest(http.MethodHead, appURL(appID, "/index.html"), nil)
+	recHead := e.serve(headReq)
+	recGet := e.get(appID, "/index.html")
+	if recHead.Code != http.StatusOK || recHead.Body.Len() != 0 {
+		t.Fatalf("HEAD 应 200 且无 body，得到 %d bodylen=%d", recHead.Code, recHead.Body.Len())
+	}
+	for k, vs := range recGet.Header() {
+		got := recHead.Header().Values(k)
+		if len(got) != len(vs) {
+			t.Fatalf("HEAD 缺少头 %s：GET=%v HEAD=%v", k, vs, got)
+		}
+		for i := range vs {
+			if got[i] != vs[i] {
+				t.Fatalf("HEAD 头 %s 与 GET 不一致：GET=%q HEAD=%q", k, vs[i], got[i])
+			}
+		}
+	}
+}
+
+// TestStatic_EvictAppReportsFreedBytes 守住 R2-CA-2：EvictApp 的返回值与日志里的
+// "记账字节"必须包含资源缓存那一笔。
+//
+// 判据（行为级）：预热一份 2 MiB 资源（缓存真的持有它）→ EvictApp 返回的 bytes 必须
+// ≥ 2 MiB，且平台日志里的记账数字不为 0；逐出后缓存字节归零。
+//
+// 变异：把 releases 那一笔从 bytes 里去掉（只留条目数）⇒ bytes=0、日志写"记账 0 KiB"⇒ 本用例红。
+func TestStatic_EvictAppReportsFreedBytes(t *testing.T) {
+	var lines []string
+	e := newEnv(t, func(o *Options) {
+		o.Logger = func(format string, args ...any) {
+			lines = append(lines, sprintf(format, args...))
+		}
+	})
+	appID := e.appID("rtacc")
+	big := strings.Repeat("M", 2<<20)
+	spec := appSpec{appID: appID, config: publicConfig(), assets: map[string]string{"big.js": big}}
+	e.publishApp(spec)
+	if rec := e.get(appID, "/big.js"); rec.Code != http.StatusOK {
+		t.Fatalf("预热失败: %d", rec.Code)
+	}
+	if st := e.srv.releases.stats(); st.Bytes < int64(len(big)) {
+		t.Fatalf("预热后缓存应持有该资源：Bytes=%d want≥%d", st.Bytes, len(big))
+	}
+
+	_, bytes := e.srv.EvictApp(appID)
+	if bytes < int64(len(big)) {
+		t.Fatalf("EvictApp 记账字节必须包含资源缓存：bytes=%d want≥%d（R2-CA-2）", bytes, len(big))
+	}
+	if st := e.srv.releases.stats(); st.Bytes != 0 {
+		t.Fatalf("逐出后资源缓存字节必须归零，得到 %d", st.Bytes)
+	}
+	var logged bool
+	for _, l := range lines {
+		if strings.Contains(l, "事件驱动逐出") {
+			logged = true
+			if strings.Contains(l, "记账 0 KiB") {
+				t.Fatalf("日志把 2 MiB 的释放记成 0 KiB：%s", l)
+			}
+		}
+	}
+	if !logged {
+		t.Fatalf("EvictApp 必须有逐出日志，实际日志=%v", lines)
+	}
+}
+
+// TestReleaseCache_SingleReleaseOverBudgetFallsBackToMetadata 守住 R2-CA-5 的**结构性上界**：
+// 当"单个 release 的资源总量"超过缓存字节上限时（现实中由自定义段总量上限挡住，本用例
+// 刻意违反它以证明**本包自己**仍然有界），唯一那条不逐出的条目必须退化成"只缓存元数据"。
+//
+// 变异：去掉 enforceByteBoundLocked ⇒ stats().Bytes 越过 maxBytes ⇒ 本用例红。
+func TestReleaseCache_SingleReleaseOverBudgetFallsBackToMetadata(t *testing.T) {
+	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	const maxBytes = int64(64 << 10)
+	c := newReleaseCache(maxBytes, 8, func() time.Time { return now })
+	k := releaseKey{AppID: "big", ReleaseID: 1}
+	blob := bytes.Repeat([]byte("a"), 32<<10) // 每资源 32 KiB，4 个 ⇒ 128 KiB > 64 KiB
+
+	for i := 0; i < 4; i++ {
+		c.putAsset(k, fmt.Sprintf("f%d", i), assetEntry{
+			ContentType: "application/octet-stream", ETag: fmt.Sprintf(`"e%d"`, i),
+			Size: len(blob), Data: blob, BytesCached: true,
+		})
+		if st := c.stats(); st.Bytes > maxBytes {
+			t.Fatalf("单条自身超预算时必须退化为元数据：Bytes=%d > maxBytes=%d（硬上界不得依赖跨模块假设）",
+				st.Bytes, maxBytes)
+		}
+	}
+	// 元数据必须还在：304 复验只靠 ETag，正文回源读盘。
+	got, ok := c.asset(k, "f0")
+	if !ok || got.ETag == "" {
+		t.Fatalf("退化后元数据必须仍在（304 复验靠 ETag）：ok=%v entry=%+v", ok, got)
+	}
+	if got.BytesCached {
+		t.Fatalf("超预算的条目不得继续持有字节：%+v", got)
+	}
+	// 结构性上界：**任何时刻**字节总量都不得超过 maxBytes（旧实现允许"唯一那条"无界超额）。
+	if st := c.stats(); st.Bytes > maxBytes {
+		t.Fatalf("退化后缓存字节仍越过 maxBytes：%d > %d", st.Bytes, maxBytes)
+	}
+}
+
+// TestReleaseCache_BudgetCoversSingleReleaseWorstCase 把两条**跨模块**常量绑在一起
+// （R2-CA-5 的另一半）：文档承诺的硬上界含"单个 release 的资源总量 ≤ SectionTotalMaxBytes"
+// 这一项，而那个上限由 wasmmod 的段总量校验保证。此前 appserver 侧没有任何断言把两者绑住
+// —— 调大段总量上限（或让资源改走别的抽取通道）会静默把本缓存的硬上界推高。
+//
+// 判据：最坏情况（一个 release 的全部资源 = 段总量上限）必须仍然放得进缓存字节预算；
+// 若将来有人把它调过头，本用例红并要求回到 readyz 的记账边界重新算账。
+func TestReleaseCache_BudgetCoversSingleReleaseWorstCase(t *testing.T) {
+	if int64(limits.SectionTotalMaxBytes) > limits.ReleaseCacheMaxBytes {
+		t.Fatalf("单个 release 的资源总量上限（SectionTotalMaxBytes=%d，由 wasmmod 段总量校验保证）"+
+			"超过了资源缓存字节预算（ReleaseCacheMaxBytes=%d）：文件头承诺的硬上界不再成立，"+
+			"必须同步调整这两者（并回到 readyz 的记账边界重算）",
+			limits.SectionTotalMaxBytes, limits.ReleaseCacheMaxBytes)
+	}
+	// 反过来也钉住"本地防线"的口径：单条资源的本地防线阈值（maxBytes/2）必须不小于单文件
+	// 上限，否则那道防线会在**单文件合法**的情况下触发（把正常资源降级成元数据）。
+	if h := int64(limits.ReleaseCacheMaxBytes / 2); int64(limits.SectionTotalMaxBytes) > h {
+		t.Fatalf("单文件上限 %d 超过本地防线阈值 %d：合法单文件会被降级成元数据（口径漂移）",
+			limits.SectionTotalMaxBytes, h)
+	}
+}

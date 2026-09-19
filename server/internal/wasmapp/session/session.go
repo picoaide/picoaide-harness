@@ -141,9 +141,16 @@ type Options struct {
 	// AllowTicketWithoutNonce 显式声明"本部署**无法**为应用基域下发换票 nonce Cookie"，
 	// 接受只受 Sec-Fetch 判据保护的换票。
 	//
-	// 默认 false = fail-closed：签发侧在"主站源未配置 / 与基域不匹配"时**拒绝签发票据**
-	// （500 + ERROR 日志 + 审计），兑换侧遇到 nonce 为空的票**一律拒**。
-	// 置 true 只在部署方明确接受该风险时才允许（此时每次签发/兑换都落 ERROR 日志 + 审计）。
+	// 默认 false = fail-closed：签发侧在"主站源未配置 / 与基域不匹配 / 基域写不出
+	// Cookie Domain"时**拒绝签发票据**（500 + ERROR 日志 + 审计），兑换侧遇到 nonce
+	// 为空的票**一律拒**。置 true 只在部署方明确接受该风险时才允许（此时每次签发/兑换
+	// 都落 ERROR 日志 + 审计）。
+	//
+	// ⚠️ **这是给内嵌方（`cmd/server` 之外的装配者/测试）的开关，运维没有配置面**
+	// （2026-09-19 第二轮审计 §1.3：全仓零 env、零 settings 键、控制台也没有开关）。
+	// 因此**任何面向运维的文案都不得指向它**（日志/页面/发布说明/`.env.example`）——
+	// 运维实际可做的动作是 `ticketNonceRemedyAlignOrigin`：把对外地址配成与应用基域
+	// 同域（或改基域/停用应用子域）。手工装配时打开它之前请先确认那两条路都走不通。
 	AllowTicketWithoutNonce bool
 	// AppIDExtraReserved 是**部署期注入**的企业既有主机名（§4.1），
 	// 与 appserver.Options.AppIDExtraReserved 同源（同一个环境变量：

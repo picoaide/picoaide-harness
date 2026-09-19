@@ -76,7 +76,11 @@ func (h *Handlers) diagnosticsPayload(c *gin.Context, appID string, app *servers
 	// 诊断里的内存数字必须跟随**生效**上限（R1-rt-25）：此前走 Summary/HintsFor 取的是
 	// 编译期默认（恒 64 MiB），控制台把单实例上限改小/改大后，作者看到的建议数字与实际
 	// 不符 —— 诊断的第一消费者是 AI，错误数字会把排查带偏。
-	summary, err := diag.SummaryWithMemoryPages(ctx, h.opt.DB, appID, since, h.instanceMemoryPages())
+	//
+	// R2-DG-2 的加固：`h.instanceMemoryPages()` 取的是**已保存值**（控制台设置），
+	// 而单实例上限要重启才生效 ⇒ 在"保存了但没重启"的窗口里它仍然不是生效值。
+	// 这里统一走 effectiveMemoryPages()（运行时优先，见它的注释）。
+	summary, err := diag.SummaryWithMemoryPages(ctx, h.opt.DB, appID, since, h.effectiveMemoryPages())
 	if err != nil {
 		return nil, internalErr("查询失败", err)
 	}
@@ -86,7 +90,7 @@ func (h *Handlers) diagnosticsPayload(c *gin.Context, appID string, app *servers
 	// 合并后保序去重（同一个 hint 不重复刷屏）。
 	hints := append([]string{}, summary.Hints...)
 	for _, f := range failures {
-		hints = append(hints, diag.HintsForMemoryPages(f.ReasonCode, h.instanceMemoryPages())...)
+		hints = append(hints, diag.HintsForMemoryPages(f.ReasonCode, h.effectiveMemoryPages())...)
 	}
 	return gin.H{
 		"app_id":         appID,
@@ -100,6 +104,37 @@ func (h *Handlers) diagnosticsPayload(c *gin.Context, appID string, app *servers
 		"failures":       failures,
 		"hints":          dedupeStrings(hints),
 	}, nil
+}
+
+// effectiveMemoryPages 返回诊断面要用的单实例内存页数（R2-DG-2）。
+//
+// 来源优先级（**必须按这个顺序**）：
+//  1. `Options.EffectiveMemoryPages`（运行时真正生效的值，装配注入 appserver.InstanceMemoryPages）；
+//  2. `instanceMemoryPages()`（= `Options.Limits().InstanceMemoryPages()`，**已保存值**）。
+//
+// 为什么第 2 条只是兜底而不是主路径：单实例内存上限住在 wazero 的 RuntimeConfig 里，
+// 控制台保存之后**要重启才生效** —— 在那个窗口里已保存值与生效值可以差出几十上百 MiB
+// （审计实测：保存 32 MiB 未重启、实际按 128 MiB 跑），而诊断 hints 说的必须是"这次
+// 运行的上限"，否则第一消费者（AI/作者）会按错的数字优化。
+//
+// 回落到第 2 条只在装配没接线时发生（测试/最小装配），语义与 R1-rt-25 之前一致。
+func (h *Handlers) effectiveMemoryPages() uint32 {
+	if h.opt.EffectiveMemoryPages != nil {
+		if pages := h.opt.EffectiveMemoryPages(); pages != 0 {
+			return pages
+		}
+	}
+	return h.instanceMemoryPages()
+}
+
+// EffectiveMemoryPages 返回诊断面当前会使用的单实例内存页数（**装配自检/装配级判据用**）。
+//
+// 存在的理由与 appserver.CachedModuleCount 同类：装配点漏传 `Options.EffectiveMemoryPages`
+// 时的失败形态是静默的（诊断悄悄退回"已保存值"），没有可观测出口就只能断言源码字符串
+// （而字符串断言分不清"接上了但值是错的"）。生产装配的大小写判据在
+// cmd/server 的 TestDiagnosticsMemoryHintUsesRuntimePagesAtAssembly。
+func (h *Handlers) EffectiveMemoryPages() uint32 {
+	return h.effectiveMemoryPages()
 }
 
 // windowFromQuery 解析诊断窗口（分钟）。缺省 24 h，上限 = 调用事件保留期

@@ -193,6 +193,27 @@ const NON_ACCOUNT_BYTES = new Set(['available_bytes', 'limit_bytes', 'total_byte
 
 const mb = (v: number) => Math.round(v / (1 << 20))
 
+/**
+ * 页内错误块的**唯一实现**。
+ *
+ * 本页有两个渲染点：首屏读取失败（早退分支，带重试按钮）与页内保存失败（内联）。
+ * 审计 A2-F4 实测：同一个 `data-testid="limits-error"` 的两个出口各写一份 JSX，
+ * 于是"保存失败那条"补了 live 区断言、"首屏读取失败那条"去掉 `role/aria-live`
+ * 用例仍然全绿（读屏用户听不到首屏失败）。共用同一个组件后语义不可能再分叉。
+ */
+function LimitsErrorBlock({ text }: { text: string }) {
+  return (
+    <div
+      data-testid="limits-error"
+      role="alert"
+      aria-live="assertive"
+      className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+    >
+      {text}
+    </div>
+  )
+}
+
 /** 采集时间:`YYYY/MM/DD HH:mm:ss`(本地时区,与列表页同一格式)。 */
 function fmtTime(iso: string): string {
   if (!iso) return '—'
@@ -246,6 +267,42 @@ export default function Limits() {
   useEffect(() => { void loadRuntime() }, [loadRuntime])
 
   /**
+   * 服务端新增、本页还没有明细的账目项：必须在页面上占位（又是一枚"看不见的旋钮"），
+   * 且**金额要进理论峰值**（F1）—— 下面 unknownAccountsTotal 是它的唯一求和点。
+   */
+  const unknownAccounts = useMemo(
+    () => (view
+      ? Object.keys(view.budget).filter((k) =>
+        k.endsWith('_bytes') &&
+        !NON_ACCOUNT_BYTES.has(k) &&
+        !(ACCOUNT_KEYS as readonly string[]).includes(k))
+      : []),
+    [view],
+  )
+
+  /**
+   * 未识别账目项的金额（F1，审计 A2 实测：注入 100 MiB 新账目项后理论峰值一字不变）。
+   *
+   * 只有**有限数值**才计入：形状漂移（字符串/缺席）的项无法求和，必须与"已计入"分开
+   * 表述 —— 否则提示语又会变成一句与事实相反的话（这正是 F1 的形态）。
+   */
+  const unknownAccountsTotal = useMemo(() => {
+    const counted: string[] = []
+    const uncounted: string[] = []
+    let bytes = 0
+    for (const key of unknownAccounts) {
+      const value = (view?.budget as Record<string, unknown> | undefined)?.[key]
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        bytes += value
+        counted.push(key)
+      } else {
+        uncounted.push(key)
+      }
+    }
+    return { bytes, counted, uncounted }
+  }, [view, unknownAccounts])
+
+  /**
    * 编辑期估算：与后端 applimits.Budget 同一公式（固定项由服务端下发，随限制项变化的
    * 三项按**表单当前值**重算）。
    *
@@ -260,6 +317,10 @@ export default function Limits() {
     const cache = form.module_cache_mb * (1 << 20)
     const appdbCache = (1 + form.app_db_readers) * form.appdb_cache_kib * 1024 * form.max_instances
     const total = instances + view.budget.compile_peak_bytes + view.budget.upload_peak_bytes + cache + appdbCache
+      // F1（审计 A2）：服务端新增、本页还没有明细的账目项**必须进总账**。旧实现只加
+      // 四笔已知账 + 表单三项，而下面的提示语却写着"已计入上面的理论峰值" —— 服务端加
+      // 第六笔账时页面显示的水位比真实值低，管理员看到"可以保存"后撞上服务端 400。
+      + unknownAccountsTotal.bytes
     const available = view.budget.available_bytes
     // 服务端语义（readyz.ComputeMemoryBudgetFor 是唯一真源）：
     //   available < 0（MemoryUnknown）⇒ 读不到可用内存 ⇒ **不判定**（known=false）；
@@ -275,7 +336,7 @@ export default function Limits() {
       /** 判定通过；没判定时恒 false —— 界面必须用 judged 区分"没判"与"判过没过"。 */
       ok: judged && total <= limit,
     }
-  }, [view, form])
+  }, [view, form, unknownAccountsTotal])
 
   /**
    * 表单行 = 已知字段（FIELDS 给标签/分组/hint）**∪ 服务端实际下发的字段**。
@@ -294,17 +355,6 @@ export default function Limits() {
     })
   }, [form])
 
-  /** 服务端新增、本页还没有明细的账目项：必须在页面上占位（又是一枚"看不见的旋钮"）。 */
-  const unknownAccounts = useMemo(
-    () => (view
-      ? Object.keys(view.budget).filter((k) =>
-        k.endsWith('_bytes') &&
-        !NON_ACCOUNT_BYTES.has(k) &&
-        !(ACCOUNT_KEYS as readonly string[]).includes(k))
-      : []),
-    [view],
-  )
-
   const dirty = useMemo(() => {
     if (!view || !form) return false
     return (Object.keys(form) as FieldKey[]).some((k) => form[k] !== view.limits[k])
@@ -316,20 +366,50 @@ export default function Limits() {
   }
 
   const save = async () => {
-    if (!form || busy) return
+    if (!form || !view || busy) return
     setBusy(true); setErr('')
     try {
+      /**
+       * 并发/多标签（F5，审计 A2 实测：另一位管理员把 app_queue 改成 99，我只改
+       * max_instances 就保存 ⇒ 请求体里 app_queue 仍是打开页面时的 32，服务端整份覆盖
+       * ⇒ 99 被静默改回）。
+       *
+       * PUT 是**整份覆盖**（服务端 applimits.Parse 要求完整对象，没有版本号/ETag），
+       * 所以保存前重读一次服务端真值，只提交"我实际改过"的字段，其余以最新值为准。
+       */
+      let next: Limits
+      /** 我改过、且服务端当前值与我打开页面时不同的字段（同一字段被别人也改过）。 */
+      let staleFields: string[] = []
+      try {
+        const fresh = await request<LimitsView>(`${ADMIN_API}/wasm-apps/limits`)
+        const mine: Record<string, number> = {}
+        for (const key of Object.keys(form)) {
+          if (form[key] !== view.limits[key]) mine[key] = form[key]
+        }
+        next = { ...fresh.limits, ...mine }
+        // 我也改过、且服务端当前值与我打开页面时不同 ⇒ 同一字段被别人改过。
+        // 仍然以我输入的值提交（那是我明确的意图），但必须在反馈里说出来。
+        staleFields = Object.keys(mine).filter((k) => fresh.limits[k] !== view.limits[k])
+      } catch {
+        // 重读失败 ⇒ **不发 PUT**：拿不到最新值就无法保证不覆盖别人（fail-closed）。
+        // 旧行为是直接提交旧快照，那正是"静默回滚他人改动"的成因。
+        setErr('保存已取消：读不到服务端最新的限制项，直接提交会把其他管理员刚保存的值覆盖掉。请点「刷新」后重试。')
+        return
+      }
       const data = await request<LimitsView>(`${ADMIN_API}/wasm-apps/limits`, {
         method: 'PUT',
-        body: JSON.stringify({ limits: form }),
+        body: JSON.stringify({ limits: next }),
       })
       setView(data); setForm(data.limits)
       const pending = data.restart_pending ?? []
       // PUT 的应答本身就是保存后的完整视图（含 restart_pending）——不再补一次 GET，
       // 否则会把"刚保存的提示"冲掉，也多一次无谓往返。
-      flash(pending.length > 0
+      const base = pending.length > 0
         ? `已保存。需重启服务端才生效：${pending.join('、')}`
-        : '已保存并即时生效')
+        : '已保存并即时生效'
+      flash(staleFields.length > 0
+        ? `${base}；注意：${staleFields.join('、')} 在你编辑期间也被改过，本次以你输入的值覆盖`
+        : base)
     } catch (e: any) {
       // P2-2:保存被拒后界面必须**自洽**。此前只把红字打出来,表单仍停在被拒的值上,
       // 而绿色的"内存水位正常"徽标/预览是按本地表单算的 ⇒ 同一屏上红字与绿标互相
@@ -381,14 +461,8 @@ export default function Limits() {
           title="限制项"
           desc="员工自建 WASM 应用的并发与内存限制"
         />
-        <div
-          data-testid="limits-error"
-          role="alert"
-          aria-live="assertive"
-          className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-        >
-          {err}
-        </div>
+        {/* F4：与页内保存失败共用同一个错误块（role/aria-live 不会只在一条出口上）。 */}
+        <LimitsErrorBlock text={err} />
         <Button variant="outline" size="sm" data-testid="limits-retry" onClick={() => { void load() }}>
           重试
         </Button>
@@ -430,16 +504,7 @@ export default function Limits() {
           {flashMsg}
         </div>
       )}
-      {err && (
-        <div
-          data-testid="limits-error"
-          role="alert"
-          aria-live="assertive"
-          className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-        >
-          {err}
-        </div>
-      )}
+      {err && <LimitsErrorBlock text={err} />}
 
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
@@ -499,14 +564,19 @@ export default function Limits() {
               <div className="font-medium">{mb(preview.appdbCache)} MiB</div>
             </div>
           </div>
-          {/* 服务端新增了本页还不认识的账目项 ⇒ 明说，而不是让它静静地计入 total_bytes。 */}
+          {/* 服务端新增了本页还不认识的账目项 ⇒ 明说，且金额**真的**计入理论峰值（F1）。 */}
           {unknownAccounts.length > 0 && (
             <div
               className="rounded-md border border-dashed border-destructive/40 px-3 py-2 text-xs text-destructive"
               data-testid="budget-unknown-accounts"
             >
               服务端下发了本页尚未列出明细的账目项：{unknownAccounts.join('、')}
-              （已计入上面的理论峰值，但这里看不到它是多少 —— 请补齐这一页的明细行）。
+              {unknownAccountsTotal.counted.length > 0
+                ? `（共 ${mb(unknownAccountsTotal.bytes)} MiB，已计入上面的理论峰值；本页看不到它的明细 —— 请补齐这一页的明细行）。`
+                : '（本页看不到它的明细 —— 请补齐这一页的明细行）。'}
+              {unknownAccountsTotal.uncounted.length > 0
+                ? `其中 ${unknownAccountsTotal.uncounted.join('、')} 的值不是数字，**没有**计入理论峰值（服务端响应形状异常，请先核对接口）。`
+                : ''}
             </div>
           )}
           {/* 三种形态必须互不同形（R1-uxw-6）：判定通过 / 判定失败 / **没有判定**。

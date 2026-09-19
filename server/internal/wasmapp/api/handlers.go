@@ -127,6 +127,20 @@ type Options struct {
 	LimitsRestart   func() []string
 	MemoryAvailable func() int64
 
+	// EffectiveMemoryPages 返回**运行时真正生效**的单实例线性内存页数（0/nil = 未注入）。
+	//
+	// 为什么必须与 Limits 分开（R2-DG-2）：`Limits` 是"控制台**已保存**的值"，而
+	// 单实例内存上限属于 wazero RuntimeConfig —— **改了要重启才生效**。在"刚保存、还没
+	// 重启"的窗口里两者不同（实测差 96 MiB：已保存 32 MiB / 实际按 128 MiB 跑）。
+	//
+	// 分工（必须照此使用，否则旧缺陷会以另一种形态回来）：
+	//   - 诊断 hints 与发布干跑：问"这次运行到底按多少上限跑" ⇒ 必须用本钩子（生效值）；
+	//   - 控制台 limits 视图与"待重启"判定：问"你配了多少" ⇒ 必须用 Limits（已保存值）。
+	//
+	// 生产装配注入 `appserver.Server.InstanceMemoryPages`（它优先问运行时，
+	// 见 limits_apply.go 的来源纪律）；nil ⇒ 回落 Limits（装配未接线时的兼容路径）。
+	EffectiveMemoryPages func() uint32
+
 	// OnAppEvict 是"立即释放该应用的进程内驻留"的钩子（可选）。
 	//
 	// 触发点 = 下架 / 冻结 / 删除：这几件事之后该应用大概率长时间不会被访问，

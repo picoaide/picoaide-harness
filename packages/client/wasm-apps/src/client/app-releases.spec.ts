@@ -79,13 +79,32 @@ describe('解析：被拒理由必须一路读到界面', () => {
     expect(RELEASE_STATUSES).toEqual(['pending', 'approved', 'rejected'])
   })
 
-  it('缺席字段回落成空/0，而不是编造', () => {
-    const outcome = parseMyReleasesOutcome('roster', { releases: [{ version: '1.0.0' }] })
+  it('缺席字段回落成空/0，而不是编造（reason 例外：它是审核结论，见下一条）', () => {
+    const outcome = parseMyReleasesOutcome('roster', { releases: [{ version: '1.0.0', reason: '' }] })
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) throw new Error('unreachable')
     expect(outcome.currentVersion).toBe('')
     expect(outcome.reviewRequired).toBe(false)
     expect(outcome.releases[0]).toEqual({ version: '1.0.0', status: '', reason: '', createdAt: '', current: false, checksum: '', size: 0 })
+  })
+
+  // F6（审计第二轮 A2-F6）：`reason` 键缺席/非字符串此前被 `asString()` 静默降级成空串，
+  // 界面于是显示"管理员没有填写理由" —— 把"我们没读到"说成服务端的事实（模块头
+  // 第二条纪律明令禁止）。这条钉住"缺席 reason ⇒ 形状错误"。
+  it('reason 键缺席 / 非字符串 ⇒ 形状错误（绝不显示成"管理员没有填写理由"）', () => {
+    for (const payload of [
+      { releases: [{ version: '1.0.0', status: 'rejected' }] },
+      { releases: [{ version: '1.0.0', status: 'rejected', reason: null }] },
+      { releases: [{ version: '1.0.0', status: 'rejected', reason: 42 }] },
+    ]) {
+      const outcome = parseMyReleasesOutcome('roster', payload)
+      expect(outcome.ok, JSON.stringify(payload)).toBe(false)
+      if (outcome.ok) throw new Error('unreachable')
+      expect(outcome.code).toBe('UNEXPECTED_RESPONSE')
+    }
+    // 空串是**合法值**（rejected 且管理员真没写理由）—— 不能被上面那条误伤。
+    const empty = parseMyReleasesOutcome('roster', { releases: [{ version: '1.0.0', status: 'rejected', reason: '' }] })
+    expect(empty.ok).toBe(true)
   })
 })
 

@@ -224,7 +224,16 @@ describe('应用中心 · 限制项（原应用平台页）', () => {
     fireEvent.change(screen.getByTestId('lim-max_instances'), { target: { value: '8' } })
     expect(save.disabled).toBe(false)
 
-    mockRequest.mockImplementationOnce(async () => ({ ...VIEW, limits: { ...LIMITS, max_instances: 8 } }) as any)
+    // F5 起保存前会先重读一次服务端真值（GET），因此 PUT 的应答按 method 分派，
+    // 不能再用 mockImplementationOnce（那会被重读吃掉）。
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/wasm-apps/limits' && (init as RequestInit | undefined)?.method === 'PUT') {
+        return { ...VIEW, limits: { ...LIMITS, max_instances: 8 } } as any
+      }
+      if (path === '/api/server/admin/wasm-apps/limits') return VIEW as any
+      if (path === '/api/server/admin/wasm-apps/runtime') return { runtime: RUNTIME } as any
+      return {} as any
+    })
     fireEvent.click(save)
 
     await waitFor(() => {
@@ -247,11 +256,18 @@ describe('应用中心 · 限制项（原应用平台页）', () => {
     const mem = await screen.findByTestId('lim-instance_memory_mb')
     fireEvent.change(mem, { target: { value: '128' } })
 
-    mockRequest.mockImplementationOnce(async () => ({
-      ...VIEW,
-      limits: { ...LIMITS, instance_memory_mb: 128 },
-      restart_pending: ['instance_memory_mb'],
-    }) as any)
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/wasm-apps/limits' && (init as RequestInit | undefined)?.method === 'PUT') {
+        return {
+          ...VIEW,
+          limits: { ...LIMITS, instance_memory_mb: 128 },
+          restart_pending: ['instance_memory_mb'],
+        } as any
+      }
+      if (path === '/api/server/admin/wasm-apps/limits') return VIEW as any
+      if (path === '/api/server/admin/wasm-apps/runtime') return { runtime: RUNTIME } as any
+      return {} as any
+    })
     fireEvent.click(screen.getByTestId('save-limits'))
 
     expect((await screen.findByTestId('restart-pending')).textContent).toContain('instance_memory_mb')
@@ -306,13 +322,23 @@ describe('应用中心 · 限制项（原应用平台页）', () => {
     })
     fireEvent.click(screen.getByTestId('save-limits'))
 
-    // 保存失败 ⇒ 必须重新 GET 一次,把表单与水位拉回服务端的真值
+    // 保存失败 ⇒ 必须重新 GET 一次,把表单与水位拉回服务端的真值。
+    // F5 起 GET 有两次：**保存前的重读**（防覆盖）与失败后的回拉。计数断言按 2 计，
+    // 并额外钉住顺序（失败回拉发生在 PUT 之后）。
     await waitFor(() => {
-      const gets = mockRequest.mock.calls.filter(
+      const calls = mockRequest.mock.calls.filter(
         ([p, init]) => p === '/api/server/admin/wasm-apps/limits' && (init as RequestInit | undefined)?.method === undefined,
-      ).length
-      expect(gets).toBe(getsBefore + 1)
+      )
+      expect(calls.length).toBe(getsBefore + 2)
     })
+    const putIndex = mockRequest.mock.calls.findIndex(
+      ([p, init]) => p === '/api/server/admin/wasm-apps/limits' && (init as RequestInit | undefined)?.method === 'PUT',
+    )
+    const lastGetIndex = mockRequest.mock.calls.reduce(
+      (last, [, init], i) => ((init as RequestInit | undefined)?.method === undefined ? i : last), -1,
+    )
+    expect(putIndex).toBeGreaterThan(-1)
+    expect(lastGetIndex).toBeGreaterThan(putIndex)
     // 表单回到服务端的 3(不再停在被拒的 200 上),绿色水位也随之回到"正常"
     await waitFor(() => {
       expect(screen.getByTestId('lim-max_instances')).toHaveProperty('value', '3')
@@ -370,6 +396,181 @@ describe('应用中心 · 限制项（原应用平台页）', () => {
       ([, init]) => (init as RequestInit | undefined)?.method && (init as RequestInit).method !== 'GET',
     )
     expect(writes).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 管理端并发（F5，审计第二轮 A2-F5）：限制项的 PUT 是**整份覆盖**（服务端
+// applimits.Parse 要求完整对象、无版本号/ETag），打开页面时的快照直接提交会把
+// 另一位管理员刚保存的字段静默改回。修法 = 保存前重读 + 只提交我改过的字段；
+// 重读失败一律不发 PUT（fail-closed）。
+// ---------------------------------------------------------------------------
+
+describe('应用中心 · 限制项 · 并发保存(F5)', () => {
+  /** 另一位管理员保存后的服务端状态（app_queue 32 → 99）。 */
+  const OTHER_ADMIN = { ...LIMITS, app_queue: 99 }
+
+  it('只覆盖我改过的字段：别人刚改的 app_queue 不被改回（PUT body 里是 99，不是 32）', async () => {
+    let limitsGets = 0
+    let putBody: { limits: Record<string, number> } | null = null
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/wasm-apps/limits' && (init as RequestInit | undefined)?.method === 'PUT') {
+        putBody = JSON.parse(String((init as RequestInit).body)) as { limits: Record<string, number> }
+        return { ...VIEW, limits: { ...OTHER_ADMIN, max_instances: 8 } } as any
+      }
+      if (path === '/api/server/admin/wasm-apps/limits') {
+        limitsGets += 1
+        // 第 1 次 = 打开页面（32）；之后的 = 保存前重读（别人已经改成 99）。
+        return { ...VIEW, limits: limitsGets === 1 ? LIMITS : OTHER_ADMIN } as any
+      }
+      if (path === '/api/server/admin/wasm-apps/runtime') return { runtime: RUNTIME } as any
+      return {} as any
+    })
+    render(<Limits />)
+    fireEvent.change(await screen.findByTestId('lim-max_instances'), { target: { value: '8' } })
+    fireEvent.click(screen.getByTestId('save-limits'))
+
+    await waitFor(() => { expect(putBody).not.toBeNull() })
+    expect(putBody!.limits.max_instances).toBe(8) // 我改的
+    // 旧实现这里会是 32 ⇒ 把别人的 99 静默改回去。
+    expect(putBody!.limits.app_queue).toBe(99)
+    expect(limitsGets).toBeGreaterThanOrEqual(2) // 保存前的重读真的发生了
+  })
+
+  it('我改的字段也被别人改过 ⇒ 以我输入的值提交，但必须在反馈里说出来（不静默覆盖）', async () => {
+    let limitsGets = 0
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/wasm-apps/limits' && (init as RequestInit | undefined)?.method === 'PUT') {
+        return { ...VIEW, limits: { ...LIMITS, max_instances: 8 } } as any
+      }
+      if (path === '/api/server/admin/wasm-apps/limits') {
+        limitsGets += 1
+        return { ...VIEW, limits: limitsGets === 1 ? LIMITS : { ...LIMITS, max_instances: 5 } } as any
+      }
+      if (path === '/api/server/admin/wasm-apps/runtime') return { runtime: RUNTIME } as any
+      return {} as any
+    })
+    render(<Limits />)
+    fireEvent.change(await screen.findByTestId('lim-max_instances'), { target: { value: '8' } })
+    fireEvent.click(screen.getByTestId('save-limits'))
+
+    const flash = await screen.findByTestId('limits-flash')
+    expect(flash.textContent).toContain('max_instances')
+    expect(flash.textContent).toContain('也被改过')
+  })
+
+  it('保存前重读失败 ⇒ 不发 PUT（宁可拒绝，也不拿旧快照覆盖别人）', async () => {
+    let limitsGets = 0
+    let puts = 0
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/wasm-apps/limits' && (init as RequestInit | undefined)?.method === 'PUT') {
+        puts += 1
+        return VIEW as any
+      }
+      if (path === '/api/server/admin/wasm-apps/limits') {
+        limitsGets += 1
+        if (limitsGets > 1) throw new ApiError(503, 'INTERNAL', '暂时读不到限制项')
+        return VIEW as any
+      }
+      if (path === '/api/server/admin/wasm-apps/runtime') return { runtime: RUNTIME } as any
+      return {} as any
+    })
+    render(<Limits />)
+    fireEvent.change(await screen.findByTestId('lim-max_instances'), { target: { value: '8' } })
+    fireEvent.click(screen.getByTestId('save-limits'))
+
+    const err = await screen.findByTestId('limits-error')
+    expect(err.textContent).toContain('保存已取消')
+    expect(puts).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 未识别账目项必须真的进总账（F1，审计第二轮 A2-F1）：旧实现只把它显示出来，
+// 理论峰值/水位徽标一字不变，而提示语却写着"已计入" ⇒ 管理员照着"可以保存"
+// 去点保存会被服务端 400 拒。
+// ---------------------------------------------------------------------------
+
+describe('应用中心 · 限制项 · 未识别账目项进总账(F1)', () => {
+  const EXTRA = 100 << 20
+
+  function withFutureAccount(value: unknown) {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/server/admin/wasm-apps/limits') {
+        return {
+          ...VIEW,
+          budget: { ...VIEW.budget, future_account_bytes: value, total_bytes: (645 << 20) + EXTRA },
+        } as any
+      }
+      if (path === '/api/server/admin/wasm-apps/runtime') return { runtime: RUNTIME } as any
+      return {} as any
+    })
+  }
+
+  it('加 100 MiB 新账目项 ⇒ 理论峰值 645 → 745 MiB，水位判定跟着翻成"超出"', async () => {
+    withFutureAccount(EXTRA)
+    render(<Limits />)
+    await screen.findByTestId('budget-unknown-accounts')
+
+    const line = screen.getByTestId('budget-line')
+    expect(line.textContent).toContain('745 MiB') // 645 + 100（旧实现恒为 645）
+    expect(line.textContent).toContain('超出水位')
+    const badge = screen.getByTestId('budget-badge')
+    expect(badge.textContent).not.toContain('正常')
+    // 提示语必须给出金额（"已计入"要能被核对，而不是一句话）
+    const box = screen.getByTestId('budget-unknown-accounts')
+    expect(box.textContent).toContain('future_account_bytes')
+    expect(box.textContent).toContain('100 MiB')
+    expect(box.textContent).toContain('已计入')
+  })
+
+  it('值不是数字 ⇒ 不得声称已计入（形状漂移与"已计入"必须分开说）', async () => {
+    withFutureAccount('100MiB')
+    render(<Limits />)
+    const box = await screen.findByTestId('budget-unknown-accounts')
+    expect(box.textContent).toContain('future_account_bytes')
+    expect(box.textContent).toContain('不是数字')
+    expect(box.textContent).toContain('没有')
+    // 未计入 ⇒ 峰值仍是 645（不含那个解析不出的值）
+    expect(screen.getByTestId('budget-line').textContent).toContain('645 MiB')
+  })
+
+  // 预览与服务端必须是**同一判据**（同一份账目集合 + 同一份水位规则）：
+  // 页面说"可以保存" ⇔ 服务端 budget.ok。这是"改回宽松判据必红"的对照用例 ——
+  // 本地只要漏掉任何一笔账（例如新账目项），边界上就会与服务端结论相反。
+  it('预览结论 ⇔ 服务端 budget.ok（同一判据，边界两侧都测）', async () => {
+    const cases = [
+      { extra: 0, serverOk: true },          // 645 ≤ 694
+      { extra: 49 << 20, serverOk: true },   // 694 ≤ 694（正好在水位上）
+      { extra: 50 << 20, serverOk: false },  // 695 > 694（越界 1 MiB）
+      { extra: 100 << 20, serverOk: false }, // 745 > 694
+    ]
+    for (const c of cases) {
+      mockRequest.mockReset()
+      mockRequest.mockImplementation(async (path: string) => {
+        if (path === '/api/server/admin/wasm-apps/limits') {
+          return {
+            ...VIEW,
+            budget: {
+              ...VIEW.budget,
+              future_account_bytes: c.extra,
+              total_bytes: (645 << 20) + c.extra,
+              ok: c.serverOk,
+            },
+          } as any
+        }
+        if (path === '/api/server/admin/wasm-apps/runtime') return { runtime: RUNTIME } as any
+        return {} as any
+      })
+      const { unmount } = render(<Limits />)
+      await screen.findByTestId('lim-max_instances')
+      const line = screen.getByTestId('budget-line').textContent ?? ''
+      const localOk = line.includes('可以保存')
+      expect(localOk, `新账目项 ${c.extra / (1 << 20)} MiB：本地说"${localOk ? '可以保存' : '会被拒绝'}"`).toBe(c.serverOk)
+      // 未编辑时显示的总账必须就是服务端那一份 total_bytes（不是"另一套算法凑出来的数"）
+      expect(line).toContain(`${Math.round(((645 << 20) + c.extra) / (1 << 20))} MiB`)
+      unmount()
+    }
   })
 })
 
@@ -652,12 +853,35 @@ describe('应用中心 · 限制项 · 无障碍(R1-uxw-14)', () => {
     render(<Limits />)
     const save = await screen.findByTestId('save-limits')
     fireEvent.change(screen.getByTestId('lim-max_instances'), { target: { value: '8' } })
-    mockRequest.mockImplementationOnce(async () => ({ ...VIEW, limits: { ...LIMITS, max_instances: 8 } }) as any)
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/wasm-apps/limits' && (init as RequestInit | undefined)?.method === 'PUT') {
+        return { ...VIEW, limits: { ...LIMITS, max_instances: 8 } } as any
+      }
+      if (path === '/api/server/admin/wasm-apps/limits') return VIEW as any
+      if (path === '/api/server/admin/wasm-apps/runtime') return { runtime: RUNTIME } as any
+      return {} as any
+    })
     fireEvent.click(save)
 
     const flash = await screen.findByTestId('limits-flash')
     expect(flash).toHaveAttribute('role', 'status')
     expect(flash).toHaveAttribute('aria-live', 'polite')
+  })
+
+  it('首屏读取失败的错误块与保存失败同形(F4:同一个 testid 的两个出口不能一个进 live 区、一个不进)', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/server/admin/wasm-apps/limits') {
+        throw new ApiError(503, 'INTERNAL', '服务暂时不可用,请稍后再试')
+      }
+      if (path === '/api/server/admin/wasm-apps/runtime') return { runtime: RUNTIME } as any
+      return {} as any
+    })
+    render(<Limits />)
+    // 早退分支（首屏读取失败）渲染的是**同一个**错误块：读屏用户必须能听到它。
+    const err = await screen.findByTestId('limits-error')
+    expect(err).toHaveAttribute('role', 'alert')
+    expect(err).toHaveAttribute('aria-live', 'assertive')
+    expect(screen.getByTestId('limits-retry')).toBeTruthy()
   })
 
   it('保存失败的红字是 alert live 区(不是普通 div)', async () => {

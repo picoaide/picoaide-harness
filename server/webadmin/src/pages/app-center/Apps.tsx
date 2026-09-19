@@ -196,6 +196,18 @@ function fmtSize(bytes: number): string {
 /** 列表页大小:管理面是"人在看"的列表,一页 20 条足够,翻页成本也低。 */
 const PAGE_SIZE = 20
 
+/**
+ * `releases` 必须**真的是数组**，否则返回 null（调用方按读取失败处理）。
+ *
+ * F6（审计第二轮 A2-F6）：`out.releases ?? []` 会把"响应里没有版本清单"渲染成
+ * "没有被拒的版本。"（对管理员是假陈述），而客户端半边 `app-releases.ts` 对同一份
+ * 响应返回结构化失败（UNEXPECTED_RESPONSE）—— 同一功能的两半不能一个说"形状错误"、
+ * 一个说"你没有"。
+ */
+function requireReleases(out: ReleasesResponse): PendingRelease[] | null {
+  return Array.isArray(out?.releases) ? out.releases : null
+}
+
 /** 状态筛选:取值与**服务端**admin.go 的 status 参数逐字一致(不要本地另造词汇表)。 */
 const STATUS_FILTERS: { value: string; label: string }[] = [
   { value: 'all', label: '全部状态' },
@@ -361,7 +373,15 @@ export default function Apps() {
       const out = await request<ReleasesResponse>(
         `${ADMIN_API}/wasm-apps/${appId}/releases?status=pending`,
       )
-      setPending(out.releases ?? [])
+      const releases = requireReleases(out)
+      if (releases === null) {
+        // F6（审计第二轮 A2-F6）：形状漂移不能显示成"没有待审版本"。
+        setPending([])
+        setPendingLoaded(false)
+        setPendingError('读取待审版本失败：响应里没有版本清单（这不是"没有待审版本"，请核对服务端接口）')
+        return
+      }
+      setPending(releases)
       setPendingCurrent(out.current_version ?? '')
       setPendingLoaded(true)
     } catch (err: any) {
@@ -385,7 +405,15 @@ export default function Apps() {
       const out = await request<ReleasesResponse>(
         `${ADMIN_API}/wasm-apps/${appId}/releases?status=rejected`,
       )
-      setRejected(out.releases ?? [])
+      const releases = requireReleases(out)
+      if (releases === null) {
+        // 与客户端半边同口径（`app-releases.ts` 对同样响应返回 UNEXPECTED_RESPONSE）：
+        // 不把"解析不出来"说成"没有被拒的版本"（F6）。
+        setRejected([])
+        setRejectedError('读取被拒版本失败：响应里没有版本清单（这不是"没有被拒的版本"，请核对服务端接口）')
+        return
+      }
+      setRejected(releases)
     } catch (err: any) {
       setRejected([])
       setRejectedError(errorText(err, '读取被拒版本失败'))
@@ -428,7 +456,6 @@ export default function Apps() {
   const patchRow = (appId: string, patch: Partial<WasmApp>) => {
     setApps((prev) => prev.map((a) => (a.app_id === appId ? { ...a, ...patch } : a)))
   }
-
   const togglePublished = async (row: WasmApp) => {
     if (busy || !canWrite) return
     const next = !row.enabled
@@ -439,7 +466,12 @@ export default function Apps() {
         `${ADMIN_API}/wasm-apps/${row.app_id}/${next ? 'publish' : 'unpublish'}`,
         { method: 'POST' },
       )
-      patchRow(row.app_id, { enabled: typeof out?.app?.enabled === 'boolean' ? out.app.enabled : next })
+      patchRow(row.app_id, {
+        // F2（审计第二轮 A2-F2）：响应缺 `enabled` 时**不臆测** —— 旧实现回落到乐观值
+        // `next`，于是一个不带该字段的 200 就把行翻成「已下架」（探针实测）。这与同一
+        // 文件冻结路径（:463 的"响应缺字段时不臆测"）本是同形响应，口径必须一致。
+        ...(typeof out?.app?.enabled === 'boolean' ? { enabled: out.app.enabled } : {}),
+      })
     } catch (err: any) {
       setError(errorText(err, next ? '上架失败' : '下架失败'))
     } finally {

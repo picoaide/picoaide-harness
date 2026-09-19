@@ -114,9 +114,11 @@ function shapeMismatch(appId: string, payload: unknown, message: string): Publis
 /**
  * 解析版本历史响应：`{app_id,current_version,review_required,releases:[{version,status,reason,created_at,current,checksum,size}]}`。
  *
- * 两条纪律：
+ * 三条纪律：
  *  - `releases` **必须是数组**：缺席/类型不对 ⇒ 形状错误（回落成空清单就是把
  *    "我们解析坏了"说成"你没有版本"，与目录页的 P2-10 同族）；
+ *  - `reason` **必须是字符串**（可以是空串 —— rejected 行确实可能没写理由）：键缺席/
+ *    类型漂移 ⇒ 形状错误，绝不降级成空串（"管理员没有填写理由"是把解析失败说成事实）；
  *  - 服务端**下发了行**却一行都没解析出来（`version` 全空）⇒ 形状错误，同样不显示空态。
  * @param appId - 本次请求的 app_id（与回显比对，防串行）。
  * @param payload - 响应体。
@@ -129,6 +131,16 @@ export function parseMyReleasesOutcome(appId: string, payload: unknown): MyRelea
     return shapeMismatch(appId, payload, t('appCenter.releasesShapeMismatch'))
   }
   if (!Array.isArray(root.releases)) {
+    return shapeMismatch(appId, payload, t('appCenter.releasesShapeMismatch'))
+  }
+  // `reason` 是**审核结论本身**：键缺席/非字符串 ⇒ 形状错误，绝不当成空串 ——
+  // 空串在界面上会显示成"管理员没有填写理由"，那是把"我们没读到"说成服务端的事实
+  // （模块头两条纪律里的第二条）。审计第二轮 A2-F6 实测：`releases`/`version` 受形状
+  // 门约束，只有 `reason` 被 `asString()` 静默降级。
+  const malformedReason = root.releases.some(row =>
+    row !== null && typeof row === 'object' &&
+    typeof (row as Record<string, unknown>).reason !== 'string')
+  if (malformedReason) {
     return shapeMismatch(appId, payload, t('appCenter.releasesShapeMismatch'))
   }
   const rows = root.releases

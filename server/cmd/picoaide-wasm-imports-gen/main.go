@@ -95,6 +95,11 @@ var generatedRelPath = filepath.Join("internal", "wasmapp", "wasmmod", "imports_
 //
 // 两份产物都由本生成器渲染、都由 `-check` **逐字节**守（与 limits 的
 // `references/limits.md` 同形态）：文档一旦与真源漂移，作者就会照着错的清单写代码。
+//
+// "逐字节"是字面意思（R2-SK-3）：`references/imports.md` 会**原样下发**给已安装
+// 该技能的员工，改行尾（CRLF）或 EOF 空行数同样是下发字节变了 ⇒ 必须红。此前比对
+// 走了 normalize（CRLF→LF + 去尾空行），门禁绿着而字节已变，与它自己打印的
+// "逐字节一致"不符。
 var skillImportsRelPath = filepath.Join("skills", "app-builder", "references", "imports.md")
 
 func main() {
@@ -190,7 +195,7 @@ func run(outPath, skillDocPath string, check bool) error {
 		if err := compareWithDisk(skillDocPath, skillDoc, "作者面导入面文档（references/imports.md）"); err != nil {
 			return err
 		}
-		fmt.Printf("-check 通过：%s 的并集与 %s 逐条一致（%d 条）；作者面文档 %s 与真源逐字节一致\n",
+		fmt.Printf("-check 通过：%s 的并集与 %s 逐条一致（%d 条）；平台侧真源与作者面文档 %s 都与真源**逐字节**一致（含行尾与 EOF）\n",
 			strings.Join(whitelistSources, " ∪ "), filepath.ToSlash(outPath), len(specs), filepath.ToSlash(skillDocPath))
 		return nil
 	}
@@ -222,12 +227,16 @@ func run(outPath, skillDocPath string, check bool) error {
 }
 
 // compareWithDisk 比对提交的生成物与实时产物（-check 门禁的唯一实现，两份产物共用）。
+//
+// 判据是**逐字节相等**（R2-SK-3）：这两份产物都会原样下发/被校验器读取，行尾风格或
+// EOF 空行数的变化同样是"下发字节变了"。`normalizeForDiff` 只用来把差异讲成人话，
+// 绝不参与判定 —— 否则门禁会一边容忍 CRLF/尾随空行，一边打印"逐字节一致"。
 func compareWithDisk(path string, want []byte, what string) error {
 	onDisk, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("读取 %s（%s）: %w（-check 模式要求该文件已提交）", path, what, err)
 	}
-	if bytes.Equal(normalize(onDisk), normalize(want)) {
+	if bytes.Equal(onDisk, want) {
 		return nil
 	}
 	return fmt.Errorf("%s 与参考程序不一致（%s）\n  第一处差异：%s\n"+
@@ -516,16 +525,20 @@ func renderSkillDoc(specs []wasmmod.ImportSpec) ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
-// normalize 归一化行尾，避免 CRLF/尾空行造成假差异。
-func normalize(b []byte) []byte {
+// normalizeForDiff 只服务差异展示：把行尾统一成 LF、去掉尾部空行，这样"改了内容"
+// 的报错能落到正确的那一行上（CRLF 差异下首行会整份不同、没有可读的行号）。
+//
+// ⚠️ 它**不参与** -check 的判定（判定是 bytes.Equal，见 compareWithDisk）：一旦这里
+// 的归一化回到判定路径，"改行尾/尾随空行 ⇒ 下发字节变了但门禁绿"就会重演（R2-SK-3）。
+func normalizeForDiff(b []byte) []byte {
 	s := strings.ReplaceAll(string(b), "\r\n", "\n")
 	return []byte(strings.TrimRight(s, "\n"))
 }
 
 // firstDiffLine 给出第一处差异的人类可读描述（行号 + 两侧内容）。
 func firstDiffLine(old, new []byte) string {
-	oldLines := strings.Split(string(normalize(old)), "\n")
-	newLines := strings.Split(string(normalize(new)), "\n")
+	oldLines := strings.Split(string(normalizeForDiff(old)), "\n")
+	newLines := strings.Split(string(normalizeForDiff(new)), "\n")
 	for i := 0; i < len(oldLines) || i < len(newLines); i++ {
 		var o, n string
 		if i < len(oldLines) {
@@ -538,7 +551,8 @@ func firstDiffLine(old, new []byte) string {
 			return fmt.Sprintf("第 %d 行\n    磁盘: %s\n    应为: %s", i+1, strings.TrimSpace(o), strings.TrimSpace(n))
 		}
 	}
-	return "内容相同（差异只在不影响阅读的空白）"
+	// 归一化后逐行相同 = 差异只在行尾 CRLF 或 EOF/尾随空行（这两类都会改变下发字节）。
+	return "字节不同但逐行内容相同（差异在行尾 CRLF 或 EOF/尾随空行）—— 请重新生成产物"
 }
 
 // moduleRoot 从当前目录向上找 go.mod（默认输出路径是相对模块根的）。

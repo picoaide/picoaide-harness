@@ -194,9 +194,14 @@ export default function BuiltinSkills() {
 
           {view !== null && skills.length === 0 && (
             <div className="rounded-md border p-3 text-[13px] text-muted-foreground" data-testid="builtin-empty">
-              {view.dir_exists
-                ? '资产目录存在，但没有一条技能通过校验。请看上面的「被跳过」原因。'
-                : '镜像里没有内置技能资产目录（本地直接跑二进制就是这种形态，不是故障）。'}
+              {/* 文案里的「被跳过」块只在 problems 非空时渲染（见上）——
+                  引用不存在的块等于把管理员指向空气（R2-SK-2）。三种形态各说各的：
+                  目录不在（正常）/ 目录在且有被跳过的条目 / 目录在但里面什么都没有。 */}
+              {!view.dir_exists
+                ? '镜像里没有内置技能资产目录（本地直接跑二进制就是这种形态，不是故障）。'
+                : problems.length > 0
+                  ? '资产目录存在，但没有一条技能通过校验。请看上面的「被跳过」原因。'
+                  : '资产目录存在，但里面没有任何条目（每个技能必须是 <name>/SKILL.md 的形态）。'}
             </div>
           )}
 
