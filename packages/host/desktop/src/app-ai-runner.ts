@@ -42,6 +42,7 @@ import type {
   AiChatTurnResult,
   AiChatTurnRunner,
 } from '@picoaide/dsh-wasm-apps-host/ai-chat'
+import { WASM_APPS_AI_RUNNER_SERVICE } from '@picoaide/dsh-wasm-apps-host'
 
 /**
  * 应用 AI 的系统提示（§21.1 第 14 条：应用**不得**声明提示，平台统一给）。
@@ -362,4 +363,20 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ai
       void dropAgent(sessionId)
     },
   }
+}
+
+/**
+ * 把应用 AI 执行面装进宿主 ctx —— §21.2 步骤③ 的**生产接线**。
+ *
+ * 为什么要单独一个函数：这段接线原先内联在 `main.ts` 的 boot 回调里，而 `main.ts`
+ * 是 Electron 引导、单测跑不到 ⇒ **删掉 `provide` 全部用例照样绿，而生产环境每次
+ * 应用 AI 调用都静默回 503 `app_ai_unavailable`**（2026-09-20 独立复核指出
+ * "宿主接线无判据"）。抽成函数后由 `tests/app-ai-runner.spec.ts` 用**真实 Cordis
+ * `Context`** 断言 `ctx.get(WASM_APPS_AI_RUNNER_SERVICE)` 确实拿得到 runner——
+ * 这就是"接线存在"的行为判据，而不是钉字符串。
+ */
+export function provideAppAiRunner(ctx: Context, options: AppAiRunnerOptions): AiChatTurnRunner {
+  const runner = createAppAiRunner(ctx, options)
+  ctx.provide(WASM_APPS_AI_RUNNER_SERVICE, runner)
+  return runner
 }

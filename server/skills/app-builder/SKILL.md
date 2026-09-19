@@ -1,6 +1,6 @@
 ---
 name: app-builder
-version: 1.3.0
+version: 1.4.0
 title: PicoAide 应用构建（WASM 应用）
 description: 用 Go 写一个 PicoAide 应用平台上的 WASM 应用并发布（员工自建小工具）。当用户说"做个内部小工具/应用/页面"、"把这个流程做成应用"、"发布到应用中心"、"能不能在平台上加个功能"时用本技能。
 author: PicoAide

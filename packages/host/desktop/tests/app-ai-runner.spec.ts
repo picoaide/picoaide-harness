@@ -29,6 +29,9 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import { afterEach, describe, expect, it } from 'vitest'
 import { APP_AI_PROMPT_SECTION, APP_AI_SYSTEM_PROMPT, createAppAiRunner } from '../src/app-ai-runner.ts'
+import { provideAppAiRunner } from '../src/app-ai-runner.ts'
+import { WASM_APPS_AI_RUNNER_SERVICE } from '@picoaide/dsh-wasm-apps-host'
+import { readFileSync } from 'node:fs'
 import type { AiChatTurnRunner } from '@picoaide/dsh-wasm-apps-host/ai-chat'
 
 /** 一段文本回答的流（字符级 `text-delta`，便于断言增量顺序）。 */
@@ -346,3 +349,33 @@ describe('应用 AI 执行面（隐藏会话 + 仅对话）', () => {
 /** 工具名与调用 id 的占位（避免未使用导入被 lint 判死）。 */
 void ToolCallId
 void ((): LlmModelReasoningInfo | undefined => undefined)
+
+describe('宿主接线（§21.2 步骤③ 的生产 provide；2026-09-20 独立复核补的判据）', () => {
+  /**
+   * 为什么要有这两条：这段接线原先**内联在 `main.ts` 的 boot 回调里**，而 `main.ts`
+   * 是 Electron 引导、单测跑不到 ⇒ 复核实测「把 `provide(...)` 删掉，29 条用例全绿」，
+   * 而生产环境每次应用 AI 调用都会回 503 `app_ai_unavailable`。
+   * 判据分两层：①**行为**（真实 Cordis `provide`/`get` 往返）；②**链接**（`main.ts`
+   * 确实走这个函数，而不是又内联回去）。
+   */
+  it('provideAppAiRunner 之后 ctx.get(WASM_APPS_AI_RUNNER_SERVICE) 必须拿得到同一个 runner', async () => {
+    const adapter = new RecordingAdapter([textResponse('你好')])
+    const ctx = await harness(adapter)
+    live.push(ctx)
+    // 正对照：provide 之前必须取不到 —— 否则下面的断言可能因为别处已 provide 而恒真。
+    expect(ctx.get(WASM_APPS_AI_RUNNER_SERVICE)).toBeUndefined()
+
+    const runner = provideAppAiRunner(ctx, { cwd: '/tmp/picoaide-app-ai-接线判据' })
+    expect(typeof runner.run).toBe('function')
+    // 关键：**从 ctx 取回来的**就是被 provide 的那个对象（真实 provide/get 往返）。
+    expect(ctx.get(WASM_APPS_AI_RUNNER_SERVICE)).toBe(runner)
+  })
+
+  it('main.ts 必须经 provideAppAiRunner 接线（内联 provide 会让上一条判据失守）', () => {
+    const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8')
+    expect(main).toContain("import { provideAppAiRunner } from './app-ai-runner.ts'")
+    expect(main).toContain('provideAppAiRunner(hostCtx, {')
+    // 反向：不得再出现"内联 hostCtx.provide(服务名…)"的形态。
+    expect(main).not.toMatch(/hostCtx\.provide\(\s*WASM_APPS_AI_RUNNER_SERVICE/)
+  })
+})

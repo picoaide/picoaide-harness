@@ -22,12 +22,11 @@ import {
 // 插件主体（`@picoaide/dsh-wasm-apps-host`）保持纯 Node 可加载。
 import { createRealElectronAdapter, registerAppScheme } from '@picoaide/dsh-wasm-apps-host/electron-adapter'
 import {
-  WASM_APPS_AI_RUNNER_SERVICE,
   WASM_APPS_HOST_ADAPTER_SERVICE,
   WASM_APPS_INSTALL_KEY_SERVICE,
 } from '@picoaide/dsh-wasm-apps-host'
 import { createInstallKeyStore } from '@picoaide/dsh-wasm-apps-host/app-proof'
-import { createAppAiRunner } from './app-ai-runner.ts'
+import { provideAppAiRunner } from './app-ai-runner.ts'
 import { applyInstallDshHome, isSystemWorkingDirectory } from './desktop-home.ts'
 import { desktopUserDataDirectoryName } from './desktop-user-data.ts'
 import { desktopProductVersion, ElectronDesktopRuntime } from './electron-runtime.ts'
@@ -387,15 +386,17 @@ async function start(): Promise<void> {
         // （`app:<app_id>`）上跑一轮 `ctx.agentLoop`。这里只 `provide` 一个**惰性**
         // 对象 —— 它内部的 `ctx.get('agents')`/`agentLoop` 在每一轮开始时才解析
         // （`provide` 发生在 profile 树挂载之前，那一刻 agent 平面还不存在）。
-        hostCtx.provide(
-          WASM_APPS_AI_RUNNER_SERVICE,
-          createAppAiRunner(hostCtx, {
-            // 隐藏会话的 `cwd` 元数据：persona 模板的 `{{cwd}}` 需要有值（AI 没有
-            // 文件面，这个路径只落在会话头上）。用 userData 而不是任何工作区 ——
-            // 隐藏会话不隶属任何用户项目目录。
-            cwd: app.getPath('userData'),
-          }),
-        )
+        //
+        // 接线本身在 `./app-ai-runner.ts` 的 `provideAppAiRunner` 里（**可测**）：
+        // 2026-09-20 独立复核指出"内联在这里 ⇒ 删掉 provide 全绿、生产静默 503"，
+        // 抽出来后由 `tests/app-ai-runner.spec.ts` 用真实 `Context` 断言
+        // `ctx.get(WASM_APPS_AI_RUNNER_SERVICE)` 确实拿得到 runner。
+        provideAppAiRunner(hostCtx, {
+          // 隐藏会话的 `cwd` 元数据：persona 模板的 `{{cwd}}` 需要有值（AI 没有
+          // 文件面，这个路径只落在会话头上）。用 userData 而不是任何工作区 ——
+          // 隐藏会话不隶属任何用户项目目录。
+          cwd: app.getPath('userData'),
+        })
         await hostCtx.plugin(DesktopPluginsService, {
           profileName: activeProfileName,
           homeDir,
