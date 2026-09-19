@@ -116,7 +116,11 @@ appdb_cache_kib × (1 + app_db_readers) × 应用库句柄数（≤ max_instance
 回退**不需要**动 appdb、不需要重启服务端；若同应用并发回退到 1，"冷应用并发首屏只开一次库"
 的单飞（§7）仍然保留（它是正确性修复，不是优化）。
 
-## 7. 同应用事务边界：**已闭合**（方案 A：每请求事务所有权校验）
+## 7. 同应用事务边界：**两条越权入口都已闭合**（方案 A：每请求事务所有权校验）
+
+> 口径更正（2026-09-19 独立验证 F1）：本节初版写的是"已闭合"，但当时只闭合了
+> **写侧**（`exec`/`define`/`begin`/`query`）—— **事务出口 `tx_commit`/`tx_rollback`
+> 是直接透传的**，"只有持有者能走到它"这句话与事实不符（详见 §7.5）。
 
 ### 7.1 触发条件与后果（闭合前的真实缺陷）
 
@@ -140,9 +144,13 @@ appdb 只知道"当前有没有事务"，不知道写的人是**谁**。于是�
    （`DB_DENIED` / `reason=foreign_transaction`，HTTP 403，hint 明说"另一个请求正在事务中，
    请稍后重试"）。句柄上的 `txOwner` 只用于**放行持有者自己**，不参与安全判定 ——
    所以它陈旧或丢失只会让调用被拒（fail-closed），绝不会放行。
-2. **写路径（`exec`/`define`）与 `begin` 共用一把 `txGate`**：所有权检查与"调用 appdb"
-   是一个原子段 ⇒ 不存在"检查时无事务、执行时已有事务"的插入窗口（那是写丢失的唯一真实入口）。
-   写本来就由 appdb 的 `writeMu` 串行，所以这把闸不引入额外吞吐代价。
+2. **写路径（`exec`/`define`）、`begin` 与事务出口（`commit`/`rollback`）共用一把 `txGate`**：
+   所有权检查与"调用 appdb"是一个原子段 ⇒ 不存在"检查时无事务、执行时已有事务"的
+   插入窗口（那是写丢失的唯一真实入口）。出口必须一起进闸：`tx_id` 是**可选字段**，
+   appdb 的串号校验写成 `if p.TxID != 0 && p.TxID != tx.id` ⇒ 传 0/不传即跳过校验，
+   没有闸就能提交或回滚**别人**的事务（§7.5）。写本来就由 appdb 的 `writeMu` 串行，
+   所以这把闸不引入额外吞吐代价；锁序恒为 `txGate → writeMu`，绝无反向获取
+   （`endRequest` 的清理回滚是直连 appdb 的，不取 `txGate`）。
 3. **读路径（`query`）不加闸**（加了会把读重新串行化，正好毁掉本轮并发收益），改为
    **执行前后各查一次**：与外来事务重叠的读被报成拒绝，而不是把未提交数据当已提交返回。
    残留（如实认账）：事务的打开与提交都恰好落在两条 query 之间的窗口读不到 ——
@@ -155,17 +163,24 @@ appdb 只知道"当前有没有事务"，不知道写的人是**谁**。于是�
 **没有改 appdb**（接口与语义不变）：修的是"谁来调用它"这一层，`db.exec` 的
 "没有事务令牌"这一事实本身仍然成立 —— 只是现在**只有持有者**能走到它。
 
-### 7.3 判据（两层，均有变异验证）
+### 7.3 判据（包装层 + 端到端；写侧与出口侧各一条，四条均有变异验证）
 
 | 层次 | 用例 | 判据 |
 |---|---|---|
 | 包装层（确定性） | `TestAppDBConn_ForeignWriteIsRejectedWhileAnotherRequestHoldsTransaction` | A 开事务并写；B 的 `exec`/`define`/`query`/`begin` 全部 `DB_DENIED`；A 回滚后 B 立刻能写；库里只剩 B 的行（A 的被回滚） |
+| 包装层 · 事务出口（commit/rollback 各一档） | `TestAppDBConn_ForeignTxFinishIsRejected` | B 的 `tx_commit`/`tx_rollback` 在 `tx_id` **省略 / 0 / A 的真 id** 三种形态下全部 `DB_DENIED`；A 的事务仍活着（`InTx()` 真、持有者标记未被改写、A 自己仍看得见未提交写）；最后由 A 自己收尾（commit ⇒ 写落库，rollback ⇒ 写消失） |
 | 端到端（真 wasm + 真 HTTP） | `TestServe_ForeignWriteDuringTransactionIsRejected` | dbapp 的 `/slowtx` 开事务持有 1.2 s；另一个真实请求的写/读都拿到 `DB_DENIED`；A 回滚后 B 能写、库里只有 B 的行 |
+| 端到端 · 事务出口 | `TestServe_ForeignTxFinishDuringTransactionIsRejected` | dbapp 的 `/txfin?op=commit\|rollback`（**只**调出口、**不带 tx_id**，即越权入口的原始形态）拿到 `DB_DENIED`，且每次被拒后 A 的事务仍在；A 自己的收尾成功、库里没有 A 的行（没被第三方提交） |
 
-**变异验证（实跑）**：把 `foreignTxError` 改成直接 `return nil`（去掉校验）⇒
-①两条用例立刻变红；②临时探针复现**静默丢写**：`B 的 db.exec → rows=1 err=<nil>`，
-`A 回滚后表里的行：[]`（B 的写随 A 的事务消失）。还原后同一探针给出
-`rows=0 err=DB_DENIED` 与"B 的写没有丢"。
+**变异验证（实跑）**：
+
+1. 把 `foreignTxError` 改成直接 `return nil`（去掉校验）⇒ 端到端/包装层的"必须被拒"
+   断言变红；临时探针复现**静默丢写**：`B 的 db.exec → rows=1 err=<nil>`，
+   `A 回滚后表里的行：[]`（B 的写随 A 的事务消失）。
+2. （2026-09-19 独立验证 F1 补）把 `Commit`/`Rollback` 的两个 `lockTxGate` 去掉
+   （回到直接透传）⇒ `TestAppDBConn_ForeignTxFinishIsRejected` 的两档
+   （commit / rollback）与 `TestServe_ForeignTxFinishDuringTransactionIsRejected` 全部变红；
+   e2e 现场形态是"B 的 `tx_commit` 返回成功（code 为空）⇒ A 的事务被第三方收掉"。
 
 ### 7.4 连带修掉的两个真实缺陷（都是 app_running>1 才暴露的）
 
@@ -184,6 +199,25 @@ appdb 只知道"当前有没有事务"，不知道写的人是**谁**。于是�
    计数表（随应用条目一起回收），回归用例
    `TestSameUserCannotExceedPerAppRunningNowThatAppsRunConcurrently`。
 
+### 7.5 口径更正：事务出口是**第二条**越权入口（2026-09-19 独立验证 F1，本轮已闭合）
+
+本节初版声称事务边界"已闭合"、并写了"只有持有者能走到它" —— 这两句在当时**与事实不符**，
+必须留下记录（否则下一位读者会按"已闭合"做设计）：
+
+- `appDBConn.Commit` / `appDBConn.Rollback` 当时是**直接透传**给 appdb 的，既没有
+  `lockTxGate()` 也没有 `foreignTxError()`；`hostcap` 的 `callTxCommit` / `callTxRollback`
+  中间也没有别的校验点。
+- `abi.TxParams.TxID` 是**可选**字段（"tx_id 可选；提供即校验"），而 appdb 的
+  `finishTx` 串号校验写成 `if p.TxID != 0 && p.TxID != tx.id` ⇒ **传 0（或干脆不传）
+  即跳过校验**，于是"当前打开的事务"（**别人的**）会被提交或回滚。
+- 后果（探针稳定复现）：同应用请求 B 调 `tx_commit(tx_id=0)` ⇒ A 的未提交写变成可见；
+  B 调 `tx_rollback(tx_id=0)` ⇒ A 的事务被回滚、A 的写丢失。仍属应用内请求间隔离
+  （库按 app_id 隔离，不是跨租户），但正是本轮声称要闭合的那一类缺陷。
+- 闭合方式：出口与写共用同一把 `txGate`（见 §7.2 第 2 条）。持有者天然放行
+  （判据是"底层 `InTx()` 且非本请求持有"）；`endRequest()` 内部的清理回滚保持直连
+  appdb（它就是清理者，且不取 `txGate` ⇒ 锁序无环）。
+- 判据与变异见 §7.3（新增两条用例 + 出口闸变异）。
+
 ## 8. 验证（判据与变异）
 
 - **行为判据**（不靠墙钟比大小）：`appserver.TestServe_SameAppRequestsRunConcurrentlyByDefault`
@@ -200,7 +234,21 @@ appdb 只知道"当前有没有事务"，不知道写的人是**谁**。于是�
   新设置影响、下一个句柄才拿到新值"。
 - **单飞判据**：`TestAppDBPool_ConcurrentFirstRequestsShareOneOpen`（4 个并发冷首屏全 200、
   池里只有 1 个句柄、fd 数 = 1+N、请求结束后引用归零）。
-- **事务边界判据**：见 §7.3（包装层 + 端到端两条）。
+- **底层"读真并发"判据**（2026-09-19 独立验证 F2 重写后）：`appdb.TestQueriesRunConcurrently`
+  与 `appdb.TestReadsAreNotBlockedByWriter` 的判据取自**执行期证据**——SQL 里注册一个标量
+  函数 `tt_tick(tag)`，它在语句执行期间被逐行回调（每次自旋 ~400 µs），用每个 tag 的
+  `[首次回调, 末次回调]` 当**真正的执行区间**（排队/等锁期间一次回调都不会发生），并用
+  回调序列的"连续同 tag 段数"度量交错程度。实测：4 读者 ⇒ 回调 240 次 / 连续段数 240 /
+  执行区间重叠 4 / 墙钟 24.8 ms；`app_db_readers=1`（反例对照
+  `TestQueriesWithOneReaderAreSerialized`）⇒ 段数 2 / 重叠 1 / 墙钟 32.3 ms（≈ 两条之和）；
+  读 vs 慢写 ⇒ 写的执行区间 79.9 ms 内读跑完（读末次回调早于写结束 62.7 ms）；写 vs 写 ⇒
+  段数 2 / 重叠 1。
+  > ⚠️ **判据为什么不能是"[发起,返回] 区间相交"或"并发墙钟 < 串行墙钟"**（本文件 §8 开头
+  > 已经为 appserver 用例写过这条，但同一个坑当时原样留在 appdb 的两个用例里，被独立验证
+  > 抓出）：前者把**排队等待**也算进区间 —— 串行实现下 N 个调用同时起跑、各自错峰结束，
+  > 扫描线照样数到 N 条"重叠"（恒真）；后者被**页缓存预热**掩盖 —— 串行基线先跑（冷）、
+  > 并发轮次后跑（热），完全串行的实现上实测仍有 1.28–1.31× 的"假加速"。
+- **事务边界判据**：见 §7.3（包装层 + 端到端，写侧与出口侧各两条）。
 - **升级连续性判据**：`cmd/server.TestWasmSavedLimitsFromOlderBuildStillApplies` —— 旧字段
   集合的 `settings.wasm.limits`（缺 `app_db_readers`）在真装配下仍来源=setting、已知字段逐字
   生效（128 MiB 真的进了 runtime）、缺字段补默认、无"待重启"残留。
@@ -209,8 +257,26 @@ appdb 只知道"当前有没有事务"，不知道写的人是**谁**。于是�
      （"默认每应用并发 = 1"）；把守卫摘掉后行为判据也红，现场形态为
      `max_running=0、max_waiting=1、重叠窗口 0s、queue_wait_ms=2138`；
      同一变异还让 `limits` 包的生成物门禁变红（单源纪律生效）。
-  2. `foreignTxError` 直接 `return nil` ⇒ 两条事务用例变红 + 临时探针复现静默丢写
-     （见 §7.3）。
+  2. `foreignTxError` 直接 `return nil` ⇒ 事务用例变红 + 临时探针复现静默丢写（见 §7.3）。
+  3. `withReadConn` 删掉只读槽快路径（读也走 `writeMu`，= 改造前语义）⇒ F2 的两条重写用例
+     必红：`TestQueriesRunConcurrently` 现场为"执行区间最大重叠 1、连续段数 4（== 语句数）、
+     墙钟 97.0 ms（≈ 4 × 单条 24 ms）"，`TestReadsAreNotBlockedByWriter` 现场为"读的首次
+     回调落在写结束之后约 2.6 ms、末次回调晚于写结束 18.2 ms"。反向（不变异）同一对用例绿。
+  4. `enableWALLocked` 的"读回必须 == wal"弱化成只判 `err == nil` ⇒ 全量产品用例 0 红
+     （正常 FS 上读回恒为 wal）；判别性用例
+     `appdb.TestEnableWALLockedRejectsNonWALJournalMode`（`:memory:` 库：`PRAGMA
+     journal_mode=WAL` 返回 err=nil、读回 "memory"）在变异下必红 —— 详见 §8.1。
+  5. 去掉 `Commit`/`Rollback` 的 `lockTxGate` ⇒ 出口侧两条用例必红（见 §7.3）。
+
+### 8.1 关于 `enableWALLocked` 的读回断言（独立验证 F3）
+
+那条断言的**唯一**判别性用例是 `appdb.TestEnableWALLockedRejectsNonWALJournalMode`：
+正常文件系统上 `PRAGMA journal_mode = WAL` 的读回恒为 `"wal"`，所以
+`TestJournalModeWALAndBusyTimeoutOnEveryConn` 之类的用例**保护不了它**（把断言弱化成
+`err == nil` 后它们全绿，实测）。新用例选了"引擎返回非 wal **且不报错**"的形态
+（`:memory:` 库 → 读回 `"memory"`），并断言：fail-closed（`INTERNAL`）、
+`details.want == "wal"`、`details.got == 实际读回值`；另有一档正常库对照，
+防止它退化成"总是报错"的空断言。
 
 ## 9. 待接线清单（含 webadmin，另一代理负责，勿在本改动里重复改）
 

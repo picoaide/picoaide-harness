@@ -12,6 +12,10 @@
 //	/slowtx?ms=800&v=x&mode=rollback
 //	                           tx_begin → db.exec(INSERT) → sleep ms → tx_rollback|tx_commit
 //	                           （事务所有权判据的夹具：事务存续期间让别的请求来写）
+//	/txfin?op=commit|rollback[&tx_id=N]
+//	                           **只**调事务出口（tx_commit / tx_rollback），不 begin：
+//	                           tx_id 省略或 0 时请求里不带该字段（= "提交/回滚别人的事务"
+//	                           这条越权入口的形态，见 2026-09-19 独立验证 F1）
 package main
 
 import (
@@ -157,6 +161,20 @@ func main() {
 		}
 		_, fcode, fmsg := call(method, map[string]any{"tx_id": tx.TxID})
 		out["finish_code"], out["finish_message"] = fcode, fmsg
+	case "/txfin":
+		// 事务出口的**独立**夹具（不 begin）：用来验证"没有事务所有权的请求调
+		// tx_commit / tx_rollback 必须被拒"。请求里**故意支持**不带 tx_id
+		// （tx_id 可省略 = appdb 跳过串号校验的那条路径），平台侧必须自己拦。
+		method := "tx_commit"
+		if req.Query["op"] == "rollback" {
+			method = "tx_rollback"
+		}
+		params := map[string]any{}
+		if id, _ := strconv.Atoi(req.Query["tx_id"]); id != 0 {
+			params["tx_id"] = id
+		}
+		res, code, msg := call(method, params)
+		record(out, res, code, msg)
 	default:
 		out["error"] = "unknown path"
 	}

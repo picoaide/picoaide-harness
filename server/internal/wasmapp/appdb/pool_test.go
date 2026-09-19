@@ -3,11 +3,12 @@ package appdb
 // 本文件是 2026-09-19「多读者并发 + 单写者串行」改造的验收用例（WAL + 只读连接池 + 锁拆分）。
 //
 // 覆盖四件事：
-//  1. 读**真的并发**（不是"多个 goroutine 排队"）——用**区间重叠**判定，不靠 CPU 并行度：
-//     串行实现（老的 d.mu / 任何覆盖整条语句的互斥量）下，任意两条语句的 [start,end] 区间
-//     不可能重叠；并发实现下，屏障后同时进入的 N 条语句区间必然重叠。这个判据在 1 核机器上
-//     同样成立（goroutine 被时间片切碎只影响耗时，不影响区间）。
-//  2. 读不被写挡住（慢写进行期间读能完成），而**写之间仍然串行**（区间不重叠）。
+//  1. 读**真的并发**（不是"多个 goroutine 排队"）——判据取自**执行期证据**：SQL 里注册的
+//     标量函数 `tt_tick(tag)` 在语句执行期间被逐行回调，用每个 tag 的
+//     `[首次回调, 末次回调]` 当执行区间，并用回调序列的"连续段数"度量交错程度
+//     （详见 tickAt 的注释：为什么"[发起,返回] 区间相交"与"墙钟比大小"都是假绿）。
+//  2. 读不被写挡住（慢写执行期间读者**在写结束前**跑完），而**写之间仍然串行**
+//     （执行期回调完全分组）。
 //  3. 事务内读走 rw（看得到未提交的写，且**不占**只读槽）。
 //  4. 关连接排空在途读者（Close 必须等在途读者归还槽位，绝不 use-after-close）。
 //
@@ -17,6 +18,7 @@ package appdb
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"os"
 	"sort"
@@ -25,20 +27,157 @@ import (
 	"testing"
 	"time"
 
+	"modernc.org/sqlite"
+
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
-// connInterval 是一条语句的墙钟区间（用于区间重叠判定）。
-type connInterval struct {
-	start time.Time
-	end   time.Time
+// ===== 执行期证据：SQL 内的 tick 回调 =====
+//
+// 为什么并发判据**不能**是"[发起,返回] 两个区间相交"（2026-09-19 独立验证 F2，
+// 当时这里的两条判据正是这样写的，结果是假绿）：
+//
+//   - `[发起, 返回]` 把**排队等待**也算进区间。串行实现（读也走 writeMu）下，N 个
+//     调用几乎同时起跑（屏障后同时进 Query）、各自错峰结束（谁排在后面谁区间更长），
+//     扫描线照样数到 N 条"重叠"——判据恒真；
+//   - "并发墙钟 < 串行墙钟"同样无效：串行基线先跑（冷），并发轮次后跑（页缓存已热），
+//     实测在**完全串行**的实现上仍给出 1.28–1.31× 的"假加速"。
+//
+// 有效判据必须来自**语句执行期间**：`tt_tick(tag)` 是注册进 SQLite 的标量函数，
+// 它只在语句真正执行到那一行时被调用（排队/等锁期间一次都不会被调用）。于是：
+//
+//   - 每个 tag 的 `[首次回调, 末次回调]` = **真正的执行区间**；
+//   - 回调按时间排序后的"连续同 tag 段数" = 交错程度：完全串行时每个 tag 恰好一段
+//     （段数 == 语句数），真并发时高度交错（段数远大于语句数）。
+//
+// 判据的区分力由反例对照用例 `TestQueriesWithOneReaderAreSerialized` 自证：
+// 同一套断言在 `app_db_readers=1`（退化为串行）下给出 重叠 == 1、段数 == 2。
+var tickSpinPerCall = 400 * time.Microsecond
+
+type tickEvent struct {
+	tag string
+	at  time.Time
 }
 
-// overlaps 报告两个区间是否有交集。
-func (a connInterval) overlaps(b connInterval) bool {
-	return a.start.Before(b.end) && b.start.Before(a.end)
+var (
+	tickMu     sync.Mutex
+	tickEvents []tickEvent
+)
+
+// tickAt 记录一次执行期回调并自旋一小段（让"执行区间"有毫秒级宽度）。
+func tickAt(tag string) int64 {
+	now := time.Now()
+	tickMu.Lock()
+	tickEvents = append(tickEvents, tickEvent{tag: tag, at: now})
+	tickMu.Unlock()
+	end := time.Now().Add(tickSpinPerCall)
+	for time.Now().Before(end) {
+	}
+	return now.UnixNano()
+}
+
+func tickReset() {
+	tickMu.Lock()
+	tickEvents = nil
+	tickMu.Unlock()
+}
+
+func tickSnapshot() []tickEvent {
+	tickMu.Lock()
+	defer tickMu.Unlock()
+	return append([]tickEvent(nil), tickEvents...)
+}
+
+// tickRuns 返回回调序列里"连续同 tag 段"的数量：每个 tag 恰好一段 = 完全没有交错。
+func tickRuns(evs []tickEvent) int {
+	runs, prev := 0, ""
+	for _, e := range evs {
+		if e.tag != prev {
+			runs++
+			prev = e.tag
+		}
+	}
+	return runs
+}
+
+// tickSpan 返回某个 tag 的 [首次回调, 末次回调] 执行区间与回调次数。
+func tickSpan(evs []tickEvent, tag string) (time.Time, time.Time, int) {
+	var first, last time.Time
+	n := 0
+	for _, e := range evs {
+		if e.tag != tag {
+			continue
+		}
+		if n == 0 {
+			first = e.at
+		}
+		last = e.at
+		n++
+	}
+	return first, last, n
+}
+
+// tickMaxOverlap 返回一组执行区间的最大同时重叠数（扫描线；同刻先算 +1）。
+func tickMaxOverlap(spans [][2]time.Time) int {
+	type point struct {
+		at    time.Time
+		delta int
+	}
+	points := make([]point, 0, len(spans)*2)
+	for _, sp := range spans {
+		if !sp[1].After(sp[0]) {
+			continue
+		}
+		points = append(points, point{sp[0], +1}, point{sp[1], -1})
+	}
+	sort.Slice(points, func(i, j int) bool {
+		if points[i].at.Equal(points[j].at) {
+			return points[i].delta > points[j].delta
+		}
+		return points[i].at.Before(points[j].at)
+	})
+	cur, best := 0, 0
+	for _, p := range points {
+		cur += p.delta
+		if cur > best {
+			best = cur
+		}
+	}
+	return best
+}
+
+// waitForTick 轮询等到某个 tag 出现第一次回调（最多 5 s）。
+//
+// 用途：让"慢写已经真的在跑"成为**可观测事实**再发起读，避免"读被调度推迟到写之后"
+// 造成的假红（回调登记发生在 tickAt 开头 ⇒ 看到首次回调时写还有几乎整条语句要跑）。
+func waitForTick(t *testing.T, tag string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, n := tickSpan(tickSnapshot(), tag); n > 0 {
+			return
+		}
+		time.Sleep(200 * time.Microsecond)
+	}
+	t.Fatalf("等待 tick %q 的首次回调超时（5 s）：慢语句没有跑起来？", tag)
+}
+
+// tt_tick 是给 SQL 用的标量函数名（`tt_` 前缀 = 测试专用，避免与应用 SQL 撞名）。
+func init() {
+	if err := sqlite.RegisterScalarFunction("tt_tick", 1,
+		func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+			tag := ""
+			if len(args) > 0 {
+				if s, ok := args[0].(string); ok {
+					tag = s
+				}
+			}
+			return tickAt(tag), nil
+		}); err != nil {
+		panic(fmt.Sprintf("注册 tt_tick 标量函数失败：%v", err))
+	}
 }
 
 // slowTableRows 是"慢查询 / 慢写"用的行数：目标是把一次全表扫描压到**毫秒级**
@@ -81,38 +220,35 @@ func newSlowDB(t *testing.T, appID string, readers int) *DB {
 
 // ===== 1. 读并发 =====
 
-// TestQueriesRunConcurrently 断言 N 个并发 Query **真的同时在跑**：
+// tickQuerySQL 造一条"执行期打点"的查询：语句每处理一行就回调 tt_tick(tag) 一次。
+func tickQuerySQL(tag string, ticks int) string {
+	return fmt.Sprintf("SELECT tt_tick('%s') FROM bench_items LIMIT %d", tag, ticks)
+}
+
+// tickWriteSQL 造一条"执行期打点"的慢写：每更新一行回调 tt_tick(tag) 一次。
+func tickWriteSQL(tag string, rows int) string {
+	return fmt.Sprintf("UPDATE bench_items SET pad = tt_tick('%s') WHERE n < %d", tag, rows)
+}
+
+// TestQueriesRunConcurrently 断言 N 个并发 Query **真的同时在执行**：
 //
-//	(a) 区间最大重叠数 ≥ 2（串行实现下恒为 1）；
-//	(b) 并发墙钟 < 串行墙钟（N 次顺序执行的耗时），即确实有加速；
+//	(a) 执行区间（回调的 [首次, 末次]）最大重叠 ≥ 2，且期望 == readers；
+//	(b) 回调序列的连续段数 > readers —— 完全串行时恰好 == readers（每个 tag 一段）；
 //	(c) 池内连接数 == 1 + readers（读连接池真的建满了）。
 //
-// 变异方式：把 withReadConn 的快路径去掉（读也走 writeMu 串行）⇒ (a)(b) 变红。
+// 判据为什么不是"[发起,返回] 区间相交"或"并发墙钟 < 串行墙钟"：见 tickAt 的注释
+// （两者在完全串行的实现上都能通过 —— 这正是 2026-09-19 独立验证发现的假绿）。
+// 反例对照见 TestQueriesWithOneReaderAreSerialized。
+//
+// 变异方式：把 withReadConn 的只读槽快路径删掉（读也走 writeMu 串行）⇒ (a)(b) 变红。
 func TestQueriesRunConcurrently(t *testing.T) {
 	const readers = 4
+	const ticksPerQuery = 60 // 60 × tickSpinPerCall ≈ 24 ms：足够覆盖调度抖动
 	d := newSlowDB(t, "concurrent-app", readers)
 	ctx := context.Background()
-	q := abi.SQLParams{SQL: "SELECT count(*) FROM bench_items WHERE pad LIKE '%0000%'"}
-	run := func() (connInterval, error) {
-		iv := connInterval{start: time.Now()}
-		_, err := d.Query(ctx, q)
-		iv.end = time.Now()
-		return iv, err
-	}
-
-	// 串行基线：同样的查询顺序跑 N 次。
-	var serial time.Duration
-	for i := 0; i < readers; i++ {
-		iv, err := run()
-		if err != nil {
-			t.Fatalf("串行基线第 %d 次查询失败：%v", i+1, err)
-		}
-		serial += iv.end.Sub(iv.start)
-	}
 
 	// 并发：屏障后同时进入（goroutine 先起好、等 start 关闭）。
 	start := make(chan struct{})
-	intervals := make([]connInterval, readers)
 	errs := make([]error, readers)
 	var wg sync.WaitGroup
 	for i := 0; i < readers; i++ {
@@ -120,11 +256,12 @@ func TestQueriesRunConcurrently(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			intervals[i], errs[i] = run()
+			_, errs[i] = d.Query(ctx, abi.SQLParams{SQL: tickQuerySQL(fmt.Sprintf("R%d", i), ticksPerQuery)})
 		}(i)
 	}
-	close(start)
+	tickReset()
 	wallStart := time.Now()
+	close(start)
 	wg.Wait()
 	wall := time.Since(wallStart)
 
@@ -133,118 +270,149 @@ func TestQueriesRunConcurrently(t *testing.T) {
 			t.Fatalf("并发第 %d 个查询失败：%v", i+1, err)
 		}
 	}
-	overlap := maxOverlap(intervals)
-	t.Logf("串行 %v（%d 次）/ 并发墙钟 %v（加速 %.2fx）/ 最大同时在跑 %d / 单次约 %v",
-		serial, readers, wall, float64(serial)/float64(wall), overlap, serial/time.Duration(readers))
+	evs := tickSnapshot()
+	spans := make([][2]time.Time, 0, readers)
+	for i := 0; i < readers; i++ {
+		tag := fmt.Sprintf("R%d", i)
+		first, last, n := tickSpan(evs, tag)
+		if n != ticksPerQuery {
+			t.Fatalf("tag %s 的回调次数 = %d，want %d（语句没跑满？）", tag, n, ticksPerQuery)
+		}
+		spans = append(spans, [2]time.Time{first, last})
+		t.Logf("%s：执行区间长 %v（%d 次回调）", tag, last.Sub(first), n)
+	}
+	overlap := tickMaxOverlap(spans)
+	runs := tickRuns(evs)
+	t.Logf("readers=%d：回调 %d 次，连续段数 %d（== 语句数 %d 即完全串行；越大说明交错越深），执行区间最大重叠 %d，墙钟 %v",
+		readers, len(evs), runs, readers, overlap, wall)
 
 	if overlap < 2 {
-		t.Fatalf("并发读没有真的重叠（最大同时在跑 %d）：读路径仍然被串行化了", overlap)
+		t.Fatalf("并发读的执行区间没有重叠（最大同时在执行 %d）：读路径仍然被串行化了", overlap)
+	}
+	if runs <= readers {
+		t.Fatalf("执行期回调的连续段数 = %d，未超过语句数 %d：语句没有真的交错执行（读被串行化）",
+			runs, readers)
 	}
 	if overlap != readers {
 		// 不是硬失败（调度抖动可能让某一条晚一步进入），但要看见。
-		t.Logf("注意：屏障后同时在跑 %d 条（期望 %d），>= 2 即视为并发成立", overlap, readers)
-	}
-	if wall >= serial {
-		t.Fatalf("并发墙钟 %v 未优于串行 %v：读没有真正并发（每次查询 %v）", wall, serial, serial/time.Duration(readers))
+		t.Logf("注意：屏障后同时在执行 %d 条（期望 %d），>= 2 即视为并发成立", overlap, readers)
 	}
 	if got := d.sqlDB.Stats().OpenConnections; got != 1+readers {
 		t.Fatalf("池内连接数应为 1+%d=%d，实际 %d", readers, 1+readers, got)
 	}
 }
 
-// maxOverlap 返回一组区间里"同时存在"的最大条数（扫描线；同刻先算 +1）。
-func maxOverlap(ivs []connInterval) int {
-	type point struct {
-		at    time.Time
-		delta int
+// TestQueriesWithOneReaderAreSerialized 是上面那条判据的**反例对照**：只读槽只有
+// 一条时（app_db_readers=1），两个并发 Query 必然退化为串行 —— 同一套执行期判据
+// 必须给出 重叠 == 1、段数 == 2（= 语句数）。它同时自证判据不是恒真：
+// 若把"读真并发"的判据写成"调用区间相交"，这条反例根本拦不住（串行下调用区间照样相交）。
+//
+// 变异方式：让 takeReadSlot 在 readers=1 时仍能并发（例如忽略槽位数）⇒ 本用例变红。
+func TestQueriesWithOneReaderAreSerialized(t *testing.T) {
+	const ticksPerQuery = 40
+	d := newSlowDB(t, "serial-readers-app", 1)
+	ctx := context.Background()
+
+	start := make(chan struct{})
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = d.Query(ctx, abi.SQLParams{SQL: tickQuerySQL(fmt.Sprintf("S%d", i), ticksPerQuery)})
+		}(i)
 	}
-	points := make([]point, 0, len(ivs)*2)
-	for _, iv := range ivs {
-		if !iv.end.After(iv.start) {
-			continue
-		}
-		points = append(points, point{iv.start, +1}, point{iv.end, -1})
-	}
-	sort.Slice(points, func(i, j int) bool {
-		if points[i].at.Equal(points[j].at) {
-			return points[i].delta > points[j].delta
-		}
-		return points[i].at.Before(points[j].at)
-	})
-	cur, best := 0, 0
-	for _, p := range points {
-		cur += p.delta
-		if cur > best {
-			best = cur
+	tickReset()
+	wallStart := time.Now()
+	close(start)
+	wg.Wait()
+	wall := time.Since(wallStart)
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("第 %d 个查询失败：%v", i+1, err)
 		}
 	}
-	return best
+	evs := tickSnapshot()
+	f0, l0, n0 := tickSpan(evs, "S0")
+	f1, l1, n1 := tickSpan(evs, "S1")
+	if n0 != ticksPerQuery || n1 != ticksPerQuery {
+		t.Fatalf("回调次数应为 %d/%d，实际 %d/%d", ticksPerQuery, ticksPerQuery, n0, n1)
+	}
+	overlap := tickMaxOverlap([][2]time.Time{{f0, l0}, {f1, l1}})
+	runs := tickRuns(evs)
+	t.Logf("app_db_readers=1：连续段数 %d（2=完全串行），执行区间重叠 %d，墙钟 %v（两条执行区间之和 %v）",
+		runs, overlap, wall, l0.Sub(f0)+l1.Sub(f1))
+
+	if overlap != 1 {
+		t.Fatalf("app_db_readers=1 时两条语句的执行区间仍重叠（%d）：没有退化为串行", overlap)
+	}
+	if runs != 2 {
+		t.Fatalf("app_db_readers=1 时执行期回调段数 = %d，want 2（每个 tag 一段 = 串行）", runs)
+	}
+	if got := d.sqlDB.Stats().OpenConnections; got != 2 {
+		t.Fatalf("readers=1 时池内连接数应为 2，实际 %d", got)
+	}
 }
 
 // ===== 2. 读不被写挡住 / 写之间仍串行 =====
 
 // TestReadsAreNotBlockedByWriter 断言三件事：
 //
-//	(a) **读与写并发**：一条慢写（auto-commit，持有 SQLite 写锁）进行期间，
-//	    另一个 goroutine 的读能在写结束**之前**完成（区间相交）。改造前读要被
-//	    d.mu 挡住整条写语句 ⇒ 读区间只会在写区间之后；
+//	(a) **读与写真并发**：慢写执行期间发起的读，其执行区间（回调的 [首次, 末次]）
+//	    与写的执行区间重叠，且读的**末次回调在写的末次回调之前** —— 读是在写还没
+//	    结束时就跑完的。判据取自执行期回调，不是"[发起,返回] 区间相交"（后者在
+//	    串行实现下恒真：读被 writeMu 挡住时，它的调用区间恰好横跨整条写）；
 //	(b) **写语句必须经过 writeMu**：测试手动持有 writeMu 时，Exec 不得完成；
-//	(c) **写与写串行**：两条慢写的总跨度接近两者耗时之和（而不是最大者）——
-//	    并发执行时跨度 ≈ max，串行执行时跨度 ≈ d1+d2。
+//	(c) **写与写串行**：两条慢写的执行期回调**完全分组**（段数 == 2）且区间不重叠。
 //
 // 顺带验证 WAL：写进行期间读不会拿到 database_busy（否则读会以错误收场）。
 func TestReadsAreNotBlockedByWriter(t *testing.T) {
 	d := newSlowDB(t, "read-write-app", 2)
 	ctx := context.Background()
-	readQ := abi.SQLParams{SQL: "SELECT count(*) FROM bench_items WHERE pad LIKE '%0000%'"}
-	writeQ := abi.SQLParams{SQL: "UPDATE bench_items SET pad = pad || ''"}
 
-	// (a) 读 vs 写：最多试 3 轮（屏障同步后两边的区间都从同一时刻开始；
-	// 万一调度把读者推迟到写结束之后，重试一轮即可，串行实现下**每一轮**都不会相交）。
-	overlapped := false
-	for round := 0; round < 3 && !overlapped; round++ {
-		start := make(chan struct{})
-		var wg sync.WaitGroup
-		var readIV, writeIV connInterval
-		var readErr, writeErr error
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			<-start
-			writeIV.start = time.Now()
-			_, writeErr = d.Exec(ctx, writeQ)
-			writeIV.end = time.Now()
-		}()
-		go func() {
-			defer wg.Done()
-			<-start
-			readIV.start = time.Now()
-			_, readErr = d.Query(ctx, readQ)
-			readIV.end = time.Now()
-		}()
-		close(start)
-		wg.Wait()
-
-		if writeErr != nil {
-			t.Fatalf("慢写失败：%v", writeErr)
-		}
-		if readErr != nil {
-			t.Fatalf("与写并发的读失败（WAL 下不该被写挡住）：%v", readErr)
-		}
-		overlapped = readIV.overlaps(writeIV)
-		t.Logf("第 %d 轮：写耗时 %v，读耗时 %v，区间相交=%v（读起点在写结束前 %v）",
-			round+1, writeIV.end.Sub(writeIV.start), readIV.end.Sub(readIV.start), overlapped,
-			writeIV.end.Sub(readIV.start))
+	// (a) 读 vs 写：先让写真的跑起来（等到它的首次回调 —— 这是"写正在执行"的
+	// 可观测事实），此时读**必然**落在写的执行窗口内，不受调度抖动影响。
+	// 写 200 行 ≈ 80 ms，读 40 行 ≈ 16 ms ⇒ 余量充足。
+	const writeRows = 200
+	const readTicks = 40
+	tickReset()
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := d.Exec(ctx, abi.SQLParams{SQL: tickWriteSQL("WL", writeRows)})
+		writeDone <- err
+	}()
+	waitForTick(t, "WL")
+	if _, err := d.Query(ctx, abi.SQLParams{SQL: tickQuerySQL("RL", readTicks)}); err != nil {
+		t.Fatalf("与写并发的读失败（WAL 下不该被写挡住）：%v", err)
 	}
-	if !overlapped {
-		t.Fatal("读与写在 3 轮里都没有重叠：读被写挡住了（读路径与写路径仍然共用一把锁）")
+	if err := <-writeDone; err != nil {
+		t.Fatalf("慢写失败：%v", err)
+	}
+	evs := tickSnapshot()
+	firstR, lastR, nR := tickSpan(evs, "RL")
+	firstW, lastW, nW := tickSpan(evs, "WL")
+	if nR != readTicks || nW != writeRows {
+		t.Fatalf("回调次数应为读 %d / 写 %d，实际 %d / %d", readTicks, writeRows, nR, nW)
+	}
+	t.Logf("写执行区间 %v（%d 次回调），读执行区间 %v（起点在写区间内 %v 处，末次回调早于写结束 %v）",
+		lastW.Sub(firstW), nW, lastR.Sub(firstR), firstR.Sub(firstW), lastW.Sub(lastR))
+	if !firstR.Before(lastW) {
+		t.Fatal("读的执行区间与写没有重叠：读是在写结束之后才开始执行的（读被写挡住了）")
+	}
+	if !lastR.Before(lastW) {
+		t.Fatal("读的末次回调发生在写结束之后：读没有在写执行期间跑完（读被写挡住了）")
 	}
 
 	// (b) 写语句必须持 writeMu：测试占着它时 Exec 不得完成。
+	// 插入行的 n 取 999999：**(c) 的 tick 谓词是 `n < 40`**，这一行不能混进去
+	// （否则下面按"回调次数 == 行数"做的断言会因为多一行而假红）。
 	d.writeMu.Lock()
 	done := make(chan error, 1)
 	go func() {
-		_, err := d.Exec(ctx, abi.SQLParams{SQL: "INSERT INTO bench_items(n, pad) VALUES (1, 'mutex-probe')"})
+		_, err := d.Exec(ctx, abi.SQLParams{SQL: "INSERT INTO bench_items(n, pad) VALUES (999999, 'mutex-probe')"})
 		done <- err
 	}()
 	select {
@@ -263,8 +431,8 @@ func TestReadsAreNotBlockedByWriter(t *testing.T) {
 		t.Fatal("释放 writeMu 后写仍未完成")
 	}
 
-	// (c) 两条慢写：总跨度应接近两者耗时之和（串行），而不是最大者（并发）。
-	var ivs [2]connInterval
+	// (c) 两条慢写：执行期回调必须完全分组（段数 == 2）且区间不重叠 —— 单写者语义。
+	tickReset()
 	errs := [2]error{}
 	start2 := make(chan struct{})
 	var wg2 sync.WaitGroup
@@ -273,9 +441,7 @@ func TestReadsAreNotBlockedByWriter(t *testing.T) {
 		go func(i int) {
 			defer wg2.Done()
 			<-start2
-			ivs[i].start = time.Now()
-			_, errs[i] = d.Exec(ctx, writeQ)
-			ivs[i].end = time.Now()
+			_, errs[i] = d.Exec(ctx, abi.SQLParams{SQL: tickWriteSQL(fmt.Sprintf("W%d", i), 40)})
 		}(i)
 	}
 	close(start2)
@@ -285,22 +451,21 @@ func TestReadsAreNotBlockedByWriter(t *testing.T) {
 			t.Fatalf("并发写第 %d 条失败：%v", i+1, err)
 		}
 	}
-	d0, d1 := ivs[0].end.Sub(ivs[0].start), ivs[1].end.Sub(ivs[1].start)
-	span := ivs[1].end.Sub(ivs[0].start)
-	if ivs[0].end.After(ivs[1].end) {
-		span = ivs[0].end.Sub(ivs[1].start)
+	evs = tickSnapshot()
+	f0, l0, n0 := tickSpan(evs, "W0")
+	f1, l1, n1 := tickSpan(evs, "W1")
+	if n0 != 40 || n1 != 40 {
+		t.Fatalf("两条写的回调次数应为 40/40，实际 %d/%d", n0, n1)
 	}
-	shorter := d0
-	if d1 < shorter {
-		shorter = d1
+	runs := tickRuns(evs)
+	ov := tickMaxOverlap([][2]time.Time{{f0, l0}, {f1, l1}})
+	t.Logf("写 vs 写：连续段数 %d（2=完全串行），执行区间重叠 %d，W0 区间长 %v，W1 区间长 %v",
+		runs, ov, l0.Sub(f0), l1.Sub(f1))
+	if runs != 2 {
+		t.Fatalf("两条写的执行期回调段数 = %d，want 2：两条写在并发执行，单写者语义被破坏", runs)
 	}
-	// 判据：串行时"后拿到锁的那条"的耗时里包含了等待 ⇒ 它几乎等于总跨度，
-	// 而"先拿到锁的那条"只有纯执行时间 ⇒ 较短者明显小于跨度。并发时两者都
-	// 从屏障时刻起跑、各自只花纯执行时间 ⇒ 较短者 ≈ 跨度。
-	t.Logf("两条写语句：耗时 %v / %v，总跨度 %v（较短者/跨度 = %.2f，串行时应明显 < 0.8）",
-		d0, d1, span, float64(shorter)/float64(span))
-	if float64(shorter) >= 0.8*float64(span) {
-		t.Fatalf("两条写语句的耗时几乎等于总跨度（%v ≈ %v）：它们在并发执行，单写者语义被破坏", shorter, span)
+	if ov != 1 {
+		t.Fatalf("两条写的执行区间重叠 = %d，want 1：两条写在并发执行", ov)
 	}
 
 	// 写事务持锁期间，第二个 Begin 仍被拒（同时最多一个事务）。
@@ -423,6 +588,74 @@ func TestCloseDrainsInFlightReaders(t *testing.T) {
 }
 
 // ===== 5. WAL 与 busy_timeout 逐条连接 =====
+
+// TestEnableWALLockedRejectsNonWALJournalMode 是 `enableWALLocked` 那条
+// 「读回必须 == "wal"」断言的**判别性**用例（2026-09-19 独立验证 F3）。
+//
+// 为什么必须有它：正常文件系统上 `PRAGMA journal_mode = WAL` 的读回**恒为 "wal"**，
+// 所以把断言弱化成 `err == nil` 之后，全量产品用例**一道都不会红**（独立验证实测
+// 0 红）—— 也就是说这条"不许静默降级"的断言此前**没有任何测试保护**。
+// 判据必须选"引擎会返回非 wal **且不报错**"的形态：`:memory:` 库正是现场
+// （`PRAGMA journal_mode = WAL` 返回 "memory"、err=nil）；只读连接不行
+// （报 SQLITE_READONLY，那是错误路径，区分不出断言强弱）。
+//
+// 变异方式：把 `if !strings.EqualFold(strings.TrimSpace(mode), "wal")` 去掉
+// （或改成 `if false && …`，= 只判 err==nil）⇒ 本用例必红。
+func TestEnableWALLockedRejectsNonWALJournalMode(t *testing.T) {
+	ctx := context.Background()
+
+	// (1) 反例：`PRAGMA journal_mode=WAL` 返回非 wal 且不报错。
+	//
+	// 这条连接**不经过 appdb.Open**：连接钩子只托管应用库路径
+	// （`isGuardedAppDBPath`），`:memory:` 不在其中 ⇒ 可以拿裸连接。
+	mem, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open(:memory:)：%v", err)
+	}
+	t.Cleanup(func() { _ = mem.Close() })
+	conn, err := mem.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Conn(:memory:)：%v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	var mode string
+	if qerr := conn.QueryRowContext(ctx, "PRAGMA journal_mode = WAL").Scan(&mode); qerr != nil {
+		t.Fatalf("该形态必须「返回非 wal 且不报错」才具备判别力，PRAGMA 却报错了：%v", qerr)
+	}
+	if strings.EqualFold(strings.TrimSpace(mode), "wal") {
+		t.Fatalf("前提不成立：:memory: 库的 journal_mode 读回 %q（本用例要的是非 wal 形态）", mode)
+	}
+	t.Logf(":memory: 上 `PRAGMA journal_mode = WAL`：err=nil、读回 %q（= 静默降级现场）", mode)
+
+	werr := enableWALLocked(ctx, conn)
+	if werr == nil {
+		t.Fatalf("读回 %q（非 wal）时 enableWALLocked 返回 nil：字符串断言已退化成 err==nil，"+
+			"静默接受非 WAL 日志（而多读者并发正是建立在 WAL 上，delete/memory 日志下读会退化成 SQLITE_BUSY）",
+			mode)
+	}
+	e, ok := apperr.As(werr)
+	if !ok {
+		t.Fatalf("应是 apperr，实际 %T：%v", werr, werr)
+	}
+	if e.Code != apperr.CodeInternal {
+		t.Fatalf("错误码 = %s，want INTERNAL（fail-closed，宁可不提供服务）：%v", e.Code, e)
+	}
+	// 错误里必须带期望值与实际读回值（弱化成 err==nil 时连这条信息都没有）。
+	if got, _ := e.Details["want"].(string); got != "wal" {
+		t.Fatalf("details.want = %q，want \"wal\"", got)
+	}
+	if got, _ := e.Details["got"].(string); got != mode {
+		t.Fatalf("details.got = %q，want %q（回显实际读回值）", got, mode)
+	}
+
+	// (2) 对照：正常库（Open 时已切成 wal）上 enableWALLocked 必须通过 ——
+	// 证明上面不是"总是报错"的空断言。
+	d := newTestDB(t, "wal-readback-ok")
+	if err := enableWALLocked(ctx, d.writeConn()); err != nil {
+		t.Fatalf("正常库（journal_mode 已是 wal）上 enableWALLocked 不该报错：%v", err)
+	}
+}
 
 // TestJournalModeWALAndBusyTimeoutOnEveryConn 钉住三件事：
 //   - **新库首次 Open 即 WAL**（journal_mode 是库级持久设置，connectLocked 断言读回 "wal"）；

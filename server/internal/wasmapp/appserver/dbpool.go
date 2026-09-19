@@ -82,7 +82,7 @@ type appDBHandle struct {
 	// uncached 表示这是"池满且无可淘汰"时的降级路径：用完即关、不进池。
 	uncached bool
 
-	// txGate 是"事务所有权判定 + 写/begin 调用"的闸（见 appDBConn 的注释）：
+	// txGate 是"事务所有权判定 + 写/begin/事务出口调用"的闸（见 appDBConn 的注释）：
 	// 同应用的写彼此本来就由 appdb 的 writeMu 串行，这把闸只额外保证
 	// "所有权检查"与"调用 appdb"之间没有插入窗口。读不经过它。
 	txGate sync.Mutex
@@ -597,9 +597,10 @@ func verifyAppDBHandle(ctx context.Context, dataRoot, appID string, db *appdb.DB
 //   - **判据是 appdb 的权威状态**：`InTx()` 为真 且 事务持有者不是本请求 ⇒ 拒绝。
 //     不信任句柄上的 owner 标记做安全判定（标记只用来放行持有者自己），
 //     因此"标记陈旧/丢失"只会让调用被拒（fail-closed），绝不会放行；
-//   - **写路径（exec/define）与 begin 走同一把 `txGate`**：检查与"调用 appdb"是一个
-//     原子段 ⇒ 不存在"检查时无事务、执行时已有事务"的插入窗口（这是写丢失的唯一
-//     真实入口，必须原子）；
+//   - **写路径（exec/define）、begin 与事务出口（commit/rollback）走同一把 `txGate`**：
+//     检查与"调用 appdb"是一个原子段 ⇒ 不存在"检查时无事务、执行时已有事务"的插入窗口
+//     （这是写丢失的唯一真实入口，必须原子）。事务出口 2026-09-19 补上（独立验证 F1）：
+//     `tx_id` 是可省略字段 ⇒ appdb 的串号校验能被绕过，出口是**同一类越权**的第二个入口；
 //   - **读路径（query）不加闸**（否则读会被写串行化，正好毁掉本轮并发收益），改为
 //     **执行前后各查一次**：与外来事务重叠的读会被报成拒绝，而不是把未提交数据当
 //     已提交返回。残留：事务的打开与提交都恰好落在两条 query 之间的窗口读不到
@@ -715,6 +716,16 @@ func (c *appDBConn) Begin(ctx context.Context) (abi.TxResult, error) {
 }
 
 func (c *appDBConn) Commit(ctx context.Context, p abi.TxParams) error {
+	// **事务出口也必须查所有权**（2026-09-19 独立验证 F1）：appdb 的
+	// `finishTx` 只在 `p.TxID != 0` 时校验串号，而 `tx_id` 是可选字段
+	// ⇒ 外来请求传 0（或干脆不传）就能**提交/回滚别人的事务**：
+	// 未提交数据被第三方提交后对全应用可见，或第三方把持有者的写直接丢弃。
+	// 与 Exec/Begin 共用一把闸还保证了"检查与调用是原子段"：否则 B 检查时
+	// 无事务、A 恰好在这中间 Begin，B 的 commit 仍会落进 A 的事务。
+	if err := c.lockTxGate(); err != nil {
+		return err
+	}
+	defer c.unlockTxGate()
 	err := c.DB.Commit(ctx, p)
 	c.notePoison(err)
 	c.releaseTxOwnership()
@@ -722,6 +733,11 @@ func (c *appDBConn) Commit(ctx context.Context, p abi.TxParams) error {
 }
 
 func (c *appDBConn) Rollback(ctx context.Context, p abi.TxParams) error {
+	// 同 Commit：串号可省略 ⇒ 所有权判定只能落在这一层（见上）。
+	if err := c.lockTxGate(); err != nil {
+		return err
+	}
+	defer c.unlockTxGate()
 	err := c.DB.Rollback(ctx, p)
 	c.notePoison(err)
 	c.releaseTxOwnership()
@@ -730,9 +746,13 @@ func (c *appDBConn) Rollback(ctx context.Context, p abi.TxParams) error {
 
 // lockTxGate 取句柄的"事务闸"并做所有权校验；返回非 nil 表示调用必须被拒（且未持锁）。
 //
-// 为什么 Begin 与写共用一把闸：见 appDBConn 的注释 —— "检查无事务"与"调用 appdb"
-// 之间必须没有窗口，否则外来写可以挤进刚打开的事务。写本来就由 appdb 的 writeMu
-// 串行，所以这把闸不引入额外的吞吐代价；读**不**经过它。
+// 为什么 Begin / 写 / 事务出口共用一把闸：见 appDBConn 的注释 —— "检查无事务"与
+// "调用 appdb"之间必须没有窗口，否则外来写可以挤进刚打开的事务（出口同理：外来
+// commit/rollback 会提交或丢弃别人的写）。写本来就由 appdb 的 writeMu 串行，所以
+// 这把闸不引入额外的吞吐代价；读**不**经过它。
+//
+// 锁序恒为 txGate → writeMu（appdb 的写原语在内部取 writeMu），绝无反向获取：
+// `endRequest` 的清理回滚是**直连** appdb 的（它先判 `txOwner == c`），不取 txGate。
 func (c *appDBConn) lockTxGate() *apperr.Error {
 	if c == nil || c.handle == nil {
 		return nil

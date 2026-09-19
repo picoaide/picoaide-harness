@@ -34,11 +34,14 @@ type DB interface {
 	// Exec 执行单条写语句（仅 INSERT/UPDATE/DELETE）。
 	Exec(ctx context.Context, p abi.SQLParams) (abi.ExecResult, error)
 	// Begin 开启事务并返回事务标识（同时最多一个事务；每应用并发布放后，宿主按请求
-	// 校验事务所有权 —— 非持有者的读写会被拒绝，见 appserver 的每请求包装层）。
+	// 校验事务所有权 —— 非持有者的读、写**与事务出口**（Commit/Rollback）都会被拒绝，
+	// 见 appserver 的每请求包装层）。
 	Begin(ctx context.Context) (abi.TxResult, error)
 	// Commit 提交当前事务；p.TxID 非零时校验一致性。
+	// 与 Begin 同一条所有权闸：非事务持有者调用一律被拒（p.TxID 为 0 也不例外）。
 	Commit(ctx context.Context, p abi.TxParams) error
 	// Rollback 回滚当前事务；p.TxID 非零时校验一致性。
+	// 同 Commit：非事务持有者一律被拒（否则第三方能把别人的事务回滚掉、连带丢失其写）。
 	Rollback(ctx context.Context, p abi.TxParams) error
 	// InTx 报告当前是否有打开的事务（事务内禁止其他宿主调用，§4.4）。
 	InTx() bool
