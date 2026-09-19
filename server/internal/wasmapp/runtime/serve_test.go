@@ -436,8 +436,13 @@ func TestServe_OutputOverrun(t *testing.T) {
 	const budget = 5 * time.Second
 	req := testRequest("/flood", newFakeHost())
 	req.Budgets.GuestBudget = budget
+	// 模块在计时**之前**取好：一次性开销（wazero 冷编译）绝不许落进"耗时必须接近预算"
+	// 的窗口里。包级不变量在 helpers_test.go 的 warmUpGuestFixture（TestMain 预热）；
+	// 这里显式再取一次，让本用例不依赖预热顺序。
+	rt := sharedRuntime(t)
+	mod := appModule(t)
 	start := time.Now()
-	res := serveCompiled(t, sharedRuntime(t), appModule(t), req)
+	res := serveCompiled(t, rt, mod, req)
 	requireKill(t, res, apperr.CodeRuntimeOutputOverrun)
 	if elapsed := time.Since(start); elapsed > budget {
 		t.Fatalf("超限应在预算内被发现，实际耗时 %s", elapsed)
@@ -449,8 +454,11 @@ func TestServe_TotalOutputOverrun(t *testing.T) {
 	const budget = 8 * time.Second
 	req := testRequest("/spam", newFakeHost())
 	req.Budgets.GuestBudget = budget
+	// 同上：模块取在计时窗口之外。
+	rt := sharedRuntime(t)
+	mod := appModule(t)
 	start := time.Now()
-	res := serveCompiled(t, sharedRuntime(t), appModule(t), req)
+	res := serveCompiled(t, rt, mod, req)
 	requireKill(t, res, apperr.CodeRuntimeOutputOverrun)
 	if elapsed := time.Since(start); elapsed > budget {
 		t.Fatalf("总量超限应在预算内被发现，实际 %s", elapsed)
@@ -462,12 +470,30 @@ func TestServe_TotalOutputOverrun(t *testing.T) {
 }
 
 // 响应帧本身超过单帧上限（1 MiB）⇒ ErrFrameTooLarge ⇒ RUNTIME_OUTPUT_OVERRUN。
+//
+// ⚠️ 这条判据只需**长度前缀**（9 字节：RS + 十进制长度 + '\n'）就能触发：夹具
+// （testdata/guests/app 的 /bigframe）必须边写帧头边流式写载荷，**不得先把 2 MiB
+// 的响应信封物化出来** —— 物化要烧 1.2–2.4 s 的 guest CPU，而 guest 预算是**墙钟**
+// 3 s ⇒ 机器一有负载，guest 光造帧就把预算烧完，宿主的判据根本来不及被触发，
+// 结论被洗成 RUNTIME_TIMEOUT（2026-09-19 定位与复现：
+// docs/AUDIT-2026-09-19-WASM-FRAME-LIMIT.md）。与单行/总量两条判据同款，
+// 这里断言"超限必须在预算内被发现"。
 func TestServe_ResponseFrameTooLarge(t *testing.T) {
+	const budget = 3 * time.Second
 	req := testRequest("/bigframe", newFakeHost())
-	res := serveCompiled(t, sharedRuntime(t), appModule(t), req)
+	req.Budgets.GuestBudget = budget
+	// 模块/运行时在计时**之前**取好（同 helpers_test.go 的 warmUpGuestFixture 口径）：
+	// 一次性开销（冷编译 ~10–20 s）不得落进"超限必须在预算内被发现"的窗口里。
+	rt := sharedRuntime(t)
+	mod := appModule(t)
+	start := time.Now()
+	res := serveCompiled(t, rt, mod, req)
 	requireKill(t, res, apperr.CodeRuntimeOutputOverrun)
 	if !strings.Contains(res.KillReason.Message, "单帧上限") {
 		t.Fatalf("应命中单帧上限判据: %s", res.KillReason.Message)
+	}
+	if elapsed := time.Since(start); elapsed > budget {
+		t.Fatalf("单帧超限应在预算内被发现，实际耗时 %s", elapsed)
 	}
 }
 
