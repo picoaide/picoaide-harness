@@ -417,6 +417,53 @@ describe('parsePublishOutcome：形状不对不假装成功', () => {
     if (!outcome.ok) throw new Error('unreachable')
     expect(outcome.entryURL).toBe('')
   })
+
+  /**
+   * R1-uxc-1：服务端**确实**下发 `app.enabled`（`api/publish.go:682`；已存在应用保留
+   * 原值 `:637-639`），而旧客户端把它丢掉 ⇒ 下架应用发新版的成功块写"已生效"。
+   *
+   * 变异验证：把 `parsePublishOutcome` 里的 `enabled` / `live` 两行删掉（旧实现）⇒
+   * 本组两条红。
+   */
+  it('下架应用（app.enabled=false）⇒ enabled=false 且 live=false（不算已生效）', () => {
+    const outcome = parsePublishOutcome({
+      app: { app_id: 'gone', enabled: false },
+      release: { version: '1.1.0', status: 'approved', current: true },
+    })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('unreachable')
+    expect(outcome.enabled).toBe(false)
+    // 版本是当前版本，但**没有对使用者生效**（应用子域 410 Gone）。
+    expect(outcome.live).toBe(false)
+  })
+
+  it('上架应用（app.enabled=true）⇒ enabled=true 且 live=true（行为不变）', () => {
+    const outcome = parsePublishOutcome({
+      app: { app_id: 'live', enabled: true },
+      release: { version: '1.1.0', status: 'approved', current: true },
+    })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('unreachable')
+    expect(outcome.enabled).toBe(true)
+    expect(outcome.live).toBe(true)
+    // 待审仍然是"没生效"（与 enabled 无关的那条判据不能被这次改动挤掉）。
+    const pending = parsePublishOutcome({
+      app: { app_id: 'live', enabled: true },
+      release: { version: '1.1.0', status: 'pending', current: false },
+      review_required: true,
+    })
+    expect(pending.ok).toBe(true)
+    if (!pending.ok) throw new Error('unreachable')
+    expect(pending.live).toBe(false)
+  })
+
+  it('`app.enabled` 缺席 ⇒ 按上架处理（不凭缺席宣称应用已下架）', () => {
+    const outcome = parsePublishOutcome({ app: {}, release: { version: '1.0.0', status: 'approved', current: true } })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('unreachable')
+    expect(outcome.enabled).toBe(true)
+    expect(outcome.live).toBe(true)
+  })
 })
 
 describe('模块级常量', () => {
