@@ -129,7 +129,10 @@ describe('workspace 子路径 import 必须都在打包必需清单里（2026-09
     const specs = new Set<string>()
     for (const file of readdirSync(libDir).filter(f => f.endsWith('.js'))) {
       const text = readFileSync(join(libDir, file), 'utf8')
-      for (const m of text.matchAll(/from\s*"(@picoaide\/[^"]+)"/g)) specs.add(m[1])
+      for (const m of text.matchAll(/from\s*"(@picoaide\/[^"]+)"/g)) {
+        const spec = m[1]
+        if (spec !== undefined) specs.add(spec)
+      }
     }
     // 前置断言：判据不能空转（桌面产物确实 import 了 workspace 包）。
     expect(specs.size, '没有从 desktop 产物里扫到任何 @picoaide/* import，判据会空转').toBeGreaterThan(0)
