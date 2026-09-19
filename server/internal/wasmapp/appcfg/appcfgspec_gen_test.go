@@ -231,13 +231,24 @@ func TestSpecCoversPublishPayload(t *testing.T) {
 // ===== (c) access 契约与 §4.2 / abi 一致 =====
 
 // TestAccessContractMatchesABIAndDesign 是本次变更的**核心断言**：
-// access 只有三个取值、缺省 login，且三处（Go 常量 / abi 帧取值 / 设计基线 §4.2）互相一致。
+// access 的内部取值有三个（含历史只读的 public）、**可写**取值只有两个、缺省 login，
+// 且 Go 常量 / abi 帧取值 / 设计基线 §4.2 / 生成物四处互相一致。
 //
-// 变异方式：把 AccessDefault 改回"可见即公开"的旧语义（public），或把取值改回两个 ⇒ 红。
+// ⚠️ 2026-09-19 收敛（R1-DAT-8 / UX-13）：**作者契约（生成物）不得再列出 public**。
+// 内部 AccessValues 仍含它是为了读取侧兼容（历史行不 500），但生成物是"作者能写什么"
+// 的唯一说明 —— 列出 public 会让作者以为还能写（写入侧实际 422 拒绝）。
+// 因此本用例对两个集合**分别**断言，并显式断言产物里没有 public。
+//
+// 变异方式：把 AccessDefault 改回 public、把可写集合放回三个、或让生成物重新列 public ⇒ 红。
 func TestAccessContractMatchesABIAndDesign(t *testing.T) {
 	want := []string{"public", "login", "whitelist"}
 	if !reflect.DeepEqual(appcfg.AccessValues, want) {
-		t.Fatalf("AccessValues = %v, want %v（用户 2026-09-18 拍板的三模式）", appcfg.AccessValues, want)
+		t.Fatalf("AccessValues = %v, want %v（内部取值含历史只读的 public）", appcfg.AccessValues, want)
+	}
+	// 可写取值 = 作者契约的取值（生成物必须与它逐字一致）。
+	wantWritable := []string{"login", "whitelist"}
+	if !reflect.DeepEqual(appcfg.AccessWritableValues, wantWritable) {
+		t.Fatalf("AccessWritableValues = %v, want %v（写侧只接受这两个）", appcfg.AccessWritableValues, wantWritable)
 	}
 	if string(appcfg.AccessDefault) != "login" {
 		t.Fatalf("AccessDefault = %q, want \"login\"（缺省=登录后全员）", appcfg.AccessDefault)
@@ -264,10 +275,11 @@ func TestAccessContractMatchesABIAndDesign(t *testing.T) {
 	if c.Access != appcfg.AccessDefault {
 		t.Fatalf("Parse({}).access = %q, want 缺省 %q", c.Access, appcfg.AccessDefault)
 	}
-	// 产物里的三取值/缺省也必须一致（TS 侧读的是生成物，不是 Go 常量）。
+	// 产物里的**可写**取值/缺省也必须一致（TS 侧读的是生成物，不是 Go 常量）。
 	doc := loadSpecArtifact(t)
-	if !reflect.DeepEqual(doc.AccessValues, want) {
-		t.Errorf("appcfg.json 的 access_values = %v, want %v", doc.AccessValues, want)
+	if !reflect.DeepEqual(doc.AccessValues, wantWritable) {
+		t.Errorf("appcfg.json 的 access_values = %v, want %v（消费方=作者，只该看到可写取值）",
+			doc.AccessValues, wantWritable)
 	}
 	if doc.AccessDefault != "login" {
 		t.Errorf("appcfg.json 的 access_default = %q, want \"login\"", doc.AccessDefault)
@@ -276,9 +288,20 @@ func TestAccessContractMatchesABIAndDesign(t *testing.T) {
 	if !ok {
 		t.Fatal("appcfg.json 的 config_fields 里没有 access")
 	}
-	if accessField.Default != "login" || !reflect.DeepEqual(accessField.Values, want) {
+	if accessField.Default != "login" || !reflect.DeepEqual(accessField.Values, wantWritable) {
 		t.Errorf("config_fields.access 的缺省/取值 = %q/%v, want login/%v",
-			accessField.Default, accessField.Values, want)
+			accessField.Default, accessField.Values, wantWritable)
+	}
+	// 作者契约里**不得**再出现 public（R1-DAT-8/UX-13 的判据本体）。
+	for _, v := range doc.AccessValues {
+		if v == "public" {
+			t.Error("appcfg.json 的 access_values 仍列出 public —— 作者会以为能写它（写侧 422 拒绝）")
+		}
+	}
+	for _, v := range accessField.Values {
+		if v == "public" {
+			t.Error("config_fields.access.values 仍列出 public")
+		}
 	}
 
 	// 设计基线 §4.2 的配置文件行必须写明同一套取值与缺省（就地勘误后的行）。

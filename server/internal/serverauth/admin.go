@@ -73,6 +73,20 @@ type AdminAPI struct {
 	// ReloadAuth 让运行中的客户端认证 API 按新配置重建 provider(F2)。
 	// main 注入;测试自建路由树为 nil 时跳过(仅启动时快照)。
 	ReloadAuth func() error
+	// OnUserSessionsRevoked 是**管理端触发的会话吊销**回调(契约 §8.2 / R1-SRV-5):
+	// 改密 / 降权 / 禁用 / 删除 / 重置 MFA 会清空该用户的全部 bearer ⇒ 每个派生
+	// 会话键同时失效,必须批量丢掉进程内的在手 AI 令牌(见 API 同名字段的注释)。
+	//
+	// 与 API 的同名钩子分成两个字段(而不是共用一个全局):两个 handler 集合的装配
+	// 生命周期不同(AdminAPI 由 main 独立构造),共用一个全局会让测试之间的注入互相串。
+	OnUserSessionsRevoked func(userID int64)
+}
+
+// notifyUserSessionsRevoked 触发管理端的会话吊销回调(nil 安全,与 API 同名方法同形)。
+func (a *AdminAPI) notifyUserSessionsRevoked(userID int64) {
+	if a != nil && a.OnUserSessionsRevoked != nil {
+		a.OnUserSessionsRevoked(userID)
+	}
 }
 
 // validateIssuerURL 是 OIDC/OpenID issuer 的**唯一校验入口**(保存与测试连接
@@ -552,6 +566,8 @@ func (a *AdminAPI) handleMePassword(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "修改密码失败")
 		return
 	}
+	// 改密吊销该用户全部 api_tokens ⇒ 会话键整批失效(契约 §8.2)。
+	a.notifyUserSessionsRevoked(u.ID)
 	_ = serverstore.AuditLog(a.DB, u.Username, "admin_password_change", "self")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -736,6 +752,7 @@ func (a *AdminAPI) resetUserMFA(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "会话吊销失败")
 		return
 	}
+	a.notifyUserSessionsRevoked(id)
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "admin_mfa_reset", target.Username)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -1022,6 +1039,8 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 			return
 		}
+		// 改密 / 降权 / 禁用 ⇒ 该用户全部 bearer 失效 ⇒ 会话键整批失效（契约 §8.2）。
+		a.notifyUserSessionsRevoked(u.ID)
 		_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_tokens_revoked", u.Username)
 	} else if err := serverstore.UpdateUser(a.DB, u); err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
@@ -1065,6 +1084,8 @@ func (a *AdminAPI) deleteUser(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 		return
 	}
+	// 删除用户连带清空其 api_tokens（FK/DAO 语义）⇒ 会话键整批失效（契约 §8.2）。
+	a.notifyUserSessionsRevoked(id)
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_delete", u.Username)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

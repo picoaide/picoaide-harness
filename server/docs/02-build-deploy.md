@@ -9,7 +9,7 @@ make test              # go test ./... -count=1(服务端全量;不依赖数据�
 make test-server       # 服务端各业务域测试(显式枚举全部包,见 Makefile)
 make build-server      # make webadmin + go build -o bin/picoaide-server
 make webadmin          # cd webadmin && npm run build(产物嵌入服务端二进制)
-make docker-image      # 服务端 Docker 镜像(ghcr.io/picoaide/picoaide-harness-server)
+make docker-image      # 服务端 Docker 镜像(本地自建;**发布镜像只走更新服务器,GHCR 已于 2026-09-10 下线**)
 make check             # gofmt 校验 + go vet + make test-server + webadmin 测试与构建
 ```
 
@@ -66,17 +66,19 @@ PICOAI_ADMIN_PASSWORD=xxx bin/picoaide-server \
 make docker-image                 # 本地单平台(版本=VERSION,默认 git describe)
 make docker-image TAG=v2.4.6      # 指定版本
 docker buildx build --platform linux/amd64 \
-  --build-arg VERSION=2.4.6 -t ghcr.io/picoaide/picoaide-harness-server:v2.4.6 --push .
+  --build-arg VERSION=2.4.6 -t picoaide-harness-server:v2.4.6 .
+# ⚠️ 不要 --push 到镜像仓库:GHCR 已于 2026-09-10 下线,发布面 = tag 流水线从源码
+#    构建镜像 → docker save|zip → 挂 GitHub Release + 上传更新服务器(<channel>/releases/<v>/)。
 ```
 
-> 版本号与产品标签共用同一 git tag(`v*`):docker.yml 在 push tag 时经 `scripts/version.mjs check` 校验 tag 与 root package.json 一致,镜像版本与桌面客户端同线推进(如 `v2.4.6`),不再使用独立的 `v0.4.x`/`v0.5.x` 线。
+> 版本号与产品标签共用同一 git tag(`v*`):tag 流水线在 push tag 时经 `scripts/version.mjs check` 校验 tag 与 root package.json 一致,镜像版本与桌面客户端同线推进(如 `v2.4.6`),不再使用独立的 `v0.4.x`/`v0.5.x` 线。
 
 ### 3.3 发布(CI 自动,Workflow: .github/workflows/docker.yml)
 
 - 触发:`push tag v*` 或手动 `workflow_dispatch`(填版本号);
 - 单平台 `linux/amd64`(2026-08-26 起移除 arm64,不再 QEMU 模拟);注入 VERSION;推送标签 `vX.Y.Z` / `vX.Y` / `latest`;
 - 附加 `type=gha` 构建缓存、`sbom=true`、`provenance=mode=max`;`imagetools inspect` 校验 amd64 manifest;
-- 镜像地址 `ghcr.io/picoaide/picoaide-harness-server`(部署 .env `SERVER_IMAGE` 可换私有 registry)。
+- 镜像来源 = **更新服务器**(`https://release.picoaide.com/<channel>/releases/<版本>/…zip` 内的 `image.tar`,`docker load` 后按渠道重打 tag 并写回 `.env` 的 `SERVER_IMAGE`);**GHCR 已于 2026-09-10 下线,不要再用镜像仓库地址**。
 
 ### 3.4 镜像验证清单
 

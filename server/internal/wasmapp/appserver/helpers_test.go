@@ -2,23 +2,24 @@ package appserver
 
 // ---- 变异验证（把闸门改回危险实现时，哪些用例必红）----
 //
-//   - 去掉步骤③的换票兑换（`?ticket=` 分支）⇒ TestServe_LoginRequiredRedirectsToTicket 之后的
-//     TestServe_LoggedInFrameCarriesUserAndSession 红（拿不到应用会话）；
+// ⚠️ 2026-09-19 W4：旧子域路径（换票 / 应用会话 Cookie / 匿名限流 / 主机名门控）
+// 已整条删除，下面只列**客户端专属模型下仍然存在**的判据；身份注入 / 无 Cookie /
+// Origin 自源那一组在 client_test.go 的文件头（不要在两边各写一份）。
+//
 //   - 把"读不到应用配置"改成按匿名继续（吞掉 loadAppConfig 的错误）
 //     ⇒ TestServe_ConfigMissingIs500 / TestServe_ConfigInvalidIs500 红；
-//   - 把 RequiresLogin 的 302 换成 200/继续 ⇒ TestServe_LoginRequiredRedirectsToTicket 红；
-//   - 把 next 改成绝对 URL（或 PathEscape）⇒ TestTicketURLUsesRelativeNext 红；
-//   - 去掉匿名限流（步骤⑥）⇒ TestServe_AnonymousRateLimited 红；
-//   - 去掉跨应用写防护（步骤⑦）⇒ TestServe_CrossOriginWriteRejected 红；
-//   - 去掉请求体上限（步骤⑧）⇒ TestServe_BodyTooLargeIs413JSON 红；
+//   - 让历史 access=public 在读取侧按"允许匿名"处理
+//     ⇒ TestClientRequest_LegacyPublicConfigReadsAsLogin 红；
+//   - 去掉跨应用写防护（管线步骤⑤）⇒ TestClientRequest_CrossOriginWriteRejected /
+//     TestClientRequest_MissingOriginOnWriteIs403 / TestCheckClientOrigin 红；
+//   - 去掉请求体上限（步骤⑥）⇒ TestServe_BodyTooLargeIs413JSON 红；
 //   - 把静态资源的 ETag 键去掉 version ⇒ TestStatic_VersionIsolation / TestAssetETagIncludesAppVersionAndPath 红；
 //   - 让 `/api/*` 也能命中静态资源 ⇒ TestStatic_APIReservedForWasm 红；
-//   - 让 RequiresLogin 应用的入口文档走静态 ⇒ TestStatic_LoginRequiredEntryGoesToWasm 红；
+//   - 让要求登录应用的入口文档走静态 ⇒ TestStatic_LoginRequiredEntryGoesToWasm 红；
 //   - 去掉响应体上限检查（writeAppResponse 里那条）⇒ TestWriteAppResponse_OverrunIs500 红；
 //   - 把 KillReason != nil 也当成功写回 ⇒ TestServe_NoResponseIs502 / TestServe_TimeoutIs504 红；
 //   - 去掉响应头白名单（不调 StripAppControlledHeaders）⇒ TestServe_ResponseHeadersAreHostOwned 红；
 //   - 去掉模块缓存的引用计数/Skip（淘汰在跑的条目）⇒ TestModuleCache_* 红；
-//   - 把 clientIP 改成无条件信 X-Forwarded-For ⇒ TestClientIP 红；
 //   - 把句柄池改成"每请求 Open/Close"（丢掉按应用持有）⇒ TestAppDBPool_ReusesHandleForSameApp 红；
 //   - 去掉句柄池的跨应用键（按 DataRoot 复用一份）⇒ TestAppDBPool_DoesNotShareAcrossApps 红；
 //   - 去掉空闲淘汰 ⇒ TestAppDBPool_IdleEvictionReopensFreshHandle 红；
@@ -47,11 +48,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,20 +61,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/events"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
-	"github.com/picoaide/picoaide/internal/wasmapp/session"
 )
 
-// 测试用的占位域名（本仓公开，禁止真实域名：AGENTS.md 的域名纪律）。
+// 测试用的账号夹具（本仓公开，禁止真实域名：AGENTS.md 的域名纪律 —— W4 删除
+// 子域路径后测试里不再有任何域名常量，客户端请求的 host 就是 app_id）。
 const (
-	testBaseDomain = "harness.example.com"
-	testMainOrigin = "https://harness.example.com"
-	testPassword   = "Test-Password-2026"
-	testOwner      = "alice"
+	testPassword = "Test-Password-2026"
+	testOwner    = "alice"
 )
 
 // ===== guest 现场编译（GOOS=wasip1 GOARCH=wasm）=====
@@ -216,42 +212,20 @@ func (b *lockedBuffer) String() string {
 	return string(b.buf)
 }
 
-// auditRecorder 记录 session 的审计回调（异步 fire-and-forget，故带锁）。
-type auditRecorder struct {
-	mu      sync.Mutex
-	entries []string
-}
-
-func (a *auditRecorder) fn(username, action, detail string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.entries = append(a.entries, username+"|"+action+"|"+detail)
-}
-
-func (a *auditRecorder) has(action string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for _, e := range a.entries {
-		parts := strings.SplitN(e, "|", 3)
-		if len(parts) == 3 && strings.HasPrefix(parts[1], action) {
-			return true
-		}
-	}
-	return false
-}
-
-// env 是一次测试的完整环境：真 PG + 真 session.Manager + 真编译出来的 wasm。
+// env 是一次测试的完整环境：真 PG + 注入的客户端身份 + 真编译出来的 wasm。
 type env struct {
-	t     *testing.T
-	db    *sql.DB
-	root  string
-	mgr   *session.Manager
-	srv   *Server
-	logs  *lockedBuffer
-	audit *auditRecorder
-	ev    *events.Sink
+	t    *testing.T
+	db   *sql.DB
+	root string
+	srv  *Server
+	logs *lockedBuffer
+	ev   *events.Sink
 	// suffix 让同一共享 DataRoot 下的不同用例用不同 app_id（文件系统隔离）。
 	suffix string
+	// ownerUser 是默认注入的已登录身份（发布者 alice，见 get/post）。
+	// 装配期一次性取好：请求可能来自多个 goroutine（并发用例），懒加载会撞 -race；
+	// 另外它必须在用例有机会关库（TestServe_DatabaseUnreachableDoesNotPanic）之前就绪。
+	ownerUser *serverstore.User
 
 	// clockMu/clock 是注入的时钟（句柄池的空闲淘汰用它推进，避免用真实 sleep 等 10 分钟）。
 	clockMu sync.Mutex
@@ -272,42 +246,22 @@ func (e *env) advance(d time.Duration) {
 	e.clock = e.clock.Add(d)
 }
 
-// newEnv 装配一个用例环境；mutate 可覆盖 Options（用于注入小上限的限流器/调度器）。
+// newEnv 装配一个用例环境；mutate 可覆盖 Options（用于注入小上限的调度器/时钟等）。
 func newEnv(t *testing.T, mutate ...func(*Options)) *env {
 	t.Helper()
 	db, cleanup := serverstore.NewTestDB(t)
 	t.Cleanup(cleanup)
 
-	api := serverauth.New(db)
-	if err := api.ReloadProviders(db); err != nil {
-		t.Fatalf("ReloadProviders: %v", err)
-	}
-
 	e := &env{
-		t:     t,
-		db:    db,
-		root:  sharedDataRoot(t),
-		logs:  &lockedBuffer{},
-		audit: &auditRecorder{},
+		t:    t,
+		db:   db,
+		root: sharedDataRoot(t),
+		logs: &lockedBuffer{},
 		// 进程内自增序号：app_id 唯一 ⇒ 共享 DataRoot 下 apps/<app_id>/ 不会串号
 		//（用时间戳取模会以极小概率碰撞，碰撞的表现是"两个用例共用资源目录"）。
 		suffix: strconv.FormatInt(envSeq.Add(1), 36),
 		clock:  time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC),
 	}
-	e.mgr = session.New(session.Options{
-		DB:         db,
-		BaseDomain: func() string { return testBaseDomain },
-		MainOrigin: testMainOrigin,
-		Auth: func(username, password string) (string, int64, error) {
-			ui, err := api.AuthenticatePassword(username, password)
-			if err != nil {
-				return "", 0, err
-			}
-			// 返回 0 ⇒ 由 session 层按用户名解析 users 行（与 main.go 的装配一致）。
-			return ui.Username, 0, nil
-		},
-		Audit: e.audit.fn,
-	})
 
 	ev := events.NewSink(db, events.Options{FlushInterval: 10 * time.Millisecond})
 	ev.Start(context.Background())
@@ -315,14 +269,11 @@ func newEnv(t *testing.T, mutate ...func(*Options)) *env {
 	e.ev = ev
 
 	opt := Options{
-		DB:         db,
-		DataRoot:   e.root,
-		BaseDomain: func() string { return testBaseDomain },
-		Sessions:   e.mgr,
-		Events:     ev,
-		AIBaseURL:  "http://127.0.0.1:9",
-		Logger:     e.logs.Printf,
-		Now:        e.now,
+		DB:       db,
+		DataRoot: e.root,
+		Events:   ev,
+		Logger:   e.logs.Printf,
+		Now:      e.now,
 	}
 	for _, fn := range mutate {
 		fn(&opt)
@@ -333,6 +284,8 @@ func newEnv(t *testing.T, mutate ...func(*Options)) *env {
 	}
 	e.srv = srv
 	t.Cleanup(func() { _ = srv.Close() })
+	// 默认注入身份（发布者 alice）在这里备好：请求可能并发发起，且有的用例会关库。
+	e.ownerUser = e.clientUser(testOwner)
 	return e
 }
 
@@ -350,7 +303,8 @@ type appSpec struct {
 	frozen  bool
 	// status 空 = approved（生效）。非 approved 的版本不会成为"生效版本"。
 	status string
-	// config 是 picoaide.app.json 的内容；空 = 默认 public（access="public"）。
+	// config 是 picoaide.app.json 的内容；空 = 默认 login（客户端专属模型的唯一
+	// 常规模式：未注入身份即 401）。
 	config string
 	// configOverride 为 true 时 config 为空表示"不写配置文件"（测平台故障分支）。
 	skipConfig bool
@@ -362,14 +316,18 @@ type appSpec struct {
 	assetsDir string
 }
 
-// publicConfig 是默认的应用配置：允许匿名（帧内 user=null），用于静态资源与匿名用例。
+// publicConfig 是**历史 schema** 的 access="public" 配置。
+//
+// ⚠️ 2026-09-19 起它只用于一条判据：client_test.go 的
+// TestClientRequest_LegacyPublicConfigReadsAsLogin（读取侧即 login，没有匿名面）。
+// 其余用例一律用 loginConfig()/loginRequiredConfig() —— 不要在这里再造存量配置。
 func publicConfig() string {
 	return `{"access":"public","whitelist":[],` +
 		`"purpose":"appserver 测试","data_sensitivity":"internal","owner":"alice"}`
 }
 
-// loginConfig 是 access=login 的配置（2026-09-18 起"登录后全员可用"是正式模式：
-// 未登录 302 换票，登录后不看名单）。
+// loginConfig 是 access=login 的配置（默认模式："登录后全员可用"：
+// 客户端模型下未注入身份 ⇒ 401，注入身份后不看名单）。
 func loginConfig() string {
 	return `{"access":"login","whitelist":[],` +
 		`"purpose":"appserver 测试","data_sensitivity":"internal","owner":"alice"}`
@@ -443,7 +401,9 @@ func (e *env) publishApp(spec appSpec) *serverstore.WasmRelease {
 	}
 	cfg := spec.config
 	if cfg == "" && !spec.skipConfig {
-		cfg = publicConfig()
+		// 默认 login：客户端专属模型下不存在"匿名可用"的常规应用
+		//（历史 public 只在读取侧兼容，见 publicConfig 的注释）。
+		cfg = loginConfig()
 	}
 	wasm := spec.wasm
 	if len(wasm) == 0 {
@@ -502,59 +462,43 @@ func (e *env) publishApp(spec appSpec) *serverstore.WasmRelease {
 	return rel
 }
 
-// appURL 拼应用子域 URL。
-func appURL(appID, path string) string {
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	return "https://" + appID + "." + testBaseDomain + path
-}
+// ===== 请求入口：客户端专属模型 =====
+//
+// 唯一入口是 (*Server).ServeClientRequest（client.go）：请求形状由协议 handler
+// 合成（`URL.Scheme = <渠道 app scheme>`、Host = app_id），身份由调用方**注入**。
+// 用例只允许经下面这三个 helper 发请求（形状本身由 client_test.go 的
+// clientRequestFor 定义）。
 
-// serve 直接驱动 ServeApp（主机名门控由 edge 包自己的用例覆盖；这里传的是已校验的标签）。
-func (e *env) serve(req *http.Request) *httptest.ResponseRecorder {
+// clientDo 走生产入口 ServeClientRequest；user 为 nil = "客户端没带登录态"。
+//
+// 自定义头 / 条件请求 / 无限请求体这类用例先按 clientRequestFor 造请求再调它。
+func (e *env) clientDo(req *http.Request, appID string, user *serverstore.User) *httptest.ResponseRecorder {
 	e.t.Helper()
 	rec := httptest.NewRecorder()
-	e.srv.ServeApp(rec, req, hostLabelOf(req.Host))
+	e.srv.ServeClientRequest(rec, req, appID, user, testSessionKey)
 	return rec
 }
 
-// get 发一个应用子域 GET（httptest 对 https 目标会挂 dummy TLS ⇒ edge.SelfOrigin 是 https）。
-func (e *env) get(appID, path string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+// get 发一个客户端 GET，**默认注入已登录的发布者身份**（e.ownerUser）。
+//
+// 需要"无身份"的用例请显式用 e.doClient(appID, nil, …)：那是 401 判据的入口，
+// 不要靠"少传一个参数"来表达。
+func (e *env) get(appID, path string) *httptest.ResponseRecorder {
 	e.t.Helper()
-	req := httptest.NewRequest(http.MethodGet, appURL(appID, path), nil)
-	for _, c := range cookies {
-		req.AddCookie(c)
-	}
-	return e.serve(req)
+	return e.doClient(appID, e.ownerUser, http.MethodGet, path, "", "")
 }
 
-// post 发一个应用子域 POST（默认带自身源 Origin，跨源用例自己改）。
-func (e *env) post(appID, path, contentType, body string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+// post 发一个客户端 POST（协议 handler 合成的自身源 Origin：非幂等请求必须带它）。
+func (e *env) post(appID, path, contentType, body string) *httptest.ResponseRecorder {
 	e.t.Helper()
-	req := httptest.NewRequest(http.MethodPost, appURL(appID, path), strings.NewReader(body))
+	req := clientRequestFor(e.t, appID, http.MethodPost, path, clientOriginOf(appID), body)
 	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("Origin", "https://"+appID+"."+testBaseDomain)
-	for _, c := range cookies {
-		req.AddCookie(c)
-	}
-	return e.serve(req)
+	return e.clientDo(req, appID, e.ownerUser)
 }
 
-// hostLabelOf 取主机名的第一级标签（与门控的口径一致）。
-func hostLabelOf(host string) string {
-	if i := strings.IndexByte(host, ':'); i >= 0 {
-		host = host[:i]
-	}
-	if i := strings.IndexByte(host, '.'); i >= 0 {
-		host = host[:i]
-	}
-	return strings.ToLower(host)
-}
-
-// ===== 身份：走完整换票链路（§6.1 ①–④）=====
-
-// newUser 建一个真账号并返回其 id（已存在则返回既有 id：用例里"先拿 id、再走登录"
-// 会两次调用它，重复建号不该是失败）。
+// newUser 建一个真账号并返回其 id（已存在则返回既有 id：用例里"先建号、再取行"
+// 会两次调用它，重复建号不该是失败）。客户端模型下它只负责建账号 ——
+// 请求身份由 client_test.go 的 clientUser/e.doClient 注入，没有登录这一步。
 func (e *env) newUser(username string) int64 {
 	e.t.Helper()
 	id, err := serverstore.CreateUserWithPassword(e.db, username, testPassword)
@@ -567,117 +511,6 @@ func (e *env) newUser(username string) int64 {
 		e.t.Fatalf("CreateUserWithPassword(%s): %v", username, err)
 	}
 	return id
-}
-
-// loginEmployee 走主站登录页（POST /login）拿员工会话 Cookie。
-func (e *env) loginEmployee(username string) *http.Cookie {
-	e.t.Helper()
-	e.newUser(username)
-	form := url.Values{"username": {username}, "password": {testPassword}, "next": {"/"}}
-	req := httptest.NewRequest(http.MethodPost, testMainOrigin+"/login", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Origin", testMainOrigin)
-	rec := httptest.NewRecorder()
-	e.mgr.LoginSubmit(rec, req)
-	if rec.Code != http.StatusSeeOther {
-		e.t.Fatalf("主站登录失败 status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	c := cookieByName(rec.Result().Cookies(), session.EmployeeCookieName)
-	if c == nil {
-		e.t.Fatal("主站登录未下发员工会话 Cookie")
-	}
-	return c
-}
-
-// redeemAppSession 走完整换票链路：POST /app-ticket（主站）→ 子域 ?ticket= 兑换应用会话。
-func (e *env) redeemAppSession(empCookie *http.Cookie, appID string) *http.Cookie {
-	e.t.Helper()
-	form := url.Values{"app": {appID}, "next": {"/"}}
-	req := httptest.NewRequest(http.MethodPost, testMainOrigin+"/app-ticket", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Origin", testMainOrigin)
-	req.AddCookie(empCookie)
-	rec := httptest.NewRecorder()
-	e.mgr.TicketSubmit(rec, req)
-	// 2026-09-19 起 POST /app-ticket 返回**同源跳板页（200）**，不再是跨源 302：
-	// CSP3 的 form-action 会检查重定向链上的每个 URL，跨源 302 会被浏览器整单拦掉
-	// （服务端连 POST 都收不到）。票因此从跳板页的兜底链接上取。
-	if rec.Code != http.StatusOK {
-		e.t.Fatalf("主站签发换票失败 status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	if loc := rec.Header().Get("Location"); loc != "" {
-		e.t.Fatalf("主站换票不得再有 Location（跨源 302 会被 form-action 拦掉）：%q", loc)
-	}
-	loc := jumpPageTarget(e.t, rec.Body.String())
-	u, err := url.Parse(loc)
-	if err != nil {
-		e.t.Fatalf("换票跳板页目标非法: %q", loc)
-	}
-	code := u.Query().Get("ticket")
-	if code == "" {
-		e.t.Fatalf("换票跳板页目标里没有 ticket: %q", loc)
-	}
-	// R1-sec-1（2026-09-19）：票是"URL 里的 code + 浏览器 Cookie 里的 nonce"两半，
-	// nonce 必须由**同一次 POST 响应**下发、并由随后的子域请求带上（真实浏览器由
-	// Domain=应用基域 自动完成）。这个 helper 就是"同一只浏览器"，所以要把它带过去。
-	nonce := cookieByName(rec.Result().Cookies(), session.TicketNonceCookieName)
-	if nonce == nil {
-		e.t.Fatal("主站换票未下发 nonce Cookie：同一浏览器的合法链路将无法兑换")
-	}
-	rec2 := e.get(appID, "/?ticket="+url.QueryEscape(code), nonce)
-	if rec2.Code != http.StatusFound {
-		e.t.Fatalf("子域兑换应 302，得到 %d body=%s", rec2.Code, rec2.Body.String())
-	}
-	if clean := rec2.Header().Get("Location"); strings.Contains(clean, "ticket=") {
-		e.t.Fatalf("兑换后的干净 URL 仍带 ticket: %q", clean)
-	}
-	c := cookieByName(rec2.Result().Cookies(), session.AppCookieName)
-	if c == nil {
-		e.t.Fatal("子域兑换未下发应用会话 Cookie")
-	}
-	return c
-}
-
-// jumpPageTarget 从**跳板页**（主站换票 / 应用子域会话失效都用它）里取出跨源那一跳的目标 URL。
-//
-// 只认 `id="picoaide-continue" href="…"`：这是页面上唯一的跨源出口声明，
-// 读它 = 读浏览器真正会用到的那份数据。html/template 会做属性转义（`&`→`&amp;` 等），
-// 因此用 html.UnescapeString 还原。
-func jumpPageTarget(t *testing.T, body string) string {
-	t.Helper()
-	const marker = `id="picoaide-continue" href="`
-	i := strings.Index(body, marker)
-	if i < 0 {
-		t.Fatalf("跳板页没有兜底链接（%s）：%s", marker, body)
-	}
-	rest := body[i+len(marker):]
-	j := strings.IndexByte(rest, '"')
-	if j < 0 {
-		t.Fatalf("兜底链接的 href 没有闭合：%s", body)
-	}
-	return html.UnescapeString(rest[:j])
-}
-
-// loggedInCookie 是"建号 + 登录 + 换票"的一站式入口。
-func (e *env) loggedInCookie(appID string) *http.Cookie {
-	e.t.Helper()
-	return e.redeemAppSession(e.loginEmployee(testOwner), appID)
-}
-
-// loggedInCookieAs 与 loggedInCookie 相同，但用指定账号（R24 的"未授权员工"用例）。
-func (e *env) loggedInCookieAs(appID, username string) *http.Cookie {
-	e.t.Helper()
-	return e.redeemAppSession(e.loginEmployee(username), appID)
-}
-
-// cookieByName 在 Set-Cookie 列表里按名字找 Cookie。
-func cookieByName(cs []*http.Cookie, name string) *http.Cookie {
-	for _, c := range cs {
-		if c.Name == name {
-			return c
-		}
-	}
-	return nil
 }
 
 // ===== 断言辅助 =====

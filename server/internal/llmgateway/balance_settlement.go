@@ -1492,5 +1492,8 @@ func (a *API) beginStreamUsage(c *gin.Context, userID int64, model, kind string)
 		rejectSettlementFailure(c, err, "pending "+kind)
 		return 0, false
 	}
+	// 应用维度归因（0076/§21.4）：pending 行是**整条流的计量锚点**，归因也钉在它上面
+	// —— 覆盖全部四条流式入口（chat/completions/responses/messages），一处接线。
+	a.bindUsageAppID(c, usageID)
 	return usageID, true
 }

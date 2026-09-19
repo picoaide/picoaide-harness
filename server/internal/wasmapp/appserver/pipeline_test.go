@@ -1,9 +1,8 @@
 package appserver
 
 import (
+	"io"
 	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,52 +11,59 @@ import (
 	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
-	"github.com/picoaide/picoaide/internal/wasmapp/anonlimit"
-	"github.com/picoaide/picoaide/internal/wasmapp/edge"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/queue"
 )
 
 // ===== 步骤①：应用反查（§4.8）=====
 
-func TestServe_UnknownHostIs404AndNeverFallsBackToMainSite(t *testing.T) {
+// TestServe_ClientUnknownAppIs404 是"未登记的 app_id ⇒ 404"在**客户端路径**上的判据。
+//
+// 2026-09-19 W4：旧的两条 UnknownHost 用例（`TestServe_UnknownHostIs404AndNeverFallsBackToMainSite`
+// 与 `TestServe_UnknownHostAPIRequestIsJSON404`）随子域路径删除 —— "unknown host"（主机名
+// 门控 + 绝不回落主站）这个概念已经不存在。仍然存活的判据是"反查不到应用就不服务"，
+// 因此按客户端入口重写一条：app_id 由路由参数给出，反查失败一律 404，页面形态与
+// API 形态各一份（页面可读 HTML、`Accept: application/json` 拿 JSON 信封）。
+func TestServe_ClientUnknownAppIs404(t *testing.T) {
 	e := newEnv(t)
-	rec := e.get(e.appID("ghost"), "/")
+	appID := e.appID("ghost")
+
+	rec := e.get(appID, "/")
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("未登记主机名应 404，得到 %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("未登记的应用应 404，得到 %d body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	// 绝不回落主站：门户/管理台的任何字样都不允许出现。
+	// 404 页面是平台自有产物：门户/管理台/任何表单都不允许出现（也不允许它变成一处跳板）。
 	for _, forbidden := range []string{"PicoAide", "portal", "管理后台", "<form"} {
 		if strings.Contains(body, forbidden) {
-			t.Fatalf("404 页面疑似回落主站内容（含 %q）: %s", forbidden, body)
+			t.Fatalf("404 页面疑似回落到平台其它页面（含 %q）: %s", forbidden, body)
 		}
 	}
 	// 宿主安全头在 404 上同样必须写（§4.8：含 4xx/5xx）。
 	assertHostSecurityHeaders(t, rec, true)
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
-		t.Fatalf("浏览器请求应拿到 HTML 404，得到 %q", ct)
+		t.Fatalf("页面请求应拿到 HTML 404，得到 %q", ct)
 	}
-}
 
-func TestServe_UnknownHostAPIRequestIsJSON404(t *testing.T) {
-	e := newEnv(t)
-	rec := e.get(e.appID("ghost"), "/api/items")
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("应 404，得到 %d", rec.Code)
+	// API 形态：同一个 404 带可解析的 JSON 信封。
+	apiReq := clientRequestFor(t, appID, http.MethodGet, "/api/items", "", "")
+	apiReq.Header.Set("Accept", "application/json")
+	apiRec := e.clientDo(apiReq, appID, e.ownerUser)
+	if apiRec.Code != http.StatusNotFound {
+		t.Fatalf("未登记应用的 API 请求应 404，得到 %d", apiRec.Code)
 	}
-	if code := errorCodeOf(t, rec.Body); code != "NOT_FOUND" {
+	if code := errorCodeOf(t, apiRec.Body); code != "NOT_FOUND" {
 		t.Fatalf("错误码应为 NOT_FOUND，得到 %q", code)
 	}
 }
 
 func TestServe_ReservedLabelIs404(t *testing.T) {
 	e := newEnv(t)
-	// 保留字即使库里存在行也不服务（纵深防御，§4.1：基域是平台资产）。
+	// 保留字即使库里存在行也不服务（纵深防御，§4.1：保留名属于平台资产）。
 	e.publishApp(appSpec{appID: "admin"})
 	rec := e.get("admin", "/")
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("保留字主机名应 404，得到 %d", rec.Code)
+		t.Fatalf("保留字 app_id 应 404，得到 %d", rec.Code)
 	}
 }
 
@@ -66,7 +72,7 @@ func TestServe_ExtraReservedHostIs404(t *testing.T) {
 	e.publishApp(appSpec{appID: "intranet"})
 	rec := e.get("intranet", "/")
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("部署期注入的企业主机名应 404，得到 %d", rec.Code)
+		t.Fatalf("部署期注入的企业保留名应 404，得到 %d", rec.Code)
 	}
 }
 
@@ -86,9 +92,9 @@ func TestServe_DisabledAppIs410(t *testing.T) {
 	assertHostSecurityHeaders(t, rec, true)
 
 	// API 形态：可解析的 JSON 信封（同一个 code，状态码仍是 410）。
-	req := httptest.NewRequest(http.MethodGet, appURL(appID, "/api/items"), nil)
+	req := clientRequestFor(t, appID, http.MethodGet, "/api/items", "", "")
 	req.Header.Set("Accept", "application/json")
-	apiRec := e.serve(req)
+	apiRec := e.clientDo(req, appID, e.ownerUser)
 	if apiRec.Code != http.StatusGone {
 		t.Fatalf("下架应用的 API 请求也应 410，得到 %d", apiRec.Code)
 	}
@@ -134,7 +140,7 @@ func TestServe_NoApprovedReleaseIs404(t *testing.T) {
 	}
 }
 
-// ===== 步骤③④⑤：换票、身份、准入 =====
+// ===== 步骤③④：身份注入与准入 =====
 
 // TestServe_WhitelistOutsiderStillReachesWasm 是 **R24 / A3 的核心回归网**
 // （独立审计 2026-09-18 P2-3 补）。
@@ -153,8 +159,8 @@ func TestServe_WhitelistOutsiderStillReachesWasm(t *testing.T) {
 	// 名单里只有 alice；下面用 bob 登录（"未授权员工"）。
 	e.publishApp(appSpec{appID: appID, config: loginRequiredConfig("alice")})
 
-	cookie := e.loggedInCookieAs(appID, "bob")
-	rec := e.get(appID, "/secret", cookie)
+	// 身份由客户端注入（bob 是"已登录但不在名单里"的员工）。
+	rec := e.doClient(appID, e.clientUser("bob"), http.MethodGet, "/secret", "", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("白名单外的已登录员工必须照常进 wasm（平台不比对名单），得到 %d body=%.200s",
 			rec.Code, rec.Body.String())
@@ -166,164 +172,6 @@ func TestServe_WhitelistOutsiderStillReachesWasm(t *testing.T) {
 	// 平台只注入身份：bob 的身份必须原样在帧里（应用要用它比对名单）。
 	if body["has_user"] != true || body["username"] != "bob" {
 		t.Fatalf("帧内身份必须是 bob（应用靠它比对名单），得到 user=%v/%v", body["has_user"], body["username"])
-	}
-}
-
-func TestServe_LoginRequiredRedirectsToTicket(t *testing.T) {
-	e := newEnv(t)
-	appID := e.appID("private")
-	e.publishApp(appSpec{appID: appID, config: loginRequiredConfig("alice", "bob")})
-
-	rec := e.get(appID, "/dashboard?tab=1")
-	if rec.Code != http.StatusFound {
-		t.Fatalf("未登录访问 login_required 应用应 302，得到 %d body=%s", rec.Code, rec.Body.String())
-	}
-	loc := rec.Header().Get("Location")
-	if !strings.HasPrefix(loc, testMainOrigin+"/app-ticket?") {
-		t.Fatalf("应 302 到主站换票端点，得到 %q", loc)
-	}
-	u, err := url.Parse(loc)
-	if err != nil {
-		t.Fatalf("Location 非法: %q", loc)
-	}
-	if got := u.Query().Get("app"); got != appID {
-		t.Fatalf("app 参数应为 %q，得到 %q", appID, got)
-	}
-	next := u.Query().Get("next")
-	if !strings.HasPrefix(next, "/") || strings.Contains(next, "https://") || strings.Contains(next, "//") {
-		t.Fatalf("next 必须是**相对路径**，得到 %q（完整 Location=%q）", next, loc)
-	}
-	if next != "/dashboard?tab=1" {
-		t.Fatalf("next 应保留原路径与查询，得到 %q", next)
-	}
-	if strings.Contains(loc, appID+".") {
-		t.Fatalf("换票端点必须在**主站**而不是应用子域: %q", loc)
-	}
-}
-
-// TestServe_LoginRequiredFormPostGetsJumpPage 是 2026-09-19 P0 同族修复的门禁（appserver 侧）。
-//
-// 缺陷形态：应用会话失效时，应用内的**原生表单 POST** 被 appserver 302 到**跨源**的主站换票
-// 端点，而应用子域的 CSP 含 `form-action 'self'`、CSP3 又会检查重定向链上的每个 URL
-// ⇒ 浏览器把这次提交整单拦掉（真实 Chromium 报
-// `Sending form data to 'https://<app>.<基域>/…' violates "form-action 'self'"`），
-// 服务端收不到请求，用户表现为"点了提交没反应"。
-//
-// 修复形态：**非幂等**且不显式要 JSON 的请求返回 200 的同源跳板页（三条出口：
-// location.replace / meta refresh / 可见链接），幂等请求与 JSON 请求保持 302。
-//
-// 变异验证：把 writeRedirectPage 那一行换回 `http.Redirect(..., 302)` ⇒ 本用例第一条断言即红。
-func TestServe_LoginRequiredFormPostGetsJumpPage(t *testing.T) {
-	e := newEnv(t)
-	appID := e.appID("private")
-	e.publishApp(appSpec{appID: appID, config: loginRequiredConfig("alice", "bob")})
-
-	// ① 原生表单 POST（非幂等、不是 JSON）⇒ 200 跳板页，不再是跨源 302。
-	rec := e.post(appID, "/note?keep=1", "application/x-www-form-urlencoded", "note=hello")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("未登录的应用内表单 POST 应得到 200 同源跳板页，得到 %d body=%s", rec.Code, rec.Body.String())
-	}
-	if loc := rec.Header().Get("Location"); loc != "" {
-		t.Fatalf("跳板页不得再有 Location（跨源 302 会被应用自己的 form-action 拦掉）：%q", loc)
-	}
-	body := rec.Body.String()
-	for _, want := range []string{`location.replace(a.href)`, `http-equiv="refresh"`, `id="picoaide-continue"`, `content="0;url=`} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("跳板页缺少 %q：%s", want, body)
-		}
-	}
-	if n := strings.Count(body, "<script"); n != 1 {
-		t.Fatalf("跳板页有 %d 个 <script（应只有 1 个内联跳转脚本）：%s", n, body)
-	}
-	target := jumpPageTarget(t, body)
-	if !strings.HasPrefix(target, testMainOrigin+"/app-ticket?") {
-		t.Fatalf("跳板页目标应是主站换票端点，得到 %q", target)
-	}
-	u, err := url.Parse(target)
-	if err != nil {
-		t.Fatalf("跳板页目标非法: %q", target)
-	}
-	if got := u.Query().Get("app"); got != appID {
-		t.Fatalf("app 参数应为 %q，得到 %q", appID, got)
-	}
-	if next := u.Query().Get("next"); next != "/note?keep=1" {
-		t.Fatalf("next 应保留原路径与查询（相对路径），得到 %q", next)
-	}
-	if strings.Contains(target, "ticket=") {
-		t.Fatalf("去登录的跳板页目标不该带票：%q", target)
-	}
-	// 安全头：CSP 不得为通过测试而放宽；跳板页必须不落缓存、跨源不带 Referer。
-	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "form-action 'self'") {
-		t.Fatalf("应用子域 CSP 的 form-action 被放宽了：%q", csp)
-	}
-	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
-		t.Fatalf("Cache-Control = %q, want no-store", cc)
-	}
-	if rp := rec.Header().Get("Referrer-Policy"); rp != edge.HostReferrerPolicy {
-		t.Fatalf("Referrer-Policy = %q, want %q", rp, edge.HostReferrerPolicy)
-	}
-	// 文案必须说明"这次提交没有被保存"（跳板页走 GET 换票，POST 体不会重放）。
-	if !strings.Contains(body, "没有被保存") {
-		t.Fatalf("跳板页文案没有说明提交未保存：%s", body)
-	}
-
-	// ② 幂等请求（GET）⇒ 仍是 302（导航不受 form-action 约束，行为与修复前一致）。
-	getRec := e.get(appID, "/dashboard?tab=1")
-	if getRec.Code != http.StatusFound {
-		t.Fatalf("未登录 GET 应仍是 302，得到 %d", getRec.Code)
-	}
-	if loc := getRec.Header().Get("Location"); !strings.HasPrefix(loc, testMainOrigin+"/app-ticket?") {
-		t.Fatalf("GET 的 Location 应是主站换票端点，得到 %q", loc)
-	}
-
-	// ③ 显式要 JSON 的 POST（`/api/*` 与 Accept: application/json）⇒ 仍是 302：
-	//    form-action 只管原生表单，fetch/XHR 不受它约束，而把 HTML 跳板页塞给 API 客户端
-	//    会破坏应用的 JSON 契约。
-	apiRec := e.post(appID, "/api/save", "application/json", `{"note":"hi"}`)
-	if apiRec.Code != http.StatusFound {
-		t.Fatalf("未登录的 /api/* POST 应仍是 302，得到 %d body=%s", apiRec.Code, apiRec.Body.String())
-	}
-	jsonReq := httptest.NewRequest(http.MethodPost, appURL(appID, "/save"), strings.NewReader("note=hi"))
-	jsonReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	jsonReq.Header.Set("Accept", "application/json")
-	jsonReq.Header.Set("Origin", "https://"+appID+"."+testBaseDomain)
-	jsonAcceptRec := e.serve(jsonReq)
-	if jsonAcceptRec.Code != http.StatusFound {
-		t.Fatalf("Accept: application/json 的 POST 应仍是 302，得到 %d body=%s", jsonAcceptRec.Code, jsonAcceptRec.Body.String())
-	}
-}
-
-func TestServe_TicketRedirectStripsTicketParam(t *testing.T) {
-	e := newEnv(t)
-	appID := e.appID("stale")
-	e.publishApp(appSpec{appID: appID, config: loginRequiredConfig("alice")})
-
-	// 过期/无效票据：兑换失败 ⇒ 按未登录继续 ⇒ 302 换票，且 next 里**不能**再带 ticket
-	//（否则会拿着旧票据反复回跳）。
-	rec := e.get(appID, "/page?ticket=stale-code&keep=1")
-	if rec.Code != http.StatusFound {
-		t.Fatalf("应 302，得到 %d", rec.Code)
-	}
-	u, err := url.Parse(rec.Header().Get("Location"))
-	if err != nil {
-		t.Fatalf("Location 非法: %v", err)
-	}
-	next := u.Query().Get("next")
-	if next != "/page?keep=1" {
-		t.Fatalf("next 应去掉 ticket 并保留其余参数，得到 %q", next)
-	}
-}
-
-func TestServe_InvalidTicketIsConsumedNotTrusted(t *testing.T) {
-	e := newEnv(t)
-	appID := e.appID("badticket")
-	e.publishApp(appSpec{appID: appID, config: loginRequiredConfig("alice")})
-	rec := e.get(appID, "/?ticket=whatever")
-	if rec.Code != http.StatusFound {
-		t.Fatalf("无效票据不得放行（应 302 换票），得到 %d body=%s", rec.Code, rec.Body.String())
-	}
-	if strings.Contains(rec.Body.String(), "app_id") {
-		t.Fatal("无效票据不得进入 wasm（响应体里出现了应用回显）")
 	}
 }
 
@@ -360,24 +208,21 @@ func TestServe_ConfigInvalidIs500(t *testing.T) {
 	}
 }
 
-// TestServe_LoginModeAllowsEveryLoggedInUser 覆盖 2026-09-18 新增的 access=login 模式
-// （用户原话："登陆后使用（默认全员）"）：未登录 302 换票；登录后**不看名单**，任何员工都能用。
+// TestServe_LoginModeAllowsEveryLoggedInUser 覆盖 access=login 模式
+// （用户原话："登陆后使用（默认全员）"）：登录后**不看名单**，任何员工都能用。
 //
-// 变异方式：把 RequiresLogin() 改成"只有 whitelist 才要求登录"（login 当匿名放行）⇒ 第一个断言红；
-// 把 AuthMode() 的 login 分支映射成 public ⇒ 帧内 mode 断言红。
+// 变异方式：把 RequiresLogin() 改成"只有 whitelist 才要求登录"（login 当匿名放行）⇒
+// 本用例的 200 断言会被 401 取代而红（"未注入身份 ⇒ 401"那半条在 client_test.go 的
+// TestClientRequest_LoginRequiredWithoutIdentityIs401，不在这里重复）；把 AuthMode() 的
+// login 分支映射成 public ⇒ 帧内 mode 断言红。
 func TestServe_LoginModeAllowsEveryLoggedInUser(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("loginmode")
 	e.publishApp(appSpec{appID: appID, config: loginConfig()})
 
-	// 未登录 ⇒ 302 换票（login 与 whitelist 都要求登录）。
-	if rec := e.get(appID, "/"); rec.Code != http.StatusFound {
-		t.Fatalf("access=login 未登录应 302 换票，得到 %d body=%.200s", rec.Code, rec.Body.String())
-	}
-	// 任何员工（不在任何名单里 —— 这里根本没有名单）登录后都能进 wasm。
+	// 任何员工（不在任何名单里 —— 这里根本没有名单）注入身份后都能进 wasm。
 	const anyone = "bob-anyone"
-	cookie := e.loggedInCookieAs(appID, anyone)
-	rec := e.get(appID, "/", cookie)
+	rec := e.doClient(appID, e.clientUser(anyone), http.MethodGet, "/", "", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("access=login 登录后应 200（登录后全员可用），得到 %d body=%.200s", rec.Code, rec.Body.String())
 	}
@@ -399,24 +244,26 @@ func TestServe_LoginModeAllowsEveryLoggedInUser(t *testing.T) {
 func TestServe_LegacySchemaConfigStillWorks(t *testing.T) {
 	e := newEnv(t)
 
-	// ① 旧 public：login_required=false ⇒ 匿名可用（visible=false 不再有任何过滤语义）。
+	// ① 旧 public：读取侧即 login（契约 §4.4：平台没有匿名面），visible=false 不再有任何过滤语义。
+	//（"无身份 ⇒ 401"那半条由 client_test.go 的 TestClientRequest_LegacyPublicConfigReadsAsLogin 覆盖。）
 	pub := e.appID("legacy-public")
 	e.publishApp(appSpec{appID: pub, config: legacyPublicConfig()})
 	rec := e.get(pub, "/")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("旧 schema 的 public 应用匿名访问应 200，得到 %d body=%.200s", rec.Code, rec.Body.String())
+		t.Fatalf("旧 schema 的 public 应用对已登录员工应 200，得到 %d body=%.200s", rec.Code, rec.Body.String())
 	}
-	if body := decodeJSON(t, rec.Body); body["auth_mode"] != "public" || body["has_user"] != false {
-		t.Fatalf("旧 schema 应映射成 public：mode=%v has_user=%v", body["auth_mode"], body["has_user"])
+	if body := decodeJSON(t, rec.Body); body["auth_mode"] != "login" || body["has_user"] != true {
+		t.Fatalf("旧 schema 的 public 应映射成 login（读取侧即 login）：mode=%v has_user=%v",
+			body["auth_mode"], body["has_user"])
 	}
 
 	// ② 旧 白名单：login_required=true + 名单非空 ⇒ whitelist（要求登录）。
 	white := e.appID("legacy-white")
 	e.publishApp(appSpec{appID: white, config: legacyWhitelistConfig(testOwner)})
-	if rec := e.get(white, "/"); rec.Code != http.StatusFound {
-		t.Fatalf("旧 schema 的 login_required=true 应用未登录应 302，得到 %d", rec.Code)
+	if rec := e.doClient(white, nil, http.MethodGet, "/", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("旧 schema 的 login_required=true 应用无身份应 401，得到 %d", rec.Code)
 	}
-	authed := e.get(white, "/", e.loggedInCookieAs(white, testOwner))
+	authed := e.get(white, "/")
 	if authed.Code != http.StatusOK {
 		t.Fatalf("旧 schema 的白名单应用登录后应 200，得到 %d body=%.200s", authed.Code, authed.Body.String())
 	}
@@ -427,153 +274,15 @@ func TestServe_LegacySchemaConfigStillWorks(t *testing.T) {
 	// ③ 旧"登录但名单为空"：映射成 login（新规则：登录后全员可用；旧规则本会拒发布）。
 	loginApp := e.appID("legacy-login")
 	e.publishApp(appSpec{appID: loginApp, config: `{"login_required":true,"whitelist":[]}`})
-	if rec := e.get(loginApp, "/"); rec.Code != http.StatusFound {
-		t.Fatalf("旧 schema 的 login_required=true（空名单）未登录应 302，得到 %d", rec.Code)
+	if rec := e.doClient(loginApp, nil, http.MethodGet, "/", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("旧 schema 的 login_required=true（空名单）无身份应 401，得到 %d", rec.Code)
 	}
-	anyoneCookie := e.loggedInCookieAs(loginApp, "carol-outsider")
-	ok := e.get(loginApp, "/", anyoneCookie)
+	ok := e.doClient(loginApp, e.clientUser("carol-outsider"), http.MethodGet, "/", "", "")
 	if ok.Code != http.StatusOK {
 		t.Fatalf("旧 schema 映射成 login 后，任何登录员工都该可用，得到 %d body=%.200s", ok.Code, ok.Body.String())
 	}
 	if body := decodeJSON(t, ok.Body); body["auth_mode"] != "login" {
 		t.Fatalf("空名单的旧配置应映射成 login，得到 %v", body["auth_mode"])
-	}
-}
-
-func TestServe_MissingBaseDomainIs500NotAnonymous(t *testing.T) {
-	e := newEnv(t, func(o *Options) { o.BaseDomain = func() string { return "" } })
-	appID := e.appID("nobase")
-	e.publishApp(appSpec{appID: appID, config: loginRequiredConfig("alice")})
-
-	rec := e.get(appID, "/")
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("未配置基域时 login_required 应用必须 500（不能静默当匿名），得到 %d", rec.Code)
-	}
-	if strings.Contains(rec.Body.String(), "app_id") {
-		t.Fatal("配置错误时不得进入 wasm")
-	}
-}
-
-func TestServe_LoginRequiredOnPlaintextIs500NotRedirectLoop(t *testing.T) {
-	e := newEnv(t)
-	appID := e.appID("plaintext")
-	e.publishApp(appSpec{appID: appID, config: loginRequiredConfig("alice")})
-
-	// 明文请求（无 TLS、无 X-Forwarded-Proto）：票永远兑换不出会话
-	//（session.RedeemTicket fail-closed）⇒ 必须 500 说清楚，绝不能 302 进死循环。
-	req := httptest.NewRequest(http.MethodGet, "http://"+appID+"."+testBaseDomain+"/", nil)
-	rec := e.serve(req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("明文访问 login_required 应用应 500（不能 302 进重定向循环），得到 %d", rec.Code)
-	}
-	if loc := rec.Header().Get("Location"); loc != "" {
-		t.Fatalf("不得重定向，得到 Location=%q", loc)
-	}
-
-	// 反代回传 X-Forwarded-Proto: https 时应照常 302（部署形态允许 TLS 终止在反代）。
-	req2 := httptest.NewRequest(http.MethodGet, "http://"+appID+"."+testBaseDomain+"/", nil)
-	req2.Header.Set("X-Forwarded-Proto", "https")
-	rec2 := e.serve(req2)
-	if rec2.Code != http.StatusFound {
-		t.Fatalf("反代终止 TLS 时应 302 换票，得到 %d", rec2.Code)
-	}
-}
-
-// ===== 步骤⑥：匿名限流（R35）=====
-
-func TestServe_AnonymousRateLimited(t *testing.T) {
-	e := newEnv(t, func(o *Options) {
-		o.Limiter = anonlimit.New(anonlimit.Options{
-			GlobalRatePerMin: 1000, GlobalBurst: 1000,
-			PerIPRatePerMin: 1, PerIPBurst: 1,
-		})
-	})
-	appID := e.appID("anon")
-	e.publishApp(appSpec{appID: appID})
-
-	if rec := e.get(appID, "/api/x"); rec.Code != http.StatusOK {
-		t.Fatalf("第一个匿名请求应放行，得到 %d", rec.Code)
-	}
-	rec := e.get(appID, "/api/x")
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("第二个匿名请求应被限流，得到 %d", rec.Code)
-	}
-	if rec.Header().Get("Retry-After") == "" {
-		t.Fatal("429 必须带 Retry-After（§4.6/§7.4）")
-	}
-	if code := errorCodeOf(t, rec.Body); code != "RATE_LIMITED" {
-		t.Fatalf("错误码应为 RATE_LIMITED，得到 %q", code)
-	}
-	// 浏览器直访（非 /api）拿到的是同一个码的可读 HTML 页，不是裸状态码。
-	if htmlRec := e.get(appID, "/"); htmlRec.Code != http.StatusTooManyRequests {
-		t.Fatalf("浏览器请求同样应 429，得到 %d", htmlRec.Code)
-	} else if !strings.Contains(htmlRec.Body.String(), "RATE_LIMITED") {
-		t.Fatalf("HTML 错误页里应带错误码: %s", htmlRec.Body.String())
-	}
-
-	// 已登录请求**不**走匿名限流（R35：限流只针对匿名）。
-	cookie := e.loggedInCookie(appID)
-	if rec := e.get(appID, "/", cookie); rec.Code != http.StatusOK {
-		t.Fatalf("已登录请求不应被匿名限流拦住，得到 %d body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// ===== 步骤⑦：跨应用写防护（§4.8 / §10.4 第 44 项）=====
-
-func TestServe_CrossOriginWriteRejected(t *testing.T) {
-	e := newEnv(t)
-	appID := e.appID("csrf")
-	e.publishApp(appSpec{appID: appID})
-
-	// 正确源：放行。
-	if rec := e.post(appID, "/api/save", "application/json", `{}`); rec.Code != http.StatusOK {
-		t.Fatalf("同源 POST 应放行，得到 %d body=%s", rec.Code, rec.Body.String())
-	}
-
-	// 跨源：403（同 eTLD+1 下 SameSite=Strict 挡不住这种写，必须靠 Origin 校验）。
-	req := httptest.NewRequest(http.MethodPost, appURL(appID, "/api/save"), strings.NewReader(`{}`))
-	req.Header.Set("Origin", "https://evil.example.com")
-	rec := e.serve(req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("跨源 POST 应 403，得到 %d", rec.Code)
-	}
-	if code := errorCodeOf(t, rec.Body); code != "FORBIDDEN" {
-		t.Fatalf("错误码应为 FORBIDDEN，得到 %q", code)
-	}
-
-	// Origin: null：**同样拒**。它是 no-referrer 策略下浏览器对同源表单 POST 发的
-	// 形态（2026-09-19 P0）；宿主响应头已改为 same-origin（edge.HostReferrerPolicy）
-	// 让浏览器发真实源，但服务端**绝不能**为了"让应用能用"而放行 null。
-	reqNull := httptest.NewRequest(http.MethodPost, appURL(appID, "/api/save"), strings.NewReader(`{}`))
-	reqNull.Header.Set("Origin", "null")
-	if rec := e.serve(reqNull); rec.Code != http.StatusForbidden {
-		t.Fatalf("Origin: null 的 POST 应 403，得到 %d", rec.Code)
-	}
-
-	// 同基域但**另一个应用**的源：同样拒（这正是"跨应用写"的形态）。
-	req2 := httptest.NewRequest(http.MethodPost, appURL(appID, "/api/save"), strings.NewReader(`{}`))
-	req2.Header.Set("Origin", "https://other."+testBaseDomain)
-	if rec := e.serve(req2); rec.Code != http.StatusForbidden {
-		t.Fatalf("其它应用子域的 POST 应 403，得到 %d", rec.Code)
-	}
-
-	// 两者都缺：拒（宁可拒一次合法请求，也不放过一次跨源写）。
-	req3 := httptest.NewRequest(http.MethodPost, appURL(appID, "/api/save"), strings.NewReader(`{}`))
-	if rec := e.serve(req3); rec.Code != http.StatusForbidden {
-		t.Fatalf("无 Origin 无 Referer 的 POST 应 403，得到 %d", rec.Code)
-	}
-
-	// 只有 Referer（老浏览器）：前缀命中自身源即放行。
-	req4 := httptest.NewRequest(http.MethodPost, appURL(appID, "/api/save"), strings.NewReader(`{}`))
-	req4.Header.Set("Referer", "https://"+appID+"."+testBaseDomain+"/page")
-	if rec := e.serve(req4); rec.Code != http.StatusOK {
-		t.Fatalf("Referer 命中自身源的 POST 应放行，得到 %d", rec.Code)
-	}
-
-	// 幂等方法不需要 Origin。
-	req5 := httptest.NewRequest(http.MethodGet, appURL(appID, "/"), nil)
-	if rec := e.serve(req5); rec.Code != http.StatusOK {
-		t.Fatalf("无 Origin 的 GET 应放行，得到 %d", rec.Code)
 	}
 }
 
@@ -586,10 +295,9 @@ func TestServe_BodyTooLargeIs413JSON(t *testing.T) {
 
 	// (a) Content-Length 撒谎/超大：不读一个字节就能拒。
 	big := strings.Repeat("a", limits.AppRequestBodyMaxBytes+1)
-	req := httptest.NewRequest(http.MethodPost, appURL(appID, "/api/save"), strings.NewReader(big))
+	req := clientRequestFor(t, appID, http.MethodPost, "/api/save", clientOriginOf(appID), big)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "https://"+appID+"."+testBaseDomain)
-	rec := e.serve(req)
+	rec := e.clientDo(req, appID, e.ownerUser)
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("超大请求体应 413，得到 %d", rec.Code)
 	}
@@ -598,13 +306,14 @@ func TestServe_BodyTooLargeIs413JSON(t *testing.T) {
 	}
 
 	// (b) 无 Content-Length（chunked 形态）：MaxBytesReader 必须兜住。
-	req2 := httptest.NewRequest(http.MethodPost, appURL(appID, "/api/save"), &endlessReader{})
+	req2 := clientRequestFor(t, appID, http.MethodPost, "/api/save", clientOriginOf(appID), "")
+	req2.Body = io.NopCloser(&endlessReader{})
+	req2.ContentLength = -1
 	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("Origin", "https://"+appID+"."+testBaseDomain)
 	if req2.ContentLength >= 0 {
 		t.Fatalf("该用例要求 ContentLength 未知，得到 %d", req2.ContentLength)
 	}
-	rec2 := e.serve(req2)
+	rec2 := e.clientDo(req2, appID, e.ownerUser)
 	if rec2.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("无长度声明的超大请求体应 413，得到 %d body=%s", rec2.Code, rec2.Body.String())
 	}
@@ -643,6 +352,10 @@ func (endlessReader) Read(p []byte) (int, error) {
 // 墙钟只作**观测值**打印（并发时 ≈ 单次耗时，串行时 ≈ 两次之和）。
 // 变异验证：把 limits.AppRuntimeConcurrency 改回 1 ⇒ 本用例必红（判据 1 先红；
 // 把判据 1 的守卫摘掉后判据 2/3 也必红，已实测）。
+//
+// ⚠️ 两个请求必须注入**两个不同员工**（2026-09-19 W4 起身份一律注入）：队列还有一条
+// §4.6 的"单用户同应用同时运行数 = 1"（limits.UserPerAppRunning），同一员工的两次并发
+// 请求会被它**按设计**串行 —— 那不是本用例要测的东西。这里测的是**每应用**并发。
 func TestServe_SameAppRequestsRunConcurrentlyByDefault(t *testing.T) {
 	e := newEnv(t) // 不注入 Scheduler：要测的正是**默认配置**
 	appID := e.appID("concurrent")
@@ -651,6 +364,10 @@ func TestServe_SameAppRequestsRunConcurrentlyByDefault(t *testing.T) {
 	perApp := e.srv.scheduler.Options().PerAppRunning
 	if perApp < 2 {
 		t.Fatalf("默认每应用并发 = %d，必须 > 1（否则默认部署下同应用仍是串行）", perApp)
+	}
+	users := []*serverstore.User{e.ownerUser, e.clientUser("bob-conc")}
+	if got := e.srv.scheduler.Options().PerUserPerAppRunning; got != 1 {
+		t.Fatalf("用例前提：单用户同应用并发应为 1（§4.6），得到 %d", got)
 	}
 
 	const holdMS = 600
@@ -672,7 +389,7 @@ func TestServe_SameAppRequestsRunConcurrentlyByDefault(t *testing.T) {
 			defer wg.Done()
 			<-start // 屏障：两个请求尽量同时出发
 			spans[i].begin = time.Now()
-			rec := e.get(appID, "/slow?ms="+strconv.Itoa(holdMS))
+			rec := e.doClient(appID, users[i], http.MethodGet, "/slow?ms="+strconv.Itoa(holdMS), "", "")
 			spans[i].code = rec.Code
 			spans[i].body = rec.Body.String()
 			spans[i].end = time.Now()

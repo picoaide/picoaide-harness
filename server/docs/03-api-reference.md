@@ -55,7 +55,7 @@
 | GET | `/api/server/admin/me` | 当前管理员信息(含 role/permissions) |
 | POST | `/api/server/admin/logout` | 登出(清 session) |
 | GET | `/api/server/admin/users` | 用户列表(附带 `role`、余额字段与 `monthly_usage`/`monthly_cost` 本月用量/费用。**2026-09-11 起不再含 `quota_tokens`/`quota_money`** —— 员工配额已下线) |
-| POST | `/api/server/admin/users` | 创建用户 `{username, password?, display_name?, email?, role?|is_admin?, source?}`(role ∈ super_admin/auditor/user;is_admin 为兼容别名) |
+| POST | `/api/server/admin/users` | 创建用户 `{username, password?, display_name?, email?, role?\|is_admin?, source?}`(role ∈ super_admin/auditor/user;is_admin 为兼容别名) |
 | PUT | `/api/server/admin/users/:id` | 更新用户(改密/角色/启用停用;改密/降权/禁用自动吊销 token)。⚠️ **`quota_tokens`/`quota_money`/`quota_clear`/`quota_money_clear` 已被 handler 显式忽略:请求照常 200,但零写入**(2026-09-11 配额下线;列与这些字段保留只是为了不砸旧客户端)。要控额度请用余额:`POST /users/:id/balance` 与 `PUT /balance` |
 | DELETE | `/api/server/admin/users/:id` | 删除用户 |
 | PUT | `/api/server/admin/users/:id/department` | 设置用户部门归属(2026-09 多部门):body `{group_ids:[n1,n2,...]}`(空=清空);兼容旧 `{group_id:n}`。授权 = 全部所属部门+祖先链同时生效 |
@@ -278,6 +278,22 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 > **2026-09-10 起 `brand:*` 已全线下线**:品牌与门户的名称/标语/欢迎语/标识只来自**渠道配置**,
 > `/api/client/v2/brand`、`/api/client/v2/brand/logo/:name`、`/api/client/v2/portal` 与
 > `/api/server/admin/brand*` 均已删除。按旧文档对接这些路径会拿到 404 JSON 信封。
+
+## 11b. WASM 应用(客户端专属,自定义协议面)
+
+员工应用**只在桌面客户端内**以 `<渠道 app 源 scheme>://<app_id>/` 打开(渠道包 `desktop.app_origin_scheme`,官方/预发渠道取值 `picoaide-app`),由客户端协议 handler 转发到下列**唯一入口**;服务端**不存在**应用子域、换票、应用侧 Cookie 或 `entry_url`(2026-09-19「客户端专属」改造,设计总纲 `../../docs/planning/2026-09-19-wasm-client-only-design.md`)。
+
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| POST | `/api/client/v2/apps/wasm/:app_id/request` | Bearer + `X-Pico-App-Proof` | **唯一应用请求入口**。信封 `{method,path,query,host,headers,body}`,其中 `host` 只接受 `<app-scheme>://<app_id>` 或裸 `app_id`;`headers` 白名单 = `origin`/`content-type`/`accept`/`accept-language`/`if-none-match`/`if-modified-since`/`user-agent`/`x-requested-with`(≤24 条、单值 ≤8 KiB;客户端必须转发**同一份**,跨端真源 `internal/wasmapp/api/wasm-app-headers.json`)。非幂等请求按 `Origin == <app-scheme>://<app_id>` 校验跨源写;响应 `{status,headers,body,truncated}`,`Set-Cookie` 整条丢弃、成功响应带 `X-PicoAide-App-Version` |
+| POST | `/api/client/v2/apps/wasm/:app_id/open` | Bearer + `X-Pico-App-Proof` | **每次「打开」动作**调一次:校验当前生效版本并**记一次打开**(PV 式,不去重;UV 由按 user 去重的聚合承担)。请求 `{current_version}`;响应 `{version,release_id,title,changed,opens:{today:{pv,uv}}}`(`changed=true` ⇒ 客户端清该应用当前 session-scope 下的全部版本缓存;**计数 best-effort ⇒ 计数失败时 `opens` 缺省,客户端不得显示 0**) |
+| POST | `/api/client/v2/apps/wasm/proof` | Bearer + **安装签名** | 签发持有性证明。proof 绑 `(user_id, bearer hash, install_id, serverURL, app_id, exp, jti)`,默认 15 min;非幂等请求做 jti 去重。安装公钥注册是 **TOFU**(任何持有效 bearer 者可为**尚未注册**的 install_id 注册自己的公钥,注册需一次性 nonce 签名)⇒ 该机制使 proof **不可跨应用/跨用户搬运、不可重放**,但**不**把"bearer 泄露"变成"不可用"(认账见设计总纲 §17) |
+| **错误码分层** | — | — | 对接方按**外层优先**分流。**传输层（外层 HTTP）**：`401 AUTH_REQUIRED` / `401 AUTH_FAILED` / **`401 PROOF_REQUIRED`**（缺证明）/ **`401 PROOF_EXPIRED`**（证明过期）/ **`401 PROOF_MISMATCH`**（绑定或结构/签名不符）/ **`401 PROOF_REPLAYED`**（非幂等请求的 jti 重放）/ `403`（审计账号或权限）/ `400 VALIDATION`（信封或 host 形态）/ `413 BODY_TOO_LARGE` / `429 RATE_LIMITED` / `503`（关停中）。**应用管线（内层信封 `status`）**：`404 NOT_FOUND`（不存在/未登记/软删/**冻结**，冻结时带 `reason=app_frozen`）/ `410`（已下架，`code` 复用 `NOT_FOUND`）/ `403 FORBIDDEN`（跨源写）/ `502`/`504`（运行时无响应或超时）/ `500 RUNTIME_OUTPUT_OVERRUN`。**`X-Pico-App-Proof` 的 401 一律用 `proof_*` 前缀**（客户端据此只在该前缀上自动重签一次） |
+| GET | `/api/server/admin/wasm-apps/:app_id/opens?from=&to=&granularity=day\|dept` | 管理会话 + `capability:read` | 打开计数运营视图(PV/UV 日趋势、按部门聚合;明细保留 90 天、日汇总长期)。缺少该端点时管理端显示"接口尚不可用"而**不是 0** |
+
+**应用能力边界**:应用内**无 cookie**(自定义协议下 `document.cookie` 恒空)、`localStorage`/`IndexedDB` 可用但**`Cache Storage` 不可用**(`cache.put` 抛 `TypeError: Request scheme … is unsupported`);**服务端 `ai.chat` 宿主能力已删除** —— 需要 AI 的应用改为**前端调客户端 AI loop**(保留路径 `POST /__picoaide/ai/chat`,由客户端协议 handler 本地处理)再把结果回传 wasm 落库。
+
+> 已删除(2026-09-19,照旧文档对接会拿到 404 JSON 信封):应用子域的 `/login`、`/logout`、`/app-ticket`、`/domain` 与应用子域路由树;目录/发布/上下架响应里的 `entry_url`;`access` 取值 `public`(写侧拒绝,存量由迁移 0074 改写为 `login`)。
 
 ## 12. 连接器(admin)
 

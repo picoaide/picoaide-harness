@@ -56,6 +56,21 @@ describe('上下架：行状态只能来自服务端的 app.enabled', () => {
     if (!outcome.ok) throw new Error('unreachable')
     expect(outcome.enabled).toBe(false)
     expect(outcome.changed).toBe(true)
+    // 2026-09-19（冻结契约 §4.5）：上下架响应不再有 entry_url，返回体只有
+    // app_id/enabled/changed —— 多带的字段也不会被客户端接住。
+    expect(Object.keys(outcome).sort()).toEqual(['appId', 'changed', 'enabled', 'ok'])
+    expect(outcome).not.toHaveProperty('entryURL')
+  })
+
+  it('服务端仍带 entry_url 时客户端也不认识它（迁移期不得复活入口链接）', () => {
+    const outcome = parseSetPublishedOutcome('roster', {
+      app: { app_id: 'roster', enabled: true, changed: false, entry_url: 'https://roster.apps.example.com/' },
+    })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('unreachable')
+    expect(Object.keys(outcome).sort()).toEqual(['appId', 'changed', 'enabled', 'ok'])
+    expect(JSON.stringify(outcome)).not.toContain('entry')
+    expect(JSON.stringify(outcome)).not.toContain('apps.example.com')
   })
 
   it('`app.enabled` 缺席 / 类型不对 ⇒ 形状错误（不回落成"我请求的值"）', () => {

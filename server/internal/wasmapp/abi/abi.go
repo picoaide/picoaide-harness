@@ -33,14 +33,21 @@ const FrameMagic byte = 0x1e
 //
 // ⚠️ **为什么 2026-09-18 把 auth.mode 收敛成三取值却没有 bump 到 /2**（有意决定，
 // 不是漏改）：这个字符串的语义是"**帧的形状与宿主调用面**"，而不是"载荷里每个
-// 字段的取值范围"。本次改动是后者 —— 帧的字节布局、方法名、导入面、错误码集合
+// 字段的取值范围"。那次改动是后者 —— 帧的字节布局、方法名、导入面、错误码集合
 // 一个都没动，变的只是 `auth.mode` 这个**被传进去的数据**。且平台尚未发布、
 // 线上零个已编译产物（编译发生在作者机器上、发布即替换），所以不存在"按 /1 编译
 // 却读到新取值"的模块。
 //
-// 反过来说清楚**什么时候必须 bump**：帧头/长度前缀语义、方法名集合、导入面、
-// 错误码取值、或任何"按 /1 写的 guest 会读错"的结构性变化 —— 那时 bump 到
-// `picoaide-app/2` 并同步 SKILL 的 `references/abi.md`、`examples/`、预览脚本
+// ⚠️ **2026-09-19 W4 删掉了宿主方法 `ai.chat`，同样不 bump**（总纲 §8.3 明确
+// "`abi.ABIVersion` 本身不得改"，§21.3 给了替代处置）：调 `ai.chat` 的**老应用**
+// 在**导入期/发布校验**就被判 `IMPORT_NOT_ALLOWED` 并附迁移指引（"改成前端调 AI →
+// 结果回传 wasm 落库"），**不静默**；而帧的字节布局、长度前缀语义、其余方法名与
+// 错误码集合一字未动 ⇒ 按 /1 编译且**不用** ai.chat 的应用行为逐字节不变。
+// bump 的代价反而更大：它会让所有合法老应用在"什么都没坏"的情况下被拒。
+//
+// 反过来说清楚**其余什么时候必须 bump**：帧头/长度前缀语义、导入面、错误码取值、
+// 或任何"按 /1 写的 guest 会读错"的结构性变化 —— 那时 bump 到 `picoaide-app/2`
+// 并同步 SKILL 的 `references/abi.md`、`examples/`、预览脚本
 // （`examples/go/preview.mjs`）。这条口径与 `AuthMode` 的类型注释成对。
 const ABIVersion = "picoaide-app/1"
 
@@ -169,6 +176,11 @@ func ReadFrame(r *bufio.Reader) ([]byte, error) {
 // ⚠️ **跨语言契约**（2026-09-18 用户拍板收敛为三模式）：取值只有下面三个 ——
 // 应用、SKILL 模板与示例里的 mode 分支必须按这三个值写，**不得再出现
 // `login_required`**（它已降级为配置文件的兼容 shim，不再是帧内取值）。
+//
+// ⚠️ 2026-09-19 W4：服务端**不再产生 `public`**（平台没有匿名面，历史 `access=public`
+// 在读取侧即 login ⇒ `appcfg.Config.AuthMode()` 只回 login/whitelist）。
+// `AuthModePublic` 作为**契约常量**保留：它是老应用/老示例里仍在分支判断的取值，
+// 删掉常量会让"历史形态"在代码里无处安放（总纲 §8.4 未列它）。
 type AuthMode string
 
 const (
@@ -308,9 +320,12 @@ const (
 	MethodTxBegin    = "tx_begin"
 	MethodTxCommit   = "tx_commit"
 	MethodTxRollback = "tx_rollback"
-	MethodAIChat     = "ai.chat"
 	MethodLog        = "log"
 	MethodAssetsRead = "assets.read"
+	// ⚠️ `MethodAIChat = "ai.chat"` 已随 W4 **删除**（总纲 §21.3）：服务端 wasm
+	// 不再具备任何 AI 能力；应用要调模型必须走"前端 JS → 宿主保留路径
+	// `/__picoaide/ai/chat` → 结果回传 wasm 落库"（客户端 AI loop，§21.2）。
+	// 老应用在**导入期/发布校验**即被拒（`IMPORT_NOT_ALLOWED` + 迁移指引），不静默。
 	// MethodPing 仅供 validate 干跑使用：不属于能力面（见 HostMethods）。
 	MethodPing = "abi.ping"
 )
@@ -325,14 +340,16 @@ var HostMethods = []string{
 	MethodTxBegin,
 	MethodTxCommit,
 	MethodTxRollback,
-	MethodAIChat,
 	MethodLog,
 	MethodAssetsRead,
 }
 
-// Primitives 是 §5.1 的七个原语（作者面），门禁要求 ABI 方法与之一一对应。
+// Primitives 是 §5.1 的**六个**原语（作者面），门禁要求 ABI 方法与之一一对应。
+//
+// ⚠️ W4：原第七个原语 `ai.chat` 已删除（总纲 §21.3），六个原语 = db.define /
+// db.query / db.exec / db.tx / log / assets.read。
 var Primitives = []string{
-	"db.define", "db.query", "db.exec", "db.tx", "ai.chat", "log", "assets.read",
+	"db.define", "db.query", "db.exec", "db.tx", "log", "assets.read",
 }
 
 // PrimitiveOf 把 ABI 方法映射回它所属的作者面原语。
@@ -358,7 +375,7 @@ func PrimitiveOf(method string) string {
 //
 // 为什么事务内**允许**数据库读写：§5.1 那句「事务内**禁止**调用任何其他宿主
 // 函数」的**意图**由 §4.4 给出依据 ——「事务内宿主调用 | **禁止**（`db.tx` 内调
-// `ai.chat`/`log` 直接报错）| 防事务长期持锁 + 占满执行槽」。这条理由只适用于
+// `log`/`assets.read` 直接报错）| 防事务长期持锁 + 占满执行槽」。这条理由只适用于
 // **会长时间阻塞 / 占满执行槽**的能力，不适用于同一条连接上的快 SQL。反过来，
 // 若把 db.query/db.exec 一并禁掉，db.tx 就退化成"begin 完立刻 commit"、
 // §5.1 的 db.tx 原语等于不存在（模块 H 审计实测：事务内当时 7 个方法全被拒，
@@ -371,7 +388,7 @@ func PrimitiveOf(method string) string {
 //     出口必须一起管：`TxParams.tx_id` 是**可省略**字段，只靠它判不出"这是谁的事务"），
 //     且 5 s 硬超时该算在谁身上没有答案（本函数的前身曾把 `tx_begin` 算作
 //     "事务控制"，属已修 bug）；
-//   - `ai.chat` / `log` / `assets.read`：长时间阻塞或占执行槽（§4.4 的理由）；
+//   - `log` / `assets.read`：长时间阻塞或占执行槽（§4.4 的理由）；
 //   - `db.define`：DDL，建表请在事务外做。
 func TxAllowedWhileInTx(method string) bool {
 	switch method {
@@ -448,31 +465,14 @@ type TxResult struct {
 	TxID int64 `json:"tx_id"`
 }
 
-// ChatMessage 是 ai.chat 的一条消息。
-type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-// AIChatParams 是 ai.chat 的参数（模型由服务端裁决，§4.7）。
-type AIChatParams struct {
-	Messages []ChatMessage `json:"messages"`
-	Model    string        `json:"model,omitempty"`
-}
-
-// AIChatResult 是 ai.chat 的结果（非流式；不透出上游原文与内部错误，§4.7）。
-type AIChatResult struct {
-	Content string       `json:"content"`
-	Model   string       `json:"model"`
-	Usage   *AIUsageView `json:"usage,omitempty"`
-}
-
-// AIUsageView 是回给应用的用量视图（只给 token 数，不给金额/余额，§4.7）。
-type AIUsageView struct {
-	PromptTokens     int64 `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
-	TotalTokens      int64 `json:"total_tokens"`
-}
+// ⚠️ W4 删除（总纲 §21.3）：消息 / 参数 / 结果 / 用量四个 ABI 载荷类型随服务端
+// 宿主 AI 能力一起消失（它们只在那一个方法的参数与结果里出现）。应用侧的新形态是
+// **客户端 AI loop**（§21.2）：请求/响应结构由宿主保留路径 `/__picoaide/ai/chat`
+// 定义，不经过帧协议，因此这里不再有任何 AI 载荷类型。
+//
+// 注意：本注释**刻意不写被删类型的标识符** —— 同一个包里的
+// `TestABIParamsCarryNoHostPath` 会扫描 abi 的**源码文本**找 `*Params` 类型，
+// 注释里留下名字会让"已删除的类型"继续出现在覆盖性断言里（真红过一次）。
 
 // LogParams 是 log 的参数（单条 ≤ 4 KiB，每请求 ≤ 100 条，§5.1）。
 type LogParams struct {

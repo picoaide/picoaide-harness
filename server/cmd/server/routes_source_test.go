@@ -5,7 +5,7 @@ package main
 // 缺陷现场：上一个提交把生产路由装配抽成了 `registerProductionRoutes`
 // （main.go，注释自称"唯一真源"），但只有 `main()` 在用它 —— 测试侧的
 // `buildRouter` 仍然自己抄了一份 `router.Register` 的 Deps，并且**不传**
-// Wasm / WasmSession，也没有 /healthz、/readyz。后果不是"少测几条"，而是
+// Wasm，也没有 /healthz、/readyz。后果不是"少测几条"，而是
 // 测试树比生产树少**一整片**（33 条 WASM 应用平台 + 员工登录 HTML 面 +
 // 2 条探针），而"路由完整性"断言照样全绿。
 //
@@ -75,13 +75,12 @@ func productionReferenceTree(t *testing.T) *gin.Engine {
 	return r
 }
 
-// minimalDepsTree 用"最小依赖"建树：Wasm / WasmSession 为 nil（= 改前测试装配
+// minimalDepsTree 用"最小依赖"建树：Wasm 为 nil（= 改前测试装配
 // 的真实形态），其余字段照旧。用来枚举"哪些路由是条件注册的"。
 func minimalDepsTree(t *testing.T) *gin.Engine {
 	t.Helper()
 	deps := testProductionDeps(t, nil)
 	deps.Wasm = nil
-	deps.WasmSession = nil
 	gin.SetMode(gin.TestMode)
 	r := newEngine()
 	installAPIMiddleware(r)
@@ -151,6 +150,12 @@ var wasmGatedRoutes = []string{
 	"DELETE /api/client/v2/apps/wasm/:app_id",
 	"GET /api/client/v2/apps/wasm/:app_id/diagnostics",
 	"GET /api/client/v2/apps/wasm/:app_id/schema",
+	// 客户端专属访问模型（2026-09-19）：请求入口、打开校验、持有性证明（W1 新增，
+	// 与 `:app_id/opens` 管理端出口一起在本轮补齐登记 —— 条件注册的漏登记形态是
+	// "路由整片消失而没人发现"，这正是本表存在的理由）。
+	"POST /api/client/v2/apps/wasm/:app_id/request",
+	"POST /api/client/v2/apps/wasm/:app_id/open",
+	"POST /api/client/v2/apps/wasm/proof",
 	// R1-pm-3：发布者本人的版本历史 + 审核结论（含被拒理由）。条件注册
 	// （d.Wasm == nil 时整片消失）⇒ 新增就必须登记，否则本表反向断言红。
 	"GET /api/client/v2/apps/wasm/:app_id/releases",
@@ -168,8 +173,6 @@ var wasmGatedRoutes = []string{
 	"PUT /api/server/admin/wasm-apps/:app_id/owner",
 	"POST /api/server/admin/wasm-apps/:app_id/freeze",
 	"PUT /api/server/admin/wasm-apps/review",
-	"GET /api/server/admin/wasm-apps/domain",
-	"PUT /api/server/admin/wasm-apps/domain",
 	"GET /api/server/admin/wasm-apps/limits",
 	"PUT /api/server/admin/wasm-apps/limits",
 	// 2026-09-19 审核闭环 + 运行诊断（router.go 已随本轮提交进仓 ⇒ 按约定登记）。
@@ -181,17 +184,17 @@ var wasmGatedRoutes = []string{
 	"POST /api/server/admin/wasm-apps/:app_id/releases/:version/reject",
 	"GET /api/server/admin/wasm-apps/:app_id/diagnostics",
 	"GET /api/server/admin/wasm-apps/runtime",
+	"GET /api/server/admin/wasm-apps/:app_id/opens",
+	// 客户端专属改造 W5：打开看板概览（静态段 `opens/summary`，与上一条 `:app_id/opens`
+	// 同层但更具体）与按应用的 AI 用量。两条与上一批同类 —— 都是 `d.Wasm != nil` 才注册，
+	// 且都**后于**本表上一轮重算落地，属同一种漏登记（守卫按实跑 diff 反向断言）。
+	"GET /api/server/admin/wasm-apps/opens/summary",
+	"GET /api/server/admin/wasm-apps/:app_id/ai-usage",
 }
 
-// sessionGatedRoutes：d.WasmSession == nil 时消失（router.Register 的
-// `if deps.WasmSession != nil`）—— 员工浏览器登录/换票 HTML 面。
-var sessionGatedRoutes = []string{
-	"GET /login",
-	"POST /login",
-	"POST /logout",
-	"GET /app-ticket",
-	"POST /app-ticket",
-}
+// ⚠️ `sessionGatedRoutes` 已随 W4 删除：它登记的是"`d.WasmSession != nil` 时才注册"
+// 的五条员工浏览器 HTML 面（`/login`、`/logout`、`/app-ticket`）—— 那套入口与
+// session 包一起消失，`Deps` 里也不再该字段。
 
 // TestRouteAssemblyGatedSlicesAreDeclared：条件注册的路由必须与声明表逐条相等。
 func TestRouteAssemblyGatedSlicesAreDeclared(t *testing.T) {
@@ -204,14 +207,8 @@ func TestRouteAssemblyGatedSlicesAreDeclared(t *testing.T) {
 	}
 	gated := diffKeys(full, minimal)
 
-	declared := make(map[string]bool, len(wasmGatedRoutes)+len(sessionGatedRoutes))
+	declared := make(map[string]bool, len(wasmGatedRoutes))
 	for _, k := range wasmGatedRoutes {
-		if declared[k] {
-			t.Fatalf("声明表里重复登记：%s", k)
-		}
-		declared[k] = true
-	}
-	for _, k := range sessionGatedRoutes {
 		if declared[k] {
 			t.Fatalf("声明表里重复登记：%s", k)
 		}
@@ -223,7 +220,7 @@ func TestRouteAssemblyGatedSlicesAreDeclared(t *testing.T) {
 
 	if len(undeclared) > 0 {
 		t.Errorf("有路由因依赖为 nil 而消失却没有登记（新增了条件注册却没人更新声明表）：\n  %s\n"+
-			"修法：把上面每条按原样加进 wasmGatedRoutes / sessionGatedRoutes。", strings.Join(undeclared, "\n  "))
+			"修法：把上面每条按原样加进 wasmGatedRoutes。", strings.Join(undeclared, "\n  "))
 	}
 	if len(stale) > 0 {
 		t.Errorf("声明表里的路由并未消失（依赖不再影响它，或路由被删）：\n  %s\n"+
@@ -238,16 +235,15 @@ func TestRouteAssemblyGatedSlicesAreDeclared(t *testing.T) {
 		t.FailNow()
 	}
 
-	t.Logf("条件注册路由共 %d 条（Wasm=%d / WasmSession=%d），与声明表逐条一致",
-		len(gated), len(wasmGatedRoutes), len(sessionGatedRoutes))
+	t.Logf("条件注册路由共 %d 条（Wasm=%d），与声明表逐条一致",
+		len(gated), len(wasmGatedRoutes))
 }
 
 // TestRouteAssemblyProbesAndHTMLFacesPresent：改前"测试树缺、生产有"的另一半。
 //
 // /healthz、/readyz 不在 router.Register 里（它们是 registerProductionRoutes 末尾
-// 单独挂的），因此"改前测试树少 35 条"里有 2 条是它们，另外 5 条是员工登录 HTML 面
-// （/login、/logout、/app-ticket）。这 7 条最容易在重构里被漏掉——它们既不属于
-// 两个 API 命名空间，也不在 router 包内。
+// 单独挂的）。这两条最容易在重构里被漏掉 —— 它们既不属于两个 API 命名空间，
+// 也不在 router 包内。
 func TestRouteAssemblyProbesAndHTMLFacesPresent(t *testing.T) {
 	r := buildRouter(t)
 	present := routeKeys(r)
@@ -257,11 +253,6 @@ func TestRouteAssemblyProbesAndHTMLFacesPresent(t *testing.T) {
 	} {
 		if !present[want] {
 			t.Errorf("测试路由树缺少探针 %s（registerProductionRoutes 末尾单独注册，重构时最易漏）", want)
-		}
-	}
-	for _, want := range sessionGatedRoutes {
-		if !present[want] {
-			t.Errorf("测试路由树缺少员工 HTML 面 %s（WasmSession 为 nil 时整片消失）", want)
 		}
 	}
 
@@ -418,7 +409,7 @@ func collectGoFiles(root string) ([]string, error) {
 //
 // 为什么需要它：运行期守卫证明的是"给定同一组依赖，测试树 == 生产函数输出"，
 // 它管不到 main() 自己漏填依赖 —— 而那正是本次 P0 的成因（旧 buildRouter 漏传
-// Wasm / WasmSession）。生产侧漏填一整片路由的失败形态是静默的（没有编译错误、
+// Wasm）。生产侧漏填一整片路由的失败形态是静默的（没有编译错误、
 // 路由表少几条、日志里没有一行）。
 //
 // ⚠️ 能力边界（不夸大）：这是**源码文本**断言 —— 它能发现"字段没传"，
@@ -445,7 +436,7 @@ func TestProductionAssemblyPassesEveryDep(t *testing.T) {
 
 	// 字段清单来自 productionDeps 的结构体定义（新增字段会被强制登记）。
 	for _, field := range []string{
-		"DB:", "Auth:", "Admin:", "Wasm:", "WasmSession:", "Ready:",
+		"DB:", "Auth:", "Admin:", "Wasm:", "Ready:",
 		"SkillSeed:", "DataDir:", "Version:", "ChannelID:",
 	} {
 		if !strings.Contains(literal, field) {

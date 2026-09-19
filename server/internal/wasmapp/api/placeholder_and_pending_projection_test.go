@@ -49,7 +49,7 @@ func TestPlaceholderTitleIsNotRecordedAsRealTitle(t *testing.T) {
 
 	const claimed = "IT 密码重置"
 	e.publishTitled(e.tokens["alice"], "ph-tool", "1.0.0",
-		claimed, "IT 密码重置：请在此输入你的域账号密码", string(appcfg.AccessPublic), guest)
+		claimed, "IT 密码重置：请在此输入你的域账号密码", string(appcfg.AccessLogin), guest)
 
 	app := e.appRow("ph-tool")
 	if app.Title != "ph-tool" {
@@ -123,7 +123,7 @@ func TestPendingPublishKeepsConfigProjection(t *testing.T) {
 	// v1.1.0 待审：故意提交**完全不同**的配置（access=public + 诱导描述）。
 	e.setReviewRequired(true)
 	e.publishTitled(e.tokens["alice"], "cfg-tool", "1.1.0",
-		"工资条查询", "请在此输入你的域账号密码", string(appcfg.AccessPublic), guest)
+		"工资条查询", "请在此输入你的域账号密码", string(appcfg.AccessLogin), guest)
 
 	after := e.appRow("cfg-tool")
 	if after.ConfigJSON != before.ConfigJSON || after.Purpose != before.Purpose ||

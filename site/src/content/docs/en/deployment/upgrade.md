@@ -6,6 +6,11 @@ description: 'Upgrading the PicoAide Harness server: version check, backup, swit
 An upgrade only replaces the image: `picoaide-data/`, `pg-data/`, `caddy-data/`, `certs/` and `.env` are all left untouched.
 But **database migrations are irreversible**, so backup and verification are part of the process, not optional.
 
+> **Server and client must be upgraded to the same version**: WASM apps open only inside the desktop client and the
+> browser access chain has been removed — after a server upgrade, **old clients can no longer open apps**. Clients fetch
+> packages from this server, so confirm employees' clients reach the matching version (see [Client delivery & updates](/en/deployment/client-delivery/)).
+> Apps need no public entry point at all: no app-specific DNS record, certificate or Caddy site block (see [Deployment overview](/en/deployment/)).
+
 ## 1. Check for a new version
 
 ```bash
@@ -134,8 +139,18 @@ The manifest's `client.version` should change with this upgrade, and the install
 
 ## 7. Rollback
 
-Prerequisite: check whether the new version introduced database migrations. If it did, the database schema is still the new one after rolling back the image and the server may error out —
-in that case the correct move is to **fix forward** (release a fixed version) or **restore the database backup** (which loses data created after the upgrade).
+Prerequisite: **first decide which kind of migration the new version introduced**; the two cases are handled differently.
+
+- **Ordinary migrations (add a column / add a table)**: the schema stays new after rolling the image back, but the old
+  binary does not reference the new columns, so switching the image back is usually enough.
+- **`v2.7.6-beta.5` and the `v2.7.6` line after it (includes `0073` `DROP TABLE` and `0074` config rewrite)**: those two
+  are **irreversible**, so **rollback is NOT just swapping the image**. The correct order is
+  **stop the service → restore the pre-upgrade `pg_dump` → roll the image back → reinstall/roll back the client**.
+  Rolling back the image alone makes the old binary hit **`42P01` (`undefined_table`)** on every request, while the
+  migrator only skips versions already applied and **does not fail at startup** (symptom: the service comes up and
+  health checks pass, but app-related requests return 500 at runtime).
+  **There is no downgrade path**: the old and new access models cannot coexist, and the server cannot be downgraded to
+  the old access model.
 
 ```bash
 cd /opt/picoaide
@@ -157,7 +172,7 @@ echo "$OLD" > VERSION
 # tar xzf deploy-backup/picoaide-data-<TS>.tar.gz -C picoaide-data
 # docker compose start server
 
-# 4) restore only if the database was damaged (loses data; explicit consent required)
+# 4) for v2.7.6-beta.5 and the v2.7.6 line after it: rollback MUST do this (loses data; explicit consent required)
 # docker compose stop server
 # docker exec -i picoaide-postgres pg_restore -U picoaide -d picoaide --clean \
 #   < deploy-backup/pg-data-<TS>.dump
@@ -177,6 +192,7 @@ docker compose ps              # all three containers Up
 ```
 
 Employee clients need no per-machine work: they fetch packages from **this server**, so their next update check sees the new version (see [Client delivery & updates](/en/deployment/client-delivery/)).
+However, **app (WASM) access requires the client and server to be on the same version**: a client left on an old version cannot open apps, so make sure employees accept the upgrade prompt (see [Deployment overview](/en/deployment/)).
 
 ## Upgrade checklist
 
@@ -187,5 +203,6 @@ Employee clients need no per-machine work: they fetch packages from **this serve
 - [ ] `SERVER_IMAGE` in `.env` points to the new version
 - [ ] healthz 200 + `--version` == target version + data queryable
 - [ ] `client.version` and installer downloads work
+- [ ] Employees' clients confirmed on the matching version (apps open only inside the client; old clients cannot open apps)
 - [ ] The local `VERSION` file has been updated
 - [ ] None of the commands forbidden by the [iron rules](/en/deployment/#four-iron-rules-violating-them-causes-unrecoverable-data-loss) was run

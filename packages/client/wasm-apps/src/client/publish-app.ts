@@ -23,7 +23,6 @@
 
 import { t } from './locales.ts'
 import {
-  ACCESS_MODES,
   APP_ID_ALL_DIGITS_PATTERN,
   APP_ID_MAX_LENGTH,
   APP_ID_PATTERN,
@@ -31,21 +30,24 @@ import {
   DEFAULT_ACCESS,
   VERSION_PATTERN,
   WHITELIST_MAX,
+  WRITABLE_ACCESS_MODES,
+  parseWindowRatio,
   type AccessMode,
+  type AppWindowSpec,
 } from './appcfg-contract.ts'
 
 /** 本地发布入口（宿主路由；唯一的发布链路）。 */
 export const PUBLISH_PATH = '/api/pico/apps/wasm/publish'
 
-export { ACCESS_MODES, DEFAULT_ACCESS, WHITELIST_MAX, type AccessMode }
+export { DEFAULT_ACCESS, WHITELIST_MAX, WRITABLE_ACCESS_MODES, type AccessMode }
 
 /** 应用配置草稿（字段名与 `picoaide.app.json` 一一对应）。 */
 export interface PublishConfigDraft {
   /**
-   * 访问模式（三选一；缺省 `login`）。
+   * 访问模式（**写侧只有两值**：`login | whitelist`；缺省 `login`）。
    *
    * 取代了旧的 `visible` + `login_required` 两个布尔：那两个的组合里有一半是
-   * 无意义甚至自相矛盾的（§4.2 的 R25/R26）。
+   * 无意义甚至自相矛盾的（§4.2 的 R25/R26）；历史取值 `public` 已退场（I6）。
    */
   access: AccessMode
   /**
@@ -61,6 +63,13 @@ export interface PublishConfigDraft {
   dataSensitivity: string
   /** 负责人声明（首次发布必填；不是平台归属）。 */
   owner: string
+  /**
+   * 窗口声明（F3/§6）。**缺席 = 不声明**（不是"锁了缺省比例"）。
+   *
+   * 客户端把它放进 `config.window`，服务端字段集合必须同步包含它
+   * （见 `appcfg-contract.ts` 的 `PENDING_SERVER_CONFIG_FIELDS`）。
+   */
+  window?: AppWindowSpec
 }
 
 /** 一次发布的表单草稿。 */
@@ -83,8 +92,9 @@ export interface PublishFile {
  *
  * 为什么必须有它：发布表单原先的初值是硬编码的（`access = login`、
  * `data_sensitivity = internal`），而对已有应用发新版时提交会**无条件**带上全部
- * 五个配置字段 —— 作者不动单选框，一个 `access=public` 的应用就会静默变成
- * `login`（访问范围被改写，服务端还会因此写一条 `wasm_app_access_change` 审计）。
+ * 五个配置字段 —— 作者不动单选框，一个 `access=public`（**历史取值**：2026-09-19 前
+ * 写侧还接受它，现已废弃；这里记录的是当时的成因）的应用就会静默变成 `login`
+ * （访问范围被改写，服务端还会因此写一条 `wasm_app_access_change` 审计）。
  * 预填是这条链路上唯一的"当前值"来源。
  *
  * `purpose` / `whitelist` 只在**发布者本人**的目录行里出现（服务端按调用者下发，
@@ -104,6 +114,8 @@ export interface PublishTarget {
   purpose?: string
   /** 准入名单（仅发布者本人可见）。 */
   whitelist?: string[]
+  /** 作者声明的窗口规格（目录行下发时预填；缺席 = 不预填）。 */
+  window?: AppWindowSpec
 }
 
 /**
@@ -130,6 +142,12 @@ export interface PublishFormInitial {
   whitelistText: string
   purpose: string
   owner: string
+  /** 窗口比例输入框原文（`""` = 作者没声明；`"16:9"` 与 `"1.7778"` 都可）。 */
+  windowRatioText: string
+  /** 窗口宽度输入框原文（`""` = 没声明）。 */
+  windowWidthText: string
+  /** 窗口高度输入框原文（`""` = 没声明）。 */
+  windowHeightText: string
 }
 
 /**
@@ -152,6 +170,9 @@ export function initialFormState(target?: PublishTarget): PublishFormInitial {
       whitelistText: '',
       purpose: '',
       owner: '',
+      windowRatioText: '',
+      windowWidthText: '',
+      windowHeightText: '',
     }
   }
   return {
@@ -163,7 +184,54 @@ export function initialFormState(target?: PublishTarget): PublishFormInitial {
     whitelistText: (target.whitelist ?? []).join(', '),
     purpose: target.purpose ?? '',
     owner: target.owner,
+    windowRatioText: formatWindowRatio(target.window?.ratio),
+    windowWidthText: target.window?.width === undefined ? '' : String(target.window.width),
+    windowHeightText: target.window?.height === undefined ? '' : String(target.window.height),
   }
+}
+
+/**
+ * 把归一化后的比例还原成输入框文本（`"16:9"` 形态优先，非整数比用小数）。
+ * @param ratio - 归一化比例（`width / height`）。
+ * @returns 文本；`undefined` ⇒ 空串（不预填 = 不声明）。
+ */
+export function formatWindowRatio(ratio: number | undefined): string {
+  if (ratio === undefined) return ''
+  const text = ratio.toFixed(4).replace(/0+$/u, '').replace(/\.$/u, '')
+  return text === '' ? '' : text
+}
+
+/**
+ * 把窗口输入框的三段原文归一化成作者声明（F3/§6）。
+ *
+ * 只在**解析得出来**时带上对应字段：非法输入由 {@link validatePublishDraft} 报错并
+ * 阻止提交，这里不猜、也不拿缺省值顶替（"没声明"与"声明了缺省"是两件事）。
+ * @param ratioText - 比例输入框原文（`"16:9"` / `"1.7778"` / `""`）。
+ * @param widthText - 宽度输入框原文（十进制像素 / `""`）。
+ * @param heightText - 高度输入框原文。
+ * @returns 规格；一个字段都解析不出来 ⇒ `undefined`（不发 `window` 键）。
+ */
+export function windowSpecFromText(ratioText: string, widthText: string, heightText: string): AppWindowSpec | undefined {
+  const spec: AppWindowSpec = {}
+  const ratio = parseWindowRatio(ratioText)
+  if (ratio !== null) spec.ratio = ratio
+  const width = parsePixelText(widthText)
+  if (width !== null) spec.width = width
+  const height = parsePixelText(heightText)
+  if (height !== null) spec.height = height
+  return Object.keys(spec).length === 0 ? undefined : spec
+}
+
+/**
+ * 像素输入框原文 → 正整数（`""` / 非数字 / 0 ⇒ `null`）。
+ * @param raw - 输入框原文。
+ * @returns 像素值，或 `null`。
+ */
+function parsePixelText(raw: string): number | null {
+  const text = raw.trim()
+  if (text === '' || !/^\d+$/u.test(text)) return null
+  const value = Number(text)
+  return Number.isSafeInteger(value) && value > 0 ? value : null
 }
 
 /**
@@ -216,7 +284,11 @@ export interface PublishSuccess {
    * 应用已下架；服务端一旦下发就以它为准）。
    */
   enabled: boolean
-  entryURL: string
+  /**
+   * 2026-09-19（冻结契约 §4.5）：发布响应里**不再有** `entry_url` —— 应用只在客户端
+   * 内以 `picoaide-app://<app_id>/` 打开，可分享形态是深链
+   * `<渠道 scheme>://app/<app_id>`（客户端按 `app_id` 自己拼，见 `deep-link.ts`）。
+   */
   checksum: string
   sizeBytes: number
 }
@@ -372,6 +444,9 @@ export function buildPublishBody(draft: PublishDraft, wasmBase64: string): Recor
       purpose: draft.config.purpose,
       data_sensitivity: draft.config.dataSensitivity,
       owner: draft.config.owner,
+      // 窗口声明（F3/§6）：**只在作者真的声明时**才发这个键 —— 不发等于"不声明"，
+      // 而不是"声明了缺省比例"（服务端对缺席有继承语义，客户端不替它写一个值）。
+      ...(draft.config.window === undefined ? {} : { window: draft.config.window }),
     },
   }
   if (draft.title.trim() !== '') body.title = draft.title.trim()
@@ -442,8 +517,22 @@ export function validatePublishDraft(draft: PublishDraft, options: ValidateOptio
     issues.push({ field: 'version', code: 'version_shape', message: t('appCenter.invalidVersionShape') })
   }
 
-  if (!(ACCESS_MODES as readonly string[]).includes(draft.config.access)) {
+  // 2026-09-19（冻结契约 §4.4）：写侧只接受 login | whitelist。历史 `public` 由**读侧**
+  // 当作 login（存量应用不会被拒绝），但新版本不得再写它 —— 本地预校验与服务端同一集合。
+  if (!(WRITABLE_ACCESS_MODES as readonly string[]).includes(draft.config.access)) {
     issues.push({ field: 'access', code: 'access_invalid', message: t('appCenter.invalidAccess') })
+  }
+
+  // 窗口声明（F3/§6）：只有**填了**才校验；越界/非数字 ⇒ 本地拦下（服务端同一区间）。
+  const ratioRaw = draft.config.window?.ratio
+  if (ratioRaw !== undefined && parseWindowRatio(ratioRaw) === null) {
+    issues.push({ field: 'window.ratio', code: 'window_ratio_invalid', message: t('appCenter.invalidWindowRatio') })
+  }
+  for (const [field, value] of [['window.width', draft.config.window?.width], ['window.height', draft.config.window?.height]] as const) {
+    if (value === undefined) continue
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+      issues.push({ field, code: 'window_size_invalid', message: t('appCenter.invalidWindowSize') })
+    }
   }
 
   // whitelist 的两条只在"选了白名单模式"或"填了名单"时才有意义：
@@ -510,7 +599,8 @@ export function parseErrorEnvelope(
  *
  * **`app.enabled` 必须接住**（R1-uxc-1）：服务端下发它（`publish.go:682`），而旧实现
  * 只取 `app_id`/`title`/`entry_url` —— 于是"已下架应用发新版"成功块写"已生效"，
- * 而应用子域仍是 410 Gone。
+ * 而应用仍是下架状态。`entry_url` 自 2026-09-19 起**已不存在**（冻结契约 §4.5），
+ * 这里也不再读它。
  * @param payload - 解析后的响应体。
  * @returns 成功对象，或结构化失败。
  */
@@ -543,7 +633,6 @@ export function parsePublishOutcome(payload: unknown): PublishSuccess | PublishF
     live: (release.current === true || !pending) && enabled,
     pending,
     enabled,
-    entryURL: typeof app.entry_url === 'string' ? app.entry_url : '',
     checksum: typeof release.checksum === 'string' ? release.checksum : '',
     sizeBytes: typeof release.size === 'number' ? release.size : 0,
   }

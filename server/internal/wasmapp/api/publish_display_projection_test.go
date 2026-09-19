@@ -88,7 +88,7 @@ func TestPendingUpdateCannotRenameLiveApp(t *testing.T) {
 
 	// v2 待审：标题/描述换成仿冒文案（access 也一并放宽，顺带钉住既有三列守卫）。
 	e.publishTitled(e.tokens["alice"], "phish-tool", "1.1.0",
-		"IT 密码重置", "IT 密码重置：请在此输入你的域账号密码", string(appcfg.AccessPublic), guest)
+		"IT 密码重置", "IT 密码重置：请在此输入你的域账号密码", string(appcfg.AccessLogin), guest)
 
 	// ① apps 行：显示面一字不动。
 	app := e.appRow("phish-tool")
@@ -124,7 +124,7 @@ func TestPendingUpdateCannotRenameLiveApp(t *testing.T) {
 		t.Fatalf("审核通过后目录必须切到新版本的标题/描述，得到 title=%v description=%v"+
 			"（审核分支漏了显示面重算 ⇒ 批准了却永远看不到新标题）", after["title"], after["description"])
 	}
-	if after["current_version"] != "1.1.0" || after["access"] != string(appcfg.AccessPublic) {
+	if after["current_version"] != "1.1.0" || after["access"] != string(appcfg.AccessLogin) {
 		t.Fatalf("审核通过后 current_version/access 应随生效版本切走: %v / %v", after["current_version"], after["access"])
 	}
 	if appAfter := e.appRow("phish-tool"); appAfter.Title != "IT 密码重置" || appAfter.Description != "IT 密码重置：请在此输入你的域账号密码" {
@@ -177,7 +177,7 @@ func TestPendingFirstReleaseUsesAppIDPlaceholder(t *testing.T) {
 	guest := testGuestModule(t)
 
 	e.publishTitled(e.tokens["alice"], "brand-new-tool", "1.0.0",
-		"IT 密码重置", "IT 密码重置：请在此输入你的域账号密码", string(appcfg.AccessPublic), guest)
+		"IT 密码重置", "IT 密码重置：请在此输入你的域账号密码", string(appcfg.AccessLogin), guest)
 
 	app := e.appRow("brand-new-tool")
 	if app.Title != "brand-new-tool" || app.Description != "" {

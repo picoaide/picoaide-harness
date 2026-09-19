@@ -42,7 +42,7 @@
 - webadmin 页 **运维 → 应用中心 → 限制项**：档位一键套用、编辑期实时预览
   （超水位当场变红）、需重启字段带徽标、保存后如实在 flash 里说明"已即时生效/需重启"。
   > 2026-09-19 页面合并（用户要求）：原独立页 **运维 → 应用平台**（`/app-platform`）并入
-  > 「应用中心」成为**限制项**子页，应用域名（泛域名）搬进新增的**设置**子页；侧栏去掉
+  > 「应用中心」成为**限制项**子页，~~应用域名（泛域名）搬进新增的**设置**子页~~（**该设置项已随「客户端专属」改造删除**，总纲 §8.4：应用不再有对外域名，管理端不再保留「应用域名」设置）；侧栏去掉
   > 「应用平台」条目（它与「应用中心」同图标，看起来像重复入口），老路径 `/app-platform`
   > 重定向到 `/app-center/limits`（原「应用平台」页就是并发/内存限制项，忠实映射是 `limits`；代码 `App.tsx` 即如此）。**后端与权限点未动**（`/wasm-apps/{,domain,limits}`
   > 仍在同一组，读 `capability:read` / 写 `capability:write`）。见
@@ -53,7 +53,7 @@
 - **制品与清单随镜像分发**：`/opt/picoaide/demo-apps/{app.wasm,demos.json}`（Dockerfile 构建，
   `demoapps/appdemo` 编译成 wasm32-wasip1）。
 - **一份 wasm，三种权限模式**：`demos.json` 把它播种成
-  `demo-public`（匿名可达）/ `demo-login`（登录可见）/ `demo-whitelist`（名单可见）。
+  `demo-public`（历史上标为公开，现按登录处理）/ `demo-login`（登录可见）/ `demo-whitelist`（名单可见）。
   准入模式是平台侧配置；**whitelist 的名单比对按 R24 由应用自己读 `picoaide.app.json` 完成**
   （平台只负责"要求登录 + 告知模式"），演示页把这一点直接写在页面上。
 - **播种**：`internal/wasmapp/appseed` 在服务端启动时执行（`cmd/server/wasmapp_demo.go`，
@@ -72,7 +72,7 @@
 
 ### 3.2 版本**必须**有资源目录
 
-应用子域管线在请求路径上 `assets.Open(root, app_id, release_id)`，**失败即 500**
+应用请求管线在请求路径上 `assets.Open(root, app_id, release_id)`，**失败即 500**
 （"该版本的资源目录缺失"）；随后还要 `loadAppConfig` 读 `picoaide.app.json`，读不到同样 500
 （绝不按匿名处理）。因此任何"绕过 HTTP 发布链路"的播种（内置演示、批量导入）都必须自己把
 资源目录与配置写出来 —— 只写 `apps` + `app_releases` 是不够的。
@@ -91,7 +91,7 @@ Dockerfile 里补了 `chmod -R a+rX /out/demo-apps`；本机往容器里 `docker
 - 本地（真服务端 + 真 PG）：管理员登录 → GET 视图 → PUT 生效（日志 `限制项已下发 … restart=[]`）
   → 超水位 400 → 非法值 400 → 落库；演示播种 3 个 → 删除一个 → **重启后仍不重建**。
 - 测试环境（2 GB 机器，`small` 档）：`GET/PUT /wasm-apps/limits` 与真实管理员会话通过；
-  三个演示子域分别验证：匿名 200（且匿名写库成功）、匿名 302 换票 + 登录后 200 显示身份、
-  名单内 200 / **名单外 403 且页面显示本人账号**；管理端 bundle 含 `/app-platform` 路由
+  三个演示应用按各自访问模式验证：登录可见 200 且显示身份、名单内 200 / **名单外 403 且页面显示本人账号**
+  （`demo-public` 的匿名面已随访问模型改造删除）；管理端 bundle 含 `/app-platform` 路由
   （2026-09-19 页面合并后该页面改挂 `/app-center/limits`，`/app-platform` 只做重定向——
   复跑本项请按新路径断言）。

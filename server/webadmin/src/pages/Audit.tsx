@@ -163,6 +163,9 @@ export const ACTION_LABEL: Record<string, string> = {
   wasm_app_prune_failed: '应用版本回收失败',
   wasm_app_schema_view: '查看应用数据表',
   wasm_app_seed: '预置内置应用',
+  // 历史保留（2026-09-19 起该动作已废弃：应用基域配置面随「客户端专属」改造删除）：
+  // 这一行**不能删** —— 存量审计链里仍有这个动作码的行，删掉映射会让历史记录
+  // 只显示原始动作码（审计可读性倒退）。属契约型保留，不是残留。
   wasm_apps_base_domain_change: '应用域名变更',
   wasm_limits_change: '应用限制项变更',
   wasm_review_switch: '应用更新审批开关',

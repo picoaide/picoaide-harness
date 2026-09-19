@@ -52,6 +52,20 @@ const GUARDS = [
   // —— 一次静默回退就能让 check:fast 重新变成 0 任务 + exit 0。用真脚本副本在合成 git
   // 仓库里跑（corepack 走桩），不联网、不跑真实包。
   { name: 'check:check-workspaces', args: ['run', 'check:check-workspaces'], path: '门禁编排器自身(--changed/--only/.gitignore)' },
+  // WASM「客户端专属」改造的验收门禁（docs/planning/2026-09-19-wasm-client-only-design.md §13）：
+  // 这里只接**便携子集**（静态守卫 / 三方对拍 / 旧模型零残留 / 渠道约束 / HEAD 绑定）——
+  // 需要真 PG 的 go test 与需要显示器的协议探针归 server job 与 W6 三平台（§16 W6）。
+  //
+  // **已转阻塞 @ 2026-09-20**：W4 删除波次落地、零残留扫描在**修好量具后**达到
+  // A=0（B=34 ≤ 预算、ANN=65 ≤ 预算；量具修复=词边界假红 R1-L4-2 / 注释单列 ANN
+  // R1-L4-3 / B 扩到 appcfg 包 R1-L4-4）。此前它是 advisory（W1–W5 施工期零残留断言
+  // 按设计会如实报出存量命中，只告警不拦门禁）—— 那段历史留在 git 历史里，不再回退。
+  // 判据：本 guard 失败 ⇒ `yarn check` 整体失败（本地 `yarn check` 与 CI gate job 同义）。
+  {
+    name: 'check:wasm-client-only',
+    args: ['run', 'check:wasm-client-only', '--portable'],
+    path: 'WASM 客户端专属（残留/对拍/渠道/W5 文档/HEAD 绑定）；PG 与探针见 §16 W6',
+  },
 ]
 
 /**
@@ -79,6 +93,11 @@ const PACKAGES = [
   // WASM 应用平台的客户端半边（应用中心 + 发布编排入口）：读 enterprise 的 lib/types。
   { name: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', needs: [] },
   { name: '@picoaide/dsh-browser', dir: 'packages/host/browser', needs: ['@picoaide/dsh-connectors'] },
+  // 客户端专属 WASM 应用 origin（`picoaide-app://` 协议 handler + 本机打开路由）：
+  // 2026-09-19 起它经 **browser 包导出的 surface seam**（`@picoaide/dsh-browser/surface`）
+  // 取得视图/分区/CDP 能力（设计总纲 §16.1 的 surface 抽象：工具实现只写一份、按 surface
+  // 分派）⇒ 构建期依赖 browser 的 lib/types，必须先于它产出。
+  { name: '@picoaide/dsh-wasm-apps-host', dir: 'packages/host/wasm-apps-host', needs: ['@picoaide/dsh-browser'] },
   // 2026-09-16:vendored 第三方插件(随三平台安装包分发)的测试此前**不在任何门禁
   // 链里**(verify-inventories 的 CHECK_CHAIN_EXEMPTIONS 显式豁免),本地加固
   // (同源守卫/符号链接写落点断言/失败软着陆)只有"手工跑"这一条保证 —— 升级
@@ -103,6 +122,7 @@ const PATH_OWNERS = [
   ['packages/client/branding/', '@picoaide/dsh-branding'],
   ['packages/host/connectors/', '@picoaide/dsh-connectors'],
   ['packages/host/browser/', '@picoaide/dsh-browser'],
+  ['packages/host/wasm-apps-host/', '@picoaide/dsh-wasm-apps-host'],
   ['packages/host/cron/', '@picoaide/dsh-cron'],
   ['packages/vendor/memory-evolve/', 'dsh-memory-evolve'],
   ['community/fabric/', 'dsh-community-fabric'],
@@ -312,6 +332,21 @@ function seconds(ms) {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
+/**
+ * 记录一个失败任务的归属：`advisory` 任务只告警、不拦门禁。
+ *
+ * 为什么要这个开关（2026-09-19）：WASM「客户端专属」的验收门禁（§13）在 W1–W5 波次
+ * 落地前**按设计就是红的** —— 它的零残留断言必须如实报出存量命中（旧应用子域/换票/
+ * entry_url/access=public/服务端 ai.chat）。若直接接成阻塞，`yarn check` 会在所有泳道
+ * 施工期间恒红；若把它改成"没命中才算"，那条判据就退化成了摆设。
+ * 折中：脚本本身仍然 exit 1（直跑可见），编排器这里只记 advisory 并**显式打印**，
+ * W6 验收前必须删掉条目上的 `advisory:true`。
+ */
+function classifyFailure(result, state) {
+  if (result.task.advisory === true) state.advisory.push(result)
+  else state.failed.push(result)
+}
+
 async function runPool(tasks, limit, state) {
   const queue = [...tasks]
   const workers = Array.from({ length: Math.max(1, Math.min(limit, queue.length)) }, async () => {
@@ -320,8 +355,9 @@ async function runPool(tasks, limit, state) {
       if (task === undefined) return
       const result = await runTask(task)
       state.results.push(result)
-      if (!result.ok) state.failed.push(result)
-      console.log(`${result.ok ? '✓' : '✗'} ${result.task.name.padEnd(28)} ${seconds(result.ms).padStart(8)}`)
+      if (!result.ok) classifyFailure(result, state)
+      const mark = result.ok ? '✓' : result.task.advisory === true ? '!' : '✗'
+      console.log(`${mark} ${result.task.name.padEnd(28)} ${seconds(result.ms).padStart(8)}`)
     }
   })
   await Promise.all(workers)
@@ -342,8 +378,9 @@ async function runScheduler(tasks, limit, state) {
       running.delete(task.name)
       state.results.push(result)
       if (result.ok) succeeded.add(task.name)
-      else state.failed.push(result)
-      console.log(`${result.ok ? '✓' : '✗'} ${task.name.padEnd(28)} ${seconds(result.ms).padStart(8)}`)
+      else classifyFailure(result, state)
+      const mark = result.ok ? '✓' : task.advisory === true ? '!' : '✗'
+      console.log(`${mark} ${task.name.padEnd(28)} ${seconds(result.ms).padStart(8)}`)
     })
     running.set(task.name, promise)
   }
@@ -443,10 +480,12 @@ if (options.list) {
     console.log(`${pkg.name.padEnd(30)} needs: ${pkg.needs.join(', ') || '—'}`)
   }
   console.log(`guards: ${guards.map(guard => guard.name).join(', ') || '—'}`)
+  const advisories = guards.filter(guard => guard.advisory === true).map(guard => guard.name)
+  if (advisories.length > 0) console.log(`guards(advisory,只告警不拦门禁): ${advisories.join(', ')}`)
   process.exit(0)
 }
 
-const state = { results: [], failed: [], skipped: [] }
+const state = { results: [], failed: [], skipped: [], advisory: [] }
 const startedAt = Date.now()
 console.log(`check — 并发 ${concurrency};按构建依赖分层(desktop 必须先产出 lib/types)`)
 
@@ -466,7 +505,19 @@ if (rest.length > 0) await runScheduler(rest, concurrency, state)
 
 const totalMs = Date.now() - startedAt
 const passed = state.results.length - state.failed.length
-console.log(`──── ${state.results.length} 个任务:${passed} 通过、${state.failed.length} 失败、${state.skipped.length} 跳过,总耗时 ${seconds(totalMs)}`)
+console.log(`──── ${state.results.length} 个任务:${passed} 通过、${state.failed.length} 失败、${state.skipped.length} 跳过`
+  + `${state.advisory.length > 0 ? `、${state.advisory.length} 告警(advisory)` : ''},总耗时 ${seconds(totalMs)}`)
+
+if (state.advisory.length > 0) {
+  // advisory 不等于通过：把失败原文（有界）打出来，并明确它何时必须转阻塞。
+  console.error(`\n⚠ ${state.advisory.length} 个 advisory 任务未通过（不拦门禁，但必须处置）：`)
+  for (const advisory of state.advisory) {
+    console.error(`\n----- ${advisory.task.name}（advisory：${advisory.task.path ?? ''}）-----`)
+    console.error(options.fullOutput ? advisory.output.trimEnd() : summarizeFailure(advisory.output))
+  }
+  console.error('\n提示：WASM 客户端专属门禁在 W1–W5 波次落地前按设计就是红的（零残留如实报出存量命中）。')
+  console.error('     W6 验收前必须删掉 scripts/check-workspaces.mjs 里该条目的 advisory:true 转为阻塞。')
+}
 
 if (state.failed.length > 0) {
   for (const failure of state.failed) {

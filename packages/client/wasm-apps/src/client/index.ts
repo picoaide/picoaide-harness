@@ -7,6 +7,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { AppCenterTrigger } from './AppCenterTrigger.tsx'
+import { APP_FOREIGN_DEEP_LINK_EVENT, showAppToast } from './app-toast.tsx'
 import { en, setActiveLocale, type AppCenterKey, zh } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -58,6 +59,13 @@ export function apply(ctx: ClientContext): void {
     if (typeof locale.subscribe !== 'function') return () => {}
     return locale.subscribe(sync)
   }, 'wasm-apps: follow active locale')
+
+  // 异渠道深链的一次性提示（§5.3/§19 Q5）：宿主只广播"这条链接属于别的安装"，
+  // 文案与渲染在这一半（见 app-toast.tsx 的接缝说明）。
+  ctx.effect(
+    () => ctx.on(APP_FOREIGN_DEEP_LINK_EVENT, () => { showAppToast({ kind: 'foreign-deep-link' }) }),
+    'wasm-apps: foreign deep-link toast',
+  )
 
   // Sidebar foot action: same slot every other user-facing panel uses
   // (capability center / browser / account card), so it is reachable without

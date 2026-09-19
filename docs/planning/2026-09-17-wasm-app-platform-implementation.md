@@ -1,6 +1,16 @@
 # WASM 应用平台 —— 实施与设计一致性报告
 
-- 设计基线：`docs/planning/2026-09-17-wasm-app-platform.md`（**唯一权威**，776 行）
+> ## ⛔ 历史归档：**已废弃，不得据此实施**
+>
+> 本文件记录的是 2026-09-19 之前那一版访问模型（浏览器 + 应用子域 + 换票）与旧 AI 能力（服务端
+> `ai.chat`）下的实施与验收结果。**两者均已被「客户端专属」改造整体删除**（访问模型：总纲 §8.4 / §12；
+> AI：总纲 §21）。文中凡出现"应用子域 / 换票 / `/app-ticket` / 会话 Cookie / 基域 / `entry_url` /
+> `ai.chat` / 匿名面"的行，**不是现状、不是待办、也不得作为实施依据**；保留它们只为记录当时的偏差裁定过程。
+>
+> **权威文档**：`docs/planning/2026-09-19-wasm-client-only-design.md`（设计总纲，§16 是唯一权威波次表）。
+> 现行契约：`docs/decisions/2026-09-19-wasm-client-internal-origin.md`。
+
+- 设计基线：`docs/planning/2026-09-17-wasm-app-platform.md`（**已废弃，见其文首横幅**）
 - 本文件回答三个问题：**实现了什么 / 与设计哪里不一致 / 哪些仍是缺口**。
 - 结论口径：`COVERED` = 有测试且做过变异验证；`PARTIAL` = 实现了但覆盖不全；
   `MISSING` = 未实现；`DEVIATION` = 实现与文档字面不同（含裁定理由）。
@@ -20,14 +30,13 @@
 | 7 | 应用数据库与 SQL 闸门 | `internal/wasmapp/appdb/*` | §4.5、§5.2、§6.3、§10.1 |
 | 8 | wazero 运行时（沙箱） | `internal/wasmapp/runtime/*` | §4.3、§4.4、§7、§10.2、§10.3 |
 | 9 | 宿主能力面（封闭清单） | `internal/wasmapp/hostcap/*` | §5.1、§5.5、§10.6 |
-| 10 | AI 调用（身份注入） | `internal/wasmapp/aichat/*` | §4.7、R36、D3.1 |
+| ~~10~~ | ~~AI 调用（身份注入）~~ **2026-09-19 删除** | ~~`internal/wasmapp/aichat/*`~~（整包删除，总纲 §21.3） | ~~§4.7、R36、D3.1~~ |
 | 11 | 包内资源与配置 | `internal/wasmapp/{assets,appcfg}/*` | §4.2、§5.1 |
 | 12 | 编译进程与隔离 | `internal/wasmapp/compile/*`、`cmd/picoaide-app-compile` | R19/R31、§4.3、§15.1 第 14 条 |
 | 13 | 请求准入与排队 | `internal/wasmapp/queue/*` | §4.6、§10.3 第 32–34 项 |
-| 14 | 匿名限流与可信代理自检 | `internal/wasmapp/anonlimit/*` | R35、§4.6 |
-| 15 | 主机名门控与安全头 | `internal/wasmapp/edge/*` | §4.8、§15.1 第 2/3/13 条、§10.1 13a–13d |
-| 16 | 应用子域请求管线 | `internal/wasmapp/appserver/*` | §6.1、§7.3、§4.6 |
-| 17 | 员工浏览器会话与换票 | `internal/wasmapp/session/*` + 迁移 `0070` | R12/R16、§4.7、§6.1、§10.4 |
+| ~~14~~ | ~~匿名限流与可信代理自检~~ **2026-09-19 删除** | ~~`internal/wasmapp/anonlimit/*`~~（随匿名面一并删除，总纲 §8.4） | ~~R35、§4.6~~ |
+| ~~15~~ | ~~主机名门控与安全头~~ **2026-09-19 删除** | ~~`internal/wasmapp/edge/*`~~（HostGate 子域门控删除；安全头改由调用方传入 selfOrigin，总纲 §8.4） | ~~§4.8、§15.1 第 2/3/13 条、§10.1 13a–13d~~ |
+| 16 | 应用请求管线（客户端协议出口复用同一 `serveApp`） | `internal/wasmapp/appserver/*` | §6.1、§7.3、§4.6 |
 | 18 | 操作面 API | `internal/wasmapp/api/*` | §8 全表、R17/R18/R23/R30/R37 |
 | 19 | 调用事件与诊断 | `internal/wasmapp/{events,diag}/*` | §4.9、§10.3 |
 | 20 | 运维探针与启动自检 | `internal/wasmapp/readyz/*` | §4.3 内存四笔账、§4.9 `/readyz`、§15.1 第 9 条 |
@@ -36,6 +45,10 @@
 | 23 | 数据模型与审计 app 维度 | `serverstore/wasmapps.go` + 迁移 `0069` + `audit.go`（追加） | §4.9、§5.3、§13 |
 | 24 | 路由与装配 | `internal/router/router.go`（追加）、`cmd/server/{main,wasmapp}.go` | §8、§6.1 |
 | 25 | AI 操作手册与作者文档 | `server/skills/app-builder/*`（2026-09-19 从 `packages/vendor/memory-evolve/skills/picoaide-app-builder/*` 迁入并改名）、`docs/wasm-app-authoring.md` | §9.3、§9.4、R40/R42 |
+
+> 🗑️ **浏览器链路条目已删除（2026-09-19）**：原模块 17「员工浏览器会话与换票」（`internal/wasmapp/session/*` + 迁移 `0070`）与模块 16 的「应用子域」措辞已随「客户端专属」改造整体删除。
+> 现行口径：应用只在桌面客户端内经 `<渠道 app 源 scheme>://<app_id>/` 打开（渠道参数化：§10/F15；official/beta 取值才是 `picoaide-app`），请求统一走 `POST /api/client/v2/apps/wasm/:app_id/request`（`BearerAuth` 必需）后复用同一 `serveApp`。
+> 冻结契约见 `docs/decisions/2026-09-19-wasm-client-internal-origin.md`。
 
 ---
 
@@ -56,12 +69,12 @@
 | D9 | §4.2 | 白名单"由参考实现构建期生成"（隐含=教学样例的导入面） | 生成器 dump **教学样例 ∪ WASI 面探测程序**的并集 | 实测：同一工具链下教学样例 17 条/16 名，而多调一行 `os.Stat` 的 guest 是 26 条/23 名 ⇒ 只按教学样例生成会让**任何用了一行 `os.Stat` 的合法 Go 应用**被 `IMPORT_NOT_ALLOWED` 拒（Go 是 R39 的 Tier 1 语言）。白名单的正确语义是 Go 可发出的 **WASI 面（保守超集）**，红线 5 由**零 preopen** 保证而非白名单 |
 | D10 | §4.3 | 「32×64 MiB 实例 + 编译峰值 + 上传峰值 + 缓存驻留」四笔账 | 实现为 `readyz.ComputeMemoryBudget`；后两笔的倍数文档未给，取保守值并注明依据 | 文档给了构成没给倍数；数值写在 `readyz` 并注明"非应用可见上限，故不属于 limits" |
 | D11 | §4.3.1-b | 缓存目录按 `wazero-v<ver>-<os>-<arch>` 分片 | 目录再套一层 `limits.CompileCacheRevision`（`r1`） | 实测：`version.GetWazeroVersion()` 在依赖方取到 **`dev`** ⇒ 目录名与条目内版本戳**都无法区分 wazero 版本**；而缓存字节会被 mmap 成机器码执行（§4.3.1-d）⇒ 升级 wazero 后旧条目被当命中 = 执行旧编译器产物。故必须有我们自己的分代标记 |
-| D12 | §4.4 / §5.1 | §5.1 字面写「事务内**禁止**调用**任何其他**宿主函数」；§4.4 的依据是「（`db.tx` 内调 `ai.chat`/`log` 直接报错）｜防事务长期持锁 + 占满执行槽」 | 事务内**允许** `db.query`/`db.exec`（+ 两个出口）；**禁止** `tx_begin`（嵌套）、`ai.chat`、`log`、`assets.read`、`db.define`、探针 `abi.ping`。允许集**唯一真源** = `abi.TxAllowedWhileInTx`，`hostcap` 调用它 | §4.4 给的理由只覆盖"会长时间阻塞/占槽"的能力，不覆盖同一条连接上的快 SQL；按 §5.1 字面实现会让 **`db.tx` 完全不可用**（只能 begin→立刻 commit）—— 这正是初版实现的实际后果，被独立审计以 P0 确认（FIX-1）。嵌套事务仍禁（会让"每应用一连接 + 并发恒 1"前提失效，5 s 硬超时归属不明） |
+| D12 | §4.4 / §5.1 | §5.1 字面写「事务内**禁止**调用**任何其他**宿主函数」；§4.4 的依据是「（`db.tx` 内调 `ai.chat`/`log` 直接报错）｜防事务长期持锁 + 占满执行槽」 | 事务内**允许** `db.query`/`db.exec`（+ 两个出口）；**禁止** `tx_begin`（嵌套）、`log`、`assets.read`、`db.define`、探针 `abi.ping`（原禁令里的 `ai.chat` 随总纲 §21 删除，该能力已不存在）。允许集**唯一真源** = `abi.TxAllowedWhileInTx`，`hostcap` 调用它 | §4.4 给的理由只覆盖"会长时间阻塞/占槽"的能力，不覆盖同一条连接上的快 SQL；按 §5.1 字面实现会让 **`db.tx` 完全不可用**（只能 begin→立刻 commit）—— 这正是初版实现的实际后果，被独立审计以 P0 确认（FIX-1）。嵌套事务仍禁（会让"每应用一连接 + ~~并发恒 1~~ **该数值已于 2026-09-19 改为 4**"的旧前提失效，5 s 硬超时归属不明；现行并发口径见 `docs/decisions/2026-09-19-wasm-app-concurrency-default.md`） |
 | D13 | §4.8 | 应用响应头白名单含 `content-disposition`（仅 `inline`） | 白名单外的头一律剥离；`Set-Cookie` 永不透出（Cookie 由宿主独占） | §4.8 同句已写「Cookie 由宿主独占」 |
 | D14 | §5.2 | 「应用看不到 `_row_id`（提到即拒）」 | 提到即拒 **+ `db.query` 结果投影层剥列** | 只靠"提到即拒"挡不住 `SELECT *`；剥列只在结果投影层做，不影响 `INSERT INTO b SELECT * FROM a` 的列数语义（那是 `db.exec` 路径） |
 | D15 | §4.2 | 「`validate` 含一次真实编译 + 合成帧干跑」 | 干跑用 `abi.ping` 探针方法；探针**不属于能力面**（`abi.ProbeMethods`，排除在 §5.5 清单一致性门禁之外） | 干跑需要一个"活着"的应答判断 guest 是否真跑起来；把探针塞进 §5.1 清单会让"封闭清单"失真 |
-| D16 | §4.9 | `usage` 表不改、不做应用维度归因（R36） | `ai.chat` 复用现有 `api_tokens` + `CreateToken`，**不加列**；令牌明文只在宿主进程内存 | R36 明确"`api_tokens` 保持现状，不加列"；代价是进程重启后孤儿令牌行要等 ≤45 min 自然过期（已认账） |
-| D17 | §4.1 | `apps.channel` "CHECK 放开"（未说取值） | 新增独立值 `wasm`（`serverstore.AppChannelWasm`） | 应用的分发面是应用子域，与 market/org 正交；既有按 channel 过滤的查询全部显式传 `market|org` ⇒ 天然排除 wasm 行，不会被当成技能/智能体展示 |
+| ~~D16~~ | ~~§4.9~~ | ~~`usage` 表不改、不做应用维度归因（R36）~~ | **2026-09-19 作废**（总纲 §21.4）：服务端 `ai.chat` 已删除，本行描述的"复用 `api_tokens` + `CreateToken` 铸造应用 AI 令牌"整条不再存在；`usage` 反而**新增应用维度**用于管理端 AI 用量面板 | 已废除（保留作历史裁定记录） |
+| D17 | §4.1 | `apps.channel` "CHECK 放开"（未说取值） | 新增独立值 `wasm`（`serverstore.AppChannelWasm`） | 应用的分发面是客户端内的应用协议，与 market/org 正交；既有按 channel 过滤的查询全部显式传 `market|org` ⇒ 天然排除 wasm 行，不会被当成技能/智能体展示 |
 | D18 | §11 第 3 项 | "只放开 CHECK，不新增标识列" | 另加**状态投影列**（purpose/data_sensitivity/config_json/~~visible~~/current_release_id/frozen_at/deleted_at）+ `app_releases.config_json/assets_dir`。⚠️ **勘误（2026-09-18）**：`apps.visible` 已在第三轮（迁移 **0071**）**删除** —— 访问模式收敛为单一 `access` 枚举，可见性布尔不再存在（见 §6.8）；制品字节复用既有 `app_releases.archive` | 任务所需的字段**没有列就无处存**；这些都不是"标识列"（域名标签仍是 `app_id`，唯一性仍由 `(kind,app_id)` 主键保证）。复用 `archive` 让审核不变量「approved 必须有归档字节」对 wasm 自动成立 |
 
 ### 2.1 门禁本身的已知弱点（审计发现，已记录待改进）
@@ -80,34 +93,11 @@
 `COVERED` = 有**真实执行**的测试且做过变异验证（拆掉闸门 ⇒ 用例红）；`PARTIAL` = 有实现但覆盖不全；
 `MISSING` = 未实现；`N/A` = 设计明确声明"不是边界"。
 
-### 3.1 端到端验收（真 PG + 真服务端 + 真 wasm + 真 https 子域）
+### 3.1 端到端验收（浏览器链路，已删除）
 
-`temp/wasm-e2e-run.sh`（60 项断言，**60/60 PASS**，可复跑）。它跑的是**完整产品路径**：
-
-```
-build server + compile child → 起服务端(含三处启动自检) → /readyz 200
-→ 登录取 Bearer → validate(不落行/不进审计) → publish(201，落行 1 条)
-→ 未登录访问应用子域 ⇒ 302 到 /app-ticket（§10.4 第 39 项）
-→ 14 条主站路径在不存在的应用子域上全部 404（§10.1 13a–13d）
-→ 基域本身/IP 直连仍服务主站（门控没把主站挡掉）
-→ 真 https（TLS 终止反代）员工登录 ⇒ 会话 Cookie
-→ POST /app-ticket(302 + 64 hex code) → 兑换 ⇒ 应用子域 Cookie
-   （断言 HttpOnly / Secure / SameSite=Strict / 无 Domain）
-→ 带会话 GET / ⇒ 200 + 应用自己的 HTML（**真空跑 wasm**）
-→ POST /api/notes 写入 ⇒ 数据出现在页面上（**真跑 db.define + db.exec**）
-→ 跨源 POST ⇒ 403（§10.4 第 44 项）
-→ 宿主写入 CSP / nosniff / Referrer-Policy（§4.8）
-→ ticket 重放不换出新会话（§10.4 第 40 项）
-→ 登出后应用会话立即失效（§10.4 第 46 项）
-→ 发布 access=public 版本 ⇒ 匿名 200 且页面显示"匿名访问"（§10.4 第 47 项；2026-09-18 前写作 login_required=false）
-→ 应用库 app.db 真落盘（§4.5 每应用一个库）
-→ 审计 2 行带 app_id、哈希链完好（§4.9）
-→ 编译缓存分代目录 r1 存在
-```
-
-⚠️ **真 https 是必须的**：员工会话与应用会话 Cookie 都是 `Secure`（§10.4 第 49 项 fail-closed），
-浏览器/curl 拒绝在 http 上存储 Secure Cookie ⇒ 不走真 https 就无法验证后半条链路。
-验收脚本因此自带一个最小 TLS 终止反代（`temp/wasm-e2e-tls/`，模拟生产 Caddy）。
+> 🗑️ **整节删除（2026-09-19）**：本节原有的端到端验收（`temp/wasm-e2e-run.sh`，真 PG + 真服务端 + 真 wasm + 真 https 子域，
+> 含未登录 302 换票、`/app-ticket` 兑换、会话 Cookie 断言、`access=public` 匿名 200 等断言）以已删除的浏览器访问模型为前提。
+> 现行验收判据 = 真客户端协议 handler + 真 wasm（契约 §6 的 W2/W5 波次）；冻结契约见 `docs/decisions/2026-09-19-wasm-client-internal-origin.md`。
 
 ### 3.2 §10.1 越权（红线 1/2）
 
@@ -124,7 +114,7 @@ build server + compile child → 起服务端(含三处启动自检) → /readyz
 | 11 应用 A 读 B 的库 | COVERED | 文件边界 + ATTACH 否决 |
 | 12 连接状态不粘连 | COVERED | 两条固定连接 + 只读连接 `query_only` |
 | 13 新连接仍带全套限额 | COVERED | 连接钩子 + 金丝雀（max_page_count 读回 + ATTACH 被拒） |
-| 13a–13d 子域主站路由不可达 | COVERED | `internal/router/subdomain_test.go` + 端到端 14 条路径 404 |
+| ~~13a–13d 子域主站路由不可达~~ **已废弃** | ~~COVERED~~ | **对象已随 W4 删除**（总纲 §8.4）：`internal/router/subdomain_test.go` 与本行引用的端到端 14 条路径断言**都将被删除**，本行不得再作为覆盖证据引用。现行判据 = 总纲 §13（I1「公网无应用 origin ⇒ 404 且不返回应用内容」+ 部署级「未配置任何基域变量时客户端内打开应用仍成功」） |
 | **额外（文档未覆盖）** | COVERED | `UPDATE sqlite_dbpage` 与 `SELECT file FROM pragma_database_list` 两个真洞（B6/B7）已封 |
 
 ### 3.3 §10.2 沙箱逃逸（红线 4/5）
@@ -132,7 +122,7 @@ build server + compile child → 起服务端(含三处启动自检) → /readyz
 | 项 | 状态 | 证据 |
 |---|---|---|
 | 14/15 文件操作 DENIED | COVERED | 零 preopen；实测 errno=**EBADF(8)**（不是文档写的 ENOSYS —— 见 D-口径） |
-| 16 任意出站不可达 | COVERED | preview1 无 `sock_*`；宿主零网络能力；导入面白名单反向断言 |
+| 16 任意出站不可达 | COVERED（**结论仍成立，措辞已订正**） | preview1 无 `sock_*`；~~宿主零网络能力~~ ⇒ **正确说法 = 沙箱内无出站 `sock_*`，应用不能主动发起 `XHR`/`fetch` 型网络请求**（⚠️ **不得对外宣称"不能联网"**：CSP 不管顶层导航与弹窗，总纲 §6 / RED-9）；导入面白名单反向断言 |
 | 17 导入面 env.*/js.* | COVERED | 白名单只允许 `wasi_snapshot_preview1` + 安全边界反向断言 |
 | 18 导入签名不符 | COVERED | `IMPORT_SIGNATURE_MISMATCH` + 干跑（编译期不报，实测） |
 | 19 组件模型 | COVERED | layer 字段检测 ⇒ `COMPONENT_MODEL_UNSUPPORTED` |
@@ -159,32 +149,29 @@ build server + compile child → 起服务端(含三处启动自检) → /readyz
 | 35 缓存回收 | COVERED | 体积 + 条目双上限，按 mtime 从旧到新 |
 | 36 上传 30 次/小时 + 并发 1 | COVERED | 第 31 次 429；失败路径也释放占位 |
 | 37 垃圾包连续上传 | PARTIAL | 单次编译 CPU/缓存受限已测；"连续填满"未做端到端压测 |
-| 38 ai.chat 死循环刷额度 | PARTIAL | R36 设计上沿用使用者余额 + 用户级限流；无应用级用例 |
-| 38b 余额不足 | COVERED | 402 `AI_BALANCE_INSUFFICIENT`，不暴露余额数值 |
-| 38c 浏览器侧不显示额度 | COVERED | catalog/portal 无额度字段；应用子域无该页面 |
+| ~~38 ai.chat 死循环刷额度~~ **已废弃** | ~~PARTIAL~~ | **对象已随 W4 删除**（总纲 §21）：服务端无 `ai.chat`。替代判据 = 总纲 §21.6（客户端 AI 链路的余额闸门 + 页面关闭即取消） |
+| ~~38b 余额不足~~ **已废弃** | ~~COVERED~~ | **对象已随 W4 删除**（总纲 §21）：402 `AI_BALANCE_INSUFFICIENT` 不再由应用请求管线返回；现行错误码 = 客户端 AI 链路的 `ai_balance_insufficient` |
+| ~~38c 应用侧不显示额度~~ | **仍成立** | 现行口径不变：catalog/portal 与应用页面都不含额度字段（额度只在桌面客户端可见） |
 
 ### 3.5 §10.4 会话、身份与准入
 
 | 项 | 状态 | 证据 |
 |---|---|---|
-| 39 未登录 ⇒ 302 换票 | COVERED | session 用例 + 端到端 |
-| 40 ticket 重放/跨应用 | COVERED | 并发 CAS（64 goroutine 只成功 1 次）+ 跨应用拒 + 端到端重放 |
-| 41 第三方触发换票 | COVERED | POST + Origin == 主站源 + `next` 白名单（26 个负向 payload） |
-| 42 应用 JS 读不到 Cookie | COVERED | Set-Cookie 断言 `HttpOnly`（浏览器行为本身未真机验证） |
-| 43 应用凭证不能调 `/api/client/v2/*` | COVERED | 真跑 `BearerAuth`：把两种 Cookie 当 Bearer 发全部 401 |
-| 44 跨应用写 | COVERED | 端到端 403 + 前缀相似域拒 |
+| 43 应用凭证不能调 `/api/client/v2/*` | COVERED（**结论仍成立**） | 真跑 `BearerAuth`：~~把两种 Cookie 当 Bearer 发全部 401~~ **已废弃（对象已删除，W4）**——那两种 Cookie 是员工会话 Cookie，随浏览器链路删除；现行等价判据 = 无 bearer ⇒ 401（总纲 §13 I2） |
+| 44 跨应用写 | COVERED（**结论仍成立**） | 端到端 403（有效）+ ~~前缀相似域拒~~ **已废弃（对象已删除，W4）**——前缀相似域判据属已删除的 HostGate；现行等价判据 = 跨源写要求 `Origin == <app scheme>://<app_id>`（总纲 §8.3 / §13 I3） |
 | 45 伪造帧内 user | COVERED | 帧由宿主构造；应用无法注入 |
-| 46 登出后旧令牌立即失效 | COVERED | SQL 层级联 + 端到端 302 + 内存令牌回收钩子 |
-| 47 匿名响应体含 username | COVERED | 端到端：匿名页显示"匿名访问"、无"你的账号"块 |
-| 48 匿名打满桶 | COVERED | 全局 3000/分 + 每 IP 60/分 + 可信代理自检（区分 compose 默认值） |
-| 49 非 https 不签发 Cookie | COVERED | 端到端前半段证明 http 下拿不到会话；https 下正常 |
+| 46 登出后旧令牌立即失效 | COVERED（**结论仍成立**） | 内存令牌回收钩子（有效）+ ~~SQL 层级联（`employee_sessions` 已 DROP）+ 端到端 302（换票重定向）~~ **已废弃（对象已删除，W4）**；现行等价判据 = 撤销后应用请求 401（`serverauth.BearerAuth` 承担，总纲 §13 I2） |
 | 51 未授权员工打开应用 | N/A | R24 明确声明不是边界（由应用返回 403） |
+
+> 🗑️ **换票 / Cookie / 匿名条目已删除（2026-09-19）**：原第 39/40/41 项（未登录 302 换票、ticket 重放与跨应用、第三方触发换票）、
+> 第 42/49 项（Cookie 属性、非 https 不签发 Cookie）与第 47/48 项（匿名响应体、匿名限流桶）都以已删除的浏览器访问模型为前提。
+> 现行口径：一律要求登录（无匿名）、自定义协议下无 cookie，准入由 bearer 身份投影判定 —— 见 `docs/decisions/2026-09-19-wasm-client-internal-origin.md` §4.4。
 
 ### 3.6 §10.5 发布链路
 
 COVERED：52 / 53 / 53b / 53c / 53d / 54 / 55 / 56 / 57 / 56b / 56c / 56d / 56f / 59 / 60
 （含"失败发布不占版本号"= §10.5 第 59 项、"员工 B 更新员工 A 的应用被拒"= 第 60 项）。
-PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58（服务端不变量覆盖；客户端分片在客户端仓库）、
+PARTIAL：56e（目录侧覆盖）、58（服务端不变量覆盖；客户端分片在客户端仓库）、
 61（转移归属/冻结的手动出路已就位；离职钩子级联仍是 §11 第 17 项缺口）。
 
 ### 3.7 §10.6 受控能力面
@@ -207,28 +194,27 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 |---|---|---|
 | 1 导入白名单由参考实现生成 | **COVERED** | 生成器真编译 `refapp` ∪ `refapp/wasiprobe`（30 条）；并修正了"白名单恰好等于最小样例"的 P0（D9） |
 | 2 帧格式 + 应用配置文件落到示例 | **COVERED** | `abi` + SKILL `examples/go`（真编译、真跑通帧协议）+ `picoaide.app.json` schema |
-| 3 迁移一件 | **COVERED** | `0069_wasm_apps.sql`（kind/channel 放开 + 状态投影列 + 审计 app_id/哈希链版本化 + `wasm_call_events`）；员工会话另起 `0070` |
+| 3 迁移一件 | **COVERED** | `0069_wasm_apps.sql`（kind/channel 放开 + 状态投影列 + 审计 app_id/哈希链版本化 + `wasm_call_events`） |
 | 4 `kind` 影响面审计 | **COVERED** | `appstore/admin.go` 白名单放开（§11 明确点名）+ **两个未知值回落点都加了 wasm 分支**（`channelLabel` / `kindLabelOf`） |
-| 5 host 门控 + 子域路由树 + 限体 + 413 可读性 | **COVERED** | `edge.HostGate` allow-list + 路由结构测试 + 端到端 14 条路径 |
-| 6 换票端点改造 | **COVERED** | POST + Origin + `next` 白名单 + 原子消费 |
-| 7 限流重做 | **COVERED** | 可信代理自检（能区分 compose 默认值）+ 全局桶 + 每 IP 桶 |
 | 8 编译进程隔离 | **PARTIAL** | bwrap 读白名单 + 私有 netns + RLIMIT_AS/CPU + env 白名单**已落地并有正反用例**；**seccomp 未做**（bwrap 未暴露该能力；建议部署面叠加 cgroup） |
 | 9 内存四笔账 + 启动自检 | **COVERED** | `readyz.ComputeMemoryBudget` + 启动路径 `log.Fatalf` |
 | 10 客户端创作链路 + 应用中心页 | **PARTIAL**（第二轮补齐） | 已落地：应用中心页（真机 CDP 验证可达）、本地路由与**发布编排**（90 s 预算 / >8 MiB 自动分片 + 续传 / 错误信封逐字段透传）、服务端**分片上传与续传**（5 端点，与一次性上传行为等价）。**仍缺**（第二轮时）：**AI 的发布路径**（`wasm_app_*` 宿主工具面未落地，见 §6.5b）—— 面板内发布入口已在 H6 补齐并有真机证据（见 §6.7）。⚠️ **2026-09-18 第三轮已补齐**：3 个宿主工具落地且与本地路由共用同一份编排（见 §6.8） |
 | 11 缓存跨进程收益与占用 | **COVERED** | 冷 1099 ms → 热 34 ms（32.3×）；条目 8.37 MB（3.63× 模块）；**新增分代目录**（D11）解决 wazero 版本不可辨 |
 | 12 32 MiB 模块 60 s 内编译 | **UNVERIFIED** | 实测最大 2.31 MiB（1099 ms）；线性外推 ≈15 s，但未实测 |
 | 13 64 MiB 实例下 8 MiB 结果余量 | **COVERED** | 64 MiB 上限 + 24 MiB 堆 ⇒ peak 27.5 MiB |
-| 14 `db.define` 幂等与并发 | **COVERED** | 幂等 + 加列 + 上限；并发由"每应用并发恒 1"保证 |
-| 15 子域 Origin 校验覆盖率 | **PARTIAL** | 服务端全覆盖（含 302 链路端到端）；**302/307/表单提交的真浏览器行为未验证**（只在 Go/curl 层） |
+| 14 `db.define` 幂等与并发 | **COVERED**（**并发前提已过时**，见右列） | 幂等 + 加列 + 上限（有效）；~~并发由"每应用并发恒 1"保证~~ **该数值已过时**：2026-09-19 起 `app_concurrency` 默认为 **4**（读并发、写仍串行），见 `docs/decisions/2026-09-19-wasm-app-concurrency-default.md`；`db.define` 的幂等结论不受影响 |
 | 16 版本 GC + 制品配额 | **PARTIAL** | DAO 就绪（`PruneWasmReleases` / `CountUserArtifactBytes`）+ 发布后自动 prune；**无后台清理任务**（§11 原文即列为缺口） |
 | 17 离职/转移归属 | **PARTIAL** | 转移归属已放开 kind 并可用（管理面）；**离职钩子级联 `apps` 未做** |
 | 18 可接手材料（源码/重建说明） | **MISSING** | 仍只有二进制 + 用途/负责人字段 |
 | 19 备份与恢复口径 | **MISSING** | 未做逐库 `VACUUM INTO` 与冷备口径 |
-| 20 部署文档（应用子域章节） | **PARTIAL** | `.env.example` / `docker-compose.yml` 已写明基域、企业保留主机名、隔离档与 bwrap 的容器前提；**`AI-DEPLOY.md` 的应用子域章节与通配证书指引未写** |
 | 21 可观测 `/readyz` + 低水位拒绝发布 | **COVERED** | `/readyz` 已注册；`AllowPublish` 是 fail-closed 闸门（发布前调用）|
 | 22 余额预留扩到既有桌面路径 | **MISSING** | 未做（设计说"一次做掉更省"，属平台既有缺口） |
 | 23 证据探针入库 | **PARTIAL** | `docs/evidence/2026-09-17-wasm-app-platform/` 原有 3 个；本轮新增的探针在 `temp/audit-wasm/*`（未入库） |
 | 24 缓存目录信任边界拍板 | **PARTIAL** | 已按"认账 + 空钩子"处理（`compile/doc.go` 的认账说明 + `VerifyCacheEntry` 占位），**未加校验方案** —— 仍需拍板 |
+
+> 🗑️ **浏览器链路缺口项已删除（2026-09-19）**：原第 5/6/7 项（host 门控与子域路由树、换票端点改造、匿名限流重做）、
+> 第 15 项（子域 Origin 校验覆盖率）与第 20 项（部署文档的应用子域章节 + 通配证书指引）都以已删除的浏览器访问链路为前提。
+> 现行端点/准入与部署前置（不再需要通配域名、通配证书、Caddy 通配站点块）见 `docs/decisions/2026-09-19-wasm-client-internal-origin.md` §4、§5。
 
 ---
 
@@ -244,7 +230,7 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 |---|---|---|---|---|
 | B1 | `abi.WriteFrame` 用 `strconv.AppendInt(hdr[1:1], …)` 导致 RS 魔数**从未写出**（实测输出 `"7\n{…}"`，首字节 0x37）。宿主→guest 的请求帧与 guest→宿主的一切帧都走这条 ⇒ 整条链路在集成时才炸 | **P0** | 模块 A 交叉审计 | 已修 + `TestFrameRoundTrip`（WriteFrame→ReadFrame 往返 + 与 EncodeFrame 逐字节一致）；变异验证：改回偏移切片 ⇒ 报 `首字节=0x37` |
 | B2 | `queue.Scheduler` 只在**被释放的那个应用**的等待队列里唤醒 ⇒ 用户占满自己的 4 个全局槽后，其第 5 个应用的排队请求**永远不会被唤醒** | P1 | 主控（自身实现自审） | 已修（`pumpAllLocked` 跨应用唤醒）+ `TestHeadOfLineSkipped` |
-| B3 | `anonlimit` 每 IP 桶数上限差一位（插入后可达 `MaxIPBuckets+1`） | P2 | 主控 | 已修 + `TestIPBucketsBounded` |
+| ~~B3~~ | ~~`anonlimit` 每 IP 桶数上限差一位（插入后可达 `MaxIPBuckets+1`）~~ **已废弃（对象随 W4 删除）** | P2 | 主控 | ~~已修 + `TestIPBucketsBounded`~~ 随包删除，不再作为现行证据 |
 | B4 | `abi.TxIsolationMethod` 把 `tx_begin` 也算作"事务控制" ⇒ 照它实现等于**允许嵌套事务** | P1 | 模块 D 审计 | 已修（拆为 `TxControlMethod` / `TxAllowedWhileInTx`，后者只有 commit/rollback） |
 | B5 | `abi.AssetsReadResult` 的 `Text`/`Base64` 都是 `omitempty` ⇒ 零字节资源与"内容为空串"在 JSON 上无法区分 | P2 | 模块 D 审计 | 已修（新增必填判别字段 `Encoding`：text/base64/empty） |
 | B6 | `UPDATE sqlite_dbpage SET data=…` 在 modernc v1.55.0 上**执行成功** ⇒ 应用可改写库物理页，绕开 `db.define` 的全部结构约束（表/列上限、保留列、类型）并写坏库 | **P0** | 模块 B 探针 | 已修（`sqlite_` 前缀标识符一律拒）+ 变异验证 |
@@ -270,8 +256,8 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 |---|---|---|
 | `sandbox` | runtime / wasmmod / refapp | 见 §6.2 |
 | `sqldb` | appdb | **P0=2 / P1=3 / P2=6 / NOT_A_BUG=7** |
-| `identity` | session / hostcap / aichat / edge | 见 §6.2 |
-| `resource` | queue / anonlimit / compile / events / readyz | **P0=0 / P1=2 / P2=12 / NOT_A_BUG=5** |
+| `identity` | ~~session~~ / hostcap / ~~aichat~~ / ~~edge~~（三者**均随 W4 删除**，总纲 §8.4 / §21.3）/ 现行 = `appserver` + `api` + `hostcap` | 见 §6.2 |
+| `resource` | queue / ~~anonlimit~~（**随 W4 删除**）/ compile / events / readyz | **P0=0 / P1=2 / P2=12 / NOT_A_BUG=5** |
 | `caps` | hostcap / abi / SKILL / 文档 | **P0=0 / P1=2 / P2=7 / NOT_A_BUG=10** |
 
 报告落盘在 `temp/audit-wasm/<身份>/REPORT.md`（含逐条复现命令与变异脚本）。
@@ -294,15 +280,17 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 - **P1-1** §5.5「能力清单一致性」门禁在"**多一个**"方向**恒真**：`RegisteredMethods()` 用 `abi.HostMethods` 过滤 `table` ⇒ 多出的注册项结构上不可见；变异（往 `table` 加 `secret.read`）后**整棵 25 包全绿**。今天无能力泄漏（runtime 另有一道 `abi.HostMethods` 白名单），但"多一个即测试红"这条判据**不成立**。
 - **P1-2** `abi.AssetsReadResult.Encoding` 自称"必填判别字段"却**从未被填充**（wire 上恒为 `""`）⇒ 零字节资源与空串文本资源的 JSON **逐字节相同**（正是该字段要消灭的歧义）。
 - **P2**：无路径参数门禁两处枚举盲区（嵌套类型 / abi 包第二个文件）、数值门禁只比"同量纲存在"（SKILL 里 4 KiB→8 KiB 全绿，因为 8192 恰是另一条上限）、`ASSET_*` 三码定义了零调用、`assets.Open` 接受抽取目录本身是软链（实测读到宿主 `/etc/passwd`，**当前攻击者模型下不可达**）、事务内 `abi.ping` 可应答、`abi.TxControlMethod`/`TxAllowedWhileInTx` 无调用者（脚枪）。
-- **已核实为真且真会红**：limits/SKILL 六条门禁（四种变异全红）、`assets.read` 32 条 payload 无穿越、匿名语义、log 限额与 `Dropped`、appcfg 的 R25/R26/R38（**全树无查 users 表路径**）、SKILL 示例真编译 3.65 MiB 且导入面全命中白名单、事务严格集合（把 `tx_begin` 放回 ⇒ 用例红）。
+- **已核实为真且真会红**：limits/SKILL 六条门禁（四种变异全红）、`assets.read` 32 条 payload 无穿越、~~匿名语义~~（**已废弃：匿名面随 W4 删除**）、log 限额与 `Dropped`、appcfg 的 R25/R26/R38（**全树无查 users 表路径**）、SKILL 示例真编译 3.65 MiB 且导入面全命中白名单、事务严格集合（把 `tx_begin` 放回 ⇒ 用例红）。
 
 **`identity`（身份与凭证）**
-- **P1-1 `edge.SelfOrigin` 把端口剥掉** ⇒ 在**真 TLS 的非默认端口**上，浏览器形态的同源 `Origin` 被判跨源 ⇒ 主站登录/换票/应用子域**一切非幂等请求 403**；反向 `Origin: …:9443` 反被当成自身源。
-- **P1-2 平台保留资源被静态面公开直出**：`GET /picoaide.app.json` **匿名 200**，body 含完整 `whitelist` —— 与 §10.5 第 56d 项"平台不校验名单以免变成账号枚举接口"、R24（准入由应用判）与 R26（不提供员工目录）的意图冲突，且作者文档零提示。
-- **P2**：换票端点不校验 `app` 形态（`real-app.evil.example.com` 命中真应用 ⇒ 签出**永不可兑换**的票并 302 到多级子域；`real-app:8443` 产生连 `url.Parse` 都失败的 Location）；`HostGate.ExtraMainHosts` 是**死配置**（两个分支等价，注释承诺的功能不成立）；`TicketSubmit` 缺 `secureRequest` 检查（明文部署下签出必然兑换失败的票）。
-- **红线 3 其余各条全部实测通过（每条带反向对照）**：帧内 `user` 宿主构造（guest 伪造被拒）、ai.chat 令牌不进帧/响应体/响应头/**平台日志**（DB 只存 SHA-256）、Cookie `HttpOnly+Secure+SameSite=Strict+host-only` 且非 https 不签发、**真跑 `BearerAuth`** 四种 Cookie 组合全 401、登出吊销链端到端（含"内存令牌条目真被丢"的正面证据）、64 并发换票只成功 1 次 + TTL + 跨应用拒且**不消费**该票、**自造 34 条 `next` payload 全部同源**、真生产路由树 21 条主站路径全 404 且与主站响应逐字节不同、15 条跨应用写 Origin 表、匿名无账号信息（有身份时必须有，反向对照）、ai.chat 错误映射（402 不暴露余额数值、上游原文不透传）。
+- **P1-1 `edge.SelfOrigin` 把端口剥掉**（浏览器链路专有：该判据已随该链路删除）。**教训保留**：源判据的归一化必须与请求里实际出现的 `Origin` 逐字符相等（默认端口省略、非默认端口保留），不能"截到源再比"、也不能自作主张剥掉或补上端口 —— 现行 Origin 判据见契约 §4.3（`Origin: <渠道 app 源 scheme>://<app_id>`，渠道参数化：§10/F15，由 handler 合成，服务端按 `app_id` 推导自源）。
+- **P1-2 平台保留资源被静态面公开直出**：`GET /picoaide.app.json` **无需任何应用侧授权即可 200**，body 含完整 `whitelist` —— 与 §10.5 第 56d 项"平台不校验名单以免变成账号枚举接口"、R24（准入由应用判）与 R26（不提供员工目录）的意图冲突，且作者文档零提示。
+- **红线 3 其余各条全部实测通过（每条带反向对照）**：帧内 `user` 宿主构造（guest 伪造被拒）、~~ai.chat 令牌不进帧/响应体/响应头/平台日志、ai.chat 错误映射~~（**已废弃：对象随 W4 删除**，总纲 §21）、~~登出吊销链端到端~~（**已废弃：`session` 随 W4 删除**）、15 条跨应用写 Origin 表（**现行：Origin 由协议 handler 合成，见总纲 §8.3**）。
 - **登录失败预算两入口共享**已被独立验证（双向各打满 3 次后另一端立刻 429）⇒ 集成期补的那条修复**有效**。
-- **残留风险（UNVERIFIED）**：浏览器侧 `document.cookie` 为空只有 Set-Cookie 属性级证据；生产 Caddy 覆写 `X-Forwarded-Proto` 的行为未在真反代上验证（实测"明文 + XFP:https ⇒ 换出会话"，属部署面依赖）。
+
+> 🗑️ **换票 / Cookie / 匿名条目已删除（2026-09-19）**：原 P2 的换票端点三项（`app` 形态不校验、`HostGate.ExtraMainHosts` 死配置、`TicketSubmit` 缺 `secureRequest`）
+> 与"`document.cookie` 为空 / 反代 `X-Forwarded-Proto` 下换出会话"两条残留风险，都以已删除的浏览器访问链路为前提。
+> 现行契约见 `docs/decisions/2026-09-19-wasm-client-internal-origin.md`（§4.3 Origin 判据、§4.4 身份与准入）。
 
 **`sandbox`（沙箱运行时）**
 - **P0-1 导入白名单仍缺 4 个符号 ⇒ 用 `html/template`/`text/template` 渲染页面的合法 Go 应用被 `IMPORT_NOT_ALLOWED` 拒**：实测 `template.Execute` 会导入 `sock_accept`/`sock_shutdown`（Go 运行时的 fd 操作路径），`(*os.File).ReadAt/WriteAt` 会导入 `fd_pread`/`fd_pwrite`；而"渲染 HTML 页面"恰是本平台最主要的用法（R8）。Skill 与作者文档**从未提示** template 会中招。
@@ -315,7 +303,7 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 **`resource`（资源边界）**
 - **P1-1** `readyz.AllowPublish` **零生产调用方** ⇒ §4.9「低水位拒绝发布（fail-closed）」只写在注释里。
 - **P1-2** `events.Sink.Cleanup` **零生产调用方** ⇒ §4.9/§5.3 的「7 天保留」未生效，`wasm_call_events` 是平台**唯一的无界磁盘增长路径**。
-- **P2**：`PICOAI_COMPILE_ISOLATION=require` 与三处文档"拒绝启动"不符（实际只禁用发布链路）；编译器缺失时 `/readyz` 与健康态**逐字段同形**（降级不可见）；`queue` 的 app 表只增不减 + 每次 Release 全表遍历（20000 应用时 **516–811 µs/请求且持全局锁**）；匿名桶满后每个新 IP 做两次 O(8192) 扫描（**865 µs/次**）；`main.go` 硬编码 `ReadTimeout 60s`（未用 `limits.ServerReadTimeout`）；内存四笔账自检**无条件**执行（未启用子域也要求 MemAvailable ≥ 3.56 GiB ⇒ 4 GiB 容器起不来）；调用事件计数无出口。
+- **P2**：`PICOAI_COMPILE_ISOLATION=require` 与三处文档"拒绝启动"不符（实际只禁用发布链路）；编译器缺失时 `/readyz` 与健康态**逐字段同形**（降级不可见）；`queue` 的 app 表只增不减 + 每次 Release 全表遍历（20000 应用时 **516–811 µs/请求且持全局锁**）；匿名桶满后每个新 IP 做两次 O(8192) 扫描（**865 µs/次**）~~匿名桶满后每个新 IP 做两次 O(8192) 扫描（**865 µs/次**）~~（**已废弃：匿名桶随 W4 删除**）；`main.go` 硬编码 `ReadTimeout 60s`（未用 `limits.ServerReadTimeout`）；内存四笔账自检**无条件**执行（原要求 MemAvailable ≥ 3.56 GiB ⇒ 4 GiB 容器起不来；与子域无关，子域已删除）；调用事件计数无出口。
 - **已核实为真**：跨应用唤醒成立、等待者不泄漏（取消 1000 个后计数归零且占位额度真的归还）、bwrap 隔离**真的生效**（差分对照：唯一可写面写成功 / 只读绑定 EROFS / 数据根 `master.key` 不可读 / netns inode 变化 / PID=2）、编译缓存**跨进程命中 41×**。
 - **压力复跑（4 核 ×3 轮 ×4 lane，峰值 12 个测试二进制）**：queue 12/12、readyz 12/12、events **9/12** —— 唯一失败 `TestFlushPersistsBatchFields` 判定为**测试不稳**（`waitRows` 写死 5s 而批次预算只有 50ms；确定性探针证明产品行为是"丢批但计数可见"，**非静默失败**）。
 - **§11 第 12 项补充**：本仓造不出合法 32 MiB 模块（自定义段上限 4 MiB），实测 2.20 MiB 冷编译 2451 ms（空载）；按代码体积线性外推 **32 MiB ≈ 36 s（空载）～59 s（负载）** ⇒ 60 s 编译预算在负载下余量接近 0。
@@ -326,7 +314,7 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 |---|---|---|
 | **H1** | `hostcap` / `abi` / `assets` / SKILL | FIX-1（事务内允许 db 读写 —— `db.tx` 可用性 P0）、FIX-2（能力清单门禁双向）、FIX-3（`Encoding` 填充）、FIX-4（事务允许集单一真源）、FIX-5（事务内 ping）、FIX-6（`ASSET_*` 码接线 + SKILL 补充码）、FIX-7（`assets.Open` 根包含断言）、FIX-8（无路径参数门禁枚举盲区） |
 | **H2** | `appdb` / `appserver.dbpool` | FIX-9（`rowid`/`_rowid_`/`oid` 别名）、FIX-10（reason 常量单一真源 + `Close` 清毒 + 用真错误做用例）、FIX-11（嵌套 `WITH` 改词级判定）、FIX-12（新建连接限额 fail-closed）、FIX-13（`dbstat`/`load_extension` 显式拒绝集）、FIX-14（define 列上限口径）、FIX-15（扩展码 / 变异表用例名 / §15.2 实测结论） |
-| **H3** | `readyz` / `events` / `queue` / `anonlimit` / `api` / `cmd/server` | FIX-16（`AllowPublish` 接线）、FIX-17（事件保留期调度 + 计数出口）、FIX-18（`IsolationRequire` 真 fail-closed）、FIX-19（`/readyz` 暴露编译可用性）、FIX-20（事件水位进 `/readyz`）、FIX-21（queue app 表摊销清理）、FIX-22（匿名桶摊销淘汰）、FIX-23（`ReadTimeout` 单一真源）、FIX-24（内存自检只在启用时执行）、FIX-25（注释与文档口径） |
+| ~~**H3**~~ | ~~`readyz` / `events` / `queue` / `anonlimit` / `api` / `cmd/server`~~ ⚠️ **`anonlimit` 随 W4 整包删除**（总纲 §8.4），本行其余模块仍为现役 | FIX-16（`AllowPublish` 接线）、FIX-17（事件保留期调度 + 计数出口）、FIX-18（`IsolationRequire` 真 fail-closed）、FIX-19（`/readyz` 暴露编译可用性）、FIX-20（事件水位进 `/readyz`）、FIX-21（queue app 表摊销清理）、~~FIX-22（匿名桶摊销淘汰）~~ **已废弃（对象随 W4 删除）**、FIX-23（`ReadTimeout` 单一真源）、FIX-24（内存自检只在启用时执行）、FIX-25（注释与文档口径） |
 
 ### 6.4 修复后复核
 
@@ -336,7 +324,7 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 |---|---|---|
 | **H1** | FIX-1..8 全部落地；`./internal/wasmapp/...` 25 包全绿；`imports-gen -check` exit 0；`grep TxControlMethod\|TxIsolationMethod` 全仓为空 | FIX-1 有**guest 级端到端**证据（真编译 refapp → 真 wazero → 真 SQLite）：事务内 exec+query 成功、事务内读到未提交的写 `[[第一条]]`、commit 落盘、rollback 不落盘。变异：允许集去掉两条 SQL ⇒ 6 条用例红 |
 | **H2** | FIX-9..15 全部落地；`appdb` 63 顶层用例、`appserver` 全绿；`./internal/wasmapp/...` 24 包全绿 | FIX-9 端到端断言宿主 `_row_id` 与 `sqlite_sequence.seq` 一字未变；FIX-10 用**真 5s 看门狗错误**替代构造串；FIX-12 改四层闭合（池容量 2 + 私有 DSN 令牌 + 未加固连接 fail-closed + 每语句复检），并**删掉了"断言 attached==10"的缺口断言** |
-| **H3** | FIX-16..25 全部落地；7/7 包绿；**11/11 变异全红**；审计方原始探针 overlay 复跑 4/4 ok | FIX-16 低水位 ⇒ 503 且 **0 release 行 + 0 审计增量**；FIX-17 保留期调度真删 8 天前旧行；FIX-21/22 性能判据用**遍历/操作次数计数器**（不用绝对耗时）；FIX-23 源码级断言 `ReadTimeout == limits.ServerReadTimeout` |
+| **H3** | FIX-16..25 全部落地；7/7 包绿；**11/11 变异全红**；审计方原始探针 overlay 复跑 4/4 ok | FIX-16 低水位 ⇒ 503 且 **0 release 行 + 0 审计增量**；FIX-17 保留期调度真删 8 天前旧行；~~FIX-21/22~~ FIX-21（**FIX-22 的对象 `anonlimit` 随 W4 删除，该条判据作废**）性能判据用**遍历/操作次数计数器**（不用绝对耗时）；FIX-23 源码级断言 `ReadTimeout == limits.ServerReadTimeout` |
 
 **修复过程中发现并一并处理的测试不稳（非产品 bug）**
 - `appserver` 的 `waitForEvents` 预算 3s < events 批量落库周期在高负载下的实际耗时（20 包并行时红、单跑绿）。已把预算提到 30s 并写明理由：**等待仍是确定性条件轮询**（条件不成立时 30s 后返回真实条数 ⇒ 断言照样红），放大预算不掩盖缺陷。同一族问题在 `events` 包的 `TestFlushPersistsBatchFields`（审计在 4 路压力下 9/12）也记录在案。
@@ -352,13 +340,15 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 
 | 批次 | 结果 | 关键证据 |
 |---|---|---|
-| **H4** | FIX-26..30 全部落地；6/6 变异红；审计员探针 27 PASS/3 FAIL → **29 PASS/1 FAIL**（唯一 FAIL 经反证变异证明是探针判据误报） | FIX-26 有 12 行表断言 `SelfOrigin` 与**浏览器实际会发的 `Origin` 逐字符相等**（默认端口省略、非默认保留）；FIX-27 保留资源不直出（8 种路径形态含 `%70` 解码）+ **反向对照**：非保留资源仍直出 200+ETag（保住 R8 的缓存收益） |
+| **H4** | FIX-26..30 全部落地；6/6 变异红；审计员探针 27 PASS/3 FAIL → **29 PASS/1 FAIL**（唯一 FAIL 经反证变异证明是探针判据误报）。⚠️ **本批 FIX-26 的证据对象已删除**（见右列） | ~~FIX-26 有 12 行表断言 `SelfOrigin` 与浏览器实际会发的 `Origin` 逐字符相等~~ **已废弃（对象已删除，W4）**：`edge.SelfOrigin` 与 HostGate 随总纲 §8.4 删除，现行 Origin 判据见总纲 §8.3（由 `app_id` 推导 `<app scheme>://<app_id>`，由 handler 补头）；**FIX-27..30 与 H4 其余结论不受影响**；FIX-27 保留资源不直出（8 种路径形态含 `%70` 解码）+ **反向对照**：非保留资源仍直出 200+ETag（保住 R8 的缓存收益） |
 | **H5** | FIX-31..37 全部落地；审计员探针 226 PASS/1 FAIL → **241 PASS/0 FAIL**；白名单 **30 → 34** | 新增第三份来源程序 `refapp/stdprobe`（template Execute + ReadAt/WriteAt + 一批常见 std），并新增**独立于生成来源**的覆盖性门禁 `wasmmod/imports_coverage_test.go` + 夹具 `wasmmod/testdata/stdrender` —— 来源程序退化时白名单会跟着变小，只有这条独立判据会红 |
 
 **H4/H5 顺带发现并修掉的真实缺陷（不在原审计清单内）**
-- **登录页与换票页的内联样式实际渲染成 `ZgotmplZ`**（`<style>{{.CSS}}</style>` 注入裸 `string`，`html/template` 拒绝输出）⇒ 两个页面静默退化成**无样式的裸表单**。已修（`template.CSS`）+ 新增 `TestLoginAndTicketPagesRenderInlineCSS`（断言 `ZgotmplZ` 不出现且样式确实落地）。
-- `edge.CheckOrigin` 曾"截到源再比" ⇒ `Origin: https://a.<基域>/x`（带路径）会被当成合法源放行；H4 自己的用例抓出并修掉。
+- **源比较不能"截到源再比"**（原 `edge.CheckOrigin` 的缺陷，该函数已随浏览器链路删除）：带路径的 `Origin` 会被当成合法源放行。**教训保留**：Origin 判据必须整串相等，先截断再比等于放开一批异源写法 —— 现行判据见契约 §4.3。
 - `net.SplitHostPort` 对 `a.example.com:8443.`（尾点）的解析会把尾点切进 port；已在 `NormalizeOrigin` 里处理。
+
+> 🗑️ **登录页 / 换票页条目已删除（2026-09-19）**：原「登录页与换票页内联样式渲染成 `ZgotmplZ`」一条（及 `TestLoginAndTicketPagesRenderInlineCSS`）针对的两个页面已随浏览器链路删除。
+> 现行契约见 `docs/decisions/2026-09-19-wasm-client-internal-origin.md`。
 
 **最终验收（全部在本轮修复之后复跑）**
 
@@ -367,11 +357,11 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 | `go build ./...`（服务端全量） | **exit 0** |
 | `gofmt -l .` / `go vet ./...` | **空 / exit 0** |
 | `go test ./internal/... ./cmd/... -count=1 -p 2` | **全绿，零 FAIL 行** |
-| 端到端验收 `temp/wasm-e2e-run.sh`（真 PG + 真服务端 + 真 wasm + 真 https 子域） | **61/61 PASS** |
+| ~~端到端验收 `temp/wasm-e2e-run.sh`（真 PG + 真服务端 + 真 wasm + 真 https 子域）~~ | ~~**61/61 PASS**~~ **已废弃（对象已删除，W4）：该脚本断言的是 https 子域 + 换票 + 匿名链路，现行判据见总纲 §13** |
 | 根守卫 7 个（layout/workflows/ci-scripts/patches/patch-resolutions/inventories/check-workspaces） | **全部 OK** |
 | desktop `verify-packaged-runtime.spec.ts`（随包技能清单） | **46/46 PASS** |
 | `memory-evolve` 的 `coi.test.js`（BUILTIN_SKILLS 冻结清单） | **70/70 PASS** |
-| 5 个审计身份的自写探针（overlay 复跑，不改产品代码） | sandbox **241 PASS/0 FAIL**；`sqldb` P0-2 与 P1-1/P1-2 判据转绿；`resource` 4/4 探针 ok；`identity` 3 条 CONFIRMED 全转绿；`caps` 两条 P1 转绿 |
+| 5 个审计身份的自写探针（overlay 复跑，不改产品代码） | sandbox **241 PASS/0 FAIL**、`sqldb` P0-2 与 P1-1/P1-2 判据转绿、`resource` 4/4 探针 ok、`caps` 两条 P1 转绿 —— **以上四行对象仍有效**；~~`identity` 3 条 CONFIRMED 全转绿~~ **已废弃（对象已删除，W4）**：`identity` 身份覆盖的 `session` / `aichat` / `edge` 三个包均随总纲 §8.4 / §21.3 删除（该身份只余 `hostcap` 相关结论，复核前不得作为现行证据） |
 
 ### 6.5b AI 发布路径：定案（模块 L 审计暴露）——**第三轮已落地**
 
@@ -441,7 +431,7 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 **H6 的真机证据（打包版、无注入）**：`temp/fix-h6/probe-real6.txt` —— 真包（宿主路由与客户端插件都在包里）下 12 项全绿：
 入口在 DOM 且可见可点 → **真宿主路由返回的目录被面板渲染**（当时含 `visible=false` 行，即"目录不过滤"；2026-09-18 起该行改为 `access`/`enabled`，口径不变）→ 面板无任何额度/用量字段（R36）→
 **宿主路由真的出站**（假网关收到 catalog，带 Bearer）→ 发布入口真按钮 → 真鼠标点击出表单 → **假网关收到
-`POST /api/client/v2/apps/wasm/shift-notes/releases`，字节数与磁盘逐字节相同** → 结果显示"版本/已生效/入口链接" →
+`POST /api/client/v2/apps/wasm/shift-notes/releases`，字节数与磁盘逐字节相同** → 结果显示"版本/已生效/~~入口链接~~"（**入口链接列已随 W4 删除**，总纲 §8.4 / F14；本项为历史验收记录） →
 **17 MiB 与 9 MiB 载荷：面板仍只发一次 `/publish`，切分由宿主的同一份编排完成**（`POST /uploads` + N 片 `PUT` + `complete`）。
 
 **第二轮修复后的门禁**
@@ -453,7 +443,7 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 | 根守卫 7 个 | **全部 OK**（其中 `verify-inventories.mjs` 在第二轮**实测拦下**了 CI 归档清单漏带新包 lib 的问题） |
 | `@picoaide/dsh-wasm-apps` check（build+typecheck+test） | **63/63 PASS** |
 | `@picoaide/dsh-enterprise` test | **435/435 PASS** |
-| 端到端验收 `temp/wasm-e2e-run.sh` | **61/61 PASS** |
+| ~~端到端验收 `temp/wasm-e2e-run.sh`~~ | ~~**61/61 PASS**~~ **已废弃（对象已删除，W4）：该脚本断言的是 https 子域 + 换票 + 匿名链路，现行判据见总纲 §13**（同桌 `gofmt`/`go test`/根守卫/包 check 各行**仍然有效，不受影响**） |
 | 审计员复跑脚本 | `chunkupload` 的两条独立发现双双转绿；`clientchain` 的 3 条 CONFIRMED 转绿 |
 
 **第二轮结束时仍开着的项（如实）**
@@ -484,7 +474,7 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
    看起来与"安全边界"冲突，而实际上两者无关（`sock_accept` 需要一个已存在的监听 fd，
    而平台没有任何途径造出 socket fd）。
 
-### 6.8 第三轮：用户新增要求（access 三模式 / AI 发布 / 技能内置 / 字段规格单一真源）
+### 6.8 第三轮：用户新增要求（~~access 三模式~~ **access 两值**（2026-09-19 订正，总纲 §6/I6）/ AI 发布 / 技能内置 / 字段规格单一真源）
 
 > 来源：用户 2026-09-18 的两条要求 + 追问后拍板。**这是本轮的最高判据**，与旧设计文本
 > 冲突处按用户口径执行，并就地勘误设计基线（`docs/planning/2026-09-17-wasm-app-platform.md`
@@ -498,8 +488,8 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 
 | # | 口径 | 落地要点 |
 |---|---|---|
-| 1 | 权限**收敛成单一 `access` 枚举**：`public` / `login`（缺省，登录后全员）/ `whitelist`；**删掉 `visible`** | `appcfg.Config` 去掉 `Visible`/`LoginRequired`；迁移 **0071** 删列 + 就地改写两个 `config_json` |
-| 2 | **准入仍由应用判定**（R24 不动）：平台只注入身份 + 访问模式 | 平台**不比对名单**；帧内 `auth.mode` 三取值，名单由应用自己 `assets.read("picoaide.app.json")` 读 |
+| 1 | 权限**收敛成单一 `access` 枚举**：`login`（缺省，登录后全员）/ `whitelist`；**删掉 `visible`**。⚠️ **2026-09-19 订正（I6）**：本行原把 `public` 也列为枚举取值之一，现已**废止** —— 写侧只接受 `login` / `whitelist` 两值；历史配置里的 `public` 只在**读取侧按 `login`** 处理（迁移期 shim，不是第三种模式，总纲 §8.4 / 迁移 0074） | `appcfg.Config` 去掉 `Visible`/`LoginRequired`；迁移 **0071** 删列 + 就地改写两个 `config_json`；后续迁移 **0074** 把存量 `access='public'` 改写为 `login` |
+| 2 | **准入仍由应用判定**（R24 不动）：平台只注入身份 + 访问模式 | 平台**不比对名单**；帧内 `auth.mode` 取值（⚠️ **2026-09-19 订正**：此处原写"**三取值**"，现为 `login` / `whitelist` **两值** —— `public` 已作废，见总纲 §6 / §13.1 I6），名单由应用自己 `assets.read("picoaide.app.json")` 读 |
 | 3 | **应用中心展示全部应用** | catalog 去掉可见性过滤；行 `visible` → `access` + 新增 `enabled` |
 | 4 | **AI 能编译、能发布**；表单字段**AI 知道该填什么** | 3 个宿主工具；字段规格做成机器可读单一真源，工具参数/UI/SKILL 三处对拍 |
 
@@ -507,7 +497,7 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 
 | 模块 | 范围 | 关键交付 |
 |---|---|---|
-| **M** | 服务端访问模型 + 迁移 + 字段规格真源 | `appcfg` 三模式 + **旧 schema 兼容 shim**（`login_required=false`→public；`true`+有名单→whitelist；`true`+空名单→login；`visible` 忽略；旧字段不报 unknown，canonical 只写新 schema）；`abi.AuthMode` 三取值；`RequiresLogin()` 取代旧布尔；迁移 **0071**（DROP COLUMN `visible` + 改写 `apps.config_json`/`app_releases.config_json`，幂等可重放，坏 JSON 跳过并 WARNING，自检段 fail-loud）；`appcfgspec.go` → 生成器新增 `appcfg.json` 与 SKILL `references/app-config.md` |
+| **M** | 服务端访问模型 + 迁移 + 字段规格真源 | `appcfg` **两模式**（`login` / `whitelist`；⚠️ **2026-09-19 订正**：本行原写"三模式"并把 `public` 算作一种，已废止；历史 `public` 只是读取侧按 `login` 的迁移期 shim）+ **旧 schema 兼容 shim**（`login_required=false`→public；`true`+有名单→whitelist；`true`+空名单→login；`visible` 忽略；旧字段不报 unknown，canonical 只写新 schema）；`abi.AuthMode` 三取值；`RequiresLogin()` 取代旧布尔；迁移 **0071**（DROP COLUMN `visible` + 改写 `apps.config_json`/`app_releases.config_json`，幂等可重放，坏 JSON 跳过并 WARNING，自检段 fail-loud）；`appcfgspec.go` → 生成器新增 `appcfg.json` 与 SKILL `references/app-config.md` |
 | **N** | 发布编排解耦 + 宿主工具面 | `wasm-apps.ts` 把编排从 `ServerResponse` 解耦成可复用函数（`publishApp`/`validateApp`/`listCatalog`），HTTP 路由退化成薄壳；新增 `wasm-app-tools.ts` 的 `wasm_app_list`/`wasm_app_validate`/`wasm_app_publish` |
 | **O** | 技能内置到服务端 + 客户端按需安装 | 技能进版本控制；`skillseed` 包把镜像内 `/opt/picoaide/skills` 打包下发（`GET /api/client/v2/skills/builtin[/:name/archive]`，确定性 tar.gz + sha256 头）；客户端两条代理分支 → `installSkillArchive()` → `<dshHome>/skills/<name>`；能力中心「平台内置技能」区 + 一键安装 |
 | **P** | 客户端 UI（发布表单 + 应用中心） | 三选一 `access` 选择器（缺省 `login`，选 `whitelist` 才出名单且必填）；提交体**不发** `visible`/`login_required`；catalog **不二次过滤**（下架项也展示并标"已下架"）；11 条本地预校验 |
@@ -561,14 +551,14 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 
 | 身份 | 判据 | 结论 | 计数 |
 |---|---|---|---|
-| `access` | A1–A5 | A1 / A2 / A4 / A5 **COVERED**；**A3 PARTIAL**（实现正确，但"平台不比对白名单"没有任何用例咬得住 → 已补回归网） | P0=0 / P1=1 / P2=5 / NOT_A_BUG=5 |
+| `access` | A1–A5 | ⚠️ **部分对象已删除（W4）**：本身份覆盖访问模型，其中 **`access=public` 与匿名面已随总纲 §8.4 删除** ⇒ 涉及 public/匿名的条目**已废弃**；**A3 PARTIAL（"平台不比对白名单"仍成立）与登录/白名单语义的条目仍然有效**。原始判据清单 `temp/wasm-brief/AUDIT-CHECKLIST-R2.md` **已不在工作树**（temp 被清理）⇒ 无法逐条判定 A1/A2/A4/A5 是否含 public/匿名，**复核前不得整体作为现行证据** | P0=0 / P1=1 / P2=5 / NOT_A_BUG=5 |
 | `aitools` | B1–B6 | **全部 COVERED**（B2 用独立计数法复核，不用实施者的 spy） | P0=0 / P1=1 / P2=2 / P3=3 / NOT_A_BUG=3 |
 | `skilldist` | C1–C6 | C1 / C2 / C4 / C5 **COVERED**；**C3 PARTIAL**（按需安装被开机自动同步架空）；**C6 PARTIAL**（内部机制措辞） | P0=0 / P1=1 / P2=5 / NOT_A_BUG=6 / UNVERIFIED=1 |
-| `clientui` | A2 + 六条 | **全部 COVERED**；两个 P1 都落在"防漂移闸"上（功能与契约本身正确） | P0=0 / P1=2 / P2=3 / NOT_A_BUG=5 |
+| `clientui` | A2 + 六条 | ⚠️ **部分对象已删除（W4）**：本身份覆盖客户端面，其中 **"入口链接"列/深链展示的相关条目已随总纲 §8.4 删除**（见本文件 §7 第 3 条的就地标注）；**其余（发布表单预填、错误信封、体积闸门、四方契约对拍）仍然有效** | P0=0 / P1=2 / P2=3 / NOT_A_BUG=5 |
 
 **两条跨身份联查（四人各自独立复现）**：① **四方字段契约逐字一致** ——
 服务端 `appcfg.Config` / 生成物 `appcfg.json` / 客户端提交体 / 宿主工具 `parameters`
-（16 个维度：配置 5 字段 × 5 处、发布 6 字段 × 2 处、access 三取值 × 4 处、缺省 × 4 处、
+（16 个维度：配置 5 字段 × 5 处、发布 6 字段 × 2 处、~~access 三取值~~ **access 两值**（2026-09-19 订正，总纲 §6/I6）× 4 处、缺省 × 4 处、
 白名单上限、首版必填；`visible`/`login_required` 在八处字段集合里均不存在）。
 ② **白名单空名单的拒绝路径三面一致**：UI 拦在前且给可读提示（零出站）、服务端 422
 带 `empty_whitelist` details、宿主工具**不拦**、把服务端信封原样带回 —— 三者行为不同，
@@ -580,7 +570,7 @@ PARTIAL：56e（目录侧覆盖；"URL 直达仍可用"属应用子域）、58�
 |---|---|---|---|
 | 1 | `clientui` P1-1 | 客户端对拍只查 `access`/`whitelist` 在不在，`purpose`/`data_sensitivity`/`owner`/`publish_fields` 被改名时**闸全绿** | 两张表各自与客户端真源做**全集合相等**（`config_fields` ↔ `APP_CONFIG_FIELDS`、`publish_fields` ↔ `PUBLISH_PAYLOAD_FIELDS`），宿主侧同补发布表集合断言；变异：单字段改名 ⇒ 两侧各红 |
 | 2 | `clientui` P1-2 | `appcfg.json` 被删/改名 ⇒ 两端对拍**静默 skip**，`yarn check` 依旧绿 | 缺席即红（`expect(missing).toBeNull()` / `expect(appcfg.exists).toBe(true)`）；变异：把文件移走 ⇒ 客户端 1 红 + 宿主 2 红 |
-| 3 | `access` P1-1 + `clientui` P2-2 | "下架应用 URL 直达仍可用"与实现相反（实测 **410 Gone**），而它是"下架也列进目录"的唯一书面理由；R38 又用"死链"作为排除冻结的理由 ⇒ 同一判据两种结论 | **行为不动**（与用户口径一致）；改说法：列出下架条目的理由 = **下架是可逆的发布者动作、应用与数据都还在**，子域返回 410 说明"已下架但数据保留"。改了 5 处（`api/read.go`、`appserver/respond.go`、`session/store.go`、`read_test.go`、设计基线 §10.5 第 56e 项） |
+| 3 | `access` P1-1 + `clientui` P2-2 | "下架应用 URL 直达仍可用"与实现相反（实测 **410 Gone**），而它是"下架也列进目录"的唯一书面理由；R38 又用"死链"作为排除冻结的理由 ⇒ 同一判据两种结论 | **行为不动**（与用户口径一致）；改说法：列出下架条目的理由 = **下架是可逆的发布者动作、应用与数据都还在**，~~子域返回 410~~（**子域已随 W4 删除；现行由应用请求管线按 `enabled` 返回 410**）说明"已下架但数据保留"。改了 5 处（`api/read.go`、`appserver/respond.go`、~~`session/store.go`~~、`read_test.go`、设计基线 §10.5 第 56e 项） |
 | 4 | `clientui` P2-a | `resolveAccess` 对**非法** `access` 值会落进旧字段分支，`access:'org' + login_required:false` 被渲染成「公开」= **放大权限** | 非法值（有值但不认识）一律回落缺省 `login`；旧字段分支**只在 `access` 缺失**时生效；DOM 级用例锁死 |
 | 5 | `aitools` P1-1 | `readWasmFromPath` 的允许面（工作区 ∪ `<数据根>/apps`）没减掉数据根子树：工作区**等于/是祖先/软链指向**数据根时，`session.json`（明文员工令牌）、`.credentials.yaml`、`data/master.key` 都成了合法上传源 | 新增"数据根子树整体否决（`apps/` 除外）"；三种形态各一条用例 + 反向对照（数据根之外的产物照常放行）；变异：删掉否决块 ⇒ 3 红 |
 | 6 | `aitools` P2-1 | 分片链路每条出站各拿 90 s，聚合最坏 5×90=450 s ≫ 工具 deadline 120 s；传输失败回笼统网关信封 ⇒ **`upload_id` 送不到模型，续传失明** | 整条链路共用一个总预算（`CHUNKED_PUBLISH_BUDGET_MS`，每次出站只用**剩余额度**），且**会话已开之后的传输失败改为可续传的 `UPLOAD_INCOMPLETE`**（带 `upload_id`/`received`/`transport_code`）；源级门禁断言 `publishChunked` 内不得出现裸 `CLIENT_UPLOAD_TIMEOUT_MS`；变异：改回网关信封 ⇒ 红 |
@@ -648,7 +638,7 @@ Windows/macOS 的 realpath 与符号链接语义（本机 Linux）；`access` �
 | `@picoaide/dsh-wasm-apps` check | **100/100 PASS** |
 | `@picoaide/dsh-enterprise` test | **509 passed / 1 skipped** |
 | 根守卫（layout/workflows/ci-scripts/patches/patch-resolutions/inventories/check-workspaces + `check-theme-tokens`） | **全部 OK** |
-| 端到端验收 `temp/wasm-e2e-run.sh`（真 PG + 真服务端 + 真 wasm + 真 https 子域） | **68/68 PASS**（较第二轮 +7：A2 目录契约、A4 空名单正反例、A5 旧 schema 端到端 + 落库 canonical 改写） |
+| ~~端到端验收 `temp/wasm-e2e-run.sh`（真 PG + 真服务端 + 真 wasm + 真 https 子域）~~ | ~~**68/68 PASS**（较第二轮 +7：A2 目录契约、A4 空名单正反例、A5 旧 schema 端到端 + 落库 canonical 改写）~~ **已废弃（对象已删除，W4）；现行判据见总纲 §13** |
 | **`corepack yarn check`（全仓 19 个任务）** | **19 通过 / 0 失败 / 0 跳过**（含 desktop 打包门禁、connectors 真实 socket 套件、`verify-licenses/notices`） |
 
 **H9（独立验证后的修复）之后的门禁复跑**（同一批修复全部落地后重跑，用于替换上面那张"第三轮结束时"的表）：
@@ -661,7 +651,7 @@ Windows/macOS 的 realpath 与符号链接语义（本机 Linux）；`access` �
 | `@picoaide/dsh-enterprise` / `@picoaide/dsh-wasm-apps` | **509+1skip / 100** |
 | memory-evolve（coi + decoupled + plugin） | **110/110**（+1：纵深防御用例） |
 | desktop 技能门禁（rank + packaged-runtime） | **48/48** |
-| 端到端 `temp/wasm-e2e-run.sh`（真 PG + 真 wasm + 真 https 子域） | **68/68 PASS** |
+| ~~端到端 `temp/wasm-e2e-run.sh`（真 PG + 真 wasm + 真 https 子域）~~ | ~~**68/68 PASS**~~ **已废弃（对象已删除，W4）；现行判据见总纲 §13** |
 
 ---
 

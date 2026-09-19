@@ -73,6 +73,8 @@
     "check:theme-tokens": "node scripts/check-theme-tokens.mjs",
     "check:glitchtip": "node scripts/verify-glitchtip-ops-check.mjs",
     "check:check-workspaces": "node scripts/verify-check-workspaces.mjs",
+    "check:wasm-client-only": "bash scripts/verify-wasm-client-only.sh",
+    "check:wasm-channels": "node scripts/verify-wasm-channels.mjs",
     "prebuild": "yarn workspace dsh-plugin-desktop prebuild",
     "check": "node scripts/check-workspaces.mjs",
     "check:fast": "node scripts/check-workspaces.mjs --changed",

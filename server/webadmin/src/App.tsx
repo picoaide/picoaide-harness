@@ -25,11 +25,14 @@ const ServerInfo = lazy(() => import('./pages/ServerInfo'))
 const CapabilityCenter = lazy(() => import('./pages/CapabilityCenter'))
 // 2026-09-18:应用中心(员工自建 WASM 应用的平台管理员面)。
 // 2026-09-19:原「应用平台」(`/app-platform`,并发/内存限制项)并入应用中心成为
-// 「限制项」子页,应用域名搬进新增的「设置」子页;侧栏只留「应用中心」一个入口。
+// 「限制项」子页;侧栏只留「应用中心」一个入口。
+// 2026-09-19(同日后半):WASM 应用改为**客户端专属**(`picoaide-app://<app_id>/`),
+// 服务端删除应用基域配置面 ⇒ 上半天新增的「设置」子页(应用域名/泛域名)整页删除,
+// 连同这里的分区路由与 AppCenterLayout 的子导航项一起去掉(契约 §4.4/§4.5)。
 const AppCenterLayout = lazy(() => import('./pages/app-center/AppCenterLayout'))
 const AppCenterApps = lazy(() => import('./pages/app-center/Apps'))
+const AppCenterOpens = lazy(() => import('./pages/app-center/OpensBoard'))
 const AppCenterLimits = lazy(() => import('./pages/app-center/Limits'))
-const AppCenterSettings = lazy(() => import('./pages/app-center/Settings'))
 const Connectors = lazy(() => import('./pages/Connectors'))
 
 // Usage 相关页含 VChart(约 2.6MB 未压缩),懒加载避免污染首屏(审计2026-E1)。
@@ -370,14 +373,15 @@ export default function App() {
                   <Route path="/capabilities" element={<CapabilityCenter />} />
                   <Route path="/app-center" element={<AppCenterLayout />}>
                     <Route index element={<AppCenterApps />} />
+                    {/* 运营看板（F16，2026-09-19 W5）：打开次数 PV/UV/趋势/TOP N。 */}
+                    <Route path="opens" element={<AppCenterOpens />} />
                     <Route path="limits" element={<AppCenterLimits />} />
-                    <Route path="settings" element={<AppCenterSettings />} />
                   </Route>
                   <Route path="/connectors" element={<Connectors />} />
                   {/* 老书签兼容(与 /marketplace 同口径):原「应用平台」页已并入
                       应用中心,这里只做重定向,不再保留独立页面。
-                      目标是 limits 而不是 settings —— 老书签原本看到的就是限制项,
-                      重定向必须落到内容等价的那个子页(设置页承载的是应用域名)。 */}
+                      目标是 limits —— 老书签原本看到的就是限制项,重定向必须落到内容
+                      等价的那个子页(应用中心现在是「应用」「运营看板」「限制项」三页)。 */}
                   <Route path="/app-platform" element={<Navigate to="/app-center/limits" replace />} />
                   <Route path="/audit" element={<Audit />} />
                   <Route path="/server-info" element={<ServerInfo />} />

@@ -78,7 +78,7 @@ func CheckImports(imports []Import, whitelist []ImportSpec) error {
 				WithDetail("signature", imp.Signature).
 				WithHint(hintsFor(apperr.CodeImportNotAllowed,
 					"不要直接调用 WASI（如 sock_open / path_open / fd_prestat_*）：平台不挂文件系统、不挂网络",
-					"宿主能力请通过 stdin/stdout 的 JSON-RPC 调用（db.* / ai.chat / log / assets.read），它们不是 wasm 导入")...)
+					"宿主能力请通过 stdin/stdout 的 JSON-RPC 调用（db.* / log / assets.read），它们不是 wasm 导入")...)
 		}
 		matched := false
 		expected := make([]string, 0, len(candidates))

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { t, type AppCenterKey } from './locales.ts'
-import { ACCESS_MODES, WASM_MAX_BYTES, type AccessMode } from './appcfg-contract.ts'
+import { WASM_MAX_BYTES, WRITABLE_ACCESS_MODES, type AccessMode } from './appcfg-contract.ts'
+import { appShareLink } from './deep-link.ts'
 import {
   type PublishDraft,
   type PublishFailure,
@@ -15,6 +16,7 @@ import {
   splitWhitelist,
   submitPublish,
   validatePublishDraft,
+  windowSpecFromText,
 } from './publish-app.ts'
 
 /**
@@ -133,9 +135,13 @@ const ACCESS_HINT: React.CSSProperties = {
 /** "必填"标记（跟随字段标题，不单独占一行）。 */
 const REQUIRED_MARK: React.CSSProperties = { marginLeft: 6, color: 'var(--dsw-alias-label-tertiary)' }
 
-/** 访问级别的选项文案（zh/en 键）。 */
+/**
+ * 访问级别的选项文案（zh/en 键）。
+ *
+ * 2026-09-19（冻结契约 §4.4）：写侧只有 `login | whitelist`（匿名面已删除），
+ * 所以这里没有 `public` —— 选项集合见 {@link WRITABLE_ACCESS_MODES}。
+ */
 const ACCESS_LABEL_KEYS: Record<AccessMode, AppCenterKey> = {
-  public: 'appCenter.access.public',
   login: 'appCenter.access.login',
   whitelist: 'appCenter.access.whitelist',
 }
@@ -147,7 +153,6 @@ const ACCESS_LABEL_KEYS: Record<AccessMode, AppCenterKey> = {
  * —— 作者若以为"填了名单平台就会拦"，他会写出一个对所有人开放的应用。
  */
 const ACCESS_HINT_KEYS: Record<AccessMode, AppCenterKey> = {
-  public: 'appCenter.access.publicHint',
   login: 'appCenter.access.loginHint',
   whitelist: 'appCenter.access.whitelistHint',
 }
@@ -203,6 +208,10 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
   // 合规声明统一抹平成同一个值，而作者以为自己声明过了。初值恒为空串。
   const [dataSensitivity, setDataSensitivity] = useState('')
   const [owner, setOwner] = useState(initial.owner)
+  // 窗口声明（F3/§6）：三项都可留空 = 不声明（**不是**"锁了缺省比例"）。
+  const [windowRatioText, setWindowRatioText] = useState(initial.windowRatioText)
+  const [windowWidthText, setWindowWidthText] = useState(initial.windowWidthText)
+  const [windowHeightText, setWindowHeightText] = useState(initial.windowHeightText)
   // 访问范围被改动时的显式确认（勾选后才允许提交）。
   const [accessConfirmed, setAccessConfirmed] = useState(false)
   const [state, setState] = useState<FormState>({ kind: 'idle' })
@@ -249,6 +258,7 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
   }, [])
 
   const submit = useCallback(async (): Promise<void> => {
+    const declaredWindow = windowSpecFromText(windowRatioText, windowWidthText, windowHeightText)
     const draft: PublishDraft = {
       appId,
       version,
@@ -260,6 +270,7 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
         purpose: purpose.trim(),
         dataSensitivity: dataSensitivity.trim(),
         owner: owner.trim(),
+        ...(declaredWindow === undefined ? {} : { window: declaredWindow }),
       },
     }
     // 预校验（与服务端 registry/appcfg 同口径）：文件是页面这一侧的事，
@@ -417,7 +428,7 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
         */}
         <fieldset style={FIELDSET} data-field="access">
           <legend style={LEGEND}>{t('appCenter.access')}</legend>
-          {ACCESS_MODES.map(mode => (
+          {WRITABLE_ACCESS_MODES.map(mode => (
             <div key={mode} style={ACCESS_OPTION}>
               <div style={{ ...ROW, marginBottom: 0 }}>
                 <input
@@ -531,6 +542,45 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
         */}
         <span style={LABEL} data-role="data-sensitivity-note">{t('appCenter.dataSensitivityNoDefault')}</span>
         <span style={LABEL}>{t('appCenter.declarationsHint')}</span>
+
+        {/*
+          窗口声明（F3/§6）：比例与首次打开的尺寸。**留空 = 不声明** ——
+          客户端不替作者填缺省值，也不在界面上声称"已锁比例"（锁定由窗口侧按这里
+          声明的比例执行；没声明就没有可锁的比例）。
+        */}
+        <div style={{ ...ROW, marginTop: 10 }}>
+          <input
+            className="pico-app-center-window-ratio"
+            data-field="window.ratio"
+            style={INPUT}
+            value={windowRatioText}
+            disabled={busy}
+            aria-label={t('appCenter.windowRatio')}
+            placeholder={t('appCenter.windowRatio')}
+            onChange={event => { setWindowRatioText(event.target.value) }}
+          />
+          <input
+            className="pico-app-center-window-width"
+            data-field="window.width"
+            style={INPUT}
+            value={windowWidthText}
+            disabled={busy}
+            aria-label={t('appCenter.windowWidth')}
+            placeholder={t('appCenter.windowWidth')}
+            onChange={event => { setWindowWidthText(event.target.value) }}
+          />
+          <input
+            className="pico-app-center-window-height"
+            data-field="window.height"
+            style={INPUT}
+            value={windowHeightText}
+            disabled={busy}
+            aria-label={t('appCenter.windowHeight')}
+            placeholder={t('appCenter.windowHeight')}
+            onChange={event => { setWindowHeightText(event.target.value) }}
+          />
+        </div>
+        <span style={LABEL} data-role="window-hint">{t('appCenter.windowHint')}</span>
       </div>
 
       {localIssues.length > 0 && (
@@ -629,20 +679,26 @@ export function PublishErrorBlock({ failure, title, role = 'publish-error' }: {
 }
 
 /**
- * 成功块：版本 / 状态（已生效 / 待审核 / **已下架**）/ 访问范围 / 入口链接 —— 员工提交完
- * 立刻知道"生效了没有、谁能用"。
+ * 成功块：版本 / 状态（已生效 / 待审核 / **已下架**）/ 访问范围 / **分享深链** ——
+ * 员工提交完立刻知道"生效了没有、谁能用、怎么发给同事"。
  *
  * 状态三分支（R1-uxc-1）：`app.enabled === false` 时**绝不能**显示"已生效" ——
  * 服务端确实把版本落了库（`release.status=approved`、`current=true`），但应用处于下架
- * 状态，应用子域返回 410 Gone，界面说"已生效"就是谎报。这一支必须同时给出**下一步**
+ * 状态，打开会被拒，界面说"已生效"就是谎报。这一支必须同时给出**下一步**
  * （先上架），否则作者只知道"没生效"而不知道怎么办。
  *
  * 回显 `access`（P1-3 的兜底要求）：发布是"整体替换配置"的语义，回显是作者唯一
  * 能事后核对"线上访问范围到底是什么"的地方（服务端发布响应里没有 `access`，
  * 所以回显的是**本次提交**的值 —— 服务端若没接受它就不会走到这个块）。
- * @param props - 结构化成功结果 + 本次提交的访问级别。
+ *
+ * 分享形态（2026-09-19，冻结契约 §4.5）：应用**没有**可贴进浏览器的地址，服务端也
+ * 不再下发 `entry_url`；能发给同事的是**渠道深链** `<渠道 scheme>://app/<app_id>`
+ * （scheme 由随渠道构建/桌面壳注入，见 `deep-link.ts`）。scheme 拿不到时这一行不渲染
+ * —— 宁可少一行，也不显示一条打不开的链接。
+ * @param props - 结构化成功结果 + 本次提交的访问级别 + 可选分享 scheme。
  */
-export function PublishSuccessBlock({ result, access }: { result: PublishSuccess, access?: AccessMode }) {
+export function PublishSuccessBlock({ result, access, shareScheme }: { result: PublishSuccess, access?: AccessMode, shareScheme?: string }) {
+  const shareLink = appShareLink(result.appId, shareScheme)
   return (
     <div style={BOX} data-role="publish-success">
       <div><strong>{t('appCenter.published')}</strong></div>
@@ -664,8 +720,8 @@ export function PublishSuccessBlock({ result, access }: { result: PublishSuccess
           {`${t('appCenter.access')}: ${t(ACCESS_LABEL_KEYS[access])}`}
         </div>
       )}
-      {result.entryURL !== '' && (
-        <div data-role="published-entry">{`${t('appCenter.entry')}: ${result.entryURL}`}</div>
+      {shareLink !== null && (
+        <div data-role="published-share">{`${t('appCenter.shareLink')}: ${shareLink}`}</div>
       )}
     </div>
   )

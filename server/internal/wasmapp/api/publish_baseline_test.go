@@ -88,7 +88,7 @@ func TestPendingFirstReleaseDoesNotSeedAppsConfigProjection(t *testing.T) {
 	guest := testGuestModule(t)
 
 	rel := e.publishOK(e.tokens["alice"], "seed-tool", "1.0.0", guest, cfgWith(map[string]any{
-		"access": "public", "purpose": "值班排班", "data_sensitivity": "internal", "owner": "张伟",
+		"access": "login", "purpose": "值班排班", "data_sensitivity": "internal", "owner": "张伟",
 	}))
 	if rel["status"] != serverstore.ReleaseStatusPending {
 		t.Fatalf("审核开启时首版应停在 pending，得到 %v", rel["status"])
@@ -112,7 +112,7 @@ func TestPendingFirstReleaseDoesNotSeedAppsConfigProjection(t *testing.T) {
 		t.Fatalf("空 config_json 的 access 兜底 = %q，want login", got)
 	}
 	// 版本行自己保留提交的配置（批准后由它生效）—— "不投影"不等于"不保存"。
-	if cfg := e.releaseConfig("seed-tool", "1.0.0"); cfg.Access != appcfg.AccessPublic {
+	if cfg := e.releaseConfig("seed-tool", "1.0.0"); cfg.Access != appcfg.AccessLogin {
 		t.Fatalf("版本行应保留提交的 access=public，得到 %q", cfg.Access)
 	}
 
@@ -120,7 +120,7 @@ func TestPendingFirstReleaseDoesNotSeedAppsConfigProjection(t *testing.T) {
 	e.decodeJSON(e.req(http.MethodPost,
 		"/api/server/admin/wasm-apps/seed-tool/releases/1.0.0/approve", "", nil), http.StatusOK, &struct{}{})
 	after := e.appRow("seed-tool")
-	if got := appcfg.AccessOfConfigJSON(after.ConfigJSON); got != appcfg.AccessPublic {
+	if got := appcfg.AccessOfConfigJSON(after.ConfigJSON); got != appcfg.AccessLogin {
 		t.Fatalf("通过审核后投影 access = %q，want public（审核分支必须补上投影）", got)
 	}
 	if after.Purpose != "值班排班" || after.DataSensitivity != "internal" {
@@ -147,7 +147,7 @@ func TestRejectedFirstReleaseConfigIsNotInherited(t *testing.T) {
 
 	// v1：首版提交 access=public（待审）。
 	e.publishOK(e.tokens["alice"], "poison-tool", "1.0.0", guest, cfgWith(map[string]any{
-		"access": "public", "purpose": "先别上线", "data_sensitivity": "public", "owner": "张伟",
+		"access": "login", "purpose": "先别上线", "data_sensitivity": "public", "owner": "张伟",
 	}))
 	// 管理员拒绝：首版被拒 ⇒ 该应用**没有任何** approved 版本。
 	e.decodeJSON(e.req(http.MethodPost,
@@ -159,7 +159,7 @@ func TestRejectedFirstReleaseConfigIsNotInherited(t *testing.T) {
 	// 模拟"老实现留下的列状态"：被拒版本的配置曾躺在 apps.config_json 里
 	// （审计实测：E1 的 INSERT 分支写过它，reject 路径在无 approved 版本时不重算）。
 	e.dirtyProjection("poison-tool",
-		`{"access":"public","whitelist":[],"purpose":"先别上线","data_sensitivity":"public","owner":"张伟"}`,
+		`{"access":"login","whitelist":[],"purpose":"先别上线","data_sensitivity":"public","owner":"张伟"}`,
 		"先别上线", "public")
 
 	// v2：省略 access（工具契约允许"未改动的可以省略"）。
@@ -173,7 +173,7 @@ func TestRejectedFirstReleaseConfigIsNotInherited(t *testing.T) {
 		t.Fatalf("v2 不该继承任何名单，得到 %v", cfg.Whitelist)
 	}
 	// 待审提交同样不改投影（这一行脏值不会因此"转正"）。
-	if got := appcfg.AccessOfConfigJSON(e.appRow("poison-tool").ConfigJSON); got != appcfg.AccessPublic {
+	if got := appcfg.AccessOfConfigJSON(e.appRow("poison-tool").ConfigJSON); got != appcfg.AccessLogin {
 		t.Fatalf("待审提交不该改投影，得到 %q", got)
 	}
 	// 审计不得把这次"没发生的变更"记成一次访问级别变更：继承基线仍是"没有生效版本"
@@ -194,7 +194,7 @@ func TestUpdateInheritsLatestApprovedNotAppsProjection(t *testing.T) {
 
 	// 脏投影：把显示列改成 public（老实现/人工改动留下的形态）。
 	e.dirtyProjection("base-tool",
-		`{"access":"public","whitelist":[],"purpose":"脏投影","data_sensitivity":"public","owner":"张伟"}`,
+		`{"access":"login","whitelist":[],"purpose":"脏投影","data_sensitivity":"public","owner":"张伟"}`,
 		"脏投影", "public")
 
 	// 纯代码更新：省略 access/whitelist，只给三个声明。

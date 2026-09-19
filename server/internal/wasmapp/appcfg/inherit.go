@@ -48,6 +48,11 @@ import (
 //
 // 返回值与 Parse 同族：合并后的对象仍然要过未知字段检查、取值范围检查、
 // 语义检查（如 access=whitelist 需要名单）—— 继承不会绕过任何一条。
+//
+// 与 Parse 的唯一差别（2026-09-19 契约 §4.4）：这是**写入侧**入口 ⇒ 提交里显式写
+// `access=public`（或旧 schema 的 `login_required=false`）一律被拒（parseSubmitted）；
+// 而**基线**里的历史 public 在读取侧即 login，因此"省略 access 的纯代码更新"继承到
+// 的是 login —— 既不会把 public 带进新版本，也不会因为基线是 public 而卡住一次更新。
 func ParseUpdate(data []byte, previousConfigJSON string) (Config, *apperr.Error) {
 	base, state := parseBaseline(previousConfigJSON)
 	switch state {
@@ -55,7 +60,7 @@ func ParseUpdate(data []byte, previousConfigJSON string) (Config, *apperr.Error)
 		// 不猜：把"基线不明"翻译成 login，等于把一次数据损坏变成一次访问级别放宽。
 		return Config{}, UnusableBaselineError()
 	case BaselineAbsent:
-		return Parse(data)
+		return parseSubmitted(data)
 	}
 	submitted, oerr := decodeObject(data)
 	if oerr != nil {
@@ -67,7 +72,7 @@ func ParseUpdate(data []byte, previousConfigJSON string) (Config, *apperr.Error)
 		// 而两个来源都刚被 JSON 解码器验证过 ⇒ 到这里只可能是平台缺陷。
 		return Config{}, bad("", "应用配置文件合并失败").WithCause(merr)
 	}
-	return Parse(merged)
+	return parseSubmitted(merged)
 }
 
 // BaselineState 是继承基线的可用性三态（发布链路据此决定"能不能发"）。
@@ -150,6 +155,9 @@ func mergeMissing(submitted, base map[string]json.RawMessage) map[string]json.Ra
 //
 //   - 旧 schema 的行先经 decode 映射成新 schema（"重新发布后写出的就是新 schema"
 //     这条既有承诺在继承上同样成立）；
+//   - **历史 public 归一化成 login**（2026-09-19 契约 §4.4 的读取侧口径）：继承出来的
+//     新版本因此写 login —— 既不会把已被取消的 public 带进新版本（写入侧本来就会拒），
+//     也不会让一次纯代码更新因为"基线里有个已废除的取值"而失败；
 //   - **空值不算上一版给过的值**：access 非法、whitelist 为空、声明为空白串一律丢弃
 //     —— "上一版没有这项"不能被继承成"上一版给了一个空串"，否则缺省语义会被抹掉；
 //   - 解析不了 ⇒ BaselineUnusable（**不是**"没有基线"）：调用方必须 fail-closed。
@@ -160,6 +168,9 @@ func parseBaseline(previousConfigJSON string) (map[string]json.RawMessage, Basel
 	prev, perr := decode([]byte(previousConfigJSON))
 	if perr != nil {
 		return nil, BaselineUnusable
+	}
+	if prev.Access == AccessPublic {
+		prev.Access = AccessLogin
 	}
 	canon, err := json.Marshal(prev)
 	if err != nil {

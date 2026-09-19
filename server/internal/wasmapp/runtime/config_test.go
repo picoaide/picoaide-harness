@@ -169,12 +169,12 @@ func TestInstanceLimits_DefaultsFromLimitsPackage(t *testing.T) {
 	if got := zero.HostBudget("db.query"); got != limits.HostCallBudgetDefault {
 		t.Fatalf("未单列预算的方法应回落到 limits.HostCallBudgetDefault，实际 %s", got)
 	}
-	if got := zero.HostBudget("ai.chat"); got != limits.HostAIChatBudget {
-		t.Fatalf("ai.chat 缺省预算应为 limits.HostAIChatBudget，实际 %s", got)
+	if got := zero.HostBudget("db.query"); got != limits.HostCallBudgetDefault {
+		t.Fatalf("未单列预算的宿主方法应回落 limits.HostCallBudgetDefault，实际 %s", got)
 	}
 	// 显式配置优先；非正值视为未设置（防"手滑设成 0"变成全部立即超时）。
-	custom := InstanceLimits{HostBudgets: map[string]time.Duration{"ai.chat": time.Second, "db.query": 0}}
-	if got := custom.HostBudget("ai.chat"); got != time.Second {
+	custom := InstanceLimits{HostBudgets: map[string]time.Duration{"assets.read": time.Second, "db.query": 0}}
+	if got := custom.HostBudget("assets.read"); got != time.Second {
 		t.Fatalf("显式预算应生效，实际 %s", got)
 	}
 	if got := custom.HostBudget("db.query"); got != limits.HostCallBudgetDefault {

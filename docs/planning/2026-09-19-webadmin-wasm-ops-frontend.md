@@ -5,6 +5,10 @@ P1-6（错误信封的 hints/details 被丢）、P1-7（列表静默截断 200 �
 P1-9/P2-4（管理端零诊断入口 + 水位零出口）、P2-1/P2-2/P2-6（限制项错误态、
 保存后不自洽、冻结应用仍能"上架成功"）。
 
+> ⛔ **部分条目已废弃（2026-09-19）**：本文中依赖 `anonlimit` 与 `aichat` 的运行时水位项随
+> 「客户端专属」改造（总纲 §8.4 / §21.3）**整包删除**，照它们施工会找不到对象；
+> 其余管理端条目不涉及旧访问模型，继续有效。
+
 ## 1. 新增/变更的端点（全部走 `internal/router` 集中声明）
 
 | 方法 | 路径 | 权限 | 用途 |
@@ -28,8 +32,8 @@ P1-9/P2-4（管理端零诊断入口 + 水位零出口）、P2-1/P2-2/P2-6（限
 
 | 水位 | 现状 | 需要的改动 |
 | --- | --- | --- |
-| `anon_limit`（匿名限流拒绝/淘汰/桶数） | `anonlimit.Limiter.Stats()` 已是导出方法 | `cmd/server/wasmapp.go` 的 `wasmapi.Options{}` 增加 `RuntimeStats` 闭包并调用 `limiter.Stats()` |
-| `ai_revoke_failures`（aichat 吊销失败数） | `aichat.Client.RevokeFailures()` 已是导出方法 | 同上，调用 `ai.RevokeFailures()` |
+| ~~`anon_limit`（匿名限流拒绝/淘汰/桶数）~~ **已废弃（2026-09-19，对象随 W4 删除）** | ~~`anonlimit.Limiter.Stats()` 已是导出方法~~ | ~~增加 `RuntimeStats` 闭包并调用 `limiter.Stats()`~~ —— `anonlimit` 整包删除（总纲 §8.4），该水位项**不再存在** |
+| ~~`ai_revoke_failures`（aichat 吊销失败数）~~ **已废弃（2026-09-19，对象随 W4 删除）** | ~~`aichat.Client.RevokeFailures()` 已是导出方法~~ | ~~调用 `ai.RevokeFailures()`~~ —— `internal/wasmapp/aichat/**` 整包删除（总纲 §21.3），该水位项**不再存在**；应用 AI 改由客户端提供，管理端改看**应用维度 AI 用量面板**（总纲 §21.4） |
 | `module_cache`（进程内模块缓存条目/字节） | 住在 `appserver` 的私有 `moduleCache` | `appserver.Server` 增加 `ModuleCacheStats() (entries int, bytes int64)` 后经 `api.Options` 注入 |
 | `appdb_handles`（应用库句柄数） | 住在 `appserver` 的私有 `appDBPool`（`pool.size()`） | `appserver.Server` 增加 `AppDBPoolStats() (handles int, max int)` 后经 `api.Options` 注入 |
 

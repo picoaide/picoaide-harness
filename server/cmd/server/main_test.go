@@ -35,7 +35,6 @@ import (
 	"github.com/picoaide/picoaide/internal/updatecheck"
 	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
 	"github.com/picoaide/picoaide/internal/wasmapp/readyz"
-	"github.com/picoaide/picoaide/internal/wasmapp/session"
 	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 	"github.com/picoaide/picoaide/webadmin"
 )
@@ -122,7 +121,7 @@ func requireRealDB(t *testing.T) *sql.DB {
 // buildRouter 用**生产装配真源**(registerProductionRoutes)组装完整路由树(nil DB)。
 //
 // 为什么必须走生产函数(2026-09-19 P0 审计):此前这里自己抄了一份 router.Register
-// 的 Deps 且不传 Wasm / WasmSession —— 测试树因此比生产树少 35 条路由(33 条 WASM
+// 的 Deps 且不传 Wasm —— 测试树因此比生产树少 33 条路由(33 条 WASM
 // 应用平台 + /login /logout /app-ticket,外加 /healthz /readyz),而"路由完整性"
 // 断言照样全绿:一整片路由从不进测试视野。测试装配现在与生产共用同一段装配代码,
 // 差集由 routes_source_test.go 的守卫常驻断言(数据来自真实调用,不抄路由表)。
@@ -146,7 +145,7 @@ func buildRouterWithDB(t *testing.T, db *sql.DB) *gin.Engine {
 
 // testProductionDeps 构造与 main() **同形**的 productionDeps:字段一一对应,
 // 只有"真实资源"换成测试可构造的等价物(临时目录、可选的真实库)。
-// 漏填的后果分两种,两种都有守卫:Wasm / WasmSession 漏填 ⇒ 对应整片路由从测试树
+// 漏填的后果有守卫:Wasm 漏填 ⇒ 对应整片路由从测试树
 // 里消失(routes_source_test.go 的差集断言会逐条报出);Ready 等字段漏填 ⇒ 路由仍在
 // 但请求必崩(见 routes_source_test.go 里的 nil-Ready 实测事实与生产侧接线断言)。
 func testProductionDeps(t *testing.T, db *sql.DB) productionDeps {
@@ -167,8 +166,7 @@ func testProductionDeps(t *testing.T, db *sql.DB) productionDeps {
 		SkillSeed: skillseed.NewHandlers(skillseed.New(skillseed.Dir)),
 		// WASM 应用平台操作面 + 员工浏览器会话面:必须非 nil,否则 router.Register
 		// 整片跳过(见 productionDeps.Wasm 的注释)。
-		Wasm:        wasmapi.NewHandlers(wasmapi.Options{DB: db, DataRoot: dataDir}),
-		WasmSession: session.New(session.Options{DB: db}),
+		Wasm: wasmapi.NewHandlers(wasmapi.Options{DB: db, DataRoot: dataDir}),
 		// /readyz 探针:与生产同形(真实库时带 Ping)。
 		Ready:     readyz.New(readyz.Options{DataRoot: dataDir, Ping: pingFn(db)}).Handler(),
 		DataDir:   dataDir,
@@ -539,14 +537,26 @@ func TestResolveStartupChannelDeepLinkScheme(t *testing.T) {
 		wantErr   bool
 	}{
 		{
-			name:      "官方缺字段通过",
+			// ⚠️ 本用例回答的是 **deep_link_scheme** 的豁免（公共渠道不要求它）；
+			// `app_origin_scheme` 是**全部渠道必填**（§8.3/§10，主控裁决不豁免 official/beta）
+			// ⇒ 夹具必须带上它，否则会因为另一条独立的 fail-loud 提前失败（那不是本用例的问题）。
+			name:      "官方缺 deep_link_scheme 通过",
 			channelID: "official",
-			config:    `{"schema":1,"channel_id":"official","identity":{"display_name":"X"}}`,
+			config: `{"schema":1,"channel_id":"official","identity":{"display_name":"X"},
+				"desktop":{"app_origin_scheme":"picoaide-app"}}`,
 		},
 		{
-			name:      "beta 缺字段通过",
+			name:      "beta 缺 deep_link_scheme 通过",
 			channelID: "beta",
-			config:    `{"schema":1,"channel_id":"beta","identity":{"display_name":"X"}}`,
+			config: `{"schema":1,"channel_id":"beta","identity":{"display_name":"X"},
+				"desktop":{"app_origin_scheme":"picoaide-app"}}`,
+		},
+		{
+			// app_origin_scheme 的**独立** fail-loud：公共渠道同样不豁免（§8.3）。
+			name:      "官方缺 app_origin_scheme 报错",
+			channelID: "official",
+			config:    `{"schema":1,"channel_id":"official","identity":{"display_name":"X"}}`,
+			wantErr:   true,
 		},
 		{
 			name:      "品牌渠道缺字段报错",
@@ -557,13 +567,15 @@ func TestResolveStartupChannelDeepLinkScheme(t *testing.T) {
 		{
 			name:      "品牌渠道畸形 scheme 报错",
 			channelID: "acme",
-			config:    `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"},"desktop":{"deep_link_scheme":"Acme AI"}}`,
-			wantErr:   true,
+			config: `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"},
+				"desktop":{"deep_link_scheme":"Acme AI","app_origin_scheme":"acme-app"}}`,
+			wantErr: true,
 		},
 		{
 			name:      "品牌渠道合法值通过",
 			channelID: "acme",
-			config:    `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"},"desktop":{"deep_link_scheme":"acme-ai"}}`,
+			config: `{"schema":1,"channel_id":"acme","identity":{"display_name":"Acme"},
+				"desktop":{"deep_link_scheme":"acme-ai","app_origin_scheme":"acme-ai-app"}}`,
 		},
 	}
 	for _, tc := range cases {
@@ -675,7 +687,10 @@ func TestPortalDownloadsRequireSecureOrigin(t *testing.T) {
 // writeChannelDir 造一个只含 channel.json 的渠道目录。
 func writeChannelDir(t *testing.T, channelID string) string {
 	t.Helper()
-	return writeChannelDirRaw(t, `{"schema":1,"channel_id":"`+channelID+`","identity":{"display_name":"X"}}`)
+	// 公共渠道(official/beta)不要求 deep_link_scheme，但 **app_origin_scheme 全部渠道必填**
+	//（§8.3/§10：CI 硬校验，服务端启动期 fail-loud）⇒ 夹具必须带上它。
+	return writeChannelDirRaw(t, `{"schema":1,"channel_id":"`+channelID+`","identity":{"display_name":"X"},
+		"desktop":{"app_origin_scheme":"harness-app"}}`)
 }
 
 // pointChannelDir 把渠道目录与镜像标记文件都指到临时目录(不碰 /opt)。
@@ -694,7 +709,7 @@ func pointChannelDir(t *testing.T, dir string) {
 func TestResolveStartupChannelAcceptsMatchingImageChannel(t *testing.T) {
 	// 品牌渠道必须自带 deep_link_scheme(见 TestResolveStartupChannelDeepLinkScheme)
 	dir := writeChannelDirRaw(t, `{"schema":1,"channel_id":"acme","identity":{"display_name":"X"},
-      "desktop":{"deep_link_scheme":"acme"}}`)
+      "desktop":{"deep_link_scheme":"acme","app_origin_scheme":"acme-app"}}`)
 	pointChannelDir(t, dir)
 	t.Setenv(updatecheck.ChannelEnv, "")
 	t.Setenv(updatecheck.EndpointEnv, "")

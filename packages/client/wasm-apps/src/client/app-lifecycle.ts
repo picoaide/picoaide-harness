@@ -122,15 +122,17 @@ export interface SetPublishedSuccess {
   enabled: boolean
   /** 服务端是否真的改了（状态本来就一致时 `false` —— 幂等，不写审计）。 */
   changed: boolean
-  /** 上架后服务端给出的入口链接（下架或无基域时为空串）。 */
-  entryURL: string
 }
 
 /**
- * 解析上下架响应：`{app:{app_id,enabled,changed,entry_url?}}`。
+ * 解析上下架响应：`{app:{app_id,enabled,changed}}`。
  *
  * `app.enabled` **必须**是布尔值：它是行状态的唯一来源。缺席时按形状错误处理
  * —— 回落成"我请求的那个值"就是把乐观更新伪装成服务端结果（本函数的全部意义）。
+ *
+ * 2026-09-19：响应里**不再有** `entry_url`（冻结契约 §4.5：应用只在客户端内以
+ * `picoaide-app://<app_id>/` 打开，服务端目录/发布/上下架响应一律不下发入口链接）。
+ * 客户端也不再读它 —— 服务端多带一个字段时这里是**忽略**，不是回落。
  * @param appId - 本次请求的 app_id（与回显比对，防串行）。
  * @param payload - 响应体。
  * @returns 结构化结果或失败。
@@ -149,7 +151,6 @@ export function parseSetPublishedOutcome(appId: string, payload: unknown): SetPu
     appId,
     enabled: app.enabled,
     changed: app.changed === true,
-    entryURL: asString(app.entry_url),
   }
 }
 

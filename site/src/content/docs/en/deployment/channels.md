@@ -41,12 +41,31 @@ Channel content includes:
 | Marks | Display name, short name (sidebar), title, tagline |
 | Copy | Login page and client welcome messages, portal welcome message |
 | Assets | Light/dark logo pair, favicon, accent color |
-| Client | Deep-link scheme (browser SSO callback), built-in server address, installer name and app ID |
+| Client | Deep-link scheme (browser SSO callback), **app-origin scheme (`desktop.app_origin_scheme`, the WASM app origin — required for every channel)**, data-root directory, built-in server address, installer name and app ID |
+
+> **`desktop.app_origin_scheme` is a required field added on 2026-09-19** (including `official` / `beta`;
+> the official and prerelease channels use `picoaide-app`): it decides the origin of a WASM app inside
+> the client (`<scheme>://<app_id>`). **A missing / invalid field, the same value as the deep-link scheme,
+> or a value duplicated across channels aborts the CI build ⇒ that channel produces no artifacts**
+> (there is no silent fallback). Add the field in the channels repo, **push it, then tag** (CI pulls from
+> the channels repo's `origin/main`). Rules and consequences: channel package reference §4.4b.
 
 This content applies at the same time to **the client login page, the client UI, the Admin Console sidebar and
 the portal page** — configured in one place, consistent across the product.
 When the server is unreachable or running an older version, the client shows branding from the copy shipped with
 the package and does not fall back to the vendor mark.
+
+## Release matrix (which tags build which channels)
+
+| Trigger | Channels built | Notes |
+|---|---|---|
+| Prerelease tag (`vX.Y.Z-beta.N` / `-rc` / `-alpha`, contains a hyphen) | **`beta` only** | Branded channels' clients are **not** produced on prerelease tags; use `workflow_dispatch` if you need them earlier |
+| Stable tag (plain `vX.Y.Z`) | **All channels** (official + beta + every branded channel) | A branded channel's image and installers appear only in that channel's own update directory |
+| Non-tag (PR / branch push) | `official` only | For gates and smoke tests, not a deliverable |
+
+⇒ **When adding or changing a field for a branded channel (e.g. `app_origin_scheme`)**: change it in the
+channels repo, **push**, then wait for a **stable tag** (prerelease tags do not build branded channels);
+otherwise customers keep receiving packages with the old behaviour.
 
 ## Three values the deployment side must keep consistent
 

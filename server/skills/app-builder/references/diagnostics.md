@@ -41,13 +41,12 @@
 | `RUNTIME_OUTPUT_OVERRUN` | 单次响应字节数 | 单帧不超过 1 MiB、响应体不超过 8 MiB；大列表要分页 |
 | `RUNTIME_NO_RESPONSE` | 是否有提前 `return` 的分支没写响应 | 每个分支都写且只写一帧 |
 | `RUNTIME_TRAP` | `stderr_tail` 的 trap 信息 | 越界/除零/`unreachable`；加边界检查 |
-| `HOST_CALL_OVER_BUDGET` | 哪一类宿主调用 | 单条 SQL 不超过 5 秒；`ai.chat` 不超过 30 秒；把长任务拆开 |
+| `HOST_CALL_OVER_BUDGET` | 哪一类宿主调用 | 单条 SQL 不超过 5 秒；把长任务拆开 |
 | `DB_DENIED` | 具体被拒的语句 | 一次只发一条语句；只用 `SELECT`/`INSERT`/`UPDATE`/`DELETE`；建表走 `db.define`；不碰保留行号列。**参数化不是平台检查项**：字面量 SQL 一样通过，值要用 `args` 占位自己挡住注入 |
 | `DB_LIMIT` | 是"库满"还是"行数/字节超" | 库满 100 MB 是硬上限（平台不给扩容旋钮）⇒ 清理历史数据或做汇总表；返回超 5000 行 / 8 MiB ⇒ 加 `LIMIT` 分页 |
 | `APP_QUEUE_FULL` | `max_queue_wait_ms` | 应用侧并发压到 1；收到 429 按 `Retry-After`（1 秒）退避，不要立刻重试；把多次小请求合并 |
-| `AI_BALANCE_INSUFFICIENT` | 使用者是谁 | 提示"请到桌面客户端查看余额"；**不要重试、不要显示金额** |
-| `AI_RATE_LIMITED` | 调用频率 | 减少循环内调用；合并成一次更长的提示词 |
-| `AUTH_REQUIRED` | `auth.mode` | 身份相关能力需要登录：把 `access` 改成 `login` / `whitelist`，或引导用户先登录 |
+| 前端桥错误码（`app_ai_denied` / `app_ai_unavailable` / `ai_balance_insufficient` / `ai_rate_limited` / `ai_cancelled`） | 应用前端的 `fetch` 返回（**不是** wasm 的 `reason_code`：wasm 侧已随服务端删除，日志里不会再出现 `AI_*` 宿主错误码） | 未授权 ⇒ 引导使用者完成一次性授权（授权按 使用者 × 应用 记录，可在客户端设置里撤销）；宿主不可用 ⇒ 提示稍后重试，不要绕回 wasm 侧自己实现；余额不足 ⇒ 提示去桌面客户端看余额，**不显示金额、不要重试**；限流 ⇒ 稍后重试、不要在循环里猛调；`ai_cancelled` ⇒ 页面关闭/主动取消导致的正常收尾，不要当故障 |
+| `AUTH_REQUIRED` | `auth.mode` / 请求是否来自登录态 | 平台一律要求登录（没有匿名面；历史 `public` 配置读取侧按 `login` 处理）：确认请求来自已登录的客户端，或引导用户先登录 |
 | `MODULE_KILLED` | 请求是否被取消（用户关页面/超时） | 与超时同处理：拆小、缩短单次工作 |
 
 平台侧与发布侧的错误码（`IMPORT_*`、`SECTION_*`、`COMPILE_*`、`APP_CONFIG_INVALID`、

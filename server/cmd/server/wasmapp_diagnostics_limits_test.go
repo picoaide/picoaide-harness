@@ -48,10 +48,9 @@ func TestDiagnosticsMemoryHintUsesRuntimePagesAtAssembly(t *testing.T) {
 	if err := serverstore.SetSetting(db, SettingWasmLimits, saved.Encode()); err != nil {
 		t.Fatalf("保存限制项设置失败: %v", err)
 	}
-	t.Setenv(EnvAppsBaseDomain, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p := setupWasmPlatform(ctx, db, nil, t.TempDir(), "127.0.0.1:8080")
+	p := setupWasmPlatform(ctx, db, t.TempDir())
 	if p == nil {
 		t.Fatal("setupWasmPlatform 返回 nil")
 	}
@@ -116,10 +115,9 @@ func TestReadyzMemoryPlanComesFromAssembly(t *testing.T) {
 	if err := serverstore.SetSetting(db, SettingWasmLimits, saved.Encode()); err != nil {
 		t.Fatalf("保存限制项设置失败: %v", err)
 	}
-	t.Setenv(EnvAppsBaseDomain, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p := setupWasmPlatform(ctx, db, nil, t.TempDir(), "127.0.0.1:8080")
+	p := setupWasmPlatform(ctx, db, t.TempDir())
 	if p == nil {
 		t.Fatal("setupWasmPlatform 返回 nil")
 	}

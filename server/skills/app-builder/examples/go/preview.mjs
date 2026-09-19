@@ -2,8 +2,8 @@
 // preview.mjs —— 用 Node 自带的 `node:wasi` 在本地把应用跑起来（零外部依赖）。
 //
 // 为什么要有它：平台的 ABI 是"stdin/stdout 上的帧 + 宿主用 JSON-RPC 应答"。在本地
-// 没有宿主，所以这个脚本扮演宿主：它把请求帧喂给 wasm，按需应答 db.* / ai.chat /
-// log / assets.read，然后把应用写出的最终响应信封打印出来。
+// 没有宿主，所以这个脚本扮演宿主：它把请求帧喂给 wasm，按需应答 db.* / log /
+// assets.read，然后把应用写出的最终响应信封打印出来。
 //
 // 用法（在 examples/go/ 目录下）：
 //
@@ -11,10 +11,15 @@
 //   node preview.mjs shared-notes.wasm
 //   node preview.mjs shared-notes.wasm --path /api/notes --method POST --body 'body=hello'
 //   node preview.mjs shared-notes.wasm --user not-in-list      # 看"无权限页"长什么样
-//   node preview.mjs shared-notes.wasm --anonymous             # 看匿名分支（public 应用）
+//   node preview.mjs shared-notes.wasm --anonymous             # 模拟历史 public 应用（user=null）
 //
-// 得到的不是"像线上一样"的预览（没有真实数据库、没有真实 AI），而是**协议层**的
+// 得到的不是"像线上一样"的预览（没有真实数据库，**wasm 侧也没有 AI 能力**：应用里的 AI
+// 走应用前端的前端桥 `POST /__picoaide/ai/chat`，由客户端本地处理），而是**协议层**的
 // 端到端验证：帧读写、路由分支、白名单判定、失败分支的响应是否都成立。
+//
+// 注：平台一律要求登录（没有匿名面），`--anonymous` 只用来回归**历史** public 应用；
+// 应用本身在客户端里是 `<渠道 app 源 scheme>://<app_id>` 的一个 origin（scheme 随渠道配置），cookie 不可用
+// （`document.cookie` 恒为空、`Set-Cookie` 不落盘）—— 状态放应用库。
 //
 // ⚠️ 只在 Linux/macOS 验证过（父子进程用管道相连）。Windows 上如果报 WASI 相关错误，
 // 直接在平台上 validate（预检不占版本号）也一样能发现协议层问题。
@@ -61,7 +66,8 @@ async function runFakeHost() {
     abi: 'picoaide-app/1',
     app_id: 'shared-notes',
     version: '1.0.0',
-    // auth.mode 取自应用的 access（三选一）；这里是假宿主，直接把它透给应用。
+    // auth.mode 取自应用的 access（写侧只有 login / whitelist；历史 public 读取侧按
+    // login 处理）。这里是假宿主：`--anonymous` 用来模拟历史 public 应用（user=null）。
     auth: { mode: config.access || 'login', verified: !args.anonymous },
     user: args.anonymous
       ? null
@@ -138,9 +144,6 @@ class FakeHost {
         this.notes.push({ rowId: this.nextRowId++, author, body, created_at })
         return ok({ rows_affected: 1 })
       }
-      case 'ai.chat':
-        // 真实平台会阻塞数秒并计费；预览里给一段固定文本，用来验证等待态与渲染。
-        return ok({ content: '（本地预览）本周便签集中在两件事：发布流程梳理、值班表确认。', model: 'preview', usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })
       case 'log':
         console.error(`[app:${params.level ?? 'info'}] ${params.message}`)
         return ok({ accepted: 1 })
@@ -150,7 +153,10 @@ class FakeHost {
         return ok({ content_type: 'application/json', size: Buffer.byteLength(text), text })
       }
       default:
-        return fail('VALIDATION', `预览宿主没有实现 ${method}`)
+        // 平台的宿主能力是封闭清单：平台没有的能力（例如 wasm 侧的 AI 调用）也走这里。
+        // 应用里的 AI 走应用前端的前端桥 `POST /__picoaide/ai/chat`（客户端本地处理），
+        // 不在 wasm 里，因此预览宿主也没有它。
+        return fail('HOST_METHOD_UNKNOWN', `宿主没有 ${method} 这个方法（宿主的可用能力是封闭清单）`)
     }
   }
 }

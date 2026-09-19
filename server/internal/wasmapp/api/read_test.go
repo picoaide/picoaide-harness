@@ -211,9 +211,9 @@ func TestCatalogListsEveryAppWithAccessAndState(t *testing.T) {
 		}
 		e.publishOK(e.tokens["alice"], appID, "1.0.0", guest, cfg)
 	}
-	mk("listed-tool", "public")
-	mk("offline-tool", "public")
-	mk("frozen-tool", "public")
+	mk("listed-tool", "login")
+	mk("offline-tool", "login")
+	mk("frozen-tool", "login")
 	mk("whitelist-tool", "whitelist", "alice")
 	mk("login-tool", "login")
 	if w := e.req(http.MethodPost, "/api/client/v2/apps/wasm/offline-tool/unpublish", e.tokens["alice"], nil); w.Code != http.StatusOK {
@@ -234,7 +234,7 @@ func TestCatalogListsEveryAppWithAccessAndState(t *testing.T) {
 	}
 	// 三种访问模式都必须出现（"没权限的也应该展示出来"）。
 	for appID, wantAccess := range map[string]string{
-		"listed-tool":    "public",
+		"listed-tool":    "login",
 		"whitelist-tool": "whitelist",
 		"login-tool":     "login",
 	} {
@@ -274,8 +274,9 @@ func TestCatalogListsEveryAppWithAccessAndState(t *testing.T) {
 	if row["responsible"] != "张伟" {
 		t.Fatalf("负责人取自 picoaide.app.json 的 owner: %v", row["responsible"])
 	}
-	if row["entry_url"] != "https://listed-tool.apps.example.com" {
-		t.Fatalf("入口链接不对: %v", row["entry_url"])
+	// ⚠️ 目录行**不再有** `entry_url`（W4 删除；总纲 §8.4/§5.2 冻结契约）。
+	if v, ok := row["entry_url"]; ok {
+		t.Fatalf("目录不得再下发 entry_url: %v", v)
 	}
 	// R36：目录**不显示额度/用量**。
 	for _, banned := range []string{"quota", "usage", "cost", "balance", "tokens", "installed"} {

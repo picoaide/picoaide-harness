@@ -176,8 +176,10 @@ func (t *Ticket) AppID() string { return t.appID }
 //   - APP_QUEUE_FULL(429, details.reason=wall_clock_exceeded)：ctx 在排队期间到期
 //     （端到端墙钟 60 s 到点即拒，§4.6）。
 //
-// userID 传 0 表示匿名（匿名不参与"每用户在跑"计数，但仍受全局与每应用上限约束；
-// 匿名另有全局/每 IP 令牌桶，见 §4.6 与 internal/wasmapp/anonlimit）。
+// userID 传 0 表示"没有身份"（不参与"每用户在跑"计数，但仍受全局与每应用上限约束）。
+//
+// ⚠️ 服务端**没有匿名面**（管线一律要求登录）：0 只可能来自装配/测试错误，
+// 这条分支留着只是为了让调度器对"没有身份"保持 fail-closed 的计数语义。
 func (s *Scheduler) Acquire(ctx context.Context, appID string, userID int64) (*Ticket, *apperr.Error) {
 	start := time.Now()
 	s.mu.Lock()

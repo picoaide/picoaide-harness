@@ -11,9 +11,10 @@
 
 import { CdpSession } from './cdp.ts'
 import { BROWSER_PARTITION, BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, type NativeBrowserWindow, type NativeSession, type NativeView } from './electron-adapter.ts'
-import { BrowserGuard, installPermissionGuard } from './guard.ts'
+import { BrowserGuard, ensureSessionGuard } from './guard.ts'
 import { extractSnapshotWithMeta, extractTextWithMeta, type SnapshotExtractionMeta } from './snapshot.ts'
 import { captureScreenshot, captureScreenshotViaCdp } from './shots.ts'
+import { type SurfaceRegistry } from './surface.ts'
 import { TabPool, type TabReservation } from './pool.ts'
 import { BrowserStore, stripSensitiveText, stripSensitiveUrl, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
 import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
@@ -306,6 +307,19 @@ export interface RuntimeDeps {
    * `dsh-connectors/src/client/status-label.ts`). Absent ⇒ {@link DEFAULT_HOST_LOCALE}.
    */
   locale?: () => HostLocale
+  /**
+   * Surface 注册表（§16.1）：应用窗口由宿主（`@picoaide/dsh-wasm-apps-host`）经
+   * `@picoaide/dsh-browser/surface` 注册进来，工具面按它寻址；**浏览器标签**这一半
+   * 由 {@link BrowserRuntime.syncSurfaces} 从池子镜像过去。
+   *
+   * 缺席（纯单测/极简宿主）⇒ 工具面退回"只有浏览器标签"的老口径，不报错。
+   */
+  surfaces?: SurfaceRegistry
+  /**
+   * 本安装的应用源 scheme（渠道包注入；§10/§16.1）。宿主注册应用窗口 surface 时
+   * 必须与它一致 —— 浏览器侧不猜、也不写死任何渠道值（CHN-3）。
+   */
+  appOriginScheme?: string
 }
 
 /**
@@ -317,6 +331,13 @@ export class BrowserRuntime {
   private nextTabId = 1
   /** Locale provider for runtime-produced copy (see {@link RuntimeDeps.locale}). */
   private readonly locale: () => HostLocale
+  /**
+   * Surface 注册表（§16.1）。工具面靠它区分"浏览器标签"与"应用窗口"：
+   * 配额/台账只算前者，默认寻址只指向前者，应用窗口必须显式给 `app_id`。
+   */
+  readonly surfaces: SurfaceRegistry | undefined
+  /** 本安装的应用源 scheme（渠道注入；缺省 = 未配置，应用窗口注册时不带 scheme）。 */
+  readonly appOriginScheme: string | undefined
   /**
    * Credential accounting keyed by ORIGIN (R7, 2026-09-13): the value set and
    * the activity window a `browser_fill_credentials` created, scoped to what
@@ -396,6 +417,8 @@ export class BrowserRuntime {
     this.guard = new BrowserGuard(adapter)
     this.partition = partition ?? BROWSER_PARTITION
     this.locale = deps.locale ?? (() => DEFAULT_HOST_LOCALE)
+    this.surfaces = deps.surfaces
+    this.appOriginScheme = deps.appOriginScheme
     // The pool this runtime builds for itself must speak the same language as
     // the runtime (its user-gate refusals reach the activity panel AND the
     // model). Production composes a pool in `index.ts` with the same provider;
@@ -848,7 +871,9 @@ export class BrowserRuntime {
       void tab.cdp.send('Page.enable').catch(() => { /* mock/older protocol: `did-navigate` still closes the window */ })
 
       const session = view.webContents.session
-      tab.disposers.push(installPermissionGuard(session))
+      // 分区级幂等（§16.1：归属 = 分区初始化，不是建 tab 时）。重复调用是 no-op，
+      // 所以这里不再需要 per-tab 的 disposer；真正的安装点是分区初始化路径。
+      ensureSessionGuard(session)
       // Downloads are a session-level event with no tab identity: attribute
       // the op to whichever tab is active when it fires (falling back to the
       // registering tab). The guard itself is ref-counted per tab (P0-5).
@@ -1240,6 +1265,28 @@ export class BrowserRuntime {
   }
 
   /** Resolve a tab id: explicit (must exist) or the pool's active tab. */
+  /**
+   * 把池子里的浏览器标签镜像进 surface 注册表（§16.1）。
+   *
+   * 调用时机 = 每次工具面寻址之前（`resolveTarget`）。理由：池子的增删点有十来处
+   * （开/关/恢复/清理/切账号），逐点插桩必然漏；镜像一次是 O(标签数)，代价可忽略，
+   * 而且**幂等**——所以"漏插桩"这个 bug 类在结构上不存在。
+   */
+  syncSurfaces(): void {
+    const registry = this.surfaces
+    if (registry === undefined) return
+    const live = new Map<number, unknown>()
+    for (const view of this.pool.list()) {
+      live.set(view.id, this.tabs.get(view.id)?.view.webContents)
+    }
+    for (const surface of registry.browserTabs()) {
+      if (!live.has(surface.id)) registry.unregister(surface.id)
+    }
+    for (const [id, webContents] of live) {
+      registry.registerBrowserTab(id, webContents)
+    }
+  }
+
   resolveTab(tabId: number | undefined): number {
     if (this.pendingLedgerTabs.length > 0) this.materializePendingTabs()
     if (tabId !== undefined) {
@@ -3295,6 +3342,17 @@ export class BrowserRuntime {
     if (this.credentials === undefined) return []
     const list = (this.credentials as CredentialResolver & { list?: () => Promise<Array<{ id: string; username?: string }>> }).list
     return list !== undefined ? await list() : []
+  }
+
+  /**
+   * 分区初始化：确保该分区的权限守卫已装（§16.1：归属 = 分区初始化）。
+   *
+   * 幂等，所以调用点可以多、可以重复 —— "漏一个入口"这个 bug 类因此不存在。
+   * 应用窗口宿主也走同一条（它有自己的 session 注册面，见 wasm-apps-host 的适配器）。
+   * @param session - 目标 session。
+   */
+  ensurePartitionGuard(session: NativeSession): void {
+    ensureSessionGuard(session)
   }
 
   /** Trigger a programmatic download of a URL. */

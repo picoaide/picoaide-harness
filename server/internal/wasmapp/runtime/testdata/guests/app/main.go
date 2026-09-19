@@ -70,7 +70,9 @@ func main() {
 		_, code := call("db.query", map[string]any{"sql": "SELECT 1"})
 		respond(200, map[string]any{"ignored_host_error": code})
 	case "/hostpanic":
-		_, code := call("ai.chat", map[string]any{"messages": []any{}})
+		// 宿主的 db.query 在该用例里被替换成"panic 的实现"（见 serve_test.go 的 panicOn）：
+		// 应用照常忽略错误并返回 200，宿主必须仍然把它变成 INTERNAL（§7.4 硬断言）。
+		_, code := call("db.query", map[string]any{"sql": "SELECT panic"})
 		respond(200, map[string]any{"host_error": code})
 	case "/rpcerr":
 		_, code := call("db.exec", map[string]any{"sql": "DROP TABLE t"})

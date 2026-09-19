@@ -273,6 +273,16 @@ func renderAppConfigMarkdown() []byte {
 	b.WriteString("\n")
 	renderFieldHints(&b, appcfg.ConfigFields())
 
+	// `window` 的子字段单独成表（§6）：它们在结构体里是一个对象，因此不在上面的
+	// 顶层表里；但作者要在同一个文件里看到它们 —— 生成物只允许有一个真源，
+	// 所以这张表也由 appcfgspec.go 的 WindowFields() 驱动。
+	b.WriteString("### 1.1 `window` 的子字段\n\n")
+	b.WriteString("`window` 是一个对象；下面三个是它**全部**允许的子键（未知子键即拒）。\n")
+	b.WriteString("路径名去掉 `window.` 前缀就是 JSON 里的键名。\n\n")
+	b.WriteString(renderFieldTable(appcfg.WindowFields()))
+	b.WriteString("\n")
+	renderFieldHints(&b, appcfg.WindowFields())
+
 	b.WriteString("## 2. 发布载荷（`validate` / `publish` 的请求体）\n\n")
 	b.WriteString("`POST /api/client/v2/apps/wasm/validate` 与 `POST /api/client/v2/apps/wasm/:app_id/releases` 共用同一份载荷。\n\n")
 	b.WriteString(renderFieldTable(appcfg.PublishFields()))

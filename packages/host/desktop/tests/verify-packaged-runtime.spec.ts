@@ -664,6 +664,22 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         expect(REQUIRED_PACKAGED_RUNTIME_ENTRIES).toContain(entry)
       }
     })
+
+    it('names the client-only wasm app origin adapter and its profile patch explicitly', () => {
+      // 2026-09-19 契约 §2:客户端专属 WASM 应用 origin(`picoaide-app://`)。
+      // `lib/electron-adapter.js` 尤其关键 —— 它被 desktop `lib/main.js` 静态
+      // import(协议特权注册 + 适配器实例),掉出产物 = **启动期**
+      // ERR_MODULE_NOT_FOUND(整个应用起不来),而不是"某一行插件不装配"。
+      for (const entry of [
+        'node_modules/@picoaide/dsh-wasm-apps-host/lib/index.js',
+        'node_modules/@picoaide/dsh-wasm-apps-host/lib/invariant.js',
+        'node_modules/@picoaide/dsh-wasm-apps-host/lib/electron-adapter.js',
+        'node_modules/@picoaide/dsh-wasm-apps-host/package.json',
+        'node_modules/@picoaide/dsh-wasm-apps-host/cordis.patch.yml',
+      ]) {
+        expect(REQUIRED_PACKAGED_RUNTIME_ENTRIES).toContain(entry)
+      }
+    })
   })
 
   describe('packaged flock smoke (P1-5)', () => {

@@ -90,7 +90,7 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request,
 	// 资源不可用要交给 wasm，响应头必须还是干净的。
 	if cached, hit := rc.CachedAsset(logical); hit && cached.ETag != "" {
 		if etagMatches(r.Header.Get("If-None-Match"), cached.ETag) {
-			writeStaticHeaders(w.Header(), r, cached)
+			writeStaticHeaders(w.Header(), s.selfOrigin(r), cached)
 			// 304：不带 body，也不带 Content-Length（RFC 9110：304 不得有消息体）。
 			w.WriteHeader(http.StatusNotModified)
 			return true
@@ -104,7 +104,7 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request,
 	if aerr != nil {
 		return false
 	}
-	writeStaticHeaders(w.Header(), r, asset)
+	writeStaticHeaders(w.Header(), s.selfOrigin(r), asset)
 
 	// 冷路径的 304：If-None-Match 与刚刚算出的 ETag 比对（此时已经付过读盘代价）。
 	if etagMatches(r.Header.Get("If-None-Match"), asset.ETag) {
@@ -125,9 +125,10 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request,
 //
 // 304 与 200 共用同一份实现：两条路径的**头必须逐字段一致**，否则"复验过的那份
 // 缓存"与"首次拿到的那份"在浏览器里会表现出不同的安全/缓存语义。
-func writeStaticHeaders(h http.Header, r *http.Request, a assetEntry) {
-	// 宿主安全头（§4.8：含 4xx/5xx，这里也含 304）。
-	edge.ApplyHostSecurityHeaders(h, edge.SelfOrigin(r))
+func writeStaticHeaders(h http.Header, selfOrigin string, a assetEntry) {
+	// 宿主安全头（§4.8：含 4xx/5xx，这里也含 304）。selfOrigin 由调用方按**本次
+	// 请求的访问模型**给出（客户端协议 vs 旧子域路径），见 Server.selfOrigin。
+	edge.ApplyHostSecurityHeaders(h, selfOrigin)
 
 	// 应用可控头的白名单过滤（§4.8）：静态资源的头是宿主产物，但统一过一遍
 	// 同一条策略 —— content-type 必须在允许集合内，否则宁可不写（由 Go 嗅探）。
@@ -152,10 +153,10 @@ func writeStaticHeaders(h http.Header, r *http.Request, a assetEntry) {
 //
 // # 为什么必须排除（三条，任一条都足以成立）
 //
-//  1. `whitelist` 是一份**账号名单**。宿主直出等于把它发给任何能打开应用的人
-//     （`access=public` 时是匿名访问者），而平台刻意不校验名单里的账号
-//     是否存在就是为了"不提供账号枚举面"（§10.5 第 56d 项）—— 直出名单把这条
-//     设计意图整个抹掉；`data_sensitivity` / `owner` 一并暴露。
+//  1. `whitelist` 是一份**账号名单**。宿主直出等于把它发给任何能打开应用的人，
+//     而平台刻意不校验名单里的账号是否存在就是为了"不提供账号枚举面"
+//     （§10.5 第 56d 项）—— 直出名单把这条设计意图整个抹掉；
+//     `data_sensitivity` / `owner` 一并暴露。
 //  2. R24 把准入判定交给应用（未授权请求**照样进 wasm**，由应用返回 403 并显示
 //     本人账号）。静态直出绕过了应用的全部准入判断，等于平台替应用做了一次
 //     "谁都能拿"的准入决定。

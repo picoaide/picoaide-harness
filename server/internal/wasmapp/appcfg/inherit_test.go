@@ -2,7 +2,8 @@
 //
 // 判据（主控定调：服务端兑现"缺省=沿用上一版"，而不是改文案迁就实现）：
 //
-//	① 更新时省略 access      ⇒ 沿用上一版生效值（白名单应用**不放开**）
+//	① 更新时省略 access      ⇒ 沿用上一版生效值（白名单应用**不放开**；
+//	   历史 public 基线在读取侧即 login ⇒ 继承到 login，2026-09-19 契约 §4.4）
 //	② 更新时显式写 access    ⇒ 真的按显式值改（显式空串不是"缺席"，会被拒）
 //	③ 省略 purpose/data_sensitivity/owner ⇒ 沿用（不被清空）；显式空串才清空
 //	④ 首版省略 access        ⇒ 仍是 login（既有语义不回归）
@@ -16,7 +17,8 @@
 //   - mergeMissing 把"缺席才填"改成"无条件覆盖" ⇒ ②（显式 login 被上一版 public 洗掉）红；
 //   - mergeMissing 把 legacy 重新计入缺席判定（老实现）⇒ ⑤ 红（白名单应用被静默放宽）；
 //   - parseBaseline 把不可用基线当成"没有基线" ⇒ ⑥ 红（坏行被翻译成一次放宽）；
-//   - ParseUpdate 在没有基线时补一个 access（例如 public）⇒ ④ 红。
+//   - ParseUpdate 在没有基线时补一个 access（例如 public）⇒ ④ 红；
+//   - parseSubmitted 去掉 public 拒绝（改回 Parse）⇒ ②/④/⑤ 的 public 拒绝断言红。
 package appcfg
 
 import (
@@ -47,10 +49,16 @@ func mustParseUpdate(t *testing.T, submitted, prev string) Config {
 	return c
 }
 
-// ① 更新时省略 access ⇒ 沿用上一版（public 保持 public、whitelist 保持 whitelist + 名单）。
+// ① 更新时省略 access ⇒ 沿用上一版生效值（whitelist 保持 whitelist + 名单；
+// 历史 public 基线在**读取侧**即 login ⇒ 继承到 login，新版本不再写 public）。
 func TestParseUpdateInheritsOmittedAccess(t *testing.T) {
-	if got := mustParseUpdate(t, declarationsOnly, livePublic); got.Access != AccessPublic {
-		t.Errorf("上一版 public、本次省略 access ⇒ 应沿用 public，得到 %q（旧实现落 login：静默收紧）", got.Access)
+	if got := mustParseUpdate(t, declarationsOnly, livePublic); got.Access != AccessLogin {
+		t.Errorf("上一版 public、本次省略 access ⇒ 读取侧即 login（契约 §4.4），得到 %q", got.Access)
+	}
+	// 省略 access 的更新**不得**把 public 带进新版本：写入侧本来就拒 public，
+	// 若基线照原值继承，一次纯代码更新就会 422。
+	if _, e := ParseUpdate([]byte(declarationsOnly), livePublic); e != nil {
+		t.Fatalf("public 基线的纯代码更新必须可发（继承为 login），得到 %v", e)
 	}
 	got := mustParseUpdate(t, declarationsOnly, liveWhitelist)
 	if got.Access != AccessWhitelist {
@@ -81,10 +89,16 @@ func TestParseUpdateExplicitAccessWins(t *testing.T) {
 	if got.Access != AccessLogin {
 		t.Fatalf("显式 access=login ⇒ 必须真的改成 login，得到 %q（继承不得覆盖显式值）", got.Access)
 	}
-	// 反方向同样要成立：显式 public 覆盖上一版 whitelist。
-	got = mustParseUpdate(t, `{"access":"public"}`, liveWhitelist)
-	if got.Access != AccessPublic {
-		t.Fatalf("显式 access=public ⇒ 必须真的改成 public，得到 %q", got.Access)
+	// 反方向：显式 public **在写入侧被拒**（契约 §4.4：新版本不得再写 public）。
+	// 用 login 覆盖上一版 whitelist 仍要真的生效（显式值优先于基线）。
+	got = mustParseUpdate(t, `{"access":"login"}`, liveWhitelist)
+	if got.Access != AccessLogin {
+		t.Fatalf("显式 access=login ⇒ 必须真的改成 login，得到 %q", got.Access)
+	}
+	if _, e := ParseUpdate([]byte(`{"access":"public"}`), liveWhitelist); e == nil {
+		t.Fatal("显式 access=public 必须被拒（写入侧收敛）")
+	} else if e.Details["reason"] != "public_not_allowed" {
+		t.Fatalf("public 被拒的结构化形态不对: %+v", e)
 	}
 	// 显式空串 = 给了值，因此**不**被上一版覆盖 ⇒ 取值非法（422），而不是悄悄沿用。
 	if _, e := ParseUpdate([]byte(`{"access":""}`), livePublic); e == nil {
@@ -96,12 +110,12 @@ func TestParseUpdateExplicitAccessWins(t *testing.T) {
 
 // ③ 省略 purpose/data_sensitivity/owner ⇒ 沿用；显式空串才清空。
 func TestParseUpdateInheritsDeclarationsAndExplicitEmptyClears(t *testing.T) {
-	got := mustParseUpdate(t, `{"access":"public"}`, livePublic)
+	got := mustParseUpdate(t, `{"access":"login"}`, livePublic)
 	if got.Purpose != "演示：共享小工具" || got.DataSensitivity != "internal" || got.Owner != "张伟" {
 		t.Fatalf("缺席的三个声明字段应沿用上一版（旧实现清空它们）: %+v", got)
 	}
 	cleared := mustParseUpdate(t,
-		`{"access":"public","purpose":"","data_sensitivity":"","owner":""}`, livePublic)
+		`{"access":"login","purpose":"","data_sensitivity":"","owner":""}`, livePublic)
 	if cleared.Purpose != "" || cleared.DataSensitivity != "" || cleared.Owner != "" {
 		t.Fatalf("显式空串是“给值”，必须真的清空（不许被上一版填回来）: %+v", cleared)
 	}
@@ -118,9 +132,13 @@ func TestParseUpdateWithoutBaselineKeepsLoginDefault(t *testing.T) {
 			t.Fatalf("基线 %q 不存在时省略 access ⇒ 必须仍是缺省 login，得到 %q", prev, got.Access)
 		}
 	}
-	// 显式给值仍然是显式（基线缺失不该让 public 失效）。
-	if got := mustParseUpdate(t, `{"access":"public"}`, ""); got.Access != AccessPublic {
-		t.Fatalf("首版显式 public ⇒ public，得到 %q", got.Access)
+	// 显式给值仍然是显式（基线缺失不改变取值合法性）：login/whitelist 照常，
+	// 但 public 在**任何**提交里都被拒（含首版）。
+	if got := mustParseUpdate(t, `{"access":"login"}`, ""); got.Access != AccessLogin {
+		t.Fatalf("首版显式 login ⇒ login，得到 %q", got.Access)
+	}
+	if _, e := ParseUpdate([]byte(`{"access":"public"}`), ""); e == nil {
+		t.Fatal("首版显式 public 同样必须被拒（写入侧收敛与版本无关）")
 	}
 }
 
@@ -197,17 +215,25 @@ func TestParseUpdateLegacyFieldsDoNotDisableInheritance(t *testing.T) {
 	if got.Owner != "张三" {
 		t.Fatalf("带 legacy 字段的提交仍应沿用缺席的声明，得到 owner=%q", got.Owner)
 	}
-	// 新字段恒优先：显式 access 与 legacy 同时出现时以 access 为准。
-	got = mustParseUpdate(t, `{"access":"public","login_required":true,"visible":false}`, liveWhitelist)
-	if got.Access != AccessPublic {
+	// 新字段恒优先：显式 access 与 legacy 同时出现时以 access 为准；
+	// 显式 public 仍然是"这次提交要求匿名" ⇒ 写入侧拒（不被 legacy 键洗掉）。
+	got = mustParseUpdate(t, `{"access":"login","login_required":true,"visible":false}`, liveWhitelist)
+	if got.Access != AccessLogin {
 		t.Fatalf("显式 access 必须优先于 legacy 字段，得到 %q", got.Access)
+	}
+	if _, e := ParseUpdate([]byte(`{"access":"public","login_required":true,"visible":false}`), liveWhitelist); e == nil {
+		t.Fatal("显式 access=public 必须被拒，哪怕同时带了 legacy 键")
 	}
 }
 
-// ⑤' 首版（**没有**基线）时旧形态仍按 shim 映射：兼容承诺不回归。
+// ⑤' 首版（**没有**基线）时旧形态仍按 shim 映射：兼容承诺不回归 ——
+// 唯一例外是 `login_required=false`（它映射出的就是被收敛掉的 public，
+// 因此写入侧拒；读取侧仍照常识别，见 appcfg_test 的 public 用例）。
 func TestParseUpdateLegacySubmissionWithoutBaselineStillMaps(t *testing.T) {
-	if got := mustParseUpdate(t, `{"login_required":false,"purpose":"看板","data_sensitivity":"internal","owner":"李四"}`, ""); got.Access != AccessPublic {
-		t.Fatalf("首版 login_required=false ⇒ public（兼容 shim），得到 %q", got.Access)
+	if _, e := ParseUpdate([]byte(`{"login_required":false,"purpose":"看板","data_sensitivity":"internal","owner":"李四"}`), ""); e == nil {
+		t.Fatal("首版 login_required=false（= 要求匿名）必须被拒（写入侧不再接受 public）")
+	} else if e.Details["reason"] != "public_not_allowed" {
+		t.Fatalf("拒绝理由应点名 public_not_allowed: %+v", e)
 	}
 	if got := mustParseUpdate(t, `{"login_required":true,"whitelist":["alice"],"purpose":"x","data_sensitivity":"y","owner":"z"}`, ""); got.Access != AccessWhitelist {
 		t.Fatalf("首版 login_required=true + 名单非空 ⇒ whitelist（兼容 shim），得到 %q", got.Access)
@@ -215,11 +241,12 @@ func TestParseUpdateLegacySubmissionWithoutBaselineStillMaps(t *testing.T) {
 }
 
 // 上一版是**旧 schema** 的行（迁移 0071 之前的历史行）：先映射成新 schema 再继承。
+// `login_required=false` 映射出的 public 在读取侧即 login（契约 §4.4）⇒ 继承到 login。
 func TestParseUpdateLegacyBaselineMapsToNewSchema(t *testing.T) {
 	prev := `{"login_required":false,"purpose":"看板","data_sensitivity":"internal","owner":"李四"}`
 	got := mustParseUpdate(t, `{"purpose":"看板","data_sensitivity":"internal","owner":"李四"}`, prev)
-	if got.Access != AccessPublic {
-		t.Fatalf("上一版 login_required=false ⇒ 继承后应为 public，得到 %q", got.Access)
+	if got.Access != AccessLogin {
+		t.Fatalf("上一版 login_required=false（= public）读取侧即 login ⇒ 继承后应为 login，得到 %q", got.Access)
 	}
 }
 

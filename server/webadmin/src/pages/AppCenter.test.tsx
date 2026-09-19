@@ -3,14 +3,30 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { ApiError, me, request } from '../api'
 import { setCurrentAdmin, type MeUser } from '../lib/rbac'
 import Apps from './app-center/Apps'
-import Settings from './app-center/Settings'
+
+// 打开次数趋势用 ChartLazy（懒加载 VChart，~182KB gz）。组件测试只断言"有图/没图"
+// 与数据口径，图表内部渲染不在范围内 —— 与 usage 三个测试文件同口径。
+vi.mock('../components/chart-lazy', () => ({
+  ChartLazy: () => <div data-testid="chart-mock" />,
+}))
 
 // ---------------------------------------------------------------------------
 // 应用中心(2026-09-18;2026-09-19 拆成子页):
 //   应用   = wasm 应用列表与平台级处置(本文件 Apps 部分)
 //   限制项 = 原「应用平台」页,测试在 AppPlatform.test.tsx(渲染 app-center/Limits)
-//   设置   = 应用域名(泛域名),本文件 Settings 部分
+//
+// 2026-09-19 WASM 客户端专属改造:原「设置」子页(应用域名/泛域名)整页删除 ——
+// 应用只在桌面客户端内以 `picoaide-app://<app_id>/` 打开,服务端的基域配置面
+// (`wasm.apps_base_domain`、`GET/PUT /wasm-apps/domain`)随之删除(契约 §4.4/§4.5)。
+// 本文件里那一整组设置页用例随之删除;`access:'public'` 夹具**保留为历史值用例**,
+// 断言新口径(渲染成「已退役（历史值）」而不是「公开」)。
 // 子导航与老路由重定向的接线测试在 app-center/AppCenterLayout.test.tsx。
+//
+// W5 追加(2026-09-19,契约 §19 Q11/Q13 + §3 F16):
+//   ⑤ **访问级别筛选**只有两值(+全部)；历史 public 行由「登录后全员」命中，
+//      行上标注「已退役（历史值）」；服务端未回显该筛选时降级为"本页过滤 + 明说"；
+//   ⑥ **打开次数列**（F16）：聚合端点缺失时显示「—」+ 明说原因，**不得显示 0**；
+//   ⑦ **公告模板**（访问级别变更 / 客户端专属形态）：可复制、含必须告知的措辞。
 //
 // 覆盖四条硬口径:
 //   ① 每个写动作都打到**契约里那一条**路径与 body(上架/下架/冻结/解冻/转移归属/
@@ -35,6 +51,12 @@ const OFF = {
   owner: 'bob', enabled: false, access: 'whitelist', purpose: '值班巡检',
   data_sensitivity: '公开', current_release_id: 7, current_version: '0.9.0',
 }
+/**
+ * 冻结行,同时是**历史访问级别**的载体:存量行里可能仍写着 `access:'public'`
+ * (2026-09-19 契约 §4.4 起写侧只接受 login|whitelist,读侧把 public 当 login)。
+ * 这个夹具**有意保留 `public`** —— 服务端/前端任何一端把它当成"还能匿名可达"
+ * 都会在这里被断言咬住(渲染必须是「已退役（历史值）」)。
+ */
 const FROZEN = {
   ...LIVE, app_id: 'legacy-board', title: '旧看板', description: '已停用的看板',
   owner: 'carol', enabled: false, access: 'public', purpose: '', data_sensitivity: '',
@@ -83,6 +105,63 @@ const REJECTED_RELEASES = [
   },
 ]
 
+/**
+ * F16 跨应用聚合（`GET /wasm-apps/opens/summary`）—— 列表「打开次数」列 + 运营看板共用。
+ *
+ * 数字刻意选成：
+ *   - `totals.uv = 9` **小于**逐日 UV 之和（6+5=11）：窗口 UV 只能信服务端的去重值，
+ *     把逐日 UV 相加会把同一个人重复计数（opens-contract 的硬口径）；
+ *   - `totals.pv = 40` 等于逐日 PV 之和（20+20）：PV 不去重，可以相加。
+ */
+const OPENS_SUMMARY = {
+  days: 7,
+  top: 10,
+  today: { day: '2026-09-19', pv: 12, uv: 5 },
+  totals: { pv: 40, uv: 9 },
+  trend: [
+    { day: '2026-09-18', pv: 20, uv: 6 },
+    { day: '2026-09-19', pv: 20, uv: 5 },
+  ],
+  apps: [
+    { app_id: 'share-note', today_pv: 8, today_uv: 3, window_pv: 25, window_uv: 6 },
+    { app_id: 'ops-tool', today_pv: 4, today_uv: 2, window_pv: 15, window_uv: 4 },
+  ],
+  top_apps: [
+    { app_id: 'share-note', title: '共享便签', pv: 25, uv: 6 },
+    { app_id: 'ops-tool', title: '运维小工具', pv: 15, uv: 4 },
+  ],
+  detail_retention_days: 90,
+}
+
+/**
+ * 单应用打开明细（`GET /wasm-apps/:app_id/opens`，设计冻结路径 §8.9）。
+ *
+ * 形状按**服务端已落地实现**写（`serverstore.WasmOpenSeries`，核对 2026-09-20）：
+ * 区间合计 = `total_pv`/`total_uv`；`granularity=dept` 的行 `day` 为空串且**无部门名**
+ * （只有 dept_id ⇒ 部门名由前端 best-effort 映射，本夹具的管理员没有 dept:read，
+ * 因此断言的是「部门 #1」这种如实回退）。
+ */
+const APP_OPENS_DAY = {
+  app_id: 'share-note', from: '2026-08-21', to: '2026-09-19', granularity: 'day',
+  total_pv: 40, total_uv: 9,
+  points: OPENS_SUMMARY.trend.map((p) => ({ ...p, dept_id: 1 })),
+  detail_retention_days: 90,
+}
+const APP_OPENS_DEPT = {
+  app_id: 'share-note', granularity: 'dept', total_pv: 40, total_uv: 9,
+  points: [
+    { day: '', dept_id: 1, pv: 30, uv: 7 },
+    { day: '', dept_id: 0, pv: 10, uv: 2 },
+  ],
+  detail_retention_days: 90,
+}
+
+/** AI 用量（§21.4）：`points: []` + 全 0 = **还没有归因数据**（不是"0 次调用"）。 */
+const AI_USAGE_EMPTY = {
+  app_id: 'share-note', calls: 0, prompt_tokens: 0, completion_tokens: 0,
+  total_tokens: 0, cost: 0, points: [],
+}
+
 /** 运行诊断(GET /wasm-apps/:app_id/diagnostics,与员工面同一份口径)。 */
 const DIAGNOSTICS = {
   app_id: 'review-me', app_enabled: true, app_frozen: false, app_deleted: false, owner: 'dave',
@@ -107,6 +186,16 @@ const mockRequest = vi.mocked(request)
 
 /** 列表数据源:分页/搜索用例会临时替换它(默认 = 4 行夹具)。 */
 let appsFixture = APP_LIST
+
+/**
+ * F16/AI 用量的取数开关（用例级覆盖点）。
+ *
+ * 默认 **全部可用**（夹具齐全），单条用例改成 `'missing'` 就能断言"缺后端时的
+ * 降级提示 + `—`"，不必在每个用例里重写整个 mockImplementation。
+ */
+let opensSummaryMode: 'ok' | 'missing' | 'drift' = 'ok'
+let appOpensMode: 'ok' | 'missing' | 'drift' = 'ok'
+let aiUsageMode: 'ok' | 'missing' | 'drift' | 'data' = 'ok'
 
 /** 抽屉里 `/releases` 回显的"当前生效版本"(审核通过后服务端会把它切到新版本)。 */
 let pendingCurrentVersion = '1.0.2'
@@ -134,6 +223,10 @@ function listPage(params: URLSearchParams) {
   if (status === 'unpublished') rows = rows.filter((a) => !a.enabled && a.frozen_at === null && a.deleted_at === null)
   if (status === 'frozen') rows = rows.filter((a) => a.frozen_at !== null)
   if (status === 'deleted') rows = rows.filter((a) => a.deleted_at !== null)
+  // 访问级别筛选（契约 §19 Q13）：`login` **必须**命中历史 public（读侧同口径）。
+  const access = params.get('access') ?? ''
+  if (access === 'login') rows = rows.filter((a) => a.access === 'login' || a.access === 'public')
+  else if (access === 'whitelist') rows = rows.filter((a) => a.access === 'whitelist')
   return {
     apps: rows.slice(offset, offset + limit),
     review_required: false,
@@ -143,6 +236,8 @@ function listPage(params: URLSearchParams) {
     truncated: offset + limit < rows.length,
     limit,
     offset,
+    // 服务端把生效的筛选值原样回显（L6 契约依赖；缺它前端按"不支持"降级）。
+    access,
   }
 }
 
@@ -150,11 +245,48 @@ beforeEach(() => {
   setCurrentAdmin(SUPER)
   appsFixture = APP_LIST
   pendingCurrentVersion = '1.0.2'
+  opensSummaryMode = 'ok'
+  appOpensMode = 'ok'
+  aiUsageMode = 'ok'
+  // 访问级别筛选会同步回 URL（刷新/分享用），而 jsdom 的 location 在用例之间是
+  // **共享**的 ⇒ 每条用例开始前清掉查询串，否则上一条用例的 `?access=` 会变成
+  // 下一条的初值（不是被测行为，是测试污染）。
+  window.history.replaceState({}, '', '/admin/app-center')
+  /** 404 是"服务端没这个端点"（NoRoute 也是 404 JSON 信封）。 */
+  const missing = (path: string) => {
+    const err = new ApiError(404, 'NOT_FOUND', `请求的资源不存在（${path}）`)
+    return Promise.reject(err)
+  }
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
     const base = String(path).split('?')[0]!
     const params = new URLSearchParams(String(path).split('?')[1] ?? '')
     if (base === '/api/server/admin/wasm-apps') return listPage(params)
+    // F16 跨应用聚合（列表列 + 看板）；`missing` 模式演练"缺后端不得显示 0"。
+    if (base === '/api/server/admin/wasm-apps/opens/summary') {
+      if (opensSummaryMode === 'missing') return missing(base)
+      if (opensSummaryMode === 'drift') return { days: 7 }
+      return OPENS_SUMMARY
+    }
+    // 单应用打开明细（设计冻结路径 §8.9）：granularity=dept 时给部门行。
+    if (base.endsWith('/opens')) {
+      if (appOpensMode === 'missing') return missing(base)
+      if (appOpensMode === 'drift') return { app_id: 'share-note' }
+      return params.get('granularity') === 'dept' ? APP_OPENS_DEPT : APP_OPENS_DAY
+    }
+    // AI 用量（§21.4）：默认空归因数据（面板必须渲染空状态而不是 0）。
+    if (base.endsWith('/ai-usage')) {
+      if (aiUsageMode === 'missing') return missing(base)
+      if (aiUsageMode === 'drift') return { app_id: 'share-note' }
+      if (aiUsageMode === 'data') {
+        return {
+          app_id: 'share-note', calls: 3, prompt_tokens: 900, completion_tokens: 300,
+          total_tokens: 1200, cost: 1.5,
+          points: [{ day: '2026-09-19', calls: 3, tokens: 1200, cost: 1.5 }],
+        }
+      }
+      return AI_USAGE_EMPTY
+    }
     // 版本清单(审核闭环的数据面):服务端按 status 过滤,`reason` 每行都下发。
     // `status=rejected` 正是管理端「最近被拒」子清单的数据源(R1-uxw-4)。
     if (base.endsWith('/releases')) {
@@ -169,18 +301,6 @@ beforeEach(() => {
       }
     }
     if (base.endsWith('/diagnostics')) return { diagnostics: DIAGNOSTICS }
-    // 应用泛域名配置(GET 当前值 / PUT 保存后回读同一形状)。
-    if (base === '/api/server/admin/wasm-apps/domain') {
-      const body = JSON.parse(String(init?.body ?? '{}')) as { base_domain?: string }
-      const next = init?.method === 'PUT' ? (body.base_domain ?? '') : 'apps.example.com'
-      return {
-        base_domain: next,
-        source: next === '' ? 'none' : 'setting',
-        enabled: next !== '',
-        url_pattern: next === '' ? '' : `https://<app_id>.${next}`,
-        setting_key: 'wasm.apps_base_domain',
-      }
-    }
     if (base === '/api/server/admin/wasm-apps/review') {
       const body = JSON.parse(String(init?.body ?? '{}')) as { required?: boolean }
       return { review_required: body.required ?? true, changed: true, setting_key: 'wasm.review_required' }
@@ -204,6 +324,8 @@ afterEach(() => {
   vi.unstubAllGlobals()
   vi.mocked(me).mockReset()
   setCurrentAdmin(null)
+  // 同上：把 URL 里的筛选带走，别污染下一条用例（含 `?access=public` 负例）。
+  window.history.replaceState({}, '', '/admin/app-center')
 })
 
 /** 渲染并等到列表落地(否则断言会撞上"加载中…"中间态)。 */
@@ -228,8 +350,8 @@ describe('AppCenter 应用中心', () => {
   it('渲染应用列表:标题/app_id/访问级别中文标签/负责人/当前版本/状态', async () => {
     await renderList()
 
-    // 列头
-    for (const h of ['应用', '访问级别', '状态', '负责人', '当前版本', '更新时间']) {
+    // 列头(F16 起多一列「打开次数」)
+    for (const h of ['应用', '访问级别', '状态', '负责人', '当前版本', '打开次数', '更新时间']) {
       expect(screen.getByRole('columnheader', { name: h })).toBeInTheDocument()
     }
 
@@ -239,10 +361,11 @@ describe('AppCenter 应用中心', () => {
     expect(screen.getByText('运维小工具')).toBeInTheDocument()
     expect(screen.getByText('ops-tool')).toBeInTheDocument()
 
-    // 访问级别:public/login/whitelist 各自的**中文**标签(按行断言:夹具里多行同级别)
+    // 访问级别:login/whitelist 的中文标签 + 历史 public 的**新口径**文案
+    // (按行断言:夹具里多行同级别)
     expect(within(rowOf('share-note')).getByText('登录后全员')).toBeInTheDocument()
     expect(within(rowOf('ops-tool')).getByText('白名单')).toBeInTheDocument()
-    expect(within(rowOf('legacy-board')).getByText('公开')).toBeInTheDocument()
+    expect(within(rowOf('legacy-board')).getByText('已退役（历史值）')).toBeInTheDocument()
 
     // 负责人 + 当前版本(空串回落 '—')
     expect(screen.getByText('alice')).toBeInTheDocument()
@@ -257,6 +380,44 @@ describe('AppCenter 应用中心', () => {
     expect(within(rowOf('legacy-board')).getByText('已冻结')).toBeInTheDocument()
     // 冻结行虽然有 frozen_at,但按钮必须给「解冻」而不是「冻结」
     expect(within(rowOf('legacy-board')).getByRole('button', { name: '解冻' })).toBeInTheDocument()
+  })
+
+  it('历史访问级别 public 的行:渲染「已退役（历史值）」并带解释，不给裸值也不给「公开」', async () => {
+    // 2026-09-19 契约 §4.4/I6:写侧只接受 login|whitelist,读侧把历史 public 当 login。
+    // 管理端必须给**同一口径**的可读文案:显示裸 `public` 读不懂、显示「公开」
+    // 会让管理员以为匿名仍然可达 —— 两种都是这次要拦回去的形态；
+    // 但也不能**隐藏**这一行/这一列（隐藏 = 存量应用的访问级别看起来丢了）。
+    await renderList()
+    const row = rowOf('legacy-board')
+    const badge = within(row).getByText('已退役（历史值）')
+    expect(badge).toBeInTheDocument()
+    expect(within(row).queryByText('公开')).toBeNull()
+    expect(within(row).queryByText('public')).toBeNull()
+    // 「已退役」不是一句无解释的标签:悬浮说明必须写清服务端按 login 执行。
+    expect(badge.getAttribute('title') ?? '').toContain('按「登录后全员」执行')
+  })
+
+  it('访问级别**筛选器**只有两值(+全部):不含 public,也不会出现"访问级别"写控件', async () => {
+    // 「收敛到两值」有两层含义:
+    //   ① 可写取值只有 login|whitelist（管理端没有访问级别编辑器 —— 取值由应用包
+    //      决定），所以不存在"选成 public"的控件；
+    //   ② 筛选器只提供两值 + 全部；历史 public 由「登录后全员」命中（读侧同口径）。
+    // 变异验证：把 public 加回筛选选项（或补一个含 public 的访问级别下拉）⇒ 本用例必红。
+    await renderList()
+
+    const filter = screen.getByTestId('app-access-filter')
+    fireEvent.click(filter)
+    const options = await screen.findAllByRole('option')
+    const labels = options.map((o) => o.textContent ?? '')
+    expect(labels.some((l) => l.includes('全部访问级别'))).toBe(true)
+    expect(labels.some((l) => l.includes('登录后全员'))).toBe(true)
+    expect(labels.some((l) => l.includes('白名单'))).toBe(true)
+    // 没有"public / 公开 / 已退役"这类**可选项**：历史值不是可选的访问级别。
+    expect(labels.some((l) => l.includes('public') || l.includes('公开'))).toBe(false)
+    // 访问级别编辑器不存在：名字恰为「访问级别」的控件只有筛选器的 label，
+    // 而没有可写控件（写侧在应用包，服务端 WritableAccess 拒绝 public）。
+    expect(screen.queryByRole('combobox', { name: '访问级别' })).toBeNull()
+    expect(screen.queryByRole('textbox', { name: '访问级别' })).toBeNull()
   })
 
   it('点「下架」→ POST /wasm-apps/<id>/unpublish，并按响应把该行切回「上架」', async () => {
@@ -1130,194 +1291,6 @@ describe('应用中心 · 运行诊断', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 应用中心 · 设置页:应用域名(泛域名)配置,应用名 + 该域名 = 应用访问地址
-// (2026-09-18 用户要求;2026-09-19 从应用中心首页顶部卡片搬进独立设置页)
-// ---------------------------------------------------------------------------
-
-describe('应用中心 · 设置(应用域名/泛域名)', () => {
-  it('展示当前基域、来源与"应用名.域名"模板', async () => {
-    render(<Settings />)
-    const input = await screen.findByLabelText('应用域名')
-    expect((input as HTMLInputElement).value).toBe('apps.example.com')
-    // 文本是"来源：控制台配置"整体（同一 span），用正则匹配子串。
-    expect(await screen.findByText(/控制台配置/)).toBeTruthy()
-    expect(await screen.findByText('https://<app_id>.apps.example.com')).toBeTruthy()
-    // 提示里必须写明"填主域名、不要填通配符",否则管理员八成会填 *.example.com。
-    expect(screen.getByText(/不要填/)).toBeTruthy()
-  })
-
-  it('保存 → PUT /wasm-apps/domain，body 是 {"base_domain": …}', async () => {
-    render(<Settings />)
-    const input = await screen.findByLabelText('应用域名')
-    fireEvent.change(input, { target: { value: 'harness.example.com' } })
-    const save = screen.getByRole('button', { name: '保存' })
-    fireEvent.click(save)
-    await waitFor(() => {
-      const hit = mockRequest.mock.calls.find(
-        ([p, init]) => p === '/api/server/admin/wasm-apps/domain' && (init as RequestInit | undefined)?.method === 'PUT',
-      )
-      expect(hit, '必须真的发出保存请求').toBeTruthy()
-      expect(JSON.parse(String((hit![1] as RequestInit).body))).toEqual({ base_domain: 'harness.example.com' })
-    })
-  })
-
-  it('关闭应用子域:先二次确认(R1-uxw-13),确认后 PUT 传空串(不是删除字段)', async () => {
-    render(<Settings />)
-    await screen.findByLabelText('应用域名')
-    fireEvent.click(screen.getByRole('button', { name: '关闭应用子域' }))
-
-    // 关闭 = 清空基域 ⇒ 全部应用域名当场失效(与"下架"同级的可见性破坏),
-    // 因此必须与冻结/下架同一套确认语义:说清影响谁 + 数据是否保留 + 如何回滚。
-    const dialog = await screen.findByTestId('close-domain-confirm-dialog')
-    expect(dialog).toHaveTextContent('全部应用域名立即失效')
-    expect(dialog).toHaveTextContent('应用与数据不受影响')
-    expect(dialog).toHaveTextContent('如何回滚')
-
-    // 确认前**零写请求**(单击即生效正是本次要修的形态)
-    const writesBefore = mockRequest.mock.calls.filter(
-      ([, init]) => (init as RequestInit | undefined)?.method && (init as RequestInit).method !== 'GET',
-    )
-    expect(writesBefore).toEqual([])
-
-    fireEvent.click(screen.getByTestId('close-domain-confirm'))
-    await waitFor(() => {
-      const hit = mockRequest.mock.calls.find(
-        ([p, init]) => p === '/api/server/admin/wasm-apps/domain' && (init as RequestInit | undefined)?.method === 'PUT',
-      )
-      expect(hit, '关闭也必须显式发请求').toBeTruthy()
-      expect(JSON.parse(String((hit![1] as RequestInit).body))).toEqual({ base_domain: '' })
-    })
-  })
-
-  it('关闭应用子域的确认框可以取消:零写请求、域名不动', async () => {
-    render(<Settings />)
-    const input = (await screen.findByLabelText('应用域名')) as HTMLInputElement
-    fireEvent.click(screen.getByRole('button', { name: '关闭应用子域' }))
-    const dialog = await screen.findByTestId('close-domain-confirm-dialog')
-    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
-
-    const writes = mockRequest.mock.calls.filter(
-      ([, init]) => (init as RequestInit | undefined)?.method && (init as RequestInit).method !== 'GET',
-    )
-    expect(writes).toEqual([])
-    expect(input.value).toBe('apps.example.com')
-  })
-
-  it('保存被服务端拒绝(真实信封带 hints + details) → 原样显示 message + hints', async () => {
-    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path === '/api/server/admin/wasm-apps/domain' && (init as RequestInit | undefined)?.method === 'PUT') {
-        // 真实信封形状(不再手工挂属性:那样 api.ts 改错也测不出来,P1-6 的假绿)
-        throw new ApiError(
-          400, 'VALIDATION',
-          '已启用应用子域，但未配置 PICOAI_TRUSTED_PROXIES',
-          undefined,
-          ['在部署 .env 里显式写出前置反向代理的地址'],
-          { field: 'base_domain' },
-        )
-      }
-      if (path === '/api/server/admin/wasm-apps/domain') {
-        return { base_domain: '', source: 'none', enabled: false, url_pattern: '', setting_key: 'wasm.apps_base_domain' }
-      }
-      return {}
-    })
-    render(<Settings />)
-    const input = await screen.findByLabelText('应用域名')
-    fireEvent.change(input, { target: { value: 'apps.example.com' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存' }))
-    expect(await screen.findByText(/未配置 PICOAI_TRUSTED_PROXIES/)).toBeTruthy()
-    expect(await screen.findByText(/前置反向代理的地址/)).toBeTruthy()
-    expect(await screen.findByText(/字段 base_domain/)).toBeTruthy()
-  })
-
-  it('读取配置失败 → 页面级错误 + 重试(不再局部静默)', async () => {
-    // 行为变化(2026-09-19 搬进设置页):原来域名 GET 失败只在卡片里显示一行局部错误、
-    // 页面其余部分照常渲染;设置页只有这一件事 —— 读不到就是整页不可用 + 可重试。
-    mockRequest.mockImplementation(async () => {
-      throw new Error('服务暂时不可用,请稍后再试')
-    })
-    render(<Settings />)
-    expect(await screen.findByTestId('settings-error')).toHaveTextContent('服务暂时不可用,请稍后再试')
-    // 失败时不渲染域名输入框(否则"读不到"会被误读成"没配")
-    expect(screen.queryByLabelText('应用域名')).toBeNull()
-
-    // 重试成功 → 页面恢复,读到什么就显示什么
-    mockRequest.mockImplementation(async (path: string) => {
-      if (path === '/api/server/admin/wasm-apps/domain') {
-        return {
-          base_domain: 'apps.example.com', source: 'setting', enabled: true,
-          url_pattern: 'https://<app_id>.apps.example.com', setting_key: 'wasm.apps_base_domain',
-        }
-      }
-      return {}
-    })
-    fireEvent.click(screen.getByRole('button', { name: '重试' }))
-    expect((await screen.findByLabelText('应用域名') as HTMLInputElement).value).toBe('apps.example.com')
-    expect(screen.queryByTestId('settings-error')).toBeNull()
-  })
-
-  it('只读账号 → 输入框与保存/关闭按钮都禁用(零写请求)', async () => {
-    setCurrentAdmin(READONLY)
-    render(<Settings />)
-    const input = (await screen.findByLabelText('应用域名')) as HTMLInputElement
-    expect(input.disabled).toBe(true)
-    expect((screen.getByRole('button', { name: '保存' }) as HTMLButtonElement).disabled).toBe(true)
-    expect((screen.getByRole('button', { name: '关闭应用子域' }) as HTMLButtonElement).disabled).toBe(true)
-    const writes = mockRequest.mock.calls.filter(
-      ([, init]) => (init as RequestInit | undefined)?.method && (init as RequestInit).method !== 'GET',
-    )
-    expect(writes).toEqual([])
-  })
-
-  // -------------------------------------------------------------------------
-  // F3（审计第二轮 A2-F3）：设置页这组无障碍判据（只读原因常驻文本 + 三处
-  // aria-describedby + 保存错误的 live 区）**此前零用例** —— 删掉后 52 条全绿。
-  // 下面两条把它们钉住。
-  // -------------------------------------------------------------------------
-
-  it('只读原因常驻且被三个禁用控件引用（不是只藏在 title 里）(F3)', async () => {
-    setCurrentAdmin(READONLY)
-    render(<Settings />)
-    const input = await screen.findByLabelText('应用域名')
-
-    const note = screen.getByTestId('settings-readonly-note')
-    expect(note.textContent).toContain('只读')
-    // 引用必须指向**真实存在**的节点（悬空 aria-describedby 等于没说）
-    expect(document.getElementById('settings-readonly-note')).toBe(note)
-    for (const el of [
-      input,
-      screen.getByRole('button', { name: '保存' }),
-      screen.getByRole('button', { name: '关闭应用子域' }),
-    ]) {
-      expect(el.getAttribute('aria-describedby')).toBe('settings-readonly-note')
-    }
-  })
-
-  it('保存失败的提示是 alert live 区（读屏用户能听到保存被拒）(F3)', async () => {
-    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path === '/api/server/admin/wasm-apps/domain' && (init as RequestInit | undefined)?.method === 'PUT') {
-        throw new ApiError(400, 'VALIDATION', '未配置 PICOAI_TRUSTED_PROXIES')
-      }
-      if (path === '/api/server/admin/wasm-apps/domain') {
-        return {
-          base_domain: 'apps.example.com', source: 'setting', enabled: true,
-          url_pattern: 'https://<app_id>.apps.example.com', setting_key: 'wasm.apps_base_domain',
-        }
-      }
-      return {}
-    })
-    render(<Settings />)
-    const input = await screen.findByLabelText('应用域名')
-    fireEvent.change(input, { target: { value: 'harness.example.com' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存' }))
-
-    const err = await screen.findByTestId('settings-save-error')
-    expect(err).toHaveTextContent('未配置 PICOAI_TRUSTED_PROXIES')
-    expect(err).toHaveAttribute('role', 'alert')
-    expect(err).toHaveAttribute('aria-live', 'assertive')
-  })
-})
-
-// ---------------------------------------------------------------------------
 // 本轮 P2 的行为级护栏(每条都能"改回旧实现即红"):
 //   R1-uxw-5  抽屉里"当前生效版本"只允许有一个真源(审核后不得同屏两个版本)
 //   R1-uxw-7  软删应用可筛可见(下拉有"已删除",请求真的带 include_deleted)
@@ -1439,5 +1412,213 @@ describe('应用中心 · 无障碍(R1-uxw-14)', () => {
     expect(note.textContent).toContain('capability:write')
     // 组织级开关的原因指向页面级只读说明(同样是可见文本,不是 title)
     expect(screen.getByTestId('apps-readonly-note').textContent).toContain('capability:write')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W5（2026-09-19）：F16 打开次数列 + 访问级别筛选（§19 Q11/Q13）+ 公告模板。
+// 每条都对应一条"缺后端/缺判据即红"的口径，变异点写在用例注释里。
+// ---------------------------------------------------------------------------
+describe('应用中心 · F16 打开次数列与降级', () => {
+  it('列表按应用显示今日 / 近 7 日 PV+UV（来自跨应用聚合，不是每行一个请求）', async () => {
+    await renderList()
+    const cell = await screen.findByTestId('app-opens-cell-share-note')
+    expect(cell.textContent).toContain('今日')
+    expect(cell.textContent).toContain('8')
+    expect(cell.textContent).toContain('3')
+    expect(cell.textContent).toContain('近 7 日')
+    expect(cell.textContent).toContain('25')
+    expect(cell.textContent).toContain('6')
+    // 一次聚合服务整页：不能退化成"每行一个 opens 请求"。
+    const summaryCalls = mockRequest.mock.calls.filter(
+      ([p]) => String(p).startsWith('/api/server/admin/wasm-apps/opens/summary'),
+    )
+    expect(summaryCalls.length).toBeGreaterThan(0)
+    expect(summaryCalls.length).toBeLessThanOrEqual(2) // 严格模式下的重复挂载容忍一次
+    const perApp = mockRequest.mock.calls.filter(([p]) => /\/wasm-apps\/[^/]+\/opens\?/.test(String(p)))
+    expect(perApp).toEqual([])
+  })
+
+  it('聚合端点缺失（404）：列显示 — 且页面明说"服务端尚未提供"，绝不显示 0', async () => {
+    // 变异验证：把这里的降级分支去掉（改成 countText(orow?.today_pv ?? 0) 之类），
+    // 用例会读到 "0" 而不是 "—"，本用例必红。
+    opensSummaryMode = 'missing'
+    await renderList()
+    const cell = await screen.findByTestId('app-opens-cell-share-note')
+    expect(cell.textContent).toBe('—')
+    const failure = await screen.findByTestId('apps-opens-failure')
+    expect(failure.textContent).toContain('404')
+    // 提示必须点名端点，运维/L1 才知道要补什么。
+    expect(failure.textContent).toContain('/api/server/admin/wasm-apps/opens/summary')
+    expect(failure.textContent).toContain('不是 0')
+  })
+
+  it('聚合响应形状漂移（缺 top_apps）：按"结构不符合契约"提示，而不是当成没有数据', async () => {
+    opensSummaryMode = 'drift'
+    await renderList()
+    const failure = await screen.findByTestId('apps-opens-failure')
+    expect(failure.textContent).toContain('top_apps')
+    expect(await screen.findByTestId('app-opens-cell-share-note')).toHaveTextContent('—')
+  })
+
+  it('详情抽屉：打开次数（PV/UV/趋势/按部门）与 AI 用量同页展示', async () => {
+    await renderList()
+    fireEvent.click(within(rowOf('share-note')).getByRole('button', { name: '详情' }))
+
+    // ① 打开次数：概览来自聚合，当前窗口来自 :app_id/opens
+    expect(await screen.findByTestId('app-opens-block')).toBeInTheDocument()
+    expect(await screen.findByTestId('app-opens-today-pv')).toHaveTextContent('8')
+    expect(screen.getByTestId('app-opens-window-pv')).toHaveTextContent('25')
+    // 窗口 UV 取**服务端**去重值 9（逐日 UV 之和是 11 —— 相加即错）
+    expect(await screen.findByTestId('app-opens-range-pv')).toHaveTextContent('40')
+    expect(screen.getByTestId('app-opens-range-uv')).toHaveTextContent('9')
+    expect(await screen.findByTestId('app-opens-trend')).toBeInTheDocument()
+
+    // ② 切到按部门：部门行 + 未归属部门行
+    fireEvent.click(screen.getByTestId('app-opens-granularity'))
+    fireEvent.click(await screen.findByRole('option', { name: '按部门' }))
+    const deptList = await screen.findByTestId('app-opens-dept-list')
+    // 服务端只给 dept_id，本夹具账号没有 dept:read ⇒ 如实显示编号而不是编名字。
+    expect(deptList.textContent).toContain('部门 #1')
+    expect(deptList.textContent).toContain('（未归属部门）')
+
+    // ③ AI 用量：默认夹具是"没有归因数据" ⇒ 空状态而不是 0
+    expect(await screen.findByTestId('app-ai-usage-block')).toBeInTheDocument()
+    expect(await screen.findByText('该应用还没有 AI 调用记录')).toBeInTheDocument()
+    expect(screen.queryByTestId('app-ai-calls')).toBeNull()
+  })
+
+  it('详情抽屉：AI 用量有数据时显示次数 / tokens / 费用', async () => {
+    aiUsageMode = 'data'
+    await renderList()
+    fireEvent.click(within(rowOf('share-note')).getByRole('button', { name: '详情' }))
+    expect(await screen.findByTestId('app-ai-calls')).toHaveTextContent('3')
+    expect(screen.getByTestId('app-ai-tokens')).toHaveTextContent('1,200')
+    expect(screen.getByTestId('app-ai-cost').textContent).toContain('1.50')
+    expect(screen.getByTestId('app-ai-days').textContent).toContain('2026-09-19')
+  })
+
+  it('详情抽屉：打开次数端点缺失时明说不可用（不把"读不到"当成"没人打开过"）', async () => {
+    appOpensMode = 'missing'
+    await renderList()
+    fireEvent.click(within(rowOf('share-note')).getByRole('button', { name: '详情' }))
+    const failure = await screen.findByTestId('app-opens-failure')
+    expect(failure.textContent).toContain('/api/server/admin/wasm-apps/share-note/opens')
+    expect(screen.getByTestId('app-opens-range-pv')).toHaveTextContent('—')
+  })
+})
+
+describe('应用中心 · 访问级别筛选（§19 Q13）', () => {
+  it('选「登录后全员」：进查询串、由服务端过滤，且**历史 public 行一起命中**', async () => {
+    await renderList()
+    fireEvent.click(screen.getByTestId('app-access-filter'))
+    fireEvent.click(await screen.findByRole('option', { name: /登录后全员/ }))
+
+    await waitFor(() => {
+      const calls = listCalls()
+      expect(calls.some(([p]) => String(p).includes('access=login'))).toBe(true)
+    })
+    // 历史 public 行必须还在（读侧同口径 ⇒ 不能因为筛选而"看起来丢了"）。
+    expect(await screen.findByText('旧看板')).toBeInTheDocument()
+    expect(await screen.findByTestId('app-access-legacy-note')).toHaveTextContent('1 条')
+    // 白名单行被服务端过滤掉
+    expect(screen.queryByText('运维小工具')).toBeNull()
+  })
+
+  it('选「白名单」：只留白名单行，不出现历史值提示', async () => {
+    await renderList()
+    fireEvent.click(screen.getByTestId('app-access-filter'))
+    fireEvent.click(await screen.findByRole('option', { name: '白名单' }))
+    expect(await screen.findByText('运维小工具')).toBeInTheDocument()
+    expect(screen.queryByText('旧看板')).toBeNull()
+    expect(screen.queryByTestId('app-access-legacy-note')).toBeNull()
+  })
+
+  it('服务端不回显 access（不支持该筛选）：本页过滤 + 明说"共 N 条/翻页仍是全集"', async () => {
+    // 变异验证：把 accessFilterSupported 恒判为 true（或删掉本地过滤）⇒
+    // 本用例的"白名单行消失 + 提示存在"就有一条会红。
+    const original = mockRequest.getMockImplementation()!
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      const out = await original(path, init)
+      if (String(path).startsWith('/api/server/admin/wasm-apps?')) {
+        const { access: _drop, ...rest } = out as Record<string, unknown>
+        return rest
+      }
+      return out
+    })
+    await renderList()
+    fireEvent.click(screen.getByTestId('app-access-filter'))
+    fireEvent.click(await screen.findByRole('option', { name: '白名单' }))
+
+    const note = await screen.findByTestId('app-access-local-note')
+    expect(note.textContent).toContain('只在**本页')
+    expect(note.textContent).toContain('未筛选全集')
+    // 本页过滤仍然生效（否则筛选器就是个摆设）
+    expect(await screen.findByText('运维小工具')).toBeInTheDocument()
+    expect(screen.queryByText('旧看板')).toBeNull()
+  })
+
+  it('URL 带 ?access=public：给出两值口径的拒绝消息，且**不隐藏**任何行', async () => {
+    // 「不可再选」不等于「假装它不存在」：旧书签带着 public 进来时，
+    // ①不能静默当成"全部"（管理员以为筛过了），②不能把历史行藏起来（看起来像数据丢了）。
+    window.history.pushState({}, '', '/admin/app-center?access=public')
+    try {
+      await renderList()
+      const rejected = await screen.findByTestId('app-access-rejected')
+      expect(rejected.textContent).toContain('login')
+      expect(rejected.textContent).toContain('whitelist')
+      expect(rejected.textContent).toContain('已退役')
+      // 筛选回落到"全部"：四条夹具行都还在（含历史 public 那行）
+      expect(screen.getByText('旧看板')).toBeInTheDocument()
+      expect(screen.getByText('共享便签')).toBeInTheDocument()
+      expect(screen.queryByTestId('app-access-local-note')).toBeNull()
+    } finally {
+      window.history.pushState({}, '', '/admin/app-center')
+    }
+  })
+})
+
+describe('应用中心 · 公告模板（§19 Q13）', () => {
+  it('提供两份员工公告（访问级别变更 / 客户端专属打开）与一份管理员清单', async () => {
+    await renderList()
+    fireEvent.click(screen.getByTestId('announcement-open'))
+    const dialog = await screen.findByTestId('announcement-dialog')
+
+    // ① 访问级别变更：必须说清"需要登录 + 旧网页地址失效"
+    const accessBody = within(dialog).getByTestId('announcement-body-access-login-only').textContent ?? ''
+    expect(accessBody).toContain('登录')
+    expect(accessBody).toContain('不再支持')
+    // ② 客户端专属形态：入口、分享、身份
+    const clientBody = within(dialog).getByTestId('announcement-body-client-only-open').textContent ?? ''
+    expect(clientBody).toContain('桌面客户端')
+    expect(clientBody).toContain('复制链接')
+    expect(clientBody).toContain('打开次数')
+    // ③ 管理员自查清单：点名筛选器与"两值"口径
+    const opsBody = within(dialog).getByTestId('announcement-body-ops-converge-legacy').textContent ?? ''
+    expect(opsBody).toContain('已退役（历史值）')
+    expect(opsBody).toContain('login / whitelist')
+    // 写侧口径只有两值（对话框顶部那行就是 accessLevelRejectionMessage 的正文）
+    expect(within(dialog).getByTestId('announcement-access-rule').textContent).toContain('两值')
+    // 公开面纪律：不许出现任何真实域名（占位符才行）
+    expect(accessBody).not.toMatch(/https?:\/\//)
+    expect(clientBody).not.toMatch(/https?:\/\//)
+  })
+
+  it('复制走剪贴板并回显"已复制"；失败时明说请手动复制', async () => {
+    const writeText = vi.fn(async (_text: string) => {})
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+    await renderList()
+    fireEvent.click(screen.getByTestId('announcement-open'))
+    fireEvent.click(await screen.findByTestId('announcement-copy-client-only-open'))
+    await waitFor(() => { expect(writeText).toHaveBeenCalledTimes(1) })
+    const copied = String(writeText.mock.calls[0]![0])
+    expect(copied).toContain('桌面客户端')
+    expect(await screen.findByTestId('announcement-flash')).toHaveTextContent('已复制')
+
+    // 剪贴板不可用（http 内网 + execCommand 也不支持）⇒ 必须明说，不假装成功。
+    vi.stubGlobal('navigator', { ...navigator, clipboard: undefined })
+    mockRequest.mockClear()
+    fireEvent.click(screen.getByTestId('announcement-copy-access-login-only'))
+    expect(await screen.findByTestId('announcement-copy-failed-access-login-only')).toHaveTextContent('手动选择')
   })
 })

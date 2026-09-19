@@ -40,7 +40,6 @@ import (
 	"github.com/picoaide/picoaide/internal/util"
 	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
-	"github.com/picoaide/picoaide/internal/wasmapp/session"
 	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 	"github.com/picoaide/picoaide/webadmin"
 )
@@ -188,12 +187,12 @@ func main() {
 	adminAPI.ReloadAuth = func() error { return auth.ReloadProviders(db) }
 
 	// WASM 应用平台（设计基线 docs/planning/2026-09-17-wasm-app-platform.md）。
-	// 装配期自检失败一律 log.Fatalf（见 setupWasmPlatform 的注释：三处 fail-closed
-	// 的失败形态都是静默的）。未配置 PICOAI_APPS_BASE_DOMAIN 时平台降级为
-	// "只有操作面、没有应用子域" —— 发布/校验链路仍可用。
+	// 装配期自检失败一律 log.Fatalf（见 setupWasmPlatform 的注释：fail-closed
+	// 的失败形态都是静默的）。应用只在桌面客户端内打开（2026-09-19「客户端专属」），
+	// 因此没有"未启用应用子域"这个降级态 —— 平台始终在服务。
 	wasmCtx, wasmStop := context.WithCancel(context.Background())
 	defer wasmStop()
-	wasmPlat := setupWasmPlatform(wasmCtx, db, authCfg.API, *dataDir, *addr)
+	wasmPlat := setupWasmPlatform(wasmCtx, db, *dataDir)
 	defer wasmPlat.Close()
 
 	// 内置演示应用（随镜像发布，见 internal/wasmapp/appseed + cmd/server/wasmapp_demo.go）：
@@ -201,6 +200,11 @@ func main() {
 	// 已存在（含被管理员删除后仍在库里的行）一律跳过 ⇒ "可删除，删了不再回来"。
 	// 失败只记日志：演示应用播种不该挡住服务启动。
 	seedDemoApps(wasmCtx, db, *dataDir)
+
+	// ⚠️ 会话键吊销回调（`auth.OnSessionRevoked` / `OnUserSessionsRevoked`）已随 W4
+	// 删除：它们唯一的作用是丢掉进程内按会话键缓存的**在手 AI 令牌**，而服务端
+	// `ai.chat` 已按总纲 §21 彻底删除 ⇒ 平台上不再有在手令牌，回调没有接收方。
+	// （`serverauth.SessionKey` 与 §8.2 的显式传参仍在，见 api/proof.go 的注释。）
 
 	// 内置技能（随镜像发布，见 internal/wasmapp/skillseed）：镜像内
 	// /opt/picoaide/skills（可用 PICOAI_SKILL_SEED_DIR 覆盖），服务端打包后由
@@ -219,16 +223,15 @@ func main() {
 	}
 
 	registerProductionRoutes(r, productionDeps{
-		DB:          db,
-		Auth:        auth.Handlers(),
-		Admin:       adminAPI.Handlers(),
-		SkillSeed:   skillseed.NewHandlers(skillCatalog),
-		Wasm:        wasmPlat.API,
-		WasmSession: wasmPlat.Session,
-		Ready:       wasmPlat.Checker.Handler(),
-		DataDir:     *dataDir,
-		Version:     version,
-		ChannelID:   channelID,
+		DB:        db,
+		Auth:      auth.Handlers(),
+		Admin:     adminAPI.Handlers(),
+		SkillSeed: skillseed.NewHandlers(skillCatalog),
+		Wasm:      wasmPlat.API,
+		Ready:     wasmPlat.Checker.Handler(),
+		DataDir:   *dataDir,
+		Version:   version,
+		ChannelID: channelID,
 	})
 	// 审计日志保留策略(v3b: settings audit.retention_days, 默认 180 天;
 	// 安全/权限类事件 365 天由应用策略保证, 这里按全局保留清理)。
@@ -255,17 +258,10 @@ func main() {
 	log.Printf("picoaide-server v%s listening on %s (data=%s)", version, *addr, *dataDir)
 	// 显式超时(slowloris/慢体攻击防护);WriteTimeout 需覆盖 SSE 流(空闲流由网关侧
 	// 90s idle 判定终止),给足 5 分钟
-	// 主机名门控必须在 HTTP 服务的最外层（§4.8 / §15.1 第 2 条）：
-	// 应用子域只可能进入应用路由树，主站路由在子域**结构上不可达**
-	// （allow-list，而不是在庞大的主站路由表上维护"禁命中清单"）。
-	// HostGate **无条件常挂**（2026-09-18：基域可由管理端在运行期启用 ⇒ 不能再按
-	// 启动期状态决定装不装）。基域为空时它把所有主机名判成主站并直接交回主站引擎，
-	// 与"没挂门控"逐字节等价（edge.MatchHost 的约定）。
+	// ⚠️ 主机名门控（edge.HostGate）已随 W4 删除（总纲 §8.4）：应用不再有对外主机名，
+	// 全部请求（含 `POST /api/client/v2/apps/wasm/:app_id/request`）都由同一个引擎服务，
+	// 不再存在"按 Host 分流到应用路由树"这件事。
 	var rootHandler http.Handler = r
-	if wasmPlat.HostGate != nil {
-		wasmPlat.HostGate.Main = r
-		rootHandler = wasmPlat.HostGate
-	}
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           rootHandler,
@@ -356,7 +352,46 @@ func resolveStartupChannel() (string, error) {
 	if err := validateDeepLinkScheme(channelID); err != nil {
 		return "", err
 	}
+	if err := validateAppOriginScheme(); err != nil {
+		return "", err
+	}
 	return channelID, nil
+}
+
+// validateAppOriginScheme 校验本部署的**应用 origin scheme**（契约 §8.3/§10）。
+//
+// 为什么放在启动期而不是"用时回落"：这个 scheme 决定"服务端认哪个自身源"，
+// 客户端注册的是渠道包里配的那一个。两端不一致的后果不是"某个功能坏了"，而是
+// **所有非幂等应用请求 403**（跨源写判据永远不成立），而错误现象与配置毫无关系
+// —— 排障会先去查应用代码。R1-OPS-4/CHN-6 的结论就是"字段缺失/非法必须 fail-loud"；
+// 唯一的中性 fallback 留给"镜像没带渠道配置"（本地开发），由 channel.AppOriginScheme
+// 自己处理（目录缺失 ⇒ 默认值）。
+func validateAppOriginScheme() error {
+	scheme, err := channel.AppOriginScheme()
+	if err != nil {
+		return fmt.Errorf("应用 origin scheme 不可用（渠道配置问题）：%w；"+
+			"请在镜像内的 channel.json 里设置 desktop.app_origin_scheme"+
+			"（须匹配 ^[a-z][a-z0-9+.-]{1,31}$、不得是保留协议、不得与 desktop.deep_link_scheme 同值）",
+			err)
+	}
+	log.Printf("app origin scheme resolved: %s", scheme)
+	return nil
+}
+
+// appOriginScheme 返回本部署的应用 origin scheme（装配期读取）。
+//
+// 为什么允许在这里吞掉错误：`resolveStartupChannel` → `validateAppOriginScheme`
+// 已经在**启动期**对同一个函数做过 fail-loud 校验，能走到装配说明它已经通过。
+// 兜底默认值只覆盖"渠道目录缺失"（本地开发构建），而那种情况下 AppOriginScheme
+// 本身也不报错 ⇒ 这里的 fallback 事实上不可达，写它是为了不给调用方留一个
+// "必须处理 error"的假分支。
+func appOriginScheme() string {
+	scheme, err := channel.AppOriginScheme()
+	if err != nil {
+		log.Printf("app origin scheme: 读取失败（启动期已校验过，不应发生）：%v", err)
+		return channel.DefaultAppOriginScheme
+	}
+	return scheme
 }
 
 // validateDeepLinkScheme 校验品牌渠道必须自带合法的客户端深链 scheme。
@@ -559,21 +594,22 @@ func installAPIMiddleware(r *gin.Engine) {
 // 为什么把它抽出来（2026-09-19，Rust 迁移契约 I1）：路由表是**冻结基准**
 // （server-rs/golden/routes.json），必须由一段**唯一**的装配代码产出。
 // 一旦 main 与测试各写一份 Deps，测试少传一个依赖就会静默漏掉一整片路由 ——
-// main_test.go 的 buildRouter 漏传 Wasm / WasmSession 正是这类前车之鉴
+// main_test.go 的 buildRouter 漏传 Wasm 正是这类前车之鉴
 // （漏掉 WASM 应用平台全部路由与员工登录 HTML 面）。
 type productionDeps struct {
 	DB *sql.DB
 	// Auth / Admin 是两套认证 handler 集合（客户端 Bearer 面 / 管理会话面）。
 	Auth  *serverauth.ClientHandlers
 	Admin *serverauth.AdminHandlers
-	// Wasm / WasmSession 是 WASM 应用平台的操作面与员工会话面。
+	// Wasm 是 WASM 应用平台的操作面（发布/审核/处置 + 客户端请求入口）。
 	//
 	// ⚠️ 必须非 nil：为 nil 时 router 会整片跳过
 	// /api/client/v2/apps/wasm/*、/api/server/admin/wasm-apps/*（registerWasm
-	// 的 `d.Wasm == nil`）与 /login、/logout、/app-ticket（Register 的
-	// `deps.WasmSession != nil`）。
-	Wasm        *wasmapi.Handlers
-	WasmSession *session.Manager
+	// 的 `d.Wasm == nil`）。
+	//
+	// （`WasmSession *session.Manager` 已随 W4 删除：员工浏览器会话/换票面
+	// `/login`、`/logout`、`/app-ticket` 不再存在，见 router.Register 的注释。）
+	Wasm *wasmapi.Handlers
 	// Ready 是 /readyz 探针（生产 = wasmPlat.Checker.Handler()）。
 	Ready http.Handler
 	// SkillSeed 是内置技能下发面（生产随镜像发布：/opt/picoaide/skills）。
@@ -628,11 +664,8 @@ func registerProductionRoutes(r *gin.Engine, d productionDeps) {
 		Telemetry:   telemetry.NewHandlers(d.DB),
 		Gateway:     llmgateway.NewHandlers(d.DB),
 		Reports:     reports.NewHandlers(d.DB),
-		// WASM 应用平台操作面（§8）+ 员工浏览器会话/换票（R12/R16）。
-		// 管理面只在主站暴露：应用子域走 edge.HostGate 的独立路由树，
-		// 主站路由在子域结构上不可达（§4.8 / F-52e）。
-		Wasm:        d.Wasm,
-		WasmSession: d.WasmSession,
+		// WASM 应用平台操作面（§8）。
+		Wasm: d.Wasm,
 	})
 	// 固定探针(不属于两命名空间)。
 	r.GET("/healthz", bootstrap.NewHandlers(d.DB).Health)

@@ -6,31 +6,22 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/netip"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/aichat"
-	"github.com/picoaide/picoaide/internal/wasmapp/anonlimit"
 	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
-	"github.com/picoaide/picoaide/internal/wasmapp/capapi"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
-	"github.com/picoaide/picoaide/internal/wasmapp/edge"
 	"github.com/picoaide/picoaide/internal/wasmapp/events"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/memprofile"
 	"github.com/picoaide/picoaide/internal/wasmapp/queue"
 	"github.com/picoaide/picoaide/internal/wasmapp/runtime"
-	"github.com/picoaide/picoaide/internal/wasmapp/session"
 )
 
-// Options 是应用子域请求管线的装配参数。
-//
-// 除 AIBaseURL 外（见下）全部字段由 main.go 注入：本包**不自己读部署配置**
-// （除 PICOAI_TRUSTED_PROXIES，见 clientip.go 的说明），也不自己建 DB 连接。
+// Options 是客户端专属应用管线的装配参数（全部字段由 main.go 注入：
+// 本包**不自己读部署配置**，也不自己建 DB 连接）。
 type Options struct {
 	// DB 是平台 PostgreSQL 连接（应用反查、生效版本、会话/票务都走它）。必填。
 	DB *sql.DB
@@ -38,22 +29,6 @@ type Options struct {
 	// 抽取的资源在 <DataRoot>/apps/<app_id>/assets/<release_id>/，
 	// 编译缓存在 <DataRoot>/_compile-cache（§4.3/§4.5/§4.2）。必填。
 	DataRoot string
-	// BaseDomain 是应用基域（`<app_id>.<BaseDomain>`），也是主站主机名
-	// （换票端点 `https://<BaseDomain>/app-ticket`）。可带 scheme 前缀
-	// （`http://127.0.0.1:8080`，用于明文部署/本地开发）；不带 scheme 时按
-	// https 处理 —— 与 session 包同口径（§4.7「必须拼 https」）。
-	//
-	// 为空 = 未启用应用子域：此时 RequiresLogin 的应用**无法**换票，本包按
-	// 500 处理（配置错误不静默，见 §6.1 与 R25 的取舍说明）。
-	//
-	// **是函数而不是字符串**（2026-09-18）：基域可由管理端在运行期修改，
-	// 服务端每处使用都必须读当前值（换票地址、日志、准入判定）。
-	BaseDomain func() string
-	// Sessions 是会话与票务管理器（模块 G）。必填：
-	// 身份帧的唯一来源、`?ticket=` 兑换的唯一实现都在它里面。
-	Sessions *session.Manager
-	// Limiter 是匿名限流器（R35）。nil ⇒ 用 anonlimit.DefaultOptions() 新建。
-	Limiter *anonlimit.Limiter
 	// Scheduler 是请求排队/准入调度器（§4.6）。nil ⇒ 用 queue.DefaultOptions() 新建。
 	Scheduler *queue.Scheduler
 	// Events 是调用事件出口（§4.9）。nil ⇒ 只记日志（诊断数据不进库）。
@@ -86,19 +61,22 @@ type Options struct {
 	// ⚠️ 它只用于**平台侧**诊断，绝不把内部错误原文回给应用或浏览器（§8）。
 	Logger func(format string, args ...any)
 
-	// AIBaseURL 是服务端自身的地址（宿主用它直调本地 `/v1`，§4.7 / D3.1）。
+	// AppScheme 是客户端专属模型里**应用页 origin 的 scheme**（契约 §8.3/§10）。
 	//
-	// ⚠️ 这是任务书给定字段表之外**追加**的一项，原因是装配必需：
-	// 共享的 aichat.Client 必须知道打哪个地址，而 Options 里没有别的地方能表达它。
-	// 留空 ⇒ ai.chat 一律 fail-closed 返回 INTERNAL（绝不静默降级），
-	// 并在启动日志里"大声"记一条 —— 部署漏配不会变成"应用以为能调 AI"。
-	AIBaseURL string
+	// 唯一来源 = 渠道包 `desktop.app_origin_scheme`（`channel.AppOriginScheme()`），
+	// 由装配层注入；空串 ⇒ 回落 ClientScheme（官方取值，即改造前的硬编码值）。
+	//
+	// 为什么必须是 option 而不是包级常量（R1-SRV-1/SRV-9/R2I-9）：渠道化之后
+	// "服务端认哪个 scheme"与"客户端注册哪个 scheme"必须同源，而 `api` 层拿不到
+	// `*Server`、服务端也拿不到渠道运行期状态 —— 唯一能把两者接起来的地方就是装配。
+	// 包级常量保留为**默认值**（本地开发/未注入时的等价行为），不再被生产路径直接读。
+	AppScheme string
 }
 
-// Server 是应用子域请求管线（实现 edge.AppHandler）。
+// Server 是客户端专属应用请求管线。
 //
 // 生命周期：New → （并发处理请求）→ Close。请求路径上除 `modules` 的模块缓存与
-// 调度/限流器的内存态之外**不保留任何跨请求状态**（会话在 PG，实例每请求新建）。
+// 调度器的内存态之外**不保留任何跨请求状态**（实例每请求新建）。
 type Server struct {
 	opt    Options
 	logger func(format string, args ...any)
@@ -116,13 +94,6 @@ type Server struct {
 	releases *releaseCache
 
 	scheduler *queue.Scheduler
-	limiter   *anonlimit.Limiter
-	// ai 是共享的 ai.chat 客户端（按 (用户, 会话) 缓存在手令牌，§4.7）。
-	ai capapi.AI
-
-	// trustedProxies 是可信前置代理（PICOAI_TRUSTED_PROXIES）：
-	// 只有来自它们的 X-Forwarded-For 才被采信（见 clientip.go）。
-	trustedProxies []netip.Prefix
 
 	// guestBudget 是 guest 执行预算的测试注入点（0 = limits.GuestBudget）。
 	// 生产路径不得设置它：数值唯一真源在 limits（§4.6）。
@@ -156,9 +127,6 @@ type Server struct {
 	sweeperOnce sync.Once
 }
 
-// 编译期断言：本包就是 edge 的应用处理器。
-var _ edge.AppHandler = (*Server)(nil)
-
 // New 装配请求管线。配置缺项一律 fail-loud（不静默降级）。
 func New(opt Options) (*Server, error) {
 	if opt.DB == nil {
@@ -166,9 +134,6 @@ func New(opt Options) (*Server, error) {
 	}
 	if strings.TrimSpace(opt.DataRoot) == "" {
 		return nil, errors.New("appserver: Options.DataRoot 必填（应用库/资源/编译缓存都在它下面）")
-	}
-	if opt.Sessions == nil {
-		return nil, errors.New("appserver: Options.Sessions 必填（换票与身份解析的唯一来源）")
 	}
 
 	logger := opt.Logger
@@ -205,11 +170,6 @@ func New(opt Options) (*Server, error) {
 		scheduler = queue.New(qopt)
 	}
 	s.scheduler = scheduler
-	limiter := opt.Limiter
-	if limiter == nil {
-		limiter = anonlimit.New(anonlimit.DefaultOptions())
-	}
-	s.limiter = limiter
 
 	// §4.3.1-a：编译侧与执行侧必须共用**同一份**磁盘缓存目录。两边各按 DataRoot
 	// 推导，推导规则不一致（或配置给了不同的 DataRoot）会让"发布期预编译"这条前提
@@ -250,25 +210,6 @@ func New(opt Options) (*Server, error) {
 	s.reclaim = newReclaimer(freeOSMemory, now, logger)
 	logger("appserver: %s；生效限制项 %s（队列并发/实例内存/模块缓存/库句柄均按它强制）", prof.Report(), lim.Encode())
 
-	// §4.7 / D3.1：ai.chat 由宿主用 http.Client 直调本地 /v1（不经出站白名单），
-	// 令牌按 (用户, 会话) 缓存在内存里。BaseURL 缺失时 aichat 自己 fail-closed。
-	if strings.TrimSpace(opt.AIBaseURL) == "" {
-		logger("appserver: ⚠️ Options.AIBaseURL 为空：应用的 ai.chat 将一律返回 INTERNAL（这是装配缺陷，不是应用的问题）")
-	}
-	s.ai = aichat.New(aichat.Options{BaseURL: opt.AIBaseURL, DB: opt.DB})
-
-	// 主站源不再缓存：基域可由管理端在运行期改（2026-09-18），换票地址必须按
-	// **当前**值生成 —— 见 mainOriginNow()。这里只做一次启动日志。
-	s.trustedProxies = trustedProxiesFromEnv()
-	if s.mainOriginNow() == "" {
-		logger("appserver: BaseDomain 为空：未启用应用子域；RequiresLogin 的应用无法换票（将按 500 处理）")
-	} else if len(s.trustedProxies) == 0 {
-		// R35：子域启用却没有可信代理配置 ⇒ 全部匿名流量会坍缩进同一个每 IP 桶。
-		// 启动自检由 main.go 的 anonlimit.CheckTrustedProxies 负责拒绝启动；
-		// 这里再记一条"大声"日志（本包不代替 main.go 做进程退出决定）。
-		logger("appserver: ⚠️ 已启用应用子域但 %s 未配置：匿名限流将按 TCP 对端地址计数（反代后=全部匿名流量共用一个桶）",
-			anonlimit.EnvTrustedProxies)
-	}
 	// 后台空闲回收：模块缓存与库句柄的"用不着就还"（见 sweepLoop）。
 	s.sweeperStop = make(chan struct{})
 	go s.sweepLoop()
@@ -522,48 +463,4 @@ func samePath(a, b string) bool {
 		return p
 	}
 	return norm(a) == norm(b)
-}
-
-// trustedProxiesFromEnv 读 PICOAI_TRUSTED_PROXIES（逗号分隔的 IP/CIDR）。
-//
-// 为什么按**环境变量**读而不是走 Options：这是部署期事实（反代地址），
-// 与 anonlimit 的启动自检（anonlimit.CheckTrustedProxies）共用同一个变量名常量，
-// 不新增字段、不新增真源。无法解析的项直接忽略（fail-closed：忽略=不信任，
-// 只会让限流更严；启动自检已负责把非法值拦在进程之外）。
-// mainOriginNow 按**当前**基域计算主站源（`scheme://<host>`）；空 = 未启用应用子域。
-//
-// 与 session.ParseBaseDomain 同一份解析（基域可带 scheme，缺省 https）—— 解析规则
-// 只允许一份，避免两处对 "http://127.0.0.1:8080" 这类取值判断不一致。
-func (s *Server) mainOriginNow() string {
-	raw := ""
-	if s.opt.BaseDomain != nil {
-		raw = s.opt.BaseDomain()
-	}
-	scheme, host := session.ParseBaseDomain(raw)
-	if host == "" {
-		return ""
-	}
-	return scheme + "://" + host
-}
-
-func trustedProxiesFromEnv() []netip.Prefix {
-	raw := strings.TrimSpace(os.Getenv(anonlimit.EnvTrustedProxies))
-	if raw == "" {
-		return nil
-	}
-	var out []netip.Prefix
-	for _, item := range strings.Split(raw, ",") {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
-		}
-		if p, err := netip.ParsePrefix(item); err == nil {
-			out = append(out, p.Masked())
-			continue
-		}
-		if ip, err := netip.ParseAddr(item); err == nil {
-			out = append(out, netip.PrefixFrom(ip, ip.BitLen()))
-		}
-	}
-	return out
 }

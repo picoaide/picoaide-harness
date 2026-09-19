@@ -14,8 +14,10 @@
 
 **问题**：`PublishForm` 的 `access` 初值硬编码 `DEFAULT_ACCESS`（`login`）、
 `data_sensitivity` 硬填 `internal`；`buildPublishBody` 提交时**无条件**发送全部五个配置
-字段。对 `access=public` 的应用发新版，作者不动单选框 ⇒ 新版本变成 `login`（访问范围被
-静默改写，服务端还会写一条 `wasm_app_access_change` 审计）；`data_sensitivity` 则被界面
+字段。对 `access=public`（**该取值已删除**，见本段末 ⚠️）的应用发新版，作者不动单选框 ⇒ 新版本变成 `login`（访问范围被
+静默改写，服务端还会写一条 `wasm_app_access_change` 审计）；⚠️ **2026-09-19 后**：`public` 已不是可写取值
+（写侧只接受 `login` / `whitelist`，存量 `public` 读取侧按 `login`，总纲 §8.4 + 迁移 0074），
+本文引用的「公开」形态只存在于该轮审计时的历史数据里；`data_sensitivity` 则被界面
 统一抹平成同一个值，而 `appcfg.json` 明写"平台**没有**这个字段的默认值：不要指望界面或
 平台替你填"。
 

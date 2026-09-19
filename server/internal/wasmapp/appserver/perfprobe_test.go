@@ -31,7 +31,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/anonlimit"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
 	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
@@ -42,21 +41,17 @@ func TestPerfProbe_StaticFixedCost(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short")
 	}
-	// 关掉匿名限流：本探针要连打几千次同一个公开应用（限流是另一条被测语义）。
-	e := newEnv(t, func(o *Options) {
-		o.Limiter = anonlimit.New(anonlimit.Options{
-			GlobalRatePerMin: 1 << 30, GlobalBurst: 1 << 30,
-			PerIPRatePerMin: 1 << 30, PerIPBurst: 1 << 30,
-			MaxIPBuckets: 1024, Now: time.Now,
-		})
-	})
+	// 客户端专属模型下不再有匿名限流（限流器随 W4 删除），直接装配缺省环境。
+	e := newEnv(t)
 	appID := e.appID("perf")
 	body := "<html><head><title>demo</title></head><body>" + strings.Repeat("x", 200*1024) + "</body></html>"
-	spec := appSpec{appID: appID, config: publicConfig(), assets: map[string]string{"index.html": body}}
+	// 资源名避开入口文档："/" 与 "/index.html" 在客户端模型下一律交给 wasm，
+	// 静态路径只对非入口资源成立（这正是本探针要测的那条路）。
+	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{"app.js": body}}
 	rel := e.publishApp(spec)
 
 	dir := releaseDirOf(t, e, spec, rel.ID)
-	pagePath := filepath.Join(dir, "index.html")
+	pagePath := filepath.Join(dir, "app.js")
 
 	// ===== 改前：旧 serveStatic 的固定成本（读盘 + 解析 + 读资源 + 算哈希）=====
 	const iters = 500
@@ -76,7 +71,7 @@ func TestPerfProbe_StaticFixedCost(t *testing.T) {
 			t.Fatalf("解析配置: %v", perr)
 		}
 		t2 := time.Now()
-		_, page, aerr := store.Read("index.html")
+		_, page, aerr := store.Read("app.js")
 		if aerr != nil {
 			t.Fatalf("读资源: %v", aerr)
 		}
@@ -107,7 +102,7 @@ func TestPerfProbe_StaticFixedCost(t *testing.T) {
 		if _, cerr := rq.Config(); cerr != nil {
 			t.Fatalf("配置（应命中缓存）: %v", cerr)
 		}
-		a, aerr := rq.Asset("index.html")
+		a, aerr := rq.Asset("app.js")
 		if aerr != nil {
 			t.Fatalf("资源（应命中缓存）: %v", aerr)
 		}
@@ -119,7 +114,7 @@ func TestPerfProbe_StaticFixedCost(t *testing.T) {
 	}
 
 	// ===== 改后 ①：预热后的 304 复验（If-None-Match 命中）=====
-	first := e.get(appID, "/index.html")
+	first := e.get(appID, "/app.js")
 	if first.Code != http.StatusOK {
 		t.Fatalf("预热失败: %d", first.Code)
 	}
@@ -129,7 +124,7 @@ func TestPerfProbe_StaticFixedCost(t *testing.T) {
 	const reqIters = 2000
 	start := time.Now()
 	for i := 0; i < reqIters; i++ {
-		rec := e.getWithETag(appID, "/index.html", etag)
+		rec := e.getWithETag(appID, "/app.js", etag)
 		if rec.Code != http.StatusNotModified {
 			t.Fatalf("第 %d 次复验应 304，得到 %d", i, rec.Code)
 		}
@@ -139,7 +134,7 @@ func TestPerfProbe_StaticFixedCost(t *testing.T) {
 	// ===== 改后 ②：预热后的普通 200（正文从缓存取）=====
 	start = time.Now()
 	for i := 0; i < reqIters; i++ {
-		rec := e.get(appID, "/index.html")
+		rec := e.get(appID, "/app.js")
 		if rec.Code != http.StatusOK || rec.Body.Len() != len(body) {
 			t.Fatalf("第 %d 次 200 请求异常: %d len=%d", i, rec.Code, rec.Body.Len())
 		}

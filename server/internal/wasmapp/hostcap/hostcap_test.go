@@ -92,25 +92,14 @@ func (d *fakeDB) InTx() bool            { return d.inTx }
 func (d *fakeDB) Close() error          { return nil }
 func (d *fakeDB) Stats() capapi.DBStats { return capapi.DBStats{} }
 
-type fakeAI struct {
-	calls  int
-	user   *abi.User
-	params abi.AIChatParams
-	panic  bool
-	err    error
+// panickyDB 是一个"底层实现 panic"的假 DB：用于验证宿主把 panic 变成 INTERNAL
+// 且**不泄露** panic 值（原用例用的是已删除的 AI 能力实现，见 TestPanicBecomesInternalError）。
+type panickyDB struct {
+	fakeDB
 }
 
-func (a *fakeAI) Chat(_ context.Context, u *abi.User, p abi.AIChatParams) (abi.AIChatResult, error) {
-	a.calls++
-	a.user = u
-	a.params = p
-	if a.panic {
-		panic("db password=hunter2 leaked in panic value")
-	}
-	if a.err != nil {
-		return abi.AIChatResult{}, a.err
-	}
-	return abi.AIChatResult{Content: "ok", Model: "m"}, nil
+func (d *panickyDB) Query(context.Context, abi.SQLParams) (abi.QueryResult, error) {
+	panic("db password=hunter2 leaked in panic value")
 }
 
 type fakeAssets struct {
@@ -200,38 +189,35 @@ func dispatchErr(t *testing.T, c *Capabilities, method string, p json.RawMessage
 	return e
 }
 
-// ===== 身份闸门 =====
+// ===== 身份闸门（W4 之后：能力面不再有"需要身份"的方法）=====
 
-func TestAnonymousIdentityGate(t *testing.T) {
-	ai := &fakeAI{}
-	c := &Capabilities{AI: ai, Assets: sampleAssets(), DB: &fakeDB{}, Logs: &fakeSink{}}
-	// 匿名 + ai.chat ⇒ AUTH_REQUIRED，且**不得**触达 AI 实现。
-	e := dispatchErr(t, c, abi.MethodAIChat, params(t, abi.AIChatParams{
-		Messages: []abi.ChatMessage{{Role: "user", Content: "hi"}},
-	}))
-	if e.Code != apperr.CodeAuthRequired || e.Status() != 401 {
-		t.Fatalf("code/status = %s/%d, want AUTH_REQUIRED/401", e.Code, e.Status())
+// capabilities 全部**不**要求身份：它们读写的是应用自己的库/资源与日志。
+//
+// 历史形态：`ai.chat` 曾经是唯一需要身份的能力（匿名 ⇒ AUTH_REQUIRED）。该能力已随
+// 总纲 §21.3 删除 ⇒ 能力面里不再有任何 identity gate；身份由**管线**保证（平台一律
+// 要求登录，见 appserver 的准入），而**不是**由每个能力自己查。
+// 变异判据：若将来有人往能力面加回"需要身份"的方法，必须同时在这里补 AUTH_REQUIRED 用例。
+func TestCapabilitiesRequireNoIdentity(t *testing.T) {
+	c := &Capabilities{Assets: sampleAssets(), DB: &fakeDB{}, Logs: &fakeSink{}}
+	for _, m := range RegisteredMethods() {
+		var p json.RawMessage
+		switch m {
+		case abi.MethodDBDefine:
+			p = params(t, abi.DBDefineParams{Table: "t"})
+		case abi.MethodDBQuery, abi.MethodDBExec:
+			p = params(t, abi.SQLParams{SQL: "SELECT 1"})
+		case abi.MethodLog:
+			p = params(t, abi.LogParams{Level: "info", Message: "hi"})
+		case abi.MethodAssetsRead:
+			p = params(t, abi.AssetsReadParams{Path: "index.html"})
+		}
+		if _, e := c.Dispatch(context.Background(), m, p); e != nil && e.Code == apperr.CodeAuthRequired {
+			t.Fatalf("能力 %s 回 AUTH_REQUIRED —— 身份闸门属于管线，不属于能力面（总纲 §8.4）", m)
+		}
 	}
-	if ai.calls != 0 {
-		t.Fatal("匿名调用不得触达 AI 实现")
-	}
-	// 匿名可用的能力：log / assets.read / db.*（R15：应用内数据全员共享）。
-	if _, e := c.Dispatch(context.Background(), abi.MethodLog, params(t, abi.LogParams{Level: "info", Message: "hi"})); e != nil {
-		t.Fatalf("匿名 log 应当可用: %v", e)
-	}
-	if _, e := c.Dispatch(context.Background(), abi.MethodAssetsRead, params(t, abi.AssetsReadParams{Path: "index.html"})); e != nil {
-		t.Fatalf("匿名 assets.read 应当可用: %v", e)
-	}
-	if _, e := c.Dispatch(context.Background(), abi.MethodDBQuery, params(t, abi.SQLParams{SQL: "SELECT 1"})); e != nil {
-		t.Fatalf("匿名 db.query 应当可用: %v", e)
-	}
-	// 身份注入：登录后调 ai.chat，用的是帧内身份（不是应用自报的）。
-	c.User = loggedIn()
-	mustDispatch(t, c, abi.MethodAIChat, params(t, abi.AIChatParams{
-		Messages: []abi.ChatMessage{{Role: "user", Content: "hi"}},
-	}))
-	if ai.calls != 1 || ai.user == nil || ai.user.ID != 7 {
-		t.Fatalf("AI 收到的身份 = %+v, want 帧内身份(id=7)", ai.user)
+	// 反向对照：能力面里**没有**任何方法会读 User（结构判据，防"闸门悄悄搬回来"）。
+	if len(RegisteredMethods()) != len(abi.HostMethods) {
+		t.Fatalf("能力面方法数 %d ≠ abi.HostMethods %d", len(RegisteredMethods()), len(abi.HostMethods))
 	}
 }
 
@@ -257,7 +243,6 @@ func TestTxAllowsDBReadWriteInsideTransaction(t *testing.T) {
 	c := &Capabilities{
 		User:   loggedIn(),
 		DB:     db,
-		AI:     &fakeAI{},
 		Assets: sampleAssets(),
 		Logs:   sink,
 	}
@@ -307,7 +292,6 @@ func TestTxBlocksNonDBHostCalls(t *testing.T) {
 		hint   string // hints 里必须出现的关键词（"怎么改"）
 	}{
 		{abi.MethodTxBegin, nil, "nested_tx", "tx_commit"},
-		{abi.MethodAIChat, params(t, abi.AIChatParams{Messages: []abi.ChatMessage{{Role: "user", Content: "x"}}}), "blocking_capability", "tx_commit"},
 		{abi.MethodLog, params(t, abi.LogParams{Level: "info", Message: "x"}), "blocking_capability", "tx_commit"},
 		{abi.MethodAssetsRead, params(t, abi.AssetsReadParams{Path: "a.txt"}), "blocking_capability", "tx_commit"},
 		{abi.MethodDBDefine, params(t, abi.DBDefineParams{Table: "t"}), "ddl", "事务外"},
@@ -316,10 +300,9 @@ func TestTxBlocksNonDBHostCalls(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.method, func(t *testing.T) {
 			db := &fakeDB{inTx: true}
-			ai := &fakeAI{}
 			sink := &fakeSink{}
 			assets := sampleAssets()
-			c := &Capabilities{User: loggedIn(), DB: db, AI: ai, Assets: assets, Logs: sink}
+			c := &Capabilities{User: loggedIn(), DB: db, Assets: assets, Logs: sink}
 
 			out, e := c.Dispatch(context.Background(), tc.method, tc.p)
 			if e == nil {
@@ -344,8 +327,8 @@ func TestTxBlocksNonDBHostCalls(t *testing.T) {
 			if len(db.queries) != 0 || len(db.execs) != 0 || len(db.defined) != 0 || db.begins != 0 || db.commits != 0 {
 				t.Fatalf("事务内的 %s 触达了 DB: %+v", tc.method, db)
 			}
-			if ai.calls != 0 || sink.count() != 0 || assets.path != "" {
-				t.Fatalf("事务内的 %s 触达了 ai/log/assets: ai=%d sink=%d path=%q", tc.method, ai.calls, sink.count(), assets.path)
+			if sink.count() != 0 || assets.path != "" {
+				t.Fatalf("事务内的 %s 触达了 log/assets: sink=%d path=%q", tc.method, sink.count(), assets.path)
 			}
 		})
 	}
@@ -368,14 +351,11 @@ func TestTxKeepsUnknownMethodSemantics(t *testing.T) {
 // 非事务路径不受影响：没有打开事务时，全部方法照常（放行集只描述"事务内"）。
 func TestOutsideTxEverythingIsAllowed(t *testing.T) {
 	db := &fakeDB{}
-	ai := &fakeAI{}
 	sink := &fakeSink{}
-	c := &Capabilities{User: loggedIn(), DB: db, AI: ai, Assets: sampleAssets(), Logs: sink}
+	c := &Capabilities{User: loggedIn(), DB: db, Assets: sampleAssets(), Logs: sink}
 	for _, m := range abi.HostMethods {
 		var p json.RawMessage
 		switch m {
-		case abi.MethodAIChat:
-			p = params(t, abi.AIChatParams{Messages: []abi.ChatMessage{{Role: "user", Content: "x"}}})
 		case abi.MethodDBDefine:
 			p = params(t, abi.DBDefineParams{Table: "t"})
 		case abi.MethodDBQuery, abi.MethodDBExec:
@@ -727,15 +707,13 @@ func TestPanicBecomesInternalError(t *testing.T) {
 	const secret = "hunter2"
 	c := &Capabilities{
 		User: loggedIn(),
-		AI:   &fakeAI{panic: true},
+		DB:   &panickyDB{},
 	}
-	e := dispatchErr(t, c, abi.MethodAIChat, params(t, abi.AIChatParams{
-		Messages: []abi.ChatMessage{{Role: "user", Content: "x"}},
-	}))
+	e := dispatchErr(t, c, abi.MethodDBQuery, params(t, abi.SQLParams{SQL: "SELECT 1"}))
 	if e.Code != apperr.CodeInternal || e.Status() != 500 {
 		t.Fatalf("code/status = %s/%d, want INTERNAL/500", e.Code, e.Status())
 	}
-	if e.Details["method"] != abi.MethodAIChat {
+	if e.Details["method"] != abi.MethodDBQuery {
 		t.Fatalf("details.method = %v", e.Details)
 	}
 	// panic 值可能带内部细节（DSN、路径、口令）⇒ 绝不进给应用的错误体。
@@ -757,8 +735,6 @@ func TestMissingCapabilitiesAreInternal(t *testing.T) {
 	}{
 		{"无 DB", &Capabilities{}, abi.MethodDBQuery, params(t, abi.SQLParams{SQL: "SELECT 1"})},
 		{"无 DB(tx)", &Capabilities{}, abi.MethodTxBegin, nil},
-		{"无 AI", &Capabilities{User: loggedIn()}, abi.MethodAIChat, params(t, abi.AIChatParams{
-			Messages: []abi.ChatMessage{{Role: "user", Content: "x"}}})},
 		{"无 Assets", &Capabilities{}, abi.MethodAssetsRead, params(t, abi.AssetsReadParams{Path: "a.txt"})},
 	}
 	for _, tc := range cases {
@@ -858,18 +834,6 @@ func TestDBAndTxHappyPath(t *testing.T) {
 	}
 }
 
-// 能力实现返回的 AI 结果原样透出（应用侧契约）。
-func TestAIChatResultPassthrough(t *testing.T) {
-	ai := &fakeAI{}
-	c := &Capabilities{User: loggedIn(), AI: ai}
-	out := mustDispatch(t, c, abi.MethodAIChat, params(t, abi.AIChatParams{
-		Messages: []abi.ChatMessage{{Role: "user", Content: "hi"}}, Model: "m1",
-	}))
-	res, ok := out.(abi.AIChatResult)
-	if !ok || res.Content != "ok" || res.Model != "m" {
-		t.Fatalf("结果 = %#v", out)
-	}
-	if ai.params.Model != "m1" || len(ai.params.Messages) != 1 {
-		t.Fatalf("参数被改写: %+v", ai.params)
-	}
-}
+// ⚠️ `TestAIChatResultPassthrough` 已随 W4 删除（总纲 §21.3）：它断言"AI 结果原样
+// 透出给应用"，而 `ai.chat` 能力与它的参数/结果类型一起消失了 ⇒ 没有可透出的东西。
+// 其余能力的"结果原样透出"仍被上面的分发用例覆盖（db.* / log / assets.read）。

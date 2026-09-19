@@ -14,7 +14,7 @@ import (
 func TestStatic_ServesResourceWithCacheKey(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("assets")
-	e.publishApp(appSpec{appID: appID, config: publicConfig(), assets: map[string]string{
+	e.publishApp(appSpec{appID: appID, config: loginConfig(), assets: map[string]string{
 		"index.html":     "<html>v1 shell</html>",
 		"static/app.css": "body{color:red}",
 	}})
@@ -43,9 +43,9 @@ func TestStatic_ServesResourceWithCacheKey(t *testing.T) {
 	assertHostSecurityHeaders(t, rec, false)
 
 	// 条件请求：命中 ETag ⇒ 304（不带 body）。
-	req := httptest.NewRequest(http.MethodGet, appURL(appID, "/static/app.css"), nil)
+	req := clientRequestFor(t, appID, http.MethodGet, "/static/app.css", "", "")
 	req.Header.Set("If-None-Match", etag)
-	rec304 := e.serve(req)
+	rec304 := e.clientDo(req, appID, e.ownerUser)
 	if rec304.Code != http.StatusNotModified {
 		t.Fatalf("If-None-Match 命中应 304，得到 %d", rec304.Code)
 	}
@@ -55,7 +55,7 @@ func TestStatic_ServesResourceWithCacheKey(t *testing.T) {
 	assertHostSecurityHeaders(t, rec304, false)
 
 	// HEAD：同样的头，但没有 body。
-	recHead := e.serve(httptest.NewRequest(http.MethodHead, appURL(appID, "/static/app.css"), nil))
+	recHead := e.clientDo(clientRequestFor(t, appID, http.MethodHead, "/static/app.css", "", ""), appID, e.ownerUser)
 	if recHead.Code != http.StatusOK || recHead.Body.Len() != 0 {
 		t.Fatalf("HEAD 应 200 且无 body，得到 %d len=%d", recHead.Code, recHead.Body.Len())
 	}
@@ -67,7 +67,7 @@ func TestStatic_ServesResourceWithCacheKey(t *testing.T) {
 func TestStatic_VersionIsolation(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("versions")
-	e.publishApp(appSpec{appID: appID, version: "1.0.0", config: publicConfig(), assets: map[string]string{
+	e.publishApp(appSpec{appID: appID, version: "1.0.0", config: loginConfig(), assets: map[string]string{
 		"index.html": "<html>v1</html>",
 		"app.js":     "console.log('v1')",
 	}})
@@ -77,7 +77,7 @@ func TestStatic_VersionIsolation(t *testing.T) {
 	}
 	etagV1 := first.Header().Get("ETag")
 
-	rel2 := e.publishApp(appSpec{appID: appID, version: "2.0.0", config: publicConfig(), assets: map[string]string{
+	rel2 := e.publishApp(appSpec{appID: appID, version: "2.0.0", config: loginConfig(), assets: map[string]string{
 		"index.html": "<html>v2</html>",
 		"app.js":     "console.log('v2')",
 	}})
@@ -104,20 +104,9 @@ func TestStatic_VersionIsolation(t *testing.T) {
 	}
 }
 
-func TestStatic_PublicEntryDocumentIsServed(t *testing.T) {
-	e := newEnv(t)
-	appID := e.appID("entry")
-	e.publishApp(appSpec{appID: appID, config: publicConfig(), assets: map[string]string{
-		"index.html": "<html>public shell</html>",
-	}})
-	for _, p := range []string{"/", "/index.html"} {
-		rec := e.get(appID, p)
-		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "public shell") {
-			t.Fatalf("public 应用入口 %s 应直出静态入口文档，得到 %d %q", p, rec.Code, rec.Body.String())
-		}
-	}
-}
-
+// 客户端专属模型下**所有**应用的入口文档都交给 wasm（平台没有匿名面 ⇒
+// serveStatic 的 allowEntry 恒为 false）：应用必须自己看到这次请求，才能做
+// 自己的准入判断与 403 页面。子资源仍由宿主直出（§4.6 缓存收益）。
 func TestStatic_LoginRequiredEntryGoesToWasm(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("guarded")
@@ -125,11 +114,8 @@ func TestStatic_LoginRequiredEntryGoesToWasm(t *testing.T) {
 		"index.html": "<html>shell</html>",
 		"app.js":     "console.log(1)",
 	}})
-	cookie := e.loggedInCookie(appID)
 
-	// 入口文档交给应用：R24 的名单判定与 403 页面只能在应用里发生
-	//（宿主直出入口会让不在名单里的已登录用户永远看不到那个 403）。
-	rec := e.get(appID, "/", cookie)
+	rec := e.get(appID, "/")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("应 200，得到 %d", rec.Code)
 	}
@@ -141,7 +127,7 @@ func TestStatic_LoginRequiredEntryGoesToWasm(t *testing.T) {
 	}
 
 	// 子资源仍然直出（§4.6：资源响应缓存 P0 必配）。
-	sub := e.get(appID, "/app.js", cookie)
+	sub := e.get(appID, "/app.js")
 	if sub.Code != http.StatusOK || sub.Body.String() != "console.log(1)" {
 		t.Fatalf("子资源应直出，得到 %d %q", sub.Code, sub.Body.String())
 	}
@@ -150,7 +136,7 @@ func TestStatic_LoginRequiredEntryGoesToWasm(t *testing.T) {
 func TestStatic_APIReservedForWasm(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("apireserved")
-	e.publishApp(appSpec{appID: appID, config: publicConfig(), assets: map[string]string{
+	e.publishApp(appSpec{appID: appID, config: loginConfig(), assets: map[string]string{
 		// 故意在保留前缀下放一个资源：它**不得**被直出（否则会盖住应用路由）。
 		"api/data.json": `{"static":true}`,
 	}})
@@ -170,7 +156,7 @@ func TestStatic_APIReservedForWasm(t *testing.T) {
 func TestStatic_PathTraversalNotServed(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("traversal")
-	e.publishApp(appSpec{appID: appID, config: publicConfig(), assets: map[string]string{
+	e.publishApp(appSpec{appID: appID, config: loginConfig(), assets: map[string]string{
 		"secret.txt": "TOP-SECRET",
 	}})
 	for _, p := range []string{"/../secret.txt", "/%2e%2e/secret.txt", "/./secret.txt", "/a/../../secret.txt"} {
@@ -184,7 +170,7 @@ func TestStatic_PathTraversalNotServed(t *testing.T) {
 func TestStatic_NonIdempotentGoesToWasm(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("postentry")
-	e.publishApp(appSpec{appID: appID, config: publicConfig(), assets: map[string]string{
+	e.publishApp(appSpec{appID: appID, config: loginConfig(), assets: map[string]string{
 		"index.html": "<html>shell</html>",
 	}})
 	rec := e.post(appID, "/", "application/json", `{"x":1}`)
@@ -219,7 +205,7 @@ func TestStatic_ReservedAppConfigNeverServed(t *testing.T) {
 	appID := e.appID("reserved")
 	// 名单里的账号是审计用的敏感内容：它出现响应体里就说明"直出"发生了。
 	const secretList = `"whitelist":["ceo","cfo"]`
-	cfg := `{"access":"public",` + secretList + `,` +
+	cfg := `{"access":"login",` + secretList + `,` +
 		`"purpose":"财务报销","data_sensitivity":"confidential","owner":"alice"}`
 	e.publishApp(appSpec{appID: appID, config: cfg, assets: map[string]string{
 		"index.html":               "<html>public shell</html>",
@@ -227,7 +213,7 @@ func TestStatic_ReservedAppConfigNeverServed(t *testing.T) {
 		"assets/picoaide.app.json": `{"note":"作者误放在子目录里的同名文件也不直出"}`,
 	}})
 
-	// (1) 匿名（access=public）：不得拿到配置文件内容，必须交给 wasm。
+	// (1) 历史 access=public（读取侧即 login）：不得拿到配置文件内容，必须交给 wasm。
 	for _, p := range []string{
 		"/picoaide.app.json",     // 根路径
 		"/./picoaide.app.json",   // dot 段被 path.Clean 归一
@@ -262,28 +248,27 @@ func TestStatic_ReservedAppConfigNeverServed(t *testing.T) {
 		}
 	}
 
-	// (2) access=whitelist 应用：匿名被换票流程挡住，**未授权员工也不能读**。
+	// (2) access=whitelist 应用：无身份 401 挡住，**未授权员工也不能读**。
 	guardedID := e.appID("reserved-guarded")
 	guardedCfg := `{"access":"whitelist","whitelist":["alice"],` +
 		`"purpose":"财务报销","data_sensitivity":"confidential","owner":"alice"}`
 	e.publishApp(appSpec{appID: guardedID, config: guardedCfg, assets: map[string]string{
 		"index.html": "<html>guarded shell</html>",
 	}})
-	anon := e.get(guardedID, "/picoaide.app.json")
-	if anon.Code != http.StatusFound {
-		t.Fatalf("匿名访问 login_required 应用的保留资源应进换票流程（302），得到 %d body=%.200s",
+	anon := e.doClient(guardedID, nil, http.MethodGet, "/picoaide.app.json", "", "")
+	if anon.Code != http.StatusUnauthorized {
+		t.Fatalf("无身份访问要求登录应用的保留资源应 401（客户端模型没有换票这一跳），得到 %d body=%.200s",
 			anon.Code, anon.Body.String())
 	}
-	if !strings.HasPrefix(anon.Header().Get("Location"), testMainOrigin+"/app-ticket") {
-		t.Fatalf("换票 Location 不对: %q", anon.Header().Get("Location"))
+	if loc := anon.Header().Get("Location"); loc != "" {
+		t.Fatalf("客户端模式不得有跳转（Location=%q）", loc)
 	}
 	// bob 不在 whitelist 里：他拿到的是**应用自己**的响应（R24），不是宿主的配置文件。
 	//
 	// ⚠️ 判据必须是"配置文件的内容"，不能拿 `"whitelist"` 这个字符串当证据：
 	// 2026-09-18 收敛为 access 三模式后，帧内 auth.mode 就可能等于 `whitelist`
 	//（应用把模式回显出来时会被误判成泄露）。
-	bobCookie := e.loggedInCookieAs(guardedID, "bob")
-	authed := e.get(guardedID, "/picoaide.app.json", bobCookie)
+	authed := e.doClient(guardedID, e.clientUser("bob"), http.MethodGet, "/picoaide.app.json", "", "")
 	for _, leak := range []string{`"data_sensitivity"`, `"purpose"`, "作者误放在子目录"} {
 		if strings.Contains(authed.Body.String(), leak) {
 			t.Fatalf("未授权员工（bob）拿到了应用配置（命中 %s）⇒ 静态直出绕过了应用准入判断 body=%.200s",
@@ -299,9 +284,9 @@ func TestStatic_ReservedAppConfigNeverServed(t *testing.T) {
 	if css.Header().Get("ETag") == "" {
 		t.Fatal("非保留资源仍应带 ETag（缓存键 app_id+version+path）")
 	}
-	entry := e.get(appID, "/index.html")
-	if entry.Code != http.StatusOK || !strings.Contains(entry.Body.String(), "public shell") {
-		t.Fatalf("public 应用的入口文档仍应直出，得到 %d %q", entry.Code, entry.Body.String())
+	// 入口文档是**例外**（客户端模型下一律交给 wasm）：这里只断言它不再由宿主代答。
+	if entry := e.get(appID, "/index.html"); strings.Contains(entry.Body.String(), "public shell") {
+		t.Fatalf("入口文档不得由宿主直出（已交给 wasm），得到 %q", entry.Body.String())
 	}
 	// `/api` 保留前缀优先级高于保留资源名（回归：别把规则顺序写反）。
 	api := e.get(appID, "/api/picoaide.app.json")
@@ -348,7 +333,7 @@ func TestStatic_AssetsDirColumnIsHonoured(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("assetsdir")
 	e.publishApp(appSpec{
-		appID: appID, config: publicConfig(), assetsDir: "custom-dir-1",
+		appID: appID, config: loginConfig(), assetsDir: "custom-dir-1",
 		assets: map[string]string{"hello.txt": "from custom dir"},
 	})
 	rec := e.get(appID, "/hello.txt")

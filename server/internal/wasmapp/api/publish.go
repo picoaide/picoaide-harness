@@ -193,6 +193,16 @@ func (h *Handlers) prepare(c *gin.Context, appID string, wasm []byte, rawConfig 
 	if xerr != nil {
 		return nil, xerr
 	}
+	// C2 保留前缀闸门（§21.2 规则②，R2-X-3）：应用**不得**占用 `__picoaide/` 前缀。
+	//
+	// 为什么必须在发布期拒（而不是像工具链段那样"忽略并报告"）：那个前缀由**宿主**
+	// 本地处理（规则①：`path` 以 `__picoaide/` 开头的请求绝不转发平台），随包资源里
+	// 出现同名路径时，应用以为自己的路由生效了 —— 实际请求被宿主截走，症状是
+	// "本地开发好的接口，发布后 404/拿到宿主的响应"，而平台侧没有任何报错。
+	// 静默忽略等于把这个谜题留给作者。
+	if aerr := checkReservedPathPrefix(sections); aerr != nil {
+		return nil, aerr
+	}
 	st.sections, st.skipped = splitAssetSections(sections)
 
 	// D 合成帧干跑（§4.2：编译通过 ≠ 能跑）。
@@ -234,6 +244,43 @@ func (h *Handlers) compileModule(c *gin.Context, appID string, wasm []byte) (*co
 		return nil, cerr
 	}
 	return res, nil
+}
+
+// reservedPathPrefix 是**平台保留**的路径前缀（§21.2 规则②）。
+//
+// 契约原文（§21.2 保留路径，冻结）：
+//
+//	①协议 handler 对 `path` 以 `__picoaide/` 开头的请求**本地处理、绝不转发平台**；
+//	②应用**不得**定义同前缀路由（发布校验拒绝）；③其余 `__picoaide/*` 一律 404。
+//
+// 服务端能静态看到的唯一"路由面"是随包资源（自定义段）的名字（应用的真实路由写在
+// wasm 里，平台不做反编译）⇒ 这里拒的是**资源路径**占用保留前缀。应用内部若自己
+// 处理 `__picoaide/…`，请求在宿主层就被截走（规则①③），平台看不到也管不着；
+// 这条闸门保证的是"作者不会以为随包资源能提供该前缀的响应"。
+const reservedPathPrefix = "__picoaide/"
+
+// checkReservedPathPrefix 拒绝占用平台保留前缀的随包资源（§21.2 规则②）。
+//
+// 错误码取既有的 `ASSET_DENIED`（"资源路径被拒"）：它就是这个语义，且已在
+// assets 包用于越界/非法段；新增一个码要同步契约与文档，而这里不需要。
+// 提示里点名 §21.2，让作者知道该走宿主桥（`__picoaide/ai/chat`）而不是自己实现。
+func checkReservedPathPrefix(sections map[string][]byte) *apperr.Error {
+	var offenders []string
+	for name := range sections {
+		if strings.HasPrefix(name, reservedPathPrefix) {
+			offenders = append(offenders, name)
+		}
+	}
+	if len(offenders) == 0 {
+		return nil
+	}
+	sort.Strings(offenders)
+	return apperr.New(apperr.CodeAssetDenied, "随包资源占用了平台保留路径前缀 "+reservedPathPrefix).
+		WithDetail("reason", "reserved_path_prefix").
+		WithDetail("prefix", reservedPathPrefix).
+		WithDetail("paths", offenders).
+		WithHint("`" + reservedPathPrefix + "` 由宿主保留（§21.2）：这类请求由客户端本地处理、绝不转发平台").
+		WithHint("应用侧要调模型请用宿主桥 `" + reservedPathPrefix + "ai/chat`（前端 fetch，结果回传 wasm 落库）")
 }
 
 // splitAssetSections 把自定义段分成「静态资源」与「非资源段（忽略并报告）」。
@@ -818,12 +865,9 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 		"owner":       rel.Owner,
 		"version":     rel.CurrentVersion,
 	}
-	// 基域未配置/解析失败 ⇒ **没有**对外地址（R1-pm-2）：整体省略字段，而不是
-	// 编造 `<app_id>.<请求 Host>`。与目录（read.go）同一形态 —— 客户端据此禁用
-	// 「打开」（缺省/空串在客户端是同一条判据）。
-	if origin := h.appOrigin(c, appID); origin != "" {
-		app["entry_url"] = origin
-	}
+	// ⚠️ `entry_url` 已随 W4 从两侧删除（总纲 §8.4 / §5.2 冻结契约）：应用只在桌面客户端内
+	// 以 `<渠道 app scheme>://<app_id>` 打开，服务端**不再下发任何入口链接**。
+	// 能发给同事的唯一形态是客户端侧生成的渠道深链（见 packages/client/wasm-apps）。
 	raw, merr := json.Marshal(gin.H{
 		"app": app,
 		"release": gin.H{
