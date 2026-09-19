@@ -156,6 +156,10 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@picoaide/dsh-wasm-apps-host/lib/index.js',
   'node_modules/@picoaide/dsh-wasm-apps-host/lib/invariant.js',
   'node_modules/@picoaide/dsh-wasm-apps-host/lib/electron-adapter.js',
+  // 2026-09-20 补：`lib/main.js` 还**值导入** `…/app-proof`（安装密钥仓库）。
+  // 此前该子路径既没被构建、也没进本清单 ⇒ 打包版启动报 ERR_MODULE_NOT_FOUND，
+  // 而 afterPack 断言照样通过（清单不完整 = 门禁瞎）。同批补齐 tsdown 的 entry 列表。
+  'node_modules/@picoaide/dsh-wasm-apps-host/lib/app-proof.js',
   'node_modules/@picoaide/dsh-wasm-apps-host/package.json',
   'node_modules/@picoaide/dsh-wasm-apps-host/cordis.patch.yml',
   // 宿主侧共享工具的**两个零依赖叶子包**（2026-09-20，构建环修复路线 A / A 扩展）。
