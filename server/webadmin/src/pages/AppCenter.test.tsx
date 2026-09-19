@@ -45,6 +45,15 @@ const REVIEWING = {
   ...LIVE, app_id: 'review-me', title: '待审应用', owner: 'dave',
   pending_releases: ['1.1.0', '1.2.0'], pending_count: 2,
 }
+/**
+ * 软删行:服务端只在 `include_deleted=1`(或 `status=deleted`)时才下发
+ * (admin.go 的 includeDeleted 判定) ⇒ 缺省列表里**不该出现**(R1-uxw-7)。
+ */
+const DELETED = {
+  ...LIVE, app_id: 'gone-app', title: '已删除应用', owner: 'erin',
+  enabled: false, current_release_id: 0, current_version: '',
+  deleted_at: '2026-09-18T09:00:00Z',
+}
 const APP_LIST = [LIVE, OFF, FROZEN, REVIEWING]
 
 /** 待审版本清单(GET /wasm-apps/:app_id/releases?status=pending)。 */
@@ -53,6 +62,21 @@ const PENDING_RELEASES = [
     id: 21, version: '1.2.0', status: 'pending', title: '待审应用', publisher: 'dave',
     size: 2 * 1024 * 1024, checksum: 'ab12', changelog: '加了导出',
     created_at: '2026-09-19T02:00:00Z', current: false,
+  },
+]
+
+/**
+ * 被拒版本清单(GET …/releases?status=rejected) —— R1-uxw-4。
+ *
+ * 服务端 `admin.go` 的审批清单每行都下发 `reason`(非 rejected 行为空串);
+ * 管理端此前拿不到它,拒绝理由只躺在审计详情里。
+ */
+const REJECTED_RELEASES = [
+  {
+    id: 20, version: '1.1.0', status: 'rejected', title: '待审应用', publisher: 'dave',
+    size: 0, checksum: '', changelog: '',
+    created_at: '2026-09-19T01:00:00Z', current: false,
+    reason: '数据范围超出用途所需:请补充数据来源说明',
   },
 ]
 
@@ -81,13 +105,21 @@ const mockRequest = vi.mocked(request)
 /** 列表数据源:分页/搜索用例会临时替换它(默认 = 4 行夹具)。 */
 let appsFixture = APP_LIST
 
+/** 抽屉里 `/releases` 回显的"当前生效版本"(审核通过后服务端会把它切到新版本)。 */
+let pendingCurrentVersion = '1.0.2'
+
 /** 按查询串在夹具上做过滤 + 分页(服务端口径的本地复刻,只用于断言 UI 行为)。 */
 function listPage(params: URLSearchParams) {
   const limit = Number(params.get('limit') ?? 20)
   const offset = Number(params.get('offset') ?? 0)
   const q = (params.get('q') ?? '').toLowerCase()
   const status = params.get('status') ?? 'all'
-  let rows = appsFixture
+  // 服务端语义(admin.go:93-95):include_deleted=1 或 status=deleted 才下发软删行。
+  const includeDeleted =
+    params.get('include_deleted') === '1' ||
+    params.get('include_deleted') === 'true' ||
+    status === 'deleted'
+  let rows = includeDeleted ? appsFixture : appsFixture.filter((a) => a.deleted_at === null)
   if (q !== '') {
     rows = rows.filter((a) =>
       a.app_id.toLowerCase().includes(q) ||
@@ -95,9 +127,10 @@ function listPage(params: URLSearchParams) {
       (a.owner ?? '').toLowerCase().includes(q))
   }
   if (status === 'pending') rows = rows.filter((a) => (a.pending_count ?? 0) > 0)
-  if (status === 'published') rows = rows.filter((a) => a.enabled && a.frozen_at === null)
-  if (status === 'unpublished') rows = rows.filter((a) => !a.enabled && a.frozen_at === null)
+  if (status === 'published') rows = rows.filter((a) => a.enabled && a.frozen_at === null && a.deleted_at === null)
+  if (status === 'unpublished') rows = rows.filter((a) => !a.enabled && a.frozen_at === null && a.deleted_at === null)
   if (status === 'frozen') rows = rows.filter((a) => a.frozen_at !== null)
+  if (status === 'deleted') rows = rows.filter((a) => a.deleted_at !== null)
   return {
     apps: rows.slice(offset, offset + limit),
     review_required: false,
@@ -113,16 +146,22 @@ function listPage(params: URLSearchParams) {
 beforeEach(() => {
   setCurrentAdmin(SUPER)
   appsFixture = APP_LIST
+  pendingCurrentVersion = '1.0.2'
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
     const base = String(path).split('?')[0]!
     const params = new URLSearchParams(String(path).split('?')[1] ?? '')
     if (base === '/api/server/admin/wasm-apps') return listPage(params)
-    // 待审版本清单(审核闭环的数据面)。
+    // 版本清单(审核闭环的数据面):服务端按 status 过滤,`reason` 每行都下发。
+    // `status=rejected` 正是管理端「最近被拒」子清单的数据源(R1-uxw-4)。
     if (base.endsWith('/releases')) {
+      const wanted = params.get('status') ?? 'pending'
+      const releases = wanted === 'rejected'
+        ? REJECTED_RELEASES
+        : wanted === 'all' ? [...PENDING_RELEASES, ...REJECTED_RELEASES] : PENDING_RELEASES
       return {
-        app_id: base.split('/')[4], status: 'pending', current_version: '1.0.2',
-        releases: PENDING_RELEASES, pending_count: PENDING_RELEASES.length,
+        app_id: base.split('/')[4], status: wanted, current_version: pendingCurrentVersion,
+        releases, pending_count: PENDING_RELEASES.length,
         review_required: true, setting_key: 'wasm.review_required',
       }
     }
@@ -487,6 +526,43 @@ describe('应用中心 · 更新审批闭环', () => {
     expect(block).toHaveTextContent('当前生效版本')
     expect(block).toHaveTextContent('1.0.2')
     expect(block).toHaveTextContent('加了导出')
+  })
+
+  it('详情抽屉渲染「最近被拒」版本与**驳回理由**(R1-uxw-4:理由此前只躺在审计详情里)', async () => {
+    await renderList()
+    fireEvent.click(within(rowOf('review-me')).getByRole('button', { name: '详情' }))
+
+    const block = await screen.findByTestId('rejected-block')
+    // 必须真的按 status=rejected 取一次(而不是把待审队列当成被拒队列)。
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith(
+        '/api/server/admin/wasm-apps/review-me/releases?status=rejected',
+      )
+    })
+    // 行 + 理由都在(理由就是这条缺陷的判据:写了必须有人读)。
+    expect(await within(block).findByTestId('rejected-list')).toHaveTextContent('v1.1.0')
+    expect(within(block).getByTestId('rejected-reason-1.1.0')).toHaveTextContent('数据范围超出用途所需')
+    expect(block).toHaveTextContent('dave')
+    // 待审队列与被拒清单是两份数据:待审那一版不得混进被拒清单。
+    expect(within(block).queryByTestId('rejected-1.2.0')).toBeNull()
+  })
+
+  it('没有可回看的结论时给出空态(不是错误,也不是"理由为空"的行)', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      const base = String(path).split('?')[0]!
+      if (base === '/api/server/admin/wasm-apps') return listPage(new URLSearchParams())
+      if (base.endsWith('/releases')) {
+        return { app_id: 'review-me', status: 'rejected', current_version: '1.0.2', releases: [], pending_count: 0, review_required: true, setting_key: 'wasm.review_required' }
+      }
+      if (base.endsWith('/diagnostics')) return { diagnostics: DIAGNOSTICS }
+      throw new Error(`unexpected ${path}`)
+    })
+    await renderList()
+    fireEvent.click(within(rowOf('review-me')).getByRole('button', { name: '详情' }))
+    const block = await screen.findByTestId('rejected-block')
+    expect(await within(block).findByTestId('rejected-empty')).toHaveTextContent('没有被拒的版本')
+    expect(within(block).queryByTestId('rejected-list')).toBeNull()
+    expect(within(block).queryByTestId('rejected-error')).toBeNull()
   })
 
   it('点「通过」→ POST .../releases/<version>/approve,并刷新列表与待审清单', async () => {
@@ -873,10 +949,25 @@ describe('应用中心 · 设置(应用域名/泛域名)', () => {
     })
   })
 
-  it('关闭应用子域 → PUT 传空串(不是删除字段)', async () => {
+  it('关闭应用子域:先二次确认(R1-uxw-13),确认后 PUT 传空串(不是删除字段)', async () => {
     render(<Settings />)
     await screen.findByLabelText('应用域名')
     fireEvent.click(screen.getByRole('button', { name: '关闭应用子域' }))
+
+    // 关闭 = 清空基域 ⇒ 全部应用域名当场失效(与"下架"同级的可见性破坏),
+    // 因此必须与冻结/下架同一套确认语义:说清影响谁 + 数据是否保留 + 如何回滚。
+    const dialog = await screen.findByTestId('close-domain-confirm-dialog')
+    expect(dialog).toHaveTextContent('全部应用域名立即失效')
+    expect(dialog).toHaveTextContent('应用与数据不受影响')
+    expect(dialog).toHaveTextContent('如何回滚')
+
+    // 确认前**零写请求**(单击即生效正是本次要修的形态)
+    const writesBefore = mockRequest.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method && (init as RequestInit).method !== 'GET',
+    )
+    expect(writesBefore).toEqual([])
+
+    fireEvent.click(screen.getByTestId('close-domain-confirm'))
     await waitFor(() => {
       const hit = mockRequest.mock.calls.find(
         ([p, init]) => p === '/api/server/admin/wasm-apps/domain' && (init as RequestInit | undefined)?.method === 'PUT',
@@ -884,6 +975,20 @@ describe('应用中心 · 设置(应用域名/泛域名)', () => {
       expect(hit, '关闭也必须显式发请求').toBeTruthy()
       expect(JSON.parse(String((hit![1] as RequestInit).body))).toEqual({ base_domain: '' })
     })
+  })
+
+  it('关闭应用子域的确认框可以取消:零写请求、域名不动', async () => {
+    render(<Settings />)
+    const input = (await screen.findByLabelText('应用域名')) as HTMLInputElement
+    fireEvent.click(screen.getByRole('button', { name: '关闭应用子域' }))
+    const dialog = await screen.findByTestId('close-domain-confirm-dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+
+    const writes = mockRequest.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method && (init as RequestInit).method !== 'GET',
+    )
+    expect(writes).toEqual([])
+    expect(input.value).toBe('apps.example.com')
   })
 
   it('保存被服务端拒绝(真实信封带 hints + details) → 原样显示 message + hints', async () => {
@@ -949,5 +1054,130 @@ describe('应用中心 · 设置(应用域名/泛域名)', () => {
       ([, init]) => (init as RequestInit | undefined)?.method && (init as RequestInit).method !== 'GET',
     )
     expect(writes).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 本轮 P2 的行为级护栏(每条都能"改回旧实现即红"):
+//   R1-uxw-5  抽屉里"当前生效版本"只允许有一个真源(审核后不得同屏两个版本)
+//   R1-uxw-7  软删应用可筛可见(下拉有"已删除",请求真的带 include_deleted)
+//   R1-uxw-14 反馈进 live 区 + 禁用原因可聚焦可读
+// ---------------------------------------------------------------------------
+
+describe('应用中心 · 抽屉单一真源(R1-uxw-5)', () => {
+  it('审核通过后抽屉里只有一个"当前生效版本"(快照与待审块不得互相矛盾)', async () => {
+    await renderList()
+    fireEvent.click(within(rowOf('review-me')).getByRole('button', { name: '详情' }))
+    const dialog = await screen.findByRole('dialog')
+    await within(dialog).findByTestId('pending-list')
+
+    // 打开时两处一致:行快照就是服务端的 1.0.2
+    expect(within(dialog).getByTestId('detail-current-version')).toHaveTextContent('1.0.2')
+    expect(within(dialog).getByTestId('pending-current-version')).toHaveTextContent('1.0.2')
+
+    // 通过 v1.2.0:服务端把当前生效版本切成 1.2.0,而**列表行快照仍是 1.0.2**
+    // (detail 是点开时的对象,不会因为重拉列表而变)。
+    pendingCurrentVersion = '1.2.0'
+    fireEvent.click(within(dialog).getByTestId('pending-approve-1.2.0'))
+
+    await waitFor(() => {
+      expect(within(dialog).getByTestId('detail-current-version')).toHaveTextContent('1.2.0')
+    })
+    // 两处必须是同一个数(旧实现在 dl 里读 detail.current_version ⇒ 这里会是 1.0.2)
+    expect(within(dialog).getByTestId('pending-current-version')).toHaveTextContent('1.2.0')
+    // 抽屉里不得再出现旧的 1.0.2 —— 同一屏两个"当前生效版本"就是本次要修的形态。
+    expect(within(dialog).queryByText('1.0.2')).toBeNull()
+  })
+
+  it('待审清单读失败时两处一起回落到行快照(不出现半新半旧)', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      const base = String(path).split('?')[0]!
+      const params = new URLSearchParams(String(path).split('?')[1] ?? '')
+      if (base === '/api/server/admin/wasm-apps') return listPage(params)
+      if (base.endsWith('/releases')) throw new ApiError(500, 'INTERNAL', '读取待审版本失败')
+      if (base.endsWith('/diagnostics')) return { diagnostics: DIAGNOSTICS }
+      return {}
+    })
+    await renderList()
+    fireEvent.click(within(rowOf('review-me')).getByRole('button', { name: '详情' }))
+    const dialog = await screen.findByRole('dialog')
+    await within(dialog).findByTestId('pending-error')
+
+    // 读不到待审清单 ⇒ 两处都用行快照的值(而不是一处空一处有)
+    expect(within(dialog).getByTestId('detail-current-version')).toHaveTextContent('1.0.2')
+    expect(within(dialog).getByTestId('pending-current-version')).toHaveTextContent('1.0.2')
+  })
+})
+
+describe('应用中心 · 软删应用可见(R1-uxw-7)', () => {
+  it('状态筛选有「已删除」,选中后请求带 status=deleted 且 include_deleted=1', async () => {
+    appsFixture = [...APP_LIST, DELETED]
+    render(<Apps />)
+    await screen.findByText('共享便签')
+    // 缺省列表不含软删行(服务端 include_deleted 缺省为假)
+    expect(screen.queryByText('已删除应用')).toBeNull()
+
+    fireEvent.click(screen.getByRole('combobox', { name: '状态筛选' }))
+    fireEvent.click(await screen.findByRole('option', { name: '已删除' }))
+
+    await waitFor(() => {
+      const hit = listCalls().find(([p]) => String(p).includes('status=deleted'))
+      expect(hit, '必须发出带 status=deleted 的列表请求').toBeTruthy()
+      expect(String(hit![0]), '软删行必须显式带 include_deleted(两条入口都要)').toContain('include_deleted=1')
+    })
+    // 真的能看到那条已删除的应用(以及它的「已删除」状态徽章)
+    expect(await screen.findByText('已删除应用')).toBeInTheDocument()
+    expect(within(rowOf('gone-app')).getByText('已删除')).toBeInTheDocument()
+  })
+})
+
+describe('应用中心 · 无障碍(R1-uxw-14)', () => {
+  it('成功提示与失败红字都在 live 区(读屏用户能听到结果)', async () => {
+    await renderList()
+    // 失败路径:下架被拒 ⇒ 页面级错误是 alert live 区
+    mockRequest.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/server/admin/wasm-apps?')) return listPage(new URLSearchParams())
+      throw new Error('下架失败:应用已被冻结')
+    })
+    fireEvent.click(within(rowOf('share-note')).getByRole('button', { name: '下架' }))
+    fireEvent.click(await screen.findByTestId('unpublish-confirm'))
+    const err = await screen.findByTestId('apps-error')
+    expect(err).toHaveAttribute('role', 'alert')
+    expect(err).toHaveAttribute('aria-live', 'assertive')
+  })
+
+  it('冻结成功的 flash 是 status live 区', async () => {
+    await renderList()
+    fireEvent.click(within(rowOf('share-note')).getByRole('button', { name: '冻结' }))
+    fireEvent.click(await screen.findByTestId('freeze-confirm'))
+    const flashMsg = await screen.findByTestId('apps-flash')
+    expect(flashMsg).toHaveAttribute('role', 'status')
+    expect(flashMsg).toHaveAttribute('aria-live', 'polite')
+  })
+
+  it('被禁用的「上架」原因可聚焦可读,而不只是 title', async () => {
+    await renderList()
+    const btn = within(rowOf('legacy-board')).getByRole('button', { name: '上架' }) as HTMLButtonElement
+    const note = screen.getByTestId('frozen-reason-legacy-board')
+
+    // 禁用按钮本身不可聚焦 ⇒ 原因必须是一个**可聚焦**的节点 + aria-describedby
+    expect(note).toHaveAttribute('tabindex', '0')
+    expect(btn.getAttribute('aria-describedby')).toBe('frozen-reason-legacy-board')
+    expect(note).toHaveTextContent('先解冻再上架')
+    note.focus()
+    expect(document.activeElement).toBe(note)
+  })
+
+  it('只读账号:被禁用的审批按钮指向可读的权限说明', async () => {
+    setCurrentAdmin(READONLY)
+    await renderList()
+    fireEvent.click(within(rowOf('review-me')).getByRole('button', { name: '详情' }))
+    const approve = await screen.findByTestId('pending-approve-1.2.0')
+    expect(approve).toBeDisabled()
+    expect(approve.getAttribute('aria-describedby')).toBe('pending-write-note')
+    const note = screen.getByTestId('pending-write-note')
+    expect(note.textContent).toContain('capability:write')
+    // 组织级开关的原因指向页面级只读说明(同样是可见文本,不是 title)
+    expect(screen.getByTestId('apps-readonly-note').textContent).toContain('capability:write')
   })
 })

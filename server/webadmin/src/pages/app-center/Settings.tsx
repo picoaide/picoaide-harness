@@ -10,6 +10,7 @@ import { PageHeader } from '../../components/page-header'
 import { hasPermission, PERM_CAP_READ, PERM_CAP_WRITE } from '../../lib/rbac'
 /** 服务端错误信封的 message + details.field + hints 统一渲染(P1-6,见 lib/api-error.ts)。 */
 import { errorText } from '../../lib/api-error'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import { Settings2 } from 'lucide-react'
 
 /**
@@ -44,6 +45,16 @@ export default function Settings() {
   /** 保存失败的原文(message + hints);与读取错误分开,便于保存后原地重试。 */
   const [saveError, setSaveError] = useState('')
   const [busy, setBusy] = useState(false)
+  /**
+   * 「关闭应用子域」的待确认状态(R1-uxw-13)。
+   *
+   * 关闭 = 立即清空基域 ⇒ **全部**应用子域名当场失效(员工端所有 .应用名.域名 打不开),
+   * 与「下架」同级的可见性破坏;而冻结/审批开关/拒绝/下架都有二次确认,只有它是一键生效
+   * ⇒ 同一页里同类风险的动作一个要确认一个不要,管理员学不到稳定预期。
+   * 规则收敛为:**可见性下降/破坏性动作要确认(冻结、下架、关闭子域、拒绝),
+   * 恢复类动作不打扰(解冻、上架、重新填域名)**。
+   */
+  const [closingDomain, setClosingDomain] = useState(false)
 
   const canRead = hasPermission(PERM_CAP_READ)
   const canWrite = hasPermission(PERM_CAP_WRITE)
@@ -113,6 +124,8 @@ export default function Settings() {
         <div className="space-y-2">
           <div
             data-testid="settings-error"
+            role="alert"
+            aria-live="assertive"
             className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
           >
             {loadError}
@@ -148,6 +161,7 @@ export default function Settings() {
             <Input
               id="wasm-base-domain"
               aria-label="应用域名"
+              aria-describedby={!canWrite ? 'settings-readonly-note' : undefined}
               className="max-w-xs"
               placeholder="example.com"
               value={domainInput}
@@ -157,6 +171,7 @@ export default function Settings() {
             <Button
               size="sm"
               disabled={!canWrite || busy || domainInput === (domain?.base_domain ?? '')}
+              aria-describedby={!canWrite ? 'settings-readonly-note' : undefined}
               onClick={() => { void saveDomain(domainInput.trim()) }}
             >
               保存
@@ -165,19 +180,63 @@ export default function Settings() {
               variant="outline"
               size="sm"
               disabled={!canWrite || busy || !domain?.enabled}
-              onClick={() => { void saveDomain('') }}
+              aria-describedby={!canWrite ? 'settings-readonly-note' : undefined}
+              onClick={() => { setClosingDomain(true) }}
             >
               关闭应用子域
             </Button>
+            {/* R1-uxw-14:禁用原因必须是可读文本(禁用控件不可聚焦,title 里的原因
+                键盘/读屏用户拿不到)。 */}
+            {!canWrite && (
+              <span id="settings-readonly-note" data-testid="settings-readonly-note" className="text-[11px] text-muted-foreground">
+                当前账号只读（需要 capability:write 权限）：域名输入与保存/关闭按钮已禁用。
+              </span>
+            )}
             {domain?.url_pattern && (
               <span className="text-[11px] text-muted-foreground">
                 当前访问地址格式：<span className="font-mono">{domain.url_pattern}</span>
               </span>
             )}
           </div>
-          {saveError && <p className="text-sm text-destructive">{saveError}</p>}
+          {saveError && (
+            <p className="text-sm text-destructive" role="alert" aria-live="assertive" data-testid="settings-save-error">
+              {saveError}
+            </p>
+          )}
         </div>
       )}
+
+      {/* 关闭应用子域的二次确认(R1-uxw-13):影响面是**全部**应用域名,与下架同级。
+          说清影响谁、数据是否保留、如何回滚 —— 与冻结/下架确认同一套口径。 */}
+      <Dialog open={closingDomain} onOpenChange={(open) => { if (!open) setClosingDomain(false) }}>
+        <DialogContent data-testid="close-domain-confirm-dialog">
+          <DialogHeader>
+            <DialogTitle>关闭应用子域?</DialogTitle>
+            <DialogDescription>
+              将清空当前基域{domain?.base_domain ? `（${domain.base_domain}）` : ''},关闭后需要重新填写才能再启用。
+            </DialogDescription>
+          </DialogHeader>
+          <ul className="list-disc space-y-1 pl-5 text-sm">
+            <li><strong>全部应用域名立即失效</strong>:员工端所有 <span className="font-mono">应用名.{domain?.base_domain || '当前域名'}</span> 当场打不开。</li>
+            <li><strong>应用与数据不受影响</strong>:已发布版本、应用数据、访问级别都不变,只是入口域名消失。</li>
+            <li><strong>如何回滚</strong>:在本页重新填入同一个基域并保存即可恢复(恢复类动作不需要再确认)。</li>
+          </ul>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => { setClosingDomain(false) }}>取消</Button>
+            <Button
+              variant="destructive"
+              data-testid="close-domain-confirm"
+              disabled={!canWrite || busy}
+              onClick={() => {
+                setClosingDomain(false)
+                void saveDomain('')
+              }}
+            >
+              确认关闭
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

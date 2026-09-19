@@ -285,6 +285,15 @@ export default function Apps() {
   /** 待审清单是否**成功读到**过(读失败时不能拿抽屉快照冒充服务端真值)。 */
   const [pendingLoaded, setPendingLoaded] = useState(false)
   const [pendingError, setPendingError] = useState('')
+  /**
+   * 最近被拒的版本(R1-uxw-4)。
+   *
+   * 服务端此前连 reason 都不下发,拒绝理由只躺在审计详情里 —— 审批面自己都回看不了
+   * "我上次为什么拒的"。这条独立取数(status=rejected)与待审队列分开,读失败不会把
+   * 待审队列一起打成错误态。
+   */
+  const [rejected, setRejected] = useState<PendingRelease[]>([])
+  const [rejectedError, setRejectedError] = useState('')
   const [diag, setDiag] = useState<Diagnostics | null>(null)
   const [diagError, setDiagError] = useState('')
 
@@ -362,6 +371,27 @@ export default function Apps() {
     }
   }, [])
 
+  /**
+   * 详情抽屉打开时拉取该应用的**最近被拒**版本(R1-uxw-4:驳回理由的唯一可回看来源)。
+   *
+   * 为什么单独取一次 `status=rejected`:待审队列按定义看不到被拒版本,而"我上次为什么
+   * 拒的"恰恰只能从那一条回答 —— 服务端此前连 reason 都不下发,理由只躺在审计详情里。
+   * 与待审清单分开取还有两个好处:①待审队列的语义与请求形状一个字不变(既有门禁照旧);
+   * ②被拒清单读失败不会把待审队列一起打成错误态(两条错误各自可见)。
+   */
+  const loadRejected = useCallback(async (appId: string) => {
+    setRejectedError('')
+    try {
+      const out = await request<ReleasesResponse>(
+        `${ADMIN_API}/wasm-apps/${appId}/releases?status=rejected`,
+      )
+      setRejected(out.releases ?? [])
+    } catch (err: any) {
+      setRejected([])
+      setRejectedError(errorText(err, '读取被拒版本失败'))
+    }
+  }, [])
+
   /** 详情抽屉打开时拉取运行诊断(P1-9:管理端此前没有任何排障入口)。 */
   const loadDiagnostics = useCallback(async (appId: string) => {
     setDiagError('')
@@ -382,12 +412,15 @@ export default function Apps() {
     setPendingCurrent(row.current_version ?? '')
     setPendingLoaded(false)
     setPendingError('')
+    setRejected([])
+    setRejectedError('')
     setDetailFeedback(null)
     setLastRejection(null)
     setRejectError('')
     setDiag(null)
     setDiagError('')
     void loadPending(row.app_id)
+    void loadRejected(row.app_id)
     void loadDiagnostics(row.app_id)
   }
 
@@ -533,11 +566,11 @@ export default function Apps() {
       flash(`已拒绝 v${rel.version}`)
       setRejectTarget(null)
       setRejectReason('')
-      // 驳回理由要留在管理员眼前:服务端 DTO 还没有 reason 字段(见 PendingRelease),
-      // 拒绝成功后那一行就从待审清单消失,刚写的理由不该跟着蒸发。
+      // 驳回理由要留在管理员眼前:拒绝成功后那一行就从**待审**清单消失。两条留痕一起给
+      // —— ①即时回显(拒绝响应里带 reason,不必等取数);②重取被拒清单(权威来源)。
       setLastRejection({ version: rel.version, reason })
       setDetailFeedback({ kind: 'ok', text: `已拒绝 v${rel.version}` })
-      await Promise.all([load(), loadPending(row.app_id)])
+      await Promise.all([load(), loadPending(row.app_id), loadRejected(row.app_id)])
     } catch (err: any) {
       // 失败时**不关闭**拒绝框:理由还在输入框里,原地显示原因让管理员能改后重试。
       setRejectError(errorText(err, '审核拒绝失败'))
@@ -585,6 +618,7 @@ export default function Apps() {
                 aria-label="更新审批"
                 checked={reviewRequired}
                 disabled={!canWrite || busy === 'review'}
+                aria-describedby={!canWrite ? 'apps-readonly-note' : undefined}
                 title={canWrite ? undefined : '没有 capability:write 权限,仅可查看'}
                 onCheckedChange={(v) => { setReviewPrompt(v) }}
               />
@@ -623,7 +657,7 @@ export default function Apps() {
         </p>
       )}
       {!canWrite && (
-        <p className="text-xs text-muted-foreground">
+        <p id="apps-readonly-note" data-testid="apps-readonly-note" className="text-xs text-muted-foreground">
           当前账号没有 capability:write 权限 —— 仅可查看,处置按钮已禁用(服务端同样会拒绝写请求)。
         </p>
       )}
@@ -802,9 +836,16 @@ export default function Apps() {
                               <UserCog className="h-4 w-4" />
                             </Button>
                             {/* 禁用按钮不可聚焦 ⇒ 原因只写 title 等于没有(R1-uxw-14)。
-                                sr-only 的说明 + aria-describedby 让读屏也能读到"先解冻再上架"。 */}
+                                sr-only 的说明 + aria-describedby 让读屏也能读到"先解冻再上架";
+                                再加 tabIndex 让它**可聚焦**：键盘用户 Tab 到这一条就能听到
+                                原因，而不是对着一个点不动的按钮猜。 */}
                             {frozen && (
-                              <span id={`frozen-reason-${row.app_id}`} className="sr-only">
+                              <span
+                                id={`frozen-reason-${row.app_id}`}
+                                data-testid={`frozen-reason-${row.app_id}`}
+                                tabIndex={0}
+                                className="sr-only"
+                              >
                                 已冻结:交付面一律 404,先解冻再上架
                               </span>
                             )}
@@ -1133,7 +1174,7 @@ export default function Apps() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => { void loadPending(detail.app_id) }}
+                  onClick={() => { void loadPending(detail.app_id); void loadRejected(detail.app_id) }}
                   data-testid="pending-refresh"
                 >
                   <RefreshCw className="h-4 w-4" />
@@ -1145,9 +1186,16 @@ export default function Apps() {
                 当前生效版本:<span className="font-mono" data-testid="pending-current-version">{currentVersionShown || '—'}</span>
                 (审批通过后线上切到新版本;拒绝会释放归档字节)
               </p>
-              {pendingError && <p className="text-sm text-destructive" data-testid="pending-error">{pendingError}</p>}
-              {/* 刚提交的驳回:理由必须留在管理员眼前(服务端 DTO 还没有 reason 字段,
-                  见 PendingRelease.reason;补上之后由下面的 rel.reason 接管)。 */}
+              {pendingError && <p className="text-sm text-destructive" role="alert" aria-live="assertive" data-testid="pending-error">{pendingError}</p>}
+              {/* 禁用原因不能只写 title(R1-uxw-14):禁用按钮不可聚焦,读屏/键盘用户
+                  只能看到一个点不动的「通过」。常驻 sr-only 说明 + aria-describedby。 */}
+              {!canWrite && (
+                <span id="pending-write-note" data-testid="pending-write-note" tabIndex={0} className="sr-only">
+                  没有 capability:write 权限:通过/拒绝按钮已禁用(服务端同样会拒绝写请求)
+                </span>
+              )}
+              {/* 刚提交的驳回:理由必须留在管理员眼前。下面「最近被拒」子清单是权威来源
+                  (服务端 status=rejected 下发 reason),这一条是即时回显。 */}
               {lastRejection && (
                 <p className="rounded-md border border-border bg-muted px-2 py-1.5 text-xs" data-testid="last-rejection">
                   已拒绝 v{lastRejection.version}
@@ -1173,8 +1221,8 @@ export default function Apps() {
                         {rel.changelog && (
                           <div className="text-xs text-muted-foreground">变更说明:{rel.changelog}</div>
                         )}
-                        {/* 审核理由(驳回理由):服务端 DTO 目前不下发 reason(见接口注释),
-                            这里先把渲染位留好 —— 字段一到,理由就显示在审批队列行里。 */}
+                        {/* 审核理由(驳回理由):服务端在**每一行**下发 reason(非 rejected
+                            行为空串),渲染位与「最近被拒」子清单共用同一字段名。 */}
                         {rel.reason && (
                           <div className="text-xs text-destructive" data-testid={`pending-reason-${rel.version}`}>
                             审核理由:{rel.reason}
@@ -1188,6 +1236,7 @@ export default function Apps() {
                           size="sm"
                           data-testid={`pending-approve-${rel.version}`}
                           disabled={!canWrite || busy !== ''}
+                          aria-describedby={!canWrite ? 'pending-write-note' : undefined}
                           title={canWrite ? '通过:该版本上线' : '没有 capability:write 权限'}
                           onClick={() => { void approveRelease(detail, rel) }}
                         >
@@ -1198,6 +1247,7 @@ export default function Apps() {
                           variant="destructive"
                           data-testid={`pending-reject-${rel.version}`}
                           disabled={!canWrite || busy !== ''}
+                          aria-describedby={!canWrite ? 'pending-write-note' : undefined}
                           title={canWrite ? '拒绝:释放归档字节(不可恢复)' : '没有 capability:write 权限'}
                           onClick={() => { setRejectReason(''); setRejectTarget(rel) }}
                         >
@@ -1208,6 +1258,33 @@ export default function Apps() {
                   ))}
                 </ul>
               )}
+
+              {/* 最近被拒(R1-uxw-4):服务端此前连 reason 都不下发 —— 管理员写过的拒绝理由
+                  只躺在审计详情里,审批面自己都回看不了。这里用 status=rejected 取回
+                  (含 reason),与待审队列并列显示,失败/空态各自可见。 */}
+              <div className="space-y-1 border-t pt-2" data-testid="rejected-block">
+                <h4 className="text-xs font-semibold text-muted-foreground">最近被拒版本({rejected.length})</h4>
+                {rejectedError && (
+                  <p className="text-sm text-destructive" role="alert" aria-live="assertive" data-testid="rejected-error">{rejectedError}</p>
+                )}
+                {!rejectedError && rejected.length === 0 ? (
+                  <p className="text-sm text-muted-foreground" data-testid="rejected-empty">没有被拒的版本。</p>
+                ) : (
+                  <ul className="space-y-1" data-testid="rejected-list">
+                    {rejected.map((rel) => (
+                      <li key={rel.version} className="text-xs" data-testid={`rejected-${rel.version}`}>
+                        <span className="font-mono">v{rel.version}</span>
+                        {rel.publisher && <span className="text-muted-foreground">{` · 提交人 ${rel.publisher}`}</span>}
+                        <span className="text-muted-foreground">{` · ${fmtTime(rel.created_at)}`}</span>
+                        {/* 被拒理由(驳回结果)必须显示出来:它就是"为什么没过"的答案。 */}
+                        <div className="text-destructive" data-testid={`rejected-reason-${rel.version}`}>
+                          {`审核理由:${rel.reason && rel.reason !== '' ? rel.reason : '(未填写理由)'}`}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </section>
           )}
 
