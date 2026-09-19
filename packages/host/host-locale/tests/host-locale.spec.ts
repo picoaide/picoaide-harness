@@ -6,6 +6,12 @@
  * host halves' user-visible payloads is resolved here. These cases pin the
  * precedence that keeps the user's explicit in-app choice authoritative while
  * still working where no desktop launcher is composed.
+ *
+ * 2026-09-20（构建环修复，路线 A）：本文件自
+ * `packages/host/desktop/tests/host-locale.spec.ts` **逐字迁移**，唯一改动是
+ * import 路径 —— 实现现在住在这个零依赖叶子包里。判据一条未减；
+ * `dsh-plugin-desktop/host-locale` 那条对外子路径由 desktop 自己的
+ * `tests/host-locale-reexport.spec.ts` 守住。
  */
 import { describe, expect, it } from 'vitest'
 import {
@@ -16,7 +22,7 @@ import {
   normalizeHostLocale,
   preferredLocaleFromAcceptLanguage,
   selectHostVariant,
-} from '../src/host-locale.ts'
+} from '../src/index.ts'
 
 describe('normalizeHostLocale', () => {
   it('maps every English tag shape to en', () => {

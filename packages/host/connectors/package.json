@@ -54,7 +54,9 @@
   },
   "dependencies": {
     "@deepseek-ai/dsh-mcp-client": "0.1.5-rc.2",
-    "@modelcontextprotocol/sdk": "^1.12.0"
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@picoaide/dsh-host-home": "workspace:*",
+    "@picoaide/dsh-host-locale": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.2"
@@ -78,7 +80,6 @@
     "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
     "@types/node": "^22.20.0",
     "@types/react": "^18",
-    "dsh-plugin-desktop": "workspace:*",
     "react": "18.3.1",
     "tsdown": "0.22.2",
     "typescript": "6.0.3",

@@ -290,6 +290,8 @@
     "@picoaide/dsh-connectors": "workspace:*",
     "@picoaide/dsh-cron": "workspace:*",
     "@picoaide/dsh-enterprise": "workspace:*",
+    "@picoaide/dsh-host-home": "workspace:*",
+    "@picoaide/dsh-host-locale": "workspace:*",
     "@picoaide/dsh-wasm-apps": "workspace:*",
     "@picoaide/dsh-wasm-apps-host": "workspace:*",
     "adm-zip": "^0.6.0",

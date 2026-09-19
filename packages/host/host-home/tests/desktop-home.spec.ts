@@ -1,3 +1,12 @@
+/**
+ * 产品数据根（desktop-home）的判据。
+ *
+ * 2026-09-20（构建环修复，路线 A 扩展）：本文件自
+ * `packages/host/desktop/tests/desktop-home.spec.ts` **逐字迁移**，唯一改动是
+ * import 路径 —— 实现现在住在这个零依赖叶子包里（`@picoaide/dsh-host-home`）。
+ * 25 个 `it` 一条未减；`dsh-plugin-desktop/desktop-home` 那条对外子路径由 desktop
+ * 自己的 `tests/desktop-home-reexport.spec.ts` 守住。
+ */
 import { describe, expect, it } from 'vitest'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -13,7 +22,7 @@ import {
   isSafeDshHomeDirName,
   isSystemWorkingDirectory,
   resolveDshHome,
-} from '../src/desktop-home.ts'
+} from '../src/index.ts'
 
 describe('resolveDshHome (product home)', () => {
   it('defaults to ~/.picoaide-harness (product home, not upstream ~/.dsh)', () => {
