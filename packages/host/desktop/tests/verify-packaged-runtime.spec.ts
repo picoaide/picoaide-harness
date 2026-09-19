@@ -119,6 +119,39 @@ function verifyWithBrandStub(
   verifyPackagedRuntime(runtimeContext, list, exists, () => BRAND_SVG)
 }
 
+describe('workspace 子路径 import 必须都在打包必需清单里（2026-09-20 补）', () => {
+  // 为什么要有它：插件包曾**声明了 8 个 exports 子路径却只构建 3 个**，而 desktop 的
+  // `lib/main.js` 值导入 `…/app-proof` ⇒ 打包版启动即 ERR_MODULE_NOT_FOUND（Linux e2e
+  // 的 "app did not expose CDP within 30s"），而 afterPack 断言因为**清单本身不完整**
+  // 照样通过。这条判据把"清单"与"产物真实 import 的每个子路径"钉在一起。
+  it('REQUIRED_PACKAGED_RUNTIME_ENTRIES 覆盖 desktop lib 里每个 @picoaide/* 子路径', () => {
+    const libDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'lib')
+    const specs = new Set<string>()
+    for (const file of readdirSync(libDir).filter(f => f.endsWith('.js'))) {
+      const text = readFileSync(join(libDir, file), 'utf8')
+      for (const m of text.matchAll(/from\s*"(@picoaide\/[^"]+)"/g)) specs.add(m[1])
+    }
+    // 前置断言：判据不能空转（桌面产物确实 import 了 workspace 包）。
+    expect(specs.size, '没有从 desktop 产物里扫到任何 @picoaide/* import，判据会空转').toBeGreaterThan(0)
+
+    const missing: string[] = []
+    for (const spec of specs) {
+      const [, name, sub = ''] = /^(@picoaide\/[^/]+)(?:\/(.*))?$/.exec(spec) ?? []
+      if (name === undefined) continue
+      const pkgJsonPath = join(libDir, '..', 'node_modules', name, 'package.json')
+      if (!existsSync(pkgJsonPath)) continue
+      const exportsField = JSON.parse(readFileSync(pkgJsonPath, 'utf8')).exports ?? {}
+      const key = sub === '' ? '.' : `./${sub}`
+      const entry = exportsField[key]
+      const def = typeof entry === 'string' ? entry : (entry?.default ?? entry?.import)
+      if (typeof def !== 'string') continue
+      const wanted = `node_modules/${name}/${def.replace(/^\.\//, '')}`
+      if (!(REQUIRED_PACKAGED_RUNTIME_ENTRIES as readonly string[]).includes(wanted)) missing.push(`${spec} ⇒ ${wanted}`)
+    }
+    expect(missing, `desktop 产物 import 了这些 workspace 子路径，但打包必需清单里没有：\n  ${missing.join('\n  ')}`).toEqual([])
+  })
+})
+
 describe('packaged desktop runtime verification', () => {
   it('fails the diagnostic Worker smoke when its archive omits the crash dump', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-smoke-'))
