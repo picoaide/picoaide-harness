@@ -101,11 +101,70 @@ func AddExcludedModel(db *sql.DB, providerID int64, name string) error {
 // 同解,写回空数组让"名单已处理"可见、也避免 settings 行随删随建;该键在删除
 // provider 时仍被整体清理(见 DeleteGatewayProvider)。SetSetting 会失效
 // settings 缓存,下一次同步立即看到新名单。
+//
+// 单条 autocommit 版本;**要与建模型行同事务请用 RemoveExcludedModelTx**
+// (后者不失效缓存,提交后调用方须 InvalidateSettings())。
 func RemoveExcludedModel(db *sql.DB, providerID int64, name string) error {
 	names, err := GetExcludedModels(db, providerID)
 	if err != nil {
 		return err
 	}
+	kept, changed := removeExcludedName(names, name)
+	if !changed {
+		return nil
+	}
+	b, _ := json.Marshal(kept)
+	return SetSetting(db, excludedModelsKey(providerID), string(b))
+}
+
+// RemoveExcludedModelTx 在调用方事务内把模型名移出排除名单,返回"是否真的
+// 改了"(幂等:不在名单里返回 (false, nil),且不写库)。
+//
+// 2026-09-19(N1):llmgateway.createModel 的"移名单 + 建模型行"必须在**同一
+// 事务**里 —— 旧实现两步各自 autocommit,建行失败(500)或同重名(400)时名单
+// 已经被清空,下一个同步轮次会把管理员显式删除的渠道模型复活。
+//
+// 名单读的是**事务内**的 settings 行(不走 settingsCache:缓存不参与事务,
+// 读-改-写必须以事务快照为准);写走 SetSettingTx,**不失效缓存**,提交后由
+// 调用方 InvalidateSettings()。
+func RemoveExcludedModelTx(tx *sql.Tx, providerID int64, name string) (bool, error) {
+	names, err := excludedModelsTx(tx, providerID)
+	if err != nil {
+		return false, err
+	}
+	kept, changed := removeExcludedName(names, name)
+	if !changed {
+		return false, nil
+	}
+	b, _ := json.Marshal(kept)
+	if err := SetSettingTx(tx, excludedModelsKey(providerID), string(b)); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// excludedModelsTx 在事务内直读排除名单(语义与 GetExcludedModels 一致:
+// 键不存在或空串 = 空名单,JSON 解析失败 = 错误,只是不经过 settings 缓存)。
+func excludedModelsTx(tx *sql.Tx, providerID int64) ([]string, error) {
+	var v string
+	err := tx.QueryRow(`SELECT value FROM settings WHERE key = ?`, excludedModelsKey(providerID)).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && v == "") {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	if err := json.Unmarshal([]byte(v), &names); err != nil {
+		return nil, err
+	}
+	return names, nil
+}
+
+// removeExcludedName 从名单里删掉一个名字,返回新名单与"是否真的删掉了"。
+// 唯一实现:autocommit 版与事务版共用(kept 始终是非 nil 切片 ⇒ 移空时
+// json.Marshal 得到 `[]` 而不是 `null`)。
+func removeExcludedName(names []string, name string) ([]string, bool) {
 	kept := make([]string, 0, len(names))
 	changed := false
 	for _, n := range names {
@@ -115,11 +174,7 @@ func RemoveExcludedModel(db *sql.DB, providerID int64, name string) error {
 		}
 		kept = append(kept, n)
 	}
-	if !changed {
-		return nil
-	}
-	b, _ := json.Marshal(kept)
-	return SetSetting(db, excludedModelsKey(providerID), string(b))
+	return kept, changed
 }
 
 // 说明:名单是**双向**的(2026-09-19 起)——删除渠道同步模型进名单,此后同步
@@ -583,8 +638,42 @@ func ModelCachePrice(db *sql.DB, name string) float64 {
 	return cache.Float64
 }
 
-// AddModel inserts a model row.
+// AddModel inserts a model row(autocommit;插入成功后失效模型缓存)。
+//
+// 要与其它写库同事务请用 AddModelTx —— 两者共用同一条 INSERT(addModel),
+// 只有"缓存失效的时机"不同。
 func AddModel(db *sql.DB, m *Model) (int64, error) {
+	id, err := addModel(func(query string, args ...any) (int64, error) {
+		return InsertID(db, query, args...)
+	}, m)
+	if err != nil {
+		return 0, err
+	}
+	InvalidateModelConfig()
+	InvalidateModelsChanged()
+	return id, nil
+}
+
+// AddModelTx 在调用方事务内插入模型行,返回新行 id(失败时 ErrDuplicate 语义
+// 与 AddModel 一致)。
+//
+// **不失效模型缓存**:事务可能回滚,失效只能在 commit 之后做 —— 由调用方调用
+// InvalidateModelConfig() / InvalidateModelsChanged()(见 llmgateway/admin.go
+// createModel:移出排除名单 + 建模型行同事务,提交后统一失效)。
+func AddModelTx(tx *sql.Tx, m *Model) (int64, error) {
+	return addModel(func(query string, args ...any) (int64, error) {
+		return InsertIDTx(tx, query, args...)
+	}, m)
+}
+
+// insertFunc 执行一条 INSERT 并返回自增 id(*sql.DB 走 InsertID,*sql.Tx 走
+// InsertIDTx)——让"模型的 INSERT 语句"只有一份实现。
+type insertFunc func(query string, args ...any) (int64, error)
+
+// addModel 是模型 INSERT 的唯一实现(AddModel / AddModelTx 共用):只负责
+// 写库、回填 m.ID 与把唯一键冲突归一为 ErrDuplicate;缓存失效由调用方按
+// "提交后"语义决定。
+func addModel(insert insertFunc, m *Model) (int64, error) {
 	if m.DefaultParams == "" {
 		m.DefaultParams = "{}"
 	}
@@ -592,7 +681,7 @@ func AddModel(db *sql.DB, m *Model) (int64, error) {
 		m.InputModalities = []string{"text"}
 	}
 	modalitiesJSON, _ := json.Marshal(m.InputModalities)
-	id, err := InsertID(db, `INSERT INTO models (name, provider_id, display_name, default_params, input_modalities, input_price_per_1m, output_price_per_1m, cache_input_price_per_1m, offpeak_discount)
+	id, err := insert(`INSERT INTO models (name, provider_id, display_name, default_params, input_modalities, input_price_per_1m, output_price_per_1m, cache_input_price_per_1m, offpeak_discount)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams, string(modalitiesJSON),
 		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), nilIfNilFloat64(m.CacheInputPricePer1M), nilIfNilFloat64(m.OffpeakDiscount))
 	if err != nil {
@@ -602,8 +691,6 @@ func AddModel(db *sql.DB, m *Model) (int64, error) {
 		return 0, err
 	}
 	m.ID = id
-	InvalidateModelConfig()
-	InvalidateModelsChanged()
 	return m.ID, nil
 }
 

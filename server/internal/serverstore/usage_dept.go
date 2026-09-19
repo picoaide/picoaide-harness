@@ -88,9 +88,11 @@ func RegroupByDept(db *sql.DB, rows []UsageAggregateRow) ([]UsageAggregateRow, e
 	// 2026-09-19(审计):旧比较器不满足严格弱序 —— 只要有一个 label 不在 order
 	// 里,混合比较就退化成纯字典序,与"两个已知 label 按先序序号"可以拼成环:
 	// 已知 z(序号 0)、已知 a(序号 1)、未知 b ⇒ z<a(序号)、a<b(字典序)、
-	// b<z(字典序)。sort.Slice 在环下输出未定义,而 out 由 map 遍历构造(每次
-	// 迭代起点随机)⇒ 同一份数据可能给出不同的部门顺序(实测同一进程内连续两次
-	// 得到 [z a b d] 与 [a b d z]/[b d z a])。未知 label 是可达的:userIDToDepts
+	// b<z(字典序)。sort.Slice 在环下输出未定义,而**输入顺序本身不固定**:
+	// out 由 map 遍历构造(上方 `for _, r := range agg`),Go 语言规范不保证 map
+	// 遍历顺序 ⇒ 每次运行喂给 sort 的置换都可能不同,而非全序比较器下输出随输入
+	// 置换变化 —— 实测(置换全枚举探针)把同一组部门的 7! 个置换全部枚举:旧比较器
+	// 给出 5 种不同输出,新比较器给出 1 种。未知 label 是可达的:userIDToDepts
 	// 的 ancestors() 自带 seen 环保护 ⇒ 部门树带环(迁移/手工数据)是被承认的输入
 	// 形态,此时环内节点既不是 root 也走不到,进不了 preOrderNodes 的前序,却在
 	// agg 里作为部门行出现。

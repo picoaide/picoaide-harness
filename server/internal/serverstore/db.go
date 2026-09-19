@@ -97,8 +97,25 @@ func CaseInsensitiveCmp(col string) string {
 // PG: pgx stdlib does not implement LastInsertId, so we append RETURNING id
 // and QueryRow-scan it.
 func InsertID(db *sql.DB, query string, args ...any) (int64, error) {
+	return insertID(db, query, args...)
+}
+
+// InsertIDTx 与 InsertID 是同一实现,只是跑在调用方事务内(2026-09-19:
+// createModel 的"移出排除名单 + 建模型行"要原子,建行必须走事务内版本;
+// SQL 与 RETURNING 追加逻辑只有这一份)。
+func InsertIDTx(tx *sql.Tx, query string, args ...any) (int64, error) {
+	return insertID(tx, query, args...)
+}
+
+// rowQuerier 覆盖 *sql.DB 与 *sql.Tx(两者都有 QueryRow),让 InsertID /
+// InsertIDTx 共用同一条语句与同一个 RETURNING 追加逻辑。
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func insertID(q rowQuerier, query string, args ...any) (int64, error) {
 	var id int64
-	err := db.QueryRow(query+" RETURNING id", args...).Scan(&id)
+	err := q.QueryRow(query+" RETURNING id", args...).Scan(&id)
 	return id, err
 }
 
