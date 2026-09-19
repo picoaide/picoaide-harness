@@ -8,7 +8,7 @@
       "Unit": "count",
       "Section": "§4.1",
       "Title": "app_id 长度上限",
-      "Note": "DNS label 上限；app_id 本身就是域名标签"
+      "Note": "DNS label 上限；app_id 是应用标识（客户端内即 `\u003c渠道 app 源 scheme\u003e://\u003capp_id\u003e` 的 host 段）"
     },
     {
       "Key": "app_id_pattern",
@@ -347,20 +347,20 @@
       "Note": ""
     },
     {
-      "Key": "ai_chat_max_messages",
-      "Value": "128",
+      "Key": "ai_bridge_max_messages",
+      "Value": "64",
       "Unit": "count",
-      "Section": "§4.4",
-      "Title": "ai.chat 消息条数上限",
-      "Note": ""
+      "Section": "§21.2",
+      "Title": "AI 桥消息条数上限",
+      "Note": "应用前端 fetch('/__picoaide/ai/chat') 的 messages 数组长度"
     },
     {
-      "Key": "ai_chat_max_body_bytes",
-      "Value": "1048576",
+      "Key": "ai_bridge_message_max_bytes",
+      "Value": "16384",
       "Unit": "bytes",
-      "Section": "§4.4",
-      "Title": "ai.chat 请求体上限",
-      "Note": ""
+      "Section": "§21.2",
+      "Title": "AI 桥单条消息上限",
+      "Note": "单条 message.content 的字节上限（应用侧据此截断/切分）"
     },
     {
       "Key": "app_db_page_size",
@@ -608,7 +608,7 @@
       "Unit": "bytes",
       "Section": "§4.6",
       "Title": "应用 API 请求体上限",
-      "Note": "子域路由树不在两个 1 MB 中间件分组里 ⇒ 必须自己实现"
+      "Note": "客户端请求信封自带上限；管线仍自套 MaxBytesReader 兜住 chunked/长度撒谎"
     },
     {
       "Key": "app_response_body_max_bytes",
@@ -633,14 +633,6 @@
       "Section": "§4.6",
       "Title": "guest 执行预算",
       "Note": "进入宿主调用时暂停计时"
-    },
-    {
-      "Key": "host_ai_chat_budget",
-      "Value": "30",
-      "Unit": "seconds",
-      "Section": "§4.6",
-      "Title": "ai.chat 宿主预算",
-      "Note": ""
     },
     {
       "Key": "request_wall_clock",
@@ -697,118 +689,6 @@
       "Section": "§4.6",
       "Title": "Retry-After",
       "Note": ""
-    },
-    {
-      "Key": "anon_global_rate_per_min",
-      "Value": "3000",
-      "Unit": "count",
-      "Section": "§4.6",
-      "Title": "全局匿名令牌桶",
-      "Note": "次/分"
-    },
-    {
-      "Key": "anon_global_burst",
-      "Value": "3000",
-      "Unit": "count",
-      "Section": "§4.6",
-      "Title": "全局匿名桶容量",
-      "Note": ""
-    },
-    {
-      "Key": "anon_per_ip_rate_per_min",
-      "Value": "60",
-      "Unit": "count",
-      "Section": "§4.6",
-      "Title": "每 IP 匿名速率",
-      "Note": "次/分"
-    },
-    {
-      "Key": "anon_per_ip_burst",
-      "Value": "60",
-      "Unit": "count",
-      "Section": "§4.6",
-      "Title": "每 IP 匿名桶容量",
-      "Note": ""
-    },
-    {
-      "Key": "ticket_ttl",
-      "Value": "60",
-      "Unit": "seconds",
-      "Section": "§4.7",
-      "Title": "一次性换票有效期",
-      "Note": "code 单次、绑 (user, app)"
-    },
-    {
-      "Key": "app_session_ttl",
-      "Value": "28800",
-      "Unit": "seconds",
-      "Section": "§4.7",
-      "Title": "应用子域会话 TTL",
-      "Note": "Cookie host-only + HttpOnly + Secure + SameSite=Strict"
-    },
-    {
-      "Key": "ai_token_ttl",
-      "Value": "2700",
-      "Unit": "seconds",
-      "Section": "§4.7",
-      "Title": "AI 令牌有效期",
-      "Note": "宿主内存持有、到期重铸、登出吊销"
-    },
-    {
-      "Key": "ai_token_renew_before",
-      "Value": "300",
-      "Unit": "seconds",
-      "Section": "§4.7",
-      "Title": "AI 令牌续期提前量",
-      "Note": ""
-    },
-    {
-      "Key": "ai_user_rate_per_min",
-      "Value": "60",
-      "Unit": "count",
-      "Section": "§4.7",
-      "Title": "用户级限流",
-      "Note": "平台既有，应用无独立额度"
-    },
-    {
-      "Key": "ai_in_flight_per_user",
-      "Value": "32",
-      "Unit": "count",
-      "Section": "§4.7",
-      "Title": "在途上限",
-      "Note": "平台既有 InFlightGuard"
-    },
-    {
-      "Key": "session_max_form_bytes",
-      "Value": "8192",
-      "Unit": "bytes",
-      "Section": "§4.7",
-      "Title": "员工会话表单体上限",
-      "Note": "登录/换票两个表单只有几个短字段"
-    },
-    {
-      "Key": "session_max_username_bytes",
-      "Value": "128",
-      "Unit": "bytes",
-      "Section": "§4.7",
-      "Title": "账号字段上限",
-      "Note": "与客户端面登录同口径"
-    },
-    {
-      "Key": "session_max_password_bytes",
-      "Value": "1024",
-      "Unit": "bytes",
-      "Section": "§4.7",
-      "Title": "密码字段上限",
-      "Note": "与客户端面登录同口径"
-    },
-    {
-      "Key": "session_max_next_bytes",
-      "Value": "512",
-      "Unit": "bytes",
-      "Section": "§4.7",
-      "Title": "换票 next 长度上限",
-      "Note": "§4.7「next 只接受同基域相对路径」的一部分"
     },
     {
       "Key": "call_event_retention_days",

@@ -17,6 +17,8 @@
 #   1. 用新证书覆盖 certs/server.crt 与 certs/server.key(权限 0600)
 #   2. docker compose restart caddy
 # 启用:compose 挂载本文件(TLS_MODE=manual)
+# 应用(WASM)访问模型:应用只在桌面客户端内打开(自定义协议 picoaide-app://<app_id>/),
+# 不经本反代 —— 无需为应用添加站点块或证书(2026-09-19 起)。
 # ============================================================
 {$DOMAIN} {
 	# MANUAL 模式:显式指定证书文件(改动后必须 restart caddy 生效)

@@ -14,16 +14,46 @@ import { PageHeader } from '../../components/page-header'
 import { errorText } from '../../lib/api-error'
 import { useFlash } from '../../lib/use-flash'
 import { hasPermission, PERM_CAP_READ, PERM_CAP_WRITE } from '../../lib/rbac'
-import { Boxes, Check, Eye, RefreshCw, Search, Stethoscope, UserCog, X } from 'lucide-react'
+import { Boxes, Check, Eye, Megaphone, RefreshCw, Search, Stethoscope, UserCog, X } from 'lucide-react'
+// 访问级别（可写两值 + 历史值文案 + 筛选匹配）的唯一真源：见 access-level.ts 的
+// 文件头。**不要**在本页另写一份标签/匹配逻辑 —— 那是"公开还能不能用"这类
+// 误导性文案的滋生地（2026-09-19 契约 §4.4 / I6 / §19 Q13）。
+import {
+  ACCESS_FILTER_ALL,
+  ACCESS_FILTERS,
+  accessLevelRejectionMessage,
+  accessMeta,
+  isAccessFilterValue,
+  matchesAccessFilter,
+} from './access-level'
+// F16 打开次数（契约 §8.9 / §19 Q11）+ §21.4 AI 用量：路径、类型、降级与聚合口径
+// 全部收敛在 opens-contract.ts；本页只做渲染与请求编排。
+import {
+  OPENS_SUMMARY_PATH,
+  classifyEndpointFailure,
+  countText,
+  requireOpensSummary,
+  shapeDrift,
+  type EndpointFailure,
+  type OpensAppRow,
+} from './opens-contract'
+import { AnnouncementTemplatesDialog } from './AnnouncementTemplatesDialog'
+import { AppOpensSection } from './AppOpensSection'
+import { AppAiUsageSection } from './AppAiUsageSection'
 
 /**
  * 应用中心 · 应用(2026-09-19 页面合并):员工自建 WASM 应用的列表与平台级处置。
  *
- * 原 `/app-center` 单页(`pages/AppCenter.tsx`)的**列表部分**。同页顶部的
- * 「应用域名」卡片已搬进本分区的设置页(`./Settings.tsx`),并发/内存限制项在
- * `./Limits.tsx`,三者由 `./AppCenterLayout.tsx` 的子导航串起来(2026-09-19
- * 用户要求「应用平台并入应用中心 + 应用中心增加设置页」)。**服务端未改**:三条
- * 接口仍在同一组、权限点不变。
+ * 原 `/app-center` 单页(`pages/AppCenter.tsx`)的**列表部分**。并发/内存限制项在
+ * `./Limits.tsx`,两者由 `./AppCenterLayout.tsx` 的子导航串起来(2026-09-19 用户
+ * 要求「应用平台并入应用中心」)。
+ *
+ * 同页顶部的「应用域名」卡片曾在 2026-09-19 上半日搬进「设置」子页,随后随 WASM
+ * 「客户端专属」改造**整页删除**(应用只在桌面客户端内以 `picoaide-app://<app_id>/`
+ * 打开,服务端不再有应用基域配置面;契约 §4.4/§4.5)。本页因此也**不渲染任何入口
+ * 链接** —— `entry_url` 已从服务端响应与两端 UI 全部取消,唯一可分享形态是深链
+ * `<渠道 scheme>://app/<app_id>`(由客户端应用中心给出,管理端不代拼)。**服务端
+ * 接口仍在同一组、权限点不变**。
  *
  * 服务端管理面已就绪(server/internal/wasmapp/api/admin.go),本页只做组合与状态
  * 编排,不复制任何后端语义:
@@ -62,8 +92,15 @@ interface WasmApp {
   description: string
   owner: string
   enabled: boolean
-  /** 访问级别:public 公开 / login 登录后全员 / whitelist 白名单。 */
-  access: 'public' | 'login' | 'whitelist' | string
+  /**
+   * 访问级别:`login` 登录后全员 / `whitelist` 白名单。
+   *
+   * 2026-09-19(WASM 客户端专属改造,契约 §4.4):发布/校验只接受 `login|whitelist`;
+   * **历史行仍可能写着 `public`**(匿名公开已废除),服务端读侧一律当 `login`。
+   * 因此这里保留 `| string` 的宽松形态、不把 `public` 写进枚举 —— 渲染交给
+   * `./access-level` 的 `accessMeta` 统一给出历史文案「已退役（历史值）」。
+   */
+  access: 'login' | 'whitelist' | string
   purpose: string
   data_sensitivity: string
   current_release_id: number
@@ -90,6 +127,14 @@ interface ListResponse {
   truncated: boolean
   limit: number
   offset: number
+  /**
+   * 访问级别筛选的**服务端回显**（2026-09-19，L6 契约依赖）。
+   *
+   * 服务端支持 `?access=login|whitelist` 时必须把生效值原样回显；前端据此判断
+   * "分页与 total 是否已按访问级别过滤"。缺这个键 ⇒ 前端退化为**本页过滤**并
+   * 显式提示（不得静默显示一个未过滤的全集数字）。
+   */
+  access?: string
 }
 
 interface PendingRelease {
@@ -202,16 +247,10 @@ interface Diagnostics {
   hints: string[]
 }
 
-const ACCESS_META: Record<string, { label: string; variant: 'success' | 'secondary' | 'outline' }> = {
-  public: { label: '公开', variant: 'success' },
-  login: { label: '登录后全员', variant: 'secondary' },
-  whitelist: { label: '白名单', variant: 'outline' },
-}
-
-/** 未知访问级别不静默吞掉:原样回显(服务端加了新枚举时页面仍可读)。 */
-function accessMeta(access: string): { label: string; variant: 'success' | 'secondary' | 'outline' } {
-  return ACCESS_META[access] ?? { label: access || '未知', variant: 'outline' }
-}
+// 访问级别的标签/历史值文案/筛选匹配**不在本页实现**：统一走 `./access-level`
+// （两值可写 + 历史 public 渲染成「已退役（历史值）」+ login 命中历史行）。
+// 这一页曾自己写一份 ACCESS_META，结果"公开"这类旧口径文字只在某一处被改掉，
+// 另一处继续误导管理员（2026-09-19 收敛）。
 
 type StatusVariant = 'success' | 'secondary' | 'destructive'
 
@@ -265,6 +304,52 @@ const STATUS_FILTERS: { value: string; label: string }[] = [
   // 支持 status=deleted,且它就是 include_deleted=1 的同义入口。
   { value: 'deleted', label: '已删除' },
 ]
+
+/**
+ * 列表/看板共用的打开计数窗口（天）。
+ *
+ * §8.9 管理端出口 ① 要的是"今日 + 近 7 日"；详情抽屉另有 30/90/全部三档。
+ */
+const OPENS_WINDOW_DAYS = 7
+
+interface AccessFilterState {
+  /** 当前筛选值（`all` / `login` / `whitelist`）。 */
+  value: string
+  /** URL 里带来的**非法**取值（例如旧书签的 `?access=public`）；非空时页面必须明说原因。 */
+  rejected: string
+}
+
+/**
+ * 访问级别筛选的初值：支持 `?access=login|whitelist`（深链/书签）。
+ *
+ * 为什么读 URL：运营动作（§19 Q13"能筛出历史 public"）常常是"把这个筛选链接发给
+ * 另一个管理员"；而旧书签/旧文档里完全可能写着 `?access=public`。
+ * 那个值**不能静默当成"全部"**（静默降级 = 管理员以为筛过了，其实看的是全集），
+ * 必须给出写侧口径的拒绝消息，并指出历史行该用哪个筛选值去找。
+ */
+function initialAccessFilter(): AccessFilterState {
+  try {
+    if (typeof window === 'undefined') return { value: ACCESS_FILTER_ALL, rejected: '' }
+    const raw = new URLSearchParams(window.location.search).get('access') ?? ''
+    if (raw === '') return { value: ACCESS_FILTER_ALL, rejected: '' }
+    if (isAccessFilterValue(raw)) return { value: raw, rejected: '' }
+    return { value: ACCESS_FILTER_ALL, rejected: raw }
+  } catch {
+    // 极端环境（无 URL/隐私模式）下不阻断页面：按"不筛选"渲染。
+    return { value: ACCESS_FILTER_ALL, rejected: '' }
+  }
+}
+
+/** 把筛选同步回 URL（只影响刷新/分享，不参与渲染；失败静默 —— 筛选本身照常工作）。 */
+function writeAccessFilterToUrl(value: string) {
+  try {
+    if (typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    if (value === ACCESS_FILTER_ALL) url.searchParams.delete('access')
+    else url.searchParams.set('access', value)
+    window.history.replaceState(window.history.state, '', url.toString())
+  } catch { /* 见上 */ }
+}
 
 export default function Apps() {
   const [apps, setApps] = useState<WasmApp[]>([])
@@ -332,9 +417,32 @@ export default function Apps() {
   const [qInput, setQInput] = useState('')
   const [q, setQ] = useState('')
   const [status, setStatus] = useState('all')
+  /**
+   * 访问级别筛选(2026-09-19 契约 §19 Q13)。
+   *
+   * 取值只有 `all | login | whitelist`（两值 + 全部）；历史 `public` 行由 `login`
+   * 命中（读侧同口径），历史行的访问级别列渲染成「已退役（历史值）」——
+   * 服务端拿到 `access=` 才算服务端过滤，拿不到就退化成本页过滤 + 明说（见
+   * `accessFilterSupported`）。**不做静默的部分过滤**：那会让"共 N 条"撒谎。
+   */
+  const [accessFilter, setAccessFilter] = useState<AccessFilterState>(() => initialAccessFilter())
   const [offset, setOffset] = useState(0)
   const [total, setTotal] = useState(0)
   const [pendingTotal, setPendingTotal] = useState(0)
+  /**
+   * 服务端**回显**的访问级别筛选值（admin.go 的列表响应）。
+   *
+   * 这是判断"服务端到底支不支持 access= 过滤"的唯一依据：回显相等 ⇒ 服务端过滤
+   * 生效，分页与 total 都可信；回显缺失 ⇒ 只在本页做本地过滤，并显式提示
+   * "共 N 条与翻页仍是未筛选全集"。契约依赖见 L6-status.md。
+   */
+  const [accessEcho, setAccessEcho] = useState('')
+
+  // 打开次数(F16):跨应用聚合一次取回,列表列与详情抽屉共用(见 opens-contract.ts)。
+  const [opensRows, setOpensRows] = useState<Record<string, OpensAppRow>>({})
+  const [opensFailure, setOpensFailure] = useState<EndpointFailure | null>(null)
+  const [announceOpen, setAnnounceOpen] = useState(false)
+
 
   // 详情抽屉的待审清单 + 运行诊断。
   const [pending, setPending] = useState<PendingRelease[]>([])
@@ -371,8 +479,11 @@ export default function Apps() {
       // 会打开 include_deleted),这里两条都带上,免得将来只改一端就静默查不到。
       if (status === 'deleted') params.set('include_deleted', '1')
     }
+    // 访问级别筛选（两值）：`public` 永不进这个参数（它不是可写值）；
+    // 历史 public 行由 `access=login` 命中（服务端读侧同口径）。
+    if (accessFilter.value !== ACCESS_FILTER_ALL) params.set('access', accessFilter.value)
     return params.toString()
-  }, [offset, q, status])
+  }, [accessFilter.value, offset, q, status])
 
   const load = useCallback(async () => {
     // 没有 capability:read 时不发这个注定 403 的请求(与用量中心同口径)。
@@ -393,6 +504,8 @@ export default function Apps() {
       // 范围标签与翻页一律以**服务端回显**为准(见 pageStart/truncated 的注释)。
       setPageStart(typeof data.offset === 'number' && data.offset >= 0 ? data.offset : offset)
       setTruncated(data.truncated === true)
+      // 访问级别筛选的服务端回显（缺 = 服务端还不支持 access=，见 accessEcho 注释）。
+      setAccessEcho(typeof data.access === 'string' ? data.access : '')
       setLoaded(true)
     } catch (err: any) {
       if (current !== loadSeq.current) return
@@ -410,6 +523,38 @@ export default function Apps() {
   }, [canRead, listQuery, offset])
 
   useEffect(() => { void load() }, [load])
+
+  /**
+   * 打开次数聚合（F16）：**一次**取回本窗口内全部应用的今日/近 7 日 PV+UV。
+   *
+   * 为什么是一次聚合而不是每行一个请求：列表一页 20 行、详情还要用同一批数字，
+   * 20 个请求既慢又会把"某一行的取数失败"渲染成"这个应用没人用"。
+   * 失败语义按 opens-contract 的硬要求：**缺后端不得显示 0** —— 这里只记录
+   * 失败原因，列与详情面板统一渲染 `—` + 提示。
+   */
+  const loadOpens = useCallback(async () => {
+    if (!canRead) return
+    try {
+      const raw = await request(`${OPENS_SUMMARY_PATH}?days=${OPENS_WINDOW_DAYS}&top=10`)
+      const parsed = requireOpensSummary(raw)
+      if (!parsed.ok) {
+        setOpensRows({})
+        setOpensFailure(shapeDrift('打开次数', parsed.detail))
+        return
+      }
+      const map: Record<string, OpensAppRow> = {}
+      for (const row of parsed.value.apps ?? []) {
+        if (row && typeof row.app_id === 'string' && row.app_id !== '') map[row.app_id] = row
+      }
+      setOpensRows(map)
+      setOpensFailure(null)
+    } catch (err: unknown) {
+      setOpensRows({})
+      setOpensFailure(classifyEndpointFailure(err, '打开次数', OPENS_SUMMARY_PATH))
+    }
+  }, [canRead])
+
+  useEffect(() => { void loadOpens() }, [loadOpens])
 
   /** 详情抽屉打开时拉取该应用的待审版本(筛选变更/审核后重拉同一份)。 */
   const loadPending = useCallback(async (appId: string) => {
@@ -668,8 +813,24 @@ export default function Apps() {
   // 渲染的位置才是管理员能验证的那个数(R1-uxw-2)。
   const hasPrev = pageStart > 0
   const hasNext = truncated
+  /**
+   * 访问级别筛选是否**由服务端执行**（= 响应回显了同一个取值）。
+   *
+   * 不支持时退化为"本页过滤"，并且必须在页面上说明 —— 否则"共 N 条"与翻页
+   * 仍然按未筛选全集的数字走，管理员会把"这一页里没有"读成"系统里没有"。
+   */
+  const accessFilterActive = accessFilter.value !== ACCESS_FILTER_ALL
+  const accessFilterSupported = !accessFilterActive || accessEcho === accessFilter.value
+  /** 屏幕上真正渲染的行：服务端支持过滤时就是 `apps`；否则是它的本页子集。 */
+  const visibleApps = accessFilterSupported
+    ? apps
+    : apps.filter((a) => matchesAccessFilter(a.access, accessFilter.value))
+  /** 本页里命中"历史已退役"的行数（用于给筛选结果加一句可核对的说明）。 */
+  const legacyShown = visibleApps.filter((a) => accessMeta(a.access).legacy).length
   /** 页码越界:服务端返回空页但全集非空(数据缩水/筛选变化后翻页的典型现场)。 */
   const outOfRange = !loading && loadError === '' && shown === 0 && total > 0
+  /** 只看本地过滤时的"本页没有命中"：与"系统里没有"必须分开说。 */
+  const filteredEmptyLocally = !accessFilterSupported && visibleApps.length === 0 && apps.length > 0
   /**
    * 抽屉里"当前生效版本"的**唯一取值**:待审清单读到了就以它为准(它比行快照新,
    * 审核通过后服务端返回的就是新版本),读不到才回落行快照。
@@ -709,6 +870,15 @@ export default function Apps() {
                 </Badge>
               )}
             </div>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="announcement-open"
+              onClick={() => { setAnnounceOpen(true) }}
+              title="面向员工的公告模板（访问级别收敛 / 只在客户端内打开）"
+            >
+              <Megaphone className="mr-1 h-4 w-4" />公告模板
+            </Button>
             <Button variant="outline" size="sm" onClick={() => { void load() }} title="刷新" aria-label="刷新">
               <RefreshCw className="h-4 w-4" />
             </Button>
@@ -770,13 +940,38 @@ export default function Apps() {
             ))}
           </SelectContent>
         </Select>
-        {(q !== '' || status !== 'all') && (
+        {/* 访问级别筛选（2026-09-19 契约 §19 Q13）。选项**只有两值 + 全部**：
+            `public` 不可选（它已退役），但历史行由「登录后全员」命中（读侧同口径），
+            所以"筛出历史 public"这个运营动作成立；每行的访问级别列还会标注
+            「已退役（历史值）」。 */}
+        <Select
+          value={accessFilter.value}
+          onValueChange={(v) => {
+            setOffset(0)
+            setAccessFilter({ value: v, rejected: '' })
+            writeAccessFilterToUrl(v)
+          }}
+        >
+          <SelectTrigger className="w-44" aria-label="访问级别筛选" data-testid="app-access-filter">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {ACCESS_FILTERS.map((f) => (
+              <SelectItem key={f.value} value={f.value}>{f.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {(q !== '' || status !== 'all' || accessFilterActive) && (
           <Button
             type="button"
             variant="ghost"
             size="sm"
             data-testid="app-clear-filters"
-            onClick={() => { setQInput(''); setQ(''); setStatus('all'); setOffset(0) }}
+            onClick={() => {
+              setQInput(''); setQ(''); setStatus('all'); setOffset(0)
+              setAccessFilter({ value: ACCESS_FILTER_ALL, rejected: '' })
+              writeAccessFilterToUrl(ACCESS_FILTER_ALL)
+            }}
           >
             清除筛选
           </Button>
@@ -792,6 +987,49 @@ export default function Apps() {
               : `共 ${total} 条${shown > 0 ? `,当前显示第 ${pageStart + 1}–${pageStart + shown} 条` : ''}`}
         </span>
       </form>
+
+      {/* URL 里带来的非法访问级别（例如旧书签 `?access=public`）：**不能静默当成"全部"**，
+          否则管理员以为筛过了、其实看的是全集。消息只说两值口径（唯一一份实现）。 */}
+      {accessFilter.rejected !== '' && (
+        <p
+          data-testid="app-access-rejected"
+          role="alert"
+          aria-live="assertive"
+          className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          {accessLevelRejectionMessage(accessFilter.rejected)}
+        </p>
+      )}
+
+      {/* 服务端还不支持 `access=` 时的**显式降级**：筛选只作用于本页，数字与翻页仍是
+          未筛选全集。不说明就等于给管理员一个假的"筛过了"。 */}
+      {accessFilterActive && !accessFilterSupported && !loadError && (
+        <p data-testid="app-access-local-note" className="rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground">
+          服务端未回显访问级别筛选（`GET /wasm-apps` 尚不支持 `access=`）：当前筛选只在**本页 {shown} 条**内生效，
+          上面的"共 N 条"与翻页仍是未筛选全集。历史 public 行按「登录后全员」口径判定。
+        </p>
+      )}
+
+      {/* 历史值提示：筛到历史行时给一句可核对的话（不隐藏、也不说成"公开"）。 */}
+      {accessFilterActive && accessFilterSupported && legacyShown > 0 && (
+        <p data-testid="app-access-legacy-note" className="text-xs text-muted-foreground">
+          本页有 {legacyShown} 条应用仍是历史值 public（已退役，服务端按「登录后全员」执行）；
+          如需只给部分人使用，请让负责人在应用配置里改为 whitelist 并发布新版本。
+        </p>
+      )}
+
+      {/* 打开次数取数失败（F16）：明说"数据源不可用"，列表里那一列显示「—」。
+          **不得静默显示 0** —— 管理员会据此判断"这个应用没人用"。 */}
+      {canRead && opensFailure !== null && (
+        <div className="space-y-1" data-testid="apps-opens-failure-block">
+          <p data-testid="apps-opens-failure" role="alert" aria-live="polite" className="rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground">
+            {opensFailure.text}
+          </p>
+          <Button variant="outline" size="sm" data-testid="apps-opens-retry" onClick={() => { void loadOpens() }}>
+            <RefreshCw className="mr-1 h-4 w-4" />重试打开次数
+          </Button>
+        </div>
+      )}
 
       {loading ? (
         <EmptyState icon={<Boxes className="h-6 w-6" />} title="加载中…" desc="请稍候" />
@@ -827,13 +1065,20 @@ export default function Apps() {
               </Button>
             }
           />
+        ) : filteredEmptyLocally ? (
+          // 本页没有命中（服务端不支持该筛选）≠ 系统里没有：两句话必须分开说。
+          <EmptyState
+            icon={<Boxes className="h-6 w-6" />}
+            title="本页没有匹配该访问级别的应用"
+            desc="服务端尚未支持按访问级别过滤，当前只在本页内筛选；其他页可能有匹配项，可翻页或清除筛选。"
+          />
         ) : (
           // 加载失败时 apps 必为空,且上面 loadError 分支已接管 —— 走到这里就是
           // 服务端如实回答"没有数据"(写操作失败时 apps 非空,走表格分支)。
           <EmptyState
             icon={<Boxes className="h-6 w-6" />}
-            title={q !== '' || status !== 'all' ? '没有匹配的应用' : '暂无应用'}
-            desc={q !== '' || status !== 'all' ? '换个关键词或状态再试' : '员工发布的 WASM 应用将出现在这里'}
+            title={q !== '' || status !== 'all' || accessFilterActive ? '没有匹配的应用' : '暂无应用'}
+            desc={q !== '' || status !== 'all' || accessFilterActive ? '换个关键词或筛选条件再试' : '员工发布的 WASM 应用将出现在这里'}
           />
         )
       ) : (
@@ -846,17 +1091,22 @@ export default function Apps() {
                 <TableHead>状态</TableHead>
                 <TableHead>负责人</TableHead>
                 <TableHead>当前版本</TableHead>
+                {/* F16（§8.9 管理端出口 ①）：每应用今日 / 近 7 日 PV+UV。
+                    数据来自跨应用聚合；聚合不可用时这里是「—」+ 页面上方的显式提示，
+                    **不是 0**（把"读不到"显示成 0 会被读成"没人用"）。 */}
+                <TableHead>打开次数</TableHead>
                 <TableHead>更新时间</TableHead>
                 <TableHead className="sticky right-0 z-10 bg-muted/60 text-right backdrop-blur-sm">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {apps.map((row) => {
+              {visibleApps.map((row) => {
                 const am = accessMeta(row.access)
                 const sm = statusMeta(row)
                 const isBusy = busy.startsWith(`${row.app_id}:`)
                 const frozen = row.frozen_at !== null && row.frozen_at !== ''
                 const pendingCount = row.pending_count ?? (row.pending_releases ?? []).length
+                const orow = opensRows[row.app_id]
                 return (
                   <TableRow key={row.app_id}>
                     <TableCell className="max-w-[16rem]">
@@ -864,7 +1114,10 @@ export default function Apps() {
                       <div className="truncate font-mono text-xs text-muted-foreground" title={row.app_id}>{row.app_id}</div>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={am.variant}>{am.label}</Badge>
+                      {/* 历史 public 渲染成「已退役（历史值）」并带解释；不显示裸值、
+                          也不显示成"公开"（会让人以为匿名仍可达），更不隐藏
+                          （隐藏 = 这些应用的访问级别看起来丢了）。 */}
+                      <Badge variant={am.variant} title={am.title} data-testid={`app-access-${row.app_id}`}>{am.label}</Badge>
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-wrap items-center gap-1">
@@ -888,6 +1141,26 @@ export default function Apps() {
                     </TableCell>
                     <TableCell>{row.owner || '—'}</TableCell>
                     <TableCell className="font-mono text-sm">{row.current_version || '—'}</TableCell>
+                    <TableCell className="whitespace-nowrap text-xs">
+                      {/* 打开次数（F16）：聚合不可用时整格显示「—」并附页面上方提示。
+                          聚合可用但该应用没有行 ⇒ 窗口内没有打开记录（真 0）。 */}
+                      {opensFailure !== null ? (
+                        <span data-testid={`app-opens-cell-${row.app_id}`} title={opensFailure.text}>—</span>
+                      ) : (
+                        <div data-testid={`app-opens-cell-${row.app_id}`} title="PV=每次打开 +1（不去重）；UV=按用户去重（服务端聚合）">
+                          <div>
+                            今日 <span className="font-mono">{countText(orow?.today_pv)}</span>
+                            {' / '}
+                            <span className="font-mono">{countText(orow?.today_uv)}</span>
+                          </div>
+                          <div className="text-muted-foreground">
+                            近 {OPENS_WINDOW_DAYS} 日 <span className="font-mono">{countText(orow?.window_pv)}</span>
+                            {' / '}
+                            <span className="font-mono">{countText(orow?.window_uv)}</span>
+                          </div>
+                        </div>
+                      )}
+                    </TableCell>
                     <TableCell className="whitespace-nowrap text-muted-foreground">{fmtTime(row.updated_at)}</TableCell>
                     {/* 操作列:窄屏(375px)下**吸右**。此前它整体落在视口之外
                         (`right` 632~782 > 375),管理员只看得到列表、点不到任何处置
@@ -1406,6 +1679,31 @@ export default function Apps() {
             </section>
           )}
 
+          {/* F16 ② 打开次数（契约 §8.9 / §19 Q11：应用页显示打开次数 + 隐私说明）：
+              与运行诊断同层，数据源是 :app_id/opens（独立取数，端点在不在都不拖累
+              其他区块）。概览用列表那份跨应用聚合，取不到时该处显示 —。 */}
+          {detail && (
+            <AppOpensSection
+              appId={detail.app_id}
+              canRead={canRead}
+              overview={(() => {
+                const r = opensRows[detail.app_id]
+                if (r === undefined) return null
+                return {
+                  days: OPENS_WINDOW_DAYS,
+                  todayPv: r.today_pv,
+                  todayUv: r.today_uv,
+                  windowPv: r.window_pv,
+                  windowUv: r.window_uv,
+                }
+              })()}
+            />
+          )}
+
+          {/* §21.1 第 12 问 / §21.4：应用详情页的 AI 用量面板（次数/token/费用），
+              与打开计数同页展示；无归因数据时是空状态而不是 0。 */}
+          {detail && <AppAiUsageSection appId={detail.app_id} canRead={canRead} />}
+
           {/* 运行诊断(P1-9):管理端此前零入口,排障只能找发布者要令牌。 */}
           {detail && (
             <section className="space-y-2 rounded-md border p-3" data-testid="diag-block">
@@ -1475,6 +1773,9 @@ export default function Apps() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* 公告模板（§19 Q13）：面向员工的访问级别变更 / 客户端专属打开方式文案。 */}
+      <AnnouncementTemplatesDialog open={announceOpen} onOpenChange={setAnnounceOpen} />
     </div>
   )
 }

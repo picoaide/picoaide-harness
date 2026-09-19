@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
+	"github.com/picoaide/picoaide/internal/wasmapp/appserver"
 	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
@@ -42,7 +44,7 @@ import (
 // 源码文本上完全看不出来（见该用例的注释）。
 //
 // 变异验证（改回缺陷实现时哪条必红）：
-//   - 去掉 checkStartupMemory 的 `if !enabled` ⇒ TestMemorySelfCheckSkippedWhenDisabled 必红；
+//   - 放宽内存四笔账判据（恒返回 nil）⇒ TestMemorySelfCheckFailClosedWhenEnabled 必红；
 //   - 把 Source=none 的跳过分支删掉（拿 0 去判）⇒ TestMemorySelfCheckSkipsWhenUnknownButSaysSo 必红；
 //   - 自检改回 readMemAvailable（只看 /proc）⇒ TestMemorySelfCheckUsesCgroupAwareAvailability 必红；
 //   - 启用档放宽判据（例如恒返回 nil）⇒ TestMemorySelfCheckFailClosedWhenEnabled 必红；
@@ -53,29 +55,17 @@ import (
 //   - 删掉 wasmapp.go 的 `uploadCleanup.Start(ctx)` ⇒ TestUploadCleanupSchedulerIsWired 必红
 //     （源码文本断言看不出这一条，这正是它存在的理由）。
 
-// TestMemorySelfCheckSkippedWhenDisabled：审计 P2-8 —— 未启用应用子域时
-// 内存四笔账（实例池/编译/上传/缓存）一笔都不会被用到，不该因此拒绝启动
-// （此前 4 GiB 容器直接起不来：要求 MemAvailable ≥ 3.56 GiB）。
-func TestMemorySelfCheckSkippedWhenDisabled(t *testing.T) {
-	var lines []string
-	logf := func(format string, args ...any) { lines = append(lines, format) }
-
-	if err := checkStartupMemory(false, memAvail(1), readyz.DefaultMemoryPlan(), logf); err != nil {
-		t.Fatalf("未启用子域时必须跳过内存自检（不能挡住启动）：%v", err)
-	}
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "跳过内存四笔账自检") {
-		t.Fatalf("跳过必须是**显式的日志**（不许静默）：%q", joined)
-	}
-	if strings.Contains(joined, "memory budget") {
-		t.Fatalf("未启用时不该打印四笔账明细：%q", joined)
-	}
-}
+// ⚠️ `TestMemorySelfCheckSkippedWhenDisabled` 已随 W4 删除：它断言"未启用应用子域时
+// 跳过内存四笔账自检"（审计 P2-8 的按 enabled 分档）。客户端专属模型下**没有"未启用"
+// 这个档位** —— 应用平台始终在服务（`/api/client/v2/apps/wasm/*` 无条件挂载），
+// 四笔账随时会被用到 ⇒ 判据全量生效（这正是 §4.3 的原话"拒绝启动而不是等 OOM"）。
+// 该档位的消失由 `TestMemorySelfCheckFailClosedWhenEnabled` +
+// `TestMemorySelfCheckSkipsWhenUnknownButSaysSo` 继续守（判据一点没放宽）。
 
 // TestMemorySelfCheckFailClosedWhenEnabled：启用子域时判据**一点没放宽** ——
 // 理论峰值 > 可用内存 70% ⇒ 拒绝启动（§4.3：拒绝启动而不是等 OOM）。
 func TestMemorySelfCheckFailClosedWhenEnabled(t *testing.T) {
-	if err := checkStartupMemory(true, memAvail(1), readyz.DefaultMemoryPlan(), func(string, ...any) {}); err == nil {
+	if err := checkStartupMemory(memAvail(1), readyz.DefaultMemoryPlan(), func(string, ...any) {}); err == nil {
 		t.Fatal("启用子域 + 极小可用内存 ⇒ 必须拒绝启动")
 	}
 	// 各笔账之和恰好卡在 70% 水位 ⇒ 通过；少 1 字节 ⇒ 拒绝。
@@ -85,15 +75,15 @@ func TestMemorySelfCheckFailClosedWhenEnabled(t *testing.T) {
 		int64(plan.Instances)*plan.AppDBPageCachePerHandleBytes
 	guard := int64(limits.MemoryPeakGuardPercent)
 	avail := (need*100 + guard - 1) / guard
-	if err := checkStartupMemory(true, memAvail(avail), readyz.DefaultMemoryPlan(), func(string, ...any) {}); err != nil {
+	if err := checkStartupMemory(memAvail(avail), readyz.DefaultMemoryPlan(), func(string, ...any) {}); err != nil {
 		t.Fatalf("恰好等于水位应通过：%v", err)
 	}
-	if err := checkStartupMemory(true, memAvail(avail-1), readyz.DefaultMemoryPlan(), func(string, ...any) {}); err == nil {
+	if err := checkStartupMemory(memAvail(avail-1), readyz.DefaultMemoryPlan(), func(string, ...any) {}); err == nil {
 		t.Fatal("超过水位 1 字节必须拒绝启动（判据不得放宽）")
 	}
 	// 正常机器：放行 + 明细进日志（运维据此看到各笔账的构成与**内存来源**）。
 	var lines []string
-	if err := checkStartupMemory(true, memAvail(64<<30), readyz.DefaultMemoryPlan(), func(format string, args ...any) {
+	if err := checkStartupMemory(memAvail(64<<30), readyz.DefaultMemoryPlan(), func(format string, args ...any) {
 		lines = append(lines, fmt.Sprintf(format, args...))
 	}); err != nil {
 		t.Fatalf("64 GiB 可用内存应通过：%v", err)
@@ -122,7 +112,7 @@ func TestMemorySelfCheckSkipsWhenUnknownButSaysSo(t *testing.T) {
 	unknown := readyz.MemoryAvailability{Source: readyz.MemorySourceNone, Detail: "两个来源都读不到"}
 	var lines []string
 	logf := func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
-	if err := checkStartupMemory(true, unknown, readyz.DefaultMemoryPlan(), logf); err != nil {
+	if err := checkStartupMemory(unknown, readyz.DefaultMemoryPlan(), logf); err != nil {
 		t.Fatalf("读不到可用内存时不得拒绝启动（保留可部署性）：%v", err)
 	}
 	joined := strings.Join(lines, "\n")
@@ -149,11 +139,11 @@ func TestMemorySelfCheckUsesCgroupAwareAvailability(t *testing.T) {
 		Source: readyz.MemorySourceCgroup,
 		Detail: "cgroup 限额 256 MiB − 用量 0 MiB = 剩余 256 MiB；宿主 MemAvailable 7168 MiB（取较小者：cgroup 剩余）",
 	}
-	if err := checkStartupMemory(true, limited, readyz.DefaultMemoryPlan(), func(string, ...any) {}); err == nil {
+	if err := checkStartupMemory(limited, readyz.DefaultMemoryPlan(), func(string, ...any) {}); err == nil {
 		t.Fatal("256 MiB 容器 + 默认档必须拒绝启动（宿主 7 GiB 不该放行）")
 	}
 	// 同一台机器、没有 cgroup 限额（来源=host）⇒ 放行：证明拒绝来自 cgroup 那一笔。
-	if err := checkStartupMemory(true, memAvail(7<<30), readyz.DefaultMemoryPlan(), func(string, ...any) {}); err != nil {
+	if err := checkStartupMemory(memAvail(7<<30), readyz.DefaultMemoryPlan(), func(string, ...any) {}); err != nil {
 		t.Fatalf("宿主 7 GiB 且无 cgroup 限额应放行：%v", err)
 	}
 }
@@ -225,7 +215,7 @@ func TestWasmPlatformWiringPresent(t *testing.T) {
 		needle string
 		why    string
 	}{
-		{"checkStartupMemory(enabled, readMemoryAvailability(), plan, log.Printf)", "内存四笔账自检必须按 enabled 分档（P2-8）、按部署档位算账，且用 cgroup 感知的读取结果（R1-rt-1）"},
+		{"checkStartupMemory(readMemoryAvailability(), plan, log.Printf)", "内存四笔账自检必须按部署档位算账，且用 cgroup 感知的读取结果（R1-rt-1）；W4 起不再有\"未启用\"档位（应用平台始终在服务）"},
 		{"MemAvailable: readMemoryAvailability", "可用内存的来源与数值必须暴露在 /readyz 上（R1-rt-1）"},
 		{"memprofile.FromEnv(os.Getenv)", "内存档位必须来自部署配置（未知档位 fail-loud）"},
 		{"MemoryProfile: prof,", "档位必须真的喂给 appserver（声明与执行同一份数）"},
@@ -257,13 +247,11 @@ func TestWasmPlatformWiringPresent(t *testing.T) {
 // 触发 `log.Fatalf` 的自检项都与应用子域开关绑定，本用例显式关掉基域，只测接线本身）。
 func TestUploadCleanupSchedulerIsWired(t *testing.T) {
 	// 装配里有两处 fail-closed 会 log.Fatalf（可信代理自检 / 内存四笔账），都只在启用
-	// 应用子域时生效；显式关掉基域，让用例只回答"清理调度有没有接线"。
-	t.Setenv(EnvAppsBaseDomain, "")
 	db := requireRealDB(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p := setupWasmPlatform(ctx, db, nil, t.TempDir(), "127.0.0.1:8080")
+	p := setupWasmPlatform(ctx, db, t.TempDir())
 	if p == nil {
 		t.Fatal("setupWasmPlatform 返回 nil")
 	}
@@ -359,11 +347,9 @@ func TestWasmInstanceMemoryComesFromSettingAfterRestart(t *testing.T) {
 	}
 
 	// 装配期有两处 fail-closed 只在启用应用子域时生效（可信代理 / 四笔账），
-	// 显式关掉基域，让用例只回答"内存上限来自哪里"。
-	t.Setenv(EnvAppsBaseDomain, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p := setupWasmPlatform(ctx, db, nil, t.TempDir(), "127.0.0.1:8080")
+	p := setupWasmPlatform(ctx, db, t.TempDir())
 	if p == nil {
 		t.Fatal("setupWasmPlatform 返回 nil")
 	}
@@ -470,10 +456,9 @@ func TestWasmSavedLimitsFromOlderBuildStillApplies(t *testing.T) {
 		t.Fatalf("写入旧版限制项设置失败: %v", err)
 	}
 
-	t.Setenv(EnvAppsBaseDomain, "") // 关掉两处只在启用子域时生效的 fail-closed
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p := setupWasmPlatform(ctx, db, nil, t.TempDir(), "127.0.0.1:8080")
+	p := setupWasmPlatform(ctx, db, t.TempDir())
 	if p == nil {
 		t.Fatal("setupWasmPlatform 返回 nil")
 	}
@@ -517,14 +502,13 @@ func TestWasmSavedLimitsFromOlderBuildStillApplies(t *testing.T) {
 // 变异验证：去掉 adminUnpublish / adminFreeze 里的 h.evictApp(appID)
 // ⇒ 本用例对应断言必红（缓存条目仍是 1）。
 func TestWasmAdminDisposalEvictsRuntimeCache(t *testing.T) {
-	t.Setenv(EnvAppsBaseDomain, "") // 关掉子域自检；本用例只回答"处置有没有逐出"
 	db := requireRealDB(t)
 	ensureCompileChildNextToTestBinary(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dataRoot := t.TempDir()
-	p := setupWasmPlatform(ctx, db, nil, dataRoot, "127.0.0.1:8080")
+	p := setupWasmPlatform(ctx, db, dataRoot)
 	if p == nil {
 		t.Fatal("setupWasmPlatform 返回 nil")
 	}
@@ -571,10 +555,14 @@ func TestWasmAdminDisposalEvictsRuntimeCache(t *testing.T) {
 
 	serve := func() {
 		t.Helper()
+		// 客户端专属模型：请求由桌面客户端的协议 handler 合成
+		// （`<app scheme>://<app_id>` + 注入身份），统一走 ServeClientRequest。
+		req := httptest.NewRequest(http.MethodGet, "http://"+appID+"/", nil)
+		req.URL.Scheme, req.URL.Host, req.Host = appserver.ClientScheme, appID, appID
 		rec := httptest.NewRecorder()
-		p.AppServer.ServeApp(rec, httptest.NewRequest("GET", "http://"+appID+".example.com/", nil), appID)
+		p.AppServer.ServeClientRequest(rec, req, appID, &serverstore.User{ID: 1, Username: "alice"}, "0123456789abcdef0123456789abcdef")
 		if rec.Code != 200 {
-			t.Fatalf("应用子域请求 = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			t.Fatalf("客户端应用请求 = %d, want 200; body=%s", rec.Code, rec.Body.String())
 		}
 	}
 

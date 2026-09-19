@@ -291,6 +291,7 @@
     "@picoaide/dsh-cron": "workspace:*",
     "@picoaide/dsh-enterprise": "workspace:*",
     "@picoaide/dsh-wasm-apps": "workspace:*",
+    "@picoaide/dsh-wasm-apps-host": "workspace:*",
     "adm-zip": "^0.6.0",
     "dsh-memory-evolve": "workspace:*",
     "koffi": "3.1.5",

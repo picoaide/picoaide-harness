@@ -6,12 +6,19 @@ import {
 
 /** 一份最小可用的渠道包内容(与服务端 channel.json 同文件)。 */
 function channelValue(overrides: Record<string, unknown> = {}): unknown {
+  const { desktop, ...rest } = overrides
   return {
     schema: 1,
     channel_id: 'acme',
     identity: { display_name: 'Acme AI' },
     defaults: { server_url: 'https://ai.acme.example.com' },
-    ...overrides,
+    // §10：**每个**渠道包都必须声明应用源 scheme（字段缺失 = 注入链断了 ⇒ fail-loud）。
+    // 浅合并 `desktop`：调用方只想覆盖 deep_link_scheme 时不该顺手把必填字段抹掉
+    // （那会让"字段缺失 fail-loud"的用例变成假的 —— 它测的其实是夹具写错了）。
+    desktop: typeof desktop === 'object' && desktop !== null && !Array.isArray(desktop)
+      ? { app_origin_scheme: 'acme-app', ...(desktop as Record<string, unknown>) }
+      : desktop ?? { app_origin_scheme: 'acme-app' },
+    ...rest,
   }
 }
 
@@ -28,6 +35,7 @@ describe('desktop channel profile', () => {
       appId: undefined,
       // 未配置深链 scheme → 回落官方值(行为不变)
       deepLinkScheme: 'picoaide',
+      appOriginScheme: 'acme-app',
       deepLinkName: 'Acme AI',
       // 只配了 identity.display_name:没有 short_name,登录页名字按服务端同序
       // 回落中性占位(CI 强制每个渠道必须写 short_name,交付构建到不了这里);
@@ -52,6 +60,7 @@ describe('desktop channel profile', () => {
       homeDir: '.picoaide-harness-acme',
       appId: undefined,
       deepLinkScheme: 'picoaide',
+      appOriginScheme: 'acme-app',
       deepLinkName: 'Acme Assistant',
       brand: {
         channelId: 'acme',
@@ -123,7 +132,7 @@ describe('desktop channel profile', () => {
   it('uses the channel deep-link scheme when configured', () => {
     // 浏览器回调跳回客户端时的确认框里就是它 —— 渠道客户不该看到厂商名。
     const profile = parseDesktopChannelProfile(channelValue({
-      desktop: { deep_link_scheme: 'acmeai', deep_link_name: 'Acme AI Link' },
+      desktop: { deep_link_scheme: 'acmeai', deep_link_name: 'Acme AI Link', app_origin_scheme: 'acmeai-app' },
     }))
     expect(profile?.deepLinkScheme).toBe('acmeai')
     expect(profile?.deepLinkName).toBe('Acme AI Link')

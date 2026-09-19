@@ -5759,6 +5759,26 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@picoaide/dsh-wasm-apps-host@workspace:*, @picoaide/dsh-wasm-apps-host@workspace:packages/host/wasm-apps-host":
+  version: 0.0.0-use.local
+  resolution: "@picoaide/dsh-wasm-apps-host@workspace:packages/host/wasm-apps-host"
+  dependencies:
+    "@deepseek-ai/cordis": "npm:4.0.2"
+    "@deepseek-ai/dsh-host-webserver": "npm:0.1.5-rc.2"
+    "@deepseek-ai/dsh-invariants": "npm:0.1.5-rc.2"
+    "@deepseek-ai/schemastery": "npm:^3.18.2"
+    "@picoaide/dsh-browser": "workspace:*"
+    "@types/node": "npm:^22.20.0"
+    electron: "npm:43.4.0"
+    tsdown: "npm:0.22.2"
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
+  peerDependencies:
+    "@deepseek-ai/cordis": 4.0.2
+    electron: 43.4.0
+  languageName: unknown
+  linkType: soft
+
 "@picoaide/dsh-wasm-apps@workspace:*, @picoaide/dsh-wasm-apps@workspace:packages/client/wasm-apps":
   version: 0.0.0-use.local
   resolution: "@picoaide/dsh-wasm-apps@workspace:packages/client/wasm-apps"
@@ -8037,6 +8057,7 @@ __metadata:
     "@picoaide/dsh-cron": "workspace:*"
     "@picoaide/dsh-enterprise": "workspace:*"
     "@picoaide/dsh-wasm-apps": "workspace:*"
+    "@picoaide/dsh-wasm-apps-host": "workspace:*"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
     adm-zip: "npm:^0.6.0"

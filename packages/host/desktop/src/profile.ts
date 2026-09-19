@@ -6,7 +6,13 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { evaluate, isJsExpr, type EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
-import { readDesktopChannelProfile, type DesktopChannelProfile } from './desktop-channel.ts'
+import {
+  DEFAULT_APP_ORIGIN_SCHEME,
+  DEFAULT_DEEP_LINK_SCHEME,
+  OFFICIAL_PRODUCT_NAME,
+  readDesktopChannelProfile,
+  type DesktopChannelProfile,
+} from './desktop-channel.ts'
 import {
   composeEntries,
   healProfilesModuleFallback,
@@ -64,6 +70,13 @@ const ACCOUNT_CARD_PATCH_PATH = join(dirname(createRequire(import.meta.url).reso
 const WASM_APPS_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-wasm-apps/package.json')), 'cordis.patch.yml')
 const CONNECTORS_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-connectors/package.json')), 'cordis.patch.yml')
 const BROWSER_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-browser/package.json')), 'cordis.patch.yml')
+// 客户端专属 WASM 应用 origin（`picoaide-app://` 协议 handler + 本机打开路由）：
+// 与其余自有插件同构 —— 桌面包通过 profile 组装期注入，插件自己不解析随包路径。
+const WASM_APPS_HOST_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-wasm-apps-host/package.json')), 'cordis.patch.yml')
+/** 宿主行 id：scheme / 产品名注入点（见 prepareDesktopProfile 末尾）。 */
+const WASM_APPS_HOST_ROW_ID = 'pico-wasm-apps-host'
+/** 浏览器行 id：应用源 scheme 注入点（导航闸门按 surface 分流要用它）。 */
+const BROWSER_ROW_ID = 'pico-browser'
 const MEMORY_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('dsh-memory-evolve/package.json')), 'cordis.patch.yml')
 const CRON_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-cron/package.json')), 'cordis.patch.yml')
 const DIRECTORY_PICKER_ROW_ID = 'directory-picker'
@@ -521,6 +534,7 @@ export async function prepareDesktopProfile(
   const wasmAppsPatches = loadOverlayPatches(BIN_NAME, WASM_APPS_PATCH_PATH)
   const connectorsPatches = loadOverlayPatches(BIN_NAME, CONNECTORS_PATCH_PATH)
   const browserPatches = loadOverlayPatches(BIN_NAME, BROWSER_PATCH_PATH)
+  const wasmAppsHostPatches = loadOverlayPatches(BIN_NAME, WASM_APPS_HOST_PATCH_PATH)
   const memoryPatches = loadOverlayPatches(BIN_NAME, MEMORY_PATCH_PATH)
   const cronPatches = loadOverlayPatches(BIN_NAME, CRON_PATCH_PATH)
   const bundlePatches: PatchOptions[] = []
@@ -536,6 +550,9 @@ export async function prepareDesktopProfile(
     // WASM 应用中心（客户端半边）：与 account-card 同层，晚于 enterprise
     // （它读 enterprise 提供的本地路由与会话）。
     bundlePatches.push(...wasmAppsPatches)
+    // 客户端专属 WASM 应用 origin：与 wasm-apps（应用中心客户端半边）同层，
+    // 它读 enterprise 提供的 `picoSession` 与本机 webServer。
+    bundlePatches.push(...wasmAppsHostPatches)
     bundlePatches.push(...connectorsPatches)
     bundlePatches.push(...browserPatches)
     bundlePatches.push(...memoryPatches)
@@ -705,6 +722,31 @@ export async function prepareDesktopProfile(
     },
   })
   patches.push(...channelProfilePatches(channelProfile, rows))
+  // 深链 scheme 必须**注入**应用协议插件行，不能让插件自己去读随包 channel.json
+  // （enterprise 的 same 教训：tsdown 内联后 `../build/channel.json` 指向不存在的
+  // 目录，渠道客户端的深链会被官方 scheme 的严格闸门丢掉）。官方构建没有渠道包，
+  // 这里补上产品缺省 scheme —— 注入点唯一，插件侧不写死 `picoaide://`。
+  if (rows.has(WASM_APPS_HOST_ROW_ID)) {
+    patches.push({
+      id: WASM_APPS_HOST_ROW_ID,
+      // 三个值同源（§10/§16.1）：渠道包字段 → 组装期注入 → 插件 config。插件侧
+      // 与渲染层都不自行读随包 `channel.json`（tsdown 内联后那个路径不成立）。
+      config: {
+        deepLinkScheme: channelProfile?.deepLinkScheme ?? DEFAULT_DEEP_LINK_SCHEME,
+        appOriginScheme: channelProfile?.appOriginScheme ?? DEFAULT_APP_ORIGIN_SCHEME,
+        productName: channelProfile?.productName ?? OFFICIAL_PRODUCT_NAME,
+      },
+    })
+  }
+  // 渲染层经本机只读路由 `GET /api/pico/wasm-apps/channel` 取渠道 scheme（§16.1）：
+  // 浏览器面也要知道应用源 scheme 才能按 surface 分流导航闸门（应用窗口放行自己的
+  // origin、浏览器标签一律拒）。同一个值、同一个注入点，两处消费。
+  if (rows.has(BROWSER_ROW_ID)) {
+    patches.push({
+      id: BROWSER_ROW_ID,
+      config: { appOriginScheme: channelProfile?.appOriginScheme ?? DEFAULT_APP_ORIGIN_SCHEME },
+    })
+  }
   return {
     homeDir: home,
     profile,

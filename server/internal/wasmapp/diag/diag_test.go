@@ -44,7 +44,6 @@ func TestHintsCoverRequiredReasons(t *testing.T) {
 		apperr.CodeDBLimit,
 		apperr.CodeDBDenied,
 		apperr.CodeAppQueueFull,
-		apperr.CodeAIBalanceInsufficient,
 	}
 	for _, code := range required {
 		hints := HintsFor(string(code))

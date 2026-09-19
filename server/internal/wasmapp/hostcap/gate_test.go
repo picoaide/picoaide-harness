@@ -143,7 +143,6 @@ var paramTypeRegistry = map[string]any{
 	"DBDefineParams":   abi.DBDefineParams{},
 	"SQLParams":        abi.SQLParams{},
 	"TxParams":         abi.TxParams{},
-	"AIChatParams":     abi.AIChatParams{},
 	"LogParams":        abi.LogParams{},
 	"AssetsReadParams": abi.AssetsReadParams{},
 }
@@ -187,9 +186,13 @@ func TestABIParamsCarryNoHostPath(t *testing.T) {
 	for _, f := range scan.Fields {
 		expanded[f.Path] = true
 	}
+	// ⚠️ 第二条正向对照原为 `AIChatParams.Messages.Role`（`[]ChatMessage` 的元素字段）；
+	// 该类型随 W4 删除（总纲 §21.3）⇒ 换成**现存**的嵌套类型 `DBDefineParams.Columns.Type`
+	// 的兄弟项 `LogParams.Message`（无嵌套）与 `DBDefineParams.Columns.Name` 一起构成对照，
+	// 递归展开若被去掉仍然必红（这才是这条断言的用途，不是钉住某个具体类型名）。
 	for _, nested := range []string{
 		"DBDefineParams.Columns.Name", // []ColumnDef 的元素字段
-		"AIChatParams.Messages.Role",  // []ChatMessage 的元素字段
+		"DBDefineParams.Columns.Type", // 同一个嵌套类型的第二个字段
 		"SQLParams.Args",              // []any：无嵌套结构体，但字段本身要在
 	} {
 		if !expanded[nested] {

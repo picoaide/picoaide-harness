@@ -31,7 +31,6 @@ import (
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
 	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
-	"github.com/picoaide/picoaide/internal/wasmapp/session"
 	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 )
 
@@ -69,15 +68,14 @@ type Deps struct {
 	// Wasm 是 WASM 应用平台的操作面（设计基线
 	// docs/planning/2026-09-17-wasm-app-platform.md §8）。
 	//
-	// ⚠️ 管理面只在**主站**暴露（§4.8 / F-52e）：应用子域走独立路由树
-	// （edge.HostGate），主站路由在子域结构上不可达，因此这里挂的管理
-	// 端点不会泄漏到 `<app_id>.<基域>`。
+	// ⚠️ 客户端专属模型（2026-09-19）之后不再有"应用子域路由树"：应用请求由桌面
+	// 客户端的协议 handler 合成、经 `/api/client/v2/apps/wasm/:app_id/request` 进入
+	// （见 registerClientV2 里的 wasm 应用分组），因此这里的管理端点天然只在主站可见。
 	Wasm *wasmapi.Handlers
-	// WasmSession 是员工浏览器会话与一次性换票（R12/R16）。
-	//
-	// 这几个是**主站 HTML 面**（不是 API）：`/login`、`/logout`、`/app-ticket`。
-	// 与 `/`、`/portal`、`/admin/*` 同属"产品 HTML 面"，不受 API 强制 JSON 约束。
-	WasmSession *session.Manager
+	// ⚠️ `WasmSession *session.Manager` 与它带来的五条主站 HTML 路由
+	// （`GET|POST /login`、`POST /logout`、`GET|POST /app-ticket`）已随 W4 删除：
+	// 员工浏览器会话的唯一用途是"给应用子域换票"，而应用不再有对外主机名，
+	// 身份一律由桌面客户端持员工 bearer 注入（总纲 §8.4）。
 	// SkillSeed 内置技能下发面（随服务端镜像发布：/opt/picoaide/skills）。
 	// 见 internal/wasmapp/skillseed —— 与 ClientRelease 同一范式，只是下发的是
 	// 技能包而不是安装包；客户端按需安装，不自动装。
@@ -109,22 +107,11 @@ func Register(r *gin.Engine, deps Deps) {
 	r.GET("/updates/client/*file", deps.ClientRelease.File)
 	r.HEAD("/updates/client/*file", deps.ClientRelease.File)
 
-	// ================= 员工浏览器会话与一次性换票（R12/R16）=================
-	// 这四个是**主站 HTML 面**（不是 API，不适用 JSON 强制约束）：
-	//   GET  /login       员工登录页（账密；语言按请求解析）
-	//   POST /login       登录提交
-	//   POST /logout      登出（级联吊销该会话下全部应用子域会话）
-	//   GET  /app-ticket  换票确认页（应用子域 302 过来只能发 GET，故有此页）
-	//   POST /app-ticket  签发一次性 code（**POST + Origin == 主站源 + next 白名单**）
-	// 换票端点为什么必须 POST（§4.7/§10.4 第 41 项）：GET 形态会被
-	// `<img src>` / `<iframe>` 这类第三方页面触发，等于把登录态换成可重放的 code。
-	if deps.WasmSession != nil {
-		r.GET("/login", gin.WrapF(deps.WasmSession.LoginPage))
-		r.POST("/login", gin.WrapF(deps.WasmSession.LoginSubmit))
-		r.POST("/logout", gin.WrapF(deps.WasmSession.Logout))
-		r.GET("/app-ticket", gin.WrapF(deps.WasmSession.TicketPage))
-		r.POST("/app-ticket", gin.WrapF(deps.WasmSession.TicketSubmit))
-	}
+	// ⚠️ 员工浏览器会话与一次性换票（`/login`、`/logout`、`/app-ticket`）已随 W4
+	// 整体删除（总纲 §8.4 + §9 迁移 0073）：那是"应用子域"模型的入口，应用改为只在
+	// 桌面客户端内打开之后，平台上不再存在"把浏览器登录态换成应用会话"这条链路。
+	// 员工/管理端的登录面分别是 `/api/client/v2/auth/login` 与
+	// `/api/server/admin/login`（既有，未受影响）。
 
 	// ================= WASM 应用平台操作面（§8）=================
 	registerWasm(r, deps)
@@ -157,6 +144,31 @@ func registerWasm(r *gin.Engine, d Deps) {
 	// （不泄露存在性）；返回体不含制品字节。
 	wg.GET("/:app_id/releases", d.Wasm.MyReleases)
 	wg.GET("/catalog", d.Wasm.Catalog)
+
+	// ===== 客户端专属访问模型（2026-09-19 决策）=====
+	//
+	// 应用只在桌面客户端内可用：客户端注册的自定义协议 handler 把
+	// `picoaide-app://<app_id>/…` 上的请求包成信封送到这里执行，
+	// 身份由客户端注入（它持有员工 bearer）。旧的应用子域 + 换票链路在 W4 波次删除。
+	// 决策与架构：docs/decisions/2026-09-19-wasm-client-internal-origin.md。
+	//
+	// **唯一入口**：`request` 必须持员工令牌（BearerAuth，契约 §4.1）；
+	// 匿名入口（`anon-request`）随匿名面一起删除（契约 §1 第 2 条 / §4.4「无匿名」）。
+	wg.POST("/:app_id/request", d.Wasm.ClientRequest)
+
+	// 持有性证明（app-proof，契约 §20.1/§23.1）：**签发**端点。
+	//
+	// 为什么签发要 BearerAuth：proof 绑的是"哪个员工 + 哪把 bearer"，
+	// 签发本身是"证明你持有这把 bearer 与这把安装私钥"（安装签名见 §23.1）。
+	// 路由是静态段（无 :app_id）：绑定用的 app_id 在请求体里，且必须过 registry 校验
+	// —— 一张 proof 只对一个应用有效（R2S-2/N2：不绑 app_id 就能跨应用重放）。
+	wg.POST("/proof", d.Wasm.AppProofIssue)
+
+	// 打开校验与计数（F16，契约 §5.1b / §8.9）：**每次打开动作调一次**。
+	//
+	// 顺序冻结：BearerAuth（本组中间件）→ app-proof → 应用反查。
+	// 响应头 `X-PicoAide-App-Version` 是客户端内容**缓存键的唯一来源**（R1-DAT-12）。
+	wg.POST("/:app_id/open", d.Wasm.OpenApp)
 
 	// ---- 分片上传与续传（§4.2 / §7.3）----
 	//
@@ -199,10 +211,8 @@ func registerWasm(r *gin.Engine, d Deps) {
 	serverauth.AdminRoute(ag, "GET", "/:app_id/releases", serverauth.PermCapabilityRead, d.Wasm.AdminReleases)
 	serverauth.AdminRoute(ag, "POST", "/:app_id/releases/:version/approve", serverauth.PermCapabilityWrite, d.Wasm.AdminApproveRelease)
 	serverauth.AdminRoute(ag, "POST", "/:app_id/releases/:version/reject", serverauth.PermCapabilityWrite, d.Wasm.AdminRejectRelease)
-	// 应用泛域名配置（2026-09-18 用户要求：应用名 + 泛域名 = 应用访问地址）。
-	// 读用 capability:read（与列表同权限点），写用 capability:write。
-	serverauth.AdminRoute(ag, "GET", "/domain", serverauth.PermCapabilityRead, d.Wasm.AdminBaseDomainGet)
-	serverauth.AdminRoute(ag, "PUT", "/domain", serverauth.PermCapabilityWrite, d.Wasm.AdminBaseDomainPut)
+	// ⚠️ 应用泛域名配置（`GET|PUT /domain`、设置键 `wasm.apps_base_domain`）已随 W4
+	// 删除：应用不再有对外主机名（总纲 §8.4）。历史设置行保留在库里但不再被读取。
 	// 平台限制项（并发/内存）：2026-09-19 用户要求"后台要有配置页面"。
 	// 读用 capability:read（与列表同权限点），写用 capability:write。
 	serverauth.AdminRoute(ag, "GET", "/limits", serverauth.PermCapabilityRead, d.Wasm.AdminLimitsGet)
@@ -217,8 +227,17 @@ func registerWasm(r *gin.Engine, d Deps) {
 	serverauth.AdminRoute(ag, "GET", "/:app_id/diagnostics", serverauth.PermCapabilityRead, d.Wasm.AdminDiagnostics)
 	// runtime 是平台级（无 app 维度）的只读水位：编译队列/缓存、执行槽、调用事件
 	// 丢包计数、磁盘余量，以及"还没有出口"的水位清单。挂在 /limits 同级的静态段上，
-	// 与既有的 /review、/domain、/limits 一样不参与 /:app_id 的通配。
+	// 与既有的 /review、/limits 一样不参与 /:app_id 的通配。
 	serverauth.AdminRoute(ag, "GET", "/runtime", serverauth.PermCapabilityRead, d.Wasm.AdminRuntime)
+	// 打开计数（F16 / §8.9 管理端出口④）：只读，与列表/诊断同权限点。
+	// 数据来自日汇总表（长期保留），明细（含 user_id/部门）仅 capability:read 可见
+	// —— 隐私口径见迁移 0075 与 §8.9 的合规说明。
+	serverauth.AdminRoute(ag, "GET", "/:app_id/opens", serverauth.PermCapabilityRead, d.Wasm.AdminAppOpens)
+	// 看板概览（W5 C2）：**静态段** `opens/summary`，与 `/:app_id/opens` 同层但更具体
+	// ⇒ 由 gin 的静态优先规则命中本行（不会落到 :app_id 通配上）。
+	serverauth.AdminRoute(ag, "GET", "/opens/summary", serverauth.PermCapabilityRead, d.Wasm.AdminOpensSummary)
+	// 应用维度 AI 用量（W5 C4）：数据源是 0076 的 usage.app_id（§21.4 的归因列）。
+	serverauth.AdminRoute(ag, "GET", "/:app_id/ai-usage", serverauth.PermCapabilityRead, d.Wasm.AdminAppAIUsage)
 }
 
 // maxJSONBody 是 /api/client/v2 与 /api/server 下全部端点的默认请求体上限
@@ -242,6 +261,11 @@ var largeBodyRoutes = map[string]struct{}{
 	// 同理：豁免只是豁免，handler 内自己套 MaxBytesReader(8<<20) 并先查 Content-Length。
 	// 开会话与 complete 是**小 JSON**，故意不进这张表。
 	"PUT " + NamespaceClientV2 + "/apps/wasm/uploads/:upload_id/chunks/:index": {},
+	// 客户端专属访问模型的请求信封（2026-09-19）：应用请求体上限 1 MiB
+	//（limits.AppRequestBodyMaxBytes）经 base64 膨胀 4/3 ⇒ 信封可达 ~1.4 MiB，
+	// 超过 1 MiB 默认上限。handler 内自套 MaxBytesReader 并先解码后再判一次。
+	// 只有这一条（没有匿名入口：契约 §4.4「无匿名」）。
+	"POST " + NamespaceClientV2 + "/apps/wasm/:app_id/request": {},
 }
 
 // bodyLimitExempt 判定某路由是否自带更大的请求体上限。

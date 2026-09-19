@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -37,11 +38,17 @@ const demosJSON = `{"demos":[
 
 func writeDemoDir(t *testing.T) string {
 	t.Helper()
+	return writeDemoDirWithManifest(t, demosJSON)
+}
+
+// writeDemoDirWithManifest 用给定清单造演示目录（W4-7 的用例要换一份清单重播）。
+func writeDemoDirWithManifest(t *testing.T, manifest string) string {
+	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "app.wasm"), fakeWasm(), 0o644); err != nil {
 		t.Fatalf("写 app.wasm: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, appseed.ManifestFileName), []byte(demosJSON), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, appseed.ManifestFileName), []byte(manifest), 0o644); err != nil {
 		t.Fatalf("写清单: %v", err)
 	}
 	return dir
@@ -811,5 +818,442 @@ func TestSeedRewritesConfigWithForeignOwner(t *testing.T) {
 	}
 	if string(after) != string(orig) {
 		t.Fatalf("重写后的配置必须等于版本快照：%q ≠ %q", after, orig)
+	}
+}
+
+// ===== W4（2026-09-19「客户端专属」改造）的护栏：磁盘资产改写 + heal 不覆盖标题 =====
+
+// 导出签名是**启动接线（cmd/server/wasmapp_demo.go）依赖的契约**：改签名必须同时改接线，
+// 这里用编译期断言把两者钉在一起（整包编译在并发泳道施工期间可能因别的文件是红的，
+// 这条断言仍然会拦住签名漂移）。
+var _ func(context.Context, *sql.DB, string, func(string, ...any)) (appseed.AssetRewriteResult, error) = appseed.RewritePublicAccessAssets
+
+// assetPathOf 返回某个演示**生效版本**的磁盘资产路径（连同应用行）。
+func assetPathOf(t *testing.T, ctx context.Context, db *sql.DB, dataRoot, appID string) (string, *serverstore.WasmApp) {
+	t.Helper()
+	app, err := serverstore.GetWasmApp(ctx, db, appID)
+	if err != nil {
+		t.Fatalf("GetWasmApp(%s): %v", appID, err)
+	}
+	return demoAssetsPath(dataRoot, appID, app.CurrentReleaseID), app
+}
+
+// assertNoTempFiles 断言资源目录里没有留下原子写用的隐藏临时文件
+// （writeReleaseAssets 的 `.picoaide.app.json.tmp*`）。
+func assertNoTempFiles(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", dir, err)
+	}
+	for _, en := range entries {
+		if strings.HasPrefix(en.Name(), ".") {
+			t.Fatalf("资源目录里留下了原子写的临时文件：%s", en.Name())
+		}
+	}
+}
+
+// TestRewritePublicAccessAssetsRewritesPublicOnDisk 是 W4-6「磁盘资产改写（A 方案）」的判据：
+// 磁盘上残留的 `access=public` 必须被**原子改写**为 `login`，且只动这一个值。
+//
+// 为什么磁盘侧必须改（设计 §9 事实订正 ②）：运行期权威在磁盘资产，应用自己 assets.read 读它；
+// 读侧虽已把 public 映射为 login，但配置里的 public 会让应用可能自行实现一套"匿名可用"行为。
+// 只改 DB（迁移 0074）不改磁盘 ⇒ 磁盘上永久残留 public。
+//
+// 判据五段：
+//  1. 命中行改写：只替换 access 的值，其余字节**逐字保留**（键序/空白/其它键都不动）；
+//  2. 原子替换：inode 变了（temp+fsync+rename），且目录里没有留下临时文件；
+//  3. 未命中的文件（login/whitelist）一个字节都不写；
+//  4. **DB 侧不动**：那是迁移 0074 的职责，本入口只改磁盘（两侧分工不得互相越界）；
+//  5. 幂等：第二次 0 命中、字节不变。
+func TestRewritePublicAccessAssetsRewritesPublicOnDisk(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	dataRoot := t.TempDir()
+	s, err := appseed.New(appseed.Options{DB: db, DataRoot: dataRoot, Dir: writeDemoDir(t), Owner: "admin"})
+	if err != nil {
+		t.Fatalf("appseed.New: %v", err)
+	}
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	pubPath, pubApp := assetPathOf(t, ctx, db, dataRoot, "demo-public")
+	before, err := os.ReadFile(pubPath)
+	if err != nil {
+		t.Fatalf("读资源目录配置: %v", err)
+	}
+	if appcfg.AccessOfConfigJSON(string(before)) != appcfg.AccessPublic {
+		t.Fatalf("前置条件失败：demo-public 的磁盘资产应当是 public，得到 %q", before)
+	}
+	fiBefore, err := os.Stat(pubPath)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	loginPath, _ := assetPathOf(t, ctx, db, dataRoot, "demo-login")
+	loginBefore, err := os.ReadFile(loginPath)
+	if err != nil {
+		t.Fatalf("读 demo-login 配置: %v", err)
+	}
+
+	var logs []string
+	res, err := appseed.RewritePublicAccessAssets(ctx, db, dataRoot, func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+	if err != nil {
+		t.Fatalf("RewritePublicAccessAssets: %v", err)
+	}
+	if res.Apps != 3 || res.Releases != 3 || res.Files != 3 || res.Rewritten != 1 ||
+		res.Missing != 0 || res.Skipped != 0 || len(res.Problems) != 0 {
+		t.Fatalf("统计不对（应 3 应用/3 版本/3 可解析/1 改写/0 跳过）：%+v", res)
+	}
+
+	// ① 只改 access 的值：其余字节逐字保留（紧凑形态）。
+	after, err := os.ReadFile(pubPath)
+	if err != nil {
+		t.Fatalf("复读: %v", err)
+	}
+	want := strings.Replace(string(before), `"access":"public"`, `"access":"login"`, 1)
+	if string(after) != want {
+		t.Fatalf("改写必须只动 access 一个值（其余键逐字保留）：\n got=%q\nwant=%q", after, want)
+	}
+	if appcfg.AccessOfConfigJSON(string(after)) != appcfg.AccessLogin {
+		t.Fatalf("改写后应当是 login：%q", after)
+	}
+	// ② 原子替换（temp+rename ⇒ 另一个 inode）+ 不留临时文件。
+	fiAfter, err := os.Stat(pubPath)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if os.SameFile(fiBefore, fiAfter) {
+		t.Fatal("改写必须走原子替换（临时文件 + rename），不能原地 O_TRUNC 覆盖（同一 inode）")
+	}
+	assertNoTempFiles(t, filepath.Dir(pubPath))
+	// ③ 未命中的文件一个字节都不写。
+	loginAfter, err := os.ReadFile(loginPath)
+	if err != nil {
+		t.Fatalf("复读 demo-login: %v", err)
+	}
+	if string(loginAfter) != string(loginBefore) {
+		t.Fatalf("非 public 的配置不得被改写：\n got=%q\nwant=%q", loginAfter, loginBefore)
+	}
+	// ④ DB 侧不动（迁移 0074 的职责）。
+	dbApp, err := serverstore.GetWasmApp(ctx, db, "demo-public")
+	if err != nil {
+		t.Fatalf("GetWasmApp: %v", err)
+	}
+	if dbApp.ConfigJSON != pubApp.ConfigJSON {
+		t.Fatalf("本入口只改磁盘，不得改 DB（DB 侧归迁移 0074）：\n got=%q\nwant=%q", dbApp.ConfigJSON, pubApp.ConfigJSON)
+	}
+	// 日志里必须能看见"改写了哪一个"（跳过数量与改写明细都是诊断面）。
+	if joined := strings.Join(logs, "\n"); !strings.Contains(joined, "已由 public 收敛为 login") {
+		t.Fatalf("改写必须记日志（否则线上无从判断这一轮做了什么）：%v", logs)
+	}
+	// ⑤ 幂等：第二次 0 命中、字节不变。
+	res2, err := appseed.RewritePublicAccessAssets(ctx, db, dataRoot, nil)
+	if err != nil {
+		t.Fatalf("二次改写: %v", err)
+	}
+	if res2.Rewritten != 0 || res2.Skipped != 0 || res2.Files != 3 {
+		t.Fatalf("二次改写必须 0 命中（幂等）：%+v", res2)
+	}
+	again, err := os.ReadFile(pubPath)
+	if err != nil {
+		t.Fatalf("复读: %v", err)
+	}
+	if string(again) != string(after) {
+		t.Fatalf("幂等被破坏：\n first=%q\nsecond=%q", after, again)
+	}
+	// 装配缺陷（nil DB / 空 DataRoot）必须报错 —— 否则会静默"什么都没做"。
+	if _, err := appseed.RewritePublicAccessAssets(ctx, nil, dataRoot, nil); err == nil {
+		t.Fatal("DB 为空必须报错")
+	}
+	if _, err := appseed.RewritePublicAccessAssets(ctx, db, "", nil); err == nil {
+		t.Fatal("DataRoot 为空必须报错")
+	}
+}
+
+// TestRewritePublicAccessAssetsSkipsBrokenButKeepsGoing：单个文件读不到 / 坏 JSON
+// ⇒ **跳过并计数、不 panic、不中断整轮**（W4-6 的失败语义）。
+//
+// 三种现场一次构造：
+//   - demo-public  ：jsonb 空格形态（`{"access": "public", …}`）⇒ 必须被改写
+//     （**字面 REPLACE 会漏掉它**，这正是 A 方案走 JSON 解析的理由）；
+//   - demo-login   ：坏 JSON ⇒ 跳过并计数（文件不得被覆盖/删除）；
+//   - demo-whitelist：文件缺失 ⇒ Missing（不是失败，单独计数）。
+//
+// 关键判据是"坏文件之后的那个应用仍然被处理"（不中断整轮）+ 跳过数量出现在日志里。
+func TestRewritePublicAccessAssetsSkipsBrokenButKeepsGoing(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	dataRoot := t.TempDir()
+	s, err := appseed.New(appseed.Options{DB: db, DataRoot: dataRoot, Dir: writeDemoDir(t), Owner: "admin"})
+	if err != nil {
+		t.Fatalf("appseed.New: %v", err)
+	}
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	pubPath, _ := assetPathOf(t, ctx, db, dataRoot, "demo-public")
+	loginPath, _ := assetPathOf(t, ctx, db, dataRoot, "demo-login")
+	whitePath, _ := assetPathOf(t, ctx, db, dataRoot, "demo-whitelist")
+
+	// 现场：空格形态 / 坏 JSON / 文件缺失。
+	const spaced = `{"access": "public", "purpose": "匿名可达", "owner": "admin"}`
+	if err := os.WriteFile(pubPath, []byte(spaced), 0o644); err != nil {
+		t.Fatalf("写空格形态: %v", err)
+	}
+	if err := os.WriteFile(loginPath, []byte(`{not json`), 0o644); err != nil {
+		t.Fatalf("写坏 JSON: %v", err)
+	}
+	if err := os.Remove(whitePath); err != nil {
+		t.Fatalf("删文件: %v", err)
+	}
+
+	var logs []string
+	res, err := appseed.RewritePublicAccessAssets(ctx, db, dataRoot, func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+	if err != nil {
+		t.Fatalf("单文件失败不得让整轮报错: %v", err)
+	}
+	if res.Rewritten != 1 || res.Skipped != 1 || res.Missing != 1 || res.Files != 1 || res.Releases != 3 {
+		t.Fatalf("统计不对（应 1 改写 / 1 跳过 / 1 缺失 / 1 可解析 / 3 版本）：%+v", res)
+	}
+	if len(res.Problems) != 1 || res.Problems[0].AppID != "demo-login" {
+		t.Fatalf("跳过明细必须点名 demo-login：%+v", res.Problems)
+	}
+	if !strings.Contains(res.Problems[0].Reason, "不可解析") {
+		t.Fatalf("跳过原因必须如实（坏 JSON ⇒ 不可解析）：%q", res.Problems[0].Reason)
+	}
+	// 坏文件不得被覆盖/删除（跳过就是跳过）。
+	if broken, rerr := os.ReadFile(loginPath); rerr != nil || string(broken) != `{not json` {
+		t.Fatalf("坏 JSON 文件不得被改动：%q（err=%v）", broken, rerr)
+	}
+	// 空格形态必须被精确改写（字面 REPLACE 会漏掉它）。
+	after, rerr := os.ReadFile(pubPath)
+	if rerr != nil {
+		t.Fatalf("复读: %v", rerr)
+	}
+	if string(after) != `{"access": "login", "purpose": "匿名可达", "owner": "admin"}` {
+		t.Fatalf("空格形态必须被改写且其余键逐字保留：%q", after)
+	}
+	// 跳过数量必须出现在日志里（调用方据此发现问题）。
+	if joined := strings.Join(logs, "\n"); !strings.Contains(joined, "跳过 1 个文件") {
+		t.Fatalf("跳过数量必须记日志：%v", logs)
+	}
+}
+
+// TestSeedDoesNotOverwriteTitleOnExistingRows 钉住 **W4-7 的 appseed 半边**：
+// heal **不得覆盖标题**（标题以库里既有行为准；只有**新建行**才写 demos.json 的标题）。
+//
+// 为什么需要这条（现状已满足，但要钉死）：W4-7 改了 `server/demoapps/demos.json` 的口径
+// （access 收敛 login、标题去掉"匿名可达"）。演示应用**保留 app_id**（历史行里有既存数据：
+// 归属、版本行、资源目录、管理员改过的标题），所以清单文案的变化**只对新建行生效** ——
+// 若哪一天有人在 heal 里顺手补一句"把标题同步成清单里的"，客户场上已被改名的演示会被
+// 静默改回去（而这不是"修复半成品"）。
+//
+// 判据三段：
+//  1. 换一份清单（demo-public 的标题/描述/access 全变）重播 ⇒ 已存在行的
+//     title/description/config_json **一个都不变**，磁盘资产也**没被重写**（同 inode）；
+//  2. 该行的处置结论是幂等跳过（Healed=false）；
+//  3. 同一份清单里的**新**演示正常播种，且取的是**清单里的新标题**（证明"只有新建行写标题"）。
+func TestSeedDoesNotOverwriteTitleOnExistingRows(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	dataRoot := t.TempDir()
+	dir := writeDemoDir(t) // 第一版清单
+	s, err := appseed.New(appseed.Options{DB: db, DataRoot: dataRoot, Dir: dir, Owner: "admin"})
+	if err != nil {
+		t.Fatalf("appseed.New: %v", err)
+	}
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("首次播种: %v", err)
+	}
+	pubPath, before := assetPathOf(t, ctx, db, dataRoot, "demo-public")
+	origAssets, err := os.ReadFile(pubPath)
+	if err != nil {
+		t.Fatalf("读资源目录配置: %v", err)
+	}
+	fiBefore, err := os.Stat(pubPath)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+
+	// 第二版清单 = W4-7 的口径变更（access 收敛 + 标题去掉"匿名可达"），外加一个新演示。
+	const demosJSONv2 = `{"demos":[
+  {"app_id":"demo-public","title":"公开演示（登录后使用）","description":"需登录","access":"login","purpose":"演示","data_sensitivity":"公开"},
+  {"app_id":"demo-login","title":"登录演示","description":"需登录","access":"login","purpose":"演示","data_sensitivity":"内部"},
+  {"app_id":"demo-whitelist","title":"名单演示","description":"需名单","access":"whitelist","whitelist":["someone"],"purpose":"演示","data_sensitivity":"内部"},
+  {"app_id":"demo-added","title":"新增演示","description":"只有新建行才取清单标题","access":"login","purpose":"演示","data_sensitivity":"内部"}
+]}`
+	if err := os.WriteFile(filepath.Join(dir, appseed.ManifestFileName), []byte(demosJSONv2), 0o644); err != nil {
+		t.Fatalf("换清单: %v", err)
+	}
+	s2, err := appseed.New(appseed.Options{DB: db, DataRoot: dataRoot, Dir: dir, Owner: "admin"})
+	if err != nil {
+		t.Fatalf("appseed.New(二版清单): %v", err)
+	}
+	res, err := s2.Seed(ctx)
+	if err != nil {
+		t.Fatalf("二次播种: %v", err)
+	}
+
+	// ① 已存在行：标题/描述/配置一律不动。
+	after, err := serverstore.GetWasmApp(ctx, db, "demo-public")
+	if err != nil {
+		t.Fatalf("GetWasmApp: %v", err)
+	}
+	if after.Title != before.Title {
+		t.Fatalf("heal 覆盖了标题：%q → %q（W4-7：标题以库里既有行为准）", before.Title, after.Title)
+	}
+	if after.Description != before.Description {
+		t.Fatalf("heal 覆盖了描述：%q → %q", before.Description, after.Description)
+	}
+	if after.ConfigJSON != before.ConfigJSON {
+		t.Fatalf("清单里的 access 变化不得回写到已存在行（那是迁移 0074 的职责）：\n got=%q\nwant=%q",
+			after.ConfigJSON, before.ConfigJSON)
+	}
+	// 磁盘资产也不得被重写（同 inode = 一个字节都没写）。
+	nowAssets, err := os.ReadFile(pubPath)
+	if err != nil {
+		t.Fatalf("复读资源目录配置: %v", err)
+	}
+	if string(nowAssets) != string(origAssets) {
+		t.Fatalf("已存在行的磁盘资产被重写了：\n got=%q\nwant=%q", nowAssets, origAssets)
+	}
+	fiAfter, err := os.Stat(pubPath)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if !os.SameFile(fiBefore, fiAfter) {
+		t.Fatal("已存在且内容完整的行不得被原子替换（一个字节都不该写）")
+	}
+	// ② 处置结论：幂等跳过（没有动手）。
+	if sk, ok := skippedHealed(res, "demo-public"); !ok || sk.Healed {
+		t.Fatalf("已存在行必须幂等跳过（Healed=false）：%+v", res.Skipped)
+	}
+	// ③ 新建行取清单标题（只有新建行写标题）。
+	if len(res.Seeded) != 1 || res.Seeded[0] != "demo-added" {
+		t.Fatalf("只应有 demo-added 被播种：seeded=%v skipped=%+v", res.Seeded, res.Skipped)
+	}
+	added, err := serverstore.GetWasmApp(ctx, db, "demo-added")
+	if err != nil {
+		t.Fatalf("GetWasmApp(demo-added): %v", err)
+	}
+	if added.Title != "新增演示" {
+		t.Fatalf("新建行必须取清单里的标题，得到 %q", added.Title)
+	}
+	if _, err := os.Stat(demoAssetsPath(dataRoot, "demo-added", added.CurrentReleaseID)); err != nil {
+		t.Fatalf("新建行的资源目录必须就位：%v", err)
+	}
+	// ④ 再播一次仍然幂等：标题不会被"越播越新"。
+	if _, err := s2.Seed(ctx); err != nil {
+		t.Fatalf("三次播种: %v", err)
+	}
+	again, err := serverstore.GetWasmApp(ctx, db, "demo-public")
+	if err != nil {
+		t.Fatalf("GetWasmApp: %v", err)
+	}
+	if again.Title != before.Title || again.ConfigJSON != before.ConfigJSON {
+		t.Fatalf("三次播种改动了已存在行：%+v（want title=%q）", again, before.Title)
+	}
+}
+
+// ===== W4-7 的另一半：存量演示应用的**标题**一次性对齐（临时文件不属于本波次） =====
+
+// TestRewriteLegacyDemoTitlesAlignsStaleRowsOnly 覆盖设计 §9 的「一次性改写标题」。
+//
+// 现场：`Seed` 对已存在的行跳过、heal 按口径不覆盖标题（否则管理员改过的标题每次启动
+// 都会被回滚）⇒ 清单改了标题对**存量部署**完全无效，演示应用点开还是历史口径。
+//
+// 判据四段：
+//  1. 标题仍带历史字样的行 ⇒ 改成清单值（title + description 一起换）；
+//  2. **管理员自己改过的标题**（不含历史字样）⇒ 一个字节都不动（Kept）；
+//  3. 幂等：第二次 Rewritten = 0（改完就不再含历史字样）；
+//  4. 只改 `apps` 行，不动 `app_releases`（版本行是每版不可变快照）。
+func TestRewriteLegacyDemoTitlesAlignsStaleRowsOnly(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	dataRoot := t.TempDir()
+	s, err := appseed.New(appseed.Options{DB: db, DataRoot: dataRoot, Dir: writeDemoDir(t), Owner: "admin"})
+	if err != nil {
+		t.Fatalf("appseed.New: %v", err)
+	}
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	// 造"存量"现场：demo-public 的标题被旧版本写成了历史口径；demo-login 的标题被
+	// 管理员改成了自己的名字（不含历史字样）。
+	if err := serverstore.SetWasmAppDisplay(ctx, db, "demo-public",
+		"演示 · 公开应用（匿名可达）", "不需要登录就能打开：演示 access=public 的准入模式。"); err != nil {
+		t.Fatalf("造存量标题: %v", err)
+	}
+	if err := serverstore.SetWasmAppDisplay(ctx, db, "demo-login", "我们自己的演示", "管理员改过的描述"); err != nil {
+		t.Fatalf("造管理员标题: %v", err)
+	}
+	// demo-whitelist 保留播种时的标题（清单口径，不含历史字样）⇒ 也不动。
+
+	var logs []string
+	res, err := appseed.RewriteLegacyDemoTitles(ctx, s, func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+	if err != nil {
+		t.Fatalf("RewriteLegacyDemoTitles: %v", err)
+	}
+	if res.Examined != 3 || res.Rewritten != 1 || res.Kept != 2 || res.Missing != 0 || len(res.Problems) != 0 {
+		t.Fatalf("统计不对（应 3 条/1 改写/2 保留）：%+v", res)
+	}
+
+	// ① 历史口径行被改成清单值（title + description 一起换）。
+	pub, err := serverstore.GetWasmApp(ctx, db, "demo-public")
+	if err != nil {
+		t.Fatalf("GetWasmApp: %v", err)
+	}
+	if pub.Title != "公开演示" || pub.Description != "匿名可达" {
+		t.Fatalf("存量标题未对齐到清单口径: title=%q desc=%q", pub.Title, pub.Description)
+	}
+	// ② 管理员改过的标题一个字节都不动。
+	login, err := serverstore.GetWasmApp(ctx, db, "demo-login")
+	if err != nil {
+		t.Fatalf("GetWasmApp: %v", err)
+	}
+	if login.Title != "我们自己的演示" || login.Description != "管理员改过的描述" {
+		t.Fatalf("管理员自己命名的标题被覆盖了（这是 heals 语义要避免的形态）: %+v", login)
+	}
+	// 日志必须能看见"改了哪一行"（诊断面）。
+	if joined := strings.Join(logs, "\n"); !strings.Contains(joined, "演示标题已由历史口径改写为清单值") {
+		t.Fatalf("改写必须记日志：%v", logs)
+	}
+	// ③ 幂等：第二次 0 改写。
+	res2, err := appseed.RewriteLegacyDemoTitles(ctx, s, nil)
+	if err != nil {
+		t.Fatalf("二次改写: %v", err)
+	}
+	if res2.Rewritten != 0 || res2.Kept != 3 {
+		t.Fatalf("二次改写必须 0 命中：%+v", res2)
+	}
+	// ④ `app_releases` 的标题不得被动过（每版不可变快照）。
+	rels, err := serverstore.ListWasmReleases(ctx, db, "demo-public", true)
+	if err != nil {
+		t.Fatalf("ListWasmReleases: %v", err)
+	}
+	if len(rels) == 0 {
+		t.Fatal("前置条件失败：demo-public 应当有版本行")
+	}
+	for _, rel := range rels {
+		if strings.Contains(rel.Title, "匿名可达") {
+			t.Fatalf("版本行的标题被本入口改动了（历史快照必须逐字保留）: %+v", rel)
+		}
+	}
+	// 装配缺陷：nil Seeder 必须报错（否则静默"什么都没做"）。
+	if _, err := appseed.RewriteLegacyDemoTitles(ctx, nil, nil); err == nil {
+		t.Fatal("Seeder 为 nil 必须报错")
 	}
 }

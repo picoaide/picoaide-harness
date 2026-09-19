@@ -36,17 +36,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/anonlimit"
 	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/wasmapp/queue"
 )
 
-// getWithETag 发一个带 If-None-Match 的应用子域 GET。
+// getWithETag 发一个带 If-None-Match 的客户端 GET（默认注入身份）。
 func (e *env) getWithETag(appID, path, etag string) *httptest.ResponseRecorder {
 	e.t.Helper()
-	req := httptest.NewRequest(http.MethodGet, appURL(appID, path), nil)
+	req := clientRequestFor(e.t, appID, http.MethodGet, path, "", "")
 	req.Header.Set("If-None-Match", etag)
-	return e.serve(req)
+	return e.clientDo(req, appID, e.ownerUser)
 }
 
 // entriesForTest 数某应用的缓存条目（护栏用的只读视图）。
@@ -81,13 +81,15 @@ func releaseDirOf(t *testing.T, e *env, spec appSpec, relID int64) string {
 func TestStatic_NotModifiedDoesNotTouchDisk(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rt304")
-	spec := appSpec{appID: appID, config: publicConfig(), assets: map[string]string{
-		"index.html": strings.Repeat("x", 200*1024),
+	// 资源名刻意避开入口文档（"/" 与 "/index.html" 在客户端专属模型下**一律**交给
+	// wasm：平台没有匿名面 ⇒ 静态入口文档路径不可达，见 TestStatic_LoginRequiredEntryGoesToWasm）。
+	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{
+		"app.js": strings.Repeat("x", 200*1024),
 	}}
 	rel := e.publishApp(spec)
 
 	// 预热：第一次 GET 走冷路径（读盘 + 算哈希 + 回填缓存）。
-	first := e.get(appID, "/index.html")
+	first := e.get(appID, "/app.js")
 	if first.Code != http.StatusOK {
 		t.Fatalf("首次 GET 应 200，得到 %d body=%.200s", first.Code, first.Body.String())
 	}
@@ -105,12 +107,12 @@ func TestStatic_NotModifiedDoesNotTouchDisk(t *testing.T) {
 
 	// 把磁盘上的资源文件删掉：此后任何"读盘"都不可能成功。
 	// （app_id 每个用例唯一 ⇒ 不会影响别的用例；数据根由 TestMain 统一清理。）
-	gone := filepath.Join(releaseDirOf(t, e, spec, rel.ID), "index.html")
+	gone := filepath.Join(releaseDirOf(t, e, spec, rel.ID), "app.js")
 	if err := os.Remove(gone); err != nil {
 		t.Fatalf("删除资源文件失败: %v", err)
 	}
 
-	rec := e.getWithETag(appID, "/index.html", etag)
+	rec := e.getWithETag(appID, "/app.js", etag)
 	if rec.Code != http.StatusNotModified {
 		t.Fatalf("缓存命中时 If-None-Match 必须直接 304（不读盘）：得到 %d body=%.200s", rec.Code, rec.Body.String())
 	}
@@ -140,7 +142,7 @@ func TestStatic_CachedBytesSurviveFileRemoval(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rtbytes")
 	const body = "body{color:red}/* 200KiB 资源以外的小资源，正文短但同样要进缓存 */"
-	spec := appSpec{appID: appID, config: publicConfig(), assets: map[string]string{
+	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{
 		"static/app.css": body,
 	}}
 	rel := e.publishApp(spec)
@@ -177,7 +179,7 @@ func TestStatic_CachedBytesSurviveFileRemoval(t *testing.T) {
 func TestStatic_NewVersionIsVisibleImmediately(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rtver")
-	e.publishApp(appSpec{appID: appID, version: "1.0.0", config: publicConfig(), assets: map[string]string{
+	e.publishApp(appSpec{appID: appID, version: "1.0.0", config: loginConfig(), assets: map[string]string{
 		"app.js": "console.log('v1')",
 	}})
 	v1 := e.get(appID, "/app.js")
@@ -186,7 +188,7 @@ func TestStatic_NewVersionIsVisibleImmediately(t *testing.T) {
 	}
 	etagV1 := v1.Header().Get("ETag")
 
-	e.publishApp(appSpec{appID: appID, version: "2.0.0", config: publicConfig(), assets: map[string]string{
+	e.publishApp(appSpec{appID: appID, version: "2.0.0", config: loginConfig(), assets: map[string]string{
 		"app.js": "console.log('v2')",
 	}})
 	v2 := e.get(appID, "/app.js")
@@ -212,12 +214,12 @@ func TestStatic_NewVersionIsVisibleImmediately(t *testing.T) {
 func TestStatic_EvictAppInvalidatesCache(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rtevict")
-	spec := appSpec{appID: appID, config: publicConfig(), assets: map[string]string{
-		"index.html": "old",
+	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{
+		"app.js": "old",
 	}}
 	rel := e.publishApp(spec)
 
-	if rec := e.get(appID, "/index.html"); rec.Code != http.StatusOK || rec.Body.String() != "old" {
+	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK || rec.Body.String() != "old" {
 		t.Fatalf("预热请求不对: %d %q", rec.Code, rec.Body.String())
 	}
 	if n := e.srv.releases.entriesForTest(appID); n == 0 {
@@ -225,14 +227,14 @@ func TestStatic_EvictAppInvalidatesCache(t *testing.T) {
 	}
 
 	// 重新填一份缓存（EvictApp 已经把它清空了），再改盘验证"缓存确实生效"。
-	if rec := e.get(appID, "/index.html"); rec.Code != http.StatusOK {
+	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK {
 		t.Fatalf("二次预热失败: %d", rec.Code)
 	}
-	target := filepath.Join(releaseDirOf(t, e, spec, rel.ID), "index.html")
+	target := filepath.Join(releaseDirOf(t, e, spec, rel.ID), "app.js")
 	if err := os.WriteFile(target, []byte("new"), 0o600); err != nil {
 		t.Fatalf("改写资源失败: %v", err)
 	}
-	if rec := e.get(appID, "/index.html"); rec.Body.String() != "old" {
+	if rec := e.get(appID, "/app.js"); rec.Body.String() != "old" {
 		t.Fatalf("缓存应命中旧字节（这就是缓存生效的证据），得到 %q", rec.Body.String())
 	}
 
@@ -243,7 +245,7 @@ func TestStatic_EvictAppInvalidatesCache(t *testing.T) {
 	if n := e.srv.releases.entriesForTest(appID); n != 0 {
 		t.Fatalf("EvictApp 之后不得再有该应用的缓存条目，仍有 %d 个", n)
 	}
-	if rec := e.get(appID, "/index.html"); rec.Body.String() != "new" {
+	if rec := e.get(appID, "/app.js"); rec.Body.String() != "new" {
 		t.Fatalf("逐出之后必须重新读盘拿到新内容，得到 %q", rec.Body.String())
 	}
 }
@@ -255,20 +257,20 @@ func TestStatic_EvictAppInvalidatesCache(t *testing.T) {
 func TestReleaseCache_VersionChangeDropsOldRelease(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rtdrop")
-	e.publishApp(appSpec{appID: appID, version: "1.0.0", config: publicConfig(), assets: map[string]string{
-		"index.html": "v1",
+	e.publishApp(appSpec{appID: appID, version: "1.0.0", config: loginConfig(), assets: map[string]string{
+		"app.js": "v1",
 	}})
-	if rec := e.get(appID, "/index.html"); rec.Code != http.StatusOK {
+	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK {
 		t.Fatalf("v1 预热失败: %d", rec.Code)
 	}
 	if got := e.srv.releases.stats().Entries; got != 1 {
 		t.Fatalf("v1 预热后应有 1 个缓存条目，得到 %d", got)
 	}
 
-	e.publishApp(appSpec{appID: appID, version: "2.0.0", config: publicConfig(), assets: map[string]string{
-		"index.html": "v2",
+	e.publishApp(appSpec{appID: appID, version: "2.0.0", config: loginConfig(), assets: map[string]string{
+		"app.js": "v2",
 	}})
-	if rec := e.get(appID, "/index.html"); rec.Body.String() != "v2" {
+	if rec := e.get(appID, "/app.js"); rec.Body.String() != "v2" {
 		t.Fatalf("v2 内容不对: %q", rec.Body.String())
 	}
 	if got := e.srv.releases.stats().Entries; got != 1 {
@@ -352,18 +354,20 @@ func TestReleaseCache_IdleSweepFreesEntries(t *testing.T) {
 //	PG_DSN_TEST=… bash ../temp/wasm-heavy.sh 900 go test ./internal/wasmapp/appserver/ \
 //	  -count=1 -race -run TestReleaseCache_ConcurrentRequestsAreSafe
 func TestReleaseCache_ConcurrentRequestsAreSafe(t *testing.T) {
+	const workers = 16
+	// 并发用例不再需要"放宽匿名限流"的 mutate（匿名面与限流器随 W4 一起删除），
+	// 但要放宽**队列的单用户同应用并发**（§4.6 默认 1）：本用例要压的是缓存的并发
+	// 正确性，16 个 worker 注入同一个员工时会被队列按设计串行化。
 	e := newEnv(t, func(o *Options) {
-		// 32 个并发请求会被每 IP 匿名限流挡住 ⇒ 放宽（限流不是本用例的被测语义）。
-		o.Limiter = anonlimit.New(anonlimit.Options{
-			GlobalRatePerMin: 1 << 30, GlobalBurst: 1 << 30,
-			PerIPRatePerMin: 1 << 30, PerIPBurst: 1 << 30, MaxIPBuckets: 1024, Now: time.Now,
+		o.Scheduler = queue.New(queue.Options{
+			PerUserPerAppRunning: workers, PerUserPerAppQueued: workers, PerUserGlobalRunning: workers,
 		})
 	})
 	appID := e.appID("rtconc")
-	e.publishApp(appSpec{appID: appID, config: publicConfig(), assets: map[string]string{
-		"index.html": "shell",
-		"app.js":     "console.log(1)",
-		"style.css":  "body{}",
+	e.publishApp(appSpec{appID: appID, config: loginConfig(), assets: map[string]string{
+		"page.html": "shell",
+		"app.js":    "console.log(1)",
+		"style.css": "body{}",
 	}})
 	first := e.get(appID, "/app.js")
 	if first.Code != http.StatusOK {
@@ -371,7 +375,6 @@ func TestReleaseCache_ConcurrentRequestsAreSafe(t *testing.T) {
 	}
 	etag := first.Header().Get("ETag")
 
-	const workers = 16
 	const rounds = 8
 	var wg sync.WaitGroup
 	errs := make(chan string, workers*rounds)
@@ -432,17 +435,17 @@ func TestReleaseCache_ConcurrentRequestsAreSafe(t *testing.T) {
 func TestReleaseCache_ConfigIsCachedPerRelease(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rtcfg")
-	spec := appSpec{appID: appID, config: publicConfig(), assets: map[string]string{"index.html": "x"}}
+	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{"app.js": "x"}}
 	rel := e.publishApp(spec)
 
-	if rec := e.get(appID, "/index.html"); rec.Code != http.StatusOK {
+	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK {
 		t.Fatalf("预热失败: %d", rec.Code)
 	}
 	misses := e.srv.releases.stats().CfgMisses
 	if misses != 1 {
 		t.Fatalf("配置只应读盘解析一次（首次），得到 %d 次未命中", misses)
 	}
-	if rec := e.get(appID, "/index.html"); rec.Code != http.StatusOK {
+	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK {
 		t.Fatalf("第二次请求失败: %d", rec.Code)
 	}
 	st := e.srv.releases.stats()
@@ -470,7 +473,7 @@ func TestReleaseCache_ConfigIsCachedPerRelease(t *testing.T) {
 func TestReleaseCache_ConfigReadFailureIsNotCached(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rtcfgfail")
-	spec := appSpec{appID: appID, config: publicConfig(), assets: map[string]string{"index.html": "x"}}
+	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{"app.js": "x"}}
 	rel := e.publishApp(spec)
 	cfgPath := filepath.Join(releaseDirOf(t, e, spec, rel.ID), limits.AppConfigFileName)
 	orig, err := os.ReadFile(cfgPath)
@@ -481,7 +484,7 @@ func TestReleaseCache_ConfigReadFailureIsNotCached(t *testing.T) {
 	if err := os.Remove(cfgPath); err != nil {
 		t.Fatalf("删除配置失败: %v", err)
 	}
-	broken := e.get(appID, "/index.html")
+	broken := e.get(appID, "/app.js")
 	if broken.Code != http.StatusInternalServerError {
 		t.Fatalf("配置读不到必须 500（平台故障，绝不按匿名放行），得到 %d body=%.200s", broken.Code, broken.Body.String())
 	}
@@ -490,7 +493,7 @@ func TestReleaseCache_ConfigReadFailureIsNotCached(t *testing.T) {
 		t.Fatalf("恢复配置失败: %v", err)
 	}
 	for i := 0; i < 3; i++ {
-		rec := e.get(appID, "/index.html")
+		rec := e.get(appID, "/app.js")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("配置已恢复（第 %d 次请求）应自愈为 200，得到 %d body=%.200s（不得要求 EvictApp/重启）",
 				i+1, rec.Code, rec.Body.String())
@@ -512,21 +515,21 @@ func TestReleaseCache_ConfigReadFailureIsNotCached(t *testing.T) {
 func TestReleaseCache_ConfigCacheRevalidatesAfterTTL(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rtcfgttl")
-	spec := appSpec{appID: appID, config: publicConfig(), assets: map[string]string{"index.html": "x"}}
+	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{"app.js": "x"}}
 	rel := e.publishApp(spec)
 	cfgPath := filepath.Join(releaseDirOf(t, e, spec, rel.ID), limits.AppConfigFileName)
 	orig, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatalf("读配置夹具失败: %v", err)
 	}
-	if rec := e.get(appID, "/index.html"); rec.Code != http.StatusOK {
+	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK {
 		t.Fatalf("预热失败: %d", rec.Code)
 	}
 	warm := e.srv.releases.stats()
 
 	// 窗口内：仍然命中缓存（不读盘）——否则"缓存配置"这件事就没有发生。
 	e.advance(ConfigRevalidateTTL / 2)
-	if rec := e.get(appID, "/index.html"); rec.Code != http.StatusOK {
+	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK {
 		t.Fatalf("窗口内应命中缓存并 200，得到 %d", rec.Code)
 	}
 	if st := e.srv.releases.stats(); st.CfgMisses != warm.CfgMisses {
@@ -538,7 +541,7 @@ func TestReleaseCache_ConfigCacheRevalidatesAfterTTL(t *testing.T) {
 		t.Fatalf("删除配置失败: %v", err)
 	}
 	e.advance(ConfigRevalidateTTL + time.Second)
-	if rec := e.get(appID, "/index.html"); rec.Code != http.StatusInternalServerError {
+	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("配置在窗口后被删除必须变成 500，得到 %d body=%.200s", rec.Code, rec.Body.String())
 	}
 
@@ -546,7 +549,7 @@ func TestReleaseCache_ConfigCacheRevalidatesAfterTTL(t *testing.T) {
 	if err := os.WriteFile(cfgPath, orig, 0o600); err != nil {
 		t.Fatalf("恢复配置失败: %v", err)
 	}
-	if rec := e.get(appID, "/index.html"); rec.Code != http.StatusOK {
+	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK {
 		t.Fatalf("配置恢复后应立刻 200（失败不缓存），得到 %d", rec.Code)
 	}
 }
@@ -564,7 +567,7 @@ func TestReleaseCache_ConfigCacheRevalidatesAfterTTL(t *testing.T) {
 func TestStatic_NotModifiedHeadersMatch200Exactly(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rthdr")
-	spec := appSpec{appID: appID, config: publicConfig(), assets: map[string]string{
+	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{
 		"index.html": "<html><body>hi</body></html>",
 		"app.js":     "console.log(1)",
 		"style.css":  "body{color:red}",
@@ -574,7 +577,9 @@ func TestStatic_NotModifiedHeadersMatch200Exactly(t *testing.T) {
 	// 允许的差异白名单：304 不带消息体 ⇒ 不带 Content-Length（RFC 9110 §15.4.5）。
 	allowed304Only := map[string]bool{"Content-Length": true}
 
-	for _, p := range []string{"/index.html", "/", "/app.js", "/style.css"} {
+	// 入口文档（"/"、"/index.html"）不在列表里：客户端专属模型下它们一律交给 wasm
+	// （平台没有匿名面 ⇒ 静态入口文档路径不可达），因此没有"静态 304"可对拍。
+	for _, p := range []string{"/app.js", "/style.css"} {
 		first := e.get(appID, p)
 		if first.Code != http.StatusOK {
 			t.Fatalf("%s 首次 GET 应 200，得到 %d", p, first.Code)
@@ -611,9 +616,9 @@ func TestStatic_NotModifiedHeadersMatch200Exactly(t *testing.T) {
 	}
 
 	// HEAD 与 GET 的头必须一致（HEAD 只是不要 body）。
-	headReq := httptest.NewRequest(http.MethodHead, appURL(appID, "/index.html"), nil)
-	recHead := e.serve(headReq)
-	recGet := e.get(appID, "/index.html")
+	headReq := clientRequestFor(t, appID, http.MethodHead, "/app.js", "", "")
+	recHead := e.clientDo(headReq, appID, e.ownerUser)
+	recGet := e.get(appID, "/app.js")
 	if recHead.Code != http.StatusOK || recHead.Body.Len() != 0 {
 		t.Fatalf("HEAD 应 200 且无 body，得到 %d bodylen=%d", recHead.Code, recHead.Body.Len())
 	}
@@ -646,7 +651,7 @@ func TestStatic_EvictAppReportsFreedBytes(t *testing.T) {
 	})
 	appID := e.appID("rtacc")
 	big := strings.Repeat("M", 2<<20)
-	spec := appSpec{appID: appID, config: publicConfig(), assets: map[string]string{"big.js": big}}
+	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{"big.js": big}}
 	e.publishApp(spec)
 	if rec := e.get(appID, "/big.js"); rec.Code != http.StatusOK {
 		t.Fatalf("预热失败: %d", rec.Code)

@@ -151,6 +151,7 @@ jobs:
             packages/host/desktop/lib packages/host/desktop/build \
             packages/host/enterprise/lib packages/host/connectors/lib \
             packages/host/browser/lib packages/host/cron/lib \
+            packages/host/wasm-apps-host/lib \
             packages/client/account-card/lib packages/client/branding/lib \
             packages/client/wasm-apps/lib \
       - name: Upload workspace build products (one build, three platforms)

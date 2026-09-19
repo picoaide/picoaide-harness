@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -382,6 +383,118 @@ func TestDeepLinkSchemeRejectsMalformed(t *testing.T) {
         }`})
 		if got := DeepLinkScheme(); got != DefaultDeepLinkScheme {
 			t.Fatalf("DeepLinkScheme() with %q = %q, want %q", bad, got, DefaultDeepLinkScheme)
+		}
+	}
+}
+
+// --- 应用 origin scheme（2026-09-19 契约 §10 / §8.3）-----------------------------
+//
+// 三条边界必须逐条钉住，因为它们的**失败形态**完全不同：
+//   - 目录缺失（本地开发）⇒ 中性 fallback，服务端照常可用；
+//   - 字段缺失 / 非法 / 与深链同值（发行镜像的交付事故）⇒ 必须报错，
+//     由启动装配拒绝启动 —— 放行等于"服务端猜一个 scheme"，客户端注册的是
+//     渠道自己配的那个，症状是所有非幂等请求 403 且与配置看不出关系。
+func TestAppOriginSchemeReadsChannelValue(t *testing.T) {
+	withDir(t, map[string]string{"channel.json": `{
+      "schema": 1, "channel_id": "acme",
+      "desktop": {"deep_link_scheme": "acmeai", "app_origin_scheme": "acmeai-app"}
+    }`})
+	got, err := AppOriginScheme()
+	if err != nil {
+		t.Fatalf("AppOriginScheme() 报错: %v", err)
+	}
+	if got != "acmeai-app" {
+		t.Fatalf("AppOriginScheme() = %q, want acmeai-app", got)
+	}
+}
+
+func TestAppOriginSchemeFallsBackWhenChannelDirMissing(t *testing.T) {
+	// 渠道目录整个缺失 = 镜像没带渠道配置（本地开发构建）⇒ 中性 fallback，
+	// **不得**报错（与 Load()/DeepLinkScheme() 的既有约定一致）。
+	withDir(t, nil)
+	got, err := AppOriginScheme()
+	if err != nil {
+		t.Fatalf("渠道目录缺失时不得 fail-loud: %v", err)
+	}
+	if got != DefaultAppOriginScheme {
+		t.Fatalf("AppOriginScheme() = %q, want %q", got, DefaultAppOriginScheme)
+	}
+}
+
+func TestAppOriginSchemeFailsLoudWhenFieldMissingOrInvalid(t *testing.T) {
+	cases := map[string]string{
+		"字段缺失":  `{"schema":1,"channel_id":"acme","desktop":{"deep_link_scheme":"acmeai"}}`,
+		"空值":    `{"schema":1,"channel_id":"acme","desktop":{"app_origin_scheme":""}}`,
+		"大写":    `{"schema":1,"channel_id":"acme","desktop":{"app_origin_scheme":"AcmeApp"}}`,
+		"含空格":   `{"schema":1,"channel_id":"acme","desktop":{"app_origin_scheme":"acme app"}}`,
+		"数字开头":  `{"schema":1,"channel_id":"acme","desktop":{"app_origin_scheme":"1acme"}}`,
+		"缺少连字符": `{"schema":1,"channel_id":"acme","desktop":{"app_origin_scheme":"a"}}`,
+		// 长度上界 = 32（不是无界）：R1-SRV-9 / CHN-15 冻结的形状两端一致。
+		"超长": `{"schema":1,"channel_id":"acme","desktop":{"app_origin_scheme":"a` +
+			strings.Repeat("b", 32) + `"}}`,
+		"保留协议":  `{"schema":1,"channel_id":"acme","desktop":{"app_origin_scheme":"https"}}`,
+		"与深链同值": `{"schema":1,"channel_id":"acme","desktop":{"deep_link_scheme":"acme","app_origin_scheme":"acme"}}`,
+	}
+	for name, body := range cases {
+		withDir(t, map[string]string{"channel.json": body})
+		got, err := AppOriginScheme()
+		if err == nil {
+			t.Errorf("%s：必须 fail-loud，却返回 %q", name, got)
+		}
+	}
+}
+
+func TestValidAppOriginSchemeBoundaries(t *testing.T) {
+	// 形状边界逐条对拍：2 字符下界、32 字符上界、保留协议、大小写。
+	ok := []string{"ab", "picoaide-app", "a" + strings.Repeat("b", 31), "acme+app.v2"}
+	for _, s := range ok {
+		if !ValidAppOriginScheme(s) {
+			t.Errorf("ValidAppOriginScheme(%q) = false, want true", s)
+		}
+	}
+	bad := []string{"", "a", "a" + strings.Repeat("b", 32), "Acme", "acme app",
+		"http", "https", "file", "data", "javascript", "about"}
+	for _, s := range bad {
+		if ValidAppOriginScheme(s) {
+			t.Errorf("ValidAppOriginScheme(%q) = true, want false", s)
+		}
+	}
+}
+
+// TestReservedAppOriginSchemeContract 是保留 scheme 名单的**跨端对拍**（CTL-5 / J11）。
+//
+// 背景（L4 审计发现）：冻结名单在三处数量不一致 —— CI 6 项、客户端
+// `desktop-channel.ts` 10 项、服务端 14 项。三份"看起来都像对"的名单会让某个渠道
+// 能构建、客户端却注册不了（或反过来服务端拒绝启动），而症状与配置看不出关系。
+//
+// 冻结做法（契约 §10 原文）：`http/https/file/data/javascript/about` 六项是**契约**，
+// 服务端额外的加固项单独成表（见 ExtraReservedAppOriginSchemes），两者不相交。
+// 本用例钉住：
+//   - 契约六项逐字（顺序无关，用集合比较）；
+//   - 额外项与契约项不相交（否则"唯一真源"名不副实）；
+//   - `ValidAppOriginScheme` 对两者的并集一律拒绝（加固必须真的生效）。
+func TestReservedAppOriginSchemeContract(t *testing.T) {
+	frozen := map[string]bool{}
+	for _, s := range ReservedAppOriginSchemes {
+		frozen[s] = true
+	}
+	want := []string{"about", "data", "file", "http", "https", "javascript"}
+	got := append([]string(nil), ReservedAppOriginSchemes...)
+	sort.Strings(got)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("§10 冻结保留名单 = %v, want %v（改它 = 改对外契约，三处必须同改）", got, want)
+	}
+	for _, s := range ExtraReservedAppOriginSchemes {
+		if frozen[s] {
+			t.Errorf("加固项 %q 同时出现在契约名单里 —— 两个集合必须不相交", s)
+		}
+		if ValidAppOriginScheme(s) {
+			t.Errorf("加固项 %q 必须被 ValidAppOriginScheme 拒绝", s)
+		}
+	}
+	for s := range frozen {
+		if ValidAppOriginScheme(s) {
+			t.Errorf("契约保留项 %q 必须被拒绝", s)
 		}
 	}
 }

@@ -12,7 +12,9 @@
 //	④ 首版省略 access ⇒ 仍是 login（不回归）
 //	⑤ 待审版本（status != approved）**不改** apps 行的配置投影（目录徽标不得提前变）
 //	⑥ approve 与 reject 两条路径都把投影重算为"最新 approved 版本"的配置
-//	⑦ 基域未配置 ⇒ entry_url 为空/字段省略，不编造 `<app_id>.<请求 Host>`
+//
+// ⚠️ 原第 ⑦ 条（"基域未配置 ⇒ entry_url 省略"）已随 W4 作废：`entry_url` 字段本身
+// 被删除（总纲 §8.4 / §5.2 冻结契约），判据改为"全仓零命中 + 响应里没有该键"。
 package api
 
 import (
@@ -222,8 +224,11 @@ func TestPublishFirstReleaseStillDefaultsToLogin(t *testing.T) {
 }
 
 // TestPendingReleaseDoesNotProjectConfigToCatalog 覆盖判据 ⑤（R1-pm-9）：
-// 审核开启时，待审版本（access=public）**不得**改 apps 行的配置投影 ——
+// 审核开启时，待审版本（access 改动）**不得**改 apps 行的配置投影 ——
 // 目录对全员的徽标必须仍是生效版本（login）。
+//
+// 2026-09-19 契约 §4.4 起匿名面被删除，可写取值只剩 login|whitelist，
+// 因此这里的"待审改动"用 whitelist（生效版本是 login）。
 func TestPendingReleaseDoesNotProjectConfigToCatalog(t *testing.T) {
 	e := newTestEnv(t)
 	guest := testGuestModule(t)
@@ -237,12 +242,13 @@ func TestPendingReleaseDoesNotProjectConfigToCatalog(t *testing.T) {
 	e.setReviewRequired(true)
 
 	p := e.payload("pending-tool", "1.1.0", guest, cfgWith(map[string]any{
-		"access":           "public", // 待审：改成匿名可达
-		"purpose":          "改成公开",
+		"access":           "whitelist", // 待审：改成名单准入
+		"whitelist":        []string{"alice"},
+		"purpose":          "改成名单准入",
 		"data_sensitivity": "public",
 		"owner":            "张伟",
 	}))
-	p["changelog"] = "想改成公开"
+	p["changelog"] = "想改成名单准入"
 	var out struct {
 		Release map[string]any `json:"release"`
 	}
@@ -270,8 +276,8 @@ func TestPendingReleaseDoesNotProjectConfigToCatalog(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("读版本失败: %v", rerr)
 	}
-	if got := appcfg.AccessOfConfigJSON(rel.ConfigJSON); got != appcfg.AccessPublic {
-		t.Fatalf("待审版本自己的 config_json 应为提交值 public，得到 %q", got)
+	if got := appcfg.AccessOfConfigJSON(rel.ConfigJSON); got != appcfg.AccessWhitelist {
+		t.Fatalf("待审版本自己的 config_json 应为提交值 whitelist，得到 %q", got)
 	}
 	// 审计口径：这不是"已生效"的变更（写"随 v1.1.0 生效"会让运维面读错）。
 	details := e.auditDetails("pending-tool", "wasm_app_access_change")
@@ -297,10 +303,10 @@ func TestReviewDecisionRecomputesProjectionFromLatestApproved(t *testing.T) {
 	}))
 	e.setReviewRequired(true)
 
-	pendingJSON := `{"access":"public","whitelist":[],"purpose":"改成公开","data_sensitivity":"public","owner":"张伟"}`
+	pendingJSON := `{"access":"login","whitelist":[],"purpose":"改成公开","data_sensitivity":"public","owner":"张伟"}`
 	// ① reject：待审版本被拒 ⇒ 投影回到仍在生效的 1.0.0。
 	e.publishOK(e.tokens["alice"], "proj-tool", "1.1.0", guest, cfgWith(map[string]any{
-		"access": "public", "purpose": "改成公开", "data_sensitivity": "public", "owner": "张伟",
+		"access": "login", "purpose": "改成公开", "data_sensitivity": "public", "owner": "张伟",
 	}))
 	e.dirtyProjection("proj-tool", pendingJSON, "改成公开", "public")
 	e.decodeJSON(e.req(http.MethodPost,
@@ -313,7 +319,7 @@ func TestReviewDecisionRecomputesProjectionFromLatestApproved(t *testing.T) {
 
 	// ② approve：再审一个版本并通过 ⇒ 投影切到它（access/声明一起走）。
 	e.publishOK(e.tokens["alice"], "proj-tool", "1.2.0", guest, cfgWith(map[string]any{
-		"access": "public", "purpose": "改成公开", "data_sensitivity": "public", "owner": "张伟",
+		"access": "login", "purpose": "改成公开", "data_sensitivity": "public", "owner": "张伟",
 	}))
 	e.dirtyProjection("proj-tool", `{"access":"login","whitelist":[],"purpose":"又改回去","data_sensitivity":"internal","owner":"张伟"}`,
 		"又改回去", "internal")
@@ -326,8 +332,8 @@ func TestReviewDecisionRecomputesProjectionFromLatestApproved(t *testing.T) {
 	if decided.Status != serverstore.ReleaseStatusApproved || decided.CurrentVersion != "1.2.0" {
 		t.Fatalf("通过后的响应不对: %+v", decided)
 	}
-	e.assertProjection("proj-tool", appcfg.AccessPublic, "改成公开", "public")
-	if got := e.catalogAccess(e.tokens["bob"], "proj-tool"); got != string(appcfg.AccessPublic) {
+	e.assertProjection("proj-tool", appcfg.AccessLogin, "改成公开", "public")
+	if got := e.catalogAccess(e.tokens["bob"], "proj-tool"); got != string(appcfg.AccessLogin) {
 		t.Fatalf("通过后目录徽标 access = %q，want public", got)
 	}
 
@@ -336,7 +342,7 @@ func TestReviewDecisionRecomputesProjectionFromLatestApproved(t *testing.T) {
 		"access": "whitelist", "whitelist": []string{"alice"},
 		"purpose": "只给白名单", "data_sensitivity": "internal", "owner": "张伟",
 	}))
-	e.dirtyProjection("proj-tool", `{"access":"public","whitelist":[],"purpose":"脏投影","data_sensitivity":"public","owner":"张伟"}`,
+	e.dirtyProjection("proj-tool", `{"access":"login","whitelist":[],"purpose":"脏投影","data_sensitivity":"public","owner":"张伟"}`,
 		"脏投影", "public")
 	e.decodeJSON(e.req(http.MethodPost,
 		"/api/server/admin/wasm-apps/proj-tool/releases/1.3.0/approve", "", nil), http.StatusOK, &decided)
@@ -368,57 +374,8 @@ func (e *testEnv) assertProjection(appID string, wantAccess appcfg.Access, wantP
 	}
 }
 
-// TestEntryURLIsAbsentWhenBaseDomainUnset 覆盖判据 ⑦（R1-pm-2）：
-// 基域未配置/解析失败 ⇒ entry_url 为空且字段整体省略；基域配好时必须照旧给出链接
-// （防"一律不发链接"的假修）。
-func TestEntryURLIsAbsentWhenBaseDomainUnset(t *testing.T) {
-	base := "" // 闭包变量：模拟运行期可改的基域（Options.BaseDomain 是函数）
-	e := newTestEnv(t, func(o *Options) { o.BaseDomain = func() string { return base } })
-	guest := testGuestModule(t)
-	p := e.payload("entry-tool", "1.0.0", guest, goodConfig())
-	w := e.req(http.MethodPost, "/api/client/v2/apps/wasm/entry-tool/releases", e.tokens["alice"], p)
-	var out struct {
-		App map[string]any `json:"app"`
-	}
-	e.decodeJSON(w, http.StatusCreated, &out)
-	if v, ok := out.App["entry_url"]; ok {
-		t.Fatalf("基域未配置时不得下发 entry_url（否则员工点「打开」进的是一个没配通配 DNS 的主机名）: %v", v)
-	}
-	// 目录同样不得给出入口链接。
-	cw := e.req(http.MethodGet, "/api/client/v2/apps/wasm/catalog", e.tokens["bob"], nil)
-	var cat struct {
-		Apps []map[string]any `json:"apps"`
-	}
-	e.decodeJSON(cw, http.StatusOK, &cat)
-	for _, row := range cat.Apps {
-		if row["app_id"] != "entry-tool" {
-			continue
-		}
-		if v, ok := row["entry_url"]; ok {
-			t.Fatalf("基域未配置时目录不得下发 entry_url: %v", v)
-		}
-	}
-	if got := len(cat.Apps); got == 0 {
-		t.Fatal("目录里应能看到 entry-tool（可见性与入口链接是两件事）")
-	}
-
-	// 正向对照：配好基域后必须照旧给出链接（与既有的 read_test/publish_test 同口径）。
-	base = "apps.example.com"
-	w2 := e.req(http.MethodGet, "/api/client/v2/apps/wasm/catalog", e.tokens["bob"], nil)
-	var cat2 struct {
-		Apps []map[string]any `json:"apps"`
-	}
-	e.decodeJSON(w2, http.StatusOK, &cat2)
-	found := false
-	for _, row := range cat2.Apps {
-		if row["app_id"] == "entry-tool" {
-			found = true
-			if row["entry_url"] != "https://entry-tool.apps.example.com" {
-				t.Fatalf("基域配好后入口链接不对: %v", row["entry_url"])
-			}
-		}
-	}
-	if !found {
-		t.Fatal("正向对照失败：目录里没有 entry-tool")
-	}
-}
+// ⚠️ `TestEntryURLIsAbsentWhenBaseDomainUnset` 已随 W4 删除：`entry_url` 不再存在
+// （总纲 §8.4 / §5.2 冻结契约），因此"基域未配置时省略字段 / 配好后给出链接"这一对
+// 判据整体作废。替代判据 = 全仓 `entry_url` 零命中（L4 的
+// `scripts/wasm/check-old-model-residue.mjs`，分类 `entry-url`）+ 本包
+// `TestPublishResponseHasNoEntryURL`（正向断言响应里没有该键，见 publish_test.go）。

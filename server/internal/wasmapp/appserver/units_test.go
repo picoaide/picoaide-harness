@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -168,40 +167,6 @@ func TestReleaseAssetID(t *testing.T) {
 	}
 	if got := releaseAssetID(nil); got != "" {
 		t.Fatalf("nil 版本应返回空串，得到 %q", got)
-	}
-}
-
-// ===== clientIP：可信代理边界（R35）=====
-
-func TestClientIP(t *testing.T) {
-	trusted := []netip.Prefix{netip.MustParsePrefix("172.28.0.0/24")}
-	cases := []struct {
-		name       string
-		remote     string
-		xff        string
-		trusted    []netip.Prefix
-		wantResult string
-	}{
-		{"无信任代理时忽略 XFF（防伪造）", "203.0.113.5:1234", "1.2.3.4", nil, "203.0.113.5"},
-		{"对端不是可信代理时忽略 XFF", "203.0.113.5:1234", "1.2.3.4", trusted, "203.0.113.5"},
-		{"对端可信时采信最左的不可信地址", "172.28.0.2:443", "203.0.113.9, 172.28.0.2", trusted, "203.0.113.9"},
-		{"整条链都是可信代理时回落对端", "172.28.0.2:443", "172.28.0.3", trusted, "172.28.0.2"},
-		{"链中出现垃圾时回落对端（不可信链）", "172.28.0.2:443", "203.0.113.9, garbage", trusted, "172.28.0.2"},
-		{"无 XFF 时用对端", "172.28.0.2:443", "", trusted, "172.28.0.2"},
-		{"IPv6 字面量", "[2001:db8::1]:8080", "", trusted, "2001:db8::1"},
-		{"对端不可解析时原样返回", "unix-socket", "1.2.3.4", trusted, "unix-socket"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "https://app.harness.example.com/", nil)
-			req.RemoteAddr = tc.remote
-			if tc.xff != "" {
-				req.Header.Set("X-Forwarded-For", tc.xff)
-			}
-			if got := clientIP(req, tc.trusted); got != tc.wantResult {
-				t.Fatalf("clientIP = %q，期望 %q", got, tc.wantResult)
-			}
-		})
 	}
 }
 
@@ -408,48 +373,6 @@ func TestModuleCache_CloseAllClosesEntries(t *testing.T) {
 	}
 	if entries, bytes := c.size(); entries != 0 || bytes != 0 {
 		t.Fatalf("closeAll 后记账应清零，得到 %d/%d", entries, bytes)
-	}
-}
-
-// ===== 换票 URL：next 必须是相对路径且正确转义 =====
-
-func TestTicketURLUsesRelativeNext(t *testing.T) {
-	// 主站源不再缓存成字段（基域运行期可改）⇒ 用例按 Options 给当前基域。
-	s := &Server{opt: Options{BaseDomain: func() string { return testBaseDomain }}}
-	req := httptest.NewRequest(http.MethodGet, "https://app."+testBaseDomain+"/a/b?q=1&r=2&ticket=dead", nil)
-	got := s.ticketURL(req, "expense")
-	u, err := url.Parse(got)
-	if err != nil {
-		t.Fatalf("ticketURL 不是合法 URL: %q", got)
-	}
-	if u.Scheme+"://"+u.Host != testMainOrigin {
-		t.Fatalf("换票必须在主站: %q", got)
-	}
-	if u.Path != "/app-ticket" {
-		t.Fatalf("换票路径不对: %q", got)
-	}
-	if u.Query().Get("app") != "expense" {
-		t.Fatalf("app 参数不对: %q", got)
-	}
-	next := u.Query().Get("next")
-	if next != "/a/b?q=1&r=2" {
-		t.Fatalf("next 应保留其余参数并去掉 ticket，得到 %q", next)
-	}
-	// 关键：含 `&`/`=` 的相对路径必须被整体转义，否则会被解析成额外的 query 参数
-	//（net/url 的 PathEscape 不转义 & 与 =，这是一个真实的坑）。
-	if !strings.Contains(got, "next=%2Fa%2Fb%3Fq%3D1%26r%3D2") {
-		t.Fatalf("next 必须整体转义（QueryEscape），得到 %q", got)
-	}
-}
-
-func TestCleanRequestURI(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "https://app."+testBaseDomain+"/", nil)
-	if got := cleanRequestURI(req); got != "/" {
-		t.Fatalf("根路径应得到 /，得到 %q", got)
-	}
-	req2 := httptest.NewRequest(http.MethodGet, "https://app."+testBaseDomain+"/x?a=1&ticket=t", nil)
-	if got := cleanRequestURI(req2); got != "/x?a=1" {
-		t.Fatalf("应去掉 ticket，得到 %q", got)
 	}
 }
 

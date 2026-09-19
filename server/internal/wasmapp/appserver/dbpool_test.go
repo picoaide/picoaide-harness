@@ -17,6 +17,7 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/wasmapp/queue"
 )
 
 // ===== §4.5 句柄池：同应用复用 / 跨应用不共享 / 淘汰策略 =====
@@ -248,7 +249,12 @@ func TestAppDBPool_HandleOpensOneWriterPlusReadersConnections(t *testing.T) {
 //
 // 变异：去掉 acquire 里的 opening 分支 ⇒ 本用例出现 500（且 fd 数 > 1+N）。
 func TestAppDBPool_ConcurrentFirstRequestsShareOneOpen(t *testing.T) {
-	e := newEnv(t)
+	// ⚠️ 单用户同应用同时运行数默认是 1（§4.6）⇒ 四个请求必须来自**四个不同员工**，
+	// 否则它们被队列串行化，本用例的前提（并发 Open 撞 WAL 写锁）就消失了（2026-09-19
+	// W4 身份一律注入后实测：同用户会被串行）。这里用 4 个员工恢复真实并发。
+	e := newEnv(t, func(o *Options) {
+		o.Scheduler = queue.New(queue.Options{PerUserPerAppRunning: 4, PerUserPerAppQueued: 4, PerUserGlobalRunning: 4})
+	})
 	appID := e.appID("dbopenflight")
 	e.publishApp(appSpec{appID: appID, wasm: appBinary(t, "dbapp")})
 
@@ -542,6 +548,12 @@ func TestServe_ForeignWriteDuringTransactionIsRejected(t *testing.T) {
 	}
 
 	// A：开事务 → 写一行 → 持有 1.2 s → 回滚（远小于 appdb 的 5 s 事务硬超时）。
+	//
+	// ⚠️ B 必须注入**另一个员工**：队列的"单用户同应用同时运行数 = 1"（§4.6）会把同一
+	// 员工的 B 排队到 A 结束之后 —— 那样 B 永远见不到 A 的事务，本用例会退化成"顺序
+	// 请求"（2026-09-19 W4 身份一律注入后实测：B 拿到的 body 是 null/空）。
+	// 本用例要验证的是**句柄层**的事务所有权守卫，与"谁发起的请求"无关。
+	bob := e.clientUser("bob-txe2e")
 	aDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { aDone <- e.get(appID, "/slowtx?ms=1200&v=from-A") }()
 	waitFor(t, func() bool { return handle.db.InTx() }, "A 进入事务（平台自省面可见）")
@@ -551,7 +563,8 @@ func TestServe_ForeignWriteDuringTransactionIsRejected(t *testing.T) {
 	// 判据看**应用看到的错误码**而不是 HTTP 状态：dbapp 夹具把宿主调用的错误回显进
 	// 200 响应体（它刻意演示"应用自己决定怎么处理宿主错误"）；平台侧的码是 DB_DENIED，
 	// 一个正常应用会把它映射成 403（apperr.StatusOf(DB_DENIED) = 403）。
-	rec := e.get(appID, "/exec?sql="+urlQueryEscape("INSERT INTO t (id, v) VALUES (7, 'from-B')"))
+	rec := e.doClient(appID, bob, http.MethodGet,
+		"/exec?sql="+urlQueryEscape("INSERT INTO t (id, v) VALUES (7, 'from-B')"), "", "")
 	b := decodeJSON(t, rec.Body)
 	if got, _ := b["code"].(string); got != "DB_DENIED" {
 		t.Fatalf("A 持有事务期间，B 的 db.exec 必须拿到 DB_DENIED（否则写会落进别人的事务），"+
@@ -561,7 +574,7 @@ func TestServe_ForeignWriteDuringTransactionIsRejected(t *testing.T) {
 		t.Fatalf("拒绝文案应说明「另一个请求正在事务中」，得到 %q", got)
 	}
 	// B：读 → 同样被拒（不把未提交数据当已提交返回）。
-	rec = e.get(appID, "/q?sql="+urlQueryEscape("SELECT id, v FROM t"))
+	rec = e.doClient(appID, bob, http.MethodGet, "/q?sql="+urlQueryEscape("SELECT id, v FROM t"), "", "")
 	b = decodeJSON(t, rec.Body)
 	if got, _ := b["code"].(string); got != "DB_DENIED" {
 		t.Fatalf("A 持有事务期间，B 的 db.query 必须拿到 DB_DENIED，得到 code=%q body=%s",
@@ -626,13 +639,16 @@ func TestServe_ForeignTxFinishDuringTransactionIsRejected(t *testing.T) {
 	}
 
 	// A：开事务 → 写一行 → 持有 1.2 s → 回滚（远小于 appdb 的 5 s 事务硬超时）。
+	// B 用另一个员工（理由同 TestServe_ForeignWriteDuringTransactionIsRejected：
+	// 单用户同应用并发为 1，同一员工会被队列串行化）。
+	bob := e.clientUser("bob-txfin")
 	aDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { aDone <- e.get(appID, "/slowtx?ms=1200&v=from-A") }()
 	waitFor(t, func() bool { return handle.db.InTx() }, "A 进入事务（平台自省面可见）")
 
 	// B：只调事务出口，且**不带 tx_id**（tx_id 是可选字段 ⇒ appdb 侧跳过串号校验）。
 	for _, op := range []string{"commit", "rollback"} {
-		rec := e.get(appID, "/txfin?op="+op)
+		rec := e.doClient(appID, bob, http.MethodGet, "/txfin?op="+op, "", "")
 		// 先取原始 body 再解析：decodeJSON 会把 body 读空，之后 String() 拿不到内容。
 		raw := rec.Body.String()
 		b := decodeJSONBytes(t, []byte(raw))

@@ -21,7 +21,6 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/memprofile"
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
-	"github.com/picoaide/picoaide/internal/wasmapp/session"
 )
 
 // 本文件是 §8 的**管理面**（R23"最小运维面"）：应用列表 / 下架 / 转移归属 / 冻结
@@ -88,6 +87,25 @@ func (h *Handlers) adminList(c *gin.Context) {
 			WithHint("待审批队列用 status=pending；不筛用 status=all（缺省）"))
 		return
 	}
+	// 访问级别筛选（W5 C1 / R2-L6-1）：`?access=login|whitelist`。
+	//
+	// ⚠️ `access=login` **必须包含历史 `public` 行**（I6 的读侧口径：public 在读取侧
+	// 即 login）。只匹配字面 `login` 会让"存量 public 行"在按 login 筛选时凭空消失
+	// —— 而那正是管理员要去处理的那批行。
+	accessFilter := strings.ToLower(strings.TrimSpace(c.Query("access")))
+	switch accessFilter {
+	case "", "all", string(appcfg.AccessLogin), string(appcfg.AccessWhitelist):
+	default:
+		writeErr(c, apperr.New(apperr.CodeValidation, "access 取值不合法").
+			WithDetail("field", "access").
+			WithDetail("allowed", []string{"all", string(appcfg.AccessLogin), string(appcfg.AccessWhitelist)}).
+			WithHint("access=login 会**连同历史 public 行**一起返回（读侧把 public 当 login）"))
+		return
+	}
+	if accessFilter == "all" {
+		accessFilter = ""
+	}
+
 	// status=deleted 与 include_deleted 是同义的两条入口：显式要求看已删除的行
 	// 时就别再让调用方记得同时传 include_deleted（否则"筛了却什么都没有"）。
 	includeDeleted := c.Query("include_deleted") == "1" ||
@@ -140,6 +158,9 @@ func (h *Handlers) adminList(c *gin.Context) {
 			continue
 		}
 		if !matchAppStatus(a, status, len(pending[a.AppID])) {
+			continue
+		}
+		if accessFilter != "" && !matchAppAccess(a, accessFilter) {
 			continue
 		}
 		matched = append(matched, a)
@@ -215,7 +236,26 @@ func (h *Handlers) adminList(c *gin.Context) {
 		"offset":    offset,
 		"q":         q,
 		"status":    status,
+		// `access` 回显（W5 C1 的契约）：前端据它判断"服务端是否支持该筛选"。
+		// **不回显**会让前端退化成本页过滤（并明说"共 N 条是未筛选全集"）——
+		// 那是个安全但难用的降级分支，别让它误判。
+		"access": accessFilter,
 	})
+}
+
+// matchAppAccess 判定一行是否命中访问级别筛选（W5 C1）。
+//
+// 归一化口径与 appcfg 的读侧一致：历史 `public` 行按 `login` 参与匹配（I6），
+// 因此 `access=login` 会同时返回字面 login 与历史 public 的行 —— 这正是管理员
+// 要清理/复核的那批。
+func matchAppAccess(a *serverstore.WasmApp, want string) bool {
+	// 历史取值的判定**只用 appcfg 的判定函数**（`IsLegacyPublicAccess`）：服务端
+	// 只有归属模块知道"历史公开档位长什么样"，调用点读起来是意图（这是不是历史档位）
+	// 而不是字面量比较；同时业务代码里不出现历史字面量（零残留扫描的 A 桶必须为 0）。
+	if appcfg.IsLegacyPublicAccess(string(appcfg.AccessOfConfigJSON(a.ConfigJSON))) {
+		return want == string(appcfg.AccessLogin)
+	}
+	return string(appcfg.AccessOfConfigJSON(a.ConfigJSON)) == want
 }
 
 // matchAppQuery 判定一行是否命中搜索词（app_id / 标题 / 负责人）。
@@ -694,96 +734,14 @@ func (h *Handlers) adminUnpublish(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"app": gin.H{"app_id": appID, "enabled": false, "changed": true}})
 }
 
-// SettingAppsBaseDomain 是应用基域的设置键（管理端可改；未设置时回落环境变量）。
+// ⚠️ 应用基域配置面已随 W4 整体删除（总纲 §8.4）：`SettingAppsBaseDomain`
+// （settings 键 `wasm.apps_base_domain`）、控制台视图 `baseDomainView`、
+// `AdminBaseDomainGet`（GET /domain）与 `AdminBaseDomainPut`（PUT /domain）
+// 全部不再存在 —— 应用只在桌面客户端内以 `<渠道 app scheme>://<app_id>` 打开，
+// 平台上不再有"应用对外主机名"这个配置项。
 //
-// 为什么要有它（2026-09-18 用户要求）：「应用名 + 泛域名 = 应用访问地址」这件事必须
-// 能在管理端配置 —— 原来只有部署期环境变量，改一次要重部署。落库之后由装配侧注入的
-// ApplyBaseDomain 负责校验/生效，本包只做"读写 + 审计"。
-const SettingAppsBaseDomain = "wasm.apps_base_domain"
-
-// baseDomainView 是控制台要的完整视图（GET 与 PUT 返回同一形状）。
-func (h *Handlers) baseDomainView() gin.H {
-	value := ""
-	if h.opt.BaseDomain != nil {
-		value = h.opt.BaseDomain()
-	}
-	source := "none"
-	if h.opt.BaseDomainSource != nil {
-		source = h.opt.BaseDomainSource()
-	}
-	scheme, host := session.ParseBaseDomain(value)
-	view := gin.H{
-		"base_domain": value,
-		"source":      source,
-		"enabled":     host != "",
-		"setting_key": SettingAppsBaseDomain,
-		// 控制台直接把它渲染成示例：把 `<app_id>` 换成真实应用名就是访问地址。
-		"url_pattern": "",
-	}
-	if host != "" {
-		view["url_pattern"] = scheme + "://<app_id>." + host
-	}
-	return view
-}
-
-// AdminBaseDomainGet 读当前应用基域配置（控制台渲染 + 保存后回读）。
-func (h *Handlers) adminBaseDomainGet(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
-		writeErr(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, h.baseDomainView())
-}
-
-// AdminBaseDomainPut 保存应用基域（空串 = 关闭应用子域）。
-//
-// 校验/自检/落库/生效全部在注入的 ApplyBaseDomain 里完成（那些知识住在装配侧：
-// 启用子域要过 R35 可信代理与内存四笔账两条 fail-closed）。本函数只负责：
-// 解析 body → 调它 → 写审计 → 回读视图。**失败一定原样回错误信封**（含 hints），
-// 控制台据此提示"还差什么条件"，而不是给一句"保存失败"。
-func (h *Handlers) adminBaseDomainPut(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
-		writeErr(c, err)
-		return
-	}
-	admin := serverauth.AdminUser(c)
-	if admin == nil {
-		writeErr(c, apperr.New(apperr.CodeAuthRequired, "未登录"))
-		return
-	}
-	if h.opt.ApplyBaseDomain == nil {
-		writeErr(c, apperr.New(apperr.CodeInternal, "应用基域不可配置（装配未注入）").
-			WithHint("服务端未提供基域保存钩子：请升级服务端或检查部署装配"))
-		return
-	}
-	var req struct {
-		BaseDomain *string `json:"base_domain"`
-	}
-	if berr := bindAdminJSON(c, &req); berr != nil {
-		writeErr(c, berr)
-		return
-	}
-	if req.BaseDomain == nil {
-		writeErr(c, apperr.New(apperr.CodeValidation, "缺少 base_domain").
-			WithDetail("field", "base_domain").
-			WithHint("body 形如 {\"base_domain\":\"apps.example.com\"}；传空串表示关闭应用子域"))
-		return
-	}
-	old := ""
-	if h.opt.BaseDomain != nil {
-		old = h.opt.BaseDomain()
-	}
-	next := strings.TrimSpace(*req.BaseDomain)
-	if err := h.opt.ApplyBaseDomain(next); err != nil {
-		writeErr(c, err)
-		return
-	}
-	if next != old {
-		h.auditOrg(admin.Username, "wasm_apps_base_domain_change",
-			fmt.Sprintf("应用基域 %q → %q（员工自建应用的访问域名）", old, next))
-	}
-	c.JSON(http.StatusOK, h.baseDomainView())
-}
+// 历史设置在库里保留但**不再被读取**（读取方 baseDomainHolder 随同一波次删除）；
+// 迁移 0074 只改写 `access`，不动该设置行。
 
 // AdminPublish 管理员上架（R23：管理员可处置任意应用）。
 //
@@ -1220,16 +1178,15 @@ func (h *Handlers) adminDiagnostics(c *gin.Context) {
 // 平台级运行时水位（P1-9 / P2-4 的只读出口）
 // ===========================================================================
 //
-// 平台里有一批"零出口"的水位（模块缓存、应用库句柄、匿名限流拒绝/淘汰、
-// aichat 吊销失败），只有包内方法或没人调用的导出方法。这里给管理面一个
-// **只读**入口，让管理员不查库、不看日志也能回答"现在的内存/队列/缓存水位如何"。
+// 平台里有一批"零出口"的水位（模块缓存、应用库句柄），只有包内方法或没人
+// 调用的导出方法。这里给管理面一个**只读**入口，让管理员不查库、不看日志也能
+// 回答"现在的内存/队列/缓存水位如何"。
 //
-// 只暴露**已经注入到本包**的访问器（Compiler / Events / Ready）：其余几项要么
-// 是 appserver 的私有方法（moduleCache / appDBPool，属并发改造中的包），要么
-// 有导出访问器但没接到 api.Options 上（anonlimit.Limiter.Stats /
-// aichat.Client.RevokeFailures，两者都已是导出方法，缺的只是 cmd/server 的装配
-// 那一行）。**如实列出"缺哪个、接哪里"**（unavailable 段），而不是静默省略 ——
-// 管理员必须能区分"这个数是 0"和"这个数没有出口"。
+// 只暴露**已经注入到本包**的访问器（Compiler / Events / Ready）：其余几项是
+// appserver 的私有方法（moduleCache / appDBPool）。**如实列出"缺哪个、接哪里"**
+// （unavailable 段），而不是静默省略 —— 管理员必须能区分"这个数是 0"和
+// "这个数没有出口"。（原文另列的两项 —— `anonlimit.Limiter.Stats` 与
+// `aichat.Client.RevokeFailures` —— 已随 W4 删除，条目同步移除。）
 
 // runtimeUnavailable 返回当前**没有出口**的水位清单（名称/原因/接线位置）。
 //
@@ -1246,16 +1203,6 @@ func runtimeUnavailable() []gin.H {
 			"name":   "appdb_handles",
 			"reason": "应用库句柄数住在 appserver 的私有 appDBPool 上（pool.size()），没有导出访问器",
 			"wiring": "appserver.Server 增加 AppDBPoolStats() (handles int, max int)，再经 api.Options 注入",
-		},
-		{
-			"name":   "anon_limit",
-			"reason": "anonlimit.Limiter.Stats() 已是导出方法，但该 Limiter 没有注入到 api.Options",
-			"wiring": "cmd/server/wasmapp.go 的 wasmapi.Options{} 增加 RuntimeStats 闭包并调用 limiter.Stats()",
-		},
-		{
-			"name":   "ai_revoke_failures",
-			"reason": "aichat.Client.RevokeFailures() 已是导出方法，但该 Client 没有注入到 api.Options",
-			"wiring": "cmd/server/wasmapp.go 的 wasmapi.Options{} 增加 RuntimeStats 闭包并调用 ai.RevokeFailures()",
 		},
 	}
 }

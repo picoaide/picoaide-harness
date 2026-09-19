@@ -104,7 +104,7 @@ func TestServe_UnknownHostMethodRejected(t *testing.T) {
 // 宿主 panic 不得打穿：转 INTERNAL 回给应用，细节只进宿主日志。
 func TestServe_HostPanicIsolated(t *testing.T) {
 	host := newFakeHost()
-	host.panicOn[abi.MethodAIChat] = true
+	host.panicOn["db.query"] = true
 	res := serveApp(t, "/hostpanic", host)
 	resp := requireOK(t, res)
 	body := bodyJSON(t, resp)
@@ -526,7 +526,7 @@ func TestServe_HostCallOverBudgetIgnoringCtx(t *testing.T) {
 	t.Logf("宿主忽略 ctx 阻塞 1.5s、预算 200ms：实测 %s 返回 %s", elapsed, res.KillReason.Code)
 }
 
-// §7.3：进入宿主调用时**暂停** guest 计时（否则 ai.chat 的 30 s 会被 10 s 误杀）。
+// §7.3：进入宿主调用时**暂停** guest 计时（否则一次慢宿主调用会被 10 s 的 guest 预算误杀）。
 func TestServe_HostCallPausesGuestClock(t *testing.T) {
 	host := newFakeHost()
 	host.blockFor[abi.MethodLog] = 400 * time.Millisecond

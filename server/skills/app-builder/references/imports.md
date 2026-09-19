@@ -17,7 +17,7 @@
 表里只有一个模块名：`wasi_snapshot_preview1`（`wasm32-wasip1` 的 WASI 预览 1）。
 `env.*` / `js.*` / `wasi_unstable` / 组件模型命名空间一律不放行。
 
-⚠️ 这里列的是 **WASI 导入**，不是平台能力：`db.*` / `ai.chat` / `log` / `assets.read`
+⚠️ 这里列的是 **WASI 导入**，不是平台能力：`db.*` / `log` / `assets.read`
 走的是 stdin/stdout 上的 JSON-RPC，根本不经过导入段（见 `references/abi.md`）。
 
 ## 为什么这是「保守超集」
@@ -46,7 +46,7 @@
 2. **对照本表**：
    - 表里没有这个符号 → 它属于平台刻意不放行的一类：不要引入依赖它的库或运行时
      （例如需要 socket 的网络客户端），平台能力一律走 stdin/stdout 上的 JSON-RPC
-     （`db.*` / `ai.chat` / `log` / `assets.read`）；
+     （`db.*` / `log` / `assets.read`）；
    - 表里有、但报的是 `IMPORT_SIGNATURE_MISMATCH` → 类型不符：按 `references/abi.md` §2 的
      读帧/写帧样板重写，并确认编译目标是 `wasm32-wasip1`（Go：`GOOS=wasip1 GOARCH=wasm`）。
 3. **不要自己往名单里加符号**：`imports_gen.go` 与本文档都是生成产物，手写即门禁红；

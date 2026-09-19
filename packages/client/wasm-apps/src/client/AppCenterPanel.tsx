@@ -1,9 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { PublishErrorBlock, PublishForm } from './PublishForm.tsx'
-import { openAppEntry } from './open-app.ts'
-import { safeEntryURL } from './open-app.ts'
-import { ACCESS_MODES, DEFAULT_ACCESS, type AccessMode } from './appcfg-contract.ts'
-import { parseErrorEnvelope, type PublishFailure, type PublishTarget } from './publish-app.ts'
+import {
+  openAppEntry,
+  type AppOpenCounts,
+  type OpenFailure,
+  type OpenFailureReason,
+  type OpenWindowOutcome,
+} from './open-app.ts'
+import { DEFAULT_ACCESS, parseWindowSpec, type AccessMode, type AppWindowSpec } from './appcfg-contract.ts'
+import { formatWindowRatio, parseErrorEnvelope, type PublishFailure, type PublishTarget } from './publish-app.ts'
 import {
   deleteApp,
   fetchDiagnostics,
@@ -18,7 +23,29 @@ import {
   type MyReleasesReport,
   type ReleaseStatus,
 } from './app-releases.ts'
-import { t, type AppCenterKey } from './locales.ts'
+import { AppAiPanel } from './AppAiPanel.tsx'
+import {
+  appChannel,
+  loadAppChannel,
+  setAppChannel,
+  type AppChannel,
+  type AppChannelFailure,
+  type AppChannelResult,
+} from './channel-seam.ts'
+import { ensureHostProof } from './host-proof.ts'
+import { loadAppAiIdentity, type AppAiConsentStore, type AppAiDeps } from './app-ai.ts'
+import { appShareLink } from './deep-link.ts'
+import {
+  CATALOG_PAGE_SIZE,
+  EMPTY_FILTER,
+  catalogEmptyState,
+  filterCatalog,
+  paginateCatalog,
+  type CatalogFilter,
+} from './catalog-filter.ts'
+import { dismissOnboarding, isOnboardingDismissed, type OnboardingStore } from './onboarding.ts'
+import { clearOpenIntent, readOpenIntent, saveOpenIntent, type OpenIntentStore } from './open-intent.ts'
+import { t, tCount, type AppCenterKey } from './locales.ts'
 
 /**
  * 应用中心（App Center，R34）——「同事做的小工具」的目录。
@@ -26,17 +53,21 @@ import { t, type AppCenterKey } from './locales.ts'
  * 四条产品约定（都来自设计基线，不是自由发挥）：
  *
  *  - **目录一律展示全部应用**（2026-09-18 拍板）。**不再按可见性过滤**：`visible` 字段
- *    已从契约里删除，"公开 / 登录后使用 / 仅白名单"只决定**谁能用**，不决定**谁能看见**
+ *    已从契约里删除，"登录后使用 / 仅白名单"只决定**谁能用**，不决定**谁能看见**
  *    （白名单应用也列出来，点开由应用自己判并返回它的 403 页）。服务端
  *    `GET /api/client/v2/apps/wasm/catalog` 给什么就渲染什么，客户端不新增第二条筛选规则
  *    —— 两份规则迟早给出不同答案，而"为什么这个应用看不到"会变成无法回答的问题。
- *  - **标出访问级别**：用服务端下发的 `access`（三模式之一），让"点开会被拦吗"在点击
- *    之前就有答案。`access` 尚未就绪时的过渡兼容见 {@link resolveAccess}。
+ *  - **标出访问级别**：用服务端下发的 `access`（2026-09-19 起写侧只有
+ *    `login | whitelist`，历史 `public` 读作 `login`，见 {@link resolveAccess}），
+ *    让"点开会被拦吗"在点击之前就有答案。
  *  - **下架的条目也要展示**（`enabled=false` 显示"已下架"并禁用打开）：下架不等于不存在，
  *    直接从目录里消失会让用户以为是自己看错了。
  *  - **R36：不显示额度/用量**。额度唯一的入口是桌面客户端本来的账号卡；这一页只有
- *    名称 / 一句话说明 / 负责人 / 访问级别 / 入口链接。**不做安装语义**：应用在子域上，
- *    点开即用（没有"装到本地"这一步）。
+ *    名称 / 一句话说明 / 负责人 / 访问级别 / 当前版本。**不做安装语义**：应用点开即用
+ *    （没有"装到本地"这一步），但它**只在客户端内**打开 —— 打开走本机路由
+ *    `POST /api/pico/wasm-apps/open`，由宿主确保协议 handler 与分区就绪后让内置浏览器
+ *    加载 `<本安装的 app scheme>://<app_id>/`（冻结契约 2026-09-19 §4.5）。这一页没有入口链接、
+ *    也没有系统浏览器兜底：应用不存在"可以贴进浏览器的地址"。
  *
  * 发布者本人（`is_owner`）额外拿到**作者自服务**那一组（R1-pm-1）：发新版、下架/上架、
  * 删除、诊断。三个判据：
@@ -61,7 +92,6 @@ export interface AppCenterItem {
   title: string
   description: string
   responsible: string
-  entryURL: string
   /** 访问级别（服务端 `access`）：决定"点开会不会被应用拦下"。 */
   access: AccessMode
   /** 是否上架（服务端 `enabled`）；`false` = 已下架，仍然展示但禁用打开。 */
@@ -87,45 +117,48 @@ export interface AppCenterItem {
   purpose?: string
   /** 准入名单（**仅发布者本人**的目录行有；发新版时预填）。 */
   whitelist?: string[]
+  /**
+   * 作者声明的窗口规格（F3/§6：`window.ratio/width/height`）。
+   *
+   * 缺席 = 服务端没下发（或字段还没落地）⇒ 详情页不显示、也**不声称锁了比例**。
+   */
+  window?: AppWindowSpec
 }
 
 /**
  * 解析一条目录行的访问级别。
  *
- * **过渡兼容（可删）**：`access` 三模式与服务端 `api/read.go` 的 catalog 是同一批改动
- * 的两半，落地过程中服务端可能还在下发旧的 `login_required` / `whitelist`。因此
- * `access` 缺失时按旧字段回落读取：
+ * 2026-09-19（冻结契约 §4.4）：匿名面已删除 ⇒ 本函数**永不返回** `public`：
  *
- * ```
- * access ?? (login_required === false ? 'public' : (whitelist?.length ? 'whitelist' : 'login'))
- * ```
+ *  - 服务端下发历史值 `public`（存量行、老服务端）⇒ 按 `login` 渲染（读侧当作登录后使用，
+ *    与服务端的读取侧收敛一致）；
+ *  - 服务端下发未知取值（例如将来新增的模式）⇒ 同样回落 `login`（缺省模式，不放大权限）；
+ *  - `access` 缺失时按旧字段 `login_required` / `whitelist` 过渡兼容读取 —— 注意
+ *    `login_required: false`（旧的"匿名可用"）现在也读作 `login`：那条语义已经不存在，
+ *    渲染成"公开"会让用户以为可以不登录打开。
  *
- * 这条分支**只在 `access` 缺席时生效**（服务端一旦返回 `access` 它就永远不会被走到）。
- * 它的价值是"迁移期间不要把每个应用都误标成登录后使用"；确认服务端已下发 `access`
- * 之后（`appcfg-contract.spec.ts` 的对拍 + 一次真实目录响应）即可删除。
+ * 这条过渡分支**只在 `access` 缺席时生效**（服务端一旦返回 `access` 它就永远不会被走到）。
  * @param row - 服务端目录行。
- * @returns 三模式之一；服务端给了非法值时回落成 `login`（缺省模式，不放大权限）。
+ * @returns `login` 或 `whitelist`；任何不确定的输入都回落 `login`（最保守的缺省）。
  */
 export function resolveAccess(row: Record<string, unknown>): AccessMode {
   const raw = row.access
   if (typeof raw === 'string') {
-    if ((ACCESS_MODES as readonly string[]).includes(raw)) return raw as AccessMode
-    // **给了但非法**（不是缺失）⇒ 按缺省模式处理，绝不落到下面的旧字段分支：
-    // 那一条会把"服务端下发了一个我们还不认识的新模式"翻译成 `public`
-    // （`login_required === false` 时），也就是**把权限放大**。
-    // 独立审计 2026-09-18 在 DOM 上复现过这条（`access: 'org'` + `login_required: false`
+    // 历史 `public`：读作 login（服务端读取侧同一口径，§4.4）。
+    if (raw === 'login' || raw === 'whitelist') return raw
+    // **给了但不认识**（不是缺失）⇒ 按缺省模式处理，绝不落到下面的旧字段分支：
+    // 那一条会把"服务端下发了一个我们还不认识的新模式"翻译成别的语义
+    // （独立审计 2026-09-18 在 DOM 上复现过 `access: 'org'` + `login_required: false`
     // 渲染成「公开」）；不认识的值一律按最保守的缺省显示。
     return DEFAULT_ACCESS
   }
   // ---- 以下是过渡兼容分支（**只在 access 缺失时**生效，见函数注释）：access 就绪后删除 ----
-  if (row.login_required === false) return 'public'
   if (Array.isArray(row.whitelist) && row.whitelist.length > 0) return 'whitelist'
   return DEFAULT_ACCESS
 }
 
 /** 访问级别徽标的字典键。 */
 const ACCESS_BADGE_KEYS: Record<AccessMode, AppCenterKey> = {
-  public: 'appCenter.accessBadge.public',
   login: 'appCenter.accessBadge.login',
   whitelist: 'appCenter.accessBadge.whitelist',
 }
@@ -163,7 +196,16 @@ export function releaseStatusLabel(status: string): string {
 
 /** 面板状态机。 */
 export type AppCenterState =
+  /** 正在取目录。 */
   | { kind: 'loading' }
+  /**
+   * 未登录（宿主路由 401 `AUTH_REQUIRED`）。
+   *
+   * 它是**一个独立的空态**（§19 Q4/Q2），不是错误：未登录时目录一个应用都不会有，
+   * 而"还没有可用的应用"会把"你还没登录"说成"平台里没有应用"。登录闸门本身在宿主
+   * （§16.1：客户端半边不持 bearer），客户端只负责把状态说清楚并给一个"登录后重试"。
+   */
+  | { kind: 'signed-out' }
   | { kind: 'error', error: AppCenterError }
   | { kind: 'ready', items: AppCenterItem[] }
 
@@ -226,12 +268,22 @@ export interface CatalogReport {
 const CATALOG_SAMPLE_MAX = 400
 
 /**
+ * "未登录时记住这次打开"的登录态轮询间隔（5s）。
+ *
+ * 与 `auth-gate.ts` 的会话 tripwire 同节奏：那条负责"登出就跳登录页"，这条负责
+ * "登录完成就继续打开"。轮询只在**有 pending 意图**时存在（不是常驻定时器）。
+ */
+const LOGIN_POLL_MS = 5000
+
+/**
  * 解析目录载荷并**统计跳过的行**（纯函数，便于单测）。
  *
  * 字段名与 server 的 `catalog` 行一一对应（`app_id`/`title`/`description`/
- * `responsible`/`entry_url`/`access`/`enabled`/`current_version`/`is_owner`，
+ * `responsible`/`access`/`enabled`/`current_version`/`is_owner`，
  * 发布者本人另有 `purpose`/`whitelist`）；`title` 缺失时回落到 `app_id`
- * （应用名就是域名，至少能让人认出是哪个）。
+ * （应用名就是标识，至少能让人认出是哪个）。`entry_url` 自 2026-09-19 起**已不在契约里**
+ * （冻结契约 §4.5：应用只在客户端内以 `<本安装的 app scheme>://<app_id>/` 打开）—— 服务端若
+ * 仍带着它，这里**忽略**（不认识、不渲染、不拼链接）。
  *
  * **不丢任何一行**：这里只有"这条不是合法对象 / 没有合法 app_id"才跳过，没有任何
  * 按可见性/权限/上下架的筛选（目录展示全部应用）。但**跳过必须是可诊断的**：
@@ -256,12 +308,12 @@ export function parseCatalogReport(payload: unknown): CatalogReport {
       skippedRows.push(row)
       continue
     }
+    const windowSpec = parseWindowSpec(entry.window)
     items.push({
       appId,
       title: typeof entry.title === 'string' && entry.title.trim() !== '' ? entry.title : appId,
       description: typeof entry.description === 'string' ? entry.description : '',
       responsible: typeof entry.responsible === 'string' ? entry.responsible : '',
-      entryURL: typeof entry.entry_url === 'string' ? entry.entry_url : '',
       access: resolveAccess(entry),
       // 服务端**会**下发 enabled（下架条目也照样列在目录里，见 api/read.go），
       // 所以这里只在字段缺失时才按"上架"兜底。
@@ -277,6 +329,8 @@ export function parseCatalogReport(payload: unknown): CatalogReport {
       ...(Array.isArray(entry.whitelist)
         ? { whitelist: entry.whitelist.filter((account): account is string => typeof account === 'string') }
         : {}),
+      // 窗口声明（F3/§6）：服务端下发才带上；解析不出（越界/形态不符）就当没声明。
+      ...(windowSpec === null ? {} : { window: windowSpec }),
     })
   }
   return {
@@ -307,18 +361,59 @@ function truncate(text: string, max: number): string {
 }
 
 /**
- * 入口链接的展示文本（只显示主机名：完整 URL 太长，而 <app_id>.<基域> 的
- * 主机名本身就是"这是什么应用"的第二个答案）。
- * @param entryURL - 服务端下发的入口链接。
- * @returns 主机名，或原串（解析失败时）。
+ * 打开失败的 reason → 用户可见文案的字典键（2026-09-19）。
+ *
+ * 每一种失败都必须**分别可辨**：未登录（去登录）、应用不存在（可能已被删除/改名）、
+ * 协议未就绪（客户端还没准备好，重试/升级）、证明缺失（必须在客户端窗口里用）不是
+ * 同一件事，混成一句"打开失败"会让用户与维护者都无从下手。文案在 `locales.ts`。
  */
-export function entryHostLabel(entryURL: string): string {
-  const url = safeEntryURL(entryURL)
-  if (url === null) return entryURL
-  try {
-    return new URL(url).host
-  } catch {
-    return entryURL
+const OPEN_FAILURE_KEYS: Record<OpenFailureReason, AppCenterKey> = {
+  'invalid-app-id': 'appCenter.openInvalidAppId',
+  'proof-unavailable': 'appCenter.openProofUnavailable',
+  'host-proof-unavailable': 'appCenter.openHostProofUnavailable',
+  'scheme-unavailable': 'appCenter.openSchemeUnavailable',
+  'not-signed-in': 'appCenter.openNotSignedIn',
+  'proof-required': 'appCenter.openProofUnavailable',
+  'proof-expired': 'appCenter.openProofExpired',
+  'app-not-found': 'appCenter.openAppMissing',
+  'protocol-not-ready': 'appCenter.openProtocolNotReady',
+  'host-unreachable': 'appCenter.openHostUnreachable',
+  'unexpected-response': 'appCenter.openUnexpectedResponse',
+}
+
+/** 打开失败的建议（`hints`，同样按 reason 分派）。 */
+const OPEN_FAILURE_HINT_KEYS: Record<OpenFailureReason, AppCenterKey> = {
+  'invalid-app-id': 'appCenter.openInvalidAppIdHint',
+  'proof-unavailable': 'appCenter.openProofUnavailableHint',
+  'host-proof-unavailable': 'appCenter.openHostProofUnavailableHint',
+  'scheme-unavailable': 'appCenter.openSchemeUnavailableHint',
+  'proof-expired': 'appCenter.openProofExpiredHint',
+  'not-signed-in': 'appCenter.openNotSignedInHint',
+  'proof-required': 'appCenter.openProofUnavailableHint',
+  'app-not-found': 'appCenter.openAppMissingHint',
+  'protocol-not-ready': 'appCenter.openProtocolNotReadyHint',
+  'host-unreachable': 'appCenter.openHostUnreachableHint',
+  'unexpected-response': 'appCenter.openUnexpectedResponseHint',
+}
+
+/**
+ * 把打开失败翻译成既有的错误块信封（复用 {@link PublishErrorBlock}：`code` 是稳定
+ * 判据、`message` 是本地化说明、`hints` 是可照做的下一步）。
+ *
+ * `details` 里保留**英文诊断原文**（本机路由/形状细节），维护者据此定位；界面上显示
+ * 的是字典文案 —— 不会把英文技术串丢给用户，也不会把原因藏起来。
+ * @param failure - {@link openAppEntry} 的失败结果。
+ * @returns 可直接渲染的失败信封。
+ */
+export function openFailureEnvelope(failure: OpenFailure): PublishFailure {
+  return {
+    ok: false,
+    status: failure.status,
+    code: `OPEN_${failure.reason.toUpperCase().replace(/-/gu, '_')}`,
+    message: t(OPEN_FAILURE_KEYS[failure.reason]),
+    details: { reason: failure.reason, error: failure.error },
+    hints: [t(OPEN_FAILURE_HINT_KEYS[failure.reason])],
+    transport: failure.reason === 'host-unreachable',
   }
 }
 
@@ -489,6 +584,53 @@ const HINT: React.CSSProperties = {
 /** 建议列表（错误信封的 `hints`；与发布失败块的形状一致）。 */
 const HINT_LIST: React.CSSProperties = { margin: '6px 0 0', paddingLeft: 18 }
 
+/** 目录工具条（搜索 + 「我发布的」）。 */
+const TOOLBAR: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 10,
+  margin: '0 0 10px',
+}
+
+/** 搜索框（受控）。 */
+const SEARCH: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  boxSizing: 'border-box',
+  borderRadius: 10,
+  border: '1px solid var(--dsw-alias-border-l2)',
+  background: 'transparent',
+  color: 'var(--dsw-alias-label-primary)',
+  fontFamily: 'inherit',
+  fontSize: 13,
+  lineHeight: '20px',
+  padding: '5px 10px',
+}
+
+/** 「我发布的」开关（真实 checkbox，键盘可达）。 */
+const OWNED_LABEL: React.CSSProperties = {
+  flex: 'none',
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  fontSize: 12,
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-label-secondary)',
+  cursor: 'pointer',
+}
+
+/** 一次性引导卡的外框。 */
+const CARD_BOX: React.CSSProperties = {
+  padding: '12px 14px',
+  marginBottom: 10,
+  borderRadius: 14,
+  border: '1px solid var(--dsw-alias-border-l2)',
+  background: 'var(--dsw-alias-bg-layer-1)',
+  fontSize: 13,
+  lineHeight: '20px',
+  color: 'var(--dsw-alias-label-primary)',
+}
+
 /** 诊断原文（服务端下发的原始行样本 / 非 JSON body）。 */
 const DETAILS: React.CSSProperties = {
   margin: '8px 0 0',
@@ -589,19 +731,75 @@ const NOTICE: React.CSSProperties = {
 /**
  * 应用中心面板（模态）。
  *
- * 两个视图（FIX-38）：**目录**（默认，只读）与**发布**（员工发布入口）。发布由页面
- * 上下文 `POST /api/pico/apps/wasm/publish` —— 页面天然持 `dsh-auth-*` 持有性证明，
- * 因此不需要任何新的信任机制；分片/续传/90 s 预算全部复用宿主那一份编排。
+ * 视图（FIX-38 + F16）：**目录**（默认）/ **发布**（员工发布入口）/ **详情**
+ * （打开次数 + 分享 + 应用 AI）。发布由页面上下文 `POST /api/pico/apps/wasm/publish`
+ * —— 页面天然持 `dsh-auth-*` 持有性证明，因此不需要任何新的信任机制；分片/续传/90 s
+ * 预算全部复用宿主那一份编排。
  *
- * @param props - `onClose` 由触发按钮提供（关闭时卸载面板）。
+ * 挂载期取三样东西（各自**独立**失败，互不阻塞）：
+ *  1. 目录（`GET /api/pico/apps/wasm`）——失败 ⇒ 错误/未登录态；
+ *  2. 渠道参数（`GET /api/pico/wasm-apps/channel`，§16.1）——失败 ⇒ 分享入口**不渲染**
+ *     （fail-closed，§19 Q6），打开链路会自己再补一次取数；
+ *  3. 身份（`GET /api/pico/auth/state`）——只为应用 AI 的"按用户×应用授权"提供作用域，
+ *     拿不到就按未登录处理（授权不被记住，fail-closed）。
+ *
+ * @param props - `onClose` 由触发按钮提供（关闭时卸载面板）；其余为可注入依赖（测试用）。
  */
-export function AppCenterPanel({ onClose }: { onClose: () => void }) {
+export function AppCenterPanel({
+  onClose, onboardingStore, channelLoader, channelResultLoader, identityLoader, writeClipboard, aiDeps, aiConsentStore,
+  intentStore, loginStateLoader, loginPollMs, now,
+}: {
+  onClose: () => void
+  /** 一次性引导卡的存储（缺省渲染进程 `localStorage`）。 */
+  onboardingStore?: OnboardingStore | null
+  /** 渠道参数取数（缺省宿主只读路由；测试注入假实现）。 */
+  channelLoader?: () => Promise<AppChannel | null>
+  /** 渠道取数的**分档结果**（测试注入失败原因；优先于 `channelLoader`）。 */
+  channelResultLoader?: () => Promise<AppChannelResult>
+  /** 应用 AI 的身份取数（缺省 `/api/pico/auth/state`）。 */
+  identityLoader?: () => Promise<string>
+  /** 写剪贴板（缺省 `navigator.clipboard.writeText`；测试注入 spy）。 */
+  writeClipboard?: (text: string) => Promise<void>
+  /** 应用 AI 的传输依赖（测试注入假 fetch）。 */
+  aiDeps?: AppAiDeps
+  /** 应用 AI 的授权存储（缺省渲染进程 `localStorage`）。 */
+  aiConsentStore?: AppAiConsentStore | null
+  /** 「未登录时记住这次打开」的存储（缺省 `sessionStorage`）。 */
+  intentStore?: OpenIntentStore | null
+  /** 登录态取数（缺省读本机 `/api/pico/auth/state`；测试注入假实现）。 */
+  loginStateLoader?: () => Promise<boolean>
+  /** 待继续打开的登录态轮询间隔（缺省 5s，与 auth-gate 的 tripwire 同节奏）。 */
+  loginPollMs?: number
+  /** 当前时间（TTL 判定；测试注入）。 */
+  now?: () => number
+}) {
   const [state, setState] = useState<AppCenterState>({ kind: 'loading' })
-  const [view, setView] = useState<'catalog' | 'publish'>('catalog')
+  const [view, setView] = useState<'catalog' | 'publish' | 'detail'>('catalog')
   // 发布基线（P1-3）：目录行的"发新版"按钮把它带进表单；`undefined` = 首版发布。
   const [publishTarget, setPublishTarget] = useState<PublishTarget | undefined>(undefined)
   // 删除成功后的服务端说明（见 CatalogNotice）。
   const [notice, setNotice] = useState<CatalogNotice | null>(null)
+  // 详情视图当前选中的应用（F16 / §19 Q11）。
+  const [detail, setDetail] = useState<AppCenterItem | null>(null)
+  // 渠道参数：分享链接的**唯一**来源（未拿到 ⇒ 分享入口不渲染）。
+  const [channel, setChannel] = useState<AppChannel | null>(() => appChannel())
+  // 没拿到渠道参数的**原因**（分享入口不可用时据此分档说明：证明问题 ≠ 配置问题）。
+  const [channelFailure, setChannelFailure] = useState<AppChannelFailure | null>(null)
+  // 可发现性（§19 Q1）：搜索 + 「我发布的」+ 分批显示。
+  const [filter, setFilter] = useState<CatalogFilter>(EMPTY_FILTER)
+  const [visible, setVisible] = useState(CATALOG_PAGE_SIZE)
+  // F16 的打开计数（按 app_id 记；只在 open 端点回传过之后才有值）。
+  const [openCounts, setOpenCounts] = useState<Record<string, AppOpenCounts>>({})
+  // 一次性引导卡（§7.2）：关过就不再出现。
+  const [onboarded, setOnboarded] = useState(() => isOnboardingDismissed(onboardingStore))
+  // 应用 AI 的授权作用域（用户×服务端；空串 = 未登录/拿不到 ⇒ 授权不记住）。
+  const [identity, setIdentity] = useState('')
+  // 复制链接的即时反馈（哪个 app_id 刚复制成功）。
+  const [copied, setCopied] = useState<string | null>(null)
+  // 打开动作的反馈（§5.2 的 `window` 字段：新开 / 聚焦；没下发就什么都不说）。
+  const [openFeedback, setOpenFeedback] = useState<Record<string, OpenWindowOutcome>>({})
+  // 「未登录时记住这次打开」（§19 Q4）：登录完成后自动继续，不再要求用户点一次。
+  const [pendingOpen, setPendingOpen] = useState<{ appId: string } | null>(null)
 
   const load = useCallback(async (): Promise<void> => {
     setState({ kind: 'loading' })
@@ -615,12 +813,17 @@ export function AppCenterPanel({ onClose }: { onClose: () => void }) {
         let payload: unknown = null
         try { payload = text === '' ? null : JSON.parse(text) } catch { payload = null }
         const failure = parseErrorEnvelope(response.status, payload, text === '' ? t('appCenter.error') : text.slice(0, CATALOG_SAMPLE_MAX))
+        // 401 = 未登录（宿主路由的 AUTH_REQUIRED）：这是**独立的空态**，不是错误，
+        // 也不是"还没有可用的应用"（§19 Q2/Q4 的三种空态各自可辨）。
+        if (response.status === 401) {
+          setState({ kind: 'signed-out' })
+          return
+        }
         setState({
           kind: 'error',
           error: {
             code: failure.code,
-            // 401 = 未登录（宿主路由的 AUTH_REQUIRED）：这是可读的常态，不是崩溃。
-            message: response.status === 401 ? t('appCenter.notLoggedIn') : failure.message,
+            message: failure.message,
             hints: failure.hints,
             ...(failure.details === undefined ? {} : { details: typeof failure.details === 'string' ? failure.details : JSON.stringify(failure.details) }),
           },
@@ -657,12 +860,140 @@ export function AppCenterPanel({ onClose }: { onClose: () => void }) {
 
   useEffect(() => { void load() }, [load])
 
+  // 渠道参数：挂载时取一次（§16.1 的渲染进程 scheme 注入）。失败 ⇒ `channel` 保持
+  // `null`，分享入口一个都不渲染（§19 Q6 的 fail-closed），并把**原因**分档显示出来
+  // （R2-X-1：证明问题与配置问题不能塌缩成同一句，否则排障会指错方向）。
+  useEffect(() => {
+    let cancelled = false
+    // 本机持有性证明（§22.2 R2）：顺手引导一枚令牌 —— 渠道/打开都要它。
+    // 这里失败不阻塞目录渲染（打开时会再判一次并给可辨原因）。
+    void ensureHostProof().catch(() => undefined)
+    const loader: () => Promise<AppChannelResult> = channelResultLoader
+      ?? (channelLoader === undefined
+        ? () => loadAppChannel()
+        : async () => ({ channel: await channelLoader(), failure: null }))
+    void loader()
+      .then((result) => {
+        if (cancelled) return
+        // 注入模块态（打开链路读它），并同步到渲染态（分享入口据此决定是否渲染）。
+        if (result.channel !== null) setAppChannel(result.channel)
+        setChannel(result.channel ?? appChannel())
+        setChannelFailure(result.failure)
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return
+        setChannel(appChannel())
+        setChannelFailure({
+          reason: 'transport',
+          status: null,
+          message: cause instanceof Error ? cause.message : String(cause),
+        })
+      })
+    return () => { cancelled = true }
+  }, [channelLoader, channelResultLoader])
+
+  // 应用 AI 的身份作用域（§21.1 第 9 条：授权按 **用户×应用** 记）。
+  useEffect(() => {
+    let cancelled = false
+    const loader = identityLoader ?? (() => loadAppAiIdentity())
+    void loader()
+      .then((value) => { if (!cancelled) setIdentity(value) })
+      .catch(() => { if (!cancelled) setIdentity('') })
+    return () => { cancelled = true }
+  }, [identityLoader])
+
   // Esc 关闭：模态的可预期出口（与能力中心一致的口径）。
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') onClose() }
     document.addEventListener('keydown', onKey)
     return () => { document.removeEventListener('keydown', onKey) }
   }, [onClose])
+
+  /**
+   * 复制分享深链（F6 / §19 Q6）。
+   *
+   * 只在**有渠道 scheme** 时才可能成功：`appShareLink` 在未注入时返回 `null`，
+   * 这里也就什么都不写（按钮本身在那种情况下不渲染，这里是第二道闸）。
+   * @param item - 目录条目。
+   * @returns true = 真的写进了剪贴板。
+   */
+  const handleCopyLink = useCallback(async (item: AppCenterItem): Promise<boolean> => {
+    const link = appShareLink(item.appId)
+    if (link === null) return false
+    try {
+      const write = writeClipboard ?? defaultWriteClipboard
+      await write(link)
+      setCopied(item.appId)
+      return true
+    } catch {
+      setCopied(null)
+      return false
+    }
+  }, [writeClipboard])
+
+  /**
+   * 登录态取数（缺省读本机 `/api/pico/auth/state`）。
+   *
+   * 复用 `app-ai.ts` 的身份解析：它返回空串表示"未登录/拿不到"，非空表示已登录
+   * （用户名 + 服务端地址）。身份取不到时按**未登录**处理 —— 对"自动继续"来说，
+   * 不确定就不动（宁可让用户再点一次，也不在一个不确定的会话上开窗）。
+   */
+  const loadLoginState = useCallback(
+    async (): Promise<boolean> => await (loginStateLoader ?? (async () => (await loadAppAiIdentity()) !== ''))(),
+    [loginStateLoader],
+  )
+
+  /**
+   * 登录完成后**自动继续**那次被记住的打开（§19 Q4：不用再点一次）。
+   *
+   * 记在存储里（不是 state）的原因见 `open-intent.ts`：客户端登录会重载页面，
+   * 组件 state 活不过那一跳。这里只在"确实已登录"时才发起，失败就清掉意图（不循环）。
+   * @param appId - 待继续的 app_id。
+   */
+  const continuePendingOpen = useCallback(async (appId: string): Promise<void> => {
+    clearOpenIntent(intentStore === undefined ? {} : { store: intentStore })
+    setPendingOpen(null)
+    const result = await openAppEntry(appId)
+    if (!result.ok) return
+    if (result.window !== undefined) setOpenFeedback(previous => ({ ...previous, [appId]: result.window! }))
+    if (result.counts !== undefined) {
+      const counts = result.counts
+      setOpenCounts(previous => ({ ...previous, [appId]: counts }))
+    }
+  }, [intentStore])
+
+  /**
+   * 挂载时读一次"待继续的打开"（页面重载回来后的第一件事）。
+   *
+   * 已登录 ⇒ 立刻继续；未登录 ⇒ 保持 pending，由下面的轮询等登录完成。
+   */
+  useEffect(() => {
+    const intent = readOpenIntent(intentStore === undefined ? {} : { store: intentStore, ...(now === undefined ? {} : { now: now() }) })
+    if (intent === null) return
+    let cancelled = false
+    void loadLoginState().then((loggedIn) => {
+      if (cancelled) return
+      if (loggedIn) { void continuePendingOpen(intent.appId); return }
+      setPendingOpen({ appId: intent.appId })
+    }).catch(() => { if (!cancelled) setPendingOpen({ appId: intent.appId }) })
+    return () => { cancelled = true }
+    // 只在挂载时跑一次：意图的后续变化由 pendingOpen 的轮询与打开动作驱动。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // 未登录期间轮询登录态；一旦登录完成就自动继续（§19 Q4）。轮询只在有 pending 时存在。
+  useEffect(() => {
+    if (pendingOpen === null) return
+    const appId = pendingOpen.appId
+    let cancelled = false
+    const timer = setInterval(() => {
+      void loadLoginState().then((loggedIn) => {
+        if (cancelled || !loggedIn) return
+        void continuePendingOpen(appId)
+      }).catch(() => { /* 下一次轮询再试 */ })
+    }, loginPollMs ?? LOGIN_POLL_MS)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [pendingOpen, loadLoginState, continuePendingOpen, loginPollMs])
 
   /**
    * 上架 / 下架：**用服务端返回的 `enabled` 更新行**（不是请求里的值）。
@@ -740,61 +1071,181 @@ export function AppCenterPanel({ onClose }: { onClose: () => void }) {
           </div>
         </div>
         <div style={BODY}>
-          {view === 'catalog'
-            ? (
-                <AppCenterBody
-                  state={state}
-                  notice={notice}
-                  onRetry={() => { void load() }}
-                  onPublish={() => { setPublishTarget(undefined); setView('publish') }}
-                  onPublishNewVersion={item => {
-                    // 把目录行的当前值交给表单（P1-3）：预填是"不静默改写线上配置"
-                    // 的唯一手段 —— 作者不动单选框时提交的就是现状。
-                    setPublishTarget({
-                      appId: item.appId,
-                      title: item.title,
-                      access: item.access,
-                      currentVersion: item.currentVersion,
-                      owner: item.responsible,
-                      ...(item.purpose === undefined ? {} : { purpose: item.purpose }),
-                      ...(item.whitelist === undefined ? {} : { whitelist: item.whitelist }),
-                    })
-                    setView('publish')
-                  }}
-                  onSetPublished={handleSetPublished}
-                  onDelete={handleDelete}
-                  onDiagnostics={handleDiagnostics}
-                  onReleases={handleReleases}
-                />
-              )
-            : (
-                <PublishForm
-                  {...(publishTarget === undefined ? {} : { target: publishTarget })}
-                  onClose={() => { setView('catalog') }}
-                  onPublished={() => { void load() }}
-                />
-              )}
+          {view === 'publish' && (
+            <PublishForm
+              {...(publishTarget === undefined ? {} : { target: publishTarget })}
+              onClose={() => { setView('catalog') }}
+              onPublished={() => { void load() }}
+            />
+          )}
+          {view === 'detail' && detail !== null && (
+            <AppDetailView
+              item={detail}
+              channel={channel}
+              {...(openCounts[detail.appId] === undefined ? {} : { counts: openCounts[detail.appId] })}
+              {...(openFeedback[detail.appId] === undefined ? {} : { windowOutcome: openFeedback[detail.appId] })}
+              copied={copied === detail.appId}
+              identity={identity}
+              {...(aiDeps === undefined ? {} : { aiDeps })}
+              {...(aiConsentStore === undefined ? {} : { aiConsentStore })}
+              onBack={() => { setView('catalog') }}
+              onOpen={async () => await openRow(detail)}
+              onCopyLink={async () => await handleCopyLink(detail)}
+            />
+          )}
+          {view === 'catalog' && (
+            <AppCenterBody
+              state={state}
+              notice={notice}
+              filter={filter}
+              onFilterChange={next => { setFilter(next); setVisible(CATALOG_PAGE_SIZE) }}
+              visible={visible}
+              onShowMore={() => { setVisible(previous => previous + CATALOG_PAGE_SIZE) }}
+              onboardingDismissed={onboarded}
+              onDismissOnboarding={() => { dismissOnboarding(onboardingStore); setOnboarded(true) }}
+              pendingOpenAppId={pendingOpen === null ? null : pendingOpen.appId}
+              shareScheme={channel === null ? null : channel.deepLinkScheme}
+              channelFailure={channel === null ? channelFailure : null}
+              openCounts={openCounts}
+              openFeedback={openFeedback}
+              copied={copied}
+              onCopyLink={async item => await handleCopyLink(item)}
+              onOpenDetail={item => { setDetail(item); setView('detail') }}
+              onRetry={() => { void load() }}
+              onPublish={() => { setPublishTarget(undefined); setView('publish') }}
+              onPublishNewVersion={item => {
+                // 把目录行的当前值交给表单（P1-3）：预填是"不静默改写线上配置"
+                // 的唯一手段 —— 作者不动单选框时提交的就是现状。
+                setPublishTarget({
+                  appId: item.appId,
+                  title: item.title,
+                  access: item.access,
+                  currentVersion: item.currentVersion,
+                  owner: item.responsible,
+                  ...(item.purpose === undefined ? {} : { purpose: item.purpose }),
+                  ...(item.whitelist === undefined ? {} : { whitelist: item.whitelist }),
+                  ...(item.window === undefined ? {} : { window: item.window }),
+                })
+                setView('publish')
+              }}
+              onOpenFailure={(item, failure) => {
+                // 未登录（§19 Q4/Q6）：宿主负责弹登录，客户端负责"登录后自动继续"。
+                if (failure.reason !== 'not-signed-in') return
+                saveOpenIntent(item.appId, intentStore === undefined ? {} : { store: intentStore, ...(now === undefined ? {} : { now: now() }) })
+                setPendingOpen({ appId: item.appId })
+              }}
+              onOpenResult={(item, counts, outcome) => {
+                // F16：打开端点在同一次调用里回传今日计数 ⇒ 记下来给详情页渲染
+                // （没回传就保持"未知"，不编造）。
+                if (counts !== undefined) setOpenCounts(previous => ({ ...previous, [item.appId]: counts }))
+                // §5.2 的 `window`：新开还是聚焦（没回传就什么都不说）。
+                if (outcome !== undefined) setOpenFeedback(previous => ({ ...previous, [item.appId]: outcome }))
+              }}
+              onSetPublished={handleSetPublished}
+              onDelete={handleDelete}
+              onDiagnostics={handleDiagnostics}
+              onReleases={handleReleases}
+            />
+          )}
         </div>
       </div>
     </div>
   )
+
+  /**
+   * 打开一个应用并把结果翻译成面板状态（F16 的计数在这里被记下）。
+   *
+   * 只认 `openAppEntry` 的成功/失败判据：失败**不**清空任何已有计数（一次网络抖动不该
+   * 让"今日已被打开 N 次"消失），成功且回传计数才覆盖。
+   * @param item - 目录条目。
+   * @returns 失败信封（成功为 `null`）。
+   */
+  async function openRow(item: AppCenterItem): Promise<PublishFailure | null> {
+    const result = await openAppEntry(item.appId)
+    if (result.ok) {
+      if (result.counts !== undefined) {
+        const counts = result.counts
+        setOpenCounts(previous => ({ ...previous, [item.appId]: counts }))
+      }
+      if (result.window !== undefined) {
+        const outcome = result.window
+        setOpenFeedback(previous => ({ ...previous, [item.appId]: outcome }))
+      }
+      return null
+    }
+    // 未登录：**记住这次打开**（§19 Q4/Q6）——宿主负责弹登录，客户端负责"登录后自动继续"。
+    if (result.reason === 'not-signed-in') {
+      saveOpenIntent(item.appId, intentStore === undefined ? {} : { store: intentStore, ...(now === undefined ? {} : { now: now() }) })
+      setPendingOpen({ appId: item.appId })
+    }
+    return openFailureEnvelope(result)
+  }
 }
 
 /**
- * 面板正文：把四种状态渲染成 DOM（loading / error / empty / list）。
+ * 默认的剪贴板写入（`navigator.clipboard.writeText`）。
  *
- * 单独导出而不是内联在 {@link AppCenterPanel} 里，是为了让"目录渲染 / 空态 /
- * 不含额度字段"这三条断言可以**直接渲染**；而"挂载后真的取数"这条链路由
+ * 缺席（旧内核 / 非安全上下文）时**抛**：调用方据此渲染"复制失败：请手动复制"，
+ * 而不是显示一个假的"已复制"。
+ * @param text - 要复制的文本。
+ */
+async function defaultWriteClipboard(text: string): Promise<void> {
+  const clipboard = (globalThis as { navigator?: { clipboard?: { writeText?: (value: string) => Promise<void> } } })
+    .navigator?.clipboard
+  if (clipboard?.writeText === undefined) throw new Error('clipboard API is unavailable')
+  await clipboard.writeText(text)
+}
+
+/**
+ * 面板正文：把五种状态渲染成 DOM（loading / signed-out / error / empty / list）。
+ *
+ * 单独导出而不是内联在 {@link AppCenterPanel} 里，是为了让"目录渲染 / 三种空态 /
+ * 不含额度字段"这些断言可以**直接渲染**；而"挂载后真的取数"这条链路由
  * `app-center-mount.spec.tsx` 用真挂载（跑 `useEffect`）+ 真路由覆盖（FIX-42）。
  *
  * 作者自服务的四个回调（`onSetPublished` / `onDelete` / `onDiagnostics` / `onReleases`）
  * 都是**可选**的：缺席时对应按钮一个都不渲染（`app-center.spec.tsx` 的静态渲染用例正是
  * 这种形态）—— "面板不给我这个能力"与"我点了但服务端拒绝"是两件事，不能混。
- * @param props - 当前状态、重试回调、"去发布"回调、作者生命周期回调与删除通知。
+ *
+ * 筛选与分享同样是可选的（`filter` 缺席 ⇒ 不过滤、不渲染工具条）：静态渲染用例与
+ * 真挂载用例共用同一个组件，而不是各自维护一份渲染分支。
+ * @param props - 状态、回调、筛选、分享与 F16 计数。
  */
-export function AppCenterBody({ state, notice, onRetry, onPublish, onPublishNewVersion, onSetPublished, onDelete, onDiagnostics, onReleases }: {
+export function AppCenterBody({
+  state, notice, filter, onFilterChange, visible, onShowMore,
+  onboardingDismissed, onDismissOnboarding, pendingOpenAppId,
+  shareScheme, channelFailure, openCounts, openFeedback, copied, onCopyLink, onOpenDetail, onOpenResult, onOpenFailure,
+  onRetry, onPublish, onPublishNewVersion, onSetPublished, onDelete, onDiagnostics, onReleases,
+}: {
   state: AppCenterState
   notice?: CatalogNotice | null
+  /** 筛选条件（缺席 ⇒ 不过滤，也不渲染工具条）。 */
+  filter?: CatalogFilter
+  onFilterChange?: (next: CatalogFilter) => void
+  /** 目录行可见上限（缺席 ⇒ 不分批）。 */
+  visible?: number
+  onShowMore?: () => void
+  /** 一次性引导卡是否已关闭（缺席 ⇒ 不渲染引导卡）。 */
+  onboardingDismissed?: boolean
+  onDismissOnboarding?: () => void
+  /** 已记住、等登录完成后自动继续的 app_id（渲染一行说明，不是错误）。 */
+  pendingOpenAppId?: string | null
+  /** 生效的渠道深链 scheme；`null`/缺席 ⇒ 分享入口**不渲染**（§19 Q6）。 */
+  shareScheme?: string | null
+  /** 没拿到渠道参数的**原因**（分档说明：证明问题 ≠ 配置问题）。 */
+  channelFailure?: AppChannelFailure | null
+  /** F16 的今日打开计数（按 app_id）。 */
+  openCounts?: Record<string, AppOpenCounts>
+  /** 打开结果（§5.2 `window`：新开 / 聚焦），按 app_id。 */
+  openFeedback?: Record<string, OpenWindowOutcome>
+  /** 刚复制成功的 app_id。 */
+  copied?: string | null
+  onCopyLink?: (item: AppCenterItem) => Promise<boolean>
+  onOpenDetail?: (item: AppCenterItem) => void
+  /** 打开动作结束后由行上报（成功时带上服务端回传的计数与 §5.2 的 `window`）。 */
+  onOpenResult?: (item: AppCenterItem, counts: AppOpenCounts | undefined, window: OpenWindowOutcome | undefined) => void
+  /** 打开**失败**时由行上报（面板据此记住"未登录时的那次打开"）。 */
+  onOpenFailure?: (item: AppCenterItem, failure: OpenFailure) => void
   onRetry: () => void
   onPublish?: () => void
   onPublishNewVersion?: (item: AppCenterItem) => void
@@ -803,10 +1254,27 @@ export function AppCenterBody({ state, notice, onRetry, onPublish, onPublishNewV
   onDiagnostics?: (item: AppCenterItem) => Promise<DiagnosticsOutcome>
   onReleases?: (item: AppCenterItem) => Promise<ReleasesOutcome>
 }) {
+  const activeFilter = filter ?? EMPTY_FILTER
+  const items = state.kind === 'ready' ? state.items : []
+  const filtered = useMemo(() => filterCatalog(items, activeFilter), [items, activeFilter])
+  const empty = state.kind === 'ready' ? catalogEmptyState(items, filtered, activeFilter) : null
+  const { page, remaining } = paginateCatalog(filtered, visible ?? Number.MAX_SAFE_INTEGER)
   return (
     <>
       {notice !== null && notice !== undefined && <NoticeBlock notice={notice} />}
       {state.kind === 'loading' && <div style={HINT}>{t('appCenter.loading')}</div>}
+
+      {/* 未登录（§19 Q2/Q4 的独立空态）：不是错误、也不是"没有应用"。 */}
+      {state.kind === 'signed-out' && (
+        <div style={HINT} data-role="catalog-signed-out">
+          <div data-role="signed-out-message">{t('appCenter.notLoggedIn')}</div>
+          <div style={{ marginTop: 6 }} data-role="signed-out-hint">{t('appCenter.notLoggedInHint')}</div>
+          <button type="button" className="pico-app-center-retry" style={{ ...OPEN_BUTTON, marginTop: 12 }} onClick={onRetry}>
+            {t('appCenter.retry')}
+          </button>
+        </div>
+      )}
+
       {state.kind === 'error' && (
         <div style={HINT} data-role="catalog-error">
           {/* 错误信封逐字段显示（P1-5）：code + message + hints（+ 可选原文）。 */}
@@ -825,8 +1293,19 @@ export function AppCenterBody({ state, notice, onRetry, onPublish, onPublishNewV
           </button>
         </div>
       )}
-      {state.kind === 'ready' && state.items.length === 0 && (
-        <div style={HINT}>
+
+      {state.kind === 'ready' && (
+        <CatalogToolbar filter={activeFilter} {...(onFilterChange === undefined ? {} : { onFilterChange })} />
+      )}
+
+      {/* 一次性引导卡（§7.2）：只在**首次**打开应用中心时出现，关闭后不再出现。 */}
+      {state.kind === 'ready' && onboardingDismissed === false && onDismissOnboarding !== undefined && (
+        <OnboardingCard onDismiss={onDismissOnboarding} />
+      )}
+
+      {/* 空态 ①：目录里一个应用都没有 ⇒ 引导让 AI 做一个。 */}
+      {empty === 'no-apps' && (
+        <div style={HINT} data-role="catalog-empty">
           <div>{t('appCenter.empty')}</div>
           <div style={{ marginTop: 6 }}>{t('appCenter.emptyHint')}</div>
           {onPublish !== undefined && (
@@ -836,10 +1315,61 @@ export function AppCenterBody({ state, notice, onRetry, onPublish, onPublishNewV
           )}
         </div>
       )}
-      {state.kind === 'ready' && state.items.map(item => (
+
+      {/* 分享入口不可用时的分档说明（R2-X-1 第 6 条）——只在渠道确实没拿到时出现。 */}
+      {channelFailure !== null && channelFailure !== undefined && (
+        <div style={CONFIRM} data-role="share-unavailable" data-reason={channelFailure.reason}>
+          {channelFailure.reason === 'scheme-not-configured'
+            ? t('appCenter.shareUnavailableConfig')
+            : t('appCenter.shareUnavailableProof')}
+        </div>
+      )}
+
+      {/* 已记住的打开（§19 Q4）：不是错误，是"等你登录完我接着开"。 */}
+      {pendingOpenAppId !== null && pendingOpenAppId !== undefined && (
+        <div style={CONFIRM} data-role="open-pending-login" role="status">
+          {`${t('appCenter.openPendingLogin')} (${pendingOpenAppId})`}
+        </div>
+      )}
+
+      {/* 空态 ②：有应用，但当前筛选条件一个都没命中（**不得**说成"还没有可用的应用"）。 */}
+      {empty === 'no-results' && (
+        <div style={HINT} data-role="catalog-no-results">
+          <div data-role="no-results-message">{t('appCenter.noResults')}</div>
+          <div style={{ marginTop: 6 }} data-role="no-results-hint">{t('appCenter.noResultsHint')}</div>
+          {onFilterChange !== undefined && (
+            <button
+              type="button"
+              className="pico-app-center-clear-filters"
+              style={{ ...OPEN_BUTTON, marginTop: 12 }}
+              onClick={() => { onFilterChange(EMPTY_FILTER) }}
+            >
+              {t('appCenter.clearFilters')}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* 空态 ③：可见的行**全部下架**（§19 Q2 第二档：说明原因 + 联系负责人）。 */}
+      {empty === 'all-disabled' && (
+        <div style={HINT} data-role="catalog-all-disabled">
+          <div data-role="all-disabled-message">{t('appCenter.allDisabled')}</div>
+          <div style={{ marginTop: 6 }} data-role="all-disabled-hint">{t('appCenter.allDisabledHint')}</div>
+        </div>
+      )}
+
+      {state.kind === 'ready' && page.map(item => (
         <AppCenterRow
           key={item.appId}
           item={item}
+          shareScheme={shareScheme ?? null}
+          copied={copied === item.appId}
+          {...(openCounts?.[item.appId] === undefined ? {} : { counts: openCounts[item.appId] })}
+          {...(openFeedback?.[item.appId] === undefined ? {} : { windowOutcome: openFeedback[item.appId] })}
+          {...(onCopyLink === undefined ? {} : { onCopyLink })}
+          {...(onOpenDetail === undefined ? {} : { onOpenDetail })}
+          {...(onOpenResult === undefined ? {} : { onOpenResult })}
+          {...(onOpenFailure === undefined ? {} : { onOpenFailure })}
           {...(onPublishNewVersion === undefined ? {} : { onPublishNewVersion })}
           {...(onSetPublished === undefined ? {} : { onSetPublished })}
           {...(onDelete === undefined ? {} : { onDelete })}
@@ -847,7 +1377,206 @@ export function AppCenterBody({ state, notice, onRetry, onPublish, onPublishNewV
           {...(onReleases === undefined ? {} : { onReleases })}
         />
       ))}
+      {state.kind === 'ready' && remaining > 0 && onShowMore !== undefined && (
+        <button type="button" className="pico-app-center-show-more" style={{ ...OPEN_BUTTON, marginTop: 8 }} onClick={onShowMore}>
+          {tCount('appCenter.showMore', remaining)}
+        </button>
+      )}
     </>
+  )
+}
+
+/**
+ * 目录工具条（§19 Q1）：搜索框 + 「我发布的」开关 + 清空。
+ *
+ * 搜索框是**受控**的（值来自面板 state）：目录可能有一百行，把 query 放在工具条里会
+ * 让"筛选条件"与"渲染结果"分属两个组件，测试也就只能测其中一个。
+ * @param props - 当前筛选与变更回调。
+ */
+export function CatalogToolbar({ filter, onFilterChange }: {
+  filter: CatalogFilter
+  onFilterChange?: (next: CatalogFilter) => void
+}) {
+  const disabled = onFilterChange === undefined
+  return (
+    <div style={TOOLBAR} data-role="catalog-toolbar">
+      <input
+        type="search"
+        className="pico-app-center-search"
+        style={SEARCH}
+        value={filter.query}
+        placeholder={t('appCenter.searchPlaceholder')}
+        aria-label={t('appCenter.search')}
+        disabled={disabled}
+        onChange={event => { onFilterChange?.({ ...filter, query: event.target.value }) }}
+      />
+      <label style={OWNED_LABEL}>
+        <input
+          type="checkbox"
+          className="pico-app-center-owned-only"
+          checked={filter.ownedOnly}
+          disabled={disabled}
+          onChange={event => { onFilterChange?.({ ...filter, ownedOnly: event.target.checked }) }}
+        />
+        <span>{t('appCenter.ownedOnly')}</span>
+      </label>
+    </div>
+  )
+}
+
+/**
+ * 一次性引导卡（§7.2 冻结：应用是什么 / 怎么让 AI 做一个 / 怎么分享）。
+ * @param props - 关闭回调（关闭后由面板写存储并收起）。
+ */
+export function OnboardingCard({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div style={CARD_BOX} className="pico-app-center-onboarding" data-role="catalog-onboarding" role="note">
+      <div style={{ fontWeight: 500 }} data-role="onboarding-title">{t('appCenter.onboarding.title')}</div>
+      <ul style={HINT_LIST} data-role="onboarding-points">
+        <li>{t('appCenter.onboarding.what')}</li>
+        <li>{t('appCenter.onboarding.build')}</li>
+        <li>{t('appCenter.onboarding.share')}</li>
+      </ul>
+      <button type="button" className="pico-app-center-onboarding-dismiss" style={OPEN_BUTTON} onClick={onDismiss}>
+        {t('appCenter.onboarding.dismiss')}
+      </button>
+    </div>
+  )
+}
+
+/**
+ * 应用详情视图（F16 的消费端 + 分享 + 应用 AI）。
+ *
+ * 三条口径：
+ *  - **打开次数只显示服务端回传过的值**（`counts`；`undefined` ⇒ 这一行不渲染），
+ *    并在旁边写出"平台记录打开次数用于运营"（§19 Q11）；
+ *  - **分享入口只在拿到渠道 scheme 时渲染**（§19 Q6 的 fail-closed）；
+ *  - **应用 AI** 挂在详情页（§21 的前端桥消费者），授权按用户×应用记。
+ * @param props - 条目、渠道参数、计数、分享与 AI 的依赖与回调。
+ */
+export function AppDetailView({
+  item, channel, counts, windowOutcome, copied, identity, aiDeps, aiConsentStore, onBack, onOpen, onCopyLink,
+}: {
+  item: AppCenterItem
+  /** 渠道参数；`null` ⇒ 分享入口不渲染、产品名不显示。 */
+  channel: AppChannel | null
+  /** 今日打开计数；`undefined` ⇒ 不渲染"今日已被打开 N 次"。 */
+  counts?: AppOpenCounts
+  /** §5.2 的打开结果（新开 / 聚焦）；`undefined` ⇒ 不渲染这一行。 */
+  windowOutcome?: OpenWindowOutcome
+  /** 刚复制成功。 */
+  copied?: boolean
+  /** 应用 AI 的授权作用域（用户×服务端）。 */
+  identity: string
+  aiDeps?: AppAiDeps
+  /** 应用 AI 的授权存储（缺省 `localStorage`）。 */
+  aiConsentStore?: AppAiConsentStore | null
+  onBack: () => void
+  onOpen: () => Promise<PublishFailure | null>
+  onCopyLink: () => Promise<boolean>
+}) {
+  const [opening, setOpening] = useState(false)
+  const [failure, setFailure] = useState<PublishFailure | null>(null)
+  const [copyFailed, setCopyFailed] = useState(false)
+  const link = appShareLink(item.appId)
+  return (
+    <div className="pico-app-detail" data-role="app-detail" data-app-id={item.appId}>
+      <button type="button" className="pico-app-center-back" style={ACTION_BUTTON} onClick={onBack}>
+        {t('appCenter.backToCatalog')}
+      </button>
+      <h3 style={{ ...ROW_TITLE, whiteSpace: 'normal', marginTop: 8 }} data-role="detail-title">{item.title}</h3>
+      {item.description !== '' && <p style={ROW_DESC} data-role="detail-description">{item.description}</p>}
+      <p style={ROW_META}>
+        <span data-role="detail-access" data-access={item.access}>{accessBadge(item.access)}</span>
+        {item.responsible !== '' && <span>{` · ${t('appCenter.responsible')}: ${item.responsible}`}</span>}
+        {item.currentVersion !== '' && (
+          <span data-role="detail-version">{` · ${t('appCenter.currentVersion')}: ${item.currentVersion}`}</span>
+        )}
+      </p>
+
+      {/*
+        作者声明的窗口规格（F3/§6）。**只在服务端真的下发了 window 时**才显示：
+        没拿到就什么都不说 —— 不写"比例已锁定"这种客户端无法兑现的话
+        （锁定由窗口侧按同一份声明执行）。
+      */}
+      {item.window !== undefined && (
+        <p style={ROW_META} data-role="detail-window">
+          {item.window.ratio !== undefined && (
+            <span data-role="window-ratio">{`${t('appCenter.windowRatioLabel')}: ${formatWindowRatio(item.window.ratio)}`}</span>
+          )}
+          {item.window.width !== undefined && item.window.height !== undefined && (
+            <span data-role="window-size">
+              {`${item.window.ratio === undefined ? '' : ' · '}${t('appCenter.windowSizeLabel')}: ${String(item.window.width)}×${String(item.window.height)}`}
+            </span>
+          )}
+        </p>
+      )}
+
+      {windowOutcome !== undefined && (
+        <p style={ROW_META} data-role="detail-open-outcome" data-window={windowOutcome}>
+          {windowOutcome === 'opened' ? t('appCenter.openWindowOpened') : t('appCenter.openWindowFocused')}
+        </p>
+      )}
+
+      {/* F16 消费端：计数只在服务端回传过之后出现（§19 Q11 的"今日已被打开 N 次"）。 */}
+      {counts !== undefined && (
+        <p style={ROW_META} data-role="detail-open-count">
+          <span data-role="opens-today">{tCount('appCenter.opensToday', counts.todayPv)}</span>
+          <span data-role="opens-privacy-note">{` · ${t('appCenter.privacyNote')}`}</span>
+        </p>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+        <button
+          type="button"
+          className="pico-app-center-open"
+          data-action="open-app"
+          style={{ ...OPEN_BUTTON, ...(item.enabled && !opening ? {} : { opacity: 0.5, cursor: 'default' }) }}
+          disabled={!item.enabled || opening}
+          onClick={() => {
+            setOpening(true)
+            setFailure(null)
+            void onOpen().then(result => { setFailure(result) }).finally(() => { setOpening(false) })
+          }}
+        >
+          {opening ? t('appCenter.openOpening') : t('appCenter.open')}
+        </button>
+        {/* §19 Q6：未注入渠道 scheme ⇒ 不渲染（宁可少一行，也不给一条打不开的链接）。 */}
+        {link !== null && (
+          <button
+            type="button"
+            className="pico-app-center-copy-link"
+            data-action="copy-link"
+            style={OPEN_BUTTON}
+            aria-label={`${t('appCenter.copyLinkAria')} ${item.title}`}
+            onClick={() => {
+              setCopyFailed(false)
+              void onCopyLink().then(ok => { if (!ok) setCopyFailed(true) })
+            }}
+          >
+            {t('appCenter.copyLink')}
+          </button>
+        )}
+      </div>
+      {link !== null && (copied === true || copyFailed) && (
+        <p style={ROW_META} data-role="copy-feedback" data-ok={copied === true ? 'true' : 'false'}>
+          {copied === true ? `${t('appCenter.copied')}: ${link}` : t('appCenter.copyFailed')}
+        </p>
+      )}
+      {channel !== null && channel.productName !== '' && (
+        <p style={ROW_META} data-role="detail-product">{channel.productName}</p>
+      )}
+      {failure !== null && (
+        <PublishErrorBlock failure={failure} title={t('appCenter.actionFailed')} role="lifecycle-error" />
+      )}
+
+      <AppAiPanel
+        appId={item.appId}
+        userId={identity}
+        {...(aiDeps === undefined ? {} : { deps: aiDeps })}
+        {...(aiConsentStore === undefined ? {} : { store: aiConsentStore })}
+      />
+    </div>
   )
 }
 
@@ -894,8 +1623,13 @@ type RowReleases =
   | { kind: 'failed', failure: PublishFailure }
 
 /**
- * 一行应用：名称 / 访问级别 / 当前版本 / 一句话说明 / 负责人 / 入口链接 / 打开 /
+ * 一行应用：名称 / 访问级别 / 当前版本 / 一句话说明 / 负责人 / 打开 /
  * （发布者本人）发新版 + 下架·上架 / **版本历史** / 诊断 / 删除。
+ *
+ * "打开"打的是**本机路由**（`POST /api/pico/wasm-apps/open`），成功即本机确认
+ * `<本安装的 app scheme>://<app_id>/` 已就绪；失败把 reason 渲染成**可读原因**（未登录 /
+ * 应用不存在 / 协议未就绪 / 证明缺失 各自可辨，见 {@link openFailureEnvelope}）。
+ * 这里**没有**入口链接、也没有系统浏览器兜底（冻结契约 2026-09-19 §4.5/§5）。
  *
  * 下架的条目（`enabled=false`）**照常展示**并标出"已下架"，打开按钮禁用 ——
  * 直接从目录消失会让用户以为是自己看错了。下架状态下**"发新版"按钮仍然出现但被禁用**
@@ -914,8 +1648,23 @@ type RowReleases =
  *
  * @param props - 目录条目、发新版回调与作者生命周期回调。
  */
-export function AppCenterRow({ item, onPublishNewVersion, onSetPublished, onDelete, onDiagnostics, onReleases }: {
+export function AppCenterRow({
+  item, shareScheme, copied, counts, windowOutcome, onCopyLink, onOpenDetail, onOpenResult, onOpenFailure,
+  onPublishNewVersion, onSetPublished, onDelete, onDiagnostics, onReleases,
+}: {
   item: AppCenterItem
+  /** 生效的渠道深链 scheme；`null`/缺席 ⇒ 不渲染「复制链接」（§19 Q6）。 */
+  shareScheme?: string | null
+  /** 刚复制成功。 */
+  copied?: boolean
+  /** F16 的今日打开计数（服务端回传过才有）。 */
+  counts?: AppOpenCounts
+  /** §5.2 的打开结果（新开 / 聚焦）；服务端没回传就没有。 */
+  windowOutcome?: OpenWindowOutcome
+  onCopyLink?: (item: AppCenterItem) => Promise<boolean>
+  onOpenDetail?: (item: AppCenterItem) => void
+  onOpenResult?: (item: AppCenterItem, counts: AppOpenCounts | undefined, window: OpenWindowOutcome | undefined) => void
+  onOpenFailure?: (item: AppCenterItem, failure: OpenFailure) => void
   onPublishNewVersion?: (item: AppCenterItem) => void
   onSetPublished?: (item: AppCenterItem, enabled: boolean) => Promise<SetPublishedOutcome>
   onDelete?: (item: AppCenterItem) => Promise<DeleteOutcome>
@@ -928,7 +1677,12 @@ export function AppCenterRow({ item, onPublishNewVersion, onSetPublished, onDele
   const [actionFailure, setActionFailure] = useState<PublishFailure | null>(null)
   const [diagnostics, setDiagnostics] = useState<RowDiagnostics>({ kind: 'closed' })
   const [releases, setReleases] = useState<RowReleases>({ kind: 'closed' })
+  const [copyFailed, setCopyFailed] = useState(false)
   const confirmRef = useRef<HTMLButtonElement | null>(null)
+  // 分享链接在**渲染期**求值：`shareScheme` **缺席**（调用方没传）时读注入值，
+  // 显式 `null`（调用方说"这个渠道没有 scheme"）时**不回落**；两者都拿不到 ⇒
+  // `null` ⇒ 按钮一个都不渲染（fail-closed 的判据只有这一条）。
+  const shareLink = shareScheme === undefined ? appShareLink(item.appId) : appShareLink(item.appId, shareScheme)
 
   // 确认块出现后把焦点移进去：键盘用户按一次"下架"就能直接 Enter 确认（或 Esc 走开），
   // 不必再 Tab 找按钮。只在打开的那一刻做一次，之后的输入不被打断。
@@ -936,11 +1690,28 @@ export function AppCenterRow({ item, onPublishNewVersion, onSetPublished, onDele
     if (confirm !== 'none') confirmRef.current?.focus()
   }, [confirm])
 
-  const openable = item.enabled && safeEntryURL(item.entryURL) !== null
+  // 可打开 = 应用已上架。判据里**没有 URL 了**（2026-09-19）：应用只在客户端内以
+  // `<本安装的 app scheme>://<app_id>/` 打开，入口链接这个字段已经从两侧契约里删除 —— 打开
+  // 能力不再取决于"服务端有没有下发一个链接"，而是取决于本机路由能不能把它打开
+  // （失败时把 reason 渲染成可读原因，见下面 openFailureEnvelope）。
+  const openable = item.enabled
   const open = (): void => {
-    if (!openable) return
+    if (!openable || opening) return
     setOpening(true)
-    void openAppEntry(item.entryURL).finally(() => { setOpening(false) })
+    setActionFailure(null)
+    void openAppEntry(item.appId)
+      .then((result) => {
+        // 成功 = 本机确认协议 URL 已就绪，内置浏览器正在加载它 —— 不需要客户端再做什么
+        //（也没有系统浏览器兜底）。F16 的计数若随响应回来，交由面板记录并展示。
+        if (!result.ok) {
+          setActionFailure(openFailureEnvelope(result))
+          // 面板需要知道"这次是未登录"（§19 Q4：记住它并在登录后自动继续）。
+          onOpenFailure?.(item, result)
+          return
+        }
+        onOpenResult?.(item, result.counts, result.window)
+      })
+      .finally(() => { setOpening(false) })
   }
   // "发新版"只给发布者本人（P1-3 的入口）：服务端 `ownedApp` 对非发布者一律 404，
   // 给别人一个必然失败的按钮不如不给。
@@ -999,7 +1770,22 @@ export function AppCenterRow({ item, onPublishNewVersion, onSetPublished, onDele
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <div style={ROW_MAIN}>
           <div style={TITLE_ROW}>
-            <h3 style={ROW_TITLE} title={item.title}>{item.title}</h3>
+            {/* 标题即详情入口（真实 button：键盘可达，也不再需要单独一行"详情"链接）。 */}
+            {onOpenDetail === undefined
+              ? <h3 style={ROW_TITLE} title={item.title}>{item.title}</h3>
+              : (
+                  <button
+                    type="button"
+                    className="pico-app-center-detail"
+                    data-action="open-detail"
+                    style={{ ...ROW_TITLE, border: 'none', background: 'transparent', padding: 0, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}
+                    title={item.title}
+                    aria-label={`${t('appCenter.detailAria')} ${item.title}`}
+                    onClick={() => { onOpenDetail(item) }}
+                  >
+                    {item.title}
+                  </button>
+                )}
             <span
               style={BADGE}
               className="pico-app-center-access"
@@ -1024,10 +1810,33 @@ export function AppCenterRow({ item, onPublishNewVersion, onSetPublished, onDele
             )}
             {item.currentVersion !== '' && <span>{' · '}</span>}
             {item.responsible !== '' && <span>{`${t('appCenter.responsible')}: ${item.responsible}`}</span>}
-            {item.responsible !== '' && item.entryURL !== '' && <span>{' · '}</span>}
-            {item.entryURL !== '' && <span className="pico-app-center-entry">{entryHostLabel(item.entryURL)}</span>}
+            {/* F16 的消费端：服务端回传过计数才显示（不编造、也不用别处的数字凑）。 */}
+            {counts !== undefined && (
+              <span className="pico-app-center-open-count" data-role="open-count">
+                {` · ${tCount('appCenter.opensToday', counts.todayPv)}`}
+              </span>
+            )}
+            {/* 2026-09-19：这里原来显示"入口链接"（服务端下发的 entry_url）。字段已从
+                两侧契约删除 —— 应用没有可贴进浏览器的地址，唯一的分享形态是渠道深链
+                （目录行的「复制链接」与发布成功块，见 §19 Q6）。 */}
           </p>
         </div>
+        {/* 分享（F6/§19 Q6）：只在拿到渠道 scheme 时渲染；未拿到时这一行彻底不存在。 */}
+        {shareLink !== null && onCopyLink !== undefined && (
+          <button
+            type="button"
+            className="pico-app-center-copy-link"
+            data-action="copy-link"
+            style={OPEN_BUTTON}
+            aria-label={`${t('appCenter.copyLinkAria')} ${item.title}`}
+            onClick={() => {
+              setCopyFailed(false)
+              void onCopyLink(item).then(ok => { if (!ok) setCopyFailed(true) })
+            }}
+          >
+            {t('appCenter.copyLink')}
+          </button>
+        )}
         {canPublish && (
           <button
             type="button"
@@ -1046,18 +1855,35 @@ export function AppCenterRow({ item, onPublishNewVersion, onSetPublished, onDele
         )}
         <button
           type="button"
+          // 稳定钩子（自动化与真机探针用）：打开走本机路由，失败在行内显示可读原因。
+          data-action="open-app"
+          className="pico-app-center-open"
           style={{ ...OPEN_BUTTON, ...(openable && !opening ? {} : { opacity: 0.5, cursor: 'default' }) }}
           onClick={open}
           disabled={!openable || opening}
           aria-label={`${t('appCenter.openAria')} ${item.title}`}
         >
-          {t('appCenter.open')}
+          {/* §19 Q12 的客户端侧反馈：请求在途时按钮自己说"正在打开…"，
+              不让用户以为点了没反应（窗口骨架屏在 L2）。 */}
+          {opening ? t('appCenter.openOpening') : t('appCenter.open')}
         </button>
       </div>
+      {windowOutcome !== undefined && (
+        <p style={ROW_META} data-role="open-outcome" data-window={windowOutcome}>
+          {windowOutcome === 'opened' ? t('appCenter.openWindowOpened') : t('appCenter.openWindowFocused')}
+        </p>
+      )}
 
       {canPublish && !item.enabled && (
         <p style={{ ...ROW_META, marginTop: 8 }} data-role="publish-new-disabled-reason">
           {t('appCenter.publishNewDisabled')}
+        </p>
+      )}
+
+      {/* 复制结果的即时反馈（成功给链接原文，失败给"手动复制"这条出路）。 */}
+      {shareLink !== null && (copied === true || copyFailed) && (
+        <p style={ROW_META} data-role="copy-feedback" data-ok={copied === true ? 'true' : 'false'}>
+          {copied === true ? `${t('appCenter.copied')}: ${shareLink}` : t('appCenter.copyFailed')}
         </p>
       )}
 

@@ -666,7 +666,7 @@ describe('浏览器本地页面：失败必须可见、状态必须真实（2026
    * ---------------------------------------------------------------- */
 
   describe('favicon 协议白名单', () => {
-    it('只允许 http(s) 与 data:image/，javascript:/file:/空串一律不写进 img.src', async () => {
+    it('只允许 http(s) 与 data:image/，javascript:/file:/应用协议/空串一律不写进 img.src', async () => {
       const page = openShell((call) => {
         if (call.path === 'state') {
           return {
@@ -677,6 +677,9 @@ describe('浏览器本地页面：失败必须可见、状态必须真实（2026
                 { id: 3, visible: false, url: 'https://c.example/', title: 'DATA', favicon: 'data:image/png;base64,AAAA' },
                 { id: 4, visible: false, url: 'https://d.example/', title: 'FILE', favicon: 'file:///etc/passwd' },
                 { id: 5, visible: false, url: 'https://e.example/', title: 'EMPTY', favicon: '' },
+                // 2026-09-19 订正（R2-P0-2）：浏览器标签不得导航到应用 scheme ⇒ 它不会
+                // 出现在标签列表里；即便出现了，favicon 也不写进 <img src>。
+                { id: 6, visible: false, url: 'picoaide-app://demo/', title: 'APP', favicon: 'picoaide-app://demo/icon.png' },
               ],
             }),
           }
@@ -686,7 +689,7 @@ describe('浏览器本地页面：失败必须可见、状态必须真实（2026
       await page.settle()
 
       const icons = [...page.doc.querySelectorAll('#tabs .favicon')]
-      expect(icons).toHaveLength(5)
+      expect(icons).toHaveLength(6)
       // javascript: —— 旧实现会原样写进 src（点了 tab 就执行在页面上下文里）。
       expect(icons[0].hasAttribute('src')).toBe(false)
       expect(icons[0].style.display).toBe('none')
@@ -694,6 +697,36 @@ describe('浏览器本地页面：失败必须可见、状态必须真实（2026
       expect(icons[2].getAttribute('src')).toBe('data:image/png;base64,AAAA')
       expect(icons[3].hasAttribute('src')).toBe(false)
       expect(icons[4].hasAttribute('src')).toBe(false)
+      expect(icons[5].hasAttribute('src')).toBe(false)
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * 2026-09-19 订正（R2-P0-2）：地址栏的安全指示只认 https
+   * ---------------------------------------------------------------- */
+
+  describe('地址栏的安全指示', () => {
+    it('明文 http 页面不给 secure 指示', async () => {
+      const page = openShell((call) => {
+        if (call.path === 'state') {
+          return { json: shellState({ tabs: [{ id: 1, visible: true, url: 'http://plain.example/', title: 'HTTP' }] }) }
+        }
+        return undefined
+      })
+      await page.settle()
+      expect(page.$('addr').value).toBe('http://plain.example/')
+      expect(page.$('addr').classList.contains('secure')).toBe(false)
+    })
+
+    it('https 页面给 secure 指示（正向对照，证明上一条不是恒假）', async () => {
+      const page = openShell((call) => {
+        if (call.path === 'state') {
+          return { json: shellState({ tabs: [{ id: 1, visible: true, url: 'https://safe.example/', title: 'HTTPS' }] }) }
+        }
+        return undefined
+      })
+      await page.settle()
+      expect(page.$('addr').classList.contains('secure')).toBe(true)
     })
   })
 

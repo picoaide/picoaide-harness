@@ -107,19 +107,22 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   //
   // 自有插件（@picoaide/*）必须随包（P2，2026-09-19）。它们**不在** `verify:closure` 的
   // 覆盖里：`scripts/runtime-closure.mjs:3` 的 `FIRST_PARTY_PREFIX = '@deepseek-ai/'` 只走
-  // 上游包，而 desktop 的 `dependencies` 里有 6 个 `@picoaide` 包 —— 也就是说这 4 个包
-  // （account-card / browser / cron / wasm-apps）此前**没有任何门禁**保证它们进了 app.asar，
-  // 只有 connectors / enterprise 在 REQUIRED_ASAR_EXPORTS 里被点名。同类事故已经发生过：
-  // `dsh-memory-evolve` 的 skills/ 被 `files` 排除规则静默丢出包（2026-09-16 修复）。
+  // 上游包，而 desktop 的 `dependencies` 里有 7 个 `@picoaide` 包 —— 也就是说这 5 个包
+  // （account-card / browser / cron / wasm-apps / wasm-apps-host）此前**没有任何门禁**保证
+  // 它们进了 app.asar，只有 connectors / enterprise 在 REQUIRED_ASAR_EXPORTS 里被点名。
+  // 同类事故已经发生过：`dsh-memory-evolve` 的 skills/ 被 `files` 排除规则静默丢出包
+  // （2026-09-16 修复）。
   //
   // 路径形状依据（逐条落在磁盘上的真实产物上核对，2026-09-19）：
   //   - account-card / browser / cron 的这 5 条在 2026-09-16 打出的 v2.7.5-beta.1
   //     app.asar（`dist/linux-unpacked/resources/app.asar`）里逐条存在；
-  //   - `@picoaide/dsh-wasm-apps` 建立（2026-09-18）晚于那份产物 ⇒ 它的 5 条**只**在磁盘上
-  //     确认过（packages/client/wasm-apps 的 lib/ 产物 + package.json + cordis.patch.yml，
-  //     与其余 5 个自有包的形状一致），**尚未经真实 app.asar 验证**：下一次打包后请复跑
-  //     verify-packaged-runtime（afterPack 会逐条断言）。
-  //   - 为什么这 5 条：`package.json` + `cordis.patch.yml` 是桌面 profile 在组装期用
+  //   - `@picoaide/dsh-wasm-apps` 建立（2026-09-18）与 `@picoaide/dsh-wasm-apps-host`
+  //     建立（2026-09-19）都晚于那份产物 ⇒ 它们的条目**只**在磁盘上确认过
+  //     （各自的 lib/ 产物 + package.json + cordis.patch.yml，与其余自有包的形状一致），
+  //     **尚未经真实 app.asar 验证**：下一次打包后请复跑 verify-packaged-runtime
+  //     （afterPack 会逐条断言）。wasm-apps-host 另有 `lib/electron-adapter.js`：
+  //     它被 desktop `lib/main.js` 静态 import，缺它是**启动期**失败而非装配期。
+  //   - 为什么这几条：`package.json` + `cordis.patch.yml` 是桌面 profile 在组装期用
   //     `createRequire(...).resolve('@picoaide/<pkg>/package.json')` 拼绝对路径读的两份
   //     （src/profile.ts），`lib/index.js` / `lib/client.js` / `lib/invariant.js` 是各包
   //     声明的入口；缺任何一条都表现为"那一行插件整块不装配"，且只在组装期可见。
@@ -145,6 +148,16 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@picoaide/dsh-wasm-apps/lib/invariant.js',
   'node_modules/@picoaide/dsh-wasm-apps/package.json',
   'node_modules/@picoaide/dsh-wasm-apps/cordis.patch.yml',
+  // 客户端专属 WASM 应用 origin（2026-09-19，契约 §2）：宿主插件（协议 handler +
+  // 本机打开路由）。三条 lib 产物都是真实入口：`lib/index.js` 由 profile 行加载，
+  // `lib/invariant.js` 是 Cordis 伴生行，`lib/electron-adapter.js` 被 desktop 的
+  // `lib/main.js` 静态 import（协议特权注册 + 适配器实例），缺它 = 启动期
+  // ERR_MODULE_NOT_FOUND（整个应用起不来，而不是某一行插件不装配）。
+  'node_modules/@picoaide/dsh-wasm-apps-host/lib/index.js',
+  'node_modules/@picoaide/dsh-wasm-apps-host/lib/invariant.js',
+  'node_modules/@picoaide/dsh-wasm-apps-host/lib/electron-adapter.js',
+  'node_modules/@picoaide/dsh-wasm-apps-host/package.json',
+  'node_modules/@picoaide/dsh-wasm-apps-host/cordis.patch.yml',
 ] as const
 
 /** Physical entries that Electron cannot load from ASAR (native binaries). */

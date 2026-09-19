@@ -28,7 +28,6 @@ import (
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
 	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
-	"github.com/picoaide/picoaide/internal/wasmapp/session"
 	"github.com/picoaide/picoaide/internal/wasmapp/skillseed"
 )
 
@@ -84,7 +83,6 @@ func buildSkillSeedRouter(t *testing.T) (*gin.Engine, string, *sql.DB) {
 		Gateway:       llmgateway.NewHandlers(db),
 		Reports:       reports.NewHandlers(db),
 		Wasm:          wasmapi.NewHandlers(wasmapi.Options{}),
-		WasmSession:   session.New(session.Options{}),
 		// 资产目录 = 仓库里那份真货，按镜像布局摆成 <dir>/app-builder/。
 		SkillSeed: skillseed.NewHandlers(skillseed.New(stageSeedDir(t))),
 	})

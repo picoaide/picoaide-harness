@@ -38,6 +38,7 @@ import {
   splitWhitelist,
   submitPublish,
   validatePublishDraft,
+  windowSpecFromText,
   type PublishDraft,
   type PublishTarget,
 } from './publish-app.ts'
@@ -72,15 +73,18 @@ function draftWith(patch: {
 }
 
 describe('发布请求体：字段名与服务端 appcfg 逐字一致', () => {
-  it('config 只发 access/whitelist/purpose/data_sensitivity/owner（旧字段一个都不发）', () => {
+  it('config 发五个声明字段；`window` **只在作者声明时**才出现（旧字段一个都不发）', () => {
     const body = buildPublishBody(DRAFT, 'BASE64')
     expect(body.app_id).toBe('shift-notes')
     expect(body.version).toBe('1.0.0')
     expect(body.wasm_base64).toBe('BASE64')
     expect(body.title).toBe('值班便签')
     expect(body.changelog).toBe('首版')
-    // 键集合 = 契约里的字段集合（`APP_CONFIG_FIELDS` 是唯一真源，不在两处各写一份）。
-    expect(Object.keys(body.config as Record<string, unknown>).sort()).toEqual([...APP_CONFIG_FIELDS].sort())
+    // 键集合 = 契约里的字段集合 **减去 window**（`APP_CONFIG_FIELDS` 是唯一真源；
+    // `window` 是"作者声明才有"的那一个：不发 = 不声明，而不是"声明了缺省比例"）。
+    const withoutWindow = [...APP_CONFIG_FIELDS].filter(field => field !== 'window').sort()
+    expect(Object.keys(body.config as Record<string, unknown>).sort()).toEqual(withoutWindow)
+    expect(body.config).not.toHaveProperty('window')
     expect(body.config).toEqual({
       access: 'whitelist',
       whitelist: ['alice', 'bob'],
@@ -97,8 +101,38 @@ describe('发布请求体：字段名与服务端 appcfg 逐字一致', () => {
     expect(sent).not.toContain('"visible"')
   })
 
-  it('access 原样发出（public / login / whitelist 三个取值都不改写）', () => {
-    for (const access of ['public', 'login', 'whitelist'] as const) {
+  /**
+   * 窗口声明（F3/§6，R1-L3-9）：作者填了才发、填错本地拦下。
+   *
+   * 变异验证：把 `windowSpecFromText` 改成"总是返回 {width:1280,height:720}"（替作者
+   * 声明缺省）⇒ 第一条红；把 `validatePublishDraft` 的 ratio 校验删掉 ⇒ 第二条红。
+   */
+  it('window 声明：三项都填 ⇒ 原样进 config.window；只填部分 ⇒ 只带那几个键', () => {
+    const fullWindow = windowSpecFromText('16:9', '1280', '720')
+    const full: PublishDraft = { ...DRAFT, config: { ...DRAFT.config, ...(fullWindow === undefined ? {} : { window: fullWindow }) } }
+    expect((buildPublishBody(full, 'B').config as { window?: unknown }).window).toEqual({ ratio: 16 / 9, width: 1280, height: 720 })
+    const partialWindow = windowSpecFromText('', '1024', '')
+    const partial: PublishDraft = { ...DRAFT, config: { ...DRAFT.config, ...(partialWindow === undefined ? {} : { window: partialWindow }) } }
+    expect((buildPublishBody(partial, 'B').config as { window?: unknown }).window).toEqual({ width: 1024 })
+    // 一个字段都没解析出来 ⇒ 不发 `window` 键（"不声明"与"声明了缺省"是两件事）。
+    expect(windowSpecFromText('', '', '')).toBeUndefined()
+    expect(windowSpecFromText('不是比例', '', '')).toBeUndefined()
+  })
+
+  it('window 填错 ⇒ 本地预校验拦住（比例越界 / 尺寸非正整数）', () => {
+    const badRatio: PublishDraft = { ...DRAFT, config: { ...DRAFT.config, window: { ratio: 9 } } }
+    const ratioIssues = validatePublishDraft(badRatio)
+    expect(ratioIssues.map(issue => issue.code)).toContain('window_ratio_invalid')
+    expect(ratioIssues.find(issue => issue.code === 'window_ratio_invalid')!.field).toBe('window.ratio')
+    const badSize: PublishDraft = { ...DRAFT, config: { ...DRAFT.config, window: { width: 0 } } }
+    expect(validatePublishDraft(badSize).map(issue => issue.code)).toContain('window_size_invalid')
+    // 合法值不产生任何 window 相关问题。
+    const good: PublishDraft = { ...DRAFT, config: { ...DRAFT.config, window: { ratio: 1.5, width: 1280, height: 720 } } }
+    expect(validatePublishDraft(good).filter(issue => issue.field.startsWith('window'))).toEqual([])
+  })
+
+  it('access 原样发出（写侧两个取值都不改写）', () => {
+    for (const access of ['login', 'whitelist'] as const) {
       const body = buildPublishBody(draftWith({ config: { access } }), 'B')
       expect((body.config as Record<string, unknown>).access).toBe(access)
     }
@@ -170,7 +204,9 @@ describe('前端预校验：与服务端同口径（只做加法，不放行服�
 
     // 非白名单模式下空名单是合法的（服务端只在 access=whitelist 时要求非空）。
     expect(validatePublishDraft(draftWith({ config: { access: 'login', whitelist: [] } }), { firstRelease: false })).toEqual([])
-    expect(validatePublishDraft(draftWith({ config: { access: 'public', whitelist: [] } }), { firstRelease: false })).toEqual([])
+    // 2026-09-19（冻结契约 §4.4）：写侧不再接受历史 public —— 本地预校验与服务端同一集合。
+    const legacy = validatePublishDraft(draftWith({ config: { access: 'public' as never, whitelist: [] } }), { firstRelease: false })
+    expect(legacy.map(issue => issue.code)).toContain('access_invalid')
   })
 
   it(`白名单条目超过上限（${String(WHITELIST_MAX)}）命中；正好等于上限放行`, () => {
@@ -274,7 +310,7 @@ describe('submitPublish：一次请求走宿主编排（不自己分片）', () 
     bytes: new Uint8Array(size).fill(3),
   })
 
-  it('成功：POST /api/pico/apps/wasm/publish，解析出版本/状态/入口', async () => {
+  it('成功：POST /api/pico/apps/wasm/publish，解析出版本/状态（入口链接已不在契约里）', async () => {
     const calls: Array<{ url: string, init: RequestInit }> = []
     const result = await submitPublish(DRAFT, file(8), {
       fetch: (async (url: unknown, init?: RequestInit) => {
@@ -298,7 +334,11 @@ describe('submitPublish：一次请求走宿主编排（不自己分片）', () 
     expect(result.version).toBe('1.0.0')
     expect(result.pending).toBe(false)
     expect(result.live).toBe(true)
-    expect(result.entryURL).toBe('https://shift-notes.apps.example.com/')
+    // 2026-09-19（冻结契约 §4.5）：发布响应不再有入口链接，客户端也不再接住它 ——
+    // 服务端仍带着 entry_url 时这里是**忽略**（分享形态是客户端自己拼的渠道深链）。
+    expect(result).not.toHaveProperty('entryURL')
+    expect(JSON.stringify(result)).not.toContain('entry')
+    expect(JSON.stringify(result)).not.toContain('apps.example.com')
   })
 
   it('待审：review_required ⇒ pending=true 且不算"已生效"（R17）', async () => {
@@ -411,11 +451,18 @@ describe('parsePublishOutcome：形状不对不假装成功', () => {
     expect(JSON.stringify(outcome.details)).toContain('"app_id":"x"')
   })
 
-  it('成功但缺 entry_url 时留空串（不发明链接）', () => {
-    const outcome = parsePublishOutcome({ app: {}, release: { version: '1.0.0', status: 'approved', current: true } })
-    expect(outcome.ok).toBe(true)
-    if (!outcome.ok) throw new Error('unreachable')
-    expect(outcome.entryURL).toBe('')
+  it('成功结果里没有任何入口链接字段（服务端给不给都不接）', () => {
+    const withoutURL = parsePublishOutcome({ app: {}, release: { version: '1.0.0', status: 'approved', current: true } })
+    expect(withoutURL.ok).toBe(true)
+    if (!withoutURL.ok) throw new Error('unreachable')
+    expect(withoutURL).not.toHaveProperty('entryURL')
+    const withURL = parsePublishOutcome({
+      app: { entry_url: 'https://legacy.example/' },
+      release: { version: '1.0.0', status: 'approved', current: true },
+    })
+    expect(withURL.ok).toBe(true)
+    if (!withURL.ok) throw new Error('unreachable')
+    expect(JSON.stringify(withURL)).not.toContain('legacy.example')
   })
 
   /**
@@ -497,7 +544,7 @@ describe('P1-3：发新版的预填基线与"访问范围改动"判据', () => {
   const TARGET: PublishTarget = {
     appId: 'shift-notes',
     title: '值班便签',
-    access: 'public',
+    access: 'login',
     currentVersion: '1.4.2',
     owner: 'alice',
     purpose: '值班交接',
@@ -509,8 +556,8 @@ describe('P1-3：发新版的预填基线与"访问范围改动"判据', () => {
     expect(initial.appId).toBe('shift-notes')
     expect(initial.title).toBe('值班便签')
     // **核心断言**：access 是当前线上的值，不是硬编码的 login。
-    expect(initial.access).toBe('public')
-    expect(initial.currentAccess).toBe('public')
+    expect(initial.access).toBe('login')
+    expect(initial.currentAccess).toBe('login')
     expect(initial.currentVersion).toBe('1.4.2')
     expect(initial.whitelistText).toBe('alice, bob')
     expect(initial.purpose).toBe('值班交接')
@@ -531,8 +578,9 @@ describe('P1-3：发新版的预填基线与"访问范围改动"判据', () => {
     expect(initial.access).toBe(DEFAULT_ACCESS)
     expect(initial.currentAccess).toBeUndefined()
     expect(initial.appId).toBe('')
+    // 没有"当前值"⇒ 任何取值都不算改动（首版发布本来就没有可比对的对象）。
     expect(changesAccess(initial, 'login')).toBe(false)
-    expect(changesAccess(initial, 'public')).toBe(false)
+    expect(changesAccess(initial, 'whitelist')).toBe(false)
   })
 
   it('发布者本人之外的目录行拿不到 whitelist / purpose ⇒ 表单留空而不是编造', () => {
@@ -546,8 +594,8 @@ describe('P1-3：发新版的预填基线与"访问范围改动"判据', () => {
 
   it('改动访问范围被识别（首版以外都算"改动"，值相同则不算）', () => {
     const initial = initialFormState(TARGET)
-    expect(changesAccess(initial, 'public')).toBe(false)
-    expect(changesAccess(initial, 'login')).toBe(true)
+    expect(initial.currentAccess).toBe('login')
+    expect(changesAccess(initial, 'login')).toBe(false)
     expect(changesAccess(initial, 'whitelist')).toBe(true)
   })
 })

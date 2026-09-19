@@ -1,16 +1,34 @@
 # WASM 应用平台设计（唯一基线）
 
 - 本文件是**唯一设计基线**：平台侧的完整设计只此一份，不含历史版本、不含分期方案；实现细节以本文为准。
-- 状态：**设计定稿**。R1–R42 为已拍板决策；开工前必须钉死/实测的项与已知缺口见 §11；关键数值的实测依据见 §15。
+- 状态：**设计定稿**。R1–R42 为已拍板决策（**R12/R16/R29/R35 已于 2026-09-19 随访问模型变更删除**，见文首说明）；开工前必须钉死/实测的项与已知缺口见 §11；关键数值的实测依据见 §15。
 - 术语：**应用** = 员工（或其 AI）编写并上传的单个 `.wasm`；**平台** = 本仓的 Go 服务端 + 桌面客户端。
 - 原则：**每个能力都有上限，每个上限都有数值，每个数值都有测试**；**平台只提供运行环境与身份，业务怎么做由应用代码决定**。
 - ⚠️ **勘误（2026-09-18）**：实施与独立审计过程中发现本文件有若干处**论证/措辞与实测或可实现语义不符**，已在原处就地标注 `⚠️ 勘误`（不动原判据的**意图**，只把判据改成可判定的形式）。完整清单与依据见 `docs/planning/2026-09-17-wasm-app-platform-implementation.md` 的 §2（偏差裁定）与 §6.6（审计对设计论证的更正）。
 
 ---
 
+> ## ⛔ 历史归档：**已废弃，不得据此实施**
+>
+> 本文件的**访问模型与 AI 能力两节已整体作废**，只作为历史推导保留。凡文中与下列两条冲突的条款，
+> **一律以设计总纲为准**；需要落地时读总纲，不要读本文件。
+>
+> **权威文档**：`docs/planning/2026-09-19-wasm-client-only-design.md`（设计总纲，§16 是唯一权威波次表）。
+> 早期契约与推导过程：`docs/decisions/2026-09-19-wasm-client-internal-origin.md`。
+>
+> **① 访问模型变更（2026-09-19）**：本文件原描述的「浏览器 + 应用子域 + 换票」访问模型已**整体删除**。应用只在桌面客户端内以 `<渠道 app scheme>://<app_id>/` 打开，经客户端协议 handler 转发到服务端唯一入口 `POST /api/client/v2/apps/wasm/:app_id/request`（`BearerAuth` 必需）；**一律要求登录**，`access` 写侧只接受 `login` / `whitelist`（历史 `public` 读侧按 `login`）。
+> 无应用子域、无换票、无 Cookie、无 `entry_url`，也不再需要通配域名 / 通配证书 / Caddy 通配站点块；请求不发 `Origin`，由客户端协议 handler 补 `Origin: <app scheme>://<app_id>`（总纲 §8.3 / §10）。
+>
+> **② AI 能力变更（2026-09-19，总纲 §21）**：**服务端 `ai.chat` 已彻底删除** —— `abi.MethodAIChat` 与其白名单生成物、`hostcap.callAIChat`、`capapi.AI`、`internal/wasmapp/aichat/**`、`limits` 的 `AIChat*` 条目、事务内禁用条目、相关测试与技能示例全部移除。应用里的 AI 改由**客户端**提供：应用前端 JS 调保留路径 `POST /__picoaide/ai/chat`（协议 handler **本地**处理，**不经服务端**），走"每应用一个隐藏会话 + 使用者账计费 + 应用维度归因 + 首次授权 + 流式 SSE + 页面关闭即取消"。**本文件 §4.4 / §4.7 / §4.9 / §5.1 / §7.2 / §7.3 / §7.4 / §9.4 / §10.3 中把 `ai.chat` 当平台能力的条目全部作废**；老应用仍导入 `ai.chat` ⇒ 导入期 `IMPORT_NOT_ALLOWED` + 迁移指引，发布校验同步拒绝。
+>
+> 本文件与访问模型、AI 能力**无关**的部分（wasm 运行时与 ABI、SQLite/应用库、内存四笔账与资源上限、
+> 编译与发布、目录/审核/审计、其余能力面）继续有效。
+
+---
+
 ## 1. 一句话定义
 
-员工（或代表员工的 AI）把一个小应用编译成**单个 `.wasm` 文件**（静态资源、HTML、JS 全部编入），上传到平台；平台在**无网络、无文件系统**的沙箱里运行它，只给它**一个本应用专属的 SQLite 数据库**（100 MB 硬限）和受控的宿主能力；任何员工通过浏览器打开 `<app_id>.<应用基域>` 使用。**应用代表使用者调用平台 AI，费用记在该使用者账上**（走平台既有请求路径，平台不为应用单独设额度，R36）。
+员工（或代表员工的 AI）把一个小应用编译成**单个 `.wasm` 文件**（静态资源、HTML、JS 全部编入），上传到平台；平台在**无网络、无文件系统**的沙箱里运行它，只给它**一个本应用专属的 SQLite 数据库**（100 MB 硬限）和受控的宿主能力；任何员工**在桌面客户端内**打开 `picoaide-app://<app_id>/`（渠道参数化：§10/F15，official/beta 取值才是 `picoaide-app`）使用。**应用代表使用者调用平台 AI，费用记在该使用者账上**（走平台既有请求路径，平台不为应用单独设额度，R36）。
 
 **员工只描述"想要什么"，AI 负责写代码、本机编译（含自备开发环境）、上传、自修、发布。** 平台不提供构建服务、不分发工具链、不做本地预览——这些属于 skill 与员工 AI 的职责（R40/R42）。
 
@@ -22,20 +40,20 @@
 |---|---|---|
 | **R1** | **每个应用一个独立数据库**（不是每用户一个） | 2026-09-17 |
 | **R2** | **每个应用数据库 100 MB 硬上限**（不可由用户配置） | 2026-09-17 |
-| **R3** | 访问标识用**子域名** `<app_id>.<应用基域>`：**`app_id` 本身就是域名标签**，必须符合域名规则（见 §4.1） | 2026-09-17 |
+| **R3** | 访问标识用**自定义协议 origin** `<渠道 app 源 scheme>://<app_id>/`（2026-09-19 取代原「子域名」方案；**scheme 由渠道配置决定** —— 总纲 §10 的 `desktop.app_origin_scheme`，official/beta 取值才是 `picoaide-app`，不得硬编码）：`app_id` 是唯一应用标识，须符合 §4.1 的字符规则 | 2026-09-17（2026-09-19 修订；渠道参数化见 §10/F15） |
 | **R4** | 应用可用**当前登录用户**身份调 AI，费用扣该使用者 | 2026-09-17 |
 | **R5** | **无人类运营后台**（日常操作走 API/由 AI 驱动）；保留**最小运维面**（R23） | 2026-09-17 |
 | **R6** | **发布者即该应用的管理员**（仅管理平面） | 2026-09-17 |
 | **R7** | **无合规限制**；"数据不得离开受控端点"不适用 | 2026-09-17 |
 | **R8** | **静态资源/HTML/JS 编译进 WASM**（单文件交付） | 2026-09-17 |
-| **R9** | 对外通讯默认全禁（应用无网络能力） | 2026-09-17 |
+| **R9** | 对外通讯默认全禁（~~应用无网络能力~~）。⚠️ **2026-09-19 措辞订正（总纲 §6 / RED-9）**：**不得对外宣称"不能联网"** —— 真实边界 = **应用不能主动发起 `XHR`/`fetch` 型网络请求**（CSP `connect-src 'self'`）；**CSP 不约束顶层导航与弹窗**（应用页可用 `location.href='https://…'` 带数据出去），导航/弹窗由客户端窗口闸门与外链策略兜底 | 2026-09-17（2026-09-19 订正） |
 | **R10** | 接受窄语言面，**维持 wazero** | 2026-09-17 |
 | **R11** | **员工本机编译，平台只收 wasm**（不建平台侧构建服务） | 2026-09-17 |
-| **R12** | **会话走一次性换票**（主站 302 带 code → 应用子域 host-only Cookie） | 2026-09-17 |
+| ~~R12~~ | **2026-09-19 删除**：一次性换票（主站 302 带 code + 应用子域 host-only Cookie）随浏览器访问模型整体删除，`app_sessions`/`employee_sessions` 由新迁移 DROP；身份改由客户端协议 handler 注入员工 bearer，服务端只认 `POST /api/client/v2/apps/wasm/:app_id/request`（契约 §4.1 / §4.4、§5） | 2026-09-17 |
 | **R13** | **SQL 护栏 = `SQLITE_LIMIT_*`（挡病态语句）+ 每语句 5 s 的 ctx 硬超时**（实测驱动可被 `sqlite3_interrupt` 中断）| 2026-09-17 |
 | **R14** | 每个点都要有护栏，防止被滥用 | 2026-09-17 |
 | **R15** | **只提供 `data_scope=shared`**：应用内不做用户级隔离；skill 与作者文档必须写明 | 2026-09-17 |
-| **R16** | **保留**主站员工浏览器登录页（账密 + OIDC）与员工会话表；这是 R12 换票的上游 | 2026-09-17 |
+| ~~R16~~ | **2026-09-19 删除**：员工浏览器登录页与员工会话表随换票链路一并删除（`internal/wasmapp/session/**`）；员工在桌面客户端内登录，应用请求一律要求登录（契约 §4.4、§5） | 2026-09-17 |
 | **R17** | **默认不审核 + 事后抽检**；发布强制填写用途 / 数据敏感性 / 负责人；审核开关仍可由管理后台配置（默认关） | 2026-09-17 |
 | **R18** | **失败的发布不占版本号**（失败不落 release 行 ⇒ 天然不占） | 2026-09-17 |
 | **R19** | **编译在独立进程执行**，并做 **OS 级隔离**（见 R31） | 2026-09-17 |
@@ -44,17 +62,17 @@
 | **R22** | **实例内存 64 MiB / 单响应 8 MiB** | 2026-09-17 |
 | **R23** | 最小运维面（webadmin）：应用列表 / 下架 / 转移归属 | 2026-09-17 |
 | **R24** | **准入由应用代码控制**：平台只提供经校验的身份，不拦"已登录但未授权"的请求 | 2026-09-17 |
-| **R25** | ⚠️ 变更（2026-09-18，用户拍板）**访问模式收敛为一个 `access` 枚举**（随发布提交，见 §4.2）：`"public"`（允许匿名）/ `"login"`（要求登录，登录后**全员可用**，**缺省**）/ `"whitelist"`（要求登录 + 名单准入）。旧字段 `login_required` 与 `visible` 已删除（读取侧保留兼容 shim，见 §10.5 第 56c 项）。允许匿名时帧内 `user: null`，身份相关宿主调用 `AUTH_REQUIRED`。**改配置 = 发新版** | 2026-09-17（2026-09-18 修订） |
+| **R25** | **访问模式为一个 `access` 枚举**（随发布提交，见 §4.2）：`"login"`（要求登录，登录后**全员可用**，**缺省**）/ `"whitelist"`（要求登录 + 名单准入）。**2026-09-19 起写侧只接受这两种取值**，`"public"`（匿名）废除；历史 `public` 读侧按 `login`。旧字段 `login_required` 与 `visible` 已删除（读取侧保留兼容 shim，见 §10.5 第 56c 项）。**改配置 = 发新版** | 2026-09-17（2026-09-18 / 2026-09-19 修订） |
 | **R26** | **平台不提供任何员工目录能力**（不列举 / 不搜索 / **不校验账号是否存在**）；名单写在应用配置文件里，由作者手填已知账号 | 2026-09-17 |
 | **R27** | 帧内提供 `user.is_publisher`（当前使用者是否为本应用发布者）；应用可选使用（如只给发布者显示设置/统计入口） | 2026-09-17 |
 | **R28** | **作者画像 = 全员自助**：不假设作者会写代码或懂运维；门槛由 skill + 员工 AI 承担 | 2026-09-17 |
-| **R29** | **部署前置条件**：企业自备通配域名与通配证书、管理员配置 Caddy；**平台不做证书自动化**。**IP / 纯内网地址不提供应用子域能力** | 2026-09-17 |
+| ~~R29~~ | **2026-09-19 删除**：部署前置三项（通配域名 / 通配证书 / Caddy 通配站点块）与 `PICOAI_APPS_BASE_DOMAIN` / `wasm.apps_base_domain` 配置面全部废除——应用不再需要任何公网应用 origin（契约 §5、§6 W5） | 2026-09-17 |
 | **R30** | **同步 publish**：校验与编译在请求内完成，成功才落 release 行，失败同步返回结构化错误（**不落行**） | 2026-09-17 |
 | **R31** | **编译进程 = 单进程串行（并发 1）+ `wazero.NewCompilationCacheWithDir` 磁盘缓存**；进程以非特权用户 + bwrap/landlock + seccomp + 无网络 + env 白名单运行 | 2026-09-17 |
 | **R32** | **表结构由应用自建**（宿主在 `db.define` 内代执行 `CREATE TABLE IF NOT EXISTS` 并强制上限）；**不做**发布期声明、自动迁移、`db.define` 自省与 `SCHEMA_MISMATCH`；`DROP`/`ALTER` 永久禁 | 2026-09-17 |
 | **R33** | 保留 **32 MiB wasm / 48 MiB 请求体**；配套补客户端上传超时、分片/续传与自定义段上限 | 2026-09-17 |
-| **R34** | **独立"应用中心"页**（客户端）+ **保留 R16 员工浏览器登录页**；员工从应用中心进入，也可持有 `<app_id>.<应用基域>` 链接 | 2026-09-17 |
-| **R35** | 匿名 `public` 与**限流重做**同批上线：可信代理自检（启用子域却未配 `PICOAI_TRUSTED_PROXIES` ⇒ 拒绝启动）+ 全局匿名令牌桶 | 2026-09-17 |
+| **R34** | **独立"应用中心"页**（客户端）：员工从应用中心"打开"应用（落到 `<渠道 app 源 scheme>://<app_id>/`，渠道参数化：§10/F15；official/beta 取值 `picoaide-app`），也可分享深链 `<渠道 scheme>://app/<app_id>` | 2026-09-17（2026-09-19 修订） |
+| ~~R35~~ | **2026-09-19 删除**：匿名 `public` 与匿名限流（全局匿名桶 / 每 IP 桶 / `PICOAI_TRUSTED_PROXIES` 启动自检 / `internal/wasmapp/anonlimit`）随匿名面一并删除（契约 §1 第 2 项、§5） | 2026-09-17 |
 | **R36** | **AI 调用走平台既有请求路径**：应用只是壳子，**谁登录用谁的额度与余额**；平台**不引入应用级配额、不做应用维度归因**（网关已有用户级记录）。调用事件里保留 `app_id` 仅供诊断与追责，不参与计费 | 2026-09-17 |
 | **R37** | 应用退役 = **冻结 → 只读快照保留 90 天（管理员可导出）→ 真删并写审计** | 2026-09-17 |
 | **R38** | ⚠️ 变更（2026-09-18，用户拍板）**目录一律展示全部应用**：无论公开与否、有没有权限、是否下架都列出来（条目里给出 `access` 与 `enabled`，由使用者判断该不该点）。`visible` 布尔与"按可见性过滤"**作废**；目录只剩三条硬条件——未删除 · `kind=wasm_app` · 有生效版本（冻结的应用不列：冻结即停止服务，列出来只是死链）。**能不能用仍由应用自己判**（R24） | 2026-09-17（2026-09-18 修订） |
@@ -71,15 +89,14 @@
 
 | 对手 | 能力 | 动机 |
 |---|---|---|
-| **恶意员工** | 可写任意 wasm、可发任意 HTTP 请求、持有自己的合法账号、可开多个浏览器会话 | 读**其他应用**的数据、越权使用未授权应用、薅 AI 额度、探测平台、报复 |
+| **恶意员工** | 可写任意 wasm、可发任意 HTTP 请求、持有自己的合法账号 | 读**其他应用**的数据、越权使用未授权应用、薅 AI 额度、探测平台、报复 |
 | **被诱导的 AI** | 同上（代表员工操作），可能生成有漏洞或含后门的代码 | 无恶意但会犯系统性错误 |
 | **粗心的作者** | 无恶意 | 写出死循环、全表扫、无限递归、把状态放全局变量 |
-| **外部攻击者** | 无账号 | 通过应用子域探测平台、走私响应头、跨应用攻击 |
-| **匿名访问者**（`public` 应用） | 无账号 | 白嫖 CPU/队列（AI 需身份，拿不到）、探测应用逻辑、把平台域名当免费托管与请求生成器 |
+| **外部攻击者** | 无账号 | 探测平台公网面（门户/管理台/网关）、走私响应头 |
 
 ### 3.2 资产
 
-平台凭据与令牌 · 平台数据库（用户/余额/审计/用量） · 各应用的数据 · AI 额度与上游成本 · 服务可用性 · **平台域名与证书声誉** · 审计完整性
+平台凭据与令牌 · 平台数据库（用户/余额/审计/用量） · 各应用的数据 · AI 额度与上游成本 · 服务可用性 · 审计完整性
 
 ### 3.3 六条不可逾越的红线
 
@@ -87,8 +104,8 @@
 
 1. **应用读不到平台数据**（用户表、令牌、余额、审计、用量）
 2. **应用读不到其他应用的数据**
-3. **应用拿不到可用于调平台的凭证**（浏览器侧与沙箱内均不得出现）
-4. **应用不能出站**（无网络能力，非策略拦截）
+3. **应用拿不到可用于调平台的凭证**（应用页面侧与沙箱内均不得出现）
+4. ~~**应用不能出站**（无网络能力，非策略拦截）~~ ⚠️ **2026-09-19 措辞订正（总纲 §6 / RED-9）**：准确说法 = **应用不能主动发起 `XHR`/`fetch` 型网络请求**；**不得对外宣称"不能联网"**（CSP 不管顶层导航与弹窗）
 5. **应用不能读宿主文件系统**
 6. **单个应用无法拖垮平台**（CPU/内存/磁盘/队列/AI 额度全部有界）
 
@@ -102,12 +119,12 @@
 
 | 项 | 值 | 依据 |
 |---|---|---|
-| **`app_id`** | **既是应用标识、也是域名标签**：基础规则沿用平台既有 `^[a-z0-9]+(?:-[a-z0-9]+)*$`（小写、无连续/首尾连字符）；**wasm 应用额外约束**：长度 ≤ **63**（DNS label 上限）、**不得纯数字**（避免 IP 形态）、**不得以 `xn--` 开头**（punycode）、不得是保留字（下行）、不得与基域下既有 DNS 记录/主机名冲突 | `manifest.go:243/60-61` + 域名规则 |
-| `app_id` 唯一性 | **同 kind 内由 `apps` 主键 `(kind, app_id)` 保证** | 一个 `app_id` 只能对应一个域名，因此不需要额外标识列 |
-| `app_id` 改名 | **不支持改名**（改名等于换域名）：需要新名字就新建应用，旧应用照 R37 退役 | 版本与域名都是外部契约 |
+| **`app_id`** | **既是应用标识、也是自定义协议 URL 的 host 段**（`picoaide-app://<app_id>`，渠道参数化：§10/F15）：基础规则沿用平台既有 `^[a-z0-9]+(?:-[a-z0-9]+)*$`（小写、无连续/首尾连字符）；**wasm 应用额外约束**：长度 ≤ **63**、**不得纯数字**、**不得以 `xn--` 开头**（punycode）、不得是保留字（下行）。（`app_id` 仍是 URL host 段与路由标识：host 段必须合法，且不得与保留名冲突；纯数字禁用同时避免与 IP/端口形态混淆） | `manifest.go:243/60-61` |
+| `app_id` 唯一性 | **同 kind 内由 `apps` 主键 `(kind, app_id)` 保证** | 一个 `app_id` 只能对应一个应用标识，因此不需要额外标识列 |
+| `app_id` 改名 | **不支持改名**（改名等于换标识）：需要新名字就新建应用，旧应用照 R37 退役 | 版本与标识都是外部契约 |
 | 版本号 | 严格 `^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$`，必须严格递增；**失败的发布不占号**（R18：失败不落 release 行）；**已落行的版本永久占号**——被拒与软删（`deleted_at`）的版本同样不可复用（`UNIQUE(kind,app_id,version)`）。两者是**两条不同规则**，不得互相推导 | `manifest.go:248` + `appstore/publish.go:221-238` + `0053_apps.sql:50/53` |
 | 非首版 changelog | 必填（空即拒，422 `MISSING_FIELD`） | `publish.go:241-244` |
-| **app_id 保留字** | `www api admin portal app apps updates static cdn mail ns ns1 ns2 dns ftp vpn sso login auth autodiscover autoconfig mta-sts dmarc acme _acme-challenge` + **部署期可注入的企业已知主机名**（基域是平台资产） |
+| **app_id 保留字** | `www api admin portal app apps updates static cdn mail ns ns1 ns2 dns ftp vpn sso login auth autodiscover autoconfig mta-sts dmarc acme _acme-challenge` + **部署期可注入的企业已知标识名**（`app_id` 是 URL host 段与路由标识，不得与平台/企业既有标识冲突） |
 
 ### 4.2 上传与包
 
@@ -122,7 +139,7 @@
 | **导入面白名单** | **由参考实现构建期生成、不手写**：每语言一份"读帧 + 调全部宿主函数 + 写帧"的样例，CI 真编译后 dump 导入集写入 `limits.go`；**判据 = 符号 + 类型**（签名不匹配 ⇒ `IMPORT_SIGNATURE_MISMATCH`） | 必须含 `fd_read`（ABI 读 stdin 需要）；Go 实测 17 条 / 16 个不同名（`fd_write`×2） |
 | 导出面 | **必须含 `_start` 与 `memory`，额外导出忽略** | Rust 实测多一个 `__main_void` |
 | 编译超时 | 60 s | 实测 2.48 MiB 冷编译 1.27–1.69 s |
-| **应用配置文件** | `picoaide.app.json`（随 publish 提交，**不计入 32 MiB wasm 上限**，≤64 KiB）：`{access, whitelist[], purpose, data_sensitivity, owner}`，其中 `access` 是 ⚠️ 变更（2026-09-18，用户拍板）引入的访问模式枚举，取值 `"public"` \| `"login"` \| `"whitelist"`，**缺省 `login`**；发布期随资源一起抽出到 `assets/<release_id>/`，应用用 `assets.read("picoaide.app.json")` 读取。**字段规格单一真源** = `appcfgspec.go` → `appcfg.json` + skill `references/app-config.md`（生成物，见 §5.5） | **平台不校验 whitelist 里的账号是否存在**（否则等于提供账号枚举接口）；`access="whitelist"` 且名单为空 ⇒ 拒（`APP_CONFIG_INVALID`）；whitelist ≤ 2 000 条；改任何一项都要发新版。旧字段 `login_required` / `visible` 只作读取侧兼容（§10.5 第 56c 项） |
+| **应用配置文件** | `picoaide.app.json`（随 publish 提交，**不计入 32 MiB wasm 上限**，≤64 KiB）：`{access, whitelist[], purpose, data_sensitivity, owner}`，其中 `access` 是访问模式枚举，取值 `"login"` \| `"whitelist"`，**缺省 `login`**（2026-09-19 起写侧不再接受 `"public"`；历史 `public` 读侧按 `login`，见 R25 与 §4.7）；发布期随资源一起抽出到 `assets/<release_id>/`，应用用 `assets.read("picoaide.app.json")` 读取。**字段规格单一真源** = `appcfgspec.go` → `appcfg.json` + skill `references/app-config.md`（生成物，见 §5.5） | **平台不校验 whitelist 里的账号是否存在**（否则等于提供账号枚举接口）；`access="whitelist"` 且名单为空 ⇒ 拒（`APP_CONFIG_INVALID`）；whitelist ≤ 2 000 条；改任何一项都要发新版。旧字段 `login_required` / `visible` 只作读取侧兼容（§10.5 第 56c 项） |
 | 上传期校验（validate） | 导入面（符号+类型）+ 导出面 + **自解析段表**（结构化错误，不把 wazero 裸错误当唯一出口）+ 体积 + **一次真实编译** + **合成帧干跑**（2 s 预算跑 `Instantiate → _start → 响应帧`） | 编译通过 ≠ 能跑（签名不匹配编译期全绿、实例化才炸，实测）；干跑与编译同进程同配额；**validate 不落版本号、不进审计** |
 | **publish** | **同步**：校验 → 编译（复用 validate 缓存）→ 落 release 行 → 生效或进待审；失败**不落行** | R30/R18；状态只有"审核态 + 删除态" |
 
@@ -167,9 +184,9 @@
 |---|---|---|
 | 硬规则 | **宿主函数不得阻塞超过其预算**；每个宿主函数**必须**使用传入的 `ctx` | 实测：宿主阻塞时 guest 超时完全失效（预算 300 ms 跑满 3 s，且返回 `err=nil`） |
 | 宿主调用返回后 | **强制复检** `ctx` 与 module 状态，已取消即按超时处理 | 否则"被杀"会返回成功 |
-| `ai.chat` | `http.NewRequestWithContext`；单独预算 30 s；不在 guest 计时内；**走平台既有 `/v1` 请求路径**，按使用者身份计费与限流（R36，无应用级额度） | §7.3 |
+| ~~`ai.chat`~~ | **2026-09-19 删除**（总纲 §21）：服务端不再具备任何 AI 能力，本行原记的"单独预算 30 s / 走平台 `/v1` 路径 / 按使用者身份计费"全部作废。应用里的 AI = 前端桥 `POST /__picoaide/ai/chat`（协议 handler 本地处理，不经服务端），计费与归因走客户端既有 LLM 链路 | 已废除 |
 | 宿主函数参数 | 任何宿主函数**不得接受文件路径**；`db.*` 只用逻辑标识 | 路径由宿主按 `app_id` 推导 |
-| 事务内宿主调用 | **禁止**（`db.tx` 内调 `ai.chat`/`log` 直接报错） | 防事务长期持锁 + 占满执行槽 |
+| 事务内宿主调用 | **禁止**（`db.tx` 内调 `log`/`assets.read`/`db.define` 直接报错） | 防事务长期持锁 + 占满执行槽 |
 | 兜底 | 每个宿主调用额外包 `recover()` 边界 | wazero 会 recover 宿主 panic，但那是实现细节不是契约 |
 
 ### 4.5 SQL / 数据层
@@ -200,99 +217,60 @@
 
 | 项 | 值 | 说明 |
 |---|---|---|
-| 请求体上限 | 1 MiB（应用 API，非上传路径） | 子域路由树不在 1 MB 中间件的两个 namespace 分组里 ⇒ **必须自己实现** |
+| 请求体上限 | 1 MiB（唯一 `request` 端点的信封 `body`，base64 解码后判） | 该端点不在 1 MB 中间件的两个 namespace 分组里 ⇒ **必须自己实现**（信封 ≤ 1 MiB×4/3 + 64 KiB，已入 `largeBodyRoutes`；契约 §4.2） |
 | 响应体上限 | 8 MiB | |
 | 协议帧单行上限 | 1 MiB | 超限即 `RUNTIME_OUTPUT_OVERRUN` |
-| guest 执行预算 | **10 s**（进入宿主调用时暂停计时） | 防 `ai.chat` 阻塞被误判 |
-| 宿主调用预算 | 30 s（`ai.chat`） | |
+| guest 执行预算 | **10 s**（进入宿主调用时暂停计时） | 防宿主调用阻塞被误判为 guest 超时 |
+| 宿主调用预算 | 单条 SQL 5 s（原 `ai.chat` 30 s 已随 §21 删除） | |
 | 请求端到端墙钟 | **60 s**（含排队等待） | 到点即拒 |
 | 每应用队列长度 | **32** | 超出 429 + `Retry-After` |
 | 每用户占槽 | **按应用计**：同时最多 1 个在跑、队列中最多 4 个 | 防单用户占满该应用队列 |
 | **每用户全局在跑上限** | **4**（跨应用聚合） | 否则单用户 20 个应用可占满全局 32 槽 |
 | 每应用并发 | **4**（读并发；写仍串行） | 2026-09-19 起 appdb 已开 WAL + 1 写 N 读连接池，队列默认值随之上调（控制台 `app_running` 可在 1–全局并发之间调）；决策与回退见 `docs/decisions/2026-09-19-wasm-app-concurrency-default.md` |
 | 全局并发实例 | **32**（配合 64 MiB/实例 ≈ 2 GiB 上界） | 防跨应用耗尽 |
-| **匿名限流**（R35） | 全局匿名令牌桶（默认 3000 次/分）+ 每 IP 60 次/分；**启用子域却未显式配置 `PICOAI_TRUSTED_PROXIES` ⇒ 拒绝启动**；⚠️ `docker-compose.yml:98` 默认注入 `172.28.0.2` ⇒ 自检必须能区分"compose 默认值"与"管理员显式配置"，否则要么永远拒启、要么形同虚设 | 缺省只信回环；错配会让全部匿名流量坍缩进同一桶 = 全组织 429（本仓已有同族事故） |
 | 响应缓存 | 仅缓存 `assets.read` 的静态资源；键 `app_id + version + path`；动态响应一律不缓存 | 键必须含 `app_id` |
 
 ### 4.7 账号、AI 与额度
 
+> ⛔ **AI 各行已作废（2026-09-19，总纲 §21）**：服务端 `ai.chat` 已彻底删除。下表保留原判断作为历史记录；
+> 现行口径 = 应用 AI 由**客户端**提供（前端桥 `POST /__picoaide/ai/chat`，协议 handler 本地处理、
+> 不经服务端），每应用一个隐藏会话、走使用者账计费 + 应用维度归因、首次授权可撤销、流式 SSE、
+> 页面关闭即取消。**实施时读总纲 §21，不要照下表实施。**
+
 | 项 | 值 | 说明 |
 |---|---|---|
-| 应用子域会话 | 一次性换票（code 单次、60 s、绑 `(user, app)`）；Cookie **host-only + HttpOnly + Secure（fail-closed：非 https 不签发）+ SameSite=Strict**，TTL 8 h | R12/R16 |
-| 换票端点 | **POST + `Origin == 主站源` + `next` 只接受同基域相对路径**（`/` 开头、不得含 `//`/scheme），非法回落 `/`；签发写审计 | 防登录 CSRF 与开放重定向 |
+| ~~应用子域会话~~ | **2026-09-19 删除**：应用子域、一次性换票与应用侧 Cookie 全部不存在（`app_sessions`/`employee_sessions` 已 DROP；自定义协议下 `document.cookie` 恒空、`Set-Cookie` 不落盘）；身份唯一来源 = 员工 bearer 经 `appserver.clientFrameUser` 投影（契约 §3 / §4.4、§5） | R12/R16（已废除） |
+| ~~换票端点~~ | **2026-09-19 删除**：`/app-ticket`（连同 `/login`、`/logout`）已删除，浏览器访问模型整体移除，登录 CSRF 与开放重定向面不复存在（契约 §4.1、§5） | 已废除 |
 | 准入（R24） | **应用侧**：平台只注入身份；未授权请求照样进 wasm，由应用读自己配置里的 `whitelist` 判定并返回 403（页面必须显示本人账号） | 名单由作者手填在配置文件里；平台不提供目录、不校验账号存在性 |
-| 登录要求（R25） | ⚠️ 变更（2026-09-18，用户拍板）由应用配置文件的 `access` 决定：`login`（缺省）/ `whitelist` 时未登录 302 换票；`public` 时帧内 `user: null`，身份相关宿主调用 `AUTH_REQUIRED`。`whitelist` 只是"要求登录 + 在帧里告诉应用模式"，**名单仍由应用自己判**（R24） | 与 R35 限流同批上线 |
-| AI 令牌 | **每个员工浏览器会话铸一张 45 min 用户令牌**（宿主内存持有并按需续期，登出即吊销）；**`api_tokens` 无需加任何列** | 不做应用维度 ⇒ **`api_tokens` 保持现状，不加列、不加唯一约束** |
-| **AI 额度与归因**（R36） | **不做应用级额度、不做应用维度归因**：用户级余额 + 网关既有 60 次/分桶 + `InFlightGuard` 是全部边界；网关已有用户级记录 | 语义已定：谁登录用谁的钱；应用只是壳子 |
-| **额度可见性**（R36） | **唯一的额度入口是桌面客户端**（余额/用量都在客户端里）；**应用子域、应用中心页、门户都不提供额度或用量页面** | 应用侧不需要知道余额，只需在宿主返回额度错误时给出可读提示 |
-| AI 调用边界 | **沿用平台既有用户级边界**（余额闸门 + 每用户 60 次/分 + 在途 32）；不新增应用级日限 | R36；爆炸半径由"使用者自己的额度"天然限定 |
-| AI 并发 | 复用既有 `InFlightGuard`（每用户 32），**不新增应用级计数** | R36 |
-| **余额预留** | 应用发起的调用必须先预留预估额度再转发；**同一处 handler 建议一次修掉既有桌面路径**（现状只判余额 >0，结算在上游调用之后） | |
-| 模型准入 | 服务端按管理员配置 + 用户权限裁决 | |
-| 提示隔离 | `ai.chat` 的 messages 由应用自建，平台不注入系统提示；返回体不透出内部错误/上游原文 | |
+| 登录要求（R25） | 由应用配置文件的 `access` 决定：`login`（缺省）与 `whitelist` 都**要求登录**；未带 bearer 的请求在平台层即 401 `AUTH_REQUIRED`，不进 wasm。`whitelist` 只是"要求登录 + 在帧里告诉应用模式"，**名单仍由应用自己判**（R24） | 契约 §4.4 |
+| ~~AI 令牌~~ | **2026-09-19 删除**（总纲 §21）：服务端不再铸造/吊销应用 AI 令牌；**`api_tokens` 保持现状，不加列、不加唯一约束**（本行的结论仍然成立，但依据已不是"AI 走服务端"） | 已废除 |
+| ~~AI 额度与归因~~（R36） | **2026-09-19 删除**：原写"不做应用级额度、不做应用维度归因"。现行 = 仍**不做应用级额度**（沿用使用者余额 + 网关既有用户级边界），但**新增应用维度归因**（隐藏会话元数据带 `app_id`，出站带 `X-Pico-App-Id`，`usage` 加应用维度），见总纲 §21.4 | 已废除（R36 的额度部分保留） |
+| **额度可见性** | **唯一的额度入口是桌面客户端**（余额/用量都在客户端里）；**应用协议页面与应用中心都不提供额度或用量页面** | 应用侧不需要知道余额，只需在返回额度错误时给出可读提示（现行错误码 `ai_balance_insufficient`） |
+| ~~AI 调用边界 / AI 并发 / 余额预留 / 模型准入 / 提示隔离~~ | **2026-09-19 删除**：这四行描述的"服务端侧 AI 调用边界、`InFlightGuard` 应用级计数、服务端余额预留、服务端模型准入裁决、服务端提示隔离"全部随 `ai.chat` 一起消失。现行 = 客户端 AI loop 承担（仅对话、无工具/无记忆、平台统一默认模型与提示、首次授权闸门、传输层有界），见总纲 §21 | 已废除 |
 
-### 4.8 响应与浏览器侧
+### 4.8 响应与应用页面侧
 
 | 项 | 值 | 说明 |
 |---|---|---|
-| **应用响应安全头（宿主独占，含 4xx/5xx）** | 宿主**强制**写 `Content-Security-Policy`（`default-src 'none'` + 自身源 `script`/`style`/`img`；`frame-ancestors 'none'`）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: same-origin`；应用自带的同名头一律剥离 | 应用子域是公司域名下的任意 HTML/JS 宿主（R8/R37）⇒ **"谁写安全头"必须落在宿主**；对照渠道 SVG 的既有口径（`channel/svg_guard.go`）。⚠️ **Referrer-Policy 必须是 `same-origin`，绝不能是 `no-referrer`**（2026-09-19 修正，见 §4.8.1）：no-referrer 下浏览器把应用/主站的**同源表单 POST** 写成 `Origin: null`，跨源写防护与换票的 `Origin == 自身源` 判据必然失败 ⇒ 应用写功能与员工登录 100% 不可用 |
-| 响应头白名单 | `content-type`（限定集合）、`cache-control`、`content-disposition`（仅 `inline`）、`x-content-type-options` | Cookie 由宿主独占 |
+| **应用响应安全头（宿主独占，含 4xx/5xx）** | 宿主**强制**写 `Content-Security-Policy`（`default-src 'none'` + 自身源 `script`/`style`/`img`；`frame-ancestors 'none'`）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: same-origin`；应用自带的同名头一律剥离 | 应用页面是任意 HTML/JS 宿主（R8/R37）⇒ **"谁写安全头"必须落在宿主**；对照渠道 SVG 的既有口径（`channel/svg_guard.go`）。自定义协议下平台生产 CSP 已实测逐字放行（契约 §3）。`Referrer-Policy: same-origin` **保留为响应头策略**，但在客户端模型下**不再是安全前提**（请求不发 `Origin`/`Referer`，由协议 handler 补 `Origin`） |
+| 响应头白名单 | `content-type`（限定集合）、`cache-control`、`content-disposition`（仅 `inline`）、`x-content-type-options` | 无 cookie 语义：`Set-Cookie` 由宿主整体丢弃（契约 §4.2） |
 | CR/LF | 头值中出现即拒 | 防响应拆分 |
-| 主机名反查 | `Host` 的**第一级标签** → `apps.app_id`（`kind=wasm_app`）；查不到**直接 404**，绝不回落主站 | 域名标签即 `app_id` |
-| **host 门控（allow-list）** | 应用子域**只挂应用路由树**——主站路由在子域**一律不注册**，而不是维护一份"禁命中清单"。至少覆盖：`/`、`/portal`、`/admin/*`（webadmin SPA，带账密表单）、`/healthz`、`/models`、`/chat/completions`、`/v1/*`、`/api/server/*`、`/updates/client/*` | 全仓 Go 代码**零 host 维度判断**（`Request.Host` 仅 `clientrelease.go:200` 一处、用于拼下载 URL），`/`、`/portal`、`/admin/*` 都在 NoRoute 分支、`/healthz` 在根引擎上 ⇒ 清单式禁命中必然漏（2026-09-17 复核）；断言见 §10.1 13a–13d |
-| 跨应用写防护 | 子域路由树最外层**无条件**校验：非幂等方法要求 `Origin == https://<app_id>.<应用基域>`（无 Origin 校验 Referer 前缀），且**早于**任何重定向/重写 | 同 eTLD+1 下 `SameSite=Strict` 挡不住 `<a>.<基域>` → `<b>.<基域>` 的跨源写 |
+| 请求 `host` 判据 | 只接受 `<渠道 app 源 scheme>://<app_id>`（渠道参数化：§10/F15；official/beta 取值 `picoaide-app`）（或裸 `<app_id>`）；`app_id` 来自路由路径，**绝不从 `Host` 反解**；其它形态一律 400 VALIDATION | 契约 §4.2 |
+| 跨源写防护 | 非幂等方法要求 `Origin == 自源`（自源由 `app_id` 推导为 `<渠道 app 源 scheme>://<app_id>`，渠道参数化：§10/F15）；自定义协议请求**不发** `Origin`/`Referer`/`Sec-Fetch-*`，由客户端协议 handler 补 `Origin`（可信组件，必须 fail-closed），两者皆缺即拒 | 契约 §4.3 |
 
-#### 4.8.1 Referrer-Policy 必须是 `same-origin`（2026-09-19 P0 修正）
+#### 4.8.1 Referrer-Policy 与 `Origin: null`（原浏览器链路修正）
 
-**结论**：主站登录页 / 换票页（`session/pages.go`：两处 `<meta name="referrer">` +
-`writePage` 响应头）与应用子域（`edge.ApplyHostSecurityHeaders`）一律下发
-`Referrer-Policy: same-origin`。**任何一处退回 `no-referrer` 都会同时关掉员工登录与
-应用内的原生表单写**（同源 `fetch`/XHR 不受影响，见下），这不是"更严"而是故障。
-
-**根因**：按 WHATWG Fetch 的「append a request `Origin` header」算法，请求的 referrer
-policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面量 `null`**
-（同源也一样；只有 `cors` / `websocket` 模式才无条件写真实源）。
-⚠️ 实测口径（2026-09-19，真实 Chromium 微实验）：这里的"非 GET/HEAD 请求"指
-**navigation 模式**（原生表单提交/导航）；同源 `fetch()` 缺省 `mode=cors`，即使
-`no-referrer` 也照发真实 `Origin` —— 证据见 `temp/wasm-verify-indep/probe-micro-referrer.mjs`
-的对照表（`no-referrer` 行：form=`null`、fetch=真实源）；早前把 `fetch` 一并列入属过度声称，已收窄。
-本平台的写请求判据全部是 `Origin == 自身源`：
-
-| 端点 | 形态 | `no-referrer` 下 | 后果 |
-|---|---|---|---|
-| `POST /login` | 主站登录表单 | `Origin: null` ⇒ 403 | 员工浏览器登录入口 100% 不可用 |
-| `POST /app-ticket` | 换票页加载即自动提交 | `Origin: null` ⇒ 403 | 登录可见应用**完全无法进入** |
-| 应用子域同源写（如演示应用留言墙 `POST /note`） | 应用自己的 `<form method="post">` | `Origin: null` ⇒ 403「跨源写请求被拒」 | 应用功能在真实浏览器里必然失败 |
-
-同一根因的第四个面是**可观测性**：`checkMainOrigin` 只在"配置的 MainOrigin 与请求源
-不一致"时打日志，其余分支静默 ⇒ 线上只看到 403 而答不出原因。现已补齐：每次拒绝落一条
-含 `reason` / 期望源 / `Origin` / `Referer` / `Host` / `X-Forwarded-Proto` 的日志
-（`edge.CheckOrigin` 同款，且**不打 Cookie**）。
-
-**为什么是 `same-origin` 而不是别的**：跨源请求它一个字节都不发 Referer（原有"不向第三方
-泄漏页面 URL"的意图不变），同源请求仍带真实 `Origin`；`strict-origin-when-cross-origin`
-同样可用，但它会在 HTTPS→HTTP 降级时把 `Origin` 也写成 `null`（同一类故障的降级版本），
-而本平台这两个端点本来就 fail-closed 要求 https，`same-origin` 语义最窄、最贴合意图。
-
-**证据与判据**：真实 Chromium 微实验 `temp/wasm-probe/micro-referrer.mjs`
-（`no-referrer`→`Origin=null`、`same-origin`→真实 Origin）；服务端行为回归
-`TestLoginSubmitOriginMatrix`（同源 Origin 通行 / `null` 与跨源拒绝 / Referer 兜底仍在）；
-策略防回退 `TestPageReferrerPolicyIsSameOrigin`、`TestSecurityHeadersIncludeFrameAncestors`、
-`assertHostSecurityHeaders`。完整记录见
-`docs/decisions/2026-09-19-referrer-policy-origin-null.md`。
-
-**不在本次范围**：门户页（`/`、`/portal`，零脚本、无同源表单 POST）与管理台 SPA
-（`/admin/*`，CSRF 靠 token 而非 Origin）保持 `no-referrer`。若日后给管理面加
-**Origin 校验**，必须先改这两处 —— 否则管理端会踩同一个坑。
+> 本节原描述的「主站登录页 / 换票页 / 应用子域同源表单在 `no-referrer` 下 `Origin: null`」故障面，随 2026-09-19 访问模型变更**整体删除**（`/login`、`/logout`、`/app-ticket`、应用子域均已移除）。
+> 现模型下请求不发 `Origin`/`Referer`/`Sec-Fetch-*`，由客户端协议 handler 补 `Origin: <渠道 app 源 scheme>://<app_id>`（渠道参数化：§10/F15；契约 §3 / §4.3）。`Referrer-Policy: same-origin` 作为宿主响应头策略保留（见 §4.8 第一行），但不再是任何正确性的安全前提。
 
 ### 4.9 审计与可观测
 
 | 项 | 值 | 说明 |
 |---|---|---|
-| 审计（防篡改链） | 发布结果（成功/失败/被拒）、上下架、**冻结/导出/删除**、令牌铸造与吊销、配额超限、审核开关与可见性变更、换票签发 | 写路径**单 worker 同步阻塞**（最坏 25 s）⇒ 高频项（令牌铸造/吊销、换票签发）**异步 fire-and-forget + 失败计数**；`validate` 不进审计 |
+| 审计（防篡改链） | 发布结果（成功/失败/被拒）、上下架、**冻结/导出/删除**、令牌铸造与吊销、配额超限、审核开关与可见性变更 | 写路径**单 worker 同步阻塞**（最坏 25 s）⇒ 高频项（令牌铸造/吊销）**异步 fire-and-forget + 失败计数**；`validate` 不进审计；应用请求不写 `audit_logs`（契约 §4.4） |
 | **审计的 app 维度** | `audit_logs` 加**可空 `app_id` + 索引**（哈希链版本化） | 否则答不出"谁在什么时候用了哪个应用" |
 | 调用事件 | 有界环形内存 → 批量落**独立表**（不进哈希链）；字段 `app_id / user_id / outcome / reason_code / cpu_ms / peak_memory_bytes / host_call_count / host_call_ms / queue_wait_ms / response_bytes / db_rows / db_bytes`；**7 天保留 + 丢最旧并计数** | 回答"这个应用刚才为什么被杀"的唯一载体；**必须带 `user_id`**（未授权访问/数据污染追责的底线） |
-| 用量归因 | **不改 `usage` 表**：AI 消耗由网关按既有用户维度记录（R36）；"哪个应用花的"不作为平台要求（调用事件里有 `app_id`，仅 7 天诊断用） | 避免了 `usage` 加列、日/月账本 PK 重建与流式回填改造 |
+| ~~用量归因~~ | **2026-09-19 订正**（总纲 §21.4）：原写"**不改 `usage` 表**、不做应用维度"。现行 = `usage` **新增应用维度**（新迁移 + 索引）用于管理端 AI 用量面板；归因头 `X-Pico-App-Id` 只在确属客户端会话链路时记录（伪造头的非会话请求忽略并记 warn） | 已废除；调用事件里的 `app_id` 仍只用于诊断 |
 | 诊断 API | 按应用聚合最近 N 条失败与被杀记录，结构化错误码 + hints（第一消费者是 AI）；含 guest exit code 与 stderr 尾巴 | §7.4 |
 | 运维面 | `/readyz`：磁盘余量 / 编译队列深度 / 执行队列深度 / 编译缓存大小；低于阈值红灯并**拒绝发布**（fail-closed） | 现网 `healthz` 只 `db.Ping`：磁盘满仍 healthy |
 
@@ -307,8 +285,8 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 | `db.define(table, columns[])` | **建表**（宿主代执行 `CREATE TABLE IF NOT EXISTS` 并做上限检查；重复调用幂等） | 表名/列名 `^[a-z][a-z0-9_]{0,30}$`；列类型枚举封闭；列 ≤ 16；表 ≤ 16；禁止指定主键/外键/索引/触发器；**改结构 = 由应用自己建新表或加列**（R32，无自动迁移） |
 | `db.query(sql, args)` | 单条 SELECT | 单语句、参数化、`SQLITE_LIMIT_*`、返回 ≤ 5 000 行 / 8 MiB |
 | `db.exec(sql, args)` | 单条写语句 | 仅 INSERT/UPDATE/DELETE；禁 DDL |
-| `db.tx(fn)` | 事务（语言侧糖） | ABI 层是 `tx_begin`/`tx_commit`/`tx_rollback`（§7.2）；事务内**允许** `db.query`/`db.exec`（+ 两个出口），**禁止** `tx_begin`（嵌套）/`ai.chat`/`log`/`assets.read`/`db.define`；硬超时 5 s 强制回滚。⚠️ **勘误**：本格原写"禁止调用任何其他宿主函数"，按字面实现会让 `db.tx` **完全不可用**（只能 begin→立刻 commit）—— §4.4 给的依据（"防事务长期持锁 + 占满执行槽"）只覆盖会长时间阻塞/占槽的能力，不覆盖同一条连接上的快 SQL（实施报告 D12，独立审计 P0） |
-| `ai.chat(messages, model?)` | 调 AI | 模型由服务端裁决；预算 30 s；不注入系统提示；匿名调用 ⇒ `AUTH_REQUIRED`；**按使用者身份走平台既有路径计费与限流（R36）** |
+| `db.tx(fn)` | 事务（语言侧糖） | ABI 层是 `tx_begin`/`tx_commit`/`tx_rollback`（§7.2）；事务内**允许** `db.query`/`db.exec`（+ 两个出口），**禁止** `tx_begin`（嵌套）/`log`/`assets.read`/`db.define`；硬超时 5 s 强制回滚。⚠️ **勘误**：本格原写"禁止调用任何其他宿主函数"，按字面实现会让 `db.tx` **完全不可用**（只能 begin→立刻 commit）—— §4.4 给的依据（"防事务长期持锁 + 占满执行槽"）只覆盖会长时间阻塞/占槽的能力，不覆盖同一条连接上的快 SQL（实施报告 D12，独立审计 P0）。⚠️ **2026-09-19**：禁用清单里的 `ai.chat` 随总纲 §21 一并删除（该能力已不存在） |
+| ~~`ai.chat(messages, model?)`~~ | **2026-09-19 删除**（总纲 §21）：服务端不再具备任何 AI 能力（原记的"模型由服务端裁决 / 预算 30 s / 按使用者身份计费"全部作废）。应用里的 AI = 前端桥 `POST /__picoaide/ai/chat`（客户端协议 handler 本地处理，不经服务端）；老应用仍导入 `ai.chat` ⇒ 导入期 `IMPORT_NOT_ALLOWED` + 迁移指引 | 已废除 |
 | `log(level, msg)` | 写日志 | 单条 ≤ 4 KiB；每请求 ≤ 100 条；超出丢弃并计数 |
 | `assets.read(path)` | 读包内资源 | 资源已在发布期抽到宿主磁盘（§4.2），应用与宿主读同一份；无文件系统语义、无路径穿越 |
 
@@ -366,38 +344,10 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 
 ### 6.1 请求链路
 
-```
-员工浏览器 / 客户端"应用中心"页
-  │  ① 访问 https://<app_id>.<应用基域>/（R29：企业自备通配域名+证书）
-  │     无有效应用子域 Cookie ⇒ 302 到主站换票（access=login/whitelist；public 允许匿名直入）
-  │     （⚠️ 变更（2026-09-18，用户拍板）：模式取值收敛为 access 三模式）
-  ▼
-主站 https://<基域>/app-ticket   ← POST + Origin 校验 + next 白名单（§4.7）
-  │  ② 主站员工浏览器会话（R16）→ 生成一次性 code（60s，绑 user+app）
-  │  ③ 302 回 https://<app_id>.<应用基域>/?ticket=<code>
-  ▼
-应用子域（独立路由树 + host 门控 + Origin 校验 + 宿主安全头）
-  │  ④ 宿主用 code 换 host-only + HttpOnly + Secure + SameSite=Strict Cookie，再 302 回干净 URL
-  │  ⑤ 准入判定在应用代码里（R24）；未授权由应用返回 403（显示本人账号）
-  ▼
-┌──────────────────────────────────────────────────────────┐
-│ 平台主服务（Go 单二进制，CGO_ENABLED=0，单实例 R20）        │
-│  会话与票务 · 应用路由 · 静态资源(宿主安全头) · 宿主能力     │
-│  护栏(limits.go) · 计量 · 审计(异步) · 队列 · 应用中心 API   │
-└───┬───────────────┬───────────────────┬──────────────────┘
-    │ stdin/stdout  │ 内部 /v1          │ 上传/校验队列
-    │ 帧协议(每请求  │ (BearerAuth +     │
-    │ 新实例 64MiB)  │  InFlightGuard +  ▼
-    ▼               │  余额预留 + 确认) ┌────────────────────────────┐
-┌──────────────────┐│                  │ 编译进程（R31，独立+隔离）  │
-│ WASM 实例（沙箱） ││                  │ 单进程串行 + wazero 磁盘缓存│
-│ 无网络·无文件系统 ││                  │ 非特权+bwrap+seccomp+无网络 │
-└────────┬─────────┘│                  └────────────┬───────────────┘
-         │ SQL 闸门：单语句+schema+语句种类+LIMIT_*+每语句 5s ctx
-         ▼                                          ▼
-/data/apps/<app_id>/app.db（100MB 硬限）      /data/apps/_compile-cache/
-（平台自身仍在 PostgreSQL，应用进程无任何可达路径）
-```
+> 本节原描述的「应用子域 → host 门控 → 换票 → Cookie → wasm」链路，随 2026-09-19 访问模型变更**整体删除**（含原链路图）。
+> 现模型：应用由**独立应用窗口**（不是内置浏览器标签，见总纲 §16.1 W-C）加载 `<渠道 app scheme>://<app_id>/<path>` → 客户端协议 handler 从 URL 取 `app_id`、取 `ctx.picoSession`、补 `Origin: <app scheme>://<app_id>` → `POST /api/client/v2/apps/wasm/:app_id/request`（`BearerAuth`）→ `appserver.ServeClientRequest` → 与旧路径共用的 `serveApp` 业务管线（准入/资源/静态/执行/计量不变）。
+> scheme 由渠道配置决定（总纲 §10 的 `desktop.app_origin_scheme`；official/beta = `picoaide-app`）——**不要在任何实现或文案里写死某个渠道的 scheme**。
+> 契约：`docs/decisions/2026-09-19-wasm-client-internal-origin.md` §2 / §4.1–4.4；总纲 §10 / §16.1。
 
 ### 6.2 编译与发布链路（同步，R30）
 
@@ -408,7 +358,7 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
   ③ AI 调 POST …/wasm/validate     ← 导入面(符号+类型) + 导出面 + 段表 + 体积 + 真编译 + 干跑
        ├─ 通过 → ④                （不落版本号、不进审计）
        └─ 失败 → 结构化 {code, details, hints} → AI 自修 → 回到 ②
-  ④ AI 调 POST …/wasm/:app_id/releases（wasm + Manifest{version,title,changelog} + 应用配置文件{access,whitelist,用途,敏感性,负责人}；⚠️ 变更（2026-09-18，用户拍板）：字段从 visible/login_required 收敛为 access 三模式）
+  ④ AI 调 POST …/wasm/:app_id/releases（wasm + Manifest{version,title,changelog} + 应用配置文件{access,whitelist,用途,敏感性,负责人}；⚠️ 变更（2026-09-18，用户拍板）：字段从 visible/login_required 收敛为 access 枚举。⚠️ **2026-09-19 订正**：此处原写"access **三模式**"，现为**两值** `login` / `whitelist`（`public` 已作废，历史 `public` 读侧按 `login`）—— 见总纲 §6 / §13.1 I6）
   ⑤ 平台在 60 s 预算内编译（复用 ③ 的缓存）：
        ├─ 编译/干跑失败 → **不落行**，同步回结构化错误 ⇒ 版本号未被占用（R18），可直接重发
        └─ 成功 → 落 release 行（默认直接生效；若管理员开了审核开关 ⇒ 待审，线上仍旧版本）
@@ -425,7 +375,7 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 |---|---|
 | **应用之间** | 文件边界 + `ATTACH` 被 `SQLITE_LIMIT_ATTACHED=0`（每条连接重设）与语句白名单双重否决 + 数据目录 `0700` + 文件名由宿主推导 |
 | **用户之间** | **不隔离**（R15）：同应用全员共享；需要按人区分时由应用自己加业务字段（这不是安全边界） |
-| **浏览器层** | 每应用独立源（子域）+ `SameSite=Strict` + `Origin` 校验 + 宿主安全头 |
+| **应用页面层** | 每个 `app_id` 一个自定义协议 origin（`picoaide-app://<app_id>`，渠道参数化：§10/F15）+ 自源 `Origin` 判据 + 宿主安全头；跨应用与跨 UI 的 fetch 由 Chromium 拦（已实测，契约 §3）。cookie 不适用 |
 
 ---
 
@@ -445,14 +395,14 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
  "body":"{\"amount\":100}"}
 ```
 
-（⚠️ 变更（2026-09-18，用户拍板）：`auth.mode` 取自应用配置文件的 `access`，取值只有 `public` / `login` / `whitelist` 三个；`public` 且未登录时 `user` 为 `null`。`whitelist` 模式下宿主**不比对名单**，只是把这个模式告诉应用。清单本身不进帧——应用用 `assets.read("picoaide.app.json")` 读自己的配置。首帧与后续 RPC 应答共用同一帧格式。）
+（`auth.mode` 取自应用配置文件的 `access`，取值只有 `login` / `whitelist` 两个（历史 `public` 读侧按 `login`）。`whitelist` 模式下宿主**不比对名单**，只是把这个模式告诉应用。清单本身不进帧——应用用 `assets.read("picoaide.app.json")` 读自己的配置。首帧与后续 RPC 应答共用同一帧格式。）
 
 **身份契约（R24–R27，宿主保证）**：
 
 1. **每请求都带**：实例每请求新建、guest 无状态 ⇒ 身份不是会话状态，必须在**每一帧**里读。
-2. **唯一来源**：应用拿不到 Cookie/令牌（R12），帧内 `user` 是唯一路径；帧由**宿主构造**，应用无法伪造。
+2. **唯一来源**：应用拿不到任何平台凭证（自定义协议下无 cookie，页面也拿不到 bearer）；帧内 `user` 是唯一路径，帧由**宿主构造**，应用无法伪造。
 3. **只给本人信息**：`id` / `username` / `display_name` / `dept` / `is_publisher`；**不含任何名单、不含平台角色**。
-4. **匿名**：`user: null`（仅 `mode=public`）；身份相关宿主调用返回 `AUTH_REQUIRED`；**`user: null` 分支不得渲染任何账号信息**（防账号枚举）。
+4. **无匿名**：帧内 `user` 永不为 `null`——未带 bearer 的请求在平台层即 401，不进 wasm（契约 §4.4）。
 5. **稳定键**：`user.id` 与 `user.username` 都**不可变** ⇒ 名单与业务权限表用这两个键，不要用 `display_name`/`dept`。
 6. **准入不在宿主**（R24）：已登录但不在名单里的请求照样进 wasm，由应用返回 403；平台拦的是"未登录"。
 
@@ -463,14 +413,15 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 - 应用 → 宿主：`RS` + 长度 + 换行 + 一行 JSON-RPC 2.0 请求，或 `RS` + 长度 + 换行 + 最终响应信封
 - 宿主 → 应用：同格式的 JSON-RPC 响应
 - **非 `RS` 起始的输出一律视为日志**，被宿主捕获（不污染 ABI），并计入"stdout 净化"统计回给作者
-- 宿主调用方法：`db.query` / `db.exec` / `tx_begin` / `tx_commit` / `tx_rollback` / `ai.chat` / `log` / `assets.read`
+- 宿主调用方法：`db.query` / `db.exec` / `tx_begin` / `tx_commit` / `tx_rollback` / `log` / `assets.read`
+  （原列表里的 `ai.chat` 已随总纲 §21 删除：服务端不再有该宿主函数）
 
 ### 7.3 计时规则
 
 ```
 请求到达 → 端到端墙钟 60 s（含排队）
   进入 guest → guest 预算 10 s
-    调宿主函数 → 【暂停 guest 计时】+ 宿主预算（ai.chat 30 s / SQL 语句 5 s）
+    调宿主函数 → 【暂停 guest 计时】+ 宿主预算（单条 SQL 语句 5 s；原 `ai.chat` 30 s 已随总纲 §21 删除）
     宿主返回   → 恢复 guest 计时 + 强制复检 ctx/module 状态
   离开 guest → 停止
 上传路径：客户端 90 s > 服务端 ReadTimeout 60 s **≥** 编译 60 s（同步 publish 在 60 s 预算内，含 1 次缓存复用）
@@ -488,9 +439,9 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 | `RUNTIME_NO_RESPONSE` | 无响应帧即退出 | 502 |
 | `RUNTIME_GUEST_EXIT(code)` | guest 非零退出且无响应帧（如 Go 运行时 OOM 走 `proc_exit(2)`） | 500（诊断里回 exit code + stderr 尾巴） |
 | `HOST_CALL_OVER_BUDGET` | 宿主调用超预算 | 504 |
-| `AUTH_REQUIRED` | 匿名请求调用身份相关宿主能力 | 401 |
-| `AI_BALANCE_INSUFFICIENT` | 使用者余额不足（网关既有 `ErrInsufficientBalance` 语义），应用侧不暴露具体余额 | 402 |
-| `AI_RATE_LIMITED` | 撞上平台既有用户级限流（60 次/分）或在途上限 | 429 + `Retry-After` |
+| `AUTH_REQUIRED` | 身份未验证（无 bearer）却请求应用 | 401 |
+| ~~`AI_BALANCE_INSUFFICIENT`~~ | **2026-09-19 删除**（总纲 §21）：余额不足现在是**客户端 AI 链路**的错误码 `ai_balance_insufficient`，不再由应用请求管线返回 | 已废除 |
+| ~~`AI_RATE_LIMITED`~~ | **2026-09-19 删除**（总纲 §21）：限流现在是**客户端 AI 链路**的错误码 `ai_rate_limited`，不再由应用请求管线返回 | 已废除 |
 | `MODULE_KILLED` | 已取消/module 已关闭 | 504 |
 | `DB_LIMIT` / `DB_DENIED` | 100 MB 满 / 行数超 / 语句被拒 | 507 / 403 |
 | `APP_QUEUE_FULL` | 队列满 | 429 + `Retry-After` |
@@ -506,6 +457,8 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 
 ## 8. 操作面
 
+> 应用子域端点（`/login`、`/logout`、`/app-ticket` 与应用子域路由树）与目录/发布/上下架响应里的 `entry_url` 字段，已于 2026-09-19 **整体删除**；应用请求入口只剩 `POST /api/client/v2/apps/wasm/:app_id/request`（`BearerAuth` 必需），可分享形态 = 深链 `<渠道 scheme>://app/<app_id>`（可选 `?path=`）；Windows / macOS 的自定义协议行为**待各平台复核（W5）**，不一致则回到「协议 + 分区隔离」的替代形态。契约 §4.1 / §4.5、§5、§7。
+
 | 能力 | 端点（示意） | 要点 |
 |---|---|---|
 | 预检 | `POST /api/client/v2/apps/wasm/validate` | 静态 + 真编译 + 干跑；不落版本号、不进审计 |
@@ -514,7 +467,7 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 | 冻结/导出/删除 | `POST …/wasm/:app_id/freeze` · `GET …/export` · `DELETE …/wasm/:app_id` | R37：冻结 → 只读快照 90 天（管理员可导出）→ 真删并审计 |
 | 诊断 | `GET …/wasm/:app_id/diagnostics` | 最近失败与被杀记录（含 guest exit code + stderr 尾） |
 | 自省 | `GET …/wasm/:app_id/schema` | 表结构与占用（仅发布者 + 审计） |
-| **应用中心** | `GET /api/client/v2/apps/wasm/catalog` | R34：⚠️ 变更（2026-09-18，用户拍板）**不再按可见性过滤**（R38 作废）——列出全部未删除、有生效版本、未冻结的应用（名称/一句话说明/负责人/**访问级别 `access`**/**是否下架 `enabled`**/入口链接）；**不做安装语义，也不显示额度/用量**（额度只在桌面客户端可见） |
+| **应用中心** | `GET /api/client/v2/apps/wasm/catalog` | R34/R38：**不再按可见性过滤**——列出全部未删除、有生效版本、未冻结的应用（名称/一句话说明/负责人/**访问级别 `access`**/**是否下架 `enabled`**）；条目提供"打开"动作（本机路由 → `<渠道 app 源 scheme>://<app_id>/`，渠道参数化：§10/F15）与深链分享；**不做安装语义，也不显示额度/用量**（额度只在桌面客户端可见） |
 | 运维面 | （webadmin）应用列表 / 下架 / 转移归属 / 冻结 | R23；转移归属必须放开 kind 白名单（现硬写 skill/agent ⇒ 400） |
 
 **审核开关（R17）**：管理后台可配，**默认关**（默认不审 + 事后抽检）。开启时发布进待审队列（线上仍旧版本），管理员在 webadmin 审批；开关变更写审计。
@@ -562,13 +515,13 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 2. **无状态**：不要用全局变量存用户/会话状态——实例每请求新建
 3. **同一应用内所有用户共享数据**（R15）；要区分用户请自己加业务字段
 4. **stdout 只用于协议帧**（`RS` + 长度 + JSON）；日志走 `log`
-5. **`ai.chat` 是阻塞的**（非流式），UI 要显示等待态
-6. **不能联网、不能读文件、不能开线程**；外部资源必须内联（HTML/JS 也编进 wasm，R8/R37）
-7. **准入由你自己判**（R24）：配置写在 `picoaide.app.json`（⚠️ 变更（2026-09-18，用户拍板）：`access` 三模式 + `whitelist`），入口第一件事就是读它并比对名单；名单用 `username`/`user.id`；无权限页显示"你的账号：xxx"（平台不校验账号是否存在，拼错只能靠这一步发现）
+5. **服务端没有 AI**（总纲 §21）：`ai.chat` 已删除。要 AI 就在**应用前端**调保留路径 `POST /__picoaide/ai/chat`（客户端协议 handler 本地处理、流式 SSE），再把结果回传 wasm 落库 —— wasm 侧不再有任何 AI 能力
+6. ~~**不能联网**~~ **不能主动发起网络请求**（⚠️ **2026-09-19 措辞订正：总纲 §6 / RED-9 —— 不得对外宣称"不能联网"**）、不能读文件、不能开线程；外部资源必须内联（HTML/JS 也编进 wasm，R8/R37）
+7. **准入由你自己判**（R24）：配置写在 `picoaide.app.json`（`access` 只有 `login` 与 `whitelist` 两种取值），入口第一件事就是读它并比对名单；名单用 `username`/`user.id`；无权限页显示"你的账号：xxx"（平台不校验账号是否存在，拼错只能靠这一步发现）
 8. **平台不提供员工名录**（R26）：名单只能手填已知账号；改配置 = 发新版（R25）
 9. **不依赖 `$HOME`**：编译器状态目录必须落在会话工作区内（R42；否则沙箱下 Go 会报"标准库不存在"这种指错方向的错）
 10. **发布前先本地自测**：Node 内置 `node:wasi` 可零依赖跑通产物（读 stdin 帧、写 `RS` 帧），再走 `validate`
-11. **应用名就是域名**（`app_id` → `<app_id>.<应用基域>`）：小写字母/数字/连字符、≤63、不能纯数字、不能 `xn--` 开头、不能是保留字；**一经发布不能改名**（改名等于换域名）
+11. **应用名就是应用标识**（`app_id` → URL host 段；客户端 origin = `<渠道 app 源 scheme>://<app_id>/`，渠道参数化：§10/F15，official/beta 取值 `picoaide-app`）：小写字母/数字/连字符、≤63、不能纯数字、不能 `xn--` 开头、不能是保留字（`app_id` 是 URL host 段与路由标识，host 段必须合法且不得与保留名冲突）；**一经发布不能改名**（改名等于换标识）
 
 ---
 
@@ -592,11 +545,9 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 11. 应用 A 的 SQL 读应用 B 的库                     → 拒（文件边界 + ATTACH 双重否决）
 12. 连接复用后 database_list 只剩 main          → 成立（每应用一连接 + 每次调用重置）
 13. 新建连接是否仍带全套限额                        → 成立（连接钩子；变异测试：去掉钩子必红）
-13a. 子域 GET / 或 /portal                        → 404（应用路由树不注册主站路由）
-13b. 子域 GET /admin/                             → 404（webadmin SPA 不对子域暴露；它带账密表单）
-13c. 子域 GET /healthz                            → 404（存活探测面不对子域暴露）
-13d. 子域 GET /updates/client/<资产>、/v1/*、/api/server/*  → 404（主站面一律不注册；allow-list 而非清单）
 ```
+
+> 原 13a–13d（应用子域 host 门控 / 主站路由在子域不注册）随 2026-09-19 访问模型变更**整体删除**；替代判据 = 契约 §6 W1（唯一入口 `POST …/wasm/:app_id/request`、无 bearer 401、跨源写 403、Host 非 `<app_id>` 400）。1–13 与访问模型无关，继续有效。
 
 ### 10.2 沙箱逃逸（红线 4/5）
 
@@ -637,37 +588,32 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 35. 编译缓存超 512 MiB 或超条数                        → 磁盘缓存按上限回收（真实体积分布下重测）
 36. 上传 30 次/小时 + 同时 1 次编译中                   → 第 31 次 429；并发上传第 2 个被拒
 37. 自定义段填满 32 MiB 的垃圾包连续上传                  → 单次编译 CPU 与缓存条目受限（防编译池独占）
-38. 应用调 ai.chat 死循环刷额度                        → 使用者自己的余额闸门 + 用户级 60 次/分 + 在途 32（R36：无应用级额度）
-38b. 使用者余额不足时调 ai.chat                         → AI_BALANCE_INSUFFICIENT（402，不暴露余额数值）+ 提示"请在客户端查看余额"；不得静默失败或返回 200
-38c. 任何浏览器侧页面显示额度/用量                       → 不存在（应用子域/应用中心/门户都无此页面，R36）
+38. ~~应用调 ai.chat 死循环刷额度~~                        → **2026-09-19 删除**（总纲 §21）：服务端无 `ai.chat`。替代判据 = 客户端 AI 链路的余额闸门与「页面关闭即取消」
+38b. ~~使用者余额不足时调 ai.chat~~                         → **2026-09-19 删除**（总纲 §21）：改由客户端 AI 链路返回 `ai_balance_insufficient`（不暴露余额数值）+ 提示"请在客户端查看余额"；不得静默失败或返回 200
+38c. 应用协议页面 / 应用中心显示额度或用量              → 不存在（额度只在桌面客户端可见）
 ```
 
 ### 10.4 会话、身份与准入
 
 ```
-39. 未登录访问要求登录的应用子域（access=login/whitelist） → 302 换票 → 主站登录页
-    ⚠️ 变更（2026-09-18，用户拍板）：取值从 login_required/public 改为 public/login/whitelist
-40. 重放 ticket（第二次）/跨应用使用 ticket            → 拒（一次性 + 绑 user+app）
-41. 第三方页面 iframe/img 触发 /app-ticket           → 拒（POST + Origin 校验 + next 白名单）
-42. 应用 JS 读 document.cookie                     → 空（HttpOnly）
-43. 恶意应用代用户调 /api/client/v2/*                → 无凭证可用（host-only + HttpOnly）
-44. 应用 A 页面跨源 POST 应用 B                       → 403（子域路由树最外层 Origin 校验）
+42. 应用 JS 读 document.cookie                     → 空（自定义协议无 cookie 语义）
+43. 恶意应用代用户调 /api/client/v2/*                → 无凭证可用（页面无 cookie、无 bearer）
+44. 应用 A 页面跨源 fetch/POST 应用 B                 → 被 Chromium 拦（`corsEnabled:false` + 不同 origin，已实测）
 45. 应用试图伪造帧内 user                             → 无效（帧由宿主构造）
-46. macro：员工登出后旧应用令牌                       → 立即失效（按 session 批量吊销）
-47. 匿名请求任何路径的响应体含 username                → 拒（`user:null` 分支不得渲染账号，防枚举）
-48. 匿名请求打满全局桶                                → 429（全局匿名桶 + 每 IP 桶；代理错配时启动即拒绝）
-49. HTTP 访问应用子域（非 https）                     → 不签发 Cookie（Secure fail-closed）
-51. 未授权员工打开应用（access=whitelist 但不在名单）  → **不是边界**（R24）：⚠️ 变更（2026-09-18，用户拍板）平台**不比对名单**，请求照进 wasm，由应用返回 403
+46. macro：员工登出 / 改密 / 禁用后旧 bearer          → 吊销后应用请求 401（客户端引导重新登录）；由 `serverauth.BearerAuth` 承担
+51. 未授权员工打开应用（access=whitelist 但不在名单）  → **不是边界**（R24）：平台**不比对名单**，请求照进 wasm，由应用返回 403
 ```
+
+> 原 39–41、47–49（未登录 302 换票、ticket 重放/跨应用、第三方 iframe 触发 `/app-ticket`、匿名 `user:null` 渲染、匿名桶、HTTP 访问应用子域不签发 Cookie）随 2026-09-19 访问模型变更**整体删除**，替代判据 = 契约 §6 W1/W2；42–46、51 已按客户端模型改写。
 
 ### 10.5 发布链路
 
 ```
 52. app_id 含大写/下划线/连续横线                     → 400 INVALID_APP_ID
-53. app_id 不符合域名规则（大写/下划线/首尾或连续连字符/超 63/纯数字/`xn--` 前缀） → 400 INVALID_APP_ID
-53b. app_id 是保留字 / 与基域既有主机名冲突              → 400（提示换名字，不得占用企业既有域名）
+53. app_id 不符合标识规则（大写/下划线/首尾或连续连字符/超 63/纯数字/`xn--` 前缀） → 400 INVALID_APP_ID
+53b. app_id 是保留字 / 与平台或企业既有标识冲突        → 400（提示换名字；`app_id` 是 URL host 段与路由标识）
 53c. app_id 已被其他 wasm 应用占用                      → 409 NAME_TAKEN（同 kind 主键保证）
-53d. 想给已发布应用改名                                 → 不支持（换域名 = 新建应用；旧应用照 R37 退役）
+53d. 想给已发布应用改名                                 → 不支持（换标识 = 新建应用；旧应用照 R37 退役）
 54. 版本号 1.0（非 x.y.z）/ 不递增                    → 拒
 55. 非首版缺 changelog                              → 422 MISSING_FIELD
 56. 上传 33 MiB wasm（base64 ≈44 MiB）               → 应用层拒（32 MiB 上限）且错误可读
@@ -676,10 +622,10 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 56c. access="whitelist" 且 whitelist 为空              → 拒（否则应用对所有人不可用）。
     ⚠️ 变更（2026-09-18，用户拍板）原规则「login_required=true 且 whitelist 为空 ⇒ 拒」**废止**：
     "登录后全员可用"（access="login"）是正式模式，名单为空合法；旧字段 login_required/visible
-    仍按映射表被读懂（login_required=false⇒public；true+名单非空⇒whitelist；true+名单空⇒login）
+    仍按映射表被读懂（login_required=false⇒login（原 public 语义已废）；true+名单非空⇒whitelist；true+名单空⇒login）
 56d. whitelist 含不存在的账号                            → **允许发布**（平台不校验，避免账号枚举）；由无权限页显示本人账号闭环
-56e. 设了 access=whitelist / 已下架（enabled=0）的应用     → ⚠️ 变更（2026-09-18，用户拍板）**照旧列入应用中心**（下架是可逆的发布者动作、应用与数据都还在；子域返回 410 说明「已下架但数据保留」，条目由 UI 标「已下架」并禁用打开）（条目里给出访问级别与下架状态）；
-    URL 直达仍可用（能否用由应用自己判，R24）。`visible` 字段与"按可见性过滤"作废（R38）
+56e. 设了 access=whitelist / 已下架（enabled=0）的应用     → **照旧列入应用中心**（下架是可逆的发布者动作、应用与数据都还在；协议侧给可读错误说明「已下架但数据保留」，条目由 UI 标「已下架」并禁用打开）（条目里给出访问级别与下架状态）；
+    深链直达仍可用（能否用由应用自己判，R24）。`visible` 字段与"按可见性过滤"作废（R38）
 56f. 改了配置但版本号没变                                  → 拒（改配置 = 发新版，R25）
 58. 客户端上传超时 < 服务端 ReadTimeout                → 配置断言（limits 单一真源）；>8 MiB 必走分片
 59. 编译失败重发同一版本号                            → **成功**（失败不落行，R18）
@@ -699,6 +645,8 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 68. 应用试图调用不存在的宿主函数（如 db.attach）            → 拒（未注册即不存在）
 ```
 
+> 53b / 56c / 56e 已按 2026-09-19 访问模型改写（保留字理由、历史 `public` 读侧按 `login`、原「子域返回 410」改为协议侧可读错误）；其余条目（52–56b、56d、56f、58–61）不受访问模型影响。
+
 ---
 
 ## 11. 必须实测的假设与未闭合缺口
@@ -709,11 +657,11 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 
 1. **导入白名单由参考实现生成**（先写 Go 样例 → CI 真编译 → dump 导入集）；核对含 `fd_read`
 2. **帧格式 + 应用配置文件落到示例代码**：长度前缀 + `read_exact` 样板（三处：宿主实现、skill references、validate 判据）；`picoaide.app.json` 的 schema、发布期抽取、`assets.read` 读取路径与校验规则（⚠️ 变更（2026-09-18，用户拍板）：含 `access="whitelist"` 空名单即拒；字段规格由 `appcfgspec.go` 生成）
-3. **迁移一件**：`apps.channel` CHECK 放开 + `kind` 白名单放开（**不新增标识列**：域名标签就是 `app_id`；`api_tokens` 保持现状）。`app_releases.status` **无需迁移**——`0053_apps.sql:45` 的 CHECK 已含 `'pending','approved','rejected'`（2026-09-17 复核），只有引入新字面量才需要动
+3. **迁移一件**：`apps.channel` CHECK 放开 + `kind` 白名单放开（**不新增标识列**：`app_id` 就是应用标识、同 kind 内由主键唯一；`api_tokens` 保持现状）。`app_releases.status` **无需迁移**——`0053_apps.sql:45` 的 CHECK 已含 `'pending','approved','rejected'`（2026-09-17 复核），只有引入新字面量才需要动
 4. **`kind` 影响面审计**：非测试代码 108 处引用 / 13 文件 + webadmin 6 个前端文件（**计数口径见 §15.2 引用纪律**：换 revision 会变）；**两个**未知值回落点都要加 wasm 分支——`channelLabel`（回落"组织共享库"）与 `kindLabelOf`（回落"技能"，用于官方锁定报错）
-5. **host 门控 + 子域路由树 + 子域限体 + 413 可读性**（4 个独立实现点；`/` 与 `/portal` 在 NoRoute 分支）
-6. **换票端点改造**（POST + Origin + `next` 白名单 + 票原子消费）
-7. **限流重做**：可信代理自检（`PICOAI_TRUSTED_PROXIES`）+ 全局匿名桶 + 每 IP 桶
+5. **唯一 `request` 端点的信封限体 + 413 可读性**（`largeBodyRoutes` + handler 自套 1 MiB + 信封 ≤ 1 MiB×4/3 + 64 KiB）
+6. ~~换票端点改造~~ —— **2026-09-19 删除**：浏览器访问模型整体移除（契约 §5）。
+7. ~~限流重做（可信代理自检 + 全局匿名桶 + 每 IP 桶）~~ —— **2026-09-19 删除**：唯一调用方 `anonlimit` 一并删除，**无替代者**（契约 §1 第 2 项、§5）。
 8. **编译进程隔离**（非特权 + bwrap/landlock + seccomp + 无网络 + env 白名单）与 CPU 配额
 9. **内存四笔账联立 + 启动自检**（缓存 + 实例 + 编译峰值 + 上传峰值）
 10. **客户端创作链路**（编译编排/上传/分片/状态）与**应用中心页**——客户端侧估 8–15 人日
@@ -724,7 +672,7 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 12. 32 MiB 模块（含 4 MiB 自定义段）在 60 s 内编译完成的把握；否则回到分片/异步
 13. 64 MiB 实例下"8 MiB 结果 + JSON 序列化"的真实余量（Go/Zig 不同基线）
 14. `db.define` 运行期建表在 16 表/16 列上限下的幂等与并发行为
-15. 应用子域与主站共 eTLD+1 下的 Origin 校验覆盖率（含 302/307/表单提交）
+15. 自源 Origin 判据的覆盖率（`picoaide-app://<app_id>`，渠道参数化：§10/F15；协议 handler 补 `Origin`、非幂等写要求 `Origin == 自源`，其余缺则拒）
 
 **已知缺口（未闭合，需排期）**
 
@@ -732,7 +680,7 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 17. **离职/转移归属**：`appstore/admin.go:49` 硬写 kind 白名单 ⇒ 现在对 wasm 返回 400；离职钩子（`dirsync.go` / `users.go` 级联）完全不动 `apps` ⇒ owner 悬空
 18. **可接手材料**：是否强制随包上传源码或最小重建说明（当前只有二进制 + 用途/负责人字段）
 19. **备份与恢复口径**：目标态 = 逐库 `VACUUM INTO` + `pg_dump -Fc`；过渡态 = 停服冷备（现在热 tar 只查"非空"；WAL 模式下只拷 `.db` 会丢数据）
-20. **部署文档**：`AI-DEPLOY.md` 需新增应用子域章节（通配证书由企业自备）+ 资源规格（含"与另一渠道栈共用宿主机"的最低内存）+ 前置反代要求
+20. **部署文档**：明确"应用不再需要任何公网应用 origin"（应用专用反代/证书配置已全部废除）+ 资源规格（含"与另一渠道栈共用宿主机"的最低内存）+ 前置反代要求
 21. **可观测**：`/readyz`（磁盘/队列/缓存水位）+ 低水位拒绝发布 + 排障信息面（编译输出归属、失败详单留存、日志落点）
 22. **余额预留扩到既有桌面路径**（同一处 handler，一次做掉更省）
 23. **证据探针入库**：§15.2 的数字必须可复跑——本轮已把 3 个复跑探针入库（`docs/evidence/2026-09-17-wasm-app-platform/`）；其余本地探针（`temp/wasm-audit2-sql/`、`temp/wasm-audit2-mem/`、`temp/wasm-redteam/`、`temp/wasm-feas/`、`temp/wasm-crash/`）在实现启动前收敛入库（`temp/` 在 `.gitignore:84`，对任何 clone 都不可见），并给每个数字标注测量基线 commit
@@ -745,12 +693,11 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 | 风险 | 影响 | 缓解 / 认账 |
 |---|---|---|
 | **需求证据为零**（R28 全员自助） | 可能做出无人使用的平台 | **已拍板要做**：以"首个真实应用跑通"作为验收口径；§11 第 10 项（客户端链路）优先 |
-| **能力面窄**（无网络/文件/定时/目录） | 部分场景表达不出来 | 认账：通用自动化继续走 skill + 连接器 + cron；本平台只做"共享状态 + 自定义界面 + 一条链接" |
+| **能力面窄**（无网络/文件/定时/目录） | 部分场景表达不出来 | 认账：通用自动化继续走 skill + 连接器 + cron；本平台只做"共享状态 + 自定义界面 + 一条深链" |
 | **32 MiB 上传链** | 客户端 30 s 超时 + 单次 ≈118 MB 峰值 | 客户端超时 90 s + 分片续传 + 自定义段 ≤4 MiB + 启动自检内存账 |
-| **平台域名声誉** | 子域可托管任意 HTML/JS（R8/R37） | 宿主强制安全头 + `app_id` 保留字（含企业已知主机名）+ 归属可追溯（发布者实名） |
+| **应用页面托管面** | 应用可托管任意 HTML/JS（R8/R37） | 宿主强制安全头 + `app_id` 保留字 + 归属可追溯（发布者实名） |
 | **准入在应用侧**（R24） | 未授权员工仍可打开应用、占用队列/CPU；其 AI 花费算使用者自己的额度 | 已认账（R36：谁登录用谁的钱）。如需平台层拦截须推翻 R24 |
 | **手填名单易写错**（R26） | 写错即静默拒人（平台**不校验**账号是否存在，以免变成账号枚举接口） | 无权限页强制显示本人账号，让员工把账号报给作者；改名单要走一次发版 |
-| **匿名应用**（R25） | 白嫖队列/CPU、账号枚举面 | 全局匿名桶 + IP 桶 + 可信代理自检 + `user:null` 分支禁渲染账号 |
 | **工具链与本地自测交给 AI**（R40/R42） | 员工机上装不上/装错工具链，报错指错方向 | skill 必须写死"状态目录落在会话工作区内"并给探测/错误码；平台不背这块 |
 | **单实例部署**（R20） | 无 HA；重启丢内存态票/队列/编译缓存；不能水平扩容 | 认账：写进部署文档 + 启动自检禁止多副本 |
 | **无托管 schema**（R32） | 应用改结构要自己负责（建新表/加列） | 认账：换来的是没有自动迁移与自动删列的数据销毁风险 |
@@ -762,18 +709,18 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 
 | 复用项 | 现状 | 需要新增 |
 |---|---|---|
-| 应用与版本 | `apps`/`app_releases`（0053） | `kind` CHECK 加 `wasm_app`（**不新增标识列**：域名标签 = `app_id`，同 kind 内已由主键唯一）；**`apps.channel` CHECK 放开**；`app_releases.status` CHECK 放开审核态；**失败发布不落行**（R30）⇒ 版本唯一约束保持现状 |
+| 应用与版本 | `apps`/`app_releases`（0053） | `kind` CHECK 加 `wasm_app`（**不新增标识列**：`app_id` 同 kind 内已由主键唯一；`apps.channel` 现状不变）；**`apps.channel` CHECK 放开**；`app_releases.status` CHECK 放开审核态；**失败发布不落行**（R30）⇒ 版本唯一约束保持现状 |
 | 归属与审批 | `appstore.Publish`（owner 首占、锁定名、跨渠道同名、`PendingCap`） | **入口加 kind 白名单**；新增应用级审核开关（R17，默认关）；publish 载荷增加**应用配置文件**（⚠️ 变更（2026-09-18，用户拍板）：access / whitelist / 用途 / 敏感性 / 负责人，见 §4.2） |
-| 员工令牌 | `IssueToken`/`VerifyToken`/`CreateToken` | **无需改表**（R36）：宿主为每个浏览器会话铸一张短时用户令牌、内存持有、登出吊销；`VerifyToken` 保持现状 |
+| 员工令牌 | `IssueToken`/`VerifyToken`/`CreateToken` | **无需改表**（R36）：身份直接用员工 bearer（`BearerAuth`）经 `clientFrameUser` 投影进帧；`VerifyToken` 保持现状 |
 | AI 网关 | `/v1` + `BearerAuth` + `InFlightGuard` | **应用侧零改动**（R36）：宿主用会话级用户令牌走既有路径；仅建议把既有"只判余额 >0、结算在后"的缺口一并修掉（平台自身风险，与应用无关） |
-| 路由 | `internal/router` 集中声明 | 应用子域**独立路由树** + **host 门控** + 子域限体 + 最外层 Origin 校验；上传路由进 `largeBodyRoutes` 且 handler 自套限体；补"新增大体积路由必须进白名单"的反向断言 |
-| 反代与证书 | `Caddyfile.autocert/manual/internal` | **企业自备通配域名与证书 + 管理员配 Caddy（R29）**；部署文档写前置条件；新增应用基域配置面（不要复用单值的 `DOMAIN`） |
+| 路由 | `internal/router` 集中声明 | 应用请求 = 唯一 `POST /api/client/v2/apps/wasm/:app_id/request`（`BearerAuth`）+ 信封限体 + Origin 判据；上传路由进 `largeBodyRoutes` 且 handler 自套限体；补"新增大体积路由必须进白名单"的反向断言 |
+| 反代与证书 | `Caddyfile.autocert/manual/internal` | 应用专用反代/证书配置**已全部废除**：应用子域、通配域名/证书、Caddy 通配站点块与 `PICOAI_APPS_BASE_DOMAIN`/`wasm.apps_base_domain` 配置面均于 2026-09-19 删除（契约 §5） |
 | 数据卷 | `picoaide-data` + `entrypoint.sh` 启动 `chown` | 新增 `apps/`（库 + assets + 编译缓存）；`chown -R` 收敛为"只处理新增顶层"或改一次性初始化（失败不得静默 `|| true`） |
 | 审计 | `AuditLog(db, username, action, detail)`（单 worker 同步阻塞，最坏 25 s） | 高频项异步化；`audit_logs.app_id` + 索引（哈希链版本化）；调用事件独立表（7 天） |
 | RBAC | 资源类别级 | 沿用粗粒度点 + 应用层 owner 比较；不造实例级权限点 |
-| **员工浏览器会话**（R16） | **不存在**（`picoaide_session` 是管理员专属；员工只有 Bearer） | 员工会话表 + 登录页（账密 + OIDC）+ 登出 + 会话绑定吊销 + **Origin/CSRF 校验**（员工面现为零）；换票端点按 §4.7 改造 |
+| **员工浏览器会话**（R16） | **不存在**（`picoaide_session` 是管理员专属；员工只有 Bearer） | **2026-09-19 删除**（原 R16）：员工会话表、登录页、登出、换票端点随 `internal/wasmapp/session/**` 一起删除；员工面身份直接走既有 bearer（契约 §4.4、§5） |
 | **编译进程**（R19/R31） | 不存在 | 独立进程 + wazero 磁盘缓存 + 队列 + 超时取消 + 结果回传 + **OS 级隔离** |
-| **限流** | `callLimiter` 未导出；`PICOAI_TRUSTED_PROXIES` 可选 | 全局匿名桶 + 每 IP 桶 + 启动自检 |
+| ~~**限流**~~ | ~~`callLimiter` 未导出；`PICOAI_TRUSTED_PROXIES` 可选~~ | **不存在**（2026-09-19）：`anonlimit`（全局匿名桶 / 每 IP 桶 / 启动自检）随匿名面与 `internal/wasmapp/anonlimit/**` 一并删除（§16 W4）；客户端专属形态下没有匿名请求 ⇒ 没有应用侧限流面。`PICOAI_TRUSTED_PROXIES` 仍保留，但只用于客户端 IP 归属（总纲 §12） |
 | **客户端** | 无编译/上传/应用中心 | 应用中心页 + 编译编排 + 分片上传 + 状态展示（估 8–15 人日） |
 | **运行时依赖** | `server/go.mod` 无 wazero、无纯 Go SQLite 驱动；`CGO_ENABLED=0` 且无 vendor | 新增 `github.com/tetratelabs/wazero` + `modernc.org/sqlite` |
 
@@ -794,18 +741,18 @@ policy 为 `no-referrer` 时，**非 GET/HEAD 请求的 `Origin` 被写成字面
 | # | 不变量 | 一句话理由 |
 |---|---|---|
 | 1 | wazero 五项显式注入（`WithCloseOnContextDone` / `WithRandSource(rand.Reader)` / `WithSysWalltime` / `WithSysNanotime` / `WithNanosleep`）+ 零 preopen | 默认值就是危险值：随机源是**固定种子 42 的确定性伪随机**（跨独立实例完全一致）、时钟是 2022-01-01、取消不生效、preopen 下挂载点全可读；其中 `WithRandSource`/`WithSysWalltime`/`WithSysNanotime`/`WithNanosleep` 是 **ModuleConfig（每请求设）**，`WithCloseOnContextDone` 是 RuntimeConfig（编译/执行两侧必须一致，§4.3.1） |
-| 2 | host 门控 + 应用子域独立路由树（allow-list） | 全仓 Go 代码**零 host 维度判断**、主站路由只按 path 注册（`/`、`/portal`、`/admin/*` 在 NoRoute 分支、`/healthz` 在根引擎）⇒ 没有门控时每个子域都会渲染门户与**管理台登录页** |
-| 3 | `SameSite=Strict` + `Origin == 自身源` | `<a>.<基域>` 与 `<b>.<基域>` 同站，Lax 挡不住跨源写（表单 + `text/plain` 免预检） |
+| 2 | ~~host 门控 + 应用子域独立路由树~~ —— **2026-09-19 删除** | 应用子域与主站路由不再共用 Host 命名空间；唯一入口 `POST …/wasm/:app_id/request`（契约 §4.1、§5） |
+| 3 | 自源 `Origin` 判据（`Origin == <渠道 app 源 scheme>://<app_id>`，渠道参数化：§10/F15） | 客户端协议请求不发 `Origin`/`Referer`，由 handler 补头（fail-closed）；跨应用 fetch 由 Chromium 拦（契约 §3 / §4.3） |
 | 4 | 每条连接重设 `max_page_count` 与全部 `SQLITE_LIMIT_*` | 二者都是连接级且不持久：新连接读回默认值 ⇒ 漏设即**静默**失去 100 MB 上限与 ATTACH 否决 |
 | 5 | 禁 `VACUUM INTO` 与全部 DDL | DDL 会绕过宿主托管的表结构；`VACUUM INTO` 与 `ATTACH` **同受 `SQLITE_LIMIT_ATTACHED` 约束**（实测 =0 时一起被拒）⇒ **真正的闸门是"每条连接重设 `LIMIT_ATTACHED=0`"**（第 4 条），显式禁它是纵深：该限额一旦漏设，两者会同时复活 |
 | 6 | 宿主函数必须传 ctx + 返回后强制复检 | 宿主不传 ctx 时 guest 预算完全失效，且 `Call` 返回 `err=nil`（失败被报成成功） |
 | 7 | `err=nil` 但 module 已关闭 / 无响应帧 ⇒ 必须映射 `MODULE_KILLED`/`RUNTIME_NO_RESPONSE` | 静默失败的唯一兜底，绝不返回 200 |
-| 8 | 帧内 `user` 由宿主构造 + 子域 host-only/HttpOnly Cookie | 红线 3（应用拿不到平台凭证）的落地；身份只有这一条来源 |
+| 8 | 帧内 `user` 由宿主构造 + 无 cookie 语义 | 红线 3（应用拿不到平台凭证）的落地：无 cookie、页面拿不到 bearer，身份只有帧内 `user` 一条来源（契约 §3 / §4.4） |
 | 9 | 单实例启动自检（advisory lock + 内存/磁盘水位） | 多副本的失败形态是静默的（票在 A 签发、B 兑换失败） |
 | 10 | `is_publisher` + 无权限页显示本人账号 | 平台不提供员工目录（R26）后，作者校验名单拼写的唯一闭环手段 |
 | 11 | 干跑 + 导入签名校验 | **编译通过 ≠ 能跑**：签名不匹配的导入编译期全绿、实例化才炸 |
-| 12 | 换票端点 POST + Origin + `next` 白名单 | 否则是登录 CSRF + 开放重定向 |
-| 13 | 宿主写 CSP / nosniff / frame-ancestors（含 4xx/5xx） | 应用子域是公司域名下的任意 HTML/JS 宿主（R8/R37） |
+| 12 | ~~换票端点 POST + Origin + `next` 白名单~~ —— **2026-09-19 删除** | 浏览器访问模型整体移除，该 CSRF / 开放重定向面不复存在（契约 §5） |
+| 13 | 宿主写 CSP / nosniff / frame-ancestors（含 4xx/5xx） | 应用页面是任意 HTML/JS 宿主（R8/R37）⇒ 安全头必须由宿主独占；生产 CSP 已在自定义协议下实测逐字放行（契约 §3） |
 | 14 | 编译进程 OS 级隔离 + env 白名单 | 唯一"读不可信字节且能写宿主"的进程，也是唯一可能触碰红线 1/3 的路径 |
 
 ### 15.2 关键实测依据（本机，Go 1.26.5 / wazero v1.12.0 / modernc.org/sqlite v1.55.0 / 4 vCPU）

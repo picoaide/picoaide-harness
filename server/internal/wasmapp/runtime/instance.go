@@ -5,7 +5,6 @@ import (
 	"io"
 	"time"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/tetratelabs/wazero"
 )
@@ -24,8 +23,7 @@ type InstanceLimits struct {
 	MemoryPages uint32
 	// GuestBudget 是 guest 执行预算（进入宿主调用时暂停计时）；0 ⇒ limits.GuestBudget（10 s）。
 	GuestBudget time.Duration
-	// HostBudgets 是「方法名 → 宿主调用预算」；缺省 limits.HostCallBudgetDefault，
-	// 其中 ai.chat 的缺省是 limits.HostAIChatBudget（30 s）。
+	// HostBudgets 是「方法名 → 宿主调用预算」；缺省 limits.HostCallBudgetDefault。
 	// 非正值视为"未设置"，回落到缺省（防一次笔误把预算设成 0 导致所有宿主调用立刻超时）。
 	HostBudgets map[string]time.Duration
 }
@@ -51,13 +49,14 @@ func (l InstanceLimits) EffectiveGuestBudget() time.Duration {
 
 // HostBudget 返回某个宿主方法的生效预算。
 //
-// 顺序：显式配置（>0）→ ai.chat 专属缺省 → 通用缺省（§4.4/§4.6）。
+// 顺序：显式配置（>0）→ 通用缺省（§4.4/§4.6）。
+//
+// ⚠️ W4：原"`ai.chat` 专属缺省 = limits.HostAIChatBudget（30 s）"这一支已随
+// 服务端 ai.chat 删除（总纲 §21.3）—— 其余宿主调用（db.* / log / assets.read）
+// 都走通用缺省，没有例外项。
 func (l InstanceLimits) HostBudget(method string) time.Duration {
 	if d, ok := l.HostBudgets[method]; ok && d > 0 {
 		return d
-	}
-	if method == abi.MethodAIChat {
-		return limits.HostAIChatBudget
 	}
 	return limits.HostCallBudgetDefault
 }

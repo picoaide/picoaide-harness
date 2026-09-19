@@ -281,7 +281,8 @@ var DeniedStatementKinds = []string{
 
 const (
 	// AppRequestBodyMaxBytes 是应用 API 请求体上限（§4.6）：1 MiB。
-	// ⚠️ 子域路由树不在两个 1 MB 中间件分组里 ⇒ 必须自己实现。
+	// ⚠️ 应用请求走客户端信封（`/api/client/v2/apps/wasm/:app_id/request`）而不是主站
+	// 路由树上的一般端点 ⇒ 管线必须自己套 MaxBytesReader（不能依赖命名空间中间件）。
 	AppRequestBodyMaxBytes = 1 << 20
 	// AppResponseBodyMaxBytes 是应用响应体上限（§4.6，R22）：8 MiB。
 	AppResponseBodyMaxBytes = 8 << 20
@@ -289,8 +290,8 @@ const (
 	ProtocolLineMaxBytes = 1 << 20
 	// GuestBudget 是 guest 执行预算（§4.6）：10 s（进入宿主调用时暂停计时）。
 	GuestBudget = 10 * time.Second
-	// HostAIChatBudget 是 ai.chat 宿主预算（§4.4/§4.6）：30 s。
-	HostAIChatBudget = 30 * time.Second
+	// ⚠️ W4 删除（总纲 §21.3）：服务端宿主 AI 调用的 30 s 预算随该能力一起消失；
+	// 其余宿主调用（db.* / log / assets.read）一律走 HostCallBudgetDefault。
 	// RequestWallClock 是请求端到端墙钟（含排队，§4.6）：60 s，到点即拒。
 	RequestWallClock = 60 * time.Second
 	// AppQueueDepth 是每应用队列长度（§4.6）：32，超出 429 + Retry-After。
@@ -323,14 +324,9 @@ const (
 	// RetryAfterSeconds 是队列满/限流时的 Retry-After 秒数（§4.6/§7.4）。
 	RetryAfterSeconds = 1
 
-	// AnonGlobalRatePerMin 是全局匿名令牌桶速率（R35/§4.6）：3000 次/分。
-	AnonGlobalRatePerMin = 3000
-	// AnonGlobalBurst 是全局匿名桶容量（与速率同量级，取 1 分钟配额）。
-	AnonGlobalBurst = AnonGlobalRatePerMin
-	// AnonPerIPRatePerMin 是每 IP 匿名速率（R35/§4.6）：60 次/分。
-	AnonPerIPRatePerMin = 60
-	// AnonPerIPBurst 是每 IP 匿名桶容量。
-	AnonPerIPBurst = AnonPerIPRatePerMin
+	// ⚠️ W4 删除（总纲 §8.4）：匿名限流的四个数值（全局速率/桶容量、每 IP 速率/桶容量）
+	// 随 `internal/wasmapp/anonlimit/**` 整包删除 —— 客户端专属模型下应用请求一律
+	// 持员工 bearer，平台上不存在匿名请求，因此没有任何"匿名桶"需要数值。
 
 	// AppRuntimeConcurrency 是每应用运行槽（= AppConcurrency，语义别名，供队列实现引用）。
 	//
@@ -342,21 +338,12 @@ const (
 
 // ===== §4.7 账号、AI 与额度 =====
 
-const (
-	// TicketTTL 是一次性换票 code 的有效期（R12/§4.7）：60 s。
-	TicketTTL = 60 * time.Second
-	// AppSessionTTL 是应用子域会话 Cookie 的 TTL（R12/§4.7）：8 h。
-	AppSessionTTL = 8 * time.Hour
-	// AITokenTTL 是宿主为员工浏览器会话铸造的用户令牌有效期（§4.7）：45 min。
-	AITokenTTL = 45 * time.Minute
-	// AITokenRenewBefore 是令牌续期提前量（到期前多久重铸）。
-	AITokenRenewBefore = 5 * time.Minute
-
-	// AIUserRatePerMin 是平台既有用户级限流（网关已有，§4.7）：60 次/分。
-	AIUserRatePerMin = 60
-	// AIInFlightPerUser 是平台既有在途上限（InFlightGuard，§4.7）：32。
-	AIInFlightPerUser = 32
-)
+// ⚠️ W4 删除（总纲 §8.4 + §21.3）：这一段原本是"员工浏览器会话 + 服务端 AI"的
+// 数值面 —— 换票 code 有效期、应用会话 TTL、宿主铸造的用户令牌 TTL 与续期提前量、
+// 网关的用户级限流与在途上限。它们随 `session/**`、`aichat/**` 与匿名面一起删除：
+//   * 客户端专属模型下身份由桌面客户端持员工 bearer 注入，服务端不再铸造任何令牌；
+//   * 服务端宿主 AI 能力删除后，AI 计费/限流由**客户端既有 LLM 链路**承担（§21.1 Q8），
+//     应用侧要退避的话读的是客户端 AI loop 的错误码（§21.2），不是这里的常量。
 
 // ===== §4.8 响应与浏览器侧 =====
 
@@ -423,10 +410,18 @@ const (
 	LogMaxPerRequest = 100
 	// HostCallBudgetDefault 是未单列预算的宿主调用的兜底预算。
 	HostCallBudgetDefault = 5 * time.Second
-	// AIChatMaxMessages 是 ai.chat 单次消息条数上限（防单次调用构造超巨载荷）。
-	AIChatMaxMessages = 128
-	// AIChatMaxBodyBytes 是 ai.chat 请求体上限。
-	AIChatMaxBodyBytes = 1 << 20
+
+	// AIBridgeMaxMessages 与 AIBridgeMessageMaxBytes 是**客户端 AI 桥**的载荷形状
+	// （总纲 §21.2 的冻结契约：`messages` ≤64 条、单条 ≤16 KiB）。
+	//
+	// 为什么这两个数值住在服务端的 limits 里（总纲 §5.5「数值单一真源」）：
+	// 桥本身由客户端协议 handler 实现（§21.2），但它的**形状是跨端契约**，而且
+	// 作者文档与 `app-builder` 技能要能引用同一份数 —— 技能内容随服务端镜像分发，
+	// 因此文档里的数字必须由本表生成，不能手写（否则迟早与实现漂移）。
+	// 单条 16 KiB 直接决定"应用侧怎么切分要发给模型的文本"（见技能范例的截断逻辑）。
+	AIBridgeMaxMessages = 64
+	// AIBridgeMessageMaxBytes 是单条 message.content 的字节上限：16 KiB。
+	AIBridgeMessageMaxBytes = 16 << 10
 )
 
 // ===== §4.2 静态资源（assets.read / 发布期抽取）=====
@@ -441,20 +436,9 @@ const (
 	AssetMaxListEntries = 10000
 )
 
-// ===== §4.7 员工浏览器会话的输入形状 =====
-
-const (
-	// SessionMaxFormBytes 是员工登录 / 换票表单的请求体上限（形状约束：
-	// 这两个表单只有几个短字段）。
-	SessionMaxFormBytes = 8 << 10
-	// SessionMaxUsernameBytes 与客户端面登录同口径（serverauth 的账号上限）。
-	SessionMaxUsernameBytes = 128
-	// SessionMaxPasswordBytes 与客户端面登录同口径。
-	SessionMaxPasswordBytes = 1024
-	// SessionMaxNextBytes 是换票 `next` 参数的长度上限（§4.7「next 只接受
-	// 同基域相对路径」，长度上限是它的一部分）。
-	SessionMaxNextBytes = 512
-)
+// ⚠️ W4 删除（总纲 §8.4）：员工浏览器登录/换票表单的四个形状上限随 `session/**`
+// 整包删除 —— 那套 HTML 表单（`/login`、`/app-ticket`）已不在平台上；员工登录面
+// 只剩 `/api/client/v2/auth/login`，它的字段上限归 `serverauth` 自己的校验。
 
 // ===== §4.3.1 编译缓存 =====
 

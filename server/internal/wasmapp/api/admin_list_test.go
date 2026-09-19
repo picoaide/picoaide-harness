@@ -364,9 +364,18 @@ func TestAdminRuntimeExposesWatermarksAndGaps(t *testing.T) {
 		}
 		names[u.Name] = true
 	}
-	for _, want := range []string{"module_cache", "appdb_handles", "anon_limit", "ai_revoke_failures"} {
+	// ⚠️ W4：`anon_limit` 与 `ai_revoke_failures` 两条缺口**已随它们的对象删除**
+	// （匿名限流与 aichat 整包删除 ⇒ 那不是"还没接线"，而是"没有这个东西了"）。
+	// 缺口清单的口径是"存在但没出口"，所以删掉才对；把已删除的对象继续列成"待接线"
+	// 反而会让管理员去找一个永远接不上的东西。
+	for _, want := range []string{"module_cache", "appdb_handles"} {
 		if !names[want] {
 			t.Fatalf("缺口水位 %s 必须如实出现在 unavailable 里（静默省略会被读成 0）", want)
+		}
+	}
+	for _, gone := range []string{"anon_limit", "ai_revoke_failures"} {
+		if names[gone] {
+			t.Fatalf("已随 W4 删除的水位 %s 不得再出现在缺口清单里（它不是「缺出口」，而是不存在）", gone)
 		}
 	}
 }

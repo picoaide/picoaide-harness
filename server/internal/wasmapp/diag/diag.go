@@ -272,7 +272,7 @@ func memoryLimitHint(memoryPages uint32) string {
 var hintTable = map[apperr.Code][]string{
 	apperr.CodeRuntimeTimeout: {
 		fmt.Sprintf("guest 执行预算是 %s:把长任务拆成多次请求,不要在单次请求里做整批计算", limits.GuestBudget),
-		"宿主调用(db.* / ai.chat)期间不计入 guest 计时 ⇒ 超时基本都是应用自己的循环没有收敛",
+		"宿主调用(db.* / log / assets.read)期间不计入 guest 计时 ⇒ 超时基本都是应用自己的循环没有收敛",
 		"检查有没有无退出的重试循环;请求超时后实例被销毁,内存里的中间状态不会保留",
 	},
 	apperr.CodeRuntimeMemory: {
@@ -301,11 +301,10 @@ var hintTable = map[apperr.Code][]string{
 		fmt.Sprintf("收到 429 不要立刻重试(只会继续撞队列):按 Retry-After 退避,默认 %d 秒", limits.RetryAfterSeconds),
 		"把多次小请求合并成一次请求,或在页面上提示稍后重试",
 	},
-	apperr.CodeAIBalanceInsufficient: {
-		"使用者自己的余额不足:应用不要重试,直接在页面上提示本人去桌面客户端查看余额与用量",
-		"平台不做应用级额度,AI 费用记在登录员工头上;提示语不要暴露具体余额数值",
-		"确需继续使用:让使用者充值,或把 ai.chat 换成不必调模型的本地逻辑",
-	},
+	// ⚠️ `apperr.CodeAIBalanceInsufficient` 的提示已随 W4 删除（总纲 §21.3）：
+	// 服务端 ai.chat 被删后，这条失败码不再由平台产生 —— AI 余额不足改由
+	// **客户端 AI loop** 在应用页里呈现（§21.2 的错误码 `ai_balance_insufficient`），
+	// 服务端诊断面无从也无需给出"应用侧该怎么办"的建议。
 	apperr.CodeRuntimeTrap: {
 		"wasm trap(越界访问 / 除零 / unreachable):先看 stderr_tail 的原始 trap 信息",
 		"Go 里 panic 必须先 recover 再写错误响应,否则 panic 直接变成 guest 退出",
@@ -319,13 +318,11 @@ var hintTable = map[apperr.Code][]string{
 		fmt.Sprintf("应用响应体上限 %d MiB,超出的部分客户端也拿不到", limits.AppResponseBodyMaxBytes>>20),
 	},
 	apperr.CodeHostCallOverBudget: {
-		fmt.Sprintf("宿主调用超过预算(ai.chat %s):缩小输入或拆成多次调用", limits.HostAIChatBudget),
+		fmt.Sprintf("宿主调用超过预算(%s):缩小输入或拆成多次调用", limits.HostCallBudgetDefault),
 		"宿主调用必须带 ctx,超时后平台按失败处理且不会返回部分结果",
 	},
-	apperr.CodeAIRateLimited: {
-		fmt.Sprintf("平台每用户 %d 次/分的网关限流:应用侧应串行 + 退避,不要并发扇出", limits.AIUserRatePerMin),
-		fmt.Sprintf("每用户在途上限 %d:并发请求会被网关挡住,页面要给可读提示而不是白屏", limits.AIInFlightPerUser),
-	},
+	// ⚠️ `apperr.CodeAIRateLimited` 的提示已随 W4 删除（总纲 §21.3）：平台不再有
+	// 服务端 AI 调用，网关限流由客户端 AI loop 自己退避（§21.2 的 `ai_rate_limited`）。
 	apperr.CodeAuthRequired: {
 		"当前请求是匿名的(未登录):身份相关能力一律不可用",
 		"需要身份时把应用配置的 access 设为 login 或 whitelist(改配置 = 发新版),或在页面上引导登录",

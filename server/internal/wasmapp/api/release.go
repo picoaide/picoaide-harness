@@ -81,8 +81,10 @@ func (h *Handlers) setPublished(c *gin.Context) {
 		// 下架即释放进程内驻留（编译模块 + 库句柄；上架不动，见 OnAppEvict 注释）。
 		h.evictApp(appID)
 	}
+	// ⚠️ 响应里不再有 `entry_url`（W4 删除；总纲 §8.4 / §5.2 冻结契约）：
+	// 入口链接由客户端用 `<渠道 app scheme>://<app_id>` 自行构造。
 	c.JSON(http.StatusOK, gin.H{"app": gin.H{
-		"app_id": appID, "enabled": target, "changed": true, "entry_url": h.appOrigin(c, appID),
+		"app_id": appID, "enabled": target, "changed": true,
 	}})
 }
 

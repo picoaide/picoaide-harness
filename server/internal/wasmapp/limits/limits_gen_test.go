@@ -269,7 +269,7 @@ func TestCriticalValuesAndOrdering(t *testing.T) {
 		{"GuestBudget==10s", limits.GuestBudget.Milliseconds(), 10_000, "§4.6：guest 执行预算"},
 		{"SQLStatementBudget==5s", limits.SQLStatementBudget.Milliseconds(), 5_000, "R13：单语句硬超时"},
 		{"RequestWallClock==60s", limits.RequestWallClock.Milliseconds(), 60_000, "§4.6：端到端墙钟（含排队）"},
-		{"HostAIChatBudget==30s", limits.HostAIChatBudget.Milliseconds(), 30_000, "§4.6：ai.chat 宿主预算"},
+		{"AIBridgeMaxMessages 与文档一致", int64(limits.AIBridgeMaxMessages) * 1000, 64_000, "§21.2：AI 桥 messages ≤64 条（跨端冻结契约）"},
 	}
 	for _, c := range durations {
 		if c.got != c.want {

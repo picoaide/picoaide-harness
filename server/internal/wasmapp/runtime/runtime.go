@@ -562,7 +562,7 @@ func (r *Runtime) handleRPC(ctx context.Context, req *Request, lim InstanceLimit
 
 	budget := lim.HostBudget(rpc.Method)
 
-	// §7.3：进入宿主调用 ⇒ **暂停 guest 计时**（否则 ai.chat 的 30 s 会被 10 s 的
+	// §7.3：进入宿主调用 ⇒ **暂停 guest 计时**（否则一次慢宿主调用会被 10 s 的
 	// guest 预算误杀）；宿主调用用自己的预算 ctx（父 ctx 仍是请求 ctx，客户端断开
 	// 时能及时中止）。
 	clock.pause()

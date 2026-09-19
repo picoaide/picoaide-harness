@@ -376,7 +376,7 @@ func runtimeHints(code apperr.Code, pages uint32) []string {
 		}
 	case apperr.CodeRuntimeTimeout:
 		return []string{
-			"把重活放到宿主能力里做（db.query / ai.chat），不要在 guest 里自旋",
+			"把重活放到宿主能力里做（db.query），不要在 guest 里自旋",
 			"检查是否有死循环或忘了 return 的循环",
 		}
 	case apperr.CodeRuntimeTrap:
@@ -406,7 +406,7 @@ func runtimeHints(code apperr.Code, pages uint32) []string {
 	case apperr.CodeHostCallOverBudget:
 		return []string{
 			"宿主调用超过了它的预算：不要在一次调用里做无界的工作",
-			"预算按方法给出（ai.chat 单独 30 s）",
+			"预算按方法给出（limits.HostCallBudgetDefault，5 s）",
 		}
 	}
 	return nil

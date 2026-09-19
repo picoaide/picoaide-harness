@@ -64,6 +64,7 @@ function acmeChannel(): Record<string, unknown> {
       maintainer: 'acme',
       synopsis: 'Acme 企业内部助手',
       deep_link_scheme: 'acmeai',
+      app_origin_scheme: 'acmeai-app',
       deep_link_name: 'Acme AI Link',
       home_dir: '.acme-harness',
     },
@@ -282,7 +283,7 @@ describe('stageChannelProfile', () => {
       channel_id: 'acme',
       identity: { display_name: 'Acme AI' },
       defaults: { server_url: 'https://ai.acme.example.com' },
-      desktop: { deep_link_scheme: 'acmeai' },
+      desktop: { deep_link_scheme: 'acmeai', app_origin_scheme: 'acmeai-app' },
     })
     const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot })
     const target = stageChannelProfile(context, buildDir)
@@ -291,7 +292,7 @@ describe('stageChannelProfile', () => {
     expect(JSON.parse(readFileSync(join(buildDir, 'channel.json'), 'utf8'))).toMatchObject({
       channel_id: 'acme',
       defaults: { server_url: 'https://ai.acme.example.com' },
-      desktop: { deep_link_scheme: 'acmeai' },
+      desktop: { deep_link_scheme: 'acmeai', app_origin_scheme: 'acmeai-app' },
     })
   })
 
@@ -300,7 +301,7 @@ describe('stageChannelProfile', () => {
       channel_id: 'acme',
       identity: { display_name: 'Acme AI' },
       assets: { logo: 'logo.svg', logo_dark: 'logo-dark.svg' },
-      desktop: { deep_link_scheme: 'acmeai' },
+      desktop: { deep_link_scheme: 'acmeai', app_origin_scheme: 'acmeai-app' },
     })
     writeFileSync(join(dir, 'logo.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><rect width="8" height="8" fill="#106040"/></svg>')
     writeFileSync(join(dir, 'logo-dark.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><rect width="8" height="8" fill="#FFFFFF"/></svg>')
@@ -328,7 +329,7 @@ describe('stageChannelProfile', () => {
       channel_id: 'acme',
       identity: { display_name: 'Acme AI' },
       assets: { logo: 'missing.svg', logo_dark: '../escape.svg' },
-      desktop: { deep_link_scheme: 'acmeai' },
+      desktop: { deep_link_scheme: 'acmeai', app_origin_scheme: 'acmeai-app' },
     })
     const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot })
     stageChannelProfile(context, buildDir)

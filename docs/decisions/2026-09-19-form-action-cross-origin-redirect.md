@@ -1,7 +1,14 @@
 # 决策：跨源那一跳用「同源跳板页」，而不是 302（CSP `form-action` 会拦跨源重定向）
 
+> ⚠️ **状态：`superseded`（已作废，2026-09-19）—— 已废弃，不得据此实施。**
+> 本文描述的浏览器访问链路（应用子域 / 换票 / `/app-ticket` / 会话 Cookie / 基域 / 通配证书）
+> 已在「客户端专属」改造中**整体删除**；本文仅作历史记录保留，其中的机制、配置、操作步骤与结论
+> **均不再适用，也不得作为实施依据**。
+> **现行契约（权威）**：`docs/planning/2026-09-19-wasm-client-only-design.md`（设计总纲，§16 是唯一权威波次表）；
+> 早期契约：`docs/decisions/2026-09-19-wasm-client-internal-origin.md`。
+
 - 日期：2026-09-19
-- 状态：已实施（工作区分支 `fix/server-p0-audit-2026-09-19`）
+- 状态：**`superseded`**（原「已实施」；2026-09-19 被「客户端专属」改造整体作废）
 - 相关：`docs/decisions/2026-09-19-referrer-policy-origin-null.md`（同一轮 P0 的前一半）
 - 证据：`temp/wasm-verify/FIX-REPORT.md`、`temp/wasm-verify/logs/`、探针 `temp/wasm-verify/*.mjs`
 

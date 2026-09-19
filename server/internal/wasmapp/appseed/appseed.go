@@ -19,6 +19,7 @@
 package appseed
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -167,6 +168,13 @@ func (s *Seeder) Demos() []Demo {
 // 唯一的例外是**半成品**（库里已存在、但资源目录或生效版本缺一项）：那是上一次播种
 // 中途失败的残留，只跳过就会永久留着（重启不自愈）⇒ 这里补齐（见 healIncomplete）。
 // 已软删/已冻结的演示**不补**（"删了不再回来"是产品语义）。
+//
+// W4-7（2026-09-19「客户端专属」改造）：演示应用**保留 app_id**（历史行里有既存数据：
+// 归属、版本行、资源目录，改名等于把客户场上已有的演示再塞一份），清单口径的变更
+// （access 由 public 收敛为 login、标题去掉"匿名可达"）**只对新建行生效** ——
+// 已存在的行一律跳过，heal 也**不覆盖标题/配置**（标题以库里既有行为准，见 seedOne）。
+// 已存在行的 access 归迁移 0074 改、磁盘资产归 RewritePublicAccessAssets 改，
+// 都不是播种的职责（播种只负责"缺失的那些"）。
 func (s *Seeder) Seed(ctx context.Context) (Result, error) {
 	var res Result
 	if s == nil {
@@ -223,7 +231,9 @@ func (s *Seeder) seedOne(ctx context.Context, d Demo, appID string) error {
 	}
 	purpose, sensitivity := d.Purpose, d.DataSensitivity
 	app := serverstore.WasmApp{
-		AppID:           appID,
+		AppID: appID,
+		// ⚠️ 只有**新建行**才写清单里的标题/描述（W4-7）：已存在的行走 healIncomplete，
+		// 它一个字节都不改标题（改清单文案不得把客户场上已有演示的标题覆盖掉）。
 		Title:           strings.TrimSpace(d.Title),
 		Description:     strings.TrimSpace(d.Description),
 		Owner:           s.opt.Owner,
@@ -549,6 +559,289 @@ func writeReleaseAssets(dataRoot, appID string, relID int64, cfgJSON string) err
 		return fmt.Errorf("替换应用配置: %w", err)
 	}
 	return nil
+}
+
+// ===== W4：磁盘资产里的 access=public 归一化（设计 §9 的 A 方案）=====
+
+// AssetRewriteProblem 描述一个**被跳过**的磁盘资产（诊断用：为什么没改成）。
+type AssetRewriteProblem struct {
+	AppID     string
+	ReleaseID int64
+	Path      string
+	Reason    string
+}
+
+// AssetRewriteResult 是一次磁盘资产改写的统计。
+type AssetRewriteResult struct {
+	// Apps / Releases 是扫过的应用数与版本数（含已软删的应用与版本：目录可能还在，
+	// 留着 public 就是"口径没有退场"）。
+	Apps     int
+	Releases int
+	// Files 是成功解析的应用配置数（真正能判定 access 的那些）。
+	Files int
+	// Rewritten 是命中**历史公开档位**并已原子改写的文件数。
+	Rewritten int
+	// Missing 是资源目录里没有配置的版本（未播种 / 制品已回收）—— **不是失败**，
+	// 单独计数以免把"本来就没有"混进"改不动"。
+	Missing int
+	// Skipped 是读不到 / 坏 JSON / 写失败的文件数（单个失败不中断整轮）。
+	Skipped int
+	// Problems 逐个列出被跳过的文件（Skipped 的明细，调用方记日志用）。
+	Problems []AssetRewriteProblem
+}
+
+// RewritePublicAccessAssets 把**磁盘资产**里 `access=public` 的应用配置一次性改写为
+// `login`（设计 §9 的 A 方案；与迁移 0074 的 DB 侧配套）。
+//
+// 为什么磁盘侧也必须改（§9 事实订正 ②）：运行期权威在磁盘资产
+// （`<data_root>/apps/<app_id>/assets/<release_id>/picoaide.app.json`，应用自己
+// `assets.read` 读它），而读侧早已把历史 public 映射成 login（appcfg.AuthMode）。
+// 因此改写的真实意义**不是"改权限"**（权限早已不生效），而是让应用自读配置时
+// **不再看到 public**、口径彻底退场 —— 否则应用可能照着配置自行实现一套"匿名可用"
+// 行为。只改 DB 不改磁盘 ⇒ 磁盘上永久残留 public，验收 SQL 之外的这一面永远不干净。
+//
+// 语义：
+//   - 遍历库里**全部** wasm 应用（含软删）的全部版本（含软删版本），路径推导走
+//     releaseAssetsConfigPath（唯一实现，与写入/自愈共用同一份）；
+//   - 只改 `"access"` 这一个键的值（public ⇒ login），其余键**逐字保留**（见
+//     rewritePublicAccessJSON：不做整体 re-marshal）；
+//   - 命中才写，且走 writeReleaseAssets 的 temp + fsync + rename 原子替换
+//     （权限 0644、临时文件由 defer 清理）；
+//   - 幂等：第二次调用 0 命中（login 不再是 public），不产生任何字节变化。
+//
+// 失败语义（设计 §9 + W4-6）：单个文件读不到 / 坏 JSON / 写失败 ⇒ **跳过并计数**，
+// 不 panic、不中断整轮；跳过数量由返回值给出（Skipped + Problems 逐条原因），
+// 调用方必须记日志。只有"枚举应用/版本"这类 DB 失败才返回 error —— 那意味着这一轮
+// 根本没跑起来（全体都没扫），不能伪装成"跳过了几个文件"。
+func RewritePublicAccessAssets(ctx context.Context, db *sql.DB, dataRoot string, logger func(format string, args ...any)) (AssetRewriteResult, error) {
+	var res AssetRewriteResult
+	if db == nil {
+		return res, errors.New("appseed: 磁盘资产改写需要 DB（要枚举 wasm 应用与版本）")
+	}
+	if strings.TrimSpace(dataRoot) == "" {
+		return res, errors.New("appseed: 磁盘资产改写需要 DataRoot（磁盘资产的落点）")
+	}
+	if logger == nil {
+		logger = func(string, ...any) {}
+	}
+	// 含软删：目录可能还在（资源回收与行退役不是同一时刻），残留的 public 同样要退场。
+	apps, err := serverstore.ListWasmApps(ctx, db, serverstore.WasmAppFilter{IncludeDeleted: true})
+	if err != nil {
+		return res, fmt.Errorf("appseed: 列 wasm 应用: %w", err)
+	}
+	res.Apps = len(apps)
+	skip := func(appID string, relID int64, path, reason string) {
+		res.Skipped++
+		res.Problems = append(res.Problems, AssetRewriteProblem{AppID: appID, ReleaseID: relID, Path: path, Reason: reason})
+		if path == "" {
+			logger("appseed: 跳过磁盘资产改写（应用 %s）：%s", appID, reason)
+			return
+		}
+		logger("appseed: 跳过磁盘资产 %s（%s）", path, reason)
+	}
+	for _, app := range apps {
+		rels, lerr := serverstore.ListWasmReleases(ctx, db, app.AppID, true)
+		if lerr != nil {
+			// 单个应用的版本枚举失败也**不中断整轮**：其余应用照常扫（这一轮是运维
+			// 兜底动作，不是"全有或全无"的事务）。
+			skip(app.AppID, 0, "", "列版本行失败: "+lerr.Error())
+			continue
+		}
+		for _, rel := range rels {
+			res.Releases++
+			path := releaseAssetsConfigPath(dataRoot, app.AppID, rel.ID)
+			raw, rerr := os.ReadFile(path)
+			switch {
+			case os.IsNotExist(rerr):
+				res.Missing++
+				continue
+			case rerr != nil:
+				skip(app.AppID, rel.ID, path, "读不到: "+rerr.Error())
+				continue
+			}
+			next, changed, perr := rewritePublicAccessJSON(raw)
+			if perr != nil {
+				skip(app.AppID, rel.ID, path, "配置不可解析: "+perr.Error())
+				continue
+			}
+			res.Files++
+			if !changed {
+				continue
+			}
+			if werr := writeReleaseAssets(dataRoot, app.AppID, rel.ID, string(next)); werr != nil {
+				skip(app.AppID, rel.ID, path, "改写落盘失败: "+werr.Error())
+				continue
+			}
+			res.Rewritten++
+			logger("appseed: 磁盘资产 access 已由 public 收敛为 login：%s", path)
+		}
+	}
+	if res.Skipped > 0 {
+		logger("appseed: ⚠️ 磁盘资产改写跳过 %d 个文件（原因见上；其余 %d 个已处理）", res.Skipped, res.Rewritten)
+	}
+	return res, nil
+}
+
+// LegacyDemoTitleMarker 是历史演示标题里的字样 —— 用来识别"这一行的标题还是旧口径"。
+//
+// 为什么按**字样**而不是按"与清单不一致"判定（W4-7）：管理员有权改演示应用的标题
+// （它是他自己库里的普通应用）。按"不一致就刷回清单"会让管理员每改一次、下次启动就被
+// 回滚成清单值 —— 那正是本文件反复强调"heal 不覆盖标题"要避免的形态。
+// 因此这条**一次性**改写只在标题仍带历史字样时才动手，改完就再也不会命中（幂等）。
+const LegacyDemoTitleMarker = "匿名可达"
+
+// DemoTitlesResult 是一次演示标题改写的统计。
+type DemoTitlesResult struct {
+	// Examined 是清单里的条目数（含库里没有的那些）。
+	Examined int
+	// Rewritten 是标题仍是历史口径、已改成清单值的行数。
+	Rewritten int
+	// Kept 是**刻意不动**的行数：管理员自己改过的标题（不含历史字样）。
+	Kept int
+	// Missing 是库里没有这一行（演示未播种 / 已被删除 —— "删了不再回来"是产品语义）。
+	Missing int
+	// Problems 是逐行失败的原因（读行 / 写回失败），单个失败不中断整轮。
+	Problems []AssetRewriteProblem
+}
+
+// RewriteLegacyDemoTitles 把**存量**演示应用的标题从历史口径改成清单口径（设计 §9）。
+//
+// 为什么需要它：`demos.json` 是清单真源，但它只影响**新播种**的行；`Seed` 对已存在的
+// 行一律跳过，`healIncomplete` 也按口径**不覆盖标题**（否则管理员改过的标题每次启动
+// 都会被回滚）。于是"清单改了标题"对存量部署完全无效 —— 演示应用点开还是
+// 「演示 · 公开应用（匿名可达）」，而这条口径早已下线（设计 §9：「需一次性改写
+// DB 行 + 磁盘资产 + 标题」；磁盘资产那一半见 RewritePublicAccessAssets）。
+//
+// 语义（三条硬约束）：
+//   - 只处理**清单里声明的 app_id**（保留 app_id：历史行有既存数据，不能按标题猜）；
+//   - 只有标题**仍含 LegacyDemoTitleMarker** 时才改写（title + description 一起换成
+//     清单值）—— 管理员改过的标题一个字节都不动（Kept 计数）；
+//   - **只改 `apps` 行**，不动 `app_releases`：版本行是每版不可变快照（§4.2「改配置 =
+//     发新版」），为了让历史版本列表好看去改它，等于把"当时发布的标题"从审计面抹掉。
+//     `apps` 才是目录/应用中心读的投影（serverstore.SetWasmAppDisplay 的注释）。
+//
+// 幂等：改写后标题不再含历史字样 ⇒ 第二次调用 Rewritten = 0。
+// 参数是 `*Seeder` 而不是 `(db, demos)`：清单与 DB 都住在它里面，两处各传一次会让
+// "改写用的清单"与"播种用的清单"有机会不是同一份（同一份数据只允许一个入口）。
+func RewriteLegacyDemoTitles(ctx context.Context, s *Seeder, logger func(format string, args ...any)) (DemoTitlesResult, error) {
+	var res DemoTitlesResult
+	if s == nil || s.opt.DB == nil {
+		return res, errors.New("appseed: 演示标题改写需要已装载的 Seeder（含 DB 与清单）")
+	}
+	if logger == nil {
+		logger = func(string, ...any) {}
+	}
+	db := s.opt.DB
+	demos := s.demos
+	res.Examined = len(demos)
+	for _, d := range demos {
+		appID := strings.TrimSpace(d.AppID)
+		title := strings.TrimSpace(d.Title)
+		if appID == "" || title == "" {
+			continue
+		}
+		app, err := serverstore.GetWasmApp(ctx, db, appID)
+		if errors.Is(err, serverstore.ErrNotFound) {
+			res.Missing++
+			continue
+		}
+		if err != nil {
+			res.Problems = append(res.Problems, AssetRewriteProblem{AppID: appID, Reason: "读应用行失败: " + err.Error()})
+			logger("appseed: 跳过演示标题改写（应用 %s）：%v", appID, err)
+			continue
+		}
+		if app == nil {
+			res.Missing++
+			continue
+		}
+		if !strings.Contains(app.Title, LegacyDemoTitleMarker) {
+			// 管理员自己命名的标题（或已经改过）：**一个字节都不动**。
+			res.Kept++
+			continue
+		}
+		if app.Title == title && app.Description == strings.TrimSpace(d.Description) {
+			// 已经是清单口径（理论上不会走到：新标题不含历史字样）。
+			res.Kept++
+			continue
+		}
+		if uerr := serverstore.SetWasmAppDisplay(ctx, db, appID, title, strings.TrimSpace(d.Description)); uerr != nil {
+			res.Problems = append(res.Problems, AssetRewriteProblem{AppID: appID, Reason: "写标题失败: " + uerr.Error()})
+			logger("appseed: 演示标题改写失败（应用 %s）：%v", appID, uerr)
+			continue
+		}
+		res.Rewritten++
+		logger("appseed: 演示标题已由历史口径改写为清单值：%s（%q → %q）", appID, app.Title, title)
+	}
+	if len(res.Problems) > 0 {
+		logger("appseed: ⚠️ 演示标题改写有 %d 行失败（其余 %d 行已改写 / %d 行刻意不动）",
+			len(res.Problems), res.Rewritten, res.Kept)
+	}
+	return res, nil
+}
+
+// rewritePublicAccessJSON 把一份应用配置 JSON 里 `"access"` 的值由 "public" 改成 "login"。
+//
+// 返回：改写后的字节、是否改动、以及错误（不是合法 JSON 对象 ⇒ 错误，调用方按"跳过"处理）。
+//
+// 为什么用 Decoder 的偏移量做**精确切片**，而不是 `map[string]json.RawMessage` + Marshal：
+// 需求是"其余字段逐字保留"，而 map+Marshal 会把键按字典序重排、重写转义与空白 ——
+// 那等于重写整份配置（应用读到的字节与它自己写下的不一样，diff 里看不出"只动了一个值"）。
+// 这里只替换 access **值**那一段字节 [start,end)，其余（键序、缩进、转义、嵌套对象里
+// 同名的 access）一个字节都不动。
+//
+// 取**最后一个** access 键（与 jsonb / Go map 的"后写覆盖"同口径）：PG 侧判定用的
+// `config_json::jsonb ->> 'access'` 同样是最后者胜，两侧判定必须一致，否则会出现
+// "DB 改了、磁盘没改"或反过来的分叉。
+func rewritePublicAccessJSON(raw []byte) ([]byte, bool, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, false, err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return nil, false, errors.New("不是 JSON 对象")
+	}
+	valueStart, valueEnd := int64(-1), int64(-1)
+	var value json.RawMessage
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil, false, err
+		}
+		key, _ := keyTok.(string)
+		var val json.RawMessage
+		if err := dec.Decode(&val); err != nil {
+			return nil, false, err
+		}
+		if key != "access" {
+			continue
+		}
+		// Decode 只消费值本身（值后的空白留给下一次 Token），RawMessage 逐字节保留该值
+		// ⇒ 值的起点 = 终点 - 长度。
+		valueEnd = dec.InputOffset()
+		valueStart = valueEnd - int64(len(val))
+		value = val
+	}
+	// 收尾的 '}' 必须读出来：截断的配置（只有开头、缺收尾大括号）在 More() 里只会静默
+	// 返回 false，不补这一步就会被当成"没有 access 键"而静默放过一份坏配置。
+	if _, err := dec.Token(); err != nil {
+		return nil, false, err
+	}
+	if valueStart < 0 {
+		return raw, false, nil // 没有 access 键：读取侧按缺省 login，不必写
+	}
+	var cur string
+	// ⚠️ 判定走 appcfg 的**读侧口径唯一实现**（不在本包拼 `"public"` 字面量，也不直接
+	// 引用那个历史取值常量）：本包只负责"看到历史取值就改写成 login"，语义归 appcfg。
+	if err := json.Unmarshal(value, &cur); err != nil || !appcfg.IsLegacyPublicAccess(cur) {
+		return raw, false, nil // 已经不是历史 public（含 login/whitelist/非字符串）：不动
+	}
+	replacement := []byte(strconv.Quote(string(appcfg.AccessLogin)))
+	out := make([]byte, 0, len(raw)-int(valueEnd-valueStart)+len(replacement))
+	out = append(out, raw[:int(valueStart)]...)
+	out = append(out, replacement...)
+	out = append(out, raw[int(valueEnd):]...)
+	return out, true, nil
 }
 
 // ===== 结构性校验（不做编译）=====

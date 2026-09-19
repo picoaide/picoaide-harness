@@ -1,5 +1,12 @@
 # WASM 应用平台：Referrer-Policy `no-referrer` 让登录与换票 100% 失败（2026-09-19）
 
+> ⚠️ **状态：`superseded`（已作废，2026-09-19）—— 已废弃，不得据此实施。**
+> 本文描述的浏览器访问链路（应用子域 / 换票 / `/app-ticket` / 会话 Cookie / 基域 / 通配证书）
+> 已在「客户端专属」改造中**整体删除**；本文仅作历史记录保留，其中的机制、配置、操作步骤与结论
+> **均不再适用，也不得作为实施依据**。
+> **现行契约（权威）**：`docs/planning/2026-09-19-wasm-client-only-design.md`（设计总纲，§16 是唯一权威波次表）；
+> 早期契约：`docs/decisions/2026-09-19-wasm-client-internal-origin.md`。
+
 > 决策：主站登录页 / 换票页（`session/pages.go`）与应用子域（`edge.ApplyHostSecurityHeaders`）
 > 的 `Referrer-Policy` 一律从 `no-referrer` 改为 **`same-origin`**，并把「策略绝不能是
 > `no-referrer`」写进测试；同时补上来源校验失败的诊断日志、把来源校验失败页改回**可重试**。

@@ -47,11 +47,9 @@ func TestCompileInstanceMemoryComesFromSetting(t *testing.T) {
 	}
 
 	// 装配期的两处 fail-closed（可信代理 / 四笔账）只在启用应用子域时生效，显式关掉基域，
-	// 让用例只回答"编译侧的内存上限来自哪里"。
-	t.Setenv(EnvAppsBaseDomain, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p := setupWasmPlatform(ctx, db, nil, t.TempDir(), "127.0.0.1:8080")
+	p := setupWasmPlatform(ctx, db, t.TempDir())
 	if p == nil {
 		t.Fatal("setupWasmPlatform 返回 nil")
 	}

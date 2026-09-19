@@ -7,7 +7,7 @@
  * verification, plus the P3 attribution/group/snapshot-limit items.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { BrowserRuntime } from '../src/runtime.ts'
 import { BrowserStore } from '../src/store.ts'
@@ -141,10 +141,29 @@ class MockAdapter implements ElectronAdapter {
   lastView(): MockView { return this.views.at(-1)! }
 }
 
+/**
+ * 本用例创建的临时目录（**只清自己创建的**）。
+ *
+ * 2026-09-19 R2-S-4：原先的 `afterEach` 扫掉 `tests/` 下**所有** `.a9-store*` 目录，
+ * 而并发跑同一包的其它 worker/用例可能正在用同名前缀的目录 ⇒ 用例中途 ENOENT
+ * （`tests/.a9-store-bm-…/bookmarks.jsonl` 消失）。修法 = 目录登记 + 精确清理，
+ * 并且清理带重试（残留的异步写不能变成 flake）。
+ */
+const createdDirs: string[] = []
+
+/** 每次唯一的临时目录（进程内序号 + 随机，避免同名）。 */
+let dirSeq = 0
+function temporaryStoreDir(prefix: string): string {
+  dirSeq += 1
+  const dir = join(process.cwd(), 'tests', `.a9-store-${prefix}-${String(process.pid)}-${String(dirSeq)}-${Math.random().toString(36).slice(2)}`)
+  mkdirSync(dir, { recursive: true })
+  createdDirs.push(dir)
+  return dir
+}
+
 function makeRuntime(options: { maxTabs?: number } = {}): { runtime: BrowserRuntime; adapter: MockAdapter; store: BrowserStore; dir: string } {
   const adapter = new MockAdapter()
-  const dir = join(process.cwd(), 'tests', `.a9-store-${Math.random().toString(36).slice(2)}`)
-  mkdirSync(dir, { recursive: true })
+  const dir = temporaryStoreDir('rt')
   const store = new BrowserStore({ dir })
   const runtime = new BrowserRuntime(adapter as never, options, undefined, undefined, { store })
   return { runtime, adapter, store, dir }
@@ -153,12 +172,12 @@ function makeRuntime(options: { maxTabs?: number } = {}): { runtime: BrowserRunt
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 afterEach(() => {
-  const dir = join(process.cwd(), 'tests')
-  try {
-    for (const name of readdirSync(dir)) {
-      if (name.startsWith('.a9-store')) rmSync(join(dir, name), { recursive: true, force: true })
-    }
-  } catch { /* best effort */ }
+  // 只清理**本文件本进程**登记的目录（见 `temporaryStoreDir` 的注释）。
+  for (const dir of createdDirs.splice(0)) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+    } catch { /* best effort */ }
+  }
 })
 
 // ---------------------------------------------------------------- P1-20
@@ -244,8 +263,7 @@ describe('P2-26 ledger restore honors the tab quota and attribution', () => {
 
 describe('P2-27 idempotent bookmarks reach disk', () => {
   it('re-stamping an existing URL persists the new title/actor', () => {
-    const dir = join(process.cwd(), 'tests', `.a9-store-bm-${Math.random().toString(36).slice(2)}`)
-    mkdirSync(dir, { recursive: true })
+    const dir = temporaryStoreDir('bm')
     const store = new BrowserStore({ dir })
     store.addBookmark({ url: 'https://a.example', title: 'first', actor: 'ai', group: '' })
     const again = store.addBookmark({ url: 'https://a.example', title: 'second', actor: 'user', group: '' })
@@ -274,8 +292,7 @@ describe('P2-28 clearData with no tab + dispose releases disposers', () => {
   it('fails loudly when the adapter cannot resolve the partition session', async () => {
     const adapter = new MockAdapter()
     ;(adapter as { getSession?: unknown }).getSession = undefined
-    const dir = join(process.cwd(), 'tests', `.a9-store-ns-${Math.random().toString(36).slice(2)}`)
-    mkdirSync(dir, { recursive: true })
+    const dir = temporaryStoreDir('ns')
     const runtime = new BrowserRuntime(adapter as never, {}, undefined, undefined, { store: new BrowserStore({ dir }) })
     await expect(runtime.clearData()).rejects.toMatchObject({ code: 'not-found' })
     runtime.dispose(); rmSync(dir, { recursive: true, force: true })

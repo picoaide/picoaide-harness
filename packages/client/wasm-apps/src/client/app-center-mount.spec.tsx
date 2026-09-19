@@ -41,8 +41,24 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppCenterPanel } from './AppCenterPanel.tsx'
 import { PublishForm } from './PublishForm.tsx'
+import { OPEN_APP_PATH } from './open-app.ts'
+import { APP_CHANNEL_PATH, type AppChannel } from './channel-seam.ts'
+import { APP_AI_IDENTITY_PATH } from './app-ai.ts'
+import { HOST_PROOF_PATH, setHostProofToken } from './host-proof.ts'
 import { PUBLISH_PATH, type PublishTarget } from './publish-app.ts'
 import { setActiveLocale } from './locales.ts'
+
+/**
+ * 官方渠道 fixture（值来自渠道包的官方声明；产品代码里没有这些字面量）。
+ *
+ * 挂载期面板会取三样东西：目录 / 渠道参数（分享与打开链路的 scheme）/ 身份
+ * （应用 AI 的授权作用域）。下面的 stub 默认把渠道与身份两条**本机只读路由**
+ * 直接答掉，用例只需要关心自己那条业务路由。
+ */
+const APP_SCHEME = 'picoaide-app'
+const OFFICIAL_CHANNEL: AppChannel = { appOriginScheme: APP_SCHEME, deepLinkScheme: 'picoaide', productName: 'PicoAide' }
+/** 一条应用协议 URL（scheme 从 fixture 来）。 */
+const appURL = (appId: string, path = '/'): string => `${APP_SCHEME}://${appId}${path}`
 
 // React 18.3 在非测试构建下要求这个全局标记才认 `act()`。
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -80,15 +96,39 @@ let root: Root
 let calls: Call[]
 let closeCount: number
 
-/** 装一个受控的全局 fetch；`respond` 拿到 (url, init) 返回 Response。 */
-function stubFetch(respond: (url: string, init: RequestInit) => Response | Promise<Response>): void {
+/**
+ * 装一个受控的全局 fetch；`respond` 拿到 (url, init) 返回 Response。
+ *
+ * **基础设施路由默认答掉**：本机持有性证明（`host-proof`，§22.2 R2）、渠道参数、身份。
+ * 用例可以用 `respond` 自己覆盖它们；其余 URL 交给 `respond`。这些默认应答都会被记进
+ * `calls`（断言"挂了几个请求"时请按路径过滤，别数总数）。
+ */
+function stubFetch(
+  respond: (url: string, init: RequestInit) => Response | Promise<Response>,
+  options: { channel?: AppChannel | null } = {},
+): void {
   vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input)
-    const options = init ?? {}
-    calls.push({ url, init: options })
-    return await respond(url, options)
+    const init_ = init ?? {}
+    calls.push({ url, init: init_ })
+    if (url === HOST_PROOF_PATH) {
+      // 本机持有性证明的引导端点（宿主 seam）：默认发一枚短时令牌。
+      return jsonResponse(200, { proof: 'host-proof-test', expires_at: Date.now() + 5 * 60_000 })
+    }
+    if (url === APP_CHANNEL_PATH) {
+      const channel = options.channel === undefined ? OFFICIAL_CHANNEL : options.channel
+      return channel === null ? jsonResponse(404, { error: 'no channel route' }) : jsonResponse(200, channel)
+    }
+    if (url === APP_AI_IDENTITY_PATH) {
+      return jsonResponse(200, { loggedIn: true, username: 'alice', serverURL: 'https://harness.example' })
+    }
+    return await respond(url, init_)
   }))
 }
+
+/** 基础设施路由（证明 / 渠道 / 身份）之外的出站调用（业务断言只看这些）。 */
+const INFRA_PATHS: readonly string[] = [HOST_PROOF_PATH, APP_CHANNEL_PATH, APP_AI_IDENTITY_PATH]
+const businessCalls = (): Call[] => calls.filter(call => !INFRA_PATHS.includes(call.url))
 
 const jsonResponse = (status: number, payload: unknown): Response =>
   new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } })
@@ -142,7 +182,7 @@ async function pickFile(selector: string, name: string, bytes: Uint8Array, optio
 }
 
 async function typeIntoPublishForm(values: {
-  appId?: string, version?: string, title?: string, changelog?: string, access?: 'public' | 'login' | 'whitelist',
+  appId?: string, version?: string, title?: string, changelog?: string, access?: 'login' | 'whitelist',
   whitelist?: string, purpose?: string, owner?: string, sensitivity?: string,
 }): Promise<void> {
   if (values.appId !== undefined) await type('.pico-app-center-app-id', values.appId)
@@ -172,6 +212,9 @@ beforeEach(() => {
   root = createRoot(container)
   calls = []
   closeCount = 0
+  // 本机持有性令牌是模块级内存态：用例之间必须复位（否则一条用例的令牌会让下一条
+  // 用例看不到"引导"这一步）。
+  setHostProofToken(null)
 })
 
 afterEach(async () => {
@@ -186,7 +229,8 @@ describe('FIX-42：面板挂载后真的取数（useEffect 真的跑）', () => 
     stubFetch(() => jsonResponse(200, CATALOG_FROM_ROUTE))
     await mount()
     // ① 真的调用了宿主取数路由（不是注入的假数据）。
-    expect(calls.map(call => call.url)).toEqual(['/api/pico/apps/wasm'])
+    expect(calls.map(call => call.url)).toContain('/api/pico/apps/wasm')
+    expect(businessCalls().map(call => call.url)).toEqual(['/api/pico/apps/wasm'])
     // ② 解析出的条目真的进了 DOM。
     expect(container.textContent).toContain('共享便签')
     expect(container.textContent).toContain('值班记录')
@@ -205,14 +249,18 @@ describe('FIX-42：面板挂载后真的取数（useEffect 真的跑）', () => 
     expect(container.querySelector('[data-role="app-disabled"]')).not.toBeNull()
   })
 
-  it('每条目标出服务端下发的访问级别（三种都有对应徽标）', async () => {
+  it('每条目标出访问级别，且历史 public 行读作"登录后使用"（不再有"公开"）', async () => {
     stubFetch(() => jsonResponse(200, CATALOG_FROM_ROUTE))
     await mount()
     const badges = [...container.querySelectorAll('[data-role="access-level"]')]
-    expect(badges.map(b => b.getAttribute('data-access'))).toEqual(['whitelist', 'public', 'login'])
+    // 目录行里的 access 依次是 whitelist / public（存量值）/ login。
+    expect(badges.map(b => b.getAttribute('data-access'))).toEqual(['whitelist', 'login', 'login'])
     expect(badges[0]!.textContent).toBe('仅白名单')
-    expect(badges[1]!.textContent).toBe('公开')
+    expect(badges[1]!.textContent).toBe('登录后使用')
     expect(badges[2]!.textContent).toBe('登录后使用')
+    // 界面上一个字都不许再说"公开/匿名可用"（冻结契约 §4.4：匿名面已删除）。
+    expect(container.textContent).not.toContain('公开')
+    expect(container.querySelector('[data-access="public"]')).toBeNull()
   })
 
   /**
@@ -233,7 +281,7 @@ describe('FIX-42：面板挂载后真的取数（useEffect 真的跑）', () => 
       },
     }))
     await mount()
-    expect(calls).toHaveLength(1)
+    expect(businessCalls()).toHaveLength(1)
     const block = container.querySelector('[data-role="catalog-error"]')
     expect(block).not.toBeNull()
     // ① 服务端 code 出现（旧实现只显示 HTTP 状态码，没有 code）。
@@ -265,7 +313,7 @@ describe('FIX-42：面板挂载后真的取数（useEffect 真的跑）', () => 
   it('取数只在挂载时发生一次（渲染不会重复请求）', async () => {
     stubFetch(() => jsonResponse(200, { apps: [] }))
     await mount()
-    expect(calls).toHaveLength(1)
+    expect(businessCalls()).toHaveLength(1)
   })
 
   it('错误态的"重试"按钮真的再取一次（不是装饰）', async () => {
@@ -277,7 +325,7 @@ describe('FIX-42：面板挂载后真的取数（useEffect 真的跑）', () => 
     await mount()
     expect(container.querySelector('[data-role="catalog-error"]')!.textContent).toContain('boom')
     await click('.pico-app-center-retry')
-    expect(calls).toHaveLength(2)
+    expect(businessCalls()).toHaveLength(2)
     expect(container.textContent).toContain('共享便签')
   })
 
@@ -312,6 +360,91 @@ describe('FIX-42：面板挂载后真的取数（useEffect 真的跑）', () => 
     await mount()
     expect(container.textContent).toContain('还没有可用的应用')
     expect(container.querySelector('[data-role="catalog-error"]')).toBeNull()
+  })
+})
+
+/**
+ * 2026-09-19（冻结契约 §4.5）：应用中心"打开"走**本机路由**
+ * `POST /api/pico/wasm-apps/open`，成功即本机确认 `picoaide-app://<app_id>/` 已就绪；
+ * 没有入口链接、没有系统浏览器兜底。失败必须**分别可辨**（未登录 / 应用不存在 /
+ * 协议未就绪），不是一句"打开失败"。
+ *
+ * 变异验证：
+ *   - 把 `AppCenterRow.open` 改回 `openAppEntry(item.entryURL)`（旧签名）⇒ 本组红；
+ *   - 失败时只显示"打开失败"、丢掉 reason 文案 ⇒「未登录/应用不存在/协议未就绪」红；
+ *   - 成功路径再补一个 `window.open` 兜底 ⇒「只发本机路由这一条请求」红。
+ */
+describe('打开应用：本机路由 + 失败原因可辨（2026-09-19）', () => {
+  const CATALOG_ONE = {
+    apps: [
+      { app_id: 'roster', title: '值班表', description: '', responsible: 'carol', access: 'login', enabled: true, current_version: '2.0.0', is_owner: false },
+    ],
+  }
+
+  it('点"打开" ⇒ POST /api/pico/wasm-apps/open（只发这一次请求）', async () => {
+    stubFetch((url) => {
+      if (url === OPEN_APP_PATH) return jsonResponse(200, { url: appURL('roster') })
+      return jsonResponse(200, CATALOG_ONE)
+    })
+    await mount()
+    await click('.pico-app-center-open')
+
+    const open = calls.filter(call => call.url === OPEN_APP_PATH)
+    expect(open).toHaveLength(1)
+    expect(open[0]!.init.method).toBe('POST')
+    expect(JSON.parse(String(open[0]!.init.body))).toEqual({ app_id: 'roster' })
+    // 没有任何别的出站路径（旧的 /api/pico/browser/open 与 show 都不该出现）。
+    expect(calls.map(call => call.url).filter(url => url.includes('/browser/'))).toEqual([])
+    // 成功 ⇒ 不显示任何错误块。
+    expect(container.querySelector('[data-role="lifecycle-error"]')).toBeNull()
+  })
+
+  it('失败：未登录 / 应用不存在 / 协议未就绪 分别给可读原因', async () => {
+    const cases: Array<[number, string]> = [
+      [401, '尚未登录'],
+      [404, '不存在'],
+      [503, '还没就绪'],
+    ]
+    for (const [status, copy] of cases) {
+      stubFetch((url) => (url === OPEN_APP_PATH ? jsonResponse(status, { error: 'x' }) : jsonResponse(200, CATALOG_ONE)))
+      await mount()
+      const before = calls.filter(call => call.url === OPEN_APP_PATH).length
+      await click('.pico-app-center-open')
+      const block = container.querySelector('[data-role="lifecycle-error"]')
+      expect(block, String(status)).not.toBeNull()
+      expect(block!.textContent, String(status)).toContain('打开失败')
+      expect(block!.textContent, String(status)).toContain(copy)
+      // 错误块里带上英文诊断原文（维护者可定位），同时有可照做的下一步。
+      expect(block!.querySelector('[data-role="error-details"]')!.textContent).toContain(`HTTP ${String(status)}`)
+      expect(block!.querySelectorAll('[data-role="error-hints"] li').length).toBeGreaterThan(0)
+      // 每次只点一次 ⇒ 只发一次打开请求（没有重试风暴）。
+      expect(calls.filter(call => call.url === OPEN_APP_PATH).length - before).toBe(1)
+    }
+  })
+
+  it('本机返回的不是这个应用的协议 URL ⇒ 读作形状错误（不假装已打开）', async () => {
+    stubFetch((url) => (url === OPEN_APP_PATH
+      ? jsonResponse(200, { url: 'https://roster.apps.example.com/' })
+      : jsonResponse(200, CATALOG_ONE)))
+    await mount()
+    await click('.pico-app-center-open')
+    const block = container.querySelector('[data-role="lifecycle-error"]')
+    expect(block).not.toBeNull()
+    expect(block!.textContent).toContain('响应与预期不一致')
+    expect(block!.querySelector('[data-role="error-code"]')!.textContent).toContain('OPEN_UNEXPECTED_RESPONSE')
+  })
+
+  it('下架的应用打开按钮禁用（不发请求）', async () => {
+    stubFetch((url) => (url === OPEN_APP_PATH
+      ? jsonResponse(200, { url: appURL('gone') })
+      : jsonResponse(200, {
+          apps: [{ app_id: 'gone', title: '已下线的工具', access: 'login', enabled: false }],
+        })))
+    await mount()
+    const button = container.querySelector<HTMLButtonElement>('.pico-app-center-open')!
+    expect(button.disabled).toBe(true)
+    await click('.pico-app-center-open')
+    expect(calls.filter(call => call.url === OPEN_APP_PATH)).toEqual([])
   })
 })
 
@@ -361,13 +494,13 @@ describe('FIX-38：面板里的发布入口可达并真的发出发布请求', (
     expect(raw).not.toContain('"visible"')
   })
 
-  it('访问级别缺省是 login（"登录后使用"），三个选项都是真实单选框', async () => {
+  it('访问级别缺省是 login（"登录后使用"），写侧只有两个真实单选框（无"公开"）', async () => {
     stubFetch(() => jsonResponse(200, { apps: [] }))
     await mount()
     await click('.pico-app-center-publish')
     const radios = [...container.querySelectorAll<HTMLInputElement>('input[type="radio"][data-field="access"]')]
-    expect(radios.map(r => r.getAttribute('data-access'))).toEqual(['public', 'login', 'whitelist'])
-    expect(radios.map(r => r.checked)).toEqual([false, true, false])
+    expect(radios.map(r => r.getAttribute('data-access'))).toEqual(['login', 'whitelist'])
+    expect(radios.map(r => r.checked)).toEqual([true, false])
     // 默认不显示名单输入（只有选了"仅白名单用户"才需要它）。
     expect(container.querySelector('.pico-app-center-whitelist')).toBeNull()
   })
@@ -400,11 +533,12 @@ describe('FIX-38：面板里的发布入口可达并真的发出发布请求', (
     expect(calls.filter(call => call.url === PUBLISH_PATH)).toHaveLength(1)
   })
 
-  it('访问级别每个选项都有帮助文字，whitelist 的写明"平台不比对名单、由应用自己判"', async () => {
+  it('访问级别每个选项都有帮助文字（写侧两个选项），whitelist 的写明"平台不比对名单、由应用自己判"', async () => {
     stubFetch(() => jsonResponse(200, { apps: [] }))
     await mount()
     await click('.pico-app-center-publish')
-    expect(container.querySelector('[data-role="access-hint-public"]')!.textContent).toContain('匿名也能打开')
+    // 匿名面已删除（冻结契约 §4.4）⇒ 没有"公开"选项，也就没有它的帮助文字。
+    expect(container.querySelector('[data-role="access-hint-public"]')).toBeNull()
     expect(container.querySelector('[data-role="access-hint-login"]')!.textContent).toContain('登录后全员可用（默认）')
     const whitelistHint = container.querySelector('[data-role="access-hint-whitelist"]')!.textContent ?? ''
     expect(whitelistHint).toContain('平台')
@@ -428,7 +562,7 @@ describe('FIX-38：面板里的发布入口可达并真的发出发布请求', (
     expect(calls.filter(call => call.url === PUBLISH_PATH)).toHaveLength(0)
   })
 
-  it('成功 ⇒ 显示版本、已生效与入口链接，并刷新目录', async () => {
+  it('成功 ⇒ 显示版本、已生效与分享深链，并刷新目录', async () => {
     stubFetch((url) => (url === PUBLISH_PATH ? jsonResponse(201, RELEASE_OK) : jsonResponse(200, { apps: [] })))
     await mount()
     await click('.pico-app-center-publish')
@@ -441,7 +575,13 @@ describe('FIX-38：面板里的发布入口可达并真的发出发布请求', (
     expect(success!.textContent).toContain('发布成功')
     expect(success!.textContent).toContain('1.0.0')
     expect(success!.textContent).toContain('已生效')
-    expect(success!.textContent).toContain('https://shift-notes.apps.example.com/')
+    // 2026-09-19（冻结契约 §4.5）：成功块给的是**渠道深链**，不再是入口链接
+    // （服务端已不再下发 `entry_url`；RELEASE_OK 里那个字段是迁移期残留，被忽略）。
+    const share = container.querySelector('[data-role="published-share"]')
+    expect(share).not.toBeNull()
+    expect(share!.textContent).toBe('分享链接: picoaide://app/shift-notes')
+    expect(success!.textContent).not.toContain('shift-notes.apps.example.com')
+    expect(success!.textContent).not.toContain('入口')
     // 发布成功后重新拉一次目录（结果立即可见）。
     expect(calls.filter(call => call.url === '/api/pico/apps/wasm').length).toBeGreaterThanOrEqual(2)
   })
@@ -581,11 +721,12 @@ describe('P1-3：对已有应用发新版（预填当前配置 + 访问范围改
     await mount()
     await openPublishNewVersion()
 
-    // ① 单选为**当前值** public（旧实现是 login，这就是"静默改写访问范围"的根因）。
-    expect(access()).toBe('public')
+    // ① 单选为**当前值**：目录行下发的历史 public 读作 login（冻结契约 §4.4），
+    //    旧实现会把它显示成"公开"单选（那个取值现在连选项都没有了）。
+    expect(access()).toBe('login')
     // 不能只靠 type=radio 的 checked 断言（React 受控组件要真的选中）。
-    expect(container.querySelector<HTMLInputElement>('.pico-app-center-access-public')!.checked).toBe(true)
-    expect(container.querySelector<HTMLInputElement>('.pico-app-center-access-login')!.checked).toBe(false)
+    expect(container.querySelector<HTMLInputElement>('.pico-app-center-access-login')!.checked).toBe(true)
+    expect(container.querySelector<HTMLInputElement>('.pico-app-center-access-whitelist')!.checked).toBe(false)
     // ② 其余字段逐项预填。
     expect(container.querySelector<HTMLInputElement>('.pico-app-center-app-id')!.value).toBe('hidden-tool')
     expect(container.querySelector<HTMLInputElement>('.pico-app-center-title')!.value).toBe('隐藏工具')
@@ -597,7 +738,7 @@ describe('P1-3：对已有应用发新版（预填当前配置 + 访问范围改
     expect(container.querySelector<HTMLInputElement>('.pico-app-center-whitelist')!.value).toBe('carol, dave')
     // ③ 上下文条：当前版本可见（新版本号必须严格大于它）。
     expect(container.querySelector('[data-role="publish-target"]')!.textContent).toContain('3.1.0')
-    expect(container.querySelector('[data-role="current-access"]')!.textContent).toContain('公开')
+    expect(container.querySelector('[data-role="current-access"]')!.textContent).toContain('登录后使用')
   })
 
   it('data_sensitivity 留空并标注"平台无默认值"，不是硬填 internal', async () => {
@@ -632,11 +773,11 @@ describe('P1-3：对已有应用发新版（预填当前配置 + 访问范围改
     // 没改访问范围 ⇒ 没有确认框（不给正常发版加无谓的摩擦）。
     expect(container.querySelector('[data-role="access-change"]')).toBeNull()
 
-    await click('.pico-app-center-access-login')
+    await click('.pico-app-center-access-whitelist')
     const confirm = container.querySelector('[data-role="access-change"]')
     expect(confirm).not.toBeNull()
-    expect(confirm!.querySelector('[data-role="access-change-detail"]')!.textContent).toContain('公开')
     expect(confirm!.querySelector('[data-role="access-change-detail"]')!.textContent).toContain('登录后使用')
+    expect(confirm!.querySelector('[data-role="access-change-detail"]')!.textContent).toContain('仅白名单用户')
 
     // 未勾选 ⇒ 就地拦下（不发请求）。
     await click('.pico-app-center-submit')
@@ -644,16 +785,16 @@ describe('P1-3：对已有应用发新版（预填当前配置 + 访问范围改
     expect([...local.querySelectorAll('li')].map(li => li.getAttribute('data-code'))).toContain('access_change_unconfirmed')
     expect(calls.filter(call => call.url === PUBLISH_PATH)).toHaveLength(0)
 
-    // 换了取值 ⇒ 上一次的确认作废（确认的是"公开 → 登录后使用"这一对具体取值，
+    // 换了取值 ⇒ 上一次的确认作废（确认的是"登录后使用 → 仅白名单用户"这一对具体取值，
     // 不是"随便改点什么"）。
     const checkbox = container.querySelector<HTMLInputElement>('.pico-app-center-access-confirm')!
     await act(async () => {
       checkbox.click()
     })
     expect(container.querySelector<HTMLInputElement>('.pico-app-center-access-confirm')!.checked).toBe(true)
-    await click('.pico-app-center-access-whitelist')
-    expect(container.querySelector<HTMLInputElement>('.pico-app-center-access-confirm')!.checked).toBe(false)
     await click('.pico-app-center-access-login')
+    expect(container.querySelector<HTMLInputElement>('.pico-app-center-access-confirm')!).toBeNull()
+    await click('.pico-app-center-access-whitelist')
     await click('.pico-app-center-submit')
     expect(calls.filter(call => call.url === PUBLISH_PATH)).toHaveLength(0)
 
@@ -665,7 +806,7 @@ describe('P1-3：对已有应用发新版（预填当前配置 + 访问范围改
     const publish = calls.filter(call => call.url === PUBLISH_PATH)
     expect(publish).toHaveLength(1)
     const body = JSON.parse(String(publish[0]!.init.body)) as { config: Record<string, unknown> }
-    expect(body.config.access).toBe('login')
+    expect(body.config.access).toBe('whitelist')
     // 预填值一路带到出站载荷（不是只显示在界面上）。
     expect(body.config.owner).toBe('carol')
     expect(body.config.purpose).toBe('值班排班')
@@ -683,8 +824,8 @@ describe('P1-3：对已有应用发新版（预填当前配置 + 访问范围改
     expect(calls.filter(call => call.url === PUBLISH_PATH)).toHaveLength(1)
     const success = container.querySelector('[data-role="publish-success"]')!
     const echoed = success.querySelector('[data-role="published-access"]')!
-    expect(echoed.getAttribute('data-access')).toBe('public')
-    expect(echoed.textContent).toContain('公开')
+    expect(echoed.getAttribute('data-access')).toBe('login')
+    expect(echoed.textContent).toContain('登录后使用')
   })
 
   it('P1-4：目录行显示服务端下发的当前版本', async () => {

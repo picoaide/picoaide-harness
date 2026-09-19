@@ -309,27 +309,10 @@ var sweepNonAPIRoutes = map[string]sweepExpect{
 		statuses: []int{404}, classes: []string{sweepClassJSON, sweepClassOther},
 		why: "同上（HEAD 变体，Range/断点续传用）",
 	},
-	// --- 员工浏览器会话与换票（主站 HTML 面，不是 API） ---
-	"GET /login": {
-		statuses: []int{200}, classes: []string{sweepClassHTML},
-		why: "员工登录页（注入式 HTML，零外部资源）",
-	},
-	"POST /login": {
-		statuses: []int{403}, classes: []string{sweepClassHTML},
-		why: "登录提交：非幂等请求必须来自主站源（无 Origin/Referer 的裸请求 fail-closed 403 HTML）",
-	},
-	"POST /logout": {
-		statuses: []int{403}, classes: []string{sweepClassHTML},
-		why: "登出：同上（Origin 校验）",
-	},
-	"GET /app-ticket": {
-		statuses: []int{404}, classes: []string{sweepClassHTML},
-		why: "换票确认页：未配置应用基域时 404（本测试装配 BaseDomain 为空）",
-	},
-	"POST /app-ticket": {
-		statuses: []int{404}, classes: []string{sweepClassHTML},
-		why: "换票签发：同上（必须 POST + Origin == 主站源，见 session.Manager）",
-	},
+	// ⚠️ 员工浏览器会话与换票（`GET|POST /login`、`POST /logout`、`GET|POST /app-ticket`）
+	// 五条主站 HTML 面已随 W4 整体删除（总纲 §8.4）：它们是"应用子域"模型的入口，
+	// 应用改为只在桌面客户端内打开之后不再存在 ⇒ 期望表里的这五条同步移除
+	// （路由表少一条而期望表还留着，本用例会以"没被扫到"报红，这正是它的用途）。
 	// --- LLM 网关的官方原生无前缀端点（带 /v1 前缀的走 isGatewayRoute 默认） ---
 	"GET /models":            {statuses: []int{401}, classes: []string{sweepClassJSON}, why: "LLM 网关（BearerAuth）", auth401: true},
 	"POST /chat/completions": {statuses: []int{401}, classes: []string{sweepClassJSON}, why: "LLM 网关（BearerAuth）", auth401: true},

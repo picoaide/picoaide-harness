@@ -1,5 +1,10 @@
 # 决策：WASM 应用平台设计文档的审计修正（2026-09-17）
 
+> ⚠️ **部分作废（2026-09-19）**：本文中**涉及「匿名限流 / 应用子域 host 门控」的采纳项与断言**
+> 已随「客户端专属」改造整体删除（`anonlimit`、HostGate/子域门控，见总纲 §8.4）。
+> 与访问模型无关的 wazero / 沙箱 / 内存结论继续有效。
+> **权威文档**：`docs/planning/2026-09-19-wasm-client-only-design.md`。
+
 ## 背景
 
 一份**第三方可行性分析报告**（在另一环境，依据 `2026-09-17-wasm-app-platform.md` 的第 751 行定稿 + 一个更旧的仓库快照）
@@ -25,7 +30,7 @@
 | §6.1 非枚举 kind 会 500 | 🟡 结果对、因果错 | 第一道闸是 Go 白名单 `serverstore/apps.go:127-128`（不是 DB CHECK），且今天 4 个生产调用点全传常量 ⇒ HTTP 不可达 |
 | §6.2 遗留 1 MiB 会击穿 24 MiB 白名单 | 🔴 假警报 | 生产走 `router.go:72-73` + `:101-106` 白名单（工作正常），文档 `:116/:691` 已要求新上传路由登记 |
 | §6.3 `kindLabelOf` 是第二个回落点 | 🟢 采纳 | `publish.go:369-374`；已补进 §11 第 4 项 |
-| §6.5 compose 默认注入可信代理，干扰"未配置则拒启" | 🟢 采纳 | `docker-compose.yml:98` = `172.28.0.2`；已补进 §4.8 匿名限流行 |
+| ~~§6.5 compose 默认注入可信代理，干扰"未配置则拒启"~~ | ~~🟢 采纳~~ **已废弃（2026-09-19，对象随 W4 删除）**：`anonlimit` 与匿名面的启动自检均随总纲 §8.4 删除；`PICOAI_TRUSTED_PROXIES` 仍保留但只用于客户端 IP 归属（总纲 §12） | ~~`docker-compose.yml:98` = `172.28.0.2`；已补进 §4.8 匿名限流行~~ |
 | §6.4 / 6.6 / 6.7 / 6.8 | 🟢 成立（无需改动设计） | Caddy 单值 site + `header_up Host`、无全局安全头中间件、usage 月分区 + 永久账本、wasip1 `_start` 自动退出（引文行区间应为 `config.go:525-527`） |
 | §七 内存实账与建议 | 🔴 不采纳 | 报告把 `runtime.MemStats.Sys` 当 RSS（wazero 机器码走 `x/sys/unix` mmap，**不进 `Sys`**）；"关实例不归还 OS""`/readyz` 按 RSS 判水位会误报"缺证据；"实测均摊×系数"会削弱 fail-closed 的启动自检 |
 
@@ -42,7 +47,7 @@
    (b) 键的可复用前提 = 同 wazero 版本 + 同 CPU features + 同 flag（影响缓存容量与回收口径）；
    (c) 每次实例化新建 ModuleConfig（随机源/时钟/stdio 都是 ModuleConfig，不得跨请求复用）；
    (d) **缓存目录是信任边界**：wazero 明写 *"The embedder must safeguard this directory from external changes"*（`cache.go:55`），条目只有同文件 CRC32（防损坏不防篡改），而执行进程把这些字节 mmap 成机器码 ⇒ 编译进程一旦被攻破，缓存即提权通道（列 §11 第 24 项待拍板）。
-3. **§4.8 host 门控改成 allow-list**（主站路由在子域一律不注册），并在 §10.1 增加 13a–13d 四条断言（`/`、`/portal`、`/admin/*`、`/healthz`、`/v1/*`、`/api/server/*`、`/updates/client/*`）。
+3. ~~**§4.8 host 门控改成 allow-list**（主站路由在子域一律不注册），并在 §10.1 增加 13a–13d 四条断言~~ —— **已废弃（2026-09-19，对象随 W4 删除）**：应用子域与 HostGate 主机门控已整体删除（总纲 §8.4）；替代判据 = 总纲 §13 I1「公网无应用 origin ⇒ 404 且不返回应用内容」。
 4. **证据入库**：新增 `docs/evidence/2026-09-17-wasm-app-platform/`——`cache-key/`（缓存键敏感性、HIT/MISS 矩阵）、`random-get/`（默认随机源端到端）、`vacuum-into/`（`LIMIT_ATTACHED` 与 `VACUUM INTO`），各带命令与实测输出；其余本地探针的收敛入库列为 §11 第 23 项。
 5. **引用纪律**（§15.2 尾注）：`file:line` 引用会随提交漂移（同一文档在 master 与分支上已有三处不一致），**以符号/命令为准**，新数字标注测量基线 commit。
 

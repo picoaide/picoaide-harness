@@ -387,6 +387,11 @@ const LEGACY_ACTIONS: Record<string, string> = {
   kb_import: '知识库功能已下线',
   kb_grant: '知识库功能已下线',
   kb_revoke: '知识库功能已下线',
+  // 应用基域配置面（应用子域 + 泛域名）随 2026-09-19「客户端专属」改造的 W4 删除波次
+  // 一并删除（服务端已无该写点，见 scripts/wasm/check-old-model-residue.mjs 的 app-subdomain）。
+  // 标签**必须留在 ACTION_LABEL**：存量审计链里仍有这个动作码的行，删标签会让历史
+  // 记录回退成裸码 —— 与 mcp_*/kb_* 同一条"已下线动作"的处置口径。
+  wasm_apps_base_domain_change: '应用基域配置面已随「客户端专属」改造删除（2026-09-19）',
 }
 
 /** 审计写入点形状：sink 名 + 动作实参在参数表里的下标（0 基）。 */

@@ -10,7 +10,9 @@
  * 覆盖:
  *   1. tag → 渠道集策略(正式 tag 全发、beta tag 只发 beta、非 tag 只发 official)
  *   2. 渠道枚举的掩码与定序(official 置顶)、不合规目录被跳过且**不打印名字**
- *   3. 缺 token / 渠道仓结构不符 / 缺 channel.json → fail-loud
+ *   3. 缺 token / 渠道仓结构不符 / 缺 channel.json → fail-loud；渠道字段(品牌 +
+ *      `desktop.app_origin_scheme`)的必填/形状/保留字/跨渠道唯一也在这里拦,
+ *      且失败信息**只报字段名不回显取值**(取值就是客户品牌,输出进公开日志)
  *   4. 逐渠道打包:官方保留完整日志、渠道输出被抑制、失败只报中性信息
  *   5. 产物归集到 client-assets/<channel>/,没产出即失败
  *   6. 更新服务器(R2)发布:每渠道独立目录、清单内容、保留最近 3 版、
@@ -89,6 +91,12 @@ function fakeChannelRepo(ids, options = {}) {
     // deep_link_scheme/home_dir)同样必需 —— 缺 slug 安装包名回落厂商品牌、缺
     // app_id 两个渠道的客户端在系统里变成同一个 app、缺 home_dir 两个渠道共用
     // 一个数据根(跨渠道共享登录态/会话)。
+    //
+    // desktop.app_origin_scheme(2026-09-19 §10)**全部渠道必填**(含 official/beta):
+    // 夹具必须与之一体 —— 不给公共渠道写这个字段,加了必填校验后下面整组 tag→渠道集
+    // 用例会一起变红(2026-09-12 home_dir 那次踩过同一个坑)。取值:公共渠道共用
+    // `picoaide-app`(§16 W3:official/beta 是一个命名空间,跨渠道唯一性扫描对它们
+    // 豁免),品牌渠道用 `<id 去连字符>-app`(合法形状、彼此不同、也不撞公共值)。
     const publicChannel = id === 'official' || id === 'beta'
     writeFileSync(join(dir, 'channels', id, 'channel.json'), JSON.stringify({
       schema: 1,
@@ -101,7 +109,9 @@ function fakeChannelRepo(ids, options = {}) {
         ? // beta 必须显式声明**与官方正式版一致**的数据根（2026-09-12 用户定案）：
           // 预发版是正式版的前置验证，登录态/设置/会话要与正式版延续；写成自己的
           // 目录会让预发版用户升级后看不到既有会话（当天实测的"对话全没了"事故）。
-          (id === 'beta' ? { desktop: { home_dir: '.picoaide-harness' } } : {})
+          (id === 'beta'
+            ? { desktop: { home_dir: '.picoaide-harness', app_origin_scheme: 'picoaide-app' } }
+            : { desktop: { app_origin_scheme: 'picoaide-app' } })
         : {
             desktop: {
               product_name: `${id} AI`,
@@ -109,6 +119,7 @@ function fakeChannelRepo(ids, options = {}) {
               app_id: `com.example.${id.replaceAll('-', '')}`,
               deep_link_scheme: `${id.replaceAll('-', '')}link`,
               home_dir: `.${id}-harness`,
+              app_origin_scheme: `${id.replaceAll('-', '')}-app`,
             },
           }),
     }))
@@ -275,7 +286,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   const missingConfig = tempDir('ci-channels-missing-')
   mkdirSync(join(missingConfig, 'channels', 'official'), { recursive: true })
   writeFileSync(join(missingConfig, 'channels', 'official', 'channel.json'),
-    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
   mkdirSync(join(missingConfig, 'channels', 'beta'), { recursive: true }) // 无 channel.json
   const missing = runChannels({ source: missingConfig, refName: 'v2.7.0', dest: 'channels', list: 'g.list' })
   check(missing.status !== 0, '选中渠道缺 channel.json 时必须失败')
@@ -285,7 +296,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   const branded = tempDir('ci-channels-brand-')
   mkdirSync(join(branded, 'channels', 'official'), { recursive: true })
   writeFileSync(join(branded, 'channels', 'official', 'channel.json'),
-    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
   mkdirSync(join(branded, 'channels', 'example-brand'), { recursive: true })
   writeFileSync(join(branded, 'channels', 'example-brand', 'channel.json'), '{"schema":1,"channel_id":"example-brand"}')
   const noBrand = runChannels({ source: branded, refName: 'v2.7.0', dest: 'channels', list: 'h.list' })
@@ -298,7 +309,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   const halfBranded = tempDir('ci-channels-brand-half-')
   mkdirSync(join(halfBranded, 'channels', 'official'), { recursive: true })
   writeFileSync(join(halfBranded, 'channels', 'official', 'channel.json'),
-    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official"}}')
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
   const half = runChannels({ source: halfBranded, refName: 'v2.7.0', dest: 'channels', list: 'i.list' })
   check(half.status !== 0, '只配 display_name 也必须失败')
   check(half.stderr.includes('identity.short_name'), '失败信息应点明缺 short_name')
@@ -309,7 +320,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   const noCompile = tempDir('ci-channels-compile-')
   mkdirSync(join(noCompile, 'channels', 'official'), { recursive: true })
   writeFileSync(join(noCompile, 'channels', 'official', 'channel.json'),
-    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
   mkdirSync(join(noCompile, 'channels', 'example-brand'), { recursive: true })
   writeFileSync(join(noCompile, 'channels', 'example-brand', 'channel.json'),
     '{"schema":1,"channel_id":"example-brand","identity":{"display_name":"Example","short_name":"Example"}}')
@@ -323,13 +334,13 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   const badShape = tempDir('ci-channels-shape-')
   mkdirSync(join(badShape, 'channels', 'official'), { recursive: true })
   writeFileSync(join(badShape, 'channels', 'official', 'channel.json'),
-    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
   mkdirSync(join(badShape, 'channels', 'example-brand'), { recursive: true })
   writeFileSync(join(badShape, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
     schema: 1,
     channel_id: 'example-brand',
     identity: { display_name: 'Example', short_name: 'Example' },
-    desktop: { slug: 'Example AI', app_id: 'com.example.brand', deep_link_scheme: 'Example!' },
+    desktop: { slug: 'Example AI', app_id: 'com.example.brand', deep_link_scheme: 'Example!', app_origin_scheme: 'examplebrand-app' },
   }))
   const shape = runChannels({ source: badShape, refName: 'v2.7.0', dest: 'channels', list: 'k.list' })
   check(shape.status !== 0, '字段形状非法时必须失败')
@@ -341,13 +352,13 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   const badIcon = tempDir('ci-channels-icon-')
   mkdirSync(join(badIcon, 'channels', 'official'), { recursive: true })
   writeFileSync(join(badIcon, 'channels', 'official', 'channel.json'),
-    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
   mkdirSync(join(badIcon, 'channels', 'example-brand'), { recursive: true })
   writeFileSync(join(badIcon, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
     schema: 1,
     channel_id: 'example-brand',
     identity: { display_name: 'Example', short_name: 'Example' },
-    desktop: { slug: 'Example-AI', app_id: 'com.example.brand', deep_link_scheme: 'examplebrand' },
+    desktop: { slug: 'Example-AI', app_id: 'com.example.brand', deep_link_scheme: 'examplebrand', app_origin_scheme: 'examplebrand-app' },
   }))
   writeFileSync(join(badIcon, 'channels', 'example-brand', 'app-icon.png'), tinyPng(256, 256, 8, 6))
   const icon = runChannels({ source: badIcon, refName: 'v2.7.0', dest: 'channels', list: 'l.list' })
@@ -361,6 +372,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
     schema: 1,
     channel_id: 'official',
     identity: { display_name: 'Official', short_name: 'Official' },
+    desktop: { app_origin_scheme: 'picoaide-app' },
     assets: { _note: '注解', logoo: 'logo.svg' },
   }))
   const unknown = runChannels({ source: unknownAsset, refName: 'v2.7.0', dest: 'channels', list: 'n.list' })
@@ -383,6 +395,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
       schema: 1,
       channel_id: 'official',
       identity: { display_name: 'Official', short_name: 'Official' },
+      desktop: { app_origin_scheme: 'picoaide-app' },
       assets,
     }))
     for (const [fileName, content] of Object.entries(files)) {
@@ -486,14 +499,14 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   const leaky = tempDir('ci-channels-leak-')
   mkdirSync(join(leaky, 'channels', 'official'), { recursive: true })
   writeFileSync(join(leaky, 'channels', 'official', 'channel.json'),
-    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
   mkdirSync(join(leaky, 'channels', 'example-brand'), { recursive: true })
   writeFileSync(join(leaky, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
     schema: 1,
     channel_id: 'example-brand',
     identity: { display_name: 'Secret Brand', short_name: 'Secret' },
     // 三个字段都**非法**:非法值才是会被拼进早先版本错误信息的东西
-    desktop: { slug: 'TOP SECRET BRAND', app_id: 'com.secret brand', deep_link_scheme: 'SECRET!' },
+    desktop: { slug: 'TOP SECRET BRAND', app_id: 'com.secret brand', deep_link_scheme: 'SECRET!', app_origin_scheme: 'examplebrand-app' },
   }))
   const leak = runChannels({ source: leaky, refName: 'v2.7.0', dest: 'channels', list: 'o.list' })
   const leakOut = `${leak.stdout ?? ''}${leak.stderr ?? ''}`
@@ -508,13 +521,13 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   const missingAsset = tempDir('ci-channels-asset-')
   mkdirSync(join(missingAsset, 'channels', 'official'), { recursive: true })
   writeFileSync(join(missingAsset, 'channels', 'official', 'channel.json'),
-    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
   mkdirSync(join(missingAsset, 'channels', 'example-brand'), { recursive: true })
   writeFileSync(join(missingAsset, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
     schema: 1,
     channel_id: 'example-brand',
     identity: { display_name: 'Example', short_name: 'Example' },
-    desktop: { slug: 'Example-AI', app_id: 'com.example.brand', deep_link_scheme: 'examplebrand' },
+    desktop: { slug: 'Example-AI', app_id: 'com.example.brand', deep_link_scheme: 'examplebrand', app_origin_scheme: 'examplebrand-app' },
     assets: { logo: 'logo.svg' },
   }))
   const asset = runChannels({ source: missingAsset, refName: 'v2.7.0', dest: 'channels', list: 'm.list' })
@@ -525,7 +538,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   const blank = tempDir('ci-channels-brand-blank-')
   mkdirSync(join(blank, 'channels', 'official'), { recursive: true })
   writeFileSync(join(blank, 'channels', 'official', 'channel.json'),
-    '{"schema":1,"channel_id":"official","identity":{"display_name":"   ","short_name":"Official"}}')
+    '{"schema":1,"channel_id":"official","identity":{"display_name":"   ","short_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
   const blankRun = runChannels({ source: blank, refName: 'v2.7.0', dest: 'channels', list: 'j.list' })
   check(blankRun.status !== 0, '空白品牌名必须视为缺失')
 
@@ -536,7 +549,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
     const root = tempDir('ci-channels-home-')
     mkdirSync(join(root, 'channels', 'official'), { recursive: true })
     writeFileSync(join(root, 'channels', 'official', 'channel.json'),
-      '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+      '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
     mkdirSync(join(root, 'channels', 'example-brand'), { recursive: true })
     writeFileSync(join(root, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
       schema: 1,
@@ -546,6 +559,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
         slug: 'Example-AI',
         app_id: 'com.example.brand',
         deep_link_scheme: 'examplebrand',
+        app_origin_scheme: 'examplebrand-app',
         ...(homeDirValue === undefined ? {} : { home_dir: homeDirValue }),
       },
     }))
@@ -580,7 +594,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
     const root = tempDir('ci-channels-product-')
     mkdirSync(join(root, 'channels', 'official'), { recursive: true })
     writeFileSync(join(root, 'channels', 'official', 'channel.json'),
-      '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"}}')
+      '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
     mkdirSync(join(root, 'channels', 'example-brand'), { recursive: true })
     writeFileSync(join(root, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
       schema: 1,
@@ -592,6 +606,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
         app_id: 'com.example.brand',
         deep_link_scheme: 'examplebrand',
         home_dir: '.example-harness',
+        app_origin_scheme: 'examplebrand-app',
       },
     }))
     return runChannels({ source: root, refName: 'v2.7.0', dest: 'channels', list: 'pn.list' })
@@ -633,7 +648,13 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
     schema: 1,
     channel_id: 'beta',
     identity: { display_name: 'PicoAide Harness', short_name: 'PicoAide' },
-    ...(homeDir === undefined ? {} : { desktop: { home_dir: homeDir } }),
+    // desktop.app_origin_scheme 是**全部渠道**必填(含 beta,2026-09-19 §10);公共
+    // 渠道共用 `picoaide-app` 命名空间。三条用例都带上它,这样它们只测 home_dir 一条规则
+    // (否则"缺 app_origin_scheme"会先于 home_dir 报错,把用例测成别的东西)。
+    desktop: {
+      app_origin_scheme: 'picoaide-app',
+      ...(homeDir === undefined ? {} : { home_dir: homeDir }),
+    },
   })
   writeFileSync(join(betaShared, 'channels', 'beta', 'channel.json'), betaChannel('.picoaide-harness'))
   const betaSharedRun = runChannels({ source: betaShared, refName: 'v2.7.0-beta.3', dest: 'channels', list: 'q.list' })
@@ -647,6 +668,142 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   writeFileSync(join(betaShared, 'channels', 'beta', 'channel.json'), betaChannel(undefined))
   const betaMissingRun = runChannels({ source: betaShared, refName: 'v2.7.0-beta.3', dest: 'channels', list: 'q.list' })
   check(betaMissingRun.status !== 0, 'beta 缺 desktop.home_dir 必须失败（非 official 渠道一律必填）')
+}
+
+// ---- 3b. desktop.app_origin_scheme:必填 / 形状 / 保留字 / 跨渠道唯一 ----
+//
+// 为什么必须有这一组(2026-09-19 设计 §10/§8.3):这个字段是 WASM 应用的**客户端协议
+// origin** —— 客户端按它注册特权 scheme、在合成请求里写 Origin,服务端按它校验来源。
+// 它出错的方式全是静默的:缺字段 ⇒ 两端各自回落(派生值 / 中性 fallback),取值不一致
+// 就是"应用打不开"且故障现象与配置毫无关系;与深链 scheme 同值 ⇒"深链回调"与"应用页"
+// 在协议栈层面撞在一起;取保留 scheme ⇒ 应用页与 http(s)/file/data/… 的既有语义打架;
+// **两个渠道同值 ⇒ 两个渠道的客户端应用页同源、可以互相读取**(渠道隔离在协议层失效,
+// 跨租户)。所以:必填/形状/保留字归逐渠道校验,跨渠道唯一归循环之后的独立扫描 ——
+// 两条路径都必须有用例。报错纪律同 slug/app_id:**只报字段名,绝不回显取值**。
+{
+  // 夹具:official/beta 是**两个公共渠道**(共用 `picoaide-app` 命名空间,§16 W3),
+  // 品牌渠道用 `<id 去连字符>-app`。`desktopByChannel` 逐渠道覆盖 desktop,传 `{}`
+  // = 显式不写 app_origin_scheme(造"缺字段"负例);品牌渠道其余编译期字段照主夹具
+  // 给全,确保每条负例只在被测的那条规则上失败。
+  const originRepo = (desktopByChannel) => {
+    const dir = tempDir('ci-channels-origin-')
+    for (const [id, desktop] of Object.entries(desktopByChannel)) {
+      mkdirSync(join(dir, 'channels', id), { recursive: true })
+      const publicChannel = id === 'official' || id === 'beta'
+      const base = publicChannel
+        ? (id === 'beta' ? { home_dir: '.picoaide-harness' } : {})
+        : {
+            slug: `${id}-AI`,
+            app_id: `com.example.${id.replaceAll('-', '')}`,
+            deep_link_scheme: `${id.replaceAll('-', '')}link`,
+            home_dir: `.${id}-harness`,
+          }
+      writeFileSync(join(dir, 'channels', id, 'channel.json'), JSON.stringify({
+        schema: 1,
+        channel_id: id,
+        identity: { display_name: `${id} AI`, short_name: id },
+        desktop: { ...base, ...desktop },
+      }))
+    }
+    return dir
+  }
+  const runOrigin = desktopByChannel => runChannels({
+    source: originRepo(desktopByChannel), refName: 'v2.7.0', dest: 'channels', list: 'or.list',
+  })
+  const PUBLIC_ORIGIN = { app_origin_scheme: 'picoaide-app' }
+  const BRAND_ORIGIN = { app_origin_scheme: 'examplebrand-app' }
+
+  // 正例:公共渠道 official/beta 共用 `picoaide-app`(设计如此,**不是**重复),品牌渠道
+  // 各用不同的值 ⇒ 必须通过。它同时钉住"公共渠道也被要求显式写字段"这半步。
+  const goodOrigin = runOrigin({
+    official: PUBLIC_ORIGIN,
+    beta: PUBLIC_ORIGIN,
+    'example-brand': BRAND_ORIGIN,
+    zeta: { app_origin_scheme: 'zeta-app' },
+  })
+  check(
+    goodOrigin.status === 0,
+    `合法 app_origin_scheme 的渠道集必须通过(公共渠道共用 picoaide-app 属设计),实际 exit=${goodOrigin.status}: ${goodOrigin.stderr.trim()}`,
+  )
+
+  // 负例 1:official 缺字段。**公共渠道不豁免必填** —— 缺字段时服务端拒绝启动、客户端
+  // 回落派生值,发行镜像里这就是"应用打不开"。
+  const missingOrigin = runOrigin({
+    official: {},
+    beta: PUBLIC_ORIGIN,
+    'example-brand': BRAND_ORIGIN,
+  })
+  check(missingOrigin.status !== 0, 'official 缺 desktop.app_origin_scheme 必须失败(公共渠道不豁免必填)')
+  check(missingOrigin.stderr.includes('desktop.app_origin_scheme'), '缺字段的失败信息应点名 desktop.app_origin_scheme')
+
+  // 负例 2:两个品牌渠道取同一个值(品牌渠道之间没有共享命名空间)⇒ 必须失败,且输出
+  // **不得出现该取值** —— 它就是客户品牌,而这里进公开 Actions 日志;跨渠道扫描同样
+  // 不得回显渠道 id/目录名(stderr 里连 ::add-mask:: 指令行都不该有,那是 stdout)。
+  const SHARED_BRAND_ORIGIN = 'example-brand-app'
+  const dupOrigin = runOrigin({
+    official: PUBLIC_ORIGIN,
+    beta: PUBLIC_ORIGIN,
+    'example-brand': { app_origin_scheme: SHARED_BRAND_ORIGIN },
+    zeta: { app_origin_scheme: SHARED_BRAND_ORIGIN },
+  })
+  check(dupOrigin.status !== 0, '两个品牌渠道取同一个 desktop.app_origin_scheme 必须失败(应用页会同源)')
+  check(dupOrigin.stderr.includes('desktop.app_origin_scheme'), '跨渠道重复的失败信息应点名 desktop.app_origin_scheme')
+  check(dupOrigin.stderr.includes('跨渠道重复'), '跨渠道重复的失败信息应说明是"跨渠道重复"(中性词)')
+  const dupOut = `${dupOrigin.stdout}${dupOrigin.stderr}`
+  check(!dupOut.includes(SHARED_BRAND_ORIGIN), '跨渠道重复的失败信息不得回显 scheme 取值(那就是客户品牌)')
+  check(!/\b(example-brand|zeta)\b/u.test(dupOrigin.stderr), '跨渠道重复的失败信息不得回显渠道 id')
+
+  // 负例 2b:品牌渠道**取公共渠道的值**也要失败(那会让品牌客户端与官方客户端同源)。
+  // 唯一性豁免只给"公共渠道之间"这一种形态(§8.3 R2I-13 订正),不是"公共取值谁都能用"。
+  const publicTakenOrigin = runOrigin({
+    official: PUBLIC_ORIGIN,
+    beta: PUBLIC_ORIGIN,
+    'example-brand': PUBLIC_ORIGIN,
+  })
+  check(publicTakenOrigin.status !== 0, '品牌渠道取公共渠道的 app_origin_scheme 必须失败(与官方客户端同源)')
+  check(publicTakenOrigin.stderr.includes('desktop.app_origin_scheme'), '品牌占用公共取值的失败信息应点名该字段')
+
+  // 负例 3:形状非法 —— 含大写、超过 32 字符(正则**有上界**,不是无上界的宽松版本)、
+  // 不以小写字母开头。两端(Go/TS)各有一份同源正则,这里拦不住就是"服务端拒绝、客户端照发"。
+  for (const [value, why] of [
+    ['ExampleBrand-App', '含大写'],
+    ['a'.repeat(33), '超过 32 字符'],
+    ['-app', '连字符开头'],
+  ]) {
+    const bad = runOrigin({
+      official: PUBLIC_ORIGIN,
+      beta: PUBLIC_ORIGIN,
+      'example-brand': { app_origin_scheme: value },
+    })
+    check(bad.status !== 0, `desktop.app_origin_scheme ${why}时必须失败`)
+    check(bad.stderr.includes('desktop.app_origin_scheme'), `desktop.app_origin_scheme(${why})的失败信息应点名该字段`)
+  }
+
+  // 负例 4:与同渠道的 deep_link_scheme 同值 —— 两者在客户端里是两个不同的注册项
+  // (深链回调 vs 应用页 origin),同值会让它们在协议栈层面撞在一起。
+  const sameAsLink = runOrigin({
+    official: PUBLIC_ORIGIN,
+    beta: PUBLIC_ORIGIN,
+    'example-brand': { deep_link_scheme: 'acmelink', app_origin_scheme: 'acmelink' },
+  })
+  check(sameAsLink.status !== 0, 'app_origin_scheme 与 deep_link_scheme 同值必须失败')
+  check(sameAsLink.stderr.includes('desktop.app_origin_scheme'), '同值失败信息应点名 desktop.app_origin_scheme')
+  check(
+    !`${sameAsLink.stdout}${sameAsLink.stderr}`.includes('acmelink'),
+    '同值失败信息不得回显取值(只报字段名 + "必须不同"这一事实)',
+  )
+
+  // 负例 5:保留 scheme —— 浏览器/系统已有既定语义,拿去当应用 origin 会让应用页与它们
+  // 冲突,也过不了特权 scheme 注册。§10 冻结名单逐个覆盖(名单是固定常量,与渠道无关)。
+  for (const value of ['http', 'https', 'file', 'data', 'javascript', 'about']) {
+    const reserved = runOrigin({
+      official: PUBLIC_ORIGIN,
+      beta: PUBLIC_ORIGIN,
+      'example-brand': { app_origin_scheme: value },
+    })
+    check(reserved.status !== 0, `保留 scheme ${value} 必须失败`)
+    check(reserved.stderr.includes('desktop.app_origin_scheme'), `保留 scheme ${value} 的失败信息应点名该字段`)
+  }
 }
 
 // ---- 4/5. 逐渠道打包:日志抑制、失败中性、产物归集 ----

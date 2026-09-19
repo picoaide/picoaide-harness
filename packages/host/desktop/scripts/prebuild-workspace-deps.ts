@@ -56,6 +56,8 @@ const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
   { workspace: '@picoaide/dsh-cron', dir: 'packages/host/cron' },
   { workspace: '@picoaide/dsh-connectors', dir: 'packages/host/connectors' },
   { workspace: '@picoaide/dsh-browser', dir: 'packages/host/browser' },
+  // 客户端专属 WASM 应用 origin：无跨包构建依赖（只依赖 peer 的 cordis/electron）。
+  { workspace: '@picoaide/dsh-wasm-apps-host', dir: 'packages/host/wasm-apps-host', deps: [] },
 ]
 
 /** 执行一个 yarn 命令,失败即抛错。 */

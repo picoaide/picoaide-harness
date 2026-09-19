@@ -6,7 +6,7 @@
 
 | 键 | 值 | 单位 | 章节 | 名称 | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| `max_app_id_len` | 63 | count | §4.1 | app_id 长度上限 | DNS label 上限；app_id 本身就是域名标签 |
+| `max_app_id_len` | 63 | count | §4.1 | app_id 长度上限 | DNS label 上限；app_id 是应用标识（客户端内即 `<渠道 app 源 scheme>://<app_id>` 的 host 段） |
 | `app_id_pattern` | ^[a-z0-9]+(?:-[a-z0-9]+)*$ |  | §4.1 | app_id 规则 | 小写、无连续/首尾连字符 |
 | `version_pattern` | ^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$ |  | §4.1 | 版本号规则 | 严格 x.y.z（可带 -prerelease），必须严格递增 |
 | `retained_versions` | 3 | count | §5.3 | 保留版本数 | 最近 N 个曾生效版本；更早的软删并归档置空 |
@@ -49,8 +49,8 @@
 | `memory_peak_guard_percent` | 70 | percent | §4.3 | 启动自检内存水位 | 理论峰值超过可用内存该比例即拒绝启动 |
 | `upload_peak_per_upload_bytes` | 123731968 | bytes | §4.3 | 单次上传峰值内存账 | base64 单次 ≈ 32+43+43 MB |
 | `host_call_budget_default` | 5 | seconds | §4.4 | 宿主调用兜底预算 |  |
-| `ai_chat_max_messages` | 128 | count | §4.4 | ai.chat 消息条数上限 |  |
-| `ai_chat_max_body_bytes` | 1048576 | bytes | §4.4 | ai.chat 请求体上限 |  |
+| `ai_bridge_max_messages` | 64 | count | §21.2 | AI 桥消息条数上限 | 应用前端 fetch('/__picoaide/ai/chat') 的 messages 数组长度 |
+| `ai_bridge_message_max_bytes` | 16384 | bytes | §21.2 | AI 桥单条消息上限 | 单条 message.content 的字节上限（应用侧据此截断/切分） |
 | `app_db_page_size` | 4096 | bytes | §4.5 | 应用库页大小 |  |
 | `app_db_max_page_count` | 25600 | pages | §4.5 | 应用库 max_page_count | PRAGMA max_page_count，连接级不持久 ⇒ 每条连接重设 |
 | `app_db_max_bytes` | 104857600 | bytes | §4.5 | 应用库体积上限 | 100 MB 硬限（平台固定，用户无旋钮） |
@@ -81,11 +81,10 @@
 | `reserved_row_id_column` | _row_id |  | §5.2 | 平台保留列 | 应用提到即拒 |
 | `sql_column_types` | `text, int, real, bool, datetime` |  | §4.5 | 列类型枚举 | 封闭集合 |
 | `allowed_statement_kinds` | `SELECT, INSERT, UPDATE, DELETE` |  | §4.5 | 语句种类白名单 | 其余一律拒（含全部 DDL） |
-| `app_request_body_max_bytes` | 1048576 | bytes | §4.6 | 应用 API 请求体上限 | 子域路由树不在两个 1 MB 中间件分组里 ⇒ 必须自己实现 |
+| `app_request_body_max_bytes` | 1048576 | bytes | §4.6 | 应用 API 请求体上限 | 客户端请求信封自带上限；管线仍自套 MaxBytesReader 兜住 chunked/长度撒谎 |
 | `app_response_body_max_bytes` | 8388608 | bytes | §4.6 | 应用响应体上限 |  |
 | `protocol_line_max_bytes` | 1048576 | bytes | §4.6 | 协议帧单行上限 | 超限 RUNTIME_OUTPUT_OVERRUN |
 | `guest_budget` | 10 | seconds | §4.6 | guest 执行预算 | 进入宿主调用时暂停计时 |
-| `host_ai_chat_budget` | 30 | seconds | §4.6 | ai.chat 宿主预算 |  |
 | `request_wall_clock` | 60 | seconds | §4.6 | 请求端到端墙钟 | 含排队等待，到点即拒 |
 | `app_queue_depth` | 32 | count | §4.6 | 每应用队列长度 | 超出 429 + Retry-After |
 | `user_per_app_running` | 1 | count | §4.6 | 单用户同应用在跑 |  |
@@ -93,20 +92,6 @@
 | `user_global_running` | 4 | count | §4.6 | 单用户跨应用全局在跑 |  |
 | `app_concurrency` | 4 | count | §4.6 | 每应用并发 | 同一应用最多 N 个请求同时在跑（控制台对应 app_running）；读并发，写仍串行 |
 | `retry_after_seconds` | 1 | seconds | §4.6 | Retry-After |  |
-| `anon_global_rate_per_min` | 3000 | count | §4.6 | 全局匿名令牌桶 | 次/分 |
-| `anon_global_burst` | 3000 | count | §4.6 | 全局匿名桶容量 |  |
-| `anon_per_ip_rate_per_min` | 60 | count | §4.6 | 每 IP 匿名速率 | 次/分 |
-| `anon_per_ip_burst` | 60 | count | §4.6 | 每 IP 匿名桶容量 |  |
-| `ticket_ttl` | 60 | seconds | §4.7 | 一次性换票有效期 | code 单次、绑 (user, app) |
-| `app_session_ttl` | 28800 | seconds | §4.7 | 应用子域会话 TTL | Cookie host-only + HttpOnly + Secure + SameSite=Strict |
-| `ai_token_ttl` | 2700 | seconds | §4.7 | AI 令牌有效期 | 宿主内存持有、到期重铸、登出吊销 |
-| `ai_token_renew_before` | 300 | seconds | §4.7 | AI 令牌续期提前量 |  |
-| `ai_user_rate_per_min` | 60 | count | §4.7 | 用户级限流 | 平台既有，应用无独立额度 |
-| `ai_in_flight_per_user` | 32 | count | §4.7 | 在途上限 | 平台既有 InFlightGuard |
-| `session_max_form_bytes` | 8192 | bytes | §4.7 | 员工会话表单体上限 | 登录/换票两个表单只有几个短字段 |
-| `session_max_username_bytes` | 128 | bytes | §4.7 | 账号字段上限 | 与客户端面登录同口径 |
-| `session_max_password_bytes` | 1024 | bytes | §4.7 | 密码字段上限 | 与客户端面登录同口径 |
-| `session_max_next_bytes` | 512 | bytes | §4.7 | 换票 next 长度上限 | §4.7「next 只接受同基域相对路径」的一部分 |
 | `call_event_retention_days` | 7 | days | §4.9 | 调用事件保留 |  |
 | `call_event_ring_size` | 4096 | count | §4.9 | 调用事件环形内存容量 |  |
 | `call_event_flush_interval` | 2 | seconds | §4.9 | 调用事件批量落库间隔 |  |

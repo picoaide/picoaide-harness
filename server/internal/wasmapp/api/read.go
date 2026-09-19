@@ -508,9 +508,24 @@ func (h *Handlers) catalog(c *gin.Context) {
 			// 调用者是不是发布者：客户端据此给出"发新版"入口（非发布者发布必然 404）。
 			"is_owner": isOwner,
 		}
-		if origin := h.appOrigin(c, a.AppID); origin != "" {
-			row["entry_url"] = origin
+		// 窗口的默认尺寸与**强制宽高比**（§6 的 `window.*` 三个字段，R1-L3-9）：
+		// F3 的"强制锁比例"要用它建窗，而目录是客户端在打开前唯一能读到应用配置的地方
+		// （`open` 只回版本/标题/计数，不回配置）。缺席（作者没写）⇒ 整个键不出现，
+		// 客户端按自己的缺省（1280×720 且不锁比例）处理 —— 与 §6 的"缺省 1280×720"一致。
+		//
+		// 归一化后的值（ratio 折算成浮点、尺寸按 ratio 校正）由 appcfg 一处算清：
+		// 让客户端再算一遍 = 两套窗口尺寸口径（比例四舍五入的差异会让"锁定的比例"
+		// 与作者写的对不上）。
+		if cfg.Window != nil {
+			width, height := cfg.ResolvedWindow()
+			window := gin.H{"width": width, "height": height}
+			if cfg.Window.Ratio > 0 {
+				window["ratio"] = cfg.Window.Ratio
+			}
+			row["window"] = window
 		}
+		// ⚠️ `entry_url` 已随 W4 从两侧删除（总纲 §8.4 / §5.2 冻结契约）：服务端不再下发
+		// 任何入口链接，客户端用 `<渠道 app scheme>://<app_id>` 自行构造打开地址。
 		// 发布者本人额外拿到 purpose / whitelist：**发布表单的预填基线**（P1-3）。
 		//
 		// 为什么限定发布者本人：whitelist 是账号名单、purpose 是内部用途声明，而目录对

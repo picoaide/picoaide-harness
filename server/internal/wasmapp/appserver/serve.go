@@ -5,14 +5,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
-	"github.com/picoaide/picoaide/internal/wasmapp/aichat"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/assets"
@@ -22,17 +20,20 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/logbuf"
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
 	"github.com/picoaide/picoaide/internal/wasmapp/runtime"
-	"github.com/picoaide/picoaide/internal/wasmapp/session"
 )
 
-// ServeApp 处理一次应用子域请求（实现 edge.AppHandler）。
+// serveApp 是**客户端专属访问模型**的唯一请求管线（2026-09-19 决策
+// docs/decisions/2026-09-19-wasm-client-internal-origin.md）。
 //
-// appLabel 由主机名门控（edge.HostGate/MatchHost）校验过**形态**：小写、单级标签、
-// 长度与字符集合规。本函数不重复形态校验，但会再过一次 registry 的**业务规则**
-// （保留字/纯数字/xn--/企业既有主机名）——那是纵深防御，见步骤 ①。
+// 应用只在桌面客户端内以 `<渠道 app scheme>://<app_id>/` 打开，客户端协议 handler
+// 把请求包成信封送到 `POST /api/client/v2/apps/wasm/:app_id/request`；**身份由客户端
+// 注入**（它本来就持有员工 bearer）。旧的应用子域路径（换票 / 应用会话 Cookie /
+// 匿名限流 / 主机名门控）已随 W4 波次整条删除 —— 因此这里没有 Cookie、没有票、
+// 没有匿名分支，也不存在第二份实现。
 //
-// 顺序即语义（§6.1 ④⑤）：每一步都标了设计条款，调整顺序前先读那一条。
-func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel string) {
+// 顺序即语义（§8.1）：每一步都标了设计条款，调整顺序前先读那一条。
+func (s *Server) serveApp(w http.ResponseWriter, r *http.Request, appLabel string,
+	clientUser *serverstore.User, sessionKey string) {
 	if r == nil {
 		return
 	}
@@ -50,19 +51,19 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 
 	appID := strings.ToLower(strings.TrimSpace(appLabel))
 
-	// ===== ① 应用反查（§4.8）=====
+	// ===== ① 应用反查（§8.1 ①）=====
 	// 纵深防御：保留字与部署期注入的企业既有主机名**永不**作为应用服务
-	//（即使库里有行）。app_id 就是域名标签，占名等于占用企业域名资产（§4.1）。
+	//（即使库里有行）。app_id 曾经就是域名标签，占名等于占用企业域名资产。
 	if aerr := registry.ValidateAppID(appID, s.opt.AppIDExtraReserved); aerr != nil {
-		edge.WriteAppNotFound(w, r, appID)
+		edge.WriteAppNotFound(w, r, appID, s.selfOrigin(r))
 		return
 	}
 	app, err := serverstore.GetWasmAppByHost(r.Context(), s.opt.DB, appID)
 	switch {
 	case errors.Is(err, serverstore.ErrNotFound):
-		// 未登记 ⇒ 404，**绝不回落主站**（回落会让任意未登记子域变成主站镜像=钓鱼面）。
+		// 未登记 ⇒ 404。
 		// kind != wasm_app 的行由 GetWasmAppByHost 的 WHERE 直接滤掉（技能/智能体同名行不会命中）。
-		edge.WriteAppNotFound(w, r, appID)
+		edge.WriteAppNotFound(w, r, appID, s.selfOrigin(r))
 		return
 	case err != nil:
 		// DB 故障不是"应用不存在"：按平台故障报 500（把故障说成 404 会让作者去查链接）。
@@ -74,7 +75,21 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 	if app == nil || app.DeletedAt != nil || app.FrozenAt != nil {
 		// 软删（退役）与冻结（R37 只读快照）都停止路由：冻结期保留数据是为了导出，
 		// 不是为了继续服务。
-		edge.WriteAppNotFound(w, r, appID)
+		//
+		// ⚠️ **三档不得塌缩**（契约 §5.1 失败行 / §7.7③ / R2-X-2）：冻结 / 软删 /
+		// 未登记都是 404，但**必须**带 `reason`，因为客户端的文案与下一步动作不同
+		// （冻结=「已被管理员停用，请联系管理员」；已删除=「应用不存在」；未登记=
+		// 「请确认标识是否正确」）。全部塌缩成"应用不存在"会让被冻结的应用看起来像
+		// 被删了 —— 用户会去问"为什么删了我的应用"，而管理员什么都没删。
+		reason, message, hint := "app_deleted", "应用不存在", "该应用已退役删除；如需恢复请联系平台管理员"
+		if app != nil && app.FrozenAt != nil {
+			reason = "app_frozen"
+			message = "应用已被管理员停用（冻结）"
+			hint = "冻结是只读快照：数据仍然保留，但不能继续使用；如需恢复请联系平台管理员"
+		}
+		s.writeFailure(w, r, apperr.New(apperr.CodeNotFound, message).
+			WithDetail("reason", reason).
+			WithHint(hint), false)
 		return
 	}
 	if !app.Enabled {
@@ -108,31 +123,22 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 		return
 	}
 
-	// ===== ③ 换票兑换（§6.1 ④）=====
-	// 子域自身没有会话时，主站 /app-ticket 会 302 回来带一次性 code（60 s、绑 user+app）。
-	// 兑换成功 ⇒ 立刻 302 到**去掉 ticket 参数**的干净 URL（票据不进地址栏/历史/Referer）。
-	if r.URL != nil && r.URL.Query().Get("ticket") != "" {
-		if clean, ok := s.opt.Sessions.RedeemTicket(w, r, appID); ok {
-			http.Redirect(w, r, clean, http.StatusFound)
-			return
-		}
-		// 兑换失败（过期/重放/跨应用/非 https）：票已被一次性消费（见 session.RedeemTicket），
-		// 这里按"未登录"继续 —— RequiresLogin 应用会在⑤再送一次换票，不会死循环
-		//（next 里已被清掉 ticket 参数）。
-		s.logf("appserver: 换票未兑换 app=%s（过期/重放/跨应用/非 https）", appID)
-	}
+	// ===== ②b 版本头（契约 §5.1 / R1-DAT-12 / R2I-21）=====
+	// 客户端的内容缓存键是 `(session-scope, app_id, version, path)`，而 version 在
+	// 客户端此前**没有任何来源** ⇒ 平台在成功响应上写 `X-PicoAide-App-Version`。
+	//
+	// 为什么用一层薄 writer 而不是在三个成功出口（静态 304 / 静态直出 / wasm 响应）
+	// 各写一遍：漏一个出口就是"某一类响应没有版本"，而缓存 bug 的形态是
+	// **改版后继续发旧内容**——最难从现象反推原因的那一类。包装层统一保证
+	// "status < 400 的响应一定带版本头，且应用自带的同名头被覆盖"。
+	w = &versionHeaderWriter{ResponseWriter: w, version: rel.Version}
 
-	// ===== ④ 身份（§7.1 身份契约）=====
-	// 身份只有这一条来源：宿主读 host-only + HttpOnly 的应用会话 Cookie。
-	// CurrentUser / SessionKey 是同一个 Resolve 的两个投影，这里一次取齐
-	//（避免同一请求解析两遍应用会话），语义与 session.CurrentUser 完全一致。
-	var user *abi.User
-	var sessionKey string
-	if id, ok := s.opt.Sessions.Resolve(r, appID); ok {
-		user, sessionKey = id.User, id.SessionKey
-	}
+	// ===== ③ 身份（§7.1 身份契约 / §8.2）=====
+	// 身份是**注入**的（客户端已持员工会话，见 client.go）：不读任何 Cookie，
+	// 也不查应用会话表（那张表随旧模型一起删，见迁移 0073）。
+	user := s.clientFrameUser(r.Context(), clientUser, app)
 
-	// ===== ⑤ 准入（R24/R25）=====
+	// ===== ④ 准入（R24/R25 + 2026-09-19 契约 §4.4）=====
 	// 资源目录：抽取根由 assets 按 (appID, releaseID) 推导（§4.2），应用读到的
 	// 与宿主读到的必须是同一份（应用用 assets.read("picoaide.app.json") 读自己的配置）。
 	//
@@ -158,84 +164,45 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 			WithHint("应用配置在发布期已校验；线上读不到属于平台故障，请联系平台管理员"), false)
 		return
 	}
+	// 准入只有一条规则：**一律要求登录**（契约 §4.4）。
+	//
+	// 历史配置里的 `access=public` 在读取侧即 `login`（`RequiresLogin()` 恒真，
+	// 见 appcfg 的兼容读）：平台没有匿名面，`legacyAnonymous` 那条分支随旧子域路径
+	// 一起删除（W4 的两段时序：W1 清语义 / W4 删代码，见 §8.4）。
 	if cfg.RequiresLogin() && user == nil {
-		// R25（2026-09-18 收敛为 access 三模式）：access=login/whitelist 且未登录
-		// ⇒ 302 主站换票，**只带相对路径**的 next
-		//（带绝对 URL 会把"跳到哪"变成一个可被误用的输入；§4.7 的 next 白名单也只收相对路径）。
-		if s.mainOriginNow() == "" {
-			// BaseDomain 未配置 ⇒ 拼不出换票地址。这是部署配置错误，不能静默：
-			// 静默按匿名放行 = 把要求登录的应用变成公开应用。
-			s.logf("appserver: BaseDomain 未配置，无法为要求登录的应用换票 app=%s", appID)
-			s.writeFailure(w, r, apperr.New(apperr.CodeInternal, "应用子域未配置（平台故障）").
-				WithHint("平台未配置应用基域，无法完成登录换票；请联系平台管理员"), false)
-			return
-		}
-		if !secureRequest(r) {
-			// 明文连接 ⇒ 票**永远**兑换不出会话（session.RedeemTicket 是 fail-closed：
-			// 非 https 不签发 Secure Cookie）。若照常 302，用户会陷入
-			// "换票 → 兑换失败 → 再换票" 的无限重定向（浏览器最终报重定向过多）。
-			// 所以这里直接说清楚：应用子域必须 https（§4.7 / §10.4 第 49 项）。
-			s.logf("appserver: 要求登录的应用收到非 https 请求 app=%s（应用子域必须 https）", appID)
-			s.writeFailure(w, r, apperr.New(apperr.CodeInternal, "应用子域必须通过 https 访问").
-				WithHint("应用会话 Cookie 是 host-only + HttpOnly + Secure，明文连接下平台拒绝签发").
-				WithHint("请通过 https 访问，或让前置反向代理回传 X-Forwarded-Proto: https"), false)
-			return
-		}
-		// 跨源那一跳的**形态**按方法分流（2026-09-19 P0 的同族修复，与主站换票同一根因）：
-		//
-		//   - 幂等请求（GET/HEAD/OPTIONS/TRACE）：302 直接跳。导航不受 CSP 约束，
-		//     302 是最省的一跳，行为与修复前完全一致。
-		//   - 非幂等的普通请求（原生表单 POST 等）：**同源跳板页（200）**。
-		//     原因：应用子域的 CSP（limits.AppContentSecurityPolicy）含 `form-action 'self'`，
-		//     而 CSP3 的 form-action 会检查**重定向链上的每一个 URL**；这里是跨源跳转
-		//     （应用子域 → 主站换票端点）⇒ 浏览器把这次提交整单拦掉
-		//     （`Sending form data to 'https://<app>.<基域>/…' violates "form-action 'self'"`），
-		//     服务端从未收到它，用户表现为"点了提交没反应，只有刷新（GET）才恢复"。
-		//     跳板页把跨源那一跳交给页面自己（location.replace / meta refresh / 链接），
-		//     三者都不受 form-action 约束 —— 因此**不放宽 CSP**。
-		//   - 显式要 JSON 的请求（`/api/*`、`Accept: application/json`）：保持 302。
-		//     form-action 只管原生表单提交，fetch/XHR 不受它约束；把 API 客户端改成
-		//     收 HTML 跳板页反而会破坏应用的 JSON 契约（parse 失败比 CORS 报错更难查）。
-		//
-		// 代价（要认账）：跳板页走的是 GET 换票，**原始 POST 体不会重放** ⇒ 用户重新
-		// 登录回来后需要再提交一次；页面文案已明确写出"这次提交没有被保存"。
-		target := s.ticketURL(r, appID)
-		if edge.IsIdempotent(r.Method) || wantsJSON(r) {
-			http.Redirect(w, r, target, http.StatusFound)
-			return
-		}
-		s.writeRedirectPage(w, r, target)
+		// 客户端模式：没有浏览器换票这一跳，也不该让应用看到匿名身份
+		//（R25 的语义是"要求登录"，不是"尽量登录"）⇒ 结构化 401，由客户端
+		// 引导员工登录后重试。forceJSON=false：页面导航拿可读 HTML，应用内 API
+		//（`/api/*` 或 Accept: application/json）拿 JSON 信封 —— 与既有口径一致。
+		s.writeFailure(w, r, apperr.New(apperr.CodeAuthRequired, "该应用要求登录后使用").
+			WithDetail("access", string(cfg.Access)).
+			WithHint("应用只在桌面客户端内可用；请在客户端登录后重试（浏览器无法打开本应用）"), false)
 		return
 	}
 	// R24（用户 2026-09-18 明确保持）：平台**不做**名单校验 —— access=whitelist 的
 	// 应用只是"要求登录 + 在帧里告诉应用模式是 whitelist"；已登录但不在名单里的
 	// 用户照样进 wasm，由应用读自己的 whitelist 判定并返回 403（页面必须显示本人账号）。
 
-	// ===== ⑥ 匿名限流（R35 / §4.6）=====
-	// 只有匿名请求需要它：已登录请求的身份与额度边界由平台既有机制承担。
-	if user == nil {
-		ok, wait := s.limiter.Allow(clientIP(r, s.trustedProxies))
+	// ===== ⑤ 跨应用写防护（§8.1 ⑦ / 契约 §4.3）=====
+	// 自定义协议下浏览器**不发** Origin（契约 §3），是协议 handler 合成的 ⇒ 非幂等
+	// 方法必须 `Origin == <app scheme>://<app_id>`（自身源由 app_id 推导，**绝不**
+	// 从 Origin/Host 反解）。必须在任何重定向/重写之前（这里早于静态/执行）。
+	if !edge.IsIdempotent(r.Method) {
+		ok, reason := s.checkClientOrigin(r, appID)
 		if !ok {
-			s.writeFailure(w, r, apperr.New(apperr.CodeRateLimited, "匿名访问过于频繁").
-				WithDetail("retry_after_seconds", int(wait.Seconds())+1).
-				WithHint("匿名应用按 IP 与全局限流；请稍后重试，或让应用要求登录（access 设为 login）"), false)
+			// 被拒时把可观测面写进日志（Origin/Referer/Host 与自身源）：
+			// "应用写请求全 403"这类故障的唯一现场，且**绝不含 Cookie**。
+			s.logf("appserver: 跨源写请求被拒 app=%s reason=%s self=%q %s",
+				appID, reason, s.selfOrigin(r), edge.OriginDiagFields(r))
+			s.writeFailure(w, r, apperr.New(apperr.CodeForbidden, "跨源写请求被拒").
+				WithDetail("reason", reason).
+				WithHint("非幂等方法必须来自本应用自身的源（客户端模式下 Origin 由协议 handler 合成，"+
+					"必须等于 <渠道 app scheme>://<app_id>）"), false)
 			return
 		}
 	}
 
-	// ===== ⑦ 跨应用写防护（§4.8 / §10.4 第 44 项）=====
-	// 同 eTLD+1 下 SameSite=Strict 挡不住 `<a>.<基域>` → `<b>.<基域>` 的跨源写
-	//（表单 + text/plain 免预检）⇒ 非幂等方法必须 Origin == 自身源。
-	// 必须在任何重定向/重写之前（本函数在 ⑤ 之后立刻做，早于静态/执行）。
-	if !edge.IsIdempotent(r.Method) && !edge.CheckOrigin(r) {
-		s.writeFailure(w, r, apperr.New(apperr.CodeForbidden, "跨源写请求被拒").
-			WithDetail("reason", "origin_mismatch").
-			WithHint("非幂等方法必须来自本应用自身的源（Origin/Referer 校验）"), false)
-		return
-	}
-
-	// ===== ⑧ 请求体上限（§4.6）=====
-	// 子域路由树不在主站的两个 1 MB 中间件分组里 ⇒ 必须自己实现（§4.6 原话）。
+	// ===== ⑥ 请求体上限（§4.6）=====
 	// 先查 Content-Length（不读一个字节就能拒），再套 MaxBytesReader 兜住
 	// chunked/无长度/长度撒谎的请求。
 	if r.ContentLength > edge.MaxBodyBytes() {
@@ -244,87 +211,16 @@ func (s *Server) ServeApp(w http.ResponseWriter, r *http.Request, appLabel strin
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, edge.MaxBodyBytes())
 
-	// ===== ⑨ 静态资源（§4.2 / §4.6 响应缓存）=====
+	// ===== ⑦ 静态资源（§4.2 / §4.6 响应缓存）=====
 	// 命中"本版本抽取出的资源"就由宿主直接服务（缓存键 app_id + version + path）；
-	// 路由判定规则见 static.go 的 serveStatic 注释（含"要求登录的应用入口不直出"的特例）。
+	// 路由判定规则见 static.go 的 serveStatic 注释。
 	// `If-None-Match` 命中的 304 在缓存命中时**不读盘、不算哈希**（R1-rt-2）。
 	if s.serveStatic(w, r, rel, rc, !cfg.RequiresLogin()) {
 		return
 	}
 
-	// ===== ⑩ 交给 wasm（§6.1 ⑤）=====
+	// ===== ⑧ 交给 wasm（§6.1 ⑤）=====
 	s.serveWasm(w, r, appID, rel, cfg, store, user, sessionKey)
-}
-
-// secureRequest 判定本次请求是否走加密连接（与 session 包同一口径）。
-//
-// 顺序：TLS ⇒ X-Forwarded-Proto（反代终止 TLS）⇒ 明文。
-// 明文下平台**不签发**应用会话 Cookie（§4.7 fail-closed）—— 所以明文请求不能进换票重定向，
-// 否则会形成"换票→兑换失败→再换票"的无限循环。
-func secureRequest(r *http.Request) bool {
-	if r == nil {
-		return false
-	}
-	if r.TLS != nil {
-		return true
-	}
-	proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
-	if i := strings.IndexByte(proto, ','); i >= 0 {
-		proto = proto[:i]
-	}
-	return strings.EqualFold(strings.TrimSpace(proto), "https")
-}
-
-// writeRedirectPage 写**同源跳板页**（应用会话失效 + 非幂等请求时的跨源那一跳）。
-//
-// 与主站换票成功后的跳板页共用**同一份实现**（`session.RedirectPage`）：三条出口
-// （location.replace / meta refresh / 可见链接）、同一份中英文案表、同一套属性转义。
-//
-// 安全头由宿主独占函数写（§4.8）：
-//   - CSP = `limits.AppContentSecurityPolicy`（含 `form-action 'self'`，**不放宽**：
-//     本页没有任何表单，跨源那一跳是页面导航）；
-//   - `Referrer-Policy` = `edge.HostReferrerPolicy`（same-origin）⇒ 从这里跳到主站时
-//     浏览器**不带 Referer**（本页 URL 里没有票，target 的 query 里也没有票）；
-//   - `Cache-Control: no-store`（带登录上下文的页面不得落缓存）。
-func (s *Server) writeRedirectPage(w http.ResponseWriter, r *http.Request, target string) {
-	h := w.Header()
-	edge.ApplyHostSecurityHeaders(h, edge.SelfOrigin(r))
-	h.Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	if r != nil && r.Method == http.MethodHead {
-		return
-	}
-	_, _ = io.WriteString(w, session.RedirectPage(
-		session.PreferredLocale(r.Header.Get("Accept-Language")),
-		session.RedirectAppSessionExpired,
-		target, "", ""))
-}
-
-// ticketURL 拼主站换票地址（§6.1 ①：`https://<基域>/app-ticket?app=<app_id>&next=<相对路径>`）。
-//
-// next **只带相对路径**（path + query，去掉 ticket 参数），且用 url.QueryEscape 编码：
-// net/url 的 PathEscape 对 `&`/`=` 不转义，直接拼进 query 会被解析成额外的参数
-// （`?next=/s?a=1&b=2` ⇒ next 只剩 `/s?a=1`）—— 任务书里写的 PathEscape 在这里是错的。
-func (s *Server) ticketURL(r *http.Request, appID string) string {
-	return s.mainOriginNow() + "/app-ticket?app=" + url.QueryEscape(appID) +
-		"&next=" + url.QueryEscape(cleanRequestURI(r))
-}
-
-// cleanRequestURI 返回去掉 ticket 参数的同源相对 URL（path + query）。
-func cleanRequestURI(r *http.Request) string {
-	if r == nil || r.URL == nil {
-		return "/"
-	}
-	p := r.URL.Path
-	if p == "" {
-		p = "/"
-	}
-	q := r.URL.Query()
-	q.Del("ticket")
-	if len(q) == 0 {
-		return p
-	}
-	return p + "?" + q.Encode()
 }
 
 // openAssets 打开本版本的抽取资源目录（§4.2）。
@@ -472,28 +368,34 @@ func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 	defer db.endRequest()
 
 	// 宿主能力面（§5.1 封闭清单）：身份由宿主注入，应用伪造不了（§7.1 身份契约）。
+	// ⚠️ `ai.chat` 已随 §21 彻底删除：服务端 wasm **不再具备任何 AI 能力**，
+	// 应用要调模型必须走"前端 JS → 宿主保留路径 `/__picoaide/ai/chat` → 结果回传 wasm"
+	// （客户端 AI loop，见总纲 §21.2）。因此能力面里没有 AI 字段。
 	caps := &hostcap.Capabilities{
 		AppID:   appID,
 		Version: rel.Version,
 		User:    user,
 		DB:      db,
-		AI:      s.ai,
 		Assets:  assetsAdapter{store: store},
 		Logs:    logs,
 	}
 
 	// §7.1：帧由宿主构造 —— 身份、方法、路径、查询、白名单化的头、请求体。
+	//
+	// auth.mode 的取值口径（2026-09-19 契约 §4.4）：`access` 在读取侧收敛为
+	// login|whitelist（历史 public 即 login，AuthMode 已如此映射）；平台没有匿名面，
+	// 因此帧里不会出现 public（旧子域路径的匿名分支随 W4 删除）。
+	authMode := cfg.AuthMode()
 	env := abi.Request{
 		ABI:     abi.ABIVersion,
 		AppID:   appID,
 		Version: rel.Version,
 		Auth: abi.AuthInfo{
 			// auth.mode 取自应用配置（§7.1）：**不要**从 user 是否为 nil 反推 ——
-			// public 应用在用户已登录时同样是 public（反推会让应用看到 login
-			// 却拿不到"名单校验"的语义）。取值只有 public/login/whitelist。
-			Mode: cfg.AuthMode(),
-			// Verified 表示宿主已验证身份：login/whitelist 下只有拿到身份才会进到这里；
-			// 匿名（user==nil）时 Verified=false —— 应用据此就知道这不是"验证过的空用户"。
+			// 反推会让应用看到 login 却拿不到"名单校验"的语义。
+			// 取值只有 public/login/whitelist；平台不再产生 public。
+			Mode: authMode,
+			// Verified 表示宿主已验证身份：login/whitelist 下只有拿到身份才会进到这里。
 			Verified: user != nil,
 		},
 		User:    user,
@@ -504,11 +406,13 @@ func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 		Body:    string(body),
 	}
 
-	// 会话键进 ctx：ai.chat 的在手令牌按 (用户, 会话) 缓存，登出即可按会话批量吊销（§10.4 第 46 项）。
-	hostCtx := aichat.WithSessionKey(ctx, sessionKey)
-
+	// ⚠️ sessionKey 不再有消费者（它过去是 `ai.chat` 在手令牌的会话维度）：
+	// 服务端 AI 已删除，§21.4 的应用维度归因改由**客户端**在出站头
+	// `X-Pico-App-Id` 上承担。参数保留是因为 `ServeClientRequest` 把它作为
+	// 契约 §8.2 的显式传参（登出/改密后的吊销回调已随 aichat 一起消失）。
+	_ = sessionKey
 	started := s.now()
-	res, serr := s.rt.Serve(hostCtx, mod, runtime.Request{
+	res, serr := s.rt.Serve(ctx, mod, runtime.Request{
 		Envelope: env,
 		// 预算：内存页上限是 RuntimeConfig 项（0 = 与运行时一致），guest 预算默认 limits.GuestBudget
 		//（数值唯一真源），仅测试注入更小的值。

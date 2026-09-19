@@ -190,6 +190,32 @@ token/settings/会话），品牌渠道之间更不该共享（跨租户）。�
 
 official 不需要写（官方构建不随包分发渠道包，写了也不生效）。
 
+### 4.4b `desktop.app_origin_scheme`（WASM 应用 origin，**全部渠道必填**；2026-09-19 加）
+
+WASM 应用在客户端里的 origin scheme。**它与 `desktop.deep_link_scheme` 是两个不同的值**，
+不要复用、不要互相派生（`deep_link_scheme` 管深链 `<scheme>://app/<app_id>`；
+`app_origin_scheme` 管应用页面本身的 origin `<scheme>://<app_id>`）。
+
+| 项 | 规则 |
+| --- | --- |
+| 取值 | 必须匹配 `^[a-z][a-z0-9+.-]{1,31}$` |
+| 必填范围 | **全部渠道**（含 `official` / `beta`）：official/beta 的取值 = **`picoaide-app`**（两者共用同一命名空间） |
+| 取值惯例 | `<deep_link_scheme>-app`（**仅惯例**，以显式配置为准，**不派生、不回落**） |
+| 禁止 | 不得与 `desktop.deep_link_scheme` 同值；不得是 `http`/`https`/`file`/`data`/`javascript`/`about`；**不得与其它渠道冲突**（跨渠道唯一） |
+| 缺字段 / 非法 / 与深链 scheme 同值 / 跨渠道重复 | **构建期 CI 中止（fail-loud）⇒ 该渠道本次没有产物**，不会静默回落到厂商值 |
+
+**后果与顺序（渠道维护者必读）**：
+
+1. **缺字段 = 该渠道零产物**：`ci-channels.sh` 在 CI 里逐渠道校验，任一渠道缺
+   `app_origin_scheme` ⇒ 该次 tag 构建**中止**；品牌渠道因此拿不到客户端安装包与镜像。
+   加这个字段必须**先在渠道仓改好并 push**，再打 tag —— CI 从渠道仓 `origin/main` 拉取，
+   本地领先未推时 CI 拿到的是旧内容。
+2. **必须跨渠道唯一**：两个渠道用同一个 app origin scheme ⇒ origin 不再隔离（一个应用能
+   读到另一个渠道应用的存储）。CI 会扫描并拒绝。
+3. **服务端侧以镜像内的渠道配置为唯一合法 scheme**（不信任客户端声明）；服务端未配置 ⇒
+   **启动期 fail-loud**。所以同一个渠道的服务端镜像与客户端包必须来自**同一次构建**。
+4. **跨渠道深链不工作属预期**：应用 origin scheme 不同 ⇒ 链接只对所属渠道的客户端生效。
+
 **渠道 logo 的格式约束**（`desktop/scripts/generate-tray-icons.mjs`）：托盘位图是
 **把方块色字符串替换成托盘变体色**渲染的，所以渠道 `logo.svg` 必须
 

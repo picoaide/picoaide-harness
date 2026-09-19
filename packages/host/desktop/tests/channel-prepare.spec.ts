@@ -77,6 +77,7 @@ function brandChannel(channelId: string): Record<string, unknown> {
       slug: 'Example-Brand',
       app_id: 'com.example.brand',
       deep_link_scheme: 'examplebrand',
+      app_origin_scheme: 'examplebrand-app',
     },
   }
 }
