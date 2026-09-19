@@ -893,8 +893,10 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 	// apps 行是目录对**全员**下发的投影（access 徽标 / 负责人 / 用途），待审版本
 	// 没有生效 ⇒ 投影必须一字不动。否则作者提交一个"改成 public"的待审版本后，
 	// 全公司先看到"公开"徽标、点进去却仍被要求登录 —— 审核就只剩"卡制品"。
-	// 待审被拒时由 admin.go 的 recomputeProjection 把投影重算为"最新 approved"，
-	// 因此这里不写 = 不留下需要回收的中间态。
+	// 待审版本**永不**写投影：拒绝它时目录配置本来就是"上一次 approved"的值，
+	// 不需要任何回滚（这也是"不写"比"写了再回滚"更稳的原因）。通过审核时由
+	// admin.go 的 adminReview 分支把投影按**最新 approved 版本**重算一遍
+	//（SetWasmAppCurrentRelease + SetWasmAppConfig，同一份 config_json 同源同版）。
 	if in.status == serverstore.ReleaseStatusApproved {
 		if err := serverstore.SetWasmAppConfig(ctx, h.opt.DB, in.appID,
 			string(st.configJSON), st.config.Purpose, st.config.DataSensitivity); err != nil {
