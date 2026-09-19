@@ -213,7 +213,7 @@ jobs:
       # -p 1 串行跑测试包:多个包并行时总连接数仍可能挤压 service 的
       # max_connections(500),串行换取确定性(耗时 ~5-10 分钟,在 30 分钟
       # 窗口内)。
-      - run: go test ./... -count=1 -p 1
+      - run: go test ./... -count=1 -p 1 -timeout 25m
       - run: npm test
         working-directory: server/webadmin
       - run: make build-server
