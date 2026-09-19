@@ -50,8 +50,11 @@ const VIEW = {
     compile_peak_bytes: 256 << 20,
     upload_peak_bytes: 118 << 20,
     cache_resident_bytes: 64 << 20,
-    total_bytes: 630 << 20,
+    // 页缓存这笔（R1-rt-8）：3 句柄 × (1+4) 条连接 × 1 MiB = 15 MiB ⇒ 四笔账 630 + 15 = 645。
+    appdb_cache_bytes: 15 << 20,
+    total_bytes: 645 << 20,
     available_bytes: 992 << 20,
+    known: true,
     limit_bytes: 694 << 20,
     ok: true,
   },
@@ -101,7 +104,8 @@ describe('应用中心 · 限制项（原应用平台页）', () => {
     expect(await screen.findByRole('heading', { name: '限制项' })).toBeTruthy()
     expect(screen.getByTestId('lim-max_instances')).toHaveProperty('value', '3')
     expect(screen.getByTestId('lim-instance_memory_mb')).toHaveProperty('value', '64')
-    expect(screen.getByTestId('budget-line').textContent).toContain('630 MiB')
+    // 理论峰值 = 四笔账 630 + 页缓存 15（编辑期按表单值重算）＝ 645 MiB（R1-rt-8）。
+    expect(screen.getByTestId('budget-line').textContent).toContain('645 MiB')
     expect(screen.getByTestId('budget-line').textContent).toContain('694 MiB')
     expect(screen.getByTestId('budget-badge').textContent).toContain('正常')
   })

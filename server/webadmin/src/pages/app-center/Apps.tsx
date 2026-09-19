@@ -105,6 +105,15 @@ interface PendingRelease {
   created_at: string
   /** 是否就是线上正在跑的版本。 */
   current: boolean
+  /**
+   * 审核结果理由(驳回理由)。
+   *
+   * ⚠️ **服务端 DTO 尚未下发**:`serverstore.WasmRelease` 没有 reason 列,
+   * `api/admin.go` 的 adminReleases 行也没有这个字段 —— 拒绝理由目前只落在审计详情里
+   * (`wasm_app_release_reject` 的 detail)。前端这里先把渲染位留好(有就显示),
+   * 依赖清单见 `temp/wasm-review-r1/fix-wave3.md` 的 R1-uxw-4 条目。
+   */
+  reason?: string
 }
 
 interface ReleasesResponse {
@@ -194,22 +203,69 @@ const STATUS_FILTERS: { value: string; label: string }[] = [
   { value: 'published', label: '已上架' },
   { value: 'unpublished', label: '已下架' },
   { value: 'frozen', label: '已冻结' },
+  // 软删(冻结保留期到期后由后台真删/软删)的行**默认不出现**在列表里;要复核
+  // "谁删了什么"、或对已删应用跑只读诊断,必须先能筛出来(R1-uxw-7)。服务端
+  // 支持 status=deleted,且它就是 include_deleted=1 的同义入口。
+  { value: 'deleted', label: '已删除' },
 ]
 
 export default function Apps() {
   const [apps, setApps] = useState<WasmApp[]>([])
   const [reviewRequired, setReviewRequired] = useState(false)
   const [loading, setLoading] = useState(true)
+  /** 处置类动作失败(下架/冻结/转移…):列表本身仍然可信,只是那一次操作没成功。 */
   const [error, setError] = useState('')
+  /**
+   * **列表读取**失败(与上面的动作失败分开)。
+   *
+   * 分开的理由就是 R1-uxw-2:两者混用一个 error 时,"翻页请求失败"与"下架失败"
+   * 在界面上长得一模一样,而前者意味着屏幕上的行数/范围数字已经不可信。
+   */
+  const [loadError, setLoadError] = useState('')
+  /** 成功加载过一次(用来区分"还在读"与"真的没有应用")。 */
+  const [loaded, setLoaded] = useState(false)
+  /**
+   * 服务端回显的 offset = 屏幕上这批行在全集里的起始下标。
+   *
+   * 范围标签只认它:本地 offset 是"我想看第几页",越界时服务端给的是空页 ——
+   * 用本地 offset 自算就会写出"共 25 条,当前显示第 21–40 条"而屏幕上是第一页
+   * 的假数字(审计 R1-uxw-2 实测文本)。
+   */
+  const [pageStart, setPageStart] = useState(0)
+  /** 还有下一页:**服务端 truncated 字段**(不再用 offset+shown<total 自算)。 */
+  const [truncated, setTruncated] = useState(false)
   /** 在途操作键(`<app_id>:<动作>` 或 'review');非空时禁用写控件防连点。 */
   const [busy, setBusy] = useState('')
   const [ownerTarget, setOwnerTarget] = useState<WasmApp | null>(null)
   const [ownerInput, setOwnerInput] = useState('')
+  /** 转移归属弹窗内的失败反馈(渲染在弹窗里,否则被遮罩盖住 = "点了没反应")。 */
+  const [ownerError, setOwnerError] = useState('')
   const [detail, setDetail] = useState<WasmApp | null>(null)
+  /**
+   * 详情抽屉内的成败反馈。
+   *
+   * R1-uxw-1:审核的「通过/拒绝」是在**弹窗里**点的,而反馈此前渲染在页面级
+   * (`apps-error`/`apps-flash`)—— Radix 的整屏遮罩(`fixed inset-0 z-50 bg-black/80`)
+   * 把它压住,管理员看到的是"点了没反应"(真实 Chromium 命中测试:错误文本中心点
+   * 命中的是弹窗标题)。现在反馈渲染进 `DialogContent` 内部。
+   */
+  const [detailFeedback, setDetailFeedback] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  /** 拒绝确认框内的失败反馈(理由输入在这里,失败必须原地可见)。 */
+  const [rejectError, setRejectError] = useState('')
+  /**
+   * 刚提交的驳回(版本 + 理由)。
+   *
+   * 服务端 DTO 还没有 `reason` 字段(见 PendingRelease.reason 注释),所以拒绝成功后
+   * 那一行就从待审清单里消失了 —— 管理员刚写下的理由会在界面上蒸发。这里如实回显
+   * "我刚才驳回了谁、理由是什么",服务端补上字段后由 `rel.reason` 接管。
+   */
+  const [lastRejection, setLastRejection] = useState<{ version: string; reason: string } | null>(null)
   /** 审核开关的**待确认**目标值(null = 没有待确认的变更)。 */
   const [reviewPrompt, setReviewPrompt] = useState<boolean | null>(null)
   /** 冻结的**待确认**目标行(null = 无)。解冻不确认(恢复服务,无破坏性)。 */
   const [freezeTarget, setFreezeTarget] = useState<WasmApp | null>(null)
+  /** 下架的**待确认**目标行(R1-uxw-13:下架=全组织员工当场不可用,不能一键生效)。 */
+  const [unpublishTarget, setUnpublishTarget] = useState<WasmApp | null>(null)
   /** 拒绝理由的目标版本(null = 关闭)。 */
   const [rejectTarget, setRejectTarget] = useState<PendingRelease | null>(null)
   const [rejectReason, setRejectReason] = useState('')
@@ -226,6 +282,8 @@ export default function Apps() {
   // 详情抽屉的待审清单 + 运行诊断。
   const [pending, setPending] = useState<PendingRelease[]>([])
   const [pendingCurrent, setPendingCurrent] = useState('')
+  /** 待审清单是否**成功读到**过(读失败时不能拿抽屉快照冒充服务端真值)。 */
+  const [pendingLoaded, setPendingLoaded] = useState(false)
   const [pendingError, setPendingError] = useState('')
   const [diag, setDiag] = useState<Diagnostics | null>(null)
   const [diagError, setDiagError] = useState('')
@@ -241,7 +299,12 @@ export default function Apps() {
     params.set('limit', String(PAGE_SIZE))
     params.set('offset', String(offset))
     if (q !== '') params.set('q', q)
-    if (status !== 'all') params.set('status', status)
+    if (status !== 'all') {
+      params.set('status', status)
+      // 软删行必须显式带 include_deleted:服务端两条入口同义(status=deleted 也
+      // 会打开 include_deleted),这里两条都带上,免得将来只改一端就静默查不到。
+      if (status === 'deleted') params.set('include_deleted', '1')
+    }
     return params.toString()
   }, [offset, q, status])
 
@@ -253,7 +316,7 @@ export default function Apps() {
     }
     const current = ++loadSeq.current
     setLoading(true)
-    setError('')
+    setLoadError('')
     try {
       const data = await request<ListResponse>(`${ADMIN_API}/wasm-apps?${listQuery}`)
       if (current !== loadSeq.current) return // 刷新连点时只认最后一次响应
@@ -261,13 +324,24 @@ export default function Apps() {
       setReviewRequired(data.review_required === true)
       setTotal(typeof data.total === 'number' ? data.total : (data.apps ?? []).length)
       setPendingTotal(typeof data.pending_count === 'number' ? data.pending_count : 0)
+      // 范围标签与翻页一律以**服务端回显**为准(见 pageStart/truncated 的注释)。
+      setPageStart(typeof data.offset === 'number' && data.offset >= 0 ? data.offset : offset)
+      setTruncated(data.truncated === true)
+      setLoaded(true)
     } catch (err: any) {
       if (current !== loadSeq.current) return
-      setError(errorText(err, '加载失败'))
+      // R1-uxw-2:失败时**清空**列表,不保留"看着像本次结果"的旧行。
+      // 保留旧行的代价是:屏幕上是第 1 页的 20 行,标签却写着新 offset 编出来的
+      // "第 21–40 条",而管理员分辨不出这是上一次成功的数据(审计实测现场)。
+      // 清空 + 明说失败 + 重试,是唯一不会撒谎的形态。
+      setApps([])
+      setTotal(0)
+      setTruncated(false)
+      setLoadError(errorText(err, '加载失败'))
     } finally {
       if (current === loadSeq.current) setLoading(false)
     }
-  }, [canRead, listQuery])
+  }, [canRead, listQuery, offset])
 
   useEffect(() => { void load() }, [load])
 
@@ -280,8 +354,10 @@ export default function Apps() {
       )
       setPending(out.releases ?? [])
       setPendingCurrent(out.current_version ?? '')
+      setPendingLoaded(true)
     } catch (err: any) {
       setPending([])
+      setPendingLoaded(false)
       setPendingError(errorText(err, '读取待审版本失败'))
     }
   }, [])
@@ -304,7 +380,11 @@ export default function Apps() {
     setDetail(row)
     setPending([])
     setPendingCurrent(row.current_version ?? '')
+    setPendingLoaded(false)
     setPendingError('')
+    setDetailFeedback(null)
+    setLastRejection(null)
+    setRejectError('')
     setDiag(null)
     setDiagError('')
     void loadPending(row.app_id)
@@ -356,7 +436,6 @@ export default function Apps() {
       setBusy('')
     }
   }
-
   /** 审核开关的真正提交(由确认框调用:开/关都会改变全组织的发布行为)。 */
   const toggleReview = async (next: boolean) => {
     if (busy || !canWrite) return
@@ -381,6 +460,7 @@ export default function Apps() {
 
   const openOwner = (row: WasmApp) => {
     setOwnerInput('')
+    setOwnerError('')
     setOwnerTarget(row)
   }
 
@@ -389,10 +469,11 @@ export default function Apps() {
     if (!row || busy || !canWrite) return
     const owner = ownerInput.trim()
     if (owner === '') {
-      setError('请填写新负责人用户名')
+      setOwnerError('请填写新负责人用户名')
       return
     }
     setBusy(`${row.app_id}:owner`)
+    setOwnerError('')
     setError('')
     try {
       const out = await request<{ app?: { owner?: string } }>(
@@ -402,8 +483,10 @@ export default function Apps() {
       patchRow(row.app_id, { owner: out?.app?.owner ?? owner })
       setOwnerTarget(null)
       setOwnerInput('')
+      flash(`已转移归属:${row.title || row.app_id} → ${out?.app?.owner ?? owner}`)
     } catch (err: any) {
-      setError(errorText(err, '转移归属失败'))
+      // 弹窗里的动作,失败必须渲染在弹窗里(R1-uxw-1 同族:页面级红字被遮罩压住)。
+      setOwnerError(errorText(err, '转移归属失败'))
     } finally {
       setBusy('')
     }
@@ -413,16 +496,21 @@ export default function Apps() {
   const approveRelease = async (row: WasmApp, rel: PendingRelease) => {
     if (busy || !canWrite) return
     setBusy(`${row.app_id}:approve`)
+    setDetailFeedback(null)
     setError('')
     try {
       await request(
         `${ADMIN_API}/wasm-apps/${row.app_id}/releases/${encodeURIComponent(rel.version)}/approve`,
         { method: 'POST' },
       )
+      // 弹窗内 + 页面级都写:抽屉关掉之后仍能看到"刚才发生了什么"。
+      setDetailFeedback({ kind: 'ok', text: `已通过 v${rel.version}` })
       flash(`已通过 v${rel.version}`)
       await Promise.all([load(), loadPending(row.app_id)])
     } catch (err: any) {
-      setError(errorText(err, '审核通过失败'))
+      // R1-uxw-1:反馈必须在**抽屉内**可见(页面级的 apps-error 被 80% 不透明
+      // 整屏遮罩压住,管理员看到的是"点了没反应")。
+      setDetailFeedback({ kind: 'err', text: errorText(err, '审核通过失败') })
     } finally {
       setBusy('')
     }
@@ -433,19 +521,26 @@ export default function Apps() {
     const row = detail
     const rel = rejectTarget
     if (!row || !rel || busy || !canWrite) return
+    const reason = rejectReason.trim()
     setBusy(`${row.app_id}:reject`)
+    setRejectError('')
     setError('')
     try {
       await request(
         `${ADMIN_API}/wasm-apps/${row.app_id}/releases/${encodeURIComponent(rel.version)}/reject`,
-        { method: 'POST', body: JSON.stringify({ reason: rejectReason.trim() }) },
+        { method: 'POST', body: JSON.stringify({ reason }) },
       )
       flash(`已拒绝 v${rel.version}`)
       setRejectTarget(null)
       setRejectReason('')
+      // 驳回理由要留在管理员眼前:服务端 DTO 还没有 reason 字段(见 PendingRelease),
+      // 拒绝成功后那一行就从待审清单消失,刚写的理由不该跟着蒸发。
+      setLastRejection({ version: rel.version, reason })
+      setDetailFeedback({ kind: 'ok', text: `已拒绝 v${rel.version}` })
       await Promise.all([load(), loadPending(row.app_id)])
     } catch (err: any) {
-      setError(errorText(err, '审核拒绝失败'))
+      // 失败时**不关闭**拒绝框:理由还在输入框里,原地显示原因让管理员能改后重试。
+      setRejectError(errorText(err, '审核拒绝失败'))
     } finally {
       setBusy('')
     }
@@ -458,8 +553,22 @@ export default function Apps() {
   }
 
   const shown = apps.length
-  const hasPrev = offset > 0
-  const hasNext = offset + shown < total
+  // 翻页判据只用**服务端回显**:pageStart(实际渲染的第一行)与 truncated(还有下一页)。
+  // hasPrev 用 pageStart>0 而不是 offset>0 —— 越界失败后两者会分叉,而屏幕上真实
+  // 渲染的位置才是管理员能验证的那个数(R1-uxw-2)。
+  const hasPrev = pageStart > 0
+  const hasNext = truncated
+  /** 页码越界:服务端返回空页但全集非空(数据缩水/筛选变化后翻页的典型现场)。 */
+  const outOfRange = !loading && loadError === '' && shown === 0 && total > 0
+  /**
+   * 抽屉里"当前生效版本"的**唯一取值**:待审清单读到了就以它为准(它比行快照新,
+   * 审核通过后服务端返回的就是新版本),读不到才回落行快照。
+   *
+   * R1-uxw-5:此前 dl 用 `detail.current_version`(点开时的快照)、待审块用
+   * `pendingCurrent`(刚拉的),通过 v1.2.0 之后同一屏上会出现"1.0.2"与"1.2.0"
+   * 两个互相矛盾的"当前生效版本"。
+   */
+  const currentVersionShown = pendingLoaded ? pendingCurrent : (detail?.current_version ?? '')
 
   return (
     <div className="space-y-4">
@@ -496,10 +605,23 @@ export default function Apps() {
         }
       />
 
+      {/* 反馈都带 live 区(R1-uxw-14):读屏/键盘用户此前在保存失败或被拒时
+          没有任何播报 —— flash/error 都只是普通 div。 */}
       {flashMsg && (
-        <div data-testid="apps-flash" className="rounded-md border border-border bg-muted px-3 py-2 text-sm">{flashMsg}</div>
+        <div
+          data-testid="apps-flash"
+          role="status"
+          aria-live="polite"
+          className="rounded-md border border-border bg-muted px-3 py-2 text-sm"
+        >
+          {flashMsg}
+        </div>
       )}
-      {error && <p data-testid="apps-error" className="text-sm text-destructive">{error}</p>}
+      {error && (
+        <p data-testid="apps-error" role="alert" aria-live="assertive" className="text-sm text-destructive">
+          {error}
+        </p>
+      )}
       {!canWrite && (
         <p className="text-xs text-muted-foreground">
           当前账号没有 capability:write 权限 —— 仅可查看,处置按钮已禁用(服务端同样会拒绝写请求)。
@@ -543,9 +665,15 @@ export default function Apps() {
             清除筛选
           </Button>
         )}
-        {/* 显式总数:没有它,"被截断的列表"和"就这么多应用"在页面上长得一样(P1-7)。 */}
+        {/* 显式总数:没有它,"被截断的列表"和"就这么多应用"在页面上长得一样(P1-7)。
+            数字全部来自**实际渲染的这批行 + 服务端回显的 total/offset**(R1-uxw-2);
+            读取失败时明说"条数未知",不拿 0 或者上一次的数字充数。 */}
         <span className="text-xs text-muted-foreground" data-testid="app-total">
-          共 {total} 条{total > 0 ? `,当前显示第 ${offset + 1}–${offset + shown} 条` : ''}
+          {loadError !== ''
+            ? '读取失败,条数未知'
+            : !loaded
+              ? '加载中…'
+              : `共 ${total} 条${shown > 0 ? `,当前显示第 ${pageStart + 1}–${pageStart + shown} 条` : ''}`}
         </span>
       </form>
 
@@ -557,16 +685,41 @@ export default function Apps() {
           title="没有查看应用中心的权限"
           desc="需要 capability:read 权限,请联系平台管理员"
         />
+      ) : loadError !== '' ? (
+        // R1-uxw-2:列表读取失败 = 页面级的确定态(错误 + 重试),**不渲染任何行**。
+        // 此前这里保留旧行,于是"共 25 条,当前显示第 21–40 条"与屏幕上的第 1 页
+        // 同屏出现 —— 数字全是编的。
+        <div className="space-y-2" data-testid="apps-load-error-block">
+          <p data-testid="apps-load-error" role="alert" aria-live="assertive" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {loadError}
+          </p>
+          <Button variant="outline" size="sm" data-testid="apps-retry" onClick={() => { void load() }}>
+            <RefreshCw className="mr-1 h-4 w-4" />重试
+          </Button>
+        </div>
       ) : apps.length === 0 ? (
-        // 加载失败时 apps 必为空 —— 此刻错误已在上方显示,再渲染「暂无应用」等于谎报
-        // (写操作失败时 apps 非空,走下面的表格分支,错误与列表可以并存)。
-        error === '' ? (
+        outOfRange ? (
+          // 越界空页:服务端 offset 越界时返回空数组但 total>0(先过滤再分页)。
+          // 此前这里渲染「暂无应用」,与标签里的"共 5 条"直接互相矛盾(A2 现场)。
+          <EmptyState
+            icon={<Boxes className="h-6 w-6" />}
+            title="这一页没有数据"
+            desc={`共 ${total} 条,当前页码已越界(数据可能因下架/删除变少了)`}
+            action={
+              <Button variant="outline" size="sm" data-testid="apps-first-page" onClick={() => { setOffset(0) }}>
+                回到第一页
+              </Button>
+            }
+          />
+        ) : (
+          // 加载失败时 apps 必为空,且上面 loadError 分支已接管 —— 走到这里就是
+          // 服务端如实回答"没有数据"(写操作失败时 apps 非空,走表格分支)。
           <EmptyState
             icon={<Boxes className="h-6 w-6" />}
             title={q !== '' || status !== 'all' ? '没有匹配的应用' : '暂无应用'}
             desc={q !== '' || status !== 'all' ? '换个关键词或状态再试' : '员工发布的 WASM 应用将出现在这里'}
           />
-        ) : null
+        )
       ) : (
         <div className="rounded-md border">
           <Table>
@@ -578,7 +731,7 @@ export default function Apps() {
                 <TableHead>负责人</TableHead>
                 <TableHead>当前版本</TableHead>
                 <TableHead>更新时间</TableHead>
-                <TableHead className="text-right">操作</TableHead>
+                <TableHead className="sticky right-0 z-10 bg-muted/60 text-right backdrop-blur-sm">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -590,9 +743,9 @@ export default function Apps() {
                 const pendingCount = row.pending_count ?? (row.pending_releases ?? []).length
                 return (
                   <TableRow key={row.app_id}>
-                    <TableCell>
-                      <div className="whitespace-nowrap font-medium">{row.title || row.app_id}</div>
-                      <div className="font-mono text-xs text-muted-foreground">{row.app_id}</div>
+                    <TableCell className="max-w-[16rem]">
+                      <div className="truncate font-medium" title={row.title || row.app_id}>{row.title || row.app_id}</div>
+                      <div className="truncate font-mono text-xs text-muted-foreground" title={row.app_id}>{row.app_id}</div>
                     </TableCell>
                     <TableCell>
                       <Badge variant={am.variant}>{am.label}</Badge>
@@ -601,12 +754,16 @@ export default function Apps() {
                       <div className="flex flex-wrap items-center gap-1">
                         <Badge variant={sm.variant}>{sm.label}</Badge>
                         {/* 待审批徽标(P0-1 前端闭环):有积压的行必须在列表上就能看出来,
-                            否则"审核开着但没人知道谁在等"就是这次审计的 P0 现场。 */}
+                            否则"审核开着但没人知道谁在等"就是这次审计的 P0 现场。
+                            R1-uxw-14:版本清单此前只挂在 hover 的 title 上 —— 徽标改成
+                            可聚焦 + aria-label,键盘/读屏用户同样读得到在等哪个版本。 */}
                         {pendingCount > 0 && (
                           <Badge
                             variant="destructive"
                             data-testid="pending-badge"
+                            tabIndex={0}
                             title={`待审版本:${(row.pending_releases ?? []).join('、')}`}
+                            aria-label={`待审批 ${pendingCount} 个版本:${(row.pending_releases ?? []).join('、')}`}
                           >
                             待审批 {pendingCount}
                           </Badge>
@@ -616,8 +773,12 @@ export default function Apps() {
                     <TableCell>{row.owner || '—'}</TableCell>
                     <TableCell className="font-mono text-sm">{row.current_version || '—'}</TableCell>
                     <TableCell className="whitespace-nowrap text-muted-foreground">{fmtTime(row.updated_at)}</TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-1">
+                    {/* 操作列:窄屏(375px)下**吸右**。此前它整体落在视口之外
+                        (`right` 632~782 > 375),管理员只看得到列表、点不到任何处置
+                        (R1-uxw-8 的真实 Chromium 实测)。sticky 让它在横向滚动条
+                        的右缘常驻,按钮允许换行避免被压成图标。 */}
+                    <TableCell className="sticky right-0 z-10 bg-background text-right shadow-[-8px_0_8px_-8px_rgba(0,0,0,0.15)]">
+                      <div className="flex flex-wrap items-center justify-end gap-1">
                         <Button
                           variant="ghost"
                           size="sm"
@@ -640,13 +801,23 @@ export default function Apps() {
                             >
                               <UserCog className="h-4 w-4" />
                             </Button>
+                            {/* 禁用按钮不可聚焦 ⇒ 原因只写 title 等于没有(R1-uxw-14)。
+                                sr-only 的说明 + aria-describedby 让读屏也能读到"先解冻再上架"。 */}
+                            {frozen && (
+                              <span id={`frozen-reason-${row.app_id}`} className="sr-only">
+                                已冻结:交付面一律 404,先解冻再上架
+                              </span>
+                            )}
                             <Button
                               size="sm"
                               variant="outline"
                               // 冻结优先(P2-6):冻结期间交付面一律 404,所以"上架"没有意义
                               // (服务端同样返回 403 APP_FROZEN + hint,这里只是别让它可点)。
                               disabled={isBusy || frozen}
-                              onClick={() => { void togglePublished(row) }}
+                              aria-describedby={frozen ? `frozen-reason-${row.app_id}` : undefined}
+                              // R1-uxw-13:下架 = 全组织员工当场不可用(与冻结同级的可见性
+                              // 破坏),必须确认;上架是恢复动作,不打扰(与解冻一致)。
+                              onClick={() => { row.enabled ? setUnpublishTarget(row) : void togglePublished(row) }}
                               title={
                                 frozen
                                   ? '已冻结:交付面一律 404,先解冻再上架'
@@ -731,6 +902,11 @@ export default function Apps() {
             {ownerTarget && (
               <p className="text-xs text-muted-foreground">当前负责人:{ownerTarget.owner || '—'}</p>
             )}
+            {ownerError && (
+              <p data-testid="owner-error" role="alert" aria-live="assertive" className="text-sm text-destructive">
+                {ownerError}
+              </p>
+            )}
           </div>
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => { setOwnerTarget(null); setOwnerInput('') }}>取消</Button>
@@ -785,6 +961,41 @@ export default function Apps() {
               }}
             >
               {reviewPrompt ? '确认开启' : '确认关闭'}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 下架确认(R1-uxw-13):下架 = 全组织员工当场不可用,与冻结同级的可见性破坏,
+          此前却是一键生效;而同类风险的冻结/审批开关/拒绝都有重确认 ⇒ 语义不成体系。
+          规则收敛为:**可见性下降/破坏性动作要确认(冻结、下架、关闭子域、拒绝),
+          恢复类动作不打扰(解冻、上架)**。 */}
+      <Dialog open={unpublishTarget !== null} onOpenChange={(open) => { if (!open) setUnpublishTarget(null) }}>
+        <DialogContent data-testid="unpublish-confirm-dialog">
+          <DialogHeader>
+            <DialogTitle>
+              下架应用{unpublishTarget ? `:${unpublishTarget.title || unpublishTarget.app_id}` : ''}?
+            </DialogTitle>
+            <DialogDescription>下架影响该应用的全部使用者,但不删除任何数据。</DialogDescription>
+          </DialogHeader>
+          <ul className="list-disc space-y-1 pl-5 text-sm">
+            <li><strong>员工端立即不可用</strong>:该应用对所有人消失,已在用的人当场打不开。</li>
+            <li><strong>数据保留</strong>:应用数据与已发布版本都不动,重新上架即恢复。</li>
+            <li><strong>如何回滚</strong>:本页「上架」按钮即可恢复(恢复类动作不需要再确认)。</li>
+          </ul>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => { setUnpublishTarget(null) }}>取消</Button>
+            <Button
+              variant="destructive"
+              data-testid="unpublish-confirm"
+              disabled={busy !== ''}
+              onClick={() => {
+                const row = unpublishTarget
+                setUnpublishTarget(null)
+                if (row) void togglePublished(row)
+              }}
+            >
+              确认下架
             </Button>
           </div>
         </DialogContent>
@@ -849,6 +1060,11 @@ export default function Apps() {
               onChange={(e) => { setRejectReason(e.target.value) }}
             />
             <p className="text-xs text-muted-foreground">{rejectReason.length}/200</p>
+            {rejectError && (
+              <p data-testid="reject-error" role="alert" aria-live="assertive" className="rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-sm text-destructive">
+                {rejectError}
+              </p>
+            )}
           </div>
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => { setRejectTarget(null); setRejectReason('') }}>取消</Button>
@@ -871,6 +1087,25 @@ export default function Apps() {
             <DialogTitle>{detail ? `${detail.title || detail.app_id} 详情` : '应用详情'}</DialogTitle>
             <DialogDescription>{detail?.app_id}</DialogDescription>
           </DialogHeader>
+          {/* R1-uxw-1:审核的成败反馈渲染在**对话框内部**。
+              此前它走页面级的 apps-error/apps-flash,而 Radix 的整屏遮罩
+              (`fixed inset-0 z-50 bg-black/80`)把它压在下面 —— 真实 Chromium 的
+              elementFromPoint 命中测试显示:错误文本中心点命中的是弹窗标题,
+              管理员看到的是"点了没反应"。放这里 = 天然浮在遮罩之上。 */}
+          {detailFeedback && (
+            <div
+              data-testid="detail-feedback"
+              role={detailFeedback.kind === 'err' ? 'alert' : 'status'}
+              aria-live={detailFeedback.kind === 'err' ? 'assertive' : 'polite'}
+              className={`rounded-md border px-3 py-2 text-sm ${
+                detailFeedback.kind === 'err'
+                  ? 'border-destructive/40 bg-destructive/10 text-destructive'
+                  : 'border-border bg-muted'
+              }`}
+            >
+              {detailFeedback.text}
+            </div>
+          )}
           {detail && (
             <dl className="grid grid-cols-[6.5rem_1fr] gap-x-3 gap-y-2 text-sm">
               <dt className="text-muted-foreground">用途</dt>
@@ -878,7 +1113,7 @@ export default function Apps() {
               <dt className="text-muted-foreground">数据敏感度</dt>
               <dd>{detail.data_sensitivity || '—'}</dd>
               <dt className="text-muted-foreground">当前生效版本</dt>
-              <dd className="font-mono">{detail.current_version || '—'}</dd>
+              <dd className="font-mono" data-testid="detail-current-version">{currentVersionShown || '—'}</dd>
               <dt className="text-muted-foreground">当前版本 ID</dt>
               <dd className="font-mono">{detail.current_release_id > 0 ? detail.current_release_id : '—'}</dd>
               <dt className="text-muted-foreground">创建时间</dt>
@@ -905,10 +1140,20 @@ export default function Apps() {
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground">
-                当前生效版本:<span className="font-mono">{pendingCurrent || '—'}</span>
+                {/* 与上面 dl 里的「当前生效版本」共用同一个取值(currentVersionShown):
+                    两处各读各的会出现"同屏两个当前生效版本"(R1-uxw-5)。 */}
+                当前生效版本:<span className="font-mono" data-testid="pending-current-version">{currentVersionShown || '—'}</span>
                 (审批通过后线上切到新版本;拒绝会释放归档字节)
               </p>
               {pendingError && <p className="text-sm text-destructive" data-testid="pending-error">{pendingError}</p>}
+              {/* 刚提交的驳回:理由必须留在管理员眼前(服务端 DTO 还没有 reason 字段,
+                  见 PendingRelease.reason;补上之后由下面的 rel.reason 接管)。 */}
+              {lastRejection && (
+                <p className="rounded-md border border-border bg-muted px-2 py-1.5 text-xs" data-testid="last-rejection">
+                  已拒绝 v{lastRejection.version}
+                  {lastRejection.reason !== '' ? `:${lastRejection.reason}` : '(未填写理由)'}
+                </p>
+              )}
               {!pendingError && pending.length === 0 ? (
                 <p className="text-sm text-muted-foreground" data-testid="pending-empty">
                   没有待审版本。员工发布新版本后,若组织开启了更新审批,会出现在这里。
@@ -927,6 +1172,13 @@ export default function Apps() {
                         </div>
                         {rel.changelog && (
                           <div className="text-xs text-muted-foreground">变更说明:{rel.changelog}</div>
+                        )}
+                        {/* 审核理由(驳回理由):服务端 DTO 目前不下发 reason(见接口注释),
+                            这里先把渲染位留好 —— 字段一到,理由就显示在审批队列行里。 */}
+                        {rel.reason && (
+                          <div className="text-xs text-destructive" data-testid={`pending-reason-${rel.version}`}>
+                            审核理由:{rel.reason}
+                          </div>
                         )}
                       </div>
                       {/* 无写权限时**禁用而不是隐藏**(与开关同风格):待审清单本身是
