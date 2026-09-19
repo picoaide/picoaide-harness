@@ -43,6 +43,8 @@ import (
 //
 // 变异验证（改回缺陷实现时哪条必红）：
 //   - 去掉 checkStartupMemory 的 `if !enabled` ⇒ TestMemorySelfCheckSkippedWhenDisabled 必红；
+//   - 把 Source=none 的跳过分支删掉（拿 0 去判）⇒ TestMemorySelfCheckSkipsWhenUnknownButSaysSo 必红；
+//   - 自检改回 readMemAvailable（只看 /proc）⇒ TestMemorySelfCheckUsesCgroupAwareAvailability 必红；
 //   - 启用档放宽判据（例如恒返回 nil）⇒ TestMemorySelfCheckFailClosedWhenEnabled 必红；
 //   - 去掉 mustRefuseStartupForIsolation 的 usable 判断 ⇒ TestIsolationRequireRefusesStartup 必红；
 //   - main.go 的 ReadTimeout 改回 `60 * time.Second` ⇒ TestServerReadTimeoutUsesLimits 必红；
@@ -58,7 +60,7 @@ func TestMemorySelfCheckSkippedWhenDisabled(t *testing.T) {
 	var lines []string
 	logf := func(format string, args ...any) { lines = append(lines, format) }
 
-	if err := checkStartupMemory(false, 1, readyz.DefaultMemoryPlan(), logf); err != nil {
+	if err := checkStartupMemory(false, memAvail(1), readyz.DefaultMemoryPlan(), logf); err != nil {
 		t.Fatalf("未启用子域时必须跳过内存自检（不能挡住启动）：%v", err)
 	}
 	joined := strings.Join(lines, "\n")
@@ -73,29 +75,86 @@ func TestMemorySelfCheckSkippedWhenDisabled(t *testing.T) {
 // TestMemorySelfCheckFailClosedWhenEnabled：启用子域时判据**一点没放宽** ——
 // 理论峰值 > 可用内存 70% ⇒ 拒绝启动（§4.3：拒绝启动而不是等 OOM）。
 func TestMemorySelfCheckFailClosedWhenEnabled(t *testing.T) {
-	if err := checkStartupMemory(true, 1, readyz.DefaultMemoryPlan(), func(string, ...any) {}); err == nil {
-		t.Fatal("启用子域 + 极小 MemAvailable ⇒ 必须拒绝启动")
+	if err := checkStartupMemory(true, memAvail(1), readyz.DefaultMemoryPlan(), func(string, ...any) {}); err == nil {
+		t.Fatal("启用子域 + 极小可用内存 ⇒ 必须拒绝启动")
 	}
-	// 四笔账之和恰好卡在 70% 水位 ⇒ 通过；少 1 字节 ⇒ 拒绝。
+	// 各笔账之和恰好卡在 70% 水位 ⇒ 通过；少 1 字节 ⇒ 拒绝。
+	plan := readyz.DefaultMemoryPlan()
 	need := readyz.InstancePoolBytes + readyz.CompilePeakBytes +
-		int64(limits.UploadPeakPerUploadBytes) + readyz.CacheResidentBytes
+		int64(limits.UploadPeakPerUploadBytes) + readyz.CacheResidentBytes +
+		int64(plan.Instances)*plan.AppDBPageCachePerHandleBytes
 	guard := int64(limits.MemoryPeakGuardPercent)
 	avail := (need*100 + guard - 1) / guard
-	if err := checkStartupMemory(true, avail, readyz.DefaultMemoryPlan(), func(string, ...any) {}); err != nil {
+	if err := checkStartupMemory(true, memAvail(avail), readyz.DefaultMemoryPlan(), func(string, ...any) {}); err != nil {
 		t.Fatalf("恰好等于水位应通过：%v", err)
 	}
-	if err := checkStartupMemory(true, avail-1, readyz.DefaultMemoryPlan(), func(string, ...any) {}); err == nil {
+	if err := checkStartupMemory(true, memAvail(avail-1), readyz.DefaultMemoryPlan(), func(string, ...any) {}); err == nil {
 		t.Fatal("超过水位 1 字节必须拒绝启动（判据不得放宽）")
 	}
-	// 正常机器：放行 + 明细进日志（运维据此看到四笔账的构成）。
+	// 正常机器：放行 + 明细进日志（运维据此看到各笔账的构成与**内存来源**）。
 	var lines []string
-	if err := checkStartupMemory(true, 64<<30, readyz.DefaultMemoryPlan(), func(format string, args ...any) {
-		lines = append(lines, format)
+	if err := checkStartupMemory(true, memAvail(64<<30), readyz.DefaultMemoryPlan(), func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
 	}); err != nil {
 		t.Fatalf("64 GiB 可用内存应通过：%v", err)
 	}
-	if !strings.Contains(strings.Join(lines, "\n"), "memory budget") {
-		t.Fatalf("启用时必须打印四笔账明细：%v", lines)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "memory budget") {
+		t.Fatalf("启用时必须打印各笔账明细：%v", lines)
+	}
+	// 来源必须进日志（R1-rt-1：排障时第一眼要能看出这个数是宿主读的还是 cgroup 算的）。
+	if !strings.Contains(joined, "mem_source=host") {
+		t.Fatalf("日志必须带内存来源：%v", lines)
+	}
+}
+
+// memAvail 构造一个"已读到"的可用内存结果（测试里不碰真实 /proc 与 cgroup）。
+func memAvail(bytes int64) readyz.MemoryAvailability {
+	return readyz.MemoryAvailability{Bytes: bytes, Source: readyz.MemorySourceHost, Detail: "测试注入"}
+}
+
+// TestMemorySelfCheckSkipsWhenUnknownButSaysSo：读不到可用内存时**跳过但大声说**（R1-rt-1）。
+//
+// 这一条同时钉住"保留可部署性"（不拒绝启动）与"fail-loud"（日志必须点名跳过）两半。
+// 变异：把 Source=none 的分支删掉（让 CheckStartupMemoryFor 拿 0 去判）⇒ 第一个断言必红
+// （会变成拒绝启动）；把日志删掉 ⇒ 第二个断言必红。
+func TestMemorySelfCheckSkipsWhenUnknownButSaysSo(t *testing.T) {
+	unknown := readyz.MemoryAvailability{Source: readyz.MemorySourceNone, Detail: "两个来源都读不到"}
+	var lines []string
+	logf := func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	if err := checkStartupMemory(true, unknown, readyz.DefaultMemoryPlan(), logf); err != nil {
+		t.Fatalf("读不到可用内存时不得拒绝启动（保留可部署性）：%v", err)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "未取到可用内存，跳过内存自检") {
+		t.Fatalf("跳过必须是显式的日志（不许与'内存充足'同形）：%q", joined)
+	}
+	if !strings.Contains(joined, "两个来源都读不到") {
+		t.Fatalf("日志必须带上读取失败的原因：%q", joined)
+	}
+	if strings.Contains(joined, "memory budget") {
+		t.Fatalf("跳过时不该打印账面明细（会误导成已判定）：%q", joined)
+	}
+}
+
+// TestMemorySelfCheckUsesCgroupAwareAvailability：R1-rt-1 的 P0 现场（装配级判据）：
+// 宿主 7 GiB 可用 + 容器限额 256 MiB 的部署必须拒绝启动；旧实现只看 /proc/meminfo，
+// 读到宿主 7 GiB 就放行，随后被内核 OOM-kill。
+//
+// 读取实现本身的四形态（v2 有上限 / v2=max / v1 / 全读不到）由 readyz 包的用例覆盖，
+// 这里钉的是"装配自检用的是带来源的读取结果，而不是裸字节数"。
+func TestMemorySelfCheckUsesCgroupAwareAvailability(t *testing.T) {
+	limited := readyz.MemoryAvailability{
+		Bytes:  256 << 20,
+		Source: readyz.MemorySourceCgroup,
+		Detail: "cgroup 限额 256 MiB − 用量 0 MiB = 剩余 256 MiB；宿主 MemAvailable 7168 MiB（取较小者：cgroup 剩余）",
+	}
+	if err := checkStartupMemory(true, limited, readyz.DefaultMemoryPlan(), func(string, ...any) {}); err == nil {
+		t.Fatal("256 MiB 容器 + 默认档必须拒绝启动（宿主 7 GiB 不该放行）")
+	}
+	// 同一台机器、没有 cgroup 限额（来源=host）⇒ 放行：证明拒绝来自 cgroup 那一笔。
+	if err := checkStartupMemory(true, memAvail(7<<30), readyz.DefaultMemoryPlan(), func(string, ...any) {}); err != nil {
+		t.Fatalf("宿主 7 GiB 且无 cgroup 限额应放行：%v", err)
 	}
 }
 
@@ -166,7 +225,8 @@ func TestWasmPlatformWiringPresent(t *testing.T) {
 		needle string
 		why    string
 	}{
-		{"checkStartupMemory(enabled, readMemAvailable(), plan, log.Printf)", "内存四笔账自检必须按 enabled 分档（P2-8）且按部署档位算账"},
+		{"checkStartupMemory(enabled, readMemoryAvailability(), plan, log.Printf)", "内存四笔账自检必须按 enabled 分档（P2-8）、按部署档位算账，且用 cgroup 感知的读取结果（R1-rt-1）"},
+		{"MemAvailable: readMemoryAvailability", "可用内存的来源与数值必须暴露在 /readyz 上（R1-rt-1）"},
 		{"memprofile.FromEnv(os.Getenv)", "内存档位必须来自部署配置（未知档位 fail-loud）"},
 		{"MemoryProfile: prof,", "档位必须真的喂给 appserver（声明与执行同一份数）"},
 		{"mustRefuseStartupForIsolation(mode, usable)", "require 档必须真的拒绝启动（P2-1）"},

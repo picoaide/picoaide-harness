@@ -182,12 +182,14 @@ func Parse(data []byte) (Config, *apperr.Error) {
 	return c, nil
 }
 
-// decode 只做 schema 解析与旧形态映射，**不做语义校验**（不检查"whitelist 模式必须
-// 有名单"）。唯一的外部用途是 AccessOfConfigJSON（显示投影）：鉴权与发布一律走 Parse。
-func decode(data []byte) (Config, *apperr.Error) {
-	var c Config
+// decodeObject 把配置字节解成"字段 → 原始值"的 map，并完成**形态**检查
+// （体积上限 / 合法 JSON / 顶层必须是对象 / 对象之后无多余内容）。
+//
+// 它是 decode 与 ParseUpdate（更新发布的字段继承）共用的第一步：两者对"什么样的
+// 字节算一份配置"必须给出**逐字相同**的结论，否则"先合并再解析"会绕开某条检查。
+func decodeObject(data []byte) (map[string]json.RawMessage, *apperr.Error) {
 	if len(data) > limits.AppConfigMaxBytes {
-		return c, bad("", "应用配置文件超过大小上限").
+		return nil, bad("", "应用配置文件超过大小上限").
 			WithDetail("size", len(data)).
 			WithDetail("max", limits.AppConfigMaxBytes).
 			WithHint(fmt.Sprintf("%s 上限 %d KiB（不计入 wasm 体积上限），请精简声明文本",
@@ -198,21 +200,32 @@ func decode(data []byte) (Config, *apperr.Error) {
 	var raw map[string]json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if err := dec.Decode(&raw); err != nil {
-		return c, bad("", "应用配置文件不是合法 JSON").
+		return nil, bad("", "应用配置文件不是合法 JSON").
 			WithCause(err).
 			WithHint(fmt.Sprintf("%s 必须是 UTF-8 JSON 对象，字段见 skill 模板（references/app-config.md）",
 				limits.AppConfigFileName))
 	}
 	if dec.More() {
-		return c, bad("", "应用配置文件在 JSON 对象之后还有多余内容").
+		return nil, bad("", "应用配置文件在 JSON 对象之后还有多余内容").
 			WithHint("一个文件只能有一个顶层 JSON 对象")
 	}
 	// `null` 解码进 map 是 nil 且不报错（`{}` 才是空 map）⇒ 单独拦一次，
 	// 否则"顶层必须是 JSON 对象"这条契约会被 null 静默绕过。
 	if raw == nil {
-		return c, bad("", "应用配置文件的顶层必须是 JSON 对象").
+		return nil, bad("", "应用配置文件的顶层必须是 JSON 对象").
 			WithDetail("reason", "not_object").
 			WithHint("写成 { ... }；字段见 skill 的 references/app-config.md")
+	}
+	return raw, nil
+}
+
+// decode 只做 schema 解析与旧形态映射，**不做语义校验**（不检查"whitelist 模式必须
+// 有名单"）。唯一的外部用途是 AccessOfConfigJSON（显示投影）：鉴权与发布一律走 Parse。
+func decode(data []byte) (Config, *apperr.Error) {
+	var c Config
+	raw, oerr := decodeObject(data)
+	if oerr != nil {
+		return c, oerr
 	}
 	for _, k := range sortedKeys(raw) {
 		if !knownField(k) {

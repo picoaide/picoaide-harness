@@ -72,6 +72,14 @@ type Limits struct {
 	AppDBReaders int `json:"app_db_readers"`
 }
 
+// defaultAppDBCacheKiB 是**每条 SQLite 连接**页缓存的默认值（KiB）。
+//
+// 它与 appdb 的 appConnCacheKiB（真正落到 `PRAGMA cache_size` 的编译期默认）必须同值：
+// 跨包断言在 applimits_test（`TestDefaultAppDBCacheKiBMatchesAppDB`）。为什么不在 limits
+// 包里声明：它不是"应用可见的上限"（可由控制台覆盖），把它塞进 limits 的表会变成
+// 第二个旋钮（表里的条目会被当成上限来读）。
+const defaultAppDBCacheKiB = 1024
+
 // Defaults 返回编译期默认值（与历史行为逐值一致；limits 包仍是默认值唯一来源）。
 func Defaults() Limits {
 	return Limits{
@@ -85,7 +93,7 @@ func Defaults() Limits {
 		ModuleCacheMB:      int(limits.ModuleCacheMaxBytes >> 20),
 		ModuleCacheIdleMin: int(limits.ModuleCacheIdleTTL.Minutes()),
 		AppDBIdleMin:       3,
-		AppDBCacheKiB:      1024,
+		AppDBCacheKiB:      defaultAppDBCacheKiB,
 		AppDBReaders:       limits.AppDBReaders,
 	}
 }
@@ -200,26 +208,48 @@ func (l Limits) InstanceMemoryPages() uint32 {
 	return uint32(l.InstanceMemoryMB) * (1 << 20) / uint32(limits.WasmPageSize)
 }
 
-// Budget 计算四笔账（并发×实例上限 + 编译峰值 + 上传峰值 + 模块缓存），
-// 与启动自检**同一判据**（availableBytes ≤ 0 ⇒ 不判定）。
+// Budget 计算内存账（并发×实例上限 + 编译峰值 + 上传峰值 + 模块缓存 + 应用库页缓存），
+// 与启动自检**同一判据**（availableBytes < 0 ⇒ 读不到 ⇒ 不判定；= 0 ⇒ 真的没有 ⇒ 判失败）。
 //
-// # 这笔账里**没有**SQLite 页缓存，去处写在这里（不静默漏掉）
+// # SQLite 页缓存**在账里**（R1-rt-8，2026-09-19）
 //
-// 四笔账的构成来自 readyz.MemoryPlan，只有四项：实例池、编译峰值、上传峰值、
-// 模块缓存驻留。应用库的页缓存**从来不在其中**（appdb_cache_kib 当初进配置面时也不在），
-// 它的上界是另一条独立的乘积式：
+// 它过去不在其中，理由是"可回收的缓存，不是实例"；但那个理由给出的是一条独立上界：
 //
 //	appdb_cache_kib × (1 + app_db_readers) × 应用库句柄数（≤ max_instances）
 //
-// 默认配置（1024 KiB × 5 × ≤32）= 160 MiB 的**最坏情况**常驻，且只在"这么多应用
-// 同时被访问过"时才可能达到（句柄按 appdb_idle_min 空闲回收）。它不进四笔账的理由：
-// 它是"缓存"而不是"实例"（可回收、不构成 OOM 的直接原因），且与其它三笔不同量级；
-// 但**扩大 app_db_readers 会线性抬高这条上界**（16 时最坏 544 MiB），所以
-// Validate 的 app_db_readers 分支把这件事写进 hint，控制台改这一项时要一并看页缓存。
+// 默认档（1024 KiB × 5 × ≤32）= 160 MiB，而**允许的最大组合**是
+// 64 MiB × 17 × 256 ≈ 272 GiB —— 控制台可以把它配到远超物理内存而保存判据一字不变
+// （四笔账预览与 ok 都不动）。页缓存只在连接关闭（空闲 appdb_idle_min 或污染回收）时
+// 释放，"可回收所以不计"在"句柄满池"的稳态下并不成立，因此现在把它作为**独立一笔**
+// 计入（不并入模块缓存：两者的失效路径与调节旋钮不同，合并会让"该调小哪一项"不可读）。
 //
 // 标签用默认的 "settings"；需要如实反映来源时用 BudgetFor。
 func (l Limits) Budget(availableBytes int64) readyz.MemoryBudget {
 	return l.BudgetFor(availableBytes, "settings")
+}
+
+// AppDBPageCachePerHandleBytes 返回**每个应用库句柄**的 SQLite 页缓存上界（字节）：
+// (1 条写连接 + app_db_readers 条只读连接) × 每条连接的 appdb_cache_kib。
+//
+// 为什么是"每句柄"而不是总数：句柄池容量 = max_instances（appserver 的
+// newAppDBPoolWithMax(…, lim.MaxInstances)），所以总数 = 单价 × max_instances，
+// 由 readyz.MemoryPlan 用**同一个** Instances 乘出来（两处乘数不可能漂移）。
+//
+// 零值（未初始化/缺失字段）按 applimits 的默认值折算：旧版本落库的设置里没有
+// app_db_readers 时，ParseStored 已经补了默认值；这里再兜一层是为了让"直接构造的
+// Limits{}"也算得出账，而不是把这一笔静默算成 0。
+func (l Limits) AppDBPageCachePerHandleBytes() int64 {
+	readers, kib := l.AppDBReaders, l.AppDBCacheKiB
+	if readers <= 0 {
+		readers = limits.AppDBReaders
+	}
+	if readers > limits.AppDBReadersMax {
+		readers = limits.AppDBReadersMax
+	}
+	if kib <= 0 {
+		kib = defaultAppDBCacheKiB
+	}
+	return int64(1+readers) * int64(kib) << 10
 }
 
 // BudgetFor 与 Budget 同公式，只是把"这套数值来自哪里"写进结果的 Profile 字段。
@@ -235,10 +265,11 @@ func (l Limits) BudgetFor(availableBytes int64, profile string) readyz.MemoryBud
 		profile = "settings"
 	}
 	return readyz.ComputeMemoryBudgetFor(availableBytes, readyz.MemoryPlan{
-		Profile:             profile,
-		Instances:           l.MaxInstances,
-		InstanceMemoryBytes: int64(l.InstanceMemoryMB) << 20,
-		ModuleCacheBytes:    int64(l.ModuleCacheMB) << 20,
+		Profile:                      profile,
+		Instances:                    l.MaxInstances,
+		InstanceMemoryBytes:          int64(l.InstanceMemoryMB) << 20,
+		ModuleCacheBytes:             int64(l.ModuleCacheMB) << 20,
+		AppDBPageCachePerHandleBytes: l.AppDBPageCachePerHandleBytes(),
 	})
 }
 

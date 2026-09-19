@@ -505,28 +505,53 @@ func (h *Handlers) reviewRelease(c *gin.Context, approve bool) {
 		return
 	}
 
-	// 通过之后把 apps.current_release_id 对齐到"最新 approved"：它是列表/审计里
-	// 「当前生效版本」的投影（线上交付走 max(id) approved，两者必须同口径）。
-	// 取最新而不是直接取本次版本：审批一个**更旧**的待审版本时，生效版本仍然是
-	// 更新的那个 approved 版本。
-	current := ""
-	if approve {
-		latest, lerr := serverstore.LatestApprovedWasmReleaseMeta(ctx, h.opt.DB, appID)
-		if lerr != nil {
-			// 状态已经是 approved，但投影没更新。这不是"审核失败"，而是平台侧写入
-			// 故障；重复调用本端点幂等（会再走一次投影同步），所以如实报错让管理员重试。
-			writeErr(c, internalErr("审核已通过，但生效版本投影更新失败（请重试一次）", lerr))
-			return
-		}
+	// 审核落定之后把 apps 行的**投影**重算为"最新 approved 版本"的配置
+	// （R1-pm-9）：current_release_id 与 config_json/purpose/data_sensitivity 是同一份
+	// 配置的三个投影列，必须一起回到同一版。
+	//
+	// 两条路径共用同一段，因为它们要的是同一个答案：
+	//   - **approve**：新版本成为生效版本 ⇒ 投影切到它（目录徽标/生效版本随审批生效）；
+	//   - **reject** ：被拒版本从未生效 ⇒ 投影**恢复**成仍在生效的那一版 ——
+	//     否则待审版本带来的 access/负责人/用途会永久留在目录上（审核期间展示一个
+	//     没被任何人批准的访问级别，正是这条缺陷的下游后果）。
+	//
+	// 取最新 approved 而不是本次版本：审批一个**更旧**的待审版本时（例如 v2 待审、
+	// v3 已通过），生效版本仍然是更新的那个 approved 版本 —— 与线上交付
+	// （max(id) approved）同口径。
+	//
+	// 没有任何 approved 版本（首版待审被拒）时不动投影：没有可投影的基线，
+	// 而"把一行从未生效的配置留着"与"把它清空"对目录都没有影响（目录只列有生效
+	// 版本的应用，见 read.go 的目录条件）。
+	current := h.currentVersionOf(ctx, appID, app)
+	latest, lerr := serverstore.LatestApprovedWasmReleaseMeta(ctx, h.opt.DB, appID)
+	switch {
+	case errors.Is(lerr, serverstore.ErrNotFound):
+		// 没有已通过版本：保持现状（上面已取到"当前生效版本"= 空或回收后的残留）。
+	case lerr != nil:
+		// 状态已经落库（approved/rejected），但投影没更新。这不是"审核失败"，而是
+		// 平台侧写入故障；重复调用本端点幂等（会再走一次投影同步），所以如实报错
+		// 让管理员重试。
+		writeErr(c, internalErr("审核结果已落库，但应用投影更新失败（请重试一次）", lerr))
+		return
+	default:
 		if latest.ID != app.CurrentReleaseID {
 			if serr := serverstore.SetWasmAppCurrentRelease(ctx, h.opt.DB, appID, latest.ID); serr != nil {
-				writeErr(c, internalErr("审核已通过，但生效版本投影更新失败（请重试一次）", serr))
+				writeErr(c, internalErr("审核结果已落库，但应用投影更新失败（请重试一次）", serr))
+				return
+			}
+		}
+		// 配置列与 config_json 同源同版：purpose/data_sensitivity 从该版本的
+		// config_json 现解（解析失败回落空串，与 AccessOfConfigJSON 同向）。
+		// 空 config_json 的历史行不写 —— 不能拿"没有配置"去清掉现有投影。
+		if strings.TrimSpace(latest.ConfigJSON) != "" {
+			purpose, sensitivity := appcfg.DeclarationsOfConfigJSON(latest.ConfigJSON)
+			if serr := serverstore.SetWasmAppConfig(ctx, h.opt.DB, appID,
+				latest.ConfigJSON, purpose, sensitivity); serr != nil {
+				writeErr(c, internalErr("审核结果已落库，但配置投影更新失败（请重试一次）", serr))
 				return
 			}
 		}
 		current = latest.Version
-	} else {
-		current = h.currentVersionOf(ctx, appID, app)
 	}
 
 	// 审计：动作名沿用既有风格（wasm_app_* 前缀、一条动作一个名字）；明细里

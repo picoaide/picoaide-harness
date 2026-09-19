@@ -80,6 +80,24 @@ type Options struct {
 	// 起手再覆盖是允许的：该字段**不进编译缓存键**（§4.3.1-a 实测），因此不影响
 	// 与编译进程共用磁盘缓存。
 	MemoryPages uint32
+	// OnModuleClose 是"实例即将关闭"的观察钩子（**测试专用**：生产路径永远为 nil，
+	// 与 compile.Options.ChildArgs 同一口径）。
+	//
+	// 为什么需要一个钩子：R1-rt-18 的判据是"**等 guest 真正结束之后**才关闭实例"，而这件事
+	// 从外部完全不可观测 —— 响应照旧成功、指标照旧一样，唯一的差别是关闭**时刻**与 guest
+	// 当时是否还在跑。只靠 `-race` 抓数据竞争等于把判据押在时序运气上（实测单跑常常不触发）。
+	// 钩子里的 GuestFinished 由 guest goroutine 自己的结束信号判定（不是复述调用点的说法），
+	// 因此"没等就关"会被如实记成 false。
+	OnModuleClose func(ModuleClose)
+}
+
+// ModuleClose 是一次"实例即将关闭"的事件（见 Options.OnModuleClose）。
+type ModuleClose struct {
+	// AppID 是本次请求的应用标识（观测用）。
+	AppID string
+	// GuestFinished 表示关闭那一刻 guest 的 `_start` 调用**确实**已经返回
+	// （由 guest goroutine 关闭的信号通道判定，与调用点是否走过 settle 无关）。
+	GuestFinished bool
 }
 
 // Runtime 是执行侧运行时：持有一个 wazero.Runtime（编译产物缓存 + WASI 宿主模块），
@@ -91,7 +109,9 @@ type Runtime struct {
 	logger *log.Logger
 	// memoryPages 是本运行时的线性内存上限（§4.3 R22），用于与请求侧期望值对拍。
 	memoryPages uint32
-	seq         atomic.Uint64
+	// onModuleClose 是 Options.OnModuleClose 的装配期快照（nil ⇒ 无观察者）。
+	onModuleClose func(ModuleClose)
+	seq           atomic.Uint64
 }
 
 // New 装配执行侧运行时。
@@ -134,7 +154,8 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Runtime{rt: rt, cache: cache, ownCch: own, logger: logger, memoryPages: pages}, nil
+	return &Runtime{rt: rt, cache: cache, ownCch: own, logger: logger, memoryPages: pages,
+		onModuleClose: opts.OnModuleClose}, nil
 }
 
 // Close 关闭运行时与其自建的编译缓存。
@@ -254,15 +275,26 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 	guestStart := time.Now()
 	mod, err := r.rt.InstantiateModule(guestCtx, module, mc)
 	if err != nil {
-		res.KillReason = classifyInstantiateError(err)
+		res.KillReason = classifyInstantiateError(err, r.memoryPages)
 		res.Metrics.StderrTail = stderr.Tail()
 		fillFailureMetrics(&res.Metrics, res.KillReason)
 		res.Metrics.CPUMs = msSince(guestStart)
 		return res, nil
 	}
+	// guestFinished 在 guest 的 `_start` 调用**真正返回**（含 panic 被兜底）时关闭。
+	//
+	// 两条理由（R1-rt-18）：
+	//  1. 它是"实例可以安全关闭"的地面真值：`rec` 据此判定关闭那一刻 guest 是否还在跑，
+	//     供测试钩子断言（不复述调用点自己的说法，否则断言会退化成自证）；
+	//  2. 关闭它发生在 `done <- callErr` **之前** ⇒ `settle` 收到 done 就等于它已关闭
+	//     （happens-before），判定不会因调度抖动误报。
+	guestFinished := make(chan struct{})
+	// rec 记录"实例关闭"这一时刻（含测试钩子所需的事实：关闭时 guest 是否已结束）。
+	// 只用 Serve 自己的 goroutine 读写，因此不需要锁。
+	rec := &moduleCloseRecord{appID: appIDOr(req.Envelope.AppID), guestFinished: guestFinished}
 	defer func() {
 		// module 关闭放最后：它可能已经被超时路径关掉，重复关闭是幂等的。
-		_ = mod.Close(context.Background())
+		r.closeModule(mod, rec)
 	}()
 
 	startFn := mod.ExportedFunction("_start")
@@ -289,11 +321,26 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 
 	done := make(chan error, 1)
 	go func() {
-		_, callErr := startFn.Call(guestCtx)
-		// guest 结束后**立刻关掉 stdout 写端**：否则宿主的读端永远等不到 EOF
-		// （写端在我们自己手里），"应用直接退出/崩溃、不写响应帧"的路径会一直卡到
-		// 预算到点，把 RUNTIME_TRAP / RUNTIME_GUEST_EXIT 误报成 RUNTIME_TIMEOUT。
-		_ = stdoutW.CloseWithError(io.EOF)
+		var callErr error
+		func() {
+			defer func() {
+				// 兜底 recover：guest 线程（含 WASI 宿主函数）里的 panic **绝不能打死整个
+				// 服务进程** —— §7.4 的归因底线是"一个应用的问题只影响它自己"。wazero 自己
+				// 也用 closeWithExitCodeWithoutClosingResource 规避同类问题，说明"直接
+				// Close 一个正在跑的实例"是误用（它的 ensureResourcesClosed 会把 m.Sys
+				// 置 nil，而仍在执行的 WASI 调用正在读它 ⇒ 数据竞争 ⇒ nil 解引用）。
+				if p := recover(); p != nil {
+					r.logf("guest 执行 panic app=%s: %v", req.Envelope.AppID, p)
+					callErr = fmt.Errorf("runtime: guest panic: %v", p)
+				}
+				// guest 结束后**立刻关掉 stdout 写端**：否则宿主的读端永远等不到 EOF
+				// （写端在我们自己手里），"应用直接退出/崩溃、不写响应帧"的路径会一直卡到
+				// 预算到点，把 RUNTIME_TRAP / RUNTIME_GUEST_EXIT 误报成 RUNTIME_TIMEOUT。
+				_ = stdoutW.CloseWithError(io.EOF)
+				close(guestFinished)
+			}()
+			_, callErr = startFn.Call(guestCtx)
+		}()
 		done <- callErr
 	}()
 
@@ -308,7 +355,17 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 	// 响应帧后自旋 5s ⇒ 耗时 1.000s、code=RUNTIME_TIMEOUT、响应体被丢掉）。
 	// §7.2 把响应信封定义为"应用的答案"，§7.4 的 RUNTIME_TIMEOUT 语义是"**没有答案**的预算耗尽"
 	// ⇒ 丢掉已有的合法答案既增加延迟、又白占执行槽（§7.3 的端到端预算），还与"绝不把失败报成
-	// 成功"的对偶（**也绝不把成功报成失败**）冲突。所以：立刻取消 + 关闭实例，按该响应返回成功。
+	// 成功"的对偶（**也绝不把成功报成失败**）冲突。所以：立刻取消 guest 的预算、按该响应返回成功。
+	//
+	// ⚠️ R1-rt-18（P0，已实测数据竞争）：**取消预算 ≠ 可以立刻关闭实例**。旧实现在这里
+	// `cancelGuest` 之后直接 `mod.Close`，而 guest goroutine 仍在跑 —— wazero 的
+	// `ensureResourcesClosed` 会把 `m.Sys` 置 nil，正在执行的 WASI 调用（Go wasip1 的
+	// nanosleep/time.Now 走 clock_time_get）读到 nil ⇒ 数据竞争 + nil 解引用 panic，而那个
+	// goroutine 没有 recover ⇒ **整个服务端进程崩溃**（多租户同时中断）。现在按正常出口同一
+	// 机制收尸：等 guest 真正结束（最多 postKillGrace），再关闭实例。
+	//
+	// 窗口预算的边界（语义不许退化）：宽限到点**不影响结论** —— 响应早就拿到了，照旧按成功
+	// 返回；只是记一条日志说明"实例未在宽限内退出"（那是一个应用赖着不走的事实，不是请求失败）。
 	//
 	// 注意这只覆盖"**已经拿到结论**"这一条：没有响应帧的路径（预算耗尽 ⇒ RUNTIME_TIMEOUT、
 	// 正常退出 ⇒ RUNTIME_NO_RESPONSE、非零退出 ⇒ RUNTIME_GUEST_EXIT、输出超限 ⇒
@@ -316,7 +373,11 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 	if out.fatal == nil && out.response != nil {
 		samplePeak(mod, &out.peak)
 		cancelGuest(errModuleKilled)
-		_ = mod.Close(context.Background())
+		if _, settled := settle(done, guestCtx, postKillGrace); !settled {
+			// 忽略 settle 的 error：结论已定（这个响应就是应用的答案），guest 怎么结束都不改判。
+			r.logf("实例未在宽限内退出 app=%s（响应已拿到，按成功返回）", req.Envelope.AppID)
+		}
+		r.closeModule(mod, rec)
 		recordLoopMetrics(&res.Metrics, out, stderr, guestStart)
 		res.Response = *out.response
 		res.Metrics.Outcome = capapi.OutcomeOK
@@ -347,6 +408,8 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 		moduleClosed:   mod.IsClosed(),
 		hasResponse:    out.response != nil,
 		guestBudget:    guestBudget,
+		// 生效的单实例上限（R1-rt-7 的文案同源）：错误里说的"多少 MiB"必须是真的。
+		memoryPages: r.memoryPages,
 	}
 	fatal := out.fatal
 	if fatal == nil {
@@ -600,6 +663,38 @@ func hostMethodAllowed(method string) bool {
 		}
 	}
 	return false
+}
+
+// moduleCloseRecord 是"实例关闭"这一步的现场记录（每次 Serve 一个，只在 Serve 的
+// goroutine 里读写 ⇒ 不需要锁）。
+type moduleCloseRecord struct {
+	appID string
+	// guestFinished 由 guest goroutine 在 `_start` 真正返回时关闭（地面真值）。
+	guestFinished <-chan struct{}
+	// fired 保证测试钩子每次请求最多上报一次（defer 里的兜底关闭是幂等的第二道）。
+	fired bool
+}
+
+// closeModule 关闭实例，并在关闭**之前**把"guest 是否已经结束"上报给观察钩子。
+//
+// 关闭本身是幂等的（wazero：已关闭时直接返回 nil），所以早退分支显式关闭之后，
+// defer 里的兜底关闭仍可以安全再调一次。
+func (r *Runtime) closeModule(mod api.Module, rec *moduleCloseRecord) {
+	if rec == nil {
+		_ = mod.Close(context.Background())
+		return
+	}
+	if !rec.fired && r.onModuleClose != nil {
+		rec.fired = true
+		ev := ModuleClose{AppID: rec.appID}
+		select {
+		case <-rec.guestFinished:
+			ev.GuestFinished = true
+		default:
+		}
+		r.onModuleClose(ev)
+	}
+	_ = mod.Close(context.Background())
 }
 
 // settle 等 guest 结束：返回 (Call 的错误, 是否等到了)。

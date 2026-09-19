@@ -36,13 +36,20 @@ import (
 // 顺序（选它的理由见"为什么把全部文件系统工作放在落库之前"）：
 //
 //	A 纯校验      identity → app_id → 体积 → 静态(导入/导出/段表/体积) → appcfg
+//	             （appcfg 一步在**更新发布**时会先把缺席字段从上一版生效配置继承过来）
 //	B 编译        临时文件 → Compiler.Compile（真编译，60 s 预算）
 //	C 抽取        ExtractCustomSections → 写进 **staging 目录**（仍未落库）
 //	D 干跑        合成帧 Instantiate → _start → 响应帧（2 s 预算）
 //	E 占名落行    UpsertWasmApp → 复读归属 → CreateWasmRelease（拿到 release_id）
 //	F 原子改名    staging → assets/<release_id>（同一父目录，单次 rename）
-//	G 投影        SetWasmAppConfig → （非待审时）SetWasmAppCurrentRelease
+//	G 投影        （仅 approved 时）SetWasmAppConfig + SetWasmAppCurrentRelease
 //	H 收尾        审计 → 版本 GC（保留 3 版，顺带清掉被回收版本的资源目录）
+//
+// ⚠️ G 的两条写都必须被 `status == approved` 罩住（R1-pm-9）：apps 行是**目录对全员
+// 下发的投影**（access 徽标/负责人/当前版本）。待审版本没有生效，投影就必须一字不动
+// —— 否则作者提交一个"改成 public"的待审版本，全公司先看到"公开"徽标，点进去却
+// 仍被要求登录（审核只剩"卡制品"，配置展示不受控）。待审版本被**拒绝**时同样不能
+// 留下未生效的投影；两条审核路径的收口见 admin.go 的 recomputeProjection。
 //
 // **为什么把全部文件系统工作放在落库之前**：R18 的判据是"失败的发布不占版本号"。
 // 磁盘写失败（满、权限、只读挂载）是这条链路上**最可能**的失败，把它排在落库之前
@@ -118,7 +125,12 @@ var toolchainSections = map[string]struct{}{
 // needConfig=false 时允许载荷不带 config（validate 的早期用法：AI 还没写配置文件
 // 就能先验证"能不能编译、能不能跑"）；publish 一律 needConfig=true（§10.5 第 56b 项
 // 明写"配置文件缺失 ⇒ 拒发布"）。
-func (h *Handlers) prepare(c *gin.Context, appID string, wasm []byte, rawConfig json.RawMessage, version string, needConfig, requireDeclarations bool) (*staged, *apperr.Error) {
+//
+// prevConfigJSON 是**更新发布**的继承基线（上一版生效配置的 config_json，见
+// inheritBase）：非空时提交里缺席的字段沿用它的值（R1-pm-10/R1-uxc-8），空串 =
+// 首版语义（缺省仍按 schema）。publish 传 existing.ConfigJSON、validate 传同一份基线
+// —— 预检与发布必须对同一份载荷给出同一个结论，否则 AI 会看到"预检通过、发布被拒"。
+func (h *Handlers) prepare(c *gin.Context, appID string, wasm []byte, rawConfig json.RawMessage, version string, needConfig, requireDeclarations bool, prevConfigJSON string) (*staged, *apperr.Error) {
 	st := &staged{appID: appID, wasm: wasm, wasmBytes: int64(len(wasm))}
 	sum := sha256.Sum256(wasm)
 	st.checksum = hex.EncodeToString(sum[:])
@@ -133,7 +145,9 @@ func (h *Handlers) prepare(c *gin.Context, appID string, wasm []byte, rawConfig 
 				WithHint("改任何一项都要发新版（§10.5 第 56f 项）")
 		}
 	} else {
-		cfg, cerr := appcfg.Parse(rawConfig)
+		// 更新发布时**先合并再解析**：缺席字段沿用上一版生效值，显式给值以提交为准。
+		// 首版（基线为空）走的就是 Parse —— "缺省 = login" 的既有语义不回归。
+		cfg, cerr := appcfg.ParseUpdate(rawConfig, prevConfigJSON)
 		if cerr != nil {
 			return nil, cerr
 		}
@@ -267,7 +281,15 @@ func isLogicalAssetPath(p string) bool {
 func (h *Handlers) dryRun(c *gin.Context, appID, version string, wasm []byte, cfg appcfg.Config) *apperr.Error {
 	// 干跑与执行进程共用同一份磁盘编译缓存 ⇒ 这里命中的就是发布期编译过的那一条
 	// （§4.3.1-a：两侧 RuntimeConfig 必须一致，由 runtime/compile 各自的自检保证）。
-	rt, err := runtime.New(c.Request.Context(), runtime.Options{DataRoot: h.cacheRoot()})
+	//
+	// ⚠️ 单实例内存上限必须取**生效限制项**（R1-rt-7）：这条路径原先只传 DataRoot，
+	// 于是回落编译期 64 MiB（runtime.New 的 MemoryPages=0 分支）——控制台把
+	// instance_memory_mb 调小 ⇒ 干跑在 64 MiB 下放行线上跑不起来的应用；调大 ⇒ 误拒。
+	// 干跑存在的理由正是"编译通过 ≠ 能跑"，用错上限就把它变成了摆设。
+	rt, err := runtime.New(c.Request.Context(), runtime.Options{
+		DataRoot:    h.cacheRoot(),
+		MemoryPages: h.instanceMemoryPages(),
+	})
 	if err != nil {
 		return internalErr("执行侧运行时装配失败", err).WithHint("这是平台装配问题，请联系平台管理员")
 	}
@@ -327,6 +349,19 @@ func (h *Handlers) dryRun(c *gin.Context, appID, version string, wasm []byte, cf
 			WithHint("干跑用的是匿名 GET / 的合成帧、宿主能力面为空：应用应当在没有 db/ai/assets 的情况下也能应答")
 	}
 	return nil
+}
+
+// instanceMemoryPages 返回**当前生效**的单实例线性内存页数（装配侧注入的
+// applimits 闭包；未注入 —— 最小装配/单测 —— 时返回 0，让 runtime.New 回落编译期默认）。
+//
+// 为什么走闭包而不是让 api 包自己读设置：解析优先级（控制台设置 > 部署档位 > 编译期默认）
+// 与运行期下发都住在装配侧（cmd/server 的 wasmLimitsHolder），api 只负责"取当前值"。
+// 执行侧（appserver/options.go）读的是**同一个**闭包产物 ⇒ 干跑与线上同源。
+func (h *Handlers) instanceMemoryPages() uint32 {
+	if h.opt.Limits == nil {
+		return 0
+	}
+	return h.opt.Limits().InstanceMemoryPages()
 }
 
 // clipForDetail 把诊断文本裁到错误明细里能放下的长度（数值来源 = limits）。
@@ -399,7 +434,8 @@ func (h *Handlers) validate(c *gin.Context) {
 		writeErr(c, derr)
 		return
 	}
-	st, perr := h.prepare(c, appID, wasm, p.Config, releaseVersion(p.Version), false, first)
+	st, perr := h.prepare(c, appID, wasm, p.Config, releaseVersion(p.Version), false, first,
+		h.inheritBaseForApp(c.Request.Context(), appID))
 	if perr != nil {
 		writeErr(c, perr)
 		return
@@ -596,7 +632,12 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 	}
 
 	// ---- A–D：预检 + 编译 + 抽取 + 干跑（失败 ⇒ 不落行，R18）----
-	st, perr := h.prepare(c, appID, wasm, in.config, version, true, len(hist) == 0)
+	//
+	// 更新发布（existing != nil）时传上一版生效配置作为继承基线：提交里缺席的
+	// access/whitelist/purpose/data_sensitivity/owner 沿用上一版（R1-pm-10/R1-uxc-8），
+	// 显式给值以提交为准。这是"给这个应用发个小修复"不会静默改写线上访问级别的唯一落点。
+	st, perr := h.prepare(c, appID, wasm, in.config, version, true, len(hist) == 0,
+		h.inheritBase(c.Request.Context(), existing))
 	if perr != nil {
 		h.auditFailed(u, appID, version, perr)
 		return nil, perr
@@ -662,10 +703,18 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 	// 访问模式变更写审计：动作名从 wasm_app_visibility_change 改为
 	// wasm_app_access_change（2026-09-18 收敛为 access 三模式；旧动作名不再产生）。
 	// 旧值从既有 config_json 现解（解析失败回落 login）。
+	//
+	// ⚠️ 明细里的"生效"必须与真相一致（R1-pm-9 的同一条纪律）：待审版本的提交
+	// **没有**生效（投影与生效版本都不动），把它写成"随 vX 生效"会让运维面把一次
+	// 提交读成一次已生效的访问级别变更。
 	if existing != nil {
 		if prev := appcfg.AccessOfConfigJSON(existing.ConfigJSON); prev != st.config.Access {
+			effect := fmt.Sprintf("随 v%s 生效", version)
+			if review {
+				effect = fmt.Sprintf("随 v%s 提交（待审，尚未生效）", version)
+			}
 			h.auditApp(appID, u.Username, "wasm_app_access_change",
-				auditDetail(appID, title, fmt.Sprintf("access %s → %s（随 v%s 生效）", prev, st.config.Access, version)))
+				auditDetail(appID, title, fmt.Sprintf("access %s → %s（%s）", prev, st.config.Access, effect)))
 		}
 	}
 	if review {
@@ -674,16 +723,22 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 	}
 	pruned := h.prune(detachCtx(c), appID)
 
+	app := gin.H{
+		"app_id":      appID,
+		"title":       title,
+		"description": st.config.Purpose,
+		"enabled":     enabled,
+		"owner":       rel.Owner,
+		"version":     rel.CurrentVersion,
+	}
+	// 基域未配置/解析失败 ⇒ **没有**对外地址（R1-pm-2）：整体省略字段，而不是
+	// 编造 `<app_id>.<请求 Host>`。与目录（read.go）同一形态 —— 客户端据此禁用
+	// 「打开」（缺省/空串在客户端是同一条判据）。
+	if origin := h.appOrigin(c, appID); origin != "" {
+		app["entry_url"] = origin
+	}
 	raw, merr := json.Marshal(gin.H{
-		"app": gin.H{
-			"app_id":      appID,
-			"title":       title,
-			"description": st.config.Purpose,
-			"enabled":     enabled,
-			"owner":       rel.Owner,
-			"version":     rel.CurrentVersion,
-			"entry_url":   h.appOrigin(c, appID),
-		},
+		"app": app,
 		"release": gin.H{
 			"id":               rel.ID,
 			"version":          version,
@@ -804,7 +859,8 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 	//  2. 软删刚建的 release 行（版本号仍占位 —— 见文件头"不硬删行"的理由）；
 	//  3. 把 apps 上的**投影**恢复原样：current_release_id 与 config_json
 	//     （config 是 apps.purpose/data_sensitivity 与访问模式的来源，不回滚会让
-	//     目录可见性反映一个并没有生效的版本）。
+	//     目录可见性反映一个并没有生效的版本）。只有 approved 路径会写这两列
+	//     （G1 的守卫），待审路径下这两条 UPDATE 是幂等兜底。
 	cleanupCtx := context.WithoutCancel(ctx)
 	compensate := func() {
 		_ = os.RemoveAll(stage.finalDir)
@@ -832,11 +888,20 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 	}
 
 	// G1 应用配置投影（config_json/purpose/data_sensitivity；访问模式由 config_json 现解）。
-	if err := serverstore.SetWasmAppConfig(ctx, h.opt.DB, in.appID,
-		string(st.configJSON), st.config.Purpose, st.config.DataSensitivity); err != nil {
-		compensate()
-		return nil, internalErr("应用配置保存失败（本次版本号已占位，请升版本号重发）", err).
-			WithDetail("version", in.version)
+	//
+	// **只有已生效（approved）的版本才写投影**（R1-pm-9，此前是无条件执行）：
+	// apps 行是目录对**全员**下发的投影（access 徽标 / 负责人 / 用途），待审版本
+	// 没有生效 ⇒ 投影必须一字不动。否则作者提交一个"改成 public"的待审版本后，
+	// 全公司先看到"公开"徽标、点进去却仍被要求登录 —— 审核就只剩"卡制品"。
+	// 待审被拒时由 admin.go 的 recomputeProjection 把投影重算为"最新 approved"，
+	// 因此这里不写 = 不留下需要回收的中间态。
+	if in.status == serverstore.ReleaseStatusApproved {
+		if err := serverstore.SetWasmAppConfig(ctx, h.opt.DB, in.appID,
+			string(st.configJSON), st.config.Purpose, st.config.DataSensitivity); err != nil {
+			compensate()
+			return nil, internalErr("应用配置保存失败（本次版本号已占位，请升版本号重发）", err).
+				WithDetail("version", in.version)
+		}
 	}
 	// G2 生效版本：仅"非待审"时指向新版本。
 	// 审核开启时**不动** current_release_id ⇒ 线上仍旧版本（R17：不中断使用）。
@@ -1004,6 +1069,45 @@ func (h *Handlers) loadForPublish(ctx context.Context, appID string) (*serversto
 		return nil, nil, internalErr("查询失败", herr)
 	}
 	return app, hist, nil
+}
+
+// inheritBase 返回**更新发布**的字段继承基线 = 上一版**生效**配置的 config_json
+// （语义与判据见 appcfg.ParseUpdate）。空串 = 没有基线（首版）。
+//
+// 取值顺序：
+//  1. `apps.config_json` —— 当前生效版本的配置投影。R1-pm-9 之后它只由 approved
+//     版本写入，所以它就是"线上那一版"的配置，而不是"最后一次提交"；
+//  2. 最新 approved 版本的 config_json —— 投影为空/坏行的兜底（例如迁移前的历史行）；
+//  3. 空串 —— 没有可继承的基线，缺省按 schema 走（access 落 login = 更严格的一侧）。
+//
+// 为什么不用"最新一次发布"当基线：审核开启时最新版本可能还是 pending（没人批准过），
+// 让它成为下一版的默认值等于把未审核的配置洗成默认。
+func (h *Handlers) inheritBase(ctx context.Context, existing *serverstore.WasmApp) string {
+	if existing == nil {
+		return ""
+	}
+	if s := strings.TrimSpace(existing.ConfigJSON); s != "" {
+		return s
+	}
+	latest, err := serverstore.LatestApprovedWasmReleaseMeta(ctx, h.opt.DB, existing.AppID)
+	if err != nil || latest == nil {
+		// 没有生效版本（或读取失败）：没有基线。读取失败不升级成发布失败 ——
+		// 缺省方向是 login（更严格），作者不该为一次读数失败付出一次发布失败。
+		return ""
+	}
+	return latest.ConfigJSON
+}
+
+// inheritBaseForApp 是 inheritBase 的"按 app_id 现查"形态（validate 用：预检与发布
+// 必须对同一份载荷给出同一个结论，否则 AI 会看到"预检通过、发布被拒"）。
+//
+// 查不到（首版）/读失败 ⇒ 空串（无基线），与 inheritBase 同向。
+func (h *Handlers) inheritBaseForApp(ctx context.Context, appID string) string {
+	app, err := serverstore.GetWasmApp(ctx, h.opt.DB, appID)
+	if err != nil {
+		return ""
+	}
+	return h.inheritBase(ctx, app)
 }
 
 // newestVersion 返回历史版本中的最高版本（空 = 尚无版本）。

@@ -129,7 +129,7 @@ func (h *baseDomainHolder) Apply(raw string) *apperr.Error {
 				WithHint("先在部署的 .env 里显式配置 PICOAI_TRUSTED_PROXIES（反代地址），再回来保存基域")
 		}
 		// §4.3：内存四笔账（实例池 + 编译峰值 + 上传峰值 + 缓存驻留）。
-		if berr := checkStartupMemory(true, readMemAvailable(), h.memoryPlan(), log.Printf); berr != nil {
+		if berr := checkStartupMemory(true, readMemoryAvailability(), h.memoryPlan(), log.Printf); berr != nil {
 			return berr
 		}
 	}

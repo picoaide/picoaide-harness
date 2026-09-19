@@ -158,7 +158,8 @@ func (p *appDBPool) SetLimits(max int, idle time.Duration) {
 		closing = append(closing, victim.db)
 	}
 	p.mu.Unlock()
-	p.closeAllDBs(closing)
+	// 收紧容量 = 淘汰（句柄已从池里摘除）⇒ 终态关闭（R1-rt-5）。
+	p.retireAllDBs(closing)
 }
 
 // Limits 返回当前容量与空闲阈值（控制台回读/测试断言用）。
@@ -240,7 +241,8 @@ func (p *appDBPool) sweepIdle() (int, int64) {
 		}
 	}
 	p.mu.Unlock()
-	p.closeAllDBs(closing)
+	// 空闲回收 = 淘汰（句柄已从池里摘除）⇒ 终态关闭（R1-rt-5）。
+	p.retireAllDBs(closing)
 	return len(closing), freed
 }
 
@@ -257,7 +259,8 @@ func (p *appDBPool) evictApp(appID string) (int, int64) {
 	}
 	delete(p.handles, appID)
 	p.mu.Unlock()
-	p.closeAllDBs([]*appdb.DB{h.db})
+	// 逐出应用 = 生命周期终点：终态关闭（R1-rt-5）。
+	p.retireAllDBs([]*appdb.DB{h.db})
 	return 1, p.handleBookkeepingBytes()
 }
 
@@ -357,7 +360,10 @@ func (p *appDBPool) finishOpen(appID string, f *appDBOpenFlight, h *appDBHandle,
 // 正常不会发生），退化为"临时句柄、用完即关"而不是报错 —— 不因为缓存策略失败
 // 就让用户的请求失败。
 func (p *appDBPool) acquire(ctx context.Context, dataRoot, appID string) (*appDBHandle, *apperr.Error) {
-	var closing []*appdb.DB
+	// retiring 是本路径**淘汰**掉的句柄（已从 p.handles 摘除）：生命周期终点 ⇒ 走 Retire
+	// 而不是 Close。Close 之后"按需重连"会让被放弃的宿主调用 goroutine 在回收之后把库
+	// 复活，那一代 1+N 条连接永久无人回收（R1-rt-5）。
+	var retiring []*appdb.DB
 
 	// 空闲阈值先算出来：**本次请求的应用**如果也空闲超时了，同样要回收重建
 	//（"空闲"的判据是"距上次使用超过阈值"，与"是不是这次要用的应用"无关）。
@@ -373,16 +379,17 @@ func (p *appDBPool) acquire(ctx context.Context, dataRoot, appID string) (*appDB
 		// p.mu 下的 inflight 判定（最后一个 release 的人关）。
 		wanted := key == appID
 		if h.inflight == 0 && (wanted && h.dirty.Load() || h.lastUsed.Before(cutoff)) {
-			// 标脏（连接污染 / 请求被杀）或空闲过久 ⇒ 关掉重建，绝不复用。
+			// 标脏（连接污染 / 请求被杀）或空闲过久 ⇒ **淘汰**（摘除 + 终态关闭）后重建，
+			// 绝不复用。为什么是终态而不是 Close：见 retiring 的注释（R1-rt-5）。
 			delete(p.handles, key)
-			closing = append(closing, h.db)
+			retiring = append(retiring, h.db)
 			continue
 		}
 		if wanted {
 			h.inflight++
 			h.lastUsed = p.now()
 			p.mu.Unlock()
-			p.closeAllDBs(closing)
+			p.retireAllDBs(retiring)
 			return h, nil
 		}
 	}
@@ -390,14 +397,14 @@ func (p *appDBPool) acquire(ctx context.Context, dataRoot, appID string) (*appDB
 	if f, ok := p.opening[appID]; ok {
 		f.refs++
 		p.mu.Unlock()
-		p.closeAllDBs(closing)
+		p.retireAllDBs(retiring)
 		return p.awaitOpen(ctx, f)
 	}
 	uncached := false
 	if len(p.handles) >= p.max {
 		if victim := p.oldestIdleLocked(); victim != nil {
 			delete(p.handles, victim.appID)
-			closing = append(closing, victim.db)
+			retiring = append(retiring, victim.db)
 		} else {
 			// 池满且全在用：降级为临时句柄（不进池），绝不报错。
 			uncached = true
@@ -409,7 +416,7 @@ func (p *appDBPool) acquire(ctx context.Context, dataRoot, appID string) (*appDB
 	flight := &appDBOpenFlight{done: make(chan struct{})}
 	p.opening[appID] = flight
 	p.mu.Unlock()
-	p.closeAllDBs(closing)
+	p.retireAllDBs(retiring)
 
 	db, err := appdb.Open(ctx, appdb.Options{DataRoot: dataRoot, AppID: appID, Readers: readers})
 	if err != nil {
@@ -467,7 +474,8 @@ func (p *appDBPool) release(h *appDBHandle, recycle bool) {
 	var closeDB *appdb.DB
 	switch {
 	case h.uncached:
-		// 降级句柄从不进池：最后一个使用者负责关闭。
+		// 降级句柄从不进池：最后一个使用者负责关闭。它同样是**终态**（不属任何池表，
+		// 没有任何人还会为它重建连接）。
 		if h.inflight == 0 {
 			closeDB = h.db
 		}
@@ -480,7 +488,11 @@ func (p *appDBPool) release(h *appDBHandle, recycle bool) {
 	p.mu.Unlock()
 
 	if closeDB != nil {
-		_ = closeDB.Close()
+		// **终态关闭**（R1-rt-5）：句柄已从池里摘除（或从未进池）。用 Close 会让
+		// "之后按需重连"生效 ⇒ 被放弃的宿主调用 goroutine 一旦在此之后走到 appdb，
+		// 就新建 1+N 条连接，而这一代连接没有任何人再持有（评审实测 fd 0→7）。
+		// Retire 让那条路径拿到一条明确错误，绝不复活。
+		_ = closeDB.Retire()
 	}
 }
 
@@ -499,6 +511,10 @@ func (p *appDBPool) oldestIdleLocked() *appDBHandle {
 }
 
 // closeAll 关闭全部句柄（Server.Close 调用）。
+//
+// 走终态（Retire）而不是 Close：关停之后没有任何"会话"还会用到这些库，而此刻仍可能有
+// 在途的被放弃调用持有引用 —— 终态让它们拿到一条明确错误，而不是在关停过程中重新建一组
+// 无人回收的连接（R1-rt-5）。
 func (p *appDBPool) closeAll() error {
 	p.mu.Lock()
 	dbs := make([]*appdb.DB, 0, len(p.handles))
@@ -507,13 +523,14 @@ func (p *appDBPool) closeAll() error {
 		delete(p.handles, key)
 	}
 	p.mu.Unlock()
-	return p.closeAllDBs(dbs)
+	return p.retireAllDBs(dbs)
 }
 
-func (p *appDBPool) closeAllDBs(dbs []*appdb.DB) error {
+// retireAllDBs 把一批**已从池里摘除**的句柄置为终态（不可重连）并关闭连接。
+func (p *appDBPool) retireAllDBs(dbs []*appdb.DB) error {
 	var first error
 	for _, db := range dbs {
-		if err := db.Close(); err != nil && first == nil {
+		if err := db.Retire(); err != nil && first == nil {
 			first = err
 		}
 	}

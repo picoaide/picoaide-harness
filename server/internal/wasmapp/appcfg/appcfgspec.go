@@ -111,6 +111,8 @@ func ConfigFields() []FieldSpec {
 				"whitelist=要求登录 + 名单准入（**平台不比对名单**，由应用自己读 whitelist 判定）",
 			Hints: []string{
 				"写漏了按 login 处理：缺省只会'要求登录'，不会意外变成匿名可达",
+				"**更新版本**时省略本字段 = **沿用上一版生效值**（不是回落 login）：纯代码更新不会改写线上访问级别",
+				"要真的改访问级别就**显式**写出来（显式 `\"login\"` 才算改成登录后全员可用）；显式空串不是合法取值，会被拒",
 				"应用中心**不按它过滤**：所有应用都列出来，条目里给出访问级别（供使用者判断该不该点）",
 				"改 access = 发一个新版本（运行期改不了）",
 			},
@@ -126,6 +128,7 @@ func ConfigFields() []FieldSpec {
 				"access=\"whitelist\" 时至少要有一个账号，否则拒绝发布",
 			Hints: []string{
 				"每个条目是一个账号（登录名 login），如 [\"zhangwei\", \"lisi\"]",
+				"**更新版本**时省略本字段 = 沿用上一版的名单；显式给 `[]` 才是“清空名单”（access 仍是 whitelist 时会被拒）",
 				"应用入口第一件事就该读它并比对；无权限页必须显示本人账号（作者发现拼错的唯一途径）",
 				"含空串即拒（不要用空行占位）；条目数上限见 references/limits.md",
 			},
@@ -141,9 +144,10 @@ func ConfigFields() []FieldSpec {
 			Key:          FieldDataSensitivity,
 			Type:         "string",
 			RequiredWhen: RequiredWhenFirstRelease,
-			Desc:         "数据敏感度声明（如 internal）：用于事后追责与合规审查（首次发布必填）",
+			Desc:         "数据敏感度声明（如 internal）：用于事后追责与合规审查（首次发布必填，之后的版本可沿用）",
 			Hints: []string{
 				"平台**没有**这个字段的默认值：不要指望界面或平台替你填（留空会被首版必填校验拒）",
+				"**更新版本**时省略本字段 = 沿用上一版；显式给空串才会把它清空（那不是“没填”，是“填了空”）",
 				"它不改变任何运行时行为，只用于声明与追责",
 			},
 		},
@@ -220,6 +224,8 @@ func PublishFields() []FieldSpec {
 			Desc:     "应用配置文件的内容（即 `picoaide.app.json` 的对象形态）：字段见 `config_fields`",
 			Hints: []string{
 				"平台存的是**解析并归一化之后**的配置（名单去空白/去重、access 缺省落定）",
+				"**更新版本**时 config 里**缺席**的字段沿用上一版生效值（access/whitelist/purpose/data_sensitivity/owner 逐字段各自沿用）；显式给值——包括显式空串——以提交为准",
+				"首版没有可沿用的上一版：缺席的 `access` 按缺省 `login` 落定",
 				"改任何一项都要发新版本（§10.5 第 56f 项）",
 			},
 		},
