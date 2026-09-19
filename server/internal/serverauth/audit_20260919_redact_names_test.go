@@ -63,6 +63,8 @@ var auditNewSensitiveNames = []string{
 	"refreshtoken",
 	"x-api-key",
 	"bearer",
+	// 第三轮审计补入:OAuth 回调的短时票据,URL 上是常见形态。
+	"authorization_code",
 }
 
 // auditNearMissNames 与新增名字同族但**必须**保持不脱敏的近似形态。
@@ -71,7 +73,7 @@ var auditNewSensitiveNames = []string{
 // 所以把它们钉成"不脱敏"不会挡住将来对真实凭据名的收口。
 var auditNearMissNames = []string{
 	"accesstokens", "access_token_v2", "access-token-v2",
-	"api-keys", "apikey_v2", "authorizationcode",
+	"api-keys", "apikey_v2", "authorizationcode", "authorization_codes",
 	"authcode", "authcodes", "authtokens", "auth_token_v2",
 	"refresh-tokens", "refresh_token_v2", "refreshtoken_v2",
 	"x-api-keys", "bearer2", "bearertoken", "bearer_token_v2",
