@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -34,9 +35,13 @@ func auditActor(c *gin.Context) string {
 	return ""
 }
 
-// auditSetSetting 写 settings 并记录变更到 changes(旧→新),用于 gateway_config
-// 审计的字段级明细。
-func auditSetSetting(db *sql.DB, key, label, value string, changes *[]string) error {
+// auditSetSettingTx 写 settings 并记录变更到 changes(旧→新),用于 gateway_config
+// 审计的字段级明细。**事务内**版本(2026-09-19:P2-1 网关配置写入整体原子化):
+// 旧值仍从 db 读(settings 表没有 GetSettingTx;读旧值只为组装审计明细,不参与
+// 原子性),写入走 SetSettingTx —— 后者**不主动失效缓存**,提交后必须由调用方
+// 调用 serverstore.InvalidateSettings(),否则保存成功但运行期(限流/峰谷/错误
+// 上报)仍读到旧值,配置静默不生效。changes 组装逻辑与旧实现逐字一致。
+func auditSetSettingTx(db *sql.DB, tx *sql.Tx, key, label, value string, changes *[]string) error {
 	old, _, err := serverstore.GetSetting(db, key)
 	if err != nil {
 		old = ""
@@ -44,7 +49,7 @@ func auditSetSetting(db *sql.DB, key, label, value string, changes *[]string) er
 	if old != value {
 		*changes = append(*changes, fmt.Sprintf("%s:%s→%s", label, orEmpty(old), orEmpty(value)))
 	}
-	return serverstore.SetSetting(db, key, value)
+	return serverstore.SetSettingTx(tx, key, value)
 }
 
 func orEmpty(v string) string {
@@ -593,9 +598,26 @@ func createModel(c *gin.Context, db *sql.DB) {
 		return
 	}
 	// provider 必须存在:FK 冲突此前落 500,掩盖参数错误(审计修复 M2)
-	if _, err := serverstore.GetGatewayProvider(db, req.ProviderID); err != nil {
+	prov, err := serverstore.GetGatewayProvider(db, req.ProviderID)
+	if err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "所属上游不存在")
 		return
+	}
+	// 2026-09-19(P2-4):渠道型上游的模型名可能还在**排除名单**里(管理员删除
+	// 过它,而 webadmin 删除确认文案承诺「如需恢复请重新添加」)。管理端重新
+	// 添加是**显式意图**,必须先把该名移出名单 —— 否则下一轮同步会因为它不在
+	// 上游目录的 keep 列表(newNames)里再删一次,承诺不可兑现(实测
+	// create 200 → 下一轮 Removed:1)。
+	//
+	// 顺序:先移名单、后建行。名单写入失败时请求 500 且**不留半套**(模型未建)。
+	// 反过来(先建行再移名单)会把"模型已建但下轮被删"这种最坏的半套状态变成
+	// 常态,而管理员看到的是 200。
+	if prov.Channel != "" {
+		if err := serverstore.RemoveExcludedModel(db, req.ProviderID, req.Name); err != nil {
+			log.Printf("gateway model create: 移出排除名单失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+			return
+		}
 	}
 	m := &serverstore.Model{
 		Name: req.Name, ProviderID: req.ProviderID, DisplayName: req.DisplayName,
@@ -998,57 +1020,70 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
+	// 2026-09-19(审计 P2-1):以下 12 处写库收进**单一事务**,任一字段写失败
+	// 整体回滚 —— 旧实现逐键 SetSetting,500 路径会留下"半套已生效配置"且
+	// 零审计(AuditLog 只在函数末尾调一次),而其中 retention_months 之后紧跟
+	// **破坏性** CleanupUsageRetention,更值得警惕。
+	//
+	// 范式与 serverauth/admin.go 的 F14(认证配置事务化)一致:Begin +
+	// defer Rollback + 逐键 SetSettingTx + Commit;提交后**必须**
+	// InvalidateSettings()(SetSettingTx 不失效缓存,见 auditSetSettingTx 注释)。
+	tx, err := db.Begin()
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	defer tx.Rollback()
 	if req.DefaultModel != nil {
 		old, _, _ := serverstore.GetSetting(db, "gateway.default_model")
 		if old != *req.DefaultModel {
 			changes = append(changes, "默认模型:"+orEmpty(old)+"→"+orEmpty(*req.DefaultModel))
 		}
-		if err := serverstore.SetSetting(db, "gateway.default_model", *req.DefaultModel); err != nil {
+		if err := serverstore.SetSettingTx(tx, "gateway.default_model", *req.DefaultModel); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.RateLimit != nil {
-		if err := auditSetSetting(db, "gateway.rate_limit", "每用户限流", string(*req.RateLimit), &changes); err != nil {
+		if err := auditSetSettingTx(db, tx, "gateway.rate_limit", "每用户限流", string(*req.RateLimit), &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	// 高峰窗口:显式空串 = 移除(无峰谷价),显式合法 JSON = 写入(审计修复 H1)
 	if req.PeakWindows != nil {
-		if err := auditSetSetting(db, serverstore.PeakWindowsSetting, "高峰时段", *req.PeakWindows, &changes); err != nil {
+		if err := auditSetSettingTx(db, tx, serverstore.PeakWindowsSetting, "高峰时段", *req.PeakWindows, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
-	// usage 明细保留月数(0=永久,默认 6);变更后立即执行一次清理。
+	// usage 明细保留月数(0=永久,默认 6)。**破坏性清理移出事务,在提交后执行**
+	// (2026-09-19,P2-1):配置写入已原子生效,清理失败不再留下半套配置(旧行为
+	// 是 retention 已落库而后续键未落)。仅显式提交 retention_months 时执行,
+	// 失败仍是 500「保留清理失败」(文案不变)。
 	if req.RetentionMonths != nil {
-		if err := auditSetSetting(db, serverstore.RetentionMonthsSetting, "明细保留", *req.RetentionMonths, &changes); err != nil {
+		if err := auditSetSettingTx(db, tx, serverstore.RetentionMonthsSetting, "明细保留", *req.RetentionMonths, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
-			return
-		}
-		if err := serverstore.CleanupUsageRetention(db); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保留清理失败")
 			return
 		}
 	}
 	if req.ErrorReportingDSN != nil {
 		// 准入校验已在**任何写库之前**完成(见本函数上方 dsnInspection);
 		// 这里只负责写入与透出告警。
-		if err := auditSetSetting(db, "web.error_reporting_dsn", "错误上报DSN", *req.ErrorReportingDSN, &changes); err != nil {
+		if err := auditSetSettingTx(db, tx, "web.error_reporting_dsn", "错误上报DSN", *req.ErrorReportingDSN, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.ErrorReportingEnabled != nil {
-		if err := auditSetSetting(db, "web.error_reporting_enabled", "错误上报开关", strconv.FormatBool(*req.ErrorReportingEnabled), &changes); err != nil {
+		if err := auditSetSettingTx(db, tx, "web.error_reporting_enabled", "错误上报开关", strconv.FormatBool(*req.ErrorReportingEnabled), &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.ErrorReportingLevel != nil {
 		// 准入校验已在**任何写库之前**完成(见本函数上方白名单校验块)。
-		if err := auditSetSetting(db, "web.error_reporting_level", "错误上报等级", *req.ErrorReportingLevel, &changes); err != nil {
+		if err := auditSetSettingTx(db, tx, "web.error_reporting_level", "错误上报等级", *req.ErrorReportingLevel, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
@@ -1056,33 +1091,48 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	if req.ErrorReportingHeartbeat != nil {
 		// D4:独立开关,**默认 false = 与今天行为完全一致**;不改 error_reporting_level
 		// 的取值与语义(红线)。
-		if err := auditSetSetting(db, "web.error_reporting_heartbeat", "错误上报心跳", strconv.FormatBool(*req.ErrorReportingHeartbeat), &changes); err != nil {
+		if err := auditSetSettingTx(db, tx, "web.error_reporting_heartbeat", "错误上报心跳", strconv.FormatBool(*req.ErrorReportingHeartbeat), &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.GlitchTipBaseURL != nil {
-		if err := auditSetSetting(db, "web.glitchtip_base_url", "GlitchTip地址", *req.GlitchTipBaseURL, &changes); err != nil {
+		if err := auditSetSettingTx(db, tx, "web.glitchtip_base_url", "GlitchTip地址", *req.GlitchTipBaseURL, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.GlitchTipOrg != nil {
-		if err := auditSetSetting(db, "web.glitchtip_organization", "GlitchTip组织", *req.GlitchTipOrg, &changes); err != nil {
+		if err := auditSetSettingTx(db, tx, "web.glitchtip_organization", "GlitchTip组织", *req.GlitchTipOrg, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.DefaultThinkingLevel != nil {
 		// 准入校验已在**任何写库之前**完成(见本函数上方白名单校验块)。
-		if err := auditSetSetting(db, "web.default_thinking_level", "默认思考强度", *req.DefaultThinkingLevel, &changes); err != nil {
+		if err := auditSetSettingTx(db, tx, "web.default_thinking_level", "默认思考强度", *req.DefaultThinkingLevel, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
 	}
 	if req.ServerBaseURL != nil {
-		if err := auditSetSetting(db, "server.base_url", "对外地址", *req.ServerBaseURL, &changes); err != nil {
+		if err := auditSetSettingTx(db, tx, "server.base_url", "对外地址", *req.ServerBaseURL, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	// 提交后刷新缓存:SetSettingTx 有意不失效缓存(事务可能回滚),配置的
+	// 运行期读取(限流/峰谷/错误上报/保留期)必须立刻看到新值。
+	// 顺序也要紧:CleanupUsageRetention 经 EffectiveRetentionMonths 读
+	// usage.retention_months,必须在失效之后才能读到本次写入的值。
+	serverstore.InvalidateSettings()
+	if req.RetentionMonths != nil {
+		if err := serverstore.CleanupUsageRetention(db); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保留清理失败")
 			return
 		}
 	}
