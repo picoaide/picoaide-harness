@@ -974,6 +974,30 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 			warnings = append(warnings, "错误上报:库中开关已打开但 DSN 为空(客户端不会上报任何错误);请在「错误监控」页填写 DSN 或关闭开关")
 		}
 	}
+	// 2026-09-19(审计):两条白名单校验必须与上面的 DSN 准入校验同一条纪律 ——
+	// **在任何写库之前**。此前它们写在各自的写入分支内,于是
+	// `PUT {"rate_limit":"120","error_reporting_level":"fatal"}` 会先落
+	// rate_limit、再 400 ⇒ 拒绝留下半套已生效的配置(与该函数自己的声明矛盾)。
+	// 判定条件与 400 文案逐字不变,只是提前到写库前。
+	if req.ErrorReportingLevel != nil {
+		// 等级阈值校验(2026-08):error|warning|info|debug
+		switch *req.ErrorReportingLevel {
+		case "", "error", "warning", "info", "debug":
+		default:
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "reporting_level 必须是 error|warning|info|debug")
+			return
+		}
+	}
+	if req.DefaultThinkingLevel != nil {
+		// 默认思考强度(2026-08):客户端默认模型 reasoningEffort,
+		// 与 llm-deepseek 适配器支持档位对齐(off|low|high|max)
+		switch *req.DefaultThinkingLevel {
+		case "", "off", "low", "high", "max":
+		default:
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "default_thinking_level 必须是 off|low|high|max")
+			return
+		}
+	}
 	if req.DefaultModel != nil {
 		old, _, _ := serverstore.GetSetting(db, "gateway.default_model")
 		if old != *req.DefaultModel {
@@ -1023,13 +1047,7 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		}
 	}
 	if req.ErrorReportingLevel != nil {
-		// 等级阈值校验(2026-08):error|warning|info|debug
-		switch *req.ErrorReportingLevel {
-		case "", "error", "warning", "info", "debug":
-		default:
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "reporting_level 必须是 error|warning|info|debug")
-			return
-		}
+		// 准入校验已在**任何写库之前**完成(见本函数上方白名单校验块)。
 		if err := auditSetSetting(db, "web.error_reporting_level", "错误上报等级", *req.ErrorReportingLevel, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
@@ -1056,14 +1074,7 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		}
 	}
 	if req.DefaultThinkingLevel != nil {
-		// 默认思考强度(2026-08):客户端默认模型 reasoningEffort,
-		// 与 llm-deepseek 适配器支持档位对齐(off|low|high|max)
-		switch *req.DefaultThinkingLevel {
-		case "", "off", "low", "high", "max":
-		default:
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "default_thinking_level 必须是 off|low|high|max")
-			return
-		}
+		// 准入校验已在**任何写库之前**完成(见本函数上方白名单校验块)。
 		if err := auditSetSetting(db, "web.default_thinking_level", "默认思考强度", *req.DefaultThinkingLevel, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return

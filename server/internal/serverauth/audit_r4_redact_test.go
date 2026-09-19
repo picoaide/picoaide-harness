@@ -94,6 +94,15 @@ var r4AuditShapes = []r4AuditShape{
 	{"long-url-tail-secret", "skill_create",
 		"hook https://qyapi.weixin.qq.com/x?pad=" + strings.Repeat("P", 4000) + "&key=" + r4Secret + "-19",
 		r4Secret + "-19", true},
+	// 2026-09-19 参数形态:分号分隔的参数、数组式参数名(修复前两种都漏判)。
+	// token 用字母后缀:数字后缀会与既有 -1/-2… 互为前缀,泄漏时会把相邻
+	// 条目的断言一起点亮(噪音,不是误判通过)。
+	{"semicolon-separated-param", "skill_create",
+		"hook https://example.com/notify?a=1;key=" + r4Secret + "-SEMI", r4Secret + "-SEMI", true},
+	{"array-param-name", "skill_create",
+		"hook https://example.com/notify?access_token[]=" + r4Secret + "-ARR", r4Secret + "-ARR", true},
+	{"array-param-fragment", "skill_create",
+		"hook https://example.com/notify#token[]=" + r4Secret + "-FRAG", r4Secret + "-FRAG", true},
 	// 边界:非报表动作的普通 URL 必须原样(audit_redact_test.go 已固定的口径)。
 	{"plain-url-untouched", "gateway_update", "server_base_url=https://harness.example/admin", "", false},
 	{"plain-detail-untouched", "user_update", "角色 auditor → super_admin", "", false},

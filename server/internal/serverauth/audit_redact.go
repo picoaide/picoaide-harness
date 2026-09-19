@@ -29,6 +29,12 @@ package serverauth
 //   - report_subscription_* 动作对定位到的任何 URL(含自定义路径、无凭据
 //     标记)无条件整体折叠。
 // 当前写入侧不可达(报表订阅只接受小写 http(s) 前缀),属预防性收口。
+//
+// 2026-09-19(参数形态补漏):凭据型查询参数原先只按 `&` 切分、参数名**全等**
+// 比对 ⇒ `?a=1;key=SECRET`(分号)与 `?key[]=SECRET`(数组式)不脱敏。现在切分
+// 接受 `;`、参数名剥一层尾部 `[]`;其余形态一律不脱敏(见 auditURLNeedsRedaction
+// 的 ⑤ 段与 audit_redact_param_test.go 的正负语料)。影响面仅限**读时**形状,
+// 库内历史行与哈希链不动(redactAuditEntryDetails 只写 logs[i].Detail)。
 
 import (
 	"regexp"
@@ -209,8 +215,16 @@ func auditURLNeedsRedaction(raw string, reportAction bool) bool {
 		if k := strings.IndexByte(q, '#'); k >= 0 {
 			q = q[:k]
 		}
-		for _, kv := range strings.Split(q, "&") {
-			name := strings.ToLower(strings.SplitN(kv, "=", 2)[0])
+		// 2026-09-19:切分从只认 `&` 扩到 `&`/`;`(RFC 3986 的子分隔符,
+		// 历史与代理形态常见),参数名再剥**一层**尾部 `[]`(数组式写法)。
+		// 此前 `?a=1;key=SECRET` 整体被当成参数名 `a`、`?key[]=SECRET` 与
+		// `key` 不全等 —— 两种都漏判,auditor(不持 report:read)读到明文。
+		// **刻意不做通用归一化**:`key[][]`/`key[0]`/`keyish`/`signature_v2`
+		// 一律不脱敏(只剥一层 + 不做前缀匹配),负向语料见
+		// audit_redact_param_test.go —— 判定的是"URL 是否凭据型",误伤正常
+		// 参数会牺牲审计可读性,而没有任何已知 webhook 用这些形态承载凭据。
+		for _, kv := range strings.FieldsFunc(q, func(r rune) bool { return r == '&' || r == ';' }) {
+			name := strings.TrimSuffix(strings.ToLower(strings.SplitN(kv, "=", 2)[0]), "[]")
 			if auditSensitiveQueryParams[name] {
 				return true
 			}
