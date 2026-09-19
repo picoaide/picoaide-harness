@@ -12,6 +12,12 @@ import {
   type DiagnosticsReport,
   type SetPublishedSuccess,
 } from './app-lifecycle.ts'
+import {
+  RELEASE_STATUSES,
+  fetchMyReleases,
+  type MyReleasesReport,
+  type ReleaseStatus,
+} from './app-releases.ts'
 import { t, type AppCenterKey } from './locales.ts'
 
 /**
@@ -133,6 +139,28 @@ export function accessBadge(access: AccessMode): string {
   return t(ACCESS_BADGE_KEYS[access])
 }
 
+/** 版本状态的字典键（R1-pm-3 的版本历史用）。 */
+const RELEASE_STATUS_KEYS: Record<ReleaseStatus, AppCenterKey> = {
+  pending: 'appCenter.releaseStatus.pending',
+  approved: 'appCenter.releaseStatus.approved',
+  rejected: 'appCenter.releaseStatus.rejected',
+}
+
+/**
+ * 版本状态的展示文案。
+ *
+ * **未知状态原样显示**（不翻译、也不回落成"已生效"）：服务端将来新增一个状态
+ * （例如 superseded）时，把它显示成一个已知状态就是谎报 —— 与 `resolveAccess`
+ * 对未知 `access` 的处理同向（不认识的值绝不放大权限，也不假装认识）。
+ * @param status - 服务端下发的状态串。
+ * @returns 当前语言下的标签，或状态原文。
+ */
+export function releaseStatusLabel(status: string): string {
+  return (RELEASE_STATUSES as readonly string[]).includes(status)
+    ? t(RELEASE_STATUS_KEYS[status as ReleaseStatus])
+    : status
+}
+
 /** 面板状态机。 */
 export type AppCenterState =
   | { kind: 'loading' }
@@ -163,6 +191,8 @@ export type SetPublishedOutcome = SetPublishedSuccess | PublishFailure
 export type DeleteOutcome = DeleteSuccess | PublishFailure
 /** {@link SetPublishedOutcome} 的诊断版本。 */
 export type DiagnosticsOutcome = DiagnosticsReport | PublishFailure
+/** {@link SetPublishedOutcome} 的版本历史版本（R1-pm-3：审核结论的作者侧出口）。 */
+export type ReleasesOutcome = MyReleasesReport | PublishFailure
 
 /**
  * 删除成功后目录顶部的通知。
@@ -515,6 +545,28 @@ const CONFIRM: React.CSSProperties = {
 /** 确认块里的按钮行（确认在左、取消在右）。 */
 const CONFIRM_ROW: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }
 
+/** 版本历史面板（只读；与 {@link DIAGNOSTICS} 同一形状，作者读结论用）。 */
+const RELEASES: React.CSSProperties = {
+  marginTop: 10,
+  padding: '10px 12px',
+  borderRadius: 10,
+  border: '1px solid var(--dsw-alias-border-l2)',
+  background: 'var(--dsw-alias-bg-layer-1)',
+  fontSize: 12,
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-label-primary)',
+}
+
+/** 被拒理由块（版本历史里最要紧的那一行：理由 + 出路）。 */
+const REJECTION: React.CSSProperties = {
+  marginTop: 4,
+  padding: '6px 8px',
+  borderRadius: 8,
+  border: '1px solid var(--dsw-alias-state-error-primary)',
+  background: 'var(--dsw-alias-bg-layer-1)',
+  color: 'var(--dsw-alias-label-primary)',
+}
+
 /** 诊断面板（只读；缩进一级，与动作条区分）。 */
 const DIAGNOSTICS: React.CSSProperties = {
   marginTop: 10,
@@ -650,6 +702,17 @@ export function AppCenterPanel({ onClose }: { onClose: () => void }) {
     [],
   )
 
+  /**
+   * 版本历史：只读，不改任何行状态（R1-pm-3）。
+   *
+   * 与诊断共用同一条路径形状（`/api/pico/apps/wasm/:app_id/<后缀>`）：页面上下文发起，
+   * 宿主代理到服务端员工面；非发布者服务端一律 404，失败由行自己渲染信封。
+   */
+  const handleReleases = useCallback(
+    async (item: AppCenterItem): Promise<ReleasesOutcome> => await fetchMyReleases(item.appId),
+    [],
+  )
+
   return (
     <div style={OVERLAY} role="dialog" aria-modal="true" aria-label={t('appCenter.title')} className="pico-app-center">
       <div style={MASK} onClick={onClose} />
@@ -701,6 +764,7 @@ export function AppCenterPanel({ onClose }: { onClose: () => void }) {
                   onSetPublished={handleSetPublished}
                   onDelete={handleDelete}
                   onDiagnostics={handleDiagnostics}
+                  onReleases={handleReleases}
                 />
               )
             : (
@@ -723,12 +787,12 @@ export function AppCenterPanel({ onClose }: { onClose: () => void }) {
  * 不含额度字段"这三条断言可以**直接渲染**；而"挂载后真的取数"这条链路由
  * `app-center-mount.spec.tsx` 用真挂载（跑 `useEffect`）+ 真路由覆盖（FIX-42）。
  *
- * 作者自服务的三个回调（`onSetPublished` / `onDelete` / `onDiagnostics`）都是**可选**的：
- * 缺席时一个管理按钮都不渲染（`app-center.spec.tsx` 的静态渲染用例正是这种形态）——
- * "面板不给我这个能力"与"我点了但服务端拒绝"是两件事，不能混。
+ * 作者自服务的四个回调（`onSetPublished` / `onDelete` / `onDiagnostics` / `onReleases`）
+ * 都是**可选**的：缺席时对应按钮一个都不渲染（`app-center.spec.tsx` 的静态渲染用例正是
+ * 这种形态）—— "面板不给我这个能力"与"我点了但服务端拒绝"是两件事，不能混。
  * @param props - 当前状态、重试回调、"去发布"回调、作者生命周期回调与删除通知。
  */
-export function AppCenterBody({ state, notice, onRetry, onPublish, onPublishNewVersion, onSetPublished, onDelete, onDiagnostics }: {
+export function AppCenterBody({ state, notice, onRetry, onPublish, onPublishNewVersion, onSetPublished, onDelete, onDiagnostics, onReleases }: {
   state: AppCenterState
   notice?: CatalogNotice | null
   onRetry: () => void
@@ -737,6 +801,7 @@ export function AppCenterBody({ state, notice, onRetry, onPublish, onPublishNewV
   onSetPublished?: (item: AppCenterItem, enabled: boolean) => Promise<SetPublishedOutcome>
   onDelete?: (item: AppCenterItem) => Promise<DeleteOutcome>
   onDiagnostics?: (item: AppCenterItem) => Promise<DiagnosticsOutcome>
+  onReleases?: (item: AppCenterItem) => Promise<ReleasesOutcome>
 }) {
   return (
     <>
@@ -779,6 +844,7 @@ export function AppCenterBody({ state, notice, onRetry, onPublish, onPublishNewV
           {...(onSetPublished === undefined ? {} : { onSetPublished })}
           {...(onDelete === undefined ? {} : { onDelete })}
           {...(onDiagnostics === undefined ? {} : { onDiagnostics })}
+          {...(onReleases === undefined ? {} : { onReleases })}
         />
       ))}
     </>
@@ -815,8 +881,21 @@ type RowDiagnostics =
   | { kind: 'failed', failure: PublishFailure }
 
 /**
+ * 行内版本历史面板的状态机（R1-pm-3）。
+ *
+ * 与 {@link RowDiagnostics} 同形：`closed` 之外的三态都渲染出来，失败走
+ * {@link PublishErrorBlock}（复用既有错误块，`code`/`message`/`details`/`hints`
+ * 逐字段显示）—— "读不到理由"与"没有被拒理由"必须是两种可见的不同结果。
+ */
+type RowReleases =
+  | { kind: 'closed' }
+  | { kind: 'loading' }
+  | { kind: 'ready', report: MyReleasesReport }
+  | { kind: 'failed', failure: PublishFailure }
+
+/**
  * 一行应用：名称 / 访问级别 / 当前版本 / 一句话说明 / 负责人 / 入口链接 / 打开 /
- * （发布者本人）发新版 + 下架·上架 / 诊断 / 删除。
+ * （发布者本人）发新版 + 下架·上架 / **版本历史** / 诊断 / 删除。
  *
  * 下架的条目（`enabled=false`）**照常展示**并标出"已下架"，打开按钮禁用 ——
  * 直接从目录消失会让用户以为是自己看错了。下架状态下**"发新版"按钮仍然出现但被禁用**
@@ -829,20 +908,26 @@ type RowDiagnostics =
  *  - **每个动作后用服务端返回的值更新行状态**（`app.enabled`，见 `handleSetPublished`）；
  *  - 失败把服务端信封的 `code`/`message`/`details`/`hints` 渲染出来（复用发布失败块）。
  *
+ * 「版本历史」（R1-pm-3）是**只读**的第四个出口：审核开启后作者此前没有任何结论出口
+ * （被拒理由写了没人读、版本号又永久占位），这一块把每版的 status / 被拒理由 /
+ * 是否线上，以及"被拒后升版本号重发"的出路一并显示出来。
+ *
  * @param props - 目录条目、发新版回调与作者生命周期回调。
  */
-export function AppCenterRow({ item, onPublishNewVersion, onSetPublished, onDelete, onDiagnostics }: {
+export function AppCenterRow({ item, onPublishNewVersion, onSetPublished, onDelete, onDiagnostics, onReleases }: {
   item: AppCenterItem
   onPublishNewVersion?: (item: AppCenterItem) => void
   onSetPublished?: (item: AppCenterItem, enabled: boolean) => Promise<SetPublishedOutcome>
   onDelete?: (item: AppCenterItem) => Promise<DeleteOutcome>
   onDiagnostics?: (item: AppCenterItem) => Promise<DiagnosticsOutcome>
+  onReleases?: (item: AppCenterItem) => Promise<ReleasesOutcome>
 }) {
   const [opening, setOpening] = useState(false)
   const [confirm, setConfirm] = useState<RowConfirm>('none')
   const [busy, setBusy] = useState<null | 'set-published' | 'delete'>(null)
   const [actionFailure, setActionFailure] = useState<PublishFailure | null>(null)
   const [diagnostics, setDiagnostics] = useState<RowDiagnostics>({ kind: 'closed' })
+  const [releases, setReleases] = useState<RowReleases>({ kind: 'closed' })
   const confirmRef = useRef<HTMLButtonElement | null>(null)
 
   // 确认块出现后把焦点移进去：键盘用户按一次"下架"就能直接 Enter 确认（或 Esc 走开），
@@ -860,8 +945,9 @@ export function AppCenterRow({ item, onPublishNewVersion, onSetPublished, onDele
   // "发新版"只给发布者本人（P1-3 的入口）：服务端 `ownedApp` 对非发布者一律 404，
   // 给别人一个必然失败的按钮不如不给。
   const canPublish = item.isOwner && onPublishNewVersion !== undefined
-  const canManage = item.isOwner && (onSetPublished !== undefined || onDelete !== undefined || onDiagnostics !== undefined)
+  const canManage = item.isOwner && (onSetPublished !== undefined || onDelete !== undefined || onDiagnostics !== undefined || onReleases !== undefined)
   const diagnosticsPanelId = `pico-app-center-diagnostics-${item.appId}`
+  const releasesPanelId = `pico-app-center-releases-${item.appId}`
 
   /** 执行上下架：只认服务端返回的 `enabled`（回调里已写回行状态）。 */
   const runSetPublished = async (enabled: boolean): Promise<void> => {
@@ -892,6 +978,20 @@ export function AppCenterRow({ item, onPublishNewVersion, onSetPublished, onDele
     setDiagnostics({ kind: 'loading' })
     const result = await onDiagnostics(item)
     setDiagnostics(result.ok ? { kind: 'ready', report: result } : { kind: 'failed', failure: result })
+  }
+
+  /**
+   * 版本历史开关（R1-pm-3）。
+   *
+   * 每次打开都**重新取一次**（与诊断同口径）：审核结论是别的会话（管理员）改的，
+   * 缓存一份"我上次看到的结论"会让作者在一个已经通过的版本上继续等。
+   */
+  const toggleReleases = async (): Promise<void> => {
+    if (releases.kind !== 'closed') { setReleases({ kind: 'closed' }); return }
+    if (onReleases === undefined) return
+    setReleases({ kind: 'loading' })
+    const result = await onReleases(item)
+    setReleases(result.ok ? { kind: 'ready', report: result } : { kind: 'failed', failure: result })
   }
 
   return (
@@ -1006,6 +1106,22 @@ export function AppCenterRow({ item, onPublishNewVersion, onSetPublished, onDele
               {t('appCenter.diagnostics')}
             </button>
           )}
+          {/* 版本历史（R1-pm-3）：审核开启后作者唯一的结论出口 —— 被拒理由、
+              待审状态与"线上是哪一版"都在这一块里。 */}
+          {onReleases !== undefined && (
+            <button
+              type="button"
+              className="pico-app-center-releases-toggle"
+              data-action="releases"
+              style={ACTION_BUTTON}
+              aria-label={`${t('appCenter.releasesAria')} ${item.title}`}
+              aria-expanded={releases.kind !== 'closed'}
+              aria-controls={releasesPanelId}
+              onClick={() => { void toggleReleases() }}
+            >
+              {t('appCenter.releases')}
+            </button>
+          )}
           {onDelete !== undefined && (
             <button
               type="button"
@@ -1093,6 +1209,68 @@ export function AppCenterRow({ item, onPublishNewVersion, onSetPublished, onDele
           {diagnostics.kind === 'ready' && <DiagnosticsBlock report={diagnostics.report} />}
         </div>
       )}
+
+      {releases.kind !== 'closed' && (
+        <div style={RELEASES} id={releasesPanelId} data-role="releases">
+          {releases.kind === 'loading' && <div data-role="releases-loading">{t('appCenter.releasesLoading')}</div>}
+          {/* 读失败必须与"没有被拒"区分开：走既有错误块，信封逐字段显示。 */}
+          {releases.kind === 'failed' && (
+            <PublishErrorBlock failure={releases.failure} title={t('appCenter.releasesFailed')} role="releases-error" />
+          )}
+          {releases.kind === 'ready' && <ReleasesBlock report={releases.report} />}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 版本历史（只读）：每版的版本号 / 状态 / 是否线上 / 提交时间，以及**被拒理由**与
+ * 「被拒后升版本号重发」的出路（R1-pm-3）。
+ *
+ * 三条口径：
+ *  - **理由只在 rejected 行显示**（服务端 approved/pending 行的 reason 恒为空串）：
+ *    把空串渲染成"没有理由"的普通行，等于把"审核没给结论"与"审核给了理由"混成一件事；
+ *  - **被拒必带出路**：被拒版本的版本号**永久占位**、不能复用，所以理由旁边永远跟着
+ *    "用更高的版本号重新提交"这句话 —— 只说"被拒了"等于把作者留在原地；
+ *  - **状态未知就原样显示**（`releaseStatusLabel`），不假装认识服务端的新状态。
+ * @param props - 服务端版本历史报告。
+ */
+export function ReleasesBlock({ report }: { report: MyReleasesReport }) {
+  return (
+    <div className="pico-app-center-releases">
+      <div data-role="releases-summary">
+        {`${t('appCenter.currentVersion')}: ${report.currentVersion === '' ? '—' : report.currentVersion}`}
+        {` · ${t('appCenter.versionLabel')}: ${String(report.releases.length)}`}
+      </div>
+      {report.releases.length === 0
+        ? <div data-role="releases-empty">{t('appCenter.releasesEmpty')}</div>
+        : (
+            <ul style={HINT_LIST} data-role="releases-list">
+              {report.releases.map(release => (
+                <li key={release.version} data-role="release" data-version={release.version} data-status={release.status}>
+                  <span data-role="release-version">{`v${release.version}`}</span>
+                  {` · ${releaseStatusLabel(release.status)}`}
+                  {release.current && (
+                    <span data-role="release-current">{` · ${t('appCenter.releaseCurrent')}`}</span>
+                  )}
+                  {release.createdAt !== '' && <span data-role="release-created">{` · ${release.createdAt}`}</span>}
+                  {release.status === 'pending' && (
+                    <div data-role="release-pending-hint">{t('appCenter.releasePendingHint')}</div>
+                  )}
+                  {release.status === 'rejected' && (
+                    <div style={REJECTION} data-role="release-rejection">
+                      <div data-role="release-reason">
+                        {`${t('appCenter.releaseReason')}: ${release.reason === '' ? t('appCenter.releaseReasonMissing') : release.reason}`}
+                      </div>
+                      {/* 出路：理由 + 这一句才构成"作者能自己往前走"的闭环。 */}
+                      <div data-role="release-resubmit-hint">{t('appCenter.releaseResubmitHint')}</div>
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
     </div>
   )
 }

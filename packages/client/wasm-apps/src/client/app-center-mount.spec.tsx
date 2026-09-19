@@ -1055,3 +1055,115 @@ describe('R1-pm-1：作者自服务（下架/上架、删除、诊断）', () =>
     expect(cardOf('值班表').querySelector('[data-role="app-disabled"]')).toBeNull()
   })
 })
+
+/**
+ * R1-pm-3：**版本历史与被拒理由**（审核开启后作者侧唯一的结论出口）。
+ *
+ * 现场缺陷：开启审核后，发布者只看到发布那一刻的"待审核（线上仍是旧版本）"，之后
+ * **永远**收不到结论 —— 服务端把被拒理由写进了 `app_releases.reason`，却没有任何读
+ * 路径（DTO 无字段、员工面无端点），而版本号一经提交就永久占位。作者既不知道被拒、
+ * 也拿不到理由，只能盲升版本号重发。
+ *
+ * 本组用例把整条链路跑通：真面板 → 真点击 → 真 fetch（断言 URL/method）→ 真解析 →
+ * 真 DOM（理由 + 「被拒后升版本号重发」的出路）。
+ *
+ * ---- 变异验证 ----
+ *   - 面板不传 `onReleases`（或不渲染 `.pico-app-center-releases-toggle`）⇒ 第 1 条红；
+ *   - 请求路径写错（少 `/releases` 后缀）⇒ 第 1 条的 URL 断言红；
+ *   - `ReleasesBlock` 不渲染 `release-reason` / `release-resubmit-hint` ⇒ 第 1 条红
+ *     （这正是"写了没人读"的界面形态）；
+ *   - 读失败时回落成空清单（而不是错误块）⇒ 第 2 条红。
+ */
+describe('R1-pm-3：版本历史（发布者拿到被拒理由与下一步）', () => {
+  const OWNED_CATALOG = {
+    apps: [
+      { app_id: 'roster', title: '值班表', description: '', responsible: 'carol', entry_url: 'https://roster.apps.example.com/', access: 'login', enabled: true, current_version: '1.0.0', is_owner: true, purpose: '值班', whitelist: [] },
+      { app_id: 'other', title: '别人的应用', description: '', responsible: 'dave', entry_url: 'https://other.apps.example.com/', access: 'login', enabled: true, current_version: '9.9.9', is_owner: false },
+    ],
+  }
+
+  const RELEASES = {
+    app_id: 'roster',
+    current_version: '1.0.0',
+    review_required: true,
+    releases: [
+      { version: '1.0.0', status: 'approved', reason: '', created_at: '2026-09-18T10:00:00Z', current: true, checksum: 'aa', size: 8 },
+      { version: '1.1.0', status: 'pending', reason: '', created_at: '2026-09-19T09:00:00Z', current: false, checksum: 'bb', size: 9 },
+      { version: '1.2.0', status: 'rejected', reason: '数据范围超出用途所需：请补充数据来源说明', created_at: '2026-09-19T10:00:00Z', current: false, checksum: '', size: 0 },
+    ],
+  }
+
+  it('点「版本历史」⇒ GET …/roster/releases，逐版渲染状态、被拒理由与"升版本号重发"的出路', async () => {
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, OWNED_CATALOG)
+      if (url === '/api/pico/apps/wasm/roster/releases') return jsonResponse(200, RELEASES)
+      throw new Error(`unexpected url: ${url}`)
+    })
+    await mount()
+
+    // 只给发布者本人（服务端 ownedApp 对非发布者一律 404 —— 不给必然失败的按钮）。
+    expect(cardOf('别人的应用').querySelector('.pico-app-center-releases-toggle')).toBeNull()
+
+    await clickIn('值班表', '.pico-app-center-releases-toggle')
+    const fetched = calls.filter(call => call.url === '/api/pico/apps/wasm/roster/releases')
+    expect(fetched).toHaveLength(1)
+    expect(fetched[0]!.init.method).toBe('GET')
+
+    const panel = cardOf('值班表').querySelector('[data-role="releases"]')
+    expect(panel).not.toBeNull()
+    const list = panel!.querySelector('[data-role="releases-list"]')!
+    const rows = [...list.querySelectorAll('[data-role="release"]')]
+    expect(rows.map(row => row.getAttribute('data-version'))).toEqual(['1.0.0', '1.1.0', '1.2.0'])
+    expect(rows[0]!.textContent).toContain('已生效')
+    expect(rows[0]!.querySelector('[data-role="release-current"]')).not.toBeNull()
+    expect(rows[1]!.textContent).toContain('待审核')
+    expect(rows[2]!.textContent).toContain('已拒绝')
+
+    // **核心判据**：被拒理由必须真的出现在界面上（这是"写了没人读"的修复本身）。
+    const reason = rows[2]!.querySelector('[data-role="release-reason"]')!.textContent ?? ''
+    expect(reason).toContain('拒绝理由')
+    expect(reason).toContain('数据范围超出用途所需：请补充数据来源说明')
+    // 理由旁边必须有出路：被拒版本的版本号永久占位，唯一办法是升版本号重发。
+    const hint = rows[2]!.querySelector('[data-role="release-resubmit-hint"]')!.textContent ?? ''
+    expect(hint).toContain('更高的版本号')
+    expect(hint).toContain('不能复用')
+    // 未生效的两版给出解释（待审：线上仍是当前生效版本）。
+    expect(rows[1]!.querySelector('[data-role="release-pending-hint"]')).not.toBeNull()
+    // 理由只在被拒行出现（approved/pending 的 reason 恒为空串，不该渲染成"没有理由"）。
+    expect(rows[0]!.querySelector('[data-role="release-rejection"]')).toBeNull()
+    expect(rows[1]!.querySelector('[data-role="release-rejection"]')).toBeNull()
+    // 只读：不改任何行状态，也不改"当前版本"。
+    expect(cardOf('值班表').querySelector('[data-role="app-disabled"]')).toBeNull()
+    expect(cardOf('值班表').querySelector('[data-role="current-version"]')!.textContent).toContain('1.0.0')
+  })
+
+  it('读失败 ⇒ 既有错误块逐字段显示服务端信封（不显示成"没有被拒"）', async () => {
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, OWNED_CATALOG)
+      return jsonResponse(404, {
+        error: { code: 'NOT_FOUND', message: '应用不存在', hints: ['只有发布者本人（或平台管理员）能管理该应用'] },
+      })
+    })
+    await mount()
+    await clickIn('值班表', '.pico-app-center-releases-toggle')
+
+    const block = cardOf('值班表').querySelector('[data-role="releases-error"]')
+    expect(block).not.toBeNull()
+    expect(block!.querySelector('[data-role="error-code"]')!.textContent).toContain('NOT_FOUND')
+    expect(block!.querySelector('[data-role="error-message"]')!.textContent).toContain('应用不存在')
+    expect(block!.querySelector('[data-role="error-hints"]')!.textContent).toContain('只有发布者本人')
+    // **关键**：读不到结论 ≠ 没有被拒 —— 不得退化成空态（那正是这条缺陷的形态）。
+    expect(cardOf('值班表').querySelector('[data-role="releases-empty"]')).toBeNull()
+  })
+
+  it('服务端下发真正的空清单 ⇒ 明确的空态（与读失败区分开）', async () => {
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, OWNED_CATALOG)
+      return jsonResponse(200, { app_id: 'roster', current_version: '', review_required: false, releases: [] })
+    })
+    await mount()
+    await clickIn('值班表', '.pico-app-center-releases-toggle')
+    expect(cardOf('值班表').querySelector('[data-role="releases-empty"]')!.textContent).toContain('还没有版本记录')
+    expect(cardOf('值班表').querySelector('[data-role="releases-error"]')).toBeNull()
+  })
+})
