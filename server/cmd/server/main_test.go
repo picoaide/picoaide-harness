@@ -146,7 +146,9 @@ func buildRouterWithDB(t *testing.T, db *sql.DB) *gin.Engine {
 
 // testProductionDeps 构造与 main() **同形**的 productionDeps:字段一一对应,
 // 只有"真实资源"换成测试可构造的等价物(临时目录、可选的真实库)。
-// 任何字段漏填都会让对应整片路由从测试树里消失 —— 差集守卫会当场报出是哪几条。
+// 漏填的后果分两种,两种都有守卫:Wasm / WasmSession 漏填 ⇒ 对应整片路由从测试树
+// 里消失(routes_source_test.go 的差集断言会逐条报出);Ready 等字段漏填 ⇒ 路由仍在
+// 但请求必崩(见 routes_source_test.go 里的 nil-Ready 实测事实与生产侧接线断言)。
 func testProductionDeps(t *testing.T, db *sql.DB) productionDeps {
 	t.Helper()
 	// 与 main() 一致:认证 provider 按 ConfigureProviders 注册(真实库时才可查配置;
