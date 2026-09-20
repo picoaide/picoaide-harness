@@ -105,18 +105,24 @@ const PACKAGES = [
   // 登记（传递上已由 wasm-apps-host → browser → connectors → 叶子包保证，但真实边
   // 就该写在表里 —— `temp/wasm-client-only/cycle-check.mjs` 会逐条对拍）。
   { name: 'dsh-plugin-desktop', dir: 'packages/host/desktop', needs: ['@picoaide/dsh-wasm-apps-host', '@picoaide/dsh-host-locale', '@picoaide/dsh-host-home'] },
-  { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop'] },
+  { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop', '@picoaide/dsh-panel-surface'] },
   // 2026-09-20（路线 A / A 扩展）：`host-copy.ts` 的语言解析直接 import 叶子包
   // `@picoaide/dsh-host-locale`；`user-scope.ts` 的 DSH-home 权威改成
   // `@picoaide/dsh-host-home` ⇒ **connectors 不再 import 桌面包**，
   // 那条 `connectors → dsh-plugin-desktop` 边随之删除（它正是四边环的最后一段）。
-  { name: '@picoaide/dsh-connectors', dir: 'packages/host/connectors', needs: ['@picoaide/dsh-host-home', '@picoaide/dsh-host-locale'] },
-  { name: '@picoaide/dsh-cron', dir: 'packages/host/cron', needs: ['dsh-plugin-desktop'] },
+  { name: '@picoaide/dsh-connectors', dir: 'packages/host/connectors', needs: ['@picoaide/dsh-host-home', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface'] },
+  { name: '@picoaide/dsh-cron', dir: 'packages/host/cron', needs: ['dsh-plugin-desktop', '@picoaide/dsh-panel-surface'] },
   { name: '@picoaide/dsh-branding', dir: 'packages/client/branding', needs: [] },
   { name: 'dsh-community-fabric', dir: 'community/fabric', needs: [] },
   { name: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', needs: ['@picoaide/dsh-enterprise'] },
   // WASM 应用平台的客户端半边（应用中心 + 发布编排入口）：读 enterprise 的 lib/types。
-  { name: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', needs: [] },
+  { name: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', needs: ['@picoaide/dsh-panel-surface'] },
+  // 四个客户端面板共用的**中列整页装载器 + 视觉语言**叶子包（2026-09-20）：
+  // 它刻意没有任何 `@picoaide/*` 依赖（React 是 peer）⇒ needs 恒空，可以被任何包
+  // 先构建；四条出边（enterprise / cron / connectors / wasm-apps）都指向这个没有
+  // 出边的节点，故不会引入新的构建环。消费方把它**内联**进 client bundle
+  // （不进 tsdown 的 external），因此它不持有任何跨插件共享的可变状态。
+  { name: '@picoaide/dsh-panel-surface', dir: 'packages/client/panel-surface', needs: [] },
   // 宿主侧语言的**零依赖叶子包**（2026-09-20，构建环修复路线 A）：实现自
   // `packages/host/desktop/src/host-locale.ts` 逐字迁入（导出面与语义一字不改）。
   // 它刻意**没有任何 dependencies**（连 `@picoaide/*` 也没有）⇒ needs 恒空，可以被
@@ -169,6 +175,7 @@ const PATH_OWNERS = [
   ['packages/client/account-card/', '@picoaide/dsh-account-card'],
   ['packages/client/wasm-apps/', '@picoaide/dsh-wasm-apps'],
   ['packages/client/branding/', '@picoaide/dsh-branding'],
+  ['packages/client/panel-surface/', '@picoaide/dsh-panel-surface'],
   ['packages/host/connectors/', '@picoaide/dsh-connectors'],
   ['packages/host/host-locale/', '@picoaide/dsh-host-locale'],
   ['packages/host/host-home/', '@picoaide/dsh-host-home'],
@@ -198,6 +205,14 @@ const DEPENDENTS = {
     'dsh-plugin-desktop',
     '@picoaide/dsh-enterprise',
     '@picoaide/dsh-cron',
+  ],
+  // 面板叶子包的四个消费方直接依赖它（都是**一跳**，不需要像 host-locale 那样
+  // 展开两跳：没有第二层包再 import 它）。
+  '@picoaide/dsh-panel-surface': [
+    '@picoaide/dsh-enterprise',
+    '@picoaide/dsh-connectors',
+    '@picoaide/dsh-cron',
+    '@picoaide/dsh-wasm-apps',
   ],
 }
 

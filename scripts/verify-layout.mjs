@@ -65,6 +65,10 @@ const packageNameTable = new Map([
   ['packages/client/account-card', '@picoaide/dsh-account-card'],
   ['packages/client/branding', '@picoaide/dsh-branding'],
   ['packages/client/wasm-apps', '@picoaide/dsh-wasm-apps'],
+  // 2026-09-20：四个客户端面板（定时任务 / 能力中心 / 连接器 / 应用中心）共用的
+  // **中列整页装载器 + 视觉语言**叶子包（零 `@picoaide/*` 依赖，被消费方的 client
+  // bundle 内联）—— 它替掉了"cron 自持 DOM 装载 + 其余三个各写一套模态"的分叉。
+  ['packages/client/panel-surface', '@picoaide/dsh-panel-surface'],
   ['packages/vendor/memory-evolve', 'dsh-memory-evolve'],
   ['community/fabric', 'dsh-community-fabric'],
 ])

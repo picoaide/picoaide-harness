@@ -117,6 +117,7 @@
     "@deepseek-ai/dsh-invariants": "0.1.5-rc.2",
     "@deepseek-ai/dsh-scope": "0.1.5-rc.2",
     "@deepseek-ai/dsh-util-values": "0.1.5-rc.2",
+    "@picoaide/dsh-panel-surface": "workspace:*",
     "@types/node": "^22.20.0",
     "@types/react": "^18",
     "dsh-plugin-desktop": "workspace:*",

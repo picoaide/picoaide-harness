@@ -27,9 +27,12 @@
 
 - **只在桌面客户端内打开，没有浏览器地址**：平台不再给应用分配任何域名，也不签发
   应用证书 —— `<app_id>.<任何域名>` 这种地址**不存在**。可分享的形态只有**深链**
-  `<渠道 scheme>://app/<app_id>`（scheme 由客户端渠道配置决定，同一份应用在不同渠道的
-  客户端里可能不同，**不要写死某个 scheme**）。应用在客户端里的 origin 是
-  `picoaide-app://<app_id>`，每个应用一个 origin。
+  `<渠道 deep link scheme>://app/<app_id>`（scheme 由客户端渠道配置决定，同一份应用在不同
+  渠道的客户端里可能不同，**不要写死某个 scheme**）。应用在客户端里的 origin 是
+  `<渠道 app 源 scheme>://<app_id>`，每个应用一个 origin（official/beta 客户端的取值才是
+  `picoaide-app`）；两个 scheme 都能由客户端本机只读路由
+  `GET /api/pico/wasm-apps/channel` 得到（`{appOriginScheme, deepLinkScheme, productName}`），
+  拿不到时**不要编链接**。
 - **一律要求登录**：平台没有匿名面，每个请求都带已登录的使用者身份。
 - **不能主动发起网络请求、不能读文件**（⚠️ **不要对外说成"不能联网"**）：沙箱与 CSP
   挡住的是**应用自己发起的 `fetch`/`XHR` 型请求**（`connect-src 'self'` 只允许回自己的
@@ -71,13 +74,13 @@
 | `db.query(sql, args)` | 单条 `SELECT` | 单语句；值用 `args` 占位（**平台不检查你是否参数化**，见 §10）、受 `SQLITE_LIMIT_*` 约束、最多返回 5000 行 / 8 MiB |
 | `db.exec(sql, args)` | 单条写语句 | 仅 `INSERT`/`UPDATE`/`DELETE`；禁 DDL |
 | `db.tx` | 事务 | ABI 层是 `tx_begin`/`tx_commit`/`tx_rollback`；事务内**只允许数据库读写**（`db.query`/`db.exec` + 两个出口），`log`/`assets.read`/`db.define` 与嵌套 `tx_begin` 一律拒；超时 5 秒强制回滚 |
-| ~~`ai.chat(messages, model?)`~~ | **已删除（2026-09-19）** | 服务端**不再提供任何 AI 能力**。应用里的 AI 改走**前端桥**：由应用前端 JS 调保留路径 `POST /__picoaide/ai/chat`（客户端本地处理，不经服务端），再见 §2.1c |
+| ~~`ai.chat(messages, model?)`~~ | **已删除（2026-09-19）** | 它从来不是 WASI 导入，而是 stdout 上 JSON-RPC 的宿主方法名（平台也不反编译产物）⇒ 老产物**能通过发布校验**，直到**运行期第一次调用**才失败（`code = "NOT_FOUND"`、message 逐字 `未知的宿主方法: ai.chat`）。应用里的 AI 改走**客户端 AI loop**：应用前端 JS 调保留路径 `POST /__picoaide/ai/chat`（客户端本地处理，不经服务端），再见 §2.1c |
 | `log(level, msg)` | 写日志 | 单条不超过 4 KiB；每请求最多 100 条；超出丢弃并计数 |
 | `assets.read(path)` | 读随包资源 | 资源在发布期已被抽到宿主磁盘；无文件系统语义、不能穿越；结果用 `encoding` 判别负载（`text` / `base64` / `empty`） |
 
 **没有任何其他能力**：无文件、无网络、无线程、无子进程、无环境变量、无 `PRAGMA`、
-无 `ATTACH`、无 DDL、无扩展加载；**也没有任何 AI 能力**（服务端 `ai.chat` 已于 2026-09-19 删除，
-要 AI 走 §2.1c 的前端桥）；**也没有任何员工名录能力**（不列举、不搜索、不点查）。
+无 `ATTACH`、无 DDL、无扩展加载；**也没有任何 AI 能力**（宿主方法 `ai.chat` 已于 2026-09-19 删除，
+要 AI 走 §2.1c 的客户端 AI loop）；**也没有任何员工名录能力**（不列举、不搜索、不点查）。
 
 #### 包内资源的可见性（**写机密之前必读**）
 
@@ -118,49 +121,60 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 - **保留资源不能这样加**：`picoaide.app.json` 由平台在发布期写入（内容 = 随包提交的
   `config`），模块里的同名段会被平台忽略 —— 脚本会直接拒绝，别把名单塞进这种会被直出的资源。
 
-### 2.1b 页面渲染：`html/template` / `text/template` 可以直接用
+### 2.1b 页面怎么产出：静态前端 + JSON API（模板是例外用法）
 
-**渲染 HTML 页面的标准做法就是把模板编译进 wasm**（R8：静态资源/HTML/JS 全部编入）。
-平台的导入白名单由参考实现**真编译取并集**生成，已覆盖模板渲染所需的导入面
-（`text/template` / `html/template` 的 `Execute`、`(*os.File).ReadAt/WriteAt` 等），
-因此"用模板渲染页面"是**一等公民用法**，不需要额外的特批。
+**默认形态是前后端分离**：`web/index.html` + `web/app.css` + `web/app.js` 打进包里当静态资源，
+**宿主按路径直出**（§2.1 的直出规则与 `references/abi.md` §3.7）；wasm 只回 JSON。
+入口文档（`/`、`/index.html`）**由 wasm 自己答**（先判名单，再 `assets.read("index.html")`
+作为响应体）—— 名单判定在应用手里，宿主对入口一律不直出。
+
+`html/template` / `text/template` **仍然被放行**（导入白名单由参考实现**真编译取并集**生成，
+已覆盖模板渲染所需的导入面：`Execute`、`(*os.File).ReadAt/WriteAt` 等），有服务端渲染需求时
+（例如导出 HTML 报表）照常用，不需要特批。
 
 注意两点：
 - 模板内容与数据都在你的 wasm 里，渲染结果通过响应信封回给宿主 —— **没有**服务器端模板引擎；
 - 白名单是 Go 工具链相关的：升级 Go 版本后若出现 `IMPORT_NOT_ALLOWED`，多半是新的运行时导入面，
   按错误里的 `details.symbol` 报给平台管理员（平台会重跑白名单生成器）。
 
-### 2.1c 应用里的 AI：**前端桥**（wasm 里没有 AI）
+### 2.1c 应用里的 AI：**客户端 AI loop**（wasm 里没有 AI）
 
-**服务端不再向应用提供 AI 能力**（原宿主函数 `ai.chat` 已于 2026-09-19 彻底删除）。
-仍导入它的应用会在上传校验阶段被直接拒（`IMPORT_NOT_ALLOWED` + 迁移指引），**不会静默降级**。
+**服务端不再向应用提供 AI 能力**（宿主方法 `ai.chat` 已于 2026-09-19 彻底删除）。
+它**从来不是 WASI 导入**，而是 stdout 上 JSON-RPC 的宿主方法名；平台也**不做反编译**
+⇒ 仍调它的老产物**会通过发布校验**，直到**运行期第一次调用**才失败：
+JSON-RPC error `code = "NOT_FOUND"`、message 逐字 **`未知的宿主方法: ai.chat`**
+（纵深还有一条 `HOST_METHOD_UNKNOWN`，它的 hints 会列出可用能力）。
 
-要在应用里用 AI，改成「**前端调 AI → 结果回传 wasm 落库**」：
+要在应用里用 AI，改成「**前端调 AI → 结果回传 wasm 落库**」（权威链路叫 **客户端 AI loop**）：
 
 ```
-应用页面（前端 JS）                 wasm（后端）
+应用页面（前端 JS）                      wasm（后端）
   fetch('/__picoaide/ai/chat')  ─┐
-    POST {messages, stream}      │  ①保留路径：由**客户端**本地处理，绝不转发服务端
-    ← SSE delta… / done          │  ②客户端取该应用的隐藏会话跑一轮 AI（仅对话）
-  ───────────────────────────────┘
-  把生成结果 POST 回你自己的页面路由 ──▶ wasm 落库（db.exec）
+    POST {messages, stream}      │  ①保留路径：宿主协议 handler **本地**处理，绝不转发平台
+    ← SSE delta… / done          │  ②首次授权闸门（用户 × 应用）→ 隐藏会话 app:<app_id>
+  ───────────────────────────────┘     ③桌面客户端跑一轮 ctx.agentLoop（工具集为空）
+  把生成结果 POST 回你自己的页面路由 ──▶ ④wasm 落库（db.exec）
 ```
 
 冻结契约：
 
 | 项 | 口径 |
 | --- | --- |
-| 端点 | `POST /__picoaide/ai/chat`（**保留路径**，客户端协议 handler 本地处理，不经服务端） |
-| 请求体 | `{messages:[{role, content}], stream:bool}`；未知字段拒 |
+| 端点 | `POST /__picoaide/ai/chat`（**保留路径**，宿主协议 handler 本地处理，不经服务端） |
+| 请求体 | `{messages:[{role, content}], stream:bool}`；未知字段拒；`messages` ≤ 64 条、单条正文 ≤ 16 KiB |
 | 非流式响应 | `{content, usage?}` |
-| 流式响应 | `text/event-stream`：`delta` 事件增量推送，`done` 收尾 |
-| 错误 | 一律 JSON 信封：`app_ai_denied`（未授权）/ `app_ai_unavailable` / `ai_balance_insufficient` / `ai_rate_limited` / `ai_cancelled` |
+| 流式响应 | `text/event-stream`：`delta` 事件增量推送，`done` 收尾（失败给 `error` 事件） |
+| 错误 | 一律 JSON 信封：`app_ai_denied`(403) / `app_ai_unavailable`(503 或 401 未登录) / `app_ai_invalid`(400·405·413) / `ai_balance_insufficient`(402) / `ai_rate_limited`(429) / `ai_cancelled`(499) |
 | 形态 | **仅对话**：无工具、无文件、无连接器、无记忆、无用户历史；上下文只有你这次传的 messages |
-| 会话 | **每应用一个隐藏会话**（支持多轮上下文；不出现在侧边栏，应用诊断里可查） |
-| 计费 | 使用者的账户（走客户端既有 LLM 链路）+ 应用维度归因 |
-| 用户授权 | **首次调用授权一次**（按 用户×应用 记录，可在设置里撤销；拒绝 ⇒ `app_ai_denied`） |
-| 预设 | **应用不能**声明提示词/模型/温度 —— 平台统一默认模型与提示 |
+| 会话 | **每应用一个隐藏会话** `app:<app_id>`（支持多轮上下文；不出现在侧边栏，诊断里可查） |
+| 系统提示 | **平台统一注入一条固定系统提示**，并且**不注入记忆、不注入用户的历史会话** |
+| 计费 | 使用者本人的既有 LLM 链路（扣他自己的余额）+ 平台统一默认模型 |
+| 归因 | ⚠️ **应用维度用量归因尚未接通**（客户端不出站 `X-Pico-App-Id`）⇒ 不要承诺"应用详情页能看到 AI 用量"；只有管理端 webadmin 的应用中心看板，且无归因数据时显示「统计尚未上线：暂无应用归因」 |
+| 用户授权 | **首次调用授权一次**（按 用户×应用 记录；**撤销入口只有应用详情页的 AI 面板里那个按钮**，设置页里没有） |
+| 预设 | **应用不能**声明提示词/模型/温度 —— 平台统一给 |
+| 并发与超时 | AI 桥**没有自己的超时预算**（宿主给普通应用请求设的那条预算对它不适用）；唯一边界是页面关闭/导航离开触发的 abort 与下游 LLM 链路；并发按**隐藏会话串行**（第二个请求排队，不是被拒绝） |
 | 后台调用 | **仅前台**：应用页面关闭即取消，不存在无人值守跑 AI 的通道 |
+| 保留前缀 | 整个 `__picoaide/` 是宿主保留命名空间：其余路径一律 404、**绝不转发平台**；**随包资源不得占用该前缀**（发布期 `ASSET_DENIED` + `details.reason = "reserved_path_prefix"`） |
 
 三条要点：
 
@@ -176,7 +190,7 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 | 想做的事 | 现实 |
 | --- | --- |
 | 调用外部 API / 抓取网页 / 加载 CDN | 应用自己发起的 `fetch`/`XHR` 一律被拦（`connect-src 'self'`）；**但这不等于"不能联网"** —— 顶层导航/弹窗不受 CSP 约束，别把它当数据外带防线 |
-| 在 wasm 里直接调 AI（老写法 `ai.chat`，**该宿主能力已删除**） | 服务端已无 AI 能力：产物一导入就报 `IMPORT_NOT_ALLOWED`。改走 §2.1c 的前端桥（前端调 AI → 结果回传 wasm 落库） |
+| 在 wasm 里直接调 AI（老写法 `ai.chat`，**该宿主能力已删除**） | 服务端已无 AI 能力，且平台不反编译产物 ⇒ **发布校验不会拒**，运行期第一次调用才失败（`NOT_FOUND` + `未知的宿主方法: ai.chat`）。改走 §2.1c 的客户端 AI loop（前端调 AI → 结果回传 wasm 落库） |
 | 读写服务器文件 / 用户磁盘 | 不可能：没有文件系统 |
 | 用 Python / Node / Java 写 | 不支持：只产出 `wasm32-wasip1` core module（Go 是 Tier 1） |
 | 用 `document.cookie` 保存状态 | 无效：自定义协议下 cookie 完全不可用（`document.cookie` 恒为空、`Set-Cookie` 不落盘）—— 状态请放应用库（`db.*`） |
@@ -301,7 +315,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 
 `preview.mjs` 是一个**假宿主**：按 ABI 收发帧，用内存数据应答 `db.*`。它能验证协议层的一切
 （帧读写、flush、响应只写一帧、路由与名单分支、失败分支的文案）；验证不了
-"真实数据库/真实体积"。**它不提供 AI**（服务端已无 AI 能力）：AI 属于前端桥（§2.1c），
+"真实数据库/真实体积"。**它不提供 AI**（服务端已无 AI 能力）：AI 属于客户端 AI loop（§2.1c），
 要在本地验证 AI 交互，请直接对前端页面做联调。
 
 也可以直接用平台预检当"线上体检"：`validate` 不占版本号、不进审计，失败会回
@@ -309,7 +323,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 
 ## 6. 发布流程
 
-| 步骤 | 端点（管理面只在平台主站：应用在客户端内以 `picoaide-app://<app_id>` 打开，拿不到管理面） |
+| 步骤 | 端点（管理面只在平台主站：应用在客户端内以 `<渠道 app 源 scheme>://<app_id>` 打开，拿不到管理面） |
 | --- | --- |
 | 预检 | `POST /api/client/v2/apps/wasm/validate` |
 | 提交新版本 | `POST /api/client/v2/apps/wasm/:app_id/releases` |
@@ -331,7 +345,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | `wasm_app_publish` | 发布新版本：同步执行，>8 MiB 自动分片续传；**失败不占版本号** |
 
 - **不要用 `curl` 直接调服务端接口**：那需要员工的登录令牌，模型既拿不到、也不该持有；
-  应用页面（`picoaide-app://<app_id>`）同样调不到管理面 —— 应用请求只经客户端的协议
+  应用页面（`<渠道 app 源 scheme>://<app_id>`）同样调不到管理面 —— 应用请求只经客户端的协议
   转发走到应用请求端点。工具是唯一走得通的路。
 - 工具的参数说明就是**该填什么**的契约（`config` 的字段集合封闭：`access` / `whitelist` /
   `purpose` / `data_sensitivity` / `owner`，多一个未知字段服务端即拒）；字段规格的机器可读
@@ -366,7 +380,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | 上传频率 | 每人每小时 30 次（预检 + 发布合计）、同时 1 个编译中的上传 |
 | 调用事件 / 日志保留 | 7 天（诊断默认返回 50 条、最多 200 条） |
 | 退役快照保留 | 90 天 |
-| AI 使用 | **无应用级配额**：应用 AI 走使用者自己的 LLM 链路（余额 + 平台既有限流）。⚠️ **不在 wasm 侧**：只在应用前端经 §2.1c 的前端桥发生 |
+| AI 使用 | **无应用级配额**：应用 AI 走使用者自己的 LLM 链路（余额 + 平台既有限流）。⚠️ **不在 wasm 侧**：只在应用前端经 §2.1c 的客户端 AI loop 发生；**应用维度归因尚未接通**（客户端不出站归因头） |
 
 ## 8. 十一条硬约束（§9.4）
 
@@ -374,8 +388,9 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 2. **无状态**：不要用全局变量存用户/会话状态 —— 实例每请求新建。
 3. **同一应用内所有用户共享数据**；要区分用户请自己加业务字段。
 4. **stdout 只用于协议帧**（`RS` + 长度 + JSON）；日志走 `log`。
-5. **wasm 里没有 AI**：服务端 `ai.chat` 已删除。要 AI 就在**应用前端**调保留路径
-   `POST /__picoaide/ai/chat`（客户端本地处理、流式 SSE，见 §2.1c），再把结果回传 wasm 落库。
+5. **wasm 里没有 AI**：宿主方法 `ai.chat` 已删除（它不是 WASI 导入 ⇒ 老产物在**运行期**才失败）。
+   要 AI 就在**应用前端**调保留路径 `POST /__picoaide/ai/chat`（客户端本地处理、流式 SSE，
+   见 §2.1c），再把结果回传 wasm 落库。
 6. **不能主动发起网络请求、不能读文件、不能开线程**（**不要对外说成"不能联网"**：CSP 不管顶层导航与弹窗，见 §1.1 与总纲 §6）；外部资源必须内联（HTML/JS 也编进 wasm）。
 7. **准入由你自己判**：配置写在 `picoaide.app.json`（`access` = `login` / `whitelist`
    + `whitelist`），入口第一件事就是读它并比对名单；名单用 `username`/`user.id`；
@@ -383,7 +398,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 8. **平台不提供员工名录**：名单只能手填已知账号；改配置 = 发新版。
 9. **不依赖 `$HOME`**：编译器状态目录必须落在会话工作区内。
 10. **发布前先本地自测**：Node 内置 `node:wasi` 可零依赖跑通产物，再走 `validate`。
-11. **应用名就是标识**（`app_id`，也是应用 origin 的 host 段 `picoaide-app://<app_id>/`）：
+11. **应用名就是标识**（`app_id`，也是应用 origin 的 host 段 `<渠道 app 源 scheme>://<app_id>/`，渠道参数化：official/beta 取值 `picoaide-app`）：
     小写字母/数字/连字符、
     不超过 63 个字符、不能纯数字、不能 `xn--` 开头、不能是保留字；**一经发布不能改名**。
 
@@ -400,7 +415,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | 写出慢查询 | 每条语句 5 秒硬超时 + `SQLITE_LIMIT_*` + 诊断事件 |
 | 想调并发 / 队列参数 | 作者不可调（运维可在控制台「应用中心 → 限制项」改全局值）：同一应用默认最多 **4 个请求并发**（读并发；**写仍串行**），**单个用户在同一应用内默认只有 1 路**（`user_per_app_running`），超出进队列（默认 32，可调到 4096），队列满 429 |
 | 事务里调 `log` / `assets.read` / `db.define` / 再开一个事务 | 直接报错（防事务长期持锁 + 占满执行槽）；事务内**只能做数据库读写**：`db.query` / `db.exec` + `tx_commit` / `tx_rollback` |
-| 在 wasm 里找 AI 能力（老代码 `ai.chat`，**该能力已删除**） | 上传校验直接拒（`IMPORT_NOT_ALLOWED` + 迁移指引），不静默降级；改走 §2.1c 的前端桥 |
+| 在 wasm 里找 AI 能力（老代码 `ai.chat`，**该能力已删除**） | 运行期第一层就回 JSON-RPC `NOT_FOUND` + `未知的宿主方法: ai.chat`（导入白名单管不到它 —— 它是 stdout 上的方法名，不是 WASI 导入）；改走 §2.1c 的客户端 AI loop |
 
 ## 10. 常见错误与处理（速查）
 
@@ -421,11 +436,11 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | `ASSET_DENIED` | `assets.read` 的包内路径非法/越界，或抽取目录异常 | 路径用相对、`/` 分隔、不含 `..`；不要读自己没有的资源 |
 | `ASSET_OVERSIZE` | 单个随包资源超过 4 MiB（与自定义段总量同源） | 精简资源；HTML/JS 先 gzip 再内嵌 |
 | `ASSET_EXISTS` | 发布期抽取要写的资源已存在（抽取只写一次） | 改资源 = 发新版本，不要指望覆盖 |
-| `HOST_METHOD_UNKNOWN` | 调了不存在的宿主函数（拼错方法名、或平台没有的能力；包括已被删除的 `ai.chat`） | 只调封闭清单里的宿主方法（见 `references/abi.md` §3）；**AI 不在其中**，走 §2.1c 的前端桥 |
+| `HOST_METHOD_UNKNOWN` | 调了不存在的宿主函数（拼错方法名、或平台没有的能力） | 只调封闭清单里的宿主方法（见 `references/abi.md` §3）；**AI 不在其中**，走 §2.1c 的客户端 AI loop。注意：**调不存在的宿主方法时第一层先回 JSON-RPC `NOT_FOUND` + `未知的宿主方法: <名字>`**（老应用调 `ai.chat` 撞的就是这一层） |
 | `DB_LIMIT` | 库满 100 MB 或返回超行数/字节、语句超时 | 清理历史数据或做汇总表；分页 |
 | `APP_QUEUE_FULL` | 用的人多 | 按 `Retry-After` 退避，别立刻重试 |
-| `ai_balance_insufficient`（**前端桥**错误，不是 wasm 错误码） | 使用者余额不足 | 提示本人去桌面客户端看余额；**不显示金额、不自动重试** |
-| `ai_rate_limited` / `app_ai_denied` / `app_ai_unavailable` / `ai_cancelled`（**前端桥**错误） | 限流 / 用户未授权（或已撤销）/ 客户端 AI 不可用 / 页面关闭导致取消 | 分别提示"稍后重试"、"请在设置里授权应用使用 AI"、"AI 暂不可用"、无需提示（是用户主动关闭）；见 §2.1c |
+| `ai_balance_insufficient`（**客户端 AI loop** 错误，不是 wasm 错误码） | 使用者余额不足 | 提示本人去桌面客户端看余额；**不显示金额、不自动重试** |
+| `ai_rate_limited` / `app_ai_denied` / `app_ai_unavailable` / `app_ai_invalid` / `ai_cancelled`（**客户端 AI loop** 错误） | 限流 / 用户未授权（或已撤销）/ 客户端 AI 不可用或未登录 / 请求体不合法（条数、单条长度、方法不是 POST）/ 页面关闭导致取消 | 分别提示"稍后重试"、"到应用详情页的 AI 面板授权（撤销入口也在那里）"、"AI 暂不可用"、"检查 messages 条数与长度"、无需提示（是用户主动关闭）；见 §2.1c |
 | `FORBIDDEN` | 不是该应用的发布者（或应用已冻结） | 只能改自己发布的应用 |
 | `NAME_TAKEN` | 应用名被占用 | 换名字（同名不同人是不同应用） |
 

@@ -16,7 +16,7 @@ const SKILLS = [
 ]
 
 const BUILTIN = [{
-  name: 'app-builder', version: '1.0.0', title: 'PicoAide 应用构建（WASM 应用）',
+  name: 'app-builder', version: '1.0.0', title: '应用构建（WASM 应用）',
   description: '用 Go 写一个应用平台上的 WASM 应用', author: 'PicoAide', category: '应用开发',
   sha256: 'a'.repeat(64), size: 43282, files: 11, source: 'builtin',
 }]

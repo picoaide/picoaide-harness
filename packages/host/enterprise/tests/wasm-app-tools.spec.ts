@@ -378,17 +378,19 @@ describe('参数契约：模型必须能读懂每个字段', () => {
     }
   })
 
-  it('access 枚举与缺省语义写进参数描述（三取值一个不少）', () => {
+  it('access 枚举与缺省语义写进参数描述（两个可写取值一个不少）', () => {
     const config = byName('wasm_app_publish').parameters.properties!.config!
     const access = (config.properties as Record<string, Record<string, unknown>>).access!
     expect(access.enum).toEqual([...APP_CONFIG_ACCESS_MODES])
     const description = String(access.description)
     for (const mode of APP_CONFIG_ACCESS_MODES) expect(description).toContain(mode)
     expect(description).toContain(APP_CONFIG_DEFAULT_ACCESS)
-    // 三模式的语义必须都在（用户拍板的口径）：匿名可用 / 登录后全员可用 / 仅名单内。
-    expect(description).toContain('匿名')
+    // 可写模式的语义必须都在：登录后全员可用 / 仅名单内。
     expect(description).toContain('全员')
     expect(description).toContain('名单')
+    // 历史值只允许以"已不再可用"的形态出现 —— 描述里必须说清它会被拒，
+    // 否则模型看到 `public` 三个字仍可能照抄（真实缺陷，2026-09-20 修正）。
+    expect(description).toContain('不再可用')
   })
 
   it('version / appId 的约束写进描述（严格递增、形态、不可改名）', () => {
@@ -572,6 +574,21 @@ describe('配置字段与 appcfg.json 对拍（单一真源缺席即红，不再
   } catch (cause) {
     missing = cause instanceof Error ? cause.message : String(cause)
   }
+
+  it('access 取值与 appcfg.json 的 access_values / access_default 逐字一致', () => {
+    expect(missing, `${APPCFG_JSON} 必须存在且是合法 JSON：它是本对拍的唯一真源`).toBeNull()
+    const root = spec as Record<string, unknown>
+    // 单一真源里 access 的取值表与缺省值。**这份工具参数是模型可见的活契约**：
+    // 2026-09-20 之前它写的是三值 `['public','login','whitelist']`，而服务端只接受
+    // login / whitelist（`public` 是历史只读值，写侧一律 `public_not_allowed`）——
+    // 模型照描述填 public，发布必被拒。这一条把两端钉死。
+    const values = root.access_values
+    expect(Array.isArray(values), `${APPCFG_JSON} 必须有 access_values 数组`).toBe(true)
+    expect([...(values as string[])].sort()).toEqual([...APP_CONFIG_ACCESS_MODES].sort())
+    expect(root.access_default).toBe(APP_CONFIG_DEFAULT_ACCESS)
+    // 历史值不得回到可写集合（写侧被服务端拒 ⇒ 描述里给它就是误导模型）。
+    expect(values as string[]).not.toContain('public')
+  })
 
   it('字段集合与首版必填标志与常量一致', () => {
     // 单一真源缺席 = **红**，不是 skip（独立审计 2026-09-18 P1-2：原先

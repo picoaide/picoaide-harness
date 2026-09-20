@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>能力全集 · 演示</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="page">
+
+<!-- 背景：纯 CSS 渐变 + 光斑（没有任何图片文件；平台自定义协议下也不允许外链） -->
+<div class="bg" aria-hidden="true">
+  <span class="blob b1"></span>
+  <span class="blob b2"></span>
+  <span class="blob b3"></span>
+  <span class="grid"></span>
+</div>
+
+<div class="shell">
+
+  <header class="topbar">
+    <div class="brand">
+      <!-- 品牌 mark：几何与仓库品牌真源 brands/official/logo.svg 一致（圆角方块 + 一对花括号 + 连接线 + 两个节点圆） -->
+      <svg class="mark" viewBox="0 0 1254 1254" aria-hidden="true" focusable="false">
+        <rect x="0" y="0" width="1254" height="1254" rx="180" fill="var(--mark-tile)"/>
+        <g transform="translate(627 627) scale(1.25) translate(-627 -627)">
+          <path d="M 334 409 C 300 409 273 431 273 466 V 548 C 273 582 254 607 220 620 C 254 633 273 658 273 692 V 775 C 273 810 300 843 334 843" fill="none" stroke="var(--mark-ink)" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M 920 409 C 954 409 981 431 981 466 V 548 C 981 582 1000 607 1034 620 C 1000 633 981 658 981 692 V 775 C 981 810 954 843 920 843" fill="none" stroke="var(--mark-ink)" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+          <line x1="435" y1="627" x2="817" y2="627" stroke="var(--mark-ink)" stroke-width="20" stroke-linecap="round"/>
+          <circle cx="435" cy="627" r="65" fill="var(--mark-ink)"/>
+          <circle cx="817" cy="627" r="65" fill="var(--mark-ink)"/>
+        </g>
+      </svg>
+      <span class="brandText">
+        <strong>能力全集</strong>
+        <span class="brandSub">应用平台 · 一页跑完</span>
+      </span>
+    </div>
+    <span class="statusChip" id="statusChip" data-state="idle" role="status">待运行</span>
+  </header>
+
+  <nav class="segbar" aria-label="能力分节导航">
+    <div class="segs" id="segs">
+      <a class="seg" href="#sec-identity">身份</a>
+      <a class="seg" href="#sec-access">访问模式</a>
+      <a class="seg" href="#sec-define">建表</a>
+      <a class="seg" href="#sec-crud">读写</a>
+      <a class="seg" href="#sec-tx">事务</a>
+      <a class="seg" href="#sec-log">日志</a>
+      <a class="seg" href="#sec-assets">包内资源</a>
+      <a class="seg" href="#sec-denied">被拒的样子</a>
+      <a class="seg" href="#sec-ai">客户端 AI</a>
+      <a class="seg" href="#sec-storage">存储边界</a>
+      <a class="seg" href="#sec-history">历史</a>
+      <a class="seg" href="#sec-trace">时间线</a>
+    </div>
+  </nav>
+
+  <main class="scroller" id="scroller">
+
+    <p class="lede">
+      这个页面把平台给 WASM 应用的每一项能力都<b>当场跑一遍</b>，并把真实结果（成功/失败、
+      平台回的 code 与 hints、耗时微秒）显示出来。页面本身是纯静态的：
+      <span class="mono">/static/app.css</span> 与 <span class="mono">/static/app.js</span>
+      由宿主按路径直出，入口 <span class="mono">/</span> 与 <span class="mono">/api/*</span> 才走应用。
+    </p>
+
+    <!-- 01 身份注入 -->
+    <section class="card" id="sec-identity" aria-labelledby="h-identity">
+      <header class="cardHead">
+        <span class="num" aria-hidden="true">01</span>
+        <div class="cardTitle">
+          <h2 id="h-identity">身份注入</h2>
+          <p class="sub">帧里的 user 字段：应用没有一行登录逻辑</p>
+        </div>
+      </header>
+      <div class="cardBody">
+        <div class="row">
+          <button class="btn btn-primary btn-sm" type="button" data-act="whoami">读取身份</button>
+          <span class="stamp" id="stamp-whoami">未读取</span>
+        </div>
+        <div class="out" data-out="identity" aria-live="polite" role="status"></div>
+      </div>
+    </section>
+
+    <!-- 02 访问模式 -->
+    <section class="card" id="sec-access" aria-labelledby="h-access">
+      <header class="cardHead">
+        <span class="num" aria-hidden="true">02</span>
+        <div class="cardTitle">
+          <h2 id="h-access">访问模式</h2>
+          <p class="sub">平台只注入模式与身份，名单由应用自己比对（R24）</p>
+        </div>
+      </header>
+      <div class="cardBody">
+        <div class="out" data-out="access" aria-live="polite" role="status"></div>
+        <details class="fold">
+          <summary>login 与 whitelist 的区别</summary>
+          <div class="foldBody" id="accessExplain">
+            <p><b>login</b>：要求登录。登录后全员可用 —— 平台注入身份，应用不需要任何登录逻辑。</p>
+            <p><b>whitelist</b>：要求登录 <b>且</b> 应用自己比对名单。平台同样只注入身份与
+              <span class="mono">auth.mode</span>，<b>不比对、也不校验名单里的账号是否存在</b>
+              （否则等于账号枚举接口）。</p>
+            <p><b>R24</b>：名单判定永远在应用侧 —— 入口第一件事就是读自己的
+              <span class="mono">picoaide.app.json</span> 比对，不在名单里返回 403 页面并
+              <b>显示本人账号</b>（那是作者发现名单拼错的唯一途径）。</p>
+            <p>名单必须放 <span class="mono">picoaide.app.json</span>（平台保留资源，永不直出）；
+              放进会被直出的非保留资源，等于把名单公开给任何能打开应用的人。</p>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <!-- 03 建表 -->
+    <section class="card" id="sec-define" aria-labelledby="h-define">
+      <header class="cardHead">
+        <span class="num" aria-hidden="true">03</span>
+        <div class="cardTitle">
+          <h2 id="h-define">建表 · db.define</h2>
+          <p class="sub">DDL 唯一的入口：SQL 里连 CREATE 都不允许</p>
+        </div>
+      </header>
+      <div class="cardBody">
+        <div class="row">
+          <button class="btn btn-primary btn-sm" type="button" data-act="run">跑一遍全部能力</button>
+          <span class="stamp" id="stamp-run">未运行</span>
+        </div>
+        <div class="out" data-out="define" aria-live="polite" role="status"></div>
+      </div>
+    </section>
+
+    <!-- 04 写入 + 查询 -->
+    <section class="card" id="sec-crud" aria-labelledby="h-crud">
+      <header class="cardHead">
+        <span class="num" aria-hidden="true">04</span>
+        <div class="cardTitle">
+          <h2 id="h-crud">写入 + 查询</h2>
+          <p class="sub">db.exec 插一条、db.query 读回来，值一律走 <span class="mono">?</span> 占位</p>
+        </div>
+      </header>
+      <div class="cardBody">
+        <div class="out" data-out="crud" aria-live="polite" role="status"></div>
+        <p class="tip">平台<b>不</b>检查你是否参数化：字面量拼进 SQL 照样过闸门 ——
+          注入没有任何平台侧防线，只有 <span class="mono">?</span> 占位挡得住。</p>
+      </div>
+    </section>
+
+    <!-- 05 事务 -->
+    <section class="card" id="sec-tx" aria-labelledby="h-tx">
+      <header class="cardHead">
+        <span class="num" aria-hidden="true">05</span>
+        <div class="cardTitle">
+          <h2 id="h-tx">事务 · 提交与回滚</h2>
+          <p class="sub">两个按钮各写两条，然后用数据证明回滚真的没落库</p>
+        </div>
+      </header>
+      <div class="cardBody">
+        <div class="row">
+          <button class="btn btn-ok btn-sm" type="button" data-act="tx" data-mode="commit">提交（commit）</button>
+          <button class="btn btn-warn btn-sm" type="button" data-act="tx" data-mode="rollback">回滚（rollback）</button>
+        </div>
+        <div class="out" data-out="tx" aria-live="polite" role="status"></div>
+        <p class="tip">事务内只允许 <span class="mono">db.query</span> / <span class="mono">db.exec</span>
+          与两个出口（commit / rollback）；<span class="mono">log</span>、<span class="mono">assets.read</span>、
+          <span class="mono">db.define</span> 进去必被拒 —— 「被拒的样子」那一屏可以现场验证。</p>
+      </div>
+    </section>
+
+    <!-- 06 应用日志 -->
+    <section class="card" id="sec-log" aria-labelledby="h-log">
+      <header class="cardHead">
+        <span class="num" aria-hidden="true">06</span>
+        <div class="cardTitle">
+          <h2 id="h-log">应用日志 · log</h2>
+          <p class="sub">保留 7 天，是排障的第一手材料</p>
+        </div>
+      </header>
+      <div class="cardBody">
+        <div class="row">
+          <button class="btn btn-primary btn-sm" type="button" data-act="log">写一条日志</button>
+          <span class="stamp" id="stamp-log">未写入</span>
+        </div>
+        <div class="out" data-out="log" aria-live="polite" role="status"></div>
+      </div>
+    </section>
+
+    <!-- 07 包内资源 + 静态直出 -->
+    <section class="card" id="sec-assets" aria-labelledby="h-assets">
+      <header class="cardHead">
+        <span class="num" aria-hidden="true">07</span>
+        <div class="cardTitle">
+          <h2 id="h-assets">包内资源 · assets.read</h2>
+          <p class="sub">显示 content_type / size / encoding，以及宿主直出与走 wasm 的区别</p>
+        </div>
+      </header>
+      <div class="cardBody">
+        <div class="out" data-out="assets" aria-live="polite" role="status"></div>
+        <div class="row">
+          <button class="btn btn-ghost btn-sm" type="button" data-act="static" data-static="/static/app.css">取 /static/app.css</button>
+          <button class="btn btn-ghost btn-sm" type="button" data-act="static" data-static="/static/nope.css">取一个不存在的静态路径</button>
+        </div>
+        <div class="out" data-out="static" aria-live="polite" role="status"></div>
+        <p class="tip">宿主规则：包内存在的 <b>非保留资源</b> 由宿主按路径直接返回（不执行 wasm，响应带 ETag）；
+          不存在就交给 wasm（这里会看到应用自己的 404 信封）。而 <span class="mono">picoaide.app.json</span>
+          是保留资源，宿主永不直出。</p>
+      </div>
+    </section>
+
+    <!-- 08 被拒的样子 -->
+    <section class="card card-alert" id="sec-denied" aria-labelledby="h-denied">
+      <header class="cardHead">
+        <span class="num" aria-hidden="true">08</span>
+        <div class="cardTitle">
+          <h2 id="h-denied">被拒的样子</h2>
+          <p class="sub">故意违规一次，把平台回的 code / message / details / hints 原样渲染</p>
+        </div>
+      </header>
+      <div class="cardBody">
+        <div class="chips" id="variantChips" role="group" aria-label="选择一种故意违规的形态">
+          <span class="skeleton skeleton-chip"></span>
+          <span class="skeleton skeleton-chip"></span>
+        </div>
+        <div class="out" data-out="denied" aria-live="polite" role="status"></div>
+      </div>
+    </section>
+
+    <!-- 09 客户端 AI -->
+    <section class="card" id="sec-ai" aria-labelledby="h-ai">
+      <header class="cardHead">
+        <span class="num" aria-hidden="true">09</span>
+        <div class="cardTitle">
+          <h2 id="h-ai">客户端 AI</h2>
+          <p class="sub">wasm 里<b>没有</b> AI；AI 由页面直接调客户端保留路径</p>
+        </div>
+      </header>
+      <div class="cardBody">
+        <p class="tip"><span class="mono">POST /__picoaide/ai/chat</span> 由客户端本地处理（首次会弹一次性授权卡），
+          应用侧只负责发问题、按 SSE 增量渲染。服务端应用库与这条链路无关。</p>
+        <label class="label" for="aiPrompt">问一句话</label>
+        <textarea class="input" id="aiPrompt" rows="2" maxlength="500"
+          placeholder="例如：用一句话解释什么是 WASM 应用的宿主能力面"></textarea>
+        <div class="row">
+          <button class="btn btn-primary btn-sm" type="button" data-act="ai" id="btnAi">发送</button>
+          <button class="btn btn-ghost btn-sm" type="button" data-act="ai-stop" id="btnAiStop" hidden>停止</button>
+        </div>
+        <div class="out" data-out="ai" aria-live="polite" role="status"></div>
+        <details class="fold">
+          <summary>六个错误码分别该怎么处置</summary>
+          <div class="foldBody" id="aiCodes"></div>
+        </details>
+      </div>
+    </section>
+
+    <!-- 10 存储边界 -->
+    <section class="card" id="sec-storage" aria-labelledby="h-storage">
+      <header class="cardHead">
+        <span class="num" aria-hidden="true">10</span>
+        <div class="cardTitle">
+          <h2 id="h-storage">存储边界</h2>
+          <p class="sub">要留存的东西放应用库；浏览器存储只当可再生的缓存</p>
+        </div>
+      </header>
+      <div class="cardBody">
+        <ul class="storeList">
+          <li class="storeRow ok">
+            <span class="storeName mono">db.*（服务端应用库）</span>
+            <span class="storeNote">不随清缓存 / 切账号丢失，跨设备一致 —— <b>一切要留存的东西</b>（业务数据、设置）</span>
+          </li>
+          <li class="storeRow">
+            <span class="storeName mono">localStorage</span>
+            <span class="storeNote">按 origin 隔离；随客户端清缓存 / 切账号被清 —— 只放可再生的界面偏好</span>
+          </li>
+          <li class="storeRow">
+            <span class="storeName mono">sessionStorage</span>
+            <span class="storeNote">同上，且随窗口关闭消失 —— 单次打开的临时态</span>
+          </li>
+          <li class="storeRow">
+            <span class="storeName mono">IndexedDB</span>
+            <span class="storeNote">按 origin 隔离；随清缓存 / 切账号被清 —— 体积较大的可再生素材缓存</span>
+          </li>
+          <li class="storeRow bad">
+            <span class="storeName mono">Cache Storage</span>
+            <span class="storeNote"><b>不可用</b>：<span class="mono">caches.open()</span> 会成功，但
+              <span class="mono">cache.put(new Request('&lt;app scheme&gt;://…'))</span> 必抛
+              <span class="mono">TypeError</span> —— 不要写「离线优先」</span>
+          </li>
+          <li class="storeRow bad">
+            <span class="storeName mono">cookie</span>
+            <span class="storeNote"><b>不可用</b>：<span class="mono">document.cookie</span> 恒为空、
+              <span class="mono">Set-Cookie</span> 不落盘；帧里的 headers 也不含 Cookie</span>
+          </li>
+        </ul>
+        <p class="tip">页面里的「历史」那一屏读的就是应用库中的真实数据，可以拿来对照：
+          换账号、清缓存之后它还在。</p>
+      </div>
+    </section>
+
+    <!-- 11 历史证据 -->
+    <section class="card" id="sec-history" aria-labelledby="h-history">
+      <header class="cardHead">
+        <span class="num" aria-hidden="true">11</span>
+        <div class="cardTitle">
+          <h2 id="h-history">历史证据</h2>
+          <p class="sub">app 库里的真实数据（GET /api/runs）</p>
+        </div>
+      </header>
+      <div class="cardBody">
+        <div class="row">
+          <button class="btn btn-ghost btn-sm" type="button" data-act="runs">刷新历史</button>
+          <span class="stamp" id="stamp-runs">未读取</span>
+        </div>
+        <div class="out" data-out="history" aria-live="polite" role="status"></div>
+      </div>
+    </section>
+
+    <!-- 12 能力时间线 -->
+    <section class="card" id="sec-trace" aria-labelledby="h-trace">
+      <header class="cardHead">
+        <span class="num" aria-hidden="true">12</span>
+        <div class="cardTitle">
+          <h2 id="h-trace">能力时间线</h2>
+          <p class="sub">本次请求 app.Traces()：方法 / 成功与否 / 备注 / 耗时微秒</p>
+        </div>
+      </header>
+      <div class="cardBody">
+        <div class="out" data-out="traceSummary" aria-live="polite" role="status"></div>
+        <ol class="timeline" data-out="timeline" aria-live="polite"></ol>
+        <p class="tip">这条时间线是「能力调用真的发生了」的证据：每一条都来自宿主调用的真实记录，
+          不是页面画出来的清单。</p>
+      </div>
+    </section>
+
+    <footer class="foot">
+      <p>手机竖屏窗口比例由 <span class="mono">picoaide.app.json</span> 的
+        <span class="mono">window.ratio</span> 声明，客户端强制锁定。</p>
+      <p class="mono footMeta" id="footMeta">等第一次请求…</p>
+    </footer>
+
+  </main>
+
+  <div class="actionbar">
+    <button class="btn btn-primary" type="button" data-act="run" id="btnRunAll">
+      <span class="playIcon" aria-hidden="true"></span><span>跑一遍全部能力</span>
+    </button>
+    <button class="btn btn-ghost" type="button" data-act="whoami">读身份</button>
+  </div>
+
+</div>
+
+<script src="/static/app.js" defer></script>
+</body>
+</html>

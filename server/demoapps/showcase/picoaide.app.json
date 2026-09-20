@@ -1,0 +1,7 @@
+{
+  "access": "login",
+  "purpose": "一页看全应用平台的能力边界与调用形态（含被拒时的错误码与平台给出的建议）",
+  "data_sensitivity": "公开",
+  "owner": "平台管理员",
+  "window": { "ratio": "9:19.5", "width": 420, "height": 910 }
+}

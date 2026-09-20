@@ -186,7 +186,7 @@ function stubServer(archive: Buffer, opts: { checksum?: string | null, version?:
     if (href.endsWith('/api/client/v2/skills/builtin')) {
       if (opts.status !== undefined) return new Response('{}', { status: opts.status })
       return new Response(JSON.stringify({
-        skills: [{ name: 'app-builder', version: manifestVersion, title: 'PicoAide 应用构建', description: '写一个 WASM 应用', source: 'builtin' }],
+        skills: [{ name: 'app-builder', version: manifestVersion, title: '应用构建', description: '写一个 WASM 应用', source: 'builtin' }],
       }), { status: 200, headers: { 'content-type': 'application/json' } })
     }
     if (href.includes('/api/client/v2/skills/builtin/') && href.endsWith('/archive')) {
@@ -423,7 +423,7 @@ describe('内置技能行的按钮区状态：失败只影响那一行', () => {
 
 describe('内置技能以普通卡片渲染：只渲染未安装的、参与搜索与筛选', () => {
   const ROWS = [
-    { name: 'app-builder', version: '1.0.0', title: 'PicoAide 应用构建（WASM 应用）', description: '用 Go 写一个应用平台上的 WASM 应用', author: 'PicoAide', category: '应用开发' },
+    { name: 'app-builder', version: '1.0.0', title: '应用构建（WASM 应用）', description: '用 Go 写一个应用平台上的 WASM 应用', author: '平台内置', category: '应用开发' },
     { name: 'another-builtin', version: '2.0.0', title: '另一个内置技能', description: '无关描述' },
   ]
 
@@ -453,8 +453,12 @@ describe('内置技能以普通卡片渲染：只渲染未安装的、参与搜�
     expect(byTitle.map(r => r.name)).toEqual(['app-builder'])
     const byDesc = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: 'wasm', kindFilter: 'all' })
     expect(byDesc.map(r => r.name)).toEqual(['app-builder'])
-    const byAuthor = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: 'picoaide', kindFilter: 'all' })
+    // 作者、分类也参与搜索。作者口径 2026-09-20 起是**渠道中性**的「平台内置」——
+    // 产品的展示名按渠道白标，技能里写死厂商名会让渠道客户看到别的牌子。
+    const byAuthor = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: '平台内置', kindFilter: 'all' })
     expect(byAuthor.map(r => r.name)).toEqual(['app-builder'])
+    const byCategory = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: '应用开发', kindFilter: 'all' })
+    expect(byCategory.map(r => r.name)).toEqual(['app-builder'])
     const noHit = selectBuiltinCards({ rows: ROWS, installedNames: new Set(), query: '不存在的东西', kindFilter: 'all' })
     expect(noHit).toEqual([])
   })
@@ -480,7 +484,7 @@ describe('内置技能以普通卡片渲染：只渲染未安装的、参与搜�
 //   `if (installed) continue`（等价于旧实现）⇒ 前两条用例必红。
 
 describe('R1-pm-8：已装且更旧 ⇒ 出「更新」卡，端点与安装同一条链路', () => {
-  const row = (version: string): BuiltinSkill => ({ name: 'app-builder', version, title: 'PicoAide 应用构建手册' })
+  const row = (version: string): BuiltinSkill => ({ name: 'app-builder', version, title: '应用构建手册' })
   const installedState = (installedVersion: string | undefined): {
     installedNames: ReadonlySet<string>
     installedVersions: Readonly<Record<string, string | undefined>>

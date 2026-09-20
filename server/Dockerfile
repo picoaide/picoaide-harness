@@ -52,12 +52,37 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 # 缺它的后果：发布链路 fail-closed（启动不再 Fatal，但功能不可用）。
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags "-s -w" -o /out/picoaide-app-compile ./cmd/picoaide-app-compile
-# 演示应用：目标是 **wasm32-wasip1**（不是宿主平台），一份制品 + 清单。
+# 演示应用：目标是 **wasm32-wasip1**（不是宿主平台）。
+# 2026-09-20 起是**三个功能不同**的演示（能力全集 / 内部小论坛 / 留言板），各一份
+# 制品，清单逐条指出用哪一份（`wasm` 字段）以及窗口比例（`window`）。共用运行时
+# 底座在 `demoapps/internal/demoapp`（帧协议 + 宿主能力包装）。
 RUN mkdir -p /out/demo-apps \
- && CGO_ENABLED=0 GOOS=wasip1 GOARCH=wasm \
-    go build -trimpath -ldflags "-s -w" -o /out/demo-apps/app.wasm ./demoapps/appdemo \
- && cp demoapps/demos.json /out/demo-apps/demos.json \
- && chmod -R a+rX /out/demo-apps
+ && for app in showcase forum board; do \
+      CGO_ENABLED=0 GOOS=wasip1 GOARCH=wasm \
+        go build -trimpath -ldflags "-s -w" -o /out/demo-apps/$app.wasm ./demoapps/$app; \
+    done \
+ && cp demoapps/demos.json /out/demo-apps/demos.json
+
+# 前端资源打进 wasm 自定义段（宿主按路径直出 `/static/*`，入口 `/` 由 wasm 读
+# `index.html` 返回 —— 这样"先判名单再给页面"才成立）。这一步需要 Node，而 Go
+# 构建阶段没有它 ⇒ 单独一个 node 阶段接力；用的打包脚本与随技能分发的那一份
+# **是同一个文件**（`skills/app-builder/scripts/pack-assets.mjs`），规则不会漂。
+FROM node:24-alpine AS demoassets
+WORKDIR /demo
+COPY --from=build /out/demo-apps /demo/apps
+COPY demoapps/showcase/web /demo/web/showcase
+COPY demoapps/forum/web /demo/web/forum
+COPY demoapps/board/web /demo/web/board
+COPY skills/app-builder/scripts/pack-assets.mjs /demo/pack-assets.mjs
+RUN set -eu; mkdir -p /demo/packed \
+ && for app in showcase forum board; do \
+      node pack-assets.mjs --in apps/$app.wasm --out packed/$app.wasm \
+        web/$app/index.html=index.html \
+        web/$app/app.css=static/app.css \
+        web/$app/app.js=static/app.js; \
+    done \
+ && cp apps/demos.json packed/demos.json \
+ && chmod -R a+rX /demo/packed
 
 # --- Stage 3: 运行镜像(CA 证书用于 HTTPS 上游/LDAPS;entrypoint 降权;数据卷 0700) ---
 FROM alpine:3.21
@@ -70,7 +95,7 @@ FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata su-exec bubblewrap && \
     adduser -D -u 10001 -h /app picoaide
 WORKDIR /app
-COPY --from=build /out/demo-apps /opt/picoaide/demo-apps
+COPY --from=demoassets /demo/packed /opt/picoaide/demo-apps
 COPY --from=build /out/picoaide-server /app/picoaide-server
 COPY --from=build /out/picoaide-app-compile /app/picoaide-app-compile
 COPY docker/entrypoint.sh /app/entrypoint.sh

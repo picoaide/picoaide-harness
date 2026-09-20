@@ -1,0 +1,8 @@
+{
+  "access": "whitelist",
+  "whitelist": ["zhangwei"],
+  "purpose": "演示最小可用形态：一张表、一次写入、一个列表，外加名单准入",
+  "data_sensitivity": "内部",
+  "owner": "平台管理员",
+  "window": { "ratio": "16:9", "width": 1280, "height": 720 }
+}
