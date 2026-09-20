@@ -157,8 +157,15 @@ func NewCompilationCache(dataRoot string) (wazero.CompilationCache, error) {
 	// 而缓存是**性能优化**，不是执行前提（没有它 wazero 只是每进程重编译一次）。
 	// 更糟的是踩中它的部署形态很常见：只读挂载、`--user` 非属主、k8s `runAsUser`
 	// 下 Chmod 必然失败 ⇒ 服务端起不来，而它本该只是"慢一点"。
-	// 现在的语义：拿不到可用缓存 ⇒ **降级为 nil（wazero 用进程内缓存）并大声告警**；
-	// 违规（形状不可信）同样只告警。真正不可用的目录在下面会被 wazero 自己再拒一次。
+	//
+	// 现在的语义：**这条路径上的任何失败都降级为 nil（`runtime.New` 会换成进程内缓存）
+	// 并大声告警，绝不返回 error**。
+	//
+	// ⚠️ 覆盖的是**全部**失败形态，不只是 `Ensure` 的 err（2026-09-21 二轮审计 P2-④）：
+	// 第一版只在 `cerr != nil` 时降级，而"缓存根被一个**普通文件**占住"这种形态下
+	// `Ensure` 只给**违规报告**（nil error），紧接着 `wazero.NewCompilationCacheWithDir`
+	// 自己失败 ⇒ 仍然返回 error ⇒ 仍然 log.Fatalf（审计实测 `err="… is not dir"`）。
+	// 所以 wazero 那一步的失败也走降级，语义才真的是"缓存不可用 ⇒ 慢一点"。
 	report, cerr := cachetrust.Ensure(dir, os.FileMode(limits.DataDirMode))
 	if cerr != nil {
 		log.Printf("runtime: ⚠️ 编译缓存目录不可用，降级为进程内缓存（不影响功能，只影响首次编译耗时）：%v", cerr)
@@ -173,7 +180,9 @@ func NewCompilationCache(dataRoot string) (wazero.CompilationCache, error) {
 	// ensuresFileCache），并给该分片目录 0700。
 	cache, err := wazero.NewCompilationCacheWithDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("runtime: 打开编译缓存失败: %w", err)
+		// 与上面同一条口径：拿不到磁盘缓存 ⇒ 降级，不打死服务端。
+		log.Printf("runtime: ⚠️ 打不开编译缓存目录，降级为进程内缓存（不影响功能，只影响首次编译耗时）：%v", err)
+		return nil, nil
 	}
 	return cache, nil
 }

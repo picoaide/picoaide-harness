@@ -567,19 +567,35 @@ describe('local open route', () => {
     })
     // `userDataDir` 是**配置**（窗口几何/缓存的落点），窗口适配器是**服务**（适配器注入）：
     // 两者都在，`windows` 才存在（缺一 ⇒ 退回"只发事件"的纯 Node 形态）。
-    apply(h.ctx as unknown as Parameters<typeof apply>[0], { userDataDir: mkdtempSync(join(tmpdir(), 'pico-wasm-apps-lifecycle-')) })
+    const userDataDir = mkdtempSync(join(tmpdir(), 'pico-wasm-apps-lifecycle-'))
+    apply(h.ctx as unknown as Parameters<typeof apply>[0], { userDataDir })
     const proof = await proofHeaderOf(h)
 
+    /**
+     * 等 handler **真的写完响应**（而不是"睡 20ms 赌它写完了"）。
+     *
+     * 为什么必须改成轮询（2026-09-21）：建窗路径带**真实文件 I/O**（窗口记忆写
+     * `<userData>/wasm-apps-windows.json`），原先固定 `setTimeout(20)` 在门禁并发
+     * （`yarn check` 同时跑 4 个包）下会先于写盘完成 ⇒ 偶发拿到空响应 = 纯负载 flake，
+     * 与产品行为无关。
+     *
+     * ⚠️ 等待条件必须是**本次调用真正要断言的那个可观察量**（`state.status`/`state.body`），
+     * 不能拿一个"第一次调用之后就一直为真"的代理条件（作者第一版等的是"窗口记忆文件
+     * 存在"——第一次 open 之后它恒真，于是第二次 open 直接返回空响应，把 flake 换成了
+     * 必现的 SyntaxError）。上限 2s：真坏时花满预算并**抛错**（不是静默返回空状态）。
+     */
     const openOnce = async (): Promise<{ status: number, body: string }> => {
       const { res, state } = fakeResponse()
       routeOf(h).handler(
         fakeRequest('POST', '{"app_id":"demo"}', proof),
         res,
       )
-      // 建窗路径带真实文件 I/O（窗口记忆落盘）⇒ 只冲微任务不够，等一小段时间。
-      await flush()
-      await new Promise(resolve => { setTimeout(resolve, 20) })
-      return state
+      for (let i = 0; i < 200; i++) {
+        if (state.status !== 0 && state.body !== '') return state
+        await flush()
+        await new Promise(resolve => { setTimeout(resolve, 10) })
+      }
+      throw new Error('open 路由在 2s 内没有写完响应（status/body 仍为空）')
     }
 
     // ① 正常打开（窗口建立）—— 并断言 `window:'opened'`（新建）。

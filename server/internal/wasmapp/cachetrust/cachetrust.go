@@ -151,6 +151,19 @@ func verifyCacheEntryShape(path string) []CacheTrustViolation {
 	return out
 }
 
+// failedReport 构造"操作失败"的报告：**必定不可信**（至少一条违规，理由 = 失败原因）。
+//
+// 为什么需要它（2026-09-21 二轮审计 P1-①）：`Ensure` 的失败分支原先返回
+// `{Dir: dir}`（零违规 ⇒ `Trusted() == true`），于是 `err != nil` 与"可信"能同时成立。
+// 把失败也表达成一条违规，`Trusted()` 才真的是"这次校验通过了"的判据，
+// 而不是"这次恰好没枚举到违规"。
+func failedReport(dir, reason string) CacheTrustReport {
+	return CacheTrustReport{
+		Dir:        dir,
+		Violations: []CacheTrustViolation{{Path: dir, Reason: reason}},
+	}
+}
+
 // Ensure 创建缓存目录（若不存在）、把权限纠正到 mode，并校验整棵树。
 //
 // 为什么必须显式 Chmod（2026-09-21 审计 F-4）：`os.MkdirAll(dir, 0700)` 只在**新建**时生效 ——
@@ -191,17 +204,20 @@ func Ensure(dir string, mode os.FileMode) (CacheTrustReport, error) {
 	case errors.Is(err, fs.ErrNotExist):
 		// 正常路径：下面创建。
 	default:
-		return CacheTrustReport{Dir: dir}, fmt.Errorf("cachetrust: 无法 stat 缓存目录 %s: %w", dir, err)
+		return failedReport(dir, "无法 stat 缓存目录："+err.Error()),
+			fmt.Errorf("cachetrust: 无法 stat 缓存目录 %s: %w", dir, err)
 	}
 
 	if err := os.MkdirAll(dir, mode); err != nil {
-		return CacheTrustReport{Dir: dir}, fmt.Errorf("cachetrust: 创建缓存目录失败: %w", err)
+		return failedReport(dir, "创建缓存目录失败："+err.Error()),
+			fmt.Errorf("cachetrust: 创建缓存目录失败: %w", err)
 	}
 	// ② 创建与 Chmod 之间再确认一次（TOCTOU）：MkdirAll 对已存在路径不做事，
 	// 所以必须重新 Lstat，否则上一步的结论可能已经过期。
 	info, err := os.Lstat(dir)
 	if err != nil {
-		return CacheTrustReport{Dir: dir}, fmt.Errorf("cachetrust: 创建后无法 stat 缓存目录 %s: %w", dir, err)
+		return failedReport(dir, "创建后无法 stat 缓存目录："+err.Error()),
+			fmt.Errorf("cachetrust: 创建后无法 stat 缓存目录 %s: %w", dir, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return CacheTrustReport{Dir: dir, Violations: []CacheTrustViolation{{
@@ -211,8 +227,13 @@ func Ensure(dir string, mode os.FileMode) (CacheTrustReport, error) {
 	}
 	if err := os.Chmod(dir, mode); err != nil {
 		// 不吞错：调用方必须知道"权限没被纠正"（此前这里静默，日志显示一切正常）。
-		return CacheTrustReport{Dir: dir}, fmt.Errorf(
-			"cachetrust: 纠正缓存目录权限失败（%s → %#o）: %w", dir, mode.Perm(), err)
+		// 同时**报告必须不再是"可信"**（2026-09-21 二轮审计 P1-①）：`(report, err)` 这对
+		// 返回值里，`err != nil` 与 `report.Trusted() == true` 同时成立是个陷阱 ——
+		// 调用方只要漏看 err（或写成 `rep, _ := Ensure(...)`）就会把"目录根本不可用"
+		// 当成"目录可信"。契约：**err 非 nil ⇒ Trusted() 必为 false**，由
+		// TestEnsureNeverReportsTrustedOnError 双向钉住。
+		return failedReport(dir, "纠正缓存目录权限失败："+err.Error()),
+			fmt.Errorf("cachetrust: 纠正缓存目录权限失败（%s → %#o）: %w", dir, mode.Perm(), err)
 	}
 	return Verify(dir)
 }
