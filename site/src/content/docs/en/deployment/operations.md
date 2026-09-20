@@ -73,7 +73,7 @@ PICOAI_TRUSTED_PROXIES=172.20.0.1
 The existing vhost **needs no changes** (keep the upstream address as it is):
 
 ```
-picoaide-harness.example.cn {
+picoaide-harness.example.com {
     encode gzip zstd
     reverse_proxy 172.20.0.1:8082
 }

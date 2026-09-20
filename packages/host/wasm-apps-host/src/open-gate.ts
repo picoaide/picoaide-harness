@@ -48,7 +48,19 @@ export type AppOpenOutcome =
   /** 服务端还没有这个端点（滚动升级窗口）：按"不阻塞"处理。 */
   | { kind: 'unsupported' }
   /** 平台明确拒绝（401 未登录/403 审计账号/404 不存在/410 下架/503 关停中）。 */
-  | { kind: 'denied', status: number, code: string }
+  | {
+    kind: 'denied'
+    status: number
+    code: string
+    /**
+     * 平台的结构化原因（`details.reason`，缺省 ⇒ 不出现）。
+     *
+     * 消费点唯一且关键：`app_frozen` 与 `app_not_found` 共用 404 + `NOT_FOUND`，
+     * 而两者的处置**相反**（冻结 = 只读快照，保留窗口与缓存并给可辨文案；
+     * 不存在/软删 = 关窗 + 清缓存）。见 `index.ts` 的生命周期分支。
+     */
+    reason?: string
+  }
   /** 网络/超时：拿不到版本。 */
   | { kind: 'unreachable', detail: string }
 
@@ -58,8 +70,8 @@ export interface AppOpenGateDeps {
   session: () => { readonly token: string, readonly serverURL: string } | null
   /** 出站（桌面适配器给 Chromium 栈）。 */
   fetch: (url: string, init: RequestInit) => Promise<Response>
-  /** 客户端持有性证明（§23.1；`open` 端点同样要求它）。 */
-  appProof?: { get(force?: boolean): Promise<string | null>, invalidate(): void } | undefined
+  /** 客户端持有性证明（§23.1；`open` 端点同样要求它，且**按 app_id 绑定**）。 */
+  appProof?: { get(appId: string, force?: boolean): Promise<string | null>, invalidate(): void } | undefined
   /** 单次预算（毫秒）；缺省 30 s（与请求面同源）。 */
   timeoutMs?: number | undefined
   /** 诊断出口。 */
@@ -148,6 +160,46 @@ export function platformErrorCode(body: unknown): string | null {
 }
 
 /**
+ * 读平台错误信封里的**结构化原因**（`{"error":{"details":{"reason":"app_frozen"}}}`）。
+ *
+ * 为什么必须有它：平台把「冻结」与「软删/未登记」放在**同一个 HTTP 404 + 同一个
+ * `code=NOT_FOUND`** 里（§18.1 R2-L1-2 主控裁定：两档，不是三档），区分它们的唯一
+ * 凭据就是 `details.reason`。只看 status 会把"只读快照（数据仍在）"当成"应用没了"
+ * ⇒ 关窗 + 清缓存 + 客户端显示"不存在"，与 §19 Q3 的冻结文案直接冲突。
+ *
+ * 宽容读取：`details` 也可以是顶层 `reason`（旧/中间形态），两者都没有 ⇒ `null`
+ * （调用方按"没有额外信息"处理，**不猜**）。
+ * @param body - 已解析的响应体。
+ * @returns `reason` 字符串，或 `null`。
+ */
+export function platformErrorReason(body: unknown): string | null {
+  if (body === null || typeof body !== 'object') return null
+  const error = (body as { error?: unknown }).error
+  const containers: unknown[] = [error, body]
+  if (typeof error === 'object' && error !== null) containers.unshift((error as { details?: unknown }).details)
+  for (const container of containers) {
+    if (typeof container !== 'object' || container === null) continue
+    const reason = (container as { reason?: unknown }).reason
+    if (typeof reason === 'string' && reason !== '') return reason
+  }
+  return null
+}
+
+/**
+ * 构造一条 `denied` 结论（**唯一构造点**：状态 + 码 + 结构化原因必须同时来自同一次
+ * 响应，否则会出现"冻结的 404 配不存在的语义"这类错配 —— 2026-09-20 真机实测过
+ * "重试的 404 配第一次响应的 `proof_replayed`"）。
+ * @param status - 外层 HTTP 状态。
+ * @param body - 该次响应的已解析体。
+ * @param code - 已判定的错误码（`platformErrorCode(body)` 的调用方结果）。
+ * @returns `denied` 结论。
+ */
+function deniedFrom(status: number, body: unknown, code: string): Extract<AppOpenOutcome, { kind: 'denied' }> {
+  const reason = platformErrorReason(body)
+  return { kind: 'denied', status, code, ...(reason === null ? {} : { reason }) }
+}
+
+/**
  * 构造打开校验器。
  * @param deps - 会话/出站/证明/预算。
  * @returns 校验器。
@@ -168,7 +220,7 @@ export function createAppOpenGate(deps: AppOpenGateDeps): AppOpenGate {
           Accept: 'application/json',
           Authorization: `Bearer ${session.token}`,
         }
-        const proof = await deps.appProof?.get(false)
+        const proof = await deps.appProof?.get(appId, false)
         if (typeof proof === 'string' && proof !== '') headers[APP_PROOF_HEADER] = proof
         const response = await deps.fetch(endpoint, {
           method: 'POST',
@@ -202,7 +254,7 @@ export function createAppOpenGate(deps: AppOpenGateDeps): AppOpenGate {
           // 401：proof 失效时重签一次再试（与请求面同口径）。
           if (response.status === 401 && deps.appProof !== undefined) {
             deps.appProof.invalidate()
-            const retryProof = await deps.appProof.get(true)
+            const retryProof = await deps.appProof.get(appId, true)
             if (typeof retryProof === 'string' && retryProof !== '') {
               const retry = await deps.fetch(endpoint, {
                 method: 'POST',
@@ -214,11 +266,16 @@ export function createAppOpenGate(deps: AppOpenGateDeps): AppOpenGate {
                 const parsedRetry = parseAppOpenResponse(await retry.json().catch(() => undefined))
                 if (parsedRetry !== null) return { kind: 'ok', ...parsedRetry }
               } else if (retry.status !== 401) {
-                return { kind: 'denied', status: retry.status, code }
+                // **必须是重试响应的码**：第一张 proof 被平台消费掉之后，重试才拿到真正的
+                // 结论。原实现把第一次响应的 `code`（`proof_replayed`）配着重试的 status
+                // 一起返回 ⇒ 真机实测"冻结后的下一次打开"报成 `PLATFORM_PROOF_REPLAYED`，
+                // 平台真正给的 `NOT_FOUND`（冻结/不存在）被丢掉，客户端拿不到可辨结论。
+                const retryBody = await retry.json().catch(() => undefined)
+                return deniedFrom(retry.status, retryBody, platformErrorCode(retryBody) ?? code)
               }
             }
           }
-          return { kind: 'denied', status: response.status, code }
+          return deniedFrom(response.status, body, code)
         }
         const parsed = parseAppOpenResponse(body)
         if (parsed === null) {

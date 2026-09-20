@@ -665,7 +665,7 @@ PICOAI_TRUSTED_PROXIES=172.20.0.1
 现有 vhost **不需要改动**（upstream 地址保持原样），例如共享 Caddy 里：
 
 ```
-picoaide-harness.example.cn {
+picoaide-harness.example.com {
     encode gzip zstd
     reverse_proxy 172.20.0.1:8082      # ← 以前指向 systemd 二进制,现在指向容器,同一个地址
 }

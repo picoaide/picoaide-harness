@@ -373,8 +373,14 @@ const OPEN_FAILURE_KEYS: Record<OpenFailureReason, AppCenterKey> = {
   'host-proof-unavailable': 'appCenter.openHostProofUnavailable',
   'scheme-unavailable': 'appCenter.openSchemeUnavailable',
   'not-signed-in': 'appCenter.openNotSignedIn',
-  'proof-required': 'appCenter.openProofUnavailable',
+  // 本机证明闸拒了令牌：请求**发出去了**（"没发请求"那个说法只属于 proof-unavailable）。
+  'proof-required': 'appCenter.openHostProofRejected',
   'proof-expired': 'appCenter.openProofExpired',
+  // 平台拒绝：不能说成"本页面无法证明自己属于这个客户端窗口"（那是本机那一层的事）。
+  'platform-refused': 'appCenter.openPlatformRefused',
+  // 平台说"被管理员冻结"：与"不存在"同码同状态，只有 `platform_reason` 能分开。
+  // 文案必须说清"只读快照、数据仍保留"，否则用户会去要一个还在的新应用。
+  'app-frozen': 'appCenter.openAppFrozen',
   'app-not-found': 'appCenter.openAppMissing',
   'protocol-not-ready': 'appCenter.openProtocolNotReady',
   'host-unreachable': 'appCenter.openHostUnreachable',
@@ -389,7 +395,9 @@ const OPEN_FAILURE_HINT_KEYS: Record<OpenFailureReason, AppCenterKey> = {
   'scheme-unavailable': 'appCenter.openSchemeUnavailableHint',
   'proof-expired': 'appCenter.openProofExpiredHint',
   'not-signed-in': 'appCenter.openNotSignedInHint',
-  'proof-required': 'appCenter.openProofUnavailableHint',
+  'proof-required': 'appCenter.openHostProofRejectedHint',
+  'platform-refused': 'appCenter.openPlatformRefusedHint',
+  'app-frozen': 'appCenter.openAppFrozenHint',
   'app-not-found': 'appCenter.openAppMissingHint',
   'protocol-not-ready': 'appCenter.openProtocolNotReadyHint',
   'host-unreachable': 'appCenter.openHostUnreachableHint',
@@ -1628,7 +1636,8 @@ type RowReleases =
  *
  * "打开"打的是**本机路由**（`POST /api/pico/wasm-apps/open`），成功即本机确认
  * `<本安装的 app scheme>://<app_id>/` 已就绪；失败把 reason 渲染成**可读原因**（未登录 /
- * 应用不存在 / 协议未就绪 / 证明缺失 各自可辨，见 {@link openFailureEnvelope}）。
+ * 应用不存在 / **被管理员冻结**（只读快照，数据保留）/ 平台拒绝 / 协议未就绪 /
+ * 本机证明缺失 各自可辨，见 {@link openFailureEnvelope}）。
  * 这里**没有**入口链接、也没有系统浏览器兜底（冻结契约 2026-09-19 §4.5/§5）。
  *
  * 下架的条目（`enabled=false`）**照常展示**并标出"已下架"，打开按钮禁用 ——

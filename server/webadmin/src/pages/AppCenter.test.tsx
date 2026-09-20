@@ -1007,6 +1007,31 @@ describe('应用中心 · 更新审批闭环', () => {
     expect((screen.getByTestId('reject-submit') as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it('P2-5 拒绝理由必填:空/纯空白时提交按钮禁用且不发请求', async () => {
+    await renderList()
+    fireEvent.click(within(rowOf('review-me')).getByRole('button', { name: '详情' }))
+    fireEvent.click(await screen.findByTestId('pending-reject-1.2.0'))
+
+    const reason = (await screen.findByTestId('reject-reason')) as HTMLTextAreaElement
+    const submit = screen.getByTestId('reject-submit') as HTMLButtonElement
+    // 一打开就是空的 ⇒ 前置闸门必须已经关着(否则点一下就是一个注定 400 的请求;
+    // 服务端 P2-5 起拒收无理由的拒绝)。
+    expect(submit.disabled).toBe(true)
+    fireEvent.click(submit)
+    expect(mockRequest).not.toHaveBeenCalledWith(
+      '/api/server/admin/wasm-apps/review-me/releases/1.2.0/reject',
+      expect.anything(),
+    )
+
+    // 纯空白同样不算理由(服务端 auditText 会把它折成空串 ⇒ 400)。
+    fireEvent.change(reason, { target: { value: '   \n\t ' } })
+    expect((screen.getByTestId('reject-submit') as HTMLButtonElement).disabled).toBe(true)
+
+    // 填了真理由才放行(正对照:证明"禁用"不是恒真)。
+    fireEvent.change(reason, { target: { value: '数据范围超出用途所需' } })
+    expect((screen.getByTestId('reject-submit') as HTMLButtonElement).disabled).toBe(false)
+  })
+
   it('只读账号:待审清单可见,但通过/拒绝按钮**禁用而不是隐藏**', async () => {
     setCurrentAdmin(READONLY)
     await renderList()

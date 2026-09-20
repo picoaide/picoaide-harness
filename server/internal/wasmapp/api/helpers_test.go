@@ -413,6 +413,10 @@ func (e *testEnv) mount(r *gin.Engine) {
 	adm.GET("/:app_id/opens", e.h.AdminAppOpens)
 	adm.GET("/opens/summary", e.h.AdminOpensSummary)
 	adm.GET("/:app_id/ai-usage", e.h.AdminAppAIUsage)
+	// 平台限制项（GET/PUT /limits）：与 internal/router 的申报逐条一致（静态段，
+	// 不参与 /:app_id 通配）。P2-1 的信封判据必须走**生产路径**，否则测不出路由漂移。
+	adm.GET("/limits", e.h.AdminLimitsGet)
+	adm.PUT("/limits", e.h.AdminLimitsPut)
 
 	// appstore 的归属转移端点（§11 第 17 项授权放开 kind 白名单）：挂同一个路径，
 	// 用同一条用例证明 wasm_app 不再返回 400。

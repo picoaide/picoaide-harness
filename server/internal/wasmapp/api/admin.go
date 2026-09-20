@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -461,24 +462,45 @@ func (h *Handlers) reviewRelease(c *gin.Context, approve bool) {
 
 	// 理由只在 reject 路径上收（approve 不接受 body：审批通过不需要解释，
 	// 也不该给"通过时顺手写一段话进审计"的口子）。
+	//
+	// **reject 必须带非空理由**（P2-5，2026-09-20 本机实测）：旧实现 `POST …/reject '{}'`
+	// ⇒ `200 {"status":"rejected","reason":""}`，作者在客户端只看到"被拒绝了"，
+	// 拿不到任何可执行反馈 —— 而拒绝理由是这条通道**唯一**的反馈载体（同时进审计、
+	// 管理端"最近被拒"清单、作者侧 `GET …/releases` 的 `reason`）。
+	// 因此"没写理由"是**请求不合法**（400），不是"理由为空"。
 	reason := ""
-	if !approve && c.Request.ContentLength > 0 {
+	if !approve {
 		var req struct {
 			Reason *string `json:"reason"`
 		}
-		if berr := bindAdminJSON(c, &req); berr != nil {
-			writeErr(c, berr)
-			return
-		}
-		if req.Reason != nil {
-			reason = auditText(*req.Reason, 0)
-			if len([]rune(reason)) > maxReviewReasonLen {
-				writeErr(c, apperr.New(apperr.CodeValidation,
-					fmt.Sprintf("拒绝理由过长（上限 %d 字）", maxReviewReasonLen)).
-					WithDetail("field", "reason").
-					WithDetail("max_length", maxReviewReasonLen))
+		// ContentLength == 0 = 明确没有请求体：不走 bindAdminJSON（它的"请求体为空"
+		// 文案对调用方没有指向性），直接落到下面统一那条"必须给出理由"。
+		// 负数（chunked，长度未知）仍要解析 —— 不能因为长度未知就把 body 丢掉。
+		if c.Request.ContentLength != 0 {
+			if berr := bindAdminJSON(c, &req); berr != nil {
+				writeErr(c, berr)
 				return
 			}
+		}
+		if req.Reason != nil {
+			// auditText 会 trim + 折成单行 + 压缩空白 ⇒ `"   "`、`"\n"` 这类
+			// "看着有理由"的输入在这里就变成空串，被下面那条闸门拦住。
+			reason = auditText(*req.Reason, 0)
+		}
+		if reason == "" {
+			writeErr(c, apperr.New(apperr.CodeValidation, "拒绝必须给出理由").
+				WithDetail("field", "reason").
+				WithDetail("max_length", maxReviewReasonLen).
+				WithHint(`理由会写进审计、管理端"最近被拒"清单与作者客户端（作者据此改后再发），`+
+					`因此不能为空或只有空白；例：{"reason":"用途描述过简，请补充数据流向与存放位置"}`))
+			return
+		}
+		if len([]rune(reason)) > maxReviewReasonLen {
+			writeErr(c, apperr.New(apperr.CodeValidation,
+				fmt.Sprintf("拒绝理由过长（上限 %d 字）", maxReviewReasonLen)).
+				WithDetail("field", "reason").
+				WithDetail("max_length", maxReviewReasonLen))
+			return
 		}
 	}
 
@@ -801,15 +823,24 @@ const SettingWasmLimits = "wasm.limits"
 // 视图里同时给出：当前值、来源、默认值、档位预设、取值区间、四笔账预览与
 // "哪些改动要重启"。**预算判定用服务端读到的可用内存**（客户端算不了），
 // 因此前端只需要把 ok=false 的红色提示渲染出来即可，不必自己复刻公式。
+//
+// limitsSourceOf 读限制项来源（nil 闭包 = 装配未接线 ⇒ "default"）。
+//
+// 唯一实现：视图与审计都要读它，两处各写一遍判空就会出现"视图说 profile、审计说 default"。
+func limitsSourceOf(fn func() string) string {
+	if fn == nil {
+		return "default"
+	}
+	return fn()
+}
+
+// limitsView 是本文件的组装入口（上面的注释描述它给出的字段）。
 func (h *Handlers) limitsView() gin.H {
 	cur := applimits.Defaults()
 	if h.opt.Limits != nil {
 		cur = h.opt.Limits()
 	}
-	source := "default"
-	if h.opt.LimitsSource != nil {
-		source = h.opt.LimitsSource()
-	}
+	source := limitsSourceOf(h.opt.LimitsSource)
 	var available int64
 	if h.opt.MemoryAvailable != nil {
 		available = h.opt.MemoryAvailable()
@@ -888,10 +919,76 @@ func (h *Handlers) adminLimitsGet(c *gin.Context) {
 	c.JSON(http.StatusOK, h.limitsView())
 }
 
-// AdminLimitsPut 保存平台限制项（空 limits ⇒ 清空设置、回到部署档位/默认）。
+// limitsEnvelopeKey 是 `PUT /wasm-apps/limits` 顶层信封的**唯一**合法键。
+const limitsEnvelopeKey = "limits"
+
+// validateLimitsEnvelope 校验限制项保存请求的**顶层信封**（P2-1，2026-09-20 本机实测）。
 //
-// 校验/四笔账/落库/下发全部在注入的 LimitsApply 里完成（那些知识住在装配侧）；
-// 本函数只负责：解析 body → 调它 → 写审计 → 回读视图（含 restart_pending）。
+// 规则两条，都是 400 fail-loud：
+//   - 出现 `limits` 以外的顶层键 ⇒ 拒（`field` = 排序后的第一个未知键）；
+//   - 没有 `limits` 键 ⇒ 拒（**不是**"当成清空设置"）。
+//
+// 为什么必须这么严（现场）：旧实现 `struct{ Limits *json.RawMessage }` 在**扁平** body
+// （把 11 个字段直接放顶层）下 `Limits` 为 nil ⇒ `raw=""` ⇒ LimitsApply 按"清空设置"
+// 处理 ⇒ **静默回落到部署档位**，响应还是 200 且不写审计 —— 管理员以为保存成功了，
+// 而调好的限制项已经被重置。"发错形状"绝不能有副作用：回落档位是**显式动作**
+// （`{"limits":null}`），不是误用的默认分支。
+//
+// 为什么不用 `DisallowUnknownFields`：`bindJSONLimited` 是全局共用的，它的注释写明
+// "请求体的新增字段必须向后兼容（老客户端 + 新服务端）"。这里的严格性只针对本端点
+// 自己的信封，所以先取原始键集合、再逐键判定 —— 也只有键集合能同时发现上面两类误用。
+//
+// `field` / `allowed` / `hint` 三件套与其余管理端 400 同口径（调用方据此直接改请求，
+// 不必靠猜）。未知键**排序**后取第一个：map 迭代无序，不排序会让同一份请求在不同
+// 进程里报出不同的 `field`，用例与日志都没法比对。
+//
+// ⚠️ **已知并接受的边界：顶层重复键按 JSON 的 last-wins 语义**（2026-09-20 审计观察项）。
+// `{"limits":<合法对象>,"limits":null}` 经 `map[string]json.RawMessage` 解码后只剩后一个
+// ⇒ 执行"清空设置"。**为什么不拒**：①这是所有主流 JSON 解析器的一致语义（RFC 8259
+// 允许重复名、只要求"行为可预测"，Go 的规则明确且稳定），拒它需要在 `bindJSONLimited`
+// 之外再做一遍 token 级扫描（自己处理体积上限/空体/尾随内容/错误信封），
+// 用一份新实现换掉一段已被大量用例覆盖的公共解析路径，风险大于收益；
+// ②清空**不是一个危险动作**，且现在已经完全可观测：`{"limits":null}` 会真删设置行、
+// 响应回显 `source` 从 `setting` 变成 `profile`/`default`，并写一条 `wasm_limits_change`
+// 审计（明细含「来源 setting → profile」）——调用方一眼能看出自己触发了清空，重新保存
+// 即可恢复；③真正需要防的"静默回落到部署档位"（扁平 body 误用）已由上面的键集合
+// 校验挡住（那条路径**零副作用**）。判据：`TestAdminLimitsPutDuplicateTopLevelKeyIsLastWinsAndObservable`。
+func validateLimitsEnvelope(envelope map[string]json.RawMessage) *apperr.Error {
+	unknown := make([]string, 0, len(envelope))
+	for k := range envelope {
+		if k != limitsEnvelopeKey {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return apperr.New(apperr.CodeValidation,
+			fmt.Sprintf("请求体含未知顶层字段：%s", unknown[0])).
+			WithDetail("field", unknown[0]).
+			WithDetail("allowed", []string{limitsEnvelopeKey}).
+			WithHint(`限制项必须整体包在 limits 键里：{"limits":{…完整字段…}}（字段名以 GET /limits 为准）。` +
+				`扁平放在顶层会被拒 —— 否则"发错形状"会被当成"清空设置"而静默回落部署档位`)
+	}
+	if _, ok := envelope[limitsEnvelopeKey]; !ok {
+		return apperr.New(apperr.CodeValidation, "请求体缺少 limits 键").
+			WithDetail("field", limitsEnvelopeKey).
+			WithDetail("allowed", []string{limitsEnvelopeKey}).
+			WithHint(`正确形态：{"limits":{…完整字段…}}（字段名以 GET /limits 为准）；` +
+				`要清空设置、真正回落到部署档位（删除库里的 wasm.limits 行，source 随之变回 profile/default）` +
+				`请**显式**传 {"limits":null}`)
+	}
+	return nil
+}
+
+// AdminLimitsPut 保存平台限制项（`{"limits":null}` ⇒ **真删设置行**、回到部署档位/默认）。
+//
+// 校验/四笔账/落库（写行或**删行**）/下发全部在注入的 LimitsApply 里完成（那些知识住在
+// 装配侧）；本函数只负责：解析 body → 校验顶层信封 → 调它 → 写审计 → 回读视图
+// （含 restart_pending）。
+//
+// 审计条件（AUD-2，2026-09-20）：**值变化或来源变化都要留痕**。旧实现只比 `next != old`，
+// 于是"存的值恰好等于档位值、但控制台行被清掉"这次运维动作（来源 setting → profile）
+// 不留任何审计 —— 而它恰恰是"我到底还有没有一条钉死的设置"这个问题的答案。
 func (h *Handlers) adminLimitsPut(c *gin.Context) {
 	if err := h.requireReady(); err != nil {
 		writeErr(c, err)
@@ -907,25 +1004,35 @@ func (h *Handlers) adminLimitsPut(c *gin.Context) {
 			WithHint("服务端未提供限制项保存钩子：请升级服务端或检查部署装配"))
 		return
 	}
-	var req struct {
-		Limits *json.RawMessage `json:"limits"`
-	}
-	if berr := bindAdminJSON(c, &req); berr != nil {
+	// 顶层信封先落成**键集合**再判定：扁平 body / 多键 body 在这里就被拦住，绝不进
+	// LimitsApply（否则"清空设置"这条分支会被误用形态命中）。
+	var envelope map[string]json.RawMessage
+	if berr := bindAdminJSON(c, &envelope); berr != nil {
 		writeErr(c, berr)
 		return
 	}
+	if aerr := validateLimitsEnvelope(envelope); aerr != nil {
+		writeErr(c, aerr)
+		return
+	}
 	raw := ""
-	if req.Limits != nil && string(*req.Limits) != "null" {
-		raw = string(*req.Limits)
+	if limits, ok := envelope[limitsEnvelopeKey]; ok && string(limits) != "null" {
+		raw = string(limits)
 	}
 	old := h.opt.Limits()
+	oldSource := limitsSourceOf(h.opt.LimitsSource)
 	restart, aerr := h.opt.LimitsApply(raw)
 	if aerr != nil {
 		writeErr(c, aerr)
 		return
 	}
-	if next := h.opt.Limits(); next != old {
+	next := h.opt.Limits()
+	newSource := limitsSourceOf(h.opt.LimitsSource)
+	if next != old || newSource != oldSource {
 		detail := fmt.Sprintf("平台限制项 %s → %s", old.Encode(), next.Encode())
+		if newSource != oldSource {
+			detail += fmt.Sprintf("（来源 %s → %s）", oldSource, newSource)
+		}
 		if len(restart) > 0 {
 			detail += fmt.Sprintf("（需重启生效：%v）", restart)
 		}

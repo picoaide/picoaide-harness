@@ -25,6 +25,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -351,5 +352,169 @@ func TestAdminAppAIUsageDaysWindow(t *testing.T) {
 	e.decodeJSON(w, http.StatusOK, &out)
 	if want := serverstore.LocalDayString(now.AddDate(0, 0, -6)); out.From != want {
 		t.Fatalf("缺省仍是近 7 天（from=%s），得到 %s", want, out.From)
+	}
+}
+
+// TestAdminOpensSummaryTrendUVNotSumOfApps 复现并钉住 P1-1（2026-09-20 本机全功能
+// 实测）：`GET /opens/summary` 的 `trend[].uv` 曾经是
+// `SELECT day, SUM(pv), SUM(uv) FROM wasm_app_opens_daily GROUP BY day` —— 把日汇总里
+// **各应用的 uv 相加**。现场形态：同一天 `today.uv=2` / `totals.uv=2`，而
+// `trend[0].uv=3`（同一块看板上两个 UV 自相矛盾）。§5.1c A 的 UV 禁令
+// （"禁止把各应用的 uv 相加"）对趋势点的"当天人数"同样适用。
+//
+// 判据强度：断言 **trend[0].uv == totals.uv**（同日窗口）且**严格小于**各应用
+// window_uv 之和 —— 后者是旧实现的取值（3），前者是真实去重（2）。
+// 变异验证：把 serverstore 的 trend UV 聚合改回 `SUM(uv)` ⇒ 本用例红。
+func TestAdminOpensSummaryTrendUVNotSumOfApps(t *testing.T) {
+	e := newTestEnv(t)
+	seedOpenApp(t, e, "notes", "1.0.0", "备忘工具", true)
+	seedOpenApp(t, e, "board", "1.0.0", "看板", true)
+	now := e.h.now().UTC()
+
+	// **同一个人**今天打开了两个应用（另有第二个人只开了一个）。
+	for _, appID := range []string{"notes", "board"} {
+		if err := serverstore.RecordWasmAppOpen(context.Background(), e.db, serverstore.WasmAppOpen{
+			AppID: appID, UserID: 1, At: now}); err != nil {
+			t.Fatalf("写明细(%s): %v", appID, err)
+		}
+	}
+	if err := serverstore.RecordWasmAppOpen(context.Background(), e.db, serverstore.WasmAppOpen{
+		AppID: "notes", UserID: 2, At: now}); err != nil {
+		t.Fatalf("写明细(notes/user2): %v", err)
+	}
+	// 日汇总（趋势的 PV 与日期集合读它）走真实写入路径。
+	if _, err := serverstore.AggregateWasmAppOpens(context.Background(), e.db, now, now); err != nil {
+		t.Fatalf("汇总: %v", err)
+	}
+
+	w := e.req(http.MethodGet, "/api/server/admin/wasm-apps/opens/summary?days=7&top=10", e.tokens["boss"], nil)
+	var out struct {
+		Today struct {
+			Day string `json:"day"`
+			PV  int64  `json:"pv"`
+			UV  int64  `json:"uv"`
+		} `json:"today"`
+		Totals struct {
+			PV int64 `json:"pv"`
+			UV int64 `json:"uv"`
+		} `json:"totals"`
+		Trend []struct {
+			Day string `json:"day"`
+			PV  int64  `json:"pv"`
+			UV  int64  `json:"uv"`
+		} `json:"trend"`
+		Apps []struct {
+			AppID    string `json:"app_id"`
+			WindowUV int64  `json:"window_uv"`
+		} `json:"apps"`
+	}
+	e.decodeJSON(w, http.StatusOK, &out)
+
+	var sumAppsUV int64
+	for _, a := range out.Apps {
+		sumAppsUV += a.WindowUV
+	}
+	if len(out.Apps) != 2 || sumAppsUV != 3 {
+		t.Fatalf("前置：两个应用窗口 UV 合计应为 3，得到 %+v", out.Apps)
+	}
+	if len(out.Trend) != 1 {
+		t.Fatalf("同日窗口的趋势应恰有 1 个点，得到 %+v", out.Trend)
+	}
+	if out.Trend[0].UV != 2 {
+		t.Fatalf("trend[0].uv = %d, want 2（当天真实去重人数）；各应用 uv 相加会得到 %d —— "+
+			"§5.1c A 的 UV 禁令对趋势点同样适用（P1-1）", out.Trend[0].UV, sumAppsUV)
+	}
+	if out.Trend[0].UV != out.Totals.UV {
+		t.Fatalf("同日窗口下 trend[0].uv(%d) 必须等于 totals.uv(%d)：同一块看板两个 UV 不得自相矛盾",
+			out.Trend[0].UV, out.Totals.UV)
+	}
+	if out.Today.UV != 2 {
+		t.Fatalf("today.uv = %d, want 2", out.Today.UV)
+	}
+	// PV 与 UV 同源（窗口内有明细 ⇒ 都取明细的 count(*)）：本次 3 次打开。
+	if out.Trend[0].PV != 3 {
+		t.Fatalf("trend[0].pv = %d, want 3（PV 取明细，与 UV 同源）", out.Trend[0].PV)
+	}
+	// AUD-1 的**端点级**不变量（与 serverstore 的库级判据同一条）：
+	//  ① 曲线每个点 uv <= pv；
+	//  ② 今天那一点与 today{} 逐值一致（日汇总 tick 落后时旧实现会在这一条上翻车）。
+	for _, p := range out.Trend {
+		if p.UV > p.PV {
+			t.Fatalf("不变量破裂：trend[%s] uv=%d > pv=%d（同一天必须同源）", p.Day, p.UV, p.PV)
+		}
+		if p.Day == out.Today.Day && (p.PV != out.Today.PV || p.UV != out.Today.UV) {
+			t.Fatalf("trend[%s]={pv:%d uv:%d} 与 today={pv:%d uv:%d} 不一致（AUD-1）",
+				p.Day, p.PV, p.UV, out.Today.PV, out.Today.UV)
+		}
+	}
+}
+
+// TestAdminOpensSummaryCappedWindowReportsHonestly 是 AUD-4（2026-09-20 独立对抗审计）
+// 的判据：`capped=true` 必须在**生产端点**可达。
+//
+// 缺陷现场：`days` 先被钳到 90，而 `from=now-(days-1)` 恰好等于库内 maxStart ⇒
+// `SummarizeWasmAppOpens` 的 `start.Before(maxStart)` 恒假 ⇒ `capped` **恒 false**；
+// `days=365` 静默变成 90（回显的也是被钳后的 90），调用方拿不到"你要 365 天、实际只给
+// 90 天"的信号。设计 §5.1c A 的这条语义**只存在于库函数**（库级 120 天窗口能构造出 true）。
+//
+// 判据（两个方向都要，防止"恒 true"也能过）：
+//   - `days=7` ⇒ `capped=false` 且窗口就是 7 天；
+//   - `days=90`（恰等于保留期）⇒ `capped=false`；
+//   - `days=91` / `days=365` ⇒ `capped=true`，`days` 回显**生效值** 90，
+//     `from/to` 是保留期内那 90 天（窗口如实，不是把请求值原样回显）。
+//
+// 变异验证：把 handler 里的 `sum.Capped || requestedDays > days` 改回 `sum.Capped`
+// ⇒ 后两个子用例红（capped 恒 false）。
+func TestAdminOpensSummaryCappedWindowReportsHonestly(t *testing.T) {
+	e := newTestEnv(t)
+	seedOpenApp(t, e, "notes", "1.0.0", "备忘工具", true)
+	now := e.h.now().UTC()
+	retention := serverstore.WasmAppOpensRetentionDays
+
+	type summaryOut struct {
+		From                string `json:"from"`
+		To                  string `json:"to"`
+		Days                int    `json:"days"`
+		Top                 int    `json:"top"`
+		Capped              bool   `json:"capped"`
+		DetailRetentionDays int    `json:"detail_retention_days"`
+	}
+	fetch := func(days int) summaryOut {
+		t.Helper()
+		w := e.req(http.MethodGet,
+			fmt.Sprintf("/api/server/admin/wasm-apps/opens/summary?days=%d", days), e.tokens["boss"], nil)
+		var out summaryOut
+		e.decodeJSON(w, http.StatusOK, &out)
+		return out
+	}
+
+	for _, tc := range []struct {
+		days     int
+		wantCap  bool
+		wantDays int
+	}{
+		{7, false, 7},
+		{retention, false, retention},
+		{retention + 1, true, retention},
+		{365, true, retention},
+	} {
+		got := fetch(tc.days)
+		if got.Capped != tc.wantCap {
+			t.Fatalf("days=%d ⇒ capped=%v, want %v（请求窗口长于保留期 %d 天必须如实回报）",
+				tc.days, got.Capped, tc.wantCap, retention)
+		}
+		if got.Days != tc.wantDays {
+			t.Fatalf("days=%d ⇒ 回显 days=%d, want %d（回显的是生效窗口 = 被钳到多少）",
+				tc.days, got.Days, tc.wantDays)
+		}
+		// 窗口如实：from/to 必须是**生效窗口**（今天往前 tc.wantDays-1 天 到 今天）。
+		if wantFrom, wantTo := serverstore.LocalDayString(now.AddDate(0, 0, -(tc.wantDays-1))),
+			serverstore.LocalDayString(now); got.From != wantFrom || got.To != wantTo {
+			t.Fatalf("days=%d ⇒ 窗口 %s~%s, want %s~%s", tc.days, got.From, got.To, wantFrom, wantTo)
+		}
+		if got.DetailRetentionDays != retention {
+			t.Fatalf("detail_retention_days = %d, want %d（调用方据此理解为什么被钳）",
+				got.DetailRetentionDays, retention)
+		}
 	}
 }

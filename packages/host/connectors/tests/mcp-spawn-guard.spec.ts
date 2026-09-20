@@ -242,8 +242,8 @@ describe('FIX-02 parseServerConnectors: catalog entries are validated before use
   it('keeps the shipped seed definitions (https MCP + npx stdio)', () => {
     const defs = parseServerConnectors([
       row('moka', {
-        auth: { discoveryUrl: 'https://mcp.mokahr.com/mcp', clientId: '', authorizeUrl: '', tokenUrl: '', redirectUri: 'http://127.0.0.1/callback', pkce: true, publicClient: true, scopes: 'offline_access' },
-        mcp: [{ serverName: 'moka', transport: 'streamable-http', url: 'https://mcp.mokahr.com/mcp' }],
+        auth: { discoveryUrl: 'https://mcp.example.com/mcp', clientId: '', authorizeUrl: '', tokenUrl: '', redirectUri: 'http://127.0.0.1/callback', pkce: true, publicClient: true, scopes: 'offline_access' },
+        mcp: [{ serverName: 'moka', transport: 'streamable-http', url: 'https://mcp.example.com/mcp' }],
       }, 'oauth'),
       row('glitchtip', {
         tokenFields: [{ key: 'GLITCHTIP_TOKEN', label: 'Token', type: 'password', required: true }],

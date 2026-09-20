@@ -20,6 +20,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -654,5 +656,85 @@ func TestPublishRejectsReservedPathPrefix(t *testing.T) {
 		e.payload("resv-bad", "1.0.0", bad, goodConfig()))
 	if w.Code == http.StatusCreated {
 		t.Fatalf("占用保留前缀的发布不得成功，得到 %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestProofIssueReasonDistinguishesKeyFromSignature 钉住相邻缺陷（2026-09-20 本机全功能
+// 实测 + 独立对抗审计 AUD-3）：`proofIssueError` 曾经把 `ErrMalformed` 一律映射成
+// `proof_mismatch / signature_invalid`（"安装签名校验失败"）—— 于是客户端把公钥按
+// SPKI/DER（44 字节）发上来时，平台回的是**签名问题**，对接方照 hint 去查签名消息
+// 拼装，方向完全错（实测就是这样多花了一整轮定位）。
+//
+// 判据：四类失败各自的 `reason` 互不相同且指向真正的病根 ——
+//   - 公钥 44 字节（实测形态）⇒ `invalid_public_key`；
+//   - 公钥不是 base64 ⇒ `invalid_public_key`；
+//   - 签名长度/编码不对 ⇒ `signature_malformed`；
+//   - **签名缺失 / 纯空白** ⇒ `signature_malformed`（AUD-3：旧实现把它们报成
+//     `signature_invalid`，而"空签名"根本不是"验签不过"）；
+//   - **`ts<=0`** ⇒ `invalid_timestamp`（AUD-3：旧实现同样报成 `signature_invalid`，
+//     让人去查签名消息，而病根是时间戳）；
+//   - **真的验签不过**（签名合法 base64 但内容不符）⇒ 仍是 `signature_invalid`
+//     （不能为了修这条把真签名问题也改掉）。
+//
+// 外层码在**全部**失败路径上仍然是 `401 proof_mismatch`（客户端按外层码重签的策略不变）。
+//
+// 变异验证：
+//   - 把 `proofIssueError` 的解码类分支删掉（回落到 default）⇒ 前四个子用例红；
+//   - 把空签名折叠回 `service.go` 的大条件（`if req.TS <= 0 || TrimSpace(Signature) == ""`）
+//     ⇒ 空签名/纯空白/ts=0 三个子用例红（reason 又变成 signature_invalid）；
+//   - 把 `ErrTimestampMalformed` 的分支删掉 ⇒ ts 子用例红。
+func TestProofIssueReasonDistinguishesKeyFromSignature(t *testing.T) {
+	e := newTestEnv(t)
+	// 44 字节 = Ed25519 SPKI/DER 的长度（客户端真实发过的形态）。
+	spki44 := base64.StdEncoding.EncodeToString(make([]byte, 44))
+	// 一份合法 base64、但内容随机的 64 字节签名（长度对、验签必然不过）。
+	wrongSig := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, ed25519.SignatureSize))
+	// 32 字节 raw 公钥（合法 base64，但长度与客户端实际发送的形态一致）。
+	rawKey32 := base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize))
+
+	cases := []struct {
+		name       string
+		mutate     func(*appproof.InstallRequest)
+		wantReason string
+	}{
+		{"公钥 44 字节（SPKI/DER，实测形态）", func(r *appproof.InstallRequest) { r.PublicKey = spki44 }, "invalid_public_key"},
+		{"公钥不是 base64", func(r *appproof.InstallRequest) { r.PublicKey = "not-base64!!" }, "invalid_public_key"},
+		{"签名长度 32 字节（当作公钥发上来）", func(r *appproof.InstallRequest) {
+			r.Signature = rawKey32
+		}, "signature_malformed"},
+		{"签名不是 base64", func(r *appproof.InstallRequest) { r.Signature = "zzz" }, "signature_malformed"},
+		{"签名缺失（空串）", func(r *appproof.InstallRequest) { r.Signature = "" }, "signature_malformed"},
+		{"签名只有空白", func(r *appproof.InstallRequest) { r.Signature = "  \t " }, "signature_malformed"},
+		{"ts=0（带合法签名）", func(r *appproof.InstallRequest) { r.TS = 0 }, "invalid_timestamp"},
+		{"ts 为负", func(r *appproof.InstallRequest) { r.TS = -1 }, "invalid_timestamp"},
+		{"真的验签不过（长度/编码都对）", func(r *appproof.InstallRequest) { r.Signature = wrongSig }, "signature_invalid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			install := e.installRequest("notes")
+			tc.mutate(&install)
+			rec := e.req(http.MethodPost, "/api/client/v2/apps/wasm/proof", e.tokens["alice"], map[string]any{
+				"install_id": install.InstallID,
+				"public_key": install.PublicKey,
+				"nonce":      install.Nonce,
+				"ts":         install.TS,
+				"signature":  install.Signature,
+				"app_id":     "notes",
+			})
+			// 三类失败都仍是"证明不可验证"大类（401 proof_mismatch）—— 只细分 reason，
+			// 不改对外码（客户端的重试/清缓存策略按码判断）。
+			decodeErrCode(t, rec, http.StatusUnauthorized, "proof_mismatch")
+			var eb errBody
+			if err := json.Unmarshal(rec.Body.Bytes(), &eb); err != nil {
+				t.Fatalf("解析错误信封: %v", err)
+			}
+			got, _ := eb.Error.Details["reason"].(string)
+			if got != tc.wantReason {
+				t.Fatalf("reason = %q, want %q（body=%s）", got, tc.wantReason, rec.Body.String())
+			}
+			if len(eb.Error.Hints) == 0 {
+				t.Fatal("失败必须带 hint（告诉对接方改哪一侧）")
+			}
+		})
 	}
 }

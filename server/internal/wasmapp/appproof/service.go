@@ -130,16 +130,36 @@ func (s *Service) Issue(r *http.Request, userID int64, bearerHash, appID string,
 	if !validInstallID(installID) || nonce == "" || len(nonce) > maxNonceBytes {
 		return nil, ErrMalformed
 	}
-	if req.TS <= 0 || strings.TrimSpace(req.Signature) == "" {
-		return nil, ErrMalformed
+	// 形状类失败**各自归到正确的子类**（AUD-3，2026-09-20 独立对抗审计）。
+	//
+	// 旧实现把这两件事折叠进同一个大条件：
+	//
+	//	if req.TS <= 0 || strings.TrimSpace(req.Signature) == "" { return nil, ErrMalformed }
+	//	if raw := strings.TrimSpace(req.Signature); raw == "" { return nil, ErrSignatureMalformed }
+	//
+	// ⇒ 第二行是**死代码**（第一行已经把空签名吃掉了），而"签名缺失"与"ts<=0"两条
+	// 路径都落到 `proofIssueError` 的 default ⇒ `reason=signature_invalid`
+	// + hint「请确认签名覆盖的是 appproof-install-v1 五段消息」——**把时间戳问题
+	// 报成签名问题**（客户端照着 hint 去查签名消息拼装，方向完全错）。
+	//
+	// 拆开之后：空/纯空白签名 ⇒ `signature_malformed`（编码类）；`ts<=0` ⇒
+	// `invalid_timestamp`（时间戳类）。两者仍 `errors.Is(…, ErrMalformed)` 为真 ⇒
+	// 外层码不变（401 `proof_mismatch`），客户端"按外层码重签"的策略不受影响。
+	if strings.TrimSpace(req.Signature) == "" {
+		return nil, fmt.Errorf("%w: 缺少安装签名", ErrSignatureMalformed)
 	}
+	if req.TS <= 0 {
+		return nil, fmt.Errorf("%w: ts=%d 不是合法的 unix 秒（必须为正）", ErrTimestampMalformed, req.TS)
+	}
+	// 公钥/签名解码失败**原样上抛**（不折叠成 ErrMalformed）：两者的对外 reason 必须
+	// 与"签名不符"分开，否则对接方会被 `signature_invalid` 误导（见 ErrKeyMalformed）。
 	pub, err := decodePublicKey(req.PublicKey)
 	if err != nil {
-		return nil, ErrMalformed
+		return nil, err
 	}
 	sig, err := decodeInstallSignature(req.Signature)
 	if err != nil {
-		return nil, ErrMalformed
+		return nil, err
 	}
 
 	now := s.now().UTC()
@@ -240,6 +260,9 @@ func (s *Service) ConsumeJTI(c *Claims) bool {
 }
 
 // decodeInstallSignature 解析安装签名（Ed25519 detached，标准 base64；容忍无 padding）。
+//
+// 失败一律返回 `ErrSignatureMalformed`（`ErrMalformed` 的子类），理由同
+// `decodePublicKey`：编码类问题与"签名验不过"是两回事，对外 reason 必须能分开。
 func decodeInstallSignature(raw string) ([]byte, error) {
 	raw = strings.TrimSpace(raw)
 	for _, enc := range []*base64.Encoding{
@@ -248,12 +271,13 @@ func decodeInstallSignature(raw string) ([]byte, error) {
 	} {
 		if b, err := enc.DecodeString(raw); err == nil {
 			if len(b) != ed25519.SignatureSize {
-				return nil, fmt.Errorf("appproof: 安装签名长度 %d，want %d", len(b), ed25519.SignatureSize)
+				return nil, fmt.Errorf("%w: 长度 %d，want %d（签名是 raw Ed25519 64 字节）",
+					ErrSignatureMalformed, len(b), ed25519.SignatureSize)
 			}
 			return b, nil
 		}
 	}
-	return nil, fmt.Errorf("appproof: 安装签名不是合法 base64")
+	return nil, fmt.Errorf("%w: 不是合法 base64", ErrSignatureMalformed)
 }
 
 // ServerURL 返回本次请求的**规范服务端地址**（proof 的 serverURL 绑定值）。

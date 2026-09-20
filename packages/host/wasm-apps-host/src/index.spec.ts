@@ -22,6 +22,7 @@ import {
   WASM_APPS_WINDOW_ADAPTER_SERVICE,
   WASM_APPS_LOCAL_PREFIX,
   WASM_APPS_HOST_ADAPTER_SERVICE,
+  PLATFORM_REFUSAL_CODE_PREFIX,
   type Config,
 } from './index.ts'
 import { AI_CHAT_PATH } from './ai-chat.ts'
@@ -539,12 +540,14 @@ describe('local open route', () => {
   /**
    * 生命周期反应（§7.2 / §16.1「触发源 = open 端点响应」；**R2-L2-2**）。
    *
-   * 平台说应用没了（404 冻结/退役、410 下架）⇒ 关掉还开着的窗口 + 丢缓存；
+   * 平台说应用**没了**（404 软删/未登记、410 下架）⇒ 关掉还开着的窗口 + 丢缓存；
+   * **冻结不算"没了"**（只读快照，§19 Q3）⇒ 窗口与缓存都留着并给可辨文案；
    * 401/403 是**可恢复**的拒绝（登录过期/白名单）⇒ 窗必须留着，否则一次登录过期
-   * 会表现成"应用被卸载"。变异：把关闭分支去掉 ⇒ 前两条红；把闸门放宽到所有
-   * denied ⇒ 第三条红。
+   * 会表现成"应用被卸载"。
+   * 变异：把关闭分支去掉 ⇒ ②/③b 红；把闸门放宽到所有 denied ⇒ ④ 红；
+   * 把 `reason` 分流拆掉（退回只看 status）⇒ ③ 红。
    */
-  it('平台报 410/404 ⇒ 关窗 + 清缓存；401 拒绝 ⇒ 窗留着（R2-L2-2）', async () => {
+  it('平台报 410/404-not-found ⇒ 关窗 + 清缓存；冻结与 401 拒绝 ⇒ 窗留着（R2-L2-2 / P2-3）', async () => {
     const closed: string[] = []
     const opened: string[] = []
     const windowAdapter = {
@@ -600,14 +603,51 @@ describe('local open route', () => {
     // 缓存也被丢掉：同一个应用再次打开时**不再**信旧版本（knownVersions 已清）。
     expect(h.warnings.join('\n')).toContain('closing its window and dropping its cache')
 
-    // ③ 冻结（404 + reason=app_frozen）同样关窗。先重新打开一个窗口（②已经关掉了）。
+    // ③ 冻结（404 + `details.reason=app_frozen`）**不**关窗、**不**清缓存（P2-3，
+    //    主控 2026-09-20）：冻结是只读快照（数据保留），平台把它与"软删/未登记"
+    //    放在同一个 404 + `NOT_FOUND` 里，唯一区分凭据是 `reason`。只看 status 会
+    //    把"被管理员停用"做成"应用消失"，§19 Q3 的冻结文案永远不可达。
+    //    变异：把 `gate.reason === 'app_frozen'` 的判断拆掉（退回只看 status）⇒ 本节红。
     answer = () => new Response(JSON.stringify({ version: '1.0.0', changed: false }), { status: 200 })
     expect((await openOnce()).status).toBe(200)
-    answer = () => new Response(JSON.stringify({ error: { code: 'APP_NOT_FOUND', reason: 'app_frozen' } }), { status: 404 })
+    const closedBeforeFrozen = [...closed]
+    answer = () => new Response(JSON.stringify({
+      error: { code: 'NOT_FOUND', message: '应用已被管理员停用（冻结）', details: { reason: 'app_frozen' } },
+    }), { status: 404 })
     const frozen = await openOnce()
     expect(frozen.status).toBe(404)
-    expect(closed).toEqual(['demo', 'demo'])
-    expect(JSON.parse(frozen.body)).toMatchObject({ error: { code: 'APP_NOT_FOUND' } })
+    expect(closed).toEqual(closedBeforeFrozen)
+    expect(h.warnings.join('\n')).toContain('keeping its window and cache')
+    // 平台的码**一律加 `PLATFORM_` 前缀**（跨端契约，见 PLATFORM_REFUSAL_CODE_PREFIX）：
+    // 原样透传会与**本机**证明闸的码撞名（两层都有 `proof_required`），客户端只能
+    // 把平台拒绝显示成"本页面无法证明自己属于这个客户端窗口"（2026-09-20 真机现场）。
+    // 原码在 `platform_code` 里保留（诊断不受前缀影响）；`reason` 是"冻结 vs 不存在"
+    // 的唯一区分凭据，必须一起给出去。
+    expect(JSON.parse(frozen.body)).toMatchObject({
+      error: {
+        code: `${PLATFORM_REFUSAL_CODE_PREFIX}NOT_FOUND`,
+        platform_code: 'NOT_FOUND',
+        platform_reason: 'app_frozen',
+        message: '应用已被管理员停用',
+      },
+    })
+    // 冻结之后窗口仍在 ⇒ 平台恢复正常后再点一次是 **focused**（不是"关掉又新建"）。
+    const openedBeforeFrozen = [...opened]
+    answer = () => new Response(JSON.stringify({ version: '1.0.0', changed: false }), { status: 200 })
+    const afterFrozen = await openOnce()
+    expect(JSON.parse(afterFrozen.body)).toMatchObject({ window: 'focused' })
+    expect(opened).toEqual(openedBeforeFrozen)
+
+    // ③b `app_not_found`（同码同状态，只有 reason 不同）⇒ 仍然关窗 + 清缓存。
+    answer = () => new Response(JSON.stringify({
+      error: { code: 'NOT_FOUND', message: '应用不存在', details: { reason: 'app_not_found' } },
+    }), { status: 404 })
+    const missing = await openOnce()
+    expect(missing.status).toBe(404)
+    expect(closed).toEqual([...closedBeforeFrozen, 'demo'])
+    expect(JSON.parse(missing.body)).toMatchObject({
+      error: { code: `${PLATFORM_REFUSAL_CODE_PREFIX}NOT_FOUND`, platform_reason: 'app_not_found' },
+    })
 
     // ④ 401（登录过期）**不**关窗：这是可恢复的拒绝。
     answer = () => new Response(JSON.stringify({ version: '1.0.0', changed: false }), { status: 200 })
@@ -616,6 +656,115 @@ describe('local open route', () => {
     const before = [...closed]
     expect((await openOnce()).status).toBe(401)
     expect(closed).toEqual(before)
+  })
+
+  /**
+   * **应用窗口的分区 = 协议 handler 注册的分区**（2026-09-20 审计 P1-2）。
+   *
+   * 这是"应用窗口跑在按用户分区上"的**能力判据**（不是字符串断言）：同一个插件实例
+   * 里，①`handleInSession` 收到的分区（协议 handler + 权限守卫 + 请求闸门都注册在
+   * 那个 session 上）与 ②`createAppWindow` 收到的 `partition` 必须**逐字相等**；
+   * ③切账号后新窗口必须落到新用户的分区，且该分区也确实被注册过。
+   *
+   * 变异：把 `partition: currentPartition` 从 `createWasmAppsWindows` 的选项里删掉
+   * （窗口退回默认 session）⇒ 本条在类型层就编不过；改成常量 ⇒ ③ 红；让
+   * `createAppWindow` 忽略 `partition` ⇒ 真机探针红（`temp/fix-appwin-r2/`）。
+   */
+  it('建窗用的分区与协议 handler 注册的分区逐字相同，并随账号切换', async () => {
+    const created: Array<Record<string, unknown>> = []
+    const windowAdapter = {
+      createAppWindow: (options: Record<string, unknown>) => { created.push(options); return { id: created.length } },
+      focusAppWindow: () => {},
+      closeAppWindow: () => {},
+      setAspectRatio: () => {},
+    }
+    let answer: () => Response = () => new Response(JSON.stringify({ version: '1.0.0', changed: false }), { status: 200 })
+    const h = fakeContext({
+      session: ALICE,
+      windowAdapter,
+      fetch: async url => (url.endsWith('/open') ? answer() : new Response('{}', { status: 200 })),
+    })
+    apply(h.ctx as unknown as Parameters<typeof apply>[0], { userDataDir: mkdtempSync(join(tmpdir(), 'pico-wasm-apps-partition-')) })
+    const proof = await proofHeaderOf(h)
+
+    const openOnce = async (appId: string): Promise<void> => {
+      const { res } = fakeResponse()
+      routeOf(h).handler(fakeRequest('POST', JSON.stringify({ app_id: appId }), proof), res)
+      await flush()
+      await new Promise(resolve => { setTimeout(resolve, 20) })
+    }
+
+    await openOnce('my-notes')
+    expect(h.partitions).toEqual(['persist:agent-browser-alice'])
+    expect(created[0]?.partition).toBe('persist:agent-browser-alice')
+    // 窗口与协议注册必须同源：不同 = 应用页 `ERR_UNKNOWN_URL_SCHEME` 空白窗口。
+    expect(created[0]?.partition).toBe(h.partitions[h.partitions.length - 1])
+
+    // 切账号（登出再登录成 bob）⇒ 新分区被注册，新窗口跟着走。
+    h.setSession({ serverURL: ALICE.serverURL, token: 'tok2', username: 'bob' })
+    h.fireSessionChanged()
+    answer = () => new Response(JSON.stringify({ version: '1.0.0', changed: false }), { status: 200 })
+    await openOnce('other-app')
+    expect(h.partitions).toContain('persist:agent-browser-bob')
+    expect(created[1]?.partition).toBe('persist:agent-browser-bob')
+
+    // 自定义分区覆盖（config.partition）同样贯穿两处。
+    const createdCustom: Array<Record<string, unknown>> = []
+    const h2 = fakeContext({
+      session: ALICE,
+      windowAdapter: {
+        createAppWindow: (options: Record<string, unknown>) => { createdCustom.push(options); return { id: 1 } },
+        focusAppWindow: () => {},
+        closeAppWindow: () => {},
+        setAspectRatio: () => {},
+      },
+    })
+    apply(h2.ctx as unknown as Parameters<typeof apply>[0], {
+      userDataDir: mkdtempSync(join(tmpdir(), 'pico-wasm-apps-partition-')),
+      partition: 'persist:agent-browser-custom',
+    })
+    const proof2 = await proofHeaderOf(h2)
+    const r2 = fakeResponse()
+    routeOf(h2).handler(fakeRequest('POST', '{"app_id":"my-notes"}', proof2), r2.res)
+    await flush()
+    await new Promise(resolve => { setTimeout(resolve, 20) })
+    expect(h2.partitions).toContain('persist:agent-browser-custom')
+    expect(createdCustom[0]?.partition).toBe('persist:agent-browser-custom')
+  })
+
+  /**
+   * **平台**的 401 `proof_required` 不得与本机证明闸的 401 撞名（2026-09-20 真机 P0）。
+   *
+   * 两层用的是**同一个字面码**：本机闸回 `{"error":"proof_required"}`（字符串形态，
+   * 宿主 host-request.ts），平台拒绝经 open 路由回的是 `PLATFORM_PROOF_REQUIRED`
+   * （对象形态 + `platform_code`）。客户端据此把"本机凭据被拒"与"服务端拒绝了这次
+   * 打开"分流 —— 混在一起时后者的文案说成"没有发出任何请求"，而请求其实发了。
+   *
+   * 变异：把 `code: `${PLATFORM_REFUSAL_CODE_PREFIX}${gate.code…}`` 改回 `gate.code`
+   * ⇒ 本条必红（而客户端那侧的 reason 用例也会红）。
+   */
+  it('平台的 401 proof_required 带 PLATFORM_ 前缀，与本机证明闸的 401 可区分', async () => {
+    const h = fakeContext({
+      session: ALICE,
+      fetch: async url => (url.endsWith('/open')
+        ? new Response(JSON.stringify({ error: { code: 'proof_required', message: '缺少持有性证明' } }), { status: 401 })
+        : new Response(JSON.stringify({ ok: true }), { status: 200 })),
+    })
+    apply(h.ctx, {})
+    const headers = await proofHeaderOf(h)
+    const { res, state } = fakeResponse()
+    routeOf(h).handler(fakeRequest('POST', '{"app_id":"my-notes"}', headers), res)
+    await flush()
+    expect(state.status).toBe(401)
+    expect(JSON.parse(state.body)).toMatchObject({
+      error: { code: 'PLATFORM_PROOF_REQUIRED', platform_code: 'proof_required' },
+    })
+    // 反向对照：**不带令牌**时是本机证明闸的 401（字符串形态），两者永不混淆。
+    const noProof = fakeResponse()
+    routeOf(h).handler(fakeRequest('POST', '{"app_id":"my-notes"}'), noProof.res)
+    await flush()
+    expect(noProof.state.status).toBe(401)
+    expect(JSON.parse(noProof.state.body)).toEqual({ error: 'proof_required' })
   })
 
   it('fails closed when the protocol could not be registered', async () => {
@@ -644,8 +793,17 @@ describe('package shape', () => {
     expect(source).not.toMatch(/export default/u)
     // 协议特权注册必须在 Electron 适配器里（桌面壳在 app.whenReady 之前调用它）。
     const adapter = readFileSync(fileURLToPath(new URL('./electron-adapter.ts', import.meta.url)), 'utf8')
-    expect(adapter).toContain("import { protocol, safeStorage, session } from 'electron'")
+    // 判据是"electron 的这几个面只在这个模块里 import"，不是"import 列表逐字等于…"：
+    // 后者会随适配器长大而过期，而它守的语义与 import 顺序/成员个数无关。
+    // 注意 `^`（多行）：文件头的模块注释里也写着这句 import，不加锚点会匹配到注释。
+    const electronImport = /^import \{([^}]*)\} from 'electron'/mu.exec(adapter)?.[1] ?? ''
+    for (const name of ['protocol', 'session', 'safeStorage']) {
+      expect(electronImport, `${name} 必须由 electron-adapter 直接 import`).toContain(name)
+    }
     expect(adapter).toContain('registerSchemesAsPrivileged')
+    // 应用窗口载体在同一个 Electron seam 里（桌面壳 `provide` 它，见 desktop 的
+    // `provideWasmAppsWindows`）。
+    expect(adapter).toContain('createRealElectronWindowAdapter')
   })
 })
 

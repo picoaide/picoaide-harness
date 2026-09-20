@@ -34,7 +34,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { AppCenterBody, accessBadge, parseCatalog, resolveAccess, type AppCenterItem } from './AppCenterPanel.tsx'
+import { AppCenterBody, accessBadge, openFailureEnvelope, parseCatalog, resolveAccess, type AppCenterItem } from './AppCenterPanel.tsx'
 import { AppCenterTrigger } from './AppCenterTrigger.tsx'
 import { en, setActiveLocale, t, zh } from './locales.ts'
 import { ACCESS_MODES, WRITABLE_ACCESS_MODES } from './appcfg-contract.ts'
@@ -494,6 +494,155 @@ describe('打开应用：只有本机路由这一条路（冻结契约 2026-09-1
   /** 只取 open 路由的调用（引导证明那次不算业务调用）。 */
   const openCalls = (h: { calls: Array<{ url: string, init: RequestInit }> }) =>
     h.calls.filter(call => call.url === OPEN_APP_PATH)
+
+  /**
+   * **平台拒绝**不得被说成"本页面无法证明自己属于这个客户端窗口"（2026-09-20 真机 P0）。
+   *
+   * 现场：服务端因为客户端没能出示 `X-Pico-App-Proof` 而回 401 `proof_required`，
+   * 宿主把它透传给渲染层，客户端见 `proof_required` 就映射到本机那一支的文案
+   * ——「（因此没有发出任何请求）」，而请求其实发出去了、平台也答了。用户与维护者
+   * 都被指到了错误的方向（去别的窗口重试 / 查本机服务）。
+   *
+   * 判据三条：reason 分流、`OPEN_*` 错误码、文案不含"没有发出任何请求"。
+   * 变异：把 `readHostPlatformRefusal` 的判定去掉（或让宿主改回原样透传）⇒ 本条必红。
+   */
+  it('平台拒绝（宿主 PLATFORM_* 码）⇒ reason platform-refused，文案指向服务端而不是"没发请求"', async () => {
+    const h = deps({ status: 401, body: { error: { code: 'PLATFORM_PROOF_REQUIRED', platform_code: 'proof_required' } } })
+    const result = await openAppEntry('demo', h.deps)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('platform-refused')
+    expect(result.status).toBe(401)
+    // 请求**真的发出去了**（这正是原文案说错的那件事）。
+    expect(openCalls(h)).toHaveLength(1)
+    expect(String((openCalls(h)[0]!.init.headers as Record<string, string>)[HOST_PROOF_HEADER])).not.toBe('')
+    const envelope = openFailureEnvelope(result)
+    expect(envelope.code).toBe('OPEN_PLATFORM_REFUSED')
+    expect(envelope.message).toBe(zh['appCenter.openPlatformRefused'])
+    expect(envelope.hints?.[0]).toBe(zh['appCenter.openPlatformRefusedHint'])
+    expect(envelope.message).not.toContain('没有发出任何请求')
+    // 平台码仍留在详情里（诊断不受前缀影响）。
+    expect(JSON.stringify(envelope.details)).toContain('PLATFORM_PROOF_REQUIRED')
+  })
+
+  it('本机证明被拒（401 字符串 proof_required）⇒ reason proof-required，文案同样不得说"没发请求"', async () => {
+    const h = deps({ status: 401, body: { error: 'proof_required' } })
+    const result = await openAppEntry('demo', h.deps)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('proof-required')
+    // 重取令牌后**重放了一次**（证明这条路径确实发过请求）。
+    expect(openCalls(h)).toHaveLength(2)
+    const envelope = openFailureEnvelope(result)
+    expect(envelope.code).toBe('OPEN_PROOF_REQUIRED')
+    expect(envelope.message).toBe(zh['appCenter.openHostProofRejected'])
+    expect(envelope.hints?.[0]).toBe(zh['appCenter.openHostProofRejectedHint'])
+    expect(envelope.message).not.toContain('没有发出任何请求')
+    // "一次请求都没发"那句只属于 `proof-unavailable`（页面根本不可能是宿主窗口）。
+    expect(zh['appCenter.openProofUnavailable']).toContain('没有发出任何请求')
+    expect(zh['appCenter.openProofUnavailableHint']).toContain('桌面客户端窗口')
+    // 英文镜像同样不得出现"no request was sent"。
+    expect(en['appCenter.openHostProofRejected']).not.toContain('no request was sent')
+    expect(en['appCenter.openPlatformRefused']).not.toContain('no request was sent')
+    expect(en['appCenter.openProofUnavailable']).toContain('no request was sent')
+  })
+
+  it('平台说"应用不存在"仍要说"应用不存在"（404 不塌缩成"打开失败"）', async () => {
+    const h = deps({ status: 404, body: { error: { code: 'PLATFORM_APP_NOT_FOUND', platform_code: 'app_not_found' } } })
+    const result = await openAppEntry('demo', h.deps)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('app-not-found')
+    expect(openFailureEnvelope(result).message).toBe(zh['appCenter.openAppMissing'])
+  })
+
+  /**
+   * **冻结 ≠ 不存在**（本缺陷的判据本体）。
+   *
+   * 平台把「冻结」（只读快照、数据保留）与「软删 / 从未登记」放进**同一个
+   * HTTP 404 + 同一个 `NOT_FOUND`**（`server/internal/wasmapp/api/open.go:76-105`，
+   * 不泄露存在性），唯一区分凭据是 `details.reason` ⇒ 宿主信封的 `platform_reason`。
+   * 只读 `platform_code` 就会把"被管理员停用"显示成"这个应用不存在（可能已被删除或
+   * 改名）"，用户去要一个还在的新应用、维护者也不看停用记录。
+   *
+   * 三条判据都用**宿主真实信封形状** `{error:{code,platform_code,platform_reason}}`
+   * （不造扁平形状、不造中间形态）：冻结 ⇒ 冻结 reason + 冻结文案；不存在的另一档
+   * ⇒ 不存在 reason + 不存在文案；缺 `platform_reason` ⇒ **确定性回落** not-found。
+   *
+   * ---- 变异验证（逐条实跑，见报告） ----
+   *  - 拆掉 `platform_reason` 读取（`readHostPlatformReason` 恒 null）⇒ 冻结两条红；
+   *  - `reasonForPlatformRefusal` 先按 status 分流（冻结判据挪到 404 之后）⇒ 冻结两条红；
+   *  - 把 `app_frozen` 映射成 not-found ⇒ 冻结两条红；
+   *  - 缺 reason 时改成抛错 / 当成功 ⇒「确定性回落」红。
+   */
+  it('平台说"被冻结"（同 404 + NOT_FOUND，仅 reason 不同）⇒ app-frozen + 冻结文案（数据保留）', async () => {
+    const h = deps({ status: 404, body: { error: { code: 'PLATFORM_NOT_FOUND', platform_code: 'NOT_FOUND', platform_reason: 'app_frozen' } } })
+    const result = await openAppEntry('demo', h.deps)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('app-frozen')
+    expect(result.status).toBe(404)
+    const envelope = openFailureEnvelope(result)
+    expect(envelope.code).toBe('OPEN_APP_FROZEN')
+    expect(envelope.message).toBe(zh['appCenter.openAppFrozen'])
+    expect(envelope.hints?.[0]).toBe(zh['appCenter.openAppFrozenHint'])
+    // 文案必须说清"停用（冻结）"与"数据仍然保留"，并**逐字可辨**于"不存在"。
+    expect(envelope.message).toContain('停用（冻结）')
+    expect(envelope.hints?.[0]).toContain('数据仍然保留')
+    expect(envelope.message).not.toContain('不存在')
+    expect(envelope.message).not.toBe(zh['appCenter.openAppMissing'])
+    expect(envelope.hints?.[0]).not.toBe(zh['appCenter.openAppMissingHint'])
+    // 多语言约定：en 侧同样可辨（不是只补中文）。
+    expect(en['appCenter.openAppFrozen']).toContain('frozen')
+    expect(en['appCenter.openAppFrozenHint']).toContain('data is still kept')
+    expect(en['appCenter.openAppFrozen']).not.toBe(en['appCenter.openAppMissing'])
+  })
+
+  it('同一状态码下的"不存在"仍是"不存在"（语义不得反向合流）', async () => {
+    const h = deps({ status: 404, body: { error: { code: 'PLATFORM_NOT_FOUND', platform_code: 'NOT_FOUND', platform_reason: 'app_not_found' } } })
+    const result = await openAppEntry('demo', h.deps)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('app-not-found')
+    const envelope = openFailureEnvelope(result)
+    expect(envelope.code).toBe('OPEN_APP_NOT_FOUND')
+    expect(envelope.message).toBe(zh['appCenter.openAppMissing'])
+    expect(envelope.hints?.[0]).toBe(zh['appCenter.openAppMissingHint'])
+    expect(envelope.message).not.toContain('冻结')
+  })
+
+  it('缺 platform_reason ⇒ 确定性回落 not-found（不崩溃、不静默成功、不猜冻结）', async () => {
+    // 旧宿主（只有前缀码）与"平台这一版还没下发原因"是同一个形状。
+    const h = deps({ status: 404, body: { error: { code: 'PLATFORM_NOT_FOUND', platform_code: 'NOT_FOUND' } } })
+    const result = await openAppEntry('demo', h.deps)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('app-not-found')
+    expect(openFailureEnvelope(result).message).toBe(zh['appCenter.openAppMissing'])
+    // 认不出的原因同样回落（前向兼容：平台新增档位 ≠ 崩溃、也 ≠ 打开成功）。
+    const unknown = deps({ status: 404, body: { error: { code: 'PLATFORM_NOT_FOUND', platform_code: 'NOT_FOUND', platform_reason: 'app_quarantined' } } })
+    const unknownResult = await openAppEntry('demo', unknown.deps)
+    expect(unknownResult.ok).toBe(false)
+    if (unknownResult.ok) return
+    expect(unknownResult.reason).toBe('app-not-found')
+    expect(openFailureEnvelope(unknownResult).message).toBe(zh['appCenter.openAppMissing'])
+  })
+
+  it('410（下架）分支保持不变：仍按"不存在"处理，原因字段不得改写它的语义', async () => {
+    const gone = deps({ status: 410, body: { error: { code: 'PLATFORM_GONE', platform_code: 'GONE' } } })
+    const result = await openAppEntry('demo', gone.deps)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('app-not-found')
+    // 契约之外的 410 + app_frozen 也不得显示成"冻结"：冻结是 404 那一档（只读快照），
+    // 下架是另一件事，不能被一个原因字段改写。
+    const odd = deps({ status: 410, body: { error: { code: 'PLATFORM_NOT_FOUND', platform_code: 'NOT_FOUND', platform_reason: 'app_frozen' } } })
+    const oddResult = await openAppEntry('demo', odd.deps)
+    expect(oddResult.ok).toBe(false)
+    if (oddResult.ok) return
+    expect(oddResult.reason).toBe('app-not-found')
+    expect(openFailureEnvelope(oddResult).message).toBe(zh['appCenter.openAppMissing'])
+  })
 
   it('成功：POST 本机路由（带 app_id + 本机持有性证明头），并断言返回的就是这个应用的协议 URL', async () => {
     const h = deps()

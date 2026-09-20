@@ -773,12 +773,25 @@ export default function Apps() {
     }
   }
 
-  /** 审核拒绝(理由可选,≤200 字;服务端超过上限直接 400)。 */
+  /**
+   * 审核拒绝(**理由必填**,≤200 字;服务端超过上限或没给理由都直接 400)。
+   *
+   * P2-5(2026-09-20 本机实测):服务端要求拒绝必须带非空理由 —— 理由同时进审计、
+   * "最近被拒"清单与作者客户端(`my-releases` 的 `reason`),是作者改后再发的唯一依据。
+   * 表单侧因此**前置**拦一次(空/纯空白 → 提交按钮禁用),不让一个注定 400 的请求出门;
+   * 服务端那道闸门仍是权威(前端绕不过去)。
+   */
   const rejectRelease = async () => {
     const row = detail
     const rel = rejectTarget
     if (!row || !rel || busy || !canWrite) return
     const reason = rejectReason.trim()
+    if (reason === '') {
+      // 兜底:按钮已禁用,但**回车提交/程序化点击**仍可能到这儿 —— 原地给文案而不是
+      // 发一个注定 400 的请求(服务端文案也会经 catch 显示,这里是更快的反馈)。
+      setRejectError('请填写拒绝理由:作者只能凭这段文字知道要改什么')
+      return
+    }
     setBusy(`${row.app_id}:reject`)
     setRejectError('')
     setError('')
@@ -1441,7 +1454,8 @@ export default function Apps() {
         </DialogContent>
       </Dialog>
 
-      {/* 拒绝理由:可选,长度上限与服务端一致(200 字);超限直接禁用提交而不是等 400。 */}
+      {/* 拒绝理由:**必填**,长度上限与服务端一致(200 字);空/纯空白或超限都直接禁用
+          提交而不是等 400(P2-5:服务端拒收无理由的拒绝)。 */}
       <Dialog
         open={rejectTarget !== null}
         onOpenChange={(open) => { if (!open) { setRejectTarget(null); setRejectReason('') } }}
@@ -1455,7 +1469,7 @@ export default function Apps() {
           </DialogHeader>
           <div className="space-y-2">
             <Label htmlFor="reject-reason" className="text-xs text-muted-foreground">
-              拒绝理由(可选,将写入审计)
+              拒绝理由(必填,将写入审计并回给作者)
             </Label>
             <Textarea
               id="reject-reason"
@@ -1478,7 +1492,7 @@ export default function Apps() {
             <Button
               variant="destructive"
               data-testid="reject-submit"
-              disabled={busy !== '' || rejectReason.length > 200}
+              disabled={busy !== '' || rejectReason.length > 200 || rejectReason.trim() === ''}
               onClick={() => { void rejectRelease() }}
             >
               确认拒绝

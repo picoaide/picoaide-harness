@@ -147,6 +147,66 @@ export function pendingBrowserLoginServer(): string | null {
 }
 
 /**
+ * 应用深链的 host（与 `@picoaide/dsh-wasm-apps-host` 的 `APP_DEEP_LINK_HOST` 同值）。
+ *
+ * 为什么这个常量出现在 auth 解析器里：`pico/deep-link` 是**多个监听器共用**的事件，
+ * `app` host 属于应用深链（`<渠道 scheme>://app/<app_id>`，契约 §5.3），由
+ * wasm-apps-host 的监听器消费。auth 解析器只需要"认出这不是给我的"（见 routeDeepLink），
+ * 不需要解析它 —— 所以这里只钉 host 字面值，不复制那边的解析逻辑。
+ */
+export const APP_DEEP_LINK_HOST = 'app'
+
+/** 深链的分流结果（见 {@link routeDeepLink}）。 */
+export type DeepLinkRoute =
+  /** 登录回调形状（`<scheme>://auth…`）：归本监听器，随后由 parseAuthDeepLink 判细节。 */
+  | { readonly kind: 'auth' }
+  /** 应用深链（`<scheme>://app/<app_id>`）：归 wasm-apps-host，本监听器**静默让行**。 */
+  | { readonly kind: 'app' }
+  /** 两者都不是：`reason` 是可判别的原因（进 warn，排障时不必猜）。 */
+  | { readonly kind: 'foreign', readonly reason: string }
+
+/**
+ * 按 **scheme/host** 把一条深链分流给"归谁处理"（P2-4，2026-09-20 本机全功能实测）。
+ *
+ * 现场：员工点开同事分享的应用链接（`picoaide://app/shared-notes`）时，宿主日志出现
+ * `pico-deep-link: ignored malformed deep link` —— 那是 enterprise 的 **auth** 解析器
+ * 按登录回调格式（`<scheme>://auth?token=…`）解析应用深链的正常丢弃。链接本身没坏，
+ * 但这条 warn 会把一次正常动作读成"分享链接是坏的"（排障时确实被这么读了）。
+ *
+ * 分流规则（**应用深链不落 warn**）：
+ *  1. 解析不了 ⇒ foreign（`malformed url`）；
+ *  2. **自定义 scheme + host=app** ⇒ `app`（本安装的或别家渠道的都算：别家的由
+ *     wasm-apps-host 的 `pico/wasm-app-deep-link-foreign` 给用户可读提示）；
+ *  3. scheme 不是本安装注入的那个 ⇒ foreign（`not our scheme (scheme=…)`）；
+ *  4. host=auth ⇒ `auth`（后面由 `parseAuthDeepLink` 判"有没有 token"）；
+ *  5. 其它 host ⇒ foreign（`host=…`）。
+ *
+ * 为什么不把 `http(s)://…/app/…` 也当应用深链：那是网页地址，不会被 OS 当成深链投递；
+ * 真收到就说明有人构造了畸形输入，记一条带 reason 的 warn 比静默丢弃更有用。
+ *
+ * @param raw - 深链原文（`pico/deep-link` 事件的参数）。
+ * @param scheme - 本安装的深链 scheme（**由桌面壳按渠道注入**；缺省官方值）。
+ * @returns 分流结果。
+ */
+export function routeDeepLink(raw: string, scheme: string = DEFAULT_DEEP_LINK_SCHEME): DeepLinkRoute {
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return { kind: 'foreign', reason: 'malformed url' }
+  }
+  const protocol = parsed.protocol.replace(/:$/u, '').toLowerCase()
+  const host = parsed.hostname.toLowerCase()
+  const customScheme = protocol !== '' && protocol !== 'http' && protocol !== 'https'
+  if (customScheme && host === APP_DEEP_LINK_HOST) return { kind: 'app' }
+  if (protocol !== scheme.toLowerCase()) {
+    return { kind: 'foreign', reason: `not our scheme (scheme=${protocol === '' ? '?' : protocol})` }
+  }
+  if (host === 'auth') return { kind: 'auth' }
+  return { kind: 'foreign', reason: `host=${host === '' ? '?' : host}` }
+}
+
+/**
  * Install the deep-link listener; used by SessionService on construction.
  *
  * scheme 由**桌面壳注入**（`picoaide-session` 行 config 的 `deepLinkScheme`，
@@ -172,7 +232,15 @@ export function installDeepLinkListener(
     if (typeof url !== 'string') return
     const session = parseAuthDeepLink(url, scheme)
     if (session === null) {
-      ctx.logger?.warn('pico-deep-link: ignored malformed deep link')
+      // 分流先于告警（P2-4）：应用深链**不是**畸形登录回调，本监听器只是不消费它 ——
+      // 在这里 warn 会把一次正常动作记成告警（现场读成"分享链接是坏的"）。
+      const route = routeDeepLink(url, scheme)
+      if (route.kind === 'app') return
+      // 其余情况保留 warn（可能是真的配错 scheme / 写错的回调），但把**可判别的原因**
+      // 附上：host=auth 无 token 与"不是登录回调"是两件事，排障时不该靠猜。
+      ctx.logger?.warn(route.kind === 'auth'
+        ? 'pico-deep-link: ignored malformed deep link (host=auth without token)'
+        : `pico-deep-link: ignored malformed deep link (not an auth callback: ${route.reason})`)
       return
     }
     // The link may omit server/user (older server or manual invocation):

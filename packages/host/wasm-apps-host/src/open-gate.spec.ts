@@ -12,7 +12,7 @@
  * 把信封判别放宽成"只要有 JSON 体" ⇒ 第三条红（旧平台的 SPA 404 会把应用拦下）。
  */
 import { describe, expect, it, vi } from 'vitest'
-import { APP_OPEN_PATH, createAppOpenGate, platformErrorCode } from './open-gate.ts'
+import { APP_OPEN_PATH, createAppOpenGate, platformErrorCode, platformErrorReason } from './open-gate.ts'
 
 const SERVER = 'https://harness.example.com'
 
@@ -108,5 +108,62 @@ describe('打开校验闸门：404 的两档语义（R2-L2-2）', () => {
     })
     expect(await gate.check('demo', '')).toMatchObject({ kind: 'denied', status: 401, code: 'AUTH_REQUIRED' })
     expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  /**
+   * 真机实测（2026-09-20，`temp/appwin/probe-freeze-close.mjs`）：应用被冻结后点"打开"，
+   * 宿主回给客户端的是 `PLATFORM_PROOF_REPLAYED`（404 配一个"证明重放"的码）—— 因为
+   * 第一张 proof 已被平台消费（401 `proof_replayed`），重试才拿到真正的结论（404 冻结），
+   * 而代码把**第一次**响应的码跟**重试**的状态一起返回了。平台真正说的 `NOT_FOUND`
+   * 被丢掉 ⇒ 客户端拿不到可辨结论（§19 Q3 的冻结文案因此不可达）。
+   */
+  it('重试被拒 ⇒ 报**重试**的码（不是第一张 proof 的 proof_replayed）', async () => {
+    const proofs: string[] = []
+    const invalidate = vi.fn()
+    let calls = 0
+    const gate = createAppOpenGate({
+      session: () => ({ serverURL: SERVER, token: 'tok' }),
+      fetch: async (_url, init) => {
+        calls += 1
+        proofs.push(new Headers(init.headers).get('x-pico-app-proof') ?? '')
+        if (calls === 1) {
+          return new Response(JSON.stringify({ error: { code: 'proof_replayed', message: '持有性证明重放' } }), { status: 401 })
+        }
+        return new Response(JSON.stringify({
+          error: { code: 'NOT_FOUND', message: '应用已被管理员停用（冻结）', details: { reason: 'app_frozen' } },
+        }), { status: 404 })
+      },
+      // 第一张来自缓存，重试必须用**重签**后的那一张。
+      appProof: { get: async (_appId, force) => (force === true ? 'proof-fresh' : 'proof-cached'), invalidate },
+      warn: () => {},
+    })
+    const result = await gate.check('demo', '')
+    expect(result).toMatchObject({ kind: 'denied', status: 404, code: 'NOT_FOUND', reason: 'app_frozen' })
+    expect(calls).toBe(2)
+    expect(proofs).toEqual(['proof-cached', 'proof-fresh'])
+    expect(invalidate).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * `details.reason` 是"冻结 vs 软删/未登记"的**唯一**区分凭据（同 404 同 `NOT_FOUND`）。
+   * 解析必须宽容（`details.reason` / `error.reason` / 顶层 `reason`），但**不许猜**：
+   * 都没有 ⇒ 不出现该字段，由调用方按"没有额外信息"处理。
+   */
+  it('读平台的结构化 reason（宽容三种形态；没有就不猜）', () => {
+    expect(platformErrorReason({ error: { code: 'NOT_FOUND', details: { reason: 'app_frozen' } } })).toBe('app_frozen')
+    expect(platformErrorReason({ error: { code: 'NOT_FOUND', reason: 'app_frozen' } })).toBe('app_frozen')
+    expect(platformErrorReason({ reason: 'app_frozen' })).toBe('app_frozen')
+    expect(platformErrorReason({ error: { code: 'NOT_FOUND' } })).toBeNull()
+    expect(platformErrorReason({ error: 'NOT_FOUND' })).toBeNull()
+    expect(platformErrorReason({ error: { details: { reason: '' } } })).toBeNull()
+    expect(platformErrorReason(undefined)).toBeNull()
+    expect(platformErrorReason('404')).toBeNull()
+  })
+
+  it('首次响应即被拒（非 401）时 reason 同样带出来', async () => {
+    const result = await check(() => new Response(JSON.stringify({
+      error: { code: 'NOT_FOUND', message: '应用不存在', details: { reason: 'app_not_found' } },
+    }), { status: 404 }))
+    expect(result).toMatchObject({ kind: 'denied', status: 404, code: 'NOT_FOUND', reason: 'app_not_found' })
   })
 })
