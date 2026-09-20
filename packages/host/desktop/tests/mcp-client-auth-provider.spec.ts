@@ -1,5 +1,5 @@
 /**
- * Guard for `patches/dsh-mcp-client@0.1.5-rc.2.patch`.
+ * Guard for `patches/dsh-mcp-client@<pin>.patch`.
  *
  * The MCP authorization spec (2025-06-18) puts token refresh in the hands of
  * the transport's `OAuthClientProvider`. `dsh-mcp-client` builds that transport

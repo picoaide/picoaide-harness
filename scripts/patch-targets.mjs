@@ -8,7 +8,7 @@
  * resolution 取值的形状(yarn 4):
  *   `patch:<name>@npm%3A<version>#<patch 文件相对仓库根的路径>`
  * 例如:
- *   `patch:@deepseek-ai/dsh-win32-process@npm%3A0.1.5-rc.2#./patches/dsh-win32-process@0.1.5-rc.2.patch`
+ *   `patch:@deepseek-ai/dsh-win32-process@npm%3A0.1.5-rc.2#./patches/dsh-win32-process@<pin>.patch`
  *
  * @module scripts/patch-targets
  */

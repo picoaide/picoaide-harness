@@ -10,7 +10,7 @@
  * 而同一二进制在 `app.asar.unpacked/` 下的那份可以正常执行）。
  *
  * 历史：0.1.5 时代上游**没有**这层适配，我们为此维护
- * `patches/dsh-tool-fs-search@0.1.5-rc.2.patch`（在 `resolveRgPath()` 出口重写并
+ * `patches/dsh-tool-fs-search@<pin>.patch`（在 `resolveRgPath()` 出口重写并
  * 导出 `unpackAsarPath` 以便直接做行为断言）。
  * **0.1.6-alpha.2 已原生包含该修复**（`resolveRgPath()` 内联
  * `process.versions.electron === void 0 ? dependency : dependency.replace(/\.asar(?=[\\/])/u, ".asar.unpacked")`），

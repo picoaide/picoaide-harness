@@ -134,7 +134,7 @@ for (const target of targets) {
       fail(
         `${where}: 缺少 "^" 键 "${caretKey}" —— 依赖者用 "^${target.version}" 请求它,`
         + 'yarn 会把该描述符解析到**未打补丁**的副本(嵌套 node_modules 里实测存在未打补丁拷贝)。'
-        + `照抄同文件里已有的 "…@npm:^0.1.5-rc.2" 写法补上,再由主 agent 跑 yarn install 提交 yarn.lock`,
+        + `照抄同文件里已有的 "…@npm:^${target.version}" 写法补上,再由主 agent 跑 yarn install 提交 yarn.lock`,
       )
     } else if (caretRequested === undefined) {
       fail(
