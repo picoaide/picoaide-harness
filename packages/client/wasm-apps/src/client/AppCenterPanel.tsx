@@ -1,4 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Card,
+  Chip,
+  IconTile,
+  PANEL_GRID,
+  PANEL_SEARCH,
+  PANEL_TOOLBAR,
+  PanelButton,
+  PanelPage,
+  icons,
+  type PanelTone,
+} from '@picoaide/dsh-panel-surface/client'
 import { PublishErrorBlock, PublishForm } from './PublishForm.tsx'
 import {
   openAppEntry,
@@ -425,126 +437,55 @@ export function openFailureEnvelope(failure: OpenFailure): PublishFailure {
   }
 }
 
-const OVERLAY: React.CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  zIndex: 1000,
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-}
+/**
+ * 面板外壳（返回出口 / 标题 / 工具条 / 滚动）由 `@picoaide/dsh-panel-surface`
+ * 的 `PanelPage` 提供 —— 2026-09-20 之前这里是一整块 `position:fixed` 的模态浮层，
+ * 与「定时任务」中列整页是两套切换语义。现在四个面板同一套。
+ *
+ * 下面的样式只剩**卡片与正文**，几何在内联、颜色在共享样式表（`.pico-card` 等）。
+ */
 
-const MASK: React.CSSProperties = {
-  position: 'absolute',
-  inset: 0,
-  background: 'var(--dsw-alias-bg-mask-1)',
-  backdropFilter: 'var(--dsw-mask-blur)',
-}
-
-const PANEL: React.CSSProperties = {
-  position: 'relative',
-  zIndex: 1,
-  display: 'flex',
-  flexDirection: 'column',
-  width: 720,
-  maxWidth: 'calc(100vw - 48px)',
-  height: 'min(680px, calc(100vh - 48px))',
-  borderRadius: 24,
-  overflow: 'hidden',
-  background: 'var(--dsw-alias-bg-layer-2)',
-  boxShadow: 'var(--dsw-shadow-lv3)',
-}
-
-const HEADER: React.CSSProperties = {
-  flex: 'none',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'space-between',
-  height: 54,
-  boxSizing: 'border-box',
-  padding: '14px 18px',
-}
-
-const TITLE: React.CSSProperties = {
-  margin: 0,
-  fontSize: 16,
-  lineHeight: '24px',
-  fontWeight: 500,
-  color: 'var(--dsw-alias-label-primary)',
-}
-
-const SUBTITLE: React.CSSProperties = {
-  margin: '2px 0 0',
-  fontSize: 12,
-  lineHeight: '18px',
-  color: 'var(--dsw-alias-label-secondary)',
-}
-
-const CLOSE: React.CSSProperties = {
-  border: 'none',
-  background: 'transparent',
-  cursor: 'pointer',
-  color: 'var(--dsw-alias-label-secondary)',
-  fontSize: 18,
-  lineHeight: '24px',
-  padding: '2px 6px',
-}
-
-/** 面板头部右侧的发布入口（FIX-38：整条发布链路唯一的员工调用方）。 */
-const PUBLISH_ENTRY: React.CSSProperties = {
-  border: '1px solid var(--dsw-alias-border-l2)',
-  borderRadius: 10,
-  background: 'transparent',
-  color: 'var(--dsw-alias-label-primary)',
-  cursor: 'pointer',
-  fontFamily: 'inherit',
-  fontSize: 13,
-  lineHeight: '20px',
-  padding: '4px 12px',
-}
-
-const BODY: React.CSSProperties = {
-  flex: 1,
-  minHeight: 0,
-  overflowY: 'auto',
-  padding: '4px 18px 18px',
-}
-
+/** 卡片外框（网格里的应用卡；纵向排布，动作条贴底）。 */
 const CARD: React.CSSProperties = {
   display: 'flex',
-  alignItems: 'center',
-  gap: 12,
-  padding: '12px 14px',
-  marginBottom: 8,
+  flexDirection: 'column',
+  gap: 10,
+  padding: '14px 15px',
   borderRadius: 14,
-  border: '1px solid var(--dsw-alias-border-l2)',
-  background: 'var(--dsw-alias-bg-layer-1)',
 }
+
+/** 卡片底部的动作条（主操作贴左、占满剩余宽度）。 */
+const CARD_FOOT: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  marginTop: 'auto',
+  paddingTop: 10,
+  borderTop: '1px solid var(--dsw-alias-border-l1)',
+}
+
 
 const ROW_MAIN: React.CSSProperties = { flex: 1, minWidth: 0 }
 
-const TITLE_ROW: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }
+const TITLE_ROW: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 7, minWidth: 0, flexWrap: 'wrap' }
 
-/** 访问级别徽标（短标签；放在标题右侧，让"点开会不会被拦"在点击前可见）。 */
-const BADGE: React.CSSProperties = {
-  flex: 'none',
-  borderRadius: 999,
-  border: '1px solid var(--dsw-alias-border-l2)',
-  padding: '0 8px',
-  fontSize: 11,
-  lineHeight: '18px',
-  color: 'var(--dsw-alias-label-secondary)',
-  whiteSpace: 'nowrap',
+/**
+ * 访问级别 → 语义色调（标题右侧的小徽章）。
+ *
+ * 用它替代原来"一种灰描边胶囊打天下"的写法：`login` / `whitelist` 的差别
+ * （谁点得开）恰恰是用户最需要一眼看出来的信息。
+ */
+function accessTone(access: AccessMode): PanelTone {
+  // AccessMode 的可写取值只有 login / whitelist（`public` 是历史只读值，
+  // 客户端契约里已不在联合类型内 —— 见 appcfg-contract.ts 的对拍用例）。
+  return access === 'whitelist' ? 'warn' : 'neutral'
 }
-
-/** 已下架徽标（比访问级别更弱一等：状态而不是能力）。 */
-const DISABLED_BADGE: React.CSSProperties = { ...BADGE, color: 'var(--dsw-alias-label-tertiary)' }
 
 const ROW_TITLE: React.CSSProperties = {
   margin: 0,
   fontSize: 14,
-  lineHeight: '22px',
-  fontWeight: 500,
+  lineHeight: '21px',
+  fontWeight: 600,
   color: 'var(--dsw-alias-label-primary)',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
@@ -552,14 +493,14 @@ const ROW_TITLE: React.CSSProperties = {
 }
 
 const ROW_DESC: React.CSSProperties = {
-  margin: '2px 0 0',
+  margin: '6px 0 0',
   fontSize: 12,
   lineHeight: '18px',
   color: 'var(--dsw-alias-label-secondary)',
 }
 
 const ROW_META: React.CSSProperties = {
-  margin: '4px 0 0',
+  margin: '6px 0 0',
   fontSize: 11,
   lineHeight: '16px',
   color: 'var(--dsw-alias-label-tertiary)',
@@ -568,21 +509,13 @@ const ROW_META: React.CSSProperties = {
   whiteSpace: 'nowrap',
 }
 
-const OPEN_BUTTON: React.CSSProperties = {
-  flex: 'none',
-  border: '1px solid var(--dsw-alias-border-l2)',
-  borderRadius: 10,
-  background: 'transparent',
-  color: 'var(--dsw-alias-label-primary)',
-  cursor: 'pointer',
-  fontFamily: 'inherit',
-  fontSize: 13,
-  lineHeight: '20px',
-  padding: '6px 12px',
-}
-
+/** 正文里的错误/空态块（居中 + 图标，取代原来的一段裸灰字）。 */
 const HINT: React.CSSProperties = {
-  padding: '28px 18px',
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  gap: 6,
+  padding: '34px 18px',
   textAlign: 'center',
   color: 'var(--dsw-alias-label-secondary)',
   fontSize: 13,
@@ -592,48 +525,11 @@ const HINT: React.CSSProperties = {
 /** 建议列表（错误信封的 `hints`；与发布失败块的形状一致）。 */
 const HINT_LIST: React.CSSProperties = { margin: '6px 0 0', paddingLeft: 18 }
 
-/** 目录工具条（搜索 + 「我发布的」）。 */
-const TOOLBAR: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 10,
-  margin: '0 0 10px',
-}
-
-/** 搜索框（受控）。 */
-const SEARCH: React.CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  boxSizing: 'border-box',
-  borderRadius: 10,
-  border: '1px solid var(--dsw-alias-border-l2)',
-  background: 'transparent',
-  color: 'var(--dsw-alias-label-primary)',
-  fontFamily: 'inherit',
-  fontSize: 13,
-  lineHeight: '20px',
-  padding: '5px 10px',
-}
-
-/** 「我发布的」开关（真实 checkbox，键盘可达）。 */
-const OWNED_LABEL: React.CSSProperties = {
-  flex: 'none',
-  display: 'flex',
-  alignItems: 'center',
-  gap: 6,
-  fontSize: 12,
-  lineHeight: '18px',
-  color: 'var(--dsw-alias-label-secondary)',
-  cursor: 'pointer',
-}
-
 /** 一次性引导卡的外框。 */
 const CARD_BOX: React.CSSProperties = {
-  padding: '12px 14px',
-  marginBottom: 10,
+  padding: '14px 16px',
+  marginBottom: 14,
   borderRadius: 14,
-  border: '1px solid var(--dsw-alias-border-l2)',
-  background: 'var(--dsw-alias-bg-layer-1)',
   fontSize: 13,
   lineHeight: '20px',
   color: 'var(--dsw-alias-label-primary)',
@@ -656,20 +552,8 @@ const ACTIONS: React.CSSProperties = {
   display: 'flex',
   flexWrap: 'wrap',
   alignItems: 'center',
-  gap: 8,
-  marginTop: 10,
-  paddingTop: 10,
-  borderTop: '1px solid var(--dsw-alias-border-l2)',
-}
-
-/** 次要动作按钮（比 {@link OPEN_BUTTON} 再轻一档：文字按钮）。 */
-const ACTION_BUTTON: React.CSSProperties = {
-  ...OPEN_BUTTON,
-  border: 'none',
-  padding: '2px 4px',
-  color: 'var(--dsw-alias-label-secondary)',
-  fontSize: 12,
-  lineHeight: '18px',
+  gap: 2,
+  paddingTop: 8,
 }
 
 /**
@@ -678,7 +562,6 @@ const ACTION_BUTTON: React.CSSProperties = {
  * 用上游真实存在的 `--dsw-alias-state-error-primary` 而不是自造红色：主题 token 是上游的，
  * 硬编码 `#d00` 在暗色主题下会失真（`scripts/check-theme-tokens.mjs` 会直接拦下不存在的 token）。
  */
-const DANGER_BUTTON: React.CSSProperties = { ...ACTION_BUTTON, color: 'var(--dsw-alias-state-error-primary)' }
 
 /** 二次确认块（危险动作的唯一闸门；确认与取消都是真 `<button>`，可键盘操作）。 */
 const CONFIRM: React.CSSProperties = {
@@ -1053,45 +936,45 @@ export function AppCenterPanel({
   )
 
   return (
-    <div style={OVERLAY} role="dialog" aria-modal="true" aria-label={t('appCenter.title')} className="pico-app-center">
-      <div style={MASK} onClick={onClose} />
-      <div style={PANEL}>
-        <div style={HEADER}>
-          <div>
-            <h2 style={TITLE}>{t('appCenter.title')}</h2>
-            <p style={SUBTITLE}>{view === 'publish' ? t('appCenter.publishTitle') : t('appCenter.subtitle')}</p>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            {view === 'catalog' && (
-              <button
-                type="button"
-                className="pico-app-center-publish"
-                data-action="open-publish"
-                style={PUBLISH_ENTRY}
-                aria-label={t('appCenter.publishAria')}
-                // 表头的"发布"= **首版**发布：不带基线，因此不预填任何"当前值"。
-                onClick={() => { setPublishTarget(undefined); setView('publish') }}
-              >
-                {t('appCenter.publish')}
-              </button>
-            )}
-            <button type="button" style={CLOSE} onClick={onClose} aria-label={t('appCenter.close')}>✕</button>
-          </div>
-        </div>
-        <div style={BODY}>
-          {view === 'publish' && (
-            <PublishForm
-              {...(publishTarget === undefined ? {} : { target: publishTarget })}
-              onClose={() => { setView('catalog') }}
-              onPublished={() => { void load() }}
-            />
-          )}
-          {view === 'detail' && detail !== null && (
-            <AppDetailView
-              item={detail}
-              channel={channel}
-              {...(openCounts[detail.appId] === undefined ? {} : { counts: openCounts[detail.appId] })}
-              {...(openFeedback[detail.appId] === undefined ? {} : { windowOutcome: openFeedback[detail.appId] })}
+    <div className="pico-app-center" data-role="app-center-page">
+      <PanelPage
+        icon={<icons.IconApps size={16} />}
+        title={view === 'publish' ? t('appCenter.publishTitle') : t('appCenter.title')}
+        subtitle={view === 'publish' ? t('appCenter.publishSubtitle') : t('appCenter.subtitle')}
+        backLabel={t('appCenter.backToChat')}
+        onClose={onClose}
+        {...(view === 'catalog'
+          ? {
+              actions: (
+                <PanelButton
+                  variant="primary"
+                  size="md"
+                  className="pico-app-center-publish"
+                  data-action="open-publish"
+                  icon={<icons.IconPlus size={14} />}
+                  aria-label={t('appCenter.publishAria')}
+                  // 表头的"发布"= **首版**发布：不带基线，因此不预填任何"当前值"。
+                  onClick={() => { setPublishTarget(undefined); setView('publish') }}
+                >
+                  {t('appCenter.publish')}
+                </PanelButton>
+              ),
+            }
+          : {})}
+      >
+        {view === 'publish' && (
+          <PublishForm
+            {...(publishTarget === undefined ? {} : { target: publishTarget })}
+            onClose={() => { setView('catalog') }}
+            onPublished={() => { void load() }}
+          />
+        )}
+        {view === 'detail' && detail !== null && (
+          <AppDetailView
+            item={detail}
+            channel={channel}
+            {...(openCounts[detail.appId] === undefined ? {} : { counts: openCounts[detail.appId] })}
+            {...(openFeedback[detail.appId] === undefined ? {} : { windowOutcome: openFeedback[detail.appId] })}
               copied={copied === detail.appId}
               identity={identity}
               {...(aiDeps === undefined ? {} : { aiDeps })}
@@ -1155,8 +1038,7 @@ export function AppCenterPanel({
               onReleases={handleReleases}
             />
           )}
-        </div>
-      </div>
+      </PanelPage>
     </div>
   )
 
@@ -1275,18 +1157,20 @@ export function AppCenterBody({
       {/* 未登录（§19 Q2/Q4 的独立空态）：不是错误、也不是"没有应用"。 */}
       {state.kind === 'signed-out' && (
         <div style={HINT} data-role="catalog-signed-out">
-          <div data-role="signed-out-message">{t('appCenter.notLoggedIn')}</div>
-          <div style={{ marginTop: 6 }} data-role="signed-out-hint">{t('appCenter.notLoggedInHint')}</div>
-          <button type="button" className="pico-app-center-retry" style={{ ...OPEN_BUTTON, marginTop: 12 }} onClick={onRetry}>
+          <IconTile size={46} radius={15} tone="warn"><icons.IconShield size={22} /></IconTile>
+          <div data-role="signed-out-message" style={{ fontSize: 14, fontWeight: 600 }}>{t('appCenter.notLoggedIn')}</div>
+          <div data-role="signed-out-hint">{t('appCenter.notLoggedInHint')}</div>
+          <PanelButton variant="secondary" size="md" className="pico-app-center-retry" icon={<icons.IconRefresh size={14} />} style={{ marginTop: 6 }} onClick={onRetry}>
             {t('appCenter.retry')}
-          </button>
+          </PanelButton>
         </div>
       )}
 
       {state.kind === 'error' && (
         <div style={HINT} data-role="catalog-error">
+          <IconTile size={46} radius={15} tone="danger"><icons.IconAlert size={22} /></IconTile>
           {/* 错误信封逐字段显示（P1-5）：code + message + hints（+ 可选原文）。 */}
-          <div data-role="error-code">{`${t('appCenter.errorCode')}: ${state.error.code}`}</div>
+          <div data-role="error-code" style={{ fontSize: 14, fontWeight: 600 }}>{`${t('appCenter.errorCode')}: ${state.error.code}`}</div>
           <div data-role="error-message">{state.error.message}</div>
           {state.error.hints.length > 0 && (
             <ul style={{ ...HINT_LIST, textAlign: 'left' }} data-role="error-hints">
@@ -1296,9 +1180,9 @@ export function AppCenterBody({
           {state.error.details !== undefined && state.error.details !== '' && (
             <pre style={{ ...DETAILS, textAlign: 'left' }} data-role="error-details">{state.error.details}</pre>
           )}
-          <button type="button" className="pico-app-center-retry" style={{ ...OPEN_BUTTON, marginTop: 12 }} onClick={onRetry}>
+          <PanelButton variant="secondary" size="md" className="pico-app-center-retry" icon={<icons.IconRefresh size={14} />} style={{ marginTop: 6 }} onClick={onRetry}>
             {t('appCenter.retry')}
-          </button>
+          </PanelButton>
         </div>
       )}
 
@@ -1314,12 +1198,13 @@ export function AppCenterBody({
       {/* 空态 ①：目录里一个应用都没有 ⇒ 引导让 AI 做一个。 */}
       {empty === 'no-apps' && (
         <div style={HINT} data-role="catalog-empty">
-          <div>{t('appCenter.empty')}</div>
-          <div style={{ marginTop: 6 }}>{t('appCenter.emptyHint')}</div>
+          <IconTile size={46} radius={15} tone="brand"><icons.IconApps size={22} /></IconTile>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>{t('appCenter.empty')}</div>
+          <div>{t('appCenter.emptyHint')}</div>
           {onPublish !== undefined && (
-            <button type="button" className="pico-app-center-empty-publish" style={{ ...OPEN_BUTTON, marginTop: 12 }} onClick={onPublish}>
+            <PanelButton variant="primary" size="md" className="pico-app-center-empty-publish" icon={<icons.IconPlus size={14} />} style={{ marginTop: 6 }} onClick={onPublish}>
               {t('appCenter.publish')}
-            </button>
+            </PanelButton>
           )}
         </div>
       )}
@@ -1343,17 +1228,19 @@ export function AppCenterBody({
       {/* 空态 ②：有应用，但当前筛选条件一个都没命中（**不得**说成"还没有可用的应用"）。 */}
       {empty === 'no-results' && (
         <div style={HINT} data-role="catalog-no-results">
-          <div data-role="no-results-message">{t('appCenter.noResults')}</div>
-          <div style={{ marginTop: 6 }} data-role="no-results-hint">{t('appCenter.noResultsHint')}</div>
+          <IconTile size={46} radius={15} tone="neutral"><icons.IconSearch size={22} /></IconTile>
+          <div data-role="no-results-message" style={{ fontSize: 14, fontWeight: 600 }}>{t('appCenter.noResults')}</div>
+          <div data-role="no-results-hint">{t('appCenter.noResultsHint')}</div>
           {onFilterChange !== undefined && (
-            <button
-              type="button"
+            <PanelButton
+              variant="secondary"
+              size="md"
               className="pico-app-center-clear-filters"
-              style={{ ...OPEN_BUTTON, marginTop: 12 }}
+              style={{ marginTop: 6 }}
               onClick={() => { onFilterChange(EMPTY_FILTER) }}
             >
               {t('appCenter.clearFilters')}
-            </button>
+            </PanelButton>
           )}
         </div>
       )}
@@ -1361,34 +1248,41 @@ export function AppCenterBody({
       {/* 空态 ③：可见的行**全部下架**（§19 Q2 第二档：说明原因 + 联系负责人）。 */}
       {empty === 'all-disabled' && (
         <div style={HINT} data-role="catalog-all-disabled">
-          <div data-role="all-disabled-message">{t('appCenter.allDisabled')}</div>
-          <div style={{ marginTop: 6 }} data-role="all-disabled-hint">{t('appCenter.allDisabledHint')}</div>
+          <IconTile size={46} radius={15} tone="neutral"><icons.IconUnplug size={22} /></IconTile>
+          <div data-role="all-disabled-message" style={{ fontSize: 14, fontWeight: 600 }}>{t('appCenter.allDisabled')}</div>
+          <div data-role="all-disabled-hint">{t('appCenter.allDisabledHint')}</div>
         </div>
       )}
 
-      {state.kind === 'ready' && page.map(item => (
-        <AppCenterRow
-          key={item.appId}
-          item={item}
-          shareScheme={shareScheme ?? null}
-          copied={copied === item.appId}
-          {...(openCounts?.[item.appId] === undefined ? {} : { counts: openCounts[item.appId] })}
-          {...(openFeedback?.[item.appId] === undefined ? {} : { windowOutcome: openFeedback[item.appId] })}
-          {...(onCopyLink === undefined ? {} : { onCopyLink })}
-          {...(onOpenDetail === undefined ? {} : { onOpenDetail })}
-          {...(onOpenResult === undefined ? {} : { onOpenResult })}
-          {...(onOpenFailure === undefined ? {} : { onOpenFailure })}
-          {...(onPublishNewVersion === undefined ? {} : { onPublishNewVersion })}
-          {...(onSetPublished === undefined ? {} : { onSetPublished })}
-          {...(onDelete === undefined ? {} : { onDelete })}
-          {...(onDiagnostics === undefined ? {} : { onDiagnostics })}
-          {...(onReleases === undefined ? {} : { onReleases })}
-        />
-      ))}
+      {state.kind === 'ready' && page.length > 0 && (
+        <div style={PANEL_GRID} data-role="catalog-grid">
+          {page.map(item => (
+            <AppCenterRow
+              key={item.appId}
+              item={item}
+              shareScheme={shareScheme ?? null}
+              copied={copied === item.appId}
+              {...(openCounts?.[item.appId] === undefined ? {} : { counts: openCounts[item.appId] })}
+              {...(openFeedback?.[item.appId] === undefined ? {} : { windowOutcome: openFeedback[item.appId] })}
+              {...(onCopyLink === undefined ? {} : { onCopyLink })}
+              {...(onOpenDetail === undefined ? {} : { onOpenDetail })}
+              {...(onOpenResult === undefined ? {} : { onOpenResult })}
+              {...(onOpenFailure === undefined ? {} : { onOpenFailure })}
+              {...(onPublishNewVersion === undefined ? {} : { onPublishNewVersion })}
+              {...(onSetPublished === undefined ? {} : { onSetPublished })}
+              {...(onDelete === undefined ? {} : { onDelete })}
+              {...(onDiagnostics === undefined ? {} : { onDiagnostics })}
+              {...(onReleases === undefined ? {} : { onReleases })}
+            />
+          ))}
+        </div>
+      )}
       {state.kind === 'ready' && remaining > 0 && onShowMore !== undefined && (
-        <button type="button" className="pico-app-center-show-more" style={{ ...OPEN_BUTTON, marginTop: 8 }} onClick={onShowMore}>
-          {tCount('appCenter.showMore', remaining)}
-        </button>
+        <div style={{ display: 'flex', justifyContent: 'center', marginTop: 12 }}>
+          <PanelButton variant="secondary" size="md" className="pico-app-center-show-more" onClick={onShowMore}>
+            {tCount('appCenter.showMore', remaining)}
+          </PanelButton>
+        </div>
       )}
     </>
   )
@@ -1407,18 +1301,18 @@ export function CatalogToolbar({ filter, onFilterChange }: {
 }) {
   const disabled = onFilterChange === undefined
   return (
-    <div style={TOOLBAR} data-role="catalog-toolbar">
+    <div style={{ ...PANEL_TOOLBAR, marginBottom: 14 }} data-role="catalog-toolbar">
       <input
         type="search"
         className="pico-app-center-search"
-        style={SEARCH}
+        style={PANEL_SEARCH}
         value={filter.query}
         placeholder={t('appCenter.searchPlaceholder')}
         aria-label={t('appCenter.search')}
         disabled={disabled}
         onChange={event => { onFilterChange?.({ ...filter, query: event.target.value }) }}
       />
-      <label style={OWNED_LABEL}>
+      <label className="pico-checkchip">
         <input
           type="checkbox"
           className="pico-app-center-owned-only"
@@ -1438,17 +1332,22 @@ export function CatalogToolbar({ filter, onFilterChange }: {
  */
 export function OnboardingCard({ onDismiss }: { onDismiss: () => void }) {
   return (
-    <div style={CARD_BOX} className="pico-app-center-onboarding" data-role="catalog-onboarding" role="note">
-      <div style={{ fontWeight: 500 }} data-role="onboarding-title">{t('appCenter.onboarding.title')}</div>
-      <ul style={HINT_LIST} data-role="onboarding-points">
+    <Card style={CARD_BOX} className="pico-app-center-onboarding" data-role="catalog-onboarding" role="note">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <IconTile size={32} radius={10} tone="brand"><icons.IconInfo size={17} /></IconTile>
+        <div style={{ flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 }} data-role="onboarding-title">
+          {t('appCenter.onboarding.title')}
+        </div>
+        <PanelButton variant="ghost" size="sm" className="pico-app-center-onboarding-dismiss" onClick={onDismiss}>
+          {t('appCenter.onboarding.dismiss')}
+        </PanelButton>
+      </div>
+      <ul style={{ ...HINT_LIST, marginTop: 10, marginBottom: 0, color: 'var(--dsw-alias-label-secondary)' }} data-role="onboarding-points">
         <li>{t('appCenter.onboarding.what')}</li>
         <li>{t('appCenter.onboarding.build')}</li>
         <li>{t('appCenter.onboarding.share')}</li>
       </ul>
-      <button type="button" className="pico-app-center-onboarding-dismiss" style={OPEN_BUTTON} onClick={onDismiss}>
-        {t('appCenter.onboarding.dismiss')}
-      </button>
-    </div>
+    </Card>
   )
 }
 
@@ -1489,9 +1388,9 @@ export function AppDetailView({
   const link = appShareLink(item.appId)
   return (
     <div className="pico-app-detail" data-role="app-detail" data-app-id={item.appId}>
-      <button type="button" className="pico-app-center-back" style={ACTION_BUTTON} onClick={onBack}>
+      <PanelButton variant="ghost" size="sm" className="pico-app-center-back" icon={<icons.IconBack size={14} />} onClick={onBack}>
         {t('appCenter.backToCatalog')}
-      </button>
+      </PanelButton>
       <h3 style={{ ...ROW_TITLE, whiteSpace: 'normal', marginTop: 8 }} data-role="detail-title">{item.title}</h3>
       {item.description !== '' && <p style={ROW_DESC} data-role="detail-description">{item.description}</p>}
       <p style={ROW_META}>
@@ -1535,11 +1434,12 @@ export function AppDetailView({
       )}
 
       <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-        <button
-          type="button"
+        <PanelButton
+          variant="primary"
+          size="lg"
           className="pico-app-center-open"
           data-action="open-app"
-          style={{ ...OPEN_BUTTON, ...(item.enabled && !opening ? {} : { opacity: 0.5, cursor: 'default' }) }}
+          icon={<icons.IconExternal size={14} />}
           disabled={!item.enabled || opening}
           onClick={() => {
             setOpening(true)
@@ -1548,14 +1448,15 @@ export function AppDetailView({
           }}
         >
           {opening ? t('appCenter.openOpening') : t('appCenter.open')}
-        </button>
+        </PanelButton>
         {/* §19 Q6：未注入渠道 scheme ⇒ 不渲染（宁可少一行，也不给一条打不开的链接）。 */}
         {link !== null && (
-          <button
-            type="button"
+          <PanelButton
+            variant="secondary"
+            size="lg"
             className="pico-app-center-copy-link"
             data-action="copy-link"
-            style={OPEN_BUTTON}
+            icon={<icons.IconCopy size={14} />}
             aria-label={`${t('appCenter.copyLinkAria')} ${item.title}`}
             onClick={() => {
               setCopyFailed(false)
@@ -1563,7 +1464,7 @@ export function AppDetailView({
             }}
           >
             {t('appCenter.copyLink')}
-          </button>
+          </PanelButton>
         )}
       </div>
       {link !== null && (copied === true || copyFailed) && (
@@ -1775,8 +1676,14 @@ export function AppCenterRow({
   }
 
   return (
-    <div style={{ ...CARD, flexDirection: 'column', alignItems: 'stretch' }} className="pico-app-center-card">
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+    <Card interactive muted={!item.enabled} style={CARD} className="pico-app-center-card">
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 11, minWidth: 0 }}>
+        <IconTile
+          size={40}
+          radius={12}
+          tone={!item.enabled ? 'neutral' : item.access === 'whitelist' ? 'warn' : 'brand'}
+          label={item.title.slice(0, 1)}
+        />
         <div style={ROW_MAIN}>
           <div style={TITLE_ROW}>
             {/* 标题即详情入口（真实 button：键盘可达，也不再需要单独一行"详情"链接）。 */}
@@ -1787,7 +1694,7 @@ export function AppCenterRow({
                     type="button"
                     className="pico-app-center-detail"
                     data-action="open-detail"
-                    style={{ ...ROW_TITLE, border: 'none', background: 'transparent', padding: 0, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}
+                    style={{ ...ROW_TITLE, border: 'none', background: 'transparent', padding: 0, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', maxWidth: '100%' }}
                     title={item.title}
                     aria-label={`${t('appCenter.detailAria')} ${item.title}`}
                     onClick={() => { onOpenDetail(item) }}
@@ -1795,21 +1702,18 @@ export function AppCenterRow({
                     {item.title}
                   </button>
                 )}
-            <span
-              style={BADGE}
-              className="pico-app-center-access"
-              data-role="access-level"
-              data-access={item.access}
-            >
-              {accessBadge(item.access)}
+            <span className="pico-app-center-access" data-role="access-level" data-access={item.access} style={{ display: 'inline-flex' }}>
+              <Chip tone={accessTone(item.access)}>{accessBadge(item.access)}</Chip>
             </span>
             {!item.enabled && (
-              <span style={DISABLED_BADGE} className="pico-app-center-disabled" data-role="app-disabled">
-                {t('appCenter.disabled')}
+              <span className="pico-app-center-disabled" data-role="app-disabled" style={{ display: 'inline-flex' }}>
+                <Chip tone="neutral" plain>{t('appCenter.disabled')}</Chip>
               </span>
             )}
           </div>
-          {item.description !== '' && <p style={ROW_DESC}>{item.description}</p>}
+          {item.description !== '' && (
+            <p style={ROW_DESC} className="pico-clamp-2" title={item.description}>{item.description}</p>
+          )}
           <p style={ROW_META}>
             {/* 当前版本（P1-4）：发新版前必须能看见它 —— 新版本号要严格大于它。 */}
             {item.currentVersion !== '' && (
@@ -1830,52 +1734,6 @@ export function AppCenterRow({
                 （目录行的「复制链接」与发布成功块，见 §19 Q6）。 */}
           </p>
         </div>
-        {/* 分享（F6/§19 Q6）：只在拿到渠道 scheme 时渲染；未拿到时这一行彻底不存在。 */}
-        {shareLink !== null && onCopyLink !== undefined && (
-          <button
-            type="button"
-            className="pico-app-center-copy-link"
-            data-action="copy-link"
-            style={OPEN_BUTTON}
-            aria-label={`${t('appCenter.copyLinkAria')} ${item.title}`}
-            onClick={() => {
-              setCopyFailed(false)
-              void onCopyLink(item).then(ok => { if (!ok) setCopyFailed(true) })
-            }}
-          >
-            {t('appCenter.copyLink')}
-          </button>
-        )}
-        {canPublish && (
-          <button
-            type="button"
-            className="pico-app-center-publish-new"
-            data-action="publish-new-version"
-            style={{ ...OPEN_BUTTON, ...(item.enabled ? {} : { opacity: 0.5, cursor: 'default' }) }}
-            // 下架状态下**保留按钮但禁用**：发新版不会恢复访问（仍是 410 Gone），
-            // 让作者白等一次上传再看到"已生效"是最坏的组合（R1-uxc-1）。
-            disabled={!item.enabled}
-            aria-disabled={!item.enabled}
-            aria-label={`${t('appCenter.publishNewVersionAria')} ${item.title}`}
-            onClick={() => { onPublishNewVersion?.(item) }}
-          >
-            {t('appCenter.publishNewVersion')}
-          </button>
-        )}
-        <button
-          type="button"
-          // 稳定钩子（自动化与真机探针用）：打开走本机路由，失败在行内显示可读原因。
-          data-action="open-app"
-          className="pico-app-center-open"
-          style={{ ...OPEN_BUTTON, ...(openable && !opening ? {} : { opacity: 0.5, cursor: 'default' }) }}
-          onClick={open}
-          disabled={!openable || opening}
-          aria-label={`${t('appCenter.openAria')} ${item.title}`}
-        >
-          {/* §19 Q12 的客户端侧反馈：请求在途时按钮自己说"正在打开…"，
-              不让用户以为点了没反应（窗口骨架屏在 L2）。 */}
-          {opening ? t('appCenter.openOpening') : t('appCenter.open')}
-        </button>
       </div>
       {windowOutcome !== undefined && (
         <p style={ROW_META} data-role="open-outcome" data-window={windowOutcome}>
@@ -1884,7 +1742,10 @@ export function AppCenterRow({
       )}
 
       {canPublish && !item.enabled && (
-        <p style={{ ...ROW_META, marginTop: 8 }} data-role="publish-new-disabled-reason">
+        <p
+          style={{ ...ROW_META, whiteSpace: 'normal', overflow: 'visible', textOverflow: 'clip' }}
+          data-role="publish-new-disabled-reason"
+        >
           {t('appCenter.publishNewDisabled')}
         </p>
       )}
@@ -1896,108 +1757,164 @@ export function AppCenterRow({
         </p>
       )}
 
-      {canManage && (
+
+      {(canManage || canPublish) && (
         <div style={ACTIONS} data-role="row-actions">
+          {canPublish && (
+            <PanelButton
+              variant="ghost"
+              size="sm"
+              className="pico-app-center-publish-new"
+              data-action="publish-new-version"
+              icon={<icons.IconPlus size={13} />}
+              // 下架状态下**保留按钮但禁用**：发新版不会恢复访问（仍是 410 Gone），
+              // 让作者白等一次上传再看到"已生效"是最坏的组合（R1-uxc-1）。
+              disabled={!item.enabled}
+              aria-disabled={!item.enabled}
+              aria-label={`${t('appCenter.publishNewVersionAria')} ${item.title}`}
+              onClick={() => { onPublishNewVersion?.(item) }}
+            >
+              {t('appCenter.publishNewVersion')}
+            </PanelButton>
+          )}
           {onSetPublished !== undefined && (
             item.enabled
               ? (
-                  <button
-                    type="button"
+                  <PanelButton
+                    variant="danger"
+                    size="sm"
                     className="pico-app-center-take-offline"
                     data-action="take-offline"
-                    style={DANGER_BUTTON}
                     disabled={busy !== null}
                     aria-label={`${t('appCenter.takeOfflineAria')} ${item.title}`}
                     onClick={() => { setActionFailure(null); setConfirm('offline') }}
                   >
                     {t('appCenter.takeOffline')}
-                  </button>
+                  </PanelButton>
                 )
               : (
-                  <button
-                    type="button"
+                  <PanelButton
+                    variant="ghost"
+                    size="sm"
                     className="pico-app-center-bring-online"
                     data-action="bring-online"
-                    style={ACTION_BUTTON}
                     disabled={busy !== null}
                     aria-label={`${t('appCenter.bringOnlineAria')} ${item.title}`}
                     onClick={() => { void runSetPublished(true) }}
                   >
                     {t('appCenter.bringOnline')}
-                  </button>
+                  </PanelButton>
                 )
           )}
           {onDiagnostics !== undefined && (
-            <button
-              type="button"
+            <PanelButton
+              variant="ghost"
+              size="sm"
               className="pico-app-center-diagnostics-toggle"
               data-action="diagnostics"
-              style={ACTION_BUTTON}
               aria-label={`${t('appCenter.diagnosticsAria')} ${item.title}`}
               aria-expanded={diagnostics.kind !== 'closed'}
               aria-controls={diagnosticsPanelId}
               onClick={() => { void toggleDiagnostics() }}
             >
               {t('appCenter.diagnostics')}
-            </button>
+            </PanelButton>
           )}
           {/* 版本历史（R1-pm-3）：审核开启后作者唯一的结论出口 —— 被拒理由、
               待审状态与"线上是哪一版"都在这一块里。 */}
           {onReleases !== undefined && (
-            <button
-              type="button"
+            <PanelButton
+              variant="ghost"
+              size="sm"
               className="pico-app-center-releases-toggle"
               data-action="releases"
-              style={ACTION_BUTTON}
               aria-label={`${t('appCenter.releasesAria')} ${item.title}`}
               aria-expanded={releases.kind !== 'closed'}
               aria-controls={releasesPanelId}
               onClick={() => { void toggleReleases() }}
             >
               {t('appCenter.releases')}
-            </button>
+            </PanelButton>
           )}
           {onDelete !== undefined && (
-            <button
-              type="button"
+            <PanelButton
+              variant="danger"
+              size="sm"
               className="pico-app-center-delete"
               data-action="delete"
-              style={DANGER_BUTTON}
               disabled={busy !== null}
               aria-label={`${t('appCenter.deleteAria')} ${item.title}`}
               onClick={() => { setActionFailure(null); setConfirm('delete') }}
             >
               {t('appCenter.deleteApp')}
-            </button>
+            </PanelButton>
           )}
         </div>
       )}
 
+      {/* 主操作条：**必须排在作者动作之后** —— 它带 `marginTop:auto` 贴卡片底部，
+          排在前面时"有作者动作"的卡片会把主按钮顶高一整行，同一行卡片的主按钮
+          参差不齐（网格截图实测）。 */}
+      <div style={CARD_FOOT}>
+        <PanelButton
+          variant="primary"
+          size="md"
+          // 稳定钩子（自动化与真机探针用）：打开走本机路由，失败在行内显示可读原因。
+          data-action="open-app"
+          className="pico-app-center-open"
+          icon={<icons.IconExternal size={14} />}
+          onClick={open}
+          disabled={!openable || opening}
+          aria-label={`${t('appCenter.openAria')} ${item.title}`}
+          style={{ flex: 1 }}
+        >
+          {/* §19 Q12 的客户端侧反馈：请求在途时按钮自己说"正在打开…"，
+              不让用户以为点了没反应（窗口骨架屏在 L2）。 */}
+          {opening ? t('appCenter.openOpening') : t('appCenter.open')}
+        </PanelButton>
+        {/* 分享（F6/§19 Q6）：只在拿到渠道 scheme 时渲染；未拿到时这一行彻底不存在。 */}
+        {shareLink !== null && onCopyLink !== undefined && (
+          <PanelButton
+            variant="secondary"
+            size="md"
+            className="pico-app-center-copy-link"
+            data-action="copy-link"
+            icon={<icons.IconCopy size={14} />}
+            aria-label={`${t('appCenter.copyLinkAria')} ${item.title}`}
+            onClick={() => {
+              setCopyFailed(false)
+              void onCopyLink(item).then(ok => { if (!ok) setCopyFailed(true) })
+            }}
+          >
+            {t('appCenter.copyLink')}
+          </PanelButton>
+        )}
+      </div>
       {confirm === 'offline' && (
         <div style={CONFIRM} data-role="confirm-take-offline" role="group" aria-label={t('appCenter.takeOfflineConfirm')}>
           <div data-role="confirm-message">{t('appCenter.takeOfflineConfirm')}</div>
           <div style={CONFIRM_ROW}>
-            <button
-              type="button"
+            <PanelButton
+              variant="danger"
+              size="sm"
               ref={confirmRef}
               className="pico-app-center-confirm-take-offline"
               data-action="confirm-take-offline"
-              style={DANGER_BUTTON}
               disabled={busy !== null}
               onClick={() => { void runSetPublished(false) }}
             >
               {t('appCenter.takeOfflineConfirmAction')}
-            </button>
-            <button
-              type="button"
+            </PanelButton>
+            <PanelButton
+              variant="secondary"
+              size="sm"
               className="pico-app-center-confirm-cancel"
               data-action="cancel-confirm"
-              style={ACTION_BUTTON}
               disabled={busy !== null}
               onClick={() => { setConfirm('none') }}
             >
               {t('appCenter.confirmCancel')}
-            </button>
+            </PanelButton>
           </div>
         </div>
       )}
@@ -2006,27 +1923,27 @@ export function AppCenterRow({
         <div style={CONFIRM} data-role="confirm-delete" role="group" aria-label={t('appCenter.deleteConfirm')}>
           <div data-role="confirm-message">{t('appCenter.deleteConfirm')}</div>
           <div style={CONFIRM_ROW}>
-            <button
-              type="button"
+            <PanelButton
+              variant="danger"
+              size="sm"
               ref={confirmRef}
               className="pico-app-center-confirm-delete"
               data-action="confirm-delete"
-              style={DANGER_BUTTON}
               disabled={busy !== null}
               onClick={() => { void runDelete() }}
             >
               {t('appCenter.deleteConfirmAction')}
-            </button>
-            <button
-              type="button"
+            </PanelButton>
+            <PanelButton
+              variant="secondary"
+              size="sm"
               className="pico-app-center-confirm-cancel"
               data-action="cancel-confirm"
-              style={ACTION_BUTTON}
               disabled={busy !== null}
               onClick={() => { setConfirm('none') }}
             >
               {t('appCenter.confirmCancel')}
-            </button>
+            </PanelButton>
           </div>
         </div>
       )}
@@ -2055,7 +1972,7 @@ export function AppCenterRow({
           {releases.kind === 'ready' && <ReleasesBlock report={releases.report} />}
         </div>
       )}
-    </div>
+    </Card>
   )
 }
 

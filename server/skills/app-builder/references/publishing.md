@@ -111,16 +111,37 @@ package fmt is not in std (/usr/local/go/src/fmt)
 ## 2. 本地自测（零依赖）
 
 Node 自带 `node:wasi`，可以直接把产物跑起来 —— `examples/go/preview.mjs` 就是一个假宿主：
-它按 ABI 收发帧、用内存数据应答宿主调用、打印最终响应。
+它按 ABI 收发帧、用内存数据应答宿主调用、**按宿主规则直出包内静态资源**（所以要先打包，
+见 §2.1）、打印最终响应。
 
 ```bash
 node preview.mjs shared-notes.wasm
-node preview.mjs shared-notes.wasm --method POST --path /api/notes --body 'body=hello'
+node preview.mjs shared-notes.wasm --path /api/notes --method POST --body '{"body":"hello"}'
 node preview.mjs shared-notes.wasm --user someone-else       # 看无权限页
 ```
 
-**这一步能发现绝大多数问题**：帧格式写错、忘了 flush、响应没写、白名单分支、路由分支。
-本地预览验证不了的只剩"真实数据库/真实 AI/真实体积" —— 那些交给预检。
+**这一步能发现绝大多数问题**：帧格式写错、忘了 flush、响应没写、白名单分支、路由分支、
+静态资源没打进包。本地预览验证不了的只剩"真实数据库/真实 AI/真实体积" —— 那些交给预检。
+
+## 2.1 把前端资源打进 wasm（发布前的固定一步）
+
+平台把 wasm 的**自定义段**当作随包静态资源的一等载体（段名 = 包内逻辑路径）：宿主按路径
+直出（宿主直出的完整路由规则见 `references/abi.md` §3.7），应用也能用 `assets.read` 读。
+用官方打包器（在技能目录的 `scripts/` 下）把 `web/` 打进去：
+
+```bash
+mkdir -p dist
+node scripts/pack-assets.mjs --in shared-notes.wasm --out dist/shared-notes-packed.wasm \
+  web/index.html=index.html web/app.css=static/app.css web/app.js=static/app.js
+```
+
+- `SRC=DEST`：`SRC` 是磁盘上的文件，`DEST` 是**包内逻辑路径**（也就是段名），可重复。
+- `--out` **必填且不得与 `--in` 同路径**（原产物要留着继续编译/重打包）。
+- `picoaide.app.json` 与工具链元数据段名（`name` / `producers` / …）会被直接拒 ——
+  保留资源由平台在发布期写入，名单放 `config` 的 `whitelist`。
+- 路径不超过 256 字节、单段不超过 255 字节；自定义段总量不超过 4 MiB。
+- **`__picoaide/` 前缀不能占用**（宿主保留命名空间，发布期 `ASSET_DENIED` +
+  `details.reason = "reserved_path_prefix"`）。
 
 ## 3. 应用配置文件 `picoaide.app.json`
 

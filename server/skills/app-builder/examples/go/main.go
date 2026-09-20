@@ -1,22 +1,34 @@
-// Command shared-notes 是 PicoAide 应用平台上的一个**真实小应用**：团队共享便签墙。
+// Command shared-notes 是应用平台上的一个**真实小应用**：团队共享便签墙。
 //
-// 它是作者与 AI 的黄金路径样板（拷走这个目录就能改出自己的应用），刻意覆盖了
-// 一篇应用代码必须处理好的六件事：
+// 它是作者与 AI 的黄金路径样板（拷走这个目录就能改出自己的应用），形态是
+// **前后端分离**：
+//
+//	web/index.html  页面结构      ┐
+//	web/app.css     样式          ├─ 随包静态资源（宿主按路径直出）
+//	web/app.js      取数与渲染     ┘
+//	main.go         wasm 后端：只回 JSON（入口页由它读了 index.html 再返回）
+//
+// 刻意覆盖了一篇应用代码必须处理好的八件事：
 //
 //  1. 读请求帧（RS + 十进制长度 + '\n' + JSON）→ 取当前使用者 `user`；
 //  2. 读自己的配置 `picoaide.app.json`（assets.read）→ 白名单判定；
 //  3. 无权限页**显示本人账号**（作者发现名单拼错的唯一途径）；
-//  4. db.define 幂等建表 + db.query 列表 + db.exec 写入（单语句、参数化）；
-//  5. AI 走**前端桥**：服务端的 `ai.chat` 宿主能力已删除，wasm 侧**没有任何 AI 调用** ——
-//     页面里的 JS 直接 fetch 客户端保留路径（**双下划线**，见 aiChatPath 常量），流式拿到回答后
-//     POST 回本应用的 /api/summaries，由 wasm 写进应用库并在页面回显；
-//  6. 每个分支都写且只写一帧响应信封；日志走 log 宿主调用（不污染 stdout 协议）。
+//  4. 入口 `/` 由 wasm 自己答（先判名单，再 assets.read("index.html")），
+//     `/static/*` 由宿主直出（apps 里的资源存在就直出，不执行 wasm）；
+//  5. 业务 API 一律回 JSON（成功与失败都是 JSON 信封），失败码由页面翻译成人话；
+//  6. db.define 幂等建表 + db.query 列表 + db.exec 写入（单语句、参数化）；
+//  7. AI 走**客户端 AI loop**：wasm 侧**没有任何 AI 调用** —— 页面里的 JS 直接 fetch
+//     客户端保留路径（**双下划线**，见 aiChatPath 常量），流式拿到回答后 POST 回本应用的
+//     `/api/summaries`，由 wasm 写进应用库并在页面回显；
+//  8. 每个分支都写且只写一帧响应信封；日志走 log 宿主调用（不污染 stdout 协议）。
 //
 // 平台没有的能力（不要试图在示例上"扩展"出来）：联网、文件、线程、子进程、环境变量、
 // cookie（自定义协议下 `document.cookie` 恒为空、`Set-Cookie` 不落盘 ⇒ 状态只能进应用库）、
 // PRAGMA/ATTACH/DDL、员工名录。同一应用内所有用户共享数据 —— 所以便签是"团队共享"的。
 //
-// 编译：GOOS=wasip1 GOARCH=wasm go build -o shared-notes.wasm .
+// 编译（四条状态目录见 README，漏了会看到 `package fmt is not in std`）：
+//
+//	GOOS=wasip1 GOARCH=wasm go build -o shared-notes.wasm .
 package main
 
 import (
@@ -24,11 +36,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io"
-	"net/url"
 	"os"
-	"sort"
+	"path"
 	"strconv"
 	"strings"
 	"syscall"
@@ -45,6 +55,10 @@ const maxFrameBytes = 1 << 20
 
 // appConfigFile 是随包提交的配置文件名（平台在发布期把它抽到资源目录里）。
 const appConfigFile = "picoaide.app.json"
+
+// indexFile 是入口页在包内的逻辑路径：入口**必须由 wasm 自己答**（先判名单），
+// 所以它不能用"宿主直出"那条路（宿主对入口文档一律交给 wasm）。
+const indexFile = "index.html"
 
 // request 是宿主 → 应用的请求帧。每一个请求都带完整身份：实例每请求新建，无状态。
 type request struct {
@@ -115,7 +129,7 @@ func main() {
 	}
 }
 
-// run 是应用的全部流程：读请求 → 调宿主 → 写响应。
+// run 是应用的全部流程：读请求 → 判准入 → 调宿主 → 写响应。
 func run(stdin io.Reader, stdout io.Writer) error {
 	in := bufio.NewReader(stdin)
 	out := stdout
@@ -124,7 +138,7 @@ func run(stdin io.Reader, stdout io.Writer) error {
 	req, err := readRequest(in)
 	if err != nil {
 		// 连请求帧都读不出来时，也要给宿主一个合法响应帧（否则只能是"无响应"）。
-		return writeResponse(out, 500, textPage("内部错误", "无法读取请求，请重试或联系管理员。"))
+		return writeHTML(out, 500, errorPage("内部错误", "无法读取请求，请重试或联系应用负责人。"))
 	}
 
 	// 身份：平台一律要求登录（没有匿名面）。login / whitelist 要求宿主已验证身份
@@ -133,94 +147,120 @@ func run(stdin io.Reader, stdout io.Writer) error {
 	switch req.Auth.Mode {
 	case "login", "whitelist":
 		if req.User == nil || !req.Auth.Verified {
-			return writeResponse(out, 401, textPage("请先登录", "本应用需要登录后使用。"))
+			return writeJSON(out, 401, apiFail("AUTH_REQUIRED", "本应用需要登录后使用。"))
 		}
 	case "public":
 		// 历史形态（平台已不再产生匿名请求）：下面所有分支都必须能处理 user == nil。
 	default:
 		// 未知模式一律拒（宁可不可用，也不要在看不懂的模式下放行）。
-		return writeResponse(out, 500, textPage("配置无法识别", "请联系应用负责人重新发布。"))
+		return writeJSON(out, 500, apiFail("CONFIG_UNREADABLE", "应用配置无法识别，请联系应用负责人重新发布。"))
 	}
 
 	// 自己的配置：准入名单在包里，运行期不可改（改名单 = 发新版本）。
 	cfg, cfgErr := loadConfig(h)
 	if cfgErr != nil {
 		_ = h.logf("error", "读取 %s 失败: %v", appConfigFile, cfgErr)
-		return writeResponse(out, 500, textPage("配置读取失败", "应用配置缺失或损坏，请联系应用负责人重新发布。"))
+		return writeHTML(out, 500, errorPage("配置读取失败", "应用配置缺失或损坏，请联系应用负责人重新发布。"))
 	}
 	_ = h.logf("info", "request method=%s path=%s user=%s", req.Method, req.Path, usernameOf(req.User))
 
 	if !allowed(cfg, req.User) {
 		// 无权限页必须显示本人账号：平台不提供员工名录，作者只能靠这一页发现名单拼写错误。
-		return writeResponse(out, 403, noAccessPage(req.User, cfg))
+		return writeHTML(out, 403, noAccessPage(req.User, cfg))
 	}
 
 	// 建表是幂等的；每个请求都调一次，省掉"迁移脚本"这个概念（平台也不支持 DDL）。
 	if err := defineSchema(h); err != nil {
-		return hostFailure(out, h, "建表失败", err)
+		return hostFailure(out, h, req, "建表失败", err)
 	}
 
 	switch {
-	case req.Method == "GET" && (req.Path == "/" || req.Path == "/index.html"):
-		notes, err := listNotes(h, listLimit)
+	case req.Method == "GET" && isEntry(req.Path):
+		// 入口页由应用自己答：先生成 HTML 壳，页面里的 JS 再向 /api/* 取数据。
+		body, err := readAsset(h, indexFile)
 		if err != nil {
-			return hostFailure(out, h, "读取便签失败", err)
+			return hostFailure(out, h, req, "读取页面失败", err)
 		}
-		summaries, err := listSummaries(h, summaryLimit)
+		return writeHTML(out, 200, body)
+	case req.Method == "GET" && req.Path == "/api/whoami":
+		return writeJSON(out, 200, map[string]any{"user": identity(req.User), "app": appInfo(cfg)})
+	case req.Method == "GET" && req.Path == "/api/ai-prompt":
+		// 提示词由 **wasm（应用侧）** 拼好并按桥的上限截断：客户端 AI loop 对单条消息
+		// 有 16 KiB 硬上限，便签的条数与长度都不可控，所以在应用侧先截断 ——
+		// 宁可少总结几条，也不要整次调用失败。
+		notes, _, err := listNotes(h, listLimit)
 		if err != nil {
-			return hostFailure(out, h, "读取 AI 总结失败", err)
+			return hostFailure(out, h, req, "读取便签失败", err)
 		}
-		return writeResponse(out, 200, page(req, cfg, notes, summaries, ""))
+		return writeJSON(out, 200, map[string]any{"prompt": pagePrompt(notes), "notes": len(notes)})
+	case req.Method == "GET" && req.Path == "/api/notes":
+		notes, truncated, err := listNotes(h, listLimit)
+		if err != nil {
+			return hostFailure(out, h, req, "读取便签失败", err)
+		}
+		summaries, sTrunc, err := listSummaries(h, summaryLimit)
+		if err != nil {
+			return hostFailure(out, h, req, "读取 AI 总结失败", err)
+		}
+		return writeJSON(out, 200, map[string]any{
+			"notes":     notes,
+			"summaries": summaries,
+			"truncated": truncated || sTrunc,
+		})
 	case req.Method == "POST" && req.Path == "/api/notes":
-		form, _ := url.ParseQuery(req.Body)
-		body := strings.TrimSpace(form.Get("body"))
+		var payload struct {
+			Body string `json:"body"`
+		}
+		if err := json.Unmarshal([]byte(req.Body), &payload); err != nil {
+			return writeJSON(out, 400, apiFail("VALIDATION", "请求体不是合法 JSON。"))
+		}
+		body := strings.TrimSpace(payload.Body)
 		if body == "" {
-			notes, _ := listNotes(h, listLimit)
-			summaries, _ := listSummaries(h, summaryLimit)
-			return writeResponse(out, 400, page(req, cfg, notes, summaries, "便签内容不能为空。"))
+			return writeJSON(out, 400, apiFail("VALIDATION", "便签内容不能为空。"))
 		}
 		if _, err := h.call(hostDBExec, sqlParams{
 			SQL:  "INSERT INTO notes (author, body, created_at) VALUES (?, ?, ?)",
-			Args: []any{usernameOf(req.User), body, time.Now().UTC().Format(time.RFC3339)},
+			Args: []any{usernameOf(req.User), clipRunes(body, bodyMaxRunes), time.Now().UTC().Format(time.RFC3339)},
 		}); err != nil {
-			return hostFailure(out, h, "保存便签失败", err)
+			return hostFailure(out, h, req, "保存便签失败", err)
 		}
-		notes, err := listNotes(h, listLimit)
-		if err != nil {
-			return hostFailure(out, h, "读取便签失败", err)
-		}
-		summaries, err := listSummaries(h, summaryLimit)
-		if err != nil {
-			return hostFailure(out, h, "读取 AI 总结失败", err)
-		}
-		return writeResponse(out, 200, page(req, cfg, notes, summaries, "已保存。"))
+		return writeJSON(out, 200, map[string]any{"ok": true})
 	case req.Method == "POST" && req.Path == "/api/summaries":
-		// AI 结果**回传落库**（§21.2 的「前端调 AI → 结果回传 wasm 落库」）。
-		//
-		// 这条路由的请求来自**页面里的 JS**（前端桥拿到回答之后 POST 过来），
-		// wasm 侧只做校验 + 入库：它自己一行 AI 调用都没有（服务端的 ai.chat 已删除）。
-		form, _ := url.ParseQuery(req.Body)
-		answer := strings.TrimSpace(form.Get("summary"))
+		// AI 结果**回传落库**：这条路由的请求来自页面里的 JS（客户端 AI loop 拿到回答后
+		// POST 过来），wasm 侧只做校验 + 入库 —— 它自己一行 AI 调用都没有。
+		var payload struct {
+			Summary string `json:"summary"`
+		}
+		if err := json.Unmarshal([]byte(req.Body), &payload); err != nil {
+			return writeJSON(out, 400, apiFail("VALIDATION", "请求体不是合法 JSON。"))
+		}
+		answer := strings.TrimSpace(payload.Summary)
 		if answer == "" {
-			notes, _ := listNotes(h, listLimit)
-			summaries, _ := listSummaries(h, summaryLimit)
-			return writeResponse(out, 400, page(req, cfg, notes, summaries, "AI 回答是空的，没有落库。"))
+			return writeJSON(out, 400, apiFail("VALIDATION", "AI 回答是空的，没有落库。"))
 		}
 		if err := saveSummary(h, req.User, clipRunes(answer, summaryMaxRunes)); err != nil {
-			return hostFailure(out, h, "保存 AI 总结失败", err)
+			return hostFailure(out, h, req, "保存 AI 总结失败", err)
 		}
-		notes, err := listNotes(h, listLimit)
-		if err != nil {
-			return hostFailure(out, h, "读取便签失败", err)
-		}
-		summaries, err := listSummaries(h, summaryLimit)
-		if err != nil {
-			return hostFailure(out, h, "读取 AI 总结失败", err)
-		}
-		return writeResponse(out, 200, page(req, cfg, notes, summaries, "AI 总结已存入应用库。"))
-	default:
-		return writeResponse(out, 404, textPage("页面不存在", "检查一下链接，或回到应用首页。"))
+		return writeJSON(out, 200, map[string]any{"ok": true})
 	}
+
+	// 子资源兜底：正常情况下 `/static/*` 由宿主直出、根本不会进到 wasm；这里再读一次
+	// 包内资源，是为了在"宿主没直出"（路径不在直出规则里、或资源名与路由不一致）时
+	// 仍然可用 —— 而不是给用户一个空白页。
+	if req.Method == "GET" || req.Method == "HEAD" {
+		if asset, ok := staticAsset(req.Path); ok {
+			body, err := readAsset(h, asset)
+			if err == nil {
+				return writeAsset(out, contentTypeOf(asset), body)
+			}
+			_ = h.logf("warn", "包内没有资源 %s（请求路径 %s）: %v", asset, req.Path, err)
+		}
+	}
+
+	if strings.HasPrefix(req.Path, "/api/") {
+		return writeJSON(out, 404, apiFail("NOT_FOUND", "没有这个接口。"))
+	}
+	return writeHTML(out, 404, errorPage("页面不存在", "检查一下链接，或回到应用首页。"))
 }
 
 // ===== 业务逻辑 =====
@@ -228,32 +268,36 @@ func run(stdin io.Reader, stdout io.Writer) error {
 // listLimit 是一次列表请求最多显示多少条便签（配合 db.query 的 LIMIT，避免拉全表）。
 const listLimit = 50
 
-// AI 总结相关的三个上限（都归应用自己管）：
+// AI 总结相关的上限（都归应用自己管）：
 //   - summaryLimit：页面最多回显几条已落库的总结；
-//   - summaryNoteCount / summaryNoteRunes：拼提示词时最多带几条便签、每条截多长。
+//   - noteLimit / noteRunes：拼提示词时最多带几条便签、每条截多长；
+//   - bodyMaxRunes / summaryMaxRunes：入库前的兜底截断。
 //
-// 后两个是**必须**的：前端桥对单条消息的上限是 16 KiB（超了整次调用直接 400 app_ai_invalid），
-// 而便签的条数与长度都不可控 ⇒ 在应用侧先截断，宁可少总结几条，也不要整次调用失败。
+// 前几个常量是**必须**的：客户端 AI loop 对单条消息的上限是 16 KiB（超了整次调用直接
+// 400 app_ai_invalid），而便签的条数与长度都不可控 ⇒ 在应用侧先截断，宁可少总结几条，
+// 也不要整次调用失败。
 const (
-	summaryLimit     = 3
-	summaryNoteCount = 20
-	summaryNoteRunes = 200
-	summaryMaxRunes  = 4000
+	summaryLimit    = 3
+	noteLimit       = 20
+	noteRunes       = 200
+	bodyMaxRunes    = 4000
+	summaryMaxRunes = 4000
 )
 
-// note 是一条便签（表结构由 db.define 声明；平台自动维护行号列，应用看不到）。
+// note 是一条便签（表结构由 db.define 声明；平台自动维护行号列 `_row_id`，应用看不到，
+// 也绝不能在 SQL 里提到它或它的别名 rowid/_rowid_/oid）。
 type note struct {
-	Author    string
-	Body      string
-	CreatedAt string
+	Author    string `json:"author"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"created_at"`
 }
 
-// summary 是一条已落库的 AI 总结：由**页面**的前端桥拿回回答、POST 回 /api/summaries，
-// 再由 wasm 写进应用库（这就是 §21.2 要的"前端调 AI → 结果回传 wasm 落库"）。
+// summary 是一条已落库的 AI 总结：由**页面**调客户端 AI loop 拿回回答、POST 回
+// /api/summaries，再由 wasm 写进应用库。
 type summary struct {
-	Author    string
-	Body      string
-	CreatedAt string
+	Author    string `json:"author"`
+	Body      string `json:"summary"`
+	CreatedAt string `json:"created_at"`
 }
 
 // defineSchema 声明表结构。重复调用幂等（返回 created=false 表示表已存在）。
@@ -284,18 +328,18 @@ func defineSchema(h *host) error {
 
 // listNotes 读最近若干条便签。
 //
-// 注意三点（都是平台硬规则）：一次一条语句；值走参数化 args；**不要提到平台保留的行号列**。
-func listNotes(h *host, limit int) ([]note, error) {
+// 注意三点（都是平台硬规则）：一次一条语句；值走参数化 args；**不要提到平台保留列**。
+func listNotes(h *host, limit int) ([]note, bool, error) {
 	raw, err := h.call(hostDBQuery, sqlParams{
 		SQL:  "SELECT author, body, created_at FROM notes ORDER BY created_at DESC LIMIT ?",
 		Args: []any{limit},
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var res queryResult
 	if err := json.Unmarshal(raw, &res); err != nil {
-		return nil, fmt.Errorf("解析查询结果: %w", err)
+		return nil, false, fmt.Errorf("解析查询结果: %w", err)
 	}
 	notes := make([]note, 0, len(res.Rows))
 	for _, row := range res.Rows {
@@ -304,29 +348,28 @@ func listNotes(h *host, limit int) ([]note, error) {
 		}
 		notes = append(notes, note{Author: cell(row[0]), Body: cell(row[1]), CreatedAt: cell(row[2])})
 	}
-	return notes, nil
+	return notes, res.Truncated, nil
 }
 
 // listSummaries 读最近几条 AI 总结（最新在前；表里的行都由 /api/summaries 写入）。
 //
-// 列名对不上就当作"还没有总结"：本地预览脚本（preview.mjs）的假宿主是内存版、只实现了
-// notes 表 —— 任何 db.query 都会回便签行。线上平台按真实 SQL 返回，这条防御只在预览里生效，
-// 免得把便签渲染成"AI 总结"。
-func listSummaries(h *host, limit int) ([]summary, error) {
+// **按列名取值、不按位置取值**：列名对不上就当作"还没有总结"（本地预览脚本的假宿主是
+// 内存版，缺列时不该把便签当成总结渲染）。
+func listSummaries(h *host, limit int) ([]summary, bool, error) {
 	raw, err := h.call(hostDBQuery, sqlParams{
 		SQL:  "SELECT author, summary, created_at FROM summaries ORDER BY created_at DESC LIMIT ?",
 		Args: []any{limit},
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var res queryResult
 	if err := json.Unmarshal(raw, &res); err != nil {
-		return nil, fmt.Errorf("解析查询结果: %w", err)
+		return nil, false, fmt.Errorf("解析查询结果: %w", err)
 	}
 	ai, si, ci := colIndex(res.Columns, "author"), colIndex(res.Columns, "summary"), colIndex(res.Columns, "created_at")
 	if ai < 0 || si < 0 || ci < 0 {
-		return nil, nil
+		return nil, res.Truncated, nil
 	}
 	summaries := make([]summary, 0, len(res.Rows))
 	for _, row := range res.Rows {
@@ -336,16 +379,12 @@ func listSummaries(h *host, limit int) ([]summary, error) {
 			CreatedAt: cellAt(row, ci),
 		})
 	}
-	return summaries, nil
+	return summaries, res.Truncated, nil
 }
 
-// saveSummary 把前端桥拿回来的回答写进应用库 —— **应用里唯一写 AI 结果的地方**。
+// saveSummary 把客户端 AI loop 拿回来的回答写进应用库 —— **应用里唯一写 AI 结果的地方**。
 //
 // 作者记当前使用者：同一应用内所有人共享数据，所以要留痕"这条总结是谁生成的"。
-//
-// preview.mjs 的边界：那个假宿主是内存版、只实现了 notes 表，所以本地预览
-// `--path /api/summaries` 会拿到 DB_DENIED（线上平台按真实 SQL 执行，不受影响）；
-// 前端桥本身也不可能在预览里跑 —— 预览没有浏览器，wasm 侧本来也没有 AI。
 func saveSummary(h *host, u *user, answer string) error {
 	_, err := h.call(hostDBExec, sqlParams{
 		SQL:  "INSERT INTO summaries (author, summary, created_at) VALUES (?, ?, ?)",
@@ -354,18 +393,21 @@ func saveSummary(h *host, u *user, answer string) error {
 	return err
 }
 
-// summaryPrompt 把最近便签拼成**一条 user 消息**（前端桥只接受 user / assistant 两种角色：
-// 应用不能声明系统提示，桥也不注入记忆与用户历史 —— 想给模型的指令就写在消息正文里）。
+// pagePrompt 把最近便签拼成**一条 user 消息**（客户端 AI loop 只接受 user / assistant
+// 两种角色：应用不能声明系统提示，桥也不注入记忆与用户历史 —— 想给模型的指令就写在消息正文里）。
 //
 // 逐条截断 + 限量见上面的常量：桥对单条消息有 16 KiB 硬上限。
-func summaryPrompt(notes []note) string {
+func pagePrompt(notes []note) string {
+	if len(notes) == 0 {
+		return ""
+	}
 	var sb strings.Builder
 	sb.WriteString("请用不超过五句话总结下面这些团队便签的要点与待办：\n")
 	for i, n := range notes {
-		if i >= summaryNoteCount {
+		if i >= noteLimit {
 			break
 		}
-		fmt.Fprintf(&sb, "- %s（%s）：%s\n", n.Author, n.CreatedAt, clipRunes(n.Body, summaryNoteRunes))
+		fmt.Fprintf(&sb, "- %s（%s）：%s\n", n.Author, n.CreatedAt, clipRunes(n.Body, noteRunes))
 	}
 	return sb.String()
 }
@@ -396,209 +438,127 @@ func allowed(cfg appConfig, u *user) bool {
 	return false
 }
 
-// ===== 页面 =====
+// ===== 路由与静态资源 =====
 
-// aiChatPath 是宿主保留的**应用 AI 桥**路径（§21.2 冻结：**双下划线** `__picoaide`）。
+// aiChatPath 是宿主保留的**客户端 AI loop** 路径（**双下划线** `__picoaide`）。
 //
-// 它由客户端协议 handler **本地**处理、绝不转发服务端；应用不得定义同前缀的自己路由
-// （发布校验直接拒），其余 `__picoaide/*` 一律 404。服务端的 `ai.chat` 宿主能力已删除，
-// 应用里的 AI 只剩这一条路：页面 JS fetch 它 → 结果 POST 回应用 → wasm 落库。
+// 它由客户端协议 handler **本地**处理、绝不转发服务端；整个 `__picoaide/` 是保留命名空间，
+// 随包资源不得占用该前缀（发布期 ASSET_DENIED + reason=reserved_path_prefix），
+// 应用内部写同名路由也没用 —— 请求在宿主层就被截走。
 //
-// ⚠️ **唯一真源**：页面说明与脚本里的路径都从这个常量注入，别处不要再抄一份字面量。
+// ⚠️ **唯一真源**：页面脚本里的路径由装配时从这里注入（见 pageScriptTag），别处不要再抄字面量。
 const aiChatPath = "/__picoaide/ai/chat"
 
-// aiBridgeScriptTemplate 是前端桥的页面脚本（`%s` 处由 aiChatPath 注入）。
-//
-// 这一份就是完整链路：**按钮 → fetch 宿主 AI 桥（流式）→ 结果 POST 回 /api/summaries
-// → wasm 落库 → 刷新读库**。照着改就能变成你自己的 AI 功能：
-//   - 请求体只有 `{messages, stream}`，未知字段一律拒；role 只有 user / assistant；
-//   - 流式响应是 `text/event-stream`：`delta` 事件带增量、`done` 收尾、`error` 报错；
-//   - 失败一律 JSON 信封（`app_ai_denied` / `app_ai_unavailable` / `ai_balance_insufficient`
-//     / `ai_rate_limited` / `ai_cancelled`，外加请求体非法的 `app_ai_invalid`）；
-//   - 原生表单提交会被应用页的安全策略挡下，所以这里全程走 fetch。
-//
-// ⚠️ 路径只有 aiChatPath 一个真源，别在别处再抄一份字面量。
-const aiBridgeScriptTemplate = `<script>
-(function () {
-  var PATH = "%s";
-  var btn = document.getElementById("ai-summarize");
-  var state = document.getElementById("ai-state");
-  var out = document.getElementById("ai-out");
-  var message = document.getElementById("ai-message");
-  // 元素缺失就先退出：在可能为 null 的元素上链式调用会抛错，后面的注册就全不执行了。
-  if (!btn || !state || !out) return;
-
-  // 读流式回答：text/event-stream，event 为 delta / done / error，data 永远是单行 JSON。
-  function readStream(resp, onDelta) {
-    if (!resp.body || !resp.body.getReader) return resp.text();
-    var reader = resp.body.getReader();
-    var decoder = new TextDecoder();
-    var buffer = "";
-    var acc = "";
-    function handle(block) {
-      var event = "message";
-      var data = "";
-      var lines = block.split("\n");
-      for (var i = 0; i < lines.length; i++) {
-        if (lines[i].indexOf("event:") === 0) event = lines[i].slice(6).trim();
-        else if (lines[i].indexOf("data:") === 0) data += lines[i].slice(5).trim();
-      }
-      if (data === "") return;
-      var payload = null;
-      try { payload = JSON.parse(data); } catch (e) { payload = null; }
-      if (event === "delta") {
-        acc += (payload && payload.delta) ? payload.delta : (payload === null ? data : "");
-        onDelta(acc);
-      } else if (event === "done") {
-        if (payload && payload.content) { acc = payload.content; onDelta(acc); }
-      } else if (event === "error") {
-        throw new Error(payload && payload.error ? (payload.error.code + "：" + payload.error.message) : data);
-      }
-    }
-    function pump() {
-      return reader.read().then(function (chunk) {
-        if (chunk.done) return acc;
-        buffer += decoder.decode(chunk.value, { stream: true });
-        var blocks = buffer.split("\n\n");
-        buffer = blocks.pop();
-        for (var i = 0; i < blocks.length; i++) handle(blocks[i]);
-        return pump();
-      });
-    }
-    return pump();
-  }
-
-  btn.addEventListener("click", function () {
-    if (!message) { state.textContent = "还没有便签可以总结。"; return; }
-    var text = "";
-    try { text = JSON.parse(message.textContent); } catch (e) { text = ""; }
-    if (text === "") { state.textContent = "还没有便签可以总结。"; return; }
-    btn.disabled = true;
-    state.textContent = "正在等 AI…（首次使用会先让你授权一次；费用记在你自己账上）";
-    out.hidden = true;
-    out.textContent = "";
-    fetch(PATH, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [{ role: "user", content: text }], stream: true })
-    }).then(function (resp) {
-      if (!resp.ok) {
-        // 失败一律 JSON 信封 {error:{code,message}} —— 把码显示出来，别只说"失败了"。
-        return resp.json().catch(function () { return {}; }).then(function (body) {
-          var err = (body && body.error) ? body.error : {};
-          throw new Error((err.code || ("HTTP " + resp.status)) + (err.message ? "：" + err.message : ""));
-        });
-      }
-      return readStream(resp, function (partial) {
-        out.hidden = false;
-        out.textContent = partial;
-      }).then(function (answer) {
-        answer = (answer || "").trim();
-        if (answer === "") throw new Error("AI 返回了空回答");
-        state.textContent = "已拿到回答，正在回传应用落库…";
-        var data = new URLSearchParams();
-        data.set("summary", answer);
-        // 回传应用自己的路由：wasm 在那里把它写进 summaries 表。
-        return fetch("/api/summaries", { method: "POST", body: data }).then(function (saved) {
-          if (!saved.ok) throw new Error("落库失败：HTTP " + saved.status);
-          state.textContent = "已写入应用库，正在刷新…";
-          location.reload();
-        });
-      });
-    }).catch(function (err) {
-      btn.disabled = false;
-      state.textContent = "AI 调用失败：" + ((err && err.message) ? err.message : String(err));
-    });
-  });
-})();
-</script>`
-
-// page 渲染便签墙（内联 CSS；平台 CSP 允许自身源的 inline 样式，脚本要外链或内联在包里）。
-func page(req *request, cfg appConfig, notes []note, summaries []summary, flash string) string {
-	var b strings.Builder
-	b.WriteString("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">")
-	b.WriteString("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
-	fmt.Fprintf(&b, "<title>%s</title>", html.EscapeString(appTitle(cfg)))
-	b.WriteString("<style>body{font-family:system-ui,sans-serif;max-width:52rem;margin:0 auto;padding:1rem}")
-	b.WriteString("form{display:flex;gap:.5rem;margin:1rem 0}textarea{flex:1;min-height:3rem}")
-	b.WriteString("li{margin:.5rem 0;padding:.5rem;border:1px solid #ddd;border-radius:.5rem}")
-	b.WriteString("pre{background:#f6f8fa;padding:.6rem;border-radius:.5rem;white-space:pre-wrap;word-break:break-word}")
-	b.WriteString(".meta{color:#666;font-size:.85rem}</style></head><body>")
-	fmt.Fprintf(&b, "<h1>%s</h1>", html.EscapeString(appTitle(cfg)))
-	fmt.Fprintf(&b, "<p class=\"meta\">当前身份：%s（%s）</p>",
-		html.EscapeString(usernameOf(req.User)), html.EscapeString(displayNameOf(req.User)))
-	if flash != "" {
-		fmt.Fprintf(&b, "<p><strong>%s</strong></p>", html.EscapeString(flash))
-	}
-	fmt.Fprintf(&b, "<form method=\"post\" action=\"/api/notes\"><textarea name=\"body\" maxlength=\"2000\" "+
-		"placeholder=\"写点什么给同事看…\"></textarea><button type=\"submit\">发布</button></form>")
-	if len(notes) == 0 {
-		b.WriteString("<p>还没有便签。</p>")
-	} else {
-		b.WriteString("<ul>")
-		for _, n := range notes {
-			fmt.Fprintf(&b, "<li><div>%s</div><div class=\"meta\">%s · %s</div></li>",
-				html.EscapeString(n.Body), html.EscapeString(n.Author), html.EscapeString(n.CreatedAt))
-		}
-		b.WriteString("</ul>")
-	}
-
-	// ── AI：前端桥（wasm 侧没有任何 AI 调用）──────────────────────────────
-	b.WriteString("<h2>用 AI 总结（前端桥范例）</h2>")
-	b.WriteString("<p class=\"meta\">wasm 调不到模型：下面这个按钮由页面里的 JS 直接 fetch 客户端保留路径 ")
-	fmt.Fprintf(&b, "<code>POST %s</code>", html.EscapeString(aiChatPath))
-	b.WriteString("（<strong>双下划线</strong> <code>__picoaide</code>，客户端协议 handler 本地处理、不经服务端），" +
-		"把回答 POST 回本应用的 <code>/api/summaries</code>，由 wasm 写进应用库；" +
-		"随后页面刷新，看到的就是库里的数据（同一应用内所有人可见）。</p>")
-	b.WriteString("<button id=\"ai-summarize\" type=\"button\">用 AI 总结最近便签</button>")
-	b.WriteString("<span class=\"meta\" id=\"ai-state\"></span>")
-	b.WriteString("<pre id=\"ai-out\" hidden></pre>")
-	fmt.Fprintf(&b, aiBridgeScriptTemplate, aiChatPath)
-	if len(notes) > 0 {
-		// 要发给模型的那条 user 消息由 **wasm（应用侧）**拼好并截断到桥的上限内，
-		// 前端脚本只负责把它放进 messages。嵌进 <script> 用 json.Marshal：
-		// 它默认把 <、>、& 转义成 \u003c 等，所以不会被提前闭合。
-		if payload, err := json.Marshal(summaryPrompt(notes)); err == nil {
-			fmt.Fprintf(&b, "<script type=\"application/json\" id=\"ai-message\">%s</script>", payload)
-		}
-	}
-	b.WriteString("<h3>已落库的 AI 总结</h3>")
-	if len(summaries) == 0 {
-		b.WriteString("<p class=\"meta\">还没有总结。</p>")
-	} else {
-		b.WriteString("<ul>")
-		for _, s := range summaries {
-			fmt.Fprintf(&b, "<li><div>%s</div><div class=\"meta\">%s · %s</div></li>",
-				html.EscapeString(s.Body), html.EscapeString(s.Author), html.EscapeString(s.CreatedAt))
-		}
-		b.WriteString("</ul>")
-	}
-	b.WriteString("</body></html>")
-	return b.String()
+// isEntry 判定入口文档路径。入口**必须由 wasm 自己答**：名单判定在应用手里，
+// 宿主对入口一律不直出（否则不在名单里的人只会看到一个空壳页面）。
+func isEntry(p string) bool {
+	return p == "/" || p == "/index.html"
 }
+
+// staticAsset 把请求路径映射到包内逻辑路径（只处理 GET/HEAD 的子资源）。
+//
+// 正常情况下 `/static/app.css` 这类请求**到不了这里**：宿主按路径直出（资源存在就直出，
+// 不执行 wasm）。这一层是兜底，也让本地预览与线上行为一致。
+func staticAsset(p string) (string, bool) {
+	clean := path.Clean("/" + strings.TrimPrefix(p, "/"))
+	if clean == "/" || clean == "/index.html" {
+		return indexFile, true
+	}
+	rel := strings.TrimPrefix(clean, "/")
+	if rel == "" || strings.HasPrefix(rel, "api/") || strings.HasPrefix(rel, "__picoaide/") {
+		return "", false
+	}
+	if strings.Contains(rel, "..") {
+		return "", false
+	}
+	return rel, true
+}
+
+// contentTypeOf 按扩展名给 Content-Type（响应头只允许平台枚举里的那几种）。
+func contentTypeOf(logical string) string {
+	switch strings.ToLower(path.Ext(logical)) {
+	case ".html", ".htm":
+		return "text/html; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".js", ".mjs":
+		return "text/javascript; charset=utf-8"
+	case ".json":
+		return "application/json; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".ico":
+		return "image/x-icon"
+	case ".woff2":
+		return "font/woff2"
+	case ".woff":
+		return "font/woff"
+	default:
+		return "text/plain; charset=utf-8"
+	}
+}
+
+// readAsset 读包内资源（assets.read），并按判别字段 encoding 取内容。
+//
+// 资源是文本还是二进制由 `encoding` 说了算（`text` / `base64` / `empty`），
+// 不要用 size == 0 去猜。
+func readAsset(h *host, logical string) (string, error) {
+	raw, err := h.call(hostAssetsRead, assetsReadParams{Path: logical})
+	if err != nil {
+		return "", err
+	}
+	var res struct {
+		ContentType string `json:"content_type"`
+		Size        int    `json:"size"`
+		Encoding    string `json:"encoding"`
+		Text        string `json:"text"`
+		Base64      string `json:"base64"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return "", fmt.Errorf("解析 assets.read 结果: %w", err)
+	}
+	switch res.Encoding {
+	case "text":
+		return res.Text, nil
+	case "empty":
+		return "", nil
+	default:
+		// 本示例只用文本资源；二进制资源应把 base64 解出来再作为响应体写回。
+		return "", fmt.Errorf("资源 %s 不是文本（encoding=%s），示例不支持二进制", logical, res.Encoding)
+	}
+}
+
+// ===== 页面（只有错误页/无权限页由 wasm 渲染；正常页面是 web/index.html）=====
 
 // noAccessPage 是无权限页：**必须显示本人账号**，否则作者无从发现名单拼写错误。
 func noAccessPage(u *user, cfg appConfig) string {
 	var b strings.Builder
 	b.WriteString("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">")
 	b.WriteString("<title>无访问权限</title></head><body>")
-	fmt.Fprintf(&b, "<h1>%s</h1>", html.EscapeString(appTitle(cfg)))
+	fmt.Fprintf(&b, "<h1>%s</h1>", escapeHTML(appTitle(cfg)))
 	b.WriteString("<p>你不在这个应用的使用名单里。</p>")
-	fmt.Fprintf(&b, "<p>你的账号：<strong>%s</strong>（ID %d）</p>",
-		html.EscapeString(usernameOf(u)), idOf(u))
+	fmt.Fprintf(&b, "<p>你的账号：<strong>%s</strong>（ID %d）</p>", escapeHTML(usernameOf(u)), idOf(u))
 	if u != nil && u.DisplayName != "" {
-		fmt.Fprintf(&b, "<p>显示名：%s</p>", html.EscapeString(u.DisplayName))
+		fmt.Fprintf(&b, "<p>显示名：%s</p>", escapeHTML(u.DisplayName))
 	}
 	b.WriteString("<p>把这个账号发给应用负责人，让他加进名单并发布新版本。</p>")
 	b.WriteString("</body></html>")
 	return b.String()
 }
 
-// textPage 是极简纯文本页（错误提示用）。
-func textPage(title, msg string) string {
+// errorPage 是极简错误页（wasm 自己渲染的那几个分支用）。
+func errorPage(title, msg string) string {
 	return "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>" +
-		html.EscapeString(title) + "</title></head><body><h1>" + html.EscapeString(title) +
-		"</h1><p>" + html.EscapeString(msg) + "</p></body></html>"
+		escapeHTML(title) + "</title></head><body><h1>" + escapeHTML(title) +
+		"</h1><p>" + escapeHTML(msg) + "</p></body></html>"
 }
 
 // appTitle 用配置里的用途做标题；缺省给一个中性名字。
@@ -609,20 +569,63 @@ func appTitle(cfg appConfig) string {
 	return "团队共享便签"
 }
 
-// hostFailure 把宿主调用失败翻译成人话，并把原始码打进日志（诊断的第一手材料）。
-func hostFailure(out io.Writer, h *host, what string, err error) error {
+// identity 是给页面看的身份（只给本人信息，没有任何平台凭证）。
+func identity(u *user) map[string]any {
+	return map[string]any{
+		"id":           idOf(u),
+		"username":     usernameOf(u),
+		"display_name": displayNameOf(u),
+		"is_publisher": u != nil && u.IsPublisher,
+	}
+}
+
+// appInfo 是给页面看的应用信息（标题 + AI 保留路径）。
+func appInfo(cfg appConfig) map[string]any {
+	return map[string]any{"title": appTitle(cfg), "ai_chat_path": aiChatPath}
+}
+
+// escapeHTML 只用于 wasm 自己拼的那两个错误页（页面本体是静态资源，不经过这里）。
+func escapeHTML(s string) string {
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;", "'", "&#39;")
+	return r.Replace(s)
+}
+
+// hostFailure 把宿主调用失败翻译成 JSON 错误信封，并把原始码打进日志（诊断的第一手材料）。
+func hostFailure(out io.Writer, h *host, req *request, what string, err error) error {
 	code, msg := "UNKNOWN", err.Error()
 	if rpc, ok := asRPCError(err); ok {
 		code, msg = string(rpc.Code), rpc.Message
 	}
 	_ = h.logf("error", "%s: code=%s message=%s", what, code, msg)
-	return writeResponse(out, statusFor(code), textPage(what, humanMessage(code, msg)))
+	payload := apiFail(codeFor(code), humanMessage(what, code, msg))
+	if strings.HasPrefix(req.Path, "/api/") {
+		return writeJSON(out, statusFor(code), payload)
+	}
+	return writeHTML(out, statusFor(code), errorPage(what, humanMessage(what, code, msg)))
+}
+
+// codeFor 把平台错误码映射成给页面看的短码（页面按它决定文案与是否重试）。
+//
+// 这里没有 AI 相关的码：AI 错误发生在**页面**对客户端 AI loop 的调用上，由脚本按
+// 六个信封码自己处理，不会以宿主错误码的形式回到 wasm。
+func codeFor(code string) string {
+	switch code {
+	case codeDBLimit:
+		return "DB_FULL"
+	case codeAppQueueFull:
+		return "BUSY"
+	case codeAuthRequired:
+		return "AUTH_REQUIRED"
+	case codeDBDenied:
+		return "DB_DENIED"
+	case "RUNTIME_TIMEOUT", "HOST_CALL_OVER_BUDGET", "MODULE_KILLED":
+		return "TIMEOUT"
+	default:
+		return "INTERNAL"
+	}
 }
 
 // statusFor 把失败码映射成给打开应用的客户端看的 HTTP 状态。
-//
-// 这里没有 AI 相关的码：AI 错误发生在**页面**的前端桥调用上，由脚本按 §21.2 的
-// JSON 信封自己处理，不会以宿主错误码的形式回到 wasm。
 func statusFor(code string) int {
 	switch code {
 	case codeDBLimit:
@@ -641,7 +644,7 @@ func statusFor(code string) int {
 }
 
 // humanMessage 给常见码一句可操作的话（不要把平台内部细节暴露给用户）。
-func humanMessage(code, fallback string) string {
+func humanMessage(what, code, fallback string) string {
 	switch code {
 	case codeDBLimit:
 		return "应用数据已达平台上限，请联系应用负责人清理历史数据。"
@@ -650,7 +653,7 @@ func humanMessage(code, fallback string) string {
 	case codeAuthRequired:
 		return "请先登录后再使用本应用。"
 	default:
-		return fallback
+		return what + "：" + fallback
 	}
 }
 
@@ -658,7 +661,7 @@ func humanMessage(code, fallback string) string {
 
 // 宿主方法名（示例用到的封闭清单；完整清单见 references/abi.md）。
 //
-// ⚠️ 这里**没有 ai.chat**：服务端已删除该宿主能力，应用里的 AI 只能走页面里的前端桥
+// ⚠️ 这里**没有 AI**：宿主能力是封闭清单，应用里的 AI 只能走页面里的客户端 AI loop
 // （见 aiChatPath）—— wasm 侧调不到模型。
 const (
 	hostDBDefine   = "db.define"
@@ -754,6 +757,10 @@ type logParams struct {
 	Message string `json:"message"`
 }
 
+type assetsReadParams struct {
+	Path string `json:"path"`
+}
+
 // appConfig 是 picoaide.app.json 的结构（字段集合封闭：多一个字段平台就拒发布；
 // 完整字段规格见 skill 的 references/app-config.md）。
 //
@@ -770,27 +777,15 @@ type appConfig struct {
 
 // loadConfig 读应用自己的配置：发布期它和静态资源一起被抽到宿主磁盘，用 assets.read 取。
 func loadConfig(h *host) (appConfig, error) {
-	raw, err := h.call(hostAssetsRead, assetsReadParams{Path: appConfigFile})
+	text, err := readAsset(h, appConfigFile)
 	if err != nil {
 		return appConfig{}, err
 	}
-	var res struct {
-		ContentType string `json:"content_type"`
-		Size        int    `json:"size"`
-		Text        string `json:"text"`
-	}
-	if err := json.Unmarshal(raw, &res); err != nil {
-		return appConfig{}, fmt.Errorf("解析 assets.read 结果: %w", err)
-	}
 	var cfg appConfig
-	if err := json.Unmarshal([]byte(res.Text), &cfg); err != nil {
+	if err := json.Unmarshal([]byte(text), &cfg); err != nil {
 		return appConfig{}, fmt.Errorf("解析 %s: %w", appConfigFile, err)
 	}
 	return cfg, nil
-}
-
-type assetsReadParams struct {
-	Path string `json:"path"`
 }
 
 // ===== 帧读写 =====
@@ -907,11 +902,35 @@ const (
 	readRetryInterval = time.Millisecond
 )
 
-// writeResponse 写最终响应信封（写好立刻 flush）。
-func writeResponse(out io.Writer, status int, body string) error {
+// writeJSON 写一个 JSON 响应（成功与失败都走这里：页面只认一种形状）。
+func writeJSON(out io.Writer, status int, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return writeHTML(out, 500, errorPage("内部错误", "无法生成响应。"))
+	}
+	return writeEnvelope(out, status, "application/json; charset=utf-8", string(body))
+}
+
+// writeHTML 写一个 HTML 响应（只有错误页与无权限页由 wasm 渲染）。
+func writeHTML(out io.Writer, status int, body string) error {
+	return writeEnvelope(out, status, "text/html; charset=utf-8", body)
+}
+
+// writeAsset 写一个静态资源响应（子资源兜底分支用）。
+func writeAsset(out io.Writer, contentType, body string) error {
+	return writeEnvelope(out, 200, contentType, body)
+}
+
+// apiFail 生成错误信封 `{"error":{"code","message"}}`（页面按 code 分支、把 message 显示给人）。
+func apiFail(code, message string) map[string]any {
+	return map[string]any{"error": map[string]any{"code": code, "message": message}}
+}
+
+// writeEnvelope 写最终响应信封（写好立刻 flush）。
+func writeEnvelope(out io.Writer, status int, contentType, body string) error {
 	payload, err := json.Marshal(response{
 		Status:  status,
-		Headers: map[string]string{"Content-Type": "text/html; charset=utf-8"},
+		Headers: map[string]string{"Content-Type": contentType},
 		Body:    body,
 	})
 	if err != nil {
@@ -1019,18 +1038,11 @@ func cellAt(row []any, i int) string {
 	return cell(row[i])
 }
 
-// clipRunes 按字符截断（避免把半个 UTF-8 字符塞进提示词）。
+// clipRunes 按字符截断（避免把半个 UTF-8 字符塞进提示词或数据库）。
 func clipRunes(s string, max int) string {
 	rs := []rune(s)
 	if len(rs) <= max {
 		return s
 	}
 	return string(rs[:max]) + "…"
-}
-
-// sortedWhitelist 只用于日志/排查：把名单排序后输出，便于人工核对。
-func sortedWhitelist(cfg appConfig) string {
-	cp := append([]string(nil), cfg.Whitelist...)
-	sort.Strings(cp)
-	return strings.Join(cp, ",")
 }

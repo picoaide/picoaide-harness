@@ -243,6 +243,29 @@ const server = createServer((req, res) => {
     }))
     return
   }
+  // 平台内置技能清单（**未安装**）：用来验证「未装 ⇒ 出现在市场分区」这条口径，
+  // 以及长描述在卡片里被截成固定两行（全文进详情弹层）。
+  // 形状来自 packages/host/enterprise/src/client/BuiltinSkillsStrip.tsx 的 BuiltinSkillsPayload。
+  if (url.pathname === '/api/pico/skills/builtin' || url.pathname === '/api/client/v2/skills/builtin') {
+    res.end(JSON.stringify({
+      skills: [
+        {
+          name: 'app-builder',
+          version: '2.0.0',
+          title: '应用构建（WASM 应用）',
+          description: '把业务同事的一句话想法做成应用平台上的 WASM 应用并发布（员工自建小工具）。分轮次访谈需求、多角色评审设计、写成静态前端 + wasm JSON API、一条命令链打包发布。当用户说"做个内部小工具/应用/登记表/页面"、"把这个流程做成应用"、"发布到应用中心"、"能不能在平台上加个功能"时用本技能。',
+          author: '平台内置',
+          category: '应用开发',
+          sha256: 'e2e-fixture-sha256',
+          size: 123456,
+          files: 18,
+        },
+      ],
+      installed: [],
+    }))
+    return
+  }
+
   if (url.pathname.includes('skill')) {
     res.end(JSON.stringify([
       { id: 'skill-1', name: '代码审计', description: 'CodeQL 审计', installed: true, version: '1.0.0' },
@@ -285,6 +308,59 @@ const server = createServer((req, res) => {
     }))
     return
   }
+  // 连接器目录：给**四种状态各一条**，这样截图能证明卡片布局（状态徽章 / 头像块 /
+  // 动作条分档）在真实数据下成立，而不是永远只看空态。字段形状来自
+  // packages/host/connectors/src/client/ConnectorsSection.tsx 的 ConnectorEntry。
+  if (url.pathname === '/api/pico/connectors' || url.pathname === '/api/client/v2/connectors') {
+    res.end(JSON.stringify({ connectors: [
+      {
+        id: 'dingtalk', name: '钉钉', description: '通讯录 / 群消息 / 日程与待办：连一次就能在对话里直接查人与发消息。',
+        icon: null, authMode: 'oauth', examples: ['查一下张伟的部门'], status: 'connected',
+        everConnected: true, canRefresh: true, expiresAt: Date.now() + 3600_000,
+      },
+      {
+        id: 'gitlab', name: 'GitLab', description: '按项目查合并请求、看流水线状态。',
+        icon: null, authMode: 'device-code', examples: ['这个 MR 谁在评审'], status: 'connecting',
+        everConnected: false,
+        request: { verificationUrl: 'https://gitlab.example.com/activate', userCode: 'WDJB-MJHT' },
+      },
+      {
+        id: 'jira', name: 'Jira', description: '按 JQL 查我名下未完成的工单。',
+        icon: null, authMode: 'token', examples: ['我这周还有哪些工单'], status: 'unauthorized',
+        everConnected: false,
+      },
+      {
+        id: 'legacy-crm', name: '旧 CRM', description: '内部老系统的只读接入。',
+        icon: null, authMode: 'stdio', examples: [], status: 'error',
+        error: '未找到命令 crm-cli，请先安装：npm install -g crm-cli', errorCode: 'command-missing',
+        everConnected: false,
+      },
+    ] }))
+    return
+  }
+
+  // 应用中心目录：三条不同可见性/归属的应用（含一条已下架），用来核对卡片网格。
+  // 字段形状来自 packages/client/wasm-apps/src/client/AppCenterPanel.tsx 的 parseCatalog。
+  if (url.pathname === '/api/pico/apps/wasm' || url.pathname === '/api/client/v2/apps/wasm/catalog') {
+    res.end(JSON.stringify({
+      apps: [
+        {
+          app_id: 'shared-notes', title: '共享便签', description: '值班记录与交接备注，同事点开就能写。',
+          responsible: 'admin', access: 'login', enabled: true, current_version: '1.2.0', is_owner: true,
+        },
+        {
+          app_id: 'shift-roster', title: '值班表', description: '排班与换班登记，仅名单内可见。',
+          responsible: '王芳', access: 'whitelist', enabled: true, current_version: '2.0.0', is_owner: false,
+        },
+        {
+          app_id: 'invoice-ocr', title: '发票识别', description: '上传发票图片，自动填报销单。',
+          responsible: '李强', access: 'login', enabled: false, current_version: '0.9.3', is_owner: true,
+        },
+      ],
+    }))
+    return
+  }
+
   if (url.pathname.startsWith('/api/admin') || url.pathname.startsWith('/api/pico')) {
     res.end(JSON.stringify({ ok: true, items: [] }))
     return

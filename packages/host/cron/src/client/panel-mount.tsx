@@ -1,159 +1,67 @@
 /**
- * Main-area mounting for the scheduled-job center.
+ * 「定时任务」中心面板的装载点。
  *
- * The `conversation` slot is single-occupant (ui-conversation) and external
- * plugins cannot declare slots, so the center takes over the center column
- * at the DOM level — the same pattern as the former dsh-task board: a
- * container is appended inside the center column as a trailing child React
- * never manages, and a global stylesheet rule scoped to the html activation
- * attribute hides the conversation content while the center is active. The
- * conversation subtree underneath stays mounted and stateful.
+ * 面板本身的切换语义（中列整页接管、四个面板互斥、侧边栏点行让位、Esc 返回）
+ * 全部由 `@picoaide/dsh-panel-surface` 提供 —— 本文件只剩两件事：把装载器接上，
+ * 以及给兄弟模块一对 `openCronPanel()` / `closeCronPanel()`（触发按钮与兄弟面板
+ * 用它们，而不是自己去读写 html 属性）。
+ *
+ * 历史：这里原来有一整套自己实现的 DOM 接管（注入样式表 + `MutationObserver`
+ * 等中列出现 + `data-dsh-cron-active`）。2026-09-20 收敛到共享装载器，因为
+ * 能力中心/连接器/应用中心当时各自是模态浮层，同一个产品里出现了两种切换语义。
+ *
+ * @module @picoaide/dsh-cron/client/panel-mount
  */
-import { createRoot, type Root } from 'react-dom/client'
 import { createElement } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { IWorkspaces } from '@deepseek-ai/dsh-api-workspace-controller/client'
+import { mountPanelSurface, type PanelSurfaceHandle } from '@picoaide/dsh-panel-surface/client'
 import type { CronController } from './controller.ts'
 import { CronJobTab } from './CronJobTab.tsx'
-import { CRON_ACTIVE_ATTR } from './CronTrigger.tsx'
-import { t } from './locales.ts'
 
-const CONVERSATION_COLUMN_SELECTOR = '[data-pane="conversation"], [class*="centerCol"], [class*="ConversationSurface"], [class*="dshDesktopConversationSurface"]'
-/** Cross-plugin activation event; detail is the activating panel name. */
-const ACTIVATE_EVENT = 'dsh-panel-activate'
-const PANEL_NAME = 'cron'
-const SIDEBAR_ROW_SELECTOR = '[class*="sessionRow"], [class*="projectRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [class*="newSession"]'
+/** 本面板在共享协议里的 id（激活态属性取值 / 容器标记取值）。 */
+export const CRON_PANEL_ID = 'cron'
 
-/** Close the cron center (used by sibling panels and navigation). */
-export function closeCronPanel(): void {
-  document.documentElement.removeAttribute(CRON_ACTIVE_ATTR)
+/** 当前装载的句柄（每个插件实例只有一个，触发按钮通过它开面板）。 */
+let surface: PanelSurfaceHandle | undefined
+
+/** 打开定时任务中心（触发按钮调用）。 */
+export function openCronPanel(): void {
+  surface?.activate()
 }
 
-/** The injected panel container (kept in the DOM, hidden when inactive). */
-export const CRON_VIEW_SELECTOR = '[data-dsh-cron-view]'
-
-/** Global visibility rules (injected once per plugin activation). */
-function visibilityStyle(): HTMLStyleElement {
-  const style = document.createElement('style')
-  style.dataset.dshCronVisibility = ''
-  // Base: the container starts hidden via a stylesheet rule (NOT an inline
-  // style — an inline display:none would out-prioritize every non-important
-  // rule below and the panel could never show). While the center is active,
-  // show the container and hide the conversation subtree. !important on the
-  // hide side beats the shell's inline display:contents.
-  //
-  // 隐藏面必须**逐个列出真实存在的中列容器**（2026-09-12 打包版真机复现）：
-  // `[data-pane='conversation']` 在上游 rc1/rc2 全仓零命中（死选择器），
-  // `[class*='centerCol']` 只匹配上游 ui-layout 的 AppFrame —— 而桌面高级壳把
-  // 那一行禁用了、中列是 AdvancedFrame 的 `.dshDesktopConversationSurface`。
-  // 漏掉它时「定时任务」不再让位：会话区与面板各占一半高度（实测 407/407）。
-  // 新增中列实现时，这里与 CONVERSATION_COLUMN_SELECTOR 必须成对更新。
-  style.textContent = [
-    `[data-dsh-cron-view] {`,
-    `  display: none;`,
-    `  height: 100%;`,
-    `  width: 100%;`,
-    `}`,
-    `html[${CRON_ACTIVE_ATTR}] [data-pane='conversation'] > :not([data-dsh-cron-view]),`,
-    `html[${CRON_ACTIVE_ATTR}] [class*='centerCol'] > :not([data-dsh-cron-view]),`,
-    `html[${CRON_ACTIVE_ATTR}] [class*='dshDesktopConversationSurface'] > :not([data-dsh-cron-view]),`,
-    `html[${CRON_ACTIVE_ATTR}] [class*='ConversationSurface'] > :not([data-dsh-cron-view]) {`,
-    `  display: none !important;`,
-    `}`,
-    `html[${CRON_ACTIVE_ATTR}] [data-dsh-cron-view] {`,
-    `  display: block;`,
-    `}`,
-  ].join('\n')
-  return style
+/** 关闭定时任务中心（兄弟面板与内部入口调用）。 */
+export function closeCronPanel(): void {
+  surface?.close()
 }
 
 /**
- * Mount the cron center React tree into the center column and bind its
- * visibility to the html activation attribute.
- * @returns disposer unmounting the tree and restoring the column.
+ * 装载定时任务中心面板。
+ * @param controller - 任务控制器（列表与动作的唯一数据源）。
+ * @param workspaces - 可选的工作区服务（编辑器的项目选择器）。
+ * @param api - 可选的连接句柄（编辑器的智能体清单）。
+ * @param openSession - 可选的会话跳转（执行详情里的"打开会话"）。
+ * @returns 卸载函数（移除容器、样式与监听）。
  */
-export function mountCronPanel(controller: CronController, workspaces?: IWorkspaces, api?: ConnectionHandle['api'], openSession?: (sessionId: string) => void): () => void {
-  let root: Root | undefined
-  let container: HTMLDivElement | undefined
-
-  const style = visibilityStyle()
-  document.head.appendChild(style)
-
-  const ensure = (): void => {
-    if (container !== undefined) return
-    const column = document.querySelector<HTMLElement>(CONVERSATION_COLUMN_SELECTOR)
-    if (column === null) return
-    container = document.createElement('div')
-    container.dataset.dshCronView = ''
-    container.dataset.dshPlugin = 'cron'
-    // No inline display here: visibility is owned by the injected
-    // stylesheet rule (an inline style would defeat the show rule).
-    column.appendChild(container)
-    root = createRoot(container)
-    root.render(createElement(CronCenterView, { controller, ...(workspaces === undefined ? {} : { workspaces }), ...(api === undefined ? {} : { api }), ...(openSession === undefined ? {} : { openSession }) }))
-  }
-
-  // The frame mounts after boot settlement; watch for the column's arrival.
-  const waitObserver = new MutationObserver(() => { ensure() })
-  waitObserver.observe(document.body, { childList: true, subtree: true })
-
-  const onOtherActivate = (event: Event): void => {
-    if ((event as CustomEvent).detail !== PANEL_NAME) closeCronPanel()
-  }
-  const onClickSidebarRow = (event: MouseEvent): void => {
-    if (!document.documentElement.hasAttribute(CRON_ACTIVE_ATTR)) return
-    const target = event.target as HTMLElement | null
-    if (target === null) return
-    if (target.closest(SIDEBAR_ROW_SELECTOR) !== null) closeCronPanel()
-  }
-  document.addEventListener('click', onClickSidebarRow, true)
-  document.addEventListener(ACTIVATE_EVENT, onOtherActivate)
-
-  ensure()
-
+export function mountCronPanel(
+  controller: CronController,
+  workspaces?: IWorkspaces,
+  api?: ConnectionHandle['api'],
+  openSession?: (sessionId: string) => void,
+): () => void {
+  const mounted = mountPanelSurface({
+    id: CRON_PANEL_ID,
+    render: ({ close }) => createElement(CronJobTab, {
+      controller,
+      page: { onClose: close },
+      ...(workspaces === undefined ? {} : { workspaces }),
+      ...(api === undefined ? {} : { api }),
+      ...(openSession === undefined ? {} : { openSession }),
+    }),
+  })
+  surface = mounted
   return () => {
-    document.removeEventListener('click', onClickSidebarRow, true)
-    document.removeEventListener(ACTIVATE_EVENT, onOtherActivate)
-    waitObserver.disconnect()
-    closeCronPanel()
-    root?.unmount()
-    root = undefined
-    container?.remove()
-    container = undefined
-    style.remove()
+    if (surface === mounted) surface = undefined
+    mounted.dispose()
   }
-}
-
-/** Center view: a back-to-chat header plus the job center body. */
-function CronCenterView({ controller, workspaces, api, openSession }: { controller: CronController; workspaces?: IWorkspaces; api?: ConnectionHandle['api']; openSession?: (sessionId: string) => void }): JSX.Element {
-  const back = (): void => { closeCronPanel() }
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minWidth: 420 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px' }}>
-        <button type="button" onClick={back} style={backButtonStyle} aria-label={t('board.close')}>
-          <span aria-hidden="true">‹</span>
-          <span>{t('board.close')}</span>
-        </button>
-      </div>
-      <div style={{ flex: 1, overflow: 'hidden' }}>
-        <CronJobTab controller={controller} {...(workspaces === undefined ? {} : { workspaces })} {...(api === undefined ? {} : { api })} {...(openSession === undefined ? {} : { openSession })} />
-      </div>
-    </div>
-  )
-}
-
-const backButtonStyle: React.CSSProperties = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: 6,
-  // `--dsw-border` 上游不存在（2026-09-16 审计）⇒ 恒为半透明灰 fallback；
-  // 用真实的描边 token（两主题都会翻转：亮 rgba(0,0,0,.1) / 暗 rgba(255,255,255,.12)）。
-  border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.3))',
-  borderRadius: 8,
-  background: 'transparent',
-  color: 'inherit',
-  fontFamily: 'inherit',
-  fontSize: 13,
-  padding: '4px 10px',
-  cursor: 'pointer',
 }

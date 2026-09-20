@@ -1,0 +1,207 @@
+<!doctype html>
+<!--
+  内部小论坛 · 入口页
+
+  这一页**由 wasm 读出来后返回**（`/` 会走到应用，先判名单再给页面），
+  而 `/static/app.css`、`/static/app.js` 是**宿主按路径直出**的（不经过 wasm）。
+  所以资源引用一律写绝对路径，不要写相对路径。
+
+  安全口径：页面上所有用户内容（标题/正文/回帖/账号）一律走 `textContent` 渲染，
+  全文没有一处 innerHTML 拼用户输入。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>内部小论坛</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<!-- 图标精灵：全部内联 SVG（平台不允许图片文件，也不允许外链） -->
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/>
+  </symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+          stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 5v14M5 12h14"/>
+  </symbol>
+  <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+          stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6 6l12 12M18 6L6 18"/>
+  </symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M14.6 2.6a1.4 1.4 0 0 1 2 0l4.8 4.8a1.4 1.4 0 0 1-.9 2.4l-2.1.3-3.1 3.1.4 3.2a1.4 1.4 0 0 1-2.4 1.2l-3.2-3.2-4.6 4.6a1 1 0 0 1-1.4-1.4l4.6-4.6-3.2-3.2a1.4 1.4 0 0 1 1.2-2.4l3.2.4 3.1-3.1.3-2.1c.1-.4.3-.7.6-1z"/>
+  </symbol>
+  <symbol id="i-reply" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+          stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 11.5a7.5 7.5 0 0 1-7.5 7.5H9l-4.5 3v-4.4A7.5 7.5 0 0 1 9 4h4.5A7.5 7.5 0 0 1 21 11.5z"/>
+  </symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+          stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.9 12.1A1.6 1.6 0 0 0 9 20.6h6a1.6 1.6 0 0 0 1.6-1.5L17.5 7"/>
+  </symbol>
+  <symbol id="i-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1"
+          stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14.5 5 8 12l6.5 7"/>
+  </symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+          stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>
+  </symbol>
+</svg>
+
+<div class="app">
+
+  <!-- ── 顶部工具栏：品牌 + 搜索 + 发新帖 + 身份 ───────────────────────── -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 12.4c0 4-3.6 7.2-8 7.2-1 0-2-.2-2.9-.5L4.6 20.4l1.2-3.5A7 7 0 0 1 4 12.4C4 8.4 7.6 5.2 12 5.2s8 3.2 8 7.2z"/>
+          <path d="M9 11.6h6M9 14.4h3.8"/>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <strong>内部小论坛</strong>
+        <small>版块 · 主题 · 回帖</small>
+      </span>
+    </div>
+
+    <form class="search" id="search-form" role="search">
+      <label class="sr-only" for="search-input">搜索主题</label>
+      <span class="search-ico" aria-hidden="true"><svg class="ico"><use href="#i-search"/></svg></span>
+      <input id="search-input" name="q" type="search" placeholder="搜索标题或正文…"
+             autocomplete="off" spellcheck="false">
+      <button type="submit" class="btn btn-ghost btn-sm" id="search-submit">搜索</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="search-clear" hidden>清除</button>
+    </form>
+
+    <div class="topbar-actions">
+      <button type="button" class="btn btn-primary" id="new-topic-btn">
+        <svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg><span>发新帖</span>
+      </button>
+      <div class="who" id="who">
+        <span class="avatar" id="who-avatar" aria-hidden="true"></span>
+        <span class="who-text">
+          <b id="who-name">…</b>
+          <small id="who-sub"></small>
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── 错误提示条：平台/宿主拒绝时把 code 与 message 原样显示出来 ─────── -->
+  <div class="banner" id="banner" role="alert" hidden>
+    <span class="banner-dot" aria-hidden="true"></span>
+    <code class="banner-code" id="banner-code"></code>
+    <span class="banner-msg" id="banner-msg"></span>
+    <button type="button" class="icon-btn" id="banner-close" aria-label="关闭提示">
+      <svg class="ico" aria-hidden="true"><use href="#i-close"/></svg>
+    </button>
+  </div>
+
+  <!-- ── 三段式桌面布局：版块导航 / 主题列表 / 详情与回帖 ───────────────── -->
+  <main class="layout" id="layout">
+
+    <aside class="pane pane-boards" aria-label="版块导航">
+      <div class="pane-head">
+        <h2 class="pane-title">版块</h2>
+      </div>
+      <nav class="board-nav" id="board-nav"></nav>
+      <div class="stats" id="stats"></div>
+    </aside>
+
+    <section class="pane pane-topics" aria-label="主题列表">
+      <div class="pane-head">
+        <h2 class="pane-title" id="list-title">全部主题</h2>
+        <span class="pill" id="list-count"></span>
+      </div>
+      <ul class="topic-list" id="topic-list" aria-label="主题列表"></ul>
+      <div class="pager" id="pager"></div>
+    </section>
+
+    <section class="pane pane-detail" id="detail" aria-label="主题详情"></section>
+
+  </main>
+</div>
+
+<!-- ── 发新帖模态框 ──────────────────────────────────────────────────── -->
+<div class="modal" id="modal" hidden>
+  <div class="modal-backdrop" data-close="1"></div>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <header class="modal-head">
+      <h2 id="modal-title">发新帖</h2>
+      <button type="button" class="icon-btn" data-close="1" aria-label="关闭">
+        <svg class="ico" aria-hidden="true"><use href="#i-close"/></svg>
+      </button>
+    </header>
+    <form class="form" id="topic-form" novalidate>
+      <div class="field">
+        <label for="f-board">版块</label>
+        <select id="f-board" name="board_id" required></select>
+      </div>
+      <div class="field">
+        <div class="field-row">
+          <label for="f-title">标题</label>
+          <span class="counter" id="c-title">0 / 120</span>
+        </div>
+        <input id="f-title" name="title" type="text" maxlength="120" required
+               placeholder="一句话说清这件事" autocomplete="off">
+      </div>
+      <div class="field">
+        <div class="field-row">
+          <label for="f-body">正文</label>
+          <span class="counter" id="c-body">0 / 4000</span>
+        </div>
+        <textarea id="f-body" name="body" rows="8" maxlength="4000" required
+                  placeholder="背景、你已经试过什么、想让大家回答什么…"></textarea>
+      </div>
+      <p class="form-error" id="form-error" role="alert" hidden></p>
+      <footer class="modal-foot">
+        <button type="button" class="btn btn-ghost" data-close="1">取消</button>
+        <button type="submit" class="btn btn-primary" id="f-submit">发布主题</button>
+      </footer>
+    </form>
+  </div>
+</div>
+
+<!-- ── 静态模板（内容全是固定文案，clone 使用，不涉及用户输入） ────────── -->
+<template id="tpl-empty">
+  <div class="empty">
+    <svg class="empty-art" viewBox="0 0 260 160" aria-hidden="true">
+      <defs>
+        <linearGradient id="eg1" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent-2)"/>
+        </linearGradient>
+        <linearGradient id="eg2" x1="0" y1="1" x2="1" y2="0">
+          <stop offset="0" stop-color="var(--accent-2)" stop-opacity=".55"/>
+          <stop offset="1" stop-color="var(--accent)" stop-opacity=".18"/>
+        </linearGradient>
+      </defs>
+      <ellipse cx="130" cy="139" rx="74" ry="9" fill="var(--accent)" opacity=".10"/>
+      <path d="M46 44a12 12 0 0 1 12-12h124a12 12 0 0 1 12 12v50a12 12 0 0 1-12 12H87l-27 22V94h-2a12 12 0 0 1-12-12z"
+            fill="url(#eg2)" stroke="url(#eg1)" stroke-width="2.4" stroke-linejoin="round"/>
+      <path d="M78 58h104M78 74h74" stroke="url(#eg1)" stroke-width="5" stroke-linecap="round" opacity=".55"/>
+      <circle cx="196" cy="34" r="7" fill="url(#eg1)" opacity=".85"/>
+      <circle cx="62" cy="118" r="4.5" fill="url(#eg1)" opacity=".6"/>
+    </svg>
+    <p class="empty-title"></p>
+    <p class="empty-hint"></p>
+  </div>
+</template>
+
+<template id="tpl-skeleton">
+  <li class="topic-card skeleton-card" aria-hidden="true">
+    <span class="sk sk-title"></span>
+    <span class="sk sk-meta"></span>
+  </li>
+</template>
+
+<script src="/static/app.js" defer></script>
+</body>
+</html>

@@ -60,6 +60,8 @@ export const zh = {
   'preset.tenMin': '每 10 分钟',
   'preset.weeklyMon9': '每周一 09:00',
   'board.close': '返回聊天',
+  'board.retry': '重试',
+  'job.emptyHint': '定时任务会在后台按 Cron 表达式唤起一个会话执行你写好的提示词。',
 } as const
 
 export type CronKey = keyof typeof zh
@@ -121,6 +123,8 @@ export const en: Record<CronKey, string> = {
   'preset.tenMin': 'Every 10 minutes',
   'preset.weeklyMon9': 'Monday 09:00',
   'board.close': 'Back to chat',
+  'board.retry': 'Retry',
+  'job.emptyHint': 'A scheduled job wakes a session in the background and runs the prompt you wrote.',
 }
 
 /** Active UI locale, kept in sync by the client plugin from ctx.locale. */

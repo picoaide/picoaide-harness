@@ -1,6 +1,7 @@
 package appseed_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -117,6 +118,119 @@ func TestSeedCreatesThreeAccessModes(t *testing.T) {
 		if len(rel.Wasm) == 0 {
 			t.Fatalf("%s 的版本必须带制品字节（审核不变量 N-4）", appID)
 		}
+	}
+}
+
+// TestSeedMultiArtifactAndWindow：清单可以给**每条演示指定不同的制品与窗口比例**。
+//
+// 存在的理由（2026-09-20）：演示不再是"同一份 wasm 按权限播种三次"，而是几个功能
+// 不同的应用（能力全集手机比例 / 论坛与留言板电脑比例）。两条判据都必须是**产物级**的：
+//   - 版本行里的制品字节 = 该条清单指向的那一份（不是别的演示的），且两份制品必须
+//     真的不同（否则"指定了 wasm 字段但读的还是同一份"会假绿）；
+//   - 配置 JSON 里的 window 与清单**逐字一致**（含 `"9:19.5"` 这种字符串形态 ——
+//     经 appcfg 的 float 往返会变成 0.4615，文档主用法就从产物里消失了）。
+func TestSeedMultiArtifactAndWindow(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	dir := t.TempDir()
+	phone := fakeWasm()
+	desktop := append(fakeWasm(), []byte("\x00second\x01")...)
+	if err := os.WriteFile(filepath.Join(dir, "phone.wasm"), phone, 0o644); err != nil {
+		t.Fatalf("写 phone.wasm: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "desktop.wasm"), desktop, 0o644); err != nil {
+		t.Fatalf("写 desktop.wasm: %v", err)
+	}
+	manifest := `{"demos":[
+	  {"app_id":"demo-phone","wasm":"phone.wasm","title":"手机演示","description":"d","access":"login",
+	   "purpose":"演示","data_sensitivity":"公开","window":{"ratio":"9:19.5","width":420,"height":910}},
+	  {"app_id":"demo-desktop","wasm":"desktop.wasm","title":"电脑演示","description":"d","access":"login",
+	   "purpose":"演示","data_sensitivity":"内部","window":{"ratio":"16:9"}}
+	]}`
+	if err := os.WriteFile(filepath.Join(dir, appseed.ManifestFileName), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("写清单: %v", err)
+	}
+
+	s := newSeeder(t, db, dir)
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	phoneRel, err := serverstore.LatestApprovedWasmReleaseFull(ctx, db, "demo-phone")
+	if err != nil {
+		t.Fatalf("查 demo-phone 版本: %v", err)
+	}
+	desktopRel, err := serverstore.LatestApprovedWasmReleaseFull(ctx, db, "demo-desktop")
+	if err != nil {
+		t.Fatalf("查 demo-desktop 版本: %v", err)
+	}
+	if bytes.Equal(phoneRel.Wasm, desktopRel.Wasm) {
+		t.Fatal("两条演示的制品必须各自来自清单指定的那一份（现在看起来读的是同一份）")
+	}
+	if !bytes.Equal(phoneRel.Wasm, phone) {
+		t.Fatal("demo-phone 的制品应是 phone.wasm")
+	}
+	if !bytes.Equal(desktopRel.Wasm, desktop) {
+		t.Fatal("demo-desktop 的制品应是 desktop.wasm")
+	}
+
+	phoneApp, err := serverstore.GetWasmApp(ctx, db, "demo-phone")
+	if err != nil {
+		t.Fatalf("查 demo-phone: %v", err)
+	}
+	// window 逐字保留字符串形态（"9:19.5" 而不是 0.4615）。
+	if !strings.Contains(phoneApp.ConfigJSON, `"ratio":"9:19.5"`) {
+		t.Fatalf("配置里应逐字保留 \"9:19.5\"（作者手写形态），得到 %s", phoneApp.ConfigJSON)
+	}
+	cfg, perr := appcfg.Parse([]byte(phoneApp.ConfigJSON))
+	if perr != nil {
+		t.Fatalf("播种出的配置应能过 appcfg.Parse: %v", perr)
+	}
+	if cfg.Window == nil || cfg.Window.Width != 420 || cfg.Window.Height != 910 {
+		t.Fatalf("窗口尺寸应落进配置，得到 %+v", cfg.Window)
+	}
+	// 解析后的 ratio 是 9/19.5 ≈ 0.4615（与"手机竖屏"一致）。
+	if ratio := cfg.Window.Ratio; ratio < 0.46 || ratio > 0.47 {
+		t.Fatalf("9:19.5 应折算成 ≈0.4615，得到 %v", ratio)
+	}
+}
+
+// TestSeedRejectsOutOfRangeWindow：窗口比例越界必须在**播种前**就被 appcfg 拒掉
+// （清单是人手写的，写错一个小数点就让应用开不出窗口 —— 不能等客户端才发现）。
+func TestSeedRejectsOutOfRangeWindow(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "app.wasm"), fakeWasm(), 0o644); err != nil {
+		t.Fatalf("写 app.wasm: %v", err)
+	}
+	manifest := `{"demos":[{"app_id":"demo-bad","title":"越界","description":"d","access":"login",
+	  "purpose":"演示","data_sensitivity":"内部","window":{"ratio":"1:9"}}]}`
+	if err := os.WriteFile(filepath.Join(dir, appseed.ManifestFileName), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("写清单: %v", err)
+	}
+	if _, err := appseed.New(appseed.Options{DB: db, DataRoot: t.TempDir(), Dir: dir, Owner: "admin"}); err != nil {
+		// New 不校验配置也没关系：播种必须失败。
+		t.Logf("New 直接拒了（也可以）：%v", err)
+	}
+	s := newSeeder(t, db, dir)
+	res, err := s.Seed(context.Background())
+	// 播种的失败语义是**逐条**的（一条坏清单不该拖住其它演示）：这一条不落库，
+	// 而是记进 Skipped 里、由启动日志如实打出来。所以判据是"没播出去 + 理由点名比例"，
+	// 不是"Seed 返回 error"（第一版就写错成后者，跑到这里才发现语义不同）。
+	if err != nil {
+		t.Fatalf("单条配置不合规不该让整个 Seed 失败（其它演示还要照播）：%v", err)
+	}
+	if len(res.Seeded) != 0 {
+		t.Fatalf("比例越界的演示不该被播出去，得到 %v", res.Seeded)
+	}
+	if len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0].Reason, "window.ratio") {
+		t.Fatalf("跳过理由必须点名 window.ratio，得到 %+v", res.Skipped)
+	}
+	if _, err := serverstore.GetWasmApp(context.Background(), db, "demo-bad"); err == nil {
+		t.Fatal("比例越界的演示不该在库里留下应用行")
 	}
 }
 

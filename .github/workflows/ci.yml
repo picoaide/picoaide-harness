@@ -154,7 +154,7 @@ jobs:
             packages/host/wasm-apps-host/lib packages/host/host-locale/lib \
             packages/host/host-home/lib \
             packages/client/account-card/lib packages/client/branding/lib \
-            packages/client/wasm-apps/lib \
+            packages/client/wasm-apps/lib packages/client/panel-surface/lib \
       - name: Upload workspace build products (one build, three platforms)
         uses: actions/upload-artifact@v7
         with:

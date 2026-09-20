@@ -52,7 +52,8 @@ RS(0x1e) + 十进制长度 + '\n' + UTF-8 JSON
 | `body` | string | 原始请求体（上限 1 MiB） |
 
 **身份契约**：应用拿不到 Cookie / 令牌 / 平台角色 / 员工名录。帧里的 `user` 是**唯一**
-的身份来源，且由宿主构造，应用无法伪造。**应用也不能用 cookie 存任何状态** ——
+的身份来源、正常路径恒为对象（客户端专属模型下平台没有匿名面），且由宿主构造，
+应用无法伪造。**应用也不能用 cookie 存任何状态** ——
 自定义协议下 `document.cookie` 恒为空、`Set-Cookie` 不落盘，状态请放应用库（`db.*`）。
 
 ## 3. 宿主调用（应用 → 宿主，JSON-RPC 2.0）
@@ -73,9 +74,10 @@ RS(0x1e) + 十进制长度 + '\n' + UTF-8 JSON
 {"jsonrpc":"2.0","id":1,"error":{"code":"DB_DENIED","message":"只允许单条 SELECT/INSERT/UPDATE/DELETE"}}
 ```
 
-**封闭清单**：下面八个方法就是全部能力。没有文件、网络、线程、子进程、环境变量、
-`PRAGMA`、`ATTACH`、DDL、扩展加载；也没有任何员工名录能力。调用不存在的方法 = 报错。
-（**AI 不在清单里**：服务端没有 AI 宿主能力，见 §3.4 的指针。）
+**封闭清单**：下面八个方法（作者面六个原语 + `log` / `assets.read`）就是全部能力。
+没有文件、网络、线程、子进程、环境变量、`PRAGMA`、`ATTACH`、DDL、扩展加载；
+也没有任何员工名录能力、**没有任何 AI 能力**。调用不存在的方法 = 报错（运行期第一层回
+`NOT_FOUND` + `未知的宿主方法: <名字>`，见 §7.1）。
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
@@ -92,25 +94,53 @@ RS(0x1e) + 十进制长度 + '\n' + UTF-8 JSON
 
 - 表名/列名规则：`^[a-z][a-z0-9_]{0,30}$`；列类型只能是 `text` / `int` / `real` /
   `bool` / `datetime`（封闭集合）。
-- 每个应用最多 16 张表，每张最多 16 列；**不能指定主键、外键、索引、触发器**。
+- 每个应用最多 16 张表，每张最多 16 列（**平台的 `_row_id` 不占这个配额**）；
+  **不能指定主键、外键、索引、触发器**。
 - 重复调用幂等（`created:false` 表示表已存在）。**没有自动迁移**：改结构就用新表名或加列，
   自己搬数据。
-- 平台自动维护一个内部行号列，应用**看不到也不能提到它**（提到即拒）。
 
-### 3.2 `db.query` / `db.exec`（只能用 SQL 的四个动词）
+### 3.2 平台保留列 `_row_id`（**名字在下面，请照它写代码**）
+
+平台的 `db.define` 会为每张表自动追加一列：
+
+```
+_row_id INTEGER PRIMARY KEY AUTOINCREMENT
+```
+
+它是平台的主键，**应用看不到、也绝不能提到**。规则说全：
+
+- **禁止出现在 SQL 与列名里的标识符**：`_row_id` 本身，以及它在 SQLite 里的三个内建别名
+  **`rowid` / `_rowid_` / `oid`**。带引号的形态一视同仁 —— `"rowid"`、`[rowid]`、
+  `` `rowid` `` 与裸词走同一个闸门（实测 `SELECT "rowid" AS x FROM items` 与裸词一样能读回
+  平台主键，所以引号不是绕过路径）。
+- **命中后果**：宿主调用失败，`error.code = "DB_DENIED"`、
+  `details.reason = "reserved_column"`、`details.column = "_row_id"`
+  （别名命中时 `message` 会点名你写的是别名）。`db.define` 里用这些名字当列名同样被拒。
+- **`SELECT *` 不会把它带回来**：结果投影层按列名剥掉保留列（`columns` 与每一行都不含它），
+  所以 `SELECT *` 是安全的读法；计量按**剥离后**的行/字节统计。
+- ⚠️ **但投影只发生在 `db.query` 上**：`INSERT INTO b SELECT * FROM a` 走 `db.exec`、
+  **不经过投影**，两边的列数语义要你自己对齐（`_row_id` 仍是表里真实存在的一列）。
+  需要搬数据时把列名逐列写清楚，不要用 `SELECT *` 做插入源。
+- 需要"业务序号"（第几条、编号）就**自己建一列**并用 `db.define` 声明，不要指望行号列。
+
+### 3.3 `db.query` / `db.exec`（只能用 SQL 的四个动词）
 
 - 一次**只能一条语句**；分号后还有内容即拒（`INSERT …; SELECT …` 一定失败）。
-- 语句种类只允许 `SELECT` / `INSERT` / `UPDATE` / `DELETE`
-  （`CREATE` / `DROP` / `ALTER` / `ATTACH` / `VACUUM` / `PRAGMA` 等一律拒）。
+- 语句种类只允许 `SELECT` / `INSERT` / `UPDATE` / `DELETE`。显式拒绝：
+  `CREATE` / `DROP` / `ALTER` / `ATTACH` / `DETACH` / `VACUUM` / `PRAGMA` / `REPLACE` /
+  `TRUNCATE` / `GRANT` / `REINDEX` / `ANALYZE` / `SAVEPOINT` / `RELEASE`；另外
+  **裸词 `WITH`（含 CTE）、`EXPLAIN`、裸 `VALUES`、以及引擎内建名**
+  （`sqlite_*` / `pragma_*` / `readfile` / `writefile` 等）也一律拒。
+- 方法分工：`db.query` 只跑 `SELECT`，`db.exec` 只跑 `INSERT` / `UPDATE` / `DELETE`。
 - **值一律放在 `args` 里**（`?` 占位），不要把字符串拼进 SQL。注意：**平台不检查你是否
   参数化** —— 字面量拼进 SQL 照样通过闸门（`WHERE author='emp1'`、`DELETE … WHERE body='x'`
-  都不会被拒），它只查语句种类/单语句/保留列/DDL·`PRAGMA`·`ATTACH`·`VACUUM`。
+  都不会被拒），它只查上面那几条。
   **SQL 注入没有任何平台侧防线，只有你自己用参数占位挡住**。
-- 单条 SQL 不超过 64 KiB、单值不超过 1 MiB、返回最多 5000 行 / 8 MiB
-  （超出会截断并置 `truncated`，或被拒）。
-- 每条语句最长 5 秒，超时被中断并报 `DB_LIMIT`。
+- 单条 SQL 不超过 64 KiB、单值不超过 1 MiB、绑定参数最多 128 个、返回最多 5000 行 / 8 MiB
+  （**行数或字节超限是截断并置 `truncated:true`，不报错** —— 看到它就该分页）。
+- 每条语句最长 5 秒，超时被中断并报 `DB_LIMIT`；库总量上限 100 MB。
 
-### 3.3 `db.tx`（事务）
+### 3.4 `db.tx`（事务）
 
 语言侧就是 `tx_begin` → 业务 → `tx_commit`（或 `tx_rollback`）。
 
@@ -121,22 +151,30 @@ RS(0x1e) + 十进制长度 + '\n' + UTF-8 JSON
   - `log` / `assets.read` ⇒ `kind = "blocking_capability"`（它们会长时间阻塞或占满执行槽）；
   - `db.define`（DDL）⇒ `kind = "ddl"`：建表请在事务外做；
   - 再开一个 `tx_begin` ⇒ `kind = "nested_tx"`：事务不可嵌套。
-- 事务有硬超时，超时**强制回滚**（事务内所有写入都不生效）。
+- 事务有硬超时（5 秒），超时**强制回滚**（事务内所有写入都不生效），错误码同样是 `DB_DENIED`。
 - 实践：事务里只包必要的写；把查询与写日志都放到 `commit` 之后。
 
-### 3.4 AI：不在宿主调用里（改走前端桥）
+### 3.5 AI：不在宿主调用里（改走客户端 AI loop）
 
-**服务端没有 `ai.chat`**（该宿主能力已按设计总纲 §21 删除；老应用仍导入它会在导入期被
-`IMPORT_NOT_ALLOWED` 直接拒，并给出迁移指引）。应用里的 AI 走**前端桥**：应用前端 JS 发
-`POST /__picoaide/ai/chat`，由客户端协议 handler **本地**处理、**不经服务端**；请求/响应契约、
-授权与错误码见 SKILL.md 的「应用里的 AI：前端桥」与设计总纲 §21。
+宿主能力清单里**没有 AI**（八个方法就是全部）。应用里的 AI 走**客户端 AI loop**：
 
-### 3.5 `log`
+```
+应用前端 JS  —— POST /__picoaide/ai/chat（双下划线保留路径）
+        ▼  宿主协议 handler 本地处理，绝不转发平台
+   ① 首次授权闸门（用户 × 应用）→ ② 隐藏会话 app:<app_id>
+   → ③ 桌面客户端跑一轮 ctx.agentLoop（工具集为空）
+   → ④ assistant 增量以 SSE 回给应用页
+```
 
-单条不超过 4 KiB，每个请求最多 100 条，超出丢弃并在结果里回 `dropped`。
-日志保留 7 天，是排障的第一手材料 —— 关键分支都打一条。
+请求 / 响应契约、六个错误码、授权与撤销入口、计费与归因口径，全部见 SKILL.md 的
+「应用里的 AI：客户端 AI loop」一节（那里是唯一权威口径，本文件不复制一份）。
 
-### 3.6 `assets.read`
+### 3.6 `log`
+
+单条不超过 4 KiB（**超限截断，不拒绝**），每个请求最多 100 条，超出丢弃并在结果里回
+`dropped`；`level` 空串回落 `info`。日志保留 7 天，是排障的第一手材料 —— 关键分支都打一条。
+
+### 3.7 `assets.read`
 
 读**随包提交**的资源（发布时从 wasm 里抽出来放到宿主磁盘）：
 
@@ -150,6 +188,9 @@ RS(0x1e) + 十进制长度 + '\n' + UTF-8 JSON
     不会把坏字节替换成乱码，而是原样给字节）；
   - `"empty"` ⇒ **零字节资源**：`text` 与 `base64` 都不会出现，直接按空处理。
 - 不要用 `size == 0` 去推断该读哪个字段 —— `encoding` 就是为消灭这个歧义存在的。
+- 单个随包资源与自定义段总量**同源上限 4 MiB**（超限 `ASSET_OVERSIZE`）。
+- ⚠️ **随包资源不得占用 `__picoaide/` 前缀**：那是宿主保留命名空间，发布期直接拒
+  （`ASSET_DENIED` + `details.reason = "reserved_path_prefix"`）。
 
 **可见性（往包里放机密之前必读）**：
 
@@ -164,6 +205,20 @@ RS(0x1e) + 十进制长度 + '\n' + UTF-8 JSON
 - **名单放 `picoaide.app.json`**：它是平台保留资源，**不会被直出**；只有应用自己
   用 `assets.read` 读得到它，访问者拿到的是应用自己写的（404/403）页面。
 
+**静态资源的直出规则（决定了你的路由怎么写）**：
+
+| 请求 | 谁来答 |
+| --- | --- |
+| `GET`/`HEAD` 且路径在包里存在对应资源 | 宿主**直出**（不执行 wasm）；响应带 ETag，命中 `If-None-Match` 时 304 且不读盘 |
+| `/api` 与 `/api/*` | **一律交给 wasm**（即使包里恰好有 `api/x.json` 也不直出） |
+| 非 `GET`/`HEAD` 方法 | 一律交给 wasm（否则 `POST /` 会拿到 index.html） |
+| **入口文档**（`/`、`/index.html`、`<目录>/`） | **一律交给 wasm**：名单判定在应用自己手里，入口必须由应用把门（否则不在名单里的人只会看到一个空壳页面） |
+| 其它路径 | 资源存在才直出，否则交给 wasm（由应用决定 404 还是别的） |
+
+⇒ 所以入口页要由 wasm `assets.read("index.html")` 读出来再作为响应体返回，而
+`/static/app.css`、`/static/app.js` 由宿主直出。子资源仍建议在 wasm 里留一条兜底分支
+（宿主没直出时自己读包内资源）。
+
 **怎么把静态资源放进包里**：用官方打包器 `scripts/pack-assets.mjs`（就在技能目录里，
 用法见同目录 `README.md`）—— 它把「磁盘文件 → 包内逻辑路径」追加进**已编译好**的 wasm
 自定义段，规则与平台同源（路径不超过 256 字节、单段不超过 255 字节、自定义段总量不超过
@@ -171,7 +226,7 @@ RS(0x1e) + 十进制长度 + '\n' + UTF-8 JSON
 
 ```bash
 node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
-  web/index.html=index.html web/app.css=static/app.css
+  web/index.html=index.html web/app.css=static/app.css web/app.js=static/app.js
 ```
 
 ⚠️ **保留资源不能这样加**：`picoaide.app.json` 由平台在发布期写入（内容 = 随包提交的
@@ -223,8 +278,8 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 
 - **长活儿拆分**：单请求里做整批计算必然撞 10 秒；分成多次请求，每次一小步。
 - **慢查询改写**：一条语句 5 秒是硬超时，加索引不存在，请用 `WHERE` 收窄 + `LIMIT` 分页。
-- **AI 不在宿主计时里**：AI 由应用前端经前端桥调客户端（见 §3.4），不占 guest 预算，
-  也不该在 wasm 里等它；wasm 只负责渲染页面与把结果落库。
+- **AI 不在宿主计时里**：AI 由应用前端经客户端 AI loop 调客户端（见 §3.5），不占 guest
+  预算，也不该在 wasm 里等它；wasm 只负责回 JSON 与把结果落库。
 
 ## 7. 失败语义（平台绝不把失败报成成功）
 
@@ -243,9 +298,9 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 | `AUTH_REQUIRED` | 401 | 身份未验证却调用需要身份的能力 | 平台一律要求登录（历史 `public` 配置读取侧按 `login` 处理）：确认请求来自登录态，或引导用户先登录 |
 | `MODULE_KILLED` | 504 | 请求被取消 / 实例已关闭 | 同超时处理：拆小、重试前先确认状态 |
 | `DB_LIMIT` | 507 | 库满 100 MB / 返回超行数 / 语句超时 | 清理旧数据或做汇总表；加 `WHERE` + `LIMIT` |
-| `DB_DENIED` | 403 | 语句被拒（DDL / 多语句 / `PRAGMA` / 保留列 / 类型不符） | 建表用 `db.define`，语句只留四个动词，值走 `args` |
+| `DB_DENIED` | 403 | 语句被拒（DDL / 多语句 / `WITH`·`EXPLAIN` / 保留列 `_row_id` 及其别名 / 类型不符），或事务内调了被禁能力 | 建表用 `db.define`，语句只留四个动词，值走 `args`；保留列规则见 §3.2；事务规则见 §3.4 |
 | `APP_QUEUE_FULL` | 429 | 该应用排队已满 | 按 `Retry-After` 退避；合并小请求 |
-| `IMPORT_NOT_ALLOWED` | 422 | 导入面不在白名单（`env.*` / `js.*` 等；**含平台已删除的旧 AI 宿主调用**） | 用官方骨架；不要引入平台外的运行时。**放行清单见 `references/imports.md`**（逐符号 + 签名 + 为什么放行） |
+| `IMPORT_NOT_ALLOWED` | 422 | 导入面不在白名单（`env.*` / `js.*` 等额外的 WASI 模块或符号） | 用官方骨架；不要引入平台外的运行时。**放行清单见 `references/imports.md`**（逐符号 + 签名 + 为什么放行） |
 | `IMPORT_SIGNATURE_MISMATCH` | 422 | 导入符号在名单内但类型不符 | 按骨架的读帧/写帧写法重写；目标必须是 `wasm32-wasip1`（签名对照 `references/imports.md`） |
 | `COMPONENT_MODEL_UNSUPPORTED` | 422 | 产物是组件模型（不是 core module） | 换回 `wasm32-wasip1` 目标 |
 | `SECTION_MALFORMED` | 422 | 自定义段结构非法 | 换官方工具链/骨架重新构建 |
@@ -260,14 +315,14 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 | `WASM_TOO_LARGE` / `BODY_TOO_LARGE` | 413 | wasm 超 32 MiB / 上传体超 48 MiB | 精简资源，或把大资源移出应用 |
 | `RATE_LIMITED` / `COMPILE_BUSY` | 429 | 上传过于频繁 / 编译队列忙 | 等一会儿再试 |
 | `FORBIDDEN` | 403 | 不是这个应用的发布者（或应用已冻结） | 只能改自己发布的应用；需要接管找管理员 |
-| `NOT_FOUND` | 404 | 应用/版本不存在 | 核对 `app_id` |
+| `NOT_FOUND` | 404 | 应用/版本不存在；**或应用调了不存在的宿主方法（见 §7.1）** | 核对 `app_id`；若来自宿主调用，读 `message` |
 | `VALIDATION` | 400 | 请求内容不合法 | 按 `details` 修 |
 | `INTERNAL` | 500 | 平台内部错误 | 重试一次；持续失败提工单并附诊断 |
 
-> **AI 相关错误码不在本表**：wasm 侧没有 AI 能力（服务端原有 AI 宿主调用已按设计总纲 §21
-> 删除）。应用里的 AI 由应用前端经保留路径 `POST /__picoaide/ai/chat` 调客户端本地处理，
-> 它的错误码是另一套（`app_ai_denied` / `app_ai_unavailable` / `ai_balance_insufficient` /
-> `ai_rate_limited` / `ai_cancelled`），处置见 SKILL.md 的「应用里的 AI：前端桥」。
+> **AI 相关错误码不在本表**：wasm 侧没有 AI 能力。应用里的 AI 由应用前端经保留路径
+> `POST /__picoaide/ai/chat` 调客户端（客户端 AI loop）本地处理，它的六个错误码
+> （`app_ai_denied` / `app_ai_unavailable` / `app_ai_invalid` / `ai_balance_insufficient` /
+> `ai_rate_limited` / `ai_cancelled`）是另一套，处置见 SKILL.md 的「应用里的 AI：客户端 AI loop」。
 
 ### 7.1 补充码（上表之外的实现补充）
 
@@ -278,29 +333,36 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 | 码 | HTTP | 触发条件 | 应用该怎么做 |
 | --- | --- | --- | --- |
 | `HOST_METHOD_UNKNOWN` | 400 | 调了不存在的宿主函数（方法名拼错，或平台没有这个能力） | 只调上面 §3 表里的八个方法；`details.method` 回显你给的方法名，`hints` 列出可用能力 |
-| `ASSET_DENIED` | 403 | `assets.read` 的包内路径被拒（绝对路径 / `..` / `\` / 控制字符 / 超长 / 符号链接逃逸），或抽取目录异常 | 用相对、以 `/` 分隔的包内逻辑路径；看 `details.reason`（如 `parent_segment`、`symlink_escape`） |
+| （第一层，JSON-RPC 的 `code` 就是 `NOT_FOUND`） | — | 方法名不在封闭清单里时，**运行时**先回一条 JSON-RPC error：`code = "NOT_FOUND"`、`message = "未知的宿主方法: <方法名>"` | **老应用（仍调 `ai.chat`）就是撞在这一层**：它**不会**在发布期被拒（`ai.chat` 从来不是 WASI 导入，平台也不反编译产物），而是运行期第一次调用才失败。迁移见 SKILL.md 的「应用里的 AI」 |
+| `ASSET_DENIED` | 403 | `assets.read` 的包内路径被拒（绝对路径 / `..` / `\` / 控制字符 / 超长 / 符号链接逃逸），或抽取目录异常；**发布期的随包资源名占用 `__picoaide/` 前缀也回这个码**（`details.reason = "reserved_path_prefix"`） | 用相对、以 `/` 分隔的包内逻辑路径；看 `details.reason`（如 `parent_segment`、`symlink_escape`、`reserved_path_prefix`） |
 | `ASSET_OVERSIZE` | 422 | 单个随包资源超过单文件上限（与自定义段总量同源，见 `references/limits.md`） | 精简资源；HTML/JS 先压缩再内嵌 |
 | `ASSET_EXISTS` | 409 | 发布期抽取要写的资源已存在（抽取只写一次） | 改资源 = 发一个新版本，不要指望覆盖 |
 
 > 失败码是**可操作**的入口：每个码都带 `message`，多数还带 `details` 与 `hints`。
 > 遇到没见过的码，先看 `hints`，再看 `references/diagnostics.md`。
 
-## 8. 渲染 HTML：**可以直接用 `html/template` / `text/template`**
+## 8. 页面怎么产出：静态前端 + JSON API（模板是例外用法）
 
-平台的白名单覆盖 Go 运行时会发出的 WASI 导入面，其中就包含模板渲染需要的那几条，所以
-**`html/template` 与 `text/template` 的 `New` / `Parse` / `Execute`（渲染）都是允许的** ——
-这是本平台最主要的用法：把页面模板编译进 wasm，用 `Execute` 渲染成 HTML 再写成响应体
-（配合 `assets.read` 取 CSS/JS，见 §3.6）。
+**默认形态是前后端分离**：`web/index.html` + `web/app.css` + `web/app.js` 作为随包资源，
+由宿主按路径直出（§3.7 的直出规则），wasm 只回 JSON。入口文档（`/`、`/index.html`）
+由 wasm 自己答（先判名单，再 `assets.read("index.html")` 作为响应体）——
+这样不在名单里的人才会看到应用自己写的 403 错误应答，而不是一个空壳。
 
-标准写法（渲染到 `bytes.Buffer`，再作为响应体写出）：
+`html/template` / `text/template` **仍然被放行**（白名单覆盖 Go 运行时发出的 WASI 导入面，
+其中包含模板渲染需要的几条）：有服务端渲染需求时（例如导出 HTML 报表）可以照常用：
 
 ```go
-var page = template.Must(template.New("page").Parse(`<h1>{{.User}}</h1>`))
+var report = template.Must(template.New("report").Parse(`<h1>{{.User}}</h1>`))
 
 var buf bytes.Buffer
-if err := page.Execute(&buf, map[string]string{"User": user}); err != nil { /* 500 */ }
+if err := report.Execute(&buf, map[string]string{"User": user}); err != nil { /* 500 */ }
 // buf.String() 就是渲染好的 HTML
 ```
+
+但**不要把整页 UI 拼在 wasm 里**：页面与逻辑耦合会让"改一个按钮"变成重新编译 + 重新发布；
+加载/空/错三态、表单校验、二次确认在 JS 里是几行，在 Go 里要手写一堆拼接；而宿主直出的
+静态资源可以走 ETag / 304，wasm 每次现拼则要跑一遍 guest（guest 预算只有 10 秒，
+且每个请求都要新建实例）。
 
 同时可用（同属"应用真的会写的代码"，白名单同样覆盖）：
 

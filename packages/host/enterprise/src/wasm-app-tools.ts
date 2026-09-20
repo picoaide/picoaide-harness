@@ -96,15 +96,27 @@ export type AppConfigField = (typeof APP_CONFIG_FIELDS)[number]
  */
 export const APP_CONFIG_FIRST_RELEASE_REQUIRED = ['purpose', 'data_sensitivity', 'owner'] as const
 
-/** `access` 的三个取值（与帧内 `auth.mode` 同一套，§7.1）。 */
-export const APP_CONFIG_ACCESS_MODES = ['public', 'login', 'whitelist'] as const
+/**
+ * `access` 的**可写**取值（与帧内 `auth.mode` 同一套，§7.1）。
+ *
+ * ⚠️ 2026-09-20 修正：这里原来写的是三值 `['public','login','whitelist']` —— 与真源
+ * 冲突。服务端 `appcfg` 的 `access_values` 只有 **login / whitelist**（缺省 login），
+ * `public` 是**历史只读值**（读取侧等同 login），**写侧一律拒**
+ * （`APP_CONFIG_INVALID` + `details.reason="public_not_allowed"`，文案
+ * 「access="public" 不再可用：应用只在桌面客户端内，且一律要求登录」）。
+ *
+ * 这份常量是**模型可见**的工具参数描述，写错会让模型主动产出一个必然被拒的发布
+ * —— 属于活契约，必须与 `server/internal/wasmapp/appcfg/appcfg.json` 对拍
+ * （守卫见 `tests/wasm-app-tools.spec.ts` 的"access 取值与 appcfg.json 真源一致"）。
+ */
+export const APP_CONFIG_ACCESS_MODES = ['login', 'whitelist'] as const
 
 /** `access` 的缺省值：`login`（写漏不该让应用意外变成匿名可达）。 */
 export const APP_CONFIG_DEFAULT_ACCESS = 'login'
 
 /** 每个配置字段的说明（模型可见；测试断言每个字段都有非空说明）。 */
 export const APP_CONFIG_FIELD_DESCRIPTIONS: Record<AppConfigField, string> = {
-  access: '访问模式，三选一：public = 匿名可用（谁都能打开，不需要登录）；login = 登录后全员可用（**缺省**，拿不准就填它）；whitelist = 仅名单内用户可用（平台只把登录身份交给应用，名单由应用自己比对）。',
+  access: '访问模式，二选一：login = 登录后全员可用（**缺省**，拿不准就填它）；whitelist = 仅名单内用户可用（平台只把登录身份交给应用，名单由应用自己比对）。历史值 public（匿名可用）**已不再可用**，写它会发布失败。',
   whitelist: '准入名单：手填的账号列表（用户名或用户 ID），access=whitelist 时**必须非空**（空名单意味着对所有人不可用，服务端会拒）。平台**不校验**账号是否存在（避免变成账号枚举接口），也不提供员工名录；上限 2000 条。改名单 = 发一个新版本。',
   purpose: '一句话用途声明（首版必填）：这个应用做什么、给谁用。会显示在应用中心。',
   data_sensitivity: '数据敏感度声明（首版必填）：例如「公开」「内部」「敏感」。写给管理员看的一行。',

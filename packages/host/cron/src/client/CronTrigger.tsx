@@ -1,9 +1,12 @@
 /**
- * Sidebar foot action opening the scheduled-job center in the main area
- * (registered into `sidebar.footer.action`, ordered before the connector
- * center). Global: root scope, no session dependency.
+ * 侧边栏底部的「定时任务」入口。
+ *
+ * 全局面板（root 作用域、不依赖会话）：点它把中列换成定时任务中心。面板的
+ * 打开/关闭语义全在共享装载器里（`panel-mount.tsx`），这里**只负责一次点击** ——
+ * 不再自己读写 html 激活属性（那是四个面板互斥关系的真源，只能有一份实现）。
  */
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { openCronPanel } from './panel-mount.tsx'
 import { t } from './locales.ts'
 
 const TRIGGER_WIDE: React.CSSProperties = {
@@ -40,34 +43,16 @@ const TRIGGER_RAIL: React.CSSProperties = {
 
 const LABEL: React.CSSProperties = { overflow: 'hidden', whiteSpace: 'nowrap' }
 
-/** The main-area activation event shared by injected panels (task-board family protocol). */
-const ACTIVATE_EVENT = 'dsh-panel-activate'
-/** The html attribute this panel toggles (sibling panels remove it). */
-export const CRON_ACTIVE_ATTR = 'data-dsh-cron-active'
-
-function isCronOpen(): boolean {
-  return document.documentElement.hasAttribute(CRON_ACTIVE_ATTR)
-}
-
 /**
- * Sidebar foot trigger for the scheduled-job center.
- * @param props - sidebar column state from the foot slot owner.
+ * 侧边栏底部的定时任务触发按钮。
+ * @param props - 侧边栏底部槽位给出的列宽状态。
  */
 export function CronTrigger(props: PropsRuntime<'sidebar.footer.action'>): JSX.Element {
-  const open = (): void => {
-    if (isCronOpen()) return
-    // Single-occupant main area: evict sibling panels (their html attribute
-    // and their controller state) before activating. The removed task-board
-    // attribute is defensive (a stale tab may still carry it).
-    document.documentElement.removeAttribute('data-dsh-task-active')
-    document.documentElement.setAttribute(CRON_ACTIVE_ATTR, '')
-    document.dispatchEvent(new CustomEvent(ACTIVATE_EVENT, { detail: 'cron' }))
-  }
   return (
     <button
       type="button"
       aria-label={t('job.listTitle')}
-      onClick={open}
+      onClick={openCronPanel}
       style={props.wide ? TRIGGER_WIDE : TRIGGER_RAIL}
     >
       <svg width={props.wide ? 16 : 18} height={props.wide ? 16 : 18} viewBox="0 0 16 16" fill="none" aria-hidden="true">

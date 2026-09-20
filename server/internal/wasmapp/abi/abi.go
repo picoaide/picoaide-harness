@@ -186,7 +186,11 @@ type AuthMode string
 const (
 	// AuthModePublic 表示允许匿名（未登录时帧内 user 为 null，身份相关宿主调用 AUTH_REQUIRED）。
 	AuthModePublic AuthMode = "public"
-	// AuthModeLogin 表示要求登录（缺省）：未登录 302 主站换票，登录后**全员可用**。
+	// AuthModeLogin 表示要求登录（缺省）：登录后**全员可用**。
+	//
+	// ⚠️ 2026-09-20 修正过时注释：这里原来写「未登录 302 主站换票」——那是应用子域
+	// 时代的旧模型（已随 W4 整体删除）。客户端专属下平台**没有匿名面**：未登录根本
+	// 打不开应用（深链会先弹登录），帧内 `user` 恒为对象。
 	AuthModeLogin AuthMode = "login"
 	// AuthModeWhitelist 表示要求登录 + 名单准入：**平台不比对名单**（R24）——
 	// 它只把模式告诉应用；名单在应用配置文件的 `whitelist` 里，由应用
