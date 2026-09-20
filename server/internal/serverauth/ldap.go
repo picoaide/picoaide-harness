@@ -443,5 +443,5 @@ func redactCredential(text, secret string) string {
 //
 // 相比换过来之前的本地实现，本包装**更严一档**：旧版逐码点判 `r < 0x20 || r == 0x7f`，
 // 不覆盖 C1 段 U+0080–U+009F（U+0085 NEL 就在其中，部分查看器与 JS 把它当换行）；
-// util 侧按 `unicode.Cc` 判定，覆盖整个 C1 段。方向是"更严"，不是放宽。
+// util 侧按 Unicode 的 Cc 分类判定（= C0 + DEL + C1），覆盖整个 C1 段。方向是"更严"，不是放宽。
 func sanitizeLogLine(text string) string { return util.EscapeControl(text) }

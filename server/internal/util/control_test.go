@@ -66,14 +66,14 @@ func assertNoRawSeparatorOrFormat(t *testing.T, what, out string) {
 	}
 	// Cc 全段（C0 + DEL + C1）：C1 里的 U+0085 是行分隔，其余 C1 也是控制字符。
 	for _, r := range out {
-		if unicode.In(r, unicode.Cc) {
+		if unicode.IsControl(r) {
 			t.Fatalf("%s 残留裸控制字符 %U（Cc 段必须全部转义）：%q", what, r, clip(out))
 		}
 	}
 }
 
 // TestEscapeControlCoversWholeC1Range 逐一钉 C1 段（U+0080–U+009F）的**每一个**码点：
-// 不是只补 U+0085 NEL 单点。C1 落在 `unicode.Cc`（C0 + DEL + C1）里，而它既不是
+// 不是只补 U+0085 NEL 单点。C1 落在 Unicode 的 Cc 分类里（= C0 + DEL + C1），而它既不是
 // `unicode.Cf` 也不是 Zl/Zp —— 只按后两类实现会**整段漏掉**（ldap 的旧本地实现逐码点
 // 判 `r < 0x20 || r == 0x7f`，漏的正是这一段；审计 A-P2-1 点名的 NEL 只是其中一个）。
 func TestEscapeControlCoversWholeC1Range(t *testing.T) {

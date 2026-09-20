@@ -86,7 +86,7 @@ func EscapeControlLimit(s string, maxBytes int) string {
 func isEscapedRune(r rune) bool {
 	// Cc = C0（0x00–0x1f）+ DEL(0x7f) + C1（0x80–0x9f，含 U+0085 NEL ——
 	// 部分查看器与 JS 把它当换行）。
-	if unicode.In(r, unicode.Cc) {
+	if unicode.IsControl(r) {
 		return true
 	}
 	// Cf/Zl/Zp：Zl/Zp 就是 U+2028/U+2029；Cf 是双向覆盖/隔离与零宽格式字符，
@@ -120,7 +120,7 @@ func writeEscaped(b *strings.Builder, s string, maxBytes int) {
 			esc = `\r`
 		case r == '\t':
 			esc = `\t`
-		case unicode.In(r, unicode.Cc):
+		case unicode.IsControl(r):
 			esc = fmt.Sprintf(`\x%02x`, r)
 		case unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp):
 			esc = fmt.Sprintf(`\u%04x`, r)
