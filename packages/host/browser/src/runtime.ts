@@ -868,6 +868,30 @@ export class BrowserRuntime {
         return { action: 'deny' }
       })
 
+      /**
+       * 顶层导航的**第二道闸**：`will-navigate`（页面自己发起的导航：`location.href=…`、
+       * 链接点击、表单提交、meta refresh）与 `will-redirect`（**服务端 302/303**）。
+       *
+       * 为什么必须有它（2026-09-21，与三轮审计 P1-① 同一族）：`browser_navigate`
+       * 那条闸只罩"模型显式调用的导航"，而这两种导航**不经过**它 ——
+       *   · 模型可以先导航到一个**它控制的**外站，再让那个站 302 到
+       *     `http://127.0.0.1:<port>/api/pico/...`（Electron 不触发 `will-navigate` 于重定向）；
+       *   · 或（若 eval 允许）直接 `location.href = …`。
+       * 两者都发生在**持有被镜像 cookie 的标签里**，于是同样绕过所有依赖持有性证明的本机守卫。
+       * 只判 shell origin（与 {@link isShellOriginUrl} 同一份判据），不碰其它回环端口。
+       * @param event - Electron 的导航事件（`preventDefault()` 取消）。
+       * @param target - 目标 URL。
+       */
+      const refuseShellOriginNavigation = (...args: unknown[]): void => {
+        const event = args[0] as { preventDefault?: () => void } | undefined
+        const target = typeof args[1] === 'string' ? args[1] : ''
+        if (!this.isShellOriginUrl(target)) return
+        event?.preventDefault?.()
+        this.record('navigate', id, `navigation denied (shell origin, ${stripSensitiveUrl(target).slice(0, 120)})`, true)
+      }
+      view.webContents.on('will-navigate', refuseShellOriginNavigation)
+      view.webContents.on('will-redirect', refuseShellOriginNavigation)
+
       view.webContents.on('did-start-loading', () => {
         tab.loading = true
         this.pool.updateTabMeta(id, tab.url, tab.title)

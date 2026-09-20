@@ -163,6 +163,16 @@ unmask**、审计账号放行、未登录零出站。
 `127.0.0.1` 上的**其它端口**是合法的开发目标（作者常让 AI 看自己本地的 dev server），
 一并拒掉是"为了安全毁掉功能"。判据里有一条**反向对照**专门钉这个方向。
 
+**第二道闸：`will-navigate` / `will-redirect`**（同批追加，同一族）——
+`browser_navigate` 那条闸只罩"模型显式调用的导航"，而以下两种导航**不经过**它：
+① 模型先导航到一个**它控制的**外站，再让那个站 302 到 `http://127.0.0.1:<port>/api/pico/...`
+（Electron 对重定向**不触发** `will-navigate`）；② 页面自己发起的导航
+（`location.href=…`、链接点击、表单提交、meta refresh）。两者都发生在**持有被镜像 cookie
+的标签里**，因此同样绕过所有依赖持有性证明的本机守卫。现在建 tab 时装上
+`will-navigate` + `will-redirect` 两个监听（`runtime.ts` 的 `refuseShellOriginNavigation`），
+命中 shell origin 即 `preventDefault()` 并记一条失败的 op。判据见同一份 spec 的第 4 条
+（直接触发两个事件，断言 shell origin 被取消、外站不被取消）：去掉这两行监听 ⇒ 该条必红。
+
 **为什么宿主自己的两个页面不受影响**：`/browser-shell` 与 `/browser-overlay` 由
 `ensureWindow` / `mountOverlay` 用 `webContents.loadURL` 直接加载（`runtime.ts:1104/1054` 等），
 **不经过**这三条模型入口。
