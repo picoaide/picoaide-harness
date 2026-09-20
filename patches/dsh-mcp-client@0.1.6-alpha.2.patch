@@ -1,8 +1,7 @@
 diff --git a/lib/index.js b/lib/index.js
-index b2f16b4a2b5eaca1ab66b1c4750454daf3e92a90..15c84630764948073c1552ad8691f68142573a13 100644
 --- a/lib/index.js
 +++ b/lib/index.js
-@@ -45,7 +45,13 @@ function createTransport(config) {
+@@ -43,7 +43,13 @@
  			env: buildChildEnv(config.env),
  			cwd: config.cwd
  		});
@@ -17,7 +16,7 @@ index b2f16b4a2b5eaca1ab66b1c4750454daf3e92a90..15c84630764948073c1552ad8691f681
  	}
  }
  //#endregion
-@@ -755,6 +761,9 @@ const Config = z.union([z.object({
+@@ -793,6 +799,9 @@
  	serverName: z.string().required().pattern(SERVER_NAME_PATTERN),
  	url: z.string().required(),
  	headers: z.dict(String).default({}),
@@ -26,17 +25,16 @@ index b2f16b4a2b5eaca1ab66b1c4750454daf3e92a90..15c84630764948073c1552ad8691f681
 +	authProvider: z.any(),
  	toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
  	failOnStartupError: z.boolean().default(false),
- 	reconnect: Reconnect
+ 	maxInstructionBytes: z.number().step(1).min(1).default(DEFAULT_MAX_INSTRUCTION_BYTES),
 diff --git a/lib/types/index.d.ts b/lib/types/index.d.ts
-index f8d553acbab2e8447ac344e960876bc88b2f662f..6851d42848b00c18d34ea58b9d10463437d2587f 100644
 --- a/lib/types/index.d.ts
 +++ b/lib/types/index.d.ts
 @@ -1,3 +1,4 @@
-+import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
++import type { OAuthClientProvider } from '@modelcontextprotocol/client';
  /**
   * MCP client bridge plugin: connects to an external MCP server and registers
   * its tools on `ctx.tools` under server-qualified public names
-@@ -60,6 +61,12 @@ export interface StreamableHttpConfig {
+@@ -63,6 +64,12 @@
      url: string;
      /** Additional headers attached to MCP requests. */
      headers: Record<string, string>;
@@ -46,6 +44,6 @@ index f8d553acbab2e8447ac344e960876bc88b2f662f..6851d42848b00c18d34ea58b9d104634
 +     * rotation and retry the request.
 +     */
 +    authProvider?: OAuthClientProvider;
-     /** Per-tool-call timeout in milliseconds. */
+     /** Timeout per tool call or resource request in milliseconds. */
      toolCallTimeoutMs: number;
      /** Fail plugin activation when the initial connection or tool synchronization fails. */
