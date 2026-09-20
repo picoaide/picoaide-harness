@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>团队共享便签</title>
+  <!--
+    静态资源用**绝对路径**引用：它们作为随包资源由宿主按路径直出
+    （包内逻辑路径分别是 static/app.css 与 static/app.js）。
+    页面本身由 wasm 在入口（/）读了 index.html 再返回 —— 因为名单判定在应用自己手里。
+  -->
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="head">
+    <h1 id="title">团队共享便签</h1>
+    <p class="meta">当前身份：<strong id="whoami">读取中…</strong></p>
+  </header>
+
+  <main>
+    <!-- 新增：表单提交走 JS（fetch JSON），不要用原生表单 POST —— 页面只认 JSON 接口 -->
+    <form id="note-form" class="row" autocomplete="off">
+      <textarea id="note-body" maxlength="2000" placeholder="写点什么给同事看…" required></textarea>
+      <button id="note-submit" type="submit">发布</button>
+    </form>
+
+    <section>
+      <h2>便签</h2>
+      <!-- 三态：加载中 / 空 / 失败，各占一个元素，由 app.js 切换 -->
+      <p id="notes-loading" class="state">正在读取…</p>
+      <p id="notes-empty" class="state" hidden>还没有便签，先在上面写一条。</p>
+      <p id="notes-error" class="state error" hidden></p>
+      <ul id="notes" class="list" hidden></ul>
+      <p id="notes-truncated" class="state warn" hidden>记录较多，这里只显示最近一部分。</p>
+    </section>
+
+    <section>
+      <h2>用 AI 总结（客户端 AI loop 范例）</h2>
+      <!--
+        wasm 调不到模型：这个按钮由页面里的 JS 直接 fetch 客户端保留路径
+        `/__picoaide/ai/chat`（双下划线，客户端协议 handler 本地处理、不经服务端），
+        拿到回答后 POST 回本应用的 /api/summaries，由 wasm 写进应用库。
+      -->
+      <p class="meta">
+        回答来自客户端 AI loop（首次使用会先让你授权一次；费用记在你自己账上）。
+        路径由后端 <code>/api/whoami</code> 下发（<code>ai_chat_path</code>），页面不写死。
+      </p>
+      <div class="row">
+        <button id="ai-summarize" type="button">用 AI 总结最近便签</button>
+        <span id="ai-state" class="meta"></span>
+      </div>
+      <pre id="ai-out" class="out" hidden></pre>
+    </section>
+
+    <section>
+      <h2>已落库的 AI 总结</h2>
+      <p id="summaries-empty" class="state" hidden>还没有总结。</p>
+      <ul id="summaries" class="list"></ul>
+    </section>
+  </main>
+
+  <footer class="meta">
+    同一应用内所有人共享这份数据；状态只进应用库（自定义协议下 cookie 不可用）。
+  </footer>
+</body>
+</html>

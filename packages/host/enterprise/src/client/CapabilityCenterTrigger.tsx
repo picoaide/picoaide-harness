@@ -1,6 +1,5 @@
-import { useEffect, useState } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { CapabilityCenterPanel } from './CapabilityCenterPanel.tsx'
+import { openCapabilityCenter } from './capability-surface.tsx'
 import { t } from './locales.ts'
 
 const TRIGGER_WIDE: React.CSSProperties = {
@@ -37,51 +36,29 @@ const TRIGGER_RAIL: React.CSSProperties = {
 
 const LABEL: React.CSSProperties = { overflow: 'hidden', whiteSpace: 'nowrap' }
 
-/** Cross-plugin panel activation event (shared with cron/task/connectors/browser). */
-const ACTIVATE_EVENT = 'dsh-panel-activate'
-const PANEL_NAME = 'capability-center'
-
 /**
- * Sidebar foot action opening the Capability Center modal (技能/智能体统一入口),
- * stacked above the Settings trigger. Replaces the old skill-center and
- * agent-share triggers (decision 2026-08-25). Opening this panel evicts
- * sibling panels via the shared activation event; a sibling activation
- * closes this panel.
- * @param props - sidebar column state from the foot slot owner.
+ * 侧边栏底部的「能力中心」入口（技能 / 智能体的统一入口，取代旧的技能中心与
+ * 智能体分享入口，决策 2026-08-25）。
+ *
+ * 面板本身由 `capability-surface.tsx` 在**插件启动时**挂一次（容器常驻中列），
+ * 这里只负责一次点击 —— 不再自己持有 `open` 状态：面板的生命周期绑在侧边栏槽位树
+ * 上时，窄轨/宽栏切换会让打开着的面板消失。
+ * @param props - 侧边栏底部槽位给出的列宽状态。
  */
 export function CapabilityCenterTrigger(props: PropsRuntime<'sidebar.footer.action'>) {
-  const [open, setOpen] = useState(false)
-
-  useEffect(() => {
-    const onOtherActivate = (event: Event): void => {
-      if ((event as CustomEvent).detail !== PANEL_NAME) setOpen(false)
-    }
-    document.addEventListener(ACTIVATE_EVENT, onOtherActivate)
-    return () => { document.removeEventListener(ACTIVATE_EVENT, onOtherActivate) }
-  }, [])
-
-  const openPanel = (): void => {
-    if (open) return
-    setOpen(true)
-    document.dispatchEvent(new CustomEvent(ACTIVATE_EVENT, { detail: PANEL_NAME }))
-  }
-
   return (
-    <>
-      <button
-        type="button"
-        className="pico-skill-trigger"
-        style={props.wide ? TRIGGER_WIDE : TRIGGER_RAIL}
-        aria-expanded={open}
-        onClick={openPanel}
-      >
-        <svg width={props.wide ? 16 : 18} height={props.wide ? 16 : 18} viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <rect x="2" y="2" width="12" height="12" rx="2.5" stroke="currentColor" strokeWidth="1.3"/>
-          <path d="M5 5h6M5 8h6M5 11h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-        </svg>
-        {props.wide && <span style={LABEL}>{t('capability.title')}</span>}
-      </button>
-      {open && <CapabilityCenterPanel onClose={() => { setOpen(false) }} />}
-    </>
+    <button
+      type="button"
+      className="pico-skill-trigger"
+      style={props.wide ? TRIGGER_WIDE : TRIGGER_RAIL}
+      aria-label={t('capability.title')}
+      onClick={openCapabilityCenter}
+    >
+      <svg width={props.wide ? 16 : 18} height={props.wide ? 16 : 18} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <rect x="2" y="2" width="12" height="12" rx="2.5" stroke="currentColor" strokeWidth="1.3"/>
+        <path d="M5 5h6M5 8h6M5 11h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+      </svg>
+      {props.wide && <span style={LABEL}>{t('capability.title')}</span>}
+    </button>
   )
 }

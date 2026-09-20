@@ -13,7 +13,7 @@ import {
   type CapabilityItem,
   type SectionCard,
 } from '../src/client/CapabilityCenterPanel.tsx'
-import { planBuiltinCards } from '../src/client/BuiltinSkillsStrip.tsx'
+import { builtinCardsForTab, planBuiltinCards } from '../src/client/BuiltinSkillsStrip.tsx'
 import { setActiveLocale } from '../src/client/locales.ts'
 
 afterEach(() => { setActiveLocale('zh') })
@@ -254,6 +254,34 @@ describe('R2-SK-6 内置卡与本机卡去重（数量断言）', () => {
     ...(originChannel === undefined ? {} : { originChannel }),
   })
   /** 与面板真实输入同形：清单 1.1.0 + 本机 1.0.0 ⇒ 出「更新到 v1.1.0」卡。 */
+describe('内置技能的分区归属（2026-09-20 用户口径）', () => {
+  const card = (name: string, action: 'install' | 'update') => ({
+    skill: { name, version: '2.0.0' },
+    action,
+    endpoint: `/api/pico/skills/builtin/${name}/install`,
+    installed: action === 'update',
+    state: 'action' as const,
+    failure: null,
+  })
+
+  it('未装的进「市场」，已装待更新的进「我的」', () => {
+    const cards = [card('app-builder', 'install'), card('other-skill', 'update')]
+    expect(builtinCardsForTab(cards, 'market').map(c => c.skill.name)).toEqual(['app-builder'])
+    expect(builtinCardsForTab(cards, 'mine').map(c => c.skill.name)).toEqual(['other-skill'])
+  })
+
+  it('未装的内置技能**不得**出现在「我的」（用户报的现象：默认没装却在「我的」里）', () => {
+    const cards = [card('app-builder', 'install')]
+    expect(builtinCardsForTab(cards, 'mine')).toEqual([])
+  })
+
+  it('两个分区合起来恰好是全部卡片（不重不漏 —— 分流写成两个独立判断就会漏卡）', () => {
+    const cards = [card('a', 'install'), card('b', 'update'), card('c', 'install')]
+    const union = [...builtinCardsForTab(cards, 'mine'), ...builtinCardsForTab(cards, 'market')]
+    expect(union.map(c => c.skill.name).sort()).toEqual(['a', 'b', 'c'])
+  })
+})
+
   const updateCards = () => planBuiltinCards({
     rows: [{ name: 'app-builder', version: '1.1.0' }],
     installedNames: new Set(['app-builder']),

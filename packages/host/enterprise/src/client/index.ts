@@ -28,6 +28,7 @@ import { installFavicon } from './favicon.ts'
 import { channelTitle } from '../channel-content.ts'
 import { startChannelStore, readChannelSync, subscribeChannel } from './channel-store.ts'
 import { CapabilityCenterTrigger } from './CapabilityCenterTrigger.tsx'
+import { mountCapabilityCenter } from './capability-surface.tsx'
 import { en, setActiveLocale, t, type EnterpriseKey, zh } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -231,6 +232,10 @@ export function apply(ctx: ClientContext): void {
     }, CapabilityCenterTrigger)),
     'enterprise: capability center foot action',
   )
+
+  // 中列整页（插件启动时挂一次；容器常驻会话列、在 React 树之外）。切换语义与
+  // 连接器/应用中心/定时任务共用 `@picoaide/dsh-panel-surface`。
+  ctx.effect(() => mountCapabilityCenter(), 'enterprise: capability center surface')
 
   ctx.effect(
     () => ctx.slots.inject('settings.section', () => ctx.slots.register({

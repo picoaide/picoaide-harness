@@ -51,6 +51,7 @@ packages/host/enterprise/lib/
 packages/client/account-card/lib/
 packages/client/branding/lib/
 packages/client/wasm-apps/lib/
+packages/client/panel-surface/lib/
 packages/host/cron/lib/
 packages/host/connectors/lib/
 packages/host/browser/lib/

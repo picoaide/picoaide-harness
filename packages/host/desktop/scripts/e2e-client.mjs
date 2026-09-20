@@ -466,51 +466,95 @@ async function main() {
   await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] }).catch(() => {})
   await waitFor(cdp, `!document.body.hasAttribute('data-ds-dark-theme')`, 8000)
 
-  // 6. Feature panels (open, assert content, screenshot, close).
-  const panelChecks = [
-    { label: '连接器', marker: '连接', shot: '03-connectors' },
-    { label: '能力中心', marker: '能力中心', shot: '04-capability' },
-    { label: '设置', marker: '关闭', shot: '05-settings' },
+  // 6. 四个「整页」功能面板：**同一套切换语义**（中列接管 + 互斥 + 返回聊天）。
+  // 2026-09-20 之前只有定时任务是这样，另外三个是 `position:fixed` 模态浮层 ——
+  // 这里逐面板断言"占满中列、会话区让位、唯一激活态属性指向它"，而不是只查元素存在
+  // （存在性断言在 2026-09-12 出过一次假绿：面板挂上了但会话区不让位，画面 407/407）。
+  const pagePanels = [
+    { label: '连接器', id: 'connectors', marker: '连接', shot: '03-connectors' },
+    { label: '能力中心', id: 'capability', marker: '能力中心', shot: '04-capability' },
+    { label: '应用中心', id: 'apps', marker: '应用中心', shot: '04b-app-center' },
   ]
-  for (const item of panelChecks) {
+  for (const item of pagePanels) {
     const open = await clickLabel(cdp, item.label, 3000)
-    // The skill center mounts a modal; re-read the current target since panel
-    // switches can replace the document. Assert either a matching dialog or a
-    // known surface text.
-    const ok = open === 'CLICKED' && await (async () => {
-      try {
-        const dialogs = await evalSafe(cdp, `[...document.querySelectorAll('[role=dialog]')].map(d => d.textContent ?? '')`)
-        if (dialogs.some(d => d?.includes(item.marker))) return true
-      } catch { /* fall through */ }
-      const text = await bodyText(cdp)
-      return text.includes(item.marker)
-    })()
-    reportStep(`${item.label}面板可打开且含预期内容`, ok, `marker=${item.marker}`)
+    const tookOver = open === 'CLICKED' && await waitFor(cdp, `(() => {
+      const active = document.documentElement.getAttribute('data-dsh-panel-active')
+      if (active !== ${JSON.stringify(item.id)}) return false
+      const view = document.querySelector('[data-dsh-panel-surface=' + JSON.stringify(${JSON.stringify(item.id)}) + ']')
+      const surface = document.querySelector('.dshDesktopConversationSurface')
+      if (view === null || surface === null) return false
+      const v = view.getBoundingClientRect(); const s = surface.getBoundingClientRect()
+      if (v.height <= 0 || getComputedStyle(view).display === 'none') return false
+      if (v.height < s.height * 0.9) return false
+      const others = [...surface.children].filter(el => !el.hasAttribute('data-dsh-panel-surface'))
+      return others.every(el => getComputedStyle(el).display === 'none' || el.getBoundingClientRect().height === 0)
+    })()`, 15000, 300)
+    reportStep(`${item.label}面板占满中列（会话区已让位）`, tookOver, `panel=${item.id}`)
+    const text = await bodyText(cdp)
+    reportStep(`${item.label}面板含预期内容`, text.includes(item.marker), `marker=${item.marker}`)
     await screenshot(cdp, item.shot)
-    await clickLabel(cdp, '关闭', 1000)
+
+    // 能力中心额外两条：①未安装的平台内置技能必须出现在「市场」而不是「我的」
+    // （2026-09-20 用户报的现象）；②卡片描述固定两行，全文进详情弹层。
+    if (item.id === 'capability') {
+      const mineText = await bodyText(cdp)
+      reportStep('未安装的内置技能不出现在「我的」', !mineText.includes('应用构建（WASM 应用）'), 'tab=mine')
+      await clickLabel(cdp, '市场', 3000)
+      await wait(700)
+      const marketText = await bodyText(cdp)
+      reportStep('未安装的内置技能出现在「市场」', marketText.includes('应用构建（WASM 应用）'), 'tab=market')
+      // 描述被截断：卡片的渲染高度必须远小于全文高度（两行 vs 五行）。
+      const clamp = await evalSafe(cdp, `(() => {
+        const nodes = [...document.querySelectorAll('[data-role="card-description"]')]
+        const node = nodes.find(el => (el.textContent || '').includes('分轮次访谈需求'))
+        if (node === undefined) return null
+        const line = parseFloat(getComputedStyle(node).lineHeight) || 18
+        return { lines: Math.round(node.getBoundingClientRect().height / line), scrollH: node.scrollHeight }
+      })()`)
+      reportStep('长描述在卡片里被截成两行', clamp !== null && clamp.lines <= 2, `lines=${clamp?.lines}`)
+      await screenshot(cdp, '04c-capability-market')
+      await clickLabel(cdp, '详情', 3000)
+      await wait(700)
+      const dialog = await waitFor(cdp, `(() => {
+        const box = document.querySelector('[data-role="capability-detail"]')
+        if (box === null) return false
+        const text = box.textContent || ''
+        return text.includes('分轮次访谈需求') && text.includes('应用构建')
+      })()`, 5000, 200)
+      reportStep('详情弹层显示描述全文', dialog === true, 'detail-dialog')
+      await screenshot(cdp, '04d-capability-detail')
+      await evalSafe(cdp, `(() => { const b=[...document.querySelectorAll('[data-role="capability-detail"] button')].find(x=>(x.textContent||'').includes('✕')); if (b) b.click(); return !!b })()`).catch(() => {})
+      await wait(500)
+    }
+    // 返回聊天：整页面板的唯一出口，同时摘掉激活态属性。
+    await evalSafe(cdp, `(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
+    await wait(900)
   }
 
-  // 7. Cron panel: 断言**可见性与让位**，不是"元素存在"。
-  // 2026-09-12（P1-1，打包版真机复现）：`[data-dsh-cron-view]` 容器在未激活时也在
-  // DOM 里（样式表 `display:none`），所以旧的"存在即通过"是假绿 —— 当时面板确实
-  // 挂上了，但隐藏规则的选择器（`[data-pane='conversation']` / `[class*='centerCol']`）
-  // 在我们自持 frame 下全不匹配，会话区不让位，画面是 407/407 分屏。
-  // 现在同时断言：面板可见且**占满中列**、会话区子节点全部被抑制。
+  // 6b. 设置仍然是上游的模态（我们没有改它）—— 只断言能打开与关闭。
+  {
+    const open = await clickLabel(cdp, '设置', 3000)
+    const text = await bodyText(cdp)
+    reportStep('设置面板可打开', open === 'CLICKED' && text.includes('设置'), 'settings')
+    await screenshot(cdp, '05-settings')
+    await clickLabel(cdp, '关闭', 1200)
+  }
+
+  // 7. 定时任务：与上面三个共用同一套面板协议（这条保留为"协议本身"的回归）。
   await clickLabel(cdp, '定时任务', 3500)
   const cronLayout = await waitFor(cdp, `(() => {
-    const view = document.querySelector('[data-dsh-cron-view]')
+    if (document.documentElement.getAttribute('data-dsh-panel-active') !== 'cron') return false
+    const view = document.querySelector('[data-dsh-panel-surface="cron"]')
     const surface = document.querySelector('.dshDesktopConversationSurface')
     if (view === null || surface === null) return false
-    const v = view.getBoundingClientRect()
-    const s = surface.getBoundingClientRect()
+    const v = view.getBoundingClientRect(); const s = surface.getBoundingClientRect()
     if (v.height <= 0 || getComputedStyle(view).display === 'none') return false
-    // 面板必须吃掉中列的绝大部分高度（>90%），而不是与会话区平分。
     if (v.height < s.height * 0.9) return false
-    const others = [...surface.children].filter(el => !el.hasAttribute('data-dsh-cron-view'))
+    const others = [...surface.children].filter(el => !el.hasAttribute('data-dsh-panel-surface'))
     return others.every(el => getComputedStyle(el).display === 'none' || el.getBoundingClientRect().height === 0)
   })()`, 15000, 300)
   const cronDetail = await evalSafe(cdp, `(() => {
-    const view = document.querySelector('[data-dsh-cron-view]')
+    const view = document.querySelector('[data-dsh-panel-surface="cron"]')
     const surface = document.querySelector('.dshDesktopConversationSurface')
     const v = view?.getBoundingClientRect(); const s = surface?.getBoundingClientRect()
     return { view: v ? Math.round(v.height) : null, surface: s ? Math.round(s.height) : null }

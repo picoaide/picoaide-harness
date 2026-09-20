@@ -59,16 +59,19 @@ interface WorkspacePackage {
 }
 
 const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
-  // 0) 两个**零依赖叶子包**最先：browser / connectors / desktop 的 tsc 都读它们的
-  //    lib/types（desktop 的 `src/{host-locale,desktop-home}.ts` 各是一行 re-export）。
+  // 0) 三个**零依赖叶子包**最先：browser / connectors / desktop 的 tsc 都读前两个的
+  //    lib/types（desktop 的 `src/{host-locale,desktop-home}.ts` 各是一行 re-export）；
+  //    panel-surface 是四个客户端面板（定时任务 / 能力中心 / 连接器 / 应用中心）
+  //    共用的中列装载器与视觉语言，被它们的 client bundle 内联 ⇒ 同样必须先产出。
   { workspace: '@picoaide/dsh-host-locale', dir: 'packages/host/host-locale', deps: [] },
   { workspace: '@picoaide/dsh-host-home', dir: 'packages/host/host-home', deps: [] },
+  { workspace: '@picoaide/dsh-panel-surface', dir: 'packages/client/panel-surface', deps: [] },
   // 1) connectors：只读两个叶子包（`host-copy.ts` / `user-scope.ts`）—— 路线 A 扩展
   //    之后它**不再** import 桌面包，所以排在叶子包之后即可。
   {
     workspace: '@picoaide/dsh-connectors',
     dir: 'packages/host/connectors',
-    deps: ['packages/host/host-home', 'packages/host/host-locale'],
+    deps: ['packages/host/host-home', 'packages/host/host-locale', 'packages/client/panel-surface'],
   },
   // 2) browser：读叶子包 + **connectors 的 lib/types**（`src/index.ts` 的
   //    `typeof import('@picoaide/dsh-connectors/…')` 与
@@ -89,14 +92,14 @@ const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
     dir: 'packages/host/desktop',
     deps: ['packages/host/host-home', 'packages/host/host-locale', 'packages/host/wasm-apps-host'],
   },
-  { workspace: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', deps: ['packages/host/desktop'] },
+  { workspace: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', deps: ['packages/host/desktop', 'packages/client/panel-surface'] },
   { workspace: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', deps: ['packages/host/desktop'] },
-  { workspace: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', deps: [] },
+  { workspace: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', deps: ['packages/client/panel-surface'] },
   { workspace: '@picoaide/dsh-branding', dir: 'packages/client/branding', deps: ['packages/host/desktop'] },
   // cron 的 tsc 仍读 desktop 的 lib/types（`dsh-plugin-desktop/host-locale` 与
   // `dsh-plugin-desktop/desktop-home` 两条 re-export 子路径）—— 它不在环上，
   // 两条子路径都保留，故这条边继续登记。
-  { workspace: '@picoaide/dsh-cron', dir: 'packages/host/cron', deps: ['packages/host/desktop'] },
+  { workspace: '@picoaide/dsh-cron', dir: 'packages/host/cron', deps: ['packages/host/desktop', 'packages/client/panel-surface'] },
 ]
 
 /** 执行一个 yarn 命令,失败即抛错。 */

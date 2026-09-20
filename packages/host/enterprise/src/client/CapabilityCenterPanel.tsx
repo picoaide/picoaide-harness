@@ -1,7 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Card,
+  Chip,
+  EmptyState,
+  IconTile,
+  PANEL_GRID,
+  PANEL_SEARCH,
+  PANEL_TOOLBAR,
+  PanelButton,
+  PanelPage,
+  SegmentedControl,
+  icons,
+} from '@picoaide/dsh-panel-surface/client'
 import { t } from './locales.ts'
 import { compareVersions } from './version-compare.ts'
-import { planBuiltinCards, useBuiltinSkills, type BuiltinCard } from './BuiltinSkillsStrip.tsx'
+import { builtinCardsForTab, planBuiltinCards, useBuiltinSkills, type BuiltinCard } from './BuiltinSkillsStrip.tsx'
 
 /**
  * 能力中心（Capability Hub）——技能商城 / 共享技能 / 共享 Agent 的归一入口。
@@ -79,128 +92,29 @@ interface CapabilityItem {
 type SourceTab = 'mine' | 'market'
 type TypeFilter = 'all' | CapabilityKind
 
-const OVERLAY: React.CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  zIndex: 1000,
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-}
-
-const MASK: React.CSSProperties = {
-  position: 'absolute',
-  inset: 0,
-  background: 'var(--dsw-alias-bg-mask-1)',
-  backdropFilter: 'var(--dsw-mask-blur)',
-}
-
-const PANEL: React.CSSProperties = {
-  position: 'relative',
-  zIndex: 1,
-  display: 'flex',
-  flexDirection: 'column',
-  width: 860,
-  maxWidth: 'calc(100vw - 48px)',
-  height: 'min(820px, calc(100vh - 48px))',
-  borderRadius: 24,
-  overflow: 'hidden',
-  background: 'var(--dsw-alias-bg-layer-2)',
-  boxShadow: 'var(--dsw-shadow-lv3)',
-}
-
-const HEADER: React.CSSProperties = {
-  flex: 'none',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'space-between',
-  height: 54,
-  boxSizing: 'border-box',
-  padding: '14px 18px',
-}
-
-const TITLE: React.CSSProperties = { margin: 0, fontSize: 16, lineHeight: '24px', fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }
-const CLOSE: React.CSSProperties = {
-  border: 'none',
-  background: 'transparent',
-  cursor: 'pointer',
-  color: 'var(--dsw-alias-label-caption)',
-  fontSize: 13,
-  padding: '4px 8px',
-  borderRadius: 6,
-}
-
 /** 顶部 Tab 条：来源分区 + 类型筛选。 */
-const TAB_BAR: React.CSSProperties = {
-  flex: 'none',
-  display: 'flex',
-  alignItems: 'center',
-  gap: 4,
-  padding: '0 18px',
-  // 上游没有 `--dsw-alias-border-l`（只有 l1/l2/l3/l4，2026-09-16 审计）⇒ 原先
-  // 分隔线在亮暗两色下都没有描边色（`1px solid` 空值 = 不画）。用会翻转的 l2。
-  borderBottom: '1px solid var(--dsw-alias-border-l2)',
-}
-
-const TAB: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 6,
-  padding: '10px 12px',
-  fontSize: 13,
-  border: 'none',
-  background: 'transparent',
-  cursor: 'pointer',
-  color: 'var(--dsw-alias-label-secondary)',
-  borderBottom: 'none',
-  marginBottom: 0,
-}
-
-const TAB_ACTIVE: React.CSSProperties = {
-  ...TAB,
-  color: 'var(--dsw-alias-label-primary)',
-  borderBottom: '2px solid var(--dsw-alias-brand-primary)',
-}
-
-const FILTER_SEP: React.CSSProperties = { width: 1, height: 14, background: 'var(--dsw-alias-border-l2)', margin: '0 6px' }
-
+/**
+ * 类型筛选片（全部 / 技能 / 智能体）。
+ *
+ * 只给几何：颜色与 `[data-active]` / `:hover` 反馈由共享样式表的 `.pico-chipbtn`
+ * 负责 —— 颜色写进行内联样式就再也做不出悬停态（本仓的既定分工）。
+ */
 const FILTER: React.CSSProperties = {
-  padding: '4px 10px',
+  padding: '3px 11px',
   fontSize: 12,
   borderRadius: 999,
-  border: '1px solid transparent',
-  background: 'transparent',
-  cursor: 'pointer',
-  color: 'var(--dsw-alias-label-caption)',
+  margin: 0,
 }
 
-const FILTER_ACTIVE: React.CSSProperties = {
-  ...FILTER,
-  borderColor: 'var(--dsw-alias-brand-primary)',
-  color: 'var(--dsw-alias-brand-primary)',
-  background: 'color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent)',
-}
 
-const BODY: React.CSSProperties = {
-  flex: 1,
-  minHeight: 0,
-  overflowY: 'auto',
-  display: 'grid',
-  gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
-  gridAutoRows: 'minmax(160px, auto)',
-  gap: 12,
-  padding: 20,
-  alignContent: 'start',
-}
 
+/** 网格里的一张能力卡（纵向排布，动作条贴底）。 */
 const CARD: React.CSSProperties = {
-  border: '1px solid var(--dsw-alias-border-l2)',
-  borderRadius: 10,
-  padding: 14,
   display: 'flex',
   flexDirection: 'column',
   gap: 8,
-  background: 'var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-layer-2))',
+  padding: '14px 15px',
+  borderRadius: 14,
 }
 
 const TITLE_ROW: React.CSSProperties = { display: 'flex', alignItems: 'flex-start', gap: 8, minWidth: 0 }
@@ -216,24 +130,19 @@ const DESC: React.CSSProperties = {
   cursor: 'pointer',
 }
 
+/**
+ * 卡片里的描述：**固定两行**。
+ *
+ * 2026-09-20 用户口径：「能力中心里描述超长」—— 原来是三行 + 点击就地展开，展开后
+ * 卡片变高、把整行栅格一起撑开，同一行相邻卡片出现大片空白。现在卡片里只留两行，
+ * **全文去详情弹层看**（网格高度恒定）。
+ */
 const DESC_CLAMP: React.CSSProperties = {
   ...DESC,
   display: '-webkit-box',
-  WebkitLineClamp: 3,
+  WebkitLineClamp: 2,
   WebkitBoxOrient: 'vertical',
   overflow: 'hidden',
-}
-
-/** 描述展开按钮:重置 button 默认外观,与 <p> 语义一致(键盘可访问)。
- *  不含 display——折叠态需保留 DESC_CLAMP 的 -webkit-box(WebkitLineClamp)。 */
-const DESC_BUTTON: React.CSSProperties = {
-  width: '100%',
-  padding: 0,
-  border: 'none',
-  background: 'none',
-  textAlign: 'left',
-  font: 'inherit',
-  color: 'inherit',
 }
 
 // 头像底色：直接用**会随主题翻转**的 alias token。
@@ -256,83 +165,21 @@ export function avatarColor(name: string): string {
   return AVATAR_COLORS[hash % AVATAR_COLORS.length] ?? AVATAR_COLORS[0]!
 }
 
-const AVATAR: React.CSSProperties = {
-  flex: 'none',
-  width: 34,
-  height: 34,
-  borderRadius: 10,
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  fontSize: 14,
-  fontWeight: 600,
-  lineHeight: 1,
-  textTransform: 'uppercase',
-}
-
 const NAME_COL: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }
 const NAME_WRAP: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flexWrap: 'wrap' }
-const NAME_TEXT: React.CSSProperties = { minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }
-
-const BUTTON: React.CSSProperties = {
-  width: '100%',
-  height: 30,
-  padding: '0 12px',
-  borderRadius: 6,
-  border: '1px solid transparent',
-  background: 'var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #2563eb))',
-  // 主按钮上的字用上游的 label-primary-foreground（Button.module.css 同款）。
-  // 2026-09-16 审计：`--dsw-alias-label-inverted` 上游不存在 ⇒ 文字的 fallback #fff
-  // 虽然"看着还行"，但它与真实 token 的暗色取值不一致，属于隐性漂移。
-  color: 'var(--dsw-alias-label-primary-foreground, #fff)',
-  fontSize: 12,
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
-}
-
-const BUTTON_DISABLED: React.CSSProperties = { ...BUTTON, opacity: 0.6, cursor: 'default' }
-const BUTTON_SECONDARY: React.CSSProperties = {
-  ...BUTTON,
-  border: '1px solid var(--dsw-alias-border-l2)',
-  background: 'transparent',
-  color: 'var(--dsw-alias-label-secondary)',
-}
-
-const EMPTY: React.CSSProperties = { fontSize: 13, color: 'var(--dsw-alias-label-caption)', textAlign: 'center', padding: 24, gridColumn: '1 / -1' }
 const CARD_FOOT: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: 6,
   marginTop: 'auto',
   paddingTop: 10,
-  borderTop: '1px solid var(--dsw-alias-border-l2)',
-}
-const NOTICE: React.CSSProperties = { fontSize: 13, margin: 0, textAlign: 'center', padding: 12 }
-
-/** 徽章基础样式（来源/类型/状态共用）。 */
-function chipStyle(color: string): React.CSSProperties {
-  return {
-    flex: 'none',
-    padding: '1px 8px',
-    borderRadius: 999,
-    fontSize: 11,
-    lineHeight: '18px',
-    color,
-    border: `1px solid ${color}`,
-    whiteSpace: 'nowrap',
-  }
+  borderTop: '1px solid var(--dsw-alias-border-l1)',
 }
 
-const CHIP_NEUTRAL = chipStyle('var(--dsw-alias-label-secondary)')
-const CHIP_BRAND = chipStyle('var(--dsw-alias-brand-primary)')
-const CHIP_SUCCESS = chipStyle('var(--dsw-alias-state-success-primary)')
-const CHIP_WARN = chipStyle('var(--dsw-alias-state-warn-label)')
-const CHIP_ERROR = chipStyle('var(--dsw-alias-state-error-primary)')
 /** 自制徽章(紫, 与官方蓝/来源灰区分)。 */
 // 自制/本地来源徽章：原先写死紫色 #7C3AED，两主题同值 —— 暗色下面板底
 // (bg-layer-2 = rgb(44,44,46)) 上只有 2.45:1（2026-09-16 暗色审计）。
 // 上游没有紫色语义 token，改用会翻转的三级文字色，靠文案「自制」区分来源。
-const CHIP_LOCAL = chipStyle('var(--dsw-alias-label-tertiary)')
 
 /**
  * 单测用：数值感知版本比较 —— 实现已抽到 `version-compare.ts`（内置技能区
@@ -481,6 +328,143 @@ export function mergeItems(items: readonly CapabilityItem[]): CapabilityItem[] {
   return [...byKey.values()]
 }
 
+/**
+ * 详情弹层的目标：普通条目（能力中心聚合面的行）或内置技能入口卡。
+ *
+ * 两者都进同一个弹层 —— 用户看到的差异只是"徽章不同、动作不同"，弹层形状与
+ * 交互不该因此分叉。
+ */
+type DetailTarget =
+  | { kind: 'item', item: CapabilityItem }
+  | { kind: 'builtin', card: BuiltinCard }
+
+/** 弹层骨架的几何（颜色由 `.pico-card` / 共享按钮类负责）。 */
+const DIALOG_MASK: React.CSSProperties = {
+  position: 'fixed',
+  inset: 0,
+  zIndex: 60,
+  background: 'var(--dsw-alias-bg-mask-1)',
+  backdropFilter: 'var(--dsw-mask-blur)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: 24,
+}
+
+const DIALOG_BOX: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  width: 'min(640px, 100%)',
+  maxHeight: 'min(78vh, 720px)',
+  borderRadius: 18,
+  padding: '18px 20px',
+  boxShadow: 'var(--dsw-shadow-lv3)',
+  // 弹层容器是**程序化聚焦**的（给读屏一个上下文锚点），不是用户 Tab 过来的 ——
+  // 保留 Chromium 的默认焦点环会在弹层外圈画一道很重的黑框（截图实测）。
+  outline: 'none',
+}
+
+/**
+ * 描述全文 + 历史版本的详情弹层。
+ *
+ * 存在的理由只有一条：**卡片里的描述必须定高**。把全文做成就地展开会把网格整行
+ * 撑高，相邻卡片出现大片空白（用户报的"描述超长"）；弹层里则可以随便长，还能
+ * 顺带放下历史版本与状态说明。
+ *
+ * 交互：Esc 关闭、点遮罩关闭、初始焦点落进弹层。**Esc 必须由弹层自己处理** ——
+ * 面板是整页不是模态，装载器的 Esc 在检测到 `[role=dialog][aria-modal=true]`
+ * 时会让位（"面板里开着真模态时 Esc 归模态"）。
+ * @param props - 目标、忙碌态、按版本安装回调与关闭回调。
+ */
+export function CapabilityDetailDialog({ target, busy, onInstallVersion, onClose }: {
+  target: DetailTarget
+  busy: boolean
+  onInstallVersion: (version: string) => void
+  onClose: () => void
+}): JSX.Element {
+  const boxRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      // 不让这次 Esc 冒到面板装载器（那里会"返回聊天"）。
+      event.stopPropagation()
+      onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    boxRef.current?.focus()
+    return () => { window.removeEventListener('keydown', onKey) }
+  }, [onClose])
+
+  const skill = target.kind === 'builtin' ? target.card.skill : undefined
+  const item = target.kind === 'item' ? target.item : undefined
+  const title = skill !== undefined
+    ? (skill.title !== undefined && skill.title !== '' ? skill.title : skill.name)
+    : (item!.displayName || item!.name)
+  const description = skill !== undefined ? (skill.description ?? '') : item!.description
+  const meta = skill !== undefined
+    ? `v${skill.version}${skill.author !== undefined && skill.author !== '' ? ` · ${skill.author}` : ''}`
+    : `v${item!.version}${item!.author !== '' ? ` · ${item!.author}` : ''}`
+  const versions = item !== undefined && item.source !== 'local' ? item.versions : []
+
+  return (
+    <div
+      style={DIALOG_MASK}
+      role="presentation"
+      onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}
+    >
+      <Card
+        ref={boxRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${t('capability.detail')} ${title}`}
+        style={DIALOG_BOX}
+        data-role="capability-detail"
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <IconTile size={38} radius={12} tone="brand" label={(skill?.name ?? item!.name).charAt(0)} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={NAME_WRAP}>
+              <p style={{ ...NAME, whiteSpace: 'normal' }}>{title}</p>
+              {skill !== undefined && <Chip tone="neutral" plain>{t('capability.builtinBadge')}</Chip>}
+            </div>
+            <p style={META}>{meta}</p>
+          </div>
+          <PanelButton variant="ghost" size="sm" aria-label={t('capability.close')} onClick={onClose}>{'✕'}</PanelButton>
+        </div>
+        <div className="pico-scroll" style={{ flex: 1, minHeight: 0, overflowY: 'auto', marginTop: 12 }}>
+          <div style={{ ...LABEL_SM }}>{t('capability.detailDescription')}</div>
+          <p style={{ ...DESC, whiteSpace: 'pre-wrap', marginTop: 4 }} data-role="detail-description">
+            {description === '' ? t('capability.detailNoDescription') : description}
+          </p>
+          {versions.length > 1 && (
+            <div style={{ marginTop: 14 }}>
+              <div style={{ ...LABEL_SM }}>{t('capability.viewVersions', { count: String(versions.length) })}</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                {versions.map(version => (
+                  <PanelButton
+                    key={version}
+                    variant={version === item!.version ? 'primary' : 'secondary'}
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => { onInstallVersion(version) }}
+                  >
+                    v{version}
+                  </PanelButton>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+/** 弹层里的小节标题。 */
+const LABEL_SM: React.CSSProperties = { fontSize: 12, color: 'var(--dsw-alias-label-caption)' }
+
 /** 每个（来源,类型）的加载状态（分区独立错误态）。 */
 type SectionStatus = 'idle' | 'loading' | 'ok' | 'error'
 interface SectionState {
@@ -513,9 +497,13 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   const [installConfirmKey, setInstallConfirmKey] = useState<string | null>(null)
   /** 卸载确认 key（{kind}:{name}）。 */
   const [uninstallConfirmKey, setUninstallConfirmKey] = useState<string | null>(null)
-  const [expandedVersions, setExpandedVersions] = useState<Record<string, boolean>>({})
-  /** 展开描述的卡片 key（{kind}:{name}）；长描述默认截 3 行,点击展开全文。 */
-  const [expandedDescs, setExpandedDescs] = useState<Record<string, boolean>>({})
+  /**
+   * 正在看详情的那张卡；null = 关闭。
+   *
+   * 描述全文与历史版本都收在弹层里，**卡片本身高度恒定**（就地展开会把整行栅格
+   * 一起撑高，2026-09-20 用户口径："能力中心里描述超长"）。
+   */
+  const [detail, setDetail] = useState<DetailTarget | null>(null)
   const loadSeqRef = useRef(0)
   const panelRef = useRef<HTMLDivElement | null>(null)
 
@@ -730,46 +718,47 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     [items],
   )
   const renderBadges = (item: CapabilityItem): React.ReactNode => {
-    const statusBadge = item.status === 'pending' ? <span style={CHIP_WARN}>{t('capability.pending')}</span>
-      : item.status === 'rejected' ? <span style={CHIP_ERROR}>{t('capability.rejected')}</span>
-        : item.source === 'org' && item.installed ? <span style={CHIP_SUCCESS}>{t('capability.installed')}</span>
-          : item.installed ? <span style={CHIP_SUCCESS}>{t('capability.installed')}</span> : null
-    const officialBadge = item.official === true ? <span style={CHIP_BRAND}>{t('capability.official')}</span> : null
-    const qualityBadge = item.quality === 'featured' ? <span style={CHIP_WARN}>{t('capability.featured')}</span> : null
-    // 「我的」来源区分(2026-09-04 定案):已安装=商店渠道(市场/共享)或其他安装;
-    // 自制=本地创作(紫色, 与 sourceLocal 徽章互补)。
-    const mineSourceBadge = !isMineSection
-      ? null
-      : item.source === 'local'
-        ? <span style={CHIP_LOCAL}>{t('capability.sourceLocal')}</span>
-        : item.originChannel === 'org'
-          ? <span style={CHIP_NEUTRAL}>{t('capability.sourceOrg')}</span>
-          : item.originChannel === 'builtin'
-            ? <span style={CHIP_NEUTRAL}>{t('capability.sourceBuiltin')}</span>
-            : item.originChannel === 'market'
-              ? <span style={CHIP_NEUTRAL}>{t('capability.sourceMarket')}</span>
-              : <span style={CHIP_NEUTRAL}>{t('capability.sourceOther')}</span>
+    const statusBadge = item.status === 'pending' ? <Chip tone="warn">{t('capability.pending')}</Chip>
+      : item.status === 'rejected' ? <Chip tone="danger">{t('capability.rejected')}</Chip>
+        : item.installed ? <Chip tone="success">{t('capability.installed')}</Chip> : null
+    const officialBadge = item.official === true ? <Chip tone="brand">{t('capability.official')}</Chip> : null
+    const qualityBadge = item.quality === 'featured' ? <Chip tone="warn">{t('capability.featured')}</Chip> : null
+    /**
+     * 「来源」徽章**只出一个**。
+     *
+     * 2026-09-20 修的真实 UI bug：原先「我的」分区同时渲染 `source` 徽章与
+     * `mineSourceBadge`，匿名路径下两张都写「自制」—— 卡片上出现两个一模一样的胶囊。
+     * 现在按分区二选一：市场分区用来源（市场/组织），我的分区用「这份内容是怎么来的」
+     * （自制 / 来自组织 / 平台内置 / 来自市场 / 其它）。
+     */
+    const sourceBadge = isMineSection
+      ? (item.source === 'local'
+          ? <Chip tone="neutral" plain>{t('capability.sourceLocal')}</Chip>
+          : item.originChannel === 'org'
+            ? <Chip tone="neutral" plain>{t('capability.sourceOrg')}</Chip>
+            : item.originChannel === 'builtin'
+              ? <Chip tone="neutral" plain>{t('capability.sourceBuiltin')}</Chip>
+              : item.originChannel === 'market'
+                ? <Chip tone="neutral" plain>{t('capability.sourceMarket')}</Chip>
+                : <Chip tone="neutral" plain>{t('capability.sourceOther')}</Chip>)
+      : (item.source === 'market'
+          ? <Chip tone="neutral" plain>{t('capability.sourceMarket')}</Chip>
+          : item.source === 'org'
+            ? <Chip tone="neutral" plain>{t('capability.sourceOrg')}</Chip>
+            : <Chip tone="neutral" plain>{t('capability.sourceLocal')}</Chip>)
     return (
       <>
-        <span style={chipStyle(item.kind === 'skill' ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-label-secondary)')}>
+        <Chip tone={item.kind === 'skill' ? 'brand' : 'neutral'}>
           {item.kind === 'skill' ? t('capability.typeSkill') : t('capability.typeAgent')}
-        </span>
-        {item.source === 'market' ? <span style={CHIP_NEUTRAL}>{t('capability.sourceMarket')}</span>
-          : item.source === 'org' ? <span style={CHIP_NEUTRAL}>{t('capability.sourceOrg')}</span>
-            : <span style={CHIP_NEUTRAL}>{t('capability.sourceLocal')}</span>}
+        </Chip>
+        {sourceBadge}
         {officialBadge}
         {qualityBadge}
-        {mineSourceBadge}
         {statusBadge}
-        {item.source === 'local' && item.originChannel !== undefined && (
-          <span style={CHIP_NEUTRAL}>
-            {item.originChannel === 'org'
-              ? t('capability.sourceOrg')
-              : item.originChannel === 'builtin' ? t('capability.sourceBuiltin') : t('capability.sourceMarket')}
-            {` v${item.version}`}
-          </span>
+        {item.source === 'local' && item.originChannel !== undefined && item.originChannel !== 'builtin' && (
+          <Chip tone="neutral" plain>{`v${item.version}`}</Chip>
         )}
-        {item.dirty === true && <span style={CHIP_WARN}>{t('capability.dirty')}</span>}
+        {item.dirty === true && <Chip tone="warn">{t('capability.dirty')}</Chip>}
       </>
     )
   }
@@ -789,40 +778,48 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
       : t('capability.builtinInstall')
     const title = skill.title !== undefined && skill.title !== '' ? skill.title : skill.name
     return (
-      <div key={key} className="pico-skill-card" style={CARD}>
+      <Card key={key} interactive style={CARD} className="pico-skill-card">
         <div style={TITLE_ROW}>
-          <span style={{ ...AVATAR, color: avatarColor(skill.name), background: `color-mix(in srgb, ${avatarColor(skill.name)} 14%, transparent)` }} aria-hidden="true">
-            {skill.name.charAt(0)}
-          </span>
+          <IconTile size={38} radius={12} tone="brand" label={skill.name.charAt(0)} />
           <div style={NAME_COL}>
             <div style={NAME_WRAP}>
-              <p style={{ ...NAME, ...NAME_TEXT }} title={title}>{title}</p>
-              <span style={CHIP_LOCAL}>{t('capability.builtinBadge')}</span>
-              <span style={chipStyle('var(--dsw-alias-brand-primary)')}>{t('capability.filterSkill')}</span>
+              <p style={{ ...NAME }} title={title}>{title}</p>
+              <Chip tone="neutral" plain>{t('capability.builtinBadge')}</Chip>
+              <Chip tone="brand">{t('capability.filterSkill')}</Chip>
             </div>
             <p style={META}>{skill.author !== undefined && skill.author !== '' ? `v${skill.version} · ${skill.author}` : `v${skill.version}`}</p>
           </div>
         </div>
         {skill.description !== undefined && skill.description !== '' && (
-          <p style={DESC_CLAMP} title={skill.description}>{skill.description}</p>
+          <p style={DESC_CLAMP} title={skill.description} data-role="card-description">{skill.description}</p>
         )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+          <PanelButton
+            variant="ghost"
+            size="sm"
+            icon={<icons.IconInfo size={13} />}
+            onClick={() => { setDetail({ kind: 'builtin', card }) }}
+          >
+            {t('capability.detail')}
+          </PanelButton>
+        </div>
         <div style={CARD_FOOT}>
           {card.state === 'busy' ? (
-            <button type="button" style={{ ...BUTTON_DISABLED, flex: 1 }} disabled>{label}</button>
+            <PanelButton variant="primary" size="md" block disabled>{label}</PanelButton>
           ) : card.state === 'failed' && card.failure !== null ? (
             <>
               <span style={{ ...META, flex: 1, color: 'var(--dsw-alias-state-error-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={card.failure}>
                 {card.failure}
               </span>
-              <button type="button" style={BUTTON} onClick={() => { void builtin.install(skill) }}>
+              <PanelButton variant="primary" size="md" onClick={() => { void builtin.install(skill) }}>
                 {t('capability.builtinRetry')}
-              </button>
+              </PanelButton>
             </>
           ) : (
-            <button type="button" style={{ ...BUTTON, flex: 1 }} onClick={() => { void builtin.install(skill) }}>{label}</button>
+            <PanelButton variant="primary" size="md" block onClick={() => { void builtin.install(skill) }}>{label}</PanelButton>
           )}
         </div>
-      </div>
+      </Card>
     )
   }
 
@@ -832,16 +829,13 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     const title = item.displayName || item.name
     const isLocal = item.source === 'local'
     const needUpdate = hasUpdateFor(item)
-    const expanded = expandedVersions[key] === true
     return (
-      <div key={key} className="pico-skill-card" style={CARD}>
+      <Card key={key} interactive muted={item.status === 'rejected'} style={CARD} className="pico-skill-card">
         <div style={TITLE_ROW}>
-          <span style={{ ...AVATAR, color: avatarColor(item.name), background: `color-mix(in srgb, ${avatarColor(item.name)} 14%, transparent)` }} aria-hidden="true">
-            {item.name.charAt(0)}
-          </span>
+          <IconTile size={38} radius={12} tone={item.kind === 'skill' ? 'brand' : 'neutral'} label={item.name.charAt(0)} />
           <div style={NAME_COL}>
             <div style={NAME_WRAP}>
-              <p style={{ ...NAME, ...NAME_TEXT }} title={title}>{title}</p>
+              <p style={{ ...NAME }} title={title}>{title}</p>
               {renderBadges(item)}
             </div>
             <p style={META}>
@@ -855,17 +849,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
           </div>
         </div>
         {item.description !== '' && (
-          <button
-            type="button"
-            style={expandedDescs[key] === true
-              ? { ...DESC, display: 'block', ...DESC_BUTTON }
-              : { ...DESC_CLAMP, ...DESC_BUTTON }}
-            title={expandedDescs[key] === true ? undefined : item.description}
-            aria-expanded={expandedDescs[key] === true}
-            onClick={() => { setExpandedDescs(prev => ({ ...prev, [key]: !(prev[key] ?? false) })) }}
-          >
-            {item.description}
-          </button>
+          <p style={DESC_CLAMP} title={item.description} data-role="card-description">{item.description}</p>
         )}
         {item.status === 'rejected' && item.reason !== undefined && item.reason !== '' && (
           <p style={{ ...META, color: 'var(--dsw-alias-state-error-primary)', whiteSpace: 'pre-wrap' }}>{t('capability.rejectReason', { reason: item.reason })}</p>
@@ -873,83 +857,93 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         <div style={CARD_FOOT}>
           {isLocal ? (
             item.uploadStatus === 'rejected'
-              ? <button type="button" style={busy ? BUTTON_DISABLED : BUTTON_SECONDARY} disabled={busy} onClick={() => { void upload(item) }}>{t('capability.reupload')}</button>
+              ? <PanelButton variant="secondary" size="md" block disabled={busy} onClick={() => { void upload(item) }}>{t('capability.reupload')}</PanelButton>
               : item.uploadStatus === 'pending'
-                ? <span style={{ ...CHIP_WARN, flex: 1, textAlign: 'center' }}>{t('capability.awaitingReview')}</span>
+                ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="warn">{t('capability.awaitingReview')}</Chip></span>
                 : item.uploadStatus === 'approved'
-                  ? <span style={{ ...CHIP_SUCCESS, flex: 1, textAlign: 'center' }}>{t('capability.approved')}</span>
-                  : <button type="button" style={busy ? BUTTON_DISABLED : BUTTON} disabled={busy} onClick={() => { void upload(item) }}>{t('capability.upload')}</button>
+                  ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="success">{t('capability.approved')}</Chip></span>
+                  : <PanelButton variant="primary" size="md" block disabled={busy} onClick={() => { void upload(item) }}>{t('capability.upload')}</PanelButton>
           ) : item.installed ? (
             needUpdate ? (
-              <button type="button" style={busy || item.official ? BUTTON_DISABLED : BUTTON} disabled={busy || item.official} title={item.official ? t('capability.officialLocked') : undefined} onClick={() => { void install(item, { force: true }) }}>
+              <PanelButton variant="primary" size="md" block disabled={busy || item.official} title={item.official ? t('capability.officialLocked') : undefined} onClick={() => { void install(item, { force: true }) }}>
                 {t('capability.updateTo', { version: item.versions[item.versions.length - 1] ?? item.version })}
-              </button>
+              </PanelButton>
             ) : uninstallConfirmKey === key ? (
               <div style={{ display: 'flex', gap: 8, width: '100%' }}>
-                <button type="button" style={{ ...BUTTON, background: 'var(--dsw-alias-state-error-primary)', color: 'var(--dsw-alias-label-primary-foreground, #fff)' }} disabled={busy} onClick={() => { void uninstall(item) }}>
+                <PanelButton variant="danger" size="md" style={{ flex: 1 }} disabled={busy} onClick={() => { void uninstall(item) }}>
                   {busy && action?.kind === 'uninstalling' ? t('capability.uninstalling') : t('capability.confirmUninstall')}
-                </button>
-                <button type="button" style={{ ...BUTTON_SECONDARY, flex: 1 }} disabled={busy} onClick={() => { setUninstallConfirmKey(null) }}>{t('capability.cancel')}</button>
+                </PanelButton>
+                <PanelButton variant="secondary" size="md" style={{ flex: 1 }} disabled={busy} onClick={() => { setUninstallConfirmKey(null) }}>{t('capability.cancel')}</PanelButton>
               </div>
             ) : (
-              <button type="button" style={busy ? BUTTON_DISABLED : BUTTON_SECONDARY} disabled={busy} onClick={() => { void uninstall(item) }}>{t('capability.uninstall')}</button>
+              <PanelButton variant="secondary" size="md" block disabled={busy} onClick={() => { void uninstall(item) }}>{t('capability.uninstall')}</PanelButton>
             )
           ) : (
-            <button type="button" style={busy ? BUTTON_DISABLED : BUTTON} disabled={busy} onClick={() => { void install(item) }}>{t('capability.install')}</button>
+            <PanelButton variant="primary" size="md" block disabled={busy} onClick={() => { void install(item) }}>{t('capability.install')}</PanelButton>
           )}
         </div>
-        {/* 历史版本展开（同名多版本归并后，点开可安装指定版本）。 */}
-        {!isLocal && item.versions.length > 1 && (
-          <button
-            type="button"
-            style={{ ...BUTTON_SECONDARY, height: 24, fontSize: 11, width: '100%' }}
-            onClick={() => { setExpandedVersions(prev => ({ ...prev, [key]: !prev[key] })) }}
-          >
-            {expanded ? t('capability.viewVersions', { count: String(item.versions.length) }) + ' ▾' : t('capability.viewVersions', { count: String(item.versions.length) }) + ' ▸'}
-          </button>
-        )}
-        {expanded && item.versions.length > 1 && (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-            {item.versions.map(v => (
-              <button key={v} type="button" style={{ ...BUTTON_SECONDARY, height: 24, fontSize: 11, width: 'auto', padding: '0 8px' }} onClick={() => { void install(item, { force: true, version: v }) }} disabled={busy}>
-                v{v}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+        {/* 历史版本、描述全文都收在详情弹层里（就地展开会把整行栅格撑高）。 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+          <PanelButton variant="ghost" size="sm" icon={<icons.IconInfo size={13} />} onClick={() => { setDetail({ kind: 'item', item }) }}>
+            {t('capability.detail')}
+          </PanelButton>
+          {!isLocal && item.versions.length > 1 && (
+            <span style={{ ...META, margin: 0 }}>{t('capability.viewVersions', { count: String(item.versions.length) })}</span>
+          )}
+        </div>
+      </Card>
     )
   }
 
-  const renderEmpty = (text: string): React.ReactNode => <p style={EMPTY}>{text}</p>
+  const renderEmpty = (text: string): React.ReactNode => (
+    <div style={{ gridColumn: '1 / -1' }}>
+      <EmptyState icon={<icons.IconCapability size={22} />} tone="neutral" title={text} />
+    </div>
+  )
 
   const renderSection = (key: 'mine' | 'market', emptyText: string): React.ReactNode => {
     const st = sectionStatus(key)
     // idle = 尚未发起加载(初始态),与 loading 同样显示 spinner;
     // error = 错误态 + 重试;ok/loading = 列表或继续等待(可见 byId 更新)。
     if (st.status === 'idle' || st.status === 'loading') {
-      return <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'center', padding: 48 }}><p style={EMPTY}>{t('capability.loading')}</p></div>
+      return <div style={{ gridColumn: '1 / -1' }}><EmptyState icon={<icons.IconRefresh size={22} />} title={t('capability.loading')} /></div>
     }
     if (st.status === 'error') {
-      return <div style={{ gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: 24 }}><p style={EMPTY}>{st.error}</p><button type="button" style={BUTTON_SECONDARY} onClick={() => { void loadAll() }}>{t('capability.retry')}</button></div>
+      return (
+        <div style={{ gridColumn: '1 / -1' }}>
+          <EmptyState
+            icon={<icons.IconAlert size={22} />}
+            tone="danger"
+            title={st.error}
+            action={<PanelButton variant="secondary" size="md" onClick={() => { void loadAll() }}>{t('capability.retry')}</PanelButton>}
+          />
+        </div>
+      )
     }
     const rows = visibleByTab
-    // 内置技能只属于「我的」（它们是本机可安装的能力，不在市场里），且类型筛选
-    // 为"智能体"时不显示；搜索按与普通卡片同一口径过滤。
-    // 出卡口径（含"已装但清单有新版 ⇒ 出更新卡"）全在 planBuiltinCards 里，见其文档。
-    const builtinCards = key === 'mine'
-      ? planBuiltinCards({
-          rows: builtin.rows,
-          // 两个事实源取并集：服务端下发的 installed[] + 面板「我的」列表里的本地技能名。
-          installedNames: new Set([...builtin.installed, ...localSkillNames]),
-          // 本机已装版本（provenance 的安装时版本）——"已装且更旧"就靠它与清单版本对比。
-          installedVersions: builtin.versions,
-          query: search,
-          kindFilter: filter,
-          busy: builtin.busy,
-          failed: builtin.failed,
-        })
-      : []
+    /**
+     * 内置技能按**动作**分派到两个分区（2026-09-20 用户口径：「默认没安装的应该在
+     * 市场里看到，而不是在『我的』里」）：
+     *   - **`install`（本机还没装）⇒ 「市场」**：它的语义与市场条目一样 ——
+     *     "平台提供了、你可以装"，不属于"我的东西"；
+     *   - **`update`（本机已装、清单有新版）⇒ 「我的」**：本机确实有这一份，
+     *     只是要升级，属于"我的"里的动作。
+     *
+     * 出卡口径（含"已装且清单同版本 ⇒ 不出卡"）全在 `planBuiltinCards` 里；这里只按
+     * 它给出的 `action` 分流，不再自己判定一次（两处各判一次就会出现"某张卡两个
+     * 分区都不出"或"两张同名卡"）。
+     */
+    const builtinCards = builtinCardsForTab(planBuiltinCards({
+      rows: builtin.rows,
+      // 两个事实源取并集：服务端下发的 installed[] + 面板「我的」列表里的本地技能名。
+      installedNames: new Set([...builtin.installed, ...localSkillNames]),
+      // 本机已装版本（provenance 的安装时版本）——"已装且更旧"就靠它与清单版本对比。
+      installedVersions: builtin.versions,
+      query: search,
+      kindFilter: filter,
+      busy: builtin.busy,
+      failed: builtin.failed,
+    }), key)
     const cards = planSectionCards({ rows, builtinCards })
     if (cards.length === 0) {
       return renderEmpty(filter === 'all' ? emptyText : t('capability.emptyFilter'))
@@ -964,57 +958,72 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   const content = renderSection(tab === 'market' ? 'market' : 'mine', tab === 'market' ? t('capability.emptyMarket') : t('capability.emptyMine'))
 
   return (
-    <div style={OVERLAY} role="presentation">
-      <div style={MASK} aria-hidden="true" onClick={onClose} />
-      <div style={PANEL} role="dialog" aria-modal="true" aria-label={t('capability.title')} tabIndex={-1} ref={panelRef}>
-        <div style={HEADER}>
-          <h2 style={TITLE}>{t('capability.title')}</h2>
-          <button type="button" style={CLOSE} onClick={onClose}>{t('capability.close')}</button>
-        </div>
-        <div style={TAB_BAR}>
-          {(['mine', 'market'] as const).map(s => (
-            <button key={s} type="button" style={tab === s ? TAB_ACTIVE : TAB} onClick={() => { setTab(s); setFilter('all'); setInstallConfirmKey(null); setUninstallConfirmKey(null) }}>
-              {s === 'mine' ? t('capability.tabMine') : t('capability.tabMarket')}
-            </button>
-          ))}
-          <span style={FILTER_SEP} aria-hidden="true" />
-          {(['all', 'skill', 'agent'] as const).map(f => (
-            <button key={f} type="button" style={filter === f ? FILTER_ACTIVE : FILTER} onClick={() => { setFilter(f) }}>
-              {f === 'all' ? t('capability.filterAll') : f === 'skill' ? t('capability.filterSkill') : t('capability.filterAgent')}
-            </button>
-          ))}
-          <span style={{ flex: 1 }} aria-hidden="true" />
-          <input
-            type="search"
-            value={search}
-            onChange={e => { setSearch(e.target.value) }}
-            placeholder={t('capability.searchPlaceholder')}
-            aria-label={t('capability.searchPlaceholder')}
-            style={{
-              width: 220, height: 28, padding: '0 10px', borderRadius: 6,
-              border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
-              color: 'var(--dsw-alias-label-primary)', fontSize: 12, outline: 'none',
-            }}
-          />
-        </div>
-        <div style={BODY}>{content}</div>
-        {installConfirmKey !== null && (
-          <div style={{ padding: '0 20px 12px' }}>
-            <p style={{ ...NOTICE, color: 'var(--dsw-alias-state-warn-label)' }}>
-              {t('capability.conflictConfirm', { name: installConfirmKey.split(':')[1] ?? '' })}
-            </p>
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
-              <button type="button" style={BUTTON} onClick={() => {
-                const item = items.find(i => `${i.kind}:${i.name}` === installConfirmKey)
+    <div className="pico-capability" data-role="capability-page">
+      <PanelPage
+        icon={<icons.IconCapability size={16} />}
+        title={t('capability.title')}
+        subtitle={t('capability.subtitle')}
+        backLabel={t('capability.backToChat')}
+        onClose={onClose}
+        width={1180}
+        toolbar={(
+          <div style={PANEL_TOOLBAR}>
+            <SegmentedControl
+              ariaLabel={t('capability.title')}
+              value={tab}
+              options={[
+                { value: 'mine' as const, label: t('capability.tabMine') },
+                { value: 'market' as const, label: t('capability.tabMarket') },
+              ]}
+              onChange={next => {
+                setTab(next)
+                setFilter('all')
                 setInstallConfirmKey(null)
-                if (item !== undefined) void install(item, { force: true })
-              }}>{t('capability.forceInstall')}</button>
-              <button type="button" style={BUTTON_SECONDARY} onClick={() => { setInstallConfirmKey(null) }}>{t('capability.cancel')}</button>
-            </div>
+                setUninstallConfirmKey(null)
+              }}
+            />
+            <span style={{ display: 'flex', gap: 4 }}>
+              {(['all', 'skill', 'agent'] as const).map(f => (
+                <button
+                  key={f}
+                  type="button"
+                  className="pico-chipbtn"
+                  data-active={filter === f ? 'true' : 'false'}
+                  style={FILTER}
+                  onClick={() => { setFilter(f) }}
+                >
+                  {f === 'all' ? t('capability.filterAll') : f === 'skill' ? t('capability.filterSkill') : t('capability.filterAgent')}
+                </button>
+              ))}
+            </span>
+            <span style={{ flex: 1 }} aria-hidden="true" />
+            <input
+              type="search"
+              value={search}
+              onChange={e => { setSearch(e.target.value) }}
+              placeholder={t('capability.searchPlaceholder')}
+              aria-label={t('capability.searchPlaceholder')}
+              style={PANEL_SEARCH}
+            />
           </div>
         )}
+      >
+        {installConfirmKey !== null && (
+          <Card style={{ padding: '10px 14px', borderRadius: 12, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <icons.IconAlert size={15} style={{ color: 'var(--dsw-alias-state-warn-label)' }} />
+            <span style={{ flex: 1, minWidth: 200, fontSize: 13 }}>
+              {t('capability.conflictConfirm', { name: installConfirmKey.split(':')[1] ?? '' })}
+            </span>
+            <PanelButton variant="primary" size="sm" onClick={() => {
+              const item = items.find(i => `${i.kind}:${i.name}` === installConfirmKey)
+              setInstallConfirmKey(null)
+              if (item !== undefined) void install(item, { force: true })
+            }}>{t('capability.forceInstall')}</PanelButton>
+            <PanelButton variant="secondary" size="sm" onClick={() => { setInstallConfirmKey(null) }}>{t('capability.cancel')}</PanelButton>
+          </Card>
+        )}
         {action !== null && action.kind !== 'installing' && action.kind !== 'uninstalling' && action.kind !== 'uploading' && (
-          <p style={{ ...NOTICE, color: action.kind === 'failed' ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)' }}>
+          <Card style={{ padding: '9px 14px', borderRadius: 12, marginBottom: 12, fontSize: 13, color: action.kind === 'failed' ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)' }}>
             {action.kind === 'done-install'
               ? t('capability.installedName', { name: action.name ?? '' })
               : action.kind === 'done-uninstall'
@@ -1022,9 +1031,21 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
                 : action.kind === 'done-upload'
                   ? t('capability.uploadedName', { name: action.name ?? '' })
                   : t('capability.failed', { error: action.error ?? '' })}
-          </p>
+          </Card>
         )}
-      </div>
+        <div style={PANEL_GRID} data-role="capability-grid">{content}</div>
+      </PanelPage>
+      {detail !== null && (
+        <CapabilityDetailDialog
+          target={detail}
+          busy={action?.key === (detail.kind === 'item' ? `${detail.item.kind}:${detail.item.name}` : `builtin:${detail.card.skill.name}`)}
+          onInstallVersion={version => {
+            if (detail.kind !== 'item') return
+            void install(detail.item, { force: true, version })
+          }}
+          onClose={() => { setDetail(null) }}
+        />
+      )}
     </div>
   )
 }

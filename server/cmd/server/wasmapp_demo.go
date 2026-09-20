@@ -14,7 +14,8 @@ import (
 // 本文件是「内置演示应用」的启动播种入口（2026-09-19 用户要求：仓库里要有几个
 // 不同权限模式的 demo，装完即可给客户演示，且可以删除）。
 //
-// 分工：制品与清单随镜像分发（`/opt/picoaide/demo-apps/{app.wasm,demos.json}`，
+// 分工：制品与清单随镜像分发（`/opt/picoaide/demo-apps/{showcase,forum,board}.wasm`
+// 与 `demos.json`，
 // 由 Dockerfile 构建），播种逻辑在 internal/wasmapp/appseed；本文件只负责
 // 「找到归属人 → 调用播种 → 记日志」。
 //

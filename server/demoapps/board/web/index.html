@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>留言板 · 写一条，倒序看全部</title>
+  <!--
+    静态资源用**绝对路径**引用：它们作为随包资源由宿主按路径直出（`/static/*` 不经过
+    wasm），所以包内逻辑路径必须是 static/app.css 与 static/app.js。
+    页面本身由 wasm 在入口 `/` 读了 index.html 再返回 —— 因为「先判名单、再给页面」
+    只有这一条路：名单外的人拿到的是后端自制的 403 页，根本看不到这个文件。
+  -->
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <!-- 背景：纯 CSS 渐变（没有图片、没有外链字体）+ 极慢的漂移 -->
+  <div class="aurora" aria-hidden="true"></div>
+  <div class="grid-overlay" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot" aria-hidden="true"></span>
+      <div class="brand-text">
+        <h1>留言板</h1>
+        <p class="tagline">一张表 · 一次写入 · 一个列表 —— 最小可用形态</p>
+      </div>
+    </div>
+    <div class="ident">
+      <span class="chip" id="chip-access" title="访问模式来自应用配置的 access 字段">读取中…</span>
+      <span class="chip chip-me" id="chip-user" title="当前登录身份由平台注入请求帧">…</span>
+      <button class="btn ghost" id="btn-refresh" type="button">
+        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 11a8 8 0 1 0-2.34 5.66M20 5v6h-6" fill="none" stroke="currentColor"
+                stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>刷新</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="stage">
+    <!-- 写一条：多行输入 + 字数计数（接近上限时计数条变色）+ 发布 -->
+    <section class="composer" aria-labelledby="composer-title">
+      <div class="composer-head">
+        <h2 id="composer-title">写一条留言</h2>
+        <p class="composer-hint">1–500 字；同一应用内所有人共享这一份数据</p>
+      </div>
+      <form id="note-form" novalidate autocomplete="off">
+        <label class="sr-only" for="note-body">留言正文</label>
+        <textarea id="note-body" name="body" rows="3" spellcheck="false"
+                  placeholder="说点什么…（Ctrl / ⌘ + Enter 直接发布）"
+                  aria-describedby="counter-hint"></textarea>
+        <div class="composer-foot">
+          <div class="meter" id="meter" aria-hidden="true"><span class="meter-fill" id="meter-fill"></span></div>
+          <p class="counter" id="counter-hint"><span id="counter">0</span><span class="slash">/</span>500 字</p>
+          <button class="btn primary" id="btn-submit" type="submit" disabled>
+            <span class="primary-label">发布</span>
+          </button>
+        </div>
+        <p class="form-error" id="form-error" role="alert" hidden></p>
+      </form>
+    </section>
+
+    <!-- 列表：倒序，两列瀑布（宽屏），单列（窄屏） -->
+    <section class="stream" aria-labelledby="stream-title">
+      <div class="stream-head">
+        <h2 id="stream-title">全部留言</h2>
+        <span class="stream-count" id="stream-count"></span>
+      </div>
+
+      <!-- 骨架屏：首屏加载时占位（加载完就移除） -->
+      <div class="wall" id="skeleton" aria-hidden="true">
+        <div class="skel"></div><div class="skel"></div><div class="skel"></div><div class="skel"></div>
+      </div>
+
+      <!-- 空态：内联 SVG 插画 + 呼吸动画（没有任何外部素材） -->
+      <div class="empty" id="empty" hidden>
+        <svg class="art" viewBox="0 0 240 160" role="img" aria-label="还没有留言">
+          <defs>
+            <linearGradient id="artGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#6d8bff"/>
+              <stop offset="0.55" stop-color="#9a5bff"/>
+              <stop offset="1" stop-color="#12b8a6"/>
+            </linearGradient>
+          </defs>
+          <g class="art-breathe">
+            <rect x="26" y="18" width="152" height="106" rx="16" fill="url(#artGrad)" opacity="0.12"/>
+            <rect x="42" y="32" width="152" height="106" rx="16" fill="none"
+                  stroke="url(#artGrad)" stroke-width="2.4"/>
+            <path d="M64 66h94M64 86h108M64 106h68" fill="none" stroke="url(#artGrad)"
+                  stroke-width="3.2" stroke-linecap="round" opacity="0.7"/>
+            <circle cx="186" cy="120" r="24" fill="url(#artGrad)"/>
+            <path d="M176 116h20M176 125h11" fill="none" stroke="#fff" stroke-width="2.8" stroke-linecap="round"/>
+          </g>
+        </svg>
+        <p class="empty-title">还没有留言</p>
+        <p class="empty-note">在上面写第一条 —— 它会出现在这里的最上面。</p>
+      </div>
+
+      <p class="stream-error" id="stream-error" role="alert" hidden></p>
+      <div class="wall" id="wall"></div>
+      <p class="stream-note" id="truncated" hidden>留言较多，这里只显示最近的一部分。</p>
+    </section>
+  </main>
+
+  <footer class="foot">
+    数据存在<strong>应用自己的库</strong>里（一张表 <code>board_notes</code>）；页面脚本用
+    <code>textContent</code> 渲染留言，从不拼 HTML。
+  </footer>
+
+  <!-- aria-live：新留言、删除、失败都播报一次（视觉动画的等价物） -->
+  <p class="sr-only" id="live" role="status" aria-live="polite"></p>
+
+  <!-- 单条留言的模板：克隆后所有字段一律用 textContent 填（绝不 innerHTML 拼用户内容） -->
+  <template id="tpl-note">
+    <article class="note">
+      <header class="note-head">
+        <span class="avatar" aria-hidden="true"></span>
+        <div class="who">
+          <p class="name"></p>
+          <p class="meta"></p>
+        </div>
+        <button class="btn del" type="button" title="删除这条留言" hidden>
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 7h14M10 7V4.8h4V7M7.5 7l.9 12.2h7.2L16.5 7" fill="none" stroke="currentColor"
+                  stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="del-text">删除</span>
+        </button>
+      </header>
+      <p class="body"></p>
+      <footer class="note-foot"><time class="time"></time></footer>
+    </article>
+  </template>
+</body>
+</html>

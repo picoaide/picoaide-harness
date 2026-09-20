@@ -1,29 +1,35 @@
 {
   "demos": [
     {
-      "app_id": "demo-public",
-      "title": "演示 · 全员登录可见（旧公开档位迁移）",
-      "description": "需要员工账号：平台没有匿名面，一律要求登录，请求帧里的使用者永远是已登录身份。本条原为「公开可达」档位（该档位已下线）—— 历史配置在读取侧按登录语义处理，新版本不要再写。",
+      "app_id": "demo-showcase",
+      "wasm": "showcase.wasm",
+      "title": "演示 · 能力全集（手机版）",
+      "description": "把平台给应用的每一项能力都当场跑一遍并显示结果：身份注入、访问模式、建表与增删改查、事务提交与回滚、应用日志、包内资源、客户端 AI。窗口按手机比例锁定，用于客户演示与上线前自查。",
       "access": "login",
-      "purpose": "演示访问级别收敛为登录后全员可用：应用无需自己实现登录，宿主把身份放进请求帧",
-      "data_sensitivity": "公开"
+      "purpose": "一页看全应用平台的能力边界与调用形态（含被拒时的错误码与平台给出的建议）",
+      "data_sensitivity": "公开",
+      "window": { "ratio": "9:19.5", "width": 420, "height": 910 }
     },
     {
-      "app_id": "demo-login",
-      "title": "演示 · 登录可见",
-      "description": "需要员工账号：演示 access=login（缺省模式）。页面显示平台注入的身份（账号/用户 ID/部门/是否发布者）与共享留言墙。",
+      "app_id": "demo-forum",
+      "wasm": "forum.wasm",
+      "title": "演示 · 内部小论坛",
+      "description": "版块 / 主题 / 回帖的完整小工具：发帖、回帖、置顶、搜索、分页，数据落在应用自己的库里。电脑屏幕比例。",
       "access": "login",
-      "purpose": "演示登录门槛与身份注入：应用无需自己实现登录，宿主把身份放进请求帧",
-      "data_sensitivity": "内部"
+      "purpose": "演示一个真的能用的内部工具：多表关系、事务写入、检索与分页",
+      "data_sensitivity": "内部",
+      "window": { "ratio": "16:9", "width": 1280, "height": 720 }
     },
     {
-      "app_id": "demo-whitelist",
-      "title": "演示 · 白名单可见",
-      "description": "需要登录且在名单内：演示 access=whitelist。平台只负责要求登录并告知模式，名单比对由应用读自己的 picoaide.app.json 完成；不在名单里的账号会看到 403 页面并显示本人账号。",
+      "app_id": "demo-board",
+      "wasm": "board.wasm",
+      "title": "演示 · 留言板",
+      "description": "最简单的留言墙：写一条、按时间倒序看全部。电脑屏幕比例；准入走名单，顺带演示 whitelist 模式（不在名单里的账号会看到一页显示本人账号的提示）。",
       "access": "whitelist",
-      "whitelist": ["user001"],
-      "purpose": "演示名单准入：适合只给少数人用的内部工具",
-      "data_sensitivity": "内部"
+      "whitelist": [],
+      "purpose": "演示最小可用形态：一张表、一次写入、一个列表，外加名单准入",
+      "data_sensitivity": "内部",
+      "window": { "ratio": "16:9", "width": 1280, "height": 720 }
     }
   ]
 }

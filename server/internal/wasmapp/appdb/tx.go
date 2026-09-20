@@ -200,6 +200,6 @@ func txTimeoutError() *apperr.Error {
 		"事务超过 %s 硬预算，已强制回滚（事务内所有写入均未生效）", limits.SQLStatementBudget).
 		WithDetail("reason", ReasonTransactionTimeout).
 		WithDetail("budget_ms", limits.SQLStatementBudget.Milliseconds()).
-		WithHint(fmt.Sprintf("请把事务体缩小到 %s 内：只包必要的写，把查询与 AI 调用放到事务外",
+		WithHint(fmt.Sprintf("请把事务体缩小到 %s 内：只包必要的写，把查询与日志（log / assets.read）放到事务外",
 			limits.SQLStatementBudget))
 }

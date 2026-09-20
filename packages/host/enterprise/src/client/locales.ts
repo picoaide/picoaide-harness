@@ -6,7 +6,12 @@
  */
 export const zh = {
   'capability.title': '能力中心',
+  'capability.backToChat': '返回聊天',
   'capability.close': '关闭',
+  'capability.detail': '详情',
+  'capability.detailDescription': '说明',
+  'capability.detailNoDescription': '（这一条没有填写说明）',
+  'capability.subtitle': '技能与智能体：装一个就能在对话里直接 @ 使用',
   // 来源分区
   'capability.tabMine': '我的',
   'capability.tabMarket': '市场',
@@ -116,7 +121,12 @@ export const zh = {
 
 export const en: Record<keyof typeof zh, string> = {
   'capability.title': 'Capability Hub',
+  'capability.backToChat': 'Back to chat',
   'capability.close': 'Close',
+  'capability.detail': 'Details',
+  'capability.detailDescription': 'Description',
+  'capability.detailNoDescription': '(no description provided)',
+  'capability.subtitle': 'Skills and agents — install one and @-mention it in chat',
   'capability.tabMine': 'Mine',
   'capability.tabMarket': 'Market',
   'capability.filterAll': 'All',

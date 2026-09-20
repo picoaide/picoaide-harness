@@ -225,14 +225,17 @@ try {
   // 会话区已让位**（打包版真机复现过"面板与会话 407/407 分屏"的回归）。
   await clickLabel('定时任务', 3500)
   const cronOk = await waitFor(`(() => {
-    const view = document.querySelector('[data-dsh-cron-view]')
+    // 2026-09-20：容器标记统一成共享协议的 data-dsh-panel-surface，激活态由
+    // html[data-dsh-panel-active] 唯一表达（四个整页面板共用一套语义）。
+    if (document.documentElement.getAttribute('data-dsh-panel-active') !== 'cron') return false
+    const view = document.querySelector('[data-dsh-panel-surface="cron"]')
     const surface = document.querySelector('.dshDesktopConversationSurface')
     if (view === null || surface === null) return false
     const v = view.getBoundingClientRect(); const s = surface.getBoundingClientRect()
     if (v.height <= 0 || getComputedStyle(view).display === 'none') return false
     if (v.height < s.height * 0.9) return false
     return [...surface.children]
-      .filter(el => !el.hasAttribute('data-dsh-cron-view'))
+      .filter(el => !el.hasAttribute('data-dsh-panel-surface'))
       .every(el => getComputedStyle(el).display === 'none' || el.getBoundingClientRect().height === 0)
   })()`, 15000)
   reportStep('定时任务中心面板占满中列（真实数据，会话区已让位）', cronOk === true)

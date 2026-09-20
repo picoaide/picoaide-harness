@@ -6,6 +6,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { CommandUiContract } from '@deepseek-ai/dsh-client-ui-commands/client'
 import { ConnectorTrigger } from './ConnectorTrigger.tsx'
+import { mountConnectorCenter } from './connector-surface.tsx'
 import { en, setActiveLocale, type ConnectorsKey, zh } from './locales.ts'
 import { t } from './locales.ts'
 
@@ -81,6 +82,10 @@ export function apply(ctx: ClientContext): void {
     }, ConnectorTrigger)),
     'connectors: connector center foot action',
   )
+
+  // 中列整页（插件启动时挂一次；容器常驻会话列、在 React 树之外）。切换语义与
+  // 能力中心 / 应用中心 / 定时任务共用 `@picoaide/dsh-panel-surface`。
+  ctx.effect(() => mountConnectorCenter(), 'connectors: connector center surface')
 
   const commandUi = ctx.get('commandUi') as CommandUiContract
   const sessions = ctx.get('sessions') as { binding(sessionId: string): { session?: { prompt(content: Array<{ type: 'text'; text: string }>, mode: 'queue'): Promise<unknown> } } | undefined }
