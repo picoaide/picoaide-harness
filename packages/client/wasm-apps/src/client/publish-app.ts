@@ -639,6 +639,131 @@ export function parsePublishOutcome(payload: unknown): PublishSuccess | PublishF
 }
 
 /**
+ * 标识查重入口（宿主只读代理 → 服务端 `GET /apps/wasm/:app_id/availability`）。
+ *
+ * 为什么是**独立端点**而不是复用目录（`catalog`）：目录**故意**不列冻结应用、也不列
+ * "占名但从未发布成功"的行，而这两类都实打实占着标识。拿目录当唯一性判据会给出
+ * "这个标识没人用"的**反向**结论 —— 用户填完一整个包才在最后一步拿到 409。
+ * @see {@link checkAppIdAvailability}
+ */
+export const AVAILABILITY_PATH = '/api/pico/apps/wasm'
+
+/** 标识查重结论（服务端 `availability` 的字段子集；字段名是跨端契约）。 */
+export interface AppIdAvailability {
+  /** 服务端回显的标识（未归一化：`My-Tool` 会原样回）。 */
+  appId: string
+  /** 形态是否合法（平台规则：小写/长度/保留字/纯数字/punycode 前缀）。 */
+  valid: boolean
+  /** 标识是否已被占用（**含**冻结、下架、软删的占名行）。 */
+  exists: boolean
+  /** 能否用它**发首版**（= 未被占用）。 */
+  available: boolean
+  /** 严格归属：这一行是不是登记在你名下（管理员接管时仍为 false）。 */
+  ownedByYou: boolean
+  /** 能否对这个标识**发布**（本人的应用，或管理员的兜底接管）。 */
+  canPublish: boolean
+  /** 判词：available / yours / taken / invalid。 */
+  reason: 'available' | 'yours' | 'taken' | 'invalid'
+  /** 非 available 时的稳定错误码（`NAME_TAKEN` / `INVALID_APP_ID`），与发布路径同码。 */
+  code: string
+  /** 可读原因（服务端原文，客户端不改写）。 */
+  message: string
+  /** 可操作提示（服务端原文）。 */
+  hints: string[]
+}
+
+/** {@link checkAppIdAvailability} 的结果：成功给判词，失败给结构化失败。 */
+export type AvailabilityOutcome =
+  | { ok: true, availability: AppIdAvailability }
+  | PublishFailure
+
+/**
+ * 解析标识查重载荷。**fail-closed**：判词字段认不出来就返回 `null`（调用方据此
+ * 判定为"查重不可用"），绝不默认成"可用"—— 那会让表单放行一次注定失败的发布。
+ * @param payload - 服务端响应体。
+ * @returns 判词，或 `null`（形状不认识）。
+ */
+export function parseAvailability(payload: unknown): AppIdAvailability | null {
+  if (typeof payload !== 'object' || payload === null) return null
+  const raw = payload as Record<string, unknown>
+  const reason = raw.reason
+  if (reason !== 'available' && reason !== 'yours' && reason !== 'taken' && reason !== 'invalid') return null
+  return {
+    appId: typeof raw.app_id === 'string' ? raw.app_id : '',
+    valid: raw.valid === true,
+    exists: raw.exists === true,
+    available: raw.available === true,
+    ownedByYou: raw.owned_by_you === true,
+    canPublish: raw.can_publish === true,
+    reason,
+    code: typeof raw.code === 'string' ? raw.code : '',
+    message: typeof raw.message === 'string' ? raw.message : '',
+    hints: Array.isArray(raw.hints) ? raw.hints.filter((h): h is string => typeof h === 'string') : [],
+  }
+}
+
+/**
+ * 问服务端"这个 app_id 现在能不能用"。
+ *
+ * 只读、便宜、可重复：服务端不编译、不写盘、不占版本号、不进审计、不消耗上传额度。
+ * 因此它适合"用户每敲几个字问一次 + 提交前再问一次"。
+ *
+ * ⚠️ **它是体验优化，不是权威判据**：权威永远是发布那一刻服务端的 `NAME_TAKEN`。
+ * 两次调用之间别人可能抢注同名，所以调用方**不得**把"这里说可用"当成发布一定成功；
+ * 反过来，"这里说被占用"才是可以据此拦下提交的正面证据。
+ * @param appId - 用户输入的标识（原值；服务端按原值判形态，不做静默小写）。
+ * @param deps - 可注入的 fetch / 取消信号。
+ * @returns 判词或结构化失败（永不抛异常）。
+ */
+export async function checkAppIdAvailability(
+  appId: string,
+  deps: RequestDeps = {},
+): Promise<AvailabilityOutcome> {
+  const trimmed = appId.trim()
+  if (trimmed === '') {
+    // 空串不发请求：表单本来就不该在没填的时候问服务端。这里给出一个与本地预校验
+    // **同码同文案**的判词，调用方不必为"空输入"再写一个分支。
+    return {
+      ok: true,
+      availability: {
+        appId: '',
+        valid: false,
+        exists: false,
+        available: false,
+        ownedByYou: false,
+        canPublish: false,
+        reason: 'invalid',
+        code: 'app_id_required',
+        message: t('appCenter.invalidAppIdRequired'),
+        hints: [],
+      },
+    }
+  }
+  // app_id 只用 [a-z0-9-]，本不需要百分号编码；仍然编一次是因为**形态非法**的输入
+  // （用户还没改完就触发防抖）也要能安全地送到服务端换回一句"必须全小写"，
+  // 而不是在 URL 拼接处炸掉。
+  const outcome = await requestJSON(
+    `${AVAILABILITY_PATH}/${encodeURIComponent(trimmed)}/availability`,
+    { method: 'GET' },
+    deps,
+  )
+  if (!outcome.ok) return outcome
+  const availability = parseAvailability(outcome.payload)
+  if (availability === null) {
+    return {
+      ok: false,
+      status: outcome.status,
+      code: 'UNEXPECTED_RESPONSE',
+      message: t('appCenter.availabilityShapeMismatch'),
+      details: { payload: outcome.payload },
+      hints: [t('appCenter.availabilityShapeHint')],
+      transport: false,
+    }
+  }
+  return { ok: true, availability }
+}
+
+/**
  * 提交一次发布：读文件 → base64 → `POST /api/pico/apps/wasm/publish` → 解析结果。
  *
  * 分片与 90 s 预算**不在这里**：那是宿主 `/publish` 的编排（`base64 > 8 MiB` 自动分片、

@@ -137,6 +137,10 @@ func registerWasm(r *gin.Engine, d Deps) {
 	wg.DELETE("/:app_id", d.Wasm.Delete)
 	wg.GET("/:app_id/diagnostics", d.Wasm.Diagnostics)
 	wg.GET("/:app_id/schema", d.Wasm.Schema)
+	// 标识唯一性预查（2026-09-20）：发布表单填 app_id 时异步问它、提交前再问一次。
+	// **只读**（不编译/不写盘/不占版本号/不进审计/不消耗上传额度），因此不进
+	// largeBodyRoutes 也没必要限流；判据与发布同源（GetWasmApp + checkOwner）。
+	wg.GET("/:app_id/availability", d.Wasm.Availability)
 	// 发布者本人的版本历史 + 审核结论（含被拒理由）。R1-pm-3：审核开关一旦打开，
 	// 发布者此前只有发布那一刻的"待审核"一句话，之后**永远**收不到结论
 	// （reason 写了没人读、版本号又永久占位）—— 这条是作者侧唯一的结论出口。

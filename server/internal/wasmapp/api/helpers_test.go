@@ -396,6 +396,8 @@ func (e *testEnv) mount(r *gin.Engine) {
 	cli.DELETE("/:app_id", e.h.Delete)
 	cli.GET("/:app_id/diagnostics", e.h.Diagnostics)
 	cli.GET("/:app_id/schema", e.h.Schema)
+	// 标识唯一性预查（2026-09-20）：与 internal/router 的申报逐条一致。
+	cli.GET("/:app_id/availability", e.h.Availability)
 	// 发布者本人的版本历史 + 审核结论（R1-pm-3）：与 internal/router 的申报逐条一致。
 	cli.GET("/:app_id/releases", e.h.MyReleases)
 	// 客户端专属访问模型的三个端点（契约 §5.1/§5.1b/§20.1）：
