@@ -245,11 +245,25 @@ type Stats struct {
 // 为什么串行：编译是 CPU 密集且峰值内存高（32 MiB 模块的编译峰值是内存四笔账之一，
 // §4.3）。串行把并发度固定为 1，从而把"编译池被上传打满"这条路封死。
 type Compiler struct {
-	opt    Options
-	cache  string
-	child  string
-	logger Logger
-	iso    *isolationPlan
+	opt   Options
+	cache string
+	// childCacheDir 是**实际交给编译子进程**的缓存目录。
+	//
+	// 与 `cache`（配置面/诊断面）分开的理由（2026-09-21 四轮审计 P2-①）：缓存目录
+	// 形状不可信时（符号链接、group 可写、条目非普通文件），wazero 的磁盘缓存是
+	// **读 + 写** —— 子进程会先查表，命中就直接加载那份"机器码"并**干跑**它。
+	// 在 `auto` 档（compose 默认）没有 OS 级隔离时，那等于让能布置缓存目录的人
+	// 在编译进程里执行代码，而编译进程读得到数据根。
+	// 执行侧已经"不可信 ⇒ 不用"（runtime.NewCompilationCache），编译侧此前只在
+	// `require` 档 fail-closed、其余档位**告警照用** ⇒ 两侧不对称。
+	// 现在的口径：不可信 ⇒ 子进程改用一个**全新的临时目录**（本进程创建、0700、
+	// 退出即删）—— 既不读攻击者的条目，也不往那棵树里写；编译功能不受影响。
+	childCacheDir string
+	// childCacheTemp 非空表示 childCacheDir 是我们创建的临时目录（关闭时要清）。
+	childCacheTemp string
+	child          string
+	logger         Logger
+	iso            *isolationPlan
 	// isoMode 是**生效的隔离档位**（构造时冻结）。保留它是为了让调用方能拿到
 	// 结构化状态而不是只有一句描述文案（见 IsolationStatus）。
 	isoMode IsolationMode
@@ -352,6 +366,9 @@ func New(opt Options) (*Compiler, error) {
 	if cerr != nil {
 		return nil, cerr
 	}
+	// 默认：子进程用配置的缓存目录。
+	childCacheDir := cache
+	var childCacheTemp string
 	if !report.Trusted() {
 		for _, v := range report.Violations {
 			opt.Logger.Printf("compile: ⚠️ 缓存目录不可信：%s（%s）", v.Path, v.Reason)
@@ -361,6 +378,20 @@ func New(opt Options) (*Compiler, error) {
 				"缓存条目会被执行进程 mmap 成机器码，require 档不接受可投毒的缓存",
 				len(report.Violations), report.Violations[0].Path, report.Violations[0].Reason)
 		}
+		// 非 require 档：**不拒绝启动，但也不碰那棵树**（四轮审计 P2-①）。
+		// wazero 的磁盘缓存是读 + 写：子进程命中就直接加载那份"机器码"并干跑它 ——
+		// 能布置缓存目录的人因此可以在编译进程里执行代码（auto 档常常没有 OS 级隔离）。
+		// 换一个本进程新建的 0700 临时目录：既不读攻击者的条目，也不往里写。
+		tmp, terr := os.MkdirTemp("", "picoaide-compile-cache-")
+		if terr != nil {
+			return nil, fmt.Errorf("compile: 缓存目录不可信，且无法创建替代缓存目录: %w", terr)
+		}
+		if cerr := os.Chmod(tmp, os.FileMode(limits.DataDirMode)); cerr != nil {
+			_ = os.RemoveAll(tmp)
+			return nil, fmt.Errorf("compile: 替代缓存目录权限设置失败: %w", cerr)
+		}
+		opt.Logger.Printf("compile: ⚠️ 缓存目录不可信 ⇒ 本次编译进程改用临时缓存目录（不读也不写那棵树）：%s", tmp)
+		childCacheDir, childCacheTemp = tmp, tmp
 	}
 	// 兼容面：旧的一行式权限描述仍保留（诊断/验收输出用），判据比 cachetrust 浅，
 	// 只回答"根目录权限是否合 §4.3.1-d"。
@@ -379,17 +410,19 @@ func New(opt Options) (*Compiler, error) {
 	}
 
 	c := &Compiler{
-		opt:         opt,
-		cache:       cache,
-		child:       child,
-		logger:      opt.Logger,
-		iso:         plan,
-		isoMode:     opt.Isolation,
-		jobs:        make(chan *job, opt.MaxQueue),
-		stop:        make(chan struct{}),
-		done:        make(chan struct{}),
-		uploads:     map[int64]*uploadState{},
-		lastReclaim: time.Now(),
+		opt:            opt,
+		cache:          cache,
+		childCacheDir:  childCacheDir,
+		childCacheTemp: childCacheTemp,
+		child:          child,
+		logger:         opt.Logger,
+		iso:            plan,
+		isoMode:        opt.Isolation,
+		jobs:           make(chan *job, opt.MaxQueue),
+		stop:           make(chan struct{}),
+		done:           make(chan struct{}),
+		uploads:        map[int64]*uploadState{},
+		lastReclaim:    time.Now(),
 	}
 	go c.run()
 	return c, nil
@@ -547,6 +580,10 @@ func (c *Compiler) Close() error {
 	var err error
 	c.once.Do(func() {
 		close(c.stop)
+		// 临时缓存目录（不可信缓存的替代品）随编译器关闭一起清掉。
+		if c.childCacheTemp != "" {
+			_ = os.RemoveAll(c.childCacheTemp)
+		}
 		// 1) 先断掉在飞编译：杀子进程会让 proc.request 立刻返回错误，worker 随即
 		//    从 runJob 出来看到 stop 并收尾。
 		c.mu.Lock()
@@ -646,7 +683,7 @@ func (c *Compiler) compileOne(modulePath string) (*Result, *apperr.Error) {
 	// 而 mtime 只被写入推进（回收只删旧的，不影响"最新"）。
 	beforeMtime, beforeEntries := c.newestCacheMtime()
 
-	req := Request{Op: OpCompile, ModulePath: modulePath, CacheDir: c.cache}
+	req := Request{Op: OpCompile, ModulePath: modulePath, CacheDir: c.childCacheDir}
 	resp, rerr := proc.request(req, c.opt.Timeout)
 	if rerr != nil {
 		return nil, c.explainMemoryDeclaration(rerr)
@@ -778,7 +815,7 @@ func (c *Compiler) spawnChild(moduleDir string) (*childProcess, error) {
 		"-cache-dir", c.cache,
 	}, c.opt.ChildArgs...)
 	proc, err := startChild(c.child, args, env, c.iso, isolationTargets{
-		CacheDir:     c.cache,
+		CacheDir:     c.childCacheDir,
 		ReadOnlyDirs: readDirs,
 		Env:          env,
 	})
