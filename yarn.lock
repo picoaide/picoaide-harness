@@ -1433,7 +1433,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-client-ui-plugin-manager@npm:^0.1.6-alpha.2":
+"@deepseek-ai/dsh-client-ui-plugin-manager@npm:0.1.6-alpha.2, @deepseek-ai/dsh-client-ui-plugin-manager@npm:^0.1.6-alpha.2":
   version: 0.1.6-alpha.2
   resolution: "@deepseek-ai/dsh-client-ui-plugin-manager@npm:0.1.6-alpha.2"
   peerDependencies:
@@ -6041,6 +6041,7 @@ __metadata:
     "@deepseek-ai/dsh-api-workspace-controller": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-client-locale": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-client-store": "npm:0.1.6-alpha.2"
+    "@deepseek-ai/dsh-client-ui-plugin-manager": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-client-ui-renderer": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-client-ui-settings": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-client-ui-settings-plugins": "npm:0.1.6-alpha.2"

@@ -108,9 +108,45 @@ export class DesktopWindowsPwshSandbox extends SandboxPwshExecutor {
     })
   }
 
-  protected override async runArgv(spec: ShellExecSpec, argv: readonly string[]): Promise<ShellRunResult> {
+  /**
+   * Adapt one argv **and** keep the spec object identity the base class will spawn with.
+   *
+   * `adaptWindowsAclExecution` returns a *new* spec carrying the runner-only
+   * `ELECTRON_RUN_AS_NODE`, but the base class builds the child environment from
+   * the spec instance it was handed — substituting our copy would silently drop
+   * that variable and relaunch the trampoline in GUI mode (the exact failure this
+   * adapter exists to prevent). Copying the adapted fields back onto the original
+   * object is the only way to keep the runner env on the object the base spawns
+   * with. Non-runner calls return the same spec instance and are left untouched.
+   * @param spec - spec the base class will spawn with.
+   * @param argv - argv to adapt.
+   * @returns argv to spawn with.
+   */
+  private adaptInPlace(spec: ShellExecSpec, argv: readonly string[]): readonly string[] {
     const adapted = this.adapt(spec, argv)
-    return super.runArgv(adapted.spec, adapted.argv)
+    if (adapted.spec !== spec) Object.assign(spec, adapted.spec)
+    return adapted.argv
+  }
+
+  /**
+   * Upstream 0.1.6-alpha.2 changed this seam twice: the second parameter is now
+   * `argv | (signal) => Promise<argv>` (the sandbox subclass passes the function
+   * form, because ACL confinement must run under the same foreground deadline as
+   * the spawn), and the return is `{ result, spawnRequested }` instead of a bare
+   * result. Adapting inside the callback keeps the upstream deadline authoritative
+   * for confinement — resolving the callback ourselves would have re-implemented it.
+   * @param spec - resolved execution settings.
+   * @param argvOrPrepare - exact argv, or preparation cancelled by the same deadline as execution.
+   * @returns the foreground result and whether argv reached the subprocess provider.
+   */
+  protected override async runArgv(
+    spec: ShellExecSpec,
+    argvOrPrepare: readonly string[] | ((signal: AbortSignal) => Promise<readonly string[]>),
+  ): Promise<{ result: ShellRunResult, spawnRequested: boolean }> {
+    if (typeof argvOrPrepare === 'function') {
+      return await super.runArgv(spec, async signal => this.adaptInPlace(spec, await argvOrPrepare(signal)))
+    }
+    return await super.runArgv(spec, this.adaptInPlace(spec, argvOrPrepare))
   }
 
   protected override startArgv(spec: ShellExecSpec, argv: readonly string[]): ShellProcess {
