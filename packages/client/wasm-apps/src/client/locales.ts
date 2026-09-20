@@ -125,6 +125,21 @@ export const zh = {
   'appCenter.fileChosen': '已选择',
   'appCenter.appId': '应用标识（app_id）',
   'appCenter.appIdHint': '小写字母、数字与连字符；它就是应用域名标签',
+  // ---- 标识唯一性查重（2026-09-20）----
+  // 四态各自可辨：空闲 / 是你的（发新版）/ 被别人占了 / 名字本身不合法。
+  // 「被别人占了」**不指明是谁**（平台口径：明确告知占用关系，不泄露是谁/什么内容）。
+  'appCenter.availabilityChecking': '正在检查该标识是否可用…',
+  'appCenter.availabilityFree': '这个标识可以用',
+  'appCenter.availabilityYours': '这是你发布的应用，可以发新版本',
+  'appCenter.availabilityTaken': '该标识已被占用，请换一个名字',
+  'appCenter.availabilityTakenHint': '标识一经发布即永久占用：首个发布者一直持有，被下架或删除也不释放',
+  'appCenter.availabilityInvalid': '这个标识不符合命名规则，请按提示修改',
+  // 查重**没问成**（宿主/网络故障）：既不能说"可用"也不能说"被占用" ——
+  // 说可用会放行一次注定失败的发布，说被占用会把一个合法的名字误杀。
+  'appCenter.availabilityUnknown': '暂时无法确认该标识是否可用（不影响提交，提交时服务端会再判一次）',
+  // 查重载荷认不出来（契约漂移）：与"查询失败"分开说，因为处置方式不同。
+  'appCenter.availabilityShapeMismatch': '查重结果与客户端预期不一致，无法显示结论',
+  'appCenter.availabilityShapeHint': '把这条交给平台维护者：通常意味着服务端刚改了查重字段名',
   'appCenter.version': '版本号',
   'appCenter.titleField': '标题',
   'appCenter.titleHint': '首版必填；它就是应用中心里显示的名字',
@@ -408,6 +423,15 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.fileChosen': 'Selected',
   'appCenter.appId': 'App ID',
   'appCenter.appIdHint': 'lowercase letters, digits and dashes; it becomes the app hostname label',
+  'appCenter.availabilityChecking': 'Checking whether this App ID is available…',
+  'appCenter.availabilityFree': 'This App ID is available',
+  'appCenter.availabilityYours': 'You published this app — you can release a new version',
+  'appCenter.availabilityTaken': 'This App ID is already taken; please pick another name',
+  'appCenter.availabilityTakenHint': 'An App ID is claimed permanently on first publish: it stays with its publisher even after unpublish or delete',
+  'appCenter.availabilityInvalid': 'This App ID does not follow the naming rules — see the hint',
+  'appCenter.availabilityUnknown': 'Could not confirm whether this App ID is available (you can still submit; the server checks again)',
+  'appCenter.availabilityShapeMismatch': 'The availability result does not match what the client expects',
+  'appCenter.availabilityShapeHint': 'Report this to the platform maintainer: the server likely renamed an availability field',
   'appCenter.version': 'Version',
   'appCenter.titleField': 'Title',
   'appCenter.titleHint': 'Required on the first release; this is the name shown in the App Center',
