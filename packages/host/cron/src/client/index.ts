@@ -27,6 +27,11 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 // (which only declared the removed keyed `settings.plugin.item`) to the
 // `ui-plugin-manager` page, so this activation moved with it.
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
+// The branded Session identity the navigator accepts (compile-time brand, no runtime cost).
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+// Type-only: pulls the `ctx.uiWorkspace` Context merge — the navigation owner
+// that replaced `ctx.sessions.open()` in 0.1.6-alpha.2.
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { CronKey } from './locales.ts'
@@ -151,9 +156,15 @@ export function apply(ctx: ClientContext): void {
   const workspacesService = ctx.get('workspaces') as IWorkspaces | undefined
   const connection = ctx.get('connection') as ConnectionHandle | undefined
   const api = connection?.api
-  // Session jump: execution detail's "open session" button targets the shell.
-  const sessions = ctx.get('sessions') as { open(id: string): void } | undefined
-  const openSession = sessions === undefined ? undefined : (id: string) => { sessions.open(id) }
+  // Session jump: execution detail's "open session" button asks the Workspace
+  // navigator to show that Session. 0.1.6-alpha.2 deleted `ctx.sessions.open()`
+  // (the session contract now says navigation belongs to the view owners), so
+  // the previous `as { open(id) }` cast compiled while the click threw — the
+  // cast is gone, the type comes from the declaring package.
+  const navigation = ctx.get('uiWorkspace')
+  const openSession = navigation === undefined
+    ? undefined
+    : (id: string) => { navigation.openSession(id as SessionId) }
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',
     id: 'pico-cron',

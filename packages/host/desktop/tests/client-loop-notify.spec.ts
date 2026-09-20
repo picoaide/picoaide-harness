@@ -31,9 +31,9 @@ describe('desktop loop-notify client', () => {
   it('opens a session once for a fresh request and ignores duplicates', async () => {
     let requestedAt = 100
     const request = vi.fn(async () => validResponse('session-jump', requestedAt))
-    const open = vi.fn()
+    const openSession = vi.fn()
     const ctx = {
-      sessions: { open },
+      get: (name: string) => (name === 'uiWorkspace' ? { openSession } : undefined),
       effect: (register: () => () => void) => {
         const dispose = register()
         // interval + initial poll happen inside the component effect; run a few ticks
@@ -45,11 +45,11 @@ describe('desktop loop-notify client', () => {
 
     applyLoopNotifyClient(ctx)
     await new Promise(resolve => setTimeout(resolve, 20))
-    expect(open).toHaveBeenCalledWith(expect.stringMatching(/^session-jump$/))
+    expect(openSession).toHaveBeenCalledWith('session-jump')
 
     // A duplicate fetch for the same requestedAt must not reopen.
     await new Promise(resolve => setTimeout(resolve, 20))
-    expect(open).toHaveBeenCalledTimes(1)
+    expect(openSession).toHaveBeenCalledTimes(1)
   })
 
   it('persists the consumed timestamp in sessionStorage (P2-24)', async () => {
@@ -59,9 +59,9 @@ describe('desktop loop-notify client', () => {
       setItem: (key: string, value: string) => { storage.set(key, value) },
     })
     const request = vi.fn(async () => validResponse('session-persist', 777))
-    const open = vi.fn()
+    const openSession = vi.fn()
     const ctx = {
-      sessions: { open },
+      get: (name: string) => (name === 'uiWorkspace' ? { openSession } : undefined),
       effect: (register: () => () => void) => {
         const dispose = register()
         return () => dispose()
@@ -71,13 +71,13 @@ describe('desktop loop-notify client', () => {
 
     applyLoopNotifyClient(ctx)
     await new Promise(resolve => setTimeout(resolve, 20))
-    expect(open).toHaveBeenCalledTimes(1)
+    expect(openSession).toHaveBeenCalledTimes(1)
     expect(readLoopNotifySeenAt()).toBe(777)
 
     // A reloaded renderer (fresh poller, same storage) must not reopen it.
     const openAfterReload = vi.fn()
     applyLoopNotifyClient({
-      sessions: { open: openAfterReload },
+      get: (name: string) => (name === 'uiWorkspace' ? { openSession: openAfterReload } : undefined),
       effect: (register: () => () => void) => {
         const dispose = register()
         return () => dispose()
