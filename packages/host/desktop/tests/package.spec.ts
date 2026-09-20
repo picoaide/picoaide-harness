@@ -510,13 +510,16 @@ describe('published package surface', () => {
 
     // 上游 0.1.6-alpha.2 已原生包含该修复（`src/process.ts` 两处 STARTUPINFOW
     // 均为 `STARTF_USESHOWWINDOW | SW_HIDE`），我们据此**删除**了
-    // `patches/dsh-win32-process@0.1.5-rc.2.patch`。
+    // `patches/dsh-win32-process@0.1.5-rc.2.patch` 及其 resolutions 键。
     // 守卫因此从「断言补丁存在」改为「断言装出来的运行时确实是隐藏控制台」——
     // 判据绑定实际行为而不是补丁机制，上游若回退这里会红。
     const installedRuntime = readFileSync(join(processLib, 'index.js'), 'utf8')
     expect(installedRuntime.match(/dwFlags: 257,/gu)).toHaveLength(2)
     expect(installedRuntime.match(/wShowWindow: 0,/gu)).toHaveLength(2)
-    expect(workspaceManifest.resolutions['@deepseek-ai/dsh-win32-process@npm:^0.1.5-rc.2'])
-      .toBeUndefined()
+    // 补丁必须保持“已删除”状态：任一 dsh-win32-process 的 patch 键复活都说明
+    // 有人把已被上游吸收的补丁加了回来（那会让 verify-patches 判反向）。
+    const resurrected = Object.keys(workspaceManifest.resolutions ?? {})
+      .filter(key => key.startsWith('@deepseek-ai/dsh-win32-process@'))
+    expect(resurrected).toEqual([])
   })
 })

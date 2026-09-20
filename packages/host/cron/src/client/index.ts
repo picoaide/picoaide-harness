@@ -22,8 +22,11 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 // Type-only: the official right Sidebar's tab registry, seats, and `ctx.sidebarRight`.
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
-// Type-only: the keyed slot declaration (settings.plugin.item).
-import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
+// Type-only: the Plugins page's `plugins.item` list-slot declaration. Upstream
+// 0.1.6-alpha.2 moved the configuration-card contract from `ui-settings-plugins`
+// (which only declared the removed keyed `settings.plugin.item`) to the
+// `ui-plugin-manager` page, so this activation moved with it.
+import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { CronKey } from './locales.ts'
@@ -109,26 +112,30 @@ export function apply(ctx: ClientContext): void {
   }, 'dsh-cron: browser cron service')
   ctx.provide(BROWSER_CRON_SERVICE, browserCron)
 
-  // Settings card: one staged form over the cron namespace (registered by
-  // the Host half; keying on the namespace pairs the two halves). The card's
-  // slot (`settings.plugin.item`) is declared by the upstream
-  // `ui-settings-plugins` row, which the desktop profile disables on purpose
-  // (packages/host/desktop/cordis.patch.yml: the desktop hides the upstream
-  // plugins tab), so this card is intentionally invisible on desktop. Probe the
+  // Settings card: one form over the cron namespace (registered by the Host
+  // half; the card edits that namespace). Upstream 0.1.6-alpha.2 replaced the
+  // old keyed `settings.plugin.item` with the Plugins page's **list** slot
+  // `plugins.item`, whose owner contract adds a `view: 'summary' | 'page'`
+  // switch. That slot is declared by the upstream `ui-plugin-manager` page,
+  // which the desktop profile disables on purpose
+  // (packages/host/desktop/cordis.patch.yml: the desktop owns its own panel
+  // chrome), so this card is intentionally invisible on desktop. Probe the
   // declaration instead of waiting on it: `slots.inject` is silent when the
   // declaration never arrives, which reads as a broken render rather than a
-  // configured absence. `spec` is the probe — a declared keyed slot is empty
+  // configured absence. `spec` is the probe — a declared list slot is empty
   // until its cards register, so `entries` would not distinguish the two.
   // The declaration precedes this row in every composed roster (the Web
   // bundle's rows come first, this package's insert last), so one probe at
   // apply time sees it whenever the row is enabled.
   const settingsScope = ctx.get('settingsScope') as { bind<S>(spec: SettingsScopeSpec<S>): SettingsScope<S> } | undefined
-  if (settingsScope !== undefined && ctx.slots.spec('settings.plugin.item') !== undefined) {
+  if (settingsScope !== undefined && ctx.slots.spec('plugins.item') !== undefined) {
     const scope = settingsScope.bind<CronSettings>({ namespace: CRON_NS })
     const card = new CronSettingsCardController(scope)
-    ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
-      name: 'settings.plugin.item',
-      key: CRON_NS,
+    ctx.slots.inject('plugins.item', () => ctx.slots.register({
+      name: 'plugins.item',
+      id: 'cron',
+      order: 40,
+      label: () => t('job.listTitle'),
       locale: LOCALE_NS,
       inject: () => card.inject(),
     }, CronSettingsCard))
@@ -181,7 +188,7 @@ export function apply(ctx: ClientContext): void {
       id: CRON_TAB_ID,
       kind: CRON_TAB_KIND,
       title: () => t('job.listTitle'),
-      guide: [{ order: 30, title: () => t('job.listTitle') }],
+      guide: [{ id: CRON_TAB_ID, order: 30, title: () => t('job.listTitle') }],
     }), 'dsh-cron: right sidebar tab type')
     scope.effect(() => scope.slots.inject('sidebar.right.pane.tab', () => scope.slots.register({
       name: 'sidebar.right.pane.tab',
