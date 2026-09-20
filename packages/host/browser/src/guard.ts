@@ -131,6 +131,23 @@ function isLoopbackIPv4(host: string): boolean {
   return Number.parseInt(parts[1]!, 10) === 127
 }
 
+/**
+ * 报告一个原始字符串是否**看起来是带 scheme 的绝对 URL**。
+ *
+ * 为什么要剥前导 C0 再判（2026-09-21 七轮审计 P2-①）：WHATWG 的 URL 解析器会**先去掉
+ * 前导/尾随的 C0 控制符与空格**，而 JS 的 `String.prototype.trim()` **不剥 `\x01` 之类**。
+ * 于是 `"\x01http://[::ffff:0177.0.0.1]:8080/"` 这种输入在 Node 侧 `new URL()` 抛错、
+ * 在 Chromium 侧被接受并归一化成回环 —— 如果 catch 分支只用 `trim()` 判"是不是绝对 URL"，
+ * 就会把它当成相对路径放行（真机实测：请求确实到达本机监听）。
+ * 口径与 WHATWG 对齐：剥掉**首尾**的 C0 控制符（U+0000–U+001F、U+007F）与空白，再判 scheme。
+ * @param raw - 候选原始字符串（模型输入 / 事件里的 URL）。
+ * @returns true 表示剥壳后形如 `scheme:`。
+ */
+export function looksLikeAbsoluteUrl(raw: string): boolean {
+  const stripped = raw.replace(/^[\u0000-\u0020\u007f]+/u, '').replace(/[\u0000-\u0020\u007f]+$/u, '')
+  return /^[a-z][a-z0-9+.-]*:/iu.test(stripped)
+}
+
 /** Schemes the embedded browser (a browser tab) may navigate to. */
 const ALLOWED_SCHEMES = new Set(['http:', 'https:', 'about:'])
 
@@ -167,7 +184,7 @@ export function classifyNavigation(rawUrl: string, surface: NavigationSurface = 
     // `[::ffff:7f00:1]`。若这里返回 'allow'，闸门等于对该 URL 失效，而 Chromium 照常
     // 落到本机监听（真机实测模型读到了本机 dev server 的正文）。判据：`^scheme:` 形态
     // 解析失败 ⇒ deny（保守方向）；纯相对路径才走放行分支。
-    return /^[a-z][a-z0-9+.-]*:/iu.test(rawUrl.trim()) ? 'deny' : 'allow'
+    return looksLikeAbsoluteUrl(rawUrl) ? 'deny' : 'allow'
   }
   if (surface.kind === 'app') {
     // 应用窗口：**只**允许它自己那个 app origin（§7.2 冻结）。http(s) 顶层导航同样

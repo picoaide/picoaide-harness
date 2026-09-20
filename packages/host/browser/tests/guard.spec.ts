@@ -375,8 +375,14 @@ describe('isLocalHostname：本机目标判定（五轮审计 P2-①/P3-①）',
       'http://[::ffff:0x7f.0.0.1]:9/',
       'HTTPS://[::ffff:0177.0.0.1]/x',
       'http://[fe80::1%25eth0]:80/',
+      // 前导 C0 控制符（七轮审计 P2-①）：WHATWG 会先剥掉它们再解析，而 JS 的 `trim()`
+      // 不剥 `\x01` ⇒ 只用 trim 判"是否绝对 URL"会把它当相对路径放行，而 Chromium
+      // 照常接受并落到本机（真机实测请求到达监听）。
+      '\u0001http://[::ffff:0177.0.0.1]:8080/',
+      '\u0000\u001f http://[::ffff:127.0.0.01]/',
+      '\u007fhttp://127.0.0.1:5173/',
     ]) {
-      expect(classifyNavigation(raw), raw).toBe('deny')
+      expect(classifyNavigation(raw), JSON.stringify(raw)).toBe('deny')
     }
     // 反向对照：相对路径仍然放行（页面无法借它越出自己的 origin）。
     expect(classifyNavigation('/local/path')).toBe('allow')
