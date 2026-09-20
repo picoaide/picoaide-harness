@@ -55,7 +55,12 @@ var seededSkillDigests = map[string]string{
 	// 与作者改成**渠道中性** —— title 去掉厂商名、author=平台内置。产品按渠道白标，
 	// 技能标题里写死厂商名会让渠道客户看到别的牌子。运行时名 `app-builder`（服务端
 	// 目录名 + 客户端常量 `APP_BUILDER_SKILL` 的绑定）与 `x-abi-version` 不动。
-	"0bbed996893d57b5369eeacc6bdfc69324c6aa205caf3f7741584d147c843cef": "2.0.0",
+	//
+	// 2026-09-20 **再次就地替换**（同一条 2.0.0）：登记后又补了 `references/design-interview.md`
+	// 与 `examples/go/web/*`（前后端分离示例的前端三件套）⇒ 整目录摘要变了。2.0.0 **从未随
+	// 任何 tag 下发**（上一个已发布的内置技能版本是 1.4.0），所以按本表的就地替换规则改写这
+	// 一条，而不是为一个没出过门的内容提版本号。
+	"08c409b0547aed5b0448575ac38dcd1f52bbb0cb8546e72782b2f0db5b26517e": "2.0.0",
 
 	// 1.2.0 = 本分支的完整技能交付内容（14 个文件）：
 	//   - references/imports.md（导入面白名单，R1-pm-18）+ abi/SKILL 指路；
