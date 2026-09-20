@@ -116,7 +116,11 @@ describe('语言切换后重新服务 chrome 页', () => {
     const { runtime, adapter } = makeRuntime()
     await runtime.ensureWindow(SHELL_ORIGIN, false)
     // Open a tab as well: its view must survive the chrome reload.
-    await runtime.open(`${SHELL_ORIGIN}/blank`)
+    // ⚠️ 用**普通外站**开这个标签（2026-09-21 起标签不得导航到 shell origin ——
+    // 那里镜像着 `dsh-auth-*` cookie，模型可借它绕过所有依赖持有性证明的本机守卫；
+    // 见 tests/audit-0921-shell-origin.spec.ts）。本用例只需要"存在一个标签视图"，
+    // URL 取哪个不影响它要钉的语义（tab 视图不被 reloadChromePages 重载）。
+    await runtime.open('https://tab.example/blank')
     const tabView = adapter.tabs.at(-1)!
     expect(adapter.windowLoads).toEqual([`${SHELL_ORIGIN}/browser-shell`])
     expect(adapter.overlays.at(-1)!.loadURL).toHaveBeenCalledWith(`${SHELL_ORIGIN}/browser-overlay`)
