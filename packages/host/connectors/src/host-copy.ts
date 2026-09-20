@@ -120,7 +120,7 @@ const zh = {
   // Diagnostic seam-verification throws. They are developer diagnostics, but
   // `registerMcp` embeds them verbatim into the row's rejected[] text, so they
   // follow the locale like every other message the panel can show.
-  'fence.ownProperty': 'MCP streamable-http 传输的 {field} 已是实例自有属性（SDK 改用类字段，原型访问器被绕开）',
+  'fence.notInstanceField': 'MCP streamable-http 传输的 {field} 不是实例自有字段（SDK 的请求字段形状已变更，实例级加固无处落笔）',
   'fence.requestInitNotFenced': 'MCP streamable-http 传输的 {field} 未被拦截（SDK 内部字段或构造方式已变更）',
   'fence.notInterceptable': 'MCP streamable-http 传输的 {field} 不可拦截',
   'fence.fetchNotFenced': 'MCP streamable-http 传输的 {field} 未被拦截（GET/SSE 通道会回落到默认 fetch 并跟随重定向）',
@@ -132,6 +132,7 @@ const zh = {
   'fence.resumeNotManual': "MCP streamable-http 传输的 resumeStream() 未强制 redirect:'manual'",
   'fence.targetUnresolved': '无法定位 MCP streamable-http 传输实现: {detail}',
   'fence.targetMismatch': 'MCP streamable-http 传输加固目标与 mcp-client 不一致（{detail}），拒绝注册',
+  'fence.foreignImport': '已安装的 dsh-mcp-client 构建并不 import 本护栏加固的 SDK 包（{detail}），拒绝注册',
   'fence.notHardened': 'MCP streamable-http 传输不可加固: {error}',
   'fence.verificationFailed': 'MCP streamable-http 重定向栅栏校验失败: {error}',
   'fence.oursLabel': '本包',
@@ -222,7 +223,7 @@ const en: Record<keyof typeof zh, string> = {
   'refresh.unsupported': 'Connector {id} does not support token refresh',
   'refresh.outboundBlocked': 'Token refresh was refused by the outbound policy: {message}',
 
-  'fence.ownProperty': 'MCP streamable-http transport: {field} is already an own property of the instance (the SDK switched to class fields, bypassing the prototype accessors)',
+  'fence.notInstanceField': "MCP streamable-http transport: {field} is not an own field of the instance (the SDK's request-field shape changed, so there is nowhere to harden the instance)",
   'fence.requestInitNotFenced': "MCP streamable-http transport: {field} was not intercepted (the SDK's internal field or construction changed)",
   'fence.notInterceptable': 'MCP streamable-http transport: {field} cannot be intercepted',
   'fence.fetchNotFenced': 'MCP streamable-http transport: {field} was not intercepted (the GET/SSE channel would fall back to the default fetch and follow redirects)',
@@ -234,6 +235,7 @@ const en: Record<keyof typeof zh, string> = {
   'fence.resumeNotManual': "MCP streamable-http transport: resumeStream() does not force redirect:'manual'",
   'fence.targetUnresolved': 'Cannot locate the MCP streamable-http transport implementation: {detail}',
   'fence.targetMismatch': 'The MCP streamable-http transport the fence hardens is not the one mcp-client uses ({detail}); registration refused',
+  'fence.foreignImport': 'The installed dsh-mcp-client build does not import the SDK package this fence hardens ({detail}); registration refused',
   'fence.notHardened': 'The MCP streamable-http transport cannot be hardened: {error}',
   'fence.verificationFailed': 'MCP streamable-http redirect fence verification failed: {error}',
   'fence.oursLabel': 'this package',

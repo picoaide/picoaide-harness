@@ -19,7 +19,7 @@
  * 这些用例是**确定性**的：它们并发调用 `tokens()` 并断言"恰好一次续期"，
  * 回退 `ensureFresh` 接线会立刻变红，不需要赢任何竞态。
  */
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -118,26 +118,28 @@ describe('SDK 自己续期后，旋转后的 refresh token 必须已经落盘', 
 describe('上游契约：SDK 必须 await provider.tokens()', () => {
   it('每一个 .tokens() 调用点都带 await（异步保鲜依赖这一点，升级上游必须重查）', async () => {
     // 我们把 provider 的 `tokens()` 改成"快过期先经单飞续期再交出"，这只有在
-    // 调用方 `await` 时才成立。pinned SDK 现在四个调用点全是 `await`；一旦升级把
-    // 某一处改回同步读取，同步位置会拿到一个 Promise（真值！）—— 于是它把
-    // Promise 当成令牌用，鉴权头会变成 "[object Promise]"，而且没有任何测试会红。
+    // 调用方 `await` 时才成立。同步读取位置会拿到一个 Promise（真值！）—— 于是它
+    // 把 Promise 当成令牌用，鉴权头会变成 "[object Promise]"，而且没有任何测试会红。
     // 所以这里对**依赖包源码**做一次形状断言：这是升级路径上的护栏，不是产品断言。
-    const dir = fileURLToPath(new URL('../node_modules/@modelcontextprotocol/sdk/dist/esm/client/', import.meta.url))
-    const files = readdirSync(dir).filter(f => f.endsWith('.js'))
-    expect(files.length).toBeGreaterThan(0)
+    //
+    // 2026-09-20 换代：上游 0.1.6-alpha.2 把 `@modelcontextprotocol/sdk@1.x`（ESM 目录
+    // `dist/esm/client/*.js`，四个调用点）换成 `@modelcontextprotocol/client@2.0.0`
+    // （单文件 bundle `dist/index.mjs`）。断言面因此从"目录下所有 .js"改为"该包实际
+    // 解析到的那个 ESM bundle"——判据不变（每个 `.tokens(` 调用点前必须有 await），
+    // 覆盖面不缩小：它扫的是**运行时真正会执行**的那份代码，而不是一份可能没人用的
+    // 旧目录。
+    const entry = fileURLToPath(import.meta.resolve('@modelcontextprotocol/client'))
+    expect(entry, '必须解析到 v2 的 ESM bundle').toContain('/dist/index.mjs')
+    const text = readFileSync(entry, 'utf8')
     const bare: string[] = []
     let awaited = 0
-    for (const file of files) {
-      const text = readFileSync(join(dir, file), 'utf8')
-      for (const match of text.matchAll(/(.{24})\.tokens\(\)/gsu)) {
-        if (/await\s+[\w.$]+\.$|await\s+this\._authProvider\.$|await\s+[\w.$]*\.$/.test(match[1]) || /await\s+[\w.$]*$/u.test(match[1])) {
-          awaited += 1
-        } else {
-          bare.push(`${file}: ${match[1].trim()}`)
-        }
-      }
+    // `tokens()` 与 `tokens(ctx)` 都是调用点（v2 的 auth 路径会传 {issuer}）；
+    // 判据 = `.tokens(` 之前的 32 个字符里，紧邻的是 `await <表达式>`。
+    for (const match of text.matchAll(/(.{32})\.tokens\(/gsu)) {
+      if (/await\s+[\w.$]+$/u.test(match[1])) awaited += 1
+      else bare.push(JSON.stringify(match[1]))
     }
-    expect(awaited, 'SDK 里应当存在 await provider.tokens() 调用点').toBeGreaterThan(0)
+    expect(awaited, 'SDK 里应当存在 await provider.tokens() 调用点').toBeGreaterThanOrEqual(2)
     expect(bare, `这些 .tokens() 调用点没有 await：\n${bare.join('\n')}`).toEqual([])
   })
 })

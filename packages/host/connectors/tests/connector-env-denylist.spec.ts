@@ -29,7 +29,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({ apply: () => {} }))
 
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import { parseServerConnectors } from '../src/index.ts'
 import { isDeniedEnvKey, sanitizeMcpEnv, stdioApprovalFingerprint } from '../src/policy.ts'
 import type { ConnectorDef } from '../src/types.ts'

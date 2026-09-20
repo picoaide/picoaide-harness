@@ -14,40 +14,55 @@
  * as an initial URL.
  *
  * The SDK gives no configuration seam for this (`createTransport` in the
- * installed `dsh-mcp-client` build passes only `requestInit: { headers }`), so
- * the fence is installed on the transport CLASS before any instance exists:
- * THREE prototype accessors make every instance's `_requestInit` carry
- * `redirect: 'manual'`, wrap its `_fetchWithInit` (the auth-provider path) and —
- * R5 — wrap its `_fetch`. `_fetch` is the one that closed the SSE hole:
- * `_startOrAuthSse()` calls `(this._fetch ?? fetch)(url, { method: 'GET',
- * headers, signal })` and does **not** spread `_requestInit`, so fencing the
- * init alone left the server-initiated SSE channel (opened automatically once
- * `initialize` answers 200 and `notifications/initialized` answers 202, and
- * again on every reconnect / `resumeStream`) following redirects with the full
- * header set. When `_fetch` is empty the accessor stores a wrapper over the
- * global `fetch`, so `(this._fetch ?? fetch)` can never fall back to it.
+ * installed `dsh-mcp-client` build passes only `requestInit: { headers }` and —
+ * since 0.1.6 — an optional `authProvider`), so the fence is installed on the
+ * transport CLASS before any instance exists.
+ *
+ * ## How the fence is installed, and why it changed in SDK v2
+ *
+ * Until upstream 0.1.5 the SDK's transport kept `_requestInit` / `_fetch` /
+ * `_fetchWithInit` as plain constructor assignments, so three prototype
+ * ACCESSORS intercepted every write and could force `redirect: 'manual'` on
+ * every instance. `@modelcontextprotocol/client@2.0.0` declares them as class
+ * fields (`dist/index.mjs:4947-4952`), i.e. every instance gets OWN data
+ * properties that shadow a prototype accessor — measured, not inferred:
+ *
+ * ```text
+ * node -e "…new StreamableHTTPClientTransport(u,o)…"
+ * _requestInit own? true proto get? false
+ * _fetch       own? true proto get? false
+ * _fetchWithInit own? true proto get? false
+ * ```
+ *
+ * An accessor fence on that shape patches nothing while still reporting
+ * "installed" — precisely the silent failure this module exists to prevent. The
+ * v2 fence therefore hardens the INSTANCE, the one place v2 still lets us
+ * write: the outbound entry points (`start`, `send`, `terminateSession`,
+ * `resumeStream`, `finishAuth`) are wrapped so that, before delegating, they
+ * rewrite that instance's own fields —
+ *
+ *  - `_requestInit` ← `{…init, redirect: 'manual'}` (every POST/DELETE spread),
+ *  - `_fetch`        ← forced-manual wrapper (POST/DELETE and the `GET`/SSE path),
+ *  - `_fetchWithInit`← forced-manual wrapper (the OAuth/auth-provider calls).
+ *
+ * The rewrite is durable (a symbol marks a hardened instance) and happens before
+ * the SDK reads anything, so the fire-and-forget SSE open, the reconnection
+ * timer and the 401/auth retries all use the hardened fields as well. The
+ * `_fetch` fallback matters for the production construction, which passes NO
+ * `fetch`: `(this._fetch ?? fetch)` must resolve to OUR wrapper, never to the
+ * global fetch's follow default.
  *
  * With `redirect: 'manual'` the SDK sees the real 3xx response and turns it
- * into a `StreamableHTTPError` from its own `!response.ok` branch (the GET path
- * included), so a redirect is a failed connection, never a followed one.
- *
- * Every other outbound channel of this transport is covered by the same three
- * accessors, because the SDK funnels all of them through `this._fetch` or
- * `this._fetchWithInit`: `send()` POST (`...this._requestInit` + `_fetch`),
- * `terminateSession()` DELETE (same), `resumeStream()`/reconnect (`_fetch` via
- * `_startOrAuthSse`), and the auth-provider calls (`_fetchWithInit`, plus one
- * `fetchFn: this._fetch` in the 403 upscoping branch — unreachable in this
- * product because `createTransport` never passes an `authProvider`). The SSE
- * `retry:` field only feeds a reconnection DELAY and the `endpoint` event
- * belongs to the deprecated HTTP+SSE transport this one does not parse, so
- * neither can name a new URL; `_url` is assigned once, in the constructor.
+ * into an `SdkHttpError`/protocol error from its own `!response.ok` branch (the
+ * GET path included), so a redirect is a failed connection, never a followed
+ * one.
  *
  * Fail-loud: {@link ensureMcpTransportRedirectFence} verifies the seam
  * behaviourally and throws {@link McpTransportFenceUnavailableError} when it
  * cannot — `registerMcp` then refuses to register any streamable-http server
- * instead of connecting unfenced. The field names are SDK internals; the
- * verification is what keeps a future SDK build from silently disabling the
- * fence.
+ * instead of connecting unfenced. The field and method names are SDK internals;
+ * the behavioural verification, not the name list, is what keeps a future SDK
+ * build from silently disabling the fence.
  *
  * The identity check that guards the build coupling is deliberately NOT
  * fail-closed on a path-spelling difference: it refuses when both resolutions
@@ -56,7 +71,7 @@
  * {@link verifyTargetsTheMcpClientSdk} for the field report that produced that
  * split.
  *
- * Build coupling: `@modelcontextprotocol/sdk` must stay EXTERNAL in this
+ * Build coupling: `@modelcontextprotocol/client` must stay EXTERNAL in this
  * package's bundle (it is a declared dependency, and `tsdown.config.ts` lists
  * it explicitly). An inlined copy is a different class object from the one
  * `dsh-mcp-client` constructs, which would leave the packaged app unfenced
@@ -67,11 +82,12 @@
  *
  * @module
  */
-import { realpathSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { DEFAULT_HOST_LOCALE, hostT, type HostLocale } from './host-copy.ts'
-import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import type { FetchLike } from '@modelcontextprotocol/client'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
+
 
 /** Thrown when the streamable-http transport seam could not be fenced. */
 export class McpTransportFenceUnavailableError extends Error {
@@ -81,11 +97,6 @@ export class McpTransportFenceUnavailableError extends Error {
   }
 }
 
-/** Per-instance storage behind the patched accessors (never a prototype field). */
-const rawRequestInit = new WeakMap<object, RequestInit | undefined>()
-const rawFetchWithInit = new WeakMap<object, unknown>()
-const rawFetch = new WeakMap<object, unknown>()
-
 /**
  * Marks a `fetch` this module already wraps.
  *
@@ -94,14 +105,51 @@ const rawFetch = new WeakMap<object, unknown>()
  */
 const FENCED_FETCH = Symbol('picoaide.mcp.transport-fence.fenced-fetch')
 
-/** The SDK module `dsh-mcp-client` constructs its streamable-http transport from. */
-const SDK_TRANSPORT_SUBPATH = '@modelcontextprotocol/sdk/client/streamableHttp.js'
+/**
+ * Marks a transport instance whose own request fields were already rewritten.
+ *
+ * The rewrite is idempotent and durable because the entry wrappers mutate the
+ * instance: once any fenced method ran, the SDK's own later reads (the
+ * fire-and-forget SSE open, the reconnection timer, the auth retries) see the
+ * hardened `_fetch` / `_fetchWithInit` / `_requestInit` without calling us
+ * again.
+ */
+const HARDENED = Symbol('picoaide.mcp.transport-fence.hardened')
+
+/**
+ * The module `dsh-mcp-client` constructs its streamable-http transport from.
+ *
+ * Upstream 0.1.6-alpha.2 replaced `@modelcontextprotocol/sdk@1.x` with
+ * `@modelcontextprotocol/client@2.0.0`; the old package still exists in this
+ * tree (the desktop package declares it, and `dsh-subagent-claude-code` uses
+ * it) — which is exactly why the identity check below has to name the package
+ * mcp-client ACTUALLY imports instead of one this module happens to resolve.
+ *
+ * Exported for the regression: the guard that reads the installed mcp-client
+ * build asserts this constant against the artifact, so a future SDK swap that
+ * leaves the constant behind goes red instead of silently hardening a package
+ * nobody loads.
+ */
+export const MCP_SDK_PACKAGE_SPECIFIER = '@modelcontextprotocol/client'
+const SDK_PACKAGE_SPECIFIER = MCP_SDK_PACKAGE_SPECIFIER
 const MCP_CLIENT_PACKAGE = '@deepseek-ai/dsh-mcp-client'
-const SDK_PACKAGE_MARKER = 'node_modules/@modelcontextprotocol/sdk'
+const SDK_PACKAGE_MARKER = 'node_modules/@modelcontextprotocol/client'
 
 const REQUEST_INIT_FIELD = '_requestInit'
 const FETCH_WITH_INIT_FIELD = '_fetchWithInit'
 const FETCH_FIELD = '_fetch'
+/**
+ * Outbound entry points of the v2 streamable-http transport.
+ *
+ * Every request the SDK can make starts in one of these (`Client.connect()`
+ * calls `start()`; every protocol message goes through `send()`; `close()` on
+ * the client side reaches `terminateSession()`; `resumeStream()` and the
+ * reconnection timer re-open the GET/SSE channel; `finishAuth()` redeems the
+ * authorization code). Hardening must happen before the SDK reads the fields,
+ * and these are the last points this module can still intercept — the fields
+ * themselves are own data properties in v2.
+ */
+const FENCED_METHODS = ['start', 'send', 'terminateSession', 'resumeStream', 'finishAuth'] as const
 /** Header the probe instance carries, so a leaked probe is recognizable. */
 const PROBE_HEADER = 'x-picoaide-transport-fence'
 /** Never contacted: the probe always supplies its own recording `fetch`. */
@@ -268,7 +316,13 @@ export type TargetVerdict =
   | { kind: 'ok'; ours: TargetResolution; theirs: TargetResolution }
   | { kind: 'unresolved'; detail: string }
   | { kind: 'proven-other'; ours: TargetResolution; theirs: TargetResolution }
-  | { kind: 'inconclusive'; ours: TargetResolution | null; theirs: TargetResolution | null }
+  /**
+   * The installed `dsh-mcp-client` build is readable and does NOT import the
+   * package this fence hardens: nothing this module could patch would ever be
+   * constructed. A readable witness, like `proven-other` — refuse loudly.
+   */
+  | { kind: 'proven-foreign'; detail: string }
+  | { kind: 'inconclusive'; ours: TargetResolution | null; theirs: TargetResolution | null; note?: string }
 
 /**
  * Check that the class this module patches is the class `dsh-mcp-client` will
@@ -279,14 +333,14 @@ export type TargetVerdict =
  * of the SDK, so patching any other copy (an inlined one, or a nested install
  * with a conflicting version range) would silently protect nothing.
  *
- * The comparison is the resolved FILE, not the package directory: the SDK ships
- * BOTH `dist/esm` and `dist/cjs` under one package root, and patching the ESM
- * class while the host loads the CJS one (or the reverse) would leave every
+ * The comparison is the resolved FILE, not the package directory: v2 ships BOTH
+ * `dist/index.mjs` and `dist/index.cjs` under one package root, and fencing the
+ * ESM class while the host loads the CJS one (or the reverse) would leave every
  * channel unfenced while a directory comparison still said "same package" —
- * measured in R5: the CJS copy of this class follows a redirect exactly like
- * the unfenced ESM one. The parent URL is mcp-client's own entry, so the second
- * resolution runs the ESM resolver over mcp-client's import conditions — the
- * same answer its static `import` gets at runtime.
+ * measured in R5 on the old SDK, whose CJS copy of this class follows a redirect
+ * exactly like the unfenced ESM one. The parent URL is mcp-client's own entry,
+ * so the second resolution runs the ESM resolver over mcp-client's import
+ * conditions — the same answer its static `import` gets at runtime.
  *
  * Three outcomes, because "the two strings differ" is not the same statement as
  * "two different files":
@@ -301,18 +355,75 @@ export type TargetVerdict =
  *   behavioural verification that follows patches and probes the real class, and
  *   a genuinely foreign target fails it. Refusing here is what took a
  *   customer's connector offline.
+ *
+ * Note what this check does NOT (only) do: it never looks at
+ * `@modelcontextprotocol/sdk` (v1) any more. Upstream 0.1.6 moved
+ * `dsh-mcp-client` to `@modelcontextprotocol/client@2.0.0`, and the v1 package is
+ * still installed in this tree for other consumers — resolving the old specifier
+ * succeeded, named OUR OWN copy, and reported `ok` while the real v2 transport
+ * went unfenced (audit B §4.2, measured).
+ *
+ * Path identity alone is still not enough for that class of failure, because
+ * Node resolves a package from the PARENT's directory upward: if a future
+ * `dsh-mcp-client` imported yet another SDK package, the resolution of OUR
+ * specifier from its entry would walk up and find the copy in this very package
+ * — `ok` again, with the real transport unfenced. So the installed mcp-client
+ * build is also READ, and the import has to name the package this fence hardens.
+ * A readable build that imports something else is refused
+ * ({@link verifyMcpClientImportsTheSdk}); an unreadable one stays a warning, per
+ * the 2026-09-13 field lesson (an `app.asar` path this process cannot stat must
+ * not take a customer's connector offline).
  */
 function verifyTargetsTheMcpClientSdk(): TargetVerdict {
   let oursPath = ''
   let theirsPath = ''
   try {
-    oursPath = fileURLToPath(import.meta.resolve(SDK_TRANSPORT_SUBPATH))
+    oursPath = fileURLToPath(import.meta.resolve(SDK_PACKAGE_SPECIFIER))
     const mcpEntry = import.meta.resolve(MCP_CLIENT_PACKAGE)
-    theirsPath = fileURLToPath(resolveFromParent(SDK_TRANSPORT_SUBPATH, mcpEntry))
+    theirsPath = fileURLToPath(resolveFromParent(SDK_PACKAGE_SPECIFIER, mcpEntry))
   } catch (error) {
     return { kind: 'unresolved', detail: String(error) }
   }
-  return judgeTargets(oursPath, theirsPath)
+  const coupling = verifyMcpClientImportsTheSdk()
+  if (coupling.kind === 'foreign') return { kind: 'proven-foreign', detail: coupling.detail }
+  const verdict = judgeTargets(oursPath, theirsPath)
+  if (coupling.kind === 'unknown' && verdict.kind === 'ok') {
+    // Same file, but the build that is supposed to import it could not be read:
+    // keep the identity report and let the behavioural probe be the gate.
+    return { kind: 'inconclusive', ours: verdict.ours, theirs: verdict.theirs, note: coupling.detail }
+  }
+  return verdict
+}
+
+/** Whether one installed bundle reaches `specifier` through a static import or `require`. */
+export function mcpClientBundleImportsSdk(source: string, specifier: string = MCP_SDK_PACKAGE_SPECIFIER): boolean {
+  const escaped = specifier.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  return new RegExp(`(?:from|require\\()\\s*["']${escaped}["']`, 'u').test(source)
+}
+
+/** What reading the installed `dsh-mcp-client` build said about the SDK it imports. */
+type McpClientSdkCoupling =
+  | { kind: 'imports'; detail: string }
+  | { kind: 'foreign'; detail: string }
+  | { kind: 'unknown'; detail: string }
+
+function verifyMcpClientImportsTheSdk(): McpClientSdkCoupling {
+  let entry = ''
+  try {
+    entry = fileURLToPath(import.meta.resolve(MCP_CLIENT_PACKAGE))
+  } catch (error) {
+    return { kind: 'unknown', detail: `mcp-client entry unresolved: ${String(error)}` }
+  }
+  let source = ''
+  try {
+    source = readFileSync(entry, 'utf8')
+  } catch (error) {
+    return { kind: 'unknown', detail: `mcp-client entry ${entry} unreadable:${errorCodeOf(error)}` }
+  }
+  if (!mcpClientBundleImportsSdk(source)) {
+    return { kind: 'foreign', detail: `the installed dsh-mcp-client build (${entry}) does not import ${SDK_PACKAGE_SPECIFIER}` }
+  }
+  return { kind: 'imports', detail: `${entry} imports ${SDK_PACKAGE_SPECIFIER}` }
 }
 
 /**
@@ -393,27 +504,45 @@ function protoOf(): Proto {
   return StreamableHTTPClientTransport.prototype as unknown as Proto
 }
 
-function patchField(
-  field: string,
-  wrap: (value: unknown) => unknown,
-  store: WeakMap<object, unknown>,
-  fallback?: () => unknown,
-): void {
-  Object.defineProperty(protoOf(), field, {
-    configurable: true,
-    enumerable: false,
-    get(this: object): unknown {
-      // The fallback only exists for `_fetch`: the SDK calls
-      // `(this._fetch ?? fetch)`, so a missing instance value must resolve to
-      // OUR wrapper (never to the global fetch). `_requestInit` deliberately
-      // has none — an SDK build that stops assigning it must fail the
-      // behavioural verification below, not be papered over.
-      return store.get(this) ?? fallback?.()
-    },
-    set(this: object, value: unknown): void {
-      store.set(this, wrap(value))
-    },
-  })
+/**
+ * Rewrite one live transport's own request fields so no request it makes can
+ * follow a redirect.
+ *
+ * This is the v2 seam. The SDK declares `_requestInit` / `_fetch` /
+ * `_fetchWithInit` as class fields, so each instance carries them as OWN data
+ * properties and a prototype accessor would be shadowed (measured — see the
+ * module header). Writing the instance's own properties is therefore the only
+ * interception point left, and it is durable: the fire-and-forget SSE open, the
+ * reconnection timer and the 401/auth retries read the SAME fields later.
+ *
+ * Idempotent: {@link HARDENED} marks an instance that was already rewritten, so
+ * concurrent `send()` calls cannot build a wrapper tower.
+ *
+ * @param transport - the live transport instance (its `this`).
+ * @throws {TypeError} when a field exists but rejects the write (a getter-only
+ *   accessor in a future SDK build) — the caller surfaces that as a failed
+ *   verification, never as an unfenced connection.
+ */
+function hardenTransport(transport: object): void {
+  const fields = transport as Record<string | symbol, unknown>
+  if (fields[HARDENED] === true) return
+  fields[REQUEST_INIT_FIELD] = forceManual(fields[REQUEST_INIT_FIELD] as RequestInit | undefined)
+  const withInit = fields[FETCH_WITH_INIT_FIELD]
+  fields[FETCH_WITH_INIT_FIELD] = typeof withInit === 'function'
+    ? forcedRedirectFetch(withInit as FetchLike)
+    : defaultFetchFence()
+  // `_startOrAuthSse()` builds its GET with `...this._requestInit` (v2) but the
+  // POST/DELETE path and the 401 retries all read `_fetch`; the production
+  // construction passes NO `fetch`, so `(this._fetch ?? fetch)` must resolve to
+  // OUR wrapper rather than to the global follow-by-default fetch.
+  const base = fields[FETCH_FIELD]
+  fields[FETCH_FIELD] = typeof base === 'function' ? forcedRedirectFetch(base as FetchLike) : defaultFetchFence()
+  Object.defineProperty(fields, HARDENED, { value: true, enumerable: false })
+}
+
+/** Whether one transport instance was already hardened by {@link hardenTransport}. */
+export function isMcpTransportFenceHardened(transport: object): boolean {
+  return (transport as Record<string | symbol, unknown>)[HARDENED] === true
 }
 
 function forceManual(init: RequestInit | undefined): RequestInit {
@@ -449,8 +578,8 @@ function isFencedFetch(value: unknown): boolean {
 
 /**
  * The one wrapper used when a transport was built without a `fetch` option —
- * the production shape. Cached so every instance (and the getter fallback)
- * shares one identity instead of minting a wrapper per read.
+ * the production shape. Cached so every instance shares one identity instead of
+ * minting a wrapper per harden.
  */
 let defaultFencedFetch: FetchLike | null = null
 
@@ -459,36 +588,38 @@ function defaultFetchFence(): FetchLike {
   return defaultFencedFetch
 }
 
+/**
+ * Wrap the transport's outbound entry points so each one hardens the instance
+ * before delegating to the SDK.
+ *
+ * Every method whose absence would make the fence inert is REQUIRED: if the
+ * class no longer exposes one of {@link FENCED_METHODS}, the seam cannot be
+ * proven and {@link installMcpTransportRedirectFence} refuses rather than
+ * reporting a hardened transport that never hardens anything.
+ *
+ * @returns a disposer restoring the original method descriptors.
+ */
 function patchTransportClass(): () => void {
   const proto = protoOf()
-  const previousRequestInit = Object.getOwnPropertyDescriptor(proto, REQUEST_INIT_FIELD)
-  const previousFetchWithInit = Object.getOwnPropertyDescriptor(proto, FETCH_WITH_INIT_FIELD)
-  const previousFetch = Object.getOwnPropertyDescriptor(proto, FETCH_FIELD)
-  patchField(REQUEST_INIT_FIELD, value => forceManual(value as RequestInit | undefined), rawRequestInit as WeakMap<object, unknown>)
-  patchField(
-    FETCH_WITH_INIT_FIELD,
-    (value) => {
-      if (typeof value !== 'function') return value
-      const original = value as FetchLike
-      const wrapped: FetchLike = (input, init) => original(input, forceManual(init))
-      return wrapped
-    },
-    rawFetchWithInit,
-  )
-  // R5: `_startOrAuthSse()` builds its GET without `...this._requestInit`, so
-  // the init accessor cannot reach it. `_fetch` is the only fetch that path
-  // uses — fence it, and supply our own when the caller passed none (the
-  // production case: `createTransport` passes `requestInit` only).
-  patchField(
-    FETCH_FIELD,
-    value => (typeof value === 'function' ? forcedRedirectFetch(value as FetchLike) : defaultFetchFence()),
-    rawFetch as WeakMap<object, unknown>,
-    defaultFetchFence,
-  )
+  const previous = new Map<string, PropertyDescriptor>()
+  for (const name of FENCED_METHODS) {
+    const descriptor = Object.getOwnPropertyDescriptor(proto, name)
+    if (descriptor === undefined || typeof descriptor.value !== 'function') {
+      for (const [restored, original] of previous) restoreField(restored, original)
+      throw new Error(`StreamableHTTPClientTransport.prototype.${name} is not a function`)
+    }
+    previous.set(name, descriptor)
+    const original = descriptor.value as (...args: unknown[]) => unknown
+    Object.defineProperty(proto, name, {
+      ...descriptor,
+      value: function hardenedEntry(this: object, ...args: unknown[]): unknown {
+        hardenTransport(this)
+        return original.apply(this, args)
+      },
+    })
+  }
   return () => {
-    restoreField(REQUEST_INIT_FIELD, previousRequestInit)
-    restoreField(FETCH_WITH_INIT_FIELD, previousFetchWithInit)
-    restoreField(FETCH_FIELD, previousFetch)
+    for (const [name, descriptor] of previous) restoreField(name, descriptor)
   }
 }
 
@@ -498,7 +629,7 @@ function restoreField(field: string, descriptor: PropertyDescriptor | undefined)
 }
 
 /**
- * Verify — behaviourally — that the patched class really hands
+ * Verify — behaviourally — that the fenced transport really hands
  * `redirect: 'manual'` to the fetch the SDK owns, on **every** channel it owns.
  *
  * The probe builds a real transport with a recording `fetch` (no socket is
@@ -511,14 +642,20 @@ function restoreField(field: string, descriptor: PropertyDescriptor | undefined)
  *    answered with `202` makes the SDK fire `_startOrAuthSse()` on its own;
  * 3. `resumeStream()` — the reconnect/resume GET.
  *
- * (2) and (3) exist because R5 proved the hole: `_startOrAuthSse()` calls
- * `(this._fetch ?? fetch)(url, { method: 'GET', … })` with NO `_requestInit`,
- * so a version of this check that only drove `send()` reported `verified=true`
- * while the SSE channel — the one that leaks as soon as a server answers
- * `initialize` 200 + `initialized` 202 — was still unfenced. Both the
- * "did the GET go through the fenced fetch" and the "was `redirect` forced on
- * it" halves are asserted: a future SDK that calls the global `fetch` directly
- * (or a subclass that re-points `_fetch`) fails here.
+ * (2) and (3) exist because R5 proved the hole: `_startOrAuthSse()` opens a
+ * `(this._fetch ?? fetch)` GET, so a version of this check that only drove
+ * `send()` reported `verified=true` while the SSE channel — the one that leaks
+ * as soon as a server answers `initialize` 200 + `initialized` 202 — was still
+ * unfenced. Both the "did the GET go through the fenced fetch" and the "was
+ * `redirect` forced on it" halves are asserted: a future SDK that calls the
+ * global `fetch` directly (or re-derives its fetch inside a method, bypassing
+ * the instance fields this fence rewrites) fails here.
+ *
+ * The v2 probe also asserts the SHAPE it depends on — the three request fields
+ * must be own data properties of the instance (class fields), because that is
+ * what makes the method-level hardening the right seam and what made the old
+ * prototype-accessor fence a no-op. A future build that moves them elsewhere,
+ * or makes them read-only, fails here instead of silently unfencing.
  *
  * Any failure lands on {@link McpTransportFenceUnavailableError}, which
  * `registerMcp` turns into a refusal to register the server.
@@ -538,14 +675,27 @@ async function verifyFenceSeam(locale: HostLocale): Promise<void> {
     fetch: probeFetch,
   })
   const internals = probe as unknown as Record<string, unknown>
-  // A future SDK that switches these to class fields (`_fetch = …`) would
-  // create own data properties and silently bypass every accessor below.
+  // The v2 shape this fence rewrites: own data properties (class fields). If a
+  // future build keeps them on the prototype as accessors, hardening still
+  // writes through them — but a build that hides them entirely must be caught
+  // here rather than reported as hardened.
   for (const field of [REQUEST_INIT_FIELD, FETCH_WITH_INIT_FIELD, FETCH_FIELD]) {
-    if (Object.getOwnPropertyDescriptor(probe, field) !== undefined) {
+    if (Object.getOwnPropertyDescriptor(probe, field) === undefined) {
       throw new McpTransportFenceUnavailableError(
-        hostT(locale, 'fence.ownProperty', { field }),
+        hostT(locale, 'fence.notInstanceField', { field }),
       )
     }
+  }
+  // The request path that actually carries the credentials and the body. Driven
+  // FIRST: the hardening happens on this entry, and everything below reads the
+  // fields it rewrote.
+  seen.length = 0
+  await probe.send({ jsonrpc: '2.0', method: 'ping', id: 1 } as never).catch(() => undefined)
+  if (!seen.some(call => call.method === 'POST' && call.redirect === 'manual')) {
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.sendNotManual'))
+  }
+  if (!isMcpTransportFenceHardened(probe)) {
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.notInterceptable', { field: REQUEST_INIT_FIELD }))
   }
   const requestInit = internals[REQUEST_INIT_FIELD] as RequestInit | undefined
   if (requestInit?.redirect !== 'manual') {
@@ -563,25 +713,22 @@ async function verifyFenceSeam(locale: HostLocale): Promise<void> {
       hostT(locale, 'fence.fetchNotFenced', { field: FETCH_FIELD }),
     )
   }
-  // The production construction passes NO `fetch`: `(this._fetch ?? fetch)` must
-  // still resolve to our wrapper, never to the global fetch's follow default.
-  const bareFetch = (new StreamableHTTPClientTransport(new URL(PROBE_URL), {
-    requestInit: { headers: { [PROBE_HEADER]: '1' } },
-  }) as unknown as Record<string, unknown>)[FETCH_FIELD]
-  if (!isFencedFetch(bareFetch) || bareFetch === globalThis.fetch) {
-    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.noHardenedFetch', { field: FETCH_FIELD }))
-  }
   // The auth-provider path builds its own fetch: prove it is fenced too.
   seen.length = 0
   await (fetchWithInit as FetchLike)(PROBE_URL, { method: 'POST' }).catch(() => undefined)
   if (seen[0]?.redirect !== 'manual') {
     throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.fetchWithInitNotManual', { field: FETCH_WITH_INIT_FIELD }))
   }
-  // The request path that actually carries the credentials and the body.
-  seen.length = 0
-  await probe.send({ jsonrpc: '2.0', method: 'ping', id: 1 } as never).catch(() => undefined)
-  if (!seen.some(call => call.method === 'POST' && call.redirect === 'manual')) {
-    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.sendNotManual'))
+  // The production construction passes NO `fetch`: `(this._fetch ?? fetch)` must
+  // resolve to our wrapper, never to the global fetch's follow default. Same
+  // entry point as production (`send`), so the hardening is exercised too.
+  const bare = new StreamableHTTPClientTransport(new URL(PROBE_URL), {
+    requestInit: { headers: { [PROBE_HEADER]: '1' } },
+  })
+  await bare.send({ jsonrpc: '2.0', method: 'ping', id: 1 } as never).catch(() => undefined)
+  const bareFetch = (bare as unknown as Record<string, unknown>)[FETCH_FIELD]
+  if (!isFencedFetch(bareFetch) || bareFetch === globalThis.fetch) {
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.noHardenedFetch', { field: FETCH_FIELD }))
   }
   // THE SPEC CHAIN: `initialize` 200 → `notifications/initialized` 202 → the
   // SDK opens the GET(SSE) stream by itself (R5 hole).
@@ -630,7 +777,8 @@ async function settleProbe(reached: () => boolean, turns = 20): Promise<void> {
  *   Windows spellings, nested duplicate installs and unreadable paths cannot be
  *   produced on the Linux test runner, so the regression injects them here
  *   rather than mocking module resolution.
- * @returns a function restoring the SDK's original property descriptors.
+ * @returns a function restoring the SDK's original method descriptors (already
+ *   hardened INSTANCES stay hardened — the hardening lives on the instance).
  */
 export function installMcpTransportRedirectFence(targets?: { ours: string; theirs: string }, locale: HostLocale = DEFAULT_HOST_LOCALE): () => void {
   if (patched) return () => {}
@@ -646,11 +794,18 @@ export function installMcpTransportRedirectFence(targets?: { ours: string; their
       hostT(locale, 'fence.targetMismatch', { detail: describeTargets(verdict.ours, verdict.theirs, locale) }),
     )
   }
+  if (verdict.kind === 'proven-foreign') {
+    targetMismatch = true
+    throw new McpTransportFenceUnavailableError(
+      hostT(locale, 'fence.foreignImport', { detail: verdict.detail }),
+    )
+  }
   if (verdict.kind === 'inconclusive') {
     // One side could not be read, so "different strings" is not evidence: the
     // behavioural verification below is the real gate. Keep the report — a
     // connector that later fails to fence must not look like a clean install.
     targetWarning = describeTargets(verdict.ours, verdict.theirs, locale)
+      + (verdict.note === undefined ? '' : ` / ${verdict.note}`)
   }
   restorePatched = patchTransportClass()
   patched = true

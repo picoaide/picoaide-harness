@@ -13,7 +13,9 @@
  *
  * The two paths are byte-identical. The refusal came from the check BEFORE the
  * comparison: the package marker is written with `/`
- * (`node_modules/@modelcontextprotocol/sdk`) while Windows `fileURLToPath`
+ * (`node_modules/@modelcontextprotocol/sdk` — the package marker of that era; it
+ * moved to `node_modules/@modelcontextprotocol/client` with 0.1.6-alpha.2) while
+ * Windows `fileURLToPath`
  * answers with `\`, so `lastIndexOf` found nothing and "unknown package" was
  * read as "wrong class" — the `||` short-circuited and no path comparison ever
  * ran. Linux CI could never see it: there `fileURLToPath` returns `/`.
@@ -52,9 +54,9 @@ import {
  * product needs: these are one file, so the connector must be allowed to
  * register.
  */
-const FIELD_OURS = 'C:\\Program Files\\PicoAide Harness\\resources\\app.asar\\node_modules\\@modelcontextprotocol\\sdk\\dist\\esm\\client\\streamableHttp.js'
-const FIELD_THEIRS = 'C:\\Program Files\\PicoAide Harness\\resources\\app.asar\\node_modules\\@modelcontextprotocol\\sdk\\dist\\esm\\client\\streamableHttp.js'
-const FIELD_REAL = 'C:\\Program Files\\PicoAide Harness\\resources\\app.asar\\node_modules\\@modelcontextprotocol\\sdk\\dist\\esm\\client\\streamableHttp.js'
+const FIELD_OURS = 'C:\\Program Files\\PicoAide Harness\\resources\\app.asar\\node_modules\\@modelcontextprotocol\\client\\dist\\index.mjs'
+const FIELD_THEIRS = 'C:\\Program Files\\PicoAide Harness\\resources\\app.asar\\node_modules\\@modelcontextprotocol\\client\\dist\\index.mjs'
+const FIELD_REAL = 'C:\\Program Files\\PicoAide Harness\\resources\\app.asar\\node_modules\\@modelcontextprotocol\\client\\dist\\index.mjs'
 
 /** A resolution as the reader would produce it, without touching the disk. */
 function target(path: string, options: { realpath?: string | null; error?: string | null; foldCase?: boolean } = {}): TargetResolution {
@@ -67,8 +69,9 @@ function target(path: string, options: { realpath?: string | null; error?: strin
   }
 }
 
-const SDK_TAIL = 'node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js'
-const CJS_TAIL = 'node_modules/@modelcontextprotocol/sdk/dist/cjs/client/streamableHttp.js'
+// v2 (2026-09-20): one ESM bundle + one CJS twin under the same package root.
+const SDK_TAIL = 'node_modules/@modelcontextprotocol/client/dist/index.mjs'
+const CJS_TAIL = 'node_modules/@modelcontextprotocol/client/dist/index.cjs'
 
 let root = ''
 let esm = ''
@@ -96,7 +99,7 @@ describe('fence target identity: the field failure (Windows, backslash paths)', 
     // The regression is the assertion: before the fix this was
     // 'inconclusive' with a missing marker → install path refused.
     expect(verdict.kind).toBe('ok')
-    expect(verdict.kind === 'ok' && verdict.ours.canonical).toContain('node_modules/@modelcontextprotocol/sdk')
+    expect(verdict.kind === 'ok' && verdict.ours.canonical).toContain('node_modules/@modelcontextprotocol/client')
   })
 
   it('accepts the field paths even when the reader could not stat them', () => {

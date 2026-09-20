@@ -559,18 +559,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/cordis-plugin-timer@npm:1.1.3":
-  version: 1.1.3
-  resolution: "@deepseek-ai/cordis-plugin-timer@npm:1.1.3"
-  dependencies:
-    "@deepseek-ai/cosmokit": "npm:^1.8.2"
-  peerDependencies:
-    "@deepseek-ai/cordis": ^4.0.1
-  checksum: 10c0/7aa5aabd194d1aa76179a69a698387af2c81a473d03a1d800eb43c6013593e0c4b6f854dfc7a26819ee4e58ae1c503b8676e074b3f0c25136c69098df280b465
-  languageName: node
-  linkType: hard
-
-"@deepseek-ai/cordis-plugin-timer@npm:^1.1.4":
+"@deepseek-ai/cordis-plugin-timer@npm:1.1.4, @deepseek-ai/cordis-plugin-timer@npm:^1.1.4":
   version: 1.1.4
   resolution: "@deepseek-ai/cordis-plugin-timer@npm:1.1.4"
   dependencies:
@@ -598,13 +587,6 @@ __metadata:
   bin:
     cordis: bin.js
   checksum: 10c0/62b7a84f591ecf7399651e577b68c7f0336e1ffa94692b202bac7994604fabe818db53660c4945a6da692bf8ce0ec43d09c07222b7b5c3ce5a1b5993e4708c50
-  languageName: node
-  linkType: hard
-
-"@deepseek-ai/cosmokit@npm:^1.8.2":
-  version: 1.8.2
-  resolution: "@deepseek-ai/cosmokit@npm:1.8.2"
-  checksum: 10c0/2e15902445b984f2d245687f6c3590cc0251eaeec5fd5173138fc61f791a0af0c77e56b27f060ee6868213996578afd36efd52ef18d115aa0ca57fca89c6a2cb
   languageName: node
   linkType: hard
 
@@ -6016,6 +5998,7 @@ __metadata:
     "@deepseek-ai/dsh-session": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-system-prompt": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-tools": "npm:0.1.6-alpha.2"
+    "@modelcontextprotocol/client": "npm:2.0.0"
     "@modelcontextprotocol/sdk": "npm:^1.12.0"
     "@picoaide/dsh-host-home": "workspace:*"
     "@picoaide/dsh-host-locale": "workspace:*"
@@ -8385,7 +8368,7 @@ __metadata:
     "@deepseek-ai/cordis-plugin-group": "npm:1.0.2"
     "@deepseek-ai/cordis-plugin-include": "npm:1.0.7"
     "@deepseek-ai/cordis-plugin-loader": "npm:1.0.3"
-    "@deepseek-ai/cordis-plugin-timer": "npm:1.1.3"
+    "@deepseek-ai/cordis-plugin-timer": "npm:1.1.4"
     "@deepseek-ai/dsh": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-acp": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-acp-app": "npm:0.1.6-alpha.2"
@@ -8537,7 +8520,7 @@ __metadata:
     electron: "npm:43.4.0"
     electron-builder: "npm:26.15.3"
     koffi: "npm:3.1.5"
-    node-addon-require-builtin: "npm:^0.1.4"
+    node-addon-require-builtin: "npm:^0.1.6"
     react: "npm:18.3.1"
     react-dom: "npm:18.3.1"
     sharp: "npm:0.35.3"
@@ -10425,26 +10408,10 @@ __metadata:
   languageName: node
   linkType: hard
 
-"node-addon-native-custom-loader@npm:0.1.4":
-  version: 0.1.4
-  resolution: "node-addon-native-custom-loader@npm:0.1.4"
-  checksum: 10c0/8459c17da5eb5db6ac28036bf2be08997eef4e1dc4b89915703055585eb9dd48a8533e8f0283cd3941444cce06500bd02adc8a8dc6ee14ddef55c412d033ea5a
-  languageName: node
-  linkType: hard
-
 "node-addon-native-custom-loader@npm:0.1.6":
   version: 0.1.6
   resolution: "node-addon-native-custom-loader@npm:0.1.6"
   checksum: 10c0/e76b083279290d0ace4ca89a14c2f672ca4b8b47a518f9fff65270024c59399c93383e1733e6f96a15f65bd53f7c1bf6b128953978607049428fa06e23a3ba4d
-  languageName: node
-  linkType: hard
-
-"node-addon-require-builtin-darwin-arm64@npm:0.1.4":
-  version: 0.1.4
-  resolution: "node-addon-require-builtin-darwin-arm64@npm:0.1.4"
-  dependencies:
-    node-addon-native-custom-loader: "npm:0.1.4"
-  conditions: os=darwin & cpu=arm64
   languageName: node
   linkType: hard
 
@@ -10457,30 +10424,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"node-addon-require-builtin-darwin-x64@npm:0.1.4":
-  version: 0.1.4
-  resolution: "node-addon-require-builtin-darwin-x64@npm:0.1.4"
-  dependencies:
-    node-addon-native-custom-loader: "npm:0.1.4"
-  conditions: os=darwin & cpu=x64
-  languageName: node
-  linkType: hard
-
 "node-addon-require-builtin-darwin-x64@npm:0.1.6":
   version: 0.1.6
   resolution: "node-addon-require-builtin-darwin-x64@npm:0.1.6"
   dependencies:
     node-addon-native-custom-loader: "npm:0.1.6"
   conditions: os=darwin & cpu=x64
-  languageName: node
-  linkType: hard
-
-"node-addon-require-builtin-linux-arm64-gnu@npm:0.1.4":
-  version: 0.1.4
-  resolution: "node-addon-require-builtin-linux-arm64-gnu@npm:0.1.4"
-  dependencies:
-    node-addon-native-custom-loader: "npm:0.1.4"
-  conditions: os=linux & cpu=arm64 & libc=glibc
   languageName: node
   linkType: hard
 
@@ -10493,30 +10442,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"node-addon-require-builtin-linux-x64-gnu@npm:0.1.4":
-  version: 0.1.4
-  resolution: "node-addon-require-builtin-linux-x64-gnu@npm:0.1.4"
-  dependencies:
-    node-addon-native-custom-loader: "npm:0.1.4"
-  conditions: os=linux & cpu=x64 & libc=glibc
-  languageName: node
-  linkType: hard
-
 "node-addon-require-builtin-linux-x64-gnu@npm:0.1.6":
   version: 0.1.6
   resolution: "node-addon-require-builtin-linux-x64-gnu@npm:0.1.6"
   dependencies:
     node-addon-native-custom-loader: "npm:0.1.6"
   conditions: os=linux & cpu=x64 & libc=glibc
-  languageName: node
-  linkType: hard
-
-"node-addon-require-builtin-win32-arm64-msvc@npm:0.1.4":
-  version: 0.1.4
-  resolution: "node-addon-require-builtin-win32-arm64-msvc@npm:0.1.4"
-  dependencies:
-    node-addon-native-custom-loader: "npm:0.1.4"
-  conditions: os=win32 & cpu=arm64
   languageName: node
   linkType: hard
 
@@ -10529,15 +10460,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"node-addon-require-builtin-win32-ia32-msvc@npm:0.1.4":
-  version: 0.1.4
-  resolution: "node-addon-require-builtin-win32-ia32-msvc@npm:0.1.4"
-  dependencies:
-    node-addon-native-custom-loader: "npm:0.1.4"
-  conditions: os=win32 & cpu=ia32
-  languageName: node
-  linkType: hard
-
 "node-addon-require-builtin-win32-ia32-msvc@npm:0.1.6":
   version: 0.1.6
   resolution: "node-addon-require-builtin-win32-ia32-msvc@npm:0.1.6"
@@ -10547,52 +10469,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"node-addon-require-builtin-win32-x64-msvc@npm:0.1.4":
-  version: 0.1.4
-  resolution: "node-addon-require-builtin-win32-x64-msvc@npm:0.1.4"
-  dependencies:
-    node-addon-native-custom-loader: "npm:0.1.4"
-  conditions: os=win32 & cpu=x64
-  languageName: node
-  linkType: hard
-
 "node-addon-require-builtin-win32-x64-msvc@npm:0.1.6":
   version: 0.1.6
   resolution: "node-addon-require-builtin-win32-x64-msvc@npm:0.1.6"
   dependencies:
     node-addon-native-custom-loader: "npm:0.1.6"
   conditions: os=win32 & cpu=x64
-  languageName: node
-  linkType: hard
-
-"node-addon-require-builtin@npm:^0.1.4":
-  version: 0.1.4
-  resolution: "node-addon-require-builtin@npm:0.1.4"
-  dependencies:
-    node-addon-native-custom-loader: "npm:0.1.4"
-    node-addon-require-builtin-darwin-arm64: "npm:0.1.4"
-    node-addon-require-builtin-darwin-x64: "npm:0.1.4"
-    node-addon-require-builtin-linux-arm64-gnu: "npm:0.1.4"
-    node-addon-require-builtin-linux-x64-gnu: "npm:0.1.4"
-    node-addon-require-builtin-win32-arm64-msvc: "npm:0.1.4"
-    node-addon-require-builtin-win32-ia32-msvc: "npm:0.1.4"
-    node-addon-require-builtin-win32-x64-msvc: "npm:0.1.4"
-  dependenciesMeta:
-    node-addon-require-builtin-darwin-arm64:
-      optional: true
-    node-addon-require-builtin-darwin-x64:
-      optional: true
-    node-addon-require-builtin-linux-arm64-gnu:
-      optional: true
-    node-addon-require-builtin-linux-x64-gnu:
-      optional: true
-    node-addon-require-builtin-win32-arm64-msvc:
-      optional: true
-    node-addon-require-builtin-win32-ia32-msvc:
-      optional: true
-    node-addon-require-builtin-win32-x64-msvc:
-      optional: true
-  checksum: 10c0/5a11f6190fa65fefab15a453e0d621cc9895fc4be8be4054e1a698896eacfbd78919278f1772fe6ba7d8410076dcd5ac9b00495aac0f2c3c522ee887b9114b6a
   languageName: node
   linkType: hard
 

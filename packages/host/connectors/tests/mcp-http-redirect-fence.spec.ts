@@ -11,9 +11,13 @@
  * list — to whatever host the `Location` named.
  *
  * Everything below is real: real HTTP front/attack servers on real sockets, the
- * real `@modelcontextprotocol/sdk` client + `StreamableHTTPClientTransport`,
- * and the real plugin driven through its own `apply()`/restore path — the
- * transport is built from the exact config the plugin registered.
+ * real `@modelcontextprotocol/client` (v2) client +
+ * `StreamableHTTPClientTransport` — the package and class
+ * `dsh-mcp-client@0.1.6-alpha.2` constructs — and the real plugin driven through
+ * its own `apply()`/restore path, so the transport is built from the exact
+ * config the plugin registered. (The fixture MCP SERVER stays on the 1.x SDK: it
+ * is a peer, not the fenced side, and keeping it also proves the v2 client still
+ * speaks to a legacy server.)
  *
  * The first test is the NEGATIVE CONTROL: it removes the fence and shows the
  * unfenced construction really does hand the channel over, so the attack
@@ -29,8 +33,7 @@ import type { AddressInfo } from 'node:net'
 import { hostname, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
 import { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
@@ -43,8 +46,11 @@ import { isOutboundUrlAllowed } from '../src/outbound.ts'
 import {
   ensureMcpTransportRedirectFence,
   installMcpTransportRedirectFence,
+  isMcpTransportFenceHardened,
   isMcpTransportRedirectFenceInstalled,
   isMcpTransportRedirectFenceVerified,
+  mcpClientBundleImportsSdk,
+  MCP_SDK_PACKAGE_SPECIFIER,
   McpTransportFenceUnavailableError,
   uninstallMcpTransportRedirectFence,
 } from '../src/mcp-transport-fence.ts'
@@ -223,7 +229,10 @@ describe('R3-N3: the plugin fences the streamable-http transport before it regis
     expect(isMcpTransportRedirectFenceInstalled()).toBe(true)
     expect(config.headers).toMatchObject({ 'x-api-key': 'SECRET-API-KEY', authorization: 'Bearer FRAMEWORK-BEARER-TOKEN' })
 
-    await expect(realListTools(transportFromRegisteredConfig(config))).rejects.toThrow(/Streamable HTTP|fetch failed|redirect/i)
+    // v2's message for a non-2xx POST is `Error POSTing to endpoint: <body>`
+    // (the 307 body is empty); v1 said `Streamable HTTP error`. Either way the
+    // connection FAILS on the 3xx instead of following it.
+    await expect(realListTools(transportFromRegisteredConfig(config))).rejects.toThrow(/POSTing to endpoint|Streamable HTTP|fetch failed|redirect/i)
     console.log(`[N3] attacker requests = ${attack.hits.length} (must be 0) | config url = ${config.url}`)
     expect(attack.hits).toEqual([])
     expect(JSON.stringify(attack.hits)).not.toContain('SECRET-API-KEY')
@@ -309,18 +318,24 @@ describe('R3-N3: the fence patches the SDK build mcp-client actually loads', () 
 
 
   it('resolves the same installed SDK FILE as the mcp-client build (ESM, not the CJS twin)', () => {
-    const ours = fileURLToPath(import.meta.resolve('@modelcontextprotocol/sdk/client/streamableHttp.js'))
+    // Upstream 0.1.6-alpha.2: `@modelcontextprotocol/client@2.0.0` (v2) replaced
+    // `@modelcontextprotocol/sdk@1.x`. The v1 package is STILL installed in this
+    // tree for other consumers, so a fence that resolved the old specifier found
+    // our own v1 copy, judged it "same file", and never touched the class
+    // mcp-client builds (audit B §4.2). The specifier asserted here is the one
+    // the installed mcp-client build imports.
+    const ours = fileURLToPath(import.meta.resolve('@modelcontextprotocol/client'))
     const mcpEntry = import.meta.resolve('@deepseek-ai/dsh-mcp-client')
     // The answer mcp-client's OWN static import gets (ESM conditions), versus
     // the one a CJS `require` would get from the same package directory.
     const resolveFromParent = import.meta.resolve as unknown as (specifier: string, parent?: string) => string
-    const theirsEsm = fileURLToPath(resolveFromParent('@modelcontextprotocol/sdk/client/streamableHttp.js', mcpEntry))
-    const theirsCjs = createRequire(fileURLToPath(mcpEntry)).resolve('@modelcontextprotocol/sdk/client/streamableHttp.js')
-    console.log(`[N3] fence patches ${ours}\n[N3] mcp-client resolves (esm) ${theirsEsm}\n[N3] cjs twin ${theirsCjs}`)
-    expect(ours).toContain('/dist/esm/')
+    const theirsEsm = fileURLToPath(resolveFromParent('@modelcontextprotocol/client', mcpEntry))
+    const theirsCjs = createRequire(fileURLToPath(mcpEntry)).resolve('@modelcontextprotocol/client')
+    console.log(`[N3] fence hardens ${ours}\n[N3] mcp-client resolves (esm) ${theirsEsm}\n[N3] cjs twin ${theirsCjs}`)
+    expect(ours).toContain('/dist/index.mjs')
     // R5 tightened this from "same package directory" to "same file": both
     // builds live under ONE package root, and the CJS class is a different
-    // object (patching it would fence nothing).
+    // object (hardening it would fence nothing).
     expect(theirsEsm).toBe(ours)
     expect(theirsCjs).not.toBe(ours)
     expect(() => installMcpTransportRedirectFence()).not.toThrow()
@@ -332,20 +347,26 @@ describe('R3-N3: the fence patches the SDK build mcp-client actually loads', () 
       dependencies?: Record<string, string>
     }
     // Declaring the dependency is what makes the bundler leave it external.
-    expect(pkg.dependencies?.['@modelcontextprotocol/sdk']).toBeDefined()
+    expect(pkg.dependencies?.['@modelcontextprotocol/client']).toBe('2.0.0')
+    // …and the dead v1 package must NOT be a runtime dependency any more: if it
+    // were, the fence could resolve it again and report `ok` while the real v2
+    // transport went unfenced (exactly the audit B §4.2 failure).
+    expect(pkg.dependencies?.['@modelcontextprotocol/sdk']).toBeUndefined()
     const tsdown = await readFile(fileURLToPath(new URL('tsdown.config.ts', root)), 'utf8')
     const nodeBuild = tsdown.slice(0, tsdown.indexOf('`${PACKAGE_NAME}/client`'))
-    expect(nodeBuild).toContain("'@modelcontextprotocol/sdk'")
+    expect(nodeBuild).toContain("'@modelcontextprotocol/client'")
+    expect(nodeBuild).not.toContain("'@modelcontextprotocol/sdk'")
 
     const built = fileURLToPath(new URL('lib/index.js', root))
     if (!existsSync(built)) return // no build in this run; `yarn check` builds first
     const source = await readFile(built, 'utf8')
     // The artifact must IMPORT the class that `dsh-mcp-client` constructs. An
-    // inlined copy is a different class object, so the fence would patch
+    // inlined copy is a different class object, so the fence would harden
     // nothing: measured with the SDK inlined, the built plugin leaked
     // x-api-key to a 307 target 3 times while every src-level test passed.
-    expect(source).toContain('from "@modelcontextprotocol/sdk/client/streamableHttp.js"')
-    for (const marker of ['mcp-session-id', '_hasCompletedAuthFlow', 'Streamable HTTP error']) {
+    expect(source).toContain('from "@modelcontextprotocol/client"')
+    // Markers that exist ONLY in the v2 bundle (not in this package's source).
+    for (const marker of ['mcp-session-id', 'last-event-id', 'hasPerRequestStream']) {
       expect(source.includes(marker), `SDK code was inlined into lib/index.js (${marker}) — rebuild with the SDK external`).toBe(false)
     }
   })
@@ -356,8 +377,18 @@ describe('R3-N3: the fence patches the SDK build mcp-client actually loads', () 
     // its own (`redirect:`), passes its own `fetch`, or stops constructing the
     // SDK transport, re-verify this seam instead of deleting the guard.
     expect(source).toContain('new StreamableHTTPClientTransport(')
-    // …from the very specifier our fence patches (ESM), so both share one module.
-    expect(source).toContain('from \"@modelcontextprotocol/sdk/client/streamableHttp.js\"')
+    // …from the very specifier our fence hardens, so both share one module.
+    expect(source).toContain('from "@modelcontextprotocol/client"')
+    // THE COUPLING GUARD (2026-09-20): the specifier the fence resolves and
+    // proves must be the one this artifact imports. Path identity alone cannot
+    // see an SDK swap — Node would resolve our specifier from mcp-client's
+    // directory UPWARD and land on our own copy, answering `ok` while the real
+    // transport was a different class (audit B §4.2). So the artifact itself is
+    // the witness, and the v1 specifier must NOT appear as an import here.
+    expect(mcpClientBundleImportsSdk(source), 'the installed build must import the hardened package').toBe(true)
+    expect(mcpClientBundleImportsSdk(source, MCP_SDK_PACKAGE_SPECIFIER)).toBe(true)
+    expect(mcpClientBundleImportsSdk(source, '@modelcontextprotocol/sdk')).toBe(false)
+    expect(MCP_SDK_PACKAGE_SPECIFIER).toBe('@modelcontextprotocol/client')
     // Whitespace-tolerant: the desktop patch adds an optional `authProvider`
     // to these transport options (MCP 授权规范), so the constructor is now
     // multi-line. What must NOT change is that the headers still come from the
@@ -375,12 +406,26 @@ describe('R3-N3: the fence patches the SDK build mcp-client actually loads', () 
     expect(indexSource).toMatch(/await ensureMcpTransportRedirectFence\(/)
   })
 
-  it('keeps both seams installed (request init and the auth-provider fetch)', async () => {
+  it('hardens the live instance on its first outbound entry point (own class fields)', async () => {
     await ensureMcpTransportRedirectFence()
     const probe = new StreamableHTTPClientTransport(new URL('http://127.0.0.1:1/mcp'), { requestInit: { headers: {} } })
-    const internals = probe as unknown as { _requestInit?: RequestInit; _fetchWithInit?: unknown }
+    const internals = probe as unknown as { _requestInit?: RequestInit; _fetchWithInit?: unknown; _fetch?: unknown }
+    // v2 declares these as class fields, so the fence rewrites the INSTANCE.
+    // That is the whole reason the old prototype-accessor fence is gone: an
+    // accessor is shadowed by these own data properties.
+    for (const field of ['_requestInit', '_fetchWithInit', '_fetch'] as const) {
+      expect(Object.getOwnPropertyDescriptor(probe, field), `${field} must be an own class field in v2`).toBeDefined()
+    }
+    // Before any entry point runs nothing has been rewritten yet — the fields
+    // still hold exactly what the constructor was given.
+    expect(internals._requestInit?.redirect).toBeUndefined()
+    // …and after the first outbound entry point the instance is hardened.
+    await probe.send({ jsonrpc: '2.0', method: 'ping', id: 1 } as never).catch(() => undefined)
+    expect(isMcpTransportFenceHardened(probe)).toBe(true)
     expect(internals._requestInit?.redirect).toBe('manual')
     expect(typeof internals._fetchWithInit).toBe('function')
+    expect(typeof internals._fetch).toBe('function')
+    expect(internals._fetch).not.toBe(globalThis.fetch)
     expect(apply).toBeTypeOf('function')
   })
 })
