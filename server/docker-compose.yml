@@ -113,6 +113,16 @@ services:
       PICOAI_APPS_EXTRA_RESERVED: ${PICOAI_APPS_EXTRA_RESERVED:-}
       # 编译子进程隔离档：require（生产推荐）| auto（默认）| off（仅测试）。
       PICOAI_COMPILE_ISOLATION: ${PICOAI_COMPILE_ISOLATION:-auto}
+      # WASM 应用平台**内存档位**：default（32 实例 / 128 MiB 模块缓存，理论峰值 ≈2.7 GiB）
+      # | small（3 实例 / 64 MiB，≈630 MiB）| large（64 实例 / 256 MiB）。
+      #
+      # ⚠️ **可用内存小于约 4 GiB 的机器必须显式选 small**：启动自检会拿"档位折算的理论
+      # 峰值"与本机 MemAvailable 的 70% 比，超了就**拒绝启动**（fail-closed，日志
+      # `WASM 应用平台启动自检失败：…超过可用内存的安全水位，拒绝启动`）—— 2026-09-20
+      # 生产环境（3.9 GiB）与客户测试环境各撞过一次，表现为容器反复重启。
+      # 档位同时决定并发实例数、单实例内存上限与模块缓存上限；运行期还可在管理端
+      # 「运维 → 应用平台」微调（那组设置不改变档位本身）。
+      PICOAI_WASM_MEMORY_PROFILE: ${PICOAI_WASM_MEMORY_PROFILE:-}
       # 内置技能资产目录（随镜像发布，服务端由 GET /api/client/v2/skills/builtin
       # 下发，客户端在能力中心按需安装）。**默认就是镜像里的位置，一般不用改**；
       # 要换成宿主机目录（现场排查/加技能）时同时解开下面的 bind mount：
