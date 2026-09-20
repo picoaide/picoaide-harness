@@ -159,9 +159,15 @@ export function classifyNavigation(rawUrl: string, surface: NavigationSurface = 
   try {
     parsed = new URL(rawUrl)
   } catch {
-    // Relative URLs resolve against the page; the page cannot escalate beyond
-    // its own origin through them, so allow (the webContents enforces origin).
-    return 'allow'
+    // 相对 URL 会按当前页解析，页面无法借此越出自己的 origin ⇒ 放行。
+    //
+    // ⚠️ 但**带 scheme 的绝对 URL 解析失败时必须拒**（2026-09-21 六轮审计 P2-①）：
+    // Node 的 WHATWG 解析器与 Chromium 的**接受面不同** —— 实测
+    // `http://[::ffff:0177.0.0.1]:PORT/` 在 Node 抛错、Chromium 接受并**归一化成回环**
+    // `[::ffff:7f00:1]`。若这里返回 'allow'，闸门等于对该 URL 失效，而 Chromium 照常
+    // 落到本机监听（真机实测模型读到了本机 dev server 的正文）。判据：`^scheme:` 形态
+    // 解析失败 ⇒ deny（保守方向）；纯相对路径才走放行分支。
+    return /^[a-z][a-z0-9+.-]*:/iu.test(rawUrl.trim()) ? 'deny' : 'allow'
   }
   if (surface.kind === 'app') {
     // 应用窗口：**只**允许它自己那个 app origin（§7.2 冻结）。http(s) 顶层导航同样

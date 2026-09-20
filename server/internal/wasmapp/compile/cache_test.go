@@ -2,6 +2,7 @@ package compile
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -571,5 +572,85 @@ func TestCompilerFailureDoesNotLeakTempCacheDir(t *testing.T) {
 		}
 		t.Fatalf("New 失败后仍在 TMPDIR 里留下 %d 项 %v —— 替代缓存目录必须在失败返回前清掉"+
 			"（调用方拿到 nil 编译器，永远不会调 Close）", len(entries), names)
+	}
+}
+
+// TestUntrustedCacheTempDirIsBoundedByReclaim 覆盖六轮审计 P2-②（r5 引入的回归）：
+// 不可信缓存改用临时目录之后，**回收/水位/度量必须跟着那个目录走**。
+//
+// 问题形态：`ReclaimCache` / `cacheUsage` / `Stats` 此前一律只看**配置目录**
+// （`cacheScanRoot` = `filepath.Dir(c.cache)`），而子进程写的是 `childCacheDir`
+// ⇒ 那条分支上 512 MiB / 4096 条的预算与 `/readyz` 告警**全部静默失效**，
+// 临时目录常落在 tmpfs 上（直接吃内存）。
+//
+// 判据：在不可信缓存分支下真编译若干个不同模块（把上限压到 1 条），
+// `ReclaimCache` 必须真的删掉东西、且 `Stats()` 报的条目数必须来自**实际在用**的那个根。
+//
+// 变异验证：把 `cacheScanRoot` 改回 `filepath.Dir(c.cache)` ⇒ 本用例红（removed=0 / 条目数看不到）。
+func TestUntrustedCacheTempDirIsBoundedByReclaim(t *testing.T) {
+	child := buildCompileChildOnce(t)
+	root := t.TempDir()
+	attacker := filepath.Join(root, "attacker")
+	if err := os.MkdirAll(attacker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(CompileCacheDir(root)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(attacker, CompileCacheDir(root)); err != nil {
+		t.Skipf("环境不支持符号链接：%v", err)
+	}
+	c := newTestCompiler(t, child, func(o *Options) {
+		o.DataRoot = root
+		o.Isolation = IsolationOff
+		o.CacheMaxEntries = 1 // 强制回收必须动手
+		o.CacheMaxBytes = 1 << 20
+	})
+	if c.childCacheDir == c.CacheDir() {
+		t.Fatalf("前置条件不成立：本用例要求走「不可信 ⇒ 临时目录」这条分支")
+	}
+	// ⚠️ 三次编译必须是**内容不同**的模块：wazero 的缓存是内容寻址的
+	//（条目名 = sha256(moduleID‖magic‖CPU features)），同一份字节编译三次只会留
+	// **一条**条目 —— 那样 CacheMaxEntries=1 就永远不触发回收，判据变成空转
+	//（第一版正是这样写的，`removed=0` 是假红）。
+	dir := t.TempDir()
+	modules := [][]byte{
+		wasmtest.Base(),
+		wasmtest.WithDataCount(),
+		wasmtest.Build(
+			wasmtest.TypeSection(wasmtest.TypeFunc(wasmtest.Params(), wasmtest.Params())),
+			wasmtest.FunctionSection(0),
+			wasmtest.MemorySection(2), // 与上面两份都不同（内存页数变了 ⇒ moduleID 变）
+			wasmtest.ExportSection(wasmtest.ExportMemory("memory", 0), wasmtest.ExportFunc("_start", 0)),
+			wasmtest.CodeSection(wasmtest.Body(0x0b)),
+		),
+	}
+	for i, raw := range modules {
+		mod := writeModule(t, dir, fmt.Sprintf("m%d.wasm", i), raw)
+		if _, cerr := c.Compile(context.Background(), mod); cerr != nil {
+			t.Fatalf("第 %d 次编译失败: %v", i+1, cerr)
+		}
+	}
+	before, beforeEntries, uerr := c.cacheUsage()
+	if uerr != nil {
+		t.Fatalf("cacheUsage: %v", uerr)
+	}
+	if beforeEntries < 2 {
+		t.Fatalf("前置条件不成立：三次不同模块的编译应留下 ≥2 条缓存条目（实际 %d，%d 字节）——"+
+			"夹具不成立会让下面的回收断言变成空转", beforeEntries, before)
+	}
+	// 回收：必须真的从**在用的那个根**里删掉条目。
+	removed, _, rerr := c.ReclaimCache()
+	if rerr != nil {
+		t.Fatalf("ReclaimCache: %v", rerr)
+	}
+	if removed == 0 {
+		t.Fatalf("回收什么都没删：临时缓存目录（%s）没有被纳入回收扫描根 ⇒ 上限与水位在这条分支失效",
+			c.childCacheDir)
+	}
+	// 度量必须来自在用的根（Stats 的 compile_cache_files 取自同一处）。
+	_, entries := c.newestCacheMtime()
+	if entries > 1 {
+		t.Fatalf("回收后当前缓存仍剩 %d 条（上限 1）", entries)
 	}
 }
