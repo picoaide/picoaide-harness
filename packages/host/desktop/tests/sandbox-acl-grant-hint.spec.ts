@@ -1,6 +1,6 @@
 /**
  * 补丁守卫：`@deepseek-ai/dsh-sandbox-windows-acl` 的 **DACL 写入被拒时必须给出
- * 可行动的原因**（见 `patches/dsh-sandbox-windows-acl@0.1.5-rc.2.patch`）。
+ * 可行动的原因**（见 `patches/dsh-sandbox-windows-acl@<pin>.patch`）。
  *
  * 背景（2026-09-17，用户提供的 Windows 自检报告，客户端 2.7.5-beta.4，工作区
  * `D:\project\urlfy`）：默认「工作区内修改」权限下连 `pwsh` 跑 `hello` 都起不来，
@@ -23,7 +23,7 @@
  *  3. 产物与补丁登记：装出来的包里两处共存，`resolutions` 的 exact + `^` 键都指向
  *     同一个补丁文件（上游重切补丁时这里先红）。
  */
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -34,7 +34,24 @@ import { AclWriteGrant } from '@deepseek-ai/dsh-sandbox-windows-acl'
 
 const require_ = createRequire(import.meta.url)
 const pkgDir = dirname(require_.resolve('@deepseek-ai/dsh-sandbox-windows-acl/package.json'))
-const bundlePath = join(pkgDir, 'lib', 'types-DuU3lSVe.js')
+/**
+ * 补丁目标是一个**哈希命名的构建产物**（`lib/types-<hash>.js`）。历史版本把
+ * `types-DuU3lSVe.js` 写死在这里，于是每次升级上游都要手改一行，改漏就是
+ * 一整片守卫静默失效。改为按内容定位：谁含 `SetNamedSecurityInfoW` 谁就是目标。
+ */
+const bundlePath = (() => {
+  const libDir = join(pkgDir, 'lib')
+  const candidates = readdirSync(libDir).filter(name => name.endsWith('.js'))
+  const found = candidates.find(name => readFileSync(join(libDir, name), 'utf8').includes('SetNamedSecurityInfoW'))
+  if (found === undefined) {
+    throw new Error(`dsh-sandbox-windows-acl: lib/ 下找不到含 SetNamedSecurityInfoW 的产物（实际 ${JSON.stringify(candidates)}）`)
+  }
+  return join(libDir, found)
+})()
+/** 上游 pin 的唯一真源；本 spec 不再硬编码补丁版本。 */
+const UPSTREAM = JSON.parse(
+  readFileSync(fileURLToPath(new URL('../../../../upstream.json', import.meta.url)), 'utf8'),
+) as { runtimePackageVersion: string }
 const PVOID = koffi.pointer('void')
 
 /**
@@ -122,10 +139,13 @@ describe('Windows ACL 授权失败的可行动原因（补丁守卫）', () => {
     const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
       resolutions: Record<string, string>
     }
-    const patch = './patches/dsh-sandbox-windows-acl@0.1.5-rc.2.patch'
-    expect(manifest.resolutions['@deepseek-ai/dsh-sandbox-windows-acl@npm:0.1.5-rc.2'])
-      .toBe(`patch:@deepseek-ai/dsh-sandbox-windows-acl@npm%3A0.1.5-rc.2#${patch}`)
-    expect(manifest.resolutions['@deepseek-ai/dsh-sandbox-windows-acl@npm:^0.1.5-rc.2'])
-      .toBe(`patch:@deepseek-ai/dsh-sandbox-windows-acl@npm%3A0.1.5-rc.2#${patch}`)
+    // 版本取自 upstream.json 而不是字面量：补丁文件名与 resolutions 键都跟着 pin 走，
+    // 写死会让每次升级都手改这里（2026-09-20 升级审计 P1-8）。
+    const version = UPSTREAM.runtimePackageVersion
+    const patch = `./patches/dsh-sandbox-windows-acl@${version}.patch`
+    expect(manifest.resolutions[`@deepseek-ai/dsh-sandbox-windows-acl@npm:${version}`])
+      .toBe(`patch:@deepseek-ai/dsh-sandbox-windows-acl@npm%3A${version}#${patch}`)
+    expect(manifest.resolutions[`@deepseek-ai/dsh-sandbox-windows-acl@npm:^${version}`])
+      .toBe(`patch:@deepseek-ai/dsh-sandbox-windows-acl@npm%3A${version}#${patch}`)
   })
 })

@@ -4,7 +4,10 @@
  * The spec (MCP 2025-06-18 authorization, RFC 9728 protected-resource
  * metadata, RFC 8414 authorization-server metadata, RFC 7591 dynamic client
  * registration, RFC 6749 §6 refresh, RFC 8707 resource indicators) is
- * implemented ONCE, by `@modelcontextprotocol/sdk`'s `auth()` orchestrator.
+ * implemented ONCE, by the official SDK's `auth()` orchestrator —
+ * `@modelcontextprotocol/client@2.0.0` since upstream 0.1.6-alpha.2 (was
+ * `@modelcontextprotocol/sdk@1.x`; v2's root entry exports the whole OAuth
+ * client face, and its only subpath entries are `./stdio` + `./validators/*`).
  * This module only supplies the storage side of the official
  * `OAuthClientProvider` interface and classifies the outcome:
  *
@@ -23,16 +26,29 @@
  * resolves the authorization server + token endpoint, and the result is fed to
  * the SDK as saved discovery state so it does not re-discover a second time.
  *
+ * v2 interface notes (verified against the installed package, not inferred):
+ * `tokens` / `saveTokens` / `clientInformation` / `saveClientInformation` now
+ * take an optional `OAuthClientInformationContext` (`{issuer}`) and exchange
+ * `StoredOAuthTokens` / `StoredOAuthClientInformation` — both are the v1 wire
+ * types plus an optional SDK-stamped `issuer` field
+ * (`@modelcontextprotocol/core` `dist/auth-BWdKR39I.d.mts:8481-8494`). This
+ * connector holds exactly one credential set per connector id, so the context is
+ * accepted and ignored (the SDK's documented shape for single-credential
+ * providers: with no `ctx` — the transport's per-request bearer read — the
+ * provider must return the most recently saved set).
+ *
  * @module
  */
 
-import { auth } from '@modelcontextprotocol/sdk/client/auth.js'
-import type { OAuthClientProvider, OAuthDiscoveryState } from '@modelcontextprotocol/sdk/client/auth.js'
+import { auth } from '@modelcontextprotocol/client'
 import type {
+  OAuthClientInformationContext,
   OAuthClientInformationMixed,
   OAuthClientMetadata,
+  OAuthClientProvider,
+  OAuthDiscoveryState,
   OAuthTokens,
-} from '@modelcontextprotocol/sdk/shared/auth.js'
+} from '@modelcontextprotocol/client'
 import { discoverMcpOAuth } from './auth.ts'
 import { assertOutboundUrlAllowed, OutboundUrlBlockedError } from './outbound.ts'
 import { DEFAULT_TOKEN_LIFETIME_MS, REFRESH_LEAD_MS } from './token-lifetime.ts'
@@ -89,14 +105,29 @@ export type RefreshOutcome = { ok: true; tokens: RefreshedTokens } | RefreshFail
 /** Thrown internally when the SDK would redirect a background refresh to a browser. */
 const REAUTHORIZE_REQUIRED = 'PICO_CONNECTOR_REAUTHORIZE_REQUIRED'
 
-/** OAuth error codes that mean "this grant is dead" (SDK `errorCode` values). */
+/** OAuth error codes that mean "this grant is dead" (SDK `OAuthError.code` values). */
 const DEAD_GRANT_CODES = new Set(['invalid_grant', 'invalid_client', 'unauthorized_client'])
 
-/** Structural read of the SDK's OAuthError (`errorCode` is a public getter). */
+/**
+ * Structural read of the SDK's `OAuthError`.
+ *
+ * v2 renamed the public field: `@modelcontextprotocol/client@2.0.0` declares
+ * `readonly code: OAuthErrorCode | string`
+ * (`dist/index-D4xIIEF6.d.mts:89`) and builds it as `this.code = code`
+ * (`dist/src-D_zzAWoS.mjs:205`), while v1 exposed `errorCode`. Reading only the
+ * old name made every dead grant look like a transient failure — measured:
+ * `invalid_grant` came back as `transient` /「令牌刷新失败：invalid_grant」instead of
+ * `reauthorize`, which would have left a revoked connector retrying forever
+ * instead of asking the user to authorize again. Both spellings are read so the
+ * classification survives either shape.
+ */
 function oauthErrorCode(error: unknown): string | undefined {
   if (error === null || typeof error !== 'object') return undefined
-  const code = (error as { errorCode?: unknown }).errorCode
-  return typeof code === 'string' ? code : undefined
+  const record = error as { code?: unknown; errorCode?: unknown }
+  for (const candidate of [record.code, record.errorCode]) {
+    if (typeof candidate === 'string' && candidate !== '') return candidate
+  }
+  return undefined
 }
 
 /** Whether a credential is worth refreshing right now (sweep + panel hint). */
@@ -201,8 +232,11 @@ export function createOAuthProvider(
     // browser (there is no user gesture and no callback server here).
     redirectUrl: undefined,
     clientMetadata,
-    clientInformation: () => clientInformation,
-    saveClientInformation: async (information: OAuthClientInformationMixed) => {
+    // v2 passes `{issuer}` here (SEP-2352 credential binding). One connector id
+    // holds one credential set, so the SDK's documented single-credential shape
+    // applies and the context is ignored.
+    clientInformation: (_ctx?: OAuthClientInformationContext) => clientInformation,
+    saveClientInformation: async (information: OAuthClientInformationMixed, _ctx?: OAuthClientInformationContext) => {
       clientInformation = information
       await options.onPersist?.({ clientId: information.client_id })
     },
@@ -224,7 +258,7 @@ export function createOAuthProvider(
      * @returns 该 provider 当前持有的令牌（刷新失败时仍是旧的，交给 SDK 走原来的
      *   escalate 路径）。
      */
-    tokens: async (): Promise<OAuthTokens | undefined> => {
+    tokens: async (_ctx?: OAuthClientInformationContext): Promise<OAuthTokens | undefined> => {
       // 与 `tokenNeedsRefresh` 同判据，但用**活的** `expiresAt`（`adopt` /
       // `saveTokens` 都会前移它）：没有 refresh token 的连接器永不在这里刷新；
       // 未记录过期时间视为可能过期（问一次很便宜）。
@@ -242,7 +276,7 @@ export function createOAuthProvider(
       }
       return tokens
     },
-    saveTokens: async (next: OAuthTokens) => {
+    saveTokens: async (next: OAuthTokens, _ctx?: OAuthClientInformationContext) => {
       tokens = next
       expiresAt = Date.now() + (next.expires_in === undefined ? DEFAULT_TOKEN_LIFETIME_MS / 1000 : next.expires_in) * 1000
       await options.onPersist?.({

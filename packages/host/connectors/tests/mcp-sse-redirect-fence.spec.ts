@@ -7,15 +7,17 @@
  * is built by a different line of the SDK:
  *
  * ```js
- * // @modelcontextprotocol/sdk 1.30.0 dist/esm/client/streamableHttp.js:90
+ * // @modelcontextprotocol/client 2.0.0 dist/index.mjs:5090 (_startOrAuthSse)
  * const response = await (this._fetch ?? fetch)(this._url, {
- *     method: 'GET', headers, signal: this._abortController?.signal
+ *     ...this._requestInit, method: 'GET', headers, signal
  * });
  * ```
  *
- * — no `...this._requestInit`, so the fence's forced `redirect: 'manual'` never
- * reached it and the GET fell back to `fetch`'s `follow` default. The chain that
- * opens it is entirely normal server behaviour: `initialize` → 200,
+ * — historically without `...this._requestInit`, so the fence's forced
+ * `redirect: 'manual'` never reached it and the GET fell back to `fetch`'s
+ * `follow` default (in v2 the init IS spread, but the request still goes through
+ * `_fetch`, so both halves of the fence matter). The chain that opens it is
+ * entirely normal server behaviour: `initialize` → 200,
  * `notifications/initialized` → 202, and the client opens the stream by itself
  * (the same line runs again on every reconnect and on `resumeStream`). A server
  * that answers that GET with 307/303/308 therefore moved the stream — and the
@@ -23,7 +25,8 @@
  * whatever host `Location` named.
  *
  * Everything here is real: real `node:http` front/attacker servers on real
- * sockets, the real `@modelcontextprotocol/sdk` `Client` +
+ * sockets, the real `@modelcontextprotocol/client` (v2, the package
+ * `dsh-mcp-client@0.1.6-alpha.2` imports) `Client` +
  * `StreamableHTTPClientTransport`, and the transport built from the exact
  * `{ url, headers }` config the real plugin registered (the same
  * `new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } })`
@@ -42,14 +45,14 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({ apply: () => {} }))
 
 import {
   ensureMcpTransportRedirectFence,
+  isMcpTransportFenceHardened,
   isMcpTransportRedirectFenceInstalled,
   isMcpTransportRedirectFenceVerified,
   McpTransportFenceUnavailableError,
@@ -310,14 +313,24 @@ describe('R5-P1: a caller-supplied fetch cannot re-enable redirect following', (
       requestInit: { headers: {} },
       fetch: custom,
     })
+    // v2 keeps `_fetch` as an OWN class field, so the fence rewrites it on the
+    // instance's first outbound entry point instead of installing an accessor
+    // that the own field would shadow (2026-09-20 SDK 换代).
+    expect((transport as unknown as Record<string, unknown>)._fetch).toBe(custom)
+    await transport.send({ jsonrpc: '2.0', method: 'ping', id: 1 } as never).catch(() => undefined)
+    expect(isMcpTransportFenceHardened(transport)).toBe(true)
     const effective = (transport as unknown as Record<string, unknown>)._fetch
     expect(effective).not.toBe(custom)
+    const before = seen.length
     await (effective as (input: string, init?: RequestInit) => Promise<Response>)('http://127.0.0.1:1/mcp', {
       method: 'GET',
       redirect: 'follow',
     }).catch(() => undefined)
-    console.log(`[R5-custom-fetch] caller init redirect="follow" reached the base fetch as redirect="${String(seen[0]?.redirect)}"`)
-    expect(seen[0]?.redirect).toBe('manual')
+    console.log(`[R5-custom-fetch] caller init redirect="follow" reached the base fetch as redirect="${String(seen.at(-1)?.redirect)}"`)
+    expect(seen.length).toBeGreaterThan(before)
+    expect(seen.at(-1)?.redirect).toBe('manual')
+    // The wrapper must still DELEGATE to the caller's fetch (same body/method).
+    expect(seen.at(-1)?.method).toBe('GET')
   })
 
   it('still delivers nothing when the caller passes the global fetch explicitly', async () => {

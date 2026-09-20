@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
+import type { OAuthClientProvider } from '@modelcontextprotocol/client'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'

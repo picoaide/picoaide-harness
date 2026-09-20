@@ -312,9 +312,13 @@ describe('cron client execution detail', () => {
     expect(source).toContain("'job.execution.openSession'")
   })
 
-  it('wires the sessions service into the panel for the jump', () => {
+  it('wires the workspace navigator into the panel for the jump', () => {
     const source = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
-    expect(source).toContain("ctx.get('sessions')")
+    // 0.1.6-alpha.2 删除了 `ctx.sessions.open()`：导航归属视图所有者，
+    // 由 `ctx.uiWorkspace.openSession(target)` 承担。判据同时钉住"取的是导航
+    // 服务"与"调的是 openSession"，回退到 sessions face 会立刻红。
+    expect(source).toContain("ctx.get('uiWorkspace')")
     expect(source).toContain('openSession')
+    expect(source).not.toContain("ctx.get('sessions')")
   })
 })

@@ -1,7 +1,13 @@
 /**
- * Cron plugin settings card (settings.plugin.item, key 'cron') plus its
- * tiny controller: a staged form over the `cron` settings namespace. The
- * namespace itself is registered by the Host half; the card only edits it.
+ * Cron plugin configuration card (`plugins.item`, id 'cron') plus its tiny
+ * controller: a form over the `cron` settings namespace. The namespace itself
+ * is registered by the Host half; the card only edits it.
+ *
+ * Upstream 0.1.6-alpha.2 把承接面从「设置→插件 里一个 keyed 卡」改成
+ * 「插件页 `plugins.item` 列表项」，并把 owner 契约变成两视图：`summary` 渲染
+ * 标题下的一行说明，`page` 渲染带自己保存控件的表单（本表单是即时保存的开关，
+ * 不需要额外的保存按钮）。旧槽 `settings.plugin.item` 已从 SlotMap 删除，
+ * 继续按它注册会类型报错、运行时静默不渲染。
  * The injected face is plain data + callbacks (JSON-compatible), per the
  * client discipline.
  */
@@ -69,13 +75,16 @@ function ToggleRow({ label, desc, checked, onChange }: {
   )
 }
 
-export function CronSettingsCard(props: PropsRuntime<'settings.plugin.item'> & CronSettingsCardFace): JSX.Element {
+export function CronSettingsCard(props: PropsRuntime<'plugins.item'> & CronSettingsCardFace): JSX.Element {
   const { getSnapshot, subscribe, set } = props
   const [snapshot, setSnapshot] = useState<CronSettingsSnapshot>(() => getSnapshot())
   useEffect(
     () => subscribe(() => setSnapshot(getSnapshot())),
     [getSnapshot, subscribe],
   )
+  // `summary` 是页面在标题下放的一行说明，不是表单的紧凑版 —— 页面自己画标题与
+  // 面包屑，这里只回一行文字。
+  if (props.view === 'summary') return <>{t('settings.summary')}</>
   const value = snapshot.status === 'ready' ? snapshot.value ?? {} : {}
   return (
     <div style={styles.card} data-dsh-plugin="cron">

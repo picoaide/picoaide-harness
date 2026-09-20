@@ -1,6 +1,6 @@
 /**
  * 补丁守卫：`@deepseek-ai/dsh-subprocess-local` 的 **runner 环境必须带
- * `ELECTRON_RUN_AS_NODE=1`**（见 `patches/dsh-subprocess-local@0.1.5-rc.2.patch`）。
+ * `ELECTRON_RUN_AS_NODE=1`**（见 `patches/dsh-subprocess-local@<pin>.patch`）。
  *
  * 背景（2026-09-12，真实故障）：打包后的 Electron 宿主里 `process.execPath` 是
  * **GUI 二进制**而不是 Node。上游按 `spawn(process.execPath, [runnerEntry, …])`

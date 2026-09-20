@@ -60,6 +60,12 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'lib/windows-agent-presets.js',
   'lib/windows-pwsh-sandbox.js',
   'lib/windows-acl-runner.js',
+  // P0-9(2026-09-20 升级审计):`lib/main.js` 静态 import 它(`assertRequiredRowsActive`)。
+  // 它是独立 tsdown 入口(冒烟要 import 同一个真源)⇒ 打包产物里必须真的在,
+  // 否则 Electron 主进程 import 期即 ERR_MODULE_NOT_FOUND(窗口都起不来)。
+  // 这一条同时是 2026-09-20 那条教训的落地:「声明了的入口就必须构建,
+  // 且 afterPack 清单必须覆盖真实 import」。
+  'lib/startup-rows.js',
   'build/app-icon.png',
   'build/app-icon-mac.png',
   'build/tray-iconTemplate.png',
@@ -96,6 +102,17 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/dsh-memory-evolve/skills/memory-consolidate/SKILL.md',
   // 技能辅助文件（上游 v26091501 起技能按整目录同步，scripts/ 要跟着走）。
   'node_modules/dsh-memory-evolve/skills/memory-consolidate/scripts/scan_memory.mjs',
+  // G-9（2026-09-20 升级审计）：`@deepseek-ai/dsh-sandbox-windows-acl`（**我们打补丁的包**）
+  // 在 0.1.6-alpha.2 新增两处运行期静态 import，此前**没有任何清单覆盖**：
+  //   lib/runner.js           → `@deepseek-ai/dsh-subprocess/control`（lib/control.js）
+  //   lib/types-CutH1Lgc.js   → `@deepseek-ai/dsh-lazy-require`（lib/index.js）
+  // 缺任一条 ⇒ 该插件模块加载失败，而 afterPack 的断言因为清单里没有这两个条目会**放行坏包**
+  // （Windows 沙箱链路的报错只会出现在运行期）。判据见
+  // tests/verify-packaged-runtime.spec.ts 的「补丁目标的静态子路径 import 必须在清单里」。
+  'node_modules/@deepseek-ai/dsh-subprocess/package.json',
+  'node_modules/@deepseek-ai/dsh-subprocess/lib/control.js',
+  'node_modules/@deepseek-ai/dsh-lazy-require/package.json',
+  'node_modules/@deepseek-ai/dsh-lazy-require/lib/index.js',
   // 平台内置技能（作者手册，2026-09-19 起叫 `app-builder`）**不在本清单里**，也不在包里：
   // 它的源目录已从本 vendored 包搬到服务端仓库的 `server/skills/app-builder/`，随服务端
   // 镜像发布、由员工在能力中心按需安装（`server/Dockerfile` 直接 COPY，客户端产物里

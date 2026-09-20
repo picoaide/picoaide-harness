@@ -1,6 +1,6 @@
---- a/lib/types-DuU3lSVe.js
-+++ b/lib/types-DuU3lSVe.js
-@@ -369,6 +369,18 @@
+--- a/lib/types-CutH1Lgc.js
++++ b/lib/types-CutH1Lgc.js
+@@ -380,6 +380,18 @@
  	};
  }
  /**
@@ -19,7 +19,7 @@
  * Shared tail of grantWrite and revokeWrite: merge `entry` into `oldAcl`
  * (null = no explicit DACL yet; SetEntriesInAclW builds one from scratch),
  * free the descriptor before applying the merged ACL, apply it, then free the
-@@ -395,7 +407,7 @@
+@@ -406,7 +418,7 @@
  	const freedDescriptor = descriptor !== null ? api.localFree(descriptor) : null;
  	const applyResult = api.setNamedSecurityInfoW(path, 1, 4, null, null, newAcl, null);
  	const freedNew = api.localFree(newAcl);

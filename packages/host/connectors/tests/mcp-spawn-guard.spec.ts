@@ -25,7 +25,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // built below from the captured config).
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({ apply: () => {} }))
 
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { apply, parseServerConnectors } from '../src/index.ts'
 import { ConnectorStore } from '../src/store.ts'
