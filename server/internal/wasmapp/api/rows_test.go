@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -275,6 +276,95 @@ func TestRowsMissingDBDoesNotCreateFile(t *testing.T) {
 	if _, err := os.Stat(path); err == nil {
 		t.Fatalf("只读端点不得创建库文件：%s 已存在", path)
 	}
+	// 目录也不能被建出来（2026-09-21 审计 P2-1：旧实现的 helper 会 MkdirAll）。
+	if _, err := os.Stat(filepath.Dir(path)); err == nil {
+		t.Fatalf("只读端点不得创建应用数据目录：%s 已存在", filepath.Dir(path))
+	}
+}
+
+// TestSchemaMissingDBCreatesNothing 是 P2-1 的另一半：`/schema` 与 `/rows` 必须同语义。
+//
+// 修复前：`/schema` 的 helper 首句是 `appdb.Open`（MkdirAll + rwc 建库）⇒ 一次"看表结构"
+// 就把库建出来了；`/rows` 只是恰好被自己的 stat 预检挡住。现在两者共用
+// `appDBReadOnly`（`appdb.SafePath` + `mode=ro`），写副作用在结构上不可能。
+//
+// 判据三条一起：HTTP 200（"还没写过数据"是状态而不是错误）+ `initialized=false`
+// + **库文件与目录都不存在**。
+func TestSchemaMissingDBCreatesNothing(t *testing.T) {
+	e := newTestEnv(t)
+	e.publishOK(e.tokens["alice"], "fresh-app", "1.0.0", testGuestModule(t), goodConfig())
+
+	path, perr := appdb.Path(e.dataRoot, "fresh-app")
+	if perr != nil {
+		t.Fatalf("Path: %v", perr)
+	}
+	w := e.req(http.MethodGet, "/api/client/v2/apps/wasm/fresh-app/schema", e.tokens["alice"], nil)
+	var out struct {
+		Schema struct {
+			Initialized bool  `json:"initialized"`
+			TableCount  int   `json:"table_count"`
+			SizeBytes   int64 `json:"size_bytes"`
+		} `json:"schema"`
+	}
+	e.decodeJSON(w, http.StatusOK, &out)
+	if out.Schema.Initialized || out.Schema.TableCount != 0 || out.Schema.SizeBytes != 0 {
+		t.Fatalf("空库的自省应是 initialized=false / 0 表 / 0 字节：%+v", out.Schema)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatalf("自省不得创建库文件：%s 已存在", path)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); err == nil {
+		t.Fatalf("自省不得创建应用数据目录：%s 已存在", filepath.Dir(path))
+	}
+}
+
+// TestDataSurfaceRejectsSymlinkedAppDir 覆盖 P2-4 的纵深防御：应用目录被替换成
+// 指向**别的应用库**的符号链接时，两个只读端点都必须 fail-closed（而不是读到别人的数据）。
+//
+// 可达性很低（要宿主数据根的写权限），但判据很便宜：一次 Lstat。与 assets 侧
+// "逐段拒符号链接"同口径。
+func TestDataSurfaceRejectsSymlinkedAppDir(t *testing.T) {
+	e := newTestEnv(t)
+	e.publishOK(e.tokens["alice"], "app-a", "1.0.0", testGuestModule(t), goodConfig())
+	e.publishOK(e.tokens["alice"], "app-b", "1.0.0", testGuestModule(t), goodConfig())
+	// 让 app-b 有真数据，再把 app-a 的目录换成指向 app-b 的符号链接。
+	rowsFixture(t, e, "app-b")
+	pathA, perr := appdb.Path(e.dataRoot, "app-a")
+	if perr != nil {
+		t.Fatalf("Path: %v", perr)
+	}
+	dirA := filepath.Dir(pathA)
+	if err := os.RemoveAll(dirA); err != nil {
+		t.Fatal(err)
+	}
+	dirB := filepath.Dir(mustPath(t, e, "app-b"))
+	if err := os.Symlink(dirB, dirA); err != nil {
+		t.Skipf("本机不支持符号链接: %v", err)
+	}
+
+	for _, req := range []string{
+		"/api/client/v2/apps/wasm/app-a/schema",
+		"/api/client/v2/apps/wasm/app-a/rows?table=notes",
+	} {
+		w := e.req(http.MethodGet, req, e.tokens["alice"], nil)
+		// fail-closed：既不是 200（读到别人的数据），也不是 404（把配置问题说成"应用不存在"）。
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("%s 必须 fail-closed（500），实际 %d：%s", req, w.Code, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "secret-token") {
+			t.Fatalf("%s 泄漏了别的应用的数据：%s", req, w.Body.String())
+		}
+	}
+}
+
+// mustPath 是 appdb.Path 的测试便捷包装。
+func mustPath(t *testing.T, e *testEnv, appID string) string {
+	t.Helper()
+	path, perr := appdb.Path(e.dataRoot, appID)
+	if perr != nil {
+		t.Fatalf("Path(%s): %v", appID, perr)
+	}
+	return path
 }
 
 func TestAdminRowsAndSchemaAvailable(t *testing.T) {
@@ -298,5 +388,55 @@ func TestAdminRowsAndSchemaAvailable(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"notes"`) {
 		t.Fatalf("管理面自省应包含表清单：%s", w.Body.String())
+	}
+}
+
+// TestSchemaAuditHappensAfterSuccessfulRead 钉住"审计行 = 真的发生过一次成功读取"。
+//
+// 背景（2026-09-21 独立审计 P3-⑧）：三个自省面的审计时机此前不一致 ——
+// `rows` 读成功才写，`schema`/`adminSchema` 在 `inspectAppDB` **之前**就写。
+// 后者让"库损坏 / 连接失败"这类失败也留下一条"查看了表结构"，审计对账会看到
+// 根本没发生的读取。
+//
+// 为什么用源码断言：`inspectAppDB` 对"库不存在"是**成功**返回（`initialized=false`），
+// 所以用"缺库"构造不出失败路径；要构造真失败需要造一个损坏的库文件，属于
+// "为了测试而制造环境病态"。这里断言的是**语句顺序**这个更直接、也更难绕过的判据：
+// 在同一个函数体里，`inspectAppDB` 必须出现在 `auditApp` 之前。
+//
+// 变异验证：把任一处的两行顺序换回来 ⇒ 本用例红。
+func TestSchemaAuditHappensAfterSuccessfulRead(t *testing.T) {
+	cases := []struct {
+		file string
+		fn   string
+	}{
+		{"read.go", "func (h *Handlers) schema(c *gin.Context) {"},
+		{"rows.go", "func (h *Handlers) adminSchema(c *gin.Context) {"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.fn, func(t *testing.T) {
+			raw, err := os.ReadFile(tc.file)
+			if err != nil {
+				t.Fatalf("读 %s: %v", tc.file, err)
+			}
+			body := string(raw)
+			start := strings.Index(body, tc.fn)
+			if start < 0 {
+				t.Fatalf("%s 里找不到 %q（函数改名后本判据会静默失效）", tc.file, tc.fn)
+			}
+			// 只取函数体开头一段（到下一个顶层 `}` 之前足够覆盖这个顺序）。
+			seg := body[start:]
+			if end := strings.Index(seg, "\n}\n"); end > 0 {
+				seg = seg[:end]
+			}
+			readAt := strings.Index(seg, "inspectAppDB(")
+			auditAt := strings.Index(seg, `"wasm_app_schema_view"`)
+			if readAt < 0 || auditAt < 0 {
+				t.Fatalf("%s 的 %s 里应同时含 inspectAppDB 与 wasm_app_schema_view 审计（读取 %d / 审计 %d）",
+					tc.file, tc.fn, readAt, auditAt)
+			}
+			if auditAt < readAt {
+				t.Fatalf("%s 的 %s 在读取之前就写审计（审计时机必须与 rows 一致：读成功才记账）", tc.file, tc.fn)
+			}
+		})
 	}
 }

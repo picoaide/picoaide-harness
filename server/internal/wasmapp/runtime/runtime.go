@@ -125,7 +125,16 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 			if err != nil {
 				return nil, err
 			}
-			cache, own = c, true
+			// 磁盘缓存不可用（只读挂载 / 非属主 chmod 失败 / 根路径被占）时
+			// NewCompilationCache 返回 (nil, nil)：**降级为进程内缓存**而不是让
+			// 整个服务端起不来（2026-09-21 独立审计 P1-①；缓存是性能优化，
+			// 不是执行前提）。wazero 不接受 nil 缓存，所以这里必须补一个。
+			if c == nil {
+				cache = wazero.NewCompilationCache()
+			} else {
+				cache = c
+			}
+			own = true
 		} else {
 			cache = wazero.NewCompilationCache()
 			own = true

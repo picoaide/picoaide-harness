@@ -76,6 +76,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -300,6 +301,58 @@ func Path(dataRoot, appID string) (string, *apperr.Error) {
 			WithHint("请把数据根换成不含 ? 与 # 的路径")
 	}
 	return path, nil
+}
+
+// SafePath 解析应用库路径，并做**形状校验**（不建目录、不连库、不跟随符号链接）。
+//
+// 返回 `exists=false` 表示"这个应用还没有库文件"——调用方据此决定语义
+// （只读端点：返回空结构或 404；运行期：由 Open 建库）。
+//
+// 为什么单独一条（2026-09-21 独立审计 P2-1/P2-4）：
+//   - 只读端点此前用 `Open` 取路径，而 `Open` 会 MkdirAll + 以 rwc 打开 ⇒ **读一次
+//     就把库建出来了**（`/schema` 实测有这个写副作用，`/rows` 只是恰好被调用方的
+//     stat 预检挡住了）；
+//   - 应用目录或库文件被替换成**符号链接**时（指向别的应用库），`/rows`、`/schema`、
+//     诊断都会读到别的应用的数据。可达性极低（要宿主数据根的写权限），但纵深防御
+//     的成本只有一次 `Lstat`，与 assets 侧的"逐段拒符号链接"同口径。
+//
+// 判据：`<dataRoot>/apps/<appID>`（若存在）必须是**真实目录**；
+// `app.db`（若存在）必须是**常规文件**；两者是符号链接一律 fail-closed。
+func SafePath(dataRoot, appID string) (path string, exists bool, oerr *apperr.Error) {
+	path, oerr = Path(dataRoot, appID)
+	if oerr != nil {
+		return "", false, oerr
+	}
+	dir := filepath.Dir(path)
+	if info, err := os.Lstat(dir); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", false, apperr.New(apperr.CodeInternal, "应用数据目录是符号链接").
+				WithDetail("app_id", appID).
+				WithHint("应用数据目录必须由平台自己创建；符号链接可能指向别的应用库 ⇒ 拒绝读取")
+		}
+		if !info.IsDir() {
+			return "", false, apperr.New(apperr.CodeInternal, "应用数据路径不是目录").
+				WithDetail("app_id", appID)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", false, apperr.New(apperr.CodeInternal, "应用数据目录不可访问").WithCause(err)
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return path, false, nil
+	}
+	if err != nil {
+		return "", false, apperr.New(apperr.CodeInternal, "应用库文件不可访问").WithCause(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", false, apperr.New(apperr.CodeInternal, "应用库文件是符号链接").
+			WithDetail("app_id", appID).
+			WithHint("库文件必须是平台自己创建的常规文件；符号链接可能指向别的应用库 ⇒ 拒绝读取")
+	}
+	if !info.Mode().IsRegular() {
+		return "", false, apperr.New(apperr.CodeInternal, "应用库文件不是常规文件").WithDetail("app_id", appID)
+	}
+	return path, true, nil
 }
 
 // Open 打开（必要时创建）某个应用的库，并完成连接加固。

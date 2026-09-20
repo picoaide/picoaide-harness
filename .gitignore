@@ -115,6 +115,10 @@ temp/xdgcache/
 .scan/
 server/.scan-staticcheck.txt
 
+# 探针手工 `go build` 落在包目录旁的产物（默认以目录名输出到 CWD；曾把 2.4 MB
+# ELF 留在 server/sockprobe，见 2026-09-21 审计 P3-3）
+server/sockprobe
+
 # 浏览器 store 回退目录（无 Electron userData 时的兜底;审计 2026-09-08 P2-38b）
 .browser-store/
 

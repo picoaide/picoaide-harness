@@ -55,3 +55,46 @@ func TestCompileRejectsDataCountAfterCode(t *testing.T) {
 		t.Fatal("DataCount 摆在 Code 之后必须被运行时拒绝（否则这条判据失去意义）")
 	}
 }
+
+// TestCompileRejectsDuplicateNonCustomSections 是重复段判据的**跨实现对拍**。
+//
+// 为什么必须有这条（2026-09-21 独立审计 P1-1 的方法学要求）：平台侧用例
+// （wasmmod.TestValidateRejectsDuplicateNonCustomSections）只钉了"平台自己会拒"，
+// 而 P1-1 的病根恰恰是**平台与 wazero 不同判**——只钉一侧等于把错误判据锁死。
+// 这条断言同一批模块在运行时 wazero 侧**也必须编译不过**：
+//   - 平台拒、wazero 也拒 ⇒ 同判（正确态）；
+//   - 平台拒、wazero 接受 ⇒ 平台过严（会误杀合法产物，同样要修）。
+//
+// 覆盖 6 个 id：Function(3)/Table(4)/Global(6)/Element(9)/Code(10)/Data(11)。
+// 夹具把两次出现摆在该段的规范位置上，因此这里同时排除了"顺序"这条干扰病因。
+func TestCompileRejectsDuplicateNonCustomSections(t *testing.T) {
+	rt, err := New(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = rt.Close(context.Background()) })
+
+	for _, tc := range []struct {
+		name string
+		id   byte
+	}{
+		{"function", 3},
+		{"table", 4},
+		{"global", 6},
+		{"element", 9},
+		{"code", 10},
+		{"data", 11},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mod := wasmtest.WithDuplicateSection(tc.id, []byte{0x00}, []byte{0x00})
+			compiled, cerr := rt.CompileModule(context.Background(), mod)
+			if cerr == nil {
+				if compiled != nil {
+					_ = compiled.Close(context.Background())
+				}
+				t.Fatalf("重复 %s 段必须被 wazero 拒绝：平台预检若也放行，两者就一起放行了非法模块；"+
+					"平台预检若拒绝而这里接受，则平台的判据比运行时更严（会误杀合法产物）", tc.name)
+			}
+		})
+	}
+}

@@ -10,8 +10,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/go-ldap/ldap/v3"
 
@@ -415,56 +413,35 @@ func redactCredential(text, secret string) string {
 			out = strings.ReplaceAll(out, v, "***")
 		}
 	}
-	out = sanitizeLogLine(out)
+	// 转义与截断都走 `internal/util` 的**同一份**实现（sanitizeLogLine 是
+	// util.EscapeControl 的薄包装，与 wasmapp/logbuf 的 sanitizeLogField 同款）：
+	//   - **先转义、再按转义边界截断** ⇒ 既不会切出半个多字节字符（中文错误消息
+	//     很常见），也不会留下 `\x8`/`\u202` 这类**半截转义序列** —— 半截序列会被
+	//     任何做一次反转义的消费端当成续行符，从而吞掉紧随其后的那一行宿主日志
+	//     （2026-09-21 审计 A-P2-2；log.Printf 也会把非法字节原样写盘）；
+	//   - 被截断时补一个省略号，"文本被截过"这件事对排障者可见。
+	// 注意这里必须用**未转义**的 out 再做一次有界转义，不能对已转义文本再转一次。
 	const maxLogText = 300
-	if len(out) > maxLogText {
-		out = truncateUTF8(out, maxLogText) + "…"
+	escaped := sanitizeLogLine(out)
+	if len(escaped) > maxLogText {
+		return util.EscapeControlLimit(out, maxLogText) + "…"
 	}
-	return out
-}
-
-// truncateUTF8 按**字节**上限截断,但绝不留半个字符。
-//
-// 为什么要专门做(2026-09-17 独立验证 P4):转义后的文本仍可能是多字节 UTF-8
-// (中文错误消息很常见),直接 out[:300] 会切出非法字节序列;而 log.Printf 用
-// %s/%v 把非法字节**原样**写盘,不会净化成 U+FFFD —— 下游日志采集会看到乱码。
-func truncateUTF8(s string, maxBytes int) string {
-	if len(s) <= maxBytes {
-		return s
-	}
-	for i := maxBytes; i > 0; i-- {
-		if utf8.RuneStart(s[i]) {
-			return s[:i]
-		}
-	}
-	return ""
+	return escaped
 }
 
 // sanitizeLogLine 把 CR/LF/Tab、控制字符与**双向/零宽格式字符**转成可见转义
 // (CWE-117:对端文本不能伪造日志行)。
 //
+// 实现唯一在 `internal/util` 的 EscapeControl（本函数只是薄包装，与 wasmapp/logbuf
+// 的 sanitizeLogField 同款写法，2026-09-21 审计 A-P2-1）—— 本地再留一份策略，
+// "哪些字符算控制字符"必然在模块间漂移。
+//
 // 为什么连格式字符也要转(2026-09-17 独立验证 P3):U+202E(U+202A-U+202E)、
 // U+2066-U+2069、U+200B-U+200F 这类字符不产生换行,但会**改变显示顺序**
 // (实测 "ok\u202egnp.exe\u202c end" 在编辑器里读成 "ok exe.png end")——
 // 管理员看日志会被误导;U+2028/U+2029 在部分查看器里还是换行。
-func sanitizeLogLine(text string) string {
-	var b strings.Builder
-	b.Grow(len(text))
-	for _, r := range text {
-		switch {
-		case r == '\n':
-			b.WriteString(`\n`)
-		case r == '\r':
-			b.WriteString(`\r`)
-		case r == '\t':
-			b.WriteString(`\t`)
-		case r < 0x20 || r == 0x7f:
-			b.WriteString(fmt.Sprintf(`\x%02x`, r))
-		case unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp):
-			b.WriteString(fmt.Sprintf(`\u%04x`, r))
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
+//
+// 相比换过来之前的本地实现，本包装**更严一档**：旧版逐码点判 `r < 0x20 || r == 0x7f`，
+// 不覆盖 C1 段 U+0080–U+009F（U+0085 NEL 就在其中，部分查看器与 JS 把它当换行）；
+// util 侧按 `unicode.Cc` 判定，覆盖整个 C1 段。方向是"更严"，不是放宽。
+func sanitizeLogLine(text string) string { return util.EscapeControl(text) }

@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -29,7 +28,10 @@ import (
 //     · 员工面鉴权 = `ownedApp`（**只有发布者本人**，他人一律 404 与"应用不存在"同形）；
 //     · 默认按列名启发式**脱敏**，显式 `unmask=1` 才给原值，且**该次调用单独审计**；
 //     · 每次调用写审计（动作 `wasm_app_rows_view`），审计**只记表名/分页/行数与脱敏状态，
-//     不记行内容**（`audit_text` 会折行，把行内容写进去等于把 PII 复制到审计表）。
+//     不记行内容**（把行内容写进审计等于把 PII **再复制一份**到审计表，而审计的保留期
+//     与可见面与业务库完全不同；另外审计明细是"一条 = 一行"的追加型文本面，
+//     行内容里的换行会破坏行结构 —— 入口的 `util.EscapeControl` 只保证结构不被伪造，
+//     不解决"PII 多存一份"这件事，所以唯一正确的做法是根本不写进去）。
 //
 // 实现纪律：
 //   - **行查询走 `appdb`**（不是自己拼一条 SELECT 打到只读连接上）：语句闸门、单语句
@@ -146,24 +148,17 @@ func (h *Handlers) respondRows(c *gin.Context, appID, appTitle, operator string)
 	offset := clampInt(atoiDefault(c.Query("offset"), 0), 0, rowsMaxOffset)
 	unmask := isTruthyQuery(c.Query("unmask"))
 
-	// ① 库文件不存在 ⇒ 应用还没有任何数据。**先 stat 再 Open**：appdb.Open 会建库，
-	// 只读端点不该有写副作用（作者点一下"数据"就把 app.db 建出来是不可接受的）。
-	path, perr := appdb.Path(h.opt.DataRoot, appID)
-	if perr != nil {
-		writeErr(c, perr)
+	// ①+② 只读打开（库文件不存在 ⇒ 应用还没有任何数据；**不建库、不建目录**）：
+	// 同一份 helper 服务 /rows 与 /schema，写副作用在结构上不可能。
+	db, _, _, exists, oerr := h.appDBReadOnly(ctx, appID)
+	if oerr != nil {
+		writeErr(c, oerr)
 		return
 	}
-	if _, serr := os.Stat(path); serr != nil {
+	if !exists {
 		writeErr(c, notFoundApp(appID).WithDetail("table", table).
 			WithHint("这个应用还没有数据库：它还没成功执行过任何 db.define/db.exec；"+
 				"先打开应用跑一次写入，或检查应用的建表代码"))
-		return
-	}
-
-	// ② 自省：表是否存在、列结构、总行数（与 GET …/schema 同一份只读实现）。
-	db, _, _, oerr := h.openAppDBReadOnly(ctx, appID)
-	if oerr != nil {
-		writeErr(c, oerr)
 		return
 	}
 	defer db.Close()
@@ -442,12 +437,14 @@ func (h *Handlers) adminSchema(c *gin.Context) {
 		writeErr(c, aerr)
 		return
 	}
-	h.auditApp(appID, admin.Username, "wasm_app_schema_view",
-		auditDetail(appID, auditTitleOf(app), "查看表结构与占用"))
+	// 审计写在读成功之后（与 `rows` 及员工面 `schema` 同一口径，2026-09-21 独立审计 P3-⑧）：
+	// 审计行 = 真的发生过一次成功读取，而不是"有人尝试过"。
 	report, serr := h.inspectAppDB(c.Request.Context(), appID)
 	if serr != nil {
 		writeErr(c, serr)
 		return
 	}
+	h.auditApp(appID, admin.Username, "wasm_app_schema_view",
+		auditDetail(appID, auditTitleOf(app), "查看表结构与占用"))
 	c.JSON(http.StatusOK, gin.H{"schema": report})
 }

@@ -125,6 +125,29 @@ var seededSkillDigests = map[string]string{
 	// 为什么要提版本：这三个文件都随镜像下发给员工（R1-pm-8：内容变 ⇒ 版本必须变，
 	// 已安装的客户端靠它判「有更新」）。
 	"8d650d1ec1203f52fe7efd52de20d0d6c632445dffe180a46ef002093c6a494f": "2.2.0",
+
+	// 2.3.0 = **本地预览换成真 SQLite**（2026-09-21）：`examples/go/preview.mjs` 此前是
+	// "内存桩 + 三个正则解析 SQL"——作者在本地永远验不到"写一条→读列表"，也看不到自己
+	// 写进去的数据（那正是"作者不能检查自己的 SQL 数据"在**开发期**的那一半）。
+	// 现在它用 Node 内置 `node:sqlite`：数据落 `<产物目录>/.preview/<名字>.db`（跨调用保留、
+	// 可用任何 SQLite 工具打开），语义与线上同向（单语句、query 只读、保留列 `_row_id`
+	// 不可见/不可提、列类型枚举与 limits 一致），并新增 `--dump-tables` / `--fresh` /
+	// `--db` / `--data-dir` / `--selftest`（8 条自检，Go 侧也有门禁跑它）。
+	//   - `SKILL.md`：第 6 阶段的自测命令与两条使用要点；
+	//   - `examples/go/README.md`：预览一节的说明与命令。
+	"404574e29b69ad73b05bb974683e3092b2b8538c89a4d6108b1ec8ba806515fa": "2.3.0",
+
+	// 2.4.0 = **工具链段（`.debug_*`）口径三处对齐 + 段序判据与平台同判**（2026-09-21 审计修复批）：
+	//   - `scripts/pack-assets.mjs`：段表判据此前只做"纯 id 升序"，会把 TinyGo/LLVM 的
+	//     **规范 DataCount 位置**（Element 之后、Code 之前）误拒；现在与 `wasmmod/parse.go`
+	//     逐条同判（重复优先 → DataCount 特例 → 严格递增），并补上 Tag(13) 的拒绝文案。
+	//   - `examples/go/preview.mjs`：**此前没有 `.debug_` 前缀规则** ⇒ 本地预览把几 MB 的
+	//     DWARF 当应用资源直出（"本地能打开、线上 404"），且段总量预算两侧给出两个数。
+	//     现在与 `assets.ToolchainSectionPrefixes` 同源，并由
+	//     `assets.TestPreviewScriptSharesToolchainSectionPolicy` 双向对拍。
+	//   - 段总量预算口径在两侧统一为"只计会计入资源集的段"（`.debug_*` 不计入，
+	//     但非 `.debug_*` 段超 4 MiB 仍照拒）。
+	"fcef001e48222b32acd8fd85154aaf5b5cb207867c36b1fc811c089d2809a7c2": "2.4.0",
 }
 
 // TestBuiltinSkillVersionTracksContent 断言当前技能内容的摘要已在登记表里，且登记的

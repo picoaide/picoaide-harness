@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/wasmapp/compile/testdata/wasmtest"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -191,4 +192,52 @@ func TestServe_MemoryPagesMismatchIsRejected(t *testing.T) {
 	if _, err := rt.Serve(context.Background(), appModule(t), req); err == nil {
 		t.Fatal("请求侧内存上限与运行时不一致时必须报错")
 	}
+}
+
+// TestRuntimeDegradesToInMemoryCacheWhenDiskCacheUnusable 是 P1-① 的**执行侧**判据。
+//
+// 背景（2026-09-21 独立审计 P1-①）：`cachetrust.Ensure` 的错误原先会一路冒泡到
+// cmd/server 的 `log.Fatalf` —— 只读挂载、`--user` 非属主、k8s `runAsUser` 下
+// Chmod 必然失败，于是**整个服务端起不来**，而它本该只是"首次编译慢一点"。
+//
+// 判据两条：
+//  1. 磁盘缓存不可用时 `NewCompilationCache` 返回 (nil, nil)（降级信号，不是错误）；
+//  2. `runtime.New` 收到这个信号后仍能装配成功并**真能编译**（不能把 nil 缓存
+//     直接交给 wazero —— 那会在装配期炸）。
+//
+// 构造方式：把缓存根路径的位置先占成**普通文件**（`<dataRoot>/_compile-cache`
+// 无法成为目录），于是 Ensure 报"根路径不是目录"⇒ 磁盘缓存拿不到。
+// 变异验证：把 NewCompilationCache 的降级分支改回 `return nil, err`（或让 runtime.New
+// 原样把 nil 交给 wazero）⇒ 本用例红。
+func TestRuntimeDegradesToInMemoryCacheWhenDiskCacheUnusable(t *testing.T) {
+	root := t.TempDir()
+	// 占位：让 <dataRoot>/_compile-cache 成为一个**普通文件**。
+	blocked := filepath.Join(root, limits.CompileCacheDirName)
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cache, err := NewCompilationCache(root)
+	if err != nil {
+		t.Fatalf("磁盘缓存不可用不应是致命错误（执行侧必须能降级）：%v", err)
+	}
+	if cache != nil {
+		_ = cache.Close(context.Background())
+		t.Fatal("根路径被普通文件占位时不应拿到磁盘缓存")
+	}
+
+	// 降级路径必须真的能起运行时并编译。
+	rt, err := New(context.Background(), Options{DataRoot: root})
+	if err != nil {
+		t.Fatalf("缓存不可用时 runtime.New 必须仍能装配（降级为进程内缓存）：%v", err)
+	}
+	t.Cleanup(func() { _ = rt.Close(context.Background()) })
+	mod, cerr := rt.CompileModule(context.Background(), wasmtest.WithDataCount())
+	if cerr != nil {
+		t.Fatalf("降级后必须仍能编译（否则降级只是把崩溃换成不可用）：%v", cerr)
+	}
+	if mod == nil {
+		t.Fatal("编译返回 nil 模块")
+	}
+	_ = mod.Close(context.Background())
 }

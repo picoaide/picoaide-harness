@@ -242,23 +242,31 @@ describe('作者数据面：路径与形状守卫（2026-09-21 新增）', () =>
   })
 
   it('schema 形状不符 ⇒ 结构化失败，**不回落成空表清单**', () => {
-    // 回落成 `{tables: []}` 会把"服务端改了字段名/返回了 HTML"说成"应用没有表"。
-    for (const payload of [{}, { schema: {} }, null, { schema: { app_id: 'roster' } }]) {
-      const outcome = parseSchemaOutcome('roster', payload)
-      if (payload && typeof payload === 'object' && 'schema' in payload && (payload as { schema?: { app_id?: string } }).schema?.app_id === 'roster') {
-        // app_id 在但 tables 缺失：这是"形状基本对、只是空"的合法情形（服务端总会发 tables）。
-        expect(outcome.ok).toBe(true)
-        continue
-      }
-      expect(outcome.ok).toBe(false)
+    // 回落成 `{tables: []}` 会把"服务端改了字段名/返回了 HTML/响应被截断"说成
+    // "应用没有表" —— 作者会据此改代码，方向完全错（2026-09-21 审计 P2-2）。
+    // 注意：`app_id` 在但 `tables` **缺失**也算形状不符；只有显式空数组才是"确实没有表"。
+    for (const payload of [{}, { schema: {} }, null, { schema: { app_id: 'roster' } }, { schema: { app_id: 'roster', tables: 'nope' } }]) {
+      expect(parseSchemaOutcome('roster', payload).ok).toBe(false)
     }
+    // 正对照：显式空数组是"确实没有表"，必须通过。
+    const empty = parseSchemaOutcome('roster', { schema: { app_id: 'roster', tables: [] } })
+    expect(empty.ok).toBe(true)
   })
 
   it('rows 形状不符 ⇒ 结构化失败，**不回落成 0 行**', () => {
-    // "0 行"会让作者以为"数据没写进去" —— 方向完全错。
-    for (const payload of [{}, { rows: {} }, null, { rows: { table: 'notes' } }]) {
+    // "0 行"会让作者以为"数据没写进去" —— 方向完全错。`rows`/`columns` 缺失或非数组都算。
+    for (const payload of [
+      {}, { rows: {} }, null,
+      { rows: { table: 'notes' } },                                  // 缺 app_id
+      { rows: { app_id: 'roster', table: 'notes' } },                // 缺 rows/columns
+      { rows: { app_id: 'roster', table: 'notes', rows: {}, columns: [] } }, // rows 非数组
+      { rows: { app_id: 'roster', table: 'notes', rows: [], columns: 'x' } }, // columns 非数组
+    ]) {
       expect(parseRowsOutcome('roster', payload).ok).toBe(false)
     }
+    // 正对照：显式空 rows 数组是"这张表确实没有行"，必须通过。
+    const empty = parseRowsOutcome('roster', { rows: { app_id: 'roster', table: 'notes', rows: [], columns: [] } })
+    expect(empty.ok).toBe(true)
   })
 
   it('rows 正常解析：列敏感标记、行值、分页与截断元数据都读服务端的', () => {

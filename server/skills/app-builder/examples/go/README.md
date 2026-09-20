@@ -17,7 +17,7 @@
 | `web/app.js` | 取数与渲染、三态切换、客户端 AI loop 调用 |
 | `picoaide.app.json` | 随包配置（`access` / `whitelist` / `purpose` / `data_sensitivity` / `owner`；字段规格见 `references/app-config.md`） |
 | `go.mod` | 独立模块（示例不依赖平台内部包，作者拿到的就是这一份） |
-| `preview.mjs` | 本地假宿主：用 Node 自带的 `node:wasi` 把应用跑起来（零外部依赖） |
+| `preview.mjs` | 本地假宿主：用 Node 自带的 `node:wasi` + `node:sqlite` 把应用跑起来（零外部依赖；数据落本地库，`--dump-tables` 可看） |
 
 ## 四步跑起来
 
@@ -37,6 +37,8 @@ node preview.mjs dist/shared-notes-packed.wasm --path / --user zhangwei
 node preview.mjs dist/shared-notes-packed.wasm --path /static/app.js       # 宿主直出，不跑 wasm
 node preview.mjs dist/shared-notes-packed.wasm --path /api/notes --method POST --body '{"body":"hello"}'
 node preview.mjs dist/shared-notes-packed.wasm --user someone-else         # 看无权限页
+node preview.mjs dist/shared-notes-packed.wasm --dump-tables               # 看本地库的表/列/行数
+node preview.mjs --selftest                                                # 自检：本地库语义与平台同向（8 条）
 
 # ④ 上传平台：先 wasm_app_validate（不占版本号），过了再 wasm_app_publish
 ```
