@@ -20,7 +20,7 @@ import {
   type OpenWindowOutcome,
 } from './open-app.ts'
 import { DEFAULT_ACCESS, parseWindowSpec, type AccessMode, type AppWindowSpec } from './appcfg-contract.ts'
-import { formatWindowRatio, parseErrorEnvelope, type PublishFailure, type PublishTarget } from './publish-app.ts'
+import { formatWindowRatio, parseErrorEnvelope, type PublishFailure, type PublishTarget, type RequestDeps } from './publish-app.ts'
 import {
   deleteApp,
   fetchDiagnostics,
@@ -36,6 +36,7 @@ import {
   type ReleaseStatus,
 } from './app-releases.ts'
 import { AppAiPanel } from './AppAiPanel.tsx'
+import { DataBrowserPanel } from './DataBrowserPanel.tsx'
 import {
   appChannel,
   loadAppChannel,
@@ -638,7 +639,7 @@ const NOTICE: React.CSSProperties = {
  */
 export function AppCenterPanel({
   onClose, onboardingStore, channelLoader, channelResultLoader, identityLoader, writeClipboard, aiDeps, aiConsentStore,
-  intentStore, loginStateLoader, loginPollMs, now,
+  intentStore, loginStateLoader, loginPollMs, now, dataDeps,
 }: {
   onClose: () => void
   /** 一次性引导卡的存储（缺省渲染进程 `localStorage`）。 */
@@ -655,6 +656,8 @@ export function AppCenterPanel({
   aiDeps?: AppAiDeps
   /** 应用 AI 的授权存储（缺省渲染进程 `localStorage`）。 */
   aiConsentStore?: AppAiConsentStore | null
+  /** 作者数据面的取数依赖（测试注入假 fetch；缺省走页面上下文的本机路由）。 */
+  dataDeps?: RequestDeps
   /** 「未登录时记住这次打开」的存储（缺省 `sessionStorage`）。 */
   intentStore?: OpenIntentStore | null
   /** 登录态取数（缺省读本机 `/api/pico/auth/state`；测试注入假实现）。 */
@@ -979,6 +982,7 @@ export function AppCenterPanel({
               identity={identity}
               {...(aiDeps === undefined ? {} : { aiDeps })}
               {...(aiConsentStore === undefined ? {} : { aiConsentStore })}
+              {...(dataDeps === undefined ? {} : { dataDeps })}
               onBack={() => { setView('catalog') }}
               onOpen={async () => await openRow(detail)}
               onCopyLink={async () => await handleCopyLink(detail)}
@@ -1362,7 +1366,7 @@ export function OnboardingCard({ onDismiss }: { onDismiss: () => void }) {
  * @param props - 条目、渠道参数、计数、分享与 AI 的依赖与回调。
  */
 export function AppDetailView({
-  item, channel, counts, windowOutcome, copied, identity, aiDeps, aiConsentStore, onBack, onOpen, onCopyLink,
+  item, channel, counts, windowOutcome, copied, identity, aiDeps, aiConsentStore, dataDeps, onBack, onOpen, onCopyLink,
 }: {
   item: AppCenterItem
   /** 渠道参数；`null` ⇒ 分享入口不渲染、产品名不显示。 */
@@ -1378,6 +1382,8 @@ export function AppDetailView({
   aiDeps?: AppAiDeps
   /** 应用 AI 的授权存储（缺省 `localStorage`）。 */
   aiConsentStore?: AppAiConsentStore | null
+  /** 数据面板的可注入取数依赖（测试用；缺省走页面上下文的 fetch）。 */
+  dataDeps?: RequestDeps
   onBack: () => void
   onOpen: () => Promise<PublishFailure | null>
   onCopyLink: () => Promise<boolean>
@@ -1477,6 +1483,13 @@ export function AppDetailView({
       )}
       {failure !== null && (
         <PublishErrorBlock failure={failure} title={t('appCenter.actionFailed')} role="lifecycle-error" />
+      )}
+
+      {/* 作者数据面（2026-09-21）：**只在发布者本人**的详情页渲染 ——
+          服务端对非发布者一律 404（与"应用不存在"同形），界面上摆一个必然失败的入口
+          只会让人以为"功能坏了"。 */}
+      {item.isOwner && (
+        <DataBrowserPanel appId={item.appId} {...(dataDeps === undefined ? {} : { deps: dataDeps })} />
       )}
 
       <AppAiPanel

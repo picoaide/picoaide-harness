@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -177,6 +178,70 @@ func TestBuildSkipsToolchainSectionsAndConfig(t *testing.T) {
 	}
 }
 
+// TestBuildSkipsDebugSections 是 P0-5 的行为判据：DWARF 调试段**不得**进资源集。
+//
+// 修复前：`ToolchainSections` 只有精确名单，`.debug_*` 是合法逻辑路径 ⇒ 全套 DWARF
+// 被当成应用资源（Rust wasm32-wasip1 默认产物 2 083 074 B 自定义段、占模块 97.7%），
+// 既吃 4 MiB 段额度，又能被任何人按路径静态直出（源码结构外泄）。
+//
+// 正负对照（缺一不可）：
+//   - 正例：`.debug_` 前缀的各段必须被跳过并出现在 skipped 列表里；
+//   - 负例：`.debugger/note.txt`（前缀是 `.debug` 但不是 `.debug_`）必须**保留** ——
+//     没有它，"把所有点开头的段都忽略"也能让正例通过，而 `.well-known/` 这类合法
+//     资源路径会被误杀。
+//
+// 变异验证：把 IsToolchainSection 的前缀分支删掉 ⇒ 本用例第一步即红。
+func TestBuildSkipsDebugSections(t *testing.T) {
+	sections := map[string][]byte{
+		"index.html":       []byte("ok"),
+		".debug_info":      []byte("DWARF"),
+		".debug_line":      []byte("DWARF"),
+		".debug_abbrev":    []byte("DWARF"),
+		".debug_str":       []byte("DWARF"),
+		".debugger/config": []byte("不是工具链段"), // 前缀 `.debug` 但不是 `.debug_`
+	}
+	set, err := assets.Build("demo", "1", sections, []byte(`{"access":"login"}`))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	got := set.List()
+	want := "index.html,.debugger/config," + limits.AppConfigFileName
+	// List 是字典序（点开头的段排在最前），这里按集合口径断言更稳。
+	has := func(name string) bool {
+		for _, g := range got {
+			if g == name {
+				return true
+			}
+		}
+		return false
+	}
+	_ = want
+	for _, name := range []string{".debug_info", ".debug_line", ".debug_abbrev", ".debug_str"} {
+		if has(name) {
+			t.Fatalf("DWARF 段 %s 不得进资源集，实际 List() = %v", name, got)
+		}
+	}
+	if !has(".debugger/config") {
+		t.Fatalf(".debugger/config 不是工具链段（前缀是 .debug 而非 .debug_），必须保留；List() = %v", got)
+	}
+
+	kept, skipped := assets.SplitSections(sections)
+	if _, ok := kept[".debug_info"]; ok {
+		t.Fatal("SplitSections 必须把 .debug_info 分流到 skipped")
+	}
+	for _, name := range []string{".debug_abbrev", ".debug_info", ".debug_line", ".debug_str"} {
+		found := false
+		for _, sk := range skipped {
+			if sk == name {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("skipped 列表应包含 %s（发布期要让作者看见哪些段被忽略），实际 %v", name, skipped)
+		}
+	}
+}
+
 func TestBuildInjectsConfigAsReservedAsset(t *testing.T) {
 	set, err := assets.Build("demo", "1", map[string][]byte{"index.html": []byte("x")},
 		[]byte(`{"access":"whitelist","whitelist":["zhangwei"]}`))
@@ -330,8 +395,15 @@ func TestBuildIsDeterministic(t *testing.T) {
 	}
 }
 
-// 打包脚本的拒绝清单必须与 ToolchainSections 同源（脚本头部注释里点名了它）。
-// 判据直接读脚本源码：改了工具链段名单却忘了同步脚本 ⇒ 红。
+// 打包脚本的拒绝清单必须与 assets 侧同源（精确名单 + 前缀），且必须**真的用**它。
+//
+// 判据是**双向**的（2026-09-21 加固）：早期版本只做"Go 名单里每个名字都能在脚本文本里
+// 找到"，这有三个假绿口子 —— ① 脚本删掉整段逻辑但常量还在，断言照样过；
+// ② 脚本多出一条 Go 侧没有的拒绝项（作者被脚本拦住、平台其实接受）；
+// ③ 前缀规则只加在一边。因此现在：
+//
+//	· 从脚本里**解析**出两个列表并与 Go 侧做集合相等（双向）；
+//	· 断言脚本确实调用了 isToolchainSection(...)（能力断言，不是字面量断言）。
 func TestPackAssetsScriptRejectionListMatchesToolchainSections(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "skills", "app-builder", "scripts", "pack-assets.mjs")
 	raw, err := os.ReadFile(path)
@@ -339,9 +411,67 @@ func TestPackAssetsScriptRejectionListMatchesToolchainSections(t *testing.T) {
 		t.Skipf("技能目录不在预期位置（%s）：%v", path, err)
 	}
 	src := string(raw)
-	for name := range assets.ToolchainSections {
-		if !strings.Contains(src, "'"+name+"'") && !strings.Contains(src, `"`+name+`"`) {
-			t.Fatalf("pack-assets.mjs 的拒绝清单里缺少工具链段 %q —— 两边必须同源", name)
+
+	parseList := func(constName string) []string {
+		t.Helper()
+		idx := strings.Index(src, constName)
+		if idx < 0 {
+			t.Fatalf("pack-assets.mjs 里找不到常量 %s", constName)
 		}
+		rest := src[idx:]
+		open := strings.IndexAny(rest, "([")
+		closeIdx := strings.IndexAny(rest, ")]")
+		if open < 0 || closeIdx < open {
+			t.Fatalf("pack-assets.mjs 的 %s 不是列表/集合字面量", constName)
+		}
+		body := rest[open+1 : closeIdx]
+		var out []string
+		for _, m := range regexp.MustCompile(`['"]([^'"]+)['"]`).FindAllStringSubmatch(body, -1) {
+			out = append(out, m[1])
+		}
+		if len(out) == 0 {
+			t.Fatalf("pack-assets.mjs 的 %s 解析出 0 项（解析口径可能失效）", constName)
+		}
+		return out
+	}
+
+	scriptNames := map[string]bool{}
+	for _, n := range parseList("TOOLCHAIN_SECTION_NAMES") {
+		scriptNames[n] = true
+	}
+	for name := range assets.ToolchainSections {
+		if !scriptNames[name] {
+			t.Fatalf("pack-assets.mjs 的拒绝清单缺少工具链段 %q —— 两边必须同源", name)
+		}
+	}
+	for name := range scriptNames {
+		if _, ok := assets.ToolchainSections[name]; !ok {
+			t.Fatalf("pack-assets.mjs 多拒了 %q：平台并不把它当工具链段（作者会被脚本误拦）", name)
+		}
+	}
+
+	scriptPrefixes := map[string]bool{}
+	for _, n := range parseList("TOOLCHAIN_SECTION_PREFIXES") {
+		scriptPrefixes[n] = true
+	}
+	for _, prefix := range assets.ToolchainSectionPrefixes {
+		if !scriptPrefixes[prefix] {
+			t.Fatalf("pack-assets.mjs 的前缀拒绝清单缺少 %q —— 两边必须同源", prefix)
+		}
+	}
+	for prefix := range scriptPrefixes {
+		found := false
+		for _, p := range assets.ToolchainSectionPrefixes {
+			if p == prefix {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("pack-assets.mjs 多拒了前缀 %q：平台并不按它忽略段名", prefix)
+		}
+	}
+
+	if !strings.Contains(src, "isToolchainSection(") {
+		t.Fatal("pack-assets.mjs 声明了清单却没用它（必须经 isToolchainSection 判定，否则前缀规则是死代码）")
 	}
 }

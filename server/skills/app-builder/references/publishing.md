@@ -2,7 +2,7 @@
 
 > ⚠️ **怎么发布（先读这一段）**
 >
-> 发布不需要你手工拼请求：客户端内置了三个工具，直接调用即可。登录态、上传超时、
+> 发布不需要你手工拼请求：客户端内置了工具，直接调用即可。登录态、上传超时、
 > 大文件分片与断线续传都由客户端处理，你只要给出应用标识、产物路径与配置声明。
 >
 > | 工具 | 用途 |
@@ -10,6 +10,9 @@
 > | `wasm_app_list` | 列出应用中心里的应用：确认标识有没有被占用、查当前版本号（新版本号必须比它大） |
 > | `wasm_app_validate` | 预检：静态校验 + 真编译 + 干跑。**不占版本号、不进审计**，失败也能反复调 |
 > | `wasm_app_publish` | 发布新版本：同步执行，超过 8 MiB 自动分片续传；**失败不占版本号** |
+> | `wasm_app_schema` | 读表结构（表/列/行数/占用）。**发布后确认 `db.define` 真的生效** |
+> | `wasm_app_diagnostics` | 读运行诊断（失败码 + 可操作 hints）："先读诊断，再改代码"的那个入口 |
+> | `wasm_app_rows` | 读某张表的一页行（缺省 50、最多 200）。**敏感列默认脱敏且本工具无法解掉**（原值只能由人在客户端点「显示原值」） |
 >
 > 一次典型的发布（先在会话工作区把产物编译好，再调工具）——`wasm_app_publish` 的参数：
 >
@@ -171,6 +174,7 @@ node scripts/pack-assets.mjs --in shared-notes.wasm --out dist/shared-notes-pack
 | 冻结 / 导出 / 删除 | `POST …/wasm/:app_id/freeze` · `GET …/export` · `DELETE …/wasm/:app_id` | 冻结 = 只读快照（保留 90 天）→ 可导出 → 真删并审计 |
 | 诊断 | `GET …/wasm/:app_id/diagnostics` | 最近失败与被杀记录（见 `references/diagnostics.md`） |
 | 自省 | `GET …/wasm/:app_id/schema` | 表结构与占用（仅发布者可见，并写审计） |
+| 数据 | `GET …/wasm/:app_id/rows?table=&limit=&offset=&unmask=` | 某张表的一页行（仅发布者；**默认脱敏**敏感列，原值需显式 `unmask=1` 且单独记审计） |
 | 应用中心 | `GET /api/client/v2/apps/wasm/catalog` | **全部应用**的列表（名称 / 一句话说明 / 负责人 / 访问级别 / 是否下架） |
 
 版本号与占号（两条**不同**的规则，不要互相推导）：

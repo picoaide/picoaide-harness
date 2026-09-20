@@ -1,6 +1,6 @@
 ---
 name: app-builder
-version: 2.1.0
+version: 2.2.0
 title: 应用构建（WASM 应用）
 description: 把业务同事的一句话想法做成应用平台上的 WASM 应用并发布（员工自建小工具）。分轮次访谈需求、多角色评审设计、写成静态前端 + wasm JSON API、一条命令链打包发布。当用户说"做个内部小工具/应用/登记表/页面"、"把这个流程做成应用"、"发布到应用中心"、"能不能在平台上加个功能"时用本技能。
 author: 平台内置
@@ -456,7 +456,7 @@ wasm_app_publish({appId:"shared-notes", version:"1.0.0", title:"共享便签",
   `IMPORT_NOT_ALLOWED` 时照它的「撞到 `IMPORT_NOT_ALLOWED` 怎么办」四步办
 - `references/limits.md` —— 平台全部上限（**从 `limits.go` 生成，不要手抄数字**）
 - `references/app-config.md` —— **字段规格**（应用配置文件 + 发布载荷；从平台源码生成）
-- `references/publishing.md` —— 本地编译与预览、打包、validate、publish、上下架、诊断、自省
+- `references/publishing.md` —— 本地编译与预览、打包、validate、publish、上下架、诊断、自省、**数据查看（schema/rows）**
 - `references/diagnostics.md` —— 怎么读诊断、常见失败码怎么处理
 - `examples/go/` —— 一个能直接编译发布的前后端分离示例（`main.go` + `web/` + `preview.mjs`
   + `picoaide.app.json`）

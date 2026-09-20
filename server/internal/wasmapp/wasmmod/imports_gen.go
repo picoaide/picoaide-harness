@@ -13,6 +13,7 @@
 //   - ./internal/wasmapp/refapp              原始  18 条 / 去重  16 条
 //   - ./internal/wasmapp/refapp/wasiprobe    原始  35 条 / 去重  30 条
 //   - ./internal/wasmapp/refapp/stdprobe     原始  35 条 / 去重  31 条
+//   - ./internal/wasmapp/refapp/sockprobe    原始  18 条 / 去重  17 条
 //
 // ⚠️ 白名单的语义 = **Go wasip1 运行时可能发出的全部 wasi_snapshot_preview1 导入**
 // （保守超集），不是「参考实现恰好用到的那些」：只按最小样例生成会让任何用了一行 os.Stat
@@ -37,7 +38,7 @@
 //
 // 签名格式：形参类型短名串 + "_" + 结果类型短名串（i32/i64/f32/f64/v128/funcref/externref；例：fd_write(i32,i32,i32,i32)->i32 = "i32i32i32i32_i32"；无结果如 "i32_"；无参无结果 "_"）
 //
-// 本次生成：并集 34 条 (module, name, kind, signature)。
+// 本次生成：并集 36 条 (module, name, kind, signature)。
 
 package wasmmod
 
@@ -76,5 +77,7 @@ var ImportWhitelist = []ImportSpec{
 	{Module: "wasi_snapshot_preview1", Name: "random_get", Kind: KindFunc, Signature: "i32i32_i32"},
 	{Module: "wasi_snapshot_preview1", Name: "sched_yield", Kind: KindFunc, Signature: "_i32"},
 	{Module: "wasi_snapshot_preview1", Name: "sock_accept", Kind: KindFunc, Signature: "i32i32i32_i32"},
+	{Module: "wasi_snapshot_preview1", Name: "sock_recv", Kind: KindFunc, Signature: "i32i32i32i32i32i32_i32"},
+	{Module: "wasi_snapshot_preview1", Name: "sock_send", Kind: KindFunc, Signature: "i32i32i32i32i32_i32"},
 	{Module: "wasi_snapshot_preview1", Name: "sock_shutdown", Kind: KindFunc, Signature: "i32i32_i32"},
 }

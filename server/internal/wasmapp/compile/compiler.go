@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+	"github.com/picoaide/picoaide/internal/wasmapp/cachetrust"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
@@ -341,11 +342,28 @@ func New(opt Options) (*Compiler, error) {
 	// limits.CompileCacheRevision），runtime 侧有一份同算法的实现 + 交叉断言用例。
 	cache := CompileCacheDir(opt.DataRoot)
 	// 0700：缓存目录是信任边界（§4.3.1-d），属主=编译进程，执行进程只读。
-	if err := os.MkdirAll(cache, limits.DataDirMode); err != nil {
-		return nil, fmt.Errorf("compile: 创建缓存目录失败: %w", err)
+	//
+	// 三步合一（2026-09-21 审计 F-4）：MkdirAll + **显式 Chmod**（只在新建时生效的
+	// MkdirAll 挡不住"旧版本/人工/宽 umask 留下的可写目录"）+ 形状校验
+	//（真实目录、无 group/other 写位、条目是普通非空文件 —— 详见 cachetrust 包）。
+	// 校验策略：`require` 档发现违规**拒绝启动**（隔离已声明为强制，缓存可信度不能例外）；
+	// 其余档位告警并逐条打印，由运维面处置。
+	report, cerr := cachetrust.Ensure(cache, os.FileMode(limits.DataDirMode))
+	if cerr != nil {
+		return nil, cerr
 	}
-	// 权限自检：目录一旦对 group/other 可写，"只有编译进程能写"这条缓解就失效
-	//（缓存条目会被 server mmap 成机器码执行，见 doc.go 的认账）。
+	if !report.Trusted() {
+		for _, v := range report.Violations {
+			opt.Logger.Printf("compile: ⚠️ 缓存目录不可信：%s（%s）", v.Path, v.Reason)
+		}
+		if opt.Isolation == IsolationRequire {
+			return nil, fmt.Errorf("compile: 缓存目录不可信（%d 处违规）但隔离档位是 require：%s（%s）——"+
+				"缓存条目会被执行进程 mmap 成机器码，require 档不接受可投毒的缓存",
+				len(report.Violations), report.Violations[0].Path, report.Violations[0].Reason)
+		}
+	}
+	// 兼容面：旧的一行式权限描述仍保留（诊断/验收输出用），判据比 cachetrust 浅，
+	// 只回答"根目录权限是否合 §4.3.1-d"。
 	if desc, terr := cacheDirIsTrustBoundary(cache); terr != nil {
 		opt.Logger.Printf("compile: ⚠️ 缓存目录权限不合规（%s）：%v；§4.3.1-d 要求只有编译进程可写", desc, terr)
 	}

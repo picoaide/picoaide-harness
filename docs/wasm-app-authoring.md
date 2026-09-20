@@ -329,8 +329,9 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | 提交新版本 | `POST /api/client/v2/apps/wasm/:app_id/releases` |
 | 上架 / 下架 | `POST /api/client/v2/apps/wasm/:app_id/publish` · `…/unpublish` |
 | 冻结 / 导出 / 删除 | `POST …/wasm/:app_id/freeze` · `GET …/export` · `DELETE …/wasm/:app_id` |
-| 诊断 | `GET …/wasm/:app_id/diagnostics` |
-| 自省 | `GET …/wasm/:app_id/schema` |
+| 诊断 | `GET …/wasm/:app_id/diagnostics`（失败码 + hints + 每次请求的 `db_rows`/`db_bytes`） |
+| 自省 | `GET …/wasm/:app_id/schema`（表 / 列 / 行数 / 占用） |
+| **数据** | `GET …/wasm/:app_id/rows?table=&limit=&offset=&unmask=`（某张表的一页行；**默认脱敏**） |
 | 应用中心 | `GET /api/client/v2/apps/wasm/catalog` |
 
 ### 6.1 让 AI 自己发布（**首选路径**）
@@ -341,6 +342,9 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | 工具 | 作用 |
 | --- | --- |
 | `wasm_app_list` | 列应用中心（确认 `app_id` 有没有被占用、查当前版本号） |
+| `wasm_app_schema` | 读表结构（表/列/行数/占用） |
+| `wasm_app_diagnostics` | 读运行诊断（失败码 + hints） |
+| `wasm_app_rows` | 读某张表的一页行（**敏感列默认脱敏，工具无法解掉**） |
 | `wasm_app_validate` | 预检：静态校验 + 真编译 + 干跑。**不占版本号、不进审计**，失败可反复调 |
 | `wasm_app_publish` | 发布新版本：同步执行，>8 MiB 自动分片续传；**失败不占版本号** |
 
@@ -363,6 +367,27 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
   上下架、删除；平台管理员可兜底接管。**AI 只是编辑器，发布者记的是发起操作的员工。**
 - 组织可开启"更新审批"：开启后新版本进待审队列，**线上仍是旧版本**（不中断使用）。
   上架/下架/删除不走审批。
+
+### 6.2 发布之后怎么查数据（作者数据面）
+
+应用上线后，"数据到底写进去没有 / 长什么样"不再只能靠猜：
+
+| 想回答的问题 | 用什么 |
+| --- | --- |
+| `db.define` 生效了吗？列名对不对？ | `wasm_app_schema`（或 `GET …/schema`）：表、列、类型、行数、库体积 |
+| 某次请求写了几行？ | `wasm_app_diagnostics` 的单条失败记录里的 `db_rows` / `db_bytes` |
+| 这张表里现在有什么？ | `wasm_app_rows`（或客户端「应用中心 → 详情 → 数据」） |
+| 为什么员工说打不开 / 报错？ | `wasm_app_diagnostics`：先看 `reasons[0]` 的 hints |
+
+三条边界（**不要越过它们向用户承诺**）：
+
+1. **仅发布者本人**可读（他人一律 404，与"应用不存在"同形）；每次调用都会被平台审计
+   （`wasm_app_rows_view`，只记表名与分页，**不记行内容**）。
+2. **敏感列默认脱敏**（按列名启发式：`password` / `token` / `secret` / `phone` / `email` /
+   `id_card` …）。原值只能由**人**在客户端面板点「显示原值（会记审计）」——
+   `wasm_app_rows` 工具没有 `unmask` 参数。看到星号不等于"没写进去"。
+3. **不是导出接口**：一页最多 200 行、单值超长会截断、分页不保证稳定排序。
+   要做导出/对账请另找管理员走运维路径。
 
 ## 7. 容量与配额
 

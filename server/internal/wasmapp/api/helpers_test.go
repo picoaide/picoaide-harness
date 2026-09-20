@@ -396,6 +396,8 @@ func (e *testEnv) mount(r *gin.Engine) {
 	cli.DELETE("/:app_id", e.h.Delete)
 	cli.GET("/:app_id/diagnostics", e.h.Diagnostics)
 	cli.GET("/:app_id/schema", e.h.Schema)
+	// 作者数据面（2026-09-21）：与 internal/router 的申报逐条一致。
+	cli.GET("/:app_id/rows", e.h.Rows)
 	// 发布者本人的版本历史 + 审核结论（R1-pm-3）：与 internal/router 的申报逐条一致。
 	cli.GET("/:app_id/releases", e.h.MyReleases)
 	// 客户端专属访问模型的三个端点（契约 §5.1/§5.1b/§20.1）：
@@ -426,6 +428,9 @@ func (e *testEnv) mount(r *gin.Engine) {
 	// 管理面诊断与运行时水位（P1-9/P2-4）：同样与 internal/router 逐条一致 ——
 	// 管理面出口必须挂在**生产路径**上，否则测不出路由/路径漂移。
 	adm.GET("/:app_id/diagnostics", e.h.AdminDiagnostics)
+	// 管理面只读数据面（2026-09-21）：与 internal/router 的申报逐条一致。
+	adm.GET("/:app_id/schema", e.h.AdminSchema)
+	adm.GET("/:app_id/rows", e.h.AdminRows)
 	adm.GET("/runtime", e.h.AdminRuntime)
 	adm.GET("/:app_id/opens", e.h.AdminAppOpens)
 	adm.GET("/opens/summary", e.h.AdminOpensSummary)

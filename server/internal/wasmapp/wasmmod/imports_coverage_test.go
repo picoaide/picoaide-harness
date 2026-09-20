@@ -122,9 +122,10 @@ func TestCoverageGuestRequiredSymbolsAreTheJudgement(t *testing.T) {
 
 // TestWhitelistAllowsOnlyFdFreeSockSymbols 把"红线 4 的静态判据"钉死在**精确集合**上：
 //
-//	允许：sock_accept / sock_shutdown（拿不到已监听的 fd ⇒ EBADF(8)；Go 运行时会发出）
-//	禁止：sock_open / sock_bind / sock_listen / sock_connect（造 fd 的路径）
-//	禁止：sock_recv / sock_send（需要已连接的 fd；当前 Go 面用不到，收紧到最小集合）
+//	允许：sock_accept / sock_recv / sock_send / sock_shutdown
+//	      （四条都要求"已有可用 socket fd"，而平台里造不出这种 fd ⇒ 能力为空；
+//	       Go 运行时会发出 accept/shutdown，TinyGo 的 net/url 路径还会发出 recv/send）
+//	禁止：sock_open / sock_bind / sock_listen / sock_connect（唯一能造 fd 的四条）
 func TestWhitelistAllowsOnlyFdFreeSockSymbols(t *testing.T) {
 	got := map[string]string{}
 	for _, spec := range ImportWhitelist {
@@ -180,4 +181,75 @@ func sortedImportNames(imports []Import) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// coverageSockGuestPkg 是 TinyGo 风格 socket 导入的固定门禁程序
+// （**刻意不在 whitelistSources / whitelistSourcesForTest 里**，理由见 stdrender 的同款注释）。
+const coverageSockGuestPkg = "./internal/wasmapp/wasmmod/testdata/sockguest"
+
+// coverageSockRequired 是 TinyGo 的 `net/url` 路径会带出的两条符号及其 canonical 签名。
+var coverageSockRequired = map[string]string{
+	"sock_recv": "i32i32i32i32i32i32_i32",
+	"sock_send": "i32i32i32i32i32_i32",
+}
+
+// TestWhitelistCoversTinyGoStyleSocketImports 是 P0-6 的回归判据：
+// 真编译一份"TinyGo 会在导入面上产出的形状"，断言平台白名单覆盖它，
+// 并且**删掉任一条就会拒**（证明白名单里的那两行是承重的，不是摆设）。
+//
+// 与 TestWhitelistAllowsOnlyFdFreeSockSymbols 的分工：
+//   - 那条钉"精确集合"（多一条造 fd 的符号即红）；
+//   - 本用例钉"够用"（少一条就让合法产物发不出去即红）。两条一起才既不过宽也不过窄。
+//
+// 变异验证：把 sockprobe 从生成来源里删掉并重跑生成器 ⇒ 本用例红（sock_recv/sock_send
+// 不在白名单，Validate 报 IMPORT_NOT_ALLOWED）——门禁与生成器的一致性由此闭环。
+func TestWhitelistCoversTinyGoStyleSocketImports(t *testing.T) {
+	raw := buildSource(t, coverageSockGuestPkg)
+	info := mustParse(t, raw)
+
+	// ① 前置断言：门禁程序**真的**发出了这两条（否则本用例是空转假绿）。
+	emitted := map[string]string{}
+	for _, imp := range info.Imports {
+		if _, want := coverageSockRequired[imp.Name]; want {
+			emitted[imp.Name] = imp.Signature
+		}
+	}
+	for name, want := range coverageSockRequired {
+		got, ok := emitted[name]
+		if !ok {
+			t.Fatalf("门禁程序没有发出 %s —— 夹具退化了（本用例将变成空转）：实际导入 %v",
+				name, sortedImportNames(info.Imports))
+		}
+		if got != want {
+			t.Fatalf("%s 的签名 = %s，期望 canonical %s（夹具或 ABI 理解已漂移）", name, got, want)
+		}
+	}
+
+	// ② 正例：白名单必须覆盖它（否则 TinyGo 产物发不出去）。
+	if _, err := Validate(raw); err != nil {
+		t.Fatalf("TinyGo 风格产物的导入面必须被白名单覆盖：%v\n修复：cd server && go run ./cmd/picoaide-wasm-imports-gen", err)
+	}
+
+	// ③ 反向：从白名单里删掉任一条 ⇒ 必须被拒（证明这两行是承重的）。
+	for name := range coverageSockRequired {
+		mutated := make([]ImportSpec, 0, len(ImportWhitelist))
+		for _, spec := range ImportWhitelist {
+			if spec.Name == name {
+				continue
+			}
+			mutated = append(mutated, spec)
+		}
+		if len(mutated) == len(ImportWhitelist) {
+			t.Fatalf("%s 本来就不在白名单里 —— 上面的正例判据不成立", name)
+		}
+		_, err := ValidateWithWhitelist(raw, mutated)
+		if err == nil {
+			t.Fatalf("白名单里删掉 %s 后门禁程序仍被放行 —— 说明这条符号没进判据", name)
+		}
+		e := codeOf(t, err)
+		if e.Code != apperr.CodeImportNotAllowed && e.Code != apperr.CodeImportSignatureMismatch {
+			t.Fatalf("删掉 %s 的期望拒绝码是 IMPORT_NOT_ALLOWED/IMPORT_SIGNATURE_MISMATCH，实际 %s: %v",
+				name, e.Code, err)
+		}
+	}
 }

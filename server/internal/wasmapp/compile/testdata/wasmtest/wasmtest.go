@@ -318,6 +318,60 @@ func TruncatedSection() []byte {
 	return slices.Clip(out)
 }
 
+// DataCountSection 编码 DataCount 段（段 id 12）。
+//
+// 为什么单独一个段编码器：DataCount 是 **Wasm 2.0 / bulk-memory** 引入的、唯一不按
+// 段 id 数值升序摆放的段（规范位置 = Element(9) 之后、Code(10) 之前）。平台预检
+// 曾只做"纯 id 升序"，于是带 DataCount 的产物（TinyGo 默认、启用 bulk-memory 的
+// LLVM/Rust/Zig 配置）陷入死局：放规范位置被预检拒、改数值升序被 wazero 拒。
+// 夹具必须能构造这个形状，判据才存在。
+func DataCountSection(count uint32) []byte { return Section(12, Uleb(uint64(count))) }
+
+// DataSection 编码数据段（段 id 11）：vec( data )，这里放一个"主动、内存 0"的段。
+//
+// ⚠️ 偏移表达式是**常量表达式**（i32.const 0 ; end），不是函数体：**不能**用 Body()
+// ——它会给函数体加"局部变量组计数"前缀，放进常量表达式就是非法操作码 0x00
+// （本夹具第一版正是这样错的，被 wazero 报 `invalid byte for const expression op code: 0x0`）。
+func DataSection(payload ...byte) []byte {
+	const offsetExprI32Const0 = "\x41\x00\x0b" // i32.const 0 ; end
+	seg := Cat([]byte{0x00}, []byte(offsetExprI32Const0), VecCount(uint64(len(payload)), payload))
+	return Section(11, VecCount(1, seg))
+}
+
+// WithDataCount 返回一个**带 DataCount 段且按规范位置摆放**的可编译模块。
+//
+// 结构：type ()->() / func[_start] / memory 1 页 / export(memory,_start) /
+// DataCount(1) / code: `data.drop 0; end` / data: 1 个主动段（1 字节）。
+// code 段用到 `data.drop` ⇒ 按规范**必须**先声明 DataCount，否则 wazero 的校验
+// 会直接拒（这正是"预检放行、真编译报错"的另一半）。
+func WithDataCount() []byte {
+	return Build(
+		TypeSection(TypeFunc(Params(), Params())),
+		FunctionSection(0),
+		MemorySection(1),
+		ExportSection(ExportMemory("memory", 0), ExportFunc("_start", 0)),
+		DataCountSection(1),
+		CodeSection(Body(0xFC, 0x09, 0x00, 0x0B)), // data.drop 0 ; end
+		DataSection(0x2a),
+	)
+}
+
+// WithDataCountMisordered 返回一个把 DataCount 摆在 Code **之后**的模块。
+//
+// 这是修复前的"绕过姿势"（为了满足纯 id 升序）：预检曾放行，真编译期 wazero 报
+// `invalid section order`。现在预检必须自己拒掉它（与 wazero 同判）。
+func WithDataCountMisordered() []byte {
+	return Build(
+		TypeSection(TypeFunc(Params(), Params())),
+		FunctionSection(0),
+		MemorySection(1),
+		ExportSection(ExportMemory("memory", 0), ExportFunc("_start", 0)),
+		CodeSection(Body(0xFC, 0x09, 0x00, 0x0B)), // data.drop 0 ; end
+		DataCountSection(1), // ← 错位：DataCount 必须在 Code 之前
+		DataSection(0x2a),
+	)
+}
+
 // Garbage 返回完全不含 wasm 头的字节串。
 func Garbage(n int) []byte {
 	out := make([]byte, n)
