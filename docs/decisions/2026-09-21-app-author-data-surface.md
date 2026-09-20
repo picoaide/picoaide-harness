@@ -191,12 +191,42 @@ unmask**、审计账号放行、未登录零出站。
 **只为造一个标签**（它钉的是"重载 chrome 页不动标签视图"）；该用例改成开普通外站，
 并在注释里写明原因（不是放宽判据，是这条 URL 与它要钉的语义无关）。
 
-### 仍**未**做（同一族的收窄，留待后续）
+### 四轮审计后的收紧：从"拒 shell origin"扩到"**拒一切本机目标**"（P0 + P1）
 
-`isShellOriginUrl` 只覆盖 shell origin 本身。指向**同一台服务器**的其它主机名（例如
-反向代理/自定义域名下的同一个本机服务）不在判据内 —— 那些形态下 cookie 是否也被镜像取决于
-部署（`mirrorBrowserAuthCookies` 只按 `shellOrigin` 取 cookie）。若将来出现"其它本机 origin
-也持有证明"的形态，应把判据改为**按 cookie 作用域**而不是按 origin 字符串。
+四轮独立审计用**真机**（Electron 43.4.0 + 真 runtime + 真 `browser_*` 工具）复现了两个绕过：
+
+- **P0（子框架无人管辖）**：Electron 的 `will-navigate` / `will-redirect` **只报主框架**，
+  而浏览器包从未注册 `will-frame-navigate`。攻击序列：模型导航到一个**自己控制的本机页面**
+  （`127.0.0.1:<其它端口>`，正是本文件上一版"反向对照"明确放行的"合法 dev server"）→
+  该页里 `<iframe src="http://127.0.0.1:<shell端口>/api/pico/.../rows?unmask=1">` →
+  `browser_eval({frame:1})` 读子框架正文 ⇒ 拿回 `UNMASKED-13800000000`。
+- **P1（cookie 不看端口）**：镜像过去的 `dsh-auth-*` 是 **host-only** cookie，而 **cookie
+  不区分端口** ⇒ 它会被送到 `127.0.0.1` 的**任意端口**。真机实测：模型在自己端口上起的
+  服务收到 `Cookie: dsh-auth-…`（对照：`localhost` 主机收到空）。这把 cookie 就是本机控制面的
+  bearer 凭据（可重放 login / 会话切换 / 技能安装 / `rows?unmask=1`，因为 `guard()` 自述
+  "伪造 Origin 的 curl 也能过"，只有 cookie 验签是真的）。同 host 不同端口属 **same-site**，
+  `SameSite=Strict` **不拦** —— 所以"外部页面 iframe 本机端口"这条也得防。
+
+**收口（本批实施）**：`isForbiddenLocalTarget(url)` = shell origin 精确相等 **∪**
+一切本机主机名（`127.0.0.0/8` / `::1` / `localhost` / `0.0.0.0`）；四条路径全部改用它：
+`navigateInternal`、`setWindowOpenHandler`、`downloadUrl`，以及新建 tab 时注册的
+`will-navigate` + `will-redirect` + **`will-frame-navigate`**（子框架，纵深防御）。
+本机 deny 的理由从"那里是 shell"变成"**那里有被镜像的凭据**"，因此 `shellOrigin`
+缺席时判据**依然生效**（不再依赖那个字符串存不存在）。
+
+**代价（如实认账）**：AI 浏览器**不能再访问任何本机地址**，包括作者本地的 dev server ——
+这是有意的取舍：那类地址上住着一把等于控制面凭据的 cookie，而"AI 看本地 dev server"
+不是产品承诺的能力（平台自己的页面由宿主 `webContents.loadURL` 直接加载，应用走应用窗口面，
+都不经过这里）。反向对照判据保证不退化：外站 `http(s)` 一律照常放行。
+
+**仍然残留（部署面，不是本批能闭合的）**：`mirrorBrowserAuthCookies` 把凭据复制进
+模型可驱动的分区，这是"overlay 跑在 `persist:agent-browser-<user>`、需要持有性证明"逼出来的
+结构性妥协。彻底闭合要么把 overlay 挪回默认 session（去掉复制），要么给 overlay 一条
+**不依赖 cookie 的**证明通道（例如宿主注入的 per-window token）。两者都要动蒙版窗口的
+加载/分区语义（三轮审计的焦点区域），风险高于本批收益，故列为后续决策项。
+指向**同一台服务器**的其它主机名（反代/自定义域名）也不在判据内 —— 那些形态下 cookie 是否
+被镜像取决于部署（镜像只按 `shellOrigin` 取 cookie）；若将来出现"其它本机 origin 也持有证明"
+的形态，应把判据改为**按 cookie 作用域**而不是按主机名字符串。
 
 
 ## 7. 与本次修订同时新增的判据（2026-09-21 审计修复批）

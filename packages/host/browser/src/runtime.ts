@@ -733,7 +733,7 @@ export class BrowserRuntime {
    * @returns true 表示可以继续。
    */
   private navigationAllowed(url: string): boolean {
-    if (this.isShellOriginUrl(url)) {
+    if (this.isForbiddenLocalTarget(url)) {
       // 不在这里写 op log：`record` 需要 tab id，而本判据同时服务 window.open / 下载
       // 两条没有 tab 的路径。拒绝本身是**可见**的 —— 导航抛 `navigation-blocked`
       // （模型与工具结果都能看到），window.open 由调用点记 `browser_window_open denied`。
@@ -743,21 +743,47 @@ export class BrowserRuntime {
   }
 
   /**
-   * 判断 URL 是否落在本机 shell origin 上。
+   * 判断 URL 是否是"模型不得访问的本机目标"。
    *
-   * `shellOrigin` 未设置（非 Electron 宿主/测试）时**恒 false**：没有 shell 就没有被镜像的
-   * cookie，判据不成立，不能因此把所有导航拒掉（那会变成"守卫缺席即全拒"的假安全）。
+   * 覆盖两类（2026-09-21 三轮/四轮审计，见 docs/decisions/2026-09-21-app-author-data-surface.md §7b）：
+   *
+   *  1. **本机 shell origin**（`shellOrigin` 精确相等）；
+   *  2. **任何回环/本机主机名**（`127.0.0.0/8`、`::1`、`localhost`、`0.0.0.0`）——
+   *     为什么不能只拒 shell origin：镜像的 `dsh-auth-*` 是 **host-only** cookie，
+   *     而 **cookie 不看端口** ⇒ 浏览器把它送到 `127.0.0.1` 的**任意端口**。
+   *     四轮审计真机实测：模型在自己的端口上起一个静态页并导航过去，
+   *     就能在自己的服务器日志里拿到这把 cookie（它等价于本机控制面的 bearer
+   *     凭据：可重放 login / 会话切换 / 技能安装 / `rows?unmask=1`）。
+   *     同理，同 host 不同端口属于 **same-site**，SameSite=Strict **不拦**它 ——
+   *     所以"外部页面 iframe 本机端口"这条路才是危险的（外部页面本身的跨站请求
+   *     确实拿不到 cookie，但一旦模型拿到**任何**本机页面，它就能在同站范围内任意取数）。
+   *
+   * 因此口径是：**AI 浏览器不访问本机地址**（这不是它的用途 —— 平台自己的页面由宿主
+   * `webContents.loadURL` 直接加载，应用走应用窗口面，都不经过这里）。
+   * 反向对照（不得退化成"什么都拒"）见 tests/audit-0921-shell-origin.spec.ts。
    * @param url - 候选 URL。
-   * @returns true 表示该 URL 指向本机 shell origin。
+   * @returns true 表示该目标禁止模型导航。
    */
-  private isShellOriginUrl(url: string): boolean {
-    const origin = this.shellOrigin
-    if (origin === undefined || origin === '') return false
+  private isForbiddenLocalTarget(url: string): boolean {
+    let parsed: URL
     try {
-      return new URL(url).origin === new URL(origin).origin
+      parsed = new URL(url)
     } catch {
       return false // 相对 URL / 畸形输入交给 guard 的既有判据
     }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/gu, '')
+    if (host === 'localhost' || host === '::1' || host === '0.0.0.0') return true
+    if (/^127\./u.test(host)) return true
+    const shell = this.shellOrigin
+    if (shell !== undefined && shell !== '') {
+      try {
+        return parsed.origin === new URL(shell).origin
+      } catch {
+        return false
+      }
+    }
+    return false
   }
 
   /**
@@ -882,15 +908,30 @@ export class BrowserRuntime {
        * @param event - Electron 的导航事件（`preventDefault()` 取消）。
        * @param target - 目标 URL。
        */
-      const refuseShellOriginNavigation = (...args: unknown[]): void => {
+      const refuseLocalNavigation = (...args: unknown[]): void => {
         const event = args[0] as { preventDefault?: () => void } | undefined
         const target = typeof args[1] === 'string' ? args[1] : ''
-        if (!this.isShellOriginUrl(target)) return
+        if (!this.isForbiddenLocalTarget(target)) return
         event?.preventDefault?.()
-        this.record('navigate', id, `navigation denied (shell origin, ${stripSensitiveUrl(target).slice(0, 120)})`, true)
+        this.record('navigate', id, `navigation denied (local target, ${stripSensitiveUrl(target).slice(0, 120)})`, true)
       }
-      view.webContents.on('will-navigate', refuseShellOriginNavigation)
-      view.webContents.on('will-redirect', refuseShellOriginNavigation)
+      view.webContents.on('will-navigate', refuseLocalNavigation)
+      view.webContents.on('will-redirect', refuseLocalNavigation)
+      // **子框架**也必须管（2026-09-21 四轮审计 P0）：`will-navigate` / `will-redirect`
+      // 只报主框架，而 `<iframe src="http://127.0.0.1:<端口>/api/pico/...">` 是子框架导航 ——
+      // 模型先用一个自己控制的**本机页面**做父页（同 host ⇒ same-site ⇒ 镜像 cookie 会被带上），
+      // 再 `browser_eval({frame:1})` 读子框架内容，就能拿回 `unmask` 后的行数据（真机实测）。
+      // 上面"禁一切本机目标"已经掐掉了"父页落在本机"这条前提，这条是**纵深防御**：
+      // 即便将来有人放宽了主框架策略，子框架也不会成为绕过口。
+      // Electron 只给一个 details 对象（无第二个 url 参数），且主框架也会走这里 ⇒ 一并判。
+      const refuseLocalFrameNavigation = (...args: unknown[]): void => {
+        const details = args[0] as { url?: unknown, preventDefault?: () => void } | undefined
+        const target = typeof details?.url === 'string' ? details.url : ''
+        if (!this.isForbiddenLocalTarget(target)) return
+        details?.preventDefault?.()
+        this.record('navigate', id, `frame navigation denied (local target, ${stripSensitiveUrl(target).slice(0, 120)})`, true)
+      }
+      view.webContents.on('will-frame-navigate', refuseLocalFrameNavigation)
 
       view.webContents.on('did-start-loading', () => {
         tab.loading = true

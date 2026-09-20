@@ -214,20 +214,58 @@ describe('内置浏览器不得导航到本机 shell origin（三轮审计 P1-�
     await runtime.dispose()
   })
 
-  it('② 反向对照：同一台机器上的**其它**端口仍然放行（真实开发用法）', () => {
-    // 判据落在 scheme 策略层：guard 本身不拒回环（精确打击只针对被镜像 cookie 的那个 origin）。
-    // 少了这条，把"所有回环地址一律拒掉"这种"为了安全毁掉功能"的实现也会全绿。
-    expect(classifyNavigation('http://127.0.0.1:5173/')).toBe('allow')
-    expect(classifyNavigation('http://localhost:3000/app')).toBe('allow')
+  it('② 反向对照：**本机一律拒**、外站一律放行（不得退化成"什么都拒"）', async () => {
+    // 为什么本机是"一律拒"而不是"只拒 shell origin"（2026-09-21 四轮审计 P1）：
+    // 镜像的 `dsh-auth-*` 是 **host-only** cookie，而 **cookie 不看端口** ⇒ 浏览器会把它
+    // 送到 `127.0.0.1` 的**任意端口**。模型在自己端口上起个静态页再导航过去，就能在
+    // 自己的服务器日志里拿到这把 cookie（= 本机控制面的 bearer 凭据，可重放 login /
+    // 会话切换 / 技能安装 / `rows?unmask=1`）。同 host 不同端口属 **same-site**，
+    // SameSite=Strict **不拦**，所以"外部页面里 iframe 一个本机端口"同样危险。
+    // 口径因此收紧为：AI 浏览器不访问本机地址（平台自己的页面由宿主 loadURL 直接加载，
+    // 应用走应用窗口面，都不经这里）。
+    const { runtime } = makeRuntime()
+    for (const local of [
+      'http://127.0.0.1:5173/',        // 曾经的"合法 dev server"——现在是凭据外带路径
+      'http://127.0.0.1:1/',
+      'http://localhost:3000/app',
+      'http://[::1]:8080/',
+      'http://0.0.0.0:9000/',
+      `${SHELL}/api/pico/apps/wasm`,
+    ]) {
+      await expect(runtime.navigate(1, local), local).rejects.toMatchObject({ code: 'navigation-blocked' })
+    }
+    // 外站必须照常放行（反向对照：防"把所有导航都拒掉"的假安全）。
     expect(classifyNavigation('https://example.com/')).toBe('allow')
+    expect(classifyNavigation('http://example.org/a')).toBe('allow')
+    await runtime.dispose()
   })
 
-  it('③ shell origin 未设置时不得拒绝一切（守卫缺席 ≠ 全拒）', async () => {
+  it('④ 子框架导航（iframe）到本机目标也被拒 —— 四轮审计 P0', async () => {
+    // `will-navigate` / `will-redirect` **只报主框架**；`<iframe src="http://127.0.0.1:<端口>/…">`
+    // 是子框架导航。四轮审计真机复现：模型用一个自己控制的本机页面做父页
+    //（同 host ⇒ same-site ⇒ 镜像 cookie 被带上），再 `browser_eval({frame:1})` 读子框架
+    // 内容，拿回 `unmask` 后的行数据。这条钉 `will-frame-navigate` 闸门存在且生效。
+    const { runtime, adapter } = makeRuntime()
+    await runtime.open('https://a.example')
+    const view = adapter.createdViews.at(-1)
+    const state = { prevented: false }
+    const handler = view!.listeners.get('will-frame-navigate')?.[0]
+    expect(handler, '标签视图必须注册 will-frame-navigate（否则这条判据是空转）').toBeTypeOf('function')
+    handler!({ url: `${SHELL}/api/pico/apps/wasm/demo/rows?unmask=1`, isMainFrame: false, preventDefault: () => { state.prevented = true } })
+    expect(state.prevented, '子框架导航到本机目标必须被取消').toBe(true)
+    // 反向对照：子框架指向外站不得被取消（正常的第三方 iframe 仍要能显示）。
+    const ok = { prevented: false }
+    handler!({ url: 'https://widgets.example/embed', isMainFrame: false, preventDefault: () => { ok.prevented = true } })
+    expect(ok.prevented).toBe(false)
+    await runtime.dispose()
+  })
+
+  it('③ shellOrigin 未设置时，本机目标仍被拒、外站不受影响', async () => {
+    // `shellOrigin` 缺席（非 Electron 宿主/测试）不能让本机判据整体失效 ——
+    // 本机禁访的依据是"那里有被镜像的凭据"，不是"shellOrigin 这个字符串存不存在"。
     const { runtime } = makeRuntime(false)
-    // 没有 shell 就没有被镜像的 cookie，判据不成立 ⇒ 正常导航不该被这条挡掉。
-    // （用 promise 的形态断言"不是 navigation-blocked"：真实 loadURL 会在 mock 适配器上
-    //   以别的方式失败，这里只关心**拒绝理由**不是本判据。）
-    const outcome = await runtime.navigate(1, 'http://127.0.0.1:5173/').then(
+    await expect(runtime.navigate(1, 'http://127.0.0.1:5173/')).rejects.toMatchObject({ code: 'navigation-blocked' })
+    const outcome = await runtime.navigate(1, 'https://a.example/').then(
       () => 'resolved',
       (err: unknown) => (err instanceof BrowserError ? err.code : String(err)),
     )
