@@ -71,6 +71,9 @@ import {
   hostProofFailure,
   isHostProofErrorCode,
   readHostErrorCode,
+  readHostPlatformReason,
+  readHostPlatformRefusal,
+  PLATFORM_APP_FROZEN_REASON,
 } from './host-proof.ts'
 
 /**
@@ -109,11 +112,35 @@ export type OpenFailureReason =
   | 'scheme-unavailable'
   /** 客户端未登录（本机路由 401 AUTH_REQUIRED）。 */
   | 'not-signed-in'
-  /** 本机路由 401 `proof_required`（重取令牌重放一次后仍然如此）。 */
+  /**
+   * 本机路由 401 `proof_required`：**本机证明闸**拒绝了我们的令牌
+   * （重取令牌重放一次后仍然如此）。请求**发出去了** —— 文案不得说"没有发出请求"。
+   */
   | 'proof-required'
   /** 本机路由 401 `proof_expired`（重取令牌重放一次后仍然如此）。 */
   | 'proof-expired'
-  /** 本机路由 404：应用不存在（或已被软删）。 */
+  /**
+   * **平台**（服务端）拒绝了这次打开（宿主信封的 `PLATFORM_*` 码，如
+   * `PLATFORM_PROOF_REQUIRED`）。
+   *
+   * 为什么必须与 `proof-required` 分开：两层用**同名**的证明码，但语义与下一步
+   * 完全不同 —— 本机码是客户端本机服务的凭据问题，平台码是服务端拒绝了这次调用
+   * （客户端没能向服务端证明自己 / 登录态失效 / 应用被下架…）。混在一起会把一次
+   * 平台拒绝显示成"本页面无法证明自己属于这个客户端窗口"（2026-09-20 真实故障的
+   * 误归因现场）。
+   */
+  | 'platform-refused'
+  /**
+   * 平台说这个应用**被管理员冻结**（只读快照：数据仍然保留，但不能继续使用）。
+   *
+   * 为什么必须与 `app-not-found` 分开：平台为了不泄露存在性，把「冻结」与
+   * 「软删 / 从未登记」放进**同一个 HTTP 404 + 同一个 `NOT_FOUND`**，唯一区分凭据是
+   * 信封里的 `platform_reason`。不读它就等于把"被管理员停用（数据还在）"显示成
+   * "这个应用不存在（可能已被删除或改名）" —— 用户会去重新要一个根本不存在的
+   * 新应用，维护者也不会去看停用记录（本缺陷的现场）。
+   */
+  | 'app-frozen'
+  /** 本机路由 404：应用不存在（已被软删 / 从未登记 / 平台未下发原因）。 */
   | 'app-not-found'
   /** 本机路由 503：协议 handler / 分区还没就绪（不降级到浏览器）。 */
   | 'protocol-not-ready'
@@ -303,6 +330,40 @@ function reasonForStatus(status: number): OpenFailureReason {
 }
 
 /**
+ * **平台**拒绝（宿主信封 `PLATFORM_*`）→ reason。
+ *
+ * 与 {@link reasonForStatus} 分开的理由：平台的信封带**它自己的**语义（证明失效 /
+ * 登录态失效 / 应用被冻结 / 应用没了 / 关停中），比"HTTP 状态"精确。证明类码落
+ * `platform-refused`（面板文案指向"服务端拒绝了这次打开"），其余按状态就近归属 ——
+ * 尤其 404/410 仍要说"这个应用不存在"，不能让一次"应用被删"变成"打不开"。
+ *
+ * **原因先于状态**（本函数的全部意义）：冻结与"不存在"同码同状态（404 + `NOT_FOUND`），
+ * 先按 `status` 分流就永远读不到 `platform_reason` —— 那正是"打开一个仅被冻结的应用
+ * 被告知应用不存在"的缺陷本体。只在 404 上认冻结：410（下架）是另一档契约，不允许被
+ * 一个原因字段改写语义。
+ *
+ * `proof_*` 判据取前缀而不是枚举：平台新增证明类码（如 `proof_replayed`）时，客户端
+ * 不该把它误判成"未登录"。
+ * @param status - HTTP 状态。
+ * @param platformCode - 平台原码（已归一化为小写，见 `readHostPlatformRefusal`）。
+ * @param platformReason - 平台结构化原因（已归一化，见 `readHostPlatformReason`）；
+ *   缺省 / 不认识 ⇒ 按状态回落（404/410 ⇒ `app-not-found`），**不崩溃也不当成功**。
+ * @returns 失败原因。
+ */
+export function reasonForPlatformRefusal(
+  status: number,
+  platformCode: string,
+  platformReason: string | null,
+): OpenFailureReason {
+  if (status === 404 && platformReason === PLATFORM_APP_FROZEN_REASON) return 'app-frozen'
+  if (status === 404 || status === 410) return 'app-not-found'
+  if (status === 503) return 'protocol-not-ready'
+  if (platformCode.startsWith('proof_')) return 'platform-refused'
+  if (status === 401 || status === 403) return 'not-signed-in'
+  return 'unexpected-response'
+}
+
+/**
  * 读响应体为 JSON（失败 ⇒ `null`，用 clone 不消费原响应）。
  * @param response - 原始响应。
  * @returns 解析结果，或 `null`。
@@ -405,10 +466,20 @@ export async function openAppEntry(rawAppId: unknown, deps: OpenAppDeps = defaul
   }
 
   if (!response.ok) {
-    const code = readHostErrorCode(await readJsonQuietly(response))
-    const reason = response.status === 401 && isHostProofErrorCode(code)
-      ? (code === 'proof_expired' ? 'proof-expired' : 'proof-required')
-      : reasonForStatus(response.status)
+    const payload = await readJsonQuietly(response)
+    const code = readHostErrorCode(payload)
+    // 平台拒绝**先判**：它带着 `PLATFORM_` 前缀（宿主封装），不能落进"本机证明被拒"
+    // 那一支 —— 那正是 2026-09-20 把"平台说没带持有性证明"显示成"本页面无法证明
+    // 自己属于这个客户端窗口"的误归因路径。
+    const platformCode = readHostPlatformRefusal(payload)
+    // `platform_reason` 必须与码**同处**读取（唯一实现在 host-proof.ts）：冻结与
+    // "不存在"同码同状态，它是唯一的区分凭据。缺省 ⇒ `null`，分流点按 not-found 回落。
+    const platformReason = readHostPlatformReason(payload)
+    const reason = platformCode === null
+      ? (response.status === 401 && isHostProofErrorCode(code)
+        ? (code === 'proof_expired' ? 'proof-expired' : 'proof-required')
+        : reasonForStatus(response.status))
+      : reasonForPlatformRefusal(response.status, platformCode, platformReason)
     return {
       ok: false,
       reason,

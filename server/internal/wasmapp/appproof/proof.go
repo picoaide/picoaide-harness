@@ -131,10 +131,14 @@ func validInstallID(id string) bool {
 }
 
 // decodePublicKey 解析客户端提交的安装公钥（Ed25519，32 字节，标准 base64）。
+//
+// 失败一律返回 `ErrKeyMalformed`（`ErrMalformed` 的子类）：公钥编码/长度问题必须在
+// 对外 reason 上与"签名不符"分开 —— 否则对接方会被 `signature_invalid` 带去查签名
+// 消息拼装，而病根其实是"公钥被 SPKI/DER 包了一层（44 字节）"。
 func decodePublicKey(raw string) (ed25519.PublicKey, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil, fmt.Errorf("appproof: 缺少安装公钥")
+		return nil, fmt.Errorf("%w: 缺少安装公钥", ErrKeyMalformed)
 	}
 	// 兼容标准与 URL-safe 两种 base64（客户端可能不带 padding）。
 	for _, enc := range []*base64.Encoding{
@@ -143,12 +147,14 @@ func decodePublicKey(raw string) (ed25519.PublicKey, error) {
 	} {
 		if b, err := enc.DecodeString(raw); err == nil {
 			if len(b) != ed25519.PublicKeySize {
-				return nil, fmt.Errorf("appproof: 安装公钥长度 %d，want %d", len(b), ed25519.PublicKeySize)
+				return nil, fmt.Errorf("%w: 长度 %d，want %d（公钥是 raw Ed25519 32 字节，"+
+					"不是 SPKI/DER 包装后的 44 字节，也不要 PEM）",
+					ErrKeyMalformed, len(b), ed25519.PublicKeySize)
 			}
 			return ed25519.PublicKey(b), nil
 		}
 	}
-	return nil, fmt.Errorf("appproof: 安装公钥不是合法 base64")
+	return nil, fmt.Errorf("%w: 不是合法 base64", ErrKeyMalformed)
 }
 
 // formatTS 把时刻写成 proof 里的 unix 秒（唯一格式）。

@@ -239,17 +239,34 @@ export type AppWindowNavigationVerdict =
   | { verdict: 'deny', reason: 'foreign-app' | 'external' | 'malformed' }
 
 /**
- * 应用窗口的导航闸门（**按 app_id 判**，N7）。
+ * 应用窗口的导航闸门（**按 app_id 判**，N7；顶层与子框架共用的**唯一判据**）。
  *
- * 规则：`<scheme>://<同一个 app_id>` 的顶层导航放行；同 scheme 但别的 app_id ⇒
- * `foreign-app`（换壳钓鱼）；http(s) 与其它一切 ⇒ `external`（外链改走内置浏览器新
+ * 规则：`<scheme>://<同一个 app_id>` 的导航放行；同 scheme 但别的 app_id ⇒
+ * `foreign-app`（换壳钓鱼 —— **子框架同样适用**：在 A 的窗口里内嵌 B 的界面与
+ * 顶层导航到 B 是同一件事）；http(s) 与其它一切 ⇒ `external`（外链改走内置浏览器新
  * 标签 + 提示条，F12/§19 Q9，而不是在应用窗口里导航）。
+ *
+ * 唯一例外（{@link isMainFrame} = false 时）：**子框架的 http(s) 外链放行**。
+ * 理由：顶层闸门管的是"应用窗口被导航走了"，而 iframe 里的第三方内容并不会改变窗口
+ * 所在的文档 —— 拒掉它只会让"应用里嵌一个视频/图表"整页失效。真正的兜底在平台侧：
+ * 平台给每个应用文档强制写 `default-src 'none'`（`frame-src` 随之 `'none'`）+
+ * `frame-ancestors 'none'`，生产里应用**嵌不进任何东西**；这条依赖由
+ * `platform-frame-fence.spec.ts` 对着服务端源码钉住（它一被拿掉，这条放行就不再成立）。
+ * 非 http(s) 的子框架外链（`file:`/`javascript:`/别的自定义 scheme）仍旧一律拒。
+ *
  * @param rawUrl - 目标 URL。
  * @param appId - 本窗口所属应用。
  * @param appScheme - 本安装的应用源 scheme。
+ * @param isMainFrame - 是否发生在顶层文档（`will-frame-navigate`/`will-redirect` 的
+ *   `details.isMainFrame`；缺省 true = 顶层语义）。
  * @returns 分类结论。
  */
-export function classifyAppWindowNavigation(rawUrl: unknown, appId: string, appScheme: string): AppWindowNavigationVerdict {
+export function classifyAppWindowNavigation(
+  rawUrl: unknown,
+  appId: string,
+  appScheme: string,
+  isMainFrame = true,
+): AppWindowNavigationVerdict {
   if (typeof rawUrl !== 'string' || rawUrl === '') return { verdict: 'deny', reason: 'malformed' }
   let url: URL
   try {
@@ -257,7 +274,10 @@ export function classifyAppWindowNavigation(rawUrl: unknown, appId: string, appS
   } catch {
     return { verdict: 'deny', reason: 'malformed' }
   }
-  if (url.protocol !== `${appScheme}:`) return { verdict: 'deny', reason: 'external' }
+  if (url.protocol !== `${appScheme}:`) {
+    if (!isMainFrame && (url.protocol === 'http:' || url.protocol === 'https:')) return { verdict: 'allow' }
+    return { verdict: 'deny', reason: 'external' }
+  }
   return url.hostname === appId ? { verdict: 'allow' } : { verdict: 'deny', reason: 'foreign-app' }
 }
 
@@ -271,6 +291,17 @@ export interface WasmAppsWindowAdapter {
     appId: string
     url: string
     title: string
+    /**
+     * 该窗口所在的 Electron session 分区（**按用户**，§7.2/R2S-8 冻结：应用窗口复用
+     * 内置浏览器的按用户分区）。
+     *
+     * 为什么是**显式参数**而不是适配器自己算：分区名是"当前登录用户"的函数，而适配器
+     * （原生面）看不到会话服务 —— 让它去猜就等于把 `browserPartitionFor` 的实现复制到
+     * 第二个地方，两边一旦发散，应用窗口会落在一个**没人注册协议 handler** 的 session
+     * 上（症状：应用页 `ERR_UNKNOWN_URL_SCHEME` 空白窗口）。调用方（插件，持有会话）
+     * 算好传进来，适配器只负责照办。
+     */
+    partition: string
     width: number
     height: number
     x: number
@@ -285,16 +316,23 @@ export interface WasmAppsWindowAdapter {
   closeAppWindow(handle: AppWindowHandle): void
   /** 锁定宽高比（`extraSize` = 自绘 chrome 的额外高度；程序化 resize 不受它约束）。 */
   setAspectRatio(handle: AppWindowHandle, ratio: number, extraSize: { width: number, height: number }): void
-  /** 安装应用面闸门（`will-navigate` / `will-frame-navigate` / `setWindowOpenHandler` +
-   * session 级 `onBeforeRequest`；归属 = 应用窗口模块，见 §16.1）。 */
+  /** 安装应用面闸门（`will-navigate` / `will-frame-navigate` / `will-redirect` /
+   * `setWindowOpenHandler` + session 级 `onBeforeRequest`；归属 = 应用窗口模块，
+   * 见 §16.1）。 */
   installAppWindowGuards?(handle: AppWindowHandle, appId: string): void
   /**
    * 创建窗口**之前**确保该分区装了权限守卫（§16.1：守卫归属 = 分区初始化）。
    *
    * 宿主在协议注册点已经装过（幂等），这里再要求一次是**显式**保证：应用窗口可以在
    * 一张浏览器标签都没开过时创建，而 Electron 缺 check handler 时默认放行 camera/mic。
+   *
+   * 分区是**必填参数**（与 `createAppWindow` 同源同值）：守卫必须装在应用窗口真正
+   * 落地的那个 session 上。缺席时它会落到默认 session —— 那既保护不了应用窗口，
+   * 又会用 last-wins 覆盖掉主窗口在默认 session 上装的剪贴板白名单（2026-09-20
+   * 审计点名的无判据耦合）。
+   * @param partition - 应用窗口所在的 session 分区（与 `createAppWindow` 同值）。
    */
-  ensureSessionGuard?(): void
+  ensureSessionGuard?(partition: string): void
   /**
    * 该窗口的 `webContents.id`（session 级请求闸门按它判发起者，§23.2 N6）。
    *
@@ -302,6 +340,22 @@ export interface WasmAppsWindowAdapter {
    * 任意网页能借用员工令牌触发应用请求）。
    */
   webContentsId?(handle: AppWindowHandle): number | undefined
+  /**
+   * 窗口是否**还活着**（§7.2 单应用单窗口的另一半）。
+   *
+   * 为什么契约里必须有这一条：用户点窗口的关闭按钮时，原生窗口是 Electron 自己
+   * 销毁的，宿主收不到任何回调。没有存活判据时管理器会一直把已销毁的句柄当"已打开"
+   * ⇒ 第二次 `open` 回 `focused`、`has()` 为真、屏幕上却**一个窗口都没有**
+   * （正是"契约对、现象空"那类缺陷）。实现方缺席 ⇒ 按"永远活着"处理（旧替身不受影响）。
+   */
+  isAlive?(handle: AppWindowHandle): boolean
+  /**
+   * 当前显示器工作区（多显示器：每次打开重新求值）。
+   *
+   * 归适配器而不是管理器：只有原生侧知道鼠标在哪块屏（`screen` API）。缺席 ⇒
+   * 管理器回落一个 1280×800 的保守工作区（纯 Node 宿主/单测）。
+   */
+  workArea?(): WorkArea
 }
 
 /** 窗口管理器的构造参数。 */
@@ -310,6 +364,14 @@ export interface WasmAppsWindowsOptions {
   appScheme: string
   productName: string
   userDataDir: string
+  /**
+   * 当前用户的应用窗口 session 分区（§7.2/R2S-8：复用内置浏览器的按用户分区）。
+   *
+   * **必填**，且必须是**函数**（每次 open 求值）：分区是当前登录用户的函数，登录态
+   * 可以在进程存活期间变化（登出/切账号）—— 在构造期求值一次会把上一个用户的分区
+   * 钉死给下一个用户。由插件（唯一持有会话服务的一方）提供，管理器只透传。
+   */
+  partition: () => string
   /** 打开：`<scheme>://<app_id><path>`（唯一实现由调用方给：它同时被本机路由与深链用）。 */
   urlFor: (appId: string, path: string) => string
   /** 应用标题解析（来自目录/平台；拿不到时回落到 app_id）。 */
@@ -349,8 +411,14 @@ export interface WasmAppsWindows {
  * 构造应用窗口管理器。
  * @param options - 适配器/几何来源/状态文件位置。
  * @returns 窗口管理器（状态文件读写是 best-effort：失败只 warn）。
+ * @throws 当 `partition` 不是函数时（**构造期** fail-loud：JS 调用方漏传时，晚到
+ *   `open()` 里才炸会表现成"点打开报一个看不懂的 TypeError"，而这条缺失的真实后果是
+ *   "应用窗口落回默认 session" —— 必须在最早、最清楚的地方拦下）。
  */
 export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmAppsWindows {
+  if (typeof options.partition !== 'function') {
+    throw new Error('createWasmAppsWindows: options.partition must be a function returning the per-user session partition')
+  }
   const warn = options.warn ?? ((): void => {})
   const windows = new Map<string, AppWindowHandle>()
   /** 应用窗口的 webContents id（请求闸门的唯一白名单来源）。 */
@@ -378,11 +446,28 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
   const titleOf = (appId: string): string =>
     `${options.titleFor?.(appId) ?? appId} · ${options.productName}`
 
+  /** 丢掉一个已被原生侧销毁的句柄（用户手动关窗；见 `isAlive` 的契约注释）。 */
+  const forget = (appId: string, handle: AppWindowHandle): void => {
+    windows.delete(appId)
+    const wcId = options.adapter.webContentsId?.(handle)
+    if (typeof wcId === 'number') webContentsIds.delete(wcId)
+  }
+  /** 该应用当前活着的窗口句柄（已销毁的顺手清掉）。 */
+  const liveHandle = (appId: string): AppWindowHandle | undefined => {
+    const handle = windows.get(appId)
+    if (handle === undefined) return undefined
+    if (options.adapter.isAlive?.(handle) === false) {
+      forget(appId, handle)
+      return undefined
+    }
+    return handle
+  }
+
   return {
     async open(appId, path = '/', ratio) {
       await load()
       const url = options.urlFor(appId, path)
-      const existing = windows.get(appId)
+      const existing = liveHandle(appId)
       if (existing !== undefined) {
         // 聚焦已有窗口 ⇒ 软闸门（§5.1b：保留内容 + 导航到目标路径，不换错误页）。
         options.adapter.focusAppWindow(existing, url)
@@ -404,12 +489,16 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
         declaredRatio,
       )
       const minimum = minimumWindowSize(declaredRatio)
+      // 分区在**每次打开**时求值（登录态可变）；同一次打开里的"装守卫"与"建窗"
+      // 必须用**同一个**值，否则守卫会落在与窗口不同的 session 上（等于没装）。
+      const partition = options.partition()
       // 先保证守卫再建窗：顺序反了会出现"窗口存在但权限面无守卫"的窗口期。
-      options.adapter.ensureSessionGuard?.()
+      options.adapter.ensureSessionGuard?.(partition)
       const handle = options.adapter.createAppWindow({
         appId,
         url,
         title: titleOf(appId),
+        partition,
         width: rect.width,
         height: rect.height,
         x: rect.x,
@@ -437,9 +526,10 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
       return { window: 'opened', appId, url }
     },
     has(appId) {
-      return windows.has(appId)
+      return liveHandle(appId) !== undefined
     },
     openApps() {
+      for (const appId of [...windows.keys()]) liveHandle(appId)
       return [...windows.keys()]
     },
     async close(appId) {

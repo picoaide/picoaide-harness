@@ -230,12 +230,26 @@ export const zh = {
   'appCenter.openOpening': '正在打开…',
   'appCenter.openWindowOpened': '已打开',
   'appCenter.openWindowFocused': '已聚焦（这个应用已有一个窗口）',
+  // 平台把「冻结」与「不存在」放进**同一个 404 + NOT_FOUND**（不泄露存在性），唯一
+  // 区分凭据是 `platform_reason`。冻结是**只读快照**（数据仍然保留），文案必须与
+  // "不存在"逐字可辨：说成"可能已被删除"会让用户去找发布者要一个还在的新应用。
+  'appCenter.openAppFrozen': '打开失败：应用已被管理员停用（冻结）',
+  'appCenter.openAppFrozenHint': '冻结是只读快照：数据仍然保留，但不能继续使用；如需恢复请联系平台管理员',
   'appCenter.openAppMissing': '打开失败：这个应用不存在（可能已被删除或改名）',
   'appCenter.openAppMissingHint': '刷新应用列表确认它还在；若确实已被删除，请向发布者索取新的应用',
   'appCenter.openProtocolNotReady': '打开失败：客户端内打开应用的能力还没就绪',
   'appCenter.openProtocolNotReadyHint': '稍后重试；若持续失败，请把客户端升级到与本服务端同版本后重启',
+  // `proof-unavailable`（本页面根本不可能是宿主窗口）才是"一次请求都没发"；
+  // 本机证明**被拒**（`proof-required`）是"请求发出去了、本机服务不认这枚令牌"。
+  // 两者共用一句话会把"请求被拒"说成"没发请求"，用户与维护者都被指错方向。
   'appCenter.openProofUnavailable': '打开失败：本页面无法证明自己属于这个客户端窗口（因此没有发出任何请求）',
   'appCenter.openProofUnavailableHint': '请在桌面客户端窗口里打开应用中心，不要在其他页面或应用页里操作',
+  // 本机证明闸拒绝了令牌（已自动重取一次并重放）。**不是**"没发请求"。
+  'appCenter.openHostProofRejected': '打开失败：客户端本机服务拒绝了本次操作的本机凭据（已自动续期一次仍未通过）',
+  'appCenter.openHostProofRejectedHint': '重启客户端后重试；持续失败请导出诊断包（这通常意味着本机服务异常）',
+  // 平台（服务端）拒绝了这次打开：与本机凭据无关，别把用户支到"换个窗口试试"。
+  'appCenter.openPlatformRefused': '打开失败：服务端拒绝了这次打开（客户端没能向服务端通过校验）',
+  'appCenter.openPlatformRefusedHint': '重启客户端后重试；持续失败请确认客户端与服务端版本一致，并把详情交给平台维护者',
   // scheme 是渠道变量（CHN-2）：还没从宿主只读路由拿到时**不发请求**，给一条可读原因。
   'appCenter.openSchemeUnavailable': '打开失败：还没拿到这个客户端安装的应用地址（渠道参数未就绪）',
   'appCenter.openSchemeUnavailableHint': '重启客户端后重试；持续失败请把客户端升级到与本服务端同版本',
@@ -483,12 +497,18 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.openOpening': 'Opening…',
   'appCenter.openWindowOpened': 'Opened',
   'appCenter.openWindowFocused': 'Focused (this app already had a window)',
+  'appCenter.openAppFrozen': 'Could not open: an administrator has disabled (frozen) this app',
+  'appCenter.openAppFrozenHint': 'A freeze is a read-only snapshot: the data is still kept, but the app cannot be used; contact your platform administrator to restore it',
   'appCenter.openAppMissing': 'Could not open: this app does not exist (it may have been deleted or renamed)',
   'appCenter.openAppMissingHint': 'Refresh the app list to confirm it is still there; if it was deleted, ask the publisher for the new app',
   'appCenter.openProtocolNotReady': 'Could not open: in-client app support is not ready yet',
   'appCenter.openProtocolNotReadyHint': 'Retry in a moment; if it keeps failing, update the client to the same version as this server and restart',
   'appCenter.openProofUnavailable': 'Could not open: this page cannot prove it belongs to the client window, so no request was sent',
   'appCenter.openProofUnavailableHint': 'Open the App Center inside the desktop client window, not from another page or an app page',
+  'appCenter.openHostProofRejected': 'Could not open: the client\'s local service rejected this action\'s local credential (already renewed once, still refused)',
+  'appCenter.openHostProofRejectedHint': 'Restart the client and retry; if it keeps failing, export a diagnostics bundle (this usually means the local service is unhealthy)',
+  'appCenter.openPlatformRefused': 'Could not open: the server refused this open request (the client did not pass the server-side check)',
+  'appCenter.openPlatformRefusedHint': 'Restart the client and retry; if it keeps failing, confirm the client and server versions match and hand the details to your platform maintainer',
   'appCenter.openSchemeUnavailable': 'Could not open: this client installation has not reported its app origin scheme yet',
   'appCenter.openSchemeUnavailableHint': 'Restart the client and retry; if it keeps failing, update the client to the same version as this server',
   'appCenter.openHostProofUnavailable': 'Could not open: no credential for this action could be obtained from the client\'s local service, so no open request was sent',

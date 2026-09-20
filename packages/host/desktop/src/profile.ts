@@ -508,6 +508,8 @@ function omitUnresolvedOptionalEntries(
  * @param home - Harness home containing profiles and the machine-wide patch.
  * @param platform - native platform selecting launcher-owned safety overlays.
  * @param pluginStatePath - optional Desktop-private disabled-bundle state.
+ * @param userDataDir - optional Electron userData directory (channel-scoped) handed to
+ *   the application-window host row for its geometry memory and content cache.
  * @returns root config, profile metadata, and ordered patches.
  */
 export async function prepareDesktopProfile(
@@ -515,6 +517,7 @@ export async function prepareDesktopProfile(
   home: string = resolveDshHome(),
   platform: NodeJS.Platform = process.platform,
   pluginStatePath?: string,
+  userDataDir?: string,
 ): Promise<PreparedDesktopProfile> {
   const profileName = DESKTOP_PROFILE_NAME
   const profileDir = ensureDesktopProfile(home)
@@ -735,6 +738,11 @@ export async function prepareDesktopProfile(
         deepLinkScheme: channelProfile?.deepLinkScheme ?? DEFAULT_DEEP_LINK_SCHEME,
         appOriginScheme: channelProfile?.appOriginScheme ?? DEFAULT_APP_ORIGIN_SCHEME,
         productName: channelProfile?.productName ?? OFFICIAL_PRODUCT_NAME,
+        // 应用窗口的几何记忆与内容缓存落点（§16.1）。**必须注入**：插件在纯 Node
+        // 宿主里拿不到 Electron 的 userData，缺席时窗口管理器整个不构造 —— 现象是
+        // "点打开回 opened，屏幕上什么都没有"（2026-09-20 实测故障）。
+        // 取值 = Electron userData（已按渠道 `setPath`，见 desktop-user-data.ts）。
+        ...(userDataDir === undefined || userDataDir === '' ? {} : { userDataDir }),
       },
     })
   }

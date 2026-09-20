@@ -52,7 +52,7 @@ func newWasmLimitsHolder(db *sql.DB, profile memprofile.Profile) *wasmLimitsHold
 		profile:         profile,
 		profileExplicit: strings.TrimSpace(os.Getenv(memprofile.EnvMemoryProfile)) != "",
 	}
-	value, source := h.profileLimits(), "profile"
+	value, source := h.profileLimits(), h.profileSource()
 	if db != nil {
 		raw, ok, err := serverstore.GetSetting(db, SettingWasmLimits)
 		switch {
@@ -78,8 +78,9 @@ func newWasmLimitsHolder(db *sql.DB, profile memprofile.Profile) *wasmLimitsHold
 				value, source = l, "setting"
 			}
 		case ok:
-			// 显式清空 ⇒ 回落档位（保留运维在 .env 里的部署档位语义）。
-			value, source = h.profileLimits(), "profile"
+			// 显式清空（控制台 `{"limits":null}` 真的删了行）⇒ 回落部署档位
+			// （保留运维在 .env 里的部署档位语义）。
+			value, source = h.profileLimits(), h.profileSource()
 		}
 	}
 	h.set(value, source, nil)
@@ -88,10 +89,31 @@ func newWasmLimitsHolder(db *sql.DB, profile memprofile.Profile) *wasmLimitsHold
 
 // profileLimits 返回部署档位折算的限制项；档位未显式设置时给编译期默认。
 func (h *wasmLimitsHolder) profileLimits() applimits.Limits {
-	if h.profileExplicit || h.profile.Name != "" && h.profile.Name != "default" {
+	if h.profileConfigured() {
 		return applimits.FromProfile(h.profile)
 	}
 	return applimits.Defaults()
+}
+
+// profileConfigured 表示"部署侧真的配了档位"（而不是回落编译期默认）。
+func (h *wasmLimitsHolder) profileConfigured() bool {
+	return h.profileExplicit || (h.profile.Name != "" && h.profile.Name != "default")
+}
+
+// profileSource 返回"档位路径"下当前值的来源标识：
+//
+//	"profile" —— 部署侧显式配置了 PICOAI_WASM_MEMORY_PROFILE（值真的来自档位）；
+//	"default" —— 未配置（值是编译期默认）。
+//
+// 为什么要与 Value 一起区分（AUD-2，2026-09-20）：控制台的 `source`/`source_label`
+// 是运维判断"我改的档位到底生效没有"的唯一入口。清空设置之后如果仍报 "profile"
+// 而实际上用的是编译期默认，标签会把"没配档位"说成"档位生效"——两种都不是 setting，
+// 但排查方向完全不同。`limitsSourceLabel("default", …)` 已经会渲染成「编译期默认」。
+func (h *wasmLimitsHolder) profileSource() string {
+	if h.profileConfigured() {
+		return "profile"
+	}
+	return "default"
 }
 
 // set 原子写入（value/source/restart 成对更新）。
@@ -184,23 +206,31 @@ func (h *wasmLimitsHolder) Preview(availableBytes int64) readyz.MemoryBudget {
 
 // Apply 保存并生效：校验 → 四笔账 → 落库 → 下发。
 //
-// raw 为空表示"清空设置、回到部署档位/默认"。返回需要重启才生效的字段名。
+// raw 为空表示"清空设置、回到部署档位/默认"：这条路径**真的删掉 `settings.wasm.limits`
+// 行**（AUD-2，2026-09-20）。
+//
+// 为什么"删行"而不是"把档位值写回设置"（旧实现，是审计判定的"承诺不成立"）：
+// 写回之后库里的行仍在、`source` 仍报 `setting`、label 仍显示「控制台保存」——
+// 运维**事实上无法回落档位**：此后即使改 `PICOAI_WASM_MEMORY_PROFILE` 也会被那条
+// 钉死的设置覆盖，而界面上看不出任何异常。删行之后 `source`/`source_label` 如实回到
+// 部署档位（或编译期默认），下一次启动按同一条优先级重新解析。
+//
+// 返回需要重启才生效的字段名。
 func (h *wasmLimitsHolder) Apply(raw string) ([]string, *apperr.Error) {
+	clearing := strings.TrimSpace(raw) == ""
 	next := applimits.Limits{}
-	if strings.TrimSpace(raw) == "" {
-		next = h.profileLimits()
+	// 保存路径复用启动自检的判据（fail-loud：不给"先跑起来再说"的口子）。
+	// 来源标签按**本次保存之后**的归属取：raw 为空 = 回到档位/默认。
+	label, source := "limits/setting", "setting"
+	if clearing {
+		next, source = h.profileLimits(), h.profileSource()
+		label = "limits/profile:" + h.profile.Name
 	} else {
 		parsed, aerr := applimits.Parse(raw)
 		if aerr != nil {
 			return nil, aerr
 		}
 		next = parsed
-	}
-	// 保存路径复用启动自检的判据（fail-loud：不给"先跑起来再说"的口子）。
-	// 来源标签按**本次保存之后**的归属取：raw 为空 = 回到档位/默认。
-	label := "limits/setting"
-	if strings.TrimSpace(raw) == "" {
-		label = "limits/profile:" + h.profile.Name
 	}
 	avail := readMemoryAvailability()
 	if !avail.Known() {
@@ -221,9 +251,18 @@ func (h *wasmLimitsHolder) Apply(raw string) ([]string, *apperr.Error) {
 				"调小全局并发、单实例内存上限、模块缓存上限或 appdb_cache_kib，或扩容机器内存")
 	}
 	if h.db != nil {
-		if err := serverstore.SetSetting(h.db, SettingWasmLimits, next.Encode()); err != nil {
+		var werr error
+		if clearing {
+			// 真删行（键不存在不算错：重复清空是幂等的）。
+			if _, werr = serverstore.DeleteSetting(h.db, SettingWasmLimits); werr == nil {
+				log.Printf("wasm: 平台限制项设置已清空（删除 settings.%s 行）", SettingWasmLimits)
+			}
+		} else {
+			werr = serverstore.SetSetting(h.db, SettingWasmLimits, next.Encode())
+		}
+		if werr != nil {
 			return nil, apperr.New(apperr.CodeInternal, "保存平台限制项失败").
-				WithDetail("reason", err.Error()).
+				WithDetail("reason", werr.Error()).
 				WithHint("数据库写入失败；重试一次，仍失败请查看服务端日志")
 		}
 	}
@@ -231,7 +270,11 @@ func (h *wasmLimitsHolder) Apply(raw string) ([]string, *apperr.Error) {
 	if h.apply != nil {
 		restart = h.apply(next)
 	}
-	h.set(next, "setting", restart)
-	log.Printf("wasm: 平台限制项已更新（来源=控制台）%s", next.Encode())
+	h.set(next, source, restart)
+	if clearing {
+		log.Printf("wasm: 平台限制项已回落到部署档位（来源=%s）%s", source, next.Encode())
+	} else {
+		log.Printf("wasm: 平台限制项已更新（来源=控制台）%s", next.Encode())
+	}
 	return restart, nil
 }

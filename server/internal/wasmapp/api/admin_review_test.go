@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -342,7 +343,8 @@ func TestAdminReviewApproveAfterRejectIsRefused(t *testing.T) {
 	e := reviewEnv(t)
 	e.publishOK(e.tokens["alice"], "race-tool", "1.0.0", testGuestModule(t), goodConfig())
 	e.publishOK(e.tokens["alice"], "race-tool", "1.1.0", testGuestModule(t), goodConfig())
-	e.decodeJSON(e.req(http.MethodPost, "/api/server/admin/wasm-apps/race-tool/releases/1.1.0/reject", "", nil),
+	e.decodeJSON(e.req(http.MethodPost, "/api/server/admin/wasm-apps/race-tool/releases/1.1.0/reject", "",
+		map[string]any{"reason": "先拒一版，用例要验的是 approve-after-reject 的语义"}),
 		http.StatusOK, &struct{}{})
 
 	eb := e.decodeErr(e.req(http.MethodPost, "/api/server/admin/wasm-apps/race-tool/releases/1.1.0/approve", "", nil),
@@ -365,10 +367,12 @@ func TestAdminRejectApprovedReleaseIsRefused(t *testing.T) {
 	e.publishOK(e.tokens["alice"], "live-tool", "1.1.0", testGuestModule(t), goodConfig())
 
 	// ① 线上生效版本（current）。
-	e.decodeErr(e.req(http.MethodPost, "/api/server/admin/wasm-apps/live-tool/releases/1.1.0/reject", "", nil),
+	e.decodeErr(e.req(http.MethodPost, "/api/server/admin/wasm-apps/live-tool/releases/1.1.0/reject", "",
+		map[string]any{"reason": "用例要验的是「拒绝线上版本」必须被拒，理由先给足"}),
 		http.StatusConflict)
 	// ② 历史 approved 版本（不是 current，但仍是可回滚点）。
-	e.decodeErr(e.req(http.MethodPost, "/api/server/admin/wasm-apps/live-tool/releases/1.0.0/reject", "", nil),
+	e.decodeErr(e.req(http.MethodPost, "/api/server/admin/wasm-apps/live-tool/releases/1.0.0/reject", "",
+		map[string]any{"reason": "同上：历史 approved 也是可回滚点"}),
 		http.StatusConflict)
 
 	for _, v := range []string{"1.0.0", "1.1.0"} {
@@ -401,7 +405,8 @@ func TestAdminReviewUnknownVersionAndDeletedApp(t *testing.T) {
 	if w := e.req(http.MethodDelete, "/api/client/v2/apps/wasm/gone-tool", e.tokens["alice"], nil); w.Code != http.StatusOK {
 		t.Fatalf("删除失败: %s", w.Body.String())
 	}
-	e.decodeErr(e.req(http.MethodPost, "/api/server/admin/wasm-apps/gone-tool/releases/1.0.0/reject", "", nil),
+	e.decodeErr(e.req(http.MethodPost, "/api/server/admin/wasm-apps/gone-tool/releases/1.0.0/reject", "",
+		map[string]any{"reason": "用例要验的是软删应用不可审批"}),
 		http.StatusNotFound)
 }
 
@@ -490,5 +495,82 @@ func assertAuditHasNoAppContent(t *testing.T, detail string) {
 	}
 	if strings.Contains(detail, base64.StdEncoding.EncodeToString([]byte("AGFzbQ"))) {
 		t.Fatalf("审计明细不得含制品字节：%q", detail)
+	}
+}
+
+// TestAdminRejectRequiresReason 钉住 P2-5（2026-09-20 本机全功能实测）：
+// `POST …/releases/<v>/reject` 曾经允许不带理由 —— `'{}'` ⇒
+// `200 {"status":"rejected","reason":""}`，作者侧拿到的 `reason` 是空串。
+//
+// 为什么这是缺陷而不是"可选字段"：拒绝理由是这条通道**唯一**的反馈载体（同一条
+// 字符串同时进审计、管理端"最近被拒"清单与作者客户端 `GET …/releases` 的 `reason`），
+// 空理由 ⇒ 作者只知道"被拒了"，不知道改什么，只能反复重发。
+//
+// 判据（四态，全部走**生产路径**）：
+//   - `{}`（实测形态）/ 无 body / 空白字符串 / `null` / 只有别的键 ⇒ 400 VALIDATION
+//     且 `field=reason`，**且状态未被改动**（仍 pending，没有被"拒掉"）；
+//   - 给足理由 ⇒ 200 且作者侧读得到同一句。
+//
+// 变异验证：把 `adminLimitsPut` 那条"reason == \"\" ⇒ 400"的闸门去掉
+// ⇒ 前四个子用例红（正是 P2-5 的现场）。
+func TestAdminRejectRequiresReason(t *testing.T) {
+	e := reviewEnv(t)
+	e.publishOK(e.tokens["alice"], "reason-required", "1.0.0", testGuestModule(t), goodConfig())
+	e.publishOK(e.tokens["alice"], "reason-required", "1.1.0", testGuestModule(t), goodConfig())
+
+	reject := func(body any) *httptest.ResponseRecorder {
+		t.Helper()
+		return e.req(http.MethodPost,
+			"/api/server/admin/wasm-apps/reason-required/releases/1.1.0/reject", "", body)
+	}
+	stillPending := func() {
+		t.Helper()
+		// 用 releaseState 而不是 status=pending 的清单：审核开关打开时 1.0.0 也待审，
+		// 「清单里有 1 行」这种断言会把前置状态算进来（判据必须只钉被拒的那一版）。
+		status, _, size := e.releaseState("reason-required", "1.1.0")
+		if status != serverstore.ReleaseStatusPending || size <= 0 {
+			t.Fatalf("被拒的 400 不得改动状态（1.1.0 应仍待审、归档字节仍在）：status=%q size=%d", status, size)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		body any
+	}{
+		{"空对象（实测形态）", map[string]any{}},
+		{"没有请求体", nil},
+		{"空白理由", map[string]any{"reason": "   \n\t "}},
+		{"显式 null", map[string]any{"reason": nil}},
+		{"只有别的键", map[string]any{"note": "忘了写 reason"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eb := e.decodeErr(reject(tc.body), http.StatusBadRequest)
+			if eb.Error.Code != string(apperr.CodeValidation) {
+				t.Fatalf("error.code = %q, want %q", eb.Error.Code, apperr.CodeValidation)
+			}
+			if got, _ := eb.Error.Details["field"].(string); got != "reason" {
+				t.Fatalf("details.field = %q, want reason", got)
+			}
+			if len(eb.Error.Hints) == 0 {
+				t.Fatal("400 必须带 hint（告诉调用方理由会流向哪里、为什么不能空）")
+			}
+			stillPending()
+		})
+	}
+
+	// 正例：给足理由 ⇒ 200，且作者侧（员工面 MyReleases）读到同一句。
+	const reason = "用途与数据敏感度不匹配：请补充数据流向与存放位置后再发"
+	var decided struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	e.decodeJSON(reject(map[string]any{"reason": reason}), http.StatusOK, &decided)
+	if decided.Status != serverstore.ReleaseStatusRejected || decided.Reason != reason {
+		t.Fatalf("正例响应 = %+v, want status=rejected + reason 原样回显", decided)
+	}
+	after := e.myReleases("reason-required", e.tokens["alice"])
+	row := after.row(t, "1.1.0")
+	if row.Status != serverstore.ReleaseStatusRejected || row.Reason != reason {
+		t.Fatalf("作者侧必须读到同一句理由：status=%q reason=%q", row.Status, row.Reason)
 	}
 }

@@ -113,14 +113,31 @@ func dayStart(t time.Time) time.Time { return serverstore.LocalDay(t) }
 // `totals.uv` 更必须是**不带 `GROUP BY app_id` 的一次聚合**（各应用 uv 相加会把
 // "同一个人开了两个应用"重复计数，§5.1c A 明令禁止）。
 // `days` 缺省 7、`top` 缺省 10（与 L6 已实现的前端取值一致）。
+//
+// `days` 与 `capped` 的关系（AUD-4，2026-09-20）：`days` 回显的是**生效窗口**（请求值
+// 超过明细保留期 90 天时收敛后的值），`capped=true` 表示"你请求的窗口比明细保留期还长"
+// —— 两者合起来才让调用方看得出"我要了 365 天、实际给了 90 天"，见 handler 里
+// requestedDays 的注释。
 func (h *Handlers) adminOpensSummary(c *gin.Context) {
 	now := h.now()
 	days := atoiDefault(c.Query("days"), opensSummaryDefaultDays)
 	if days <= 0 {
 		days = opensSummaryDefaultDays
 	}
+	// `days` 的**请求值**与**生效值**分开记（AUD-4，2026-09-20 独立对抗审计）。
+	//
+	// 现场：请求 days=365 时这里静默收敛到 90，而响应里的 `capped` 来自
+	// `SummarizeWasmAppOpens` —— 库函数判的是"`from` 早于明细保留期"，可 `from` 在
+	// 上面**已经被钳过**（from = now-(90-1)，恰好等于库内 maxStart）⇒ `capped` 恒 false，
+	// 设计 §5.1c A 要求的"窗口长于保留期时如实回报"在**生产端点不可达**（只有库级判据
+	// 能构造出 true）。调用方拿到的是"days=90 / capped=false"，与它请求的 365 天无从对照。
+	//
+	// 修法：端点自己知道"请求窗口是否长于保留期"，`capped` 取**两者或**（库级的
+	// 早于保留期判定继续保留：它也覆盖"显式 from 早于保留期"的调用形态）。
+	// `days` 仍回显**生效窗口**（= 被钳到多少），`detail_retention_days` 给出钳制上界，
+	// 前端已按 `capped=true` 渲染"已收敛到保留期"的说明。
+	requestedDays := days
 	if days > serverstore.WasmAppOpensRetentionDays {
-		// 超过明细保留期就没有"窗口去重 UV"可算了 ⇒ 收敛并如实回报 capped。
 		days = serverstore.WasmAppOpensRetentionDays
 	}
 	top := atoiDefault(c.Query("top"), opensSummaryDefaultTop)
@@ -164,11 +181,18 @@ func (h *Handlers) adminOpensSummary(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"from": serverstore.LocalDayString(from),
 		"to":   serverstore.LocalDayString(now),
+		// `days` 是**生效窗口**（被钳到多少）：requestedDays 超过明细保留期时这里回显
+		// 收敛后的值，配合 `capped=true` 与 `detail_retention_days` 让调用方看清
+		// "我要了 N 天、实际给了 M 天"（AUD-4）。
 		"days": days,
 		"top":  top,
-		// capped=true：请求的窗口比明细保留期还长，UV 只能按保留期算（如实说，
-		// 不静默给一个偏小的数字）。
-		"capped": sum.Capped,
+		// capped=true：请求的窗口比明细保留期还长（或显式 from 早于保留期），UV 只能按
+		// 保留期算（如实说，不静默给一个偏小的数字）。
+		//
+		// ⚠️ 库函数的 Capped 只覆盖"from 早于保留期"那一种形态（显式 from 调用方）；
+		// 本端点把 from 钳过之后再问库函数 ⇒ 必须在此处补上"请求值 > 生效值"这一半，
+		// 否则设计 §5.1c A 的 capped=true 在生产端点**不可达**（AUD-4 的现场）。
+		"capped": sum.Capped || requestedDays > days,
 		// 明细保留期（§5.1c A）：前端据此标注"多久以前的明细已经不在"，
 		// 并在 capped 时说明窗口为什么被收敛。
 		"detail_retention_days": serverstore.WasmAppOpensRetentionDays,
