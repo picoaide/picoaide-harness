@@ -109,6 +109,10 @@ func TestNamespaces(t *testing.T) {
 		// R1-pm-3：审核结论的作者侧出口（发布者本人的版本历史 + 被拒理由）。
 		// 缺了这条，开启审核 = 作者永远收不到结论（客户端拿不到任何数据）。
 		"GET " + nsClient + "/apps/wasm/:app_id/releases",
+		// 标识唯一性预查（2026-09-20）：发布表单填 app_id 时异步问它、提交前再问一次。
+		// 缺了这条，表单只能退回去读 catalog —— 而 catalog 不列冻结/占名行，
+		// 会给出"这个标识没人用"的反向结论。
+		"GET " + nsClient + "/apps/wasm/:app_id/availability",
 		"POST " + nsServer + "/admin/login",
 		"GET " + nsServer + "/admin/auth/methods",
 		"GET " + nsServer + "/admin/users",

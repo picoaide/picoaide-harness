@@ -195,6 +195,10 @@ type Handlers struct {
 	Diagnostics  gin.HandlerFunc // GET  /apps/wasm/:app_id/diagnostics
 	Schema       gin.HandlerFunc // GET  /apps/wasm/:app_id/schema
 	Catalog      gin.HandlerFunc // GET  /apps/wasm/catalog
+	// Availability 是**标识唯一性预查**（发布表单的异步查重 + 提交前复检）：
+	// 只读、不编译、不写盘、不占版本号、不进审计。判据与发布同源（GetWasmApp +
+	// checkOwner），因此它的结论与真正提交时的 409 必然一致。
+	Availability gin.HandlerFunc // GET  /apps/wasm/:app_id/availability
 	// MyReleases 是**发布者本人的版本历史**（含被拒理由）—— R1-pm-3 的作者侧闭环：
 	// 审核开启后这是作者唯一能拿到"结论 + 理由"的出口（非发布者一律 404）。
 	MyReleases gin.HandlerFunc // GET  /apps/wasm/:app_id/releases
@@ -268,6 +272,7 @@ func NewHandlers(opt Options) *Handlers {
 	h.Diagnostics = h.diagnostics
 	h.Schema = h.schema
 	h.Catalog = h.catalog
+	h.Availability = h.availability
 	h.MyReleases = h.myReleases
 	h.ClientRequest = h.clientRequest
 	h.AppProofIssue = h.appProofIssue
@@ -618,6 +623,18 @@ func (h *Handlers) creationAppID(c *gin.Context, bodyAppID string) (string, *app
 	if raw == "" {
 		raw = rawBody
 	}
+	return h.validateRawAppID(raw)
+}
+
+// validateRawAppID 校验调用方给出的 app_id **原值**（不做归一化）。
+//
+// 为什么强调"原值"：`registry.NormalizeAppID` 会顺手小写，而"必须全小写"是平台
+// **刻意**的规则（避免两个名字指向同一行）。先归一化再校验会把 `My-Tool` 判成
+// 合法，然后回答"这个名字可以用" —— 用户拿着一个永远发不出去的名字反复试。
+// 两个消费方（发布链路与标识查重）都必须看原值，因此判据只在这里实现一次。
+// @param raw - 已 TrimSpace 的原始 app_id。
+// @returns 原样返回的合法 app_id，或结构化错误。
+func (h *Handlers) validateRawAppID(raw string) (string, *apperr.Error) {
 	if raw == "" {
 		return "", apperr.New(apperr.CodeMissingField, "缺少 app_id").
 			WithDetail("field", "app_id").
