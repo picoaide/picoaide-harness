@@ -6,15 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
-	"github.com/picoaide/picoaide/internal/wasmapp/assets"
+	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
@@ -115,40 +113,26 @@ func TestPublishHappyPath(t *testing.T) {
 	if rel.Status != serverstore.ReleaseStatusApproved || rel.Publisher != "alice" {
 		t.Fatalf("release 行不对: %+v", rel)
 	}
-	// assets_dir 列有意留空（原因见 commitRelease 的注释）：目录名就是 release_id，
-	// 而 release_id 只有 INSERT 之后才知道。执行侧据此回落到 release.id。
+	// assets_dir 列有意留空：它是"资源抽取到磁盘"时代的遗留列 —— 2026-09-20 起随包
+	// 资源从 wasm 自定义段在内存里构造（决策文档
+	// docs/decisions/2026-09-20-wasm-assets-in-memory.md），磁盘上没有按版本的资源目录。
 	if rel.AssetsDir != "" {
-		t.Fatalf("assets_dir 应留空（目录名 = release_id）：%q", rel.AssetsDir)
+		t.Fatalf("assets_dir 应留空（资源不再落盘）：%q", rel.AssetsDir)
 	}
 
-	// 资源目录：段文件 + picoaide.app.json（应用用 assets.read 读自己的配置）。
-	dir := filepath.Join(e.dataRoot, limits.AppsDirName, "demo-tool", assets.AssetsDirName, fmt.Sprint(out.Release.ID))
-	if body, rerr := os.ReadFile(filepath.Join(dir, "index.html")); rerr != nil || string(body) != "<html>hi</html>" {
-		t.Fatalf("段资源未落盘: %v %q", rerr, body)
-	}
-	raw, rerr := os.ReadFile(filepath.Join(dir, limits.AppConfigFileName))
-	if rerr != nil {
-		t.Fatalf("picoaide.app.json 未落盘: %v", rerr)
-	}
+	// 应用自己读到的那份配置（宿主注入内存资源集的 picoaide.app.json）= **库内**版本行
+	// 的 config_json。资源不落盘以后这是唯一权威副本，所以断言改在这里。
 	var cfg appcfg.Config
-	if jerr := json.Unmarshal(raw, &cfg); jerr != nil {
-		t.Fatalf("配置文件不是合法 JSON: %v", jerr)
+	if jerr := json.Unmarshal([]byte(rel.ConfigJSON), &cfg); jerr != nil {
+		t.Fatalf("版本行 config_json 不是合法 JSON: %v", jerr)
 	}
 	if cfg.Owner != "张伟" || cfg.Purpose == "" || cfg.DataSensitivity != "internal" {
-		t.Fatalf("配置文件内容不对: %+v", cfg)
+		t.Fatalf("版本行配置内容不对: %+v", cfg)
 	}
-	// staging 目录必须已被 rename 消费掉（不能留下 staging-* 残骸）。
-	entries, derr := os.ReadDir(filepath.Join(e.dataRoot, limits.AppsDirName, "demo-tool", assets.AssetsDirName))
-	if derr != nil {
-		t.Fatalf("读 assets 目录失败: %v", derr)
-	}
-	if len(entries) != 1 || entries[0].Name() != fmt.Sprint(out.Release.ID) {
-		names := make([]string, 0, len(entries))
-		for _, en := range entries {
-			names = append(names, en.Name())
-		}
-		t.Fatalf("assets 目录应只剩版本目录: %v", names)
-	}
+	// 负向判据（2026-09-20 定案）：发布成功后 <data_root>/apps/<app_id>/ 下**不得**
+	// 出现 assets/ 目录 —— 整条发布链路只写数据库。
+	// 变异验证：把 staging + rename 落盘代码加回发布链路，这条立刻变红。
+	assertNoAssetsDir(t, e.dataRoot, "demo-tool")
 
 	// 审计：发布成功留痕，且带 app 维度（0069）。
 	actions := e.auditActions("demo-tool")
@@ -746,39 +730,206 @@ func TestArtifactQuotaRejected(t *testing.T) {
 	}
 }
 
-// TestPublishAssetWriteFailureLeavesNothing 是"落行与资产抽取顺序"的判据：
-// 资源写盘失败 ⇒ **库里一行都没有**（版本号未被占用）+ staging 目录被清理。
-func TestPublishAssetWriteFailureLeavesNothing(t *testing.T) {
+// TestPublishAssetRejectedLeavesNothing 是"非法资源名 ⇒ 一行都不留"的判据。
+//
+// 旧形态（2026-09-20 前）判的是"写盘失败"：段名超过 POSIX NAME_MAX 时 assets.Write
+// 拒绝。资源不落盘以后没有写盘这一步，但**同一个非法段名仍然必须被拒**，而且拒的
+// 位置提前到了发布期的 assets.ValidateLogicalPath（运行期 assets.Build 的同源副本）：
+// 判据因此变成"逻辑路径完整校验失败 ⇒ 库里一行都没有（版本号未被占用）"。
+//
+// 两个长度档分别咬住两条规则：整条 > MaxPathBytes(256) 与 单段 > MaxSegmentBytes(255)。
+func TestPublishAssetRejectedLeavesNothing(t *testing.T) {
 	e := newTestEnv(t)
 	guest := testGuestModule(t)
-	// 段名本身是合法逻辑路径，但单段超过 POSIX NAME_MAX(255) ⇒ assets.Write 拒。
-	long := strings.Repeat("a", 300)
-	mod := withCustomSections(t, guest, map[string][]byte{long: []byte("x")})
+	cases := []struct {
+		name     string
+		appID    string
+		section  string
+		wantCode string
+	}{
+		{
+			name:     "整条路径超长",
+			appID:    "fs-tool",
+			section:  strings.Repeat("a", 300), // > MaxPathBytes
+			wantCode: "ASSET_DENIED",
+		},
+		{
+			name:     "单段超长",
+			appID:    "fs-seg-tool",
+			section:  strings.Repeat("b", 256), // = MaxPathBytes 之内，但单段 > MaxSegmentBytes
+			wantCode: "ASSET_DENIED",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mod := withCustomSections(t, guest, map[string][]byte{tc.section: []byte("x")})
+			p := e.payload(tc.appID, "1.0.0", mod, goodConfig())
+			w := e.req(http.MethodPost, "/api/client/v2/apps/wasm/"+tc.appID+"/releases", e.tokens["alice"], p)
+			if w.Code == http.StatusCreated {
+				t.Fatal("非法资源名不得发布成功")
+			}
+			eb := e.decodeErr(w, w.Code)
+			if eb.Error.Code != tc.wantCode {
+				t.Fatalf("code = %s, want %s（details=%v）", eb.Error.Code, tc.wantCode, eb.Error.Details)
+			}
+			if eb.Error.Details["section"] != tc.section {
+				t.Fatalf("错误应指出是哪个段: %v", eb.Error.Details)
+			}
+			if eb.Error.Details["reason"] == nil {
+				t.Fatalf("错误应给出具体被拒的理由: %v", eb.Error.Details)
+			}
+			if len(eb.Error.Hints) == 0 {
+				t.Fatal("错误应给出可行动的 hints（作者要知道合法的段名长什么样）")
+			}
+			if n := e.countReleases(tc.appID); n != 0 {
+				t.Fatalf("校验失败后库里不得有 release 行（R18），实际 %d 行", n)
+			}
+			if _, err := serverstore.GetWasmApp(t.Context(), e.db, tc.appID); err == nil {
+				t.Fatal("校验失败后不得留下占名的应用行（版本号为 0 的悬挂应用）")
+			}
+			// 失败路径同样不得有任何磁盘痕迹（负向判据）。
+			assertNoAssetsDir(t, e.dataRoot, tc.appID)
+		})
+	}
+}
 
-	p := e.payload("fs-tool", "1.0.0", mod, goodConfig())
-	w := e.req(http.MethodPost, "/api/client/v2/apps/wasm/fs-tool/releases", e.tokens["alice"], p)
-	if w.Code == http.StatusCreated {
-		t.Fatal("资源写盘失败不得发布成功")
+// TestPublishAssetLimitsRejectBeforeCommit 咬住发布期的"单文件 / 总量"上限校验
+// （与运行期 assets.Build 同一份口径）。这里直接对校验函数做单元级断言：真编译一份
+// 带 4 MiB 段的模块代价过高，而这条判据的价值在于"上限被拿掉时必红"。
+func TestPublishAssetLimitsRejectBeforeCommit(t *testing.T) {
+	max := int(limits.SectionTotalMaxBytes)
+
+	// ① 单文件超上限 ⇒ ASSET_OVERSIZE，且指出是哪个段。
+	big := map[string][]byte{"static/app.js": make([]byte, max+1)}
+	eb := checkPublishAssets(big, nil)
+	if eb == nil || eb.Code != apperr.CodeAssetOversize {
+		t.Fatalf("单文件超限必须被拒，得到 %+v", eb)
 	}
-	eb := e.decodeErr(w, w.Code)
-	if eb.Error.Details["section"] != long {
-		t.Fatalf("错误应指出是哪个段: %v", eb.Error.Details)
+	if eb.Details["section"] != "static/app.js" || eb.Details["max"] != limits.SectionTotalMaxBytes {
+		t.Fatalf("单文件超限的错误明细不对: %v", eb.Details)
 	}
-	if n := e.countReleases("fs-tool"); n != 0 {
-		t.Fatalf("抽取失败后库里不得有 release 行（R18），实际 %d 行", n)
+
+	// ② 两个文件各自合法但总量超上限 ⇒ ASSET_OVERSIZE（details.total）。
+	half := make([]byte, max/2+1)
+	total := map[string][]byte{"a.png": half, "b.png": half}
+	eb = checkPublishAssets(total, nil)
+	if eb == nil || eb.Code != apperr.CodeAssetOversize {
+		t.Fatalf("总量超限必须被拒，得到 %+v", eb)
 	}
-	if _, err := serverstore.GetWasmApp(t.Context(), e.db, "fs-tool"); err == nil {
-		t.Fatal("抽取失败后不得留下占名的应用行（版本号为 0 的悬挂应用）")
+	if eb.Details["total"] == nil {
+		t.Fatalf("总量超限应给出 details.total: %v", eb.Details)
 	}
-	// staging 目录必须被清理（不留半成品资源）。
-	dir := filepath.Join(e.dataRoot, limits.AppsDirName, "fs-tool", assets.AssetsDirName)
-	entries, derr := os.ReadDir(dir)
-	if derr == nil && len(entries) != 0 {
-		names := make([]string, 0, len(entries))
-		for _, en := range entries {
-			names = append(names, en.Name())
-		}
-		t.Fatalf("失败后 assets 目录应为空: %v", names)
+
+	// ③ 平台注入的 picoaide.app.json 也占额度（口径与 assets.Build 逐字一致）。
+	eb = checkPublishAssets(map[string][]byte{"a.png": make([]byte, max-8)}, make([]byte, 64))
+	if eb == nil || eb.Code != apperr.CodeAssetOversize {
+		t.Fatalf("配置文件也让总量越界时必须被拒，得到 %+v", eb)
+	}
+
+	// ④ 恰好等于上限（含配置文件）必须放行 —— 免得把上限判成"小于等于"以外的东西。
+	ok := map[string][]byte{"a.png": make([]byte, max-64)}
+	if eb := checkPublishAssets(ok, make([]byte, 64)); eb != nil {
+		t.Fatalf("恰好等于上限应放行: %+v", eb)
+	}
+	// ⑤ 边界上再多一字节即拒。
+	if eb := checkPublishAssets(ok, make([]byte, 65)); eb == nil {
+		t.Fatal("超出一字节必须被拒")
+	}
+}
+
+// TestPublishDuplicateAssetSectionRejected 咬住 `ASSET_EXISTS` 的**唯一触发点**：
+// 同一个包内路径在自定义段里出现了两次。
+//
+// 为什么必须拒：重名段在解析层只取第一个、其余**静默丢弃**（wasmmod.Parse 的既有
+// 语义），作者的两种常见形态都会撞上 —— 打包脚本给两个源文件写了同一个 DEST，或手工
+// 往模块里重复追加同一个段。两种情况都表现为"页面内容与预期不一致"，而平台一声不响。
+// 这个错误码在磁盘版的 `assets.Store.Write`（"拒绝覆盖"）删除后曾经没有任何触发点，
+// 而 `server/skills/app-builder/references/abi.md` 已声明该语义 ⇒ 实现必须跟上文档。
+//
+// 变异验证：去掉 prepare 里的 checkDuplicateSections 调用，本用例必须变红（会发布成功）。
+func TestPublishDuplicateAssetSectionRejected(t *testing.T) {
+	e := newTestEnv(t)
+	guest := testGuestModule(t)
+	// 同一段名两次、内容不同：解析层保留第一份（"<html>first</html>"）。
+	mod := withRepeatedCustomSection(t, guest, "index.html",
+		[]byte("<html>first</html>"), []byte("<html>second</html>"))
+
+	// ① 预检与发布必须给同一个结论（否则 AI 会看到"预检通过、发布被拒"）。
+	// 顺带咬住"validate 不写审计"（§4.2）：预检是只读动作。
+	auditBefore := e.countAudit()
+	p := e.payload("dup-tool", "1.0.0", mod, goodConfig())
+	w := e.req(http.MethodPost, "/api/client/v2/apps/wasm/validate", e.tokens["alice"], p)
+	veb := e.decodeErr(w, http.StatusConflict)
+	if veb.Error.Code != "ASSET_EXISTS" {
+		t.Fatalf("validate code = %s, want ASSET_EXISTS", veb.Error.Code)
+	}
+	if veb.Error.Details["reason"] != "duplicate_section" {
+		t.Fatalf("validate details.reason = %v, want duplicate_section", veb.Error.Details)
+	}
+	if fmt.Sprint(veb.Error.Details["paths"]) != "[index.html]" {
+		t.Fatalf("validate details.paths = %v, want [index.html]", veb.Error.Details["paths"])
+	}
+	if got := e.countAudit(); got != auditBefore {
+		t.Fatalf("预检不得写审计: %d → %d", auditBefore, got)
+	}
+
+	// ② 发布：同样的码与明细，且**一行都不留**（版本号未被占用）。
+	w = e.req(http.MethodPost, "/api/client/v2/apps/wasm/dup-tool/releases", e.tokens["alice"], p)
+	eb := e.decodeErr(w, http.StatusConflict)
+	if eb.Error.Code != "ASSET_EXISTS" {
+		t.Fatalf("publish code = %s, want ASSET_EXISTS", eb.Error.Code)
+	}
+	if eb.Error.Details["reason"] != "duplicate_section" {
+		t.Fatalf("publish details.reason = %v, want duplicate_section", eb.Error.Details)
+	}
+	if fmt.Sprint(eb.Error.Details["paths"]) != "[index.html]" {
+		t.Fatalf("publish details.paths = %v, want [index.html]", eb.Error.Details["paths"])
+	}
+	if len(eb.Error.Hints) < 2 {
+		t.Fatalf("错误应给出两条可行动的 hints（怎么改 + 改内容要发新版）: %v", eb.Error.Hints)
+	}
+	if n := e.countReleases("dup-tool"); n != 0 {
+		t.Fatalf("重名被拒后库里不得有 release 行（R18），实际 %d 行", n)
+	}
+	if _, err := serverstore.GetWasmApp(t.Context(), e.db, "dup-tool"); err == nil {
+		t.Fatal("重名被拒后不得留下占名的应用行")
+	}
+	// 发布失败必须留痕（审计动作是 wasm_app_release_failed，不是成功那条）。
+	if got := e.countAudit(); got != auditBefore+1 {
+		t.Fatalf("被拒的发布应写一条失败审计: %d → %d", auditBefore, got)
+	}
+	if actions := e.auditActions("dup-tool"); !contains(actions, "wasm_app_release_failed") {
+		t.Fatalf("缺少 wasm_app_release_failed 审计: %v", actions)
+	}
+	assertNoAssetsDir(t, e.dataRoot, "dup-tool")
+}
+
+// TestPublishDuplicateNonAssetSectionsStillAllowed 是上一条的**反向控制**：
+// 工具链元数据段（`producers`）与平台独占的 `picoaide.app.json` 重复出现**不得**被
+// 重名闸门误伤（它们本来就可能重复/被忽略，判据只罩保留下来的资源段）。
+func TestPublishDuplicateNonAssetSectionsStillAllowed(t *testing.T) {
+	e := newTestEnv(t)
+	guest := testGuestModule(t)
+	mod := withRepeatedCustomSection(t, guest, "producers", []byte("meta-1"), []byte("meta-2"))
+	mod = withRepeatedCustomSection(t, mod, limits.AppConfigFileName,
+		[]byte(`{"access":"public"}`), []byte(`{"access":"whitelist"}`))
+
+	rel := e.publishOK(e.tokens["alice"], "dup-meta-tool", "1.0.0", mod, goodConfig())
+	ignored, _ := rel["ignored_sections"].([]any)
+	got := map[string]bool{}
+	for _, name := range ignored {
+		got[fmt.Sprint(name)] = true
+	}
+	if !got["producers"] || !got[limits.AppConfigFileName] {
+		t.Fatalf("工具链段与 picoaide.app.json 应被忽略并报告，得到 %v", ignored)
+	}
+	// 资源只有段里真正的那份配置被注入 ⇒ 库内 config_json 是**平台解析后的**配置。
+	r, err := serverstore.GetWasmRelease(t.Context(), e.db, "dup-meta-tool", "1.0.0")
+	if err != nil {
+		t.Fatalf("读版本失败: %v", err)
+	}
+	if appcfg.AccessOfConfigJSON(r.ConfigJSON) != appcfg.AccessLogin {
+		t.Fatalf("库内配置应来自提交的 config（login），得到 %q", appcfg.AccessOfConfigJSON(r.ConfigJSON))
 	}
 }
 

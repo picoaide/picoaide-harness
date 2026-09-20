@@ -176,7 +176,7 @@ _row_id INTEGER PRIMARY KEY AUTOINCREMENT
 
 ### 3.7 `assets.read`
 
-读**随包提交**的资源（发布时从 wasm 里抽出来放到宿主磁盘）：
+读**随包提交**的资源（= wasm 的**自定义段**，运行期由宿主从制品里解析后常驻内存）：
 
 - 最常见的用法是读应用自己的配置：`assets.read("picoaide.app.json")`。
 - 路径是包内相对路径；没有文件系统语义（不能列目录、不能穿越）：路径不超过 256 字节、
@@ -194,7 +194,7 @@ _row_id INTEGER PRIMARY KEY AUTOINCREMENT
 
 **可见性（往包里放机密之前必读）**：
 
-- `assets.read` 读到的资源**默认不对外公开** —— 它只在宿主磁盘上，按包内逻辑路径读，
+- `assets.read` 读到的资源**默认不对外公开** —— 它按包内逻辑路径在宿主内存里查，
   没有文件系统语义，外面也列不了目录。
 - **唯一例外是"非保留资源"**：`picoaide.app.json` 之外的一切包内文件
   （HTML/JS/CSS/图片/字体/数据文件）会被宿主**按路径直出给任何能打开应用的人**
@@ -209,7 +209,7 @@ _row_id INTEGER PRIMARY KEY AUTOINCREMENT
 
 | 请求 | 谁来答 |
 | --- | --- |
-| `GET`/`HEAD` 且路径在包里存在对应资源 | 宿主**直出**（不执行 wasm）；响应带 ETag，命中 `If-None-Match` 时 304 且不读盘 |
+| `GET`/`HEAD` 且路径在包里存在对应资源 | 宿主**直出**（不执行 wasm）；响应带 ETag，命中 `If-None-Match` 时 304（连内容都不重算） |
 | `/api` 与 `/api/*` | **一律交给 wasm**（即使包里恰好有 `api/x.json` 也不直出） |
 | 非 `GET`/`HEAD` 方法 | 一律交给 wasm（否则 `POST /` 会拿到 index.html） |
 | **入口文档**（`/`、`/index.html`、`<目录>/`） | **一律交给 wasm**：名单判定在应用自己手里，入口必须由应用把门（否则不在名单里的人只会看到一个空壳页面） |
@@ -334,9 +334,9 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 | --- | --- | --- | --- |
 | `HOST_METHOD_UNKNOWN` | 400 | 调了不存在的宿主函数（方法名拼错，或平台没有这个能力） | 只调上面 §3 表里的八个方法；`details.method` 回显你给的方法名，`hints` 列出可用能力 |
 | （第一层，JSON-RPC 的 `code` 就是 `NOT_FOUND`） | — | 方法名不在封闭清单里时，**运行时**先回一条 JSON-RPC error：`code = "NOT_FOUND"`、`message = "未知的宿主方法: <方法名>"` | **老应用（仍调 `ai.chat`）就是撞在这一层**：它**不会**在发布期被拒（`ai.chat` 从来不是 WASI 导入，平台也不反编译产物），而是运行期第一次调用才失败。迁移见 SKILL.md 的「应用里的 AI」 |
-| `ASSET_DENIED` | 403 | `assets.read` 的包内路径被拒（绝对路径 / `..` / `\` / 控制字符 / 超长 / 符号链接逃逸），或抽取目录异常；**发布期的随包资源名占用 `__picoaide/` 前缀也回这个码**（`details.reason = "reserved_path_prefix"`） | 用相对、以 `/` 分隔的包内逻辑路径；看 `details.reason`（如 `parent_segment`、`symlink_escape`、`reserved_path_prefix`） |
+| `ASSET_DENIED` | 403 | `assets.read` 的包内路径被拒（绝对路径 / `..` / `\` / 控制字符 / 超长）；**发布期的随包资源名占用 `__picoaide/` 前缀也回这个码**（`details.reason = "reserved_path_prefix"`） | 用相对、以 `/` 分隔的包内逻辑路径；看 `details.reason`（如 `parent_segment`、`not_canonical`、`reserved_path_prefix`） |
 | `ASSET_OVERSIZE` | 422 | 单个随包资源超过单文件上限（与自定义段总量同源，见 `references/limits.md`） | 精简资源；HTML/JS 先压缩再内嵌 |
-| `ASSET_EXISTS` | 409 | 发布期抽取要写的资源已存在（抽取只写一次） | 改资源 = 发一个新版本，不要指望覆盖 |
+| `ASSET_EXISTS` | 409 | 同一个资源名在自定义段里出现了两次（重名段只认第一个） | 改资源名或删掉重复的那一份；改内容 = 发一个新版本 |
 
 > 失败码是**可操作**的入口：每个码都带 `message`，多数还带 `details` 与 `hints`。
 > 遇到没见过的码，先看 `hints`，再看 `references/diagnostics.md`。
