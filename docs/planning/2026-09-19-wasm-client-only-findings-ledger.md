@@ -953,5 +953,26 @@ GET /api/server/admin/wasm-apps/opens/summary
 **门禁**：`corepack yarn check` 27/27 通过；`gofmt`/`go vet` 干净；
 `go test ./... -count=1 -p 2`（真 PG）**全绿**；`webadmin` 554 用例通过。
 
+**发版与部署（2026-09-20）**：PR **#107** → 全检查绿（Gate / **Go server 12m36s** / Desktop Linux·Windows·macOS / CodeQL×4）
+→ squash 合并 master **`f197692079`**（版本 2.7.6-beta.8 同步 root + desktop）→ annotated tag **`v2.7.6-beta.8`**
+→ tag CI **success** → GitHub **Pre-release**（`picoaide-server-2.7.6-beta.8-amd64.zip` 510,087,834 B + `SHA256SUMS`）
+→ R2 `beta/latest.json` → 2.7.6-beta.8（`published 08:33:50Z`）。
+
+测试环境（101.42.228.128:/opt/picoaide）：R2 实拉 zip → sha256 `8dddd1ec…` 对 `SHA256SUMS` 一致 → scp → 远端复核
+→ `bash /root/upgrade-beta.sh … beta /opt/picoaide 2.7.6-beta.8 …` → 容器 healthy、镜像 **`beta-2.7.6-beta.8`**、`--version` 一致。
+**回滚点 = `SERVER_IMAGE=picoaide-harness-server:beta-2.7.6-beta.7`**（但见下方认账）。
+端到端核验：`/healthz` ok；manifest `server=client=2.7.6-beta.8`；`channel_id=beta`；
+实拉 `PicoAide-Harness-2.7.6-beta.8-x86_64.AppImage`（153,782,643 B）sha256 与 manifest **逐字一致**；
+解 `resources/app.asar` → `channel_id=beta`、**`home_dir=.picoaide-harness`**、`app_origin_scheme=picoaide-app`，
+且 beta.7 的五个面板字面量全部在产物内（交付的客户端确实是含新面板的那一版）。
+
+**线上实测（这一版真正要证的事）**：容器启动日志
+`appserver: 已清理历史资源目录 /data/apps/hello-picoaide/assets（190 字节）——随包资源已改为内存直出` +
+`wasm: 已清理 8 个历史资源目录（释放 190406 字节）`；数据根 `find apps -maxdepth 2 -name assets` **为空**；
+六个 demo 应用行与生效版本号原样在线（`demo-showcase/25`、`demo-forum/26`、`demo-board/27` 均 enabled）。
+另：部署前先核对过**线上那份演示制品的自定义段**（把容器里的 `showcase.wasm` 取回本地解析）=
+`['go:buildid','producers','index.html','static/app.css','static/app.js']` ⇒ 内存资源集的原料确实在制品里，
+这正是 beta.7 缺的那一环。
+
 **本版认账**：历史资源目录清理只在启动时做一次（失败只记日志）；回滚到 beta.7 必须
 **同时恢复升级前的数据目录备份**（旧版本依赖那个目录），或回滚后重新发布各应用。
