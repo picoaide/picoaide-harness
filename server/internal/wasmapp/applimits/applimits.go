@@ -50,7 +50,13 @@ type Limits struct {
 	// InstanceMemoryMB 是单实例线性内存上限（MiB）。
 	// ⚠️ wazero 的该字段属于 RuntimeConfig ⇒ **保存后需重启服务端生效**。
 	InstanceMemoryMB int `json:"instance_memory_mb"`
-	// ModuleCacheMB 是进程内编译模块缓存上限（MiB）。
+	// ModuleCacheMB 是进程内**编译模块 + 随包资源**缓存上限（MiB）。
+	//
+	// 2026-09-20 起随包资源（wasm 自定义段）不再落盘，改为随版本常驻内存
+	// （决策文档 docs/decisions/2026-09-20-wasm-assets-in-memory.md）⇒ 这笔预算
+	// 同时覆盖"模块编译产物"与"该版本的资源集"。资源集单版本上限 4 MiB
+	// （limits.SectionTotalMaxBytes），条目数与模块缓存同生命周期（LRU + 空闲 TTL +
+	// 应用级逐出），所以它们是同一笔账、不存在"只涨不落"的独立账目。
 	ModuleCacheMB int `json:"module_cache_mb"`
 	// ModuleCacheIdleMin 是编译模块空闲回收时间（分钟）。
 	ModuleCacheIdleMin int `json:"module_cache_idle_min"`

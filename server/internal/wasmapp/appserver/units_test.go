@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/edge"
@@ -145,30 +144,17 @@ func TestAssetETagIncludesAppVersionAndPath(t *testing.T) {
 	}
 }
 
-// ===== releaseAssetID：发布期的目录约定 =====
-
-func TestReleaseAssetID(t *testing.T) {
-	cases := []struct {
-		name string
-		rel  *serverstore.WasmRelease
-		want string
-	}{
-		{"空 assets_dir 用 release id", &serverstore.WasmRelease{ID: 42}, "42"},
-		{"目录名直接用", &serverstore.WasmRelease{ID: 42, AssetsDir: "custom-1"}, "custom-1"},
-		{"绝对路径取 basename", &serverstore.WasmRelease{ID: 42, AssetsDir: "/data/apps/x/assets/7"}, "7"},
-		{"带尾斜杠取 basename", &serverstore.WasmRelease{ID: 42, AssetsDir: "/data/apps/x/assets/7/"}, "7"},
-		{"纯空白回落 id", &serverstore.WasmRelease{ID: 42, AssetsDir: "   "}, "42"},
-		{"点路径回落 id", &serverstore.WasmRelease{ID: 42, AssetsDir: ".."}, "42"},
-	}
-	for _, tc := range cases {
-		if got := releaseAssetID(tc.rel); got != tc.want {
-			t.Fatalf("%s: releaseAssetID = %q，期望 %q", tc.name, got, tc.want)
-		}
-	}
-	if got := releaseAssetID(nil); got != "" {
-		t.Fatalf("nil 版本应返回空串，得到 %q", got)
-	}
-}
+// ===== 发布期目录约定（assets_dir / release id）：**已随内存资源集取消** =====
+//
+// 旧用例 TestReleaseAssetID 断言 `releaseAssetID(rel)`（从 `app_releases.assets_dir`
+// 或版本行 id 推出资源目录名，供 `assets.Open` 打开那个目录）——2026-09-20 起随包资源
+// 改为从 wasm 自定义段 + 库内 config_json 构造的**内存**资源集
+// （docs/decisions/2026-09-20-wasm-assets-in-memory.md）：
+//
+//   - 宿主盘上不再有"按版本抽取的资源目录"，因此没有目录名可推；
+//   - `openAssets` / `releaseAssetID` 两个函数随本次改造一起从 serve.go 删除；
+//   - `app_releases.assets_dir` 列保留（DB schema 不动）但**不再被任何代码读取**
+//     —— 反向断言见 static_test.go 的 TestStatic_AssetsDirColumnIsIgnored。
 
 // ===== 模块缓存（CompiledModule 的淘汰策略与上限）=====
 

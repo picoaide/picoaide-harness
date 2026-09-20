@@ -64,6 +64,34 @@ func main() {
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 
+	// /asset-probe?path=<包内逻辑路径>：走一次宿主 `assets.read` 并把结果原样回吐（JSON）。
+	//
+	// 用途（appserver 的 TestStatic_AssetsReadUsesMemorySet / TestStatic_NoAssetDirectoryOnDisk）：
+	// 证明**应用读资源**（assets.read）与宿主静态直出读的是同一份内存资源集，
+	// 且这条路径同样不会在宿主盘上产生任何目录。
+	if req.Path == "/asset-probe" {
+		probe := req.Query["path"]
+		if probe == "" {
+			probe = "index.html"
+		}
+		raw, rpcErr := hostCall("assets.read", map[string]string{"path": probe})
+		var result any
+		if len(raw) > 0 {
+			result = json.RawMessage(raw)
+		}
+		body, err := json.Marshal(map[string]any{"path": probe, "result": result, "error": rpcErr})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "echoapp: marshal asset probe: %v\n", err)
+			os.Exit(3)
+		}
+		status := 200
+		if rpcErr != nil {
+			status = 500
+		}
+		writeResponse(status, map[string]string{"Content-Type": "application/json; charset=utf-8"}, string(body))
+		return
+	}
+
 	username := ""
 	if req.User != nil {
 		username = req.User.Username
@@ -186,4 +214,48 @@ func writeFrame(payload []byte) error {
 		return err
 	}
 	return out.Flush()
+}
+
+// rpcError 是宿主能力的失败体（与 abi.RPCErrorBody 同形；本模块不 import 平台包）。
+type rpcError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// hostCall 发起一次宿主能力调用（JSON-RPC over stdin/stdout，§7.2）：
+// 写一条 RPC 请求帧 → 读一条 RPC 响应帧。协议层失败直接退出（应用没法继续）。
+func hostCall(method string, params any) (json.RawMessage, *rpcError) {
+	rawParams, err := json.Marshal(params)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "echoapp: marshal %s params: %v\n", method, err)
+		os.Exit(3)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  method,
+		"params":  json.RawMessage(rawParams),
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "echoapp: marshal %s request: %v\n", method, err)
+		os.Exit(3)
+	}
+	if err := writeFrame(payload); err != nil {
+		fmt.Fprintf(os.Stderr, "echoapp: write %s request: %v\n", method, err)
+		os.Exit(3)
+	}
+	respPayload, err := readFrame(stdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "echoapp: read %s response: %v\n", method, err)
+		os.Exit(3)
+	}
+	var resp struct {
+		Result json.RawMessage `json:"result"`
+		Error  *rpcError       `json:"error"`
+	}
+	if err := json.Unmarshal(respPayload, &resp); err != nil {
+		fmt.Fprintf(os.Stderr, "echoapp: parse %s response: %v\n", method, err)
+		os.Exit(3)
+	}
+	return resp.Result, resp.Error
 }

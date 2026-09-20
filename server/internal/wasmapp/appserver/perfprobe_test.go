@@ -2,7 +2,7 @@
 
 package appserver
 
-// 量化探针（**不进常规门禁**）：200 KiB 静态资源的固定成本，改前 vs 改后。
+// 量化探针（**不进常规门禁**）：200 KiB 静态资源的固定成本，无缓存 vs 命中缓存。
 //
 // 复跑：
 //
@@ -12,31 +12,44 @@ package appserver
 //
 // 两条被测量的路径（**同一进程、同一台机器**，因此可比）：
 //
-//	"改前" = assets.Open + loadAppConfig（读盘+解析）+ store.Read(200 KiB) + sha256(200 KiB)
-//	         —— 这正是旧 serveStatic 每请求做的事（先整份读盘、算哈希、再判 If-None-Match）。
-//	"改后" = ServeApp 的完整请求（含 3 次 PG 查询 + 准入 + 缓存命中 + 写头/写体）：
-//	         ① 预热后的 If-None-Match 复验（应 304，且不读盘、不算哈希）
-//	         ② 预热后的普通 200（应从缓存取字节，同样不读盘）
+//	"无缓存" = set.Read(app.js) + sha256(200 KiB) + appcfg.Parse(配置)
+//	         —— 这正是旧 serveStatic 每请求都要付的重复成本。
+//	"改后"  = ServeApp 的完整请求（含 3 次 PG 查询 + 准入 + 缓存命中 + 写头/写体）：
+//	         ① 预热后的 If-None-Match 复验（应 304，且不碰资源集、不算哈希）
+//	         ② 预热后的普通 200（元数据命中 ⇒ 不重算 ETag；正文来自内存资源集）
 //
-// 改前的"整条请求"还包含 PG 三段查询（审计实测 0.919 ms），这里不重复测它 ——
-// 报告里的对比同时在"组件固定成本"这一层做（那是静态路径真正的可变部分）。
+// 2026-09-20 口径变化（决策文档 docs/decisions/2026-09-20-wasm-assets-in-memory.md）：
+// 随包资源不再落盘，`set.Read` 从"读盘 + Lstat 逐段校验"变成内存 map 查找 ——
+// 探针里保留这一段只是为了与 sha256 / 配置解析一起构成"无缓存"基线；
+// 真正的节省项是 **sha256（元数据缓存）** 与 **304 路径完全不碰资源集**。
 
 import (
 	"crypto/sha256"
-	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
 	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
-// TestPerfProbe_StaticFixedCost 打印改前/改后的每请求成本（µs）。
+// moduleSetForTest 取模块缓存里该版本的内存资源集（探针用；取不到即 Fatal）。
+func moduleSetForTest(t *testing.T, e *env, rel *serverstore.WasmRelease) *assets.Set {
+	t.Helper()
+	key := moduleKey{AppID: rel.AppID, Version: rel.Version, ReleaseID: rel.ID}
+	e.srv.modules.mu.Lock()
+	defer e.srv.modules.mu.Unlock()
+	entry, ok := e.srv.modules.items[key]
+	if !ok || entry.set == nil {
+		t.Fatalf("模块缓存里应有该版本的内存资源集: key=%+v", key)
+	}
+	return entry.set
+}
+
+// TestPerfProbe_StaticFixedCost 打印"无缓存基线"与"命中缓存后"的每请求成本（µs）。
 func TestPerfProbe_StaticFixedCost(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short")
@@ -50,66 +63,56 @@ func TestPerfProbe_StaticFixedCost(t *testing.T) {
 	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{"app.js": body}}
 	rel := e.publishApp(spec)
 
-	dir := releaseDirOf(t, e, spec, rel.ID)
-	pagePath := filepath.Join(dir, "app.js")
+	// 预热一次完整请求：把资源集与元数据缓存都建起来。
+	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK {
+		t.Fatalf("预热失败: %d", rec.Code)
+	}
+	set := moduleSetForTest(t, e, rel)
 
-	// ===== 改前：旧 serveStatic 的固定成本（读盘 + 解析 + 读资源 + 算哈希）=====
+	// ===== 无缓存基线：每请求 set.Read + sha256(200 KiB) + 配置解析 =====
 	const iters = 500
-	var openT, cfgT, readT, hashT, oldTotal time.Duration
+	var readT, hashT, cfgT, baseTotal time.Duration
 	for i := 0; i < iters; i++ {
 		start := time.Now()
-		store, aerr := assets.Open(e.root, appID, fmt.Sprintf("%d", rel.ID))
+		_, page, aerr := set.Read("app.js")
 		if aerr != nil {
-			t.Fatalf("assets.Open: %v", aerr)
+			t.Fatalf("set.Read(app.js): %v", aerr)
 		}
 		t1 := time.Now()
-		_, cfgData, aerr := store.Read(limits.AppConfigFileName)
+		_ = sha256.Sum256(page)
+		t2 := time.Now()
+		_, cfgData, aerr := set.Read(limits.AppConfigFileName)
 		if aerr != nil {
-			t.Fatalf("读配置: %v", aerr)
+			t.Fatalf("set.Read(配置): %v", aerr)
 		}
 		if _, perr := appcfg.Parse(cfgData); perr != nil {
 			t.Fatalf("解析配置: %v", perr)
 		}
-		t2 := time.Now()
-		_, page, aerr := store.Read("app.js")
-		if aerr != nil {
-			t.Fatalf("读资源: %v", aerr)
-		}
 		t3 := time.Now()
-		sum := sha256.Sum256(page)
-		_ = sum
-		t4 := time.Now()
-		openT += t1.Sub(start)
-		cfgT += t2.Sub(t1)
-		readT += t3.Sub(t2)
-		hashT += t4.Sub(t3)
-		oldTotal += t4.Sub(start)
+		readT += t1.Sub(start)
+		hashT += t2.Sub(t1)
+		cfgT += t3.Sub(t2)
+		baseTotal += t3.Sub(start)
 	}
 	per := func(d time.Duration) float64 { return float64(d.Microseconds()) / iters }
 
-	// ===== 改后（组件级，不含 PG）：同样的每一段在**缓存命中**下的成本 =====
-	// 与"改前"逐段对拍：仍然是"每请求打开资源目录（平台状态断言）+ 取配置 + 取资源 + 判 ETag"，
-	// 只是配置与资源都从 (app_id, release_id) 级缓存来。
-	var newOpen, newTotal time.Duration
+	// ===== 改后（组件级，不含 PG）：元数据命中下的每一段 =====
+	// 仍然是"取配置 + 取资源 + 判 ETag"，只是配置与元数据都从 (app_id, release_id)
+	// 级缓存来 ⇒ 不再重算 sha256。
+	var newTotal time.Duration
 	for i := 0; i < iters; i++ {
 		start := time.Now()
-		store, aerr := assets.Open(e.root, appID, fmt.Sprintf("%d", rel.ID))
-		if aerr != nil {
-			t.Fatalf("assets.Open: %v", aerr)
-		}
-		t1 := time.Now()
-		rq := e.srv.openReleaseContent(appID, rel, store)
+		rq := e.srv.openReleaseContent(appID, rel, set)
 		if _, cerr := rq.Config(); cerr != nil {
 			t.Fatalf("配置（应命中缓存）: %v", cerr)
 		}
-		a, aerr := rq.Asset("app.js")
+		a, data, aerr := rq.Asset("app.js")
 		if aerr != nil {
-			t.Fatalf("资源（应命中缓存）: %v", aerr)
+			t.Fatalf("资源（应命中元数据缓存）: %v", aerr)
 		}
-		if !etagMatches(`"`+strings.Repeat("0", 32)+`"`, a.ETag) && a.ETag == "" {
-			t.Fatal("缓存里的 ETag 不能为空（304 判据靠它）")
+		if a.ETag == "" || len(data) != len(body) {
+			t.Fatalf("缓存命中的元数据/字节不对: etag=%q len(data)=%d", a.ETag, len(data))
 		}
-		newOpen += t1.Sub(start)
 		newTotal += time.Since(start)
 	}
 
@@ -131,7 +134,7 @@ func TestPerfProbe_StaticFixedCost(t *testing.T) {
 	}
 	revalidate := time.Since(start) / reqIters
 
-	// ===== 改后 ②：预热后的普通 200（正文从缓存取）=====
+	// ===== 改后 ②：预热后的普通 200（元数据命中；正文来自内存资源集）=====
 	start = time.Now()
 	for i := 0; i < reqIters; i++ {
 		rec := e.get(appID, "/app.js")
@@ -142,27 +145,21 @@ func TestPerfProbe_StaticFixedCost(t *testing.T) {
 	serve200 := time.Since(start) / reqIters
 
 	after := e.srv.releases.stats()
-	if after.DiskReads != warm.DiskReads {
-		t.Fatalf("预热后不得再读盘：DiskReads %d → %d", warm.DiskReads, after.DiskReads)
+	if after.SourceReads != warm.SourceReads {
+		t.Fatalf("预热后不得再回源派生元数据：SourceReads %d → %d", warm.SourceReads, after.SourceReads)
 	}
 
 	t.Logf("=== 200 KiB 静态资源固定成本（iters=%d/%d，同机同进程）===", iters, reqIters)
-	t.Logf("改前（旧 serveStatic 的每一段，逐请求都付）:")
-	t.Logf("    assets.Open            %8.1f us", per(openT))
-	t.Logf("    应用配置 读盘+解析       %8.1f us", per(cfgT))
-	t.Logf("    资源读盘 (200 KiB)      %8.1f us", per(readT))
-	t.Logf("    sha256(200 KiB)        %8.1f us", per(hashT))
-	t.Logf("    --------- 合计          %8.1f us", per(oldTotal))
-	t.Logf("改后（同样每一段，缓存命中）:")
-	t.Logf("    assets.Open            %8.1f us", per(newOpen))
-	t.Logf("    应用配置 + 资源（缓存）   %8.1f us", per(newTotal)-per(newOpen))
-	t.Logf("    --------- 合计          %8.1f us   （改前 %.1f us ⇒ %.1fx）",
-		per(newTotal), per(oldTotal), per(oldTotal)/per(newTotal))
-	t.Logf("端到端 ServeApp（**含 3 次 PG 查询 + 准入 + 写头/写体**，这部分与本次修复无关）:")
-	t.Logf("    If-None-Match 复验 304  %8.1f us", float64(revalidate.Microseconds()))
-	t.Logf("    普通 200（缓存字节）     %8.1f us", float64(serve200.Microseconds()))
-	t.Logf("    （二次 DiskReads=%d，即两条路径都不读盘）", after.DiskReads-warm.DiskReads)
-
-	_ = pagePath
-	_ = os.Getpid
+	t.Logf("无缓存基线（旧 serveStatic 每请求都付的重复成本；现在 set.Read 是内存查找）:")
+	t.Logf("    set.Read(app.js)        %8.1f us", per(readT))
+	t.Logf("    sha256(200 KiB)         %8.1f us", per(hashT))
+	t.Logf("    应用配置 读取+解析        %8.1f us", per(cfgT))
+	t.Logf("    --------- 合计           %8.1f us", per(baseTotal))
+	t.Logf("改后（同样每一段，元数据/配置全部命中缓存）:")
+	t.Logf("    配置 + 资源元数据 + 字节   %8.1f us   （无缓存基线的 %.1fx）",
+		per(newTotal), per(baseTotal)/per(newTotal))
+	t.Logf("端到端 ServeApp（**含 3 次 PG 查询 + 准入 + 写头/写体**，这部分与缓存无关）:")
+	t.Logf("    If-None-Match 复验 304   %8.1f us", float64(revalidate.Microseconds()))
+	t.Logf("    普通 200（元数据命中）    %8.1f us", float64(serve200.Microseconds()))
+	t.Logf("    （SourceReads 增量=%d，即两条路径都没有重新派生元数据）", after.SourceReads-warm.SourceReads)
 }

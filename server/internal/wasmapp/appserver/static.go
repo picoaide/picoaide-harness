@@ -97,16 +97,18 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	// ② 需要正文：缓存命中（含字节）⇒ 同样零读盘；只有冷路径才读盘 + 算哈希。
-	// 资源不存在 / 路径非法 / 超限都不是"静态资源命中"，交给 wasm 决定
-	//（应用的 404 页面比宿主代答更准确，且这里绝不能因为一个坏资源就 500）。
-	asset, aerr := rc.Asset(logical)
+	// ② 需要正文：字节来自**内存资源集**（随包资源不再落盘，2026-09-20 定案）。
+	// 元数据（content-type + ETag）命中缓存时不重算 sha256，字节仍是资源集里那份
+	// 共享只读切片 —— 两条路径都不做 IO。
+	// 资源不存在 / 路径非法都不是"静态资源命中"，交给 wasm 决定（应用的 404 页面比
+	// 宿主代答更准确，且这里绝不能因为一个坏资源就 500）。
+	asset, data, aerr := rc.Asset(logical)
 	if aerr != nil {
 		return false
 	}
 	writeStaticHeaders(w.Header(), s.selfOrigin(r), asset)
 
-	// 冷路径的 304：If-None-Match 与刚刚算出的 ETag 比对（此时已经付过读盘代价）。
+	// 冷路径的 304：If-None-Match 与刚刚算出的 ETag 比对（此时已经付过算哈希的代价）。
 	if etagMatches(r.Header.Get("If-None-Match"), asset.ETag) {
 		w.WriteHeader(http.StatusNotModified)
 		return true
@@ -116,7 +118,7 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request,
 	h.Set("Content-Length", strconv.Itoa(asset.Size))
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {
-		_, _ = w.Write(asset.Data)
+		_, _ = w.Write(data)
 	}
 	return true
 }
@@ -231,7 +233,7 @@ func reservedAssetName(p string) bool {
 //
 // 为什么 `..` 段直接判"不静态"而不清洗掉：清洗会把一次穿越尝试变成一次
 // "看起来正常"的读取（`/a/../b` 变成 `/b`），审计上就看不到有人在试探。
-// assets.Store 自己也会拒（纵深防御），这里只是不让它进入静态路径。
+// 内存资源集自己也会拒（纵深防御），这里只是不让它进入静态路径。
 func staticLogicalPath(u *url.URL) (logical string, isEntry bool, ok bool) {
 	if u == nil {
 		return "", false, false

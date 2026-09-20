@@ -470,7 +470,7 @@ func (c *Capabilities) callAssetsRead(ctx context.Context, raw json.RawMessage) 
 	if err != nil {
 		return nil, apperr.From(err)
 	}
-	// 纵深防御：单文件上限与自定义段总量同源（§4.2）；实现方（assets.Store）
+	// 纵深防御：单文件上限与自定义段总量同源（§4.2）；实现方（内存资源集 assets.Set）
 	// 已经拦过一次，这里再拦一次是因为 Assets 是可替换的接口。
 	// 错误码与实现方**同码**（ASSET_OVERSIZE）：同一个条件不能因为"谁先发现"
 	// 而给出两个不同的码（模块 H 审计 FIX-6 的同族问题就是码与现实脱节）。

@@ -129,3 +129,16 @@ func (s *Server) CachedModuleCount() int {
 	entries, _ := s.modules.size()
 	return entries
 }
+
+// CachedCompiledModuleCount 返回**已编译**的缓存条目数（= "模块就绪"的条目数）。
+//
+// 与 CachedModuleCount 的差别（2026-09-20 起才有意义）：条目可以只"资源就绪"——
+// 随包资源集已在内存里、但还没编译（静态直出与 `assets.read` 建的就是这种）。
+// 所以 `CachedModuleCount() == 1` **不能**说明编译发生过；要判"某条路径有没有触发
+// 编译"必须看这个数（例：静态资源直出后它必须仍是 0，入口请求之后必须是 1）。
+func (s *Server) CachedCompiledModuleCount() int {
+	if s == nil || s.modules == nil {
+		return 0
+	}
+	return s.modules.compiledCount()
+}

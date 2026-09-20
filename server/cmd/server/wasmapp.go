@@ -284,6 +284,16 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, dataDir string) *wasmPla
 	if aerr != nil {
 		log.Fatalf("wasm 应用子域管线装配失败：%v", aerr)
 	}
+	// 一次性维护动作：清掉历史遗留的"按版本抽取的资源目录"。
+	//
+	// 2026-09-20 起随包资源改为**内存直出**（决策文档
+	// docs/decisions/2026-09-20-wasm-assets-in-memory.md）：发布期不再把 wasm 自定义段
+	// 抽到 <data_root>/apps/<app_id>/assets/<release_id>/，运行期也不再读它。目录内容是
+	// 纯派生数据（配置权威在库内 config_json、素材在制品字节里），所以启动时清掉，
+	// 免得盘上留着一份没人读的旧内容去误导排障。best-effort：失败只记日志，不影响启动。
+	if dirs, freed := appserver.CleanupLegacyAssetDirs(dataDir, log.Printf); dirs > 0 {
+		log.Printf("wasm: 已清理 %d 个历史资源目录（释放 %d 字节）", dirs, freed)
+	}
 	// 限制项接到运行态：①注入下发钩子（控制台保存后即时生效）
 	// ②首次下发一次（幂等：把档位折算值之外的可热改字段对齐到当前生效值）。
 	//
