@@ -200,7 +200,12 @@ describe('应用中心 · 限制项（原应用平台页）', () => {
     // P1-6 的一部分:管理员要能一眼看出"当前值来自哪个档位/设置"。
     // 服务端的 limitsSourceLabel 是唯一真源(档位名与设置键都住在服务端)。
     expect(screen.getByTestId('limits-source').textContent).toContain('控制台保存（wasm.limits）')
-    expect(screen.getByTestId('limits-source').textContent).toContain('wasm.limits')
+    // P2-2(2026-09-20 本机实测):这里曾经再追加一个 `（{setting_key}）`,而服务端 label
+    // 已经把设置键拼进去了 ⇒ 渲染成「控制台保存（wasm.limits）（wasm.limits）」。
+    // 判据必须是**出现次数**(toContain 对重复显示没有任何牙齿)。
+    const sourceText = screen.getByTestId('limits-source').textContent ?? ''
+    const hits = sourceText.split('wasm.limits').length - 1
+    expect(hits).toBe(1)
   })
 
   it('source_label 缺失时回落旧文案(不显示空白)', async () => {

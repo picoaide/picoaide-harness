@@ -137,3 +137,55 @@ describe('installDeepLinkListener 会话切换防护 (F12)', () => {
     vi.unstubAllGlobals()
   })
 })
+
+describe('深链按 scheme/host 分流（P2-4）', () => {
+  it('应用深链（<scheme>://app/<app_id>）不落 malformed 告警：它归 wasm-apps-host', () => {
+    const { ctx, warns, fire } = stubCtx()
+    const applied: Session[] = []
+    installDeepLinkListener(ctx, (s) => applied.push(s), () => A, SCHEME)
+
+    // 现场形态：员工点同事分享的链接（宿主日志曾出现
+    // `pico-deep-link: ignored malformed deep link` ⇒ 被读成"分享链接是坏的"）。
+    fire(`${SCHEME}://app/shared-notes`)
+    // 带 ?path= 的形态（契约 §5.3）同样不归 auth 监听器。
+    fire(`${SCHEME}://app/shared-notes?path=%2Fdetail`)
+
+    expect(warns).toEqual([])
+    expect(applied).toHaveLength(0)
+  })
+
+  it('别的渠道的应用深链同样静默让行（由 wasm-apps-host 给用户可读提示）', () => {
+    const { ctx, warns, fire } = stubCtx()
+    installDeepLinkListener(ctx, (s) => void s, () => A, SCHEME)
+    fire('otherbrand://app/shared-notes')
+    expect(warns).toEqual([])
+  })
+
+  it('对照：不是登录回调的其它形态仍告警，且带可判别原因', () => {
+    const { ctx, warns, fire } = stubCtx()
+    installDeepLinkListener(ctx, (s) => void s, () => A, SCHEME)
+
+    // ① 本安装 scheme 的未知 host。
+    fire(`${SCHEME}://settings?tab=general`)
+    expect(warns.join('\n')).toContain('not an auth callback: host=settings')
+
+    // ② 别的 scheme 的 auth 回调（桌面壳注错 scheme 的形态）。
+    fire('otherbrand://auth?token=t&server=https%3A%2F%2Fa.example&user=alice')
+    expect(warns.join('\n')).toContain('not our scheme (scheme=otherbrand)')
+
+    // ③ host=auth 但结构不合法（缺 token）—— 与"不是登录回调"是两件事。
+    fire(`${SCHEME}://auth?server=https%3A%2F%2Fa.example&user=alice`)
+    expect(warns.join('\n')).toContain('host=auth without token')
+
+    // ④ 完全解析不了的串。
+    fire('not a url at all')
+    expect(warns.join('\n')).toContain('malformed url')
+  })
+
+  it('http(s) 地址不算应用深链（只有自定义 scheme 才可能是 OS 深链）', () => {
+    const { ctx, warns, fire } = stubCtx()
+    installDeepLinkListener(ctx, (s) => void s, () => A, SCHEME)
+    fire('https://app/shared-notes')
+    expect(warns.join('\n')).toContain('not an auth callback')
+  })
+})

@@ -107,6 +107,8 @@ interface LimitsView {
   guard_percent: number
   restart_fields: string[]
   restart_pending: string[]
+  // setting_key 仍在契约里（GET 响应带它），但**界面不再自己拼它**：设置键已经由
+  // 服务端 source_label 拼好，前端再拼一次就是 P2-2 的重复显示（`（wasm.limits）（wasm.limits）`）。
   setting_key: string
 }
 
@@ -511,11 +513,14 @@ export default function Limits() {
           <div>
             <CardTitle className="text-base">当前配置</CardTitle>
             <CardDescription data-testid="limits-source">
-              {/* 来源直接显示服务端的 source_label（档位名 + 设置键都在服务端拼好）：
-                  前端自己推断"是设置还是档位"就会与服务端出现两套口径。 */}
+              {/* 来源**只**显示服务端的 source_label（档位名 + 设置键都在服务端拼好）：
+                  前端自己推断"是设置还是档位"就会与服务端出现两套口径。
+                  P2-2（2026-09-20 本机实测）：这里曾经再追加一个 `（{setting_key}）`，
+                  而服务端的 label 已经把设置键拼进去了 ⇒ 渲染成
+                  「控制台保存（wasm.limits）（wasm.limits）」。设置键的显示**只有一处
+                  实现**（服务端 limitsSourceLabel）——回落分支也不要再拼一次。 */}
               来源：{view.source_label
                 || (view.source === 'setting' ? '控制台保存' : view.source === 'profile' ? '部署档位（环境变量）' : '默认值')}
-              （{view.setting_key}）
             </CardDescription>
           </div>
           <div className="flex items-center gap-2">

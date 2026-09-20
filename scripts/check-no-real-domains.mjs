@@ -250,7 +250,7 @@ function maskHost(host) {
     .join('.')
 }
 
-/** 合法主机名形状（标签 + 字母 TLD）——用来把畸形语料（`example.123`、`a.com%00`）挡在 URL 判据外。 */
+/** 合法主机名形状（标签 + 字母 TLD）——用来把畸形语料（`example.123`、`example.com%00`）挡在 URL 判据外。 */
 const HOSTNAME_SHAPE = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,24}$/u
 
 /**
@@ -265,7 +265,7 @@ const HOSTNAME_SHAPE = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,24}$/u
 function candidatesInLine(line) {
   const found = []
   for (const match of line.matchAll(URL_AUTHORITY)) {
-    // `/([^\s/?#"'`<>\\|]+)/` 的捕获可能带尾随标点（`(https://x.org)`）、
+    // `/([^\s/?#"'`<>\\|]+)/` 的捕获可能带尾随标点（`(https://example.org)`）、
     // IPv6 方括号、userinfo、端口、百分号编码 —— 逐段收敛到 host。
     let raw = match[1]
     if (raw.startsWith('[')) continue // IPv6 字面量：本守卫只判域名（见头注释的范围声明）
@@ -282,6 +282,11 @@ function candidatesInLine(line) {
     if (!BARE_ALWAYS_TLDS.has(tld)) continue
     if (isIpv4(host)) continue
     if (line[match.index - 1] === '{') continue // 模板插值 `${cfg.org}`：那是变量，不是主机名
+    // 多段**公共后缀**自身不是主机名：本文件的 `MULTI_LABEL_SUFFIXES` 语料逐条列出
+    // `.com.cn`/`.org.cn` 这类两段式后缀，而 `HOST_TOKEN` 会把 `org.cn` 读成
+    // `label=org` + `TLD=cn` ⇒ 守卫扫自己就红了（2026-09-20 实测 EXIT=1）。
+    // 这不是豁免：带真实标签的三段式主机名（`<label>` + 两段后缀）仍照常命中。
+    if (MULTI_LABEL_SUFFIXES.has(host)) continue
     found.push({ host, why: '裸主机名', index: match.index, kind: 'host' })
   }
   return found
@@ -352,6 +357,19 @@ function selfTest() {
   const messageHits = candidatesInText(`deploy: point client at ${syntheticHost}`, 'COMMIT_EDITMSG')
     .filter(hit => !isAllowedCandidate(hit))
   expect(messageHits.length >= 1, '合成提交信息负例未被判红')
+
+  // 负例 5（守 2026-09-20 新加的「多段公共后缀自身不是主机名」跳过规则）：两段式后缀
+  // 本身不再判红（否则守卫扫到自己的 `MULTI_LABEL_SUFFIXES` 语料就红，实测 EXIT=1），
+  // **但带真实标签的三段式主机名必须照旧判红** —— 判据不能靠"新规则看起来只跳过后缀"，
+  // 必须实测两个方向；串一律运行时拼接（与上面同样的理由：源码里不留完整域名）。
+  const cnSuffixBare = ['com', '.cn'].join('')
+  const cnHostBare = ['inn', 'er.', cnSuffixBare].join('')
+  expect(
+    candidatesInLine(`suffix ${cnSuffixBare}`).length === 0,
+    `多段公共后缀自身被误判为主机名：${cnSuffixBare}`,
+  )
+  const cnHits = candidatesInLine(`DOMAIN=${cnHostBare}`).filter(hit => !isAllowedCandidate(hit))
+  expect(cnHits.some(hit => hit.host === cnHostBare), `多段后缀下的三段式主机名被误放过：${cnHostBare}`)
 
   // 正例：白名单域与保留命名空间必须绿（否则守卫会把合法改动拦下来）。
   for (const host of ['harness.example.com', 'app.example.com', 'example.com', 'picoaide.com', 'release.picoaide.com', 'github.com', 'api.github.com', 'registry.npmjs.org', 'api.deepseek.com', 'a.test', 'metadata.google.internal', 'sub.localhost', 'doc.example']) {

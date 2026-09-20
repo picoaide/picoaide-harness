@@ -19,11 +19,19 @@
  * @module @picoaide/dsh-wasm-apps-host/electron-adapter
  */
 
-import { protocol, safeStorage, session } from 'electron'
+import { BrowserWindow, net, protocol, safeStorage, screen, session } from 'electron'
+import type { ClientRequest, Session as ElectronSession } from 'electron'
 // 权限守卫与请求闸门**只有一份实现**（在 browser 包里，§16.1 要求浏览器与应用窗口
 // 共用）；本包通过 workspace 依赖使用它，不再自己写第二份。
 import { ensureSessionGuard, installAppSchemeRequestGate, type NativeSession as NativeGuardSession, type NativeWebRequestSession } from '@picoaide/dsh-browser/guard'
 import { DEFAULT_APP_SCHEME, isValidAppScheme } from './app-protocol.ts'
+// 窗口几何/生命周期/状态文件的**纯逻辑**在 `windows.ts`（无 Electron 依赖，单测覆盖）；
+// 本模块只实现它的原生动作面。类型从那里**再导出**（不复制第二份声明：两份声明
+// 会在"给契约加一个成员"时静默漂移，而漂移的方向是`webContentsId` 之类的闸门判据
+// 在真实适配器上缺席）。
+import { classifyAppWindowNavigation, type AppWindowHandle, type WasmAppsWindowAdapter } from './windows.ts'
+
+export type { AppWindowHandle, WasmAppsWindowAdapter } from './windows.ts'
 
 /** 协议 handler 的形状（Electron `protocol.handle` 的回调）。 */
 export type AppSchemeRequestHandler = (request: Request) => Promise<Response> | Response
@@ -76,35 +84,11 @@ export interface AppSchemeRegistrar {
 /**
  * 应用窗口载体（§16.1「建窗适配器扩 `WasmAppsHostAdapter`」）。
  *
- * 由桌面壳实现（真实 `BrowserWindow`），单测给替身：窗口几何/生命周期/闸门这些
- * "容易写错又难验证"的规则在 `windows.ts` 里是纯逻辑，这里只留原生动作。
+ * **声明在 `windows.ts`**（那里是实现它的纯逻辑的消费者），本模块只 `export type`
+ * 转出去 —— 见文件头的 import 注释。
+ *
+ * @see {@link WasmAppsWindowAdapter}
  */
-export interface WasmAppsWindowAdapter {
-  /** 建窗（几何已按契约算好）。 */
-  createAppWindow(options: {
-    appId: string
-    url: string
-    title: string
-    width: number
-    height: number
-    x: number
-    y: number
-    ratio?: number
-    minimumWidth: number
-    minimumHeight: number
-  }): unknown
-  /** 聚焦并导航（已有窗口）。 */
-  focusAppWindow(handle: unknown, url: string): void
-  /** 关窗。 */
-  closeAppWindow(handle: unknown): void
-  /** 锁定宽高比（`extraSize` = 自绘 chrome 的额外高度）。 */
-  setAspectRatio(handle: unknown, ratio: number, extraSize: { width: number, height: number }): void
-  /** 安装应用面导航闸门（`will-navigate`/`setWindowOpenHandler` + session 级
-   * `onBeforeRequest`，归属 = 应用窗口模块，§16.1）。 */
-  installAppWindowGuards?(handle: unknown, appId: string): void
-  /** 当前显示器工作区（多显示器：每次打开重新求值）。 */
-  workArea?(): { x: number, y: number, width: number, height: number }
-}
 
 /**
  * 桌面壳交给插件的最小 Electron 面。
@@ -156,6 +140,231 @@ export function registerAppScheme(scheme: string = DEFAULT_APP_SCHEME): void {
 }
 
 /**
+ * 同源重定向的最大跳数（跨源**一跳都不跟**，见 {@link createPlatformFetch}）。
+ *
+ * 取 5 是因为平台 API 不该有重定向链：留几跳给"尾斜杠 307""HTTP→HTTPS 同源升级"
+ * 这类正常情况，同时保证畸形/恶意链不会无限循环。
+ */
+export const PLATFORM_FETCH_MAX_REDIRECTS = 5
+
+/**
+ * 平台出站（**唯一实现**）：`net.request`（主进程原始 HTTP 客户端），**不是**
+ * `session.fetch`。
+ *
+ * ## 为什么不能用 `session.fetch`（2026-09-20 真机实测，探针
+ * `temp/appwin/electron-fetch-probe.cjs`）
+ *
+ * 契约 §4.3/§20.2 要求协议 handler 为每个应用请求**合成**
+ * `Origin: <app scheme>://<app_id>`（自定义协议下浏览器不发 Origin，而平台对非幂等
+ * 请求强制校验它）。`session.fetch` 是**浏览器语义**的客户端：请求一旦带 `Origin`
+ * 就被当作跨源请求，Chromium 先发 CORS 预检 `OPTIONS`；平台对该路径没有 OPTIONS
+ * 路由 ⇒ 404 ⇒ 整个请求以 `net::ERR_FAILED` 失败（实测：同头同体下 A/C/D 三种带
+ * Origin 的形态全部 ERR_FAILED，去掉 Origin 才 200/401）。
+ *
+ * 症状极具误导性：**窗口开了、应用页却永远显示"暂时连不上服务端"**，宿主日志只有
+ * 一行 `gateway request for <app> failed (net::ERR_FAILED)`，而服务端访问日志里只有
+ * 一串 `OPTIONS … 404`（没有任何 `POST …/request`）——
+ * 也就是"看起来像网络故障，实际是客户端自己的 CORS 预检"。
+ *
+ * `net.request` 不做 CORS，`Origin` 与自定义头原样送出（同一探针 E 组实测：同样的
+ * 头拿到 401 `AUTH_FAILED`，说明请求真的到达了平台）。仍绑定同一个
+ * `Session`（证书校验策略/代理/缓存都是那个 session 的网络上下文）。
+ *
+ * ## 重定向：**只跟同源**（2026-09-20 审计 P2-2）
+ *
+ * 这条出站通道每次都带 `Authorization: Bearer <员工令牌>` 与
+ * `X-Pico-App-Proof`，而平台 API **没有**任何合法的跨源重定向用途。此前用
+ * `redirect: 'follow'`：一次 302 到别的 host 就把这两件凭据原样送过去（审计实测
+ * `net.request` 与 `session.fetch` **两代都这样** ⇒ 不是本实现引入的回归，但本实现
+ * 有能力关掉它）。现在改成 `redirect: 'manual'` + 在 `redirect` 事件里**同步**判源：
+ *  - 目标 origin 与请求 origin 相同 ⇒ `followRedirect()`（正常同源跳转照旧）；
+ *  - 不同源 / 目标 URL 解析不出来 / 跳数超限 ⇒ **不发第二个请求**，直接以
+ *    `createPlatformFetch: refused a cross-origin redirect …` 拒绝（fail-closed）。
+ *
+ * 响应整体缓冲成 `Response`：本包的三个调用点（协议 handler / 打开校验 / proof 签发）
+ * 全都读 `status` + `text()`/`json()`，没有流式消费；平台侧本身也有 8 MiB 响应上限。
+ * @param target - 出站使用的 session（缺省默认 session）。
+ * @returns 与 `fetch` 同形的出站函数（交给插件做 `adapter.fetch`）。
+ */
+export function createPlatformFetch(target: ElectronSession = session.defaultSession): (url: string, init: RequestInit) => Promise<Response> {
+  return async (url, init) => {
+    const method = (init.method ?? 'GET').toUpperCase()
+    const headers = new Headers(init.headers ?? undefined)
+    const body = requestBodyBytes(init.body)
+    return await new Promise<Response>((resolve, reject) => {
+      const signal = init.signal ?? undefined
+      if (signal?.aborted === true) {
+        reject(signal.reason instanceof Error ? signal.reason : new Error('the request was aborted'))
+        return
+      }
+      let request: ClientRequest
+      try {
+        // methods 之外的选项：`redirect: 'manual'`（**不**让 Chromium 自己跟跳：
+        // 每一次重定向都要过下面的同源判据）、显式 session（证书校验策略/代理仍走该
+        // session 的网络上下文）。
+        request = net.request({ method, url, session: target, redirect: 'manual' })
+      } catch (cause) {
+        reject(cause instanceof Error ? cause : new Error(String(cause)))
+        return
+      }
+      let settled = false
+      let redirects = 0
+      /** 初始 origin：所有被放行的跳都必须留在它上面（跨源一跳都不跟）。 */
+      let origin: string | null
+      try {
+        origin = new URL(url).origin
+      } catch {
+        origin = null
+      }
+      const fail = (cause: unknown): void => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        reject(cause instanceof Error ? cause : new Error(String(cause)))
+      }
+      const onAbort = (): void => {
+        try {
+          request.abort()
+        } catch {
+          // 已经结束的请求 abort 会抛：忽略（结果由 fail() 给出）。
+        }
+        fail(signal?.reason instanceof Error ? signal.reason : new Error('the request was aborted'))
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      request.on('error', fail)
+      request.on('redirect', (status, _method, redirectUrl) => {
+        // 判据唯一实现（`sameOriginRedirect`）：跨源一律 fail-closed，**不** follow。
+        // 目标 URL 解析失败也按跨源处理（"看不懂就不跟"）。
+        if (!sameOriginRedirect(origin, redirectUrl)) {
+          fail(new Error(
+            `createPlatformFetch: refused a cross-origin redirect (${status} ${url} -> ${redirectUrl}): `
+            + 'credentials are never replayed to another origin',
+          ))
+          try {
+            request.abort()
+          } catch {
+            // 同上：abort 的异常不影响已给出的结论。
+          }
+          return
+        }
+        redirects += 1
+        if (redirects > PLATFORM_FETCH_MAX_REDIRECTS) {
+          fail(new Error(`createPlatformFetch: too many redirects (> ${PLATFORM_FETCH_MAX_REDIRECTS})`))
+          try {
+            request.abort()
+          } catch {
+            // 同上。
+          }
+          return
+        }
+        try {
+          // 必须在 `redirect` 事件里**同步**调用（Electron 的契约）：晚一步请求就以
+          // "Redirect was cancelled" 结束。
+          request.followRedirect()
+        } catch (cause) {
+          fail(cause)
+        }
+      })
+      request.on('response', (response) => {
+        const chunks: Buffer[] = []
+        response.on('data', (chunk: Buffer) => { chunks.push(Buffer.from(chunk)) })
+        response.on('error', fail)
+        response.on('end', () => {
+          if (settled) return
+          // **先构造、再置 settled**（2026-09-20 审计 P2-1）：反过来的话
+          // `buildResponse` 抛错时 `settled` 已是 true，`fail()` 直接 return —— promise
+          // 永久 pending，调用方的 AbortSignal 也被摘掉，一次失败被放大成"永不返回"。
+          // 触发面：status ∉ [200,599]（RangeError）或 statusText 含非 0x20–0x7E 字符
+          // （TypeError）。
+          let built: Response
+          try {
+            built = buildResponse(response.statusCode, response.statusMessage, response.headers, Buffer.concat(chunks))
+          } catch (cause) {
+            fail(cause)
+            return
+          }
+          settled = true
+          signal?.removeEventListener('abort', onAbort)
+          resolve(built)
+        })
+      })
+      try {
+        for (const [name, value] of headers) request.setHeader(name, value)
+        if (body !== undefined) request.write(body)
+        request.end()
+      } catch (cause) {
+        fail(cause)
+      }
+    })
+  }
+}
+
+/**
+ * 重定向目标是否与**初始请求**同源（`createPlatformFetch` 的唯一判据）。
+ *
+ * 同源 = 协议 + 主机 + 端口完全一致；相对 `Location`（`/next`）按初始 origin 解析。
+ * 解析失败返回 false（"看不懂就不跟"，fail-closed）。
+ * @param origin - 初始请求的 origin（`new URL(requestUrl).origin`）；null ⇒ 一律 false。
+ * @param redirectUrl - `net.request` 的 `redirect` 事件给出的目标 URL。
+ * @returns 是否可以继续跟随。
+ */
+function sameOriginRedirect(origin: string | null, redirectUrl: unknown): boolean {
+  if (origin === null || typeof redirectUrl !== 'string' || redirectUrl === '') return false
+  try {
+    return new URL(redirectUrl, origin).origin === origin
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 把 `RequestInit.body` 规范成 `ClientRequest.write` 能吃的字节。
+ *
+ * 只支持本包实际用到的三种（JSON 字符串 / `Uint8Array` / `ArrayBuffer`）：流式 body
+ * 会与"整体缓冲响应"的实现假设打架，遇到就直接抛（fail-loud，而不是悄悄丢掉 body
+ * 让平台回一个莫名其妙的 400）。
+ * @param body - `RequestInit.body`。
+ * @returns 字节，或 undefined（无 body）。
+ * @throws 当 body 是不支持的形态时。
+ */
+function requestBodyBytes(body: RequestInit['body']): Buffer | undefined {
+  if (body === undefined || body === null) return undefined
+  if (typeof body === 'string') return Buffer.from(body, 'utf8')
+  if (body instanceof Uint8Array) return Buffer.from(body)
+  if (body instanceof ArrayBuffer) return Buffer.from(new Uint8Array(body))
+  throw new Error('createPlatformFetch: unsupported request body (only string, Uint8Array and ArrayBuffer are supported)')
+}
+
+/**
+ * 用 `net.request` 的响应三元组构造标准 `Response`。
+ *
+ * 逐跳/传输层头必须丢掉：`net.request` 交出来的体**已经解压**，而
+ * `content-encoding`/`content-length`/`transfer-encoding` 描述的仍是线上形态 —— 原样
+ * 带进 `Response` 会让消费者的解码与长度校验对不上（最典型的是 body 被截断或抛
+ * `TypeError: incorrect header check`）。
+ * @param status - HTTP 状态码。
+ * @param statusMessage - HTTP 原因短语（可能为空）。
+ * @param raw - `net.request` 的 `response.headers`（值可能是数组或单串）。
+ * @param body - 已缓冲的响应体。
+ * @returns 标准 `Response`。
+ */
+function buildResponse(status: number, statusMessage: string, raw: Record<string, string | string[]>, body: Buffer): Response {
+  const headers = new Headers()
+  const dropped = new Set(['content-encoding', 'content-length', 'transfer-encoding'])
+  for (const [name, values] of Object.entries(raw)) {
+    if (dropped.has(name.toLowerCase())) continue
+    for (const value of (Array.isArray(values) ? values : [values])) headers.append(name, value)
+  }
+  // 204/304 与空体在 `Response` 构造上语义不同：带 body 会直接抛。
+  const empty = body.length === 0 || status === 204 || status === 304
+  return new Response(empty ? null : new Uint8Array(body), {
+    status,
+    ...(statusMessage === '' ? {} : { statusText: statusMessage }),
+    headers,
+  })
+}
+
+/**
  * 真实 Electron 适配器（默认 session + 任意分区 + Chromium 外出栈）。
  *
  * scheme 是**每次调用**的参数（不是适配器字段）：协议注册与 handler 注册必须用
@@ -182,13 +391,234 @@ export function createRealElectronAdapter(): WasmAppsHostAdapter {
         isAppSurfaceWebContents,
       })
     },
-    fetch: async (url, init) => await session.defaultSession.fetch(url, init),
+    // 出站**不走** `session.fetch`：见 createPlatformFetch 的注释（Origin ⇒ CORS 预检
+    // ⇒ 平台没有 OPTIONS 路由 ⇒ 应用页永远"连不上服务端"）。
+    fetch: createPlatformFetch(),
     // OS 钥匙串（§23.1）：Windows DPAPI / macOS Keychain / Linux libsecret。
     // 不可用时 `isEncryptionAvailable()` 为 false，插件侧回落 0600 明文并记 warn。
     safeStorage: {
       isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
       encryptString: plainText => safeStorage.encryptString(plainText),
       decryptString: encrypted => safeStorage.decryptString(encrypted),
+    },
+  }
+}
+
+/** {@link createRealElectronWindowAdapter} 的构造参数。 */
+export interface RealAppWindowAdapterOptions {
+  /**
+   * 本安装的应用源 scheme（渠道注入，§10/§16.1）。
+   *
+   * 导航闸门按它判"同 app origin"；非法值一律**构造期**抛（fail-loud 比"窗口打开
+   * 后每一个导航都被拒"早得多，也清楚得多）。
+   */
+  appScheme: string
+  /** 诊断出口（拒绝导航 / 加载失败）。缺省丢弃。 */
+  warn?: ((message: string) => void) | undefined
+}
+
+/**
+ * 真实 Electron 应用窗口适配器（W-C 裁决的"独立窗口"原生面，§16.1）。
+ *
+ * 这里**只有原生动作**：几何计算、单应用单窗口、尺寸/比例记忆、状态文件都在
+ * `windows.ts`（纯 Node 可测）。本函数是那条逻辑与 Electron 之间唯一的缝 ——
+ * 所以它自己也要能被离线钉住（`electron-adapter.spec.ts` 用替身 `BrowserWindow`）。
+ *
+ * 冻结条款（逐条对应实现）：
+ *  - **默认 session**：应用协议 handler 与 `onBeforeRequest` 闸门都由插件装在
+ *    **默认 session**（`registerDefault()`）上；应用窗口跟着走同一个 session，
+ *    否则页面直接 `ERR_UNKNOWN_URL_SCHEME`（§16.1「注册面 = 默认 session + 分区」）。
+ *  - **标题不可被页面改写**（§7.2 防伪装）：`page-title-updated` 一律
+ *    `preventDefault()`，窗口标题恒为宿主给的 `<应用名> · <产品名>`。
+ *  - **同 app origin 的导航闸门**：`will-navigate` / `will-frame-navigate` /
+ *    `setWindowOpenHandler` 三处都按 {@link classifyAppWindowNavigation} 判
+ *    （跨 app = 换壳钓鱼 ⇒ 拒；http(s) 外链不在应用窗口导航 ⇒ 拒）。
+ *  - **权限守卫**：建窗前 `ensureSessionGuard()` 显式确保（幂等；Electron 缺 check
+ *    handler 时默认放行 camera/mic）。
+ *  - **存活判据**（`isAlive`）：用户手动关窗后窗口管理器必须**重新建窗**，而不是
+ *    聚焦一个已销毁的句柄（否则第二次 `open` 会回 `focused` 而**屏幕上一个窗口都
+ *    没有**——正是本模块要消灭的那类"契约对、现象空"的缺陷）。
+ * @param options - 应用源 scheme 与诊断出口。
+ * @returns 交给桌面壳 `provide('wasmAppsWindowAdapter', …)` 的适配器实例。
+ * @throws 当 `appScheme` 不是合法应用源 scheme 时。
+ */
+export function createRealElectronWindowAdapter(options: RealAppWindowAdapterOptions): WasmAppsWindowAdapter {
+  const { appScheme } = options
+  if (!isValidAppScheme(appScheme)) {
+    throw new Error(`createRealElectronWindowAdapter: ${JSON.stringify(appScheme)} is not a valid application origin scheme`)
+  }
+  const warn = options.warn ?? ((): void => {})
+  /** 句柄 → 原生窗口。用注册表而不是 `instanceof`：单测的替身也是合法句柄。 */
+  const handles = new WeakMap<object, BrowserWindow>()
+
+  /**
+   * 解析应用窗口要落地的 session（**分区必填**）。
+   *
+   * 为什么在这里 fail-loud：Electron 把空/缺失的 `partition` 当"用默认 session"，
+   * 于是"忘记传分区"这种缺陷的表现是**窗口照常打开**（只是跑在默认 session 上），
+   * 离线单测与真机都看不出来 —— 这正是 2026-09-20 审计的 P1-2。宁可在建窗时抛。
+   * @param partition - 插件按当前用户算出的分区名（`persist:...`）。
+   * @returns 该分区的 Electron session。
+   * @throws 当分区是空串/非字符串时。
+   */
+  const sessionForPartition = (partition: string): ElectronSession => {
+    if (typeof partition !== 'string' || partition === '') {
+      throw new Error('createRealElectronWindowAdapter: an explicit session partition is required for an application window')
+    }
+    return session.fromPartition(partition)
+  }
+
+  /**
+   * 被后续导航顶掉的加载（`ERR_ABORTED`）不是故障。
+   *
+   * 真实序列：`createAppWindow` 发起的 `loadURL('/')` 还没完成，第二次 `open`（聚焦到
+   * `/notes`）就把它顶掉 —— 第一次加载的 promise 以 `ERR_ABORTED (-3)` reject。把它当
+   * "加载失败"记进日志会让诊断包出现一条永远存在的假故障（真机实测踩到）。
+   * @param cause - `loadURL` 的 rejection。
+   * @returns 是否是"被顶掉"。
+   */
+  const supersededLoad = (cause: unknown): boolean => {
+    if (typeof cause !== 'object' || cause === null) return false
+    const record = cause as { code?: unknown, errno?: unknown, message?: unknown }
+    if (record.code === 'ERR_ABORTED' || record.errno === -3) return true
+    return typeof record.message === 'string' && record.message.includes('ERR_ABORTED')
+  }
+  /** 统一的加载失败出口（被顶掉的不记）。 */
+  const reportLoadFailure = (url: string, cause: unknown): void => {
+    if (supersededLoad(cause)) return
+    warn(`pico-wasm-apps-host: loading ${url} in the application window failed (${cause instanceof Error ? cause.message : String(cause)})`)
+  }
+
+  const windowOf = (handle: AppWindowHandle): BrowserWindow | undefined =>
+    (typeof handle === 'object' && handle !== null) ? handles.get(handle) : undefined
+
+  /** 记录一个句柄并返回它（句柄就是 `BrowserWindow` 本身）。 */
+  const remember = (win: BrowserWindow): AppWindowHandle => {
+    handles.set(win, win)
+    return win
+  }
+
+  return {
+    createAppWindow(geometry) {
+      // 分区先解析（非法值在这里就抛，不建窗）：窗口必须落在**插件指定的按用户分区**
+      // 上，既与内置浏览器共用 cookie/存储，又不再与主窗口共享默认 session。
+      const target = sessionForPartition(geometry.partition)
+      const win = new BrowserWindow({
+        width: geometry.width,
+        height: geometry.height,
+        x: geometry.x,
+        y: geometry.y,
+        minWidth: geometry.minimumWidth,
+        minHeight: geometry.minimumHeight,
+        title: geometry.title,
+        // 先开窗（骨架屏），内容随后加载：§19 Q12 的"先开窗再加载"以窗口可见为准。
+        show: true,
+        backgroundColor: '#ffffff',
+        autoHideMenuBar: true,
+        webPreferences: {
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          // 应用窗口在前台/后台都可能被 AI 操作，别让后台节流冻住它。
+          backgroundThrottling: false,
+          // §7.2/R2S-8 冻结：应用窗口复用内置浏览器的**按用户分区**（分区名由插件显式
+          // 传入，适配器不猜用户）。协议 handler / 权限守卫 / 请求闸门都注册在同一个
+          // session 上（插件侧 `ensurePartition`），三处对上才不会出现
+          // `ERR_UNKNOWN_URL_SCHEME` 或"守卫装在一个没人用的 session 上"。
+          partition: geometry.partition,
+          // 兜底：session 与 webPreferences 必须指向同一个分区（`session.fromPartition`
+          // 是幂等的，这里只是把"两者同源"写成断言，防将来有人只改一处）。
+          session: target,
+        },
+      })
+      win.setMenuBarVisibility(false)
+      // 标题恒为宿主给的 `<应用名> · <产品名>`：应用 HTML 的 `<title>` 不得改写它
+      // （否则应用可以伪装成"设置""登录"等宿主界面）。
+      win.on('page-title-updated', (event) => { event.preventDefault() })
+      const handle = remember(win)
+      void win.loadURL(geometry.url).catch((cause: unknown) => { reportLoadFailure(geometry.url, cause) })
+      win.focus()
+      return handle
+    },
+    focusAppWindow(handle, url) {
+      const win = windowOf(handle)
+      if (win === undefined || win.isDestroyed()) return
+      const current = win.webContents.getURL()
+      if (current !== url) {
+        void win.loadURL(url).catch((cause: unknown) => { reportLoadFailure(url, cause) })
+      }
+      // 最小化/隐藏状态下"聚焦"必须先把窗口带回来，否则用户点了打开却什么都没发生。
+      if (win.isMinimized()) win.restore()
+      if (!win.isVisible()) win.show()
+      win.focus()
+    },
+    closeAppWindow(handle) {
+      const win = windowOf(handle)
+      if (win === undefined || win.isDestroyed()) return
+      win.close()
+    },
+    setAspectRatio(handle, ratio, extraSize) {
+      const win = windowOf(handle)
+      if (win === undefined || win.isDestroyed()) return
+      win.setAspectRatio(ratio, extraSize)
+    },
+    installAppWindowGuards(handle, appId) {
+      const win = windowOf(handle)
+      if (win === undefined || win.isDestroyed()) return
+      const contents = win.webContents
+      /**
+       * 导航闸门（**三处事件共用这一份判据**）：顶层与子框架都过
+       * {@link classifyAppWindowNavigation}。
+       * @param event - Electron 事件（`preventDefault` 即取消该次导航）。
+       * @param url - 目标 URL。
+       * @param isMainFrame - 是否顶层文档。
+       */
+      const refuse = (event: { preventDefault: () => void }, url: unknown, isMainFrame: boolean): void => {
+        const verdict = classifyAppWindowNavigation(url, appId, appScheme, isMainFrame)
+        if (verdict.verdict === 'allow') return
+        event.preventDefault()
+        warn(`pico-wasm-apps-host: refused a ${verdict.reason} navigation in an application window (app=${appId})`)
+      }
+      contents.on('will-navigate', (details) => { refuse(details, details.url, details.isMainFrame !== false) })
+      contents.on('will-frame-navigate', (details) => {
+        refuse(details, details.url, details.isMainFrame !== false)
+      })
+      // **重定向也要过同一道闸门**（2026-09-20 审计 P1-1）：`will-navigate` 只覆盖
+      // 发起方直接发起的导航，302/303/307 是**服务端**发起的第二次导航 —— 只挂前两个
+      // 钩子时，一次 302 就能把窗口换到外站或**另一个应用**的 origin（换壳）。时序上
+      // `will-redirect` 在 `will-navigate` 之后、导航真正发生之前触发，
+      // `preventDefault()` 取消的是整个导航（窗口留在原页面）。子框架的重定向同样
+      // 走这里（`details.isMainFrame` 为假时按子框架规则判）。
+      contents.on('will-redirect', (details) => { refuse(details, details.url, details.isMainFrame !== false) })
+      contents.setWindowOpenHandler(() => {
+        // §20.2：应用窗口不得弹窗（外链改走内置浏览器新标签 + 提示条，§19 Q9）。
+        warn(`pico-wasm-apps-host: refused a window.open from an application window (app=${appId})`)
+        return { action: 'deny' }
+      })
+    },
+    ensureSessionGuard(partition) {
+      // 幂等（browser 包按 session 记）；这里再要求一次是**显式**保证：应用窗口可以
+      // 在一张浏览器标签都没开过时创建（深链、应用中心直达）。
+      //
+      // 装的是**应用窗口真正落地的那个分区**（不是默认 session）：默认 session 上
+      // 主窗口装着剪贴板白名单（desktop `electron-runtime.ts`），而 Electron 的
+      // `setPermissionRequestHandler` 是 last-wins —— 装错 session 会一边保护不到应用
+      // 窗口，一边静默废掉主窗口的剪贴板（2026-09-20 审计点名的无判据耦合）。
+      ensureSessionGuard(sessionForPartition(partition) as unknown as NativeGuardSession)
+    },
+    webContentsId(handle) {
+      const win = windowOf(handle)
+      if (win === undefined || win.isDestroyed()) return undefined
+      return win.webContents.id
+    },
+    isAlive(handle) {
+      const win = windowOf(handle)
+      return win !== undefined && !win.isDestroyed()
+    },
+    workArea() {
+      // 每次打开重新求值（多显示器）：鼠标所在显示器的工作区，取不到时回落主显示器。
+      const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea
+      return { x: area.x, y: area.y, width: area.width, height: area.height }
     },
   }
 }

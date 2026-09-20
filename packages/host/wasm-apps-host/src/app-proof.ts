@@ -13,10 +13,29 @@
  *
  * 每次签发（Bearer + 安装签名）：
  *   POST /api/client/v2/apps/wasm/proof
- *   body {install_id, public_key, nonce, ts, server_url, signature}
- *   signature = Ed25519.sign(canonicalJson({nonce, ts, server_url, install_id}))
+ *   body {install_id, public_key, nonce, ts, signature, app_id}
+ *   signature = Ed25519.sign(installMessage(install_id, nonce, ts, serverURL))
  *   → {proof, expires_at}
  * ```
+ *
+ * ## 线格式的真源在服务端（**2026-09-20 血案，别再漂移**）
+ *
+ * 上面那行 body 与 `installMessage` 的**字节**不是本模块的自由选择：它们是冻结的
+ * 跨端线格式，真源 = `server/internal/wasmapp/appproof/proof.go` 的
+ * `InstallMessage`（五段 `"\n"` 连接、末尾无换行）与
+ * `server/internal/wasmapp/api/proof.go` 的 `appProofIssue`（`DisallowUnknownFields`
+ * 的解码结构体）。四条曾经**同时**漂移、导致真实客户端 100% 打不开任何应用：
+ *
+ *  1. body 里多带 `server_url` ⇒ 未知字段 ⇒ 400 `VALIDATION`（decode_failed）；
+ *  2. body 里少 `app_id` ⇒ 400 `INVALID_APP_ID`（它是 proof 绑定的输入，**必填**）；
+ *  3. 签名覆盖的是"键排序的 JSON"而不是五段消息 ⇒ 401 `proof_mismatch`
+ *     （`signature_invalid`）；
+ *  4. `public_key` 发的是 SPKI DER（44 字节）而不是**原始 32 字节** Ed25519 ⇒ 同样
+ *     落到 `signature_invalid`（服务端 `decodePublicKey` 只收 32 字节）。
+ *
+ * 后果不是"少一个功能"：签发永远失败 ⇒ 请求上没有 `X-Pico-App-Proof` ⇒ 平台对
+ * `open`/`request` 回 401 `proof_required`。判据见 `app-proof.spec.ts` 的跨端对拍
+ * （直接读 Go 源码的 `InstallMessage` 拼装）与 `installMessageBytes()` 的逐字节断言。
  *
  * 本模块**只做客户端该做的一半**：密钥的生成/存放/读取、惰性签发、缓存、失效与
  * 切换账号时的清理。服务端的公钥注册与验签在 `server/internal/wasmapp`（L1）。
@@ -53,6 +72,14 @@ const ASSUMED_PROOF_TTL_MS = 15 * 60_000
 
 /** 提前续签窗口：剩余寿命少于它就先续（避免"刚好在请求中途过期"）。 */
 const RENEW_BEFORE_MS = 60_000
+
+/**
+ * 内存里同时保留的 proof 张数上限（按 app_id 分格，界内 LRU）。
+ *
+ * 每格是一条 15 min 的凭据；应用数量没有上限，界存在的意义与宿主令牌表
+ * （`HOST_PROOF_MAX_PENDING`）相同：把"逛遍应用中心"的内存占用钉成常数。
+ */
+const APP_PROOF_CACHE_MAX = 64
 
 /** 安装密钥文件的版本（将来换形态时用来拒绝旧文件，而不是猜）。 */
 const INSTALL_KEY_VERSION = 1
@@ -101,30 +128,108 @@ export function generateInstallKey(): { installId: string, privateKeyPem: string
 }
 
 /**
- * 对"签发载荷"签名（§23.1：`{nonce, ts, serverURL, install_id}`）。
+ * 安装签名**待签消息**的前缀（与 Go `appproof.InstallMessagePrefix` **逐字**一致）。
  *
- * 规范化 JSON 是**跨端契约的一部分**：键按字典序、无空格，服务端必须用同一条
- * 规则重建字节串再验签（两端各有一份实现，`app-proof.spec.ts` 钉住形状）。
+ * 它是线格式的一部分（改它 = 让所有在手客户端签不出有效证明），跨端对拍用例
+ * 直接读 Go 源码的常量来钉住它。
+ */
+export const INSTALL_MESSAGE_PREFIX = 'appproof-install-v1'
+
+/** 安装签名待签消息的输入（四段 + 固定前缀 = 五段）。 */
+export interface InstallMessageInput {
+  /** 稳定安装标识。 */
+  installId: string
+  /** 一次性 nonce（base64/hex 均可，服务端只要求 ≤128 字节的非空串）。 */
+  nonce: string
+  /** **unix 秒**（不是毫秒：服务端按 `time.Unix(ts, 0)` 做 ±5 min 漂移判定）。 */
+  ts: number
+  /** 规范服务端地址（见 {@link proofServerURL}）。 */
+  serverURL: string
+}
+
+/**
+ * 拼装安装签名的待签**字节**（跨端线格式的**唯一**实现）。
+ *
+ * 与服务端 `appproof.InstallMessage` 逐字节相同：五段用 `"\n"` 连接、**末尾无换行**。
+ * 写成数组 join 而不是模板串，是为了让"少一段/多一个尾换行"这种漂移在测试里逐字节
+ * 可见（服务端验签失败只回一个笼统的 `signature_invalid`，真机极难定位）。
+ * @param input - 四段载荷。
+ * @returns 待签字节。
+ */
+export function installMessageBytes(input: InstallMessageInput): Buffer {
+  return Buffer.from([
+    INSTALL_MESSAGE_PREFIX,
+    input.installId,
+    input.nonce,
+    String(input.ts),
+    input.serverURL,
+  ].join('\n'), 'utf8')
+}
+
+/**
+ * 把会话里的服务端地址归一成**服务端自己算出的那个绑定值**。
+ *
+ * 服务端的绑定值来自 `appproof.ServerURL(r)` = `edge.NormalizeOrigin(scheme://r.Host)`
+ * —— 小写 scheme、主机小写、**默认端口省略**、无路径、无尾斜杠。客户端必须签同一个
+ * 字符串，否则签名与绑定都对不上（而且失败信息只有 `signature_invalid`）。
+ *
+ * 归一化前客户端签的是"用户输入原文"：`https://host/` 这样的地址会直接签出无效证明
+ * （服务端算出来是 `https://host`）。`new URL().origin` 与 Go 的 `originHostPort`
+ * 同口径（默认端口省略、非法形态返回空串）。
+ * @param serverURL - 会话里的服务端地址（未归一）。
+ * @returns 规范 origin；不是 http(s) 或无法解析 ⇒ `''`（调用方按"拿不到 proof"处理）。
+ */
+export function proofServerURL(serverURL: string): string {
+  try {
+    const url = new URL(serverURL.trim())
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return ''
+    return url.origin
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 对"安装签发载荷"签名（§23.1：`{nonce, ts, serverURL, install_id}`）。
+ *
+ * 覆盖的字节由 {@link installMessageBytes} 决定（**不是** JSON）——服务端用同一份
+ * 拼装验签，两边各写一份会让所有客户端静默签不出有效证明。
  * @param privateKeyPem - 安装私钥（PKCS#8 PEM）。
- * @param payload - 四个字段（`serverURL` 是服务端地址原文，不做归一化）。
+ * @param payload - 四段载荷。
  * @returns base64 签名。
  */
 export function signInstallPayload(
   privateKeyPem: string,
-  payload: { nonce: string, ts: number, serverURL: string, installId: string },
+  payload: InstallMessageInput,
 ): string {
-  const canonical = JSON.stringify({
-    install_id: payload.installId,
-    nonce: payload.nonce,
-    server_url: payload.serverURL,
-    ts: payload.ts,
-  })
-  return edSign(null, Buffer.from(canonical, 'utf8'), createPrivateKey(privateKeyPem)).toString('base64')
+  return edSign(null, installMessageBytes(payload), createPrivateKey(privateKeyPem)).toString('base64')
 }
 
 /** 由私钥推出公钥（SPKI DER base64）——用来校验落盘文件自洽（自检，§23.1）。 */
 export function publicKeyOf(privateKeyPem: string): string {
   return createPublicKey(createPrivateKey(privateKeyPem)).export({ type: 'spki', format: 'der' }).toString('base64')
+}
+
+/**
+ * 由私钥推出**线上形态**的公钥：原始 32 字节 Ed25519，base64（标准字母表、带 padding）。
+ *
+ * 为什么不是 {@link publicKeyOf}（SPKI DER，44 字节）：服务端 `decodePublicKey` 只接受
+ * `len(b) == ed25519.PublicKeySize`（32）。发 SPKI 会被判"长度 44，want 32"并**误报**成
+ * `signature_invalid`（`ErrMalformed` 落到 `proofIssueError` 的 default 分支），真机只看到
+ * "安装签名校验失败"，完全指不到公钥编码。
+ *
+ * 落盘的密钥文件仍然存 SPKI（{@link StoredInstallKey.publicKey}，自检用），线格式在这里
+ * 现推 —— 换编码不改密钥文件 schema，老机器的密钥文件不用重建。
+ * @param privateKeyPem - 安装私钥（PKCS#8 PEM）。
+ * @returns base64（32 字节原始公钥）。
+ */
+export function rawPublicKeyOf(privateKeyPem: string): string {
+  const jwk = createPublicKey(createPrivateKey(privateKeyPem)).export({ format: 'jwk' }) as { x?: unknown }
+  const x = jwk.x
+  if (typeof x !== 'string' || x === '') throw new Error('app-proof: the install key has no Ed25519 public component')
+  const raw = Buffer.from(x, 'base64url')
+  if (raw.byteLength !== 32) throw new Error(`app-proof: the install public key is ${String(raw.byteLength)} bytes, want 32`)
+  return raw.toString('base64')
 }
 
 /** 安装密钥是否自洽（私钥可读且公钥对得上）。 */
@@ -208,14 +313,23 @@ export function createInstallKeyStore(options: InstallKeyStoreOptions): InstallK
   }
 }
 
-/** 签发一次 proof 的载荷（客户端生成 nonce：一次性、绑本次签发请求）。 */
+/**
+ * 签发一次 proof 的请求体（**线格式**：字段集与 `server/internal/wasmapp/api/proof.go`
+ * 的 `appProofIssue` 解码结构体逐字一致）。
+ *
+ * 该端点是 `DisallowUnknownFields` 解码：**多一个字段就 400**（曾经的 `server_url`
+ * 就是这么挂掉的），**少 `app_id` 也 400**（它必填，且是 proof 绑定的输入）。
+ */
 export interface AppProofRequest {
   install_id: string
+  /** **原始 32 字节** Ed25519 公钥的 base64（见 {@link rawPublicKeyOf}；不是 SPKI）。 */
   public_key: string
   nonce: string
+  /** unix **秒**（服务端按秒做 ±5 min 漂移判定）。 */
   ts: number
-  server_url: string
   signature: string
+  /** proof 绑定的应用（服务端把它写进 Claims.App；跨应用使用会被判 proof_mismatch）。 */
+  app_id: string
 }
 
 /** 签发结果（服务端响应；未知字段在这里被收紧）。 */
@@ -244,12 +358,17 @@ export interface AppProofProviderDeps {
 /** proof 提供者：惰性签发 + 内存缓存 + 失效重签。 */
 export interface AppProofProvider {
   /**
-   * 取一个可用的 proof（未登录 ⇒ null；签发失败 ⇒ null 并记 warn，调用方按
+   * 取一个可用于 `appId` 的 proof（未登录 ⇒ null；签发失败 ⇒ null 并记 warn，调用方按
    * "没有 proof"处理，**不**把失败变成异常打断应用页面）。
+   *
+   * `appId` 是**必填**参数而不是可选项：服务端把 proof 绑到 app_id 上（R2S-2/N2），
+   * 一张 proof 只能用于那一个应用。签名必须覆盖 `app_id`，缓存也必须按 app_id 分格
+   * —— 共用一张会让第二个应用的请求必吃 401 `proof_mismatch`。
+   * @param appId - 本次调用要访问的应用。
    * @param force - true 时忽略缓存（401 重签用）。
    */
-  get(force?: boolean): Promise<string | null>
-  /** 丢弃内存里的 proof（401 / 切换账号 / 切服务端时调用）。 */
+  get(appId: string, force?: boolean): Promise<string | null>
+  /** 丢弃内存里的全部 proof（401 / 切换账号 / 切服务端时调用）。 */
   invalidate(): void
   /** 启动期自检：私钥可读 + 公钥自洽（§23.1；失败 ⇒ 应用功能不可用并给可读原因）。 */
   selfCheck(): Promise<{ ok: true } | { ok: false, reason: string }>
@@ -292,12 +411,17 @@ export function createAppProofProvider(deps: AppProofProviderDeps): AppProofProv
   const now = deps.now ?? ((): number => Date.now())
   const warn = deps.warn ?? ((): void => {})
   const nonce = deps.randomNonce ?? ((): string => randomBytes(32).toString('hex'))
-  /** 内存里的 current proof（**只有内存**，§20.1：不落盘）。 */
-  let cached: AppProofResponse | null = null
-  /** 缓存对应的 (token, serverURL)：切换账号/服务端即失效（§23.1 切换口径）。 */
-  let cachedFor: { token: string, serverURL: string } | null = null
-  /** 并发单飞：同一时刻只发一次签发请求（首个应用请求常有多条并行子资源）。 */
-  let inFlight: Promise<string | null> | null = null
+  /**
+   * 内存里的 current proof，**按 app_id 分格**（**只有内存**，§20.1：不落盘）。
+   *
+   * 为什么必须分格：服务端把 proof 绑到 `app_id`（`Claims.App`），跨应用使用被判
+   * `proof_mismatch`。共用一张 = 第二个应用必然 401。
+   * 为什么有界：应用数量没有上限，而每格是一条 15 min 的凭据 —— 界内 LRU 保证
+   * "逛遍整个应用中心"不会把内存变成一张无界的凭据表。
+   */
+  const cached = new Map<string, { proof: string, expiresAt: number, token: string, serverURL: string }>()
+  /** 并发单飞：同一 app 同一时刻只发一次签发请求（首个应用请求常有多条并行子资源）。 */
+  const inFlight = new Map<string, Promise<string | null>>()
   let cachedKey: StoredInstallKey | null = null
 
   const loadKey = async (): Promise<StoredInstallKey> => {
@@ -315,36 +439,51 @@ export function createAppProofProvider(deps: AppProofProviderDeps): AppProofProv
     return created
   }
 
-  const issue = async (force: boolean): Promise<string | null> => {
+  /**
+   * 签发一张绑定 `appId` 的 proof（缓存命中直接返回）。
+   * @param appId - 目标应用（服务端按它绑定；不能再共用）。
+   * @param force - true 时忽略缓存（401 重签）。
+   * @returns proof，或 null（未登录/地址不可归一/签发失败，原因见 warn）。
+   */
+  const issue = async (appId: string, force: boolean): Promise<string | null> => {
     const session = deps.session()
     if (session === null) return null
+    // 绑定值必须与**服务端算出来的那个字符串**逐字相同（见 proofServerURL）。
+    const serverURL = proofServerURL(session.serverURL)
+    if (serverURL === '') {
+      warn('pico-wasm-apps-host: the configured server address is not a usable http(s) origin; no app proof can be issued')
+      return null
+    }
     const instant = now()
+    const hit = cached.get(appId)
     if (!force
-      && cached !== null
-      && cachedFor !== null
-      && cachedFor.token === session.token
-      && cachedFor.serverURL === session.serverURL
-      && usable(cached.expiresAt, instant)) {
-      return cached.proof
+      && hit !== undefined
+      && hit.token === session.token
+      && hit.serverURL === serverURL
+      && usable(hit.expiresAt, instant)) {
+      return hit.proof
     }
     const key = await loadKey()
-    const ts = instant
+    // **unix 秒**：服务端按 `time.Unix(ts, 0)` 判 ±5 min 漂移，发毫秒会被判
+    // proof_expired（差值 1000 倍，且提示只会说"时钟漂移"）。
+    const ts = Math.floor(instant / 1000)
     // nonce 只取一次，签名与请求体共用它：两处各取一次随机数会让签名与载荷
     // 不一致（服务端 100% 拒签，且症状极难查）。
     const oneTimeNonce = nonce()
     const signature = signInstallPayload(key.privateKeyPem, {
       nonce: oneTimeNonce,
       ts,
-      serverURL: session.serverURL,
+      serverURL,
       installId: key.installId,
     })
     const request: AppProofRequest = {
       install_id: key.installId,
-      public_key: key.publicKey,
+      // 线上形态是**原始 32 字节**公钥（不是落盘的 SPKI）。
+      public_key: rawPublicKeyOf(key.privateKeyPem),
       nonce: oneTimeNonce,
       ts,
-      server_url: session.serverURL,
       signature,
+      app_id: appId,
     }
     let response: Response
     try {
@@ -363,6 +502,8 @@ export function createAppProofProvider(deps: AppProofProviderDeps): AppProofProv
     }
     if (!response.ok) {
       // 只记状态码：响应体可能带服务端诊断，但这里**不记录**任何 token/proof。
+      // 400 是最常见的一种（body 形状与 `appProofIssue` 的解码结构体不一致）——
+      // 这条 warn 是那次漂移唯一的现场，别把它降级成 debug。
       warn(`pico-wasm-apps-host: the platform refused to issue an app proof (${String(response.status)})`)
       return null
     }
@@ -371,23 +512,31 @@ export function createAppProofProvider(deps: AppProofProviderDeps): AppProofProv
       warn('pico-wasm-apps-host: the app proof response was malformed')
       return null
     }
-    cached = parsed
-    cachedFor = { token: session.token, serverURL: session.serverURL }
+    // 界内 LRU：先删后写让"刚用过的那格"排到队尾（Map 的 set 对已存在的键**不**改插入序），
+    // 超上限时淘汰队首（与 host-request 的令牌表同一口径）。先删再判上限，避免
+    // "重签的正是最旧那一格"时把自己淘汰掉、白丢一张刚签好的证明。
+    cached.delete(appId)
+    while (cached.size >= APP_PROOF_CACHE_MAX) {
+      const oldest = cached.keys().next()
+      if (oldest.done === true) break
+      cached.delete(oldest.value)
+    }
+    cached.set(appId, { proof: parsed.proof, expiresAt: parsed.expiresAt, token: session.token, serverURL })
     return parsed.proof
   }
 
   return {
-    async get(force = false) {
-      if (inFlight !== null && !force) return await inFlight
-      const pending = issue(force).finally(() => {
-        if (inFlight === pending) inFlight = null
+    async get(appId, force = false) {
+      const pending = inFlight.get(appId)
+      if (pending !== undefined && !force) return await pending
+      const task = issue(appId, force).finally(() => {
+        if (inFlight.get(appId) === task) inFlight.delete(appId)
       })
-      inFlight = pending
-      return await pending
+      inFlight.set(appId, task)
+      return await task
     },
     invalidate() {
-      cached = null
-      cachedFor = null
+      cached.clear()
     },
     async selfCheck() {
       try {

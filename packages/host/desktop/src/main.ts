@@ -20,13 +20,14 @@ import {
 // 客户端专属 WASM 应用 origin：协议特权注册（whenReady 之前）+ 交给插件的
 // Electron 适配器。子路径 `electron-adapter` 是唯一静态 import electron 的模块，
 // 插件主体（`@picoaide/dsh-wasm-apps-host`）保持纯 Node 可加载。
-import { createRealElectronAdapter, registerAppScheme } from '@picoaide/dsh-wasm-apps-host/electron-adapter'
+import { createRealElectronAdapter, createRealElectronWindowAdapter, registerAppScheme } from '@picoaide/dsh-wasm-apps-host/electron-adapter'
 import {
   WASM_APPS_HOST_ADAPTER_SERVICE,
   WASM_APPS_INSTALL_KEY_SERVICE,
 } from '@picoaide/dsh-wasm-apps-host'
 import { createInstallKeyStore } from '@picoaide/dsh-wasm-apps-host/app-proof'
 import { provideAppAiRunner } from './app-ai-runner.ts'
+import { provideWasmAppsWindows } from './wasm-apps-windows.ts'
 import { applyInstallDshHome, isSystemWorkingDirectory } from './desktop-home.ts'
 import { desktopUserDataDirectoryName } from './desktop-user-data.ts'
 import { desktopProductVersion, ElectronDesktopRuntime } from './electron-runtime.ts'
@@ -348,6 +349,10 @@ async function start(): Promise<void> {
       homeDir,
       process.platform,
       pluginManagementStatePath,
+      // 应用窗口的几何记忆与缓存落点（§16.1：`<userData>/wasm-apps-windows.json`）。
+      // 必须显式注入：插件在纯 Node 宿主里无从得知 userData，缺席时窗口管理器
+      // **整个不构造**（`index.ts` 的 `userDataDir === undefined` 分支）。
+      app.getPath('userData'),
     )
     const releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
     // Electron does not patch `child_process.spawn`/`spawnSync` for asar paths
@@ -376,6 +381,19 @@ async function start(): Promise<void> {
         // 交给插件：`provide` 发生在 boot 的 prepare 回调里，**早于** profile 树的
         // 任何插件 apply（dsh-app-boot 的 boot(): prepare → mountRootInclude）。
         hostCtx.provide(WASM_APPS_HOST_ADAPTER_SERVICE, createRealElectronAdapter())
+        // 应用窗口载体（§16.1 W-C「独立窗口」）：没有它，"打开应用"只会广播一个
+        // 零消费者的事件然后回 `opened` —— 现象就是"点打开什么都没发生"。
+        // scheme 与特权注册同源（`APP_ORIGIN_SCHEME`，模块作用域的渠道值）：
+        // 导航闸门按它判"同 app origin"，传错即每个导航都被拒。
+        provideWasmAppsWindows(
+          hostCtx,
+          createRealElectronWindowAdapter({
+            appScheme: APP_ORIGIN_SCHEME,
+            // 窗口诊断（拒绝导航/window.open、加载失败）走桌面日志：这类事件在
+            // 真机上只有日志能看见（渲染进程看不到宿主侧的原生拒绝）。
+            warn: message => { electronLogger.error(message) },
+          }),
+        )
         // 安装密钥仓库（§23.1）：私钥进 OS 钥匙串（`safeStorage`），无钥匙串时
         // 0600 明文 + 启动 warn（认账 §17）。proof 本身**不落盘**，只有这对密钥落盘。
         hostCtx.provide(
