@@ -1,6 +1,6 @@
 /**
  * 补丁守卫：`@deepseek-ai/dsh-sandbox-windows-acl` 的 **DACL 写入被拒时必须给出
- * 可行动的原因**（见 `patches/dsh-sandbox-windows-acl@0.1.5-rc.2.patch`）。
+ * 可行动的原因**（见 `patches/dsh-sandbox-windows-acl@<pin>.patch`）。
  *
  * 背景（2026-09-17，用户提供的 Windows 自检报告，客户端 2.7.5-beta.4，工作区
  * `D:\project\urlfy`）：默认「工作区内修改」权限下连 `pwsh` 跑 `hello` 都起不来，
