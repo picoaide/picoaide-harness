@@ -425,6 +425,61 @@ describe('本地路由：装配、方法分发、写面持有性证明', () => {
     expect(h.outbound).toHaveLength(0)
   })
 
+  it('作者数据面 GET 也要求持有性证明（unmask 不得被本机伪造 Origin 的 curl 读到）', async () => {
+    // P1-②（2026-09-21 独立审计）：`rows` 是**唯一**返回使用者数据的只读后缀，
+    // 且 `?unmask=1` 直接给原值。它曾与 schema/diagnostics 同走 `guard()`，而
+    // `guard()` 自述"伪造 Origin 的 curl 也能过" ⇒ 模型一条 curl 就能把 PII 读走。
+    // 判据三条，缺一不可：
+    //   ① 无 cookie 的 rows 请求 ⇒ 403 且**零出站**（不是"转发后被服务端拒"）；
+    //   ② 同一请求带真页面 cookie ⇒ 200 且查询串（含 unmask=1）逐字转发；
+    //   ③ 其余只读后缀（schema）同一无 cookie 形态下照常放行 —— 围栏只加在
+    //      "含使用者数据"的那一条上，不能顺手把作者自己的诊断面也锁死。
+    const h = harness(() => json(200, { rows: [] }))
+    const bare = await h.call(`${WASM_APPS_PREFIX}/demo-tool/rows?table=notes&unmask=1`, 'GET', undefined, { cookie: null })
+    expect(bare.code).toBe(403)
+    expect(String(bare.body.error)).toContain('proof')
+    expect(h.outbound).toHaveLength(0)
+
+    const withProof = await h.call(`${WASM_APPS_PREFIX}/demo-tool/rows?table=notes&unmask=1`)
+    expect(withProof.code).toBe(200)
+    expect(h.outbound).toHaveLength(1)
+    expect(h.outbound[0]!.url).toBe(
+      'https://harness.example/api/client/v2/apps/wasm/demo-tool/rows?table=notes&unmask=1',
+    )
+
+    const schema = await h.call(`${WASM_APPS_PREFIX}/demo-tool/schema`, 'GET', undefined, { cookie: null })
+    expect(schema.code).toBe(200)
+    expect(h.outbound).toHaveLength(2)
+  })
+
+  it('只有白名单后缀会转发查询串（其余路由不得把 query 带出站）', async () => {
+    // P2-⑤（2026-09-21 独立审计的实跑变异）：把查询串转发从"只给 rows"扩到任意
+    // 路由（含 DELETE / publish / unpublish / freeze）时，既有 62 条用例**全绿**
+    // —— 也就是"query 转发白名单"这条不变量此前零防线。
+    // 判据：非白名单路由带 `?search=…` 出站时 URL 里**不得**出现 `?`。
+    // ⚠️ 每条非白名单调用**必须自带查询串**：不带 `?` 时这条断言恒真（第一版就是
+    // 这样写的，变异实跑 64/64 全绿 = 假绿）。判据要能被打坏，输入就得带上被禁的东西。
+    const h = harness(() => json(200, { ok: true }))
+    // 非白名单 GET（未知后缀 / 未知应用段 / 目录）：一律不出站，查询串无从泄漏。
+    expect((await h.call(`${WASM_APPS_PREFIX}/demo-tool/bogus?search=x`)).code).toBe(404)
+    expect((await h.call(`${WASM_APPS_PREFIX}?search=x`)).code).toBe(200) // 目录 GET 合法
+    expect(h.outbound).toHaveLength(1)
+    expect(h.outbound[0]!.url).toBe('https://harness.example/api/client/v2/apps/wasm/catalog')
+    // 写面 POST / DELETE 与诊断面 GET：查询串**不得**出站。
+    await h.call(`${WASM_APPS_PREFIX}/demo-tool?search=x`, 'DELETE')
+    await h.call(`${WASM_APPS_PREFIX}/demo-tool/publish?search=x`, 'POST', '{}')
+    await h.call(`${WASM_APPS_PREFIX}/demo-tool/unpublish?search=x`, 'POST', '{}')
+    await h.call(`${WASM_APPS_PREFIX}/demo-tool/freeze?search=x`, 'POST', '{}')
+    await h.call(`${WASM_APPS_PREFIX}/validate?search=x`, 'POST', '{}')
+    for (const o of h.outbound.slice(1)) expect(o.url).not.toContain('?')
+    // 白名单后缀**必须**保留查询串（rows 的 table/limit/offset/unmask 全是服务端判据）；
+    // 四个只读后缀共用同一条转发路径，因此这里同时钉住"白名单整条都带 query"。
+    for (const suffix of ['rows', 'schema', 'diagnostics', 'export', 'releases']) {
+      await h.call(`${WASM_APPS_PREFIX}/demo-tool/${suffix}?search=x`)
+      expect(h.outbound.at(-1)!.url).toContain('?search=x')
+    }
+  })
+
   it('validate 代理到服务端 validate（POST + Bearer）', async () => {
     const h = harness(() => json(200, { ok: true, imports: [] }))
     const res = await h.call(`${WASM_APPS_PREFIX}/validate`, 'POST', JSON.stringify({ wasm_base64: 'AA==' }))

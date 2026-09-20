@@ -72,12 +72,16 @@
 // （`VerifyCacheEntry`）。审计指出这条的失败形态是"看起来有校验、其实没有"，
 // 因此改为**可执行的两件事**：
 //
-//  1. **形状校验（已实现）**：`VerifyCacheDirTrust(dir)` 逐项校验缓存目录树 ——
+//  1. **形状校验（已实现）**：`cachetrust.Verify(dir)` 逐项校验缓存目录树 ——
 //     根与各级子目录必须是真实目录（不是符号链接）、权限不含 group/other 写位且属主可读；
 //     条目必须是**普通文件**（不是符号链接/设备/FIFO）、非空、权限不含 group/other 写位。
-//     编译侧 `Compiler` 在构造时 `EnsureCacheDirTrust`（MkdirAll + Chmod + 校验），
-//     违规在 `IsolationRequire` 下**拒绝启动**、其余档位告警并进运维日志；
-//     执行侧（`runtime.NewCompilationCache`）也只做同一条校验（告警）。
+//     编译侧 `Compiler` 在构造时 `cachetrust.Ensure`（先确认根是真实目录，再 MkdirAll +
+//     Chmod，最后校验），违规在 `IsolationRequire` 下**拒绝启动**、其余档位告警并进运维日志。
+//     **执行侧不再"同一条校验的另一种策略"，而是降级**（2026-09-21 独立审计 P1-①）：
+//     `runtime.NewCompilationCache` 拿不到可用缓存时返回 (nil, nil)，由 `runtime.New`
+//     回落到进程内缓存并告警 —— 缓存是性能优化、不是执行前提，只读挂载 / `--user`
+//     非属主 / k8s `runAsUser` 下 Chmod 必然失败，让服务端因此起不来是错误取舍
+//     （执行侧的"不可用"与"不可信"都不该升级成整站不可用）。
 //  2. **认账（写进本注释，不再藏在 TODO 里）**：**缓存条目没有内容签名**，
 //     与宿主同 uid 的进程仍可投毒。要真正闭合需要"宿主持有产物清单 + HMAC"或
 //     独立 uid / 只读挂载（部署面）。这条缺口在 docs/decisions 里有对应认账，

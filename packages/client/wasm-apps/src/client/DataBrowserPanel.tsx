@@ -16,7 +16,7 @@
  * @module @picoaide/dsh-wasm-apps/client/DataBrowserPanel
  */
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 
 import { PanelButton } from '@picoaide/dsh-panel-surface/client'
 
@@ -53,9 +53,18 @@ export function DataBrowserPanel({ appId, deps }: { appId: string, deps?: Reques
   const [unmask, setUnmask] = useState(false)
   const [rows, setRows] = useState<RowsState>({ kind: 'idle' })
 
+  // 请求序号（2026-09-21 审计 P2-3）：只让**最后一次**发出的请求改写状态。
+  // 没有它会怎样：快速切表/翻页时"先发后到"的响应会用旧表数据覆盖新表，
+  // 界面显示的表格与选中的表不一致 —— 那比崩溃更容易误导作者对数据的判断。
+  const seq = useRef(0)
+  const alive = useRef(true)
+  useEffect(() => () => { alive.current = false }, [])
+
   const loadSchema = useCallback(async (): Promise<void> => {
+    const mine = ++seq.current
     setSchema({ kind: 'loading' })
     const result = await fetchSchema(appId, deps ?? {})
+    if (!alive.current || mine !== seq.current) return
     if (!result.ok) {
       setSchema({ kind: 'failed', failure: result })
       return
@@ -65,8 +74,11 @@ export function DataBrowserPanel({ appId, deps }: { appId: string, deps?: Reques
   }, [appId, deps])
 
   const loadRows = useCallback(async (nextTable: string, nextOffset: number, nextUnmask: boolean): Promise<void> => {
+    const mine = ++seq.current
     setRows({ kind: 'loading' })
     const result = await fetchRows(appId, { table: nextTable, limit: PAGE_SIZE, offset: nextOffset, unmask: nextUnmask }, deps ?? {})
+    // 迟到的响应直接丢掉（序号已经被更新的请求推进）——不是"合并"，是"只认最后一次"。
+    if (!alive.current || mine !== seq.current) return
     setRows(result.ok ? { kind: 'ready', report: result } : { kind: 'failed', failure: result })
   }, [appId, deps])
 

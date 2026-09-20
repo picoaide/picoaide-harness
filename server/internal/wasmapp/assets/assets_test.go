@@ -2,15 +2,19 @@ package assets_test
 
 import (
 	"bytes"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
+	"github.com/picoaide/picoaide/internal/wasmapp/wasmmod"
 )
 
 // 本文件守"内存资源集"的全部对外语义（2026-09-20 起随包资源不再落盘，磁盘版
@@ -405,7 +409,7 @@ func TestBuildIsDeterministic(t *testing.T) {
 //	· 从脚本里**解析**出两个列表并与 Go 侧做集合相等（双向）；
 //	· 断言脚本确实调用了 isToolchainSection(...)（能力断言，不是字面量断言）。
 func TestPackAssetsScriptRejectionListMatchesToolchainSections(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "skills", "app-builder", "scripts", "pack-assets.mjs")
+	path := packAssetsScriptPath(t)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Skipf("技能目录不在预期位置（%s）：%v", path, err)
@@ -471,7 +475,520 @@ func TestPackAssetsScriptRejectionListMatchesToolchainSections(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(src, "isToolchainSection(") {
-		t.Fatal("pack-assets.mjs 声明了清单却没用它（必须经 isToolchainSection 判定，否则前缀规则是死代码）")
+	// 能力断言：脚本必须**真的调用** isToolchainSection(...)，而不是只定义了它。
+	//
+	// ⚠️ 判据必须排除**函数定义行**（2026-09-21 审计实跑变异：只写
+	// `strings.Contains(src, "isToolchainSection(")` 会被 `function isToolchainSection(name) {`
+	// 这一行满足 —— 把调用点整段删掉照样绿，前缀规则变成死代码而门禁毫无反应）。
+	// 因此这里逐行找"调用"形态：排除 `function ` 开头的定义行，且要求至少一处出现。
+	callSites := 0
+	for _, line := range strings.Split(src, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "function ") {
+			continue
+		}
+		if strings.Contains(trimmed, "isToolchainSection(") {
+			callSites++
+		}
+	}
+	if callSites == 0 {
+		t.Fatal("pack-assets.mjs 声明了清单却没用它（必须经 isToolchainSection 判定，否则前缀规则是死代码）；" +
+			"注意这条判据排除定义行，只有函数定义不算数")
+	}
+	// 反向对照：把定义行也算进来的旧口径会放过"删掉调用点"，这里显式证明两者可区分。
+	if !strings.Contains(src, "function isToolchainSection(") {
+		t.Fatal("pack-assets.mjs 里找不到 isToolchainSection 的定义（判据口径已变，请同步本用例）")
+	}
+
+	// 行为对拍（不只是"字面量/调用点"）：同一个名字向量分别喂给脚本与平台的判定 ——
+	// **脚本放行 ⟺ 平台会把它当资源**（= 不是工具链段 ∧ 不是保留名 ∧ 是包内逻辑路径）。
+	//
+	// 这条抓的是审计 D-A2 那类退化的最后一层：清单还在、判定函数还在、调用点也在，
+	// 但两边的语义已经不同（例如脚本漏了保留名、或平台的 IsLogicalAssetPath 放宽）。
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Logf("node 不可用（%v）：跳过行为对拍", err)
+		return
+	}
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wasm")
+	writeFixtureFile(t, in, buildModule())
+	srcFile := filepath.Join(dir, "asset.txt")
+	writeFixtureFile(t, srcFile, []byte("x"))
+	names := []string{
+		// 放行（平台会把它当资源）
+		"index.html", ".debugger/config", "x/.debug_y", ".debugfoo", ".DEBUG_INFO", "debug_info", "name/x",
+		// 拒绝（工具链段名 / 平台保留名）
+		".debug_info", ".debug_line", ".debug_", ".debug_/index.html", "name", "producers",
+		"target_features", "dylink.0", "linking", "sourceMappingURL", "external_debug_info",
+		limits.AppConfigFileName,
+	}
+	for _, name := range names {
+		out := filepath.Join(dir, "out.wasm")
+		_ = os.Remove(out)
+		stdout, code := runPackAssets(t, dir, "--in", in, "--out", out, srcFile+"="+name)
+		accepted := code == 0
+		want := !assets.IsToolchainSection(name) &&
+			name != limits.AppConfigFileName && assets.IsLogicalAssetPath(name)
+		if accepted != want {
+			t.Errorf("段名 %q：脚本放行=%v，平台当资源=%v（两边必须同判）\n%s", name, accepted, want, stdout)
+		}
+	}
+}
+
+// ===== 段总量预算（§4.2 的 4 MiB）与资源口径必须是**同一个测量** =====
+//
+// 背景（2026-09-21 独立审计 D-A1，temp/audit-w0-data/assets-cachetrust/REPORT.md）：
+// 平台在发布期把 `.debug_*`（DWARF）当"工具链元数据"丢弃（SplitSections 从不保留、
+// 既不进资源集也不可能被静态直出），但段总量预算（limits.SectionTotalMaxBytes = 4 MiB）
+// 原先**照样计入**它们 ⇒ 同一个模块出现两个数：
+//
+//	资产口径（assets.Build / 打包脚本）3,584,077 / 4,194,304 → 通过
+//	wasmmod 口径（Validate 的段总量）  4,287,501 / 4,194,304 → SECTION_OVERRIDE_OVERSIZE
+//
+// 而真实工具链默认就带 DWARF（审计实测：Zig 0.14.0 的 `-O Debug` 产物 703,566 字节里
+// 703,313 字节是 8 个 `.debug_*` 段），错误提示却写着"请压缩资源" —— 压缩资源毫无用处。
+//
+// 定案：**4 MiB 预算不计 `.debug_*` 前缀族**（发布期被丢弃、实践中无界的那一族；
+// 精确名单里的 `name`/`producers`/… 与非路径名仍按保守口径计入，见
+// assets.CountsTowardSectionBudget 的长注释）。作者在打包脚本里看到的数与 Validate
+// 判的数必须是同一个测量 —— 下面的用例把这条不变式钉死。
+
+// customSection 是夹具里的一段自定义段（段名 + 内容）。
+type customSection struct {
+	name    string
+	content []byte
+}
+
+// wasmLEB 编码无符号 LEB128（用例侧独立实现，不与平台/脚本共享代码）。
+func wasmLEB(v int) []byte {
+	var out []byte
+	for {
+		b := byte(v & 0x7f)
+		v >>= 7
+		if v != 0 {
+			b |= 0x80
+		}
+		out = append(out, b)
+		if v == 0 {
+			return out
+		}
+	}
+}
+
+// sectionPayloadBytes 返回自定义段的**负载**字节数（段名长度前缀 + 段名 + 内容）。
+// 与 wasmmod/parse.go 的 `info.CustomBytes += size`、pack-assets.mjs 的 payloadBytes 同口径。
+func sectionPayloadBytes(name string, contentLen int) int {
+	return len(wasmLEB(len(name))) + len(name) + contentLen
+}
+
+// budgetedByRule 是用例侧对"段总量预算计入口径"的**独立实现**（不调用平台代码，
+// 否则判据会自我印证）：4 MiB 只不计 `.debug_` 前缀族。
+func budgetedByRule(name string) bool { return !strings.HasPrefix(name, ".debug_") }
+
+// buildModule 拼一个"最小合法"模块（无导入、导出 _start 与 memory）+ 追加自定义段。
+// 只保证**静态校验**能过（§4.2 的校验器不做真编译），不保证能被 wazero 编译。
+func buildModule(customs ...customSection) []byte {
+	body := []byte{}
+	add := func(id byte, payload []byte) {
+		body = append(body, id)
+		body = append(body, wasmLEB(len(payload))...)
+		body = append(body, payload...)
+	}
+	add(1, []byte{0x01, 0x60, 0x00, 0x00}) // type：一个 () -> ()
+	add(3, []byte{0x01, 0x00})             // function：1 个函数，类型下标 0
+	add(5, []byte{0x01, 0x00, 0x01})       // memory：1 个内存，min=1
+	export := []byte{0x02}                 // export：_start(func 0) + memory(memory 0)
+	export = append(export, wasmLEB(len("_start"))...)
+	export = append(export, "_start"...)
+	export = append(export, 0x00, 0x00)
+	export = append(export, wasmLEB(len("memory"))...)
+	export = append(export, "memory"...)
+	export = append(export, 0x02, 0x00)
+	add(7, export)
+	add(10, []byte{0x01, 0x02, 0x00, 0x0b}) // code：一个空函数体
+	for _, c := range customs {
+		payload := append(wasmLEB(len(c.name)), c.name...)
+		payload = append(payload, c.content...)
+		add(0, payload)
+	}
+	return append(append([]byte("\x00asm"), 1, 0, 0, 0), body...)
+}
+
+// sectionsOf 把有序夹具折成段名 → 内容（assets 侧与打包脚本都用这个形态）。
+func sectionsOf(customs []customSection) map[string][]byte {
+	out := make(map[string][]byte, len(customs))
+	for _, c := range customs {
+		out[c.name] = c.content
+	}
+	return out
+}
+
+func fixtureKeys(m map[string][]byte) []string {
+	out := make([]string, 0, len(m))
+	for name := range m {
+		out = append(out, name)
+	}
+	return out
+}
+
+func hasString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSectionBudgetExcludesDiscardedDebugSections 是本次修复的**核心判据**（审计 D-A1）。
+//
+// 修复前：Validate 把发布期被丢弃的 5 MiB `.debug_*` 也算进 4 MiB ⇒ 整个模块被
+// SECTION_OVERRIDE_OVERSIZE 拒，而资产侧（assets.Build）与打包脚本都说通过。
+func TestSectionBudgetExcludesDiscardedDebugSections(t *testing.T) {
+	html := bytes.Repeat([]byte("h"), 1024)
+	cfg := []byte(`{"access":"login"}`)
+	fixture := []customSection{
+		{"index.html", html},
+		{"name", []byte("sym")},        // 精确名单里的工具链段：仍按保守口径计入
+		{"go:buildid", []byte("abcd")}, // 非逻辑路径名：也仍计入
+		{".debug_info", make([]byte, 3<<20)},
+		{".debug_line", make([]byte, 2<<20)},
+	}
+	sections := sectionsOf(fixture)
+	mod := buildModule(fixture...)
+
+	info, err := wasmmod.Validate(mod)
+	if err != nil {
+		t.Fatalf("`.debug_*` 在发布期被丢弃，不得把模块顶出 4 MiB 段总量预算"+
+			"（修复前这里正是 SECTION_OVERRIDE_OVERSIZE）：%v", err)
+	}
+	wantBudget := sectionPayloadBytes("index.html", len(html)) +
+		sectionPayloadBytes("name", len("sym")) +
+		sectionPayloadBytes("go:buildid", len("abcd"))
+	if info.CustomBytes != wantBudget {
+		t.Fatalf("Validate 的段总量 = %d，期望 %d（= 全部非 `.debug_*` 段的负载和；5 MiB DWARF 必须为 0）",
+			info.CustomBytes, wantBudget)
+	}
+
+	// 资产侧：同一模块必须给出一致结论（真正变成资源的只有 index.html）。
+	kept, skipped := assets.SplitSections(sections)
+	if len(kept) != 1 || !hasString(fixtureKeys(kept), "index.html") {
+		t.Fatalf("保留资源 = %v，只应有 index.html", fixtureKeys(kept))
+	}
+	for _, name := range []string{".debug_info", ".debug_line"} {
+		if _, ok := kept[name]; ok {
+			t.Fatalf("%s 不得进资源集（发布期被丢弃的工具链段）", name)
+		}
+		if !hasString(skipped, name) {
+			t.Fatalf("skipped 必须如实报告 %s（作者要能看到哪些段被忽略），实际 %v", name, skipped)
+		}
+	}
+	set, berr := assets.Build("demo", "1", sections, cfg)
+	if berr != nil {
+		t.Fatalf("资产侧必须接受同一模块（两侧必须给出同一个结论）：%v", berr)
+	}
+	if got := set.Bytes(); got != int64(len(html)+len(cfg)) {
+		t.Fatalf("资源集字节 = %d，期望 %d（index.html 内容 + 平台注入的配置）", got, len(html)+len(cfg))
+	}
+
+	// 两个数的**口径分解**必须对得上（任一边多算/少算一段就会破）：
+	//
+	//	Validate 的数 = Σ 负载(计入预算的段)
+	//	              = Σ 内容(保留段) + Σ 内容(被忽略但计入的段) + Σ 段名开销(计入预算的段)
+	//	资产侧的数    = Σ 内容(保留段) + len(注入配置)
+	budgetedIgnored, overhead := 0, 0
+	for _, c := range fixture {
+		if !budgetedByRule(c.name) {
+			continue
+		}
+		overhead += sectionPayloadBytes(c.name, len(c.content)) - len(c.content)
+		if _, isKept := kept[c.name]; !isKept {
+			budgetedIgnored += len(c.content)
+		}
+	}
+	moduleSide := set.Bytes() - int64(len(cfg)) // 资产侧去掉注入配置后的"模块侧"字节
+	if want := int(moduleSide) + budgetedIgnored + overhead; info.CustomBytes != want {
+		t.Fatalf("两侧不是同一个测量：Validate=%d，按资产侧反推=%d"+
+			"（被忽略但计入 %d 字节 + 段名开销 %d 字节）", info.CustomBytes, want, budgetedIgnored, overhead)
+	}
+}
+
+// TestSectionBudgetStillRejectsOversizeAssets 是上一条的**反向对照**：
+// 把 `.debug_*` 排除出预算 ≠ 取消预算 —— 计入预算的段一旦超限，必须照旧拒。
+//
+// 变异验证：把 CountsTowardSectionBudget 改成恒 true（或删掉 validate 的判据）⇒ 本例红。
+func TestSectionBudgetStillRejectsOversizeAssets(t *testing.T) {
+	big := make([]byte, limits.SectionTotalMaxBytes+1024)
+	mod := buildModule(
+		customSection{"big.bin", big},                     // 计入预算：超限的就是它
+		customSection{".debug_info", make([]byte, 1<<20)}, // 不计入：不能靠它"分摊"
+	)
+	_, err := wasmmod.Validate(mod)
+	if err == nil {
+		t.Fatal("计入预算的段超过 4 MiB 必须被拒（排除 `.debug_*` 不是取消预算）")
+	}
+	e, ok := apperr.As(err)
+	if !ok || e.Code != apperr.CodeSectionOverrideOversize {
+		t.Fatalf("错误码 = %v，期望 SECTION_OVERRIDE_OVERSIZE", err)
+	}
+	wantBytes := sectionPayloadBytes("big.bin", len(big))
+	if got := e.Details["custom_bytes"]; got != wantBytes {
+		t.Fatalf("details.custom_bytes = %v，期望 %d（1 MiB `.debug_info` 不得计入）", got, wantBytes)
+	}
+}
+
+// ===== 与作者侧打包脚本（pack-assets.mjs）的**逐字节**对拍 =====
+
+// packAssetsScriptPath 返回作者侧打包脚本的**绝对**路径（脚本在临时目录里执行，
+// 相对路径会按 `cmd.Dir` 解析）。
+//
+// `PACK_ASSETS_SCRIPT` 可覆盖：变异验证/双向对拍要指向**副本**（脚本是 Node 侧判据的
+// 实现，`go test -overlay` 只能替换 Go 源文件，替换不了它运行期读到的 .mjs）。
+func packAssetsScriptPath(t *testing.T) string {
+	t.Helper()
+	path := os.Getenv("PACK_ASSETS_SCRIPT")
+	if path == "" {
+		path = filepath.Join("..", "..", "..", "skills", "app-builder", "scripts", "pack-assets.mjs")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("解析打包脚本路径失败（%s）：%v", path, err)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		t.Fatalf("打包脚本不可用（%s）：%v", abs, err)
+	}
+	return abs
+}
+
+// runPackAssets 在 dir 下跑一次打包脚本，返回（stdout+stderr, 退出码）。node 不可用即 Skip。
+func runPackAssets(t *testing.T, dir string, args ...string) (string, int) {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node 不可用，跳过与打包脚本的对拍：%v", err)
+	}
+	cmd := exec.Command(node, append([]string{packAssetsScriptPath(t)}, args...)...)
+	cmd.Dir = dir
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	runErr := cmd.Run()
+	if runErr == nil {
+		return buf.String(), 0
+	}
+	var ee *exec.ExitError
+	if !errors.As(runErr, &ee) {
+		t.Fatalf("执行 node 失败：%v\n%s", runErr, buf.String())
+	}
+	return buf.String(), ee.ExitCode()
+}
+
+func writeFixtureFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("写夹具 %s：%v", path, err)
+	}
+}
+
+// scriptBudgetTotal 抽出脚本打印的「自定义段总量 N 字节」（对拍判据依赖这个可机读的数）。
+func scriptBudgetTotal(t *testing.T, stdout string) int {
+	t.Helper()
+	m := regexp.MustCompile(`自定义段总量 (\d+) 字节`).FindStringSubmatch(stdout)
+	if m == nil {
+		t.Fatalf("脚本输出里没有可机读的「自定义段总量 <N> 字节」：\n%s", stdout)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("解析脚本的段总量失败：%v", err)
+	}
+	return n
+}
+
+// TestSectionBudgetBytesMatchPackAssetsScript 证明"作者在打包脚本里看到的数"与
+// "Validate 判的数"是**同一个测量**（审计 D-A1/D-A3 的不变式）。
+//
+// 做法是真跑脚本（node）+ 用平台自己的解析器复算产出模块：
+//  1. 用例侧独立算出"非 `.debug_*` 段的负载和"（含本次追加的资产）；
+//  2. 脚本打印的「自定义段总量」必须等于它（被丢弃的 DWARF 不得计入）；
+//  3. wasmmod.Parse(产出模块).CustomBytes 也必须等于它。
+//
+// 任一边单独改口径（Go 的 parse.go 或 Node 的 pack-assets.mjs）都会让本条红 ——
+// 这正是"作者按一个数改、被另一个数拒"的根因判据。
+func TestSectionBudgetBytesMatchPackAssetsScript(t *testing.T) {
+	added := customSection{"static/extra.css", []byte("body{color:red}")}
+	fixture := []customSection{
+		{"index.html", []byte("<html>hi</html>")},
+		{"static/app.js", []byte("console.log(1)")},
+		{"name", []byte("symbol-table")},
+		{"go:buildid", []byte("build-id")},
+		{".debug_info", bytes.Repeat([]byte{0xab}, 4096)},
+		{".debug_line", bytes.Repeat([]byte{0xcd}, 2048)},
+	}
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wasm")
+	writeFixtureFile(t, in, buildModule(fixture...))
+	src := filepath.Join(dir, "extra.css")
+	writeFixtureFile(t, src, added.content)
+	out := filepath.Join(dir, "out.wasm")
+
+	stdout, code := runPackAssets(t, dir, "--in", in, "--out", out, src+"="+added.name)
+	if code != 0 {
+		t.Fatalf("脚本必须接受含 `.debug_*` 的模块（它们不计入 4 MiB 预算）：\n%s", stdout)
+	}
+
+	want, debugBytes := 0, 0
+	for _, c := range append(append([]customSection{}, fixture...), added) {
+		if budgetedByRule(c.name) {
+			want += sectionPayloadBytes(c.name, len(c.content))
+		} else {
+			debugBytes += sectionPayloadBytes(c.name, len(c.content))
+		}
+	}
+	if want >= debugBytes {
+		t.Fatalf("夹具不成立：计入预算的 %d 字节必须远小于被丢弃的 %d 字节（否则本条分不出对错）",
+			want, debugBytes)
+	}
+	printed := scriptBudgetTotal(t, stdout)
+	if printed != want {
+		t.Fatalf("脚本报的段总量 = %d，期望 %d（非 `.debug_*` 段的负载和；被丢弃的 %d 字节不得计入）",
+			printed, want, debugBytes)
+	}
+
+	packed, rerr := os.ReadFile(out)
+	if rerr != nil {
+		t.Fatalf("读脚本产出：%v", rerr)
+	}
+	info, perr := wasmmod.Parse(packed)
+	if perr != nil {
+		t.Fatalf("平台解析脚本产出失败：%v", perr)
+	}
+	if info.CustomBytes != printed {
+		t.Fatalf("脚本与平台不是同一个测量：脚本报 %d 字节，wasmmod.Parse 的 CustomBytes = %d 字节",
+			printed, info.CustomBytes)
+	}
+	if _, verr := wasmmod.Validate(packed); verr != nil {
+		t.Fatalf("脚本产出必须能过平台的静态校验：%v", verr)
+	}
+	// 双向：平台自己的分流也必须把 `.debug_*` 排除在资源之外（两边同一批段）。
+	extracted, xerr := wasmmod.ExtractCustomSections(packed)
+	if xerr != nil {
+		t.Fatalf("抽取自定义段：%v", xerr)
+	}
+	kept, _ := assets.SplitSections(extracted)
+	for _, name := range []string{".debug_info", ".debug_line"} {
+		if _, ok := kept[name]; ok {
+			t.Fatalf("%s 不得进资源集（发布期被丢弃）", name)
+		}
+	}
+}
+
+// TestPreviewScriptSharesToolchainSectionPolicy 钉住"作者侧第三份实现"必须同源。
+//
+// 背景（2026-09-21 独立审计 P3-②）：工具链段的判定在仓库里有**三处**实现 ——
+//
+//	server/internal/wasmapp/assets/assets.go            （平台唯一真源：前缀 + 精确名单）
+//	server/skills/app-builder/scripts/pack-assets.mjs   （打包期：与 Go 侧有行为对拍）
+//	server/skills/app-builder/examples/go/preview.mjs   （本地预览：**此前没有任何对拍**）
+//
+// 第三份此前**没有 `.debug_` 前缀规则** ⇒ 本地预览会把几 MB 的 DWARF 当成应用资源直出，
+// 作者看到"本地能打开、线上 404"，而段总量预算两侧也会给出两个数。
+//
+// 本用例读 `preview.mjs` 的源码，断言：
+//  1. 它持有与 Go 侧**完全相同**的前缀清单（逐项集合相等，两个方向都查）；
+//  2. 它持有与 Go 侧**完全相同**的精确名单；
+//  3. 段名分流真的走 `isToolchainSection(...)`（排除函数定义行，否则定义本身就能满足
+//     字面量断言 —— 这正是 pack-assets 那条用例被抓过的假绿形态）。
+//
+// 为什么是源码解析而不是跑脚本：`preview.mjs` 的段名分流在"跑一个 wasm"这条路径里
+// （需要产物 + 子进程），而"清单是否同源"这件事静态可判、且失败信息更准。
+// 行为面的兜底在 `TestPreviewHostSelfTest`（跑 `--selftest`）。
+//
+// 变异验证：把 `preview.mjs` 的 TOOLCHAIN_SECTION_PREFIXES 改成 `[]`（或把 call site
+// 换回 `TOOLCHAIN_SECTION_NAMES.has(name)`）⇒ 本用例红。
+func TestPreviewScriptSharesToolchainSectionPolicy(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "skills", "app-builder", "examples", "go", "preview.mjs")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读 preview.mjs（%s）: %v", path, err)
+	}
+	src := string(raw)
+
+	// 解析一个 JS 数组/集合字面量里的字符串项（与 pack-assets 那条用例同款口径）。
+	parseJsList := func(constName string) []string {
+		t.Helper()
+		idx := strings.Index(src, constName)
+		if idx < 0 {
+			t.Fatalf("preview.mjs 里找不到常量 %s", constName)
+		}
+		rest := src[idx:]
+		open := strings.IndexAny(rest, "([")
+		closing := strings.IndexAny(rest, ")]")
+		if open < 0 || closing < open {
+			t.Fatalf("preview.mjs 的 %s 不是列表/集合字面量", constName)
+		}
+		var out []string
+		for _, m := range regexp.MustCompile(`['"]([^'"]+)['"]`).FindAllStringSubmatch(rest[open+1:closing], -1) {
+			out = append(out, m[1])
+		}
+		if len(out) == 0 {
+			t.Fatalf("preview.mjs 的 %s 解析出 0 项（解析口径可能失效）", constName)
+		}
+		return out
+	}
+
+	// ① 前缀清单：双向集合相等。
+	previewPrefixes := map[string]bool{}
+	for _, p := range parseJsList("TOOLCHAIN_SECTION_PREFIXES") {
+		previewPrefixes[p] = true
+	}
+	for _, p := range assets.ToolchainSectionPrefixes {
+		if !previewPrefixes[p] {
+			t.Fatalf("preview.mjs 缺少平台的前缀 %q（本地预览会把这类段当资源直出，与线上不一致）", p)
+		}
+	}
+	for p := range previewPrefixes {
+		found := false
+		for _, want := range assets.ToolchainSectionPrefixes {
+			if want == p {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("preview.mjs 多出平台没有的前缀 %q（本地预览隐藏了线上会直出的资源）", p)
+		}
+	}
+
+	// ② 精确名单：双向集合相等。
+	previewNames := map[string]bool{}
+	for _, n := range parseJsList("TOOLCHAIN_SECTION_NAMES") {
+		previewNames[n] = true
+	}
+	for name := range assets.ToolchainSections {
+		if !previewNames[name] {
+			t.Fatalf("preview.mjs 的精确名单缺少 %q（与 assets.ToolchainSections 必须同源）", name)
+		}
+	}
+	for name := range previewNames {
+		if _, ok := assets.ToolchainSections[name]; !ok {
+			t.Fatalf("preview.mjs 的精确名单多出 %q（平台并不按它分流）", name)
+		}
+	}
+
+	// ③ 能力断言：分流必须经 isToolchainSection(...)，且必须排除函数定义行。
+	if !strings.Contains(src, "function isToolchainSection(") {
+		t.Fatal("preview.mjs 里找不到 isToolchainSection 的定义")
+	}
+	callSites := 0
+	for _, line := range strings.Split(src, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "function ") {
+			continue
+		}
+		if strings.Contains(trimmed, "isToolchainSection(") {
+			callSites++
+		}
+	}
+	if callSites == 0 {
+		t.Fatal("preview.mjs 定义了 isToolchainSection 却没有调用它（前缀规则是死代码）")
 	}
 }

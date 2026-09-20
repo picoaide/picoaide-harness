@@ -50,6 +50,12 @@ import { basename, dirname, resolve } from 'node:path'
 const CUSTOM_SECTION_ID = 0
 /** core spec 里最后一个段 id（DataCount=12）；更大的 id 平台直接拒（wasmmod/parse.go）。 */
 const MAX_KNOWN_SECTION_ID = 12
+/** DataCount 段 id（Wasm 2.0 bulk-memory）；规范位置在 Element 之后、Code 之前。 */
+const DATA_COUNT_SECTION_ID = 12
+/** Element 段 id（DataCount 的下界判据用）。 */
+const ELEMENT_SECTION_ID = 9
+/** Code 段 id（DataCount 的上界判据用）。 */
+const CODE_SECTION_ID = 10
 /** core module 版本（组件模型是另一个版本号，平台不支持）。 */
 const CORE_MODULE_VERSION = 1
 /** `\0asm` 魔数。 */
@@ -87,16 +93,41 @@ function isToolchainSection(name) {
   return TOOLCHAIN_SECTION_NAMES.has(name) || TOOLCHAIN_SECTION_PREFIXES.some(p => name.startsWith(p))
 }
 
+/**
+ * 段名是否计入 4 MiB 段总量预算（与 assets.CountsTowardSectionBudget **同一判据**）：
+ * **只有 `.debug_*` 前缀族不计**。
+ *
+ * 为什么（2026-09-21 独立审计 D-A1）：`.debug_*`（DWARF）是平台在发布期**丢弃**的段
+ * （不进资源集、不可能被静态直出、`assets.read` 也读不到），而真实工具链默认就会产出
+ * 几百 KB ~ 几 MB（实测 Zig 0.14.0 `-O Debug` 产物 703,566 字节里 703,313 字节是 8 个
+ * `.debug_*` 段）。把它们计入会让同一个模块出现**两个数** —— 资产口径说"通过"、段总量
+ * 口径说"超限"（实测 3,584,077/4,194,304 vs 4,287,501/4,194,304），作者按哪个数改都是错的。
+ * 精确名单里的 `name`/`producers`/… 与非路径名（`go:buildid`）小而有界，仍按保守口径计入。
+ *
+ * ⚠️ 这条判据与 Go 侧是**同一个测量**：改动必须两边同改（Go 侧
+ * `internal/wasmapp/assets/assets_test.go` 有 Go↔Node 的逐字节对拍用例）。
+ */
+function countsTowardSectionBudget(name) {
+  return !TOOLCHAIN_SECTION_PREFIXES.some(p => name.startsWith(p))
+}
+
 /** assets.MaxPathBytes：包内逻辑路径总长（**字节**，不是字符数）。 */
 const MAX_PATH_BYTES = 256
 /** assets.MaxSegmentBytes：单个路径段长度（字节）。 */
 const MAX_SEGMENT_BYTES = 255
 /**
- * limits.SectionTotalMaxBytes：自定义段总量上限。
- * 口径 = 各段**负载**字节和（含段名的长度前缀与段名，不含段 id 与长度前缀本身），
- * 见 wasmmod/parse.go 的 `info.CustomBytes += size`。
+ * limits.SectionTotalMaxBytes：段总量上限（4 MiB）。
+ *
+ * 口径 = **计入预算的**自定义段**负载**字节和（含段名的长度前缀与段名，不含段 id 与
+ * 段长度前缀本身），见 wasmmod/parse.go 的 `info.CustomBytes += size`；
+ * 哪些段计入见 countsTowardSectionBudget（`.debug_*` 不计）。
  */
 const SECTION_TOTAL_MAX_BYTES = 4 << 20
+/**
+ * limits.WasmMaxBytes：`.wasm` 体积上限（32 MiB）。本脚本不据此拒绝（那是平台 upload 期
+ * 的判据），只在 `.debug_*` 提示里给出参照 —— 它们不计入 4 MiB，但仍计入这个体积上限。
+ */
+const WASM_MAX_BYTES = 32 << 20
 
 /** 带提示的错误：main 里统一渲染成 `pack-assets: 消息` + 提示行。 */
 class PackerError extends Error {
@@ -144,9 +175,13 @@ function encodeU32(value) {
 }
 
 /**
- * 解析模块的**段表**，返回 { customSections, customBytes, endOffset }。
+ * 解析模块的**段表**，返回 { customSections, budgetBytes, ignoredDebugBytes }。
  *
- * 只复刻平台对段表的判据（越界、LEB 合法、非自定义段至多一次且 id 升序、未知 id），
+ * `budgetBytes` = **计入 4 MiB 段总量预算**的自定义段负载之和（`.debug_*` 不计，
+ * 口径见 countsTowardSectionBudget）；`ignoredDebugBytes` = 被排除的那部分（只用于提示）。
+ *
+ * 只复刻平台对段表的判据（越界、LEB 合法、非自定义段至多一次、未知 id、
+ * **含 DataCount(12) 的规范位置特例**），
  * 因为本脚本只追加自定义段、不改动既有字节 —— 「输入能过段表 ⇒ 输出还是能过」。
  * 导入面/导出面不在本脚本职责内（那是平台 upload 期校验的事）。
  */
@@ -164,7 +199,8 @@ function parseModule(buf) {
 
   const customSections = []
   const seenSectionIDs = new Set()
-  let customBytes = 0
+  let budgetBytes = 0
+  let ignoredDebugBytes = 0
   let lastSectionID = -1
   let offset = 8
   while (offset < buf.length) {
@@ -189,22 +225,38 @@ function parseModule(buf) {
       }
       const name = payload.subarray(namePrefix, namePrefix + nameLength).toString('utf8')
       customSections.push({ name, size, sectionStart })
-      customBytes += size
+      if (countsTowardSectionBudget(name)) budgetBytes += size
+      else ignoredDebugBytes += size
       continue
     }
+    // 段表判据必须与平台**逐条同判**（wasmmod/parse.go）—— 两边不同判的后果是
+    // "脚本放行 ⇒ 平台发布被拒"或反过来"脚本误拒合法产物"（2026-09-21 审计：
+    // 本脚本此前只做"纯 id 升序"，会把 TinyGo/LLVM 的**规范 DataCount 位置**误拒）。
     if (id > MAX_KNOWN_SECTION_ID) {
-      fail(`未知段 id ${id}（第 ${sectionStart} 字节）：core spec 只定义 0–${MAX_KNOWN_SECTION_ID}`)
+      fail(`未知段 id ${id}（第 ${sectionStart} 字节）：平台只支持 0–${MAX_KNOWN_SECTION_ID}` +
+        `（Tag 段（13）属 Wasm 3.0 异常处理，本平台不启用该特性，段序摆对也无法编译）`)
     }
+    // 重复判据**先于**顺序判据：两种病因可能同时成立，重复优先才能指出病根。
     if (seenSectionIDs.has(id)) {
       fail(`非自定义段 id=${id} 出现了两次（第 ${sectionStart} 字节）：每个 id 至多一次`)
     }
-    if (id < lastSectionID) {
+    seenSectionIDs.add(id)
+    // DataCount(12) 是唯一不按数值升序的段：规范位置 = Element(9) 之后、Code(10) 之前。
+    if (id === DATA_COUNT_SECTION_ID) {
+      if (lastSectionID > ELEMENT_SECTION_ID) {
+        fail(`段顺序非法：段 id=${id} 出现在段 id ${lastSectionID} 之后` +
+          `（DataCount 必须在 Element 之后、Code 之前）`)
+      }
+    } else if (lastSectionID === DATA_COUNT_SECTION_ID) {
+      if (id < CODE_SECTION_ID) {
+        fail(`段顺序非法：段 id=${id} 出现在 DataCount 之后（DataCount 之后只允许 Code 及之后）`)
+      }
+    } else if (id < lastSectionID) {
       fail(`段顺序非法：段 id=${id} 出现在段 id ${lastSectionID} 之后（非自定义段必须按 id 升序）`)
     }
-    seenSectionIDs.add(id)
     lastSectionID = id
   }
-  return { customSections, customBytes }
+  return { customSections, budgetBytes, ignoredDebugBytes }
 }
 
 /** 拼一个自定义段，返回 { section, payloadBytes }。
@@ -328,8 +380,9 @@ function usage() {
   · 段名 = 包内逻辑路径（相对、以 / 分隔、不含 .. 与 :，单段不超过 ${MAX_SEGMENT_BYTES} 字节）
   · ${RESERVED_ASSET_NAME} 是平台保留资源，不能这样加（它由平台写入）
   · 工具链元数据段名（name / producers / …）会被平台忽略，脚本直接拒
-  · 自定义段总量上限 ${humanBytes(SECTION_TOTAL_MAX_BYTES)}（= 各段**负载**之和：含段名的长度前缀与段名，
-    不含段 id 与长度前缀本身；Go 产物自带的 name 段也计入）`
+  · 段总量上限 ${humanBytes(SECTION_TOTAL_MAX_BYTES)}（= **计入预算的**各段**负载**之和：含段名的长度前缀与段名，
+    不含段 id 与长度前缀本身；Go 产物自带的 name 段也计入；.debug_*（DWARF）不计 ——
+    平台发布期会丢弃它们，与 wasmmod.Validate 同一口径）`
 }
 
 function humanBytes(n) {
@@ -402,7 +455,7 @@ function run(argv) {
   if (!existsSync(outDir)) fail(`--out 的目录不存在：${outDir}`, ['先建好目录（本脚本不替你 mkdir）'])
 
   const input = readFileSync(inPath)
-  const { customSections, customBytes } = parseModule(input)
+  const { customSections, budgetBytes, ignoredDebugBytes } = parseModule(input)
   const existingNames = new Set(customSections.map(s => s.name))
 
   // 解析 + 校验全部资源参数（先全部校验再写盘：失败时不留下半成品）。
@@ -429,14 +482,19 @@ function run(argv) {
     plannedNames.add(dest)
   }
 
-  // 总量判据与平台同口径：**结果模块**里所有自定义段的**负载**字节和
-  // （含段名的长度前缀与段名；不含段 id 与长度前缀本身）——见 limits.SectionTotalMaxBytes。
+  // 总量判据与平台同口径：**结果模块**里**计入预算的**自定义段的**负载**字节和
+  // （含段名的长度前缀与段名；不含段 id 与长度前缀本身；`.debug_*` 不计）——
+  // 见 limits.SectionTotalMaxBytes 与 countsTowardSectionBudget。
   const addedBytes = planned.reduce((sum, p) => sum + p.payloadBytes, 0)
-  const totalBytes = customBytes + addedBytes
+  const totalBytes = budgetBytes + addedBytes
+  const debugHint = ignoredDebugBytes > 0
+    ? `模块里另有 ${ignoredDebugBytes} 字节的 .debug_*（DWARF）段：平台发布期会丢弃它们，不计入这 4 MiB`
+    : '`.debug_*`（DWARF）调试段不计入这 4 MiB：平台发布期会丢弃它们'
   if (totalBytes > SECTION_TOTAL_MAX_BYTES) {
     fail(`自定义段总量会达到 ${totalBytes} 字节，超过平台上限 ${SECTION_TOTAL_MAX_BYTES} 字节`, [
-      `已有自定义段 ${customBytes} 字节（Go 产物的 name 段可能就有几十 KiB），本次要加 ${addedBytes} 字节`,
+      `已有计入预算的自定义段 ${budgetBytes} 字节（Go 产物的 name 段可能就有几十 KiB），本次要加 ${addedBytes} 字节`,
       '精简资源（HTML/JS 先 gzip 再内嵌）或删掉用不到的文件；超限平台会回 SECTION_OVERRIDE_OVERSIZE',
+      debugHint + `（它们仍随模块计入 ${humanBytes(WASM_MAX_BYTES)} 的 .wasm 体积上限）`,
     ])
   }
 
@@ -450,7 +508,10 @@ function run(argv) {
   for (const p of planned) {
     console.log(`  ${p.dest}  (${humanBytes(p.content.length)}  ← ${p.source})`)
   }
-  console.log(`模块 ${humanBytes(input.length)} → ${humanBytes(packed.length)}；自定义段总量 ${humanBytes(totalBytes)} / ${humanBytes(SECTION_TOTAL_MAX_BYTES)}`)
+  console.log(`模块 ${humanBytes(input.length)} → ${humanBytes(packed.length)}；自定义段总量 ${totalBytes} 字节 / ${SECTION_TOTAL_MAX_BYTES} 字节（${humanBytes(totalBytes)} / ${humanBytes(SECTION_TOTAL_MAX_BYTES)}；口径与平台 wasmmod.Validate 相同：.debug_* 不计）`)
+  if (ignoredDebugBytes > 0) {
+    console.log(`  · 另有 ${ignoredDebugBytes} 字节 .debug_*（DWARF）段不计入段总量（平台发布期丢弃；仍计入 ${humanBytes(WASM_MAX_BYTES)} 的 .wasm 体积上限）`)
+  }
   console.log(`下一步：把 ${basename(outPath)} 与 picoaide.app.json 一起交给 wasm_app_validate / wasm_app_publish`)
   return 0
 }

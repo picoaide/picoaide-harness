@@ -158,14 +158,61 @@ func verifyCacheEntryShape(path string) []CacheTrustViolation {
 // 而"只有编译进程可写"这条缓解完全依赖它。同包的 appdb / upload 早就是
 // "MkdirAll + 显式 Chmod" 的写法，缓存目录此前独缺。
 //
+// ⚠️ **校验必须先于任何改动权限的动作**（2026-09-21 独立审计 P1-①）：`os.Chmod` 会
+// **跟随符号链接**，先 Chmod 再 Verify 等于"先按攻击者布置的链接改了目标目录的权限，
+// 再去校验它"——`<dataRoot>/compile-cache` 被换成指向别处的链接时，
+// 平台自己成了改权限的那只手。所以这里先用 `Lstat` 确认根路径是**真实目录**，
+// 不是目录就一次权限位都不改、直接返回违规。
+//
+// 第二个坑（同一处）：`Chmod` 失败（非属主、只读挂载）原先**被当成成功** —— 调用方
+// 拿到 err=nil 继续走，而权限其实没被纠正，日志里没有任何信号（审计复现：非属主下
+// `Ensure` 返回 err=nil 且 `Trusted()==true`）。现在 Chmod 失败**原样返回错误**。
+//
 // 返回值：目录句柄层面的 err（无法创建/无法 chmod）与校验报告分开 —— 调用方对
-// "校验发现违规"的策略不同（编译侧 require 档 fail-loud、执行侧告警）。
+// "校验发现违规"的策略不同（编译侧 require 档 fail-loud、执行侧降级告警），
+// 但**两者都不该把"目录不可用"当成"目录可信"**。
 func Ensure(dir string, mode os.FileMode) (CacheTrustReport, error) {
+	// ① 先看根路径的真实形态：不存在 ⇒ 可以安全创建；存在但不是真实目录
+	//（符号链接 / 普通文件 / 设备）⇒ 不碰权限，直接给违规报告。
+	switch info, err := os.Lstat(dir); {
+	case err == nil:
+		if info.Mode()&os.ModeSymlink != 0 {
+			return CacheTrustReport{Dir: dir, Violations: []CacheTrustViolation{{
+				Path:   dir,
+				Reason: "缓存根目录是符号链接（可被重定向到任意位置；平台不会跟随它改权限）",
+			}}}, nil
+		}
+		if !info.IsDir() {
+			return CacheTrustReport{Dir: dir, Violations: []CacheTrustViolation{{
+				Path:   dir,
+				Reason: "缓存根路径不是目录",
+			}}}, nil
+		}
+	case errors.Is(err, fs.ErrNotExist):
+		// 正常路径：下面创建。
+	default:
+		return CacheTrustReport{Dir: dir}, fmt.Errorf("cachetrust: 无法 stat 缓存目录 %s: %w", dir, err)
+	}
+
 	if err := os.MkdirAll(dir, mode); err != nil {
 		return CacheTrustReport{Dir: dir}, fmt.Errorf("cachetrust: 创建缓存目录失败: %w", err)
 	}
+	// ② 创建与 Chmod 之间再确认一次（TOCTOU）：MkdirAll 对已存在路径不做事，
+	// 所以必须重新 Lstat，否则上一步的结论可能已经过期。
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return CacheTrustReport{Dir: dir}, fmt.Errorf("cachetrust: 创建后无法 stat 缓存目录 %s: %w", dir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return CacheTrustReport{Dir: dir, Violations: []CacheTrustViolation{{
+			Path:   dir,
+			Reason: "缓存根目录在创建与授权之间被替换（非真实目录；平台不会跟随它改权限）",
+		}}}, nil
+	}
 	if err := os.Chmod(dir, mode); err != nil {
-		return CacheTrustReport{Dir: dir}, fmt.Errorf("cachetrust: 纠正缓存目录权限失败: %w", err)
+		// 不吞错：调用方必须知道"权限没被纠正"（此前这里静默，日志显示一切正常）。
+		return CacheTrustReport{Dir: dir}, fmt.Errorf(
+			"cachetrust: 纠正缓存目录权限失败（%s → %#o）: %w", dir, mode.Perm(), err)
 	}
 	return Verify(dir)
 }

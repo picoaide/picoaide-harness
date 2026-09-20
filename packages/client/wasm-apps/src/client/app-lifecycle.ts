@@ -394,7 +394,13 @@ export function parseSchemaOutcome(appId: string, payload: unknown): AppSchemaRe
   if (asString(body.app_id) === '') {
     return shapeMismatch(appId, payload, t('appCenter.schemaShapeMismatch'))
   }
-  const rawTables = Array.isArray(body.tables) ? body.tables : []
+  // **数组缺失 = 形状不符 ⇒ 失败**（2026-09-21 独立审计 P2-2）：回落成 `[]` 会把
+  // "服务端改了字段名/返回被截断"渲染成"这个应用还没有数据库"，排障方向完全错。
+  // 显式的空数组（服务端说"确实没有表"）仍然正常通过。
+  if (!Array.isArray(body.tables)) {
+    return shapeMismatch(appId, payload, t('appCenter.schemaShapeMismatch'))
+  }
+  const rawTables = body.tables
   return {
     ok: true,
     appId,
@@ -462,8 +468,12 @@ export function parseRowsOutcome(appId: string, payload: unknown): AppRowsReport
   if (asString(body.app_id) === '' || asString(body.table) === '') {
     return shapeMismatch(appId, payload, t('appCenter.rowsShapeMismatch'))
   }
-  const rawCols = Array.isArray(body.columns) ? body.columns : []
-  const rawRows = Array.isArray(body.rows) ? body.rows : []
+  // 同理：`rows`/`columns` 缺失或非数组 ⇒ 形状不符（不能画成"这张表还是空的"）。
+  if (!Array.isArray(body.rows) || !Array.isArray(body.columns)) {
+    return shapeMismatch(appId, payload, t('appCenter.rowsShapeMismatch'))
+  }
+  const rawCols = body.columns
+  const rawRows = body.rows
   return {
     ok: true,
     appId,

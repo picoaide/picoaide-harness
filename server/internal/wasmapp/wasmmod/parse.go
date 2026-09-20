@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 )
 
 // ===== 模块头常量（§4.2 魔数 + 版本/层字段校验）=====
@@ -119,8 +120,12 @@ type ModuleInfo struct {
 	CustomSections map[string][]byte
 	// CustomSectionCounts 是段名 → 出现次数（重名时同样只有第一个进 CustomSections）。
 	CustomSectionCounts map[string]int
-	// CustomBytes 是全部自定义段的**负载字节和**（口径见 validate.go 的 Validate 注释：
-	// 含段名字段，取保守口径）。
+	// CustomBytes 是**计入 §4.2 段总量预算**的自定义段负载字节和（口径：各段负载之和，
+	// 含段名长度前缀与段名；**不含** `.debug_*` 前缀族 —— 它们在发布期被丢弃、不进资源集，
+	// 计入会让同一模块出现"资产口径通过、段总量口径超限"两个数）。
+	//
+	// 预算口径的唯一实现在 assets.CountsTowardSectionBudget；它与作者侧
+	// `skills/app-builder/scripts/pack-assets.mjs` 逐字节同源（assets 包测试对拍）。
 	CustomBytes int
 	// HasStart 表示存在 start 段（实例化时会自动执行该函数；平台不因此拒绝，仅记录以便诊断）。
 	HasStart bool
@@ -243,6 +248,18 @@ func Parse(data []byte) (*ModuleInfo, error) {
 		typePayload, importPayload, exportPayload, memoryPayload, startPayload []byte
 		haveType, haveImport, haveExport, haveMemory, haveStart                bool
 		lastSectionID                                                          = -1
+		// seenSection 记录每个非自定义段 id 是否已经出现过（下标 = id，0..12）。
+		//
+		// 为什么需要它，而不是靠"相邻相等"或"严格递增"推断重复（2026-09-21 独立审计
+		// P1-1 的判据收口）：`int(id) == lastSectionID` 只覆盖**紧邻**的重复段；
+		// 一旦两次出现之间夹着别的段（如 function 段被 code 段隔开），判据会先落到
+		// "顺序非法"那条，错误码虽然同样是 SECTION_MALFORMED，但文案不再指出病根，
+		// 且"重复"与"乱序"两种病因在同一个输入上不可区分（同一模块报哪种取决于
+		// 段的相对位置）。显式集合让**重复恒优先**、文案稳定，且与 wazero 的
+		// `current > previous` 判据保持同判（两者都拒，这里额外给出更精确的错误）。
+		seenSection [SectionDataCount + 1]bool
+		// firstSectionOffset 记录每个段 id 首次出现的段起始偏移，供重复段报错指向首次出现。
+		firstSectionOffset [SectionDataCount + 1]int
 	)
 	offset := HeaderLen
 	for offset < len(data) {
@@ -287,7 +304,14 @@ func Parse(data []byte) (*ModuleInfo, error) {
 			if _, dup := info.CustomSections[name]; !dup {
 				info.CustomSections[name] = payload[n:]
 			}
-			info.CustomBytes += int(size)
+			// 段总量预算（§4.2 的 4 MiB）只计**会变成资源**的载荷：`.debug_*` 前缀族
+			// （DWARF）在发布期被丢弃 —— 不进资源集、不可能被静态直出、assets.read 也
+			// 读不到，却由真实工具链默认产出几 MB。把它们计入的后果是同一模块两个数
+			// （资产口径通过、段总量口径超限，且提示说的是"压缩资源"），作者/AI 只能
+			// 按错的数改。判据的唯一实现见 assets.CountsTowardSectionBudget 的长注释。
+			if assets.CountsTowardSectionBudget(name) {
+				info.CustomBytes += int(size)
+			}
 			continue
 		}
 
@@ -302,11 +326,37 @@ func Parse(data []byte) (*ModuleInfo, error) {
 		//     `invalid section order` ⇒ **任何带 DataCount 的产物都发不出去**
 		//     （TinyGo 默认产物、启用 bulk-memory 的 LLVM/Rust/Zig 配置）。
 		// 见 docs/planning/2026-09-21-wasm-platform-gap-audit-and-plan.md §3 P0-4。
+		// id 上界 = 12（DataCount）。**Tag 段（13）故意在此被拒**，理由必须写清楚，
+		// 否则会被误读成"漏了一个段"（2026-09-21 独立审计 P3-④）：
+		//
+		//   · wazero 的 `checkSectionOrder`（v1.12.0 internal/wasm/binary/decoder.go:185-189）
+		//     对 Tag 有一条**特例位置规则**（Memory 之后、Global 之前），也就是说
+		//     "段序"这一层 wazero 是认识 13 的；
+		//   · 但平台**根本不支持 TAG 语义**（没有 tag 段解析、运行时不启用
+		//     exception-handling），所以一个带 Tag 段的模块即便段序摆对，也会在
+		//     真编译期被 wazero 以 feature 缺失拒掉；
+		//   · 于是这里提前拒、并给出可操作的 `SECTION_MALFORMED`（指向"段 id 13"），
+		//     而不是放行到编译期换一个编译器内部错误 —— 契约「预检通过即可编译」
+		//     因此仍然成立（**两边都拒**，只是**拒的位置与理由不同**）。
+		//
+		// 判据见 TestValidateRejectsTagSectionID13：id=13 必须被拒，且文案指向段 id
+		// 而不是"顺序非法"（后者会让人以为"摆对位置就能过"）。
 		if id > SectionDataCount {
-			return nil, malformedf("未知段 id %d（core spec 只定义 0–12）", id).
+			return nil, malformedf("未知段 id %d（平台只支持 0–12：Tag 段（13）属 Wasm 3.0 异常处理，"+
+				"本平台不启用该特性，段序摆对也无法编译）", id).
 				WithDetail("offset", sectionStart).
 				WithDetail("section_id", id)
 		}
+		// 重复段判据**先于**顺序判据：两种病因（"同一段出现两次" vs "段乱序"）在
+		// 同一段表上可能同时成立，只有把重复放在前面，同一输入才会稳定地给出
+		// 指向病根的文案（判据：`{3,4,6,9,10,11}` 各构造一个"重复空段"模块，
+		// 错误 message 必须含「两次」——见 TestValidateRejectsDuplicateNonCustomSections）。
+		if seenSection[id] {
+			return nil, duplicateSection(sectionStart, id).
+				WithDetail("first_offset", firstSectionOffset[id])
+		}
+		seenSection[id] = true
+		firstSectionOffset[id] = sectionStart
 		switch {
 		case id == SectionDataCount:
 			// DataCount 必须在 Element 之后（且不能出现在它自己之前）。
@@ -329,7 +379,15 @@ func Parse(data []byte) (*ModuleInfo, error) {
 					WithDetail("previous_section_id", lastSectionID)
 			}
 		case int(id) < lastSectionID:
-			return nil, malformedf("段顺序非法：段 %s 出现在段 id %d 之后（非自定义段必须按 id 升序）",
+			// 严格递增 = "每个非自定义段至多一次 + 按 id 升序"，与 wazero 的
+			// `checkSectionOrder`（`current > previous`）**逐字等价**。
+			//
+			// 为什么是"严格递增"而不是"只拦倒序"（2026-09-21 独立审计 P1-1）：
+			// 只拦倒序时**重复段会静默通过**（例如两个 Function 段），而 wazero 会以
+			// `invalid section order` 拒绝 ⇒ `/validate` 回绿、`/publish` 的真编译
+			// 才炸，契约「预检通过即可编译」被破坏。重复由上面的 `seenSection`
+			// 显式覆盖（含 5 个原有的 `haveX` 分支），这里只判"倒序"。
+			return nil, malformedf("段顺序非法：段 %s 出现在段 id %d 之后（非自定义段必须严格递增：至多一次且按 id 升序）",
 				SectionName(id), lastSectionID).
 				WithDetail("offset", sectionStart).
 				WithDetail("section_id", id).

@@ -273,6 +273,17 @@ export interface WasmAppsFence {
   guard(req: IncomingMessage, res: ServerResponse): boolean
   /** 写面持有性证明（GET 直接放行，非 GET 在 fence 缺席时 fail-closed 503）。 */
   requireWriteProof(req: IncomingMessage, res: ServerResponse): boolean
+  /**
+   * **不区分方法**的持有性证明（fence 缺席时 fail-closed）。
+   *
+   * 为什么需要它，而不是复用 {@link requireWriteProof}（2026-09-21 独立审计 P1-②）：
+   * `requireWriteProof` 的语义是"GET 直接放行"——它假设读面不含使用者数据。这条假设
+   * 对目录/诊断/结构成立，但对 `GET …/rows?unmask=1` **不成立**：它是**一条 curl 就能
+   * 读走使用者 PII** 的路，而 `guard()` 自述的边界正是"伪造 Origin 的 curl 也能过"
+   * （回环 socket + 回环 Host + 同源标记三条都是本机进程能自己造出来的）。
+   * 所以行数据面走这条：**GET 也要证明自己是那个真页面**。
+   */
+  requireProof(req: IncomingMessage, res: ServerResponse): boolean
   /** 第二道保险：auditor 不得触发任何写面（§4.5）。 */
   writeGuard(): boolean
   /** 当前员工会话（令牌 + 服务端地址）。 */
@@ -1755,6 +1766,10 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
     //（?table=&limit=&offset=&unmask=），代理层只需原样转发 query 与身份。
     if (segments.length === 2 && ['diagnostics', 'schema', 'export', 'releases', 'rows'].includes(segments[1] ?? '')) {
       if (method !== 'GET') return fail(res, { code: 'METHOD_NOT_ALLOWED', message: 'method not allowed', status: 405 })
+      // `rows` 返回**使用者数据**（`?unmask=1` 时是脱敏前的原值）：即使 GET 也要
+      // 浏览器持有性证明 —— 否则本机任意进程（含模型自己的 shell）一条 curl 就能读走。
+      // 其余只读后缀（schema/diagnostics/export/releases）是零使用者数据面，维持 `guard()`。
+      if (segments[1] === 'rows' && !fence.requireProof(req, res)) return
       return write(res, await proxyApp(ctx, session, {
         upstreamPath: `${appPath}/${segments[1]!}${search}`,
         method: 'GET',

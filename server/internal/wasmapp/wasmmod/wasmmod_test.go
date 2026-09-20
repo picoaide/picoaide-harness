@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+	"github.com/picoaide/picoaide/internal/wasmapp/compile/testdata/wasmtest"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
@@ -775,5 +776,137 @@ func TestValidateRejectsMisorderedDataCount(t *testing.T) {
 	m3 = m3.add(SectionData, wasmVec([]byte{0x00}))
 	if _, err := Validate(m3.build()); err != nil {
 		t.Fatalf("Element → DataCount → Code → Data 必须被接受：%v", err)
+	}
+}
+
+// ===== P1-1（2026-09-21 独立审计）：重复段必须与 wazero 同判 =====
+//
+// 修复前的形态：段序判据是 `int(id) < lastSectionID`（只拦倒序），而重复段只有
+// Type/Import/Export/Memory/Start 五个 id 有 `haveX` 守卫 ⇒ **重复 Function(3)、
+// Table(4)、Global(6)、Element(9)、Code(10)、Data(11) 段被平台预检放行**，
+// 而 wazero 的 `checkSectionOrder`（`current > previous`，严格递增）会拒。
+// 后果：`/validate` 回绿、`/publish` 的真编译才炸 ⇒「预检通过即可编译」这条契约破了。
+//
+// 判据两条一起：
+//
+//	① 平台侧对 6 个 id 的重复段都必须回 SECTION_MALFORMED（本文件的用例）；
+//	② 反向对照：wazero 也必须拒同一批形状（runtime 包的
+//	   TestCompileRejectsDuplicateSections）—— 只钉平台自己的行为不算"同判"。
+func TestValidateRejectsDuplicateNonCustomSections(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   byte
+	}{
+		{"function", SectionFunction},
+		{"table", SectionTable},
+		{"global", SectionGlobal},
+		{"element", SectionElement},
+		{"code", SectionCode},
+		{"data", SectionData},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// 用**空载荷**构造重复段：段本身合法（vec 计数 0），唯一的问题是"出现了两次"。
+			//
+			// 夹具把这**两次出现都摆在该段的规范位置上**（`wasmtest.WithDuplicateSection`）。
+			// 这不是细节：第一版夹具把它们追加到段表末尾，于是 table(4)/global(6)/
+			// element(9) 的重复段同时构成"乱序"，命中的是顺序判据 ⇒ 用例测到的是顺序、
+			// **测不到"重复"这条分支**。末尾形态单独由下一条用例覆盖。
+			mod := wasmtest.WithDuplicateSection(tc.id, []byte{0x00}, []byte{0x00})
+			_, err := Validate(mod)
+			e := codeOf(t, err)
+			if e.Code != apperr.CodeSectionMalformed {
+				t.Fatalf("重复 %s 段必须被拒（code=%s）: %v", tc.name, e.Code, err)
+			}
+			// 重复段由 duplicateSection 分支给出更具体的文案（"出现了两次"）；
+			// 顺序判据那条另有「严格递增」的文案（见 TestValidateRejectsOutOfOrderSections）。
+			if !strings.Contains(e.Message, "两次") {
+				t.Fatalf("错误消息应指出重复段：%s", e.Message)
+			}
+			assertHints(t, e)
+		})
+	}
+}
+
+// TestValidateRejectsSectionAtTailOutOfOrder 覆盖"低 id 段落在段表末尾"的形态。
+//
+// 这条与上一条互补，钉住的是一个**容易搞错的语义**：末尾出现的 table(4) 同时构成
+// "倒序"与（跟它的副本一起时）"重复"，但平台是**逐段 fail-fast** 的——第一次出现
+// 就撞上顺序判据，所以合法文案是「顺序非法」，不是「出现了两次」。写重复判据时
+// 不能指望它承接这种输入（`seenSection` 只在**首次出现已按规范顺序登记**之后才生效）。
+//
+// 判据：末尾形态必须回 SECTION_MALFORMED，且文案指向**顺序**；同一段在规范位置
+// 重复时文案才指向**重复**（上一条用例）。
+//
+// 只取 table/global/element：夹具的基线段表本身含 type(1)/function(3)/memory(5)/
+// export(7)/code(10)，这四类段在"末尾形态"里**依然保留了规范位置的那一次**，
+// 所以它们命中的反而是重复判据（那是**正确**行为，不是本用例要钉的语义）。
+func TestValidateRejectsSectionAtTailOutOfOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   byte
+	}{
+		{"table", SectionTable},
+		{"global", SectionGlobal},
+		{"element", SectionElement},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mod := wasmtest.WithDuplicateSectionAtTail(tc.id, []byte{0x00}, []byte{0x00})
+			_, err := Validate(mod)
+			e := codeOf(t, err)
+			if e.Code != apperr.CodeSectionMalformed {
+				t.Fatalf("末尾倒序的 %s 段必须被拒（code=%s）: %v", tc.name, e.Code, err)
+			}
+			if !strings.Contains(e.Message, "顺序非法") {
+				t.Fatalf("末尾首次出现应报「顺序非法」（fail-fast）：%s", e.Message)
+			}
+		})
+	}
+}
+
+// TestValidateAcceptsAscendingSectionsWithoutDuplicates 是上一条的正对照：
+// 同样的段序列、每个 id 只出现一次 ⇒ 必须放行（防止"把所有重复判据写成恒拒"）。
+func TestValidateAcceptsAscendingSectionsWithoutDuplicates(t *testing.T) {
+	mod := wasmtest.Build(
+		wasmtest.TypeSection(wasmtest.TypeFunc(wasmtest.Params(), wasmtest.Params())),
+		wasmtest.FunctionSection(0),
+		wasmtest.MemorySection(1),
+		wasmtest.ExportSection(wasmtest.ExportMemory("memory", 0), wasmtest.ExportFunc("_start", 0)),
+		wasmtest.CodeSection(wasmtest.Body(0x0b)),
+	)
+	if _, err := Validate(mod); err != nil {
+		t.Fatalf("严格递增且无重复的模块必须被接受：%v", err)
+	}
+}
+
+// TestValidateRejectsTagSectionID13 钉住 Tag 段（id=13）的拒绝口径。
+//
+// 背景（2026-09-21 独立审计 P3-④）：wazero 的 `checkSectionOrder` 对 Tag 有**特例位置
+// 规则**（Memory 之后、Global 之前，decoder.go:185-189），而平台的段序判据**完全不认识**
+// 13（上界=12）。两边结论一致（都拒），但**理由不同**：平台按"未知段 id"拒，wazero 按
+// "不支持 exception-handling"拒。这条用例把口径固定下来，防止后人"补齐位置规则"时
+// 误以为平台漏了一个段。
+//
+// 判据两条：
+//  1. 带 Tag 段的模块必须被拒（SECTION_MALFORMED）；
+//  2. 文案必须指向**段 id**，**不能**是"顺序非法" —— 后者会让人以为"把 Tag 摆到
+//     Memory 与 Global 之间就能过"，而实际上真编译期仍会因缺少 exception-handling 被拒。
+//
+// 变异验证：把上界判据改成 `id > 13`（放行 Tag）⇒ 本用例红（错误码变成别的或直接通过）。
+func TestValidateRejectsTagSectionID13(t *testing.T) {
+	// Tag 段载荷：vec( tagtype ) 中的一个空 tag（0x00 = 无参数/无结果）。
+	mod := wasmtest.Build(
+		wasmtest.TypeSection(wasmtest.TypeFunc(wasmtest.Params(), wasmtest.Params())),
+		wasmtest.Section(13, []byte{0x00}),
+	)
+	_, err := Validate(mod)
+	e := codeOf(t, err)
+	if e.Code != apperr.CodeSectionMalformed {
+		t.Fatalf("Tag 段（id=13）必须被拒（code=%s）: %v", e.Code, err)
+	}
+	if !strings.Contains(e.Message, "13") {
+		t.Fatalf("文案必须指向段 id 13（而不是笼统的段序问题）：%s", e.Message)
+	}
+	if strings.Contains(e.Message, "顺序非法") {
+		t.Fatalf("Tag 段应报「未知段 id」而不是「顺序非法」——后者暗示摆对位置就能过，实际不能：%s", e.Message)
 	}
 }

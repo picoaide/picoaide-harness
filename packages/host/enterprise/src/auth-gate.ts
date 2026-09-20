@@ -2505,6 +2505,8 @@ export function apply(ctx: Context, config: Config): void {
       ctx.webServer.register(createWasmAppsRoute(ctx, {
         guard,
         requireWriteProof,
+        // GET 也要证明显（行数据面）：同一份持有性证明原语，策略由路由决定。
+        requireProof: (req, res) => proofOfPossession(req, res, 'required'),
         writeGuard,
         session,
         json,

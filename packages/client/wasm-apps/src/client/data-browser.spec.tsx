@@ -229,3 +229,47 @@ describe('分页与截断提示', () => {
     expect(container.querySelector('[data-role="data-truncated-note"]')).not.toBeNull()
   })
 })
+
+describe('迟到响应不得覆盖新状态（2026-09-21 审计 P2-3）', () => {
+  it('先发后到的 rows 响应被丢弃：界面显示的始终是**最后选中**的那张表', async () => {
+    // 手工控制 resolve 顺序的传输层：第 1 次 rows（notes）晚于第 2 次（tags）返回。
+    const pending: Array<() => void> = []
+    let rowsCalls = 0
+    stubFetch(url => {
+      if (url.endsWith('/schema')) return jsonResponse(200, SCHEMA_OK)
+      rowsCalls += 1
+      return jsonResponse(200, {
+        rows: {
+          ...ROWS_MASKED.rows,
+          table: new URL(url, 'http://x').searchParams.get('table') ?? 'notes',
+          rows: [[`来自 ${new URL(url, 'http://x').searchParams.get('table') ?? ''}`, '***']],
+        },
+      })
+    })
+    // 用一层包装把"响应到达"变成可控：把假 fetch 的 promise 排队。
+    const realFetch = globalThis.fetch as unknown as (i: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.endsWith('/schema')) return await realFetch(input, init)
+      const response = await realFetch(input, init)
+      await new Promise<void>(resolve => { pending.push(resolve) })
+      return response
+    }))
+
+    await mount()
+    await click('.pico-app-data-toggle')          // 展开 ⇒ schema 到货 + **notes 的 rows 请求在飞**（未放行）
+    // 在 notes 还没回来时切到 tags（表按钮来自 schema，与 rows 状态无关 ⇒ 可点）。
+    await click('.pico-app-data-table[data-table="tags"]')
+    // 先放行**后发**的 tags，再放行**先发**的 notes：没有序号守卫时后者会覆盖前者。
+    const last = pending.pop()
+    last?.()
+    await act(async () => { await Promise.resolve() })
+    const first = pending.shift()
+    first?.()
+    await act(async () => { await Promise.resolve() })
+
+    expect(rowsCalls).toBeGreaterThanOrEqual(2)
+    expect(container.textContent).toContain('来自 tags')
+    expect(container.textContent).not.toContain('来自 notes')
+  })
+})

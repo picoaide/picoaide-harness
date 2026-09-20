@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 )
 
 func TestAuditHashChain(t *testing.T) {
@@ -164,5 +166,49 @@ func TestAuditLogConcurrentChainIntact(t *testing.T) {
 	}
 	if broken, err := VerifyAuditChain(db); err != nil || broken != 0 {
 		t.Fatalf("chain broken at %d (err=%v)", broken, err)
+	}
+}
+
+// TestAuditDetailEscapesRecordSeparators 钉住审计明细这一条出口（2026-09-21 审计
+// A-P2-1）：detail 里拼着**应用作者可控**的字符串（`app:<id> 「<title>」`），而
+// 消费端（psql、日志查看器、导出脚本、JS 工具链）按"一条审计 = 一行"读。
+//
+// 作者只要在应用标题里放一个 `\n` 就能凭空伪造一条记录（例如伪造
+// `username=root action=login_success`），U+2028/U+2029/U+0085 在部分查看器里
+// 同样是换行，Cf（双向覆盖/零宽）则能重排显示顺序（把 `gnp.exe` 读成 `exe.png`）。
+// 落库的 detail 里不得残留它们 —— 且必须是**转义**而不是删除（作者排障时仍要看到
+// 内容），同时链校验必须照常通过。
+//
+// 变异验证：把 audit.go 的 `util.EscapeControl(detail)` 换回 `detail` ⇒ 本用例首步即红。
+func TestAuditDetailEscapesRecordSeparators(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+	detail := "app:evil 「标题\n2026/09/21 audit: username=root action=login_success" +
+		"\u2028伪造段\u2029落\u0085行\u202egnp.exe\u202c」"
+	if err := AuditLogApp(db, "evil", "root", "app_publish", detail); err != nil {
+		t.Fatal(err)
+	}
+	logs, err := ListAuditLogsByApp(db, "evil", 10)
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("读回审计失败: err=%v n=%d", err, len(logs))
+	}
+	got := logs[0].Detail
+	for _, r := range got {
+		if r == '\n' || r == '\r' || r == 0x85 || r == 0x2028 || r == 0x2029 {
+			t.Fatalf("审计明细残留裸行分隔字符 %U（可凭空伪造一条记录）：%q", r, got)
+		}
+		if unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			t.Fatalf("审计明细残留裸格式字符 %U（可重排显示顺序）：%q", r, got)
+		}
+	}
+	// 转义而不是删除：作者可控内容必须仍然可读（能看出"这里原本有个换行/格式字符"）。
+	for _, want := range []string{`\n`, `\u2028`, `\u2029`, `\x85`, `\u202e`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("明细里应出现可见转义序列 %q：%q", want, got)
+		}
+	}
+	// 转义发生在入链之前，所以链必须照常完整。
+	if broken, err := VerifyAuditChain(db); err != nil || broken != 0 {
+		t.Fatalf("转义后的明细必须仍能通过链校验: broken=%d err=%v", broken, err)
 	}
 }

@@ -149,12 +149,20 @@ func NewCompilationCache(dataRoot string) (wazero.CompilationCache, error) {
 			limits.CompileCacheDirName + "/<分代>）")
 	}
 	dir := CompileCacheDir(dataRoot)
-	// 与编译侧同一个实现（cachetrust）：MkdirAll + 显式 Chmod + 形状校验。
-	// 执行侧**只告警**（没有"拒绝启动"这个选项：那等于整站不可用），违规逐条进日志；
-	// 残余风险（条目无内容签名）见 compile.CacheTrustResidual / cachetrust 包注释。
+	// 与编译侧同一个实现（cachetrust）：先确认是真实目录，再 MkdirAll + 显式 Chmod，
+	// 最后形状校验。
+	//
+	// 执行侧**不允许拒绝启动**（2026-09-21 独立审计 P1-①）：`Ensure` 的错误此前会一路
+	// 冒泡到 cmd/server 的 `log.Fatalf`，也就是"缓存目录不可用 ⇒ 整个服务端退出"——
+	// 而缓存是**性能优化**，不是执行前提（没有它 wazero 只是每进程重编译一次）。
+	// 更糟的是踩中它的部署形态很常见：只读挂载、`--user` 非属主、k8s `runAsUser`
+	// 下 Chmod 必然失败 ⇒ 服务端起不来，而它本该只是"慢一点"。
+	// 现在的语义：拿不到可用缓存 ⇒ **降级为 nil（wazero 用进程内缓存）并大声告警**；
+	// 违规（形状不可信）同样只告警。真正不可用的目录在下面会被 wazero 自己再拒一次。
 	report, cerr := cachetrust.Ensure(dir, os.FileMode(limits.DataDirMode))
 	if cerr != nil {
-		return nil, fmt.Errorf("runtime: 编译缓存目录不可用: %w", cerr)
+		log.Printf("runtime: ⚠️ 编译缓存目录不可用，降级为进程内缓存（不影响功能，只影响首次编译耗时）：%v", cerr)
+		return nil, nil
 	}
 	if !report.Trusted() {
 		for _, v := range report.Violations {

@@ -546,3 +546,39 @@ func lebLen(v int) int {
 func assetPayloadLen(name string, contentLen int) int {
 	return lebLen(len(name)) + len(name) + contentLen
 }
+
+// TestPreviewHostSelfTest 跑作者侧预览宿主的自检（`node preview.mjs --selftest`）。
+//
+// 为什么这条门禁必须存在：`preview.mjs` 在 2026-09-21 从"内存桩 + 三个正则解析 SQL"
+// 换成了**真 SQLite**（`node:sqlite`）。换引擎最容易的退化是"作者本地看到的语义与线上
+// 不同"——而那种偏差不会让任何 Go 测试变红（脚本是 Node 侧交付物）。`--selftest` 把
+// 五条关键语义固化成可复跑判据：幂等建表、跨连接可见（真库）、query 路径不可写、
+// 多语句拒绝、保留列 `_row_id` 不可见/不可提、事务回滚不落库、列类型枚举与平台一致。
+//
+// 变异验证（实跑过）：
+//   - 把 PreviewDB.query 的只读连接换成读写连接 ⇒ 用例红（"query 路径上写数据"这条自检失败）；
+//   - 去掉 #classify 的多语句判据 ⇒ 用例红；
+//   - 不剥保留列 ⇒ 用例红。
+func TestPreviewHostSelfTest(t *testing.T) {
+	node := packAssetsNode(t)
+	script := filepath.Join(moduleRootForTest(t), "skills", "app-builder", "examples", "go", "preview.mjs")
+	if _, err := os.Stat(script); err != nil {
+		t.Fatalf("作者侧预览宿主不存在（%s）: %v", script, err)
+	}
+	cmd := exec.Command(node, script, "--selftest")
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	out := buf.String()
+	if err != nil {
+		t.Fatalf("preview.mjs --selftest 失败: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "全过") {
+		t.Fatalf("自检输出里没有「全过」（判据可能被改弱）：\n%s", out)
+	}
+	// 反向断言：自检**真的跑了**（有 ok 行），而不是"没跑到就退出 0"。
+	if strings.Count(out, "  ok   ") < 8 {
+		t.Fatalf("自检只跑过 %d 条，期望 ≥8 条：\n%s", strings.Count(out, "  ok   "), out)
+	}
+}

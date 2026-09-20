@@ -1,6 +1,6 @@
 ---
 name: app-builder
-version: 2.2.0
+version: 2.4.0
 title: 应用构建（WASM 应用）
 description: 把业务同事的一句话想法做成应用平台上的 WASM 应用并发布（员工自建小工具）。分轮次访谈需求、多角色评审设计、写成静态前端 + wasm JSON API、一条命令链打包发布。当用户说"做个内部小工具/应用/登记表/页面"、"把这个流程做成应用"、"发布到应用中心"、"能不能在平台上加个功能"时用本技能。
 author: 平台内置
@@ -226,18 +226,26 @@ GOOS=wasip1 GOARCH=wasm go build -o shared-notes.wasm .
 ```
 
 ```bash
-# ③ 本地自测：随技能分发的假宿主（零依赖，Node 自带 node:wasi）
+# ③ 本地自测：随技能分发的假宿主（零依赖，Node 自带 node:wasi + node:sqlite）
 #    预览读的是**打包后**的产物（先做第 7 阶段第 ① 步）—— 假宿主也要按宿主规则
 #    直出包内静态资源，所以它需要一份带了资源的 wasm。
 node preview.mjs dist/shared-notes-packed.wasm --path / --user zhangwei
 node preview.mjs dist/shared-notes-packed.wasm --path /api/notes --method POST --body '{"body":"hello"}'
+node preview.mjs dist/shared-notes-packed.wasm --path /api/notes        # 再读一次：数据真的落库了
 node preview.mjs dist/shared-notes-packed.wasm --user someone-else      # 看无权限页
+node preview.mjs dist/shared-notes-packed.wasm --dump-tables            # 看本地库有哪些表/列/行数
 ```
 
-`preview.mjs` 按 ABI 收发帧、用内存数据应答 `db.*` / `log` / `assets.read`，
-**并按宿主规则直出包内静态资源**（所以它必须先被 `pack-assets.mjs` 打包，见第 7 阶段）。
-它验证的是**协议层**（帧读写、路由分支、名单判定、静态资源直出、失败分支），不是"线上行为"；
-每次调用都是一个全新的内存库，数据不跨调用保留。
+`preview.mjs` 按 ABI 收发帧、**用真 SQLite 应答 `db.*`**（Node 内置 `node:sqlite`）、
+并按宿主规则直出包内静态资源（所以它必须先被 `pack-assets.mjs` 打包，见第 7 阶段）。
+
+两条使用要点：
+
+- **数据跨调用保留**：库落在 `<产物目录>/.preview/<名字>.db`，可以用任何 SQLite 工具直接打开看
+  （`--db <file>` / `--data-dir <dir>` 换位置，`--fresh` 清空重来）。闸门也与线上同向：
+  单语句、`db.query` 只读、保留列 `_row_id` 不可提及也不出现在结果里。
+- 它**不是**线上：没有 AI（wasm 侧本就没有）、没有并发/配额，名单判定仍是应用自己的事。
+  改过预览逻辑或升级 Node 后，可以跑 `node preview.mjs --selftest` 确认语义没漂（8 条自检）。
 
 **看到 `package fmt is not in std` 时不要怀疑 Go 装坏了**：唯一原因是第 ①步的四条环境变量
 没生效。回到上面重跑一遍。
@@ -329,8 +337,9 @@ wasm_app_publish({appId:"shared-notes", version:"1.0.0", title:"共享便签",
 8. **平台不提供员工名录**：名单只能手填已知账号；**改名单 = 发一个新版本**，运行期改不了。
 9. **不要依赖 `$HOME`**：四条状态目录（`GOCACHE`/`GOMODCACHE`/`GOPATH`/`TMPDIR`）**必须**
    指向会话工作区，否则你会看到 `package fmt is not in std` 这种指向完全错误方向的报错。
-10. **发布前先本地自测**：Node 自带的 `node:wasi` 零依赖就能跑产物（`preview.mjs`），
-    通过后再走 `wasm_app_validate` → `wasm_app_publish`。
+10. **发布前先本地自测**：Node 自带的 `node:wasi` + `node:sqlite` 零依赖就能跑产物
+    （`preview.mjs`，数据落本地库、可用 `--dump-tables` 看），通过后再走
+    `wasm_app_validate` → `wasm_app_publish`。
 11. **应用名就是标识**：`app_id` 同时是应用 origin 的 host 段（`<渠道 app 源 scheme>://<app_id>/`，
     渠道参数化：official/beta 取值 `picoaide-app`）；小写字母/数字/连字符、不超过 63 个字符、
     不能纯数字、不能 `xn--` 开头、不能是平台保留字；**一经发布不能改名**，也不能与别人的

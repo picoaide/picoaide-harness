@@ -140,8 +140,17 @@ func ValidateWithWhitelist(data []byte, whitelist []ImportSpec) (*ModuleInfo, er
 		return nil, err
 	}
 
-	// 自定义段总量（§4.2：4 MiB）。口径 = 各自定义段**负载字节和**（含段名字段），
-	// 取保守值：名字字段也确确实实进内存，判宽了就等于放宽了 §4.2 的实测依据。
+	// 自定义段总量（§4.2：4 MiB）。口径 = **会计入资源集的**自定义段负载字节和
+	// （含段名字段），取保守值：名字字段也确确实实进内存，判宽了就等于放宽了 §4.2 的实测依据。
+	//
+	// ⚠️ `.debug_*` 前缀族**不计入**（2026-09-21 审计修复）：它们在发布期被丢弃
+	// （`assets.SplitSections` 从不保留 ⇒ 不进资源集、不可能被静态直出、`assets.read`
+	// 读不到），却是真实工具链的**默认**产出。计入的后果是同一模块两个数 ——
+	// 资产口径通过、段总量口径超限，而提示说的是"请压缩资源"，作者只能按错的数改。
+	// 判据的唯一实现是 `assets.CountsTowardSectionBudget`（Parse 侧调用它累加），
+	// 作者侧脚本 `pack-assets.mjs` 的 `countsTowardSectionBudget` 与它逐字节对拍。
+	// 注意这条**不是取消预算**：非 `.debug_*` 的段超过 4 MiB 仍然照拒
+	// （TestSectionBudgetStillRejectsOversizeAssets）。
 	if info.CustomBytes > limits.SectionTotalMaxBytes {
 		e := apperr.Newf(apperr.CodeSectionOverrideOversize,
 			"自定义段总量 %d 字节超过上限 %d 字节", info.CustomBytes, limits.SectionTotalMaxBytes).

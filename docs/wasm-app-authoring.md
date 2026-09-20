@@ -368,6 +368,33 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 - 组织可开启"更新审批"：开启后新版本进待审队列，**线上仍是旧版本**（不中断使用）。
   上架/下架/删除不走审批。
 
+### 6.1a 产物里的 `.debug_*` 段：打包会忽略，**但按平台口径不计入段预算**
+
+编译器（TinyGo / Zig / Rust + LLVM）默认会带一批 **DWARF 调试段**，段名一律以
+`.debug_` 开头（`.debug_info`、`.debug_line`…）。这类段常常比代码本身还大
+（TinyGo 默认就带，Zig/LLVM 的 release 产物里也有；体积随优化级别与内联量变化，
+不引用具体数字 —— 用 `wasm-objdump -h` 量你自己的产物）。
+
+平台的处置（**打包、段预算、本地预览三处都实现，且必须逐字一致**：真源
+`server/internal/wasmapp/assets/assets.go` 的 `ToolchainSectionPrefixes` /
+`CountsTowardSectionBudget`，镜像在 `server/skills/app-builder/scripts/pack-assets.mjs`
+与 `server/skills/app-builder/examples/go/preview.mjs`）：
+
+- **打包（`pack-assets.mjs`）把它们当"工具链段"忽略**，不当作应用资源；应用资源只认
+  `picoaide.app.json` 声明过的逻辑路径。**本地预览（`preview.mjs`）同判** —— 否则会
+  出现"本地能打开、线上 404"（预览把 DWARF 直出了，而平台上它根本不在资源集里）。
+- **段总量预算（4 MiB）统计的是"会计入资源集的段"的负载字节和**，`.debug_*` **不计入**
+  —— 它们在发布期就被丢弃，不可能被静态直出、`assets.read` 也读不到。所以
+  "打包时被忽略"与"不占预算"在这一点上是一致的（2026-09-21 起两侧统一口径；
+  此前脚本按"全部自定义段"计、平台按"保留段"计，会给两个数）。
+- **但这不等于取消预算**：非 `.debug_*` 的段（真实资源）超过 4 MiB 仍然照拒。
+  因此调试段本身不会把你顶出预算，**资源才是**；要省体积仍然建议用 `-no-debug`
+  （TinyGo）或 strip 掉调试段 —— 省的是传输与冷编译时间。
+
+要点：**看数字要对同一个口径**。作者侧（打包脚本打印的段总量）与服务端 `Validate`
+报的 `SECTION_OVERRIDE_OVERSIZE` 是**同一个测量**（Go↔Node 逐字节对拍有判据）；
+两侧对不上时以 `Validate` 为准（它是发布闸门）。
+
 ### 6.2 发布之后怎么查数据（作者数据面）
 
 应用上线后，"数据到底写进去没有 / 长什么样"不再只能靠猜：
