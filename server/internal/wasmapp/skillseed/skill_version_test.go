@@ -62,6 +62,20 @@ var seededSkillDigests = map[string]string{
 	// 一条，而不是为一个没出过门的内容提版本号。
 	"08c409b0547aed5b0448575ac38dcd1f52bbb0cb8546e72782b2f0db5b26517e": "2.0.0",
 
+	// 2.1.0 = **同一份手册的"资源不落盘"口径订正**（2026-09-20，随
+	// `<data_root>/apps/<app_id>/assets/<release_id>/` 抽取目录一起作废）：
+	//   - `references/abi.md` §3.7：随包资源改为"wasm 自定义段，运行期由宿主解析后常驻
+	//     内存"，可见性/直出规则同步；`ASSET_EXISTS` 的含义由"抽取时目标已存在"改成
+	//     "同一个包内路径在自定义段里出现了两次"（平台直接拒，不再静默取第一个）；
+	//   - `references/publishing.md` §3：`picoaide.app.json` 的落点改为"随资源集一起
+	//     进内存"；
+	//   - `scripts/README.md`：打包脚本产出物的去向改为内存资源集。
+	//
+	// 为什么必须提版本（而不是就地改 2.0.0）：2.0.0 **已随 v2.7.6-beta.7 下发**，
+	// 已安装的员工靠 version 判「有更新」；就地改写会让"内容变了但版本没变"，那正是
+	// 本表存在的理由（R1-pm-8）。权威口径见 docs/decisions/2026-09-20-wasm-assets-in-memory.md。
+	"61daec2dac9a2badc6901ad2ffa8f1cbbe569d7dfe9f876864b5d0231d81fecc": "2.1.0",
+
 	// 1.2.0 = 本分支的完整技能交付内容（14 个文件）：
 	//   - references/imports.md（导入面白名单，R1-pm-18）+ abi/SKILL 指路；
 	//   - SKILL 黄金路径第 5 步的导入面自查指引（R1-pm-8 的第二半：内容变 ⇒ 版本必须跟着变）；

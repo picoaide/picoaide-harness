@@ -145,8 +145,8 @@ node scripts/pack-assets.mjs --in shared-notes.wasm --out dist/shared-notes-pack
 
 ## 3. 应用配置文件 `picoaide.app.json`
 
-随发布一起提交（**不计入 wasm 体积上限**），发布期被抽到资源目录，
-应用用 `assets.read("picoaide.app.json")` 读它。
+随发布一起提交（**不计入 wasm 体积上限**），发布期由平台连同随包资源一起收进该版本的
+资源集（运行期常驻内存，不落盘），应用用 `assets.read("picoaide.app.json")` 读它。
 
 **字段规格（字段名 / 类型 / 必填 / 取值 / 上限）只在生成物里维护**：
 `references/app-config.md`（由平台的 `appcfgspec.go` 生成，含应用配置字段与发布载荷字段）。

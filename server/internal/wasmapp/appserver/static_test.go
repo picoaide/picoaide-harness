@@ -327,18 +327,27 @@ func TestStatic_ReservedAssetMatcher(t *testing.T) {
 	}
 }
 
-// ===== 发布期目录约定（assets_dir / release id）=====
+// ===== 发布期目录约定（assets_dir）已被取消：这个列不再被读 =====
 
-func TestStatic_AssetsDirColumnIsHonoured(t *testing.T) {
+// TestStatic_AssetsDirColumnIsIgnored 是 2026-09-20「随包资源改内存直出」改造的
+// **反向断言**（取代旧的 TestStatic_AssetsDirColumnIsHonoured）：
+//
+// `app_releases.assets_dir` 列即使写着一个（曾经用来定位抽取目录的）值，
+// 静态直出也只认**内存资源集** —— wasm 自定义段（资源）+ 库内 `config_json`（配置）。
+// 列本身保留（DB schema 不动），但没有任何代码读它。
+//
+// 变异验证：让任何运行期路径重新按 `assets_dir` 去宿主盘上找资源 ⇒ 本用例红。
+func TestStatic_AssetsDirColumnIsIgnored(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("assetsdir")
+	// assets_dir 指向一个**不存在**的目录名：旧实现会因为这个目录缺失而 500/交给 wasm。
 	e.publishApp(appSpec{
 		appID: appID, config: loginConfig(), assetsDir: "custom-dir-1",
-		assets: map[string]string{"hello.txt": "from custom dir"},
+		assets: map[string]string{"hello.txt": "from memory set"},
 	})
 	rec := e.get(appID, "/hello.txt")
-	if rec.Code != http.StatusOK || rec.Body.String() != "from custom dir" {
-		t.Fatalf("资源目录名应取 assets_dir 的 basename，得到 %d %q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK || rec.Body.String() != "from memory set" {
+		t.Fatalf("资源只应来自内存资源集（assets_dir 已不被读取），得到 %d %q", rec.Code, rec.Body.String())
 	}
 }
 

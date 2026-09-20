@@ -19,17 +19,12 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
-	"github.com/picoaide/picoaide/internal/wasmapp/assets"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // cfgWith 是"AI 照工具描述只给要改的字段"的载荷形态（其余字段**缺席**）。
@@ -109,19 +104,14 @@ func TestPublishUpdateInheritsOmittedAccessFields(t *testing.T) {
 	if relCfg.Access != appcfg.AccessWhitelist || len(relCfg.Whitelist) != 1 {
 		t.Fatalf("新版本的权威配置丢了访问级别/名单: %+v", relCfg)
 	}
-	// 应用自己读到的那份（assets/picoaide.app.json）同样必须带名单。
-	raw, ferr := os.ReadFile(filepath.Join(e.dataRoot, limits.AppsDirName, "inherit-tool",
-		assets.AssetsDirName, fmt.Sprint(rel.ID), limits.AppConfigFileName))
-	if ferr != nil {
-		t.Fatalf("读随包配置失败: %v", ferr)
-	}
-	var assetCfg appcfg.Config
-	if jerr := json.Unmarshal(raw, &assetCfg); jerr != nil {
-		t.Fatalf("随包配置不是合法 JSON: %v", jerr)
-	}
-	if assetCfg.Access != appcfg.AccessWhitelist {
-		t.Fatalf("应用读到的 picoaide.app.json access = %q，want whitelist", assetCfg.Access)
-	}
+	// 应用自己读到的那份配置（宿主注入内存资源集的 picoaide.app.json）= **库内**
+	// `app_releases.config_json`（上面的 relCfg 就是它）。2026-09-20 起资源不落盘，
+	// 磁盘上没有可对拍的副本 ⇒ 原先"读 <release>/picoaide.app.json 再比一次"的断言
+	// 已删除：它验证的是"两份副本一致"，而现在只有库这一份权威（运行期
+	// assets.Build 用库里这份 config_json 注入资源集）。
+	//
+	// 负向判据同时钉住"不再有磁盘副本"。
+	assertNoAssetsDir(t, e.dataRoot, "inherit-tool")
 	if got := e.catalogAccess(e.tokens["bob"], "inherit-tool"); got != string(appcfg.AccessWhitelist) {
 		t.Fatalf("目录徽标 access = %q，want whitelist", got)
 	}

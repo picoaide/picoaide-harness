@@ -167,7 +167,7 @@ const FIELDS: FieldRow[] = [
   { key: 'user_per_app_running', label: '单用户单应用并发', group: '并发', hint: '通常为 1：单个用户在同一应用内仍串行（并发放宽的是读并发与不同用户之间）' },
   { key: 'user_per_app_queued', label: '单用户单应用排队', group: '并发', hint: '一个用户在同一应用队列里的占位上限' },
   { key: 'instance_memory_mb', label: '单实例内存上限', group: '内存', hint: '单个应用实例可用的线性内存上限（wazero 的硬上限，超了报 RUNTIME_MEMORY）' },
-  { key: 'module_cache_mb', label: '编译模块缓存上限', group: '内存', hint: '进程内缓存已编译应用的上限；几百个应用时它是常驻内存的主要项' },
+  { key: 'module_cache_mb', label: '编译模块 + 随包资源缓存上限', group: '内存', hint: '进程内缓存已编译应用与其随包资源（wasm 自定义段，单版本上限 4 MiB）的上限；两者同一笔账、同一条回收路径；几百个应用时它是常驻内存的主要项' },
   { key: 'module_cache_idle_min', label: '模块空闲回收', group: '内存', hint: '超过这个时间没被访问就逐出并归还内存给操作系统' },
   { key: 'appdb_idle_min', label: '应用库空闲回收', group: '内存', hint: '应用数据库句柄（1 条写连接 + N 条只读连接）空闲多久后关闭' },
   { key: 'appdb_cache_kib', label: 'SQLite 页缓存/连接', group: '内存', hint: '每条应用库连接的页缓存上限；下一个新建连接生效' },

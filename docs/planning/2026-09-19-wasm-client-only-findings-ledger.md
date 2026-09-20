@@ -890,3 +890,68 @@ GET /api/server/admin/wasm-apps/opens/summary
 - `--appimage-extract` → `@electron/asar` 读 `resources/app.asar`：`channel_id=beta`、**`home_dir=.picoaide-harness`**（beta 与正式版共用数据根，未回归）、`app_origin_scheme=picoaide-app`；且**本期修复的五个字面量全部在产物内**：`will-redirect`（HOST-P1-1）、`platform_reason`/`app_frozen`（P2-3 宿主半边）、`PLATFORM_`/`app-frozen`（客户端冻结文案）⇒ **交付给客户的包确实是这一版**，不是"本地绿、线上旧"。
 
 **本版仍未闭环**（逐条与 §AC/§AC.2 一致，不重复展开）：应用窗口外链落点未接线（安全半边已实现）；应用内 AI 控制权交互属下一批；`trend[].uv` 早于 90 天明细保留期如实给 0（长期保留需迁移）；三平台只实测 Linux/Xvfb；`install_id`/`nonce` 形状失败仍落 `signature_invalid`（文档已按实际收窄声明）；`origin/master` 上 11 条历史提交信息含真实域名（**已认账，建议不重写历史**，见 §AD ④）。
+
+## AF. v2.7.6-beta.7 发布与部署（2026-09-20）
+
+**发版链**：分支 `chore/release-2.7.6-beta.7`（3 提交：功能 `40e6b3e281` + 版本与说明 `dd8fc1f5b5` + 技能摘要修正 `4191e2c50c`）→ PR **#106** → 全检查绿（Gate / Go server / Desktop Linux·Windows·macOS / CodeQL×4）→ squash 合并 master **`ece6a32577`**（版本 2.7.6-beta.7 同步 root + desktop）→ annotated tag **`v2.7.6-beta.7`** → tag CI **success** → GitHub **Pre-release**（名 = tag；`picoaide-server-2.7.6-beta.7-amd64.zip` 510,080,125 B + `SHA256SUMS`）+ R2 `beta/latest.json` → 2.7.6-beta.7（`published 07:12:20Z`）。
+
+**发布说明**：`docs/releases/v2.7.6-beta.7.md` 随同一 PR 落地（**预发 tag 也走策展说明**，避开"回退自动 PR 列表"那条曾泄漏真实域名的路径）。
+
+**部署**：R2 实拉 zip → sha256 对 `SHA256SUMS` 一致 → scp → 远端 `sha256sum -c` OK → `bash /root/upgrade-beta.sh … beta /opt/picoaide 2.7.6-beta.7 …`（备份 → load → **按渠道重打 `beta-2.7.6-beta.7`** → 切 `.env` → 重建 → healthy）。**回滚点** = `SERVER_IMAGE=picoaide-harness-server:beta-2.7.6-beta.6`（本版无迁移）。核验：`/healthz` ok、manifest `server=client=2.7.6-beta.7`、`channel_id=beta`、实拉 AppImage 153,782,642 B 且 sha256 与 manifest 逐字一致。
+
+**发布途中两件事（都值得记住）**：
+1. **`corepack yarn check` 不含 Go 测试** ⇒ 本地 27/27 全绿时 `internal/wasmapp/skillseed` 的
+   `TestBuiltinSkillVersionTracksContent` 仍是红的（改过 `server/skills/app-builder/**` 就必须重算
+   整目录摘要并登记）。本版最终摘要 `08c409b0…`（18 个文件）。**发版前跑 Go 门禁**。
+2. 24 处注释把当天写成 `2026-09-21`（实际 `2026-09-20`），已逐文件归一并复核。
+
+## AG. v2.7.6-beta.8：随包资源改内存直出（2026-09-20）
+
+**触发**：beta.7 上线后用户实测**三个内置演示应用全部打不开** —— 入口页
+「资源不存在：index.html」500。根因不是"漏写一行"，而是"资源必须抽到宿主磁盘"这套机制的
+结构性后果：演示不走发布链路（`appseed` 直接落库），于是它**也得自己抽段落盘**，而它只写了
+配置 ⇒ 页面与静态资源从未落盘（线上实测资源目录里只有 `picoaide.app.json`）。
+
+**用户定案**：「不要抽取出来放到宿主盘，宿主盘只能保存 wasm 文件，应该从内存里直接响应。」
+权威口径：`docs/decisions/2026-09-20-wasm-assets-in-memory.md`。
+
+**改了什么（四条泳道，全部已独立验证）**：
+- `assets` 包重写为内存资源集（`Set`：`Build/Read/Has/List/Bytes`），`SplitSections` /
+  `ToolchainSections` / `IsLogicalAssetPath` / `ValidateLogicalPath` 下沉为**唯一一份策略**；
+  磁盘版 `Store`（含符号链接防御、原子写、realpath 前缀比对）连同其判据整体删除。
+- `appserver`：模块缓存条目新增"资源就绪"形态（`set`），新增 `acquireSet`（静态直出与
+  `assets.read` **不触发编译**）/`insertSet`（补齐资源不丢已编译模块）；`tryAcquire` 判据改成
+  `!ok || e.mod == nil`（**改造中真实踩到的 P0**：只判 `ok` 会让 wasm 执行拿到 nil 模块 ⇒ 整条 500，
+  由 releasecache 泳道用"干净副本对照"定位）；`loadReleaseAssets` 读制品字节 + 抽段 + 用**库内
+  `config_json`** 注入保留资源；新增 `CleanupLegacyAssetDirs`（启动期清历史目录，跳过符号链接）
+  并在 `cmd/server` 接线。
+- `api/publish`：staging 目录、原子改名、按版本目录 GC 全部删除（整条链路**零磁盘副作用**）；
+  发布期新增纯校验（逐资源完整路径校验 / 单文件与总量上限，总量含 config；**重名资源段** ⇒
+  `ASSET_EXISTS` + `reason=duplicate_section`，取段改用 `wasmmod.ExtractCustomSectionsWithCounts`）。
+- `appseed`：不再写版本资源目录；半成品自愈判据全部改成库内口径（分支表见交付说明）；
+  `RewritePublicAccessAssets` 只保留库内 `config_json` 改写。
+- `releasecache`：改为**元数据缓存**（content-type + ETag + 解析后的配置），不再复制一份字节
+  （字节真源 = 内存资源集，计入 `module_cache_mb`）；`DiskReads` → `SourceReads`
+  （304 复验与 200 命中都不增长、`EvictApp` 后 +1）。
+- 技能 `app-builder` 2.1.0：`references/abi.md` §3.7、`references/publishing.md` §3、
+  `scripts/README.md` 的口径改为"自定义段 / 内存资源集"（内容变 ⇒ 提版本 + 登记新摘要）。
+
+**判据（新增）**：
+- `cmd/server` 端到端 `TestAssetsAreServedFromMemoryWithoutAnyExtraction`：现场编译演示应用、
+  把 `web/` 三件套**作为自定义段**附加、`appseed` 播种后 —— ①`/static/app.css` 由宿主直出且
+  **已编译条目数保持 0**（静态直出不为一次字节读取付冷编译）；②入口 `/` 返回包内 `index.html`
+  逐字节一致，且**没有**读到磁盘上那份"历史资源"（真源是内存）；③播种后数据根里**不存在**
+  `apps/<app>/assets`；④历史资源目录被清理后服务照常。
+- `api`：`assertNoAssetsDir` 负向断言（happy path / 非法资源名 / inherit / 分片上传四处）、
+  上限与重名段双入口用例、反向控制（工具链段与 `picoaide.app.json` 重复**不**误伤）。
+- `appseed`：`TestSeedWritesNoAssetsToDisk`（整个 `<dataRoot>` 零条目）。
+- `appserver`：`TestStatic_NoAssetDirectoryOnDisk`、`TestStatic_AssetsReadUsesMemorySet`、
+  `TestCleanupLegacyAssetDirs`（含符号链接不跟随）等。
+- 变异验证：三路泳道各自实跑（落盘加回 ⇒ 负向断言红；去掉重名闸门 ⇒ 409 变 200 红；
+  去掉元数据缓存 ⇒ 304 判据红 等），变异体均已还原。
+
+**门禁**：`corepack yarn check` 27/27 通过；`gofmt`/`go vet` 干净；
+`go test ./... -count=1 -p 2`（真 PG）**全绿**；`webadmin` 554 用例通过。
+
+**本版认账**：历史资源目录清理只在启动时做一次（失败只记日志）；回滚到 beta.7 必须
+**同时恢复升级前的数据目录备份**（旧版本依赖那个目录），或回滚后重新发布各应用。

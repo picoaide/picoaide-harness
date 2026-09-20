@@ -637,19 +637,33 @@ func parseLimits(b []byte) (string, int, error) {
 
 // ===== 自定义段抽取（发布期静态资源，§4.2）=====
 
-// ExtractCustomSections 抽出全部自定义段，供发布期把静态资源落到
-// `<data_root>/apps/<app_id>/assets/<release_id>/`（§4.2，抽完即可释放 wasm 原始字节）。
+// ExtractCustomSections 抽出全部自定义段，供发布期把静态资源收进资源集
+// （2026-09-20 起不再落盘：见 docs/decisions/2026-09-20-wasm-assets-in-memory.md；
+// 抽完即可释放 wasm 原始字节）。
 //
 // 与 Parse 的差别：
-//   - 返回的内容是**复制**过的，不与 data 共享底层数组——这是"抽完立即释放原始字节"（§4.2）成立的前提；
+//   - 返回的内容是**复制**过的，不与 data 共享底层数组——这是"抽完立即释放原始字节"成立的前提；
 //   - 重名段取第一个（与 Parse 一致）。
 //
 // 本函数只做结构解析，**不重复策略判据**：调用方应先 Validate（体积 / 自定义段总量 / 导出面 / 导入面）
-// 再抽取（发布链路"抽出失败 = 发布失败"的前提是静态校验已经通过）。
+// 再抽取（发布链路"抽取失败 = 发布失败"的前提是静态校验已经通过）。
 func ExtractCustomSections(data []byte) (map[string][]byte, error) {
+	sections, _, err := ExtractCustomSectionsWithCounts(data)
+	return sections, err
+}
+
+// ExtractCustomSectionsWithCounts 与 ExtractCustomSections 相同，但**同时**返回
+// "段名 → 出现次数"。
+//
+// 为什么需要次数（2026-09-20）：随包资源以段名作为包内逻辑路径，而重名段在解析层
+// 只取第一个、其余**静默丢弃** —— 作者把同一个包内路径打了两遍（或两个不同文件映射到
+// 同一个路径）时，他看到的页面与"最后写进去的那份"不一致，且不会出现任何错误码。
+// 发布期据此拒（`ASSET_EXISTS` + `details.reason = "duplicate_section"`）比让作者对着
+// 一个"内容不对"的页面猜要便宜得多。
+func ExtractCustomSectionsWithCounts(data []byte) (map[string][]byte, map[string]int, error) {
 	info, err := Parse(data)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := make(map[string][]byte, len(info.CustomSections))
 	for name, content := range info.CustomSections {
@@ -657,5 +671,9 @@ func ExtractCustomSections(data []byte) (map[string][]byte, error) {
 		copy(cp, content)
 		out[name] = cp
 	}
-	return out, nil
+	counts := make(map[string]int, len(info.CustomSectionCounts))
+	for name, n := range info.CustomSectionCounts {
+		counts[name] = n
+	}
+	return out, counts, nil
 }

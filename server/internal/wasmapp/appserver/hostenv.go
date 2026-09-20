@@ -6,29 +6,29 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/logbuf"
 )
 
-// assetsAdapter 把 assets.Store 适配成 capapi.Assets。
+// assetsAdapter 把内存资源集（assets.Set）适配成 capapi.Assets。
 //
 // ⚠️ 为什么需要它（跨模块契约缺口，已在交付说明里点名，**不改任何一侧**）：
-// `assets.Store.Read` 的签名是
+// `assets.Set.Read` 的签名是
 //
-//	func (s *Store) Read(logicalPath string) (string, []byte, *apperr.Error)   // assets/assets.go:143
+//	func (s *Set) Read(logicalPath string) (string, []byte, *apperr.Error)
 //
 // 而 `capapi.Assets.Read` 声明的是 `error`（capapi/capapi.go:80）—— 方法签名不同 ⇒
-// `*assets.Store` **不满足** `capapi.Assets`，直接塞给 `hostcap.Capabilities.Assets`
-// 编译不过（`*assets.Store does not implement capapi.Assets (wrong type for method Read)`）。
+// `*assets.Set` **不满足** `capapi.Assets`，直接塞给 `hostcap.Capabilities.Assets`
+// 编译不过（`*assets.Set does not implement capapi.Assets (wrong type for method Read)`）。
 // 这里用一层零逻辑适配器弥合：真正要修的是两边之一（把 assets.Read 改成返回 error，
 // 或把 capapi.Assets 改成返回 *apperr.Error），但那两个包都不是本模块的文件。
 //
 // 注意"typed nil"陷阱：`*apperr.Error` 为 nil 时若直接当 error 返回会变成非 nil 接口，
 // 因此这里显式判空后再返回 nil。
-type assetsAdapter struct{ store *assets.Store }
+type assetsAdapter struct{ set *assets.Set }
 
 // Read 实现 capapi.Assets。
 func (a assetsAdapter) Read(logicalPath string) (string, []byte, error) {
-	if a.store == nil {
-		return "", nil, apperr.New(apperr.CodeInternal, "资源目录未打开")
+	if a.set == nil {
+		return "", nil, apperr.New(apperr.CodeInternal, "资源集未加载")
 	}
-	contentType, data, err := a.store.Read(logicalPath)
+	contentType, data, err := a.set.Read(logicalPath)
 	if err != nil {
 		return "", nil, err
 	}
@@ -37,10 +37,10 @@ func (a assetsAdapter) Read(logicalPath string) (string, []byte, error) {
 
 // List 实现 capapi.Assets。
 func (a assetsAdapter) List() []string {
-	if a.store == nil {
+	if a.set == nil {
 		return nil
 	}
-	return a.store.List()
+	return a.set.List()
 }
 
 // flushAppLogs 把本次请求的应用日志（logbuf，§5.1）转写到平台日志出口。
