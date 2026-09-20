@@ -131,7 +131,7 @@ unmask**、审计账号放行、未登录零出站。
 服务端用户的可写范围**（部署面：独立 uid / 只读挂载），不是再加一层路径判据。
 
 
-## 7b. ⚠️ **已知限制：持有性证明挡不住"AI 自己开浏览器"**（三轮审计 P1-①，未修，需产品决策）
+## 7b. 持有性证明挡不住"AI 自己开浏览器" —— **已修（方案 A）**（三轮审计 P1-①）
 
 ### 事实（三个使能条件都实测过）
 
@@ -150,21 +150,43 @@ unmask**、审计账号放行、未登录零出站。
 再用 `browser_get_text` 读回，就能拿到**未脱敏**的行数据。宿主侧的持有性证明**无法区分**
 "真页面的人"与"模型驱动的标签页"—— 因为那个标签页**就是**一个持有 cookie 的真页面。
 
-### 为什么没有在本批修（以及两个候选修法）
+### 采用方案 A：把 shell origin 从"浏览器标签可导航目标"里排除（2026-09-21 实施）
 
-不仓促改的理由：唯一的结构性修法（切断条件 2 或 3）会碰到**浏览器自己的页面** ——
-`/browser-shell` 与 `/browser-overlay` 正是从这个 origin 提供的，盲改导航策略可能直接
-弄坏内置浏览器与接管蒙版（这是"为了补一个洞而制造两个新洞"的典型形态）。因此这里把它
-写成**需要拍板的限制**，而不是一个临时补丁。
+**落地**：`BrowserRuntime` 新增 `navigationAllowed(url)`（`runtime.ts:713-745` 附近）——
+先判 `isShellOriginUrl(url)`（同文件，`shellOrigin` 未设置时**恒 false**：没有 shell 就没有被
+镜像的 cookie，不能退化成"守卫缺席即全拒"），命中即拒；否则委托给既有的
+`guard.allowNavigation`（scheme 策略）。**模型可达的三条导航入口全部改用它**：
+`browser_navigate`（`navigateInternal`）、`window.open`/`target=_blank`
+（`setWindowOpenHandler`）、`browser_download`（`downloadUrl`）。
 
-| 候选 | 内容 | 代价 / 风险 |
-| --- | --- | --- |
-| **A（推荐）** | 把"shell origin"从**浏览器标签可导航目标**里排除：`Runtime` 已有 `setShellOrigin`（`runtime.ts:709`），在三个 `allowNavigation` 调用点（`runtime.ts:806/1699/3360`）加一层"是不是 shell origin"的判定，**同时**给浏览器自己的两个页面加白名单（它们不是模型导航目标，是宿主自己 load 的） | 需要把"宿主自己 load 的页面"与"模型导航"两条路径分开，改 `packages/host/browser`；浏览器套件（186+ 用例）必须全绿 + 补"模型导航到 shell origin ⇒ deny / 宿主 load shell 页 ⇒ 不受影响"两条判据 |
-| **B** | `unmask` 改成**人的手势**才生效：面板点「显示原值」时向本机路由换一个一次性 token（短有效期、绑 app+table），服务端只认"带 token 的 unmask" | 需要新的票据面；且 token 仍由本机路由签发 ⇒ 若模型能到达该路由，等于没加（所以**仍需 A**）；B 的真实价值是"人类操作留痕"，不是阻断 |
+**为什么只拒这一个 origin，而不是"所有回环地址"**：被镜像 cookie 的作用域就是 shell origin；
+`127.0.0.1` 上的**其它端口**是合法的开发目标（作者常让 AI 看自己本地的 dev server），
+一并拒掉是"为了安全毁掉功能"。判据里有一条**反向对照**专门钉这个方向。
 
-**在拍板之前的口径**：`unmask` 应被视为"**给作者本人看的便利功能**"，而不是"对 AI 的强制边界"；
-`wasm_app_rows` 工具面没有 `unmask` 参数这一条仍然成立（模型走工具拿不到原值），
-但模型若**主动开浏览器导航**，当前实现挡不住。这一点必须让使用者知道，不能只在代码注释里。
+**为什么宿主自己的两个页面不受影响**：`/browser-shell` 与 `/browser-overlay` 由
+`ensureWindow` / `mountOverlay` 用 `webContents.loadURL` 直接加载（`runtime.ts:1104/1054` 等），
+**不经过**这三条模型入口。
+
+**判据**（`packages/host/browser/tests/audit-0921-shell-origin.spec.ts`，5 条）：
+① 三条入口对 shell origin 全部拒绝（含 `rows?unmask=1` 的绕过尝试；断言 `BrowserError.code`
+= `navigation-blocked`，不是只比文案）；② 反向对照：`127.0.0.1:<其它端口>`、`localhost`、
+外站仍放行；③ `shellOrigin` 未设置时判据不生效（守卫缺席 ≠ 全拒）。
+其中 `window.open` 那条的判据是**标签数**而不是 handler 返回值 —— 该 handler 恒返回
+`{action:'deny'}`（弹窗由宿主自己 `this.open()` 变成新标签），比返回值会写出恒真断言。
+
+**变异验证**：把 `isShellOriginUrl` 分支关掉（退回三轮审计时的形态）⇒ 三条 ① 用例全红
+（`browser_navigate` / `window.open` / `browser_download` 各一条）。
+
+**连带改动**：`tests/audit-r9-chrome-locale.spec.ts` 原来用 `open(SHELL_ORIGIN + "/blank")`
+**只为造一个标签**（它钉的是"重载 chrome 页不动标签视图"）；该用例改成开普通外站，
+并在注释里写明原因（不是放宽判据，是这条 URL 与它要钉的语义无关）。
+
+### 仍**未**做（同一族的收窄，留待后续）
+
+`isShellOriginUrl` 只覆盖 shell origin 本身。指向**同一台服务器**的其它主机名（例如
+反向代理/自定义域名下的同一个本机服务）不在判据内 —— 那些形态下 cookie 是否也被镜像取决于
+部署（`mirrorBrowserAuthCookies` 只按 `shellOrigin` 取 cookie）。若将来出现"其它本机 origin
+也持有证明"的形态，应把判据改为**按 cookie 作用域**而不是按 origin 字符串。
 
 
 ## 7. 与本次修订同时新增的判据（2026-09-21 审计修复批）

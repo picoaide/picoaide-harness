@@ -711,6 +711,56 @@ export class BrowserRuntime {
   }
 
   /**
+   * Decide whether a **model-facing** navigation may proceed.
+   *
+   * 除了 scheme 策略（{@link DownloadGuard.allowNavigation}）之外，还要拒**本机 shell
+   * origin**（2026-09-21 三轮审计 P1-①，见 docs/decisions/2026-09-21-app-author-data-surface.md §7b）：
+   *
+   *   - 内置浏览器的分区**故意镜像**了 shell 的 `dsh-auth-*` cookie（本插件自己的
+   *     `/browser-shell`、`/browser-overlay` 两个页面的写操作要靠它过 `requireWriteProof`），
+   *     而导航策略对浏览器标签放行一切 `http(s)`；
+   *   - 两者叠加 ⇒ 模型只要 `browser_navigate` 到 `http://127.0.0.1:<port>/api/pico/...`
+   *     就天然持有那把 cookie，**任何**依赖持有性证明的本机守卫（不只是 `unmask`）都会被绕过 ——
+   *     因为它驱动的那个标签页**就是**一个持有 cookie 的真页面。
+   *
+   * 口径（为什么只拒这一个 origin，而不是"所有回环地址"）：这一条是精确打击 —— 被镜像
+   * cookie 的作用域就是 shell origin；而 `127.0.0.1` 上的**其它**端口是合法的开发目标
+   * （作者常让 AI 看自己本地的 dev server），一并拒掉会毁掉真实用法。
+   *
+   * 宿主自己 load 两个 shell 页面走的是 `webContents.loadURL`，**不经过**这里
+   * （`ensureWindow`/`mountOverlay`），所以接管蒙版与工具栏不受影响。
+   * @param url - 候选 URL（模型输入 / `window.open` 目标 / 程序化下载）。
+   * @returns true 表示可以继续。
+   */
+  private navigationAllowed(url: string): boolean {
+    if (this.isShellOriginUrl(url)) {
+      // 不在这里写 op log：`record` 需要 tab id，而本判据同时服务 window.open / 下载
+      // 两条没有 tab 的路径。拒绝本身是**可见**的 —— 导航抛 `navigation-blocked`
+      // （模型与工具结果都能看到），window.open 由调用点记 `browser_window_open denied`。
+      return false
+    }
+    return this.guard.allowNavigation(url)
+  }
+
+  /**
+   * 判断 URL 是否落在本机 shell origin 上。
+   *
+   * `shellOrigin` 未设置（非 Electron 宿主/测试）时**恒 false**：没有 shell 就没有被镜像的
+   * cookie，判据不成立，不能因此把所有导航拒掉（那会变成"守卫缺席即全拒"的假安全）。
+   * @param url - 候选 URL。
+   * @returns true 表示该 URL 指向本机 shell origin。
+   */
+  private isShellOriginUrl(url: string): boolean {
+    const origin = this.shellOrigin
+    if (origin === undefined || origin === '') return false
+    try {
+      return new URL(url).origin === new URL(origin).origin
+    } catch {
+      return false // 相对 URL / 畸形输入交给 guard 的既有判据
+    }
+  }
+
+  /**
    * Open a tab (agent path: serial + quota wait under the user gate; user
    * path: fail-fast quota, gate bypassed).
    *
@@ -803,7 +853,7 @@ export class BrowserRuntime {
       view.webContents.setWindowOpenHandler((details) => {
         const target = typeof details?.url === 'string' ? details.url : ''
         const userInitiated = this.pool.controlled
-        if (target === '' || !this.guard.allowNavigation(target)) {
+        if (target === '' || !this.navigationAllowed(target)) {
           this.record('browser_window_open', id, `window.open denied: ${target}`, true)
           return { action: 'deny' }
         }
@@ -1696,7 +1746,7 @@ export class BrowserRuntime {
   }
 
   private async navigateInternal(id: number, url: string, waitUntil: BrowserWaitUntil, actor: RecordActor): Promise<void> {
-    if (!this.guard.allowNavigation(url)) {
+    if (!this.navigationAllowed(url)) {
       // R-1: the refusal text is model-facing (tool error) — echo the
       // *redacted* URL, exactly like history/op-log do.
       throw browserError('navigation-blocked', `browser: navigation denied — ${stripSensitiveUrl(url).slice(0, 200)}`)
@@ -3357,7 +3407,7 @@ export class BrowserRuntime {
 
   /** Trigger a programmatic download of a URL. */
   async downloadUrl(url: string, signal?: AbortSignal): Promise<void> {
-    if (!this.guard.allowNavigation(url)) {
+    if (!this.navigationAllowed(url)) {
       throw browserError('navigation-blocked', `browser: download denied — ${stripSensitiveUrl(url).slice(0, 200)}`)
     }
     const active = this.pool.activeTab
