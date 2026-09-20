@@ -11,7 +11,7 @@
 
 import { CdpSession } from './cdp.ts'
 import { BROWSER_PARTITION, BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, type NativeBrowserWindow, type NativeSession, type NativeView } from './electron-adapter.ts'
-import { BrowserGuard, ensureSessionGuard, isLocalHostname } from './guard.ts'
+import { BrowserGuard, ensureSessionGuard, isLocalHostname, looksLikeAbsoluteUrl } from './guard.ts'
 import { extractSnapshotWithMeta, extractTextWithMeta, type SnapshotExtractionMeta } from './snapshot.ts'
 import { captureScreenshot, captureScreenshotViaCdp } from './shots.ts'
 import { type SurfaceRegistry } from './surface.ts'
@@ -773,7 +773,7 @@ export class BrowserRuntime {
       // 解析失败 ≠ 安全：带 scheme 的绝对 URL 在 Node 侧解析失败、Chromium 侧却可能接受
       // （六轮审计实测 `http://[::ffff:0177.0.0.1]:PORT/` → 归一化为回环）⇒ 这种输入按
       // "禁止"处理；纯相对 URL 交给 guard 的既有语义（同源、不越界）。
-      return /^[a-z][a-z0-9+.-]*:/iu.test(url.trim())
+      return looksLikeAbsoluteUrl(url)
     }
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
     // 本机判定的**唯一实现**在 guard（含 IPv6 / IPv4-mapped / `*.localhost` 等写法），

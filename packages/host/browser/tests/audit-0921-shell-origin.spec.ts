@@ -269,9 +269,35 @@ describe('内置浏览器不得导航到本机 shell origin（三轮审计 P1-�
 
   it('⑤ 解析不出来的绝对本机 URL 也拒（同 Node/Chromium 接受面差异）', async () => {
     const { runtime } = makeRuntime()
-    for (const raw of ['http://[::ffff:0177.0.0.1]:8080/', 'http://[::ffff:127.0.0.01]/']) {
-      await expect(runtime.navigate(1, raw), raw).rejects.toMatchObject({ code: 'navigation-blocked' })
+    for (const raw of [
+      'http://[::ffff:0177.0.0.1]:8080/',
+      'http://[::ffff:127.0.0.01]/',
+      '\u0001http://[::ffff:0177.0.0.1]:8080/',
+    ]) {
+      await expect(runtime.navigate(1, raw), JSON.stringify(raw)).rejects.toMatchObject({ code: 'navigation-blocked' })
     }
+
+    // ⚠️ 上面三条会被 **guard 层**同样拒掉，所以它们**证明不了 runtime 层的 catch**
+    //（七轮审计 P3-②：只回退 runtime 的 catch，本文件仍全绿）。而 will-navigate /
+    // will-redirect / will-frame-navigate 三条事件处理器**只**走运行时的
+    // `isForbiddenLocalTarget`（不查 scheme 策略）⇒ 它们才是 runtime catch 的独立判据。
+    const { runtime: rt2, adapter } = makeRuntime()
+    await rt2.open('https://a.example')
+    const view = adapter.createdViews.at(-1)
+    // ⚠️ 必须用**核心也解析不出来**的形态：前导 C0 + 一个**能**解析的 `http://127.0.0.1/`
+    // 在 Node 侧本身就能解析成功（WHATWG 会剥前导 C0）⇒ 走的是"正常判定"分支，
+    // 证明不了 catch。这里的 `[::ffff:0177.0.0.1]` 才是 Node 抛错、Chromium 接受的形态。
+    for (const [event, url] of [
+      ['will-redirect', '\u0001http://[::ffff:0177.0.0.1]:8080/'],
+      ['will-navigate', '\u0001http://[::ffff:0177.0.0.1]:8080/'],
+    ] as const) {
+      const state = { prevented: false }
+      const handler = view!.listeners.get(event)?.[0]
+      expect(handler, `${event} 必须注册`).toBeTypeOf('function')
+      handler!({ preventDefault: () => { state.prevented = true } }, url)
+      expect(state.prevented, `${event} 的前导 C0 形态必须被运行时的本机判据拦住`).toBe(true)
+    }
+    await rt2.dispose()
     await runtime.dispose()
   })
 
