@@ -430,3 +430,73 @@ func contains(haystack, needle string) bool {
 		return false
 	})()
 }
+
+// TestCompilerAvoidsUntrustedCacheDir 覆盖"不可信缓存 ⇒ 编译子进程不碰那棵树"。
+//
+// 背景（2026-09-21 四轮审计 P2-①）：执行侧已经"不可信 ⇒ 不用"（`runtime.NewCompilationCache`），
+// 而编译侧此前只在 `require` 档 fail-closed、其余档位（**compose 默认就是 auto**）
+// 告警之后**照用** —— 两侧不对称。这条不对称有后果：wazero 的磁盘缓存是**读 + 写**，
+// 子进程命中就直接加载那份"机器码"并干跑它；`auto` 档在没有 bwrap 的机器上不隔离，
+// 于是"能布置缓存目录的人"可以在**读得到数据根的编译进程**里执行代码。
+//
+// 判据（三条，缺一不可）：
+//  1. 不可信（这里把分代目录做成指向别处的**符号链接**）⇒ `childCacheDir` 必须**偏离**配置目录；
+//  2. 替代目录必须是本进程新建的真实目录、权限 0700，且**攻击者目录里一个文件都没有**
+//     （只断言"换了个路径"挡不住"换了路径但仍然写进攻击者目录"的实现）；
+//  3. **反向对照**：可信目录下必须**原样**使用配置目录 —— 否则"永远换临时目录"会让
+//     "发布期编译暖到执行进程"这条前提静默失效（拿功能换安全）。
+//
+// 变异验证：把不可信分支里的 `childCacheDir = tmp` 改回 `childCacheDir = cache` ⇒ ① 红。
+func TestCompilerAvoidsUntrustedCacheDir(t *testing.T) {
+	child := buildCompileChildOnce(t)
+
+	// ① 构造不可信缓存：`<dataRoot>/_compile-cache/<gen>` 是指向攻击者目录的符号链接。
+	root := t.TempDir()
+	attacker := filepath.Join(root, "attacker-dir")
+	if err := os.MkdirAll(attacker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configuredParent := filepath.Dir(CompileCacheDir(root))
+	if err := os.MkdirAll(configuredParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(attacker, CompileCacheDir(root)); err != nil {
+		t.Skipf("环境不支持符号链接：%v", err)
+	}
+
+	c := newTestCompiler(t, child, func(o *Options) {
+		o.DataRoot = root
+		o.Isolation = IsolationOff // 非 require 档（compose 默认走的就是这条）
+	})
+	if c.childCacheDir == c.CacheDir() {
+		t.Fatalf("缓存目录不可信时，子进程不得使用配置的缓存目录（%s）—— "+
+			"wazero 的磁盘缓存是读+写，命中即加载并干跑那份机器码；auto 档没有 OS 隔离时"+
+			"等于把代码执行权交给能布置该目录的人", c.CacheDir())
+	}
+	info, err := os.Stat(c.childCacheDir)
+	if err != nil {
+		t.Fatalf("替代缓存目录不存在（%s）：%v", c.childCacheDir, err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("替代缓存目录必须是 0700 的真实目录：mode=%#o", info.Mode().Perm())
+	}
+	// ② 攻击者目录必须**一个文件都没有**（平台没有把编译产物写进去）。
+	entries, derr := os.ReadDir(attacker)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("不可信缓存目录被写入：攻击者目录出现 %d 项 %v", len(entries), names)
+	}
+
+	// ③ 反向对照：可信目录必须原样使用（否则"暖缓存"这条前提静默失效）。
+	good := newTestCompiler(t, child, func(o *Options) { o.Isolation = IsolationOff })
+	if good.childCacheDir != good.CacheDir() {
+		t.Fatalf("缓存目录可信时必须原样使用配置目录（否则发布期编译无法暖到执行进程）：child=%s configured=%s",
+			good.childCacheDir, good.CacheDir())
+	}
+}
