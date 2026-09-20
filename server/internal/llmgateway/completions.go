@@ -147,6 +147,8 @@ func (a *API) handleCompletions(c *gin.Context) {
 // (/chat/completions, /completions, /responses). It is forward() with a
 // selectable endpoint suffix.
 func (a *API) forwardEndpoint(c *gin.Context, up *Upstream, raw []byte, stream bool, endpoint string) (*http.Response, error) {
+	// P0-4 服务端侧第二道闸门：出站请求体剔除上游 DSH 私有扩展字段（见 sanitize.go）。
+	raw = sanitizeOutboundBody(raw)
 	url := upstreamURLFor(up.BaseURL, endpoint)
 	client := a.client
 	if stream {
