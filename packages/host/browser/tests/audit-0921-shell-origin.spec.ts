@@ -36,6 +36,8 @@ let capturedWindowOpen: ((details: { url: string }) => { action: string }) | und
 class MockView {
   partition = ''
   session: MockSession | undefined
+  /** 视图上注册的事件监听器（本用例要直接触发 will-navigate / will-redirect）。 */
+  readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>()
   attach(): void {}
   setBounds(): void {}
   setVisible(): void {}
@@ -64,7 +66,11 @@ class MockView {
       setAudioMuted: () => {},
       isAudioMuted: () => false,
       isLoading: () => false,
-      on: () => {},
+      on: (event: string, listener: (...args: unknown[]) => void) => {
+        const list = this.listeners.get(event) ?? []
+        list.push(listener)
+        this.listeners.set(event, list)
+      },
       removeListener: () => {},
       session: this.session ?? new MockSession(),
       setWindowOpenHandler: (cb: (details: { url: string }) => { action: string }) => { capturedWindowOpen = cb },
@@ -85,9 +91,11 @@ class MockSession {
 
 class MockAdapter {
   readonly partitionSession = new MockSession()
+  readonly createdViews: MockView[] = []
   createView(): never {
     const view = new MockView()
     view.session = this.partitionSession
+    this.createdViews.push(view)
     return view as never
   }
   createMaskView(): never {
@@ -116,20 +124,21 @@ afterEach(() => {
 
 const SHELL = 'http://127.0.0.1:45678'
 
-function makeRuntime(withShellOrigin = true): BrowserRuntime {
+function makeRuntime(withShellOrigin = true): { runtime: BrowserRuntime, adapter: MockAdapter } {
   const dir = join(process.cwd(), 'tests', `.shell-origin-${Math.random().toString(36).slice(2)}`)
   mkdirSync(dir, { recursive: true })
   dirs.push(dir)
-  const runtime = new BrowserRuntime(new MockAdapter() as never, {}, undefined, 'persist:test-part', {
+  const adapter = new MockAdapter()
+  const runtime = new BrowserRuntime(adapter as never, {}, undefined, 'persist:test-part', {
     store: new BrowserStore({ dir }),
   })
   if (withShellOrigin) runtime.setShellOrigin(SHELL)
-  return runtime
+  return { runtime, adapter }
 }
 
 describe('内置浏览器不得导航到本机 shell origin（三轮审计 P1-①）', () => {
   it('① browser_navigate 到 shell origin 被拒（含 rows?unmask=1 的绕过尝试）', async () => {
-    const runtime = makeRuntime()
+    const { runtime } = makeRuntime()
     for (const url of [
       `${SHELL}/api/pico/apps/wasm/demo/rows?table=notes&unmask=1`,
       `${SHELL}/api/pico/apps/wasm`,
@@ -147,7 +156,7 @@ describe('内置浏览器不得导航到本机 shell origin（三轮审计 P1-�
   })
 
   it('① window.open（target=_blank）落在 shell origin 时不产生新标签', async () => {
-    const runtime = makeRuntime()
+    const { runtime } = makeRuntime()
     capturedWindowOpen = undefined
     // 先开一个正常标签：`setWindowOpenHandler` 是在建 tab 时装的，装机后才可断言。
     await runtime.open('https://a.example')
@@ -170,7 +179,7 @@ describe('内置浏览器不得导航到本机 shell origin（三轮审计 P1-�
   })
 
   it('① browser_download 到 shell origin 被拒', async () => {
-    const runtime = makeRuntime()
+    const { runtime } = makeRuntime()
     await expect(runtime.downloadUrl(`${SHELL}/api/pico/apps/wasm/demo/export`)).rejects.toMatchObject({
       constructor: BrowserError,
       code: 'navigation-blocked',
@@ -178,15 +187,43 @@ describe('内置浏览器不得导航到本机 shell origin（三轮审计 P1-�
     await runtime.dispose()
   })
 
+  it('① 页面自己发起的导航与**服务端重定向**落到 shell origin 也被拒（will-navigate/will-redirect）', async () => {
+    // 为什么这条必须独立存在（2026-09-21）：`browser_navigate` 那条闸只罩"模型显式调用的
+    // 导航"。模型可以先把标签导航到一个**它控制的**外站，再让那个站 302 到
+    // `http://127.0.0.1:<port>/api/pico/...`（Electron 对重定向**不触发** `will-navigate`），
+    // 或（若 eval 允许）直接 `location.href = …` —— 两者都在**持有被镜像 cookie 的标签里**
+    // 发生，于是同样绕过所有依赖持有性证明的本机守卫。
+    const { runtime } = makeRuntime()
+    const adapter = (runtime as unknown as { adapter: MockAdapter }).adapter
+    await runtime.open('https://a.example')
+    const view = adapter.createdViews.at(-1)
+    expect(view, '应能拿到刚创建的标签视图').toBeDefined()
+    const fire = (event: string, url: string): { prevented: boolean } => {
+      const state = { prevented: false }
+      const handler = view!.listeners.get(event)?.[0]
+      expect(handler, `标签视图必须注册 ${event} 闸门（否则这条判据是空转）`).toBeTypeOf('function')
+      handler!({ preventDefault: () => { state.prevented = true } }, url)
+      return state
+    }
+    // 两条事件都必须在 shell origin 上**取消**导航。
+    expect(fire('will-redirect', `${SHELL}/api/pico/apps/wasm/demo/rows?unmask=1`).prevented).toBe(true)
+    expect(fire('will-navigate', `${SHELL}/api/pico/apps/wasm/demo/rows?unmask=1`).prevented).toBe(true)
+    // 反向对照：正常外站（含重定向目标）不得被取消。
+    expect(fire('will-redirect', 'https://b.example/next').prevented).toBe(false)
+    expect(fire('will-navigate', 'https://b.example/next').prevented).toBe(false)
+    await runtime.dispose()
+  })
+
   it('② 反向对照：同一台机器上的**其它**端口仍然放行（真实开发用法）', () => {
     // 判据落在 scheme 策略层：guard 本身不拒回环（精确打击只针对被镜像 cookie 的那个 origin）。
+    // 少了这条，把"所有回环地址一律拒掉"这种"为了安全毁掉功能"的实现也会全绿。
     expect(classifyNavigation('http://127.0.0.1:5173/')).toBe('allow')
     expect(classifyNavigation('http://localhost:3000/app')).toBe('allow')
     expect(classifyNavigation('https://example.com/')).toBe('allow')
   })
 
   it('③ shell origin 未设置时不得拒绝一切（守卫缺席 ≠ 全拒）', async () => {
-    const runtime = makeRuntime(false)
+    const { runtime } = makeRuntime(false)
     // 没有 shell 就没有被镜像的 cookie，判据不成立 ⇒ 正常导航不该被这条挡掉。
     // （用 promise 的形态断言"不是 navigation-blocked"：真实 loadURL 会在 mock 适配器上
     //   以别的方式失败，这里只关心**拒绝理由**不是本判据。）
