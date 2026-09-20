@@ -11,7 +11,7 @@
 
 import { CdpSession } from './cdp.ts'
 import { BROWSER_PARTITION, BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, type NativeBrowserWindow, type NativeSession, type NativeView } from './electron-adapter.ts'
-import { BrowserGuard, ensureSessionGuard } from './guard.ts'
+import { BrowserGuard, ensureSessionGuard, isLocalHostname } from './guard.ts'
 import { extractSnapshotWithMeta, extractTextWithMeta, type SnapshotExtractionMeta } from './snapshot.ts'
 import { captureScreenshot, captureScreenshotViaCdp } from './shots.ts'
 import { type SurfaceRegistry } from './surface.ts'
@@ -772,9 +772,9 @@ export class BrowserRuntime {
       return false // 相对 URL / 畸形输入交给 guard 的既有判据
     }
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
-    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/gu, '')
-    if (host === 'localhost' || host === '::1' || host === '0.0.0.0') return true
-    if (/^127\./u.test(host)) return true
+    // 本机判定的**唯一实现**在 guard（含 IPv6 / IPv4-mapped / `*.localhost` 等写法），
+    // 这里不复制一份 —— 两份判据必然漂移，而漂移方向是"漏掉某个能落到本机的写法"。
+    if (isLocalHostname(parsed.hostname)) return true
     const shell = this.shellOrigin
     if (shell !== undefined && shell !== '') {
       try {

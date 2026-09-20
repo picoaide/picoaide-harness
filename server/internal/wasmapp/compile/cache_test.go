@@ -493,10 +493,83 @@ func TestCompilerAvoidsUntrustedCacheDir(t *testing.T) {
 		t.Fatalf("不可信缓存目录被写入：攻击者目录出现 %d 项 %v", len(entries), names)
 	}
 
+	// ②b **真的编译一次**（五轮审计 P1 的教训）：只断言结构体字段是不够的 ——
+	// `-cache-dir`（子进程 argv 的显式声明）与请求里的 `cache_dir` 必须是同一个值，
+	// 子进程的启动自检会比对两者，不一致直接回 INTERNAL。上一版只改了请求、漏了 argv，
+	// 于是"不可信 ⇒ 换临时目录"这条分支上**每一次真实编译都失败**，而只查字段的用例全绿。
+	// 因此这里必须走完整链路：真编译 + 断言产物落在替代目录里 + 攻击者目录仍为空。
+	mod := writeModule(t, t.TempDir(), "untrusted-cache.wasm", wasmtest.Base())
+	if _, cerr := c.Compile(context.Background(), mod); cerr != nil {
+		t.Fatalf("缓存不可信时编译必须仍然成功（改用临时缓存目录即可，见 doc.go 的口径）：%v", cerr)
+	}
+	afterEntries, aerr := os.ReadDir(attacker)
+	if aerr != nil {
+		t.Fatal(aerr)
+	}
+	if len(afterEntries) != 0 {
+		t.Fatalf("编译后攻击者目录仍必须为空，实际 %d 项", len(afterEntries))
+	}
+	cacheEntries, cerr2 := os.ReadDir(c.childCacheDir)
+	if cerr2 != nil {
+		t.Fatal(cerr2)
+	}
+	if len(cacheEntries) == 0 {
+		t.Fatalf("真编译必须在替代缓存目录里留下条目（否则这条判据只是「编译没报错」）: %s", c.childCacheDir)
+	}
+
 	// ③ 反向对照：可信目录必须原样使用（否则"暖缓存"这条前提静默失效）。
 	good := newTestCompiler(t, child, func(o *Options) { o.Isolation = IsolationOff })
 	if good.childCacheDir != good.CacheDir() {
 		t.Fatalf("缓存目录可信时必须原样使用配置目录（否则发布期编译无法暖到执行进程）：child=%s configured=%s",
 			good.childCacheDir, good.CacheDir())
+	}
+}
+
+// TestCompilerFailureDoesNotLeakTempCacheDir 覆盖五轮审计 P2-②：
+// 不可信缓存时创建的替代目录，在 `New` **失败**路径上必须被清掉。
+//
+// 为什么单测能得到确定结论：`os.MkdirTemp("", …)` 落在 `$TMPDIR`，所以把 TMPDIR 指向
+// 一个空目录后，"有没有泄漏"就是"那个目录里有没有东西"（不依赖全局 /tmp 的并发状态）。
+// 触发失败的方式 = `ChildBinary` 指向不存在的路径（`resolveChildBinary` 必失败），
+// 而这一步在替代目录创建**之后**。
+//
+// 变异验证：把 `return fail(err)` 改回 `return nil, err` ⇒ 本用例红。
+func TestCompilerFailureDoesNotLeakTempCacheDir(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+
+	root := t.TempDir()
+	attacker := filepath.Join(root, "attacker")
+	if err := os.MkdirAll(attacker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(CompileCacheDir(root)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(attacker, CompileCacheDir(root)); err != nil {
+		t.Skipf("环境不支持符号链接：%v", err)
+	}
+
+	_, err := New(Options{
+		DataRoot:    root,
+		Isolation:   IsolationOff,
+		ChildBinary: filepath.Join(root, "does-not-exist-compile-child"),
+		Timeout:     5 * time.Second,
+		Logger:      testLogger{t},
+	})
+	if err == nil {
+		t.Fatal("子进程二进制不存在时 New 必须失败（否则本用例是空转）")
+	}
+	entries, derr := os.ReadDir(tmp)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("New 失败后仍在 TMPDIR 里留下 %d 项 %v —— 替代缓存目录必须在失败返回前清掉"+
+			"（调用方拿到 nil 编译器，永远不会调 Close）", len(entries), names)
 	}
 }
