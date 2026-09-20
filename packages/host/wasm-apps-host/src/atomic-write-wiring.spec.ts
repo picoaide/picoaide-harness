@@ -33,8 +33,14 @@ const { APP_WINDOWS_STATE_FILE, writeWindowsState } = await import('./windows.ts
 
 const sourceDir = dirname(fileURLToPath(import.meta.url))
 const packageDir = dirname(sourceDir)
-/** 本包对上游 atomic-write 的依赖取值（与 desktop 对齐，见判据 1）。 */
-const DECLARED_VERSION = '0.1.5-rc.2'
+/**
+ * 本包对上游 atomic-write 的依赖取值（与 desktop 对齐，见判据 1）。
+ * 取自 `upstream.json` 的 pin（唯一真源）而不是字面量 —— 写死会让每次升级都手改
+ * 这里，改漏就是假红（2026-09-20 升级审计 P1-8）。
+ */
+const DECLARED_VERSION = (JSON.parse(
+  readFileSync(fileURLToPath(new URL('../../../../upstream.json', import.meta.url)), 'utf8'),
+) as { runtimePackageVersion: string }).runtimePackageVersion
 
 afterEach(() => {
   writeFileAtomicSpy.mockClear()
