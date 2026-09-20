@@ -18,6 +18,7 @@ import (
 
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/upload"
@@ -251,11 +252,19 @@ func TestUploadFlowEqualsOneShotPublish(t *testing.T) {
 	if err != nil || app.CurrentReleaseID != hist[0].ID {
 		t.Fatalf("current_release_id 未指向新版本: app=%+v err=%v", app, err)
 	}
-	// 真落盘：资源目录与宿主写的应用配置文件都在。
-	assetsDir := filepath.Join(env.dataRoot, limits.AppsDirName, "split-app", "assets", strconv.FormatInt(hist[0].ID, 10))
-	if _, serr := os.Stat(filepath.Join(assetsDir, limits.AppConfigFileName)); serr != nil {
-		t.Fatalf("发布产物 %s 不存在: %v", limits.AppConfigFileName, serr)
+	// 库内权威：宿主解析后的应用配置落在**版本行**（config_json）—— 2026-09-20 起
+	// 随包资源不再抽到磁盘，应用读到的那份 picoaide.app.json 由运行期
+	// assets.Build 用库内这份 config_json 注入内存资源集（决策文档
+	// docs/decisions/2026-09-20-wasm-assets-in-memory.md）。
+	var storedCfg appcfg.Config
+	if jerr := json.Unmarshal([]byte(hist[0].ConfigJSON), &storedCfg); jerr != nil {
+		t.Fatalf("版本行 config_json 不是合法 JSON: %v", jerr)
 	}
+	if storedCfg.Purpose != cfg["purpose"] || storedCfg.Owner != cfg["owner"] {
+		t.Fatalf("版本行配置与提交不符: %+v", storedCfg)
+	}
+	// 负向判据：分片路径同样不得留下任何按版本落盘的资源目录。
+	assertNoAssetsDir(t, env.dataRoot, "split-app")
 	// 审计：应用级动作留痕（与一次性发布同一条动作名）。
 	if actions := env.auditActions("split-app"); !containsStr(actions, "wasm_app_release") {
 		t.Fatalf("缺少 wasm_app_release 审计: %v", actions)

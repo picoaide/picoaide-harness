@@ -205,8 +205,9 @@ func New(opt Options) (*Server, error) {
 	// app_db_readers 的部署在重启后会"退回默认"，直到下一次保存才生效。
 	// 它只影响**新建句柄**（语义见 appDBPool.SetReaders）。
 	s.appdbs.SetReaders(lim.AppDBReaders)
-	// (app_id, release_id) 级资源/配置缓存：上限来自 limits 真源（不是本包的常量）。
-	s.releases = newReleaseCache(limits.ReleaseCacheMaxBytes, limits.ReleaseCacheMaxReleases, now)
+	// (app_id, release_id) 级资源元数据/配置缓存：上限来自 limits 真源（不是本包的常量）。
+	// 只有条目数上限 —— 字节不再由本缓存持有（随包资源计入模块缓存的 module_cache_mb）。
+	s.releases = newReleaseCache(limits.ReleaseCacheMaxReleases, now)
 	s.reclaim = newReclaimer(freeOSMemory, now, logger)
 	logger("appserver: %s；生效限制项 %s（队列并发/实例内存/模块缓存/库句柄均按它强制）", prof.Report(), lim.Encode())
 

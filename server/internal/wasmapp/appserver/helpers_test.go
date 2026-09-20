@@ -29,12 +29,14 @@ package appserver
 //   - 把 logbuf 换成自建 sink（丢掉 §5.1 的统一限额实现）⇒ TestServe_AppLogsGoToPlatformLog 红；
 //   - 把 `defer s.flushAppLogs` 挪回"获取句柄之后"（旧顺序：刷盘发生在持执行槽/句柄期间）
 //     ⇒ TestServe_AppLogFlushHoldsNoSlotOrHandle 红（R1-rt-6）；
-//   - 把 serveStatic 改回"先整份读盘 + 算 sha256，再判 If-None-Match"（绕过缓存）
-//     ⇒ TestStatic_NotModifiedDoesNotTouchDisk / TestStatic_CachedBytesSurviveFileRemoval 红（R1-rt-2/3）；
-//   - 让 releaseContent.Config() 每次读盘解析 ⇒ TestReleaseCache_ConfigIsCachedPerRelease 红；
+//   - 把 serveStatic 改回"先回源派生 ETag（算 sha256），再判 If-None-Match"（绕过元数据缓存）
+//     ⇒ TestStatic_NotModifiedDoesNotTouchSource / TestStatic_CacheHitSkipsDerivation 红（R1-rt-2/3）；
+//   - 让 releaseContent.Config() 每次重新解析配置 ⇒ TestReleaseCache_ConfigIsCachedPerRelease 红；
 //   - 让 dropOtherReleasesLocked 变 no-op ⇒ TestReleaseCache_VersionChangeDropsOldRelease 红；
 //   - 去掉 EvictApp 里的 releases.evictApp ⇒ TestStatic_EvictAppInvalidatesCache 红；
-//   - 去掉 releaseCache.evictLocked 的容量淘汰 ⇒ TestReleaseCache_IsBounded 红（有界性）；
+//   - 去掉 releaseCache.evictLocked 的条目淘汰 ⇒ TestReleaseCache_IsBounded 红（有界性）；
+//   - 把"随包资源抽取到 <data_root>/apps/<app_id>/assets/"加回产品链路
+//     ⇒ TestStatic_NoAssetDirectoryOnDisk 红（2026-09-20 内存直出的交付判据）；
 //   - **让平台自己比对白名单**（R24 / A3：只注入身份与模式，名单由应用判）
 //     ⇒ TestServe_WhitelistOutsiderStillReachesWasm 红（2026-09-18 独立审计补的回归网：
 //     这条性质在该用例之前没有任何用例咬住）。
@@ -54,6 +56,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,9 +65,7 @@ import (
 	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
-	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/events"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 测试用的账号夹具（本仓公开，禁止真实域名：AGENTS.md 的域名纪律 —— W4 删除
@@ -164,15 +165,50 @@ func appBinary(t *testing.T, name string) []byte {
 // 追加自定义段是合法的 wasm 编码（段表里额外的 section id 0 被允许），不影响执行。
 func withCustomSection(t *testing.T, app, name string, payload []byte) []byte {
 	t.Helper()
-	base := appBinary(t, app)
-	body := make([]byte, 0, len(name)+len(payload)+8)
-	body = append(body, byte(len(name)))
-	body = append(body, name...)
-	body = append(body, payload...)
-	out := append([]byte{}, base...)
-	out = append(out, 0) // section id 0 = custom
-	// LEB128 长度前缀。
-	n := len(body)
+	return appendCustomSection(appBinary(t, app), name, payload)
+}
+
+// withAssetsInWasm 把"包内逻辑路径 → 内容"折成 wasm 的自定义段（随包资源的唯一载体）。
+//
+// 布局（wasm 规范的 custom section）：
+//
+//	0x00 | uleb(payloadLen) | uleb(nameLen) | name | data
+//	payloadLen = ulebLen(nameLen) + len(name) + len(data)
+//
+// 自定义段可以重复出现、也可以出现在模块末尾；解析器（wasmmod.Parse）按 id 顺序读，
+// 因此这里直接追加即可，不影响模块执行。段名按字典序写入 ⇒ 同一个 spec 产出同一份
+// 模块字节（wazero 的磁盘编译缓存才能跨用例复用）。
+//
+// `picoaide.app.json` 不在这里注入：它是平台保留资源名，`assets.SplitSections` 会忽略
+// 模块里的同名段，运行期由库内 `config_json` 注入（配置的唯一权威）。
+func withAssetsInWasm(wasm []byte, files map[string]string) []byte {
+	if len(files) == 0 {
+		return wasm
+	}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := append([]byte{}, wasm...)
+	for _, name := range names {
+		out = appendCustomSection(out, name, []byte(files[name]))
+	}
+	return out
+}
+
+// appendCustomSection 在 wasm 末尾追加一个自定义段（id = 0）。
+func appendCustomSection(wasm []byte, name string, data []byte) []byte {
+	body := append(ulebBytes(uint32(len(name))), name...)
+	body = append(body, data...)
+	out := append(wasm, 0) // section id 0 = custom
+	out = append(out, ulebBytes(uint32(len(body)))...)
+	return append(out, body...)
+}
+
+// ulebBytes 是 LEB128（无符号）编码。
+func ulebBytes(n uint32) []byte {
+	var out []byte
 	for {
 		b := byte(n & 0x7f)
 		n >>= 7
@@ -181,10 +217,9 @@ func withCustomSection(t *testing.T, app, name string, payload []byte) []byte {
 		}
 		out = append(out, b)
 		if n == 0 {
-			break
+			return out
 		}
 	}
-	return append(out, body...)
 }
 
 // ===== 用例环境 =====
@@ -308,11 +343,14 @@ type appSpec struct {
 	config string
 	// configOverride 为 true 时 config 为空表示"不写配置文件"（测平台故障分支）。
 	skipConfig bool
-	// assets 是抽取目录里的额外资源（逻辑路径 → 内容）。
+	// assets 是**随包资源**（包内逻辑路径 → 内容）。publishApp 把它们折成 wasm 的
+	// 自定义段（2026-09-20 起随包资源不再落盘）；`picoaide.app.json` 不放这里 ——
+	// 平台保留资源名由资源集按库内 `config_json` 注入（见 withAssetsInWasm）。
 	assets map[string]string
 	// wasm 空 = echoapp。
 	wasm []byte
-	// assetsDir 非空 = 把资源写进这个目录名并写回 assets_dir 列（测发布期约定）。
+	// assetsDir 非空 = 往 `app_releases.assets_dir` 列写这个值，**只用于反向断言**
+	// （证明该列已不再被任何代码读取：目录名/路径都不再影响资源解析）。
 	assetsDir string
 }
 
@@ -366,7 +404,7 @@ func legacyWhitelistConfig(whitelist ...string) string {
 		`"purpose":"旧 schema","data_sensitivity":"internal","owner":"alice"}`
 }
 
-// publishApp 建应用 + 版本 + 抽取好的资源目录，返回**重新读回**的版本行。
+// publishApp 建应用 + 版本（资源折成 wasm 自定义段），返回**重新读回**的版本行。
 func (e *env) publishApp(spec appSpec) *serverstore.WasmRelease {
 	e.t.Helper()
 	if spec.appID == "" {
@@ -409,6 +447,9 @@ func (e *env) publishApp(spec appSpec) *serverstore.WasmRelease {
 	if len(wasm) == 0 {
 		wasm = appBinary(e.t, "echoapp")
 	}
+	// 随包资源 = wasm 的**自定义段**（2026-09-20 定案：不再抽取到宿主磁盘，
+	// 运行期从内存资源集直出，见 docs/decisions/2026-09-20-wasm-assets-in-memory.md）。
+	wasm = withAssetsInWasm(wasm, spec.assets)
 	status := spec.status
 	if status == "" {
 		status = serverstore.ReleaseStatusApproved
@@ -425,35 +466,17 @@ func (e *env) publishApp(spec appSpec) *serverstore.WasmRelease {
 		e.t.Fatalf("SetWasmAppCurrentRelease: %v", err)
 	}
 
-	dirName := strconv.FormatInt(id, 10)
+	// assets_dir 列本身保留（DB schema 不动），但发布链路已不再写它、也没有任何代码
+	// 读它 —— 这里只在用例显式要求时写一个值，用来做"它确实不再被读"的反向断言。
 	if spec.assetsDir != "" {
-		dirName = spec.assetsDir
 		if _, err := e.db.ExecContext(ctx,
-			`UPDATE app_releases SET assets_dir = $1 WHERE id = $2`, dirName, id); err != nil {
+			`UPDATE app_releases SET assets_dir = $1 WHERE id = $2`, spec.assetsDir, id); err != nil {
 			e.t.Fatalf("写回 assets_dir: %v", err)
 		}
 	}
-	dir := filepath.Join(e.root, limits.AppsDirName, spec.appID, assets.AssetsDirName, dirName)
-	if err := os.MkdirAll(dir, limits.DataDirMode); err != nil {
-		e.t.Fatalf("建资源目录: %v", err)
-	}
-	// picoaide.app.json 与其它资源写进同一份抽取目录（应用用 assets.read 读同一份）。
-	files := map[string]string{}
-	for k, v := range spec.assets {
-		files[k] = v
-	}
-	if !spec.skipConfig {
-		files[limits.AppConfigFileName] = cfg
-	}
-	for name, content := range files {
-		full := filepath.Join(dir, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
-			e.t.Fatalf("建资源子目录: %v", err)
-		}
-		if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
-			e.t.Fatalf("写资源 %s: %v", name, err)
-		}
-	}
+	// 注意：这里**刻意不建任何资源目录**（旧实现在 <data_root>/apps/<app>/assets/<dir>/
+	// 写文件）。"宿主盘上不得出现 assets/ 目录"是本次改造的交付判据，见
+	// releasecache_test.go 的 TestStatic_NoAssetDirectoryOnDisk。
 
 	rel, err := serverstore.GetWasmRelease(ctx, e.db, spec.appID, spec.version)
 	if err != nil {

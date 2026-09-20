@@ -9,6 +9,7 @@ import (
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/tetratelabs/wazero"
 )
@@ -41,8 +42,23 @@ type compiledResult struct {
 }
 
 // moduleEntry 是缓存里的一条（带引用计数，用于安全淘汰）。
+//
+// 一条条目有两种"就绪度"，可以只满足前者：
+//   - **资源就绪**（`set != nil`）：随包资源（wasm 自定义段 + 库内配置）已在内存里
+//     ⇒ 静态直出、`assets.read`、应用配置读取三条路径都能服务，**不触发编译**；
+//   - **模块就绪**（`mod != nil`）：模块已编译 ⇒ 请求可以进 Instantiate 交给 wasm。
+//
+// 为什么允许"只有 set、没有 mod"（2026-09-20 起）：随包资源不再落盘，改为从制品字节
+// 解析自定义段后常驻内存（决策文档 docs/decisions/2026-09-20-wasm-assets-in-memory.md）。
+// 静态资源请求（`/static/app.css`、图片）不该为了一次字节读取付一次冷编译
+// （Go 应用实测 ≈1.7 s），所以条目先以"资源就绪"建立，等真有请求要执行 wasm 时
+// 才补齐 mod（`acquire` 的 loader 路径，见 insert 的"补齐"分支）。
+//
+// 两种就绪度共用一条 LRU / 空闲 TTL / 逐出生命周期，也共用**一笔**内存记账（size =
+// 资源集字节 + 编译产物估算）⇒ 控制台的 `module_cache_mb` 现在覆盖"模块 + 随包资源"。
 type moduleEntry struct {
 	key  moduleKey
+	set  *assets.Set
 	mod  wazero.CompiledModule
 	size int64
 	// refs 是当前正在使用该模块的请求数。**只有 refs == 0 的条目才可淘汰**：
@@ -150,6 +166,93 @@ func newModuleCacheWith(maxBytes int64, maxEntries int, idleTTL time.Duration, n
 	}
 }
 
+// acquireSet 取一个"资源就绪"的缓存条目；未命中时调用 loader 冷加载
+// （读制品字节 → 抽自定义段 → 构造内存资源集）。
+//
+// 返回的 release 必须调用（通常 defer）：它把引用计数归还，使条目重新可淘汰。
+//
+// 与 acquire 的分工：本函数只保证**资源**在内存里（静态直出、assets.read、配置读取
+// 都够用），不编译模块；需要执行 wasm 的路径在此之后照常调用 acquire（它会命中同一
+// 条目并只补编译产物）。
+func (c *moduleCache) acquireSet(ctx context.Context, key moduleKey,
+	loader func(context.Context) (*assets.Set, *apperr.Error)) (*moduleEntry, func(), *apperr.Error) {
+
+	if e, release, ok := c.tryAcquireSet(key); ok {
+		return e, release, nil
+	}
+
+	// 冷加载串行化（与冷编译共用同一个槽位：两者都要读制品字节，且都是秒级）。
+	select {
+	case c.compileSem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, nil, apperr.New(apperr.CodeModuleKilled, "等待加载槽位时请求已取消（客户端断开或墙钟到点）").
+			WithCause(ctx.Err())
+	}
+	defer func() { <-c.compileSem }()
+
+	// 双检：等信号量期间可能已经有别的请求把同一 key 加载好了。
+	if e, release, ok := c.tryAcquireSet(key); ok {
+		return e, release, nil
+	}
+
+	set, aerr := loader(ctx)
+	if aerr != nil {
+		return nil, nil, aerr
+	}
+	if set == nil {
+		return nil, nil, apperr.New(apperr.CodeInternal, "资源集为空（平台缺陷）")
+	}
+	return c.insertSet(key, set)
+}
+
+// tryAcquireSet 命中"资源就绪"的条目即引用并返回（未命中返回 ok=false）。
+func (c *moduleCache) tryAcquireSet(key moduleKey) (*moduleEntry, func(), bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.items[key]
+	if !ok || e.set == nil {
+		return nil, nil, false
+	}
+	e.refs++
+	e.lastUsed = c.now()
+	c.ll.MoveToFront(e.elem)
+	return e, c.releaser(e), true
+}
+
+// insertSet 把资源集挂到缓存条目上；已有条目（例如测试用 acquire 建的"仅模块"条目）
+// 只补齐 set，绝不丢弃已经编好的模块。
+func (c *moduleCache) insertSet(key moduleKey, set *assets.Set) (*moduleEntry, func(), *apperr.Error) {
+	size := set.Bytes()
+	if size <= 0 {
+		size = 1
+	}
+	c.mu.Lock()
+	if e, ok := c.items[key]; ok {
+		if e.set == nil {
+			e.set = set
+			e.size += size
+			c.bytes += size
+		}
+		e.refs++
+		e.lastUsed = c.now()
+		c.ll.MoveToFront(e.elem)
+		release := c.releaser(e)
+		victims := c.evictLocked()
+		c.mu.Unlock()
+		closeVictims(victims)
+		return e, release, nil
+	}
+	e := &moduleEntry{key: key, set: set, size: size, refs: 1, lastUsed: c.now()}
+	e.elem = c.ll.PushFront(e)
+	c.items[key] = e
+	c.bytes += size
+	victims := c.evictLocked()
+	c.mu.Unlock()
+
+	closeVictims(victims)
+	return e, c.releaser(e), nil
+}
+
 // acquire 取一个可用模块；未命中时调用 loader 冷编译（同一时刻只允许一个冷编译）。
 //
 // 返回的 release 必须调用（通常 defer）：它把引用计数归还，使条目重新可淘汰。
@@ -184,12 +287,17 @@ func (c *moduleCache) acquire(ctx context.Context, key moduleKey,
 	return c.insert(key, res)
 }
 
-// tryAcquire 命中即引用并返回（未命中返回 ok=false）。
+// tryAcquire 命中"模块就绪"的条目即引用并返回（未命中返回 ok=false）。
+//
+// ⚠️ 判据必须**同时**看 `ok` 与 `e.mod != nil`：条目可能只完成了"资源就绪"
+// （`insertSet` 建的就是这种），此时绝不能返回 `(nil, ok=true)` —— 那会让调用方
+// 拿着 nil 模块去实例化（实测症状：整个应用请求 500，日志 `runtime: module 为 nil`）。
+// 返回 false 会让冷路径走 loader 编译，`insert` 的"补齐 mod、不丢 set"分支接住。
 func (c *moduleCache) tryAcquire(key moduleKey) (wazero.CompiledModule, func(), bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.items[key]
-	if !ok {
+	if !ok || e.mod == nil {
 		return nil, nil, false
 	}
 	e.refs++
@@ -213,6 +321,10 @@ func (c *moduleCache) releaser(e *moduleEntry) func() {
 }
 
 // insert 放入新编译的模块并引用它（容量超限时淘汰 LRU 尾部）。
+//
+// 已有条目时**只补齐编译产物**（这是 2026-09-20 之后的常态：条目先以"资源就绪"
+// 建立，真需要执行 wasm 时才走到这里）——绝不能新建条目，否则已经挂在旧条目上的
+// 资源集会跟着旧条目一起被丢掉。真正重复编译（条目已有 mod）时用已有的、关掉多的那个。
 func (c *moduleCache) insert(key moduleKey, res compiledResult) (wazero.CompiledModule, func(), *apperr.Error) {
 	size := res.size
 	if size <= 0 {
@@ -220,11 +332,19 @@ func (c *moduleCache) insert(key moduleKey, res compiledResult) (wazero.Compiled
 	}
 	c.mu.Lock()
 	if e, ok := c.items[key]; ok {
-		// 理论上到不了（信号量已串行化），但重复插入必须无害：用已有的，关掉多的那个。
 		e.refs++
 		e.lastUsed = c.now()
 		c.ll.MoveToFront(e.elem)
 		release := c.releaser(e)
+		if e.mod == nil {
+			e.mod = res.mod
+			e.size += size
+			c.bytes += size
+			victims := c.evictLocked()
+			c.mu.Unlock()
+			closeVictims(victims)
+			return e.mod, release, nil
+		}
 		c.mu.Unlock()
 		go func() { _ = res.mod.Close(context.Background()) }()
 		return e.mod, release, nil
@@ -236,11 +356,19 @@ func (c *moduleCache) insert(key moduleKey, res compiledResult) (wazero.Compiled
 	victims := c.evictLocked()
 	c.mu.Unlock()
 
-	for _, v := range victims {
-		// Close 放在锁外：Close 可能触发引擎侧回收，不该占着缓存互斥量。
-		_ = v.Close(context.Background())
-	}
+	closeVictims(victims)
 	return e.mod, c.releaser(e), nil
+}
+
+// closeVictims 在锁外关闭被逐出的模块（nil = 只有资源、还没编译过的条目）。
+func closeVictims(victims []wazero.CompiledModule) {
+	for _, m := range victims {
+		if m == nil {
+			continue
+		}
+		// Close 可能触发引擎侧回收，不该占着缓存互斥量。
+		_ = m.Close(context.Background())
+	}
 }
 
 // evictLocked 从 LRU 尾部淘汰直到回到上限内，返回需要在锁外 Close 的模块。
@@ -350,10 +478,7 @@ func (c *moduleCache) dropLocked(victims []*moduleEntry) evicted {
 
 // closeAll_ 在锁外关闭逐出的模块（命名带下划线：与 closeAll 区分，后者关全量）。
 func (c *moduleCache) closeAll_(e *evicted) {
-	for _, m := range e.mods {
-		// Close 可能触发引擎侧回收，放到锁外做。
-		_ = m.Close(context.Background())
-	}
+	closeVictims(e.mods)
 }
 
 // closeAll 关闭全部缓存条目（Server.Close 调用）。
@@ -370,6 +495,9 @@ func (c *moduleCache) closeAll() error {
 
 	var errs []error
 	for _, m := range mods {
+		if m == nil {
+			continue // 只有资源、还没编译过的条目
+		}
 		if err := m.Close(context.Background()); err != nil {
 			errs = append(errs, err)
 		}
@@ -386,6 +514,19 @@ func (c *moduleCache) has(key moduleKey) bool {
 	defer c.mu.Unlock()
 	_, ok := c.items[key]
 	return ok
+}
+
+// compiledCount 返回**已编译**的条目数（mod 就绪；只读，诊断/断言用）。
+func (c *moduleCache) compiledCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, e := range c.items {
+		if e.mod != nil {
+			n++
+		}
+	}
+	return n
 }
 
 // size 返回当前缓存条目数与记账字节数（诊断/测试断言用）。

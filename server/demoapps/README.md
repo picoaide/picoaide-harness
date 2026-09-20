@@ -23,7 +23,8 @@ demoapps/<app>/{main.go, web/}                 源码（前端资源在 web/）
         │                                     ↑ 宿主按路径直出 /static/*，入口 / 由 wasm 读 index.html 返回
         ▼
 /opt/picoaide/demo-apps/  ← Dockerfile 的 demoassets 阶段产出（wasm + demos.json）
-        │  服务端启动时 appseed 播种（直接落 apps/app_releases + 版本资源目录）
+        │  服务端启动时 appseed 播种（**只落 apps/app_releases 行**：随包资源在制品字节里，
+        │  运行期由宿主解析自定义段后常驻内存 —— 2026-09-20 起宿主盘不再有版本资源目录）
         ▼
    应用中心里的 demo-* 三个应用
 ```
@@ -32,9 +33,9 @@ demoapps/<app>/{main.go, web/}                 源码（前端资源在 web/）
   `index.html` / `static/app.css` / `static/app.js` 三个自定义段）；`main.go` 只做 JSON API。
 - **入口 `/` 必须由 wasm 处理**：非保留资源会被宿主**按路径直出**（`/static/*` 不经过 wasm），
   所以"先判名单再给页面"只有让 `/` 走应用才成立。
-- **`picoaide.app.json` 是平台保留资源**，宿主永不直出。生产环境里它由 `appseed` 依
-  `demos.json` 写进版本资源目录；本目录里每个应用各带一份同名文件，**只服务本地预览**
-  （预览工具要读它才能演示 `access` / `whitelist`）。
+- **`picoaide.app.json` 是平台保留资源**，宿主永不直出。生产环境里它由平台按库内
+  `config_json`（`appseed` 依 `demos.json` 折算写入）随资源集注入；本目录里每个应用各带一份
+  同名文件，**只服务本地预览**（预览工具要读它才能演示 `access` / `whitelist`）。
 
 ## 本地构建与预览
 
@@ -44,6 +45,7 @@ bash server/scripts/build-demo-apps.sh            # 全部
 bash server/scripts/build-demo-apps.sh forum      # 单个
 
 # 假宿主跑一遍（按平台真实路由规则：/static/* 直出、/ 走 wasm、db.*/log/assets.read 有应答）
+# 注意：假宿主直接从**制品里的自定义段**取资源，与生产一致（生产也是内存直出，不落盘）
 node server/skills/app-builder/examples/go/preview.mjs /tmp/demo-forum-packed.wasm \
   --config server/demoapps/forum/picoaide.app.json --path / --user zhangwei
 node server/skills/app-builder/examples/go/preview.mjs /tmp/demo-forum-packed.wasm \

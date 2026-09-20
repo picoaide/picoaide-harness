@@ -17,6 +17,13 @@
 // `apps` + `app_releases`（status=approved，与"发布即上架"同形）。代价是不做编译期
 // 校验，因此这里补一道**结构性校验**（魔数 + 必须导出 _start/memory），把"拿错文件"
 // 这类失败挡在播种之前；真正的编译由执行侧首次请求时完成（磁盘编译缓存会持久化）。
+//
+// **播种的落点只有 PostgreSQL**（2026-09-20 起）：随包资源（wasm 自定义段）改为运行期
+// **内存直出**（决策文档 docs/decisions/2026-09-20-wasm-assets-in-memory.md），本包
+// **不再**往 `<data_root>/<AppsDirName>/<app_id>/<AssetsDirName>/<release_id>/` 抽资源
+// 目录、也不在盘上留应用配置副本 —— 应用配置的唯一权威是库内 `app_releases.config_json`
+// （运行期由应用平台注入内存资源集，仍以保留资源名 `picoaide.app.json` 供应用自读）。
+// 历史遗留的资源目录由 appserver.CleanupLegacyAssetDirs 在启动期一次性清理。
 package appseed
 
 import (
@@ -35,8 +42,6 @@ import (
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
-	"github.com/picoaide/picoaide/internal/wasmapp/assets"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
 )
 
@@ -106,9 +111,14 @@ type manifest struct {
 // Options 是播种参数。
 type Options struct {
 	DB *sql.DB
-	// DataRoot 是平台数据根（资源目录 = <DataRoot>/<AppsDirName>/<app_id>/<AssetsDirName>/<release_id>/）。
-	// 必填：应用子域管线要求**每个版本都有资源目录**（缺了会在请求时 500），
-	// 演示应用至少要能读到自己的 picoaide.app.json。
+	// DataRoot 是平台数据根（= <data_root>）。
+	//
+	// ⚠️ 2026-09-20 起随包资源改为**内存直出**（决策文档
+	// docs/decisions/2026-09-20-wasm-assets-in-memory.md）：播种不再往
+	// `<data_root>/<AppsDirName>/<app_id>/<AssetsDirName>/<release_id>/` 抽资源目录，
+	// 本字段因此在 appseed 内**没有读者**。之所以保留（`New` 的必填校验也一并保留）：
+	// 启动接线（cmd/server/wasmapp_demo.go）与测试都按平台数据根装配，删掉它会波及
+	// 它们。历史资源目录的清理是 appserver.CleanupLegacyAssetDirs 的职责，不是播种的事。
 	DataRoot string
 	Dir      string
 	// Owner 是演示应用的归属账号（必须是已存在的用户；生产装配传超管用户名）。
@@ -147,10 +157,9 @@ func (s *Seeder) isOurChecksum(sum string) bool {
 // SkipReason 说明某个演示为什么没有播种。
 type SkipReason struct {
 	AppID string
-	// Reason 是**给人看的**如实理由（"已存在但资源目录不完整（…）⇒ 已重写"这类）。
+	// Reason 是**给人看的**如实理由（"已存在但缺生效版本 ⇒ 已指向该版本"这类）。
 	Reason string
-	// Healed 表示这次"跳过"之前其实**动了手**（半成品自愈：重写资源目录 / 补版本行 /
-	// 指向生效版本）。
+	// Healed 表示这次"跳过"之前其实**动了手**（半成品自愈：补版本行 / 指向生效版本）。
 	//
 	// 为什么要有这个机器可读的布尔（第三轮审计 P3-4）：理由文案是诊断面的一部分、会随
 	// 措辞演进，而"自愈是否幂等""完好文件是否被动过"这类断言不该靠匹配中文措辞 ——
@@ -170,7 +179,7 @@ func New(opt Options) (*Seeder, error) {
 		return nil, errors.New("appseed: Options.DB 必填")
 	}
 	if strings.TrimSpace(opt.DataRoot) == "" {
-		return nil, errors.New("appseed: Options.DataRoot 必填（要写版本资源目录）")
+		return nil, errors.New("appseed: Options.DataRoot 必填（平台数据根）")
 	}
 	dir := strings.TrimSpace(opt.Dir)
 	if dir == "" {
@@ -231,15 +240,15 @@ func (s *Seeder) Demos() []Demo {
 
 // Seed 播种全部缺失的演示应用；已存在（含已删除/已冻结）的一律跳过。
 //
-// 唯一的例外是**半成品**（库里已存在、但资源目录或生效版本缺一项）：那是上一次播种
+// 唯一的例外是**半成品**（库里已存在、但没有版本行或没有生效版本）：那是上一次播种
 // 中途失败的残留，只跳过就会永久留着（重启不自愈）⇒ 这里补齐（见 healIncomplete）。
-// 已软删/已冻结的演示**不补**（"删了不再回来"是产品语义）。
+// 已软删/已冻结/已下架的演示**不补**（"删了不再回来"是产品语义）。
 //
 // W4-7（2026-09-19「客户端专属」改造）：演示应用**保留 app_id**（历史行里有既存数据：
-// 归属、版本行、资源目录，改名等于把客户场上已有的演示再塞一份），清单口径的变更
+// 归属、版本行，改名等于把客户场上已有的演示再塞一份），清单口径的变更
 // （access 由 public 收敛为 login、标题去掉"匿名可达"）**只对新建行生效** ——
 // 已存在的行一律跳过，heal 也**不覆盖标题/配置**（标题以库里既有行为准，见 seedOne）。
-// 已存在行的 access 归迁移 0074 改、磁盘资产归 RewritePublicAccessAssets 改，
+// 已存在行的 access 归迁移 0074 与 RewritePublicAccessAssets（库内版本行的 config_json）改，
 // 都不是播种的职责（播种只负责"缺失的那些"）。
 func (s *Seeder) Seed(ctx context.Context) (Result, error) {
 	var res Result
@@ -258,8 +267,8 @@ func (s *Seeder) Seed(ctx context.Context) (Result, error) {
 			// 存在即跳过：**这是"删了不再回来"的实现**（软删的行仍存在）。
 			//
 			// 但"跳过"的理由必须与真实行为一致（第三轮审计 P3-4）：库里存在**不等于**
-			// 交付面完整 —— 半分片的配置（存在但是坏 JSON）此前会被笼统记成"已存在"，
-			// 而线上每请求 500、重启也不自愈。因此理由由 healIncomplete 逐态给出。
+			// 可交付 —— 没有版本行、没有生效版本都是坏状态，笼统记成"已存在"会把它们
+			// 永久留着（重启也不自愈）。因此理由由 healIncomplete 逐态给出。
 			out, herr := s.healIncomplete(ctx, appID, existing, d)
 			if herr != nil {
 				// 补齐失败如实记录（与播种失败同一处置：不阻断其它演示）。
@@ -316,19 +325,12 @@ func (s *Seeder) seedOne(ctx context.Context, d Demo, appID string) error {
 	if err != nil {
 		return err
 	}
-	// 资源目录：应用子域管线按 <data_root>/apps/<app_id>/assets/<release_id>/ 推导，
-	// **缺了直接 500**（不是可选项）。演示应用把配置写进去（应用自己 assets.read 读它）。
+	// 落点只有库内两行：版本行（含制品字节与配置快照）+ apps 行的生效指针。
+	// 随包资源改内存直出后不再有"先把资源目录写出来"这一步，R1-rt-19 那条
+	// "资源目录先写、失败则不置当前版本"的顺序不变量**随磁盘一起消失**。
 	//
-	// ⚠️ 顺序是不变量（R1-rt-19）：**资源目录先写、失败则不置当前版本** —— 与
-	// api/publish.go 的同一条顺序一致（"否则会有一个窗口让应用指向一个资源目录还不存在的
-	// 版本"）。反过来写会留下指向不存在目录的应用：子域每请求 500，而且播种判据是
-	// "库里是否已有该 app_id" ⇒ 重启也不自愈。
-	//
-	// 两个写动作都不建新版本：资源目录写失败 ⇒ 应用行/版本行已在，下次播种由
-	// healIncomplete 补齐（幂等，不需要人工删行）。
-	if err := writeReleaseAssets(s.opt.DataRoot, appID, relID, cfgJSON); err != nil {
-		return err
-	}
+	// 两个写动作都不建新版本：任一步失败 ⇒ 已落的行留着，下次播种由 healIncomplete
+	// 补齐（幂等，不需要人工删行）。
 	if err := serverstore.SetWasmAppCurrentRelease(ctx, s.opt.DB, appID, relID); err != nil {
 		return fmt.Errorf("指向当前版本: %w", err)
 	}
@@ -413,9 +415,9 @@ func (s *Seeder) createSeedRelease(ctx context.Context, d Demo, title, descripti
 // healOutcome 说明自愈这一趟**做了什么、或为什么没做**。
 //
 // 为什么不是一个 bool（第三轮审计 P3-4）：播种日志/SkipReason 里的"已存在"是**误导性**的
-// 笼统理由 —— 库里存在不等于交付面完整（配置半写、目录缺失都能让子域每请求 500）。理由必须
-// 与真实行为一致，所以由判定处逐态给出（既要能说"已存在但内容不完整 ⇒ 重写"，
-// 也要能说"已存在且内容完整（幂等跳过）"）。
+// 笼统理由 —— 库里存在不等于可交付（没有版本行、没有生效版本都是坏状态）。理由必须与真实
+// 行为一致，所以由判定处逐态给出（既要能说"已存在但缺生效版本 ⇒ 已指向该版本"，
+// 也要能说"已存在且版本行与生效版本齐备（幂等跳过）"）。
 type healOutcome struct {
 	// Healed 表示这一趟真的写了字节（日志按它决定是否记"已修复"）。
 	Healed bool
@@ -425,57 +427,53 @@ type healOutcome struct {
 
 // healIncomplete 补齐"库里已存在、但处于半成品"的演示应用（R1-rt-19 的自愈那一半）。
 //
-// 半成品只有三种形态（其余一律不碰）：
+// 半成品只有两种形态（其余一律不碰）—— 判据**全部是库内的**：2026-09-20 起随包资源改为
+// 内存直出（决策文档 docs/decisions/2026-09-20-wasm-assets-in-memory.md），盘上不再有
+// 版本资源目录与应用配置副本，旧判据里"资源目录/配置在磁盘上是否完整"那整条随磁盘消失：
 //
-//	A. 没有生效版本（current_release_id = 0），但**有** approved 版本行：旧顺序在"置当前
-//	   版本"之后写资源目录失败 ⇒ 库里留着应用行 + 版本行，却没有指向它的当前版本。旧实现
-//	   按"存在即跳过"会把这份半成品永久留着（子域 404/500，重启也不变）。
-//	A2. 有应用行但**一个版本行都没有**：seedOne 的 CreateWasmRelease 失败（PG 抖动/磁盘满/
-//	   连接中断）就会留下这个状态。旧实现把它当"同名应用不是我们播的"跳过 ⇒ 应用永久没有
+//	A. 有应用行但**一个版本行都没有**：seedOne 的 CreateWasmRelease 失败（PG 抖动/连接
+//	   中断）就会留下这个状态。旧实现把它当"同名应用不是我们播的"跳过 ⇒ 应用永久没有
 //	   可交付版本，日志还说"已存在"（R2-DG-4）。判据只认内容：归属人 + 配置与本次清单
-//	   逐字节相同（版本行不存在时没有 checksum 可对）。
-//	B. 有生效版本，但资源目录（或目录里的 picoaide.app.json）**不在或内容不完整**：
-//	   应用子域按"最新 approved 版本"推导目录 ⇒ 每请求 500。数据盘被换过、目录被手工
-//	   删掉、写盘中途被打断（半写配置）都会落到这一支。
+//	   逐字节相同（版本行不存在时没有 checksum 可对）。见 healMissingRelease。
+//	B. 有版本行、但 `current_release_id <= 0`（**没有生效版本**）：库里留着应用行 + 版本行，
+//	   却没有指向它的当前版本（播种中途失败、或人工把 current_release_id 归零的处置）。
+//	   补的动作 = 把我们那一版指过去；判据仍是内容（版本行 status=approved 且 checksum ∈
+//	   本目录里的任一份制品），别人的版本行一律不碰。
 //
-// ⚠️ "完整"的判据必须是**内容级**（第三轮审计 P3-4）：旧判据 `os.Stat` 成功即完整，
-// 于是"存在但被截断"的配置永不修复、日志还说"已存在"，线上每请求 500 —— 只有人工删掉
-// 文件才触发补齐。现在的判据是：文件在 **且** 能过 `appcfg.Parse`（合法 JSON + 必需字段
-// 齐备）**且** 归属人与随安装清单一致 **且** 与生效版本的配置快照逐字节相同。
+// 版本行与生效版本**都齐** ⇒ 跳过（理由照实写，没有"要不要重写磁盘"这回事了）。
 //
 // 补齐动作为什么安全（幂等、只碰自己的东西）：
 //   - 只认 checksum 与**本次随安装的演示制品逐字节相同**的版本行（本目录里的任一份制品）——app_id 被别人
-//     占用/被重新发布的情况下一律不碰（判断依据是内容，不是名字；A2 没有版本行时退化为
+//     占用/被重新发布的情况下一律不碰（判断依据是内容，不是名字；A 没有版本行时退化为
 //     对应用行做同一口径的内容比对）；
-//   - 只做三件事：写回资源目录（应用配置来自该版本行的快照）+ 在没有生效版本时把它指过去 +
-//     A2 补一条内容与 seedOne 逐字节相同的版本行，不改配置、不改标题、不写审计；
-//   - 资源目录**内容完整**就一个字节都不写（idempotent：二次播种只跳过，且是原子替换，
-//     不存在"半写"窗口）。
+//   - 只做两件事：没有生效版本时把我们那一版指过去 + A 补一条内容与 seedOne 逐字节相同的
+//     版本行；不改配置、不改标题、不写审计；
+//   - 没有要补的东西就一个字节都不写（idempotent：二次播种只跳过）。
 //
 // 三种处置态**一律不补**（软删 / 冻结 / 下架）：它们表达的都是"不要再服务它"
-// （子域分别返回 404 / 404 / 410），此时把资源目录写回来与产品语义相反（R2-DG-5）。
+// （客户端专属模型下分别不可见 / 只读 / 下架），此时把它"修好"与产品语义相反（R2-DG-5）。
+// ⚠️ 2026-09-20 起这条守卫里**不再有"磁盘那一半"** —— 旧注释的动机是"下架 + 腾磁盘后
+// 重启会把资源目录悄悄写回来"，而播种已经不写盘了；留下的是纯粹的产品语义：这三种态
+// 不是半成品，播种碰都不碰。
 //
-// 返回值：out 说明处置与理由；err 只在 IO/DB 失败时非 nil。
+// 返回值：out 说明处置与理由；err 只在 DB 失败时非 nil。
 func (s *Seeder) healIncomplete(ctx context.Context, appID string, app *serverstore.WasmApp, d Demo) (healOutcome, error) {
 	if app == nil || app.DeletedAt != nil || app.FrozenAt != nil || !app.Enabled {
 		// 软删 = "删了不再回来"；冻结 = 管理员的只读处置；**下架（enabled=false）也算
-		// "不要再服务它"**（子域对下架应用直接 410，见 appserver.serveWasm）。
-		// 三者都不是"半成品"，不补 —— 否则管理员"下架 + 腾磁盘"之后，重启会把资源
-		// 目录悄悄写回来，与"删了不再回来"的产品语义相反（R2-DG-5）。
-		// 代价认账：下架期间不补；管理员重新上架后，下一次重启/重新播种会把资源目录
-		// 补齐（下架态永远不服务，所以这个窗口不会让用户看到 500）。
+		// "不要再服务它"**。三者都不是"半成品"，不补（R2-DG-5）。
+		// 代价认账：下架期间不补；管理员重新上架后，下一次重启/重新播种会把缺的生效版本
+		// 补齐（下架态不交付，所以这个窗口不会让用户看到坏状态）。
 		return healOutcome{Reason: "已存在且处于软删/冻结/下架态（按产品语义不补）"}, nil
 	}
 	relID := app.CurrentReleaseID
 	if relID <= 0 {
-		// A：找我们这一版（演示版本号固定 defaultVersion），并核对制品指纹与审核态。
+		// B：没有生效版本 —— 找我们这一版（演示版本号固定 defaultVersion），核对制品指纹与审核态。
 		rel, err := serverstore.GetWasmRelease(ctx, s.opt.DB, appID, defaultVersion)
 		switch {
 		case errors.Is(err, serverstore.ErrNotFound):
-			// A2（第三种半成品，R2-DG-4）：apps 行已落，但**一个版本行都没有** ——
-			// seedOne 的 CreateWasmRelease 失败（PG 抖动/磁盘满/连接中断）就会留下这个
-			// 状态。旧实现把它当"同名应用不是我们播的"跳过 ⇒ 该应用永久没有可交付版本
-			//（子域 404/500），而日志给的理由是误导性的"已存在"。
+			// A：apps 行已落，但**一个版本行都没有** —— seedOne 的 CreateWasmRelease 失败
+			// （PG 抖动/连接中断）就会留下这个状态。旧实现把它当"同名应用不是我们播的"
+			// 跳过 ⇒ 该应用永久没有可交付版本，而日志给的理由是误导性的"已存在"。
 			return s.healMissingRelease(ctx, appID, app, d)
 		case err != nil:
 			return healOutcome{}, fmt.Errorf("查演示版本行: %w", err)
@@ -484,37 +482,19 @@ func (s *Seeder) healIncomplete(ctx context.Context, appID string, app *serverst
 			// 状态/制品不是随安装的这一份：不碰（理由如实给出，别笼统说"已存在"）。
 			return healOutcome{Reason: "已存在但版本行不是随安装播种的那一份（不碰）"}, nil
 		}
-		relID = rel.ID
-		if why := s.releaseAssetsIncompleteReason(appID, relID, rel.ConfigJSON); why != "" {
-			if err := writeReleaseAssets(s.opt.DataRoot, appID, relID, rel.ConfigJSON); err != nil {
-				return healOutcome{}, err
-			}
-			healed := healOutcome{Healed: true, Reason: "已存在但资源目录不完整（" + why + "）⇒ 已重写"}
-			if err := serverstore.SetWasmAppCurrentRelease(ctx, s.opt.DB, appID, relID); err != nil {
-				return healOutcome{}, fmt.Errorf("指向当前版本: %w", err)
-			}
-			return healed, nil
-		}
-		// 资源目录内容完整：只把生效版本指过去（没有写盘）。
-		if err := serverstore.SetWasmAppCurrentRelease(ctx, s.opt.DB, appID, relID); err != nil {
+		if err := serverstore.SetWasmAppCurrentRelease(ctx, s.opt.DB, appID, rel.ID); err != nil {
 			return healOutcome{}, fmt.Errorf("指向当前版本: %w", err)
 		}
-		return healOutcome{Healed: true, Reason: "已存在但缺生效版本（资源目录完整）⇒ 已指向该版本"}, nil
+		return healOutcome{Healed: true, Reason: "已存在但缺生效版本（版本行是随安装播种的那一份）⇒ 已指向该版本"}, nil
 	}
 
-	// B：有生效版本时先确认"生效的那一版"确实是我们的制品（判据 = 最新 approved 版本
-	// 既是当前版本、checksum 又与随安装的演示一致）。
+	// 有生效版本：确认"生效的那一版"确实是我们的制品（判据 = 最新 approved 版本既是当前
+	// 版本、checksum 又与随安装的演示一致）。库内没有别的可判据 —— 磁盘那一半已随内存直出删除。
 	rel, err := serverstore.LatestApprovedWasmReleaseMeta(ctx, s.opt.DB, appID)
 	if err != nil || rel == nil || rel.ID != relID || !s.isOurChecksum(rel.Checksum) {
 		return healOutcome{Reason: "已存在但生效版本不是随安装播种的那一份（不碰）"}, nil
 	}
-	if why := s.releaseAssetsIncompleteReason(appID, relID, rel.ConfigJSON); why != "" {
-		if err := writeReleaseAssets(s.opt.DataRoot, appID, relID, rel.ConfigJSON); err != nil {
-			return healOutcome{}, err
-		}
-		return healOutcome{Healed: true, Reason: "已存在但资源目录不完整（" + why + "）⇒ 已重写"}, nil
-	}
-	return healOutcome{Reason: "已存在且资源目录内容完整（幂等跳过）"}, nil
+	return healOutcome{Reason: "已存在且版本行与生效版本齐备（幂等跳过）"}, nil
 }
 
 // healMissingRelease 补上"apps 行已落但没有任何版本行"的半成品（R2-DG-4）。
@@ -523,8 +503,9 @@ func (s *Seeder) healIncomplete(ctx context.Context, appID string, app *serverst
 // 本次清单要播的那一份逐字节相同 —— 同名但由别人发布/配置不同的应用一律不碰。版本行
 // 不存在时没有 checksum 可对，配置就是唯一可用的"这是我们播的"锚点。
 //
-// 只做三件事：补版本行（内容与 seedOne 逐字节相同）、写资源目录、置生效版本；不新建
-// app 行、不改标题/配置、不写审计。
+// 只做两件事：补版本行（内容与 seedOne 逐字节相同）、置生效版本；不新建 app 行、
+// 不改标题/配置、不写审计。（旧实现还要写资源目录 —— 随包资源改内存直出后那一步连同
+// 它的顺序不变量一起消失。）
 func (s *Seeder) healMissingRelease(ctx context.Context, appID string, app *serverstore.WasmApp, d Demo) (healOutcome, error) {
 	cfgJSON, err := s.demoConfigJSON(d)
 	if err != nil {
@@ -546,218 +527,137 @@ func (s *Seeder) healMissingRelease(ctx context.Context, appID string, app *serv
 	if err != nil {
 		return healOutcome{}, fmt.Errorf("重建版本行: %w", err)
 	}
-	if err := writeReleaseAssets(s.opt.DataRoot, appID, relID, cfgJSON); err != nil {
-		return healOutcome{}, err
-	}
 	if err := serverstore.SetWasmAppCurrentRelease(ctx, s.opt.DB, appID, relID); err != nil {
 		return healOutcome{}, fmt.Errorf("指向当前版本: %w", err)
 	}
-	return healOutcome{Healed: true, Reason: "已存在但一个版本行都没有（上次播种中断）⇒ 已重建版本行与资源目录"}, nil
+	return healOutcome{Healed: true, Reason: "已存在但一个版本行都没有（上次播种中断）⇒ 已重建版本行并置为生效版本"}, nil
 }
 
-// releaseAssetsIncompleteReason 判断版本的资源目录里那份应用配置**是否完整**：
-// 完整返回 ""，不完整返回**如实的原因**（它会进日志与 SkipReason）。
-//
-// 判据是**内容级**的四个条件（第三轮审计 P3-4，旧实现只做 os.Stat —— "存在"不等于"完整"）：
-//
-//  1. 文件在且可读（不存在/不可读 ⇒ 不完整；目录存在但没有配置同样是每请求 500）；
-//  2. 能过 `appcfg.Parse`：合法 JSON 对象 + 必需字段齐备 + 取值合规
-//     （半写/截断的配置在这里被抓住）；
-//  3. **归属人一致**（与 healMissingRelease 的"这是我们播的"同一口径）：配置里的 owner
-//     必须等于本次播种的归属人，防止把别人发布的同名应用当成自家半成品改写；
-//  4. 与生效版本的配置快照**逐字节相同**（wantCfgJSON 非空时才比）——资源目录里的这份是
-//     请求路径真正读的那一份，与库里那份不一致时，导出/准入会各说各话。
-//
-// 判据取**内容**而不是"文件在不在"，正是为了让"存在但被截断"的半写形态可自愈：
-// 写盘被打断（崩溃/磁盘满/断电）会留下坏配置，而请求路径（loadAppConfig）对坏配置是
-// fail-loud 500 —— 不修的话线上每请求 500，且重启也不自愈，只能人工删文件。
-func (s *Seeder) releaseAssetsIncompleteReason(appID string, relID int64, wantCfgJSON string) string {
-	cfgPath := releaseAssetsConfigPath(s.opt.DataRoot, appID, relID)
-	raw, err := os.ReadFile(cfgPath)
-	switch {
-	case os.IsNotExist(err):
-		return "资源目录里没有应用配置"
-	case err != nil:
-		return "应用配置不可读: " + err.Error()
-	}
-	cfg, perr := appcfg.Parse(raw)
-	if perr != nil {
-		return "应用配置内容不完整（" + perr.Message + "）"
-	}
-	if cfg.Owner != s.opt.Owner {
-		return "应用配置的归属人与随安装清单不一致（" + cfg.Owner + " ≠ " + s.opt.Owner + "）"
-	}
-	if wantCfgJSON != "" && string(raw) != wantCfgJSON {
-		return "应用配置与生效版本的配置快照不一致"
-	}
-	return ""
-}
+// ===== W4：库内 `access=public` 归一化（设计 §9 的 A 方案；磁盘那一半随内存直出删除）=====
 
-// releaseAssetsConfigPath 返回版本资源目录里应用配置的路径（唯一推导点，写与判据共用）。
-func releaseAssetsConfigPath(dataRoot, appID string, relID int64) string {
-	return filepath.Join(dataRoot, limits.AppsDirName, appID, assets.AssetsDirName,
-		strconv.FormatInt(relID, 10), limits.AppConfigFileName)
-}
-
-// writeReleaseAssets 写出版本的资源目录（只放应用配置；演示应用没有额外的静态资源）。
-//
-// 写盘是**原子替换**：先写同目录的隐藏临时文件、fsync、再 rename。为什么必须原子
-// （第三轮审计 P3-4 的成因）：`os.WriteFile` 是 O_TRUNC 后写，崩溃/磁盘满/断电落在中间
-// 就留下"存在但被截断"的配置 —— 请求路径对它是 500，而"存在即完整"的自愈判据又不会修，
-// 症状比"文件缺失"隐蔽得多（文件缺失至少能触发补齐）。rename 之后读到的永远是旧内容或
-// 新内容，不会读到半写。
-func writeReleaseAssets(dataRoot, appID string, relID int64, cfgJSON string) error {
-	cfgPath := releaseAssetsConfigPath(dataRoot, appID, relID)
-	dir := filepath.Dir(cfgPath)
-	if err := os.MkdirAll(dir, os.FileMode(limits.DataDirMode)); err != nil {
-		return fmt.Errorf("创建资源目录: %w", err)
-	}
-	tmp, err := os.CreateTemp(dir, "."+limits.AppConfigFileName+".tmp*")
-	if err != nil {
-		return fmt.Errorf("创建应用配置临时文件: %w", err)
-	}
-	tmpName := tmp.Name()
-	// rename 成功后这次 Remove 是 no-op（ENOENT）；失败路径则由它清掉临时文件。
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.WriteString(cfgJSON); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("写应用配置: %w", err)
-	}
-	// 先落盘再 rename：否则断电后可能留下"名字是对的、内容是空的"文件（比缺文件更难查）。
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("落盘应用配置: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("关闭应用配置临时文件: %w", err)
-	}
-	// CreateTemp 的权限是 0600，改成与其他资源文件一致的 0644（内容本来就是交付给应用的）。
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		return fmt.Errorf("设置应用配置权限: %w", err)
-	}
-	if err := os.Rename(tmpName, cfgPath); err != nil {
-		return fmt.Errorf("替换应用配置: %w", err)
-	}
-	return nil
-}
-
-// ===== W4：磁盘资产里的 access=public 归一化（设计 §9 的 A 方案）=====
-
-// AssetRewriteProblem 描述一个**被跳过**的磁盘资产（诊断用：为什么没改成）。
+// AssetRewriteProblem 描述一个**被跳过**的配置行（诊断用：为什么没改成）。
 type AssetRewriteProblem struct {
 	AppID     string
 	ReleaseID int64
-	Path      string
-	Reason    string
+	// Reason 是**给人看的**如实原因（配置不可解析 / 改写落库失败 / 列版本行失败）。
+	Reason string
 }
 
-// AssetRewriteResult 是一次磁盘资产改写的统计。
+// AssetRewriteResult 是一次库内配置改写的统计。
 type AssetRewriteResult struct {
-	// Apps / Releases 是扫过的应用数与版本数（含已软删的应用与版本：目录可能还在，
+	// Apps / Releases 是扫过的应用数与版本行数（含已软删的应用与版本：软删行仍在库里，
 	// 留着 public 就是"口径没有退场"）。
 	Apps     int
 	Releases int
-	// Files 是成功解析的应用配置数（真正能判定 access 的那些）。
+	// Files 是成功解析的配置行数（真正能判定 access 的那些）。
+	//
+	// 字段名沿用启动接线的日志口径（cmd/server/wasmapp_demo.go 按它打统计行）；
+	// 语义已随内存直出从"磁盘上的配置文件数"变为"库内的 config_json 行数"。
 	Files int
-	// Rewritten 是命中**历史公开档位**并已原子改写的文件数。
+	// Rewritten 是命中**历史公开档位**并已改写落库的行数。
 	Rewritten int
-	// Missing 是资源目录里没有配置的版本（未播种 / 制品已回收）—— **不是失败**，
-	// 单独计数以免把"本来就没有"混进"改不动"。
+	// Missing 是 config_json 为空的版本行（未播种 / 历史行）—— **不是失败**，
+	// 单独计数以免把"本来就没有配置"混进"改不动"。
 	Missing int
-	// Skipped 是读不到 / 坏 JSON / 写失败的文件数（单个失败不中断整轮）。
+	// Skipped 是配置不可解析 / 改写落库失败 / 版本行枚举失败的行数（单个失败不中断整轮）。
 	Skipped int
-	// Problems 逐个列出被跳过的文件（Skipped 的明细，调用方记日志用）。
+	// Problems 逐个列出被跳过的行（Skipped 的明细，调用方记日志用）。
 	Problems []AssetRewriteProblem
 }
 
-// RewritePublicAccessAssets 把**磁盘资产**里 `access=public` 的应用配置一次性改写为
-// `login`（设计 §9 的 A 方案；与迁移 0074 的 DB 侧配套）。
+// RewritePublicAccessAssets 把**库内版本行**里 `access=public` 的配置一次性改写为
+// `login`（设计 §9 的 A 方案；与迁移 0074 的 DB 侧同一件事的运行期兜底）。
 //
-// 为什么磁盘侧也必须改（§9 事实订正 ②）：运行期权威在磁盘资产
-// （`<data_root>/apps/<app_id>/assets/<release_id>/picoaide.app.json`，应用自己
-// `assets.read` 读它），而读侧早已把历史 public 映射成 login（appcfg.AuthMode）。
-// 因此改写的真实意义**不是"改权限"**（权限早已不生效），而是让应用自读配置时
-// **不再看到 public**、口径彻底退场 —— 否则应用可能照着配置自行实现一套"匿名可用"
-// 行为。只改 DB 不改磁盘 ⇒ 磁盘上永久残留 public，验收 SQL 之外的这一面永远不干净。
+// 为什么改（§9 事实订正 ②，2026-09-20 口径更新）：随包资源改为**内存直出**后，应用
+// `assets.read` 读到的配置就是运行期用 `app_releases.config_json` **注入内存资源集**的
+// 那一份（保留资源名 picoaide.app.json），盘上不再有配置副本。而读侧早已把历史 public
+// 映射成 login（appcfg.AuthMode）⇒ 改写的真实意义**不是"改权限"**（权限早已不生效），
+// 而是让应用自读配置时**不再看到 public**、口径彻底退场 —— 否则应用可能照着配置自行
+// 实现一套"匿名可用"行为。
+//
+// 与迁移 0074 的分工：0074 在升级那一刻把 `apps` 与 `app_releases` 两处一起改写；
+// 本入口是**运行期兜底**（从旧备份恢复的行、被手工写回的行），与播种同批执行、幂等，
+// 因此只碰应用真正读到的那一面 —— **版本行**（`app_releases.config_json`）。`apps` 行的
+// config_json 是目录/运维面的投影，归迁移 0074；读侧本来就把 public 当 login，不构成分叉。
 //
 // 语义：
-//   - 遍历库里**全部** wasm 应用（含软删）的全部版本（含软删版本），路径推导走
-//     releaseAssetsConfigPath（唯一实现，与写入/自愈共用同一份）；
+//   - 遍历库里**全部** wasm 应用（含软删）的全部版本（含软删版本）；
 //   - 只改 `"access"` 这一个键的值（public ⇒ login），其余键**逐字保留**（见
 //     rewritePublicAccessJSON：不做整体 re-marshal）；
-//   - 命中才写，且走 writeReleaseAssets 的 temp + fsync + rename 原子替换
-//     （权限 0644、临时文件由 defer 清理）；
+//   - 命中才写（`UPDATE app_releases SET config_json = …`，按主键定位）；
 //   - 幂等：第二次调用 0 命中（login 不再是 public），不产生任何字节变化。
 //
-// 失败语义（设计 §9 + W4-6）：单个文件读不到 / 坏 JSON / 写失败 ⇒ **跳过并计数**，
-// 不 panic、不中断整轮；跳过数量由返回值给出（Skipped + Problems 逐条原因），
-// 调用方必须记日志。只有"枚举应用/版本"这类 DB 失败才返回 error —— 那意味着这一轮
-// 根本没跑起来（全体都没扫），不能伪装成"跳过了几个文件"。
+// 失败语义（设计 §9 + W4-6）：单个行配置不可解析 / 落库失败 ⇒ **跳过并计数**，不 panic、
+// 不中断整轮；跳过数量由返回值给出（Skipped + Problems 逐条原因），调用方必须记日志。
+// 只有"枚举应用/版本"这类 DB 失败才返回 error —— 那意味着这一轮根本没跑起来（全体都没扫），
+// 不能伪装成"跳过了几行"。
+//
+// dataRoot 参数**保留但不再使用**：启动接线与测试仍按平台数据根装配（与 Options.DataRoot
+// 同一处置），删除会波及它们；本入口不再触盘（历史资源目录的清理是
+// appserver.CleanupLegacyAssetDirs 的职责）。
 func RewritePublicAccessAssets(ctx context.Context, db *sql.DB, dataRoot string, logger func(format string, args ...any)) (AssetRewriteResult, error) {
 	var res AssetRewriteResult
 	if db == nil {
-		return res, errors.New("appseed: 磁盘资产改写需要 DB（要枚举 wasm 应用与版本）")
-	}
-	if strings.TrimSpace(dataRoot) == "" {
-		return res, errors.New("appseed: 磁盘资产改写需要 DataRoot（磁盘资产的落点）")
+		return res, errors.New("appseed: access 归一化需要 DB（要枚举 wasm 应用与版本行）")
 	}
 	if logger == nil {
 		logger = func(string, ...any) {}
 	}
-	// 含软删：目录可能还在（资源回收与行退役不是同一时刻），残留的 public 同样要退场。
+	// 含软删：软删行同样在库里（资源回收与行退役不是同一时刻），残留的 public 同样要退场。
 	apps, err := serverstore.ListWasmApps(ctx, db, serverstore.WasmAppFilter{IncludeDeleted: true})
 	if err != nil {
 		return res, fmt.Errorf("appseed: 列 wasm 应用: %w", err)
 	}
 	res.Apps = len(apps)
-	skip := func(appID string, relID int64, path, reason string) {
+	skip := func(appID string, relID int64, reason string) {
 		res.Skipped++
-		res.Problems = append(res.Problems, AssetRewriteProblem{AppID: appID, ReleaseID: relID, Path: path, Reason: reason})
-		if path == "" {
-			logger("appseed: 跳过磁盘资产改写（应用 %s）：%s", appID, reason)
+		res.Problems = append(res.Problems, AssetRewriteProblem{AppID: appID, ReleaseID: relID, Reason: reason})
+		if relID <= 0 {
+			logger("appseed: 跳过 access 归一化（应用 %s）：%s", appID, reason)
 			return
 		}
-		logger("appseed: 跳过磁盘资产 %s（%s）", path, reason)
+		logger("appseed: 跳过 access 归一化（%s 的版本行 %d）：%s", appID, relID, reason)
 	}
 	for _, app := range apps {
 		rels, lerr := serverstore.ListWasmReleases(ctx, db, app.AppID, true)
 		if lerr != nil {
 			// 单个应用的版本枚举失败也**不中断整轮**：其余应用照常扫（这一轮是运维
 			// 兜底动作，不是"全有或全无"的事务）。
-			skip(app.AppID, 0, "", "列版本行失败: "+lerr.Error())
+			skip(app.AppID, 0, "列版本行失败: "+lerr.Error())
 			continue
 		}
 		for _, rel := range rels {
 			res.Releases++
-			path := releaseAssetsConfigPath(dataRoot, app.AppID, rel.ID)
-			raw, rerr := os.ReadFile(path)
-			switch {
-			case os.IsNotExist(rerr):
+			raw := []byte(rel.ConfigJSON)
+			if len(raw) == 0 {
+				// 没有配置可判定（历史行 / 未播种）：不是失败，单独计数。
 				res.Missing++
-				continue
-			case rerr != nil:
-				skip(app.AppID, rel.ID, path, "读不到: "+rerr.Error())
 				continue
 			}
 			next, changed, perr := rewritePublicAccessJSON(raw)
 			if perr != nil {
-				skip(app.AppID, rel.ID, path, "配置不可解析: "+perr.Error())
+				skip(app.AppID, rel.ID, "配置不可解析: "+perr.Error())
 				continue
 			}
 			res.Files++
 			if !changed {
 				continue
 			}
-			if werr := writeReleaseAssets(dataRoot, app.AppID, rel.ID, string(next)); werr != nil {
-				skip(app.AppID, rel.ID, path, "改写落盘失败: "+werr.Error())
+			// 落库：只改 config_json 一个列。serverstore 没有"改版本配置"的 setter ——
+			// 版本行按设计是**不可变快照**（§4.2「改配置 = 发新版」），这里的一次性归一化
+			// 是唯一例外（与迁移 0074 同一件事的兜底、判据同源），因此就地一条按主键的 UPDATE。
+			if _, uerr := db.ExecContext(ctx,
+				`UPDATE app_releases SET config_json = $1 WHERE id = $2 AND kind = $3 AND app_id = $4`,
+				string(next), rel.ID, serverstore.AppKindWasmApp, app.AppID); uerr != nil {
+				skip(app.AppID, rel.ID, "改写落库失败: "+uerr.Error())
 				continue
 			}
 			res.Rewritten++
-			logger("appseed: 磁盘资产 access 已由 public 收敛为 login：%s", path)
+			logger("appseed: 库内配置的 access 已由 public 收敛为 login：%s 的版本行 %d", app.AppID, rel.ID)
 		}
 	}
 	if res.Skipped > 0 {
-		logger("appseed: ⚠️ 磁盘资产改写跳过 %d 个文件（原因见上；其余 %d 个已处理）", res.Skipped, res.Rewritten)
+		logger("appseed: ⚠️ access 归一化跳过 %d 行（原因见上；其余 %d 行已处理）", res.Skipped, res.Rewritten)
 	}
 	return res, nil
 }
@@ -790,7 +690,7 @@ type DemoTitlesResult struct {
 // 行一律跳过，`healIncomplete` 也按口径**不覆盖标题**（否则管理员改过的标题每次启动
 // 都会被回滚）。于是"清单改了标题"对存量部署完全无效 —— 演示应用点开还是
 // 「演示 · 公开应用（匿名可达）」，而这条口径早已下线（设计 §9：「需一次性改写
-// DB 行 + 磁盘资产 + 标题」；磁盘资产那一半见 RewritePublicAccessAssets）。
+// DB 行 + 配置 + 标题」；配置那一半见 RewritePublicAccessAssets）。
 //
 // 语义（三条硬约束）：
 //   - 只处理**清单里声明的 app_id**（保留 app_id：历史行有既存数据，不能按标题猜）；
@@ -865,13 +765,14 @@ func RewriteLegacyDemoTitles(ctx context.Context, s *Seeder, logger func(format 
 //
 // 为什么用 Decoder 的偏移量做**精确切片**，而不是 `map[string]json.RawMessage` + Marshal：
 // 需求是"其余字段逐字保留"，而 map+Marshal 会把键按字典序重排、重写转义与空白 ——
-// 那等于重写整份配置（应用读到的字节与它自己写下的不一样，diff 里看不出"只动了一个值"）。
+// 那等于重写整份配置（应用读到的配置字节与作者写下的不一样，diff 里看不出"只动了一个值"；
+// 内存直出后应用 `assets.read` 读的就是这一列，所以字节级保留仍然有意义）。
 // 这里只替换 access **值**那一段字节 [start,end)，其余（键序、缩进、转义、嵌套对象里
 // 同名的 access）一个字节都不动。
 //
-// 取**最后一个** access 键（与 jsonb / Go map 的"后写覆盖"同口径）：PG 侧判定用的
-// `config_json::jsonb ->> 'access'` 同样是最后者胜，两侧判定必须一致，否则会出现
-// "DB 改了、磁盘没改"或反过来的分叉。
+// 取**最后一个** access 键（与 jsonb / Go map 的"后写覆盖"同口径）：迁移 0074 与运维面
+// 判定用的 `config_json::jsonb ->> 'access'` 同样是最后者胜，两侧判定必须一致，否则会
+// 出现"库内改了这一列、判定却说另一个值"的分叉。
 func rewritePublicAccessJSON(raw []byte) ([]byte, bool, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	tok, err := dec.Token()

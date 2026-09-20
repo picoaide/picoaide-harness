@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -24,7 +23,6 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
 	"github.com/picoaide/picoaide/internal/wasmapp/appserver"
-	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/memprofile"
@@ -544,14 +542,9 @@ func TestWasmAdminDisposalEvictsRuntimeCache(t *testing.T) {
 	if err := serverstore.SetWasmAppCurrentRelease(ctx, db, appID, relID); err != nil {
 		t.Fatalf("置生效版本失败: %v", err)
 	}
-	assetsDir := filepath.Join(dataRoot, limits.AppsDirName, appID, assets.AssetsDirName,
-		strconv.FormatInt(relID, 10))
-	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
-		t.Fatalf("建资源目录失败: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(assetsDir, limits.AppConfigFileName), []byte(cfgJSON), 0o644); err != nil {
-		t.Fatalf("写应用配置失败: %v", err)
-	}
+	// 2026-09-20 起随包资源不再落盘：配置就取自上面那行 `ConfigJSON`（库内权威副本），
+	// 资源集由 appserver 在运行期从制品字节解析自定义段得到 —— 这里**故意不写任何磁盘
+	// 资源目录**，正是为了证明"不落盘也能跑通编译/缓存/逐出这条链"。
 
 	serve := func() {
 		t.Helper()

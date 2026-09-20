@@ -28,6 +28,7 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/appproof"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
+	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件是本包测试的**共享夹具**。
@@ -45,8 +46,11 @@ import (
 //   - 把 `defer Compiler.ReleaseUpload` 从 publish/validate 里删掉 ⇒
 //     连续两次失败后的第三次提交会拿到 COMPILE_BUSY/429（TestUploadSlotReleasedOnFailure 红）；
 //   - 把上传闸门（AllowUpload）整段注释掉 ⇒ TestUploadRateGate429IsPointed 红；
-//   - 把 staging 写入挪到落库之后（或先落行再抽资产）⇒
-//     TestPublishAssetFailureLeavesNoReleaseRow 红（库里会出现行）；
+//   - 把资源落盘（staging + rename）加回发布链路 ⇒
+//     TestPublishHappyPath / TestPublishAssetRejectedLeavesNothing / upload complete 的
+//     assertNoAssetsDir 负向断言红（<data_root>/apps/<app_id>/assets/ 会出现）；
+//   - 把发布期的 assets.ValidateLogicalPath / 上限校验（checkPublishAssets）删掉 ⇒
+//     TestPublishAssetRejectedLeavesNothing 与 TestPublishAssetLimitsRejectBeforeCommit 红；
 //   - 把 owner 检查（checkOwner）注释掉 ⇒ TestOtherEmployeeCannotPublish 红；
 //   - 把 `defer h.opt.Compiler.ReleaseUpload` 与 review 开关的 pending 分支改回
 //     approved ⇒ TestReviewSwitchKeepsCurrentRelease 红。
@@ -143,6 +147,19 @@ func withCustomSections(t *testing.T, base []byte, sections map[string][]byte) [
 	t.Helper()
 	out := append([]byte{}, base...)
 	for name, data := range sections {
+		out = withRepeatedCustomSection(t, out, name, data)
+	}
+	return out
+}
+
+// withRepeatedCustomSection 在同一模块上追加**同名**自定义段若干次。
+//
+// 自定义段（id=0x00）按规范可以重复出现，而解析层只认第一个、其余静默丢弃 ——
+// 这正是发布期 `ASSET_EXISTS`（重名闸门）要拦的形态，所以夹具必须能造出"真"重名段。
+func withRepeatedCustomSection(t *testing.T, base []byte, name string, blobs ...[]byte) []byte {
+	t.Helper()
+	out := append([]byte{}, base...)
+	for _, data := range blobs {
 		payload := append(uleb(len(name)), []byte(name)...)
 		payload = append(payload, data...)
 		out = append(out, 0x00)
@@ -605,6 +622,37 @@ func (e *testEnv) countReleases(appID string) int {
 
 // b64 是标准 base64（与端点约定一致：A-Za-z0-9+/ 且带 padding）。
 func b64(raw []byte) string { return base64.StdEncoding.EncodeToString(raw) }
+
+// assertNoAssetsDir 是"随包资源不落盘"的**负向判据**（2026-09-20 定案，决策文档
+// docs/decisions/2026-09-20-wasm-assets-in-memory.md）：`<data_root>/apps/<app_id>/`
+// 下不得出现 `assets/` 目录，也不得留下任何 `staging-*` 残骸。
+//
+// 为什么断言得这么死：发布链路的"零磁盘副作用"是本次改造的核心承诺 —— 一旦有人把
+// 抽段落盘（staging 目录 / 按 release_id 的目录）加回发布链路，这条立刻变红。
+// 目录不存在是**正常**形态（发布本身不建任何应用目录）。
+func assertNoAssetsDir(t *testing.T, dataRoot, appID string) {
+	t.Helper()
+	appDir := filepath.Join(dataRoot, limits.AppsDirName, appID)
+	// ① 精确判据：assets/ 不得存在。
+	if _, err := os.Lstat(filepath.Join(appDir, "assets")); err == nil {
+		t.Fatalf("<data_root>/apps/%s/assets 不得存在（随包资源已改为内存直出，不再抽取落盘）", appID)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("探测 assets 目录失败: %v", err)
+	}
+	// ② 更强的判据：应用目录里不能有任何以 staging- 开头的残骸（旧的原子改名形态）。
+	entries, derr := os.ReadDir(appDir)
+	if derr != nil {
+		if os.IsNotExist(derr) {
+			return // 应用目录都没建 = 最干净的形态
+		}
+		t.Fatalf("读应用目录失败: %v", derr)
+	}
+	for _, en := range entries {
+		if strings.HasPrefix(en.Name(), "staging-") {
+			t.Fatalf("<data_root>/apps/%s 下不得残留 staging 目录: %s", appID, en.Name())
+		}
+	}
+}
 
 // testLogger 把编译器的告警收进测试日志（隔离关闭的告警是**预期**的）。
 type testLogger struct{ t *testing.T }

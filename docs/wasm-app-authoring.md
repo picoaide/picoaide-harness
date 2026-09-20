@@ -76,7 +76,7 @@
 | `db.tx` | 事务 | ABI 层是 `tx_begin`/`tx_commit`/`tx_rollback`；事务内**只允许数据库读写**（`db.query`/`db.exec` + 两个出口），`log`/`assets.read`/`db.define` 与嵌套 `tx_begin` 一律拒；超时 5 秒强制回滚 |
 | ~~`ai.chat(messages, model?)`~~ | **已删除（2026-09-19）** | 它从来不是 WASI 导入，而是 stdout 上 JSON-RPC 的宿主方法名（平台也不反编译产物）⇒ 老产物**能通过发布校验**，直到**运行期第一次调用**才失败（`code = "NOT_FOUND"`、message 逐字 `未知的宿主方法: ai.chat`）。应用里的 AI 改走**客户端 AI loop**：应用前端 JS 调保留路径 `POST /__picoaide/ai/chat`（客户端本地处理，不经服务端），再见 §2.1c |
 | `log(level, msg)` | 写日志 | 单条不超过 4 KiB；每请求最多 100 条；超出丢弃并计数 |
-| `assets.read(path)` | 读随包资源 | 资源在发布期已被抽到宿主磁盘；无文件系统语义、不能穿越；结果用 `encoding` 判别负载（`text` / `base64` / `empty`） |
+| `assets.read(path)` | 读随包资源 | 资源 = wasm 的**自定义段**（运行期由宿主解析后常驻内存，不落盘）；无文件系统语义、不能穿越；结果用 `encoding` 判别负载（`text` / `base64` / `empty`） |
 
 **没有任何其他能力**：无文件、无网络、无线程、无子进程、无环境变量、无 `PRAGMA`、
 无 `ATTACH`、无 DDL、无扩展加载；**也没有任何 AI 能力**（宿主方法 `ai.chat` 已于 2026-09-19 删除，
@@ -84,8 +84,8 @@
 
 #### 包内资源的可见性（**写机密之前必读**）
 
-`assets.read` 读到的资源**默认不对外公开** —— 它只存在于宿主磁盘上，按包内逻辑路径
-读取，没有文件系统语义，也没人能从外面列目录。
+`assets.read` 读到的资源**默认不对外公开** —— 它按包内逻辑路径在宿主内存里查（资源来自
+wasm 的自定义段，不落盘），没有文件系统语义，也没人能从外面列目录。
 
 **唯一例外是"非保留资源"**：`picoaide.app.json` 之外的一切包内文件（HTML/JS/CSS/
 图片/字体/数据文件）会被宿主**按路径直出给任何能打开应用的人**（这正是"静态资源
@@ -433,9 +433,9 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | `RUNTIME_TIMEOUT` | 单请求里做了整批计算 | 拆成多次请求；检查不收敛的循环 |
 | `RUNTIME_MEMORY` | 一次把大结果集读进内存 | 用 `WHERE` 收窄 + `LIMIT` 分页 |
 | `DB_DENIED` | 多语句 / DDL / `PRAGMA` / `ATTACH` / `VACUUM` / 提到保留列；**事务内调了被禁能力**（`details.kind` = `nested_tx` / `blocking_capability` / `ddl`） | 建表走 `db.define`；语句只留四个动词；事务里只留 `db.query`/`db.exec` |
-| `ASSET_DENIED` | `assets.read` 的包内路径非法/越界，或抽取目录异常 | 路径用相对、`/` 分隔、不含 `..`；不要读自己没有的资源 |
+| `ASSET_DENIED` | `assets.read` 的包内路径非法，或资源名占用了保留前缀 | 路径用相对、`/` 分隔、不含 `..`；不要读自己没有的资源 |
 | `ASSET_OVERSIZE` | 单个随包资源超过 4 MiB（与自定义段总量同源） | 精简资源；HTML/JS 先 gzip 再内嵌 |
-| `ASSET_EXISTS` | 发布期抽取要写的资源已存在（抽取只写一次） | 改资源 = 发新版本，不要指望覆盖 |
+| `ASSET_EXISTS` | 同一个包内路径在自定义段里出现了两次（解析层只取第一个，重复的那份会被静默丢弃 ⇒ 平台直接拒） | 打包时不要给两个源文件写同一个目标路径；改内容 = 发新版本 |
 | `HOST_METHOD_UNKNOWN` | 调了不存在的宿主函数（拼错方法名、或平台没有的能力） | 只调封闭清单里的宿主方法（见 `references/abi.md` §3）；**AI 不在其中**，走 §2.1c 的客户端 AI loop。注意：**调不存在的宿主方法时第一层先回 JSON-RPC `NOT_FOUND` + `未知的宿主方法: <名字>`**（老应用调 `ai.chat` 撞的就是这一层） |
 | `DB_LIMIT` | 库满 100 MB 或返回超行数/字节、语句超时 | 清理历史数据或做汇总表；分页 |
 | `APP_QUEUE_FULL` | 用的人多 | 按 `Retry-After` 退避，别立刻重试 |

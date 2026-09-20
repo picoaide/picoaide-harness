@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -20,6 +19,7 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/logbuf"
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
 	"github.com/picoaide/picoaide/internal/wasmapp/runtime"
+	"github.com/picoaide/picoaide/internal/wasmapp/wasmmod"
 )
 
 // serveApp 是**客户端专属访问模型**的唯一请求管线（2026-09-19 决策
@@ -141,22 +141,29 @@ func (s *Server) serveApp(w http.ResponseWriter, r *http.Request, appLabel strin
 	// 也不查应用会话表（那张表随旧模型一起删，见迁移 0073）。
 	user := s.clientFrameUser(r.Context(), clientUser, app)
 
-	// ===== ④ 准入（R24/R25 + 2026-09-19 契约 §4.4）=====
-	// 资源目录：抽取根由 assets 按 (appID, releaseID) 推导（§4.2），应用读到的
-	// 与宿主读到的必须是同一份（应用用 assets.read("picoaide.app.json") 读自己的配置）。
+	// ===== ④ 随包资源 + 应用配置（§4.2 / R24/R25）=====
+	// 随包资源（wasm 自定义段）**不再落盘**（2026-09-20 定案）：这里按
+	// (app_id, version, release_id) 取内存资源集 —— 未命中就读一次制品字节 + 抽自定义段
+	// （loadReleaseAssets），命中则零 IO。应用用 `assets.read("picoaide.app.json")` 读到的
+	// 与宿主判准入用的是**同一份**：配置来自库内 `config_json`，随资源集一起注入
+	// （决策文档 docs/decisions/2026-09-20-wasm-assets-in-memory.md）。
 	//
-	// ⚠️ 目录仍然**每请求打开**（三次 Lstat，实测 ≈30 µs）：它是"平台状态"断言
-	// （目录缺失 = 500 平台故障），不能因为 `(app_id, release_id)` 级缓存里有字节
-	// 就跳过。真正贵的三项（资源配置读盘 + 解析、资源读盘、SHA-256）走 releaseContent
-	// 的缓存（R1-rt-3），命中时零读盘。
-	store, aerr := s.openAssets(appID, rel)
+	// 为什么在准入之前就要资源集：静态直出（步骤⑦）与 `assets.read` 都读它；而
+	// "资源加载失败"属于平台故障，必须 fail-loud 500 —— 绝不能因为读不到配置就按匿名放行
+	// （那会把要求登录的应用意外开放）。
+	key := moduleKey{AppID: appID, Version: rel.Version, ReleaseID: rel.ID}
+	entry, releaseEntry, aerr := s.modules.acquireSet(r.Context(), key,
+		func(cctx context.Context) (*assets.Set, *apperr.Error) {
+			return s.loadReleaseAssets(cctx, appID, rel)
+		})
 	if aerr != nil {
-		s.logf("appserver: 资源目录不可用 app=%s release=%d: %v", appID, rel.ID, aerr)
+		s.logf("appserver: 随包资源加载失败 app=%s release=%d: %v", appID, rel.ID, aerr)
 		s.writeFailure(w, r, apperr.New(apperr.CodeInternal, "平台暂时不可用").
-			WithHint("这是平台侧故障（该版本的资源目录缺失）；请告知应用发布者或平台管理员"), false)
+			WithHint("这是平台侧故障（该版本的随包资源加载失败）；请告知应用发布者或平台管理员"), false)
 		return
 	}
-	rc := s.openReleaseContent(appID, rel, store)
+	defer releaseEntry()
+	rc := s.openReleaseContent(appID, rel, entry.set)
 	cfg, cerr := rc.Config()
 	if cerr != nil {
 		// ⚠️ 读不到/解析不了应用配置**绝不**当匿名处理：那会把 RequiresLogin 应用
@@ -223,55 +230,56 @@ func (s *Server) serveApp(w http.ResponseWriter, r *http.Request, appLabel strin
 	}
 
 	// ===== ⑧ 交给 wasm（§6.1 ⑤）=====
-	s.serveWasm(w, r, appID, rel, cfg, store, user, sessionKey)
+	s.serveWasm(w, r, appID, rel, cfg, entry.set, user, sessionKey)
 }
 
-// openAssets 打开本版本的抽取资源目录（§4.2）。
-func (s *Server) openAssets(appID string, rel *serverstore.WasmRelease) (*assets.Store, *apperr.Error) {
-	if rel == nil {
-		return nil, apperr.New(apperr.CodeInternal, "缺少生效版本信息")
-	}
-	return assets.Open(s.opt.DataRoot, appID, releaseAssetID(rel))
-}
-
-// releaseAssetID 返回版本资源目录名。
+// loadReleaseAssets 冷加载一个版本的随包资源集（读制品字节 → 抽自定义段 → 构造）。
 //
-// 抽取目录是 `<data_root>/apps/<app_id>/assets/<release_id>/`（§4.2）。目录名的
-// **约定**是发布期的抽取目录列（assets_dir）：可能写目录名，也可能写路径
-// （含绝对路径），因此统一取 basename；为空时回落到版本行 id（数字，天然满足
-// assets 的 releaseIDPattern）。
+// 只在缓存未命中时调用（`moduleCache.acquireSet` 的 loader）：命中路径零 IO。
 //
-// ⚠️ 跨模块约定（交付说明已标注）：发布链路（模块 E/D）必须把资源抽到
-// `assets/<assets_dir 的 basename 或 release.id>/`，且**即使包里没有任何自定义段
-// 也必须建出该目录**（§4.2「抽出失败 = 发布失败」）—— 否则本函数会让该应用整体 500。
-func releaseAssetID(rel *serverstore.WasmRelease) string {
-	if rel == nil {
-		return ""
+// 为什么在这里做"抽段"而不是发布期落到磁盘上（2026-09-20 定案，见
+// docs/decisions/2026-09-20-wasm-assets-in-memory.md）：段本来就在制品字节里，
+// 落盘只是把同一份内容抄一份到宿主盘上，代价是"两份权威 + 两处实现 + 一条磁盘攻击面"。
+// 配置从**库内** `config_json` 注入（保留资源名 `picoaide.app.json`，仍然永不直出），
+// 因此宿主判准入与应用 `assets.read` 读到的是同一份。
+func (s *Server) loadReleaseAssets(ctx context.Context, appID string,
+	rel *serverstore.WasmRelease) (*assets.Set, *apperr.Error) {
+
+	full, aerr := s.loadReleaseWasm(ctx, rel)
+	if aerr != nil {
+		return nil, aerr
 	}
-	if raw := strings.TrimSpace(rel.AssetsDir); raw != "" {
-		base := strings.TrimSpace(filepath.Base(raw))
-		if base != "" && base != "." && base != "/" && base != ".." {
-			return base
-		}
+	sections, err := wasmmod.ExtractCustomSections(full.Wasm)
+	if err != nil {
+		// 发布期已校验过模块结构；这里失败属于平台状态异常（字节被换/被截断）。
+		s.logf("appserver: 解析随包资源失败 app=%s release=%d: %v", appID, full.ID, err)
+		return nil, apperr.New(apperr.CodeInternal, "随包资源解析失败（平台故障）").
+			WithCause(err).
+			WithHint("随包资源来自 wasm 的自定义段；这里解析失败说明制品字节异常，请联系平台管理员")
 	}
-	return strconv.FormatInt(rel.ID, 10)
+	set, aerr := assets.Build(appID, strconv.FormatInt(full.ID, 10), sections, []byte(full.ConfigJSON))
+	if aerr != nil {
+		s.logf("appserver: 随包资源集构造失败 app=%s release=%d: %v", appID, full.ID, aerr)
+		return nil, aerr
+	}
+	return set, nil
 }
 
-// loadAppConfig 读并解析 `picoaide.app.json`（§4.2 / R25）。
+// loadAppConfig 解析 `picoaide.app.json`（§4.2 / R25）。
 //
 // 解析走 appcfg.Parse：它会落定 access 缺省（login）并把**旧 schema**
 // （login_required/visible，已发布版本里还是旧形态）映射成 access —— 因此
 // "宿主按旧配置判准入、应用按同一份文件的新 schema 判"两条口径始终一致。
 //
-// 为什么从资源目录读而不是用版本行的 config_json 列：应用自己是用
-// `assets.read("picoaide.app.json")` 读配置的（§4.2），宿主必须与它读**同一份**，
-// 否则可能出现"宿主按 access=public 放进 wasm、应用按 whitelist 拒绝"这种
-// 双方各说各话的状态。资源缺失 = 平台故障 ⇒ 调用方按 500 处理（fail-loud）。
-func loadAppConfig(store *assets.Store) (appcfg.Config, *apperr.Error) {
-	if store == nil {
-		return appcfg.Config{}, apperr.New(apperr.CodeInternal, "资源目录未打开")
+// 配置的来源是**内存资源集里的保留资源**（由库内 `config_json` 注入）：应用自己是用
+// `assets.read("picoaide.app.json")` 读它的（§4.2），宿主必须与它读**同一份**，
+// 否则可能出现"宿主按 access=login 放进 wasm、应用按 whitelist 拒绝"这种双方各说各话
+// 的状态。资源缺失 = 平台故障 ⇒ 调用方按 500 处理（fail-loud）。
+func loadAppConfig(set *assets.Set) (appcfg.Config, *apperr.Error) {
+	if set == nil {
+		return appcfg.Config{}, apperr.New(apperr.CodeInternal, "资源集未加载")
 	}
-	_, data, err := store.Read(limits.AppConfigFileName)
+	_, data, err := set.Read(limits.AppConfigFileName)
 	if err != nil {
 		return appcfg.Config{}, apperr.New(apperr.CodeInternal, "读取应用配置失败").
 			WithDetail("config", limits.AppConfigFileName).
@@ -292,7 +300,7 @@ func loadAppConfig(store *assets.Store) (appcfg.Config, *apperr.Error) {
 
 // serveWasm 把请求交给 wasm 实例（§6.1 ⑤ / §4.6 / §7）。
 func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
-	rel *serverstore.WasmRelease, cfg appcfg.Config, store *assets.Store, user *abi.User, sessionKey string) {
+	rel *serverstore.WasmRelease, cfg appcfg.Config, set *assets.Set, user *abi.User, sessionKey string) {
 
 	// ===== 应用日志（§5.1）=====
 	// 每请求一个 logbuf（它的限额语义唯一实现在那个包），请求结束后由 flushAppLogs
@@ -379,7 +387,7 @@ func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 		Version: rel.Version,
 		User:    user,
 		DB:      db,
-		Assets:  assetsAdapter{store: store},
+		Assets:  assetsAdapter{set: set},
 		Logs:    logs,
 	}
 

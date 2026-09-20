@@ -27,26 +27,35 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
 	"github.com/picoaide/picoaide/internal/wasmapp/runtime"
+	"github.com/picoaide/picoaide/internal/wasmapp/wasmmod"
 )
 
 // 本文件是 §6.2 的**同步发布链路**（R30）与 §4.2 的预检（validate）。
 //
-// 两件事在这里同时定死：**顺序**与**失败时的回滚**。
+// 两件事在这里同时定死：**顺序**与**失败时的补偿**。
 //
-// 顺序（选它的理由见"为什么把全部文件系统工作放在落库之前"）：
+// 顺序（2026-09-20 起整条链路只写数据库，见下）：
 //
 //	A 纯校验      identity → app_id → 体积 → 静态(导入/导出/段表/体积) → appcfg
 //	             （appcfg 一步在**更新发布**时会先把缺席字段从上一版生效配置继承过来）
 //	B 编译        临时文件 → Compiler.Compile（真编译，60 s 预算）
-//	C 抽取        ExtractCustomSections → 写进 **staging 目录**（仍未落库）
+//	C 抽取分流    ExtractCustomSectionsWithCounts → assets.SplitSections（**纯内存**）
+//	             → 保留前缀拒 → 重名段拒（ASSET_EXISTS）→ 逐条逻辑路径完整校验 +
+//	             单文件/总量上限（与运行期 assets.Build 同一份判据）
 //	D 干跑        合成帧 Instantiate → _start → 响应帧（2 s 预算）
 //	E 占名落行    UpsertWasmApp → 复读归属 → CreateWasmRelease（拿到 release_id）
-//	F 原子改名    staging → assets/<release_id>（同一父目录，单次 rename）
-//	G 投影        （仅 approved 时）SetWasmAppConfig + SetWasmAppCurrentRelease
-//	H 收尾        审计 → 版本 GC（保留 3 版，顺带清掉被回收版本的资源目录）
+//	F 投影        （仅 approved 时）SetWasmAppConfig + SetWasmAppCurrentRelease
+//	G 收尾        审计 → 版本 GC（**数据行**，保留 3 版）
+//
+// ⚠️ 随包资源**不落盘**（2026-09-20 定案，决策文档
+// `docs/decisions/2026-09-20-wasm-assets-in-memory.md`）：自定义段在本进程里被解析成
+// 内存资源集（运行期由 appserver 用 `assets.Build` 构造并直出），磁盘上只留各应用自己的
+// `app.db`。因此原先的 "C 抽取落盘 / F 原子改名 / GC 顺带删资源目录" 三步连同 staging
+// 目录与补偿里的删目录一起消失 —— **本文件不再出现任何"按版本落盘"的路径**
+// （`<data_root>/apps/<app_id>/assets/<release_id>/` 这个布局作废）。
 //
 // ⚠️ 投影有**两条**写路径，两条都必须被 `status == approved` 罩住：
-//   - G1/G2（SetWasmAppConfig + SetWasmAppCurrentRelease）；
+//   - F1/F2（SetWasmAppConfig + SetWasmAppCurrentRelease）；
 //   - E1 的 UPSERT（首版落行 / 已有应用的更新都走它），罩住的列 =
 //     config_json/purpose/data_sensitivity（首版待审时它们曾照写，让"没被任何人批准过的
 //     配置"成了后续版本的继承基线，审计 §1.2）**以及 title/description**（2026-09-19
@@ -61,15 +70,17 @@ import (
 // recomputeProjection。继承基线的真源已经是版本行（inheritBase 走
 // LatestApprovedWasmReleaseMeta），投影列因此只是显示面 —— 但显示面同样不能提前变。
 //
-// **为什么把全部文件系统工作放在落库之前**：R18 的判据是"失败的发布不占版本号"。
-// 磁盘写失败（满、权限、只读挂载）是这条链路上**最可能**的失败，把它排在落库之前
-// 意味着这类失败留下一行都没有；反之（先落行再抽资产）就必须靠删行来补偿，
-// 而删行一旦也失败，就会留下"版本号被一个失败版本永久占用"的状态。
+// **为什么现在是"零磁盘副作用"**：R18 的判据是"失败的发布不占版本号"。原实现把
+// 全部抽段落盘排在落库之前，好让写盘失败不留库行 —— 但那只是把风险挪了个位置，且
+// 落库后还要靠 rename + 补偿维持一致。现在整条链路**只写数据库**，唯一的文件系统
+// 痕迹是编译用的临时文件（`<data_root>/apps/_tmp/upload-*.wasm`，每条路径都 defer
+// 删除）⇒ 任何失败要么发生在第一次 INSERT 之前（一行都不留），要么由 compensate()
+// 把那一行软删掉（版本号仍占位，见下）。
 //
-// 落库之后只剩一次同父目录的 rename（同文件系统、原子）与两次 UPDATE。它们真失败时
-// 走 compensate()：删目录 + 软删刚建的 release 行 + 恢复原来的 current_release_id，
-// 并把错误如实回给调用方（含"该版本号已占位"的提示）。**不硬删行**：本包不做数据
-// 访问（DAO 在 serverstore），而"软删行仍在 ⇒ 版本号仍占位"是平台既有语义（§4.1）。
+// 落库之后只剩两次 UPDATE。它们真失败时走 compensate()：软删刚建的 release 行 +
+// 把 current_release_id 与 config 投影恢复成原来的值，并把错误如实回给调用方
+// （含"该版本号已占位"的提示）。**不硬删行**：本包不做数据访问（DAO 在 serverstore），
+// 而"软删行仍在 ⇒ 版本号仍占位"是平台既有语义（§4.1）。
 
 // uploadPayload 是上传载荷（§4.2/R21）。
 //
@@ -88,13 +99,15 @@ type uploadPayload struct {
 type staged struct {
 	appID string
 	// wasm 是解码后的模块字节。落库（CreateWasmRelease）之后调用方把它置 nil：
-	// 段已抽到磁盘、编译已进缓存，再留一份 32 MiB 的副本没有任何用处
-	// （§4.2"抽完立即释放原始字节"）。
+	// 段已在内存里解析成 sections、编译已进缓存，再留一份 32 MiB 的副本没有任何
+	// 用处（§4.2"抽完立即释放原始字节"）。
 	wasm []byte
-	// sections 是抽出的自定义段（总量 ≤ limits.SectionTotalMaxBytes，内存里持有
-	// 它是安全的；真正要释放的是 wasm 本体）。
+	// sections 是抽出的**静态资源**（已分流、已逐条校验、总量 ≤
+	// limits.SectionTotalMaxBytes）。它是内存资源集的原料：落库后由运行期
+	// `assets.Build` 用「库里这份 wasm 的自定义段 + 库内 config_json」构造，本字段
+	// 只服务于本次请求的响应/诊断（`release.assets`）。
 	sections map[string][]byte
-	// skipped 是"看起来不是资源"的段名（工具链元数据等），只报告不失败。
+	// skipped 是"看起来不是资源"的段名（工具链元数据 / 平台独占名等），只报告不失败。
 	skipped []string
 
 	config     appcfg.Config
@@ -105,28 +118,8 @@ type staged struct {
 	compile   *compile.Result
 }
 
-// toolchainSections 是**工具链自带的自定义段**名（不当作静态资源抽取）。
-//
-// 依据是实测而不是猜测：Go 的 wasip1 产物固定带三个自定义段（`go:buildid` /
-// `producers` / `name`；本机实测 refapp.wasm 分别 114 B / 71 B / 73 043 B）。
-// 其中 `name` 是符号名表（73 KiB！），`producers` 是产线元数据 —— 把它们写进
-// assets 只会浪费配额并让作者困惑（`assets.read("name")` 读到一坨符号表）。
-//
-// 设计 §4.2 说的"抽出失败 = 发布失败"指的是**抽取/写盘动作失败**，不是"模块里存在
-// 非资源段"——否则任何 Go 模块都无法发布（`go:buildid` 含 `:`，不满足 assets 的
-// 逻辑路径规则）。判据与分流见 splitAssetSections。
-var toolchainSections = map[string]struct{}{
-	"name":                {},
-	"producers":           {},
-	"target_features":     {},
-	"dylink":              {},
-	"dylink.0":            {},
-	"linking":             {},
-	"sourceMappingURL":    {},
-	"external_debug_info": {},
-}
-
-// prepare 跑完 A–D（**零副作用**：不写库、不写最终目录，只写临时文件与 staging）。
+// prepare 跑完 A–D（**零磁盘副作用**：不写库、不落盘；唯一的文件系统痕迹是 B 步的
+// 编译临时文件，函数返回前已删除）。
 //
 // appID 与 wasm 由调用方给出（调用方已经完成身份/归属/版本/体积预检）：
 // `publish` 传 base64 解码结果、`upload complete` 传分片拼装结果 —— **同一个 prepare**，
@@ -188,10 +181,15 @@ func (h *Handlers) prepare(c *gin.Context, appID string, wasm []byte, rawConfig 
 	}
 	st.compile = res
 
-	// C 抽取自定义段（只解析，不落盘 —— 落盘在 writeStaging）。
-	sections, xerr := h.opt.Compiler.ExtractCustomSections(wasm)
+	// C 抽取自定义段（只解析，**不落盘**：资源不再有磁盘形态）。
+	//
+	// 走 wasmmod 的 WithCounts 形态而不是 `Compiler.ExtractCustomSections`：后者是同一份
+	// 解析能力的薄包装，只返回段内容 —— 而"同一个资源名出现了几次"是发布期必须判的
+	// 事实（重名段在解析层只取第一个、其余静默丢弃，见 C3 的重名闸门）。
+	// 错误映射与那个包装逐字一致（apperr.From）。
+	sections, sectionCounts, xerr := wasmmod.ExtractCustomSectionsWithCounts(wasm)
 	if xerr != nil {
-		return nil, xerr
+		return nil, apperr.From(xerr)
 	}
 	// C2 保留前缀闸门（§21.2 规则②，R2-X-3）：应用**不得**占用 `__picoaide/` 前缀。
 	//
@@ -203,7 +201,20 @@ func (h *Handlers) prepare(c *gin.Context, appID string, wasm []byte, rawConfig 
 	if aerr := checkReservedPathPrefix(sections); aerr != nil {
 		return nil, aerr
 	}
-	st.sections, st.skipped = splitAssetSections(sections)
+	// C3 分流（段 → 静态资源 / 忽略并报告）与**发布期**的完整校验。
+	//
+	// 分流策略只有一份实现（assets.SplitSections，判据与运行期、与打包脚本同源）；
+	// 这里的校验是运行期 assets.Build 的**前置副本**：不通过的错误必须发生在落库之前
+	// （否则非法资源名会先占掉一个版本号），且要指到具体哪个段（details.section）。
+	st.sections, st.skipped = assets.SplitSections(sections)
+	// 重名闸门只罩**保留下来的资源段**：工具链元数据（`name`/`producers`/…）与平台
+	// 独占的 `picoaide.app.json` 本来就可能重复出现或被忽略，对它们报错没有意义。
+	if aerr := checkDuplicateSections(st.sections, sectionCounts); aerr != nil {
+		return nil, aerr
+	}
+	if aerr := checkPublishAssets(st.sections, st.configJSON); aerr != nil {
+		return nil, aerr
+	}
 
 	// D 合成帧干跑（§4.2：编译通过 ≠ 能跑）。
 	if derr := h.dryRun(c, appID, version, wasm, st.config); derr != nil {
@@ -283,53 +294,99 @@ func checkReservedPathPrefix(sections map[string][]byte) *apperr.Error {
 		WithHint("应用侧要调模型请用宿主桥 `" + reservedPathPrefix + "ai/chat`（前端 fetch，结果回传 wasm 落库）")
 }
 
-// splitAssetSections 把自定义段分成「静态资源」与「非资源段（忽略并报告）」。
+// checkDuplicateSections 拒绝"同一个包内路径出现了两次"的自定义段（`ASSET_EXISTS`，409）。
 //
-// 判据（两条都要满足才算资源）：
-//   - 段名不是工具链元数据（toolchainSections，实测依据见其注释）；
-//   - 段名是**包内逻辑路径**（写盘时 assets.Write 会做完整校验：相对、`/` 分隔、
-//     无 `..`；这里只做预判以便把"元数据"分流出去）。
+// 为什么必须有这条闸门：随包资源的键就是段名，而重名段在**解析层是静默的** ——
+// `wasmmod.Parse` 只把第一个同名段收进 `CustomSections`，其余的丢掉、不报错。作者的
+// 两种常见形态都会撞上它：
 //
-// `picoaide.app.json` 是平台独占名（配置文件由宿主写入），模块里的同名段直接忽略 ——
-// 否则资产的"拒绝覆盖"会先占位，导致配置写不进去。
-func splitAssetSections(in map[string][]byte) (kept map[string][]byte, skipped []string) {
-	kept = make(map[string][]byte, len(in))
-	for name, data := range in {
-		if _, isToolchain := toolchainSections[name]; isToolchain {
-			skipped = append(skipped, name)
-			continue
+//   - 打包脚本里两个源文件写了同一个 `DEST`（页面显示的是先打进模块的那一份）；
+//   - 手工往模块里追加段时重复追加（例如"改了一下 index.html 又追加了一次"）。
+//
+// 两种情况下作者都会对着一个"内容不对"的页面反复怀疑浏览器缓存，而平台侧一声不响。
+// `ASSET_EXISTS` 的语义正好是"这个资源名已经被占了一次"（它原来是磁盘版
+// `assets.Store.Write` 的"拒绝覆盖"用的码；磁盘版删除后，这里是它唯一的触发点）。
+//
+// 判据只罩 `kept`（真正会成为资源的段）：工具链元数据段（`name`/`producers`/…）与
+// 平台独占的 `picoaide.app.json` 本来就可能重复出现或被忽略，对它们报错没有意义。
+func checkDuplicateSections(kept map[string][]byte, counts map[string]int) *apperr.Error {
+	var dup []string
+	dupCounts := make(map[string]int)
+	for name := range kept {
+		if n := counts[name]; n > 1 {
+			dup = append(dup, name)
+			dupCounts[name] = n
 		}
-		if name == limits.AppConfigFileName {
-			skipped = append(skipped, name)
-			continue
-		}
-		if !isLogicalAssetPath(name) {
-			skipped = append(skipped, name)
-			continue
-		}
-		kept[name] = data
 	}
-	sort.Strings(skipped)
-	return kept, skipped
+	if len(dup) == 0 {
+		return nil
+	}
+	sort.Strings(dup)
+	return apperr.New(apperr.CodeAssetExists, "同一个资源名在自定义段里出现了多次").
+		WithDetail("reason", "duplicate_section").
+		WithDetail("paths", dup).
+		WithDetail("counts", dupCounts).
+		WithHint("同一个包内路径只能有一个自定义段；用 `scripts/pack-assets.mjs` 打包时不要给两个源文件写同一个 DEST").
+		WithHint("改资源内容 = 发一个新版本（重名不是「后者覆盖前者」，而是整份被平台拒）")
 }
 
-// isLogicalAssetPath 是 assets 逻辑路径规则的**本地预判**（纯字符串、不做 IO）。
-func isLogicalAssetPath(p string) bool {
-	if p == "" || strings.HasPrefix(p, "/") || strings.ContainsAny(p, "\\:") {
-		return false
-	}
-	for _, r := range p {
-		if r < 0x20 || r == 0x7f {
-			return false
+// checkPublishAssets 在**发布期**对随包资源做两道完整校验（判据与运行期
+// `assets.Build` 同源，是它的前置副本）。
+//
+// 为什么运行期已经判过还要在这里判一次：
+//   - **失败要发生在落库之前**：否则一个非法资源名会先占掉一个版本号，作者只能升
+//     版本号重发（R18 的代价）。运行期报错发生在那之后，救不了版本号；
+//   - **错误要能指到具体哪个段**（`details.section`）：运行期是交付路径，它给出的
+//     `details.path` 到不了作者发起的那次请求。
+//
+// 两道判据：
+//
+//  1. 每个资源名过 `assets.ValidateLogicalPath`（唯一的完整实现：相对、`/` 分隔、
+//     无 `..`/`:`/控制字符、单段 ≤ MaxSegmentBytes、整条 ≤ MaxPathBytes）。
+//     分流用的 `assets.IsLogicalAssetPath` 只是**纯字符串预判**，不做长度校验 ——
+//     超长段名会走到这里才被拒。错误码沿用 `ASSET_DENIED`（与 assets 包同一个语义）。
+//  2. 单文件与总量 ≤ `limits.SectionTotalMaxBytes`。总量口径与 `assets.Build` 逐字
+//     一致 = 全部资源之和，**再加平台注入的 `picoaide.app.json`**（它也是资源集里的
+//     一条，配置同样占额度）。
+func checkPublishAssets(kept map[string][]byte, cfgJSON []byte) *apperr.Error {
+	var total int64
+	for _, name := range sortedKeys(kept) {
+		if _, perr := assets.ValidateLogicalPath(name); perr != nil {
+			return perr.
+				WithDetail("section", name).
+				WithHint("自定义段名就是**包内逻辑路径**（如 index.html、static/app.js）：相对、以 `/` 分隔、不含 `..` 与冒号").
+				WithHint("段名长度上限：单段 " + strconv.Itoa(assets.MaxSegmentBytes) + " 字节、整条 " + strconv.Itoa(assets.MaxPathBytes) + " 字节")
 		}
-	}
-	for _, seg := range strings.Split(p, "/") {
-		switch seg {
-		case "", ".", "..":
-			return false
+		size := int64(len(kept[name]))
+		if size > limits.SectionTotalMaxBytes {
+			return assetOversize(name, size)
 		}
+		total += size
 	}
-	return true
+	if len(cfgJSON) > 0 {
+		if size := int64(len(cfgJSON)); size > limits.SectionTotalMaxBytes {
+			return assetOversize(limits.AppConfigFileName, size)
+		}
+		total += int64(len(cfgJSON))
+	}
+	if total > limits.SectionTotalMaxBytes {
+		return apperr.New(apperr.CodeAssetOversize, "随包资源总量超过上限").
+			WithDetail("total", total).
+			WithDetail("max", limits.SectionTotalMaxBytes).
+			WithHint("随包资源来自 wasm 自定义段，段总量上限与单文件上限同源（§4.2）")
+	}
+	return nil
+}
+
+// assetOversize 是"单条资源超过上限"的错误（`details.section` 指到具体段名；
+// 同时带 `details.path`，与 assets 包同一码的既有明细口径一致）。
+func assetOversize(section string, size int64) *apperr.Error {
+	return apperr.New(apperr.CodeAssetOversize, "随包资源超过单文件上限").
+		WithDetail("section", section).
+		WithDetail("path", section).
+		WithDetail("size", size).
+		WithDetail("max", limits.SectionTotalMaxBytes).
+		WithHint("单文件与段总量同源 limits.SectionTotalMaxBytes（§4.2）")
 }
 
 // dryRun 用合成帧跑一次真实实例化（§4.2：「一次真实编译 + 合成帧干跑」，2 s 预算）。
@@ -744,7 +801,7 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 	//
 	// 现场（审计第三轮 B 区 CONFIRMED，2026-09-19）：`existing` 是本次请求开头
 	// （loadForPublish）读到的 apps 行快照，而**写回投影**在 commitRelease 里 ——
-	// 中间隔着真编译 + staging（秒级窗口）。窗口里落库的任何一次并发写都会被这一次的
+	// 中间隔着真编译 + 干跑 + 段解析（秒级窗口）。窗口里落库的任何一次并发写都会被这一次的
 	// 陈旧快照覆盖。最典型的是**并发 approve**：
 	//
 	//	① 发布读到 apps = {title:"报销助手", current_release_id:R1}；
@@ -758,7 +815,7 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 	//
 	// E1.5 的 owner 复读只认"抢占"那一种形态（owner 变了才拒），覆盖不到这条。这里在
 	// **任何写入之前**复读一次 apps 行并逐字段比对快照：不一致 ⇒ fail-loud 让作者重试。
-	// 此刻还没有建版本行、也没有写 staging ⇒ 版本号没被占用，重试是干净的。
+	// 此刻还没有建版本行、也没有任何落盘 ⇒ 版本号没被占用，重试是干净的。
 	//
 	// 残留（要认账）：复读与 commitRelease 的第一次写之间仍有微秒级窗口 —— 彻底关掉它
 	// 需要把"校验 + 写投影"做成一条带条件的 UPDATE（serverstore 目前没有这种 DAO）。
@@ -786,20 +843,7 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 		existing = fresh
 	}
 
-	// ---- C→落库：先把资源写进 staging（仍在库外）----
-	stage, serr := h.writeStaging(st)
-	if serr != nil {
-		h.auditFailed(u, appID, version, serr)
-		return nil, serr
-	}
-	// staging 的清理责任：成功路径由 rename 消费掉；失败路径在这里兜底。
-	committed := false
-	defer func() {
-		if !committed {
-			_ = os.RemoveAll(stage.dir)
-		}
-	}()
-
+	// ---- E：落库（从这里开始才有写入；此前一行都没有，也没有任何落盘）----
 	review := h.reviewRequired()
 	status := serverstore.ReleaseStatusApproved
 	if review {
@@ -810,7 +854,7 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 		enabled = existing.Enabled
 	}
 
-	rel, cerr := h.commitRelease(c, st, stage, commitInput{
+	rel, cerr := h.commitRelease(c, st, commitInput{
 		appID:          appID,
 		version:        version,
 		title:          title,
@@ -825,10 +869,9 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 		h.auditFailed(u, appID, version, cerr)
 		return nil, cerr
 	}
-	committed = true
 	st.wasm = nil // §4.2：落库后立即释放内存里的模块字节
 
-	// ---- H 收尾：审计 + 版本 GC ----
+	// ---- G 收尾：审计 + 版本 GC（数据行）----
 	h.auditApp(appID, u.Username, "wasm_app_release",
 		auditDetail(appID, title, fmt.Sprintf("v%s %s checksum=%s size=%d", version, rel.Status, st.checksum, st.wasmBytes)))
 	// 访问模式变更写审计：动作名从 wasm_app_visibility_change 改为
@@ -916,12 +959,13 @@ type commitInput struct {
 
 // commitRelease 执行落库到生效的全部写入，并在**任何一步失败时补偿**。
 //
-// 补偿口径：删掉已经改好名的资源目录 + 软删刚建的 release 行 + 把
-// current_release_id 恢复成原来的值（仅当这一次改过它）。
+// 补偿口径（2026-09-20 起只有数据库半边）：软删刚建的 release 行 + 把
+// current_release_id / config 投影恢复成原来的值（仅当这一次改过它们）。资源目录
+// 已经不存在，"删目录"这一步随磁盘布局一起删除。
 //
 // 补偿本身失败只影响"版本号被占用"这一后果，不会让应用指向半个版本 —— 因此不把
 // 补偿失败升级成 panic，只把**原始错误**回给调用方（它才是可行动的）。
-func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, in commitInput) (*releaseOutcome, *apperr.Error) {
+func (h *Handlers) commitRelease(c *gin.Context, st *staged, in commitInput) (*releaseOutcome, *apperr.Error) {
 	ctx := c.Request.Context()
 	out := &releaseOutcome{Status: in.status, CurrentVersion: in.currentVersion}
 	if in.existing != nil {
@@ -930,16 +974,16 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 
 	// E1 占名（owner 首占且不可改写：DAO 的 COALESCE 保证）。
 	//
-	// **投影列只在"已生效"时随 E1 落行**（与 G1 同一条纪律，R1-pm-9 + R2-1）：
+	// **投影列只在"已生效"时随 E1 落行**（与 F1 同一条纪律，R1-pm-9 + R2-1）：
 	// 待审版本没有经过任何人批准，写进 apps 行会让它成为下一版的**继承基线**
-	// （2026-09-19 审计 §1.2 —— 首版待审时 E1 的 INSERT 分支曾照写，G1 守卫只挡住了
+	// （2026-09-19 审计 §1.2 —— 首版待审时 E1 的 INSERT 分支曾照写，F1 守卫只挡住了
 	// 半条路），也会**立刻改写全组织可见的目录门面**（2026-09-19 第二轮审计 §1.1 ——
 	// title/description 是同一次 UPSERT 里唯一没被守卫罩住的两列，而员工面目录直接
 	// 读它们：作者发一个待审版本就能把已上线应用改名成"IT 密码重置"并写诱导描述，
 	// 点进去执行的却仍是已审核的旧代码 ⇒ 仿冒不需要过审）。
 	//
 	// 三条分支的口径（read.go 的目录/详情/导出都是"读 apps 行"）：
-	//   - **approved**：投影 = 本次版本（title/description + 配置三列，与 G1 同源同版）；
+	//   - **approved**：投影 = 本次版本（title/description + 配置三列，与 F1 同源同版）；
 	//   - **待审 + 已存在应用**：投影**一字不动** —— 显式传 in.existing 的**现值**
 	//     （title/description/config_json/purpose/data_sensitivity 五列全都传现值，
 	//     见下面的 Finding 6 说明）；
@@ -1011,11 +1055,9 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 
 	// E2 版本行（拿到 release_id；唯一约束冲突 = 版本号已占位，§4.1）。
 	//
-	// assets_dir 列**留空**（不是漏写）：目录名就是 release_id（§4.2 的布局
-	// `<data_root>/apps/<app_id>/assets/<release_id>/`），而 release_id 只有 INSERT
-	// 之后才知道 —— 本包不做数据访问（DAO 在 serverstore），没有"插入后回填某一列"
-	// 的入口，硬凑只能靠预测 id。执行侧对空值的口径是**回落到 release.id**
-	// （appserver.releaseAssetID），与 §4.2 的布局逐字一致，因此这里留空是安全的。
+	// assets_dir 列**留空**：它是"资源抽取到磁盘"时代的遗留列（2026-09-20 起随包资源
+	// 从 wasm 自定义段在内存里构造，磁盘上没有按版本的资源目录）。本包不做数据访问
+	// （DAO 在 serverstore），也就没有"插入后回填某一列"的入口；列留空即"没有磁盘资源"。
 	relID, err := serverstore.CreateWasmRelease(ctx, h.opt.DB, serverstore.WasmRelease{
 		AppID: in.appID, Version: in.version, Title: in.title,
 		Description: st.config.Purpose, Changelog: in.changelog,
@@ -1038,16 +1080,17 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 
 	// 补偿闭包：从这里开始任何失败都要把"半成品"回收掉。
 	//
-	// 三件事，缺一件都会留下不一致的状态：
-	//  1. 删掉已改名的资源目录（否则盘上留着没人引用的资源）；
-	//  2. 软删刚建的 release 行（版本号仍占位 —— 见文件头"不硬删行"的理由）；
-	//  3. 把 apps 上的**投影**恢复原样：current_release_id 与 config_json
+	// 两件事，缺一件都会留下不一致的状态：
+	//  1. 软删刚建的 release 行（版本号仍占位 —— 见文件头"不硬删行"的理由）；
+	//  2. 把 apps 上的**投影**恢复原样：current_release_id 与 config_json
 	//     （config 是 apps.purpose/data_sensitivity 与访问模式的来源，不回滚会让
 	//     目录可见性反映一个并没有生效的版本）。只有 approved 路径会写这两列
-	//     （G1 的守卫），待审路径下这两条 UPDATE 是幂等兜底。
+	//     （F1 的守卫），待审路径下这两条 UPDATE 是幂等兜底。
+	//
+	// 磁盘上没有需要对账的东西：随包资源只存在于本次请求的内存里（此刻已被丢弃），
+	// 库里的 wasm 字节才是唯一权威副本（下一版/回滚都从它重建资源集）。
 	cleanupCtx := context.WithoutCancel(ctx)
 	compensate := func() {
-		_ = os.RemoveAll(stage.finalDir)
 		_ = serverstore.SoftDeleteWasmRelease(cleanupCtx, h.opt.DB, relID)
 		if in.existing == nil {
 			return
@@ -1061,17 +1104,7 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 		}
 	}
 
-	// F 原子改名：staging → assets/<release_id>（同一父目录，单次 rename）。
-	// 放在"置为生效版本"之前：否则会有一个窗口让应用指向一个资源目录还不存在的版本。
-	stage.finalDir = filepath.Join(filepath.Dir(stage.dir), strconv.FormatInt(relID, 10))
-	if err := os.Rename(stage.dir, stage.finalDir); err != nil {
-		compensate()
-		return nil, internalErr("资源目录落位失败（本次版本号已占位，请升版本号重发）", err).
-			WithDetail("version", in.version).
-			WithHint("这是平台侧的文件系统错误；请把这条诊断反馈给平台管理员")
-	}
-
-	// G1 应用配置投影（config_json/purpose/data_sensitivity；访问模式由 config_json 现解）。
+	// F1 应用配置投影（config_json/purpose/data_sensitivity；访问模式由 config_json 现解）。
 	//
 	// **只有已生效（approved）的版本才写投影**（R1-pm-9，此前是无条件执行）：
 	// apps 行是目录对**全员**下发的投影（access 徽标 / 负责人 / 用途），待审版本
@@ -1089,7 +1122,7 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 				WithDetail("version", in.version)
 		}
 	}
-	// G2 生效版本：仅"非待审"时指向新版本。
+	// F2 生效版本：仅"非待审"时指向新版本。
 	// 审核开启时**不动** current_release_id ⇒ 线上仍旧版本（R17：不中断使用）。
 	if in.status == serverstore.ReleaseStatusApproved {
 		if err := serverstore.SetWasmAppCurrentRelease(ctx, h.opt.DB, in.appID, relID); err != nil {
@@ -1103,71 +1136,11 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, stage *stagingDir, 
 	return out, nil
 }
 
-// ---------------------------------------------------------------------------
-// staging 目录
-// ---------------------------------------------------------------------------
-
-// stagingDir 是一次发布使用的**临时资源目录**（落库前写入，落库后改名）。
-type stagingDir struct {
-	dir      string
-	finalDir string
-	files    []string
-}
-
-// writeStaging 把抽出的段与应用配置文件写进 `<data_root>/apps/<app_id>/assets/<staging>/`。
+// prune 做版本 GC（§5.3：保留最近 3 个曾生效版本）。
 //
-// 为什么用 staging（而**不是**"先落库拿 id 再写最终目录"）：见文件头注释 —— 一切
-// 文件系统写入都发生在落库之前，写盘失败就不留任何库行，R18 因此是结构性的而不是
-// 靠补偿维持的。改名是同父目录的单次 rename（同一文件系统 ⇒ 原子、几乎不失败）。
-func (h *Handlers) writeStaging(st *staged) (*stagingDir, *apperr.Error) {
-	parent := filepath.Join(h.opt.DataRoot, limits.AppsDirName, st.appID, assets.AssetsDirName)
-	if err := os.MkdirAll(parent, os.FileMode(limits.DataDirMode)); err != nil {
-		return nil, internalErr("资源根目录创建失败", err)
-	}
-	// 目录名必须满足 assets 的 releaseIDPattern（`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`，
-	// 不得以点开头）—— MkdirTemp 的前缀本身满足，随机后缀是字母数字。
-	tmp, err := os.MkdirTemp(parent, "staging-")
-	if err != nil {
-		return nil, internalErr("资源暂存目录创建失败", err)
-	}
-	if err := os.Chmod(tmp, os.FileMode(limits.DataDirMode)); err != nil {
-		_ = os.RemoveAll(tmp)
-		return nil, internalErr("资源暂存目录权限设置失败", err)
-	}
-	stage := &stagingDir{dir: tmp}
-	// staging 的名字必须能被 assets.Open 接受（它同时校验 app_id 与 release_id 规则）。
-	store, aerr := assets.Open(h.opt.DataRoot, st.appID, filepath.Base(tmp))
-	if aerr != nil {
-		_ = os.RemoveAll(tmp)
-		return nil, aerr
-	}
-	// 段 → 资源文件（顺序固定，报错稳定）。
-	for _, name := range sortedKeys(st.sections) {
-		if werr := store.Write(name, st.sections[name]); werr != nil {
-			_ = os.RemoveAll(tmp)
-			return nil, werr.
-				WithDetail("section", name).
-				WithHint("自定义段名必须是包内逻辑路径（如 index.html、static/app.js）：相对、以 / 分隔、不含 .. 与冒号")
-		}
-		stage.files = append(stage.files, name)
-	}
-	// 应用配置文件（§4.2：随资源一起抽出，应用用 assets.read("picoaide.app.json") 读）。
-	// 它由宿主写入 ⇒ 平台侧是唯一权威副本（模块里的同名段已在 splitAssetSections 忽略）。
-	if st.configJSON != nil {
-		if werr := store.Write(limits.AppConfigFileName, st.configJSON); werr != nil {
-			_ = os.RemoveAll(tmp)
-			return nil, werr
-		}
-		stage.files = append(stage.files, limits.AppConfigFileName)
-	}
-	return stage, nil
-}
-
-// prune 做版本 GC（§5.3：保留最近 3 个曾生效版本）并清理被回收版本的资源目录。
-//
-// 资源目录的删除必须在这里做：PruneWasmReleases 只负责"数据行"（其包注释明确
-// "本文件只做数据访问"），不会碰文件系统；没有这一步，被 GC 的版本会留下永久占盘的
-// 资源目录（配额按 BYTEA 算，磁盘却还在涨）。目录名就是 release id（§4.2 的布局）。
+// 只做**数据行** GC：随包资源不再是磁盘目录（2026-09-20 起内存直出，见文件头），
+// 所以原先"顺带删除被回收版本的资源目录"那一段连同它的审计分支一起删除 ——
+// 磁盘上没有属于版本的东西可删。被 GC 版本的 wasm 字节随数据行一起消失。
 func (h *Handlers) prune(ctx context.Context, appID string) []int64 {
 	pruned, err := serverstore.PruneWasmReleases(ctx, h.opt.DB, appID, limits.RetainedVersions)
 	if err != nil {
@@ -1176,18 +1149,11 @@ func (h *Handlers) prune(ctx context.Context, appID string) []int64 {
 		h.auditApp(appID, "", "wasm_app_prune_failed", auditDetail(appID, "", "版本 GC 失败: "+err.Error()))
 		return nil
 	}
-	for _, id := range pruned {
-		dir := filepath.Join(h.opt.DataRoot, limits.AppsDirName, appID, assets.AssetsDirName, fmt.Sprint(id))
-		if rerr := os.RemoveAll(dir); rerr != nil {
-			h.auditApp(appID, "", "wasm_app_prune_failed",
-				auditDetail(appID, "", fmt.Sprintf("资源目录清理失败 release=%d: %v", id, rerr)))
-		}
-	}
 	return pruned
 }
 
 // detachCtx 返回一个**不随请求取消**的上下文，用于"响应已经决定之后"的收尾动作
-// （GC / 资源清理）：客户端提前断开不应该让收尾半途而废。
+// （版本 GC）：客户端提前断开不应该让收尾半途而废。
 func detachCtx(c *gin.Context) context.Context {
 	return context.WithoutCancel(c.Request.Context())
 }

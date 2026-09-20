@@ -1,28 +1,68 @@
 package appserver
 
-// 本文件是 R1-rt-2 / R1-rt-3（静态资源热路径零缓存）的**行为级护栏**。
+// 本文件是 R1-rt-2 / R1-rt-3（静态资源热路径零重复派生）的**行为级护栏**。
 //
-// 现场（审计 runtime-perf.md R1-rt-2/3，HEAD 7da0ba47dd）：
+// 现场（审计 runtime-perf.md R1-rt-2/3，HEAD 7da0ba47dd，当时资源在宿主盘上）：
 //
 //   - R1-rt-2：`serveStatic` 先整份读盘（store.Read）→ 算 sha256 → **之后**才判
 //     `If-None-Match` ⇒ 304 复验一分钱不省（实测 200 KiB 资源 665 µs/请求），
 //     而浏览器每 5 分钟缓存窗口之后每个资源都要复验一次。
 //   - R1-rt-3：请求热路径零缓存 ⇒ 每个静态子资源都要重付"读盘 + SHA-256 + 配置读盘解析"。
 //
-// 修法：`(app_id, release_id)` 级缓存（releasecache.go）+ **先判 304、再决定要不要正文**。
+// 2026-09-20 口径变化（决策文档 docs/decisions/2026-09-20-wasm-assets-in-memory.md）：
+// 随包资源不再落盘，运行期从**内存资源集**（`assets.Set`）直出。于是：
 //
-// # 变异验证（把实现改回去时哪条会红，2026-09-19 实跑）
+//   - `DiskReads` → `SourceReads`：没有磁盘可读了，但"304 复验不得回源"这条断言必须留下
+//     —— 观测点从"删掉盘上文件后仍 304"改成"回源派生次数不增长"，并保留一条行为级佐证
+//     （把资源集换成另一份内容后，304 仍必须返回缓存里的 ETag，见下）；
+//   - 本缓存只留**元数据**（content-type / ETag / Size）与解析后的配置：字节的真源就是
+//     资源集，再缓存一份等于同一份内容在内存里存两遍（还要凭空多维护一套字节预算）。
 //
-//	(a) 把 serveStatic 改回"先 rc.Asset(logical)（读盘）再判 If-None-Match"
-//	    ⇒ TestStatic_NotModifiedDoesNotTouchDisk 红（磁盘上的文件已被删除，
-//	      读盘会失败 → 落到 wasm，不再 304）；
-//	(b) 让 Asset() 不走缓存（每次 store.Read）⇒ TestStatic_CachedBytesSurviveFileRemoval
-//	    与 TestStatic_NotModifiedDoesNotTouchDisk 的 DiskReads 断言红；
-//	(c) 去掉换版本时的失效（dropOtherReleasesLocked 变成 no-op）⇒
+// # 变异验证（把实现改回去时哪条会红，2026-09-20 复核）
+//
+//	(a) 让 304 路径**重新派生元数据**（不再走 `CachedAsset`：缓存被绕过、或实现改回
+//	    "先回源算哈希、再判 If-None-Match"）⇒ TestStatic_NotModifiedDoesNotTouchSource 红
+//	    （资源集已被换成另一份内容：回源会算出新 ETag → 200；SourceReads 也会涨）。
+//	    ⚠️ 实测边界：单纯在 304 判定之前多调一次 `rc.Asset(logical)` **不会红** ——
+//	    它命中元数据缓存、不重算 ETag（temp/rc-mut/RESULTS.md 的 overlay D）。被守住的
+//	    回归形态是"元数据缓存被绕过/重算 sha256"，不是"多一次 map 查找"。
+//	(b) 让 `releaseCache.asset()` 永远未命中（每个请求都重算 ETag）⇒
+//	    TestStatic_NotModifiedDoesNotTouchSource / TestStatic_CacheHitSkipsDerivation /
+//	    TestReleaseCache_ConfigIsCachedPerRelease 的 SourceReads 断言红（overlay A 实测：
+//	    前两条红）；
+//	(c) 去掉换版本时的失效（dropOtherReleasesLocked 变 no-op）⇒
 //	    TestStatic_NewVersionIsVisibleImmediately 仍绿（键含 release_id，正确性不依赖它），
-//	    但 TestReleaseCache_VersionChangeDropsOldRelease 红（旧版本字节滞留）；
-//	(d) 去掉 EvictApp 里的 releases.evictApp ⇒ TestStatic_EvictAppInvalidatesCache 红；
-//	(e) 去掉 evictLocked 的容量淘汰 ⇒ TestReleaseCache_IsBounded 红。
+//	    但 TestReleaseCache_VersionChangeDropsOldRelease 红（旧版本条目滞留）；
+//	(d) 去掉 EvictApp 里的 releases.evictApp ⇒ TestStatic_EvictAppInvalidatesCache 红
+//	    （逐出后 SourceReads 不再 +1）；
+//	(e) 去掉 evictLocked 的条目淘汰 ⇒ TestReleaseCache_IsBounded 红；
+//	(f) 让 putConfig 缓存失败 ⇒ TestReleaseCache_ConfigFailureIsNotCached 红；
+//	(g) 把"随包资源抽取到 <data_root>/apps/<app_id>/assets/"加回发布/运行期链路 ⇒
+//	    TestStatic_NoAssetDirectoryOnDisk 红（本次改造的交付判据）；
+//	(h) 把 `assets.read`（或配置读取）改回读宿主盘上的抽取目录 ⇒
+//	    TestStatic_AssetsReadUsesMemorySet 红（静态直出与应用读资源必须是同一份内存资源集）。
+//
+// # 被删掉的判据与为什么删（**不静默删除**）
+//
+//   - `TestStatic_NotModifiedDoesNotTouchDisk` → 改成 `TestStatic_NotModifiedDoesNotTouchSource`：
+//     没有磁盘可删了，判据改为"换掉资源集内容后仍返回缓存 ETag + SourceReads 不变"。
+//   - `TestStatic_CachedBytesSurviveFileRemoval` → 换成 `TestStatic_CacheHitSkipsDerivation`：
+//     字节不再由本缓存持有（"删掉盘上文件后仍 200"这条判据没有对象了），等价判据是
+//     "命中缓存时不再重算 ETag"（字节照旧从内存资源集取）。
+//   - `TestReleaseCache_IsBounded` 的**字节预算**分支（含"单条超预算一半只缓存元数据"）、
+//     `TestReleaseCache_SingleReleaseOverBudgetFallsBackToMetadata`、
+//     `TestReleaseCache_BudgetCoversSingleReleaseWorstCase`：字节维度随内存资源集取消 ——
+//     资源字节计入模块缓存的 `module_cache_mb`（modules.go 的 insertSet 把 `set.Bytes()`
+//     记进条目 size），本缓存再维护一套字节预算就是同一笔账记两遍。条目数上限 + 空闲 TTL
+//     仍由 `TestReleaseCache_IsBounded` / `TestReleaseCache_IdleSweepFreesEntries` 守住。
+//   - `TestReleaseCache_ConfigReadFailureIsNotCached` / `TestReleaseCache_ConfigCacheRevalidatesAfterTTL`：
+//     配置现在来自**随版本不可变的库内 `config_json`**（随资源集注入），"暖缓存下磁盘上的
+//     配置被删掉/改坏"这条路径不存在了（配置没有独立的生命周期）⇒ `cfgAt` + TTL 复验机制
+//     连同这两条判据一起删。"失败不缓存"这一半以 `TestReleaseCache_ConfigFailureIsNotCached`
+//     保留（判据改成"资源集里没有配置时，每次请求都重新查"）。
+//   - `TestReleaseCache_BudgetCoversSingleReleaseWorstCase` 绑定的两个常量（单 release 资源
+//     总量 vs 资源缓存字节预算）现在毫无关系；资源集自身的 `SectionTotalMaxBytes` 上限由
+//     assets 包的测试守卫。
 
 import (
 	"bytes"
@@ -36,6 +76,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/queue"
@@ -62,23 +104,46 @@ func (c *releaseCache) entriesForTest(appID string) int {
 	return n
 }
 
-// releaseDirOf 返回某次 publishApp 写下的资源目录（与 helpers_test 的约定一致）。
-func releaseDirOf(t *testing.T, e *env, spec appSpec, relID int64) string {
+// replaceSetForTest 把模块缓存里该版本的**内存资源集**换成另一份内容。
+//
+// 用途只有一个：让"源与缓存不一致"成为可观测状态，从而证明 304 路径没有回源。
+// 资源集在 `(app_id, release_id)` 下不可变，所以产品里不可能出现这种状态 —— 这正是它
+// 作为判据的价值：一旦实现还在 304 路径上回源，就会读到这份"不该被读到"的内容、算出
+// 一个 != `If-None-Match` 的 ETag ⇒ 返回 200，用例立刻红。这与旧判据"把磁盘上的文件
+// 删掉"是同一手法（制造"源已经不是缓存记的那份"的状态，看实现有没有碰源）。
+func replaceSetForTest(t *testing.T, e *env, rel *serverstore.WasmRelease, files map[string]string) {
 	t.Helper()
-	dirName := fmt.Sprintf("%d", relID)
-	if spec.assetsDir != "" {
-		dirName = spec.assetsDir
+	if rel == nil {
+		t.Fatal("replaceSetForTest 需要版本行")
 	}
-	return filepath.Join(e.root, limits.AppsDirName, spec.appID, assets.AssetsDirName, dirName)
+	sections := make(map[string][]byte, len(files))
+	for name, content := range files {
+		sections[name] = []byte(content)
+	}
+	set, aerr := assets.Build(rel.AppID, fmt.Sprintf("%d", rel.ID), sections, nil)
+	if aerr != nil {
+		t.Fatalf("构造替换用的资源集: %v", aerr)
+	}
+	key := moduleKey{AppID: rel.AppID, Version: rel.Version, ReleaseID: rel.ID}
+	e.srv.modules.mu.Lock()
+	defer e.srv.modules.mu.Unlock()
+	entry, ok := e.srv.modules.items[key]
+	if !ok || entry.set == nil {
+		t.Fatalf("模块缓存里应已有该版本（资源就绪）的条目: key=%+v", key)
+	}
+	entry.set = set
 }
 
-// TestStatic_NotModifiedDoesNotTouchDisk 是 R1-rt-2 的核心判据：
-// 缓存预热后，`If-None-Match` 命中必须**不读盘、不算哈希**。
+// TestStatic_NotModifiedDoesNotTouchSource 是 R1-rt-2 的核心判据：
+// 缓存预热后，`If-None-Match` 命中必须**不碰资源集、不重算哈希**。
 //
-// 判据怎么做到"行为级"而不是"读代码"：预热之后**把磁盘上的资源文件删掉**。
-// 只要实现还去读那份文件，就一定读不到（assets.Read 返回 NOT_FOUND）⇒ 请求会落到
-// wasm，拿不到 304；反过来，仍然 304 就证明它没有碰磁盘。另有 DiskReads 计数佐证。
-func TestStatic_NotModifiedDoesNotTouchDisk(t *testing.T) {
+// 判据怎么做到"行为级"而不是"读代码"：预热之后**把资源集换成另一份内容**。
+// 只要实现还去回源派生 ETag，就一定会算出新的 ETag（≠ If-None-Match）⇒ 返回 200；
+// 反过来，仍然 304 且回同一个 ETag 就证明它只用了缓存里的元数据。另有 SourceReads 计数佐证。
+//
+// （旧版本这条用例叫 TestStatic_NotModifiedDoesNotTouchDisk，判据是"删掉磁盘上的资源
+// 文件"；内存模型下没有盘上副本可删，换成"换掉资源集内容"。）
+func TestStatic_NotModifiedDoesNotTouchSource(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rt304")
 	// 资源名刻意避开入口文档（"/" 与 "/index.html" 在客户端专属模型下**一律**交给
@@ -88,7 +153,7 @@ func TestStatic_NotModifiedDoesNotTouchDisk(t *testing.T) {
 	}}
 	rel := e.publishApp(spec)
 
-	// 预热：第一次 GET 走冷路径（读盘 + 算哈希 + 回填缓存）。
+	// 预热：第一次 GET 走冷路径（回源 + 算哈希 + 回填缓存）。
 	first := e.get(appID, "/app.js")
 	if first.Code != http.StatusOK {
 		t.Fatalf("首次 GET 应 200，得到 %d body=%.200s", first.Code, first.Body.String())
@@ -98,23 +163,21 @@ func TestStatic_NotModifiedDoesNotTouchDisk(t *testing.T) {
 		t.Fatal("静态资源必须有 ETag")
 	}
 	warm := e.srv.releases.stats()
-	if warm.DiskReads == 0 {
-		t.Fatal("冷路径必须真的读过盘（否则下面的断言没有意义）")
+	if warm.SourceReads == 0 {
+		t.Fatal("冷路径必须真的回源派生过元数据（否则下面的断言没有意义）")
 	}
 	if warm.Entries == 0 {
 		t.Fatal("首次访问必须回填 (app_id, release_id) 级缓存（R1-rt-3）")
 	}
 
-	// 把磁盘上的资源文件删掉：此后任何"读盘"都不可能成功。
-	// （app_id 每个用例唯一 ⇒ 不会影响别的用例；数据根由 TestMain 统一清理。）
-	gone := filepath.Join(releaseDirOf(t, e, spec, rel.ID), "app.js")
-	if err := os.Remove(gone); err != nil {
-		t.Fatalf("删除资源文件失败: %v", err)
-	}
+	// 制造"源已经不是缓存记的那份"：把资源集换成另一份内容。
+	// （app_id 每个用例唯一 ⇒ 不会影响别的用例。）
+	replaceSetForTest(t, e, rel, map[string]string{"app.js": "console.log('changed')"})
 
 	rec := e.getWithETag(appID, "/app.js", etag)
 	if rec.Code != http.StatusNotModified {
-		t.Fatalf("缓存命中时 If-None-Match 必须直接 304（不读盘）：得到 %d body=%.200s", rec.Code, rec.Body.String())
+		t.Fatalf("缓存命中时 If-None-Match 必须直接 304（不回源）：得到 %d body=%.200s"+
+			"（若这里拿到 200 且 ETag 变了，说明 304 路径去回源派生 ETag 了）", rec.Code, rec.Body.String())
 	}
 	if rec.Body.Len() != 0 {
 		t.Fatalf("304 不得带 body，得到 %q", rec.Body.String())
@@ -129,36 +192,38 @@ func TestStatic_NotModifiedDoesNotTouchDisk(t *testing.T) {
 	assertHostSecurityHeaders(t, rec, false)
 
 	after := e.srv.releases.stats()
-	if after.DiskReads != warm.DiskReads {
-		t.Fatalf("304 复验不得读盘：DiskReads %d → %d", warm.DiskReads, after.DiskReads)
+	if after.SourceReads != warm.SourceReads {
+		t.Fatalf("304 复验不得回源派生（SourceReads %d → %d）", warm.SourceReads, after.SourceReads)
 	}
 }
 
-// TestStatic_CachedBytesSurviveFileRemoval 守住 R1-rt-3 的"资源字节"这一半：
-// 缓存命中时连正文都不必回源 —— 文件删掉之后再取同一条（非条件请求）仍然 200 且字节一致。
+// TestStatic_CacheHitSkipsDerivation 守住 R1-rt-3 的另一半：热路径不得重复派生元数据。
 //
-// 变异：让 Asset() 每次都 store.Read（不查缓存）⇒ 本用例红（文件已删除）。
-func TestStatic_CachedBytesSurviveFileRemoval(t *testing.T) {
+// 字节照旧从内存资源集取（那是 map 查找，本来就便宜），省掉的是 sha256 —— 缓存命中时
+// 既不能重算 ETag，也不能改变 ETag/内容。
+//
+// （旧版本这条用例叫 TestStatic_CachedBytesSurviveFileRemoval，判据是"删掉盘上文件后
+// 仍 200"；字节不再由本缓存持有，那条判据没有对象了。）
+func TestStatic_CacheHitSkipsDerivation(t *testing.T) {
 	e := newEnv(t)
-	appID := e.appID("rtbytes")
-	const body = "body{color:red}/* 200KiB 资源以外的小资源，正文短但同样要进缓存 */"
-	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{
+	appID := e.appID("rthash")
+	const body = "body{color:red}/* 小资源，同样要证明 200 命中不再重算 ETag */"
+	e.publishApp(appSpec{appID: appID, config: loginConfig(), assets: map[string]string{
 		"static/app.css": body,
-	}}
-	rel := e.publishApp(spec)
+	}})
 
 	first := e.get(appID, "/static/app.css")
 	if first.Code != http.StatusOK || first.Body.String() != body {
 		t.Fatalf("首次 GET 应 200 且内容一致，得到 %d %q", first.Code, first.Body.String())
 	}
-	if err := os.Remove(filepath.Join(releaseDirOf(t, e, spec, rel.ID), "static/app.css")); err != nil {
-		t.Fatalf("删除资源文件失败: %v", err)
-	}
 	warm := e.srv.releases.stats()
+	if warm.SourceReads == 0 {
+		t.Fatal("冷路径必须回源派生过一次（否则下面的断言没有意义）")
+	}
 
 	second := e.get(appID, "/static/app.css")
 	if second.Code != http.StatusOK {
-		t.Fatalf("缓存命中应仍然 200（字节在缓存里）：得到 %d body=%.200s", second.Code, second.Body.String())
+		t.Fatalf("缓存命中应仍然 200：得到 %d body=%.200s", second.Code, second.Body.String())
 	}
 	if second.Body.String() != body {
 		t.Fatalf("缓存命中应返回同一份字节：%q", second.Body.String())
@@ -167,8 +232,9 @@ func TestStatic_CachedBytesSurviveFileRemoval(t *testing.T) {
 		t.Fatalf("同一份内容必须给出同一个 ETag：%q vs %q",
 			first.Header().Get("ETag"), second.Header().Get("ETag"))
 	}
-	if got := e.srv.releases.stats().DiskReads; got != warm.DiskReads {
-		t.Fatalf("缓存命中不得读盘：DiskReads %d → %d", warm.DiskReads, got)
+	if got := e.srv.releases.stats().SourceReads; got != warm.SourceReads {
+		t.Fatalf("缓存命中不得重算 ETag（SourceReads %d → %d）：字节仍从内存资源集取，省掉的是 sha256",
+			warm.SourceReads, got)
 	}
 }
 
@@ -207,17 +273,18 @@ func TestStatic_NewVersionIsVisibleImmediately(t *testing.T) {
 // TestStatic_EvictAppInvalidatesCache 守住"下架/冻结/删除/逐出必须失效"这一条
 // （EvictApp 是 api 侧四条处置路径共用的钩子）。
 //
-// 判据（行为级）：缓存预热之后**直接改磁盘上的内容**（违反"资源不可变"的契约，
-// 但正好让"缓存是否失效"变成可观测的）——
-//   - 未 EvictApp：仍然返回旧内容（证明缓存真的生效）；
-//   - EvictApp 之后：立刻返回新内容（证明失效真的发生）。
+// 判据（行为级）：缓存预热之后第二次请求**不回源派生**（SourceReads 不变 = 缓存真的生效）；
+// EvictApp 之后的下一次请求**必须回源派生**（SourceReads +1 = 失效真的发生），
+// 且内容仍然正确（资源集会被重新加载）。
+//
+// （旧版本靠"直接改磁盘上的内容"来区分"缓存生效/失效"；字节来源现在是不可变的库内
+// 制品，改不了，改用回源派生次数这个可观测量。）
 func TestStatic_EvictAppInvalidatesCache(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rtevict")
-	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{
+	e.publishApp(appSpec{appID: appID, config: loginConfig(), assets: map[string]string{
 		"app.js": "old",
-	}}
-	rel := e.publishApp(spec)
+	}})
 
 	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK || rec.Body.String() != "old" {
 		t.Fatalf("预热请求不对: %d %q", rec.Code, rec.Body.String())
@@ -225,17 +292,14 @@ func TestStatic_EvictAppInvalidatesCache(t *testing.T) {
 	if n := e.srv.releases.entriesForTest(appID); n == 0 {
 		t.Fatal("预热后该应用应有缓存条目")
 	}
+	warm := e.srv.releases.stats()
 
-	// 重新填一份缓存（EvictApp 已经把它清空了），再改盘验证"缓存确实生效"。
-	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK {
-		t.Fatalf("二次预热失败: %d", rec.Code)
+	// 缓存生效的证据：第二次请求不再回源派生元数据。
+	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK || rec.Body.String() != "old" {
+		t.Fatalf("二次请求失败: %d %q", rec.Code, rec.Body.String())
 	}
-	target := filepath.Join(releaseDirOf(t, e, spec, rel.ID), "app.js")
-	if err := os.WriteFile(target, []byte("new"), 0o600); err != nil {
-		t.Fatalf("改写资源失败: %v", err)
-	}
-	if rec := e.get(appID, "/app.js"); rec.Body.String() != "old" {
-		t.Fatalf("缓存应命中旧字节（这就是缓存生效的证据），得到 %q", rec.Body.String())
+	if got := e.srv.releases.stats().SourceReads; got != warm.SourceReads {
+		t.Fatalf("缓存命中不得回源派生：SourceReads %d → %d", warm.SourceReads, got)
 	}
 
 	// 处置事件：下架/冻结/删除都经这一个钩子。
@@ -245,15 +309,20 @@ func TestStatic_EvictAppInvalidatesCache(t *testing.T) {
 	if n := e.srv.releases.entriesForTest(appID); n != 0 {
 		t.Fatalf("EvictApp 之后不得再有该应用的缓存条目，仍有 %d 个", n)
 	}
-	if rec := e.get(appID, "/app.js"); rec.Body.String() != "new" {
-		t.Fatalf("逐出之后必须重新读盘拿到新内容，得到 %q", rec.Body.String())
+	after := e.get(appID, "/app.js")
+	if after.Code != http.StatusOK || after.Body.String() != "old" {
+		t.Fatalf("逐出之后请求仍须正确（资源集会重新加载）：%d %q", after.Code, after.Body.String())
+	}
+	if got := e.srv.releases.stats().SourceReads; got != warm.SourceReads+1 {
+		t.Fatalf("逐出之后必须重新回源派生元数据：SourceReads %d → %d（期望 %d）",
+			warm.SourceReads, got, warm.SourceReads+1)
 	}
 }
 
-// TestReleaseCache_VersionChangeDropsOldRelease 守住"换版本时旧 release 的字节不滞留"。
+// TestReleaseCache_VersionChangeDropsOldRelease 守住"换版本时旧 release 的条目不滞留"。
 //
-// 正确性不依赖它（键含 release_id），它守的是**有界性/及时释放**：同一应用出现新的
-// release 时，旧 release 的条目必须被丢掉。
+// 正确性不依赖它（键含 release_id），它守的是**及时释放**：同一应用出现新的 release 时，
+// 旧 release 的条目必须被丢掉。
 func TestReleaseCache_VersionChangeDropsOldRelease(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rtdrop")
@@ -278,49 +347,47 @@ func TestReleaseCache_VersionChangeDropsOldRelease(t *testing.T) {
 	}
 }
 
-// TestReleaseCache_IsBounded 是"缓存必须有界"的判据：
-// ①字节总量被上限约束（允许一份超额，见 releaseCache 的头注释）；
-// ②条目数被上限约束；③单条超大资源只缓存元数据（不缓存字节）。
+// TestReleaseCache_IsBounded 是"缓存必须有界"的判据：条目数被上限约束 + LRU 真的淘汰。
+//
+// 字节维度已随内存资源集取消（见文件头"被删掉的判据"）：本缓存只存元数据，资源字节
+// 计入模块缓存的 `module_cache_mb`。所以这里刻意放"大"条目也只是元数据（`Size` 只是
+// 回给调用方写 Content-Length 的数字，不参与任何预算判定）。
 func TestReleaseCache_IsBounded(t *testing.T) {
 	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
-	c := newReleaseCache(64<<10, 4, func() time.Time { return now })
+	c := newReleaseCache(4, func() time.Time { return now })
 	blob := bytes.Repeat([]byte("a"), 8<<10)
 
 	for i := 0; i < 64; i++ {
 		k := releaseKey{AppID: fmt.Sprintf("app-%d", i), ReleaseID: int64(i)}
 		for j := 0; j < 4; j++ {
 			c.putAsset(k, fmt.Sprintf("f%d", j), assetEntry{
-				ContentType: "application/octet-stream", ETag: `"e"`, Size: len(blob), Data: blob, BytesCached: true,
+				ContentType: "application/octet-stream", ETag: `"e"`, Size: len(blob),
 			})
 		}
-		st := c.stats()
-		if st.Entries > 4 {
+		if st := c.stats(); st.Entries > 4 {
 			t.Fatalf("条目数必须 ≤ maxEntries(4)，得到 %d", st.Entries)
-		}
-		// 硬上界 = maxBytes + 单个 release 的资源总量（这里一个 release = 32 KiB）。
-		if st.Bytes > int64(64<<10)+(32<<10) {
-			t.Fatalf("字节总量越过硬上界：%d > %d", st.Bytes, int64(64<<10)+(32<<10))
 		}
 	}
 	if st := c.stats(); st.Evictions == 0 {
 		t.Fatal("超过上限必须真的发生淘汰")
 	}
+	// 最近写入的那一条必须还在（LRU 留下的是热的那一端），且元数据可查。
+	if _, ok := c.asset(releaseKey{AppID: "app-63", ReleaseID: 63}, "f3"); !ok {
+		t.Fatal("LRU 必须留下最近使用的条目（否则缓存永不命中）")
+	}
 
-	// 单条超预算一半 ⇒ 只留元数据。
-	big := newReleaseCache(1<<20, 8, func() time.Time { return now })
-	huge := bytes.Repeat([]byte("b"), (1<<20)/2+1)
-	big.putAsset(releaseKey{AppID: "a", ReleaseID: 1}, "huge.bin", assetEntry{
-		ContentType: "application/octet-stream", ETag: `"h"`, Size: len(huge), Data: huge, BytesCached: true,
+	// 单条"巨大"资源与普通资源在元数据口径下等价：没有字节预算 ⇒ 不存在
+	// "单条超预算一半只缓存元数据"这条降级分支（旧判据随字节维度一起删除）。
+	big := newReleaseCache(8, func() time.Time { return now })
+	big.putAsset(releaseKey{AppID: "huge", ReleaseID: 1}, "big.bin", assetEntry{
+		ContentType: "application/octet-stream", ETag: `"h"`, Size: 1 << 30,
 	})
-	got, ok := big.asset(releaseKey{AppID: "a", ReleaseID: 1}, "huge.bin")
+	got, ok := big.asset(releaseKey{AppID: "huge", ReleaseID: 1}, "big.bin")
 	if !ok {
 		t.Fatal("元数据必须仍然可查（304 复验靠它）")
 	}
-	if got.BytesCached {
-		t.Fatalf("单条超过预算一半时不得缓存字节：BytesCached=%v", got.BytesCached)
-	}
-	if st := big.stats(); st.Bytes != 0 {
-		t.Fatalf("只缓存元数据时字节总量应为 0，得到 %d", st.Bytes)
+	if got.Size != 1<<30 {
+		t.Fatalf("Size 必须如实回给调用方（写 Content-Length 用），得到 %d", got.Size)
 	}
 }
 
@@ -328,9 +395,9 @@ func TestReleaseCache_IsBounded(t *testing.T) {
 func TestReleaseCache_IdleSweepFreesEntries(t *testing.T) {
 	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
 	clock := now
-	c := newReleaseCache(1<<20, 8, func() time.Time { return clock })
+	c := newReleaseCache(8, func() time.Time { return clock })
 	k := releaseKey{AppID: "a", ReleaseID: 1}
-	c.putAsset(k, "f", assetEntry{ContentType: "text/plain", ETag: `"e"`, Size: 1, Data: []byte("x"), BytesCached: true})
+	c.putAsset(k, "f", assetEntry{ContentType: "text/plain", ETag: `"e"`, Size: 1})
 	if n, _ := c.sweepIdle(time.Minute); n != 0 {
 		t.Fatalf("未空闲不得回收，得到 %d", n)
 	}
@@ -347,7 +414,7 @@ func TestReleaseCache_IdleSweepFreesEntries(t *testing.T) {
 //
 // 缓存是**跨请求共享**的进程内状态（每请求一个 releaseContent 视图，缓存本体共享），
 // 因此必须证明"并发读写 + 并发逐出/空闲回收"下没有数据竞争、没有错内容。
-// 值语义（assetEntry 拷贝 + 不可变的 Data 切片）就是为这条服务的。
+// 值语义（assetEntry 拷贝）就是为这条服务的；字节由只读的资源集提供。
 //
 // 复跑（-race 下才有检出能力）：
 //
@@ -420,9 +487,9 @@ func TestReleaseCache_ConcurrentRequestsAreSafe(t *testing.T) {
 		t.Fatal(msg)
 	}
 
-	// 缓存仍然自洽（有界、计数非负），且请求照常可用。
+	// 缓存仍然自洽（计数非负），且请求照常可用。
 	st := e.srv.releases.stats()
-	if st.Bytes < 0 || st.Entries < 0 {
+	if st.Entries < 0 || st.AssetHits < 0 || st.AssetMisses < 0 || st.SourceReads < 0 || st.Evictions < 0 {
 		t.Fatalf("缓存计数不得为负: %+v", st)
 	}
 	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK || rec.Body.String() != "console.log(1)" {
@@ -431,7 +498,7 @@ func TestReleaseCache_ConcurrentRequestsAreSafe(t *testing.T) {
 }
 
 // TestReleaseCache_ConfigIsCachedPerRelease 守住"解析后的 appcfg"这一半：
-// 配置只读盘一次（同 release 内复用），换 release 重新读。
+// 配置只从资源集解析一次（同 release 内复用），换 release 重新解析。
 func TestReleaseCache_ConfigIsCachedPerRelease(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rtcfg")
@@ -443,7 +510,7 @@ func TestReleaseCache_ConfigIsCachedPerRelease(t *testing.T) {
 	}
 	misses := e.srv.releases.stats().CfgMisses
 	if misses != 1 {
-		t.Fatalf("配置只应读盘解析一次（首次），得到 %d 次未命中", misses)
+		t.Fatalf("配置只应解析一次（首次），得到 %d 次未命中", misses)
 	}
 	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK {
 		t.Fatalf("第二次请求失败: %d", rec.Code)
@@ -458,99 +525,60 @@ func TestReleaseCache_ConfigIsCachedPerRelease(t *testing.T) {
 	_ = rel
 }
 
-// ===== 第二轮对抗式审计（性能缓存区域 R2-CA-1/2/3/5）的行为级护栏 =====
-
-// TestReleaseCache_ConfigReadFailureIsNotCached 是 R2-CA-1 的核心判据：
-// **一次瞬时读失败不得把应用固化成持续 500**。
+// TestReleaseCache_ConfigFailureIsNotCached 守住"失败不进缓存"这一半（R2-CA-1 的残留）。
 //
-// 判据怎么做到行为级：把配置文件删掉（模拟 EIO/误删/挂载抖动这一类的"可就地修好"的
-// 平台故障）→ 期望 500（fail-loud：读不到配置绝不当匿名）；然后把文件**逐字节恢复**
-// → 下一个请求必须自己恢复 200，**不许**要求先 EvictApp/重启。
+// 口径变化（2026-09-20）：配置不再来自宿主盘上可被删掉/改坏的文件，而是随版本不可变的
+// 库内 `config_json`（随资源集注入）—— 所以"暖缓存下被外部改坏"这条路径消失了，
+// 对应的 TTL 复验与用例一起删除。但"不缓存失败"仍然有意义：一个版本可能**根本没有配置**
+// （`config_json` 为空 ⇒ 资源集里没有 `picoaide.app.json`），它随新版本/资源集重建可以改变；
+// 把失败记进缓存会让这次故障被固化（之后每个请求都命中那份失败记录）。
 //
-// 旧实现把失败也写进缓存（"平台故障要么被修好=换版本，要么一直存在"），于是恢复文件
-// 之后每一个请求都命中那份失败记录，永远 500；且命中会刷新 lastUsed ⇒ 空闲淘汰也
-// 永不触发（"越多请求越修不好"）。变异：让 putConfig 重新缓存 err ⇒ 本用例红。
-func TestReleaseCache_ConfigReadFailureIsNotCached(t *testing.T) {
+// 判据：两次请求都必须 500（fail-loud，绝不按匿名放行），且 CfgMisses 每次都 +1。
+// 变异：让 putConfig 也缓存 err ⇒ 第二次不再解析、CfgMisses 停在 1 ⇒ 本用例红。
+func TestReleaseCache_ConfigFailureIsNotCached(t *testing.T) {
 	e := newEnv(t)
 	appID := e.appID("rtcfgfail")
-	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{"app.js": "x"}}
-	rel := e.publishApp(spec)
-	cfgPath := filepath.Join(releaseDirOf(t, e, spec, rel.ID), limits.AppConfigFileName)
-	orig, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("读配置夹具失败: %v", err)
-	}
+	e.publishApp(appSpec{appID: appID, skipConfig: true, assets: map[string]string{"app.js": "x"}})
 
-	if err := os.Remove(cfgPath); err != nil {
-		t.Fatalf("删除配置失败: %v", err)
+	first := e.get(appID, "/app.js")
+	if first.Code != http.StatusInternalServerError {
+		t.Fatalf("没有配置必须 500（平台故障，绝不按匿名放行），得到 %d body=%.200s",
+			first.Code, first.Body.String())
 	}
-	broken := e.get(appID, "/app.js")
-	if broken.Code != http.StatusInternalServerError {
-		t.Fatalf("配置读不到必须 500（平台故障，绝不按匿名放行），得到 %d body=%.200s", broken.Code, broken.Body.String())
+	second := e.get(appID, "/app.js")
+	if second.Code != http.StatusInternalServerError {
+		t.Fatalf("第二次仍应 500（失败不得被缓存）：得到 %d body=%.200s", second.Code, second.Body.String())
 	}
-	// 恢复成与原来**逐字节相同**的内容：平台故障已经修好。
-	if err := os.WriteFile(cfgPath, orig, 0o600); err != nil {
-		t.Fatalf("恢复配置失败: %v", err)
+	st := e.srv.releases.stats()
+	if st.CfgMisses != 2 {
+		t.Fatalf("读失败不得进缓存：CfgMisses=%d，期望每次请求都未命中（2）", st.CfgMisses)
 	}
-	for i := 0; i < 3; i++ {
-		rec := e.get(appID, "/app.js")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("配置已恢复（第 %d 次请求）应自愈为 200，得到 %d body=%.200s（不得要求 EvictApp/重启）",
-				i+1, rec.Code, rec.Body.String())
-		}
-	}
-	// 反向对照：读失败期间**每次**都要真的重读盘（不缓存失败），否则自愈无从谈起。
-	if st := e.srv.releases.stats(); st.CfgMisses < 2 {
-		t.Fatalf("读失败不得进缓存：CfgMisses=%d，期望每次请求都未命中（≥2）", st.CfgMisses)
+	if st.CfgHits != 0 {
+		t.Fatalf("读失败不得被当成命中：CfgHits=%d", st.CfgHits)
 	}
 }
 
-// TestReleaseCache_ConfigCacheRevalidatesAfterTTL 是 R2-CA-1 的"镜像面"判据：
-// 暖缓存下的**删除**也必须在一个窗口内被察觉 —— 配置进缓存不代表它可以被无限期信任。
-//
-// 判据：预热（成功进缓存）→ 删掉磁盘上的配置 → 推进时钟超过 ConfigRevalidateTTL →
-// 请求必须变成 500（fail-loud 恢复）；把文件恢复 → 再推进一个窗口 → 请求回到 200。
-//
-// 变异：去掉 config() 里的 TTL 判断（无限期信任缓存）⇒ 删除后仍然 200 ⇒ 本用例红。
-func TestReleaseCache_ConfigCacheRevalidatesAfterTTL(t *testing.T) {
+// TestReleaseContent_NilSetIsPlatformFault 钉死"资源集未加载"的错误语义：
+// `CachedAsset` 只查缓存（不回源、不报错），`Asset`/`Config` 则必须 fail-loud
+// 报 `INTERNAL`（而不是 panic 或按"资源不存在"处理 —— 后者会让静态路径静默交给 wasm）。
+func TestReleaseContent_NilSetIsPlatformFault(t *testing.T) {
 	e := newEnv(t)
-	appID := e.appID("rtcfgttl")
-	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{"app.js": "x"}}
-	rel := e.publishApp(spec)
-	cfgPath := filepath.Join(releaseDirOf(t, e, spec, rel.ID), limits.AppConfigFileName)
-	orig, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("读配置夹具失败: %v", err)
+	rel := &serverstore.WasmRelease{AppID: "no-set", ID: 7, Version: "1.0.0"}
+	rc := e.srv.openReleaseContent(rel.AppID, rel, nil)
+	if rc == nil {
+		t.Fatal("openReleaseContent 不应返回 nil（rel 非空）")
 	}
-	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK {
-		t.Fatalf("预热失败: %d", rec.Code)
+	if _, ok := rc.CachedAsset("app.js"); ok {
+		t.Fatal("资源集未加载时 CachedAsset 必须返回 ok=false（只查缓存，绝不回源）")
 	}
-	warm := e.srv.releases.stats()
-
-	// 窗口内：仍然命中缓存（不读盘）——否则"缓存配置"这件事就没有发生。
-	e.advance(ConfigRevalidateTTL / 2)
-	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK {
-		t.Fatalf("窗口内应命中缓存并 200，得到 %d", rec.Code)
+	if _, _, aerr := rc.Asset("app.js"); aerr == nil || aerr.Code != apperr.CodeInternal {
+		t.Fatalf("资源集未加载时 Asset 必须报 INTERNAL，得到 %v", aerr)
 	}
-	if st := e.srv.releases.stats(); st.CfgMisses != warm.CfgMisses {
-		t.Fatalf("窗口内不得重新解析配置：CfgMisses %d → %d", warm.CfgMisses, st.CfgMisses)
+	if _, cerr := rc.Config(); cerr == nil || cerr.Code != apperr.CodeInternal {
+		t.Fatalf("资源集未加载时 Config 必须报 INTERNAL，得到 %v", cerr)
 	}
-
-	// 跨窗口 + 磁盘上配置消失 ⇒ 必须被察觉（fail-loud）。
-	if err := os.Remove(cfgPath); err != nil {
-		t.Fatalf("删除配置失败: %v", err)
-	}
-	e.advance(ConfigRevalidateTTL + time.Second)
-	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusInternalServerError {
-		t.Fatalf("配置在窗口后被删除必须变成 500，得到 %d body=%.200s", rec.Code, rec.Body.String())
-	}
-
-	// 修好后同样在一个窗口内恢复。
-	if err := os.WriteFile(cfgPath, orig, 0o600); err != nil {
-		t.Fatalf("恢复配置失败: %v", err)
-	}
-	if rec := e.get(appID, "/app.js"); rec.Code != http.StatusOK {
-		t.Fatalf("配置恢复后应立刻 200（失败不缓存），得到 %d", rec.Code)
+	if rc := e.srv.openReleaseContent(rel.AppID, nil, nil); rc != nil {
+		t.Fatal("rel 为 nil 时 openReleaseContent 必须返回 nil")
 	}
 }
 
@@ -635,13 +663,93 @@ func TestStatic_NotModifiedHeadersMatch200Exactly(t *testing.T) {
 	}
 }
 
-// TestStatic_EvictAppReportsFreedBytes 守住 R2-CA-2：EvictApp 的返回值与日志里的
-// "记账字节"必须包含资源缓存那一笔。
+// TestStatic_AssetsReadUsesMemorySet 守住"三条路径读的是同一份内存资源集"这条不变量
+// （2026-09-20 内存直出改造的核心）：宿主静态直出与应用自己的 `assets.read` 必须看到
+// **同一份**字节，而应用读到的配置必须与宿主判准入用的是**同一份**（库内 config_json）。
 //
-// 判据（行为级）：预热一份 2 MiB 资源（缓存真的持有它）→ EvictApp 返回的 bytes 必须
-// ≥ 2 MiB，且平台日志里的记账数字不为 0；逐出后缓存字节归零。
+// 判据（行为级，guest 真的发起宿主调用 —— echoapp 的 `/asset-probe` 分支）：
+//   - 静态面 `GET /static/app.css` 拿到资源字节；
+//   - 应用面 `GET /asset-probe?path=static/app.css` 拿到同一份字节与 content-type/大小；
+//   - `/asset-probe?path=picoaide.app.json` 拿到配置原文（保留资源永不直出，但应用读得到）；
+//   - 不存在的路径必须原样回 `NOT_FOUND`（不是 500、也不是"空成功"）。
+func TestStatic_AssetsReadUsesMemorySet(t *testing.T) {
+	e := newEnv(t)
+	appID := e.appID("assetread")
+	cfg := loginConfig()
+	const css = "body{color:red}"
+	e.publishApp(appSpec{appID: appID, config: cfg, assets: map[string]string{
+		"static/app.css": css,
+	}})
+
+	if rec := e.get(appID, "/static/app.css"); rec.Code != http.StatusOK || rec.Body.String() != css {
+		t.Fatalf("静态直出失败: %d %q", rec.Code, rec.Body.String())
+	}
+
+	readAsset := func(logical string) (int, map[string]any) {
+		t.Helper()
+		rec := e.get(appID, "/asset-probe?path="+logical)
+		return rec.Code, decodeJSON(t, rec.Body)
+	}
+	assertResult := func(t *testing.T, body map[string]any) map[string]any {
+		t.Helper()
+		if body["error"] != nil {
+			t.Fatalf("assets.read(%v) 不应失败: %v", body["path"], body)
+		}
+		res, _ := body["result"].(map[string]any)
+		if res == nil {
+			t.Fatalf("assets.read 结果不是对象: %v", body)
+		}
+		return res
+	}
+
+	_, body := readAsset("static/app.css")
+	res := assertResult(t, body)
+	if got := res["text"]; got != css {
+		t.Fatalf("assets.read 必须拿到与静态直出同一份字节，得到 %v", got)
+	}
+	if got := res["encoding"]; got != "text" {
+		t.Fatalf("文本资源必须回 text 编码，得到 %v", got)
+	}
+	if got := res["content_type"]; got != "text/css" {
+		t.Fatalf("content-type 应由同一份资源集推导，得到 %v", got)
+	}
+	if got := res["size"]; got != float64(len(css)) {
+		t.Fatalf("size 应为 %d，得到 %v", len(css), got)
+	}
+
+	// 保留资源：`picoaide.app.json` 宿主**永不直出**（见 static.go 的 isReservedAsset）
+	// —— 请求会交给 wasm，因此判据是"响应体里没有配置内容"（而不是状态码：
+	// 应用自己可以对这个路径回任何东西）。但应用用 assets.read 读得到，
+	// 且读到的就是宿主判准入用的那份库内 config_json。
+	if rec := e.get(appID, "/picoaide.app.json"); strings.Contains(rec.Body.String(), "data_sensitivity") {
+		t.Fatalf("保留资源不得由宿主直出（响应体里出现了配置内容）：%d %q", rec.Code, rec.Body.String())
+	}
+	_, body = readAsset("picoaide.app.json")
+	res = assertResult(t, body)
+	if got := res["text"]; got != cfg {
+		t.Fatalf("应用读到的配置必须与宿主判准入用的同一份（库内 config_json）：%v", got)
+	}
+
+	// 不存在 ⇒ 原样透传 NOT_FOUND（不是 500 平台故障、也不是空成功）。
+	code, body := readAsset("missing.txt")
+	if code != http.StatusInternalServerError {
+		t.Fatalf("assets.read 失败时 guest 侧应看到 500 分支，得到 %d", code)
+	}
+	rpcErr, _ := body["error"].(map[string]any)
+	if rpcErr == nil || rpcErr["code"] != "NOT_FOUND" {
+		t.Fatalf("不存在的资源必须回 NOT_FOUND，得到 %v", body)
+	}
+}
+
+// TestStatic_EvictAppReportsFreedBytes 守住 R2-CA-2 在新模型下的落点：
+// EvictApp 的**记账字节**必须包含随包资源那一笔，日志不得把一次真实释放写成"记账 0 KiB"。
 //
-// 变异：把 releases 那一笔从 bytes 里去掉（只留条目数）⇒ bytes=0、日志写"记账 0 KiB"⇒ 本用例红。
+// 口径变化（2026-09-20）：资源字节不再由 releaseCache 持有 ⇒ 它记在**模块缓存**条目上
+// （modules.go 的 insertSet 把 `set.Bytes()` 记进 size）。因此本用例断言的是
+// "EvictApp 的记账覆盖这份资源集"，而不再是"releaseCache 的字节"。
+//
+// 变异：把资源集字节从模块缓存的记账里去掉（或让 EvictApp 只回条目数）⇒ bytes=0、
+// 日志写"记账 0 KiB" ⇒ 本用例红。
 func TestStatic_EvictAppReportsFreedBytes(t *testing.T) {
 	var lines []string
 	e := newEnv(t, func(o *Options) {
@@ -651,21 +759,23 @@ func TestStatic_EvictAppReportsFreedBytes(t *testing.T) {
 	})
 	appID := e.appID("rtacc")
 	big := strings.Repeat("M", 2<<20)
-	spec := appSpec{appID: appID, config: loginConfig(), assets: map[string]string{"big.js": big}}
-	e.publishApp(spec)
+	e.publishApp(appSpec{appID: appID, config: loginConfig(), assets: map[string]string{"big.js": big}})
 	if rec := e.get(appID, "/big.js"); rec.Code != http.StatusOK {
 		t.Fatalf("预热失败: %d", rec.Code)
 	}
-	if st := e.srv.releases.stats(); st.Bytes < int64(len(big)) {
-		t.Fatalf("预热后缓存应持有该资源：Bytes=%d want≥%d", st.Bytes, len(big))
+	if _, cached := e.srv.modules.size(); cached < int64(len(big)) {
+		t.Fatalf("预热后模块缓存应记着这份资源集：bytes=%d want≥%d", cached, len(big))
 	}
 
 	_, bytes := e.srv.EvictApp(appID)
 	if bytes < int64(len(big)) {
-		t.Fatalf("EvictApp 记账字节必须包含资源缓存：bytes=%d want≥%d（R2-CA-2）", bytes, len(big))
+		t.Fatalf("EvictApp 记账字节必须包含资源集那一笔：bytes=%d want≥%d（R2-CA-2）", bytes, len(big))
 	}
-	if st := e.srv.releases.stats(); st.Bytes != 0 {
-		t.Fatalf("逐出后资源缓存字节必须归零，得到 %d", st.Bytes)
+	if _, after := e.srv.modules.size(); after != 0 {
+		t.Fatalf("逐出后模块缓存必须归零，得到 %d", after)
+	}
+	if n := e.srv.releases.entriesForTest(appID); n != 0 {
+		t.Fatalf("逐出后资源元数据缓存必须清空，仍有 %d 个条目", n)
 	}
 	var logged bool
 	for _, l := range lines {
@@ -681,60 +791,40 @@ func TestStatic_EvictAppReportsFreedBytes(t *testing.T) {
 	}
 }
 
-// TestReleaseCache_SingleReleaseOverBudgetFallsBackToMetadata 守住 R2-CA-5 的**结构性上界**：
-// 当"单个 release 的资源总量"超过缓存字节上限时（现实中由自定义段总量上限挡住，本用例
-// 刻意违反它以证明**本包自己**仍然有界），唯一那条不逐出的条目必须退化成"只缓存元数据"。
+// TestStatic_NoAssetDirectoryOnDisk 是本次改造（随包资源改内存直出）的**交付判据**：
+// 宿主盘上不得再出现 `<data_root>/apps/<app_id>/assets/` 这个按版本抽取的资源目录。
 //
-// 变异：去掉 enforceByteBoundLocked ⇒ stats().Bytes 越过 maxBytes ⇒ 本用例红。
-func TestReleaseCache_SingleReleaseOverBudgetFallsBackToMetadata(t *testing.T) {
-	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
-	const maxBytes = int64(64 << 10)
-	c := newReleaseCache(maxBytes, 8, func() time.Time { return now })
-	k := releaseKey{AppID: "big", ReleaseID: 1}
-	blob := bytes.Repeat([]byte("a"), 32<<10) // 每资源 32 KiB，4 个 ⇒ 128 KiB > 64 KiB
-
-	for i := 0; i < 4; i++ {
-		c.putAsset(k, fmt.Sprintf("f%d", i), assetEntry{
-			ContentType: "application/octet-stream", ETag: fmt.Sprintf(`"e%d"`, i),
-			Size: len(blob), Data: blob, BytesCached: true,
-		})
-		if st := c.stats(); st.Bytes > maxBytes {
-			t.Fatalf("单条自身超预算时必须退化为元数据：Bytes=%d > maxBytes=%d（硬上界不得依赖跨模块假设）",
-				st.Bytes, maxBytes)
-		}
-	}
-	// 元数据必须还在：304 复验只靠 ETag，正文回源读盘。
-	got, ok := c.asset(k, "f0")
-	if !ok || got.ETag == "" {
-		t.Fatalf("退化后元数据必须仍在（304 复验靠 ETag）：ok=%v entry=%+v", ok, got)
-	}
-	if got.BytesCached {
-		t.Fatalf("超预算的条目不得继续持有字节：%+v", got)
-	}
-	// 结构性上界：**任何时刻**字节总量都不得超过 maxBytes（旧实现允许"唯一那条"无界超额）。
-	if st := c.stats(); st.Bytes > maxBytes {
-		t.Fatalf("退化后缓存字节仍越过 maxBytes：%d > %d", st.Bytes, maxBytes)
-	}
-}
-
-// TestReleaseCache_BudgetCoversSingleReleaseWorstCase 把两条**跨模块**常量绑在一起
-// （R2-CA-5 的另一半）：文档承诺的硬上界含"单个 release 的资源总量 ≤ SectionTotalMaxBytes"
-// 这一项，而那个上限由 wasmmod 的段总量校验保证。此前 appserver 侧没有任何断言把两者绑住
-// —— 调大段总量上限（或让资源改走别的抽取通道）会静默把本缓存的硬上界推高。
+// 判据怎么做到行为级：跑一轮"发布 + 静态直出"（发布链路与运行期读资源两条路都走到），
+// 然后 `Stat` 那个历史目录 —— 只要有人把"抽段落盘"加回发布链路，或让运行期为了读资源
+// 去建/写这个目录，用例立刻红。`assets.read`（应用的读资源出口）与静态直出共用**同一个**
+// 内存资源集（hostenv 的适配器只是把 `*assets.Set` 转成 capapi.Assets），所以不存在
+// "静态不落盘、assets.read 落盘"的可能：判据是"盘上没有那个目录"，与走哪条出口无关。
 //
-// 判据：最坏情况（一个 release 的全部资源 = 段总量上限）必须仍然放得进缓存字节预算；
-// 若将来有人把它调过头，本用例红并要求回到 readyz 的记账边界重新算账。
-func TestReleaseCache_BudgetCoversSingleReleaseWorstCase(t *testing.T) {
-	if int64(limits.SectionTotalMaxBytes) > limits.ReleaseCacheMaxBytes {
-		t.Fatalf("单个 release 的资源总量上限（SectionTotalMaxBytes=%d，由 wasmmod 段总量校验保证）"+
-			"超过了资源缓存字节预算（ReleaseCacheMaxBytes=%d）：文件头承诺的硬上界不再成立，"+
-			"必须同步调整这两者（并回到 readyz 的记账边界重算）",
-			limits.SectionTotalMaxBytes, limits.ReleaseCacheMaxBytes)
+// 变异验证：把资源抽取（`assets.Write` 那一套）加回 publishApp 之外的任何产品路径，
+// 或让 loadReleaseAssets 改成落盘再读 ⇒ 本用例红。
+func TestStatic_NoAssetDirectoryOnDisk(t *testing.T) {
+	e := newEnv(t)
+	appID := e.appID("nodisk")
+	e.publishApp(appSpec{
+		appID: appID, config: loginConfig(), assetsDir: "custom-dir-1",
+		assets: map[string]string{
+			"static/app.css": "body{}",
+			"index.html":     "<html>shell</html>",
+		},
+	})
+	if rec := e.get(appID, "/static/app.css"); rec.Code != http.StatusOK || rec.Body.String() != "body{}" {
+		t.Fatalf("静态直出失败: %d %q", rec.Code, rec.Body.String())
 	}
-	// 反过来也钉住"本地防线"的口径：单条资源的本地防线阈值（maxBytes/2）必须不小于单文件
-	// 上限，否则那道防线会在**单文件合法**的情况下触发（把正常资源降级成元数据）。
-	if h := int64(limits.ReleaseCacheMaxBytes / 2); int64(limits.SectionTotalMaxBytes) > h {
-		t.Fatalf("单文件上限 %d 超过本地防线阈值 %d：合法单文件会被降级成元数据（口径漂移）",
-			limits.SectionTotalMaxBytes, h)
+	// 读资源的两条出口都跑一轮：静态直出（宿主）与 `assets.read`（guest 真发一次宿主调用）。
+	// 两者共用**同一个**内存资源集（hostenv 的适配器只是把 `*assets.Set` 转成 capapi.Assets），
+	// 因此不存在"静态不落盘、assets.read 落盘"的可能。
+	if rec := e.get(appID, "/asset-probe?path=static/app.css"); rec.Code != http.StatusOK {
+		t.Fatalf("assets.read 探针失败: %d %q", rec.Code, rec.Body.String())
+	}
+	legacy := filepath.Join(e.root, limits.AppsDirName, appID, legacyAssetsDirName)
+	if _, err := os.Stat(legacy); err == nil {
+		t.Fatalf("宿主盘上不得出现随包资源目录（本次改造的交付判据）：%s 存在", legacy)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("Stat(%s): %v", legacy, err)
 	}
 }
