@@ -151,7 +151,8 @@
     "dist:mac:dmg": "node scripts/release-mac.ts --dmg",
     "verify:session": "node scripts/verify-session-restart.mjs",
     "verify:renderer-capture": "node scripts/verify-renderer-error-capture.mjs",
-    "e2e:sidebar": "node scripts/e2e-right-sidebar.mjs"
+    "e2e:sidebar": "node scripts/e2e-right-sidebar.mjs",
+    "e2e:terminal": "node scripts/e2e-terminal.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.2",
