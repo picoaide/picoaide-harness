@@ -267,6 +267,14 @@ describe('内置浏览器不得导航到本机 shell origin（三轮审计 P1-�
     await runtime.dispose()
   })
 
+  it('⑤ 解析不出来的绝对本机 URL 也拒（同 Node/Chromium 接受面差异）', async () => {
+    const { runtime } = makeRuntime()
+    for (const raw of ['http://[::ffff:0177.0.0.1]:8080/', 'http://[::ffff:127.0.0.01]/']) {
+      await expect(runtime.navigate(1, raw), raw).rejects.toMatchObject({ code: 'navigation-blocked' })
+    }
+    await runtime.dispose()
+  })
+
   it('③ shellOrigin 未设置时，本机目标仍被拒、外站不受影响', async () => {
     // `shellOrigin` 缺席（非 Electron 宿主/测试）不能让本机判据整体失效 ——
     // 本机禁访的依据是"那里有被镜像的凭据"，不是"shellOrigin 这个字符串存不存在"。

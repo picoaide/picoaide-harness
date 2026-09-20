@@ -590,9 +590,11 @@ func (c *Compiler) Close() error {
 	var err error
 	c.once.Do(func() {
 		close(c.stop)
-		// 临时缓存目录（不可信缓存的替代品）随编译器关闭一起清掉。
+		// ⚠️ 顺序（2026-09-21 六轮审计 P3）：**先杀子进程再删目录**。反过来的话，
+		// 在飞编译的子进程仍在往临时目录里写，`RemoveAll` 会与它竞争（可能删掉正在
+		// 写的条目、或让子进程以难解释的错误收场）。
 		if c.childCacheTemp != "" {
-			_ = os.RemoveAll(c.childCacheTemp)
+			defer func() { _ = os.RemoveAll(c.childCacheTemp) }()
 		}
 		// 1) 先断掉在飞编译：杀子进程会让 proc.request 立刻返回错误，worker 随即
 		//    从 runJob 出来看到 stop 并收尾。

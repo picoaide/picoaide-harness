@@ -723,9 +723,9 @@ export class BrowserRuntime {
    *     就天然持有那把 cookie，**任何**依赖持有性证明的本机守卫（不只是 `unmask`）都会被绕过 ——
    *     因为它驱动的那个标签页**就是**一个持有 cookie 的真页面。
    *
-   * 口径（为什么只拒这一个 origin，而不是"所有回环地址"）：这一条是精确打击 —— 被镜像
-   * cookie 的作用域就是 shell origin；而 `127.0.0.1` 上的**其它**端口是合法的开发目标
-   * （作者常让 AI 看自己本地的 dev server），一并拒掉会毁掉真实用法。
+   * 口径（2026-09-21 四轮审计后收紧）：**本机一律不访问** —— 被镜像的 cookie 是
+   * host-only 且 cookie 不看端口，`127.0.0.1` 的任意端口都能收到它；"看本地 dev server"
+   * 因此是拿本机控制面凭据换便利，代价不可接受（详见决策记录 §7b）。
    *
    * 宿主自己 load 两个 shell 页面走的是 `webContents.loadURL`，**不经过**这里
    * （`ensureWindow`/`mountOverlay`），所以接管蒙版与工具栏不受影响。
@@ -748,7 +748,8 @@ export class BrowserRuntime {
    * 覆盖两类（2026-09-21 三轮/四轮审计，见 docs/decisions/2026-09-21-app-author-data-surface.md §7b）：
    *
    *  1. **本机 shell origin**（`shellOrigin` 精确相等）；
-   *  2. **任何回环/本机主机名**（`127.0.0.0/8`、`::1`、`localhost`、`0.0.0.0`）——
+   *  2. **任何本机主机名**（判定唯一实现在 `guard.isLocalHostname`：`127.0.0.0/8`、
+   *     `::1`/`::`、IPv4-mapped、`localhost` 及其尾点/子域、`ip6-localhost` 等）——
    *     为什么不能只拒 shell origin：镜像的 `dsh-auth-*` 是 **host-only** cookie，
    *     而 **cookie 不看端口** ⇒ 浏览器把它送到 `127.0.0.1` 的**任意端口**。
    *     四轮审计真机实测：模型在自己的端口上起一个静态页并导航过去，
@@ -769,7 +770,10 @@ export class BrowserRuntime {
     try {
       parsed = new URL(url)
     } catch {
-      return false // 相对 URL / 畸形输入交给 guard 的既有判据
+      // 解析失败 ≠ 安全：带 scheme 的绝对 URL 在 Node 侧解析失败、Chromium 侧却可能接受
+      // （六轮审计实测 `http://[::ffff:0177.0.0.1]:PORT/` → 归一化为回环）⇒ 这种输入按
+      // "禁止"处理；纯相对 URL 交给 guard 的既有语义（同源、不越界）。
+      return /^[a-z][a-z0-9+.-]*:/iu.test(url.trim())
     }
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
     // 本机判定的**唯一实现**在 guard（含 IPv6 / IPv4-mapped / `*.localhost` 等写法），

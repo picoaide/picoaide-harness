@@ -364,6 +364,25 @@ describe('isLocalHostname：本机目标判定（五轮审计 P2-①/P3-①）',
     for (const host of locals) expect(isLocalHostname(host), host).toBe(true)
   })
 
+  it('解析失败的**绝对** http(s) URL 一律拒（六轮审计 P2-①：Node 与 Chromium 的接受面不同）', () => {
+    // 实测：`http://[::ffff:0177.0.0.1]:8080/` 在 Node 的 WHATWG 解析器里抛错、
+    // 而 Chromium **接受并归一化成回环** `[::ffff:7f00:1]`。旧实现 catch 后返回 'allow'
+    // ⇒ 闸门对该 URL 失效，而 Chromium 照常落到本机监听（真机实测模型读到了本机正文）。
+    // 口径：带 scheme 的绝对 URL 解析失败 ⇒ deny；纯相对路径才放行。
+    for (const raw of [
+      'http://[::ffff:0177.0.0.1]:8080/',
+      'http://[::ffff:127.0.0.01]/',
+      'http://[::ffff:0x7f.0.0.1]:9/',
+      'HTTPS://[::ffff:0177.0.0.1]/x',
+      'http://[fe80::1%25eth0]:80/',
+    ]) {
+      expect(classifyNavigation(raw), raw).toBe('deny')
+    }
+    // 反向对照：相对路径仍然放行（页面无法借它越出自己的 origin）。
+    expect(classifyNavigation('/local/path')).toBe('allow')
+    expect(classifyNavigation('relative.html')).toBe('allow')
+  })
+
   it('公网/其它私网写法逐个不命中（防"什么都拒"与"127. 前缀"误判）', () => {
     for (const host of remotes) expect(isLocalHostname(host), host).toBe(false)
   })
