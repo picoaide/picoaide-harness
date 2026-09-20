@@ -241,3 +241,50 @@ func TestRuntimeDegradesToInMemoryCacheWhenDiskCacheUnusable(t *testing.T) {
 	}
 	_ = mod.Close(context.Background())
 }
+
+// TestRuntimeDegradesWhenCacheRootIsRegularFile 覆盖 P2-④ 的边界形态。
+//
+// 与上一条的区别（2026-09-21 二轮审计 P2-④）：上一条堵的是**父目录**被文件占住
+// （`Ensure` 返回 err ⇒ 第一版就降级了）；这一条堵的是**缓存分代目录自身**被普通文件占住 ——
+// 此时 `Ensure` 的 `Lstat` 看到"存在但不是目录" ⇒ 返回**违规报告 + nil error**，
+// 第一版于是继续往下走，由 `wazero.NewCompilationCacheWithDir` 失败 ⇒ `return nil, err`
+// ⇒ `runtime.New` 失败 ⇒ `appserver.New` 失败 ⇒ `cmd/server` 的 `log.Fatalf`
+// —— "缓存不可用只是慢一点"的承诺在这个形态下不成立（审计实测 err="… is not dir"）。
+//
+// 判据：两种占位形态下，`NewCompilationCache` 都必须返回 `(nil, nil)`（降级信号），
+// 且 `runtime.New` 仍能装配 + 真编译。
+// 变异验证：把 `wazero.NewCompilationCacheWithDir` 的错误分支改回 `return nil, err` ⇒ 本用例红。
+func TestRuntimeDegradesWhenCacheRootIsRegularFile(t *testing.T) {
+	root := t.TempDir()
+	// 把**分代目录**（CompileCacheDir(root)）本身占成普通文件。
+	dir := CompileCacheDir(root)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cache, err := NewCompilationCache(root)
+	if err != nil {
+		t.Fatalf("分代目录被普通文件占住时必须降级而不是报错（报错会一路 log.Fatalf 打死服务端）：%v", err)
+	}
+	if cache != nil {
+		_ = cache.Close(context.Background())
+		t.Fatal("分代目录不可用时不应拿到磁盘缓存")
+	}
+
+	rt, rerr := New(context.Background(), Options{DataRoot: root})
+	if rerr != nil {
+		t.Fatalf("缓存不可用时 runtime.New 必须仍能装配（降级为进程内缓存）：%v", rerr)
+	}
+	t.Cleanup(func() { _ = rt.Close(context.Background()) })
+	mod, cerr := rt.CompileModule(context.Background(), wasmtest.WithDataCount())
+	if cerr != nil {
+		t.Fatalf("降级后必须仍能编译：%v", cerr)
+	}
+	if mod == nil {
+		t.Fatal("编译返回 nil 模块")
+	}
+	_ = mod.Close(context.Background())
+}

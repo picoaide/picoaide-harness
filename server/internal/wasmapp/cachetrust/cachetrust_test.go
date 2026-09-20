@@ -239,33 +239,91 @@ func TestEnsureDoesNotFollowSymlinkWhenCorrectingMode(t *testing.T) {
 	}
 }
 
-// TestEnsureReportsChmodFailureInsteadOfClaimingTrust 覆盖 P1-① 的第二半：
-// Chmod 失败（非属主 / 只读挂载）原先**被当成成功** —— 调用方拿到 err=nil 且
-// `Trusted()==true`，日志里没有任何信号，而"只有编译进程可写"这条缓解其实没生效。
+// TestEnsureNeverReportsTrustedOnError 钉住 `(report, err)` 这对返回值的契约：
+// **err 非 nil ⇒ Trusted() 必为 false**。
 //
-// 判据：目录存在但不可 chmod 时，Ensure 必须返回**非 nil 错误**，
-// 且绝不能同时给出"可信"的报告（两者只能有一个成立）。
+// 背景（2026-09-21 二轮独立审计 P1-①）：失败分支原先返回 `{Dir: dir}`（零违规 ⇒
+// `Trusted()==true`）。调用方只要漏看 err（或写成 `rep, _ := Ensure(...)`）就会把
+// "目录根本不可用"当成"目录可信"；而**守着它的用例在结构上不可能红** ——
+// 旧断言是 `if err == nil && rep.Trusted() { t.Fatal(...) }`，真实行为 `err != nil`
+// 使它永假，再加上 `os.Geteuid() == 0` 整条 Skip（本机就是 root）。
 //
-// 本用例用"目录本身不存在且父目录不可写"来构造 Chmod 失败（需要 root 之外的普通
-// 用户视角；在容器里以 root 跑时会自动跳过并说明，避免变成假绿）。
-func TestEnsureReportsChmodFailureInsteadOfClaimingTrust(t *testing.T) {
+// 现在的判据是**双向**的，且不依赖"以非 root 身份制造 Chmod 失败"（那在 root 下不可能，
+// 只会变成 Skip 假绿）：
+//
+//	① 构造一个必然失败的输入（父路径被普通文件占住）⇒ 断言 `err != nil` **且**
+//	   `rep.Trusted() == false`（修复前这一条就红：err 非 nil 而 Trusted 为 true）；
+//	② 反向对照：正常可创建的目录 ⇒ `err == nil` **且** `Trusted() == true`
+//	   （防"把 Trusted 写成恒假"）。
+//
+// 变异验证：把任一失败分支改回 `CacheTrustReport{Dir: dir}` ⇒ ①红。
+func TestEnsureNeverReportsTrustedOnError(t *testing.T) {
+	base := t.TempDir()
+	// 父路径是**普通文件**：`<base>/blocked/cache` 的任何创建/stat 都必然失败
+	//（ENOTDIR），与运行身份无关 ⇒ 在 root 下也能稳定构造（不需要 Skip）。
+	blocked := filepath.Join(base, "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := Ensure(filepath.Join(blocked, "cache"), 0o700)
+	if err == nil {
+		t.Fatalf("父路径被普通文件占住时必须报错，实际 err=nil, trusted=%v", rep.Trusted())
+	}
+	if rep.Trusted() {
+		t.Fatalf("err 非 nil 时报告不得是「可信」（调用方漏看 err 就会把不可用当可信）：err=%v violations=%+v",
+			err, rep.Violations)
+	}
+	if len(rep.Violations) == 0 {
+		t.Fatalf("失败报告必须带至少一条违规（理由应说明失败原因）：%+v", rep)
+	}
+
+	// ①b 另一条失败分支：`Lstat` 返回 ENOENT（看起来"还不存在，可以创建"）但
+	// `MkdirAll` 必然失败 —— 构造方式是**父路径是指向不存在目标的悬空符号链接**
+	// （stat 整串 ⇒ ENOENT；MkdirAll ⇒ 父级建不出来）。这条把"创建失败"分支也钉住，
+	// 否则只覆盖到 stat 失败那一条（两条分支各改一处，判据必须分别能红）。
+	dangling := filepath.Join(base, "dangling")
+	if err := os.Symlink(filepath.Join(base, "nowhere"), dangling); err != nil {
+		t.Skipf("环境不支持符号链接，跳过 MkdirAll 分支：%v", err)
+	}
+	rep2, err2 := Ensure(filepath.Join(dangling, "cache"), 0o700)
+	if err2 == nil {
+		t.Fatalf("悬空链接下的目录不可能创建成功，实际 err=nil trusted=%v", rep2.Trusted())
+	}
+	if rep2.Trusted() {
+		t.Fatalf("MkdirAll 失败分支同样不得报「可信」：err=%v violations=%+v", err2, rep2.Violations)
+	}
+
+	// ② 反向对照：正常路径仍必须给"可信 + nil"（防恒假）。
+	ok := filepath.Join(base, "cache")
+	good, gerr := Ensure(ok, 0o700)
+	if gerr != nil {
+		t.Fatalf("正常目录不应报错：%v", gerr)
+	}
+	if !good.Trusted() {
+		t.Fatalf("正常创建的 0700 目录必须可信：%+v", good.Violations)
+	}
+}
+
+// TestEnsureReportsChmodFailureAsUntrustedWhenPossible 覆盖"Chmod 本身失败"那条分支。
+//
+// 在 root（本机/CI 容器）下无法制造 EPERM，此时**显式 Skip 并说明原因**，而不是让
+// 一条恒假的断言冒充判据（旧版本的形态）。非 root 环境下它是真实判据。
+func TestEnsureReportsChmodFailureAsUntrustedWhenPossible(t *testing.T) {
 	if os.Geteuid() == 0 {
-		t.Skip("以 root 运行时 Chmod 总能成功（CAP_FOWNER），无法在单测里构造失败；" +
-			"该形态由部署侧（--user/只读挂载）触发，判据是 Ensure 的错误传播分支")
+		t.Skip("以 root 运行时 Chmod 有 CAP_FOWNER，无法构造 EPERM；" +
+			"该分支的契约（err 非 nil ⇒ 不可信）已由 TestEnsureNeverReportsTrustedOnError 覆盖，" +
+			"本用例只在非 root 环境下补 Chmod 这一条具体路径")
 	}
 	base := t.TempDir()
-	root := filepath.Join(base, "cache")
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	dir := filepath.Join(base, "cache")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// 换成别人拥有的目录在单测里做不到；改为让父目录不可写 + 删除目标后重建来触发错误。
-	// 这里采用更直接的形态：把 root 换成只读父目录下的路径。
-	roParent := filepath.Join(base, "ro")
-	if err := os.MkdirAll(roParent, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	rep, err := Ensure(filepath.Join(roParent, "nested"), 0o700)
-	if err == nil && rep.Trusted() {
-		t.Fatal("无法创建/授权缓存目录时，Ensure 不得同时返回 nil 错误与\"可信\"报告")
+	// 移走所有权：让当前用户不再是属主 ⇒ Chmod 报 EPERM。
+	// （单测里做不到 chown 到别人；改为把目录放进一个不可写的父目录并删除当前目录，
+	//  使 MkdirAll 无法重建 —— 这仍走"创建失败"分支，因此这里只断言契约，不猜具体分支。）
+	rep, err := Ensure(filepath.Join(base, "ro", "cache"), 0o700)
+	if err != nil && rep.Trusted() {
+		t.Fatalf("Chmod/创建失败时不得报可信：err=%v", err)
 	}
 }

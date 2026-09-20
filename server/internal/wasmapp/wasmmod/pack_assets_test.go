@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/picoaide/picoaide/internal/wasmapp/compile/testdata/wasmtest"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
@@ -580,5 +581,86 @@ func TestPreviewHostSelfTest(t *testing.T) {
 	// 反向断言：自检**真的跑了**（有 ok 行），而不是"没跑到就退出 0"。
 	if strings.Count(out, "  ok   ") < 8 {
 		t.Fatalf("自检只跑过 %d 条，期望 ≥8 条：\n%s", strings.Count(out, "  ok   "), out)
+	}
+}
+
+// firstNonEmptyLine 取输出的第一行非空内容（失败信息里给一句可读的脚本报错）。
+func firstNonEmptyLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return "(脚本无输出)"
+}
+
+// TestPackAssetsSectionOrderParityWithPlatform 把"脚本的段表判据 == 平台"变成常驻判据。
+//
+// 为什么需要它（2026-09-21 二轮独立审计 P1-②）：`pack-assets.mjs` 的段表判据此前只做
+// "纯 id 升序"，会把 TinyGo/LLVM 的**规范 DataCount 位置**误拒；本批把它改成与
+// `wasmmod.Parse` 逐条同判（重复优先 → DataCount 特例 → 严格递增 → Tag(13) 拒绝）。
+// 但**仓库里没有任何用例把重复段/DataCount/Tag 喂给那个脚本**（审计实跑 12 种形状证明
+// 当时同判，同时 grep 证明零判据）⇒ 脚本侧任何回退都会静默复发
+// "作者本地打包通过、平台发布被拒"，而门禁全绿。
+//
+// 判据口径：对每种形状，**脚本的接受/拒绝**必须与 `Parse` 的接受/拒绝一致
+// （比 `Validate` 更贴切：脚本只复刻段表判据，不管导入/导出面）。11 种形状覆盖
+// 合法基线与 DataCount 两种位置、6 类重复段、算术插空重复、Tag(13)、未知 id(14)、
+// 以及"自定义段重复必须放行"的反向对照。
+//
+// 变异验证（审计已实跑其中一个方向）：把脚本的 `if (seenSectionIDs.has(id))` 改成
+// `if (false)`，或删掉 `DATA_COUNT_SECTION_ID` 特例 ⇒ 本用例红。
+func TestPackAssetsSectionOrderParityWithPlatform(t *testing.T) {
+	base := wasmtest.Build(
+		wasmtest.TypeSection(wasmtest.TypeFunc(wasmtest.Params(), wasmtest.Params())),
+		wasmtest.FunctionSection(0),
+		wasmtest.MemorySection(1),
+		wasmtest.ExportSection(wasmtest.ExportMemory("memory", 0), wasmtest.ExportFunc("_start", 0)),
+		wasmtest.CodeSection(wasmtest.Body(0x0b)),
+	)
+	cases := []struct {
+		name string
+		raw  []byte
+	}{
+		{"基线（规范升序）", base},
+		{"DataCount 规范位置", wasmtest.WithDataCount()},
+		{"DataCount 错位（Code 之后）", wasmtest.WithDataCountMisordered()},
+		{"重复 Function", wasmtest.WithDuplicateSection(3, []byte{0x00}, []byte{0x00})},
+		{"重复 Table", wasmtest.WithDuplicateSection(4, []byte{0x00}, []byte{0x00})},
+		{"重复 Code", wasmtest.WithDuplicateSection(10, []byte{0x00}, []byte{0x00})},
+		{"重复 Data", wasmtest.WithDuplicateSection(11, []byte{0x00}, []byte{0x00})},
+		{"末尾重复 Function", wasmtest.WithDuplicateSectionAtTail(3, []byte{0x00}, []byte{0x00})},
+		{"算术插空的重复段（3/4/3）", wasmtest.Build(
+			wasmtest.TypeSection(wasmtest.TypeFunc(wasmtest.Params(), wasmtest.Params())),
+			wasmtest.Section(3, []byte{0x00}),
+			wasmtest.Section(4, []byte{0x00}),
+			wasmtest.Section(3, []byte{0x00}),
+		)},
+		{"Tag(13)", wasmtest.Build(wasmtest.Section(13, []byte{0x00}))},
+		{"未知 id(14)", wasmtest.Build(wasmtest.Section(14, []byte{0x00}))},
+		{"自定义段重名（合法）", wasmtest.Build(
+			wasmtest.CustomSection("a", []byte("1")),
+			wasmtest.CustomSection("a", []byte("2")),
+		)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, perr := Parse(tc.raw)
+			platformOK := perr == nil
+
+			dir := t.TempDir()
+			in := writeFixture(t, dir, tc.raw)
+			src := writeAsset(t, dir, "a.txt", []byte("hello"))
+			out := filepath.Join(dir, "out.wasm")
+			stdout, code := runPackAssets(t, dir, "--in", in, "--out", out, src+"=index.html")
+			scriptOK := code == 0
+
+			if scriptOK != platformOK {
+				t.Fatalf("脚本与平台不同判（脚本接受=%v，平台 Parse 接受=%v）：\n"+
+					"  平台错误：%v\n  脚本输出：%s\n"+
+					"两侧必须同判：不同判的后果是「脚本放行 ⇒ 平台发布被拒」（或反向误拒合法产物）",
+					scriptOK, platformOK, perr, firstNonEmptyLine(stdout))
+			}
+		})
 	}
 }

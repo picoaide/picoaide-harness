@@ -375,10 +375,12 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 （TinyGo 默认就带，Zig/LLVM 的 release 产物里也有；体积随优化级别与内联量变化，
 不引用具体数字 —— 用 `wasm-objdump -h` 量你自己的产物）。
 
-平台的处置（**打包、段预算、本地预览三处都实现，且必须逐字一致**：真源
+平台的处置（**"哪些段算工具链段"这条分类在三处实现且必须逐字一致**：真源
 `server/internal/wasmapp/assets/assets.go` 的 `ToolchainSectionPrefixes` /
-`CountsTowardSectionBudget`，镜像在 `server/skills/app-builder/scripts/pack-assets.mjs`
-与 `server/skills/app-builder/examples/go/preview.mjs`）：
+`IsToolchainSection`，镜像在 `server/skills/app-builder/scripts/pack-assets.mjs` 与
+`server/skills/app-builder/examples/go/preview.mjs`。**段预算的算术只有两处** ——
+平台 `CountsTowardSectionBudget` 与打包脚本的 `countsTowardSectionBudget`（逐字节对拍）；
+本地预览**不算预算**，只用同一份分类决定"哪些段能当资源直出"）：
 
 - **打包（`pack-assets.mjs`）把它们当"工具链段"忽略**，不当作应用资源；应用资源只认
   `picoaide.app.json` 声明过的逻辑路径。**本地预览（`preview.mjs`）同判** —— 否则会
