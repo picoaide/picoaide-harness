@@ -44,9 +44,13 @@ const UPSTREAM_JSON = join(ROOT, 'upstream.json')
 
 /** §8.3 冻结的 scheme 正则（**不是**无上界版本）。 */
 const FROZEN_SCHEME_REGEX = '^[a-z][a-z0-9+.-]{1,31}$'
-/** 设计文档冻结的上游 pin（§22 目标形态基于该 pin 的桌面形态）。 */
-const PIN_TAG = 'dsh-v0.1.5-rc.2'
-const PIN_COMMIT = 'fb2c4b9e698e30edb738bca4cf0618587db7d203'
+/**
+ * 上游 pin 的**唯一真源**是 `upstream.json`（升级脚本同时改写它与 submodule）。
+ * 这里刻意**不再硬编码**版本号与 commit：历史版本写死了 `dsh-v0.1.5-rc.2` /
+ * `fb2c4b9e…`，升级后会在 `yarn check` 里立刻报红，且失败信息指向"pin 校验"而不是
+ * "守卫夹具过期"，极易被误判成升级本身坏了（2026-09-20 升级审计 P1-8）。
+ */
+const PIN_TAG_PATTERN = /^dsh-v\d+\.\d+\.\d+-(?:alpha|beta|rc)\.\d+$/
 const APP_SCHEME_FIELD = 'desktop.app_origin_scheme'
 /** §10 冻结的保留 scheme **契约**（真源是设计总纲原文，这里只作为解析失败时的对照提示）。 */
 const RESERVED_SCHEMES = ['http', 'https', 'file', 'data', 'javascript', 'about']
@@ -202,10 +206,14 @@ section('1. 冻结 scheme 正则：设计总纲 §8.3 ↔ ci-channels.sh（逐�
 section('2. 仓库 pin 校验（upstream.json / .gitmodules / submodule 实际检出）')
 {
   const upstream = JSON.parse(readFileSync(UPSTREAM_JSON, 'utf8'))
-  check(upstream.commit === PIN_COMMIT,
-    `upstream.json commit = ${PIN_COMMIT}（实际 ${upstream.commit}）`)
-  check(upstream.sourceVersion === '0.1.5-rc.2' && upstream.runtimePackageVersion === '0.1.5-rc.2',
-    'upstream.json sourceVersion/runtimePackageVersion = 0.1.5-rc.2')
+  const pinCommit = upstream.commit
+  const pinVersion = upstream.runtimePackageVersion
+  check(typeof pinCommit === 'string' && /^[0-9a-f]{40}$/.test(pinCommit),
+    `upstream.json commit 必须是 40 位十六进制（实际 ${JSON.stringify(pinCommit)}）`)
+  check(typeof pinVersion === 'string' && /^\d+\.\d+\.\d+-/.test(pinVersion),
+    `upstream.json runtimePackageVersion 必须是 prerelease 版本（实际 ${JSON.stringify(pinVersion)}）`)
+  check(upstream.sourceVersion === pinVersion,
+    `upstream.json sourceVersion 必须等于 runtimePackageVersion（${JSON.stringify(upstream.sourceVersion)} vs ${JSON.stringify(pinVersion)}）`)
 
   const gitmodules = readFileSync(join(ROOT, '.gitmodules'), 'utf8')
   check(gitmodules.includes('deepseek-ai/deepseek-harness'),
@@ -213,26 +221,32 @@ section('2. 仓库 pin 校验（upstream.json / .gitmodules / submodule 实际�
 
   const status = spawnSync('git', ['submodule', 'status', 'deepseek-harness'], { cwd: ROOT, encoding: 'utf8' })
   const line = (status.stdout ?? '').trim()
-  // 只断言**目标语义**：检出的 submodule commit == pin（`-` = 未初始化，必须失败）。
+  // 只断言**目标语义**：检出的 submodule commit == upstream.json 的 pin（`-` = 未初始化，必须失败）。
   //
-  // 刻意**不**把「describe 段必须是 tag（`(dsh-v0.1.5-rc.2)`）」写进断言 —— 那是"这个克隆有没有
-  // 取到 tag"的**环境性产物**：CI 的 actions/checkout 是浅检出、不带 tag，git 就打印缩写 hash
+  // 刻意**不**把「describe 段必须是 tag」写进断言 —— 那是"这个克隆有没有取到 tag"的
+  // **环境性产物**：CI 的 actions/checkout 是浅检出、不带 tag，git 就打印缩写 hash
   // `(fb2c4b9e)`，于是同一条判据在 CI 恒红，而两端的 commit 其实完全相同（2026-09-20 实测：
   // PR #101 的 Gate 就红在这一条）。环境性产物一律只 WARN，不拦门禁。
   // 依据：`temp/wasm-client-only/AUDIT-CHARTER.md` §4.2「把新鲜度/环境守卫与目标断言分开」。
   const parsed = /^([-+U ])?\s*([0-9a-f]{40})\b/.exec(line)
   const state = parsed?.[1] ?? ''
   const commit = parsed?.[2] ?? ''
-  check(status.status === 0 && state !== '-' && commit === PIN_COMMIT,
-    `submodule 实际检出 commit = ${PIN_COMMIT}（实际 ${JSON.stringify(line)}）`)
-  if (commit === PIN_COMMIT && !line.includes(`(${PIN_TAG})`)) {
+  check(status.status === 0 && state !== '-' && commit === pinCommit,
+    `submodule 实际检出 commit = upstream.json 的 ${pinCommit}（实际 ${JSON.stringify(line)}）`)
+  if (commit === pinCommit && !new RegExp(`\\(dsh-v[^)]*\\)`).test(line)) {
     console.log(`  WARN  submodule 的 describe 段不是 tag（${JSON.stringify(line)}）—— 浅检出/未取 tag 属正常，不拦门禁`)
   }
 
+  // 设计总纲是**历史记录**（`docs/planning/`，记录面）：它冻结的是当时那个 pin，
+  // 有意升级后与当前 pin 分歧属正常。因此这里只断言"它确实记录了一个 pin"，
+  // 与当前 pin 不一致时给 WARN 而不是拦门禁。
   const doc = readLines(DESIGN_DOC)
-  check(doc.text.includes(PIN_TAG),
-    `设计总纲记录的上游 pin = ${PIN_TAG}（${DESIGN_DOC.replace(`${ROOT}/`, '')}）`)
-}
+  const recorded = /dsh-v\d+\.\d+\.\d+-(?:alpha|beta|rc)\.\d+/.exec(doc.text)?.[0]
+  check(recorded !== undefined && PIN_TAG_PATTERN.test(recorded),
+    `设计总纲必须记录它当时冻结的上游 pin（${DESIGN_DOC.replace(`${ROOT}/`, '')}）`)
+  if (recorded !== undefined && !pinVersion.endsWith(recorded.replace(/^dsh-v/, ''))) {
+    console.log(`  WARN  设计总纲记录的 pin 是 ${recorded}，当前 pin 是 ${pinVersion} —— 历史记录面，不拦门禁`)
+  }
 
 // ---------------------------------------------------------------------------
 section('3. 渠道 CI dry-run：tag 名 → 渠道集（正式 tag 必须含 official）')
