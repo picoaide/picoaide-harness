@@ -171,6 +171,13 @@ describe('内置浏览器不得导航到本机 shell origin（三轮审计 P1-�
     capturedWindowOpen!({ url: `${SHELL}/api/pico/apps/wasm/demo/rows?unmask=1` })
     await new Promise(resolve => { setTimeout(resolve, 20) })
     expect(runtime.listTabs().length, 'window.open 到 shell origin 不得产生新标签').toBe(before)
+    // ⚠️ "标签数不变"这一条**单独不足以**证明是这一行闸门起的作用（四轮审计实测：把这行
+    // 换回 `guard.allowNavigation` 后本用例仍绿 —— 因为弹窗随后经 `this.open()` →
+    // `navigateInternal` 的闸门被拒，标签同样不会出现）。所以再加一条**独立可观察量**：
+    // op log 里必须出现"由 window.open 闸门记下的拒绝"，而不是"打开失败"。
+    const denied = runtime.opLog.filter(op => /window\.open denied/u.test(op.summary))
+    expect(denied.length, 'window.open 闸门必须自己记一条拒绝（否则这条判据被 navigate 闸门兜住、不独立承重）').toBeGreaterThan(0)
+    expect(denied.at(-1)!.failed).toBe(true)
 
     capturedWindowOpen!({ url: 'https://b.example/page' })
     await new Promise(resolve => { setTimeout(resolve, 20) })

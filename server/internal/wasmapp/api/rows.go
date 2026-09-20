@@ -377,38 +377,69 @@ var sensitiveColumnTokens = map[string]struct{}{
 	"shouji": {}, "shoujihao": {}, "dianhua": {}, "youxiang": {}, "xingming": {},
 	"xingmingquan": {}, "shenfenzheng": {}, "shenfen": {}, "dizhi": {}, "shengri": {},
 	"yinhang": {}, "yinhangzhanghao": {}, "zhanghao": {}, "mima": {}, "mimacuowu": {},
+	// 微信 / QQ 的**词根**：单独成词即命中（`wechat_id` → [wechat, id]）。
+	"wechat": {}, "weixin": {},
+	// **多词拼回形态**（joined 分支查的就是本表）：`id_card_no` → "idcardno"、
+	// `card_number` → "cardnumber"、`qq_number` → "qqnumber"。四轮审计发现的两类漏判
+	// 都落在这里：① 多词写法拼回后不等于已有的单数形态；② 键放错表（见 Names 表注释）。
+	"wxid": {}, "wxno": {},
+	"wechatid": {}, "wechatno": {}, "wechatnumber": {},
+	"weixinid": {}, "weixinnumber": {},
+	"qqid": {}, "qqno": {}, "qqnumber": {},
+	"idcardno": {}, "cardnumber": {},
+	// （`idnumber` / `accountnumber` 本表已有，勿重复。）
 }
 
 // sensitiveColumnNames 是"整名匹配"（无分隔符写法，或必须整体相等才算的词）。
 var sensitiveColumnNames = map[string]struct{}{
 	"tel": {}, "id": {}, "key": {}, "apikey": {}, "privatekey": {}, "secretkey": {},
-	"accesskey": {}, "cardno": {}, "phoneNumber": {}, "identity": {},
+	"accesskey": {}, "cardno": {}, "identity": {},
+	// ⚠️ 这里**不能**放 camelCase 写法（`phoneNumber`）：`isSensitiveColumn` 先把列名
+	// `ToLower` 再切词，所以进到本表比较的永远是全小写形态 —— 放 camelCase 键就是
+	// **死条目**（四轮审计实测：`phoneNumber` 从未被命中）。camelCase 由**切词**覆盖：
+	// `phoneNumber` → [phone, number] → `phone` 命中 sensitiveColumnTokens。
+	// 本表只收"整名相等才算"的全小写写法。
 	// 单独出现时足以指认到人、但**不能**进 sensitiveColumnTokens 的词：
 	// 它们作为子串在业务库里极其常见（`contact`/`content`/`gender` 里没有，但
 	// `name` 一旦进了 token 表，`filename`/`hostname`/`table_name` 都会被误判成敏感，
 	// 而误判的代价是"排障时看不到任何有用数据"）。
 	// 这里放的是"整名相等才算"的写法：`contact`（联系人）/`gender` 不进（不是标识符）。
-	"contact": {}, "contactinfo": {}, "wechat": {}, "weixin": {}, "qq": {},
+	"contact": {}, "contactinfo": {},
+	// 微信 / QQ 的短写法（**整名相等**才算）：`wx`/`qq` 单独作为列名才是敏感列，
+	// 作为词根则过于常见（`qq` 可能出现在别处）⇒ 它们不进 token 表。
+	// ⚠️ 教训（四轮审计）：**多词拼回形态（`wechatid`/`qqnumber`/`idcardno`…）必须放
+	// token 表**，因为 `isSensitiveColumn` 的 joined 分支只查 token 表 —— 放进本表就是
+	// 死条目（`wechat_id` 切词后拼回 `wechatid`，在本表里永远比不到 ⇒ 成片漏判）。
+	"wechat": {}, "weixin": {}, "wx": {}, "wxid": {}, "wxno": {}, "qq": {},
 }
 
 // isSensitiveColumn 判定列名是否按默认策略脱敏。
+//
+// ⚠️ 切词必须用**原串**，不能先 `ToLower`（2026-09-21 四轮审计 P2）：本函数此前先
+// `strings.ToLower(name)` 再 `splitIdentifier`，而驼峰边界正是 `splitIdentifier` 判据的一部分
+// （"小写后跟大写 ⇒ 新词"）—— 先小写等于**把边界擦掉**，于是所有 camelCase 写法
+// （`phoneNumber` / `accountName` / `idCardNo` / `bankAccountNo`）都退化成单个词、全部漏判；
+// 同一原因还让 `sensitiveColumnNames` 里的 `phoneNumber` 变成**死条目**（键永远比不到，
+// 因为查表用的是全小写形态）。现在：整名表查小写形态，切词/拼回用保留大小写的原串。
 func isSensitiveColumn(name string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(name))
-	if normalized == "" {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
 		return false
 	}
-	if _, ok := sensitiveColumnNames[normalized]; ok {
+	// 整名相等表（键一律全小写；放 camelCase 键是死条目）。
+	if _, ok := sensitiveColumnNames[strings.ToLower(trimmed)]; ok {
 		return true
 	}
-	// 切词：非字母数字都是分隔符（`api_key` / `api-key` / `api key` / `apiKey` 归一）。
-	// 大小写边界也要切（`passwordHash` → password + hash）。
-	for _, token := range splitIdentifier(normalized) {
+	// 切词：非字母数字都是分隔符（`api_key` / `api-key` / `api key`），
+	// **以及驼峰边界**（`passwordHash` → password + hash、`phoneNumber` → phone + number）。
+	tokens := splitIdentifier(trimmed)
+	for _, token := range tokens {
 		if _, ok := sensitiveColumnTokens[token]; ok {
 			return true
 		}
 	}
 	// 连写词：把切出来的词拼回去再比一次（`id` + `card` → `idcard`）。
-	joined := strings.Join(splitIdentifier(normalized), "")
+	joined := strings.Join(tokens, "")
 	if _, ok := sensitiveColumnTokens[joined]; ok {
 		return true
 	}
