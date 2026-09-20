@@ -27,6 +27,7 @@ import {
 } from '@picoaide/dsh-wasm-apps-host'
 import { createInstallKeyStore } from '@picoaide/dsh-wasm-apps-host/app-proof'
 import { provideAppAiRunner } from './app-ai-runner.ts'
+import { assertRequiredRowsActive } from './startup-rows.ts'
 import { provideWasmAppsWindows } from './wasm-apps-windows.ts'
 import { applyInstallDshHome, isSystemWorkingDirectory } from './desktop-home.ts'
 import { desktopUserDataDirectoryName } from './desktop-user-data.ts'
@@ -436,6 +437,10 @@ async function start(): Promise<void> {
       throw cause
     })
     current = ctx
+    // 上游 auditStartupEntries 只对 7 个全局 required id 抛错，我方 18 个行失败
+    // 只 warn（Windows GUI 无 stderr ⇒ 彻底静默）。这里补上我方必需行的激活断言，
+    // 失败走桌面自己的致命路径。见 src/startup-rows.ts 的模块注释。
+    assertRequiredRowsActive(ctx)
     fileExporter?.setThreshold((ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE) as DesktopSettings | undefined)?.logLevel ?? 'info')
     ctx.on('settings/updated', (namespace, next) => {
       if (namespace !== DESKTOP_SETTINGS_NAMESPACE) return

@@ -29,6 +29,11 @@ export default defineConfig([
       'loop-notify': 'src/loop-notify.ts',
       'loop-notify-route': 'src/loop-notify-route.ts',
       'loop-notify-contract': 'src/loop-notify-contract.ts',
+      // P0-9(2026-09-20 升级审计):必需行清单与激活断言既被 src/main.ts 引用,
+      // 也被 scripts/verify-profile-boot.mjs 引用(后者是**唯一**真正挂载完整个
+      // 桌面组合树的地方)。作为独立入口产出,冒烟 import 的就是同一个真源 ——
+      // 不能在冒烟里另抄一份清单(两份必然漂移,而漂移的清单正是这次要修的形态)。
+      'startup-rows': 'src/startup-rows.ts',
       'windows-agent-presets': 'src/windows-agent-presets.ts',
       'windows-pwsh-sandbox': 'src/windows-pwsh-sandbox.ts',
       'windows-acl-runner': 'src/windows-acl-runner.ts',

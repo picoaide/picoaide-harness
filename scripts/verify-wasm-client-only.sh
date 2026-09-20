@@ -330,7 +330,14 @@ if want 7; then
   CHANNEL_ARGS=()
   if [ -n "${WASM_CHANNELS_REPO:-}" ]; then CHANNEL_ARGS+=(--channels-repo "$WASM_CHANNELS_REPO"); fi
   log="$LOG_DIR/channels.log"
-  if node scripts/verify-wasm-channels.mjs ${CHANNEL_ARGS[@]+"${CHANNEL_ARGS[@]}"} >"$log" 2>&1; then
+  # 先语法检查再跑：这一段门禁的内容全在 `scripts/verify-wasm-channels.mjs` 里，
+  # 而脚本解析失败时**整段代码根本不执行**，报出来的却只是"渠道约束未通过"——
+  # 2026-09-20 实测被这一点绕了一圈（真正的病根是少了一个 `}`）。`node --check`
+  # 只解析不执行，秒级成本换一个明确的失败原因。
+  if ! node --check scripts/verify-wasm-channels.mjs 2>"$log"; then
+    sed 's/^/  /' "$log"
+    fail "守卫脚本本身语法错误（scripts/verify-wasm-channels.mjs 解析失败）"
+  elif node scripts/verify-wasm-channels.mjs ${CHANNEL_ARGS[@]+"${CHANNEL_ARGS[@]}"} >"$log" 2>&1; then
     sed 's/^/  /' "$log"
     pass "渠道约束（含五条负例与正式 tag dry-run）"
   else
