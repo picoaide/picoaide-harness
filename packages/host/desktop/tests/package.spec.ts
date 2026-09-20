@@ -240,6 +240,15 @@ describe('published package surface', () => {
     // 打包精简：排除 map 与 mermaid 依赖树（见 package.json build.files）
     expect(manifest.build?.files).toContain('!**/node_modules/mermaid/**')
     expect(manifest.build?.files).toContain('!**/node_modules/cytoscape/**')
+    // office-to-pdf 已在 cordis.patch.yml 关闭（桌面不需要 Office 转换），但它拉进来的
+    // `@deepseek-ai/libreoffice-kit*` 仍会被 electron-builder 打进 app.asar.unpacked ——
+    // 其中 macOS 侧是一个**嵌套的 LibreOfficeDev.app**。codesign 递归签名到它时直接失败：
+    //   `bundle format unrecognized, invalid, or unsuitable`（2026-09-20 v2.7.7-beta.1 实测）
+    // 这是**发布阻塞级**：desktop-macos 红 ⇒ release job（needs 四平台）整片跳过 ⇒
+    // 服务端镜像发不出去。所以这两个排除项是发布链路的一部分，不是"体积优化"。
+    // 变异：删掉任一条 ⇒ macOS 打包在签名阶段失败（本地 Linux 测不出，只有 CI 的 mac runner 会红）。
+    expect(manifest.build?.files).toContain('!**/node_modules/@deepseek-ai/libreoffice-kit/**')
+    expect(manifest.build?.files).toContain('!**/node_modules/@deepseek-ai/libreoffice-kit-*/**')
     expect(manifest.build?.mac?.icon).toBe('build/app-icon-mac.png')
     expect(manifest.build?.win?.icon).toBe('build/app-icon.png')
     expect(manifest.build?.win?.target).toEqual([{
