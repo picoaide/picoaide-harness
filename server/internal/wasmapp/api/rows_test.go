@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -493,5 +495,59 @@ func TestSensitiveColumnHeuristicCoversBusinessVocabulary(t *testing.T) {
 		if isSensitiveColumn(col) {
 			t.Errorf("列名 %q 不应按默认策略脱敏（误判会让作者在排障时看不到有用数据）", col)
 		}
+	}
+}
+
+// TestRowsLimitsMatchAuthorFacingDocs 把"50/200"这组数字在**随包文档**里的副本钉住。
+//
+// 背景（2026-09-21 三轮审计 P2-⑤）：这组数字在仓库里有 4 处副本 ——
+// `rows.go` 的两个常量、客户端面板的 `PAGE_SIZE`（有跨语言对拍）、
+// `wasm-app-tools.ts` 的工具说明（有对拍），以及 **`server/skills/app-builder/**` 里
+// 随镜像发给员工的三处散文**（`references/publishing.md`、`references/diagnostics.md` ×2）
+// —— 后三处此前**零判据**，改了 `rows.go` 而忘了改技能文档，模型/作者读到的说明书就静默过期。
+//
+// 判据口径：在"提到 rows / wasm_app_rows 的行"里，凡是 `缺省 N` / `最多 N` / `上限 N`
+// 形态的数字都必须是 `rowsDefaultLimit` 或 `rowsMaxLimit`；并且**要求至少命中若干条**，
+// 否则说明文档被改写/搬走（零命中 = 判据空转，直接失败而不是静默通过）。
+//
+// 变异验证：把 `references/publishing.md:15` 的「缺省 50」改成「缺省 20」⇒ 本用例红；
+// 把两个常量改成 20/300 ⇒ 本用例红（文档没跟着改）。
+func TestRowsLimitsMatchAuthorFacingDocs(t *testing.T) {
+	files := []string{
+		filepath.Join("..", "..", "..", "skills", "app-builder", "references", "publishing.md"),
+		filepath.Join("..", "..", "..", "skills", "app-builder", "references", "diagnostics.md"),
+		filepath.Join("..", "..", "..", "..", "docs", "wasm-app-authoring.md"),
+	}
+	numberRe := regexp.MustCompile(`(缺省|最多|上限)\s*(\d+)`)
+	rowsLine := func(line string) bool {
+		return strings.Contains(line, "rows") || strings.Contains(line, "数据")
+	}
+	checked := 0
+	for _, path := range files {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("读随包文档 %s: %v（文档被搬走 ⇒ 本条判据必须红，不能静默跳过）", path, err)
+		}
+		for i, line := range strings.Split(string(raw), "\n") {
+			if !rowsLine(line) {
+				continue
+			}
+			for _, m := range numberRe.FindAllStringSubmatch(line, -1) {
+				checked++
+				got, cerr := strconv.Atoi(m[2])
+				if cerr != nil {
+					t.Fatalf("%s:%d 解析数字失败：%q", path, i+1, m[0])
+				}
+				if got != rowsDefaultLimit && got != rowsMaxLimit {
+					t.Errorf("%s:%d 的「%s」= %d，但 rows.go 的缺省/上限是 %d/%d —— "+
+						"随包文档必须与实现同源（改实现要同步这三处散文）",
+						path, i+1, m[1], got, rowsDefaultLimit, rowsMaxLimit)
+				}
+			}
+		}
+	}
+	if checked < 3 {
+		t.Fatalf("只校验到 %d 处数字（期望 ≥3：publishing.md 一处 + diagnostics.md 两处）—— "+
+			"零命中/少命中说明文档被改写或判据口径失效，本条会退化成空转", checked)
 	}
 }
