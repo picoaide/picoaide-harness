@@ -1,4 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Card,
+  EmptyState,
+  PANEL_SEARCH,
+  PANEL_TOOLBAR,
+  PanelButton,
+  icons,
+} from '@picoaide/dsh-panel-surface/client'
 import { connectorErrorCodeOf, withConnectorErrorCode, type ConnectorErrorCode } from '../connector-error.ts'
 import { friendlyConnectorError } from './friendly-error.ts'
 import { t } from './locales.ts'
@@ -87,8 +95,7 @@ const CARD: React.CSSProperties = {
   flexDirection: 'column',
   gap: 8,
   padding: '14px 16px',
-  border: '1px solid var(--dsw-alias-border-l2)',
-  borderRadius: 12,
+  borderRadius: 14,
   minWidth: 0,
 }
 
@@ -142,7 +149,6 @@ function stateOutlineButton(stateColor: string): React.CSSProperties {
 }
 
 const DANGER_BUTTON: React.CSSProperties = stateOutlineButton('var(--dsw-alias-state-error-primary, #dc2626)')
-const WARN_BUTTON: React.CSSProperties = stateOutlineButton('var(--dsw-alias-state-warn-label, #b45309)')
 
 const INPUT: React.CSSProperties = {
   padding: '6px 10px',
@@ -155,19 +161,15 @@ const INPUT: React.CSSProperties = {
 
 const LABEL: React.CSSProperties = { fontSize: 12, margin: 0, color: 'var(--dsw-alias-label-caption)' }
 
-const TOOLBAR: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }
+/** 工具条几何（颜色与悬停反馈见共享样式表的 `.pico-chipbtn`）。 */
+const TOOLBAR: React.CSSProperties = { ...PANEL_TOOLBAR, marginBottom: 16 }
 
 const FILTER_BUTTON: React.CSSProperties = {
-  padding: '5px 10px',
-  borderRadius: 6,
-  border: '1px solid var(--dsw-alias-border-l2)',
-  background: 'transparent',
-  color: 'var(--dsw-alias-label-secondary)',
+  padding: '3px 11px',
+  borderRadius: 999,
   fontSize: 12,
-  cursor: 'pointer',
+  margin: 0,
 }
-
-const FILTER_ACTIVE: React.CSSProperties = { ...FILTER_BUTTON, background: 'var(--dsw-alias-bg-layer-3)', color: 'var(--dsw-alias-label-primary)' }
 
 // Design-token colors: adapt automatically to the light and dark themes.
 const statusColor: Record<string, string> = {
@@ -401,10 +403,18 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
   const downloading = entry.status === 'connecting' && Boolean(entry.request?.message)
 
   return (
-    <div style={CARD}>
+    <Card interactive style={CARD}>
       <div style={HEAD}>
-        <p style={TITLE} title={entry.name}>{entry.name}</p>
-        <p style={{ ...STATUS, color: statusColor[entry.status] ?? '#c9ccd3' }}>{statusLabel(entry.status)}</p>
+        <span className="pico-tile" aria-hidden="true" style={{ width: 36, height: 36, borderRadius: 11, color: statusColor[entry.status] ?? 'var(--dsw-alias-label-tertiary)', background: `color-mix(in srgb, ${statusColor[entry.status] ?? 'var(--dsw-alias-label-tertiary)'} 14%, transparent)`, fontSize: 15 }}>
+          {entry.name.slice(0, 1)}
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <p style={TITLE} title={entry.name}>{entry.name}</p>
+          <span className="pico-chip" style={{ marginTop: 3, color: statusColor[entry.status] ?? 'var(--dsw-alias-label-secondary)' }}>
+            <span className="pico-tile" style={{ width: 6, height: 6, borderRadius: 999, background: 'currentColor' }} />
+            {statusLabel(entry.status)}
+          </span>
+        </div>
       </div>
       <p style={DESC} title={entry.description}>{entry.description}</p>
 
@@ -537,23 +547,24 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       {entry.error && !isConnected && <p style={{ ...STATUS, color: statusColor.error }}>{friendlyConnectorError(entry.error, connectorErrorCodeOf(entry.errorCode))}</p>}
       {error && <p style={{ ...STATUS, color: statusColor.error }}>{error}</p>}
 
-      <div style={{ marginTop: 'auto', paddingTop: 4, display: 'flex', gap: 8 }}>
+      <div style={{ marginTop: 'auto', paddingTop: 10, borderTop: '1px solid var(--dsw-alias-border-l1)', display: 'flex', gap: 8 }}>
         {isConnected && entry.canRefresh === true ? (
-          <button
-            type="button"
-            style={{ ...BUTTON, background: 'var(--dsw-alias-bg-layer-3)', color: 'var(--dsw-alias-label-primary)', border: '1px solid var(--dsw-alias-border-l2)' }}
+          <PanelButton
+            variant="secondary"
+            size="md"
+            icon={<icons.IconRefresh size={13} />}
             disabled={busy === 'refresh' || entry.refreshing === true}
             onClick={() => { void refreshToken() }}
             title={t('action.refreshTokenHint')}
             aria-label={`${t('action.refreshToken')} ${entry.name}`}
           >
             {busy === 'refresh' || entry.refreshing === true ? t('action.refreshingToken') : t('action.refreshToken')}
-          </button>
+          </PanelButton>
         ) : null}
         {isConnected ? (
-          <button type="button" style={DANGER_BUTTON} disabled={busy === 'disconnect'} onClick={() => { void disconnect() }} aria-label={`${t('action.disconnect')} ${entry.name}`}>
+          <PanelButton variant="danger" size="md" style={{ flex: 1 }} disabled={busy === 'disconnect'} onClick={() => { void disconnect() }} aria-label={`${t('action.disconnect')} ${entry.name}`}>
             {busy === 'disconnect' ? t('action.disconnecting') : t('action.disconnect')}
-          </button>
+          </PanelButton>
         ) : entry.request?.approval ? (
           // FIX-02: the decision block above owns the actions; a generic
           // "连接" button here would silently re-enter the same gate.
@@ -563,23 +574,24 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
           // able to abort it — a "停止" button instead of a disabled "连接".
           // The button is always visible (not hover-gated) so a user who
           // closed the authorization popup is never stuck on "连接中…".
-          <button
-            type="button"
-            style={WARN_BUTTON}
+          <PanelButton
+            variant="danger"
+            size="md"
+            style={{ flex: 1 }}
             disabled={busy === 'disconnect'}
             onClick={() => { void cancel() }}
             title={t('action.cancelHint')}
             aria-label={`${t('action.stop')} ${entry.name}`}
           >
             {busy === 'disconnect' ? t('action.cancelling') : t('action.stop')}
-          </button>
+          </PanelButton>
         ) : (
-          <button type="button" style={BUTTON} disabled={busy === 'connect'} onClick={() => { void connect() }} aria-label={`${t('action.connect')} ${entry.name}`}>
+          <PanelButton variant="primary" size="md" style={{ flex: 1 }} disabled={busy === 'connect'} onClick={() => { void connect() }} aria-label={`${t('action.connect')} ${entry.name}`}>
             {busy === 'connect' ? t('action.connecting') : t('action.connect')}
-          </button>
+          </PanelButton>
         )}
       </div>
-    </div>
+    </Card>
   )
 }
 
@@ -619,24 +631,52 @@ export function ConnectorsList() {
 
   const connectedCount = useMemo(() => (connectors ?? []).filter((c) => c.status === 'connected').length, [connectors])
 
-  if (connectors === null) return <p style={DESC}>{t('status.connecting')}</p>
+  // 首载中：与另外三个面板同一套空态骨架（此前这里是一行裸灰字，看起来像渲染坏了）。
+  if (connectors === null) {
+    return <EmptyState icon={<icons.IconRefresh size={22} />} tone="neutral" title={t('status.connecting')} />
+  }
 
   return (
     <div>
       <div style={TOOLBAR}>
         <input
-          style={{ ...INPUT, flex: 1, minWidth: 0 }}
+          type="search"
+          style={PANEL_SEARCH}
           placeholder={t('search.placeholder')}
+          aria-label={t('search.placeholder')}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
-        <button type="button" style={statusFilter === 'all' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('all')}>{t('filter.all')}</button>
-        <button type="button" style={statusFilter === 'connected' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('connected')}>{t('filter.connected')}</button>
-        <button type="button" style={statusFilter === 'disconnected' ? FILTER_ACTIVE : FILTER_BUTTON} onClick={() => setStatusFilter('disconnected')}>{t('filter.disconnected')}</button>
+        <span style={{ display: 'flex', gap: 4 }}>
+          {(['all', 'connected', 'disconnected'] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              className="pico-chipbtn"
+              data-active={statusFilter === value ? 'true' : 'false'}
+              style={FILTER_BUTTON}
+              onClick={() => setStatusFilter(value)}
+            >
+              {value === 'all' ? t('filter.all') : value === 'connected' ? t('filter.connected') : t('filter.disconnected')}
+            </button>
+          ))}
+        </span>
+        <span style={{ flex: 1 }} aria-hidden="true" />
         <span style={{ ...LABEL, flex: 'none' }}>{t('filter.count', { connected: String(connectedCount), total: String(connectors.length) })}</span>
       </div>
-      {loadError && <p style={{ ...DESC, color: 'var(--dsw-alias-state-warn-label, #b45309)' }}>{t('error.refreshStale')}</p>}
-      {visible.length === 0 && <p style={DESC}>{t('empty.noMatch')}</p>}
+      {loadError && (
+        <p style={{ ...DESC, color: 'var(--dsw-alias-state-warn-label, #b45309)' }}>{t('error.refreshStale')}</p>
+      )}
+      {/* 空态分两档：目录里本来就没有连接器（服务端没下发目录）vs 筛选没命中。
+          两者处置完全不同（找管理员加连接器 vs 改筛选条件），不能塌缩成一句话。 */}
+      {visible.length === 0 && (
+        <EmptyState
+          icon={<icons.IconPlug size={22} />}
+          tone={connectors.length === 0 ? 'brand' : 'neutral'}
+          title={connectors.length === 0 ? t('empty.noConnectors') : t('empty.noMatch')}
+          {...(connectors.length === 0 ? { description: t('empty.noConnectorsHint') } : {})}
+        />
+      )}
       <div style={GRID}>
         {visible.map((entry) => (
           <ConnectorCard key={entry.id} entry={entry} onChanged={refresh} />

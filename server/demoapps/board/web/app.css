@@ -1,0 +1,630 @@
+/* ===========================================================================
+   app.css —— 留言板的全部样式（纯静态：没有外链字体、没有图片、没有 CDN）
+   设计基准：桌面宽屏 16:9（1280×720）—— 客户端按 window.ratio 锁定比例，
+   所以这里按「宽屏桌面」写，不按手机竖屏写。
+   深色 / 浅色两套都走 CSS 变量 + prefers-color-scheme，不做 JS 切换。
+   =========================================================================== */
+
+/* --- 1. 设计变量 ---------------------------------------------------------- */
+:root {
+  --bg: #e9edf9;
+  --bg-2: #f8faff;
+  --ink: #0f1729;
+  --ink-2: #33405e;
+  --muted: #6b7793;
+  --line: rgba(15, 23, 41, 0.10);
+  --line-strong: rgba(15, 23, 41, 0.16);
+  --glass: rgba(255, 255, 255, 0.72);
+  --glass-2: rgba(255, 255, 255, 0.55);
+  --glass-hi: rgba(255, 255, 255, 0.9);
+
+  --accent: #4f6bff;
+  --accent-2: #9a5bff;
+  --accent-3: #12b8a6;
+  --danger: #d64545;
+  --warn: #c2751a;
+  --ok: #0f7a55;
+
+  --radius: 18px;
+  --radius-sm: 12px;
+  --shadow-1: 0 1px 2px rgba(15, 23, 41, 0.05), 0 12px 30px -18px rgba(15, 23, 41, 0.28);
+  --shadow-2: 0 2px 4px rgba(15, 23, 41, 0.05), 0 30px 60px -34px rgba(22, 32, 74, 0.55);
+  --glow: 0 0 0 4px rgba(79, 107, 255, 0.18);
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --dur: 0.32s;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #070a12;
+    --bg-2: #0d1220;
+    --ink: #e9edfa;
+    --ink-2: #c3cbe4;
+    --muted: #93a0c0;
+    --line: rgba(255, 255, 255, 0.11);
+    --line-strong: rgba(255, 255, 255, 0.2);
+    --glass: rgba(20, 27, 48, 0.62);
+    --glass-2: rgba(20, 27, 48, 0.42);
+    --glass-hi: rgba(30, 40, 68, 0.8);
+
+    --accent: #8ba0ff;
+    --accent-2: #c08bff;
+    --accent-3: #4fd8c6;
+    --danger: #ff8080;
+    --warn: #f4b455;
+    --ok: #57d3a4;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), 0 18px 40px -22px rgba(0, 0, 0, 0.8);
+    --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.45), 0 40px 80px -40px rgba(0, 0, 0, 0.9);
+    --glow: 0 0 0 4px rgba(139, 160, 255, 0.22);
+  }
+}
+
+/* --- 2. 基础与背景 -------------------------------------------------------- */
+* { box-sizing: border-box; }
+
+/* ⚠️ 必须放在所有组件规则之前并带 !important：
+   `.empty{display:flex}` / `.btn{display:inline-flex}` 这类声明会盖掉浏览器默认的
+   `[hidden]{display:none}`（作者样式优先于 UA 样式），于是 `el.hidden = true` 失效 ——
+   实测症状是空态插画和留言列表同时显示、删除按钮明明设了 hidden 却还在。
+   这一条是「用 hidden 控制显隐」这件事的唯一保险。 */
+[hidden] { display: none !important; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  background: var(--bg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC",
+               "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15px;
+  line-height: 1.65;
+  letter-spacing: 0.01em;
+  overflow-x: hidden;
+}
+
+/* 极光背景：多层径向渐变 + 极慢漂移（没有任何图片） */
+.aurora {
+  position: fixed;
+  inset: -25% -15%;
+  z-index: -2;
+  background:
+    radial-gradient(52% 46% at 16% 8%, rgba(79, 107, 255, 0.42), transparent 62%),
+    radial-gradient(44% 42% at 84% 4%, rgba(154, 91, 255, 0.36), transparent 64%),
+    radial-gradient(48% 44% at 62% 96%, rgba(18, 184, 166, 0.30), transparent 66%),
+    radial-gradient(40% 38% at 6% 88%, rgba(255, 145, 120, 0.20), transparent 62%),
+    linear-gradient(165deg, var(--bg-2), var(--bg) 62%);
+  animation: drift 32s var(--ease) infinite alternate;
+}
+@media (prefers-color-scheme: dark) {
+  .aurora { filter: saturate(1.15) brightness(0.95); }
+}
+
+/* 细网格：让玻璃卡片有依托（纯 CSS 重复渐变） */
+.grid-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-image:
+    linear-gradient(to right, var(--line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--line) 1px, transparent 1px);
+  background-size: 46px 46px;
+  opacity: 0.5;
+  mask-image: radial-gradient(72% 62% at 50% 8%, #000 12%, transparent 78%);
+  -webkit-mask-image: radial-gradient(72% 62% at 50% 8%, #000 12%, transparent 78%);
+  pointer-events: none;
+}
+
+@keyframes drift {
+  from { transform: translate3d(-1.6%, -1.2%, 0) scale(1.02); }
+  to   { transform: translate3d(1.6%, 1.6%, 0) scale(1.07); }
+}
+
+/* --- 3. 顶栏（品牌条） ---------------------------------------------------- */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 14px clamp(18px, 3.2vw, 44px);
+  background: linear-gradient(to bottom, var(--glass-hi), var(--glass-2));
+  backdrop-filter: blur(16px) saturate(1.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+
+/* 品牌点：CSS 画的渐变圆点 + 呼吸光晕（不是任何 logo） */
+.brand-dot {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 11px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2) 55%, var(--accent-3));
+  box-shadow: 0 8px 20px -8px rgba(79, 107, 255, 0.85);
+}
+.brand-dot::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 15px;
+  border: 1px solid var(--line-strong);
+  animation: halo 3.6s var(--ease) infinite;
+}
+
+@keyframes halo {
+  0%, 100% { opacity: 0.35; transform: scale(0.96); }
+  50%      { opacity: 0.9;  transform: scale(1.06); }
+}
+
+.brand-text { min-width: 0; }
+.brand-text h1 { margin: 0; font-size: 19px; letter-spacing: 0.02em; }
+.tagline {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ident { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--glass);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.chip-me {
+  border-color: rgba(79, 107, 255, 0.35);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* --- 4. 输入区 ------------------------------------------------------------ */
+.stage {
+  width: min(1240px, 100% - clamp(24px, 5vw, 72px));
+  margin: 0 auto;
+  padding: clamp(20px, 3vh, 34px) 0 40px;
+}
+
+.composer {
+  position: relative;
+  border-radius: var(--radius);
+  padding: 20px 22px 16px;
+  /* 渐变描边：两层背景（内层玻璃 + 外层渐变）用 background-clip 叠出来 */
+  background-image:
+    linear-gradient(var(--glass-hi), var(--glass-2)),
+    linear-gradient(120deg, var(--accent), var(--accent-2) 45%, var(--accent-3));
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+  border: 1.5px solid transparent;
+  box-shadow: var(--shadow-2);
+  transition: box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.composer:focus-within {
+  box-shadow: var(--shadow-2), var(--glow);
+}
+
+.composer-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.composer-head h2 { margin: 0; font-size: 15px; letter-spacing: 0.02em; }
+.composer-hint { margin: 0; font-size: 12.5px; color: var(--muted); }
+
+#note-body {
+  display: block;
+  width: 100%;
+  min-height: 84px;
+  max-height: 30vh;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--glass-2);
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.7;
+  resize: vertical;
+  transition: border-color 0.2s var(--ease), background 0.2s var(--ease);
+}
+#note-body::placeholder { color: var(--muted); }
+#note-body:focus { outline: none; border-color: var(--line-strong); background: var(--glass-hi); }
+
+.composer-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+/* 字数计数条：接近上限变琥珀，超出变红并呼吸 */
+.meter {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+.meter-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.18s var(--ease), background 0.3s var(--ease);
+}
+.meter.is-warn .meter-fill { background: linear-gradient(90deg, #f0a92c, #ef7a3a); }
+.meter.is-over .meter-fill {
+  background: linear-gradient(90deg, #ff5252, #c62828);
+  animation: meterPulse 1s ease-in-out infinite;
+}
+
+@keyframes meterPulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
+.counter {
+  margin: 0;
+  min-width: 88px;
+  text-align: right;
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.counter .slash { margin: 0 3px; opacity: 0.65; }
+
+.form-error {
+  margin: 10px 0 0;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(214, 69, 69, 0.35);
+  background: rgba(214, 69, 69, 0.10);
+  color: var(--danger);
+  font-size: 13px;
+}
+
+/* --- 5. 按钮 -------------------------------------------------------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 9px 18px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--ink);
+  background: var(--glass);
+  transition: transform 0.14s var(--ease), box-shadow var(--dur) var(--ease),
+              background 0.2s var(--ease), color 0.2s var(--ease);
+}
+.btn:active { transform: scale(0.965) translateY(1px); }
+
+.btn.primary {
+  padding: 10px 26px;
+  color: #fff;
+  background: linear-gradient(120deg, var(--accent), var(--accent-2) 70%);
+  box-shadow: 0 14px 30px -14px rgba(79, 107, 255, 0.9);
+}
+.btn.primary:hover:not(:disabled) {
+  box-shadow: 0 20px 40px -14px rgba(120, 90, 255, 0.95);
+  transform: translateY(-1px);
+}
+.btn.primary:disabled {
+  cursor: not-allowed;
+  color: var(--muted);
+  background: var(--line);
+  box-shadow: none;
+  opacity: 0.75;
+}
+
+.btn.ghost {
+  border-color: var(--line);
+  color: var(--ink-2);
+  background: var(--glass-2);
+}
+.btn.ghost:hover { background: var(--glass-hi); color: var(--ink); }
+
+/* 刷新中：图标转起来（reduced-motion 下由总闸关掉） */
+.btn.is-spinning .ico { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.ico { width: 16px; height: 16px; flex: none; }
+
+/* --- 6. 列表头 / 骨架屏 / 空态 -------------------------------------------- */
+.stream-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 30px 2px 14px;
+}
+.stream-head h2 { margin: 0; font-size: 15px; letter-spacing: 0.02em; }
+.stream-count {
+  font-size: 12.5px;
+  color: var(--muted);
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--glass-2);
+}
+
+.skel {
+  height: 118px;
+  margin-bottom: 18px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: linear-gradient(100deg, var(--glass-2) 28%, var(--glass-hi) 50%, var(--glass-2) 72%);
+  background-size: 220% 100%;
+  animation: shimmer 1.5s linear infinite;
+}
+
+@keyframes shimmer {
+  from { background-position: 140% 0; }
+  to   { background-position: -40% 0; }
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 26px 20px 34px;
+  border-radius: var(--radius);
+  border: 1px dashed var(--line-strong);
+  background: var(--glass-2);
+  text-align: center;
+}
+.empty .art { width: min(240px, 46%); height: auto; }
+.empty-title { margin: 6px 0 0; font-size: 16px; font-weight: 600; }
+.empty-note { margin: 0; color: var(--muted); font-size: 13px; }
+
+/* 插画呼吸：整体缓慢缩放 + 透明度起伏 */
+.art-breathe {
+  transform-origin: 50% 55%;
+  animation: breathe 4.4s var(--ease) infinite;
+}
+@keyframes breathe {
+  0%, 100% { transform: scale(1) translateY(0); opacity: 0.9; }
+  50%      { transform: scale(1.045) translateY(-4px); opacity: 1; }
+}
+
+.stream-error {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(214, 69, 69, 0.35);
+  background: rgba(214, 69, 69, 0.1);
+  color: var(--danger);
+  font-size: 13.5px;
+}
+.stream-note { color: var(--muted); font-size: 12.5px; margin: 4px 2px 0; }
+
+/* --- 7. 留言卡片（两列瀑布） --------------------------------------------- */
+.wall {
+  columns: 2;
+  column-gap: 18px;
+}
+@media (max-width: 900px) { .wall { columns: 1; } }
+
+.note {
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  page-break-inside: avoid;
+  position: relative;
+  margin: 0 0 18px;
+  padding: 15px 17px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--glass);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  box-shadow: var(--shadow-1);
+  transition: transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease),
+              border-color var(--dur) var(--ease), opacity 0.25s var(--ease);
+  will-change: transform;
+}
+.note:hover {
+  transform: translateY(-2px);
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-2);
+}
+
+.note-head { display: flex; align-items: center; gap: 11px; }
+
+/* 自己发的留言：左边一条渐变细边，一眼看出哪些能删 */
+.note.is-mine::before {
+  content: "";
+  position: absolute;
+  left: -1px;
+  top: 14px;
+  bottom: 14px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+}
+
+.avatar {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 700;
+  color: hsl(var(--h, 230) 68% 38%);
+  background: hsl(var(--h, 230) 72% 60% / 0.18);
+  border: 1px solid hsl(var(--h, 230) 72% 60% / 0.3);
+}
+@media (prefers-color-scheme: dark) {
+  .avatar { color: hsl(var(--h, 230) 82% 76%); background: hsl(var(--h, 230) 70% 60% / 0.2); }
+}
+
+.who { min-width: 0; flex: 1; }
+.who .name {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.who .meta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.note .body {
+  margin: 11px 0 0;
+  font-size: 14.6px;
+  line-height: 1.72;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.note-foot { display: flex; justify-content: flex-end; margin-top: 8px; }
+.time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* 删除：默认只在 hover / 聚焦时出现（无 hover 的设备常显） */
+.btn.del {
+  padding: 5px 11px;
+  font-size: 12.5px;
+  gap: 5px;
+  border-color: var(--line);
+  background: var(--glass-2);
+  color: var(--muted);
+}
+.btn.del:hover { color: var(--danger); border-color: rgba(214, 69, 69, 0.4); }
+.btn.del.is-confirming {
+  color: #fff;
+  background: linear-gradient(120deg, #ef5350, #c62828);
+  border-color: transparent;
+}
+@media (hover: hover) {
+  .note .del { opacity: 0; transform: translateX(4px); }
+  .note:hover .del,
+  .note:focus-within .del { opacity: 1; transform: none; }
+}
+
+/* --- 8. 动效：进场 / 新留言高亮 / 折叠消失 ------------------------------- */
+.note.is-enter {
+  animation: noteIn 0.52s var(--ease) both;
+  animation-delay: calc(var(--i, 0) * 46ms);
+}
+@keyframes noteIn {
+  from { opacity: 0; transform: translateY(-14px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* 新留言：滑入 + 短暂高亮（两个动画串在一条规则里 —— 分成两条规则会互相覆盖
+   animation，后写的赢，实测滑入会消失） */
+.note.is-new { animation: noteIn 0.52s var(--ease) both, flash 1.6s var(--ease) 0.12s 1; }
+@keyframes flash {
+  0%   { box-shadow: 0 0 0 0 rgba(79, 107, 255, 0.55), var(--shadow-1); border-color: rgba(79, 107, 255, 0.55); }
+  70%  { box-shadow: 0 0 0 16px rgba(79, 107, 255, 0), var(--shadow-1); border-color: var(--line); }
+  100% { box-shadow: var(--shadow-1); }
+}
+
+/* 折叠消失：高度 / 内边距 / 透明度一起过渡（FLIP 由脚本补位） */
+.note.is-collapsing {
+  height: 0 !important;
+  margin-bottom: 0 !important;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  overflow: hidden;
+  transform: scale(0.97);
+  transition: height 0.3s var(--ease), margin 0.3s var(--ease), padding 0.3s var(--ease),
+              opacity 0.24s var(--ease), transform 0.3s var(--ease);
+}
+
+/* --- 9. 页脚 / 无障碍 ---------------------------------------------------- */
+.foot {
+  width: min(1240px, 100% - clamp(24px, 5vw, 72px));
+  margin: 0 auto;
+  padding: 16px 0 40px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.foot code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95em;
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--glass-2);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+::selection { background: rgba(79, 107, 255, 0.28); }
+
+/* 滚动条（Chromium）：细一点，别抢戏 */
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* --- 10. 减少动态效果：全部关掉（动画、过渡、平滑滚动） ------------------ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .aurora { animation: none; }
+}

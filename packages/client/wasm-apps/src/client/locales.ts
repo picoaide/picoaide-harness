@@ -30,6 +30,8 @@ export const zh = {
   'appCenter.open': '打开',
   'appCenter.openAria': '打开应用',
   'appCenter.close': '关闭',
+  'appCenter.backToChat': '返回聊天',
+  'appCenter.publishSubtitle': '把写好的小工具发布到应用中心，同事点开就能用',
   'appCenter.notLoggedIn': '登录后可以查看应用中心',
 
   // ---- 未登录是可读的**状态**，不是崩溃（§19 Q4：闸门在宿主；客户端半边不持 bearer）----
@@ -326,6 +328,8 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.open': 'Open',
   'appCenter.openAria': 'Open app',
   'appCenter.close': 'Close',
+  'appCenter.backToChat': 'Back to chat',
+  'appCenter.publishSubtitle': 'Publish your tool to the App Center so colleagues can open it',
   'appCenter.notLoggedIn': 'Sign in to browse the App Center',
   'appCenter.notLoggedInHint': 'Apps open in the desktop client only: sign in first and the list appears here automatically',
 

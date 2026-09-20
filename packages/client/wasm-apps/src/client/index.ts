@@ -7,6 +7,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { AppCenterTrigger } from './AppCenterTrigger.tsx'
+import { mountAppCenterPanel } from './app-center-surface.tsx'
 import { APP_FOREIGN_DEEP_LINK_EVENT, showAppToast } from './app-toast.tsx'
 import { en, setActiveLocale, type AppCenterKey, zh } from './locales.ts'
 
@@ -79,4 +80,10 @@ export function apply(ctx: ClientContext): void {
     }, AppCenterTrigger)),
     'wasm-apps: sidebar app center entry',
   )
+
+  // Center-column page: mounted once at plugin boot (the container lives in the
+  // conversation column, outside React's tree), so the panel survives sidebar
+  // re-layouts. Switching semantics are shared with cron / capability center /
+  // connectors — see `@picoaide/dsh-panel-surface`.
+  ctx.effect(() => mountAppCenterPanel(), 'wasm-apps: app center surface')
 }

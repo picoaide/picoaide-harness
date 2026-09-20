@@ -5660,6 +5660,7 @@ __metadata:
     "@modelcontextprotocol/sdk": "npm:^1.12.0"
     "@picoaide/dsh-host-home": "workspace:*"
     "@picoaide/dsh-host-locale": "workspace:*"
+    "@picoaide/dsh-panel-surface": "workspace:*"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
     react: "npm:18.3.1"
@@ -5701,6 +5702,7 @@ __metadata:
     "@deepseek-ai/dsh-tools": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-workspace": "npm:0.1.5-rc.2"
     "@deepseek-ai/schemastery": "npm:^3.18.2"
+    "@picoaide/dsh-panel-surface": "workspace:*"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:~18.3.1"
     "@types/react-dom": "npm:^18.3.5"
@@ -5744,6 +5746,7 @@ __metadata:
     "@deepseek-ai/dsh-tools": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-util-values": "npm:0.1.5-rc.2"
     "@deepseek-ai/schemastery": "npm:^3.18.2"
+    "@picoaide/dsh-panel-surface": "workspace:*"
     "@sentry/node": "npm:^7.120.0"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
@@ -5783,6 +5786,25 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@picoaide/dsh-panel-surface@workspace:*, @picoaide/dsh-panel-surface@workspace:packages/client/panel-surface":
+  version: 0.0.0-use.local
+  resolution: "@picoaide/dsh-panel-surface@workspace:packages/client/panel-surface"
+  dependencies:
+    "@types/node": "npm:^22.20.0"
+    "@types/react": "npm:^18.3.1"
+    "@types/react-dom": "npm:^18.3.5"
+    jsdom: "npm:25.0.1"
+    react: "npm:18.3.1"
+    react-dom: "npm:18.3.1"
+    tsdown: "npm:0.22.2"
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
+  peerDependencies:
+    react: ^18.2.0
+    react-dom: ^18.2.0
+  languageName: unknown
+  linkType: soft
+
 "@picoaide/dsh-wasm-apps-host@workspace:*, @picoaide/dsh-wasm-apps-host@workspace:packages/host/wasm-apps-host":
   version: 0.0.0-use.local
   resolution: "@picoaide/dsh-wasm-apps-host@workspace:packages/host/wasm-apps-host"
@@ -5814,6 +5836,7 @@ __metadata:
     "@deepseek-ai/dsh-client-ui-sidebar": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-client-ui-slots": "npm:0.1.5-rc.2"
     "@deepseek-ai/dsh-invariants": "npm:0.1.5-rc.2"
+    "@picoaide/dsh-panel-surface": "workspace:*"
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
     "@types/react-dom": "npm:^18.3.5"
@@ -6622,7 +6645,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@types/react@npm:^18, @types/react@npm:~18.3.1":
+"@types/react@npm:^18, @types/react@npm:^18.3.1, @types/react@npm:~18.3.1":
   version: 18.3.31
   resolution: "@types/react@npm:18.3.31"
   dependencies:

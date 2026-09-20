@@ -288,6 +288,24 @@ export function planBuiltinCards(options: {
 }
 
 /**
+ * 内置技能卡分派到哪个分区（**唯一判定**，2026-09-20 用户口径）。
+ *
+ * 「默认没安装的应该在市场里看到，而不是在『我的』里」：
+ *   - `install`（本机还没装）⇒ **市场**：它与市场条目同义 —— "平台提供了、你可以装"；
+ *   - `update`（本机已装、清单有新版）⇒ **我的**：本机确实有这一份，只是要升级。
+ *
+ * 抽成纯函数而不是写在面板的渲染分支里：这是"用户在哪个 tab 能找到它"的判据，
+ * 写进渲染层就只能靠 jsdom 才测得到，而它在 2026-09-20 之前是**没有判据**的
+ * （内置技能一律只出现在「我的」，未装的也在那里 —— 用户报的那个现象）。
+ * @param cards - {@link planBuiltinCards} 的输出。
+ * @param tab - 分区。
+ * @returns 该分区要渲染的内置技能卡（保持输入顺序）。
+ */
+export function builtinCardsForTab(cards: readonly BuiltinCard[], tab: 'mine' | 'market'): BuiltinCard[] {
+  return cards.filter(card => (tab === 'mine' ? card.action === 'update' : card.action === 'install'))
+}
+
+/**
  * 选出"要以普通卡片渲染"的内置技能行（{@link planBuiltinCards} 的行视图）。
  *
  * 口径见 {@link planBuiltinCards}：未装的出卡；**已装但清单有更新的也出卡**

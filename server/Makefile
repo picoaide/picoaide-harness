@@ -105,8 +105,10 @@ docker-image:
 # (原 release-export 目标于 2026-09-10 随部署脚本一并移除)
 
 check:
-	@if [ -n "$$(gofmt -l cmd internal)" ]; then echo "gofmt未通过:"; gofmt -l cmd internal; exit 1; fi
-	go vet ./cmd/... ./internal/...
+	# demoapps 也进闸：内置演示应用的 Go 源码随镜像分发，此前不在任何本地门禁里 ——
+	# 写坏一个只能等 CI 构建镜像（或服务端启动播种）才发现。
+	@if [ -n "$$(gofmt -l cmd internal demoapps)" ]; then echo "gofmt未通过:"; gofmt -l cmd internal demoapps; exit 1; fi
+	go vet ./cmd/... ./internal/... ./demoapps/...
 	$(MAKE) test-server
 	cd webadmin && npm test && npm run build
 
@@ -114,7 +116,9 @@ check:
 # 与 check 的差异:不跑 webadmin 构建(tsc -b && vite build,~17s)、不带 -count=1。
 # 提交前/发布前仍须跑 `make check`(CI 跑的就是它那一套)。
 check-fast:
-	@if [ -n "$$(gofmt -l cmd internal)" ]; then echo "gofmt未通过:"; gofmt -l cmd internal; exit 1; fi
-	go vet ./cmd/... ./internal/...
+	# demoapps 也进闸：内置演示应用的 Go 源码随镜像分发，此前不在任何本地门禁里 ——
+	# 写坏一个只能等 CI 构建镜像（或服务端启动播种）才发现。
+	@if [ -n "$$(gofmt -l cmd internal demoapps)" ]; then echo "gofmt未通过:"; gofmt -l cmd internal demoapps; exit 1; fi
+	go vet ./cmd/... ./internal/... ./demoapps/...
 	$(MAKE) test-server-fast
 	cd webadmin && npm test

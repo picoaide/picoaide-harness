@@ -5,7 +5,8 @@
 // 设计要点（三条都来自那句话）：
 //
 //  1. **装在镜像里、装完即用**：演示制品由 Dockerfile 构建进
-//     `/opt/picoaide/demo-apps/`（`app.wasm` + `demos.json` 清单），服务端启动时播种；
+//     `/opt/picoaide/demo-apps/`（若干 `*.wasm` + `demos.json` 清单，逐条指明用哪一份），
+//     服务端启动时播种；
 //     没有目录 ⇒ 静默跳过（源码构建/自定义镜像可以不带演示）。
 //  2. **各种权限模式**：同一份 wasm 按清单播种成 public / login / whitelist 三个应用
 //     （准入模式是平台侧配置；whitelist 的名单比对按 R24 由**应用自己**读配置完成）。
@@ -39,7 +40,7 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
 )
 
-// ManifestFileName 是演示清单文件名（与 app.wasm 同在演示目录）。
+// ManifestFileName 是演示清单文件名（与各演示制品同在演示目录）。
 const ManifestFileName = "demos.json"
 
 // defaultVersion 是演示应用的版本号（演示不涉及升级，固定 1.0.0）。
@@ -61,6 +62,40 @@ type Demo struct {
 	// Purpose / DataSensitivity 走应用元数据（列表与审计里可见）。
 	Purpose         string `json:"purpose,omitempty"`
 	DataSensitivity string `json:"data_sensitivity,omitempty"`
+	// Wasm 是本条演示用的制品文件名（缺省 `app.wasm`）。
+	//
+	// 2026-09-20 起清单里可以有多份制品：演示不再是"同一份 wasm 按权限播种三次"，
+	// 而是几个**功能不同**的小应用（能力集合 / 论坛 / 留言板），各自的窗口比例也不同。
+	Wasm string `json:"wasm,omitempty"`
+	// Window 是窗口规格（§6），**原样透传**给 appcfg.Parse 校验。
+	//
+	// 用 json.RawMessage 而不是解析后的结构体：作者手写形态是 `{"ratio":"9:19.5"}`
+	// （字符串），而 appcfg.Config.Window.Ratio 是已经折算成浮点的 float64 —— 先解析
+	// 再序列化会把"W:H"这条文档主用法从产物里抹掉。播种产物要与作者手写的配置**同形**，
+	// 合法性与区间由 appcfg.Parse 把关（越界/未知子键都会在这里就被拒）。
+	Window json.RawMessage `json:"window,omitempty"`
+}
+
+// DefaultWasmFile 是 Demo.Wasm 缺省值（历史清单里那一条制品）。
+const DefaultWasmFile = "app.wasm"
+
+// artifact 是一份演示制品（wasm 字节 + 内容摘要 + 大小）。
+//
+// 摘要的职责有两处：写进版本行（下载完整性凭据），以及**识别"这一行是不是我们播的"**
+// （heal 路径）。多制品之后后者必须变成"摘要 ∈ 本目录里的任何一份"，不能再拿单一
+// s.sum 去比 —— 否则第二种制品播下的行会被判成"别人的版本行"而不予自愈。
+type artifact struct {
+	wasm []byte
+	sum  string
+	size int64
+}
+
+// wasmFile 返回本条演示的制品文件名（缺省 {@link DefaultWasmFile}）。
+func (d Demo) wasmFile() string {
+	if f := strings.TrimSpace(d.Wasm); f != "" {
+		return f
+	}
+	return DefaultWasmFile
 }
 
 // manifest 是 demos.json 的结构。
@@ -89,9 +124,24 @@ type Options struct {
 type Seeder struct {
 	opt    Options
 	demos  []Demo
-	wasm   []byte
-	sum    string
+	arts   map[string]artifact
 	logger func(format string, args ...any)
+}
+
+// artifactFor 取本条演示的制品（New 已保证清单里引用的每一份都读到了）。
+func (s *Seeder) artifactFor(d Demo) artifact {
+	return s.arts[d.wasmFile()]
+}
+
+// isOurChecksum 判断一个版本行的摘要是不是本目录里的任何一份制品。
+// heal 路径靠它认"这一行是我们播的"（多制品：不能只比一份）。
+func (s *Seeder) isOurChecksum(sum string) bool {
+	for _, a := range s.arts {
+		if a.sum == sum {
+			return true
+		}
+	}
+	return false
 }
 
 // SkipReason 说明某个演示为什么没有播种。
@@ -140,19 +190,35 @@ func New(opt Options) (*Seeder, error) {
 	if len(m.Demos) == 0 {
 		return nil, nil
 	}
-	wasm, err := os.ReadFile(filepath.Join(dir, "app.wasm"))
-	if err != nil {
-		return nil, fmt.Errorf("appseed: 读演示制品失败: %w", err)
+	// 制品：清单里引用到哪几份就读哪几份（去重）。缺任何一份都**直接失败** ——
+	// 它们由 Dockerfile 与本机构建脚本产出，缺文件是装配错误，静默跳过只会让
+	// 客户看到"少了一个演示"却没有任何线索。
+	arts := map[string]artifact{}
+	for _, d := range m.Demos {
+		file := d.wasmFile()
+		if _, ok := arts[file]; ok {
+			continue
+		}
+		// 只取基名：清单来自镜像内的可信目录，但仍不允许 `../` 这类路径逃逸
+		//（同一条规则在客户端资源路径上是既有防线）。
+		if filepath.Base(file) != file {
+			return nil, fmt.Errorf("appseed: 演示制品名必须是纯文件名（不能含路径分隔符）: %q", file)
+		}
+		wasm, err := os.ReadFile(filepath.Join(dir, file))
+		if err != nil {
+			return nil, fmt.Errorf("appseed: 读演示制品 %s 失败: %w", file, err)
+		}
+		if berr := validateWasm(wasm); berr != nil {
+			return nil, fmt.Errorf("%s: %w", file, berr)
+		}
+		sum := sha256.Sum256(wasm)
+		arts[file] = artifact{wasm: wasm, sum: hex.EncodeToString(sum[:]), size: int64(len(wasm))}
 	}
-	if berr := validateWasm(wasm); berr != nil {
-		return nil, berr
-	}
-	sum := sha256.Sum256(wasm)
 	logger := opt.Logger
 	if logger == nil {
 		logger = func(string, ...any) {}
 	}
-	return &Seeder{opt: opt, demos: m.Demos, wasm: wasm, sum: hex.EncodeToString(sum[:]), logger: logger}, nil
+	return &Seeder{opt: opt, demos: m.Demos, arts: arts, logger: logger}, nil
 }
 
 // Demos 返回清单里的演示定义（诊断/测试用）。
@@ -246,7 +312,7 @@ func (s *Seeder) seedOne(ctx context.Context, d Demo, appID string) error {
 	if err := serverstore.UpsertWasmApp(ctx, s.opt.DB, app); err != nil {
 		return fmt.Errorf("写应用行: %w", err)
 	}
-	relID, err := s.createSeedRelease(ctx, appID, app.Title, app.Description, cfgJSON)
+	relID, err := s.createSeedRelease(ctx, d, app.Title, app.Description, cfgJSON)
 	if err != nil {
 		return err
 	}
@@ -303,6 +369,19 @@ func (s *Seeder) demoConfigJSON(d Demo) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("编码应用配置: %w", err)
 	}
+	// window 单独合并：`{"ratio":"9:19.5"}` 这种**作者手写形态**（字符串）必须原样落进
+	// 产物。appcfg.Config.Window.Ratio 是折算后的 float64，经它往返一次就只剩
+	// `0.4615` —— 文档里的主用法会从播种产物里消失，而 demo 的职责正是"照着文档长"。
+	if len(d.Window) > 0 {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return "", fmt.Errorf("编码应用配置: %w", err)
+		}
+		fields["window"] = d.Window
+		if raw, err = json.Marshal(fields); err != nil {
+			return "", fmt.Errorf("编码应用配置: %w", err)
+		}
+	}
 	if _, perr := appcfg.Parse(raw); perr != nil {
 		return "", fmt.Errorf("应用配置不合规: %v", perr)
 	}
@@ -314,18 +393,19 @@ func (s *Seeder) demoConfigJSON(d Demo) (string, error) {
 // 抽取同一份实现的两个调用点：首次播种（seedOne）与"补齐缺版本行"（healMissingRelease）。
 // 版本号固定 defaultVersion、publisher 固定归属人、changelog 同一句话 —— 三处若各写一份，
 // "补齐出来的版本行"就会与真实播种产物不是同一形态（审计面/归属都会漂移）。
-func (s *Seeder) createSeedRelease(ctx context.Context, appID, title, description, cfgJSON string) (int64, error) {
+func (s *Seeder) createSeedRelease(ctx context.Context, d Demo, title, description, cfgJSON string) (int64, error) {
+	art := s.artifactFor(d)
 	return serverstore.CreateWasmRelease(ctx, s.opt.DB, serverstore.WasmRelease{
-		AppID:       appID,
+		AppID:       d.AppID,
 		Version:     defaultVersion,
 		Title:       title,
 		Description: description,
 		Changelog:   "随安装内置的演示应用",
 		Publisher:   s.opt.Owner,
-		Checksum:    s.sum,
-		Size:        int64(len(s.wasm)),
+		Checksum:    art.sum,
+		Size:        art.size,
 		Status:      serverstore.ReleaseStatusApproved,
-		Wasm:        s.wasm,
+		Wasm:        art.wasm,
 		ConfigJSON:  cfgJSON,
 	})
 }
@@ -364,7 +444,7 @@ type healOutcome struct {
 // 齐备）**且** 归属人与随安装清单一致 **且** 与生效版本的配置快照逐字节相同。
 //
 // 补齐动作为什么安全（幂等、只碰自己的东西）：
-//   - 只认 checksum 与**本次随安装的演示制品逐字节相同**的版本行（s.sum）——app_id 被别人
+//   - 只认 checksum 与**本次随安装的演示制品逐字节相同**的版本行（本目录里的任一份制品）——app_id 被别人
 //     占用/被重新发布的情况下一律不碰（判断依据是内容，不是名字；A2 没有版本行时退化为
 //     对应用行做同一口径的内容比对）；
 //   - 只做三件事：写回资源目录（应用配置来自该版本行的快照）+ 在没有生效版本时把它指过去 +
@@ -400,7 +480,7 @@ func (s *Seeder) healIncomplete(ctx context.Context, appID string, app *serverst
 		case err != nil:
 			return healOutcome{}, fmt.Errorf("查演示版本行: %w", err)
 		}
-		if rel.Status != serverstore.ReleaseStatusApproved || rel.Checksum != s.sum {
+		if rel.Status != serverstore.ReleaseStatusApproved || !s.isOurChecksum(rel.Checksum) {
 			// 状态/制品不是随安装的这一份：不碰（理由如实给出，别笼统说"已存在"）。
 			return healOutcome{Reason: "已存在但版本行不是随安装播种的那一份（不碰）"}, nil
 		}
@@ -425,7 +505,7 @@ func (s *Seeder) healIncomplete(ctx context.Context, appID string, app *serverst
 	// B：有生效版本时先确认"生效的那一版"确实是我们的制品（判据 = 最新 approved 版本
 	// 既是当前版本、checksum 又与随安装的演示一致）。
 	rel, err := serverstore.LatestApprovedWasmReleaseMeta(ctx, s.opt.DB, appID)
-	if err != nil || rel == nil || rel.ID != relID || rel.Checksum != s.sum {
+	if err != nil || rel == nil || rel.ID != relID || !s.isOurChecksum(rel.Checksum) {
 		return healOutcome{Reason: "已存在但生效版本不是随安装播种的那一份（不碰）"}, nil
 	}
 	if why := s.releaseAssetsIncompleteReason(appID, relID, rel.ConfigJSON); why != "" {
@@ -462,7 +542,7 @@ func (s *Seeder) healMissingRelease(ctx context.Context, appID string, app *serv
 	if len(rels) > 0 {
 		return healOutcome{Reason: "已存在且已有版本行（不是本次能补的半成品形态）"}, nil
 	}
-	relID, err := s.createSeedRelease(ctx, appID, app.Title, app.Description, cfgJSON)
+	relID, err := s.createSeedRelease(ctx, d, app.Title, app.Description, cfgJSON)
 	if err != nil {
 		return healOutcome{}, fmt.Errorf("重建版本行: %w", err)
 	}

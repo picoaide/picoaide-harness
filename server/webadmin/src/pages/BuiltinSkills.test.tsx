@@ -22,7 +22,7 @@ const mockRequest = vi.mocked(request)
 const SKILL = {
   name: 'app-builder',
   version: '1.0.0',
-  title: 'PicoAide 应用构建（WASM 应用）',
+  title: '应用构建（WASM 应用）',
   description: '用 Go 写一个 PicoAide 应用平台上的 WASM 应用并发布',
   author: 'PicoAide',
   category: '应用开发',

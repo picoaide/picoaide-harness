@@ -1,0 +1,85 @@
+/* 团队共享便签：样式全部在包内，外部 CDN / 字体一律加载不到（应用不能主动发起网络请求）。 */
+
+:root {
+  --fg: #1f2328;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --bg-soft: #f6f8fa;
+  --accent: #2563eb;
+  --danger: #b42318;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0 auto;
+  padding: 1rem;
+  max-width: 52rem;
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+  line-height: 1.55;
+}
+
+.head h1 { margin: 0 0 .25rem; font-size: 1.4rem; }
+
+.meta { color: var(--muted); font-size: .85rem; margin: .25rem 0; }
+.state { margin: .5rem 0; color: var(--muted); }
+.error { color: var(--danger); }
+.warn { color: #92400e; }
+
+.row { display: flex; gap: .5rem; align-items: flex-start; margin: .75rem 0; }
+
+textarea {
+  flex: 1;
+  min-height: 3.5rem;
+  padding: .5rem;
+  border: 1px solid var(--line);
+  border-radius: .5rem;
+  font: inherit;
+  resize: vertical;
+}
+
+button {
+  padding: .5rem .9rem;
+  border: 1px solid transparent;
+  border-radius: .5rem;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+button[disabled] { opacity: .55; cursor: default; }
+button:active:not([disabled]) { transform: translateY(1px); }
+
+.list { list-style: none; margin: .5rem 0; padding: 0; }
+
+.list li {
+  margin: .5rem 0;
+  padding: .6rem .75rem;
+  border: 1px solid var(--line);
+  border-radius: .5rem;
+  background: var(--bg-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.list .who { display: block; margin-top: .35rem; color: var(--muted); font-size: .8rem; }
+
+.out {
+  margin: .5rem 0;
+  padding: .6rem;
+  border: 1px solid var(--line);
+  border-radius: .5rem;
+  background: var(--bg-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+footer { margin-top: 1.5rem; border-top: 1px solid var(--line); padding-top: .5rem; }
+
+/* 窄窗口（客户端窗口可以被拖得很小）：单列，按钮不换行 */
+@media (max-width: 640px) {
+  .row { flex-wrap: wrap; }
+  button { flex: 0 0 auto; }
+}
