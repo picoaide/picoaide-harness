@@ -30,12 +30,20 @@ const COMPOSITION = `- id: persona
  * that is already declared here rather than through a dependency of this
  * package: nothing in this package imports the row at runtime, and a new
  * dependency edge would need a lockfile update.
+ *
+ * 解析路径必须走**真正声明它的包**：persona 不是任何 bundle 的 row
+ * （各 bundle 的 `cordis.patch.yml` 零命中），它只是 `@deepseek-ai/dsh`
+ * 自己的依赖。0.1.6-alpha.2 起 `nmHoistingLimits: workspaces` 把它放在
+ * `@deepseek-ai/dsh/node_modules/` 下而不是桌面包顶层，因此按桌面包解析会
+ * "Cannot find module '@deepseek-ai/dsh-persona'"（2026-09-20 升级实测）。
+ * 跟随依赖边解析，与提升布局无关。
  * @returns the Config validator (throws when a row omits `prefix`).
  */
 async function loadPersonaConfig(): Promise<(input: Record<string, unknown>) => { prefix: string }> {
   const desktopManifest = createRequire(import.meta.url).resolve('dsh-plugin-desktop/package.json')
-  const require = createRequire(desktopManifest)
-  const persona = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-persona')).href) as {
+  const fromDesktop = createRequire(desktopManifest)
+  const umbrellaManifest = fromDesktop.resolve('@deepseek-ai/dsh/package.json')
+  const persona = await import(pathToFileURL(createRequire(umbrellaManifest).resolve('@deepseek-ai/dsh-persona')).href) as {
     Config: (input: Record<string, unknown>) => { prefix: string }
   }
   return persona.Config

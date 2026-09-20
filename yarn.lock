@@ -1478,7 +1478,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-client-ui-session@npm:^0.1.6-alpha.2":
+"@deepseek-ai/dsh-client-ui-session@npm:0.1.6-alpha.2, @deepseek-ai/dsh-client-ui-session@npm:^0.1.6-alpha.2":
   version: 0.1.6-alpha.2
   resolution: "@deepseek-ai/dsh-client-ui-session@npm:0.1.6-alpha.2"
   peerDependencies:
@@ -1772,7 +1772,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-compaction-image-offload@npm:^0.1.6-alpha.2":
+"@deepseek-ai/dsh-compaction-image-offload@npm:0.1.6-alpha.2, @deepseek-ai/dsh-compaction-image-offload@npm:^0.1.6-alpha.2":
   version: 0.1.6-alpha.2
   resolution: "@deepseek-ai/dsh-compaction-image-offload@npm:0.1.6-alpha.2"
   dependencies:
@@ -1916,7 +1916,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-experimental-agent-team@npm:^0.1.6-alpha.2":
+"@deepseek-ai/dsh-experimental-agent-team@npm:0.1.6-alpha.2, @deepseek-ai/dsh-experimental-agent-team@npm:^0.1.6-alpha.2":
   version: 0.1.6-alpha.2
   resolution: "@deepseek-ai/dsh-experimental-agent-team@npm:0.1.6-alpha.2"
   dependencies:
@@ -1937,7 +1937,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-experimental-client-ui-agent-team@npm:^0.1.6-alpha.2":
+"@deepseek-ai/dsh-experimental-client-ui-agent-team@npm:0.1.6-alpha.2, @deepseek-ai/dsh-experimental-client-ui-agent-team@npm:^0.1.6-alpha.2":
   version: 0.1.6-alpha.2
   resolution: "@deepseek-ai/dsh-experimental-client-ui-agent-team@npm:0.1.6-alpha.2"
   peerDependencies:
@@ -1958,7 +1958,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-experimental-tool-agent-team@npm:^0.1.6-alpha.2":
+"@deepseek-ai/dsh-experimental-tool-agent-team@npm:0.1.6-alpha.2, @deepseek-ai/dsh-experimental-tool-agent-team@npm:^0.1.6-alpha.2":
   version: 0.1.6-alpha.2
   resolution: "@deepseek-ai/dsh-experimental-tool-agent-team@npm:0.1.6-alpha.2"
   dependencies:
@@ -5969,6 +5969,7 @@ __metadata:
     "@deepseek-ai/dsh-invariants": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-llm": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-ptc-runtime": "npm:0.1.6-alpha.2"
+    "@deepseek-ai/dsh-sandbox": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-scope": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-session": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-system-prompt": "npm:0.1.6-alpha.2"
@@ -6053,6 +6054,7 @@ __metadata:
     "@deepseek-ai/dsh-host-webserver": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-invariants": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-ptc-runtime": "npm:0.1.6-alpha.2"
+    "@deepseek-ai/dsh-sandbox": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-scope": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-session": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-settings": "npm:0.1.6-alpha.2"
@@ -6096,6 +6098,7 @@ __metadata:
     "@deepseek-ai/dsh-credentials": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-host-webserver": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-invariants": "npm:0.1.6-alpha.2"
+    "@deepseek-ai/dsh-sandbox": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-scope": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-session": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-settings": "npm:0.1.6-alpha.2"
@@ -8415,6 +8418,7 @@ __metadata:
     "@deepseek-ai/dsh-client-ui-layout": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-client-ui-primitives": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-client-ui-renderer": "npm:0.1.6-alpha.2"
+    "@deepseek-ai/dsh-client-ui-session": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-client-ui-settings": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-client-ui-sidebar": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-client-ui-slots": "npm:0.1.6-alpha.2"
@@ -8425,10 +8429,14 @@ __metadata:
     "@deepseek-ai/dsh-command-feedback": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-commands": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-compaction": "npm:0.1.6-alpha.2"
+    "@deepseek-ai/dsh-compaction-image-offload": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-cordis-client-runner": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-cordis-host-runner": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-credentials": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-deepseek-llm-api-extensions": "npm:0.1.6-alpha.2"
+    "@deepseek-ai/dsh-experimental-agent-team": "npm:0.1.6-alpha.2"
+    "@deepseek-ai/dsh-experimental-client-ui-agent-team": "npm:0.1.6-alpha.2"
+    "@deepseek-ai/dsh-experimental-tool-agent-team": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-file-reference": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-fs": "npm:0.1.6-alpha.2"
     "@deepseek-ai/dsh-fs-local": "npm:0.1.6-alpha.2"
