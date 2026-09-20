@@ -399,14 +399,24 @@ func New(opt Options) (*Compiler, error) {
 		opt.Logger.Printf("compile: ⚠️ 缓存目录权限不合规（%s）：%v；§4.3.1-d 要求只有编译进程可写", desc, terr)
 	}
 
+	// 从这里往下的任何失败都必须在返回前清掉临时缓存目录（五轮审计 P2-②：
+	// `os.MkdirTemp` 在 New 早期就创建了目录，而后续任一步失败都会 `return nil, err`
+	// ——调用方拿不到 *Compiler，也就永远不会调 Close()，目录留在 /tmp 里）。
+	fail := func(err error) (*Compiler, error) {
+		if childCacheTemp != "" {
+			_ = os.RemoveAll(childCacheTemp)
+		}
+		return nil, err
+	}
+
 	child, err := resolveChildBinary(opt.ChildBinary)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 
 	plan, err := planIsolation(opt.Isolation, child, opt.Logger)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 
 	c := &Compiler{
@@ -809,10 +819,15 @@ func (c *Compiler) spawnChild(moduleDir string) (*childProcess, error) {
 	}
 	// -cache-dir 是**显式声明可写面**：隔离启动器只认这个值（不再从 argv 反解——
 	// 常驻子进程的 argv 里根本没有 cache_dir，它只出现在请求里）。
+	// ⚠️ `-cache-dir` 必须与请求里的 `cache_dir` **同一个值**（`childCacheDir`）：
+	// 子进程启动时会记下这个声明，并在每个请求上做一致性自检
+	//（cmd/picoaide-app-compile/main.go 的 declaredCacheDir 比对），不一致直接回
+	// INTERNAL。五轮审计实测：这里曾漏改成 `c.cache` ⇒ 在"缓存不可信"这条分支上
+	// **每一次真实编译都失败**（而只断言结构体的用例完全看不出来）。
 	args := append([]string{
 		"-listen",
 		"-timeout", c.opt.Timeout.String(),
-		"-cache-dir", c.cache,
+		"-cache-dir", c.childCacheDir,
 	}, c.opt.ChildArgs...)
 	proc, err := startChild(c.child, args, env, c.iso, isolationTargets{
 		CacheDir:     c.childCacheDir,

@@ -84,6 +84,53 @@ export interface NavigationSurface {
   readonly appScheme?: string | undefined
 }
 
+/**
+ * 判断主机名是否指向**本机地址**（模型不得访问 —— 见 `BrowserRuntime.navigationAllowed`）。
+ *
+ * 为什么必须这么细（2026-09-21 五轮审计实测）：漏掉的写法**真的会落到本机监听**，
+ * 而朴素判据（`host === 'localhost' || host.startsWith('127.')`）两头都错 ——
+ * 既漏 `localhost.` / `*.localhost` / `ip6-localhost` / `[::]` / IPv4-mapped 的
+ * `[::ffff:127.0.0.1]`，又会把 `127.example.com` 这种**合法公网域名**误判成本机。
+ * 覆盖范围：
+ *   - IPv4：`127.0.0.0/8`（按**完整四段**匹配）、`0.0.0.0`；
+ *   - IPv6：`::1`、`::`（未指定地址连上去就是本机）、IPv4-mapped 的
+ *     `::ffff:127.0.0.1` 与 `::ffff:7f00:1` 两种写法；
+ *   - 主机名：`localhost`、`localhost.`（尾点归一）、任意 `*.localhost`（RFC 6761 保留，
+ *     Chromium 解析到回环）、`ip6-localhost` / `ip6-loopback`（/etc/hosts 惯例）、
+ *     `localhost.localdomain`。
+ * 纯函数、表驱动可测（`tests/guard.spec.ts`）。
+ * @param rawHostname - `URL#hostname`（IPv6 带方括号）。
+ * @returns true 表示该主机名是本机目标。
+ */
+export function isLocalHostname(rawHostname: string): boolean {
+  const host = rawHostname.trim().toLowerCase().replace(/^\[|\]$/gu, '').replace(/\.$/u, '')
+  if (host === '') return false
+  if (host.includes(':')) {
+    if (host === '::1' || host === '::') return true
+    const mapped = /^::ffff:(.+)$/u.exec(host)
+    if (mapped === null) return false
+    const v4 = mapped[1]!
+    if (isLoopbackIPv4(v4)) return true
+    // 十六进制写法 `::ffff:7f00:1`（高 16 位的高字节 = 127）。
+    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/u.exec(v4)
+    if (hex === null) return false
+    return Number.parseInt(hex[1]!, 16) >> 8 === 127
+  }
+  if (isLoopbackIPv4(host) || host === '0.0.0.0') return true
+  if (host === 'localhost' || host.endsWith('.localhost')) return true
+  return host === 'ip6-localhost' || host === 'ip6-loopback' || host === 'localhost.localdomain'
+}
+
+/** 判断是否是 `127.0.0.0/8` 的**完整 IPv4 字面量**（四段、每段 0–255）。 */
+function isLoopbackIPv4(host: string): boolean {
+  const parts = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(host)
+  if (parts === null) return false
+  for (let i = 1; i <= 4; i++) {
+    if (Number.parseInt(parts[i]!, 10) > 255) return false
+  }
+  return Number.parseInt(parts[1]!, 10) === 127
+}
+
 /** Schemes the embedded browser (a browser tab) may navigate to. */
 const ALLOWED_SCHEMES = new Set(['http:', 'https:', 'about:'])
 
