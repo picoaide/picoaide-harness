@@ -56,3 +56,36 @@
   config:
     fetch: true
     searchTimeoutMs: 60000
+
+# ── 0.1.6-alpha.2 新增/改默认行为行：桌面这三行必须显式关闭 ──────────────────
+
+# 会话原文出境（P0，2026-09-20 升级审计）：`session-log-deepseek` 的
+# `enabled` 默认值在 0.1.6 由 false 翻成 true，而 base bundle 无 config 挂载它。
+# 打开后每个带 sessionId 的请求体会多出顶层 `dsh_session_log`（会话正文、
+# 工具参数与结果、工作区路径），我们的网关是逐字节转发给上游供应商的
+# （server/internal/llmgateway/handler.go 的 map 往返不剔未知键）⇒ 会话原文
+# 出境到模型供应商，企业客户不可接受。故在桌面 profile 显式关闭。
+- id: session-log-deepseek
+  disabled: true
+
+# 右栏内置 HTTP(S) 浏览器：与我们自研的内置 AI 浏览器功能重叠且必然不可用 ——
+# 它用 iframe，而桌面窗口 CSP（src/electron-runtime.ts 的
+# APP_CONTENT_SECURITY_POLICY）没有 frame-src/child-src，回退到 default-src
+# 后外部页全被拒 ⇒ 点开是空白。桌面提供自己的浏览器入口，故关闭官方这一行。
+- id: ui-sidebar-browser
+  disabled: true
+
+# 插件管理页（侧栏 Plugins）：它占 `main`(key `plugins`) 与 `sidebar.panellist`，
+# 与桌面自研四面板的 `data-dsh-panel-active` DOM 接管不互通
+# （SIDEBAR_ROW_SELECTOR 不含 panellist 行）⇒ 点「插件」表现为没反应。
+# 桌面不提供上游插件管理写面（我们的插件写面是 DesktopPluginsService），故关闭。
+- id: ui-plugin-manager
+  disabled: true
+
+# Office 转 PDF：该行会拉进仓库外 npm 包 `@deepseek-ai/libreoffice-kit` 与 5 个
+# 平台引擎包，而四张打包清单（asarUnpack / REQUIRED_PACKAGED_RUNTIME_ENTRIES /
+# REQUIRED_UNPACKED_RUNTIME_ENTRIES / MACOS_ARM64_NATIVE_ENTRIES）对它们零覆盖，
+# 其中 macOS 侧引擎是**无扩展名可执行文件**、我方 glob 不匹配 ⇒ 引擎会留在
+# app.asar 内无法 spawn，且没有任何门禁会看到。桌面不需要 Office 转换，关闭。
+- id: office-to-pdf
+  disabled: true

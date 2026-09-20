@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { apply, TOKEN_ENV } from '../src/gateway-model.ts'
@@ -51,6 +54,7 @@ describe('gateway-model', () => {
     await vi.waitFor(() => expect(f.set).toHaveBeenCalledWith(expect.anything(), 'tok-1'))
     expect(f.unset).not.toHaveBeenCalled()
     await vi.waitFor(() => expect(f.update).toHaveBeenCalledWith(expect.anything(), {
+      protocol: 'chat-completions',
       baseURL: 'https://gateway.example/v1',
       apiKeyEnv: TOKEN_ENV,
     }))
@@ -68,6 +72,7 @@ describe('gateway-model', () => {
     apply(f.ctx)
     await vi.waitFor(() => expect(f.set).toHaveBeenCalledWith(expect.anything(), 'tok-1'))
     await vi.waitFor(() => expect(f.update).toHaveBeenCalledWith(expect.anything(), {
+      protocol: 'chat-completions',
       baseURL: 'https://gateway.example/v1',
       apiKeyEnv: TOKEN_ENV,
     }))
@@ -78,6 +83,7 @@ describe('gateway-model', () => {
     apply(f.ctx)
     f.emit({ ...SESSION, serverURL: 'https://gateway.example///' })
     await vi.waitFor(() => expect(f.update).toHaveBeenCalledWith(expect.anything(), {
+      protocol: 'chat-completions',
       baseURL: 'https://gateway.example/v1',
       apiKeyEnv: TOKEN_ENV,
     }))
@@ -98,5 +104,31 @@ describe('gateway-model', () => {
     apply(f.ctx)
     f.emit(SESSION)
     await vi.waitFor(() => expect(f.ctx.logger.error).toHaveBeenCalled())
+  })
+
+  // 2026-09-20 升级审计 P0：0.1.6-alpha.2 给上游适配器新增了 `protocol`，默认
+  // `messages`。这个默认值不是"接口形状"而是**契约**——它决定请求打到
+  // `/v1/chat/completions` 还是 `/v1/messages`，而后者只发 `x-api-key`、在只认
+  // `Authorization: Bearer` 的网关上必然 401（且计费 kind 也会记错）。
+  // 本用例钉住我们的显式声明；同时探测上游默认值，一旦它不再是 messages 就提示
+  // 这个 pin 可能已可删除（提示不是失败：pin 本身无害）。
+  it('pins protocol=chat-completions while the upstream default is messages', async () => {
+    const f = ctxFixture()
+    apply(f.ctx)
+    f.emit(SESSION)
+    await vi.waitFor(() => expect(f.update).toHaveBeenCalled())
+    const payload = f.update.mock.calls.at(-1)?.[1] as Record<string, unknown> | undefined
+    expect(payload?.protocol).toBe('chat-completions')
+
+    // 上游产物通过桌面包（部署根，声明了 llm-deepseek）解析，而不是从本包 —
+    // 本包不声明该依赖，直接从测试文件解析会 Cannot find module。
+    const desktopManifest = createRequire(import.meta.url).resolve('dsh-plugin-desktop/package.json')
+    const pkgDir = dirname(createRequire(desktopManifest).resolve('@deepseek-ai/dsh-llm-deepseek/package.json'))
+    const upstreamConfig = readFileSync(join(pkgDir, 'lib', 'index.js'), 'utf8')
+    const defaultIsMessages = /default\("messages"\)/.test(upstreamConfig)
+      || /protocol\s*\?\?\s*"messages"/.test(upstreamConfig)
+    if (!defaultIsMessages) {
+      console.warn('[gateway-model] 上游 llm-deepseek 的 protocol 默认值不再是 messages —— 复核该 pin 是否仍必要')
+    }
   })
 })
