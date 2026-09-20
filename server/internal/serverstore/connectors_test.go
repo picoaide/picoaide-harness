@@ -159,7 +159,7 @@ func TestConnectorDefinitionPolicy(t *testing.T) {
 		definition string
 	}{
 		// 0042 的三个种子定义必须继续通过。
-		{"seed example-a", `{"auth":{"discoveryUrl":"https://mcp-a.example.com/mcp"},"mcp":[{"serverName":"example-a","transport":"streamable-http","url":"https://mcp-a.example.com/mcp"}]}`},
+		{"seed example-a", `{"auth":{"discoveryUrl":"https://mcp.example.com/mcp"},"mcp":[{"serverName":"example-a","transport":"streamable-http","url":"https://mcp.example.com/mcp"}]}`},
 		{"seed glitchtip", `{"tokenFields":[{"key":"GLITCHTIP_TOKEN","label":"Token","type":"password"}],"mcp":[{"serverName":"glitchtip","transport":"stdio","command":"npx","args":["-y","glitchtip-mcp"],"env":{}}]}`},
 		{"seed sales-easy", `{"mcp":[{"serverName":"neo-crm","transport":"streamable-http","url":"https://mcp.xiaoshouyi.com/mcp"}]}`},
 		{"回环 http 开发端点", `{"mcp":[{"serverName":"dev","transport":"streamable-http","url":"http://127.0.0.1:8765/mcp"}]}`},

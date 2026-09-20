@@ -68,6 +68,12 @@ const GUARDS = [
   // 2026-09-20 实测漂移：`server/docs/06-database.md` / `08-development.md` 写着「迁移 0001–0060」
   // 而实际已到 0076。文档里的迁移区间此前**没有任何守卫**，只能靠人记得改 —— 这条把它变成判据。
   { name: 'check:migration-range', args: ['run', 'check:migration-range'], path: '文档里的迁移区间 ↔ 实际迁移编号' },
+  // 2026-09-20 补上的那一环：本仓**公开**，「真实客户/部署域名永不出现」这条规则原先只有
+  // 人工 `git grep`，而且规则条文自己把真实域名写进了示例 ⇒ 自检永远命中规则本身，等于没有
+  // 守卫（历史提交信息里也真的进过客户域名与预发/生产主机名）。白名单式**前向**守卫：
+  // URL host / 裸主机名 / URL 里的公网 IP / **提交信息** 四个判据，未登记的 host 一律失败。
+  // 守卫自身的合成负例用运行时拼接（不内嵌客户域名），命中输出默认脱敏（CI 日志公开）。
+  { name: 'check:no-real-domains', args: ['run', 'check:no-real-domains'], path: '客户/部署域名（文件内容 + 提交信息）' },
   {
     name: 'check:wasm-client-only',
     args: ['run', 'check:wasm-client-only', '--portable'],

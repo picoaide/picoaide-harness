@@ -37,11 +37,11 @@ This repository owns the desktop product around an unmodified DeepSeek Harness c
   - The pair is **mandatory dual-color**: `brands/official/logo-dark.svg` flips the tile fill to white and the mark to black (**exactly** the relationship of `brands/official/logo-dark.svg` relative to `logo.svg`); the geometry must stay identical. Light/daily surfaces use `logo.svg`; dark/night surfaces use `logo-dark.svg` — never invent a third chromatic variant.
   - All other visuals (colors, accents, gradient) must not redesign the mark. When a surface cannot use the SVG (e.g. PNG bitmaps), derive it from the brand folder (sharp renders from the same source; see `packages/host/desktop/scripts/generate-tray-icons.mjs` and `packages/host/desktop/scripts/brand-prepare.mjs`) and never rasterize a different drawing.
   - Before adding any logo asset or brand mark: resolve `git diff` and confirm it traces to `brands/official/logo.svg`; if a surface cannot, it should keep the previous official mark rather than a placeholder. Do not copy logo geometry from memory, from upstream packages, or from historical versions (the old version was a text `P` on a tile; it is retired and must not reappear anywhere, including fallbacks).
-- **Real customer / deployment domains and hostnames must never appear in this repository**（`*.a.example.com`、`*.example.com` 及任何客户自有域名、被投递环境的真实主机名）。本仓**公开**（GitHub `picoaide/picoaide-harness`），真实域名会同时暴露客户身份与其基础设施命名。
+- **Real customer / deployment domains and hostnames must never appear in this repository**（客户自有域名、被投递/测试环境的真实主机名；示例写法一律用保留命名空间 `*.example.com`）。本仓**公开**（GitHub `picoaide/picoaide-harness`），真实域名会同时暴露客户身份与其基础设施命名。
   - 禁止位置：文档与设计/规划稿（含代码块、JSON 示例、`server_url` 字段、部署示例）、测试夹具与断言、脚本默认值、注释。
   - 允许写法：占位符域名（`harness.example.com`）、环境变量（`{$DOMAIN}`、`REAL_SERVER`）。脚本若需默认值，留空或指向 `example.com`，让调用方必须显式传入。
   - 渠道/客户身份属于**私有仓** `picoaide/channels`；本仓只保留占位符。真实域名只允许出现在部署机上的 `.env` 与运维脚本，不进版本库。
-  - 自检口径：改动含域名/URL 的文件后跑 `git grep -nE '(a\.example\.com|example\.com)'` 必须为空；**提交信息同样适用**（提交信息也是公开的）。
+  - 自检口径：改动含域名/URL 的文件后跑 `node scripts/check-no-real-domains.mjs`（白名单式前向守卫：URL host / 裸主机名 / 提交信息三个判据，未登记的 host 一律失败）必须为空；**提交信息同样适用**（提交信息也是公开的）。
 - `community/fabric/` owns the community interoperability RFC. Until schemas and a reviewed reference adapter exist, it remains a private documentation scaffold and must not declare loadable DSH or package entry points.
 - The outer repository and all owned packages use the root Yarn release with `nodeLinker: node-modules`.
 - The upstream submodule keeps its own pnpm workspace. Run upstream commands through the root `upstream:*` scripts, whose Yarn portable-shell commands enter the submodule before invoking Corepack.
