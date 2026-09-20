@@ -175,6 +175,17 @@ func NewCompilationCache(dataRoot string) (wazero.CompilationCache, error) {
 		for _, v := range report.Violations {
 			log.Printf("runtime: ⚠️ 编译缓存目录不可信：%s（%s）", v.Path, v.Reason)
 		}
+		// **不可信 ⇒ 不用**（2026-09-21 三轮审计 P1-②）：这里此前只打日志然后继续用，
+		// 于是"缓存根是符号链接"（违规文案就是"可被重定向到任意位置"）这条**照用**，
+		// 并把编译产物**写进**链接目标 —— 而本包的威胁模型正是"缓存条目会被执行进程
+		// mmap 成机器码执行"（cachetrust.go 的包注释），能布置这条链接的人就能决定
+		// 执行进程从哪个目录取机器码（条目只有同文件 CRC32，挡损坏不挡篡改）。
+		// 执行侧的正确口径与 `cerr != nil` 完全一致：**降级为进程内缓存**（功能不变、
+		// 只损失跨进程暖缓存），绝不在"已判定不可信"的目录上读写。
+		// 注意这不影响"目录不存在/空目录"：`Verify` 对它们返回**零违规**
+		// （cachetrust.go 的 Verify 注释），所以正常的冷启动仍然用磁盘缓存。
+		log.Printf("runtime: ⚠️ 编译缓存目录不可信，降级为进程内缓存（不读写不可信目录）")
+		return nil, nil
 	}
 	// wazero 会在其下再建 wazero-v<ver>-<arch>-<os>/ 版本分片目录（cache.go 的
 	// ensuresFileCache），并给该分片目录 0700。

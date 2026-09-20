@@ -97,3 +97,53 @@ describe('作者数据面分页口径：客户端面板 ↔ 服务端 rows.go（
     expect(panel).toContain('Math.floor(rows.report.offset / PAGE_SIZE) + 1')
   })
 })
+
+describe('rows 线格式字段名：服务端 json tag ↔ 客户端读取键（三轮审计 P2-④）', () => {
+  // 为什么单独一条判据（2026-09-21 三轮独立审计）：`rowsPayload` 的字段名是**跨端冻结契约**，
+  // 但两侧各有一套自己的测试 —— 服务端把 `has_more` 改名（并同步自己的用例）后，
+  // **服务端 ok、客户端 30/30 全绿**，而面板会把"还有更多"读成 false（静默少一页），
+  // 或把 `masked_columns` 读成空（静默显示"什么都没遮"，实际遮了）。
+  // 判据 = 读服务端结构体的 json tag 集合 ↔ 读客户端解析函数里真正读的键集合，双向相等。
+  //
+  // 变异验证：把 `rows.go` 的 `json:"has_more"` 改成 `json:"hasMore"` ⇒ 本用例红。
+  const goSrc = read(ROWS_GO)
+  const clientSrc = read('packages/client/wasm-apps/src/client/app-lifecycle.ts')
+
+  it('两侧字段名集合必须相等（缺一即红）', () => {
+    const structStart = goSrc.indexOf('type rowsPayload struct {')
+    expect(structStart, `${ROWS_GO} 里找不到 rowsPayload（契约结构体被改名？）`).toBeGreaterThan(-1)
+    const structEnd = goSrc.indexOf('\n}', structStart)
+    const structBody = goSrc.slice(structStart, structEnd)
+    const serverKeys = new Set(
+      [...structBody.matchAll(/json:"([a-z_]+)"/g)].map(m => m[1]!),
+    )
+    expect(serverKeys.size, 'rowsPayload 的 json tag 一个都没解析到（解析口径失效）').toBeGreaterThan(5)
+
+    const parseStart = clientSrc.indexOf('export function parseRowsOutcome')
+    expect(parseStart, '客户端找不到 parseRowsOutcome').toBeGreaterThan(-1)
+    const parseEnd = clientSrc.indexOf('export async function fetchSchema', parseStart)
+    const parseBody = clientSrc.slice(parseStart, parseEnd > 0 ? parseEnd : undefined)
+    const clientKeys = new Set([...parseBody.matchAll(/body\.([a-z_]+)/g)].map(m => m[1]!))
+    expect(clientKeys.size, '客户端解析函数里一个 body.<key> 都没解析到（解析口径失效）').toBeGreaterThan(0)
+
+    // `app_id` / `table` / `rows` / `columns` 走形状校验（`asString` / `Array.isArray`），
+    // 读取形态是 `body.x` 之外的写法，因此单独比对：它们必须同时出现在两侧。
+    for (const shaped of ['app_id', 'table', 'rows', 'columns']) {
+      expect(serverKeys.has(shaped), `服务端 rowsPayload 缺少字段 ${shaped}`).toBe(true)
+      expect(clientSrc).toContain(`body.${shaped}`)
+      clientKeys.delete(shaped)
+    }
+    serverKeys.delete('app_id')
+    serverKeys.delete('table')
+    serverKeys.delete('rows')
+    serverKeys.delete('columns')
+
+    const onlyServer = [...serverKeys].filter(k => !clientKeys.has(k)).sort()
+    const onlyClient = [...clientKeys].filter(k => !serverKeys.has(k)).sort()
+    expect(
+      { onlyServer, onlyClient },
+      'rows 线格式字段名必须两侧同源：只在服务端存在的字段 = 客户端没读（静默少功能）；' +
+        '只在客户端存在的字段 = 服务端没给（恒 undefined）',
+    ).toEqual({ onlyServer: [], onlyClient: [] })
+  })
+})
