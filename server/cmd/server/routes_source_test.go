@@ -150,6 +150,8 @@ var wasmGatedRoutes = []string{
 	"DELETE /api/client/v2/apps/wasm/:app_id",
 	"GET /api/client/v2/apps/wasm/:app_id/diagnostics",
 	"GET /api/client/v2/apps/wasm/:app_id/schema",
+	// 作者数据面（2026-09-21）：只读浏览自己应用库里的行。
+	"GET /api/client/v2/apps/wasm/:app_id/rows",
 	// 客户端专属访问模型（2026-09-19）：请求入口、打开校验、持有性证明（W1 新增，
 	// 与 `:app_id/opens` 管理端出口一起在本轮补齐登记 —— 条件注册的漏登记形态是
 	// "路由整片消失而没人发现"，这正是本表存在的理由）。
@@ -190,6 +192,9 @@ var wasmGatedRoutes = []string{
 	// 且都**后于**本表上一轮重算落地，属同一种漏登记（守卫按实跑 diff 反向断言）。
 	"GET /api/server/admin/wasm-apps/opens/summary",
 	"GET /api/server/admin/wasm-apps/:app_id/ai-usage",
+	// 管理面的只读数据面（2026-09-21）：表结构 + 行浏览（与员工面同实现，只差鉴权）。
+	"GET /api/server/admin/wasm-apps/:app_id/schema",
+	"GET /api/server/admin/wasm-apps/:app_id/rows",
 }
 
 // ⚠️ `sessionGatedRoutes` 已随 W4 删除：它登记的是"`d.WasmSession != nil` 时才注册"

@@ -74,7 +74,7 @@ const (
 // 资源集只会浪费内存与段额度，并让作者困惑（`assets.read("name")` 读到一坨符号表）。
 //
 // 判据与分流见 SplitSections；打包脚本 `scripts/pack-assets.mjs` 的拒绝清单与
-// 本表同源（改这里必须同步改它，`assets` 包测试会读脚本源码对拍）。
+// 本表同源（改这里必须同步改它，`assets` 包测试会读脚本源码**双向**对拍）。
 var ToolchainSections = map[string]struct{}{
 	"name":                {},
 	"producers":           {},
@@ -86,10 +86,39 @@ var ToolchainSections = map[string]struct{}{
 	"external_debug_info": {},
 }
 
+// ToolchainSectionPrefixes 是**前缀形态**的工具链段名（同样不当作静态资源）。
+//
+// 为什么必须按前缀判（2026-09-21 审计 P0-5，已实测复现）：DWARF 调试段是一族名字
+// （`.debug_info` / `.debug_line` / `.debug_abbrev` / `.debug_str` / `.debug_ranges` …），
+// 逐个罗列必然漏 —— 而漏掉的后果**不是**"少一条提示"，是：
+//   - Rust `wasm32-wasip1` 默认产物带 **2 083 074 B** 自定义段（占模块 97.7%）全是 DWARF，
+//     会被当成应用资源发布、吃掉 4 MiB 段额度的一半以上；
+//   - 这些段还会像普通资源一样**可被静态直出**（任何人按路径下载），等于把作者机器的
+//     源码路径与结构暴露给使用者。
+//
+// 判据取 `.debug_` 前缀而不是"点开头"：`.well-known/...` 这类合法资源路径不该被误伤。
+var ToolchainSectionPrefixes = []string{".debug_"}
+
+// IsToolchainSection 判断段名是否是工具链元数据（**唯一实现**，SplitSections 与测试共用）。
+//
+// 单一实现的理由：这条策略同时服务"发布期分流"与"打包脚本拒绝"，两边各写一份
+// 就会出现"脚本拒了、平台放行"（或反过来）的静默分歧。
+func IsToolchainSection(name string) bool {
+	if _, ok := ToolchainSections[name]; ok {
+		return true
+	}
+	for _, prefix := range ToolchainSectionPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // SplitSections 把自定义段分成「静态资源」与「非资源段（忽略并报告）」。
 //
 // 判据（两条都要满足才算资源）：
-//   - 段名不是工具链元数据（ToolchainSections）；
+//   - 段名不是工具链元数据（IsToolchainSection：精确名单 + `.debug_` 前缀）；
 //   - 段名是**包内逻辑路径**（IsLogicalAssetPath 的纯字符串预判；完整校验在
 //     Set.Build 里做，那里会拒掉超长与非法字符）。
 //
@@ -98,7 +127,7 @@ var ToolchainSections = map[string]struct{}{
 func SplitSections(in map[string][]byte) (kept map[string][]byte, skipped []string) {
 	kept = make(map[string][]byte, len(in))
 	for name, data := range in {
-		if _, isToolchain := ToolchainSections[name]; isToolchain {
+		if IsToolchainSection(name) {
 			skipped = append(skipped, name)
 			continue
 		}

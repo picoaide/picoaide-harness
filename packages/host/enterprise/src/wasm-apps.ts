@@ -1440,6 +1440,111 @@ export async function listCatalog(ctx: Context, session: Session, signal?: Abort
   }
 }
 
+/**
+ * 读取一个应用的**表结构自省**（只读；`GET …/wasm/:app_id/schema`）。
+ *
+ * 与 {@link listCatalog} 同一形状：原样透传上游字节与 content-type，不做二次序列化
+ *（服务端的错误信封也就这样逐字节到模型手里）。
+ *
+ * 为什么工具面需要它（2026-09-21）：作者（尤其替他写应用的 AI）此前**没有任何回读面**
+ * —— 表名写错、列名拼错、`db.define` 没生效，都只能在对话里猜。schema 是零隐私的
+ * 结构面（表/列/行数/占用），给模型看没有问题。
+ * @param ctx - Host 上下文。
+ * @param session - 会话（提供 bearer）。
+ * @param appId - 应用标识（调用方已校验，仍按不可信输入编码）。
+ * @param signal - 取消信号。
+ * @returns 上游响应（原样字节）。
+ */
+export async function readAppSchema(ctx: Context, session: Session, appId: string, signal?: AbortSignal): Promise<WasmResponse> {
+  const path = `/api/client/v2/apps/wasm/${encodeURIComponent(appId)}/schema`
+  let upstream: Response
+  try {
+    upstream = await gatewayRequest(session, path, {}, CLIENT_UPLOAD_TIMEOUT_MS, signal)
+  } catch (cause) {
+    return gatewayFailure(cause)
+  }
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  return {
+    status: upstream.status,
+    text: await upstream.text().catch(() => ''),
+    contentType: upstream.headers.get('content-type') ?? WASM_JSON_CONTENT_TYPE,
+  }
+}
+
+/**
+ * 读取一个应用的**运行诊断**（只读；`GET …/wasm/:app_id/diagnostics`）。
+ *
+ * 技能文档（`references/diagnostics.md`）把"先读诊断，再改代码"写成第一动作，
+ * 而在此之前**没有任何工具**能让模型执行它（2026-09-21 补上）。
+ * @param ctx - Host 上下文。
+ * @param session - 会话（提供 bearer）。
+ * @param appId - 应用标识。
+ * @param minutes - 诊断窗口（分钟；服务端按保留期收敛）。
+ * @param signal - 取消信号。
+ * @returns 上游响应（原样字节）。
+ */
+export async function readAppDiagnostics(
+  ctx: Context,
+  session: Session,
+  appId: string,
+  minutes: number | undefined,
+  signal?: AbortSignal,
+): Promise<WasmResponse> {
+  const query = minutes === undefined ? '' : `?minutes=${String(minutes)}`
+  const path = `/api/client/v2/apps/wasm/${encodeURIComponent(appId)}/diagnostics${query}`
+  let upstream: Response
+  try {
+    upstream = await gatewayRequest(session, path, {}, CLIENT_UPLOAD_TIMEOUT_MS, signal)
+  } catch (cause) {
+    return gatewayFailure(cause)
+  }
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  return {
+    status: upstream.status,
+    text: await upstream.text().catch(() => ''),
+    contentType: upstream.headers.get('content-type') ?? WASM_JSON_CONTENT_TYPE,
+  }
+}
+
+/**
+ * 读取一个应用某张表的**行**（只读；`GET …/wasm/:app_id/rows`）。
+ *
+ * ⚠️ **永远不带 `unmask`**：服务端的默认策略是按列名启发式脱敏敏感列，原值只能由
+ * **人**在客户端面板里显式点「显示原值（会记审计）」—— 模型自己不能解掉这层保护
+ *（否则"使用者 PII 进模型上下文"就成了一条谁也没批准过的默认路径）。
+ * @param ctx - Host 上下文。
+ * @param session - 会话（提供 bearer）。
+ * @param appId - 应用标识。
+ * @param query - table / limit / offset（unmask 由本函数**拒绝**透传）。
+ * @param signal - 取消信号。
+ * @returns 上游响应（原样字节）。
+ */
+export async function readAppRows(
+  ctx: Context,
+  session: Session,
+  appId: string,
+  query: { table: string, limit?: number, offset?: number },
+  signal?: AbortSignal,
+): Promise<WasmResponse> {
+  const params = new URLSearchParams()
+  params.set('table', query.table)
+  if (query.limit !== undefined) params.set('limit', String(query.limit))
+  if (query.offset !== undefined) params.set('offset', String(query.offset))
+  const path = `/api/client/v2/apps/wasm/${encodeURIComponent(appId)}/rows?${params.toString()}`
+  let upstream: Response
+  try {
+    upstream = await gatewayRequest(session, path, {}, CLIENT_UPLOAD_TIMEOUT_MS, signal)
+  } catch (cause) {
+    return gatewayFailure(cause)
+  }
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  return {
+    status: upstream.status,
+    text: await upstream.text().catch(() => ''),
+    contentType: upstream.headers.get('content-type') ?? WASM_JSON_CONTENT_TYPE,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 代理面（生命周期 / 只读 / 删除）
 // ---------------------------------------------------------------------------
@@ -1544,8 +1649,15 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
     }
 
     let pathname: string
+    // 查询串必须保留（2026-09-21，作者数据面 `rows`）：`table/limit/offset/unmask`
+    // 全是**查询参数**，代理层只取 pathname 会让"看数据"永远停在默认视图
+    //（测试实测：`…/rows?table=notes&limit=50` 转发成 `…/rows`）。
+    let search = ''
     try {
-      pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+      const parsed = new URL(req.url ?? '/', 'http://localhost')
+      pathname = parsed.pathname
+      // `pathname` 已单独取出；这里只拼查询串（保留空查询串为 ''，不带 `?`）。
+      search = parsed.search
     } catch {
       return fail(res, { code: 'NOT_FOUND', message: 'not found', status: 404 })
     }
@@ -1639,10 +1751,12 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
     // 的员工面出口是 `GET /api/client/v2/apps/wasm/:app_id/releases`。**它必须在这里
     // 的白名单里** —— 这张表是逐后缀分发的，漏一个后缀就是"服务端做完了、客户端永远
     // 404"（面板上表现为一条读不出来的结论，而不是功能缺失）。
-    if (segments.length === 2 && ['diagnostics', 'schema', 'export', 'releases'].includes(segments[1] ?? '')) {
+    // `rows`（2026-09-21，作者数据面）也走这条：它是**查询串参数**的 GET
+    //（?table=&limit=&offset=&unmask=），代理层只需原样转发 query 与身份。
+    if (segments.length === 2 && ['diagnostics', 'schema', 'export', 'releases', 'rows'].includes(segments[1] ?? '')) {
       if (method !== 'GET') return fail(res, { code: 'METHOD_NOT_ALLOWED', message: 'method not allowed', status: 405 })
       return write(res, await proxyApp(ctx, session, {
-        upstreamPath: `${appPath}/${segments[1]!}`,
+        upstreamPath: `${appPath}/${segments[1]!}${search}`,
         method: 'GET',
         locale,
       }))

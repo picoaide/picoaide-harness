@@ -10,6 +10,8 @@
 package logbuf
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
@@ -32,6 +34,48 @@ type Buffer struct {
 // New 创建一个空缓冲。
 func New() *Buffer { return &Buffer{} }
 
+// sanitizeLogField 把应用可控字段里的行分隔与控制字符转义成可见序列。
+//
+// 为什么在**入口**洗而不是在出口（flushAppLogs）洗：日志有两个出口
+// （`appserver.flushAppLogs` 的平台日志、以及未来可能新增的诊断出口），出口各洗一遍
+// 必然漏一处；入口只有这一个。判据 = "换行/回车不再改变行数"。
+//
+// 转义而不是删除：作者排障时需要看见"我的日志里有换行"这件事，静默删掉会让内容
+// 悄悄变样（与日志本身"可溯源"的用途冲突）。
+func sanitizeLogField(s string) string {
+	if !strings.ContainsAny(s, "\r\n") && !hasOtherControl(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r < 0x20 || r == 0x7f:
+			// 其余 C0 控制字符（含 ESC → 终端颜色/光标控制）：一律转义成 \xNN。
+			b.WriteString(fmt.Sprintf(`\x%02x`, r))
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// hasOtherControl 报告字符串里是否含除 CR/LF/TAB 之外的控制字符（快速路径用）。
+func hasOtherControl(s string) bool {
+	for _, r := range s {
+		if (r < 0x20 && r != '\n' && r != '\r' && r != '\t') || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 // Log 实现 capapi.LogSink。
 //
 // 语义（§5.1）：
@@ -43,6 +87,13 @@ func (b *Buffer) Log(level, message string) {
 	if b == nil {
 		return
 	}
+	// 先清洗再截断（顺序不能反，2026-09-21 审计 F-6）：应用完全控制 level 与 message，
+	// 而宿主出口是"一行一条"的文本日志（`wasm-app[<id>] <level>: <message>`）。
+	// 消息里带 `\n` 就能凭空造出**额外的日志行**（例如伪造 `wasm-app[x] error: ...`，
+	// 甚至伪造运维/宿主自己的日志格式），带 `\r` 则能覆盖同一行的前段内容。
+	// 这里把 CR/LF 转义成可见的两字符序列：内容不丢、行结构不可伪造。
+	level = sanitizeLogField(level)
+	message = sanitizeLogField(message)
 	if len(message) > limits.LogMaxLineBytes {
 		message = message[:limits.LogMaxLineBytes]
 	}

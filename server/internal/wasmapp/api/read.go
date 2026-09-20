@@ -236,18 +236,16 @@ func (h *Handlers) schema(c *gin.Context) {
 // 提供的** SQL、表名先过平台规则再进语句，风险面与 appdb 的只读连接同级。
 // 库路径仍由 appdb 权威给出（不在本包复制"<data_root>/apps/<app_id>/app.db"的布局）。
 func (h *Handlers) inspectAppDB(ctx context.Context, appID string) (gin.H, *apperr.Error) {
-	probe, oerr := appdb.Open(ctx, appdb.Options{DataRoot: h.opt.DataRoot, AppID: appID})
+	db, path, size, oerr := h.openAppDBReadOnly(ctx, appID)
 	if oerr != nil {
-		// 打开失败（限额设不上 / 金丝雀不成立）是平台状态问题，如实上报而不是假装空库。
-		return nil, internalErr("应用库不可用", oerr)
+		return nil, oerr
 	}
-	path := probe.Path()
-	_ = probe.Close()
+	defer db.Close()
 
 	report := gin.H{
 		"app_id":           appID,
 		"db":               logicalUnderDataRoot(h.opt.DataRoot, path),
-		"size_bytes":       int64(0),
+		"size_bytes":       size,
 		"max_bytes":        int64(limits.AppDBMaxBytes),
 		"max_tables":       limits.MaxTablesPerApp,
 		"max_columns":      limits.MaxColumnsPerTable,
@@ -257,32 +255,66 @@ func (h *Handlers) inspectAppDB(ctx context.Context, appID string) (gin.H, *appe
 		"table_count":      0,
 		"usage_percent":    float64(0),
 	}
-
-	dsn := "file:" + path + "?mode=ro&_pragma=query_only(1)"
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, internalErr("应用库只读打开失败", err)
-	}
-	defer db.Close()
-	if err := db.PingContext(ctx); err != nil {
-		return nil, internalErr("应用库只读连接失败", err)
-	}
-	size := fileSize(path)
-	report["size_bytes"] = size
 	report["initialized"] = size > 0
 	report["page_size"] = pragmaInt(ctx, db, "page_size")
 	report["page_count"] = pragmaInt(ctx, db, "page_count")
 	report["usage_percent"] = usagePercent(size, int64(limits.AppDBMaxBytes))
 
+	tables, terr := listAppTables(ctx, db)
+	if terr != nil {
+		return nil, internalErr("读取表清单失败", terr)
+	}
+	report["tables"] = tables
+	report["table_count"] = len(tables)
+	return report, nil
+}
+
+// openAppDBReadOnly 以**只读**方式打开应用库，返回连接、宿主绝对路径与磁盘占用。
+//
+// 抽出来的理由（2026-09-21）：自省（schema）与作者数据面（rows）都要"先只读看一眼库"
+// —— 两处各写一遍连接/加固/Ping 就会漂移（一处 mode=ro、另一处忘了 query_only）。
+// 调用方负责 Close。
+//
+// 为什么在 api 层直连 SQLite（而不复用 appdb 的加固连接）：`appdb` 的连接面向
+// **应用请求**（query_only/rw 两条 + 语句白名单），它明确拒绝 `sqlite_` 前缀的引擎
+// 内部对象（sqlgate.go 的 internal_object），而自省正是要读 sqlite_master。
+// 这里的连接是"平台读自己的文件"：只读（mode=ro + query_only）、不执行任何**应用
+// 提供的** SQL、表名先过平台规则再进语句，风险面与 appdb 的只读连接同级。
+// 库路径仍由 appdb 权威给出（不在本包复制"<data_root>/apps/<app_id>/app.db"的布局）。
+func (h *Handlers) openAppDBReadOnly(ctx context.Context, appID string) (*sql.DB, string, int64, *apperr.Error) {
+	probe, oerr := appdb.Open(ctx, appdb.Options{DataRoot: h.opt.DataRoot, AppID: appID})
+	if oerr != nil {
+		// 打开失败（限额设不上 / 金丝雀不成立）是平台状态问题，如实上报而不是假装空库。
+		return nil, "", 0, internalErr("应用库不可用", oerr)
+	}
+	path := probe.Path()
+	_ = probe.Close()
+
+	dsn := "file:" + path + "?mode=ro&_pragma=query_only(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, "", 0, internalErr("应用库只读打开失败", err)
+	}
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, "", 0, internalErr("应用库只读连接失败", err)
+	}
+	return db, path, fileSize(path), nil
+}
+
+// listAppTables 列出库里**平台看得懂**的表（表名 / 列结构 / 行数）。
+//
+// 表名先过平台自己的规则：sqlite_master 的内容是**应用可控**的（正常由 db.define 建，
+// 但文件可能被篡改），拼进 SQL 前必须校验；不合规的表被标成 skipped 而不是让整个
+// 自省失败 —— 一条脏表名不该让作者看不到其余的表。
+func listAppTables(ctx context.Context, db *sql.DB) ([]schemaTable, error) {
 	names, err := appTableNames(ctx, db)
 	if err != nil {
-		return nil, internalErr("读取表清单失败", err)
+		return nil, err
 	}
 	tables := make([]schemaTable, 0, len(names))
 	for _, name := range names {
 		t := schemaTable{Name: name}
-		// 名称先过平台自己的表名规则：sqlite_master 的内容是**应用可控**的
-		//（正常由 db.define 建，但文件可能被篡改），拼进 SQL 前必须校验。
 		if !validateTableName(name) {
 			t.Skipped, t.Reason = true, "表名不符合平台规则（不是 db.define 建的）"
 			tables = append(tables, t)
@@ -290,7 +322,7 @@ func (h *Handlers) inspectAppDB(ctx context.Context, appID string) (gin.H, *appe
 		}
 		cols, cerr := tableColumns(ctx, db, name)
 		if cerr != nil {
-			return nil, internalErr("读取列结构失败", cerr)
+			return nil, cerr
 		}
 		t.Columns = cols
 		if n, cerr := tableRowCount(ctx, db, name); cerr == nil {
@@ -298,9 +330,7 @@ func (h *Handlers) inspectAppDB(ctx context.Context, appID string) (gin.H, *appe
 		}
 		tables = append(tables, t)
 	}
-	report["tables"] = tables
-	report["table_count"] = len(tables)
-	return report, nil
+	return tables, nil
 }
 
 // logicalUnderDataRoot 把宿主绝对路径渲染成"数据根之下的相对路径"（对外只暴露

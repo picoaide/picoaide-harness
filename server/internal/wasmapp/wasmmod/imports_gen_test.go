@@ -54,6 +54,7 @@ var whitelistSourcesForTest = []string{
 	"./internal/wasmapp/refapp",
 	"./internal/wasmapp/refapp/wasiprobe",
 	"./internal/wasmapp/refapp/stdprobe",
+	"./internal/wasmapp/refapp/sockprobe",
 }
 
 // generatedFileName 是生成产物相对 wasmmod 包目录的文件名。
@@ -143,9 +144,77 @@ var bannedSocketFdCreation = []string{"sock_open", "sock_bind", "sock_listen", "
 // 判据 = 它不需要一个已存在的 socket fd、也造不出 fd：
 // sock_accept 只是"从一个已监听的 fd 上接一个连接"（拿不到监听的 fd ⇒ EBADF(8) 实测），
 // sock_shutdown 只是收尾（fd 不存在 ⇒ EBADF(8) 实测）。
+// allowedSocketSymbols 是**放行**的 socket 符号精确集合（红线 4 的静态判据）。
+//
+// 判据不是"名字带 sock_ 就危险"，而是"它能不能自造出一个可用的 socket 描述符"：
+//   - 允许四条：`sock_accept` / `sock_recv` / `sock_send` / `sock_shutdown` ——
+//     它们都要求"已经有一个可用的 socket fd"。而 preview1 里造 fd 的四条
+//     （sock_open/bind/listen/connect）一律不在白名单，运行时又零 preopen
+//     ⇒ `sock_accept(0..10)` 实测全 EBADF(8)，recv/send 同样无从下手 ⇒ **能力为空**；
+//   - 禁止四条：任何一条进了白名单都等于给出站开了一道门（反向断言见
+//     TestWhitelistAllowsOnlyFdFreeSockSymbols）。
+//
+// 为什么 2026-09-21 从两条扩到四条（审计 P0-6）：Go 的 wasip1 运行时只声明
+// sock_accept/sock_shutdown（`syscall/net_wasip1.go`），而 **TinyGo 的 `net/url`
+// 路径还会带出 sock_recv/sock_send**。白名单的既定语义是"Go/TinyGo 运行时的保守超集"
+// （见 cmd/picoaide-wasm-imports-gen 的包注释），只按 Go 收紧会让同一份纯标准库代码
+// "TinyGo 编译发不出去、Go 编译能过" —— 而内存实测 TinyGo 产物常驻只有 Go 的约 1/4。
 var allowedSocketSymbols = map[string]string{
 	"sock_accept":   "i32i32i32_i32",
+	"sock_recv":     "i32i32i32i32i32i32_i32", // canonical ABI：fd, ri_data, ri_data_len, ri_flags, ro_datalen, ro_flags
+	"sock_send":     "i32i32i32i32i32_i32",    // canonical ABI：fd, si_data, si_data_len, si_flags, so_datalen
 	"sock_shutdown": "i32i32_i32",
+}
+
+// TestWhitelistSourcesMatchGenerator 守住"两份来源清单"的一致性。
+//
+// 为什么必须有（2026-09-21 踩到）：`whitelistSourcesForTest` 是**独立列出**的
+// （这是有意的：门禁要能发现"生成器偷偷少编了一份来源"），代价是新增来源时
+// 容易只改一边 —— 本次加 `sockprobe` 时正是先改了生成器、忘了这里，
+// TestImportWhitelistMatchesAllSources 立刻红（好在判据有效）。把它固化成守卫，
+// 下一次的失败信息就会直接点名"两份清单不一致"，而不是让人去猜白名单为什么多了两条。
+//
+// 判据刻意**不解析 Go AST**：`whitelistSources` 是一段字面量，正则抽出其中的
+// `./internal/...` 字符串即可；true 源仍是生成器（这里只做集合对拍）。
+func TestWhitelistSourcesMatchGenerator(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "cmd", "picoaide-wasm-imports-gen", "main.go")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取生成器源码失败（%s）：%v", path, err)
+	}
+	src := string(raw)
+	idx := strings.Index(src, "var whitelistSources = []string{")
+	if idx < 0 {
+		t.Fatal("生成器里找不到 whitelistSources 字面量（判据需同步更新）")
+	}
+	end := strings.Index(src[idx:], "}")
+	if end < 0 {
+		t.Fatal("whitelistSources 字面量没有结束花括号")
+	}
+	body := src[idx : idx+end]
+	found := map[string]bool{}
+	for _, m := range regexp.MustCompile(`"(\.[^"]*)"`).FindAllStringSubmatch(body, -1) {
+		found[m[1]] = true
+	}
+	if len(found) == 0 {
+		t.Fatal("从生成器源码里解析出 0 个来源（解析口径可能失效）")
+	}
+	for _, pkg := range whitelistSourcesForTest {
+		if !found[pkg] {
+			t.Fatalf("生成器缺来源 %s：两份清单必须一致（否则门禁测的不是真实白名单）", pkg)
+		}
+	}
+	for pkg := range found {
+		listed := false
+		for _, p := range whitelistSourcesForTest {
+			if p == pkg {
+				listed = true
+			}
+		}
+		if !listed {
+			t.Fatalf("测试清单缺来源 %s（生成器编了它、门禁没编 ⇒ 白名单多出的符号无人守）", pkg)
+		}
+	}
 }
 
 func TestImportWhitelistMatchesAllSources(t *testing.T) {

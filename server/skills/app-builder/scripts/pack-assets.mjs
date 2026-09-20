@@ -59,8 +59,9 @@ const WASM_MAGIC = Buffer.from([0x00, 0x61, 0x73, 0x6d])
 const RESERVED_ASSET_NAME = 'picoaide.app.json'
 
 /**
- * api/publish.go 的 toolchainSections：平台按"工具链元数据"分流掉，不会成为资源。
- * 往这些段名里塞文件 = 静默丢失（Go 产物本来就带 `name` / `producers` / `go:buildid`）。
+ * server/internal/wasmapp/assets 的 ToolchainSections：平台按"工具链元数据"分流掉，
+ * 不会成为资源。往这些段名里塞文件 = 静默丢失
+ * （Go 产物本来就带 `name` / `producers` / `go:buildid`）。
  */
 const TOOLCHAIN_SECTION_NAMES = new Set([
   'name',
@@ -72,6 +73,19 @@ const TOOLCHAIN_SECTION_NAMES = new Set([
   'sourceMappingURL',
   'external_debug_info',
 ])
+
+/**
+ * assets.ToolchainSectionPrefixes：**前缀形态**的工具链段名。
+ * DWARF 调试段是一族（`.debug_info` / `.debug_line` / `.debug_abbrev` / …），
+ * 逐个罗列必然漏；Rust/Zig/LLVM 默认产物会带几 MB 的 DWARF，平台按前缀忽略它们
+ * （既不进资源集，也不会被静态直出）。这里 fail-loud 而不是静默丢弃。
+ */
+const TOOLCHAIN_SECTION_PREFIXES = ['.debug_']
+
+/** 段名是否是工具链元数据（与 assets.IsToolchainSection 同一判据）。 */
+function isToolchainSection(name) {
+  return TOOLCHAIN_SECTION_NAMES.has(name) || TOOLCHAIN_SECTION_PREFIXES.some(p => name.startsWith(p))
+}
 
 /** assets.MaxPathBytes：包内逻辑路径总长（**字节**，不是字符数）。 */
 const MAX_PATH_BYTES = 256
@@ -271,10 +285,11 @@ function assertNotReservedOrToolchain(dest, source) {
       '要放名单/机密：写进 config（whitelist），不要放进非保留资源（非保留资源会被直出给任何人）',
     ])
   }
-  if (TOOLCHAIN_SECTION_NAMES.has(dest)) {
-    fail(`段名 \`${dest}\` 是工具链元数据段（平台按 toolchainSections 忽略，不会成为资源）`, [
+  if (isToolchainSection(dest)) {
+    fail(`段名 \`${dest}\` 是工具链元数据段（平台按 assets.IsToolchainSection 忽略，不会成为资源）`, [
       '换个包内路径（如 data/notes.json）：这个名字加了也会被平台静默丢掉',
       'Go 产物本来就有 name / producers / go:buildid 三个段，正是走这条分流',
+      '`.debug_` 开头的 DWARF 调试段同样走这条分流（Rust/Zig/LLVM 默认产物会带几 MB）',
     ])
   }
 }

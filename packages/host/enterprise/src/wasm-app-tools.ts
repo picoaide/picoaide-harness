@@ -44,6 +44,9 @@ import {
   listCatalog,
   parseWasmBody,
   publishApp,
+  readAppDiagnostics,
+  readAppRows,
+  readAppSchema,
   validateApp,
   wasmError,
   type WasmResponse,
@@ -55,7 +58,16 @@ import {
  * 三个名字只在这里出现一次：注册与测试断言共用同一份真源（写死两处的话，
  * "工具改名了但测试还在断言旧名字"会静默通过）。
  */
-export const WASM_APP_TOOL_NAMES = ['wasm_app_list', 'wasm_app_validate', 'wasm_app_publish'] as const
+export const WASM_APP_TOOL_NAMES = [
+  'wasm_app_list',
+  'wasm_app_validate',
+  'wasm_app_publish',
+  // 回读面（2026-09-21）：作者排障闭环的另一半。此前 AI 只能"写"不能"看"，
+  // 而技能文档却要求它"先读诊断，再改代码" —— 那条链路上根本没有工具。
+  'wasm_app_schema',
+  'wasm_app_diagnostics',
+  'wasm_app_rows',
+] as const
 
 /**
  * 工具的单次预算：120 s。
@@ -562,6 +574,89 @@ export function registerWasmAppTools(ctx: Context, options: WasmAppToolOptions):
         ...(args.config === undefined ? {} : { config: args.config }),
         ...(args.uploadId === undefined ? {} : { uploadId: args.uploadId.trim() }),
       }))
+    },
+  })))
+
+  // ------------------------------------------------- schema / diagnostics / rows
+  //
+  // 回读面（2026-09-21）：这一步之前，工具面只有"写"（list/validate/publish），
+  // 而技能文档要求模型"先读诊断，再改代码" —— 那条链路上根本没有工具。
+  //
+  // 三条工具的能力边界（与产品口径一致，见 server/internal/wasmapp/api/rows.go）：
+  //   - schema / diagnostics：**零隐私**（结构、失败码、hints），默认可读；
+  //   - rows：只读一页行，且**永远请求服务端的默认脱敏**（本文件不透传 unmask）
+  //     —— 原值只能由人在客户端面板里显式点「显示原值（会记审计）」。
+
+  disposers.push(tools.register(defineTool({
+    name: 'wasm_app_schema',
+    description: [
+      '读取一个应用的**表结构**（表名、列名/类型、行数、库体积与上限）。只读。',
+      '排障用法：数据对不上时先跑它，确认表与列**真的像你以为的那样**（db.define 没生效、列名拼错、表名大小写不符都在这里现形），再用 wasm_app_rows 看几行数据。',
+      '仅发布者本人可读（他人与"应用不存在"同形 404）；每次调用都会被平台审计。',
+    ].join(''),
+    parameters: {
+      appId: { type: 'string', required: true, description: APP_ID_DESCRIPTION },
+    },
+    output,
+    timeoutMs: WASM_APP_TOOL_TIMEOUT_MS,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const locale = options.locale()
+      const allowed = gate(locale, 'read')
+      if (!allowed.ok) return asToolResult(allowed.response)
+      return asToolResult(await readAppSchema(ctx, allowed.session, args.appId.trim(), exec.signal))
+    },
+  })))
+
+  disposers.push(tools.register(defineTool({
+    name: 'wasm_app_diagnostics',
+    description: [
+      '读取一个应用的**运行诊断**（时间窗口内的调用总数、失败/被杀次数、按次数排序的 reason_code 与可操作 hints、单条失败记录含 guest 退出码与 stderr 尾巴）。只读。',
+      '这是技能文档里"先读诊断，再改代码"的那个入口：`reasons[0]` 的 hints 就是下一步该改什么，不要靠猜。',
+      '`outcome` 是 `error` 或 `killed` 都算失败；响应结构是 `{"diagnostics":{summary:{...},failures:[...],hints:[...]}}`。',
+    ].join(''),
+    parameters: {
+      appId: { type: 'string', required: true, description: APP_ID_DESCRIPTION },
+      minutes: { type: 'integer', description: '诊断窗口（分钟；缺省 24 小时，上限 = 调用事件保留期）' },
+    },
+    output,
+    timeoutMs: WASM_APP_TOOL_TIMEOUT_MS,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const locale = options.locale()
+      const allowed = gate(locale, 'read')
+      if (!allowed.ok) return asToolResult(allowed.response)
+      return asToolResult(await readAppDiagnostics(ctx, allowed.session, args.appId.trim(), args.minutes, exec.signal))
+    },
+  })))
+
+  disposers.push(tools.register(defineTool({
+    name: 'wasm_app_rows',
+    description: [
+      '读取一个应用某张表的一页数据（只读；缺省 50 行、最多 200 行；用 offset 翻页）。',
+      '**敏感列默认脱敏**（服务端按列名判定，值显示为 ***）：本工具**不能**解掉这层保护 —— 要看原值只能由人在客户端「应用中心 → 详情 → 数据 → 显示原值」里操作（那一次会单独记审计）。',
+      '用法：先用 wasm_app_schema 拿到表名与列名（表名规则：小写字母开头、只含 [a-z0-9_]），再用本工具确认"数据是不是真的写进去了"。',
+      '返回 `total_rows` / `has_more` / `truncated_values`：分页与截断都以服务端返回的这两个字段为准，不要按返回条数猜。',
+      '每次调用都会被平台审计（动作 `wasm_app_rows_view`），审计只记表名与分页，不记行内容。',
+    ].join(''),
+    parameters: {
+      appId: { type: 'string', required: true, description: APP_ID_DESCRIPTION },
+      table: { type: 'string', required: true, description: '表名（db.define 用的那个；先用 wasm_app_schema 查）' },
+      limit: { type: 'integer', description: '本页行数（缺省 50，上限 200；越界会被服务端收敛）' },
+      offset: { type: 'integer', description: '跳过的行数（缺省 0；翻页用）' },
+    },
+    output,
+    timeoutMs: WASM_APP_TOOL_TIMEOUT_MS,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const locale = options.locale()
+      const allowed = gate(locale, 'read')
+      if (!allowed.ok) return asToolResult(allowed.response)
+      return asToolResult(await readAppRows(ctx, allowed.session, args.appId.trim(), {
+        table: args.table.trim(),
+        ...(args.limit === undefined ? {} : { limit: args.limit }),
+        ...(args.offset === undefined ? {} : { offset: args.offset }),
+      }, exec.signal))
     },
   })))
 

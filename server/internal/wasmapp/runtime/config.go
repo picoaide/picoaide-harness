@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -30,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/wasmapp/cachetrust"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/tetratelabs/wazero"
 )
@@ -147,8 +149,17 @@ func NewCompilationCache(dataRoot string) (wazero.CompilationCache, error) {
 			limits.CompileCacheDirName + "/<分代>）")
 	}
 	dir := CompileCacheDir(dataRoot)
-	if err := os.MkdirAll(dir, os.FileMode(limits.DataDirMode)); err != nil {
-		return nil, fmt.Errorf("runtime: 创建编译缓存目录失败: %w", err)
+	// 与编译侧同一个实现（cachetrust）：MkdirAll + 显式 Chmod + 形状校验。
+	// 执行侧**只告警**（没有"拒绝启动"这个选项：那等于整站不可用），违规逐条进日志；
+	// 残余风险（条目无内容签名）见 compile.CacheTrustResidual / cachetrust 包注释。
+	report, cerr := cachetrust.Ensure(dir, os.FileMode(limits.DataDirMode))
+	if cerr != nil {
+		return nil, fmt.Errorf("runtime: 编译缓存目录不可用: %w", cerr)
+	}
+	if !report.Trusted() {
+		for _, v := range report.Violations {
+			log.Printf("runtime: ⚠️ 编译缓存目录不可信：%s（%s）", v.Path, v.Reason)
+		}
 	}
 	// wazero 会在其下再建 wazero-v<ver>-<arch>-<os>/ 版本分片目录（cache.go 的
 	// ensuresFileCache），并给该分片目录 0700。

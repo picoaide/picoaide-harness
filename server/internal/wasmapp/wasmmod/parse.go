@@ -291,19 +291,50 @@ func Parse(data []byte) (*ModuleInfo, error) {
 			continue
 		}
 
-		// 非自定义段：每个 id 至多一次，且必须按 id 升序（core spec §5.5）。
-		if int(id) < lastSectionID {
+		// 非自定义段：每个 id 至多一次，且必须按**规范顺序**（core spec §5.5）。
+		//
+		// DataCount(12) 是唯一不按数值升序的段：它的规范位置是 Element(9) 之后、
+		// Code(10) 之前（Wasm 2.0 / bulk-memory）。判据必须与平台自己的运行时
+		// wazero 逐条对齐（wazero@v1.12.0 internal/wasm/binary/decoder.go:190-204）——
+		// 修复前这里只做"纯 id 升序"，于是带 DataCount 的模块陷入死局：
+		//   · DataCount 放规范位置 → 本函数报"顺序非法"（Code(10) < DataCount(12)）；
+		//   · 改成数值升序（放 Data/Code 之后）→ 预检放行，但真编译期 wazero 报
+		//     `invalid section order` ⇒ **任何带 DataCount 的产物都发不出去**
+		//     （TinyGo 默认产物、启用 bulk-memory 的 LLVM/Rust/Zig 配置）。
+		// 见 docs/planning/2026-09-21-wasm-platform-gap-audit-and-plan.md §3 P0-4。
+		if id > SectionDataCount {
+			return nil, malformedf("未知段 id %d（core spec 只定义 0–12）", id).
+				WithDetail("offset", sectionStart).
+				WithDetail("section_id", id)
+		}
+		switch {
+		case id == SectionDataCount:
+			// DataCount 必须在 Element 之后（且不能出现在它自己之前）。
+			if lastSectionID > int(SectionElement) {
+				return nil, malformedf("段顺序非法：段 %s 出现在段 id %d 之后（DataCount 必须在 Element 之后、Code 之前）",
+					SectionName(id), lastSectionID).
+					WithDetail("offset", sectionStart).
+					WithDetail("section_id", id).
+					WithDetail("section", SectionName(id)).
+					WithDetail("previous_section_id", lastSectionID)
+			}
+		case lastSectionID == int(SectionDataCount):
+			// DataCount 之后只允许 Code 及其后继段。
+			if int(id) < int(SectionCode) {
+				return nil, malformedf("段顺序非法：段 %s 出现在段 %s 之后（DataCount 之后只允许 Code 及之后）",
+					SectionName(id), SectionName(SectionDataCount)).
+					WithDetail("offset", sectionStart).
+					WithDetail("section_id", id).
+					WithDetail("section", SectionName(id)).
+					WithDetail("previous_section_id", lastSectionID)
+			}
+		case int(id) < lastSectionID:
 			return nil, malformedf("段顺序非法：段 %s 出现在段 id %d 之后（非自定义段必须按 id 升序）",
 				SectionName(id), lastSectionID).
 				WithDetail("offset", sectionStart).
 				WithDetail("section_id", id).
 				WithDetail("section", SectionName(id)).
 				WithDetail("previous_section_id", lastSectionID)
-		}
-		if id > SectionDataCount {
-			return nil, malformedf("未知段 id %d（core spec 只定义 0–12）", id).
-				WithDetail("offset", sectionStart).
-				WithDetail("section_id", id)
 		}
 		lastSectionID = int(id)
 		info.Sections = append(info.Sections, Section{ID: id, Offset: payloadStart, Size: int(size)})
@@ -412,14 +443,39 @@ func duplicateSection(offset int, id byte) *apperr.Error {
 		WithDetail("section", SectionName(id))
 }
 
+// checkVecCount 校验"段内计数向量"与剩余载荷的一致性。
+//
+// 为什么必须有这条（2026-09-21 安全修复，P0）：向量解析的第一行是
+// `make([]T, 0, n)`，n 直接来自段内声明，最大 0xFFFFFFFF。若不做上界校验，
+// 一个 **15 字节**的畸形模块就能让宿主申请 256 GiB（`Import` = 4×string = 64 B，
+// 0xFFFFFFFF×64 B = 274 877 906 944 B），触发 `fatal error: out of memory`
+// —— 这是**进程级**崩溃（不可 recover，gin.Recovery 无效），且发生在 API server
+// 进程内（`compile.ValidateWasm` 明写"不发子进程"）⇒ 任意已登录员工可让整个
+// 服务端退出。修复前的实测复现见 docs/planning/2026-09-21-wasm-platform-gap-audit-and-plan.md §3 P0-0。
+//
+// 判据：向量里每个元素在字节流中至少占 1 字节 ⇒ n 不可能大于剩余载荷长度。
+// 这里只做**上界**；元素内部结构仍由各自的解析循环逐条校验（截断/畸形各有错码）。
+func checkVecCount(section byte, what string, n uint32, rest []byte) error {
+	if uint64(n) > uint64(len(rest)) {
+		return malformedf("%s条目数 %d 与剩余载荷 %d 字节不一致（计数向量越界）", what, n, len(rest)).
+			WithDetail("section", SectionName(section)).
+			WithDetail("declared_count", n).
+			WithDetail("available_bytes", len(rest))
+	}
+	return nil
+}
+
 // parseTypes 解析类型段：vec of functype(0x60)。
 func parseTypes(payload []byte) ([]funcType, error) {
 	n, used, err := readU32(payload)
 	if err != nil {
 		return nil, malformedf("类型段条目数非法：%v", err).WithDetail("section", SectionName(SectionType))
 	}
-	out := make([]funcType, 0, n)
 	rest := payload[used:]
+	if err := checkVecCount(SectionType, "类型段", n, rest); err != nil {
+		return nil, err
+	}
+	out := make([]funcType, 0, n)
 	for i := uint32(0); i < n; i++ {
 		if len(rest) == 0 {
 			return nil, malformedf("类型段第 %d 条在数据结束前截断", i).
@@ -472,6 +528,9 @@ func parseImports(payload []byte, types []funcType) ([]Import, error) {
 		return nil, malformedf("导入段条目数非法：%v", err).WithDetail("section", SectionName(SectionImport))
 	}
 	rest := payload[used:]
+	if err := checkVecCount(SectionImport, "导入段", n, rest); err != nil {
+		return nil, err
+	}
 	out := make([]Import, 0, n)
 	for i := uint32(0); i < n; i++ {
 		detail := func() *apperr.Error {
@@ -555,6 +614,9 @@ func parseExports(payload []byte) ([]string, map[string]string, error) {
 		return nil, nil, malformedf("导出段条目数非法：%v", err).WithDetail("section", SectionName(SectionExport))
 	}
 	rest := payload[used:]
+	if err := checkVecCount(SectionExport, "导出段", n, rest); err != nil {
+		return nil, nil, err
+	}
 	names := make([]string, 0, n)
 	kinds := make(map[string]string, n)
 	for i := uint32(0); i < n; i++ {

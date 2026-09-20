@@ -364,7 +364,16 @@ describe('本地路由：装配、方法分发、写面持有性证明', () => {
 
   it('同一次装配也注册了宿主工具面（AI 的发布路径与路由共用编排）', () => {
     const h = harness(() => json(200, {}))
-    expect(h.tools.map(t => t.name).sort()).toEqual(['wasm_app_list', 'wasm_app_publish', 'wasm_app_validate'])
+    // 六个名字逐个钉死（写死在这里是**有意**的：这条断言的用途就是"注册面少了/多了
+    // 一个工具立刻红"，改成读 WASM_APP_TOOL_NAMES 会让它变成自证）。
+    expect(h.tools.map(t => t.name).sort()).toEqual([
+      'wasm_app_diagnostics',
+      'wasm_app_list',
+      'wasm_app_publish',
+      'wasm_app_rows',
+      'wasm_app_schema',
+      'wasm_app_validate',
+    ])
     // 预算序关系：工具 deadline 必须**严格大于**出站预算（90 s），否则上游超时
     // 策略会把带 hints 的结构化结果整条换成笼统的 "tool call timed out"。
     for (const tool of h.tools) expect(tool.timeoutMs).toBeGreaterThan(CLIENT_UPLOAD_TIMEOUT_MS)
@@ -490,6 +499,9 @@ describe('错误语义：业务信封原样透传，只有传输层失败才回�
     // R1-pm-3：发布者的版本历史 + 审核结论（含被拒理由）必须也被转发 ——
     // 只读白名单是逐后缀的，漏一个后缀 = 服务端做完了、客户端永远 404。
     await h.call(`${WASM_APPS_PREFIX}/demo-tool/releases`)
+    // 作者数据面（2026-09-21）：查询串必须**原样**转发（table/limit/offset/unmask 都是
+    // 服务端的判据；代理层吞掉查询串会让"看数据"永远查第一张表的第一页默认视图）。
+    await h.call(`${WASM_APPS_PREFIX}/demo-tool/rows?table=notes&limit=50&offset=100`)
     await h.call(`${WASM_APPS_PREFIX}/demo-tool`, 'DELETE')
     expect(h.outbound.map(o => `${o.method} ${o.url.replace('https://harness.example', '')}`)).toEqual([
       'POST /api/client/v2/apps/wasm/demo-tool/unpublish',
@@ -498,6 +510,7 @@ describe('错误语义：业务信封原样透传，只有传输层失败才回�
       'GET /api/client/v2/apps/wasm/demo-tool/schema',
       'GET /api/client/v2/apps/wasm/demo-tool/export',
       'GET /api/client/v2/apps/wasm/demo-tool/releases',
+      'GET /api/client/v2/apps/wasm/demo-tool/rows?table=notes&limit=50&offset=100',
       'DELETE /api/client/v2/apps/wasm/demo-tool',
     ])
     expect(h.outbound[0]!.body).toBe(JSON.stringify({ enabled: false }))

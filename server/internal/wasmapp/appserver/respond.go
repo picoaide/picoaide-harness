@@ -49,8 +49,13 @@ func (s *Server) writeAppResponse(w http.ResponseWriter, r *http.Request, resp a
 		return
 	}
 
+	// status 只接受 200–599（2026-09-21 审计 F-7）：修复前下界是 100，于是应用可以
+	// 让宿主写出 1xx（100 Continue / 101 Switching Protocols / 103 Early Hints）——
+	// 这些是**协议控制**语义（100 会让客户端继续等 body、101 触发协议切换），
+	// 不该由应用内容决定；而且 `WriteHeader(1xx)` 之后 `http` 仍允许再写一次头，
+	// 让"一次响应一帧"的契约在 HTTP 层被绕过。非法值一律回落 200。
 	status := resp.Status
-	if status < 100 || status > 599 {
+	if status < 200 || status > 599 {
 		status = http.StatusOK
 	}
 
@@ -62,6 +67,12 @@ func (s *Server) writeAppResponse(w http.ResponseWriter, r *http.Request, resp a
 			continue
 		}
 		h[k] = v
+	}
+	// content-type 由**平台显式判定**，不留空给 net/http 隐式嗅探（F-13，见
+	// edge.DefaultContentTypeForBody 的注释：白名单被"按内容定类型"绕过，
+	// 且行为随 Go 版本漂移）。应用给了合法类型时不动它。
+	if h.Get("Content-Type") == "" {
+		h.Set("Content-Type", edge.DefaultContentTypeForBody([]byte(resp.Body)))
 	}
 
 	w.WriteHeader(status)
