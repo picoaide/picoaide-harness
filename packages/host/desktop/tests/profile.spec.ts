@@ -609,3 +609,22 @@ describe('removeStaleAsarFallbackLinks', () => {
     expect(lstatSync(join(modulesDir, '@deepseek-ai', 'real-pkg')).isDirectory()).toBe(true)
   })
 })
+
+describe('profile module fallback generation (P1-13)', () => {
+  it('materializes the installation closure into the shared profiles/node_modules', async () => {
+    const home = temporaryHome()
+    await prepareDesktopProfile(undefined, home, 'linux')
+    const modulesDir = join(home, 'profiles', 'node_modules')
+    // 上游 0.1.6-alpha.2 给 `healProfilesModuleFallback` 加了 `materialize` 选项
+    // （默认 `true`）并新增"只计算不落盘"的 `createProfileResolutionGeneration`。
+    // 我们的打包版链路**依赖这里真的落盘**：`module-resolution.ts` 的 CJS 重试与
+    // `removeStaleAsarFallbackLinks` 都建立在"共享 fallback 里有一条指向安装树的
+    // 链接"这个事实上。默认值被翻成 false、或落盘形态换成别的（proxy 目录等），
+    // 打包版就会在 profile 解析阶段静默回落到宿主树。这条断言钉住"落盘 + 指向真身"。
+    for (const name of ['@deepseek-ai/dsh-base', '@picoaide/dsh-enterprise', '@picoaide/dsh-cron']) {
+      const link = join(modulesDir, ...name.split('/'))
+      expect(lstatSync(link).isSymbolicLink(), `${name} 未落盘为符号链接`).toBe(true)
+      expect(existsSync(join(link, 'package.json')), `${name} 的链接目标读不到 package.json`).toBe(true)
+    }
+  })
+})

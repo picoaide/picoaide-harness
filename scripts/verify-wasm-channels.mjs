@@ -247,6 +247,7 @@ section('2. 仓库 pin 校验（upstream.json / .gitmodules / submodule 实际�
   if (recorded !== undefined && !pinVersion.endsWith(recorded.replace(/^dsh-v/, ''))) {
     console.log(`  WARN  设计总纲记录的 pin 是 ${recorded}，当前 pin 是 ${pinVersion} —— 历史记录面，不拦门禁`)
   }
+}
 
 // ---------------------------------------------------------------------------
 section('3. 渠道 CI dry-run：tag 名 → 渠道集（正式 tag 必须含 official）')

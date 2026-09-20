@@ -155,6 +155,105 @@ describe('workspace 子路径 import 必须都在打包必需清单里（2026-09
   })
 })
 
+describe('上游补丁目标的静态 import 必须在打包必需清单里（G-9，2026-09-20 补）', () => {
+  // 为什么要有它：`patches/*.patch` 的目标是**上游包**，升级时它们会整体换版
+  // （连 `lib/` 的哈希文件名都换）。这些包新引入的运行期静态 import 不在任何清单里时，
+  // `afterPack` 会放行一个"点开某功能才炸"的包 —— 本次升级实测到的第一条就是
+  // `dsh-sandbox-windows-acl` 新增 `@deepseek-ai/dsh-subprocess/control` 与
+  // `@deepseek-ai/dsh-lazy-require`（Windows 沙箱链路）。这条判据把"补丁目标的
+  // **子路径** import"与"打包必需清单"钉在一起；包根 import（`@deepseek-ai/dsh-tools`
+  // 这类）不逐条登记 —— 清单是"缺了会静默/致命"的抽查oracle，不是完整打包清单。
+  const PATCH_TARGETS = [
+    '@deepseek-ai/dsh-agent-presets',
+    '@deepseek-ai/dsh-client-ui-brand-official',
+    '@deepseek-ai/dsh-mcp-client',
+    '@deepseek-ai/dsh-plugin-package-inventory-deepseek',
+    '@deepseek-ai/dsh-sandbox-windows-acl',
+    '@deepseek-ai/dsh-subprocess-local',
+    '@deepseek-ai/dsh-web-fetch-http',
+  ]
+
+  /** Collect `<pkg>/<subpath>` static imports declared by one installed package. */
+  function subpathImportsOf(packageName: string): { specifiers: Set<string>, files: number } {
+    const packageDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'node_modules', packageName)
+    const specifiers = new Set<string>()
+    let files = 0
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'node_modules' || entry.name === 'src') continue
+        const path = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          walk(path)
+          continue
+        }
+        if (!entry.name.endsWith('.js') && !entry.name.endsWith('.mjs') && !entry.name.endsWith('.cjs')) continue
+        files += 1
+        const text = readFileSync(path, 'utf8')
+        for (const m of text.matchAll(/(?:from|import)\s*\(?\s*"([^"]+)"/g)) {
+          const spec = m[1] as string
+          // 只认 `<pkg>/<subpath>`：跳过相对路径、URL、node: 内置与包根 import。
+          if (spec.startsWith('.') || spec.startsWith('node:') || URL.canParse(spec)) continue
+          const parts = spec.split('/')
+          const bare = spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
+          if (bare === spec) continue
+          specifiers.add(spec)
+        }
+      }
+    }
+    walk(packageDir)
+    return { specifiers, files }
+  }
+
+  it('every resolvable upstream subpath import of a patched package is a required entry', () => {
+    const missing: string[] = []
+    let scanned = 0
+    let checked = 0
+    for (const target of PATCH_TARGETS) {
+      const { specifiers, files } = subpathImportsOf(target)
+      scanned += files
+      for (const spec of specifiers) {
+        const [, name, sub = ''] = /^((?:@[^/]+\/)?[^/]+)(?:\/(.*))?$/.exec(spec) ?? []
+        if (name === undefined || sub === '') continue
+        const manifestPath = join(
+          dirname(fileURLToPath(import.meta.url)), '..', 'node_modules', name, 'package.json',
+        )
+        if (!existsSync(manifestPath)) continue
+        const exportsField = JSON.parse(readFileSync(manifestPath, 'utf8')).exports ?? {}
+        const entry = exportsField[`./${sub}`]
+        const def = typeof entry === 'string' ? entry : (entry?.default ?? entry?.import)
+        if (typeof def !== 'string') continue
+        const relative = join('node_modules', name, def.replace(/^\.\//, ''))
+        // 只对"磁盘上真实存在"的落点提要求：解析不到的多半是可选/平台分支，
+        // 要求登记它们会把这条判据变成假红源。
+        if (!existsSync(join(dirname(fileURLToPath(import.meta.url)), '..', relative))) continue
+        checked += 1
+        if (!(REQUIRED_PACKAGED_RUNTIME_ENTRIES as readonly string[]).includes(relative)) {
+          missing.push(`${target} → ${spec} ⇒ ${relative}`)
+        }
+      }
+    }
+    // 前置断言：判据不能空转（真的扫到了补丁目标的 lib 文件与可解析子路径）。
+    expect(scanned, '没有扫到任何补丁目标的 JS 文件，判据会空转').toBeGreaterThan(0)
+    expect(checked, '没有解析出任何补丁目标的子路径 import，判据会空转').toBeGreaterThan(0)
+    expect(missing, `这些上游子路径会被打包版静态 import，但必需清单里没有：\n  ${missing.join('\n  ')}`).toEqual([])
+  })
+
+  it('pins the two G-9 entries the 0.1.6 upgrade introduced', () => {
+    // 显式钉住本次审计发现的两条（generic 用例可能在将来的上游版本里因
+    // "补丁目标不再 import 子路径"而失去覆盖，这两条不会）。
+    expect([...REQUIRED_PACKAGED_RUNTIME_ENTRIES]).toEqual(expect.arrayContaining([
+      'node_modules/@deepseek-ai/dsh-subprocess/lib/control.js',
+      'node_modules/@deepseek-ai/dsh-lazy-require/lib/index.js',
+    ]))
+    for (const entry of [
+      'node_modules/@deepseek-ai/dsh-subprocess/lib/control.js',
+      'node_modules/@deepseek-ai/dsh-lazy-require/lib/index.js',
+    ]) {
+      expect(existsSync(join(dirname(fileURLToPath(import.meta.url)), '..', entry)), `${entry} 在磁盘上不存在`).toBe(true)
+    }
+  })
+})
+
 describe('packaged desktop runtime verification', () => {
   it('fails the diagnostic Worker smoke when its archive omits the crash dump', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-smoke-'))

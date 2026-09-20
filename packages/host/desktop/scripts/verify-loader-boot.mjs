@@ -12,9 +12,38 @@ import {
 } from '@deepseek-ai/dsh-launch-environment'
 import { installProfilePackageResolver } from '../lib/module-resolution.js'
 import { prepareDesktopProfile } from '../lib/profile.js'
+// 数值来自唯一真源 `lib/startup-rows.js`（`FiberState` 是 const enum，运行时被擦除，
+// 只能钉数值；`tests/startup-rows.spec.ts` 负责与上游 `fiber.d.ts` 对拍）。
+import { FIBER_ACTIVE, FIBER_FAILED } from '../lib/startup-rows.js'
 
 const BIN_NAME = 'dsh-plugin-desktop-loader-smoke'
 const THIRD_PARTY_NAME = 'dsh-desktop-loader-smoke-plugin'
+
+/**
+ * Describe one entry's activation the way a human would triage it.
+ *
+ * 存在性（`resolve(id)` 拿得到 options）**不等于**该行真的活着：包名写错、
+ * 模块导入失败、`apply` 抛异常时条目照样在树里。2026-09-20 升级审计的 P0-9
+ * 就是"门禁只断言存在 ⇒ 坏包照样通过"。这里把判据换成激活状态。
+ * @param entry - resolved Loader entry, or undefined when the id is absent.
+ * @returns `'active'` only when the fiber is ACTIVE; otherwise why not.
+ */
+function activationOf(entry) {
+  if (entry === undefined) return 'absent from the Loader tree'
+  if (entry.disabled === true) return 'disabled in the composition'
+  const state = entry.fiber?.state
+  if (state === undefined) return 'no fiber (module failed to import)'
+  return state === FIBER_ACTIVE ? 'active' : `fiber state ${String(state)}`
+}
+
+/** Require ACTIVE, with the reason in the message. */
+function assertActive(label, entry) {
+  const activation = activationOf(entry)
+  if (activation !== 'active') {
+    throw new Error(`${label} is not active: ${activation}`)
+  }
+}
+
 const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-loader-'))
 // Isolate the product home for the whole boot: profile files live in the
 // temporary home, and plugins resolve their data dir through `$DSH_HOME`
@@ -135,6 +164,19 @@ try {
   }
   if (thirdPartyEntry?.options.name !== THIRD_PARTY_NAME) {
     throw new Error('profile-local third-party plugin did not activate')
+  }
+  // 存在 ≠ 激活：`resolve()` 拿到的是条目配置，导入失败/`apply` 抛异常时它照样返回。
+  assertActive('launcher-owned desktop plugin', desktopEntry)
+  assertActive('profile-local third-party plugin', thirdPartyEntry)
+  // 组合树里**任何**已启用行都不该是 FAILED。这条覆盖面比上面两条大得多：
+  // 我方 18 个 `desktop-*`/`picoaide-*`/`pico-*` 行不在上游的
+  // requiredStartupEntryIds 里（上游只 warn、启动照常成功），而这套冒烟里
+  // 没有该表，所以此前"某行 apply 抛异常"是完全不可见的。
+  const failed = [...ctx.loader.entries()]
+    .filter(entry => entry.fiber?.state === FIBER_FAILED)
+    .map(entry => entry.options.id)
+  if (failed.length > 0) {
+    throw new Error(`enabled Loader rows failed to apply: ${failed.join(', ')}`)
   }
   if (mountedSpec?.url !== 'http://127.0.0.1:43120/?dsh-desktop-mode=advanced&dsh-desktop-platform=darwin') {
     throw new Error(`desktop plugin produced an unexpected renderer URL: ${String(mountedSpec?.url)}`)
