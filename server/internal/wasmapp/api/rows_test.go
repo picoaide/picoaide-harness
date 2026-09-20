@@ -476,6 +476,13 @@ func TestSensitiveColumnHeuristicCoversBusinessVocabulary(t *testing.T) {
 		"shoujihao", "xingming", "shenfenzheng", "dizhi", "shengri", "yinhangzhanghao", "mima",
 		// 整名匹配类
 		"wechat", "contact",
+		// 四轮审计实测成片漏判的**实际列名**（带后缀）与 camelCase 写法。
+		// camelCase 由"先 ToLower 再切词"覆盖（`phoneNumber` → [phone, number]）——
+		// 这条同时防"把 camelCase 键塞进整名表"那种死条目（四轮审计发现
+		// `sensitiveColumnNames["phoneNumber"]` 从未被命中）。
+		"wechat_id", "wechat_no", "wx_id", "weixin_id", "qq_number", "qq_id",
+		"phoneNumber", "accountName", "idCardNo", "bankAccountNo", "contactPhone",
+		"id_card_no", "id_number", "card_number", "account_number",
 	}
 	for _, col := range mustMask {
 		if !isSensitiveColumn(col) {
