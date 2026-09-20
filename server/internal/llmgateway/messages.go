@@ -444,6 +444,8 @@ func anthropicBaseURL(base, protocol string) string {
 // upstream key the server owns is sent, so a client can never inject its own
 // credential or version drift on a proxied search.
 func (a *API) forwardAnthropic(c *gin.Context, up *Upstream, raw []byte, stream bool) (*http.Response, error) {
+	// P0-4 服务端侧第二道闸门：出站请求体剔除上游 DSH 私有扩展字段（见 sanitize.go）。
+	raw = sanitizeOutboundBody(raw)
 	url := upstreamURLFor(anthropicBaseURL(up.BaseURL, up.Protocol), "/messages")
 	client := a.client
 	if stream {
