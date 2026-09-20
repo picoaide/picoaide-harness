@@ -130,6 +130,43 @@ unmask**、审计账号放行、未登录零出站。
 已经在对方手里，`/rows` 不是额外的越权面。真正要把这两条也闭合，需要的是**把数据根移出
 服务端用户的可写范围**（部署面：独立 uid / 只读挂载），不是再加一层路径判据。
 
+
+## 7b. ⚠️ **已知限制：持有性证明挡不住"AI 自己开浏览器"**（三轮审计 P1-①，未修，需产品决策）
+
+### 事实（三个使能条件都实测过）
+
+1. 宿主本机路由 `GET /api/pico/apps/wasm/:app_id/rows` 现在要求**持有性证明**
+   （`dsh-auth-*` cookie，见 §2/§7 的判据）—— 这一步是有效的：本机伪造 Origin 的 `curl`
+   拿不到 cookie，403。
+2. 但**内置浏览器的分区故意镜像了这把 cookie**：`packages/host/browser/src/index.ts:475-505`
+   的 `mirrorBrowserAuthCookies` 把 shell origin 的 `dsh-auth-*` 从 defaultSession 复制进
+   当前浏览器分区（这是产品需要：`/browser-shell`、`/browser-overlay` 两个页面的写操作
+   要靠它过 `requireWriteProof`）。
+3. 而导航策略**不拦 shell origin**：`packages/host/browser/src/guard.ts:88` 的
+   `ALLOWED_SCHEMES` 对浏览器标签放行一切 `http(s)`，`classifyNavigation`（同文件 `:109-128`）
+   只对**应用窗口**（`kind:'app'`）做来源限制。
+
+⇒ 模型用 `browser_navigate('http://127.0.0.1:<port>/api/pico/apps/wasm/<app>/rows?table=…&unmask=1')`
+再用 `browser_get_text` 读回，就能拿到**未脱敏**的行数据。宿主侧的持有性证明**无法区分**
+"真页面的人"与"模型驱动的标签页"—— 因为那个标签页**就是**一个持有 cookie 的真页面。
+
+### 为什么没有在本批修（以及两个候选修法）
+
+不仓促改的理由：唯一的结构性修法（切断条件 2 或 3）会碰到**浏览器自己的页面** ——
+`/browser-shell` 与 `/browser-overlay` 正是从这个 origin 提供的，盲改导航策略可能直接
+弄坏内置浏览器与接管蒙版（这是"为了补一个洞而制造两个新洞"的典型形态）。因此这里把它
+写成**需要拍板的限制**，而不是一个临时补丁。
+
+| 候选 | 内容 | 代价 / 风险 |
+| --- | --- | --- |
+| **A（推荐）** | 把"shell origin"从**浏览器标签可导航目标**里排除：`Runtime` 已有 `setShellOrigin`（`runtime.ts:709`），在三个 `allowNavigation` 调用点（`runtime.ts:806/1699/3360`）加一层"是不是 shell origin"的判定，**同时**给浏览器自己的两个页面加白名单（它们不是模型导航目标，是宿主自己 load 的） | 需要把"宿主自己 load 的页面"与"模型导航"两条路径分开，改 `packages/host/browser`；浏览器套件（186+ 用例）必须全绿 + 补"模型导航到 shell origin ⇒ deny / 宿主 load shell 页 ⇒ 不受影响"两条判据 |
+| **B** | `unmask` 改成**人的手势**才生效：面板点「显示原值」时向本机路由换一个一次性 token（短有效期、绑 app+table），服务端只认"带 token 的 unmask" | 需要新的票据面；且 token 仍由本机路由签发 ⇒ 若模型能到达该路由，等于没加（所以**仍需 A**）；B 的真实价值是"人类操作留痕"，不是阻断 |
+
+**在拍板之前的口径**：`unmask` 应被视为"**给作者本人看的便利功能**"，而不是"对 AI 的强制边界"；
+`wasm_app_rows` 工具面没有 `unmask` 参数这一条仍然成立（模型走工具拿不到原值），
+但模型若**主动开浏览器导航**，当前实现挡不住。这一点必须让使用者知道，不能只在代码注释里。
+
+
 ## 7. 与本次修订同时新增的判据（2026-09-21 审计修复批）
 
 - 宿主代理：`tests/wasm-apps.spec.ts` 新增两条 ——
@@ -138,4 +175,3 @@ unmask**、审计账号放行、未登录零出站。
   时 URL 里不得出现 `?`）。两条都做过变异验证（去掉栅栏 / 把 query 扩到写面 ⇒ 必红）。
 - 服务端：`rows.go` 的"库不存在 ⇒ 404 且不建库"由 `appdb.SafePath`（`Lstat` 拒符号
   链接 + 不建库）在**helper 层**保证，不再依赖调用方的预检。
-

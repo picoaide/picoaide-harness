@@ -352,12 +352,43 @@ var sensitiveColumnTokens = map[string]struct{}{
 	"phone": {}, "mobile": {}, "cellphone": {}, "telephone": {},
 	"email": {}, "mail": {},
 	"idcard": {}, "idnumber": {}, "passport": {}, "bankcard": {},
+	// 姓名 / 地址 / 生日（2026-09-21 三轮审计 P2-③：这三类此前的漏判率最高——
+	// 结构化业务库几乎每张"员工/客户"表都有它们，而它们直接指认到人）。
+	//
+	// ⚠️ **故意不放裸 `name`**：本表既用于"逐词匹配"也用于"拼回整名匹配"
+	// （见 isSensitiveColumn 的 joined 分支），放进去会让 `file_name`/`hostname`/
+	// `table_name`/`display_name` 全部被误判 —— 而误判的代价是"排障时看不到任何有用
+	// 数据"，与漏判同样有害。所以只放**复合写法**：`real_name` → 拼回 `realname` 命中，
+	// 而 `file_name` → `filename` 不在表里。判据 TestSensitiveColumnHeuristicCoversBusinessVocabulary
+	// 的 mustNotMask 清单就是为这条纪律准备的（实测：加 `name` 立刻红 5 条）。
+	"realname": {}, "fullname": {}, "username": {}, "surname": {},
+	"firstname": {}, "lastname": {}, "nickname": {}, "personname": {},
+	"address": {}, "addr": {}, "street": {}, "city": {}, "postcode": {}, "zipcode": {},
+	"birthday": {}, "birthdate": {}, "birth": {}, "dob": {},
+	// 财务：薪资与银行账号（泄露后果与口令同级，且业务库里几乎必然存在）。
+	"salary": {}, "wage": {}, "income": {},
+	"account": {}, "accountno": {}, "accountnumber": {}, "bankaccount": {},
+	"iban": {}, "swift": {},
+	// 网络身份：IP 与设备标识（可关联到人）。
+	"ip": {}, "ipaddr": {}, "ipaddress": {}, "mac": {}, "macaddr": {}, "imei": {}, "imsi": {},
+	// 中文业务库里的**拼音列名**（2026-09-21 三轮审计实测：全拼音写法此前 100% 漏判）。
+	// 中文 SaaS/外包项目的建表习惯经常是 `shoujihao`/`xingming`/`shenfenzheng` 这类写法，
+	// 而"漏判 = 使用者 PII 进模型上下文"，正是本端点要防的那件事。
+	"shouji": {}, "shoujihao": {}, "dianhua": {}, "youxiang": {}, "xingming": {},
+	"xingmingquan": {}, "shenfenzheng": {}, "shenfen": {}, "dizhi": {}, "shengri": {},
+	"yinhang": {}, "yinhangzhanghao": {}, "zhanghao": {}, "mima": {}, "mimacuowu": {},
 }
 
 // sensitiveColumnNames 是"整名匹配"（无分隔符写法，或必须整体相等才算的词）。
 var sensitiveColumnNames = map[string]struct{}{
 	"tel": {}, "id": {}, "key": {}, "apikey": {}, "privatekey": {}, "secretkey": {},
 	"accesskey": {}, "cardno": {}, "phoneNumber": {}, "identity": {},
+	// 单独出现时足以指认到人、但**不能**进 sensitiveColumnTokens 的词：
+	// 它们作为子串在业务库里极其常见（`contact`/`content`/`gender` 里没有，但
+	// `name` 一旦进了 token 表，`filename`/`hostname`/`table_name` 都会被误判成敏感，
+	// 而误判的代价是"排障时看不到任何有用数据"）。
+	// 这里放的是"整名相等才算"的写法：`contact`（联系人）/`gender` 不进（不是标识符）。
+	"contact": {}, "contactinfo": {}, "wechat": {}, "weixin": {}, "qq": {},
 }
 
 // isSensitiveColumn 判定列名是否按默认策略脱敏。

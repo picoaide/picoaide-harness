@@ -440,3 +440,58 @@ func TestSchemaAuditHappensAfterSuccessfulRead(t *testing.T) {
 		})
 	}
 }
+
+// TestSensitiveColumnHeuristicCoversBusinessVocabulary 是默认脱敏启发式的**覆盖面判据**。
+//
+// 背景（2026-09-21 三轮独立审计 P2-③）：实测 29 个常见业务列名里 **22 个漏判** ——
+// 姓名/地址/生日/薪资/银行账号/IP，以及**全部拼音写法**（`shoujihao`/`xingming`/
+// `shenfenzheng`/`dizhi`…）。漏判的后果不是"作者看不到数据"，而是"**使用者的 PII 进
+// 模型上下文**"：AI 工具面默认开着、没有 `unmask` 参数，它拿到的就是这份默认视图 ——
+// 所以启发式的覆盖面**就是**"AI 只看脱敏数据"这句承诺的实际强度。
+//
+// 判据两条，缺一不可：
+//  1. **必须命中**的清单（业务库里指认到人的列）逐个断言敏感；
+//  2. **不得误判**的清单（按子串/词根会误伤的高频正常列）逐个断言不敏感 ——
+//     只加不查误判的用例会把启发式推向"什么都遮"，那等于把排障面关掉。
+//
+// 变异验证：删掉 sensitiveColumnTokens 里的 "realname"/"salary"/"dizhi" 任一项 ⇒ ①红；
+// 把 "name" 加进 sensitiveColumnTokens（而不是 Names 整名表）⇒ ②红（hostname/filename 被误判）。
+func TestSensitiveColumnHeuristicCoversBusinessVocabulary(t *testing.T) {
+	mustMask := []string{
+		// 身份
+		"password", "pwd", "api_token", "secret_key", "id_card", "idcard", "passport",
+		"real_name", "realname", "full_name", "fullname", "user_name", "username",
+		"first_name", "last_name", "nickname", "surname",
+		// 联系方式与位置
+		"phone", "mobile", "tel", "email", "address", "addr", "postcode", "zipcode",
+		// 人口属性
+		"birthday", "birthdate", "dob",
+		// 财务
+		"salary", "wage", "bank_account", "account_no", "iban",
+		// 网络身份
+		"ip_addr", "ip_address", "mac_addr", "imei",
+		// 中文业务库常见拼音列名（此前 100% 漏判）
+		"shoujihao", "xingming", "shenfenzheng", "dizhi", "shengri", "yinhangzhanghao", "mima",
+		// 整名匹配类
+		"wechat", "contact",
+	}
+	for _, col := range mustMask {
+		if !isSensitiveColumn(col) {
+			t.Errorf("列名 %q 必须按默认策略脱敏（漏判 = 使用者 PII 进模型上下文；"+
+				"确属正常业务列请把它加进本用例的不得误判清单并说明理由）", col)
+		}
+	}
+
+	mustNotMask := []string{
+		// 与 "name" 同形但不指认到人的高频列（误判的代价 = 排障时看不到有用数据）
+		"hostname", "filename", "file_name", "table_name", "app_name", "display_name",
+		"nick_name_label", // 注意：nickname 已由 token 覆盖，这条是「标签」语义
+		"content", "gender", "note", "remark", "title", "status", "enabled",
+		"created_at", "updated_at", "count", "total", "amount", "price", "score",
+	}
+	for _, col := range mustNotMask {
+		if isSensitiveColumn(col) {
+			t.Errorf("列名 %q 不应按默认策略脱敏（误判会让作者在排障时看不到有用数据）", col)
+		}
+	}
+}

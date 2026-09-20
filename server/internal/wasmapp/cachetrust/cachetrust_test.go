@@ -304,26 +304,46 @@ func TestEnsureNeverReportsTrustedOnError(t *testing.T) {
 	}
 }
 
-// TestEnsureReportsChmodFailureAsUntrustedWhenPossible 覆盖"Chmod 本身失败"那条分支。
+// TestEnsureChmodFailureIsUntrustedAndReported 钉住 **Chmod 失败** 这条分支的契约。
 //
-// 在 root（本机/CI 容器）下无法制造 EPERM，此时**显式 Skip 并说明原因**，而不是让
-// 一条恒假的断言冒充判据（旧版本的形态）。非 root 环境下它是真实判据。
-func TestEnsureReportsChmodFailureAsUntrustedWhenPossible(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("以 root 运行时 Chmod 有 CAP_FOWNER，无法构造 EPERM；" +
-			"该分支的契约（err 非 nil ⇒ 不可信）已由 TestEnsureNeverReportsTrustedOnError 覆盖，" +
-			"本用例只在非 root 环境下补 Chmod 这一条具体路径")
-	}
-	base := t.TempDir()
-	dir := filepath.Join(base, "cache")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+// 为什么用接缝而不是真实调用（2026-09-21 三轮审计 §1-①）：Chmod 失败在 root 下无法
+// 构造（CAP_FOWNER），旧版本因此 `t.Skip` —— 而 Skip 就是"这条分支可以静默回退"
+// （审计实跑：把失败分支改回零违规报告，整包 `go test` 仍 ok）。现在替换包级
+// `chmodDir` 接缝，让这条分支在**任何身份、任何文件系统**上都能确定性地被走到：
+//   - `err` 必须非 nil（调用方要知道"权限没被纠正"）；
+//   - 报告必须**不可信**（err 非 nil ⇒ Trusted()==false，与另外三条失败分支同契约）；
+//   - 反向对照：接缝恢复后同一目录必须 `err==nil && Trusted()==true`（防"恒报错/恒不可信"）。
+//
+// 变异验证：把 `chmodDir` 的失败分支改回 `return CacheTrustReport{Dir: dir}, err`
+// ⇒ 本用例红（Trusted 为 true）。
+func TestEnsureChmodFailureIsUntrustedAndReported(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "cache")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// 移走所有权：让当前用户不再是属主 ⇒ Chmod 报 EPERM。
-	// （单测里做不到 chown 到别人；改为把目录放进一个不可写的父目录并删除当前目录，
-	//  使 MkdirAll 无法重建 —— 这仍走"创建失败"分支，因此这里只断言契约，不猜具体分支。）
-	rep, err := Ensure(filepath.Join(base, "ro", "cache"), 0o700)
-	if err != nil && rep.Trusted() {
-		t.Fatalf("Chmod/创建失败时不得报可信：err=%v", err)
+
+	original := chmodDir
+	chmodDir = func(string, os.FileMode) error { return os.ErrPermission }
+	t.Cleanup(func() { chmodDir = original })
+
+	rep, err := Ensure(dir, 0o700)
+	if err == nil {
+		t.Fatal("Chmod 失败必须返回非 nil 错误（否则调用方以为权限已纠正）")
+	}
+	if rep.Trusted() {
+		t.Fatalf("Chmod 失败时报告不得是「可信」：violations=%+v", rep.Violations)
+	}
+	if len(rep.Violations) == 0 {
+		t.Fatalf("失败报告必须带至少一条违规（理由应说明失败原因）：%+v", rep)
+	}
+
+	// 反向对照：接缝恢复后同一目录必须真的通过（防"恒报错/恒不可信"的假实现）。
+	chmodDir = original
+	good, gerr := Ensure(dir, 0o700)
+	if gerr != nil {
+		t.Fatalf("接缝恢复后不应报错：%v", gerr)
+	}
+	if !good.Trusted() {
+		t.Fatalf("接缝恢复后必须可信：%+v", good.Violations)
 	}
 }

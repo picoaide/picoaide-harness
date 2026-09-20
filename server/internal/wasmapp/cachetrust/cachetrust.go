@@ -151,6 +151,15 @@ func verifyCacheEntryShape(path string) []CacheTrustViolation {
 	return out
 }
 
+// chmodDir 是 `Ensure` 纠正权限的唯一出口。
+//
+// 为什么留一个包级变量（2026-09-21 三轮审计 §1-①）：Chmod 失败这条分支**在 root 下
+// 不可能用真实调用构造**（CAP_FOWNER），于是守它的用例要么 Skip（= 静默可回退），
+// 要么写一条恒真的断言。用一个仅在测试里替换的接缝，把"失败分支的契约"变成
+// **任何身份、任何文件系统上都能跑**的判据（见 TestEnsureChmodFailureIsUntrustedAndReported）。
+// 它不是配置面（未导出、无 setter、生产代码永不赋值）。
+var chmodDir = os.Chmod
+
 // failedReport 构造"操作失败"的报告：**必定不可信**（至少一条违规，理由 = 失败原因）。
 //
 // 为什么需要它（2026-09-21 二轮审计 P1-①）：`Ensure` 的失败分支原先返回
@@ -225,7 +234,7 @@ func Ensure(dir string, mode os.FileMode) (CacheTrustReport, error) {
 			Reason: "缓存根目录在创建与授权之间被替换（非真实目录；平台不会跟随它改权限）",
 		}}}, nil
 	}
-	if err := os.Chmod(dir, mode); err != nil {
+	if err := chmodDir(dir, mode); err != nil {
 		// 不吞错：调用方必须知道"权限没被纠正"（此前这里静默，日志显示一切正常）。
 		// 同时**报告必须不再是"可信"**（2026-09-21 二轮审计 P1-①）：`(report, err)` 这对
 		// 返回值里，`err != nil` 与 `report.Trusted() == true` 同时成立是个陷阱 ——

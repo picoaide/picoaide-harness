@@ -288,3 +288,71 @@ func TestRuntimeDegradesWhenCacheRootIsRegularFile(t *testing.T) {
 	}
 	_ = mod.Close(context.Background())
 }
+
+// TestRuntimeRefusesUntrustedCacheDir 覆盖"不可信但可用"这一形态（三轮审计 P1-②）。
+//
+// 与上两条的区别：那条堵的是"目录不可用"（Ensure 报错 / wazero 打不开）；
+// 这一条堵的是**目录可用但已判定不可信** —— 缓存根是**符号链接**（违规文案：
+// "可被重定向到任意位置"）。第一版只打日志然后继续用，于是执行进程会从这个
+// 被重定向的目录**读**（mmap 成机器码）并**写**编译产物，而"条目只有同文件 CRC32"
+// 意味着布置链接的人可以自算 CRC 投毒。
+//
+// 判据三条（缺一不可）：
+//  1. `NewCompilationCache` 返回 `(nil, nil)`（降级信号，不是错误 —— 服务端不许因此起不来）；
+//  2. `runtime.New` 仍能装配并真编译（降级后功能不破）；
+//  3. **链接目标目录里不出现任何新文件**（这条是关键：只断言 (nil,nil) 挡不住
+//     "先用了再返回 nil" 的实现；目标目录被写入 = 平台真的把机器码放到了攻击者选的位置）。
+//
+// 变异验证：把 `!report.Trusted()` 分支改回"只打日志继续"（即删掉 `return nil, nil`）
+// ⇒ 本用例红（cache 非 nil，且目标目录出现 wazero 分片/条目）。
+func TestRuntimeRefusesUntrustedCacheDir(t *testing.T) {
+	root := t.TempDir()
+	attacker := filepath.Join(root, "attacker-dir")
+	if err := os.MkdirAll(attacker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// 把**分代目录**做成指向攻击者目录的符号链接（父目录先建好）。
+	dir := CompileCacheDir(root)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(attacker, dir); err != nil {
+		t.Skipf("环境不支持符号链接：%v", err)
+	}
+
+	cache, err := NewCompilationCache(root)
+	if err != nil {
+		t.Fatalf("不可信缓存不得导致报错（否则会一路 log.Fatalf）：%v", err)
+	}
+	if cache != nil {
+		_ = cache.Close(context.Background())
+		t.Fatal("缓存根是符号链接时必须降级为 nil（不得照用被重定向的目录）")
+	}
+
+	rt, rerr := New(context.Background(), Options{DataRoot: root})
+	if rerr != nil {
+		t.Fatalf("降级后 runtime.New 必须仍能装配：%v", rerr)
+	}
+	t.Cleanup(func() { _ = rt.Close(context.Background()) })
+	mod, cerr := rt.CompileModule(context.Background(), wasmtest.WithDataCount())
+	if cerr != nil {
+		t.Fatalf("降级后必须仍能编译：%v", cerr)
+	}
+	if mod != nil {
+		_ = mod.Close(context.Background())
+	}
+
+	// ③ 链接目标必须**一个字节都没多**（平台没有把编译产物写进攻击者选的目录）。
+	entries, derr := os.ReadDir(attacker)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("不可信缓存目录被照用：链接目标里出现了 %d 项 %v（平台把编译产物写进了被重定向的目录）",
+			len(entries), names)
+	}
+}
