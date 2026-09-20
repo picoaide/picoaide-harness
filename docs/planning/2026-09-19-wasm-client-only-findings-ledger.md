@@ -782,3 +782,98 @@ GET /api/server/admin/wasm-apps/opens/summary
 | H4 | **把 `check:wasm-client-only` 从 `advisory:true` 转为阻塞式 + 接入 CI** | L4 现状：W1–W5 未落地时残留断言会如实报出数百处存量命中，故暂为 advisory；**W6 前必须转阻塞**，否则门禁形同虚设 | `scripts/check-workspaces.mjs` 的 GUARDS 里该条去掉 `advisory`；本地 `corepack yarn check` 与 CI gate job 都跑该脚本（PG 相关 `go test` 归 server job） | L4（W6）+ 主控复核 |
 
 > 说明：§H 的四项**都不是**泳道内代码问题，而是"本仓之外/需要真机/需要发布动作"的部分 —— 登记在此避免被当成"已完工"。
+
+## AC. 本机全功能端到端实测（第二轮，2026-09-20）与 P0/P1/P2 处置
+
+**动因**：用户要求「你自己本机实际启动一个服务端和客户端进行测试一下，整个功能是否完整可用，包括上架下架、发布应用、审批、拒绝、运营看板、限制项目所有的操作都尝试一遍」。
+
+**环境**（可复用）：服务端 `server/bin/picoaide-server`（**用当前源码重新构建**）监听 `:18090`，PG 容器 `pg-test` 的独立库 `picoaide_e2e`，渠道目录 `PICOAI_CHANNEL_DIR=temp/e2e-func/channel`，`PICOAI_WASM_MEMORY_PROFILE=small`；管理端助手 `BASE=… bash temp/e2e-func/admin.sh`。矩阵与原始输出：`temp/wasm-client-only/e2e-functional-local.md`（21 行：**PASS 17 / FAIL 1 / BLOCKED 3**，三条 BLOCKED 全部同因 P0-1，非环境缺失）。
+
+| # | finding | 层次 | 现状 | 我的独立复核（本轮） |
+| --- | --- | --- | --- | --- |
+| — | **客户端侧四条（B12/B13/B14）与 P2-3 的真机复判** | — | 见 **§AC.1** | **11/11 PASS**（打包客户端 + 真实服务端，主控独立探针） |
+| **P0-1** | 应用打开链路整体不可用（app-proof 三方契约不一致：多 `server_url` 字段 + SPKI 44B 公钥 + 签 JSON 而非 `appproof-install-v1` 五段消息） ⇒ `open` 恒 `401 proof_required`，UI 显示 `OPEN_PROOF_REQUIRED`（与**本机** proof 闸的错误码撞名 ⇒ 误归因） | 宿主为主 + 服务端严格解码为触发点 | **已修**：`app-proof.ts` 按服务端真源重写（`installMessageBytes`/`proofServerURL`/`rawPublicKeyOf`/秒级 ts/per-app LRU + 单飞）；判据**读 Go 源码**对拍（`app-proof.spec.ts` 读 `appproof/proof.go` 与 `api/proof.go`，钉死前缀+五段顺序+解码结构体 tag 集合+32 字节公钥） | 真机 `open` **401→200**、宿主日志 0×400（交付方）；判据质量已抽查：**跨端读源码**而非各钉自己的字面量（旧版只断言"签名是 base64"，属已登记的假绿模式） |
+| **P0-2** | 「打开」返回 `opened` 但屏幕上没有任何窗口 | 宿主 + 桌面壳 | **已修**（三缺同时成立）：真实 Electron 窗口适配器**压根未实现**（只有接口声明 + 测试替身）+ 桌面壳**没 provide** + `profile.ts` **没注入 `userDataDir`** ⇒ 走 `windows === undefined` 分支只 emit 零消费者事件 | 真机（打包版 + 真实服务端）：CDP 目标出现 `picoaide-app://shared-notes/`，窗内渲染平台里的真实应用「团队共享便签墙」+ 身份 `zhangwei`；`opened → focused →（关窗）→ opened` 三态 PASS；**13 条变异全部实跑变红且 sha256 还原一致** |
+| **P0-3**（新发现） | 窗口开了但应用页恒显示"暂时连不上服务端"：handler 按契约合成 `Origin: <scheme>://<app_id>`，而 `session.fetch` 带 Origin 会**先发 CORS 预检** ⇒ 平台无 OPTIONS 路由 ⇒ `404` ⇒ `net::ERR_FAILED`（服务端日志只有 `OPTIONS … 404`） | 宿主 | **已修**：平台出站改 `net.request`（**显式传 session** ⇒ 证书 pin/代理策略仍走该 session；`content-encoding`/`content-length` 等逐跳头丢弃，因 `net.request` 交出的是**已解压**体） | 交付方 A/C/D/E 四组探针 + 变异"出站退回 `session.fetch`"变红 |
+| **P1-1** | 运营看板 `trend[].uv` 是各应用日汇总 UV 之和（`SUM(uv)`），与同页 `today.uv`/`totals.uv` 自相矛盾 | 服务端 | **已修**：`trend` 的 **PV 仍读日汇总**（曲线不断档）、**UV 改读明细** `count(DISTINCT user_id)`；日边界由 Go 单源算好后一次性传 SQL（`width_bucket(floor(extract(epoch))::bigint, ?::bigint[])`），**不写** `opened_at::date`/`AT TIME ZONE`（否则"日"有第二份实现且 DST 错位） | **我在修后二进制上实测闭合**：同一份数据 `SUM(uv)`（旧口径基准）=**6**、`count(DISTINCT user_id)`（真值）=**2**、API `trend[0].uv`=**2** 且与 `today.uv`/`totals.uv` 一致；PV 两口径均 25。设计 §5.1c A 已同步订正 |
+| **P2-1** | `PUT …/limits` 顶层信封不校验：扁平 body（缺 `limits` 键）**静默**回落部署档位且 `200` + 无审计 | 服务端 | **已修**：未知顶层键/缺 `limits` 键一律 `400 VALIDATION`（`allowed:["limits"]` + 中文 hint），闸门在落库**之前** ⇒ 误用零副作用；回落档位改为**显式** `{"limits":null}` | **我实测**：扁平 body → `400`（`field=app_db_readers`）；未知顶层键 `bogus` → `400`；`{"limits":null}` → `200`（显式回落）。**修前**该形态是 `200` 静默回落 |
+| **P2-2** | webadmin 来源标签重复：`来源：控制台保存（wasm.limits）（wasm.limits）` | webadmin | **已修**：界面只显示服务端 `source_label`（设置键已由服务端拼好），回落分支也不再自拼 | **我实测**：源码唯一真源（`Limits.tsx:516-522`）；**构建产物**（`server/webadmin/dist/assets/*.js`）里 `setting_key` 字面量 **0 处** ⇒ 前端确实不再拼 |
+| **P2-3** | 冻结 / 不存在在 `open` 上同为 `404`，客户端只按 `status` 判断 ⇒ 冻结（只读快照、数据保留）被当成"应用没了" | 服务端 + 宿主 + 客户端 | **服务端半边 = 既定裁决 (b)、非缺陷**（两档 `reason`：`app_frozen` / `app_not_found`；下架由 410 承载）—— 已核对逐字一致；**宿主半边已修**（按 `error.details.reason` 分流：`app_frozen` ⇒ **不关窗/不清缓存** + 冻结文案；`app_not_found`/410 ⇒ 关窗清缓存）；**客户端半边在修**（`readHostPlatformRefusal` 原本只读 `platform_code`，须同时读 `platform_reason`，否则冻结在页面上仍塌回"应用不存在"） | 宿主两档真机验过（冻结窗口仍在、软删窗口消失）；客户端半边判据 + 变异待该泳道交付后复核 |
+| **P2-4** | 应用深链触发 auth 解析器的误导告警 `pico-deep-link: ignored malformed deep link`（两条监听器共用事件、都打 warn） | 客户端宿主 | **已修**：新增 `routeDeepLink()` 按 **scheme/host 分流** —— 自定义 scheme + `host=app` ⇒ 静默让行；其余保留 warn 但带**可判别原因**（`host=auth without token` / `not an auth callback: host=settings` / `not our scheme (scheme=…)` / `malformed url`）；scheme **仍取注入参数**（未新增读随包 `channel.json` 的路径 ⇒ 避开 tsdown 内联回落坑） | 交付方变异"去掉分流"变红（4 例）；跨渠道文案无回归 |
+| **P2-5** | 「拒绝」允许不带理由（作者拿不到可执行反馈） | 服务端 + webadmin | **已修**：`reason` **必填**（归一后空/纯空白都拒），闸门在**状态检查之前**；webadmin 提交按钮 `trim()===''` 时禁用、Label 标「必填」 | **我实测**：`{}` → `400`（`field=reason`）；`"   "` → `400`；**正向未误伤**：带合法理由 → `200` 且理由落库并回给作者 |
+| **相邻** | `proofIssueError()` 把解码类失败也报成 `signature_invalid` | 服务端 | **已修（第三轮审计后加严）**：公钥 44 字节（SPKI/DER）⇒ `invalid_public_key`、签名空/纯空白/非法 base64/长度不符 ⇒ `signature_malformed`、`ts` 缺失或 `<=0` ⇒ `invalid_timestamp`（**死分支已消除** —— 审计实测原实现把空签名先折叠成大条件，新增分支不可达）；外层码仍 `401 proof_mismatch`（客户端"按码重签"策略不变） | 交付方 6/6 变异全 RED；**认账残留**：`install_id`/`nonce` 的**形状**失败仍落 `signature_invalid` ⇒ 该码是"最后兜底档"，**不能**读成"验签一定不过"（已在 `server/docs/03-api-reference.md` 写明，不再作过度声明） |
+
+### AC.1 客户端侧矩阵复跑（**主控独立探针**，2026-09-20）—— 11/11 PASS
+
+**动因**：§AC 的表里 B12 判 FAIL、B13/B14/B15b 判 BLOCKED，全部同因 P0-1/P0-2；两条 P0 修完后必须**在真机重新判**，不能靠交付方自述。
+
+**环境**：`server/bin/picoaide-server`（当前源码重建）`:18090` + PG `picoaide_e2e`；打包客户端 `packages/host/desktop/dist/linux-unpacked`（`yarn prebuild` + `package-dir.mjs` 重建，**asar 内已实测含本期新字面量** `app_frozen` / `PLATFORM_` / `app-frozen`，且**不含**尚未实现的 `will-redirect`——证明产物确实是这一版）；假上游 `mock-upstream` `:18081`（**必须是受管后台作业**：`( … & )` 子壳会随 bash 调用结束被杀，本节实测踩到一次）；探针 `temp/e2e-matrix/probe-matrix.mjs`，原始输出 `temp/e2e-matrix/MATRIX-RESULT.json`。
+
+| # | 断言 | 结果 |
+| --- | --- | --- |
+| 1 | 渠道：本机只读路由给出应用 origin scheme（宿主注入，非前端写死） | PASS（`picoaide-app`） |
+| 2 | B12 本机 `open` 路由 **200**（P0-1 现场是 `401 proof_required`） | PASS |
+| 3 | B12 `window ∈ {opened,focused}` 且 `opens.today.pv` **含本次调用** | PASS |
+| 4 | B13 应用窗口**真的出现**（CDP 出现应用 origin 的 target；P0-2 现场是 0 个） | PASS（`picoaide-app://shared-notes/`） |
+| 5 | B13 应用页渲染的是**应用内容**（不是宿主错误页），应用自己的 `fetch('/')` = 200 | PASS（标题「团队共享便签墙」、正文含身份 `zhangwei` 与历史便签、5520 字节） |
+| 6 | B13 应用页 `origin` = 应用协议 origin 且 `isSecureContext` | PASS |
+| 7 | B13 应用页 `localStorage` 可用 | PASS |
+| 8 | B14 应用内 AI：`POST /__picoaide/ai/chat` 200 + 非空回复 | PASS（经假上游回 `mock upstream echo: …`，`usage.promptTokens=11`） |
+| 9 | P2-3 冻结档：宿主**透出** `platform_reason=app_frozen`（不合流成"不存在"） | PASS |
+| 10 | P2-3 冻结档：文案可辨（「应用已被管理员停用」+「数据仍保留」），**不是**「应用不存在」 | PASS |
+| 11 | P2-3 冻结档：**已有窗口被保留**（冻结是只读快照，不关窗不清缓存） | PASS |
+
+**过程诚实记录（探针自身也出过两次假红，已订正）**：①第一版在第 3 条断言了**平台**契约的 `changed`，而本机 `open` 路由的响应形状是 `{window,app_id,url,opens}` —— 平台契约由服务端探针 `open-app.mjs` 覆盖（实测 200 且 `version/release_id/title/changed/opens` 齐全），两者不可混谈；②第一版调用应用内 AI 时没传 `stream`，而**缺省是 `true`（SSE）**，于是 `r.json()` 解析失败被读成"空回复" —— 真源 `ai-chat.ts:96` 与 `:229`，显式 `stream:false` 后响应为 `{content,usage?}`。**这两条都不是产品缺陷**；记在此处是为了不让"探针假红"被后人当成回归。
+
+### AC.2 第三轮独立对抗审计（两份）与其修复 —— 服务端 4 条已修并**由主控活体复验**
+
+**审计对象与结论**：`temp/wasm-client-only/audit-server-p1p2.md`（服务端面，312 行）与 `audit-app-window.md`（宿主面，33KB）。两份都只读、探针落 `temp/`、被审文件 sha256 进场==收场、域名守卫零命中。
+- **服务端面**：六条主修法**全部真实存在且有效、零虚报**；P0 **0** / P1 **0** / P2 **4**（下面 AUD-1..4）。4 条抽跑变异全 RED，与交付方一致。
+- **宿主面**：交付方 6 条声称**全部独立复现成立**（含真机 CDP 目标与窗口内渲染真实应用内容）；**P0 = 0**（H1 的每条凭据触达路径都打不通：`document.cookie` 空、`SameSite=Strict` 下 cookie 不随行、本机 `/api/pico/**` 读不到、`webPreferences` 最小面）；**P1 2 条 + P2 4 条**（见下）——13 条变异抽验 6 条全红、还原 sha256 逐条相等。
+
+**服务端四条（已修，主控在修后二进制上活体复验）**：
+
+| # | 审计发现 | 修法 | **我的活体复验（`:18090` + 真 PG）** |
+| --- | --- | --- | --- |
+| AUD-1 | **第一版 P1-1 修复自身引入的不变量回归**：`trend.pv` 读 5 min 陈旧的日汇总、`trend.uv` 读实时明细 ⇒ 同一响应出现 `uv>pv`（活体 `{pv:26,uv:27}`），且 tick 前曲线漏掉"今天" | 趋势**按天同源**：明细覆盖到的天 PV/UV 都取明细（一次聚合同时得 `count(*)` 与 `count(DISTINCT user_id)`），只有明细已不在的天 PV 回落日汇总；日期集合 = 明细天 ∪ 日汇总天 | `trend[0] = {day:2026-09-20, pv:33, uv:2}` 与 `today` **逐值一致**；`uv>pv` 的点 **0 个**；曲线**含今天** ✅ |
+| AUD-2 | `{"limits":null}` 号称"回落部署档位"**在生产装配上不成立**（`Apply("")` 把档位值又写回 settings、`source` 恒 `setting`）；且原判据只由**测试替身**支撑（"mock 掩盖契约"类假绿） | 选 (a) **真回落**：新增 `serverstore.DeleteSetting`（含缓存失效），清 `settings.wasm.limits` 行 + 回到 `profile`/`default` + 日志；审计条件加"来源变化"；**补生产装配判据**（`cmd/server` 真 holder + 真 PG + 生产 `AdminRoute` 路由，7 段断言） | 改前 `source=setting`、label「控制台保存（wasm.limits）」、settings 行 **1**；`{"limits":null}` → 200；改后 `source=profile`、label「部署档位 small（PICOAI_WASM_MEMORY_PROFILE）」、settings 行 **0**；审计有留痕 ✅ |
+| AUD-3 | 新增的 `ErrSignatureMalformed` 分支是**死代码**（空签名先被折叠成大条件），`signature:""`/`" "`/`ts:0` 仍报 `signature_invalid` | 空/纯空白签名 ⇒ `signature_malformed`；`ts<=0` ⇒ 新增 `ErrTimestampMalformed` → `invalid_timestamp`（仍 `Unwrap` 到 `ErrMalformed`，外层码不变） | 空签名/纯空白 ⇒ `signature_malformed`；`ts=0`/负数 ⇒ `invalid_timestamp`；SPKI 44B ⇒ `invalid_public_key`；**64 字节翻转一位**（真验签不过）⇒ `signature_invalid`；合法 ⇒ 200。**外层码全部仍是 `401 proof_mismatch`** ✅ |
+| AUD-4 | `days` 被钳到 90 且与库内 `maxStart` 恰好相等 ⇒ `capped` **恒 false**、`days=365` 静默变 90（调用方无从判断） | 端点记 `requestedDays`，`capped = sum.Capped || requestedDays > days`（未加新响应键，避免动冻结键集） | `days=7/90` ⇒ `capped=false`；`days=91/365` ⇒ **`capped=true`** 且 `from/to` 是保留期内 90 天 ✅ |
+
+**宿主面两条 P1 + 四条 P2（已修，报告 `temp/wasm-client-only/fix-audit-app-window-round2.md`）**：
+- **HOST-P1-1 导航闸门不覆盖重定向 ⇒ 已修**：`installAppWindowGuards` 增 `will-redirect`，与 `will-navigate`/`will-frame-navigate` **共用同一个 `refuse` 闭包**（唯一 origin 判据，无第二份逻辑）。真机（真实 Electron + 真实适配器 + 真实 302）：外站 302 与"另一个 app origin"302 ⇒ **窗口 URL 不变** + 宿主记 `refused a … navigation`；同 app 302 仍放行。变异（删监听器）真机**精确复现审计原发现**（`redirect:external=https://example.com/`、`redirect:otherapp=picoaide-app://appb/`）⇒ RED。
+- **HOST-P1-2 应用窗口跑默认 session ⇒ 已修（按 §7.2/R2S-8 改为按用户分区）**：契约层把 partition 做成**显式必填**（`createAppWindow({partition})`、`ensureSessionGuard(partition)`、`WasmAppsWindowsOptions.partition: () => string` **每次 open 求值**），分区非法/缺席**构造期 fail-loud**；插件侧 `currentPartition()` 唯一实现，三个消费者（协议 handler 注册 / 守卫 / 建窗）同源。真机三条如实回答：①应用页真的在分区上（`isDefaultSession:false/isTargetPartition:true/storagePathMatches:true`，默认 session 的 cookie 读不到）；②`ensurePartition`/`ensureSessionGuard` **不再是死路径**（协议 handler 真渲染、应用窗 `clipboard-read=denied`、同分区普通窗口请求应用 scheme ⇒ handler 零调用）；③last-wins 耦合**构造性消除**（应用窗口路径完全不碰默认 session，主窗口 granted / 应用窗 denied，且灵敏度对照能被打坏）。**顺带纠正审计一处推断**：`ensureSessionGuard` 是 WeakSet 幂等的、`registerDefault()` 在 boot 期已标记默认 session ⇒ 旧代码那次 `ensureSessionGuard(defaultSession)` 其实是 **no-op**，真实后果是"守卫装在错 session ⇒ 保护不到应用窗口"，而非"随时会炸的 last-wins"（变异因此必须绕过幂等才红）。
+- **P2 三条修 + 一条订正**：`createPlatformFetch` 先构造 Response 再置 settled（真机 `status700 ⇒ REJECTED`，abort 也有结论）；**跨源 302 出站改 fail-closed**（`redirect:'manual'` + `redirect` 事件同步判源，跨源/解析失败/超 5 跳 ⇒ abort+reject；真机目标 host **零请求**，同源 302 仍跟随）；**子框架**经真机定标确认钩子本就会触发（缺口在判据不在钩子）⇒ 判据放宽到子框架（跨 app 仍拒、同 app 与 http(s) 放行、非 http(s) 外链仍拒），并新增 `platform-frame-fence.spec.ts` **对拍服务端源码**钉住平台侧依赖（CSP `default-src 'none'` + `frame-ancestors 'none'`、XFO DENY 且宿主独占）；报告用例数口径订正为「21 文件 / 259 用例」并标注测量时刻。
+- **宿主面变异**：**12/12 全红**且产品文件 sha256 前后一致；harness 新增**证据门槛**（探针无 JSON/fatal/watchdog ⇒ 判 INCONCLUSIVE 不算红）——第一版曾因副本缺 `node_modules` 把一条误记成红，已修。
+- **宿主面认账**：http(s) 子框架放行**依赖平台 CSP**（判据 C16 钉住，平台一放松就红）；只测 Linux/Xvfb + Electron 43.4.0；平台侧"写不出 `Location`"的偶然性属服务端泳道。**契约是破坏性变更**：`createWasmAppsWindows` 现在必填 `partition`（审计方探针复跑前要补 `partition: () => 'persist:agent-browser-<user>'`，否则构造期即抛，属有意 fail-loud）。
+
+**服务端认账残留（记录，不阻塞）**：① `days` 不回显 `requested_days`（冻结键集，加键需三面同改）；② 清空也过四笔账水位判据 ⇒ 极端内存压力下清空被**如实拒绝**（非静默改写）；③ `install_id`/`nonce` 的**形状**失败仍落 `signature_invalid` ⇒ 该码是"最后兜底档"，已在 API 文档写明、不再过度声明；④ 趋势仍是稀疏序列、`readyz` 的 `mem_profile=limits/profile:default` 与控制台 `source=default` 字面不同形（都不撒谎）。
+
+**仍未闭环（**不得说成已完工**）**：① **F12 只落地了安全半边**：`http(s)` 外链**一律不在应用窗口导航**（§7.2 的冻结条款，已实现）；UX 半边（**内置浏览器新标签 + 应用窗口提示条**、下载的最小反馈）**未接线** —— 文案真源 `app-window-copy.ts` 的 `externalLinkNotice`/`downloadStartedNotice` 已定义且被 5 条判据钉住（本轮实跑 `app-window-copy.spec.ts` 5/5 绿），缺的是调用点；② AI 控制权胶囊/蒙版、AI 按 `app_id` 寻址（surface seam）属 W3/浏览器泳道；③ `trend[].uv` 在**早于 90 天明细保留期**的日期只能如实给 0（彻底解法＝日汇总加一条 `(day)` 维度全局去重行 + 写路径变更 = **需迁移**，已登记候选，**禁止**就地改回 `SUM(uv)` 顶替）；④ P1-1 的 UV 聚合多一次明细顺序扫描（要优化需 `(opened_at,user_id)` 索引 = 迁移）；⑤ 每次打开因一次性 jti 多花一次 `401`+重签往返（属 app-proof 设计，用户无感）；⑥ 三平台只实测 Linux/Xvfb（Windows/macOS 的 `setAspectRatio` 与自定义协议行为待真机）。
+**审计状态**：P0-2/P0-3/P1-1/P2-1/P2-2/P2-4/P2-5 与"客户端冻结文案"的**独立对抗审计**在本轮交付后立即启动（宿主面 + 服务端面两份，见 §AD 之后的审计报告）；**按章程，上表任何一条在独立审计报出零新增 P0/P1 之前都不得记为"闭环"**。
+
+## AD. 隐私面：真实域名与客户身份的清理（2026-09-20）
+
+**规则**（`AGENTS.md`）：本仓**公开**，客户自有域名、被投递/测试环境真实主机名**永不出现**（含**提交信息**与 CI 记录）；占位符一律 `example.com`。
+
+**① 代码与文档面 = 零命中，且已变成判据（而非人工 `git grep`）**
+- 新增白名单式**前向守卫** `scripts/check-no-real-domains.mjs`：判据 = 已跟踪文件里的 URL host / 裸主机名 / URL 中的公网 IPv4 / **提交信息区间**（`origin/master..HEAD`）四路，未登记 host 一律失败；命中输出**默认脱敏**（CI 日志公开）；合成负例**运行时拼接**（守卫自身不得内嵌客户域名）。
+- **本轮实测出一个会让门禁恒红的自身缺陷并修掉**：守卫扫到自己 —— `MULTI_LABEL_SUFFIXES` 语料里的四个两段式 `.cn` 后缀（`.com.cn`/`.net.cn`/`.org.cn`/`.gov.cn`）被 `HOST_TOKEN` 读成 `label+TLD`（4 处），外加注释里两处**示例主机名**（畸形语料示例与 URL 尾随标点示例，各 1 处）⇒ **`yarn check` 实测 `EXIT=1`**。修法：**多段公共后缀自身不是主机名**（语义修正；带真实标签的三段式主机名仍照常命中）+ 两处示例改保留命名空间；并给自证补了**两个方向**的用例（后缀本身不红 / 两段后缀下的三段式主机名必红），变异 A（拆掉跳过规则）与变异 B（放宽成"以任意后缀结尾一律跳过"）**各自变红**，还原后 sha256 与改前一致。
+  > 写本段时第一次把示例主机名**原样抄进了台账**，`node scripts/check-no-real-domains.mjs` 立刻报 3 处命中 —— 守卫在"文档描述守卫"这条路径上也被实测有效；本段最终版已改用后缀记法（`.com.cn`）与保留命名空间，复跑零命中。
+- 守卫**确实在门禁里**：`scripts/check-workspaces.mjs:76` 的 `GUARDS` 有 `check:no-real-domains`（本地 `yarn check` 与 CI gate job 同义）⇒ 这是本次唯一一条会让 gate 恒红的缺陷。**其余 9 条静态根守卫（layout/workflows/ci-scripts/patch-resolutions/inventories/theme-tokens/no-leftover-mutants/migration-range/wasm-channels）本轮实跑全 OK。**
+- 现状：`node scripts/check-no-real-domains.mjs` → **零命中 ✅**（扫描 2144 个已跟踪文件）。
+
+**② CI 记录面（用户原问「ci 记录里是否出现了隐私内容」）= 零命中，且掩码确证生效**
+- 扫描口径：最近 **24 个 run 的全部 job 日志**（**160 个日志文件 / 21 MB / 无空文件**）+ **v2.7.5 正式 tag（唯一会构建品牌渠道的那次）的 `Release (server image archive)` 与 `Desktop (Linux)`** + `v2.7.6-beta.5` 的 Release job。脚本 `temp/ci-privacy/scan-ci-logs.sh`。
+- 结果 **0 命中**；同时证明不是"真空绿"：**正向对照**（造的含客户域名样本）同一 grep 命中 1；且日志里 `***` 出现 **32 次**、`ci-channels.sh` 步骤真实存在、原文含 `ci-channel-transfer: pull 完成(2 个品牌渠道经 R2 中转,渠道名与路径均未进入公开面)` ⇒ **掩码机制真的在工作**，品牌渠道的身份与路径未进公开面。
+- 静态面复核：CI 脚本**从不回显** `defaults.server_url` 的取值（`ci-channels.sh` 只在非法时报字段名）。
+
+**③ 可编辑的公开元数据 = 已清理（域名/部署 IP）**
+- 发现并清理：**12 个 PR 正文** + **2 个 Release 正文**（`v2.6.9-beta.2`/`.3` 的自动 PR 列表）含真实域名或部署 IP：域名 → `example.com`（保留命名空间），部署 IP → RFC 5737 文档网段（`192.0.2.10`/`192.0.2.20`）。脚本 `temp/ci-privacy/scrub-public-metadata.sh`；**原文逐份备份**在 `temp/ci-privacy/backup/`（可逆）；复扫 **PR 正文 / Release 正文 / PR 标题全部 0 命中**。
+- **守卫的盲区（认账）**：守卫只看**已跟踪文件**（新文件须先 `git add`），GitHub 的 **Release 正文与 PR 标题/正文不是文件 ⇒ 不在判据内** —— 上面那 14 处泄漏正是从这条盲区出去的。
+
+**④ 仍未清除、需要用户拍板的残留：`origin/master` 上 11 条历史提交信息**
+- 逐条枚举（`git log origin/master`，消息体匹配）：`517bf0c6b0`(example-b)、`d436e036bd`(example-a)、`3945dbf43a`(example-a)、`822d93e987`(example-a 域)、`21e2b59a2f`(example-a 域)、`fd3760272f`(example-a)、`b3f59ccd61`(测试域名族)、`7310cb4ca1`(同)、`97923dcf34`(同)、`99099b296f`(同)、`86bf6aa0f3`(同)。
+- 性质：**5 条泄漏测试/部署域名族、5 条泄漏客户生产域名/主机名、1 条泄漏客户渠道 id**；**无凭据/密钥**。另：2 个 PR 标题与 8 个 PR 正文仍含**客户名**（非域名）。
+- **主控建议：不做历史重写。** 理由是技术性的而非回避：①本仓**已公开**，重写**不能撤回已披露**（GitHub 侧旧对象长期可按 SHA 取到，fork/镜像/CI 缓存同理）；②重写会打断 **91 个 tag / 76 个分支**与全部已发布产物的溯源（tag→提交 SHA 已写进发布说明与部署记录）；③代价与收益不成比例，而**前向**已被守卫拦住（新提交进 `origin/master..HEAD` 区间即受检）。
+- 因此登记为**已认账残留**；若合规上必须清除，正确做法是"协调式重写 + bundle 备份 + 重打 tag + 明示旧 SHA 仍可达"，需用户明确授权后才动。

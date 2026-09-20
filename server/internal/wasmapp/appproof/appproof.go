@@ -74,6 +74,40 @@ var (
 	ErrReplayed = errors.New("appproof: 重放")
 )
 
+// 签发失败里"**形状类**"的三个子类（相邻缺陷，2026-09-20 本机全功能实测 + 独立对抗审计）。
+//
+// 现场：客户端把安装公钥按 **SPKI/DER**（44 字节）base64 发上来，而服务端要求 raw
+// Ed25519（32 字节）⇒ `decodePublicKey` 失败 ⇒ 旧实现一律归到 `ErrMalformed`，于是
+// 签发端点回 `proof_mismatch / signature_invalid`（"安装签名校验失败"）——
+// **把公钥编码问题误报成签名问题**：对接方照着 hint 去查签名消息拼装，方向完全错
+// （实测把 44 字节公钥报成签名问题，多花了一整轮定位）。
+//
+// 因此拆出三个可判别的原因。它们**仍 `Unwrap` 到 `ErrMalformed`**：`ErrMalformed` 是
+// "proof 结构/签名非法"这个大类，既有调用方与判据按 `errors.Is(err, ErrMalformed)`
+// 判大类，细分不能让它失效（否则这次修复会打红一批与本次无关的判据）。
+var (
+	// ErrKeyMalformed 表示**安装公钥**缺失 / 不是 base64 / 不是 raw Ed25519 32 字节。
+	ErrKeyMalformed = fmt.Errorf("%w（安装公钥非法）", ErrMalformed)
+	// ErrSignatureMalformed 表示**安装签名**缺失（含纯空白）/ 不是 base64 /
+	// 不是 raw Ed25519 64 字节。
+	ErrSignatureMalformed = fmt.Errorf("%w（安装签名非法）", ErrMalformed)
+	// ErrTimestampMalformed 表示**安装签名的时间戳**不是合法的 unix 秒（缺失 / <= 0）。
+	//
+	// 为什么单列（AUD-3，2026-09-20 独立对抗审计）：`ts<=0` 曾经与"签名缺失"一起被
+	// 折叠进同一个大条件（`if req.TS <= 0 || TrimSpace(req.Signature) == ""`），对外报成
+	// `signature_invalid`（"安装签名校验失败"，hint 还让人去查 appproof-install-v1
+	// 五段消息怎么拼）—— 而病根是"时间戳不是一个有效时刻"，补救是**重新取当前时间
+	// 再签**（与 `timestamp_skew` 同一句话）。把非签名问题报成签名问题正是本泳道
+	// 要消除的误诊。
+	//
+	// 为什么不归 `ErrExpired`（同样是"时间"问题）：那会把外层码从
+	// `401 proof_mismatch` 变成 `401 proof_expired`（`proofIssueError` 按
+	// `errors.Is(err, ErrExpired)` 分支），而"客户端按外层码重签"的策略与既有判据
+	// 都建立在 `ts<=0` 属于 `ErrMalformed` 大类之上。归到 `ErrMalformed` 的子类
+	// 既保住外层码，又让 `details.reason` 能如实区分。
+	ErrTimestampMalformed = fmt.Errorf("%w（安装签名时间戳非法）", ErrMalformed)
+)
+
 // keyFileMode 是密钥文件与注册表文件的权限（0600，与 master.key 同口径）。
 const keyFileMode = 0o600
 

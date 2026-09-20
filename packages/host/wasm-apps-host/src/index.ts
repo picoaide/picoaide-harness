@@ -29,6 +29,7 @@ import { DEFAULT_APP_SCHEME, appOrigin, appSchemePrefix, isValidAppId } from './
 import { AI_CHAT_PATH, handleAiChat, type AiChatAuthorization, type AiChatTurnRunner } from './ai-chat.ts'
 import { AI_CONSENT_FILE_NAME, createAiChatAuthorization } from './ai-authorization.ts'
 import { createAppProofProvider, type InstallKeyStore } from './app-proof.ts'
+import { frozenAppHint, frozenAppTitle } from './app-window-copy.ts'
 import { WasmAppsCache, type CacheScope } from './cache.ts'
 import { createAppOpenGate } from './open-gate.ts'
 import { createDeepLinkQueue, sanitizeAppPath } from './deep-link-queue.ts'
@@ -39,7 +40,7 @@ import { createHostRequestSurface, type SurfaceReply } from './host-request.ts'
 import { hostCopy, hostLocaleFrom, type HostLocale } from './locale.ts'
 import { browserPartitionFor } from './partition.ts'
 import { readAppSession, subscribePicoSession, type PicoSessionLike } from './session.ts'
-import { createWasmAppsWindows, type WorkArea } from './windows.ts'
+import { createWasmAppsWindows } from './windows.ts'
 
 /** Cordis 插件名（loader 诊断用）。 */
 export const name = 'pico-wasm-apps-host'
@@ -103,6 +104,22 @@ export const WASM_APP_DEEP_LINK_FOREIGN_EVENT = 'pico/wasm-app-deep-link-foreign
 
 /** 本机路由请求体上限（只有一个 app_id + path，不需要更多）。 */
 const OPEN_REQUEST_BODY_MAX_BYTES = 64 * 1024
+
+/**
+ * 本机路由错误信封里"**平台**拒绝了这次调用"的码前缀（**跨端契约**；客户端按它把
+ * "哪一层拒的"分流，见 `packages/client/wasm-apps/src/client/host-proof.ts`）。
+ *
+ * 为什么必须加前缀：平台的证明码与**本机证明闸**的码字面相同（都是
+ * `proof_required` / `proof_expired`），而两者该给用户的下一步完全不同 ——
+ * 本机码 = "客户端本机服务的凭据没通过"（重取令牌/重启客户端），平台码 =
+ * "服务端拒绝了这次打开"（升级/联系管理员）。原样透传时客户端只能二选一：
+ * 2026-09-20 的真实故障里它选了本机那一支，把一次**平台**拒绝显示成
+ * 「本页面无法证明自己属于这个客户端窗口（因此没有发出任何请求）」—— 请求其实
+ * 发出去了，界面却说没发，维护者与用户都被指错了方向。
+ *
+ * 信封里同时保留**原码**（`platform_code`），诊断不受前缀影响。
+ */
+export const PLATFORM_REFUSAL_CODE_PREFIX = 'PLATFORM_'
 
 /** 插件配置（组装期注入；见 desktop `src/profile.ts` 的 channelProfilePatches）。 */
 export interface Config {
@@ -369,6 +386,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     config.partition !== undefined && config.partition !== ''
       ? config.partition
       : browserPartitionFor(username)
+  /**
+   * 当前登录用户对应的应用窗口分区（**唯一实现**）。
+   *
+   * 同一个值有三个消费者，必须是同一份：①协议 handler 注册（`ensurePartition`）；
+   * ②权限守卫（`ensureSessionGuard`）；③建窗（`createAppWindow`）。任何一处用了别的
+   * 值，表现都是"窗口开了但页面空白"或"守卫装在一个没人用的 session 上"。
+   */
+  const currentPartition = (): string => partitionFor(currentSession()?.username ?? null)
 
   if (adapter === undefined) {
     warn('pico-wasm-apps-host: no Electron adapter was provided; the application protocol stays unregistered')
@@ -392,12 +417,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       appScheme,
       productName,
       userDataDir: config.userDataDir,
+      // §7.2/R2S-8：应用窗口复用内置浏览器的**按用户分区**。分区在**每次 open** 时按
+      // 当前会话求值（登录态会变），由本插件显式传给适配器 —— 原生面不猜用户。
+      partition: currentPartition,
       urlFor: (appId, path) => wasmAppUrl(appScheme, appId, path),
       titleFor: (appId) => knownTitles.get(appId),
-      workArea: () => (
-        (ctx.get(WASM_APPS_WINDOW_ADAPTER_SERVICE) as { workArea?: () => WorkArea } | undefined)?.workArea?.()
-        ?? { x: 0, y: 0, width: 1280, height: 800 }
-      ),
+      workArea: () => windowAdapter.workArea?.() ?? { x: 0, y: 0, width: 1280, height: 800 },
       warn,
     })
 
@@ -428,6 +453,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       ctx.emit(WASM_APP_OPEN_EVENT, { app_id: appId, url: wasmAppUrl(appScheme, appId, path) })
       return 'opened'
     }
+    // 建窗**之前**确保当前用户的分区已注册（协议 handler + 权限守卫 + 请求闸门）：
+    // 应用窗口就落在这个 session 上，注册晚于建窗会让首次加载撞
+    // `ERR_UNKNOWN_URL_SCHEME`（空白窗口）。幂等，正常路径下这里是 no-op。
+    ensurePartition(currentPartition())
     const result = await windows.open(appId, path)
     ctx.emit(WASM_APP_OPEN_EVENT, { app_id: appId, url: result.url })
     return result.window
@@ -540,20 +569,42 @@ export function apply(ctx: Context, config: Config = {}): void {
             const gate = await openGate.check(target, knownVersions.get(target) ?? '')
             if (gate.kind === 'denied') {
               // 生命周期反应（§7.2 / §16.1「触发源 = open 端点响应」；R2-L2-2）：
-              // 平台说这个应用**没了**（404 = 冻结/退役/无可用版本，410 = 已下架）⇒
+              // 平台说这个应用**没了**（404 未登记/软删/无可用版本，410 = 已下架）⇒
               // 关掉还开着的窗口并丢掉缓存。触发点只能是这里（服务端不会主动推），
               // 且只有"没了"才关：401/403（未登录/白名单）是**可恢复**的拒绝，关窗
               // 会把一次登录过期变成"应用被卸载"。
-              if (gate.status === 404 || gate.status === 410) {
+              //
+              // **冻结是例外，且必须按 `details.reason` 判**（P2-3，主控 2026-09-20）：
+              // 冻结是**只读快照**（数据保留，§19 Q3），平台为了不泄露存在性把它与
+              // 软删/未登记放在**同一个 404 + `NOT_FOUND`** 里，唯一区分凭据是
+              // `reason`。只看 status 会把"被管理员停用"做成"应用消失"：关窗 + 清
+              // 缓存 + 回一个不可辨的码，`frozenAppTitle` 的可辨文案永远不可达。
+              const frozen = gate.reason === 'app_frozen'
+              if (!frozen && (gate.status === 404 || gate.status === 410)) {
                 const scope = sessionScope()
                 if (scope !== undefined) await cache?.clearApp(scope, target)
                 knownVersions.delete(target)
                 knownTitles.delete(target)
                 warn(`pico-wasm-apps-host: the platform reported ${target} as unavailable (HTTP ${String(gate.status)} ${gate.code}); closing its window and dropping its cache`)
                 await windows?.close(target)
+              } else if (frozen) {
+                // 窗口与缓存一律保留（只读快照仍是可看的内容）；只记一条诊断。
+                warn(`pico-wasm-apps-host: the platform reported ${target} as frozen (HTTP ${String(gate.status)} ${gate.code}); keeping its window and cache`)
               }
               json(reply, gate.status === 401 ? 401 : gate.status, {
-                error: { code: gate.code, message: hostCopy(locale, '平台拒绝了这次打开。', 'The platform refused this open request.') },
+                error: {
+                  // 平台的码一律加前缀（见 PLATFORM_REFUSAL_CODE_PREFIX 的注释）：
+                  // 原样透传会与**本机**证明闸的码撞名，客户端只能误归因。
+                  code: `${PLATFORM_REFUSAL_CODE_PREFIX}${gate.code.toUpperCase()}`,
+                  platform_code: gate.code,
+                  // `reason` 是"冻结 vs 不存在"的**唯一**区分凭据（同码同状态）：
+                  // 缺它客户端只能显示笼统的"平台拒绝了这次打开"。
+                  ...(gate.reason === undefined ? {} : { platform_reason: gate.reason }),
+                  message: frozen
+                    ? frozenAppTitle(locale)
+                    : hostCopy(locale, '平台拒绝了这次打开。', 'The platform refused this open request.'),
+                  ...(frozen ? { hints: [frozenAppHint(locale)] } : {}),
+                },
               })
               return
             }

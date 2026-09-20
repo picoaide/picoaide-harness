@@ -56,7 +56,7 @@ function harness(
   options: {
     timeoutMs?: number
     /** 注入 proof 提供者（R2-X-4：默认注入，否则头拼装与 401 重签是测试里的死分支）。 */
-    appProof?: { get(force?: boolean): Promise<string | null>, invalidate(): void } | undefined
+    appProof?: { get(appId: string, force?: boolean): Promise<string | null>, invalidate(): void } | undefined
   } = {},
 ): Harness {
   const fetchMock = vi.fn(respond)
@@ -316,7 +316,9 @@ describe('客户端持有性证明的带出与重签（§20.1/§23.1；R2-X-4/R2
       return new Response(okEnvelope, { status: 200 })
     }, undefined, {
       appProof: {
-        get: async (force?: boolean) => {
+        // `appId` 也必须被透传（proof 绑应用：拿错应用的 proof 会被平台判 mismatch）。
+        get: async (appId: string, force?: boolean) => {
+          expect(appId).toBe('demo')
           if (force === true) issued += 1
           return force === true ? 'proof-fresh' : 'proof-stale'
         },

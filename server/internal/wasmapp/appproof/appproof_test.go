@@ -13,6 +13,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -174,6 +175,72 @@ func TestIssueRequiresInstallSignatureAndRegistration(t *testing.T) {
 			_, err := f.svc.Issue(f.req(host), f.userID, f.bearer, "demo", tc.mut(base))
 			if !errorsIs(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestIssueShapeFailuresCarryTheirOwnSentinel 是 AUD-3（2026-09-20 独立对抗审计）的
+// **机制级**判据：签名缺失（空串/纯空白）与 `ts<=0` 必须各自归到正确的子类，
+// 而不是落进"真验签不过"那一档。
+//
+// 现场：`service.go` 里
+//
+//	if req.TS <= 0 || strings.TrimSpace(req.Signature) == "" { return nil, ErrMalformed }
+//	if raw := strings.TrimSpace(req.Signature); raw == "" { return nil, ErrSignatureMalformed }
+//
+// 第二行是**死代码**（第一行已经把空签名吃掉了）⇒ 空签名与 ts<=0 都走 default ⇒
+// 对外 `reason=signature_invalid` + hint「请确认签名覆盖的是 appproof-install-v1 五段
+// 消息」——把"没给签名/没给有效时间"两点误诊成"签名拼装错了"。
+//
+// 判据（三层，缺一不可）：
+//  1. 子类正确：空/纯空白签名 ⇒ `ErrSignatureMalformed`；ts<=0 ⇒ `ErrTimestampMalformed`；
+//  2. **大类不变**：两者都仍 `errors.Is(err, ErrMalformed)` 为真（外层码 401
+//     `proof_mismatch` 与既有"按大类判"的调用方不受影响）；
+//  3. **不串档**：签名缺失不得被判成时间戳问题，反之亦然；且不得是**裸** ErrMalformed
+//     （那会退回"无法区分"的旧形态）。
+//
+// 变异验证：把这两个分支合并回上面的大条件 ⇒ 用例 1/3 红。
+func TestIssueShapeFailuresCarryTheirOwnSentinel(t *testing.T) {
+	f := newFixture(t)
+	host := "http://example.com"
+
+	cases := []struct {
+		name string
+		mut  func(InstallRequest) InstallRequest
+		want error
+	}{
+		{"签名缺失（空串）", func(r InstallRequest) InstallRequest { r.Signature = ""; return r }, ErrSignatureMalformed},
+		{"签名只有空白", func(r InstallRequest) InstallRequest { r.Signature = "  \t\n "; return r }, ErrSignatureMalformed},
+		{"ts=0（签名本身合法）", func(r InstallRequest) InstallRequest { r.TS = 0; return r }, ErrTimestampMalformed},
+		{"ts 为负", func(r InstallRequest) InstallRequest { r.TS = -1; return r }, ErrTimestampMalformed},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// nonce 每次唯一（否则第二条以后会因"重放"而不是被测原因失败）。
+			base := f.signed("install-aaaa-0001", "n-shape-"+strconv.Itoa(i), f.now.Unix(), host)
+			_, err := f.svc.Issue(f.req(host), f.userID, f.bearer, "demo", tc.mut(base))
+			if err == nil {
+				t.Fatalf("这条形态必须被拒（%s）", tc.name)
+			}
+			// ① 子类正确。
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want errors.Is(…, %v)", err, tc.want)
+			}
+			// ② 大类不变（外层码按大类映射）。
+			if !errors.Is(err, ErrMalformed) {
+				t.Fatalf("子类必须仍 Unwrap 到 ErrMalformed（外层码 401 proof_mismatch 不变）: %v", err)
+			}
+			// ③ 不串档、也不是裸 ErrMalformed。
+			other := ErrTimestampMalformed
+			if tc.want == ErrTimestampMalformed {
+				other = ErrSignatureMalformed
+			}
+			if errors.Is(err, other) {
+				t.Fatalf("归错档：%v 同时命中 %v", err, other)
+			}
+			if err == ErrMalformed {
+				t.Fatalf("必须是可判别的子类，不能是裸 ErrMalformed（那就退回无法区分的旧形态）")
 			}
 		})
 	}

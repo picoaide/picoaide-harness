@@ -71,7 +71,7 @@ export interface AppSchemeHandlerDeps {
    * 客户端持有性证明（§20.1/§23.1）：`request` 与 `open` 都必须带
    * `X-Pico-App-Proof`。缺席（异常宿主/单测）⇒ 不带该头，平台会拒（fail-closed）。
    */
-  appProof?: { get(force?: boolean): Promise<string | null>, invalidate(): void } | undefined
+  appProof?: { get(appId: string, force?: boolean): Promise<string | null>, invalidate(): void } | undefined
   /** 应用 AI 桥（§21；本地处理 `/__picoaide/ai/chat`，绝不转发平台）。缺席 ⇒ 503。 */
   aiChat?: ((appId: string, body: Uint8Array, signal: AbortSignal) => Promise<AiChatOutcome>) | undefined
   /** 单次出站预算（毫秒）；缺省 {@link APP_REQUEST_TIMEOUT_MS}。 */
@@ -287,7 +287,7 @@ export function createAppSchemeHandler(
         Origin: appOrigin(deps.appOriginScheme, url.appId),
         Authorization: `Bearer ${session.token}`,
       }
-      const proof = await deps.appProof?.get(forceProof)
+      const proof = await deps.appProof?.get(url.appId, forceProof)
       if (typeof proof === 'string' && proof !== '') headers[APP_PROOF_HEADER] = proof
       const pending = deps.fetch(endpoint, {
         method: 'POST',

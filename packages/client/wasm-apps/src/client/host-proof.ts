@@ -272,6 +272,81 @@ export async function fetchWithHostProof(
 }
 
 /**
+ * 本机路由错误信封里"**平台**拒绝了这次调用"的码前缀（与宿主
+ * `packages/host/wasm-apps-host/src/index.ts` 的 `PLATFORM_REFUSAL_CODE_PREFIX` 逐字一致；
+ * `app-center.spec.tsx` 会与宿主源码逐字对拍）。
+ *
+ * 为什么客户端要单独认它：平台的证明码（`proof_required`/`proof_expired`/…）与
+ * **本机**证明闸的码字面相同，但两者的下一步完全不同。宿主把平台码包成
+ * `PLATFORM_<CODE>` 之后，客户端才能把"本机凭据被拒"与"服务端拒绝了这次打开"
+ * 分流到不同的 reason 与文案。
+ */
+export const PLATFORM_REFUSAL_CODE_PREFIX = 'PLATFORM_'
+
+/**
+ * 这个错误信封是不是"平台（服务端）拒绝了本次调用"；是则给出**原码**。
+ *
+ * 两种形态都认：宿主封装后的 `{code:"PLATFORM_X", platform_code:"x"}`，以及
+ * 只有原码的 `{code:"PLATFORM_X"}`（`platform_code` 摘掉前缀小写还原）。
+ * @param payload - 已解析的响应体。
+ * @returns 平台原码（小写）；不是平台拒绝 ⇒ `null`。
+ */
+export function readHostPlatformRefusal(payload: unknown): string | null {
+  if (payload === null || typeof payload !== 'object') return null
+  const error = (payload as { error?: unknown }).error
+  if (error === null || typeof error !== 'object') return null
+  const row = error as { code?: unknown, platform_code?: unknown }
+  // 一律**摘前缀小写还原**：宿主给 `code` 加的是 `toUpperCase()`（`PLATFORM_NOT_FOUND`），
+  // 而 `platform_code` 原样透传平台码 —— 平台的码表是**混合大小写**的
+  // （`NOT_FOUND` 大写、`proof_required` 小写，见 `server/internal/wasmapp/apperr`）。
+  // 不归一化就会出现"同一个码看大小写分流"：`platform_code:"PROOF_REQUIRED"` 落不进
+  // `proof_` 前缀判定 ⇒ 平台拒绝被显示成"未登录"。
+  if (typeof row.platform_code === 'string' && row.platform_code.trim() !== '') {
+    return row.platform_code.trim().toLowerCase()
+  }
+  const code = typeof row.code === 'string' ? row.code : ''
+  return code.startsWith(PLATFORM_REFUSAL_CODE_PREFIX)
+    ? code.slice(PLATFORM_REFUSAL_CODE_PREFIX.length).toLowerCase()
+    : null
+}
+
+/**
+ * 平台错误信封里"应用被**冻结**"这一档 `platform_reason` 的**唯一字面量**。
+ *
+ * 真源在服务端 `server/internal/wasmapp/api/open.go`：冻结（只读快照、数据保留）与
+ * "不存在"（软删 / 从未登记）被平台刻意放进**同一个 HTTP 404 + 同一个 `NOT_FOUND`**
+ * 里（不泄露存在性），唯一区分凭据就是 `details.reason`；宿主把它原样搬到
+ * `error.platform_reason`。客户端只认这一个字面量，不认它的地方一律按"不存在"回落。
+ */
+export const PLATFORM_APP_FROZEN_REASON = 'app_frozen'
+
+/**
+ * 读平台错误信封里的**结构化原因** `error.platform_reason`（"冻结 vs 不存在"的
+ * **唯一**凭据）。与 {@link readHostPlatformRefusal} 并列导出，是因为这两个字段必须
+ * 出自**同一份**判定与**同一处**读取 —— 分流点各读一遍就会出现"码说平台拒绝、原因
+ * 说本机证明"的错配。
+ *
+ * 两种形态都容忍：
+ *  - 宿主封装后的 `{error:{code:"PLATFORM_X", platform_code:"x", platform_reason:"y"}}`
+ *    ⇒ `"y"`（归一化为小写、去首尾空白）；
+ *  - 只有前缀码的 `{error:{code:"PLATFORM_X"}}`（旧宿主）⇒ `null` —— 原因**不可从码里
+ *    还原**，调用方按"没有额外信息"做确定性回落，绝不猜。
+ *
+ * 只在**平台拒绝**信封上读：非平台信封（本机证明闸的 `{"error":"proof_required"}`）
+ * 即使带同名字段也不认，否则一个本机信封就能改写平台分流。
+ * @param payload - 已解析的响应体。
+ * @returns 平台结构化原因（小写）；不是平台拒绝 / 没带原因 ⇒ `null`。
+ */
+export function readHostPlatformReason(payload: unknown): string | null {
+  if (readHostPlatformRefusal(payload) === null) return null
+  if (payload === null || typeof payload !== 'object') return null
+  const error = (payload as { error?: unknown }).error
+  if (error === null || typeof error !== 'object') return null
+  const reason = (error as { platform_reason?: unknown }).platform_reason
+  return typeof reason === 'string' && reason.trim() !== '' ? reason.trim().toLowerCase() : null
+}
+
+/**
  * 读响应体为 JSON（失败 ⇒ `null`），**不改动**调用方后续的读取（用 clone）。
  * @param response - 原始响应。
  * @returns 解析结果，或 `null`。

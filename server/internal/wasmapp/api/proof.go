@@ -162,8 +162,29 @@ func (h *Handlers) appProofIssue(c *gin.Context) {
 const maxProofRequestBytes = 1 << 10
 
 // proofIssueError 把 appproof 的错误分类映射成对外码（契约 §20.1 的字面值）。
+//
+// 判定顺序：**先解码类、再语义类**。原因（相邻缺陷，2026-09-20 本机实测）：公钥按
+// SPKI/DER（44 字节）发上来时旧实现回 `signature_invalid`（"安装签名校验失败"），
+// 对接方会照着 hint 去查**签名消息**拼装 —— 而病根是公钥编码。两个解码类各自有
+// 独立 reason（`invalid_public_key` / `signature_malformed`），且**只有真的验签不过**
+// 才报 `signature_invalid`。
 func proofIssueError(err error) *apperr.Error {
 	switch {
+	case errors.Is(err, appproof.ErrKeyMalformed):
+		return apperr.New(apperr.CodeProofMismatch, "安装公钥不合法").
+			WithDetail("reason", "invalid_public_key").
+			WithHint("public_key 必须是 **raw Ed25519 32 字节**的标准 base64（44 字节 = SPKI/DER 包装，" +
+				"PEM 文本也不行）；对公钥做任何包装都会被拒")
+	case errors.Is(err, appproof.ErrSignatureMalformed):
+		return apperr.New(apperr.CodeProofMismatch, "安装签名不合法").
+			WithDetail("reason", "signature_malformed").
+			WithHint("signature 必须是 **raw Ed25519 64 字节**的标准 base64（不要带 PEM/ASN.1 包装）；" +
+				"缺失或纯空白也走这一档 —— 空签名不是「验签不过」，别去查签名消息的拼装")
+	case errors.Is(err, appproof.ErrTimestampMalformed):
+		return apperr.New(apperr.CodeProofMismatch, "安装签名的时间戳不合法").
+			WithDetail("reason", "invalid_timestamp").
+			WithHint("ts 必须是**正整数**的 unix 秒（客户端取当前时间）；ts=0/负数/缺失都走这一档，" +
+				"重新取当前时间再签名即可")
 	case errors.Is(err, appproof.ErrReplayed):
 		return apperr.New(apperr.CodeProofReplayed, "安装签名已被使用过（nonce 重放）").
 			WithDetail("reason", "nonce_replayed").

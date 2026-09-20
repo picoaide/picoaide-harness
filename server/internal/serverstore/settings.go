@@ -84,6 +84,27 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
 	return err
 }
 
+// DeleteSetting 删除一个 settings 键并返回"是否真的删掉了一行"（键不存在不算错）。
+//
+// 为什么必须**失效缓存**（与 SetSetting 对称，缺了它回落会静默失效）：GetSetting 会把
+// "键不存在"（ok=false）也缓存 30s，而它同样缓存了删除前的旧值 —— 不失效就会出现
+// "库里已经删了、读侧 30s 内仍看得见"，而"显式清空设置回落到部署档位"这类运维动作
+// 恰恰是**先删后读**（下一次启动重新解析优先级）。设置缓存是全局单例（settingsCache），
+// 所以这里与 SetSetting 用同一把失效口径。
+func DeleteSetting(db *sql.DB, key string) (bool, error) {
+	res, err := db.Exec(`DELETE FROM settings WHERE key = ?`, key)
+	if err != nil {
+		return false, err
+	}
+	settingsCache.invalidateAll()
+	n, err := res.RowsAffected()
+	if err != nil {
+		// 删除本身已经成功；行数拿不到不影响语义（调用方只关心"删掉了吗"）。
+		return true, nil
+	}
+	return n > 0, nil
+}
+
 // GetSetting returns the value and whether it exists.
 func GetSetting(db *sql.DB, key string) (string, bool, error) {
 	if v := settingsCache.get(db, "s:"+key); v != nil {
