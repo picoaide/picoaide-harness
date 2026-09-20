@@ -37,7 +37,7 @@ the package names, versions, and licenses for transparency.
 | @deepseek-ai/cordis-plugin-group | 1.0.2 | MIT |
 | @deepseek-ai/cordis-plugin-include | 1.0.7 | MIT |
 | @deepseek-ai/cordis-plugin-loader | 1.0.3 | MIT |
-| @deepseek-ai/cordis-plugin-timer | 1.1.3 | MIT |
+| @deepseek-ai/cordis-plugin-timer | 1.1.4 | MIT |
 | @deepseek-ai/cosmokit | 1.8.3 | MIT |
 | @deepseek-ai/dsh | 0.1.6-alpha.2 | MIT |
 | @deepseek-ai/dsh-acp | 0.1.6-alpha.2 | MIT |
@@ -448,10 +448,10 @@ the package names, versions, and licenses for transparency.
 | ms | 2.0.0 | MIT |
 | negotiator | 1.0.0 | MIT |
 | node-addon-api | 7.1.1 | MIT |
-| node-addon-native-custom-loader | 0.1.4 | MIT |
-| node-addon-require-builtin | 0.1.4 | MIT |
-| node-addon-require-builtin-linux-arm64-gnu | 0.1.4 | MIT |
-| node-addon-require-builtin-linux-x64-gnu | 0.1.4 | MIT |
+| node-addon-native-custom-loader | 0.1.6 | MIT |
+| node-addon-require-builtin | 0.1.6 | MIT |
+| node-addon-require-builtin-linux-arm64-gnu | 0.1.6 | MIT |
+| node-addon-require-builtin-linux-x64-gnu | 0.1.6 | MIT |
 | node-domexception | 1.0.0 | MIT |
 | node-fetch | 3.3.2 | MIT |
 | node-pty | 1.2.0-beta.15 | MIT |
