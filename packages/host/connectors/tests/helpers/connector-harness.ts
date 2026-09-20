@@ -5,9 +5,9 @@
  *  - the plugin under test runs through its own `apply()` entry point, its own
  *    HTTP routes (`approve` / `list`) and its own on-disk credential store;
  *  - the captured MCP config is executed through the REAL
- *    `@modelcontextprotocol/sdk` client + stdio transport, which really spawns
- *    the fixture server, so every env assertion reads the child process' OWN
- *    environment.
+ *    `@modelcontextprotocol/client` (v2 — the package `dsh-mcp-client@0.1.6`
+ *    imports) client + stdio transport, which really spawns the fixture server,
+ *    so every env assertion reads the child process' OWN environment.
  *
  * Only the cordis plumbing is faked (`ctx.plugin` records the config instead of
  * loading `@deepseek-ai/dsh-mcp-client`, whose peer dependencies are not
@@ -21,8 +21,8 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { Client } from '@modelcontextprotocol/client'
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import { vi } from 'vitest'
 import { apply } from '../../src/index.ts'
 import { ConnectorStore } from '../../src/store.ts'

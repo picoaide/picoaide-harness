@@ -2,7 +2,7 @@
  * conn-3 (audit R7, P2): `canonicalMcpTargetPath` folded `\` into `/` on every
  * platform, and `sameFile` compared only the canonical forms. On POSIX `\` is
  * an ordinary filename byte, so ONE real file whose NAME contains the SDK tail
- * (`node_modules\@modelcontextprotocol\sdk\...\streamableHttp.js`) canonicalised
+ * (`node_modules\@modelcontextprotocol\client\...\index.mjs`) canonicalised
  * onto a DIFFERENT real file's path: `decideTargets` answered `ok` and
  * `installMcpTransportRedirectFence` installed silently — breaking R5's
  * "two readable different files are refused" rule and this module's own
@@ -31,7 +31,8 @@ import {
   type TargetResolution,
 } from '../src/mcp-transport-fence.ts'
 
-const SDK_TAIL = 'node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js'
+// v2 (2026-09-20): the SDK is one ESM bundle under `@modelcontextprotocol/client`.
+const SDK_TAIL = 'node_modules/@modelcontextprotocol/client/dist/index.mjs'
 
 /** A resolution exactly as `resolveTarget` builds it (real `realpathSync`). */
 function resolved(path: string, foldCase = false): TargetResolution {
@@ -58,7 +59,7 @@ describe('conn-3: POSIX backslash folding no longer merges two different files',
   it('keeps a POSIX filename containing backslashes distinct from the SDK path', () => {
     const root = mkdtempSync(join(tmpdir(), 'pico-fence-bslash-'))
     const realDir = join(root, 'a')
-    mkdirSync(join(realDir, 'node_modules/@modelcontextprotocol/sdk/dist/esm/client'), { recursive: true })
+    mkdirSync(join(realDir, 'node_modules/@modelcontextprotocol/client/dist'), { recursive: true })
     const realFile = join(realDir, SDK_TAIL)
     writeFileSync(realFile, '// real sdk copy\n')
 
@@ -94,7 +95,7 @@ describe('conn-3: POSIX backslash folding no longer merges two different files',
   it('no longer answers plain "ok" when the backslash-named file is this package side', () => {
     const root = mkdtempSync(join(tmpdir(), 'pico-fence-bslash-ours-'))
     const realDir = join(root, 'a')
-    mkdirSync(join(realDir, 'node_modules/@modelcontextprotocol/sdk/dist/esm/client'), { recursive: true })
+    mkdirSync(join(realDir, 'node_modules/@modelcontextprotocol/client/dist'), { recursive: true })
     const realFile = join(realDir, SDK_TAIL)
     writeFileSync(realFile, '// real sdk copy\n')
     const fakeFile = join(realDir, SDK_TAIL.split('/').join('\\'))
@@ -116,12 +117,12 @@ describe('conn-3: the Windows spellings from the R5 field report still compare e
     expect(canonicalMcpTargetPath('//?/C:/x', false)).toBe('C:/x')
     expect(canonicalMcpTargetPath('\\\\server\\share\\sdk.js', false)).toBe('//server/share/sdk.js')
     // A POSIX name with backslashes is NOT a Windows spelling.
-    expect(canonicalMcpTargetPath('/opt/app/node_modules\\@modelcontextprotocol\\sdk', false))
-      .toBe('/opt/app/node_modules\\@modelcontextprotocol\\sdk')
+    expect(canonicalMcpTargetPath('/opt/app/node_modules\\@modelcontextprotocol\\client', false))
+      .toBe('/opt/app/node_modules\\@modelcontextprotocol\\client')
   })
 
   it('accepts one unreadable app.asar file spelled with an extended-length prefix', () => {
-    const plain = 'C:\\Program Files\\PicoAide Harness\\resources\\app.asar\\node_modules\\@modelcontextprotocol\\sdk\\dist\\esm\\client\\streamableHttp.js'
+    const plain = 'C:\\Program Files\\PicoAide Harness\\resources\\app.asar\\node_modules\\@modelcontextprotocol\\client\\dist\\index.mjs'
     // Identical spellings: same file, byte for byte.
     expect(decideMcpTargets(unreadable(plain, true), unreadable(plain, true), true).kind).toBe('ok')
     // One spelling carries the extended-length prefix the packaged app adds.
