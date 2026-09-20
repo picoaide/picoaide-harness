@@ -976,3 +976,40 @@ GET /api/server/admin/wasm-apps/opens/summary
 
 **本版认账**：历史资源目录清理只在启动时做一次（失败只记日志）；回滚到 beta.7 必须
 **同时恢复升级前的数据目录备份**（旧版本依赖那个目录），或回滚后重新发布各应用。
+## AH. v2.7.6 正式版发布与三环境部署（2026-09-20）
+
+**发版链**：台账 PR **#108** → master `ac817ad320`；发布 PR **#109**（版本 + 策展说明）首推被 master 的
+strict 保护拦下（`5 of 5 required status checks are expected`）→ `gh pr update-branch` 后重跑检查 →
+squash 合并 master **`26cb259458`**（版本 2.7.6 同步 root + desktop）→ annotated tag **`v2.7.6`**
+→ tag CI **success**（**全 4 渠道**，品牌渠道 mac 走签名+公证）→ GitHub Release **正式版**
+（`picoaide-server-2.7.6-amd64.zip` 510,067,571 B + `SHA256SUMS`）→ R2 四渠道 `latest.json` 全部 2.7.6。
+
+**部署顺序（用户指定：先 example-a，其余次之）**：
+
+| 顺序 | 环境 | 结果 | 回滚点 |
+| --- | --- | --- | --- |
+| 1 | **example-a**（生产 `198.51.100.20:/data/picoaide-harness`） | `example-a-2.7.6` healthy、迁移到 **0076**、域名核验通过 | `example-a-2.7.5` |
+| 2 | **example-b**（测试 `198.51.100.10:/opt/picoaide-example-b`） | `example-b-2.7.6` healthy、域名核验通过 | `example-b-2.7.5` |
+| 3 | **beta**（同机 `/opt/picoaide`） | `beta-2.7.6` healthy、域名核验通过 | `beta-2.7.6-beta.8` |
+
+三环境域名核验口径一致：`/healthz` ok + `/api/client/v2/updates/manifest` 的 `server=client=2.7.6` +
+`channel_id` 与渠道一致 + **从该域名实拉 AppImage 并比对 manifest 的 sha256 逐字一致**
+（example-a 153,782,627 B / example-b 153,893,535 B / beta 153,782,353 B）。生产备份在
+`deploy-backup/{env-20260920-094625.bak,pg-data-20260920-094625.dump,picoaide-data-20260920-094625.tar.gz}`。
+
+**本次唯一的阻塞（撞了两次）：内存档位自检拒绝启动。** 症状 = 容器反复重启，日志
+`WASM 应用平台启动自检失败：INTERNAL: 理论内存峰值超过可用内存的安全水位，拒绝启动`。
+根因 = 默认档 `default` 的理论峰值 ≈2.7 GiB，而自检按 `MemAvailable × 70%` 判水位：生产机 3.9 GiB
+（可用 3.1 GiB ⇒ 水位 2.16 GiB）与 example-b 栈都不达标；beta 栈之所以没事，是因为它早先已被设成 `small`。
+处置 = 在**渠道栈**里显式 `PICOAI_WASM_MEMORY_PROFILE=small`（生产还要把该变量补进 compose 的
+`server.environment` —— 2.7.6 的部署模板此前**没有透传**它）。
+
+**产品侧跟进（同批提交）**：`server/docker-compose.yml` 增加 `PICOAI_WASM_MEMORY_PROFILE` 透传与说明；
+`server/.env.example` 补三档对照与"<4 GiB 必须选 small"的判据；`docs/deploy/AI-DEPLOY.md` 新增 **§2.4.1**
+（症状原文、三档表、处置命令）。**建议的后续改进（未实施）**：把启动自检从"拒绝启动"改成
+"自动降到能装下的最大档位 + 大声告警"（与"已保存设置超水位时回落档位不拒绝启动"的既有口径一致）——
+这需要产品拍板，因为它是 fail-closed 语义的放宽。
+
+**认账**：生产从 17:46（开始升级）到 17:50（`small` 生效）之间不可用；期间无任何写入，迁移已成功
+（schema 76），回滚通道未启用。客户侧客户端**无需重装**（服务端升级后门户/更新清单即指向 2.7.6 客户端，
+员工按提示升级，且**服务端与客户端必须同版本**才能使用应用功能）。
