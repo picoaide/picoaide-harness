@@ -877,3 +877,16 @@ GET /api/server/admin/wasm-apps/opens/summary
 - 性质：**5 条泄漏测试/部署域名族、5 条泄漏客户生产域名/主机名、1 条泄漏客户渠道 id**；**无凭据/密钥**。另：2 个 PR 标题与 8 个 PR 正文仍含**客户名**（非域名）。
 - **主控建议：不做历史重写。** 理由是技术性的而非回避：①本仓**已公开**，重写**不能撤回已披露**（GitHub 侧旧对象长期可按 SHA 取到，fork/镜像/CI 缓存同理）；②重写会打断 **91 个 tag / 76 个分支**与全部已发布产物的溯源（tag→提交 SHA 已写进发布说明与部署记录）；③代价与收益不成比例，而**前向**已被守卫拦住（新提交进 `origin/master..HEAD` 区间即受检）。
 - 因此登记为**已认账残留**；若合规上必须清除，正确做法是"协调式重写 + bundle 备份 + 重打 tag + 明示旧 SHA 仍可达"，需用户明确授权后才动。
+
+## AE. v2.7.6-beta.6 发布与部署（2026-09-20）—— **已上线测试环境并端到端核验**
+
+**发版链**：PR **#103**（`fix/wasm-open-window-audit`）→ 全检查绿（Gate / Go server / Desktop Linux·Windows·macOS / CodeQL×4 / Cloudflare Pages）→ squash 合并 master **`d3e7f77f18`**（版本 2.7.6-beta.6 已同步 root + desktop；发布说明 `docs/releases/v2.7.6-beta.6.md` 随同一 PR 落地，**刻意避开"预发 tag 回退自动 PR 列表"**——那正是 §AD 里两处 Release 正文泄漏的产生路径）→ annotated tag **`v2.7.6-beta.6`**（`7d4ad71d88`）→ tag CI **success**（全部 job：Gate / Go server / 三平台 / **Release (server image archive)**）→ GitHub **Pre-release**（名 = tag 本身，附件 `picoaide-server-2.7.6-beta.6-amd64.zip` 507,203,492 B + `SHA256SUMS`）。
+
+**部署**：实拉 R2 `beta/releases/2.7.6-beta.6/` 的 zip（sha256 `b24ecfc14551b813…` 对 `SHA256SUMS` **校验通过**）→ `scp` 到测试机 → 远端 `sha256sum -c` → `bash /root/upgrade-beta.sh … beta /opt/picoaide 2.7.6-beta.6 …`（备份 → load → **按渠道重打 `beta-2.7.6-beta.6`** → 切 `.env` → 重建 → healthy），`UPGRADE_EXIT=0`。**回滚点**：`SERVER_IMAGE=picoaide-harness-server:beta-2.7.6-beta.5` 写回 `/opt/picoaide/.env` + `docker compose up -d server`（本版**无新增迁移**）。gentech 栈与生产 moka 未动（预发 tag 只构建 beta）。
+
+**端到端核验（全部从部署后的域名实拉，落盘 `temp/verify-276b6/`）**：
+- `/healthz` = `{"ok":true}`；`/api/client/v2/updates/manifest` → **server 2.7.6-beta.6 / client 2.7.6-beta.6**，三平台资产 sha256 齐全；`/api/client/v2/channel` → `channel_id=beta`；容器镜像 `picoaide-harness-server:beta-2.7.6-beta.6`（渠道专属 tag，未复用裸版本 tag）。
+- 实拉 `PicoAide-Harness-2.7.6-beta.6-x86_64.AppImage`（153,717,057 B）→ **sha256 与 manifest 逐字一致**（`fc3fef2c923c017e…`）。
+- `--appimage-extract` → `@electron/asar` 读 `resources/app.asar`：`channel_id=beta`、**`home_dir=.picoaide-harness`**（beta 与正式版共用数据根，未回归）、`app_origin_scheme=picoaide-app`；且**本期修复的五个字面量全部在产物内**：`will-redirect`（HOST-P1-1）、`platform_reason`/`app_frozen`（P2-3 宿主半边）、`PLATFORM_`/`app-frozen`（客户端冻结文案）⇒ **交付给客户的包确实是这一版**，不是"本地绿、线上旧"。
+
+**本版仍未闭环**（逐条与 §AC/§AC.2 一致，不重复展开）：应用窗口外链落点未接线（安全半边已实现）；应用内 AI 控制权交互属下一批；`trend[].uv` 早于 90 天明细保留期如实给 0（长期保留需迁移）；三平台只实测 Linux/Xvfb；`install_id`/`nonce` 形状失败仍落 `signature_invalid`（文档已按实际收窄声明）；`origin/master` 上 11 条历史提交信息含真实域名（**已认账，建议不重写历史**，见 §AD ④）。
