@@ -23,6 +23,7 @@ interface RegisteredEntry {
   key?: string
   id?: string
   order?: number
+  label?: () => string
   locale?: string
   inject?: () => Record<string, unknown>
 }
@@ -87,9 +88,9 @@ function harness(options: { pluginsPage?: boolean } = {}): Harness {
     },
     slots: {
       spec: (key: string) => {
-        const declared = key === 'settings.plugin.item' && options.pluginsPage === true
+        const declared = key === 'plugins.item' && options.pluginsPage === true
         probes.push({ key, declared })
-        return declared ? { kind: 'keyed' } : undefined
+        return declared ? { kind: 'list' } : undefined
       },
       inject: (key: string, register: () => RegisteredEntry) => {
         slotWaits.push({ key, register })
@@ -153,7 +154,7 @@ describe('cron client surfaces', () => {
     const h = harness()
     apply(h.ctx)
 
-    expect(h.probes).toEqual([{ key: 'settings.plugin.item', declared: false }])
+    expect(h.probes).toEqual([{ key: 'plugins.item', declared: false }])
     expect(h.slotWaits.map(wait => wait.key)).toEqual(['sidebar.footer.action'])
   })
 
@@ -161,10 +162,13 @@ describe('cron client surfaces', () => {
     const h = harness({ pluginsPage: true })
     apply(h.ctx)
 
-    expect(h.probes).toEqual([{ key: 'settings.plugin.item', declared: true }])
-    expect(h.slotWaits.map(wait => wait.key).sort()).toEqual(['settings.plugin.item', 'sidebar.footer.action'])
-    const card = register(h, 'settings.plugin.item')[0]
-    expect(card).toMatchObject({ name: 'settings.plugin.item', key: 'cron', locale: 'cron' })
+    expect(h.probes).toEqual([{ key: 'plugins.item', declared: true }])
+    expect(h.slotWaits.map(wait => wait.key).sort()).toEqual(['plugins.item', 'sidebar.footer.action'])
+    const card = register(h, 'plugins.item')[0]
+    // 0.1.6-alpha.2：承接面从 keyed `settings.plugin.item` 变成 list `plugins.item`，
+    // 注册形态随之从 key 变成 id/order/label（owner 契约新增 view:'summary'|'page'）。
+    expect(card).toMatchObject({ name: 'plugins.item', id: 'cron', order: 40, locale: 'cron' })
+    expect(typeof card?.label?.()).toBe('string')
     expect(Object.keys(card?.inject?.() ?? {}).sort()).toEqual(['getSnapshot', 'set', 'subscribe'])
   })
 

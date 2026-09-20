@@ -53,7 +53,11 @@ describe('DeepSeek streaming tool calls', () => {
       '[DONE]',
     ])))
 
+    // protocol 必须与产品写入一致：0.1.6-alpha.2 的适配器默认 `messages`
+    // （请求打 /v1/messages、只发 x-api-key），而网关只认 Authorization: Bearer。
+    // enterprise/gateway-model 显式写 'chat-completions'，这里跟随该契约。
     const connection = resolveAdapterOptions({
+      protocol: 'chat-completions',
       baseURL: 'https://example.test/v1',
       thinking: 'disabled',
     })
