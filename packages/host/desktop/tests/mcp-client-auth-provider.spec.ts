@@ -1,5 +1,5 @@
 /**
- * Guard for `patches/dsh-mcp-client@0.1.5-rc.2.patch`.
+ * Guard for `patches/dsh-mcp-client@<pin>.patch`.
  *
  * The MCP authorization spec (2025-06-18) puts token refresh in the hands of
  * the transport's `OAuthClientProvider`. `dsh-mcp-client` builds that transport
@@ -19,7 +19,11 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { describe, expect, it } from 'vitest'
 import { Config } from '@deepseek-ai/dsh-mcp-client'
-import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
+// Upstream 0.1.6-alpha.2 moved `dsh-mcp-client` from `@modelcontextprotocol/sdk@1.x`
+// to `@modelcontextprotocol/client@2.0.0`, so the provider this patch hands to
+// `StreamableHTTPClientTransport` is the v2 `OAuthClientProvider` (the root entry
+// exports it; v2 has no `./client/*` subpaths).
+import type { OAuthClientProvider } from '@modelcontextprotocol/client'
 
 describe('dsh-mcp-client authProvider pass-through (patch guard)', () => {
   it('keeps a function-valued authProvider through config normalization', () => {

@@ -317,6 +317,8 @@ func upstreamURLFor(base, endpoint string) string {
 // returned as-is (client error, no failover); connection errors, 5xx and
 // header timeouts return an error, which the caller treats as failover-eligible.
 func (a *API) forward(c *gin.Context, up *Upstream, raw []byte, stream bool) (*http.Response, error) {
+	// P0-4 服务端侧第二道闸门：出站请求体剔除上游 DSH 私有扩展字段（见 sanitize.go）。
+	raw = sanitizeOutboundBody(raw)
 	url := upstreamURL(up.BaseURL)
 	client := a.client
 	if stream {

@@ -23,13 +23,14 @@ export default defineConfig([
     external: [
       '@deepseek-ai/cordis',
       '@deepseek-ai/dsh-mcp-client',
-      // Audit R4/N3: the redirect fence patches
-      // `StreamableHTTPClientTransport.prototype`. `dsh-mcp-client` is external
-      // and constructs that transport from ITS OWN import of this package, so
-      // inlining a second copy here would create a class object the fence never
-      // touches — the fix would silently disappear in the packaged app while
-      // every src-level test still passed.
-      '@modelcontextprotocol/sdk',
+      // Audit R4/N3: the redirect fence hardens the transport class
+      // `dsh-mcp-client` constructs. `dsh-mcp-client` is external and builds
+      // that transport from ITS OWN import of this package, so inlining a
+      // second copy here would create a class object the fence never touches —
+      // the fix would silently disappear in the packaged app while every
+      // src-level test still passed. (Upstream 0.1.6-alpha.2: `sdk@1.x` →
+      // `client@2.0.0`, see mcp-transport-fence.ts.)
+      '@modelcontextprotocol/client',
       'node:child_process',
       'node:crypto',
       'node:fs',

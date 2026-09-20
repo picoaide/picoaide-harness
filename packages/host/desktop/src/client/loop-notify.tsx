@@ -8,6 +8,9 @@
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+// Type-only: pulls the `ctx.uiWorkspace` Context merge — the navigation owner
+// that replaced `ctx.sessions.open()` in 0.1.6-alpha.2.
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import { DESKTOP_LOOP_NOTIFY_SESSION_PATH, type DesktopLoopNotifySessionResponse } from '../loop-notify-contract.ts'
 
 /** Poll interval for the pending jump request, ms. */
@@ -107,12 +110,17 @@ export function applyLoopNotifyClient(ctx: ClientContext): void {
       }
       if (next.requestedAt <= seenAt) return
       markSeen(next.requestedAt)
-      // The desktop package compiles client and Host faces into one program:
-      // `ctx.sessions` merges to the Host `SessionStore` face here, while the
-      // browser runtime actually provides the `ISessions` face with `open()`.
-      // Read through the narrow consumer interface instead of fighting the
-      // merge; the runtime object always carries `open`.
-      ;(ctx.sessions as unknown as { open(id: SessionId): void }).open(brandSessionId(next.sessionId))
+      // 0.1.6-alpha.2 删除了 `ctx.sessions.open()`（契约注释：navigation belongs
+      // to view owners），导航改由 `ctx.uiWorkspace.openSession(target)` 承担。
+      // 旧写法是把 Host `SessionStore` face 强转成浏览器 face 去取 `open()`：
+      // 类型检查逃过去了，运行时点通知直接 TypeError。这里走真正的导航所有者，
+      // 并保留缺席时的可诊断降级（不静默吞掉点击）。
+      const navigation = ctx.get('uiWorkspace')
+      if (navigation === undefined) {
+        console.warn('[loop-notify] uiWorkspace 缺席，通知点击无法跳转会话')
+        return
+      }
+      navigation.openSession(brandSessionId(next.sessionId))
     }
     void pollLoopNotifySession(consume)
     const timer = window.setInterval(() => { void pollLoopNotifySession(consume) }, JUMP_POLL_MS)

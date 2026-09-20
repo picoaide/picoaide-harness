@@ -13,6 +13,7 @@ import {
 import { DESKTOP_SETTINGS_NAMESPACE } from '../lib/index.js'
 import { installProfilePackageResolver } from '../lib/module-resolution.js'
 import { prepareDesktopProfile } from '../lib/profile.js'
+import { inactiveRequiredRows, FIBER_FAILED } from '../lib/startup-rows.js'
 
 // 产物清理(2026-09): 依赖包 lib/ 不再入库, fresh checkout 下 profile smoke
 // 需要先构建全部 workspace 依赖(cron/connectors/browser 等),
@@ -121,6 +122,31 @@ try {
     prepared.bareModuleBaseUrl,
   )
   await runtime.mountScheduled()
+
+  // P0-9（2026-09-20 升级审计）：这是**唯一**挂载完整桌面组合树的地方，所以
+  // 「我方必需行真的活了」只能在这里端到端证明。上游 0.1.6 的
+  // `auditStartupEntries` 只对 7 个全局 required id 抛错，我方 18 个
+  // `desktop-*`/`picoaide-*`/`pico-*` 行失败只打 warn（"树上不存在"与"被 disabled"
+  // 两类更是被它明确忽略）、启动照常成功；运行期由 src/main.ts 的
+  // `assertRequiredRowsActive` 兜底，这里让它在 CI 上可判红。
+  // 清单与断言都来自 `lib/startup-rows.js`（唯一真源，两处 import 同一份）。
+  const inactiveRows = inactiveRequiredRows(ctx.loader.entries())
+  if (inactiveRows.length > 0) {
+    throw new Error(
+      'assembled desktop profile has inactive required rows:\n'
+      + inactiveRows.map(row => `  - ${row.id}: ${row.reason}`).join('\n'),
+    )
+  }
+  // 更宽的一层：**任何**已启用行都不该是 FAILED（`apply` 或配置校验抛异常）。
+  // 与"必需行必须 ACTIVE"分开：PENDING 在冒烟环境里可能是合法的（某个服务本来
+  // 就不存在），FAILED 则任何环境都不合法。实测（2026-09-20）本组合树 189 行、
+  // 非 ACTIVE 且未 disable 的行 **0** 条 —— 所以这条不是"理论上应该"，是现状。
+  const failedRows = [...ctx.loader.entries()]
+    .filter(entry => entry.disabled !== true && entry.fiber?.state === FIBER_FAILED)
+    .map(entry => entry.options.id)
+  if (failedRows.length > 0) {
+    throw new Error(`assembled desktop profile has failed Loader rows: ${failedRows.join(', ')}`)
+  }
 
   const agentPresets = ctx.get('agentPresets')
   if (agentPresets === undefined) {

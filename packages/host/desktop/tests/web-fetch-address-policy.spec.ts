@@ -1,6 +1,6 @@
 /**
  * 补丁守卫：`@deepseek-ai/dsh-web-fetch-http` 的**地址策略放行**
- * （见 `patches/dsh-web-fetch-http@0.1.5-rc.2.patch`）。
+ * （见 `patches/dsh-web-fetch-http@<pin>.patch`）。
  *
  * 背景（2026-09-12，真机故障）：Windows 测试机上 `web_fetch` 对**任何**网址都失败，
  * 报 `URL hostname "…" resolves to a non-public IP address`（`WEB_BLOCKED_URL`）。

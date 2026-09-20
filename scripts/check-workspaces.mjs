@@ -38,6 +38,10 @@ const GUARDS = [
   // 补丁 resolution 键成对完备、补丁在仓库外对 pristine tarball 干净应用、
   // platform-modules 与 CI 归档清单等手工清单互相对拍。
   { name: 'check:patch-resolutions', args: ['run', 'check:patch-resolutions'], path: 'resolutions ↔ patches/' },
+  // 2026-09-20 DSH 0.1.6 升级审计 P0 盲区:补丁 resolution 的版本与 upstream.json 的
+  // pin 之间此前**零守卫**,而 yarn 对没命中的 resolution 是静默忽略的 ⇒ 漏改一条
+  // 就是"补丁消失但三门禁全绿"。本守卫把两者绑在一起。
+  { name: 'check:patch-pin', args: ['run', 'check:patch-pin'], path: 'resolutions ↔ upstream.json pin' },
   { name: 'check:patches', args: ['run', 'check:patches'], path: 'patches/*.patch 仓库外 dry-run' },
   { name: 'check:inventories', args: ['run', 'check:inventories'], path: '平台模块表 / CI 归档 / 包表' },
   // 2026-09-16 真机事故(暗色模式看不清)后的守卫:我们插件里的颜色引用必须是上游
