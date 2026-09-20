@@ -7,6 +7,31 @@
 
 ---
 
+## 0.0 实施状态（2026-09-21 第二/三轮审计修复后更新）
+
+> ⚠️ **这一节只是"该看哪里"的索引，不是闭合凭据。** 按本仓纪律，任何"已完成"的判据都是
+> **可复跑的用例 + 变异验证**，不是本文档的状态列。行文中的提交号可 `git show` 复核。
+
+**已落地（本文档 §3 的 P0 全部 + §5 专项 + 二/三轮审计的 P1/P2）**：
+
+| 波次 | 内容 | 落地位置 |
+| --- | --- | --- |
+| W0 · P0-0 | 段内**计数向量越界分配**（15 字节模块 ⇒ 256 GiB 映射 ⇒ 进程 `fatal error`） | `wasmmod/parse.go` 的 `checkVecCount`；判据 `TestValidateRejectsOversizedVectorCounts` 等；变异：关掉判据 + `ulimit -v` 复现 OOM |
+| W0 · P0-4 | DataCount 段位置的**规范位置**（与 wazero `checkSectionOrder` 同判） | `parse.go` 的 DataCount 特例；判据：平台侧 + wazero 侧（`runtime/datacount_test.go`） |
+| W0 · P0-5 | `.debug_*` 段的**三处同源**分类 + 段预算口径统一 | `assets.ToolchainSectionPrefixes` / `CountsTowardSectionBudget`；`pack-assets.mjs`；`preview.mjs`；判据见 `assets_test.go` 与 `wasmmod/pack_assets_test.go` |
+| W0 · P0-6 | 白名单补 `sock_recv`/`sock_send`（TinyGo `net/url`） | `imports_gen.go` 重新生成；判据含"夹具真产出符号"前置断言 |
+| §5 专项 | 作者数据面 `GET …/wasm/:app_id/rows`（只读、默认脱敏、显式 `unmask`、全审计）+ 客户端数据面板 + AI 工具 | `api/rows.go`、`api/read.go`、`client/…/DataBrowserPanel.tsx`、`wasm-app-tools.ts`；决策记录 `docs/decisions/2026-09-21-app-author-data-surface.md`（含 §5.9 十个待拍板点逐条落实与认账） |
+| 二轮审计 P1 | 段序判据与 wazero 同判（重复段恒拒）；`cachetrust.Ensure` 不再跟随符号链接改权限、失败不再报"可信"；执行侧缓存不可用一律降级（不再 `log.Fatalf`）；宿主 `GET …/rows` 加**持有性证明** | `parse.go`、`cachetrust.go`、`runtime/{config,runtime}.go`、`wasm-apps.ts` |
+| 二轮审计 P2 | 日志/审计/LDAP 三处**共用一份转义策略**（C0+C1+Cf/Zl/Zp、按转义边界截断）；`appdb.SafePath` 拒符号链接；审计"读成功才记账"；畸形响应不再渲染成"空表" | `util/control.go`、`logbuf`、`auth-gate`/`ldap.go`、`appdb.go`、`api/{read,rows}.go` |
+
+**仍未做**（"未做"既不是"不打算做"，也不是"已排期"；各自要独立决策）：
+
+- §3 的 **B1–B5 五类接线缺口**（应用窗口↔browser runtime、`window.ratio` 进建窗、缓存 `put/get` 闭环、下架清浏览器存储、应用 AI 归因）—— 它们是"设计已冻结、实现没接通"，与本次的安全/数据面修复不是同一批。
+- §3 里的 P1/P2 余项（部门用量汇总与 UV、目录服务端分页、模块缓存统计面、`/readyz` 细分、`--ro-bind-try /etc` 收窄编译进程可读面等）。
+- §5.9 第 2 点的**规划推荐口径**（AI 默认关 + 显式授权卡）：当前实现是"默认开 + 只脱敏 + 全审计"，已在决策记录里如实认账并写明改法（一处改动）。
+
+---
+
 ## 0. 摘要
 
 **A0. 发版前必修（安全）**：`wasmmod` 段解析对段内"计数向量"做无界分配 ⇒ 任意已登录员工用 **15 字节**的 wasm 打 `POST /api/client/v2/apps/wasm/validate` 即可让**整个服务端进程** `fatal error: out of memory` 退出（不可 recover、无审计、无信封）。2026-09-18 沙箱审计已登记为 P0，**本次独立复现仍存在，且它从未进入任何"未闭环清单"**。修法 3 行 + 一组用例。
