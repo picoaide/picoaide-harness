@@ -135,7 +135,11 @@ func UnusableBaselineError() *apperr.Error {
 // 必须原样保留。旧 schema 的 `visible` / `login_required` **不参与这个判定**
 // （判据见文件头）：带了它们不等于"access 已声明"，也不等于"这次不继承 access 轴"。
 func mergeMissing(submitted, base map[string]json.RawMessage) map[string]json.RawMessage {
-	out := make(map[string]json.RawMessage, len(submitted)+len(base))
+	// 容量提示只按**平台常量字段表**取。2026-09-21（CodeQL #95 `go/allocation-size-overflow`）：
+	// 原来写的是 `len(submitted)+len(base)` —— 两个"可能很大的值"相加后直接当分配尺寸，
+	// 是静态分析眼里的溢出算术面（实践中不可能，但容量提示本来就只是省几次扩容的优化，
+	// 没有任何理由为它留一条算术路径；`submitted` 的键数由请求体决定）。
+	out := make(map[string]json.RawMessage, len(KnownFields))
 	for k, v := range submitted {
 		out[k] = v
 	}
