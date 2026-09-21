@@ -53,7 +53,13 @@ export const FIBER_FAILED = 3
  * 判据是「缺了它这个产品就不是它」：窗口与壳、桌面自有路由、登录门、企业面、
  * 四个自研业务面。**不含**可选客户端 UI 行 —— `profile.ts` 的 `filterRows` 会有意
  * 丢弃组合里解析不到的客户端行，把它们放进来会造成启动假报警。
- * 共 18 条；`tests/startup-rows.spec.ts` 会逐条断言它们真的在组合树里且未被 disable。
+ * 共 19 条；`tests/startup-rows.spec.ts` 会逐条断言它们真的在组合树里且未被 disable。
+ *
+ * 2026-09-21（并道改造）：`picoaide-foot-menu` 入表 —— 它是**五个面板入口的唯一
+ * 承载行**（更多 + 浮层）。它不在 `filterRows` 的丢弃范围内（那只丢
+ * `dsh-client-ui-*`），所以入表不会造成假报警；反过来，一旦它被渠道覆盖层或
+ * `$DSH_HOME/cordis.patch.yml` 禁用，底部功能区会**安静地**少掉五个入口 ——
+ * 正是本模块要消灭的形态，因此按"必需行"处理（boot 后直接抛错）。
  */
 export const REQUIRED_DESKTOP_ROWS = [
   // 桌面壳与其自有路由（desktop/cordis.patch.yml）
@@ -77,6 +83,8 @@ export const REQUIRED_DESKTOP_ROWS = [
   'pico-browser',
   'pico-wasm-apps-host',
   'picoaide-account-card',
+  // 底部「更多」行（foot-menu/cordis.patch.yml）：五个面板入口的唯一承载行
+  'picoaide-foot-menu',
 ] as const
 
 /** Loader 条目里本模块读取的最小形状（避免把上游 Loader 类型引进来）。 */

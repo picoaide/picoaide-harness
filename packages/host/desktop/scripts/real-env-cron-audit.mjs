@@ -92,6 +92,51 @@ async function clickLabel(label, waitMs = 2500) {
   return r
 }
 
+/**
+ * 打开底部「更多」浮层（2026-09-21 并道后，面板入口不在常显行里）。
+ * @param waitMs - settle time after the click.
+ * @returns `'OPENED'` / `'ALREADY_OPEN'` / `'NOT_FOUND'` / `'NOT_OPEN'`.
+ */
+async function openFootMenu(waitMs = 700) {
+  const clicked = await ev(`(() => {
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    if (row === null || row.offsetParent === null) return 'NOT_FOUND'
+    if (row.getAttribute('aria-expanded') === 'true') return 'ALREADY_OPEN'
+    row.click()
+    return 'CLICKED'
+  })()`)
+  if (clicked === 'NOT_FOUND') return 'NOT_FOUND'
+  await wait(waitMs)
+  const open = await ev(`(() => {
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    if (row === null) return false
+    const menu = document.getElementById(row.getAttribute('aria-controls') ?? '')
+    return row.getAttribute('aria-expanded') === 'true' && menu !== null && getComputedStyle(menu).display !== 'none'
+  })()`)
+  if (open !== true) return 'NOT_OPEN'
+  return clicked === 'ALREADY_OPEN' ? 'ALREADY_OPEN' : 'OPENED'
+}
+
+/**
+ * 点开「更多」浮层里的一个条目（先开浮层）。
+ * @param label - 条目文案（`.pico-foot-menu-item` 的可见文本）。
+ * @param waitMs - settle time after the click.
+ * @returns `'CLICKED'` / `'NOT_FOUND'` / `'OPEN_FAILED'`.
+ */
+async function clickFootMenuItem(label, waitMs = 2500) {
+  const opened = await openFootMenu()
+  if (opened !== 'OPENED' && opened !== 'ALREADY_OPEN') return opened === 'NOT_FOUND' ? 'NOT_FOUND' : 'OPEN_FAILED'
+  const clicked = await ev(`(() => {
+    const items = [...document.querySelectorAll('.pico-foot-menu-item')].filter(b => b.offsetParent)
+    const hit = items.find(b => (b.textContent ?? '').trim() === ${esc(label)})
+    if (hit === undefined) return 'NOT_FOUND'
+    hit.click()
+    return 'CLICKED'
+  })()`)
+  await wait(waitMs)
+  return clicked
+}
+
 async function resetToLogin() {
   await ev(`(() => { try { localStorage.clear() } catch {}; try { sessionStorage.clear() } catch {}; return true })()`)
   await send('Page.reload', { ignoreCache: true })
@@ -118,10 +163,13 @@ try {
   // 3. Let the client settle (panel graph).
   await wait(2000)
 
-  // 4. Open the scheduled-job center from the sidebar.
-  const cronOpen = await clickLabel('定时任务', 3500)
+  // 4. Open the scheduled-job center from the sidebar. 2026-09-21 并道之后入口住在
+  //    「更多」浮层里：先开浮层再点条目；面板是否真的打开用**激活态属性**判定
+  //    （只查 `document.body.textContent` 会在"面板没打开"时同样为真）。
+  const cronOpen = await clickFootMenuItem('定时任务', 3500)
   // 2026-09-12：改为可见性 + 让位断言（存在性对未激活也在 DOM 的容器是假绿）。
   const cronView = await ev(`(() => {
+    if (document.documentElement.getAttribute('data-dsh-panel-active') !== 'cron') return false
     const view = document.querySelector('[data-dsh-cron-view]')
     const surface = document.querySelector('.dshDesktopConversationSurface')
     if (view === null || surface === null) return false
@@ -132,7 +180,8 @@ try {
       .filter(el => !el.hasAttribute('data-dsh-cron-view'))
       .every(el => getComputedStyle(el).display === 'none' || el.getBoundingClientRect().height === 0)
   })()`)
-  reportStep('定时任务中心面板占满中列（会话区已让位）', cronOpen === 'CLICKED' && cronView === true)
+  reportStep('定时任务中心面板占满中列（会话区已让位）', cronOpen === 'CLICKED' && cronView === true,
+    `click=${cronOpen} active=${await ev(`document.documentElement.getAttribute('data-dsh-panel-active')`)}`)
   await screenshot('c01-cron-center')
 
   // 5. Click "新建任务" to open the job editor dialog.

@@ -437,7 +437,7 @@ async function start(): Promise<void> {
       throw cause
     })
     current = ctx
-    // 上游 auditStartupEntries 只对 7 个全局 required id 抛错，我方 18 个行失败
+    // 上游 auditStartupEntries 只对 7 个全局 required id 抛错，我方 19 个行失败
     // 只 warn（Windows GUI 无 stderr ⇒ 彻底静默）。这里补上我方必需行的激活断言，
     // 失败走桌面自己的致命路径。见 src/startup-rows.ts 的模块注释。
     assertRequiredRowsActive(ctx)

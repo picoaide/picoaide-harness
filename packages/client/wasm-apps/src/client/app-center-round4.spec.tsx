@@ -773,7 +773,7 @@ describe('发起者绑定的客户端半边（§20.2 / §22.2 R4 的另一半）
     await mount()
     await click('.pico-app-center-detail')
     expect(container.querySelectorAll('a[href]')).toHaveLength(0)
-    for (const file of ['AppCenterPanel.tsx', 'AppCenterTrigger.tsx', 'AppAiPanel.tsx', 'open-app.ts']) {
+    for (const file of ['AppCenterPanel.tsx', 'AppToastHostMount.tsx', 'AppAiPanel.tsx', 'open-app.ts']) {
       // jsdom 环境下 `import.meta.url` 不是 file: URL（拿它拼相对路径会得到 `/src/...`），
       // 因此按包根（vitest 的 cwd = 包目录）解析；这与 `check` 的调用方式一致。
       const source = readFileSync(resolve(process.cwd(), 'src/client', file), 'utf8')

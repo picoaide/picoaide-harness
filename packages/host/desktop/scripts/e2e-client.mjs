@@ -197,6 +197,78 @@ async function clickLabel(cdp, label, waitMs = 2500) {
   return r
 }
 
+/**
+ * 「可见」判据（字符串形式，嵌进页面表达式里用）。
+ *
+ * **不要用 `offsetParent`**：`position:fixed` 的元素（账户浮层、设置/工作区模态、
+ * foot 浮层容器）它的 `offsetParent` **恒为 null** —— 2026-09-21 真机 e2e 实测：
+ * 账户浮层明明开着，按 `offsetParent` 却永远筛不到，"账户浮层含余额…"直接假红，
+ * 而紧接着的"Esc 已关闭"又变成空转假绿（筛不到 ⇒ 计数恒为 0）。按矩形量对
+ * fixed / 普通流元素都成立。
+ */
+const VISIBLE_BOX = `((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).display !== 'none' })`
+
+/**
+ * 打开侧边栏底部的「更多」浮层（2026-09-21 并道改造）。
+ *
+ * 五个面板入口（定时任务 / 能力中心 / 连接器 / 浏览器 / 应用中心）不再是常显行，
+ * 都住在 `.pico-foot-menu-trigger` 点开的上浮层里 —— 点它们之前必须先开这一层，
+ * 否则 `clickLabel` 会以 NOT_FOUND 静默失败（浮层关闭时条目 `display:none`，
+ * `offsetParent` 为 null，本来也点不到）。
+ * @param cdp - CDP session.
+ * @param waitMs - settle time after the click.
+ * @returns `'OPENED'` / `'ALREADY_OPEN'` / `'NOT_FOUND'` / `'NOT_OPEN'`.
+ */
+async function openFootMenu(cdp, waitMs = 700) {
+  const clicked = await evalSafe(cdp, `(() => {
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    if (row === null || row.offsetParent === null) return 'NOT_FOUND'
+    if (row.getAttribute('aria-expanded') === 'true') return 'ALREADY_OPEN'
+    row.click()
+    return 'CLICKED'
+  })()`)
+  if (clicked === 'NOT_FOUND') return 'NOT_FOUND'
+  await wait(waitMs)
+  const open = await evalSafe(cdp, `(() => {
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    if (row === null) return false
+    const menu = document.getElementById(row.getAttribute('aria-controls') ?? '')
+    return row.getAttribute('aria-expanded') === 'true'
+      && menu !== null && getComputedStyle(menu).display !== 'none'
+  })()`)
+  if (open !== true) return 'NOT_OPEN'
+  return clicked === 'ALREADY_OPEN' ? 'ALREADY_OPEN' : 'OPENED'
+}
+
+/**
+ * 点开「更多」浮层里的一个条目，并断言点完浮层关掉了。
+ * @param cdp - CDP session.
+ * @param label - 条目文案（`.pico-foot-menu-item` 的可见文本）。
+ * @param waitMs - settle time after the click.
+ * @returns `'CLICKED'`（且浮层已收起）/ `'NOT_FOUND'` / `'OPEN_FAILED'` / `'STILL_OPEN'`.
+ */
+async function clickFootMenuItem(cdp, label, waitMs = 2500) {
+  const opened = await openFootMenu(cdp)
+  if (opened !== 'OPENED' && opened !== 'ALREADY_OPEN') return opened === 'NOT_FOUND' ? 'NOT_FOUND' : 'OPEN_FAILED'
+  const clicked = await evalSafe(cdp, `(() => {
+    const items = [...document.querySelectorAll('.pico-foot-menu-item')].filter(b => b.offsetParent)
+    const hit = items.find(b => (b.textContent ?? '').trim() === ${JSON.stringify(label)})
+    if (hit === undefined) return 'NOT_FOUND'
+    hit.click()
+    return 'CLICKED'
+  })()`)
+  await wait(waitMs)
+  if (clicked !== 'CLICKED') return clicked
+  const closed = await evalSafe(cdp, `(() => {
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    if (row === null) return false
+    const menu = document.getElementById(row.getAttribute('aria-controls') ?? '')
+    return row.getAttribute('aria-expanded') === 'false'
+      && (menu === null || getComputedStyle(menu).display === 'none')
+  })()`)
+  return closed === true ? 'CLICKED' : 'STILL_OPEN'
+}
+
 /** 求值一个返回 Promise 的表达式（`Runtime.evaluate` 需要显式 awaitPromise）。 */
 async function evalAsync(cdp, expression) {
   const r = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
@@ -430,9 +502,70 @@ async function main() {
   )
 
   // 5. Main surface assertions.
-  const mainBtns = await evalSafe(cdp, `[...new Set([...document.querySelectorAll('button')].map(b => b.textContent?.trim()).filter(Boolean))]`)
-  const hasSidebar = ['定时任务', '能力中心', '连接器', '浏览器', '设置'].every(x => (mainBtns ?? []).includes(x) || (mainBtns ?? []).some(b => b.includes(x)))
-  reportStep('主界面侧边栏导航完整', hasSidebar, `buttons=${(mainBtns ?? []).slice(0, 14).join(',')}`)
+  //
+  // 2026-09-21 并道改造：底部不再常显五行，只剩「更多」一行（+ 设置座位 + 账户行），
+  // 五个面板入口搬进上浮层。这条断言因此改成**量"折叠态"**：更多行在、是收起的、
+  // 文案是「更多」，设置仍在，而且五个旧行**不许**再直接可见（漏改一个就是"两套入口
+  // 并存"，比"少一个入口"更难发现）。
+  //
+  // **判据必须看可见性，不能只看存在**：浮层收起时条目仍然挂在 DOM 里
+  //（`display:none` 是"关闭 ≠ 卸载"的要求），而 `textContent` 不分可见性 —— 只按
+  // textContent 收集按钮，"泄漏"会恒等于五项、这条永远红（2026-09-21 对抗审计 P0）。
+  // 同时把浮层自己的条目排除掉：这样无论浮层当前开着还是关着，判据量的都是"浮层之外
+  // 还有没有那五个入口"，既不会假红也不会假绿。
+  //
+  // 前置：先把它收起来（这个脚本会复用已在运行的 app，上一轮探针可能把它留在展开态）。
+  await evalSafe(cdp, `(() => {
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    if (row !== null && row.getAttribute('aria-expanded') === 'true') row.click()
+    return true
+  })()`)
+  await wait(400)
+  const lane = await evalSafe(cdp, `(() => {
+    const visible = ${VISIBLE_BOX}
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    const menu = row === null ? null : document.getElementById(row.getAttribute('aria-controls') ?? '')
+    const inPopover = (el) => menu !== null && menu.contains(el)
+    const rowButtons = [...document.querySelectorAll('button')].filter(b => visible(b) && !inPopover(b))
+    const names = rowButtons.map(b => (b.textContent ?? '').trim()).filter(Boolean)
+    // 账户行按它自己的类名取（pico-account-row）：设置触发器同样带 aria-haspopup=dialog，
+    // 用属性选会把它当成账户行（2026-09-21 真机 e2e 实测）。
+    // ⚠️ 注入到页面里的这段代码是**宿主模板串的文本**：这里不许出现反引号（那会提前
+    // 结束模板串，语法错误只会在很远处报出来 —— 2026-09-21 踩过）。
+    const accountRow = [...document.querySelectorAll('button.pico-account-row')].find(visible) ?? null
+    return {
+      row: row === null ? null : {
+        label: (row.textContent ?? '').trim(),
+        expanded: row.getAttribute('aria-expanded'),
+        visible: visible(row),
+      },
+      popoverHidden: menu === null || getComputedStyle(menu).display === 'none',
+      hasSettings: names.includes('设置'),
+      hasAccountRow: accountRow !== null,
+      leaked: ['定时任务', '能力中心', '连接器', '浏览器', '应用中心'].filter(t => names.includes(t)),
+      visibleButtons: names.length,
+    }
+  })()`)
+  const laneOk = lane?.row?.visible === true
+    && lane.row.expanded === 'false'
+    && lane.row.label === '更多'
+    && lane.popoverHidden === true
+    && lane.hasSettings === true
+    && lane.hasAccountRow === true
+    && (lane.leaked?.length ?? 1) === 0
+    && (lane.visibleButtons ?? 0) > 0
+  reportStep('侧边栏底部只剩「更多」一行（+ 设置 + 账户行），五个面板入口已并道',
+    laneOk, `lane=${JSON.stringify(lane)}`)
+  // 展开一次、合上一次：浮层真的能开，「更多」行是"点得到的那一行"。
+  const laneOpened = await openFootMenu(cdp)
+  const laneItems = await evalSafe(cdp, `[...document.querySelectorAll('.pico-foot-menu-item')].filter(b => b.offsetParent).map(b => (b.textContent ?? '').trim())`)
+  reportStep('「更多」浮层可展开且列出五个面板入口',
+    laneOpened === 'OPENED' && Array.isArray(laneItems)
+      && ['定时任务', '能力中心', '连接器', '浏览器', '应用中心'].every(t => laneItems.includes(t)),
+    `open=${laneOpened} items=${JSON.stringify(laneItems)}`)
+  await screenshot(cdp, '05c-foot-menu')
+  await evalSafe(cdp, `(() => { const row = document.querySelector('.pico-foot-menu-trigger'); if (row !== null) row.click(); return true })()`)
+  await wait(500)
 
   // 5.5 暗色模式（2026-09-16 真机事故的回归点）：
   //   ① 主题真的切到暗色（body[data-ds-dark-theme]）；
@@ -491,13 +624,15 @@ async function main() {
   // 2026-09-20 之前只有定时任务是这样，另外三个是 `position:fixed` 模态浮层 ——
   // 这里逐面板断言"占满中列、会话区让位、唯一激活态属性指向它"，而不是只查元素存在
   // （存在性断言在 2026-09-12 出过一次假绿：面板挂上了但会话区不让位，画面 407/407）。
+  // 2026-09-21 并道之后入口在「更多」浮层里：走 `clickFootMenuItem`（开浮层 → 点条目），
+  // 它同时断言"点完浮层收起" —— 浮层赖着不走会盖住刚打开的面板。
   const pagePanels = [
     { label: '连接器', id: 'connectors', marker: '连接', shot: '03-connectors' },
     { label: '能力中心', id: 'capability', marker: '能力中心', shot: '04-capability' },
     { label: '应用中心', id: 'apps', marker: '应用中心', shot: '04b-app-center' },
   ]
   for (const item of pagePanels) {
-    const open = await clickLabel(cdp, item.label, 3000)
+    const open = await clickFootMenuItem(cdp, item.label, 3000)
     const tookOver = open === 'CLICKED' && await waitFor(cdp, `(() => {
       const active = document.documentElement.getAttribute('data-dsh-panel-active')
       if (active !== ${JSON.stringify(item.id)}) return false
@@ -510,7 +645,7 @@ async function main() {
       const others = [...surface.children].filter(el => !el.hasAttribute('data-dsh-panel-surface'))
       return others.every(el => getComputedStyle(el).display === 'none' || el.getBoundingClientRect().height === 0)
     })()`, 15000, 300)
-    reportStep(`${item.label}面板占满中列（会话区已让位）`, tookOver, `panel=${item.id}`)
+    reportStep(`${item.label}面板占满中列（会话区已让位）`, tookOver, `panel=${item.id} click=${open}`)
     // 正文必须**真的能滚**（2026-09-21 用户报「能力中心不能往下翻页」）：根因是面板根
     // 包装层没有高度 ⇒ `PanelPage` 的 height:100% 退化成 auto ⇒ `.pico-scroll` 拿到的是
     // **内容高度**，永远不溢出、永远没有滚动条，内容被容器裁掉。
@@ -585,7 +720,8 @@ async function main() {
   }
 
   // 7. 定时任务：与上面三个共用同一套面板协议（这条保留为"协议本身"的回归）。
-  await clickLabel(cdp, '定时任务', 3500)
+  // 入口同样在「更多」浮层里（2026-09-21 并道）。
+  await clickFootMenuItem(cdp, '定时任务', 3500)
   const cronLayout = await waitFor(cdp, `(() => {
     if (document.documentElement.getAttribute('data-dsh-panel-active') !== 'cron') return false
     const view = document.querySelector('[data-dsh-panel-surface="cron"]')
@@ -753,17 +889,106 @@ async function main() {
   } catch { usageProbe = null }
   reportStep('账户卡余额数据链路（balance=88.5/activated/enabled）',
     usageProbe?.enabled === true && usageProbe?.activated === true && usageProbe?.balance === 88.5, JSON.stringify(usageProbe))
-  // 再验证渲染:账户卡在宽布局(sidebar.footer wide seat)下以余额为主数字。
+  // 再验证渲染:2026-09-21 起账户卡是"一行 + 向上浮层"（宽布局）——
+  //   ① 折叠行里是用户名 + 金额；② 「账户余额」标签与「退出登录」在浮层里。
+  // 所以断言必须**先点开行、再量浮层文本**：只量整页文本会假绿（浮层 `display:none`
+  // 时 textContent 仍在），只量行文本又会假红（标签确实不在行里）。
+  //
+  // 选择器必须**按各自的稳定标记**取，不能用"第一个可见的 dialog"：
+  //   - 设置触发器**自己也带** `aria-haspopup="dialog"`，而且它的 `[role="dialog"]` 与
+  //     账户浮层同形 —— 设置模态还开着时，通用选择器取到的是「设置」；
+  //   - 账户行用 `button.pico-account-row`，账户浮层用 `[role="dialog"][aria-label="账户"]`
+  //     （account-card 的 DOM 契约）。
+  // 2026-09-21 真机 e2e 实测过这个坑：rowText="设置"、dialog="设置通用设置…"，两条断言
+  // 全红而产品本身没问题。
+  //
+  // 第一步先把设置模态**关掉并等它真的消失**（关是 best-effort：可能已经没有模态；
+  // "消失"必须 waitFor 到，sleep 一拍不够）。
+  await clickLabel(cdp, '关闭', 500).catch(() => {})
+  // 「可见」判据按**矩形**量，不能用 `offsetParent`：`position:fixed` 的元素
+  // （账户浮层、各种模态都是 fixed）`offsetParent` **恒为 null**，用它筛可见性会
+  // 永远筛不到 —— 2026-09-21 真机实测：账户浮层明明开着，按 offsetParent 找不到，
+  // 连带 Esc 断言变成"空转即通过"的假绿。
+  const settingsGone = await waitFor(cdp, `(() => {
+    const visible = ${VISIBLE_BOX}
+    return ![...document.querySelectorAll('[role="dialog"]')].some(visible)
+  })()`, 8000, 200)
+  reportStep('账户步骤前置：设置模态已关闭（无可见 dialog）', settingsGone === true, `settingsGone=${settingsGone}`)
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false }).catch(() => {})
-  await wait(800)
-  const accountWithCard = await bodyText(cdp)
+  await wait(600)
+  const ACCOUNT_ROW_SELECTOR = 'button.pico-account-row'
+  const ACCOUNT_DIALOG_SELECTOR = '[role="dialog"][aria-label="账户"]'
+  const accountRowProbe = await evalSafe(cdp, `(() => {
+    const visible = ${VISIBLE_BOX}
+    const rows = [...document.querySelectorAll(${JSON.stringify(ACCOUNT_ROW_SELECTOR)})]
+    const row = rows.find(visible)
+    return {
+      count: rows.length,
+      text: row === undefined ? null : (row.textContent ?? '').trim(),
+      expanded: row === undefined ? null : row.getAttribute('aria-expanded'),
+    }
+  })()`)
   // 精确断言格式化结果(¥88.50):includes('88.5') 对 ¥88.5 / 88.5 / ¥88.500 都成立,
   // 对"小数位回归"不敏感(2026-09-11 加固)。
-  const balanceRendered = accountWithCard.includes('账户余额') && accountWithCard.includes('¥88.50')
-  reportStep('账户卡渲染余额主数字（宽布局）', balanceRendered,
-    `hasLabel=${accountWithCard.includes('账户余额')} hasAmount=${accountWithCard.includes('¥88.50')}`)
+  //
+  // **只量账户行自己的文本**：整页 `document.body.textContent` 里任何一处 ¥88.50 都能
+  // 让这条成立（几步之前的「设置 → 账号」页带着同一个数字），那样断言的就不是"折叠行
+  // 显示了余额"（2026-09-21 二轮对抗审计 P2）。
+  const balanceInRow = typeof accountRowProbe?.text === 'string' && accountRowProbe.text.includes('¥88.50')
+  const accountRowClicked = await evalSafe(cdp, `(() => {
+    const visible = ${VISIBLE_BOX}
+    const row = [...document.querySelectorAll(${JSON.stringify(ACCOUNT_ROW_SELECTOR)})].find(visible)
+    if (row === undefined) return 'NOT_FOUND'
+    // 已经是展开态就不要再点（那一下会把浮层关掉）—— 复用同一 app 实例时可能如此。
+    if (row.getAttribute('aria-expanded') === 'true') return 'ALREADY_OPEN'
+    row.click()
+    return 'CLICKED'
+  })()`)
+  const accountDialogOpen = await waitFor(cdp, `(() => {
+    const visible = ${VISIBLE_BOX}
+    const dialog = [...document.querySelectorAll(${JSON.stringify(ACCOUNT_DIALOG_SELECTOR)})].find(visible)
+    if (dialog === undefined) return false
+    const text = dialog.textContent ?? ''
+    return text.includes('账户余额') && text.includes('¥88.50') && text.includes('退出登录')
+  })()`, 8000, 200)
+  // 失败时要能一眼看出"现场到底有哪些 dialog"（aria-label + 尺寸 + 首段文本）。
+  const accountDialogProbe = await evalSafe(cdp, `(() => {
+    const visible = ${VISIBLE_BOX}
+    return [...document.querySelectorAll('[role="dialog"]')].map(el => {
+      const rect = el.getBoundingClientRect()
+      return {
+        label: el.getAttribute('aria-label'),
+        visible: visible(el),
+        w: Math.round(rect.width),
+        h: Math.round(rect.height),
+        text: (el.textContent ?? '').slice(0, 80),
+      }
+    })
+  })()`)
+  reportStep('账户卡折叠行显示余额主数字（宽布局）',
+    balanceInRow && (accountRowClicked === 'CLICKED' || accountRowClicked === 'ALREADY_OPEN'),
+    `rowHasAmount=${balanceInRow} click=${accountRowClicked} rows=${accountRowProbe?.count} rowText=${JSON.stringify(accountRowProbe?.text)}`)
+  reportStep('账户浮层含余额标签 / 金额 / 退出登录（宽布局）', accountDialogOpen === true,
+    `dialogs=${JSON.stringify(accountDialogProbe)}`)
   await screenshot(cdp, '10-account')
-  await clickLabel(cdp, '关闭', 800).catch(() => {})
+  // 真键盘事件（不是合成 Event）：Esc 关闭浮层并把焦点还回账户行 —— 合成事件绕过
+  // 浏览器的默认动作与焦点语义，量不到真实行为。
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 }).catch(() => {})
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 }).catch(() => {})
+  await wait(600)
+  const accountDialogClosed = await evalSafe(cdp, `(() => {
+    const visible = ${VISIBLE_BOX}
+    const row = [...document.querySelectorAll(${JSON.stringify(ACCOUNT_ROW_SELECTOR)})].find(visible)
+    return {
+      openAccountDialogs: [...document.querySelectorAll(${JSON.stringify(ACCOUNT_DIALOG_SELECTOR)})].filter(visible).length,
+      visibleDialogs: [...document.querySelectorAll('[role="dialog"]')].filter(visible).length,
+      expanded: row === undefined ? null : row.getAttribute('aria-expanded'),
+      focused: row !== undefined && document.activeElement === row,
+    }
+  })()`)
+  reportStep('账户浮层 Esc 关闭且焦点回到账户行',
+    accountDialogClosed?.openAccountDialogs === 0 && accountDialogClosed?.expanded === 'false' && accountDialogClosed?.focused === true,
+    `state=${JSON.stringify(accountDialogClosed)}`)
 
   // 12. Composer input, scoped to the conversation column and verified by
   // reading the value back: "an element was found" is exactly the false green

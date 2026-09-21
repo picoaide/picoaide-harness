@@ -3,16 +3,18 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-commands/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
-import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+// Type-only: the foot-lane registry contract (`ctx.picoFootMenu`). The one
+// sidebar foot row belongs to `@picoaide/dsh-foot-menu`, which reaches this
+// bundle as a Cordis service — never as a module import.
+import type {} from '@picoaide/dsh-foot-menu/client'
 import type { CommandUiContract } from '@deepseek-ai/dsh-client-ui-commands/client'
-import { ConnectorTrigger } from './ConnectorTrigger.tsx'
-import { mountConnectorCenter } from './connector-surface.tsx'
+import { mountConnectorCenter, openConnectorCenter } from './connector-surface.tsx'
 import { en, setActiveLocale, type ConnectorsKey, zh } from './locales.ts'
 import { t } from './locales.ts'
 
 /**
- * Connectors client half: registers the connector center foot action in the
- * sidebar (its modal renders the connector list and drives the auth flows),
+ * Connectors client half: registers the connector center entry in the foot-lane
+ * popover (the panel renders the connector list and drives the auth flows),
  * and registers one slash command per CONNECTED connector (`/<connector-id>`)
  * so the `/` menu only shows connectors you can act on. Picking an example
  * prompt sends it to the session — the model then calls the connector's
@@ -66,22 +68,24 @@ export function apply(ctx: ClientContext): void {
     return locale.subscribe(sync)
   }, 'follow active locale')
 
-  // Hover feedback matching the skill center trigger (P3-11).
-  ctx.effect(() => {
-    const style = document.createElement('style')
-    style.textContent = '.pico-connector-trigger:hover { background: var(--dsw-alias-interactive-bg-hover); }'
-    document.head.appendChild(style)
-    return () => { style.remove() }
-  }, 'connectors: trigger hover style')
-
-  ctx.effect(
-    () => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
-      name: 'sidebar.footer.action',
-      id: 'connector-center',
+  // Foot-lane entry: the one `⋯ 更多` row (owned by `@picoaide/dsh-foot-menu`)
+  // renders it; hover/focus feedback for the popover items is injected by that
+  // package, so this half no longer ships a trigger stylesheet.
+  // `order: 0` keeps the connector center between the capability center (-1) and
+  // the browser (1); `id: 'connectors'` is the panel-surface PanelId.
+  //
+  // 登记放在**子 fiber** 里等服务到位，而不是把 `picoFootMenu` 写进 `inject`：
+  // 提供它的那一行可以被渠道覆盖层 / `$DSH_HOME/cordis.patch.yml` 禁用，硬 inject
+  // 会让整条 fiber 永久 pending（无报错），把连接器面板与每个已连接连接器的斜杠
+  // 命令一起带走（P1-7 教训）。只有"登记这一个条目"等它。
+  ctx.inject(['picoFootMenu'], (scope: ClientContext) => {
+    scope.effect(() => scope.picoFootMenu.add({
+      id: 'connectors',
       order: 0,
-    }, ConnectorTrigger)),
-    'connectors: connector center foot action',
-  )
+      title: () => t('panel.title'),
+      activate: openConnectorCenter,
+    }), 'connectors: foot menu entry')
+  })
 
   // 中列整页（插件启动时挂一次；容器常驻会话列、在 React 树之外）。切换语义与
   // 能力中心 / 应用中心 / 定时任务共用 `@picoaide/dsh-panel-surface`。

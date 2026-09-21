@@ -1,8 +1,10 @@
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 /**
- * Cron plugin client half: registers the sidebar foot trigger and the
- * main-area job center unconditionally, plus two optional faces that exist only
- * where their owning rows do — the scheduled-job tab in the official right
+ * Cron plugin client half: registers the foot-lane entry (an entry into the
+ * `picoFootMenu` registry owned by `@picoaide/dsh-foot-menu`, which owns the one
+ * sidebar foot row) and the main-area job center unconditionally, plus two
+ * optional faces that exist only where their owning rows do — the scheduled-job
+ * tab in the official right
  * Sidebar (rc.2 `ui-sidebar-right`; `sidebarRightTabs` + the keyed
  * `sidebar.right.pane.tab` body seat) and the settings card
  * (`settings.plugin.item` keyed 'cron', declared by `ui-settings-plugins`, which
@@ -18,8 +20,10 @@ import type { IWorkspaces } from '@deepseek-ai/dsh-api-workspace-controller/clie
 import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-// Type-only: the sidebar shell's footer slot declaration.
-import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+// Type-only: the foot-lane registry contract (`ctx.picoFootMenu`) and its entry
+// shape. Never a runtime import: the registry reaches this bundle as a Cordis
+// service, not as a module.
+import type {} from '@picoaide/dsh-foot-menu/client'
 // Type-only: the official right Sidebar's tab registry, seats, and `ctx.sidebarRight`.
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 // Type-only: the Plugins page's `plugins.item` list-slot declaration. Upstream
@@ -48,16 +52,22 @@ import { HttpCronTransport } from './host-api.ts'
 import { HttpBrowserCronService, type BrowserCronService } from './browser-service.ts'
 import { CronJobTab } from './CronJobTab.tsx'
 import { CronSettingsCard, CronSettingsCardController, type CronSettings } from './CronSettingsCard.tsx'
-import { CronTrigger } from './CronTrigger.tsx'
-import { mountCronPanel } from './panel-mount.tsx'
+import { mountCronPanel, openCronPanel } from './panel-mount.tsx'
 import { en, setActiveLocale, t, zh } from './locales.ts'
 
 // Required services only: the right Sidebar's tab registry is NOT here. It is
 // provided by the rc.2 `ui-sidebar-right` row, and a hard `inject` on a service
 // an optional row provides leaves this fiber pending forever when the row is
-// absent — taking the sidebar foot entry, the main-area center, and the settings
+// absent — taking the foot-lane entry, the main-area center, and the settings
 // card down with the tab, with no error anywhere (P1-7). The tab is registered
 // inside its own `ctx.inject` scope below instead.
+//
+// `picoFootMenu` is deliberately NOT here for the same reason: the row that
+// provides it (`@picoaide/dsh-foot-menu`) can be disabled by a channel overlay or
+// the machine-wide patch, and a hard inject on a never-provided service leaves
+// this fiber pending forever with no error — taking the whole plugin (job
+// center + settings card + right-Sidebar tab) down with the entry. The entry is
+// registered from a child `ctx.inject` scope instead.
 export const inject = ['slots', 'settingsScope', 'locale', 'workspaces', 'connection', 'sessions']
 
 /** Settings namespace this card edits (the Host half registers it). */
@@ -165,16 +175,29 @@ export function apply(ctx: ClientContext): void {
   const openSession = navigation === undefined
     ? undefined
     : (id: string) => { navigation.openSession(id as SessionId) }
-  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
-    name: 'sidebar.footer.action',
-    id: 'pico-cron',
-    order: -10,
-  }, CronTrigger))
+  // Foot-lane entry (the single `⋯ 更多` row owned by `@picoaide/dsh-foot-menu`):
+  // one controller drives both the main-area center and the panel tab.
+  // `order: -10` keeps the job center first in the popover, and `id: 'cron'` is
+  // the panel-surface PanelId — the foot row reads it to render `更多 · 定时任务`
+  // while this panel is active.
+  //
+  // 登记放在**子 fiber** 里等服务到位，而不是把 `picoFootMenu` 写进本插件的
+  // `inject`：那一行可以被渠道覆盖层或 `$DSH_HOME/cordis.patch.yml` 禁用，硬 inject
+  // 会让整条 fiber 永久 pending（**没有任何报错**），把任务中心、设置卡片与右栏标签
+  // 一起带走（P1-7 的原话）。这里只有"登记这一个条目"等它，其余面貌照常 apply。
+  ctx.inject(['picoFootMenu'], (scope: ClientContext) => {
+    scope.effect(() => scope.picoFootMenu.add({
+      id: 'cron',
+      order: -10,
+      title: () => t('job.listTitle'),
+      activate: openCronPanel,
+    }), 'dsh-cron: foot menu entry')
+  })
   ctx.effect(() => mountCronPanel(controller, workspacesService, api, openSession), 'dsh-cron: main-area center')
   // Scheduled-job tab in the official right Sidebar (rc.2). The type
   // definition carries the chip title and the guide entry, and the body is a
   // keyed registration under the definition's own id. The tab shares the same
-  // controller as the sidebar foot entry and the main-area center, so all
+  // controller as the foot-lane entry and the main-area center, so all
   // three surfaces stay in sync; per-session tab state belongs to the Sidebar.
   //
   // This is an optional face: `sidebarRightTabs` comes from the rc.2

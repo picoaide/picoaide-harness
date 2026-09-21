@@ -2,6 +2,8 @@
 
 对象：`packages/host/browser`（含 `src/client/BrowserTrigger.tsx`）、`packages/host/desktop/src/electron-runtime.ts` 的浏览器相关面。
 
+> ⚠️ **勘误（2026-09-21，底部并道改造）**：`src/client/BrowserTrigger.tsx` **已删除** —— 侧边栏底部不再由每个插件各占一行，浏览器入口变成 `@picoaide/dsh-foot-menu` 的 `picoFootMenu` 条目（`id: 'browser'`、`order: 1`、`attention()` 仍是"AI 在等你"），控制权轮询迁到 `src/client/control-hint-store.ts`。本文其余结论（工具预算、用户闸、窗口语义等）不受影响。
+
 前置事实：客户现场两个 P0（点「我来操作」整轮 401、复制按钮静默失效）已在 #68/#69/#70/#71 修复。
 本文件记录的是随后**对整个浏览器包**的审计结论与修复，逐条含「行为变化 / 回归测试 / 反向对照」。
 

@@ -109,24 +109,30 @@ const PACKAGES = [
   // 登记（传递上已由 wasm-apps-host → browser → connectors → 叶子包保证，但真实边
   // 就该写在表里 —— `temp/wasm-client-only/cycle-check.mjs` 会逐条对拍）。
   { name: 'dsh-plugin-desktop', dir: 'packages/host/desktop', needs: ['@picoaide/dsh-wasm-apps-host', '@picoaide/dsh-host-locale', '@picoaide/dsh-host-home'] },
-  { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop', '@picoaide/dsh-panel-surface'] },
+  { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
   // 2026-09-20（路线 A / A 扩展）：`host-copy.ts` 的语言解析直接 import 叶子包
   // `@picoaide/dsh-host-locale`；`user-scope.ts` 的 DSH-home 权威改成
   // `@picoaide/dsh-host-home` ⇒ **connectors 不再 import 桌面包**，
   // 那条 `connectors → dsh-plugin-desktop` 边随之删除（它正是四边环的最后一段）。
-  { name: '@picoaide/dsh-connectors', dir: 'packages/host/connectors', needs: ['@picoaide/dsh-host-home', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface'] },
-  { name: '@picoaide/dsh-cron', dir: 'packages/host/cron', needs: ['dsh-plugin-desktop', '@picoaide/dsh-panel-surface'] },
+  { name: '@picoaide/dsh-connectors', dir: 'packages/host/connectors', needs: ['@picoaide/dsh-host-home', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
+  { name: '@picoaide/dsh-cron', dir: 'packages/host/cron', needs: ['dsh-plugin-desktop', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
   { name: '@picoaide/dsh-branding', dir: 'packages/client/branding', needs: [] },
   { name: 'dsh-community-fabric', dir: 'community/fabric', needs: [] },
   { name: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', needs: ['@picoaide/dsh-enterprise'] },
   // WASM 应用平台的客户端半边（应用中心 + 发布编排入口）：读 enterprise 的 lib/types。
-  { name: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', needs: ['@picoaide/dsh-panel-surface'] },
+  { name: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', needs: ['@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
   // 四个客户端面板共用的**中列整页装载器 + 视觉语言**叶子包（2026-09-20）：
   // 它刻意没有任何 `@picoaide/*` 依赖（React 是 peer）⇒ needs 恒空，可以被任何包
   // 先构建；四条出边（enterprise / cron / connectors / wasm-apps）都指向这个没有
   // 出边的节点，故不会引入新的构建环。消费方把它**内联**进 client bundle
   // （不进 tsdown 的 external），因此它不持有任何跨插件共享的可变状态。
   { name: '@picoaide/dsh-panel-surface', dir: 'packages/client/panel-surface', needs: [] },
+  // 侧边栏底部**并道行**（2026-09-21）：一个「更多」行 + 向上浮层，条目经客户端
+  // Cordis 服务 `picoFootMenu` 从五个面板插件收集。它读 panel-surface 的
+  // `activePanelId` / `PANEL_ACTIVE_ATTR`（内联进自己的 client bundle）⇒ 必须排在
+  // panel-surface 之后；五个消费方的 tsc 又读它的 `./client` 声明（type-only）⇒
+  // 排在它之后。方向单一，故不引入新的构建环。
+  { name: '@picoaide/dsh-foot-menu', dir: 'packages/client/foot-menu', needs: ['@picoaide/dsh-panel-surface'] },
   // 宿主侧语言的**零依赖叶子包**（2026-09-20，构建环修复路线 A）：实现自
   // `packages/host/desktop/src/host-locale.ts` 逐字迁入（导出面与语义一字不改）。
   // 它刻意**没有任何 dependencies**（连 `@picoaide/*` 也没有）⇒ needs 恒空，可以被
@@ -151,7 +157,7 @@ const PACKAGES = [
   //      `tests/credential-site.spec.ts` 还值导入真实 `ConnectorStore`。干净态实测：
   //      删掉 connectors/lib 后 browser 的 tsc 报 3 条 TS2307 ⇒ 真实边，删掉它就会
   //      "调度器排得下、实际跑不通"（本地有 lib 时全绿，CI 干净检出必红）。
-  { name: '@picoaide/dsh-browser', dir: 'packages/host/browser', needs: ['@picoaide/dsh-host-locale', '@picoaide/dsh-connectors'] },
+  { name: '@picoaide/dsh-browser', dir: 'packages/host/browser', needs: ['@picoaide/dsh-host-locale', '@picoaide/dsh-connectors', '@picoaide/dsh-foot-menu'] },
   // 客户端专属 WASM 应用 origin（`picoaide-app://` 协议 handler + 本机打开路由）：
   // 2026-09-19 起它经 **browser 包导出的 surface seam**（`@picoaide/dsh-browser/surface`）
   // 取得视图/分区/CDP 能力（设计总纲 §16.1 的 surface 抽象：工具实现只写一份、按 surface
@@ -180,6 +186,7 @@ const PATH_OWNERS = [
   ['packages/client/wasm-apps/', '@picoaide/dsh-wasm-apps'],
   ['packages/client/branding/', '@picoaide/dsh-branding'],
   ['packages/client/panel-surface/', '@picoaide/dsh-panel-surface'],
+  ['packages/client/foot-menu/', '@picoaide/dsh-foot-menu'],
   ['packages/host/connectors/', '@picoaide/dsh-connectors'],
   ['packages/host/host-locale/', '@picoaide/dsh-host-locale'],
   ['packages/host/host-home/', '@picoaide/dsh-host-home'],
@@ -210,13 +217,26 @@ const DEPENDENTS = {
     '@picoaide/dsh-enterprise',
     '@picoaide/dsh-cron',
   ],
-  // 面板叶子包的四个消费方直接依赖它（都是**一跳**，不需要像 host-locale 那样
-  // 展开两跳：没有第二层包再 import 它）。
+  // 面板叶子包的消费方直接依赖它（都是**一跳**，不需要像 host-locale 那样
+  // 展开两跳：没有第二层包再 import 它）。2026-09-21 起 foot-menu 也读它的
+  // `activePanelId` / `PANEL_ACTIVE_ATTR`（内联），而 foot-menu 的五个消费方
+  // 是本字典里自己的那条（两跳由下面那条展开）。
   '@picoaide/dsh-panel-surface': [
     '@picoaide/dsh-enterprise',
     '@picoaide/dsh-connectors',
     '@picoaide/dsh-cron',
     '@picoaide/dsh-wasm-apps',
+    '@picoaide/dsh-foot-menu',
+  ],
+  // 底部并道行：五个面板插件的 tsc 读它的 `./client` 声明（type-only），
+  // desktop 的 profile 组装期解析它的 `cordis.patch.yml`（打包产物也要重建）。
+  '@picoaide/dsh-foot-menu': [
+    '@picoaide/dsh-enterprise',
+    '@picoaide/dsh-connectors',
+    '@picoaide/dsh-browser',
+    '@picoaide/dsh-cron',
+    '@picoaide/dsh-wasm-apps',
+    'dsh-plugin-desktop',
   ],
 }
 

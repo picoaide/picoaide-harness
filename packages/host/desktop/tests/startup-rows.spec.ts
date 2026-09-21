@@ -2,7 +2,7 @@
  * 守卫：桌面自有 Loader 行的「必需 ACTIVE」清单与断言。
  *
  * 背景（2026-09-20 DSH 0.1.6 升级审计 P0-9）：上游 `auditStartupEntries` 只对
- * 7 个全局 required id 抛错，我方 18 个行失败只 warn（且"树上不存在"与"被 disabled"
+ * 7 个全局 required id 抛错，我方 19 个行失败只 warn（且"树上不存在"与"被 disabled"
  * 两类被它明确忽略）；Windows GUI 无 stderr ⇒ 静默。`src/startup-rows.ts` 为此补了
  * 一条 boot 后断言，本文件守住它：
  * ①清单里的每个 id 必须真的出现在桌面组合树里（改名/被 filterRows 丢掉时先红，

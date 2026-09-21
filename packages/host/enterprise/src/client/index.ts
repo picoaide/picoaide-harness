@@ -7,8 +7,12 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // contract types resolve through it).
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 // Type-only: declares the sidebar brand slots (`sidebar.brand.mark` /
-// `sidebar.brand.name`) and the foot action slot.
+// `sidebar.brand.name`).
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+// Type-only: the foot-lane registry contract (`ctx.picoFootMenu`). The single
+// sidebar foot row belongs to `@picoaide/dsh-foot-menu` and reaches this bundle
+// as a Cordis service — never as a module import.
+import type {} from '@picoaide/dsh-foot-menu/client'
 // Type-only: declares the conversation hero brand-mark slot.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
@@ -27,8 +31,7 @@ import { buildChannelCSSVars, defaultHeroTagline } from './channel-vars.ts'
 import { installFavicon } from './favicon.ts'
 import { channelTitle } from '../channel-content.ts'
 import { startChannelStore, readChannelSync, subscribeChannel } from './channel-store.ts'
-import { CapabilityCenterTrigger } from './CapabilityCenterTrigger.tsx'
-import { mountCapabilityCenter } from './capability-surface.tsx'
+import { mountCapabilityCenter, openCapabilityCenter } from './capability-surface.tsx'
 import { en, setActiveLocale, t, type EnterpriseKey, zh } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -44,7 +47,7 @@ export const name = 'picoaide-enterprise-client'
 /** Locale namespace owning the enterprise client copy. */
 const LOCALE_NS = 'enterprise'
 
-/** Services required: the slot registry for settings pages. */
+/** Services required: the slot registry for settings pages. `picoFootMenu` is waited on from a child scope. */
 export const inject = ['slots', 'locale']
 
 /**
@@ -79,9 +82,6 @@ const brandCss = (tagline: string): string => `
 [class$="_headlineText"]::after, [class$="_titleGroup"] > span:first-child::after { content: var(--pico-hero-headline, "PicoAide Harness"); font-size: 26px; line-height: 32px; font-weight: 500; }
 [class$="_previewBadge"] { font-size: 0; }
 [class$="_previewBadge"]::after { content: var(--pico-hero-tagline, ${JSON.stringify(tagline)}); font-size: 12px; line-height: 18px; font-weight: 500; font-family: var(--ds-font-family-code); }
-
-/* Skill center trigger hover feedback, matching the Settings trigger. */
-.pico-skill-trigger:hover { background: var(--dsw-alias-interactive-bg-hover); }
 
 /* Skill center card grid: hover lift + focus ring (inline-styled card, CSS-only affordances). */
 .pico-skill-card {
@@ -224,14 +224,21 @@ export function apply(ctx: ClientContext): void {
     return () => { /* favicon reverts on the next navigation */ }
   }, 'enterprise: desktop favicon')
 
-  ctx.effect(
-    () => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
-      name: 'sidebar.footer.action',
-      id: 'capability-center',
+  // 底部「更多」浮层条目（唯一的底栏行由 `@picoaide/dsh-foot-menu` 拥有）：
+  // id 就是 panel-surface 的 PanelId，行因此在能力中心激活时显示「更多 · 能力中心」。
+  //
+  // 登记放在**子 fiber** 里等服务到位，而不是把 `picoFootMenu` 写进 `inject`：
+  // 提供它的那一行可以被渠道覆盖层 / `$DSH_HOME/cordis.patch.yml` 禁用，硬 inject
+  // 会让整条 fiber 永久 pending（无报错），把能力中心面板、渠道 CSS 变量、品牌
+  // chrome 与 favicon 一起带走（P1-7 教训）。只有"登记这一个条目"等它。
+  ctx.inject(['picoFootMenu'], (scope: ClientContext) => {
+    scope.effect(() => scope.picoFootMenu.add({
+      id: 'capability',
       order: -1,
-    }, CapabilityCenterTrigger)),
-    'enterprise: capability center foot action',
-  )
+      title: () => t('capability.title'),
+      activate: openCapabilityCenter,
+    }), 'enterprise: capability center foot menu entry')
+  })
 
   // 中列整页（插件启动时挂一次；容器常驻会话列、在 React 树之外）。切换语义与
   // 连接器/应用中心/定时任务共用 `@picoaide/dsh-panel-surface`。

@@ -26,7 +26,7 @@
  * 2026-09-10 增量化:每个包构建前先判定「产物是否已是最新」——产物 mtime 不早于
  * 全部输入(src/ 递归 + package.json/tsconfig/tsdown 配置 + 依赖包产物)即跳过。
  * 动因:`yarn check` 里 desktop 的 verify:profile 会再跑一遍本函数,而此刻
- * 8 个包刚刚在本轮 check 中构建完毕 → 纯重复劳动实测 40s(check 总时长的
+ * 全部包刚刚在本轮 check 中构建完毕 → 纯重复劳动实测 40s(check 总时长的
  * 1/4)。判定只会在"源文件比产物新"或"产物缺失"时放行重建,方向始终偏保守;
  * CI/fresh checkout 下 lib/ 缺失 → 全量构建,行为与之前完全一致。
  * 需要强制全量重建时设 DSH_PREBUILD=force(或 CLI 传 --force)。
@@ -66,12 +66,18 @@ const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
   { workspace: '@picoaide/dsh-host-locale', dir: 'packages/host/host-locale', deps: [] },
   { workspace: '@picoaide/dsh-host-home', dir: 'packages/host/host-home', deps: [] },
   { workspace: '@picoaide/dsh-panel-surface', dir: 'packages/client/panel-surface', deps: [] },
+  // 0b) 底部「更多」行（2026-09-21 并道改造）：它把 panel-surface 的
+  //     `activePanelId` / `PANEL_ACTIVE_ATTR` 内联进自己的 client bundle，因此
+  //     **必须排在 panel-surface 之后**；五个面板插件（cron / enterprise /
+  //     connectors / browser / wasm-apps）的类型面读它的 `./client` 声明
+  //     （type-only import），所以它们又都排在它之后 —— 无环。
+  { workspace: '@picoaide/dsh-foot-menu', dir: 'packages/client/foot-menu', deps: ['packages/client/panel-surface'] },
   // 1) connectors：只读两个叶子包（`host-copy.ts` / `user-scope.ts`）—— 路线 A 扩展
   //    之后它**不再** import 桌面包，所以排在叶子包之后即可。
   {
     workspace: '@picoaide/dsh-connectors',
     dir: 'packages/host/connectors',
-    deps: ['packages/host/host-home', 'packages/host/host-locale', 'packages/client/panel-surface'],
+    deps: ['packages/host/host-home', 'packages/host/host-locale', 'packages/client/panel-surface', 'packages/client/foot-menu'],
   },
   // 2) browser：读叶子包 + **connectors 的 lib/types**（`src/index.ts` 的
   //    `typeof import('@picoaide/dsh-connectors/…')` 与
@@ -79,7 +85,7 @@ const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
   {
     workspace: '@picoaide/dsh-browser',
     dir: 'packages/host/browser',
-    deps: ['packages/host/host-locale', 'packages/host/connectors'],
+    deps: ['packages/host/host-locale', 'packages/host/connectors', 'packages/client/foot-menu'],
   },
   // 3) 客户端专属 WASM 应用 origin：`electron-adapter.ts` 值导入
   //    `@picoaide/dsh-browser/guard` ⇒ 必须排在 browser 之后、desktop 之前
@@ -92,14 +98,14 @@ const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
     dir: 'packages/host/desktop',
     deps: ['packages/host/host-home', 'packages/host/host-locale', 'packages/host/wasm-apps-host'],
   },
-  { workspace: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', deps: ['packages/host/desktop', 'packages/client/panel-surface'] },
+  { workspace: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', deps: ['packages/host/desktop', 'packages/client/panel-surface', 'packages/client/foot-menu'] },
   { workspace: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', deps: ['packages/host/desktop'] },
-  { workspace: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', deps: ['packages/client/panel-surface'] },
+  { workspace: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', deps: ['packages/client/panel-surface', 'packages/client/foot-menu'] },
   { workspace: '@picoaide/dsh-branding', dir: 'packages/client/branding', deps: ['packages/host/desktop'] },
   // cron 的 tsc 仍读 desktop 的 lib/types（`dsh-plugin-desktop/host-locale` 与
   // `dsh-plugin-desktop/desktop-home` 两条 re-export 子路径）—— 它不在环上，
   // 两条子路径都保留，故这条边继续登记。
-  { workspace: '@picoaide/dsh-cron', dir: 'packages/host/cron', deps: ['packages/host/desktop', 'packages/client/panel-surface'] },
+  { workspace: '@picoaide/dsh-cron', dir: 'packages/host/cron', deps: ['packages/host/desktop', 'packages/client/panel-surface', 'packages/client/foot-menu'] },
 ]
 
 /** 执行一个 yarn 命令,失败即抛错。 */
