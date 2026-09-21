@@ -158,9 +158,9 @@ function emptyForm(): ConnectorForm {
 /** 示例模板(与 0042 种子数据对齐,便于「抄一个改一改」)。 */
 const TEMPLATES: { label: string; name: string; description: string; authMode: AuthMode; json: string }[] = [
   {
-    label: 'Moka(远程 MCP + OAuth 发现)',
-    name: 'Moka HR 智能体',
-    description: '招聘和人事一体的 AI 同事,把查询与执行收进一个对话。',
+    label: '示例 MCP 智能体(远程 MCP + OAuth 发现)',
+    name: '示例 MCP 智能体',
+    description: '远程 MCP 连接器示例:OAuth 2.1 + PKCE + 授权服务器元数据发现,端点由管理员按实际服务填写。',
     authMode: 'oauth',
     json: '{"auth":{"discoveryUrl":"https://mcp.example.com/mcp","clientId":"","authorizeUrl":"","tokenUrl":"","redirectUri":"http://127.0.0.1/callback","pkce":true,"publicClient":true,"scopes":"offline_access"},"mcp":[{"serverName":"example-crm","transport":"streamable-http","url":"https://mcp.example.com/mcp"}]}',
   },

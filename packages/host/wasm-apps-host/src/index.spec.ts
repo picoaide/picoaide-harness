@@ -475,16 +475,16 @@ describe('local open route', () => {
 
   it('serves the channel read route with the injected scheme and fails closed without one (§16.1 CHN-4)', async () => {
     const h = fakeContext({ session: ALICE })
-    apply(h.ctx, { appOriginScheme: 'gentech-harness-app', deepLinkScheme: 'gentech-harness', productName: 'Gentech Harness' })
+    apply(h.ctx, { appOriginScheme: 'example-harness-app', deepLinkScheme: 'example-harness', productName: 'Example Harness' })
     const headers = await proofHeaderOf(h)
     const { res, state } = fakeResponse()
     routeOf(h).handler(fakeRequest('GET', undefined, headers, WASM_APP_CHANNEL_ROUTE), res)
     await flush()
     expect(state.status).toBe(200)
     expect(JSON.parse(state.body)).toEqual({
-      appOriginScheme: 'gentech-harness-app',
-      deepLinkScheme: 'gentech-harness',
-      productName: 'Gentech Harness',
+      appOriginScheme: 'example-harness-app',
+      deepLinkScheme: 'example-harness',
+      productName: 'Example Harness',
     })
 
     const bare = fakeContext({ session: ALICE })
@@ -861,7 +861,7 @@ describe('local open route', () => {
   it('builds the app URL from the parsed app id only', () => {
     expect(wasmAppUrl('picoaide-app', 'my-notes')).toBe('picoaide-app://my-notes/')
     // 渠道参数化（§7.8/§10）：URL 由注入的 scheme 决定，不写死官方值。
-    expect(wasmAppUrl('gentech-harness-app', 'my-notes', '/notes?page=2')).toBe('gentech-harness-app://my-notes/notes?page=2')
+    expect(wasmAppUrl('example-harness-app', 'my-notes', '/notes?page=2')).toBe('example-harness-app://my-notes/notes?page=2')
   })
 })
 

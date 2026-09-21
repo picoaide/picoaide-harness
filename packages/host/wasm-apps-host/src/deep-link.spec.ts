@@ -37,8 +37,8 @@ describe('app deep link', () => {
   })
 
   it('parameterizes the app origin scheme instead of hardcoding the official one (§7.8/CHN-3)', () => {
-    expect(parseAppDeepLink('gentech-harness://app/my-notes', 'gentech-harness', 'gentech-harness-app')?.url)
-      .toBe('gentech-harness-app://my-notes/')
+    expect(parseAppDeepLink('example-harness://app/my-notes', 'example-harness', 'example-harness-app')?.url)
+      .toBe('example-harness-app://my-notes/')
     // 没有注入应用源 scheme ⇒ fail-closed（不猜官方值）。
     expect(parseAppDeepLink('acmeai://app/my-notes', 'acmeai', '')).toBeNull()
   })
