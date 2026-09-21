@@ -1,5 +1,35 @@
 # PicoAide Harness repository rules
 
+## 铁律 0（最高优先级）：渠道与客户身份**永不进本仓**
+
+**本仓是公开仓**（GitHub `picoaide/picoaide-harness`）。渠道 / 客户身份属**私有仓** `picoaide/channels`，
+本仓只保留占位符。
+
+**禁止出现**（任何位置、任何形态）：
+
+- 渠道 id、渠道显示名 / 短名 / 产品名、客户或 OEM 品牌名（含其中英文写法、拼音、缩写）；
+- 客户自有或被投递环境的**真实域名、主机名、IP、目录名、容器名、镜像 tag、`.env` 取值**；
+- 上面的名字出现在**示例、夹具、断言、注释、脚本默认值、文档正文、表格、代码块、URL** 里。
+
+**这一条同样适用于 git 提交信息（subject 与 body）与 GitHub 的 PR / Release 文案** ——
+提交信息是公开且可检索的，泄露面与文件正文完全相同。写提交信息时用中性表述：
+「某客户渠道」「第二个渠道栈」「渠道 A」；需要具体身份时指向私有仓，不写名字。
+
+**唯一允许的写法**：占位符（`harness.example.com`）、环境变量（`{$DOMAIN}`、`REAL_SERVER`）、
+角色化表述（「品牌渠道」「客户渠道」「同机第二栈」）。
+
+**自检（改任何含渠道/域名/URL 的文件或写提交信息之前，先跑）**：
+
+```bash
+node scripts/check-no-real-domains.mjs          # 域名/主机名判据（白名单式，未登记即失败）
+git log -1 --format=%B | grep -inE '<渠道名1>|<渠道名2>'   # 提交信息自查（渠道名清单见私有仓）
+```
+
+**为什么放在第 0 条**：这条一旦违反，泄露是不可逆的（公开仓的提交历史会被镜像与索引，
+清理需要改写历史 + 强推 + 通知所有克隆）。代价 >> 任何功能收益，所以它是所有规则里唯一
+"**先问再写**"的一条：**拿不准某个名字算不算渠道身份时，按"算"处理**。
+
+
 This repository owns the desktop product around an unmodified DeepSeek Harness checkout.
 
 ## Prerequisites and setup
