@@ -110,6 +110,7 @@ const SHELL_ZH_MARKERS = [
   'aria-label="地址栏"',
   'placeholder="输入网址，回车访问（例如 https://example.com）"',
   '打开浏览器，AI 会在需要时自动打开网页。',
+  'aria-label="标签页"',
   '关闭标签',
 ]
 
@@ -124,6 +125,7 @@ const SHELL_EN_MARKERS = [
   'aria-label="Address bar"',
   'placeholder="Enter a URL and press Enter (for example https://example.com)"',
   'Open the browser: the AI opens pages here automatically when it needs to.',
+  'aria-label="Tabs"',
   'Close tab',
 ]
 
@@ -202,6 +204,13 @@ describe('injected chrome copy is per locale', () => {
     expect(en.handBack).toBe('Hand back to AI')
     expect((zh.toolLabels as Record<string, string>).browser_click).toBe('点击')
     expect((en.toolLabels as Record<string, string>).browser_click).toBe('Click')
+    // 2026-09-21（壳层缺陷 #5a）：宿主自己记的 op id（不是模型工具）也必须在表里。
+    // 少一个，labelOf 就会把裸 id 抛到活动面板上；两边一起钉住，防止只补一种语言
+    // （en 表整体还受下面 "no HAN" 断言约束）。
+    for (const id of ['browser_window_open', 'browser_download_open', 'navigate']) {
+      expect((zh.toolLabels as Record<string, string>)[id], `zh ${id}`).toBeTruthy()
+      expect((en.toolLabels as Record<string, string>)[id], `en ${id}`).toBeTruthy()
+    }
     // Every dynamic string must be locale-consistent: no zh value survives in
     // the English table (this is the table the page reads, not the markup).
     expect(JSON.stringify(en).match(HAN)).toBeNull()
@@ -227,7 +236,11 @@ describe('injected chrome copy is per locale', () => {
       .toBe('a&lt;/script&gt;&lt;script&gt;window.__pwned=1&lt;/script&gt;&lt;br/&gt;b')
     expect(emptyHtml('one\ntwo')).toBe('one<br/>two')
     const shell = browserShellHtml('zh')
-    expect(shell).toContain('打开浏览器，AI 会在需要时自动打开网页。<br/>你也可以点右上角 ＋ 先自己逛起来。')
+    // 2026-09-21（壳层缺陷 #2）：文案必须指向**真实可用**的入口。空闲态蒙版铺满
+    // 整窗（含工具栏）且 scrim 是 inert ⇒ 右上角 ＋ 根本点不动，旧文案把第一次
+    // 使用的用户送进死路；唯一控制权入口是蒙版上的「我来操作」（2026-09-11 定案）。
+    expect(shell).toContain('打开浏览器，AI 会在需要时自动打开网页。<br/>点下方的「我来操作」，你也可以自己先逛起来。')
+    expect(shell).not.toContain('右上角 ＋')
     // …and the escaping is why the served page has exactly ONE </script> (its own).
     expect(shell.match(/<\/script>/gu)).toHaveLength(1)
     expect(browserOverlayHtml('en').match(/<\/script>/gu)).toHaveLength(1)

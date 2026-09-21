@@ -105,6 +105,11 @@ export function AppAiPanel({ appId, userId, store, deps }: {
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<AppAiFailure | null>(null)
   const controller = useRef<AbortController | null>(null)
+  /**
+   * 登录身份还没到（`userId` 为空串）：授权按 用户×应用 记，身份缺席时写入与读取都会
+   * 早退 —— 这时「允许」必须是**禁用 + 说明**，而不是点了没反应的按钮。
+   */
+  const identityPending = userId === ''
 
   // 仅前台（§21.1 第 15 条）：组件卸载（页面关闭/切走）⇒ 取消在跑的那一轮。
   useEffect(() => () => { controller.current?.abort() }, [])
@@ -202,8 +207,22 @@ export function AppAiPanel({ appId, userId, store, deps }: {
           {revoked && !denied && <div data-role="ai-revoked">{t('appCenter.ai.revoked')}</div>}
           {/* 宿主没记住授权（写失败/拿不到持有性证明）：如实说，不放行输入框。 */}
           {syncFailed !== null && <div data-role="ai-consent-failed">{t('appCenter.ai.consentFailed')}</div>}
+          {/*
+            身份未就绪时的「允许」是**静默 no-op**（2026-09-21 审计）：授权按 用户×应用 记，
+            `grantAppAiConsent`/`hasAppAiConsent` 在 userId 为空串时直接早退 ⇒ 点击后
+            `consented` 仍为 false，说明卡不动、没有任何提示（而宿主闸门其实已经打开）。
+            这里如实置灰并说明原因：身份到达后（父组件用新的 userId 重渲染）按钮自动可用。
+          */}
+          {identityPending && <div data-role="ai-identity-pending">{t('appCenter.ai.identityPending')}</div>}
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <button type="button" className="pico-app-ai-allow" data-action="ai-allow" style={BUTTON} onClick={allow}>
+            <button
+              type="button"
+              className="pico-app-ai-allow"
+              data-action="ai-allow"
+              style={{ ...BUTTON, ...(identityPending ? { opacity: 0.55, cursor: 'default' } : {}) }}
+              disabled={identityPending}
+              onClick={allow}
+            >
               {t('appCenter.ai.allow')}
             </button>
             <button type="button" className="pico-app-ai-deny" data-action="ai-deny" style={BUTTON} onClick={() => { setDenied(true); setRevoked(false) }}>

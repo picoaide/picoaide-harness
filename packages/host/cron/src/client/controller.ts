@@ -112,6 +112,11 @@ export class CronController {
     this.markPending(jobId, true)
     try {
       const snapshot = await this.transport.action(action)
+      // 与 `refresh()` 同一条修订号守卫（2026-09-21 审计）：动作响应可能晚于一条更新的
+      // 快照（同一账号的 AI 用 cron 工具写入、或第二个窗口）落地，直接 install 会把列表
+      // 回滚到旧修订 —— 用户看到"刚建的任务又没了 / 刚改的名字退回去了"，且要等下一次
+      // SSE 事件才修回来。宿主快照是唯一权威，旧修订没有 install 的资格。
+      if (snapshot.revision < this.snapshot.revision) return
       this.install(snapshot)
     } catch (error) {
       // Keep the error visible (a follow-up refresh would clear it before

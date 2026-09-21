@@ -244,7 +244,10 @@ describe('F-2: no tail-prefix matching on text that was never truncated', () => 
     // Round-1 regression: every one of these read 'https://app.example/help/****'.
     const history = h.runtime.history({ limit: 5 }) as unknown as Array<{ url: string }>
     expect(history.map((entry) => entry.url)).toContain(url)
-    expect(h.runtime.opLog.some((op) => op.summary === `navigate: ${url}`)).toBe(true)
+    // 2026-09-21（壳层缺陷 #5c）：navigate 的 op summary 走 hostCopy（中英按调用求值），
+    // 所以这里不再钉前缀字面量，只钉"URL 原样出现在活动面板的时间线里"这条性质
+    // （前缀文案不承载安全语义，凭据掩码才是）。
+    expect(h.runtime.opLog.some((op) => op.summary.includes(url))).toBe(true)
     expect(h.runtime.listTabs().map((tab) => tab.url)).toContain(url)
   })
 
@@ -268,10 +271,12 @@ describe('F-2: no tail-prefix matching on text that was never truncated', () => 
   })
 
   it('caps the op-log navigate summary AFTER the value redaction, not before', async () => {
-    // The op log keeps `navigate: <url>` and caps it at 210 characters. When the
-    // cap ran at the call site (round 1) the credential was cut first, so a
-    // password straddling character 200 survived as a plaintext head fragment —
-    // the R7 tail heuristic missed it because the fragment was 5 characters.
+    // The op log keeps the navigate summary (label + `<url>`) and caps it at 210
+    // characters. When the cap ran at the call site (round 1) the credential was
+    // cut first, so a password straddling character 200 survived as a plaintext
+    // head fragment — the R7 tail heuristic missed it because the fragment was 5
+    // characters. (2026-09-21: the label is localized via hostCopy; the cap is
+    // unchanged, so the URL room only grows in zh.)
     const token = 'T0ken-ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789'
     const url = `https://app.example/${'a'.repeat(175)}${token}tail`
     const h = track(makeHarness(async () => ({ username: 'alice', password: token })))

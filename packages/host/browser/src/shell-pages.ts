@@ -95,6 +95,8 @@ interface BrowserShellCopy extends BrowserFailureCopy {
   readonly empty: string
   /** Title shown for a tab that has neither a title nor a URL yet. */
   readonly tabFallback: string
+  /** Accessible name of the tab strip (`role="tablist"`). */
+  readonly tabsLabel: string
   /** Tooltip of the per-tab close button. */
   readonly closeTab: string
   /** `alert()` when the bookmark button has no page to act on. */
@@ -114,8 +116,9 @@ const SHELL_COPY: Readonly<Record<HostLocale, BrowserShellCopy>> = {
     addrLabel: '地址栏',
     bookmark: '收藏到书签',
     more: '更多',
-    empty: '打开浏览器，AI 会在需要时自动打开网页。\n你也可以点右上角 ＋ 先自己逛起来。',
+    empty: '打开浏览器，AI 会在需要时自动打开网页。\n点下方的「我来操作」，你也可以自己先逛起来。',
     tabFallback: '新标签',
+    tabsLabel: '标签页',
     closeTab: '关闭标签',
     nothingToBookmark: '当前没有可收藏的页面',
   },
@@ -131,8 +134,9 @@ const SHELL_COPY: Readonly<Record<HostLocale, BrowserShellCopy>> = {
     addrLabel: 'Address bar',
     bookmark: 'Bookmark this page',
     more: 'More',
-    empty: 'Open the browser: the AI opens pages here automatically when it needs to.\nYou can also click ＋ in the top right to start browsing on your own.',
+    empty: 'Open the browser: the AI opens pages here automatically when it needs to.\nClick "Take over" at the bottom to start browsing on your own.',
     tabFallback: 'New tab',
+    tabsLabel: 'Tabs',
     closeTab: 'Close tab',
     nothingToBookmark: 'There is no page to bookmark right now',
   },
@@ -246,9 +250,14 @@ export function browserShellHtml(locale: HostLocale): string {
   .tab .favicon { width: 16px; height: 16px; border-radius: 3px; background: var(--surface-hover); flex: none; object-fit: contain; }
   .tab .ai-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; animation: breathe 2.4s ease-in-out infinite; }
   .tab .t { overflow: hidden; text-overflow: ellipsis; }
-  .tab .x { opacity: 0; padding: 0 2px; font-size: 12px; color: var(--text-muted); }
+  /* 2026-09-21（键盘可达）：标签是 role="tab" + tabindex 的控件，关闭键是真正的
+     <button>。两者都必须有可见的键盘焦点环，且关闭键不能只在 hover 时可见 ——
+     键盘用户 Tab 到它时看不到任何东西就等于没有这个入口。 */
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .tab .x { opacity: 0; padding: 0 2px; font-size: 12px; color: var(--text-muted); border: none; background: none; }
   .tab:hover .x { opacity: 1; }
-  .tab .x:hover { color: var(--danger); }
+  .tab:focus-visible .x, .tab .x:focus-visible { opacity: 1; }
+  .tab .x:hover { color: var(--danger); background: none; }
   #newtab { margin-left: auto; }
   @keyframes breathe { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
 
@@ -266,7 +275,7 @@ export function browserShellHtml(locale: HostLocale): string {
 <body>
   <div id="toast" role="status" aria-live="polite"></div>
   <div id="tabstrip">
-    <div id="tabs" style="display:flex;align-items:center;gap:4px;min-width:0;"></div>
+    <div id="tabs" role="tablist" aria-label="${escapeHtml(c.tabsLabel)}" style="display:flex;align-items:center;gap:4px;min-width:0;"></div>
     <button id="newtab" class="icon" title="${escapeHtml(c.newTab)}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
   </div>
   <div id="omnibox">
@@ -365,15 +374,35 @@ export function browserShellHtml(locale: HostLocale): string {
     return ''
   }
 
-  function render() {
+  /**
+   * 标签条。**内容签名不变就不动 DOM**（与活动面板的 renderStream 同一手法）：
+   * 2026-09-21 之前每次 refresh 都整表重建，任何一次刷新（SSE 事件、1.5s 兜底轮询）
+   * 都会把节点换掉 ⇒ 键盘用户 Tab 到某个标签后焦点立刻掉回 body，标签"可聚焦"
+   * 只存在于两次刷新之间（与 2026-09-15 修过的面板滚动重置同族）。
+   */
+  let tabsSig = ''
+  function renderTabs() {
+    const sig = JSON.stringify([state.tabs, state.busy])
+    if (sig === tabsSig) return
+    tabsSig = sig
     const strip = $('tabs')
     strip.textContent = ''
     for (const tab of state.tabs) {
+      // 2026-09-21（键盘可达，壳层缺陷 #6）：标签原来是不可聚焦的 div，关闭键是
+      // opacity:0 的 span ⇒ 整条标签栏键盘不可达（Tab 跳不到、AI 开的标签只能用
+      // 鼠标切/关）。现在：标签 = role="tab" + aria-selected + tabindex 的可聚焦
+      // 控件（Enter/空格切换），关闭键 = 真正的 <button>（原生 Enter/空格触发，
+      // 聚焦时可见）。**故意不嵌套 button**：button 里再塞 button 是非法内容
+      // 模型，片段解析会把内层甩到外层之外 —— 所以标签本身用 role="tab"
+      // 的 div 承载，内层关闭键才是真按钮。
       const el = document.createElement('div')
       el.className = 'tab' + (tab.visible ? ' active' : '')
+      el.setAttribute('role', 'tab')
+      el.setAttribute('aria-selected', tab.visible ? 'true' : 'false')
+      el.tabIndex = 0
       el.title = tab.url || tab.title
       const busy = state.busy && tab.visible
-      el.innerHTML = '<img class="favicon" alt=""><span class="t">' + esc(tab.title || tab.url || COPY.tabFallback) + (tab.loading ? '…' : '') + '</span>' + (busy ? '<span class="ai-dot"></span>' : '') + '<span class="x" title="' + esc(COPY.closeTab) + '">×</span>'
+      el.innerHTML = '<img class="favicon" alt=""><span class="t">' + esc(tab.title || tab.url || COPY.tabFallback) + (tab.loading ? '…' : '') + '</span>' + (busy ? '<span class="ai-dot"></span>' : '') + '<button class="x" type="button" title="' + esc(COPY.closeTab) + '" aria-label="' + esc(COPY.closeTab) + '">×</button>'
       const icon = el.querySelector('.favicon')
       // 2026-09-15 审计（P2）：tab.favicon 是页面/服务端给的字符串，原来直接落进
       // img.src —— javascript:/file: 这类 scheme 也照设不误。只放行 http(s) 与
@@ -385,12 +414,24 @@ export function browserShellHtml(locale: HostLocale): string {
         if (e.target.className === 'x') return
         if (!tab.visible) postErr('switch-tab', { tab: tab.id })
       })
+      // 键盘激活：事件必须落在标签**自己**身上。关闭键是独立控件，它自己处理
+      // Enter/空格（原生 click），冒泡到这里时不能顺手把标签也切了。
+      el.addEventListener('keydown', (e) => {
+        if (e.target !== el) return
+        if (e.key !== 'Enter' && e.key !== ' ') return
+        e.preventDefault()
+        if (!tab.visible) postErr('switch-tab', { tab: tab.id })
+      })
       el.addEventListener('auxclick', (e) => {
         if (e.button === 1) { e.preventDefault(); postErr('close-tab', { tab: tab.id }) }
       })
       el.querySelector('.x').addEventListener('click', (e) => { e.stopPropagation(); postErr('close-tab', { tab: tab.id }) })
       strip.appendChild(el)
     }
+  }
+
+  function render() {
+    renderTabs()
     $('empty').hidden = state.tabs.length > 0
 
     const cur = state.tabs.find((t) => t.visible)
@@ -474,6 +515,19 @@ export function browserShellHtml(locale: HostLocale): string {
       for (const ev of ['tab', 'tab-meta', 'busy', 'takeover', 'release', 'ops', 'state']) {
         es.addEventListener(ev, () => { lastSseAt = Date.now(); refresh() })
       }
+      // 2026-09-21（壳层缺陷 #4）：Ctrl+L 是在**蒙版视图**里被消费掉的（那一刻键盘
+      // 焦点在 overlay 页），宿主把键盘交回本页后只调 focusPage() —— 原生焦点落在
+      // 本页文档上，activeElement 仍是 body，地址栏拿不到焦点，用户必须再按一次
+      // Ctrl+L（这次才落到本页的 keydown）。宿主因此补发一条 focus-addr 信号，由本页
+      // 把光标真正放进 #addr。只在用户确实持控制权时执行：蒙版状态下地址栏本来就不
+      // 可用（见 #addr 的 keydown 闸门），聚焦它只会误导。
+      es.addEventListener('focus-addr', () => {
+        lastSseAt = Date.now()
+        if (!state.controlled) return
+        const addr = $('addr')
+        addr.focus()
+        addr.select()
+      })
     } catch { /* 连不上就纯靠兜底轮询 */ }
   }
   connectStream()
@@ -648,6 +702,12 @@ const OVERLAY_COPY: Readonly<Record<HostLocale, BrowserOverlayCopy>> = {
       'browser_upload_file': '上传文件',
       'browser_bookmarks_add': '收藏页面',
       'browser_page_state': '页面变化',
+      // 2026-09-21（壳层缺陷 #5）：这三个 id 是宿主自己记的 op（不是模型工具），
+      // 此前不在表里 ⇒ labelOf 兜底成裸 id，中文界面的活动面板直接显示
+      // `browser_window_open`。navigate 家族里宿主记的本地导航拒绝也用 'navigate'。
+      'browser_window_open': '打开新标签页',
+      'browser_download_open': '打开下载文件',
+      'navigate': '打开网页',
       'browser_page_crash': '页面恢复',
       'browser_close': '关闭浏览器',
     },
@@ -723,6 +783,10 @@ const OVERLAY_COPY: Readonly<Record<HostLocale, BrowserOverlayCopy>> = {
       'browser_page_state': 'Page change',
       'browser_page_crash': 'Page recovery',
       'browser_close': 'Close browser',
+      // Host-recorded ops that are not model tools (2026-09-21, shell defect #5).
+      'browser_window_open': 'Open new tab',
+      'browser_download_open': 'Open downloaded file',
+      'navigate': 'Open page',
     },
   },
 }
@@ -799,7 +863,12 @@ export function browserOverlayHtml(locale: HostLocale): string {
   body[data-mode="mask"] .surface.s-mask { display: flex; }
 
   /* ---------- capsule (AI 指示) ---------- */
-  .s-capsule { align-items: center; gap: 6px; padding: 0 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-raised); box-shadow: 0 4px 16px rgba(0,0,0,.12); cursor: pointer; overflow: hidden; }
+  /* 2026-09-21（壳层缺陷 #7）：胶囊**钉在视图底部**、高度恒为 34px，而不是撑满视图。
+     宿主在弹失败 toast 时会把 overlay 视图临时放大到 300×116（同一个右下角锚点），
+     如果胶囊继续 height:100% 就会被拉成一整块 300×116 的大药丸盖住页面；
+     锚到底部后视觉位置/尺寸与紧凑态逐像素一致，放大的只是它上方那块 toast 区域。
+     紧凑态（视图就是 172×34）下 left/right/bottom/height 与原来的 100%/100% 等价。 */
+  .s-capsule { position: absolute; left: 0; right: 0; bottom: 0; height: 34px; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-raised); box-shadow: 0 4px 16px rgba(0,0,0,.12); cursor: pointer; overflow: hidden; }
   .s-capsule .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex: none; }
   .s-capsule .dot.busy { background: var(--accent); animation: breathe 2.4s ease-in-out infinite; }
   .s-capsule .dot.paused { background: var(--warning); }
@@ -954,7 +1023,11 @@ export function browserOverlayHtml(locale: HostLocale): string {
     return await r.json()
   }
 
-  const labelOf = (tool) => TOOL_LABELS[tool] || tool || COPY.actionFallback
+  // 2026-09-21（壳层缺陷 #5b）：兜底**绝不显示裸 tool id**。旧实现是
+  // TOOL_LABELS[tool] || tool || COPY.actionFallback，任何新增/未登记的工具都会把
+  // browser_window_open 这样的内部标识符原样抛到中文界面的活动面板上；工具面是
+  // 会长的（新增工具时没人会记得回来补表），所以兜底必须是**通用文案**。
+  const labelOf = (tool) => TOOL_LABELS[tool] || COPY.actionFallback
   const fmtTime = (t) => {
     try {
       const d = new Date(t)
@@ -965,17 +1038,47 @@ export function browserOverlayHtml(locale: HostLocale): string {
     } catch { return '' }
   }
   let otoastTimer = null
+  let noticeOn = false
+  /**
+   * 胶囊态下请求宿主临时放大 overlay 视图（2026-09-21 壳层缺陷 #7）。
+   *
+   * 胶囊视图只有 172×34，而 #otoast 是 position:fixed 的页面级提示 —— 它只能在
+   * 视图矩形内渲染，超出部分被原生视图裁掉（失败文案只剩顶部一条还压在胶囊上）。
+   * 刻意**不走 post()**：post 失败会弹 toast，而 toast 又回到这里 ⇒ 自激循环。这条
+   * 信号只是"提示能不能看清"的优化，失败静默（最坏情况退化成旧的被裁行为）。
+   * 非胶囊态不发（面板/查看器/蒙版的视图本来就装得下 toast）。
+   */
+  const setNotice = (visible) => {
+    if (mode !== 'capsule' || noticeOn === visible) return
+    noticeOn = visible
+    try {
+      fetchWithTimeout('/api/pico/browser/notice', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ visible: visible }),
+      }).catch(() => {})
+    } catch { /* 信号失败不影响提示本身 */ }
+  }
+  const hideToast = () => {
+    $('otoast').classList.remove('show')
+    setNotice(false)
+  }
   const showToast = (text) => {
     const t = $('otoast')
     t.textContent = String(text || '')
     t.classList.add('show')
+    setNotice(true)
     if (otoastTimer !== null) clearTimeout(otoastTimer)
-    otoastTimer = setTimeout(() => t.classList.remove('show'), 3200)
+    otoastTimer = setTimeout(hideToast, 3200)
   }
   const esc = (s) => String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 
   function applyMode(next) {
     mode = next
+    // 模式一变宿主就归还了提示矩形（见 setNotice 的调用方与 runtime 的
+    // setOverlayMode）⇒ 页面的镜像必须一起复位，否则回到胶囊态后第一次 toast 会
+    // 因为 noticeOn 已是 true 而不再请求放大（提示又被裁）。
+    noticeOn = false
     document.body.dataset.mode = mode
     if (mode === 'mask') renderMask()
     if (mode === 'menu') renderMenu()
@@ -1246,7 +1349,8 @@ export function browserOverlayHtml(locale: HostLocale): string {
 
   // Forward the browser shortcuts when keyboard focus lives in the overlay
   // (after panel/menu/viewer interactions) so Ctrl+T/W/R keep working; Ctrl+L
-  // closes the overlay surface (the host then focuses the shell address bar).
+  // closes the overlay surface (the host then signals the shell page to focus
+  // the address bar — see the focus-addr listener there).
   document.addEventListener('keydown', (e) => {
     // Escape only closes the floating surface. It must NEVER hand the browser
     // back to the AI: control changes only via the 我来操作/交给 AI button.
@@ -1254,15 +1358,30 @@ export function browserOverlayHtml(locale: HostLocale): string {
       void post('overlay', { mode: 'capsule' })
       return
     }
-    // While masked the window is locked and the pill button is the only entry;
-    // Enter/Space mirror it for keyboard users.
+    // 2026-09-21（壳层缺陷 #1，P0）：蒙版下**只有真正聚焦在可见的
+    // #pill-take 按钮上**的 Enter/空格才等于按了这个按钮。
+    //
+    // 旧实现在 !controlled 时把整个文档的 Enter/空格都当成「我来操作」并
+    // preventDefault —— 而蒙版页在前台持键盘焦点（宿主上锁时会把焦点交给它），
+    // 于是用户想用空格翻页的那一刻：不翻页、正在跑的工具调用被 window-controlled
+    // 中止、控制权静默转到用户手上。
+    //
+    // 键盘可达性不退化：蒙版显示时 .s-mask 是唯一可见的 surface，其余 surface
+    // display:none（不可聚焦），所以 Tab 的第一站就是 #pill-take；它本身是
+    // <button>，这里显式调 .click() 而不是依赖原生键激活，既保证 keydown 期
+    // preventDefault（不滚动页面）不会吃掉这次激活，也让行为可被 jsdom 断言。
     if (!state.controlled) {
-      if (e.key === 'Enter' || e.key === ' ') {
+      const pill = $('pill-take')
+      if (document.activeElement === pill && (e.key === 'Enter' || e.key === ' ')) {
         e.preventDefault()
-        void takeControl('pill-take', true)
+        pill.click()
       }
       return
     }
+    // Ctrl+L：回到 capsule = 把键盘交回 shell 页（宿主 focusPage()），宿主随后在同
+    // 一个闸门内补发 focus-addr ⇒ shell 页把光标放进 #addr。少了这条信号，第一次
+    // Ctrl+L 只是把**原生**焦点还给 shell 文档，activeElement 仍是 body，用户必须
+    // 再按一次才进地址栏（2026-09-21 缺陷 #4）。
     if (e.ctrlKey && e.key.toLowerCase() === 'l') { e.preventDefault(); void post('overlay', { mode: 'capsule' }) }
     if (e.ctrlKey && e.key.toLowerCase() === 't') { e.preventDefault(); void post('open').then((r) => { if (r.ok) refresh() }) }
     if (e.ctrlKey && e.key.toLowerCase() === 'w') { e.preventDefault(); void getJson('state').then((s) => { const t = (s.tabs || []).find((x) => x.visible); if (t) void post('close-tab', { tab: t.id }).then((r) => { if (r.ok) refresh() }) }).catch(() => {}) }

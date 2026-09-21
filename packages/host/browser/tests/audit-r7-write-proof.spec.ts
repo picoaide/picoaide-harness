@@ -135,6 +135,8 @@ const WRITE_REQUESTS: Array<{ method: string, url: string, body?: string }> = [
   // 蒙版页自己的两个按钮（§7b 方案 A 的"产品不能被修坏"面）：接管与隐藏窗口。
   { method: 'POST', url: '/api/pico/browser/takeover', body: '{"active":true}' },
   { method: 'POST', url: '/api/pico/browser/hide' },
+  // 胶囊态的失败提示矩形信号（2026-09-21 缺陷 #7）：同样是写面。
+  { method: 'POST', url: '/api/pico/browser/notice', body: '{"visible":true}' },
   { method: 'DELETE', url: '/api/pico/browser/bookmarks?id=1' },
   { method: 'DELETE', url: '/api/pico/browser/downloads?id=1' },
 ]
@@ -179,6 +181,10 @@ describe('R7-RV-3 browser:本地写路由要求持有性证明', () => {
     expect(await call('POST', '/api/pico/browser/takeover', '{"active":true}', true))
       .toMatchObject({ code: 200, body: { ok: true } })
     expect(await call('POST', '/api/pico/browser/hide', undefined, true))
+      .toMatchObject({ code: 200, body: { ok: true } })
+    // 胶囊态提示矩形信号（2026-09-21 缺陷 #7）：真路由必须接到 runtime ——
+    // 漏 case 会落到 `default: 404 not found`（这条判据就是抓那个）。
+    expect(await call('POST', '/api/pico/browser/notice', '{"visible":true}', true))
       .toMatchObject({ code: 200, body: { ok: true } })
   })
 

@@ -220,9 +220,22 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
   // Prefill server-provided defaults as soon as the form request arrives on
   // the poll (the /connect response only carries {connectorId}; the real
   // `fields` payload lands one render later). Never overwrite user input.
+  //
+  // 2026-09-21 审计：这里原先只依赖 `entry.request?.fields` 这个**数组引用**，而轮询每 2 秒
+  // 反序列化出的都是新数组 ⇒ effect 每 2s 重跑一次，判据又是"值为空就填默认值" ⇒ 用户
+  // 主动清空的预填字段会在 2 秒内自己回来，无法提交"留空"的表单。现在按**一轮连接只预填
+  // 一次**（用字段指纹去重），并在离开 connecting 时忘记这次，下一次连接仍能预填。
+  const prefilledFingerprint = useRef<string | null>(null)
   useEffect(() => {
+    if (entry.status !== 'connecting') {
+      prefilledFingerprint.current = null
+      return
+    }
     const fields = entry.request?.fields
     if (fields === undefined || fields.length === 0) return
+    const fingerprint = fields.map(field => `${field.key}\u0000${field.defaultValue ?? ''}`).join('\u0001')
+    if (prefilledFingerprint.current === fingerprint) return
+    prefilledFingerprint.current = fingerprint
     setFormValues((previous) => {
       let changed = false
       const next = { ...previous }
@@ -235,7 +248,7 @@ function ConnectorCard({ entry, onChanged }: { entry: ConnectorEntry; onChanged:
       }
       return changed ? next : previous
     })
-  }, [entry.id, entry.request?.fields])
+  }, [entry.id, entry.status, entry.request?.fields])
 
   // The authorize URL is produced asynchronously by the flow; open it once
   // when it appears (popup blockers tolerate a click-adjacent open).
