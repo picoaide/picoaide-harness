@@ -8,6 +8,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  APP_WINDOW_DEFAULT_HEIGHT,
+  APP_WINDOW_DEFAULT_WIDTH,
   APP_WINDOW_MIN_HEIGHT,
   APP_WINDOW_MIN_WIDTH,
   APP_WINDOWS_STATE_FILE,
@@ -161,7 +163,7 @@ describe('window manager (single window per app)', () => {
     const dir = await tempDir()
     const first = fakeAdapter()
     const windows = createWasmAppsWindows({ adapter: first, appScheme: 'picoaide-app', productName: 'Acme', userDataDir: dir, partition: () => TEST_PARTITION, urlFor, workArea })
-    await windows.open('my-notes', '/', 2)
+    await windows.open('my-notes', '/', { ratio: 2 })
     const created = first.created[0] as { width: number, height: number }
     expect(created.width / created.height).toBeCloseTo(2, 1)
     expect(first.ratios).toEqual([2])
@@ -456,5 +458,172 @@ describe('state write failures never block opening a window', () => {
     expect(result.window).toBe('opened')
     await new Promise(resolve => setTimeout(resolve, 10))
     expect(warn).toHaveBeenCalled()
+  })
+})
+
+/**
+ * 作者声明的窗口几何进建窗路径（F3/§6；2026-09-21 审计 P0-2）。
+ *
+ * 现场：目录行里的 `window.ratio/width/height` 只被客户端渲染成详情页的
+ * 「窗口比例 16:9」，`windows.open` 一个字段都没收到 ⇒ 首次一律 1280×720、比例不锁。
+ *
+ * 变异：把 `open` 里的 `resolveDeclaredWindowSize(geometry)` 换回
+ * `APP_WINDOW_DEFAULT_WIDTH/HEIGHT` ⇒ "首次尺寸用声明值" 必红；把 `declaredRatio`
+ * 改回 `remembered?.ratio`（忽略声明）⇒ "比例进 setAspectRatio" 必红。
+ */
+describe('declared window geometry reaches window creation (F3/§6)', () => {
+  const urlFor = (appId: string, path: string): string => `picoaide-app://${appId}${path}`
+  const workArea = (): { x: number, y: number, width: number, height: number } => ({ x: 0, y: 0, width: 1920, height: 1080 })
+
+  it('首次开窗用作者声明的尺寸与比例（缺省仍是 1280×720）', async () => {
+    const dir = await tempDir()
+    const adapter = fakeAdapter()
+    const windows = createWasmAppsWindows({ adapter, appScheme: 'picoaide-app', productName: 'Acme', userDataDir: dir, partition: () => TEST_PARTITION, urlFor, workArea })
+    await windows.open('wide', '/', { ratio: 16 / 9, width: 1600 })
+    expect(adapter.created[0]).toMatchObject({ width: 1600, height: 900, ratio: 16 / 9 })
+    expect(adapter.ratios).toEqual([16 / 9])
+
+    // 没声明 ⇒ 缺省 1280×720 且**不锁**比例（不是"锁一个 16:9"）。
+    await windows.open('plain')
+    expect(adapter.created[1]).toMatchObject({ width: APP_WINDOW_DEFAULT_WIDTH, height: APP_WINDOW_DEFAULT_HEIGHT })
+    expect(adapter.created[1]?.ratio).toBeUndefined()
+    expect(adapter.ratios).toHaveLength(1)
+  })
+
+  it('改版后新比例必须生效（声明覆盖记忆里的旧比例），尺寸仍以记忆为准', async () => {
+    const dir = await tempDir()
+    const first = fakeAdapter()
+    const windows = createWasmAppsWindows({ adapter: first, appScheme: 'picoaide-app', productName: 'Acme', userDataDir: dir, partition: () => TEST_PARTITION, urlFor, workArea })
+    await windows.open('my-notes', '/', { ratio: 4 / 3, width: 1200 })
+    expect(first.ratios).toEqual([4 / 3])
+
+    // 同一个 userData 的新实例（模拟重启）：记忆里有 1200×900 + ratio 4/3，
+    // 而声明改成了 16:9 ⇒ 比例用新的，尺寸仍是记忆的（按新比例校正）。
+    const second = fakeAdapter()
+    const reopened = createWasmAppsWindows({ adapter: second, appScheme: 'picoaide-app', productName: 'Acme', userDataDir: dir, partition: () => TEST_PARTITION, urlFor, workArea })
+    await reopened.open('my-notes', '/', { ratio: 16 / 9 })
+    expect(second.ratios).toEqual([16 / 9])
+    const created = second.created[0] as { width: number, height: number }
+    expect(created.width / created.height).toBeCloseTo(16 / 9, 1)
+  })
+})
+
+/**
+ * 应用窗口注册进 browser runtime 的 surface 注册表（§16.1 的 `kind:'app'` 那一半）。
+ *
+ * 现场（2026-09-21 审计 P0-1）：`surface.ts` 的 `registerApp` 早已实现，但全仓调用点
+ * **只有测试** ⇒ AI 的 `browser_list_tabs` 永远看不到应用窗口、`app_id` 寻址永远报
+ * "没有这个应用窗口"。
+ *
+ * 变异：去掉 `registerSurface(appId, handle)` 调用 ⇒ 本组全红；去掉
+ * `forget`/`close`/`closeAll` 里的 `unregisterSurface` ⇒ 对应的"注销"用例红。
+ */
+describe('application windows register as browser surfaces (§16.1)', () => {
+  const urlFor = (appId: string, path: string): string => `picoaide-app://${appId}${path}`
+  const workArea = (): { x: number, y: number, width: number, height: number } => ({ x: 0, y: 0, width: 1920, height: 1080 })
+
+  /** surface 注册表替身（只实现本包用到的两个方法）。 */
+  function fakeSurfaces(): {
+    registered: Array<{ id: number, appId: string, appScheme: string, webContents?: unknown, scope?: string }>
+    unregistered: number[]
+    registry: { registerApp(input: { id: number, appId: string, appScheme: string, webContents?: unknown, scope?: string }): { id: number }, unregister(id: number): void }
+  } {
+    const registered: Array<{ id: number, appId: string, appScheme: string, webContents?: unknown, scope?: string }> = []
+    const unregistered: number[] = []
+    return {
+      registered,
+      unregistered,
+      registry: {
+        registerApp(input) {
+          registered.push(input)
+          return { id: input.id }
+        },
+        unregister(id) { unregistered.push(id) },
+      },
+    }
+  }
+
+  it('建窗即注册（appId/scheme/webContents/scope），关窗与登出注销', async () => {
+    const dir = await tempDir()
+    const adapter = fakeAdapter()
+    const surfaces = fakeSurfaces()
+    const windows = createWasmAppsWindows({
+      adapter: { ...adapter, webContentsId: handle => (handle as { id: number }).id, webContents: handle => ({ wc: (handle as { id: number }).id }) },
+      appScheme: 'acme-app',
+      productName: 'Acme',
+      userDataDir: dir,
+      partition: () => TEST_PARTITION,
+      surfaces: () => surfaces.registry,
+      urlFor,
+      workArea,
+    })
+
+    await windows.open('my-notes')
+    expect(surfaces.registered).toHaveLength(1)
+    expect(surfaces.registered[0]).toMatchObject({
+      appId: 'my-notes',
+      appScheme: 'acme-app',
+      scope: TEST_PARTITION,
+      webContents: { wc: 1 },
+    })
+    // surface id 由宿主单调分配（不与浏览器标签的 1..N 相撞，且不同应用互不覆盖）。
+    await windows.open('other')
+    expect(surfaces.registered[1]?.id).not.toBe(surfaces.registered[0]?.id)
+    // 重复 open（聚焦已有窗口）不重复注册。
+    await windows.open('my-notes', '/notes')
+    expect(surfaces.registered).toHaveLength(2)
+
+    await windows.close('my-notes')
+    expect(surfaces.unregistered).toEqual([surfaces.registered[0]?.id])
+    await windows.closeAll()
+    expect(surfaces.unregistered).toEqual([surfaces.registered[0]?.id, surfaces.registered[1]?.id])
+  })
+
+  it('用户手动关窗后（句柄已销毁）下一次触碰即注销，不留"幽灵 surface"', async () => {
+    const dir = await tempDir()
+    let alive = true
+    let next = 0
+    const surfaces = fakeSurfaces()
+    const adapter: WasmAppsWindowAdapter = {
+      createAppWindow() { next += 1; alive = true; return { id: next } },
+      focusAppWindow() {},
+      closeAppWindow() {},
+      setAspectRatio() {},
+      isAlive() { return alive },
+    }
+    const windows = createWasmAppsWindows({
+      adapter, appScheme: 'picoaide-app', productName: 'Acme', userDataDir: dir, partition: () => TEST_PARTITION, surfaces: () => surfaces.registry, urlFor, workArea,
+    })
+    await windows.open('my-notes')
+    expect(surfaces.registered).toHaveLength(1)
+    alive = false
+    expect(windows.has('my-notes')).toBe(false)
+    expect(surfaces.unregistered).toEqual([surfaces.registered[0]?.id])
+  })
+
+  it('注册表晚到（browser 行在本插件之后加载）时补注册已开窗口', async () => {
+    const dir = await tempDir()
+    const adapter = fakeAdapter()
+    const surfaces = fakeSurfaces()
+    let registry: typeof surfaces.registry | undefined
+    const windows = createWasmAppsWindows({
+      adapter,
+      appScheme: 'picoaide-app',
+      productName: 'Acme',
+      userDataDir: dir,
+      partition: () => TEST_PARTITION,
+      surfaces: () => registry,
+      urlFor,
+      workArea,
+    })
+    // 注册表还没提供：窗口照常开（AI 能力不是准入），但不注册。
+    await windows.open('my-notes')
+    expect(surfaces.registered).toHaveLength(0)
+    registry = surfaces.registry
+    windows.registerOpenWindows()
+    expect(surfaces.registered.map(entry => entry.appId)).toEqual(['my-notes'])
+    // 幂等：再补一次不重复注册。
+    windows.registerOpenWindows()
+    expect(surfaces.registered).toHaveLength(1)
   })
 })

@@ -216,6 +216,18 @@ export const zh = {
   'appCenter.diagnosticsShapeMismatch': '服务端返回的诊断结果形状与客户端预期不一致',
   'appCenter.schemaShapeMismatch': '服务端返回的表结构形状与客户端预期不一致',
   'appCenter.rowsShapeMismatch': '服务端返回的数据形状与客户端预期不一致',
+  // ---- AI 读取数据的授权卡（2026-09-21 用户拍板：**默认关 + 显式授权卡**）----
+  // 文案必须把后果说全：只有脱敏列、每次调用写审计、可随时撤销。用户点下"允许"就是
+  // 对这一组后果的授权，因此这三件事一个都不能省（省掉任何一条，授权卡就变成了
+  // 一句含糊的"打开 AI"）。
+  'appCenter.aiRowsTitle': 'AI 读取数据',
+  'appCenter.aiRowsAllow': '允许 AI 读取此应用的数据（仅脱敏列，每次调用写审计）',
+  'appCenter.aiRowsEnabled': '已允许 AI 读取此应用的数据（仅脱敏列，每次调用写审计）',
+  'appCenter.aiRowsRevoke': '撤销授权',
+  'appCenter.aiRowsHint': '默认关闭。打开后，AI 的 wasm_app_rows 工具才能读这个应用的数据；敏感列仍然脱敏，且每次调用都会写平台审计。撤销后立刻恢复默认（再调用会被拒绝）。',
+  'appCenter.aiRowsUnknown': '拿不到当前的授权状态（宿主没有回答）',
+  'appCenter.aiRowsSaveFailed': '授权没有保存成功：宿主仍会拒绝 AI 的读取（默认关）',
+  'appCenter.aiRowsShapeMismatch': '授权状态响应与客户端预期不一致（没有 app_id/enabled 字段）',
   'appCenter.dataTitle': '数据',
   'appCenter.dataHint': '只读浏览这个应用库里的数据。默认脱敏敏感列，行内容不进审计。',
   'appCenter.dataEmpty': '这个应用还没有数据库：它还没成功执行过任何建表或写入。',
@@ -510,6 +522,15 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.diagnosticsShapeMismatch': 'The diagnostics response does not match the shape this client expects',
   'appCenter.schemaShapeMismatch': 'The schema response does not match the shape this client expects',
   'appCenter.rowsShapeMismatch': 'The data response does not match the shape this client expects',
+  // ---- AI data-reading consent card (2026-09-21: off by default + explicit card) ----
+  'appCenter.aiRowsTitle': 'AI data reading',
+  'appCenter.aiRowsAllow': 'Allow AI to read this app\u2019s data (masked columns only; every call is audited)',
+  'appCenter.aiRowsEnabled': 'AI is allowed to read this app\u2019s data (masked columns only; every call is audited)',
+  'appCenter.aiRowsRevoke': 'Revoke',
+  'appCenter.aiRowsHint': 'Off by default. When it is on, the AI\u2019s wasm_app_rows tool can read this app\u2019s data: sensitive columns stay masked and every call is audited by the platform. Revoking restores the default immediately (later calls are refused).',
+  'appCenter.aiRowsUnknown': 'The current consent state could not be read (the host did not answer)',
+  'appCenter.aiRowsSaveFailed': 'The consent was not saved: the host still refuses AI reads (off by default)',
+  'appCenter.aiRowsShapeMismatch': 'The consent response does not match the shape this client expects (no app_id/enabled field)',
   'appCenter.dataTitle': 'Data',
   'appCenter.dataHint': 'Read-only view of this app\u2019s database. Sensitive columns are masked by default; row contents never enter the audit log.',
   'appCenter.dataEmpty': 'This app has no database yet: it has never created a table or written a row.',

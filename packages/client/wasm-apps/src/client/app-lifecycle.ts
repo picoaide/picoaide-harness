@@ -531,3 +531,86 @@ export async function fetchRows(
   if (!outcome.ok) return outcome
   return parseRowsOutcome(appId, outcome.payload)
 }
+
+// ---------------------------------------------------------------------------
+// 「允许 AI 读取此应用的数据」的授权卡（默认关；2026-09-21 用户拍板）
+// ---------------------------------------------------------------------------
+//
+// 这段是**客户端半边**：面板把它当普通本机路由调用，真正的闸门在宿主工具
+// （`wasm_app_rows`，见 `packages/host/enterprise/src/wasm-app-tools.ts`）。
+// 授权状态落在宿主私有文件（`$DSH_HOME/wasm-apps-ai-rows-consent.json`），
+// 因此**面板必须读宿主**（不能拿渲染层 `localStorage` 当真相）——否则换窗口/重开
+// 客户端后面板显示的开关状态与宿主实际闸门会不一致。
+
+/**
+ * 授权路由的后缀（**跨端契约**：宿主 `wasm-apps.ts` 的 `AI_ROWS_CONSENT_SUFFIX`
+ * 是同值的另一份字面量；客户端不 import 宿主包，漂移由 `ai-rows-consent.spec.tsx`
+ * 的读源码对拍钉住）。
+ */
+export const AI_ROWS_CONSENT_SUFFIX = 'ai-rows-consent'
+
+/**
+ * 一个应用的 AI 行数据授权路由。
+ * @param appId - 应用标识（路径段，必须 URI 编码）。
+ * @returns 以 `/` 开头的本机路径。
+ */
+export function aiRowsConsentPath(appId: string): string {
+  return lifecyclePath(appId, AI_ROWS_CONSENT_SUFFIX)
+}
+
+/** 授权状态（宿主返回值）。 */
+export interface AiRowsConsentState {
+  ok: true
+  appId: string
+  /** true = 允许 AI 读这个应用的数据（仅脱敏列）；false = 默认关。 */
+  enabled: boolean
+}
+
+/**
+ * 解析授权响应（`{app_id, enabled}`）。
+ *
+ * 形状不符 ⇒ **失败**（不回落成 `false`）：把"宿主方言变了"显示成"未授权"会让用户
+ * 反复点开关而不知道为什么没反应（与 rows/schema 的"不回落成空表"同一条纪律）。
+ * @param appId - 本次请求的 app_id。
+ * @param payload - 响应体。
+ * @returns 状态或失败。
+ */
+export function parseAiRowsConsentOutcome(appId: string, payload: unknown): AiRowsConsentState | PublishFailure {
+  const body = asRecord(payload)
+  if (asString(body.app_id) !== appId || typeof body.enabled !== 'boolean') {
+    return shapeMismatch(appId, payload, t('appCenter.aiRowsShapeMismatch'))
+  }
+  return { ok: true, appId, enabled: body.enabled }
+}
+
+/**
+ * 读授权状态（只读；宿主 `GET …/:app_id/ai-rows-consent`）。
+ * @param appId - 应用标识。
+ * @param deps - 可注入的 fetch / 取消信号。
+ * @returns 状态或失败（永不抛）。
+ */
+export async function fetchAiRowsConsent(appId: string, deps: RequestDeps = {}): Promise<AiRowsConsentState | PublishFailure> {
+  const outcome = await requestJSON(aiRowsConsentPath(appId), { method: 'GET' }, deps)
+  if (!outcome.ok) return outcome
+  return parseAiRowsConsentOutcome(appId, outcome.payload)
+}
+
+/**
+ * 写授权状态（宿主 `POST …/:app_id/ai-rows-consent`，带持有性证明）。
+ *
+ * 只有**显式**调用才会打开闸门：这个函数是"授权卡"的唯一实现，模型面（工具）没有
+ * 任何等价入口 —— `wasm_app_rows` 连 `unmask` 参数都没有，更不会替人点这个开关。
+ * @param appId - 应用标识。
+ * @param enabled - true = 允许，false = 撤销。
+ * @param deps - 可注入的 fetch / 取消信号。
+ * @returns 宿主**回报的**状态（以宿主为准，不做乐观更新）。
+ */
+export async function setAiRowsConsent(appId: string, enabled: boolean, deps: RequestDeps = {}): Promise<AiRowsConsentState | PublishFailure> {
+  const outcome = await requestJSON(aiRowsConsentPath(appId), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  }, deps)
+  if (!outcome.ok) return outcome
+  return parseAiRowsConsentOutcome(appId, outcome.payload)
+}

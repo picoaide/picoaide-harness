@@ -55,6 +55,14 @@ const (
 	FieldWindow          = "window"
 	FieldDataSensitivity = "data_sensitivity"
 	FieldOwner           = "owner"
+	// FieldSensitiveColumns 是**作者声明的额外敏感列**（默认脱敏的启发式之外的补充）。
+	//
+	// 为什么需要它（§5.9 第 8 点后半）：平台默认按**列名启发式**脱敏
+	//（api/rows.go 的 isSensitiveColumn），启发式再全也覆盖不了每个业务词汇
+	//（"工位号"/"宿舍"/"客户编号"…）。作者最清楚哪一列指认到人，因此给他一条
+	// **声明**通道：声明是**加法**（只增不减 —— 声明的列一定脱敏，启发式照旧生效），
+	// 也是保守方向（多遮一列只影响排障观感，少遮一列会让 PII 进模型上下文）。
+	FieldSensitiveColumns = "sensitive_columns"
 )
 
 // 旧 schema 的字段名（**兼容 shim**）。它们不进 KnownFields —— 报错提示只列新
@@ -78,6 +86,7 @@ var KnownFields = []string{
 	FieldPurpose,
 	FieldDataSensitivity,
 	FieldOwner,
+	FieldSensitiveColumns,
 	FieldWindow,
 }
 
@@ -166,6 +175,21 @@ type Config struct {
 	// Owner 是**负责人**声明（首次发布必填）：写"这个应用出问题找谁"。
 	// 不是平台归属 —— 平台归属在 apps.owner，取自登录态、不可伪造。
 	Owner string `json:"owner"`
+	// SensitiveColumns 是作者**声明的额外敏感列**（默认启发式之外的补充）。
+	//
+	// 语义（§5.9 第 8 点后半）：
+	//   - **加法**：声明的列一定脱敏，而默认启发式照旧生效 —— 声明不能"取消"任何列的
+	//     脱敏（没有反向开关：让作者把一列标成"不敏感"等于给 PII 开一条出口，
+	//     而平台无法复核他的判断）；
+	//   - **大小写不敏感匹配**（SQLite 列名本身不区分大小写，平台的启发式也先 ToLower）；
+	//     但**保留作者写的原样**（与 whitelist 同一条纪律：不改写大小写，避免造出
+	//     作者看不见的差异）；
+	//   - 归一化：去首尾空白、拒空串、**按大小写不敏感去重**（保留首次出现）；
+	//   - 声明的列**不在结果集里**不算错误（作者可能声明的是一张还没建的表上的列，
+	//     或者列被改名了）—— 它只是不参与这次的脱敏，`masked_columns` 也不会提到它。
+	//     为什么静默：这是"多遮一层"的声明面，判错方向是"没遮住一列不存在的列"，
+	//     而发布期硬校验"这个列必须存在"需要在发布时读应用库（发布链路不碰应用数据）。
+	SensitiveColumns []string `json:"sensitive_columns"`
 	// Window 是窗口的**默认尺寸与强制宽高比**（§6 新增）。
 	//
 	// nil = 作者没写 ⇒ 客户端按 WindowDefaultWidth×Height 开窗（见 ResolvedWindow）。
@@ -443,6 +467,21 @@ func decodeAs(data []byte, mode accessMode) (Config, *apperr.Error) {
 	}
 	c.Whitelist = clean
 
+	// 声明敏感列：与 whitelist 同一条归一化纪律（去空白/拒空串/去重），
+	// 但去重是**大小写不敏感**的（列名匹配本身不区分大小写，见 Config.SensitiveColumns）。
+	if v, ok := raw[FieldSensitiveColumns]; ok {
+		if e := json.Unmarshal(v, &c.SensitiveColumns); e != nil {
+			return Config{}, bad(FieldSensitiveColumns, "sensitive_columns 必须是字符串数组").
+				WithCause(e).
+				WithHint(`每个条目是一个**列名**，如 ["workstation_no", "dorm_room"]`)
+		}
+	}
+	declared, e := normalizeSensitiveColumns(c.SensitiveColumns)
+	if e != nil {
+		return Config{}, e
+	}
+	c.SensitiveColumns = declared
+
 	// 旧 schema 字段：解析以确认形态合法（不合法要报错，不静默放过），
 	// 但只在没有 access 时参与映射；visible 一律忽略。
 	legacyLoginRequired := true // 旧 schema 的缺省（R25 原文：login_required 缺省 true）
@@ -711,6 +750,27 @@ func (c Config) Validate(requireDeclarations bool) *apperr.Error {
 			WithHint(fmt.Sprintf("白名单上限 %d 条；超过说明不该用白名单做准入（R26：平台不提供员工目录）",
 				limits.AppConfigWhitelistMax))
 	}
+	if len(c.SensitiveColumns) > limits.AppConfigSensitiveColumnsMax {
+		return bad(FieldSensitiveColumns, "sensitive_columns 条目数超过上限").
+			WithDetail("count", len(c.SensitiveColumns)).
+			WithDetail("max", limits.AppConfigSensitiveColumnsMax).
+			WithHint(fmt.Sprintf("声明上限 %d 条；超过说明该往默认脱敏的启发式上补（列名含 token/phone/realname 等词根即自动命中），"+
+				"而不是把整张表的列都列进来", limits.AppConfigSensitiveColumnsMax))
+	}
+	// 单条长度在这里判（**唯一**的上限落点，与 whitelist 的条目数上限同一条分工：
+	// normalize 只管形态）—— `Parse`/`parseSubmitted` 都会调用本函数，因此发布、
+	// 校验、继承合并三条写入路径全部覆盖；直接构造的 Config（seed/测试）也覆盖。
+	for i, name := range c.SensitiveColumns {
+		if s := strings.TrimSpace(name); len(s) > limits.AppConfigSensitiveColumnMaxBytes {
+			return bad(FieldSensitiveColumns, "sensitive_columns 的条目超过长度上限").
+				WithDetail("reason", "entry_too_long").
+				WithDetail("index", i).
+				WithDetail("bytes", len(s)).
+				WithDetail("max_bytes", limits.AppConfigSensitiveColumnMaxBytes).
+				WithHint(fmt.Sprintf("每个条目只写**列名本身**（如 workstation_no）；超过 %d 字节说明整行/整段被粘了进来",
+					limits.AppConfigSensitiveColumnMaxBytes))
+		}
+	}
 	if requireDeclarations {
 		for _, f := range []struct {
 			name string
@@ -785,6 +845,93 @@ func normalizeWhitelist(in []string) ([]string, *apperr.Error) {
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+// normalizeSensitiveColumns 归一化作者声明的敏感列：去首尾空白、拒空串、
+// **按大小写不敏感去重**（保留首次出现的原样写法）。
+//
+// 分工与 whitelist 逐字相同（normalize 只管**形态**，Validate 管**取值域/上限**）：
+//   - 空串一律拒：`[""]` 是"从表格里粘了一列空行"的形态，静默丢掉会让作者以为已经
+//     声明了某列；而空串永远匹配不到任何列，接受它等于接受一条"看起来声明了、实际
+//     什么也没做"的记录；
+//   - 去重不区分大小写：`["Phone"]` 与 `["phone"]` 是同一列（SQLite 列名不区分大小写，
+//     启发式也先 ToLower），留两条会让 `masked_columns` 与配置里的条目数对不上；
+//   - **长度与条目数上限不在这里判**（Validate 的职责）：它们是语义边界，而
+//     normalize 在**读取侧**也会跑 —— 把上限塞进来会让一条手改过的存量行
+//     从"能读"变成"每次请求都失败"，与"读取侧兼容"的纪律相反。
+func normalizeSensitiveColumns(in []string) ([]string, *apperr.Error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+	for i, raw := range in {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			return nil, bad(FieldSensitiveColumns, "sensitive_columns 含空条目").
+				WithDetail("reason", "empty_entry").
+				WithDetail("index", i).
+				WithHint("去掉空行；每行一个列名（不要写空串占位）")
+		}
+		key := strings.ToLower(s)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// SensitiveColumnSet 把声明列表转成**大小写不敏感**的匹配集合（宿主脱敏路径用）。
+//
+// 为什么不在这里做前缀/子串匹配：声明是**逐字**的（作者写的就是那一列的名字），
+// 而启发式才负责"像密码的列"这种模糊判定。两者是不同强度的两条通道，混在一起会让
+// "我声明的是 `no`" 意外遮掉 `order_no`。
+//
+// 空列表返回 nil（调用方可直接用 `_, ok := set[...]` 判，无需额外分支）。
+func SensitiveColumnSet(declared []string) map[string]struct{} {
+	if len(declared) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(declared))
+	for _, name := range declared {
+		s := strings.TrimSpace(name)
+		if s == "" {
+			continue
+		}
+		out[strings.ToLower(s)] = struct{}{}
+	}
+	return out
+}
+
+// DeclaredSensitiveColumn 报告列名是否被作者**声明**为敏感（大小写不敏感、逐字匹配）。
+func DeclaredSensitiveColumn(set map[string]struct{}, name string) bool {
+	if len(set) == 0 {
+		return false
+	}
+	_, ok := set[strings.ToLower(strings.TrimSpace(name))]
+	return ok
+}
+
+// SensitiveColumnsOfConfigJSON 从 `config_json` 投影里取作者声明的敏感列（唯一入口）。
+//
+// 与 AccessOfConfigJSON / DeclarationsOfConfigJSON 同一条纪律：
+//   - 解析失败/空值一律回落**空名单**（"坏行不编造"）—— 回落方向是"只用默认启发式"，
+//     不会因为一次投影读取失败就把某些列**取消**脱敏（声明本身是加法，不存在"取消"）；
+//   - **只用于脱敏判定**：鉴权与发布一律走 Parse（Parse 还会做语义校验）。
+//
+// 生产路径的 `config_json` 是 `apps` 行的**已生效配置投影**（只有 approved 版本才写，
+// 见 api/publish.go 的 F1）：待审版本不会改变脱敏口径，与目录显示同一条纪律。
+func SensitiveColumnsOfConfigJSON(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	c, e := decode([]byte(raw))
+	if e != nil {
+		return nil
+	}
+	return c.SensitiveColumns
 }
 
 // knownField 报告 name 是否是可接受的顶层字段：新 schema 的字段，或旧 schema 的

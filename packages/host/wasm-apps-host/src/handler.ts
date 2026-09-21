@@ -37,9 +37,12 @@ import {
   missingAppTitle,
   retiredAppTitle,
 } from './app-window-copy.ts'
+import type { CacheConditionalResult, CacheEntryInput, CacheScope, CachedResponse } from './cache.ts'
+import { securityHeaders } from './cache.ts'
 import { hostCopy, type HostLocale } from './locale.ts'
 import { AI_CHAT_PATH, AI_CHAT_SSE_HEADERS, type AiChatOutcome } from './ai-chat.ts'
 import { APP_PROOF_HEADER } from './app-proof.ts'
+import { APP_VERSION_HEADER } from './open-gate.ts'
 import { isReservedHostPath } from './host-request.ts'
 import {
   appErrorPage,
@@ -74,10 +77,39 @@ export interface AppSchemeHandlerDeps {
   appProof?: { get(appId: string, force?: boolean): Promise<string | null>, invalidate(): void } | undefined
   /** 应用 AI 桥（§21；本地处理 `/__picoaide/ai/chat`，绝不转发平台）。缺席 ⇒ 503。 */
   aiChat?: ((appId: string, body: Uint8Array, signal: AbortSignal) => Promise<AiChatOutcome>) | undefined
+  /**
+   * 本机内容缓存（§7.5 / F11）。缺席 ⇒ 一律回源（**不是**"缓存坏了"，只是不缓存）。
+   *
+   * 只影响**静态子资源**：文档导航与 `/api/*` 永远回源（{@link AppSchemeCache.isStaticSubresource}
+   * 是那条判据的唯一实现）—— 否则本地缓存会变成绕过准入/下架的第二入口。
+   */
+  cache?: AppSchemeCache | undefined
+  /** 当前会话作用域（server+user 哈希；§7.5 R1-SEC-3）。缺席/未登录 ⇒ 不读不写缓存。 */
+  cacheScope?: (() => CacheScope | undefined) | undefined
+  /**
+   * 某应用**当前已知的生效版本**（缓存键的第三段；唯一来源是平台响应头
+   * `X-PicoAide-App-Version`，由打开校验记下）。未知 ⇒ 不读不写缓存
+   * （拿一个猜出来的版本号当键 = 改版后继续发旧内容）。
+   */
+  cacheVersion?: ((appId: string) => string | undefined) | undefined
   /** 单次出站预算（毫秒）；缺省 {@link APP_REQUEST_TIMEOUT_MS}。 */
   timeoutMs?: number
   /** 诊断出口（缺省丢弃）。 */
   warn?: (message: string) => void
+}
+
+/**
+ * 内容缓存的最小面（`cache.ts` 的 `WasmAppsCache` 满足它；单测给替身）。
+ *
+ * 为什么是结构化接口而不是直接依赖类：handler 的单测不该落盘；而"handler 真的调了
+ * `get`/`put`/`conditional`"这件事必须能在不碰文件系统的前提下被打红（见
+ * `handler.spec.ts` 的静态资源缓存用例）。
+ */
+export interface AppSchemeCache {
+  get(scope: CacheScope, appId: string, version: string, path: string): Promise<CachedResponse | null>
+  put(scope: CacheScope, entry: CacheEntryInput): Promise<void>
+  conditional(scope: CacheScope, appId: string, version: string, path: string, ifNoneMatch: string | undefined): Promise<CacheConditionalResult>
+  isStaticSubresource(path: string, headers: Record<string, string>): boolean
 }
 
 /** 去掉尾斜杠（与 enterprise `normalizeServerURL` 同口径）。 */
@@ -246,6 +278,47 @@ export function createAppSchemeHandler(
     if (Number.isFinite(declared) && declared > APP_REQUEST_BODY_MAX_BYTES) {
       return htmlResponse(413, invalidRequestPage(locale, `content-length=${String(declared)}`))
     }
+
+    // ---- 本机内容缓存（§7.5 / F11）：**读路径** ----
+    //
+    // 位置固定在"出站之前"：缓存命中就完全不出网（这是 F11 的性能承诺）。
+    // 只对静态子资源生效 —— 判据在 `cache.isStaticSubresource`（`/api/*` 与文档导航
+    // 一律回源，见那里的注释：本地缓存不得成为绕过准入/下架的第二入口）。
+    // 缓存键的版本段**只能**来自平台响应头（打开校验记下的 `knownVersions`）；
+    // 版本未知 ⇒ 整个读写路径跳过，绝不用猜出来的键。
+    const cachePath = url.query === '' ? url.path : `${url.path}?${url.query}`
+    const cacheVersion = deps.cacheVersion?.(url.appId)
+    const cacheScope = deps.cacheScope?.()
+    const cacheable = method === 'GET'
+      && deps.cache !== undefined
+      && typeof cacheVersion === 'string' && cacheVersion !== ''
+      && cacheScope !== undefined
+      && deps.cache.isStaticSubresource(cachePath, Object.fromEntries(request.headers))
+    if (cacheable) {
+      const ifNoneMatch = request.headers.get('if-none-match') ?? undefined
+      if (ifNoneMatch !== undefined) {
+        // 304 只在**本地已有同 ETag 的静态副本**时给（Chromium 据此直接用自己的副本，
+        // 连 body 都不过协议边界）。判据的唯一实现在 cache.conditional。
+        const conditional = await deps.cache!.conditional(cacheScope!, url.appId, cacheVersion!, cachePath, ifNoneMatch)
+        if (conditional !== 'miss') {
+          // 304 必须带**当前**宿主安全头（缓存里存的字节不含它们，见 cache.ts 的
+          // securityHeaders 注释）；ETag 原样回显请求里的那个 —— `conditional` 已经
+          // 保证它与我们存的那份逐字相同。
+          return new Response(null, {
+            status: 304,
+            headers: { ...securityHeaders(), [APP_VERSION_HEADER]: cacheVersion!, ETag: ifNoneMatch },
+          })
+        }
+      }
+      const cached = await deps.cache!.get(cacheScope!, url.appId, cacheVersion!, cachePath)
+      if (cached !== null) {
+        return new Response(cached.body.byteLength === 0 ? null : new Uint8Array(cached.body), {
+          status: cached.status,
+          headers: { ...cached.headers, [APP_VERSION_HEADER]: cacheVersion! },
+        })
+      }
+    }
+
     let body: Uint8Array
     try {
       body = new Uint8Array(await request.arrayBuffer())
@@ -466,9 +539,11 @@ export function createAppSchemeHandler(
     let payload = bytes
     // 兜底截断（权威上限在服务端：超限整单失败；这里只保证不会把超过 8 MiB
     // 的字节交给渲染器）。
+    let locallyTruncated = false
     if (payload.byteLength > APP_RESPONSE_BODY_MAX_BYTES) {
       warn(`pico-wasm-apps-host: truncating a ${String(payload.byteLength)}-byte response for ${url.appId}`)
       payload = payload.subarray(0, APP_RESPONSE_BODY_MAX_BYTES)
+      locallyTruncated = true
     }
     // ③ 应用自己的错误体 + 文档导航 ⇒ 渲染成可读页面（否则用户看到的是一屏裸 JSON）。
     if (status >= 400 && navigation && !isHtmlResponse(headers)) {
@@ -481,6 +556,30 @@ export function createAppSchemeHandler(
       }))
     }
     const bodyAllowed = method !== 'HEAD' && status !== 204 && status !== 304
+    // ---- 本机内容缓存（§7.5 / F11）：**写路径** ----
+    //
+    // 写判据与读判据**必须同源**，但用**响应头**判形态：路径像 `.json` 而响应是
+    // `text/html`（准入/错误页！）时，按响应头判会拒绝缓存 —— 这正是"文档导航与
+    // 错误页永不进缓存"这条规则的落点。`put` 自身还会再挡 no-store / 非 2xx /
+    // 超容量（三处判据都在 cache.ts，一处实现）。
+    const responseHeaders: Record<string, string> = {}
+    for (const [name, value] of headers) responseHeaders[name] = value
+    if (cacheable && bodyAllowed && !locallyTruncated && status >= 200 && status < 300
+      && deps.cache!.isStaticSubresource(cachePath, responseHeaders)) {
+      await deps.cache!.put(cacheScope!, {
+        appId: url.appId,
+        version: cacheVersion!,
+        path: cachePath,
+        body: new Uint8Array(payload),
+        headers: responseHeaders,
+        status,
+      })
+    }
+    // 版本头（§5.1 / DAT-12）：即使平台没在信封头里给（旧服务端），只要宿主知道
+    // 当前生效版本就补上 —— 它是客户端缓存键的唯一来源，缺了它客户端只能当"未知"。
+    if (status >= 200 && status < 300 && typeof cacheVersion === 'string' && cacheVersion !== '') {
+      headers.set(APP_VERSION_HEADER, cacheVersion)
+    }
     // 拷进一个独立的 ArrayBuffer：`decodeBase64Body` 返回的是 Node Buffer 池上的
     // 视图（`payload.buffer` 比视图大，且类型上是 `ArrayBufferLike`），直接交给
     // `Response` 既会带上别的字节、也过不了 `BodyInit` 的类型面。

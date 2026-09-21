@@ -132,6 +132,9 @@ const WRITE_REQUESTS: Array<{ method: string, url: string, body?: string }> = [
   { method: 'POST', url: '/api/pico/browser/bookmarks', body: '{"title":"x"}' },
   { method: 'POST', url: '/api/pico/browser/open', body: '{}' },
   { method: 'POST', url: '/api/pico/browser/show' },
+  // 蒙版页自己的两个按钮（§7b 方案 A 的"产品不能被修坏"面）：接管与隐藏窗口。
+  { method: 'POST', url: '/api/pico/browser/takeover', body: '{"active":true}' },
+  { method: 'POST', url: '/api/pico/browser/hide' },
   { method: 'DELETE', url: '/api/pico/browser/bookmarks?id=1' },
   { method: 'DELETE', url: '/api/pico/browser/downloads?id=1' },
 ]
@@ -171,6 +174,12 @@ describe('R7-RV-3 browser:本地写路由要求持有性证明', () => {
     const bookmark = await call('POST', '/api/pico/browser/bookmarks', '{"title":"x"}', true)
     expect(bookmark.code).toBe(400)
     expect(bookmark.body.error).toBe('no tab open to bookmark')
+    // 蒙版页的两个按钮：持票时必须**真的执行动作**（§7b 方案 A 之后蒙版跑在默认
+    // session 里，票据天然在 —— 这两条是"修好漏洞不能弄坏产品"的正向判据）。
+    expect(await call('POST', '/api/pico/browser/takeover', '{"active":true}', true))
+      .toMatchObject({ code: 200, body: { ok: true } })
+    expect(await call('POST', '/api/pico/browser/hide', undefined, true))
+      .toMatchObject({ code: 200, body: { ok: true } })
   })
 
   it('read routes keep the guard-only contract (GET stays readable for the panel)', async () => {

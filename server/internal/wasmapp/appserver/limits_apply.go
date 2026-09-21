@@ -7,6 +7,7 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/picoaide/picoaide/internal/wasmapp/queue"
+	"github.com/picoaide/picoaide/internal/wasmapp/runtime"
 )
 
 // 本文件是「控制台限制项 → 运行中组件」的**唯一落地点**（2026-09-19）。
@@ -114,6 +115,21 @@ func (s *Server) InstanceMemoryPages() uint32 {
 		return pages
 	}
 	return s.profile.InstanceMemoryPages
+}
+
+// RuntimeCacheMode 返回**执行侧实际生效**的编译缓存模式（disk / memory）。
+//
+// 来源纪律与 InstanceMemoryPages 完全同一条（P0-2 / R1-rt-1）：**问运行时**，
+// 不在这里按 DataRoot 能不能建目录重算一遍 —— 第二个判断正是这条可观测性要消灭的
+// 分叉（探针说 disk、实际跑 memory）。装配层只把这个值原样转成字符串送进 /readyz
+// （cmd/server/wasmapp.go 的 readyz.Options.ExecCacheMode）。
+//
+// nil 接收者返回空串：调用方（探针）据此区分"没有运行时"与"某一种模式"。
+func (s *Server) RuntimeCacheMode() runtime.CacheMode {
+	if s == nil || s.rt == nil {
+		return ""
+	}
+	return s.rt.CacheMode()
 }
 
 // CachedModuleCount 返回进程内编译模块缓存的条目数（只读；诊断与装配自检用）。

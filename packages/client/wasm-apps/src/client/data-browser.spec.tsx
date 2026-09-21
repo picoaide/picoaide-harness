@@ -41,6 +41,10 @@ function stubFetch(handler: (url: string) => Response): void {
   const fake = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
     calls.push({ url, method: init?.method ?? 'GET' })
+    // 「AI 读取数据」的授权状态默认答"未授权"：本文件的用例全是**数据面**的行为
+    //（展开才取数、脱敏、失败不回落），授权卡自己的行为判据在 `ai-rows-consent.spec.tsx`。
+    // 不答这一条会让面板渲染一块"拿不到授权状态"的错误 —— 那会污染这里的所有断言。
+    if (url.endsWith('/ai-rows-consent')) return jsonResponse(200, { app_id: 'roster', enabled: false })
     return handler(url)
   })
   vi.stubGlobal('fetch', fake)
@@ -109,7 +113,7 @@ afterEach(async () => {
 
 async function mount(): Promise<void> {
   await act(async () => {
-    root.render(<DataBrowserPanel appId="roster" />)
+    root.render(<DataBrowserPanel appId="roster" isOwner />)
   })
 }
 
@@ -122,13 +126,16 @@ async function click(selector: string): Promise<void> {
 }
 
 describe('展开才取数（详情页是高频入口，收起状态必须零请求）', () => {
-  it('挂载后不请求；点「查看数据」才 GET schema 与首张表的 rows', async () => {
+  it('挂载后不请求；点「查看数据」才读授权状态 + GET schema 与首张表的 rows', async () => {
     stubFetch(url => url.endsWith('/schema') ? jsonResponse(200, SCHEMA_OK) : jsonResponse(200, ROWS_MASKED))
     await mount()
     expect(calls).toHaveLength(0)
 
     await click('.pico-app-data-toggle')
+    // 第一条是**授权状态**（AI 读取默认关；面板必须从宿主读真相，不能拿 localStorage 当真相），
+    // 然后才是 schema 与首张表的 rows。顺序由 effect 声明顺序固定（用例钉住）。
     expect(calls.map(call => new URL(call.url, 'http://x').pathname)).toEqual([
+      '/api/pico/apps/wasm/roster/ai-rows-consent',
       '/api/pico/apps/wasm/roster/schema',
       '/api/pico/apps/wasm/roster/rows',
     ])
@@ -237,6 +244,8 @@ describe('迟到响应不得覆盖新状态（2026-09-21 审计 P2-3）', () => 
     let rowsCalls = 0
     stubFetch(url => {
       if (url.endsWith('/schema')) return jsonResponse(200, SCHEMA_OK)
+      // 授权状态不是这条用例的对象：立刻答掉，免得占住下面手工排队的队列。
+      if (url.endsWith('/ai-rows-consent')) return jsonResponse(200, { app_id: 'roster', enabled: false })
       rowsCalls += 1
       return jsonResponse(200, {
         rows: {
@@ -250,7 +259,7 @@ describe('迟到响应不得覆盖新状态（2026-09-21 审计 P2-3）', () => 
     const realFetch = globalThis.fetch as unknown as (i: RequestInfo | URL, init?: RequestInit) => Promise<Response>
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
-      if (url.endsWith('/schema')) return await realFetch(input, init)
+      if (url.endsWith('/schema') || url.endsWith('/ai-rows-consent')) return await realFetch(input, init)
       const response = await realFetch(input, init)
       await new Promise<void>(resolve => { pending.push(resolve) })
       return response

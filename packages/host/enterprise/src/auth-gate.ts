@@ -22,6 +22,7 @@ import {
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { createWasmAppsRoute } from './wasm-apps.ts'
 import { registerWasmAppTools } from './wasm-app-tools.ts'
+import { createAiRowsConsentStore, defaultAiRowsConsentPath } from './wasm-apps-ai-rows-consent.ts'
 import { brandMarkSvg } from './channel-geometry.ts'
 import { hostCopy, hostLocaleFrom, tryNormalizeHostLocale, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import { LOCALE_SETTINGS_NAMESPACE } from '@deepseek-ai/dsh-client-locale'
@@ -1444,6 +1445,32 @@ export function apply(ctx: Context, config: Config): void {
     noteBrowserLoginStarted(configuredServer)
   }
 
+  /**
+   * 「允许 AI 读取此应用的数据」的授权状态（**默认关**，2026-09-21 用户拍板）。
+   *
+   * 三条接线事实在这里一次说清：
+   *  1. **一个实例、两个消费方** —— 本机路由（`/:app_id/ai-rows-consent`，人在面板上点）
+   *     与宿主工具（`wasm_app_rows` 的闸门）共用下面这一个对象；
+   *  2. **落盘位置** = `$DSH_HOME/wasm-apps-ai-rows-consent.json`（0600，原子写）——
+   *     与 `server-connector/tls.ts` 的指纹库同一形态（企业插件既有的"随装小状态"落点）；
+   *     不用 `ctx.settings`：那是用户可编辑的产品配置域，且 `bootstrap.ts` 在退出登录时
+   *     会 `replace()` 清掉命名空间 ⇒ 授权会随重登消失；
+   *  3. **数据根不可信时**（`dshHomeSafe()` 拒绝：DSH_HOME 指向系统关键目录）退化成
+   *     **内存记录**（照样 fail-closed，只是重启即忘），而不是让插件 apply 失败。
+   */
+  const aiRowsConsentFile = ((): string | undefined => {
+    try {
+      return defaultAiRowsConsentPath()
+    } catch (cause) {
+      ctx.logger?.warn?.(`pico: resolving the data root for the AI rows consent failed (${cause instanceof Error ? cause.message : String(cause)}); the consent will not survive a restart`)
+      return undefined
+    }
+  })()
+  const aiRowsConsent = createAiRowsConsentStore({
+    ...(aiRowsConsentFile === undefined ? {} : { file: aiRowsConsentFile }),
+    warn: message => { ctx.logger?.warn?.(message) },
+  })
+
   ctx.effect(() => {
     const disposers = [
       // The main window's first page: the login form while logged out, the
@@ -2512,13 +2539,17 @@ export function apply(ctx: Context, config: Config): void {
         json,
         collectBody,
         hostLocale,
+        // 「允许 AI 读取此应用的数据」的授权状态（默认关，2026-09-21 用户拍板）：
+        // 面板经本机路由写它、`wasm_app_rows` 读它 —— **同一个实例**（下面那个
+        // registerWasmAppTools 拿到的就是它）。
+        aiRowsConsent,
       })),
       // WASM 应用平台的**宿主工具面**（§6.5b）：让 AI 能自己预检与发布，而不是
-      // 只能请员工去应用中心点。三个工具直接调用上面那条路由背后的**同一批编排
-      // 函数**（wasm-apps.ts 的 publishApp/validateApp/listCatalog）—— 不经 HTTP，
-      // 因此不需要浏览器持有性证明，也不会把员工令牌交给任何调用方。
+      // 只能请员工去应用中心点。工具直接调用上面那条路由背后的**同一批编排
+      // 函数**（wasm-apps.ts 的 publishApp/validateApp/listCatalog/readAppRows…）——
+      // 不经 HTTP，因此不需要浏览器持有性证明，也不会把员工令牌交给任何调用方。
       // 语言按**每次调用**解析（hostLocale 是 apply 作用域里的函数，不在模块级冻结）。
-      registerWasmAppTools(ctx, { locale: () => hostLocale() }),
+      registerWasmAppTools(ctx, { locale: () => hostLocale(), aiRowsConsent }),
     ]
     return () => { for (const dispose of disposers) dispose() }
   }, 'pico auth-gate routes')

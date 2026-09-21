@@ -639,6 +639,9 @@ describe('createRealElectronWindowAdapter', () => {
     expect(event.preventDefault).toHaveBeenCalledTimes(1)
 
     expect(adapter.webContentsId?.(handle)).toBe(win.webContents.id)
+    // surface 注册要的是**真实** webContents（不是 id）：browser runtime 的 CDP
+    // 附着路径只认它（`surface.webContents`）。变异：让它返回 id/undefined ⇒ 本断言红。
+    expect(adapter.webContents?.(handle)).toBe(win.webContents)
     expect(adapter.isAlive?.(handle)).toBe(true)
   })
 
@@ -650,6 +653,8 @@ describe('createRealElectronWindowAdapter', () => {
     expect(win.destroyed).toBe(true)
     expect(adapter.isAlive?.(handle)).toBe(false)
     expect(adapter.webContentsId?.(handle)).toBeUndefined()
+    // 已销毁的窗口不得把 webContents 交给 surface 注册（否则模型会寻址到一个死句柄）。
+    expect(adapter.webContents?.(handle)).toBeUndefined()
     // 已销毁的句柄上再操作必须是 no-op（不能抛，也不能"复活"一个死窗口）。
     expect(() => adapter.focusAppWindow(handle, `${APP_SCHEME}://demo/next`)).not.toThrow()
     expect(() => adapter.setAspectRatio(handle, 1.5, { width: 0, height: 0 })).not.toThrow()

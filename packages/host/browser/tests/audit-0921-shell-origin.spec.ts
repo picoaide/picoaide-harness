@@ -10,7 +10,7 @@ import type { NativeSession } from '../src/electron-adapter.ts'
 /**
  * 三轮审计 P1-①：**持有性证明挡不住"模型自己开浏览器"**。
  *
- * 三个使能条件（都实测过）：
+ * 三个使能条件（当时都实测过）：
  *  1. 宿主本机路由 `GET /api/pico/apps/wasm/:app_id/rows?unmask=1` 要求 `dsh-auth-*` cookie；
  *  2. 内置浏览器的分区**故意镜像**了那把 cookie（`index.ts` 的 `mirrorBrowserAuthCookies`，
  *     本插件自己两个 shell 页面的写操作要靠它）；
@@ -19,15 +19,22 @@ import type { NativeSession } from '../src/electron-adapter.ts'
  * 就能读未脱敏数据；而且被绕过的**不只是** `unmask` —— 任何依赖持有性证明的本机守卫都失效。
  *
  * 修法：模型可达的三条导航入口（`browser_navigate` / `window.open` / `browser_download`）
- * 一律拒**本机 shell origin**。本文件的判据：
+ * 一律拒**本机目标**（`runtime.isForbiddenLocalTarget`）。本文件的判据：
  *  - ① 三条入口对 shell origin 全部拒绝（含同 origin 的其它路径、带端口的写法）；
- *  - ② **反向对照**：其它 `127.0.0.1:<其它端口>` 仍然放行（作者让 AI 看本地 dev server
- *    是真实用法，一并拒掉就是"为了安全毁掉功能"）；
+ *  - ② **反向对照**：外站一律放行；
  *  - ③ **不误伤宿主自己**：shell origin **未设置**时判据恒不生效（非 Electron 宿主/测试），
- *    且宿主 load 两个 shell 页面走的是 `webContents.loadURL`（不经本判据）。
+ *    且宿主 load 两个 shell 页面走的是 `webContents.loadURL`（不经本判据）；
+ *  - ④ 子框架 / 重定向 / 页面自发导航同样被拒（四轮审计 P0/P1）。
  *
- * 变异验证：把 `navigationAllowed` 里的 `isShellOriginUrl` 分支删掉（退回直接
- * `this.guard.allowNavigation`）⇒ ①的导航用例变红（不再抛 navigation-blocked）。
+ * ⚠️ 2026-09-21（§7b 方案 A）之后这条禁访的**理由变了**：镜像已删除，蒙版改跑默认
+ * session，标签分区里**不再有** `dsh-auth-*`（见 audit-0921-credential-isolation.spec.ts）。
+ * 判据**故意保留**，性质从"唯一的阻断手段"变成**纵深防御**：
+ *  - 本机回环面是宿主控制面（登录态、连接器、应用数据、浏览器写面），模型驱动的标签
+ *    不该有任何一条通路落在它上面 —— 凭据今天不在那个 jar，不等于明天不会有别的凭证；
+ *  - 反向对照仍然生效：外站一个都不拦（不得退化成"什么都拒"）。
+ *
+ * 变异验证：把 `navigationAllowed` 里的本机判据删掉（退回直接
+ * `this.guard.allowNavigation`）⇒ ①④ 的用例变红（不再抛 navigation-blocked）。
  */
 
 /** 捕获 `setWindowOpenHandler` 装上的那个回调（window.open / target=_blank 的唯一闸门）。 */
@@ -198,8 +205,9 @@ describe('内置浏览器不得导航到本机 shell origin（三轮审计 P1-�
     // 为什么这条必须独立存在（2026-09-21）：`browser_navigate` 那条闸只罩"模型显式调用的
     // 导航"。模型可以先把标签导航到一个**它控制的**外站，再让那个站 302 到
     // `http://127.0.0.1:<port>/api/pico/...`（Electron 对重定向**不触发** `will-navigate`），
-    // 或（若 eval 允许）直接 `location.href = …` —— 两者都在**持有被镜像 cookie 的标签里**
-    // 发生，于是同样绕过所有依赖持有性证明的本机守卫。
+    // 或（若 eval 允许）直接 `location.href = …` —— 两者都不经过显式导航闸门，
+    // 同样会落到本机控制面上（纵深防御：§7b 方案 A 之后那个 jar 里已无凭据，
+    // 但"模型驱动的页面不得触达宿主控制面"这条口径不变）。
     const { runtime } = makeRuntime()
     const adapter = (runtime as unknown as { adapter: MockAdapter }).adapter
     await runtime.open('https://a.example')
@@ -223,13 +231,14 @@ describe('内置浏览器不得导航到本机 shell origin（三轮审计 P1-�
 
   it('② 反向对照：**本机一律拒**、外站一律放行（不得退化成"什么都拒"）', async () => {
     // 为什么本机是"一律拒"而不是"只拒 shell origin"（2026-09-21 四轮审计 P1）：
-    // 镜像的 `dsh-auth-*` 是 **host-only** cookie，而 **cookie 不看端口** ⇒ 浏览器会把它
-    // 送到 `127.0.0.1` 的**任意端口**。模型在自己端口上起个静态页再导航过去，就能在
-    // 自己的服务器日志里拿到这把 cookie（= 本机控制面的 bearer 凭据，可重放 login /
-    // 会话切换 / 技能安装 / `rows?unmask=1`）。同 host 不同端口属 **same-site**，
-    // SameSite=Strict **不拦**，所以"外部页面里 iframe 一个本机端口"同样危险。
-    // 口径因此收紧为：AI 浏览器不访问本机地址（平台自己的页面由宿主 loadURL 直接加载，
-    // 应用走应用窗口面，都不经这里）。
+    // 当时镜像过去的 `dsh-auth-*` 是 **host-only** cookie，而 **cookie 不看端口** ⇒
+    // 浏览器把它送到 `127.0.0.1` 的**任意端口**，模型在自己端口上起个静态页再导航过去
+    // 就能在日志里拿到这把 cookie（= 本机控制面的 bearer 凭据）。同 host 不同端口属
+    // **same-site**，SameSite=Strict **不拦**，所以"外部页面里 iframe 一个本机端口"
+    // 同样危险。口径因此收紧为：AI 浏览器不访问本机地址（平台自己的页面由宿主 loadURL
+    // 直接加载，应用走应用窗口面，都不经这里）。
+    // 2026-09-21 §7b 方案 A 删掉了镜像（标签分区里不再有凭据），这条判据**保留**为
+    // 纵深防御：模型驱动的标签不得触达宿主控制面的任何一条通路。
     const { runtime } = makeRuntime()
     for (const local of [
       'http://127.0.0.1:5173/',        // 曾经的"合法 dev server"——现在是凭据外带路径
@@ -250,8 +259,9 @@ describe('内置浏览器不得导航到本机 shell origin（三轮审计 P1-�
   it('④ 子框架导航（iframe）到本机目标也被拒 —— 四轮审计 P0', async () => {
     // `will-navigate` / `will-redirect` **只报主框架**；`<iframe src="http://127.0.0.1:<端口>/…">`
     // 是子框架导航。四轮审计真机复现：模型用一个自己控制的本机页面做父页
-    //（同 host ⇒ same-site ⇒ 镜像 cookie 被带上），再 `browser_eval({frame:1})` 读子框架
-    // 内容，拿回 `unmask` 后的行数据。这条钉 `will-frame-navigate` 闸门存在且生效。
+    //（同 host ⇒ same-site，当时的镜像 cookie 会被带上），再 `browser_eval({frame:1})`
+    // 读子框架内容，拿回 `unmask` 后的行数据。这条钉 `will-frame-navigate` 闸门存在且生效
+    // —— §7b 方案 A 之后本机面已无凭据可拿，闸门仍按纵深防御保留。
     const { runtime, adapter } = makeRuntime()
     await runtime.open('https://a.example')
     const view = adapter.createdViews.at(-1)
@@ -303,7 +313,8 @@ describe('内置浏览器不得导航到本机 shell origin（三轮审计 P1-�
 
   it('③ shellOrigin 未设置时，本机目标仍被拒、外站不受影响', async () => {
     // `shellOrigin` 缺席（非 Electron 宿主/测试）不能让本机判据整体失效 ——
-    // 本机禁访的依据是"那里有被镜像的凭据"，不是"shellOrigin 这个字符串存不存在"。
+    // 本机禁访的依据一度是"那里有被镜像的凭据"，现在是"本机回环面 = 宿主控制面"，
+    // 两种理由都跟 `shellOrigin` 这个字符串存不存在无关。
     const { runtime } = makeRuntime(false)
     await expect(runtime.navigate(1, 'http://127.0.0.1:5173/')).rejects.toMatchObject({ code: 'navigation-blocked' })
     const outcome = await runtime.navigate(1, 'https://a.example/').then(

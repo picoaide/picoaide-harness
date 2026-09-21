@@ -14,8 +14,8 @@ import { BROWSER_PARTITION, BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, 
 import { BrowserGuard, ensureSessionGuard, isLocalHostname, looksLikeAbsoluteUrl } from './guard.ts'
 import { extractSnapshotWithMeta, extractTextWithMeta, type SnapshotExtractionMeta } from './snapshot.ts'
 import { captureScreenshot, captureScreenshotViaCdp } from './shots.ts'
-import { type SurfaceRegistry } from './surface.ts'
-import { TabPool, type TabReservation } from './pool.ts'
+import { appSurfaceAllowsUrl, asSurfaceWebContents, surfaceLabel, type BrowserSurface, type SurfaceControlOwner, type SurfaceRegistry, type SurfaceWebContents } from './surface.ts'
+import { TabPool, gateRefusal, type TabReservation } from './pool.ts'
 import { BrowserStore, stripSensitiveText, stripSensitiveUrl, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
 import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
 import { SENSITIVE_KEY_PATTERN, isExactProseSensitiveKey } from './sensitive.ts'
@@ -274,11 +274,18 @@ export interface BrowserControlState {
   awaitingRelease: boolean
   /** Tool whose call was refused ('' when nothing is waiting). */
   awaitingReleaseTool: string
+  /**
+   * 由**用户**持有控制权的应用窗口 surface（§16.1 第 3 条：控制权按 surface 记）。
+   *
+   * 与 `controlled` 分开是两个不同的判据：`controlled` = 浏览器窗口被用户接管
+   * （浏览器工具的池级闸门 + 蒙版），这里 = 某个应用窗口归人（只有针对那个
+   * `app_id` 的操作被拒）。空数组 = 没有应用窗口归人。
+   */
+  userHeldSurfaces: Array<{ id: number, appId: string }>
 }
 
 /** Shell/panel state projection (GET /api/pico/browser/state). */
-export interface BrowserShellState extends BrowserControlState {
-  tabs: BrowserTabState[]
+export interface BrowserShellState extends BrowserControlState {  tabs: BrowserTabState[]
   window: BrowserWindowState
   latestOp: BrowserOpLogEntry | null
   /** Overlay UI mode (capsule/panel/menu/viewer, or 'mask' while AI drives). */
@@ -287,6 +294,19 @@ export interface BrowserShellState extends BrowserControlState {
 
 /** State-change events emitted by the runtime (SSE stream). */
 export type BrowserStreamEvent = 'state' | 'tab' | 'tab-meta' | 'busy' | 'takeover' | 'release' | 'ops'
+
+/**
+ * `waitForLoad` 需要的最小 webContents 面。
+ *
+ * 浏览器标签（`NativeView['webContents']`）与**应用窗口 surface**（注册表里的不透明
+ * 句柄，§16.1）都要能传给同一个等待器；两者只是在 `on/removeListener/isLoading`
+ * 上重合，所以这里声明结构最小面而不是 Electron 类型（本模块不 import electron）。
+ */
+interface LoadWaitTarget {
+  on?(event: string, listener: (...args: unknown[]) => void): unknown
+  removeListener?(event: string, listener: (...args: unknown[]) => void): unknown
+  isLoading?(): boolean
+}
 
 /** Overlay UI modes (user-facing surfaces; the effective mode is forced to
  * 'mask' while the AI drives). */
@@ -380,13 +400,6 @@ export class BrowserRuntime {
   private windowFocusDisposer: (() => void) | null = null
   private disposed = false
   private partition: string
-  /**
-   * Partition the LIVE mask view was created with (undefined = no view yet).
-   * Electron fixes a WebContents's session at creation, so this must be
-   * compared against {@link partition} on every user switch — see
-   * {@link remountOverlay}.
-   */
-  private overlayPartition: string | undefined
   private readonly listeners = new Set<(event: BrowserStreamEvent) => void>()
   private shellOrigin: string | undefined
   private lastAgentId = ''
@@ -520,6 +533,11 @@ export class BrowserRuntime {
   /**
    * Control/turn-state projection — ONE source for the shell payload, the
    * sidebar hint (`/state`) and the model-facing `browser_list_tabs` note.
+   *
+   * 2026-09-21（§16.1 第 3 条）：控制权**按 surface** 记。`userHeldSurfaces` 是那
+   * 一半的投影 —— 池级 `controlled` 仍然只表示"浏览器窗口被用户接管"（它驱动蒙版与
+   * 浏览器工具的闸门，语义不能改），应用窗口由用户按住时在这里如实列出，UI 与模型都
+   * 能看见"哪个窗口现在归人"。
    */
   controlState(): BrowserControlState {
     return {
@@ -528,7 +546,53 @@ export class BrowserRuntime {
       busyTool: this.pool.busyToolOf(),
       awaitingRelease: this.gateBlock !== null,
       awaitingReleaseTool: this.gateBlock?.tool ?? '',
+      userHeldSurfaces: this.userHeldSurfaces(),
     }
+  }
+
+  /** 由用户持有控制权的应用窗口 surface（`kind:'app'`；浏览器标签不在这里）。 */
+  userHeldSurfaces(): Array<{ id: number, appId: string }> {
+    return (this.surfaces?.userHeldSurfaces() ?? []).map(surface => ({
+      id: surface.id,
+      appId: surface.appId ?? '',
+    }))
+  }
+
+  /**
+   * 设某个 surface 的控制权归属（§16.1 第 3 条）。
+   *
+   * 与浏览器窗口上的胶囊**同一个语义**：用户点「我来操作」= `'user'`，同一个按钮
+   * （「交给 AI」）= `'agent'`；空白处点击 / Esc / 面板都不得调用它（2026-09-11 定案）。
+   * 幂等：同值不记录、不发事件。
+   *
+   * 用户接管某个应用窗口时只停**那个窗口**的加载（浏览器标签的 `stopPendingLoads`
+   * 管不到它），并记一条 op 让活动时间线可见。
+   * @param id - surface id（未知 id ⇒ 什么都不做，返回 false）。
+   * @param owner - 新的归属。
+   * @param actor - 记录归属（用户按钮 = 'user'）。
+   * @returns true = 状态确实变了。
+   */
+  setSurfaceControl(id: number, owner: SurfaceControlOwner, actor: RecordActor = 'user'): boolean {
+    const registry = this.surfaces
+    if (registry === undefined) return false
+    const before = registry.surfaceControl(id)
+    const surface = registry.setSurfaceControl(id, owner)
+    if (surface === undefined) return false
+    if (before === owner) return false
+    if (owner === 'user') {
+      const wc = asSurfaceWebContents(surface.webContents)
+      try { wc?.stop?.() } catch { /* teardown never throws */ }
+      this.record('browser_takeover', 0, `user took over ${surfaceLabel(surface)}`, false, actor)
+    } else {
+      this.record('browser_release', 0, `user released ${surfaceLabel(surface)}`, false, actor)
+    }
+    this.emitAll('state')
+    return true
+  }
+
+  /** 某个 surface 的控制权归属（未知 id ⇒ undefined；缺省 `'agent'`）。 */
+  surfaceControl(id: number): SurfaceControlOwner | undefined {
+    return this.surfaces?.surfaceControl(id)
   }
 
   shellState(): BrowserShellState {
@@ -685,17 +749,16 @@ export class BrowserRuntime {
   /**
    * Swap the partition used by NEW tab views (user switch) and the store.
    *
-   * The mask overlay is the one view that can NOT be left behind: it owns the
-   * 「我来操作」pill, whose POST needs the BrowserAuth write proof that
-   * `index.ts` mirrors into the CURRENT browser partition. A view created
-   * before the switch keeps writing into the previous user's cookie jar, so
-   * every takeover click is refused (403 / logged 401) for the rest of the run
-   * (2026-09-14 现场 P0: Windows 客户机登录后「我来操作」完全没反应).
+   * The mask overlay deliberately does **NOT** follow this switch any more
+   * (2026-09-21, §7b option A): it lives in the DEFAULT session, the jar that
+   * already holds the application's `dsh-auth-*` proof cookie for the shell
+   * window, so a user switch cannot invalidate its write proof — the new login
+   * simply replaces the cookie in that one jar. Before that change the mask
+   * followed the partition and the proof had to be COPIED into the tab jar.
    */
   setPartition(partition: string): void {
     if (this.partition === partition) return
     this.partition = partition
-    if (this.overlayPartition !== undefined && this.overlayPartition !== partition) this.remountOverlay()
   }
 
   /** Switch the per-user store (session change): re-point ledger/stores. */
@@ -713,19 +776,21 @@ export class BrowserRuntime {
   /**
    * Decide whether a **model-facing** navigation may proceed.
    *
-   * 除了 scheme 策略（{@link DownloadGuard.allowNavigation}）之外，还要拒**本机 shell
-   * origin**（2026-09-21 三轮审计 P1-①，见 docs/decisions/2026-09-21-app-author-data-surface.md §7b）：
+   * 除了 scheme 策略（{@link DownloadGuard.allowNavigation}）之外，还要拒**本机目标**
+   * （2026-09-21 三轮/四轮审计 P1-①，见 docs/decisions/2026-09-21-app-author-data-surface.md §7b）：
    *
-   *   - 内置浏览器的分区**故意镜像**了 shell 的 `dsh-auth-*` cookie（本插件自己的
-   *     `/browser-shell`、`/browser-overlay` 两个页面的写操作要靠它过 `requireWriteProof`），
-   *     而导航策略对浏览器标签放行一切 `http(s)`；
-   *   - 两者叠加 ⇒ 模型只要 `browser_navigate` 到 `http://127.0.0.1:<port>/api/pico/...`
-   *     就天然持有那把 cookie，**任何**依赖持有性证明的本机守卫（不只是 `unmask`）都会被绕过 ——
-   *     因为它驱动的那个标签页**就是**一个持有 cookie 的真页面。
+   *   - 当时的形态：内置浏览器的分区**故意镜像**了 shell 的 `dsh-auth-*` cookie（本插件
+   *     自己两个 shell 页面的写操作要靠它过 `requireWriteProof`），而导航策略对浏览器标签
+   *     放行一切 `http(s)`；两者叠加 ⇒ 模型只要 `browser_navigate` 到
+   *     `http://127.0.0.1:<port>/api/pico/...` 就天然持有那把 cookie，**任何**依赖持有性
+   *     证明的本机守卫（不只是 `unmask`）都会被绕过 —— 因为它驱动的那个标签页**就是**
+   *     一个持有 cookie 的真页面；
+   *   - 2026-09-21 §7b **方案 A** 已把凭据移出模型可驱动的 jar（蒙版改跑默认 session，
+   *     镜像删除）。判据**保留**为**纵深防御**：本机回环面是宿主控制面（登录态、连接器、
+   *     应用数据、浏览器写面），模型驱动的标签不该有任何一条通路落在它上面 ——
+   *     "今天那个 jar 里没凭据"不等于"明天不会有别的凭证"。
    *
-   * 口径（2026-09-21 四轮审计后收紧）：**本机一律不访问** —— 被镜像的 cookie 是
-   * host-only 且 cookie 不看端口，`127.0.0.1` 的任意端口都能收到它；"看本地 dev server"
-   * 因此是拿本机控制面凭据换便利，代价不可接受（详见决策记录 §7b）。
+   * 口径（2026-09-21 四轮审计后收紧，方案 A 后不变）：**本机一律不访问**。
    *
    * 宿主自己 load 两个 shell 页面走的是 `webContents.loadURL`，**不经过**这里
    * （`ensureWindow`/`mountOverlay`），所以接管蒙版与工具栏不受影响。
@@ -750,14 +815,13 @@ export class BrowserRuntime {
    *  1. **本机 shell origin**（`shellOrigin` 精确相等）；
    *  2. **任何本机主机名**（判定唯一实现在 `guard.isLocalHostname`：`127.0.0.0/8`、
    *     `::1`/`::`、IPv4-mapped、`localhost` 及其尾点/子域、`ip6-localhost` 等）——
-   *     为什么不能只拒 shell origin：镜像的 `dsh-auth-*` 是 **host-only** cookie，
-   *     而 **cookie 不看端口** ⇒ 浏览器把它送到 `127.0.0.1` 的**任意端口**。
-   *     四轮审计真机实测：模型在自己的端口上起一个静态页并导航过去，
-   *     就能在自己的服务器日志里拿到这把 cookie（它等价于本机控制面的 bearer
-   *     凭据：可重放 login / 会话切换 / 技能安装 / `rows?unmask=1`）。
-   *     同理，同 host 不同端口属于 **same-site**，SameSite=Strict **不拦**它 ——
-   *     所以"外部页面 iframe 本机端口"这条路才是危险的（外部页面本身的跨站请求
-   *     确实拿不到 cookie，但一旦模型拿到**任何**本机页面，它就能在同站范围内任意取数）。
+   *     为什么不能只拒 shell origin（四轮审计当时的形态）：镜像的 `dsh-auth-*` 是
+   *     **host-only** cookie，而 **cookie 不看端口** ⇒ 浏览器把它送到 `127.0.0.1` 的
+   *     **任意端口**。真机实测：模型在自己的端口上起一个静态页并导航过去，就能在自己的
+   *     服务器日志里拿到这把 cookie（等价于本机控制面的 bearer 凭据）。同 host 不同端口
+   *     属 **same-site**，SameSite=Strict **不拦**它 —— 所以"外部页面 iframe 本机端口"
+   *     那条路同样是危险的。方案 A 删掉了镜像，但判据按主机名一刀切保留：
+   *     逐端口/逐来源的例外只会给下一次凭据回流留缝。
    *
    * 因此口径是：**AI 浏览器不访问本机地址**（这不是它的用途 —— 平台自己的页面由宿主
    * `webContents.loadURL` 直接加载，应用走应用窗口面，都不经过这里）。
@@ -1157,17 +1221,23 @@ export class BrowserRuntime {
   }
 
   /**
-   * Mount the mask overlay onto the CURRENT partition (create + attach + load
-   * the overlay page + re-apply bounds/z-order).
+   * Mount the mask overlay (create + attach + load the overlay page + re-apply
+   * bounds/z-order).
    *
-   * Keep this the ONLY place that builds the mask view: the view's partition is
-   * fixed at creation and must always equal {@link partition}, which is what
-   * the cookie handoff in `index.ts` targets.
+   * Keep this the ONLY place that builds the mask view. The view is created
+   * with **no partition** on purpose (2026-09-21, §7b option A): it must land in
+   * the DEFAULT session, the jar that already holds the application's
+   * `dsh-auth-*` proof cookie (the shell window's page and the main window live
+   * there too). Its write operations therefore pass `requireWriteProof` with no
+   * cross-jar cookie copy — and, more importantly, the model-drivable tab
+   * partition (`{@link partition}`) never receives that credential.
+   *
+   * The session is fixed at creation, and since the mask no longer depends on
+   * the tab partition there is nothing to rebuild on a user switch.
    */
   private mountOverlay(win: NativeBrowserWindow, origin: string | undefined): void {
-    const overlay = this.adapter.createMaskView(this.partition)
+    const overlay = this.adapter.createMaskView()
     this.overlay = overlay
-    this.overlayPartition = this.partition
     overlay.attach(win, this.overlayBounds('capsule'))
     if (origin !== undefined) {
       void overlay.webContents.loadURL(`${origin}/browser-overlay`).catch((cause: unknown) => {
@@ -1177,30 +1247,6 @@ export class BrowserRuntime {
       })
     }
     this.applyOverlay()
-  }
-
-  /**
-   * Rebuild the live mask overlay after a partition switch (user switch).
-   *
-   * Electron cannot re-point a WebContents at another session, so the stale
-   * view is destroyed and a fresh one is mounted on the new partition (the
-   * reload also re-triggers the cookie handoff through the page GET).
-   */
-  private remountOverlay(): void {
-    const stale = this.overlay
-    const win = this.window
-    this.overlay = null
-    this.overlayPartition = undefined
-    if (stale !== null) {
-      try {
-        stale.detach()
-        stale.destroy()
-      } catch {
-        // Teardown must never throw.
-      }
-    }
-    if (win === null || win.isDestroyed()) return
-    this.mountOverlay(win, this.shellOrigin)
   }
 
   /**
@@ -1247,7 +1293,6 @@ export class BrowserRuntime {
       this.tabs.clear()
       this.pool.clear()
       this.overlay = null
-      this.overlayPartition = undefined
       this.windowResizeDisposer?.()
       this.windowClosedDisposer?.()
       this.windowFocusDisposer?.()
@@ -1409,7 +1454,17 @@ export class BrowserRuntime {
   resolveTab(tabId: number | undefined): number {
     if (this.pendingLedgerTabs.length > 0) this.materializePendingTabs()
     if (tabId !== undefined) {
-      if (!this.pool.has(tabId)) throw browserError('not-found', `browser: unknown tab ${tabId}`)
+      if (!this.pool.has(tabId)) {
+        // §16.1：`browser_list_tabs` 会把应用窗口的 surface id 一起列出来，但它们是
+        // **另一种**目标 —— 用 `tab` 寻址应用窗口必须明确拒绝，而不是含混的
+        // "unknown tab <id>"（那会让模型以为标签被关掉了，然后去开一张新的浏览器
+        // 标签，把操作落在**错的窗口**上）。应用窗口只能显式给 `app_id`。
+        const surface = this.surfaces?.get(tabId)
+        if (surface?.kind === 'app') {
+          throw browserError('policy', `browser: ${surfaceLabel(surface)} is an application window, not a browser tab — address it with app_id (only browser_navigate dispatches to application windows today)`)
+        }
+        throw browserError('not-found', `browser: unknown tab ${tabId}`)
+      }
       return tabId
     }
     const active = this.pool.activeTab
@@ -1863,10 +1918,19 @@ export class BrowserRuntime {
     } as Omit<HistoryEntry, 'seq'>)
   }
 
-  /** Cooperative wait for the page load milestone; never rejects on timeout. */
-  private waitForLoad(wc: NativeView['webContents'], waitUntil: BrowserWaitUntil): (budgetMs: number) => Promise<void> {
+  /** Cooperative wait for the page load milestone; never rejects on timeout.
+   *
+   * The parameter is the minimal structural face (on/removeListener/isLoading)
+   * rather than `NativeView['webContents']`: **application surfaces** carry a
+   * `webContents` the registry holds as an opaque handle (§16.1), and this is
+   * the only loader-side helper they share with browser tabs. */
+  private waitForLoad(wc: LoadWaitTarget, waitUntil: BrowserWaitUntil): (budgetMs: number) => Promise<void> {
     return async (budgetMs: number) => {
       const deadline = Date.now() + Math.max(0, budgetMs)
+      // Absent `isLoading` (a surface handle that only exposes loadURL) means
+      // "unknown": treat it as still loading so the bounded timer settles the
+      // wait instead of settling on a guess.
+      const loading = (): boolean => wc.isLoading?.() ?? true
       await new Promise<void>((resolve) => {
         let settled = false
         let idleTimer: ReturnType<typeof setTimeout> | undefined
@@ -1882,8 +1946,8 @@ export class BrowserRuntime {
           idleTimer.unref?.()
         }
         const cleanup = (): void => {
-          wc.removeListener('dom-ready', onDomReady)
-          wc.removeListener('did-finish-load', onFinish)
+          wc.removeListener?.('dom-ready', onDomReady)
+          wc.removeListener?.('did-finish-load', onFinish)
           clearTimeout(timer)
           if (idleTimer !== undefined) clearTimeout(idleTimer)
         }
@@ -1894,17 +1958,114 @@ export class BrowserRuntime {
           if (waitUntil === 'load') settle()
           if (waitUntil === 'networkidle') scheduleIdle()
         }
-        wc.on('dom-ready', onDomReady)
-        wc.on('did-finish-load', onFinish)
+        wc.on?.('dom-ready', onDomReady)
+        wc.on?.('did-finish-load', onFinish)
         const timer = setTimeout(settle, Math.max(0, deadline - Date.now()))
         timer.unref?.()
-        if (waitUntil !== 'domcontentloaded' && !wc.isLoading()) {
+        if (waitUntil !== 'domcontentloaded' && !loading()) {
           if (waitUntil === 'networkidle') scheduleIdle()
           else settle()
         }
-        if (waitUntil === 'domcontentloaded' && wc.isLoading() === false) settle()
+        if (waitUntil === 'domcontentloaded' && loading() === false) settle()
       })
     }
+  }
+
+  /**
+   * 导航**应用窗口自己的** webContents（§16.1：`app_id` 显式寻址的唯一落点）。
+   *
+   * 为什么必须有这条路径（2026-09-21，P1）：应用窗口 surface 注册之后，
+   * `browser_navigate{app_id, url}` 曾在校验完 surface 后**回落到浏览器标签** —— 模型
+   * 以为自己在驱动应用窗口，实际把用户的浏览器当前标签导航走了（http(s) URL），或者
+   * 被浏览器闸门拒绝（应用 scheme URL）。两种都是错的落点，且对用户是真实伤害
+   * （劫持他正在看的页面）。
+   *
+   * 三条冻结语义：
+   *  1. 只落在这个 surface 自己的 `webContents` 上 —— 没有可驱动句柄就**明确报错**，
+   *     绝不回落到浏览器标签（"没有目标"比"错的目标"安全）；
+   *  2. 只允许该应用自己的 origin（`<scheme>://<app_id>/…`）：应用窗口导航到外站是
+   *     宿主原生闸门（`will-navigate`/`will-redirect` 共用的 verdict）也会拒的动作，
+   *     这里在**碰 webContents 之前**就变成结构化错误，模型能看到原因；
+   *  3. 用户按住这个窗口时（逐 surface 用户闸，§16.1 第 3 条）拒绝，文案与浏览器窗口
+   *     上的「我来操作」逐字相同（{@link gateRefusal}）。
+   * @param surface - 目标应用 surface（工具面用 `app_id` 解析得到）。
+   * @param url - 目标 URL。
+   * @param waitUntil - 加载里程碑（缺省 domcontentloaded）。
+   * @param signal - 调用方取消信号。
+   * @returns 该窗口的状态投影（url/title/loading）。
+   */
+  async navigateAppSurface(
+    surface: BrowserSurface,
+    url: string,
+    waitUntil: BrowserWaitUntil = 'domcontentloaded',
+    signal?: AbortSignal,
+  ): Promise<{ url: string, title: string, loading: boolean }> {
+    if (surface.kind !== 'app') {
+      throw browserError('policy', `browser: application-surface navigation requires a kind:'app' surface (got ${surface.kind}) — refusing to guess a target`)
+    }
+    const label = surfaceLabel(surface)
+    const wc = asSurfaceWebContents(surface.webContents)
+    if (wc === undefined) {
+      throw browserError('not-found', `browser: ${label} has no drivable webContents yet — reopen the application window and retry (refusing to act on a browser tab instead)`)
+    }
+    if (!appSurfaceAllowsUrl(surface, url)) {
+      throw browserError('navigation-blocked', `browser: ${label} only navigates inside its own origin (${surface.appScheme ?? '?'}://${surface.appId ?? '?'}) — ${stripSensitiveUrl(url).slice(0, 200)} is a different origin; use a browser tab for http(s) pages`)
+    }
+    if (this.isForbiddenLocalTarget(url)) {
+      throw browserError('navigation-blocked', `browser: navigation denied — ${stripSensitiveUrl(url).slice(0, 200)}`)
+    }
+    return await this.agentRun('browser_navigate', async () => {
+      this.assertSurfaceAgentStillAllowed(surface, 'browser_navigate')
+      const started = Date.now()
+      let loadError: unknown
+      const outcome = await Promise.race([
+        wc.loadURL(url).then(
+          () => 'loaded' as const,
+          (cause: unknown) => { loadError = cause; return 'failed' as const },
+        ),
+        sleep(this.options.loadTimeoutMs).then(() => 'pending' as const),
+      ])
+      // 接管压过加载结果（与浏览器标签同一条判据）。
+      this.assertSurfaceAgentStillAllowed(surface, 'browser_navigate')
+      if (outcome === 'failed') {
+        const detail = loadError instanceof Error ? loadError.message : String(loadError ?? 'unknown error')
+        throw browserError('network', `browser: navigation failed — ${stripSensitiveUrl(detail).slice(0, 200)}`)
+      }
+      if (waitUntil !== 'domcontentloaded') {
+        const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started))
+        await this.waitForLoad(wc, waitUntil)(Math.min(budget, Math.max(0, this.options.loadTimeoutMs)))
+      }
+      // op log 用 tab 0（与 browser_takeover 同口径）：应用窗口不是浏览器标签，
+      // 塞一个 surface id 进 tab 字段会让"按标签看时间线"的界面指向不存在的标签。
+      this.record('browser_navigate', 0, `${label} navigate: ${stripSensitiveUrl(url)}`, false, 'ai', NAVIGATE_SUMMARY_LIMIT)
+      return this.appSurfaceState(wc, url)
+    }, signal)
+  }
+
+  /** 应用窗口的状态投影（webContents 的读取全部当可选：宿主可能只交了 id）。 */
+  private appSurfaceState(wc: SurfaceWebContents, fallbackUrl: string): { url: string, title: string, loading: boolean } {
+    let current = fallbackUrl
+    let title = ''
+    let loading = false
+    try { current = wc.getURL?.() ?? fallbackUrl } catch { current = fallbackUrl }
+    try { title = wc.getTitle?.() ?? '' } catch { title = '' }
+    try { loading = wc.isLoading?.() ?? false } catch { loading = false }
+    return {
+      url: stripSensitiveUrl(current),
+      title: stripSensitiveText(title),
+      loading,
+    }
+  }
+
+  /**
+   * 逐 surface 的接管检查点（§16.1 第 3 条）：用户按住**这个应用窗口**时 AI 不得
+   * 操作它。错误码与文案与池级闸门完全一致（{@link gateRefusal}）—— 模型只需要学
+   * 会一条"用户拿着控制权"的指令，而不是两条。
+   */
+  private assertSurfaceAgentStillAllowed(surface: BrowserSurface, operation: string): void {
+    if (this.surfaces?.surfaceControl(surface.id) !== 'user') return
+    this.record(operation, 0, `refused: ${surfaceLabel(surface)} is user-controlled`, true)
+    throw browserError('window-controlled', gateRefusal(this.locale()))
   }
 
   async reload(tabId: number, signal?: AbortSignal, user = false): Promise<void> {
@@ -3474,6 +3635,21 @@ export class BrowserRuntime {
     ensureSessionGuard(session)
   }
 
+  /**
+   * Resolve the Electron session of a partition **without creating a view**
+   * (adapter `getSession`, optional in test/non-Electron adapters ⇒ undefined).
+   *
+   * Exists so the plugin can install the partition permission guard at
+   * plugin-boot (before any tab exists) without reaching for `require('electron')`
+   * itself — the adapter is the only Electron seam (2026-09-21: this replaced the
+   * cookie-mirroring function, which used to be the boot-time guard owner).
+   * @param partition - partition name (`persist:agent-browser-<user>`).
+   * @returns the session, or undefined when the host cannot resolve one.
+   */
+  sessionForPartition(partition: string): NativeSession | undefined {
+    return this.adapter.getSession?.(partition)
+  }
+
   /** Trigger a programmatic download of a URL. */
   async downloadUrl(url: string, signal?: AbortSignal): Promise<void> {
     if (!this.navigationAllowed(url)) {
@@ -3566,7 +3742,6 @@ export class BrowserRuntime {
     if (this.window !== null && !this.window.isDestroyed()) this.window.close()
     this.window = null
     this.overlay = null
-    this.overlayPartition = undefined
     this.pool.dispose()
     this.listeners.clear()
   }

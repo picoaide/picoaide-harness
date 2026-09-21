@@ -351,6 +351,23 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, dataDir string) *wasmPla
 		// 保存后生效的那一份**（limitsHolder.Plan 读的是 h.Get()），因此探针上的
 		// profile/budget 与"实际跑的账"同源 —— 不会出现"界面按档位显示、实际按设置跑"。
 		MemoryPlan: limitsHolder.Plan,
+		// 两侧编译缓存**实际生效**的模式（2026-09-21 审计 P1-①的可观测面）：两条降级
+		// （执行侧磁盘缓存不可用 ⇒ 进程内缓存；编译侧缓存目录不可信 ⇒ 临时目录）此前
+		// 都只有一行日志，容器里轮转后就查不到了。
+		//
+		// ⚠️ 取值只做 `string(...)` 转换 —— **判定在组件内部**（runtime.CacheMode /
+		// compile.CacheMode 都是对"真的用上的那个缓存对象/目录"的判定）。在这里按
+		// DataRoot 能不能建目录重算一遍就是第二个判断，而"探针说 disk、实际跑 memory"
+		// 正是这条可观测性要消灭的形态（judge：TestReadyzCacheModeMatchesRuntime）。
+		ExecCacheMode: func() string { return string(appSrv.RuntimeCacheMode()) },
+		CompileCacheMode: func() string {
+			if compiler == nil {
+				// 没有编译子系统 ⇒ 不报任何一种模式（"临时目录"与"没有编译器"是两件事；
+				// 后者由 compile_available=false 表达）。
+				return ""
+			}
+			return string(compiler.CacheMode())
+		},
 	})
 
 	api := wasmapi.NewHandlers(wasmapi.Options{

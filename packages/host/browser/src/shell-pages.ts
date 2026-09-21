@@ -305,9 +305,10 @@ export function browserShellHtml(locale: HostLocale): string {
   }
 
   /** 失败文案的唯一出处。401/403 就是 2026-09-15 现场主机日志里那条
-   * 「refused a local write without browser proof」：浏览器分区还没拿到 BrowserAuth
-   * 票据（蒙版页加载早于 cookie 交接）。打包版用户看不到 console，页面必须自己把
-   * 话说清楚 —— 否则就是「点了『我来操作』整轮没反应、现场零证据」。 */
+   * 「refused a local write without browser proof」：本地写面拿不到 BrowserAuth
+   * 证明（本页与主应用窗口同用默认 session，票据缺席的形态是未登录 / cookie 过期 /
+   * 被清掉）。打包版用户看不到 console，页面必须自己把话说清楚 —— 否则就是
+   * 「点了『我来操作』整轮没反应、现场零证据」。 */
   const failureText = (status, data) => {
     if (status === 401 || status === 403) return COPY.failCredentials
     if (status === 503) return COPY.failService
@@ -908,8 +909,9 @@ export function browserOverlayHtml(locale: HostLocale): string {
   const TOOL_LABELS = COPY.toolLabels
 
   /** 失败文案的唯一出处。401/403 就是 2026-09-15 现场主机日志里那条
-   * 「refused a local write without browser proof」：本页跑在浏览器分区，靠 cookie
-   * 交接拿到 BrowserAuth 票据，交接没完成时所有写操作都被拒。打包版用户看不到
+   * 「refused a local write without browser proof」：本页跑在**默认 session**
+   * （§7b 方案 A —— 与 shell 页、主应用窗口同一个 jar），票据由那个 jar 里的应用
+   * cookie 提供；它缺席时（未登录 / 过期 / 被清）所有写操作都被拒。打包版用户看不到
    * console —— 页面必须自己说出来，否则就是「点了『我来操作』整轮没反应、零证据」。 */
   const failureText = (status, data) => {
     if (status === 401 || status === 403) return COPY.failCredentials

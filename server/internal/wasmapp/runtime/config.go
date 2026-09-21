@@ -198,6 +198,104 @@ func NewCompilationCache(dataRoot string) (wazero.CompilationCache, error) {
 	return cache, nil
 }
 
+// ===== 编译缓存模式（§4.9 运维面：/readyz 的 exec_cache_mode）=====
+
+// CacheMode 是执行侧**实际生效**的编译缓存模式（封闭取值，JSON 名即取值）。
+//
+// 为什么需要它：磁盘缓存不可用时 `NewCompilationCache` 返回 `(nil, nil)`、`New`
+// 换成进程内缓存 —— 这条降级（2026-09-21 独立审计 P1-①）此前**只有一行日志**。
+// 容器里日志会随轮转消失，编排/运维看不到"这台实例的跨进程暖缓存其实没生效"
+// （表现只是每个应用首个请求慢一点），而这正是"缓存不可用 ⇒ 慢一点"这条取舍
+// 必须能被看见的地方。
+//
+// 判据纪律（防"报告的模式"与"真的用了哪个缓存"分叉）：本值**不是**第二个判断，
+// 而是 `cacheModeOf` 对**那个真的被装进 wazero.Runtime 的缓存对象**的判定。
+// 因此它不可能与运行时实际构建的缓存不一致 —— 包括调用方注入缓存的那条路径。
+type CacheMode string
+
+const (
+	// CacheModeDisk：磁盘缓存（<dataRoot>/<CompileCacheDirName>/<分代>），跨进程共享。
+	CacheModeDisk CacheMode = "disk"
+	// CacheModeMemory：进程内缓存。两条来源：降级（目录不可用/不可信）与"没有 DataRoot"。
+	CacheModeMemory CacheMode = "memory"
+)
+
+// resolveCompilationCache 是执行侧"用哪个编译缓存"的**唯一决策点**：它把缓存对象
+// 与它的模式**一起**返回。调用方（`New`）不得自行推导模式 —— 那会造出第二个判断，
+// 而两者分叉的失败形态恰恰是这条可观测性要消灭的（探针说 disk、实际跑 memory）。
+func resolveCompilationCache(dataRoot string, injected wazero.CompilationCache) (wazero.CompilationCache, CacheMode, error) {
+	if injected != nil {
+		// 调用方注入的缓存（共享/测试装配）：它是**别人**造的，只能问对象自己。
+		return injected, cacheModeOf(injected), nil
+	}
+	if strings.TrimSpace(dataRoot) == "" {
+		// 没有数据根 = 没有磁盘缓存的位置（单机验证/最小装配）。
+		c := wazero.NewCompilationCache()
+		return c, cacheModeOf(c), nil
+	}
+	c, err := NewCompilationCache(dataRoot)
+	if err != nil {
+		// 生产路径上 NewCompilationCache 已不再返回 error（任何失败都降级为 (nil, nil)）；
+		// 保留这条 fail-loud 是给"将来重新引入可失败分支"的：拿不到缓存却假装在用，
+		// 比启动失败更难查。
+		return nil, "", err
+	}
+	if c == nil {
+		// **降级信号**（不是错误）：磁盘缓存不可用 ⇒ 进程内缓存。
+		// wazero 不接受 nil 缓存，所以这里必须补一个（§4.3.1-d 的"不可信 ⇒ 不用"）。
+		mem := wazero.NewCompilationCache()
+		return mem, cacheModeOf(mem), nil
+	}
+	return c, cacheModeOf(c), nil
+}
+
+// cacheModeOf 问**缓存对象自己**底层有没有文件存储。
+//
+// 为什么用反射读未导出字段（而不是让调用方记住自己走的是哪个分支）：wazero 的
+// `CompilationCache` 是个空接口（`interface{ api.Closer }`），内存缓存与磁盘缓存是
+// **同一个具体类型**（`*wazero.cache`）—— 唯一差别是磁盘那条路径上 `fileCache`
+// 字段被设成了 `filecache.New(dir)`（wazero v1.12.0 `cache.go` 的 ensuresFileCache）。
+// 所以"是哪种缓存"只能从对象本身读。同类先例见 RuntimeConfigFingerprint（同样用
+// 反射读 wazero 的未导出字段）。
+//
+// 读不到该字段（wazero 改名/换实现）⇒ 报 **memory**：保守方向（声称的能力更少）。
+// 这条保守有代价（真有磁盘缓存时会被显示成内存缓存），所以
+// TestRuntimeCacheModeMatchesBuiltCache 对两个方向都有断言：升级 wazero 后若这条
+// 反射失效，那个用例会红，而不是静默把 disk 说成 memory。
+func cacheModeOf(cache wazero.CompilationCache) CacheMode {
+	if cache == nil {
+		return CacheModeMemory
+	}
+	if compilationCacheHasDiskStore(cache) {
+		return CacheModeDisk
+	}
+	return CacheModeMemory
+}
+
+// compilationCacheHasDiskStore 是 cacheModeOf 的反射实现（判定规则见其注释）。
+func compilationCacheHasDiskStore(cache wazero.CompilationCache) bool {
+	v := reflect.ValueOf(cache)
+	for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return false
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return false
+	}
+	f := v.FieldByName("fileCache")
+	if !f.IsValid() {
+		return false
+	}
+	switch f.Kind() {
+	case reflect.Interface, reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return !f.IsNil()
+	default:
+		return false
+	}
+}
+
 // RuntimeConfigFingerprint 返回 RuntimeConfig 的**进键字段**指纹，用于
 // "编译侧与执行侧一致"的断言（§4.3.1-a）。
 //

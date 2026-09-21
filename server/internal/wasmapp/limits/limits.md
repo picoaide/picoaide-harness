@@ -19,6 +19,8 @@
 | `section_total_max_bytes` | 4194304 | bytes | §4.2 | 自定义段总量上限 | 超限 SECTION_OVERRIDE_OVERSIZE |
 | `app_config_max_bytes` | 65536 | bytes | §4.2 | 应用配置文件上限 | picoaide.app.json，不计入 wasm 上限 |
 | `app_config_whitelist_max` | 2000 | count | §4.2 | 白名单条目上限 | 平台不校验账号是否存在（否则等于账号枚举接口） |
+| `app_config_sensitive_columns_max` | 100 | count | §4.2 | 作者声明敏感列上限 | sensitive_columns：默认启发式之外**由作者补充**的脱敏列；条目去重按大小写不敏感 |
+| `app_config_sensitive_column_max_bytes` | 64 | bytes | §4.2 | 声明敏感列名单项字节上限 | 单条列名超过它只可能是走样输入（整行/整段被粘进来），且永远匹配不到任何一列 |
 | `compile_timeout` | 60 | seconds | §4.2 | 编译超时 | 同步 publish 在 60 s 预算内完成 |
 | `dry_run_budget` | 2 | seconds | §4.2 | 合成帧干跑预算 | 编译通过 ≠ 能跑（签名不匹配编译期全绿） |
 | `compile_queue_depth` | 64 | count | §4.3 | 编译队列深度 | 满则拒绝 |

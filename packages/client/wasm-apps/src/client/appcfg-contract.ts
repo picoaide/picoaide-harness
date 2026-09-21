@@ -180,7 +180,7 @@ function isPixelSize(value: unknown): value is number {
 
 
 /** `picoaide.app.json` 的字段名集合（`access` 取代了 `visible` + `login_required`）。 */
-export const APP_CONFIG_FIELDS = ['access', 'whitelist', 'purpose', 'data_sensitivity', 'owner', 'window'] as const
+export const APP_CONFIG_FIELDS = ['access', 'whitelist', 'purpose', 'data_sensitivity', 'owner', 'window', 'sensitive_columns'] as const
 
 /**
  * 已删除的字段名。

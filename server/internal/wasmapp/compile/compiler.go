@@ -536,6 +536,39 @@ func (c *Compiler) Stats() Stats {
 // CacheDir 返回缓存目录绝对路径（诊断/权限断言用）。
 func (c *Compiler) CacheDir() string { return c.cache }
 
+// CacheMode 是编译侧**实际生效**的编译缓存模式（封闭取值，JSON 名即取值）。
+//
+// 为什么需要它（§4.9 运维面）：`New` 在缓存目录**不可信**时会改用本次进程新建的
+// 临时目录（四轮审计 P2-①：wazero 的磁盘缓存是读 + 写 ⇒ 不可信目录等于让能布置它的人
+// 在编译进程里执行代码）。这条降级此前只有一行日志，`/readyz` 上完全看不出
+// "这台实例的编译缓存每次都落在一个退出即删的目录里"（表现只是缓存从不复用）。
+type CacheMode string
+
+const (
+	// CacheModeConfigured：子进程用**配置的**缓存目录（<DataRoot>/_compile-cache/<分代>）。
+	CacheModeConfigured CacheMode = "configured"
+	// CacheModeTemporary：子进程用**临时**缓存目录（不可信 ⇒ 不读也不写那棵树，退出即删）。
+	CacheModeTemporary CacheMode = "temporary"
+)
+
+// CacheMode 返回编译子进程**实际使用**的缓存目录形态（configured / temporary）。
+//
+// 唯一真源 = `childCacheTemp`：它同时决定子进程 argv 的 `-cache-dir` 与请求里的
+// `cache_dir`（runJob / childArgs），因此这里报的模式与"子进程真的用了哪个目录"
+// 是同一个字段，不存在第二个判断可以与之分叉。
+//
+// nil 接收者返回空串（编译器未构造 ≠ 任何一种模式；可用性由 /readyz 的
+// compile_available 回答）。
+func (c *Compiler) CacheMode() CacheMode {
+	if c == nil {
+		return ""
+	}
+	if c.childCacheTemp != "" {
+		return CacheModeTemporary
+	}
+	return CacheModeConfigured
+}
+
 // CacheEntries 返回缓存条目的路径/体积/写入时间（UnixNano），按路径升序。
 //
 // 用途：/readyz 水位、命中判定的可观测性、以及**回收测试**（"删的是最旧的那些"
