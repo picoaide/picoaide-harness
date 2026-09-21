@@ -232,7 +232,7 @@ describe('response envelope', () => {
   it('accepts only the frozen scheme shape and rejects reserved schemes (design §8.3/§10)', () => {
     // 与 Go `channel.AppOriginScheme()` 的正则逐字一致：^[a-z][a-z0-9+.-]{1,31}$
     expect(isValidAppScheme('picoaide-app')).toBe(true)
-    expect(isValidAppScheme('example-a-harness-app')).toBe(true)
+    expect(isValidAppScheme('example-harness-app')).toBe(true)
     expect(isValidAppScheme('a1')).toBe(true)
     for (const value of ['a', '', 'A-app', '-app', 'app_', 'app name', 'x'.repeat(33), 'http', 'https', 'file', 'data', 'javascript', 'about', 'blob']) {
       expect(isValidAppScheme(value), value).toBe(false)

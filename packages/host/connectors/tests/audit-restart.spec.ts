@@ -29,13 +29,13 @@ afterEach(async () => { while (servers.length) await servers.pop()?.close() })
 
 function def(origin: string): ConnectorDef {
   return {
-    id: 'example-a', name: 'Example-A', description: 'audit', authMode: 'oauth',
+    id: 'example-mcp', name: '示例 MCP 智能体', description: 'audit', authMode: 'oauth',
     auth: {
       authorizeUrl: `${origin}/oauth/authorize`, tokenUrl: `${origin}/oauth/token`, clientId: '',
       redirectUri: 'http://127.0.0.1/callback', pkce: true, publicClient: true,
       discoveryUrl: `${origin}/mcp`, scopes: 'offline_access',
     },
-    mcp: [{ serverName: 'example-a', transport: 'streamable-http', url: `${origin}/mcp` }],
+    mcp: [{ serverName: 'example-mcp', transport: 'streamable-http', url: `${origin}/mcp` }],
   }
 }
 
@@ -63,11 +63,11 @@ async function awaitRow(
 /** One full "open the client, authorize, then quit" cycle on a directory. */
 async function authorizeOnce(dir: string, server: RealMcpServer): Promise<void> {
   const first = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
-  await callRoute(first, '/api/pico/connectors/example-a/connect', 'POST')
+  await callRoute(first, '/api/pico/connectors/example-mcp/connect', 'POST')
   const deadline = Date.now() + 8000
   let url: string | undefined
   while (Date.now() < deadline && url === undefined) {
-    const res = await callRoute(first, '/api/pico/connectors/example-a/state', 'GET')
+    const res = await callRoute(first, '/api/pico/connectors/example-mcp/state', 'GET')
     url = (JSON.parse(res.body) as { request?: { authorizeUrl?: string } | null }).request?.authorizeUrl
     if (url === undefined) await new Promise(r => setTimeout(r, 25))
   }
@@ -176,7 +176,7 @@ describe('restart lifecycle: 第二天打开还能不能用', () => {
 
     // what a >1h shutdown looks like locally: the recorded expiry has passed
     const store = new ConnectorStore({ baseDir: dir })
-    await store.updateCredential('example-a', { expiresAt: Date.now() - 60_000 })
+    await store.updateCredential('example-mcp', { expiresAt: Date.now() - 60_000 })
     const grantsBefore = server.stats.grants.filter(g => g === 'refresh_token').length
 
     const next = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
@@ -193,11 +193,11 @@ describe('restart lifecycle: 第二天打开还能不能用', () => {
     // 而轮换后的凭据是客户端处理完应答才写回 store。负载高时（CI 4 vCPU + 多包并发）
     // 两者之间会被调度拉开，紧跟着读到的还是种子里的 `now - 60s`，断言必红（实测差值
     // 恰为 60_037ms）——所以轮询到新过期时间可见为止。
-    let stored = await store.readCredential('example-a')
+    let stored = await store.readCredential('example-mcp')
     const persistedDeadline = Date.now() + 8000
     while (Date.now() < persistedDeadline && !((stored?.expiresAt ?? 0) > Date.now())) {
       await new Promise(r => setTimeout(r, 25))
-      stored = await store.readCredential('example-a')
+      stored = await store.readCredential('example-mcp')
     }
     expect(stored?.expiresAt).toBeGreaterThan(Date.now())
     next.dispose()
@@ -210,12 +210,12 @@ describe('restart lifecycle: 第二天打开还能不能用', () => {
     await authorizeOnce(dir, server)
 
     const store = new ConnectorStore({ baseDir: dir })
-    await store.updateCredential('example-a', {
+    await store.updateCredential('example-mcp', {
       accessToken: 'at-revoked', refreshToken: 'rt-revoked', expiresAt: Date.now() - 60_000,
     })
 
     const next = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
-    const settled = await awaitRow(next, 'example-a', r => r.status === 'unauthorized' || r.status === 'error')
+    const settled = await awaitRow(next, 'example-mcp', r => r.status === 'unauthorized' || r.status === 'error')
     expect(settled.status).toBe('unauthorized')
     expect(settled.error ?? '').toContain('重新授权')
     next.dispose()

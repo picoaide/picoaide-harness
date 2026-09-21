@@ -27,7 +27,7 @@ PicoAide Harness 2.3.0 正式发布。本版本完成了一次重要的**产品�
 
 - 早期「CLI 即 skill」方案（自动安装 dws / wecom-cli / lark-cli / beisen-cli 等命令行工具）**整体移除**——CLI 直接 spawn 存在跨平台分发、安全与运维复杂度问题；
 - **最终架构定案**：厂商 CLI 能力改由**技能商店以 SKILL.md 分发**（上传 → 审批 → 授权 → 员工安装），模型读 skill 按引导操作；MCP 能力统一走连接器框架；
-- 连接器同步收敛为**纯 MCP 连接器**：删除 urlCommand 与 CLI 连接器，只保留 OAuth / streamable-http 形态（当前内置**销售易 NeoCRM** 与 **示例 MCP 智能体**）；
+- 连接器同步收敛为**纯 MCP 连接器**：删除 urlCommand 与 CLI 连接器，只保留 OAuth / streamable-http 形态（当前内置**销售易 NeoCRM** 等 MCP 连接器）；
 - dws 凭证落盘统一指向产品 DSH HOME。
 
 ## 发布链路加固

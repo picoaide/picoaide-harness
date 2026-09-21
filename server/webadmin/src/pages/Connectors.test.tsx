@@ -7,7 +7,7 @@ const mockRequest = vi.mocked(request)
 
 const ROWS = [
   {
-    id: 'example-crm', name: '示例 MCP 智能体', description: '招聘人事', auth_mode: 'oauth',
+    id: 'example-crm', name: '示例 MCP 智能体', description: '示例描述', auth_mode: 'oauth',
     definition: '{"auth":{"discoveryUrl":"https://mcp.example.com/mcp","pkce":true,"publicClient":true},"mcp":[{"serverName":"example-crm","transport":"streamable-http","url":"https://mcp.example.com/mcp"}]}',
     enabled: true, updated_at: '2026-08-28T10:00:00+08:00', created_at: '2026-08-28T10:00:00+08:00',
   },
@@ -69,7 +69,7 @@ describe('Connectors 连接器目录页', () => {
     fireEvent.click(screen.getByRole('button', { name: '新建连接器' }))
     const dialog = within(await screen.findByRole('dialog'))
     fireEvent.change(dialog.getByLabelText('编号(不可改,客户端按 id 匹配凭证)'), { target: { value: 'example-crm2' } })
-    fireEvent.change(dialog.getByLabelText('名称'), { target: { value: 'Example-A2' } })
+    fireEvent.change(dialog.getByLabelText('名称'), { target: { value: '示例智能体2' } })
     fireEvent.click(dialog.getByRole('button', { name: '从 JSON 导入' }))
     fireEvent.change(dialog.getByLabelText('JSON'), {
       target: { value: '{"tokenFields":[{"key":"K","label":"K","type":"text","required":true}],"mcp":[{"serverName":"m2","transport":"streamable-http","url":"https://m.example.com/mcp"}]}' },
@@ -96,7 +96,7 @@ describe('Connectors 连接器目录页', () => {
     fireEvent.click(screen.getByRole('button', { name: '新建连接器' }))
     const dialog = within(await screen.findByRole('dialog'))
     fireEvent.click(dialog.getByRole('button', { name: '从 JSON 导入' }))
-    fireEvent.click(dialog.getByRole('button', { name: 'Example-A(远程 MCP + OAuth 发现)' }))
+    fireEvent.click(dialog.getByRole('button', { name: '示例 MCP 智能体(远程 MCP + OAuth 发现)' }))
     const preview = dialog.getByLabelText('定义 JSON(与客户端 ConnectorDef 对齐,实时生成)') as HTMLTextAreaElement
     expect(preview.value).toContain('"discoveryUrl": "https://mcp.example.com/mcp"')
     expect(preview.value).toContain('"serverName": "example-crm"')

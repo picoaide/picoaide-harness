@@ -40,24 +40,24 @@ afterEach(async () => {
 
 function def(origin: string): ConnectorDef {
   return {
-    id: 'example-a', name: 'Example-A', description: 'single-owner', authMode: 'oauth',
+    id: 'example-mcp', name: '示例 MCP 智能体', description: 'single-owner', authMode: 'oauth',
     auth: {
       authorizeUrl: `${origin}/oauth/authorize`, tokenUrl: `${origin}/oauth/token`, clientId: '',
       redirectUri: 'http://127.0.0.1/callback', pkce: true, publicClient: true,
       discoveryUrl: `${origin}/mcp`, scopes: 'mcp.read offline_access',
     },
-    mcp: [{ serverName: 'example-a', transport: 'streamable-http', url: `${origin}/mcp` }],
+    mcp: [{ serverName: 'example-mcp', transport: 'streamable-http', url: `${origin}/mcp` }],
   }
 }
 
 /** 完成一次交互式授权，让磁盘上有一份带 refresh token 的凭据。 */
 async function authorizeOnce(dir: string, server: RealMcpServer): Promise<void> {
   const first = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
-  await callRoute(first, '/api/pico/connectors/example-a/connect', 'POST')
+  await callRoute(first, '/api/pico/connectors/example-mcp/connect', 'POST')
   const deadline = Date.now() + 8000
   let url: string | undefined
   while (Date.now() < deadline && url === undefined) {
-    const res = await callRoute(first, '/api/pico/connectors/example-a/state', 'GET')
+    const res = await callRoute(first, '/api/pico/connectors/example-mcp/state', 'GET')
     url = (JSON.parse(res.body) as { request?: { authorizeUrl?: string } | null }).request?.authorizeUrl
     if (url === undefined) await new Promise(r => setTimeout(r, 25))
   }
@@ -104,11 +104,11 @@ describe('SDK 自己续期后，旋转后的 refresh token 必须已经落盘', 
     expect(provider, '注册时必须带上 SDK provider').toBeTruthy()
 
     const store = new ConnectorStore({ baseDir: dir })
-    const before = await store.readCredential('example-a')
+    const before = await store.readCredential('example-mcp')
     // 模拟 SDK 自己续期完成后的持久化点（SDK 就是这么调 saveTokens 的）。
     await provider!.saveTokens({ access_token: 'at-sdk', refresh_token: 'rt-rotated', expires_in: 3600 })
 
-    const onDisk = await store.readCredential('example-a')
+    const onDisk = await store.readCredential('example-mcp')
     expect(onDisk?.refreshToken, 'saveTokens 返回时新 refresh token 必须已经落盘').toBe('rt-rotated')
     expect(onDisk?.refreshToken).not.toBe(before?.refreshToken)
     h.dispose()
@@ -152,12 +152,12 @@ describe('SDK 的 tokens() 与我们的刷新共用一个单飞（不允许二�
     await authorizeOnce(dir, server)
 
     const store = new ConnectorStore({ baseDir: dir })
-    const stale = await store.readCredential('example-a')
+    const stale = await store.readCredential('example-mcp')
     expect(stale?.refreshToken, '前置：磁盘上必须有 refresh token').toBeTruthy()
     // 让"本地记录的过期时间已过"（关机超过一小时）——这是 provider 会走
     // ensureFresh 的判据，也是 CI 那条约 50% 复现率的窗口的入口。
-    await store.updateCredential('example-a', { expiresAt: Date.now() - 60_000 })
-    const credential = (await store.readCredential('example-a'))!
+    await store.updateCredential('example-mcp', { expiresAt: Date.now() - 60_000 })
+    const credential = (await store.readCredential('example-mcp'))!
     const target = {
       discoveryUrl: `${server.origin}/mcp`,
       tokenUrl: `${server.origin}/oauth/token`,
@@ -177,7 +177,7 @@ describe('SDK 的 tokens() 与我们的刷新共用一个单飞（不允许二�
       target,
       // 与 registerMcp 的接线同形：同一个 per-id 单飞，成功后把令牌交给 provider。
       ensureFresh: async () => {
-        const outcome = await refresher.refresh('example-a', {})
+        const outcome = await refresher.refresh('example-mcp', {})
         return outcome.ok ? outcome.tokens : null
       },
     })
@@ -194,7 +194,7 @@ describe('SDK 的 tokens() 与我们的刷新共用一个单飞（不允许二�
     expect(refreshGrants(server) - before).toBe(1)
     expect(server.stats.revokedRefreshReuse).toBe(0)
     // 交出来的必须是**当前世代**：磁盘上的那份。
-    const onDisk = await store.readCredential('example-a')
+    const onDisk = await store.readCredential('example-mcp')
     expect(onDisk?.refreshToken).toBeTruthy()
     for (const t of [a, b, c]) {
       expect(t?.refresh_token).toBe(onDisk?.refreshToken)
@@ -217,7 +217,7 @@ describe('SDK 的 tokens() 与我们的刷新共用一个单飞（不允许二�
     const before = refreshGrants(server)
     const [, res] = await Promise.all([
       provider!.tokens(),
-      callRoute(h, '/api/pico/connectors/example-a/refresh', 'POST'),
+      callRoute(h, '/api/pico/connectors/example-mcp/refresh', 'POST'),
     ])
     expect(res.status).toBe(200)
     // 面板刷新自己就是一次续期；tokens() 若也自己刷一次，这里会是 2。

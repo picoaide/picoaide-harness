@@ -42,22 +42,22 @@ describe('navigation policy', () => {
     expect(classifyNavigation('picoaide-app://demo/')).toBe('deny')
     expect(classifyNavigation('picoaide-app://demo/notes?page=2')).toBe('deny')
     // 渠道化后 scheme 是运行期值：任何非 http(s)/about 的 scheme 一律拒（不含名单）。
-    expect(classifyNavigation('example-b-harness-app://demo/')).toBe('deny')
+    expect(classifyNavigation('example-harness-app://demo/')).toBe('deny')
     expect(classifyNavigation('electron-app://x')).toBe('deny')
     expect(classifyNavigation('picoaide://app/demo')).toBe('deny')
   })
 
   it('allows the app scheme only on its own application surface (§16.1 按 surface 分流)', () => {
-    const appSurface = { kind: 'app', appScheme: 'example-b-harness-app' } as const
-    expect(classifyNavigation('example-b-harness-app://demo/', appSurface)).toBe('allow')
-    expect(classifyNavigation('example-b-harness-app://demo/notes?page=2', appSurface)).toBe('allow')
+    const appSurface = { kind: 'app', appScheme: 'example-harness-app' } as const
+    expect(classifyNavigation('example-harness-app://demo/', appSurface)).toBe('allow')
+    expect(classifyNavigation('example-harness-app://demo/notes?page=2', appSurface)).toBe('allow')
     // 别的渠道的 scheme 与别的自定义协议在应用窗口里也拒（跨渠道隔离）。
     expect(classifyNavigation('picoaide-app://demo/', appSurface)).toBe('deny')
     expect(classifyNavigation('javascript:alert(1)', appSurface)).toBe('deny')
     // 应用窗口里的 http(s) 顶层导航也拒（外链走内置浏览器新标签，§7.2 冻结）。
     expect(classifyNavigation('https://evil.example/', appSurface)).toBe('deny')
     // 应用窗口没有 scheme 信息时不放宽任何东西（fail-closed）。
-    expect(classifyNavigation('example-b-harness-app://demo/', { kind: 'app' })).toBe('deny')
+    expect(classifyNavigation('example-harness-app://demo/', { kind: 'app' })).toBe('deny')
   })
 
   it('denies empty, non-string and oversized URLs', () => {
@@ -83,7 +83,7 @@ describe('navigation policy', () => {
     expect(navigationDenyReason('file:///etc/passwd')).toContain('"file:"')
     // 应用协议被拒的**真因**：它属于应用窗口，而不是"平台不支持这个 scheme"。
     // 说错方向会让模型绕道重试（审计里已经出现过一次这种误诊）。
-    const appReason = navigationDenyReason('example-b-harness-app://demo/', { kind: 'app', appScheme: 'example-b-harness-app' })
+    const appReason = navigationDenyReason('example-harness-app://demo/', { kind: 'app', appScheme: 'example-harness-app' })
     expect(appReason).toContain('application window')
     expect(appReason).toContain('R4')
   })

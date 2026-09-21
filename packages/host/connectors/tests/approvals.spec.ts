@@ -112,7 +112,7 @@ describe('policy primitives', () => {
   })
 
   it('keeps the connector-id pattern aligned with the server side', () => {
-    for (const id of ['example-a', 'sales-easy', 'glitchtip']) expect(CONNECTOR_ID_PATTERN.test(id)).toBe(true)
+    for (const id of ['example-mcp', 'sales-easy', 'glitchtip']) expect(CONNECTOR_ID_PATTERN.test(id)).toBe(true)
     for (const id of ['Bad_ID', '-leading', 'a'.repeat(65), '../evil']) expect(CONNECTOR_ID_PATTERN.test(id)).toBe(false)
   })
 })

@@ -40,13 +40,13 @@ afterEach(async () => {
 /** OAuth connector whose discovery + MCP endpoint go through the holding proxy. */
 function raceDef(proxyOrigin: string, origin: string): ConnectorDef {
   return {
-    id: 'example-a', name: 'Example-A', description: 'audit', authMode: 'oauth',
+    id: 'example-mcp', name: '示例 MCP 智能体', description: 'audit', authMode: 'oauth',
     auth: {
       authorizeUrl: `${origin}/oauth/authorize`, tokenUrl: `${origin}/oauth/token`, clientId: '',
       redirectUri: 'http://127.0.0.1/callback', pkce: true, publicClient: true,
       discoveryUrl: `${proxyOrigin}/mcp`, scopes: 'mcp.read offline_access',
     },
-    mcp: [{ serverName: 'example-a', transport: 'streamable-http', url: `${proxyOrigin}/mcp` }],
+    mcp: [{ serverName: 'example-mcp', transport: 'streamable-http', url: `${proxyOrigin}/mcp` }],
   }
 }
 
@@ -122,7 +122,7 @@ function startHoldingProxy(target: string, holdAt = 2): Promise<{
 async function waitForAuthorizeUrl(h: Harness, previous?: string): Promise<string> {
   const deadline = Date.now() + 10_000
   while (Date.now() < deadline) {
-    const res = await callRoute(h, '/api/pico/connectors/example-a/state', 'GET')
+    const res = await callRoute(h, '/api/pico/connectors/example-mcp/state', 'GET')
     const request = (JSON.parse(res.body) as { request?: { authorizeUrl?: string } | null }).request
     const url = request?.authorizeUrl
     if (typeof url === 'string' && url !== '' && url !== previous) return url
@@ -146,14 +146,14 @@ describe('a superseded registration must not steal the live provider', () => {
     await new Promise(resolve => setTimeout(resolve, 100))
 
     // Registration A: authorize, then park in the held discovery request.
-    await callRoute(h, '/api/pico/connectors/example-a/connect', 'POST')
+    await callRoute(h, '/api/pico/connectors/example-mcp/connect', 'POST')
     const firstUrl = await waitForAuthorizeUrl(h)
     await completeAuthorization(firstUrl)
     await proxy.arrived
 
     // Registration B: a second connect supersedes A's intent. Its discovery
     // request is forwarded immediately, so B loads a transport while A waits.
-    await callRoute(h, '/api/pico/connectors/example-a/connect', 'POST')
+    await callRoute(h, '/api/pico/connectors/example-mcp/connect', 'POST')
     await completeAuthorization(await waitForAuthorizeUrl(h, firstUrl))
     await waitFor(() => h.configs.length === 1, 15_000)
 
@@ -163,14 +163,14 @@ describe('a superseded registration must not steal the live provider', () => {
     await new Promise(resolve => setTimeout(resolve, 300))
 
     // An out-of-band refresh must reach the transport that is actually live.
-    const refreshed = await callRoute(h, '/api/pico/connectors/example-a/refresh', 'POST')
+    const refreshed = await callRoute(h, '/api/pico/connectors/example-mcp/refresh', 'POST')
     expect(refreshed.status).toBe(200)
     const live = h.configs[0] as unknown as { authProvider?: { tokens: () => Promise<{ refresh_token?: string } | undefined> } }
     // 读 SDK 面视图会**顺带保鲜**（`tokens()` 已改为"快过期先续期"），所以基准
     // 要在读之后取：不断言"等于某个历史快照"，而断言"传输上活着的那份 == 库里
     // 现在的那份"（这正是本用例要钉的不变量）。
     const shown = (await live.authProvider?.tokens())?.refresh_token
-    const stored = await new ConnectorStore({ baseDir: dir }).readCredential('example-a')
+    const stored = await new ConnectorStore({ baseDir: dir }).readCredential('example-mcp')
     expect(shown).toBe(stored?.refreshToken)
     expect(server.stats.revokedRefreshReuse).toBe(0)
     h.dispose()

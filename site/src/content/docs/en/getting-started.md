@@ -69,7 +69,7 @@ The port must be an integer from `0` to `65535`; changing it performs an orderly
 1. **New session**: choose a workspace (project directory) to start chatting; the tools a model can call are gated by permission approvals;
 2. **Capability Hub**: install market skills/agents (needs administrator authorization), and review your "Mine" local creations and their upload/approval status;
 3. **Scheduled jobs**: hand high-frequency work to an Agent to run automatically on schedule (cron + prompt + workspace + permissions); execution details are always available;
-4. **Connectors / Browser**: authorize via OAuth to connect MCP services such as Xiaoshouyi and Example-A; let the Agent take over the browser to perform actions.
+4. **Connectors / Browser**: authorize via OAuth to connect MCP services such as Xiaoshouyi; let the Agent take over the browser to perform actions.
 
 ## What's next
 

@@ -388,7 +388,7 @@
 | R1-L5-11 | P2 | `server/docs` 仍以 **ghcr** 为镜像来源（2026-09-10 起已经更新服务器分发，GHCR 已下线） | `server/docs/DEPLOY.md:77`、`server/docs/02-build-deploy.md:12/79` | **已闭合（A2-L5 第二轮独立审计 2026-09-20，14/14 PASS；新增 P0=0/P1=0）**| **已交主控修** |
 | R1-L5-12 | P2 | 作者面缺**产品级口径**：冻结后员工看到什么、目录列不列、三种空态、搜索/「我发布的」（接口级信息在，产品级缺） | `docs/wasm-app-authoring.md:210-211/263/375` | **已闭合（A2-L5 第二轮独立审计 2026-09-20，14/14 PASS；新增 P0=0/P1=0）**| **待修** |
 
-**审计的正面结论（记录在案，避免重复劳动）**：C2 ✓（三份决策记录 `superseded` 横幅到位）、C3 ✓（站点中英同构、无旧模型处方、无客户域名；`grep -rnE 'a\.example\.com|example\.com'` 唯一命中是"禁止规则本身"）、SKILL.md 硬约束 **11 条**成立 ✓、CTL-10-②（`:58` 竖线转义）✓、CTL-10-③（`AGENTS.md` 迁移区间）✓、生成物 `references/*.md` 归 W4-9 不记 L5 缺陷 ✓、`docs/AUDIT-2026-09-19-SERVERAUTH-TEST-ISOLATION.md:291` 等 9 处属台账 **W4-12** 的"W4 之后"待标注项 ✓。
+**审计的正面结论（记录在案，避免重复劳动）**：C2 ✓（三份决策记录 `superseded` 横幅到位）、C3 ✓（站点中英同构、无旧模型处方、无客户域名；按域名守卫口径复扫，唯一命中是"禁止规则本身"）、SKILL.md 硬约束 **11 条**成立 ✓、CTL-10-②（`:58` 竖线转义）✓、CTL-10-③（`AGENTS.md` 迁移区间）✓、生成物 `references/*.md` 归 W4-9 不记 L5 缺陷 ✓、`docs/AUDIT-2026-09-19-SERVERAUTH-TEST-ISOLATION.md:291` 等 9 处属台账 **W4-12** 的"W4 之后"待标注项 ✓。
 
 | R1-L3-5 | **P2** | **判据弱点（由 L3 审计代理的变异 M14 暴露，主控定位机制；与审计报告 `audit-round1/L3.md` 的 R1-L3-5 同一条）**：`packages/client/wasm-apps/src/client/app-center.spec.tsx:555` 用 `expect(source).not.toContain('X-Pico-App-Proof:')` 判"客户端不自己拼 proof 头"。但**最自然的写法抓不到**：JS/TS 对象字面量写 `{ 'X-Pico-App-Proof': value }` 时，原文是 `'X-Pico-App-Proof':` —— `Proof` 与 `:` 之间夹着引号 ⇒ `not.toContain('X-Pico-App-Proof:')` **恒不命中**。审计代理的 M14 变异（往 `open-app.ts` 加字面量头）因此**只触发通用的"产物不旧于源码"守卫，没有任何语义断言变红**（日志 `audit-round1/R1L3-M14.log`）—— 这是章程 §3"只钉字符串不钉能力"的教科书案例 | L3 / W3 | **已整改（L3 2026-09-20；`check` = 15 files / 287 tests / exit 0，25 条新增用例）；待第二轮审计复验（A2-L3）** |
 | R1-L5-14 | **P1** | **权威文档自相矛盾："已下架"到底列不列（主控 2026-09-20 定位并订正）**：§7.7① 原写"冻结**与已下架**都不列"，而 **F1** 明写目录展示"**上下架状态**"（不列就没状态可展示）、**§19 Q2②**（我上一轮的裁定）明写"全部下架 = 列表**非空但全为下架**"、服务端 `read.go:468` 也**确实列下架行**（`:478` 只排除冻结）。⇒ §7.7① 是我上一轮把"冻结不列"（§19 Q3）**错误扩大到下架**。**订正**：目录**不列冻结**、**下架仍列并带标记**。**连带影响**：L5 在 R1-L5-12 整改时按（错误的）§7.7① 把作者文档改成了"不列下架" ⇒ **必须回改**（见 §F7） | 主控 + L5 | **已闭合（A2-L5 第二轮独立审计 2026-09-20，14/14 PASS；新增 P0=0/P1=0）**|
@@ -770,13 +770,13 @@ GET /api/server/admin/wasm-apps/opens/summary
 **发版途中修掉的三个真缺陷（都带判据/变异）**：① **构建期依赖环**（Gate 必红根因，且不存在任何构建顺序能产出全部产物）⇒ 抽出两个**零依赖叶子包** + desktop 保留 re-export 兼容面，边表按实测改写，`cycle-check.mjs` 断言「声明无环 ∧ 实测无环 ∧ 声明==实测」；干净态 `yarn check` 连续两次 25/25，强制全量 prebuild 后第三次同样绿（决策记录 `docs/decisions/2026-09-20-host-leaf-packages-build-graph.md`）。② **打包版 P0**：插件包声明 8 个 `exports` 却只构建 3 个 ⇒ `lib/app-proof.js` 从未产出，而 `desktop/lib/main.js` 值导入它 ⇒ 真实 asar 启动即 `ERR_MODULE_NOT_FOUND`（症状＝Linux e2e「app did not expose CDP within 30s」），**且 afterPack 清单不完整导致断言放过坏包** ⇒ 补齐 tsdown 四个 entry + 必需条目 + 新增判据「desktop 产物 import 的每个 `@picoaide/*` 子路径都必须在必需清单里」（变异验证过）。③ **守卫与环境耦合**：submodule 校验把 describe 段必须是 tag 当目标断言 ⇒ CI 浅检出恒红 ⇒ 降为 WARN（章程 §4.2）。
 **CodeQL**（非必需检查，不阻塞合并）：10 条中 2 条实缺陷已修（`check-workflows.mjs` 的 **ReDoS** 正则 → `[ \t]+`；`admin_opens.go` 用请求参数当 slice 容量 → 按实际行数），其余 7 条经核实为误报（`app_id` 经 `limits.AppIDPattern+MaxAppIDLen` 校验、`DataRoot` 为运维根、另有 `filepath.Dir` 越界断言）并逐条入库处置理由。
 
-**本次未带上**：Windows/macOS 探针（§H3）；应用维度 AI 用量归因（替代路径待实施）；客户端 UI 侧 AI 面板聊天（待拍板）；`atomic-write` 无 fsync；W4-12（L5 三文件七行）；**example-b / example-a 两栈未升级**（预发 tag 只构建 beta）。
+**本次未带上**：Windows/macOS 探针（§H3）；应用维度 AI 用量归因（替代路径待实施）；客户端 UI 侧 AI 面板聊天（待拍板）；`atomic-write` 无 fsync；W4-12（L5 三文件七行）；**两个品牌渠道栈未升级**（预发 tag 只构建 beta）。
 
 ## H. 发布前置（**非本仓可完成**；主控登记，需人工/私有仓/真机）
 
 | # | 前置 | 为什么必须做 | 完成判据 | 责任 |
 | --- | --- | --- | --- | --- |
-| H1 | **私有仓 `picoaide/channels` 四个渠道补 `desktop.app_origin_scheme` 并 push** | §10/§16 W3：该字段**全部渠道必填**（含 official/beta），CI 缺失即 fail-loud；每次 tag 构建 CI 都从 **origin/main** 克隆渠道仓 ⇒ 不 push 等于没配 | 取值：`official`=`picoaide-app`、`beta`=`picoaide-app`（公共渠道共用命名空间）、`example-a`=`example-a-harness-app`、`example-b`=`example-b-harness-app`（惯例 `<深链 scheme>-app`，正则 `^[a-z][a-z0-9+.-]{1,31}$`、须 ≠ 深链 scheme、跨渠道唯一）。判据：`GITHUB_REF_NAME=v2.7.6-beta.5 CI_CHANNELS_SOURCE=<克隆> bash scripts/ci-channels.sh --dest <tmp> --list <tmp.list>` EXIT=0；正式 tag 名 dry-run 四渠道全过 | 发布人（私有仓） |
+| H1 | **私有仓 `picoaide/channels` 四个渠道补 `desktop.app_origin_scheme` 并 push** | §10/§16 W3：该字段**全部渠道必填**（含 official/beta），CI 缺失即 fail-loud；每次 tag 构建 CI 都从 **origin/main** 克隆渠道仓 ⇒ 不 push 等于没配 | 取值：`official`=`picoaide-app`、`beta`=`picoaide-app`（公共渠道共用命名空间）、品牌渠道 A=`example-harness-app`、品牌渠道 B=`sample-harness-app`（惯例 `<深链 scheme>-app`，正则 `^[a-z][a-z0-9+.-]{1,31}$`、须 ≠ 深链 scheme、跨渠道唯一）。判据：`GITHUB_REF_NAME=v2.7.6-beta.5 CI_CHANNELS_SOURCE=<克隆> bash scripts/ci-channels.sh --dest <tmp> --list <tmp.list>` EXIT=0；正式 tag 名 dry-run 四渠道全过 | 发布人（私有仓） |
 | H2 | **渠道仓 pin 或把 commit 写进产物/发布说明** | CHN-10/R2I-16：`scripts/ci-channels.sh:98` 每次 `git clone --depth 1` **不 pin commit** ⇒ 同一源码 tag 可产出数据根/品牌/scheme 不同的客户端（2026-09-12 已因此出过一次数据根漂移事故） | 二者之一：①pin commit；②把解析出的 commit 写进产物（如 `build/channel.json` 附带 `sourceCommit`）与发布说明。判据：同一 tag 重复构建产物中该字段一致 | 发布人 + L4 |
 | H3 | **三平台协议探针（Windows / macOS）** | §17 认账 1：`registerSchemesAsPrivileged`、分区注册、无 Origin/无 Cookie 四条**只在 Linux 实测过**；F13 的存储结论同样只有 Linux | 在 Windows/macOS 上跑 `scripts/wasm/probes/probe-custom-scheme*.cjs` 与 `probe-web-storage.cjs`，产出 `PROBE-RESULTS.md`（§16 W6）；不一致 ⇒ 按总纲回退备选形态并修订文档 | 需要真机（发布前） |
 | H4 | **把 `check:wasm-client-only` 从 `advisory:true` 转为阻塞式 + 接入 CI** | L4 现状：W1–W5 未落地时残留断言会如实报出数百处存量命中，故暂为 advisory；**W6 前必须转阻塞**，否则门禁形同虚设 | `scripts/check-workspaces.mjs` 的 GUARDS 里该条去掉 `advisory`；本地 `corepack yarn check` 与 CI gate job 都跑该脚本（PG 相关 `go test` 归 server job） | L4（W6）+ 主控复核 |
@@ -873,7 +873,7 @@ GET /api/server/admin/wasm-apps/opens/summary
 - **守卫的盲区（认账）**：守卫只看**已跟踪文件**（新文件须先 `git add`），GitHub 的 **Release 正文与 PR 标题/正文不是文件 ⇒ 不在判据内** —— 上面那 14 处泄漏正是从这条盲区出去的。
 
 **④ 仍未清除、需要用户拍板的残留：`origin/master` 上 11 条历史提交信息**
-- 逐条枚举（`git log origin/master`，消息体匹配）：`517bf0c6b0`(example-b)、`d436e036bd`(example-a)、`3945dbf43a`(example-a)、`822d93e987`(example-a 域)、`21e2b59a2f`(example-a 域)、`fd3760272f`(example-a)、`b3f59ccd61`(测试域名族)、`7310cb4ca1`(同)、`97923dcf34`(同)、`99099b296f`(同)、`86bf6aa0f3`(同)。
+- 逐条枚举（`git log origin/master`，消息体匹配历史渠道/域名关键词；**关键词清单见私有仓，本仓不重复写出**）：`517bf0c6b0`、`d436e036bd`、`3945dbf43a`、`822d93e987`、`21e2b59a2f`、`fd3760272f`、`b3f59ccd61`、`7310cb4ca1`、`97923dcf34`、`99099b296f`、`86bf6aa0f3`。
 - 性质：**5 条泄漏测试/部署域名族、5 条泄漏客户生产域名/主机名、1 条泄漏客户渠道 id**；**无凭据/密钥**。另：2 个 PR 标题与 8 个 PR 正文仍含**客户名**（非域名）。
 - **主控建议：不做历史重写。** 理由是技术性的而非回避：①本仓**已公开**，重写**不能撤回已披露**（GitHub 侧旧对象长期可按 SHA 取到，fork/镜像/CI 缓存同理）；②重写会打断 **91 个 tag / 76 个分支**与全部已发布产物的溯源（tag→提交 SHA 已写进发布说明与部署记录）；③代价与收益不成比例，而**前向**已被守卫拦住（新提交进 `origin/master..HEAD` 区间即受检）。
 - 因此登记为**已认账残留**；若合规上必须清除，正确做法是"协调式重写 + bundle 备份 + 重打 tag + 明示旧 SHA 仍可达"，需用户明确授权后才动。
@@ -882,7 +882,7 @@ GET /api/server/admin/wasm-apps/opens/summary
 
 **发版链**：PR **#103**（`fix/wasm-open-window-audit`）→ 全检查绿（Gate / Go server / Desktop Linux·Windows·macOS / CodeQL×4 / Cloudflare Pages）→ squash 合并 master **`d3e7f77f18`**（版本 2.7.6-beta.6 已同步 root + desktop；发布说明 `docs/releases/v2.7.6-beta.6.md` 随同一 PR 落地，**刻意避开"预发 tag 回退自动 PR 列表"**——那正是 §AD 里两处 Release 正文泄漏的产生路径）→ annotated tag **`v2.7.6-beta.6`**（`7d4ad71d88`）→ tag CI **success**（全部 job：Gate / Go server / 三平台 / **Release (server image archive)**）→ GitHub **Pre-release**（名 = tag 本身，附件 `picoaide-server-2.7.6-beta.6-amd64.zip` 507,203,492 B + `SHA256SUMS`）。
 
-**部署**：实拉 R2 `beta/releases/2.7.6-beta.6/` 的 zip（sha256 `b24ecfc14551b813…` 对 `SHA256SUMS` **校验通过**）→ `scp` 到测试机 → 远端 `sha256sum -c` → `bash /root/upgrade-beta.sh … beta /opt/picoaide 2.7.6-beta.6 …`（备份 → load → **按渠道重打 `beta-2.7.6-beta.6`** → 切 `.env` → 重建 → healthy），`UPGRADE_EXIT=0`。**回滚点**：`SERVER_IMAGE=picoaide-harness-server:beta-2.7.6-beta.5` 写回 `/opt/picoaide/.env` + `docker compose up -d server`（本版**无新增迁移**）。example-b 栈与生产 example-a 未动（预发 tag 只构建 beta）。
+**部署**：实拉 R2 `beta/releases/2.7.6-beta.6/` 的 zip（sha256 `b24ecfc14551b813…` 对 `SHA256SUMS` **校验通过**）→ `scp` 到测试机 → 远端 `sha256sum -c` → `bash /root/upgrade-beta.sh … beta /opt/picoaide 2.7.6-beta.6 …`（备份 → load → **按渠道重打 `beta-2.7.6-beta.6`** → 切 `.env` → 重建 → healthy），`UPGRADE_EXIT=0`。**回滚点**：`SERVER_IMAGE=picoaide-harness-server:beta-2.7.6-beta.5` 写回 `/opt/picoaide/.env` + `docker compose up -d server`（本版**无新增迁移**）。两个品牌渠道栈未动（预发 tag 只构建 beta）。
 
 **端到端核验（全部从部署后的域名实拉，落盘 `temp/verify-276b6/`）**：
 - `/healthz` = `{"ok":true}`；`/api/client/v2/updates/manifest` → **server 2.7.6-beta.6 / client 2.7.6-beta.6**，三平台资产 sha256 齐全；`/api/client/v2/channel` → `channel_id=beta`；容器镜像 `picoaide-harness-server:beta-2.7.6-beta.6`（渠道专属 tag，未复用裸版本 tag）。
@@ -958,7 +958,7 @@ GET /api/server/admin/wasm-apps/opens/summary
 → tag CI **success** → GitHub **Pre-release**（`picoaide-server-2.7.6-beta.8-amd64.zip` 510,087,834 B + `SHA256SUMS`）
 → R2 `beta/latest.json` → 2.7.6-beta.8（`published 08:33:50Z`）。
 
-测试环境（198.51.100.10:/opt/picoaide）：R2 实拉 zip → sha256 `8dddd1ec…` 对 `SHA256SUMS` 一致 → scp → 远端复核
+测试环境（beta 栈）：R2 实拉 zip → sha256 `8dddd1ec…` 对 `SHA256SUMS` 一致 → scp → 远端复核
 → `bash /root/upgrade-beta.sh … beta /opt/picoaide 2.7.6-beta.8 …` → 容器 healthy、镜像 **`beta-2.7.6-beta.8`**、`--version` 一致。
 **回滚点 = `SERVER_IMAGE=picoaide-harness-server:beta-2.7.6-beta.7`**（但见下方认账）。
 端到端核验：`/healthz` ok；manifest `server=client=2.7.6-beta.8`；`channel_id=beta`；
@@ -984,23 +984,23 @@ squash 合并 master **`26cb259458`**（版本 2.7.6 同步 root + desktop）→
 → tag CI **success**（**全 4 渠道**，品牌渠道 mac 走签名+公证）→ GitHub Release **正式版**
 （`picoaide-server-2.7.6-amd64.zip` 510,067,571 B + `SHA256SUMS`）→ R2 四渠道 `latest.json` 全部 2.7.6。
 
-**部署顺序（用户指定：先 example-a，其余次之）**：
+**部署顺序（用户指定：先生产品牌渠道，其余次之）**：
 
 | 顺序 | 环境 | 结果 | 回滚点 |
 | --- | --- | --- | --- |
-| 1 | **example-a**（生产 `198.51.100.20:/data/picoaide-harness`） | `example-a-2.7.6` healthy、迁移到 **0076**、域名核验通过 | `example-a-2.7.5` |
-| 2 | **example-b**（测试 `198.51.100.10:/opt/picoaide-example-b`） | `example-b-2.7.6` healthy、域名核验通过 | `example-b-2.7.5` |
+| 1 | **品牌渠道 A**（生产机） | 渠道镜像 healthy、迁移到 **0076**、域名核验通过 | 上一版渠道镜像 |
+| 2 | **品牌渠道 B**（测试机同机第二栈） | 渠道镜像 healthy、域名核验通过 | 上一版渠道镜像 |
 | 3 | **beta**（同机 `/opt/picoaide`） | `beta-2.7.6` healthy、域名核验通过 | `beta-2.7.6-beta.8` |
 
 三环境域名核验口径一致：`/healthz` ok + `/api/client/v2/updates/manifest` 的 `server=client=2.7.6` +
 `channel_id` 与渠道一致 + **从该域名实拉 AppImage 并比对 manifest 的 sha256 逐字一致**
-（example-a 153,782,627 B / example-b 153,893,535 B / beta 153,782,353 B）。生产备份在
+（品牌渠道 A 153,782,627 B / 品牌渠道 B 153,893,535 B / beta 153,782,353 B）。生产备份在
 `deploy-backup/{env-20260920-094625.bak,pg-data-20260920-094625.dump,picoaide-data-20260920-094625.tar.gz}`。
 
 **本次唯一的阻塞（撞了两次）：内存档位自检拒绝启动。** 症状 = 容器反复重启，日志
 `WASM 应用平台启动自检失败：INTERNAL: 理论内存峰值超过可用内存的安全水位，拒绝启动`。
 根因 = 默认档 `default` 的理论峰值 ≈2.7 GiB，而自检按 `MemAvailable × 70%` 判水位：生产机 3.9 GiB
-（可用 3.1 GiB ⇒ 水位 2.16 GiB）与 example-b 栈都不达标；beta 栈之所以没事，是因为它早先已被设成 `small`。
+（可用 3.1 GiB ⇒ 水位 2.16 GiB）与品牌渠道 B 栈都不达标；beta 栈之所以没事，是因为它早先已被设成 `small`。
 处置 = 在**渠道栈**里显式 `PICOAI_WASM_MEMORY_PROFILE=small`（生产还要把该变量补进 compose 的
 `server.environment` —— 2.7.6 的部署模板此前**没有透传**它）。
 

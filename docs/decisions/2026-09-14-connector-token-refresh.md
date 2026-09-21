@@ -25,7 +25,7 @@ MCP 授权规范（2025-06-18，叠 RFC 9728 / RFC 8414 / RFC 7591 / RFC 6749 §
 
 ### 为什么不是"401 时自己 POST 一次刷新"
 
-自研刷新会分叉出第二套端点推导（规范里由 RFC 9728/RFC 8414 元数据决定），在"只有 discoveryUrl、没有静态 tokenUrl"的连接器（Example-A）与"只有静态端点、没有元数据"的连接器（销售易）上必须各写一套，而且刷新失败分类、令牌轮换、并发单飞都要自己维护。探针实测（`temp/mcp-auth-probe/`）证明官方 `authProvider` 路径在这两种形态下都成立。
+自研刷新会分叉出第二套端点推导（规范里由 RFC 9728/RFC 8414 元数据决定），在"只有 discoveryUrl、没有静态 tokenUrl"的连接器（某客户渠道的远程 MCP 连接器）与"只有静态端点、没有元数据"的连接器（销售易）上必须各写一套，而且刷新失败分类、令牌轮换、并发单飞都要自己维护。探针实测（`temp/mcp-auth-probe/`）证明官方 `authProvider` 路径在这两种形态下都成立。
 
 ## 3. 实施
 
@@ -70,7 +70,7 @@ resolutions 按仓库既有惯例登记 exact + `^` 两个键；护栏 `packages
 - 探针 `temp/mcp-auth-probe/`（`@modelcontextprotocol/sdk` 1.30.0 + 假授权/假 MCP 服务器，不触网）：provider 持有效令牌 → 自动注入；令牌过期 → 401 触发刷新重试；中途轮换 → 自动恢复；refresh token 失效 → 抛 `InvalidGrantError` 且**零浏览器尝试**；无凭据 → 干净报错。
 - 单测 `packages/host/connectors/tests/token-refresh.spec.ts`（15 例，真实 HTTP 假授权服务器）：发现形态 / 静态端点形态 / 轮换保留 / 死 grant → `reauthorize` / 5xx → `transient` / 并发单飞只发一次 grant / 心跳只刷一次 / 手动刷新路由（响应不含任何令牌材料）/ stdio 令牌变更后重新注册 / **心跳在无任何工具调用时把过期令牌刷新并重注册 stdio 服务器**。
 - 门禁：`yarn workspace @picoaide/dsh-connectors check` 与整仓 `yarn check`（含 `verify-patches` 在仓库外对 pristine tarball 的 dry-run 与逐字节对拍）。
-- 未做真机（需客户 IdP 交互授权）：Example-A 线上刷新未在真实服务端跑过，首次升级后建议观察一次令牌到期是否自动续期。
+- 未做真机（需客户 IdP 交互授权）：某客户渠道的线上刷新未在真实服务端跑过，首次升级后建议观察一次令牌到期是否自动续期。
 
 ## 4.1 两处实现细节（踩过才定下来的）
 

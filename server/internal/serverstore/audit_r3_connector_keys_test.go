@@ -75,7 +75,7 @@ func TestConnectorCredentialFieldKeysAccepted(t *testing.T) {
 	db, cleanup := NewTestDB(t)
 	defer cleanup()
 
-	// 0042 种子:example-a / glitchtip / sales-easy 的真实 DB 行。
+	// 0042 种子:example-mcp / glitchtip / sales-easy 的真实 DB 行。
 	seeds, err := ListConnectors(db)
 	if err != nil {
 		t.Fatalf("list connectors: %v", err)

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { parseServerConnectors } from '../src/index.ts'
 
 // 服务端 0042 种子的真实定义(从 migrations-pg/0042_connectors.sql 复制)。
-const EXAMPLE-A_DEF = JSON.stringify({
+const EXAMPLE_MCP_DEF = JSON.stringify({
   auth: {
     discoveryUrl: 'https://mcp.example.com/mcp',
     clientId: '',
@@ -13,7 +13,7 @@ const EXAMPLE-A_DEF = JSON.stringify({
     publicClient: true,
     scopes: 'offline_access',
   },
-  mcp: [{ serverName: 'example-crm', transport: 'streamable-http', url: 'https://mcp.example.com/mcp' }],
+  mcp: [{ serverName: 'example-mcp', transport: 'streamable-http', url: 'https://mcp.example.com/mcp' }],
 })
 
 const GLITCHTIP_DEF = JSON.stringify({
@@ -27,19 +27,19 @@ const GLITCHTIP_DEF = JSON.stringify({
 })
 
 describe('parseServerConnectors', () => {
-  it('解析 example-a: 目录行字段覆盖 + auth/mcp 完整保留', () => {
+  it('解析 example-mcp: 目录行字段覆盖 + auth/mcp 完整保留', () => {
     const defs = parseServerConnectors([
-      { id: 'example-crm', name: '示例 MCP 智能体', description: '招聘与人事', auth_mode: 'oauth', definition: EXAMPLE-A_DEF },
+      { id: 'example-mcp', name: '示例 MCP 智能体', description: '示例描述', auth_mode: 'oauth', definition: EXAMPLE_MCP_DEF },
     ])
     expect(defs).toHaveLength(1)
     const m = defs[0]!
-    expect(m.id).toBe('example-crm')
+    expect(m.id).toBe('example-mcp')
     expect(m.name).toBe('示例 MCP 智能体')
     expect(m.authMode).toBe('oauth')
     expect(m.auth?.discoveryUrl).toBe('https://mcp.example.com/mcp')
     expect(m.auth?.pkce).toBe(true)
     expect(m.auth?.publicClient).toBe(true)
-    expect(m.mcp).toEqual([{ serverName: 'example-crm', transport: 'streamable-http', url: 'https://mcp.example.com/mcp' }])
+    expect(m.mcp).toEqual([{ serverName: 'example-mcp', transport: 'streamable-http', url: 'https://mcp.example.com/mcp' }])
   })
 
   it('解析 glitchtip: tokenFields/examples/mcp 完整保留, authMode=token', () => {
@@ -60,7 +60,7 @@ describe('parseServerConnectors', () => {
     const defs = parseServerConnectors([
       { id: 'bad', name: 'Bad', description: '', auth_mode: 'token', definition: '{not json' },
       { id: 'nomcp', name: 'NoMcp', description: '', auth_mode: 'token', definition: '{"tokenFields":[]}' },
-      { id: 'good', name: 'Good', description: 'x', auth_mode: 'oauth', definition: EXAMPLE-A_DEF },
+      { id: 'good', name: 'Good', description: 'x', auth_mode: 'oauth', definition: EXAMPLE_MCP_DEF },
     ])
     expect(defs).toHaveLength(1)
     expect(defs[0]!.id).toBe('good')
@@ -68,7 +68,7 @@ describe('parseServerConnectors', () => {
 
   it('目录行缺 auth_mode 时回退定义 JSON 的 authMode', () => {
     const defs = parseServerConnectors([
-      { id: 'example-crm', name: '', description: '', auth_mode: '', definition: EXAMPLE-A_DEF },
+      { id: 'example-mcp', name: '', description: '', auth_mode: '', definition: EXAMPLE_MCP_DEF },
     ])
     expect(defs[0]!.authMode).toBe('oauth')
     expect(defs[0]!.name).toBe('') // 目录行 name 为空 → 原样(定义内没有 name)
@@ -76,15 +76,15 @@ describe('parseServerConnectors', () => {
 
   it('drops a row with an unsupported auth_mode instead of silently registering it', () => {
     const defs = parseServerConnectors([
-      { id: 'legacy-cli', name: 'Legacy CLI', description: '', auth_mode: 'cli', definition: EXAMPLE-A_DEF },
-      { id: 'good', name: 'Good', description: '', auth_mode: 'oauth', definition: EXAMPLE-A_DEF },
+      { id: 'legacy-cli', name: 'Legacy CLI', description: '', auth_mode: 'cli', definition: EXAMPLE_MCP_DEF },
+      { id: 'good', name: 'Good', description: '', auth_mode: 'oauth', definition: EXAMPLE_MCP_DEF },
     ])
     expect(defs.map(d => d.id)).toEqual(['good'])
   })
 
   it('never emits an undefined name (the settings panel calls name.toLowerCase on search)', () => {
     const defs = parseServerConnectors([
-      { id: 'nameless', name: undefined as unknown as string, description: undefined as unknown as string, auth_mode: 'oauth', definition: EXAMPLE-A_DEF },
+      { id: 'nameless', name: undefined as unknown as string, description: undefined as unknown as string, auth_mode: 'oauth', definition: EXAMPLE_MCP_DEF },
     ])
     expect(defs).toHaveLength(1)
     expect(typeof defs[0]!.name).toBe('string')

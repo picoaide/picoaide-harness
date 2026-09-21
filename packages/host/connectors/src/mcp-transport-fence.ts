@@ -215,8 +215,9 @@ function isWindowsPathShape(value: string, foldCase: boolean): boolean {
  * differ while naming one file: `/` vs `\`, `\\?\C:` vs `C:`, 8.3 short names
  * (`PROGRA~1`) on one side only, and case. Comparing raw strings turned any of
  * those into a hard refusal — a customer's connector stopped registering for a
- * path-spelling difference (2026-09-13, Example-A `streamable-http`), which is why
- * the comparison is canonical: separators normalised, extended-length prefix
+ * path-spelling difference (2026-09-13, a customer-channel `streamable-http`
+ * connector), which is why the comparison is canonical: separators normalised,
+ * extended-length prefix
  * stripped, and case folded where the platform folds it.
  *
  * Canonical is deliberately NOT aggressive: no symlink following is invented

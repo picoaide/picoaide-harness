@@ -63,7 +63,7 @@
 ## 5. 深链必须渠道化（OEM/白标硬约束）
 
 **深链 scheme 不属于厂商，属于渠道**：`channel.json` 的 `desktop.deep_link_scheme` 是唯一真源
-（官方缺省 `picoaide`；example-a = `example-a-harness`、example-b = `example-b-harness`；OEM 客户可自定义，
+（官方缺省 `picoaide`；品牌渠道各自在渠道包里声明（如 `example-harness`）；OEM 客户可自定义，
 甚至由客户方指定自己的 scheme）。任何地方**不得写死 `picoaide://`**。
 
 现状（已核实，可直接复用）：

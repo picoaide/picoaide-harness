@@ -111,8 +111,8 @@ describe('surface registry (§16.1)', () => {
 describe('app scheme lookup by URL (浏览器面拒绝时的定位，§22.2 R4)', () => {
   it('finds the surface whose channel-injected scheme the URL uses', () => {
     const { registry } = harness()
-    const surface = registry.registerApp({ id: 10_001, appId: 'my-notes', appScheme: 'example-b-harness-app' })
-    expect(appSurfaceForUrl('example-b-harness-app://my-notes/', registry)).toEqual(surface)
+    const surface = registry.registerApp({ id: 10_001, appId: 'my-notes', appScheme: 'example-harness-app' })
+    expect(appSurfaceForUrl('example-harness-app://my-notes/', registry)).toEqual(surface)
     expect(appSurfaceForUrl('https://evil.example/', registry)).toBeUndefined()
     expect(appSurfaceForUrl('picoaide-app://my-notes/', registry)).toBeUndefined()
     expect(appSurfaceForUrl('not a url', registry)).toBeUndefined()
