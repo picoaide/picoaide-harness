@@ -1534,7 +1534,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-client-ui-sidebar-documentpreview@npm:^0.1.6-alpha.2":
+"@deepseek-ai/dsh-client-ui-sidebar-documentpreview@npm:0.1.6-alpha.2":
   version: 0.1.6-alpha.2
   resolution: "@deepseek-ai/dsh-client-ui-sidebar-documentpreview@npm:0.1.6-alpha.2"
   dependencies:
@@ -1542,6 +1542,17 @@ __metadata:
   peerDependencies:
     "@deepseek-ai/cordis": ^4.0.2
   checksum: 10c0/1be0f009942cd8cce4f0a8e8ffdd5fd21ddc97ae19051aa369b88eea38039a9160a5acdb6133d41851f3c68931965e9431e3c68e707c8a51d0fb126a56f3d6f4
+  languageName: node
+  linkType: hard
+
+"@deepseek-ai/dsh-client-ui-sidebar-documentpreview@patch:@deepseek-ai/dsh-client-ui-sidebar-documentpreview@npm%3A0.1.6-alpha.2#./patches/dsh-client-ui-sidebar-documentpreview@0.1.6-alpha.2.patch::locator=picoaide-harness%40workspace%3A.":
+  version: 0.1.6-alpha.2
+  resolution: "@deepseek-ai/dsh-client-ui-sidebar-documentpreview@patch:@deepseek-ai/dsh-client-ui-sidebar-documentpreview@npm%3A0.1.6-alpha.2#./patches/dsh-client-ui-sidebar-documentpreview@0.1.6-alpha.2.patch::version=0.1.6-alpha.2&hash=9435e1&locator=picoaide-harness%40workspace%3A."
+  dependencies:
+    "@deepseek-ai/schemastery": "npm:^3.18.2"
+  peerDependencies:
+    "@deepseek-ai/cordis": ^4.0.2
+  checksum: 10c0/53c981d30f72a3c241e660d6a8696c2e77b5d9f9efad7cad17f857074d283cc12aa99f499bd7d67afa6f774d10b37b7fc0b2acf7d03abd65253e163a7694d207
   languageName: node
   linkType: hard
 
