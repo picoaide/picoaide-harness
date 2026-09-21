@@ -67,7 +67,9 @@ import (
 // whitelistSources 是参与生成的全部参考程序（相对模块根；白名单 = 它们的并集）。
 //
 //   - `refapp`           参考实现 = 教学样例（只做帧协议 + 内存分配，必须保持干净，见其包注释）；
+//
 //   - `refapp/wasiprobe` 只用于 dump 的探测程序：故意触碰 os 包的文件/时间/随机/环境面；
+//
 //   - `refapp/stdprobe`  只用于 dump 的探测程序（FIX-31）：**应用真的会写的那种代码** ——
 //     html/text template 的 Execute（渲染）、(*os.File).ReadAt/WriteAt、encoding/json、
 //     strings/strconv/sort/regexp/math/errors、net/url、time.Parse/Format、base64、hash/*、
