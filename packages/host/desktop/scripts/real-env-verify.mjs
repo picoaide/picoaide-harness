@@ -116,6 +116,55 @@ async function clickLabel(label, waitMs = 2500) {
   return r
 }
 
+/**
+ * 打开底部「更多」浮层（2026-09-21 并道后，五个面板入口不在常显行里）。
+ * @param waitMs - settle time after the click.
+ * @returns `'OPENED'` / `'ALREADY_OPEN'` / `'NOT_FOUND'` / `'NOT_OPEN'`.
+ */
+async function openFootMenu(waitMs = 700) {
+  const clicked = await ev(`(() => {
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    if (row === null || row.offsetParent === null) return 'NOT_FOUND'
+    if (row.getAttribute('aria-expanded') === 'true') return 'ALREADY_OPEN'
+    row.click()
+    return 'CLICKED'
+  })()`)
+  if (clicked === 'NOT_FOUND') return 'NOT_FOUND'
+  await wait(waitMs)
+  const open = await ev(`(() => {
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    if (row === null) return false
+    const menu = document.getElementById(row.getAttribute('aria-controls') ?? '')
+    return row.getAttribute('aria-expanded') === 'true' && menu !== null && getComputedStyle(menu).display !== 'none'
+  })()`)
+  if (open !== true) return 'NOT_OPEN'
+  return clicked === 'ALREADY_OPEN' ? 'ALREADY_OPEN' : 'OPENED'
+}
+
+/**
+ * 点开「更多」浮层里的一个条目（先开浮层），并断言面板真的接管了中列。
+ * @param label - 条目文案（`.pico-foot-menu-item` 的可见文本）。
+ * @param panelId - 期望的 panel-surface PanelId。
+ * @param waitMs - settle time after the click.
+ * @returns `'CLICKED'` / `'NOT_FOUND'` / `'OPEN_FAILED'` / `'NOT_ACTIVE'`.
+ */
+async function openPanelFromFootMenu(label, panelId, waitMs = 3000) {
+  const opened = await openFootMenu()
+  if (opened !== 'OPENED' && opened !== 'ALREADY_OPEN') return opened === 'NOT_FOUND' ? 'NOT_FOUND' : 'OPEN_FAILED'
+  const clicked = await ev(`(() => {
+    const items = [...document.querySelectorAll('.pico-foot-menu-item')].filter(b => b.offsetParent)
+    const hit = items.find(b => (b.textContent ?? '').trim() === ${esc(label)})
+    if (hit === undefined) return 'NOT_FOUND'
+    hit.click()
+    return 'CLICKED'
+  })()`)
+  await wait(waitMs)
+  if (clicked !== 'CLICKED') return clicked
+  // 激活态属性是唯一真源：只查 `document.body.textContent` 会在面板根本没打开时同样为真。
+  const active = await ev(`document.documentElement.getAttribute('data-dsh-panel-active')`)
+  return active === panelId ? 'CLICKED' : 'NOT_ACTIVE'
+}
+
 /** Clear persisted auth (settings/session) then reload so the login form shows. */
 async function resetToLogin() {
   // Sign out through the product's own control. Two wrong turns are recorded
@@ -182,10 +231,17 @@ try {
   reportStep('客户端插件图已装载', (boot?.entries ?? 0) > 0, `entries=${boot?.entries}`)
   await wait(3000)
 
-  // 4. Main sidebar
-  const mainBtns = await ev(`[...new Set([...document.querySelectorAll('button')].map(b => b.textContent?.trim()).filter(Boolean))]`)
-  const hasSidebar = ['定时任务', '能力中心', '连接器', '浏览器', '设置'].every(x => (mainBtns ?? []).some(b => b.includes(x)))
-  reportStep('主界面侧边栏导航完整（真实）', hasSidebar, `buttons=${(mainBtns ?? []).slice(0, 12).join(',')}`)
+  // 4. Main sidebar. 2026-09-21 并道改造：底部只剩「更多」一行（+ 设置 + 账户行），
+  //    五个面板入口在浮层里 —— 而浮层收起时条目仍挂在 DOM 里（display:none），
+  //    `textContent` 不分可见性 ⇒ 这一列的按钮必须按**可见性**收集，否则恒为假红。
+  const sidebar = await ev(`(() => {
+    const visible = (el) => el.offsetParent !== null
+    const names = [...document.querySelectorAll('button')].filter(visible).map(b => (b.textContent ?? '').trim()).filter(Boolean)
+    return { names, hasMore: names.includes('更多'), hasSettings: names.includes('设置') }
+  })()`)
+  const hasSidebar = sidebar?.hasMore === true && sidebar?.hasSettings === true
+  reportStep('主界面侧边栏导航完整（真实）', hasSidebar,
+    `more=${sidebar?.hasMore} settings=${sidebar?.hasSettings} buttons=${(sidebar?.names ?? []).slice(0, 12).join(',')}`)
   await screenshot('r02-main')
 
   // 5. Workspace picker (real data). The previous form of this check was
@@ -197,17 +253,21 @@ try {
   await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`).catch(() => {})
   await wait(1000)
 
-  // 6. Feature panels: connectors / skills / settings
-  await clickLabel('连接器', 3000)
-  const connOk = (await bodyText()).includes('连接器')
-  reportStep('连接器面板打开（真实数据）', connOk)
+  // 6. Feature panels: connectors / skills / settings.
+  //    2026-09-21 并道之后连接器与能力中心在「更多」浮层里：先开浮层再点条目，
+  //    并用激活态属性判定面板真的打开（`textContent` 检查在"没打开"时也可能为真）。
+  const connOpen = await openPanelFromFootMenu('连接器', 'connectors', 3000)
+  const connOk = connOpen === 'CLICKED' && (await bodyText()).includes('连接器')
+  reportStep('连接器面板打开（真实数据）', connOk, `open=${connOpen}`)
   await screenshot('r04-connectors')
-  await clickLabel('关闭', 1000)
+  await clickLabel('返回聊天', 1200).catch(() => {})
+  await clickLabel('关闭', 1000).catch(() => {})
 
-  await clickLabel('能力中心', 3000)
-  const skillOk = (await bodyText()).includes('能力中心')
-  reportStep('能力中心面板打开（真实数据）', skillOk)
+  const skillOpen = await openPanelFromFootMenu('能力中心', 'capability', 3000)
+  const skillOk = skillOpen === 'CLICKED' && (await bodyText()).includes('能力中心')
+  reportStep('能力中心面板打开（真实数据）', skillOk, `open=${skillOpen}`)
   await screenshot('r05-skills')
+  await clickLabel('返回聊天', 1200).catch(() => {})
   await clickLabel('关闭', 1000).catch(() => {})
 
   await clickLabel('设置', 2500)
@@ -223,7 +283,9 @@ try {
   // 7. Cron panel (real data)。2026-09-12（P1-1）：只断言"元素存在"是假绿 ——
   // 容器未激活时也在 DOM 里（样式表 display:none）。改为断言**可见且占满中列、
   // 会话区已让位**（打包版真机复现过"面板与会话 407/407 分屏"的回归）。
-  await clickLabel('定时任务', 3500)
+  // 入口同样在「更多」浮层里（2026-09-21 并道），点击后先验激活态属性。
+  const cronOpen = await openPanelFromFootMenu('定时任务', 'cron', 3000)
+  reportStep('从「更多」浮层打开定时任务中心（真实）', cronOpen === 'CLICKED', `open=${cronOpen}`)
   const cronOk = await waitFor(`(() => {
     // 2026-09-20：容器标记统一成共享协议的 data-dsh-panel-surface，激活态由
     // html[data-dsh-panel-active] 唯一表达（四个整页面板共用一套语义）。
@@ -238,7 +300,8 @@ try {
       .filter(el => !el.hasAttribute('data-dsh-panel-surface'))
       .every(el => getComputedStyle(el).display === 'none' || el.getBoundingClientRect().height === 0)
   })()`, 15000)
-  reportStep('定时任务中心面板占满中列（真实数据，会话区已让位）', cronOk === true)
+  reportStep('定时任务中心面板占满中列（真实数据，会话区已让位）', cronOk === true && cronOpen === 'CLICKED',
+    `open=${cronOpen}`)
   await screenshot('r08-cron')
   await ev(`(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
   await wait(1200)
@@ -252,10 +315,15 @@ try {
   reportStep('聊天输入区可用（真实，限会话列）', chatOk, `selector=${chatSelector.slice(0, 40)}…`)
   await screenshot('r09-chat')
 
-  // 9. Browser panel
-  await clickLabel('浏览器', 3000).catch(() => {})
+  // 9. Browser entry：2026-09-21 并道之后它在「更多」浮层里，点击唤起的是**独立
+  //    浏览器窗口**（不是中列面板），所以这里断言的是"条目点得到 + 浮层收起"，
+  //    窗口本身由 real-env-browser-no-approval.mjs 负责。
+  const browserOpen = await openPanelFromFootMenu('浏览器', 'browser', 2500)
+  // `browser` 不是 panel-surface 的 PanelId（浏览器在独立窗口）⇒ openPanelFromFootMenu
+  // 的激活态比对预期是 NOT_ACTIVE；这里只要求"点得到"（CLICKED / NOT_ACTIVE 都算）。
   const browserText = await bodyText()
-  reportStep('浏览器面板可打开', browserText.includes('浏览') || browserText.includes('地址'), `len=${browserText.length}`)
+  reportStep('浏览器条目可点（真实）', browserOpen === 'CLICKED' || browserOpen === 'NOT_ACTIVE',
+    `open=${browserOpen} textLen=${browserText.length}`)
   await screenshot('r11-browser')
 } catch (cause) {
   console.error('real-env-verify fatal:', cause instanceof Error ? cause.message : String(cause))

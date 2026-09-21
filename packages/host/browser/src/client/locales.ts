@@ -1,15 +1,19 @@
 /**
  * Browser client UI copy: zh is the key source, en mirrors the full key set.
  *
- * Parameters use the same `{name}` placeholder convention as the sibling
- * packages (`dsh-connectors/src/client/locales.ts`): the sentence names the
- * UI control through a translated key instead of embedding a hard-coded label,
- * so the English sentence names the English button.
+ * 2026-09-21（底部并道改造 + 对抗审计）：警示态的**可操作文案**由本字典提供，
+ * 经条目的 `attentionTitle()` 交给 `@picoaide/dsh-foot-menu`（它只认这个函数出口，
+ * 不认识浏览器插件）。通用那句（`footMenu.attention`＝"AI 正在等待你的操作"）是
+ * 兜底：只说"在等"，不告诉用户下一步点哪里 —— 这正是审计要求补回来的信息。
+ *
+ * 占位符沿用兄弟包的 `{name}` 约定（`panel.waiting` 用 `{button}` 引用按钮文案，
+ * 于是英文句子里的按钮名也是英文）。
  */
 export const zh = {
   'panel.title': '浏览器',
-  /** 用户持有控制权、AI 被挡住时的提示（侧边栏宽度足够时显示短句，全句进 title）。 */
+  /** 用户持有控制权、AI 被挡住时的提示（浮层条目上的短句 + 「更多」行上的圆点）。 */
   'panel.waitingShort': 'AI 等待交还',
+  /** 警示 tooltip / 无障碍文案：必须说清"下一步做什么"。 */
   'panel.waiting': 'AI 正在等你交还浏览器控制权：打开浏览器窗口点「{button}」即可继续',
   /** 浏览器窗口里交还控制权的那个按钮（`panel.waiting` 用 `{button}` 引用它）。 */
   'button.handBack': '交给 AI',

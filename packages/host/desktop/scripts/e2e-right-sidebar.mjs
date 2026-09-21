@@ -375,8 +375,10 @@ try {
     // 5. Open OUR migrated tab (cron's scheduled jobs) from the guide and prove
     // its body renders inside the official panel. The guide entry is a button
     // whose text is the tab title.
-    // Scope to the official panel: the left sidebar's footer also has a
-    // 「定时任务」 button, and that one opens the main-area center instead.
+    // Scope to the official panel: the left sidebar also carries a
+    // 「定时任务」 entry (2026-09-21 并道后它住在「更多」浮层里), and that one opens
+    // the main-area center instead — clicking the wrong one would look like a
+    // missing tab body.
     if (!pristine) {
       skip('点开「定时任务」后 cron 面板在官方右栏内渲染', '面板布局已被上一轮变更（复用同一会话）')
     } else {

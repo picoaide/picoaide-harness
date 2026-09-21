@@ -69,6 +69,9 @@ const packageNameTable = new Map([
   // **中列整页装载器 + 视觉语言**叶子包（零 `@picoaide/*` 依赖，被消费方的 client
   // bundle 内联）—— 它替掉了"cron 自持 DOM 装载 + 其余三个各写一套模态"的分叉。
   ['packages/client/panel-surface', '@picoaide/dsh-panel-surface'],
+  // 2026-09-21：侧边栏底部**并道行** —— 一个「更多」行 + 向上浮层，条目经客户端
+  // Cordis 服务 `picoFootMenu` 从五个面板插件收集（它们不再各自注册一整行）。
+  ['packages/client/foot-menu', '@picoaide/dsh-foot-menu'],
   ['packages/vendor/memory-evolve', 'dsh-memory-evolve'],
   ['community/fabric', 'dsh-community-fabric'],
 ])

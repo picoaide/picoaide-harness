@@ -5,6 +5,11 @@
  * the zh key source directly so components stay dependency-free.
  */
 export const zh = {
+  'account.title': '账户',
+  // 收起后的账户行只剩用户名 + 金额，说不清的状态（未开通 / 取数失败 / 加载中）
+  // 以及用户名都进 aria-label / title（用户可见的新文案仅这两条 + 标题）。
+  'account.rowLabel': '账户 {username}：{balance}',
+  'account.rowLabelLow': '账户 {username}：{balance}（余额不足）',
   'account.usedThisMonth': '本月已用',
   'account.today': '今日',
   'account.admin': '管理员',
@@ -21,6 +26,9 @@ export const zh = {
 }
 
 export const en: Record<keyof typeof zh, string> = {
+  'account.title': 'Account',
+  'account.rowLabel': 'Account {username}: {balance}',
+  'account.rowLabelLow': 'Account {username}: {balance} (low balance)',
   'account.usedThisMonth': 'Used this month',
   'account.today': 'Today',
   'account.admin': 'Admin',

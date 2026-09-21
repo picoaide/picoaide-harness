@@ -109,7 +109,8 @@ export function foreignDeepLinkToastText(): string {
 }
 
 /**
- * toast 宿主组件（主窗口底部居中；由 `AppCenterTrigger` 挂载 ⇒ 有真实消费者）。
+ * toast 宿主组件（主窗口底部居中；由 `AppToastHostMount` 挂在侧边栏底部的
+ * `sidebar.footer.action` 座位上 ⇒ 客户端 UI 存续期间一直有真实消费者）。
  *
  * 它只订阅 store：宿主事件 → 插件 → `showAppToast` → 这里渲染。
  */

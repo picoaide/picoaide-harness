@@ -152,7 +152,8 @@
     "verify:session": "node scripts/verify-session-restart.mjs",
     "verify:renderer-capture": "node scripts/verify-renderer-error-capture.mjs",
     "e2e:sidebar": "node scripts/e2e-right-sidebar.mjs",
-    "e2e:terminal": "node scripts/e2e-terminal.mjs"
+    "e2e:terminal": "node scripts/e2e-terminal.mjs",
+    "e2e:foot-lane": "node scripts/e2e-foot-lane.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.2",
@@ -298,6 +299,7 @@
     "@picoaide/dsh-connectors": "workspace:*",
     "@picoaide/dsh-cron": "workspace:*",
     "@picoaide/dsh-enterprise": "workspace:*",
+    "@picoaide/dsh-foot-menu": "workspace:*",
     "@picoaide/dsh-host-home": "workspace:*",
     "@picoaide/dsh-host-locale": "workspace:*",
     "@picoaide/dsh-wasm-apps": "workspace:*",

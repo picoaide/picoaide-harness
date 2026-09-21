@@ -52,6 +52,7 @@ packages/client/account-card/lib/
 packages/client/branding/lib/
 packages/client/wasm-apps/lib/
 packages/client/panel-surface/lib/
+packages/client/foot-menu/lib/
 packages/host/cron/lib/
 packages/host/connectors/lib/
 packages/host/browser/lib/
@@ -95,6 +96,8 @@ packages/host/desktop/.e2e-report.md
 packages/host/desktop/.e2e-shots/
 packages/host/desktop/.e2e-sidebar/
 packages/host/desktop/.e2e-terminal/
+# 并道探针（e2e:foot-lane）：shots/ + report.md + 一次性 HOME，一次跑出 ~130 个文件
+packages/host/desktop/.e2e-foot-lane/
 packages/host/desktop/.real-env-report.md
 packages/host/desktop/.real-env-shots/
 packages/host/desktop/.real-env-cron-report.md

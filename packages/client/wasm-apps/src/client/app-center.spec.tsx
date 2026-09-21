@@ -2,9 +2,10 @@
  * 应用中心客户端面的回归测试（R34 / R36 / R38 + 入口打开策略）。
  *
  * 三条断言口径（对应设计基线的三条硬约定）：
- *  - **R34 可达**：侧边栏入口渲染成真正的 `<button type="button">`、带可见文案与
- *    `aria-label`，且 markup 里没有任何隐藏手段（`hidden` / `display:none` /
- *    `visibility:hidden`）——"组件存在但用户点不到"是本仓有明确教训的假绿形态；
+ *  - **R34 可达**：导航条目登记进 `picoFootMenu`（底部唯一的「更多」行由
+ *    `@picoaide/dsh-foot-menu` 渲染，登记面在 `index.spec.ts`），侧边栏座位上只剩
+ *    **toast 宿主挂载点** —— 本文件断言后者真的只是挂载点（无 toast 时零渲染、
+ *    不含任何"打开应用中心"的入口）；
  *  - **目录展示全部应用**（2026-09-18 拍板）：面板**原样渲染**服务端给的数组 ——
  *    不按可见性过滤（`visible` 字段已删除）、不按访问级别过滤（白名单应用也列出来）、
  *    下架的条目也留着（标"已下架"）；每条目标出服务端下发的 `access`；
@@ -22,8 +23,8 @@
  *     → 同上红 + 「已下架标状态」红；
  *   - `resolveAccess` 的第一段换成旧语义（只看 `login_required`）
  *     → 「服务端下发 access 时原样采用」红；
- *   - 入口按钮改成 `<div onClick>` 或加 `hidden`/`display:none`
- *     → 「入口是真实按钮」红；
+ *   - 挂载点里加回一个"打开应用中心"的按钮（导航行复活）
+ *     → 「挂载点不含入口」红；
  *   - `openAppEntry` 改回"先开内置浏览器标签、失败再 window.open"（2026-09-19 前的
  *     实现）→ 「打开只打本机路由」与「没有系统浏览器兜底」红；
  *   - `openAppEntry` 不校验本机返回的协议 URL（谁给什么都当成功）⇒「返回别的应用/
@@ -33,9 +34,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { AppCenterBody, accessBadge, openFailureEnvelope, parseCatalog, resolveAccess, type AppCenterItem } from './AppCenterPanel.tsx'
-import { AppCenterTrigger } from './AppCenterTrigger.tsx'
+import { AppToastHostMount } from './AppToastHostMount.tsx'
+import { clearAppToast, foreignDeepLinkToastText, showAppToast } from './app-toast.tsx'
 import { en, setActiveLocale, t, zh } from './locales.ts'
 import { ACCESS_MODES, WRITABLE_ACCESS_MODES } from './appcfg-contract.ts'
 import { OPEN_APP_PATH, openAppEntry, pageHoldsWriteProof, parseAppProtocolURL, type OpenAppDeps } from './open-app.ts'
@@ -56,6 +57,7 @@ const appURL = (appId: string, path = '/'): string => `${APP_SCHEME}://${appId}$
 
 afterEach(() => {
   setActiveLocale('zh')
+  clearAppToast()
   // 分享 scheme、渠道参数与持有性令牌都是模块级注入点：用例之间必须复位，
   // 否则一条用例的注入会污染下一条（令牌还会让"引导"这一步被跳过）。
   setAppShareScheme(null)
@@ -429,39 +431,36 @@ describe('目录渲染（R34 / R36）', () => {
   })
 })
 
-describe('侧边栏入口：真实可达（不是"存在即通过"）', () => {
-  const props = (wide: boolean): PropsRuntime<'sidebar.footer.action'> =>
-    ({ wide } as unknown as PropsRuntime<'sidebar.footer.action'>)
-
-  it('宽栏：渲染成真实按钮 + 可见文案 + aria-label，未打开时没有面板', () => {
-    const html = renderToStaticMarkup(<AppCenterTrigger {...props(true)} />)
-    expect(html).toMatch(/<button[^>]*type="button"/u)
-    expect(html).toContain('pico-app-center-trigger')
-    expect(html).toContain('应用中心')
-    expect(html).toContain('aria-label="应用中心"')
-    // 关键：没有任何隐藏手段（"存在但点不到"就是这些形态）。
-    expect(html).not.toMatch(/display:\s*none/iu)
-    expect(html).not.toMatch(/visibility:\s*hidden/iu)
-    // `hidden` 是 HTML 属性（`aria-hidden` 在 svg 上是合法的、不算隐藏入口）。
-    expect(html).not.toMatch(/\shidden(?=[\s=>])/u)
-    expect(html).not.toContain('role="dialog"')
+describe('侧边栏挂载点：只挂 toast 宿主，不再是导航行', () => {
+  it('渲染的是 toast 宿主本身（无 toast 时什么都不渲染）', () => {
+    const html = renderToStaticMarkup(<AppToastHostMount />)
+    // 无 toast ⇒ 空串：挂载点不占布局、不改观感（它不是一行导航）。
+    expect(html).toBe('')
   })
 
-  it('窄轨（56px rail）仍然渲染按钮，只是不显示文字标签', () => {
-    const html = renderToStaticMarkup(<AppCenterTrigger {...props(false)} />)
-    expect(html).toMatch(/<button[^>]*type="button"/u)
-    expect(html).toContain('pico-app-center-trigger')
-    expect(html).toContain('aria-label="应用中心"')
-    expect(html).not.toContain('>应用中心<')
+  it('有 toast 时渲染真实提示（异渠道深链），仍然没有任何按钮入口', () => {
+    showAppToast({ kind: 'foreign-deep-link' })
+    const html = renderToStaticMarkup(<AppToastHostMount />)
+    expect(html).toContain('data-role="app-toast"')
+    expect(html).toContain(foreignDeepLinkToastText())
+    // 挂载点自己不含任何"打开应用中心"的入口（入口在「更多」浮层里）。
+    expect(html).not.toContain('pico-app-center-trigger')
+    expect(html).not.toContain('aria-label="应用中心"')
+    clearAppToast()
   })
 
-  it('跟随语言：en 下入口与面板都是英文（App Center）', () => {
+  it('跟随语言：en 下提示是英文（App Center 入口文案由 foot-menu 条目负责）', () => {
     setActiveLocale('en')
-    const trigger = renderToStaticMarkup(<AppCenterTrigger {...props(true)} />)
-    expect(trigger).toContain('App Center')
+    showAppToast({ kind: 'foreign-deep-link' })
+    const html = renderToStaticMarkup(<AppToastHostMount />)
+    // 断言用不含引号的前缀：`renderToStaticMarkup` 会把 `'` / `"` 转义成实体。
+    expect(foreignDeepLinkToastText()).toContain('This link belongs to another company')
+    expect(html).toContain('This link belongs to another company')
+    expect(html).not.toContain('这个链接属于另一家企业的客户端')
     const panelBody = renderToStaticMarkup(<AppCenterBody state={{ kind: 'ready', items: [] }} onRetry={() => {}} />)
     expect(panelBody).toContain('No apps yet')
     expect(t('appCenter.title')).toBe('App Center')
+    clearAppToast()
   })
 })
 

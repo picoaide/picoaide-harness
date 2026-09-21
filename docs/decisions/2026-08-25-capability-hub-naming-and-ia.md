@@ -2,6 +2,8 @@
 
 日期：2026-08-25　分支：master　状态：**已实施（Phase 1-3）**——Phase 4 远期
 
+> ⚠️ **后续变更（2026-09-21，底部并道改造）**：本文 §"单入口"里"新增 `CapabilityCenterTrigger` 并往 `sidebar.footer.action` 注册 id=`capability-center`(order=-1)"的**注册形态已被取代** —— 能力中心入口现在登记进 `@picoaide/dsh-foot-menu` 的 `picoFootMenu` 条目（`id: 'capability'`（= panel-surface 的 PanelId）、`order: -1`），`CapabilityCenterTrigger.tsx` 已删除。"单入口 + 两个维度"的信息架构结论不变。
+
 ## 目标
 
 把客户端当前三个平行的内容入口——「技能商城」「共享技能库」「共享 Agent」——归并为**一个入口 + 两个维度（类型 × 来源）**的信息架构，消除「商城 / 共享」命名造成的同类歧义，并为市场端「分级智能体」预留语义空间。

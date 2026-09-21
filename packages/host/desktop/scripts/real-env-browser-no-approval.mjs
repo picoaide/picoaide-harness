@@ -120,6 +120,47 @@ async function clickLabel(label, waitMs = 2500) {
   return r
 }
 
+/**
+ * 点开「更多」浮层里的一个条目（2026-09-21 并道后浏览器入口在浮层里；它唤起的是
+ * **独立浏览器窗口**，没有中列面板可断言，所以判据是"条目点得到、浮层收起"）。
+ * @param label - 条目文案（`.pico-foot-menu-item` 的可见文本）。
+ * @param waitMs - settle time after the click.
+ * @returns `'CLICKED'` / `'NOT_FOUND'` / `'OPEN_FAILED'` / `'STILL_OPEN'`.
+ */
+async function clickFootMenuItem(label, waitMs = 3000) {
+  const clicked = await ev(`(() => {
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    if (row === null || row.offsetParent === null) return 'NOT_FOUND'
+    if (row.getAttribute('aria-expanded') !== 'true') row.click()
+    return 'OPENED'
+  })()`)
+  if (clicked === 'NOT_FOUND') return 'NOT_FOUND'
+  await wait(700)
+  const open = await ev(`(() => {
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    if (row === null) return false
+    const menu = document.getElementById(row.getAttribute('aria-controls') ?? '')
+    return row.getAttribute('aria-expanded') === 'true' && menu !== null && getComputedStyle(menu).display !== 'none'
+  })()`)
+  if (open !== true) return 'OPEN_FAILED'
+  const hit = await ev(`(() => {
+    const items = [...document.querySelectorAll('.pico-foot-menu-item')].filter(b => b.offsetParent)
+    const target = items.find(b => (b.textContent ?? '').trim() === ${esc(label)})
+    if (target === undefined) return 'NOT_FOUND'
+    target.click()
+    return 'CLICKED'
+  })()`)
+  await wait(waitMs)
+  if (hit !== 'CLICKED') return hit
+  const closed = await ev(`(() => {
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    if (row === null) return false
+    const menu = document.getElementById(row.getAttribute('aria-controls') ?? '')
+    return row.getAttribute('aria-expanded') === 'false' && (menu === null || getComputedStyle(menu).display === 'none')
+  })()`)
+  return closed === true ? 'CLICKED' : 'STILL_OPEN'
+}
+
 try {
   // 1. Reset to login and fill creds.
   await ev(`(() => { try { localStorage.clear() } catch {}; try { sessionStorage.clear() } catch {}; return true })()`)
@@ -145,8 +186,12 @@ try {
   reportStep('初始无审批弹窗', (approvalProbe?.dialogs ?? []).length === 0, `dialogs=${JSON.stringify(approvalProbe?.dialogs)}`)
   await screenshot('b00-logged-in')
 
-  // 3. Open the browser panel via the sidebar.
-  await clickLabel('浏览器', 3000)
+  // 3. 从「更多」浮层点浏览器条目（2026-09-21 并道之后入口在浮层里；点击唤起**独立
+  //    浏览器窗口**）。这里必须断言点击结果：旧写法 `clickLabel('浏览器')` 永远匹配不到
+  //    （唯一的「浏览器」按钮在 display:none 的浮层条目里，clickLabel 要求 offsetParent），
+  //    而返回值没被断言 ⇒ 这一步是死代码、截图也没有意义（二轮对抗审计 P2）。
+  const browserClicked = await clickFootMenuItem('浏览器', 3000)
+  reportStep('浏览器条目可点（从「更多」浮层）', browserClicked === 'CLICKED', `click=${browserClicked}`)
   await wait(3000)
   await screenshot('b01-browser-panel')
 

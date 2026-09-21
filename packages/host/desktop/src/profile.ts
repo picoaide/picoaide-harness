@@ -68,6 +68,16 @@ const ACCOUNT_CARD_PATCH_PATH = join(dirname(createRequire(import.meta.url).reso
 // WASM 应用中心（客户端半边）：与 account-card 同构 —— 由桌面包通过 profile 组装期
 // 注入，插件自己不解析随包路径（跨包路径在 tsdown 内联后会指向不存在的目录）。
 const WASM_APPS_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-wasm-apps/package.json')), 'cordis.patch.yml')
+// 侧边栏底部「更多」行（客户端服务 `picoFootMenu` + 向上浮层）：与 wasm-apps 同层。
+// 五个面板插件把自己的底部条目登记进它提供的服务（各自在**子 fiber** 里等，见各包
+// client/index.ts），所以这一行与它们之间没有装配顺序敏感度。
+//
+// ⚠️ **禁用危害（2026-09-21 对抗审计）**：这一行是**五个面板入口的唯一承载行**。
+// 渠道覆盖层或 `$DSH_HOME/cordis.patch.yml` 把它 `disabled: true` 时不会有任何报错 ——
+// 消费者等的服务永远不出现，于是底部功能区**安静地**少掉定时任务 / 能力中心 / 连接器 /
+// 浏览器 / 应用中心。因此它进了 `REQUIRED_DESKTOP_ROWS`（boot 后断言 ACTIVE，缺席即
+// 抛错并走桌面的致命路径），而不是"少一行也无所谓"。
+const FOOT_MENU_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-foot-menu/package.json')), 'cordis.patch.yml')
 const CONNECTORS_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-connectors/package.json')), 'cordis.patch.yml')
 const BROWSER_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-browser/package.json')), 'cordis.patch.yml')
 // 客户端专属 WASM 应用 origin（`picoaide-app://` 协议 handler + 本机打开路由）：
@@ -535,6 +545,7 @@ export async function prepareDesktopProfile(
   const enterprisePatches = loadOverlayPatches(BIN_NAME, ENTERPRISE_PATCH_PATH)
   const accountCardPatches = loadOverlayPatches(BIN_NAME, ACCOUNT_CARD_PATCH_PATH)
   const wasmAppsPatches = loadOverlayPatches(BIN_NAME, WASM_APPS_PATCH_PATH)
+  const footMenuPatches = loadOverlayPatches(BIN_NAME, FOOT_MENU_PATCH_PATH)
   const connectorsPatches = loadOverlayPatches(BIN_NAME, CONNECTORS_PATCH_PATH)
   const browserPatches = loadOverlayPatches(BIN_NAME, BROWSER_PATCH_PATH)
   const wasmAppsHostPatches = loadOverlayPatches(BIN_NAME, WASM_APPS_HOST_PATCH_PATH)
@@ -553,6 +564,9 @@ export async function prepareDesktopProfile(
     // WASM 应用中心（客户端半边）：与 account-card 同层，晚于 enterprise
     // （它读 enterprise 提供的本地路由与会话）。
     bundlePatches.push(...wasmAppsPatches)
+    // 侧边栏底部「更多」行：五个面板插件的底部条目都登记进它提供的
+    // `picoFootMenu` 服务（消费者用 `inject` 等服务到位，与它们的装配顺序无关）。
+    bundlePatches.push(...footMenuPatches)
     // 客户端专属 WASM 应用 origin：与 wasm-apps（应用中心客户端半边）同层，
     // 它读 enterprise 提供的 `picoSession` 与本机 webServer。
     bundlePatches.push(...wasmAppsHostPatches)

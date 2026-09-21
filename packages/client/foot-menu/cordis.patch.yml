@@ -1,0 +1,9 @@
+# 侧边栏底部「并道」行（更多 / More）。
+#
+# 这一行承载客户端 bundle（`dsh.client`）：它在 `sidebar.footer.action` 里注册
+# **唯一**一个占用者（「更多」行 + 向上浮层），并通过客户端 Cordis 服务
+# `picoFootMenu` 收集兄弟插件（定时任务 / 能力中心 / 连接器 / 浏览器 / 应用中心）
+# 的条目。宿主半边是 no-op：本包不拥有任何本机路由或数据面。
+- insert:
+    - id: picoaide-foot-menu
+      name: '@picoaide/dsh-foot-menu'

@@ -165,6 +165,15 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@picoaide/dsh-cron/lib/invariant.js',
   'node_modules/@picoaide/dsh-cron/package.json',
   'node_modules/@picoaide/dsh-cron/cordis.patch.yml',
+  // 侧边栏底部「更多」行（2026-09-21 并道改造）：五个面板插件的底部条目都登记进它
+  // 提供的 `picoFootMenu` 服务，`lib/client.js` 就是那个注册了**唯一**底部座位占用者
+  // 的客户端 bundle。它**没有** `lib/invariant.js`（本包没有伴生不变量行），所以这里
+  // 只列它真实声明的入口；`package.json` + `cordis.patch.yml` 仍是 profile 组装期
+  // `createRequire(...).resolve('@picoaide/dsh-foot-menu/package.json')` 要读的两份。
+  'node_modules/@picoaide/dsh-foot-menu/lib/index.js',
+  'node_modules/@picoaide/dsh-foot-menu/lib/client.js',
+  'node_modules/@picoaide/dsh-foot-menu/package.json',
+  'node_modules/@picoaide/dsh-foot-menu/cordis.patch.yml',
   'node_modules/@picoaide/dsh-wasm-apps/lib/index.js',
   'node_modules/@picoaide/dsh-wasm-apps/lib/client.js',
   'node_modules/@picoaide/dsh-wasm-apps/lib/invariant.js',

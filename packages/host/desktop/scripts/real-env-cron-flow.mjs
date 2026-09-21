@@ -80,9 +80,60 @@ async function clickLabel(label, waitMs = 2500) {
   return r
 }
 
+/**
+ * 打开底部「更多」浮层（2026-09-21 并道后，面板入口不在常显行里）。
+ * @param waitMs - settle time after the click.
+ * @returns `'OPENED'` / `'ALREADY_OPEN'` / `'NOT_FOUND'` / `'NOT_OPEN'`.
+ */
+async function openFootMenu(waitMs = 700) {
+  const clicked = await ev(`(() => {
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    if (row === null || row.offsetParent === null) return 'NOT_FOUND'
+    if (row.getAttribute('aria-expanded') === 'true') return 'ALREADY_OPEN'
+    row.click()
+    return 'CLICKED'
+  })()`)
+  if (clicked === 'NOT_FOUND') return 'NOT_FOUND'
+  await wait(waitMs)
+  const open = await ev(`(() => {
+    const row = document.querySelector('.pico-foot-menu-trigger')
+    if (row === null) return false
+    const menu = document.getElementById(row.getAttribute('aria-controls') ?? '')
+    return row.getAttribute('aria-expanded') === 'true' && menu !== null && getComputedStyle(menu).display !== 'none'
+  })()`)
+  if (open !== true) return 'NOT_OPEN'
+  return clicked === 'ALREADY_OPEN' ? 'ALREADY_OPEN' : 'OPENED'
+}
+
+/**
+ * 点开「更多」浮层里的一个条目（先开浮层），并断言面板真的接管了中列。
+ * @param label - 条目文案（`.pico-foot-menu-item` 的可见文本）。
+ * @param panelId - 期望的 panel-surface PanelId。
+ * @param waitMs - settle time after the click.
+ * @returns `'CLICKED'` / `'NOT_FOUND'` / `'OPEN_FAILED'` / `'NOT_ACTIVE'`.
+ */
+async function openPanelFromFootMenu(label, panelId, waitMs = 3500) {
+  const opened = await openFootMenu()
+  if (opened !== 'OPENED' && opened !== 'ALREADY_OPEN') return opened === 'NOT_FOUND' ? 'NOT_FOUND' : 'OPEN_FAILED'
+  const clicked = await ev(`(() => {
+    const items = [...document.querySelectorAll('.pico-foot-menu-item')].filter(b => b.offsetParent)
+    const hit = items.find(b => (b.textContent ?? '').trim() === ${esc(label)})
+    if (hit === undefined) return 'NOT_FOUND'
+    hit.click()
+    return 'CLICKED'
+  })()`)
+  await wait(waitMs)
+  if (clicked !== 'CLICKED') return clicked
+  // 激活态属性是唯一真源：只查 textContent 会在"面板根本没打开"时同样为真。
+  const active = await ev(`document.documentElement.getAttribute('data-dsh-panel-active')`)
+  return active === panelId ? 'CLICKED' : 'NOT_ACTIVE'
+}
+
 try {
-  // Open the cron center.
-  await clickLabel('定时任务', 3500)
+  // Open the cron center. 2026-09-21 并道之后入口住在「更多」浮层里：先开浮层再点条目，
+  // 并用 panel-surface 的激活态属性断言面板真的接管了中列（只看 textContent 会假绿）。
+  const cronOpen = await openPanelFromFootMenu('定时任务', 'cron', 3500)
+  reportStep('从「更多」浮层打开定时任务中心', cronOpen === 'CLICKED', `open=${cronOpen}`)
   await wait(1000)
   await screenshot('f01-cron-center')
 
@@ -191,8 +242,9 @@ try {
   await wait(2500)
   await screenshot('f08-open-session')
 
-  // Delete the verification job.
-  await clickLabel('定时任务', 2000)
+  // Delete the verification job. 入口同样在浮层里（并道后）。
+  const cronReopen = await openPanelFromFootMenu('定时任务', 'cron', 2500)
+  reportStep('重新打开定时任务中心（浮层入口）', cronReopen === 'CLICKED', `open=${cronReopen}`)
   const deleted = await ev(`(() => {
     const rows = [...document.querySelectorAll('[data-dsh-cron-panel] button')].filter(b => (b.textContent ?? '').trim() === '删除' && b.offsetParent)
     if (!rows.length) return 'NOT_FOUND'

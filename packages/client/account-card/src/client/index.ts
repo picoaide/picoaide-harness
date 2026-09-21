@@ -26,10 +26,11 @@ const LOCALE_NS = 'account-card'
 export const inject = ['slots', 'locale']
 
 /**
- * Register the bottom sidebar account card: it mounts through the
+ * Register the bottom sidebar account row: it mounts through the
  * `sidebar.footer.action` slot (last, below the sibling foot actions) and
- * portals itself below the Settings seat; the username/logout/balance data
- * all come from the local `/api/pico/*` routes owned by the host half.
+ * portals itself below the Settings seat; the username/balance data all come
+ * from the local `/api/pico/*` routes owned by the host half, and the row
+ * expands the account card popover on click.
  * @param ctx - browser Cordis context.
  */
 export function apply(ctx: ClientContext): void {
@@ -57,6 +58,21 @@ export function apply(ctx: ClientContext): void {
     if (typeof locale.subscribe !== 'function') return () => {}
     return locale.subscribe(sync)
   }, 'follow active locale')
+
+  // Row background lives here, not inline: an inline `background` outranks any
+  // stylesheet rule, which would make the `:hover` fill dead. The base rule
+  // keeps the row transparent; `:hover` (higher specificity) paints the same
+  // fill as the sibling sidebar foot rows. Same injection shape as the browser
+  // plugin's trigger hover, and the tag is removed when the plugin disposes.
+  ctx.effect(() => {
+    const style = document.createElement('style')
+    style.textContent = [
+      '.pico-account-row { background: transparent; }',
+      '.pico-account-row:hover { background: var(--dsw-alias-interactive-bg-hover); }',
+    ].join('\n')
+    document.head.appendChild(style)
+    return () => { style.remove() }
+  }, 'account-card: row hover style')
 
   ctx.effect(
     () => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
