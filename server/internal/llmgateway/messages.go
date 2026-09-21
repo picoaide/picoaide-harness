@@ -261,6 +261,7 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 				break
 			}
 			if fl != nil {
+				touchSSEWriteDeadline(c)
 				fl.Flush()
 			}
 		}
@@ -270,6 +271,7 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 				log.Printf("gateway: anthropic stream idle timeout after %v, terminating", streamIdleTimeout)
 				fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游响应空闲超时"}}`)
 				if fl != nil {
+					touchSSEWriteDeadline(c)
 					fl.Flush()
 				}
 			}

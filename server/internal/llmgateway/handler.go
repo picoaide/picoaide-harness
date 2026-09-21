@@ -703,6 +703,7 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 						clientGone = true
 						drainDeadline = time.Now().Add(streamDrainTimeout)
 					} else if fl != nil {
+						touchSSEWriteDeadline(c)
 						fl.Flush()
 					}
 				}
@@ -715,6 +716,7 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 					if !clientGone {
 						fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游响应单行过大"}}`)
 						if fl != nil {
+							touchSSEWriteDeadline(c)
 							fl.Flush()
 						}
 					}
@@ -729,6 +731,7 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 				if !clientGone {
 					fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游响应空闲超时"}}`)
 					if fl != nil {
+						touchSSEWriteDeadline(c)
 						fl.Flush()
 					}
 				}

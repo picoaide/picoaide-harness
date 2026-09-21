@@ -88,6 +88,7 @@ func abortBalanceSettlementStream(c *gin.Context, fl http.Flusher) {
 	fmt.Fprintf(c.Writer, "data: %s\n\n",
 		`{"error":{"code":"`+balanceExhaustedCode+`","message":"`+balanceSettlementMessage+`"}}`)
 	if fl != nil {
+		touchSSEWriteDeadline(c)
 		fl.Flush()
 	}
 }
@@ -150,6 +151,7 @@ func abortSettlementFailureStream(c *gin.Context, fl http.Flusher, err error, wh
 	fmt.Fprintf(c.Writer, "data: %s\n\n",
 		`{"error":{"code":"`+meteringFailedCode+`","message":"`+meteringFailedMessage+`"}}`)
 	if fl != nil {
+		touchSSEWriteDeadline(c)
 		fl.Flush()
 	}
 }
