@@ -1,14 +1,20 @@
 package clientrelease
 
 import (
+	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -460,5 +466,127 @@ func TestFileRejectsMissingAndTraversal(t *testing.T) {
 		if !strings.Contains(w.Body.String(), `"error"`) {
 			t.Errorf("%s: 非 JSON 错误信封: %s", path, w.Body.String())
 		}
+	}
+}
+
+// ---- 缺陷(2026-09-21):慢链路下载被服务端 WriteTimeout 截断 ----
+//
+// 现场:某次部署后从域名实拉 154 MB 的 AppImage,上行 260–430 KB/s 时下载**恰好在 5m0s**
+// 处断开(服务端访问日志 `200 | 5m0s`,客户端 HTTP/2 报 stream INTERNAL_ERROR)。根因是
+// http.Server 的全局 WriteTimeout(5 分钟)罩住了 http.ServeFile 这条大文件路由。
+// 修法见 downloadWriteDeadline:只放宽这一条路由的写截止时间。
+
+// 截止时间的取值判据:有界(≤1h)、不倒退(≥5min)、随体积线性放宽。
+func TestDownloadWriteDeadlineIsBoundedAndSizeAware(t *testing.T) {
+	cases := []struct {
+		name string
+		size int64
+		want time.Duration
+	}{
+		{"大小未知", 0, downloadWriteDeadlineMin},
+		{"负数大小", -1, downloadWriteDeadlineMin},
+		{"1 MiB 小文件不低于全局超时", 1 << 20, downloadWriteDeadlineMin},
+		{"按保底速率折算恰好超过下限", downloadFloorRateBytesPerSec * 600, 601 * time.Second},
+		{"180 MiB(最大安装包量级)≈48 分钟", 180 << 20, 48*time.Minute + time.Second},
+		{"超大文件封顶 1 小时", 10 << 30, downloadWriteDeadlineMax},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := downloadWriteDeadline(tc.size); got != tc.want {
+				t.Fatalf("downloadWriteDeadline(%d) = %s, want %s", tc.size, got, tc.want)
+			}
+		})
+	}
+	// 不变量(改常量时最容易踩的两条):永不短于全局超时、永不取消上限。
+	for size := int64(0); size < 1<<32; size += 7 << 20 {
+		d := downloadWriteDeadline(size)
+		if d < downloadWriteDeadlineMin || d > downloadWriteDeadlineMax {
+			t.Fatalf("size=%d 时截止时间 %s 越界 [%s, %s]", size, d, downloadWriteDeadlineMin, downloadWriteDeadlineMax)
+		}
+	}
+}
+
+// 回归判据:客户端**故意慢读**时也必须拿到完整字节(soul 判据 = 字节数 + sha256)。
+//
+// 服务端 WriteTimeout 设成 1s(真实配置 5 分钟按用例时长压缩后的等价物):
+// 修复前,http.ServeFile 的写会在 1s 处被掐断,客户端读到 unexpected EOF ⇒ 本用例红;
+// 修复后,这条路由的写截止时间被放宽到 max(5min, size/64KiB/s),慢读也能下完 ⇒ 绿。
+// 末尾的 elapsed 断言是用例自身的防退化判据:读得太快就证明不了"慢读者能下完"。
+func TestFileSurvivesServerWriteTimeoutOnSlowDownload(t *testing.T) {
+	const size = 12 << 20 // 12 MiB:远大于内核收发缓冲,慢读必然把 1s 的写 deadline 撞满
+	body := make([]byte, size)
+	if _, err := rand.Read(body); err != nil {
+		t.Fatal(err)
+	}
+	wantSum := sha256.Sum256(body)
+	withReleaseDir(t, testInfo(t, "2.7.0", nil), map[string]string{"slow.exe": string(body)})
+
+	srv := httptest.NewUnstartedServer(newRouter("2.7.0"))
+	srv.Config.WriteTimeout = 1 * time.Second
+	srv.Start()
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/updates/client/slow.exe")
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	start := time.Now()
+	h := sha256.New()
+	var n int64
+	buf := make([]byte, 256<<10)
+	for {
+		read, rerr := resp.Body.Read(buf)
+		if read > 0 {
+			h.Write(buf[:read])
+			n += int64(read)
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			t.Fatalf("慢读到第 %d/%d 字节失败(修复前即此形态:服务端写超时掐断连接): %v", n, size, rerr)
+		}
+		time.Sleep(120 * time.Millisecond) // 慢读者:整体耗时 ~6s ≫ 服务端 1s
+	}
+	if n != size {
+		t.Fatalf("收到 %d 字节, want %d", n, size)
+	}
+	if got := h.Sum(nil); !bytes.Equal(got, wantSum[:]) {
+		t.Fatalf("sha256 = %x, want %x", got, wantSum)
+	}
+	elapsed := time.Since(start)
+	if elapsed < 3*time.Second {
+		t.Fatalf("下载只用了 %s,本用例没有真的慢读,判据失效", elapsed)
+	}
+	t.Logf("慢读完成:%d 字节 / %s(服务端 WriteTimeout=1s)", n, elapsed)
+
+	// Range/断点续传不能被这次改动破坏(老客户端靠它续传):真起服务器覆盖一次。
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/updates/client/slow.exe", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Range", "bytes=1000-1999")
+	rresp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Range 请求失败: %v", err)
+	}
+	defer rresp.Body.Close()
+	got, err := io.ReadAll(rresp.Body)
+	if err != nil {
+		t.Fatalf("Range 读体失败: %v", err)
+	}
+	if rresp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("Range status = %d, want 206", rresp.StatusCode)
+	}
+	if want := fmt.Sprintf("bytes 1000-1999/%d", size); rresp.Header.Get("Content-Range") != want {
+		t.Fatalf("Content-Range = %q, want %q", rresp.Header.Get("Content-Range"), want)
+	}
+	if !bytes.Equal(got, body[1000:2000]) {
+		t.Fatalf("Range 字节不符: len=%d", len(got))
 	}
 }
