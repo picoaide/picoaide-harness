@@ -244,10 +244,13 @@ describe('F-2: no tail-prefix matching on text that was never truncated', () => 
     // Round-1 regression: every one of these read 'https://app.example/help/****'.
     const history = h.runtime.history({ limit: 5 }) as unknown as Array<{ url: string }>
     expect(history.map((entry) => entry.url)).toContain(url)
-    // 2026-09-21（壳层缺陷 #5c）：navigate 的 op summary 走 hostCopy（中英按调用求值），
-    // 所以这里不再钉前缀字面量，只钉"URL 原样出现在活动面板的时间线里"这条性质
-    // （前缀文案不承载安全语义，凭据掩码才是）。
-    expect(h.runtime.opLog.some((op) => op.summary.includes(url))).toBe(true)
+    // 2026-09-21（壳层缺陷 #5c）：navigate 的 op summary 走 hostCopy（中英按调用求值）。
+    // 这里钉**精确等值**（而不是 `summary.includes(url)`）：默认 locale 是 zh，前缀固定；
+    // 等值断言比子串强（能抓到前缀漂移/多拼接），而且子串形态会触发 CodeQL
+    // js/incomplete-url-substring-sanitization 高危告警（PR #118 上的 #105 —— 测试里的
+    // "URL 子串判定"与真实消毒逻辑同形，本仓惯例是改断言形态而不是 dismiss）。
+    const navSummary = h.runtime.opLog.find((op) => op.tool === 'browser_navigate')?.summary ?? ''
+    expect(navSummary).toBe(`打开网页：${url}`)
     expect(h.runtime.listTabs().map((tab) => tab.url)).toContain(url)
   })
 
