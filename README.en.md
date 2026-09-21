@@ -78,7 +78,7 @@ Client upgrades and first-time installs can also fetch packages straight from **
 ### Production-ready productivity tools
 
 - **Capability Hub**: Mine/Market tabs with skill & agent type filters, source (Market/Organization/Local) and quality (Official/Featured) badges, multi-version merge with history, and one-click install/update/uninstall;
-- **Connector hub**: built-in SalesEasy (NeoCRM), Moka HR and other MCP connectors with OAuth + PKCE, locally encrypted credential storage, and dynamic MCP registration;
+- **Connector hub**: built-in SalesEasy (NeoCRM) and other MCP connectors with OAuth + PKCE, locally encrypted credential storage, and dynamic MCP registration;
 - **Scheduled tasks**: cron-triggered runs with a chosen agent, prompt, workspace, and permissions; execution detail (session, result, error) is always inspectable, with session jump; driven by the Host scheduler;
 - **Embedded browser**: the agent can take over the browser to act, with multi-tab, address bar, permission approval, and download control;
 - **Five-track memory**: user profile, global facts, project key memory, project logs, and daily logs, isolated per directory and git branch, with confirmation-first writes.

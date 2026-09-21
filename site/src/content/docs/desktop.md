@@ -73,7 +73,7 @@ description: PicoAide Harness 桌面客户端的完整功能与操作指南：�
 | 连接器 | 说明 |
 |---|---|
 | **销售易 NeoCRM** | 官方 streamable-HTTP MCP（`mcp.xiaoshouyi.com`），RFC 8414 OAuth（授权码 + PKCE + 动态客户端注册），查询客户/线索/商机/联系人，执行 XOQL 与元数据操作 |
-| **Moka HR 智能体** | 招聘人事一体 AI 同事：人才推荐、招聘动态、考勤绩效、审批待办；智能寻聘、面试分析与面试官评估；OAuth + streamable-http |
+| **远程 MCP 示例** | 通用远程 MCP 连接器：OAuth 2.1 + PKCE + 授权服务器元数据发现（RFC 9728 / RFC 8414）+ streamable-HTTP；端点与字段由管理员按实际服务填写（`mcp.example.com` 为占位值） |
 
 - 授权走 **OAuth 授权码 + PKCE**（`offline_access` 获取刷新令牌），state 校验与 60s 超时防 CSRF；
 - 凭据**本地加密存储**在用户 scope 路径（`0600/0700`、原子写、防符号链接）；连接成功后通过 `ctx.plugin` **动态注册 MCP**，模型即可调用其工具；

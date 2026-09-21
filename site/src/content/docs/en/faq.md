@@ -41,7 +41,7 @@ Upgrade method: Windows uses the installer, macOS opens the DMG and installs ove
 
 ## Why are there only two connectors?
 
-The product follows two standard forms — "Skills + MCP" (the final architecture as of 2026-08-26): **vendor CLI capabilities are distributed as SKILL.md via the Skill Store, and MCP capabilities go through the connector framework**. The early CLI connectors (vendor CLIs such as DingTalk, Feishu, WeCom, Beisen) were removed entirely; the built-in MCP connectors are now **Xiaoshouyi NeoCRM** and **Moka HR Agent**. Connector definitions are extensible, and third parties can register their own MCP def.
+The product follows two standard forms — "Skills + MCP" (the final architecture as of 2026-08-26): **vendor CLI capabilities are distributed as SKILL.md via the Skill Store, and MCP capabilities go through the connector framework**. The early CLI connectors (vendor CLIs such as DingTalk, Feishu, WeCom, Beisen) were removed entirely; the built-in MCP connectors are now **Xiaoshouyi NeoCRM** and a **remote MCP example** (placeholder config filled in by an administrator). Connector definitions are extensible, and third parties can register their own MCP def.
 
 ## Why was CLI tooling removed?
 

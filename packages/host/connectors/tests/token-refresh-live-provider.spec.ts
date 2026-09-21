@@ -42,13 +42,13 @@ afterEach(async () => {
 
 function def(origin: string): ConnectorDef {
   return {
-    id: 'moka', name: 'Moka', description: 'audit', authMode: 'oauth',
+    id: 'example-mcp', name: '示例 MCP 智能体', description: 'audit', authMode: 'oauth',
     auth: {
       authorizeUrl: `${origin}/oauth/authorize`, tokenUrl: `${origin}/oauth/token`, clientId: '',
       redirectUri: 'http://127.0.0.1/callback', pkce: true, publicClient: true,
       discoveryUrl: `${origin}/mcp`, scopes: 'mcp.read offline_access',
     },
-    mcp: [{ serverName: 'moka', transport: 'streamable-http', url: `${origin}/mcp` }],
+    mcp: [{ serverName: 'example-mcp', transport: 'streamable-http', url: `${origin}/mcp` }],
   }
 }
 
@@ -64,11 +64,11 @@ function liveConfig(h: ReturnType<typeof createHarness>): LiveConfig {
 /** Complete one interactive authorization so a credential (with a refresh token) is on disk. */
 async function authorizeOnce(dir: string, server: RealMcpServer): Promise<void> {
   const first = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
-  await callRoute(first, '/api/pico/connectors/moka/connect', 'POST')
+  await callRoute(first, '/api/pico/connectors/example-mcp/connect', 'POST')
   const deadline = Date.now() + 8000
   let url: string | undefined
   while (Date.now() < deadline && url === undefined) {
-    const res = await callRoute(first, '/api/pico/connectors/moka/state', 'GET')
+    const res = await callRoute(first, '/api/pico/connectors/example-mcp/state', 'GET')
     url = (JSON.parse(res.body) as { request?: { authorizeUrl?: string } | null }).request?.authorizeUrl
     if (url === undefined) await new Promise(r => setTimeout(r, 25))
   }
@@ -93,10 +93,10 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
 
     // An out-of-band refresh — the panel button's route, same engine the
     // background sweep and the restore path use. The server rotates RT1 → RT2.
-    const refreshed = await callRoute(h, '/api/pico/connectors/moka/refresh', 'POST')
+    const refreshed = await callRoute(h, '/api/pico/connectors/example-mcp/refresh', 'POST')
     expect(refreshed.status).toBe(200)
 
-    const stored = await new ConnectorStore({ baseDir: dir }).readCredential('moka')
+    const stored = await new ConnectorStore({ baseDir: dir }).readCredential('example-mcp')
     expect(stored?.refreshToken, 'the server must have rotated the refresh token').toBeTruthy()
     expect(stored?.refreshToken).not.toBe(before)
 
@@ -116,7 +116,7 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
     // day 2: reopen, refresh out of band, then use the transport.
     const day2 = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
     await waitFor(() => day2.configs.length === 1, 15_000)
-    await callRoute(day2, '/api/pico/connectors/moka/refresh', 'POST')
+    await callRoute(day2, '/api/pico/connectors/example-mcp/refresh', 'POST')
     day2.dispose()
 
     // day 3: reopen with the rotated credential; the server must never see a
@@ -137,17 +137,17 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
 
     const multi = def(server.origin)
     multi.mcp = [
-      { serverName: 'moka-a', transport: 'streamable-http', url: `${server.origin}/mcp` },
-      { serverName: 'moka-b', transport: 'streamable-http', url: `${server.origin}/mcp` },
+      { serverName: 'example-mcp-a', transport: 'streamable-http', url: `${server.origin}/mcp` },
+      { serverName: 'example-mcp-b', transport: 'streamable-http', url: `${server.origin}/mcp` },
     ]
     const h = createHarness([multi], dir, { refreshSweepIntervalMs: 0 })
     await waitFor(() => h.configs.length === 2, 15_000)
     const before = await Promise.all(h.configs.map(async (config) => (await (config as unknown as LiveConfig).authProvider?.tokens())?.refresh_token))
     expect(before.every((token) => typeof token === 'string' && token !== ''), 'both servers should carry a token').toBe(true)
 
-    const refreshed = await callRoute(h, '/api/pico/connectors/moka/refresh', 'POST')
+    const refreshed = await callRoute(h, '/api/pico/connectors/example-mcp/refresh', 'POST')
     expect(refreshed.status).toBe(200)
-    const stored = await new ConnectorStore({ baseDir: dir }).readCredential('moka')
+    const stored = await new ConnectorStore({ baseDir: dir }).readCredential('example-mcp')
     expect(stored?.refreshToken).not.toBe(before[0])
 
     // BOTH transports must hold the same rotated credential. A per-connector
@@ -168,9 +168,9 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
     await waitFor(() => h.configs.length === 1, 15_000)
 
     // Our refresher rotated RT1→RT2 and adopted it into the live provider.
-    const refreshed = await callRoute(h, '/api/pico/connectors/moka/refresh', 'POST')
+    const refreshed = await callRoute(h, '/api/pico/connectors/example-mcp/refresh', 'POST')
     expect(refreshed.status).toBe(200)
-    const afterSweep = await new ConnectorStore({ baseDir: dir }).readCredential('moka')
+    const afterSweep = await new ConnectorStore({ baseDir: dir }).readCredential('example-mcp')
 
     // A 401 self-heal inside the same window rotates from the token it was just
     // fed; the provider must be allowed to persist that result instead of being
@@ -181,11 +181,11 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
       access_token: 'at-sdk', refresh_token: 'rt-sdk', token_type: 'Bearer', expires_in: 3_600,
     })
     // onPersist kicks the write off without awaiting it; poll for it.
-    let stored = await new ConnectorStore({ baseDir: dir }).readCredential('moka')
+    let stored = await new ConnectorStore({ baseDir: dir }).readCredential('example-mcp')
     const deadline = Date.now() + 5_000
     while (Date.now() < deadline && stored?.refreshToken !== 'rt-sdk') {
       await new Promise((resolve) => setTimeout(resolve, 50))
-      stored = await new ConnectorStore({ baseDir: dir }).readCredential('moka')
+      stored = await new ConnectorStore({ baseDir: dir }).readCredential('example-mcp')
     }
     expect(stored?.accessToken).toBe('at-sdk')
     expect(stored?.updatedAt).toBeGreaterThan(afterSweep?.updatedAt ?? 0)
@@ -200,7 +200,7 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
 
     const h = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
     await waitFor(() => h.configs.length === 1, 15_000)
-    const refreshed = await callRoute(h, '/api/pico/connectors/moka/refresh', 'POST')
+    const refreshed = await callRoute(h, '/api/pico/connectors/example-mcp/refresh', 'POST')
     expect(refreshed.status).toBe(200)
     // The refresh itself announces the new credential, which re-registers the
     // connector (config 2). Let that settle first so the config count below is
@@ -213,8 +213,8 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
     // would declare the stale refresh newer and adopt it back; the store write
     // order (`updatedAt`) is the only sound ordering.
     const store = new ConnectorStore({ baseDir: dir })
-    const current = await store.readCredential('moka')
-    await store.updateCredential('moka', {
+    const current = await store.readCredential('example-mcp')
+    await store.updateCredential('example-mcp', {
       accessToken: 'at-after-reauth',
       refreshToken: 'rt-after-reauth',
       expiresAt: Date.now() + 1_000,
@@ -223,7 +223,7 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
     })
 
     // Production re-registration path: any credential change announces itself.
-    h.emit('pico/connector-credentials-changed', { id: 'moka' })
+    h.emit('pico/connector-credentials-changed', { id: 'example-mcp' })
     await waitFor(() => h.configs.length === configsBefore + 1, 15_000)
     const newest = h.configs[h.configs.length - 1] as unknown as LiveConfig
     expect((await newest.authProvider?.tokens())?.refresh_token, 'the fresh grant must win').toBe('rt-after-reauth')
