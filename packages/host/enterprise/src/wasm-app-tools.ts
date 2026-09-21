@@ -96,7 +96,7 @@ export const WASM_APP_TOOL_TIMEOUT_MS = 120_000
 // `appcfg-contract.ts`），同样对拍那份 JSON —— 三处都指向同一个真源。
 
 /** `picoaide.app.json` 的**封闭**字段集合（多一个未知字段服务端即拒）。 */
-export const APP_CONFIG_FIELDS = ['access', 'whitelist', 'purpose', 'data_sensitivity', 'owner', 'window'] as const
+export const APP_CONFIG_FIELDS = ['access', 'whitelist', 'purpose', 'data_sensitivity', 'owner', 'window', 'sensitive_columns'] as const
 
 /** `picoaide.app.json` 的字段名类型。 */
 export type AppConfigField = (typeof APP_CONFIG_FIELDS)[number]
@@ -134,6 +134,7 @@ export const APP_CONFIG_FIELD_DESCRIPTIONS: Record<AppConfigField, string> = {
   purpose: '一句话用途声明（首版必填）：这个应用做什么、给谁用。会显示在应用中心。',
   data_sensitivity: '数据敏感度声明（首版必填）：例如「公开」「内部」「敏感」。写给管理员看的一行。',
   owner: '负责人声明（首版必填）：出问题找谁（姓名 / 工号 / 账号）。**这不是平台归属**——平台归属取自登录态（谁发布就是谁的），不可伪造。',
+  sensitive_columns: '作者**显式声明**的敏感列名（可选，缺省不声明）：这里列出的列在作者数据面（`wasm_app_rows` / 客户端「数据」面板）**一定**按敏感处理（显示 ***），即使列名不在平台的启发式名单里。与启发式取并集（声明只会更严，不会让某列变得可见）；上限 100 条、单条 ≤64 字节、大小写不敏感去重，越界 ⇒ 发布期 APP_CONFIG_INVALID。整个字段缺席 = 沿用上一版生效值；显式给空数组 = 本版不声明。原值仍只能由人在面板里显式查看（AI 工具面永远拿不到原值）。',
   window: '窗口的默认尺寸与强制宽高比。`window.ratio` 是客户端 resize 时锁定的比例（"W:H" 或浮点，合法区间 0.25–4.0，越界 ⇒ 发布期 APP_CONFIG_INVALID）；`window.width` / `window.height` 是首次打开的默认尺寸（缺省 1280×720，写了 ratio 时按比例校正）。未知子键（如 window.zoom）会被拒；整个 window 缺席 = 沿用上一版生效值。',
 }
 
@@ -173,6 +174,11 @@ const APP_CONFIG_PROPERTIES = {
     description: APP_CONFIG_FIELD_DESCRIPTIONS.owner,
   },
   // §6 / appcfg.json 的 `window`（R2-S-2）：可选整体对象，未知子键服务端拒。
+  sensitive_columns: {
+    type: 'array',
+    items: { type: 'string' },
+    description: APP_CONFIG_FIELD_DESCRIPTIONS.sensitive_columns,
+  },
   window: {
     type: 'object',
     // 未知子键服务端会拒（`window.zoom` 这类），所以这里也封闭。
