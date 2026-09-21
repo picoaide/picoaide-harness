@@ -13,6 +13,12 @@
  *  3. **失败原样呈现**：形状不符/404/超限都渲染服务端的错误信封，**不回落成空表** ——
  *     把 404 画成"这张表是空的"会让作者以为"数据没写进去"，方向完全错。
  *
+ * 2026-09-21 追加：**AI 读取的授权卡**（用户拍板"默认关 + 显式授权卡"）。
+ * `wasm_app_rows` 工具在本机是**默认拒绝**的（回 `AI_ROWS_NOT_AUTHORIZED` 且零出站）；
+ * 打开它的唯一入口是本面板上的这张卡 —— 因此卡上的文案必须把后果说全
+ *（仅脱敏列 / 每次调用写审计 / 可随时撤销），且**只有发布者本人**看得到
+ *（`isOwner` 是必填 prop：默认关的能力不允许挂在一个"忘了传就默认可见"的开关上）。
+ *
  * @module @picoaide/dsh-wasm-apps/client/DataBrowserPanel
  */
 
@@ -20,7 +26,14 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 
 import { PanelButton } from '@picoaide/dsh-panel-surface/client'
 
-import { fetchRows, fetchSchema, type AppRowsReport, type AppSchemaReport } from './app-lifecycle.ts'
+import {
+  fetchAiRowsConsent,
+  fetchRows,
+  fetchSchema,
+  setAiRowsConsent,
+  type AppRowsReport,
+  type AppSchemaReport,
+} from './app-lifecycle.ts'
 import type { PublishFailure, RequestDeps } from './publish-app.ts'
 import { t, tCount } from './locales.ts'
 
@@ -39,32 +52,48 @@ type RowsState =
   | { kind: 'ready', report: AppRowsReport }
   | { kind: 'failed', failure: PublishFailure }
 
+/** AI 行数据授权状态（宿主是真源：面板只反映它回报的值）。 */
+type ConsentState =
+  | { kind: 'loading' }
+  | { kind: 'ready', enabled: boolean }
+  | { kind: 'failed', failure: PublishFailure }
+
 /**
  * 数据面板。
  *
- * @param props - app_id、可选的可注入取数依赖（测试用）、是否可见。
+ * @param props - app_id、是否发布者本人（**必填**）、可选的可注入取数依赖（测试用）。
  * @returns 面板 DOM（无可读内容时也渲染说明，不渲染空白）。
  */
-export function DataBrowserPanel({ appId, deps }: { appId: string, deps?: RequestDeps }): ReactNode {
+export function DataBrowserPanel({ appId, isOwner, deps }: { appId: string, isOwner: boolean, deps?: RequestDeps }): ReactNode {
   const [open, setOpen] = useState(false)
   const [schema, setSchema] = useState<SchemaState>({ kind: 'loading' })
   const [table, setTable] = useState<string | null>(null)
   const [offset, setOffset] = useState(0)
   const [unmask, setUnmask] = useState(false)
   const [rows, setRows] = useState<RowsState>({ kind: 'idle' })
+  const [consent, setConsent] = useState<ConsentState>({ kind: 'loading' })
+  const [consentSaving, setConsentSaving] = useState(false)
+  const [consentFailure, setConsentFailure] = useState<PublishFailure | null>(null)
 
-  // 请求序号（2026-09-21 审计 P2-3）：只让**最后一次**发出的请求改写状态。
-  // 没有它会怎样：快速切表/翻页时"先发后到"的响应会用旧表数据覆盖新表，
-  // 界面显示的表格与选中的表不一致 —— 那比崩溃更容易误导作者对数据的判断。
-  const seq = useRef(0)
+  // 每种资源**各自的**请求序号（2026-09-21 审计 P2-3）：只让"同一种资源里最后一次"
+  // 发出的请求改写状态。
+  //
+  // 为什么必须是三个计数器而不是一个：三种取数（授权状态 / 结构 / 行）会并发在飞，
+  // 共用一个计数器时后发起的那条会把先发起的判成"迟到响应"直接丢掉 —— 症状是
+  // 结构永远停在"正在读取…"、行数据一次都不请求（本轮真实踩到，被 data-browser
+  // 的既有用例抓住）。原来只有一个计数器能用，是因为 schema 与 rows 之间由
+  // `table === null` 的依赖顺序天然串行；授权状态插进来就打破了这个隐含前提。
+  const schemaSeq = useRef(0)
+  const rowsSeq = useRef(0)
+  const consentSeq = useRef(0)
   const alive = useRef(true)
   useEffect(() => () => { alive.current = false }, [])
 
   const loadSchema = useCallback(async (): Promise<void> => {
-    const mine = ++seq.current
+    const mine = ++schemaSeq.current
     setSchema({ kind: 'loading' })
     const result = await fetchSchema(appId, deps ?? {})
-    if (!alive.current || mine !== seq.current) return
+    if (!alive.current || mine !== schemaSeq.current) return
     if (!result.ok) {
       setSchema({ kind: 'failed', failure: result })
       return
@@ -73,17 +102,52 @@ export function DataBrowserPanel({ appId, deps }: { appId: string, deps?: Reques
     setTable(previous => previous ?? result.tables.find(row => !row.skipped)?.name ?? null)
   }, [appId, deps])
 
+  /** 读授权状态：**以宿主为准**（渲染层不持真相，否则重开客户端后开关会撒谎）。 */
+  const loadConsent = useCallback(async (): Promise<void> => {
+    const mine = ++consentSeq.current
+    setConsent({ kind: 'loading' })
+    const result = await fetchAiRowsConsent(appId, deps ?? {})
+    if (!alive.current || mine !== consentSeq.current) return
+    setConsent(result.ok ? { kind: 'ready', enabled: result.enabled } : { kind: 'failed', failure: result })
+  }, [appId, deps])
+
+  /**
+   * 写授权状态（授权卡的两个按钮）。
+   *
+   * **成功才切换 UI**：宿主写失败时界面必须停在"未授权"并说明原因 —— 反过来
+   *（先乐观置为已允许）会让用户以为闸门开了，而 AI 下一次调用仍然被拒绝。
+   */
+  const changeConsent = useCallback(async (enabled: boolean): Promise<void> => {
+    setConsentSaving(true)
+    setConsentFailure(null)
+    const result = await setAiRowsConsent(appId, enabled, deps ?? {})
+    if (!alive.current) return
+    setConsentSaving(false)
+    if (!result.ok) {
+      setConsentFailure(result)
+      setConsent({ kind: 'ready', enabled: !enabled })
+      return
+    }
+    setConsent({ kind: 'ready', enabled: result.enabled })
+  }, [appId, deps])
+
   const loadRows = useCallback(async (nextTable: string, nextOffset: number, nextUnmask: boolean): Promise<void> => {
-    const mine = ++seq.current
+    const mine = ++rowsSeq.current
     setRows({ kind: 'loading' })
     const result = await fetchRows(appId, { table: nextTable, limit: PAGE_SIZE, offset: nextOffset, unmask: nextUnmask }, deps ?? {})
     // 迟到的响应直接丢掉（序号已经被更新的请求推进）——不是"合并"，是"只认最后一次"。
-    if (!alive.current || mine !== seq.current) return
+    if (!alive.current || mine !== rowsSeq.current) return
     setRows(result.ok ? { kind: 'ready', report: result } : { kind: 'failed', failure: result })
   }, [appId, deps])
 
   // 面板**展开时**才取数（收起状态零请求）：应用详情页是高频入口，
-  // 不该因为"看了一眼详情"就去读一次应用库。
+  // 不该因为"看了一眼详情"就去读一次应用库。授权状态也在展开时读（同一理由），
+  // 且**先**发起：闸门状态是这一页的前置信息（顺序由 effect 声明顺序固定，用例钉住）。
+  useEffect(() => {
+    if (!open || !isOwner) return
+    void loadConsent()
+  }, [open, isOwner, loadConsent])
+
   useEffect(() => {
     if (!open) return
     void loadSchema()
@@ -119,6 +183,18 @@ export function DataBrowserPanel({ appId, deps }: { appId: string, deps?: Reques
       </div>
       {/* 说明文案常驻：作者要知道"这是只读的、默认脱敏的、会审计的"。 */}
       <p style={{ fontSize: 12, opacity: 0.75, margin: '4px 0 0' }} data-role="data-hint">{t('appCenter.dataHint')}</p>
+
+      {/* AI 读取的授权卡（只给发布者本人；默认关）——挂在展开区里，与数据同一现场。 */}
+      {open && isOwner && (
+        <AiRowsConsentCard
+          state={consent}
+          saving={consentSaving}
+          failure={consentFailure}
+          onEnable={() => { void changeConsent(true) }}
+          onRevoke={() => { void changeConsent(false) }}
+          onRetry={() => { void loadConsent() }}
+        />
+      )}
 
       {open && schema.kind === 'loading' && <p style={HINT} data-role="data-loading">{t('appCenter.dataLoading')}</p>}
       {open && schema.kind === 'failed' && (
@@ -212,6 +288,72 @@ export function DataBrowserPanel({ appId, deps }: { appId: string, deps?: Reques
         </>
       )}
     </section>
+  )
+}
+
+/**
+ * AI 行数据授权卡（**默认关**；打开它的唯一入口）。
+ *
+ * 文案把后果说全的三件事：只有脱敏列会被读到、每次调用都写平台审计、可以随时撤销。
+ * 状态一律**以宿主回报为准**（`consent` 来自宿主），写失败时界面停在原状态并报错 ——
+ * 乐观切换会让用户以为闸门开了，而 AI 下一次调用仍然被拒绝。
+ * @param props - 当前状态、是否在保存、上一次写失败、三个动作。
+ * @returns 卡片 DOM。
+ */
+function AiRowsConsentCard({ state, saving, failure, onEnable, onRevoke, onRetry }: {
+  state: ConsentState
+  saving: boolean
+  failure: PublishFailure | null
+  onEnable: () => void
+  onRevoke: () => void
+  onRetry: () => void
+}): ReactNode {
+  const enabled = state.kind === 'ready' && state.enabled
+  return (
+    <div
+      className="pico-app-data-ai-consent"
+      data-role="ai-rows-consent"
+      data-enabled={enabled ? 'true' : 'false'}
+      style={{ marginTop: 8, fontSize: 12, lineHeight: '18px' }}
+    >
+      <strong style={{ fontSize: 12 }}>{t('appCenter.aiRowsTitle')}</strong>
+      <p style={{ margin: '2px 0 0', opacity: 0.85 }} data-role="ai-rows-consent-copy">
+        {enabled ? t('appCenter.aiRowsEnabled') : t('appCenter.aiRowsAllow')}
+      </p>
+      <p style={{ margin: '2px 0 0', opacity: 0.7 }} data-role="ai-rows-consent-hint">{t('appCenter.aiRowsHint')}</p>
+
+      {state.kind === 'loading' && <p style={HINT} data-role="ai-rows-consent-loading">{t('appCenter.dataLoading')}</p>}
+      {state.kind === 'failed' && (
+        <div data-role="ai-rows-consent-error">
+          <p style={{ margin: 0 }}>{`${t('appCenter.aiRowsUnknown')}: ${state.failure.code}`}</p>
+          <PanelButton variant="ghost" size="sm" className="pico-app-data-ai-retry" onClick={onRetry}>
+            {t('appCenter.retry')}
+          </PanelButton>
+        </div>
+      )}
+      {/* 写失败：如实说"没保存成功"（此时闸门仍是关的），不要把失败画成成功。 */}
+      {failure !== null && (
+        <p style={{ margin: '4px 0 0' }} data-role="ai-rows-consent-save-error">
+          {`${t('appCenter.aiRowsSaveFailed')} (${failure.code})`}
+        </p>
+      )}
+
+      {state.kind === 'ready' && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+          {enabled
+            ? (
+              <PanelButton variant="ghost" size="sm" className="pico-app-data-ai-revoke" disabled={saving} onClick={onRevoke}>
+                {t('appCenter.aiRowsRevoke')}
+              </PanelButton>
+              )
+            : (
+              <PanelButton variant="ghost" size="sm" className="pico-app-data-ai-allow" disabled={saving} onClick={onEnable}>
+                {t('appCenter.aiRowsAllow')}
+              </PanelButton>
+              )}
+        </div>
+      )}
+    </div>
   )
 }
 

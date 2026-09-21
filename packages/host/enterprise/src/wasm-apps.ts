@@ -51,9 +51,20 @@ import { isAbsolute, join, relative } from 'node:path'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { gatewayFetch, normalizeServerURL } from './server-connector/auth.ts'
 import type { Session } from './server-connector/config.ts'
+import type { AiRowsConsentStore } from './wasm-apps-ai-rows-consent.ts'
 
 /** 本地路由前缀（唯一入口；管理面只在主站，§4.7 的 F-52e）。 */
 export const WASM_APPS_PREFIX = '/api/pico/apps/wasm'
+
+/**
+ * 「允许 AI 读取此应用的数据」的授权后缀（**跨端契约**：客户端 `app-lifecycle.ts`
+ * 的 `AI_ROWS_CONSENT_SUFFIX` 是同值的另一份字面量，对拍见客户端
+ * `ai-rows-consent.spec.tsx`）。
+ *
+ * 为什么是 `:app_id` 下的一段而不是像 app AI 那样一个全局面：授权**按应用**——
+ * 员工允许 AI 看"值班表"的库，不等于允许它看"发票助手"的库。
+ */
+export const AI_ROWS_CONSENT_SUFFIX = 'ai-rows-consent'
 
 /** 本地/服务端 JSON 响应的 Content-Type（两处必须一致：路由逐字节写出上游原文）。 */
 export const WASM_JSON_CONTENT_TYPE = 'application/json; charset=utf-8'
@@ -77,6 +88,13 @@ export const WASM_JSON_CONTENT_TYPE = 'application/json; charset=utf-8'
 export const WASM_MAX_BYTES = 32 * 1024 * 1024
 /** 上传请求体上限（base64 JSON，§4.2/R21）：48 MiB。 */
 export const UPLOAD_BODY_MAX_BYTES = 48 * 1024 * 1024
+/**
+ * 「允许 AI 读取此应用的数据」授权请求体上限：4 KiB。
+ *
+ * 载荷只有一个布尔值。**不**借用 publish 的 48 MiB 通道：那条通道会把整个 body 收进
+ * 内存再解析，而这条本机路由没有任何理由接受一个 48 MiB 的"授权请求"。
+ */
+export const AI_ROWS_CONSENT_BODY_MAX_BYTES = 4 * 1024
 /** 客户端上传超时（§4.2）：90 s，**必须**大于服务端读取超时。 */
 export const CLIENT_UPLOAD_TIMEOUT_MS = 90_000
 /** 服务端 `http.Server.ReadTimeout`（§4.2）：60 s。仅用于断言序关系，客户端不消费。 */
@@ -294,6 +312,14 @@ export interface WasmAppsFence {
   collectBody(req: IncomingMessage, limit: number): Promise<Buffer>
   /** 宿主语言（本地文案按请求解析，禁止模块级冻结）。 */
   hostLocale(req?: IncomingMessage): HostLocale
+  /**
+   * 「允许 AI 读取此应用的数据」的**授权状态**（默认关；见
+   * `docs/decisions/2026-09-21-app-author-data-surface.md` §6 第 2 点）。
+   *
+   * **必须与宿主工具面是同一个实例**：面板经本路由写它，`wasm_app_rows` 读它 ——
+   * 两个实例（或一份内存副本）会让"点了允许、工具仍旧拒绝"，而那看起来像 AI 坏了。
+   */
+  aiRowsConsent: AiRowsConsentStore
 }
 
 /** 本模块向 `ctx.webServer.register` 交付的路由（方法分发在 handler 内）。 */
@@ -1614,7 +1640,8 @@ export async function proxyApp(ctx: Context, session: Session, input: ProxyInput
  * | POST | `/validate` | 预检代理（AI/UI 用来"不占版本号地试一发"） |
  * | POST | `/publish` | **发布编排**：`wasm_base64`/`wasm_path` → 直传或分片续传 |
  * | POST | `/:app_id/publish\|unpublish\|freeze` | 生命周期代理（原样转发 body） |
- * | GET | `/:app_id/diagnostics\|schema\|export\|releases` | 只读代理 |
+ * | GET | `/:app_id/diagnostics\|schema\|export\|releases\|rows` | 只读代理（`rows` 额外要持有性证明） |
+ * | GET/POST | `/:app_id/ai-rows-consent` | 「允许 AI 读取此应用的数据」授权状态（本机文件；默认关） |
  * | DELETE | `/:app_id` | 删除代理（R37 冻结→导出→真删） |
  *
  * 这个函数只做**四件 HTTP 层的事**：围栏（guard/持有性证明/auditor）、路径分发、
@@ -1743,6 +1770,65 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
     const appID = segments[0] ?? ''
     if (appID === '') return fail(res, { code: 'NOT_FOUND', message: 'not found', status: 404 })
     const appPath = `/api/client/v2/apps/wasm/${encodeURIComponent(appID)}`
+
+    // GET/POST /:app_id/ai-rows-consent —— 「允许 AI 读取此应用的数据」授权（默认关）
+    //
+    // 为什么是一条**本机**路由而不是平台调用：闸门在宿主工具（`wasm_app_rows`）里，
+    // 而授权动作发生在渲染进程的面板上 —— 这条路由是两端唯一的连接点（与 app AI
+    // 的 `…/wasm-apps/ai/consent` 同一形态，只是授权维度按 app 而不是按用户×app）。
+    //
+    // 读与写都要**持有性证明**（含 GET）：这个布尔值就是"AI 能不能读这个应用的数据"
+    // 的开关，与 `rows` 同口径 —— `guard()` 自述的边界正是"伪造 Origin 的 curl 也能过"。
+    if (segments.length === 2 && segments[1] === AI_ROWS_CONSENT_SUFFIX) {
+      if (method !== 'GET' && method !== 'POST') return fail(res, { code: 'METHOD_NOT_ALLOWED', message: 'method not allowed', status: 405 })
+      if (!fence.requireProof(req, res)) return
+      if (method === 'GET') {
+        return fence.json(res, 200, { app_id: appID, enabled: await fence.aiRowsConsent.isEnabled(appID) })
+      }
+      // 写面：body 只有一个布尔值 —— 用 4 KiB 的独立上限，不借用 publish 的 48 MiB 通道。
+      let raw: Buffer
+      try {
+        raw = await fence.collectBody(req, AI_ROWS_CONSENT_BODY_MAX_BYTES)
+      } catch {
+        return fail(res, {
+          code: 'UPLOAD_TOO_LARGE',
+          message: hostCopy(locale, '授权请求体超过上限', 'the consent request body exceeds the size limit'),
+          status: 413,
+          details: { limit_bytes: AI_ROWS_CONSENT_BODY_MAX_BYTES },
+        })
+      }
+      let parsed: unknown
+      try {
+        parsed = raw.byteLength === 0 ? undefined : JSON.parse(raw.toString('utf8'))
+      } catch {
+        parsed = undefined
+      }
+      const row = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : undefined
+      if (row === undefined || typeof row.enabled !== 'boolean') {
+        return fail(res, {
+          code: 'VALIDATION',
+          message: hostCopy(locale, '授权请求体必须是 {"enabled":true|false}', 'the consent body must be {"enabled":true|false}'),
+          status: 400,
+          hints: ['这个开关只有一个字段：enabled（布尔）。没有其它开关、也没有"允许原值"这一项'],
+        })
+      }
+      try {
+        await fence.aiRowsConsent.setEnabled(appID, row.enabled)
+      } catch (cause) {
+        // 写失败**必须**让用户看见：静默成功会让面板显示"已允许"而工具仍然拒绝
+        //（下一次调用回 AI_ROWS_NOT_AUTHORIZED），而那看起来像 AI 坏了。
+        ctx.logger?.warn?.(`pico-wasm-apps: persisting the AI rows consent failed (${cause instanceof Error ? cause.message : String(cause)})`)
+        return fail(res, {
+          code: 'AI_ROWS_CONSENT_NOT_PERSISTED',
+          message: hostCopy(locale, '授权未能保存', 'the consent could not be saved'),
+          status: 500,
+          hints: ['检查数据根是否可写（授权记录落在 $DSH_HOME/wasm-apps-ai-rows-consent.json，0600）'],
+        })
+      }
+      return fence.json(res, 200, { app_id: appID, enabled: row.enabled })
+    }
 
     // POST /:app_id/(publish|unpublish|freeze) —— 生命周期（body 原样转发）
     if (segments.length === 2 && ['publish', 'unpublish', 'freeze'].includes(segments[1] ?? '')) {

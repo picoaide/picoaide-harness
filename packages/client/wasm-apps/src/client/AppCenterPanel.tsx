@@ -1487,9 +1487,15 @@ export function AppDetailView({
 
       {/* 作者数据面（2026-09-21）：**只在发布者本人**的详情页渲染 ——
           服务端对非发布者一律 404（与"应用不存在"同形），界面上摆一个必然失败的入口
-          只会让人以为"功能坏了"。 */}
+          只会让人以为"功能坏了"。
+          `isOwner` 显式传进去（面板的 prop 是**必填**）：AI 读取数据的授权卡挂在
+          这个面板里，而那是"默认关"的能力 —— 不允许出现"忘了传就默认可见"的形态。 */}
       {item.isOwner && (
-        <DataBrowserPanel appId={item.appId} {...(dataDeps === undefined ? {} : { deps: dataDeps })} />
+        <DataBrowserPanel
+          appId={item.appId}
+          isOwner={item.isOwner}
+          {...(dataDeps === undefined ? {} : { deps: dataDeps })}
+        />
       )}
 
       <AppAiPanel

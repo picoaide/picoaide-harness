@@ -131,7 +131,7 @@ unmask**、审计账号放行、未登录零出站。
 服务端用户的可写范围**（部署面：独立 uid / 只读挂载），不是再加一层路径判据。
 
 
-## 7b. 持有性证明挡不住"AI 自己开浏览器" —— **已修（方案 A）**（三轮审计 P1-①）
+## 7b. 持有性证明挡不住"AI 自己开浏览器" —— **已修（两批：先堵导航入口，再把凭据移出模型面）**（三轮审计 P1-①）
 
 ### 事实（三个使能条件都实测过）
 
@@ -213,20 +213,92 @@ unmask**、审计账号放行、未登录零出站。
 `will-navigate` + `will-redirect` + **`will-frame-navigate`**（子框架，纵深防御）。
 本机 deny 的理由从"那里是 shell"变成"**那里有被镜像的凭据**"，因此 `shellOrigin`
 缺席时判据**依然生效**（不再依赖那个字符串存不存在）。
+（写第二批之后回看：凭据已不再住进标签分区，这条判据按其后的**纵深防御**口径保留 ——
+本机回环面就是宿主控制面，见本节的"第二批"。）
 
 **代价（如实认账）**：AI 浏览器**不能再访问任何本机地址**，包括作者本地的 dev server ——
-这是有意的取舍：那类地址上住着一把等于控制面凭据的 cookie，而"AI 看本地 dev server"
-不是产品承诺的能力（平台自己的页面由宿主 `webContents.loadURL` 直接加载，应用走应用窗口面，
-都不经过这里）。反向对照判据保证不退化：外站 `http(s)` 一律照常放行。
+这是有意的取舍：那类地址就是宿主控制面（登录态、连接器、应用数据与浏览器写面），而
+"AI 看本地 dev server"不是产品承诺的能力（平台自己的页面由宿主 `webContents.loadURL`
+直接加载，应用走应用窗口面，都不经过这里）。反向对照判据保证不退化：外站 `http(s)` 一律照常放行。
 
-**仍然残留（部署面，不是本批能闭合的）**：`mirrorBrowserAuthCookies` 把凭据复制进
-模型可驱动的分区，这是"overlay 跑在 `persist:agent-browser-<user>`、需要持有性证明"逼出来的
-结构性妥协。彻底闭合要么把 overlay 挪回默认 session（去掉复制），要么给 overlay 一条
-**不依赖 cookie 的**证明通道（例如宿主注入的 per-window token）。两者都要动蒙版窗口的
-加载/分区语义（三轮审计的焦点区域），风险高于本批收益，故列为后续决策项。
-指向**同一台服务器**的其它主机名（反代/自定义域名）也不在判据内 —— 那些形态下 cookie 是否
-被镜像取决于部署（镜像只按 `shellOrigin` 取 cookie）；若将来出现"其它本机 origin 也持有证明"
-的形态，应把判据改为**按 cookie 作用域**而不是按主机名字符串。
+**仍然残留（部署面）**：指向**同一台服务器**的其它主机名（反代/自定义域名）不在本判据内 ——
+那些形态下 cookie 是否被镜像取决于部署（镜像只按 `shellOrigin` 取 cookie）；若将来出现
+"其它本机 origin 也持有证明"的形态，应把判据改为**按 cookie 作用域**而不是按主机名字符串。
+（凭据镜像本身已在下面第二批里删除，所以这条现在只剩"间接形态"的理论面。）
+
+### 第二批：把蒙版挪回默认 session —— 凭据不再住进模型可驱动的 jar（2026-09-21）
+
+**为什么还要修**：第一批只堵住"模型**可达的导航入口**"，根妥协没有动 ——
+`src/index.ts` 的 `mirrorBrowserAuthCookies`（约 476-507 行）把默认 session 里回环源的
+`dsh-auth-*` **复制进** `persist:agent-browser-<user>`，而那正是 `browser_*` 工具驱动的那批
+标签页所在的 cookie jar。导航闸门是**外围**判据：被复制的凭据本身就住在模型面里，
+任何一条没被闸门覆盖的取数路径（新窗口、新协议、将来的工具）都会重新变成"持票的真页面"。
+
+**采用方案：把蒙版（overlay）视图挪回默认 session（任务书里的方案 (a)）。
+⚠️ 名称消歧：本节第一批的"方案 A"指"拒绝模型导航到本机目标"，两者不是同一件事。**
+
+**为什么不是"给 overlay 一条不依赖 cookie 的证明通道"（任务书方案 (b)）**：
+`/browser-overlay` 是本插件自己经回环端口服务的页面，而 `guard()` 的边界（`loopback.ts`
+自述）就是"伪造 Origin/头的本机进程也能过"。因此**写在 HTTP 应答里的** token 对"本机任意
+进程"没有任何鉴别力 —— 它能自己 GET 一份。要做到至少与 cookie 等强，token 只能走
+**Electron 专属通道**（preload + `additionalArguments`/IPC），那要新增一个必须随包构建、
+必须进 desktop afterPack 清单的 preload 产物，并给 `proofOfPossession` 加第二套校验；
+而方案 (a) 让**已有的** cookie 直接生效：蒙版与 shell 页、主应用窗口同处一个 jar。
+少一个凭据面、少一条构建/打包链，收益相同。
+
+**落地**（写此记录时的锚点，均在 `packages/host/browser/`）：
+- `runtime.ts:1167` `mountOverlay` 改调 `this.adapter.createMaskView()`（**不传分区**）⇒
+  蒙版落在 Electron 默认 session，与 `createBrowserWindow()` 的窗口 webContents 同一个 jar
+  —— `dsh-auth-*` 天然在里面（token 换票发生在同一个默认 session）。
+- `electron-adapter.ts:417` 的 `createMaskView(partition?)` 在 `partition === undefined` 时
+  **根本不写** `webPreferences.partition`（`NativeView.partition` 随之变为可选，
+  `electron-adapter.ts:257`）。显式传分区仍然生效（只有测试/将来别的 surface 会用）。
+- `runtime.ts:688` `setPartition` 只切标签分区与 store：蒙版**不再跟着分区走**，
+  旧的"切账号重建蒙版"路径（`remountOverlay`）整段删除 —— 那本来就是为镜像补的丁。
+- `index.ts` 删除 `mirrorBrowserAuthCookies`、`cookie-handoff.ts`（连同其自测）、
+  `startCookieHandoff/stopCookieHandoff` 与 `BROWSER_AUTH_COOKIE_PREFIX`；`clear-data`
+  分支里"清完再交接一次"的补丁与 `page()` 里"加载页面顺带交接"一并删除（默认 session 的
+  票据不在清理范围内）。
+- **保留并显式接线**原来寄生在交接函数里的安全副作用：分区权限守卫
+  （`ensureSessionGuard`，§16.1 冻结"归属 = 分区初始化"）。新 `index.ts:441`
+  `ensureBrowserPartitionGuard(user)` 在**开机**（`ctx.effect`）与**切账号**
+  （`applyUserScope`）各调一次，经 `runtime.sessionForPartition`（`runtime.ts:3462`，
+  不自己 `require('electron')`）拿到 session 再 `runtime.ensurePartitionGuard`
+  （`runtime.ts:3447`）。**不得**把守卫装到默认 session 上 —— 那是主应用窗口所在的 jar。
+
+**判据**（都是行为判据；`packages/host/browser/tests/`）：
+- `audit-0914-mask-partition.spec.ts`（2026-09-14 P0 的回归，已按新不变量重写，5 条）：
+  ① prewarm 调 `createMaskView` 时**实参个数为 0**；② 切账号**不重建/不销毁**蒙版，
+  同时**标签仍落新用户分区**；③ 蒙版与标签在**不同 session**；④ 分区未变不 churn；
+  ⑤ 无窗口时切分区不建视图。旧断言（"切分区必须重建蒙版"）在方案 (a) 下已不成立 ——
+  它是镜像链路的补丁，不是产品语义；改写而不是删除，并保留了原 P0 的用户可见结果。
+- `audit-0921-credential-isolation.spec.ts`（新增，7 条）：① 真实适配器下
+  `createMaskView()` 的 webPreferences **没有** `partition` 键（`in` 判据，不是 `undefined` 比较），
+  且与 `createBrowserWindow()` 同 jar、`transparent` 未丢；② 显式分区仍写键（标签那条路未改坏）；
+  ③ 源码里五条"凭据搬运 API"（`x.cookies`、`x['cookies']`、`defaultSession`、
+  `onBeforeSendHeaders`、`requestHeaders`）**零命中**，且 `cookie-handoff.ts` 与其自测文件
+  必须不存在；④ shell 页由宿主 `loadURL` 加载、**不在标签台账**里（蒙版同理），
+  分区权限守卫装在该分区上、重复调用幂等、**默认 session 未被装**，`index.ts` 的开机/切账号
+  两处接线存在且不再有交接表。
+- 产品面不被修坏：`audit-r7-write-proof.spec.ts` 的写面矩阵补入蒙版的 `takeover` 与 `hide`
+  （无票 ⇒ 403；持票 ⇒ 200 且真的驱动 runtime）；页面行为仍由 `shell-pages.behavior.spec.ts`
+  （jsdom 真跑两个页面）覆盖。
+- 标签的写面**没有**放宽：`browser_navigate`/`window.open`/`browser_download` 与
+  `will-navigate`/`will-redirect`/`will-frame-navigate` 仍一律拒本机目标
+  （`audit-0921-shell-origin.spec.ts` 全绿）。
+
+**变异验证**（在包副本 `temp/s7b-scratch/browser/` 里实跑，真树文件 sha256 前后一致）：
+`mountOverlay` 改回传分区 ⇒ 0914 ①③⑤ 红；适配器恢复 `partition` 默认值 ⇒ cred-iso ① 红；
+把镜像照抄回来（三种写法：`session.cookies?.set` / `session['cookies']?.set` /
+`onBeforeSendHeaders` 塞 `Cookie`）⇒ cred-iso ③ 红；`ensurePartitionGuard` 掏空 ⇒
+cred-iso ④（守卫）红；删掉开机那次接线 ⇒ cred-iso ④（接线）红；`setPartition` 恢复
+"销毁 + 重建蒙版" ⇒ 0914 ② 红；`createView()` 丢掉分区 ⇒ 0914 ② 红。
+
+**认账的边界**：③ 那条是**静态 tripwire，不是形式化证明**（`session['coo'+'kies']` 这类
+拼写可绕过；`vi.mock('electron')` 拦不住 `createRequire('electron')`，所以这条只能以源码
+扫描形态存在）。真正的保证是三件事叠加：行为判据钉住"蒙版不传分区 / 标签按分区"、
+标签分区里的 cookie 只能由**页面自身的网络活动**写入（而本机目标被导航闸门全面禁止）、
+以及这把 cookie 是 HMAC 签名（伪造值过不了 `requestRejection`）。
 
 
 ## 7. 与本次修订同时新增的判据（2026-09-21 审计修复批）

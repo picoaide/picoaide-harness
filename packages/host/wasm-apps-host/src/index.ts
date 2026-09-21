@@ -25,6 +25,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { BROWSER_SURFACE_SERVICE } from '@picoaide/dsh-browser/surface'
 import { DEFAULT_APP_SCHEME, appOrigin, appSchemePrefix, isValidAppId } from './app-protocol.ts'
 import { AI_CHAT_PATH, handleAiChat, type AiChatAuthorization, type AiChatTurnRunner } from './ai-chat.ts'
 import { AI_CONSENT_FILE_NAME, createAiChatAuthorization } from './ai-authorization.ts'
@@ -38,9 +39,15 @@ import type { AppSchemeRequestHandler, WasmAppsHostAdapter, WasmAppsWindowAdapte
 import { createAppSchemeHandler } from './handler.ts'
 import { createHostRequestSurface, type SurfaceReply } from './host-request.ts'
 import { hostCopy, hostLocaleFrom, type HostLocale } from './locale.ts'
-import { browserPartitionFor } from './partition.ts'
+import { browserPartitionFor, serverPartitionHash } from './partition.ts'
 import { readAppSession, subscribePicoSession, type PicoSessionLike } from './session.ts'
-import { createWasmAppsWindows } from './windows.ts'
+import { createWindowCatalog } from './window-catalog.ts'
+import {
+  createWasmAppsWindows,
+  parseDeclaredWindowGeometry,
+  type AppSurfaceRegistrar,
+  type DeclaredWindowGeometry,
+} from './windows.ts'
 
 /** Cordis 插件名（loader 诊断用）。 */
 export const name = 'pico-wasm-apps-host'
@@ -268,6 +275,21 @@ export function apply(ctx: Context, config: Config = {}): void {
     ? undefined
     : new WasmAppsCache({ root: `${config.userDataDir}/wasm-apps-cache`, warn })
   /**
+   * 窗口几何的目录兜底来源（F3/§6；见 `window-catalog.ts`）。
+   *
+   * 只在"本机打开路由的请求体没带 `window`"且"要新建窗口"时才发一次请求（每个会话
+   * 只拉一次目录）。客户端把目录行里的 `window` 放进请求体之后，这条路径自然不再触发。
+   */
+  const windowCatalog = createWindowCatalog({
+    session: () => {
+      const session = currentSession()
+      return session === null ? null : { token: session.token, serverURL: session.serverURL }
+    },
+    fetch: fetchImpl,
+    ...(config.requestTimeoutMs === undefined ? {} : { timeoutMs: config.requestTimeoutMs }),
+    warn,
+  })
+  /**
    * 本会话内各应用的已知版本（缓存键的一部分；登录/切账号即作废）。
    *
    * 首次打开某应用时给空串 ⇒ 平台回 `changed=true` ⇒ 清一次缓存（正确：新会话本就
@@ -335,6 +357,16 @@ export function apply(ctx: Context, config: Config = {}): void {
     ...(config.requestTimeoutMs === undefined ? {} : { timeoutMs: config.requestTimeoutMs }),
     ...(appProof === undefined ? {} : { appProof }),
     ...(aiChat === undefined ? {} : { aiChat }),
+    // ---- F11 内容缓存（§7.5）：读/写半环的**唯一**接线点 ----
+    //
+    // 此前只接了"失效"半环（`clearApp`），`get`/`put`/`conditional` 在 `cache.ts`
+    // 之外**零调用点** ⇒ 28 条缓存用例全绿而 F11 零效果（2026-09-21 审计 P0-3）。
+    // 三处判据（能不能缓存 / 版本 / 会话作用域）都在 `handler.ts` 里按**每次请求**
+    // 求值：作用域随登录变化、版本随平台响应头变化，任何一个在构造期冻结都会让
+    // 缓存永不命中或跨租户命中。
+    ...(cache === undefined ? {} : { cache }),
+    cacheScope: sessionScope,
+    cacheVersion: (appId: string) => knownVersions.get(appId),
     warn,
   })
 
@@ -382,10 +414,14 @@ export function apply(ctx: Context, config: Config = {}): void {
       return false
     }
   }
-  const partitionFor = (username: string | null | undefined): string =>
+  const partitionFor = (session: ReturnType<typeof readAppSession>): string =>
     config.partition !== undefined && config.partition !== ''
       ? config.partition
-      : browserPartitionFor(username)
+      // §7.2/R2S-8 冻结（2026-09-21 审计 P1-10 证据②补齐）：分区名必须含**服务端地址
+      // 哈希**（`persist:agent-browser-<user>@<hash>`）。分区是 `persist:` 的，同机切
+      // 服务端（测试/正式并存是真实拓扑）时新旧租户会共用同一个分区 —— 同名应用 origin
+      // 的 localStorage/IndexedDB 于是跨租户串味。未登录（anonymous）不带哈希。
+      : browserPartitionFor(session?.username ?? null, serverPartitionHash(session?.serverURL ?? null))
   /**
    * 当前登录用户对应的应用窗口分区（**唯一实现**）。
    *
@@ -393,23 +429,33 @@ export function apply(ctx: Context, config: Config = {}): void {
    * ②权限守卫（`ensureSessionGuard`）；③建窗（`createAppWindow`）。任何一处用了别的
    * 值，表现都是"窗口开了但页面空白"或"守卫装在一个没人用的 session 上"。
    */
-  const currentPartition = (): string => partitionFor(currentSession()?.username ?? null)
+  const currentPartition = (): string => partitionFor(currentSession())
 
   if (adapter === undefined) {
     warn('pico-wasm-apps-host: no Electron adapter was provided; the application protocol stays unregistered')
   } else {
     registerDefault()
   }
-  /** 当前会话对应的分区（+ 匿名分区：未登录时内置浏览器用的是那一个）。 */
+  /** 当前会话对应的分区（未登录 ⇒ 匿名分区，与内置浏览器的启动分区逐字相同）。 */
   const syncPartitions = (): void => {
-    const session = currentSession()
-    ensurePartition(partitionFor(session?.username ?? null))
-    if (session === null) ensurePartition(partitionFor(null))
+    ensurePartition(partitionFor(currentSession()))
   }
   syncPartitions()
 
   // ---- 窗口载体（§16.1：独立窗口 + surface；单应用单窗口、尺寸记忆、比例锁定） ----
   const windowAdapter = ctx.get(WASM_APPS_WINDOW_ADAPTER_SERVICE) as WasmAppsWindowAdapter | undefined
+  /**
+   * browser runtime 的应用窗口 surface 注册表（§16.1，`kind:'app'`）。
+   *
+   * 取值方式是 `inject`（不是 `ctx.get`）：`browserSurface` 由 `@picoaide/dsh-browser`
+   * **provide**，而 profile 里 browser 行在本插件**之后**加载 —— 用 `ctx.get` 会永久拿到
+   * `undefined`（这正是"`registerApp` 零生产调用点"的结构性原因之一）。`inject` 的回调
+   * 在服务出现时执行；回调里补注册已经开着的窗口（深链可以在那之前就把窗口开出来）。
+   *
+   * 不用 `export const inject = [..., 'browserSurface']`：那会让本插件在没有 browser 的
+   * 宿主（纯 Node 冒烟、单测）里**整行加载不了** —— 而应用窗口本身不依赖 surface。
+   */
+  let browserSurfaces: AppSurfaceRegistrar | undefined
   const windows = windowAdapter === undefined || config.userDataDir === undefined
     ? undefined
     : createWasmAppsWindows({
@@ -422,9 +468,18 @@ export function apply(ctx: Context, config: Config = {}): void {
       partition: currentPartition,
       urlFor: (appId, path) => wasmAppUrl(appScheme, appId, path),
       titleFor: (appId) => knownTitles.get(appId),
+      // thunk：注册表可能晚到（见上面的注释）。
+      surfaces: () => browserSurfaces,
       workArea: () => windowAdapter.workArea?.() ?? { x: 0, y: 0, width: 1280, height: 800 },
       warn,
     })
+  ctx.inject(['browserSurface'], (surfaceCtx) => {
+    const registry = surfaceCtx.get(BROWSER_SURFACE_SERVICE) as AppSurfaceRegistrar | undefined
+    if (registry === undefined) return
+    browserSurfaces = registry
+    // 注册表晚到时把**已经开着**的应用窗口补注册进去（深链/本机路由可能早于它）。
+    windows?.registerOpenWindows()
+  })
 
   // ---- 深链队列（§7.6：≤8 条 / TTL 5 min / 未登录入队，登录后按序消费） ----
   const pendingLinks = createDeepLinkQueue({ warn })
@@ -438,9 +493,15 @@ export function apply(ctx: Context, config: Config = {}): void {
    * （真实窗口适配器下的必然结果，纯 Node 宿主反而看不出来）。
    * @param appId - 已校验的 app_id。
    * @param path - 已净化的相对路径。
+   * @param geometry - 作者声明的窗口几何（F3）；传 `undefined` = "还没问过"，本函数会
+   *   在**新建窗口**时去目录兜底取一次；传 `null` = "确定没有声明"（不再兜底）。
    * @returns 打开结论（`unavailable` = 协议未就绪）。
    */
-  const requestOpen = async (appId: string, path: string): Promise<'opened' | 'focused' | 'queued' | 'unavailable'> => {
+  const requestOpen = async (
+    appId: string,
+    path: string,
+    geometry?: DeclaredWindowGeometry | null,
+  ): Promise<'opened' | 'focused' | 'queued' | 'unavailable'> => {
     const session = currentSession()
     if (session === null) {
       pendingLinks.enqueue(appId, path)
@@ -457,7 +518,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     // 应用窗口就落在这个 session 上，注册晚于建窗会让首次加载撞
     // `ERR_UNKNOWN_URL_SCHEME`（空白窗口）。幂等，正常路径下这里是 no-op。
     ensurePartition(currentPartition())
-    const result = await windows.open(appId, path)
+    // 作者声明的窗口几何（F3/§6）：**只对新建窗口**求值（聚焦已有窗口用的是记忆尺寸）。
+    // 请求体/调用方给了就用它，否则问一次目录兜底（每个会话只发一次请求）。
+    const declared = geometry !== undefined
+      ? geometry
+      : (windows.has(appId) ? null : await windowCatalog.lookup(appId) ?? null)
+    const result = await windows.open(appId, path, declared)
     ctx.emit(WASM_APP_OPEN_EVENT, { app_id: appId, url: result.url })
     return result.window
   }
@@ -505,11 +571,17 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.effect(() => subscribePicoSession(ctx, service, () => {
     syncPartitions()
     drainPendingLinks()
+    // 目录兜底按（服务端 + 令牌）缓存：会话一变就必须作废（切租户不得复用上一台的目录）。
+    windowCatalog.invalidate()
     if (currentSession() === null) {
       // 登出/切账号：上一个用户的待打开目标不得在新用户下打开（§7.2 同精神）。
       pendingLinks.clear()
       appProof?.invalidate()
       void windows?.closeAll()
+      // §7.5「会话切换清空」：缓存路径里已经有 session-scope（双保险），但登出仍要
+      // 把落盘的内容删掉 —— 它装着员工业务页面，留着等于"登出后还能从磁盘上读回来"
+      // （磁盘可能被同机另一个本地账户/取证工具看到）。
+      void cache?.clearAll()
     }
   }), 'pico wasm apps host: partition follow')
 
@@ -540,6 +612,14 @@ export function apply(ctx: Context, config: Config = {}): void {
             const rawPath = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
               ? (parsed as Record<string, unknown>).path
               : undefined
+            // 作者声明的窗口几何（F3/§6）：客户端把**目录行里那份**原样放进请求体
+            // （`{window: {ratio?, width?, height?}}`，形状与目录行的 `window` 逐字相同）。
+            // 解析失败/缺席一律当"没声明"，绝不让一块畸形几何挡住打开。
+            const declared = parseDeclaredWindowGeometry(
+              parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+                ? (parsed as Record<string, unknown>).window
+                : undefined,
+            )
             if (typeof appId !== 'string' || !isValidAppId(appId.trim())) {
               json(reply, 400, {
                 error: {
@@ -566,6 +646,11 @@ export function apply(ctx: Context, config: Config = {}): void {
             // F16 硬/软闸门：新窗口 = 硬（拿不到版本就不打开）；聚焦已有窗口 = 软
             // （保留内容 + 提示，不把正常应用打成错误页）。§5.1b 冻结。
             const alreadyOpen = windows?.has(target) === true
+            // 目录兜底与打开校验**并发**（两条都是同一台服务端的一次往返；串行会让
+            // 首次打开白白多等一个 RTT）。请求体已经带了 `window`、或窗口已开着 ⇒ 不查。
+            const catalogWarm = declared === null && !alreadyOpen
+              ? windowCatalog.lookup(target)
+              : undefined
             const gate = await openGate.check(target, knownVersions.get(target) ?? '')
             if (gate.kind === 'denied') {
               // 生命周期反应（§7.2 / §16.1「触发源 = open 端点响应」；R2-L2-2）：
@@ -630,7 +715,7 @@ export function apply(ctx: Context, config: Config = {}): void {
               // 软闸门：聚焦已有窗口时保留内容，只回一条提示（客户端渲染横幅）。
               warning = 'version-unverified'
             }
-            const outcome = await requestOpen(target, path)
+            const outcome = await requestOpen(target, path, declared ?? (catalogWarm === undefined ? undefined : await catalogWarm) ?? null)
             if (outcome === 'unavailable') {
               json(reply, 503, { error: { code: 'PROTOCOL_UNAVAILABLE', message: hostCopy(locale, '应用协议未就绪', 'the app protocol is not available') } })
               return

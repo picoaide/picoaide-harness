@@ -8,6 +8,7 @@ import (
 
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
+	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
 	"github.com/picoaide/picoaide/internal/wasmapp/appdb"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/registry"
@@ -27,6 +28,8 @@ import (
 //   - 真正的新增面是"AI 读行内容 ⇒ 使用者 PII 进模型上下文"，因此：
 //     · 员工面鉴权 = `ownedApp`（**只有发布者本人**，他人一律 404 与"应用不存在"同形）；
 //     · 默认按列名启发式**脱敏**，显式 `unmask=1` 才给原值，且**该次调用单独审计**；
+//     · **作者可补充声明**（`picoaide.app.json` 的 `sensitive_columns`，§5.9 第 8 点后半）：
+//     启发式覆盖不到的业务列名由作者声明，声明与启发式取**并集**（只增不减）；
 //     · 每次调用写审计（动作 `wasm_app_rows_view`），审计**只记表名/分页/行数与脱敏状态，
 //     不记行内容**（把行内容写进审计等于把 PII **再复制一份**到审计表，而审计的保留期
 //     与可见面与业务库完全不同；另外审计明细是"一条 = 一行"的追加型文本面，
@@ -101,7 +104,7 @@ func (h *Handlers) rows(c *gin.Context) {
 		writeErr(c, oerr)
 		return
 	}
-	h.respondRows(c, appID, auditTitleOf(app), u.Username)
+	h.respondRows(c, appID, auditTitleOf(app), u.Username, appcfg.SensitiveColumnsOfConfigJSON(app.ConfigJSON))
 }
 
 // adminRows 是管理面的行浏览（`capability:read`，与诊断/自省同权限点）。
@@ -124,13 +127,15 @@ func (h *Handlers) adminRows(c *gin.Context) {
 		writeErr(c, aerr)
 		return
 	}
-	h.respondRows(c, appID, auditTitleOf(app), admin.Username)
+	h.respondRows(c, appID, auditTitleOf(app), admin.Username, appcfg.SensitiveColumnsOfConfigJSON(app.ConfigJSON))
 }
 
 // respondRows 是两条鉴权面共用的唯一实现（同 diagnosticsPayload 的分工）。
 //
 // appTitle 只用于审计明细（"查看了《团队便签》的表 notes"），不参与数据查询。
-func (h *Handlers) respondRows(c *gin.Context, appID, appTitle, operator string) {
+// declared 是作者在 `picoaide.app.json` 里**声明**的额外敏感列（appcfg 的
+// `sensitive_columns`）：与默认启发式取**并集**（声明是加法）。
+func (h *Handlers) respondRows(c *gin.Context, appID, appTitle, operator string, declared []string) {
 	ctx := c.Request.Context()
 
 	table := strings.TrimSpace(c.Query("table"))
@@ -206,11 +211,21 @@ func (h *Handlers) respondRows(c *gin.Context, appID, appTitle, operator string)
 	}
 
 	// ④ 投影：脱敏 + 单值截断。列名→是否敏感的判定只在这里做一次。
+	//
+	// 敏感 = **默认启发式 ∪ 作者声明**（§5.9 第 8 点后半）：两条通道是**并集**，
+	// 声明不能"取消"启发式（没有反向开关 —— 平台无法复核作者"这列不敏感"的判断，
+	// 而判错的代价是 PII 进模型上下文）。声明的匹配是**逐字 + 大小写不敏感**
+	//（appcfg.DeclaredSensitiveColumn），不做前缀/子串：模糊判定是启发式的职责。
+	//
+	// 声明了但**不在结果集里**的列不算错误（列改名、还没建表、或这张表本来就没有它）：
+	// 它只是这次不参与脱敏，`masked_columns` 也只在真的遮住某一列时才提到那一列
+	//（"声明"不是"结果集"的事实，两者不该互相要求）。
+	declaredSet := appcfg.SensitiveColumnSet(declared)
 	cols := make([]rowsColumn, 0, len(res.Columns))
 	masked := make([]string, 0)
 	sensitive := make([]bool, len(res.Columns))
 	for i, name := range res.Columns {
-		s := isSensitiveColumn(name)
+		s := isSensitiveColumn(name) || appcfg.DeclaredSensitiveColumn(declaredSet, name)
 		sensitive[i] = s
 		if s && !unmask {
 			masked = append(masked, name)

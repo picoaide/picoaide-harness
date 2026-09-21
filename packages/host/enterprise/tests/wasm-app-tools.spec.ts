@@ -21,7 +21,9 @@
  *   - 工具直接出站而不做 `wasm_path` 读取面校验 →「越界/目录被拒且零出站」红；
  *   - 错误结果里重新序列化信封（丢掉 hints/details）→「信封原样带出」红；
  *   - `config` 的字段名或必填标志漂移 →「配置字段与常量一致」+ limits/appcfg 对拍红；
- *   - 未登录/审计账号放行 →「明确拒绝且零出站」两条红。
+ *   - 未登录/审计账号放行 →「明确拒绝且零出站」两条红；
+ *   - `wasm_app_rows` 去掉"AI 读取默认关"的授权判定（回到默认开）→ 本文件里 rows 的
+ *     出站用例仍绿，但 `tests/wasm-app-ai-rows-consent.spec.ts` 整组红（那是这道闸的判据）。
  */
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
@@ -1286,6 +1288,17 @@ describe('工具描述与服务端实现一致（下架语义 / 旧配置字段�
 // 6. 作者回读面：wasm_app_schema / wasm_app_diagnostics / wasm_app_rows
 // ---------------------------------------------------------------------------
 
+/**
+ * 打开「AI 读取此应用的数据」的授权（**默认关**，2026-09-21 用户拍板）。
+ *
+ * 走**本机路由**而不是直接写文件：这正是面板在生产里做的事，因此调用它的用例同时
+ * 钉住"面板写的状态 = 工具读的状态"（同一份真源）。
+ */
+async function authorizeAiRows(h: Harness, appId: string): Promise<void> {
+  const res = await h.call(`${WASM_APPS_PREFIX}/${appId}/ai-rows-consent`, 'POST', JSON.stringify({ enabled: true }))
+  if (res.code !== 200) throw new Error(`授权失败：HTTP ${String(res.code)} ${res.text}`)
+}
+
 describe('作者回读面：AI 也能"看"，但看不到被脱敏的原值', () => {
   const SCHEMA_BODY = {
     schema: {
@@ -1346,6 +1359,8 @@ describe('作者回读面：AI 也能"看"，但看不到被脱敏的原值', ()
 
   it('wasm_app_rows 出站 GET …/rows?table=…&limit=…&offset=…，且**永不带 unmask**', async () => {
     const h = harness(() => json(200, ROWS_BODY))
+    // AI 读行数据是**默认关**的能力（2026-09-21 用户拍板）：先经本机路由打开开关。
+    await authorizeAiRows(h, 'shared-notes')
     const result = await h.run('wasm_app_rows', { appId: 'shared-notes', table: 'notes', limit: 10, offset: 20 })
     expect(h.outbound).toHaveLength(1)
     const url = new URL(h.outbound[0]!.url)
@@ -1371,6 +1386,11 @@ describe('作者回读面：AI 也能"看"，但看不到被脱敏的原值', ()
 
   it('三条回读工具对审计账号放行（只读面与 list 同口径），未登录一律零出站拒绝', async () => {
     for (const name of ['wasm_app_schema', 'wasm_app_diagnostics', 'wasm_app_rows']) {
+      // rows 还有第二道闸（AI 读取默认关）：这道闸在会话闸门**之内**，审计账号也要过。
+      // 但授权本身只能由员工打开（审计账号是只读的，写面由 writeGuard 拒）——
+      // 所以先用**员工** harness 走本机路由授权（同一个数据根，落盘后对下面可见）。
+      // ⚠️ 顺序有讲究：每个 `harness()` 都会换掉全局 fetch，被测的那个必须**最后**建。
+      if (name === 'wasm_app_rows') await authorizeAiRows(harness(() => json(200, {}), SESSION), 'a')
       const auditor = harness(() => json(200, {}), AUDITOR)
       const ok = await auditor.run(name, name === 'wasm_app_rows' ? { appId: 'a', table: 't' } : { appId: 'a' })
       expect(ok.ok).toBe(true)

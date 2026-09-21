@@ -28,6 +28,7 @@ import {
 import { AI_CHAT_PATH } from './ai-chat.ts'
 import { AI_CONSENT_FILE_NAME } from './ai-authorization.ts'
 import type { AppSchemeRequestHandler, WasmAppsHostAdapter } from './electron-adapter.ts'
+import { serverPartitionHash } from './partition.ts'
 import type { AppSession, PicoSessionLike } from './session.ts'
 
 /** 记录注册面与事件的假 Cordis 上下文（只实现本插件真正用到的成员）。 */
@@ -45,11 +46,18 @@ function fakeContext(options: {
   aiRunner?: unknown
   /** 窗口适配器（配合 `apply(ctx, {userDataDir})` 才建窗口管理器；生命周期用例需要）。 */
   windowAdapter?: unknown
+  /**
+   * 应用窗口 surface 注册表（§16.1）。给了 ⇒ `ctx.inject(['browserSurface'])` 的回调
+   * **立刻**执行（模拟 browser 行已加载）；不给 ⇒ 回调挂起，测试可用
+   * `provideBrowserSurface()` 模拟"注册表晚到"。
+   */
+  browserSurface?: unknown
 } = {}) {
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
   const emitted: Array<{ event: string, payload: unknown }> = []
   const warnings: string[] = []
   const routes: Array<{ kind: string, path: string, handler: (req: IncomingMessage, res: ServerResponse) => void }> = []
+  const injections: Array<{ deps: readonly string[], callback: (scope: { get: (name: string) => unknown }) => void }> = []
   let session: AppSession | null = options.session ?? null
   const partitions: string[] = []
   let defaultRegistrations = 0
@@ -86,10 +94,32 @@ function fakeContext(options: {
     ['connection', options.fence === null ? undefined : (options.fence ?? { requestRejection: () => undefined })],
     [WASM_APPS_AI_RUNNER_SERVICE, options.aiRunner],
     [WASM_APPS_WINDOW_ADAPTER_SERVICE, options.windowAdapter],
+    ['browserSurface', options.browserSurface],
   ])
+
+  /**
+   * `ctx.inject` 的替身（本插件只用它取晚到的 `browserSurface`）。
+   *
+   * 语义与 Cordis 一致：服务**已经**在 ⇒ 回调立刻执行；还没到 ⇒ 挂起，等
+   * {@link provideBrowserSurface} 触发（这正是 profile 里 browser 行在本插件之后
+   * 加载的真实时序）。
+   */
+  const runInjection = (injection: { deps: readonly string[], callback: (scope: { get: (name: string) => unknown }) => void }, name: string): void => {
+    injection.callback({ get: (key: string) => (key === name ? services.get(name) : undefined) })
+  }
+  const inject = (deps: readonly string[], callback: (scope: { get: (name: string) => unknown }) => void): (() => void) => {
+    const injection = { deps, callback }
+    injections.push(injection)
+    if (deps.includes('browserSurface') && services.get('browserSurface') !== undefined) runInjection(injection, 'browserSurface')
+    return () => {
+      const index = injections.indexOf(injection)
+      if (index >= 0) injections.splice(index, 1)
+    }
+  }
 
   const ctx = {
     get: (name: string) => (name === 'webServer' ? webServerService : services.get(name)),
+    inject,
     on: (event: string, handler: (...args: unknown[]) => void) => {
       const set = listeners.get(event) ?? new Set()
       set.add(handler)
@@ -119,6 +149,13 @@ function fakeContext(options: {
     setSession: (next: AppSession | null) => { session = next },
     get defaultRegistrations() { return defaultRegistrations },
     get handler() { return currentHandler },
+    /** 模拟 browser 行**晚于**本插件加载：注册表现在才出现。 */
+    provideBrowserSurface: (registry: unknown) => {
+      services.set('browserSurface', registry)
+      for (const injection of [...injections]) {
+        if (injection.deps.includes('browserSurface')) runInjection(injection, 'browserSurface')
+      }
+    },
     fireSessionChanged: () => {
       for (const handler of listeners.get('pico/session-changed') ?? []) handler(session)
     },
@@ -167,6 +204,13 @@ function fakeResponse(): { res: ServerResponse, state: { status: number, body: s
 const flush = (): Promise<void> => new Promise(resolve => { setTimeout(resolve, 0) })
 
 const ALICE: AppSession = { serverURL: 'https://harness.example.com', token: 'tok', username: 'alice' }
+/**
+ * alice 在 `https://harness.example.com` 上的分区名（§7.2 冻结：
+ * `persist:agent-browser-<user>@<server-hash>`）。哈希口径 = `serverPartitionHash`
+ * （sha256 前 32 位 hex，去尾斜杠）；这里写死是为了让**形状本身**成为判据：
+ * 换服务端地址必须换分区（跨租户不得串味），未登录仍是匿名分区。
+ */
+const ALICE_PARTITION = `persist:agent-browser-alice@${serverPartitionHash(ALICE.serverURL)!}`
 
 describe('protocol and partition registration', () => {
   it('registers the default session plus the anonymous partition with no session', () => {
@@ -179,7 +223,10 @@ describe('protocol and partition registration', () => {
   it('registers the logged-in user partition on a restored session (no event needed)', () => {
     const h = fakeContext({ session: ALICE, restored: true })
     apply(h.ctx, {})
-    expect(h.partitions).toEqual(['persist:agent-browser-alice'])
+    expect(h.partitions).toEqual([ALICE_PARTITION])
+    // §7.2 冻结：分区名含**服务端地址哈希**（2026-09-21 审计 P1-10 证据②）。
+    // 变异：`browserPartitionFor` 去掉 `@<hash>` 后缀 ⇒ 本组用例必红。
+    expect(h.partitions[0]).not.toBe('persist:agent-browser-alice')
   })
 
   it('follows the session change (setPartition semantics) without duplicating registrations', () => {
@@ -189,14 +236,30 @@ describe('protocol and partition registration', () => {
     h.setSession(ALICE)
     h.fireSessionChanged()
     // 新分区被补注册，旧分区保留（已挂载的页面不受影响）。
-    expect(h.partitions).toEqual(['persist:agent-browser-anonymous', 'persist:agent-browser-alice'])
+    expect(h.partitions).toEqual(['persist:agent-browser-anonymous', ALICE_PARTITION])
     // 同一分区重复同步不重复注册（Electron 对同一 scheme 二次 handle 会抛）。
     h.fireSessionChanged()
     h.fireSessionChanged()
-    expect(h.partitions).toEqual(['persist:agent-browser-anonymous', 'persist:agent-browser-alice'])
+    expect(h.partitions).toEqual(['persist:agent-browser-anonymous', ALICE_PARTITION])
     h.setSession(null)
     h.fireSessionChanged()
-    expect(h.partitions).toEqual(['persist:agent-browser-anonymous', 'persist:agent-browser-alice'])
+    expect(h.partitions).toEqual(['persist:agent-browser-anonymous', ALICE_PARTITION])
+  })
+
+  it('换服务端地址 ⇒ 换分区（跨租户不得共用同一个持久分区）', () => {
+    const h = fakeContext({ session: ALICE, restored: true })
+    apply(h.ctx, {})
+    const first = h.partitions[0]
+    h.setSession({ ...ALICE, serverURL: 'https://other.example.com' })
+    h.fireSessionChanged()
+    expect(h.partitions[1]).not.toBe(first)
+    expect(h.partitions[1]?.startsWith('persist:agent-browser-alice@')).toBe(true)
+    // 尾斜杠是同一个服务端（分区名是磁盘目录名，不能因为一次地址写法不同就换空分区）：
+    // 归一化之后同名 ⇒ 不产生第二次注册（`ensurePartition` 幂等）。
+    const other = h.partitions[1]
+    h.setSession({ ...ALICE, serverURL: 'https://other.example.com/' })
+    h.fireSessionChanged()
+    expect(h.partitions).toEqual([first, other])
   })
 
   it('honours an explicit partition override', () => {
@@ -711,8 +774,8 @@ describe('local open route', () => {
     }
 
     await openOnce('my-notes')
-    expect(h.partitions).toEqual(['persist:agent-browser-alice'])
-    expect(created[0]?.partition).toBe('persist:agent-browser-alice')
+    expect(h.partitions).toEqual([ALICE_PARTITION])
+    expect(created[0]?.partition).toBe(ALICE_PARTITION)
     // 窗口与协议注册必须同源：不同 = 应用页 `ERR_UNKNOWN_URL_SCHEME` 空白窗口。
     expect(created[0]?.partition).toBe(h.partitions[h.partitions.length - 1])
 
@@ -721,8 +784,9 @@ describe('local open route', () => {
     h.fireSessionChanged()
     answer = () => new Response(JSON.stringify({ version: '1.0.0', changed: false }), { status: 200 })
     await openOnce('other-app')
-    expect(h.partitions).toContain('persist:agent-browser-bob')
-    expect(created[1]?.partition).toBe('persist:agent-browser-bob')
+    const bobPartition = `persist:agent-browser-bob@${serverPartitionHash(ALICE.serverURL)!}`
+    expect(h.partitions).toContain(bobPartition)
+    expect(created[1]?.partition).toBe(bobPartition)
 
     // 自定义分区覆盖（config.partition）同样贯穿两处。
     const createdCustom: Array<Record<string, unknown>> = []
@@ -1015,5 +1079,266 @@ describe('应用 AI 桥（§21）：授权路由 → 闸门 → SSE，且不转�
     expect(served.status).toBe(200)
     // 变异：把 `__picoaide/ai/chat` 落进"普通应用请求"分支 ⇒ 这里会多出一条平台 URL。
     expect(fetched).toEqual([])
+  })
+})
+
+/**
+ * 三处「设计已冻结、实现没接通」的接线（2026-09-21 审计 B1/B2/B3）。
+ *
+ * 这一组刻意走**生产装配路径**（`apply` → 本机打开路由 → 协议 handler），而不是
+ * 直接调 `windows.open` / `handler(...)`：三处缺口的共同形态就是"子模块有实现、
+ * 生产调用点为零"，只测子模块的用例正是掩盖它们的东西。
+ */
+describe('接线缺口回归（B1 surface / B2 窗口几何 / B3 内容缓存）', () => {
+  const routeOf = (h: ReturnType<typeof fakeContext>) => {
+    const route = h.routes.find(entry => entry.path === WASM_APPS_LOCAL_PREFIX)
+    expect(route, 'open route must be registered').toBeDefined()
+    return route!
+  }
+  const proofOf = async (h: ReturnType<typeof fakeContext>): Promise<string> => {
+    const { res, state } = fakeResponse()
+    routeOf(h).handler(fakeRequest('GET', undefined, {}, `${WASM_APPS_LOCAL_PREFIX}/host-proof`), res)
+    for (let i = 0; i < 200 && state.status === 0; i++) await flush()
+    expect(state.status).toBe(200)
+    return (JSON.parse(state.body) as { proof: string }).proof
+  }
+  /** 走本机打开路由并把响应读全（handler 是 fire-and-forget）。 */
+  const openViaRoute = async (
+    h: ReturnType<typeof fakeContext>,
+    body: string,
+    proof: string,
+  ): Promise<{ status: number, body: string }> => {
+    const { res, state } = fakeResponse()
+    routeOf(h).handler(fakeRequest('POST', body, { 'x-pico-host-proof': proof }), res)
+    for (let i = 0; i < 300; i++) {
+      if (state.status !== 0 && state.body !== '') return state
+      await flush()
+      await new Promise(resolve => { setTimeout(resolve, 5) })
+    }
+    throw new Error('open 路由在预算内没有写完响应')
+  }
+  /** 等一个"调用另一个异步面"的可观察结果（深链/协议 handler 都是 fire-and-forget）。 */
+  const until = async (check: () => boolean): Promise<void> => {
+    for (let i = 0; i < 300; i++) {
+      if (check()) return
+      await flush()
+      await new Promise(resolve => { setTimeout(resolve, 5) })
+    }
+    throw new Error('等待的条件在预算内没有成立')
+  }
+
+  const WORK_AREA = { x: 0, y: 0, width: 1920, height: 1080 }
+
+  /** 建窗替身：记录几何，报 webContents（surface 注册要用）。 */
+  function windowStub(): {
+    created: Array<Record<string, unknown>>
+    adapter: Record<string, unknown>
+  } {
+    const created: Array<Record<string, unknown>> = []
+    return {
+      created,
+      adapter: {
+        createAppWindow: (options: Record<string, unknown>) => { created.push(options); return { id: created.length } },
+        focusAppWindow: () => {},
+        closeAppWindow: () => {},
+        setAspectRatio: () => {},
+        webContentsId: (handle: { id: number }) => handle.id,
+        webContents: (handle: { id: number }) => ({ wc: handle.id }),
+        workArea: () => WORK_AREA,
+      },
+    }
+  }
+
+  const openAnswer = (version: string): Response =>
+    new Response(JSON.stringify({ version, changed: true }), { status: 200 })
+
+  /**
+   * B1：应用窗口注册为 browser runtime 的 surface（§16.1 的 `kind:'app'`）。
+   *
+   * 变异：删掉 `windows.ts` 的 `registerSurface` 调用 ⇒ "建窗即注册" 红；
+   * 删掉 `ctx.inject(['browserSurface'])` 那段 ⇒ "晚到补注册" 红。
+   */
+  it('B1 建窗即注册 surface（appId/scheme/webContents/分区 scope），登出注销', async () => {
+    const registered: Array<{ id: number, appId: string, appScheme: string, webContents?: unknown, scope?: string }> = []
+    const unregistered: number[] = []
+    const surfaceRegistry = {
+      registerApp: (input: { id: number, appId: string, appScheme: string, webContents?: unknown, scope?: string }) => {
+        registered.push(input)
+        return { id: input.id }
+      },
+      unregister: (id: number) => { unregistered.push(id) },
+    }
+    const { created, adapter } = windowStub()
+    const h = fakeContext({
+      session: ALICE,
+      windowAdapter: adapter,
+      browserSurface: surfaceRegistry,
+      fetch: async url => (url.endsWith('/open') ? openAnswer('2.0.0') : new Response('{}', { status: 200 })),
+    })
+    apply(h.ctx, { userDataDir: mkdtempSync(join(tmpdir(), 'pico-wasm-apps-surface-')), appOriginScheme: 'acme-app' })
+    const proof = await proofOf(h)
+
+    const opened = await openViaRoute(h, '{"app_id":"demo"}', proof)
+    expect(opened.status).toBe(200)
+    expect(created).toHaveLength(1)
+    expect(registered).toHaveLength(1)
+    expect(registered[0]).toMatchObject({
+      appId: 'demo',
+      appScheme: 'acme-app',
+      scope: ALICE_PARTITION,
+      webContents: { wc: 1 },
+    })
+
+    // 登出 ⇒ closeAll ⇒ surface 注销（否则模型还能寻址到一个已经销毁的 webContents）。
+    h.setSession(null)
+    h.fireSessionChanged()
+    expect(unregistered).toEqual([registered[0]?.id])
+  })
+
+  it('B1 browser 行晚到（profile 里本插件在前）⇒ 补注册已经开着的窗口', async () => {
+    const registered: Array<{ id: number, appId: string }> = []
+    const { adapter } = windowStub()
+    const h = fakeContext({
+      session: ALICE,
+      windowAdapter: adapter,
+      // 刻意不给 browserSurface：模拟 browser 行还没加载。
+      fetch: async url => (url.endsWith('/open') ? openAnswer('2.0.0') : new Response('{}', { status: 200 })),
+    })
+    apply(h.ctx, { userDataDir: mkdtempSync(join(tmpdir(), 'pico-wasm-apps-surface-late-')), appOriginScheme: 'acme-app' })
+    const proof = await proofOf(h)
+    expect((await openViaRoute(h, '{"app_id":"demo"}', proof)).status).toBe(200)
+    expect(registered).toHaveLength(0)
+
+    // 注册表现在才出现（browser 插件 apply）。
+    h.provideBrowserSurface({
+      registerApp: (input: { id: number, appId: string }) => { registered.push(input); return { id: input.id } },
+      unregister: () => {},
+    })
+    expect(registered.map(entry => entry.appId)).toEqual(['demo'])
+  })
+
+  /**
+   * B2：作者声明的窗口几何（`window.ratio/width/height`）进建窗路径。
+   *
+   * 变异：把打开路由里的 `parseDeclaredWindowGeometry` 结果丢掉（回退成
+   * `windows.open(target, path)` 的老调用）⇒ 本组三条全红。
+   */
+  it('B2 请求体里的 window（客户端目录行那份）决定首次尺寸与比例锁', async () => {
+    const { created, adapter } = windowStub()
+    const h = fakeContext({
+      session: ALICE,
+      windowAdapter: adapter,
+      fetch: async url => (url.endsWith('/open') ? openAnswer('2.0.0') : new Response('{}', { status: 200 })),
+    })
+    apply(h.ctx, { userDataDir: mkdtempSync(join(tmpdir(), 'pico-wasm-apps-geometry-')), appOriginScheme: 'acme-app' })
+    const proof = await proofOf(h)
+
+    const opened = await openViaRoute(h, '{"app_id":"demo","window":{"ratio":1.7778,"width":1600}}', proof)
+    expect(opened.status).toBe(200)
+    expect(created[0]).toMatchObject({ width: 1600, height: 900 })
+    expect(created[0]?.ratio).toBeCloseTo(1.7778, 4)
+    // 详情页显示的「窗口比例 16:9」与真实窗口必须一致：比例锁就是这条断言的行为面。
+    expect(created[0]?.minimumWidth).toBeGreaterThan(0)
+  })
+
+  it('B2 请求体没带 window ⇒ 目录兜底（与详情页读到的是同一份服务端数据）', async () => {
+    const { created, adapter } = windowStub()
+    const catalogUrls: string[] = []
+    const h = fakeContext({
+      session: ALICE,
+      windowAdapter: adapter,
+      fetch: async (url) => {
+        if (url.endsWith('/open')) return openAnswer('2.0.0')
+        if (url.endsWith('/catalog')) {
+          catalogUrls.push(url)
+          return new Response(JSON.stringify({ apps: [{ app_id: 'demo', title: 'Demo', window: { ratio: 2, width: 1000 } }] }), { status: 200 })
+        }
+        return new Response('{}', { status: 200 })
+      },
+    })
+    apply(h.ctx, { userDataDir: mkdtempSync(join(tmpdir(), 'pico-wasm-apps-geometry-cat-')), appOriginScheme: 'acme-app' })
+    const proof = await proofOf(h)
+
+    expect((await openViaRoute(h, '{"app_id":"demo"}', proof)).status).toBe(200)
+    expect(created[0]).toMatchObject({ width: 1000, height: 500 })
+    expect(created[0]?.ratio).toBe(2)
+    expect(catalogUrls).toEqual([`${ALICE.serverURL}/api/client/v2/apps/wasm/catalog`])
+
+    // 第二个应用复用**同一份**目录（同一个会话只拉一次），不再发第二次请求。
+    expect((await openViaRoute(h, '{"app_id":"demo","path":"/notes"}', proof)).status).toBe(200)
+    expect(catalogUrls).toHaveLength(1)
+  })
+
+  it('B2 深链打开（没有请求体那条路径）同样拿目录兜底', async () => {
+    const { created, adapter } = windowStub()
+    const h = fakeContext({
+      session: ALICE,
+      windowAdapter: adapter,
+      fetch: async (url) => {
+        if (url.endsWith('/catalog')) {
+          return new Response(JSON.stringify({ apps: [{ app_id: 'demo', window: { ratio: 4 / 3 } }] }), { status: 200 })
+        }
+        return new Response('{}', { status: 200 })
+      },
+    })
+    apply(h.ctx, { userDataDir: mkdtempSync(join(tmpdir(), 'pico-wasm-apps-geometry-link-')), appOriginScheme: 'acme-app', deepLinkScheme: 'acmeai' })
+    h.fireDeepLink('acmeai://app/demo?path=%2Fnotes')
+    await until(() => created.length === 1)
+    expect(created[0]).toMatchObject({ width: 1280, height: 960 })
+    expect(created[0]?.ratio).toBeCloseTo(4 / 3, 6)
+  })
+
+  /**
+   * B3：静态资源缓存的**读/写**半环（F11）。
+   *
+   * 走生产链路：本机打开路由把平台版本写进 `knownVersions` → 协议 handler 用
+   * `(scope, app_id, version, path)` 读/写缓存。第二次取同一个静态资源必须**零出网**。
+   *
+   * 变异：把 `index.ts` 里传给 handler 的 `cache`/`cacheScope`/`cacheVersion` 任一项
+   * 删掉 ⇒ 第二条断言（第二次仍出网）红。
+   */
+  it('B3 打开校验的版本进缓存键：第二次取同一静态资源零出网', async () => {
+    const { adapter } = windowStub()
+    const userDataDir = mkdtempSync(join(tmpdir(), 'pico-wasm-apps-cache-wire-'))
+    let requestCalls = 0
+    const h = fakeContext({
+      session: ALICE,
+      windowAdapter: adapter,
+      fetch: async (url) => {
+        if (url.endsWith('/open')) return openAnswer('3.1.4')
+        // 目录兜底与内容请求**分账**：只有 `/request` 才是"应用内容回源"。
+        if (url.endsWith('/catalog')) return new Response(JSON.stringify({ apps: [] }), { status: 200 })
+        requestCalls += 1
+        return new Response(JSON.stringify({
+          status: 200,
+          headers: { 'Content-Type': 'application/javascript' },
+          body: Buffer.from(`payload-${String(requestCalls)}`).toString('base64'),
+          truncated: false,
+        }), { status: 200 })
+      },
+    })
+    apply(h.ctx, { userDataDir, appOriginScheme: 'acme-app' })
+    const proof = await proofOf(h)
+    expect((await openViaRoute(h, '{"app_id":"demo"}', proof)).status).toBe(200)
+
+    const handler = h.handler
+    expect(handler, '协议 handler 必须已注册').toBeDefined()
+    const first = await handler!(new Request('acme-app://demo/app.js', { headers: { accept: '*/*' } }))
+    expect(await first.text()).toBe('payload-1')
+    expect(requestCalls).toBe(1)
+
+    const second = await handler!(new Request('acme-app://demo/app.js', { headers: { accept: '*/*' } }))
+    expect(await second.text()).toBe('payload-1')
+    // 缓存命中 ⇒ 一次都不回源（F11 的性能承诺）。
+    expect(requestCalls).toBe(1)
+    expect(second.headers.get('x-picoaide-app-version')).toBe('3.1.4')
+    // 落盘位置在 `<userData>/wasm-apps-cache`（诊断/清理口径）。
+    expect(existsSync(join(userDataDir, 'wasm-apps-cache'))).toBe(true)
+
+    // 会话切换（登出）⇒ 缓存整根清掉（§7.5「会话切换清空」）。
+    h.setSession(null)
+    h.fireSessionChanged()
+    await until(() => !existsSync(join(userDataDir, 'wasm-apps-cache', String(process.pid))))
+    expect(existsSync(join(userDataDir, 'wasm-apps-cache'))).toBe(true)
   })
 })

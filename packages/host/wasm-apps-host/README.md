@@ -9,7 +9,7 @@
 ## 它做什么 / 不做什么
 
 ```
-内置浏览器视图（partition: persist:agent-browser-<user>）
+应用窗口 / 内置浏览器视图（partition: persist:agent-browser-<user>@<server-hash>）
   load picoaide-app://<app_id>/<path>?<query>
         │  Chromium 交给已注册的协议 handler
         ▼
@@ -46,7 +46,8 @@
 | --- | --- |
 | 协议 URL | `picoaide-app://<app_id>/<path>?<query>`；app_id = `^[a-z0-9]+(?:-[a-z0-9]+)*$`（与 `limits.AppIDPattern` 同源） |
 | 平台出站 | `POST <serverURL>/api/client/v2/apps/wasm/<app_id>/request`，`Authorization: Bearer <员工令牌>`，`Origin: picoaide-app://<app_id>` |
-| 本机路由 | 前缀 `/api/pico/wasm-apps`（handler 内按 pathname 分发）；打开 = `POST /api/pico/wasm-apps/open`，体 `{app_id}` → `{ok, app_id, url}`；写面**必须过持有性证明**（`connection.requestRejection`，fence 缺席 fail-closed 503） |
+| 本机路由 | 前缀 `/api/pico/wasm-apps`（handler 内按 pathname 分发）；打开 = `POST /api/pico/wasm-apps/open`，体 `{app_id, path?, window?}` → `{window, app_id, url, opens?, warning?}`；写面**必须过持有性证明**（`connection.requestRejection`，fence 缺席 fail-closed 503） |
+| 窗口几何 | `window: {ratio?, width?, height?}`（**形状与目录行的 `window` 逐字相同**，F3/§6）。给了就用它建窗（首次尺寸 + 比例锁）；没给 ⇒ 宿主自己拉一次平台目录 `GET /api/client/v2/apps/wasm/catalog` 兜底（每会话一次，见 `src/window-catalog.ts`）⇒ 详情页显示的比例与真实窗口永远同源 |
 | 宿主事件 | `pico/wasm-app-open` `{app_id, url}` —— 客户端面据此在内置浏览器里开标签 |
 | 深链 | `<渠道 scheme>://app/<app_id>`（`pico/deep-link` 事件；未知 scheme/host/路径一律丢弃，**不回落**） |
 
@@ -66,12 +67,26 @@ JSON 信封（按 code 分流）。未登录**永远**是可读页面，不是�
 
 ## 分区跟随
 
-内置浏览器的分区按用户切换（`persist:agent-browser-<encoded-user>`）。本包在装配期注册默认
-session + 当前用户分区，并订阅 `pico/session-changed`（订阅 + `isRestored()` 补发，避免
-"恢复型启动漏掉首个事件"）后补注册新分区。分区名推导是
-`packages/host/browser/src/electron-adapter.ts` 的**镜像**（browser 包没有导出它），
-`src/partition.spec.ts` 与 browser 的 `tests/partition.spec.ts` 用同一组例值钉死；
-部署侧若要另一种命名，用 config 的 `partition` 覆盖。
+内置浏览器的分区按用户切换（`persist:agent-browser-<encoded-user>@<server-hash>`，§7.2
+冻结：后缀是服务端地址的 sha256 前 32 位 hex —— 同机切服务端时不得跨租户共用持久分区；
+未登录的匿名分区**不带**后缀）。本包在装配期注册默认 session + 当前用户分区，并订阅
+`pico/session-changed`（订阅 + `isRestored()` 补发，避免"恢复型启动漏掉首个事件"）后补注册
+新分区。分区名推导是 `packages/host/browser/src/electron-adapter.ts` 的**镜像**（browser 包
+没有导出它），`src/partition.spec.ts` 与 browser 的 `tests/partition.spec.ts` 用同一组例值
+钉死 —— **browser 侧必须同批改成同一份公式**（含 `@<server-hash>`），否则登录态下两边的
+分区名不同；部署侧若要另一种命名，用 config 的 `partition` 覆盖。
+
+## 应用窗口的 AI（surface）与内容缓存
+
+- **surface 注册**（§16.1 / F7）：建窗即把窗口注册进 browser runtime 的 surface 注册表
+  （Cordis 服务 `browserSurface`，`@picoaide/dsh-browser/surface` 的 `BROWSER_SURFACE_SERVICE`），
+  载荷是 `{id, appId, appScheme, webContents, scope}`；关窗/登出注销。注册表晚到（profile 里
+  browser 行在本插件之后）由 `ctx.inject(['browserSurface'])` + `windows.registerOpenWindows()`
+  补齐。`webContents` 是**真实句柄**：browser 侧的 CDP 附着路径要用它才能真正驱动这个窗口
+  （见 `src/windows.ts` 的 `AppSurfaceRegistrar`）。
+- **内容缓存**（§7.5 / F11）：`handler.ts` 读/写 `WasmAppsCache`，键 =
+  `<session-scope> + app_id + version + path`（version 只来自 `X-PicoAide-App-Version`）；
+  只有静态子资源可直出，文档导航与 `/api/*` 一律回源；登出清空整根。
 
 ## 命令
 

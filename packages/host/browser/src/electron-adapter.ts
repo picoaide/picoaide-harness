@@ -20,8 +20,15 @@ import type { CdpTransport } from './cdp.ts'
 
 /** The minimal native view surface the browser runtime drives. */
 export interface NativeView {
-  /** Stable partition name of this view's session (persistent browser storage). */
-  readonly partition: string
+  /**
+   * Stable partition name of this view's session (persistent browser storage).
+   *
+   * ABSENT = the view runs in Electron's **default session** (no partition).
+   * That is the mask overlay since 2026-09-21 (§7b option A): it shares the
+   * application's own cookie jar with the shell window, which is what makes the
+   * BrowserAuth write proof work without copying the credential anywhere.
+   */
+  readonly partition?: string
   /** Attach this view to the browser window at the given bounds. */
   attach(win: NativeBrowserWindow, bounds: NativeBounds): void
   /** Update the view bounds (DIP, relative to the window content area). */
@@ -234,7 +241,19 @@ export function raiseChildView(win: NativeBrowserWindow, view: unknown): void {
  */
 export interface ElectronAdapter {
   createView(partition?: string): NativeView
-  /** The AI interception mask view (transparent, z-top; clicks hand control to the user). */
+  /**
+   * The AI interception mask view (transparent, z-top; clicks hand control to the user).
+   *
+   * `partition` is OPTIONAL and the runtime passes **nothing**: the mask then
+   * runs in the DEFAULT session, i.e. the same jar as the browser window's own
+   * shell page and the main application window. That is a security requirement,
+   * not a default (docs/decisions/2026-09-21-app-author-data-surface.md §7b):
+   * the mask page is served by this host and its write operations must pass
+   * `requireWriteProof`, whose proof is the application's `dsh-auth-*` cookie.
+   * Putting the mask in a `persist:` partition either loses that cookie (the
+   * 2026-09-14 P0: 「我来操作」 silently 403s) or — as the pre-2026-09-21 code
+   * did — forces the cookie to be COPIED into the model-drivable tab partition.
+   */
   createMaskView(partition?: string): NativeView
   createBrowserWindow(): NativeBrowserWindow
   showSaveDialog(options: { title: string; defaultPath: string }): Promise<{ canceled: boolean; filePath?: string }>
@@ -253,11 +272,17 @@ export interface ElectronAdapter {
 /**
  * Persistent browser partition: login sessions survive app restarts and stay
  * isolated from the main application's cookies/storage. The partition name is
- * per-user (`persist:agent-browser-<encoded-user>`), so a user switch never
- * exposes A's website logins to B. The username is hex-encoded with the same
- * scheme as the connectors user scope (no separators, no dots).
+ * per-user (`persist:agent-browser-<encoded-user>[@<server-hash>]`), so a user
+ * switch never exposes A's website logins to B, and a **server** switch (the
+ * deployment topology has a test and a production server side by side on one
+ * machine) never shares one persistent partition between two tenants.
  *
- * CROSS-PACKAGE CONSTRAINT (2026-08-22): this encoding intentionally mirrors
+ * The formula has ONE implementation — `./surface.ts` (`browserPartitionFor`),
+ * re-exported here so the long-standing import path keeps working. The
+ * `@picoaide/dsh-wasm-apps-host/partition` mirror is pinned against it by
+ * `tests/partition-parity.spec.ts`.
+ *
+ * CROSS-PACKAGE CONSTRAINT (2026-08-22): the encoding intentionally mirrors
  * `@picoaide/dsh-connectors` `encodeSegment` (user-scope.ts) byte-for-byte —
  * the two are implemented separately because cross-package runtime imports
  * are forbidden, but they must NEVER diverge (a divergence would let the
@@ -265,27 +290,8 @@ export interface ElectronAdapter {
  * break the injective property). Keep the charset: A-Za-z0-9_- literal, all
  * else `~<HEX>~`. `tests/partition.spec.ts` locks the examples.
  */
-export function encodePartitionSegment(segment: string): string {
-  let out = ''
-  for (const char of segment) {
-    const code = char.codePointAt(0)!
-    if ((code >= 0x30 && code <= 0x39)
-      || (code >= 0x41 && code <= 0x5a)
-      || (code >= 0x61 && code <= 0x7a)
-      || char === '-' || char === '_') {
-      out += char
-    } else {
-      out += `~${code.toString(16).toUpperCase()}~`
-    }
-  }
-  return out.length === 0 ? 'anonymous' : out
-}
-
-/** Partition name for a logged-in (or anonymous) user. */
-export function browserPartitionFor(username: string | null | undefined): string {
-  const key = username !== undefined && username !== null && username.length > 0 ? username : 'anonymous'
-  return `persist:agent-browser-${encodePartitionSegment(key)}`
-}
+export { browserPartitionFor, encodePartitionSegment } from './surface.ts'
+import { browserPartitionFor } from './surface.ts'
 
 /** Legacy fixed partition name (pre-user-scope); kept for tests/back-compat. */
 export const BROWSER_PARTITION = browserPartitionFor(null)
@@ -395,7 +401,7 @@ export function createRealElectronAdapter(
 
   return {
     createView,
-    createMaskView(partition: string = BROWSER_PARTITION): NativeView {
+    createMaskView(partition?: string): NativeView {
       // The AI-control mask must COMPOSITE over the tab views beneath it:
       // the mask page paints a translucent scrim (`rgba(...)`) whose alpha
       // must blend with the live page, not with this view's own canvas.
@@ -406,9 +412,15 @@ export function createRealElectronAdapter(
       // guest page's own background transparent, so rgba() blends through it
       // onto the tabs underneath. The window itself stays opaque; only the
       // mask view carries alpha.
+      //
+      // 2026-09-21 (§7b option A): no partition ⇒ DEFAULT session, which is
+      // where the application's `dsh-auth-*` proof cookie lives (same jar as
+      // the shell window's page and the main window). Omit the key entirely —
+      // passing `partition: undefined` explicitly is not the same statement
+      // and Electron's own default is what we rely on here.
       const view = new WebContentsView({
         webPreferences: {
-          partition,
+          ...(partition === undefined ? {} : { partition }),
           contextIsolation: true,
           nodeIntegration: false,
           sandbox: true,
@@ -421,7 +433,7 @@ export function createRealElectronAdapter(
       const wc = view.webContents
       wc.setWindowOpenHandler(() => ({ action: 'deny' }))
       return {
-        partition,
+        ...(partition === undefined ? {} : { partition }),
         attach(win, bounds) {
           win.contentView.addChildView(view)
           view.setBounds(bounds)

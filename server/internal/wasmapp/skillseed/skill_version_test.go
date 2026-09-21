@@ -148,6 +148,16 @@ var seededSkillDigests = map[string]string{
 	//   - 段总量预算口径在两侧统一为"只计会计入资源集的段"（`.debug_*` 不计入，
 	//     但非 `.debug_*` 段超 4 MiB 仍照拒）。
 	"fcef001e48222b32acd8fd85154aaf5b5cb207867c36b1fc811c089d2809a7c2": "2.4.0",
+
+	// 2.5.0 = **作者声明敏感列**（`sensitive_columns`，§5.9 第 8 点后半，2026-09-21）：
+	// 默认脱敏是**列名启发式**，覆盖不到每个业务词汇 ⇒ 给作者一条声明通道（加法：
+	// 声明的列一定脱敏，启发式照旧）。两处生成物随之变：
+	//   - `references/app-config.md`：`picoaide.app.json` 的字段表多一行
+	//     `sensitive_columns`（去重/上限/缺席即不参与的口径都写在字段提示里）；
+	//   - `references/limits.md`：新增两条上限（声明条目数 100、单条列名 64 字节）。
+	// 为什么必须提版本：这两份都是随镜像下发给员工的手册，已安装的客户端靠 version 判
+	//「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
+	"42dba768233467eaa28226e36ee8050981be784c35b04ae7dfb658c115213b01": "2.5.0",
 }
 
 // TestBuiltinSkillVersionTracksContent 断言当前技能内容的摘要已在登记表里，且登记的

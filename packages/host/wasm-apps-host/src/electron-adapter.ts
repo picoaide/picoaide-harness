@@ -611,6 +611,14 @@ export function createRealElectronWindowAdapter(options: RealAppWindowAdapterOpt
       if (win === undefined || win.isDestroyed()) return undefined
       return win.webContents.id
     },
+    webContents(handle) {
+      // surface 注册用（§16.1）：把**真实** webContents 交给 browser runtime 的 CDP
+      // 附着路径。它是唯一能让 `browser_*` 工具真正驱动应用窗口的句柄 —— 只传 id
+      // 是驱动不了的（CdpSession 要的是 webContents.debugger）。
+      const win = windowOf(handle)
+      if (win === undefined || win.isDestroyed()) return undefined
+      return win.webContents
+    },
     isAlive(handle) {
       const win = windowOf(handle)
       return win !== undefined && !win.isDestroyed()
