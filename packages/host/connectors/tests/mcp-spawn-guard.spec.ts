@@ -241,16 +241,16 @@ describe('FIX-02 parseServerConnectors: catalog entries are validated before use
 
   it('keeps the shipped seed definitions (https MCP + npx stdio)', () => {
     const defs = parseServerConnectors([
-      row('example-a', {
+      row('example-mcp', {
         auth: { discoveryUrl: 'https://mcp.example.com/mcp', clientId: '', authorizeUrl: '', tokenUrl: '', redirectUri: 'http://127.0.0.1/callback', pkce: true, publicClient: true, scopes: 'offline_access' },
-        mcp: [{ serverName: 'example-a', transport: 'streamable-http', url: 'https://mcp.example.com/mcp' }],
+        mcp: [{ serverName: 'example-mcp', transport: 'streamable-http', url: 'https://mcp.example.com/mcp' }],
       }, 'oauth'),
       row('glitchtip', {
         tokenFields: [{ key: 'GLITCHTIP_TOKEN', label: 'Token', type: 'password', required: true }],
         mcp: [{ serverName: 'glitchtip', transport: 'stdio', command: 'npx', args: ['-y', 'glitchtip-mcp'], env: {} }],
       }),
     ])
-    expect(defs.map(def => def.id)).toEqual(['example-a', 'glitchtip'])
+    expect(defs.map(def => def.id)).toEqual(['example-mcp', 'glitchtip'])
   })
 })
 

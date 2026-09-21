@@ -120,7 +120,7 @@ export interface BrandConfig {
    * 服务端可达时以服务端下发的 URL 为准；服务端不可达、或服务端还是旧版（没有
    * `/api/client/v2/channel`）时，登录页与侧边栏显示的就是它。没有它，客户端只能
    * 回落到编译期内置的**官方**花括号 mark —— 白标客户在登录页上看到厂商图形
-   * （2026-09-11 在 example-a 渠道的线上环境实测到）。
+   * （2026-09-11 在某客户渠道的线上环境实测到）。
    */
   logoURL?: string
   /** 深色场景的随包 logo（`assets.logo_dark`），同一来源。 */

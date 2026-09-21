@@ -5,7 +5,7 @@
 --   GET /api/config/bootstrap 下发(connectors[]) 获取。
 --
 -- 字段:
---   connectors.id           稳定标识(如 example-a/glitchtip),客户端按 id 匹配凭证
+--   connectors.id           稳定标识(如 example-mcp/glitchtip),客户端按 id 匹配凭证
 --   connectors.name         展示名(webadmin/客户端连接器中心)
 --   connectors.description  展示描述
 --   connectors.auth_mode    oauth|device|token|server-side
@@ -14,7 +14,7 @@
 --   connectors.enabled      下架开关(0=bootstrap 不下发,客户端隐藏)
 --   connectors.updated_at   变更时间(审计对照)
 --
--- 种子数据:迁入现有两个内置连接器(example-a/glitchtip)的等价定义,
+-- 种子数据:迁入现有两个内置连接器(远程 MCP/glitchtip)的等价定义,
 --   保证升级后行为不变;后续增删改全部经 webadmin。
 
 CREATE TABLE IF NOT EXISTS connectors (
@@ -28,21 +28,22 @@ CREATE TABLE IF NOT EXISTS connectors (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- 种子:example-a(OAuth + streamable-http)+ glitchtip(token + stdio)+
+-- 种子:example-mcp(OAuth + streamable-http,远程 MCP 示例)+ glitchtip(token + stdio)+
 -- sales-easy(销售易 NeoCRM,OAuth + streamable-http)。
 -- 覆盖客户端此前全部硬编码连接器(0042 核查 2026-08-28:sales-easy 曾随
 -- dedupeById 注册但未入表,现补齐)。
--- example-a 的 MCP 端点在此为占位符(mcp.example.com):真实端点属客户身份,按仓库规则
--- 只允许出现在私有仓 picoaide/channels 与部署侧配置,不进公开仓(0042 已上线的库不受
--- 影响,改的是新建库的种子值;管理员可在连接器页改回真实地址)。
+-- 远程 MCP 行的 id/名称/描述/端点一律为占位符(mcp.example.com):真实取值、产品名与
+-- 文案属渠道/客户身份,按仓库规则只允许出现在私有仓 picoaide/channels 与部署侧配置,
+-- 不进公开仓(0042 已上线的库不受影响,改的是新建库的种子值;管理员可在连接器页
+-- 改成实际服务的取值)。
 -- glitchtip 的 DEFAULT 字段值由服务端设置页(web.glitchtip_base_url/
 -- web.glitchtip_organization)在 bootstrap 时合成注入,数据库存定义不含
 -- 部署地址(源码/DB 均不含自部署主机名,见客户端旧 glitchtip.ts 约束)。
 INSERT INTO connectors (id, name, description, auth_mode, definition) VALUES
-('example-a', '示例 MCP 智能体',
+('example-mcp', '示例 MCP 智能体',
  '远程 MCP 连接器示例:OAuth 2.1 + PKCE + 授权服务器元数据发现;名称、描述与端点由管理员按实际服务填写。',
  'oauth',
- '{"auth":{"discoveryUrl":"https://mcp.example.com/mcp","clientId":"","authorizeUrl":"","tokenUrl":"","redirectUri":"http://127.0.0.1/callback","pkce":true,"publicClient":true,"scopes":"offline_access"},"mcp":[{"serverName":"example-a","transport":"streamable-http","url":"https://mcp.example.com/mcp"}]}'),
+ '{"auth":{"discoveryUrl":"https://mcp.example.com/mcp","clientId":"","authorizeUrl":"","tokenUrl":"","redirectUri":"http://127.0.0.1/callback","pkce":true,"publicClient":true,"scopes":"offline_access"},"mcp":[{"serverName":"example-mcp","transport":"streamable-http","url":"https://mcp.example.com/mcp"}]}'),
 ('glitchtip', 'GlitchTip',
  'GlitchTip(Sentry 兼容错误追踪):查询 issue 与最新事件堆栈,用于错误排查与监控告警',
  'token',
