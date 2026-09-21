@@ -3,6 +3,7 @@ import { t, type AppCenterKey } from './locales.ts'
 import { WASM_MAX_BYTES, WRITABLE_ACCESS_MODES, type AccessMode } from './appcfg-contract.ts'
 import { appShareLink } from './deep-link.ts'
 import {
+  type AppIdAvailability,
   type PublishDraft,
   type PublishFailure,
   type PublishFile,
@@ -11,6 +12,7 @@ import {
   type PublishTarget,
   type PublishFormInitial,
   type ValidationIssue,
+  checkAppIdAvailability,
   changesAccess,
   initialFormState,
   splitWhitelist,
@@ -166,6 +168,28 @@ type FormState =
   | { kind: 'failed', failure: PublishFailure }
 
 /**
+ * 标识查重的界面态。
+ *
+ * `idle` 是"还没问"（空输入 / 正在防抖 / 已有本地形态错误），`unknown` 是"问了但
+ * 没问成"。两者**都不是**"可用" —— 查重结果只用于**提示与拦下确定的坏情况**，
+ * 权威判据永远是提交那一刻服务端的 409（见 {@link checkAppIdAvailability}）。
+ */
+type AvailabilityState =
+  | { kind: 'idle' }
+  | { kind: 'checking' }
+  | { kind: 'known', verdict: AppIdAvailability }
+  | { kind: 'unknown' }
+
+/**
+ * 查重防抖间隔（毫秒）。
+ *
+ * 400 ms 是"停下来才问"的量级：比逐字符请求少一个数量级的往返，又不至于让人等出
+ * "界面没反应"的感觉。刻意不做节流（throttle）—— 每敲一个字都发一次请求，对一个
+ * 需要查库的端点没有意义。
+ */
+const AVAILABILITY_DEBOUNCE_MS = 400
+
+/**
  * 字节数 → 人类可读（只在错误文案里用；不做单位美化，保留一位小数就够）。
  * @param bytes - 字节数。
  * @returns 形如 `33.0 MiB`。
@@ -174,6 +198,45 @@ function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`
   return `${String(bytes)} B`
+}
+
+/**
+ * 把查重状态翻成一行给用户看的话。
+ *
+ * 几条刻意的取舍：
+ *  - `taken` 时**优先显示服务端的 `message`**：它就是发布那一刻 409 的那句话，
+ *    两条链路给出同一句话，用户不会以为"查重说占用、提交说别的"是两回事；
+ *  - `invalid` 同理（服务端指名了到底是哪条规则；本地文案只是兜底）；
+ *  - `taken` 追加一条 `takenHint`，把"永久占用、下架/删除也不释放"讲清楚 ——
+ *    否则用户会去下架自己的旧应用然后奇怪为什么名字还是拿不回来；
+ *  - `checking` / `unknown` **都说"不确定"**，绝不说"可用"。
+ * @param availability - 当前查重态。
+ * @returns 展示文案（空串 = 不显示）。
+ */
+function availabilityText(availability: AvailabilityState): string {
+  switch (availability.kind) {
+    case 'idle':
+      return ''
+    case 'checking':
+      return t('appCenter.availabilityChecking')
+    case 'unknown':
+      return t('appCenter.availabilityUnknown')
+    case 'known': {
+      const { verdict } = availability
+      switch (verdict.reason) {
+        case 'available':
+          return t('appCenter.availabilityFree')
+        case 'yours':
+          return t('appCenter.availabilityYours')
+        case 'taken': {
+          const head = verdict.message === '' ? t('appCenter.availabilityTaken') : verdict.message
+          return `${head} — ${t('appCenter.availabilityTakenHint')}`
+        }
+        case 'invalid':
+          return verdict.message === '' ? t('appCenter.availabilityInvalid') : verdict.message
+      }
+    }
+  }
 }
 
 /**
@@ -216,13 +279,120 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
   const [accessConfirmed, setAccessConfirmed] = useState(false)
   const [state, setState] = useState<FormState>({ kind: 'idle' })
   const [localIssues, setLocalIssues] = useState<ValidationIssue[]>([])
+  // 标识查重（2026-09-20）：用户敲 app_id 时防抖问服务端一次，提交前再问一次。
+  const [availability, setAvailability] = useState<AvailabilityState>({ kind: 'idle' })
   const abortRef = useRef<AbortController | null>(null)
+  // 查重自己的取消器：与提交的 abortRef 分开 —— 关面板时提交要取消（可能正在传
+  // 44 MiB），查重也要取消（一个 200 ms 的 GET 没有理由活过组件）。
+  const availabilityAbortRef = useRef<AbortController | null>(null)
+  // 单调递增序号：只有"最后一次"发出的查重可以落地。防抖 + 在途响应会出现
+  // "先发的后回"，不做序号判断就会用旧输入的结论覆盖新输入的结论。
+  const availabilitySeqRef = useRef(0)
 
   const busy = state.kind === 'busy'
   const accessChanged = changesAccess(initial, access)
 
   // 卸载时取消在途请求：面板被关掉之后不该还在跑一次 44 MiB 的上传。
   useEffect(() => () => { abortRef.current?.abort() }, [])
+
+  /**
+   * 标识查重：**防抖**地在用户停止输入后问服务端一次。
+   *
+   * 四条纪律：
+   *  1. **空输入与本地形态错误不发请求**：名字还没成形时服务端只会回"非法"，
+   *     而本地预校验（`validatePublishDraft` 的同一套规则）已经能给出同一条文案
+   *     —— 何必每次敲击都换一次往返。这里用 `initial` 判"已有应用发新版"：
+   *     那种情况下 app_id 不可改，查重没有意义。
+   *  2. **序号 + AbortController 双保险**：防抖窗口内多次输入只发最后一次；即便
+   *     前一次已经在途，"先发后回"也不能覆盖新结论（序号判定），并且立刻 abort。
+   *  3. **查重失败不阻断**（`kind: 'unknown'`）：宿主故障时既不能说"可用"（会放行
+   *     注定失败的发布）也不能说"被占用"（会误杀合法名字），只提示"暂时无法确认"。
+   *  4. **对已有应用发新版不做可发布性拦截**：`target` 存在时 app_id 是既成事实，
+   *     `reason: 'yours'` 是正常态，不能被当成"被占用"。
+   */
+  useEffect(() => {
+    // 已有应用发新版：app_id 不可改，不查重（也没有"唯一性"问题）。
+    if (initial.currentAccess !== undefined) {
+      setAvailability({ kind: 'idle' })
+      return
+    }
+    const candidate = appId.trim()
+    if (candidate === '') {
+      setAvailability({ kind: 'idle' })
+      return
+    }
+    // 本地形态不过关 ⇒ 不发请求（本地文案与服务端同源，见 validatePublishDraft）。
+    const localShape = validatePublishDraft({
+      appId: candidate,
+      version: '0.0.0',
+      title: 'x',
+      changelog: '',
+      config: { access: 'login', whitelist: [], purpose: 'x', dataSensitivity: 'i', owner: 'o' },
+    }).some(issue => issue.field === 'app_id')
+    if (localShape) {
+      setAvailability({ kind: 'idle' })
+      return
+    }
+    setAvailability({ kind: 'checking' })
+    const timer = setTimeout(() => {
+      const seq = availabilitySeqRef.current + 1
+      availabilitySeqRef.current = seq
+      availabilityAbortRef.current?.abort()
+      const controller = new AbortController()
+      availabilityAbortRef.current = controller
+      void checkAppIdAvailability(candidate, { signal: controller.signal }).then(outcome => {
+        // 迟到的响应一律丢弃：只有最后一次发出的查重可以改界面。
+        if (availabilitySeqRef.current !== seq) return
+        if (outcome.ok) {
+          setAvailability({ kind: 'known', verdict: outcome.availability })
+          return
+        }
+        // 被自己取消（换输入/卸载）不算"查重失败"，保持 checking 交给下一轮覆盖。
+        if (outcome.code === 'ABORTED') return
+        setAvailability({ kind: 'unknown' })
+      })
+    }, AVAILABILITY_DEBOUNCE_MS)
+    return () => { clearTimeout(timer) }
+  }, [appId, initial.currentAccess])
+
+  // 卸载时一并取消在途查重。
+  useEffect(() => () => { availabilityAbortRef.current?.abort() }, [])
+
+  /**
+   * 提交前的**权威复检**：拿服务端当下的事实再判一次，不信任界面上那份结论。
+   *
+   * 为什么不能只靠 `availability` 状态：它可能来自几百毫秒前的输入（防抖窗口里
+   * 用户又改了名字），也可能因为防抖/网络根本没跑过 —— 拿它放行等于把"提交"押在
+   * 一个可能过期的缓存上。这里**主动再问一次**，并且：
+   *  - 明确"被别人占用"⇒ 返回一条本地 issue，**不上传**（省掉一次 32 MiB 往返）；
+   *  - 明确"是你的"或"空闲"⇒ 放行；
+   *  - 查重本身失败（宿主故障）⇒ **放行**，让服务端在发布那一刻给出权威判定 ——
+   *    查重是体验优化，不能变成新的单点故障（它挂了不该让所有人都发不出去）。
+   * @returns 拦下提交的本地 issue；`null` = 可以继续提交。
+   */
+  const verifyAppIdBeforeSubmit = useCallback(async (candidate: string): Promise<ValidationIssue | null> => {
+    // 已有应用发新版：标识不可改，归属由服务端 ownedApp 判，不在这里重复判。
+    if (initial.currentAccess !== undefined) return null
+    const outcome = await checkAppIdAvailability(candidate)
+    if (!outcome.ok) return null
+    const verdict = outcome.availability
+    if (verdict.reason === 'taken') {
+      return {
+        field: 'app_id',
+        code: 'app_id_taken',
+        message: verdict.message === '' ? t('appCenter.availabilityTaken') : verdict.message,
+      }
+    }
+    if (verdict.reason === 'invalid') {
+      return {
+        field: 'app_id',
+        code: 'app_id_invalid',
+        // 服务端原文优先（它指名了到底是哪一条规则），本地文案兜底。
+        message: verdict.message === '' ? t('appCenter.availabilityInvalid') : verdict.message,
+      }
+    }
+    return null
+  }, [initial.currentAccess])
 
   const pickFile = useCallback(async (selected: File | null): Promise<void> => {
     setLocalIssues([])
@@ -293,6 +463,17 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
       return
     }
     setLocalIssues([])
+    // 提交前的**唯一性复检**（2026-09-20）：本地形态校验只证明"名字长得对"，
+    // 证明不了"名字还没被占"。这一步真的问一次服务端，被占就**连文件都不读、
+    // 一个字节都不上传**地拦下（省掉一次 ≤32 MiB 的往返 + 一次编译）。
+    // 查重自身失败不阻断（见 verifyAppIdBeforeSubmit）：权威判据是发布那一刻的 409。
+    setAvailability({ kind: 'checking' })
+    const blocked = await verifyAppIdBeforeSubmit(appId.trim())
+    if (blocked !== null) {
+      setAvailability({ kind: 'idle' })
+      setLocalIssues([blocked])
+      return
+    }
     const controller = new AbortController()
     abortRef.current = controller
     setState({ kind: 'busy', phase: 'reading' })
@@ -312,7 +493,7 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
       return
     }
     setState({ kind: 'failed', failure: result })
-  }, [access, accessChanged, accessConfirmed, appId, changelog, dataSensitivity, file, onPublished, owner, purpose, title, version, whitelistText])
+  }, [access, accessChanged, accessConfirmed, appId, changelog, dataSensitivity, file, onPublished, owner, purpose, title, verifyAppIdBeforeSubmit, version, whitelistText])
 
   const cancel = useCallback((): void => {
     if (busy) {
@@ -373,6 +554,18 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
           onChange={event => { setAppId(event.target.value) }}
         />
         <span style={LABEL}>{t('appCenter.appIdHint')}</span>
+        {/*
+          查重结论（2026-09-20）：四态各自可辨，`data-availability` 是给断言用的稳定钩子。
+          `aria-live=polite` 让读屏用户在结论变化时得到通知（不是每次敲击都打断）。
+        */}
+        <span
+          style={LABEL}
+          data-role="app-id-availability"
+          data-availability={availability.kind === 'known' ? availability.verdict.reason : availability.kind}
+          aria-live="polite"
+        >
+          {availabilityText(availability)}
+        </span>
       </div>
 
       <div style={FIELD}>
