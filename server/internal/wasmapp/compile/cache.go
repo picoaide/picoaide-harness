@@ -164,12 +164,40 @@ func listCacheEntries(dir string, layoutDepth int) ([]cacheEntry, error) {
 //
 // 为什么不是 c.cache（当前分代，见 FIX-36 / 审计 P2-2）：升级 wazero（或分代回落常量 +1）后
 // 旧一代目录永远不会再被命中，却仍占磁盘；只在当前分代里统计/删除会让"缓存有界"
-// （§10.3 第 35 项）只在单代内成立。写面不变：子进程拿到的仍是 c.cache（当前分代）。
-func (c *Compiler) cacheScanRoot() string { return filepath.Dir(c.cache) }
+// （§10.3 第 35 项）只在单代内成立。
+//
+// ⚠️ 但**必须跟着"子进程真正在用的那个根"走**（2026-09-21 六轮审计 P2-②）：缓存不可信时
+// 子进程改用临时目录（`childCacheDir`），而回收/水位/度量此前一律只看**配置目录** ⇒
+// 那条分支上 512 MiB / 4096 条的预算与 `/readyz` 告警全部静默失效（临时目录常落在
+// tmpfs 上 ⇒ 直接吃内存）。
+//
+// 两个分支的**根不是一回事**（六轮审计实测：直接把 `filepath.Dir(childCacheDir)` 当根会让
+// 扫描落到 `/tmp` 上，把别的测试目录当"分代目录"删掉）：
+//   - 配置分支：根 = `_compile-cache/`（**含所有分代**中的当前与历史分代）；
+//   - 临时分支：临时目录**本身就是根**（wazero 会在它下面建一个分代目录），
+//     不存在"历史分代"这回事，也没有别人的目录。
+func (c *Compiler) cacheScanRoot() string {
+	if c.childCacheTemp != "" {
+		return c.childCacheDir
+	}
+	return filepath.Dir(c.cache)
+}
+
+// scanCacheEntries 返回"在用的那棵树"里的全部条目。
+//
+// **根与深度必须成对选**（六轮审计实测：只换根不换深度会扫错层）：
+//   - 配置分支：根 = `_compile-cache/`（含所有分代），深度 3（分代/分片/条目）；
+//   - 临时分支：临时目录本身就是"分代目录"（wazero 在它下面建分片），深度 2。
+func (c *Compiler) scanCacheEntries() ([]cacheEntry, error) {
+	if c.childCacheTemp != "" {
+		return listCacheEntries(c.childCacheDir, cacheLayoutDepthGeneration)
+	}
+	return listCacheEntries(c.cacheScanRoot(), cacheLayoutDepthAll)
+}
 
 // cacheUsage 返回缓存（**所有分代**）的体积与条目数。
 func (c *Compiler) cacheUsage() (bytes int64, entries int, err error) {
-	es, err := listCacheEntries(c.cacheScanRoot(), cacheLayoutDepthAll)
+	es, err := c.scanCacheEntries()
 	if err != nil {
 		return 0, 0, err
 	}
@@ -181,11 +209,12 @@ func (c *Compiler) cacheUsage() (bytes int64, entries int, err error) {
 
 // newestCacheMtime 返回最新条目的写入时间（UnixNano，无条目为 0）与条目数。
 //
-// ⚠️ 这里**只看当前分代**（c.cache），与回收/水位的"全部分代"口径刻意不同：
+// ⚠️ 这里**只看当前分代**（`c.childCacheDir` —— 与回收同源），与回收/水位的
+// "全部分代"口径刻意不同：
 // 它的用途是命中判定（见 compileOne）——"本次编译有没有写入新条目"。把别的分代算进来会
 // 让一个**不会**被命中的旧目录把"最新 mtime"顶到未来，命中判定就不再成立。
 func (c *Compiler) newestCacheMtime() (int64, int) {
-	es, err := listCacheEntries(c.cache, cacheLayoutDepthGeneration)
+	es, err := listCacheEntries(c.childCacheDir, cacheLayoutDepthGeneration)
 	if err != nil || len(es) == 0 {
 		return 0, 0
 	}
@@ -200,7 +229,7 @@ func (c *Compiler) newestCacheMtime() (int64, int) {
 
 // newestCacheEntry 返回最近写入的缓存条目路径（命中判定与诊断用；口径同 newestCacheMtime）。
 func (c *Compiler) newestCacheEntry() string {
-	es, err := listCacheEntries(c.cache, cacheLayoutDepthGeneration)
+	es, err := listCacheEntries(c.childCacheDir, cacheLayoutDepthGeneration)
 	if err != nil || len(es) == 0 {
 		return ""
 	}
@@ -229,7 +258,7 @@ func (c *Compiler) CacheUsage() (bytes int64, entries int) {
 // 失败（表现为下次 miss，不是错误）。因此回收只在两次编译**之间**由父侧调用
 // （编译 worker 是单线程，回收在 runJob 里同步执行 ⇒ 不与编译重入）。
 func (c *Compiler) ReclaimCache() (removed int, freed int64, err error) {
-	es, err := listCacheEntries(c.cacheScanRoot(), cacheLayoutDepthAll)
+	es, err := c.scanCacheEntries()
 	if err != nil {
 		return 0, 0, err
 	}
@@ -273,7 +302,7 @@ func (c *Compiler) ReclaimCache() (removed int, freed int64, err error) {
 // 版本分片会让旧条目**永远不会被命中**，而回收只看 mtime ⇒ 它们会被优先删掉，
 // 所以本方法不是必需品，只是给运维一个确定的清空入口。
 func (c *Compiler) CleanCache() (removed int, freed int64, err error) {
-	es, err := listCacheEntries(c.cacheScanRoot(), cacheLayoutDepthAll)
+	es, err := c.scanCacheEntries()
 	if err != nil {
 		return 0, 0, err
 	}

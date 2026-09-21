@@ -182,6 +182,26 @@ func ConfigFields() []FieldSpec {
 			Hints: []string{"它与应用中心的'负责人'显示同源；平台不拿它做任何权限判断"},
 		},
 		{
+			Key:      FieldSensitiveColumns,
+			Type:     "string[]",
+			Required: false,
+			Default:  "[]",
+			Max:      limits.AppConfigSensitiveColumnsMax,
+			Desc: "**额外**声明为敏感的列名：平台默认按列名启发式脱敏（token/password/phone/realname…），" +
+				"启发式覆盖不到的业务词汇（工位号/宿舍/客户编号…）在这里补充。声明是**加法**：" +
+				"声明的列一定脱敏，启发式照旧生效；没有\"取消脱敏\"的开关",
+			Hints: []string{
+				"写**列名本身**（与 `db.define` 里的名字一致），如 [\"workstation_no\", \"dorm_room\"]；列名匹配不区分大小写",
+				"条目去重按大小写不敏感（`Phone` 与 `phone` 是同一列）；含空串或超过 64 字节的条目直接拒（422）",
+				"声明了但结果集里没有这一列**不算错误**（列改名/还没建表都属正常）：它只是这次不参与脱敏，" +
+					"`masked_columns` 也只在真的遮住它时才提到它",
+				"**更新版本**时省略本字段 = 沿用上一版声明的列；显式给 `[]` 才是清空声明（默认启发式仍然生效）",
+				"作用面 = 作者/管理员的**数据浏览**面（`GET …/rows` 的默认视图）：声明让 AI 与作者看到 `***` 而不是明文；" +
+					"显式 `unmask=1` 仍可看原值（该次调用单独审计）",
+				"它不是访问控制：应用自己的代码读自己的库不受影响（平台不做行/列级过滤，R15）",
+			},
+		},
+		{
 			Key:      FieldWindow,
 			Type:     "object",
 			Required: false,
@@ -300,7 +320,7 @@ func PublishFields() []FieldSpec {
 			Desc:     "应用配置文件的内容（即 `picoaide.app.json` 的对象形态）：字段见 `config_fields`",
 			Hints: []string{
 				"平台存的是**解析并归一化之后**的配置（名单去空白/去重、access 缺省落定）",
-				"**更新版本**时 config 里**缺席**的字段沿用上一版生效值（access/whitelist/purpose/data_sensitivity/owner 逐字段各自沿用）；显式给值——包括显式空串——以提交为准",
+				"**更新版本**时 config 里**缺席**的字段沿用上一版生效值（access/whitelist/purpose/data_sensitivity/owner/sensitive_columns 逐字段各自沿用）；显式给值——包括显式空串——以提交为准",
 				"首版没有可沿用的上一版：缺席的 `access` 按缺省 `login` 落定",
 				"改任何一项都要发新版本（§10.5 第 56f 项）",
 			},

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+	"github.com/picoaide/picoaide/internal/wasmapp/cachetrust"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
@@ -244,11 +245,25 @@ type Stats struct {
 // 为什么串行：编译是 CPU 密集且峰值内存高（32 MiB 模块的编译峰值是内存四笔账之一，
 // §4.3）。串行把并发度固定为 1，从而把"编译池被上传打满"这条路封死。
 type Compiler struct {
-	opt    Options
-	cache  string
-	child  string
-	logger Logger
-	iso    *isolationPlan
+	opt   Options
+	cache string
+	// childCacheDir 是**实际交给编译子进程**的缓存目录。
+	//
+	// 与 `cache`（配置面/诊断面）分开的理由（2026-09-21 四轮审计 P2-①）：缓存目录
+	// 形状不可信时（符号链接、group 可写、条目非普通文件），wazero 的磁盘缓存是
+	// **读 + 写** —— 子进程会先查表，命中就直接加载那份"机器码"并**干跑**它。
+	// 在 `auto` 档（compose 默认）没有 OS 级隔离时，那等于让能布置缓存目录的人
+	// 在编译进程里执行代码，而编译进程读得到数据根。
+	// 执行侧已经"不可信 ⇒ 不用"（runtime.NewCompilationCache），编译侧此前只在
+	// `require` 档 fail-closed、其余档位**告警照用** ⇒ 两侧不对称。
+	// 现在的口径：不可信 ⇒ 子进程改用一个**全新的临时目录**（本进程创建、0700、
+	// 退出即删）—— 既不读攻击者的条目，也不往那棵树里写；编译功能不受影响。
+	childCacheDir string
+	// childCacheTemp 非空表示 childCacheDir 是我们创建的临时目录（关闭时要清）。
+	childCacheTemp string
+	child          string
+	logger         Logger
+	iso            *isolationPlan
 	// isoMode 是**生效的隔离档位**（构造时冻结）。保留它是为了让调用方能拿到
 	// 结构化状态而不是只有一句描述文案（见 IsolationStatus）。
 	isoMode IsolationMode
@@ -341,37 +356,83 @@ func New(opt Options) (*Compiler, error) {
 	// limits.CompileCacheRevision），runtime 侧有一份同算法的实现 + 交叉断言用例。
 	cache := CompileCacheDir(opt.DataRoot)
 	// 0700：缓存目录是信任边界（§4.3.1-d），属主=编译进程，执行进程只读。
-	if err := os.MkdirAll(cache, limits.DataDirMode); err != nil {
-		return nil, fmt.Errorf("compile: 创建缓存目录失败: %w", err)
+	//
+	// 三步合一（2026-09-21 审计 F-4）：MkdirAll + **显式 Chmod**（只在新建时生效的
+	// MkdirAll 挡不住"旧版本/人工/宽 umask 留下的可写目录"）+ 形状校验
+	//（真实目录、无 group/other 写位、条目是普通非空文件 —— 详见 cachetrust 包）。
+	// 校验策略：`require` 档发现违规**拒绝启动**（隔离已声明为强制，缓存可信度不能例外）；
+	// 其余档位告警并逐条打印，由运维面处置。
+	report, cerr := cachetrust.Ensure(cache, os.FileMode(limits.DataDirMode))
+	if cerr != nil {
+		return nil, cerr
 	}
-	// 权限自检：目录一旦对 group/other 可写，"只有编译进程能写"这条缓解就失效
-	//（缓存条目会被 server mmap 成机器码执行，见 doc.go 的认账）。
+	// 默认：子进程用配置的缓存目录。
+	childCacheDir := cache
+	var childCacheTemp string
+	if !report.Trusted() {
+		for _, v := range report.Violations {
+			opt.Logger.Printf("compile: ⚠️ 缓存目录不可信：%s（%s）", v.Path, v.Reason)
+		}
+		if opt.Isolation == IsolationRequire {
+			return nil, fmt.Errorf("compile: 缓存目录不可信（%d 处违规）但隔离档位是 require：%s（%s）——"+
+				"缓存条目会被执行进程 mmap 成机器码，require 档不接受可投毒的缓存",
+				len(report.Violations), report.Violations[0].Path, report.Violations[0].Reason)
+		}
+		// 非 require 档：**不拒绝启动，但也不碰那棵树**（四轮审计 P2-①）。
+		// wazero 的磁盘缓存是读 + 写：子进程命中就直接加载那份"机器码"并干跑它 ——
+		// 能布置缓存目录的人因此可以在编译进程里执行代码（auto 档常常没有 OS 级隔离）。
+		// 换一个本进程新建的 0700 临时目录：既不读攻击者的条目，也不往里写。
+		tmp, terr := os.MkdirTemp("", "picoaide-compile-cache-")
+		if terr != nil {
+			return nil, fmt.Errorf("compile: 缓存目录不可信，且无法创建替代缓存目录: %w", terr)
+		}
+		if cerr := os.Chmod(tmp, os.FileMode(limits.DataDirMode)); cerr != nil {
+			_ = os.RemoveAll(tmp)
+			return nil, fmt.Errorf("compile: 替代缓存目录权限设置失败: %w", cerr)
+		}
+		opt.Logger.Printf("compile: ⚠️ 缓存目录不可信 ⇒ 本次编译进程改用临时缓存目录（不读也不写那棵树）：%s", tmp)
+		childCacheDir, childCacheTemp = tmp, tmp
+	}
+	// 兼容面：旧的一行式权限描述仍保留（诊断/验收输出用），判据比 cachetrust 浅，
+	// 只回答"根目录权限是否合 §4.3.1-d"。
 	if desc, terr := cacheDirIsTrustBoundary(cache); terr != nil {
 		opt.Logger.Printf("compile: ⚠️ 缓存目录权限不合规（%s）：%v；§4.3.1-d 要求只有编译进程可写", desc, terr)
 	}
 
+	// 从这里往下的任何失败都必须在返回前清掉临时缓存目录（五轮审计 P2-②：
+	// `os.MkdirTemp` 在 New 早期就创建了目录，而后续任一步失败都会 `return nil, err`
+	// ——调用方拿不到 *Compiler，也就永远不会调 Close()，目录留在 /tmp 里）。
+	fail := func(err error) (*Compiler, error) {
+		if childCacheTemp != "" {
+			_ = os.RemoveAll(childCacheTemp)
+		}
+		return nil, err
+	}
+
 	child, err := resolveChildBinary(opt.ChildBinary)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 
 	plan, err := planIsolation(opt.Isolation, child, opt.Logger)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 
 	c := &Compiler{
-		opt:         opt,
-		cache:       cache,
-		child:       child,
-		logger:      opt.Logger,
-		iso:         plan,
-		isoMode:     opt.Isolation,
-		jobs:        make(chan *job, opt.MaxQueue),
-		stop:        make(chan struct{}),
-		done:        make(chan struct{}),
-		uploads:     map[int64]*uploadState{},
-		lastReclaim: time.Now(),
+		opt:            opt,
+		cache:          cache,
+		childCacheDir:  childCacheDir,
+		childCacheTemp: childCacheTemp,
+		child:          child,
+		logger:         opt.Logger,
+		iso:            plan,
+		isoMode:        opt.Isolation,
+		jobs:           make(chan *job, opt.MaxQueue),
+		stop:           make(chan struct{}),
+		done:           make(chan struct{}),
+		uploads:        map[int64]*uploadState{},
+		lastReclaim:    time.Now(),
 	}
 	go c.run()
 	return c, nil
@@ -475,6 +536,39 @@ func (c *Compiler) Stats() Stats {
 // CacheDir 返回缓存目录绝对路径（诊断/权限断言用）。
 func (c *Compiler) CacheDir() string { return c.cache }
 
+// CacheMode 是编译侧**实际生效**的编译缓存模式（封闭取值，JSON 名即取值）。
+//
+// 为什么需要它（§4.9 运维面）：`New` 在缓存目录**不可信**时会改用本次进程新建的
+// 临时目录（四轮审计 P2-①：wazero 的磁盘缓存是读 + 写 ⇒ 不可信目录等于让能布置它的人
+// 在编译进程里执行代码）。这条降级此前只有一行日志，`/readyz` 上完全看不出
+// "这台实例的编译缓存每次都落在一个退出即删的目录里"（表现只是缓存从不复用）。
+type CacheMode string
+
+const (
+	// CacheModeConfigured：子进程用**配置的**缓存目录（<DataRoot>/_compile-cache/<分代>）。
+	CacheModeConfigured CacheMode = "configured"
+	// CacheModeTemporary：子进程用**临时**缓存目录（不可信 ⇒ 不读也不写那棵树，退出即删）。
+	CacheModeTemporary CacheMode = "temporary"
+)
+
+// CacheMode 返回编译子进程**实际使用**的缓存目录形态（configured / temporary）。
+//
+// 唯一真源 = `childCacheTemp`：它同时决定子进程 argv 的 `-cache-dir` 与请求里的
+// `cache_dir`（runJob / childArgs），因此这里报的模式与"子进程真的用了哪个目录"
+// 是同一个字段，不存在第二个判断可以与之分叉。
+//
+// nil 接收者返回空串（编译器未构造 ≠ 任何一种模式；可用性由 /readyz 的
+// compile_available 回答）。
+func (c *Compiler) CacheMode() CacheMode {
+	if c == nil {
+		return ""
+	}
+	if c.childCacheTemp != "" {
+		return CacheModeTemporary
+	}
+	return CacheModeConfigured
+}
+
 // CacheEntries 返回缓存条目的路径/体积/写入时间（UnixNano），按路径升序。
 //
 // 用途：/readyz 水位、命中判定的可观测性、以及**回收测试**（"删的是最旧的那些"
@@ -529,6 +623,12 @@ func (c *Compiler) Close() error {
 	var err error
 	c.once.Do(func() {
 		close(c.stop)
+		// ⚠️ 顺序（2026-09-21 六轮审计 P3）：**先杀子进程再删目录**。反过来的话，
+		// 在飞编译的子进程仍在往临时目录里写，`RemoveAll` 会与它竞争（可能删掉正在
+		// 写的条目、或让子进程以难解释的错误收场）。
+		if c.childCacheTemp != "" {
+			defer func() { _ = os.RemoveAll(c.childCacheTemp) }()
+		}
 		// 1) 先断掉在飞编译：杀子进程会让 proc.request 立刻返回错误，worker 随即
 		//    从 runJob 出来看到 stop 并收尾。
 		c.mu.Lock()
@@ -628,7 +728,7 @@ func (c *Compiler) compileOne(modulePath string) (*Result, *apperr.Error) {
 	// 而 mtime 只被写入推进（回收只删旧的，不影响"最新"）。
 	beforeMtime, beforeEntries := c.newestCacheMtime()
 
-	req := Request{Op: OpCompile, ModulePath: modulePath, CacheDir: c.cache}
+	req := Request{Op: OpCompile, ModulePath: modulePath, CacheDir: c.childCacheDir}
 	resp, rerr := proc.request(req, c.opt.Timeout)
 	if rerr != nil {
 		return nil, c.explainMemoryDeclaration(rerr)
@@ -754,13 +854,18 @@ func (c *Compiler) spawnChild(moduleDir string) (*childProcess, error) {
 	}
 	// -cache-dir 是**显式声明可写面**：隔离启动器只认这个值（不再从 argv 反解——
 	// 常驻子进程的 argv 里根本没有 cache_dir，它只出现在请求里）。
+	// ⚠️ `-cache-dir` 必须与请求里的 `cache_dir` **同一个值**（`childCacheDir`）：
+	// 子进程启动时会记下这个声明，并在每个请求上做一致性自检
+	//（cmd/picoaide-app-compile/main.go 的 declaredCacheDir 比对），不一致直接回
+	// INTERNAL。五轮审计实测：这里曾漏改成 `c.cache` ⇒ 在"缓存不可信"这条分支上
+	// **每一次真实编译都失败**（而只断言结构体的用例完全看不出来）。
 	args := append([]string{
 		"-listen",
 		"-timeout", c.opt.Timeout.String(),
-		"-cache-dir", c.cache,
+		"-cache-dir", c.childCacheDir,
 	}, c.opt.ChildArgs...)
 	proc, err := startChild(c.child, args, env, c.iso, isolationTargets{
-		CacheDir:     c.cache,
+		CacheDir:     c.childCacheDir,
 		ReadOnlyDirs: readDirs,
 		Env:          env,
 	})

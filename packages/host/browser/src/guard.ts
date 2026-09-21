@@ -84,6 +84,78 @@ export interface NavigationSurface {
   readonly appScheme?: string | undefined
 }
 
+/**
+ * 判断主机名是否指向**本机地址**（模型不得访问 —— 见 `BrowserRuntime.navigationAllowed`）。
+ *
+ * 为什么必须这么细（2026-09-21 五轮审计实测）：漏掉的写法**真的会落到本机监听**，
+ * 而朴素判据（`host === 'localhost' || host.startsWith('127.')`）两头都错 ——
+ * 既漏 `localhost.` / `*.localhost` / `ip6-localhost` / `[::]` / IPv4-mapped 的
+ * `[::ffff:127.0.0.1]`，又会把 `127.example.com` 这种**合法公网域名**误判成本机。
+ * 覆盖范围：
+ *   - IPv4：`127.0.0.0/8`（按**完整四段**匹配）、`0.0.0.0`；
+ *   - IPv6：`::1`、`::`（未指定地址连上去就是本机）、IPv4-mapped 的
+ *     `::ffff:127.0.0.1` 与 `::ffff:7f00:1` 两种写法；
+ *   - 主机名：`localhost`、`localhost.`（尾点归一）、任意 `*.localhost`（RFC 6761 保留，
+ *     Chromium 解析到回环）、`ip6-localhost` / `ip6-loopback`（/etc/hosts 惯例）、
+ *     `localhost.localdomain`。
+ * 纯函数、表驱动可测（`tests/guard.spec.ts`）。
+ * @param rawHostname - `URL#hostname`（IPv6 带方括号）。
+ * @returns true 表示该主机名是本机目标。
+ */
+export function isLocalHostname(rawHostname: string): boolean {
+  const host = rawHostname.trim().toLowerCase().replace(/^\[|\]$/gu, '').replace(/\.$/u, '')
+  if (host === '') return false
+  if (host.includes(':')) {
+    if (host === '::1' || host === '::') return true
+    const mapped = /^::ffff:(.+)$/u.exec(host)
+    if (mapped === null) return false
+    const v4 = mapped[1]!
+    if (isLoopbackIPv4(v4)) return true
+    // 十六进制写法 `::ffff:7f00:1`（高 16 位的高字节 = 127）。
+    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/u.exec(v4)
+    if (hex === null) return false
+    return Number.parseInt(hex[1]!, 16) >> 8 === 127
+  }
+  if (isLoopbackIPv4(host) || host === '0.0.0.0') return true
+  if (host === 'localhost' || host.endsWith('.localhost')) return true
+  return host === 'ip6-localhost' || host === 'ip6-loopback' || host === 'localhost.localdomain'
+}
+
+/** 判断是否是 `127.0.0.0/8` 的**完整 IPv4 字面量**（四段、每段 0–255）。 */
+function isLoopbackIPv4(host: string): boolean {
+  const parts = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(host)
+  if (parts === null) return false
+  for (let i = 1; i <= 4; i++) {
+    if (Number.parseInt(parts[i]!, 10) > 255) return false
+  }
+  return Number.parseInt(parts[1]!, 10) === 127
+}
+
+/**
+ * 报告一个原始字符串是否**看起来是带 scheme 的绝对 URL**。
+ *
+ * 为什么要剥前导 C0 再判（2026-09-21 七轮审计 P2-①）：WHATWG 的 URL 解析器会**先去掉
+ * 前导/尾随的 C0 控制符与空格**，而 JS 的 `String.prototype.trim()` **不剥 `\x01` 之类**。
+ * 于是 `"\x01http://[::ffff:0177.0.0.1]:8080/"` 这种输入在 Node 侧 `new URL()` 抛错、
+ * 在 Chromium 侧被接受并归一化成回环 —— 如果 catch 分支只用 `trim()` 判"是不是绝对 URL"，
+ * 就会把它当成相对路径放行（真机实测：请求确实到达本机监听）。
+ * 口径与 WHATWG 对齐：剥掉**首尾**的 C0 控制符（U+0000–U+001F、U+007F）与空白，再判 scheme。
+ * @param raw - 候选原始字符串（模型输入 / 事件里的 URL）。
+ * @returns true 表示剥壳后形如 `scheme:`。
+ */
+export function looksLikeAbsoluteUrl(raw: string): boolean {
+  // 手写剥离而不是正则：等价语义（剥首尾 C0 控制符与空格）但**没有** `+` 量词回溯面 ——
+  // CodeQL 的 `js/polynomial-redos` 对"库输入 + 字符类 + `+`"会报高优（本题实测是误报，
+  // 但一个可以随手消掉的告警不值得留在面板上让后来者重新判断一次）。
+  let start = 0
+  let end = raw.length
+  const isStrippable = (code: number): boolean => code <= 0x20 || code === 0x7f
+  while (start < end && isStrippable(raw.charCodeAt(start))) start++
+  while (end > start && isStrippable(raw.charCodeAt(end - 1))) end--
+  const stripped = raw.slice(start, end)
+  return /^[a-z][a-z0-9+.-]*:/iu.test(stripped)
+}
+
 /** Schemes the embedded browser (a browser tab) may navigate to. */
 const ALLOWED_SCHEMES = new Set(['http:', 'https:', 'about:'])
 
@@ -112,9 +184,15 @@ export function classifyNavigation(rawUrl: string, surface: NavigationSurface = 
   try {
     parsed = new URL(rawUrl)
   } catch {
-    // Relative URLs resolve against the page; the page cannot escalate beyond
-    // its own origin through them, so allow (the webContents enforces origin).
-    return 'allow'
+    // 相对 URL 会按当前页解析，页面无法借此越出自己的 origin ⇒ 放行。
+    //
+    // ⚠️ 但**带 scheme 的绝对 URL 解析失败时必须拒**（2026-09-21 六轮审计 P2-①）：
+    // Node 的 WHATWG 解析器与 Chromium 的**接受面不同** —— 实测
+    // `http://[::ffff:0177.0.0.1]:PORT/` 在 Node 抛错、Chromium 接受并**归一化成回环**
+    // `[::ffff:7f00:1]`。若这里返回 'allow'，闸门等于对该 URL 失效，而 Chromium 照常
+    // 落到本机监听（真机实测模型读到了本机 dev server 的正文）。判据：`^scheme:` 形态
+    // 解析失败 ⇒ deny（保守方向）；纯相对路径才走放行分支。
+    return looksLikeAbsoluteUrl(rawUrl) ? 'deny' : 'allow'
   }
   if (surface.kind === 'app') {
     // 应用窗口：**只**允许它自己那个 app origin（§7.2 冻结）。http(s) 顶层导航同样

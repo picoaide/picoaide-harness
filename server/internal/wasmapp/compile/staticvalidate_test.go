@@ -1,6 +1,7 @@
 package compile
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -281,3 +282,41 @@ func (rejectingValidator) Validate([]byte) (*Report, error) {
 
 // mustErr 把 (result, error) 里的 error 取出来（让 mustCode 的调用更短）。
 func mustErr[T any](_ T, err error) error { return err }
+
+// TestDataCountSectionOrderContract 是 P0-4 的**发布链路判据**（预检 + 真编译子进程）。
+//
+// 修复前的死局（D 路 2026-09-21 用真服务端实测）：
+//   - DataCount 放规范位置（Element 之后、Code 之前）⇒ 预检报 SECTION_MALFORMED；
+//   - 改成段 id 升序（Code/Data 之后）⇒ 预检放行、**真编译器**回 `invalid section order`。
+//
+// 两条路都堵死 ⇒ 任何带 DataCount 的产物（TinyGo 默认、启用 bulk-memory 的
+// LLVM/Rust/Zig 配置）100% 发不出去。
+//
+// 本用例三条断言缺一不可：
+//
+//	① 规范位置过预检（wasmmod 的段序判据与 wazero 同判）；
+//	② 规范位置能**真编译**（子进程走 wazero —— 只断言 ① 会重演"预检放行、编译报错"）；
+//	③ 错位摆放被**预检**拒（不能把错误留到编译期，否则失败形态是"用户等 30 秒拿一个
+//	   看不懂的编译错误"，而不是一条带 hints 的 422）。
+func TestDataCountSectionOrderContract(t *testing.T) {
+	child := buildCompileChildOnce(t)
+	c := newTestCompiler(t, child, nil)
+
+	if _, err := c.ValidateWasm(wasmtest.WithDataCount()); err != nil {
+		t.Fatalf("① 规范位置的 DataCount 必须过预检：%v", err)
+	}
+
+	dir := t.TempDir()
+	mod := writeModule(t, dir, "datacount.wasm", wasmtest.WithDataCount())
+	if _, err := c.Compile(context.Background(), mod); err != nil {
+		t.Fatalf("② 带 DataCount（规范位置）的模块必须能真编译：%v", err)
+	}
+
+	_, err := c.ValidateWasm(wasmtest.WithDataCountMisordered())
+	if err == nil {
+		t.Fatal("③ DataCount 摆在 Code 之后必须被预检拒绝（否则会漏到编译期）")
+	}
+	if err.Code != apperr.CodeSectionMalformed {
+		t.Fatalf("③ 错位 DataCount 的错误码应为 %s，实际 %s: %v", apperr.CodeSectionMalformed, err.Code, err)
+	}
+}

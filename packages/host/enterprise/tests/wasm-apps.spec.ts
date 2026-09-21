@@ -364,7 +364,16 @@ describe('本地路由：装配、方法分发、写面持有性证明', () => {
 
   it('同一次装配也注册了宿主工具面（AI 的发布路径与路由共用编排）', () => {
     const h = harness(() => json(200, {}))
-    expect(h.tools.map(t => t.name).sort()).toEqual(['wasm_app_list', 'wasm_app_publish', 'wasm_app_validate'])
+    // 六个名字逐个钉死（写死在这里是**有意**的：这条断言的用途就是"注册面少了/多了
+    // 一个工具立刻红"，改成读 WASM_APP_TOOL_NAMES 会让它变成自证）。
+    expect(h.tools.map(t => t.name).sort()).toEqual([
+      'wasm_app_diagnostics',
+      'wasm_app_list',
+      'wasm_app_publish',
+      'wasm_app_rows',
+      'wasm_app_schema',
+      'wasm_app_validate',
+    ])
     // 预算序关系：工具 deadline 必须**严格大于**出站预算（90 s），否则上游超时
     // 策略会把带 hints 的结构化结果整条换成笼统的 "tool call timed out"。
     for (const tool of h.tools) expect(tool.timeoutMs).toBeGreaterThan(CLIENT_UPLOAD_TIMEOUT_MS)
@@ -414,6 +423,61 @@ describe('本地路由：装配、方法分发、写面持有性证明', () => {
     expect(res.code).toBe(403)
     expect(res.body.error.code).toBe('FORBIDDEN')
     expect(h.outbound).toHaveLength(0)
+  })
+
+  it('作者数据面 GET 也要求持有性证明（unmask 不得被本机伪造 Origin 的 curl 读到）', async () => {
+    // P1-②（2026-09-21 独立审计）：`rows` 是**唯一**返回使用者数据的只读后缀，
+    // 且 `?unmask=1` 直接给原值。它曾与 schema/diagnostics 同走 `guard()`，而
+    // `guard()` 自述"伪造 Origin 的 curl 也能过" ⇒ 模型一条 curl 就能把 PII 读走。
+    // 判据三条，缺一不可：
+    //   ① 无 cookie 的 rows 请求 ⇒ 403 且**零出站**（不是"转发后被服务端拒"）；
+    //   ② 同一请求带真页面 cookie ⇒ 200 且查询串（含 unmask=1）逐字转发；
+    //   ③ 其余只读后缀（schema）同一无 cookie 形态下照常放行 —— 围栏只加在
+    //      "含使用者数据"的那一条上，不能顺手把作者自己的诊断面也锁死。
+    const h = harness(() => json(200, { rows: [] }))
+    const bare = await h.call(`${WASM_APPS_PREFIX}/demo-tool/rows?table=notes&unmask=1`, 'GET', undefined, { cookie: null })
+    expect(bare.code).toBe(403)
+    expect(String(bare.body.error)).toContain('proof')
+    expect(h.outbound).toHaveLength(0)
+
+    const withProof = await h.call(`${WASM_APPS_PREFIX}/demo-tool/rows?table=notes&unmask=1`)
+    expect(withProof.code).toBe(200)
+    expect(h.outbound).toHaveLength(1)
+    expect(h.outbound[0]!.url).toBe(
+      'https://harness.example/api/client/v2/apps/wasm/demo-tool/rows?table=notes&unmask=1',
+    )
+
+    const schema = await h.call(`${WASM_APPS_PREFIX}/demo-tool/schema`, 'GET', undefined, { cookie: null })
+    expect(schema.code).toBe(200)
+    expect(h.outbound).toHaveLength(2)
+  })
+
+  it('只有白名单后缀会转发查询串（其余路由不得把 query 带出站）', async () => {
+    // P2-⑤（2026-09-21 独立审计的实跑变异）：把查询串转发从"只给 rows"扩到任意
+    // 路由（含 DELETE / publish / unpublish / freeze）时，既有 62 条用例**全绿**
+    // —— 也就是"query 转发白名单"这条不变量此前零防线。
+    // 判据：非白名单路由带 `?search=…` 出站时 URL 里**不得**出现 `?`。
+    // ⚠️ 每条非白名单调用**必须自带查询串**：不带 `?` 时这条断言恒真（第一版就是
+    // 这样写的，变异实跑 64/64 全绿 = 假绿）。判据要能被打坏，输入就得带上被禁的东西。
+    const h = harness(() => json(200, { ok: true }))
+    // 非白名单 GET（未知后缀 / 未知应用段 / 目录）：一律不出站，查询串无从泄漏。
+    expect((await h.call(`${WASM_APPS_PREFIX}/demo-tool/bogus?search=x`)).code).toBe(404)
+    expect((await h.call(`${WASM_APPS_PREFIX}?search=x`)).code).toBe(200) // 目录 GET 合法
+    expect(h.outbound).toHaveLength(1)
+    expect(h.outbound[0]!.url).toBe('https://harness.example/api/client/v2/apps/wasm/catalog')
+    // 写面 POST / DELETE 与诊断面 GET：查询串**不得**出站。
+    await h.call(`${WASM_APPS_PREFIX}/demo-tool?search=x`, 'DELETE')
+    await h.call(`${WASM_APPS_PREFIX}/demo-tool/publish?search=x`, 'POST', '{}')
+    await h.call(`${WASM_APPS_PREFIX}/demo-tool/unpublish?search=x`, 'POST', '{}')
+    await h.call(`${WASM_APPS_PREFIX}/demo-tool/freeze?search=x`, 'POST', '{}')
+    await h.call(`${WASM_APPS_PREFIX}/validate?search=x`, 'POST', '{}')
+    for (const o of h.outbound.slice(1)) expect(o.url).not.toContain('?')
+    // 白名单后缀**必须**保留查询串（rows 的 table/limit/offset/unmask 全是服务端判据）；
+    // 四个只读后缀共用同一条转发路径，因此这里同时钉住"白名单整条都带 query"。
+    for (const suffix of ['rows', 'schema', 'diagnostics', 'export', 'releases']) {
+      await h.call(`${WASM_APPS_PREFIX}/demo-tool/${suffix}?search=x`)
+      expect(h.outbound.at(-1)!.url).toContain('?search=x')
+    }
   })
 
   it('validate 代理到服务端 validate（POST + Bearer）', async () => {
@@ -490,6 +554,9 @@ describe('错误语义：业务信封原样透传，只有传输层失败才回�
     // R1-pm-3：发布者的版本历史 + 审核结论（含被拒理由）必须也被转发 ——
     // 只读白名单是逐后缀的，漏一个后缀 = 服务端做完了、客户端永远 404。
     await h.call(`${WASM_APPS_PREFIX}/demo-tool/releases`)
+    // 作者数据面（2026-09-21）：查询串必须**原样**转发（table/limit/offset/unmask 都是
+    // 服务端的判据；代理层吞掉查询串会让"看数据"永远查第一张表的第一页默认视图）。
+    await h.call(`${WASM_APPS_PREFIX}/demo-tool/rows?table=notes&limit=50&offset=100`)
     // 标识唯一性预查（2026-09-20）：发布表单的异步查重走这条只读代理。
     // 它同样必须在这张逐后缀分发的白名单里，否则表单永远拿不到判词。
     await h.call(`${WASM_APPS_PREFIX}/demo-tool/availability`)
@@ -501,6 +568,7 @@ describe('错误语义：业务信封原样透传，只有传输层失败才回�
       'GET /api/client/v2/apps/wasm/demo-tool/schema',
       'GET /api/client/v2/apps/wasm/demo-tool/export',
       'GET /api/client/v2/apps/wasm/demo-tool/releases',
+      'GET /api/client/v2/apps/wasm/demo-tool/rows?table=notes&limit=50&offset=100',
       'GET /api/client/v2/apps/wasm/demo-tool/availability',
       'DELETE /api/client/v2/apps/wasm/demo-tool',
     ])

@@ -51,9 +51,20 @@ import { isAbsolute, join, relative } from 'node:path'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { gatewayFetch, normalizeServerURL } from './server-connector/auth.ts'
 import type { Session } from './server-connector/config.ts'
+import type { AiRowsConsentStore } from './wasm-apps-ai-rows-consent.ts'
 
 /** 本地路由前缀（唯一入口；管理面只在主站，§4.7 的 F-52e）。 */
 export const WASM_APPS_PREFIX = '/api/pico/apps/wasm'
+
+/**
+ * 「允许 AI 读取此应用的数据」的授权后缀（**跨端契约**：客户端 `app-lifecycle.ts`
+ * 的 `AI_ROWS_CONSENT_SUFFIX` 是同值的另一份字面量，对拍见客户端
+ * `ai-rows-consent.spec.tsx`）。
+ *
+ * 为什么是 `:app_id` 下的一段而不是像 app AI 那样一个全局面：授权**按应用**——
+ * 员工允许 AI 看"值班表"的库，不等于允许它看"发票助手"的库。
+ */
+export const AI_ROWS_CONSENT_SUFFIX = 'ai-rows-consent'
 
 /** 本地/服务端 JSON 响应的 Content-Type（两处必须一致：路由逐字节写出上游原文）。 */
 export const WASM_JSON_CONTENT_TYPE = 'application/json; charset=utf-8'
@@ -77,6 +88,13 @@ export const WASM_JSON_CONTENT_TYPE = 'application/json; charset=utf-8'
 export const WASM_MAX_BYTES = 32 * 1024 * 1024
 /** 上传请求体上限（base64 JSON，§4.2/R21）：48 MiB。 */
 export const UPLOAD_BODY_MAX_BYTES = 48 * 1024 * 1024
+/**
+ * 「允许 AI 读取此应用的数据」授权请求体上限：4 KiB。
+ *
+ * 载荷只有一个布尔值。**不**借用 publish 的 48 MiB 通道：那条通道会把整个 body 收进
+ * 内存再解析，而这条本机路由没有任何理由接受一个 48 MiB 的"授权请求"。
+ */
+export const AI_ROWS_CONSENT_BODY_MAX_BYTES = 4 * 1024
 /** 客户端上传超时（§4.2）：90 s，**必须**大于服务端读取超时。 */
 export const CLIENT_UPLOAD_TIMEOUT_MS = 90_000
 /** 服务端 `http.Server.ReadTimeout`（§4.2）：60 s。仅用于断言序关系，客户端不消费。 */
@@ -273,6 +291,17 @@ export interface WasmAppsFence {
   guard(req: IncomingMessage, res: ServerResponse): boolean
   /** 写面持有性证明（GET 直接放行，非 GET 在 fence 缺席时 fail-closed 503）。 */
   requireWriteProof(req: IncomingMessage, res: ServerResponse): boolean
+  /**
+   * **不区分方法**的持有性证明（fence 缺席时 fail-closed）。
+   *
+   * 为什么需要它，而不是复用 {@link requireWriteProof}（2026-09-21 独立审计 P1-②）：
+   * `requireWriteProof` 的语义是"GET 直接放行"——它假设读面不含使用者数据。这条假设
+   * 对目录/诊断/结构成立，但对 `GET …/rows?unmask=1` **不成立**：它是**一条 curl 就能
+   * 读走使用者 PII** 的路，而 `guard()` 自述的边界正是"伪造 Origin 的 curl 也能过"
+   * （回环 socket + 回环 Host + 同源标记三条都是本机进程能自己造出来的）。
+   * 所以行数据面走这条：**GET 也要证明自己是那个真页面**。
+   */
+  requireProof(req: IncomingMessage, res: ServerResponse): boolean
   /** 第二道保险：auditor 不得触发任何写面（§4.5）。 */
   writeGuard(): boolean
   /** 当前员工会话（令牌 + 服务端地址）。 */
@@ -283,6 +312,14 @@ export interface WasmAppsFence {
   collectBody(req: IncomingMessage, limit: number): Promise<Buffer>
   /** 宿主语言（本地文案按请求解析，禁止模块级冻结）。 */
   hostLocale(req?: IncomingMessage): HostLocale
+  /**
+   * 「允许 AI 读取此应用的数据」的**授权状态**（默认关；见
+   * `docs/decisions/2026-09-21-app-author-data-surface.md` §6 第 2 点）。
+   *
+   * **必须与宿主工具面是同一个实例**：面板经本路由写它，`wasm_app_rows` 读它 ——
+   * 两个实例（或一份内存副本）会让"点了允许、工具仍旧拒绝"，而那看起来像 AI 坏了。
+   */
+  aiRowsConsent: AiRowsConsentStore
 }
 
 /** 本模块向 `ctx.webServer.register` 交付的路由（方法分发在 handler 内）。 */
@@ -1440,6 +1477,111 @@ export async function listCatalog(ctx: Context, session: Session, signal?: Abort
   }
 }
 
+/**
+ * 读取一个应用的**表结构自省**（只读；`GET …/wasm/:app_id/schema`）。
+ *
+ * 与 {@link listCatalog} 同一形状：原样透传上游字节与 content-type，不做二次序列化
+ *（服务端的错误信封也就这样逐字节到模型手里）。
+ *
+ * 为什么工具面需要它（2026-09-21）：作者（尤其替他写应用的 AI）此前**没有任何回读面**
+ * —— 表名写错、列名拼错、`db.define` 没生效，都只能在对话里猜。schema 是零隐私的
+ * 结构面（表/列/行数/占用），给模型看没有问题。
+ * @param ctx - Host 上下文。
+ * @param session - 会话（提供 bearer）。
+ * @param appId - 应用标识（调用方已校验，仍按不可信输入编码）。
+ * @param signal - 取消信号。
+ * @returns 上游响应（原样字节）。
+ */
+export async function readAppSchema(ctx: Context, session: Session, appId: string, signal?: AbortSignal): Promise<WasmResponse> {
+  const path = `/api/client/v2/apps/wasm/${encodeURIComponent(appId)}/schema`
+  let upstream: Response
+  try {
+    upstream = await gatewayRequest(session, path, {}, CLIENT_UPLOAD_TIMEOUT_MS, signal)
+  } catch (cause) {
+    return gatewayFailure(cause)
+  }
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  return {
+    status: upstream.status,
+    text: await upstream.text().catch(() => ''),
+    contentType: upstream.headers.get('content-type') ?? WASM_JSON_CONTENT_TYPE,
+  }
+}
+
+/**
+ * 读取一个应用的**运行诊断**（只读；`GET …/wasm/:app_id/diagnostics`）。
+ *
+ * 技能文档（`references/diagnostics.md`）把"先读诊断，再改代码"写成第一动作，
+ * 而在此之前**没有任何工具**能让模型执行它（2026-09-21 补上）。
+ * @param ctx - Host 上下文。
+ * @param session - 会话（提供 bearer）。
+ * @param appId - 应用标识。
+ * @param minutes - 诊断窗口（分钟；服务端按保留期收敛）。
+ * @param signal - 取消信号。
+ * @returns 上游响应（原样字节）。
+ */
+export async function readAppDiagnostics(
+  ctx: Context,
+  session: Session,
+  appId: string,
+  minutes: number | undefined,
+  signal?: AbortSignal,
+): Promise<WasmResponse> {
+  const query = minutes === undefined ? '' : `?minutes=${String(minutes)}`
+  const path = `/api/client/v2/apps/wasm/${encodeURIComponent(appId)}/diagnostics${query}`
+  let upstream: Response
+  try {
+    upstream = await gatewayRequest(session, path, {}, CLIENT_UPLOAD_TIMEOUT_MS, signal)
+  } catch (cause) {
+    return gatewayFailure(cause)
+  }
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  return {
+    status: upstream.status,
+    text: await upstream.text().catch(() => ''),
+    contentType: upstream.headers.get('content-type') ?? WASM_JSON_CONTENT_TYPE,
+  }
+}
+
+/**
+ * 读取一个应用某张表的**行**（只读；`GET …/wasm/:app_id/rows`）。
+ *
+ * ⚠️ **永远不带 `unmask`**：服务端的默认策略是按列名启发式脱敏敏感列，原值只能由
+ * **人**在客户端面板里显式点「显示原值（会记审计）」—— 模型自己不能解掉这层保护
+ *（否则"使用者 PII 进模型上下文"就成了一条谁也没批准过的默认路径）。
+ * @param ctx - Host 上下文。
+ * @param session - 会话（提供 bearer）。
+ * @param appId - 应用标识。
+ * @param query - table / limit / offset（unmask 由本函数**拒绝**透传）。
+ * @param signal - 取消信号。
+ * @returns 上游响应（原样字节）。
+ */
+export async function readAppRows(
+  ctx: Context,
+  session: Session,
+  appId: string,
+  query: { table: string, limit?: number, offset?: number },
+  signal?: AbortSignal,
+): Promise<WasmResponse> {
+  const params = new URLSearchParams()
+  params.set('table', query.table)
+  if (query.limit !== undefined) params.set('limit', String(query.limit))
+  if (query.offset !== undefined) params.set('offset', String(query.offset))
+  const path = `/api/client/v2/apps/wasm/${encodeURIComponent(appId)}/rows?${params.toString()}`
+  let upstream: Response
+  try {
+    upstream = await gatewayRequest(session, path, {}, CLIENT_UPLOAD_TIMEOUT_MS, signal)
+  } catch (cause) {
+    return gatewayFailure(cause)
+  }
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  return {
+    status: upstream.status,
+    text: await upstream.text().catch(() => ''),
+    contentType: upstream.headers.get('content-type') ?? WASM_JSON_CONTENT_TYPE,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 代理面（生命周期 / 只读 / 删除）
 // ---------------------------------------------------------------------------
@@ -1498,6 +1640,8 @@ export async function proxyApp(ctx: Context, session: Session, input: ProxyInput
  * | POST | `/validate` | 预检代理（AI/UI 用来"不占版本号地试一发"） |
  * | POST | `/publish` | **发布编排**：`wasm_base64`/`wasm_path` → 直传或分片续传 |
  * | POST | `/:app_id/publish\|unpublish\|freeze` | 生命周期代理（原样转发 body） |
+ * | GET | `/:app_id/diagnostics\|schema\|export\|releases\|rows` | 只读代理（`rows` 额外要持有性证明） |
+ * | GET/POST | `/:app_id/ai-rows-consent` | 「允许 AI 读取此应用的数据」授权状态（本机文件；默认关） |
  * | GET | `/:app_id/diagnostics\|schema\|export\|releases\|availability` | 只读代理 |
  * | DELETE | `/:app_id` | 删除代理（R37 冻结→导出→真删） |
  *
@@ -1544,8 +1688,15 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
     }
 
     let pathname: string
+    // 查询串必须保留（2026-09-21，作者数据面 `rows`）：`table/limit/offset/unmask`
+    // 全是**查询参数**，代理层只取 pathname 会让"看数据"永远停在默认视图
+    //（测试实测：`…/rows?table=notes&limit=50` 转发成 `…/rows`）。
+    let search = ''
     try {
-      pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+      const parsed = new URL(req.url ?? '/', 'http://localhost')
+      pathname = parsed.pathname
+      // `pathname` 已单独取出；这里只拼查询串（保留空查询串为 ''，不带 `?`）。
+      search = parsed.search
     } catch {
       return fail(res, { code: 'NOT_FOUND', message: 'not found', status: 404 })
     }
@@ -1621,6 +1772,65 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
     if (appID === '') return fail(res, { code: 'NOT_FOUND', message: 'not found', status: 404 })
     const appPath = `/api/client/v2/apps/wasm/${encodeURIComponent(appID)}`
 
+    // GET/POST /:app_id/ai-rows-consent —— 「允许 AI 读取此应用的数据」授权（默认关）
+    //
+    // 为什么是一条**本机**路由而不是平台调用：闸门在宿主工具（`wasm_app_rows`）里，
+    // 而授权动作发生在渲染进程的面板上 —— 这条路由是两端唯一的连接点（与 app AI
+    // 的 `…/wasm-apps/ai/consent` 同一形态，只是授权维度按 app 而不是按用户×app）。
+    //
+    // 读与写都要**持有性证明**（含 GET）：这个布尔值就是"AI 能不能读这个应用的数据"
+    // 的开关，与 `rows` 同口径 —— `guard()` 自述的边界正是"伪造 Origin 的 curl 也能过"。
+    if (segments.length === 2 && segments[1] === AI_ROWS_CONSENT_SUFFIX) {
+      if (method !== 'GET' && method !== 'POST') return fail(res, { code: 'METHOD_NOT_ALLOWED', message: 'method not allowed', status: 405 })
+      if (!fence.requireProof(req, res)) return
+      if (method === 'GET') {
+        return fence.json(res, 200, { app_id: appID, enabled: await fence.aiRowsConsent.isEnabled(appID) })
+      }
+      // 写面：body 只有一个布尔值 —— 用 4 KiB 的独立上限，不借用 publish 的 48 MiB 通道。
+      let raw: Buffer
+      try {
+        raw = await fence.collectBody(req, AI_ROWS_CONSENT_BODY_MAX_BYTES)
+      } catch {
+        return fail(res, {
+          code: 'UPLOAD_TOO_LARGE',
+          message: hostCopy(locale, '授权请求体超过上限', 'the consent request body exceeds the size limit'),
+          status: 413,
+          details: { limit_bytes: AI_ROWS_CONSENT_BODY_MAX_BYTES },
+        })
+      }
+      let parsed: unknown
+      try {
+        parsed = raw.byteLength === 0 ? undefined : JSON.parse(raw.toString('utf8'))
+      } catch {
+        parsed = undefined
+      }
+      const row = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : undefined
+      if (row === undefined || typeof row.enabled !== 'boolean') {
+        return fail(res, {
+          code: 'VALIDATION',
+          message: hostCopy(locale, '授权请求体必须是 {"enabled":true|false}', 'the consent body must be {"enabled":true|false}'),
+          status: 400,
+          hints: ['这个开关只有一个字段：enabled（布尔）。没有其它开关、也没有"允许原值"这一项'],
+        })
+      }
+      try {
+        await fence.aiRowsConsent.setEnabled(appID, row.enabled)
+      } catch (cause) {
+        // 写失败**必须**让用户看见：静默成功会让面板显示"已允许"而工具仍然拒绝
+        //（下一次调用回 AI_ROWS_NOT_AUTHORIZED），而那看起来像 AI 坏了。
+        ctx.logger?.warn?.(`pico-wasm-apps: persisting the AI rows consent failed (${cause instanceof Error ? cause.message : String(cause)})`)
+        return fail(res, {
+          code: 'AI_ROWS_CONSENT_NOT_PERSISTED',
+          message: hostCopy(locale, '授权未能保存', 'the consent could not be saved'),
+          status: 500,
+          hints: ['检查数据根是否可写（授权记录落在 $DSH_HOME/wasm-apps-ai-rows-consent.json，0600）'],
+        })
+      }
+      return fence.json(res, 200, { app_id: appID, enabled: row.enabled })
+    }
+
     // POST /:app_id/(publish|unpublish|freeze) —— 生命周期（body 原样转发）
     if (segments.length === 2 && ['publish', 'unpublish', 'freeze'].includes(segments[1] ?? '')) {
       if (method !== 'POST') return fail(res, { code: 'METHOD_NOT_ALLOWED', message: 'method not allowed', status: 405 })
@@ -1633,21 +1843,29 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
         locale,
       }))
     }
-    // GET /:app_id/(diagnostics|schema|export|releases|availability) —— 只读
+    // GET /:app_id/(diagnostics|schema|export|releases|rows|availability) —— 只读
     //
     // `releases`（R1-pm-3）是发布者本人的版本历史 + 审核结论（含被拒理由）：服务端
     // 的员工面出口是 `GET /api/client/v2/apps/wasm/:app_id/releases`。**它必须在这里
     // 的白名单里** —— 这张表是逐后缀分发的，漏一个后缀就是"服务端做完了、客户端永远
     // 404"（面板上表现为一条读不出来的结论，而不是功能缺失）。
+    // `rows`（2026-09-21，作者数据面）也走这条：它是**查询串参数**的 GET
+    //（?table=&limit=&offset=&unmask=），代理层只需原样转发 query 与身份。
     //
     // `availability`（2026-09-20）是标识唯一性预查：发布表单在用户敲 app_id 时防抖
     // 调用它、提交前再调一次。它同样**必须在这个白名单里**，否则表单拿不到判词，
     // 只能退回去读 `catalog` —— 而 catalog 不列冻结/占名行，会给出"标识没人用"的
     // 反向结论（这正是本端点要消灭的形态）。
-    if (segments.length === 2 && ['diagnostics', 'schema', 'export', 'releases', 'availability'].includes(segments[1] ?? '')) {
+    // 三条只读后缀共用同一条转发路径（**一个 if**：两处各写一个会把下面的大括号配平弄坏 ——
+    // 合并 master 时踩过）。
+    if (segments.length === 2 && ['diagnostics', 'schema', 'export', 'releases', 'rows', 'availability'].includes(segments[1] ?? '')) {
       if (method !== 'GET') return fail(res, { code: 'METHOD_NOT_ALLOWED', message: 'method not allowed', status: 405 })
+      // `rows` 返回**使用者数据**（`?unmask=1` 时是脱敏前的原值）：即使 GET 也要
+      // 浏览器持有性证明 —— 否则本机任意进程（含模型自己的 shell）一条 curl 就能读走。
+      // 其余只读后缀（schema/diagnostics/export/releases）是零使用者数据面，维持 `guard()`。
+      if (segments[1] === 'rows' && !fence.requireProof(req, res)) return
       return write(res, await proxyApp(ctx, session, {
-        upstreamPath: `${appPath}/${segments[1]!}`,
+        upstreamPath: `${appPath}/${segments[1]!}${search}`,
         method: 'GET',
         locale,
       }))

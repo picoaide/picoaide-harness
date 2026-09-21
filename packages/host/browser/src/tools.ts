@@ -58,6 +58,55 @@ function present(title: string): (args: unknown) => GenericCallView {
 }
 
 /**
+ * 真正**声明**了 `app_id` 参数的工具（§16.1：应用窗口只能显式寻址）。
+ *
+ * 今天只有 `browser_navigate` 分派到应用 surface。这份名单与 {@link guardStrayAppId}
+ * 合起来构成同一条事实的两个方向：在名单里的工具必须**真的**把操作落到那个 surface
+ * 自己的 `webContents` 上；不在名单里的工具收到 `app_id` 必须 fail-loud。
+ */
+const APP_SURFACE_TOOLS: ReadonlySet<string> = new Set(['browser_navigate'])
+
+/**
+ * 一次调用的落点（§16.1）：要么是某个**应用窗口 surface**，要么是某个**浏览器标签**。
+ *
+ * 判别联合而不是"tab id"：错目标的缺陷之所以能发生，就是因为应用窗口被降级成了一个
+ * 数字，落回浏览器标签时没有任何类型能拦住。工具实现必须按 `kind` 分派。
+ */
+type SurfaceTarget =
+  | { kind: 'app', surface: BrowserSurface }
+  | { kind: 'browser-tab', tab: number }
+
+/**
+ * 把"给不接受 `app_id` 的工具传了 `app_id`"变成**明确的结构化错误**。
+ *
+ * 为什么必须有这道闸（与 `browser_navigate` 的 P1 同族，2026-09-21）：上游工具参数
+ * schema 的 `additionalProperties` 是**未声明**（宽松）的 —— 模型传一个未声明的
+ * `app_id` 不会在参数校验处被拦下，而是原样进入 `execute` 后被**忽略**，操作便落在
+ * **浏览器标签**上，而模型以为自己驱动的是应用窗口。对 snapshot / get_text / eval /
+ * screenshot / wait_for / reload / close 这些工具，这就是同一族的静默错目标；唯一
+ * 正确的行为是拒绝，并把"该怎么寻址"告诉模型。
+ *
+ * 包装发生在**注册点**：这是所有工具（含以后新加的）唯一的共同入口，逐工具手写检查
+ * 必然漏。
+ * @param definition - `defineTool` 产出的定义。
+ * @returns 带参数闸门的定义（在名单里的工具原样返回）。
+ */
+function guardStrayAppId(definition: ReturnType<typeof defineTool>): ReturnType<typeof defineTool> {
+  if (APP_SURFACE_TOOLS.has(definition.name)) return definition
+  const inner = definition.execute
+  return {
+    ...definition,
+    async execute(args, exec) {
+      const appId = (args as { app_id?: unknown } | null | undefined)?.app_id
+      if (typeof appId === 'string' && appId !== '') {
+        throw browserError('policy', `${definition.name} cannot act on an application window (app_id ${JSON.stringify(appId)}) — only browser_navigate dispatches to application windows today; every other tool addresses browser tabs (browser_list_tabs lists both kinds)`)
+      }
+      return await inner(args, exec)
+    },
+  }
+}
+
+/**
  * Read the verdict of the operation that just finished back out of the runtime's
  * own op log (2026-09-15 审计 P2).
  *
@@ -179,7 +228,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
   // registrations without changing the tool definitions.
   const register = (definition: ReturnType<typeof defineTool>): void => {
     const group = GROUP_OF[definition.name] ?? 'control'
-    if (enabledGroups.has(group)) disposers.push(ctx.tools.register(definition))
+    if (enabledGroups.has(group)) disposers.push(ctx.tools.register(guardStrayAppId(definition)))
   }
   disposers.push(ctx.systemPrompt.section({
     name: 'tool:browser',
@@ -209,10 +258,26 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     return surface
   }
 
-  /** 本次调用的目标（浏览器标签），`app_id` 存在时先做显式寻址校验。 */
-  const browserTabOf = async (args: { tab?: number | undefined, app_id?: string | undefined }): Promise<number> => {
-    if (typeof args.app_id === 'string' && args.app_id !== '') appSurfaceOf(args.app_id)
-    return await tabOf(args.tab)
+  /**
+   * 把模型给的寻址解析成**一个明确的落点**（§16.1）。
+   *
+   * 这是"应用窗口 ≠ 浏览器标签"的唯一分派点：`app_id` ⇒ 解析成那个 surface 自己的
+   * 目标（{@link SurfaceTarget}），否则才是浏览器标签。此前这里把 `app_id` 校验完就
+   * 丢掉、直接返回浏览器当前标签 —— 模型以为自己驱动应用窗口，实际导航了用户的浏览器
+   * 标签（P1，2026-09-21）。
+   * @param args - 模型的 `tab` / `app_id`。
+   * @returns 明确的目标（应用 surface 或浏览器标签 id）。
+   */
+  const resolveSurfaceTarget = async (args: { tab?: number | undefined, app_id?: string | undefined }): Promise<SurfaceTarget> => {
+    const appId = args.app_id
+    if (typeof appId === 'string' && appId !== '') {
+      if (args.tab !== undefined) {
+        // 矛盾的寻址：宁可拒绝，也不要"随便挑一个"（注册表与 resolve() 同一口径）。
+        throw browserError('policy', `browser: ambiguous target — pass either tab (browser tab) or app_id (application window), not both (tab=${String(args.tab)} app_id=${JSON.stringify(appId)})`)
+      }
+      return { kind: 'app', surface: appSurfaceOf(appId) }
+    }
+    return { kind: 'browser-tab', tab: await tabOf(args.tab) }
   }
 
   // ----------------------------------------------------------- Navigate (8)
@@ -269,11 +334,17 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       const { tab, app_id: appId, url, waitUntil } = args as { tab?: number; app_id?: string; url: string; waitUntil?: BrowserWaitUntil }
       if (typeof url !== 'string' || url.trim() === '') throw new Error('url must be a non-empty string')
       noteAgent(runtime, exec.agent)
-      // §16.1 寻址：给了 app_id ⇒ 显式指向应用窗口；否则默认指向**浏览器当前标签**。
-      const tabId = await browserTabOf({ tab, ...(appId === undefined ? {} : { app_id: appId }) })
-      await runtime.navigate(tabId, url.trim(), waitUntil ?? 'domcontentloaded', exec.signal)
+      // §16.1 寻址：给了 app_id ⇒ **这个应用窗口自己的 webContents**；否则默认指向
+      // 浏览器当前标签。两条路径的返回值形状一致（url/title/loading），但落点绝不互换。
+      const target = await resolveSurfaceTarget({ tab, ...(appId === undefined ? {} : { app_id: appId }) })
+      if (target.kind === 'app') {
+        const state = await runtime.navigateAppSurface(target.surface, url.trim(), waitUntil ?? 'domcontentloaded', exec.signal)
+        exec.signal.throwIfAborted()
+        return state
+      }
+      await runtime.navigate(target.tab, url.trim(), waitUntil ?? 'domcontentloaded', exec.signal)
       exec.signal.throwIfAborted()
-      const state = runtime.tabState(tabId)
+      const state = runtime.tabState(target.tab)
       return { url: state.url, title: state.title, loading: state.loading }
     },
   }))
@@ -373,11 +444,26 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
             type: 'object',
             additionalProperties: false,
             properties: {
-              controlled: { type: 'boolean', description: 'The user holds control: your other browser tools are refused until the user hands control back from the browser window.' },
+              controlled: { type: 'boolean', description: 'The user holds control of the BROWSER window: your other browser tools are refused until the user hands control back from the browser window.' },
               busy: { type: 'boolean', description: 'A browser operation (yours or the user\'s) is running right now.' },
               busyTool: { type: 'string', description: 'Name of the running tool (empty when idle).' },
               awaitingRelease: { type: 'boolean', description: 'One of your browser calls was already refused because the user holds control — the user must hand control back from the browser window before you can continue.' },
               awaitingReleaseTool: { type: 'string', description: 'The tool whose call was refused (empty when nothing is waiting).' },
+              // §16.1 第 3 条：控制权按 surface 记。应用窗口的用户闸不会拦住浏览器
+              // 标签，所以它必须与 `controlled` 分开报 —— 否则模型会把"某个应用窗口
+              // 归人"误读成"整个浏览器都不能动"。
+              userHeldSurfaces: {
+                type: 'array',
+                description: 'Application windows the USER currently holds (take-over). Your browser_navigate calls against these app_ids are refused until the user clicks "Hand back to AI" in that window; browser tabs are unaffected.',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: 'integer', description: 'Surface id.' },
+                    appId: { type: 'string', description: 'Application id (pass it as app_id to browser_navigate).' },
+                  },
+                },
+              },
             },
           },
         },

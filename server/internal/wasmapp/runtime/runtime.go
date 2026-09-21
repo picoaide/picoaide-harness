@@ -107,7 +107,10 @@ type Runtime struct {
 	rt     wazero.Runtime
 	cache  wazero.CompilationCache
 	ownCch bool // cache 是否由本运行时创建（决定 Close 时是否一并关闭）
-	logger *log.Logger
+	// cacheMode 是本运行时**实际生效**的编译缓存模式（构造期由唯一的决策点
+	// resolveCompilationCache 连同缓存对象一起给出，见 config.go）。
+	cacheMode CacheMode
+	logger    *log.Logger
 	// memoryPages 是本运行时的线性内存上限（§4.3 R22），用于与请求侧期望值对拍。
 	memoryPages uint32
 	// onModuleClose 是 Options.OnModuleClose 的装配期快照（nil ⇒ 无观察者）。
@@ -117,19 +120,14 @@ type Runtime struct {
 
 // New 装配执行侧运行时。
 func New(ctx context.Context, opts Options) (*Runtime, error) {
-	cache := opts.CompilationCache
-	own := false
-	if cache == nil {
-		if opts.DataRoot != "" {
-			c, err := NewCompilationCache(opts.DataRoot)
-			if err != nil {
-				return nil, err
-			}
-			cache, own = c, true
-		} else {
-			cache = wazero.NewCompilationCache()
-			own = true
-		}
+	// 缓存与**它的模式**必须出自同一个决策点（resolveCompilationCache）：
+	// 分两次算会让"探针报告 disk、实际跑 memory"成为可能，而这条降级此前只有一行
+	// 日志（2026-09-21 独立审计 P1-①）。own 只表示"缓存由本运行时创建"（决定 Close
+	// 是否一并关闭），与模式无关。
+	own := opts.CompilationCache == nil
+	cache, cacheMode, cerr := resolveCompilationCache(opts.DataRoot, opts.CompilationCache)
+	if cerr != nil {
+		return nil, cerr
 	}
 	pages := opts.MemoryPages
 	if pages == 0 {
@@ -155,7 +153,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Runtime{rt: rt, cache: cache, ownCch: own, logger: logger, memoryPages: pages,
+	return &Runtime{rt: rt, cache: cache, ownCch: own, cacheMode: cacheMode, logger: logger, memoryPages: pages,
 		onModuleClose: opts.OnModuleClose}, nil
 }
 
@@ -181,6 +179,21 @@ func (r *Runtime) MemoryLimitPages() uint32 {
 		return 0
 	}
 	return r.memoryPages
+}
+
+// CacheMode 返回本运行时**实际生效**的编译缓存模式（disk / memory）。
+//
+// 与 MemoryLimitPages 同一条纪律（P0-2 的"让访问器直接问运行时"）：调用方若各自
+// 记住"我以为传进去的 DataRoot 能建磁盘缓存"，就会出现"探针说 disk、实际跑 memory"
+// 的分叉 —— 而这条降级的**唯一**可观测面在实现前只有一行日志。取值由构造期那个
+// 唯一的决策点给出，且是对**真的装进 wazero 的那个缓存对象**的判定（见 cacheModeOf）。
+//
+// nil 接收者返回空串（"没有运行时"不能伪装成任何一种模式）。
+func (r *Runtime) CacheMode() CacheMode {
+	if r == nil {
+		return ""
+	}
+	return r.cacheMode
 }
 
 // CompileModule 是执行侧的编译入口（与编译进程共用 NewRuntimeConfig 的配置）。

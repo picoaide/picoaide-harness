@@ -322,5 +322,41 @@ func allowedContentType(ct string) bool {
 	return false
 }
 
+// DefaultContentTypeForBody 在应用**没有给出可用 content-type** 时显式判定一个类型。
+//
+// 为什么必须有这条（2026-09-21 审计 F-13）：动态响应此前把 Content-Type 交给
+// `net/http` 的**隐式嗅探**（应用没写、或被 §4.8 白名单剥掉 ⇒ 头为空 ⇒ 首次 Write
+// 时由标准库按前 512 字节决定）。两个后果：
+//   - "白名单"事实上被绕过：类型由**响应体内容**决定，而不是由平台枚举决定；
+//   - 行为随 Go 版本漂移，且在本 package 的测试里完全不可见（隐式路径不写头）。
+//
+// 判据（"显式 + 收口"两条一起）：
+//  1. 用 `http.DetectContentType`（与隐式路径同一张表 ⇒ **行为等价、无回归**）；
+//  2. 结果必须落回 §4.8 的允许集合：`text/html` / `text/plain` 保留并补 charset，
+//     `image/*` 只在允许集合内保留，其余（含 Go 会认出的 application/pdf、
+//     application/zip、audio/*、video/*）一律回落 `application/octet-stream`。
+//
+// 为什么保留 text/html 而不是统一 octet-stream：应用页的主文档就是 HTML，
+// 而"没写 Content-Type"的应用在修复前靠嗅探能正常渲染 —— 统一 octet-stream 会把
+// 它们变成下载 ⇒ 白屏，属于**修复引入的回归**。参考实现（refapp / examples）都显式
+// 写了头，所以这条只影响"忘了写"的应用：给它们一个安全的、与修复前一致的默认值。
+func DefaultContentTypeForBody(body []byte) string {
+	sniffed := http.DetectContentType(body)
+	base := strings.ToLower(strings.TrimSpace(sniffed))
+	if i := strings.IndexByte(base, ';'); i >= 0 {
+		base = strings.TrimSpace(base[:i])
+	}
+	switch base {
+	case "text/html":
+		return "text/html; charset=utf-8"
+	case "text/plain":
+		return "text/plain; charset=utf-8"
+	}
+	if strings.HasPrefix(base, "image/") && allowedContentType(base) {
+		return base
+	}
+	return "application/octet-stream"
+}
+
 // MaxBodyBytes 是应用 API 的请求体上限（§4.6）。
 func MaxBodyBytes() int64 { return limits.AppRequestBodyMaxBytes }

@@ -1,6 +1,8 @@
 package wasmmod
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -122,9 +124,10 @@ func TestCoverageGuestRequiredSymbolsAreTheJudgement(t *testing.T) {
 
 // TestWhitelistAllowsOnlyFdFreeSockSymbols 把"红线 4 的静态判据"钉死在**精确集合**上：
 //
-//	允许：sock_accept / sock_shutdown（拿不到已监听的 fd ⇒ EBADF(8)；Go 运行时会发出）
-//	禁止：sock_open / sock_bind / sock_listen / sock_connect（造 fd 的路径）
-//	禁止：sock_recv / sock_send（需要已连接的 fd；当前 Go 面用不到，收紧到最小集合）
+//	允许：sock_accept / sock_recv / sock_send / sock_shutdown
+//	      （四条都要求"已有可用 socket fd"，而平台里造不出这种 fd ⇒ 能力为空；
+//	       Go 运行时会发出 accept/shutdown，TinyGo 的 net/url 路径还会发出 recv/send）
+//	禁止：sock_open / sock_bind / sock_listen / sock_connect（唯一能造 fd 的四条）
 func TestWhitelistAllowsOnlyFdFreeSockSymbols(t *testing.T) {
 	got := map[string]string{}
 	for _, spec := range ImportWhitelist {
@@ -180,4 +183,165 @@ func sortedImportNames(imports []Import) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// coverageSockGuestPkg 是 TinyGo 风格 socket 导入的固定门禁程序
+// （**刻意不在 whitelistSources / whitelistSourcesForTest 里**，理由见 stdrender 的同款注释）。
+const coverageSockGuestPkg = "./internal/wasmapp/wasmmod/testdata/sockguest"
+
+// coverageSockRequired 是 TinyGo 的 `net/url` 路径会带出的两条符号及其 canonical 签名。
+var coverageSockRequired = map[string]string{
+	"sock_recv": "i32i32i32i32i32i32_i32",
+	"sock_send": "i32i32i32i32i32_i32",
+}
+
+// TestWhitelistCoversTinyGoStyleSocketImports 是 P0-6 的回归判据：
+// 真编译一份"TinyGo 会在导入面上产出的形状"，断言平台白名单覆盖它，
+// 并且**删掉任一条就会拒**（证明白名单里的那两行是承重的，不是摆设）。
+//
+// 与 TestWhitelistAllowsOnlyFdFreeSockSymbols 的分工：
+//   - 那条钉"精确集合"（多一条造 fd 的符号即红）；
+//   - 本用例钉"够用"（少一条就让合法产物发不出去即红）。两条一起才既不过宽也不过窄。
+//
+// 变异验证：把 sockprobe 从生成来源里删掉并重跑生成器 ⇒ 本用例红（sock_recv/sock_send
+// 不在白名单，Validate 报 IMPORT_NOT_ALLOWED）——门禁与生成器的一致性由此闭环。
+func TestWhitelistCoversTinyGoStyleSocketImports(t *testing.T) {
+	raw := buildSource(t, coverageSockGuestPkg)
+	info := mustParse(t, raw)
+
+	// ① 前置断言：门禁程序**真的**发出了这两条（否则本用例是空转假绿）。
+	emitted := map[string]string{}
+	for _, imp := range info.Imports {
+		if _, want := coverageSockRequired[imp.Name]; want {
+			emitted[imp.Name] = imp.Signature
+		}
+	}
+	for name, want := range coverageSockRequired {
+		got, ok := emitted[name]
+		if !ok {
+			t.Fatalf("门禁程序没有发出 %s —— 夹具退化了（本用例将变成空转）：实际导入 %v",
+				name, sortedImportNames(info.Imports))
+		}
+		if got != want {
+			t.Fatalf("%s 的签名 = %s，期望 canonical %s（夹具或 ABI 理解已漂移）", name, got, want)
+		}
+	}
+
+	// ② 正例：白名单必须覆盖它（否则 TinyGo 产物发不出去）。
+	if _, err := Validate(raw); err != nil {
+		t.Fatalf("TinyGo 风格产物的导入面必须被白名单覆盖：%v\n修复：cd server && go run ./cmd/picoaide-wasm-imports-gen", err)
+	}
+
+	// ③ 反向：从白名单里删掉任一条 ⇒ 必须被拒（证明这两行是承重的）。
+	for name := range coverageSockRequired {
+		mutated := make([]ImportSpec, 0, len(ImportWhitelist))
+		for _, spec := range ImportWhitelist {
+			if spec.Name == name {
+				continue
+			}
+			mutated = append(mutated, spec)
+		}
+		if len(mutated) == len(ImportWhitelist) {
+			t.Fatalf("%s 本来就不在白名单里 —— 上面的正例判据不成立", name)
+		}
+		_, err := ValidateWithWhitelist(raw, mutated)
+		if err == nil {
+			t.Fatalf("白名单里删掉 %s 后门禁程序仍被放行 —— 说明这条符号没进判据", name)
+		}
+		e := codeOf(t, err)
+		if e.Code != apperr.CodeImportNotAllowed && e.Code != apperr.CodeImportSignatureMismatch {
+			t.Fatalf("删掉 %s 的期望拒绝码是 IMPORT_NOT_ALLOWED/IMPORT_SIGNATURE_MISMATCH，实际 %s: %v",
+				name, e.Code, err)
+		}
+	}
+}
+
+// hasParams 报告一行 `func name(...)...` 的参数列表是否非空（用于区分 wasmimport 声明
+// 与无参辅助函数）。
+func hasParams(funcLine string) bool {
+	open := strings.Index(funcLine, "(")
+	closeIdx := strings.Index(funcLine, ")")
+	if open < 0 || closeIdx <= open {
+		return false
+	}
+	return strings.TrimSpace(funcLine[open+1:closeIdx]) != ""
+}
+
+// TestSocketImportDeclarationsStayInSyncAcrossCopies 钉住"两份 sock 导入声明逐字相等"。
+//
+// 为什么需要它（2026-09-21 独立审计 P3-⑤）：`sock_recv`/`sock_send` 的声明在仓库里有
+// **两份拷贝** ——
+//
+//	server/internal/wasmapp/refapp/sockprobe/sock_wasip1.go   （生成器来源：进 ImportWhitelist）
+//	server/internal/wasmapp/wasmmod/testdata/sockguest/sock_wasip1.go（独立门禁：验证白名单够用）
+//
+// 两者**必须声明同一组符号、同一组签名**：签名是白名单比对的一部分
+// （`IMPORT_SIGNATURE_MISMATCH`），任一份漂移都会让"够用"或"精确"这两条判据之一失去
+// 意义（例如门禁程序写错签名 ⇒ 白名单看起来够用，真产物仍被拒）。
+// 现在的机制性保证为零（靠"改一处记得改另一处"），本用例把它变成断言。
+//
+// 判据口径：比较**去掉注释与空白后的函数签名行 + wasmimport 指令行**，而不是整个文件
+// ——两份文件的注释是**故意**不同的（各自解释自己的用途），逐字节比较会把文档改动变成红灯。
+// 变异验证：把任一份的 `sock_send` 签名少写一个参数（或删掉一条声明）⇒ 本用例红。
+func TestSocketImportDeclarationsStayInSyncAcrossCopies(t *testing.T) {
+	// 两份拷贝的**相对包目录**（相对 server/）。
+	const (
+		generatorCopy = "refapp/sockprobe"
+		guestCopy     = "wasmmod/testdata/sockguest"
+	)
+	// 相对 **go.mod 所在目录**（server/）解析：包的测试 cwd 是包目录，
+	// 而既有用例的 `./internal/...` 口径是相对模块根的 —— 这里必须与之一致，
+	// 否则换目录跑测试会读不到文件（且是"读不到"而不是"断言失败"，更容易误诊）。
+	base := filepath.Join(moduleRootForTest(t), "internal", "wasmapp")
+	extract := func(pkgDir string) map[string]string {
+		t.Helper()
+		path := filepath.Join(base, pkgDir, "sock_wasip1.go")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("读 %s: %v", path, err)
+		}
+		out := map[string]string{}
+		var pending string // 上一行的 //go:wasmimport 指令
+		for _, line := range strings.Split(string(raw), "\n") {
+			trimmed := strings.TrimSpace(line)
+			switch {
+			case strings.HasPrefix(trimmed, "//go:wasmimport"):
+				pending = trimmed
+			case strings.HasPrefix(trimmed, "func "):
+				// 只认**带参数的包级函数**（即真的 wasmimport 声明）；`func probeSockets()`
+				// 这类无参辅助函数本就该没有指令，不能因此判失败。
+				// 形如 `func sockRecv(fd, iovs, iovsLen, flags, nread, nwritten uintptr) int32 {`
+				if !hasParams(trimmed) {
+					continue
+				}
+				sig := strings.TrimSuffix(trimmed, " {")
+				if pending == "" {
+					t.Fatalf("%s 里的 %q 缺 //go:wasmimport 指令（声明不完整）", path, sig)
+				}
+				out[sig] = pending
+				pending = ""
+			}
+		}
+		if len(out) == 0 {
+			t.Fatalf("%s 里没解析到任何 //go:wasmimport 声明（解析口径可能失效）", path)
+		}
+		return out
+	}
+	gen := extract(generatorCopy)
+	guest := extract(guestCopy)
+	for sig, imp := range gen {
+		other, ok := guest[sig]
+		if !ok {
+			t.Fatalf("门禁拷贝（%s）缺少生成器拷贝里的声明：%s\n"+
+				"两份必须逐条相同，否则\"白名单够用\"的判据会在真产物上失效", guestCopy, sig)
+		}
+		if other != imp {
+			t.Fatalf("同一签名的 wasmimport 指令不一致：\n  生成器：%s\n  门禁：  %s", imp, other)
+		}
+	}
+	for sig := range guest {
+		if _, ok := gen[sig]; !ok {
+			t.Fatalf("门禁拷贝（%s）多出生成器拷贝没有的声明：%s（多声明的符号不会被白名单覆盖）", guestCopy, sig)
+		}
+	}
 }

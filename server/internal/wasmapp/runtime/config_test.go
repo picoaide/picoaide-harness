@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/wasmapp/compile/testdata/wasmtest"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -190,5 +191,168 @@ func TestServe_MemoryPagesMismatchIsRejected(t *testing.T) {
 	req.Budgets.MemoryPages = limits.InstanceMemoryPages * 2
 	if _, err := rt.Serve(context.Background(), appModule(t), req); err == nil {
 		t.Fatal("请求侧内存上限与运行时不一致时必须报错")
+	}
+}
+
+// TestRuntimeDegradesToInMemoryCacheWhenDiskCacheUnusable 是 P1-① 的**执行侧**判据。
+//
+// 背景（2026-09-21 独立审计 P1-①）：`cachetrust.Ensure` 的错误原先会一路冒泡到
+// cmd/server 的 `log.Fatalf` —— 只读挂载、`--user` 非属主、k8s `runAsUser` 下
+// Chmod 必然失败，于是**整个服务端起不来**，而它本该只是"首次编译慢一点"。
+//
+// 判据两条：
+//  1. 磁盘缓存不可用时 `NewCompilationCache` 返回 (nil, nil)（降级信号，不是错误）；
+//  2. `runtime.New` 收到这个信号后仍能装配成功并**真能编译**（不能把 nil 缓存
+//     直接交给 wazero —— 那会在装配期炸）。
+//
+// 构造方式：把缓存根路径的位置先占成**普通文件**（`<dataRoot>/_compile-cache`
+// 无法成为目录），于是 Ensure 报"根路径不是目录"⇒ 磁盘缓存拿不到。
+// 变异验证：把 NewCompilationCache 的降级分支改回 `return nil, err`（或让 runtime.New
+// 原样把 nil 交给 wazero）⇒ 本用例红。
+func TestRuntimeDegradesToInMemoryCacheWhenDiskCacheUnusable(t *testing.T) {
+	root := t.TempDir()
+	// 占位：让 <dataRoot>/_compile-cache 成为一个**普通文件**。
+	blocked := filepath.Join(root, limits.CompileCacheDirName)
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cache, err := NewCompilationCache(root)
+	if err != nil {
+		t.Fatalf("磁盘缓存不可用不应是致命错误（执行侧必须能降级）：%v", err)
+	}
+	if cache != nil {
+		_ = cache.Close(context.Background())
+		t.Fatal("根路径被普通文件占位时不应拿到磁盘缓存")
+	}
+
+	// 降级路径必须真的能起运行时并编译。
+	rt, err := New(context.Background(), Options{DataRoot: root})
+	if err != nil {
+		t.Fatalf("缓存不可用时 runtime.New 必须仍能装配（降级为进程内缓存）：%v", err)
+	}
+	t.Cleanup(func() { _ = rt.Close(context.Background()) })
+	mod, cerr := rt.CompileModule(context.Background(), wasmtest.WithDataCount())
+	if cerr != nil {
+		t.Fatalf("降级后必须仍能编译（否则降级只是把崩溃换成不可用）：%v", cerr)
+	}
+	if mod == nil {
+		t.Fatal("编译返回 nil 模块")
+	}
+	_ = mod.Close(context.Background())
+}
+
+// TestRuntimeDegradesWhenCacheRootIsRegularFile 覆盖 P2-④ 的边界形态。
+//
+// 与上一条的区别（2026-09-21 二轮审计 P2-④）：上一条堵的是**父目录**被文件占住
+// （`Ensure` 返回 err ⇒ 第一版就降级了）；这一条堵的是**缓存分代目录自身**被普通文件占住 ——
+// 此时 `Ensure` 的 `Lstat` 看到"存在但不是目录" ⇒ 返回**违规报告 + nil error**，
+// 第一版于是继续往下走，由 `wazero.NewCompilationCacheWithDir` 失败 ⇒ `return nil, err`
+// ⇒ `runtime.New` 失败 ⇒ `appserver.New` 失败 ⇒ `cmd/server` 的 `log.Fatalf`
+// —— "缓存不可用只是慢一点"的承诺在这个形态下不成立（审计实测 err="… is not dir"）。
+//
+// 判据：两种占位形态下，`NewCompilationCache` 都必须返回 `(nil, nil)`（降级信号），
+// 且 `runtime.New` 仍能装配 + 真编译。
+// 变异验证：把 `wazero.NewCompilationCacheWithDir` 的错误分支改回 `return nil, err` ⇒ 本用例红。
+func TestRuntimeDegradesWhenCacheRootIsRegularFile(t *testing.T) {
+	root := t.TempDir()
+	// 把**分代目录**（CompileCacheDir(root)）本身占成普通文件。
+	dir := CompileCacheDir(root)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cache, err := NewCompilationCache(root)
+	if err != nil {
+		t.Fatalf("分代目录被普通文件占住时必须降级而不是报错（报错会一路 log.Fatalf 打死服务端）：%v", err)
+	}
+	if cache != nil {
+		_ = cache.Close(context.Background())
+		t.Fatal("分代目录不可用时不应拿到磁盘缓存")
+	}
+
+	rt, rerr := New(context.Background(), Options{DataRoot: root})
+	if rerr != nil {
+		t.Fatalf("缓存不可用时 runtime.New 必须仍能装配（降级为进程内缓存）：%v", rerr)
+	}
+	t.Cleanup(func() { _ = rt.Close(context.Background()) })
+	mod, cerr := rt.CompileModule(context.Background(), wasmtest.WithDataCount())
+	if cerr != nil {
+		t.Fatalf("降级后必须仍能编译：%v", cerr)
+	}
+	if mod == nil {
+		t.Fatal("编译返回 nil 模块")
+	}
+	_ = mod.Close(context.Background())
+}
+
+// TestRuntimeRefusesUntrustedCacheDir 覆盖"不可信但可用"这一形态（三轮审计 P1-②）。
+//
+// 与上两条的区别：那条堵的是"目录不可用"（Ensure 报错 / wazero 打不开）；
+// 这一条堵的是**目录可用但已判定不可信** —— 缓存根是**符号链接**（违规文案：
+// "可被重定向到任意位置"）。第一版只打日志然后继续用，于是执行进程会从这个
+// 被重定向的目录**读**（mmap 成机器码）并**写**编译产物，而"条目只有同文件 CRC32"
+// 意味着布置链接的人可以自算 CRC 投毒。
+//
+// 判据三条（缺一不可）：
+//  1. `NewCompilationCache` 返回 `(nil, nil)`（降级信号，不是错误 —— 服务端不许因此起不来）；
+//  2. `runtime.New` 仍能装配并真编译（降级后功能不破）；
+//  3. **链接目标目录里不出现任何新文件**（这条是关键：只断言 (nil,nil) 挡不住
+//     "先用了再返回 nil" 的实现；目标目录被写入 = 平台真的把机器码放到了攻击者选的位置）。
+//
+// 变异验证：把 `!report.Trusted()` 分支改回"只打日志继续"（即删掉 `return nil, nil`）
+// ⇒ 本用例红（cache 非 nil，且目标目录出现 wazero 分片/条目）。
+func TestRuntimeRefusesUntrustedCacheDir(t *testing.T) {
+	root := t.TempDir()
+	attacker := filepath.Join(root, "attacker-dir")
+	if err := os.MkdirAll(attacker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// 把**分代目录**做成指向攻击者目录的符号链接（父目录先建好）。
+	dir := CompileCacheDir(root)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(attacker, dir); err != nil {
+		t.Skipf("环境不支持符号链接：%v", err)
+	}
+
+	cache, err := NewCompilationCache(root)
+	if err != nil {
+		t.Fatalf("不可信缓存不得导致报错（否则会一路 log.Fatalf）：%v", err)
+	}
+	if cache != nil {
+		_ = cache.Close(context.Background())
+		t.Fatal("缓存根是符号链接时必须降级为 nil（不得照用被重定向的目录）")
+	}
+
+	rt, rerr := New(context.Background(), Options{DataRoot: root})
+	if rerr != nil {
+		t.Fatalf("降级后 runtime.New 必须仍能装配：%v", rerr)
+	}
+	t.Cleanup(func() { _ = rt.Close(context.Background()) })
+	mod, cerr := rt.CompileModule(context.Background(), wasmtest.WithDataCount())
+	if cerr != nil {
+		t.Fatalf("降级后必须仍能编译：%v", cerr)
+	}
+	if mod != nil {
+		_ = mod.Close(context.Background())
+	}
+
+	// ③ 链接目标必须**一个字节都没多**（平台没有把编译产物写进攻击者选的目录）。
+	entries, derr := os.ReadDir(attacker)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("不可信缓存目录被照用：链接目标里出现了 %d 项 %v（平台把编译产物写进了被重定向的目录）",
+			len(entries), names)
 	}
 }

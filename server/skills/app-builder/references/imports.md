@@ -94,6 +94,8 @@
 | `wasi_snapshot_preview1` | `random_get` | func | `i32i32_i32` | `crypto/rand` / `math/rand` 的随机源（平台注入真实随机源） |
 | `wasi_snapshot_preview1` | `sched_yield` | func | `_i32` | 调度让出（Go 运行时在自旋/等待路径上发出） |
 | `wasi_snapshot_preview1` | `sock_accept` | func | `i32i32i32_i32` | `html/template` / `text/template` 的 `Execute`（渲染页面）会带出它；它只能从**已监听**的描述符接连接，而平台里没有任何途径造出这种描述符 |
+| `wasi_snapshot_preview1` | `sock_recv` | func | `i32i32i32i32i32i32_i32` | **TinyGo 的 `net/url` 路径**会带出它（与 sock_accept/sock_shutdown 同理：Go 运行时不会发，TinyGo 会）。它需要一个**已连接**的 socket 描述符，而平台里造不出这种描述符（没有 sock_open/bind/listen/connect；sock_accept 只能从已监听的描述符接连接，实测拿不到）⇒ 能力为空 |
+| `wasi_snapshot_preview1` | `sock_send` | func | `i32i32i32i32i32_i32` | 同上：TinyGo 路径的发送侧符号，没有可用描述符就无从发送（不是出站途径） |
 | `wasi_snapshot_preview1` | `sock_shutdown` | func | `i32i32_i32` | 模板渲染路径的收尾调用；描述符不存在 ⇒ 直接失败，不构成出站途径 |
 
-本次生成：并集 34 (module, name, kind, signature)，符号、签名与说明均出自同一生成器。
+本次生成：并集 36 (module, name, kind, signature)，符号、签名与说明均出自同一生成器。

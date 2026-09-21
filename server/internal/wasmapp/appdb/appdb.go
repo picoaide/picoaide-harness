@@ -76,6 +76,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -272,6 +273,88 @@ type DB struct {
 	bytes atomic.Int64
 }
 
+// Path 返回某应用库的**文件路径**（纯函数，无副作用：不建目录、不连库）。
+//
+// 存在的理由（2026-09-21，作者数据面端点）：调用方常常需要先回答"这个应用**有没有**
+// 库文件"再决定要不要连 —— 而 `Open` 会建目录并连库（SQLite 在 rwc 模式下会把
+// 不存在的库**建出来**）。"读一次数据顺便把库建出来"是不可接受的副作用：
+// 它会让"应用还没被用过"这个事实消失，也会让一个只读端点产生写行为。
+//
+// 库布局的唯一权威仍然是本包（`<DataRoot>/<AppsDirName>/<AppID>/app.db`）：
+// 调用方不得自己拼这个路径，否则布局一变就会出现"自省与运行期读的不是同一个库"。
+func Path(dataRoot, appID string) (string, *apperr.Error) {
+	if strings.TrimSpace(dataRoot) == "" {
+		return "", apperr.New(apperr.CodeInternal, "appdb: DataRoot 为空").
+			WithHint("平台启动配置缺少数据根目录")
+	}
+	if !validAppID(appID) {
+		return "", apperr.Newf(apperr.CodeInvalidAppID, "appdb: 非法 app_id %q", appID).
+			WithDetail("pattern", limits.AppIDPattern).
+			WithDetail("max_len", limits.MaxAppIDLen)
+	}
+	path := filepath.Join(dataRoot, limits.AppsDirName, appID, appDBFileName)
+	// DSN 里 `?` 之后是查询参数（驱动与 mattn 同源行为），路径含 `?`/`#` 会被误解析；
+	// 路径全部由宿主推导，这里对不可控的 DataRoot 做一次 fail-closed 检查。
+	if strings.ContainsAny(path, "?#") {
+		return "", apperr.New(apperr.CodeInternal, "appdb: 数据根路径含非法字符（? 或 #）").
+			WithCause(errors.New(path)).
+			WithHint("请把数据根换成不含 ? 与 # 的路径")
+	}
+	return path, nil
+}
+
+// SafePath 解析应用库路径，并做**形状校验**（不建目录、不连库、不跟随符号链接）。
+//
+// 返回 `exists=false` 表示"这个应用还没有库文件"——调用方据此决定语义
+// （只读端点：返回空结构或 404；运行期：由 Open 建库）。
+//
+// 为什么单独一条（2026-09-21 独立审计 P2-1/P2-4）：
+//   - 只读端点此前用 `Open` 取路径，而 `Open` 会 MkdirAll + 以 rwc 打开 ⇒ **读一次
+//     就把库建出来了**（`/schema` 实测有这个写副作用，`/rows` 只是恰好被调用方的
+//     stat 预检挡住了）；
+//   - 应用目录或库文件被替换成**符号链接**时（指向别的应用库），`/rows`、`/schema`、
+//     诊断都会读到别的应用的数据。可达性极低（要宿主数据根的写权限），但纵深防御
+//     的成本只有一次 `Lstat`，与 assets 侧的"逐段拒符号链接"同口径。
+//
+// 判据：`<dataRoot>/apps/<appID>`（若存在）必须是**真实目录**；
+// `app.db`（若存在）必须是**常规文件**；两者是符号链接一律 fail-closed。
+func SafePath(dataRoot, appID string) (path string, exists bool, oerr *apperr.Error) {
+	path, oerr = Path(dataRoot, appID)
+	if oerr != nil {
+		return "", false, oerr
+	}
+	dir := filepath.Dir(path)
+	if info, err := os.Lstat(dir); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", false, apperr.New(apperr.CodeInternal, "应用数据目录是符号链接").
+				WithDetail("app_id", appID).
+				WithHint("应用数据目录必须由平台自己创建；符号链接可能指向别的应用库 ⇒ 拒绝读取")
+		}
+		if !info.IsDir() {
+			return "", false, apperr.New(apperr.CodeInternal, "应用数据路径不是目录").
+				WithDetail("app_id", appID)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", false, apperr.New(apperr.CodeInternal, "应用数据目录不可访问").WithCause(err)
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return path, false, nil
+	}
+	if err != nil {
+		return "", false, apperr.New(apperr.CodeInternal, "应用库文件不可访问").WithCause(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", false, apperr.New(apperr.CodeInternal, "应用库文件是符号链接").
+			WithDetail("app_id", appID).
+			WithHint("库文件必须是平台自己创建的常规文件；符号链接可能指向别的应用库 ⇒ 拒绝读取")
+	}
+	if !info.Mode().IsRegular() {
+		return "", false, apperr.New(apperr.CodeInternal, "应用库文件不是常规文件").WithDetail("app_id", appID)
+	}
+	return path, true, nil
+}
+
 // Open 打开（必要时创建）某个应用的库，并完成连接加固。
 //
 // 失败一律 fail-closed：任一限额设不上、任一金丝雀不成立，都返回错误而不是降级运行。
@@ -295,13 +378,9 @@ func Open(ctx context.Context, opt Options) (*DB, error) {
 	if err := os.Chmod(dir, limits.DataDirMode); err != nil {
 		return nil, apperr.New(apperr.CodeInternal, "appdb: 设置应用数据目录权限失败").WithCause(err)
 	}
-	path := filepath.Join(dir, appDBFileName)
-	// DSN 里 `?` 之后是查询参数（驱动与 mattn 同源行为），路径含 `?`/`#` 会被误解析；
-	// 路径全部由宿主推导，这里对不可控的 DataRoot 做一次 fail-closed 检查。
-	if strings.ContainsAny(path, "?#") {
-		return nil, apperr.New(apperr.CodeInternal, "appdb: 数据根路径含非法字符（? 或 #）").
-			WithCause(errors.New(path)).
-			WithHint("请把数据根换成不含 ? 与 # 的路径")
+	path, perr := Path(opt.DataRoot, opt.AppID)
+	if perr != nil {
+		return nil, perr
 	}
 
 	// 把这个应用目录登记进"受保护目录"：从此刻起，任何**不带一次性令牌**且不是

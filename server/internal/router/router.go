@@ -137,6 +137,11 @@ func registerWasm(r *gin.Engine, d Deps) {
 	wg.DELETE("/:app_id", d.Wasm.Delete)
 	wg.GET("/:app_id/diagnostics", d.Wasm.Diagnostics)
 	wg.GET("/:app_id/schema", d.Wasm.Schema)
+	// 作者的数据面（2026-09-21）：只读浏览自己应用库里的行。
+	// 鉴权沿用 ownedApp（仅发布者本人，他人 404 同形），每次调用写审计
+	//（`wasm_app_rows_view`；显式要原值时是 `wasm_app_rows_view_unmasked`）。
+	// 见 internal/wasmapp/api/rows.go 的安全论证与 docs/decisions。
+	wg.GET("/:app_id/rows", d.Wasm.Rows)
 	// 标识唯一性预查（2026-09-20）：发布表单填 app_id 时异步问它、提交前再问一次。
 	// **只读**（不编译/不写盘/不占版本号/不进审计/不消耗上传额度），因此不进
 	// largeBodyRoutes 也没必要限流；判据与发布同源（GetWasmApp + checkOwner）。
@@ -229,6 +234,12 @@ func registerWasm(r *gin.Engine, d Deps) {
 	// 入口，只能找发布者或用员工令牌手搓 curl。这里只**新增**管理面出口，
 	// 员工面的鉴权语义一字未改（发布者仍只看得到自己的应用）。
 	serverauth.AdminRoute(ag, "GET", "/:app_id/diagnostics", serverauth.PermCapabilityRead, d.Wasm.AdminDiagnostics)
+	// 管理面的只读数据面（2026-09-21）：表结构 + 行浏览，与员工面同形同实现，
+	// 差别只有鉴权（管理会话 + capability:read）与操作者账号（进审计）。
+	// 为什么管理员也要有：排障与合规（员工面的 schema/rows 只认发布者本人，
+	// 管理员借用他人令牌会让审计记错人）。
+	serverauth.AdminRoute(ag, "GET", "/:app_id/schema", serverauth.PermCapabilityRead, d.Wasm.AdminSchema)
+	serverauth.AdminRoute(ag, "GET", "/:app_id/rows", serverauth.PermCapabilityRead, d.Wasm.AdminRows)
 	// runtime 是平台级（无 app 维度）的只读水位：编译队列/缓存、执行槽、调用事件
 	// 丢包计数、磁盘余量，以及"还没有出口"的水位清单。挂在 /limits 同级的静态段上，
 	// 与既有的 /review、/limits 一样不参与 /:app_id 的通配。

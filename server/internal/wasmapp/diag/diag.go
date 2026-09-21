@@ -33,6 +33,15 @@ type Failure struct {
 	Evidence   string `json:"evidence"`
 	CPUMs      int64  `json:"cpu_ms"`
 	PeakMemory int64  `json:"peak_memory_bytes"`
+	// DBRows / DBBytes 是**这次失败调用**里应用库读写累计的行数与字节数
+	//（2026-09-21 补：这两个字段此前只写不读 —— `wasm_call_events` 有列、
+	//  `serve.go` 也采集，但诊断的两条 SQL 都没 select 它们，而技能文档
+	//  `references/diagnostics.md` 已经向作者承诺"数据库读写行数与字节"可见）。
+	//
+	// 为什么挂在失败记录上而不是概览：作者要回答的问题是"这一次请求到底写了几行"
+	//（写失败/写少了/写多了），聚合的最大值答不了这个问题。
+	DBRows  int64 `json:"db_rows"`
+	DBBytes int64 `json:"db_bytes"`
 }
 
 // ReasonCount 是一个失败码的计数 + 它的可操作 hints。
@@ -93,7 +102,7 @@ func RecentFailures(ctx context.Context, db *sql.DB, appID string, limit int) ([
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, `SELECT created_at, outcome, reason_code, guest_exit_code,
-		stderr_tail, evidence, cpu_ms, peak_memory_bytes
+		stderr_tail, evidence, cpu_ms, peak_memory_bytes, db_rows, db_bytes
 		FROM wasm_call_events
 		WHERE app_id = $1 AND outcome <> $2
 		ORDER BY created_at DESC, id DESC
@@ -107,7 +116,7 @@ func RecentFailures(ctx context.Context, db *sql.DB, appID string, limit int) ([
 		var f Failure
 		var created time.Time
 		if err := rows.Scan(&created, &f.Outcome, &f.ReasonCode, &f.GuestExitCode,
-			&f.StderrTail, &f.Evidence, &f.CPUMs, &f.PeakMemory); err != nil {
+			&f.StderrTail, &f.Evidence, &f.CPUMs, &f.PeakMemory, &f.DBRows, &f.DBBytes); err != nil {
 			return nil, err
 		}
 		f.CreatedAt = created
