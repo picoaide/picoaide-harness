@@ -227,6 +227,25 @@ describe('下载文件名净化（2026-09-15 审计 P2-6）', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('超长的结尾点/空格串也能线性剥掉（CodeQL #98 js/polynomial-redos 的回归面）', () => {
+    // 2026-09-21：旧实现 `replace(/[. ]+$/u, '')` 在"大量重复的空格/点"上多项式回溯。
+    // 判据用**大输入 + 行为断言**：回退成正则版本时这一条会明显变慢（vitest 默认 5s
+    // 预算内跑不完），修好的实现是单次线性扫描。
+    const dir = mkdtempSync(join(tmpdir(), 'guard-dl-redos-'))
+    try {
+      const tail = ' '.repeat(20000)
+      const dots = '.'.repeat(20000)
+      const started = Date.now()
+      expect(basename(resolveDownloadPath(dir, `报告${tail}`))).toBe('报告')
+      expect(basename(resolveDownloadPath(dir, `name${dots}`))).toBe('name')
+      expect(basename(resolveDownloadPath(dir, `mix${' .'.repeat(10000)}`))).toBe('mix')
+      // 宽松上限（不是性能断言，只挡住"数量级级别的退化"）：线性实现 <100ms。
+      expect(Date.now() - started).toBeLessThan(2000)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 })
 

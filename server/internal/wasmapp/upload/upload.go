@@ -357,8 +357,14 @@ func ValidID(id string) bool {
 // 双保险的第二道：ValidID 已经排除了分隔符与 `..`，这里再断言一次父目录相等 ——
 // 万一将来有人放宽了 ValidID（或把 root 配成了相对路径），越界会在第一层就炸成
 // INTERNAL，而不是把某个无辜目录删掉。
+//
+// 2026-09-21（CodeQL #76-#90 `go/path-injection`）：再加一道**标准库判据**
+// `filepath.IsLocal`。ValidID 的字符白名单比它更严，但那是本仓自写的循环，静态分析
+// 不认；`filepath.IsLocal` 是 Go 官方对"该相对路径不会逃出根目录"的判据（拒绝绝对
+// 路径、盘符与 `..` 逃逸），既让这条路径污染面在源码层可判定，也把防御叠在**唯一**
+// 的会话目录入口上（所有会话目录都只经这一个函数产生）。
 func (s *Store) dirChecked(id string) (string, *apperr.Error) {
-	if !ValidID(id) {
+	if !ValidID(id) || !filepath.IsLocal(id) {
 		return "", NotFoundError()
 	}
 	dir := filepath.Join(s.root, id)

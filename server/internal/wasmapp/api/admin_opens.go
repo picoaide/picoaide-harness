@@ -163,11 +163,14 @@ func (h *Handlers) adminOpensSummary(c *gin.Context) {
 	}
 	// TOP N 从**已按窗口 PV 降序**的 apps 里取前 top 行（服务端已排好序；
 	// 前端另有兜底排序与截断）。行形状按 §5.1c A：`{app_id,title,pv,uv}`。
-	// 容量按**实际行数**取（`top` 虽已钳到 opensSummaryMaxTop=100，但没有理由
-	// 预留一个与数据无关的容量 —— 顺带消除「用用户给的值当容量」这一告警面）。
-	capHint := top
-	if len(sum.Apps) < capHint {
-		capHint = len(sum.Apps)
+	// 容量按**实际行数**取、上界用**平台常量**。2026-09-21（CodeQL #99
+	// `go/uncontrolled-allocation-size`）：原来写的是 `capHint := top`（`top` 是请求参数），
+	// 即使上面已经把它钳到 opensSummaryMaxTop=100，静态分析也看不到"已钳"这条事实 ——
+	// 请求值一旦参与分配尺寸就会被判"依赖用户输入"。改成只由数据侧（`len(sum.Apps)`）
+	// 与常量上界派生：容量与数据相关、且不多预留超过平台上限的空间（≤100 行）。
+	capHint := len(sum.Apps)
+	if capHint > opensSummaryMaxTop {
+		capHint = opensSummaryMaxTop
 	}
 	topApps := make([]serverstore.WasmAppOpenTopRow, 0, capHint)
 	for _, a := range sum.Apps {

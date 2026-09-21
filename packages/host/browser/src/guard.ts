@@ -38,7 +38,17 @@ const WINDOWS_RESERVED_STEM = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/iu
 
 /** 去掉 Windows 会静默裁掉的结尾点与空格（`foo.` → `foo`，否则会覆盖已存在的 foo）。 */
 function trimWindowsTrailing(value: string): string {
-  return value.replace(/[. ]+$/u, '')
+  // 2026-09-21（CodeQL #98 js/polynomial-redos）：旧实现是 `value.replace(/[. ]+$/u, '')`，
+  // 该正则在"一长串点/空格"上会多项式回溯（CodeQL 给出的触发串是大量重复的空格）。
+  // 这里的语义就是"从尾部往前扫，直到第一个既不是 `.` 也不是空格的字符"，写成循环是
+  // **线性且无回溯**的，行为与原来逐字一致（`.`=0x2e、空格=0x20）。
+  let end = value.length
+  while (end > 0) {
+    const ch = value.charCodeAt(end - 1)
+    if (ch !== 0x2e && ch !== 0x20) break
+    end -= 1
+  }
+  return end === value.length ? value : value.slice(0, end)
 }
 
 /** Resolve a conflict-free absolute path inside `dir` for `filename`. */
