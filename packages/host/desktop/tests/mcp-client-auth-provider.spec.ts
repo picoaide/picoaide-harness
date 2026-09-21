@@ -32,7 +32,7 @@ describe('dsh-mcp-client authProvider pass-through (patch guard)', () => {
     const provider = { tokens: () => ({ access_token: 'at-1' }) } as unknown as OAuthClientProvider
     const parsed = Config({
       transport: 'streamable-http',
-      serverName: 'moka',
+      serverName: 'example-mcp',
       url: 'https://mcp.example.com/mcp',
       authProvider: provider,
     } as never) as { authProvider?: unknown, headers?: Record<string, string> }

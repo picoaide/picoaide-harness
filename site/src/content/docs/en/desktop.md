@@ -73,7 +73,7 @@ Connectors plug external systems into the Agent over **MCP (Model Context Protoc
 | Connector | Description |
 |---|---|
 | **SalesEasy NeoCRM** | Official streamable-HTTP MCP (`mcp.xiaoshouyi.com`), RFC 8414 OAuth (authorization code + PKCE + dynamic client registration); query customers/leads/opportunities/contacts, execute XOQL and metadata operations |
-| **Moka HR** | Recruitment and HR all-in-one AI colleague: talent recommendations, recruitment updates, attendance & performance, approval todos; smart talent sourcing, interview analysis, and interviewer evaluation; OAuth + streamable-http |
+| **Remote MCP example** | A generic remote MCP connector: OAuth 2.1 + PKCE + authorization-server metadata discovery (RFC 9728 / RFC 8414) + streamable-HTTP; the endpoint and fields are filled in by an administrator for the actual service (`mcp.example.com` is a placeholder) |
 
 - Authorization uses **OAuth authorization code + PKCE** (`offline_access` for a refresh token), with state validation and a 60s timeout against CSRF;
 - Credentials are **encrypted and stored locally** under the user scope path (`0600/0700`, atomic write, anti-symlink); after a successful connection the tool **registers the MCP dynamically** via `ctx.plugin`, so the model can call its tools;

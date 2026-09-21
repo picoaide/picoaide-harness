@@ -110,15 +110,15 @@ async function start(options?: { expiresIn?: number, rotate?: boolean }): Promis
 
 function oauthDef(origin: string, transport: 'stdio' | 'streamable-http' = 'streamable-http'): ConnectorDef {
   return {
-    id: 'moka', name: 'Moka', description: 'x', authMode: 'oauth',
+    id: 'example-mcp', name: '示例 MCP 智能体', description: 'x', authMode: 'oauth',
     auth: {
       authorizeUrl: `${origin}/oauth/authorize`, tokenUrl: `${origin}/oauth/token`, clientId: '',
       redirectUri: 'http://127.0.0.1/callback', pkce: true, publicClient: true,
       discoveryUrl: `${origin}/mcp`, scopes: 'offline_access',
     },
     mcp: transport === 'streamable-http'
-      ? [{ serverName: 'moka', transport: 'streamable-http', url: `${origin}/mcp` }]
-      : [{ serverName: 'moka', transport: 'stdio', command: process.execPath, args: ['-e', ''] }],
+      ? [{ serverName: 'example-mcp', transport: 'streamable-http', url: `${origin}/mcp` }]
+      : [{ serverName: 'example-mcp', transport: 'stdio', command: process.execPath, args: ['-e', ''] }],
   }
 }
 
@@ -158,7 +158,7 @@ describe('audit: refresh failure must not park the connector forever', () => {
       refreshSweepIntervalMs: 0,
       onRefreshSweepReady: (fn: () => Promise<void>) => { sweep = fn },
     })
-    await seedCredential(dir, 'moka', {
+    await seedCredential(dir, 'example-mcp', {
       accessToken: 'at-first', refreshToken: 'rt-1', clientId: 'dyn-1',
       expiresAt: Date.now() + 5 * 60 * 1000,
     })
@@ -166,12 +166,12 @@ describe('audit: refresh failure must not park the connector forever', () => {
     await waitFor(() => h.configs.length === 1, 20_000)
     assert.ok(sweep !== undefined, '插件必须把扫掠函数交给注入的观察者')
     // 前置条件：连接器必须已经 connected，否则扫掠会（正确地）跳过它
-    await awaitRow(h, 'moka', row => row.status === 'connected', 20_000)
+    await awaitRow(h, 'example-mcp', row => row.status === 'connected', 20_000)
 
     // the token lapses while the endpoint is temporarily down
     server.fail = 'server_error'
     const store = new ConnectorStore({ baseDir: dir })
-    await store.updateCredential('moka', { expiresAt: Date.now() - 1000 })
+    await store.updateCredential('example-mcp', { expiresAt: Date.now() - 1000 })
 
     /** 主动驱动扫掠，直到条件成立（真实 HTTP 往返仍需等待，但不再靠定时器）。 */
     async function sweepUntil(predicate: () => boolean, budgetMs: number, label: string): Promise<void> {
@@ -187,7 +187,7 @@ describe('audit: refresh failure must not park the connector forever', () => {
         rounds += 1
         if (predicate()) return
         if (Date.now() >= deadline) {
-          const row = await awaitRow(h, 'moka', () => true, 2_000).catch(() => ({ status: '?' }))
+          const row = await awaitRow(h, 'example-mcp', () => true, 2_000).catch(() => ({ status: '?' }))
           throw new Error(
             `sweepUntil(${label}) not reached in ${budgetMs}ms after ${rounds} sweeps; `
             + `grants=${JSON.stringify(server.grants)} configs=${h.configs.length} rowStatus=${row.status}`,
@@ -208,7 +208,7 @@ describe('audit: refresh failure must not park the connector forever', () => {
       'recovery after the endpoint returns',
     )
     const status = (JSON.parse((await callRoute(h, '/api/pico/connectors', 'GET')).body) as
-      { connectors: Array<{ id: string, status: string }> }).connectors.find(c => c.id === 'moka')
+      { connectors: Array<{ id: string, status: string }> }).connectors.find(c => c.id === 'example-mcp')
     expect(status?.status).toBe('connected')
     h.dispose()
   }, 120_000)
@@ -219,7 +219,7 @@ describe('audit: reconnect paths', () => {
     const server = await start({ expiresIn: 3600 })
     const dir = mkdtempSync(join(tmpdir(), 'audit-b-'))
     const h = createHarness([oauthDef(server.origin)], dir, { refreshSweepIntervalMs: 0 })
-    await seedCredential(dir, 'moka', {
+    await seedCredential(dir, 'example-mcp', {
       accessToken: 'at-live', refreshToken: 'rt-1', clientId: 'dyn-1',
       expiresAt: Date.now() + 30 * 60 * 1000,
     })
@@ -230,11 +230,11 @@ describe('audit: reconnect paths', () => {
     // the user starts a fresh authorization and the authorization server fails
     // the token exchange -> the flow ends in an error
     server.fail = 'server_error'
-    const connect = await callRoute(h, '/api/pico/connectors/moka/connect', 'POST')
+    const connect = await callRoute(h, '/api/pico/connectors/example-mcp/connect', 'POST')
     expect(connect.status).toBe(200)
     // Wait until the row reports the failure (the flow ended), then assert the
     // previous registration survived it.
-    await awaitRow(h, 'moka', row => row.status === 'error' || row.status === 'unauthorized')
+    await awaitRow(h, 'example-mcp', row => row.status === 'error' || row.status === 'unauthorized')
     expect(h.configs.length).toBe(1)
     expect(firstDisposer?.mock.calls.length).toBe(0)
     h.dispose()
@@ -246,7 +246,7 @@ describe('audit: concurrent credential writes', () => {
     const server = await start({ expiresIn: 3600, rotate: true })
     const dir = mkdtempSync(join(tmpdir(), 'audit-c-'))
     const store = new ConnectorStore({ baseDir: dir })
-    await store.writeCredential('moka', {
+    await store.writeCredential('example-mcp', {
       accessToken: 'at-stale', refreshToken: 'rt-1', clientId: 'dyn-1', updatedAt: Date.now(),
       expiresAt: Date.now() - 1000,
     })
@@ -257,15 +257,15 @@ describe('audit: concurrent credential writes', () => {
     })
     // two independent writers race: the refresher and a provider-style save
     // (the SDK's onPersist path writes the same credential from a snapshot).
-    const snapshot = await store.readCredential('moka')
+    const snapshot = await store.readCredential('example-mcp')
     await Promise.all([
-      refresher.refresh('moka', { force: true }),
+      refresher.refresh('example-mcp', { force: true }),
       (async () => {
         await new Promise(r => setTimeout(r, 1))
-        await store.updateCredential('moka', { accessToken: snapshot?.accessToken, refreshedAt: Date.now() })
+        await store.updateCredential('example-mcp', { accessToken: snapshot?.accessToken, refreshedAt: Date.now() })
       })(),
     ])
-    const stored = await store.readCredential('moka')
+    const stored = await store.readCredential('example-mcp')
     // the rotation the server performed must be what is stored, or the next
     // refresh presents a consumed token
     expect(stored?.refreshToken).toBe('rt-1')
@@ -278,21 +278,21 @@ describe('audit: state and announcement hygiene', () => {
     const server = await start({ expiresIn: 3600 })
     const dir = mkdtempSync(join(tmpdir(), 'audit-d-'))
     const h = createHarness([oauthDef(server.origin)], dir, { refreshSweepIntervalMs: 0 })
-    await seedCredential(dir, 'moka', {
+    await seedCredential(dir, 'example-mcp', {
       accessToken: 'at-live', refreshToken: 'rt-1', clientId: 'dyn-1',
       expiresAt: Date.now() + 30 * 60 * 1000, refreshedAt: Date.now(),
     })
     h.emitSession({ username: 'user-a' })
     await waitFor(() => h.configs.length === 1)
     const before = (JSON.parse((await callRoute(h, '/api/pico/connectors', 'GET')).body) as
-      { connectors: Array<{ id: string, expiresAt: number | null }> }).connectors.find(c => c.id === 'moka')
+      { connectors: Array<{ id: string, expiresAt: number | null }> }).connectors.find(c => c.id === 'example-mcp')
     expect(before?.expiresAt).toBeGreaterThan(Date.now())
 
-    const res = await callRoute(h, '/api/pico/connectors/moka/disconnect', 'POST')
+    const res = await callRoute(h, '/api/pico/connectors/example-mcp/disconnect', 'POST')
     expect(res.status).toBe(200)
     const after = (JSON.parse((await callRoute(h, '/api/pico/connectors', 'GET')).body) as
       { connectors: Array<{ id: string, status: string, expiresAt: number | null, refreshedAt: number | null }> })
-      .connectors.find(c => c.id === 'moka')
+      .connectors.find(c => c.id === 'example-mcp')
     expect(after?.status).toBe('disconnected')
     // a disconnected row must not keep advertising a token lifetime
     expect(after?.expiresAt ?? null).toBeNull()
@@ -304,7 +304,7 @@ describe('audit: state and announcement hygiene', () => {
     const server = await start({ expiresIn: 3600 })
     const dir = mkdtempSync(join(tmpdir(), 'audit-e-'))
     const h = createHarness([oauthDef(server.origin)], dir, { refreshSweepIntervalMs: 0 })
-    await seedCredential(dir, 'moka', {
+    await seedCredential(dir, 'example-mcp', {
       accessToken: 'at-live', refreshToken: 'rt-1', clientId: 'dyn-1',
       expiresAt: Date.now() + 30 * 60 * 1000,
     })
@@ -364,16 +364,16 @@ describe('audit: auth flows other than OAuth', () => {
     connector.settings = [{ key: 'tenant', label: 'Tenant', type: 'text', required: true }]
     const dir = mkdtempSync(join(tmpdir(), 'audit-j-'))
     const h = createHarness([connector], dir, { refreshSweepIntervalMs: 0 })
-    await callRoute(h, '/api/pico/connectors/moka/connect', 'POST')
+    await callRoute(h, '/api/pico/connectors/example-mcp/connect', 'POST')
 
     // The pre-connect settings form is shown, before any OAuth flow starts.
-    const settingsRow = await awaitRow(h, 'moka', (r) => Array.isArray(r.request?.fields) && r.request!.fields!.length === 1)
+    const settingsRow = await awaitRow(h, 'example-mcp', (r) => Array.isArray(r.request?.fields) && r.request!.fields!.length === 1)
     expect(settingsRow.request!.fields![0]!.key).toBe('tenant')
 
-    await callRoute(h, '/api/pico/connectors/moka/auth-submit', 'POST', { fields: { tenant: 'acme' } })
+    await callRoute(h, '/api/pico/connectors/example-mcp/auth-submit', 'POST', { fields: { tenant: 'acme' } })
     // After settings are submitted the real authorization flow must start (an
     // authorize URL appears) and nothing may register yet.
-    const authorizeRow = await awaitRow(h, 'moka', (r) => typeof r.request?.authorizeUrl === 'string')
+    const authorizeRow = await awaitRow(h, 'example-mcp', (r) => typeof r.request?.authorizeUrl === 'string')
     expect(authorizeRow.request!.authorizeUrl).toContain('/oauth/authorize')
     expect(h.configs).toHaveLength(0)
     h.dispose()
@@ -383,7 +383,7 @@ describe('audit: auth flows other than OAuth', () => {
     const server = await start({ expiresIn: 3600 })
     const dir = mkdtempSync(join(tmpdir(), 'audit-g-'))
     const h = createHarness([oauthDef(server.origin)], dir, { refreshSweepIntervalMs: 0 })
-    await seedCredential(dir, 'moka', {
+    await seedCredential(dir, 'example-mcp', {
       accessToken: 'at-live', refreshToken: 'rt-1', clientId: 'dyn-1',
       expiresAt: Date.now() + 30 * 60 * 1000,
     })
@@ -392,9 +392,9 @@ describe('audit: auth flows other than OAuth', () => {
     // user B logs in. The harness pins one store dir for both users (tests
     // deliberately share it), so model B having no credential by clearing it —
     // what must not survive is the ROW state from the previous session.
-    await new ConnectorStore({ baseDir: dir }).clearCredential('moka')
+    await new ConnectorStore({ baseDir: dir }).clearCredential('example-mcp')
     h.emitSession({ username: 'user-b' })
-    const row = await awaitRow(h, 'moka', r => r.status === 'disconnected')
+    const row = await awaitRow(h, 'example-mcp', r => r.status === 'disconnected')
     expect(row.status).toBe('disconnected')
     expect((row as { expiresAt?: number | null }).expiresAt ?? null).toBeNull()
     h.dispose()
@@ -404,8 +404,8 @@ describe('audit: auth flows other than OAuth', () => {
     const server = await start({ expiresIn: 3600 })
     const dir = mkdtempSync(join(tmpdir(), 'audit-h-'))
     const h = createHarness([oauthDef(server.origin)], dir, { refreshSweepIntervalMs: 0 })
-    const first = await callRoute(h, '/api/pico/connectors/moka/connect', 'POST')
-    const second = await callRoute(h, '/api/pico/connectors/moka/connect', 'POST')
+    const first = await callRoute(h, '/api/pico/connectors/example-mcp/connect', 'POST')
+    const second = await callRoute(h, '/api/pico/connectors/example-mcp/connect', 'POST')
     expect([first.status, second.status]).toEqual([200, 200])
     await new Promise(r => setTimeout(r, 200))
     // no credential was ever authorized, so nothing may have registered

@@ -265,18 +265,18 @@ describe('TokenRefresher', () => {
   it('single-flights concurrent refreshes (one grant, one rotation)', async () => {
     const server = await startServer({ rotateRefresh: true })
     const { store } = tempStore()
-    await store.writeCredential('moka', credential({ expiresAt: Date.now() - 1000 }))
+    await store.writeCredential('example-mcp', credential({ expiresAt: Date.now() - 1000 }))
     const refresher = harnessFor(server, store)
     const outcomes = await Promise.all([
-      refresher.refresh('moka'),
-      refresher.refresh('moka'),
-      refresher.refresh('moka'),
+      refresher.refresh('example-mcp'),
+      refresher.refresh('example-mcp'),
+      refresher.refresh('example-mcp'),
     ])
     expect(outcomes.every(outcome => outcome.ok)).toBe(true)
     // One token request for three callers: the second refresh would have
     // consumed the rotated refresh token the first one just stored.
     expect(server.grants).toEqual(['refresh_token'])
-    const stored = await store.readCredential('moka')
+    const stored = await store.readCredential('example-mcp')
     expect(stored?.accessToken).toBe('at-1')
     expect(stored?.refreshToken).toBe('rt-1')
     expect(stored?.expiresAt).toBeGreaterThan(Date.now())
@@ -285,7 +285,7 @@ describe('TokenRefresher', () => {
   it('treats a user switch during the refresh as a silent no-op', async () => {
     const server = await startServer({ rotateRefresh: true })
     const { store } = tempStore()
-    await store.writeCredential('moka', credential({ expiresAt: Date.now() - 1000 }))
+    await store.writeCredential('example-mcp', credential({ expiresAt: Date.now() - 1000 }))
     let scope = 'user-a'
     const announced: string[] = []
     const refresher = new TokenRefresher({
@@ -296,7 +296,7 @@ describe('TokenRefresher', () => {
       target: () => discoveryTarget(server.origin),
       onRefreshed: (id) => { announced.push(id) },
     })
-    const outcome = await refresher.refresh('moka', { force: true })
+    const outcome = await refresher.refresh('example-mcp', { force: true })
     expect(outcome.ok).toBe(false)
     if (outcome.ok) return
     expect(outcome.reason).toBe('not-applicable')
@@ -307,7 +307,7 @@ describe('TokenRefresher', () => {
     const server = await startServer({ rotateRefresh: true })
     const { store } = tempStore()
     const before = credential({ expiresAt: Date.now() - 1000 })
-    await store.writeCredential('moka', before)
+    await store.writeCredential('example-mcp', before)
     const announced: Array<{ id: string; token: string | undefined }> = []
     const refresher = new TokenRefresher({
       read: (id) => store.readCredential(id),
@@ -324,18 +324,18 @@ describe('TokenRefresher', () => {
       target: () => discoveryTarget(server.origin),
       onRefreshed: (id, tokens) => { announced.push({ id, token: tokens.accessToken }) },
     })
-    const outcome = await refresher.refresh('moka', { force: true })
+    const outcome = await refresher.refresh('example-mcp', { force: true })
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return
     expect(outcome.tokens.accessToken).toBe('at-newer')
-    expect(announced).toEqual([{ id: 'moka', token: 'at-newer' }])
-    expect((await store.readCredential('moka'))?.accessToken).toBe('at-newer')
+    expect(announced).toEqual([{ id: 'example-mcp', token: 'at-newer' }])
+    expect((await store.readCredential('example-mcp'))?.accessToken).toBe('at-newer')
   })
 
   it('treats a disconnect during the refresh as not-applicable and never resurrects', async () => {
     const server = await startServer({ rotateRefresh: true })
     const { store } = tempStore()
-    await store.writeCredential('moka', credential({ expiresAt: Date.now() - 1000 }))
+    await store.writeCredential('example-mcp', credential({ expiresAt: Date.now() - 1000 }))
     const announced: string[] = []
     const refresher = new TokenRefresher({
       read: (id) => store.readCredential(id),
@@ -344,20 +344,20 @@ describe('TokenRefresher', () => {
       target: () => discoveryTarget(server.origin),
       onRefreshed: (id) => { announced.push(id) },
     })
-    const outcome = await refresher.refresh('moka', { force: true })
+    const outcome = await refresher.refresh('example-mcp', { force: true })
     expect(outcome.ok).toBe(false)
     if (outcome.ok) return
     expect(outcome.reason).toBe('not-applicable')
     expect(announced).toEqual([])
-    expect(await store.readCredential('moka')).toBeNull()
+    expect(await store.readCredential('example-mcp')).toBeNull()
   })
 
   it('skips the round trip while the stored token is still fresh', async () => {
     const server = await startServer()
     const { store } = tempStore()
-    await store.writeCredential('moka', credential({ expiresAt: Date.now() + 10 * 60 * 1000 }))
+    await store.writeCredential('example-mcp', credential({ expiresAt: Date.now() + 10 * 60 * 1000 }))
     const refresher = harnessFor(server, store)
-    const outcome = await refresher.refresh('moka')
+    const outcome = await refresher.refresh('example-mcp')
     expect(outcome.ok).toBe(true)
     expect(server.grants).toEqual([])
   })
@@ -366,11 +366,11 @@ describe('TokenRefresher', () => {
     const server = await startServer()
     server.failGrant = 'server_error'
     const { store } = tempStore()
-    await store.writeCredential('moka', credential({ expiresAt: Date.now() - 1000 }))
+    await store.writeCredential('example-mcp', credential({ expiresAt: Date.now() - 1000 }))
     const refresher = harnessFor(server, store)
-    const outcome = await refresher.refresh('moka', { force: true })
+    const outcome = await refresher.refresh('example-mcp', { force: true })
     expect(outcome.ok).toBe(false)
-    const stored = await store.readCredential('moka')
+    const stored = await store.readCredential('example-mcp')
     expect(stored?.accessToken).toBe('at-stale')
     expect(stored?.refreshToken).toBe('rt-1')
   })
@@ -380,10 +380,10 @@ describe('TokenRefresher', () => {
     const { store } = tempStore()
     // No expiresAt (credential written by an older build): read as "possibly
     // stale", so the first sweep asks — and then the recorded expiry stops it.
-    await store.writeCredential('moka', credential())
+    await store.writeCredential('example-mcp', credential())
     const refresher = harnessFor(server, store)
-    const first = await refresher.refresh('moka')
-    const second = await refresher.refresh('moka')
+    const first = await refresher.refresh('example-mcp')
+    const second = await refresher.refresh('example-mcp')
     expect(first.ok && second.ok).toBe(true)
     expect(server.grants).toEqual(['refresh_token'])
   })
@@ -393,8 +393,8 @@ describe('refresh route + panel metadata', () => {
   it('refreshes through the real route and exposes the new expiry', async () => {
     const server = await startServer({ expiresIn: 900 })
     const def: ConnectorDef = {
-      id: 'moka',
-      name: 'Moka',
+      id: 'example-mcp',
+      name: '示例 MCP 智能体',
       description: 'x',
       authMode: 'oauth',
       auth: {
@@ -407,13 +407,13 @@ describe('refresh route + panel metadata', () => {
         discoveryUrl: `${server.origin}/mcp`,
         scopes: 'offline_access',
       },
-      mcp: [{ serverName: 'moka', transport: 'streamable-http', url: `${server.origin}/mcp` }],
+      mcp: [{ serverName: 'example-mcp', transport: 'streamable-http', url: `${server.origin}/mcp` }],
     }
     const dir = mkdtempSync(join(tmpdir(), 'conn-route-'))
     // The credential exists BEFORE the plugin restores it: this is the real
     // sequence (a stored token from an earlier session), and it is what makes
     // the row report the manual-refresh affordance.
-    await seedCredential(dir, 'moka', {
+    await seedCredential(dir, 'example-mcp', {
       accessToken: 'at-stale',
       refreshToken: 'rt-1',
       clientId: 'dyn-1',
@@ -424,17 +424,17 @@ describe('refresh route + panel metadata', () => {
     })
     const h = createHarness([def], dir, { refreshSweepIntervalMs: 0 })
     const before = (JSON.parse((await callRoute(h, '/api/pico/connectors', 'GET')).body) as
-      { connectors: Array<{ id: string, status: string }> }).connectors.find(item => item.id === 'moka')
+      { connectors: Array<{ id: string, status: string }> }).connectors.find(item => item.id === 'example-mcp')
     expect(before?.status).toBe('disconnected')
 
-    const refreshed = await callRoute(h, '/api/pico/connectors/moka/refresh', 'POST')
+    const refreshed = await callRoute(h, '/api/pico/connectors/example-mcp/refresh', 'POST')
     expect(refreshed.status).toBe(200)
     const payload = JSON.parse(refreshed.body) as { ok: boolean, expiresAt: number }
     expect(payload.ok).toBe(true)
     expect(payload.expiresAt).toBeGreaterThan(Date.now())
 
     const after = (JSON.parse((await callRoute(h, '/api/pico/connectors', 'GET')).body) as
-      { connectors: Array<{ id: string, status: string, expiresAt: number | null }> }).connectors.find(item => item.id === 'moka')
+      { connectors: Array<{ id: string, status: string, expiresAt: number | null }> }).connectors.find(item => item.id === 'example-mcp')
     expect(after?.status).toBe('connected')
     expect(after?.expiresAt).toBeGreaterThan(Date.now())
     // No token material ever leaves the host through the list route.
@@ -475,8 +475,8 @@ describe('re-registration must not collide with the live MCP instance', () => {
   it('re-registers from the manual refresh route while the old instance is live', async () => {
     const server = await startServer({ expiresIn: 900 })
     const def: ConnectorDef = {
-      id: 'moka',
-      name: 'Moka',
+      id: 'example-mcp',
+      name: '示例 MCP 智能体',
       description: 'x',
       authMode: 'oauth',
       auth: {
@@ -489,11 +489,11 @@ describe('re-registration must not collide with the live MCP instance', () => {
         discoveryUrl: `${server.origin}/mcp`,
         scopes: 'offline_access',
       },
-      mcp: [{ serverName: 'moka', transport: 'streamable-http', url: `${server.origin}/mcp` }],
+      mcp: [{ serverName: 'example-mcp', transport: 'streamable-http', url: `${server.origin}/mcp` }],
     }
     const dir = mkdtempSync(join(tmpdir(), 'conn-rereg-http-'))
     const h = createHarness([def], dir, { refreshSweepIntervalMs: 0 })
-    await seedCredential(dir, 'moka', {
+    await seedCredential(dir, 'example-mcp', {
       accessToken: 'at-1',
       refreshToken: 'rt-1',
       clientId: 'dyn-1',
@@ -505,8 +505,8 @@ describe('re-registration must not collide with the live MCP instance', () => {
     expect(first).toBeDefined()
 
     // Refresh + re-register without a teardown in between: the live instance
-    // still owns "moka" at this moment.
-    const refreshed = await callRoute(h, '/api/pico/connectors/moka/refresh', 'POST')
+    // still owns "example-mcp" at this moment.
+    const refreshed = await callRoute(h, '/api/pico/connectors/example-mcp/refresh', 'POST')
     expect(refreshed.status).toBe(200)
     await waitFor(() => h.configs.length === 2)
     // The previous instance was retired, not leaked.

@@ -12,7 +12,7 @@ func TestConnectorCRUD(t *testing.T) {
 	db, cleanup := newTestDB(t)
 	defer cleanup()
 
-	// 种子:迁移 0042 插入 moka + glitchtip。
+	// 种子:迁移 0042 插入 example-mcp + glitchtip。
 	list, err := ListConnectors(db)
 	if err != nil {
 		t.Fatalf("list: %v", err)
@@ -24,8 +24,8 @@ func TestConnectorCRUD(t *testing.T) {
 	for _, c := range list {
 		ids[c.ID] = true
 	}
-	if !ids["moka"] || !ids["glitchtip"] || !ids["sales-easy"] {
-		t.Fatalf("seed missing moka/glitchtip/sales-easy: %v", ids)
+	if !ids["example-mcp"] || !ids["glitchtip"] || !ids["sales-easy"] {
+		t.Fatalf("seed missing example-mcp/glitchtip/sales-easy: %v", ids)
 	}
 
 	// 创建新连接器。
@@ -159,7 +159,7 @@ func TestConnectorDefinitionPolicy(t *testing.T) {
 		definition string
 	}{
 		// 0042 的三个种子定义必须继续通过。
-		{"seed moka", `{"auth":{"discoveryUrl":"https://mcp.example.com/mcp"},"mcp":[{"serverName":"moka","transport":"streamable-http","url":"https://mcp.example.com/mcp"}]}`},
+		{"seed example-mcp", `{"auth":{"discoveryUrl":"https://mcp.example.com/mcp"},"mcp":[{"serverName":"example-mcp","transport":"streamable-http","url":"https://mcp.example.com/mcp"}]}`},
 		{"seed glitchtip", `{"tokenFields":[{"key":"GLITCHTIP_TOKEN","label":"Token","type":"password"}],"mcp":[{"serverName":"glitchtip","transport":"stdio","command":"npx","args":["-y","glitchtip-mcp"],"env":{}}]}`},
 		{"seed sales-easy", `{"mcp":[{"serverName":"neo-crm","transport":"streamable-http","url":"https://mcp.xiaoshouyi.com/mcp"}]}`},
 		{"回环 http 开发端点", `{"mcp":[{"serverName":"dev","transport":"streamable-http","url":"http://127.0.0.1:8765/mcp"}]}`},

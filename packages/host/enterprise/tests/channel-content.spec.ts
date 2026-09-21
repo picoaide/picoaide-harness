@@ -51,7 +51,7 @@ describe('brandChannel', () => {
     // 随包 logo（组装期内联的 data: URI）：服务端不可达、或服务端还是旧版
     // （没有 /api/client/v2/channel）时，登录页与侧边栏显示的就是它。没有它，
     // 客户端只能回落编译期内置的官方花括号 mark —— 白标客户在登录页看到厂商图形
-    // （2026-09-11 在 moka 渠道线上实测到）。
+    // （2026-09-11 在某客户渠道线上实测到）。
     const content = brandChannel({
       login: { displayName: 'Acme', shortName: 'Acme' },
       client: { displayName: 'Acme AI' },

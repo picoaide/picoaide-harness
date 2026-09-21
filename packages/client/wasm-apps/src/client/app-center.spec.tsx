@@ -297,8 +297,8 @@ describe('目录渲染（R34 / R36）', () => {
     setAppShareScheme(DEEP_LINK_SCHEME)
     expect(appShareLink('roster')).toBe(`${DEEP_LINK_SCHEME}://app/roster`)
     // 换渠道 ⇒ 换 scheme（品牌渠道的链接在官方客户端里打不开）。
-    setAppShareScheme('mokahr-harness')
-    expect(appShareLink('roster')).toBe('mokahr-harness://app/roster')
+    setAppShareScheme('example-harness')
+    expect(appShareLink('roster')).toBe('example-harness://app/roster')
     // 畸形 scheme 不采纳 ⇒ 回到"没有链接"（不是回落官方值）。
     setAppShareScheme('Not A Scheme://')
     expect(appShareLink('roster')).toBeNull()
@@ -885,7 +885,7 @@ describe('打开应用：只有本机路由这一条路（冻结契约 2026-09-1
     expect(parseAppProtocolURL('https://demo/', 'demo', protocol)).toBeNull()
     expect(parseAppProtocolURL(null, 'demo', protocol)).toBeNull()
     // 别的安装的 scheme（品牌渠道互相打不开）⇒ 形状错误，不是"成功"。
-    expect(parseAppProtocolURL(appURL('demo'), 'demo', 'mokahr-harness-app:')).toBeNull()
+    expect(parseAppProtocolURL(appURL('demo'), 'demo', 'example-harness-app:')).toBeNull()
     // 没拿到 scheme ⇒ 任何 URL 都不认（fail-closed）。
     expect(parseAppProtocolURL(appURL('demo'), 'demo', null)).toBeNull()
   })
