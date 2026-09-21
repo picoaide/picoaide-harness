@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
@@ -475,6 +476,107 @@ func pragmaInt(ctx context.Context, db *sql.DB, name string) int64 {
 // 应用中心目录：GET /apps/wasm/catalog
 // ---------------------------------------------------------------------------
 
+// availability 回答**一个**问题："我现在能用这个 app_id 吗？"
+//
+// 发布表单在用户敲字时异步问它（防抖），提交前再问一次 —— 目的是让"这个名字被
+// 占了"在**填表阶段**就可见，而不是让用户传完一整个 32 MiB 的包才在最后一步拿到
+// 409。它只读：不编译、不写盘、不占版本号、不进审计、不消耗上传额度。
+//
+// # 为什么必须是一条独立端点（不能让表单去读 catalog）
+//
+// 目录**故意**不列冻结应用，也不列"占名但从未发布成功"的行 —— 而这两类都实打实
+// 占着标识（R6/§4.1："发布即占名…被拒/软删也不释放"）。拿目录当唯一性判据会给出
+// **反向**结论（"这个标识没人用"），把问题推到提交那一刻才爆发。
+//
+// # 判据与发布**同源**
+//
+// 存在性走 `serverstore.GetWasmApp`（**不过滤 deleted_at**：软删不释放标识），
+// 归属走 `h.checkOwner` —— 与 `publishFromBytes` 用的是同两个原语。因此本端点的
+// 结论与真正提交时的 409 必然同码（NAME_TAKEN）、同文案、同 hints，客户端不必为
+// 两条链路维护两套提示。
+//
+// # 两条刻意的形态选择
+//
+//  1. **非法是判词，不是错误**：`valid=false` 走 200 而不是 400。客户端因此只有
+//     一条解析路径，不必为"查重本身失败了"再写一套错误处理；而 `available` 在
+//     非法时恒为 false —— fail-closed，非法名字绝不能报"可用"，否则表单会放行
+//     一次注定失败的发布。
+//  2. **不归一化输入**：用户敲的是 `My-Tool`，答案必须是"必须全小写"，而不是把它
+//     偷偷小写之后说"这个名字可用"（见 validateRawAppID）。
+//
+// # 不泄露
+//
+// 只回"被占用了"，不回是谁占的、叫什么、什么状态 —— 与 docs/07 的 NAME_TAKEN
+// 口径一致。存在性本身不是新增泄露：发布路径的 409 与目录都已经披露它。
+func (h *Handlers) availability(c *gin.Context) {
+	if err := h.requireReady(); err != nil {
+		writeErr(c, err)
+		return
+	}
+	// 查重是**员工面**：未登录不得回答，否则它就是一个免费的"标识是否被占用"探测器。
+	u, aerr := h.currentUser(c)
+	if aerr != nil {
+		writeErr(c, aerr)
+		return
+	}
+	raw := strings.TrimSpace(c.Param("app_id"))
+	appID, verr := h.validateRawAppID(raw)
+	if verr != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"app_id":       raw,
+			"valid":        false,
+			"exists":       false,
+			"available":    false,
+			"owned_by_you": false,
+			"can_publish":  false,
+			"reason":       "invalid",
+			"code":         string(verr.Code),
+			"message":      verr.Message,
+			"hints":        verr.Hints,
+		})
+		return
+	}
+	app, err := serverstore.GetWasmApp(c.Request.Context(), h.opt.DB, appID)
+	if err != nil && !errors.Is(err, serverstore.ErrNotFound) {
+		writeErr(c, internalErr("查询失败", err))
+		return
+	}
+	out := gin.H{
+		"app_id":       appID,
+		"valid":        true,
+		"exists":       app != nil,
+		"available":    app == nil,
+		"owned_by_you": app != nil && app.Owner == u.Username,
+		"can_publish":  false,
+		"reason":       "available",
+		"code":         "",
+		"message":      "",
+		"hints":        []string{},
+	}
+	if app == nil {
+		// 空闲标识：可以发首版。
+		out["can_publish"] = true
+		c.JSON(http.StatusOK, out)
+		return
+	}
+	if oerr := h.checkOwner(u, appID, app); oerr != nil {
+		// 与 publish 的 409 同一份文案与 hints（见 checkOwner 的注释）。
+		out["reason"] = "taken"
+		out["code"] = string(oerr.Code)
+		out["message"] = oerr.Message
+		out["hints"] = oerr.Hints
+		c.JSON(http.StatusOK, out)
+		return
+	}
+	// checkOwner 放行 = "你可以对这个标识发布"：发布者本人，或管理员的兜底接管。
+	// 注意它与 owned_by_you 不同物 —— 后者是**严格归属**（admin 接管时仍为 false），
+	// 而表单要判的是"能不能发"，所以 reason 取宽松的那一个。
+	out["reason"] = "yours"
+	out["can_publish"] = true
+	c.JSON(http.StatusOK, out)
+}
+
+// catalog 是应用中心目录（GET /apps/wasm/catalog）。
 func (h *Handlers) catalog(c *gin.Context) {
 	if err := h.requireReady(); err != nil {
 		writeErr(c, err)

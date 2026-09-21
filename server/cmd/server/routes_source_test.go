@@ -162,6 +162,9 @@ var wasmGatedRoutes = []string{
 	// （d.Wasm == nil 时整片消失）⇒ 新增就必须登记，否则本表反向断言红。
 	"GET /api/client/v2/apps/wasm/:app_id/releases",
 	"GET /api/client/v2/apps/wasm/catalog",
+	// 标识唯一性预查（2026-09-20）：发布表单填 app_id 时异步问它、提交前再问一次。
+	// 与上面几条同理 —— 条件注册（d.Wasm == nil 时整片消失），新增就必须登记。
+	"GET /api/client/v2/apps/wasm/:app_id/availability",
 	// 分片上传（§4.2）
 	"POST /api/client/v2/apps/wasm/uploads",
 	"PUT /api/client/v2/apps/wasm/uploads/:upload_id/chunks/:index",

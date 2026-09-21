@@ -1308,3 +1308,192 @@ describe('R1-pm-3：版本历史（发布者拿到被拒理由与下一步）', 
     expect(cardOf('值班表').querySelector('[data-role="releases-error"]')).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// 标识唯一性查重（2026-09-20）：填 app_id 时异步问、提交前再问一次
+//
+// 这一组是**真挂载**判据，钉住的是四件在产品里能看见的事：
+//   1. 敲完 app_id 会（防抖地）真的发出查重请求，结论渲染到界面；
+//   2. **被别人占用**时提交被就地拦下 —— 且**一个字节的产物都没上传**；
+//   3. 名字空闲时正常放行；
+//   4. 查重**问不成**时 fail-open：不阻断提交（查重不能变成新的单点故障）。
+//
+// ---- 变异验证 ----
+//   - 去掉 `verifyAppIdBeforeSubmit` 那一段（只靠防抖结论）⇒「占用即拦下」红；
+//   - 把 `verifyAppIdBeforeSubmit` 的 taken 分支改成 return null ⇒ 同上红；
+//   - 查重失败当成"被占用"处理 ⇒「问不成不阻断」红；
+//   - 防抖 effect 里去掉 `setAvailability({kind:'checking'})` 或结论渲染 ⇒ 第 1 条红。
+// ---------------------------------------------------------------------------
+const AVAILABILITY_URL = (appId: string): string => `/api/pico/apps/wasm/${appId}/availability`
+
+/** 一条查重判词（服务端 `availability` 的真实形状）。 */
+const availabilityPayload = (
+  appId: string,
+  verdict: 'available' | 'yours' | 'taken' | 'invalid',
+): Record<string, unknown> => ({
+  app_id: appId,
+  valid: verdict !== 'invalid',
+  exists: verdict === 'yours' || verdict === 'taken',
+  available: verdict === 'available',
+  owned_by_you: verdict === 'yours',
+  can_publish: verdict === 'available' || verdict === 'yours',
+  reason: verdict,
+  code: verdict === 'taken' ? 'NAME_TAKEN' : verdict === 'invalid' ? 'INVALID_APP_ID' : '',
+  message: verdict === 'taken' ? '名称已被占用，无法上传：请更换名称或联系管理员' : '',
+  hints: verdict === 'taken' ? ['发布即占名：首个成功发布者永久占有该标识'] : [],
+})
+
+/** 打开发布表单并等到它挂载完。 */
+async function openPublishForm(): Promise<void> {
+  await click('.pico-app-center-publish')
+  expect(container.querySelector('.pico-app-center-publish-form')).not.toBeNull()
+}
+
+/** 读查重结论那一行的 `data-availability`（结论的稳定钩子）与文案。 */
+function availabilityLine(): { state: string, text: string } {
+  const el = container.querySelector('[data-role="app-id-availability"]')
+  if (el === null) throw new Error('missing [data-role="app-id-availability"]')
+  return { state: el.getAttribute('data-availability') ?? '', text: el.textContent ?? '' }
+}
+
+describe('应用标识查重：填 app_id 时异步问、提交前复检', () => {
+  /** 一条"我发布的"目录行（发新版入口的基线；app_id 不可改）。 */
+  const MY_APP_CATALOG = {
+    apps: [
+      { app_id: 'roster', title: '值班表', description: '', responsible: 'carol', entry_url: 'https://roster.apps.example.com/', access: 'login', enabled: true, current_version: '2.0.0', is_owner: true, purpose: '值班', whitelist: [] },
+    ],
+  }
+
+  it('敲完 app_id ⇒ 真的发出查重请求，空闲时显示"这个标识可以用"', async () => {
+    stubFetch((url) => {
+      if (url === AVAILABILITY_URL('free-tool')) return jsonResponse(200, availabilityPayload('free-tool', 'available'))
+      return jsonResponse(200, { apps: [] })
+    })
+    await mount()
+    await openPublishForm()
+    await typeIntoPublishForm({ appId: 'free-tool' })
+    // 防抖 400 ms：等它真的发出去（`type` 里的 act 已经把 effect 跑完，这里补等）。
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 600)) })
+
+    const probes = calls.filter(call => call.url === AVAILABILITY_URL('free-tool'))
+    expect(probes).toHaveLength(1)
+    expect(probes[0]!.init.method).toBe('GET')
+    expect(availabilityLine()).toEqual({ state: 'available', text: '这个标识可以用' })
+  })
+
+  it('名字已被他人占用 ⇒ 显示"已被占用"+不泄露是谁，且**不提交、不上传任何产物**', async () => {
+    let fileRead = 0
+    stubFetch((url) => {
+      if (url === AVAILABILITY_URL('taken-tool')) return jsonResponse(200, availabilityPayload('taken-tool', 'taken'))
+      if (url === PUBLISH_PATH) return jsonResponse(201, RELEASE_OK)
+      return jsonResponse(200, { apps: [] })
+    })
+    await mount()
+    await openPublishForm()
+    await pickFile('.pico-app-center-file', 'shift-notes.wasm', new Uint8Array([0, 97, 115, 109]), { onRead: () => { fileRead += 1 } })
+    await typeIntoPublishForm({ ...FILLED, appId: 'taken-tool' })
+    // 等防抖窗口过去，结论才落地（此刻界面先显示"正在检查"）。
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 600)) })
+
+    // 占用结论先到界面上（服务端原文，与发布那一刻的 409 是同一句）。
+    expect(availabilityLine().state).toBe('taken')
+    expect(availabilityLine().text).toContain('名称已被占用')
+
+    const before = fileRead
+    await click('.pico-app-center-submit')
+
+    // ① 没有发出发布请求 —— 名字被占就不该让用户白等一次上传。
+    expect(calls.filter(call => call.url === PUBLISH_PATH)).toHaveLength(0)
+    // ② 连文件都没再读一次（产物根本没被编码成 base64）。
+    expect(fileRead).toBe(before)
+    // ③ 就地给出可读原因（与服务端同文案）。
+    const issues = container.querySelector('[data-role="local-error"]')
+    expect(issues).not.toBeNull()
+    expect(issues!.textContent).toContain('名称已被占用')
+    // ④ 界面**不**指明是谁占的（平台口径：说明占用关系，不泄露是谁/什么内容）。
+    expect(container.textContent).not.toContain('alice 的')
+  })
+
+  it('名字空闲 ⇒ 提交正常放行（复检不误杀）', async () => {
+    stubFetch((url) => {
+      if (url === AVAILABILITY_URL('free-tool')) return jsonResponse(200, availabilityPayload('free-tool', 'available'))
+      if (url === PUBLISH_PATH) return jsonResponse(201, RELEASE_OK)
+      return jsonResponse(200, { apps: [] })
+    })
+    await mount()
+    await openPublishForm()
+    await pickFile('.pico-app-center-file', 'shift-notes.wasm', new Uint8Array([0, 97, 115, 109]))
+    await typeIntoPublishForm({ ...FILLED, appId: 'free-tool' })
+    await click('.pico-app-center-submit')
+
+    const publish = calls.filter(call => call.url === PUBLISH_PATH)
+    expect(publish).toHaveLength(1)
+    expect(JSON.parse(String(publish[0]!.init.body)).app_id).toBe('free-tool')
+  })
+
+  it('复检发生在提交那一刻（不拿防抖的旧结论放行）：改名后旧结论不生效', async () => {
+    // 第一次问 `first-name` 说空闲；用户随后改成 `second-name`（服务端说被占）。
+    // 提交必须拦下 —— 这正是"只看防抖缓存"会漏掉的形态。
+    stubFetch((url) => {
+      if (url === AVAILABILITY_URL('first-name')) return jsonResponse(200, availabilityPayload('first-name', 'available'))
+      if (url === AVAILABILITY_URL('second-name')) return jsonResponse(200, availabilityPayload('second-name', 'taken'))
+      if (url === PUBLISH_PATH) return jsonResponse(201, RELEASE_OK)
+      return jsonResponse(200, { apps: [] })
+    })
+    await mount()
+    await openPublishForm()
+    await pickFile('.pico-app-center-file', 'shift-notes.wasm', new Uint8Array([0, 97, 115, 109]))
+    await typeIntoPublishForm({ ...FILLED, appId: 'first-name' })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 600)) })
+    await typeIntoPublishForm({ appId: 'second-name' })
+    await click('.pico-app-center-submit')
+    expect(calls.filter(call => call.url === PUBLISH_PATH)).toHaveLength(0)
+  })
+
+  it('查重问不成（宿主故障）⇒ **不阻断**提交（查重是体验优化，不是单点故障）', async () => {
+    stubFetch((url) => {
+      if (url === AVAILABILITY_URL('free-tool')) return jsonResponse(500, { error: { code: 'INTERNAL', message: '查询失败' } })
+      if (url === PUBLISH_PATH) return jsonResponse(201, RELEASE_OK)
+      return jsonResponse(200, { apps: [] })
+    })
+    await mount()
+    await openPublishForm()
+    await pickFile('.pico-app-center-file', 'shift-notes.wasm', new Uint8Array([0, 97, 115, 109]))
+    await typeIntoPublishForm({ ...FILLED, appId: 'free-tool' })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 600)) })
+    // 界面明说"暂时无法确认"，**不**伪装成可用。
+    expect(['unknown', 'checking']).toContain(availabilityLine().state)
+    await click('.pico-app-center-submit')
+    // 但提交照旧放行：权威判据是服务端发布那一刻的 409。
+    expect(calls.filter(call => call.url === PUBLISH_PATH)).toHaveLength(1)
+  })
+
+  it('名字形态不合法 ⇒ 本地就拦下，不发查重请求（省一次往返）', async () => {
+    stubFetch((url) => {
+      if (url.includes('/availability')) throw new Error(`不该发查重请求：${url}`)
+      return jsonResponse(200, { apps: [] })
+    })
+    await mount()
+    await openPublishForm()
+    await typeIntoPublishForm({ appId: 'Bad_Name' })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 600)) })
+    expect(calls.filter(call => call.url.includes('/availability'))).toHaveLength(0)
+  })
+
+  it('对已有应用发新版：app_id 不可改，不做唯一性拦截（自己的应用不被误拦）', async () => {
+    // 目录行带 is_owner=true ⇒ 面板给出"发新版"入口，app_id 是既成事实。
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, MY_APP_CATALOG)
+      if (url === PUBLISH_PATH) return jsonResponse(201, RELEASE_OK)
+      return jsonResponse(200, { apps: [] })
+    })
+    await mount()
+    await clickIn('值班表', '.pico-app-center-publish-new')
+    await pickFile('.pico-app-center-file', 'roster.wasm', new Uint8Array([0, 97, 115, 109]))
+    await typeIntoPublishForm({ version: '2.0.0', changelog: '加了导出', sensitivity: 'internal' })
+    await click('.pico-app-center-submit')
+    // 既有应用的 app_id 不做查重（它必然"存在"），提交直接走发布。
+    expect(calls.filter(call => call.url.includes('/availability'))).toHaveLength(0)
+    expect(calls.filter(call => call.url === PUBLISH_PATH)).toHaveLength(1)
+  })
+})

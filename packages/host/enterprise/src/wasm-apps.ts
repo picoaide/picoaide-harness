@@ -1642,6 +1642,7 @@ export async function proxyApp(ctx: Context, session: Session, input: ProxyInput
  * | POST | `/:app_id/publish\|unpublish\|freeze` | 生命周期代理（原样转发 body） |
  * | GET | `/:app_id/diagnostics\|schema\|export\|releases\|rows` | 只读代理（`rows` 额外要持有性证明） |
  * | GET/POST | `/:app_id/ai-rows-consent` | 「允许 AI 读取此应用的数据」授权状态（本机文件；默认关） |
+ * | GET | `/:app_id/diagnostics\|schema\|export\|releases\|availability` | 只读代理 |
  * | DELETE | `/:app_id` | 删除代理（R37 冻结→导出→真删） |
  *
  * 这个函数只做**四件 HTTP 层的事**：围栏（guard/持有性证明/auditor）、路径分发、
@@ -1842,7 +1843,7 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
         locale,
       }))
     }
-    // GET /:app_id/(diagnostics|schema|export|releases) —— 只读
+    // GET /:app_id/(diagnostics|schema|export|releases|rows|availability) —— 只读
     //
     // `releases`（R1-pm-3）是发布者本人的版本历史 + 审核结论（含被拒理由）：服务端
     // 的员工面出口是 `GET /api/client/v2/apps/wasm/:app_id/releases`。**它必须在这里
@@ -1850,7 +1851,14 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
     // 404"（面板上表现为一条读不出来的结论，而不是功能缺失）。
     // `rows`（2026-09-21，作者数据面）也走这条：它是**查询串参数**的 GET
     //（?table=&limit=&offset=&unmask=），代理层只需原样转发 query 与身份。
-    if (segments.length === 2 && ['diagnostics', 'schema', 'export', 'releases', 'rows'].includes(segments[1] ?? '')) {
+    //
+    // `availability`（2026-09-20）是标识唯一性预查：发布表单在用户敲 app_id 时防抖
+    // 调用它、提交前再调一次。它同样**必须在这个白名单里**，否则表单拿不到判词，
+    // 只能退回去读 `catalog` —— 而 catalog 不列冻结/占名行，会给出"标识没人用"的
+    // 反向结论（这正是本端点要消灭的形态）。
+    // 三条只读后缀共用同一条转发路径（**一个 if**：两处各写一个会把下面的大括号配平弄坏 ——
+    // 合并 master 时踩过）。
+    if (segments.length === 2 && ['diagnostics', 'schema', 'export', 'releases', 'rows', 'availability'].includes(segments[1] ?? '')) {
       if (method !== 'GET') return fail(res, { code: 'METHOD_NOT_ALLOWED', message: 'method not allowed', status: 405 })
       // `rows` 返回**使用者数据**（`?unmask=1` 时是脱敏前的原值）：即使 GET 也要
       // 浏览器持有性证明 —— 否则本机任意进程（含模型自己的 shell）一条 curl 就能读走。

@@ -30,8 +30,10 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPublishBody,
   changesAccess,
+  checkAppIdAvailability,
   encodeBase64,
   initialFormState,
+  parseAvailability,
   parseErrorEnvelope,
   parsePublishOutcome,
   PUBLISH_PATH,
@@ -603,5 +605,168 @@ describe('P1-3：发新版的预填基线与"访问范围改动"判据', () => {
     expect(initial.currentAccess).toBe('login')
     expect(changesAccess(initial, 'login')).toBe(false)
     expect(changesAccess(initial, 'whitelist')).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 标识唯一性查重（2026-09-20）
+//
+// 这一组钉住的是"提交前能发现名字冲突"这件事的四条边界：
+//   - 空闲 / 是自己的 / 被别人占了 / 名字本身非法 —— 四态各自可辨；
+//   - **被别人占了**必须是可据以拦下提交的正面证据；
+//   - 查重**本身失败**时 fail-open（不阻断提交），但绝不伪装成"可用"；
+//   - 载荷形状不认识时 fail-closed 到"结论不可用"（不是"可用"）。
+// ---------------------------------------------------------------------------
+describe('checkAppIdAvailability：提交前问一次服务端', () => {
+  const AVAIL = (body: Record<string, unknown>, status = 200): typeof fetch =>
+    (async () => new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    })) as unknown as typeof fetch
+
+  it('空闲标识：GET 到本机 /availability，available=true', async () => {
+    const calls: string[] = []
+    const outcome = await checkAppIdAvailability('brand-new', {
+      fetch: (async (url: unknown) => {
+        calls.push(String(url))
+        return new Response(JSON.stringify({
+          app_id: 'brand-new', valid: true, exists: false, available: true,
+          owned_by_you: false, can_publish: true, reason: 'available', code: '', message: '', hints: [],
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }) as unknown as typeof fetch,
+    })
+    // 路径与宿主白名单逐字一致：多一段少一段都会让宿主的逐后缀分发回 404。
+    expect(calls).toEqual(['/api/pico/apps/wasm/brand-new/availability'])
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('unreachable')
+    expect(outcome.availability.available).toBe(true)
+    expect(outcome.availability.canPublish).toBe(true)
+    expect(outcome.availability.reason).toBe('available')
+  })
+
+  it('被他人占用：reason=taken + NAME_TAKEN（与发布路径同码，UI 可共用一套提示）', async () => {
+    const outcome = await checkAppIdAvailability('taken-tool', {
+      fetch: AVAIL({
+        app_id: 'taken-tool', valid: true, exists: true, available: false,
+        owned_by_you: false, can_publish: false, reason: 'taken',
+        code: 'NAME_TAKEN', message: '名称已被占用，无法上传：请更换名称或联系管理员',
+        hints: ['发布即占名：首个成功发布者永久占有该标识'],
+      }),
+    })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('unreachable')
+    expect(outcome.availability.reason).toBe('taken')
+    expect(outcome.availability.code).toBe('NAME_TAKEN')
+    expect(outcome.availability.available).toBe(false)
+    // 服务端文案与 hints 原样保留：第一条消费者是 AI，丢掉 hints 等于让它自己猜。
+    expect(outcome.availability.message).toContain('已被占用')
+    expect(outcome.availability.hints).toHaveLength(1)
+  })
+
+  it('自己的应用：can_publish=true 但 available=false（发新版不能被自己拦下）', async () => {
+    const outcome = await checkAppIdAvailability('my-tool', {
+      fetch: AVAIL({
+        app_id: 'my-tool', valid: true, exists: true, available: false,
+        owned_by_you: true, can_publish: true, reason: 'yours', code: '', message: '', hints: [],
+      }),
+    })
+    if (!outcome.ok) throw new Error('unreachable')
+    // 这两条**必须**分开：表单拦提交看 canPublish，显示"这是你的"看 ownedByYou。
+    expect(outcome.availability.canPublish).toBe(true)
+    expect(outcome.availability.available).toBe(false)
+    expect(outcome.availability.ownedByYou).toBe(true)
+  })
+
+  it('非法名字：200 + valid=false（判词不是错误），hints 带上来', async () => {
+    const outcome = await checkAppIdAvailability('Bad_Name', {
+      fetch: AVAIL({
+        app_id: 'Bad_Name', valid: false, exists: false, available: false,
+        owned_by_you: false, can_publish: false, reason: 'invalid',
+        code: 'INVALID_APP_ID', message: 'app_id 必须全小写', hints: ['大小写敏感是有意的'],
+      }),
+    })
+    // 关键：非法不是"请求失败"，因此 ok=true —— 调用方只有一条解析路径。
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('unreachable')
+    expect(outcome.availability.valid).toBe(false)
+    expect(outcome.availability.available).toBe(false)
+    expect(outcome.availability.code).toBe('INVALID_APP_ID')
+  })
+
+  it('空输入不发请求：本地直接给出 app_id_required（与本地预校验同码）', async () => {
+    let called = 0
+    const outcome = await checkAppIdAvailability('   ', {
+      fetch: (async () => { called += 1; return new Response('{}') }) as unknown as typeof fetch,
+    })
+    expect(called).toBe(0)
+    if (!outcome.ok) throw new Error('unreachable')
+    expect(outcome.availability.code).toBe('app_id_required')
+    expect(outcome.availability.reason).toBe('invalid')
+  })
+
+  it('标识含非 URL 安全字符时仍然安全出站（百分号编码，不在拼接处炸掉）', async () => {
+    const calls: string[] = []
+    await checkAppIdAvailability('has space/slash', {
+      fetch: (async (url: unknown) => {
+        calls.push(String(url))
+        return new Response(JSON.stringify({ reason: 'invalid', valid: false, available: false }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        })
+      }) as unknown as typeof fetch,
+    })
+    expect(calls[0]).toBe('/api/pico/apps/wasm/has%20space%2Fslash/availability')
+  })
+
+  it('形状不认识 ⇒ UNEXPECTED_RESPONSE（fail-closed：绝不默认成"可用"）', async () => {
+    const outcome = await checkAppIdAvailability('whatever', {
+      fetch: AVAIL({ app_id: 'whatever', ok: true }),
+    })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error('unreachable')
+    expect(outcome.code).toBe('UNEXPECTED_RESPONSE')
+    expect(outcome.transport).toBe(false)
+  })
+
+  it('宿主没起来 ⇒ NETWORK_ERROR（调用方据此 fail-open，不阻断提交）', async () => {
+    const outcome = await checkAppIdAvailability('whatever', {
+      fetch: (async () => { throw new Error('fetch failed') }) as unknown as typeof fetch,
+    })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error('unreachable')
+    expect(outcome.code).toBe('NETWORK_ERROR')
+    expect(outcome.transport).toBe(true)
+  })
+
+  it('服务端 5xx ⇒ 结构化失败原样回来（带上服务端 code，不压成"失败"）', async () => {
+    const outcome = await checkAppIdAvailability('whatever', {
+      fetch: AVAIL({ error: { code: 'INTERNAL', message: '查询失败' } }, 500),
+    })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error('unreachable')
+    expect(outcome.status).toBe(500)
+    expect(outcome.code).toBe('INTERNAL')
+  })
+})
+
+describe('parseAvailability：判词字段的 fail-closed 读法', () => {
+  it('reason 缺席或不在四态内 ⇒ null（不猜测）', () => {
+    expect(parseAvailability(null)).toBeNull()
+    expect(parseAvailability('nope')).toBeNull()
+    expect(parseAvailability({})).toBeNull()
+    expect(parseAvailability({ reason: 'maybe' })).toBeNull()
+  })
+
+  it('布尔字段缺省一律按 false（缺席不等于 true）', () => {
+    const verdict = parseAvailability({ reason: 'taken' })
+    expect(verdict).not.toBeNull()
+    expect(verdict!.available).toBe(false)
+    expect(verdict!.canPublish).toBe(false)
+    expect(verdict!.ownedByYou).toBe(false)
+    expect(verdict!.exists).toBe(false)
+  })
+
+  it('hints 里的非字符串条目被剔除（服务端契约漂移不污染 UI）', () => {
+    const verdict = parseAvailability({ reason: 'invalid', hints: ['a', 7, null, 'b'] })
+    expect(verdict!.hints).toEqual(['a', 'b'])
   })
 })

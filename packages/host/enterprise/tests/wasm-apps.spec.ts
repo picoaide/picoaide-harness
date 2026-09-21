@@ -557,6 +557,9 @@ describe('错误语义：业务信封原样透传，只有传输层失败才回�
     // 作者数据面（2026-09-21）：查询串必须**原样**转发（table/limit/offset/unmask 都是
     // 服务端的判据；代理层吞掉查询串会让"看数据"永远查第一张表的第一页默认视图）。
     await h.call(`${WASM_APPS_PREFIX}/demo-tool/rows?table=notes&limit=50&offset=100`)
+    // 标识唯一性预查（2026-09-20）：发布表单的异步查重走这条只读代理。
+    // 它同样必须在这张逐后缀分发的白名单里，否则表单永远拿不到判词。
+    await h.call(`${WASM_APPS_PREFIX}/demo-tool/availability`)
     await h.call(`${WASM_APPS_PREFIX}/demo-tool`, 'DELETE')
     expect(h.outbound.map(o => `${o.method} ${o.url.replace('https://harness.example', '')}`)).toEqual([
       'POST /api/client/v2/apps/wasm/demo-tool/unpublish',
@@ -566,6 +569,7 @@ describe('错误语义：业务信封原样透传，只有传输层失败才回�
       'GET /api/client/v2/apps/wasm/demo-tool/export',
       'GET /api/client/v2/apps/wasm/demo-tool/releases',
       'GET /api/client/v2/apps/wasm/demo-tool/rows?table=notes&limit=50&offset=100',
+      'GET /api/client/v2/apps/wasm/demo-tool/availability',
       'DELETE /api/client/v2/apps/wasm/demo-tool',
     ])
     expect(h.outbound[0]!.body).toBe(JSON.stringify({ enabled: false }))

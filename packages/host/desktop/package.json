@@ -414,6 +414,8 @@
       "!**/node_modules/@iconify/**",
       "!**/node_modules/@braintree/**",
       "!**/node_modules/khroma/**",
+      "!**/node_modules/@deepseek-ai/libreoffice-kit/**",
+      "!**/node_modules/@deepseek-ai/libreoffice-kit-*/**",
       "!**/node_modules/stylis/**",
       "!**/node_modules/ts-dedent/**",
       "!**/node_modules/uuid/**",
