@@ -144,7 +144,15 @@ function isLoopbackIPv4(host: string): boolean {
  * @returns true 表示剥壳后形如 `scheme:`。
  */
 export function looksLikeAbsoluteUrl(raw: string): boolean {
-  const stripped = raw.replace(/^[\u0000-\u0020\u007f]+/u, '').replace(/[\u0000-\u0020\u007f]+$/u, '')
+  // 手写剥离而不是正则：等价语义（剥首尾 C0 控制符与空格）但**没有** `+` 量词回溯面 ——
+  // CodeQL 的 `js/polynomial-redos` 对"库输入 + 字符类 + `+`"会报高优（本题实测是误报，
+  // 但一个可以随手消掉的告警不值得留在面板上让后来者重新判断一次）。
+  let start = 0
+  let end = raw.length
+  const isStrippable = (code: number): boolean => code <= 0x20 || code === 0x7f
+  while (start < end && isStrippable(raw.charCodeAt(start))) start++
+  while (end > start && isStrippable(raw.charCodeAt(end - 1))) end--
+  const stripped = raw.slice(start, end)
   return /^[a-z][a-z0-9+.-]*:/iu.test(stripped)
 }
 
