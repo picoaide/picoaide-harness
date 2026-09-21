@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -33,6 +34,46 @@ var Dir = func() string {
 	}
 	return "/opt/picoaide/client"
 }()
+
+// 下载链路的写截止时间(2026-09-21 实测缺陷的修复)。
+//
+// 背景:http.Server 的 WriteTimeout(cmd/server/main.go 的 5 分钟)是**整个响应**写出的
+// 硬上限,而客户端安装包是 150–180 MB 的静态大文件、由本包用 http.ServeFile 直接下发。
+// 实测(某次部署后,从域名实拉 154 MB 的 AppImage):上行 260–430 KB/s 时下载**恰好在
+// 5m0s 处**被服务端断开(访问日志 `200 | 5m0s`,客户端侧 HTTP/2 报 stream INTERNAL_ERROR /
+// 连接重置),员工无法自助绕过 —— 保底速率 = 体积/300s ≈ 525 KB/s,低于它的链路必然失败。
+//
+// 因此这条路由单独放宽写截止时间,判据是"有界但足够":
+//
+//   - downloadFloorRate:必须仍能下完的**保底速率**,取 64 KiB/s。按当前最大的资产
+//     (Windows NSIS 安装包约 180 MB)计,180 MiB / 64 KiB/s ≈ 48 分钟;
+//   - downloadWriteDeadlineMin 不低于全局 WriteTimeout(5 分钟),避免比修复前更严;
+//   - downloadWriteDeadlineMax 给 1 小时硬上限 —— 只放宽、不取消超时:客户端挂死
+//     (既不读也不断开)时连接仍会被回收,不会变成"永不超时"的连接泄漏。
+//
+// 只影响 /updates/client/* 这一条路由:http.Server 的全局 WriteTimeout 与 SSE/网关
+// 语义都不动(用 http.ResponseController 精确改写本次响应的写 deadline)。
+const (
+	downloadFloorRateBytesPerSec = 64 << 10
+	downloadWriteDeadlineMin     = 5 * time.Minute
+	downloadWriteDeadlineMax     = time.Hour
+)
+
+// downloadWriteDeadline 按文件字节数推出本次响应的写截止时间(供 file 用)。
+func downloadWriteDeadline(size int64) time.Duration {
+	if size <= 0 {
+		// 大小未知(理论上不会走到:ServeFile 之前已 os.Stat):退回全局超时语义。
+		return downloadWriteDeadlineMin
+	}
+	d := time.Duration(size/downloadFloorRateBytesPerSec+1) * time.Second
+	if d < downloadWriteDeadlineMin {
+		return downloadWriteDeadlineMin
+	}
+	if d > downloadWriteDeadlineMax {
+		return downloadWriteDeadlineMax
+	}
+	return d
+}
 
 // Asset 单个平台安装包(CLIENT-RELEASE.json 里的一条)。
 type Asset struct {
@@ -133,6 +174,11 @@ func file(c *gin.Context) {
 	}
 	// 文件名含版本号 → 内容固定,可长缓存;ServeFile 自带 Range/断点续传。
 	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	// 只放宽**这一条路由**的写截止时间(见 downloadWriteDeadline 的推导):
+	// 安装包体积大、慢链路下载远超全局 WriteTimeout。底层实现不支持时
+	// (SetWriteDeadline 返回 ErrNotSupported)保持原语义,不新增失败面。
+	_ = http.NewResponseController(c.Writer).SetWriteDeadline(
+		time.Now().Add(downloadWriteDeadline(st.Size())))
 	http.ServeFile(c.Writer, c.Request, full)
 }
 
