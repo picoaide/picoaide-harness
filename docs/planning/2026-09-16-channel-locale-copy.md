@@ -10,21 +10,21 @@
 
 `channel.json` 的品牌文案分两处：`identity.*` 与 `copy.*`（另有 `assets.*` 素材、`defaults.*` 默认值、`desktop.*` 打包参数）。
 
-`packages/host/desktop/src/desktop-channel.ts` 的 `ChannelBrand` 定义了口径，实测四个渠道（official / beta / example-a / example-b）的取值：
+`packages/host/desktop/src/desktop-channel.ts` 的 `ChannelBrand` 定义了口径，实测四个渠道（两个公共渠道 official / beta，两个品牌渠道）的取值：
 
-| 字段 | example-a / beta 实测值 | 性质 | 需要多语言？ |
+| 字段 | 品牌渠道 / beta 实测值 | 性质 | 需要多语言？ |
 |---|---|---|---|
-| `identity.display_name` | `Example-A Harness` | 品牌名 | ❌ 不译 |
-| `identity.short_name` | `Example-A` | 品牌名 | ❌ 不译 |
-| `identity.title` | `Example-A Harness` | 品牌名（页面标题） | ❌ 不译 |
-| `copy.login_display_name` | `Example-A` | 品牌名 | ❌ 不译 |
-| `copy.client_display_name` | `Example-A Harness` | 品牌名 | ❌ 不译 |
+| `identity.display_name` | `Example Harness` | 品牌名 | ❌ 不译 |
+| `identity.short_name` | `Example` | 品牌名 | ❌ 不译 |
+| `identity.title` | `Example Harness` | 品牌名（页面标题） | ❌ 不译 |
+| `copy.login_display_name` | `Example` | 品牌名 | ❌ 不译 |
+| `copy.client_display_name` | `Example Harness` | 品牌名 | ❌ 不译 |
 | `copy.login_tagline` | `企业级 AI 办公智能体平台` | **散文** | ✅ **要** |
 | `copy.client_tagline` | （四个渠道都留空） | 散文 | ✅ 要（一旦启用） |
 | `copy.login_welcome` | （留空） | 散文 | ✅ 要（一旦启用） |
-| `copy.portal_welcome` | `欢迎使用 Example-A Harness。企业 AI 能力由管理员统一开通与配置。` | **散文** | ✅ **要** |
+| `copy.portal_welcome` | `欢迎使用 Example Harness。企业 AI 能力由管理员统一开通与配置。` | **散文** | ✅ **要** |
 
-**判据**：品牌名是专有名词，跨语言保持同一串（`Example-A Harness` 在英文界面里也是 `Example-A Harness`）；而 tagline / welcome 是**句子**——中文界面的 `企业级 AI 办公智能体平台` 在英文界面下必须换成英文，否则英文用户第一屏看到中文标语。
+**判据**：品牌名是专有名词，跨语言保持同一串（`Example Harness` 在英文界面里也是 `Example Harness`）；而 tagline / welcome 是**句子**——中文界面的 `企业级 AI 办公智能体平台` 在英文界面下必须换成英文，否则英文用户第一屏看到中文标语。
 
 今天 `official` 与 `beta` 都配了中文 tagline，而产品现在支持英文界面（`login_tagline` 渲染在登录页品牌区），所以**中文标语会直接出现在英文登录页上**——这是一个当前就存在的可见缺陷，不是假设。
 
@@ -51,14 +51,14 @@
 
 ```json
 "copy": {
-  "login_display_name": "Example-A",
+  "login_display_name": "Example",
   "login_tagline": {
     "zh": "企业级 AI 办公智能体平台",
     "en": "An enterprise AI workspace platform"
   },
   "portal_welcome": {
-    "zh": "欢迎使用 Example-A Harness。企业 AI 能力由管理员统一开通与配置。",
-    "en": "Welcome to Example-A Harness. Your administrator enables and configures enterprise AI capabilities."
+    "zh": "欢迎使用 Example Harness。企业 AI 能力由管理员统一开通与配置。",
+    "en": "Welcome to Example Harness. Your administrator enables and configures enterprise AI capabilities."
   }
 }
 ```
@@ -75,7 +75,7 @@
 ```json
 "defaults": {
   "server_url": "https://harness.example.com",
-  "telemetry_channel": "example-a",
+  "telemetry_channel": "<channel-id>",
   "locale": "zh"
 }
 ```

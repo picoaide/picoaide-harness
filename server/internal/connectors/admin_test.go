@@ -120,17 +120,17 @@ func TestConnectorAdminLifecycle(t *testing.T) {
 	}
 
 	// 禁用开关端点。
-	w, _ = doJSON(t, r, "PUT", "/api/server/admin/connectors/example-a/enabled", `{"enabled":false}`, hdr)
+	w, _ = doJSON(t, r, "PUT", "/api/server/admin/connectors/example-mcp/enabled", `{"enabled":false}`, hdr)
 	if w.Code != http.StatusOK {
-		t.Fatalf("disable example-a = %d", w.Code)
+		t.Fatalf("disable example-mcp = %d", w.Code)
 	}
-	if err := serverstore.SetConnectorEnabled(db, "example-a", false); err != nil {
+	if err := serverstore.SetConnectorEnabled(db, "example-mcp", false); err != nil {
 		t.Fatal(err)
 	}
 	enabled, _ := serverstore.ListEnabledConnectors(db)
 	for _, c := range enabled {
-		if c.ID == "example-a" {
-			t.Fatalf("example-a still in enabled list")
+		if c.ID == "example-mcp" {
+			t.Fatalf("example-mcp still in enabled list")
 		}
 	}
 

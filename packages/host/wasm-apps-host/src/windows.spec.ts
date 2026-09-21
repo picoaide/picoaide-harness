@@ -236,7 +236,7 @@ describe('navigation gate and legacy ledger (R2-P0-2 / R1-CLI-14)', () => {
     expect(classifyAppWindowNavigation('javascript:alert(1)', 'my-notes', 'picoaide-app')).toEqual({ verdict: 'deny', reason: 'external' })
     expect(classifyAppWindowNavigation('not a url', 'my-notes', 'picoaide-app')).toEqual({ verdict: 'deny', reason: 'malformed' })
     // 渠道 scheme：别的渠道的 origin 也不认。
-    expect(classifyAppWindowNavigation('picoaide-app://my-notes/', 'my-notes', 'example-b-harness-app')).toEqual({ verdict: 'deny', reason: 'external' })
+    expect(classifyAppWindowNavigation('picoaide-app://my-notes/', 'my-notes', 'example-harness-app')).toEqual({ verdict: 'deny', reason: 'external' })
   })
 
   it('drops browser-ledger entries that point at the app scheme (and counts them)', () => {

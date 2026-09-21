@@ -3,7 +3,7 @@
  * `dsh-mcp-client`. The check that proves it resolves the SDK twice — once from
  * this module, once from mcp-client's entry — and compares the answers.
  *
- * That check was wrong on Windows, in the field (2026-07-13 Example-A
+ * That check was wrong on Windows, in the field (2026-07-13, a customer-channel
  * `streamable-http` connector, client 2.7.2-beta.8):
  *
  *   … 传输不可加固: McpTransportFenceUnavailableError: MCP streamable-http
