@@ -1,0 +1,15 @@
+diff --git a/lib/client.js b/lib/client.js
+index 7f0950f9623815e0bdd8d36c084bd9f108a17061..dba1ecc665088cc263f0fce49a6fba960dc1a52a 100644
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -3856,7 +3856,9 @@ document.open();document.write(html);document.close();
+ 			apply$4(ctx);
+ 			apply$3(ctx);
+ 			apply$2(ctx);
+-			apply$1(ctx, config.office);
++			/* PicoAide: the desktop host ships no LibreOffice engine, so the Office
++			   renderer stays unregistered. Binary documents then fall back to the built-in
++			   unsupported empty state instead of a converter that can only fail. */
+ 		}
+ 		//#endregion
+ 		exports.apply = apply;
