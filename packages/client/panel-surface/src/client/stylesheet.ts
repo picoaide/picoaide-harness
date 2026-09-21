@@ -1,7 +1,7 @@
 /**
  * 面板表面的样式表（每个面板各注入一份，id 嵌在选择器里）。
  *
- * ## 两条硬规则（都是踩过的坑）
+ * ## 三条硬规则（都是踩过的坑）
  *
  * 1. **容器默认隐藏必须写在样式表里，不能写行内 `style="display:none"`**：
  *    行内样式的优先级高于任何非 `!important` 的样式表规则，写了行内就再也显示不出来
@@ -9,6 +9,10 @@
  * 2. **会话区让位要逐个列出真实存在的中列容器**，且必须带 `!important` —— 上游中列
  *    自己带 `display:contents` 之类的行内样式，不加 `!important` 压不住。这里的选择器
  *    与 `CONVERSATION_COLUMN_SELECTOR` 是**成对的**，改一个必须改另一个。
+ * 3. **高度必须逐层有界**：容器 `height:100%` → 面板根（各插件自己的 div）→
+ *    `PanelPage` → `.pico-scroll`。中间任何一层是 auto，正文滚动区就变成内容高度，
+ *    面板"翻不动页"（2026-09-21 能力中心的真实 bug，实测内容 2714px / 容器 813px）。
+ *    因为面板根由插件提供，这条只能由共享样式表用 `> *` 兜住，见下方规则。
  *
  * ## 颜色与几何的分工
  *
@@ -40,8 +44,21 @@ const YIELD_SELECTORS = CONVERSATION_COLUMN_SELECTOR
 
 const SHARED_CSS = `
 /* ---- 面板表面容器与激活态 ---- */
-[${PANEL_SURFACE_ATTR}] { display: none; height: 100%; width: 100%; min-width: 0; }
+/* position:relative + overflow:hidden：容器是"一页"，超出部分一律由面板自己的
+   滚动区消化 —— 不许溢出到侧边栏/窗口外（溢出时内容会被祖先裁掉却滚不动）。 */
+[${PANEL_SURFACE_ATTR}] { display: none; position: relative; overflow: hidden; height: 100%; width: 100%; min-width: 0; }
 ${YIELD_SELECTORS} { display: none !important; }
+
+/* 面板根包装层必须把高度**透传**下去（2026-09-21 真机实测的能力中心"翻不动页"根因）。
+   面板根是各插件自己的 div（.pico-capability / .pico-connectors / …），默认 height:auto；
+   而 PanelPage 是 height:100% 的 flex 列 —— 百分比高度在"包含块高度 auto"时按 auto
+   解析，于是正文滚动区（.pico-scroll，flex:1 + min-height:0）拿到的是**内容高度**，
+   永远不产生溢出、也就永远没有滚动条；内容一路向下长，被容器 overflow:hidden 裁掉，
+   用户看到的就是"翻不到下面"。
+   （实测数据：内容 2714px / 容器 813px / .pico-scroll clientHeight = scrollHeight = 2652px。）
+   写在共享样式表里 = 四个面板与任何第三方面板都自动获得有界高度，不必各自记得加。
+   注意：这个模板字符串里不能出现反引号（会提前结束字符串，tsdown 直接 PARSE_ERROR）。 */
+html[${PANEL_ACTIVE_ATTR}] [${PANEL_SURFACE_ATTR}] > * { height: 100%; min-height: 0; }
 
 /* ---- 滚动条（默认的粗灰条在整页面板里很扎眼） ---- */
 .pico-scroll { scrollbar-width: thin; scrollbar-color: var(--dsw-alias-border-l3) transparent; }
@@ -190,8 +207,12 @@ ${YIELD_SELECTORS} { display: none !important; }
 .pico-clamp-2 { -webkit-line-clamp: 2; }
 .pico-clamp-3 { -webkit-line-clamp: 3; }
 
-/* ---- 进场面板的轻微上浮（尊重"减少动态效果"） ---- */
-@keyframes pico-surface-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+/* ---- 进场面板的轻微淡入（尊重"减少动态效果"） ---- */
+/* **只动 opacity，不动 transform**：运行中的 transform 会让面板容器成为内部 fixed
+   定位后代（JobEditor 的遮罩、能力中心详情弹层）的包含块，而容器又是 overflow:hidden
+   —— 动画那 180ms 里内层遮罩会被裁成"只铺满面板区域"再跳成全窗。opacity 不产生包含块。
+   （再次提醒：本模板字符串里不能出现反引号，会提前结束字符串，构建直接 PARSE_ERROR。） */
+@keyframes pico-surface-in { from { opacity: 0; } to { opacity: 1; } }
 html[${PANEL_ACTIVE_ATTR}] [${PANEL_SURFACE_ATTR}] { animation: pico-surface-in .18s ease-out; }
 @media (prefers-reduced-motion: reduce) {
   html[${PANEL_ACTIVE_ATTR}] [${PANEL_SURFACE_ATTR}] { animation: none; }

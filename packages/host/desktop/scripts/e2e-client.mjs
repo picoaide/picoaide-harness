@@ -75,6 +75,27 @@ for (const base of ['/tmp', './temp']) {
   }
 }
 if (workDir === '') throw new Error('cannot create a writable e2e work directory')
+
+// Seed a few cron jobs into the **local Host ledger**（`$DSH_HOME/cron/ledger.json`）。
+// 定时任务不属于 mock 网关的目录数据：不种这颗种子，定时任务面板永远是空态，卡片底部的
+// 动作行布局就没有任何判据覆盖 —— 2026-09-21「删除被挤出卡片」正是这样漏过 E2E 的。
+{
+  const now = Date.now()
+  const jobs = Array.from({ length: 5 }, (_, index) => ({
+    id: `e2e-job-${String(index + 1)}`,
+    name: index === 2 ? 'E2E 长名字任务 —— 用来撑满卡片标题行' : `E2E 任务 ${String(index + 1)}`,
+    cron: index === 1 ? '0 0 1 1 *' : '*/10 * * * *',
+    action: { kind: 'agent', prompt: 'e2e cron seed' },
+    enabled: false,
+    executions: [],
+    createdAt: now,
+    updatedAt: now,
+  }))
+  mkdirSync(join(HOME_DIR, 'cron'), { recursive: true })
+  writeFileSync(join(HOME_DIR, 'cron', 'ledger.json'), JSON.stringify({
+    schemaVersion: 2, revision: 1, jobs, scheduler: { timeZone: 'Asia/Shanghai' },
+  }))
+}
 console.log(`[e2e] workDir=${workDir} home=${HOME_DIR} port=${cdpPort}`)
 
 const DISPLAY = process.env.DISPLAY ?? ':99'
@@ -490,6 +511,29 @@ async function main() {
       return others.every(el => getComputedStyle(el).display === 'none' || el.getBoundingClientRect().height === 0)
     })()`, 15000, 300)
     reportStep(`${item.label}面板占满中列（会话区已让位）`, tookOver, `panel=${item.id}`)
+    // 正文必须**真的能滚**（2026-09-21 用户报「能力中心不能往下翻页」）：根因是面板根
+    // 包装层没有高度 ⇒ `PanelPage` 的 height:100% 退化成 auto ⇒ `.pico-scroll` 拿到的是
+    // **内容高度**，永远不溢出、永远没有滚动条，内容被容器裁掉。
+    // 判据必须是"注入超高内容后能滚"：只查 `.pico-scroll` 存在、只在 jsdom 里钉样式表
+    // 字符串，都是假绿（前者在故障态下同样成立，后者量不到排版）。
+    const scrollable = await evalSafe(cdp, `(() => {
+      const view = document.querySelector('[data-dsh-panel-surface=' + JSON.stringify(${JSON.stringify(item.id)}) + ']')
+      const scroller = view === null ? null : view.querySelector('.pico-scroll')
+      if (view === null || scroller === null) return null
+      const inner = scroller.firstElementChild
+      const prev = inner === null ? null : inner.style.minHeight
+      if (inner !== null) inner.style.minHeight = '2600px'
+      const bounded = scroller.scrollHeight > scroller.clientHeight + 4
+      scroller.scrollTop = 400
+      const moved = scroller.scrollTop
+      const clipped = (view.firstElementChild?.getBoundingClientRect().height ?? 0) > view.getBoundingClientRect().height + 4
+      if (inner !== null) inner.style.minHeight = prev ?? ''
+      scroller.scrollTop = 0
+      return { bounded, moved, clipped, clientH: scroller.clientHeight, scrollH: scroller.scrollHeight }
+    })()`)
+    reportStep(`${item.label}面板正文可滚动（内容超出时能翻到底）`,
+      scrollable !== null && scrollable.bounded === true && scrollable.moved > 0 && scrollable.clipped !== true,
+      `clientH=${scrollable?.clientH} scrollH=${scrollable?.scrollH} scrollTop=${scrollable?.moved} clipped=${scrollable?.clipped}`)
     const text = await bodyText(cdp)
     reportStep(`${item.label}面板含预期内容`, text.includes(item.marker), `marker=${item.marker}`)
     await screenshot(cdp, item.shot)
@@ -562,6 +606,32 @@ async function main() {
   reportStep('定时任务中心面板占满中列（会话区已让位）', cronLayout,
     `cronH=${cronDetail?.view} surfaceH=${cronDetail?.surface}`)
   await screenshot(cdp, '06-cron')
+
+  // 卡片底部动作行（立即执行/编辑任务/执行详情/删除）必须留在卡片内：面板网格最小列宽
+  // 只有 268px，而这一行是 4 个 nowrap 按钮 —— 不放行折行时"删除"会被挤出卡片右侧
+  // （2026-09-21 用户截图）。判据量每个按钮与所属卡片的边界，**不是**量"有没有按钮"。
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 900, height: 560, deviceScaleFactor: 1, mobile: false })
+  await wait(500)
+  const cardFoot = await evalSafe(cdp, `(() => {
+    const view = document.querySelector('[data-dsh-panel-surface="cron"]')
+    if (view === null) return null
+    const buttons = [...view.querySelectorAll('button')].filter(b => ['立即执行', '编辑任务', '执行详情', '删除'].some(t => (b.textContent || '').includes(t)))
+    if (buttons.length === 0) return { buttons: 0 }
+    const outside = []
+    for (const button of buttons) {
+      const card = button.parentElement === null ? null : button.parentElement.parentElement
+      if (card === null) continue
+      const cr = card.getBoundingClientRect(); const br = button.getBoundingClientRect()
+      if (br.right > cr.right + 1 || br.left < cr.left - 1) outside.push((button.textContent || '').trim().slice(0, 6))
+    }
+    const scroller = view.querySelector('.pico-scroll')
+    return { buttons: buttons.length, outside, hOverflow: scroller === null ? false : scroller.scrollWidth > scroller.clientWidth + 2 }
+  })()`)
+  await cdp.send('Emulation.clearDeviceMetricsOverride')
+  await wait(300)
+  reportStep('定时任务卡片动作行不溢出卡片（900px 窄窗）',
+    cardFoot !== null && cardFoot.buttons > 0 && (cardFoot.outside?.length ?? 1) === 0 && cardFoot.hOverflow !== true,
+    `buttons=${cardFoot?.buttons} outside=${JSON.stringify(cardFoot?.outside)} hOverflow=${String(cardFoot?.hOverflow)}`)
   // Leave the cron board: its "返回聊天" header button removes the activation attr.
   await evalSafe(cdp, `(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.textContent||'').includes('返回聊天') && x.offsetParent); if (b) b.click(); return !!b })()`).catch(() => {})
   await wait(1200)

@@ -169,7 +169,10 @@ describe('cron client surfaces', () => {
     // 注册形态随之从 key 变成 id/order/label（owner 契约新增 view:'summary'|'page'）。
     expect(card).toMatchObject({ name: 'plugins.item', id: 'cron', order: 40, locale: 'cron' })
     expect(typeof card?.label?.()).toBe('string')
-    expect(Object.keys(card?.inject?.() ?? {}).sort()).toEqual(['getSnapshot', 'set', 'subscribe'])
+    // 2026-09-21：注入面新增 `getError` —— 开关保存失败时 Scope.set 会回滚并重读宿主状态，
+    // 原来控制器把 promise `void` 掉，界面静默弹回旧值、还留一条未处理的 rejection。
+    // 现在失败原因经这条出口回到卡片里显示。
+    expect(Object.keys(card?.inject?.() ?? {}).sort()).toEqual(['getError', 'getSnapshot', 'set', 'subscribe'])
   })
 
   it('registers the right-Sidebar tab with the official id, kind, and seat key', () => {

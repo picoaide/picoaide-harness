@@ -60,7 +60,22 @@ describe('中列整页装载器', () => {
     // 行内 display:none 会压过"显示"规则 ⇒ 面板永远出不来（真实踩过的 bug）。
     expect((container as HTMLElement).style.display).toBe('')
     const style = document.querySelector('style[data-dsh-panel-style="cron"]')
-    expect(style?.textContent).toContain(`[${PANEL_SURFACE_ATTR}] { display: none;`)
+    expect(style?.textContent).toMatch(new RegExp(`\\[${PANEL_SURFACE_ATTR}\\] \\{[^}]*display: none`))
+  })
+
+  /**
+   * 高度链的**规则**判据（2026-09-21「能力中心不能往下翻页」）。
+   *
+   * jsdom 没有排版引擎，量不出"能不能滚"——这里只能钉住"共享样式表必须下发这条
+   * 规则"（防删除/防改选择器）。**真能力判据在 `scripts/e2e-client.mjs`**：真机注入
+   * 超高内容后断言 `.pico-scroll` 真的溢出且 `scrollTop` 生效（改回 auto 链即红）。
+   */
+  it('共享样式表把容器高度透传给面板根包装层（滚动区有界的前提）', () => {
+    mount('capability', '能力中心')
+    const css = document.querySelector('style[data-dsh-panel-style="capability"]')?.textContent ?? ''
+    expect(css).toContain(`html[${PANEL_ACTIVE_ATTR}] [${PANEL_SURFACE_ATTR}] > * { height: 100%; min-height: 0; }`)
+    // 容器自己是"一页"：溢出必须被裁（否则内容会压到侧边栏上，且滚不动）。
+    expect(css).toMatch(new RegExp(`\\[${PANEL_SURFACE_ATTR}\\] \\{[^}]*overflow: hidden`))
   })
 
   it('激活写唯一激活态属性并渲染内容；关闭把它摘掉并卸载内容', async () => {
@@ -83,6 +98,29 @@ describe('中列整页装载器', () => {
     expect(activePanelId(document)).toBe('apps')
     // 互斥不是"两边都以为自己开着"：A 的内容同样被卸载。
     expect(document.querySelector('[data-testid="body-capability"]')).toBeNull()
+  })
+
+  /**
+   * 切换面板 = 旧面板的"关闭"，可见性回调必须走同一条出口（2026-09-21 真机审计）。
+   *
+   * `activate()` 曾经先写 `<html>` 激活属性、再派发激活事件，旧面板的 `close()` 因为
+   * "当前激活的不是我"直接提前返回 ⇒ 不渲染 null（只是被 CSS 隐藏）、**不派发
+   * `onVisibilityChange(false)`**。内容被卸载只是 MutationObserver 顺带救回来的，
+   * 而可见性回调没有任何东西救——凡是靠它停轮询/停定时器的面板，切走后会一直跑。
+   */
+  it('切换到另一个面板时，旧面板的可见性回调必须触发 false', async () => {
+    const seen: boolean[] = []
+    const a = mountPanelSurface({
+      id: 'capability',
+      render: () => <div data-testid="body-capability" />,
+      onVisibilityChange: value => { seen.push(value) },
+    })
+    handles.push(a)
+    const b = mount('apps', '应用中心')
+    await act(async () => { a.activate() })
+    await act(async () => { b.activate() })
+    expect(activePanelId(document)).toBe('apps')
+    expect(seen).toEqual([true, false])
   })
 
   it('点侧边栏的行 ⇒ 自动让位（会话/项目/新建会话都算）', async () => {

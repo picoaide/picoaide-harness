@@ -1135,6 +1135,50 @@ describe('R1-pm-1：作者自服务（下架/上架、删除、诊断）', () =>
     expect(failure!.querySelector('[data-role="error-hints"]')!.textContent).toContain('稍后重试')
   })
 
+  /**
+   * 确认块是模态（`role=alertdialog aria-modal=true`）：装载器看到内层模态会让位，
+   * 所以 Esc 必须由确认块自己接住 —— 而且只收起确认块，不关整个面板。
+   * 收起后焦点要回到触发它的按钮（此前直接掉到 body）。
+   * 变异验证：去掉确认块的 window Esc 监听 ⇒ 本用例红（Esc 之后确认块还在）。
+   */
+  it('确认块的 Esc：只收起确认块、不关面板、发 0 个请求，焦点回到触发按钮', async () => {
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, OWNED_CATALOG)
+      throw new Error(`unexpected url: ${url}`)
+    })
+    await mount()
+    const closesBefore = closeCount
+
+    await clickIn('值班表', '.pico-app-center-take-offline')
+    const trigger = cardOf('值班表').querySelector<HTMLButtonElement>('.pico-app-center-take-offline')!
+    expect(cardOf('值班表').querySelector('[data-role="confirm-take-offline"]')).not.toBeNull()
+    // 确认块声明成模态（装载器据此让出 Esc）。
+    expect(cardOf('值班表').querySelector('[data-role="confirm-take-offline"]')!.getAttribute('aria-modal')).toBe('true')
+
+    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+
+    expect(cardOf('值班表').querySelector('[data-role="confirm-take-offline"]')).toBeNull()
+    expect(closeCount).toBe(closesBefore)
+    expect(document.activeElement).toBe(trigger)
+    expect(lifecycleCalls('/unpublish')).toHaveLength(0)
+  })
+
+  /**
+   * Esc 的唯一权威是面板装载器（`@picoaide/dsh-panel-surface`）。面板自己再注册一份
+   * document 级 Esc 会把"搜索框里按 Esc 清空输入""发布表单填一半按 Esc"都变成关面板。
+   * 变异验证：把那段 `document.addEventListener('keydown', ...)` 加回来 ⇒ 本用例红。
+   */
+  it('面板自身不再监听 Esc：Esc 不会从面板内部关掉它（交给装载器）', async () => {
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, OWNED_CATALOG)
+      throw new Error(`unexpected url: ${url}`)
+    })
+    await mount()
+    const closesBefore = closeCount
+    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    expect(closeCount).toBe(closesBefore)
+  })
+
   it('诊断：只读展示服务端的最近失败（reason_code）与 hints，不改行状态', async () => {
     stubFetch((url) => {
       if (url === '/api/pico/apps/wasm') return jsonResponse(200, OWNED_CATALOG)

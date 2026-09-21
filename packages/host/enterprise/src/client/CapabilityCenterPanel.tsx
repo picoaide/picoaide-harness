@@ -355,6 +355,9 @@ const DIALOG_BOX: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   width: 'min(640px, 100%)',
+  // `box-sizing: border-box`：没有它时 `max-height` 只约束内容盒，弹层实际能长到
+  // 78vh + 上下 padding 36px（2026-09-21 审计）。滚动链本身是有界的，这条只是把上限收紧。
+  boxSizing: 'border-box',
   maxHeight: 'min(78vh, 720px)',
   borderRadius: 18,
   padding: '18px 20px',
@@ -383,18 +386,54 @@ export function CapabilityDetailDialog({ target, busy, onInstallVersion, onClose
   onClose: () => void
 }): JSX.Element {
   const boxRef = useRef<HTMLDivElement | null>(null)
+  /**
+   * `onClose` 是父组件里的内联箭头函数 ⇒ 每次父渲染都是新引用。把它固定进 ref，
+   * 下面两个 effect 才能是**只挂载一次**的：否则每 30s 轮询/每次 busy 翻转都会重跑
+   * （重跑会做两件坏事：把焦点从用户正在操作的版本按钮上抢回弹层、卸载时把焦点还原到
+   * 已经被替换掉的"上一个活动元素"即弹层自己）。
+   */
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+  const previousFocusRef = useRef<HTMLElement | null>(null)
+  useEffect(() => {
+    // 记下"打开弹层的那个元素"，并在卸载时把焦点还回去。
+    const previous = document.activeElement
+    previousFocusRef.current = previous instanceof HTMLElement ? previous : null
+    boxRef.current?.focus()
+    return () => {
+      const target = previousFocusRef.current
+      if (target !== null && target.isConnected) target.focus()
+    }
+  }, [])
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      // 不让这次 Esc 冒到面板装载器（那里会"返回聊天"）。
-      event.stopPropagation()
-      onClose()
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        // 不让这次 Esc 冒到面板装载器（那里会"返回聊天"）。
+        event.stopPropagation()
+        onCloseRef.current()
+        return
+      }
+      // Tab 环（2026-09-21 审计）：弹层声明了 `aria-modal=true`，但遮罩后面的侧边栏/
+      // 面板控件仍然可聚焦 —— Tab 会把焦点带到看不见的地方，回车能激活看不见的按钮。
+      if (event.key !== 'Tab') return
+      const box = boxRef.current
+      if (box === null) return
+      const focusables = [...box.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+      if (focusables.length === 0) return
+      const first = focusables[0]!
+      const last = focusables[focusables.length - 1]!
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
     }
     window.addEventListener('keydown', onKey)
-    boxRef.current?.focus()
     return () => { window.removeEventListener('keydown', onKey) }
-  }, [onClose])
+  }, [])
 
   const skill = target.kind === 'builtin' ? target.card.skill : undefined
   const item = target.kind === 'item' ? target.item : undefined
@@ -505,7 +544,25 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
    */
   const [detail, setDetail] = useState<DetailTarget | null>(null)
   const loadSeqRef = useRef(0)
-  const panelRef = useRef<HTMLDivElement | null>(null)
+  /**
+   * 站内是否有动作在飞（安装/卸载/上传）。
+   *
+   * `install()` / `uninstall()` / `upload()` 的第一行都是"有动作在飞就 return"，但按钮此前
+   * 只按**自己这张卡**的 key 置灰 ⇒ 慢安装期间其它卡片的按钮外观仍是可点的启用态，
+   * 点下去被静默吞掉（用户以为按钮坏了，2026-09-21 审计）。现在其它卡片一起置灰。
+   */
+  const inFlight = action !== null && (action.kind === 'installing' || action.kind === 'uninstalling' || action.kind === 'uploading')
+  /**
+   * 动作结果条 / 覆盖确认条在**滚动区顶部**，列表滚到下方时看不见它们。
+   * 任何一条出现或内容变化就把它滚进视口，否则用户点完按钮"界面零变化"。
+   */
+  const noticeRef = useRef<HTMLDivElement | null>(null)
+  const noticeKey = action === null ? '' : `${action.kind}|${action.key}|${action.error ?? ''}`
+  useEffect(() => {
+    if (noticeRef.current === null) return
+    if (noticeKey === '' && installConfirmKey === null) return
+    noticeRef.current.scrollIntoView({ block: 'nearest' })
+  }, [noticeKey, installConfirmKey])
 
   const setSection = (key: string, state: Partial<SectionState>): void => {
     setSections(prev => ({ ...prev, [key]: { status: prev[key]?.status ?? 'idle', error: prev[key]?.error ?? '', ...state } }))
@@ -551,29 +608,21 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Esc close + initial focus + Tab focus trap（取旧 Agent 面板的更完善实现）。
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') { onClose(); return }
-      if (e.key !== 'Tab' || panelRef.current === null) return
-      const focusables = panelRef.current.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      )
-      if (focusables.length === 0) return
-      const first = focusables[0]!
-      const last = focusables[focusables.length - 1]!
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault()
-        last.focus()
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault()
-        first.focus()
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    panelRef.current?.focus()
-    return () => { window.removeEventListener('keydown', onKey) }
-  }, [onClose])
+  // Esc / 初始焦点 / 焦点陷阱**都不在这里做**（2026-09-21 删除）。
+  //
+  // 这里原来有一段 window 级 keydown：`Escape ⇒ onClose()` + 一个 Tab 焦点陷阱。
+  // 真机实测它有两个问题：
+  //   ① 详情弹层打开时按 Esc：弹层自己也在 window 上注册了 Esc（并且 stopPropagation），
+  //      但**同一个 target 上的监听器不会被 stopPropagation 拦住**（那要
+  //      stopImmediatePropagation），而面板这段注册更早 ⇒ 先执行 onClose()，
+  //      结果是"关弹层"变成"整页被踢回会话区"。
+  //   ② 焦点陷阱的 `panelRef` 从未挂到任何元素上（全文件只有声明与读取），
+  //      所以陷阱与 `panelRef.current?.focus()` 都是死代码；而整页面板的键盘语义本来
+  //      就不该把 Tab 圈死（侧边栏是同一个可键盘到达的面板出口）。
+  //
+  // 现在的唯一权威是装载器 `@picoaide/dsh-panel-surface`：它在 document 上处理 Esc
+  // （检测到 `[role=dialog][aria-modal=true]` 时让给内层模态），并在激活时把焦点移到
+  // 面板容器上。弹层自己负责它那一层的 Esc（见 CapabilityDetailDialog）。
 
   // 30s 静默轮询:市场(合并)审批状态/质量变化后台刷新。
   useEffect(() => {
@@ -811,12 +860,12 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
               <span style={{ ...META, flex: 1, color: 'var(--dsw-alias-state-error-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={card.failure}>
                 {card.failure}
               </span>
-              <PanelButton variant="primary" size="md" onClick={() => { void builtin.install(skill) }}>
+              <PanelButton variant="primary" size="md" disabled={inFlight} onClick={() => { void builtin.install(skill) }}>
                 {t('capability.builtinRetry')}
               </PanelButton>
             </>
           ) : (
-            <PanelButton variant="primary" size="md" block onClick={() => { void builtin.install(skill) }}>{label}</PanelButton>
+            <PanelButton variant="primary" size="md" block disabled={inFlight} onClick={() => { void builtin.install(skill) }}>{label}</PanelButton>
           )}
         </div>
       </Card>
@@ -826,6 +875,10 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   const renderCard = (item: CapabilityItem): React.ReactNode => {
     const key = `${item.kind}:${item.name}`
     const busy = action?.key === key && (action.kind === 'installing' || action.kind === 'uninstalling' || action.kind === 'uploading')
+    // 别的卡片正在装/卸/上传时，本卡片的按钮必须**置灰**：`install()`/`uninstall()`/`upload()`
+    // 第一行是 `action 在飞就 return`，此前按钮外观仍是可点的启用态 ⇒ 慢安装期间其它卡片
+    // 表现为"死按钮"（点了没反应、也没有任何提示，2026-09-21 审计）。
+    const blocked = busy || inFlight
     const title = item.displayName || item.name
     const isLocal = item.source === 'local'
     const needUpdate = hasUpdateFor(item)
@@ -857,29 +910,29 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         <div style={CARD_FOOT}>
           {isLocal ? (
             item.uploadStatus === 'rejected'
-              ? <PanelButton variant="secondary" size="md" block disabled={busy} onClick={() => { void upload(item) }}>{t('capability.reupload')}</PanelButton>
+              ? <PanelButton variant="secondary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.reupload')}</PanelButton>
               : item.uploadStatus === 'pending'
                 ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="warn">{t('capability.awaitingReview')}</Chip></span>
                 : item.uploadStatus === 'approved'
                   ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="success">{t('capability.approved')}</Chip></span>
-                  : <PanelButton variant="primary" size="md" block disabled={busy} onClick={() => { void upload(item) }}>{t('capability.upload')}</PanelButton>
+                  : <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.upload')}</PanelButton>
           ) : item.installed ? (
             needUpdate ? (
-              <PanelButton variant="primary" size="md" block disabled={busy || item.official} title={item.official ? t('capability.officialLocked') : undefined} onClick={() => { void install(item, { force: true }) }}>
+              <PanelButton variant="primary" size="md" block disabled={blocked || item.official} title={item.official ? t('capability.officialLocked') : undefined} onClick={() => { void install(item, { force: true }) }}>
                 {t('capability.updateTo', { version: item.versions[item.versions.length - 1] ?? item.version })}
               </PanelButton>
             ) : uninstallConfirmKey === key ? (
               <div style={{ display: 'flex', gap: 8, width: '100%' }}>
-                <PanelButton variant="danger" size="md" style={{ flex: 1 }} disabled={busy} onClick={() => { void uninstall(item) }}>
+                <PanelButton variant="danger" size="md" style={{ flex: 1 }} disabled={blocked} onClick={() => { void uninstall(item) }}>
                   {busy && action?.kind === 'uninstalling' ? t('capability.uninstalling') : t('capability.confirmUninstall')}
                 </PanelButton>
                 <PanelButton variant="secondary" size="md" style={{ flex: 1 }} disabled={busy} onClick={() => { setUninstallConfirmKey(null) }}>{t('capability.cancel')}</PanelButton>
               </div>
             ) : (
-              <PanelButton variant="secondary" size="md" block disabled={busy} onClick={() => { void uninstall(item) }}>{t('capability.uninstall')}</PanelButton>
+              <PanelButton variant="secondary" size="md" block disabled={blocked} onClick={() => { void uninstall(item) }}>{t('capability.uninstall')}</PanelButton>
             )
           ) : (
-            <PanelButton variant="primary" size="md" block disabled={busy} onClick={() => { void install(item) }}>{t('capability.install')}</PanelButton>
+            <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void install(item) }}>{t('capability.install')}</PanelButton>
           )}
         </div>
         {/* 历史版本、描述全文都收在详情弹层里（就地展开会把整行栅格撑高）。 */}
@@ -1008,6 +1061,8 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
           </div>
         )}
       >
+        {/* 结果条/确认条挂在滚动区顶部，出现时滚进视口（见 noticeRef 的注释）。 */}
+        <div ref={noticeRef}>
         {installConfirmKey !== null && (
           <Card style={{ padding: '10px 14px', borderRadius: 12, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <icons.IconAlert size={15} style={{ color: 'var(--dsw-alias-state-warn-label)' }} />
@@ -1033,6 +1088,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
                   : t('capability.failed', { error: action.error ?? '' })}
           </Card>
         )}
+        </div>
         <div style={PANEL_GRID} data-role="capability-grid">{content}</div>
       </PanelPage>
       {detail !== null && (

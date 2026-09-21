@@ -57,7 +57,7 @@ import {
   type CatalogFilter,
 } from './catalog-filter.ts'
 import { dismissOnboarding, isOnboardingDismissed, type OnboardingStore } from './onboarding.ts'
-import { clearOpenIntent, readOpenIntent, saveOpenIntent, type OpenIntentStore } from './open-intent.ts'
+import { OPEN_INTENT_TTL_MS, clearOpenIntent, readOpenIntent, saveOpenIntent, type OpenIntentStore } from './open-intent.ts'
 import { t, tCount, type AppCenterKey } from './locales.ts'
 
 /**
@@ -693,7 +693,10 @@ export function AppCenterPanel({
   // 打开动作的反馈（§5.2 的 `window` 字段：新开 / 聚焦；没下发就什么都不说）。
   const [openFeedback, setOpenFeedback] = useState<Record<string, OpenWindowOutcome>>({})
   // 「未登录时记住这次打开」（§19 Q4）：登录完成后自动继续，不再要求用户点一次。
-  const [pendingOpen, setPendingOpen] = useState<{ appId: string } | null>(null)
+  /** 待继续的打开：`at` 是意图记录时刻，轮询按 `OPEN_INTENT_TTL_MS` 判过期（与宿主同口径）。 */
+  const [pendingOpen, setPendingOpen] = useState<{ appId: string; at: number } | null>(null)
+  /** 自动继续打开失败的原因（此前完全静默：提示消失、窗不开、什么都不说）。 */
+  const [pendingOpenFailure, setPendingOpenFailure] = useState<PublishFailure | null>(null)
 
   const load = useCallback(async (): Promise<void> => {
     setState({ kind: 'loading' })
@@ -796,12 +799,14 @@ export function AppCenterPanel({
     return () => { cancelled = true }
   }, [identityLoader])
 
-  // Esc 关闭：模态的可预期出口（与能力中心一致的口径）。
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') onClose() }
-    document.addEventListener('keydown', onKey)
-    return () => { document.removeEventListener('keydown', onKey) }
-  }, [onClose])
+  // Esc 由装载器统一处理（`@picoaide/dsh-panel-surface`：面板自身是激活态时关闭，
+  // 检测到内层模态时让位）。这里**不要**再注册一份：2026-09-21 真机审计发现这份
+  // 重复的 document 级监听会把内层场景一起关掉 ——
+  //   ① 在 `type="search"` 搜索框里按 Esc（浏览器本来会清空输入）会连面板一起关；
+  //   ② 发布表单填了一半/正在上传时按 Esc，表单与已选文件直接丢失（上传被卸载 effect
+  //      abort），没有二次确认；
+  //   ③ 下架/删除确认块打开时按 Esc 关的是整个面板，而不是取消确认。
+  // 需要"Esc 只回上一层"的地方（详情/发布表单）应由那一层自己接管。
 
   /**
    * 复制分享深链（F6 / §19 Q6）。
@@ -848,7 +853,13 @@ export function AppCenterPanel({
     clearOpenIntent(intentStore === undefined ? {} : { store: intentStore })
     setPendingOpen(null)
     const result = await openAppEntry(appId)
-    if (!result.ok) return
+    if (!result.ok) {
+      // 静默是缺陷（2026-09-21 审计）：登录后自动继续若失败（应用已删/被冻结/协议未就绪），
+      // 用户只会看到"提示没了、窗也没开"。复用既有的错误块信封如实渲染。
+      setPendingOpenFailure(openFailureEnvelope(result))
+      return
+    }
+    setPendingOpenFailure(null)
     if (result.window !== undefined) setOpenFeedback(previous => ({ ...previous, [appId]: result.window! }))
     if (result.counts !== undefined) {
       const counts = result.counts
@@ -868,8 +879,8 @@ export function AppCenterPanel({
     void loadLoginState().then((loggedIn) => {
       if (cancelled) return
       if (loggedIn) { void continuePendingOpen(intent.appId); return }
-      setPendingOpen({ appId: intent.appId })
-    }).catch(() => { if (!cancelled) setPendingOpen({ appId: intent.appId }) })
+      setPendingOpen({ appId: intent.appId, at: intent.at })
+    }).catch(() => { if (!cancelled) setPendingOpen({ appId: intent.appId, at: intent.at }) })
     return () => { cancelled = true }
     // 只在挂载时跑一次：意图的后续变化由 pendingOpen 的轮询与打开动作驱动。
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -879,15 +890,24 @@ export function AppCenterPanel({
   useEffect(() => {
     if (pendingOpen === null) return
     const appId = pendingOpen.appId
+    const at = pendingOpen.at
     let cancelled = false
     const timer = setInterval(() => {
+      // TTL 与宿主同口径（5 分钟，`open-intent.ts`）：挂载时判过一次，但"用户 6 分钟后才
+      // 登录"这条路径此前没有任何时间判据 ⇒ 提示常驻、每 5s 永久轮询，还会在过期后突然
+      // 开窗。过期即清意图并停止轮询。
+      if ((now ?? Date.now)() - at > OPEN_INTENT_TTL_MS) {
+        clearOpenIntent(intentStore === undefined ? {} : { store: intentStore })
+        setPendingOpen(null)
+        return
+      }
       void loadLoginState().then((loggedIn) => {
         if (cancelled || !loggedIn) return
         void continuePendingOpen(appId)
       }).catch(() => { /* 下一次轮询再试 */ })
     }, loginPollMs ?? LOGIN_POLL_MS)
     return () => { cancelled = true; clearInterval(timer) }
-  }, [pendingOpen, loadLoginState, continuePendingOpen, loginPollMs])
+  }, [pendingOpen, loadLoginState, continuePendingOpen, loginPollMs, intentStore, now])
 
   /**
    * 上架 / 下架：**用服务端返回的 `enabled` 更新行**（不是请求里的值）。
@@ -965,6 +985,9 @@ export function AppCenterPanel({
             }
           : {})}
       >
+        {view === 'catalog' && pendingOpenFailure !== null && (
+          <PublishErrorBlock failure={pendingOpenFailure} title={t('appCenter.actionFailed')} role="lifecycle-error" />
+        )}
         {view === 'publish' && (
           <PublishForm
             {...(publishTarget === undefined ? {} : { target: publishTarget })}
@@ -1027,7 +1050,7 @@ export function AppCenterPanel({
                 // 未登录（§19 Q4/Q6）：宿主负责弹登录，客户端负责"登录后自动继续"。
                 if (failure.reason !== 'not-signed-in') return
                 saveOpenIntent(item.appId, intentStore === undefined ? {} : { store: intentStore, ...(now === undefined ? {} : { now: now() }) })
-                setPendingOpen({ appId: item.appId })
+                setPendingOpen({ appId: item.appId, at: (now ?? Date.now)() })
               }}
               onOpenResult={(item, counts, outcome) => {
                 // F16：打开端点在同一次调用里回传今日计数 ⇒ 记下来给详情页渲染
@@ -1070,7 +1093,7 @@ export function AppCenterPanel({
     // 未登录：**记住这次打开**（§19 Q4/Q6）——宿主负责弹登录，客户端负责"登录后自动继续"。
     if (result.reason === 'not-signed-in') {
       saveOpenIntent(item.appId, intentStore === undefined ? {} : { store: intentStore, ...(now === undefined ? {} : { now: now() }) })
-      setPendingOpen({ appId: item.appId })
+      setPendingOpen({ appId: item.appId, at: (now ?? Date.now)() })
     }
     return openFailureEnvelope(result)
   }
@@ -1619,6 +1642,31 @@ export function AppCenterRow({
     if (confirm !== 'none') confirmRef.current?.focus()
   }, [confirm])
 
+  /**
+   * 确认块的键盘出口（2026-09-21 审计）。
+   *
+   * 确认块会声明成 `role="alertdialog" aria-modal="true"`，而面板装载器的 Esc 在检测到
+   * 内层模态时会让位 —— 所以这里必须自己接住 Esc 取消，否则键盘用户失去唯一的取消途径。
+   * 收起（取消/确认完成/失败后关闭）时把焦点还给触发它的按钮：此前焦点直接掉到 body，
+   * 用户得从文档头重新 Tab 回来。
+   */
+  const confirmTriggerRef = useRef<HTMLElement | null>(null)
+  const previousConfirm = useRef(confirm)
+  useEffect(() => {
+    if (confirm !== 'none') {
+      const onKey = (event: KeyboardEvent): void => {
+        if (event.key !== 'Escape') return
+        event.preventDefault()
+        setConfirm('none')
+      }
+      window.addEventListener('keydown', onKey)
+      return () => window.removeEventListener('keydown', onKey)
+    }
+    if (previousConfirm.current !== 'none') confirmTriggerRef.current?.focus()
+    return undefined
+  }, [confirm])
+  useEffect(() => { previousConfirm.current = confirm }, [confirm])
+
   // 可打开 = 应用已上架。判据里**没有 URL 了**（2026-09-19）：应用只在客户端内以
   // `<本安装的 app scheme>://<app_id>/` 打开，入口链接这个字段已经从两侧契约里删除 —— 打开
   // 能力不再取决于"服务端有没有下发一个链接"，而是取决于本机路由能不能把它打开
@@ -1671,12 +1719,21 @@ export function AppCenterRow({
     setConfirm('none')
   }
 
-  /** 诊断开关（`aria-expanded` 与面板同步；失败也留在原地显示信封）。 */
+  /**
+   * 诊断开关（`aria-expanded` 与面板同步；失败也留在原地显示信封）。
+   *
+   * 迟到响应必须丢弃（2026-09-21 审计）：先点开再点收起时，先发的那次请求仍在飞，
+   * 落地后会把已收起的块重新 `ready` —— 用户看到"面板自己又冒出来了"。
+   * 用每资源一个序号，只有最后一次请求的结论可以落地（同 `DataBrowserPanel` 的口径）。
+   */
+  const diagnosticsSeq = useRef(0)
   const toggleDiagnostics = async (): Promise<void> => {
-    if (diagnostics.kind !== 'closed') { setDiagnostics({ kind: 'closed' }); return }
+    if (diagnostics.kind !== 'closed') { diagnosticsSeq.current += 1; setDiagnostics({ kind: 'closed' }); return }
     if (onDiagnostics === undefined) return
+    const seq = ++diagnosticsSeq.current
     setDiagnostics({ kind: 'loading' })
     const result = await onDiagnostics(item)
+    if (seq !== diagnosticsSeq.current) return
     setDiagnostics(result.ok ? { kind: 'ready', report: result } : { kind: 'failed', failure: result })
   }
 
@@ -1686,11 +1743,14 @@ export function AppCenterRow({
    * 每次打开都**重新取一次**（与诊断同口径）：审核结论是别的会话（管理员）改的，
    * 缓存一份"我上次看到的结论"会让作者在一个已经通过的版本上继续等。
    */
+  const releasesSeq = useRef(0)
   const toggleReleases = async (): Promise<void> => {
-    if (releases.kind !== 'closed') { setReleases({ kind: 'closed' }); return }
+    if (releases.kind !== 'closed') { releasesSeq.current += 1; setReleases({ kind: 'closed' }); return }
     if (onReleases === undefined) return
+    const seq = ++releasesSeq.current
     setReleases({ kind: 'loading' })
     const result = await onReleases(item)
+    if (seq !== releasesSeq.current) return
     setReleases(result.ok ? { kind: 'ready', report: result } : { kind: 'failed', failure: result })
   }
 
@@ -1806,7 +1866,7 @@ export function AppCenterRow({
                     data-action="take-offline"
                     disabled={busy !== null}
                     aria-label={`${t('appCenter.takeOfflineAria')} ${item.title}`}
-                    onClick={() => { setActionFailure(null); setConfirm('offline') }}
+                    onClick={(event) => { confirmTriggerRef.current = event.currentTarget; setActionFailure(null); setConfirm('offline') }}
                   >
                     {t('appCenter.takeOffline')}
                   </PanelButton>
@@ -1863,7 +1923,7 @@ export function AppCenterRow({
               data-action="delete"
               disabled={busy !== null}
               aria-label={`${t('appCenter.deleteAria')} ${item.title}`}
-              onClick={() => { setActionFailure(null); setConfirm('delete') }}
+              onClick={(event) => { confirmTriggerRef.current = event.currentTarget; setActionFailure(null); setConfirm('delete') }}
             >
               {t('appCenter.deleteApp')}
             </PanelButton>
@@ -1910,7 +1970,7 @@ export function AppCenterRow({
         )}
       </div>
       {confirm === 'offline' && (
-        <div style={CONFIRM} data-role="confirm-take-offline" role="group" aria-label={t('appCenter.takeOfflineConfirm')}>
+        <div style={CONFIRM} data-role="confirm-take-offline" role="alertdialog" aria-modal="true" aria-label={t('appCenter.takeOfflineConfirm')}>
           <div data-role="confirm-message">{t('appCenter.takeOfflineConfirm')}</div>
           <div style={CONFIRM_ROW}>
             <PanelButton
@@ -1939,7 +1999,7 @@ export function AppCenterRow({
       )}
 
       {confirm === 'delete' && (
-        <div style={CONFIRM} data-role="confirm-delete" role="group" aria-label={t('appCenter.deleteConfirm')}>
+        <div style={CONFIRM} data-role="confirm-delete" role="alertdialog" aria-modal="true" aria-label={t('appCenter.deleteConfirm')}>
           <div data-role="confirm-message">{t('appCenter.deleteConfirm')}</div>
           <div style={CONFIRM_ROW}>
             <PanelButton

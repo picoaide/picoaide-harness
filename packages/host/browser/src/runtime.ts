@@ -71,6 +71,20 @@ const EVAL_SUMMARY_LIMIT = 60 + 'eval: '.length
 const PAGE_STATE_SUMMARY_LIMIT = 120 + 'after-change: '.length
 const SCREENSHOT_FALLBACK_SUMMARY_LIMIT = 120 + 'capturePage unavailable (); captured via CDP fromSurface:false'.length
 const SELECT_VALUE_SUMMARY_LIMIT = 80
+
+/**
+ * 胶囊态「提示可见」时临时放大的 overlay 矩形（2026-09-21 壳层缺陷 #7）。
+ *
+ * 胶囊视图只有 172×34，而 overlay 页的失败 toast 是 `position: fixed` 的**页面级**
+ * 提示 —— 它只能在视图矩形内渲染，超出部分被原生视图裁掉：胶囊态下失败文案只剩
+ * 顶部一条、还压在胶囊上（把 2026-09-15「失败必须可见」的修复抵消掉）。
+ * 放大矩形与胶囊共用**右下角锚点**（右/下各留 16px），胶囊本体由页面 CSS 锚在视图
+ * 底部，所以视觉上胶囊一动不动，只是它上方多出一块能放 toast 的区域。
+ */
+const CAPSULE_NOTICE_WIDTH = 300
+const CAPSULE_NOTICE_HEIGHT = 116
+/** 提示矩形的最长存活时间：页面没回报「收起」时的兜底（页面重载/崩溃）。 */
+const CAPSULE_NOTICE_MAX_MS = 6_000
 /**
  * Cap on the page-derived element name in the `browser_press` summary
  * (2026-09-17 审计 S02-04）。
@@ -292,8 +306,15 @@ export interface BrowserShellState extends BrowserControlState {  tabs: BrowserT
   ui: { mode: OverlayMode | 'mask' }
 }
 
-/** State-change events emitted by the runtime (SSE stream). */
-export type BrowserStreamEvent = 'state' | 'tab' | 'tab-meta' | 'busy' | 'takeover' | 'release' | 'ops'
+/** State-change events emitted by the runtime (SSE stream).
+ *
+ * `focus-addr` (2026-09-21, shell defect #4) is a one-shot **command** rather than a
+ * state-change signal: the toolbar shell page moves the caret into `#addr` when it
+ * arrives. It exists because Ctrl+L is consumed by the overlay page (that is where
+ * the keyboard focus lives while the mask/floating surfaces are up) — returning the
+ * native focus to the shell document is not enough, its `activeElement` stays
+ * `body`, so the user had to press Ctrl+L a second time. */
+export type BrowserStreamEvent = 'state' | 'tab' | 'tab-meta' | 'busy' | 'takeover' | 'release' | 'ops' | 'focus-addr'
 
 /**
  * `waitForLoad` 需要的最小 webContents 面。
@@ -389,6 +410,9 @@ export class BrowserRuntime {
   /** User-chosen overlay mode (capsule/panel/menu/viewer); the effective mode
    * is forced to 'mask' while the AI drives (busy && !controlled). */
   private overlayMode: OverlayMode = 'capsule'
+  /** 胶囊态是否需要一块放得下失败 toast 的矩形（见 {@link setOverlayNotice}）。 */
+  private overlayNotice = false
+  private overlayNoticeTimer: ReturnType<typeof setTimeout> | null = null
   /** Ledger tabs registered but not yet materialized into views (lazy
    * restore: the browser window must not pop up at app boot). */
   private pendingLedgerTabs: Array<{ tabId: number; url: string; title: string }> = []
@@ -582,9 +606,9 @@ export class BrowserRuntime {
     if (owner === 'user') {
       const wc = asSurfaceWebContents(surface.webContents)
       try { wc?.stop?.() } catch { /* teardown never throws */ }
-      this.record('browser_takeover', 0, `user took over ${surfaceLabel(surface)}`, false, actor)
+      this.record('browser_takeover', 0, hostCopy(this.locale(), `用户接管了 ${surfaceLabel(surface)}`, `user took over ${surfaceLabel(surface)}`), false, actor)
     } else {
-      this.record('browser_release', 0, `user released ${surfaceLabel(surface)}`, false, actor)
+      this.record('browser_release', 0, hostCopy(this.locale(), `用户交还了 ${surfaceLabel(surface)}`, `user released ${surfaceLabel(surface)}`), false, actor)
     }
     this.emitAll('state')
     return true
@@ -981,7 +1005,11 @@ export class BrowserRuntime {
         const target = typeof args[1] === 'string' ? args[1] : ''
         if (!this.isForbiddenLocalTarget(target)) return
         event?.preventDefault?.()
-        this.record('navigate', id, `navigation denied (local target, ${stripSensitiveUrl(target).slice(0, 120)})`, true)
+        this.record('navigate', id, hostCopy(
+          this.locale(),
+          `导航被拒（本机目标，${stripSensitiveUrl(target).slice(0, 120)}）`,
+          `navigation denied (local target, ${stripSensitiveUrl(target).slice(0, 120)})`,
+        ), true)
       }
       view.webContents.on('will-navigate', refuseLocalNavigation)
       view.webContents.on('will-redirect', refuseLocalNavigation)
@@ -997,7 +1025,11 @@ export class BrowserRuntime {
         const target = typeof details?.url === 'string' ? details.url : ''
         if (!this.isForbiddenLocalTarget(target)) return
         details?.preventDefault?.()
-        this.record('navigate', id, `frame navigation denied (local target, ${stripSensitiveUrl(target).slice(0, 120)})`, true)
+        this.record('navigate', id, hostCopy(
+          this.locale(),
+          `子框架导航被拒（本机目标，${stripSensitiveUrl(target).slice(0, 120)}）`,
+          `frame navigation denied (local target, ${stripSensitiveUrl(target).slice(0, 120)})`,
+        ), true)
       }
       view.webContents.on('will-frame-navigate', refuseLocalFrameNavigation)
 
@@ -1149,7 +1181,12 @@ export class BrowserRuntime {
       case 'viewer':
         return { x: 0, y: BROWSER_SHELL_TOOLBAR_HEIGHT, width: w, height: Math.max(0, h - BROWSER_SHELL_TOOLBAR_HEIGHT) }
       case 'panel':
-        return { x: Math.max(0, w - 340), y: 0, width: 340, height: h }
+        // 2026-09-21（壳层缺陷 #3）：面板从**工具条下沿**开始，不是从 y=0。
+        // 面板宽 340 且贴右缘 ⇒ 旧 bounds 正好盖住工具栏右侧的 ＋（新建标签）与
+        // ⋮（更多）两个按钮：面板一开，用户既开不了新标签也进不了菜单，只能先关
+        // 面板。工具条高度是常量（BROWSER_SHELL_TOOLBAR_HEIGHT = 30 标签条 + 36
+        // 地址栏），与 viewer/menu 用的是同一个值。
+        return { x: Math.max(0, w - 340), y: BROWSER_SHELL_TOOLBAR_HEIGHT, width: 340, height: Math.max(0, h - BROWSER_SHELL_TOOLBAR_HEIGHT) }
       case 'menu':
         // 6 items + separator: keep the rect short so the empty lower area
         // does not dead-block page clicks below the menu.
@@ -1158,8 +1195,46 @@ export class BrowserRuntime {
       default:
         // Compact capsule: right-aligned inside its own view, 16px from the
         // window edges; kept narrow so it blocks as little page as possible.
+        // 2026-09-21（壳层缺陷 #7）：有失败提示要显示时临时放大到能放下 toast 的
+        // 矩形 —— 同一个右下角锚点（右/下各 16px），胶囊本体由页面 CSS 锚在视图
+        // 底部，因此视觉位置不变，只是上方多出一块 toast 区域。
+        if (this.overlayNotice) {
+          return {
+            x: Math.max(0, w - 16 - CAPSULE_NOTICE_WIDTH),
+            y: Math.max(0, h - 16 - CAPSULE_NOTICE_HEIGHT),
+            width: CAPSULE_NOTICE_WIDTH,
+            height: CAPSULE_NOTICE_HEIGHT,
+          }
+        }
         return { x: Math.max(0, w - 188), y: Math.max(0, h - 50), width: 172, height: 34 }
     }
+  }
+
+  /**
+   * 胶囊态「现在有一条失败提示要显示」（2026-09-21 壳层缺陷 #7）。
+   *
+   * 页面在弹 toast 时请求放大、toast 收起时归还；`applyOverlay()` 是唯一的落点
+   * （不新增任何改视图层序的路径，2026-09-17 的不变式不动）。归还点有三个，任一
+   * 生效即可：页面回报 false、模式/控制权变化、以及兜底超时（页面重载或崩溃时没人
+   * 回报）。
+   */
+  setOverlayNotice(visible: boolean): void {
+    if (this.overlayNotice === visible) return
+    this.overlayNotice = visible
+    this.clearOverlayNoticeTimer()
+    if (visible) {
+      this.overlayNoticeTimer = setTimeout(() => {
+        this.overlayNoticeTimer = null
+        this.setOverlayNotice(false)
+      }, CAPSULE_NOTICE_MAX_MS)
+    }
+    this.applyOverlay()
+  }
+
+  private clearOverlayNoticeTimer(): void {
+    if (this.overlayNoticeTimer === null) return
+    clearTimeout(this.overlayNoticeTimer)
+    this.overlayNoticeTimer = null
   }
 
   /**
@@ -1209,6 +1284,8 @@ export class BrowserRuntime {
    * the user controls the window). */
   setOverlayMode(mode: OverlayMode): void {
     if (mode !== 'capsule' && mode !== 'panel' && mode !== 'menu' && mode !== 'viewer') return
+    // 浮层切换 ⇒ 上一次提示的上下文已经结束，提示矩形立刻归还（缺陷 #7）。
+    this.setOverlayNotice(false)
     this.overlayMode = mode
     this.applyOverlay()
     this.emitAll('state')
@@ -1217,6 +1294,15 @@ export class BrowserRuntime {
     // 2026-09-17：同样只在这个窗口真的在前台时做（否则等于把窗口拽回前台）。
     if (mode === 'capsule' && this.window !== null && this.windowAttended(this.window)) {
       this.window.focusPage()
+      // 2026-09-21（壳层缺陷 #4）：Ctrl+L 是在**蒙版页**里被消费掉的 —— 那一刻键盘
+      // 焦点在 overlay 视图上（applyOverlay 上锁时把焦点交给它），所以 shell 页的
+      // Ctrl+L 分支根本收不到这次按键。宿主这里只把**原生**焦点还给 shell 文档
+      // （focusPage），它的 activeElement 仍然是 body ⇒ 地址栏没拿到光标，用户得再
+      // 按一次 Ctrl+L（第二次才落到 shell 页自己的 keydown 上）。
+      // 补一条 focus-addr 信号让 shell 页把光标真正放进 #addr。只在控制权在用户手里
+      // 时发：蒙版状态下地址栏本来就不可用（Esc 关浮层也会走到这里），而且
+      // windowAttended 闸门保持 2026-09-17 的规则（后台/最小化窗口什么都别做）。
+      if (this.pool.controlled) this.emitAll('focus-addr')
     }
   }
 
@@ -1238,6 +1324,9 @@ export class BrowserRuntime {
   private mountOverlay(win: NativeBrowserWindow, origin: string | undefined): void {
     const overlay = this.adapter.createMaskView()
     this.overlay = overlay
+    // 新挂载的页面还没有任何 toast ⇒ 提示矩形必须是紧凑态（缺陷 #7；同时兜住
+    // "上一个页面被重建、永远不会回报 false"这条路径）。
+    this.setOverlayNotice(false)
     overlay.attach(win, this.overlayBounds('capsule'))
     if (origin !== undefined) {
       void overlay.webContents.loadURL(`${origin}/browser-overlay`).catch((cause: unknown) => {
@@ -1336,6 +1425,8 @@ export class BrowserRuntime {
     try {
       const origin = this.shellOrigin
       if (origin === undefined) return
+      // 页面重载后没有人会回报「toast 收起」⇒ 提示矩形必须在这里归还（缺陷 #7）。
+      this.setOverlayNotice(false)
       const win = this.window
       if (win !== null && !win.isDestroyed()) {
         void win.loadURL(`${origin}/browser-shell`).catch(() => {
@@ -1903,7 +1994,7 @@ export class BrowserRuntime {
       await this.waitForLoad(wc, waitUntil)(Math.min(budget, Math.max(0, this.options.loadTimeoutMs)))
     }
     this.updateTabState(tab)
-    this.record('browser_navigate', id, `navigate: ${url}`, false, actor, NAVIGATE_SUMMARY_LIMIT)
+    this.record('browser_navigate', id, hostCopy(this.locale(), `打开网页：${url}`, `navigate: ${url}`), false, actor, NAVIGATE_SUMMARY_LIMIT)
     // R-5 (2026-09-13): the persisted history is a model-facing exit
     // (`browser_history_search`, the shell's history panel, `<dir>/history.jsonl`),
     // so it gets BOTH layers: the store's key-level rule and this tab's value set
@@ -2037,7 +2128,11 @@ export class BrowserRuntime {
       }
       // op log 用 tab 0（与 browser_takeover 同口径）：应用窗口不是浏览器标签，
       // 塞一个 surface id 进 tab 字段会让"按标签看时间线"的界面指向不存在的标签。
-      this.record('browser_navigate', 0, `${label} navigate: ${stripSensitiveUrl(url)}`, false, 'ai', NAVIGATE_SUMMARY_LIMIT)
+      this.record('browser_navigate', 0, hostCopy(
+        this.locale(),
+        `${label} 打开网页：${stripSensitiveUrl(url)}`,
+        `${label} navigate: ${stripSensitiveUrl(url)}`,
+      ), false, 'ai', NAVIGATE_SUMMARY_LIMIT)
       return this.appSurfaceState(wc, url)
     }, signal)
   }
@@ -2123,7 +2218,7 @@ export class BrowserRuntime {
       this.relayout()
       const switched = this.tabs.get(tabId)
       if (switched !== undefined) this.refreshWindowTitle(switched)
-      this.record('browser_switch_tab', tabId, `switch to tab ${tabId}`, false, user ? 'user' : 'ai')
+      this.record('browser_switch_tab', tabId, hostCopy(this.locale(), `切换标签页：${tabId}`, `switch to tab ${tabId}`), false, user ? 'user' : 'ai')
     }
     if (user) return await body()
     return await this.agentRun('browser_switch_tab', body, signal)
@@ -3476,15 +3571,20 @@ export class BrowserRuntime {
    * are not recorded (the gate is idempotent). */
   setUserControl(active: boolean, actor: RecordActor = 'user'): void {
     const was = this.pool.controlled
+    // 控制权一换，胶囊/蒙版的可见性就变了 ⇒ 提示矩形归还（缺陷 #7）。
+    this.setOverlayNotice(false)
     this.pool.setUserControl(active)
     if (was === this.pool.controlled) return
     if (active) {
       this.stopPendingLoads()
-      this.record('browser_takeover', 0, 'user took over the browser', false, actor)
+      // 活动面板是用户界面：控制权移交必须按**调用时**的语言出（`hostCopy` 每次
+      // 求值，绝不在模块级冻结 —— 见 dsh-host-locale 的头注释与 2026-09-21 壳层
+      // 缺陷 #5）。
+      this.record('browser_takeover', 0, hostCopy(this.locale(), '用户接管了浏览器', 'user took over the browser'), false, actor)
     } else {
       // 交还控制权 = 等待结束：清掉"AI 被挡住"的提示状态（2026-09-16）。
       this.gateBlock = null
-      this.record('browser_release', 0, 'user released browser control', false, actor)
+      this.record('browser_release', 0, hostCopy(this.locale(), '用户交还了浏览器控制权', 'user released browser control'), false, actor)
     }
   }
 
@@ -3719,6 +3819,9 @@ export class BrowserRuntime {
     this.disposed = true
     this.materializeEpoch++
     this.pendingLedgerTabs = []
+    // 兜底超时不许比 runtime 活得久（测试进程会因此挂着一个 pending timer）。
+    this.overlayNotice = false
+    this.clearOverlayNoticeTimer()
     for (const id of [...this.tabs.keys()]) {
       // Releasing the per-tab disposers (permission guard + ref-counted
       // download guard) matters: a dropped ref-count keeps the download

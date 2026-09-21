@@ -4,7 +4,7 @@
  * permission picker, and the prompt text sent to the spawned agent session.
  * The only action kind is `agent`.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { IWorkspaces } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import { isValidCron, nextRunAtMs } from '../cron.ts'
@@ -96,12 +96,21 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
     return () => { alive = false }
   }, [api])
 
-  const cronValid = isValidCron(cron)
-  const nextRun = cronValid ? nextRunAtMs(cron, Date.now()) : undefined
+  // 与**宿主同口径**(protocol.ts 的 validCron)：语法合法 **且** 扫描窗口内存在可达的
+  // 下一次触发。只判语法会把 `0 0 30 2 *` 这类日历上不可能的组合放过去 —— 保存后宿主
+  // 返 400、弹窗已经关掉，用户只在列表顶部看到一句 "cron action failed: 400"
+  // [2026-09-21 审计]。
+  const cronParsed = isValidCron(cron)
+  const nextRun = cronParsed ? nextRunAtMs(cron, Date.now()) : undefined
+  const cronValid = cronParsed && nextRun !== undefined
 
   const save = (): void => {
-    if (!cronValid) {
+    if (!cronParsed) {
       setError(t('job.cronInvalid'))
+      return
+    }
+    if (nextRun === undefined) {
+      setError(t('job.cronNoMatch'))
       return
     }
     if (name.trim() === '') {
@@ -151,24 +160,63 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
     }
   }, [onClose])
 
+  // `onClose` 是父组件里的内联箭头函数 ⇒ 每次父渲染都是新引用。固定进 ref，让下面两个
+  // effect 都是**只挂载一次**的：否则控制器快照每次变化都会重跑，把焦点从用户正在填的
+  // 字段(例如提示词)抢回第一个输入框。
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onClose()
+      if (event.key === 'Escape') onCloseRef.current()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [])
+
+  // 初始焦点 + Tab 环：遮罩是视觉上的模态，键盘也必须真的是模态 ——
+  // 否则 Tab 会穿到遮罩背后的面板按钮："新建/启用/立即执行/删除"都能被 Tab 到并回车触发。
+  const boxRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    boxRef.current?.querySelector<HTMLElement>('input, select, textarea')?.focus()
+  }, [])
+  useEffect(() => {
+    const onTab = (event: KeyboardEvent): void => {
+      if (event.key !== 'Tab') return
+      const box = boxRef.current
+      if (box === null) return
+      const focusables = [...box.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href]',
+      )]
+      if (focusables.length === 0) return
+      const first = focusables[0]!
+      const last = focusables[focusables.length - 1]!
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    window.addEventListener('keydown', onTab)
+    return () => window.removeEventListener('keydown', onTab)
+  }, [])
 
   return (
     <div style={styles.overlay} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <div style={styles.editor} role="dialog" aria-label={t('job.new')}>
+      {/*
+        `aria-modal` 不只是无障碍标注：面板装载器就是按 `[role=dialog][aria-modal=true]`
+        判断"把 Esc 让给内层模态"的。少了它，在编辑器里按 Esc 想取消编辑，整页面板也一起
+        关闭、被踢回会话区 [2026-09-21 审计]。
+      */}
+      <div ref={boxRef} style={styles.editor} role="dialog" aria-modal="true" aria-label={job === undefined ? t('job.new') : t('job.editTitle')}>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.name')}</span>
-          <input style={styles.input} value={name} onChange={(event) => { setName(event.target.value) }} />
+          <label style={styles.label} htmlFor="cron-job-name">{t('job.name')}</label>
+          <input id="cron-job-name" style={styles.input} value={name} onChange={(event) => { setName(event.target.value) }} />
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.cron')}</span>
-          <input style={styles.input} value={cron} onChange={(event) => { setCron(event.target.value) }} spellCheck={false} />
+          <label style={styles.label} htmlFor="cron-job-expr">{t('job.cron')}</label>
+          <input id="cron-job-expr" style={styles.input} value={cron} onChange={(event) => { setCron(event.target.value) }} spellCheck={false} />
           <div style={styles.presets}>
             {PRESETS.map(preset => (
               <button
@@ -190,8 +238,9 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
           )}
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.workspace')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>{t('job.parenthesized', { text: t('job.actionNotEditable') })}</span>}</span>
+          <label style={styles.label} htmlFor="cron-job-workspace">{t('job.workspace')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>{t('job.parenthesized', { text: t('job.actionNotEditable') })}</span>}</label>
           <select
+            id="cron-job-workspace"
             style={styles.input}
             value={workspaceId}
             disabled={job !== undefined}
@@ -204,8 +253,9 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
           </select>
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.agent')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>{t('job.parenthesized', { text: t('job.actionNotEditable') })}</span>}</span>
+          <label style={styles.label} htmlFor="cron-job-agent">{t('job.agent')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>{t('job.parenthesized', { text: t('job.actionNotEditable') })}</span>}</label>
           <select
+            id="cron-job-agent"
             style={styles.input}
             value={agentPreset}
             disabled={job !== undefined || agentOptions.length === 0}
@@ -220,8 +270,9 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
           </select>
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.permission')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>{t('job.parenthesized', { text: t('job.actionNotEditable') })}</span>}</span>
+          <label style={styles.label} htmlFor="cron-job-permission">{t('job.permission')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>{t('job.parenthesized', { text: t('job.actionNotEditable') })}</span>}</label>
           <select
+            id="cron-job-permission"
             style={styles.input}
             value={permission}
             disabled={job !== undefined}
@@ -234,8 +285,8 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
           </select>
         </div>
         <div style={styles.field}>
-          <span style={styles.label}>{t('job.promptText')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>{t('job.parenthesized', { text: t('job.actionNotEditable') })}</span>}</span>
-          <textarea style={styles.input} rows={4} value={prompt} disabled={job !== undefined} onChange={(event) => { setPrompt(event.target.value) }} />
+          <label style={styles.label} htmlFor="cron-job-prompt">{t('job.promptText')}{job !== undefined && <span style={{ color: 'var(--dsw-alias-label-caption)' }}>{t('job.parenthesized', { text: t('job.actionNotEditable') })}</span>}</label>
+          <textarea id="cron-job-prompt" style={styles.input} rows={4} value={prompt} disabled={job !== undefined} onChange={(event) => { setPrompt(event.target.value) }} />
         </div>
         {error !== undefined && <span style={styles.error}>{error}</span>}
         <div style={styles.editorActions}>

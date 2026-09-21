@@ -128,8 +128,13 @@ export function mountPanelSurface(options: PanelSurfaceOptions): PanelSurfaceHan
   function activate(): void {
     if (activePanelId(document) === id) return
     if (ensureContainer() === undefined) return
-    document.documentElement.setAttribute(PANEL_ACTIVE_ATTR, id)
+    // **先广播、再写激活态**（顺序是语义的一部分，2026-09-21 真机审计）：
+    // 旧面板的 `onOtherActivate → close()` 第一句是 `activePanelId(document) !== id 就返回`；
+    // 若先写属性，旧面板看到的已经是新 id ⇒ close() 提前返回，既不清属性、也不渲染 null、
+    // 更不派发 `onVisibilityChange(false)`（旧面板只是被 CSS 隐藏，可见性回调这一条出口
+    // 永久失效）。先广播时旧面板仍是激活态，close() 正常走完；随后自己写属性接管。
     document.dispatchEvent(new CustomEvent(PANEL_ACTIVATE_EVENT, { detail: id }))
+    document.documentElement.setAttribute(PANEL_ACTIVE_ATTR, id)
     sync()
     onVisibilityChange?.(true)
     container?.focus({ preventScroll: true })

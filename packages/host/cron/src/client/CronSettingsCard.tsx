@@ -30,9 +30,15 @@ export interface CronSettingsCardFace {
   getSnapshot(): CronSettingsSnapshot
   subscribe(listener: () => void): () => void
   set: (field: keyof CronSettings, value: boolean) => void
+  /** 最近一次保存失败的原因（成功后清空）；`undefined` = 没有失败。 */
+  getError(): string | undefined
 }
 
 export class CronSettingsCardController {
+  /** 自己的一份订阅者：保存失败也要能通知界面（scope 只在它自己的状态变化时通知）。 */
+  private readonly listeners = new Set<() => void>()
+  private error: string | undefined
+
   constructor(private readonly scope: SettingsScope<CronSettings>) {}
 
   getSnapshot(): CronSettingsSnapshot {
@@ -40,11 +46,32 @@ export class CronSettingsCardController {
   }
 
   subscribe(listener: () => void): () => void {
-    return this.scope.subscribe(listener)
+    const off = this.scope.subscribe(listener)
+    this.listeners.add(listener)
+    return () => {
+      off()
+      this.listeners.delete(listener)
+    }
+  }
+
+  getError(): string | undefined {
+    return this.error
   }
 
   set(field: keyof CronSettings, value: boolean): void {
-    void this.scope.set(field, value)
+    // 失败必须有人接住（2026-09-21 审计）：`SettingsScope.set` 在失败时会回滚并重读宿主
+    // 状态，原来 `void` 掉 promise ⇒ 开关静默弹回旧值、界面零解释，同时留下一条未处理的
+    // rejection（渲染进程控制台/错误上报里的噪声）。现在记下原因并通知界面。
+    void Promise.resolve(this.scope.set(field, value)).then(
+      () => { this.publishError(undefined) },
+      (cause: unknown) => { this.publishError(cause instanceof Error ? cause.message : String(cause)) },
+    )
+  }
+
+  private publishError(message: string | undefined): void {
+    if (this.error === message) return
+    this.error = message
+    for (const listener of this.listeners) listener()
   }
 
   inject(): CronSettingsCardFace {
@@ -52,60 +79,86 @@ export class CronSettingsCardController {
       getSnapshot: () => this.getSnapshot(),
       subscribe: listener => this.subscribe(listener),
       set: (field, value) => this.set(field, value),
+      getError: () => this.getError(),
     }
   }
 }
 
-function ToggleRow({ label, desc, checked, onChange }: {
+function ToggleRow({ id, label, desc, checked, disabled, onChange }: {
+  id: string
   label: string
   desc: string
   checked: boolean
+  disabled?: boolean | undefined
   onChange: (value: boolean) => void
 }): JSX.Element {
   return (
     <div style={styles.row}>
-      <div>
-        <div>{label}</div>
+      <div style={{ minWidth: 0 }}>
+        {/* 文案与控件必须真的关联：只把 <input> 包进空 <label> 时，读屏念的是"未命名复选框"。 */}
+        <label htmlFor={id}>{label}</label>
         <div style={styles.rowDesc}>{desc}</div>
       </div>
-      <label style={styles.switch}>
-        <input type="checkbox" checked={checked} onChange={(event) => { onChange(event.target.checked) }} />
+      <label style={{ ...styles.switch, ...(disabled === true ? { opacity: 0.5 } : {}) }}>
+        <input
+          id={id}
+          type="checkbox"
+          checked={checked}
+          disabled={disabled === true}
+          onChange={(event) => { onChange(event.target.checked) }}
+        />
       </label>
     </div>
   )
 }
 
 export function CronSettingsCard(props: PropsRuntime<'plugins.item'> & CronSettingsCardFace): JSX.Element {
-  const { getSnapshot, subscribe, set } = props
+  const { getSnapshot, subscribe, set, getError } = props
   const [snapshot, setSnapshot] = useState<CronSettingsSnapshot>(() => getSnapshot())
+  const [error, setError] = useState<string | undefined>(() => getError())
   useEffect(
-    () => subscribe(() => setSnapshot(getSnapshot())),
-    [getSnapshot, subscribe],
+    () => subscribe(() => {
+      setSnapshot(getSnapshot())
+      setError(getError())
+    }),
+    [getSnapshot, subscribe, getError],
   )
   // `summary` 是页面在标题下放的一行说明，不是表单的紧凑版 —— 页面自己画标题与
   // 面包屑，这里只回一行文字。
   if (props.view === 'summary') return <>{t('settings.summary')}</>
-  const value = snapshot.status === 'ready' ? snapshot.value ?? {} : {}
+  // 状态没到 `ready` 之前，`value` 是空对象 ⇒ 三个开关渲染的是**默认值**而不是落库值。
+  // 此时必须禁用：否则用户在这一窗口里拨动开关，写入的是"默认值语义"的结果（看起来
+  // 像没反应，或者正好写反）。
+  const ready = snapshot.status === 'ready'
+  const value = ready ? snapshot.value ?? {} : {}
   return (
     <div style={styles.card} data-dsh-plugin="cron">
+      {ready ? null : <div style={styles.rowDesc} role="status">{t('settings.loading')}</div>}
       <ToggleRow
+        id="cron-setting-enabled"
         label={t('settings.enabled')}
         desc={t('settings.enabledDesc')}
         checked={value.enabled ?? true}
+        disabled={!ready}
         onChange={(enabled) => { set('enabled', enabled) }}
       />
       <ToggleRow
+        id="cron-setting-announce"
         label={t('settings.announce')}
         desc={t('settings.announceDesc')}
         checked={value.announceToAgent ?? true}
+        disabled={!ready}
         onChange={(announceToAgent) => { set('announceToAgent', announceToAgent) }}
       />
       <ToggleRow
+        id="cron-setting-catch-up"
         label={t('settings.catchUp')}
         desc={t('settings.catchUpDesc')}
         checked={value.catchUpMissed ?? false}
+        disabled={!ready}
         onChange={(catchUpMissed) => { set('catchUpMissed', catchUpMissed) }}
       />
+      {error === undefined ? null : <div style={styles.error} role="alert">{t('settings.saveFailed', { error })}</div>}
     </div>
   )
 }

@@ -650,6 +650,14 @@ export function apply(ctx: Context, config: Config = {}): void {
           json(res, 200, { ok: true })
           return
         }
+        // 蒙版页在胶囊态弹失败 toast 时请求临时放大 overlay 视图（2026-09-21 缺陷 #7：
+        // 172×34 的视图装不下 position:fixed 的 toast，失败文案会被裁掉）。页面回报
+        // `visible:false` 即归还；模式/控制权变化与兜底超时也会归还。
+        case 'notice': {
+          runtime.setOverlayNotice(body.visible === true)
+          json(res, 200, { ok: true })
+          return
+        }
         case 'open': {
           const url = typeof body.url === 'string' ? body.url : undefined
           // Shell `+`: the USER's surface — bypasses the agent mutex.

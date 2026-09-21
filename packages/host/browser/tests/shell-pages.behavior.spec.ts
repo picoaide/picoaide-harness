@@ -91,6 +91,8 @@ interface PageHandle {
   $: (selector: string) => any
   /** 像真实点击一样派发（disabled 的按钮 `.click()` 在 jsdom 里不派发，见防连点用例）。 */
   fire: (el: any, type: string) => void
+  /** 派发一次真实按键（keydown，冒泡 + 可取消）；返回事件本身，便于断言 defaultPrevented。 */
+  key: (el: any, key: string, init?: Record<string, unknown>) => any
   /** 排空页面里的 microtask（fetch stub 都是已决 promise）。 */
   settle: () => Promise<void>
   /** 推进假计时器并排空 microtask。 */
@@ -183,6 +185,11 @@ function openPage(html: string, handler: Handler = () => undefined): PageHandle 
     },
     $: (selector: string) => dom.window.document.querySelector(selector.startsWith('#') || selector.includes(' ') ? selector : `#${selector}`),
     fire: (el: any, type: string) => { el.dispatchEvent(new dom.window.MouseEvent(type, { bubbles: true, cancelable: true })) },
+    key: (el: any, k: string, init: Record<string, unknown> = {}) => {
+      const ev = new dom.window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init })
+      el.dispatchEvent(ev)
+      return ev
+    },
     settle,
     tick: async (ms: number) => { vi.advanceTimersByTime(ms); await settle() },
   }
@@ -790,6 +797,342 @@ describe('浏览器本地页面：失败必须可见、状态必须真实（2026
     healthy = false
     await page.tick(5000)
     expect(page.doc.querySelectorAll('#tabs .tab')).toHaveLength(1)
+  })
+
+  /* ================================================================ *
+   * 2026-09-21 壳层 UI 缺陷（只读审计 6 条）—— 页面侧判据
+   * ================================================================ */
+
+  /* ---------------------------------------------------------------- *
+   * 缺陷 #1（P0）：蒙版下按空格/回车不得静默夺取控制权
+   * ---------------------------------------------------------------- */
+
+  describe('蒙版：只有真正聚焦的「我来操作」按钮能接管（缺陷 #1）', () => {
+    const takeovers = (page: PageHandle): number => page.calls.filter((c) => c.path === 'takeover').length
+
+    function openMasked(): PageHandle {
+      return openOverlay((call) => {
+        if (call.path === 'state') return { json: overlayState({ ui: { mode: 'mask' } }) }
+        if (call.path === 'ops') return { json: { ops: [] } }
+        if (call.path === 'takeover') return { json: { ok: true } }
+        return undefined
+      })
+    }
+
+    it('焦点不在 pill 上时，空格/回车既不接管也不吞按键', async () => {
+      const page = openMasked()
+      await page.settle()
+      expect(page.doc.activeElement).not.toBe(page.$('pill-take'))
+
+      for (const k of [' ', 'Enter']) {
+        const ev = page.key(page.doc.body, k)
+        await page.settle()
+        // 现场症状：AI 正在操作时用户按空格想翻页 → 不翻页、当前工具调用被
+        // `window-controlled` 中止、控制权静默转到用户手上。
+        expect(takeovers(page), `按 ${JSON.stringify(k)} 不该产生 takeover 请求`).toBe(0)
+        // 空格必须保持"页面默认行为"（翻页/滚动），不能被页面吞掉。
+        expect(ev.defaultPrevented, `${JSON.stringify(k)} 不该被 preventDefault`).toBe(false)
+      }
+    })
+
+    it('Tab 到 pill（真正聚焦）后空格/回车仍然能接管 —— 键盘可达性不退化', async () => {
+      const page = openMasked()
+      await page.settle()
+      const pill = page.$('pill-take')
+      // 蒙版显示时 .s-mask 是唯一可见 surface（其余 display:none ⇒ 不可聚焦），
+      // 所以 Tab 的第一站就是它；它必须是真按钮（原生 Enter/空格也能激活）。
+      expect(pill.tagName).toBe('BUTTON')
+      expect(pill.getAttribute('type')).toBe('button')
+      expect(pill.disabled).toBe(false)
+
+      pill.focus()
+      expect(page.doc.activeElement).toBe(pill)
+
+      const ev = page.key(pill, ' ')
+      await page.settle()
+      expect(ev.defaultPrevented).toBe(true) // 在按钮上时按键属于按钮，不能让页面滚动
+      expect(takeovers(page)).toBe(1)
+      expect(page.calls.find((c) => c.path === 'takeover')?.body?.active).toBe(true)
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * 缺陷 #2：空态文案必须指向真实可用的入口
+   * ---------------------------------------------------------------- */
+
+  it('shell：空态文案指向「我来操作」，不再指向被蒙版盖住的工具栏 ＋（缺陷 #2）', async () => {
+    const page = openShell((call) => {
+      if (call.path === 'state') return { json: shellState() }
+      return undefined
+    })
+    await page.settle()
+    expect(page.$('empty').hidden).toBe(false)
+    const msg = page.$('#empty .msg').textContent
+    // 未接管时蒙版铺满整窗且 scrim 是 inert（runtime 侧判据见
+    // shell-ui-defects.spec.ts），所以 ＋ 点了没反应 —— 文案指向它就是死路。
+    expect(msg).toContain('我来操作')
+    expect(msg).not.toContain('＋')
+    expect(msg).not.toContain('右上角')
+  })
+
+  /* ---------------------------------------------------------------- *
+   * 缺陷 #4：第一次 Ctrl+L 就把光标放进地址栏（页面侧：信号 + 按键路径）
+   * ---------------------------------------------------------------- */
+
+  describe('Ctrl+L / focus-addr（缺陷 #4）', () => {
+    it('shell：收到 focus-addr 信号后光标落在 #addr（且只在持控制权时）', async () => {
+      let controlled = true
+      const page = openShell((call) => {
+        if (call.path === 'state') return { json: shellState({ controlled, tabs: [{ id: 1, visible: true, url: 'https://a.example/', title: 'A' }] }) }
+        return undefined
+      })
+      await page.settle()
+      const addr = page.$('addr')
+      const focused = (): boolean => page.doc.activeElement === addr
+      expect(focused(), 'BODY 起手').toBe(false)
+
+      page.stream().emit('focus-addr')
+      expect(focused(), 'focus-addr 之后').toBe(true)
+      controlled = false
+      // 必须跨过 SSE_STALE_MS(4000)：刚收到过信号，1.5s 的那次 tick 不会触发兜底轮询。
+      await page.tick(5000)
+      expect(focused(), 'tick 之后仍在').toBe(true)
+      addr.blur()
+      page.stream().emit('focus-addr')
+      expect(focused(), '无人持控制权时不得聚焦').toBe(false)
+      expect(page.doc.activeElement.tagName).toBe('BODY')
+    })
+
+    it('overlay：Ctrl+L 走 overlay{mode:capsule}（宿主据此把键盘交回 shell 页）', async () => {
+      const page = openOverlay((call) => {
+        if (call.path === 'state') return { json: overlayState({ controlled: true }) }
+        if (call.path === 'ops') return { json: { ops: [] } }
+        return undefined
+      })
+      await page.settle()
+
+      // 键盘焦点此刻在 overlay 页上（宿主上锁时把焦点交给它），所以这次 Ctrl+L
+      // 由 overlay 消费：它只能请求回 capsule，真正的地址栏聚焦要靠宿主补发信号。
+      page.key(page.doc.body, 'l', { ctrlKey: true })
+      await page.settle()
+      const call = page.calls.find((c) => c.path === 'overlay')
+      expect(call?.body?.mode).toBe('capsule')
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * 缺陷 #5：中文界面里的标签与兜底
+   * ---------------------------------------------------------------- */
+
+  it('活动面板：宿主自记的 op id 显示为标签，未登记的工具回落成通用文案（缺陷 #5）', async () => {
+    const ops = [
+      { time: Date.now(), tool: 'browser_window_open', actor: 'ai', summary: 'window.open → new tab: https://a.example/', failed: false },
+      { time: Date.now() - 1, tool: 'navigate', actor: 'ai', summary: '导航被拒（本机目标，http://127.0.0.1:1/x）', failed: true },
+      { time: Date.now() - 2, tool: 'browser_download_open', actor: 'user', summary: 'open download: /tmp/x', failed: false },
+      { time: Date.now() - 3, tool: 'browser_not_yet_registered', actor: 'ai', summary: 'whatever', failed: false },
+    ]
+    const page = openOverlay((call) => {
+      if (call.path === 'state') return { json: overlayState() }
+      if (call.path === 'ops') return { json: { ops } }
+      return undefined
+    })
+    await page.settle()
+
+    const labels = [...page.doc.querySelectorAll('#stream .op .what span')].map((el: any) => el.textContent)
+    expect(labels).toEqual(['打开新标签页', '打开网页', '打开下载文件', '操作'])
+    // 兜底绝不显示裸 id：工具面会长，没人会记得回来补表。
+    for (const label of labels) expect(label).not.toMatch(/^browser_/u)
+  })
+
+  /* ---------------------------------------------------------------- *
+   * 缺陷 #6：标签条可键盘操作
+   * ---------------------------------------------------------------- */
+
+  describe('标签条可键盘操作（缺陷 #6）', () => {
+    const TABS = [
+      { id: 1, visible: true, url: 'https://a.example/', title: 'A' },
+      { id: 2, visible: false, url: 'https://b.example/', title: 'B' },
+    ]
+    function openTabs(): PageHandle {
+      return openShell((call) => {
+        if (call.path === 'state') return { json: shellState({ tabs: TABS }) }
+        return undefined
+      })
+    }
+    const switches = (page: PageHandle): Call[] => page.calls.filter((c) => c.path === 'switch-tab')
+
+    it('标签是 role=tab + aria-selected 的可聚焦控件，关闭键是真按钮', async () => {
+      const page = openTabs()
+      await page.settle()
+      expect(page.$('#tabs').getAttribute('role')).toBe('tablist')
+      expect(page.$('#tabs').getAttribute('aria-label')).toBe('标签页')
+
+      const tabs = [...page.doc.querySelectorAll('#tabs .tab')]
+      expect(tabs).toHaveLength(2)
+      expect(tabs[0].getAttribute('role')).toBe('tab')
+      expect(tabs[0].getAttribute('aria-selected')).toBe('true')
+      expect(tabs[1].getAttribute('role')).toBe('tab')
+      expect(tabs[1].getAttribute('aria-selected')).toBe('false')
+      // 可 Tab 到：tabindex 必须存在（div 默认不可聚焦）。
+      expect(tabs[0].tabIndex).toBe(0)
+      tabs[1].focus()
+      expect(page.doc.activeElement).toBe(tabs[1])
+
+      // 关闭键：真 <button>（原先是 opacity:0 的 span ⇒ 键盘完全到不了）。
+      const close = tabs[1].querySelector('.x')
+      expect(close.tagName).toBe('BUTTON')
+      expect(close.getAttribute('type')).toBe('button')
+      expect(close.tabIndex).toBe(0)
+      expect(close.disabled).toBe(false)
+    })
+
+    it('Enter/空格 切换非活动标签；已是活动标签则不发请求', async () => {
+      const page = openTabs()
+      await page.settle()
+      const tabs = [...page.doc.querySelectorAll('#tabs .tab')]
+
+      const ev = page.key(tabs[1], 'Enter')
+      await page.settle()
+      expect(ev.defaultPrevented).toBe(true)
+      expect(switches(page).map((c) => c.body)).toEqual([{ tab: 2 }])
+
+      // 活动标签再按一次：没有任何副作用（不重复 POST）。
+      page.key(tabs[0], ' ')
+      await page.settle()
+      expect(switches(page)).toHaveLength(1)
+    })
+
+    it('焦点在关闭键上时，Enter/空格 不会顺手把标签也切了', async () => {
+      const page = openTabs()
+      await page.settle()
+      const close = page.doc.querySelectorAll('#tabs .tab')[1].querySelector('.x')
+
+      // jsdom 不实现按钮的原生键盘激活（真机里 Enter/空格 会派发 click），所以这里
+      // 钉的是"关闭键自己处理、不冒泡成切换"这条分流；原生激活的副作用由下一条用例
+      // 用 click()（浏览器原生激活派发的就是它）覆盖。
+      close.focus()
+      page.key(close, 'Enter')
+      await page.settle()
+      expect(switches(page)).toHaveLength(0)
+
+      page.fire(close, 'click')
+      await page.settle()
+      expect(page.calls.filter((c) => c.path === 'close-tab').map((c) => c.body)).toEqual([{ tab: 2 }])
+      expect(switches(page)).toHaveLength(0)
+    })
+
+    it('刷新（SSE 事件 / 兜底轮询）不重建标签节点 —— 键盘焦点不被打断', async () => {
+      const page = openTabs()
+      await page.settle()
+      const before = page.doc.querySelectorAll('#tabs .tab')[1]
+      before.focus()
+      expect(page.doc.activeElement).toBe(before)
+
+      // 兜底轮询会触发 refresh()→render()；旧实现每次整表重建 ⇒ 焦点掉回 body。
+      await page.tick(5000)
+
+      const after = page.doc.querySelectorAll('#tabs .tab')[1]
+      expect(after).toBe(before)
+      expect(page.doc.activeElement).toBe(before)
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * 缺陷 #7：胶囊态（172×34）的失败 toast 必须真的看得见
+   * ---------------------------------------------------------------- */
+
+  describe('胶囊态失败提示（缺陷 #7）', () => {
+    const notices = (page: PageHandle): unknown[] => page.calls.filter((c) => c.path === 'notice').map((c) => c.body)
+
+    it('胶囊态失败：请求宿主临时放大视图，toast 收起后归还', async () => {
+      const page = openOverlay((call) => {
+        if (call.path === 'state') return { json: overlayState({ controlled: true }) }
+        if (call.path === 'ops') return { json: { ops: [] } }
+        if (call.path === 'takeover') return { status: 403, json: { error: 'browser session proof required' } }
+        return undefined
+      })
+      await page.settle()
+      expect(notices(page)).toEqual([])
+
+      // 用户持控制权时点「交给 AI」失败 —— 现场症状：按钮文字闪回、零提示
+      // （#otoast 是 position:fixed 的页面级提示，胶囊视图只有 172×34 ⇒ 只剩
+      // 顶部一条还压在胶囊上）。
+      page.fire(page.$('ai-take'), 'click')
+      await page.settle()
+      expect(toasts(page, 'otoast')).toBe('操作失败：浏览器会话凭据尚未就绪，请重试')
+      expect(notices(page)).toEqual([{ visible: true }])
+
+      // toast 3200ms 后收起 ⇒ 视图归还紧凑态（否则右下角一直留一块死区）。
+      await page.tick(3200)
+      expect(notices(page)).toEqual([{ visible: true }, { visible: false }])
+    })
+
+    it('非胶囊态不发信号：面板/查看器的视图本来就装得下 toast', async () => {
+      const page = openOverlay((call) => {
+        if (call.path === 'state') return { json: overlayState({ controlled: true, ui: { mode: 'panel' } }) }
+        if (call.path === 'ops') return { json: { ops: [] } }
+        if (call.path === 'hide') return { status: 400, json: { error: 'nope' } }
+        return undefined
+      })
+      await page.settle()
+      await page.tick(1500) // 让 refresh 把 mode 拉到 panel
+
+      page.fire(page.$('hide-btn'), 'click')
+      await page.settle()
+      expect(toasts(page, 'otoast')).toBe('操作失败：nope')
+      expect(notices(page)).toEqual([])
+    })
+
+    it('notice 信号自身失败不得自激成第二次 toast（信号刻意绕过 post）', async () => {
+      const page = openOverlay((call) => {
+        if (call.path === 'state') return { json: overlayState({ controlled: true }) }
+        if (call.path === 'ops') return { json: { ops: [] } }
+        // 原始失败与信号失败给**不同**文案，谁覆盖了 toast 一眼可判。
+        if (call.path === 'takeover') return { status: 400, json: { error: 'first-failure' } }
+        // 放大信号自己也被拒：若它走 post()，post 的失败处理会再弹一条 toast，
+        // 而 toast 又会请求放大 ⇒ 收起时来回 ping-pong（每 3.2s 一轮，永不收敛）。
+        if (call.path === 'notice') return { status: 500, json: { error: 'notice-failure' } }
+        return undefined
+      })
+      await page.settle()
+      page.fire(page.$('ai-take'), 'click')
+      await page.settle()
+
+      // 恰好一次信号，且 toast 仍是**原始**失败文案（没被信号自己的失败覆盖）。
+      expect(notices(page)).toEqual([{ visible: true }])
+      expect(toasts(page, 'otoast')).toBe('操作失败：first-failure')
+
+      // 收起这一拍才是自激真正爆发的地方：走 post() 的话 setNotice(false) 的失败会
+      // 再弹 toast → 再请求放大 → …
+      await page.tick(3200)
+      expect(notices(page)).toEqual([{ visible: true }, { visible: false }])
+      expect(page.$('otoast').classList.contains('show')).toBe(false)
+      expect(toasts(page, 'otoast')).toBe('操作失败：first-failure')
+    })
+
+    it('模式切走再回来时页面镜像复位（回到胶囊态后第一次 toast 仍会请求放大）', async () => {
+      let mode = 'capsule'
+      const page = openOverlay((call) => {
+        if (call.path === 'state') return { json: overlayState({ controlled: true, ui: { mode } }) }
+        if (call.path === 'ops') return { json: { ops: [] } }
+        if (call.path === 'takeover') return { status: 403, json: { error: 'x' } }
+        return undefined
+      })
+      await page.settle()
+      page.fire(page.$('ai-take'), 'click')
+      await page.settle()
+      expect(notices(page)).toEqual([{ visible: true }])
+
+      // 宿主在模式切换时会归还矩形，页面的镜像必须一起复位。
+      mode = 'panel'
+      await page.tick(1500)
+      mode = 'capsule'
+      await page.tick(1500)
+
+      page.fire(page.$('ai-take'), 'click')
+      await page.settle()
+      expect(notices(page)).toEqual([{ visible: true }, { visible: true }])
+    })
   })
 })
 

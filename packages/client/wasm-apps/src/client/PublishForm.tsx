@@ -282,6 +282,11 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
   // 标识查重（2026-09-20）：用户敲 app_id 时防抖问服务端一次，提交前再问一次。
   const [availability, setAvailability] = useState<AvailabilityState>({ kind: 'idle' })
   const abortRef = useRef<AbortController | null>(null)
+  /**
+   * 提交重入闸（2026-09-21）：查重是异步的，按钮在查重窗口里仍可点 —— 只靠 `busy`
+   * 这种"渲染后才生效"的状态挡不住两次快速点击（同一 tick 内读到的 `busy` 都是 false）。
+   */
+  const submittingRef = useRef(false)
   // 查重自己的取消器：与提交的 abortRef 分开 —— 关面板时提交要取消（可能正在传
   // 44 MiB），查重也要取消（一个 200 ms 的 GET 没有理由活过组件）。
   const availabilityAbortRef = useRef<AbortController | null>(null)
@@ -467,32 +472,53 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
     // 证明不了"名字还没被占"。这一步真的问一次服务端，被占就**连文件都不读、
     // 一个字节都不上传**地拦下（省掉一次 ≤32 MiB 的往返 + 一次编译）。
     // 查重自身失败不阻断（见 verifyAppIdBeforeSubmit）：权威判据是发布那一刻的 409。
-    setAvailability({ kind: 'checking' })
-    const blocked = await verifyAppIdBeforeSubmit(appId.trim())
-    if (blocked !== null) {
-      setAvailability({ kind: 'idle' })
-      setLocalIssues([blocked])
-      return
+    //
+    // **重入闸 + 状态先落地**（2026-09-21 真机审计）：查重是一次真实网络往返，而原先
+    // `busy` 要等它返回之后才置位 ⇒ 按钮在查重窗口里仍可点，双击/连点等于两次 32 MiB
+    // 上传 + 两次 publish（后到的 409 会把已经成功的界面改写成"名称已被占用"，而
+    // `onPublished()` 已经把新应用刷进目录）；「取消」也只 abort 最后一次（abortRef 被
+    // 第二次覆盖）。现在：进函数先占住重入闸，abortRef 与 busy 都在查重**之前**建立，
+    // 于是查重期间取消同样能取消掉后续整条链路。
+    if (submittingRef.current) return
+    submittingRef.current = true
+    try {
+      const controller = new AbortController()
+      abortRef.current = controller
+      setAvailability({ kind: 'checking' })
+      setState({ kind: 'busy', phase: 'reading' })
+      const blocked = await verifyAppIdBeforeSubmit(appId.trim())
+      if (controller.signal.aborted) {
+        abortRef.current = null
+        setAvailability({ kind: 'idle' })
+        setState({ kind: 'idle' })
+        return
+      }
+      if (blocked !== null) {
+        abortRef.current = null
+        setAvailability({ kind: 'idle' })
+        setState({ kind: 'idle' })
+        setLocalIssues([blocked])
+        return
+      }
+      const result = await submitPublish(draft, file, {
+        signal: controller.signal,
+        onPhase: phase => { setState({ kind: 'busy', phase }) },
+      })
+      abortRef.current = null
+      // 被取消时不留"失败"面板：回到可提交的空闲态（用户刚按的就是取消）。
+      if (!result.ok && result.code === 'ABORTED') {
+        setState({ kind: 'idle' })
+        return
+      }
+      if (result.ok) {
+        setState({ kind: 'done', result, access })
+        onPublished()
+        return
+      }
+      setState({ kind: 'failed', failure: result })
+    } finally {
+      submittingRef.current = false
     }
-    const controller = new AbortController()
-    abortRef.current = controller
-    setState({ kind: 'busy', phase: 'reading' })
-    const result = await submitPublish(draft, file, {
-      signal: controller.signal,
-      onPhase: phase => { setState({ kind: 'busy', phase }) },
-    })
-    abortRef.current = null
-    // 被取消时不留"失败"面板：回到可提交的空闲态（用户刚按的就是取消）。
-    if (!result.ok && result.code === 'ABORTED') {
-      setState({ kind: 'idle' })
-      return
-    }
-    if (result.ok) {
-      setState({ kind: 'done', result, access })
-      onPublished()
-      return
-    }
-    setState({ kind: 'failed', failure: result })
   }, [access, accessChanged, accessConfirmed, appId, changelog, dataSensitivity, file, onPublished, owner, purpose, title, verifyAppIdBeforeSubmit, version, whitelistText])
 
   const cancel = useCallback((): void => {
@@ -533,7 +559,15 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
             type="file"
             accept=".wasm,application/wasm"
             disabled={busy}
-            onChange={event => { void pickFile(event.target.files?.[0] ?? null) }}
+            onChange={event => {
+              const input = event.target
+              const selected = input.files?.[0] ?? null
+              // 清空原生 value：否则"再选同一个文件"时浏览器不再派发 change ——
+              // 选了超限/读取失败的文件后重选同一个文件，界面会毫无反应、旧错误还挂着
+              // （2026-09-21 审计）。File 对象在 value 清空后依然可用。
+              input.value = ''
+              void pickFile(selected)
+            }}
           />
           <span style={LABEL} data-role="file-state">
             {fileName === '' ? t('appCenter.fileNone') : `${t('appCenter.fileChosen')}: ${fileName}`}

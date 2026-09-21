@@ -72,6 +72,11 @@ const CARD_FOOT: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: 4,
+  // 五个动作（立即执行/编辑/执行详情/删除，文案都 nowrap）在窄列里放不下：
+  // 面板网格的最小列宽是 268px（`PANEL_GRID`），不放行折行时"删除"会被挤出卡片右侧，
+  // 用户得横向滚动才能摸到（右侧栏标签页形态尤其明显，2026-09-21 审计）。
+  flexWrap: 'wrap',
+  rowGap: 4,
   marginTop: 'auto',
   paddingTop: 9,
   borderTop: '1px solid var(--dsw-alias-border-l1)',

@@ -372,7 +372,7 @@ function RowsTable({ report }: { report: AppRowsReport }): ReactNode {
                 key={col.name}
                 data-column={col.name}
                 data-sensitive={col.sensitive ? 'true' : 'false'}
-                style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid rgba(127,127,127,0.35)', whiteSpace: 'nowrap' }}
+                style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--dsw-alias-border-l2)', whiteSpace: 'nowrap' }}
               >
                 {col.name}
                 {col.sensitive && <span title={t('appCenter.dataMaskedNote')}>{' *'}</span>}
