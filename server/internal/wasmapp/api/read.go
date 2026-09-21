@@ -216,15 +216,20 @@ func (h *Handlers) schema(c *gin.Context) {
 		writeErr(c, oerr)
 		return
 	}
-	// §8：自省"仅发布者 + 审计" —— 每次调用都留痕（自省面会暴露应用的数据规模）。
-	h.auditApp(appID, u.Username, "wasm_app_schema_view",
-		auditDetail(appID, auditTitleOf(app), "查看表结构与占用"))
-
+	// §8：自省"仅发布者 + 审计" —— 每次**成功**调用留痕（自省面会暴露应用的数据规模）。
+	//
+	// 审计必须写在**读成功之后**（2026-09-21 独立审计 P3-⑧）：三个自省面
+	//（`schema` / `adminSchema` / `rows`）此前不一致 —— `rows` 读成功才写，两个
+	// schema 在读之前就写。后果不是安全问题而是**审计语义被污染**：库损坏、连接失败、
+	// 应用不存在时也会留下一条"查看了表结构"，事后对账会看到根本没发生的读取。
+	// 统一为"读成功才记账"：审计行 = 真的发生过一次成功读取。
 	report, serr := h.inspectAppDB(c.Request.Context(), appID)
 	if serr != nil {
 		writeErr(c, serr)
 		return
 	}
+	h.auditApp(appID, u.Username, "wasm_app_schema_view",
+		auditDetail(appID, auditTitleOf(app), "查看表结构与占用"))
 	c.JSON(http.StatusOK, gin.H{"schema": report})
 }
 
@@ -237,18 +242,36 @@ func (h *Handlers) schema(c *gin.Context) {
 // 提供的** SQL、表名先过平台规则再进语句，风险面与 appdb 的只读连接同级。
 // 库路径仍由 appdb 权威给出（不在本包复制"<data_root>/apps/<app_id>/app.db"的布局）。
 func (h *Handlers) inspectAppDB(ctx context.Context, appID string) (gin.H, *apperr.Error) {
-	probe, oerr := appdb.Open(ctx, appdb.Options{DataRoot: h.opt.DataRoot, AppID: appID})
+	db, path, size, exists, oerr := h.appDBReadOnly(ctx, appID)
 	if oerr != nil {
-		// 打开失败（限额设不上 / 金丝雀不成立）是平台状态问题，如实上报而不是假装空库。
-		return nil, internalErr("应用库不可用", oerr)
+		return nil, oerr
 	}
-	path := probe.Path()
-	_ = probe.Close()
+	// 库还不存在：**返回空结构而不是建库**（"这个应用还没写过任何数据"是状态，
+	// 不是错误；但也不能让一次读取把库建出来 —— 那会让"没被用过"这个事实消失）。
+	if !exists {
+		return gin.H{
+			"app_id":           appID,
+			"db":               logicalUnderDataRoot(h.opt.DataRoot, path),
+			"size_bytes":       int64(0),
+			"max_bytes":        int64(limits.AppDBMaxBytes),
+			"max_tables":       limits.MaxTablesPerApp,
+			"max_columns":      limits.MaxColumnsPerTable,
+			"column_types":     limits.SQLColumnTypes,
+			"reserved_columns": []string{limits.ReservedRowIDColumn},
+			"tables":           []schemaTable{},
+			"table_count":      0,
+			"usage_percent":    float64(0),
+			"initialized":      false,
+			"page_size":        int64(0),
+			"page_count":       int64(0),
+		}, nil
+	}
+	defer db.Close()
 
 	report := gin.H{
 		"app_id":           appID,
 		"db":               logicalUnderDataRoot(h.opt.DataRoot, path),
-		"size_bytes":       int64(0),
+		"size_bytes":       size,
 		"max_bytes":        int64(limits.AppDBMaxBytes),
 		"max_tables":       limits.MaxTablesPerApp,
 		"max_columns":      limits.MaxColumnsPerTable,
@@ -258,32 +281,63 @@ func (h *Handlers) inspectAppDB(ctx context.Context, appID string) (gin.H, *appe
 		"table_count":      0,
 		"usage_percent":    float64(0),
 	}
-
-	dsn := "file:" + path + "?mode=ro&_pragma=query_only(1)"
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, internalErr("应用库只读打开失败", err)
-	}
-	defer db.Close()
-	if err := db.PingContext(ctx); err != nil {
-		return nil, internalErr("应用库只读连接失败", err)
-	}
-	size := fileSize(path)
-	report["size_bytes"] = size
 	report["initialized"] = size > 0
 	report["page_size"] = pragmaInt(ctx, db, "page_size")
 	report["page_count"] = pragmaInt(ctx, db, "page_count")
 	report["usage_percent"] = usagePercent(size, int64(limits.AppDBMaxBytes))
 
+	tables, terr := listAppTables(ctx, db)
+	if terr != nil {
+		return nil, internalErr("读取表清单失败", terr)
+	}
+	report["tables"] = tables
+	report["table_count"] = len(tables)
+	return report, nil
+}
+
+// appDBReadOnly 以**只读**方式打开应用库：库文件不存在时返回 `exists=false`，
+// **不建目录、不建库**（只读端点不得有写副作用）。
+//
+// 为什么不用 `appdb.Open`（2026-09-21 独立审计 P2-1）：`Open` 会 MkdirAll 并以 rwc
+// 打开 ⇒ "读一次就把库建出来"。此前只有 `/rows` 靠调用方自己的 `os.Stat` 挡住了，
+// 而同一个 helper 服务的 `/schema` 实测有写副作用 —— 两个兄弟端点语义不一致，
+// 未来复用者会静默继承。现在路径解析走 `appdb.SafePath`（纯解析 + 符号链接拒绝），
+// 连接用 `mode=ro`，写副作用在结构上不可能。
+//
+// 调用方负责 Close（只读连接）。
+func (h *Handlers) appDBReadOnly(ctx context.Context, appID string) (db *sql.DB, path string, size int64, exists bool, oerr *apperr.Error) {
+	path, exists, oerr = appdb.SafePath(h.opt.DataRoot, appID)
+	if oerr != nil {
+		return nil, "", 0, false, oerr
+	}
+	if !exists {
+		return nil, path, 0, false, nil
+	}
+	dsn := "file:" + path + "?mode=ro&_pragma=query_only(1)"
+	conn, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, "", 0, false, internalErr("应用库只读打开失败", err)
+	}
+	if err := conn.PingContext(ctx); err != nil {
+		_ = conn.Close()
+		return nil, "", 0, false, internalErr("应用库只读连接失败", err)
+	}
+	return conn, path, fileSize(path), true, nil
+}
+
+// listAppTables 列出库里**平台看得懂**的表（表名 / 列结构 / 行数）。
+//
+// 表名先过平台自己的规则：sqlite_master 的内容是**应用可控**的（正常由 db.define 建，
+// 但文件可能被篡改），拼进 SQL 前必须校验；不合规的表被标成 skipped 而不是让整个
+// 自省失败 —— 一条脏表名不该让作者看不到其余的表。
+func listAppTables(ctx context.Context, db *sql.DB) ([]schemaTable, error) {
 	names, err := appTableNames(ctx, db)
 	if err != nil {
-		return nil, internalErr("读取表清单失败", err)
+		return nil, err
 	}
 	tables := make([]schemaTable, 0, len(names))
 	for _, name := range names {
 		t := schemaTable{Name: name}
-		// 名称先过平台自己的表名规则：sqlite_master 的内容是**应用可控**的
-		//（正常由 db.define 建，但文件可能被篡改），拼进 SQL 前必须校验。
 		if !validateTableName(name) {
 			t.Skipped, t.Reason = true, "表名不符合平台规则（不是 db.define 建的）"
 			tables = append(tables, t)
@@ -291,7 +345,7 @@ func (h *Handlers) inspectAppDB(ctx context.Context, appID string) (gin.H, *appe
 		}
 		cols, cerr := tableColumns(ctx, db, name)
 		if cerr != nil {
-			return nil, internalErr("读取列结构失败", cerr)
+			return nil, cerr
 		}
 		t.Columns = cols
 		if n, cerr := tableRowCount(ctx, db, name); cerr == nil {
@@ -299,9 +353,7 @@ func (h *Handlers) inspectAppDB(ctx context.Context, appID string) (gin.H, *appe
 		}
 		tables = append(tables, t)
 	}
-	report["tables"] = tables
-	report["table_count"] = len(tables)
-	return report, nil
+	return tables, nil
 }
 
 // logicalUnderDataRoot 把宿主绝对路径渲染成"数据根之下的相对路径"（对外只暴露

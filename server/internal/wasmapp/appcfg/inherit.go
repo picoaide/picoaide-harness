@@ -158,8 +158,9 @@ func mergeMissing(submitted, base map[string]json.RawMessage) map[string]json.Ra
 //   - **历史 public 归一化成 login**（2026-09-19 契约 §4.4 的读取侧口径）：继承出来的
 //     新版本因此写 login —— 既不会把已被取消的 public 带进新版本（写入侧本来就会拒），
 //     也不会让一次纯代码更新因为"基线里有个已废除的取值"而失败；
-//   - **空值不算上一版给过的值**：access 非法、whitelist 为空、声明为空白串一律丢弃
-//     —— "上一版没有这项"不能被继承成"上一版给了一个空串"，否则缺省语义会被抹掉；
+//   - **空值不算上一版给过的值**：access 非法、whitelist/敏感列声明为空、window 为
+//     `{}`、声明类文本为空白串一律丢弃 —— "上一版没有这项"不能被继承成"上一版给了一个
+//     空值"，否则缺省语义会被抹掉（判据按**字段类型**分支，见 baselineValueUsable）；
 //   - 解析不了 ⇒ BaselineUnusable（**不是**"没有基线"）：调用方必须 fail-closed。
 func parseBaseline(previousConfigJSON string) (map[string]json.RawMessage, BaselineState) {
 	if strings.TrimSpace(previousConfigJSON) == "" {
@@ -181,28 +182,54 @@ func parseBaseline(previousConfigJSON string) (map[string]json.RawMessage, Basel
 		return nil, BaselineUnusable
 	}
 	for k, raw := range base {
-		switch k {
-		case FieldWhitelist:
-			var list []string
-			if json.Unmarshal(raw, &list) != nil || len(list) == 0 {
-				delete(base, k)
-			}
-		case FieldAccess:
-			var s string
-			if json.Unmarshal(raw, &s) != nil || !ValidAccess(Access(s)) {
-				delete(base, k)
-			}
-		default:
-			var s string
-			if json.Unmarshal(raw, &s) != nil || strings.TrimSpace(s) == "" {
-				delete(base, k)
-			}
+		if !baselineValueUsable(k, raw) {
+			delete(base, k)
 		}
 	}
 	if len(base) == 0 {
 		return nil, BaselineAbsent
 	}
 	return base, BaselineUsable
+}
+
+// baselineValueUsable 判定上一版某个字段的值能不能作为**继承基线**。
+//
+// 两类"不可用"：
+//   - **不是那个类型的值**（对象被当成字符串解码、数组被当成字符串解码…）；
+//   - **空值不算"上一版给过值"**：`""` / `[]` / `{}` / 非法 access 一律不算 ——
+//     "上一版没有这项"不能被继承成"上一版给了一个空值"，否则 schema 缺省语义会被抹掉。
+//
+// ⚠️ 按字段**类型**分支（而不是"字符串兜底"）是这段代码的**硬要求**：兜底写法会让
+// 非字符串字段（`window` 对象、`whitelist`/`sensitive_columns` 数组）解码失败并被
+// `delete` —— 表现是"上一版声明过的字段在一次纯代码更新里静默消失"，而新版本看起来
+// 一切正常（2026-09-21 实测：`window` 就是这样被丢掉的，与生成物里"整个 window 缺席 =
+// 沿用上一版生效值"的承诺直接矛盾）。
+//
+// 覆盖纪律：`KnownFields` 的**每个**字段都必须在这里有显式分支，由
+// TestBaselineEveryKnownFieldHasTypedBranch 双向钉住（新增字段忘了登记 ⇒ 红）。
+// `default` 因此理论上不可达；真到了那里就**不继承**（拿不准的东西不往新版本里带），
+// 而不是像旧实现那样"按字符串试试看"。
+func baselineValueUsable(key string, raw json.RawMessage) bool {
+	switch key {
+	case FieldWhitelist, FieldSensitiveColumns:
+		// 同族数组字段（准入名单 / 声明敏感列）：两者语义逐条相同 —— 非空数组才算给过值。
+		var list []string
+		return json.Unmarshal(raw, &list) == nil && len(list) > 0
+	case FieldWindow:
+		// 对象字段：`{}` 与"缺席"在继承上同义（都没有可沿用的取值），
+		// 显式 `null` 在 decodeWindow 里是"清空"，同样不算给过值。
+		var obj map[string]json.RawMessage
+		return json.Unmarshal(raw, &obj) == nil && len(obj) > 0
+	case FieldAccess:
+		var s string
+		return json.Unmarshal(raw, &s) == nil && ValidAccess(Access(s))
+	case FieldPurpose, FieldDataSensitivity, FieldOwner:
+		// 自由文本声明字段：空白串不算给过值（见本文件头部"空值不算上一版给过的值"）。
+		var s string
+		return json.Unmarshal(raw, &s) == nil && strings.TrimSpace(s) != ""
+	default:
+		return false
+	}
 }
 
 // DeclarationsOfConfigJSON 从 `config_json` 投影里取 purpose / data_sensitivity。

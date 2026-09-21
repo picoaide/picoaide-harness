@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 // ---- FIX-12(审计 2026-09-12,P1):审计丢失必须可观测 + 不变式必须有执行者 ----
@@ -165,7 +167,13 @@ func auditLog(db *sql.DB, appID, username, action, detail string) error {
 	// 一次锁获取,DB 往返与锁竞争降为 1/N;worker 空闲 60s 自动退出,
 	// 测试的多临时库不会积累常驻 goroutine。
 	w := auditWorkerFor(db)
-	req := auditRequest{appID: appID, username: username, action: action, detail: detail, done: make(chan error, 1)}
+	// 审计明细里拼着**应用作者可控**的字符串（`app:<id> 「<title>」` 的 title 由作者自填，
+	// 见 internal/wasmapp/api/handlers.go 与 rows.go）。消费端（psql、日志查看器、
+	// 导出脚本）按"一条审计 = 一行"读，作者在 title 里放一个 `\n` 就能凭空造出一行
+	// 伪造记录（例如伪造一条管理员操作）。入口处统一转义 CR/LF/控制字符：
+	// 内容不丢、行结构不可伪造（判据 = 落库 detail 的换行数为 0）。
+	// 实现与日志侧同一份（util.EscapeControl），避免两处对"哪些字符算控制字符"漂移。
+	req := auditRequest{appID: appID, username: username, action: action, detail: util.EscapeControl(detail), done: make(chan error, 1)}
 	enqueue := func(worker *auditWorker) bool {
 		select {
 		case worker.ch <- req:

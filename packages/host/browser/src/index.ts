@@ -29,13 +29,11 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { CookieHandoff } from './cookie-handoff.ts'
 import { credentialSiteOrigin } from './credential-site.ts'
 import { browserPartitionFor, createRealElectronAdapter } from './electron-adapter.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { BrowserRuntime } from './runtime.ts'
-import { BROWSER_SURFACE_SERVICE, createSurfaceRegistry } from './surface.ts'
-import type { NativeSession } from './electron-adapter.ts'
+import { BROWSER_SURFACE_SERVICE, createSurfaceRegistry, encodePartitionSegment, serverPartitionHash } from './surface.ts'
 import { TabPool } from './pool.ts'
 import { BrowserStore } from './store.ts'
 import { applyBrowserTools, parseToolGroups } from './tools.ts'
@@ -77,42 +75,6 @@ interface ConnectionTrustFence {
    * @returns 401/403 表示拒绝；undefined 表示通过。
    */
   requestRejection(request: { headers: IncomingMessage['headers'] }): 401 | 403 | undefined
-}
-
-/** BrowserAuth cookie 前缀（上游 `client-connection/browser-auth.ts`）。 */
-const BROWSER_AUTH_COOKIE_PREFIX = 'dsh-auth-'
-
-/**
- * `require('electron')` 在本模块内需要的**最小结构**（只用于 cookie 交接）。
- *
- * 同 `electron-adapter.ts` 的理由：`electron` 是 peerDependency、只在
- * Electron 宿主里可用，类型面刻意收窄到用到的两个 session 入口。
- */
-interface ElectronCookieLike {
-  name: string
-  value: string
-  path?: string
-  httpOnly?: boolean
-  secure?: boolean
-  sameSite?: 'unspecified' | 'no_restriction' | 'lax' | 'strict'
-  expirationDate?: number
-}
-
-interface ElectronSessionLike {
-  cookies: {
-    get(filter: { url: string }): Promise<ElectronCookieLike[]>
-    set(details: Record<string, unknown>): Promise<void>
-  }
-  /** 权限守卫用的两个 handler（ Electron `Session` 满足；测试替身可以不给）。 */
-  setPermissionRequestHandler?(handler: (wc: unknown, permission: string, callback: (grant: boolean) => void) => void): void
-  setPermissionCheckHandler?(handler: (wc: unknown, permission: string, requestingOrigin: string, details: unknown) => boolean): void
-}
-
-interface ElectronLike {
-  session?: {
-    defaultSession?: ElectronSessionLike
-    fromPartition?(partition: string): ElectronSessionLike
-  }
 }
 
 /** Services required by the embedded browser. */
@@ -298,9 +260,8 @@ function resolveUserDataDir(): string | undefined {
 /**
  * fence（交互证明闸）是否处于"能用"状态。
  *
- * 闸门（`proofOfPossession`）与票据交接表（`CookieHandoff.fenceAvailable`）**必须**
- * 用同一判据（2026-09-15 审计 F3）：只看"服务在不在"会让交接在
- * `requestRejection` 缺失时"假成功即停表"，之后每次写都被 503 拒且不再重试。
+ * 只服务闸门（`proofOfPossession`）一处：服务缺席时写面一律 fail-closed 503，
+ * 绝不退回"只查 Origin"的 `guard()`（2026-09-15 审计 F3 的口径保留）。
  * @param service - `ctx.get('connection')` 的返回值（任意宿主形状）。
  * @returns 服务存在且 `requestRejection` 可用时为 true。
  */
@@ -311,7 +272,7 @@ export function connectionFenceReady(service: unknown): service is ConnectionTru
 
 /** 用户切换的四个步骤（导出以便确定性单测顺序与容错）。 */
 export interface SessionSwitchSteps {
-  /** 身份相关：分区 + store + 票据交接（**必须**执行，失败即串账号）。 */
+  /** 身份相关：分区 + store + 分区权限守卫（**必须**执行，失败即串账号）。 */
   applyUserScope: () => void
   /** 破坏性清理：关掉上一个账号的标签页（可能因窗口销毁竞态抛错）。 */
   closeAll: () => Promise<void>
@@ -360,6 +321,30 @@ export function apply(ctx: Context, config: Config = {}): void {
       return pico?.getSession?.()?.username ?? null
     } catch {
       return null
+    }
+  }
+
+  /**
+   * 当前会话的**服务端地址哈希**（§7.2/R2S-8 冻结：分区名 =
+   * `persist:agent-browser-<user>@<sha256(normalized server url)[:32]>`）。
+   *
+   * 为什么必须与用户一起进分区名：分区是 `persist:` 的，同机切服务端（本仓部署拓扑里
+   * 测试/正式并存，真实可触发）会让新旧租户共用同一个持久分区 —— 同名站点/应用
+   * origin 的 cookie 与 localStorage 于是跨租户串味（2026-09-21 审计 P1-10 证据②）。
+   *
+   * **来源与宿主同源**：`picoSession.getSession().serverURL`，与
+   * `@picoaide/dsh-wasm-apps-host` 的 `readAppSession` 读的是同一个服务 —— 应用窗口
+   * 与浏览器标签必须落在**同一个**分区上，两边各读一份就会漂移成两个 session。
+   * 未登录 / 读不到 ⇒ `undefined`（匿名分区**不带**后缀，逐字节不变）。
+   * @returns 32 位 hex 摘要，或 undefined。
+   */
+  const currentServerHash = (): string | undefined => {
+    try {
+      const pico = ctx.get('picoSession') as { getSession?: () => { serverURL?: string } | null } | undefined
+      const serverURL = pico?.getSession?.()?.serverURL
+      return serverPartitionHash(typeof serverURL === 'string' ? serverURL : null)
+    } catch {
+      return undefined
     }
   }
 
@@ -448,82 +433,39 @@ export function apply(ctx: Context, config: Config = {}): void {
       downloadDir: config.downloadDir ?? (userDataDir !== undefined ? join(userDataDir, 'downloads') : join(fallbackDataRoot(), 'downloads')),
     },
     credentialResolver,
-    browserPartitionFor(currentUser()),
+    browserPartitionFor(currentUser(), currentServerHash()),
     { pool, store, currentUsername: currentUser, locale: () => hostLocale(), surfaces, ...(appOriginScheme === undefined ? {} : { appOriginScheme }) },
   )
   const shellOrigin = `http://127.0.0.1:${String(ctx.webServer.port)}`
   runtime.setShellOrigin(shellOrigin)
 
   /**
-   * R7-RV-3 证明交接：本插件自己服务的两个页面（`/browser-shell` 与
-   * `/browser-overlay`）里的写操作也必须带上 BrowserAuth cookie，否则接管
-   * 按钮、隐藏窗口、书签、下载打开这些正常按钮会在 `requireWriteProof` 下
-   * 变成 403（那是"修好漏洞、弄坏产品"）。
+   * §7b（2026-09-21）**方案 A**：把蒙版（overlay）视图移回**默认 session**，
+   * 因此这里不再有任何 cookie 交接。
    *
-   * shell 窗口与主应用窗口同用默认 Electron session，token 换票后天然持有
-   * cookie；**overlay（mask view）跑在 `persist:agent-browser-<user>` 分区里，
-   * 是另一个 cookie jar**。这里把应用 session 里回环源的 `dsh-auth-*` cookie
-   * 镜像进浏览器分区：两个页面都由本插件在同一回环源上服务，cookie 保持
-   * HttpOnly + SameSite=Strict（浏览器分区里的任意站点读不到它，跨站请求也
-   * 带不出去），本机其它进程更无法凭空造出 HMAC 签名。
+   * 旧结构（已删除）：`mirrorBrowserAuthCookies` 把默认 session 里回环源的
+   * `dsh-auth-*`（BrowserAuth 持有性证明）**复制进** `persist:agent-browser-<user>`
+   * —— 也就是**模型可驱动的标签页用的那个 jar**。那是 §7b 记录的根妥协：只要
+   * 标签页持有这把 cookie，模型 `browser_navigate` 到 `http://127.0.0.1:<port>/…`
+   * 就是一个"持有证明的真页面"，任何依赖 `requireWriteProof` 的本机守卫都被绕过。
    *
-   * 开机时序：prewarm 建 overlay 与主窗口 load 是并发的，cookie 可能还没换出来
-   * ——所以交接**反复尝试到成功一次**（首次成功即停表），用户切换分区时重来。
-   * 两次尝试之间的间隔按 1s→2s→…→30s 退避（登录可能晚于开机很久）。
-   * 非 Electron 宿主（headless loader / 单测）里 `require('electron')` 直接抛错，
-   * 交接是 no-op，路由仍由 fence 决定（缺席即 fail-closed 503）。
+   * 现在：蒙版与本插件的 shell 页、主应用窗口**同一个 default session**（`mountOverlay`
+   * 用 `createMaskView()` 不传分区，见 runtime.ts），票据天然就在那个 jar 里，所以
+   * 交接没有必要 ⇒ 整块删除（`cookie-handoff.ts` 一并删除）。模型面（标签页）的
+   * 分区从此**没有任何 `dsh-auth-*`**。
+   *
+   * 留下的是**权限守卫**（与 cookie 无关的安全副作用，原先寄生在交接函数里）：
+   * 分区初始化就装，§16.1 冻结的归属不变。
+   *
+   * 顺带消失的两类缺陷（原先都出在这条交接链上）：2026-09-14 蒙版分区 P0
+   * （交接漏了蒙版所在的 jar ⇒「我来操作」整轮 401）与 2026-09-15 恢复型启动 P0
+   * （fence 暂时缺席时交接一次判死 ⇒ 同样整轮 401）。判据见
+   * `tests/audit-0914-mask-partition.spec.ts` 与 `tests/audit-0921-credential-isolation.spec.ts`。
    */
-  const mirrorBrowserAuthCookies = async (): Promise<boolean> => {
-    let electron: ElectronLike | undefined
-    try {
-      electron = createRequire(import.meta.url)('electron') as ElectronLike
-    } catch {
-      return false // 非 Electron 宿主：无需交接
-    }
-    const from = electron.session?.defaultSession
-    const to = electron.session?.fromPartition?.(browserPartitionFor(currentUser()))
-    // 分区初始化即装权限守卫（§16.1 冻结：归属 = 分区初始化，不是建 tab 时）。
-    // 幂等 ⇒ 切账号反复进入也安全；不装的表现是 Electron 的 check 默认放行 camera/mic。
-    if (to !== undefined && typeof to.setPermissionRequestHandler === 'function' && typeof to.setPermissionCheckHandler === 'function') {
-      runtime.ensurePartitionGuard(to as unknown as NativeSession)
-    }
-    if (from === undefined || to === undefined) return false
-    const cookies = await from.cookies.get({ url: shellOrigin })
-    const auth = cookies.filter((cookie) => cookie.name.startsWith(BROWSER_AUTH_COOKIE_PREFIX))
-    if (auth.length === 0) return false
-    for (const cookie of auth) {
-      await to.cookies.set({
-        url: shellOrigin,
-        name: cookie.name,
-        value: cookie.value,
-        path: cookie.path ?? '/',
-        httpOnly: cookie.httpOnly ?? true,
-        secure: cookie.secure ?? false,
-        ...(cookie.sameSite === undefined ? {} : { sameSite: cookie.sameSite }),
-        ...(cookie.expirationDate === undefined ? {} : { expirationDate: cookie.expirationDate }),
-      })
-    }
-    return true
+  const ensureBrowserPartitionGuard = (user: string | null, serverHash?: string | undefined): void => {
+    const session = runtime.sessionForPartition(browserPartitionFor(user, serverHash))
+    if (session !== undefined) runtime.ensurePartitionGuard(session)
   }
-
-  /**
-   * 票据交接表：反复把应用 session 的 BrowserAuth 证明镜像进**当前**浏览器分区，
-   * 直到成功一次（分区里有票即停）。退避重试与"fence 缺席也要排队"的口径见
-   * `cookie-handoff.ts` —— 2026-09-15 恢复型启动 P0 就是这里一次判死造成的。
-   */
-  const cookieHandoff = new CookieHandoff({
-    // 判据必须与真正的闸门**同口径**（2026-09-15 审计 F3）：闸门在服务缺席
-    // **或** `requestRejection` 不是函数时 fail-closed 503。只看"服务在不在"
-    // 会让交接"假成功即停表"，随后每次写都被 503 拒且不再重试 —— 正是现场
-    // "只有 refuse、没有 handoff"的镜像形态。
-    fenceAvailable: () => connectionFenceReady((ctx as unknown as { get?: (name: string) => unknown }).get?.('connection')),
-    mirror: mirrorBrowserAuthCookies,
-    schedule: (run, delayMs) => setTimeout(run, delayMs),
-    cancel: (handle) => { clearTimeout(handle as ReturnType<typeof setTimeout>) },
-    warn: (message, cause) => { ctx.logger?.warn?.(message, cause) },
-  })
-  const startCookieHandoff = (): void => { cookieHandoff.start() }
-  const stopCookieHandoff = (): void => { cookieHandoff.stop() }
 
   // Restore the persisted tab ledger; keep it fresh on every tab change (ops/
   // busy events never change the ledger — persisting on them would sync-write
@@ -543,15 +485,19 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
 
   /**
-   * 把"当前用户作用域"切到 `user`：分区 + 书签/历史/下载 store + 票据交接。
+   * 把"当前用户作用域"切到 `user`：分区 + 书签/历史/下载 store + 分区权限守卫。
    *
-   * 幂等、可从任意路径重复调用（`setPartition` 同值短路、交接表可重启），因此
-   * 它同时服务三个入口：启动期补采样、`pico/session-changed`、以及失败重试。
+   * 幂等、可从任意路径重复调用（`setPartition` 同值短路、守卫安装本身幂等），因此
+   * 它同时服务两个入口：`pico/session-changed` 与启动期安装。
+   *
+   * 交接表已删除（§7b 方案 A）：用户切换只需要换标签分区与 store —— 蒙版在默认
+   * session 里，它的写证明（应用自己的 `dsh-auth-*` cookie）由新登录直接替换，
+   * 不需要任何重建或复制。
    */
-  const applyUserScope = (user: string | null): void => {
-    runtime.setPartition(browserPartitionFor(user))
+  const applyUserScope = (user: string | null, serverHash?: string | undefined): void => {
+    runtime.setPartition(browserPartitionFor(user, serverHash))
     switchStoreForUser(user)
-    startCookieHandoff()
+    ensureBrowserPartitionGuard(user, serverHash)
   }
 
   // Language switch: the two chrome pages are rendered per request, so an
@@ -567,8 +513,13 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.on('pico/session-changed', (next) => {
     const username = (next as { username?: string } | null)?.username ?? null
     const user = username !== null && username !== undefined && username.length > 0 ? username : null
+    // 分区名带**服务端哈希**（§7.2/R2S-8）：同一个用户在两个服务端上是两个租户，
+    // 持久分区必须分开。哈希从 `picoSession` 现取（事件载荷只当兜底）—— 应用窗口
+    // 那边读的是同一个服务，两边必须落在同一个分区上。
+    const eventServerURL = (next as { serverURL?: string } | null)?.serverURL
+    const serverHash = currentServerHash() ?? serverPartitionHash(eventServerURL ?? null)
     void runSessionSwitch({
-      applyUserScope: () => { applyUserScope(user) },
+      applyUserScope: () => { applyUserScope(user, serverHash) },
       // Login switch / logout destroys background tabs (2026-09-08 decision).
       closeAll: async () => { await runtime.closeAll(true) },
       // P1-19: the op log (hosts, paths, token-bearing URLs) is per-account —
@@ -588,12 +539,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     'pico-browser: tool suite',
   )
 
-  // R7-RV-3：开机即开始把应用 session 的 BrowserAuth cookie 交接进浏览器分区
-  // （overlay 页在 prewarm 时就会加载，早于主窗口换票完成）。
+  // 分区初始化即装权限守卫（§16.1 冻结：归属 = 分区初始化，不是建 tab 时）。
+  // 开机时分区名已经由构造函数定下（`browserPartitionFor(currentUser())`），但那时
+  // 可能还没有任何 tab ⇒ 这里补装一次；切账号时由 `applyUserScope` 再装新分区。
+  // 幂等（runtime.ensurePartitionGuard → guard.ensureSessionGuard）。
   ctx.effect(() => {
-    startCookieHandoff()
-    return stopCookieHandoff
-  }, 'pico browser: browser-auth cookie handoff')
+    ensureBrowserPartitionGuard(currentUser(), currentServerHash())
+    return () => {}
+  }, 'pico browser: browser partition permission guard')
 
   ctx.effect(() => {
     /**
@@ -742,10 +695,10 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
         case 'clear-data': {
           await runtime.clearData(true)
-          // 交接表在首次成功后停表（见 startCookieHandoff），而「清除全部数据」
-          // 会连 cookie 一起清掉：蒙版页持有的 BrowserAuth 证明随之消失，此后
-          // 接管/面板按钮全部 403。清完立刻再交接一次，把票据补回分区。
-          startCookieHandoff()
+          // 只清**浏览器分区**（标签页的 cookie/storage）。蒙版页在默认 session 里，
+          // 它的 BrowserAuth 证明不在清理范围内 ⇒ 清完照旧能接管、开面板、点书签
+          // （旧结构下这里的 cookie 会被一起清掉，所以旧代码要在这里补一次交接；
+          // §7b 方案 A 之后这个补丁连同交接表一起删除）。
           json(res, 200, { ok: true })
           return
         }
@@ -857,15 +810,17 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
 
     /**
-     * 本插件自己的两个页面：加载即再交接一次 cookie（交接可能在开机竞态里
-     * 刚开始播表，页面加载是一个自然的"该有了"时点）。
+     * 本插件自己的两个页面（`/browser-shell` 与 `/browser-overlay`）。
      *
      * 页面**按请求现渲染**：语言可能在使用过程中切换（桌面运行时的 locale 是
      * 活的），所以 locale 在这里、每次请求解析一次，再交给页面构建函数；把
      * locale 定死在插件装配期就是这条约束要消灭的 bug 类型。
+     *
+     * 这两个页面的写操作靠**默认 session 里**的应用 `dsh-auth-*` cookie 过
+     * `requireWriteProof`（两个页面都由宿主 loadURL 加载到默认 session，§7b 方案 A）
+     * —— 因此这里不再需要任何"加载页面时顺带交接一次票据"的动作。
      */
     const page = (render: (locale: HostLocale) => string): JsonHandler => (req, res) => {
-      startCookieHandoff()
       html(render(hostLocale(req)))(req, res)
     }
 
@@ -961,22 +916,7 @@ function num(value: string | null, fallback: number | undefined): number | undef
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
-/** Encode the per-user store key (reflects the partition encoding). */
-function encodePartitionSegment(segment: string): string {
-  let out = ''
-  for (const char of segment) {
-    const code = char.codePointAt(0)!
-    if ((code >= 0x30 && code <= 0x39)
-      || (code >= 0x41 && code <= 0x5a)
-      || (code >= 0x61 && code <= 0x7a)
-      || char === '-' || char === '_') {
-      out += char
-    } else {
-      out += `~${code.toString(16).toUpperCase()}~`
-    }
-  }
-  return out.length === 0 ? 'anonymous' : out
-}
+/** Encode the per-user store key (the ONE implementation lives in `./surface.ts`). */
 
 export type { BrowserRuntime } from './runtime.ts'
 export type { BrowserOpLogEntry, BrowserSnapshotElement, BrowserTabState, BrowserToolOptions, BrowserWindowState } from './types.ts'

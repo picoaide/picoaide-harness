@@ -7,6 +7,7 @@ import {
   BrowserGuard,
   classifyNavigation,
   ensureSessionGuard,
+  isLocalHostname,
   installAppSchemeRequestGate,
   installPermissionGuard,
   MAX_DOWNLOAD_BYTES,
@@ -331,5 +332,64 @@ describe('installAppSchemeRequestGate：只有应用窗口能触发应用 scheme
     expect(fake.fire('harness-app://my-notes/', 1)).toEqual({ cancel: true })
     dispose()
     expect(fake.fire('harness-app://my-notes/', 1)).toEqual({})
+  })
+})
+
+describe('isLocalHostname：本机目标判定（五轮审计 P2-①/P3-①）', () => {
+  /**
+   * 为什么这条判据必须**表驱动且双向**（2026-09-21 五轮审计）：
+   *  - 漏判方向：`localhost.` / `*.localhost` / `ip6-localhost` / `[::]` /
+   *    `[::ffff:127.0.0.1]` 这些写法**真的会落到本机监听**（真机实测），
+   *    而"AI 浏览器不访问本机地址"这条承诺就靠这个函数兑现；
+   *  - 误判方向：朴素的前缀判据会把 `127.example.com`（合法公网域名，只是以 "127." 开头）
+   *    当成回环 ⇒ 把一个正常站点封掉。
+   */
+  const locals = [
+    '127.0.0.1', '127.0.0.1:8080'.split(':')[0]!, '127.1.2.3', '127.255.255.255',
+    '0.0.0.0',
+    'localhost', 'LOCALHOST', 'localhost.', 'app.localhost', 'a.b.localhost',
+    'ip6-localhost', 'ip6-loopback', 'localhost.localdomain',
+    '[::1]', '::1', '[::]', '::',
+    '[::ffff:127.0.0.1]', '::ffff:127.0.0.1', '[::ffff:7f00:1]',
+  ]
+  const remotes = [
+    'example.com', '127.example.com', '127.0.0.1.evil.example', 'localhost.evil.example',
+    'notlocalhost', 'my.localhost.example', 'example.org',
+    '128.0.0.1', '126.0.0.1', '10.0.0.1', '192.168.1.1', '169.254.1.1',
+    '999.0.0.1', '127.0.0', '127.0.0.1.5',
+    '[2001:db8::1]', '::2', '[::ffff:128.0.0.1]',
+  ]
+
+  it('本机写法逐个命中', () => {
+    for (const host of locals) expect(isLocalHostname(host), host).toBe(true)
+  })
+
+  it('解析失败的**绝对** http(s) URL 一律拒（六轮审计 P2-①：Node 与 Chromium 的接受面不同）', () => {
+    // 实测：`http://[::ffff:0177.0.0.1]:8080/` 在 Node 的 WHATWG 解析器里抛错、
+    // 而 Chromium **接受并归一化成回环** `[::ffff:7f00:1]`。旧实现 catch 后返回 'allow'
+    // ⇒ 闸门对该 URL 失效，而 Chromium 照常落到本机监听（真机实测模型读到了本机正文）。
+    // 口径：带 scheme 的绝对 URL 解析失败 ⇒ deny；纯相对路径才放行。
+    for (const raw of [
+      'http://[::ffff:0177.0.0.1]:8080/',
+      'http://[::ffff:127.0.0.01]/',
+      'http://[::ffff:0x7f.0.0.1]:9/',
+      'HTTPS://[::ffff:0177.0.0.1]/x',
+      'http://[fe80::1%25eth0]:80/',
+      // 前导 C0 控制符（七轮审计 P2-①）：WHATWG 会先剥掉它们再解析，而 JS 的 `trim()`
+      // 不剥 `\x01` ⇒ 只用 trim 判"是否绝对 URL"会把它当相对路径放行，而 Chromium
+      // 照常接受并落到本机（真机实测请求到达监听）。
+      '\u0001http://[::ffff:0177.0.0.1]:8080/',
+      '\u0000\u001f http://[::ffff:127.0.0.01]/',
+      '\u007fhttp://127.0.0.1:5173/',
+    ]) {
+      expect(classifyNavigation(raw), JSON.stringify(raw)).toBe('deny')
+    }
+    // 反向对照：相对路径仍然放行（页面无法借它越出自己的 origin）。
+    expect(classifyNavigation('/local/path')).toBe('allow')
+    expect(classifyNavigation('relative.html')).toBe('allow')
+  })
+
+  it('公网/其它私网写法逐个不命中（防"什么都拒"与"127. 前缀"误判）', () => {
+    for (const host of remotes) expect(isLocalHostname(host), host).toBe(false)
   })
 })

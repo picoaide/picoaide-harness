@@ -329,8 +329,9 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | 提交新版本 | `POST /api/client/v2/apps/wasm/:app_id/releases` |
 | 上架 / 下架 | `POST /api/client/v2/apps/wasm/:app_id/publish` · `…/unpublish` |
 | 冻结 / 导出 / 删除 | `POST …/wasm/:app_id/freeze` · `GET …/export` · `DELETE …/wasm/:app_id` |
-| 诊断 | `GET …/wasm/:app_id/diagnostics` |
-| 自省 | `GET …/wasm/:app_id/schema` |
+| 诊断 | `GET …/wasm/:app_id/diagnostics`（失败码 + hints + 每次请求的 `db_rows`/`db_bytes`） |
+| 自省 | `GET …/wasm/:app_id/schema`（表 / 列 / 行数 / 占用） |
+| **数据** | `GET …/wasm/:app_id/rows?table=&limit=&offset=&unmask=`（某张表的一页行；**默认脱敏**） |
 | 应用中心 | `GET /api/client/v2/apps/wasm/catalog` |
 
 ### 6.1 让 AI 自己发布（**首选路径**）
@@ -341,6 +342,9 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | 工具 | 作用 |
 | --- | --- |
 | `wasm_app_list` | 列应用中心（确认 `app_id` 有没有被占用、查当前版本号） |
+| `wasm_app_schema` | 读表结构（表/列/行数/占用） |
+| `wasm_app_diagnostics` | 读运行诊断（失败码 + hints） |
+| `wasm_app_rows` | 读某张表的一页行（**敏感列默认脱敏，工具无法解掉**） |
 | `wasm_app_validate` | 预检：静态校验 + 真编译 + 干跑。**不占版本号、不进审计**，失败可反复调 |
 | `wasm_app_publish` | 发布新版本：同步执行，>8 MiB 自动分片续传；**失败不占版本号** |
 
@@ -363,6 +367,59 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
   上下架、删除；平台管理员可兜底接管。**AI 只是编辑器，发布者记的是发起操作的员工。**
 - 组织可开启"更新审批"：开启后新版本进待审队列，**线上仍是旧版本**（不中断使用）。
   上架/下架/删除不走审批。
+
+### 6.1a 产物里的 `.debug_*` 段：打包会忽略，**但按平台口径不计入段预算**
+
+编译器（TinyGo / Zig / Rust + LLVM）默认会带一批 **DWARF 调试段**，段名一律以
+`.debug_` 开头（`.debug_info`、`.debug_line`…）。这类段常常比代码本身还大
+（TinyGo 默认就带，Zig/LLVM 的 release 产物里也有；体积随优化级别与内联量变化，
+不引用具体数字 —— 用 `wasm-objdump -h` 量你自己的产物）。
+
+平台的处置（**"哪些段算工具链段"这条分类在三处实现且必须逐字一致**：真源
+`server/internal/wasmapp/assets/assets.go` 的 `ToolchainSectionPrefixes` /
+`IsToolchainSection`，镜像在 `server/skills/app-builder/scripts/pack-assets.mjs` 与
+`server/skills/app-builder/examples/go/preview.mjs`。**段预算的算术只有两处** ——
+平台 `CountsTowardSectionBudget` 与打包脚本的 `countsTowardSectionBudget`（逐字节对拍）；
+本地预览**不算预算**，只用同一份分类决定"哪些段能当资源直出"）：
+
+- **打包（`pack-assets.mjs`）把它们当"工具链段"忽略**，不当作应用资源；应用资源只认
+  `picoaide.app.json` 声明过的逻辑路径。**本地预览（`preview.mjs`）同判** —— 否则会
+  出现"本地能打开、线上 404"（预览把 DWARF 直出了，而平台上它根本不在资源集里）。
+- **段总量预算（4 MiB）统计的是"会计入资源集的段"的负载字节和**，`.debug_*` **不计入**
+  —— 它们在发布期就被丢弃，不可能被静态直出、`assets.read` 也读不到。所以
+  "打包时被忽略"与"不占预算"在这一点上是一致的。
+  历史归因（2026-09-21 三轮审计订正）：修复前**两个"段总量"口径本身是一致的**
+  （`wasmmod.Parse` 与 `pack-assets.mjs` 都无条件累加"全部自定义段"），与它们不同口径的是
+  **资产面** —— `assets.go` 在建资源集时跳过工具链段 ⇒ 冲突发生在"资产口径 vs 段总量口径"
+  之间，而不是"脚本 vs 平台"之间。结论（两处必须同测量）不变。
+- **但这不等于取消预算**：非 `.debug_*` 的段（真实资源）超过 4 MiB 仍然照拒。
+  因此调试段本身不会把你顶出预算，**资源才是**；要省体积仍然建议用 `-no-debug`
+  （TinyGo）或 strip 掉调试段 —— 省的是传输与冷编译时间。
+
+要点：**看数字要对同一个口径**。作者侧（打包脚本打印的段总量）与服务端 `Validate`
+报的 `SECTION_OVERRIDE_OVERSIZE` 是**同一个测量**（Go↔Node 逐字节对拍有判据）；
+两侧对不上时以 `Validate` 为准（它是发布闸门）。
+
+### 6.2 发布之后怎么查数据（作者数据面）
+
+应用上线后，"数据到底写进去没有 / 长什么样"不再只能靠猜：
+
+| 想回答的问题 | 用什么 |
+| --- | --- |
+| `db.define` 生效了吗？列名对不对？ | `wasm_app_schema`（或 `GET …/schema`）：表、列、类型、行数、库体积 |
+| 某次请求写了几行？ | `wasm_app_diagnostics` 的单条失败记录里的 `db_rows` / `db_bytes` |
+| 这张表里现在有什么？ | `wasm_app_rows`（或客户端「应用中心 → 详情 → 数据」） |
+| 为什么员工说打不开 / 报错？ | `wasm_app_diagnostics`：先看 `reasons[0]` 的 hints |
+
+三条边界（**不要越过它们向用户承诺**）：
+
+1. **仅发布者本人**可读（他人一律 404，与"应用不存在"同形）；每次调用都会被平台审计
+   （`wasm_app_rows_view`，只记表名与分页，**不记行内容**）。
+2. **敏感列默认脱敏**（按列名启发式：`password` / `token` / `secret` / `phone` / `email` /
+   `id_card` …）。原值只能由**人**在客户端面板点「显示原值（会记审计）」——
+   `wasm_app_rows` 工具没有 `unmask` 参数。看到星号不等于"没写进去"。
+3. **不是导出接口**：一页最多 200 行、单值超长会截断、分页不保证稳定排序。
+   要做导出/对账请另找管理员走运维路径。
 
 ## 7. 容量与配额
 

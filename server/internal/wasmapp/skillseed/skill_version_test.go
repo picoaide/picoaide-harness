@@ -110,6 +110,54 @@ var seededSkillDigests = map[string]string{
 	//（此前任何 `db.query` 都当 notes、`db.exec` 只认 `INSERT INTO notes` ⇒ 作者照抄示例、
 	// 一用第二张表（AI 总结 summaries）就在预览里 DB_DENIED）。示例文件属技能内容 ⇒ 摘要随之变。
 	"c2232f8835d891e1fe3c335cf2101925d84c4fd4d6331e53849d27b2f7d95aa6": "1.4.0",
+
+	// 2.2.0 = **作者数据面**（2026-09-21）：应用作者可以在产品里查自己应用的数据了，
+	// 手册必须跟着讲清三件事 —— 有哪些入口（工具 `wasm_app_schema` /
+	// `wasm_app_diagnostics` / `wasm_app_rows` + 客户端「详情 → 数据」）、默认脱敏口径
+	//（敏感列显示星号，原值只能由人在面板里显式查看并单独记审计；工具面没有 `unmask`）、
+	// 以及"这不是导出接口"的边界。
+	//   - `SKILL.md`：参考文件索引补"数据查看"；
+	//   - `references/publishing.md`：端点表补 `rows`，工具表补三条只读工具；
+	//   - `references/diagnostics.md`：**订正两处与实现不符的承诺** ——
+	//     ① 应用 `log` 并没有"7 天保留"（只进服务端运维日志，平台没有日志查询接口）；
+	//     ② `db_rows`/`db_bytes` 此前"只写不读"，现在真的出现在单条失败记录里；
+	//     并补 §4 数据面（schema/rows 的用法、脱敏、分页语义）。
+	// 为什么要提版本：这三个文件都随镜像下发给员工（R1-pm-8：内容变 ⇒ 版本必须变，
+	// 已安装的客户端靠它判「有更新」）。
+	"8d650d1ec1203f52fe7efd52de20d0d6c632445dffe180a46ef002093c6a494f": "2.2.0",
+
+	// 2.3.0 = **本地预览换成真 SQLite**（2026-09-21）：`examples/go/preview.mjs` 此前是
+	// "内存桩 + 三个正则解析 SQL"——作者在本地永远验不到"写一条→读列表"，也看不到自己
+	// 写进去的数据（那正是"作者不能检查自己的 SQL 数据"在**开发期**的那一半）。
+	// 现在它用 Node 内置 `node:sqlite`：数据落 `<产物目录>/.preview/<名字>.db`（跨调用保留、
+	// 可用任何 SQLite 工具打开），语义与线上同向（单语句、query 只读、保留列 `_row_id`
+	// 不可见/不可提、列类型枚举与 limits 一致），并新增 `--dump-tables` / `--fresh` /
+	// `--db` / `--data-dir` / `--selftest`（8 条自检，Go 侧也有门禁跑它）。
+	//   - `SKILL.md`：第 6 阶段的自测命令与两条使用要点；
+	//   - `examples/go/README.md`：预览一节的说明与命令。
+	"404574e29b69ad73b05bb974683e3092b2b8538c89a4d6108b1ec8ba806515fa": "2.3.0",
+
+	// 2.4.0 = **工具链段（`.debug_*`）口径三处对齐 + 段序判据与平台同判**（2026-09-21 审计修复批）：
+	//   - `scripts/pack-assets.mjs`：段表判据此前只做"纯 id 升序"，会把 TinyGo/LLVM 的
+	//     **规范 DataCount 位置**（Element 之后、Code 之前）误拒；现在与 `wasmmod/parse.go`
+	//     逐条同判（重复优先 → DataCount 特例 → 严格递增），并补上 Tag(13) 的拒绝文案。
+	//   - `examples/go/preview.mjs`：**此前没有 `.debug_` 前缀规则** ⇒ 本地预览把几 MB 的
+	//     DWARF 当应用资源直出（"本地能打开、线上 404"），且段总量预算两侧给出两个数。
+	//     现在与 `assets.ToolchainSectionPrefixes` 同源，并由
+	//     `assets.TestPreviewScriptSharesToolchainSectionPolicy` 双向对拍。
+	//   - 段总量预算口径在两侧统一为"只计会计入资源集的段"（`.debug_*` 不计入，
+	//     但非 `.debug_*` 段超 4 MiB 仍照拒）。
+	"fcef001e48222b32acd8fd85154aaf5b5cb207867c36b1fc811c089d2809a7c2": "2.4.0",
+
+	// 2.5.0 = **作者声明敏感列**（`sensitive_columns`，§5.9 第 8 点后半，2026-09-21）：
+	// 默认脱敏是**列名启发式**，覆盖不到每个业务词汇 ⇒ 给作者一条声明通道（加法：
+	// 声明的列一定脱敏，启发式照旧）。两处生成物随之变：
+	//   - `references/app-config.md`：`picoaide.app.json` 的字段表多一行
+	//     `sensitive_columns`（去重/上限/缺席即不参与的口径都写在字段提示里）；
+	//   - `references/limits.md`：新增两条上限（声明条目数 100、单条列名 64 字节）。
+	// 为什么必须提版本：这两份都是随镜像下发给员工的手册，已安装的客户端靠 version 判
+	//「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
+	"42dba768233467eaa28226e36ee8050981be784c35b04ae7dfb658c115213b01": "2.5.0",
 }
 
 // TestBuiltinSkillVersionTracksContent 断言当前技能内容的摘要已在登记表里，且登记的

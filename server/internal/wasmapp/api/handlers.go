@@ -194,7 +194,10 @@ type Handlers struct {
 	Delete       gin.HandlerFunc // DELETE /apps/wasm/:app_id
 	Diagnostics  gin.HandlerFunc // GET  /apps/wasm/:app_id/diagnostics
 	Schema       gin.HandlerFunc // GET  /apps/wasm/:app_id/schema
-	Catalog      gin.HandlerFunc // GET  /apps/wasm/catalog
+	// Rows 是**作者的数据面**（2026-09-21）：只读浏览自己应用库里的行。
+	// 鉴权沿用 ownedApp（仅发布者本人；他人一律 404 同形），每次调用写审计。
+	Rows    gin.HandlerFunc // GET  /apps/wasm/:app_id/rows?table=&limit=&offset=&unmask=
+	Catalog gin.HandlerFunc // GET  /apps/wasm/catalog
 	// Availability 是**标识唯一性预查**（发布表单的异步查重 + 提交前复检）：
 	// 只读、不编译、不写盘、不占版本号、不进审计。判据与发布同源（GetWasmApp +
 	// checkOwner），因此它的结论与真正提交时的 409 必然一致。
@@ -245,7 +248,12 @@ type Handlers struct {
 	// 管理面诊断与运行时水位（2026-09-19，P1-9/P2-4）：
 	//   diagnostics —— 同一份 diag 数据，出口从"发布者令牌"扩到管理会话；
 	//   runtime     —— 平台级只读水位（编译/执行/事件/磁盘 + 尚未接线的缺口清单）。
-	AdminDiagnostics  gin.HandlerFunc // GET /:app_id/diagnostics（capability:read）
+	AdminDiagnostics gin.HandlerFunc // GET /:app_id/diagnostics（capability:read）
+	// AdminRows/AdminSchema 是管理面同形的只读数据面（排障与合规；capability:read）。
+	// 实现与员工面**共用同一份** payload 组装（respondRows / inspectAppDB），
+	// 差别只有鉴权与操作者账号（都进审计）。
+	AdminRows         gin.HandlerFunc // GET /:app_id/rows（capability:read）
+	AdminSchema       gin.HandlerFunc // GET /:app_id/schema（capability:read）
 	AdminRuntime      gin.HandlerFunc // GET /runtime（capability:read）
 	AdminAppOpens     gin.HandlerFunc // GET /:app_id/opens（capability:read；F16 打开计数，§8.9）
 	AdminOpensSummary gin.HandlerFunc // GET /opens/summary（capability:read；W5 C2 看板概览）
@@ -271,6 +279,7 @@ func NewHandlers(opt Options) *Handlers {
 	h.Delete = h.deleteApp
 	h.Diagnostics = h.diagnostics
 	h.Schema = h.schema
+	h.Rows = h.rows
 	h.Catalog = h.catalog
 	h.Availability = h.availability
 	h.MyReleases = h.myReleases
@@ -294,6 +303,8 @@ func NewHandlers(opt Options) *Handlers {
 	h.AdminLimitsGet = h.adminLimitsGet
 	h.AdminLimitsPut = h.adminLimitsPut
 	h.AdminDiagnostics = h.adminDiagnostics
+	h.AdminRows = h.adminRows
+	h.AdminSchema = h.adminSchema
 	h.AdminRuntime = h.adminRuntime
 	h.AdminAppOpens = h.adminAppOpens
 	h.AdminOpensSummary = h.adminOpensSummary

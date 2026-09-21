@@ -407,7 +407,8 @@ describe('客户端镜像自身的内部一致性（不依赖任何服务端文�
   })
 
   it('字段名集合与"已删除字段"互不重叠（visible / login_required 必须不在集合里）', () => {
-    expect([...APP_CONFIG_FIELDS]).toEqual(['access', 'whitelist', 'purpose', 'data_sensitivity', 'owner', 'window'])
+    // 2026-09-21：`sensitive_columns` 加入字段集（作者声明脱敏列；服务端真源 appcfgspec.go）。
+    expect([...APP_CONFIG_FIELDS]).toEqual(['access', 'whitelist', 'purpose', 'data_sensitivity', 'owner', 'window', 'sensitive_columns'])
     for (const removed of REMOVED_APP_CONFIG_FIELDS) {
       expect(APP_CONFIG_FIELDS).not.toContain(removed)
     }

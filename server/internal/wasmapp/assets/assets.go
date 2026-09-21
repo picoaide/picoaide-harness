@@ -74,7 +74,7 @@ const (
 // 资源集只会浪费内存与段额度，并让作者困惑（`assets.read("name")` 读到一坨符号表）。
 //
 // 判据与分流见 SplitSections；打包脚本 `scripts/pack-assets.mjs` 的拒绝清单与
-// 本表同源（改这里必须同步改它，`assets` 包测试会读脚本源码对拍）。
+// 本表同源（改这里必须同步改它，`assets` 包测试会读脚本源码**双向**对拍）。
 var ToolchainSections = map[string]struct{}{
 	"name":                {},
 	"producers":           {},
@@ -86,27 +86,108 @@ var ToolchainSections = map[string]struct{}{
 	"external_debug_info": {},
 }
 
+// ToolchainSectionPrefixes 是**前缀形态**的工具链段名（同样不当作静态资源）。
+//
+// 为什么必须按前缀判（2026-09-21 审计 P0-5，已实测复现）：DWARF 调试段是一族名字
+// （`.debug_info` / `.debug_line` / `.debug_abbrev` / `.debug_str` / `.debug_ranges` …），
+// 逐个罗列必然漏 —— 而漏掉的后果**不是**"少一条提示"，是：
+//   - Rust `wasm32-wasip1` 默认产物带 **2 083 074 B** 自定义段（占模块 97.7%）全是 DWARF，
+//     会被当成应用资源发布、吃掉 4 MiB 段额度的一半以上；
+//   - 这些段还会像普通资源一样**可被静态直出**（任何人按路径下载），等于把作者机器的
+//     源码路径与结构暴露给使用者。
+//
+// 判据取 `.debug_` 前缀而不是"点开头"：`.well-known/...` 这类合法资源路径不该被误伤。
+//
+// ⚠️ 这份前缀清单同时是**段总量预算**的排除依据（CountsTowardSectionBudget）——
+// 改它等于改"作者能用多少资源额度"，必须同步 `skills/app-builder/scripts/pack-assets.mjs`
+// （`assets` 包测试有 Go↔Node 的逐字节对拍）。
+var ToolchainSectionPrefixes = []string{".debug_"}
+
+// hasToolchainPrefix 报告段名是否命中**前缀形态**的工具链段（唯一实现：
+// IsToolchainSection 与 CountsTowardSectionBudget 共用同一份清单与同一套比较）。
+func hasToolchainPrefix(name string) bool {
+	for _, prefix := range ToolchainSectionPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsToolchainSection 判断段名是否是工具链元数据（**唯一实现**，SplitSections 与测试共用）。
+//
+// 单一实现的理由：这条策略同时服务"发布期分流"与"打包脚本拒绝"，两边各写一份
+// 就会出现"脚本拒了、平台放行"（或反过来）的静默分歧。
+func IsToolchainSection(name string) bool {
+	if _, ok := ToolchainSections[name]; ok {
+		return true
+	}
+	return hasToolchainPrefix(name)
+}
+
+// CountsTowardSectionBudget 报告一个自定义段是否计入 §4.2 的 4 MiB 段总量预算
+// （limits.SectionTotalMaxBytes）。**这是该口径的唯一实现**：wasmmod.Validate 用它算
+// ModuleInfo.CustomBytes，作者侧 `skills/app-builder/scripts/pack-assets.mjs` 镜像同一判据
+// （`assets` 包测试有 Go↔Node 的逐字节对拍）。
+//
+// # 口径（2026-09-21 定案，独立审计 D-A1）
+//
+// 4 MiB 预算计的是**随包资源**的载荷，**不计 `.debug_*` 前缀族**：
+//
+//   - `.debug_*`（DWARF）是平台在发布期**丢弃**的段（SplitSections 从不保留 ⇒ 不进内存
+//     资源集、不可能被静态直出、`assets.read` 也读不到），却由真实工具链**默认**产出
+//     几百 KB ~ 几 MB（审计实测：Zig 0.14.0 `-O Debug` 产物 703,566 字节里 703,313 字节
+//     是 8 个 `.debug_*` 段；Rust `wasm32-wasip1` 默认 2,083,074 字节）。把它们计入的
+//     后果**不是**"更保守"，而是**同一模块两个数**：审计的真实产物上，资产口径
+//     3,584,077 / 4,194,304（通过）而段总量口径 4,287,501 / 4,194,304（被拒），
+//     错误提示却是"请压缩资源" —— 压缩资源对多出来的 703 KB 毫无用处，作者/AI 只能瞎改。
+//   - 精确名单里的工具链段（`name` / `producers` / …）与"不是包内逻辑路径"的段名
+//     （如 Go 的 `go:buildid`）**仍按保守口径计入**：它们小而有界（Go 的 `name` 段约
+//     73 KiB）、每个真实产物都有，排除它们只会改掉平台对存量应用报的数，没有收益。
+//     判据取"平台忽略、且**实践中无界**的那一族"（前缀族）。
+//
+// # 不变式（改这里必须两边同改）
+//
+// **作者在打包脚本里看到的数 = `Validate` 判的数 = 同一个测量**（同一批段、同一口径：
+// 段负载字节和，含段名长度前缀与段名）。任何一边单独改口径，`assets_test.go` 的
+// TestSectionBudgetBytesMatchPackAssetsScript 与 TestSectionBudgetExcludesDiscardedDebugSections
+// 会红。
+//
+// # 认账残留
+//
+// `.debug_*` 不再受 4 MiB 约束，只受 `limits.WasmMaxBytes`（32 MiB 模块体积）约束 ——
+// 它们仍随模块进库、进编译缓存（那部分内存记账在 wasmapp/memprofile 的模块缓存预算里，
+// 与本预算无关）。取舍理由：让"作者可用的资源额度"与"平台真正会装进资源的字节"对齐，
+// 比用一个混入被丢弃字节的数去拒真实工具链产物更重要（审计 D-A1 建议 ①）。
+func CountsTowardSectionBudget(name string) bool {
+	return !hasToolchainPrefix(name)
+}
+
+// IsAssetSection 报告段名是否会成为**包内资源**（分流策略的唯一判据，SplitSections 与
+// 打包脚本行为对拍共用）：
+//
+//	不是工具链元数据（IsToolchainSection）∧ 不是平台独占的配置名 ∧ 是包内逻辑路径预判。
+//
+// 与 CountsTowardSectionBudget 的关系：**资源 ⊆ 预算**。预算比资源宽（把 `name` /
+// `producers` / `go:buildid` 这类小而有界的元数据也算进去，见那条的注释），
+// 但两者都**不含** `.debug_*` —— 这是"作者按脚本的数改、被平台另一个数拒"的收口点。
+func IsAssetSection(name string) bool {
+	return !IsToolchainSection(name) &&
+		name != limits.AppConfigFileName &&
+		IsLogicalAssetPath(name)
+}
+
 // SplitSections 把自定义段分成「静态资源」与「非资源段（忽略并报告）」。
 //
-// 判据（两条都要满足才算资源）：
-//   - 段名不是工具链元数据（ToolchainSections）；
-//   - 段名是**包内逻辑路径**（IsLogicalAssetPath 的纯字符串预判；完整校验在
-//     Set.Build 里做，那里会拒掉超长与非法字符）。
+// 判据只有一条：IsAssetSection（不是工具链元数据、不是平台独占的 `picoaide.app.json`、
+// 是包内逻辑路径预判；完整路径校验在 Set.Build 里做，那里会拒掉超长与非法字符）。
 //
 // `picoaide.app.json` 是平台独占名（配置由平台按库内 `config_json` 注入），
 // 模块里的同名段直接忽略 —— 否则"资源拒绝覆盖"会先占位，导致配置注入不进去。
 func SplitSections(in map[string][]byte) (kept map[string][]byte, skipped []string) {
 	kept = make(map[string][]byte, len(in))
 	for name, data := range in {
-		if _, isToolchain := ToolchainSections[name]; isToolchain {
-			skipped = append(skipped, name)
-			continue
-		}
-		if name == limits.AppConfigFileName {
-			skipped = append(skipped, name)
-			continue
-		}
-		if !IsLogicalAssetPath(name) {
+		if !IsAssetSection(name) {
 			skipped = append(skipped, name)
 			continue
 		}

@@ -2,6 +2,7 @@ package compile
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -429,4 +430,227 @@ func contains(haystack, needle string) bool {
 		}
 		return false
 	})()
+}
+
+// TestCompilerAvoidsUntrustedCacheDir 覆盖"不可信缓存 ⇒ 编译子进程不碰那棵树"。
+//
+// 背景（2026-09-21 四轮审计 P2-①）：执行侧已经"不可信 ⇒ 不用"（`runtime.NewCompilationCache`），
+// 而编译侧此前只在 `require` 档 fail-closed、其余档位（**compose 默认就是 auto**）
+// 告警之后**照用** —— 两侧不对称。这条不对称有后果：wazero 的磁盘缓存是**读 + 写**，
+// 子进程命中就直接加载那份"机器码"并干跑它；`auto` 档在没有 bwrap 的机器上不隔离，
+// 于是"能布置缓存目录的人"可以在**读得到数据根的编译进程**里执行代码。
+//
+// 判据（三条，缺一不可）：
+//  1. 不可信（这里把分代目录做成指向别处的**符号链接**）⇒ `childCacheDir` 必须**偏离**配置目录；
+//  2. 替代目录必须是本进程新建的真实目录、权限 0700，且**攻击者目录里一个文件都没有**
+//     （只断言"换了个路径"挡不住"换了路径但仍然写进攻击者目录"的实现）；
+//  3. **反向对照**：可信目录下必须**原样**使用配置目录 —— 否则"永远换临时目录"会让
+//     "发布期编译暖到执行进程"这条前提静默失效（拿功能换安全）。
+//
+// 变异验证：把不可信分支里的 `childCacheDir = tmp` 改回 `childCacheDir = cache` ⇒ ① 红。
+func TestCompilerAvoidsUntrustedCacheDir(t *testing.T) {
+	child := buildCompileChildOnce(t)
+
+	// ① 构造不可信缓存：`<dataRoot>/_compile-cache/<gen>` 是指向攻击者目录的符号链接。
+	root := t.TempDir()
+	attacker := filepath.Join(root, "attacker-dir")
+	if err := os.MkdirAll(attacker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configuredParent := filepath.Dir(CompileCacheDir(root))
+	if err := os.MkdirAll(configuredParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(attacker, CompileCacheDir(root)); err != nil {
+		t.Skipf("环境不支持符号链接：%v", err)
+	}
+
+	c := newTestCompiler(t, child, func(o *Options) {
+		o.DataRoot = root
+		o.Isolation = IsolationOff // 非 require 档（compose 默认走的就是这条）
+	})
+	if c.childCacheDir == c.CacheDir() {
+		t.Fatalf("缓存目录不可信时，子进程不得使用配置的缓存目录（%s）—— "+
+			"wazero 的磁盘缓存是读+写，命中即加载并干跑那份机器码；auto 档没有 OS 隔离时"+
+			"等于把代码执行权交给能布置该目录的人", c.CacheDir())
+	}
+	info, err := os.Stat(c.childCacheDir)
+	if err != nil {
+		t.Fatalf("替代缓存目录不存在（%s）：%v", c.childCacheDir, err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("替代缓存目录必须是 0700 的真实目录：mode=%#o", info.Mode().Perm())
+	}
+	// ② 攻击者目录必须**一个文件都没有**（平台没有把编译产物写进去）。
+	entries, derr := os.ReadDir(attacker)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("不可信缓存目录被写入：攻击者目录出现 %d 项 %v", len(entries), names)
+	}
+
+	// ②b **真的编译一次**（五轮审计 P1 的教训）：只断言结构体字段是不够的 ——
+	// `-cache-dir`（子进程 argv 的显式声明）与请求里的 `cache_dir` 必须是同一个值，
+	// 子进程的启动自检会比对两者，不一致直接回 INTERNAL。上一版只改了请求、漏了 argv，
+	// 于是"不可信 ⇒ 换临时目录"这条分支上**每一次真实编译都失败**，而只查字段的用例全绿。
+	// 因此这里必须走完整链路：真编译 + 断言产物落在替代目录里 + 攻击者目录仍为空。
+	mod := writeModule(t, t.TempDir(), "untrusted-cache.wasm", wasmtest.Base())
+	if _, cerr := c.Compile(context.Background(), mod); cerr != nil {
+		t.Fatalf("缓存不可信时编译必须仍然成功（改用临时缓存目录即可，见 doc.go 的口径）：%v", cerr)
+	}
+	afterEntries, aerr := os.ReadDir(attacker)
+	if aerr != nil {
+		t.Fatal(aerr)
+	}
+	if len(afterEntries) != 0 {
+		t.Fatalf("编译后攻击者目录仍必须为空，实际 %d 项", len(afterEntries))
+	}
+	cacheEntries, cerr2 := os.ReadDir(c.childCacheDir)
+	if cerr2 != nil {
+		t.Fatal(cerr2)
+	}
+	if len(cacheEntries) == 0 {
+		t.Fatalf("真编译必须在替代缓存目录里留下条目（否则这条判据只是「编译没报错」）: %s", c.childCacheDir)
+	}
+
+	// ③ 反向对照：可信目录必须原样使用（否则"暖缓存"这条前提静默失效）。
+	good := newTestCompiler(t, child, func(o *Options) { o.Isolation = IsolationOff })
+	if good.childCacheDir != good.CacheDir() {
+		t.Fatalf("缓存目录可信时必须原样使用配置目录（否则发布期编译无法暖到执行进程）：child=%s configured=%s",
+			good.childCacheDir, good.CacheDir())
+	}
+}
+
+// TestCompilerFailureDoesNotLeakTempCacheDir 覆盖五轮审计 P2-②：
+// 不可信缓存时创建的替代目录，在 `New` **失败**路径上必须被清掉。
+//
+// 为什么单测能得到确定结论：`os.MkdirTemp("", …)` 落在 `$TMPDIR`，所以把 TMPDIR 指向
+// 一个空目录后，"有没有泄漏"就是"那个目录里有没有东西"（不依赖全局 /tmp 的并发状态）。
+// 触发失败的方式 = `ChildBinary` 指向不存在的路径（`resolveChildBinary` 必失败），
+// 而这一步在替代目录创建**之后**。
+//
+// 变异验证：把 `return fail(err)` 改回 `return nil, err` ⇒ 本用例红。
+func TestCompilerFailureDoesNotLeakTempCacheDir(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+
+	root := t.TempDir()
+	attacker := filepath.Join(root, "attacker")
+	if err := os.MkdirAll(attacker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(CompileCacheDir(root)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(attacker, CompileCacheDir(root)); err != nil {
+		t.Skipf("环境不支持符号链接：%v", err)
+	}
+
+	_, err := New(Options{
+		DataRoot:    root,
+		Isolation:   IsolationOff,
+		ChildBinary: filepath.Join(root, "does-not-exist-compile-child"),
+		Timeout:     5 * time.Second,
+		Logger:      testLogger{t},
+	})
+	if err == nil {
+		t.Fatal("子进程二进制不存在时 New 必须失败（否则本用例是空转）")
+	}
+	entries, derr := os.ReadDir(tmp)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("New 失败后仍在 TMPDIR 里留下 %d 项 %v —— 替代缓存目录必须在失败返回前清掉"+
+			"（调用方拿到 nil 编译器，永远不会调 Close）", len(entries), names)
+	}
+}
+
+// TestUntrustedCacheTempDirIsBoundedByReclaim 覆盖六轮审计 P2-②（r5 引入的回归）：
+// 不可信缓存改用临时目录之后，**回收/水位/度量必须跟着那个目录走**。
+//
+// 问题形态：`ReclaimCache` / `cacheUsage` / `Stats` 此前一律只看**配置目录**
+// （`cacheScanRoot` = `filepath.Dir(c.cache)`），而子进程写的是 `childCacheDir`
+// ⇒ 那条分支上 512 MiB / 4096 条的预算与 `/readyz` 告警**全部静默失效**，
+// 临时目录常落在 tmpfs 上（直接吃内存）。
+//
+// 判据：在不可信缓存分支下真编译若干个不同模块（把上限压到 1 条），
+// `ReclaimCache` 必须真的删掉东西、且 `Stats()` 报的条目数必须来自**实际在用**的那个根。
+//
+// 变异验证：把 `cacheScanRoot` 改回 `filepath.Dir(c.cache)` ⇒ 本用例红（removed=0 / 条目数看不到）。
+func TestUntrustedCacheTempDirIsBoundedByReclaim(t *testing.T) {
+	child := buildCompileChildOnce(t)
+	root := t.TempDir()
+	attacker := filepath.Join(root, "attacker")
+	if err := os.MkdirAll(attacker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(CompileCacheDir(root)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(attacker, CompileCacheDir(root)); err != nil {
+		t.Skipf("环境不支持符号链接：%v", err)
+	}
+	c := newTestCompiler(t, child, func(o *Options) {
+		o.DataRoot = root
+		o.Isolation = IsolationOff
+		o.CacheMaxEntries = 1 // 强制回收必须动手
+		o.CacheMaxBytes = 1 << 20
+	})
+	if c.childCacheDir == c.CacheDir() {
+		t.Fatalf("前置条件不成立：本用例要求走「不可信 ⇒ 临时目录」这条分支")
+	}
+	// ⚠️ 三次编译必须是**内容不同**的模块：wazero 的缓存是内容寻址的
+	//（条目名 = sha256(moduleID‖magic‖CPU features)），同一份字节编译三次只会留
+	// **一条**条目 —— 那样 CacheMaxEntries=1 就永远不触发回收，判据变成空转
+	//（第一版正是这样写的，`removed=0` 是假红）。
+	dir := t.TempDir()
+	modules := [][]byte{
+		wasmtest.Base(),
+		wasmtest.WithDataCount(),
+		wasmtest.Build(
+			wasmtest.TypeSection(wasmtest.TypeFunc(wasmtest.Params(), wasmtest.Params())),
+			wasmtest.FunctionSection(0),
+			wasmtest.MemorySection(2), // 与上面两份都不同（内存页数变了 ⇒ moduleID 变）
+			wasmtest.ExportSection(wasmtest.ExportMemory("memory", 0), wasmtest.ExportFunc("_start", 0)),
+			wasmtest.CodeSection(wasmtest.Body(0x0b)),
+		),
+	}
+	for i, raw := range modules {
+		mod := writeModule(t, dir, fmt.Sprintf("m%d.wasm", i), raw)
+		if _, cerr := c.Compile(context.Background(), mod); cerr != nil {
+			t.Fatalf("第 %d 次编译失败: %v", i+1, cerr)
+		}
+	}
+	before, beforeEntries, uerr := c.cacheUsage()
+	if uerr != nil {
+		t.Fatalf("cacheUsage: %v", uerr)
+	}
+	if beforeEntries < 2 {
+		t.Fatalf("前置条件不成立：三次不同模块的编译应留下 ≥2 条缓存条目（实际 %d，%d 字节）——"+
+			"夹具不成立会让下面的回收断言变成空转", beforeEntries, before)
+	}
+	// 回收：必须真的从**在用的那个根**里删掉条目。
+	removed, _, rerr := c.ReclaimCache()
+	if rerr != nil {
+		t.Fatalf("ReclaimCache: %v", rerr)
+	}
+	if removed == 0 {
+		t.Fatalf("回收什么都没删：临时缓存目录（%s）没有被纳入回收扫描根 ⇒ 上限与水位在这条分支失效",
+			c.childCacheDir)
+	}
+	// 度量必须来自在用的根（Stats 的 compile_cache_files 取自同一处）。
+	_, entries := c.newestCacheMtime()
+	if entries > 1 {
+		t.Fatalf("回收后当前缓存仍剩 %d 条（上限 1）", entries)
+	}
 }

@@ -94,8 +94,11 @@ const POOL_DEFAULTS = {
  *
  * 按 locale 取值（调用点现取，不缓存）：这段文案既进模型上下文，也进用户看得见的
  * 活动时间线（`noteControlBlock` / 工具错误），所以它必须跟界面语言一致。
+ *
+ * **导出**：逐 surface 的用户闸（应用窗口的「我来操作」，§16.1 第 3 条）必须与池级
+ * 闸门说**同一句话** —— 复制一份文案出去就是两份会漂移的判据。
  */
-function gateRefusal(locale: HostLocale): string {
+export function gateRefusal(locale: HostLocale): string {
   return hostCopy(
     locale,
     '用户正在操作浏览器（我来操作）—— 请在浏览器窗口点「交给 AI」交还控制权后重试',

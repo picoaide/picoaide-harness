@@ -318,6 +318,156 @@ func TruncatedSection() []byte {
 	return slices.Clip(out)
 }
 
+// DataCountSection 编码 DataCount 段（段 id 12）。
+//
+// 为什么单独一个段编码器：DataCount 是 **Wasm 2.0 / bulk-memory** 引入的、唯一不按
+// 段 id 数值升序摆放的段（规范位置 = Element(9) 之后、Code(10) 之前）。平台预检
+// 曾只做"纯 id 升序"，于是带 DataCount 的产物（TinyGo 默认、启用 bulk-memory 的
+// LLVM/Rust/Zig 配置）陷入死局：放规范位置被预检拒、改数值升序被 wazero 拒。
+// 夹具必须能构造这个形状，判据才存在。
+func DataCountSection(count uint32) []byte { return Section(12, Uleb(uint64(count))) }
+
+// DataSection 编码数据段（段 id 11）：vec( data )，这里放一个"主动、内存 0"的段。
+//
+// ⚠️ 偏移表达式是**常量表达式**（i32.const 0 ; end），不是函数体：**不能**用 Body()
+// ——它会给函数体加"局部变量组计数"前缀，放进常量表达式就是非法操作码 0x00
+// （本夹具第一版正是这样错的，被 wazero 报 `invalid byte for const expression op code: 0x0`）。
+func DataSection(payload ...byte) []byte {
+	const offsetExprI32Const0 = "\x41\x00\x0b" // i32.const 0 ; end
+	seg := Cat([]byte{0x00}, []byte(offsetExprI32Const0), VecCount(uint64(len(payload)), payload))
+	return Section(11, VecCount(1, seg))
+}
+
+// WithDataCount 返回一个**带 DataCount 段且按规范位置摆放**的可编译模块。
+//
+// 结构：type ()->() / func[_start] / memory 1 页 / export(memory,_start) /
+// DataCount(1) / code: `data.drop 0; end` / data: 1 个主动段（1 字节）。
+// code 段用到 `data.drop` ⇒ 按规范**必须**先声明 DataCount，否则 wazero 的校验
+// 会直接拒（这正是"预检放行、真编译报错"的另一半）。
+func WithDataCount() []byte {
+	return Build(
+		TypeSection(TypeFunc(Params(), Params())),
+		FunctionSection(0),
+		MemorySection(1),
+		ExportSection(ExportMemory("memory", 0), ExportFunc("_start", 0)),
+		DataCountSection(1),
+		CodeSection(Body(0xFC, 0x09, 0x00, 0x0B)), // data.drop 0 ; end
+		DataSection(0x2a),
+	)
+}
+
+// WithDuplicateSection 返回一个**重复出现某个非自定义段**的模块（段 id 至多一次）。
+//
+// 为什么需要它（2026-09-21 独立审计 P1-1）：平台此前的段序判据是 `id < lastSectionID`
+// （只拦倒序），重复段静默通过；而 wazero 的 `checkSectionOrder` 是 `current > previous`
+// （严格递增）⇒ 重复 Function/Table/Global/Element/Code/Data 段会被平台预检放行、
+// 被真编译拒绝。本夹具让"预检必须与 wazero 同判"这条判据可复跑。
+//
+// ⚠️ 两次出现必须摆在**该段的规范位置**上（第一版夹具把它们追加到段表末尾，于是
+// 低 id 的 table/global/element 会先撞上"顺序非法"判据，测到的是顺序而不是重复——
+// 判据本身没错，但**测不到"重复"这条分支**。见 TestValidateRejectsDuplicateSectionAtTail
+// 对"末尾重复"形态的独立判据）。
+//
+// @param id - 要重复的段 id（0..12，且必须是本夹具会安置的段）。
+// @param first - 第一次出现的段载荷。
+// @param second - 第二次出现的段载荷。
+func WithDuplicateSection(id byte, first, second []byte) []byte {
+	dup := Cat(Section(id, first), Section(id, second))
+	return Build(concatSections(buildDuplicateBase(id, dup))...)
+}
+
+// WithDuplicateSectionAtTail 返回一个把某个低 id 段**重复追加在段表末尾**的模块。
+//
+// 与 WithDuplicateSection 的差别是"重复"与"乱序"同时成立：第一次出现落在段表末尾
+// （相对 lastSectionID 是倒序，但因为是首次出现而被顺序判据放过），紧随其后的副本
+// 命中重复判据。此时平台的判据顺序决定文案：重复必须优先（指向病根「出现了两次」），
+// 而不是"出现在段 id 10 之后"。
+func WithDuplicateSectionAtTail(id byte, first, second []byte) []byte {
+	base := buildDuplicateBase(id, nil) // 规范段表，但不含 id 段（首次出现挪到末尾）
+	return Build(append(concatSections(base),
+		Section(id, first),
+		Section(id, second),
+	)...)
+}
+
+// 段 id 常量（core spec）。本包是独立夹具，不依赖 wasmmod（那里也有一份，
+// 两边各自钉在规范上；夹具侧只用到"排序"这一个语义）。
+const (
+	secType     byte = 1
+	secFunction byte = 3
+	secMemory   byte = 5
+	secExport   byte = 7
+	secCode     byte = 10
+)
+
+// buildDuplicateBase 生成规范顺序的段表；dup 非空时把它插到目标段的规范位置上。
+func buildDuplicateBase(id byte, dup []byte) [][]byte {
+	var out [][]byte
+	put := func(v []byte) {
+		if len(v) > 0 {
+			out = append(out, v)
+		}
+	}
+	if dup != nil && id < secType {
+		put(dup)
+	}
+	put(TypeSection(TypeFunc(Params(), Params())))
+	if dup != nil && id == secType {
+		put(dup)
+	}
+	if dup != nil && id > secType && id < secFunction {
+		put(dup)
+	}
+	put(FunctionSection(0))
+	if dup != nil && id == secFunction {
+		put(dup)
+	}
+	if dup != nil && id > secFunction && id < secMemory {
+		put(dup)
+	}
+	put(MemorySection(1))
+	if dup != nil && id == secMemory {
+		put(dup)
+	}
+	if dup != nil && id > secMemory && id < secExport {
+		put(dup)
+	}
+	put(ExportSection(ExportMemory("memory", 0), ExportFunc("_start", 0)))
+	if dup != nil && id == secExport {
+		put(dup)
+	}
+	if dup != nil && id > secExport && id < secCode {
+		put(dup)
+	}
+	put(CodeSection(Body(0x0b)))
+	if dup != nil && id == secCode {
+		put(dup)
+	}
+	if dup != nil && id > secCode {
+		put(dup)
+	}
+	return out
+}
+
+// concatSections 把段编码列表拼成一个字节串（Build 之前的"段表"形态）。
+func concatSections(sections [][]byte) [][]byte { return sections }
+
+// WithDataCountMisordered 返回一个把 DataCount 摆在 Code **之后**的模块。
+//
+// 这是修复前的"绕过姿势"（为了满足纯 id 升序）：预检曾放行，真编译期 wazero 报
+// `invalid section order`。现在预检必须自己拒掉它（与 wazero 同判）。
+func WithDataCountMisordered() []byte {
+	return Build(
+		TypeSection(TypeFunc(Params(), Params())),
+		FunctionSection(0),
+		MemorySection(1),
+		ExportSection(ExportMemory("memory", 0), ExportFunc("_start", 0)),
+		CodeSection(Body(0xFC, 0x09, 0x00, 0x0B)), // data.drop 0 ; end
+		DataCountSection(1), // ← 错位：DataCount 必须在 Code 之前
+		DataSection(0x2a),
+	)
+}
+
 // Garbage 返回完全不含 wasm 头的字节串。
 func Garbage(n int) []byte {
 	out := make([]byte, n)

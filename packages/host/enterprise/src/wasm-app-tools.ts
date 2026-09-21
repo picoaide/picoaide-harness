@@ -38,12 +38,16 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import { APP_BUILDER_SKILL, builtinSkillInstallHint, isBuiltinSkillInstalled } from './builtin-skills.ts'
 import type { Session } from './server-connector/config.ts'
+import type { AiRowsConsentStore } from './wasm-apps-ai-rows-consent.ts'
 import {
   CLIENT_UPLOAD_TIMEOUT_MS,
   errorEnvelopeOf,
   listCatalog,
   parseWasmBody,
   publishApp,
+  readAppDiagnostics,
+  readAppRows,
+  readAppSchema,
   validateApp,
   wasmError,
   type WasmResponse,
@@ -55,7 +59,16 @@ import {
  * 三个名字只在这里出现一次：注册与测试断言共用同一份真源（写死两处的话，
  * "工具改名了但测试还在断言旧名字"会静默通过）。
  */
-export const WASM_APP_TOOL_NAMES = ['wasm_app_list', 'wasm_app_validate', 'wasm_app_publish'] as const
+export const WASM_APP_TOOL_NAMES = [
+  'wasm_app_list',
+  'wasm_app_validate',
+  'wasm_app_publish',
+  // 回读面（2026-09-21）：作者排障闭环的另一半。此前 AI 只能"写"不能"看"，
+  // 而技能文档却要求它"先读诊断，再改代码" —— 那条链路上根本没有工具。
+  'wasm_app_schema',
+  'wasm_app_diagnostics',
+  'wasm_app_rows',
+] as const
 
 /**
  * 工具的单次预算：120 s。
@@ -83,7 +96,7 @@ export const WASM_APP_TOOL_TIMEOUT_MS = 120_000
 // `appcfg-contract.ts`），同样对拍那份 JSON —— 三处都指向同一个真源。
 
 /** `picoaide.app.json` 的**封闭**字段集合（多一个未知字段服务端即拒）。 */
-export const APP_CONFIG_FIELDS = ['access', 'whitelist', 'purpose', 'data_sensitivity', 'owner', 'window'] as const
+export const APP_CONFIG_FIELDS = ['access', 'whitelist', 'purpose', 'data_sensitivity', 'owner', 'window', 'sensitive_columns'] as const
 
 /** `picoaide.app.json` 的字段名类型。 */
 export type AppConfigField = (typeof APP_CONFIG_FIELDS)[number]
@@ -121,6 +134,7 @@ export const APP_CONFIG_FIELD_DESCRIPTIONS: Record<AppConfigField, string> = {
   purpose: '一句话用途声明（首版必填）：这个应用做什么、给谁用。会显示在应用中心。',
   data_sensitivity: '数据敏感度声明（首版必填）：例如「公开」「内部」「敏感」。写给管理员看的一行。',
   owner: '负责人声明（首版必填）：出问题找谁（姓名 / 工号 / 账号）。**这不是平台归属**——平台归属取自登录态（谁发布就是谁的），不可伪造。',
+  sensitive_columns: '作者**显式声明**的敏感列名（可选，缺省不声明）：这里列出的列在作者数据面（`wasm_app_rows` / 客户端「数据」面板）**一定**按敏感处理（显示 ***），即使列名不在平台的启发式名单里。与启发式取并集（声明只会更严，不会让某列变得可见）；上限 100 条、单条 ≤64 字节、大小写不敏感去重，越界 ⇒ 发布期 APP_CONFIG_INVALID。整个字段缺席 = 沿用上一版生效值；显式给空数组 = 本版不声明。原值仍只能由人在面板里显式查看（AI 工具面永远拿不到原值）。',
   window: '窗口的默认尺寸与强制宽高比。`window.ratio` 是客户端 resize 时锁定的比例（"W:H" 或浮点，合法区间 0.25–4.0，越界 ⇒ 发布期 APP_CONFIG_INVALID）；`window.width` / `window.height` 是首次打开的默认尺寸（缺省 1280×720，写了 ratio 时按比例校正）。未知子键（如 window.zoom）会被拒；整个 window 缺席 = 沿用上一版生效值。',
 }
 
@@ -160,6 +174,11 @@ const APP_CONFIG_PROPERTIES = {
     description: APP_CONFIG_FIELD_DESCRIPTIONS.owner,
   },
   // §6 / appcfg.json 的 `window`（R2-S-2）：可选整体对象，未知子键服务端拒。
+  sensitive_columns: {
+    type: 'array',
+    items: { type: 'string' },
+    description: APP_CONFIG_FIELD_DESCRIPTIONS.sensitive_columns,
+  },
   window: {
     type: 'object',
     // 未知子键服务端会拒（`window.zoom` 这类），所以这里也封闭。
@@ -320,6 +339,60 @@ export interface WasmAppToolOptions {
    * apply 之后很久才渲染的 —— 模块级常量会把语言钉死在导入那一刻。
    */
   locale: () => HostLocale
+  /**
+   * 「允许 AI 读取此应用的数据」的**授权状态**（2026-09-21 用户拍板：默认关）。
+   *
+   * 必须是**与本机路由同一个实例**（`auth-gate.ts` 里创建一次、两处共用）：
+   * 面板写它、`wasm_app_rows` 读它，两个实例就会出现"点了允许但工具仍拒绝"。
+   * 缺省（最小组合/单测）⇒ 一份内存记录 = 谁都没授权（fail-closed）。
+   */
+  aiRowsConsent?: AiRowsConsentStore
+}
+
+/** 授权状态缺省实现：内存记录，永远"未授权"（fail-closed，且不假装记得住）。 */
+const DENY_ALL_AI_ROWS: AiRowsConsentStore = {
+  isEnabled: () => Promise.resolve(false),
+  setEnabled: () => Promise.resolve(),
+}
+
+/**
+ * 「AI 读行数据还没有被授权」的**稳定错误码**（跨端契约：客户端面板与技能文档都按它
+ * 解释"为什么工具拒绝了"）。写死两处会让改名静默通过，所以注册与判据共用这一个常量。
+ */
+export const AI_ROWS_NOT_AUTHORIZED = 'AI_ROWS_NOT_AUTHORIZED'
+
+/**
+ * 「AI 读行数据还没有被授权」的**结构化拒绝**（稳定 code：`AI_ROWS_NOT_AUTHORIZED`）。
+ *
+ * 为什么必须是拒绝而不是空结果：空结果（`{rows:[]}`）会让模型把"人还没授权"读成
+ * "这张表是空的 / 数据没写进去"，于是它会去改代码 —— 方向完全错。这里给出**可行动的**
+ * 下一步（让用户去数据面板打开开关），并且**零出站**（未授权时一个字节都不发往服务端）。
+ *
+ * 三条不变量：
+ *  - 即使被授权，AI 也**只看得到脱敏列**（`wasm_app_rows` 没有 `unmask` 参数）；
+ *  - 授权是**按应用**的（看得到 A 不等于看得到 B）；
+ *  - 拒绝里**不落**任何行内容（一个字节都没有，因为压根没有出站）。
+ * @param locale - 宿主语言（按调用解析）。
+ * @param appId - 应用标识。
+ * @returns 错误信封（`status: 403`）。
+ */
+function aiRowsNotAuthorized(locale: HostLocale, appId: string): WasmResponse {
+  return wasmError({
+    code: AI_ROWS_NOT_AUTHORIZED,
+    message: hostCopy(
+      locale,
+      `AI 还没有被授权读取应用 ${appId} 的数据（这是默认关的能力）`,
+      `AI is not authorized to read the data of app ${appId} (this capability is off by default)`,
+    ),
+    status: 403,
+    details: { app_id: appId, authorized: false },
+    hints: [
+      '这是**默认关**的：AI 读行数据必须由人在客户端里显式打开。请让用户打开「应用中心 → 该应用的详情 → 数据」面板，勾选「允许 AI 读取此应用的数据（仅脱敏列，每次调用写审计）」，然后重试本工具。',
+      '不要改用 curl / 浏览器 / shell 去绕这条闸门：那条路要么没有员工令牌，要么被本机持有性证明挡住（且每次调用都会被平台审计）。',
+      '即使被授权，本工具也**只**返回脱敏后的列（没有 unmask 参数）。要看原值必须由人在同一个面板里点「显示原值（会记审计）」。',
+      '授权是**按应用**的：为 A 应用打开不代表为 B 应用打开。',
+    ],
+  })
 }
 
 /**
@@ -562,6 +635,109 @@ export function registerWasmAppTools(ctx: Context, options: WasmAppToolOptions):
         ...(args.config === undefined ? {} : { config: args.config }),
         ...(args.uploadId === undefined ? {} : { uploadId: args.uploadId.trim() }),
       }))
+    },
+  })))
+
+  // ------------------------------------------------- schema / diagnostics / rows
+  //
+  // 回读面（2026-09-21）：这一步之前，工具面只有"写"（list/validate/publish），
+  // 而技能文档要求模型"先读诊断，再改代码" —— 那条链路上根本没有工具。
+  //
+  // 三条工具的能力边界（与产品口径一致，见 server/internal/wasmapp/api/rows.go）：
+  //   - schema / diagnostics：**零隐私**（结构、失败码、hints），默认可读；
+  //   - rows：只读一页行，且**永远请求服务端的默认脱敏**（本文件不透传 unmask）
+  //     —— 原值只能由人在客户端面板里显式点「显示原值（会记审计）」。
+  //
+  // **为什么 rows 是"注册但拒绝"而不是"未授权就不注册"**（2026-09-21 用户拍板后定：
+  // 默认关 + 显式授权卡）：
+  //   - 授权是**按应用**且**运行期可变**的（人在面板上随时开/关）。按状态动态增删工具
+  //     会让"模型可见的工具清单"随外部状态漂移：同一段对话里前一句有、后一句没有，
+  //     而模型无法解释、只能重试；
+  //   - 拒绝是一个**可行动的答案**（稳定 code + "让用户去数据面板打开"的指路），
+  //     而"清单里没有这个工具"只会让模型以为平台不支持读数据 —— 它连"该请人授权"
+  //     都想不到，转而用 curl/浏览器硬闯（那两条路分别没有令牌、被持有性证明挡住）。
+  //   - 代价（如实认账）：清单里**常驻**一个当前不可用的工具。这个代价落在描述里 ——
+  //     description 第一句就写清"这是默认关的能力、拿到 AI_ROWS_NOT_AUTHORIZED 该做什么"。
+
+  disposers.push(tools.register(defineTool({
+    name: 'wasm_app_schema',
+    description: [
+      '读取一个应用的**表结构**（表名、列名/类型、行数、库体积与上限）。只读。',
+      '排障用法：数据对不上时先跑它，确认表与列**真的像你以为的那样**（db.define 没生效、列名拼错、表名大小写不符都在这里现形），再用 wasm_app_rows 看几行数据。',
+      '仅发布者本人可读（他人与"应用不存在"同形 404）；每次调用都会被平台审计。',
+    ].join(''),
+    parameters: {
+      appId: { type: 'string', required: true, description: APP_ID_DESCRIPTION },
+    },
+    output,
+    timeoutMs: WASM_APP_TOOL_TIMEOUT_MS,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const locale = options.locale()
+      const allowed = gate(locale, 'read')
+      if (!allowed.ok) return asToolResult(allowed.response)
+      return asToolResult(await readAppSchema(ctx, allowed.session, args.appId.trim(), exec.signal))
+    },
+  })))
+
+  disposers.push(tools.register(defineTool({
+    name: 'wasm_app_diagnostics',
+    description: [
+      '读取一个应用的**运行诊断**（时间窗口内的调用总数、失败/被杀次数、按次数排序的 reason_code 与可操作 hints、单条失败记录含 guest 退出码与 stderr 尾巴）。只读。',
+      '这是技能文档里"先读诊断，再改代码"的那个入口：`reasons[0]` 的 hints 就是下一步该改什么，不要靠猜。',
+      '`outcome` 是 `error` 或 `killed` 都算失败；响应结构是 `{"diagnostics":{summary:{...},failures:[...],hints:[...]}}`。',
+    ].join(''),
+    parameters: {
+      appId: { type: 'string', required: true, description: APP_ID_DESCRIPTION },
+      minutes: { type: 'integer', description: '诊断窗口（分钟；缺省 24 小时，上限 = 调用事件保留期）' },
+    },
+    output,
+    timeoutMs: WASM_APP_TOOL_TIMEOUT_MS,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const locale = options.locale()
+      const allowed = gate(locale, 'read')
+      if (!allowed.ok) return asToolResult(allowed.response)
+      return asToolResult(await readAppDiagnostics(ctx, allowed.session, args.appId.trim(), args.minutes, exec.signal))
+    },
+  })))
+
+  disposers.push(tools.register(defineTool({
+    name: 'wasm_app_rows',
+    description: [
+      '读取一个应用某张表的一页数据（只读；缺省 50 行、最多 200 行；用 offset 翻页）。',
+      '**这是默认关的能力**：必须先由人在客户端「应用中心 → 该应用详情 → 数据」面板里打开「允许 AI 读取此应用的数据」，',
+      '否则本工具会返回 `AI_ROWS_NOT_AUTHORIZED`（**不会**发出任何请求，也**不会**回一个空表让你误以为数据没写进去）。',
+      '拿到该错误时请把面板路径告诉用户并请其打开开关，然后重试；不要改用 curl/浏览器去绕（那条路没有令牌）。',
+      '**敏感列默认脱敏**（服务端按列名判定，值显示为 ***）：本工具**不能**解掉这层保护 —— 要看原值只能由人在同一个面板里点「显示原值」（那一次会单独记审计）。',
+      '用法：先用 wasm_app_schema 拿到表名与列名（表名规则：小写字母开头、只含 [a-z0-9_]），再用本工具确认"数据是不是真的写进去了"。',
+      '返回 `total_rows` / `has_more` / `truncated_values`：分页与截断都以服务端返回的这两个字段为准，不要按返回条数猜。',
+      '每次调用都会被平台审计（动作 `wasm_app_rows_view`），审计只记表名与分页，不记行内容。',
+    ].join(''),
+    parameters: {
+      appId: { type: 'string', required: true, description: APP_ID_DESCRIPTION },
+      table: { type: 'string', required: true, description: '表名（db.define 用的那个；先用 wasm_app_schema 查）' },
+      limit: { type: 'integer', description: '本页行数（缺省 50，上限 200；越界会被服务端收敛）' },
+      offset: { type: 'integer', description: '跳过的行数（缺省 0；翻页用）' },
+    },
+    output,
+    timeoutMs: WASM_APP_TOOL_TIMEOUT_MS,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const locale = options.locale()
+      const allowed = gate(locale, 'read')
+      if (!allowed.ok) return asToolResult(allowed.response)
+      const appId = args.appId.trim()
+      // **默认关的闸门**（2026-09-21 用户拍板）：未授权 ⇒ 结构化拒绝且**零出站**。
+      // 判据顺序是契约的一部分：先查本机授权，再碰任何出站 —— 顺序反过来就会出现
+      // "人还没授权，但服务端已经收到一次调用（并写了一条审计）"。
+      const consent = options.aiRowsConsent ?? DENY_ALL_AI_ROWS
+      if (!await consent.isEnabled(appId)) return asToolResult(aiRowsNotAuthorized(locale, appId))
+      return asToolResult(await readAppRows(ctx, allowed.session, appId, {
+        table: args.table.trim(),
+        ...(args.limit === undefined ? {} : { limit: args.limit }),
+        ...(args.offset === undefined ? {} : { offset: args.offset }),
+      }, exec.signal))
     },
   })))
 

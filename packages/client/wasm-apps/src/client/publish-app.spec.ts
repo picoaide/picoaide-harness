@@ -82,11 +82,17 @@ describe('发布请求体：字段名与服务端 appcfg 逐字一致', () => {
     expect(body.wasm_base64).toBe('BASE64')
     expect(body.title).toBe('值班便签')
     expect(body.changelog).toBe('首版')
-    // 键集合 = 契约里的字段集合 **减去 window**（`APP_CONFIG_FIELDS` 是唯一真源；
-    // `window` 是"作者声明才有"的那一个：不发 = 不声明，而不是"声明了缺省比例"）。
-    const withoutWindow = [...APP_CONFIG_FIELDS].filter(field => field !== 'window').sort()
-    expect(Object.keys(body.config as Record<string, unknown>).sort()).toEqual(withoutWindow)
+    // 键集合 = 契约里的字段集合 **减去"作者声明才有"的那几个**（`APP_CONFIG_FIELDS`
+    // 是唯一真源）。它们是 `window`（窗口几何）与 `sensitive_columns`（声明脱敏列，
+    // 2026-09-21 新增）：**不发 = 不声明**，而不是"声明了缺省值" —— 服务端对缺席有
+    // 继承语义，客户端不替它写一个空值。
+    // ⚠️ 这条断言此前只减 `window`；`sensitive_columns` 加进契约后它必须同步，
+    // 否则"新增一个声明型字段"会被这条用例当成"客户端漏发"（同一类漂移）。
+    const declaredOnly = new Set(['window', 'sensitive_columns'])
+    const alwaysSent = [...APP_CONFIG_FIELDS].filter(field => !declaredOnly.has(field)).sort()
+    expect(Object.keys(body.config as Record<string, unknown>).sort()).toEqual(alwaysSent)
     expect(body.config).not.toHaveProperty('window')
+    expect(body.config).not.toHaveProperty('sensitive_columns')
     expect(body.config).toEqual({
       access: 'whitelist',
       whitelist: ['alice', 'bob'],

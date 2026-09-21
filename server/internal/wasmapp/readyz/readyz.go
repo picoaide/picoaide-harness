@@ -197,6 +197,28 @@ type Options struct {
 	// 不可区分**这件事以空值显式表达，绝不伪造一个默认档（那会正好掩盖 P0-2 要防的分叉：
 	// 探针显示按默认档算账，实际跑的是控制台配置）。
 	MemoryPlan func() MemoryPlan
+	// ExecCacheMode 报告**执行侧实际生效**的编译缓存模式（`disk` / `memory`）。
+	//
+	// 为什么它必须能被看见（2026-09-21 独立审计 P1-① 的可观测面）：磁盘缓存不可用时
+	// 执行侧**降级为进程内缓存**（`runtime.NewCompilationCache` 返回 `(nil, nil)`，
+	// `runtime.New` 换成 `wazero.NewCompilationCache()`）—— 这条"缓存不可用 ⇒ 慢一点"
+	// 的取舍此前只有一行日志，容器里日志轮转后就再也查不到"这台实例的跨进程暖缓存
+	// 其实没生效"。
+	//
+	// ⚠️ 取值**必须**来自运行时自己（`appserver.Server.RuntimeCacheMode` →
+	// `runtime.Runtime.CacheMode`），不许在装配层按"目录看起来能不能建"重算一遍：
+	// 第二个判断就是分叉本身（探针说 disk、实际跑 memory）。装配点只做 `string(...)`
+	// 转换，不参与判定。
+	//
+	// nil ⇒ 字段为空串（"没注入"与"某一种模式"不可混淆）。
+	ExecCacheMode func() string
+	// CompileCacheMode 报告**编译侧实际生效**的编译缓存模式（`configured` / `temporary`）。
+	//
+	// 与 ExecCacheMode 同一纪律：取值来自 `compile.Compiler.CacheMode()`（唯一真源 =
+	// 决定子进程 `-cache-dir` 的那个字段）。编译子系统不可用时**不报任何一种模式**
+	// （空串）—— 此时 `compile_available=false` 已经说明了"没有编译面"，
+	// 而"临时目录"与"没有编译器"是完全不同的两件事，不能混成一个值。
+	CompileCacheMode func() string
 }
 
 // Snapshot 是 `/readyz` 的响应体。
@@ -214,6 +236,12 @@ type Options struct {
 // 理论峰值多少、按可用内存的允许水位判定结果如何"。`mem_source=none`（两个来源都读不到）
 // ⇒ 内存自检被跳过，这件事以非阻塞 reason 显式说出来 —— 零水位与"未知"不能同形
 // （那正是旧实现的 fail-open）。
+//
+// 缓存模式维（`exec_cache_mode` / `compile_cache_mode`）：两侧的编译缓存都可能**降级**
+// （执行侧磁盘缓存不可用 ⇒ 进程内缓存；编译侧缓存目录不可信 ⇒ 临时目录），而两条降级
+// 此前都只有日志。这两个字段把"实际生效的模式"暴露出来，取值**只**来自运行时/编译器
+// 自己的访问器（不许在装配层重算），因此不可能与"真的用了哪个缓存"分叉 ——
+// 详见 Options.ExecCacheMode / Options.CompileCacheMode。
 type Snapshot struct {
 	OK               bool     `json:"ok"`
 	Reasons          []string `json:"reasons,omitempty"`
@@ -228,9 +256,21 @@ type Snapshot struct {
 	MemBudgetLimitByte int64 `json:"mem_budget_limit_bytes"`
 	// MemBudgetOK / MemBudgetKnown 是判定结果与"是否真的判定过"
 	//（known=false ⇒ 读不到可用内存，这一维没有判定，不是"判定通过"）。
-	MemBudgetOK      bool   `json:"mem_budget_ok"`
-	MemBudgetKnown   bool   `json:"mem_budget_known"`
-	CompileAvailable bool   `json:"compile_available"`
+	MemBudgetOK      bool `json:"mem_budget_ok"`
+	MemBudgetKnown   bool `json:"mem_budget_known"`
+	CompileAvailable bool `json:"compile_available"`
+	// ExecCacheMode 是执行侧**实际生效**的编译缓存模式：`disk` 或 `memory`。
+	//
+	// 制造它的那条降级（磁盘缓存不可用 ⇒ 进程内缓存）不是错误、也不影响功能，
+	// 但它是"为什么这台实例每个应用首个请求都慢"的唯一答案，所以必须在探针上可读
+	// （此前只有一行日志）。空串 = 装配层未注入提供者（与"某一模式"不可混淆）。
+	ExecCacheMode string `json:"exec_cache_mode"`
+	// CompileCacheMode 是编译侧**实际生效**的编译缓存模式：`configured` 或 `temporary`。
+	//
+	// `temporary` 表示发布期编译**不读也不写**配置的缓存目录（该目录被判不可信，
+	// 见 compile.New）：编译功能照常，但缓存永不跨次复用。空串 = 无编译子系统
+	// （看 compile_available）或装配层未注入。
+	CompileCacheMode string `json:"compile_cache_mode"`
 	CompileQueue     int    `json:"compile_queue_depth"`
 	CompileBusy      bool   `json:"compile_busy"`
 	CacheBytes       int64  `json:"compile_cache_bytes"`
@@ -374,6 +414,10 @@ func (c *Checker) collect() Snapshot {
 			s.Reasons = append(s.Reasons, reason)
 		}
 	}
+	if c.opt.CompileCacheMode != nil {
+		// 取值来自编译侧自己（见 Options.CompileCacheMode 的"不许重算"纪律）。
+		s.CompileCacheMode = c.opt.CompileCacheMode()
+	}
 	if c.opt.Compiler != nil {
 		cs := c.opt.Compiler()
 		s.CompileQueue = cs.QueueDepth
@@ -405,6 +449,10 @@ func (c *Checker) collect() Snapshot {
 	if c.opt.Events != nil {
 		es := c.opt.Events()
 		s.EventsDropped, s.EventsFailed, s.EventsWritten = es.Dropped, es.Failed, es.Written
+	}
+	if c.opt.ExecCacheMode != nil {
+		// 执行侧模式同理：来自运行时自己的 CacheMode()，装配点只做 string 转换。
+		s.ExecCacheMode = c.opt.ExecCacheMode()
 	}
 	// 内存维（R1-rt-1）：把读到的来源与数值暴露出来；读不到时显式说明"自检被跳过"。
 	// 这是**非阻塞**说明项（见 reasonMemUnavailable），AllowPublish 也把它过滤掉。

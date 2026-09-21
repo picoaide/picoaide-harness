@@ -153,6 +153,11 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@picoaide/dsh-browser/lib/index.js',
   'node_modules/@picoaide/dsh-browser/lib/client.js',
   'node_modules/@picoaide/dsh-browser/lib/invariant.js',
+  // surface seam（§16.1）：`@picoaide/dsh-wasm-apps-host/lib/index.js` **值导入**
+  // `BROWSER_SURFACE_SERVICE` 去取 browser 插件 provide 的 surface 注册表 —— 应用窗口
+  // 就是经它注册成 `kind:'app'` 的（2026-09-21 审计 P0-1）。缺这个产物 ⇒ 打包版
+  // 启动即 ERR_MODULE_NOT_FOUND（与 2026-09-20 的 app-proof 事故同一形态）。
+  'node_modules/@picoaide/dsh-browser/lib/surface.js',
   'node_modules/@picoaide/dsh-browser/package.json',
   'node_modules/@picoaide/dsh-browser/cordis.patch.yml',
   'node_modules/@picoaide/dsh-cron/lib/index.js',

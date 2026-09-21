@@ -160,12 +160,30 @@ function upstreamTokens() {
   return defined
 }
 
-/** 递归列出我们的源码文件。 */
+/**
+ * 递归列出我们的源码文件。
+ *
+ * ⚠️ 必须容忍"扫描期间条目消失"（2026-09-21）：readdirSync 拿到名字与 statSync 之间
+ * 存在窗口，而工作树里可能有**活着的 Unix socket / 正在被清理的 e2e 残留目录**
+ * （实测：packages/host/desktop/.e2e-sidebar/ 下的 SingletonCookie 在扫描时消失 ⇒
+ * stat 抛 ENOENT，整个守卫以一句 stat 错误崩掉，看起来像主题令牌违规，其实是与主题
+ * 无关的竞态）。消失的条目直接跳过；**其它错误照旧抛出**（EACCES 之类是真实配置
+ * 问题，不该被静默吞掉）。
+ * @param {string} dir - 起始目录（递归下降）。
+ * @returns {Generator<string>} 命中的源码文件路径。
+ */
 function* sourceFiles(dir) {
   for (const entry of readdirSync(dir)) {
     if (SKIP_DIRS.has(entry)) continue
     const path = join(dir, entry)
-    if (statSync(path).isDirectory()) yield* sourceFiles(path)
+    let stats
+    try {
+      stats = statSync(path)
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue // 扫描期间被删/被替换（socket、e2e 残留）
+      throw err
+    }
+    if (stats.isDirectory()) yield* sourceFiles(path)
     else if (SOURCE_PATTERN.test(entry)) yield path
   }
 }

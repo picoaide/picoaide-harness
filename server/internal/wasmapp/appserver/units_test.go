@@ -74,6 +74,12 @@ func TestWriteAppResponse_StatusDefaultsAndClamps(t *testing.T) {
 		{"非法高位回落 200", 999, http.StatusOK},
 		{"正常状态保留", http.StatusTeapot, http.StatusTeapot},
 		{"错误状态保留", http.StatusForbidden, http.StatusForbidden},
+		// 1xx 一律回落 200（F-7，2026-09-21）：它们是协议控制语义（100 让客户端继续等
+		// body、101 触发协议切换、103 提前推头），不该由应用内容决定；且 WriteHeader(1xx)
+		// 之后 http 仍允许再写一次头 ⇒ "一次响应一帧"的契约会在 HTTP 层被绕过。
+		{"100 Continue 回落 200", http.StatusContinue, http.StatusOK},
+		{"101 Switching Protocols 回落 200", http.StatusSwitchingProtocols, http.StatusOK},
+		{"103 Early Hints 回落 200", http.StatusEarlyHints, http.StatusOK},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -83,6 +89,57 @@ func TestWriteAppResponse_StatusDefaultsAndClamps(t *testing.T) {
 			s.writeAppResponse(rec, req, abi.Response{Status: tc.in, Body: "ok"})
 			if rec.Code != tc.want {
 				t.Fatalf("status %d 应映射成 %d，得到 %d", tc.in, tc.want, rec.Code)
+			}
+		})
+	}
+}
+
+// TestWriteAppResponse_ContentTypeIsExplicitAndAllowlisted 是 F-13 的判据：
+// 平台必须**显式**写出 content-type，且结果收口在 §4.8 的允许集合里。
+//
+// 修复前：应用没写（或被白名单剥掉）⇒ 头为空 ⇒ `net/http` 按前 512 字节隐式嗅探。
+// 后果是"白名单被内容绕过"且行为随 Go 版本漂移；更隐蔽的是它在测试里不可见
+// （隐式路径只在实际写出时发生，而单元测试用 httptest.Recorder 往往只看 Body）。
+//
+// 判据：
+//   - 应用给了**允许集合内**的类型 ⇒ 逐字保留（不能被平台改写）；
+//   - 应用没给 ⇒ 平台显式判定，HTML/纯文本按嗅探结果并补 charset，其余一律
+//     `application/octet-stream`（含 Go 会认出的 application/pdf）；
+//   - 应用给了**不在集合内**的类型 ⇒ 被白名单剥掉后走同一条显式判定，绝不落到
+//     net/http 的隐式嗅探。
+//
+// 变异验证：删掉 respond.go 里的 `if h.Get("Content-Type") == ""` 兜底 ⇒
+// 本用例的"没给 CT"与"给了非法 CT"两组立即红（Recorder 上不再有该头）。
+func TestWriteAppResponse_ContentTypeIsExplicitAndAllowlisted(t *testing.T) {
+	htmlBody := "<!DOCTYPE html><html><body>hi</body></html>"
+	pdfBody := "%PDF-1.7\n%\xe2\xe3\xcf\xd3\n"
+
+	cases := []struct {
+		name      string
+		headers   map[string]string
+		body      string
+		wantCT    string
+		wantEmpty bool
+	}{
+		{"应用声明合法类型时逐字保留", map[string]string{"Content-Type": "application/json"}, `{"a":1}`, "application/json", false},
+		{"应用声明 HTML 保留", map[string]string{"Content-Type": "text/html; charset=utf-8"}, htmlBody, "text/html; charset=utf-8", false},
+		{"没给 CT + HTML 体 ⇒ 显式 text/html", nil, htmlBody, "text/html; charset=utf-8", false},
+		{"没给 CT + 纯文本体 ⇒ 显式 text/plain", nil, "hello world", "text/plain; charset=utf-8", false},
+		{"没给 CT + PDF 体 ⇒ 收口 octet-stream（Go 会认成 application/pdf，不在集合内）", nil, pdfBody, "application/octet-stream", false},
+		{"非法 CT 被剥掉后同样显式判定", map[string]string{"Content-Type": "application/x-msdownload"}, htmlBody, "text/html; charset=utf-8", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "https://app.harness.example.com/", nil)
+			s.writeAppResponse(rec, req, abi.Response{Status: http.StatusOK, Headers: tc.headers, Body: tc.body})
+			got := rec.Header().Get("Content-Type")
+			if tc.wantEmpty && got != "" {
+				t.Fatalf("期望没有 Content-Type，实际 %q", got)
+			}
+			if !tc.wantEmpty && got != tc.wantCT {
+				t.Fatalf("Content-Type = %q，期望 %q", got, tc.wantCT)
 			}
 		})
 	}

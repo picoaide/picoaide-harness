@@ -25,7 +25,11 @@ import {
   fetchDiagnostics,
   parseDeleteOutcome,
   parseDiagnosticsOutcome,
+  parseRowsOutcome,
+  parseSchemaOutcome,
   parseSetPublishedOutcome,
+  rowsPath,
+  schemaPath,
   setAppPublished,
   setPublishedPath,
 } from './app-lifecycle.ts'
@@ -213,5 +217,86 @@ describe('诊断：只读投影（reason_code / hints / 计数）', () => {
     expect(result.code).toBe('NOT_FOUND')
     expect(result.message).toBe('应用不存在')
     expect(result.hints).toEqual(['只有发布者本人能管理该应用'])
+  })
+})
+
+describe('作者数据面：路径与形状守卫（2026-09-21 新增）', () => {
+  it('自省/数据路径与服务端申报逐字一致（后缀是唯一路由判据）', () => {
+    expect(schemaPath('roster')).toBe('/api/pico/apps/wasm/roster/schema')
+    expect(rowsPath('roster', { table: 'notes' })).toBe('/api/pico/apps/wasm/roster/rows?table=notes')
+  })
+
+  it('数据路径把 table 放进查询串并编码（表名是用户输入，不是路径段）', () => {
+    const path = rowsPath('roster', { table: 'a b&c', limit: 50, offset: 100, unmask: true })
+    // URLSearchParams 会把空格编成 `+`、`&` 编成 `%26`：两者都不改变查询串结构。
+    expect(path).toContain('table=a+b%26c')
+    expect(path).toContain('limit=50')
+    expect(path).toContain('offset=100')
+    expect(path).toContain('unmask=1')
+    expect(path.split('?')[0]).toBe('/api/pico/apps/wasm/roster/rows')
+  })
+
+  it('unmask 缺省不发送（服务端按"未请求原值"处理，且这是审计分叉的唯一判据）', () => {
+    expect(rowsPath('roster', { table: 'notes' })).not.toContain('unmask')
+    expect(rowsPath('roster', { table: 'notes', unmask: false })).not.toContain('unmask')
+  })
+
+  it('schema 形状不符 ⇒ 结构化失败，**不回落成空表清单**', () => {
+    // 回落成 `{tables: []}` 会把"服务端改了字段名/返回了 HTML/响应被截断"说成
+    // "应用没有表" —— 作者会据此改代码，方向完全错（2026-09-21 审计 P2-2）。
+    // 注意：`app_id` 在但 `tables` **缺失**也算形状不符；只有显式空数组才是"确实没有表"。
+    for (const payload of [{}, { schema: {} }, null, { schema: { app_id: 'roster' } }, { schema: { app_id: 'roster', tables: 'nope' } }]) {
+      expect(parseSchemaOutcome('roster', payload).ok).toBe(false)
+    }
+    // 正对照：显式空数组是"确实没有表"，必须通过。
+    const empty = parseSchemaOutcome('roster', { schema: { app_id: 'roster', tables: [] } })
+    expect(empty.ok).toBe(true)
+  })
+
+  it('rows 形状不符 ⇒ 结构化失败，**不回落成 0 行**', () => {
+    // "0 行"会让作者以为"数据没写进去" —— 方向完全错。`rows`/`columns` 缺失或非数组都算。
+    for (const payload of [
+      {}, { rows: {} }, null,
+      { rows: { table: 'notes' } },                                  // 缺 app_id
+      { rows: { app_id: 'roster', table: 'notes' } },                // 缺 rows/columns
+      { rows: { app_id: 'roster', table: 'notes', rows: {}, columns: [] } }, // rows 非数组
+      { rows: { app_id: 'roster', table: 'notes', rows: [], columns: 'x' } }, // columns 非数组
+    ]) {
+      expect(parseRowsOutcome('roster', payload).ok).toBe(false)
+    }
+    // 正对照：显式空 rows 数组是"这张表确实没有行"，必须通过。
+    const empty = parseRowsOutcome('roster', { rows: { app_id: 'roster', table: 'notes', rows: [], columns: [] } })
+    expect(empty.ok).toBe(true)
+  })
+
+  it('rows 正常解析：列敏感标记、行值、分页与截断元数据都读服务端的', () => {
+    const outcome = parseRowsOutcome('roster', {
+      rows: {
+        app_id: 'roster',
+        table: 'notes',
+        columns: [{ name: 'title', type: 'TEXT', sensitive: false }, { name: 'api_token', type: 'TEXT', sensitive: true }],
+        rows: [['hello', '***'], ['world', null]],
+        limit: 50,
+        offset: 0,
+        returned: 2,
+        total_rows: 3,
+        has_more: true,
+        truncated: false,
+        truncated_values: 1,
+        unmasked: false,
+        masked_columns: ['api_token'],
+        value_max_bytes: 4096,
+      },
+    })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('unreachable')
+    expect(outcome.table).toBe('notes')
+    expect(outcome.columns[1]?.sensitive).toBe(true)
+    expect(outcome.rows[0]?.[1]).toBe('***')
+    expect(outcome.rows[1]?.[1]).toBeNull()
+    expect(outcome.totalRows).toBe(3)
+    expect(outcome.hasMore).toBe(true)
+    expect(outcome.truncatedValues).toBe(1)
+    expect(outcome.maskedColumns).toEqual(['api_token'])
   })
 })

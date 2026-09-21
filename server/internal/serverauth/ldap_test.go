@@ -3,6 +3,7 @@ package serverauth
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"reflect"
@@ -383,6 +384,135 @@ func TestRedactCredentialEscapesBidiAndKeepsUTF8Valid(t *testing.T) {
 	mixed := redactCredential(strings.Repeat("啊\\x01", 200), "")
 	if !utf8.ValidString(mixed) {
 		t.Fatalf("转义+截断后不是合法 UTF-8: %q", mixed)
+	}
+}
+
+// TestRedactCredentialEscapesAllC1AndFormatChars 是"ldap 与 logbuf 共用同一份转义
+// 策略"的判据（2026-09-21 审计 A-P2-1 收口）：
+//
+// 旧本地实现 `sanitizeLogLine` 逐码点判 `r < 0x20 || r == 0x7f`，**不含 C1 段
+// U+0080–U+009F**（`unicode.Cf` 也不覆盖 C1），而 U+0085 NEL 就落在 C1 里 ——
+// 部分查看器与 JS 把它当换行。换成薄包装（唯一实现在 `util.EscapeControl`）之后，
+// 经 ldap 脱敏路径输出的文本里不得残留任何 C1 / Cf / Zl / Zp 码点，且换行数为 0。
+//
+// 变异验证：把 ldap 侧改回旧实现（或让 sanitizeLogLine 原样返回）⇒ 本用例即红。
+func TestRedactCredentialEscapesAllC1AndFormatChars(t *testing.T) {
+	var payload strings.Builder
+	payload.WriteString("ldap: bind failed (secret=hunter2) echo=")
+	for r := rune(0x80); r <= 0x9f; r++ { // 整个 C1 段，逐个码点
+		payload.WriteRune(r)
+	}
+	// Cf / Zl / Zp 代表 + 惯用转义。
+	for _, r := range []rune{'\u2028', '\u2029', '\u200b', '\u200e', '\u200f', '\u202a', '\u202e', '\u2066', '\u2069', '\ufeff', '\n', '\r', '\t'} {
+		payload.WriteRune(r)
+	}
+	payload.WriteString(" end")
+
+	got := redactCredential(payload.String(), "hunter2")
+	if n := strings.Count(got, "\n"); n != 0 {
+		t.Fatalf("脱敏后的文本含 %d 个真换行（可凭空伪造一行日志）：%q", n, got)
+	}
+	for _, r := range got {
+		if r >= 0x80 && r <= 0x9f {
+			t.Fatalf("残留裸 C1 码点 %U（C1 里含 NEL U+0085 —— 部分查看器当换行）：%q", r, got)
+		}
+		if unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			t.Fatalf("残留裸格式/分隔字符 %U（可重排显示顺序或当换行）：%q", r, got)
+		}
+	}
+	// 逐个点名：C1 段的每一个码点都必须是可见转义（`\xNN`），不是被删掉。
+	for r := rune(0x80); r <= 0x9f; r++ {
+		want := fmt.Sprintf(`\x%02x`, r)
+		if !strings.Contains(got, want) {
+			t.Fatalf("C1 码点 %U 应转义成 %q（转义而不是删除）：%q", r, want, got)
+		}
+	}
+	for _, want := range []string{`\u2028`, `\u2029`, `\u202e`, `\u2066`, `\ufeff`, `\n`, `\r`, `\t`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("应出现可见转义序列 %q：%q", want, got)
+		}
+	}
+	// 凭据擦除必须照常工作（转义是后加的一层，不能把替换挤掉）。
+	if strings.Contains(got, "hunter2") {
+		t.Fatalf("凭据未被擦除：%q", got)
+	}
+}
+
+// TestRedactCredentialKeepsPrintableTextVerbatim 是上面那条判据的**反向对照**：
+// 只断言"不含某类字符"的话，把 sanitizeLogLine 改成 `return ""` 也会绿。可打印内容
+// （中文/ASCII/常见标点）必须逐字保留。
+func TestRedactCredentialKeepsPrintableTextVerbatim(t *testing.T) {
+	const plain = "ldap: bind failed code=49 用户不存在 user=张三 host=ldap.example.com:636 (tls=starttls)"
+	if got := redactCredential(plain, "hunter2"); got != plain {
+		t.Fatalf("可打印内容必须逐字保留（不得被改写/清空）：\n got=%q\nwant=%q", got, plain)
+	}
+	if got := sanitizeLogLine(plain); got != plain {
+		t.Fatalf("sanitizeLogLine 不得改动可打印内容：%q", got)
+	}
+}
+
+// partialEscapeTail 报告 s 结尾是否为**不完整**的转义序列（`\`、`\x`、`\xN`、
+// `\u`、`\uNNN`）；完整形态是 `\n`/`\r`/`\t`/`\xNN`/`\uNNNN`。
+//
+// 与 internal/util/control_test.go、wasmapp/logbuf/logbuf_test.go 里同名判据是同一条
+// 规则的三处测试辅助（三个包无法共享 test-only 代码）；此处必须完整到 `\xN`/`\uNNN`，
+// 否则"截断把转义切成半截"的变异体会漏网（例如正文以 `\u20` 结尾）。
+func partialEscapeTail(s string) string {
+	isHex := func(b byte) bool {
+		return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+	}
+	i := len(s)
+	for i > 0 && isHex(s[i-1]) {
+		i--
+	}
+	digits := len(s) - i
+	switch {
+	case digits == 0:
+		if strings.HasSuffix(s, `\`) {
+			return `\`
+		}
+		if strings.HasSuffix(s, `\x`) || strings.HasSuffix(s, `\u`) {
+			return s[len(s)-2:]
+		}
+		return ""
+	case i >= 1 && s[i-1] == '\\':
+		return s[i-1:] // `\` + 1..4 位十六进制 = 半个 `\xNN`/`\uNNNN`
+	case i >= 2 && s[i-2] == '\\' && (s[i-1] == 'x' || s[i-1] == 'u'):
+		width := 2
+		if s[i-1] == 'u' {
+			width = 4
+		}
+		if digits < width {
+			return s[i-2:]
+		}
+	}
+	return ""
+}
+
+// TestRedactCredentialTruncationKeepsEscapesWhole 钉住"截断必须落在转义边界上"：
+// 超过 300 字节的文本会截断，若按字节硬切（旧 truncateUTF8 就是在转义之后切字节），
+// 第 300 字节可能正好落在 `\u2028` 这类转义序列中间，输出就会以 `\u`/`\u202`（半截
+// 转义）结尾 —— 下游做一次反转义的消费端会把紧随其后的宿主换行当成续行符。
+//
+// 参数化：让边界在 290..306 之间滑动，覆盖 `\n`（2 字符）、`\x85`（4 字符）与
+// `\u2028`（6 字符）三种宽度的所有切点。
+func TestRedactCredentialTruncationKeepsEscapesWhole(t *testing.T) {
+	for n := 290; n <= 306; n++ {
+		for _, tail := range []string{"\n", "\x01", "\u0085", "\u2028", "\u202e"} {
+			in := strings.Repeat("A", n) + strings.Repeat(tail, 40)
+			got := redactCredential(in, "")
+			if !utf8.ValidString(got) {
+				t.Fatalf("n=%d tail=%q 截断切出非法 UTF-8：%q", n, tail, got)
+			}
+			if len(got) > 320 {
+				t.Fatalf("n=%d tail=%q 超出长度上限：%d 字节", n, tail, len(got))
+			}
+			body := strings.TrimSuffix(got, "…")
+			if bad := partialEscapeTail(body); bad != "" {
+				t.Fatalf("n=%d tail=%q 截断落在转义序列中间（正文以 %q 结尾）：%q",
+					n, tail, bad, got)
+			}
+		}
 	}
 }
 

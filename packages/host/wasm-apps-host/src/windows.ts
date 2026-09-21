@@ -20,7 +20,13 @@
  *  - §7.2 导航闸门**按 app_id 判**（N7）：应用窗口只允许同 app origin 的顶层导航，
  *    跨 app 拒绝，http(s) 外链一律不在应用窗口导航；
  *  - R1-CLI-14 旧账本迁移：浏览器 store 的 groups 账本里以 app scheme 开头的条目
- *    **丢弃并 warn**。
+ *    **丢弃并 warn**；
+ *  - §6/F3 作者声明的几何（2026-09-21 审计 P0-2 补齐）：`window.ratio/width/height`
+ *    只在**首次**建窗时决定尺寸，比例对每次打开都生效（{@link parseDeclaredWindowGeometry}
+ *    / {@link resolveDeclaredWindowSize}，与 Go `appcfg.ResolvedWindow` 同判）；
+ *  - §16.1 应用窗口 surface（2026-09-21 审计 P0-1 补齐）：建窗即注册进 browser runtime
+ *    的 surface 注册表（`kind:'app'`，载荷含 `webContents`），关窗/登出注销
+ *    （{@link AppSurfaceRegistrar}）。
  *
  * @module @picoaide/dsh-wasm-apps-host/windows
  */
@@ -47,6 +53,83 @@ export const APP_WINDOW_MAX_RATIO = 4
 /** 首次打开的缺省尺寸（§6：1280×720）。 */
 export const APP_WINDOW_DEFAULT_WIDTH = 1280
 export const APP_WINDOW_DEFAULT_HEIGHT = 720
+
+/**
+ * 作者声明的窗口几何（`window` 对象的宿主侧投影；F3/§6）。
+ *
+ * 与客户端 `AppWindowSpec`/服务端目录行的子字段**同名同义**：`ratio` 是宽/高比、
+ * `width`/`height` 是像素。字段缺席 = 作者没声明它（不是 0）。
+ *
+ * 取值来源有两条，都归一化成这个形状：本机打开路由请求体的 `window`
+ * （客户端手里那份目录数据）与 {@link ./window-catalog.ts} 的目录兜底。
+ */
+export interface DeclaredWindowGeometry {
+  ratio?: number
+  width?: number
+  height?: number
+}
+
+/** 像素尺寸判据（正的安全整数；与客户端 `isPixelSize` 同口径）。 */
+function isPixelSize(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+}
+
+/**
+ * 解析一块 `window` 值（本机路由请求体与目录行都走它）。
+ *
+ * **逐字段独立解析**：非法的单个字段被丢弃而不是让整块作废（声明了比例但尺寸写坏时，
+ * 比例仍然可用）。一个可用字段都没有 ⇒ `null`（= 作者没声明，调用方用缺省 1280×720）。
+ * 绝不抛：打开动作不能因为一块畸形几何而失败。
+ * @param raw - `window` 的原始值（任意 JSON 值）。
+ * @returns 归一化后的几何，或 `null`。
+ */
+export function parseDeclaredWindowGeometry(raw: unknown): DeclaredWindowGeometry | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const row = raw as { ratio?: unknown, width?: unknown, height?: unknown }
+  const geometry: DeclaredWindowGeometry = {}
+  // ratio 走**同一个**夹取函数（0.25–4.0）：区间在两处各写一份，迟早会出现
+  // "详情页按 4.0 显示、窗口按 3.9 锁"。
+  const ratio = clampAspectRatio(row.ratio)
+  if (ratio !== undefined) geometry.ratio = ratio
+  if (isPixelSize(row.width)) geometry.width = row.width
+  if (isPixelSize(row.height)) geometry.height = row.height
+  return Object.keys(geometry).length === 0 ? null : geometry
+}
+
+/**
+ * 最终生效的**首次**开窗尺寸（与 Go `appcfg.ResolvedWindow` 逐条同判）。
+ *
+ * 规则（§6："缺省 1280×720 并按 ratio 校正"）：
+ *  1. 起点 = 作者给的值，缺省 1280×720；
+ *  2. 没写 ratio ⇒ 原样返回（不做任何校正）；
+ *  3. 写了 ratio ⇒ 以**作者显式给出的那一边**为准推另一边（宽度优先）：
+ *     只给 width ⇒ height = round(width/ratio)；只给 height ⇒ width = round(height*ratio)；
+ *     两个都给了 ⇒ 以 width 为锚；两个都没给 ⇒ 以缺省宽度 1280 为锚。
+ *
+ * 为什么不能只把三个值分别传下去：那样"比例与尺寸冲突"的裁决会落到
+ * `setAspectRatio` 与 `clampToWorkArea` 两个不同口径上，而**详情页显示的是服务端
+ * `ResolvedWindow` 的结果** —— 三处不一致就是"显示 16:9、窗口 4:3"这个具体缺陷。
+ * @param geometry - 已解析的几何（缺省 ⇒ 缺省尺寸）。
+ * @returns 首次开窗的宽高（恒为正整数）。
+ */
+export function resolveDeclaredWindowSize(geometry: DeclaredWindowGeometry | null | undefined): { width: number, height: number } {
+  const declaredWidth = geometry?.width
+  const declaredHeight = geometry?.height
+  const ratio = geometry?.ratio
+  if (ratio === undefined) {
+    return {
+      width: declaredWidth ?? APP_WINDOW_DEFAULT_WIDTH,
+      height: declaredHeight ?? APP_WINDOW_DEFAULT_HEIGHT,
+    }
+  }
+  if (declaredWidth !== undefined) {
+    return { width: declaredWidth, height: Math.round(declaredWidth / ratio) }
+  }
+  if (declaredHeight !== undefined) {
+    return { width: Math.round(declaredHeight * ratio), height: declaredHeight }
+  }
+  return { width: APP_WINDOW_DEFAULT_WIDTH, height: Math.round(APP_WINDOW_DEFAULT_WIDTH / ratio) }
+}
 
 /** 一个应用的窗口记忆（§16.1 的 schema，字段名逐字一致）。 */
 export interface AppWindowMemory {
@@ -284,6 +367,44 @@ export function classifyAppWindowNavigation(
 /** 窗口标识（宿主内部；每个应用一个）。 */
 export type AppWindowHandle = unknown
 
+/**
+ * 应用窗口 surface 的**注册面**（§16.1 冻结的 `kind:'app'` 那一半）。
+ *
+ * 归属说明（为什么是一个结构化接口而不是直接 import browser 包的类）：真实的注册表
+ * 由 `@picoaide/dsh-browser` 经 Cordis 服务 `browserSurface` **provide** 出来
+ * （`@picoaide/dsh-browser/surface` 的 `BROWSER_SURFACE_SERVICE`），而它可能晚于本插件
+ * apply（profile 里两个行同层、本插件在前）。窗口管理器只认这个最小形状：注册 / 注销，
+ * 于是"建窗时注册、关窗时注销"这条接线可以在**纯 Node** 下被逐条钉住。
+ */
+export interface AppSurfaceRegistrar {
+  /**
+   * 注册/更新一个应用窗口 surface。
+   *
+   * `webContents` 是不透明句柄（注册表不解释它；browser 侧的 CDP 附着路径要用它把
+   * 工具操作指到这个窗口）。`scope` = 该窗口所在的会话分区（切账号时按它清理）。
+   */
+  registerApp(input: {
+    id: number
+    appId: string
+    appScheme: string
+    webContents?: unknown
+    scope?: string
+  }): { id: number }
+  /** 注销（窗口关闭/被用户关掉/登出）。 */
+  unregister(id: number): void
+}
+
+/**
+ * 宿主自己分配的应用 surface id 起点。
+ *
+ * 为什么不让注册表按 webContents id 去撞：surface id 空间里还有**浏览器标签**
+ * （池子按 1..N 分配），而注册表的去重只在"同 id 且已有条目是浏览器标签"时把应用窗口
+ * 往上让。两个应用窗口拿同一个 id 时它**不会**让（kind 是 app）⇒ 后注册的会覆盖先注册
+ * 的，另一个应用从此无法按 `app_id` 寻址。所以 id 由本模块**单调分配、永不复用**。
+ * 起点取 100 万：浏览器标签是 1..16 量级（上限 16 个），够不到这里。
+ */
+export const APP_SURFACE_ID_BASE = 1_000_000
+
 /** 建窗适配器：桌面壳实现真实 Electron 窗口，单测给替身。 */
 export interface WasmAppsWindowAdapter {
   /** 建窗（已按几何契约算好尺寸/位置/比例）。 */
@@ -341,6 +462,16 @@ export interface WasmAppsWindowAdapter {
    */
   webContentsId?(handle: AppWindowHandle): number | undefined
   /**
+   * 该窗口的 `webContents`（**不透明句柄**，§16.1：注册应用窗口 surface 时交给
+   * browser runtime 的 CDP 附着路径）。
+   *
+   * 与 {@link webContentsId} 分开是因为两者消费者不同：id 是**闸门判据**（必须存在，
+   * 否则 fail-closed），webContents 是**工具面句柄**（缺席只是"AI 还不能驱动这个窗口"，
+   * 不影响建窗与闸门）。实现方缺席 ⇒ surface 仍然注册（`kind:'app'` 可见、`app_id`
+   * 可寻址），只是 `webContents` 为空。
+   */
+  webContents?(handle: AppWindowHandle): unknown
+  /**
    * 窗口是否**还活着**（§7.2 单应用单窗口的另一半）。
    *
    * 为什么契约里必须有这一条：用户点窗口的关闭按钮时，原生窗口是 Electron 自己
@@ -376,6 +507,16 @@ export interface WasmAppsWindowsOptions {
   urlFor: (appId: string, path: string) => string
   /** 应用标题解析（来自目录/平台；拿不到时回落到 app_id）。 */
   titleFor?: ((appId: string) => string | undefined) | undefined
+  /**
+   * 应用窗口 surface 的注册表（§16.1；browser 插件 `provide` 的 `browserSurface`）。
+   *
+   * **是 thunk 不是值**：`browserSurface` 可能晚于本插件 apply（profile 里本行在前），
+   * 而窗口可以在此之前就被打开（深链、本机路由）。用 thunk 让"注册表晚到"这件事在
+   * 类型上可见：`registerOpenWindows()` 在它到达时把已开着的窗口补注册一遍。
+   *
+   * 缺席/晚到 ⇒ 只影响 AI 能否寻址这个窗口，**不影响**建窗、闸门、权限守卫。
+   */
+  surfaces?: (() => AppSurfaceRegistrar | undefined) | undefined
   /** 当前工作区（多显示器：每次打开重新求值）。 */
   workArea: () => WorkArea
   warn?: ((message: string) => void) | undefined
@@ -390,8 +531,15 @@ export interface AppWindowOpenResult {
 
 /** 应用窗口管理器。 */
 export interface WasmAppsWindows {
-  /** 打开或聚焦（单应用单窗口，§7.2）。 */
-  open(appId: string, path?: string, ratio?: number): Promise<AppWindowOpenResult>
+  /**
+   * 打开或聚焦（单应用单窗口，§7.2）。
+   * @param appId - 已校验的 app_id。
+   * @param path - 已净化的相对路径（缺省 `/`）。
+   * @param geometry - 作者声明的窗口几何（`window.ratio/width/height`，F3/§6）。
+   *   **只在首次建窗时**决定初始尺寸；比例（ratio）对每次打开都生效（含聚焦已有窗口后
+   *   的锁定）。缺省 ⇒ 1280×720 且不锁比例。
+   */
+  open(appId: string, path?: string, geometry?: DeclaredWindowGeometry | null): Promise<AppWindowOpenResult>
   /** 是否存在窗口。 */
   has(appId: string): boolean
   /** 打开着的应用 id（诊断/测试）。 */
@@ -400,6 +548,13 @@ export interface WasmAppsWindows {
   close(appId: string): Promise<void>
   /** 关闭全部并清空映射（登出/切账号/切渠道，§7.2 冻结）。 */
   closeAll(): Promise<void>
+  /**
+   * 把当前所有活着的应用窗口补注册进 surface 注册表（§16.1）。
+   *
+   * 为什么需要它：注册表可能**晚于**窗口出现（browser 行在本插件之后加载；深链可以在
+   * 那之前就把窗口开出来）。幂等（已注册的窗口不重复注册）。
+   */
+  registerOpenWindows(): void
   /**
    * 该 `webContentsId` 是否是本管理器创建的应用窗口（session 级请求闸门的判据）。
    * @param webContentsId - Electron `webRequest` details 的发起者 id。
@@ -424,7 +579,50 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
   /** 应用窗口的 webContents id（请求闸门的唯一白名单来源）。 */
   const webContentsIds = new Set<number>()
   const memory = new Map<string, AppWindowMemory>()
+  /** 已注册进 surface 注册表的窗口（app_id → surface id；注销要按它）。 */
+  const surfaceIds = new Map<string, number>()
+  let surfaceSeq = 0
   let loaded = false
+
+  /**
+   * 把一个应用窗口注册进 surface 注册表（§16.1 的 `kind:'app'`）。
+   *
+   * 幂等：已注册过的 app_id 直接返回。注册表缺席（browser 行还没加载/纯 Node 宿主）
+   * 时**什么都不做**，等 {@link WasmAppsWindows.registerOpenWindows} 被调用时补。
+   * @param appId - 应用 id。
+   * @param handle - 窗口句柄。
+   */
+  const registerSurface = (appId: string, handle: AppWindowHandle): void => {
+    if (surfaceIds.has(appId)) return
+    const registry = options.surfaces?.()
+    if (registry === undefined) return
+    surfaceSeq += 1
+    const webContents = options.adapter.webContents?.(handle)
+    try {
+      const surface = registry.registerApp({
+        id: APP_SURFACE_ID_BASE + surfaceSeq,
+        appId,
+        appScheme: options.appScheme,
+        ...(webContents === undefined ? {} : { webContents }),
+        scope: options.partition(),
+      })
+      surfaceIds.set(appId, surface.id)
+    } catch (cause) {
+      // 注册失败不得影响建窗（AI 能不能驱动它是能力，不是准入）。
+      warn(`pico-wasm-apps-host: registering the application surface for ${appId} failed (${cause instanceof Error ? cause.message : String(cause)})`)
+    }
+  }
+  /** 注销一个应用的 surface（窗口关闭/被用户关掉/登出）。 */
+  const unregisterSurface = (appId: string): void => {
+    const id = surfaceIds.get(appId)
+    if (id === undefined) return
+    surfaceIds.delete(appId)
+    try {
+      options.surfaces?.()?.unregister(id)
+    } catch (cause) {
+      warn(`pico-wasm-apps-host: unregistering the application surface for ${appId} failed (${cause instanceof Error ? cause.message : String(cause)})`)
+    }
+  }
 
   const load = async (): Promise<void> => {
     if (loaded) return
@@ -449,6 +647,9 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
   /** 丢掉一个已被原生侧销毁的句柄（用户手动关窗；见 `isAlive` 的契约注释）。 */
   const forget = (appId: string, handle: AppWindowHandle): void => {
     windows.delete(appId)
+    // 窗口没了 ⇒ 它在 browser runtime 里的 surface 也必须消失：留着会让模型
+    // 按 `app_id` 寻址到一个已经销毁的 webContents（工具面会报一个看不懂的错）。
+    unregisterSurface(appId)
     const wcId = options.adapter.webContentsId?.(handle)
     if (typeof wcId === 'number') webContentsIds.delete(wcId)
   }
@@ -464,7 +665,7 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
   }
 
   return {
-    async open(appId, path = '/', ratio) {
+    async open(appId, path = '/', geometry) {
       await load()
       const url = options.urlFor(appId, path)
       const existing = liveHandle(appId)
@@ -477,11 +678,18 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
         return { window: 'focused', appId, url }
       }
       const remembered = memory.get(appId)
-      const declaredRatio = clampAspectRatio(ratio ?? remembered?.ratio)
+      // 作者声明的几何（F3/§6）：**只决定首次开窗尺寸** —— 已经有记忆（用户拖过/上次
+      // 运行留下的状态）时以记忆为准，声明不是"每次复位"。
+      // 比例（ratio）在两条路径上都生效：声明 > 记忆里的旧比例（改版后新比例必须生效，
+      // 否则"详情页显示 16:9"与真实窗口又会分叉）。
+      const declaredRatio = clampAspectRatio(geometry?.ratio ?? remembered?.ratio)
+      const declaredSize = remembered === undefined
+        ? resolveDeclaredWindowSize(geometry)
+        : { width: remembered.width, height: remembered.height }
       const rect = clampToWorkArea(
         {
-          width: remembered?.width ?? APP_WINDOW_DEFAULT_WIDTH,
-          height: remembered?.height ?? APP_WINDOW_DEFAULT_HEIGHT,
+          width: declaredSize.width,
+          height: declaredSize.height,
           ...(remembered?.x === undefined ? {} : { x: remembered.x }),
           ...(remembered?.y === undefined ? {} : { y: remembered.y }),
         },
@@ -513,6 +721,10 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
       else warn('pico-wasm-apps-host: the window adapter did not report a webContents id; application-scheme subresource requests will be refused (fail-closed)')
       options.adapter.installAppWindowGuards?.(handle, appId)
       if (declaredRatio !== undefined) options.adapter.setAspectRatio(handle, declaredRatio, { width: 0, height: 0 })
+      // §16.1：**建窗即注册** surface（`kind:'app'`）—— 注册表里没有它，AI 的
+      // `browser_list_tabs` 永远看不到应用窗口、`app_id` 寻址永远报"没有这个应用窗口"。
+      // 必须在窗口句柄进入 `windows` 之后（注销路径按同一个映射找 id）。
+      registerSurface(appId, handle)
       memory.set(appId, {
         width: rect.width,
         height: rect.height,
@@ -532,16 +744,24 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
       for (const appId of [...windows.keys()]) liveHandle(appId)
       return [...windows.keys()]
     },
+    registerOpenWindows() {
+      for (const [appId, handle] of [...windows.entries()]) {
+        if (liveHandle(appId) === undefined) continue
+        registerSurface(appId, handle)
+      }
+    },
     async close(appId) {
       const handle = windows.get(appId)
       if (handle === undefined) return
       windows.delete(appId)
+      unregisterSurface(appId)
       const wcId = options.adapter.webContentsId?.(handle)
       if (typeof wcId === 'number') webContentsIds.delete(wcId)
       options.adapter.closeAppWindow(handle)
     },
     async closeAll() {
       for (const handle of windows.values()) options.adapter.closeAppWindow(handle)
+      for (const appId of [...surfaceIds.keys()]) unregisterSurface(appId)
       windows.clear()
       webContentsIds.clear()
     },

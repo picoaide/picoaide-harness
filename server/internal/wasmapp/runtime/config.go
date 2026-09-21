@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -30,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/wasmapp/cachetrust"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 	"github.com/tetratelabs/wazero"
 )
@@ -147,16 +149,151 @@ func NewCompilationCache(dataRoot string) (wazero.CompilationCache, error) {
 			limits.CompileCacheDirName + "/<分代>）")
 	}
 	dir := CompileCacheDir(dataRoot)
-	if err := os.MkdirAll(dir, os.FileMode(limits.DataDirMode)); err != nil {
-		return nil, fmt.Errorf("runtime: 创建编译缓存目录失败: %w", err)
+	// 与编译侧同一个实现（cachetrust）：先确认是真实目录，再 MkdirAll + 显式 Chmod，
+	// 最后形状校验。
+	//
+	// 执行侧**不允许拒绝启动**（2026-09-21 独立审计 P1-①）：`Ensure` 的错误此前会一路
+	// 冒泡到 cmd/server 的 `log.Fatalf`，也就是"缓存目录不可用 ⇒ 整个服务端退出"——
+	// 而缓存是**性能优化**，不是执行前提（没有它 wazero 只是每进程重编译一次）。
+	// 更糟的是踩中它的部署形态很常见：只读挂载、`--user` 非属主、k8s `runAsUser`
+	// 下 Chmod 必然失败 ⇒ 服务端起不来，而它本该只是"慢一点"。
+	//
+	// 现在的语义：**这条路径上的任何失败都降级为 nil（`runtime.New` 会换成进程内缓存）
+	// 并大声告警，绝不返回 error**。
+	//
+	// ⚠️ 覆盖的是**全部**失败形态，不只是 `Ensure` 的 err（2026-09-21 二轮审计 P2-④）：
+	// 第一版只在 `cerr != nil` 时降级，而"缓存根被一个**普通文件**占住"这种形态下
+	// `Ensure` 只给**违规报告**（nil error），紧接着 `wazero.NewCompilationCacheWithDir`
+	// 自己失败 ⇒ 仍然返回 error ⇒ 仍然 log.Fatalf（审计实测 `err="… is not dir"`）。
+	// 所以 wazero 那一步的失败也走降级，语义才真的是"缓存不可用 ⇒ 慢一点"。
+	report, cerr := cachetrust.Ensure(dir, os.FileMode(limits.DataDirMode))
+	if cerr != nil {
+		log.Printf("runtime: ⚠️ 编译缓存目录不可用，降级为进程内缓存（不影响功能，只影响首次编译耗时）：%v", cerr)
+		return nil, nil
+	}
+	if !report.Trusted() {
+		for _, v := range report.Violations {
+			log.Printf("runtime: ⚠️ 编译缓存目录不可信：%s（%s）", v.Path, v.Reason)
+		}
+		// **不可信 ⇒ 不用**（2026-09-21 三轮审计 P1-②）：这里此前只打日志然后继续用，
+		// 于是"缓存根是符号链接"（违规文案就是"可被重定向到任意位置"）这条**照用**，
+		// 并把编译产物**写进**链接目标 —— 而本包的威胁模型正是"缓存条目会被执行进程
+		// mmap 成机器码执行"（cachetrust.go 的包注释），能布置这条链接的人就能决定
+		// 执行进程从哪个目录取机器码（条目只有同文件 CRC32，挡损坏不挡篡改）。
+		// 执行侧的正确口径与 `cerr != nil` 完全一致：**降级为进程内缓存**（功能不变、
+		// 只损失跨进程暖缓存），绝不在"已判定不可信"的目录上读写。
+		// 注意这不影响"目录不存在/空目录"：`Verify` 对它们返回**零违规**
+		// （cachetrust.go 的 Verify 注释），所以正常的冷启动仍然用磁盘缓存。
+		log.Printf("runtime: ⚠️ 编译缓存目录不可信，降级为进程内缓存（不读写不可信目录）")
+		return nil, nil
 	}
 	// wazero 会在其下再建 wazero-v<ver>-<arch>-<os>/ 版本分片目录（cache.go 的
 	// ensuresFileCache），并给该分片目录 0700。
 	cache, err := wazero.NewCompilationCacheWithDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("runtime: 打开编译缓存失败: %w", err)
+		// 与上面同一条口径：拿不到磁盘缓存 ⇒ 降级，不打死服务端。
+		log.Printf("runtime: ⚠️ 打不开编译缓存目录，降级为进程内缓存（不影响功能，只影响首次编译耗时）：%v", err)
+		return nil, nil
 	}
 	return cache, nil
+}
+
+// ===== 编译缓存模式（§4.9 运维面：/readyz 的 exec_cache_mode）=====
+
+// CacheMode 是执行侧**实际生效**的编译缓存模式（封闭取值，JSON 名即取值）。
+//
+// 为什么需要它：磁盘缓存不可用时 `NewCompilationCache` 返回 `(nil, nil)`、`New`
+// 换成进程内缓存 —— 这条降级（2026-09-21 独立审计 P1-①）此前**只有一行日志**。
+// 容器里日志会随轮转消失，编排/运维看不到"这台实例的跨进程暖缓存其实没生效"
+// （表现只是每个应用首个请求慢一点），而这正是"缓存不可用 ⇒ 慢一点"这条取舍
+// 必须能被看见的地方。
+//
+// 判据纪律（防"报告的模式"与"真的用了哪个缓存"分叉）：本值**不是**第二个判断，
+// 而是 `cacheModeOf` 对**那个真的被装进 wazero.Runtime 的缓存对象**的判定。
+// 因此它不可能与运行时实际构建的缓存不一致 —— 包括调用方注入缓存的那条路径。
+type CacheMode string
+
+const (
+	// CacheModeDisk：磁盘缓存（<dataRoot>/<CompileCacheDirName>/<分代>），跨进程共享。
+	CacheModeDisk CacheMode = "disk"
+	// CacheModeMemory：进程内缓存。两条来源：降级（目录不可用/不可信）与"没有 DataRoot"。
+	CacheModeMemory CacheMode = "memory"
+)
+
+// resolveCompilationCache 是执行侧"用哪个编译缓存"的**唯一决策点**：它把缓存对象
+// 与它的模式**一起**返回。调用方（`New`）不得自行推导模式 —— 那会造出第二个判断，
+// 而两者分叉的失败形态恰恰是这条可观测性要消灭的（探针说 disk、实际跑 memory）。
+func resolveCompilationCache(dataRoot string, injected wazero.CompilationCache) (wazero.CompilationCache, CacheMode, error) {
+	if injected != nil {
+		// 调用方注入的缓存（共享/测试装配）：它是**别人**造的，只能问对象自己。
+		return injected, cacheModeOf(injected), nil
+	}
+	if strings.TrimSpace(dataRoot) == "" {
+		// 没有数据根 = 没有磁盘缓存的位置（单机验证/最小装配）。
+		c := wazero.NewCompilationCache()
+		return c, cacheModeOf(c), nil
+	}
+	c, err := NewCompilationCache(dataRoot)
+	if err != nil {
+		// 生产路径上 NewCompilationCache 已不再返回 error（任何失败都降级为 (nil, nil)）；
+		// 保留这条 fail-loud 是给"将来重新引入可失败分支"的：拿不到缓存却假装在用，
+		// 比启动失败更难查。
+		return nil, "", err
+	}
+	if c == nil {
+		// **降级信号**（不是错误）：磁盘缓存不可用 ⇒ 进程内缓存。
+		// wazero 不接受 nil 缓存，所以这里必须补一个（§4.3.1-d 的"不可信 ⇒ 不用"）。
+		mem := wazero.NewCompilationCache()
+		return mem, cacheModeOf(mem), nil
+	}
+	return c, cacheModeOf(c), nil
+}
+
+// cacheModeOf 问**缓存对象自己**底层有没有文件存储。
+//
+// 为什么用反射读未导出字段（而不是让调用方记住自己走的是哪个分支）：wazero 的
+// `CompilationCache` 是个空接口（`interface{ api.Closer }`），内存缓存与磁盘缓存是
+// **同一个具体类型**（`*wazero.cache`）—— 唯一差别是磁盘那条路径上 `fileCache`
+// 字段被设成了 `filecache.New(dir)`（wazero v1.12.0 `cache.go` 的 ensuresFileCache）。
+// 所以"是哪种缓存"只能从对象本身读。同类先例见 RuntimeConfigFingerprint（同样用
+// 反射读 wazero 的未导出字段）。
+//
+// 读不到该字段（wazero 改名/换实现）⇒ 报 **memory**：保守方向（声称的能力更少）。
+// 这条保守有代价（真有磁盘缓存时会被显示成内存缓存），所以
+// TestRuntimeCacheModeMatchesBuiltCache 对两个方向都有断言：升级 wazero 后若这条
+// 反射失效，那个用例会红，而不是静默把 disk 说成 memory。
+func cacheModeOf(cache wazero.CompilationCache) CacheMode {
+	if cache == nil {
+		return CacheModeMemory
+	}
+	if compilationCacheHasDiskStore(cache) {
+		return CacheModeDisk
+	}
+	return CacheModeMemory
+}
+
+// compilationCacheHasDiskStore 是 cacheModeOf 的反射实现（判定规则见其注释）。
+func compilationCacheHasDiskStore(cache wazero.CompilationCache) bool {
+	v := reflect.ValueOf(cache)
+	for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return false
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return false
+	}
+	f := v.FieldByName("fileCache")
+	if !f.IsValid() {
+		return false
+	}
+	switch f.Kind() {
+	case reflect.Interface, reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return !f.IsNil()
+	default:
+		return false
+	}
 }
 
 // RuntimeConfigFingerprint 返回 RuntimeConfig 的**进键字段**指纹，用于

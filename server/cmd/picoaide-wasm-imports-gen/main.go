@@ -67,7 +67,9 @@ import (
 // whitelistSources 是参与生成的全部参考程序（相对模块根；白名单 = 它们的并集）。
 //
 //   - `refapp`           参考实现 = 教学样例（只做帧协议 + 内存分配，必须保持干净，见其包注释）；
+//
 //   - `refapp/wasiprobe` 只用于 dump 的探测程序：故意触碰 os 包的文件/时间/随机/环境面；
+//
 //   - `refapp/stdprobe`  只用于 dump 的探测程序（FIX-31）：**应用真的会写的那种代码** ——
 //     html/text template 的 Execute（渲染）、(*os.File).ReadAt/WriteAt、encoding/json、
 //     strings/strconv/sort/regexp/math/errors、net/url、time.Parse/Format、base64、hash/*、
@@ -75,11 +77,19 @@ import (
 //     template 的 Execute 会带出 sock_accept/sock_shutdown、ReadAt/WriteAt 会带出
 //     fd_pread/fd_pwrite，这四条缺一条就让"渲染页面的合法 Go 应用"被 IMPORT_NOT_ALLOWED 拒。
 //
+//   - `refapp/sockprobe` 只用于 dump 的探测程序（2026-09-21 审计 P0-6）：**直接声明**
+//     `sock_recv` / `sock_send` 两条 WASI 导入（`//go:wasmimport`）。存在的理由是
+//     "白名单 = Go/TinyGo wasip1 运行时的保守超集"：Go 运行时只声明 sock_accept /
+//     sock_shutdown，而 TinyGo 的 net/url 路径还会带出这两条 —— 缺了它们，同一份
+//     只用标准库的应用"用 TinyGo 编译就发不出去"。两条符号能力为空（拿不到已连接的
+//     socket fd，见 sockprobe 包注释与 TestWhitelistAllowsOnlyFdFreeSockSymbols）。
+//
 // 新增语言样例（Rust/Zig）时在这里加一条即可，生成器与门禁都会自动覆盖。
 var whitelistSources = []string{
 	"./internal/wasmapp/refapp",
 	"./internal/wasmapp/refapp/wasiprobe",
 	"./internal/wasmapp/refapp/stdprobe",
+	"./internal/wasmapp/refapp/sockprobe",
 }
 
 // generatedRelPath 是生成产物的默认位置（相对模块根）。
@@ -456,6 +466,10 @@ var symbolNotes = map[string]string{
 	"sock_accept": "`html/template` / `text/template` 的 `Execute`（渲染页面）会带出它；" +
 		"它只能从**已监听**的描述符接连接，而平台里没有任何途径造出这种描述符",
 	"sock_shutdown": "模板渲染路径的收尾调用；描述符不存在 ⇒ 直接失败，不构成出站途径",
+	"sock_recv": "**TinyGo 的 `net/url` 路径**会带出它（与 sock_accept/sock_shutdown 同理：Go 运行时不会发，" +
+		"TinyGo 会）。它需要一个**已连接**的 socket 描述符，而平台里造不出这种描述符" +
+		"（没有 sock_open/bind/listen/connect；sock_accept 只能从已监听的描述符接连接，实测拿不到）⇒ 能力为空",
+	"sock_send": "同上：TinyGo 路径的发送侧符号，没有可用描述符就无从发送（不是出站途径）",
 }
 
 // renderSkillDoc 渲染**作者面**的导入面文档（内置技能的 references/imports.md）。

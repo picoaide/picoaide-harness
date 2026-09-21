@@ -54,6 +54,19 @@ const (
 	AppConfigMaxBytes = 64 << 10
 	// AppConfigWhitelistMax 是白名单条目上限（§4.2）：2 000 条。
 	AppConfigWhitelistMax = 2000
+	// AppConfigSensitiveColumnsMax 是作者声明的**敏感列**（`sensitive_columns`）
+	// 条目上限（§4.2）：100 条。
+	//
+	// 为什么要有界：这份名单在**每个 `/rows` 请求**上都要建集合参与判定（默认脱敏的
+	// 启发式之外的第二来源），无界名单等于让一次请求做任意量的字符串工作；同时它也是
+	// 作者契约的一部分（声明 100 列以上说明该用启发式或改列名，而不是把整表列进来）。
+	AppConfigSensitiveColumnsMax = 100
+	// AppConfigSensitiveColumnMaxBytes 是单条声明列名的字节上限（§4.2）：64 字节。
+	//
+	// 平台自己的列名规则（ColumnNamePattern）远短于它，留出余量是为了不把"列名合法性"
+	// 与"声明体积"混成一条判据：超出这个长度只可能是走样输入（粘贴了整行/整段），
+	// 而它永远不会匹配到任何一列。
+	AppConfigSensitiveColumnMaxBytes = 64
 	// CompileTimeout 是单次编译超时（§4.2/§4.3）：60 s。
 	CompileTimeout = 60 * time.Second
 	// DryRunBudget 是上传期合成帧干跑预算（§4.2）：2 s。
