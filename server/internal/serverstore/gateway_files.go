@@ -39,6 +39,14 @@ func RecordGatewayFile(db *sql.DB, fileID string, userID int64, expiresAt *time.
 }
 
 // RecordGatewayFileSize 同上，并记录文件字节数（管理端容量统计用；0 = 未知）。
+//
+// `created_at` 语义：**行还活着**时是"首次上传时间"，续期不改写；行**已过期**时
+// 这次登记等于一次全新上传（过期 = 不存在），`created_at` 必须跟着刷新 —— 否则
+// 台账会把新上传的文件记成上一个归属人几十天前的上传时间，管理端显示的上传时间
+// 失真，`ListGatewayFilesForPurge` 的"最旧优先"清理还会把刚上传的文件排在最前面
+// （审计 2026-09-22 L1 实测：30 天前的老行被 B 重新占用后 created_at 仍是 30 天前）。
+//
+// `size_bytes` 语义：0 = 上游没回大小 ⇒ 保留已知值（不清零）；>0 ⇒ 覆盖。
 func RecordGatewayFileSize(db *sql.DB, fileID string, userID int64, expiresAt *time.Time, sizeBytes int64) error {
 	if sizeBytes < 0 {
 		sizeBytes = 0
@@ -47,6 +55,8 @@ func RecordGatewayFileSize(db *sql.DB, fileID string, userID int64, expiresAt *t
 		`INSERT INTO gateway_files (file_id, user_id, expires_at, size_bytes) VALUES (?, ?, ?, ?)
 		 ON CONFLICT (file_id) DO UPDATE
 		   SET expires_at = EXCLUDED.expires_at, user_id = EXCLUDED.user_id,
+		       created_at = CASE WHEN gateway_files.expires_at <= now() THEN now()
+		                         ELSE gateway_files.created_at END,
 		       size_bytes = CASE WHEN EXCLUDED.size_bytes > 0 THEN EXCLUDED.size_bytes
 		                         ELSE gateway_files.size_bytes END
 		 WHERE gateway_files.user_id = EXCLUDED.user_id
@@ -84,38 +94,60 @@ func GatewayFileOwnedBy(db *sql.DB, fileID string, userID int64) (bool, error) {
 	return ok && owner == userID, nil
 }
 
+// gatewayFilesOwnedByChunk 是 `IN (...)` 展开的分片大小。
+//
+// 为什么必须分片：PostgreSQL 扩展协议一条语句最多 65535 个绑定参数（`IN` 还会带上
+// user_id，所以实际上限是 65534 个 id），超了直接报 "extended protocol limited to
+// 65535 parameters"（审计 2026-09-22 L1 实测：70000 个 id 必现；本函数是对外可达的，
+// 引用上限 `max_file_refs` 运行期可配到 4096，且将来可能放宽）。分片只多几次往返，
+// 语义不变：缺省引用上限 600 ⇒ 常规路径仍然正好一条查询。
+const gatewayFilesOwnedByChunk = 5000
+
 // GatewayFilesOwnedBy 批量判定：返回 ids 中**确实属于该用户**且未过期的那些 id。
 //
 // 单次往返（`IN (...)` 展开）：审计 2026-09-22 F 路 P2-3 实测逐个 `GatewayFileOwnedBy`
 // 在 100 个引用时约 49ms、1000 个约 113ms，全是串行 DB 往返；而请求体上限 64MiB 足够
 // 塞进远多于 1000 个 `file_id`，等于把"闸门前的排队时间"交给调用方控制。调用方据此
 // 把引用数压在上限内（见 llmgateway 的 `max_file_refs` 设置），本函数只负责一次问清。
+// 超出分片大小时按 gatewayFilesOwnedByChunk 分批（见该常量注释）。
 func GatewayFilesOwnedBy(db *sql.DB, ids []string, userID int64) (map[string]struct{}, error) {
 	owned := make(map[string]struct{}, len(ids))
 	if len(ids) == 0 {
 		return owned, nil
 	}
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, userID)
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	rows, err := db.Query(
-		`SELECT file_id FROM gateway_files
-		 WHERE user_id = ? AND (expires_at IS NULL OR expires_at > now())
-		   AND file_id IN (`+qmarks(len(ids))+`)`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+	for start := 0; start < len(ids); start += gatewayFilesOwnedByChunk {
+		end := start + gatewayFilesOwnedByChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, userID)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		rows, err := db.Query(
+			`SELECT file_id FROM gateway_files
+			 WHERE user_id = ? AND (expires_at IS NULL OR expires_at > now())
+			   AND file_id IN (`+qmarks(len(batch))+`)`, args...)
+		if err != nil {
 			return nil, err
 		}
-		owned[id] = struct{}{}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			owned[id] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	return owned, rows.Err()
+	return owned, nil
 }
 
 // DeleteGatewayFileRow 删除归属行（上游删除成功、或已确认上游 404 时调用）。
@@ -290,8 +322,17 @@ func gatewayFileWhere(q GatewayFileQuery) (string, []any) {
 		args = append(args, q.UserID)
 	}
 	if s := strings.TrimSpace(q.Search); s != "" {
-		where += " AND g.file_id ILIKE ?"
-		args = append(args, "%"+escapeLike(s)+"%")
+		// NUL 字节（`?q=%00` 一个 URL 就够）必须在这里拦下：PG 的 text 参数不能含
+		// NUL，原样送进去会得到 SQLSTATE 22021（invalid byte sequence for encoding
+		// "UTF8": 0x00）⇒ 管理端 500（审计 2026-09-22 L1 实测）。而 text 列里本来
+		// 也**存不了** NUL ⇒ 唯一的正确语义是"无命中"：既不是 500，也**不能**退化成
+		// "丢掉搜索条件后按其它过滤返回全量"。
+		if strings.IndexByte(s, 0) >= 0 {
+			where += " AND 1=0"
+		} else {
+			where += " AND g.file_id ILIKE ?"
+			args = append(args, "%"+escapeLike(s)+"%")
+		}
 	}
 	if q.OnlyExpired {
 		where += " AND g.expires_at IS NOT NULL AND g.expires_at <= now()"
@@ -460,9 +501,13 @@ func GatewayFileRowExists(db *sql.DB, fileID string) (bool, error) {
 }
 
 // GatewayFileForReap 是回收器认领一行时的快照（用于上游删除失败后**原样写回**）。
+//
+// `CreatedAt` 必须一起带走：写回是"补回一行"，若不带原始上传时间就只能记成 now()，
+// 台账会丢掉真实上传时间（审计 2026-09-22 N10）。
 type GatewayFileForReap struct {
 	FileID    string
 	UserID    int64
+	CreatedAt time.Time
 	ExpiresAt *time.Time
 	SizeBytes int64
 }
@@ -478,7 +523,9 @@ type GatewayFileForReap struct {
 //
 // 先删行再删上游对象：行是"还有清理责任"的凭据，但它同时是并发续期的目标 ——
 // 先删行把窗口缩到一个网络往返，且调用方在上游删除前还会复检一次该 id 是否被
-// 重新登记（见 llmgateway 侧）；上游删除失败时调用方用返回的快照**写回**，下轮重试。
+// 重新登记（见 llmgateway 侧）；上游删除失败时调用方用返回的快照**写回**
+// （必须用 RestoreGatewayFileRow，不能用 RecordGatewayFileSize：后者会把并发
+// 续期后的未来过期时间覆盖回过去），下轮重试。
 func ClaimExpiredGatewayFile(db *sql.DB, fileID string) (GatewayFileForReap, bool, error) {
 	tx, err := db.Begin()
 	if err != nil {
@@ -487,10 +534,10 @@ func ClaimExpiredGatewayFile(db *sql.DB, fileID string) (GatewayFileForReap, boo
 	defer func() { _ = tx.Rollback() }()
 
 	var snap GatewayFileForReap
-	row := tx.QueryRow(`SELECT file_id, user_id, expires_at, size_bytes FROM gateway_files
+	row := tx.QueryRow(`SELECT file_id, user_id, created_at, expires_at, size_bytes FROM gateway_files
 	                     WHERE file_id = ? AND expires_at IS NOT NULL AND expires_at <= now()
 	                     FOR UPDATE`, fileID)
-	switch err := row.Scan(&snap.FileID, &snap.UserID, &snap.ExpiresAt, &snap.SizeBytes); {
+	switch err := row.Scan(&snap.FileID, &snap.UserID, &snap.CreatedAt, &snap.ExpiresAt, &snap.SizeBytes); {
 	case errors.Is(err, sql.ErrNoRows):
 		return GatewayFileForReap{}, false, nil // 已续期/已被处理
 	case err != nil:
@@ -503,6 +550,40 @@ func ClaimExpiredGatewayFile(db *sql.DB, fileID string) (GatewayFileForReap, boo
 		return GatewayFileForReap{}, false, err
 	}
 	return snap, true, nil
+}
+
+// RestoreGatewayFileRow 把回收器认领过的行**补回**台账，语义严格是
+// `INSERT … ON CONFLICT (file_id) DO NOTHING`：**绝不覆盖现有行**。
+//
+// 为什么不能用 `RecordGatewayFileSize` 写回（审计 2026-09-22 N7/N10）：
+// 认领之后、上游删除之前，原主可能已经把同一个 file_id 重新上传（`RecordGatewayFileSize`
+// 把 expires_at 推到未来）。此时 `RecordGatewayFileSize` 的 WHERE 命中
+// `gateway_files.user_id = EXCLUDED.user_id` ⇒ 会把这行**已经续期的未来过期时间
+// 覆盖回快照里的过去时间**（活行当场变"已过期"，任何人都能再抢占它），并且
+// 重占用路径还会改写 created_at。写回的本意只是"下游删失败、这行还得留着重试"，
+// 一旦行已经在了就说明有人接手了这条清理责任，什么都不该做。
+//
+// createdAt 传 nil 表示"没有原始时间可用"（记 now()）；重复调用幂等。
+func RestoreGatewayFileRow(db *sql.DB, fileID string, userID int64, createdAt *time.Time, expiresAt *time.Time, sizeBytes int64) error {
+	if sizeBytes < 0 {
+		sizeBytes = 0
+	}
+	if createdAt == nil {
+		_, err := db.Exec(
+			`INSERT INTO gateway_files (file_id, user_id, created_at, expires_at, size_bytes)
+			 VALUES (?, ?, now(), ?, ?)
+			 ON CONFLICT (file_id) DO NOTHING`,
+			fileID, userID, expiresAt, sizeBytes,
+		)
+		return err
+	}
+	_, err := db.Exec(
+		`INSERT INTO gateway_files (file_id, user_id, created_at, expires_at, size_bytes)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (file_id) DO NOTHING`,
+		fileID, userID, *createdAt, expiresAt, sizeBytes,
+	)
+	return err
 }
 
 // NormalizeLegacyPermanentGatewayFiles 把"没有过期时间"的存量行按上限补齐
