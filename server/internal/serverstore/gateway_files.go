@@ -380,29 +380,24 @@ func ListGatewayFiles(db *sql.DB, q GatewayFileQuery) ([]GatewayFileRow, int64, 
 	if err := db.QueryRow(`SELECT count(*) FROM gateway_files g`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	order := q.Sort
-	dir := "ASC"
-	if q.Desc {
-		dir = "DESC"
-	}
-	// 排序键来自白名单（normalizeGatewayFileQuery），可安全拼接。
-	if order == "username" {
-		order = "u.username"
-	} else {
-		order = "g." + order
-	}
+	// 排序子句是**常量**（白名单 → 固定字符串），SQL 里不拼接任何变量：
+	// 位置下标或字符串拼接都出过问题（下标的静默错位见 R6 P1-C；拼接则是 CodeQL
+	// `go/sql-injection` 的判据面 —— 即使来源已白名单，也不给它留这个面）。
+	orderClause := gatewayFileOrderClause(q.Sort, q.Desc)
 	query := `SELECT g.file_id, g.user_id, COALESCE(u.username, ''), COALESCE(u.display_name, ''),
 	                 g.size_bytes, g.created_at, g.expires_at,
 	                 (g.expires_at IS NOT NULL AND g.expires_at <= now()) AS expired
 	            FROM gateway_files g LEFT JOIN users u ON u.id = g.user_id` + where +
-		` ORDER BY ` + order + ` ` + dir + `, g.file_id ASC LIMIT ? OFFSET ?`
+		` ` + orderClause + ` LIMIT ? OFFSET ?`
 	args = append(args, q.Limit, q.Offset)
 	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer rows.Close()
-	out := make([]GatewayFileRow, 0, q.Limit)
+	// 容量不吃用户可控的 Limit（CodeQL `go/uncontrolled-allocation-size`）：
+	// 从一个小常量起步，靠 append 增长即可。
+	out := make([]GatewayFileRow, 0, gatewayFilePageMaxCapped)
 	for rows.Next() {
 		var r GatewayFileRow
 		if err := rows.Scan(&r.FileID, &r.UserID, &r.Username, &r.DisplayName,
@@ -414,21 +409,64 @@ func ListGatewayFiles(db *sql.DB, q GatewayFileQuery) ([]GatewayFileRow, int64, 
 	return out, total, rows.Err()
 }
 
+// gatewayFileOrderClause 把（白名单内的）排序键与方向映射成**固定 SQL 常量**。
+// 任何输入都只会落到下列字面量之一，默认 created_at DESC。
+func gatewayFileOrderClause(sort string, desc bool) string {
+	switch sort {
+	case "expires_at":
+		if desc {
+			return "ORDER BY g.expires_at DESC NULLS LAST, g.file_id ASC"
+		}
+		return "ORDER BY g.expires_at ASC NULLS LAST, g.file_id ASC"
+	case "size_bytes":
+		if desc {
+			return "ORDER BY g.size_bytes DESC, g.file_id ASC"
+		}
+		return "ORDER BY g.size_bytes ASC, g.file_id ASC"
+	case "username":
+		if desc {
+			return "ORDER BY u.username DESC, g.file_id ASC"
+		}
+		return "ORDER BY u.username ASC, g.file_id ASC"
+	default: // created_at
+		if desc {
+			return "ORDER BY g.created_at DESC, g.file_id ASC"
+		}
+		return "ORDER BY g.created_at ASC, g.file_id ASC"
+	}
+}
+
+// gatewayFileSummaryOrderClause 同上（按员工汇总的三个排序键）。
+func gatewayFileSummaryOrderClause(sort string, desc bool) string {
+	switch sort {
+	case "files":
+		if desc {
+			return "ORDER BY files DESC NULLS LAST, g.user_id ASC"
+		}
+		return "ORDER BY files ASC NULLS LAST, g.user_id ASC"
+	case "username":
+		if desc {
+			return "ORDER BY username DESC NULLS LAST, g.user_id ASC"
+		}
+		return "ORDER BY username ASC NULLS LAST, g.user_id ASC"
+	default: // bytes
+		if desc {
+			return "ORDER BY bytes DESC NULLS LAST, g.user_id ASC"
+		}
+		return "ORDER BY bytes ASC NULLS LAST, g.user_id ASC"
+	}
+}
+
+// gatewayFilePageMaxCapped 是列表查询的起始切片容量（小常量，避免按用户输入预分配）。
+const gatewayFilePageMaxCapped = 32
+
 // GatewayFileSummary 按员工汇总占用（文件数 / 字节数 / 其中已过期数 / 最早过期时刻）。
 //
 // 排序用**输出列名**（PG 允许 ORDER BY 输出列），不要用位置下标：位置在改 SELECT
 // 列表时会静默错位（审计 2026-09-22 R6 P1-C 实测三档全部错位一列，`sort=bytes`
 // 的首行不是占用最大的人）。
 func GatewayFileSummary(db *sql.DB, sort string, desc bool) ([]GatewayFileSummaryRow, error) {
-	order := "bytes"
-	switch sort {
-	case "files", "bytes", "username":
-		order = sort
-	}
-	dir := "DESC"
-	if !desc {
-		dir = "ASC"
-	}
+	orderClause := gatewayFileSummaryOrderClause(sort, desc)
 	rows, err := db.Query(`SELECT g.user_id, COALESCE(u.username, '') AS username,
 	                              COALESCE(u.display_name, '') AS display_name,
 	                              count(*) AS files,
@@ -437,7 +475,7 @@ func GatewayFileSummary(db *sql.DB, sort string, desc bool) ([]GatewayFileSummar
 	                              min(g.expires_at) AS earliest_expires_at
 	                         FROM gateway_files g LEFT JOIN users u ON u.id = g.user_id
 	                        GROUP BY g.user_id, u.username, u.display_name
-	                        ORDER BY ` + order + ` ` + dir + ` NULLS LAST, g.user_id ASC`)
+	                        ` + orderClause)
 	if err != nil {
 		return nil, err
 	}
