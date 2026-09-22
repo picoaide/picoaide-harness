@@ -28,7 +28,12 @@ export type DesktopDownloadPlatform = DesktopReleasePlatform
 export interface UpdateDownloadProgress {
   /** Bytes received so far, counting bytes kept from an earlier attempt. */
   readonly receivedBytes: number
-  /** Total expected bytes (content-length), or undefined when unknown. */
+  /**
+   * 整份安装包的期望字节数:206 的 `Content-Range` total,或可采信的
+   * `content-length + offset`,再退到清单 `size`;都没有时为 undefined
+   * (显示面据此改为显示已下载字节数)。带非 identity `Content-Encoding` 的
+   * 响应不参与分母 —— 那时线上长度与落盘字节不是同一口径。
+   */
   readonly totalBytes: number | undefined
 }
 
@@ -219,6 +224,13 @@ interface PartialTransferState {
   readonly downloadURL: string
   readonly sha256: string
   readonly receivedBytes: number
+  /**
+   * 上次响应声明的**完整长度**(`content-length + offset`);没有该头时缺省。
+   *
+   * 与 `receivedBytes` 一起决定"这份残留是不是已经下满":清单 `size` 可能偏小,
+   * 只有连接上声明过的长度才是同一份字节的权威口径。
+   */
+  readonly totalBytes?: number
   readonly etag?: string
   readonly lastModified?: string
 }
@@ -313,7 +325,7 @@ export async function resolveUpdateInstaller(
     size,
   } as const
 
-  if (await isVerifiedInstaller(paths.completed, platform, size, shared.sha256)) {
+  if (await isVerifiedInstaller(paths.completed, platform, shared.sha256)) {
     return { ...shared, path: paths.completed, partialPath: paths.temporary, resumeBytes: 0, complete: true }
   }
   return {
@@ -417,14 +429,15 @@ async function fetchManifestFor(
 /**
  * 下载已完成的安装包是否可信到可以直接复用。
  *
- * 复用不是"文件存在就算":必须是普通文件(不是符号链接),声明了长度时必须等长,
- * 内容必须与本次清单的 SHA-256 相同(ETag/Last-Modified 不参与 —— 哈希是权威)。
+ * 复用不是"文件存在就算":必须是普通文件(不是符号链接),内容必须与本次清单的
+ * SHA-256 相同(ETag/Last-Modified 不参与 —— 哈希是权威)。
+ * **长度不是判据**:清单 `size` 是发布方的声明,可能不准(现场见过偏小 20%);
+ * 拿它对拍会把已经下好的安装包判成"不可复用"⇒ 每次检查都重下整包。
  * @returns 通过全部校验时为 true。
  */
 async function isVerifiedInstaller(
   filename: string,
   platform: DesktopDownloadPlatform,
-  expectedSize: number,
   expectedDigest: string,
 ): Promise<boolean> {
   let stat
@@ -437,7 +450,9 @@ async function isVerifiedInstaller(
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0 || stat.size > MAX_UPDATE_DOWNLOAD_BYTES) {
     return false
   }
-  if (expectedSize > 0 && stat.size !== expectedSize) return false
+  // 长度不作为判据:清单 `size` 是发布方的声明,可能不准(现场见过偏小 20%)。
+  // 用它对拍会把一个已经下好的安装包判成"不可复用" ⇒ 每次检查都重下整包;
+  // 权威判据是清单里的 SHA-256,长度不符只是提示。
   if (await sha256OfFile(filename) !== expectedDigest) return false
   try {
     await validateArtifact(filename, platform)
@@ -451,9 +466,10 @@ async function isVerifiedInstaller(
 /**
  * 已有 `.partial` 里可以安全续传的字节数。
  *
- * 必须同时满足:sidecar 存在且结构与来源指向本次同一地址/同一哈希、长度与声明
- * 的清单长度不冲突、文件不小于 sidecar 记录的长度。任何一条不满足都从 0 开始
- * (宁可从零重下,也不拼出一份来源混杂的文件)。
+ * 必须同时满足:sidecar 存在且结构与来源指向本次同一地址/同一哈希、残留不大于
+ * **已知总长**(sidecar 记下的连接声明长度优先,清单 `size` 只作退路)、文件不小于
+ * sidecar 记录的长度。任何一条不满足都从 0 开始(宁可从零重下,也不拼出一份来源
+ * 混杂的文件)。
  * @returns 可续传字节数;没有可用残留时为 0。
  */
 async function resumableBytes(
@@ -471,7 +487,11 @@ async function resumableBytes(
   const stat = await lstatOptional(paths.temporary)
   if (stat === undefined || !stat.isFile() || stat.isSymbolicLink()) return 0
   if (stat.size <= 0 || stat.size > MAX_UPDATE_DOWNLOAD_BYTES) return 0
-  if (expected.size > 0 && stat.size > expected.size) return 0
+  // 残留不能比"已知总长"还大:已知总长优先取 sidecar 里记的**连接声明值**
+  // (上次响应真发过的长度),清单 `size` 只作退路 —— 清单偏小时用它会把这
+  // 份仍有价值的残留直接判成不可续传。
+  const knownTotal = state.totalBytes ?? (expected.size > 0 ? expected.size : undefined)
+  if (knownTotal !== undefined && stat.size > knownTotal) return 0
   // sidecar 在每块写入后刷新,但仍可能落后于实际字节(例如最后一块写完前后崩溃):
   // 以两者中较小的值为准,多出来的字节必然会被后续写入覆盖。
   return Math.min(Number(stat.size), Math.max(0, Math.trunc(state.receivedBytes)))
@@ -496,11 +516,17 @@ function parsePartialState(text: string): PartialTransferState {
   const lastModified = typeof record.lastModified === 'string' && record.lastModified !== ''
     ? record.lastModified
     : undefined
+  const totalBytes = typeof record.totalBytes === 'number'
+    && Number.isSafeInteger(record.totalBytes)
+    && record.totalBytes > 0
+    ? record.totalBytes
+    : undefined
   return {
     version: PARTIAL_STATE_VERSION,
     downloadURL: record.downloadURL,
     sha256: record.sha256,
     receivedBytes: record.receivedBytes,
+    ...(totalBytes === undefined ? {} : { totalBytes }),
     ...(etag === undefined ? {} : { etag }),
     ...(lastModified === undefined ? {} : { lastModified }),
   }
@@ -509,8 +535,8 @@ function parsePartialState(text: string): PartialTransferState {
 /**
  * 传输(或复用)一份安装包,返回首个失败;成功时文件已在 `paths.completed`。
  *
- * 三种路径:残留已满(长度与清单声明一致)→ 只做摘要校验;有可续传字节 →
- * Range 续传,服务端不认 206 就退回整份重下;否则整份下。
+ * 三种路径:残留已满(长度已达**已知总长**,清单声明或上次响应声明的)→ 只做
+ * 摘要校验;有可续传字节 → Range 续传,服务端不认 206 就退回整份重下;否则整份下。
  * @param paths - completed/temporary targets.
  * @param transfer - request boundary, source URL, validators, and progress.
  * @returns 失败对象,或 undefined 表示完成件已就位。
@@ -525,10 +551,16 @@ async function streamInstaller(
   // 字面量 false,catch 里再判就永远为假(实际运行时仍可能已被取消)。
   const abortedBeforeStreaming = transfer.signal?.aborted === true
 
-  // 残留已经等于清单声明的长度:不花流量,直接按哈希确认;不符就整份重下。
+  const previous = await readPartialState(paths.temporaryState)
+  // "残留是否已经下满"的分母:上次连接声明过的总长优先,清单 `size` 只作退路。
+  // 清单偏小时用 `size` 判满会把**没下完**的残留当成下满的:哈希不符 → 残留被
+  // 删掉,已下字节全部作废(而它本可以从断点续传)。
+  const knownTotal = previous?.totalBytes ?? expectedTotal
+
+  // 残留已经等于已知总长:不花流量,直接按哈希确认;不符就整份重下。
   // `startBytes > 0` 是必要条件:没有残留时 startBytes 是 0,"0 >= 0" 会把
   // "没有文件"误判成"文件已完整"。
-  if (startBytes > 0 && expectedTotal !== undefined && startBytes >= expectedTotal) {
+  if (startBytes > 0 && knownTotal !== undefined && startBytes >= knownTotal) {
     if (await sha256OfFile(paths.temporary) === transfer.sha256) {
       await unlinkIfPresent(paths.temporaryState)
       await rename(paths.temporary, paths.completed)
@@ -537,7 +569,6 @@ async function streamInstaller(
     await removePartial(paths)
   }
 
-  const previous = await readPartialState(paths.temporaryState)
   let offset = 0
   const resumeFrom = startBytes > 0 && previous !== undefined
     && (previous.etag !== undefined || previous.lastModified !== undefined)
@@ -599,8 +630,14 @@ async function streamInstaller(
   if (response.body === null) {
     return new UpdateDownloadError('empty-body', 'The update download service returned an empty body.')
   }
-  const declared = declaredContentLength(response)
-  if (declared !== undefined && declared + offset > MAX_UPDATE_DOWNLOAD_BYTES) {
+  // 响应自报的长度只在**没有非 identity 内容编码**时可采信:生产请求边界
+  // (Electron `net.fetch`)会主动广告 `Accept-Encoding: gzip, deflate, br, zstd`,
+  // 任何对安装包启压缩的反代/CDN 都会让 `content-length`(以及 206 的
+  // `Content-Range` total)是**线上**字节,而 body 是解码后的字节 —— 两者不同
+  // 口径(实测 4111 vs 4194304)。用它当分母会把完整且 SHA-256 正确的安装包
+  // 判成截断(重试到彻底失败),进度还会自第一帧起恒为 100%。
+  const transferLength = encodedTransferLength(response, offset)
+  if (transferLength !== undefined && transferLength > MAX_UPDATE_DOWNLOAD_BYTES) {
     return new UpdateDownloadError(
       'response-too-large',
       `The update installer exceeds ${String(MAX_UPDATE_DOWNLOAD_BYTES)} bytes.`,
@@ -608,12 +645,17 @@ async function streamInstaller(
   }
   if (transfer.signal?.aborted === true) return aborted(transfer.signal.reason)
 
-  const totalBytes = expectedTotal ?? (declared === undefined ? undefined : declared + offset)
+  // 分母 = 本次响应声明/清单声明的**整份长度**(见 `installerTotalBytes`):可采信的
+  // 连接声明优先(206 的 `Content-Range` total,否则 `content-length + offset`),
+  // 再退到清单 `size`,都没有就按"总长未知"处理(显示面改为显示已下载字节数)。
+  // 权威完整性判据始终是清单里的 SHA-256(见下方摘要校验),长度只是完整性提示。
+  const totalBytes = installerTotalBytes(transferLength, expectedTotal)
   const sidecar: PartialTransferState = {
     version: PARTIAL_STATE_VERSION,
     downloadURL: transfer.downloadURL,
     sha256: transfer.sha256,
     receivedBytes: offset,
+    ...(totalBytes === undefined ? {} : { totalBytes }),
     ...validatorFields(response.headers),
   }
 
@@ -646,24 +688,28 @@ async function streamInstaller(
     await response.body.cancel().catch(() => undefined)
   }
 
+  // 摘要只算一次:长度与哈希的顺序是**先算摘要、再判长度**(见下)。
+  const digest = digestStream.digest('hex')
   if (received === 0) {
     failure = new UpdateDownloadError('empty-body', 'The update download service returned an empty body.')
-  } else if (totalBytes !== undefined && received !== totalBytes) {
-    // 连接在中途被切断:字节留在 .partial 里,下一次用 Range 续传。
-    // 一个字节都没收到(服务端声明了长度却立刻关流)是"空响应",不是截断。
-    failure = new UpdateDownloadError(
-      received === 0 ? 'empty-body' : 'network',
-      received === 0
-        ? 'The update download service returned an empty body.'
-        : `The update download ended after ${String(received)} of ${String(totalBytes)} bytes.`,
-    )
-  } else if (digestStream.digest('hex') !== transfer.sha256) {
-    // 与服务端发布的哈希不符:极可能是被截断的传输 —— 保留字节以便续传,
-    // 若下一次仍不符,长度校验会先失败并整份重下。
-    failure = new UpdateDownloadError(
-      'checksum-mismatch',
-      'The downloaded installer does not match the published SHA-256 digest.',
-    )
+  } else if (digest !== transfer.sha256) {
+    // 与服务端发布的哈希不符:极可能是被截断的传输 —— 保留字节以便续传。
+    // 只判"没收到声明的字节数":收到**多**于分母(清单 size 偏小且响应没有
+    // content-length 时可能出现)不算截断。
+    failure = totalBytes !== undefined && received < totalBytes
+      ? new UpdateDownloadError(
+        'network',
+        `The update download ended after ${String(received)} of ${String(totalBytes)} bytes.`,
+      )
+      : new UpdateDownloadError(
+        'checksum-mismatch',
+        'The downloaded installer does not match the published SHA-256 digest.',
+      )
+  } else if (totalBytes !== undefined && received < totalBytes) {
+    // 摘要命中、长度声明不足:长度**不能越权否决 SHA-256**。清单 `size` 可能不准
+    // (发布面数字偏大),`content-length` 也可能是另一个口径(压缩响应);只要
+    // 字节与清单哈希逐字节相同,这份文件就是完整的,按完成处理。
+    // (旧行为是 `else if` 链:长度先判 ⇒ 完整且哈希正确的文件永久失败。)
   }
   if (failure !== undefined) {
     // 一个字节都没收到:这份空 .partial 没有续传价值,留着只会让目录里多一个
@@ -783,6 +829,23 @@ function conditionalValidator(
 }
 
 /**
+ * 把 `kind:value` 形状的验证器切成两段。
+ *
+ * **只按第一个冒号切**:`kind` 是我们自己写的固定前缀(`etag` / `last-modified`),
+ * 而 `value` 是服务端原样的头值 —— `Last-Modified` 形如
+ * `Tue, 22 Sep 2026 18:06:04 GMT`,自带两个冒号。按"数组元素个数"切
+ * (`split(':', 2)`,第二参是 **limit** 不是索引)会把值截成
+ * `Tue, 22 Sep 2026 18`,于是与响应头永远不相等 ⇒ 206 被丢弃、整份重下。
+ * @param spec - validator spec produced by `conditionalValidator`.
+ * @returns the kind and the untouched remainder (empty when there is no colon).
+ */
+export function splitValidatorSpec(spec: string): { readonly kind: string, readonly value: string } {
+  const separator = spec.indexOf(':')
+  if (separator < 0) return { kind: spec, value: '' }
+  return { kind: spec.slice(0, separator), value: spec.slice(separator + 1) }
+}
+
+/**
  * 续传响应的验证器是否仍指向同一份内容。
  *
  * 只有 sidecar 记下了 ETag 或 Last-Modified 时才做这项比对 —— 都没有时,
@@ -795,7 +858,7 @@ function resumeValidatorMatches(
   if (previous === undefined) return false
   const expected = conditionalValidator(headers, previous, 'GET', true)
   if (expected === undefined) return true
-  const [kind, value] = expected.split(':', 2) as [string, string]
+  const { kind, value } = splitValidatorSpec(expected)
   const actual = kind === 'etag' ? headers.get('etag') : headers.get('last-modified')
   return actual === value
 }
@@ -814,6 +877,71 @@ function declaredContentLength(response: Response): number | undefined {
   if (declared === null || !DECIMAL_BYTES.test(declared)) return undefined
   const value = Number(declared)
   return Number.isSafeInteger(value) && value > 0 ? value : undefined
+}
+
+/** `Content-Range: bytes <start>-<end>/<total>` 的 total;`*`(未知)与畸形值为 undefined。 */
+function contentRangeTotal(response: Response): number | undefined {
+  const value = response.headers.get('content-range')
+  if (value === null) return undefined
+  const match = /^bytes (?:0|[1-9][0-9]*)-(?:0|[1-9][0-9]*)\/([0-9]+)$/u.exec(value.trim())
+  if (match === null) return undefined
+  const total = Number(match[1])
+  return Number.isSafeInteger(total) && total > 0 ? total : undefined
+}
+
+/**
+ * 响应的内容编码;`identity` 与缺失都视为"未编码",返回 undefined。
+ *
+ * 见 `encodedTransferLength`:只要这里非 undefined,`content-length` 与
+ * `Content-Range` 就是**压缩后**的字节数,与落盘的解码字节不同口径。
+ * @param response - installer response.
+ * @returns 非 identity 的编码名(小写),或 undefined 表示按原样传输。
+ */
+function responseContentEncoding(response: Response): string | undefined {
+  const value = response.headers.get('content-encoding')
+  if (value === null) return undefined
+  const normalized = value.trim().toLowerCase()
+  return normalized === '' || normalized === 'identity' ? undefined : normalized
+}
+
+/**
+ * 本次响应在**线上**声明的整份长度;不可采信或缺失时为 undefined。
+ *
+ * 两个来源都是一回事:`content-length + offset`(整份响应)或 206 的
+ * `Content-Range` total。只要响应带非 identity `Content-Encoding`,这两个数字
+ * 描述的就是压缩后的字节,而调用方拿到的 `body` 是解码后的字节 —— 必须整条
+ * 弃用,否则完整文件会被长度校验判成截断(2026-09 实测:gzip 响应的
+ * `content-length` 4111 vs 实收 4194304)。
+ * @param response - installer response.
+ * @param offset - bytes already kept from an earlier attempt (0 for a full body).
+ * @returns declared transfer length in bytes, or undefined when it cannot be trusted.
+ */
+function encodedTransferLength(response: Response, offset: number): number | undefined {
+  if (responseContentEncoding(response) !== undefined) return undefined
+  // 206 的 `Content-Range` total 是"整份资源多长"的权威声明(与偏移无关);
+  // 整份响应(200)没有它,只能靠 `content-length`。
+  const rangeTotal = offset > 0 ? contentRangeTotal(response) : undefined
+  if (rangeTotal !== undefined) return rangeTotal
+  const declared = declaredContentLength(response)
+  return declared === undefined ? undefined : declared + offset
+}
+
+/**
+ * "整份安装包有多长"的**单一判定点**(进度分母 + 长度校验共用)。
+ *
+ * 优先级:可采信的连接声明(见 `encodedTransferLength`)→ 清单 `size` →
+ * undefined(总长未知:显示面改为显示已下载字节数,不再瞎猜)。清单 `size` 是
+ * 发布方的声明,可能不准(现场见过偏小 20%):它只作退路,不作唯一口径。
+ * @param transferLength - trusted length declared by this response, if any.
+ * @param manifestSize - `size` from the release manifest, if any.
+ * @returns expected total bytes, or undefined when no source is trustworthy.
+ */
+function installerTotalBytes(
+  transferLength: number | undefined,
+  manifestSize: number | undefined,
+): number | undefined {
+  if (transferLength !== undefined && transferLength > 0) return transferLength
+  return manifestSize
 }
 
 async function hashFileInto(

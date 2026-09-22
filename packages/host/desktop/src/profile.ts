@@ -26,6 +26,7 @@ import {
   resolveProfileDir,
   writeProfileManifest,
   type Profile,
+  type ProfileContext,
   type ProfileManifest,
 } from '@deepseek-ai/dsh-app-boot'
 import { resolveDshHome } from './desktop-home.ts'
@@ -279,6 +280,20 @@ export interface PreparedDesktopProfile {
   bareModuleBaseUrl: string
   /** Complete ordered patch list for this desktop generation. */
   patches: PatchOptions[]
+  /**
+   * Launcher-owned patches applied **above** the profile's own layer and the home
+   * patch (`$DSH_HOME/cordis.patch.yml`) — the tail of {@link patches} and the
+   * desktop counterpart of the CLI's `--patch` overlays
+   * (`ProfileContext.overlays`). The desktop has no command-line overlay inputs,
+   * so this layer is exactly what the launcher pins itself (settings/webserver/
+   * agent-presets/channel injection…); exposing the boundary keeps
+   * `profileContext` describing this generation instead of re-deriving it.
+   */
+  overlays: PatchOptions[]
+  /** Installation manifest path used as the first module-resolution anchor. */
+  installAnchor: string
+  /** Launch-time telemetry opt-out this generation was composed with. */
+  telemetryDisabledEnv: string | undefined
   /** Optional Client UI entries skipped because this profile cannot resolve them. */
   skippedOptionalEntries: SkippedOptionalEntry[]
   /** Persisted shell mode applied after every user-owned patch. */
@@ -593,6 +608,11 @@ export async function prepareDesktopProfile(
     ...profile.patches,
     ...homePatches,
   ]
+  // 分界线：这一行之后 push 的全是**启动器自己的 pin**（settings/webserver/
+  // ui-layout/agent-presets/desktop-shell/渠道注入…）。它们在真实组合里就应用在
+  // profile 自有层与 home 层**之上**，正是 `ProfileContext.overlays` 的语义
+  // （上游 CLI 的 `--patch` 覆盖层）；`desktopProfileContext` 用它描述本次装配。
+  const overlayStart = patches.length
   const composedRows = composeEntries([patches])
   assertUniqueEntryIds(composedRows)
   const rows = new Map<string, EntryOptions>()
@@ -775,9 +795,71 @@ export async function prepareDesktopProfile(
     rootConfig,
     bareModuleBaseUrl,
     patches: structuredClone(patches),
+    overlays: structuredClone(patches.slice(overlayStart)),
+    installAnchor: INSTALL_ANCHOR,
+    telemetryDisabledEnv: telemetryDisabled,
     skippedOptionalEntries,
     mode,
     port,
+  }
+}
+
+/**
+ * Compose the launcher-owned `profileContext` for one prepared desktop generation.
+ *
+ * 为什么必须有它（issue #130，P0「创造模式」会话全部不可用）：上游 base bundle 的两
+ * 行由 `disabled: !!js "!ctx.get('profileContext')"` 这个开关控制
+ * （`deepseek-harness/packages/bundle/base/cordis.patch.yml:20-31`）——
+ *   · `plugin-manager`：宿主不 provide `profileContext` 时整行被**静默** disable
+ *     ⇒ `pluginManager` 服务不存在 ⇒ `cordis` preset 的行 `tool-plugin-manager`
+ *     （`inject: ['tools','pluginManager','sandboxPolicy']`）永远停在 PENDING ⇒
+ *     该 preset 的会话挂不起来（`preset "cordis" failed to mount: 1 row(s) did not
+ *     activate: tool-plugin-manager … waiting for pluginManager`）。
+ *   · `hmr`：**一旦** provide 了 `profileContext` 它就会挂载，而
+ *     `@deepseek-ai/dsh-hmr` 的 `Service.init` 要求存在 `appReady`
+ *     （`deepseek-harness/packages/boot/hmr/src/index.ts:200-208`），`appReady` 只有
+ *     `@deepseek-ai/dsh-cmdline` 会 provide —— 桌面宿主不走 cmdline，于是整棵 profile
+ *     树在 "Profile HMR requires application readiness" 处 fail-loud。两件事必须成对
+ *     做：这里 provide `profileContext`，`cordis.patch.yml` 里显式关闭 `hmr` 行。
+ *
+ * 字段与上游 CLI 的构造同源（`deepseek-harness/apps/cli/src/profile-boot.ts:297-305`），
+ * 但每个取值都来自**本次真实装配**（`prepareDesktopProfile` 的返回值），这里不另猜路径：
+ *   · `name`/`dir`/`patchPath` —— 本次装配的 profile（`$DSH_HOME/profiles/desktop`）；
+ *   · `installAnchor` —— 首次模块解析锚点（桌面包自己的 `package.json`，与
+ *     `loadProfile`/`healProfilesModuleFallback` 用的是同一个值；`plugin-manager` 的
+ *     `listBundles()` 会把它当 JSON 读，所以必须是文件而不是目录）；
+ *   · `home` —— 本次装配用的 Harness home（`$DSH_HOME`，或渠道派生的数据根）；
+ *   · `startedBundles` —— 本次 profile 清单解析出的 bundle 层顺序（与上游 CLI 的
+ *     `composed.profile.layers.map(layer => layer.packageName)` 同源）；
+ *   · `overlays` —— 启动器自己的 pin 层（应用在 profile 自有层与 home 层之上）；
+ *   · `telemetryDisabledEnv` —— 本次装配实际读到的遥测开关。**不要**在这里重读
+ *     `process.env`：装配的入参可能是调用方显式传进来的值（冒烟就是这么做的），重读
+ *     会让"组合期用了 A、事后自述 B"分叉；
+ *   · `cwd` —— 启动器的工作目录，语义与上游 CLI 相同（`process.cwd()`）。它只被用来
+ *     锚定"安装 bundle"时的**相对**路径参数，绝对路径不受影响。
+ *
+ * `packageManager` **有意不提供**：随包不带 pnpm，也不带任何可执行包管理器入口
+ * （`package.json` 的 `files`/`asarUnpack` 与 `tests/package.spec.ts` 里
+ * `installDesktopPnpmRuntime` 的反向断言共同保证这一点）。编造入口只会把"这台机器没有
+ * 包管理器"伪装成"命令不存在"。缺省时 `PluginManager` 用 `pnpmCommand: 'pnpm'`，即回落到
+ * PATH 上的 pnpm：**插件服务本身照常可用**（`list_plugins`/`list_bundles`/启停都工作），
+ * 只有 `install_bundle`/`remove_bundle` 这类包操作会因 `ENOENT` 失败——上游把 pnpm 的
+ * stderr 原样回给模型（`runProfilePnpm` → `plugin_manager` 工具结果），失败是 loud 的，
+ * 不是静默降级。
+ * @param prepared - the prepared desktop generation this context describes.
+ * @returns the launcher-owned context passed to `ctx.provide('profileContext', …)`.
+ */
+export function desktopProfileContext(prepared: PreparedDesktopProfile): ProfileContext {
+  return {
+    name: DESKTOP_PROFILE_NAME,
+    dir: prepared.profile.dir,
+    patchPath: prepared.profile.patchPath,
+    installAnchor: prepared.installAnchor,
+    startedBundles: prepared.profile.layers.map(layer => layer.packageName),
+    cwd: process.cwd(),
+    home: prepared.homeDir,
+    overlays: prepared.overlays,
+    telemetryDisabledEnv: prepared.telemetryDisabledEnv,
   }
 }
 

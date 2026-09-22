@@ -62,3 +62,78 @@
 - `packages/host/desktop/tests/client-desktop-update.spec.ts`：12 例，覆盖单轮询/多订阅、同值不通知、路由 404 时保留快照、动作按状态分派到检查或安装路由、徽标三态与重试文案。
 - `packages/host/enterprise/tests/update-status-text.spec.ts`：4 例，钉住"可安装/下载中（含重试）/各类失败"的文案与按钮状态。
 - 相关门禁：`corepack yarn workspace dsh-plugin-desktop typecheck|test`、`corepack yarn workspace @picoaide/dsh-enterprise typecheck|test`。
+
+## 修订（2026-09-23）：续传验证器解析错误与完成语义
+
+上线后审计在**生产参数**下复现了两处缺陷（同一天交付的"健壮化"里），修正与判据如下。
+
+1. **续传验证器按"元素个数"切分（缺陷）**：`resumeValidatorMatches` 曾用
+   `expected.split(':', 2)`，而 JS 里第二个参数是**数组元素个数上限**，不是"切几刀"。
+   生产 `/updates/client/*` 由 Go 的 `http.ServeFile` 提供，**只发 `Last-Modified`**，
+   值形如 `Tue, 22 Sep 2026 18:06:04 GMT`（自带冒号）⇒ 比较值被截成
+   `Tue, 22 Sep 2026 18`，永远不等于响应头 ⇒ 合法的 206 被丢弃、退避后**整份重下**、
+   进度从 72% 掉回 0%。
+   - 修正：只按**第一个**冒号切分（`splitValidatorSpec`）。
+   - **为什么原自测没抓到**：假服务器只发 ETag（值里没有冒号），夹具与生产不同形。
+     现补"只发 `Last-Modified`"的真实 HTTP 用例（第 2 次请求必须是 206 且只发两次请求、
+     进度单调不减），另加切分函数的定点单测。
+2. **完成语义（缺陷）**：展示层公式是 `Math.min(99, floor(received/total*100))`，
+   是单向封顶、且没有任何"完成即 100%"的出口 —— 于是"下载完成"在整条链路上**没有数值
+   表达**（收满那一刻显示 99%，随后直接翻成"已下载/可安装"）。
+   - 现语义：`received >= total ⇒ 100%`；未达之前最多 99%；`total` 未知或 ≤0 ⇒ 显示
+     **已下载字节数**（如 `12.3 MB`；单位与语言无关，中英两面逐字相同）。
+   - 公式仍是两份副本（跨包客户端 import 被禁止，两个 client bundle 各自加载），
+     由跨包对拍守住：同一输入矩阵下两面输出必须逐字相同（0% / 99% / 完成 /
+     `total = 0` / `total` 未知 / `received > total`），只改一面即红。
+3. **分母与长度校验**：传输层的分母改为**本次响应声明的长度**（`content-length + offset`），
+   清单 `size` 只作退路；长度校验从"必须逐字节相等"改为"收到的**少于**声明才算截断"，
+   完整性始终由清单 SHA-256 定论。同一口径贯穿"完成件复用"与"残留续传"：sidecar 记下
+   连接声明过的总长，清单 `size` 偏小时不再否决复用（否则每次检查都重下整包）。
+   - 旧行为（清单 `size` 偏小 20% 时）：进度在真实进度 80% 处就被顶到 99%，长度校验失败
+     ⇒ 6 次整份重下 ⇒ 最终只剩一句"网络不可达（已自动重试）"。
+4. **退避期保留下载态**：失败后曾先清 `downloadingVersion/downloadProgress` 再等待，
+   于是「关于」页回落到"发现新版本…正在准备下载…"、侧边栏只剩版本号，
+   `update.interrupted`（"N 秒后重试"）**永不可达**。现在退避期保留下载态与最后一次进度；
+   同时 `waitBeforeRetry` 在 dispose 时被唤醒 —— 否则退避期退出应用会让 teardown 永久等待。
+5. **前台即时刷新**：5 秒轮询之外，窗口 `visibilitychange → visible` 与 `focus` 时立即取一次
+   快照。主窗口没有关 `backgroundThrottling`，后台时 Chromium 会把定时器压到 ≥1 次/分钟，
+   用户切回前台若不补取一次，进度/状态会停在几十秒前的旧值（不改窗口的全局节流行为）。
+
+## 修订（2026-09-23，第二轮）：编码口径、SHA 权威与真倒计时
+
+对抗式审计对上一节的三处改动做了生产参数复现，确认其中两处反而更糟。本轮修正如下，
+判据一律是**能被打坏**的（把该处改回旧形态，对应用例必红）。
+
+1. **分母必须排除非 identity `Content-Encoding`（P1，上一节引入的回归）**：生产请求
+   边界（Electron `net.fetch`）会主动发 `Accept-Encoding: gzip, deflate, br, zstd`，
+   反代/CDN 只要对安装包启压缩，`content-length` 就是**压缩后**的长度而 body 是**解码后**
+   的字节（实测同一响应 `4111` vs `4194304`）。上一节把"本次响应声明的长度"提为唯一
+   优先分母 ⇒ ①不可压缩的真安装包（gzip 后反而更长 0.03%）被判"截断"，6 次重试后只剩
+   `.partial`；②可压缩内容自第一帧起恒显 `100%`；③sidecar 记下压缩长度，残留被
+   `stat.size > knownTotal` 判成不可续传。现在：
+   - 只有**没有非 identity `Content-Encoding`** 时才采信连接声明（`encodedTransferLength`）；
+   - 206 优先取 `Content-Range` 的 total（同样受内容编码约束 —— 它也是线上长度）；
+   - 其余回落清单 `size`，都没有就按"总长未知"处理（显示已下载字节数）；
+   - `sidecar.totalBytes` 与进度分母同源（`installerTotalBytes`），**绝不写线上长度**。
+2. **长度不得越权否决 SHA-256（P2-1）**：判定顺序从 `else if` 链（长度在前）改为**先算摘要**：
+   摘要命中即接受（长度声明不足只作提示），摘要不符才按"截断（可续传）/内容不符"分流。
+   影响面：chunked 响应 + 清单 `size` 偏大时，完整且哈希正确的文件曾永久失败。
+3. **退避倒计时按绝对截止时刻（P2-2）**：`retryDelayMs` 原先只在进入退避时发布一次常量，
+   显示面 `Math.ceil(delay/1000)` 于是**永不递减**。现在宿主记**绝对截止时刻**
+   （`retryDeadlineAt`）并在退避窗口内每秒重发快照（`retryDelayMs` 现算剩余量）；
+   两个客户端的共享快照 hook（`useUpdateState` / `useDesktopUpdateState`）再按"快照到达
+   时刻"每秒本地重算（`liveRetryDelayMs`，两面逐字对拍），重开界面也能看到真实剩余量。
+   文案键沿用 `update.interrupted` / `update.retryingIn`，未新增。
+4. **注释同步（P3）**：`isVerifiedInstaller` / `resumableBytes` 的 JSDoc 不再声称
+   "声明了长度时必须等长""长度与清单长度不冲突" —— 复用只认哈希，续传只认
+   sidecar 的连接声明长度（清单 `size` 为退路）。
+5. **判据补强（P2-3）**：新增真实 HTTP 集成用例——gzip（不可压缩/可压缩/断流续传三种
+   形态）、chunked + 清单偏大（长度不足但哈希正确）、清单偏小 + 残留 85%（sidecar
+   的 `totalBytes` 两条分支）；跨包对拍矩阵补 ≥100 单位的 KB 值（`200 KB` 进位分支）与
+   NaN/Infinity/负数输入，并新增倒计时公式的对拍。变异验证：把上述任一处改回旧形态，
+   对应用例均变红（红/绿对照见审计修复报告）。
+6. **认账（未闭环）**：`UpdateSection.tsx`（设置-关于页）不在本轮文件所有权范围内，
+   它的倒计时靠宿主每秒重发 + 5 秒轮询呈现，粒度是 5 秒而不是 1 秒；渲染层 hook 本身
+   没有组件级用例（本包测试跑在 node 环境、无 jsdom/testing-library），只由纯函数对拍
+   与宿主用例覆盖。
+
