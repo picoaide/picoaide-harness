@@ -210,11 +210,20 @@ func PurgeExpiredGatewayFiles(db *sql.DB, limit int) (int64, error) {
 	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.Query(
+		// 口径与另外两处（回收候选列表、管理端清理）一致：**租约内**的认领行跳过，
+		// 租约过期的标记行可以清（认领方多半已经死了）。
+		//
+		// 分工说明：本函数只清**台账行**，不删上游对象 —— 上游那份由回收器负责；
+		// 上传重写把每个新上传的 `expires_after` 收敛到平台上限后，上游对象会自己到期，
+		// 所以"先清行、后由上游自清"不会长期泄漏配额。**例外**是改造前的"永久"老行
+		// （上游无过期时间）：它们靠回收器的 `NormalizeLegacyPermanentGatewayFiles`
+		// 补上过期时间后再由回收器删上游；若本函数先一步删了行，那份对象就再无凭据
+		// （已认账的残留，见 06-database.md）。
 		`SELECT file_id FROM gateway_files
 		 WHERE expires_at IS NOT NULL AND expires_at <= now()
-		   AND reaping_at IS NULL
+		   AND (reaping_at IS NULL OR reaping_at < now() - make_interval(secs => ?))
 		 ORDER BY expires_at
-		 LIMIT ? FOR UPDATE SKIP LOCKED`, limit,
+		 LIMIT ? FOR UPDATE SKIP LOCKED`, ReapClaimLease.Seconds(), limit,
 	)
 	if err != nil {
 		return 0, err
@@ -342,8 +351,10 @@ func gatewayFileWhere(q GatewayFileQuery) (string, []any) {
 	if q.OnlyExpired {
 		where += " AND g.expires_at IS NOT NULL AND g.expires_at <= now()"
 		// 正在被回收器认领（标记在租约内）的行不参与管理端清理：删掉行会让上游对象
-		// 失去清理凭据；等回收器收尾（或租约过期）后自然会被清掉。
-		where += " AND (g.reaping_at IS NULL OR g.reaping_at < now() - make_interval(secs => 600))"
+		// 失去清理凭据；等回收器收尾（或租约过期）后自然会被清掉。租约常量只有一处真源
+		// （`ReapClaimLease`），这里通过参数传入而不是再写一个字面量。
+		where += " AND (g.reaping_at IS NULL OR g.reaping_at < now() - make_interval(secs => ?))"
+		args = append(args, ReapClaimLease.Seconds())
 	}
 	if q.OnlyActive {
 		where += " AND (g.expires_at IS NULL OR g.expires_at > now())"
@@ -597,40 +608,6 @@ func FinishReapedGatewayFile(db *sql.DB, fileID string) error {
 // 不必等租约过期。
 func ReleaseReapClaim(db *sql.DB, fileID string) error {
 	_, err := db.Exec(`UPDATE gateway_files SET reaping_at = NULL WHERE file_id = ?`, fileID)
-	return err
-}
-
-// RestoreGatewayFileRow 把回收器认领过的行**补回**台账，语义严格是
-// `INSERT … ON CONFLICT (file_id) DO NOTHING`：**绝不覆盖现有行**。
-//
-// 为什么不能用 `RecordGatewayFileSize` 写回（审计 2026-09-22 N7/N10）：
-// 认领之后、上游删除之前，原主可能已经把同一个 file_id 重新上传（`RecordGatewayFileSize`
-// 把 expires_at 推到未来）。此时 `RecordGatewayFileSize` 的 WHERE 命中
-// `gateway_files.user_id = EXCLUDED.user_id` ⇒ 会把这行**已经续期的未来过期时间
-// 覆盖回快照里的过去时间**（活行当场变"已过期"，任何人都能再抢占它），并且
-// 重占用路径还会改写 created_at。写回的本意只是"下游删失败、这行还得留着重试"，
-// 一旦行已经在了就说明有人接手了这条清理责任，什么都不该做。
-//
-// createdAt 传 nil 表示"没有原始时间可用"（记 now()）；重复调用幂等。
-func RestoreGatewayFileRow(db *sql.DB, fileID string, userID int64, createdAt *time.Time, expiresAt *time.Time, sizeBytes int64) error {
-	if sizeBytes < 0 {
-		sizeBytes = 0
-	}
-	if createdAt == nil {
-		_, err := db.Exec(
-			`INSERT INTO gateway_files (file_id, user_id, created_at, expires_at, size_bytes)
-			 VALUES (?, ?, now(), ?, ?)
-			 ON CONFLICT (file_id) DO NOTHING`,
-			fileID, userID, expiresAt, sizeBytes,
-		)
-		return err
-	}
-	_, err := db.Exec(
-		`INSERT INTO gateway_files (file_id, user_id, created_at, expires_at, size_bytes)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT (file_id) DO NOTHING`,
-		fileID, userID, *createdAt, expiresAt, sizeBytes,
-	)
 	return err
 }
 

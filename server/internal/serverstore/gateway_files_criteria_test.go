@@ -1200,178 +1200,41 @@ func TestGatewayFileTotalsAndPurgeListRespectFilters(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 12. RestoreGatewayFileRow：回收器写回（审计 N7/N10）
 // ---------------------------------------------------------------------------
-
-// 认领快照必须带上 created_at —— 否则写回只能记 now()，台账丢掉真实上传时间（N10）。
-func TestClaimExpiredGatewayFileSnapshotCarriesOriginalFields(t *testing.T) {
+// 12. 标记认领取代"写回缺失行"（审计 R7 N11）
+// ---------------------------------------------------------------------------
+//
+// 旧设计里回收器"认领即删行、失败再把快照写回"，因此需要一个"只补缺失行、绝不覆盖
+// 现有行"的写回 DAO（审计 N7：`RecordGatewayFileSize` 做写回会把同人续期的未来过期时间
+// 覆盖回过去；N10：还会丢 created_at）。改成**标记认领**（`reaping_at`，行从不删除）后
+// 这条写回路径整体消失，对应 DAO 也已删除 —— 下面这条判据钉住"归属行在回收全程都不消失"，
+// 即"不再需要写回"这一前提；它一旦失效（行被删），就说明回收流程被改回了旧形态。
+func TestReapClaimKeepsLedgerRowUntilFinish(t *testing.T) {
 	db, cleanup := NewTestDB(t)
 	t.Cleanup(cleanup)
-	alice := mustUser(t, db, "gw-snap-alice")
-
-	created := time.Now().Add(-6 * 24 * time.Hour).Truncate(time.Microsecond)
-	expires := time.Now().Add(-2 * time.Hour).Truncate(time.Microsecond)
-	rawGatewayFile(t, db, "snap-1", alice, created, &expires, 4242)
-
-	snap, ok, err := ClaimExpiredGatewayFile(db, "snap-1")
+	alice := mustUser(t, db, "gw-n12-alice")
+	past := time.Now().Add(-time.Minute)
+	if err := RecordGatewayFile(db, "n12-1", alice, &past); err != nil {
+		t.Fatal(err)
+	}
+	snap, ok, err := ClaimExpiredGatewayFile(db, "n12-1")
 	if err != nil || !ok {
-		t.Fatalf("claim = %v/%v", ok, err)
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if snap.FileID != "snap-1" || snap.UserID != alice || snap.SizeBytes != 4242 {
-		t.Fatalf("快照 = %+v", snap)
+	if exists, err := GatewayFileRowExists(db, "n12-1"); err != nil || !exists {
+		t.Fatalf("认领后行必须仍在（写回路径因此不再需要）: exists=%v err=%v", exists, err)
 	}
-	if !snap.CreatedAt.Truncate(time.Microsecond).Equal(created) {
-		t.Errorf("快照 CreatedAt = %v, want %v（写回要保留原始上传时间）", snap.CreatedAt, created)
+	if held, err := GatewayFileReapClaimHeld(db, "n12-1"); err != nil || !held {
+		t.Fatalf("认领后标记必须持有: held=%v err=%v", held, err)
 	}
-	if snap.ExpiresAt == nil || !snap.ExpiresAt.Truncate(time.Microsecond).Equal(expires) {
-		t.Errorf("快照 ExpiresAt = %v, want %v", snap.ExpiresAt, expires)
+	if snap.CreatedAt.IsZero() {
+		t.Fatal("认领快照必须带 created_at（管理端上传时间的唯一来源）")
 	}
-}
-
-// ① 行已存在（且可能已被并发续期）⇒ 写回**绝不覆盖**；② 行不存在 ⇒ 按传入值补回；
-// ③ 重复调用幂等。
-func TestRestoreGatewayFileRowNeverOverwritesExistingRow(t *testing.T) {
-	db, cleanup := NewTestDB(t)
-	t.Cleanup(cleanup)
-	alice := mustUser(t, db, "gw-restore-alice")
-	bob := mustUser(t, db, "gw-restore-bob")
-
-	type row struct {
-		userID    int64
-		createdAt time.Time
-		expiresAt *time.Time
-		size      int64
-	}
-	read := func(id string) row {
-		t.Helper()
-		var r row
-		if err := db.QueryRow(`SELECT user_id, created_at, expires_at, size_bytes
-		                         FROM gateway_files WHERE file_id = ?`, id).
-			Scan(&r.userID, &r.createdAt, &r.expiresAt, &r.size); err != nil {
-			t.Fatalf("read %s: %v", id, err)
-		}
-		return r
-	}
-
-	past := time.Now().Add(-2 * time.Hour).Truncate(time.Microsecond)
-	future := time.Now().Add(48 * time.Hour).Truncate(time.Microsecond)
-	original := time.Now().Add(-6 * 24 * time.Hour).Truncate(time.Microsecond)
-
-	// 场景（N7）：认领后原主重新上传把 expires_at 推到未来 ⇒ 写回不得把它打回过去
-	rawGatewayFile(t, db, "rest-1", alice, original, &past, 100)
-	snap, ok, err := ClaimExpiredGatewayFile(db, "rest-1")
-	if err != nil || !ok {
-		t.Fatalf("claim: %v/%v", ok, err)
-	}
-	if err := RecordGatewayFileSize(db, "rest-1", alice, &future, 300); err != nil {
+	if err := FinishReapedGatewayFile(db, "n12-1"); err != nil {
 		t.Fatal(err)
 	}
-	renewed := read("rest-1")
-	if err := RestoreGatewayFileRow(db, snap.FileID, snap.UserID, &snap.CreatedAt, snap.ExpiresAt, snap.SizeBytes); err != nil {
-		t.Fatalf("restore: %v", err)
-	}
-	after := read("rest-1")
-	if after.expiresAt == nil || !after.expiresAt.Truncate(time.Microsecond).Equal(future) {
-		t.Errorf("写回把续期后的 expires_at 打回了过去: %v, want %v", after.expiresAt, future)
-	}
-	if !after.createdAt.Truncate(time.Microsecond).Equal(renewed.createdAt.Truncate(time.Microsecond)) {
-		t.Errorf("写回改写了 created_at: %v → %v", renewed.createdAt, after.createdAt)
-	}
-	if after.size != 300 || after.userID != alice {
-		t.Errorf("写回改写了 size/user: %+v", after)
-	}
-
-	// ③ 重复写回幂等
-	for i := 0; i < 3; i++ {
-		if err := RestoreGatewayFileRow(db, snap.FileID, snap.UserID, &snap.CreatedAt, snap.ExpiresAt, snap.SizeBytes); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if again := read("rest-1"); again.size != 300 || !again.expiresAt.Truncate(time.Microsecond).Equal(future) {
-		t.Errorf("重复写回不幂等: %+v", again)
-	}
-
-	// ① 行存在但是**别人**的（过期被别人重占用）⇒ 同样不覆盖
-	rawGatewayFile(t, db, "rest-2", alice, original, &past, 100)
-	snap2, ok, err := ClaimExpiredGatewayFile(db, "rest-2")
-	if err != nil || !ok {
-		t.Fatalf("claim2: %v/%v", ok, err)
-	}
-	if err := RecordGatewayFileSize(db, "rest-2", bob, &future, 700); err != nil {
-		t.Fatal(err)
-	}
-	if err := RestoreGatewayFileRow(db, snap2.FileID, snap2.UserID, &snap2.CreatedAt, snap2.ExpiresAt, snap2.SizeBytes); err != nil {
-		t.Fatal(err)
-	}
-	if got := read("rest-2"); got.userID != bob || got.size != 700 {
-		t.Errorf("写回抢回了已转手的行: %+v（want bob/700）", got)
-	}
-
-	// ② 行不存在（上游删除失败后下轮重试前进程重启等）⇒ 按传入值**原样**补回
-	if err := RestoreGatewayFileRow(db, "rest-3", alice, &original, &past, 55); err != nil {
-		t.Fatal(err)
-	}
-	got := read("rest-3")
-	if got.userID != alice || got.size != 55 {
-		t.Errorf("补回的行 = %+v, want alice/55", got)
-	}
-	if !got.createdAt.Truncate(time.Microsecond).Equal(original) {
-		t.Errorf("补回的 created_at = %v, want %v（必须保留原始上传时间）", got.createdAt, original)
-	}
-	if got.expiresAt == nil || !got.expiresAt.Truncate(time.Microsecond).Equal(past) {
-		t.Errorf("补回的 expires_at = %v, want %v（过期行留待下轮重试）", got.expiresAt, past)
-	}
-	// 补回后的行必须能被认领/清理路径继续看见
-	if ids, err := ListExpiredGatewayFiles(db, 10); err != nil || len(ids) == 0 {
-		t.Fatalf("补回后的过期行未被回收面看见: %v/%v", ids, err)
-	}
-
-	// createdAt=nil ⇒ 记 now()；负数大小 ⇒ 0；expires_at=nil 允许（永久行）
-	before := time.Now().Add(-time.Minute)
-	if err := RestoreGatewayFileRow(db, "rest-4", alice, nil, nil, -9); err != nil {
-		t.Fatal(err)
-	}
-	got4 := read("rest-4")
-	if got4.createdAt.Before(before) {
-		t.Errorf("createdAt=nil 时未记 now(): %v", got4.createdAt)
-	}
-	if got4.size != 0 || got4.expiresAt != nil {
-		t.Errorf("rest-4 = %+v, want size 0 / expires nil", got4)
-	}
-}
-
-// 反面对照（证明 RestoreGatewayFileRow 不是多余的）：把写回换成
-// `RecordGatewayFileSize` 会把已续期的活行打回过期 —— 这正是 N7 的现场。
-func TestRecordGatewayFileSizeIsNotASafeWriteBack(t *testing.T) {
-	db, cleanup := NewTestDB(t)
-	t.Cleanup(cleanup)
-	alice := mustUser(t, db, "gw-n7-alice")
-
-	past := time.Now().Add(-2 * time.Hour).Truncate(time.Microsecond)
-	future := time.Now().Add(48 * time.Hour).Truncate(time.Microsecond)
-	rawGatewayFile(t, db, "n7-1", alice, time.Now().Add(-6*24*time.Hour), &past, 100)
-	snap, ok, err := ClaimExpiredGatewayFile(db, "n7-1")
-	if err != nil || !ok {
-		t.Fatalf("claim: %v/%v", ok, err)
-	}
-	// 原主并发续期（同一 user_id ⇒ ON CONFLICT 的 WHERE 命中）
-	if err := RecordGatewayFileSize(db, "n7-1", alice, &future, 300); err != nil {
-		t.Fatal(err)
-	}
-	// 用 RecordGatewayFileSize 写回快照
-	if err := RecordGatewayFileSize(db, snap.FileID, snap.UserID, snap.ExpiresAt, snap.SizeBytes); err != nil {
-		t.Fatal(err)
-	}
-	var expires *time.Time
-	if err := db.QueryRow(`SELECT expires_at FROM gateway_files WHERE file_id = 'n7-1'`).Scan(&expires); err != nil {
-		t.Fatal(err)
-	}
-	if expires == nil || !expires.Before(time.Now()) {
-		t.Fatalf("反面对照失效：RecordGatewayFileSize 写回后 expires_at = %v（本应被打回过期 ⇒ 说明它不再是危险路径，需重审 RestoreGatewayFileRow 的必要性）", expires)
-	}
-	// 活行被打回过期后，任何人都能抢占它 —— 这就是必须用 DO NOTHING 写回的原因
-	if owned, err := GatewayFileOwnedBy(db, "n7-1", alice); err != nil || owned {
-		t.Fatalf("被打回的活行仍判为归属自己（%v/%v）—— 与上面的结论矛盾", owned, err)
+	if exists, _ := GatewayFileRowExists(db, "n12-1"); exists {
+		t.Fatal("收尾后行才应消失")
 	}
 }
 
@@ -1423,5 +1286,56 @@ func TestListGatewayFilesSearchWithNulByteDoesNotError(t *testing.T) {
 	}
 	if got, total := listFileIDs(t, db, GatewayFileQuery{Search: "nul-a", Limit: 50}); !sameOrder(got, []string{"nul-a"}) || total != 1 {
 		t.Errorf("正常搜索被 NUL 分支影响: %v/%d", got, total)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 14. 收尾的标记谓词（审计 R8 H9：删掉它全部自带用例仍绿）
+// ---------------------------------------------------------------------------
+
+// `FinishReapedGatewayFile` 的 `AND reaping_at IS NOT NULL` 是"认领后、收尾前被续期"
+// 这个窗口的**最后一道防线**：续期会清空标记（文件又有主了），此时收尾必须拒绝删行，
+// 否则那份活文件在管理端/归属校验里凭空消失（客户端只能重新上传）。
+//
+// 判据必须直接打这条 SQL 谓词：只测"正常收尾删行"的话，把谓词删掉仍然绿（H9 实测）。
+func TestFinishReapedGatewayFileRefusesRowWhoseClaimWasCleared(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	t.Cleanup(cleanup)
+	alice := mustUser(t, db, "gw-h9-alice")
+	bob := mustUser(t, db, "gw-h9-bob")
+	past := time.Now().Add(-time.Minute)
+	future := time.Now().Add(time.Hour)
+	if err := RecordGatewayFile(db, "h9-1", alice, &past); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := ClaimExpiredGatewayFile(db, "h9-1"); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	// 续期（换人）= 清空标记 ⇒ 收尾必须放弃删行。
+	if err := RecordGatewayFile(db, "h9-1", bob, &future); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := GatewayFileReapClaimHeld(db, "h9-1"); err != nil || held {
+		t.Fatalf("续期后标记必须已清空: held=%v err=%v", held, err)
+	}
+	if err := FinishReapedGatewayFile(db, "h9-1"); err != nil {
+		t.Fatal(err)
+	}
+	owner, ok, err := GatewayFileOwner(db, "h9-1")
+	if err != nil || !ok || owner != bob {
+		t.Fatalf("续期后的活行被收尾误删了: owner=%d ok=%v err=%v", owner, ok, err)
+	}
+	// 反向对照：标记仍在时收尾必须真的把行删掉（否则回收会永远清不完）。
+	if err := RecordGatewayFile(db, "h9-2", alice, &past); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := ClaimExpiredGatewayFile(db, "h9-2"); !ok {
+		t.Fatal("claim h9-2 failed")
+	}
+	if err := FinishReapedGatewayFile(db, "h9-2"); err != nil {
+		t.Fatal(err)
+	}
+	if exists, _ := GatewayFileRowExists(db, "h9-2"); exists {
+		t.Fatal("标记仍在时收尾必须删行")
 	}
 }
