@@ -38,6 +38,12 @@ function options(calls: CommandCall[], logs: string[] = []): WindowsPackageOptio
       calls.push({ command, args: [...args], cwd, env: { ...env } })
     },
     log: message => logs.push(message),
+    // 打包输入暂存：真实实现要求真实包根，本用例用假路径驱动命令边界，故注入替身。
+    stagePackAppRoot: () => ({
+      stageRoot: 'C:\\repo\\dsh-plugin-desktop/dist/.pack-root',
+      args: ['--config.directories.app=C:\\repo\\dsh-plugin-desktop/dist/.pack-root'],
+      cleanup: () => undefined,
+    }),
   }
 }
 
@@ -71,6 +77,7 @@ describe('Windows x64 installer packaging', () => {
         'never',
         '--config.win.signExecutable=false',
         '--config.npmRebuild=false',
+        '--config.directories.app=C:\\repo\\dsh-plugin-desktop/dist/.pack-root',
       ],
       cwd: 'C:\\repo\\dsh-plugin-desktop',
       env: {
@@ -109,6 +116,7 @@ describe('Windows x64 installer packaging', () => {
       'never',
       '--config.win.signExecutable=false',
       '--config.npmRebuild=false',
+      '--config.directories.app=C:\\repo\\dsh-plugin-desktop/dist/.pack-root',
     ])
     expect(calls[2]?.args).toEqual([
       'C:\\repo\\dsh-plugin-desktop\\scripts\\verify-win-portable.ts',

@@ -430,8 +430,20 @@ describe('published package surface', () => {
 
   it('keeps Electron out of production dependencies consumed by electron-builder', () => {
     expect(manifest.dependencies).not.toHaveProperty('electron')
-    expect(manifest.peerDependencies?.electron).toBe('43.4.0')
-    expect(manifest.devDependencies?.electron).toBe('43.4.0')
+    // 精确 pin（不是 range）：Electron 的主版本决定引擎与 API 面，必须显式升。
+    // 版本号本身不写死在这里 —— 否则每次升级都要改两处断言，而「改了断言但漏改
+    // 另一个字段」正是这类门禁最容易出现的假绿。
+    const pinned = manifest.devDependencies?.electron as string | undefined
+    expect(typeof pinned).toBe('string')
+    expect(pinned).toMatch(/^\d+\.\d+\.\d+$/u)
+    expect(manifest.peerDependencies?.electron).toBe(pinned)
+    // 必须与桌面壳实际使用的主版本一致（peer 面写着旧版本而 devDep 是新的，
+    // 会让第三方插件在 Electron 43 上编译、在 44 上运行）。
+    const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
+    expect(lockfile).toContain(`"electron@npm:${String(pinned)}":`)
+    // 42 是最后一个带 32 位（ia32/armv7l）与 Unity 的版本线；我们的交付面只有
+    // x64/arm64，落在 >=44 才能拿到 Chromium 152 一线的安全回移。
+    expect(Number(String(pinned).split('.')[0])).toBeGreaterThanOrEqual(44)
     expect(manifest.dependencies).not.toHaveProperty('pnpm')
   })
 

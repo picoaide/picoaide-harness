@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-desktop",
-  "version": "2.8.0",
+  "version": "2.8.1-beta.1",
   "description": "PicoAide Harness: an Electron shell composed as a DeepSeek Harness Cordis plugin",
   "license": "MIT",
   "publishConfig": {
@@ -315,7 +315,7 @@
     "yaml": "^2.9.0"
   },
   "peerDependencies": {
-    "electron": "43.4.0"
+    "electron": "44.4.3"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-client-connection": "0.1.6-alpha.2",
@@ -324,7 +324,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "^22.20.0",
     "@types/react": "^18",
-    "electron": "43.4.0",
+    "electron": "44.4.3",
     "electron-builder": "26.15.3",
     "sharp": "0.35.3",
     "tsdown": "0.22.2",
@@ -385,8 +385,15 @@
       "lib/**",
       "package.json",
       "!**/*.map",
+      "!*.map",
       "!.e2e-*",
+      "!.e2e-*/**",
       "!.real-env-*",
+      "!.real-env-*/**",
+      "!temp/**",
+      "!dist/**",
+      "!dist-*/**",
+      "!dist-probe/**",
       "!src/**",
       "!tests/**",
       "!scripts/**",
@@ -396,6 +403,12 @@
       "!vitest.config.ts",
       "!*.ts",
       "!*.tsx",
+      "!**/*.ts",
+      "!**/*.tsx",
+      "!**/node_modules/@picoaide/*/src/**",
+      "!**/node_modules/@picoaide/*/tests/**",
+      "!**/node_modules/@picoaide/*/docs/**",
+      "!**/node_modules/@picoaide/*/*.ts",
       "!**/node_modules/dsh-memory-evolve/src/**",
       "!**/node_modules/dsh-memory-evolve/docs/**",
       "!**/node_modules/dsh-memory-evolve/tests/**",

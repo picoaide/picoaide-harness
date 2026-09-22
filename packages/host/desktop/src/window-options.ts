@@ -19,12 +19,14 @@ const RENDERER_ERROR_PRELOAD = fileURLToPath(new URL('./preload/renderer-error.c
  * @param spec - shell values resolved from the active Cordis row.
  * @param icon - validated application icon.
  * @param platform - current Electron platform.
+ * @param packaged - `app.isPackaged`; wins the DevTools policy for shipped builds.
  * @returns platform-native glass and window-control options.
  */
 export function advancedWindowOptions(
   spec: DesktopShellSpec,
   icon: NativeImage,
   platform: DesktopPlatform,
+  packaged = false,
 ): BrowserWindowConstructorOptions {
   const options: BrowserWindowConstructorOptions = {
     title: platform === 'win32' ? spec.windowTitle : '',
@@ -39,6 +41,14 @@ export function advancedWindowOptions(
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      // Electron 默认 `devTools: true`,全仓从不覆写 ⇒ 客户机上「开一下 DevTools」
+      // 就能读到打包进去的渲染层实现(以及此前连带 sourcemap 一起进包的源码,
+      // 见同批 `build.files` 修复)。发布版一律关掉。
+      //
+      // 为什么可以关:e2e 与真机探针走的是 `--remote-debugging-port`(Chromium 级
+      // CDP),不依赖 `webPreferences.devTools`;开发态(`app.isPackaged === false`)
+      // 保持可用。预加载/错误上报链路也不经过 DevTools。
+      devTools: !packaged,
       // 沙箱 preload:只把渲染进程未捕获错误经 IPC 转给主进程(P0-6/D8)。
       // 它不向页面暴露 API,也不持有 DSN/不联网。
       preload: RENDERER_ERROR_PRELOAD,
@@ -85,12 +95,14 @@ export function advancedWindowOptions(
  * @param spec - active shell generation.
  * @param icon - validated application icon.
  * @param platform - current Electron platform.
+ * @param packaged - `app.isPackaged`; wins the DevTools policy for shipped builds.
  * @returns mode-specific BrowserWindow options.
  */
 export function desktopWindowOptions(
   spec: DesktopShellSpec,
   icon: NativeImage,
   platform: DesktopPlatform,
+  packaged = false,
 ): BrowserWindowConstructorOptions {
-  return advancedWindowOptions(spec, icon, platform)
+  return advancedWindowOptions(spec, icon, platform, packaged)
 }
