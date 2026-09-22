@@ -44,8 +44,9 @@ const FileReaperInterval = 5 * time.Minute
 // 删上游对象**之前**再复检一次该 id 是否被重新登记（并发上传拿到同一个 id 会插入新行）
 // —— 被重新登记就跳过上游删除（宁可留一个孤儿对象下轮再扫，也不删活文件）。
 //
-// 上游删除失败 ⇒ 用认领时拿到的快照**原样写回**台账行，下一轮继续尝试（行是"还有
-// 清理责任"的唯一凭据）。
+// 上游删除失败 ⇒ 释放回收标记（`ReleaseReapClaim`），行**从不删除** ⇒ 下一轮立刻可以
+// 重新认领并重试（行是"还有清理责任"的唯一凭据；认领本身也不再删行，见
+// `serverstore.ClaimExpiredGatewayFile` 的说明）。
 func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 	if a == nil || a.DB == nil {
 		return 0, 0

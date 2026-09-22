@@ -524,7 +524,11 @@ func GatewayFileRowExists(db *sql.DB, fileID string) (bool, error) {
 	return true, nil
 }
 
-// GatewayFileForReap 是回收器认领一行时的快照（用于上游删除失败后**原样写回**）。
+// GatewayFileForReap 是回收器认领一行时的快照。
+//
+// 回收路径本身只用 `ok` 判定（认领成功后行仍在、无需写回），快照字段供**测试与诊断**
+// 消费（例如断言 created_at 不丢、管理端上传时间口径）；保留它们是为了让"认领拿到了
+// 什么"可被断言，而不是给生产路径回写用。
 //
 // `CreatedAt` 必须一起带走：写回是"补回一行"，若不带原始上传时间就只能记成 now()，
 // 台账会丢掉真实上传时间（审计 2026-09-22 N10）。
