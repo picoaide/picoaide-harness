@@ -1006,17 +1006,17 @@ func TestReaperDoesNotDeleteRenewedFile(t *testing.T) {
 	if err := serverstore.RecordGatewayFile(gw.db, "file-listed", gw.uidA, &past); err != nil {
 		t.Fatal(err)
 	}
-	reapAfterListHook = func(ids []string) {
+	reapAfterListHook.store(func(ids []string) {
 		for _, id := range ids {
 			if id == "file-listed" {
-				reapAfterListHook = nil
+				reapAfterListHook.store(nil)
 				if err := serverstore.RecordGatewayFile(gw.db, id, gw.uidA, &future); err != nil {
 					t.Errorf("renew after list: %v", err)
 				}
 			}
 		}
-	}
-	t.Cleanup(func() { reapAfterListHook = nil })
+	})
+	t.Cleanup(func() { reapAfterListHook.store(nil) })
 	beforeDeletes := up.deletes.Load()
 	if deleted, _ := api.ReapExpiredGatewayFiles(0); deleted != 0 {
 		t.Fatalf("列表后已续期的行不该被回收（deleted=%d）", deleted)
@@ -1032,17 +1032,17 @@ func TestReaperDoesNotDeleteRenewedFile(t *testing.T) {
 	if err := serverstore.RecordGatewayFile(gw.db, "file-race", gw.uidA, &past); err != nil {
 		t.Fatal(err)
 	}
-	reapRecheckHook = func(id string) {
+	reapRecheckHook.store(func(id string) {
 		if id != "file-race" {
 			return
 		}
-		reapRecheckHook = nil
+		reapRecheckHook.store(nil)
 		// 模拟并发上传：同一个 id 被重新登记为未来过期。
 		if err := serverstore.RecordGatewayFile(gw.db, id, gw.uidB, &future); err != nil {
 			t.Errorf("re-register: %v", err)
 		}
-	}
-	t.Cleanup(func() { reapRecheckHook = nil })
+	})
+	t.Cleanup(func() { reapRecheckHook.store(nil) })
 	before := up.deletes.Load()
 	if deleted, _ := api.ReapExpiredGatewayFiles(0); deleted != 0 {
 		t.Fatalf("被重新登记的文件不该计入回收（deleted=%d）", deleted)

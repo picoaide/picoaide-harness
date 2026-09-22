@@ -3,9 +3,11 @@ package llmgateway
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"log"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -46,7 +48,15 @@ func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 	if a == nil || a.DB == nil {
 		return 0, 0
 	}
-	// 存量"永久"行（改造前的上传，expires_at IS NULL）先按上限补齐，使它们可被回收。
+	// 上游可用性**先判**：规范化会把存量"永久"行（expires_at IS NULL）标成"已过期"，
+	// 而上游不可用时我们根本删不掉对象 —— 提前标记只会让这些行在管理端看起来"可回收/
+	// 已处理"，实际对象继续占着共享配额（把可见的泄漏面变成隐身的）。上游恢复后再补做。
+	up, ok := fileUpstream(a.DB)
+	if !ok {
+		log.Printf("gateway: file reaper: no usable files upstream; skipping this round (no normalize/list)")
+		return 0, 0
+	}
+	// 存量"永久"行按上限补齐，使它们可被回收（幂等，只动 NULL 行）。
 	if n, err := serverstore.NormalizeLegacyPermanentGatewayFiles(a.DB, gatewayLimitsFor(a.DB).fileExpiry, limit); err != nil {
 		log.Printf("gateway: file reaper: normalize legacy permanent rows failed: %v", err)
 	} else if n > 0 {
@@ -60,16 +70,14 @@ func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 	if len(ids) == 0 {
 		return 0, 0
 	}
-	if reapAfterListHook != nil {
-		reapAfterListHook(ids) // 测试注入点：模拟"列表与认领之间"发生的并发续期
-	}
-	up, ok := fileUpstream(a.DB)
-	if !ok {
-		log.Printf("gateway: file reaper: no usable files upstream; %d expired file(s) left for the next round", len(ids))
-		return 0, len(ids)
+	if fn := reapAfterListHook.load(); fn != nil {
+		fn(ids) // 测试注入点：模拟"列表与认领之间"发生的并发续期
 	}
 	client := a.filesHTTPClient()
 	for _, id := range ids {
+		// created_at 必须在**认领之前**读：认领会把整行删掉，而写回时要保留它，否则
+		// 管理端的"文件年龄/占用时长"会在每次上游删除失败后归零（实测 10 天 → 0.00 天）。
+		createdAt := gatewayFileCreatedAt(a.DB, id)
 		snap, claimed, err := serverstore.ClaimExpiredGatewayFile(a.DB, id)
 		if err != nil {
 			log.Printf("gateway: file reaper: claim expired row failed: %v", err)
@@ -79,13 +87,23 @@ func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 		if !claimed {
 			continue // 已续期 / 已被别的路径处理
 		}
-		if reapRecheckHook != nil {
-			reapRecheckHook(id) // 测试注入点：模拟"认领与复检之间发生的并发上传"
+		if fn := reapRecheckHook.load(); fn != nil {
+			fn(id) // 测试注入点：模拟"认领与复检之间发生的并发上传"
+		}
+		// 形状非法的行永远无法在上游删除（拼不出合法 URL），留着只会每轮挤占一个
+		// 批次位、把管理员列表变成永久幽灵 —— 行已认领（= 已删），记一条日志即可；
+		// 不计入 deleted（上游什么都没删）。
+		if !validGatewayFileID(id) {
+			log.Printf("gateway: file reaper: dropped ledger row with unusable file id shape %q", id)
+			continue
 		}
 		// 认领后复检：并发上传可能刚给同一个 id 登记了新行（上游按内容去重时会这样），
 		// 那种情况下**不能**删上游对象。
 		if exists, err := serverstore.GatewayFileRowExists(a.DB, id); err != nil {
 			log.Printf("gateway: file reaper: recheck row failed: %v", err)
+			// 复检失败 = 不知道有没有被重新登记：既没删上游对象，就不能丢掉"还有清理
+			// 责任"的凭据（旧实现只 failed++，行已经被认领删掉 ⇒ 该对象永远无人再扫）。
+			restoreGatewayFileRow(a.DB, snap, createdAt)
 			failed++
 			continue
 		} else if exists {
@@ -95,9 +113,7 @@ func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 		if err := deleteUpstreamFile(client, up, id); err != nil {
 			log.Printf("gateway: file reaper: delete upstream file failed: %v", err)
 			// 写回快照，保住"还有清理责任"的凭据（下一轮重试）。
-			if rerr := serverstore.RecordGatewayFileSize(a.DB, snap.FileID, snap.UserID, snap.ExpiresAt, snap.SizeBytes); rerr != nil {
-				log.Printf("gateway: file reaper: restore ledger row failed: %v", rerr)
-			}
+			restoreGatewayFileRow(a.DB, snap, createdAt)
 			failed++
 			continue
 		}
@@ -109,17 +125,96 @@ func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 	return deleted, failed
 }
 
-// reapAfterListHook 只在测试里设置：在"列出候选"与"逐行认领"之间插一步，
+// reapHookBox 是测试注入点的无锁存储。
+//
+// 回收器跑在常驻 goroutine 里（StartFileReaper），而测试会从**另一个** goroutine
+// 设置/清除钩子 —— 裸包级 var 在 `go test -race` 下就是 DATA RACE（生产者/消费者之间
+// 没有任何同步边）。用 atomic.Pointer 存函数值：生产恒为空（store 只在测试里调用），
+// 语义与裸 var 逐字相同（nil = 未注入）。判据见 files_reaper_test.go 的
+// TestFilesReaperHooksAreRaceFree（用 -race 复跑）。
+type reapHookBox[T any] struct{ p atomic.Pointer[T] }
+
+func (b *reapHookBox[T]) store(fn T) { b.p.Store(&fn) }
+
+func (b *reapHookBox[T]) load() T {
+	if f := b.p.Load(); f != nil {
+		return *f
+	}
+	var zero T
+	return zero
+}
+
+// reapAfterListHook 只在测试里注入：在"列出候选"与"逐行认领"之间插一步，
 // 用来确定性地复现"列表之后被续期"（认领时的过期复检就是为这个窗口存在的）。
-var reapAfterListHook func(ids []string)
+var reapAfterListHook reapHookBox[func(ids []string)]
 
-// reapRecheckHook 只在测试里设置：在"认领成功"与"复检是否被重新登记"之间插一步，
-// 用来确定性地复现并发上传（生产恒为 nil）。
-var reapRecheckHook func(fileID string)
+// reapRecheckHook 只在测试里注入：在"认领成功"与"复检是否被重新登记"之间插一步，
+// 用来确定性地复现并发上传（生产恒为空）。
+var reapRecheckHook reapHookBox[func(fileID string)]
 
-// deleteUpstreamFile 删上游文件：404 视为成功（上游已自然过期/被删）。
+// gatewayFileCreatedAt 读一行的 created_at（认领前调用；读不到返回 nil，写回时用库默认值）。
+func gatewayFileCreatedAt(db *sql.DB, fileID string) *time.Time {
+	var created time.Time
+	switch err := db.QueryRow(`SELECT created_at FROM gateway_files WHERE file_id = ?`, fileID).Scan(&created); {
+	case err == nil:
+		return &created
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	default:
+		log.Printf("gateway: file reaper: read created_at for %s failed: %v", fileID, err)
+		return nil
+	}
+}
+
+// restoreGatewayFileRow 把认领时的快照写回台账（上游删除失败 / 复检失败时）。
+//
+// 语义 = `INSERT ... ON CONFLICT (file_id) DO NOTHING`：**只补回确实缺失的行，绝不覆盖
+// 现有行**。两点都承重：
+//   - 覆盖会砸活行：认领与写回之间若发生并发上传（上游按内容去重会把同一个 id 再发给上传者），
+//     旧实现（serverstore.RecordGatewayFileSize）的冲突分支对"同一 user_id"无条件覆盖 ⇒
+//     把**未来的过期时间改回过去**：那份活文件随即被判 404，下一轮回收器还会真的去删
+//     上游对象（R6 P1-A 要防的"误删活文件"从写回这条路绕了回来）；
+//   - 覆盖会丢 created_at：旧实现走 INSERT，created_at 归 now()，管理端看到的文件年龄
+//     每次上游删除失败都归零（实测 10 天 → 0.00 天）。这里显式写回认领前的 created_at。
+//
+// TODO(L1 合并): 换用 serverstore.RestoreGatewayFileRow(db, fileID, userID, createdAt,
+// expiresAt, sizeBytes)（L1 泳道正在新增，签名与语义逐字相同）；本泳道内先以同名占位
+// 实现，避免跨泳道编译依赖。ClaimExpiredGatewayFile 的快照届时若带上 CreatedAt，
+// gatewayFileCreatedAt 的预读可以去掉。
+func restoreGatewayFileRow(db *sql.DB, snap serverstore.GatewayFileForReap, createdAt *time.Time) {
+	created := time.Now()
+	if createdAt != nil {
+		created = *createdAt
+	}
+	if _, err := db.Exec(
+		`INSERT INTO gateway_files (file_id, user_id, created_at, expires_at, size_bytes)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (file_id) DO NOTHING`,
+		snap.FileID, snap.UserID, created, snap.ExpiresAt, snap.SizeBytes); err != nil {
+		log.Printf("gateway: file reaper: restore ledger row %s failed: %v", snap.FileID, err)
+	}
+}
+
+// fileDeleteTimeout 是单次上游删除的整请求预算（含读响应体）。
+//
+// 为什么必须有：transport 只设了 ResponseHeaderTimeout（120s），响应体没有截止时间 ——
+// 上游回了头就不再发字节时，`io.Copy` 会**永久**挂住；回收器只有一条协程，一次挂死
+// 等于整个自动回收停摆（过期文件继续占着上游配额）。测试可注入。
+var fileDeleteTimeout = 30 * time.Second
+
+// errUnusableReapFileID：台账行里的 id 形状非法（无法拼出合法上游 URL）。
+var errUnusableReapFileID = errors.New("reaper: unusable file id shape")
+
+// deleteUpstreamFile 删上游文件：404/410 视为成功（上游已自然过期/被删）。
 func deleteUpstreamFile(client *http.Client, up Upstream, fileID string) error {
-	req, err := http.NewRequest(http.MethodDelete, filesURL(up.BaseURL, "/"+fileID), nil)
+	// 形状白名单与 retrieve/delete 入口同源：台账里的 id 会被拼进上游 URL，
+	// 畸形 id（点段/编码穿越）绝不能进 URL（回收器也不能成为例外）。
+	if !validGatewayFileID(fileID) {
+		return errUnusableReapFileID
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), fileDeleteTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, filesURL(up.BaseURL, "/"+fileID), nil)
 	if err != nil {
 		return err
 	}
