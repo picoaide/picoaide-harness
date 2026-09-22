@@ -33,7 +33,7 @@
 ```
 第三方客户端 / 员工接入 ──HTTPS/Bearer token──▶ Go 服务端
   ├─ 认证:local/LDAP/OIDC + api_tokens(90天过期)+ /api/client/v2/auth/me|usage
-  ├─ AI 网关:/v1/chat/completions|embeddings|messages|completions|responses|models|files + per-user 限流(缺省 0=不限制)+ usage 计量(费用/峰谷);/v1/* 读请求体预算 1h、上限 64MiB;出站体按员工注入官方用户标识(chat `user_id`/responses `user`/anthropic `metadata.user_id`)+ 校验 file_id 归属(聊天引用他人文件 ⇒ 404;非法 JSON ⇒ 400 fail-closed;单请求引用上限 256)(2026-09-22)
+  ├─ AI 网关:/v1/chat/completions|embeddings|messages|completions|responses|models|files + per-user 限流(缺省 0=不限制)+ usage 计量(费用/峰谷);/v1/* 读请求体预算 1h、上限 64MiB;出站体按员工注入官方用户标识(chat `user_id`/responses `user`/anthropic `metadata.user_id`)+ 校验 file_id 归属(聊天引用他人文件 ⇒ 404;非法 JSON ⇒ 400 fail-closed;单请求引用上限与在飞请求体字节预算均可配,缺省 600 / 128MiB,打满 ⇒ 503 SERVER)(2026-09-22)
   ├─ bootstrap:/api/client/v2/config/bootstrap(默认模型+建议清单+connectors[])
   ├─ 商城/共享:/api/client/v2/marketplace|shared-skills|agent-presets|capabilities(授权制/双门制)
   ├─ 审计:/api/server/admin/audit(用户/部门/技能等敏感操作留痕)
