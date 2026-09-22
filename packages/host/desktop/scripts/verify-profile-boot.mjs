@@ -12,6 +12,7 @@ import {
   DSH_LAUNCH_ENVIRONMENT_KEY,
 } from '@deepseek-ai/dsh-launch-environment'
 import { DESKTOP_SETTINGS_NAMESPACE } from '../lib/index.js'
+import { parse as parseYaml } from 'yaml'
 import { NO_OWNER_LOCK_MIN_AGE_MS, reclaimOrphanedDocumentLocks } from '../lib/document-lock-recovery.js'
 import { installProfilePackageResolver } from '../lib/module-resolution.js'
 import { prepareDesktopProfile, desktopProfileContext } from '../lib/profile.js'
@@ -267,6 +268,132 @@ try {
     throw new Error('the hmr service is present although the desktop host provides no appReady')
   }
 
+  // ---- 读面事实：`plugin_manager` 看不到的那一片（issue #130 的**登记残留**）-------
+  // 为什么必须有一条"读面"判据：`desktopProfileContext.overlays` 只覆盖**启动器 pin
+  // 层**，而桌面把 desktop/enterprise/account-card/wasm-apps/foot-menu/wasm-apps-host/
+  // connectors/browser/memory-evolve/cron 十个包的 `cordis.patch.yml` 注入在 **bundle
+  // 层**（`src/profile.ts:571-593`）—— 既不在 profile 的 `layers` 里，也不在
+  // `context.patchPath` 指向的文件里。上游 `readProfilePatches`（= `plugin-manager`
+  // 读面 listPlugins 的唯一来源）只重读 layers + patchPath + home 补丁 + overlays，
+  // ⇒ 这十个包的行在创造模式里落成 `readOnlyReason: 'unaddressable'`，`set_plugin`
+  // 直接抛 ManagementFailure。
+  //
+  // **这是有意的，本轮不修组合实现**（2026-09-23 主控裁决）：让 session 内的
+  // `plugin_manager` 能改写 `picoaide-*`/`pico-*`/`dsh-memory-evolve` 这些行，等于把
+  // "关掉企业面/渠道面/记忆面"的能力交给模型 —— 那不是在修 bug，是在扩权。所以改为把
+  // 缺口**钉死**：行集差异与读面行集都必须**恰好等于**登记值，变大变小都红；
+  // 将来组合实现真的改了（例如把注入层落进 profile 自己的 `cordis.patch.yml`），
+  // 这条会红，届时按新事实更新登记即可 —— 但那时要同时想清楚"是否真的要让模型能改这些行"。
+  const { composeEntries, readProfilePatches } = await import('@deepseek-ai/dsh-app-boot')
+  /** `true`/`false` for real booleans, `undefined` for absent, `!!js` source otherwise. */
+  const disabledToken = value => value === undefined
+    ? 'undefined'
+    : typeof value === 'boolean' ? String(value) : `<js:${String(value?.__jsExpr ?? '?')}>`
+  const assembledIds = composeEntries([prepared.patches]).filter(row => typeof row.id === 'string')
+  const readBackIds = composeEntries([readProfilePatches('dsh', desktopProfileContext(prepared), prepared.profile)])
+    .filter(row => typeof row.id === 'string')
+  const assembledById = new Map(assembledIds.map(row => [row.id, row]))
+  const readBackById = new Map(readBackIds.map(row => [row.id, row]))
+  // 登记 ①：重算路径**看不到**的行 —— 全部来自十个「包内 patch 注入在 bundle 层」的包
+  // （desktop-* = 桌面包自己的 cordis.patch.yml；picoaide-*/pico-*/dsh-memory-evolve =
+  // enterprise / account-card / wasm-apps / foot-menu / wasm-apps-host / connectors /
+  // browser / memory-evolve / cron）。24 行，按来源包分组登记：
+  const KNOWN_READBACK_MISSING = [
+    // 桌面包 cordis.patch.yml（bundle 层插入）
+    'desktop-shell', 'desktop-diagnostics', 'desktop-updates', 'desktop-loop-notify',
+    'desktop-asar-fs', 'desktop-asar-guidance',
+    // enterprise
+    'picoaide-enterprise', 'picoaide-session', 'picoaide-gateway-model', 'picoaide-bootstrap',
+    'picoaide-error-reporting', 'picoaide-skill-telemetry', 'picoaide-auth-gate',
+    'picoaide-channel-sync', 'pico-skill-filesystem', 'pico-tool-skill',
+    // account-card / wasm-apps / foot-menu / wasm-apps-host
+    'picoaide-account-card', 'picoaide-wasm-apps', 'picoaide-foot-menu', 'pico-wasm-apps-host',
+    // connectors / browser
+    'pico-connectors', 'pico-browser',
+    // memory-evolve / cron
+    'dsh-memory-evolve', 'pico-cron',
+  ].sort()
+  // 登记 ②：两侧都看得到、但 `disabled` 取值不同的行（`assembled → readBack`）。
+  // `fs-sandbox`/`office-to-pdf`/`session-log-deepseek`/`ui-plugin-manager`/
+  // `ui-settings-models`/`ui-settings-plugins`/`ui-sidebar-browser` 的"关"由我们的
+  // bundle 层补丁声明，重算路径看不到 ⇒ 回落成 `undefined`（未声明）；`hmr` 同理回落成
+  // 上游 base bundle 的 `!!js` 开关；`tool-web` 反向：重算路径只看到上游缺省 `disabled: true`，
+  // 而我们的 bundle 层补丁把它打开成 `false`。**这不是本 P0 的成因**：这些行在真实 boot
+  // 的树上全部按组合生效（上面 (d)/(e) 已逐条判），差异只存在于"重算自述"里。
+  const KNOWN_READBACK_DISABLED_DIFFERENCES = new Map([
+    ['fs-sandbox', ['true', 'undefined']],
+    ['hmr', ['true', "<js:!ctx.get('profileContext')>"]],
+    ['office-to-pdf', ['true', 'undefined']],
+    ['session-log-deepseek', ['true', 'undefined']],
+    ['tool-web', ['false', 'true']],
+    ['ui-plugin-manager', ['true', 'undefined']],
+    ['ui-settings-models', ['true', 'undefined']],
+    ['ui-settings-plugins', ['true', 'undefined']],
+    ['ui-sidebar-browser', ['true', 'undefined']],
+  ])
+  const readBackMissing = [...assembledById.keys()].filter(id => !readBackById.has(id)).sort()
+  const readBackExtra = [...readBackById.keys()].filter(id => !assembledById.has(id)).sort()
+  const readBackDisabledDiff = [...assembledById.keys()]
+    .filter(id => readBackById.has(id)
+      && disabledToken(assembledById.get(id).disabled) !== disabledToken(readBackById.get(id).disabled))
+    .sort()
+  const registeredDisabledDiff = [...KNOWN_READBACK_DISABLED_DIFFERENCES.keys()].sort()
+  if (JSON.stringify(readBackMissing) !== JSON.stringify(KNOWN_READBACK_MISSING)
+    || readBackExtra.length > 0
+    || JSON.stringify(readBackDisabledDiff) !== JSON.stringify(registeredDisabledDiff)
+    || readBackDisabledDiff.some(id => {
+      const [assembled, readBack] = KNOWN_READBACK_DISABLED_DIFFERENCES.get(id)
+      return disabledToken(assembledById.get(id).disabled) !== assembled
+        || disabledToken(readBackById.get(id).disabled) !== readBack
+    })) {
+    throw new Error(
+      'readProfilePatches(desktopProfileContext) 与真实装配的行集差异与登记不一致 —— '
+      + '「重算 ≠ 装配」是本轮**故意保留**的残留（包内 patch 注入在 bundle 层，重算路径看不到；'
+      + '见本判据上方的裁决说明），但它必须**恰好**是登记的那一份，变大变小都要按新事实更新登记：\n'
+      + `  missing  actual=${JSON.stringify(readBackMissing)}\n`
+      + `  missing  registered=${JSON.stringify(KNOWN_READBACK_MISSING)}\n`
+      + `  extra    actual=${JSON.stringify(readBackExtra)} (registered=[])\n`
+      + `  disabled actual=${JSON.stringify(readBackDisabledDiff.map(id => `${id}:${disabledToken(assembledById.get(id)?.disabled)}->${disabledToken(readBackById.get(id)?.disabled)}`))}\n`
+      + `  disabled registered=${JSON.stringify([...KNOWN_READBACK_DISABLED_DIFFERENCES].map(([id, pair]) => `${id}:${pair[0]}->${pair[1]}`))}`,
+    )
+  }
+
+  // 读面事实：真实 boot 的树上 `pluginManager.listPlugins()` 的 `unaddressable` 行。
+  // 上面那条判据证的是"重算能算出什么"，这条证的是"读面真的给出了什么"（同一个缺口的
+  // 两个观测点：一个在数据层、一个在服务层）。防止缺口无声扩大 —— 例如某天新增一个
+  // 自研包、或有人把 `readProfilePatches` 换成另一份实现。
+  const pluginManager = ctx.get('pluginManager')
+  if (pluginManager === undefined) {
+    throw new Error('assembled desktop profile is missing the pluginManager service (issue #130 regressed)')
+  }
+  const unaddressable = (await pluginManager.listPlugins())
+    .filter(row => row.readOnlyReason === 'unaddressable')
+    .map(row => row.entryId)
+    .sort()
+  // 登记：26 条 —— 我们十个包的行（`include:<包名>` 形态）+ 本冒烟自己注入的夹具行 + 树根。
+  const KNOWN_UNADDRESSABLE_ROWS = [
+    // Loader 树的**根** include 行（没有包名、父节点不是 include ⇒ 天生不可寻址，不是插件行）
+    'include',
+    'include:desktop-shell', 'include:desktop-diagnostics', 'include:desktop-updates',
+    'include:desktop-loop-notify', 'include:desktop-asar-fs', 'include:desktop-asar-guidance',
+    'include:picoaide-enterprise', 'include:picoaide-session', 'include:picoaide-gateway-model',
+    'include:picoaide-bootstrap', 'include:picoaide-error-reporting', 'include:picoaide-skill-telemetry',
+    'include:picoaide-auth-gate', 'include:picoaide-channel-sync', 'include:pico-skill-filesystem',
+    'include:pico-tool-skill', 'include:picoaide-account-card', 'include:picoaide-wasm-apps',
+    'include:picoaide-foot-menu', 'include:pico-wasm-apps-host', 'include:pico-connectors',
+    'include:pico-browser', 'include:dsh-memory-evolve', 'include:pico-cron',
+    // 冒烟自己的宿主服务夹具行（`tests/fixtures/desktop-host-services-smoke-plugin/`）
+    'include:desktop-host-services-smoke-plugin',
+  ].sort()
+  if (JSON.stringify(unaddressable) !== JSON.stringify(KNOWN_UNADDRESSABLE_ROWS)) {
+    throw new Error(
+      'pluginManager.listPlugins() 的 unaddressable 行集合与登记不一致 —— 这是 issue #130 的**已知能力缺口**'
+      + '（创造模式里 set_plugin 改不了这些行，属故意保留），缺口扩大或缩小都必须按新事实更新登记：\n'
+      + `  actual  =${JSON.stringify(unaddressable)}\n`
+      + `  registered=${JSON.stringify(KNOWN_UNADDRESSABLE_ROWS)}`,
+    )
+  }
+
   // ---- 「整树被重算」回归判据（issue #130 的第二种失败形态）----------------------
   // 上游 profile HMR 的 reconcile 会用 `readProfilePatches(profileContext)` **重算**
   // 组合并覆盖运行中的 include；重算列表只有 bundle 层 + profile/home 补丁层 ——
@@ -276,10 +403,16 @@ try {
   // 运行时行集合必须覆盖完整桌面组合 `prepared.patches` 声明的每一行，且布尔型
   // `disabled` 两侧一致（`!!js` 表达式的行不参与比较，它们由上面 (a)/(c) 逐条判）。
   // 任何"树跑在另一份更短/不同的 patch 列表上"的形态都会在这里变红。
+  //
+  // **为什么必须是"相等"而不是"超集"**（2026-09-23 对抗审计 M9w 实测）：超集式比较
+  // （只要求"组合关掉的行运行时也关掉"）会放过"组合说开着、运行时却关着"那一半，而这
+  // 正是 profile-HMR reconcile 覆盖 include 之后的形态（M9：往 boot 列表尾部插一条
+  // `{id:'tool-web',disabled:true}` ⇒ 组合 composed=false / 运行时 live=true）。这条
+  // `disabled` 相等判据是**唯一**能抓"树跑在另一份 patch 列表上"的判据 —— 上面的
+  // `missingRows` 只抓"少行"，抓不到"多关/改关"。不要把它弱化成超集。
   const liveRows = new Map([...ctx.loader.entries()]
     .filter(entry => typeof entry.options?.id === 'string')
     .map(entry => [entry.options.id, entry]))
-  const { composeEntries } = await import('@deepseek-ai/dsh-app-boot')
   const expectedRows = composeEntries([prepared.patches]).filter(row => typeof row.id === 'string')
   const missingRows = expectedRows.filter(row => !liveRows.has(row.id)).map(row => row.id)
   if (missingRows.length > 0) {
@@ -288,9 +421,24 @@ try {
       + `(a runtime rewrite such as profile-HMR reconcile?): ${missingRows.slice(0, 20).join(', ')}`,
     )
   }
-  const flipRows = expectedRows
-    .filter(row => typeof row.disabled === 'boolean' && liveRows.get(row.id).disabled !== row.disabled)
-    .map(row => `${row.id}: composed=${String(row.disabled)} live=${String(liveRows.get(row.id).disabled)}`)
+  /** Rows whose boolean `disabled` differs between the composition and the live tree. */
+  const disabledFlips = (expected, live) => expected
+    .filter(row => typeof row.disabled === 'boolean' && live.get(row.id)?.disabled !== row.disabled)
+    .map(row => `${row.id}: composed=${String(row.disabled)} live=${String(live.get(row.id)?.disabled)}`)
+  // 空转护栏 + 判别力自检。① 没有任何布尔 `disabled` 行时，相等判据会恒真（等于没有判据）；
+  // ② 合成一个 M9 形态的反例（组合 composed=false / 运行时 live=true）跑同一个比较函数，
+  // 它必须报出来 —— 把比较弱化成"只查 composed=true 那一半"（M9w）会让这条自检先红。
+  const booleanRows = expectedRows.filter(row => typeof row.disabled === 'boolean')
+  if (booleanRows.length === 0) {
+    throw new Error('the composition declares no boolean `disabled` row: the live-tree equality judge would be vacuous')
+  }
+  if (disabledFlips([{ id: '(judge self-check)', disabled: false }], new Map([['(judge self-check)', { disabled: true }]])).length === 0) {
+    throw new Error(
+      'the live-tree equality judge lost its discriminating power: a row the composition enables but the tree '
+      + 'disables is no longer flagged (was it weakened to a superset check?)',
+    )
+  }
+  const flipRows = disabledFlips(expectedRows, liveRows)
   if (flipRows.length > 0) {
     throw new Error(
       `the live Loader tree disagrees with the assembled composition on ${String(flipRows.length)} row(s) `
@@ -300,6 +448,31 @@ try {
   // 产品决策行必须仍然关着。上一条只保证"运行时 == 组合"，抓不到"组合本身被改"
   // （例如某天有人往 patch 里加一行把 P0 闸门重新打开）；这条把产品意图钉在这里，
   // 每条都写清理由，改动它必须同时改这条判据。
+  //
+  // **为什么名单必须与来源文件对拍**（2026-09-23 对抗审计 M10 实测）：原版只查
+  // `liveRows.get(id)?.disabled !== true` —— 把名单里一行删掉、同时把
+  // `cordis.patch.yml` 里对应那条闸门改成 `disabled: false`，冒烟 EXIT=0。裸名单是
+  // "自证"：判据、被判断的数据、以及破坏者要改的两处都在同一个文件里。现在改成
+  // 三面绑定：
+  //   ① 来源文件：`cordis.patch.yml` 里 `disabled: true` 的 id 集合必须**恰好等于**
+  //      这份名单（多一条、少一条都红）；
+  //   ② 组合：`composeEntries(prepared.patches)` 里同一行也必须 `disabled === true`
+  //      （"配置写了但没落到组合"这一层）；
+  //   ③ 运行时：名单里每一行必须 `disabled === true`（行为面）。
+  // 三面绑定能抓：只重开闸门（①③红）、只删名单项（①红）、直接删掉 patch 行（①③红）。
+  // **它抓不到"同时删名单项 + 重开闸门"** —— 那时①的两侧一起缩小，仍然自洽。所以每条
+  // 闸门还必须配一条**与名单无关的行为判据**（下文的「与名单无关的行为闸门」段）：行为
+  // 判据观测的是"这一行真的生效了会造成的那个后果"，删名单/改名单都不影响它。
+  // 已配行为判据的：
+  //   · `session-log-deepseek` → `dsh_session_log` 请求字段是否已注册（会话正文出境）；
+  //   · `office-to-pdf`        → `officeToPdf` 服务是否存在；
+  //   · `hmr`                  → `hmr` 服务是否存在（见上文）；
+  //   · `fs-sandbox`           → 它与桌面 asar 后端**提供同一个 `fs` 服务**，
+  //                              重开即双向 provide ⇒ 整棵树挂不起来（既有行为面兜底）；
+  //   · `ui-sidebar-browser` / `ui-plugin-manager` / `ui-settings-plugins`
+  //                            → 客户端行，见文末 Web graph 的排除名单。
+  // 范围说明：只对拍桌面包自己的 `cordis.patch.yml`（桌面产品闸门的唯一落点）；
+  // enterprise/connectors 等包的 `cordis.patch.yml` 不在本判据内。
   const mustStayDisabled = [
     ['fs-sandbox', 'desktop 用 asar-aware 文件系统后端替换上游 fs-sandbox'],
     ['session-log-deepseek', '会话正文出境的 P0 闸门（0.1.6 起默认 true）'],
@@ -307,12 +480,64 @@ try {
     ['ui-plugin-manager', 'P0-8：侧栏插件页与桌面自研面板的 DOM 接管不互通'],
     ['office-to-pdf', 'libreoffice-kit 引擎不在四张打包清单覆盖内 + macOS 签名'],
     ['ui-settings-plugins', '桌面隐藏「插件」设置选项卡（2026-09 产品决策）'],
+    ['hmr', '与 plugin-manager 共用 profileContext 开关，但没有 CLI 专属的 appReady 会炸整棵树'],
   ]
+  const declaredDisabled = (parseYaml(readFileSync(join(packageRoot, 'cordis.patch.yml'), 'utf8')))
+    .filter(row => row?.disabled === true)
+    .map(row => row.id)
+    .filter(id => typeof id === 'string')
+    .sort()
+  const registeredDisabled = mustStayDisabled.map(([id]) => id).sort()
+  if (JSON.stringify(declaredDisabled) !== JSON.stringify(registeredDisabled)) {
+    throw new Error(
+      'cordis.patch.yml 的 `disabled: true` 行集合与登记的产品决策行不一致 '
+      + `(declared=${JSON.stringify(declaredDisabled)} registered=${JSON.stringify(registeredDisabled)}): `
+      + '重开一条产品闸门、或新增/删除一条闸门，都必须同时更新必须保持关闭的名单与理由',
+    )
+  }
   const reenabled = mustStayDisabled
-    .filter(([id]) => liveRows.get(id)?.disabled !== true)
+    .filter(([id]) => liveRows.get(id)?.disabled !== true || expectedRows.find(row => row.id === id)?.disabled !== true)
     .map(([id, why]) => `${id} (${why})`)
   if (reenabled.length > 0) {
     throw new Error(`product-decision rows are no longer disabled:\n${reenabled.map(line => `  - ${line}`).join('\n')}`)
+  }
+
+  // ---- 与名单无关的**行为**闸门 -------------------------------------------------
+  // 每一条都直接观测"这一行生效后的后果"，因此把名单项删掉、把名单改短、甚至把整段
+  // 名单删掉，都不会让它变绿。这是对"自证式判据"的正面回应。
+
+  // `session-log-deepseek`：该行唯一的作用是向 `deepseekLlmApiExtensions` 注册
+  // `dsh_session_log` 请求字段（会话正文/工具参数与结果/工作区路径随每个带 sessionId 的
+  // 请求出境，而我们的网关逐字节转发给上游供应商）。上游 `register` 对同一个字段名
+  // **只允许注册一次**，重复注册抛 `field "dsh_session_log" is already registered`。
+  // 于是：该行关着 ⇒ 我们的探针注册成功（随即 dispose）；该行被打开 ⇒ 注册抛错 ⇒ 红。
+  const extensionRegistry = ctx.get('deepseekLlmApiExtensions')
+  if (extensionRegistry === undefined) {
+    throw new Error('assembled desktop profile is missing the deepseekLlmApiExtensions service')
+  }
+  let sessionLogFieldTaken = false
+  try {
+    const releaseProbeField = extensionRegistry.register('dsh_session_log', { prepare: () => undefined })
+    await releaseProbeField()
+  } catch {
+    sessionLogFieldTaken = true
+  }
+  if (sessionLogFieldTaken) {
+    throw new Error(
+      'session-log-deepseek is ACTIVE: the `dsh_session_log` request field is registered, so session content '
+      + '(messages, tool arguments/results, workspace paths) would leave with every gateway request '
+      + '(P0, 2026-09-20 升级审计)。cordis.patch.yml 必须保持该行 disabled: true',
+    )
+  }
+
+  // `office-to-pdf`：该行提供 `officeToPdf` 服务（`@deepseek-ai/dsh-office-to-pdf` 的
+  // `super(ctx, 'officeToPdf')`）。桌面的组合里不该有它 —— 它的引擎包不在四张打包清单
+  // 覆盖内，且 macOS 侧是无扩展名可执行文件，打包后必然 spawn 失败。
+  if (ctx.get('officeToPdf') !== undefined) {
+    throw new Error(
+      'office-to-pdf is ACTIVE: the officeToPdf service exists although the LibreOffice engine is outside every '
+      + 'packaging manifest and cannot run from the signed macOS bundle。cordis.patch.yml 必须保持该行 disabled: true',
+    )
   }
 
   const agentPresets = ctx.get('agentPresets')
@@ -476,6 +701,13 @@ try {
     // 桌面隐藏「插件」设置选项卡(2026-09 产品决策,与 ui-settings-models
     // 同机制:desktop/cordis.patch.yml 同 id 覆盖行 disabled)。
     '@deepseek-ai/dsh-client-ui-settings-plugins',
+    // 与名单无关的**行为**闸门（2026-09-23 加固）：这三行是客户端行，被打开时它们的
+    // client bundle 会出现在真实 Renderer 的模块图里 —— 这条断言观测的就是"图里有没有
+    // 它们"，因此删掉 (d) 的名单项、把名单改短都不影响它。
+    //   · ui-sidebar-browser → 窗口 CSP 无 frame-src，iframe 浏览器必然白屏；
+    //   · ui-plugin-manager  → 侧栏插件页与桌面自研面板的 DOM 接管不互通（P0-8）。
+    '@deepseek-ai/dsh-client-ui-sidebar-browser',
+    '@deepseek-ai/dsh-client-ui-plugin-manager',
   ]) {
     if (ids.has(id)) throw new Error(`assembled advanced Web graph unexpectedly includes ${id}`)
   }
