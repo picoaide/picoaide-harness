@@ -34,6 +34,9 @@ let captured = ''
 // 用它断言 BOM 会永远为假 —— 复核员的探针正栽在这里("无 BOM"那半条证据无效;
 // 旧代码确实没有 BOM,但那个断言证明不了)。这里同时取文本与字节。
 let bytes: Uint8Array | null = null
+// 每次导出的下载锚点(href + download 文件名)。见 beforeEach 里的注释:
+// 记录点击而不是放 jsdom 去"导航"。
+let downloadAnchors: { href: string; download: string }[] = []
 
 // ---------------------------------------------------------------------------
 // 等"真的加载完",不要等"发过请求"(2026-09-17 Gate 红的根因)
@@ -91,6 +94,15 @@ beforeEach(() => {
     return 'blob:test'
   }
   ;(globalThis.URL as any).revokeObjectURL = () => {}
+  downloadAnchors = []
+  // lib/csv.ts 的 downloadCsv 会 createElement('a') → click()。在 jsdom 里这次点击
+  // 会真的尝试"导航"到 blob: URL，控制台每次导出打一行
+  // "Not implemented: navigation to another Document"（jsdom 不实现导航，只能报错），
+  // 而且它证明不了任何东西。用例真正要钉的是"导出确实触发了一次下载、地址与文件名正确"，
+  // 所以把点击换成**记录**：比原来放它去导航更强（原来连"点了没有"都没断言）。
+  HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+    downloadAnchors.push({ href: this.href, download: this.download })
+  }
 })
 
 async function exportCsv(): Promise<string> {
@@ -128,6 +140,11 @@ describe('审计日志 CSV 导出(公式注入 + BOM)', () => {
     // 表头/首行可被解析,且攻击者那格已被中和
     expect(csv.split('\n')[0]).toBe('id,username,action,detail,created_at')
     expect(csv.split('\n')[1]).toBe(`1,'${EVIL_DDE},login_fail,ip=10.0.0.9,2026-09-13T10:00:00+08:00`)
+    // 真的发生了一次下载(锚点点击记录),文件名 = 审核页的当日审计文件名。
+    // 少了这条,"导出"可以静默不点锚点而用例全绿。
+    expect(downloadAnchors).toEqual([
+      { href: 'blob:test', download: `audit-${new Date().toISOString().slice(0, 10)}.csv` },
+    ])
   })
 })
 

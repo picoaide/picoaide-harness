@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom'
 import CapabilityCenter from './CapabilityCenter'
 import { request } from '../api'
 import { setCurrentAdmin } from '../lib/rbac'
+import { ROUTER_FUTURE } from '@/lib/router-future'
 
 // 2026-09-02:「市场 · 技能」与「能力中心」合并为单入口(与客户端 IA 对齐)。
 // 默认 Tab = 技能市场;四个一级 Tab:技能/智能体/审批/平台内置(最后一个 2026-09-19 新增,
@@ -48,7 +49,7 @@ beforeEach(() => {
 
 function renderPage(initialEntry = '/capabilities') {
   return render(
-    <MemoryRouter initialEntries={[initialEntry]}>
+    <MemoryRouter future={ROUTER_FUTURE} initialEntries={[initialEntry]}>
       <CapabilityCenter />
     </MemoryRouter>,
   )

@@ -10,6 +10,7 @@ import MemberDetail from './MemberDetail'
 import Models from './Models'
 import Logs from './Logs'
 import Balance from './Balance'
+import { ROUTER_FUTURE } from '@/lib/router-future'
 
 // 图表懒加载(VChart)在 jsdom 无 canvas:统一 mock 为占位
 vi.mock('../../components/chart-lazy', () => ({
@@ -77,7 +78,7 @@ beforeEach(() => {
 
 function renderAt(path: string, ui: React.ReactNode, routePath?: string) {
   return render(
-    <MemoryRouter initialEntries={[path]}>
+    <MemoryRouter future={ROUTER_FUTURE} initialEntries={[path]}>
       <Routes>
         <Route path={routePath ?? path} element={ui} />
       </Routes>

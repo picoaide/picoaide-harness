@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { request } from '../../api'
 import { setCurrentAdmin, type MeUser } from '../../lib/rbac'
 import UsageBalance from './Balance'
+import { ROUTER_FUTURE } from '@/lib/router-future'
 
 // ---------------------------------------------------------------------------
 // 审计 R7-RV-2 残留(RECHECK3 R7RV2-1):R2 只按报告点名的 5 个文件接线,
@@ -54,7 +55,7 @@ beforeEach(() => {
 afterEach(() => setCurrentAdmin(null))
 
 function renderPage() {
-  return render(<MemoryRouter><UsageBalance /></MemoryRouter>)
+  return render(<MemoryRouter future={ROUTER_FUTURE}><UsageBalance /></MemoryRouter>)
 }
 
 describe('审计员访问余额页(R7-RV-2 残留):写控件必须缺席', () => {
@@ -103,7 +104,7 @@ describe('审计员访问余额页(R7-RV-2 残留):写控件必须缺席', () =>
 
   it('auditor 不会因为 ?user= 深链自动打开调整对话框', async () => {
     setCurrentAdmin(AUDITOR)
-    render(<MemoryRouter initialEntries={['/usage/balance?user=alice']}><UsageBalance /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE} initialEntries={['/usage/balance?user=alice']}><UsageBalance /></MemoryRouter>)
     await screen.findByText('Alice')
     expect(screen.queryByText(/调整余额/)).toBeNull()
   })

@@ -11,6 +11,7 @@ import { NEUTRAL_ADMIN_TITLE, adminLogoURL, adminSiteName, useChannel } from './
 import { PasswordDialog } from './components/password-dialog'
 import { MFASettingsDialog } from './components/mfa-settings-dialog'
 import Login from './pages/Login'
+import { ROUTER_FUTURE } from './lib/router-future'
 
 // 路由级懒加载(性能优化 2026-P):各页面拆成独立 JS chunk,首屏只加载
 // 当前路由页面;其余页面(含各自依赖)在导航时按需加载,降低首屏体积。
@@ -200,7 +201,7 @@ export default function App() {
   }
 
   return (
-    <BrowserRouter basename="/admin">
+    <BrowserRouter basename="/admin" future={ROUTER_FUTURE}>
       {/* DSH 风:浅色界面 + 白色侧栏 + 黑 logo tile + 蓝 accent;移动端侧栏为抽屉 */}
       <div className="flex h-screen bg-background">
         {/* 遮罩(移动端抽屉打开时) */}

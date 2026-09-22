@@ -4,6 +4,7 @@ import Users from './Users'
 import { MemoryRouter } from 'react-router-dom'
 import { request } from '../api'
 import { setCurrentAdmin } from '../lib/rbac'
+import { ROUTER_FUTURE } from '@/lib/router-future'
 
 const mockRequest = vi.mocked(request)
 const confirmSpy = vi.fn(() => true)
@@ -43,7 +44,7 @@ describe('Users 用户管理页', () => {
       }
       return {}
     })
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     expect(screen.queryByText('暂无匹配用户')).toBeNull()
     expect(screen.getByText('加载中…')).toBeInTheDocument()
     release()
@@ -52,7 +53,7 @@ describe('Users 用户管理页', () => {
   })
 
   it('渲染用户表格:部门徽标与管理角色', async () => {
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     expect(await screen.findByText('alice')).toBeInTheDocument()
     expect(screen.getByText('研发部')).toBeInTheDocument()
     expect(screen.getByText('管理员')).toBeInTheDocument()
@@ -60,7 +61,7 @@ describe('Users 用户管理页', () => {
   })
 
   it('员工部门归属:打开对话框从部门树多选并保存(group_ids)', async () => {
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     await screen.findByText('alice')
     fireEvent.click(screen.getAllByRole('button', { name: '部门' })[0])
     const dialog = within(await screen.findByRole('dialog'))
@@ -75,14 +76,14 @@ describe('Users 用户管理页', () => {
   })
 
   it('未分配部门用户显示占位', async () => {
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     await screen.findByText('boss')
     // boss 无部门
     expect(screen.getByText('—')).toBeInTheDocument()
   })
 
   it('禁用用户需确认(高2):确认后 PUT status 0,取消不发送', async () => {
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     await screen.findByText('alice')
     // 取消 → 不发送请求
     confirmSpy.mockReturnValueOnce(false)
@@ -107,7 +108,7 @@ describe('Users 用户管理页', () => {
       if (path === '/api/server/admin/users' && init?.method === 'POST') throw new Error('密码至少 10 位')
       return {}
     })
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     await screen.findByText('alice')
     fireEvent.click(screen.getByRole('button', { name: '新建用户' }))
     const dialog = within(await screen.findByRole('dialog'))
@@ -127,7 +128,7 @@ describe('Users 用户管理页', () => {
       if (path === '/api/server/admin/users/1/tokens') throw new Error('查询失败')
       return {}
     })
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     await screen.findByText('alice')
     fireEvent.click(screen.getByRole('button', { name: '令牌' }))
     const dialog = within(await screen.findByRole('dialog'))
@@ -149,7 +150,7 @@ describe('Users 用户管理页', () => {
       }
       return {}
     })
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     await screen.findByText('alice')
     fireEvent.click(screen.getByRole('button', { name: '令牌' }))
     const dialog = within(await screen.findByRole('dialog'))
@@ -163,7 +164,7 @@ describe('Users 用户管理页', () => {
       if (path === '/api/server/admin/departments') return { departments: depts }
       return {}
     })
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     expect(await screen.findByText(/暂无匹配用户/)).toBeInTheDocument()
   })
 
@@ -176,7 +177,7 @@ describe('Users 用户管理页', () => {
       if (path === '/api/server/admin/departments') return { departments: depts }
       return {}
     })
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     await screen.findByText('multi')
     fireEvent.click(screen.getByRole('button', { name: '部门' }))
     const dialog = within(await screen.findByRole('dialog'))
@@ -202,7 +203,7 @@ describe('Users 0057 密码/MFA 操作', () => {
       if (path === '/api/server/admin/departments') return { departments: [] }
       return {}
     })
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     await screen.findByText('alice')
     // 上次改密列渲染本地格式化时间
     expect(screen.getByText(/2026-08-0[12]/)).toBeInTheDocument()
@@ -232,7 +233,7 @@ describe('Users 0057 密码/MFA 操作', () => {
       if (path === '/api/server/admin/departments') return { departments: [] }
       return {}
     })
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     await screen.findByText('alice')
     // 未开启 MFA 的 alice 无按钮; 仅 boss 有(全页恰一个)
     expect(screen.getAllByRole('button', { name: '重置MFA' })).toHaveLength(1)
@@ -252,7 +253,7 @@ describe('Users 0057 密码/MFA 操作', () => {
       if (path === '/api/server/admin/departments') return { departments: [] }
       return {}
     })
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     await screen.findByText('ldap1')
     expect(screen.getByRole('button', { name: '重置密码' })).toBeDisabled()
   })
@@ -287,7 +288,7 @@ describe('审计员只读访问(R7 branding-3)', () => {
       }
       return {}
     })
-    render(<MemoryRouter><Users /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
 
     expect(await screen.findByText('alice')).toBeInTheDocument()
     expect(screen.queryByText('没有权限执行该操作')).toBeNull()
