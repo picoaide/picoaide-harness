@@ -93,6 +93,15 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@deepseek-ai/dsh/lib/bin.js',
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
   'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
+  // 宿主行 `plugin-manager` 自 2026-09-23（issue #130）起在桌面里真的会被激活：它发布
+  // `pluginManager` 服务，而 cordis preset 的 `tool-plugin-manager` 行注入该服务 ——
+  // 缺了它，该 preset 挂载失败、创造模式会话整条不可用。它由 base bundle 的依赖带入、
+  // 纯 JS（无需 asarUnpack），此前四张清单对它零覆盖 ⇒ 某天没打进包会**全绿通过**
+  // （冒烟从 node_modules 启动，看不到打包过滤的结果）。这三条是加载它的最小闭包：
+  // package.json（解析入口）+ 服务入口 + 工具入口。
+  'node_modules/@deepseek-ai/dsh-plugin-manager/package.json',
+  'node_modules/@deepseek-ai/dsh-plugin-manager/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-plugin-manager/lib/types/tools.js',
   // 内置 COI 技能必须随包（P1，2026-09-16）：`dsh-memory-evolve` 启动时把包内
   // `skills/` 目录同步到用户技能库（`lib/coi/index.js` 的 PLUGIN_SKILLS_DIR，
   // `coiSyncSkills` 默认 true，用户开 COI 时执行）。2026-09-03 的瘦身提交
