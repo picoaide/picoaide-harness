@@ -24,12 +24,22 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
-// defaultRateLimit is the default per-user requests per minute.
-const defaultRateLimit = 60
+// defaultRateLimit 是每用户每分钟请求上限的缺省值；**0 = 不限制**。
+//
+// 2026-09-22 与官方口径对齐：DeepSeek 官方只限**账号级并发**（deepseek-flash
+// 2500 / deepseek-v4-pro 500 并发，超出才 429），不设请求速率上限
+// （api-docs.deepseek.com/quick_start/rate_limit）。此前缺省 60 req/min 是本地
+// 自设的公平性闸门：一条长任务扇出多个并行子代理时必然打满（现场实测某会话
+// 424 次 429），而它并不对应上游任何约束。需要限速的部署仍可用 settings
+// `gateway.rate_limit` 显式开启（>0 生效，0/缺省 = 不限制）。
+const defaultRateLimit = 0
 
-// maxChatBody caps the chat completions request body (memory guard; typical
-// requests are a few hundred KB even with long context).
-const maxChatBody = 16 << 20
+// maxChatBody caps the chat completions request body (memory guard).
+//
+// 2026-09-22 由 16MiB 提到 64MiB：长会话（65 万 token 级）请求体约 3MiB 且随
+// 上下文继续增长，16MiB 在"多图 + 大规模工具结果回灌"下余量偏薄。这是**内存**
+// 闸门（网关整段读进内存），64MiB × 并发数是内存上界。
+const maxChatBody = 64 << 20
 
 // maxUpstreamBody caps a non-stream upstream response body (C-8); oversized
 // responses are refused with 502 instead of being buffered unboundedly.
@@ -74,15 +84,15 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 		return
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxChatBody)
-	raw, err := io.ReadAll(c.Request.Body)
-	var maxErr *http.MaxBytesError
-	if errors.As(err, &maxErr) {
-		serverauth.WriteError(c, http.StatusRequestEntityTooLarge, "VALIDATION", "请求体过大")
+	// 读体统一走 readRequestBody(放宽读预算 + 三类失败分类,2026-09-22)。
+	raw, ok := readRequestBody(c, maxChatBody)
+	if !ok {
 		return
 	}
-	if err != nil {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+	// 出站体加工(2026-09-22):校验 file_id 引用归属 + 按端点注入平台 user_id。
+	// raw 保持**客户端原始字节**(计量侧按它估算 prompt),转发用 outbound。
+	outbound, ok := prepareOutboundBody(c, a.DB, user.ID, raw, identityOpenAI)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -140,7 +150,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 	var respSecrets []string   // 成功 provider 的官方 key(响应脱敏用)
 	var chosenProviderID int64 // 实际命中的 provider(计费取价用,P1-6)
 	for i := range ups {
-		body := raw
+		body := outbound
 		if ups[i].Channel != "" {
 			if ch, ok := channels.Get(ups[i].Channel); ok {
 				ov, rm := ch.RequestOverrides(req.Model)
@@ -1376,9 +1386,10 @@ func (a *API) rateLimitPerMinute() int {
 		return defaultRateLimit
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(v))
-	if err != nil || n <= 0 {
+	if err != nil {
 		return defaultRateLimit
 	}
+	// 0 / 负数 = 不限制(与官方一致:官方只限账号级并发,不限请求速率)。
 	return n
 }
 
@@ -1416,7 +1427,12 @@ func newRateLimiter() *rateLimiter {
 }
 
 // allow reports whether the user may proceed; rate is tokens per minute.
+// rate <= 0 表示不限制(缺省,与官方口径一致):此时既不建桶也不消耗令牌,
+// 避免无上限部署下白建 10000 个桶并触发驱逐扫描。
 func (l *rateLimiter) allow(userID int64, rate int) bool {
+	if rate <= 0 {
+		return true
+	}
 	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()

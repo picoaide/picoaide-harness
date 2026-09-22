@@ -387,10 +387,17 @@ func registerClientV2(cli *gin.RouterGroup, d Deps) {
 	cli.POST("/telemetry/error-reporting", serverauth.BearerAuth(d.DB), d.Telemetry.ReportErrorReporting)
 }
 
-// registerGatewayV1 挂载 DeepSeek 兼容的 LLM 网关 API,与官方完全一致:
-// 官方原生端点(/chat/completions、/completions、/responses、/models)
-// + OpenAI/Anthropic 兼容(/v1/*)。独立于 /api/* 管理命名空间,第三方按
-// DeepSeek 标准 baseURL(server 或 server/v1、server/anthropic) 接入。
+// registerGatewayV1 挂载 DeepSeek 兼容的 LLM 网关 API:官方原生端点
+// (/chat/completions、/completions、/responses、/models、/files)
+// + OpenAI 兼容别名(/v1/*)。独立于 /api/* 管理命名空间,第三方按
+// baseURL(server 或 server/v1) 接入。
+//
+// 与官方文档的已知差异(2026-09-22 盘点,别把本函数读成"与官方完全一致"):
+//   - 官方的 /beta 前缀未实现(/beta/chat/completions 前缀续写、/beta/completions FIM);
+//   - 官方 Anthropic 兼容前缀 /anthropic/v1/*(含 x-api-key 认证)未实现;
+//   - GET /user/balance(密钥持有人视角)未实现,只有管理端 providers/:id/balance;
+//   - 官方 429 = "账号级并发上限"(flash 2500 / v4-pro 500);我们的 429 是
+//     余额不足/本地限流,语义不同。
 func registerGatewayV1(r *gin.Engine, d Deps) {
 	// OpenAI/Anthropic 兼容形态(OpenAI SDK base_url=server 自动补 /v1;
 	// Anthropic SDK base_url=server/anthropic 用 /v1/messages)。
@@ -403,6 +410,12 @@ func registerGatewayV1(r *gin.Engine, d Deps) {
 	v1.POST("/completions", d.Gateway.Completions)
 	v1.POST("/responses", d.Gateway.Responses)
 	v1.GET("/models", d.Gateway.Models)
+	// Files API(2026-09-22,官方 Files API 同形):客户端默认用 file_id 传图片,
+	// 缺失则每步回落成 base64 内联。实现硬绑 DeepSeek 上游(见 llmgateway/files.go)。
+	v1.POST("/files", d.Gateway.UploadFile)
+	v1.GET("/files", d.Gateway.ListFiles)
+	v1.GET("/files/:file_id", d.Gateway.RetrieveFile)
+	v1.DELETE("/files/:file_id", d.Gateway.DeleteFile)
 
 	// 官方原生端点(base_url=server, 无 /v1 前缀)。
 	gw := r.Group("", serverauth.BearerAuth(d.DB), llmgateway.InFlightGuard())
@@ -411,8 +424,15 @@ func registerGatewayV1(r *gin.Engine, d Deps) {
 	gw.POST("/completions", d.Gateway.Completions)
 	gw.POST("/responses", d.Gateway.Responses)
 	gw.GET("/models", d.Gateway.Models)
-	// Anthropic 原生兼容(base_url=server/anthropic): SDK 请求 /v1/messages,
-	// 已由上面 v1 组覆盖;再挂 /messages 兜底变体。
+	gw.POST("/files", d.Gateway.UploadFile)
+	gw.GET("/files", d.Gateway.ListFiles)
+	gw.GET("/files/:file_id", d.Gateway.RetrieveFile)
+	gw.DELETE("/files/:file_id", d.Gateway.DeleteFile)
+	// Anthropic Messages 的**别名**兜底:base_url=server 时 Anthropic SDK 请求
+	// /v1/messages(由上面 v1 组覆盖),这里再挂根级 /messages。
+	// 注意:官方 Anthropic 兼容的 base_url 是 <host>/anthropic(路径
+	// /anthropic/v1/messages),该前缀我们**没有**实现,也没有实现 Anthropic SDK
+	// 默认的 x-api-key 认证 ⇒ 按官方文档接入会 404/401(属未实现项,勿照注释误判)。
 	gw.POST("/messages", d.Gateway.Messages)
 }
 

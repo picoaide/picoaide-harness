@@ -3,7 +3,6 @@ package llmgateway
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -17,8 +16,9 @@ import (
 )
 
 // maxFIMBody caps the FIM completion request body (memory guard; typical
-// prefix/suffix prompts are far below this).
-const maxFIMBody = 16 << 20
+// prefix/suffix prompts are far below this). 2026-09-22 与 chat 同口径提到
+// 64MiB(见 maxChatBody 注释);读预算与失败分类见 read_budget.go。
+const maxFIMBody = 64 << 20
 
 // handleCompletions proxies the DeepSeek FIM Completion (Beta) endpoint
 // (/completions and OpenAI-compatible /v1/completions) to the matching
@@ -32,15 +32,14 @@ func (a *API) handleCompletions(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 		return
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxFIMBody)
-	raw, err := io.ReadAll(c.Request.Body)
-	var maxErr *http.MaxBytesError
-	if errors.As(err, &maxErr) {
-		serverauth.WriteError(c, http.StatusRequestEntityTooLarge, "VALIDATION", "请求体过大")
+	raw, ok := readRequestBody(c, maxFIMBody)
+	if !ok {
 		return
 	}
-	if err != nil {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+	// 出站体加工(2026-09-22):校验 file_id 引用归属 + 按端点注入平台 user_id。
+	// raw 保持**客户端原始字节**(计量侧按它估算 prompt),转发用 outbound。
+	outbound, ok := prepareOutboundBody(c, a.DB, user.ID, raw, identityNone)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -95,7 +94,7 @@ func (a *API) handleCompletions(c *gin.Context) {
 	var respSecrets []string
 	var chosenProviderID int64 // 实际命中的 provider(计费取价用,P1-6)
 	for i := range ups {
-		body := raw
+		body := outbound
 		if ups[i].Channel != "" {
 			if ch, ok := channels.Get(ups[i].Channel); ok {
 				ov, rm := ch.RequestOverrides(req.Model)

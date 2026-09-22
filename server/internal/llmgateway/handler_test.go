@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -233,18 +234,51 @@ func TestApplyStreamUsageRequest(t *testing.T) {
 	}
 }
 
+// forwardedBodyEqual 断言上游收到的请求体与客户端提交的**语义相等**。
+//
+// 2026-09-22 起网关会对出站体重编码（注入平台 user_id、校验 file_id 引用归属），
+// 键序变成 Go map 的排序序、并多出 user_id —— "逐字节原样转发"不再是契约。
+// 判据因此改为：JSON 语义等价 + user_id 等于平台侧期望值（"" = 该端点不注入，
+// 也不允许客户端自带值透传）。
+func forwardedBodyEqual(t *testing.T, got, want, wantUserID string) {
+	t.Helper()
+	var g, w map[string]any
+	if err := json.Unmarshal([]byte(got), &g); err != nil {
+		t.Fatalf("forwarded body not JSON: %q", got)
+	}
+	if err := json.Unmarshal([]byte(want), &w); err != nil {
+		t.Fatalf("expected body not JSON: %q", want)
+	}
+	if id, _ := g["user_id"].(string); id != wantUserID {
+		t.Fatalf("forwarded user_id = %q, want %q（平台侧注入并覆盖客户端值）", id, wantUserID)
+	}
+	delete(g, "user_id")
+	if !reflect.DeepEqual(g, w) {
+		t.Fatalf("forwarded body differs from client body:\n got=%v\nwant=%v", g, w)
+	}
+}
+
+// aliceTestUserID 取 newGateway 建的测试用户 alice 的 id（断言平台注入的 user_id 用）。
+func aliceTestUserID(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	var id int64
+	if err := db.QueryRow(`SELECT id FROM users WHERE username = 'alice'`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
 func TestProxyNonStream(t *testing.T) {
 	f := newFakeUpstream(t)
-	r, _, token := newGateway(t, f)
+	r, db, token := newGateway(t, f)
 	body := `{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}`
 
 	w := doPost(t, r, "/v1/chat/completions", body, token, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
-	if got := f.gotBody.Load().(string); got != body {
-		t.Fatalf("body not forwarded identically: %q", got)
-	}
+	// 语义等价 + 平台 user_id（2026-09-22 起出站体统一重编码，不再是逐字节转发）
+	forwardedBodyEqual(t, f.gotBody.Load().(string), body, platformUserID(aliceTestUserID(t, db)))
 	if got := f.gotAuth.Load().(string); got != "Bearer "+upstreamKey {
 		t.Fatalf("auth = %q, want upstream key", got)
 	}

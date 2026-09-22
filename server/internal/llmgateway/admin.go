@@ -841,7 +841,8 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	rateLimit := settings["gateway.rate_limit"]
 	if rateLimit == "" {
-		rateLimit = "60"
+		// 缺省 0 = 不限制(与官方一致:官方只限账号级并发,不限请求速率)。
+		rateLimit = "0"
 	}
 	retention := settings[serverstore.RetentionMonthsSetting]
 	if retention == "" {
@@ -932,8 +933,9 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		return
 	}
 	if req.RateLimit != nil && *req.RateLimit != "" {
-		if n, err := strconv.Atoi(string(*req.RateLimit)); err != nil || n <= 0 || n > 100000 {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "rate_limit 必须是正整数")
+		// 0 = 不限制(缺省,与官方口径一致);上限 100000 防误填天文数字。
+		if n, err := strconv.Atoi(string(*req.RateLimit)); err != nil || n < 0 || n > 100000 {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "rate_limit 必须是 0~100000 的整数(0=不限制)")
 			return
 		}
 	}

@@ -34,6 +34,11 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 	v1.POST("/completions", a.handleCompletions)
 	v1.POST("/responses", a.handleResponses)
 	v1.GET("/models", a.handleModels)
+	// Files API(2026-09-22):与生产树(internal/router.registerGatewayV1)逐条对齐。
+	v1.POST("/files", a.handleFilesUpload)
+	v1.GET("/files", a.handleFilesList)
+	v1.GET("/files/:file_id", a.handleFilesRetrieve)
+	v1.DELETE("/files/:file_id", a.handleFilesDelete)
 	// 官方原生形态(无 /v1 前缀)。
 	gw := r.Group("", serverauth.BearerAuth(db))
 	gw.POST("/chat/completions", a.handleChatCompletions)
@@ -42,4 +47,8 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 	gw.POST("/responses", a.handleResponses)
 	gw.GET("/models", a.handleModels)
 	gw.POST("/messages", a.handleMessages)
+	gw.POST("/files", a.handleFilesUpload)
+	gw.GET("/files", a.handleFilesList)
+	gw.GET("/files/:file_id", a.handleFilesRetrieve)
+	gw.DELETE("/files/:file_id", a.handleFilesDelete)
 }

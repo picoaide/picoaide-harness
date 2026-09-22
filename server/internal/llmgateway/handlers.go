@@ -30,6 +30,12 @@ type Handlers struct {
 	Models          gin.HandlerFunc // GET /models (+ /v1 别名)
 	Completions     gin.HandlerFunc // POST /completions (FIM Beta)
 	Responses       gin.HandlerFunc // POST /responses (Responses API)
+	// Files API(2026-09-22):客户端默认用它上传图片并复用 file_id,拿不到才回落
+	// base64 内联。硬绑 DeepSeek 上游,见 files.go。
+	UploadFile   gin.HandlerFunc // POST /files (multipart,流式)
+	ListFiles    gin.HandlerFunc // GET /files
+	RetrieveFile gin.HandlerFunc // GET /files/:file_id
+	DeleteFile   gin.HandlerFunc // DELETE /files/:file_id
 	// 服务端面 /api/server/admin
 	ListProviders     gin.HandlerFunc
 	CreateProvider    gin.HandlerFunc
@@ -84,6 +90,10 @@ func NewHandlers(db *sql.DB) *Handlers {
 		Models:            api.handleModels,
 		Completions:       api.handleCompletions,
 		Responses:         api.handleResponses,
+		UploadFile:        api.handleFilesUpload,
+		ListFiles:         api.handleFilesList,
+		RetrieveFile:      api.handleFilesRetrieve,
+		DeleteFile:        api.handleFilesDelete,
 		ListProviders:     func(c *gin.Context) { listProviders(c, db) },
 		CreateProvider:    func(c *gin.Context) { createProvider(c, db) },
 		UpdateProvider:    func(c *gin.Context) { updateProvider(c, db) },

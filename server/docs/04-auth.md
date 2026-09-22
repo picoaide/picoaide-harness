@@ -72,7 +72,7 @@ PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -data ./data --bootstrap-admin admin
 |------|------|------|
 | 登录 `POST /api/client/v2/auth/login` | 内存计数器(按 IP+用户名,失败累计,成功/时间窗重置) | - |
 | 管理登录 `POST /api/server/admin/login` | 同上(独立计数器) | - |
-| 网关 `/v1/chat/completions` | per-user 令牌桶(`gateway.rate_limit`,settings 可调,桶上限 10000) | 60/min |
+| 网关 `/v1/chat/completions` | per-user 令牌桶(`gateway.rate_limit`,settings 可调,桶上限 10000) | **0 = 不限制**(2026-09-22 起与官方口径一致:官方只限账号级并发、不设请求速率上限;此前缺省 60/min) |
 
 超限返回 `429 RATE_LIMITED`。
 

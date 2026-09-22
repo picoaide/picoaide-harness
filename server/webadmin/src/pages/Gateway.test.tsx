@@ -540,6 +540,36 @@ describe('Gateway 保存面(F-07)', () => {
       expect(body[foreign]).toBeUndefined()
     }
   })
+
+  // 2026-09-22:服务端把每用户限流缺省从 60 改成 **0 = 不限制**(与官方口径一致:
+  // 官方只限账号级并发、不设请求速率上限)。页面校验若仍是 `rl <= 0`,GET 拿到的
+  // 0 会被自己的前端校验拦下 ⇒ 网关页**任何字段都保存不了**(默认模型/峰谷窗口/
+  // 保留期一起被挡),且 0 在 UI 上不可达(服务端 API 本身接受 0)。
+  it.each([
+    ['服务端下发 rate_limit=0', { rate_limit: '0' }],
+    ['服务端未下发 rate_limit(缺省即 0)', { rate_limit: undefined }],
+  ])('限流 0 = 不限制:%s 时必须能保存', async (_label, payload) => {
+    const puts: Array<Record<string, unknown>> = []
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/gateway' && init?.method === 'PUT') {
+        puts.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+        return { ok: true }
+      }
+      if (path === '/api/server/admin/gateway') {
+        return {
+          default_model: 'deepseek-chat', peak_windows: '', retention_months: '6',
+          default_thinking_level: 'max', server_base_url: '', ...payload,
+        }
+      }
+      return baseImpl(path, init)
+    })
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存')
+    expect(puts.length).toBe(1)
+    expect(puts[0]!.rate_limit).toBe('0')
+  })
 })
 
 // ---------------------------------------------------------------------------

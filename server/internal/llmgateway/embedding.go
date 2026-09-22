@@ -175,15 +175,15 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 		return
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxEmbedBody)
-	raw, err := io.ReadAll(c.Request.Body)
-	var maxErr *http.MaxBytesError
-	if errors.As(err, &maxErr) {
-		serverauth.WriteError(c, http.StatusRequestEntityTooLarge, "VALIDATION", "请求体过大")
+	// 读体统一走 readRequestBody(放宽读预算 + 三类失败分类,2026-09-22)。
+	// 体积上限保持 4MiB:embeddings 是文本批次,没有内联图片/长工具结果那类膨胀面。
+	raw, ok := readRequestBody(c, maxEmbedBody)
+	if !ok {
 		return
 	}
-	if err != nil {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+	// 出站体加工(2026-09-22):embeddings 无图片引用面,这里只做 file_id 归属校验
+	// (identityNone ⇒ 不注入官方未文档化的 user_id)。
+	if raw, ok = prepareOutboundBody(c, a.DB, user.ID, raw, identityNone); !ok {
 		return
 	}
 	var req struct {

@@ -143,7 +143,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '0', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '' })
   const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
   // 审计 2026-09-12 P1-2:服务端存的 peak_windows 无法解析时为 true →
   // 禁止把空列表当成「清空」写回去(那是静默破坏计费口径)。管理员显式
@@ -208,7 +208,7 @@ export default function Gateway() {
       // (复核实证:A) PUT {rate_limit:321} → 200;B) 整份回提交 → 400 且 rate_limit 未变)。
       setCfg({
         default_model: g.default_model ?? '',
-        rate_limit: String(g.rate_limit ?? '60'),
+        rate_limit: String(g.rate_limit ?? '0'),
         peak_windows: g.peak_windows ?? '',
         retention_months: g.retention_months ?? '6',
         default_thinking_level: g.default_thinking_level ?? 'max',
@@ -244,9 +244,10 @@ export default function Gateway() {
   async function saveGateway() {
     if (busy) return // P1-6: 双击守卫
     // 前端校验(审计修复 L3):限流/配额数值、URL 格式
+    // 0 = 不限制(2026-09-22 与服务端同口径:缺省 0,官方只限账号级并发、不设速率上限)
     const rl = Number(cfg.rate_limit)
-    if (!Number.isInteger(rl) || rl <= 0 || rl > 100000) {
-      setError('每用户限流必须是正整数(1-100000)')
+    if (!Number.isInteger(rl) || rl < 0 || rl > 100000) {
+      setError('每用户限流必须是 0~100000 的整数(0=不限制)')
       return
     }
     // 全局默认配额已迁至「用量中心 → 配额与预算」页(2026-09 重构),
@@ -867,8 +868,9 @@ export default function Gateway() {
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
                 <Label htmlFor="rate-limit">每用户网关限流(次/分钟)</Label>
-                <Input id="rate-limit" type="number" min={1} max={100000} value={cfg.rate_limit}
+                <Input id="rate-limit" type="number" min={0} max={100000} value={cfg.rate_limit}
                   onChange={(e) => setCfg({ ...cfg, rate_limit: e.target.value })} />
+                <p className="text-xs text-muted-foreground">0 = 不限制(与官方口径一致:官方只限账号级并发,不设请求速率上限)</p>
               </div>
             </div>
           </section>

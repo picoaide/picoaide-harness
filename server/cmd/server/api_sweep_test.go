@@ -61,6 +61,7 @@ import (
 //	:version   → 1   版本号（必须是版本形状）
 //	:name      → x   技能/智能体/预设名（非数字，用 x）
 //	:kind      → x   能力类别（apps/:kind/:app_id/owner、capability-locks/:kind/:name）
+//	:file_id   → x   DeepSeek Files API 的文件 id（非数字形状，用 x）
 //	*file      → x   通配捕获（/updates/client/*file）
 //
 // 新增参数名时**必须在这里显式登记**：没登记的名字会让扫描失败（而不是静默
@@ -73,6 +74,7 @@ var sweepParamValues = map[string]string{
 	"version":   "1",
 	"name":      "x",
 	"kind":      "x",
+	"file_id":   "x",
 }
 
 // sweepWildcardValue 是 `*name` 通配段的替换值。
@@ -207,7 +209,10 @@ func isGatewayRoute(route string) bool {
 		return true
 	}
 	switch route {
-	case "/models", "/chat/completions", "/embeddings", "/completions", "/responses", "/messages":
+	case "/models", "/chat/completions", "/embeddings", "/completions", "/responses", "/messages",
+		// DeepSeek Files API(2026-09-22):/v1/files 由上面的 /v1/ 前缀覆盖,
+		// 官方原生无前缀形态在这里登记。
+		"/files", "/files/:file_id":
 		return true
 	}
 	return false
@@ -320,6 +325,13 @@ var sweepNonAPIRoutes = map[string]sweepExpect{
 	"POST /embeddings":       {statuses: []int{401}, classes: []string{sweepClassJSON}, why: "LLM 网关（BearerAuth）", auth401: true},
 	"POST /responses":        {statuses: []int{401}, classes: []string{sweepClassJSON}, why: "LLM 网关（BearerAuth）", auth401: true},
 	"POST /messages":         {statuses: []int{401}, classes: []string{sweepClassJSON}, why: "LLM 网关（BearerAuth）", auth401: true},
+	// Files API（2026-09-22）：登记在这里而不是只靠 isGatewayRoute 的默认分支 ——
+	// 本表有**反向检查**（路由被删/改名 ⇒ "期望表里的 X 没有被扫到"报红），
+	// 默认分支只有单向覆盖（新路由必须登记，但登记过的路由被删不会红）。
+	"POST /files":            {statuses: []int{401}, classes: []string{sweepClassJSON}, why: "LLM 网关 Files API（BearerAuth）", auth401: true},
+	"GET /files":             {statuses: []int{401}, classes: []string{sweepClassJSON}, why: "LLM 网关 Files API（BearerAuth）", auth401: true},
+	"GET /files/:file_id":    {statuses: []int{401}, classes: []string{sweepClassJSON}, why: "LLM 网关 Files API（BearerAuth）", auth401: true},
+	"DELETE /files/:file_id": {statuses: []int{401}, classes: []string{sweepClassJSON}, why: "LLM 网关 Files API（BearerAuth）", auth401: true},
 }
 
 // sweepAuthGatedJSONSurfaces 是"产品响应不是 JSON、但**未认证扫描只能看到

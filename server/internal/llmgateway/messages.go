@@ -19,9 +19,10 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
-// maxMessagesBody caps the Anthropic Messages request body (search requests
-// are small; the chat cap is already 16MB, keep the same margin policy).
-const maxMessagesBody = 16 << 20
+// maxMessagesBody caps the Anthropic Messages request body (memory guard).
+// 2026-09-22 与 chat 同口径提到 64MiB(见 maxChatBody 注释):Anthropic 路由同样
+// 承载长会话(含内联图片),旧的 16MiB 余量与 chat 一致地偏薄。
+const maxMessagesBody = 64 << 20
 
 // anthropicUsage parses token counts from an Anthropic Messages response body
 // (non-stream) or one SSE "data:" line (stream). Returns
@@ -330,15 +331,14 @@ func (a *API) handleMessages(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 		return
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxMessagesBody)
-	raw, err := io.ReadAll(c.Request.Body)
-	var maxErr *http.MaxBytesError
-	if errors.As(err, &maxErr) {
-		serverauth.WriteError(c, http.StatusRequestEntityTooLarge, "VALIDATION", "请求体过大")
+	raw, ok := readRequestBody(c, maxMessagesBody)
+	if !ok {
 		return
 	}
-	if err != nil {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+	// 出站体加工(2026-09-22):校验 file_id 引用归属 + 按端点注入平台 user_id。
+	// raw 保持**客户端原始字节**(计量侧按它估算 prompt),转发用 outbound。
+	outbound, ok := prepareOutboundBody(c, a.DB, user.ID, raw, identityAnthropic)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -393,7 +393,7 @@ func (a *API) handleMessages(c *gin.Context) {
 	var respSecrets []string   // 成功 provider 的官方 key(响应脱敏用)
 	var chosenProviderID int64 // 实际命中的 provider(计费取价用,P1-6)
 	for i := range ups {
-		resp, err = a.forwardAnthropic(c, &ups[i], raw, req.Stream)
+		resp, err = a.forwardAnthropic(c, &ups[i], outbound, req.Stream)
 		if err == nil {
 			respSecrets = []string{ups[i].APIKey}
 			chosenProviderID = ups[i].ID
