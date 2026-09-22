@@ -154,22 +154,28 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		if ups[i].Channel != "" {
 			if ch, ok := channels.Get(ups[i].Channel); ok {
 				ov, rm := ch.RequestOverrides(req.Model)
-				if raw2, err := applyChannelOverrides(body, ov, rm); err == nil {
+				if raw2, err := a.applyChannelOverrides(body, ov, rm); err == nil {
 					body = raw2
+				} else if a.rejectBusyBodyEdit(c, usageID, err) {
+					return
 				}
 			}
 		}
 		if defaultParams != "" {
-			if raw2, err := applyMaxTokensDefault(body, defaultParams); err == nil {
+			if raw2, err := a.applyMaxTokensDefault(body, defaultParams); err == nil {
 				body = raw2
+			} else if a.rejectBusyBodyEdit(c, usageID, err) {
+				return
 			}
 		}
 		// P1-1 (metering): every streaming request must ask the upstream for
 		// usage in the final SSE chunk, otherwise the pending usage row can
 		// never be backfilled and metering is silently bypassed.
 		if req.Stream {
-			if raw2, err := applyStreamUsageRequest(body); err == nil {
+			if raw2, err := a.applyStreamUsageRequest(body); err == nil {
 				body = raw2
+			} else if a.rejectBusyBodyEdit(c, usageID, err) {
+				return
 			}
 		}
 		resp, err = a.forward(c, &ups[i], body, req.Stream)
@@ -210,6 +216,34 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 	a.serveJSON(c, resp, user.ID, chosenProviderID, req.Model, respSecrets, billingKindChat, raw)
 }
 
+// db 返回 API 的数据库句柄（nil 安全：测试里直接调 helper 时按可配数值的缺省值走）。
+func (a *API) db() *sql.DB {
+	if a == nil {
+		return nil
+	}
+	return a.DB
+}
+
+// discardPendingUsage 丢弃本轮已建的 pending usage 行（否则留下永不回填的悬挂行）。
+func (a *API) discardPendingUsage(usageID int64) {
+	if usageID > 0 && a.DB != nil {
+		if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
+			log.Printf("gateway: delete pending usage: %v", err)
+		}
+	}
+}
+
+// rejectBusyBodyEdit 处理"候选循环内的整 body 编辑撞上内存闸门"：清 pending 行 +
+// 写 503 SERVER（可重试），返回 true 表示调用方必须立即 return（不要试下一个 provider）。
+func (a *API) rejectBusyBodyEdit(c *gin.Context, usageID int64, err error) bool {
+	if !errors.Is(err, errBodyParseBusy) {
+		return false
+	}
+	a.discardPendingUsage(usageID)
+	writeBodyParseBusy(c)
+	return true
+}
+
 // rejectBadOutboundBody 处理"最后一道闸门判定出站体不是 JSON 对象"这一情形：
 // 清掉本轮已建的 pending usage 行（否则留下永不回填的悬挂行），并写 400。
 //
@@ -217,11 +251,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 // 走到这里说明上游闸门与本地判定不一致（编程错误/中间重编码 bug）；显式收口是为了
 // 让"任何一道闸门都 fail-closed"这条不变量成立（审计 2026-09-22 F 路 P0-1）。
 func (a *API) rejectBadOutboundBody(c *gin.Context, usageID int64) {
-	if usageID > 0 {
-		if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
-			log.Printf("gateway: delete pending usage: %v", err)
-		}
-	}
+	a.discardPendingUsage(usageID)
 	log.Printf("gateway: outbound body rejected before forwarding (not a JSON object)")
 	serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体不是合法 JSON")
 }
@@ -247,23 +277,21 @@ func maxOutputFromDefaultParams(params string) (int64, bool, error) {
 // applyMaxTokensDefault:客户端未传 max_tokens 时,从模型 default_params.max_output 注入。
 // 无 default_params/解析失败时原样返回。支持 max_completion_tokens 模型的同语义双键
 // (审计2026-L17:注入 max_tokens 与既有 max_completion_tokens 冲突)。
-func applyMaxTokensDefault(raw []byte, defaultParams string) ([]byte, error) {
-	var body map[string]any
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return raw, err
-	}
-	if _, ok := body["max_tokens"]; ok {
-		return raw, nil
-	}
-	if _, ok := body["max_completion_tokens"]; ok {
-		return raw, nil
-	}
-	v, ok, err := maxOutputFromDefaultParams(defaultParams)
-	if err != nil || !ok {
-		return raw, nil
-	}
-	body["max_tokens"] = v
-	return json.Marshal(body)
+func (a *API) applyMaxTokensDefault(raw []byte, defaultParams string) ([]byte, error) {
+	return rewriteJSONObjectBody(a.db(), raw, func(body map[string]any) error {
+		if _, ok := body["max_tokens"]; ok {
+			return errBodyNoChange
+		}
+		if _, ok := body["max_completion_tokens"]; ok {
+			return errBodyNoChange
+		}
+		v, ok, err := maxOutputFromDefaultParams(defaultParams)
+		if err != nil || !ok {
+			return errBodyNoChange
+		}
+		body["max_tokens"] = v
+		return nil
+	})
 }
 
 // applyStreamUsageRequest injects stream_options.include_usage=true into a
@@ -277,34 +305,30 @@ func applyMaxTokensDefault(raw []byte, defaultParams string) ([]byte, error) {
 // 收尾只能走字节估算(prompt 侧恒记 0,completion 侧被 maxEstimatedCompletionTokens
 // 截顶),被计费方可以一行 JSON 精确关掉自己的计量表。现在无条件写 true
 // (客户端已给的其它 stream_options 键保留),与 P1-1 的本意一致。
-func applyStreamUsageRequest(raw []byte) ([]byte, error) {
-	var body map[string]any
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return raw, err
-	}
-	stream, _ := body["stream"].(bool)
-	if !stream {
-		return raw, nil
-	}
-	if m, isMap := body["stream_options"].(map[string]any); isMap {
-		m["include_usage"] = true
-		return json.Marshal(body)
-	}
-	body["stream_options"] = map[string]any{"include_usage": true}
-	return json.Marshal(body)
+func (a *API) applyStreamUsageRequest(raw []byte) ([]byte, error) {
+	return rewriteJSONObjectBody(a.db(), raw, func(body map[string]any) error {
+		stream, _ := body["stream"].(bool)
+		if !stream {
+			return errBodyNoChange // 非流式请求不改体
+		}
+		if m, isMap := body["stream_options"].(map[string]any); isMap {
+			m["include_usage"] = true
+			return nil
+		}
+		body["stream_options"] = map[string]any{"include_usage": true}
+		return nil
+	})
 }
 
 // applyChannelOverrides 深合并 overrides 进请求体,并删除 removeKeys 中的键。
-func applyChannelOverrides(raw []byte, overrides map[string]any, removeKeys []string) ([]byte, error) {
-	var body map[string]any
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return raw, err
-	}
-	for _, k := range removeKeys {
-		delete(body, k)
-	}
-	deepMerge(body, overrides)
-	return json.Marshal(body)
+func (a *API) applyChannelOverrides(raw []byte, overrides map[string]any, removeKeys []string) ([]byte, error) {
+	return rewriteJSONObjectBody(a.db(), raw, func(body map[string]any) error {
+		for _, k := range removeKeys {
+			delete(body, k)
+		}
+		deepMerge(body, overrides)
+		return nil
+	})
 }
 
 // deepMerge 将 src 合并进 dst(嵌套 map 递归合并,标量覆盖)。

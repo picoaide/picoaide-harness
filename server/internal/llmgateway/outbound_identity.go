@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -99,13 +101,6 @@ func topLevelUserKey(mode outboundIdentity) string {
 	return ""
 }
 
-// maxFileRefsPerRequest 单个请求允许引用的 file_id 数量上限。
-//
-// 归属校验的 DB 往返已经批量成一次，这条上限挡的是另外两件事：①`IN (...)` 的
-// 参数个数（PG 上限 65535，64MiB 体足够塞进十万个 id，撞上去就是 500 而非干净的
-// 拒绝）；②上游对"一条消息引用几百个文件"也没有实际用法。真实会话是个位数量级。
-const maxFileRefsPerRequest = 256
-
 // prepareOutboundBody 是聊天类入口共用的出站体加工：
 // ① 校验所有 file_id 引用归属调用者（不通过 ⇒ 已写 404，返回 ok=false）；
 // ② 按 mode 注入/覆盖平台侧 user_id。
@@ -122,8 +117,8 @@ func prepareOutboundBody(c *gin.Context, db *sql.DB, userID int64, raw clientBod
 	if c == nil {
 		return outboundBody(raw), true
 	}
-	// 快路径：大体积、无需校验引用、也没有客户端自带的 user_id 要覆盖时，
-	// 只在末尾追加平台 user_id（不改动原有字节）。
+	// 快路径：大体积、无需校验引用、也没有客户端自带的同名字段要覆盖时，
+	// 只在末尾追加平台标识（不改动原有字节，也不占用内存闸门额度）。
 	if out, ok := fastPathUserID(raw, userID, mode); ok {
 		return out, true
 	}
@@ -131,32 +126,38 @@ func prepareOutboundBody(c *gin.Context, db *sql.DB, userID int64, raw clientBod
 		writeInvalidBody(c, "请求体不是合法 JSON")
 		return nil, false
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber() // 保全大整数精度（float64 会让 >2^53 的整数在重编码时漂移）
-	var body map[string]any
-	if err := dec.Decode(&body); err != nil || body == nil {
+	out, err := rewriteJSONObjectBody(db, raw, func(body map[string]any) error {
+		if !fileReferencesOwned(c, db, userID, body) {
+			return errAlreadyResponded // 归属校验已经写过 404/400/500
+		}
+		if mode == identityNone {
+			return errBodyNoChange // 没有任何改动 ⇒ 原字节返回（避免无谓的重编码）
+		}
+		if !setPlatformUserID(c, body, userID, mode) {
+			return errAlreadyResponded
+		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, errAlreadyResponded):
+		return nil, false
+	case errors.Is(err, errBodyParseBusy):
+		writeBodyParseBusy(c)
+		return nil, false
+	case err != nil:
 		writeInvalidBody(c, "请求体必须是 JSON 对象")
 		return nil, false
 	}
-	if !fileReferencesOwned(c, db, userID, body) {
-		return nil, false
-	}
-	if mode == identityNone {
-		// 没有任何改动 ⇒ 原字节返回（避免无谓的重编码）。
-		return outboundBody(raw), true
-	}
-	if !setPlatformUserID(c, body, userID, mode) {
-		return nil, false
-	}
-	var buf bytes.Buffer
-	buf.Grow(len(raw) + 32)
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false) // 正文里的 < > & 不再被转成 \u003c（输出膨胀 ~1.9× 的来源）
-	if err := enc.Encode(body); err != nil {
-		return outboundBody(raw), true
-	}
-	return bytes.TrimRight(buf.Bytes(), "\n"), true
+	return outboundBody(out), true
 }
+
+// writeBodyParseBusy 是内存闸门拒绝时的统一响应：503 + code SERVER（客户端按可重试处理）。
+func writeBodyParseBusy(c *gin.Context) {
+	serverauth.WriteError(c, http.StatusServiceUnavailable, "SERVER", "网关繁忙（请求体加工并发已满），请稍后重试")
+}
+
+// errAlreadyResponded：回调内部已经写出响应（404/400/500），调用方只需停止处理。
+var errAlreadyResponded = errors.New("gateway response already written")
 
 // writeInvalidBody 统一的"请求体不合法"响应（fail-closed 的本地拒绝）。
 func writeInvalidBody(c *gin.Context, msg string) {
@@ -179,8 +180,10 @@ func fastPathUserID(raw []byte, userID int64, mode outboundIdentity) (outboundBo
 		return nil, false
 	}
 	// 键名 + 冒号：Responses 的 `user` 与正文里的 `"role":"user"` 必须区分开，
-	// 所以比对 `"user":` 而不是裸 `user`（后者在每条消息里都有，快路径会永不命中）。
-	if bytes.Contains(raw, []byte(`"`+key+`":`)) {
+	// 所以比对完整键而不是裸 `user`（后者在每条消息里都有，快路径会永不命中）。
+	// `"user_id" :`（冒号前有空白）也必须算命中 —— 漏判会让出站体出现两个同名键，
+	// 覆盖就只剩"上游取最后一个"这条隐式约定（审计 2026-09-22 R4 N-5）。
+	if containsJSONKey(raw, key) {
 		return nil, false
 	}
 	if bytes.Contains(raw, []byte(`\u`)) {
@@ -205,7 +208,22 @@ func fastPathUserID(raw []byte, userID int64, mode outboundIdentity) (outboundBo
 	for start < end && (raw[start] == ' ' || raw[start] == '\t' || raw[start] == '\n' || raw[start] == '\r') {
 		start++
 	}
-	if start >= end || raw[start] != '{' || raw[start+1] == '}' {
+	if start >= end || raw[start] != '{' {
+		return nil, false
+	}
+	// 空对象（含只有空白的形式 `{   }`）不能走快路径：尾插会拼出非法 JSON
+	// `{   ,"user_id":"uN"}`（审计 2026-09-22 R4 N-4；经 HTTP 不可达——model 字段
+	// 校验先拦下——但判据不该指望下游兜底）。
+	inner := end - 1 // `}` 的下标
+	for inner > start+1 {
+		switch raw[inner-1] {
+		case ' ', '\t', '\n', '\r':
+			inner--
+			continue
+		}
+		break
+	}
+	if inner == start+1 {
 		return nil, false
 	}
 	out := make([]byte, 0, end+32)
@@ -217,6 +235,29 @@ func fastPathUserID(raw []byte, userID int64, mode outboundIdentity) (outboundBo
 	out = append(out, '"', '}')
 	out = append(out, raw[end:]...)
 	return out, true
+}
+
+// containsJSONKey 判定 `"key"` 是否作为**键**出现（允许冒号前有空白），
+// 用于快路径的"客户端自带同名字段"判据。
+//
+// 只认键不认值：正文里出现 `user_id` 字样（例如讨论这个词）不该把请求踢回慢路径。
+// 漏判的代价是出站体出现重复键（依赖上游 last-wins），因此这里宽松判"像键"。
+func containsJSONKey(raw []byte, key string) bool {
+	needle := []byte(`"` + key + `"`)
+	for i := 0; ; {
+		j := bytes.Index(raw[i:], needle)
+		if j < 0 {
+			return false
+		}
+		k := i + j + len(needle)
+		for k < len(raw) && (raw[k] == ' ' || raw[k] == '\t' || raw[k] == '\n' || raw[k] == '\r') {
+			k++
+		}
+		if k < len(raw) && raw[k] == ':' {
+			return true
+		}
+		i += j + len(needle)
+	}
 }
 
 // fastPathMinBytes 是启用快路径的体量门槛：低于它的请求解析成本可忽略，
@@ -263,10 +304,11 @@ func fileReferencesOwned(c *gin.Context, db *sql.DB, userID int64, node any) boo
 	if len(refs) == 0 {
 		return true
 	}
-	if len(refs) > maxFileRefsPerRequest {
-		log.Printf("gateway: reject request with too many file references (user=%d refs=%d)", userID, len(refs))
+	limit := gatewayLimitsFor(db).maxFileRefs
+	if len(refs) > limit {
+		log.Printf("gateway: reject request with too many file references (user=%d refs=%d limit=%d)", userID, len(refs), limit)
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
-			"单次请求引用的文件过多（上限 256 个）")
+			fmt.Sprintf("单次请求引用的文件过多（上限 %d 个）", limit))
 		return false
 	}
 	ids := make([]string, 0, len(refs))

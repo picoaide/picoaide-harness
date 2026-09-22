@@ -9,6 +9,9 @@
 // 语义边界：
 //   - 台账是**本地事实**，不是上游状态的镜像；上游删了/过期了本行可能还在，
 //     由 `expires_at` 过期清理与"上游 404 时顺手删行"两个兜底收敛；
+//   - **过期行允许被重新占用**（与"过期 = 不存在"同一口径）：上游若按内容去重、
+//     把同一个 file_id 再发给第二个上传者，而该行已过期时，归属必须能转给新的
+//     上传者；否则第二个上传者引用自己刚传的文件会 404（审计 2026-09-22 R4 N-3）。
 //   - 只存归属与过期时刻，**不存文件内容、也不存文件名**（文件名可能含业务信息）；
 //   - 未登记的文件 id 一律按"不存在"处理（404，与真的不存在同形，不泄露存在性）。
 package serverstore
@@ -21,16 +24,22 @@ import (
 
 // RecordGatewayFile 记录一次成功的上传归属。
 //
-// **归属不转手**（首次上传者恒为归属人）：同一 file_id 再次上传（上游若对相同内容
-// 返回既有 id —— 官方文档未承诺，但要有防线）只刷新 `expires_at`，不改 `user_id`。
-// 反过来的"最后上传者胜"是可被利用的：知道目标图片字节的人重传一次就能把归属抢走，
-// 让原主的聊天引用整体 404；而首次胜的失败面是第二个上传者退回 base64 内联（安全、
-// 自动恢复），代价仅限请求体变大。
+// **存活行不转手、过期行可重新占用**：
+//   - 同一 file_id 再次上传（上游若对相同内容返回既有 id —— 官方文档未承诺，但要有
+//     防线）而该行**仍然有效**时只刷新 `expires_at`，`user_id` 不动。"最后上传者胜"
+//     是可被利用的：知道目标图片字节的人重传一次就能把归属抢走、让原主的聊天引用整体
+//     404；而首次胜的失败面是第二个上传者退回 base64 内联（安全、自动恢复）。
+//   - 该行**已过期**时必须允许转手，否则上游按内容去重返回同一 id 时，第二个上传者
+//     引用自己刚上传的文件会被判 404（审计 2026-09-22 R4 N-3：判据与
+//     `GatewayFileOwner` 的"过期 = 不存在"曾相反）。永久文件（expires_at IS NULL）
+//     永不转手。
 func RecordGatewayFile(db *sql.DB, fileID string, userID int64, expiresAt *time.Time) error {
 	_, err := db.Exec(
 		`INSERT INTO gateway_files (file_id, user_id, expires_at) VALUES (?, ?, ?)
-		 ON CONFLICT (file_id) DO UPDATE SET expires_at = EXCLUDED.expires_at
-		 WHERE gateway_files.user_id = EXCLUDED.user_id`,
+		 ON CONFLICT (file_id) DO UPDATE
+		   SET expires_at = EXCLUDED.expires_at, user_id = EXCLUDED.user_id
+		 WHERE gateway_files.user_id = EXCLUDED.user_id
+		    OR gateway_files.expires_at <= now()`,
 		fileID, userID, expiresAt,
 	)
 	return err

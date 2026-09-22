@@ -128,7 +128,7 @@ func TestApplyChannelOverrides(t *testing.T) {
 	body := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"temperature":0.7}`)
 	overrides := map[string]any{"thinking": map[string]any{"type": "enabled"}, "reasoning_effort": "max"}
 	removeKeys := []string{"temperature"}
-	out, err := applyChannelOverrides(body, overrides, removeKeys)
+	out, err := (&API{}).applyChannelOverrides(body, overrides, removeKeys)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestApplyChannelOverrides(t *testing.T) {
 func TestApplyMaxTokensDefault(t *testing.T) {
 	// client provided max_tokens -> untouched
 	body := []byte(`{"model":"m","max_tokens":100}`)
-	out, err := applyMaxTokensDefault(body, `{"max_output":393216}`)
+	out, err := (&API{}).applyMaxTokensDefault(body, `{"max_output":393216}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestApplyMaxTokensDefault(t *testing.T) {
 
 	// client omitted -> inject from default_params
 	body2 := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
-	out2, err := applyMaxTokensDefault(body2, `{"context_length":1048576,"max_output":393216}`)
+	out2, err := (&API{}).applyMaxTokensDefault(body2, `{"context_length":1048576,"max_output":393216}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestApplyMaxTokensDefault(t *testing.T) {
 func TestApplyStreamUsageRequest(t *testing.T) {
 	// streaming body without stream_options -> inject include_usage=true
 	body := []byte(`{"model":"m","stream":true}`)
-	out, err := applyStreamUsageRequest(body)
+	out, err := (&API{}).applyStreamUsageRequest(body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestApplyStreamUsageRequest(t *testing.T) {
 
 	// non-stream body -> untouched (stream_options must not leak into JSON mode)
 	nonStream := []byte(`{"model":"m","messages":[]}`)
-	out2, err := applyStreamUsageRequest(nonStream)
+	out2, err := (&API{}).applyStreamUsageRequest(nonStream)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestApplyStreamUsageRequest(t *testing.T) {
 	// 计量开关只能由服务端持有;尊重显式 false 等于让被计费方一行 JSON 关掉自己
 	// 的计量表 —— 上游据此不发 usage chunk → 输入侧免费 + completion 估算截顶)。
 	explicitFalse := []byte(`{"model":"m","stream":true,"stream_options":{"include_usage":false}}`)
-	out3, err := applyStreamUsageRequest(explicitFalse)
+	out3, err := (&API{}).applyStreamUsageRequest(explicitFalse)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestApplyStreamUsageRequest(t *testing.T) {
 
 	// client set include_usage=true already -> merged without duplication
 	explicitTrue := []byte(`{"model":"m","stream":true,"stream_options":{"include_usage":true}}`)
-	out4, err := applyStreamUsageRequest(explicitTrue)
+	out4, err := (&API{}).applyStreamUsageRequest(explicitTrue)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -679,8 +679,8 @@ func TestTooManyFileReferencesRejected(t *testing.T) {
 	up := newFakeFilesUpstream(t)
 	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
 
-	parts := make([]string, 0, maxFileRefsPerRequest+1)
-	for i := 0; i <= maxFileRefsPerRequest; i++ {
+	parts := make([]string, 0, DefaultMaxFileRefsPerRequest+1)
+	for i := 0; i <= DefaultMaxFileRefsPerRequest; i++ {
 		parts = append(parts, fmt.Sprintf(`{"type":"file","file_id":"file-%d"}`, i))
 	}
 	reqBody := `{"model":"deepseek-chat","messages":[{"role":"user","content":[` + strings.Join(parts, ",") + `]}]}`
@@ -700,9 +700,9 @@ func TestManyOwnedFileReferencesPassInOneQuery(t *testing.T) {
 	up := newFakeFilesUpstream(t)
 	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
 
-	ids := make([]string, 0, maxFileRefsPerRequest)
-	parts := make([]string, 0, maxFileRefsPerRequest)
-	for i := 0; i < maxFileRefsPerRequest; i++ {
+	ids := make([]string, 0, DefaultMaxFileRefsPerRequest)
+	parts := make([]string, 0, DefaultMaxFileRefsPerRequest)
+	for i := 0; i < DefaultMaxFileRefsPerRequest; i++ {
 		id := fmt.Sprintf("file-own-%d", i)
 		ids = append(ids, id)
 		parts = append(parts, fmt.Sprintf(`{"type":"file","file_id":"%s"}`, id))
@@ -727,7 +727,7 @@ func TestManyOwnedFileReferencesPassInOneQuery(t *testing.T) {
 	// 换一个不属于 B 的 id 混进来 ⇒ 整条 404 且不触达上游。
 	hits := up.hits.Load()
 	mixed := `{"model":"deepseek-chat","messages":[{"role":"user","content":[` +
-		strings.Join(parts[:maxFileRefsPerRequest-1], ",") + `,{"type":"file","file_id":"file-of-someone-else"}]}]}`
+		strings.Join(parts[:DefaultMaxFileRefsPerRequest-1], ",") + `,{"type":"file","file_id":"file-of-someone-else"}]}]}`
 	if w := doPost(t, gw.r, "/v1/chat/completions", mixed, gw.tokenB, nil); w.Code != http.StatusNotFound {
 		t.Fatalf("B 引用他人文件 status = %d (%s), want 404", w.Code, w.Body.String())
 	}

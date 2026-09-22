@@ -261,3 +261,63 @@ func TestGatewayFilesOwnedByBatch(t *testing.T) {
 		t.Fatalf("空输入: %v/%v", got, err)
 	}
 }
+
+// TestGatewayFileExpiredRowCanBeReclaimed：**过期行允许被重新占用**（审计 2026-09-22
+// R4 N-3）。上游若按内容去重、把同一个 file_id 再发给第二个上传者，而原行已过期时，
+// 归属必须能转给新的上传者 —— 否则他引用自己刚上传的文件会被判 404（与
+// GatewayFileOwner 的"过期 = 不存在"口径相反）。
+// 存活行仍然**不转手**（防"重传抢归属"），永久文件（expires_at IS NULL）永不转手。
+func TestGatewayFileExpiredRowCanBeReclaimed(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	t.Cleanup(cleanup)
+
+	alice := mustUser(t, db, "gw-reclaim-alice")
+	bob := mustUser(t, db, "gw-reclaim-bob")
+	past := time.Now().Add(-time.Minute)
+	future := time.Now().Add(time.Hour)
+
+	// ① 过期行 → B 上传同名 id 后归属转到 B。
+	if err := RecordGatewayFile(db, "r-expired", alice, &past); err != nil {
+		t.Fatal(err)
+	}
+	if owned, err := GatewayFileOwnedBy(db, "r-expired", bob); err != nil || owned {
+		t.Fatalf("过期行在重新登记前不该属于 B: %v/%v", owned, err)
+	}
+	if err := RecordGatewayFile(db, "r-expired", bob, &future); err != nil {
+		t.Fatal(err)
+	}
+	if owned, err := GatewayFileOwnedBy(db, "r-expired", bob); err != nil || !owned {
+		t.Fatalf("过期行重新上传后应归属 B: %v/%v", owned, err)
+	}
+	if owned, err := GatewayFileOwnedBy(db, "r-expired", alice); err != nil || owned {
+		t.Fatalf("归属应已转给 B，A 不该仍拥有: %v/%v", owned, err)
+	}
+
+	// ② 存活行 → 不转手（防重传抢归属）。
+	if err := RecordGatewayFile(db, "r-live", alice, &future); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordGatewayFile(db, "r-live", bob, &future); err != nil {
+		t.Fatal(err)
+	}
+	if owned, _ := GatewayFileOwnedBy(db, "r-live", alice); !owned {
+		t.Fatal("存活行的归属被抢走了")
+	}
+	if owned, _ := GatewayFileOwnedBy(db, "r-live", bob); owned {
+		t.Fatal("存活行不该转手给第二个上传者")
+	}
+
+	// ③ 永久文件（无过期时间）→ 永不转手。
+	if err := RecordGatewayFile(db, "r-perm", alice, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordGatewayFile(db, "r-perm", bob, &future); err != nil {
+		t.Fatal(err)
+	}
+	if owned, _ := GatewayFileOwnedBy(db, "r-perm", bob); owned {
+		t.Fatal("永久文件不该被他人占用")
+	}
+	if owner, ok, _ := GatewayFileOwner(db, "r-perm"); !ok || owner != alice {
+		t.Fatalf("永久文件归属漂移: %d/%v", owner, ok)
+	}
+}

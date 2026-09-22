@@ -99,19 +99,25 @@ func (a *API) handleCompletions(c *gin.Context) {
 		if ups[i].Channel != "" {
 			if ch, ok := channels.Get(ups[i].Channel); ok {
 				ov, rm := ch.RequestOverrides(req.Model)
-				if raw2, err := applyChannelOverrides(body, ov, rm); err == nil {
+				if raw2, err := a.applyChannelOverrides(body, ov, rm); err == nil {
 					body = raw2
+				} else if a.rejectBusyBodyEdit(c, usageID, err) {
+					return
 				}
 			}
 		}
 		if defaultParams != "" {
-			if raw2, err := applyMaxTokensDefault(body, defaultParams); err == nil {
+			if raw2, err := a.applyMaxTokensDefault(body, defaultParams); err == nil {
 				body = raw2
+			} else if a.rejectBusyBodyEdit(c, usageID, err) {
+				return
 			}
 		}
 		if req.Stream {
-			if raw2, err := applyStreamUsageRequest(body); err == nil {
+			if raw2, err := a.applyStreamUsageRequest(body); err == nil {
 				body = raw2
+			} else if a.rejectBusyBodyEdit(c, usageID, err) {
+				return
 			}
 		}
 		resp, err = a.forwardEndpoint(c, &ups[i], body, req.Stream, "/completions")

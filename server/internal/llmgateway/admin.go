@@ -848,6 +848,16 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	if retention == "" {
 		retention = fmt.Sprintf("%d", serverstore.DefaultRetentionMonths)
 	}
+	// 出站体加工的两个闸门值(2026-09-22):缺省即 Default*,空值一律回落到缺省展示 ——
+	// 管理端永远看到一个具体数字,不需要理解"空 = 缺省"。
+	maxFileRefs := settings[SettingMaxFileRefs]
+	if maxFileRefs == "" {
+		maxFileRefs = strconv.Itoa(DefaultMaxFileRefsPerRequest)
+	}
+	parseBudget := settings[SettingBodyParseBudgetMB]
+	if parseBudget == "" {
+		parseBudget = strconv.Itoa(DefaultBodyParseBudgetMB)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"default_model":             settings["gateway.default_model"],
 		"rate_limit":                rateLimit,
@@ -861,6 +871,8 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 		"glitchtip_organization":    settings["web.glitchtip_organization"],
 		"default_thinking_level":    settings["web.default_thinking_level"],
 		"server_base_url":           settings["server.base_url"],
+		"max_file_refs":             maxFileRefs, // 单请求 file_id 引用数上限
+		"body_parse_budget_mb":      parseBudget, // 进程级在飞请求体字节预算(MiB)
 	})
 }
 
@@ -915,6 +927,8 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		GlitchTipOrg            *string         `json:"glitchtip_organization"`
 		DefaultThinkingLevel    *string         `json:"default_thinking_level"`
 		ServerBaseURL           *string         `json:"server_base_url"`
+		MaxFileRefs             *FlexibleString `json:"max_file_refs"`
+		BodyParseBudgetMB       *FlexibleString `json:"body_parse_budget_mb"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
@@ -936,6 +950,20 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		// 0 = 不限制(缺省,与官方口径一致);上限 100000 防误填天文数字。
 		if n, err := strconv.Atoi(string(*req.RateLimit)); err != nil || n < 0 || n > 100000 {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "rate_limit 必须是 0~100000 的整数(0=不限制)")
+			return
+		}
+	}
+	if req.MaxFileRefs != nil && *req.MaxFileRefs != "" {
+		if _, ok := ParseMaxFileRefs(string(*req.MaxFileRefs)); !ok {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+				fmt.Sprintf("max_file_refs 必须是 1~%d 的整数", MaxMaxFileRefsPerRequest))
+			return
+		}
+	}
+	if req.BodyParseBudgetMB != nil && *req.BodyParseBudgetMB != "" {
+		if _, ok := ParseBodyParseBudgetMB(string(*req.BodyParseBudgetMB)); !ok {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+				fmt.Sprintf("body_parse_budget_mb 必须是 %d~%d 的整数", MinBodyParseBudgetMB, MaxBodyParseBudgetMB))
 			return
 		}
 	}
@@ -1092,6 +1120,18 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		}
 	}
 	// 高峰窗口:显式空串 = 移除(无峰谷价),显式合法 JSON = 写入(审计修复 H1)
+	if req.MaxFileRefs != nil {
+		if err := auditSetSettingTx(db, tx, SettingMaxFileRefs, "单请求文件引用上限", string(*req.MaxFileRefs), &changes); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if req.BodyParseBudgetMB != nil {
+		if err := auditSetSettingTx(db, tx, SettingBodyParseBudgetMB, "请求体加工内存预算", string(*req.BodyParseBudgetMB), &changes); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
 	if req.PeakWindows != nil {
 		if err := auditSetSettingTx(db, tx, serverstore.PeakWindowsSetting, "高峰时段", *req.PeakWindows, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
@@ -1171,6 +1211,9 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	// 顺序也要紧:CleanupUsageRetention 经 EffectiveRetentionMonths 读
 	// usage.retention_months,必须在失效之后才能读到本次写入的值。
 	serverstore.InvalidateSettings()
+	// 出站体加工的两个闸门值走自己的进程内 10s TTL 缓存(见 body_memory.go)——
+	// 保存后必须主动失效,否则管理员改完最多 10s 内仍按旧值拒绝/放行。
+	InvalidateGatewayLimits()
 	// 审计**先于**破坏性清理(2026-09-19,N2):配置此刻已经提交生效,"谁改了什么"
 	// 的可追溯性不得取决于 CleanupUsageRetention 的成败 —— 旧实现把 AuditLog
 	// 放在清理之后,清理失败(500「保留清理失败」)会留下"配置已生效但零审计"

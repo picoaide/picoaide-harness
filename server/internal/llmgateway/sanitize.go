@@ -65,8 +65,14 @@ func stripUpstreamExtensions(raw []byte) ([]byte, bool, error) {
 	if !bytes.Contains(raw, []byte(upstreamExtensionPrefix)) {
 		return raw, false, nil
 	}
+	// 必须与出站加工侧同口径（`Decoder.UseNumber()`）：普通 Unmarshal 会把数字解成
+	// float64，于是**合法 JSON**（如 `{"temperature":1e400,"dsh_x":1}`）在这里报
+	// "cannot unmarshal number"，被 fail-closed 的调用方误判成"请求体不是合法 JSON"
+	// 而 400 —— 审计 2026-09-22 R4 N-1 实测（同一份体不带 `dsh_` 字样时 200）。
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var body map[string]any
-	if err := json.Unmarshal(raw, &body); err != nil {
+	if err := dec.Decode(&body); err != nil || body == nil {
 		return raw, false, err
 	}
 	removed := make([]string, 0, 1)
