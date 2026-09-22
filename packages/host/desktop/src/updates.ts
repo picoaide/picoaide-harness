@@ -69,6 +69,15 @@ const DEFAULT_TRANSFER_RETRY_DELAYS_MS: number[] = [2_000, 8_000, 20_000, 30_000
 /** 退避抖动比例的缺省值:确定性抖动,只用于避免所有客户端同一毫秒重试。 */
 const DEFAULT_RETRY_JITTER_RATIO = 0.25
 
+/**
+ * 退避倒计时的重发节奏,ms。
+ *
+ * 显示面每 5 秒轮询一次快照:`retryDelayMs` 只 publish 一次的话,"30 秒后重试"
+ * 会从头到尾都显示 30(2026-09 审计 P2)。1 秒重发一次让每次轮询都落在 1 秒
+ * 精度内,同时不给本地回环路由增加可感知的负担(只在退避窗口内)。
+ */
+const RETRY_COUNTDOWN_TICK_MS = 1_000
+
 /** Download failure codes that survive to the UI unchanged (P2-63). */
 const DOWNLOAD_ERROR_CATEGORIES: ReadonlySet<string> = new Set([
   'network',
@@ -188,7 +197,17 @@ export function apply(ctx: Context, config: Config): void {
     let readyVersion: string | undefined
     let readyPath: string | undefined
     let retryAttempt = 0
-    let retryDelayMs = 0
+    /**
+     * 退避的**绝对**截止时刻(epoch ms);0 = 当前不在退避等待中。
+     *
+     * 倒计时的唯一真源是截止时刻而不是一个"剩余毫秒"常量:常量只 publish 一次,
+     * 显示面的 `Math.ceil(delay/1000)` 就永远停在初始值("30 秒后重试"永远不动,
+     * 2026-09 审计 P2)。每次 publish 都按截止时刻现算,重开界面/中途轮询拿到的
+     * 都是真实剩余量。
+     */
+    let retryDeadlineAt = 0
+    /** 退避期每秒重发一次快照的定时器(见 `beginRetryWait`)。 */
+    let retryTickTimer: ReturnType<typeof setTimeout> | undefined
     let lastError: DesktopUpdateErrorCategory | undefined
     let state: UpdateStateV2 = EMPTY_STATE
     let pollTimer: ReturnType<typeof setTimeout> | undefined
@@ -241,6 +260,36 @@ export function apply(ctx: Context, config: Config): void {
           resolve(!disposed)
         }, delayMs)
       })
+    }
+
+    /** 当前退避的剩余毫秒(不在退避时为 0);快照里的 `retryDelayMs` 只从这个函数来。 */
+    const retryRemainingMs = (): number => retryDeadlineAt === 0
+      ? 0
+      : Math.max(0, retryDeadlineAt - Date.now())
+
+    /**
+     * 进入退避等待:记下**绝对**截止时刻,并每秒重发一次快照。
+     *
+     * 显示面每 5 秒轮询一次快照:只 publish 一次的时候"30 秒后重试"从头到尾都
+     * 是 30;每秒重发后每次轮询读到的都是真实剩余量(重开界面也一样)。
+     * 定时器随退避结束/销毁一起清掉,不跨阶段残留。
+     * @param delayMs - backoff duration for this attempt.
+     */
+    const beginRetryWait = (delayMs: number): void => {
+      retryDeadlineAt = Date.now() + Math.max(0, delayMs)
+      if (retryTickTimer === undefined) {
+        retryTickTimer = setInterval(() => { publishState() }, RETRY_COUNTDOWN_TICK_MS)
+      }
+      publishState()
+    }
+
+    /** 结束退避等待(下一趟开始/成功/放弃/销毁):清截止时刻与重发定时器。 */
+    const endRetryWait = (): void => {
+      retryDeadlineAt = 0
+      if (retryTickTimer !== undefined) {
+        clearInterval(retryTickTimer)
+        retryTickTimer = undefined
+      }
     }
 
     /**
@@ -374,7 +423,8 @@ export function apply(ctx: Context, config: Config): void {
           readyPath,
           retryAttempt,
           retryMaxAttempts: transferRetry.maxAttempts,
-          retryDelayMs,
+          // 每次现算:退避期里同一份快照会被反复发布,而"还要等多久"每秒都在变。
+          retryDelayMs: retryRemainingMs(),
           lastError,
         })
       } catch {
@@ -682,7 +732,7 @@ export function apply(ctx: Context, config: Config): void {
           downloadingVersion = version
           downloadProgress = undefined
           retryAttempt = attempt
-          retryDelayMs = 0
+          endRetryWait()
           // 重试中不再保留上一次的错误:UI 显示"第 n 次尝试/进度"而不是失败。
           lastError = undefined
           refreshTray()
@@ -698,7 +748,7 @@ export function apply(ctx: Context, config: Config): void {
             downloadingVersion = undefined
             downloadProgress = undefined
             retryAttempt = 0
-            retryDelayMs = 0
+            endRetryWait()
             readyVersion = version
             readyPath = path
             lastError = undefined
@@ -714,9 +764,14 @@ export function apply(ctx: Context, config: Config): void {
             // 在等待期仍显示"下载中 + 第 n/N 次 + 倒计时"(`update.interrupted`)。
             // 之前这里先把两者清掉,于是「关于」页回落到"发现新版本…正在准备下载…",
             // 侧边栏只剩版本号,而倒计时文案成了永不可达的死代码(2026-09 审计)。
-            retryDelayMs = updateRetryDelayMs(transferRetry, attempt, version)
-            publishState()
-            if (!await waitBeforeRetry(retryDelayMs)) return
+            const delayMs = updateRetryDelayMs(transferRetry, attempt, version)
+            // 快照里的 `retryDelayMs` 由截止时刻现算(见 `beginRetryWait`):
+            // 只发一次常量会让"N 秒后重试"永远停在 N。
+            beginRetryWait(delayMs)
+            if (!await waitBeforeRetry(delayMs)) {
+              endRetryWait()
+              return
+            }
           } finally {
             if (downloadController === controller) downloadController = undefined
           }
@@ -727,7 +782,7 @@ export function apply(ctx: Context, config: Config): void {
         downloadingVersion = undefined
         downloadProgress = undefined
         retryAttempt = 0
-        retryDelayMs = 0
+        endRetryWait()
         refreshTray()
         publishState()
       })().finally(() => {
@@ -859,6 +914,9 @@ export function apply(ctx: Context, config: Config): void {
       disposed = true
       if (pollTimer !== undefined) clearTimeout(pollTimer)
       if (retryTimer !== undefined) clearTimeout(retryTimer)
+      // 退避倒计时的重发定时器也要清:否则 dispose 之后它还会继续 publishState,
+      // 而且句柄会让 teardown 之后的进程多活一拍。
+      endRetryWait()
       // 唤醒退避等待:否则 downloadTask 会永远挂在那个 promise 上,teardown 不 settle。
       const wake = wakeRetryWait
       wakeRetryWait = undefined

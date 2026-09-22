@@ -693,7 +693,8 @@ describe('desktop update Host plugin', () => {
       const progressState = states.find(state => state.downloadProgress !== undefined
         && state.downloadingVersion === '2.1.0')
       expect(progressState).toMatchObject({ retryAttempt: 1, retryDelayMs: 0 })
-      const retryWait = states.filter(state => state.retryDelayMs > 0).at(-1)
+      // 退避窗口的**第一帧**是本次退避的完整时长(此后每秒递减,见下一条用例)。
+      const retryWait = states.filter(state => state.retryDelayMs > 0)[0]
       // 退避期必须**保留**下载态与最后进度:三个展示面都读这份快照,
       // 清掉 downloadingVersion 会让「关于」页回落到"发现新版本…正在准备下载…",
       // 而倒计时文案(`update.interrupted`)成为永不可达的死代码。
@@ -711,6 +712,46 @@ describe('desktop update Host plugin', () => {
       // 退避期间退出应用不得卡住 teardown(定时器被清掉时必须唤醒等待)。
       await harness.dispose()
       await pending
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('counts the backoff down in the published snapshot instead of freezing it', async () => {
+    vi.useFakeTimers()
+    // 退避窗口取 10 秒(与上一条用例同形),这样才能在窗口内部取样。
+    const harness = await createHarness({
+      packaged: false,
+      request: async () => manifestResponse('2.1.0'),
+      config: { ...testConfig, transferRetryDelaysMs: [10_000] },
+      downloadUpdate: vi.fn()
+        .mockRejectedValueOnce(new Error('socket hang up'))
+        .mockResolvedValueOnce('/tmp/picoaide-installer'),
+    })
+    const publishedDelays = (): number[] => harness.publishedStates.mock.calls
+      .map(call => (call[0] as { retryDelayMs: number }).retryDelayMs)
+
+    try {
+      const pending = harness.tray.invoke()
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.waitFor(() => {
+        expect(harness.publishedStates).toHaveBeenCalledWith(expect.objectContaining({ retryDelayMs: 10_000 }))
+      })
+      // 退避期每过一秒重发一次快照,剩余量随绝对截止时刻递减 —— 旧行为只 publish
+      // 一次常量,显示面的 `Math.ceil(delay/1000)` 就永远停在"10 秒后重试"。
+      await vi.advanceTimersByTimeAsync(3_000)
+      const deltas = publishedDelays().filter(delay => delay > 0)
+      expect(deltas[0]).toBe(10_000)
+      expect(deltas.at(-1)).toBeLessThan(10_000)
+      // 单调不增(重发不会让倒计时回跳)。
+      expect(deltas).toEqual([...deltas].sort((left, right) => right - left))
+      expect(new Set(deltas).size).toBeGreaterThan(1)
+
+      // 走完退避,让第二趟成功收尾(不留悬着的 downloadTask)。
+      await vi.advanceTimersByTimeAsync(8_000)
+      await pending
+      // 退避结束后不得再报正数(截止时刻清零)。
+      expect(publishedDelays().at(-1)).toBe(0)
     } finally {
       await harness.dispose()
     }

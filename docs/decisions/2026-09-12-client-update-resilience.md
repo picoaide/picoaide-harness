@@ -99,3 +99,41 @@
    快照。主窗口没有关 `backgroundThrottling`，后台时 Chromium 会把定时器压到 ≥1 次/分钟，
    用户切回前台若不补取一次，进度/状态会停在几十秒前的旧值（不改窗口的全局节流行为）。
 
+## 修订（2026-09-23，第二轮）：编码口径、SHA 权威与真倒计时
+
+对抗式审计对上一节的三处改动做了生产参数复现，确认其中两处反而更糟。本轮修正如下，
+判据一律是**能被打坏**的（把该处改回旧形态，对应用例必红）。
+
+1. **分母必须排除非 identity `Content-Encoding`（P1，上一节引入的回归）**：生产请求
+   边界（Electron `net.fetch`）会主动发 `Accept-Encoding: gzip, deflate, br, zstd`，
+   反代/CDN 只要对安装包启压缩，`content-length` 就是**压缩后**的长度而 body 是**解码后**
+   的字节（实测同一响应 `4111` vs `4194304`）。上一节把"本次响应声明的长度"提为唯一
+   优先分母 ⇒ ①不可压缩的真安装包（gzip 后反而更长 0.03%）被判"截断"，6 次重试后只剩
+   `.partial`；②可压缩内容自第一帧起恒显 `100%`；③sidecar 记下压缩长度，残留被
+   `stat.size > knownTotal` 判成不可续传。现在：
+   - 只有**没有非 identity `Content-Encoding`** 时才采信连接声明（`encodedTransferLength`）；
+   - 206 优先取 `Content-Range` 的 total（同样受内容编码约束 —— 它也是线上长度）；
+   - 其余回落清单 `size`，都没有就按"总长未知"处理（显示已下载字节数）；
+   - `sidecar.totalBytes` 与进度分母同源（`installerTotalBytes`），**绝不写线上长度**。
+2. **长度不得越权否决 SHA-256（P2-1）**：判定顺序从 `else if` 链（长度在前）改为**先算摘要**：
+   摘要命中即接受（长度声明不足只作提示），摘要不符才按"截断（可续传）/内容不符"分流。
+   影响面：chunked 响应 + 清单 `size` 偏大时，完整且哈希正确的文件曾永久失败。
+3. **退避倒计时按绝对截止时刻（P2-2）**：`retryDelayMs` 原先只在进入退避时发布一次常量，
+   显示面 `Math.ceil(delay/1000)` 于是**永不递减**。现在宿主记**绝对截止时刻**
+   （`retryDeadlineAt`）并在退避窗口内每秒重发快照（`retryDelayMs` 现算剩余量）；
+   两个客户端的共享快照 hook（`useUpdateState` / `useDesktopUpdateState`）再按"快照到达
+   时刻"每秒本地重算（`liveRetryDelayMs`，两面逐字对拍），重开界面也能看到真实剩余量。
+   文案键沿用 `update.interrupted` / `update.retryingIn`，未新增。
+4. **注释同步（P3）**：`isVerifiedInstaller` / `resumableBytes` 的 JSDoc 不再声称
+   "声明了长度时必须等长""长度与清单长度不冲突" —— 复用只认哈希，续传只认
+   sidecar 的连接声明长度（清单 `size` 为退路）。
+5. **判据补强（P2-3）**：新增真实 HTTP 集成用例——gzip（不可压缩/可压缩/断流续传三种
+   形态）、chunked + 清单偏大（长度不足但哈希正确）、清单偏小 + 残留 85%（sidecar
+   的 `totalBytes` 两条分支）；跨包对拍矩阵补 ≥100 单位的 KB 值（`200 KB` 进位分支）与
+   NaN/Infinity/负数输入，并新增倒计时公式的对拍。变异验证：把上述任一处改回旧形态，
+   对应用例均变红（红/绿对照见审计修复报告）。
+6. **认账（未闭环）**：`UpdateSection.tsx`（设置-关于页）不在本轮文件所有权范围内，
+   它的倒计时靠宿主每秒重发 + 5 秒轮询呈现，粒度是 5 秒而不是 1 秒；渲染层 hook 本身
+   没有组件级用例（本包测试跑在 node 环境、无 jsdom/testing-library），只由纯函数对拍
+   与宿主用例覆盖。
+

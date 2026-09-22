@@ -1,7 +1,7 @@
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 /** Desktop update badge and the shared client-side update snapshot store. */
 
-import { useSyncExternalStore } from 'react'
+import { useEffect, useReducer, useState, useSyncExternalStore } from 'react'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -195,9 +195,14 @@ export function readDesktopUpdate(): DesktopUpdateStateResponse | null {
   return snapshot
 }
 
-/** Shared update snapshot as a React hook (one poller per window). */
+/** Shared update snapshot as a React hook (one poller per window).
+ *
+ * 退避倒计时在这里统一按"快照到达时刻"每秒重算一次:该 hook 的所有消费者
+ * (会话头部徽标等)都跟着走,不需要各自实现一套。
+ */
 export function useDesktopUpdateState(): DesktopUpdateStateResponse | null {
-  return useSyncExternalStore(subscribeDesktopUpdate, readDesktopUpdate, () => null)
+  const state = useSyncExternalStore(subscribeDesktopUpdate, readDesktopUpdate, () => null)
+  return useLiveRetryState(state)
 }
 
 /** Client service handed to sibling client plugins through `ctx.provide`. */
@@ -378,6 +383,57 @@ function downloadingRetryTitle(state: DesktopUpdateStateResponse): string | unde
   return state.retryDelayMs > 0
     ? t('update.retryingIn', { attempt, seconds: String(Math.ceil(state.retryDelayMs / 1000)) })
     : t('update.retryingNow', { attempt })
+}
+
+/** 退避倒计时的本地重算节奏,ms(与宿主的重发节奏一致)。 */
+const RETRY_COUNTDOWN_TICK_MS = 1_000
+
+/**
+ * 退避倒计时的**本地**剩余毫秒。
+ *
+ * 快照里的 `retryDelayMs` 是"宿主发布那一刻的剩余量",而秒数要每秒都动:
+ * 以快照到达时刻为锚点做差,就能在两次轮询之间继续倒计时。
+ * 与 enterprise 侧 `liveRetryDelayMs` 是**同一份语义的两份副本**(跨包客户端
+ * import 被禁止),由 `packages/host/enterprise/tests/update-progress-parity.spec.ts`
+ * 逐字对拍钉住。
+ * @param delayMs - 快照发布时的剩余毫秒。
+ * @param anchoredAtMs - 该快照到达本地的时刻(ms)。
+ * @param nowMs - 当前时刻(ms)。
+ * @returns 此刻的剩余毫秒(不为负;非有限输入视为未知,按原值处理)。
+ */
+export function liveRetryDelayMs(delayMs: number, anchoredAtMs: number, nowMs: number): number {
+  if (!Number.isFinite(delayMs) || delayMs <= 0) return 0
+  if (!Number.isFinite(anchoredAtMs) || !Number.isFinite(nowMs)) return Math.max(0, Math.round(delayMs))
+  return Math.max(0, Math.round(delayMs - (nowMs - anchoredAtMs)))
+}
+
+/**
+ * 让退避剩余量每秒重算一次的 hook。
+ *
+ * 只在真的有退避(`delayMs > 0`)时开定时器,退避结束/组件卸载即清 —— 三个展示面
+ * 里只有真的渲染出倒计时的那些会走这条路。
+ * @param delayMs - 最新快照里的剩余毫秒(可能 undefined)。
+ * @returns 此刻的剩余毫秒(0 = 不在退避)。
+ */
+function useLiveRetryDelayMs(delayMs: number | undefined): number {
+  const delay = typeof delayMs === 'number' && delayMs > 0 ? delayMs : 0
+  // 锚点跟随**快照值**变化:同一份快照被反复渲染时不得重置时基。
+  const [anchor, setAnchor] = useState<{ delay: number, at: number }>(() => ({ delay, at: Date.now() }))
+  const [, tick] = useReducer((value: number) => value + 1, 0)
+  if (anchor.delay !== delay) setAnchor({ delay, at: Date.now() })
+  useEffect(() => {
+    if (delay <= 0) return undefined
+    const timer = setInterval(() => { tick() }, RETRY_COUNTDOWN_TICK_MS)
+    return () => { clearInterval(timer) }
+  }, [delay, anchor.at])
+  return liveRetryDelayMs(delay, anchor.at, Date.now())
+}
+
+/** 把快照换算成"此刻"的退避剩余量(无退避时原样返回同一个对象)。 */
+function useLiveRetryState(state: DesktopUpdateStateResponse | null): DesktopUpdateStateResponse | null {
+  const live = useLiveRetryDelayMs(state?.retryDelayMs)
+  if (state === null || live === state.retryDelayMs) return state
+  return { ...state, retryDelayMs: live }
 }
 
 /** Right-aligned badge: newest pending update state, click to check/download/install. */
