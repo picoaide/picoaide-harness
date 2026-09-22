@@ -1,11 +1,14 @@
 package llmgateway
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -210,25 +213,31 @@ func (a *API) handleFilesUpload(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusRequestEntityTooLarge, "VALIDATION", "请求体过大")
 		return
 	}
-	tracker := &filesBodyTracker{inner: http.MaxBytesReader(c.Writer, c.Request.Body, maxFilesUploadBody)}
-	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, target, tracker)
+	// 上传体读进内存后**重写 multipart**（把过期时间收进平台上限；见
+	// rewriteUploadExpiry）。因此这里不再流式转发：峰值内存 = 原文 + 重写体 ≈ 2×，
+	// 由内存闸门按 2× 计费；超限/超预算分别 413 / 503（都在调用上游之前）。
+	rawBody, trackerErr, ok := readUploadBody(c)
+	if !ok {
+		writeFilesTransportError(c, trackerErr)
+		return
+	}
+	outBody, contentType := a.rewriteUploadExpiry(c, rawBody)
+	if outBody == nil {
+		return // 闸门拒绝，响应已写
+	}
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, target, bytes.NewReader(outBody))
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "构造上游请求失败")
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+up.APIKey)
 	req.Header.Set("Accept", "application/json")
-	// multipart boundary 在 Content-Type 里，必须原样带给上游。
-	if ct := c.Request.Header.Get("Content-Type"); ct != "" {
-		req.Header.Set("Content-Type", ct)
-	}
-	if c.Request.ContentLength >= 0 {
-		req.ContentLength = c.Request.ContentLength
-	}
+	req.Header.Set("Content-Type", contentType)
+	// 重写后的体长度已知（重写会换 boundary，必须显式带上新的 Content-Type/Length）。
+	req.ContentLength = int64(len(outBody))
 	resp, err := a.filesHTTPClient().Do(req)
 	if err != nil {
-		// 请求体读失败（超限/读超时/客户端断开）按请求体语义报；否则是上游侧失败。
-		writeFilesTransportError(c, tracker.err)
+		writeFilesTransportError(c, nil)
 		return
 	}
 	// 上传体可能耗时数分钟（官方窗口 10 分钟），已经吃掉全局 WriteTimeout(5m) ——
@@ -250,6 +259,189 @@ func (a *API) handleFilesUpload(c *gin.Context) {
 		}
 	}
 	relayFilesBody(c, resp, up.APIKey, body)
+}
+
+// readUploadBody 把上传体读进内存（上限 maxFilesUploadBody），返回 (体, 读错误, ok)。
+// 失败时响应已写好；trackerErr 供三类失败分类（超限/读超时/其它）。
+func readUploadBody(c *gin.Context) ([]byte, error, bool) {
+	tracker := &filesBodyTracker{inner: http.MaxBytesReader(c.Writer, c.Request.Body, maxFilesUploadBody)}
+	raw, err := io.ReadAll(tracker)
+	if err == nil {
+		renewWriteDeadline(c)
+		return raw, nil, true
+	}
+	return nil, tracker.err, false
+}
+
+// uploadExpiryFields 是官方口径的过期字段名（OpenAI SDK 的 multipart 扁平化写法）。
+const (
+	expirySecondsField = "expires_after[seconds]"
+	expiryAnchorField  = "expires_after[anchor]"
+	// expiryJSONField 兼容"整个对象塞进一个字段"的写法（部分客户端直接
+	// `form.append('expires_after', JSON.stringify({anchor, seconds}))`）。
+	expiryJSONField = "expires_after"
+)
+
+// rewriteUploadExpiry 重写上传的 multipart 体，把过期时间收进平台上限
+// （`gateway.file_expiry_days`，缺省 7 天）——**让上游也按上限保存**，而不是只在
+// 我们的台账里记账（用户 2026-09-22 明确要求："没有带过期时间、或大于 7 天的，
+// 直接强制改为 7 天"）。
+//
+// 语义：
+//   - `expires_after[seconds]` 缺失或大于上限 ⇒ 写上限；更小 ⇒ 原样保留（更早的保留
+//     期不占配额，尊重客户端）；
+//   - `expires_after[anchor]` 缺失 ⇒ 补 `created_at`（官方唯一支持的锚点）；
+//   - 整段没有过期字段 ⇒ 在 `file` 部分**之前**插入两个字段（保持"元数据在前、
+//     文件在后"的常规顺序）；
+//   - 非 multipart / 解析失败 ⇒ **原样转发**（保持既有兼容性：让上游去拒绝畸形请求，
+//     而不是我们本地变成一个新失败面），只留一条日志。
+//
+// 返回值 (出站体, Content-Type)。出站体为 nil 表示已写出响应（内存闸门拒绝）。
+func (a *API) rewriteUploadExpiry(c *gin.Context, raw []byte) ([]byte, string) {
+	origCT := c.Request.Header.Get("Content-Type")
+	_, params, err := mime.ParseMediaType(origCT)
+	boundary := params["boundary"]
+	if err != nil || boundary == "" || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(origCT)), "multipart/") {
+		log.Printf("gateway: files upload: not multipart (content-type=%q); forwarded unchanged", origCT)
+		return raw, origCT
+	}
+	capSeconds := int64(gatewayLimitsFor(a.DB).fileExpiry / time.Second)
+
+	// 内存闸门：重写期间原文 + 新体同时在内存里 ⇒ 按 2× 计费。
+	budget := gatewayLimitsFor(a.DB).budgetBytes
+	release, ok := globalBodyParseGate.acquire(budget, int64(len(raw))*2)
+	if !ok {
+		log.Printf("gateway: files upload rejected by memory gate: bytes=%d", len(raw))
+		writeBodyParseBusy(c)
+		return nil, ""
+	}
+	defer release()
+
+	mr := multipart.NewReader(bytes.NewReader(raw), boundary)
+	var buf bytes.Buffer
+	buf.Grow(len(raw) + 256)
+	mw := multipart.NewWriter(&buf)
+	seenExpiry := false
+	inserted := false
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			// 解析中途失败：整段原样转发（不把上游能处理的请求变成我们的新错误面）。
+			log.Printf("gateway: files upload: multipart parse failed (%v); forwarded unchanged", err)
+			return raw, origCT
+		}
+		name := part.FormName()
+		// 没有过期字段时，在**第一个非过期字段之前**补上（元数据在前更符合常规）。
+		if !seenExpiry && !inserted && name != expirySecondsField && name != expiryAnchorField && name != expiryJSONField {
+			writeExpiryFields(mw, capSeconds)
+			inserted = true
+		}
+		switch name {
+		case expirySecondsField:
+			seenExpiry = true
+			if err := writePart(mw, name, part.FileName(), []byte(strconv.FormatInt(clampExpirySeconds(part, capSeconds), 10))); err != nil {
+				log.Printf("gateway: files upload: rewrite expiry failed (%v); forwarded unchanged", err)
+				return raw, origCT
+			}
+		case expiryAnchorField:
+			seenExpiry = true
+			if err := writePart(mw, name, part.FileName(), []byte("created_at")); err != nil {
+				log.Printf("gateway: files upload: rewrite anchor failed (%v); forwarded unchanged", err)
+				return raw, origCT
+			}
+		case expiryJSONField:
+			seenExpiry = true
+			val, _ := io.ReadAll(io.LimitReader(part, 4096))
+			if err := writePart(mw, name, part.FileName(), rewriteExpiryJSON(val, capSeconds)); err != nil {
+				log.Printf("gateway: files upload: rewrite expiry json failed (%v); forwarded unchanged", err)
+				return raw, origCT
+			}
+		default:
+			if err := copyPart(mw, part); err != nil {
+				log.Printf("gateway: files upload: copy part failed (%v); forwarded unchanged", err)
+				return raw, origCT
+			}
+		}
+	}
+	if !seenExpiry && !inserted {
+		writeExpiryFields(mw, capSeconds)
+	}
+	if err := mw.Close(); err != nil {
+		log.Printf("gateway: files upload: finalize multipart failed (%v); forwarded unchanged", err)
+		return raw, origCT
+	}
+	return buf.Bytes(), mw.FormDataContentType()
+}
+
+// writeExpiryFields 写入官方形状的两个过期字段（元数据在前）。
+func writeExpiryFields(mw *multipart.Writer, capSeconds int64) {
+	_ = writePart(mw, expiryAnchorField, "", []byte("created_at"))
+	_ = writePart(mw, expirySecondsField, "", []byte(strconv.FormatInt(capSeconds, 10)))
+}
+
+// writePart 写一个普通（非文件）字段；文件部分走 copyPart 以保留文件名。
+func writePart(mw *multipart.Writer, name, filename string, value []byte) error {
+	var w io.Writer
+	var err error
+	if filename != "" {
+		w, err = mw.CreateFormFile(name, filename)
+	} else {
+		w, err = mw.CreateFormField(name)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(value)
+	return err
+}
+
+// copyPart 原样搬运一个部分（含文件名与内容）。
+func copyPart(mw *multipart.Writer, part *multipart.Part) error {
+	filename := part.FileName()
+	var w io.Writer
+	var err error
+	if filename != "" {
+		w, err = mw.CreateFormFile(part.FormName(), filename)
+	} else {
+		w, err = mw.CreateFormField(part.FormName())
+	}
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(w, part)
+	return err
+}
+
+// clampExpirySeconds 读客户端的 `expires_after[seconds]` 并收敛到上限：
+// 解析失败/非正数/超过上限一律写上限（解析失败即按"没带"处理）。
+func clampExpirySeconds(part *multipart.Part, capSeconds int64) int64 {
+	b, _ := io.ReadAll(io.LimitReader(part, 64))
+	n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil || n <= 0 || n > capSeconds {
+		return capSeconds
+	}
+	return n
+}
+
+// rewriteExpiryJSON 处理"整个 expires_after 对象塞在一个字段里"的写法：
+// 解析成对象后收敛 seconds、锚点固定 created_at；解析失败则原样返回（交给上游）。
+func rewriteExpiryJSON(val []byte, capSeconds int64) []byte {
+	var obj map[string]any
+	if err := json.Unmarshal(val, &obj); err != nil || obj == nil {
+		return val
+	}
+	obj["anchor"] = "created_at"
+	if n, ok := obj["seconds"].(float64); !ok || n <= 0 || int64(n) > capSeconds {
+		obj["seconds"] = capSeconds
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return val
+	}
+	return out
 }
 
 // handleFilesList 处理 GET /files（列表）：query 原样透传，**结果按归属过滤**。

@@ -206,8 +206,12 @@ func TestFilesURLCanonicalizesToOfficialPath(t *testing.T) {
 	}
 }
 
-// TestFilesUploadStreamsMultipartToDeepSeek：上传体（含 multipart boundary）
-// 必须原样到上游，Authorization 换成上游 key，响应原样回给客户端。
+// TestFilesUploadStreamsMultipartToDeepSeek：上传到上游的请求必须是**完整可解析的
+// multipart**（字段与文件内容都在）、Authorization 换成上游 key、响应原样回给客户端。
+//
+// 2026-09-22 起网关会**重写** multipart（把过期时间收进平台上限，见
+// rewriteUploadExpiry）：boundary 因此会变、字段顺序可能变，所以判据是**语义等价**
+// 而不是逐字节相同（逐字节判据会把这个刻意行为变更误判成回归）。
 func TestFilesUploadStreamsMultipartToDeepSeek(t *testing.T) {
 	up := newFakeFilesUpstream(t)
 	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
@@ -230,12 +234,16 @@ func TestFilesUploadStreamsMultipartToDeepSeek(t *testing.T) {
 	if got := up.auth.Load(); got != "Bearer "+upstreamKey {
 		t.Errorf("upstream auth = %v, want 上游 key（客户端 token 不得外发）", got)
 	}
-	if got := up.ctype.Load(); got != ct {
-		t.Errorf("upstream content-type = %v, want %v（multipart boundary 必须原样）", got, ct)
+	if got, _ := up.ctype.Load().(string); !strings.HasPrefix(got, "multipart/form-data; boundary=") {
+		t.Errorf("upstream content-type = %v, want multipart/form-data", got)
 	}
-	sent, _ := up.body.Load().(string)
-	if !strings.Contains(sent, "IMG-BYTES") || !strings.Contains(sent, `name="purpose"`) {
-		t.Errorf("upstream body 不是完整 multipart: %q", sent)
+	// 语义等价：字段/文件都能被解析出来（boundary 已由网关重写）。
+	fields, files := parseUploadedForm(t, up)
+	if fields["purpose"] != "user_data" {
+		t.Errorf("upstream 字段丢失: %v", fields)
+	}
+	if files["image.webp"] != "IMG-BYTES" {
+		t.Errorf("upstream 文件内容丢失: %v", files)
 	}
 	if !strings.Contains(w.Body.String(), `"file-abc"`) {
 		t.Errorf("响应未透传: %s", w.Body.String())

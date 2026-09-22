@@ -334,7 +334,7 @@ var bodyMarshalAllowlist = map[string]struct {
 }{
 	"embedding.go":                 {2, "服务端自建 {model,input} 出站体（客户端体不转发）"},
 	"errorreporting_test_event.go": {1, "服务端自建的诊断事件体"},
-	"files.go":                     {1, "上游**响应**信封重写（列表过滤用，≤4MiB 响应体）"},
+	"files.go":                     {2, "① 上游**响应**信封重写（列表过滤用，≤4MiB 响应体）② 兼容`expires_after` 整对象写法时重写那个小 JSON（≤4KiB 字段值）"},
 	"handler.go":                   {2, "① 上游错误信封重建 ② 单个流式元数据值的字节量（都不是整 body 往返）"},
 	"sync.go":                      {1, "模型 sync 时重建 default_params（服务端配置小体，与请求体无关）"},
 }

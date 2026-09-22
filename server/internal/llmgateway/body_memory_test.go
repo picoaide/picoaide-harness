@@ -3,8 +3,12 @@ package llmgateway
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -774,5 +778,191 @@ func TestAdminGatewayFilesEndpoints(t *testing.T) {
 	}
 	if audits < 2 {
 		t.Fatalf("审计行 = %d, want ≥2", audits)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 上传体过期时间重写（用户 2026-09-22 定案：让**上游也按上限保存**）
+// ---------------------------------------------------------------------------
+
+// parseUploadedForm 把假上游收到的上传体解析成 (字段 → 值, 文件名 → 内容)。
+func parseUploadedForm(t *testing.T, up *fakeFilesUpstream) (map[string]string, map[string]string) {
+	t.Helper()
+	raw, _ := up.body.Load().(string)
+	ct, _ := up.ctype.Load().(string)
+	_, params, err := mime.ParseMediaType(ct)
+	if err != nil {
+		t.Fatalf("上游 Content-Type 非法: %q (%v)", ct, err)
+	}
+	mr := multipart.NewReader(strings.NewReader(raw), params["boundary"])
+	fields := map[string]string{}
+	files := map[string]string{}
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("上游收到的不是合法 multipart: %v", err)
+		}
+		b, _ := io.ReadAll(part)
+		if part.FileName() != "" {
+			files[part.FileName()] = string(b)
+			continue
+		}
+		fields[part.FormName()] = string(b)
+	}
+	return fields, files
+}
+
+// TestUploadForcesExpiryCapUpstream：三种形态都必须让**上游收到**收进上限的过期时间：
+// ①客户端要 30 天 ⇒ 改成上限；②客户端要 1 天 ⇒ 原样保留（更早的保留期尊重客户端）；
+// ③客户端完全没带 ⇒ 补上 anchor + seconds。
+func TestUploadForcesExpiryCapUpstream(t *testing.T) {
+	resetBodyParseGate(t)
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	capSeconds := int64(DefaultFileExpiryDays) * 24 * 3600
+
+	upload := func(seconds string, withExpiry bool) (map[string]string, map[string]string) {
+		t.Helper()
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		_ = mw.WriteField("purpose", "user_data")
+		if withExpiry {
+			_ = mw.WriteField("expires_after[anchor]", "created_at")
+			_ = mw.WriteField("expires_after[seconds]", seconds)
+		}
+		fw, err := mw.CreateFormFile("file", "image.webp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = fw.Write([]byte("payload-bytes"))
+		if err := mw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if w := doFilesReq(t, gw.r, http.MethodPost, "/v1/files", bytes.NewReader(buf.Bytes()), gw.tokenA, mw.FormDataContentType()); w.Code != http.StatusOK {
+			t.Fatalf("上传失败: %d %s", w.Code, w.Body.String())
+		}
+		return parseUploadedForm(t, up)
+	}
+
+	// ① 30 天 ⇒ 上限。
+	fields, files := upload("2592000", true)
+	if fields["expires_after[seconds]"] != strconv.FormatInt(capSeconds, 10) {
+		t.Fatalf("30 天未被收敛: %q", fields["expires_after[seconds]"])
+	}
+	if fields["expires_after[anchor]"] != "created_at" {
+		t.Fatalf("锚点被破坏: %q", fields["expires_after[anchor]"])
+	}
+	if files["image.webp"] != "payload-bytes" {
+		t.Fatalf("文件内容被破坏: %q", files["image.webp"])
+	}
+	if fields["purpose"] != "user_data" {
+		t.Fatalf("其它字段被破坏: %v", fields)
+	}
+
+	// ② 1 天 ⇒ 原样。
+	fields, _ = upload("86400", true)
+	if fields["expires_after[seconds]"] != "86400" {
+		t.Fatalf("更早的保留期不该被改写: %q", fields["expires_after[seconds]"])
+	}
+
+	// ③ 完全没带 ⇒ 补上两个字段，且文件内容不变。
+	fields, files = upload("", false)
+	if fields["expires_after[seconds]"] != strconv.FormatInt(capSeconds, 10) {
+		t.Fatalf("缺省未补上限: %v", fields)
+	}
+	if fields["expires_after[anchor]"] != "created_at" {
+		t.Fatalf("缺省未补锚点: %v", fields)
+	}
+	if files["image.webp"] != "payload-bytes" {
+		t.Fatalf("补字段时破坏了文件内容: %q", files["image.webp"])
+	}
+}
+
+// TestUploadExpiryCapIsConfigurable：把上限改成 1 天后，上传体里的 seconds 也要跟着变
+// （配置项真的作用在出站体上，而不是只影响台账）。
+func TestUploadExpiryCapIsConfigurable(t *testing.T) {
+	resetBodyParseGate(t)
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	if err := serverstore.SetSetting(gw.db, SettingFileExpiryDays, "1"); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateGatewayLimits()
+
+	body, ct := multipartBytes(t, "x") // 客户端要 86400（=1 天）：恰好等于上限，保留
+	if w := doFilesReq(t, gw.r, http.MethodPost, "/v1/files", bytes.NewReader(body), gw.tokenA, ct); w.Code != http.StatusOK {
+		t.Fatalf("上传失败: %d %s", w.Code, w.Body.String())
+	}
+	fields, _ := parseUploadedForm(t, up)
+	if fields["expires_after[seconds]"] != "86400" {
+		t.Fatalf("上限 1 天时客户端要 86400 应保留: %q", fields["expires_after[seconds]"])
+	}
+	// 再改成 30 天：客户端要 30 天（2592000）与上限相等 ⇒ 保留；说明上限值确实随配置变。
+	if err := serverstore.SetSetting(gw.db, SettingFileExpiryDays, "30"); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateGatewayLimits()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("expires_after[seconds]", "2592000")
+	fw, _ := mw.CreateFormFile("file", "f.bin")
+	_, _ = fw.Write([]byte("y"))
+	_ = mw.Close()
+	if w := doFilesReq(t, gw.r, http.MethodPost, "/v1/files", bytes.NewReader(buf.Bytes()), gw.tokenA, mw.FormDataContentType()); w.Code != http.StatusOK {
+		t.Fatalf("上传失败: %d %s", w.Code, w.Body.String())
+	}
+	fields, _ = parseUploadedForm(t, up)
+	if fields["expires_after[seconds]"] != "2592000" {
+		t.Fatalf("上限 30 天时 30 天请求应保留: %q", fields["expires_after[seconds]"])
+	}
+}
+
+// TestUploadRewriteFailsClosedOnMemoryGate：重写要占用内存闸门（原文 + 新体 ≈ 2×），
+// 闸门打满时必须是 503 SERVER 且**不触达上游**（不能悄悄退回流式转发把上限放过去）。
+func TestUploadRewriteFailsClosedOnMemoryGate(t *testing.T) {
+	resetBodyParseGate(t)
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	if err := serverstore.SetSetting(gw.db, SettingBodyParseBudgetMB, "64"); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateGatewayLimits()
+	budget := int64(MinBodyParseBudgetMB) << 20
+	rel, ok := globalBodyParseGate.acquire(budget, budget)
+	if !ok {
+		t.Fatal("占满闸门失败（夹具问题）")
+	}
+	defer rel()
+
+	body, ct := multipartBytes(t, strings.Repeat("z", 8<<10))
+	w := doFilesReq(t, gw.r, http.MethodPost, "/v1/files", bytes.NewReader(body), gw.tokenA, ct)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("闸门占满时上传应 503，实得 %d (%s)", w.Code, w.Body.String())
+	}
+	if up.hits.Load() != 0 {
+		t.Fatalf("被闸门拒绝的上传不应触达上游（%d 次）", up.hits.Load())
+	}
+}
+
+// TestNonMultipartUploadPassesThrough：非 multipart 体（畸形 Content-Type）**原样转发**，
+// 由上游去拒绝 —— 上传重写不得把"上游能处理的请求"变成我们的新错误面。
+func TestNonMultipartUploadPassesThrough(t *testing.T) {
+	resetBodyParseGate(t)
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+
+	raw := `{"not":"multipart"}`
+	w := doFilesReq(t, gw.r, http.MethodPost, "/v1/files", strings.NewReader(raw), gw.tokenA, "application/json")
+	if w.Code != http.StatusOK {
+		t.Fatalf("非 multipart 上传应原样转发（%d %s）", w.Code, w.Body.String())
+	}
+	if got, _ := up.body.Load().(string); got != raw {
+		t.Fatalf("体被改动了:\n got=%q\nwant=%q", got, raw)
+	}
+	if ct, _ := up.ctype.Load().(string); ct != "application/json" {
+		t.Fatalf("Content-Type 被改动: %q", ct)
 	}
 }
