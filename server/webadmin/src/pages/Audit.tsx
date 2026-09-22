@@ -113,6 +113,9 @@ export const ACTION_LABEL: Record<string, string> = {
   skill_normalize: '规范化技能包',
   // 网关(上游/模型/配置)。
   gateway_config: '网关配置变更',
+  // 2026-09-22:网关文件台账的清理动作(管理员按条件删除上游文件 + 台账行)。
+  gateway_file_delete: '网关文件删除',
+  gateway_file_purge: '网关文件批量清理',
   error_reporting_test: '错误上报连通性自检',
   provider_create: '新建上游',
   provider_update: '更新上游',

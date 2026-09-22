@@ -33,6 +33,7 @@ var audit0919ConfigKeys = []string{
 	"gateway.rate_limit",
 	SettingMaxFileRefs,
 	SettingBodyParseBudgetMB,
+	SettingFileExpiryDays,
 	serverstore.PeakWindowsSetting,
 	serverstore.RetentionMonthsSetting,
 	"web.error_reporting_dsn",

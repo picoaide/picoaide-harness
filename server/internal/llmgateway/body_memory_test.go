@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
@@ -552,5 +553,210 @@ func TestGatewayLimitsCacheIsPerDB(t *testing.T) {
 	}
 	if got := gatewayLimitsFor(db1).maxFileRefs; got != 111 {
 		t.Fatalf("回到 db1 = %d", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 文件保留上限 + 管理端清理面（2026-09-22 新需求）
+// ---------------------------------------------------------------------------
+
+// TestFileExpiryIsClampedToPlatformCap：客户端没带过期时间、或要得比上限更久，
+// 一律按 `gateway.file_expiry_days` 收敛（缺省 7 天）—— 上游配额是全组织共享的
+// （25 GiB / 10000 文件），保留期不能任人拉长；更早的保留期则尊重客户端。
+func TestFileExpiryIsClampedToPlatformCap(t *testing.T) {
+	resetBodyParseGate(t)
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+
+	// 缺省 7 天：无过期时间 ⇒ 收敛到 ~7 天。
+	exp, clamped := enforceFileExpiry(db, nil)
+	if !clamped || exp == nil {
+		t.Fatalf("无过期时间必须收敛: exp=%v clamped=%v", exp, clamped)
+	}
+	if d := time.Until(*exp); d < 6*24*time.Hour || d > 8*24*time.Hour {
+		t.Fatalf("收敛结果应接近 7 天，实得 %v", d)
+	}
+	// 上游给 30 天 ⇒ 收敛。
+	far := time.Now().Add(30 * 24 * time.Hour)
+	exp, clamped = enforceFileExpiry(db, &far)
+	if !clamped || exp == nil || exp.After(far) {
+		t.Fatalf("30 天必须收敛: exp=%v clamped=%v", exp, clamped)
+	}
+	// 上游给 1 天 ⇒ 尊重客户端（更早）。
+	near := time.Now().Add(24 * time.Hour)
+	exp, clamped = enforceFileExpiry(db, &near)
+	if clamped || exp == nil || !exp.Equal(near) {
+		t.Fatalf("更早的保留期不该被改写: exp=%v clamped=%v", exp, clamped)
+	}
+	// 改成 1 天 ⇒ 上限立即生效（保存后缓存失效由 admin 接线保证，这里手动失效）。
+	if err := serverstore.SetSetting(db, SettingFileExpiryDays, "1"); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateGatewayLimits()
+	exp, clamped = enforceFileExpiry(db, &far)
+	if !clamped || time.Until(*exp) > 25*time.Hour {
+		t.Fatalf("上限改成 1 天后应立刻收敛: %v", time.Until(*exp))
+	}
+}
+
+// TestReapExpiredGatewayFiles：回收器只删**已过期**的行，且上游 404 视为成功；
+// 上游失败时**保留行**（行是"还有清理责任"的唯一凭据）。
+func TestReapExpiredGatewayFiles(t *testing.T) {
+	resetBodyParseGate(t)
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+
+	past := time.Now().Add(-time.Minute)
+	future := time.Now().Add(time.Hour)
+	if err := serverstore.RecordGatewayFile(gw.db, "file-expired-1", gw.uidA, &past); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.RecordGatewayFile(gw.db, "file-expired-2", gw.uidB, &past); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.RecordGatewayFile(gw.db, "file-live", gw.uidA, &future); err != nil {
+		t.Fatal(err)
+	}
+	api := &API{DB: gw.db, client: &http.Client{}}
+	deleted, failed := api.ReapExpiredGatewayFiles(0)
+	if deleted != 2 || failed != 0 {
+		t.Fatalf("reap = deleted %d failed %d, want 2/0", deleted, failed)
+	}
+	if up.deletes.Load() != 2 {
+		t.Fatalf("上游删除调用 = %d, want 2", up.deletes.Load())
+	}
+	var left int
+	if err := gw.db.QueryRow(`SELECT count(*) FROM gateway_files`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 1 {
+		t.Fatalf("未过期的行必须保留（left=%d）", left)
+	}
+	// 幂等：再跑一轮无事发生。
+	if deleted, failed := api.ReapExpiredGatewayFiles(0); deleted != 0 || failed != 0 {
+		t.Fatalf("第二轮应无事发生: %d/%d", deleted, failed)
+	}
+}
+
+// TestAdminGatewayFilesEndpoints：管理端「网关文件」面的读/删/清理闭环
+// （按员工过滤、搜索、排序、汇总、单删、按条件批量清理 + 审计）。
+func TestAdminGatewayFilesEndpoints(t *testing.T) {
+	resetBodyParseGate(t)
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	// 删除/清理要真的往上游发 DELETE ⇒ 需要一个可用的 files 上游（deepseek 系）。
+	up := newFakeFilesUpstream(t)
+	if _, err := db.Exec(
+		`INSERT INTO gateway_providers (name, base_url, api_key_enc, models) VALUES (?, ?, ?, '["deepseek-chat"]')`,
+		"deepseek-official", up.srv.URL, upstreamKey,
+	); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateUpstreams()
+	alice, err := serverstore.CreateUser(db, &serverstore.User{Username: "files-alice", DisplayName: "Alice", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := serverstore.CreateUser(db, &serverstore.User{Username: "files-bob", DisplayName: "Bob", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Minute)
+	future := time.Now().Add(time.Hour)
+	seed := []struct {
+		id   string
+		user int64
+		exp  *time.Time
+		size int64
+	}{
+		{"file-a1", alice, &future, 1000},
+		{"file-a2", alice, &past, 2000},
+		{"file-b1", bob, &future, 3000},
+	}
+	for _, s := range seed {
+		if err := serverstore.RecordGatewayFileSize(db, s.id, s.user, s.exp, s.size); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// ① 列表：全量 3 条 + 合计。
+	w, out := adminReq(t, r, "GET", "/api/server/admin/gateway/files", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list %d %s", w.Code, w.Body.String())
+	}
+	if n, _ := out["total"].(float64); int(n) != 3 {
+		t.Fatalf("total = %v, want 3", out["total"])
+	}
+	// ② 按员工过滤（用户名）。
+	w, out = adminReq(t, r, "GET", "/api/server/admin/gateway/files?user=files-alice", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("filter %d", w.Code)
+	}
+	if n, _ := out["total"].(float64); int(n) != 2 {
+		t.Fatalf("按员工过滤 total = %v, want 2", out["total"])
+	}
+	// ③ 搜索 file_id 子串。
+	_, out = adminReq(t, r, "GET", "/api/server/admin/gateway/files?q=a2", "", hdr)
+	if n, _ := out["total"].(float64); int(n) != 1 {
+		t.Fatalf("搜索 total = %v, want 1", out["total"])
+	}
+	// ④ 状态过滤：已过期 1 条。
+	_, out = adminReq(t, r, "GET", "/api/server/admin/gateway/files?state=expired", "", hdr)
+	if n, _ := out["total"].(float64); int(n) != 1 {
+		t.Fatalf("过期过滤 total = %v, want 1", out["total"])
+	}
+	// ⑤ 用户名查不到 ⇒ 空集（不能退化成全量）。
+	_, out = adminReq(t, r, "GET", "/api/server/admin/gateway/files?user=nobody-here", "", hdr)
+	if n, _ := out["total"].(float64); int(n) != 0 {
+		t.Fatalf("未知用户 total = %v, want 0", out["total"])
+	}
+	// ⑥ 汇总：按字节降序，Bob 3KB 在 Alice 3KB 之前/之后都合法，但合计必须对。
+	_, out = adminReq(t, r, "GET", "/api/server/admin/gateway/files/summary", "", hdr)
+	rows, _ := out["rows"].([]any)
+	if len(rows) != 2 {
+		t.Fatalf("summary rows = %d, want 2", len(rows))
+	}
+	totals, _ := out["totals"].(map[string]any)
+	if n, _ := totals["files"].(float64); int(n) != 3 {
+		t.Fatalf("totals.files = %v", totals["files"])
+	}
+	if n, _ := totals["bytes"].(float64); int(n) != 6000 {
+		t.Fatalf("totals.bytes = %v, want 6000", totals["bytes"])
+	}
+	// ⑦ 单删（上游删除 + 台账删行 + 审计）。
+	w, out = adminReq(t, r, "DELETE", "/api/server/admin/gateway/files/file-a1", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete %d %s", w.Code, w.Body.String())
+	}
+	// ⑧ 清理必须有条件（空 body ⇒ 400，防误清全量）。
+	w, _ = adminReq(t, r, "POST", "/api/server/admin/gateway/files/purge", `{}`, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("无条件清理应 400，实得 %d", w.Code)
+	}
+	// ⑨ 按员工 + 已过期清理。
+	w, out = adminReq(t, r, "POST", "/api/server/admin/gateway/files/purge", `{"user":"files-alice","state":"expired"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("purge %d %s", w.Code, w.Body.String())
+	}
+	if n, _ := out["deleted"].(float64); int(n) != 1 {
+		t.Fatalf("purge deleted = %v, want 1", out["deleted"])
+	}
+	var left int
+	if err := db.QueryRow(`SELECT count(*) FROM gateway_files`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 1 {
+		t.Fatalf("清理后应只剩 Bob 的 1 条（left=%d）", left)
+	}
+	if up.deletes.Load() != 2 {
+		t.Fatalf("上游 DELETE 次数 = %d, want 2（单删 1 + 批量清理 1）", up.deletes.Load())
+	}
+	// ⑩ 审计留痕。
+	var audits int
+	if err := db.QueryRow(`SELECT count(*) FROM audit_logs WHERE action IN ('gateway_file_delete','gateway_file_purge')`).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits < 2 {
+		t.Fatalf("审计行 = %d, want ≥2", audits)
 	}
 }

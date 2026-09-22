@@ -3,7 +3,7 @@
 ## 1. 服务端(PostgreSQL,PG-only 2026-08)
 
 > 2026-08 起 SQLite 已全面下线:服务端数据库为 PostgreSQL(内置容器或外部实例)。
-> 迁移在 `internal/serverstore/migrations-pg/`(0001–0077;0007 已废弃;0028 下线
+> 迁移在 `internal/serverstore/migrations-pg/`(0001–0078;0007 已废弃;0028 下线
 > 知识库/MCP 表并独立审计表 audit_logs;0039 usage 按月原生分区 + 日/月账本;
 > 0040/0041 归档直存 DB;0042 connectors;0043/0044 provider protocol;
 > 0045 glitchtip 下架;0046 rbac 角色;0047 brand 快照;0048 审计哈希链;
@@ -19,9 +19,9 @@
 > **0073 删除应用会话与员工会话表(`app_sessions`/`employee_sessions`)、0074 把存量
 > `access='public'` 改写为 `login`、0075 应用打开计数(`wasm_app_opens` 明细 +
 > `wasm_app_opens_daily` 日汇总)、0076 `usage.app_id`(应用维度归因)、
-> 0077 网关 Files API 归属台账 `gateway_files`(2026-09-22)** —— 前三条(0073-0076)随
+> 0077 网关 Files API 归属台账 `gateway_files`、0078 台账容量字段与清理索引(2026-09-22)** —— 前三条(0073-0076)随
 > 2026-09-19「WASM 应用客户端专属」改造落地(应用子域/换票/匿名面/服务端 `ai.chat`
-> 同批删除,见 03-api-reference.md §11b),0077 随 2026-09-22 网关文件直通与归属隔离落地
+> 同批删除,见 03-api-reference.md §11b),0077/0078 随 2026-09-22 网关文件直通、归属隔离与「按员工看占用 + 清理」落地
 > (见下 `gateway_files`)
 > ——以 `migrations-pg/` 目录实际文件为准)。
 
@@ -50,7 +50,7 @@
 - 0024 新增 `budget_money REAL`(部门月度金额预算,元):约束该部门树(含全部子部门)成员当月费用合计;员工生效预算 = 归属部门 + 祖先链(链上全部预算都约束,父部门 = 子树封顶);任一超限网关 429。费用聚合 `DeptMonthlyCost`/`DeptMonthlyCostBatch`(部门树 SUM(cost))。
 
 ### settings(0001)
-`settings(key PK, value)`。键: `auth.mode` / `ldap.*` / `oidc.*` / `openid.*` / `auth.enabled` / `gateway.default_model` / `gateway.rate_limit` / `gateway.max_file_refs`(单请求 file_id 引用上限,缺省 600=官方单请求最多 600 张图) / `gateway.body_parse_budget_mb`(在飞请求体字节预算 MiB,缺省 128) / `usage.monthly_quota`(员工默认月 token 配额,0=不限)/ `usage.monthly_quota_money`(员工默认月金额配额,元,0=不限)/ `usage.peak_windows`(高峰时段 JSON,北京时间,空=无峰谷价)/ `usage.retention_months`(明细保留月数,默认 6)/ `web.default_thinking_level` / `web.error_reporting_*` / `web.glitchtip_*` / `server.base_url` / `audit.retention_days`(默认 180)等(见 04-auth.md、03-api-reference.md)。
+`settings(key PK, value)`。键: `auth.mode` / `ldap.*` / `oidc.*` / `openid.*` / `auth.enabled` / `gateway.default_model` / `gateway.rate_limit` / `gateway.max_file_refs`(单请求 file_id 引用上限,缺省 600=官方单请求最多 600 张图) / `gateway.body_parse_budget_mb`(在飞请求体字节预算 MiB,缺省 128) / `gateway.file_expiry_days`(网关强制执行的文件保留上限天数,缺省 7,范围 1~30) / `usage.monthly_quota`(员工默认月 token 配额,0=不限)/ `usage.monthly_quota_money`(员工默认月金额配额,元,0=不限)/ `usage.peak_windows`(高峰时段 JSON,北京时间,空=无峰谷价)/ `usage.retention_months`(明细保留月数,默认 6)/ `web.default_thinking_level` / `web.error_reporting_*` / `web.glitchtip_*` / `server.base_url` / `audit.retention_days`(默认 180)等(见 04-auth.md、03-api-reference.md)。
 
 ### api_tokens(0002)
 `id, user_id→users, token_hash(唯一), name(默认 'desktop'), created_at, expires_at(NOT NULL), last_used_at, revoked(0/1)`;索引 `idx_tokens_user`。明文 token 不落库,只存哈希;90 天过期。
@@ -100,8 +100,9 @@ idx_usage_user_cost`。写路径 `RecordUsage*` 先 ensure 当月分区。
 ### connectors(0042)
 `id, name, description, auth_mode(oauth|device|token|server-side), definition JSON, enabled, updated_at, created_at`——连接器唯一目录源,经 bootstrap `connectors[]` 下发;种子 example-org/sales-easy(glitchtip 0045 下架,不再下发)。
 
-### gateway_files(0077,网关 Files API 归属台账)
-`file_id(PK), user_id→users(ON DELETE CASCADE), created_at, expires_at`;索引按 `user_id` 与 `expires_at`。
+### gateway_files(0077 + 0078,网关 Files API 归属台账与容量视图)
+`file_id(PK), user_id→users(ON DELETE CASCADE), created_at, expires_at, size_bytes(0078)`;索引按 `(user_id, created_at DESC)`、`(user_id, expires_at)`、`(expires_at)`、`(expires_at, created_at)`。
+- 0078 的 `size_bytes` 只用于**容量统计与排序**（OpenAI 形状 `bytes` / Anthropic 形状 `size_bytes`；取不到记 0，升级前的老行同为 0 = 未知），不参与归属判定。
 
 网关 `/v1/files`(`/files` 同)是官方 Files API 的直通面(上传/列出/下载/删除),而上游按 **API key** 隔离文件——公司内所有员工共用同一把 key,所以「谁能读哪个 file_id」这件事上游不知道。此表是平台侧的归属账本:上传成功即 `RecordGatewayFile` 记 `(file_id, user_id, expires_at)`,**首次写入者胜**(`ON CONFLICT DO UPDATE … WHERE gateway_files.user_id = EXCLUDED.user_id`,不覆盖他人归属)。
 

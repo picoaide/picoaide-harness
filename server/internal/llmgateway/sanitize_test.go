@@ -177,6 +177,7 @@ var outboundRequestAllowlist = map[string]string{
 	"errorreporting_test_event.go:sendErrorReportingTestEvent": "错误上报测试探针：体是服务端自建事件",
 	"files.go:handleFilesUpload":                               "Files API 直通：客户端体**就是文件字节**，无 JSON 字段面",
 	"files.go:doFilesMeta":                                     "Files 元数据 GET/DELETE：无请求体",
+	"files_reaper.go:deleteUpstreamFile":                       "文件回收：DELETE 无请求体（服务端发起的上游删除）",
 }
 
 func TestEveryForwardHelperSanitizesOutboundBody(t *testing.T) {

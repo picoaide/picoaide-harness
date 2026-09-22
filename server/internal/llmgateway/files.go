@@ -414,13 +414,15 @@ func writeFilesTransportError(c *gin.Context, readErr error) {
 	}
 }
 
-// recordUploadedFile 从上传响应里取出 id/expires_at 写归属台账。
+// recordUploadedFile 从上传响应里取出 id / expires_at / 体积写归属台账。
 // 取不到 id（上游响应异常）时不阻断交付，只留日志 —— 该文件在网关侧等于"未登记"，
 // list/retrieve/delete 会按 404 处理（安全方向的降级；chat 引用仍可用）。
 func (a *API) recordUploadedFile(userID int64, body []byte) {
 	var obj struct {
 		ID        string          `json:"id"`
 		ExpiresAt json.RawMessage `json:"expires_at"`
+		Bytes     int64           `json:"bytes"`      // OpenAI 形状
+		SizeBytes int64           `json:"size_bytes"` // Anthropic 形状
 	}
 	if err := json.Unmarshal(body, &obj); err != nil || strings.TrimSpace(obj.ID) == "" {
 		log.Printf("gateway: files: upload response has no usable id; ownership not recorded")
@@ -434,9 +436,41 @@ func (a *API) recordUploadedFile(userID int64, body []byte) {
 	if t, ok := parseFileExpiry(obj.ExpiresAt); ok {
 		expires = &t
 	}
-	if err := serverstore.RecordGatewayFile(a.DB, obj.ID, userID, expires); err != nil {
+	expires, clamped := enforceFileExpiry(a.DB, expires)
+	if clamped {
+		// 上游保留期比平台上限长（或客户端根本没带过期时间）：台账按上限记，
+		// 到点即拒绝授权并由回收器在上游删除 —— 公司共享配额不会被长期占用。
+		log.Printf("gateway: files: upload expiry clamped to the platform cap (%dd)", int(gatewayLimitsFor(a.DB).fileExpiry/(24*time.Hour)))
+	}
+	size := obj.Bytes
+	if size <= 0 {
+		size = obj.SizeBytes
+	}
+	if err := serverstore.RecordGatewayFileSize(a.DB, obj.ID, userID, expires, size); err != nil {
 		log.Printf("gateway: files: record ownership for uploaded file failed: %v", err)
 	}
+}
+
+// enforceFileExpiry 把"上游给的过期时间"收进平台上限内：
+//   - 没给（永久）⇒ 上限时刻；
+//   - 给了但比上限更晚 ⇒ 上限时刻；
+//   - 给了且更早 ⇒ 尊重客户端（更早的保留期不影响配额）。
+//
+// 返回 (生效的过期时间, 是否被收敛)。**只在台账层收敛**：上游那边仍按客户端的
+// `expires_after` 保存，但我们（唯一的访问路径）到点即拒绝授权，并由 files_reaper
+// 在上游删除，因此有效保留期 ≤ 上限（最多多一个回收周期）。
+//
+// 为什么不改写上传体：官方上传是 multipart（`expires_after[seconds]` + 文件字节），
+// 改字段要整包重编码或改走 chunked；而配额的关键是"到点能删掉"，回收器已经做到。
+func enforceFileExpiry(db *sql.DB, upstream *time.Time) (*time.Time, bool) {
+	capAt := time.Now().Add(gatewayLimitsFor(db).fileExpiry)
+	if upstream == nil {
+		return &capAt, true
+	}
+	if upstream.After(capAt) {
+		return &capAt, true
+	}
+	return upstream, false
 }
 
 // parseFileExpiry 解析官方 `expires_at`：文档口径是 **Unix 秒（number）**，

@@ -8,6 +8,7 @@
 // RequirePermission 才是护栏);某条目声明多个权限点时命中任一即可见。
 // 未声明 perms 的条目 fail-closed(仅超管可见),防止以后新增页面漏声明。
 import {
+  HardDrive,
   Users, Settings2, KeyRound, BarChart3, Store, ScrollText, Network, Server, Bug, Plug, Boxes,
   type LucideIcon,
 } from 'lucide-react'
@@ -47,6 +48,10 @@ export const NAV_ENTRIES: NavEntry[] = [
   { to: '/auth', label: '认证', icon: KeyRound, section: '管理', perms: [PERM_AUTH_READ] },
   // 运维分区(super_admin; auditor 仅有 usage:read)
   { to: '/gateway', label: '网关', icon: Settings2, section: '运维', perms: [PERM_GATEWAY_READ] },
+  // 2026-09-22:上游 Files 配额是每 API key(全组织共享),这里给管理员一个
+  // "按员工看占用 + 搜索 + 排序 + 清理"的工具(读 gateway:read,写动作页内另按
+  // gateway:write 收敛;服务端 RequirePermission 才是护栏)。
+  { to: '/gateway-files', label: '网关文件', icon: HardDrive, section: '运维', perms: [PERM_GATEWAY_READ] },
   // 错误监控页归 server-info 权限点(审计 2026-09-12 P1-3):它此前 gate 在
   // `error-monitoring:read` 上,而该权限点 2026-09-08 已从 rbac.go 删除
   // (rbac.go:43 注释),全仓再无人下发 → 连 super_admin 都看不到菜单项,

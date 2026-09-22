@@ -37,20 +37,26 @@ type Handlers struct {
 	RetrieveFile gin.HandlerFunc // GET /files/:file_id
 	DeleteFile   gin.HandlerFunc // DELETE /files/:file_id
 	// 服务端面 /api/server/admin
-	ListProviders     gin.HandlerFunc
-	CreateProvider    gin.HandlerFunc
-	UpdateProvider    gin.HandlerFunc
-	DeleteProvider    gin.HandlerFunc
-	ProviderBalance   gin.HandlerFunc // GET /providers/:id/balance(2026-09 渠道余额)
-	ListModelsAdmin   gin.HandlerFunc
-	CreateModel       gin.HandlerFunc
-	UpdateModel       gin.HandlerFunc
-	DeleteModel       gin.HandlerFunc
-	GetGatewayConfig  gin.HandlerFunc
-	SetGatewayConfig  gin.HandlerFunc
-	ListChannelsAdmin gin.HandlerFunc
-	SyncOneAdmin      gin.HandlerFunc
-	SyncAllAdmin      gin.HandlerFunc
+	ListProviders    gin.HandlerFunc
+	CreateProvider   gin.HandlerFunc
+	UpdateProvider   gin.HandlerFunc
+	DeleteProvider   gin.HandlerFunc
+	ProviderBalance  gin.HandlerFunc // GET /providers/:id/balance(2026-09 渠道余额)
+	ListModelsAdmin  gin.HandlerFunc
+	CreateModel      gin.HandlerFunc
+	UpdateModel      gin.HandlerFunc
+	DeleteModel      gin.HandlerFunc
+	GetGatewayConfig gin.HandlerFunc
+	SetGatewayConfig gin.HandlerFunc
+	// 网关文件台账的管理面(2026-09-22):按员工看占用 / 搜索 / 排序 / 清理。
+	// 读走 gateway:read,删除与清理走 gateway:write(见 router.go 的申报)。
+	ListGatewayFiles    gin.HandlerFunc // GET /gateway/files
+	GatewayFilesSummary gin.HandlerFunc // GET /gateway/files/summary
+	DeleteGatewayFile   gin.HandlerFunc // DELETE /gateway/files/:file_id
+	PurgeGatewayFiles   gin.HandlerFunc // POST /gateway/files/purge
+	ListChannelsAdmin   gin.HandlerFunc
+	SyncOneAdmin        gin.HandlerFunc
+	SyncAllAdmin        gin.HandlerFunc
 	// ConcurrencyStatus 返回各模型当前并发(内存快照)+ 90 天历史峰值(DB),
 	// 供服务器信息页展示与扩容申请(2026-08-31)。
 	ConcurrencyStatus gin.HandlerFunc
@@ -84,30 +90,34 @@ func NewHandlers(db *sql.DB) *Handlers {
 	// db 为 nil(测试路由树)时内部跳过。
 	api.startConcurrencySampler(nil)
 	return &Handlers{
-		ChatCompletions:   api.handleChatCompletions,
-		Embeddings:        api.handleEmbeddings,
-		Messages:          api.handleMessages,
-		Models:            api.handleModels,
-		Completions:       api.handleCompletions,
-		Responses:         api.handleResponses,
-		UploadFile:        api.handleFilesUpload,
-		ListFiles:         api.handleFilesList,
-		RetrieveFile:      api.handleFilesRetrieve,
-		DeleteFile:        api.handleFilesDelete,
-		ListProviders:     func(c *gin.Context) { listProviders(c, db) },
-		CreateProvider:    func(c *gin.Context) { createProvider(c, db) },
-		UpdateProvider:    func(c *gin.Context) { updateProvider(c, db) },
-		DeleteProvider:    func(c *gin.Context) { deleteProvider(c, db) },
-		ProviderBalance:   func(c *gin.Context) { providerBalance(c, db) },
-		ListModelsAdmin:   func(c *gin.Context) { listModelsAdmin(c, db) },
-		CreateModel:       func(c *gin.Context) { createModel(c, db) },
-		UpdateModel:       func(c *gin.Context) { updateModel(c, db) },
-		DeleteModel:       func(c *gin.Context) { deleteModel(c, db) },
-		GetGatewayConfig:  func(c *gin.Context) { getGatewayConfig(c, db) },
-		SetGatewayConfig:  func(c *gin.Context) { setGatewayConfig(c, db) },
-		ListChannelsAdmin: func(c *gin.Context) { listChannelsAdmin(c) },
-		SyncOneAdmin:      func(c *gin.Context) { syncOneAdmin(c, db) },
-		SyncAllAdmin:      func(c *gin.Context) { syncAllAdmin(c, db) },
+		ChatCompletions:     api.handleChatCompletions,
+		Embeddings:          api.handleEmbeddings,
+		Messages:            api.handleMessages,
+		Models:              api.handleModels,
+		Completions:         api.handleCompletions,
+		Responses:           api.handleResponses,
+		UploadFile:          api.handleFilesUpload,
+		ListFiles:           api.handleFilesList,
+		RetrieveFile:        api.handleFilesRetrieve,
+		DeleteFile:          api.handleFilesDelete,
+		ListProviders:       func(c *gin.Context) { listProviders(c, db) },
+		CreateProvider:      func(c *gin.Context) { createProvider(c, db) },
+		UpdateProvider:      func(c *gin.Context) { updateProvider(c, db) },
+		DeleteProvider:      func(c *gin.Context) { deleteProvider(c, db) },
+		ProviderBalance:     func(c *gin.Context) { providerBalance(c, db) },
+		ListModelsAdmin:     func(c *gin.Context) { listModelsAdmin(c, db) },
+		CreateModel:         func(c *gin.Context) { createModel(c, db) },
+		UpdateModel:         func(c *gin.Context) { updateModel(c, db) },
+		DeleteModel:         func(c *gin.Context) { deleteModel(c, db) },
+		GetGatewayConfig:    func(c *gin.Context) { getGatewayConfig(c, db) },
+		SetGatewayConfig:    func(c *gin.Context) { setGatewayConfig(c, db) },
+		ListGatewayFiles:    func(c *gin.Context) { listGatewayFilesAdmin(c, db) },
+		GatewayFilesSummary: func(c *gin.Context) { gatewayFilesSummaryAdmin(c, db) },
+		DeleteGatewayFile:   func(c *gin.Context) { deleteGatewayFileAdmin(c, api, db) },
+		PurgeGatewayFiles:   func(c *gin.Context) { purgeGatewayFilesAdmin(c, api, db) },
+		ListChannelsAdmin:   func(c *gin.Context) { listChannelsAdmin(c) },
+		SyncOneAdmin:        func(c *gin.Context) { syncOneAdmin(c, db) },
+		SyncAllAdmin:        func(c *gin.Context) { syncAllAdmin(c, db) },
 		ConcurrencyStatus: func(c *gin.Context) {
 			concurrencyStatus(c, db, api.conc)
 		},

@@ -33,7 +33,7 @@
 ```
 第三方客户端 / 员工接入 ──HTTPS/Bearer token──▶ Go 服务端
   ├─ 认证:local/LDAP/OIDC + api_tokens(90天过期)+ /api/client/v2/auth/me|usage
-  ├─ AI 网关:/v1/chat/completions|embeddings|messages|completions|responses|models|files + per-user 限流(缺省 0=不限制)+ usage 计量(费用/峰谷);/v1/* 读请求体预算 1h、上限 64MiB;出站体按员工注入官方用户标识(chat `user_id`/responses `user`/anthropic `metadata.user_id`)+ 校验 file_id 归属(聊天引用他人文件 ⇒ 404;非法 JSON ⇒ 400 fail-closed;单请求引用上限与在飞请求体字节预算均可配,缺省 600 / 128MiB,打满 ⇒ 503 SERVER)(2026-09-22)
+  ├─ AI 网关:/v1/chat/completions|embeddings|messages|completions|responses|models|files + per-user 限流(缺省 0=不限制)+ usage 计量(费用/峰谷);/v1/* 读请求体预算 1h、上限 64MiB;出站体按员工注入官方用户标识(chat `user_id`/responses `user`/anthropic `metadata.user_id`)+ 校验 file_id 归属(聊天引用他人文件 ⇒ 404;非法 JSON ⇒ 400 fail-closed;单请求引用上限与在飞请求体字节预算均可配,缺省 600 / 128MiB,打满 ⇒ 503 SERVER;文件保留上限 `gateway.file_expiry_days` 缺省 7 天,超期由回收器在上游删除,管理端可按员工看占用/清理)(2026-09-22)
   ├─ bootstrap:/api/client/v2/config/bootstrap(默认模型+建议清单+connectors[])
   ├─ 商城/共享:/api/client/v2/marketplace|shared-skills|agent-presets|capabilities(授权制/双门制)
   ├─ 审计:/api/server/admin/audit(用户/部门/技能等敏感操作留痕)
@@ -80,7 +80,7 @@ data/                  # 服务端运行时数据(0700,gitignore);数据库在 P
 - **REST 错误**:`{"error":{"code":"ERR_CODE","message":"..."}}`;`AUTH_REQUIRED`/`AUTH_FAILED`/`FORBIDDEN`(管理端)/`NOT_FOUND`/`VALIDATION`/`UPSTREAM`/`RATE_LIMITED`/`INTERNAL`(健康探针与 404 NoRoute 同信封)
 - **bootstrap**:`{default_model, models, skills, web, connectors}`(接入方对 skills/web 缺省值兜底;connectors 为服务端连接器目录,0042 起)
 - **员工用量接口**:`GET /api/client/v2/auth/usage` → `{balance_money, balance_activated, balance_enabled, balance_monthly, balance_mode, is_admin, today/yesterday/monthly/total usage+cost}`(账户卡的数据源;字段集合是**跨语言契约**,由 `server/internal/serverauth/usage_contract_test.go` 与 `packages/client/account-card/src/usage-contract.ts` 对拍)
-- **DB**:PostgreSQL 唯一,迁移 `internal/serverstore/migrations-pg/` **0001–0072 与 0075–0077**(**0073/0074 随 WASM「客户端专属」改造的 W4 删除波次落地**:0073 DROP `app_sessions`/`employee_sessions`、0074 把 `kind='wasm_app'` 的 `config_json.access` 由 `public` 改写为 `login`;0075 WASM 应用打开计数、0076 `usage.app_id` 应用维度、0077 网关 Files API 归属台账 `gateway_files`(2026-09-22);0034 shared_skills 多版本、0035 agent_presets 多版本、0036 共享授权、0037 quality、0039 usage 分区 + 日/月账本、0040/0041 归档直存 DB、0042 connectors、0043/0044 provider protocol、0045 glitchtip 下架、0046 rbac 角色、0048 审计哈希链、0057 管理员 MFA、0061/0062 员工余额与账本、0063 usage.estimated、0064 TOTP 防重放、0065 usage.provider_id、0066 管理会话 secret_hash、0067 外部身份绑定、0068 客户端错误上报状态)
+- **DB**:PostgreSQL 唯一,迁移 `internal/serverstore/migrations-pg/` **0001–0072 与 0075–0078**(**0073/0074 随 WASM「客户端专属」改造的 W4 删除波次落地**:0073 DROP `app_sessions`/`employee_sessions`、0074 把 `kind='wasm_app'` 的 `config_json.access` 由 `public` 改写为 `login`;0075 WASM 应用打开计数、0076 `usage.app_id` 应用维度、0077 网关 Files API 归属台账 `gateway_files`、0078 台账容量字段 `size_bytes` + 清理索引(2026-09-22);0034 shared_skills 多版本、0035 agent_presets 多版本、0036 共享授权、0037 quality、0039 usage 分区 + 日/月账本、0040/0041 归档直存 DB、0042 connectors、0043/0044 provider protocol、0045 glitchtip 下架、0046 rbac 角色、0048 审计哈希链、0057 管理员 MFA、0061/0062 员工余额与账本、0063 usage.estimated、0064 TOTP 防重放、0065 usage.provider_id、0066 管理会话 secret_hash、0067 外部身份绑定、0068 客户端错误上报状态)
 - **审计契约**:`GET /api/server/admin/audit?page=&size=&action=&username=`(敏感操作留痕;默认保留 180 天,settings `audit.retention_days` 可配;0048 起哈希链防篡改)
 - **费用口径**:cost 记录时按 输入×input_price/1e6 + 输出×output_price/1e6(缓存命中另按 `cache_input_price_per_1m`,0029),高峰窗口(settings `usage.peak_windows`,北京时间)外 × `offpeak_discount`;员工侧不再有"配额/剩余"概念(见上条),拦截只看账户余额
 

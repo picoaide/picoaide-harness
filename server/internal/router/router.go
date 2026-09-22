@@ -503,6 +503,12 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "DELETE", "/models/:id", serverauth.PermGatewayWrite, d.Gateway.DeleteModel)
 	serverauth.AdminRoute(authed, "GET", "/gateway", serverauth.PermGatewayRead, d.Gateway.GetGatewayConfig)
 	serverauth.AdminRoute(authed, "PUT", "/gateway", serverauth.PermGatewayWrite, d.Gateway.SetGatewayConfig)
+	// 网关文件台账的管理面(2026-09-22):按员工看占用 / 搜索 / 排序 / 清理。
+	// 读 = gateway:read,写(删除/批量清理)= gateway:write。
+	serverauth.AdminRoute(authed, "GET", "/gateway/files", serverauth.PermGatewayRead, d.Gateway.ListGatewayFiles)
+	serverauth.AdminRoute(authed, "GET", "/gateway/files/summary", serverauth.PermGatewayRead, d.Gateway.GatewayFilesSummary)
+	serverauth.AdminRoute(authed, "DELETE", "/gateway/files/:file_id", serverauth.PermGatewayWrite, d.Gateway.DeleteGatewayFile)
+	serverauth.AdminRoute(authed, "POST", "/gateway/files/purge", serverauth.PermGatewayWrite, d.Gateway.PurgeGatewayFiles)
 	// 错误上报自检 + 客户端状态聚合(2026-09-16 P0-4/P1-3):
 	// test = 服务端代发一条测试事件(D3:浏览器直发拿不到可读失败原因);
 	// clients = 客户端上报状态聚合(D7)。

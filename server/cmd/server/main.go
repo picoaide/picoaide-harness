@@ -282,6 +282,11 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 网关文件回收(2026-09-22):台账里已过期的文件在上游删除并清行 —— 上游配额是
+	// 每 API key(全组织共享 25 GiB / 10000 文件),而保留上限由平台收敛
+	// (gateway.file_expiry_days),必须有人真的去删,否则配额被"已不可访问但仍占着"
+	// 的文件吃光。启动先跑一轮,之后每 5 分钟一次。
+	llmgateway.StartFileReaper(ctx, db, llmgateway.FileReaperInterval)
 	// 月度报表推送调度(2026-09 P1):每小时检查补跑上月报表。
 	reports.NewScheduler(db, time.Hour, nil).Start(ctx)
 	// 月度余额发放调度(0061):每小时检查当月是否已发放,未发则按配置

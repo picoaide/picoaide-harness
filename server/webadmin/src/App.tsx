@@ -17,6 +17,7 @@ import Login from './pages/Login'
 const UsersPage = lazy(() => import('./pages/Users'))
 const Departments = lazy(() => import('./pages/Departments'))
 const Gateway = lazy(() => import('./pages/Gateway'))
+const GatewayFiles = lazy(() => import('./pages/GatewayFiles'))
 const Auth = lazy(() => import('./pages/Auth'))
 const ErrorMonitoring = lazy(() => import('./pages/ErrorMonitoring'))
 const Audit = lazy(() => import('./pages/Audit'))
@@ -357,6 +358,7 @@ export default function App() {
                   <Route path="/users" element={<UsersPage />} />
                   <Route path="/departments" element={<Departments />} />
                   <Route path="/gateway" element={<Gateway />} />
+                  <Route path="/gateway-files" element={<GatewayFiles />} />
                   <Route path="/auth" element={<Auth />} />
                   <Route path="/error-monitoring" element={<ErrorMonitoring />} />
                   <Route path="/usage" element={<UsageLayout />}>

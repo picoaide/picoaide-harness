@@ -108,6 +108,13 @@ OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹
 1. **按员工注入官方用户标识**:`chat/completions` 写顶层 `user_id`、`/responses` 写官方 create-response 的顶层 `user`、Anthropic `messages` 写 `metadata.user_id`,值为平台侧稳定标识 `u<users.id>`(非用户名/邮箱等隐私信息),并**覆盖**客户端自带值(否则第三方客户端可伪造他人身份做上游 KVCache 投毒/隔离逃逸)。官方用它做 KVCache / 调度 / 内容安全三重隔离——不注入则全公司落进同一个"空 user_id"域。`/completions`(FIM,官方文档只有 prompt/echo 等字段)与 `/v1/embeddings`(客户端体不转发)**不注入**。
 2. **校验 `file_id` 引用归属**:请求体里任何 `file_id`(聊天内容部件 `{"type":"file","file_id":…}`、Anthropic `source.file_id` 等)都必须是**调用者自己**上传的文件(台账 `gateway_files`,迁移 0077);未登记/他人的 id、或形状非法的 id 一律 `404 NOT_FOUND`(与"不存在"同形),**整条请求不发往上游**。原因:Files API 的文件落在同一个上游账号(全组织共用一个 provider key),不校验就等于"知道 id 就能读别人的图"。字符串正文里出现的 `file_id` 文本不算引用(不误伤工具参数等);工具/schema 子树(`tools`/`functions`/`function`/`tool_choice`/`response_format`)不参与收集;单次请求引用数上限缺省 600 个(与官方"单请求最多 600 张图"对齐,可配;超出 `400 VALIDATION`)。
 
+**文件保留上限与回收(2026-09-22)**:`gateway.file_expiry_days`(缺省 **7 天**,范围 1~30)是网关**强制执行**的保留上限 ——
+上传时若客户端没带 `expires_after`、或要得比上限更久,台账一律按上限记录(更早的保留期尊重客户端),到点即拒绝授权,
+并由 5 分钟一轮的回收器在上游删除(上游配额是**每 API key**、全组织共享 25 GiB / 10000 文件)。
+管理后台「网关文件」页按员工展示占用(文件数/字节/其中已过期),支持按员工过滤、`file_id` 搜索、排序与按条件清理;
+接口:`GET /api/server/admin/gateway/files|/files/summary`(gateway:read)、`DELETE /api/server/admin/gateway/files/:file_id`
+与 `POST /api/server/admin/gateway/files/purge`(gateway:write;批量清理**必须**带 `user` 或 `state`,单次最多 500 条)。
+
 **两个可配闸门(2026-09-22,管理后台「网关 → 网关防护」)**:
 `gateway.max_file_refs`(单请求 `file_id` 引用数上限,缺省 **600** = 官方 vision 文档的"单请求最多 600 张图",范围 1~4096 —— 本平台的归属校验只会比上游更松,绝不会更严)与
 `gateway.body_parse_budget_mb`(全进程**同时在加工**的请求体字节预算,缺省 128MiB,范围 64~8192)。

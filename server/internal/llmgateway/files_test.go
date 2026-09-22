@@ -28,8 +28,10 @@ import (
 
 // fakeFilesUpstream 记录收到的请求并返回预设响应，模拟 DeepSeek Files API。
 type fakeFilesUpstream struct {
-	srv     *httptest.Server
-	hits    atomic.Int64
+	srv  *httptest.Server
+	hits atomic.Int64
+	// deletes 只数 DELETE 请求（回收器/管理端清理的判据；hits 含全部方法）。
+	deletes atomic.Int64
 	method  atomic.Value
 	path    atomic.Value
 	query   atomic.Value
@@ -45,6 +47,9 @@ func newFakeFilesUpstream(t *testing.T) *fakeFilesUpstream {
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		f.hits.Add(1)
+		if r.Method == http.MethodDelete {
+			f.deletes.Add(1)
+		}
 		f.method.Store(r.Method)
 		f.path.Store(r.URL.Path)
 		f.query.Store(r.URL.RawQuery)

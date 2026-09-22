@@ -19,6 +19,7 @@ package serverstore
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -34,13 +35,23 @@ import (
 //     `GatewayFileOwner` 的"过期 = 不存在"曾相反）。永久文件（expires_at IS NULL）
 //     永不转手。
 func RecordGatewayFile(db *sql.DB, fileID string, userID int64, expiresAt *time.Time) error {
+	return RecordGatewayFileSize(db, fileID, userID, expiresAt, 0)
+}
+
+// RecordGatewayFileSize 同上，并记录文件字节数（管理端容量统计用；0 = 未知）。
+func RecordGatewayFileSize(db *sql.DB, fileID string, userID int64, expiresAt *time.Time, sizeBytes int64) error {
+	if sizeBytes < 0 {
+		sizeBytes = 0
+	}
 	_, err := db.Exec(
-		`INSERT INTO gateway_files (file_id, user_id, expires_at) VALUES (?, ?, ?)
+		`INSERT INTO gateway_files (file_id, user_id, expires_at, size_bytes) VALUES (?, ?, ?, ?)
 		 ON CONFLICT (file_id) DO UPDATE
-		   SET expires_at = EXCLUDED.expires_at, user_id = EXCLUDED.user_id
+		   SET expires_at = EXCLUDED.expires_at, user_id = EXCLUDED.user_id,
+		       size_bytes = CASE WHEN EXCLUDED.size_bytes > 0 THEN EXCLUDED.size_bytes
+		                         ELSE gateway_files.size_bytes END
 		 WHERE gateway_files.user_id = EXCLUDED.user_id
 		    OR gateway_files.expires_at <= now()`,
-		fileID, userID, expiresAt,
+		fileID, userID, expiresAt, sizeBytes,
 	)
 	return err
 }
@@ -201,4 +212,236 @@ func PurgeExpiredGatewayFiles(db *sql.DB, limit int) (int64, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// ---------------------------------------------------------------------------
+// 管理端：网关文件的容量视图与清理（2026-09-22）
+// ---------------------------------------------------------------------------
+
+// GatewayFileRow 是管理端列表的一行（含归属员工的展示名）。
+type GatewayFileRow struct {
+	FileID      string     `json:"file_id"`
+	UserID      int64      `json:"user_id"`
+	Username    string     `json:"username"`
+	DisplayName string     `json:"display_name"`
+	SizeBytes   int64      `json:"size_bytes"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at"`
+	Expired     bool       `json:"expired"`
+}
+
+// GatewayFileQuery 是管理端列表的过滤/排序/分页条件。
+//
+// 白名单式排序键（不接受任意列名）：`created_at` / `expires_at` / `size_bytes` /
+// `username`；顺序只接受 asc|desc。`UserID > 0` 时按员工过滤，`UserID < 0` 表示
+// "指定的员工不存在"⇒ 恒空集，`Search` 匹配 file_id 子串（大小写不敏感），
+// `OnlyExpired` / `OnlyActive` 二选一（都为假 = 全部）。
+type GatewayFileQuery struct {
+	UserID      int64
+	Search      string
+	OnlyExpired bool
+	OnlyActive  bool
+	Sort        string
+	Desc        bool
+	Offset      int
+	Limit       int
+}
+
+// GatewayFileSummaryRow 是"按员工看占用"的一行。
+type GatewayFileSummaryRow struct {
+	UserID      int64      `json:"user_id"`
+	Username    string     `json:"username"`
+	DisplayName string     `json:"display_name"`
+	Files       int64      `json:"files"`
+	Bytes       int64      `json:"bytes"`
+	Expired     int64      `json:"expired_files"`
+	Earliest    *time.Time `json:"earliest_expires_at"`
+}
+
+func normalizeGatewayFileQuery(q GatewayFileQuery) GatewayFileQuery {
+	switch q.Sort {
+	case "created_at", "expires_at", "size_bytes", "username":
+	default:
+		q.Sort = "created_at"
+	}
+	if q.Limit <= 0 || q.Limit > 200 {
+		q.Limit = 50
+	}
+	if q.Offset < 0 {
+		q.Offset = 0
+	}
+	if q.OnlyExpired && q.OnlyActive {
+		q.OnlyActive = false
+	}
+	return q
+}
+
+// gatewayFileWhere 生成列表与计数的共用 WHERE 子句与参数。
+func gatewayFileWhere(q GatewayFileQuery) (string, []any) {
+	where := " WHERE 1=1"
+	args := []any{}
+	switch {
+	case q.UserID < 0:
+		// 负数 = "按查不到的用户名过滤" ⇒ 恒空集（不能退化成"不过滤"，
+		// 否则管理员会以为过滤生效了，实际看到的是全量）。
+		where += " AND 1=0"
+	case q.UserID > 0:
+		where += " AND g.user_id = ?"
+		args = append(args, q.UserID)
+	}
+	if s := strings.TrimSpace(q.Search); s != "" {
+		where += " AND g.file_id ILIKE ?"
+		args = append(args, "%"+escapeLike(s)+"%")
+	}
+	if q.OnlyExpired {
+		where += " AND g.expires_at IS NOT NULL AND g.expires_at <= now()"
+	}
+	if q.OnlyActive {
+		where += " AND (g.expires_at IS NULL OR g.expires_at > now())"
+	}
+	return where, args
+}
+
+// escapeLike 转义 LIKE 通配符（用户输入里的 % _ \ 只按字面匹配）。
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`)
+	return r.Replace(s)
+}
+
+// ListGatewayFiles 分页查询台账（管理端「网关文件」页）。
+func ListGatewayFiles(db *sql.DB, q GatewayFileQuery) ([]GatewayFileRow, int64, error) {
+	q = normalizeGatewayFileQuery(q)
+	where, args := gatewayFileWhere(q)
+	var total int64
+	if err := db.QueryRow(`SELECT count(*) FROM gateway_files g`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	order := q.Sort
+	dir := "ASC"
+	if q.Desc {
+		dir = "DESC"
+	}
+	// 排序键来自白名单（normalizeGatewayFileQuery），可安全拼接。
+	if order == "username" {
+		order = "u.username"
+	} else {
+		order = "g." + order
+	}
+	query := `SELECT g.file_id, g.user_id, COALESCE(u.username, ''), COALESCE(u.display_name, ''),
+	                 g.size_bytes, g.created_at, g.expires_at,
+	                 (g.expires_at IS NOT NULL AND g.expires_at <= now()) AS expired
+	            FROM gateway_files g LEFT JOIN users u ON u.id = g.user_id` + where +
+		` ORDER BY ` + order + ` ` + dir + `, g.file_id ASC LIMIT ? OFFSET ?`
+	args = append(args, q.Limit, q.Offset)
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := make([]GatewayFileRow, 0, q.Limit)
+	for rows.Next() {
+		var r GatewayFileRow
+		if err := rows.Scan(&r.FileID, &r.UserID, &r.Username, &r.DisplayName,
+			&r.SizeBytes, &r.CreatedAt, &r.ExpiresAt, &r.Expired); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, r)
+	}
+	return out, total, rows.Err()
+}
+
+// GatewayFileSummary 按员工汇总占用（文件数 / 字节数 / 其中已过期数 / 最早过期时刻）。
+func GatewayFileSummary(db *sql.DB, sort string, desc bool) ([]GatewayFileSummaryRow, error) {
+	order := "bytes"
+	switch sort {
+	case "files", "bytes", "username":
+		order = sort
+	}
+	dir := "DESC"
+	if !desc {
+		dir = "ASC"
+	}
+	if order == "username" {
+		order = "3"
+	} else if order == "files" {
+		order = "5"
+	} else {
+		order = "6"
+	}
+	rows, err := db.Query(`SELECT g.user_id, COALESCE(u.username, ''), COALESCE(u.display_name, ''),
+	                              count(*) AS files,
+	                              COALESCE(sum(g.size_bytes), 0) AS bytes,
+	                              count(*) FILTER (WHERE g.expires_at IS NOT NULL AND g.expires_at <= now()) AS expired,
+	                              min(g.expires_at) AS earliest
+	                         FROM gateway_files g LEFT JOIN users u ON u.id = g.user_id
+	                        GROUP BY g.user_id, u.username, u.display_name
+	                        ORDER BY ` + order + ` ` + dir + `, g.user_id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []GatewayFileSummaryRow{}
+	for rows.Next() {
+		var r GatewayFileSummaryRow
+		if err := rows.Scan(&r.UserID, &r.Username, &r.DisplayName, &r.Files, &r.Bytes, &r.Expired, &r.Earliest); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GatewayFileTotals 返回全量合计（文件数 / 字节数 / 已过期数）。
+func GatewayFileTotals(db *sql.DB) (files, bytes, expired int64, err error) {
+	err = db.QueryRow(`SELECT count(*), COALESCE(sum(size_bytes), 0),
+	                          count(*) FILTER (WHERE expires_at IS NOT NULL AND expires_at <= now())
+	                     FROM gateway_files`).Scan(&files, &bytes, &expired)
+	return files, bytes, expired, err
+}
+
+// ListExpiredGatewayFiles 取一批已过期行（自动回收/管理端清理用），按过期时间升序。
+func ListExpiredGatewayFiles(db *sql.DB, limit int) ([]string, error) {
+	if limit <= 0 || limit > 2000 {
+		limit = 500
+	}
+	rows, err := db.Query(`SELECT file_id FROM gateway_files
+	                        WHERE expires_at IS NOT NULL AND expires_at <= now()
+	                        ORDER BY expires_at ASC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// ListGatewayFilesForPurge 取一批"按条件可清理"的行（管理端按员工/状态清理用）。
+func ListGatewayFilesForPurge(db *sql.DB, q GatewayFileQuery, limit int) ([]string, error) {
+	q = normalizeGatewayFileQuery(q)
+	if limit <= 0 || limit > 2000 {
+		limit = 500
+	}
+	where, args := gatewayFileWhere(q)
+	args = append(args, limit)
+	rows, err := db.Query(`SELECT g.file_id FROM gateway_files g`+where+` ORDER BY g.created_at ASC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }

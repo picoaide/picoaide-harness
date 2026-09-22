@@ -40,6 +40,9 @@ const (
 	// SettingMaxFileRefs / SettingBodyParseBudgetMB 是网关页可配的两个键。
 	SettingMaxFileRefs       = "gateway.max_file_refs"
 	SettingBodyParseBudgetMB = "gateway.body_parse_budget_mb"
+	// SettingFileExpiryDays：网关强制执行的**文件保留上限**（天）。见 files.go 的
+	// enforceFileExpiry：客户端没带过期时间、或要得比这个还久，一律按上限落台账。
+	SettingFileExpiryDays = "gateway.file_expiry_days"
 
 	// DefaultMaxFileRefsPerRequest：单请求 file_id 引用数上限的缺省值。
 	//
@@ -62,6 +65,13 @@ const (
 	MinBodyParseBudgetMB = 64
 	MaxBodyParseBudgetMB = 8192
 
+	// DefaultFileExpiryDays：文件保留上限的缺省值（天）。
+	// 上游允许 1 小时~30 天或永久，但**公司共享配额**（25 GiB / 10000 文件）要求
+	// 保留期不能任人拉长：缺省 7 天，管理端可配 1~30 天。
+	DefaultFileExpiryDays = 7
+	MinFileExpiryDays     = 1
+	MaxFileExpiryDays     = 30
+
 	// gatewayLimitsTTL：进程内缓存的有效期。管理端保存后立即 InvalidateGatewayLimits()。
 	gatewayLimitsTTL = 10 * time.Second
 )
@@ -70,6 +80,8 @@ const (
 type gatewayLimits struct {
 	maxFileRefs int
 	budgetBytes int64
+	// fileExpiry 是文件保留上限（缺省 7 天，可配 1~30 天）。
+	fileExpiry time.Duration
 }
 
 var gatewayLimitsCache struct {
@@ -92,6 +104,7 @@ func gatewayLimitsFor(db *sql.DB) gatewayLimits {
 	def := gatewayLimits{
 		maxFileRefs: DefaultMaxFileRefsPerRequest,
 		budgetBytes: int64(DefaultBodyParseBudgetMB) << 20,
+		fileExpiry:  DefaultFileExpiryDays * 24 * time.Hour,
 	}
 	if db == nil {
 		return def
@@ -109,6 +122,9 @@ func gatewayLimitsFor(db *sql.DB) gatewayLimits {
 		}
 		if n, err := strconv.Atoi(strings.TrimSpace(all[SettingBodyParseBudgetMB])); err == nil && n >= MinBodyParseBudgetMB && n <= MaxBodyParseBudgetMB {
 			out.budgetBytes = int64(n) << 20
+		}
+		if n, err := strconv.Atoi(strings.TrimSpace(all[SettingFileExpiryDays])); err == nil && n >= MinFileExpiryDays && n <= MaxFileExpiryDays {
+			out.fileExpiry = time.Duration(n) * 24 * time.Hour
 		}
 	}
 	gatewayLimitsCache.val = out
@@ -129,6 +145,15 @@ func InvalidateGatewayLimits() {
 func ParseMaxFileRefs(v string) (int, bool) {
 	n, err := strconv.Atoi(strings.TrimSpace(v))
 	if err != nil || n <= 0 || n > MaxMaxFileRefsPerRequest {
+		return 0, false
+	}
+	return n, true
+}
+
+// ParseFileExpiryDays 供管理端保存前校验（0/false 表示非法）。
+func ParseFileExpiryDays(v string) (int, bool) {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < MinFileExpiryDays || n > MaxFileExpiryDays {
 		return 0, false
 	}
 	return n, true
