@@ -210,20 +210,24 @@ func PurgeExpiredGatewayFiles(db *sql.DB, limit int) (int64, error) {
 	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.Query(
-		// 口径与另外两处（回收候选列表、管理端清理）一致：**租约内**的认领行跳过，
-		// 租约过期的标记行可以清（认领方多半已经死了）。
+		// 口径比另外两处**更严**：只要带回收标记就跳过（不看租约）。
 		//
-		// 分工说明：本函数只清**台账行**，不删上游对象 —— 上游那份由回收器负责；
-		// 上传重写把每个新上传的 `expires_after` 收敛到平台上限后，上游对象会自己到期，
-		// 所以"先清行、后由上游自清"不会长期泄漏配额。**例外**是改造前的"永久"老行
-		// （上游无过期时间）：它们靠回收器的 `NormalizeLegacyPermanentGatewayFiles`
-		// 补上过期时间后再由回收器删上游；若本函数先一步删了行，那份对象就再无凭据
-		// （已认账的残留，见 06-database.md）。
+		// 为什么更严（审计 R8 P3 的口径差异，这里说明为有意）：本函数只清**台账行**、
+		// 不删上游对象，而行是回收器唯一的"清理责任"凭据 —— 把一个正在被认领的行删掉，
+		// 万一回收器随后崩溃/中断，那份上游对象就再无凭据（配额静默泄漏）。候选列表与
+		// 管理端清理允许处理"租约过期的标记行"，是因为它们各自都还有别的收敛路径
+		// （列表：重新认领；管理端：管理员显式删除）。
+		//
+		// 上游那份对象由回收器负责删除；上传重写把新上传的 `expires_after` 收敛到平台
+		// 上限后，上游对象会自己到期，所以"台账行先清、上游自清"不会长期泄漏配额。
+		// **例外**是改造前的"永久"老行（上游无过期时间）：靠回收器的
+		// `NormalizeLegacyPermanentGatewayFiles` 补上过期时间后再删上游；若本函数先一步
+		// 清了行，那份对象就再无凭据（已认账的残留，见 06-database.md）。
 		`SELECT file_id FROM gateway_files
 		 WHERE expires_at IS NOT NULL AND expires_at <= now()
-		   AND (reaping_at IS NULL OR reaping_at < now() - make_interval(secs => ?))
+		   AND reaping_at IS NULL
 		 ORDER BY expires_at
-		 LIMIT ? FOR UPDATE SKIP LOCKED`, ReapClaimLease.Seconds(), limit,
+		 LIMIT ? FOR UPDATE SKIP LOCKED`, limit,
 	)
 	if err != nil {
 		return 0, err
