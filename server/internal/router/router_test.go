@@ -143,6 +143,15 @@ func TestNamespaces(t *testing.T) {
 		"POST /completions",
 		"POST /v1/responses",
 		"POST /responses",
+		// Files API(2026-09-22):客户端默认用它上传图片并复用 file_id
+		"POST /v1/files",
+		"POST /files",
+		"GET /v1/files",
+		"GET /files",
+		"GET /v1/files/:file_id",
+		"GET /files/:file_id",
+		"DELETE /v1/files/:file_id",
+		"DELETE /files/:file_id",
 	} {
 		if !routes[want] {
 			t.Fatalf("missing route: %s", want)

@@ -24,12 +24,22 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
-// defaultRateLimit is the default per-user requests per minute.
-const defaultRateLimit = 60
+// defaultRateLimit 是每用户每分钟请求上限的缺省值；**0 = 不限制**。
+//
+// 2026-09-22 与官方口径对齐：DeepSeek 官方只限**账号级并发**（deepseek-flash
+// 2500 / deepseek-v4-pro 500 并发，超出才 429），不设请求速率上限
+// （api-docs.deepseek.com/quick_start/rate_limit）。此前缺省 60 req/min 是本地
+// 自设的公平性闸门：一条长任务扇出多个并行子代理时必然打满（现场实测某会话
+// 424 次 429），而它并不对应上游任何约束。需要限速的部署仍可用 settings
+// `gateway.rate_limit` 显式开启（>0 生效，0/缺省 = 不限制）。
+const defaultRateLimit = 0
 
-// maxChatBody caps the chat completions request body (memory guard; typical
-// requests are a few hundred KB even with long context).
-const maxChatBody = 16 << 20
+// maxChatBody caps the chat completions request body (memory guard).
+//
+// 2026-09-22 由 16MiB 提到 64MiB：长会话（65 万 token 级）请求体约 3MiB 且随
+// 上下文继续增长，16MiB 在"多图 + 大规模工具结果回灌"下余量偏薄。这是**内存**
+// 闸门（网关整段读进内存），64MiB × 并发数是内存上界。
+const maxChatBody = 64 << 20
 
 // maxUpstreamBody caps a non-stream upstream response body (C-8); oversized
 // responses are refused with 502 instead of being buffered unboundedly.
@@ -74,15 +84,15 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 		return
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxChatBody)
-	raw, err := io.ReadAll(c.Request.Body)
-	var maxErr *http.MaxBytesError
-	if errors.As(err, &maxErr) {
-		serverauth.WriteError(c, http.StatusRequestEntityTooLarge, "VALIDATION", "请求体过大")
+	// 读体统一走 readRequestBody(放宽读预算 + 三类失败分类,2026-09-22)。
+	raw, ok := readRequestBody(c, maxChatBody)
+	if !ok {
 		return
 	}
-	if err != nil {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+	// 出站体加工(2026-09-22):校验 file_id 引用归属 + 按端点注入平台 user_id。
+	// raw 保持**客户端原始字节**(计量侧按它估算 prompt),转发用 outbound。
+	outbound, ok := prepareOutboundBody(c, a.DB, user.ID, raw, identityOpenAI)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -140,29 +150,38 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 	var respSecrets []string   // 成功 provider 的官方 key(响应脱敏用)
 	var chosenProviderID int64 // 实际命中的 provider(计费取价用,P1-6)
 	for i := range ups {
-		body := raw
+		body := outbound
 		if ups[i].Channel != "" {
 			if ch, ok := channels.Get(ups[i].Channel); ok {
 				ov, rm := ch.RequestOverrides(req.Model)
-				if raw2, err := applyChannelOverrides(body, ov, rm); err == nil {
+				if raw2, err := a.applyChannelOverrides(body, ov, rm); err == nil {
 					body = raw2
+				} else if a.rejectBusyBodyEdit(c, usageID, err) {
+					return
 				}
 			}
 		}
 		if defaultParams != "" {
-			if raw2, err := applyMaxTokensDefault(body, defaultParams); err == nil {
+			if raw2, err := a.applyMaxTokensDefault(body, defaultParams); err == nil {
 				body = raw2
+			} else if a.rejectBusyBodyEdit(c, usageID, err) {
+				return
 			}
 		}
 		// P1-1 (metering): every streaming request must ask the upstream for
 		// usage in the final SSE chunk, otherwise the pending usage row can
 		// never be backfilled and metering is silently bypassed.
 		if req.Stream {
-			if raw2, err := applyStreamUsageRequest(body); err == nil {
+			if raw2, err := a.applyStreamUsageRequest(body); err == nil {
 				body = raw2
+			} else if a.rejectBusyBodyEdit(c, usageID, err) {
+				return
 			}
 		}
 		resp, err = a.forward(c, &ups[i], body, req.Stream)
+		if a.rejectForwardError(c, usageID, err) {
+			return
+		}
 		if err == nil {
 			respSecrets = []string{ups[i].APIKey}
 			chosenProviderID = ups[i].ID
@@ -196,6 +215,64 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 	a.serveJSON(c, resp, user.ID, chosenProviderID, req.Model, respSecrets, billingKindChat, raw)
 }
 
+// db 返回 API 的数据库句柄（nil 安全：测试里直接调 helper 时按可配数值的缺省值走）。
+func (a *API) db() *sql.DB {
+	if a == nil {
+		return nil
+	}
+	return a.DB
+}
+
+// discardPendingUsage 丢弃本轮已建的 pending usage 行（否则留下永不回填的悬挂行）。
+func (a *API) discardPendingUsage(usageID int64) {
+	if usageID > 0 && a.DB != nil {
+		if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
+			log.Printf("gateway: delete pending usage: %v", err)
+		}
+	}
+}
+
+// rejectBusyBodyEdit 处理"候选循环内的整 body 编辑撞上内存闸门"：清 pending 行 +
+// 写 503 SERVER（可重试），返回 true 表示调用方必须立即 return（不要试下一个 provider）。
+func (a *API) rejectBusyBodyEdit(c *gin.Context, usageID int64, err error) bool {
+	if !errors.Is(err, errBodyParseBusy) {
+		return false
+	}
+	a.discardPendingUsage(usageID)
+	writeBodyParseBusy(c)
+	return true
+}
+
+// rejectForwardError 处理**转发前**的本地拒绝：出站体不是 JSON 对象 ⇒ 400；
+// 内存闸门打满 ⇒ 503 SERVER。两种情况都已写出响应并清掉 pending usage 行，
+// 返回 true 表示调用方必须立即 return（不要继续试下一个 provider）。
+func (a *API) rejectForwardError(c *gin.Context, usageID int64, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, errBodyParseBusy):
+		a.discardPendingUsage(usageID)
+		writeBodyParseBusy(c)
+		return true
+	case errors.Is(err, errOutboundBodyNotJSON):
+		a.rejectBadOutboundBody(c, usageID)
+		return true
+	}
+	return false
+}
+
+// rejectBadOutboundBody 处理"最后一道闸门判定出站体不是 JSON 对象"这一情形：
+// 清掉本轮已建的 pending usage 行（否则留下永不回填的悬挂行），并写 400。
+//
+// 正常情况下不可达 —— 聊天类端点在更早处已经用 prepareOutboundBody 统一校验过，
+// 走到这里说明上游闸门与本地判定不一致（编程错误/中间重编码 bug）；显式收口是为了
+// 让"任何一道闸门都 fail-closed"这条不变量成立（审计 2026-09-22 F 路 P0-1）。
+func (a *API) rejectBadOutboundBody(c *gin.Context, usageID int64) {
+	a.discardPendingUsage(usageID)
+	log.Printf("gateway: outbound body rejected before forwarding (not a JSON object)")
+	serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体不是合法 JSON")
+}
+
 // maxOutputFromDefaultParams 从模型 default_params JSON 读取 max_output。
 // ok=false 表示 JSON 里没有该字段;解析失败返回 err。
 func maxOutputFromDefaultParams(params string) (int64, bool, error) {
@@ -217,23 +294,21 @@ func maxOutputFromDefaultParams(params string) (int64, bool, error) {
 // applyMaxTokensDefault:客户端未传 max_tokens 时,从模型 default_params.max_output 注入。
 // 无 default_params/解析失败时原样返回。支持 max_completion_tokens 模型的同语义双键
 // (审计2026-L17:注入 max_tokens 与既有 max_completion_tokens 冲突)。
-func applyMaxTokensDefault(raw []byte, defaultParams string) ([]byte, error) {
-	var body map[string]any
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return raw, err
-	}
-	if _, ok := body["max_tokens"]; ok {
-		return raw, nil
-	}
-	if _, ok := body["max_completion_tokens"]; ok {
-		return raw, nil
-	}
-	v, ok, err := maxOutputFromDefaultParams(defaultParams)
-	if err != nil || !ok {
-		return raw, nil
-	}
-	body["max_tokens"] = v
-	return json.Marshal(body)
+func (a *API) applyMaxTokensDefault(raw []byte, defaultParams string) ([]byte, error) {
+	return rewriteJSONObjectBody(a.db(), raw, func(body map[string]any) error {
+		if _, ok := body["max_tokens"]; ok {
+			return errBodyNoChange
+		}
+		if _, ok := body["max_completion_tokens"]; ok {
+			return errBodyNoChange
+		}
+		v, ok, err := maxOutputFromDefaultParams(defaultParams)
+		if err != nil || !ok {
+			return errBodyNoChange
+		}
+		body["max_tokens"] = v
+		return nil
+	})
 }
 
 // applyStreamUsageRequest injects stream_options.include_usage=true into a
@@ -247,34 +322,30 @@ func applyMaxTokensDefault(raw []byte, defaultParams string) ([]byte, error) {
 // 收尾只能走字节估算(prompt 侧恒记 0,completion 侧被 maxEstimatedCompletionTokens
 // 截顶),被计费方可以一行 JSON 精确关掉自己的计量表。现在无条件写 true
 // (客户端已给的其它 stream_options 键保留),与 P1-1 的本意一致。
-func applyStreamUsageRequest(raw []byte) ([]byte, error) {
-	var body map[string]any
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return raw, err
-	}
-	stream, _ := body["stream"].(bool)
-	if !stream {
-		return raw, nil
-	}
-	if m, isMap := body["stream_options"].(map[string]any); isMap {
-		m["include_usage"] = true
-		return json.Marshal(body)
-	}
-	body["stream_options"] = map[string]any{"include_usage": true}
-	return json.Marshal(body)
+func (a *API) applyStreamUsageRequest(raw []byte) ([]byte, error) {
+	return rewriteJSONObjectBody(a.db(), raw, func(body map[string]any) error {
+		stream, _ := body["stream"].(bool)
+		if !stream {
+			return errBodyNoChange // 非流式请求不改体
+		}
+		if m, isMap := body["stream_options"].(map[string]any); isMap {
+			m["include_usage"] = true
+			return nil
+		}
+		body["stream_options"] = map[string]any{"include_usage": true}
+		return nil
+	})
 }
 
 // applyChannelOverrides 深合并 overrides 进请求体,并删除 removeKeys 中的键。
-func applyChannelOverrides(raw []byte, overrides map[string]any, removeKeys []string) ([]byte, error) {
-	var body map[string]any
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return raw, err
-	}
-	for _, k := range removeKeys {
-		delete(body, k)
-	}
-	deepMerge(body, overrides)
-	return json.Marshal(body)
+func (a *API) applyChannelOverrides(raw []byte, overrides map[string]any, removeKeys []string) ([]byte, error) {
+	return rewriteJSONObjectBody(a.db(), raw, func(body map[string]any) error {
+		for _, k := range removeKeys {
+			delete(body, k)
+		}
+		deepMerge(body, overrides)
+		return nil
+	})
 }
 
 // deepMerge 将 src 合并进 dst(嵌套 map 递归合并,标量覆盖)。
@@ -316,9 +387,14 @@ func upstreamURLFor(base, endpoint string) string {
 // provider (re-sending to the same one could double-bill). 4xx responses are
 // returned as-is (client error, no failover); connection errors, 5xx and
 // header timeouts return an error, which the caller treats as failover-eligible.
-func (a *API) forward(c *gin.Context, up *Upstream, raw []byte, stream bool) (*http.Response, error) {
+func (a *API) forward(c *gin.Context, up *Upstream, body outboundBody, stream bool) (*http.Response, error) {
 	// P0-4 服务端侧第二道闸门：出站请求体剔除上游 DSH 私有扩展字段（见 sanitize.go）。
-	raw = sanitizeOutboundBody(raw)
+	// 净化走统一往返（同一内存闸门 + 同一编码器口径），失败 fail-closed：
+	// 不是 JSON 对象 ⇒ errOutboundBodyNotJSON（400）；闸门打满 ⇒ errBodyParseBusy（503）。
+	clean, err := sanitizeOutboundBody(a.db(), []byte(body))
+	if err != nil {
+		return nil, err
+	}
 	url := upstreamURL(up.BaseURL)
 	client := a.client
 	if stream {
@@ -331,7 +407,7 @@ func (a *API) forward(c *gin.Context, up *Upstream, raw []byte, stream bool) (*h
 	if stream {
 		reqCtx = context.WithoutCancel(reqCtx)
 	}
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(clean))
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +478,7 @@ func redactHeaderValue(value string, secrets []string) string {
 // secrets: 本次请求使用的上游官方 key——上游若在响应中回显,透传前脱敏。
 // kind: 端点标识(计费 kind,见 billingKind*),不再硬编码 "chat"。
 // requestBytes: 实际发往上游的请求体字节数(P0-1:prompt 侧兜底估算用)。
-func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID, providerID int64, model string, secrets []string, kind string, requestBody []byte) {
+func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID, providerID int64, model string, secrets []string, kind string, requestBody clientBody) {
 	defer resp.Body.Close()
 	type readResult struct {
 		body []byte
@@ -549,7 +625,7 @@ func sanitizeUpstreamError(body []byte, secrets []string) []byte {
 // 在拿到真实 usage chunk 与不过度占用上游资源之间折中。
 const streamDrainTimeout = 2 * time.Minute
 
-func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, secrets []string, requestBody []byte, promptTokenCap int64) {
+func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, secrets []string, requestBody clientBody, promptTokenCap int64) {
 	defer resp.Body.Close()
 	// upstream 4xx: no SSE to stream, the pending row is dropped
 	if resp.StatusCode >= 400 {
@@ -1376,9 +1452,10 @@ func (a *API) rateLimitPerMinute() int {
 		return defaultRateLimit
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(v))
-	if err != nil || n <= 0 {
+	if err != nil {
 		return defaultRateLimit
 	}
+	// 0 / 负数 = 不限制(与官方一致:官方只限账号级并发,不限请求速率)。
 	return n
 }
 
@@ -1416,7 +1493,12 @@ func newRateLimiter() *rateLimiter {
 }
 
 // allow reports whether the user may proceed; rate is tokens per minute.
+// rate <= 0 表示不限制(缺省,与官方口径一致):此时既不建桶也不消耗令牌,
+// 避免无上限部署下白建 10000 个桶并触发驱逐扫描。
 func (l *rateLimiter) allow(userID int64, rate int) bool {
+	if rate <= 0 {
+		return true
+	}
 	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()

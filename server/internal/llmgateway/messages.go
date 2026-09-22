@@ -19,9 +19,10 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
-// maxMessagesBody caps the Anthropic Messages request body (search requests
-// are small; the chat cap is already 16MB, keep the same margin policy).
-const maxMessagesBody = 16 << 20
+// maxMessagesBody caps the Anthropic Messages request body (memory guard).
+// 2026-09-22 与 chat 同口径提到 64MiB(见 maxChatBody 注释):Anthropic 路由同样
+// 承载长会话(含内联图片),旧的 16MiB 余量与 chat 一致地偏薄。
+const maxMessagesBody = 64 << 20
 
 // anthropicUsage parses token counts from an Anthropic Messages response body
 // (non-stream) or one SSE "data:" line (stream). Returns
@@ -330,15 +331,14 @@ func (a *API) handleMessages(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 		return
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxMessagesBody)
-	raw, err := io.ReadAll(c.Request.Body)
-	var maxErr *http.MaxBytesError
-	if errors.As(err, &maxErr) {
-		serverauth.WriteError(c, http.StatusRequestEntityTooLarge, "VALIDATION", "请求体过大")
+	raw, ok := readRequestBody(c, maxMessagesBody)
+	if !ok {
 		return
 	}
-	if err != nil {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+	// 出站体加工(2026-09-22):校验 file_id 引用归属 + 按端点注入平台 user_id。
+	// raw 保持**客户端原始字节**(计量侧按它估算 prompt),转发用 outbound。
+	outbound, ok := prepareOutboundBody(c, a.DB, user.ID, raw, identityAnthropic)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -393,7 +393,10 @@ func (a *API) handleMessages(c *gin.Context) {
 	var respSecrets []string   // 成功 provider 的官方 key(响应脱敏用)
 	var chosenProviderID int64 // 实际命中的 provider(计费取价用,P1-6)
 	for i := range ups {
-		resp, err = a.forwardAnthropic(c, &ups[i], raw, req.Stream)
+		resp, err = a.forwardAnthropic(c, &ups[i], outbound, req.Stream)
+		if a.rejectForwardError(c, usageID, err) {
+			return
+		}
 		if err == nil {
 			respSecrets = []string{ups[i].APIKey}
 			chosenProviderID = ups[i].ID
@@ -445,9 +448,14 @@ func anthropicBaseURL(base, protocol string) string {
 // `x-api-key` / `authorization` / `anthropic-version` are dropped: only the
 // upstream key the server owns is sent, so a client can never inject its own
 // credential or version drift on a proxied search.
-func (a *API) forwardAnthropic(c *gin.Context, up *Upstream, raw []byte, stream bool) (*http.Response, error) {
+func (a *API) forwardAnthropic(c *gin.Context, up *Upstream, body outboundBody, stream bool) (*http.Response, error) {
 	// P0-4 服务端侧第二道闸门：出站请求体剔除上游 DSH 私有扩展字段（见 sanitize.go）。
-	raw = sanitizeOutboundBody(raw)
+	// 净化走统一往返（同一内存闸门 + 同一编码器口径），失败 fail-closed：
+	// 不是 JSON 对象 ⇒ errOutboundBodyNotJSON（400）；闸门打满 ⇒ errBodyParseBusy（503）。
+	clean, err := sanitizeOutboundBody(a.db(), []byte(body))
+	if err != nil {
+		return nil, err
+	}
 	url := upstreamURLFor(anthropicBaseURL(up.BaseURL, up.Protocol), "/messages")
 	client := a.client
 	if stream {
@@ -460,7 +468,7 @@ func (a *API) forwardAnthropic(c *gin.Context, up *Upstream, raw []byte, stream 
 	if stream {
 		reqCtx = context.WithoutCancel(reqCtx)
 	}
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(clean))
 	if err != nil {
 		return nil, err
 	}

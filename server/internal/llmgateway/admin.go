@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -80,6 +81,13 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	serverauth.AdminRoute(g, "GET", "/channels", serverauth.PermGatewayRead, func(c *gin.Context) { listChannelsAdmin(c) })
 	serverauth.AdminRoute(g, "POST", "/providers/:id/sync", serverauth.PermGatewayWrite, func(c *gin.Context) { syncOneAdmin(c, db) })
 	serverauth.AdminRoute(g, "POST", "/providers/sync-all", serverauth.PermGatewayWrite, func(c *gin.Context) { syncAllAdmin(c, db) })
+	// 网关文件台账管理面(2026-09-22):与生产路由树(internal/router)逐条对齐 ——
+	// 测试树缺一条就会让对应用例 404（本仓既有约定:测试树必须镜像生产路径）。
+	api := &API{DB: db, client: &http.Client{Transport: newUpstreamTransport()}}
+	serverauth.AdminRoute(g, "GET", "/gateway/files", serverauth.PermGatewayRead, func(c *gin.Context) { listGatewayFilesAdmin(c, db) })
+	serverauth.AdminRoute(g, "GET", "/gateway/files/summary", serverauth.PermGatewayRead, func(c *gin.Context) { gatewayFilesSummaryAdmin(c, db) })
+	serverauth.AdminRoute(g, "DELETE", "/gateway/files/:file_id", serverauth.PermGatewayWrite, func(c *gin.Context) { deleteGatewayFileAdmin(c, api, db) })
+	serverauth.AdminRoute(g, "POST", "/gateway/files/purge", serverauth.PermGatewayWrite, func(c *gin.Context) { purgeGatewayFilesAdmin(c, api, db) })
 }
 
 // syncFetchFn is the fetchFn used by immediate post-save syncs; nil uses
@@ -841,11 +849,26 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	rateLimit := settings["gateway.rate_limit"]
 	if rateLimit == "" {
-		rateLimit = "60"
+		// 缺省 0 = 不限制(与官方一致:官方只限账号级并发,不限请求速率)。
+		rateLimit = "0"
 	}
 	retention := settings[serverstore.RetentionMonthsSetting]
 	if retention == "" {
 		retention = fmt.Sprintf("%d", serverstore.DefaultRetentionMonths)
+	}
+	// 出站体加工的两个闸门值(2026-09-22):缺省即 Default*,空值一律回落到缺省展示 ——
+	// 管理端永远看到一个具体数字,不需要理解"空 = 缺省"。
+	maxFileRefs := settings[SettingMaxFileRefs]
+	if maxFileRefs == "" {
+		maxFileRefs = strconv.Itoa(DefaultMaxFileRefsPerRequest)
+	}
+	parseBudget := settings[SettingBodyParseBudgetMB]
+	if parseBudget == "" {
+		parseBudget = strconv.Itoa(DefaultBodyParseBudgetMB)
+	}
+	fileExpiryDays := settings[SettingFileExpiryDays]
+	if fileExpiryDays == "" {
+		fileExpiryDays = strconv.Itoa(DefaultFileExpiryDays)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"default_model":             settings["gateway.default_model"],
@@ -860,6 +883,9 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 		"glitchtip_organization":    settings["web.glitchtip_organization"],
 		"default_thinking_level":    settings["web.default_thinking_level"],
 		"server_base_url":           settings["server.base_url"],
+		"max_file_refs":             maxFileRefs,    // 单请求 file_id 引用数上限
+		"body_parse_budget_mb":      parseBudget,    // 进程级在飞请求体字节预算(MiB)
+		"file_expiry_days":          fileExpiryDays, // 网关强制执行的文件保留上限(天)
 	})
 }
 
@@ -914,6 +940,9 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		GlitchTipOrg            *string         `json:"glitchtip_organization"`
 		DefaultThinkingLevel    *string         `json:"default_thinking_level"`
 		ServerBaseURL           *string         `json:"server_base_url"`
+		MaxFileRefs             *FlexibleString `json:"max_file_refs"`
+		BodyParseBudgetMB       *FlexibleString `json:"body_parse_budget_mb"`
+		FileExpiryDays          *FlexibleString `json:"file_expiry_days"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
@@ -932,8 +961,30 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		return
 	}
 	if req.RateLimit != nil && *req.RateLimit != "" {
-		if n, err := strconv.Atoi(string(*req.RateLimit)); err != nil || n <= 0 || n > 100000 {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "rate_limit 必须是正整数")
+		// 0 = 不限制(缺省,与官方口径一致);上限 100000 防误填天文数字。
+		if n, err := strconv.Atoi(string(*req.RateLimit)); err != nil || n < 0 || n > 100000 {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "rate_limit 必须是 0~100000 的整数(0=不限制)")
+			return
+		}
+	}
+	if req.MaxFileRefs != nil && *req.MaxFileRefs != "" {
+		if _, ok := ParseMaxFileRefs(string(*req.MaxFileRefs)); !ok {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+				fmt.Sprintf("max_file_refs 必须是 1~%d 的整数", MaxMaxFileRefsPerRequest))
+			return
+		}
+	}
+	if req.BodyParseBudgetMB != nil && *req.BodyParseBudgetMB != "" {
+		if _, ok := ParseBodyParseBudgetMB(string(*req.BodyParseBudgetMB)); !ok {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+				fmt.Sprintf("body_parse_budget_mb 必须是 %d~%d 的整数", MinBodyParseBudgetMB, MaxBodyParseBudgetMB))
+			return
+		}
+	}
+	if req.FileExpiryDays != nil && *req.FileExpiryDays != "" {
+		if _, ok := ParseFileExpiryDays(string(*req.FileExpiryDays)); !ok {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+				fmt.Sprintf("file_expiry_days 必须是 %d~%d 的整数", MinFileExpiryDays, MaxFileExpiryDays))
 			return
 		}
 	}
@@ -1090,6 +1141,24 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		}
 	}
 	// 高峰窗口:显式空串 = 移除(无峰谷价),显式合法 JSON = 写入(审计修复 H1)
+	if req.MaxFileRefs != nil {
+		if err := auditSetSettingTx(db, tx, SettingMaxFileRefs, "单请求文件引用上限", string(*req.MaxFileRefs), &changes); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if req.BodyParseBudgetMB != nil {
+		if err := auditSetSettingTx(db, tx, SettingBodyParseBudgetMB, "请求体加工内存预算", string(*req.BodyParseBudgetMB), &changes); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if req.FileExpiryDays != nil {
+		if err := auditSetSettingTx(db, tx, SettingFileExpiryDays, "文件保留上限(天)", string(*req.FileExpiryDays), &changes); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
 	if req.PeakWindows != nil {
 		if err := auditSetSettingTx(db, tx, serverstore.PeakWindowsSetting, "高峰时段", *req.PeakWindows, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
@@ -1169,6 +1238,9 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	// 顺序也要紧:CleanupUsageRetention 经 EffectiveRetentionMonths 读
 	// usage.retention_months,必须在失效之后才能读到本次写入的值。
 	serverstore.InvalidateSettings()
+	// 出站体加工的两个闸门值走自己的进程内 10s TTL 缓存(见 body_memory.go)——
+	// 保存后必须主动失效,否则管理员改完最多 10s 内仍按旧值拒绝/放行。
+	InvalidateGatewayLimits()
 	// 审计**先于**破坏性清理(2026-09-19,N2):配置此刻已经提交生效,"谁改了什么"
 	// 的可追溯性不得取决于 CleanupUsageRetention 的成败 —— 旧实现把 AuditLog
 	// 放在清理之后,清理失败(500「保留清理失败」)会留下"配置已生效但零审计"
@@ -1254,4 +1326,281 @@ func validateUpstreamBaseURL(raw string) error {
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 网关文件台账的管理面（2026-09-22）
+// ---------------------------------------------------------------------------
+//
+// 需求：上游 Files 配额是**每 API key**（全组织共享），管理员需要"按员工看占用量、
+// 能搜索、能排序、能清理"的工具。只读聚合与列表走 gateway:read，删除/清理走
+// gateway:write（路由申报见 internal/router/router.go），全部动作写审计。
+
+// 列表分页的三个数值：与 serverstore.normalizeGatewayFileQuery 的缺省/上限**同源**
+// （那边把 Limit<=0 或 >200 都归一到 50；这里必须在**算出 offset 之前**用同一份
+// 生效值，否则 size 缺省时 offset 恒为 0、分页静默失效）。
+const (
+	defaultGatewayFilePageSize = 50
+	maxGatewayFilePageSize     = 200
+	// maxGatewayFilePage 是页号上限。存在的唯一理由是防溢出：page 取 MaxInt64 时
+	// (page-1)*size 会回绕成**负数**，被 DAO 的 `Offset < 0 ⇒ 0` 兜底成"第一页"
+	// —— 越界页本该返回空集，却把第一页数据当成"最后一页"交给管理员。
+	// 2^20 页 × 200 条 = 2 亿行，远超任何真实台账规模。
+	maxGatewayFilePage = 1 << 20
+)
+
+// adminFileQuery 从查询参数解析过滤/排序/分页条件（数值/排序的非法值一律回落缺省）。
+//
+// `user=` 一律按**用户名**解，数字 ID 走 `user_id=`（审计 2026-09-22 R6 P1-B：
+// 旧实现"先按 ID 解"⇒ 用户名恰好是数字时 `user=2` 会过滤到 id=2 的**另一个员工**、
+// purge 更会删错人）。用户名查不到 ⇒ 空集（不退化成"不过滤"）。
+//
+// 唯一的例外是 `state`：**未知取值必须拒绝**（返回 ok=false），不能静默忽略 ——
+// 静默忽略 = 过滤条件消失，管理员看着"已过期"的筛选结果实际是全量（与 purge
+// 侧同一口径，见 purgeGatewayFilesAdmin 的注释）。
+func adminFileQuery(c *gin.Context, db *sql.DB) (serverstore.GatewayFileQuery, bool) {
+	q := serverstore.GatewayFileQuery{}
+	if v := strings.TrimSpace(c.Query("user_id")); v != "" {
+		if id, err := strconv.ParseInt(v, 10, 64); err == nil && id > 0 {
+			q.UserID = id
+		} else {
+			q.UserID = -1
+		}
+	} else if v := strings.TrimSpace(c.Query("user")); v != "" {
+		if uid, err := serverstore.GetUserByUsername(db, v); err == nil && uid != nil {
+			q.UserID = uid.ID
+		} else {
+			q.UserID = -1
+		}
+	}
+	q.Search = strings.TrimSpace(c.Query("q"))
+	switch strings.TrimSpace(c.Query("state")) {
+	case "", "all":
+	case "expired":
+		q.OnlyExpired = true
+	case "active":
+		q.OnlyActive = true
+	default:
+		return q, false
+	}
+	q.Sort = strings.TrimSpace(c.Query("sort"))
+	q.Desc = c.Query("order") != "asc"
+	size := defaultGatewayFilePageSize
+	if n, err := strconv.Atoi(strings.TrimSpace(c.Query("size"))); err == nil && n > 0 {
+		size = min(n, maxGatewayFilePageSize)
+	}
+	q.Limit = size
+	page := 1
+	if n, err := strconv.Atoi(strings.TrimSpace(c.Query("page"))); err == nil && n > 1 {
+		page = min(n, maxGatewayFilePage)
+	}
+	q.Offset = (page - 1) * q.Limit // 与生效的 size 同源（缺省 size 时旧实现算出 0）
+	return q, true
+}
+
+func listGatewayFilesAdmin(c *gin.Context, db *sql.DB) {
+	q, ok := adminFileQuery(c, db)
+	if !ok {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "state 只支持 active|expired|all")
+		return
+	}
+	rows, total, err := serverstore.ListGatewayFiles(db, q)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取文件台账失败")
+		return
+	}
+	files, bytes, expired, err := serverstore.GatewayFileTotals(db)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取文件台账失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"rows":  rows,
+		"total": total,
+		"totals": gin.H{
+			"files":   files,
+			"bytes":   bytes,
+			"expired": expired,
+		},
+	})
+}
+
+func gatewayFilesSummaryAdmin(c *gin.Context, db *sql.DB) {
+	rows, err := serverstore.GatewayFileSummary(db, strings.TrimSpace(c.Query("sort")), c.Query("order") != "asc")
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取占用汇总失败")
+		return
+	}
+	files, bytes, expired, err := serverstore.GatewayFileTotals(db)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取占用汇总失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"rows": rows,
+		"totals": gin.H{
+			"files":   files,
+			"bytes":   bytes,
+			"expired": expired,
+		},
+	})
+}
+
+func deleteGatewayFileAdmin(c *gin.Context, api *API, db *sql.DB) {
+	fileID := strings.TrimSpace(c.Param("file_id"))
+	if !validGatewayFileID(fileID) {
+		writeFileNotFound(c, fileID)
+		return
+	}
+	// 管理端按 id 删除**不看过期**（列表里的过期行同样有删除按钮；审计 2026-09-22
+	// R6 P2 实测旧实现走 GatewayFileOwner ⇒ 过期行 404，管理员只能等回收器）。
+	if exists, err := serverstore.GatewayFileRowExists(db, fileID); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取文件台账失败")
+		return
+	} else if !exists {
+		writeFileNotFound(c, fileID)
+		return
+	}
+	up, ok := fileUpstream(db)
+	if !ok {
+		serverauth.WriteError(c, http.StatusServiceUnavailable, "SERVER", "没有可用的文件上游")
+		return
+	}
+	if err := deleteUpstreamFile(api.filesHTTPClient(), up, fileID); err != nil {
+		log.Printf("gateway: admin delete file: upstream delete failed: %v", err)
+		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游删除失败，请稍后重试")
+		return
+	}
+	if err := serverstore.DeleteGatewayFileRow(db, fileID); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除台账行失败")
+		return
+	}
+	_ = serverstore.AuditLog(db, auditActor(c), "gateway_file_delete", "file_id="+fileID)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": 1})
+}
+
+// purgeGatewayFilesAdmin 按条件批量清理（上游删除 + 台账删行）。
+//
+// 安全边界：`user` 或 `state` **至少给一个**（不给就等于"清空全公司台账"，
+// 必须走一次显式确认的入口，而不是一个空 body 就全网删除）；单次上限 500 条，
+// 客户端可重复调用。
+func purgeGatewayFilesAdmin(c *gin.Context, api *API, db *sql.DB) {
+	var req struct {
+		User        *string `json:"user"`
+		UserID      *int64  `json:"user_id"`
+		State       *string `json:"state"`
+		ExpiredOnly *bool   `json:"expired_only"`
+		Limit       *int    `json:"limit"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && err != io.EOF {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
+		return
+	}
+	q := serverstore.GatewayFileQuery{}
+	target := "all"
+	if req.UserID != nil {
+		// 显式给了 user_id 就必须是**正整数**：旧实现把 `<=0` 静默忽略 ⇒ 过滤条件
+		// 消失、范围从"某个人"变成"全组织"（`{"user_id":0,"state":"expired"}` 会清掉
+		// 全公司已过期文件）。列表侧同一口径（`?user_id=0` 落空集，fail-closed），
+		// 这里选显式 400 —— 一个自己都不成立的 user_id 只可能是调用方写错了。
+		if *req.UserID <= 0 {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+				"user_id 必须是正整数（用户名请用 user）")
+			return
+		}
+		q.UserID = *req.UserID
+		target = "user_id=" + strconv.FormatInt(*req.UserID, 10)
+	} else if req.User != nil && strings.TrimSpace(*req.User) != "" {
+		// `user` 一律用户名（数字用户名不会被当成 ID —— 删错人的根因，见 adminFileQuery）。
+		v := strings.TrimSpace(*req.User)
+		if uid, err := serverstore.GetUserByUsername(db, v); err == nil && uid != nil {
+			q.UserID = uid.ID
+		} else {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "user 必须是存在的用户名（数字 ID 请用 user_id）")
+			return
+		}
+		target = "user=" + v
+	}
+	// 状态过滤先归一到**一个**取值，再据此设过滤条件与审计范围。
+	//
+	// 为什么不能各写各的：`state` 与 `expired_only` 是同一件事的两种写法
+	// （`{"state":"active","expired_only":true}` 完全可能出现），逐块追加会让审计
+	// detail 写出"state=active state=expired"这种自相矛盾的范围 —— 事后无法据审计
+	// 判断管理员到底清了什么。同时未知 state 必须显式拒绝（静默忽略 = 过滤条件
+	// 消失、范围扩大），所以白名单校验必须排在最前。
+	state := ""
+	if req.State != nil {
+		state = strings.TrimSpace(*req.State)
+	}
+	switch state {
+	case "", "all", "expired", "active":
+	default:
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "state 只支持 active|expired|all")
+		return
+	}
+	// `expired_only=true` 是 `state=expired` 的等价写法（老前端/脚本用），优先级更高；
+	// `state=active` 才是"清理仍然有效的文件"这条危险路径，必须显式给出。
+	if req.ExpiredOnly != nil && *req.ExpiredOnly {
+		state = "expired"
+	}
+	switch state {
+	case "expired":
+		q.OnlyExpired = true
+		target += " state=expired"
+	case "active":
+		q.OnlyActive = true
+		target += " state=active"
+	}
+	if q.UserID == 0 && !q.OnlyExpired && !q.OnlyActive {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "必须指定 user 或 state（避免误清全量台账）")
+		return
+	}
+	// 删**有效**文件必须指名员工（审计 2026-09-22 R6 P1-D 实测：`{"state":"active"}`
+	// 一个请求删掉全组织 6 个有效文件 + 上游对象）。用户 2026-09-22 确认"批量清理可以
+	// 删有效文件"，但**范围必须收敛到某个人**；全组织范围只允许清"已过期"。
+	if q.OnlyActive && q.UserID == 0 {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+			"清理仍然有效的文件必须指定员工（user 或 user_id）；全组织范围只允许清理已过期文件")
+		return
+	}
+	limit := 0
+	if req.Limit != nil {
+		limit = *req.Limit
+	}
+	// 单次上限 500（文档口径）：更大请重复调用，避免一次请求在上游侧打太久。
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+	ids, err := serverstore.ListGatewayFilesForPurge(db, q, limit)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取待清理文件失败")
+		return
+	}
+	if len(ids) == 0 {
+		c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": 0, "failed": 0, "matched": 0})
+		return
+	}
+	up, ok := fileUpstream(db)
+	if !ok {
+		serverauth.WriteError(c, http.StatusServiceUnavailable, "SERVER", "没有可用的文件上游")
+		return
+	}
+	client := api.filesHTTPClient()
+	deleted, failed := 0, 0
+	for _, id := range ids {
+		if err := deleteUpstreamFile(client, up, id); err != nil {
+			log.Printf("gateway: admin purge file: upstream delete failed: %v", err)
+			failed++
+			continue
+		}
+		if err := serverstore.DeleteGatewayFileRow(db, id); err != nil {
+			log.Printf("gateway: admin purge file: delete ledger row failed: %v", err)
+			failed++
+			continue
+		}
+		deleted++
+	}
+	_ = serverstore.AuditLog(db, auditActor(c), "gateway_file_purge",
+		fmt.Sprintf("%s 删除 %d 失败 %d 命中 %d", target, deleted, failed, len(ids)))
+	c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": deleted, "failed": failed, "matched": len(ids)})
 }

@@ -72,9 +72,14 @@ PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -data ./data --bootstrap-admin admin
 |------|------|------|
 | 登录 `POST /api/client/v2/auth/login` | 内存计数器(按 IP+用户名,失败累计,成功/时间窗重置) | - |
 | 管理登录 `POST /api/server/admin/login` | 同上(独立计数器) | - |
-| 网关 `/v1/chat/completions` | per-user 令牌桶(`gateway.rate_limit`,settings 可调,桶上限 10000) | 60/min |
+| 网关 `/v1/chat/completions` | per-user 令牌桶(`gateway.rate_limit`,settings 可调,桶上限 10000) | **0 = 不限制**(2026-09-22 起与官方口径一致:官方只限账号级并发、不设请求速率上限;此前缺省 60/min) |
 
 超限返回 `429 RATE_LIMITED`。
+
+> **升级说明（2026-09-22）**：网关限流的**默认值**由 60/min 改为 0（不限制），但改的是代码缺省，
+> **库里已保存的 `settings.gateway.rate_limit = 60` 不会被自动覆盖** —— 老库升级后仍按 60/min 限流。
+> 要按官方口径放开（官方只限账号级并发、不设请求速率上限），需在管理后台网关页把该值显式改为 0
+> 或清空。并发侧仍由 in-flight 闸门兜底（每用户 32，`PICOAI_GATEWAY_MAX_INFLIGHT_PER_USER` 可调）。
 
 ## 7. 用户模型
 

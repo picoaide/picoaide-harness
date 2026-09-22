@@ -1407,8 +1407,11 @@ func (m *estimationFallbackMonitor) snapshot() (total, consecutive int64) {
 // promptSeen/completionSeen 是**按侧独立**记忆的"上游给出过可用计量(>0)"
 // (r7 r7f1-4,P3):一条零值 usage 行不足以关掉输入侧补估。
 type streamSettlement struct {
-	usageID     int64
-	requestBody []byte
+	usageID int64
+	// requestBody 是**客户端原始字节**（计量唯一基数）：用 clientBody 而不是 []byte，
+	// 让"把出站体（outbound）拿来计费"变成编译错误（审计 2026-09-22 R4 P2：
+	// Anthropic 两条计量路径此前仍是裸 []byte，变异可编译且全绿）。
+	requestBody clientBody
 	// promptTokenCap 是该模型的输入侧补估上限(rc3-5:上下文窗口;0 = 128K 兜底)。
 	promptTokenCap int64
 	// deliveredBody 只为日志保留(诊断"转发了多少、正文多少")。

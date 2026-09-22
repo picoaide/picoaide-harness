@@ -529,8 +529,11 @@ describe('Gateway 保存面(F-07)', () => {
     expect(puts.length).toBe(1)
     const body = puts[0]!
     expect(Object.keys(body).sort()).toEqual([
+      'body_parse_budget_mb',
       'default_model',
       'default_thinking_level',
+      'file_expiry_days',
+      'max_file_refs',
       'peak_windows',
       'rate_limit',
       'retention_months',
@@ -539,6 +542,36 @@ describe('Gateway 保存面(F-07)', () => {
     for (const foreign of ['error_reporting_dsn', 'error_reporting_enabled', 'error_reporting_level', 'error_reporting_heartbeat', 'glitchtip_base_url', 'glitchtip_organization']) {
       expect(body[foreign]).toBeUndefined()
     }
+  })
+
+  // 2026-09-22:服务端把每用户限流缺省从 60 改成 **0 = 不限制**(与官方口径一致:
+  // 官方只限账号级并发、不设请求速率上限)。页面校验若仍是 `rl <= 0`,GET 拿到的
+  // 0 会被自己的前端校验拦下 ⇒ 网关页**任何字段都保存不了**(默认模型/峰谷窗口/
+  // 保留期一起被挡),且 0 在 UI 上不可达(服务端 API 本身接受 0)。
+  it.each([
+    ['服务端下发 rate_limit=0', { rate_limit: '0' }],
+    ['服务端未下发 rate_limit(缺省即 0)', { rate_limit: undefined }],
+  ])('限流 0 = 不限制:%s 时必须能保存', async (_label, payload) => {
+    const puts: Array<Record<string, unknown>> = []
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/gateway' && init?.method === 'PUT') {
+        puts.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+        return { ok: true }
+      }
+      if (path === '/api/server/admin/gateway') {
+        return {
+          default_model: 'deepseek-chat', peak_windows: '', retention_months: '6',
+          default_thinking_level: 'max', server_base_url: '', ...payload,
+        }
+      }
+      return baseImpl(path, init)
+    })
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存')
+    expect(puts.length).toBe(1)
+    expect(puts[0]!.rate_limit).toBe('0')
   })
 })
 
@@ -587,5 +620,73 @@ describe('Gateway 保存告警', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await screen.findByText('已保存')
     expect(document.querySelector('.border-amber-500\\/40')).toBeNull()
+  })
+})
+
+// 2026-09-22 新增的两个闸门字段（单请求文件引用上限 / 请求体加工内存预算）：
+// 前端校验必须与服务端 ParseMaxFileRefs / ParseBodyParseBudgetMB 同口径，
+// 且 GET 未下发时回落到服务端缺省（256 / 128MiB），不能退化成空串提交。
+describe('出站体加工的两个闸门字段', () => {
+  function storeGateway(getBody: Record<string, unknown>) {
+    const puts: Array<Record<string, unknown>> = []
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/gateway' && init?.method === 'PUT') {
+        puts.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+        return { ok: true, warnings: [] }
+      }
+      if (path === '/api/server/admin/gateway') return getBody
+      if (path === '/api/server/admin/providers') return []
+      if (path === '/api/server/admin/models') return []
+      if (path === '/api/server/admin/channels') return { channels: [] }
+      return baseImpl(path, init)
+    })
+    return puts
+  }
+
+  it('GET 未下发时回落到缺省 600 / 128 并原样提交', async () => {
+    const puts = storeGateway({ default_model: 'deepseek-chat', rate_limit: '0', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '' })
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    expect((screen.getByLabelText('单请求文件引用上限(个)') as HTMLInputElement).value).toBe('600')
+    expect((screen.getByLabelText('请求体加工内存预算(MiB)') as HTMLInputElement).value).toBe('128')
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存')
+    expect(puts[0].max_file_refs).toBe('600')
+    expect(puts[0].body_parse_budget_mb).toBe('128')
+    expect(puts[0].file_expiry_days).toBe('7')
+  })
+
+  it('越界值被前端拦下（引用上限 0 与内存预算 32 都不提交）', async () => {
+    const puts = storeGateway({ default_model: 'deepseek-chat', rate_limit: '0', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '' })
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    fireEvent.change(screen.getByLabelText('单请求文件引用上限(个)'), { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText(/单请求文件引用上限必须是 1~4096 的整数/)
+    expect(puts.length).toBe(0)
+    fireEvent.change(screen.getByLabelText('单请求文件引用上限(个)'), { target: { value: '600' } })
+    fireEvent.change(screen.getByLabelText('请求体加工内存预算(MiB)'), { target: { value: '32' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText(/请求体加工内存预算必须是 64~8192 MiB 的整数/)
+    expect(puts.length).toBe(0)
+  })
+
+  it('文件保留上限：越界值被前端拦下（0 与 31 都不提交）', async () => {
+    const puts = storeGateway({ default_model: 'deepseek-chat', rate_limit: '0', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '' })
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    expect((screen.getByLabelText('文件保留上限(天)') as HTMLInputElement).value).toBe('7')
+    fireEvent.change(screen.getByLabelText('文件保留上限(天)'), { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText(/文件保留上限必须是 1~30 天的整数/)
+    expect(puts.length).toBe(0)
+    fireEvent.change(screen.getByLabelText('文件保留上限(天)'), { target: { value: '31' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText(/文件保留上限必须是 1~30 天的整数/)
+    expect(puts.length).toBe(0)
+    fireEvent.change(screen.getByLabelText('文件保留上限(天)'), { target: { value: '7' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存')
+    expect(puts[0].file_expiry_days).toBe('7')
   })
 })

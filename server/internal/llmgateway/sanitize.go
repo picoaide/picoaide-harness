@@ -2,9 +2,22 @@ package llmgateway
 
 import (
 	"bytes"
-	"encoding/json"
+	"database/sql"
+	"errors"
 	"log"
+	"sort"
+	"strings"
 )
+
+// errOutboundBodyNotJSON：最后一道闸门发现出站体**不是 JSON 对象**（解析失败/是数组
+// 或标量）。调用方必须 fail-closed（400），绝不"解析不了就原样放行"。
+//
+// 审计 2026-09-22 F 路 P0-1 的教训：整条链上任何一个 fail-open 的闸门都会变成绕过
+// 全部校验的入口 —— `{"junk":1e999, …他人 file_id…}` 让 map 解析失败，而结构体解析
+// 容忍未知字段，于是 file_id 归属、user_id 覆盖、`dsh_` 剔除三处同时被跳过。聊天类
+// 端点在更早处（prepareOutboundBody）已经做过同样的合法性判定，这里返回该错误意味着
+// **上游闸门与本地判定不一致**（编程错误或中间重编码 bug），属不可达但必须显式处理。
+var errOutboundBodyNotJSON = errors.New("outbound body is not a JSON object")
 
 // upstreamExtensionPrefix 是上游 DSH 私有请求体扩展字段的前缀。
 //
@@ -12,7 +25,9 @@ import (
 // 插件**默认开启**（`packages/session/session-log-deepseek/src/index.ts:39`），
 // 它通过 `ctx.deepseekLlmApiExtensions.register('dsh_session_log', …)` 往每个带
 // 会话的 LLM 请求体顶层塞一份**会话日志后缀**（会话正文 / 工具参数与结果 / 工作区
-// 路径）。而本网关把请求体**逐字节转发**给客户配置的供应商 ⇒ 不做剔除就是
+// 路径）。而本网关把请求体转发给客户配置的供应商（聊天类端点会先经
+// prepareOutboundBody 重编码：注入 user_id + 校验 file_id 归属；其余端点仍按
+// 原始字节转发）⇒ 不做剔除就是
 // 「会话原文出境」，企业客户不可接受。
 //
 // 两道闸门（缺一不可，深度防御）：
@@ -35,63 +50,62 @@ import (
 // 「上游新增默认行」清单兜住（本次就是靠审计发现的）。
 const upstreamExtensionPrefix = "dsh_"
 
-// stripUpstreamExtensions 剔除出站请求体顶层的上游私有扩展字段。
+// removeUpstreamExtensions 剔除体内的顶层上游私有扩展字段，返回被删键名（已排序）。
 //
 // 语义边界（**故意保守**，因为转发与计费是主路径、净化只是附带动作）：
 //   - 只删**顶层**键；不动 `messages`/`input`/`tools`/`system` 等契约字段，
 //     也不动嵌套结构里同名的字符串（那不是上游的扩展面）；
-//   - 请求体不含该前缀时**原样返回同一段字节**（零重编码：网关的既有语义是
-//     "逐字节转发"，不能因为净化而改变正常的字节形态与键序）；
-//   - 非 JSON 对象 / 解析失败时原样返回并报错，由调用方决定怎么记日志 ——
-//     绝不因为净化动作让一个合法请求失败。
-//
-// 返回 (可能被净化的体, 是否发生剔除, 错误)。
-func stripUpstreamExtensions(raw []byte) ([]byte, bool, error) {
-	if !bytes.Contains(raw, []byte(upstreamExtensionPrefix)) {
-		return raw, false, nil
-	}
-	var body map[string]any
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return raw, false, err
-	}
-	removed := make([]string, 0, 1)
+//   - 一个键都没删时返回空切片（调用方据此保持**原始字节**，零重编码）；
+//   - 解析/编码由 `rewriteJSONObjectBody` 负责（同一内存闸门 + 同一编码器口径）。
+func removeUpstreamExtensions(body map[string]any) []string {
+	var removed []string
 	for key := range body {
-		if len(key) >= len(upstreamExtensionPrefix) && key[:len(upstreamExtensionPrefix)] == upstreamExtensionPrefix {
+		if strings.HasPrefix(key, upstreamExtensionPrefix) {
 			delete(body, key)
 			removed = append(removed, key)
 		}
 	}
-	if len(removed) == 0 {
-		// 前缀只出现在值里（例如某条消息的正文）—— 保持原字节。
-		return raw, false, nil
+	if len(removed) > 1 {
+		sort.Strings(removed) // 日志可复现（map 迭代顺序随机）
 	}
-	out, err := json.Marshal(body)
-	if err != nil {
-		return raw, false, err
-	}
-	// 剔除是**安全事件**：留一条可检索的日志（键名不是秘密，值才是，值不落日志）。
-	log.Printf("gateway: stripped %d upstream request extension field(s) from outbound body: %v", len(removed), removed)
-	return out, true, nil
+	return removed
 }
 
 // sanitizeOutboundBody 是三个转发入口（forward / forwardEndpoint /
-// forwardAnthropic）共用的净化包装：剔除失败只记日志、不改转发语义。
+// forwardAnthropic）共用的净化包装。
 //
 // 三个入口都必须调用它 —— 覆盖 `/v1/chat/completions`、`/v1/completions`、
-// `/v1/responses`、`/v1/messages` 四条出站路径（`/v1/embeddings` 的请求体是
-// 服务端自己拼的 `{model,input}`，没有客户端透传面，故不经过这里）。
+// `/v1/responses`、`/v1/messages` 四条出站路径（`/v1/embeddings` 的客户端体
+// **从不转发**：出站体由服务端按解析后的 input 自建）。
 // 防漏判据在 `sanitize_test.go` 的 `TestEveryForwardHelperSanitizesOutboundBody`
-// （扫描源码：任何 `bytes.NewReader(raw)` 所在函数都必须调用本函数）。
-func sanitizeOutboundBody(raw []byte) []byte {
-	out, stripped, err := stripUpstreamExtensions(raw)
+// （扫描源码：任何构造上游请求的函数都必须调用本函数，或登记在带理由的允许清单里）。
+//
+// ok=false 表示"无法确认这是 JSON 对象" ⇒ 调用方必须 400 收口（见
+// errOutboundBodyNotJSON）。2026-09-22 审计 F 路 P0-1 之前这里是"解析失败即原样
+// 转发"，那是一个 fail-open 闸门。
+func sanitizeOutboundBody(db *sql.DB, raw []byte) ([]byte, error) {
+	// 绝大多数请求体不含该前缀：零重编码直接透传（不占闸门、不解析）。
+	if !bytes.Contains(raw, []byte(upstreamExtensionPrefix)) {
+		return raw, nil
+	}
+	var removed []string
+	out, err := rewriteJSONObjectBody(db, raw, func(body map[string]any) error {
+		removed = removeUpstreamExtensions(body)
+		if len(removed) == 0 {
+			return errBodyNoChange // 前缀只出现在值里 —— 保持原字节
+		}
+		return nil
+	})
 	if err != nil {
-		// 解析失败 = 这段体不是 JSON 对象（真·非法请求会在下游被供应商拒绝）。
-		// 这里只留痕，不改变既有语义。
-		log.Printf("gateway: outbound body left unsanitized (not a JSON object): %v", err)
-		return raw
+		if errors.Is(err, errBodyParseBusy) {
+			return nil, err // 内存闸门打满：调用方 503（可重试），不能悄悄跳过净化
+		}
+		log.Printf("gateway: outbound body rejected (not a JSON object): %v", err)
+		return nil, errOutboundBodyNotJSON
 	}
-	if !stripped {
-		return raw
+	if len(removed) > 0 {
+		// 剔除是**安全事件**：留一条可检索的日志（键名不是秘密，值才是，值不落日志）。
+		log.Printf("gateway: stripped %d upstream request extension field(s) from outbound body: %v", len(removed), removed)
 	}
-	return out
+	return out, nil
 }

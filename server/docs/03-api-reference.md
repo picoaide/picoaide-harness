@@ -92,12 +92,39 @@
 | POST | `/v1/completions` / `/v1/responses` / `/v1/embeddings` | 原生/兼容形态(同网关计量) |
 | POST | `/v1/messages` | Anthropic Messages 兼容(0043,web_search 服务端代理) |
 | GET | `/v1/models` | 可用模型列表 |
+| POST | `/v1/files` | DeepSeek Files API 上传(multipart,2026-09-22) |
+| GET | `/v1/files` | 文件列表(query 透传) |
+| GET/DELETE | `/v1/files/{file_id}` | 检索/删除文件 |
 
-> 无 `/v1` 前缀的官方原生变体(`/chat/completions`、`/completions`、`/responses`、`/embeddings`、`/models`、`/messages`)同样挂载(base_url=server 使用)。
+> 无 `/v1` 前缀的官方原生变体(`/chat/completions`、`/completions`、`/responses`、`/embeddings`、`/models`、`/messages`、`/files`、`/files/{file_id}`)同样挂载(base_url=server 使用)。
 
 ### POST `/v1/chat/completions`
 
-OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹配上游 provider(protocol=`openai`|`anthropic`|`both`,0043/0044)代理转发;非流式/流式(SSE)均支持;响应按 per-user 令牌桶限流(`gateway.rate_limit`,默认 60/min),计量写入 usage 表(含按模型定价折算的 `cost` 费用,元;配置 `usage.peak_windows` 后,高峰窗口外按模型 `offpeak_discount` 打折;缓存命中输入 token 按 `cache_input_price_per_1m`,0029);转发前按**账户余额闸门**检查:已开通余额账户(`balance_activated_at` 非空)且余额分位口径 ≤0 时返回 429 `BALANCE_EXHAUSTED`(admin 豁免;未开通者不受约束)。2026-09-11 起月度 token 配额、金额配额与部门预算已下线。
+OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹配上游 provider(protocol=`openai`|`anthropic`|`both`,0043/0044)代理转发;非流式/流式(SSE)均支持;响应按 per-user 令牌桶限流(`gateway.rate_limit`,**默认 0 = 不限制**——与官方口径一致:官方只限账号级并发、不设请求速率上限;需要限速时用该设置显式开启,2026-09-22 前缺省为 60/min),计量写入 usage 表(含按模型定价折算的 `cost` 费用,元;配置 `usage.peak_windows` 后,高峰窗口外按模型 `offpeak_discount` 打折;缓存命中输入 token 按 `cache_input_price_per_1m`,0029);转发前按**账户余额闸门**检查:已开通余额账户(`balance_activated_at` 非空)且余额分位口径 ≤0 时返回 429 `BALANCE_EXHAUSTED`(admin 豁免;未开通者不受约束)。2026-09-11 起月度 token 配额、金额配额与部门预算已下线。
+
+请求体上限:chat/FIM/messages/responses 各 64MiB(2026-09-22 由 16MiB 提高),embeddings 4MiB。**读请求体的时间预算是 1 小时**(按路由放宽,与全局 `http.Server.ReadTimeout` 的 60s slowloris 防护解耦):超时返回 `503` + `code=SERVER`(可重试),而不是旧版的 `400 请求体格式错误`(客户端会归类为不可重试的 `INVALID_REQUEST`)。
+
+**出站体加工(2026-09-22)**:四个聊天入口在转发前解析请求体做两件事——
+1. **按员工注入官方用户标识**:`chat/completions` 写顶层 `user_id`、`/responses` 写官方 create-response 的顶层 `user`、Anthropic `messages` 写 `metadata.user_id`,值为平台侧稳定标识 `u<users.id>`(非用户名/邮箱等隐私信息),并**覆盖**客户端自带值(否则第三方客户端可伪造他人身份做上游 KVCache 投毒/隔离逃逸)。官方用它做 KVCache / 调度 / 内容安全三重隔离——不注入则全公司落进同一个"空 user_id"域。`/completions`(FIM,官方文档只有 prompt/echo 等字段)与 `/v1/embeddings`(客户端体不转发)**不注入**。
+2. **校验 `file_id` 引用归属**:请求体里任何 `file_id`(聊天内容部件 `{"type":"file","file_id":…}`、Anthropic `source.file_id` 等)都必须是**调用者自己**上传的文件(台账 `gateway_files`,迁移 0077);未登记/他人的 id、或形状非法的 id 一律 `404 NOT_FOUND`(与"不存在"同形),**整条请求不发往上游**。原因:Files API 的文件落在同一个上游账号(全组织共用一个 provider key),不校验就等于"知道 id 就能读别人的图"。字符串正文里出现的 `file_id` 文本不算引用(不误伤工具参数等);工具/schema 子树(`tools`/`functions`/`function`/`tool_choice`/`response_format`)不参与收集;单次请求引用数上限缺省 600 个(与官方"单请求最多 600 张图"对齐,可配;超出 `400 VALIDATION`)。
+
+**文件保留上限与回收(2026-09-22)**:`gateway.file_expiry_days`(缺省 **7 天**,范围 1~30)是网关**强制执行**的保留上限。
+上传时网关**重写 multipart 体**把过期时间收进上限(客户端没带就补 `expires_after[seconds]` + `anchor=created_at`,
+要得比上限久就改成上限,更早就原样保留)—— 所以**上游也按上限保存**;台账侧再收敛一次作为纵深防御,
+到点即拒绝授权,并由 5 分钟一轮的回收器在上游删除(回收采用**标记认领**:认领保留台账行 + `reaping_at` 标记,删上游后收尾删行 ⇒ 进程中断也不会留下无凭据的孤儿对象)(上游配额是**每 API key**、全组织共享 25 GiB / 10000 文件)。
+重写按 2× 体量占用内存闸门(已知 Content-Length 时**读体之前**申请 ⇒ 一个字节都不读;chunked 只能读后补记,属已认账的窗口),打满即 503;非 multipart 体原样转发(不新增失败面)。
+管理后台「网关文件」页按员工展示占用(文件数/字节/其中已过期),支持按员工过滤(`user=` 用户名、`user_id=` 数字 ID)、`file_id` 搜索、排序与按条件清理;
+接口:`GET /api/server/admin/gateway/files|/files/summary`(gateway:read)、`DELETE /api/server/admin/gateway/files/:file_id`
+与 `POST /api/server/admin/gateway/files/purge`(gateway:write;单次最多 **500** 条) —— **必须**带 `state`(expired|active|all)或 `user`/`user_id`;
+删"仍然有效"的文件**必须同时指名员工**(全组织范围只允许清已过期),未知 `state` 一律 400(不静默扩大范围),前端对危险范围要求输入确认词。
+
+**两个可配闸门(2026-09-22,管理后台「网关 → 网关防护」)**:
+`gateway.max_file_refs`(单请求 `file_id` 引用数上限,缺省 **600** = 官方 vision 文档的"单请求最多 600 张图",范围 1~4096 —— 本平台的归属校验只会比上游更松,绝不会更严)与
+`gateway.body_parse_budget_mb`(全进程**同时在加工**的请求体字节预算,缺省 128MiB,范围 64~8192)。
+后者是内存闸门:整 body 的 map 往返实测总分配 ≈28× 请求体、峰值活跃堆约 6~8×,预算打满时新的慢路径请求直接
+`503` + `code=SERVER`(可重试),**不排队、不无上限叠加**。两个值都走进程内 10s TTL 缓存,管理端保存后立即失效。
+
+**失败语义(fail-closed)**:请求体不是合法 JSON 对象(含 `1e999` 这类解析分歧体)、`metadata` 存在但不是对象 ⇒ **本地 400,绝不原样转发**。原因:任何一个"解析失败就放行"的闸门都会成为绕过全部校验的入口(2026-09-22 审计实测:同一构造体让 file_id 归属、user_id 覆盖、`dsh_` 私有字段剔除三处同时失效)。转发体因此不再保证与客户端字节逐字相同;**计量仍按客户端原始字节估算** prompt(用 `usage.estimated` 标注),前缀缓存不受影响(同一输入每轮产出相同字节)。
 
 ### POST `/v1/messages`(0043,Anthropic 兼容——web_search 服务端代理)
 
@@ -106,6 +133,16 @@ Anthropic Messages 兼容请求体 `{model, max_tokens, messages, stream?, tools
 ### GET `/v1/models`
 
 `[{id, display_name, ...}]` 可用模型列表(仅 enabled provider 的模型)。
+
+### Files API(`/v1/files*`,2026-09-22)
+
+DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图片先上传一次、后续请求只引用 `file_id`(拿不到 `file_id` 才回落成把图片 base64 内联进每一个请求,请求体因此长期偏大)。语义:
+
+- **只转发给 DeepSeek**:请求里没有 model 字段,无法按模型选上游 —— 只认 deepseek 系 provider(`base_url` 或 `name` 含 `deepseek`,与 `GET /providers/:id/balance` 同一判据),一个都没有时返回 503 `UPSTREAM`。注意这是**路由判据、不是安全边界**:能改 provider 配置的人(`gateway:write`,仅 super_admin)本就能把 base_url 指向任意地址;
+- **归属隔离**:上传成功后在网关侧台账 `gateway_files`(迁移 0077)记 `(file_id, user_id, expires_at)`;`GET|DELETE /files/{id}` 非本人 ⇒ 404(与"不存在"同形,不泄露存在性)且不触达上游;`GET /files` 只回自己的 id;聊天请求里引用的 `file_id` 同样按归属校验(详见 §5 的「出站体加工」)。上游删除/过期由"删除成功或上游 404 ⇒ 删行"与 `expires_at` 过期清理两条路径收敛;
+- 上传体上限 **64MiB**(官方 Files API 口径:单文件 ≤64 MiB 且须在 10 分钟内传完)，**流式**转发(不整段读进内存);元数据响应上限 4MiB;
+- **仅限流**:不计 token、不落 usage、不写审计(官方也不按 token 计费文件);仍受 `gateway.rate_limit` 与单用户并发闸门约束;
+- 上游非 2xx 时保留状态码并收敛成统一错误信封(`{"error":{code,message,...}}`),客户端据此回落到 base64 内联,不会因文件接口异常而发不出图。
 
 ## 6. 商城(客户端用,Bearer)
 

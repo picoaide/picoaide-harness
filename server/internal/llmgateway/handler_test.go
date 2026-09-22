@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -127,7 +128,7 @@ func TestApplyChannelOverrides(t *testing.T) {
 	body := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"temperature":0.7}`)
 	overrides := map[string]any{"thinking": map[string]any{"type": "enabled"}, "reasoning_effort": "max"}
 	removeKeys := []string{"temperature"}
-	out, err := applyChannelOverrides(body, overrides, removeKeys)
+	out, err := (&API{}).applyChannelOverrides(body, overrides, removeKeys)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +156,7 @@ func TestApplyChannelOverrides(t *testing.T) {
 func TestApplyMaxTokensDefault(t *testing.T) {
 	// client provided max_tokens -> untouched
 	body := []byte(`{"model":"m","max_tokens":100}`)
-	out, err := applyMaxTokensDefault(body, `{"max_output":393216}`)
+	out, err := (&API{}).applyMaxTokensDefault(body, `{"max_output":393216}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +168,7 @@ func TestApplyMaxTokensDefault(t *testing.T) {
 
 	// client omitted -> inject from default_params
 	body2 := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
-	out2, err := applyMaxTokensDefault(body2, `{"context_length":1048576,"max_output":393216}`)
+	out2, err := (&API{}).applyMaxTokensDefault(body2, `{"context_length":1048576,"max_output":393216}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +181,7 @@ func TestApplyMaxTokensDefault(t *testing.T) {
 func TestApplyStreamUsageRequest(t *testing.T) {
 	// streaming body without stream_options -> inject include_usage=true
 	body := []byte(`{"model":"m","stream":true}`)
-	out, err := applyStreamUsageRequest(body)
+	out, err := (&API{}).applyStreamUsageRequest(body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +197,7 @@ func TestApplyStreamUsageRequest(t *testing.T) {
 
 	// non-stream body -> untouched (stream_options must not leak into JSON mode)
 	nonStream := []byte(`{"model":"m","messages":[]}`)
-	out2, err := applyStreamUsageRequest(nonStream)
+	out2, err := (&API{}).applyStreamUsageRequest(nonStream)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +209,7 @@ func TestApplyStreamUsageRequest(t *testing.T) {
 	// 计量开关只能由服务端持有;尊重显式 false 等于让被计费方一行 JSON 关掉自己
 	// 的计量表 —— 上游据此不发 usage chunk → 输入侧免费 + completion 估算截顶)。
 	explicitFalse := []byte(`{"model":"m","stream":true,"stream_options":{"include_usage":false}}`)
-	out3, err := applyStreamUsageRequest(explicitFalse)
+	out3, err := (&API{}).applyStreamUsageRequest(explicitFalse)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +223,7 @@ func TestApplyStreamUsageRequest(t *testing.T) {
 
 	// client set include_usage=true already -> merged without duplication
 	explicitTrue := []byte(`{"model":"m","stream":true,"stream_options":{"include_usage":true}}`)
-	out4, err := applyStreamUsageRequest(explicitTrue)
+	out4, err := (&API{}).applyStreamUsageRequest(explicitTrue)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,18 +234,69 @@ func TestApplyStreamUsageRequest(t *testing.T) {
 	}
 }
 
+// forwardedBodyEqual 断言上游收到的请求体与客户端提交的**语义相等**。
+//
+// 2026-09-22 起网关会对出站体重编码（注入平台 user_id、校验 file_id 引用归属），
+// 键序变成 Go map 的排序序、并多出 user_id —— "逐字节原样转发"不再是契约。
+// 判据因此改为：JSON 语义等价 + user_id 等于平台侧期望值（"" = 该端点不注入，
+// 也不允许客户端自带值透传）。
+func forwardedBodyEqual(t *testing.T, got, want, wantUserID string) {
+	t.Helper()
+	// UseNumber：两侧都不做 float64 化，否则 >2^53 的整数漂移（重编码唯一的语义失真面）
+	// 会被这条判据自己掩盖（审计 2026-09-22 G-9）。
+	decode := func(s string) map[string]any {
+		dec := json.NewDecoder(strings.NewReader(s))
+		dec.UseNumber()
+		var m map[string]any
+		if err := dec.Decode(&m); err != nil {
+			t.Fatalf("body not JSON: %q", s)
+		}
+		return m
+	}
+	g, w := decode(got), decode(want)
+	// 平台身份注入有两种形态：chat/FIM 走顶层 `user_id`，Responses 走官方
+	// create-response 的顶层 `user`（审计 2026-09-22 F 路 P1-1 修正：此前误按
+	// "官方无该字段"处理，实际字段名是 `user`）。两种任取其一，但必须**恰好**命中
+	// 平台注入值 —— 只在命中时才从比对里抹掉，避免掩盖客户端自带的同名字段。
+	gotID, _ := g["user_id"].(string)
+	gotUser, _ := g["user"].(string)
+	switch {
+	case wantUserID == "" && gotID == "":
+		delete(g, "user_id")
+	case wantUserID != "" && gotID == wantUserID:
+		delete(g, "user_id")
+	case wantUserID != "" && gotUser == wantUserID:
+		delete(g, "user")
+	default:
+		t.Fatalf("forwarded identity = user_id:%q user:%q, want %q（平台侧注入并覆盖客户端值）",
+			gotID, gotUser, wantUserID)
+	}
+	if !reflect.DeepEqual(g, w) {
+		t.Fatalf("forwarded body differs from client body:\n got=%v\nwant=%v", g, w)
+	}
+}
+
+// aliceTestUserID 取 newGateway 建的测试用户 alice 的 id（断言平台注入的 user_id 用）。
+func aliceTestUserID(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	var id int64
+	if err := db.QueryRow(`SELECT id FROM users WHERE username = 'alice'`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
 func TestProxyNonStream(t *testing.T) {
 	f := newFakeUpstream(t)
-	r, _, token := newGateway(t, f)
+	r, db, token := newGateway(t, f)
 	body := `{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}`
 
 	w := doPost(t, r, "/v1/chat/completions", body, token, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
-	if got := f.gotBody.Load().(string); got != body {
-		t.Fatalf("body not forwarded identically: %q", got)
-	}
+	// 语义等价 + 平台 user_id（2026-09-22 起出站体统一重编码，不再是逐字节转发）
+	forwardedBodyEqual(t, f.gotBody.Load().(string), body, platformUserID(aliceTestUserID(t, db)))
 	if got := f.gotAuth.Load().(string); got != "Bearer "+upstreamKey {
 		t.Fatalf("auth = %q, want upstream key", got)
 	}

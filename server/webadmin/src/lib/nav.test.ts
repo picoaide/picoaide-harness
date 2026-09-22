@@ -84,6 +84,19 @@ describe('导航权限过滤(P2-43)', () => {
     expect(isNavVisible(entry, employee)).toBe(false)
   })
 
+  it('网关文件页:gateway:read 可见,只读角色(无该权限点)不可见', () => {
+    // 2026-09-22 新增条目（运维分区）：读占用/明细走 `gateway:read`（与
+    // router.go 里 GET /gateway/files[/summary] 的申报同一点），删除/清理走
+    // `gateway:write` —— 页面内另做写面收敛（GatewayFiles.tsx 的 canWrite）。
+    const entry = NAV_ENTRIES.find((n) => n.to === '/gateway-files')!
+    expect(entry.section).toBe('运维')
+    expect(entry.perms).toEqual(['gateway:read'])
+    expect(isNavVisible(entry, superAdmin)).toBe(true)
+    expect(isNavVisible(entry, { role: 'auditor', permissions: ['gateway:read'] })).toBe(true)
+    expect(isNavVisible(entry, auditor)).toBe(false) // auditor = audit/usage/user:read
+    expect(isNavVisible(entry, employee)).toBe(false)
+  })
+
   it('侧栏没有两条同图标入口(「应用平台」并入「应用中心」后的回归)', () => {
     // 2026-09-19 页面合并:此前 `/app-center` 与 `/app-platform` 两个条目同用 Boxes
     // 图标 —— 侧栏看着是两个入口、实际是同一类东西。合并后限制项/设置是应用中心的

@@ -11,8 +11,8 @@
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ Go 服务端(gin + PostgreSQL)                                       │
 │   ├─ 认证:local/LDAP/OIDC + api_tokens(90 天过期,哈希存储)+ /api/client/v2/auth/*   │
-│   ├─ AI 网关:/v1/*(chat/completions|embeddings|messages|completions|responses|models)代理   │
-│   │   + per-user 限流 + usage 计量(费用/峰谷折算)                         │
+│   ├─ AI 网关:/v1/*(chat/completions|embeddings|messages|completions|responses|models|files)代理   │
+│   │   + per-user 限流(缺省 0=不限制) + usage 计量(费用/峰谷折算);files 走归属台账(0077) │
 │   ├─ bootstrap:/api/client/v2/config/bootstrap(默认模型+建议清单)                   │
 │   ├─ 商城:skills(建议清单)+ 授权制                                    │
 │   └─ 管理端 webadmin(go:embed 内嵌,/admin/,shadcn)                        │

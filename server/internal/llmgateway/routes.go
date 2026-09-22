@@ -27,19 +27,28 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 		conc: newConcurrencyMeter(),
 	}
 	// OpenAI/Anthropic 兼容形态(/v1/*)。
-	v1 := r.Group("/v1", serverauth.BearerAuth(db))
+	v1 := r.Group("/v1", serverauth.BearerAuth(db), InFlightGuard())
 	v1.POST("/chat/completions", a.handleChatCompletions)
 	v1.POST("/embeddings", a.handleEmbeddings)
 	v1.POST("/messages", a.handleMessages)
 	v1.POST("/completions", a.handleCompletions)
 	v1.POST("/responses", a.handleResponses)
 	v1.GET("/models", a.handleModels)
+	// Files API(2026-09-22):与生产树(internal/router.registerGatewayV1)逐条对齐。
+	v1.POST("/files", a.handleFilesUpload)
+	v1.GET("/files", a.handleFilesList)
+	v1.GET("/files/:file_id", a.handleFilesRetrieve)
+	v1.DELETE("/files/:file_id", a.handleFilesDelete)
 	// 官方原生形态(无 /v1 前缀)。
-	gw := r.Group("", serverauth.BearerAuth(db))
+	gw := r.Group("", serverauth.BearerAuth(db), InFlightGuard())
 	gw.POST("/chat/completions", a.handleChatCompletions)
 	gw.POST("/embeddings", a.handleEmbeddings)
 	gw.POST("/completions", a.handleCompletions)
 	gw.POST("/responses", a.handleResponses)
 	gw.GET("/models", a.handleModels)
 	gw.POST("/messages", a.handleMessages)
+	gw.POST("/files", a.handleFilesUpload)
+	gw.GET("/files", a.handleFilesList)
+	gw.GET("/files/:file_id", a.handleFilesRetrieve)
+	gw.DELETE("/files/:file_id", a.handleFilesDelete)
 }

@@ -3,7 +3,7 @@
 ## 1. 服务端(PostgreSQL,PG-only 2026-08)
 
 > 2026-08 起 SQLite 已全面下线:服务端数据库为 PostgreSQL(内置容器或外部实例)。
-> 迁移在 `internal/serverstore/migrations-pg/`(0001–0076;0007 已废弃;0028 下线
+> 迁移在 `internal/serverstore/migrations-pg/`(0001–0079;0007 已废弃;0028 下线
 > 知识库/MCP 表并独立审计表 audit_logs;0039 usage 按月原生分区 + 日/月账本;
 > 0040/0041 归档直存 DB;0042 connectors;0043/0044 provider protocol;
 > 0045 glitchtip 下架;0046 rbac 角色;0047 brand 快照;0048 审计哈希链;
@@ -18,9 +18,11 @@
 > 0069-0072 WASM 应用平台与员工会话(应用登记/员工会话/访问级别/调用事件证据);
 > **0073 删除应用会话与员工会话表(`app_sessions`/`employee_sessions`)、0074 把存量
 > `access='public'` 改写为 `login`、0075 应用打开计数(`wasm_app_opens` 明细 +
-> `wasm_app_opens_daily` 日汇总)、0076 `usage.app_id`(应用维度归因)** —— 后四条随
+> `wasm_app_opens_daily` 日汇总)、0076 `usage.app_id`(应用维度归因)、
+> 0077 网关 Files API 归属台账 `gateway_files`、0078 台账容量字段与清理索引(2026-09-22)** —— 前三条(0073-0076)随
 > 2026-09-19「WASM 应用客户端专属」改造落地(应用子域/换票/匿名面/服务端 `ai.chat`
-> 同批删除,见 03-api-reference.md §11b)
+> 同批删除,见 03-api-reference.md §11b),0077-0079 随 2026-09-22 网关文件直通、归属隔离与「按员工看占用 + 清理」落地
+> (见下 `gateway_files`)
 > ——以 `migrations-pg/` 目录实际文件为准)。
 
 ### users(0001, 0046 起 role 取代 is_admin)
@@ -48,7 +50,7 @@
 - 0024 新增 `budget_money REAL`(部门月度金额预算,元):约束该部门树(含全部子部门)成员当月费用合计;员工生效预算 = 归属部门 + 祖先链(链上全部预算都约束,父部门 = 子树封顶);任一超限网关 429。费用聚合 `DeptMonthlyCost`/`DeptMonthlyCostBatch`(部门树 SUM(cost))。
 
 ### settings(0001)
-`settings(key PK, value)`。键: `auth.mode` / `ldap.*` / `oidc.*` / `openid.*` / `auth.enabled` / `gateway.default_model` / `gateway.rate_limit` / `usage.monthly_quota`(员工默认月 token 配额,0=不限)/ `usage.monthly_quota_money`(员工默认月金额配额,元,0=不限)/ `usage.peak_windows`(高峰时段 JSON,北京时间,空=无峰谷价)/ `usage.retention_months`(明细保留月数,默认 6)/ `web.default_thinking_level` / `web.error_reporting_*` / `web.glitchtip_*` / `server.base_url` / `audit.retention_days`(默认 180)等(见 04-auth.md、03-api-reference.md)。
+`settings(key PK, value)`。键: `auth.mode` / `ldap.*` / `oidc.*` / `openid.*` / `auth.enabled` / `gateway.default_model` / `gateway.rate_limit` / `gateway.max_file_refs`(单请求 file_id 引用上限,缺省 600=官方单请求最多 600 张图) / `gateway.body_parse_budget_mb`(在飞请求体字节预算 MiB,缺省 128) / `gateway.file_expiry_days`(网关强制执行的文件保留上限天数,缺省 7,范围 1~30) / `usage.monthly_quota`(员工默认月 token 配额,0=不限)/ `usage.monthly_quota_money`(员工默认月金额配额,元,0=不限)/ `usage.peak_windows`(高峰时段 JSON,北京时间,空=无峰谷价)/ `usage.retention_months`(明细保留月数,默认 6)/ `web.default_thinking_level` / `web.error_reporting_*` / `web.glitchtip_*` / `server.base_url` / `audit.retention_days`(默认 180)等(见 04-auth.md、03-api-reference.md)。
 
 ### api_tokens(0002)
 `id, user_id→users, token_hash(唯一), name(默认 'desktop'), created_at, expires_at(NOT NULL), last_used_at, revoked(0/1)`;索引 `idx_tokens_user`。明文 token 不落库,只存哈希;90 天过期。
@@ -97,6 +99,18 @@ idx_usage_user_cost`。写路径 `RecordUsage*` 先 ensure 当月分区。
 
 ### connectors(0042)
 `id, name, description, auth_mode(oauth|device|token|server-side), definition JSON, enabled, updated_at, created_at`——连接器唯一目录源,经 bootstrap `connectors[]` 下发;种子 example-org/sales-easy(glitchtip 0045 下架,不再下发)。
+
+### gateway_files(0077 + 0078,网关 Files API 归属台账与容量视图)
+`file_id(PK), user_id→users(ON DELETE CASCADE), created_at, expires_at, size_bytes(0078), reaping_at(0079)`;索引按 `(user_id, created_at DESC)`、`(user_id, expires_at)`、`(expires_at)`、`(expires_at, created_at)`。
+- 0078 的 `size_bytes` 只用于**容量统计与排序**（OpenAI 形状 `bytes` / Anthropic 形状 `size_bytes`；取不到记 0，升级前的老行同为 0 = 未知），不参与归属判定。
+
+网关 `/v1/files`(`/files` 同)是官方 Files API 的直通面(上传/列出/下载/删除),而上游按 **API key** 隔离文件——公司内所有员工共用同一把 key,所以「谁能读哪个 file_id」这件事上游不知道。此表是平台侧的归属账本:上传成功即 `RecordGatewayFileSize` 记 `(file_id, user_id, expires_at, size_bytes)`,归属规则见下一条(**存活行不转手、过期行可被重新占用、永久行永不转手**)——早期版本这里写的"首次写入者胜"只对存活行成立,已按实现更正。
+
+- 聊天体里出现 `file_id` 引用时,批量 `GatewayFilesOwnedBy` 一次问清:非本人(含行已过期)一律 404 `file_id not found or expired`(不泄露存在性),防止员工 A 拿着员工 B 上传后的 id 直接把对方文件读进自己的对话。
+- `expires_at` = min(上游返回的过期时间, 上传时刻 + `gateway.file_expiry_days`);上游那侧也由网关**重写上传体**收敛到同一上限(见 03-api-reference §5);过期行视为**不存在**——既不再授权读取,也**允许他人重新占用同名 id**(`RecordGatewayFile` 的 `ON CONFLICT … WHERE user_id = EXCLUDED.user_id OR expires_at <= now()`:存活行不转手防"重传抢归属",过期行可转手防"上游按内容去重时第二个上传者引用自己的文件 404";永久文件永不转手)。
+- 容量与回收:官方限制是**每 key 25 GiB / 10000 个文件**(公司级共享,非按人)。过期行有两条收敛路径:①`PurgeExpiredGatewayFiles`(同一事务内 `SELECT … FOR UPDATE SKIP LOCKED` → `DELETE`)只清台账;②网关的**文件回收器**(`internal/llmgateway/files_reaper.go`,启动先跑一轮、之后每 5 分钟)先 `ClaimExpiredGatewayFile`(事务内 `FOR UPDATE` + 复检仍过期)再删上游对象,失败按快照写回台账行留待下轮。`ListGatewayFileIDs` 供列表过滤用途(上限 20000 行)。
+- 管理面另有 `size_bytes` 汇总与清理索引(0078):按员工看占用、按员工/状态过滤与按过期时间排序都走这些索引。
+- **回收标记 `reaping_at`(0079)**:认领 = 事务内锁行 + 复检仍过期 + 打标记（**不删行**）⇒ 删上游对象 ⇒ 带标记删行收尾。之所以不"认领即删行":认领与删上游之间进程中断时,删掉的行会让上游对象**再无凭据**（共享配额静默泄漏）;保留行 + 标记则可重入（下一轮重新认领、重删 404=成功、再收尾）。标记有 10 分钟租约(`serverstore.ReapClaimLease`):租约内不进候选列表、不被重复认领,过期后可重新认领（崩溃自愈）;并发重新登记（上传转手过期行）会清空标记 ⇒ 回收器放弃删上游对象。后台 `PurgeExpiredGatewayFiles` 跳过**任何**带标记的行（比另两处更严，因为它不删上游对象、删行会让那份对象失去凭据）；回收候选列表与管理端清理只跳过**租约内**的标记行（租约过期的可重新认领/由管理员显式删除）。**认账残留**：④`PurgeExpiredGatewayFiles` 只清台账行、不删上游对象 —— 新上传的对象由上游按 `expires_after` 自行到期，所以不长期泄漏；但改造前的"永久"老行若被本函数先一步清掉行，那份上游对象就再无凭据（靠回收器的 `NormalizeLegacyPermanentGatewayFiles` + 认领流程尽量先处理，属已认账的窗口）。
 
 ### model_concurrency_stats(0049,按模型并发峰值)
 `model, day(UTC), max_concurrency, peak_at`——`PRIMARY KEY(model, day)`。网关内存 in-flight 计数每 15s 采样落库;`max_concurrency` 用 `GREATEST` 累计(永不回退),`peak_at` 记录首次触发峰值时刻。供管理后台「服务器信息 → 模型并发」展示(当前/90 天峰值/目标),是向模型上游申请扩容的量化依据。目标值配置在 `models.default_params` 的 `concurrency_target`(如 flash 2500 / pro 500),不在此表。

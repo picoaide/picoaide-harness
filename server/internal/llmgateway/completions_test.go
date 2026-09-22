@@ -24,10 +24,9 @@ func TestFIMRecordsUsage(t *testing.T) {
 	if pt != 8 || ct != 3 {
 		t.Fatalf("usage pt=%d ct=%d", pt, ct)
 	}
-	// 请求体原样转发(不映射/不改写字段)。
-	if got := f.gotBody.Load().(string); got != body {
-		t.Fatalf("forwarded body = %s", got)
-	}
+	// 出站体语义等价（2026-09-22 起网关统一重编码：键序 + file_id 校验；
+	// FIM 端点官方未文档化 user_id ⇒ 不注入）。
+	forwardedBodyEqual(t, f.gotBody.Load().(string), body, "")
 }
 
 // TestFIMPromptRequired FIM 无 prompt 字段 → 400(不落账)。
@@ -57,9 +56,9 @@ func TestResponsesRecordsUsage(t *testing.T) {
 	if pt != 8 || ct != 3 {
 		t.Fatalf("usage pt=%d ct=%d", pt, ct)
 	}
-	if got := f.gotBody.Load().(string); got != body {
-		t.Fatalf("forwarded body = %s", got)
-	}
+	// 语义等价 + 官方 create-response 的顶层 user 注入（审计 F 路 P1-1 修正：
+	// 此前误按"官方无该字段"处理，实际字段名是 user 而不是 user_id）。
+	forwardedBodyEqual(t, f.gotBody.Load().(string), body, platformUserID(aliceTestUserID(t, db)))
 }
 
 // TestVisionImageTokenBilling 验证图片请求(官方 Vision: 图片折算 token,
@@ -83,8 +82,6 @@ func TestVisionImageTokenBilling(t *testing.T) {
 	if pt != 404 || ct != 3 {
 		t.Fatalf("usage pt=%d ct=%d (want image tokens in prompt)", pt, ct)
 	}
-	// 图片请求体原样转发(网关不改写/不拦截 image_url)。
-	if got := f.gotBody.Load().(string); got != body {
-		t.Fatalf("forwarded body mismatch")
-	}
+	// 图片请求体语义等价转发(网关不改写/不拦截 image_url);chat 路径会注入 user_id。
+	forwardedBodyEqual(t, f.gotBody.Load().(string), body, platformUserID(aliceTestUserID(t, db)))
 }

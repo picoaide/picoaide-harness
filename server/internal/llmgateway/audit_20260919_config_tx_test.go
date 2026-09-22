@@ -25,11 +25,15 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
-// audit0919ConfigKeys 是 setGatewayConfig 会写的 12 个 settings 键
-// (与 temp/verify-60ceaa 的探针同一集合,便于两边结果对拍)。
+// audit0919ConfigKeys 是 setGatewayConfig 会写的 settings 键
+// (与 temp/verify-60ceaa 的探针同一集合,便于两边结果对拍;
+// 2026-09-22 追加出站体加工的两个闸门键)。
 var audit0919ConfigKeys = []string{
 	"gateway.default_model",
 	"gateway.rate_limit",
+	SettingMaxFileRefs,
+	SettingBodyParseBudgetMB,
+	SettingFileExpiryDays,
 	serverstore.PeakWindowsSetting,
 	serverstore.RetentionMonthsSetting,
 	"web.error_reporting_dsn",
@@ -42,7 +46,7 @@ var audit0919ConfigKeys = []string{
 	"server.base_url",
 }
 
-// audit0919Snapshot 读全部 12 个键的现值。直读 SQL(绕开 settings 缓存),
+// audit0919Snapshot 读全部键的现值。直读 SQL(绕开 settings 缓存),
 // 缺失记为 "<absent>" —— 与"存在但为空"区分,半套配置的判据正是"键被动过没有"。
 func audit0919Snapshot(t *testing.T, db *sql.DB) map[string]string {
 	t.Helper()

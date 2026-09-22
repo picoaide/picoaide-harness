@@ -143,7 +143,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '0', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '', max_file_refs: '600', body_parse_budget_mb: '128', file_expiry_days: '7' })
   const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
   // 审计 2026-09-12 P1-2:服务端存的 peak_windows 无法解析时为 true →
   // 禁止把空列表当成「清空」写回去(那是静默破坏计费口径)。管理员显式
@@ -208,11 +208,15 @@ export default function Gateway() {
       // (复核实证:A) PUT {rate_limit:321} → 200;B) 整份回提交 → 400 且 rate_limit 未变)。
       setCfg({
         default_model: g.default_model ?? '',
-        rate_limit: String(g.rate_limit ?? '60'),
+        rate_limit: String(g.rate_limit ?? '0'),
         peak_windows: g.peak_windows ?? '',
         retention_months: g.retention_months ?? '6',
         default_thinking_level: g.default_thinking_level ?? 'max',
         server_base_url: g.server_base_url ?? '',
+        // 2026-09-22 新增:出站体加工的两个闸门(服务端缺省 600 / 128MiB)
+        max_file_refs: String(g.max_file_refs ?? '600'),
+        body_parse_budget_mb: String(g.body_parse_budget_mb ?? '128'),
+        file_expiry_days: String(g.file_expiry_days ?? '7'),
       })
       const peak = parsePeakWindows(g.peak_windows ?? '')
       if (peak.ok) {
@@ -244,9 +248,10 @@ export default function Gateway() {
   async function saveGateway() {
     if (busy) return // P1-6: 双击守卫
     // 前端校验(审计修复 L3):限流/配额数值、URL 格式
+    // 0 = 不限制(2026-09-22 与服务端同口径:缺省 0,官方只限账号级并发、不设速率上限)
     const rl = Number(cfg.rate_limit)
-    if (!Number.isInteger(rl) || rl <= 0 || rl > 100000) {
-      setError('每用户限流必须是正整数(1-100000)')
+    if (!Number.isInteger(rl) || rl < 0 || rl > 100000) {
+      setError('每用户限流必须是 0~100000 的整数(0=不限制)')
       return
     }
     // 全局默认配额已迁至「用量中心 → 配额与预算」页(2026-09 重构),
@@ -256,6 +261,17 @@ export default function Gateway() {
       if (!Number.isInteger(rm) || rm < 0 || rm > 120) { setError('明细保留必须 0-120 个月(0=永不删除)'); return }
     }
     if (cfg.server_base_url && !isHttpUrl(cfg.server_base_url)) { setError('对外访问地址必须是 http(s) URL'); return }
+    // 出站体加工的两个闸门(与服务端 ParseMaxFileRefs/ParseBodyParseBudgetMB 同口径):
+    // 引用数上限 1~4096(不允许 0 —— 那是把安全闸门关掉);内存预算 64~8192 MiB
+    // (下限必须容得下一个 64MiB 上限请求体,否则谁都过不去)。
+    const mfr = Number(cfg.max_file_refs)
+    if (!Number.isInteger(mfr) || mfr < 1 || mfr > 4096) { setError('单请求文件引用上限必须是 1~4096 的整数'); return }
+    const bpb = Number(cfg.body_parse_budget_mb)
+    if (!Number.isInteger(bpb) || bpb < 64 || bpb > 8192) { setError('请求体加工内存预算必须是 64~8192 MiB 的整数'); return }
+    // 文件保留上限(2026-09-22):1~30 天。上游允许 30 天/永久,但配额是全组织共享的,
+    // 平台按这个上限强制收敛(超出即改为上限,并由回收器在上游删除)。
+    const fed = Number(cfg.file_expiry_days)
+    if (!Number.isInteger(fed) || fed < 1 || fed > 30) { setError('文件保留上限必须是 1~30 天的整数'); return }
     // 审计 2026-09-12 P1-2:服务端已存的 peak_windows 无法解析 + 本次编辑区为空
     // ⇒ 提交等于用空串覆盖它(静默清空峰谷窗口、破坏计费口径)。拒绝提交,
     // 而不是照旧写 `peak_windows: ''` 再弹「已保存」。
@@ -282,6 +298,9 @@ export default function Gateway() {
         retention_months: cfg.retention_months,
         default_thinking_level: cfg.default_thinking_level,
         server_base_url: cfg.server_base_url,
+        max_file_refs: cfg.max_file_refs,
+        body_parse_budget_mb: cfg.body_parse_budget_mb,
+        file_expiry_days: cfg.file_expiry_days,
         peak_windows: peaked.length ? JSON.stringify(peaked) : '',
       }
       const res = await request(`${ADMIN_API}/gateway`, { method: 'PUT', body: JSON.stringify(body) })
@@ -867,8 +886,27 @@ export default function Gateway() {
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
                 <Label htmlFor="rate-limit">每用户网关限流(次/分钟)</Label>
-                <Input id="rate-limit" type="number" min={1} max={100000} value={cfg.rate_limit}
+                <Input id="rate-limit" type="number" min={0} max={100000} value={cfg.rate_limit}
                   onChange={(e) => setCfg({ ...cfg, rate_limit: e.target.value })} />
+                <p className="text-xs text-muted-foreground">0 = 不限制(与官方口径一致:官方只限账号级并发,不设请求速率上限)</p>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="max-file-refs">单请求文件引用上限(个)</Label>
+                <Input id="max-file-refs" type="number" min={1} max={4096} value={cfg.max_file_refs}
+                  onChange={(e) => setCfg({ ...cfg, max_file_refs: e.target.value })} />
+                <p className="text-xs text-muted-foreground">聊天请求里引用的 <code>file_id</code> 个数上限(超出 400);官方 vision 文档的单请求上限是 600 张图,缺省与之一致(归属校验只会更松,不会更严)</p>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="file-expiry-days">文件保留上限(天)</Label>
+                <Input id="file-expiry-days" type="number" min={1} max={30} value={cfg.file_expiry_days}
+                  onChange={(e) => setCfg({ ...cfg, file_expiry_days: e.target.value })} />
+                <p className="text-xs text-muted-foreground">员工上传的文件最长保留天数(1~30);客户端没带过期时间或要得更久都按该值收敛,超期由服务端在上游删除</p>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="body-parse-budget">请求体加工内存预算(MiB)</Label>
+                <Input id="body-parse-budget" type="number" min={64} max={8192} value={cfg.body_parse_budget_mb}
+                  onChange={(e) => setCfg({ ...cfg, body_parse_budget_mb: e.target.value })} />
+                <p className="text-xs text-muted-foreground">全进程同时在解析的请求体总字节上限(超出 503 可重试);瞬时内存约为该值的 6~8 倍(实测),按可用内存设置;下限 64 = 一次只加工一个最大请求体</p>
               </div>
             </div>
           </section>
