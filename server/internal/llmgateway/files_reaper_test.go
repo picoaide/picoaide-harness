@@ -383,3 +383,169 @@ func TestStartFileReaperReapsThenStops(t *testing.T) {
 		t.Fatal("ctx 取消后回收器仍在扫描")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// R7 N11：回收标记（认领不删行）——中断可重入、续期即放弃、失败可立即重试
+// ---------------------------------------------------------------------------
+
+// TestReaperClaimSurvivesCrashWithoutOrphan（R7 N11）：认领后进程中断（这里用
+// "认领了但没走完"模拟：直接调用 DAO 打标记后不再动它）**不会**产生"永无凭据"的
+// 上游孤儿对象 —— 行还在、下一轮（租约过期后）能重新认领并重删（404 = 成功）再收尾。
+func TestReaperClaimSurvivesCrashWithoutOrphan(t *testing.T) {
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	api := &API{DB: gw.db, client: &http.Client{}}
+
+	past := time.Now().Add(-time.Minute)
+	if err := serverstore.RecordGatewayFile(gw.db, "file-crash", gw.uidA, &past); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟"认领成功但进程随即死掉"：只打标记。
+	if _, ok, err := serverstore.ClaimExpiredGatewayFile(gw.db, "file-crash"); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if exists, _ := serverstore.GatewayFileRowExists(gw.db, "file-crash"); !exists {
+		t.Fatal("认领必须**保留**台账行（否则上游对象再无凭据）")
+	}
+	// 租约内：别的批次不会抢（claim 返回 false），也不会重复删上游；
+	// 候选列表也必须把它排除（否则崩溃留下的标记行每轮白占一个批次位）。
+	if _, ok, _ := serverstore.ClaimExpiredGatewayFile(gw.db, "file-crash"); ok {
+		t.Fatal("租约内不该被重复认领")
+	}
+	if ids, err := serverstore.ListExpiredGatewayFiles(gw.db, 10); err != nil {
+		t.Fatal(err)
+	} else {
+		for _, id := range ids {
+			if id == "file-crash" {
+				t.Fatal("租约内的标记行不该再进候选列表（会挤占批次位）")
+			}
+		}
+	}
+	// 租约过期（把标记推到 11 分钟前）⇒ 下一轮可重新认领并真正收尾。
+	if _, err := gw.db.Exec(`UPDATE gateway_files SET reaping_at = now() - interval '11 minutes' WHERE file_id = 'file-crash'`); err != nil {
+		t.Fatal(err)
+	}
+	deleted, failed := api.ReapExpiredGatewayFiles(0)
+	if deleted != 1 || failed != 0 {
+		t.Fatalf("租约过期后应能回收: %d/%d", deleted, failed)
+	}
+	if exists, _ := serverstore.GatewayFileRowExists(gw.db, "file-crash"); exists {
+		t.Fatal("收尾后台账行必须清掉")
+	}
+	if up.deletes.Load() != 1 {
+		t.Fatalf("上游删除次数 = %d, want 1（重入时上游已是 404 = 成功）", up.deletes.Load())
+	}
+}
+
+// TestReaperAbandonsIfRenewedDuringReap（R7 N11 续期侧）：两个窗口都必须放弃删上游对象 ——
+//
+//	(a) 列出候选 → 认领之间被续期（认领的"复检仍过期"挡住）；
+//	(b) 认领（打标记）→ 删上游之间被续期（续期**清空标记** ⇒ 复检发现认领已失效）。
+//
+// 两个窗口分开成子用例：合并写会互相遮蔽 —— (a) 的续期让认领直接失败，(b) 的注入点
+// 根本不会被执行，于是"续期清标记"这条实现细节没有任何判据（变异实测：删掉
+// `reaping_at = NULL` 时合并版仍绿）。
+func TestReaperAbandonsIfRenewedDuringReap(t *testing.T) {
+	past := time.Now().Add(-time.Minute)
+	future := time.Now().Add(time.Hour)
+
+	cases := []struct {
+		name  string
+		arm   func(t *testing.T, gw *filesGateway, id string, future time.Time)
+		clear func()
+	}{
+		{
+			name: "after-list",
+			arm: func(t *testing.T, gw *filesGateway, id string, future time.Time) {
+				reapAfterListHook.store(func(ids []string) {
+					for _, got := range ids {
+						if got != id {
+							continue
+						}
+						reapAfterListHook.store(nil)
+						if err := serverstore.RecordGatewayFile(gw.db, id, gw.uidB, &future); err != nil {
+							t.Errorf("renew: %v", err)
+						}
+					}
+				})
+			},
+			clear: func() { reapAfterListHook.store(nil) },
+		},
+		{
+			name: "after-claim",
+			arm: func(t *testing.T, gw *filesGateway, id string, future time.Time) {
+				reapRecheckHook.store(func(got string) {
+					if got != id {
+						return
+					}
+					reapRecheckHook.store(nil)
+					if err := serverstore.RecordGatewayFile(gw.db, id, gw.uidB, &future); err != nil {
+						t.Errorf("renew during reap: %v", err)
+					}
+				})
+			},
+			clear: func() { reapRecheckHook.store(nil) },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			up := newFakeFilesUpstream(t)
+			gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+			api := &API{DB: gw.db, client: &http.Client{}}
+			// id 必须满足 validGatewayFileID 的白名单（`[A-Za-z0-9_-]`）：否则回收器会先把它
+			// 当成"本地损坏行"就地丢弃（L2 的有意设计），判据就测不到了。
+			id := "file-renew-" + tc.name
+			if err := serverstore.RecordGatewayFile(gw.db, id, gw.uidA, &past); err != nil {
+				t.Fatal(err)
+			}
+			tc.arm(t, gw, id, future)
+			t.Cleanup(tc.clear)
+
+			before := up.deletes.Load()
+			if deleted, _ := api.ReapExpiredGatewayFiles(0); deleted != 0 {
+				t.Fatalf("被续期的文件不该计入回收（deleted=%d）", deleted)
+			}
+			if up.deletes.Load() != before {
+				t.Fatalf("被续期的文件其上游对象被删了（deletes %d → %d）", before, up.deletes.Load())
+			}
+			owner, ok, err := serverstore.GatewayFileOwner(gw.db, id)
+			if err != nil || !ok {
+				t.Fatalf("续期后的行必须仍然有效: ok=%v err=%v", ok, err)
+			}
+			if owner != gw.uidB {
+				t.Fatalf("归属应转为续期者: %d want %d", owner, gw.uidB)
+			}
+		})
+	}
+}
+
+// TestReaperReleasesClaimOnUpstreamFailure（R7 N11）：上游删除失败时释放标记 ⇒ 下一轮
+// **立刻**重试（不必等租约），且台账行仍在（清理责任不丢）。
+func TestReaperReleasesClaimOnUpstreamFailure(t *testing.T) {
+	up := newFakeFilesUpstream(t)
+	up.respond = func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"file-x"}`))
+	}
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	api := &API{DB: gw.db, client: &http.Client{}}
+
+	past := time.Now().Add(-time.Minute)
+	if err := serverstore.RecordGatewayFile(gw.db, "file-retry", gw.uidA, &past); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, failed := api.ReapExpiredGatewayFiles(0); deleted != 0 || failed != 1 {
+		t.Fatalf("第一轮 = %d/%d, want 0/1", deleted, failed)
+	}
+	if held, err := serverstore.GatewayFileReapClaimHeld(gw.db, "file-retry"); err != nil || held {
+		t.Fatalf("失败后必须释放标记才能立刻重试: held=%v err=%v", held, err)
+	}
+	up.respond = nil
+	if deleted, failed := api.ReapExpiredGatewayFiles(0); deleted != 1 || failed != 0 {
+		t.Fatalf("第二轮 = %d/%d, want 1/0（不该等租约过期）", deleted, failed)
+	}
+}

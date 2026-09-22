@@ -470,12 +470,25 @@ func TestClaimExpiredGatewayFileConcurrentClaimsExactlyOneWins(t *testing.T) {
 		if wins != 1 {
 			t.Fatalf("第 %d 轮成功数 = %d, want 1（oks=%v）", i, wins, oks)
 		}
+		// 认领是"打标记"，**不删行**（R7 N11：删行会让上游对象在崩溃时失去凭据）——
+		// 收尾（FinishReapedGatewayFile）之后行才消失。
 		var left int
+		var marked bool
+		if err := db.QueryRow(`SELECT count(*), COALESCE(bool_or(reaping_at IS NOT NULL), false)
+		                         FROM gateway_files WHERE file_id = ?`, id).Scan(&left, &marked); err != nil {
+			t.Fatal(err)
+		}
+		if left != 1 || !marked {
+			t.Fatalf("第 %d 轮认领后应保留带标记的行（left=%d marked=%v）", i, left, marked)
+		}
+		if err := FinishReapedGatewayFile(db, id); err != nil {
+			t.Fatal(err)
+		}
 		if err := db.QueryRow(`SELECT count(*) FROM gateway_files WHERE file_id = ?`, id).Scan(&left); err != nil {
 			t.Fatal(err)
 		}
 		if left != 0 {
-			t.Fatalf("第 %d 轮认领后行仍在（left=%d）", i, left)
+			t.Fatalf("第 %d 轮收尾后行应被清掉（left=%d）", i, left)
 		}
 	}
 }
@@ -607,7 +620,7 @@ func TestPurgeAndClaimCrossPaths(t *testing.T) {
 	alice := mustUser(t, db, "gw-cross-alice")
 	past := time.Now().Add(-time.Minute)
 
-	// ① claim 先删 → purge 不报错、不重复计数
+	// ① claim 先打标记 → purge 必须跳过它（否则删行会让上游对象在回收器崩溃时失去凭据）
 	if err := RecordGatewayFile(db, "cross-1", alice, &past); err != nil {
 		t.Fatal(err)
 	}
@@ -615,7 +628,13 @@ func TestPurgeAndClaimCrossPaths(t *testing.T) {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if n, err := PurgeExpiredGatewayFiles(db, 10); err != nil || n != 0 {
-		t.Fatalf("claim 之后 purge = %d/%v, want 0/nil", n, err)
+		t.Fatalf("claim 之后 purge = %d/%v, want 0/nil（标记行必须被跳过）", n, err)
+	}
+	if err := FinishReapedGatewayFile(db, "cross-1"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := PurgeExpiredGatewayFiles(db, 10); err != nil || n != 0 {
+		t.Fatalf("收尾之后 purge 仍应为 0（行已删）: %d/%v", n, err)
 	}
 
 	// ② purge 先删 → claim 报 ok=false（不是错误）

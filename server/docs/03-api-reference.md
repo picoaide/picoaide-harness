@@ -111,7 +111,7 @@ OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹
 **文件保留上限与回收(2026-09-22)**:`gateway.file_expiry_days`(缺省 **7 天**,范围 1~30)是网关**强制执行**的保留上限。
 上传时网关**重写 multipart 体**把过期时间收进上限(客户端没带就补 `expires_after[seconds]` + `anchor=created_at`,
 要得比上限久就改成上限,更早就原样保留)—— 所以**上游也按上限保存**;台账侧再收敛一次作为纵深防御,
-到点即拒绝授权,并由 5 分钟一轮的回收器在上游删除(上游配额是**每 API key**、全组织共享 25 GiB / 10000 文件)。
+到点即拒绝授权,并由 5 分钟一轮的回收器在上游删除(回收采用**标记认领**:认领保留台账行 + `reaping_at` 标记,删上游后收尾删行 ⇒ 进程中断也不会留下无凭据的孤儿对象)(上游配额是**每 API key**、全组织共享 25 GiB / 10000 文件)。
 重写按 2× 体量占用内存闸门,打满即 503;非 multipart 体原样转发(不新增失败面)。
 管理后台「网关文件」页按员工展示占用(文件数/字节/其中已过期),支持按员工过滤(`user=` 用户名、`user_id=` 数字 ID)、`file_id` 搜索、排序与按条件清理;
 接口:`GET /api/server/admin/gateway/files|/files/summary`(gateway:read)、`DELETE /api/server/admin/gateway/files/:file_id`
