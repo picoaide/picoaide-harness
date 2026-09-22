@@ -213,7 +213,7 @@ export default function Gateway() {
         retention_months: g.retention_months ?? '6',
         default_thinking_level: g.default_thinking_level ?? 'max',
         server_base_url: g.server_base_url ?? '',
-        // 2026-09-22 新增:出站体加工的两个闸门(服务端缺省 256 / 256MiB)
+        // 2026-09-22 新增:出站体加工的两个闸门(服务端缺省 600 / 128MiB)
         max_file_refs: String(g.max_file_refs ?? '600'),
         body_parse_budget_mb: String(g.body_parse_budget_mb ?? '128'),
       })

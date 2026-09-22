@@ -78,7 +78,7 @@ func GatewayFileOwnedBy(db *sql.DB, fileID string, userID int64) (bool, error) {
 // 单次往返（`IN (...)` 展开）：审计 2026-09-22 F 路 P2-3 实测逐个 `GatewayFileOwnedBy`
 // 在 100 个引用时约 49ms、1000 个约 113ms，全是串行 DB 往返；而请求体上限 64MiB 足够
 // 塞进远多于 1000 个 `file_id`，等于把"闸门前的排队时间"交给调用方控制。调用方据此
-// 把引用数压在上限内（见 maxFileRefsPerRequest），本函数只负责一次问清。
+// 把引用数压在上限内（见 llmgateway 的 `max_file_refs` 设置），本函数只负责一次问清。
 func GatewayFilesOwnedBy(db *sql.DB, ids []string, userID int64) (map[string]struct{}, error) {
 	owned := make(map[string]struct{}, len(ids))
 	if len(ids) == 0 {

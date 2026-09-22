@@ -694,7 +694,8 @@ func TestTooManyFileReferencesRejected(t *testing.T) {
 }
 
 // TestManyOwnedFileReferencesPassInOneQuery：批量归属查询的正确性 —— 登记 300 个
-// 自己的文件、请求引用其中 256 个（上限内）必须整体放行；其中只要有一个不是自己的，
+// 自己的文件、请求引用其中 DefaultMaxFileRefsPerRequest 个（上限内）必须整体放行；
+// 其中只要有一个不是自己的，
 // 整个请求 404。
 func TestManyOwnedFileReferencesPassInOneQuery(t *testing.T) {
 	up := newFakeFilesUpstream(t)
