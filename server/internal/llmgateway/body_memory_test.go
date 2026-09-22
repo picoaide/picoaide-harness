@@ -17,10 +17,10 @@ import (
 func resetBodyParseGate(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {
-		globalBodyParseGate.release(globalBodyParseGate.inFlightBytes())
+		globalBodyParseGate.zeroForTest()
 		InvalidateGatewayLimits()
 	})
-	globalBodyParseGate.release(globalBodyParseGate.inFlightBytes())
+	globalBodyParseGate.zeroForTest()
 	InvalidateGatewayLimits()
 }
 
@@ -39,10 +39,11 @@ func TestBodyParseGateBlocksOverBudget(t *testing.T) {
 	}
 	InvalidateGatewayLimits()
 	budget := int64(MinBodyParseBudgetMB) << 20
-	if !globalBodyParseGate.acquire(budget, budget) {
+	releaseGate, ok := globalBodyParseGate.acquire(budget, budget)
+	if !ok {
 		t.Fatal("占满闸门失败（夹具问题）")
 	}
-	defer globalBodyParseGate.release(budget)
+	defer releaseGate()
 
 	reqBody := `{"model":"deepseek-chat","messages":[{"role":"user","content":[{"type":"file","file_id":"file-abc"}]}]}`
 	w := doPost(t, gw.r, "/v1/chat/completions", reqBody, gw.tokenA, nil)
@@ -236,6 +237,11 @@ func TestGatewayConfigRoundTripsBodyGates(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 
+	// 先"热"一次缓存（读到缺省值）⇒ 保存后必须由 admin 侧的 InvalidateGatewayLimits
+	// 才能看到新值；删掉那行接线本用例即红（审计 2026-09-22 R4：该接线此前无判据）。
+	if got := gatewayLimitsFor(db); got.maxFileRefs != DefaultMaxFileRefsPerRequest {
+		t.Fatalf("预热缓存应读到缺省值: %+v", got)
+	}
 	put := func(body string) *httptest.ResponseRecorder {
 		t.Helper()
 		w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", body, hdr)
@@ -291,10 +297,11 @@ func TestBodyParseGateCoversCandidateLoopEdits(t *testing.T) {
 	}
 	InvalidateGatewayLimits()
 	budget := int64(MinBodyParseBudgetMB) << 20
-	if !globalBodyParseGate.acquire(budget, budget) {
+	releaseGate, ok := globalBodyParseGate.acquire(budget, budget)
+	if !ok {
 		t.Fatal("占满闸门失败（夹具问题）")
 	}
-	defer globalBodyParseGate.release(budget)
+	defer releaseGate()
 
 	filler := strings.Repeat("x", 96<<10) // ≥ fastPathMinBytes，且不含触发慢路径的子串
 	body := `{"model":"deepseek-chat","messages":[{"role":"user","content":"` + filler + `"}],"stream":true}`
@@ -324,8 +331,8 @@ func TestBodyParseGateCoversCandidateLoopEdits(t *testing.T) {
 func TestSanitizeUsesNumberDecoder(t *testing.T) {
 	// 合法 JSON：越界数值 + 顶层 `dsh_` 字样（触发净化解析路径）。
 	body := []byte(`{"temperature":1e400,"model":"m","dsh_session_log":"x"}`)
-	out, ok := sanitizeOutboundBody(body)
-	if !ok {
+	out, err := sanitizeOutboundBody(nil, body)
+	if err != nil {
 		t.Fatalf("合法 JSON 被净化闸门拒绝（N-1 回归）：%s", body)
 	}
 	if bytes.Contains(out, []byte("dsh_session_log")) {
@@ -376,5 +383,174 @@ func TestFastPathJSONKeyDetection(t *testing.T) {
 	blank := []byte(`{` + strings.Repeat(" ", fastPathMinBytes+10) + `}`)
 	if out, ok := fastPathUserID(blank, 1, identityOpenAI); ok {
 		t.Fatalf("空白大空对象走了快路径，产物非法: %q", string(out[:40]))
+	}
+}
+
+// TestSanitizeGoesThroughBodyGate（R5-1，第 4 轮复审）：净化必须与其它整 body 往返
+// **共用同一个内存闸门**。旧实现自带 `json.Marshal` 且不过闸门 ⇒ 客户端只要加一个
+// 顶层 `dsh_` 前缀键就能绕过内存闸门（实测闸门占满时仍 200 并完成整 body 往返），
+// 而且默认 HTML 转义会把出站体放大到 6×（上游有 48/64MiB 口径）。
+func TestSanitizeGoesThroughBodyGate(t *testing.T) {
+	resetBodyParseGate(t)
+	f := newFakeUpstream(t)
+	r, db, token := newGateway(t, f)
+	if _, err := db.Exec(`UPDATE models SET default_params = '' WHERE name = 'deepseek-chat'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.SetSetting(db, SettingBodyParseBudgetMB, "64"); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateGatewayLimits()
+	budget := int64(MinBodyParseBudgetMB) << 20
+	releaseGate, ok := globalBodyParseGate.acquire(budget, budget)
+	if !ok {
+		t.Fatal("占满闸门失败（夹具问题）")
+	}
+	defer releaseGate()
+
+	// ① 带顶层 `dsh_` 键（客户端可控）⇒ 净化也要占额度 ⇒ 503（旧实现这里 200）。
+	filler := strings.Repeat("x", 96<<10)
+	body := `{"model":"deepseek-chat","messages":[{"role":"user","content":"` + filler + `"}],"dsh_x":1}`
+	w := doPost(t, r, "/v1/chat/completions", body, token, nil)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("净化路径绕过了内存闸门（%d）：%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"SERVER"`) {
+		t.Fatalf("code 必须是 SERVER（可重试）: %s", w.Body.String())
+	}
+	if upBody, _ := f.gotBody.Load().(string); upBody != "" {
+		t.Fatalf("被闸门拒绝的请求不应触达上游: %s", upBody)
+	}
+}
+
+// TestSanitizeDoesNotEscapeHTML（R5-1 的另一半）：净化重编码必须与加工侧同口径
+// （`SetEscapeHTML(false)`），否则 HTML 密集正文 + `dsh_` 键会把出站体放大到 6×。
+func TestSanitizeDoesNotEscapeHTML(t *testing.T) {
+	resetBodyParseGate(t)
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+
+	// HTML 密集正文 + 一个顶层 `dsh_` 键（强制走剔除路径）。
+	dense := strings.Repeat(`<div class='a'>&amp;</div>`, 5000)
+	body := []byte(`{"model":"m","dsh_x":1,"messages":[{"role":"user","content":"` + dense + `"}]}`)
+	out, err := sanitizeOutboundBody(db, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(out, []byte("dsh_x")) {
+		t.Fatalf("dsh_ 键未剔除")
+	}
+	if n := float64(len(out)) / float64(len(body)); n > 1.05 {
+		t.Fatalf("出站体膨胀 %.2f×（应≈1.00×，说明 HTML 转义没关）: in=%d out=%d", n, len(body), len(out))
+	}
+	if !bytes.Contains(out, []byte(`<div class='a'>`)) {
+		t.Fatal("正文被转义，出站体不再是原文")
+	}
+}
+
+// TestFastPathSkipsEscapedAndReferencedBodies（R4 P1-2）：快路径的两条**安全短路**
+// 必须有行为覆盖 —— 删掉 `file_id` 或 `\u` 短路后旧判据全绿（审计实测：200 且他人
+// file_id 出现在上游实收字节里）。这里用 ≥64KiB 的真实体逐条打穿。
+func TestFastPathSkipsEscapedAndReferencedBodies(t *testing.T) {
+	resetBodyParseGate(t)
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	// A 的文件；B 将被拒绝。
+	if err := serverstore.RecordGatewayFile(gw.db, "file-victim", gw.uidA, nil); err != nil {
+		t.Fatal(err)
+	}
+	filler := strings.Repeat("x", 70<<10)
+
+	// ① 大体积 + 真实（他人的）file_id 引用 ⇒ 必须 404，且零转发。
+	body := `{"model":"deepseek-chat","messages":[{"role":"user","content":[{"type":"text","text":"` + filler + `"},{"type":"file","file_id":"file-victim"}]}]}`
+	if _, ok := fastPathUserID([]byte(body), 2, identityOpenAI); ok {
+		t.Fatal("含 file_id 的大体走了快路径（会跳过归属校验）")
+	}
+	if w := doPost(t, gw.r, "/v1/chat/completions", body, gw.tokenB, nil); w.Code != http.StatusNotFound {
+		t.Fatalf("引用他人文件 status = %d (%s), want 404", w.Code, w.Body.String())
+	}
+	if up.hits.Load() != 0 {
+		t.Fatalf("越权请求触达了上游（%d 次）", up.hits.Load())
+	}
+
+	// ② 大体积 + `\u` 转义键名（`file\u005fid`）⇒ 必须回落慢路径并被拦下。
+	esc := `{"model":"deepseek-chat","messages":[{"role":"user","content":[{"type":"text","text":"` + filler + `"},{"type":"file","file\u005fid":"file-victim"}]}]}`
+	if _, ok := fastPathUserID([]byte(esc), 2, identityOpenAI); ok {
+		t.Fatal("含 \\u 转义的大体走了快路径（会漏掉转义后的引用）")
+	}
+	if w := doPost(t, gw.r, "/v1/chat/completions", esc, gw.tokenB, nil); w.Code != http.StatusNotFound {
+		t.Fatalf("转义键名引用他人文件 status = %d (%s), want 404", w.Code, w.Body.String())
+	}
+	if up.hits.Load() != 0 {
+		t.Fatalf("转义越权请求触达了上游（%d 次）", up.hits.Load())
+	}
+	// ③ 反向对照：同样的体（无引用）必须正常走通（证明 ①② 不是整体拒绝）。
+	ok := `{"model":"deepseek-chat","messages":[{"role":"user","content":"` + filler + `"}]}`
+	if _, ok2 := fastPathUserID([]byte(ok), 2, identityOpenAI); !ok2 {
+		t.Fatal("无引用的大体应走快路径")
+	}
+	if w := doPost(t, gw.r, "/v1/chat/completions", ok, gw.tokenA, nil); w.Code != http.StatusOK {
+		t.Fatalf("正常大体积请求 status = %d (%s)", w.Code, w.Body.String())
+	}
+}
+
+// TestBodyParseGateTiersProtectSmallRequests（R4 P2 公平性）：单个员工用大体灌满
+// 大体池后，**其他员工的普通小请求**仍必须走通 —— 否则一个租户能让全公司对话 503。
+func TestBodyParseGateTiersProtectSmallRequests(t *testing.T) {
+	resetBodyParseGate(t)
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	if _, err := gw.db.Exec(`UPDATE models SET default_params = ''`); err != nil {
+		t.Fatal(err)
+	}
+
+	// 直接占满"大体池"（不碰小体池）：模拟某员工灌 64MiB 级请求体。
+	budget := int64(DefaultBodyParseBudgetMB) << 20
+	_, largeCap := bodyParseTiers(budget)
+	rel, ok := globalBodyParseGate.acquire(budget, largeCap)
+	if !ok {
+		t.Fatal("占满大体池失败（夹具问题）")
+	}
+	defer rel()
+
+	// 其他员工的普通小请求（几 KB + 一个自己的 file_id ⇒ 慢路径）必须 200。
+	if err := serverstore.RecordGatewayFile(gw.db, "file-mine", gw.uidA, nil); err != nil {
+		t.Fatal(err)
+	}
+	small := `{"model":"deepseek-chat","messages":[{"role":"user","content":[{"type":"file","file_id":"file-mine"}]}]}`
+	if w := doPost(t, gw.r, "/v1/chat/completions", small, gw.tokenA, nil); w.Code != http.StatusOK {
+		t.Fatalf("大体池占满后，普通小请求被饿死（%d %s）—— 分档没生效", w.Code, w.Body.String())
+	}
+	// 大体仍然被拒（池子是硬上限）。
+	big := `{"model":"deepseek-chat","messages":[{"role":"user","content":"` + strings.Repeat("x", 2<<20) + `"}],"dsh_x":1}`
+	if w := doPost(t, gw.r, "/v1/chat/completions", big, gw.tokenA, nil); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("大体池占满时大请求应 503，实得 %d", w.Code)
+	}
+}
+
+// TestGatewayLimitsCacheIsPerDB（R4 P2）：进程内缓存必须按库分键，否则测试/多库
+// 场景会读到别的库的配置（审计实测 db2 读到 db1 的值）。
+func TestGatewayLimitsCacheIsPerDB(t *testing.T) {
+	resetBodyParseGate(t)
+	db1, cleanup1 := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup1)
+	db2, cleanup2 := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup2)
+
+	if err := serverstore.SetSetting(db1, SettingMaxFileRefs, "111"); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.SetSetting(db2, SettingMaxFileRefs, "222"); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateGatewayLimits()
+	if got := gatewayLimitsFor(db1).maxFileRefs; got != 111 {
+		t.Fatalf("db1 = %d", got)
+	}
+	if got := gatewayLimitsFor(db2).maxFileRefs; got != 222 {
+		t.Fatalf("db2 读到了 db1 的缓存值（%d）", got)
+	}
+	if got := gatewayLimitsFor(db1).maxFileRefs; got != 111 {
+		t.Fatalf("回到 db1 = %d", got)
 	}
 }

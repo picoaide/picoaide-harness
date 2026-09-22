@@ -394,8 +394,7 @@ func (a *API) handleMessages(c *gin.Context) {
 	var chosenProviderID int64 // 实际命中的 provider(计费取价用,P1-6)
 	for i := range ups {
 		resp, err = a.forwardAnthropic(c, &ups[i], outbound, req.Stream)
-		if errors.Is(err, errOutboundBodyNotJSON) {
-			a.rejectBadOutboundBody(c, usageID)
+		if a.rejectForwardError(c, usageID, err) {
 			return
 		}
 		if err == nil {
@@ -451,10 +450,11 @@ func anthropicBaseURL(base, protocol string) string {
 // credential or version drift on a proxied search.
 func (a *API) forwardAnthropic(c *gin.Context, up *Upstream, body outboundBody, stream bool) (*http.Response, error) {
 	// P0-4 服务端侧第二道闸门：出站请求体剔除上游 DSH 私有扩展字段（见 sanitize.go）。
-	// 净化无法确认是 JSON 对象时 fail-closed（见 errOutboundBodyNotJSON）。
-	clean, ok := sanitizeOutboundBody([]byte(body))
-	if !ok {
-		return nil, errOutboundBodyNotJSON
+	// 净化走统一往返（同一内存闸门 + 同一编码器口径），失败 fail-closed：
+	// 不是 JSON 对象 ⇒ errOutboundBodyNotJSON（400）；闸门打满 ⇒ errBodyParseBusy（503）。
+	clean, err := sanitizeOutboundBody(a.db(), []byte(body))
+	if err != nil {
+		return nil, err
 	}
 	url := upstreamURLFor(anthropicBaseURL(up.BaseURL, up.Protocol), "/messages")
 	client := a.client

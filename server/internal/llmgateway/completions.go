@@ -3,7 +3,6 @@ package llmgateway
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -121,8 +120,7 @@ func (a *API) handleCompletions(c *gin.Context) {
 			}
 		}
 		resp, err = a.forwardEndpoint(c, &ups[i], body, req.Stream, "/completions")
-		if errors.Is(err, errOutboundBodyNotJSON) {
-			a.rejectBadOutboundBody(c, usageID)
+		if a.rejectForwardError(c, usageID, err) {
 			return
 		}
 		if err == nil {
@@ -158,10 +156,11 @@ func (a *API) handleCompletions(c *gin.Context) {
 // selectable endpoint suffix.
 func (a *API) forwardEndpoint(c *gin.Context, up *Upstream, body outboundBody, stream bool, endpoint string) (*http.Response, error) {
 	// P0-4 服务端侧第二道闸门：出站请求体剔除上游 DSH 私有扩展字段（见 sanitize.go）。
-	// 净化无法确认是 JSON 对象时 fail-closed（见 errOutboundBodyNotJSON）。
-	clean, ok := sanitizeOutboundBody([]byte(body))
-	if !ok {
-		return nil, errOutboundBodyNotJSON
+	// 净化走统一往返（同一内存闸门 + 同一编码器口径），失败 fail-closed：
+	// 不是 JSON 对象 ⇒ errOutboundBodyNotJSON（400）；闸门打满 ⇒ errBodyParseBusy（503）。
+	clean, err := sanitizeOutboundBody(a.db(), []byte(body))
+	if err != nil {
+		return nil, err
 	}
 	url := upstreamURLFor(up.BaseURL, endpoint)
 	client := a.client

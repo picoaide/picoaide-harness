@@ -179,8 +179,7 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 			}
 		}
 		resp, err = a.forward(c, &ups[i], body, req.Stream)
-		if errors.Is(err, errOutboundBodyNotJSON) {
-			a.rejectBadOutboundBody(c, usageID)
+		if a.rejectForwardError(c, usageID, err) {
 			return
 		}
 		if err == nil {
@@ -242,6 +241,24 @@ func (a *API) rejectBusyBodyEdit(c *gin.Context, usageID int64, err error) bool 
 	a.discardPendingUsage(usageID)
 	writeBodyParseBusy(c)
 	return true
+}
+
+// rejectForwardError 处理**转发前**的本地拒绝：出站体不是 JSON 对象 ⇒ 400；
+// 内存闸门打满 ⇒ 503 SERVER。两种情况都已写出响应并清掉 pending usage 行，
+// 返回 true 表示调用方必须立即 return（不要继续试下一个 provider）。
+func (a *API) rejectForwardError(c *gin.Context, usageID int64, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, errBodyParseBusy):
+		a.discardPendingUsage(usageID)
+		writeBodyParseBusy(c)
+		return true
+	case errors.Is(err, errOutboundBodyNotJSON):
+		a.rejectBadOutboundBody(c, usageID)
+		return true
+	}
+	return false
 }
 
 // rejectBadOutboundBody 处理"最后一道闸门判定出站体不是 JSON 对象"这一情形：
@@ -372,10 +389,11 @@ func upstreamURLFor(base, endpoint string) string {
 // header timeouts return an error, which the caller treats as failover-eligible.
 func (a *API) forward(c *gin.Context, up *Upstream, body outboundBody, stream bool) (*http.Response, error) {
 	// P0-4 服务端侧第二道闸门：出站请求体剔除上游 DSH 私有扩展字段（见 sanitize.go）。
-	// 净化无法确认是 JSON 对象时 fail-closed（见 errOutboundBodyNotJSON）。
-	clean, ok := sanitizeOutboundBody([]byte(body))
-	if !ok {
-		return nil, errOutboundBodyNotJSON
+	// 净化走统一往返（同一内存闸门 + 同一编码器口径），失败 fail-closed：
+	// 不是 JSON 对象 ⇒ errOutboundBodyNotJSON（400）；闸门打满 ⇒ errBodyParseBusy（503）。
+	clean, err := sanitizeOutboundBody(a.db(), []byte(body))
+	if err != nil {
+		return nil, err
 	}
 	url := upstreamURL(up.BaseURL)
 	client := a.client

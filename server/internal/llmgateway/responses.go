@@ -2,7 +2,6 @@ package llmgateway
 
 import (
 	"encoding/json"
-	"errors"
 	"log"
 	"net/http"
 
@@ -117,8 +116,7 @@ func (a *API) handleResponses(c *gin.Context) {
 			}
 		}
 		resp, err = a.forwardEndpoint(c, &ups[i], body, req.Stream, "/responses")
-		if errors.Is(err, errOutboundBodyNotJSON) {
-			a.rejectBadOutboundBody(c, usageID)
+		if a.rejectForwardError(c, usageID, err) {
 			return
 		}
 		if err == nil {

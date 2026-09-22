@@ -362,10 +362,19 @@ func TestOutboundBodyRejectsNonObjectOrInvalidJSON(t *testing.T) {
 	up := newFakeFilesUpstream(t)
 	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
 
+	// 判据必须与"必填字段缺失"的 400 区分开（审计 2026-09-22 R4：只断言 400 时，
+	// 把 fail-closed 去掉也会被后面的 `缺少 model 字段` 兜成 400 ⇒ 判据不判别）。
 	for _, body := range []string{`null`, `[]`, `"text"`, `{`, `{"model":}`} {
 		w := doPost(t, gw.r, "/v1/chat/completions", body, gw.tokenA, nil)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("body=%q status = %d (%s), want 400", body, w.Code, w.Body.String())
+		}
+		msg := w.Body.String()
+		if !strings.Contains(msg, "请求体不是合法 JSON") && !strings.Contains(msg, "请求体必须是 JSON 对象") {
+			t.Fatalf("body=%q 的 400 不是出站体闸门给出的（说明 fail-closed 未生效，被必填字段校验兜住）: %s", body, msg)
+		}
+		if strings.Contains(msg, "缺少 model 字段") {
+			t.Fatalf("body=%q 落到了 model 必填校验（闸门被跳过）: %s", body, msg)
 		}
 	}
 	if up.hits.Load() != 0 {

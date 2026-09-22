@@ -31,7 +31,8 @@ import (
 // 本文件的三个不变量：
 //   - 所有"整 body map 往返"只走 `rewriteJSONObjectBody` 一个实现（放大的唯一来源）；
 //   - 每次往返都必须先过进程级**在飞字节闸门**（`bodyParseGate`），超了直接 503
-//     （fail-closed、可重试），而不是让内存无上限叠加；
+//     （fail-closed、可重试），而不是让内存无上限叠加；闸门分两档（小体保留池 +
+//     大体池），避免单租户灌大体把所有人的日常对话一起饿死；
 //   - 两个可配数值（引用数上限、在飞字节预算）都来自 `settings`，管理后台可改，
 //     进程内 10s TTL 缓存（改完最多 10s 生效；保存时主动失效）。
 
@@ -76,6 +77,10 @@ var gatewayLimitsCache struct {
 	loaded bool
 	at     time.Time
 	val    gatewayLimits
+	// src 记录这份快照是从哪个 *sql.DB 读出来的：进程里可能同时存在多个库
+	// （测试逐用例建库、运维脚本可能连第二个库），不按库分键会读到别的库的值
+	// （审计 2026-09-22 R4：测试实测 db2 读到 db1 的配置）。
+	src *sql.DB
 }
 
 // gatewayLimitsFor 读两个可配数值（10s TTL 缓存）。
@@ -93,7 +98,8 @@ func gatewayLimitsFor(db *sql.DB) gatewayLimits {
 	}
 	gatewayLimitsCache.mu.Lock()
 	defer gatewayLimitsCache.mu.Unlock()
-	if gatewayLimitsCache.loaded && time.Since(gatewayLimitsCache.at) < gatewayLimitsTTL {
+	if gatewayLimitsCache.loaded && gatewayLimitsCache.src == db &&
+		time.Since(gatewayLimitsCache.at) < gatewayLimitsTTL {
 		return gatewayLimitsCache.val
 	}
 	out := def
@@ -108,6 +114,7 @@ func gatewayLimitsFor(db *sql.DB) gatewayLimits {
 	gatewayLimitsCache.val = out
 	gatewayLimitsCache.at = time.Now()
 	gatewayLimitsCache.loaded = true
+	gatewayLimitsCache.src = db
 	return out
 }
 
@@ -140,45 +147,113 @@ func ParseBodyParseBudgetMB(v string) (int, bool) {
 // 为什么按字节而不是按请求数：一条 64MiB 的体与一条 64KiB 的体代价差三个数量级，
 // 按条数限制挡不住内存。为什么是进程级而不是按用户：内存是进程共享资源，按用户限
 // 只会让"每人 32 并发"叠加（`InFlightGuard`）——正是审计指出的缺口。
+// 分层（审计 2026-09-22 R4 P2：全局闸门无公平性 ⇒ 单个员工灌大体能让全公司
+// 普通对话一起 503）：小体走**保留池**，大体走剩余池，两边都有硬上限。
+//
+// 为什么必须分：普通对话请求体只有几 KB，但**同样要进慢路径**（快路径只覆盖
+// ≥64KiB 的体），所以大体洪泛会直接命中所有人的日常请求。
+const (
+	// bodyParseSmallTierBytes：≤ 该体量算"小体"（普通对话 + 少量引用）。
+	bodyParseSmallTierBytes = 1 << 20
+	// bodyParseSmallReserveMin：小体池的下限（预算很小也要留出这一块）。
+	bodyParseSmallReserveMin = 8 << 20
+	// bodyParseMaxBodyBytes：任何档位都必须容得下**一个**最大请求体，
+	// 否则等于把上限设成了不可用（与 llmgateway 的 64MiB 体上限同源）。
+	bodyParseMaxBodyBytes = 64 << 20
+)
+
+// bodyParseTiers 把总预算拆成 (小体池, 大体池)。拆不出来时（预算 ≤ 一个最大体）
+// 小体池为 0，表示"不分层、共用大体池"—— 管理员选最小预算即接受这个取舍。
+func bodyParseTiers(budget int64) (smallCap, largeCap int64) {
+	smallCap = budget / 4
+	if smallCap < bodyParseSmallReserveMin {
+		smallCap = bodyParseSmallReserveMin
+	}
+	largeCap = budget - smallCap
+	if largeCap < bodyParseMaxBodyBytes {
+		largeCap = bodyParseMaxBodyBytes
+		smallCap = budget - largeCap
+		if smallCap < 0 {
+			smallCap = 0
+		}
+	}
+	return smallCap, largeCap
+}
+
 type bodyParseGate struct {
-	mu       sync.Mutex
-	inFlight int64
+	mu    sync.Mutex
+	small int64
+	large int64
 }
 
 var globalBodyParseGate bodyParseGate
 
-// acquire 申请 n 字节额度：成功返回 true，超预算返回 false（调用方必须 503）。
-// n <= 0 视为成功（空体没有放大面）。
-func (g *bodyParseGate) acquire(budget, n int64) bool {
+// acquire 申请 n 字节额度：成功返回**必须 defer 调用的 release 闭包**。
+//
+// 返回闭包而不是 `release(n)` 是刻意的：分档规则依赖 acquire 当时的预算与体量，
+// 单独一个 `release(n)` 在"预算中途被改小"等场景下可能归错池（审计口径里这属于
+// 记账泄漏类缺陷）。闭包把"记在哪一档"钉在申请那一刻，配对不可能出错。
+func (g *bodyParseGate) acquire(budget, n int64) (func(), bool) {
+	noop := func() {}
 	if n <= 0 {
-		return true
+		return noop, true
 	}
+	smallCap, largeCap := bodyParseTiers(budget)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.inFlight+n > budget {
-		return false
+	if smallCap > 0 && n <= bodyParseSmallTierBytes {
+		if g.small+n > smallCap {
+			return nil, false
+		}
+		g.small += n
+		return func() {
+			g.mu.Lock()
+			g.small -= n
+			if g.small < 0 {
+				g.small = 0 // 防御：任何路径都不该多释放
+			}
+			g.mu.Unlock()
+		}, true
 	}
-	g.inFlight += n
-	return true
-}
-
-func (g *bodyParseGate) release(n int64) {
-	if n <= 0 {
-		return
+	if g.large+n > largeCap {
+		return nil, false
 	}
-	g.mu.Lock()
-	g.inFlight -= n
-	if g.inFlight < 0 {
-		g.inFlight = 0 // 防御：任何路径都不该多释放
-	}
-	g.mu.Unlock()
+	g.large += n
+	return func() {
+		g.mu.Lock()
+		g.large -= n
+		if g.large < 0 {
+			g.large = 0
+		}
+		g.mu.Unlock()
+	}, true
 }
 
 // inFlightBytes 是当前在飞字节（诊断/测试口径）。
 func (g *bodyParseGate) inFlightBytes() int64 {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.inFlight
+	return g.small + g.large
+}
+
+// inFlightSmallBytes / inFlightLargeBytes 供测试断言分档行为使用。
+func (g *bodyParseGate) inFlightSmallBytes() int64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.small
+}
+
+func (g *bodyParseGate) inFlightLargeBytes() int64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.large
+}
+
+// zeroForTest 把两个池清零（只给测试隔离用：真实路径只能靠配对 release 归还）。
+func (g *bodyParseGate) zeroForTest() {
+	g.mu.Lock()
+	g.small, g.large = 0, 0
+	g.mu.Unlock()
 }
 
 var (
@@ -200,12 +275,13 @@ var (
 func rewriteJSONObjectBody(db *sql.DB, raw []byte, mutate func(map[string]any) error) ([]byte, error) {
 	budget := gatewayLimitsFor(db).budgetBytes
 	n := int64(len(raw))
-	if !globalBodyParseGate.acquire(budget, n) {
-		log.Printf("gateway: body rewrite rejected: in-flight=%dMiB budget=%dMiB request=%dMiB",
-			globalBodyParseGate.inFlightBytes()>>20, budget>>20, n>>20)
+	release, ok := globalBodyParseGate.acquire(budget, n)
+	if !ok {
+		log.Printf("gateway: body rewrite rejected: in-flight=%dMiB budget=%dMiB request=%d bytes",
+			globalBodyParseGate.inFlightBytes()>>20, budget>>20, n)
 		return nil, errBodyParseBusy
 	}
-	defer globalBodyParseGate.release(n)
+	defer release()
 
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber() // 保全大整数精度（float64 会让 >2^53 的整数在重编码时漂移）
