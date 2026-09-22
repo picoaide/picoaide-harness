@@ -46,17 +46,27 @@ function writeLock(home: string, document: string, content: string): string {
 }
 
 /**
- * 该目录所在文件系统是否**复用 inode**（ext4 是、tmpfs 不是）。换锁类判据只有在前者上
- * 才可能让"四项 stat 全等"成立，用它决定"是否要求判据必须咬到"。
+ * 该目录所在文件系统能否构造"身份不变的换锁"——**直接做一遍**判据要做的那个动作：
+ * 建一个与锁同长的普通文件 → `rm` → 建一个目标串等长的符号链接，比较四项 stat。
+ *
+ * 不猜文件系统性质（inode 是否复用、时间戳步进多粗都随文件系统与内核而异，CI runner 与
+ * 本机就不一样）：探针命中说明这种形态**确实构造得出来**，那条用例才要求"必须咬到"；
+ * 探针打不中（tmpfs、纳秒时间戳、不回收 inode 的 overlayfs…）就只断言行为，不因环境变红。
  */
-function filesystemReusesInodes(dir: string): boolean {
-  for (let i = 0; i < 20; i += 1) {
-    const probe = join(dir, `ino-probe-${String(i)}`)
-    writeFileSync(probe, 'x')
-    const first = statSync(probe).ino
-    rmSync(probe)
-    writeFileSync(probe, 'x')
-    if (statSync(probe).ino === first) return true
+function identityPreservingSwapSupported(dir: string): boolean {
+  writeFileSync(join(dir, 'other'), '4242\n')
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const lock = join(dir, `swap-probe-${String(attempt)}`)
+    writeFileSync(lock, '4242\n')
+    const before = statSync(lock)
+    rmSync(lock, { force: true })
+    symlinkSync('other', lock)
+    const after = lstatSync(lock)
+    rmSync(lock, { force: true })
+    if (after.dev === before.dev && after.ino === before.ino
+      && after.size === before.size && after.mtimeMs === before.mtimeMs) {
+      return true
+    }
   }
   return false
 }
@@ -454,10 +464,10 @@ describe('orphaned document write locks are reclaimed', () => {
     // 也起不来，变异体只会把整个套件挂死而不是干净变红；用"同内容符号链接"能让同一条
     // `!after.isFile()` 守卫以可判定的方式变红（变异体：`unlink` 掉符号链接 ⇒ 路径消失）。
     //
-    // 身份全等依赖文件系统（ext4 复用 inode、tmpfs 不复用）与时间戳粒度（同 tick），所以
-    // **整场重试**；只要该目录所在文件系统会复用 inode，就要求至少命中一次（判据不允许在
-    // 这种环境下静默退化成"没咬到"）。
-    const inodeReuse = filesystemReusesInodes(temporaryHome())
+    // 身份全等依赖文件系统（inode 是否复用 + 时间戳步进是否粗于两次写入的间隔），所以先
+    // **整场重试**、再用 `identityPreservingSwapSupported()` 判断这种形态本能否构造出来：
+    // 能构造就要求必须咬到；不能（tmpfs、纳秒时间戳的 CI runner）就只断言行为，不假红。
+    const strictIdentity = identityPreservingSwapSupported(temporaryHome())
     let identityForced = false
     for (let attempt = 0; attempt < 64 && !identityForced; attempt += 1) {
       const home = temporaryHome()
@@ -479,8 +489,10 @@ describe('orphaned document write locks are reclaimed', () => {
       expect(report.reclaimed).toEqual([])
       expect(report.kept[0]).toMatchObject({ reason: 'changed-since-inspection' })
     }
-    if (inodeReuse) {
-      expect(identityForced, '复用 inode 的文件系统上没能构造出"四项 stat 全等"的换锁，判据会退化').toBe(true)
+    if (strictIdentity) {
+      // 该文件系统上这种形态**可以**构造出来（实测本机 ext4 + 4ms 步进：1 次尝试即全等）：
+      // 那就要求它必须咬到，否则这条判据会静默退化成"没测到守卫"。
+      expect(identityForced, '该文件系统本可构造"四项 stat 全等"的换锁，却没构造出来，判据会退化').toBe(true)
     }
   })
 
