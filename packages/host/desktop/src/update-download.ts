@@ -219,6 +219,13 @@ interface PartialTransferState {
   readonly downloadURL: string
   readonly sha256: string
   readonly receivedBytes: number
+  /**
+   * 上次响应声明的**完整长度**(`content-length + offset`);没有该头时缺省。
+   *
+   * 与 `receivedBytes` 一起决定"这份残留是不是已经下满":清单 `size` 可能偏小,
+   * 只有连接上声明过的长度才是同一份字节的权威口径。
+   */
+  readonly totalBytes?: number
   readonly etag?: string
   readonly lastModified?: string
 }
@@ -313,7 +320,7 @@ export async function resolveUpdateInstaller(
     size,
   } as const
 
-  if (await isVerifiedInstaller(paths.completed, platform, size, shared.sha256)) {
+  if (await isVerifiedInstaller(paths.completed, platform, shared.sha256)) {
     return { ...shared, path: paths.completed, partialPath: paths.temporary, resumeBytes: 0, complete: true }
   }
   return {
@@ -424,7 +431,6 @@ async function fetchManifestFor(
 async function isVerifiedInstaller(
   filename: string,
   platform: DesktopDownloadPlatform,
-  expectedSize: number,
   expectedDigest: string,
 ): Promise<boolean> {
   let stat
@@ -437,7 +443,9 @@ async function isVerifiedInstaller(
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0 || stat.size > MAX_UPDATE_DOWNLOAD_BYTES) {
     return false
   }
-  if (expectedSize > 0 && stat.size !== expectedSize) return false
+  // 长度不作为判据:清单 `size` 是发布方的声明,可能不准(现场见过偏小 20%)。
+  // 用它对拍会把一个已经下好的安装包判成"不可复用" ⇒ 每次检查都重下整包;
+  // 权威判据是清单里的 SHA-256,长度不符只是提示。
   if (await sha256OfFile(filename) !== expectedDigest) return false
   try {
     await validateArtifact(filename, platform)
@@ -471,7 +479,11 @@ async function resumableBytes(
   const stat = await lstatOptional(paths.temporary)
   if (stat === undefined || !stat.isFile() || stat.isSymbolicLink()) return 0
   if (stat.size <= 0 || stat.size > MAX_UPDATE_DOWNLOAD_BYTES) return 0
-  if (expected.size > 0 && stat.size > expected.size) return 0
+  // 残留不能比"已知总长"还大:已知总长优先取 sidecar 里记的**连接声明值**
+  // (上次响应真发过的长度),清单 `size` 只作退路 —— 清单偏小时用它会把这
+  // 份仍有价值的残留直接判成不可续传。
+  const knownTotal = state.totalBytes ?? (expected.size > 0 ? expected.size : undefined)
+  if (knownTotal !== undefined && stat.size > knownTotal) return 0
   // sidecar 在每块写入后刷新,但仍可能落后于实际字节(例如最后一块写完前后崩溃):
   // 以两者中较小的值为准,多出来的字节必然会被后续写入覆盖。
   return Math.min(Number(stat.size), Math.max(0, Math.trunc(state.receivedBytes)))
@@ -496,11 +508,17 @@ function parsePartialState(text: string): PartialTransferState {
   const lastModified = typeof record.lastModified === 'string' && record.lastModified !== ''
     ? record.lastModified
     : undefined
+  const totalBytes = typeof record.totalBytes === 'number'
+    && Number.isSafeInteger(record.totalBytes)
+    && record.totalBytes > 0
+    ? record.totalBytes
+    : undefined
   return {
     version: PARTIAL_STATE_VERSION,
     downloadURL: record.downloadURL,
     sha256: record.sha256,
     receivedBytes: record.receivedBytes,
+    ...(totalBytes === undefined ? {} : { totalBytes }),
     ...(etag === undefined ? {} : { etag }),
     ...(lastModified === undefined ? {} : { lastModified }),
   }
@@ -509,8 +527,8 @@ function parsePartialState(text: string): PartialTransferState {
 /**
  * 传输(或复用)一份安装包,返回首个失败;成功时文件已在 `paths.completed`。
  *
- * 三种路径:残留已满(长度与清单声明一致)→ 只做摘要校验;有可续传字节 →
- * Range 续传,服务端不认 206 就退回整份重下;否则整份下。
+ * 三种路径:残留已满(长度已达**已知总长**,清单声明或上次响应声明的)→ 只做
+ * 摘要校验;有可续传字节 → Range 续传,服务端不认 206 就退回整份重下;否则整份下。
  * @param paths - completed/temporary targets.
  * @param transfer - request boundary, source URL, validators, and progress.
  * @returns 失败对象,或 undefined 表示完成件已就位。
@@ -525,10 +543,16 @@ async function streamInstaller(
   // 字面量 false,catch 里再判就永远为假(实际运行时仍可能已被取消)。
   const abortedBeforeStreaming = transfer.signal?.aborted === true
 
-  // 残留已经等于清单声明的长度:不花流量,直接按哈希确认;不符就整份重下。
+  const previous = await readPartialState(paths.temporaryState)
+  // "残留是否已经下满"的分母:上次连接声明过的总长优先,清单 `size` 只作退路。
+  // 清单偏小时用 `size` 判满会把**没下完**的残留当成下满的:哈希不符 → 残留被
+  // 删掉,已下字节全部作废(而它本可以从断点续传)。
+  const knownTotal = previous?.totalBytes ?? expectedTotal
+
+  // 残留已经等于已知总长:不花流量,直接按哈希确认;不符就整份重下。
   // `startBytes > 0` 是必要条件:没有残留时 startBytes 是 0,"0 >= 0" 会把
   // "没有文件"误判成"文件已完整"。
-  if (startBytes > 0 && expectedTotal !== undefined && startBytes >= expectedTotal) {
+  if (startBytes > 0 && knownTotal !== undefined && startBytes >= knownTotal) {
     if (await sha256OfFile(paths.temporary) === transfer.sha256) {
       await unlinkIfPresent(paths.temporaryState)
       await rename(paths.temporary, paths.completed)
@@ -537,7 +561,6 @@ async function streamInstaller(
     await removePartial(paths)
   }
 
-  const previous = await readPartialState(paths.temporaryState)
   let offset = 0
   const resumeFrom = startBytes > 0 && previous !== undefined
     && (previous.etag !== undefined || previous.lastModified !== undefined)
@@ -608,12 +631,19 @@ async function streamInstaller(
   }
   if (transfer.signal?.aborted === true) return aborted(transfer.signal.reason)
 
-  const totalBytes = expectedTotal ?? (declared === undefined ? undefined : declared + offset)
+  // 分母优先取**本次响应声明的长度**(`content-length + offset`):它是这条连接
+  // 上真正会交付的字节数,也是长度校验唯一能自洽的口径。清单 `size` 只作退路 ——
+  // 清单偏小时(`size` 小于实际字节,2026-09 现场),用它当分母会让进度在真实
+  // 进度约 80% 处就被顶到 99%,并且收到完整文件后长度校验(`received 与 total`
+  // 不等)仍然失败 ⇒ 6 次整份重下,最后只剩一句"网络不可达"。
+  // 权威完整性判据始终是清单里的 SHA-256(见下方摘要校验),长度只是完整性提示。
+  const totalBytes = declared === undefined ? expectedTotal : declared + offset
   const sidecar: PartialTransferState = {
     version: PARTIAL_STATE_VERSION,
     downloadURL: transfer.downloadURL,
     sha256: transfer.sha256,
     receivedBytes: offset,
+    ...(totalBytes === undefined ? {} : { totalBytes }),
     ...validatorFields(response.headers),
   }
 
@@ -648,14 +678,13 @@ async function streamInstaller(
 
   if (received === 0) {
     failure = new UpdateDownloadError('empty-body', 'The update download service returned an empty body.')
-  } else if (totalBytes !== undefined && received !== totalBytes) {
+  } else if (totalBytes !== undefined && received < totalBytes) {
     // 连接在中途被切断:字节留在 .partial 里,下一次用 Range 续传。
-    // 一个字节都没收到(服务端声明了长度却立刻关流)是"空响应",不是截断。
+    // 只判"没收到承诺的字节数" —— 收到**多**于分母(清单 size 偏小且响应没有
+    // content-length 时可能出现)不算截断,交给下面的 SHA-256 定论。
     failure = new UpdateDownloadError(
-      received === 0 ? 'empty-body' : 'network',
-      received === 0
-        ? 'The update download service returned an empty body.'
-        : `The update download ended after ${String(received)} of ${String(totalBytes)} bytes.`,
+      'network',
+      `The update download ended after ${String(received)} of ${String(totalBytes)} bytes.`,
     )
   } else if (digestStream.digest('hex') !== transfer.sha256) {
     // 与服务端发布的哈希不符:极可能是被截断的传输 —— 保留字节以便续传,
@@ -783,6 +812,23 @@ function conditionalValidator(
 }
 
 /**
+ * 把 `kind:value` 形状的验证器切成两段。
+ *
+ * **只按第一个冒号切**:`kind` 是我们自己写的固定前缀(`etag` / `last-modified`),
+ * 而 `value` 是服务端原样的头值 —— `Last-Modified` 形如
+ * `Tue, 22 Sep 2026 18:06:04 GMT`,自带两个冒号。按"数组元素个数"切
+ * (`split(':', 2)`,第二参是 **limit** 不是索引)会把值截成
+ * `Tue, 22 Sep 2026 18`,于是与响应头永远不相等 ⇒ 206 被丢弃、整份重下。
+ * @param spec - validator spec produced by `conditionalValidator`.
+ * @returns the kind and the untouched remainder (empty when there is no colon).
+ */
+export function splitValidatorSpec(spec: string): { readonly kind: string, readonly value: string } {
+  const separator = spec.indexOf(':')
+  if (separator < 0) return { kind: spec, value: '' }
+  return { kind: spec.slice(0, separator), value: spec.slice(separator + 1) }
+}
+
+/**
  * 续传响应的验证器是否仍指向同一份内容。
  *
  * 只有 sidecar 记下了 ETag 或 Last-Modified 时才做这项比对 —— 都没有时,
@@ -795,7 +841,7 @@ function resumeValidatorMatches(
   if (previous === undefined) return false
   const expected = conditionalValidator(headers, previous, 'GET', true)
   if (expected === undefined) return true
-  const [kind, value] = expected.split(':', 2) as [string, string]
+  const { kind, value } = splitValidatorSpec(expected)
   const actual = kind === 'etag' ? headers.get('etag') : headers.get('last-modified')
   return actual === value
 }

@@ -659,6 +659,63 @@ describe('desktop update Host plugin', () => {
     expect(harness.warnings).toEqual([])
   })
 
+  it('keeps the download state and the countdown visible during the backoff wait', async () => {
+    // 退避窗口取 10 秒:足够长到让用例稳定观察到"等待中"的快照,而不是靠抢时序。
+    const harness = await createHarness({
+      packaged: false,
+      request: async () => manifestResponse('2.1.0'),
+      config: { ...testConfig, transferRetryDelaysMs: [10_000] },
+      downloadUpdate: vi.fn()
+        .mockImplementationOnce(async (...args: unknown[]) => {
+          // 第一趟:报告一次进度,然后像网络抖动那样失败。
+          const onProgress = args[3] as ((progress: { receivedBytes: number, totalBytes: number | undefined }) => void) | undefined
+          onProgress?.({ receivedBytes: 1024, totalBytes: 2048 })
+          throw new Error('socket hang up')
+        })
+        .mockResolvedValueOnce('/tmp/picoaide-installer'),
+    })
+
+    try {
+      // 手动检查会一直等到下载结束(含 10 秒退避),所以这里只等快照,不 await 它。
+      const pending = harness.tray.invoke()
+      await vi.waitFor(() => {
+        expect(harness.publishedStates).toHaveBeenCalledWith(expect.objectContaining({ retryDelayMs: 10_000 }))
+      })
+      const states = harness.publishedStates.mock.calls.map(call => call[0] as {
+        readonly availableVersion: string | undefined
+        readonly downloadingVersion: string | undefined
+        readonly downloadProgress: { receivedBytes: number, totalBytes: number | undefined } | undefined
+        readonly retryAttempt: number
+        readonly retryMaxAttempts: number
+        readonly retryDelayMs: number
+      })
+      // 时间线:进度 → 退避等待(同一版仍是"下载中")→ 下一趟。
+      const progressState = states.find(state => state.downloadProgress !== undefined
+        && state.downloadingVersion === '2.1.0')
+      expect(progressState).toMatchObject({ retryAttempt: 1, retryDelayMs: 0 })
+      const retryWait = states.filter(state => state.retryDelayMs > 0).at(-1)
+      // 退避期必须**保留**下载态与最后进度:三个展示面都读这份快照,
+      // 清掉 downloadingVersion 会让「关于」页回落到"发现新版本…正在准备下载…",
+      // 而倒计时文案(`update.interrupted`)成为永不可达的死代码。
+      // (文案侧:enterprise update-status-text.spec.ts 钉住"有 downloadingVersion
+      //  + retryDelayMs > 0 ⇒ 'N 秒后重试'"。)
+      expect(retryWait).toMatchObject({
+        downloadingVersion: '2.1.0',
+        retryAttempt: 1,
+        retryMaxAttempts: 2,
+        retryDelayMs: 10_000,
+        downloadProgress: { receivedBytes: 1024, totalBytes: 2048 },
+      })
+      // 等待期不得同时报错:文案是"下载中断，N 秒后重试",不是一个失败状态。
+      expect(retryWait?.retryAttempt).toBeLessThan(retryWait?.retryMaxAttempts ?? 0)
+      // 退避期间退出应用不得卡住 teardown(定时器被清掉时必须唤醒等待)。
+      await harness.dispose()
+      await pending
+    } finally {
+      await harness.dispose()
+    }
+  })
+
   it('shares one pending download and keeps availability after the retry budget is spent', async () => {
     let rejectDownload!: (cause: Error) => void
     const download = new Promise<string>((_resolve, reject) => { rejectDownload = reject })

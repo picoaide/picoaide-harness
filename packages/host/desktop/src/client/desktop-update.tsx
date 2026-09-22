@@ -142,11 +142,42 @@ export async function triggerDesktopUpdateAction(
   return actionInFlight
 }
 
-/** Subscribe to the shared snapshot; polling runs only while someone listens. */
+/** 立即刷新一次:窗口回到前台/重新聚焦时用(见 `subscribeDesktopUpdate`)。 */
+function refreshWhenVisible(): void {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+  void refreshDesktopUpdate()
+}
+
+/** 订阅期间挂在 window/document 上的即时刷新监听(只挂一份)。 */
+let foregroundListenersInstalled = false
+
+function installForegroundListeners(): void {
+  if (foregroundListenersInstalled) return
+  if (typeof document === 'undefined' || typeof window === 'undefined') return
+  foregroundListenersInstalled = true
+  document.addEventListener('visibilitychange', refreshWhenVisible)
+  window.addEventListener('focus', refreshWhenVisible)
+}
+
+function removeForegroundListeners(): void {
+  if (!foregroundListenersInstalled) return
+  foregroundListenersInstalled = false
+  document.removeEventListener('visibilitychange', refreshWhenVisible)
+  window.removeEventListener('focus', refreshWhenVisible)
+}
+
+/**
+ * Subscribe to the shared snapshot; polling runs only while someone listens.
+ *
+ * 5 秒轮询之外还挂 `visibilitychange`/`focus` 即时刷新:窗口切到后台时
+ * Chromium 会把主窗口的定时器节流到 ≥1 次/分钟(主窗口没有关 `backgroundThrottling`),
+ * 用户切回来时若不补取一次,进度/状态会停在几十秒前的旧值。
+ */
 export function subscribeDesktopUpdate(listener: () => void): () => void {
   listeners.add(listener)
   if (pollTimer === undefined) {
     void refreshDesktopUpdate()
+    installForegroundListeners()
     pollTimer = setInterval(() => { void refreshDesktopUpdate() }, UPDATE_POLL_MS)
   }
   return () => {
@@ -154,6 +185,7 @@ export function subscribeDesktopUpdate(listener: () => void): () => void {
     if (listeners.size === 0 && pollTimer !== undefined) {
       clearInterval(pollTimer)
       pollTimer = undefined
+      removeForegroundListeners()
     }
   }
 }
@@ -253,6 +285,58 @@ export interface DesktopUpdateBadgeView {
 }
 
 /**
+ * 下载进度的显示文本(与 enterprise 侧 `progressPercent` **同语义**;
+ * 跨包对拍见 `packages/host/enterprise/tests/update-progress-parity.spec.ts`)。
+ *
+ * 完成语义(2026-09 缺陷修正):
+ * - `receivedBytes >= totalBytes` ⇒ **`100%`** —— "下载完成"必须有唯一的数值表达,
+ *   此前公式是单向封顶 `Math.min(99, …)`,整条链路里"100%"根本不存在;
+ * - 未达之前最多 99%;
+ * - `totalBytes` 未知(清单没给 size 且响应无 content-length)或非正数 ⇒
+ *   显示**已下载字节数**(如 `12.3 MB`),不显示一个假百分比;
+ * - 没有下载中的版本 / 没有进度快照 ⇒ undefined(调用方不渲染进度)。
+ * @param state - 最新更新快照,或首轮轮询前的 null。
+ * @returns 进度文本,或 undefined 表示当前没有可显示的进度。
+ */
+export function updateProgressPercent(state: DesktopUpdateStateResponse | null): string | undefined {
+  const progress = state?.downloadProgress
+  if (state?.downloadingVersion === undefined || progress === undefined) return undefined
+  return downloadProgressText(progress)
+}
+
+/** 一段字节进度的文本(纯函数)。 */
+function downloadProgressText(
+  progress: { readonly receivedBytes: number, readonly totalBytes: number | undefined },
+): string {
+  const received = Number.isFinite(progress.receivedBytes) ? Math.max(0, progress.receivedBytes) : 0
+  const total = progress.totalBytes
+  if (total === undefined || !Number.isFinite(total) || total <= 0) return formatByteCount(received)
+  if (received >= total) return '100%'
+  return `${String(Math.min(99, Math.floor((received / total) * 100)))}%`
+}
+
+/**
+ * 已下载字节数的人类可读文本。
+ *
+ * 单位(`B`/`KB`/`MB`/`GB`/`TB`)与中文/英文无关,所以两个展示面可以逐字相同,
+ * 不必为此新增字典条目。
+ * @param bytes - non-negative byte count.
+ * @returns e.g. `812 B`, `12.3 MB`, `1.5 GB`.
+ */
+function formatByteCount(bytes: number): string {
+  if (bytes < 1024) return `${String(Math.round(bytes))} B`
+  const units = ['KB', 'MB', 'GB', 'TB'] as const
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  const rounded = value >= 100 ? String(Math.round(value)) : value.toFixed(1)
+  return `${rounded} ${units[unit] as string}`
+}
+
+/**
  * 徽标显示内容(纯函数,便于钉住三态与重试文案)。
  * @param state - latest update snapshot, or null before the first poll.
  * @returns what to render, or null when nothing is pending.
@@ -264,12 +348,7 @@ export function desktopUpdateBadgeView(state: DesktopUpdateStateResponse | null)
   const ready = state.readyVersion
   if (available === undefined && downloading === undefined && ready === undefined) return null
 
-  const progress = state.downloadProgress
-  const percent = downloading !== undefined && progress !== undefined
-    ? progress.totalBytes !== undefined && progress.totalBytes > 0
-      ? `${Math.min(99, Math.floor((progress.receivedBytes / progress.totalBytes) * 100))}%`
-      : '…'
-    : undefined
+  const percent = updateProgressPercent(state)
 
   if (ready !== undefined) {
     return {
@@ -346,6 +425,7 @@ export function resetDesktopUpdateStoreForTests(): void {
   listeners.clear()
   if (pollTimer !== undefined) clearInterval(pollTimer)
   pollTimer = undefined
+  removeForegroundListeners()
   snapshot = null
   requestInFlight = undefined
   actionInFlight = undefined

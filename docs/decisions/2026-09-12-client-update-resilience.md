@@ -62,3 +62,40 @@
 - `packages/host/desktop/tests/client-desktop-update.spec.ts`：12 例，覆盖单轮询/多订阅、同值不通知、路由 404 时保留快照、动作按状态分派到检查或安装路由、徽标三态与重试文案。
 - `packages/host/enterprise/tests/update-status-text.spec.ts`：4 例，钉住"可安装/下载中（含重试）/各类失败"的文案与按钮状态。
 - 相关门禁：`corepack yarn workspace dsh-plugin-desktop typecheck|test`、`corepack yarn workspace @picoaide/dsh-enterprise typecheck|test`。
+
+## 修订（2026-09-23）：续传验证器解析错误与完成语义
+
+上线后审计在**生产参数**下复现了两处缺陷（同一天交付的"健壮化"里），修正与判据如下。
+
+1. **续传验证器按"元素个数"切分（缺陷）**：`resumeValidatorMatches` 曾用
+   `expected.split(':', 2)`，而 JS 里第二个参数是**数组元素个数上限**，不是"切几刀"。
+   生产 `/updates/client/*` 由 Go 的 `http.ServeFile` 提供，**只发 `Last-Modified`**，
+   值形如 `Tue, 22 Sep 2026 18:06:04 GMT`（自带冒号）⇒ 比较值被截成
+   `Tue, 22 Sep 2026 18`，永远不等于响应头 ⇒ 合法的 206 被丢弃、退避后**整份重下**、
+   进度从 72% 掉回 0%。
+   - 修正：只按**第一个**冒号切分（`splitValidatorSpec`）。
+   - **为什么原自测没抓到**：假服务器只发 ETag（值里没有冒号），夹具与生产不同形。
+     现补"只发 `Last-Modified`"的真实 HTTP 用例（第 2 次请求必须是 206 且只发两次请求、
+     进度单调不减），另加切分函数的定点单测。
+2. **完成语义（缺陷）**：展示层公式是 `Math.min(99, floor(received/total*100))`，
+   是单向封顶、且没有任何"完成即 100%"的出口 —— 于是"下载完成"在整条链路上**没有数值
+   表达**（收满那一刻显示 99%，随后直接翻成"已下载/可安装"）。
+   - 现语义：`received >= total ⇒ 100%`；未达之前最多 99%；`total` 未知或 ≤0 ⇒ 显示
+     **已下载字节数**（如 `12.3 MB`；单位与语言无关，中英两面逐字相同）。
+   - 公式仍是两份副本（跨包客户端 import 被禁止，两个 client bundle 各自加载），
+     由跨包对拍守住：同一输入矩阵下两面输出必须逐字相同（0% / 99% / 完成 /
+     `total = 0` / `total` 未知 / `received > total`），只改一面即红。
+3. **分母与长度校验**：传输层的分母改为**本次响应声明的长度**（`content-length + offset`），
+   清单 `size` 只作退路；长度校验从"必须逐字节相等"改为"收到的**少于**声明才算截断"，
+   完整性始终由清单 SHA-256 定论。同一口径贯穿"完成件复用"与"残留续传"：sidecar 记下
+   连接声明过的总长，清单 `size` 偏小时不再否决复用（否则每次检查都重下整包）。
+   - 旧行为（清单 `size` 偏小 20% 时）：进度在真实进度 80% 处就被顶到 99%，长度校验失败
+     ⇒ 6 次整份重下 ⇒ 最终只剩一句"网络不可达（已自动重试）"。
+4. **退避期保留下载态**：失败后曾先清 `downloadingVersion/downloadProgress` 再等待，
+   于是「关于」页回落到"发现新版本…正在准备下载…"、侧边栏只剩版本号，
+   `update.interrupted`（"N 秒后重试"）**永不可达**。现在退避期保留下载态与最后一次进度；
+   同时 `waitBeforeRetry` 在 dispose 时被唤醒 —— 否则退避期退出应用会让 teardown 永久等待。
+5. **前台即时刷新**：5 秒轮询之外，窗口 `visibilitychange → visible` 与 `focus` 时立即取一次
+   快照。主窗口没有关 `backgroundThrottling`，后台时 Chromium 会把定时器压到 ≥1 次/分钟，
+   用户切回前台若不补取一次，进度/状态会停在几十秒前的旧值（不改窗口的全局节流行为）。
+

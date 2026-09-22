@@ -90,13 +90,56 @@ export async function triggerUpdateAction(): Promise<void> {
   await updateService()?.act()
 }
 
-/** 下载进度百分比文本(无进度信息时为 undefined)。 */
+/**
+ * 下载进度的显示文本(与 desktop 侧 `updateProgressPercent` **同语义**;
+ * 跨包对拍见 tests/update-progress-parity.spec.ts)。
+ *
+ * 完成语义(2026-09 缺陷修正):
+ * - `receivedBytes >= totalBytes` ⇒ **`100%`** —— "下载完成"必须有唯一的数值表达,
+ *   此前公式是单向封顶 `Math.min(99, …)`,整条链路里"100%"根本不存在;
+ * - 未达之前最多 99%;
+ * - `totalBytes` 未知(清单没给 size 且响应无 content-length)或非正数 ⇒
+ *   显示**已下载字节数**(如 `12.3 MB`),不显示一个假百分比;
+ * - 没有下载中的版本 / 没有进度快照 ⇒ undefined(调用方不渲染进度)。
+ * @param state - 共享快照。
+ * @returns 进度文本,或 undefined 表示当前没有可显示的进度。
+ */
 export function progressPercent(state: UpdateState | null): string | undefined {
   const progress = state?.downloadProgress
   if (state?.downloadingVersion === undefined || progress === undefined) return undefined
-  return progress.totalBytes !== undefined && progress.totalBytes > 0
-    ? `${Math.min(99, Math.floor((progress.receivedBytes / progress.totalBytes) * 100))}%`
-    : undefined
+  return downloadProgressText(progress)
+}
+
+/** 一段字节进度的文本(纯函数)。 */
+function downloadProgressText(
+  progress: { readonly receivedBytes: number, readonly totalBytes: number | undefined },
+): string {
+  const received = Number.isFinite(progress.receivedBytes) ? Math.max(0, progress.receivedBytes) : 0
+  const total = progress.totalBytes
+  if (total === undefined || !Number.isFinite(total) || total <= 0) return formatByteCount(received)
+  if (received >= total) return '100%'
+  return `${String(Math.min(99, Math.floor((received / total) * 100)))}%`
+}
+
+/**
+ * 已下载字节数的人类可读文本。
+ *
+ * 单位(`B`/`KB`/`MB`/`GB`/`TB`)与中文/英文无关,所以两个展示面可以逐字相同,
+ * 不必为此新增字典条目。
+ * @param bytes - non-negative byte count.
+ * @returns e.g. `812 B`, `12.3 MB`, `1.5 GB`.
+ */
+function formatByteCount(bytes: number): string {
+  if (bytes < 1024) return `${String(Math.round(bytes))} B`
+  const units = ['KB', 'MB', 'GB', 'TB'] as const
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  const rounded = value >= 100 ? String(Math.round(value)) : value.toFixed(1)
+  return `${rounded} ${units[unit] as string}`
 }
 
 /** 下载状态文本:重试等待中显示"第 n/N 次 + 倒计时",否则显示进度。 */

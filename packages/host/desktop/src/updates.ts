@@ -193,6 +193,8 @@ export function apply(ctx: Context, config: Config): void {
     let state: UpdateStateV2 = EMPTY_STATE
     let pollTimer: ReturnType<typeof setTimeout> | undefined
     let retryTimer: ReturnType<typeof setTimeout> | undefined
+    /** 退避等待的唤醒钩子(见 `waitBeforeRetry`);不在等待时为 undefined。 */
+    let wakeRetryWait: (() => void) | undefined
     /**
      * 所有在飞的清单/渠道探测请求。
      *
@@ -223,11 +225,19 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
-    /** 等待一次退避;返回 false 表示等待期间被销毁(调用方必须停止)。 */
+    /**
+     * 等待一次退避;返回 false 表示等待期间被销毁(调用方必须停止)。
+     *
+     * 销毁时必须**主动唤醒**:`dispose` 会 `clearTimeout(retryTimer)` 并等
+     * `downloadTask` settle,而只清定时器会让这个 promise 永远悬着 —— 退避
+     * 期间退出应用会卡在 teardown(2026-09 实测)。
+     */
     const waitBeforeRetry = async (delayMs: number): Promise<boolean> => {
       return await new Promise<boolean>((resolve) => {
+        wakeRetryWait = (): void => { resolve(false) }
         retryTimer = setTimeout(() => {
           retryTimer = undefined
+          wakeRetryWait = undefined
           resolve(!disposed)
         }, delayMs)
       })
@@ -698,11 +708,12 @@ export function apply(ctx: Context, config: Config): void {
             return
           } catch (cause) {
             lastFailure = cause
-            downloadingVersion = undefined
-            downloadProgress = undefined
             if (disposed) return
             if (!isRetriableDownloadFailure(cause) || attempt >= transferRetry.maxAttempts) break
-            // 退避等待:进度清掉,但 UI 能看到"第 n 次重试 + 倒计时"。
+            // 退避等待:保留 `downloadingVersion` 与最后一次进度 —— 三个展示面
+            // 在等待期仍显示"下载中 + 第 n/N 次 + 倒计时"(`update.interrupted`)。
+            // 之前这里先把两者清掉,于是「关于」页回落到"发现新版本…正在准备下载…",
+            // 侧边栏只剩版本号,而倒计时文案成了永不可达的死代码(2026-09 审计)。
             retryDelayMs = updateRetryDelayMs(transferRetry, attempt, version)
             publishState()
             if (!await waitBeforeRetry(retryDelayMs)) return
@@ -848,6 +859,10 @@ export function apply(ctx: Context, config: Config): void {
       disposed = true
       if (pollTimer !== undefined) clearTimeout(pollTimer)
       if (retryTimer !== undefined) clearTimeout(retryTimer)
+      // 唤醒退避等待:否则 downloadTask 会永远挂在那个 promise 上,teardown 不 settle。
+      const wake = wakeRetryWait
+      wakeRetryWait = undefined
+      wake?.()
       // 每一个在飞请求都要被 abort:只 abort 最后一个会让 teardown 一直等
       // 那个被抢走保护的请求(desktop-1 实测:dispose 永不 settle)。
       for (const controller of inFlightRequests) controller.abort()
