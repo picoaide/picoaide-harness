@@ -76,6 +76,11 @@ PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -data ./data --bootstrap-admin admin
 
 超限返回 `429 RATE_LIMITED`。
 
+> **升级说明（2026-09-22）**：网关限流的**默认值**由 60/min 改为 0（不限制），但改的是代码缺省，
+> **库里已保存的 `settings.gateway.rate_limit = 60` 不会被自动覆盖** —— 老库升级后仍按 60/min 限流。
+> 要按官方口径放开（官方只限账号级并发、不设请求速率上限），需在管理后台网关页把该值显式改为 0
+> 或清空。并发侧仍由 in-flight 闸门兜底（每用户 32，`PICOAI_GATEWAY_MAX_INFLIGHT_PER_USER` 可调）。
+
 ## 7. 用户模型
 
 `users` 表字段:`username`(唯一)、`display_name`、`email`、`password_hash`(argon2id)、`source`(local/ldap/oidc)、`role`(super_admin/auditor/user,0046;`is_admin` 为兼容别名)、`status`(1=启用)。LDAP/OIDC 首次登录的用户自动创建本地记录(source 标记来源),停用(`status=0`)后所有 token 即刻失效;管理员登录仅接受本地账号(SSO/LDAP 不进后台)。

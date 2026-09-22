@@ -18,9 +18,11 @@
 > 0069-0072 WASM 应用平台与员工会话(应用登记/员工会话/访问级别/调用事件证据);
 > **0073 删除应用会话与员工会话表(`app_sessions`/`employee_sessions`)、0074 把存量
 > `access='public'` 改写为 `login`、0075 应用打开计数(`wasm_app_opens` 明细 +
-> `wasm_app_opens_daily` 日汇总)、0076 `usage.app_id`(应用维度归因)** —— 后四条随
+> `wasm_app_opens_daily` 日汇总)、0076 `usage.app_id`(应用维度归因)、
+> 0077 网关 Files API 归属台账 `gateway_files`(2026-09-22)** —— 前三条(0073-0076)随
 > 2026-09-19「WASM 应用客户端专属」改造落地(应用子域/换票/匿名面/服务端 `ai.chat`
-> 同批删除,见 03-api-reference.md §11b)
+> 同批删除,见 03-api-reference.md §11b),0077 随 2026-09-22 网关文件直通与归属隔离落地
+> (见下 `gateway_files`)
 > ——以 `migrations-pg/` 目录实际文件为准)。
 
 ### users(0001, 0046 起 role 取代 is_admin)
@@ -97,6 +99,15 @@ idx_usage_user_cost`。写路径 `RecordUsage*` 先 ensure 当月分区。
 
 ### connectors(0042)
 `id, name, description, auth_mode(oauth|device|token|server-side), definition JSON, enabled, updated_at, created_at`——连接器唯一目录源,经 bootstrap `connectors[]` 下发;种子 example-org/sales-easy(glitchtip 0045 下架,不再下发)。
+
+### gateway_files(0077,网关 Files API 归属台账)
+`file_id(PK), user_id→users(ON DELETE CASCADE), created_at, expires_at`;索引按 `user_id` 与 `expires_at`。
+
+网关 `/v1/files`(`/files` 同)是官方 Files API 的直通面(上传/列出/下载/删除),而上游按 **API key** 隔离文件——公司内所有员工共用同一把 key,所以「谁能读哪个 file_id」这件事上游不知道。此表是平台侧的归属账本:上传成功即 `RecordGatewayFile` 记 `(file_id, user_id, expires_at)`,**首次写入者胜**(`ON CONFLICT DO UPDATE … WHERE gateway_files.user_id = EXCLUDED.user_id`,不覆盖他人归属)。
+
+- 聊天体里出现 `file_id` 引用时,`GatewayFileOwnedBy` 逐条校验:非本人(含行已过期)一律 404 `file_id not found or expired`(不泄露存在性),防止员工 A 拿着员工 B 上传后的 id 直接把对方文件读进自己的对话。
+- `expires_at` 取上游返回的过期时间(官方上限 30 天);过期行视为**不存在**——既不再授权读取,也允许他人重新占用同名 id。
+- 容量与回收:官方限制是**每 key 25 GiB / 10000 个文件**(公司级共享,非按人),`PurgeExpiredGatewayFiles`(同一事务内 `SELECT … FOR UPDATE SKIP LOCKED` → `DELETE`)清理过期行;`ListGatewayFileIDs` 供管理/诊断用途(上限 20000 行)。
 
 ### model_concurrency_stats(0049,按模型并发峰值)
 `model, day(UTC), max_concurrency, peak_at`——`PRIMARY KEY(model, day)`。网关内存 in-flight 计数每 15s 采样落库;`max_concurrency` 用 `GREATEST` 累计(永不回退),`peak_at` 记录首次触发峰值时刻。供管理后台「服务器信息 → 模型并发」展示(当前/90 天峰值/目标),是向模型上游申请扩容的量化依据。目标值配置在 `models.default_params` 的 `concurrency_target`(如 flash 2500 / pro 500),不在此表。
