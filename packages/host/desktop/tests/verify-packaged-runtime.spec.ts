@@ -128,6 +128,63 @@ function verifyWithBrandStub(
   verifyPackagedRuntime(runtimeContext, list, exists, () => BRAND_SVG)
 }
 
+describe('归档里每个 lib/*.js 的相对 import 都必须在包里（2026-09-22 补）', () => {
+  // 为什么要有它：`REQUIRED_PACKAGED_RUNTIME_ENTRIES` 是人维护的清单，2026-09-22 审计
+  // 实测它漏了 `lib/network-policy.js` 与 `lib/document-lock-recovery.js` —— 两者都被
+  // `lib/main.js` 静态 import，产物里缺任何一个都是**窗口起不来**。这条判据不看清单，
+  // 直接拿归档里的 `lib/**/*.js` 与归档条目对拍（清单没登记的稳定名与内容哈希 chunk
+  // 都在内；只查 main.js 会漏掉"chunk 引用 chunk"那一层，第 4 条用例就是打这个的）。
+  const readWith = (mainSource: string): PackageEntryReader => ((_root, entry) =>
+    (entry === 'lib/main.js' ? mainSource : BRAND_SVG))
+
+  it('rejects an archive missing a stable-name module that lib/main.js imports', () => {
+    const runtimeContext = context('/build', 'linux')
+    // `lib/desktop-channel.js` 是 main.js 的静态 import，但**不在**必需清单里（清单只登记
+    // 运行期资产，不登记全部 chunk）—— 正是这条判据要覆盖的形态。
+    const entries = completeArchiveEntries().filter(entry => !entry.includes('desktop-channel'))
+    expect(() => verifyPackagedRuntime(
+      runtimeContext,
+      () => entries,
+      () => true,
+      readWith('import { readDesktopChannelProfile } from "./desktop-channel.js";\n'),
+    )).toThrow(/missing modules imported by lib\/main\.js: lib\/desktop-channel\.js/)
+  })
+
+  it('rejects an archive missing a content-hashed chunk that lib/main.js imports', () => {
+    const runtimeContext = context('/build', 'linux')
+    expect(() => verifyPackagedRuntime(
+      runtimeContext,
+      () => completeArchiveEntries(),
+      () => true,
+      readWith('import "./chunk-ABC123.js";\n'),
+    )).toThrow(/missing modules imported by lib\/main\.js: lib\/chunk-ABC123\.js/)
+  })
+
+  it('accepts it once every imported module is in the archive', () => {
+    const runtimeContext = context('/build', 'linux')
+    expect(() => verifyPackagedRuntime(
+      runtimeContext,
+      () => [...completeArchiveEntries(), '/lib/desktop-channel.js', '/lib/chunk-ABC123.js'],
+      () => true,
+      readWith('import { readDesktopChannelProfile } from "./desktop-channel.js";\nimport "./chunk-ABC123.js";\n'),
+    )).not.toThrow()
+  })
+
+  it('also judges a chunk that imports a missing module (not only lib/main.js)', () => {
+    const runtimeContext = context('/build', 'linux')
+    // 只扫 main.js 时这条是绿的：缺的模块由**另一个 chunk** import。启动期同样
+    // ERR_MODULE_NOT_FOUND（chunk 是入口的传递依赖）。
+    expect(() => verifyPackagedRuntime(
+      runtimeContext,
+      () => [...completeArchiveEntries(), '/lib/chunk-ABC123.js'],
+      () => true,
+      (_root, entry) => (entry === 'lib/chunk-ABC123.js'
+        ? 'import "./missing-sibling.js";\n'
+        : entry === 'lib/main.js' ? 'export {}\n' : BRAND_SVG),
+    )).toThrow(/missing modules imported by lib\/chunk-ABC123\.js: lib\/missing-sibling\.js/)
+  })
+})
+
 describe('workspace 子路径 import 必须都在打包必需清单里（2026-09-20 补）', () => {
   // 为什么要有它：插件包曾**声明了 8 个 exports 子路径却只构建 3 个**，而 desktop 的
   // `lib/main.js` 值导入 `…/app-proof` ⇒ 打包版启动即 ERR_MODULE_NOT_FOUND（Linux e2e
@@ -245,6 +302,20 @@ describe('上游补丁目标的静态 import 必须在打包必需清单里（G-
     expect(scanned, '没有扫到任何补丁目标的 JS 文件，判据会空转').toBeGreaterThan(0)
     expect(checked, '没有解析出任何补丁目标的子路径 import，判据会空转').toBeGreaterThan(0)
     expect(missing, `这些上游子路径会被打包版静态 import，但必需清单里没有：\n  ${missing.join('\n  ')}`).toEqual([])
+  })
+
+  it('pins the two desktop lib entries the 2026-09-22 audit found missing', () => {
+    // 这两条被 `lib/main.js` 静态 import(网络出口策略 + 文档锁回收),但清单此前
+    // 只登记"运行期资产",漏了它们;掉出产物 = 启动期 ERR_MODULE_NOT_FOUND。
+    // generic 用例(读 lib/*.js 的 import)只在"产物已存在"时生效,这里显式钉住。
+    for (const entry of ['lib/network-policy.js', 'lib/document-lock-recovery.js']) {
+      expect(REQUIRED_PACKAGED_RUNTIME_ENTRIES).toContain(entry)
+      expect(existsSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', `${entry.slice('lib/'.length, -'.js'.length)}.ts`)), `${entry} 没有对应的 src 源文件`).toBe(true)
+    }
+    const mainSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'main.ts'), 'utf8')
+    for (const name of ['network-policy', 'document-lock-recovery']) {
+      expect(mainSource, `src/main.ts 不再 import ./${name}.ts,这条判据会失去意义`).toContain(`from './${name}.ts'`)
+    }
   })
 
   it('pins the two G-9 entries the 0.1.6 upgrade introduced', () => {

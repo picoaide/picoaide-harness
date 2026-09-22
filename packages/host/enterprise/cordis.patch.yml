@@ -34,6 +34,24 @@
 - id: web-search-deepseek
   config:
     apiKeyEnv: PICOAI_GATEWAY_TOKEN
+# 网关鉴权协议:上游 0.1.6 起 `llm-deepseek` 新增 `protocol`,**缺省值是
+# `messages`**;该协议路径只发 `x-api-key`、**不发 `Authorization`**
+# (`protocols/messages/adapter.ts`),而我们的网关 `/v1/*` 挂在 serverauth 的
+# `BearerAuth` 下、只认 `Authorization: Bearer …` ⇒ 每个模型请求都是
+# 401 `AUTH_REQUIRED`「缺少认证令牌」,整条模型链路报废。网关只实现 Bearer
+# 这一种鉴权,所以这里**组装期**钉死 chat-completions。
+# 为什么不能只靠 `gateway-model` 运行期往 settings 里写:那条写入依赖
+# settings 落盘成功,而落盘会被任何一次写锁异常永久挡住(见下面的孤儿锁回收),
+# 于是"本该修好链路的这一行"恰恰写不进去 —— 现场事故(2026-09-22)的完整链条。
+# 组装层是 base,缺这个键的 user 层不会覆盖它。要改协议:未登录时可由 settings 覆盖;
+# 一旦有会话,`gateway-model` 的 sync 会把 user 层的 protocol 写回 chat-completions
+# (user 层压 base),所以"改协议"只在未登录/离线场景持久。
+# 注意 `config` 是**整键替换**:更晚的层(`$DSH_HOME/cordis.patch.yml`)若覆盖本行
+# config,**必须重述 `protocol: chat-completions`** —— 只写别的键(如 models)会把这条
+# pin 一起换掉、静默回落 `messages`(判据 tests/llm-gateway-protocol-pin.spec.ts)。
+- id: llm-deepseek
+  config:
+    protocol: chat-completions
 # Local skill discovery: the web-app bundle disables the host skill
 # provider rows (presets own local discovery), but the desktop has no
 # presets. Mount the filesystem provider (scans `<dshHome>/skills`, which

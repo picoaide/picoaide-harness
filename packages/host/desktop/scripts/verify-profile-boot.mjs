@@ -1,16 +1,18 @@
 /** Headless smoke for the complete published PicoAide Harness profile and renderer manifest. */
 
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
+import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import {
   createLaunchEnvironmentSnapshot,
   DSH_LAUNCH_ENVIRONMENT_KEY,
 } from '@deepseek-ai/dsh-launch-environment'
 import { DESKTOP_SETTINGS_NAMESPACE } from '../lib/index.js'
+import { NO_OWNER_LOCK_MIN_AGE_MS, reclaimOrphanedDocumentLocks } from '../lib/document-lock-recovery.js'
 import { installProfilePackageResolver } from '../lib/module-resolution.js'
 import { prepareDesktopProfile } from '../lib/profile.js'
 import { inactiveRequiredRows, FIBER_FAILED } from '../lib/startup-rows.js'
@@ -45,6 +47,67 @@ try {
     '  default: minimal',
     '',
   ].join('\n'))
+
+  // ---- 孤儿写锁：能力判据（不是字符串判据）----------------------------------
+  // 现场事故（2026-09-22，客户机）：数据根里一个 0 字节的 `settings.yaml.lock` 让
+  // settings 的**每一次**写入都等 2s 后超时失败（被插件的 .catch 吞掉），于是
+  // `llm-deepseek.protocol: chat-completions` 永远写不进去 —— 客户端升级到 0.1.6
+  // 后每个模型请求都 401「缺少认证令牌」。这里用 settings provider 的**同一条写缝**
+  // （`withFileLock` + `writeFileAtomic`）在真实 <home>/settings.yaml 上跑四段：
+  //   ① 刚建的 0 字节锁（活写者的"已建锁未写 PID"窗口）⇒ 回收必须**保留**它；
+  //   ② 把它拨老到门槛之外 ⇒ 同一条写缝必须超时失败（复现故障机制，反向对照）；
+  //   ③ main.ts 的回收（同一份 lib 产物、同一个数据根）⇒ 锁没了且写缝恢复；
+  //   ④ 活锁（属主不是本进程）⇒ **必须保留**并上报（我们绝不替人删活锁）。
+  // 写回的内容是文件原字节，所以后面的断言看到的 settings 与之前完全一致。
+  const settingsPath = join(home, 'settings.yaml')
+  const settingsBytes = readFileSync(settingsPath, 'utf8')
+  const writeThroughSettingsSeam = async () => withFileLock(settingsPath, async () => {
+    await writeFileAtomic(settingsPath, readFileSync(settingsPath, 'utf8'), { mode: 0o600, dirMode: 0o700 })
+  }, { waitMs: 250 })
+
+  writeFileSync(`${settingsPath}.lock`, '')
+  const freshLock = reclaimOrphanedDocumentLocks({ home })
+  if (freshLock.reclaimed.length !== 0 || freshLock.kept.length !== 1 || !existsSync(`${settingsPath}.lock`)) {
+    throw new Error(`a freshly created ownerless lock must be kept (live-writer window): ${JSON.stringify(freshLock)}`)
+  }
+
+  const staleSeconds = (Date.now() - NO_OWNER_LOCK_MIN_AGE_MS - 5_000) / 1000
+  utimesSync(`${settingsPath}.lock`, staleSeconds, staleSeconds)
+  let blockedByOrphan = false
+  try {
+    await writeThroughSettingsSeam()
+  } catch {
+    blockedByOrphan = true
+  }
+  if (!blockedByOrphan) {
+    throw new Error('an orphaned settings.yaml.lock did NOT block the settings write seam (reverse control is broken)')
+  }
+  if (!existsSync(`${settingsPath}.lock`)) {
+    throw new Error('the planted orphan lock vanished without recovery; the reverse control cannot be trusted')
+  }
+
+  const recovery = reclaimOrphanedDocumentLocks({ home })
+  if (!recovery.reclaimed.some(lock => lock.document === 'settings.yaml')) {
+    throw new Error(`document lock recovery did not reclaim the orphaned settings lock: ${JSON.stringify(recovery)}`)
+  }
+  if (existsSync(`${settingsPath}.lock`)) {
+    throw new Error('document lock recovery reported the lock but left it on disk')
+  }
+  await writeThroughSettingsSeam()
+  if (readFileSync(settingsPath, 'utf8') !== settingsBytes) {
+    throw new Error('the settings write seam changed the document content unexpectedly')
+  }
+  if (existsSync(`${settingsPath}.lock`)) {
+    throw new Error('a successful locked write must release the settings lock')
+  }
+
+  writeFileSync(`${settingsPath}.lock`, `${String(process.ppid)}\n`)
+  const liveOwner = reclaimOrphanedDocumentLocks({ home })
+  if (liveOwner.reclaimed.length !== 0 || liveOwner.held.length !== 1) {
+    throw new Error(`document lock recovery must keep a lock held by another live process: ${JSON.stringify(liveOwner)}`)
+  }
+  rmSync(`${settingsPath}.lock`)
+
   const prepared = await prepareDesktopProfile('1', home, 'win32')
   const hostServicePluginDir = join(
     prepared.profile.dir,
@@ -205,6 +268,37 @@ try {
   const desktopSettings = ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE)
   if (desktopSettings?.mode !== 'advanced') {
     throw new Error('assembled Host settings are missing the advanced dsh-desktop mode')
+  }
+  // 网关协议（2026-09-22）：`ctx.settings.get` 读的就是 llm-deepseek 适配器读的那份
+  // 解析值（schema 缺省 → 组装 base → user 层）。上游 0.1.6 的缺省是 `messages`，
+  // 而 messages 适配器只发 `x-api-key`、不发 `Authorization`，我们的网关只认
+  // `Authorization: Bearer` ⇒ 这个值不是"配置偏好"，是"每个模型请求是否 401"。
+  // 组装期 pin 丢了（行改名/补丁被静默跳过/后续层整键替换）时这条会红。
+  const deepSeekSection = ctx.settings.get('llm-deepseek')
+  if (deepSeekSection === undefined) {
+    throw new Error('assembled desktop profile has no llm-deepseek settings namespace')
+  }
+  if (deepSeekSection.protocol !== 'chat-completions') {
+    throw new Error(`assembled desktop profile resolves llm-deepseek protocol=${String(deepSeekSection.protocol)} instead of chat-completions`)
+  }
+  // **现场形态**：事故机的 `llm-deepseek` 段由旧版（0.1.5 线）写入，只有
+  // baseURL/apiKeyEnv/models、**没有 protocol**。这里在 user 层原样复刻它（无会话的
+  // 启动会被 bootstrap/gateway-model 清空该段，所以只能在 boot 之后用 settings 写入）：
+  // 缺这个键的 user 段**不得**盖掉组装期的 pin，其它键也必须原样保留。
+  await ctx.settings.replace('llm-deepseek', {
+    baseURL: 'https://harness.example.com/v1',
+    apiKeyEnv: 'PICOAI_GATEWAY_TOKEN',
+    models: [{ id: 'smoke-model', name: 'smoke-model', maxTokens: 4096, inputModalities: ['text'] }],
+  })
+  const fieldShaped = ctx.settings.get('llm-deepseek')
+  if (fieldShaped.protocol !== 'chat-completions') {
+    throw new Error(`a user llm-deepseek section without protocol shadowed the composition pin: protocol=${String(fieldShaped.protocol)}`)
+  }
+  if (fieldShaped.baseURL !== 'https://harness.example.com/v1' || fieldShaped.apiKeyEnv !== 'PICOAI_GATEWAY_TOKEN') {
+    throw new Error(`the user llm-deepseek section lost fields: baseURL=${String(fieldShaped.baseURL)} apiKeyEnv=${String(fieldShaped.apiKeyEnv)}`)
+  }
+  if (fieldShaped.models?.[0]?.id !== 'smoke-model') {
+    throw new Error(`the user llm-deepseek section lost its model catalog: ${JSON.stringify(fieldShaped.models)}`)
   }
   if (!trayItems.some(item => item.label() === 'Check for Updates…')) {
     throw new Error('assembled desktop profile is missing the update tray command')
