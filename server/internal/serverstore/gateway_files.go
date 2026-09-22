@@ -351,6 +351,10 @@ func ListGatewayFiles(db *sql.DB, q GatewayFileQuery) ([]GatewayFileRow, int64, 
 }
 
 // GatewayFileSummary 按员工汇总占用（文件数 / 字节数 / 其中已过期数 / 最早过期时刻）。
+//
+// 排序用**输出列名**（PG 允许 ORDER BY 输出列），不要用位置下标：位置在改 SELECT
+// 列表时会静默错位（审计 2026-09-22 R6 P1-C 实测三档全部错位一列，`sort=bytes`
+// 的首行不是占用最大的人）。
 func GatewayFileSummary(db *sql.DB, sort string, desc bool) ([]GatewayFileSummaryRow, error) {
 	order := "bytes"
 	switch sort {
@@ -361,21 +365,15 @@ func GatewayFileSummary(db *sql.DB, sort string, desc bool) ([]GatewayFileSummar
 	if !desc {
 		dir = "ASC"
 	}
-	if order == "username" {
-		order = "3"
-	} else if order == "files" {
-		order = "5"
-	} else {
-		order = "6"
-	}
-	rows, err := db.Query(`SELECT g.user_id, COALESCE(u.username, ''), COALESCE(u.display_name, ''),
+	rows, err := db.Query(`SELECT g.user_id, COALESCE(u.username, '') AS username,
+	                              COALESCE(u.display_name, '') AS display_name,
 	                              count(*) AS files,
 	                              COALESCE(sum(g.size_bytes), 0) AS bytes,
-	                              count(*) FILTER (WHERE g.expires_at IS NOT NULL AND g.expires_at <= now()) AS expired,
-	                              min(g.expires_at) AS earliest
+	                              count(*) FILTER (WHERE g.expires_at IS NOT NULL AND g.expires_at <= now()) AS expired_files,
+	                              min(g.expires_at) AS earliest_expires_at
 	                         FROM gateway_files g LEFT JOIN users u ON u.id = g.user_id
 	                        GROUP BY g.user_id, u.username, u.display_name
-	                        ORDER BY ` + order + ` ` + dir + `, g.user_id ASC`)
+	                        ORDER BY ` + order + ` ` + dir + ` NULLS LAST, g.user_id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -444,4 +442,92 @@ func ListGatewayFilesForPurge(db *sql.DB, q GatewayFileQuery, limit int) ([]stri
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+// GatewayFileRowExists 判定台账里是否存在该 file_id（**不看过期**）。
+//
+// 管理端的单条删除用它：过期行也允许管理员按 id 删掉（列表里"已过期"那一行同样有
+// 删除按钮；审计 2026-09-22 R6 P2 实测旧实现走 GatewayFileOwner ⇒ 过期行 404）。
+func GatewayFileRowExists(db *sql.DB, fileID string) (bool, error) {
+	var one int
+	switch err := db.QueryRow(`SELECT 1 FROM gateway_files WHERE file_id = ?`, fileID).Scan(&one); {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return true, nil
+}
+
+// GatewayFileForReap 是回收器认领一行时的快照（用于上游删除失败后**原样写回**）。
+type GatewayFileForReap struct {
+	FileID    string
+	UserID    int64
+	ExpiresAt *time.Time
+	SizeBytes int64
+}
+
+// ClaimExpiredGatewayFile 在一个事务里"认领"一行已过期记录：先 `FOR UPDATE` 锁行、
+// 再确认它**此刻仍然过期**，然后删掉台账行并提交。
+//
+// 为什么必须锁内确认（审计 2026-09-22 R6 P1-A 实测）：无锁的
+// `ListExpiredGatewayFiles` + 无条件删行，会在"并发上传把同一个 file_id 的
+// expires_at 推到未来"时把**活行**与上游对象一起删掉（假上游在 DELETE 时续期即复现）。
+// 同一个提交里的 PurgeExpiredGatewayFiles 早有 `FOR UPDATE SKIP LOCKED`，自动回收
+// 路径当时漏了。返回 ok=false 表示"已经不过期/已被别人处理"（调用方跳过）。
+//
+// 先删行再删上游对象：行是"还有清理责任"的凭据，但它同时是并发续期的目标 ——
+// 先删行把窗口缩到一个网络往返，且调用方在上游删除前还会复检一次该 id 是否被
+// 重新登记（见 llmgateway 侧）；上游删除失败时调用方用返回的快照**写回**，下轮重试。
+func ClaimExpiredGatewayFile(db *sql.DB, fileID string) (GatewayFileForReap, bool, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return GatewayFileForReap{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var snap GatewayFileForReap
+	row := tx.QueryRow(`SELECT file_id, user_id, expires_at, size_bytes FROM gateway_files
+	                     WHERE file_id = ? AND expires_at IS NOT NULL AND expires_at <= now()
+	                     FOR UPDATE`, fileID)
+	switch err := row.Scan(&snap.FileID, &snap.UserID, &snap.ExpiresAt, &snap.SizeBytes); {
+	case errors.Is(err, sql.ErrNoRows):
+		return GatewayFileForReap{}, false, nil // 已续期/已被处理
+	case err != nil:
+		return GatewayFileForReap{}, false, err
+	}
+	if _, err := tx.Exec(`DELETE FROM gateway_files WHERE file_id = ?`, fileID); err != nil {
+		return GatewayFileForReap{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return GatewayFileForReap{}, false, err
+	}
+	return snap, true, nil
+}
+
+// NormalizeLegacyPermanentGatewayFiles 把"没有过期时间"的存量行按上限补齐
+// （`expires_at = created_at + cap`），使它们也能被回收。
+//
+// 背景：平台改造前，客户端不带 expires_after 的上传在上游是**永久**的，台账记 NULL；
+// 只靠新上传路径收敛管不到这些老行（审计 2026-09-22 R6 P2："存量永久行永不收敛"）。
+// 幂等（只动 NULL 行）、批量有上限，返回本次补齐行数。
+func NormalizeLegacyPermanentGatewayFiles(db *sql.DB, cap time.Duration, limit int) (int64, error) {
+	if cap <= 0 {
+		return 0, nil
+	}
+	if limit <= 0 || limit > 2000 {
+		limit = 500
+	}
+	// 用 make_interval(secs => ?) 而不是 `created_at + ?`：Go 的 time.Duration 不是
+	// PG 的 interval，直接传会被驱动拒绝（实测 500）。秒数走 float8。
+	seconds := cap.Seconds()
+	res, err := db.Exec(`UPDATE gateway_files SET expires_at = created_at + make_interval(secs => ?)
+	                      WHERE file_id IN (
+	                        SELECT file_id FROM gateway_files WHERE expires_at IS NULL LIMIT ?
+	                      )`, seconds, limit)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }

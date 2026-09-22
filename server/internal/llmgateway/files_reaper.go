@@ -34,10 +34,23 @@ const FileReaperInterval = 5 * time.Minute
 
 // ReapExpiredGatewayFiles 执行一轮回收：删上游 + 删台账行，返回 (成功, 失败) 计数。
 //
-// 失败时**保留台账行**，下一轮继续尝试 —— 行是"还有清理责任"的唯一凭据。
+// 并发正确性（审计 2026-09-22 R6 P1-A）：每一行都先经
+// `serverstore.ClaimExpiredGatewayFile` 在**事务内 `FOR UPDATE` + 复检过期**后删行
+// （无锁列表 + 无条件删行会在并发续期时把活行与上游对象一起删掉）。认领成功后、
+// 删上游对象**之前**再复检一次该 id 是否被重新登记（并发上传拿到同一个 id 会插入新行）
+// —— 被重新登记就跳过上游删除（宁可留一个孤儿对象下轮再扫，也不删活文件）。
+//
+// 上游删除失败 ⇒ 用认领时拿到的快照**原样写回**台账行，下一轮继续尝试（行是"还有
+// 清理责任"的唯一凭据）。
 func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 	if a == nil || a.DB == nil {
 		return 0, 0
+	}
+	// 存量"永久"行（改造前的上传，expires_at IS NULL）先按上限补齐，使它们可被回收。
+	if n, err := serverstore.NormalizeLegacyPermanentGatewayFiles(a.DB, gatewayLimitsFor(a.DB).fileExpiry, limit); err != nil {
+		log.Printf("gateway: file reaper: normalize legacy permanent rows failed: %v", err)
+	} else if n > 0 {
+		log.Printf("gateway: file reaper: %d legacy permanent file(s) capped to the platform retention limit", n)
 	}
 	ids, err := serverstore.ListExpiredGatewayFiles(a.DB, limit)
 	if err != nil {
@@ -54,13 +67,34 @@ func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 	}
 	client := a.filesHTTPClient()
 	for _, id := range ids {
-		if err := deleteUpstreamFile(client, up, id); err != nil {
-			log.Printf("gateway: file reaper: delete upstream file failed: %v", err)
+		snap, claimed, err := serverstore.ClaimExpiredGatewayFile(a.DB, id)
+		if err != nil {
+			log.Printf("gateway: file reaper: claim expired row failed: %v", err)
 			failed++
 			continue
 		}
-		if err := serverstore.DeleteGatewayFileRow(a.DB, id); err != nil {
-			log.Printf("gateway: file reaper: delete ledger row failed: %v", err)
+		if !claimed {
+			continue // 已续期 / 已被别的路径处理
+		}
+		if reapRecheckHook != nil {
+			reapRecheckHook(id) // 测试注入点：模拟"认领与复检之间发生的并发上传"
+		}
+		// 认领后复检：并发上传可能刚给同一个 id 登记了新行（上游按内容去重时会这样），
+		// 那种情况下**不能**删上游对象。
+		if exists, err := serverstore.GatewayFileRowExists(a.DB, id); err != nil {
+			log.Printf("gateway: file reaper: recheck row failed: %v", err)
+			failed++
+			continue
+		} else if exists {
+			log.Printf("gateway: file reaper: file %s was re-registered during reaping; upstream object kept", id)
+			continue
+		}
+		if err := deleteUpstreamFile(client, up, id); err != nil {
+			log.Printf("gateway: file reaper: delete upstream file failed: %v", err)
+			// 写回快照，保住"还有清理责任"的凭据（下一轮重试）。
+			if rerr := serverstore.RecordGatewayFileSize(a.DB, snap.FileID, snap.UserID, snap.ExpiresAt, snap.SizeBytes); rerr != nil {
+				log.Printf("gateway: file reaper: restore ledger row failed: %v", rerr)
+			}
 			failed++
 			continue
 		}
@@ -71,6 +105,10 @@ func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 	}
 	return deleted, failed
 }
+
+// reapRecheckHook 只在测试里设置：在"认领成功"与"复检是否被重新登记"之间插一步，
+// 用来确定性地复现并发上传（生产恒为 nil）。
+var reapRecheckHook func(fileID string)
 
 // deleteUpstreamFile 删上游文件：404 视为成功（上游已自然过期/被删）。
 func deleteUpstreamFile(client *http.Client, up Upstream, fileID string) error {

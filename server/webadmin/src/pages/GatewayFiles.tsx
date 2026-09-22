@@ -151,16 +151,19 @@ export default function GatewayFiles() {
 
   async function purge() {
     if (busy) return
-    // 服务端要求至少一个条件；这里再挡一层，并把"删有效文件"单独确认。
-    if (!user.trim() && state === 'all') {
-      setError('批量清理必须指定员工或状态（避免误清全量台账）')
+    // 服务端要求：至少一个条件；且**删有效文件必须指名员工**（全组织范围只允许清已过期）。
+    // 这里保持同口径，避免用户点了才发现 400。
+    if (state === 'all') {
+      setError('批量清理必须指定状态（全部状态请先指定员工）')
       return
     }
-    const scope = state === 'all'
-      ? `员工「${user.trim()}」的**全部**文件（含仍然有效的）`
-      : state === 'expired'
-        ? `已过期文件${user.trim() ? `（员工「${user.trim()}」）` : ''}`
-        : `仍然有效的文件${user.trim() ? `（员工「${user.trim()}」）` : ''}`
+    if (state === 'active' && !user.trim()) {
+      setError('清理仍然有效的文件必须指定员工（全组织范围只允许清理已过期文件）')
+      return
+    }
+    const scope = state === 'expired'
+      ? `已过期文件${user.trim() ? `（员工「${user.trim()}」）` : ''}`
+      : `员工「${user.trim()}」仍然有效的文件`
     const needTyped = state !== 'expired'
     const answer = window.prompt(
       needTyped
@@ -171,7 +174,8 @@ export default function GatewayFiles() {
     setError('')
     setOkMsg('')
     try {
-      const body: Record<string, unknown> = { state }
+      // `all` 在服务端等价于"全部状态"，但删有效文件必须带 user ⇒ 这里按用户收敛。
+      const body: Record<string, unknown> = { state: state === 'all' ? 'expired' : state }
       if (user.trim()) body.user = user.trim()
       const d = await request<{ deleted: number; failed: number; matched: number }>(
         `${ADMIN_API}/gateway/files/purge`, { method: 'POST', body: JSON.stringify(body) })

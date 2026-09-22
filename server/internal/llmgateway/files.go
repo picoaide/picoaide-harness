@@ -10,6 +10,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
@@ -216,10 +217,28 @@ func (a *API) handleFilesUpload(c *gin.Context) {
 	// 上传体读进内存后**重写 multipart**（把过期时间收进平台上限；见
 	// rewriteUploadExpiry）。因此这里不再流式转发：峰值内存 = 原文 + 重写体 ≈ 2×，
 	// 由内存闸门按 2× 计费；超限/超预算分别 413 / 503（都在调用上游之前）。
-	rawBody, trackerErr, ok := readUploadBody(c)
+	// 内存闸门**在读体之前**申请（重写期间原文 + 出站体同时在内存 ⇒ 按 2× 计费）：
+	// 旧实现先读后申请，闸门占满时仍会先吃下整个 32MiB 才 503（审计 2026-09-22
+	// R6 P1-G）。Content-Length 未知（chunked）时只能读完后补记，见 readUploadBody。
+	uploadBudget := gatewayLimitsFor(a.DB).budgetBytes
+	var uploadRelease func()
+	if cl := c.Request.ContentLength; cl > 0 {
+		rel, ok := globalBodyParseGate.acquire(uploadBudget, cl*2)
+		if !ok {
+			log.Printf("gateway: files upload rejected by memory gate before reading: content-length=%d", cl)
+			writeBodyParseBusy(c)
+			return
+		}
+		uploadRelease = rel
+		defer uploadRelease()
+	}
+	rawBody, trackerErr, ok := readUploadBody(c, uploadBudget, &uploadRelease)
 	if !ok {
 		writeFilesTransportError(c, trackerErr)
 		return
+	}
+	if uploadRelease != nil {
+		defer uploadRelease()
 	}
 	outBody, contentType := a.rewriteUploadExpiry(c, rawBody)
 	if outBody == nil {
@@ -263,15 +282,30 @@ func (a *API) handleFilesUpload(c *gin.Context) {
 
 // readUploadBody 把上传体读进内存（上限 maxFilesUploadBody），返回 (体, 读错误, ok)。
 // 失败时响应已写好；trackerErr 供三类失败分类（超限/读超时/其它）。
-func readUploadBody(c *gin.Context) ([]byte, error, bool) {
-	tracker := &filesBodyTracker{inner: http.MaxBytesReader(c.Writer, c.Request.Body, maxFilesUploadBody)}
+//
+// 若调用方因 Content-Length 未知（chunked）尚未申请内存额度，这里读完后按 2× 补记：
+// 读已经发生，这道额度主要约束后续重写与并发叠加（闸门仍会挡住新的上传）。
+func readUploadBody(c *gin.Context, budget int64, release *func()) ([]byte, error, bool) {
+	tracker := &filesBodyTracker{inner: http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadBody())}
 	raw, err := io.ReadAll(tracker)
-	if err == nil {
-		renewWriteDeadline(c)
-		return raw, nil, true
+	if err != nil {
+		return nil, tracker.err, false
 	}
-	return nil, tracker.err, false
+	renewWriteDeadline(c)
+	if release != nil && *release == nil {
+		rel, ok := globalBodyParseGate.acquire(budget, int64(len(raw))*2)
+		if !ok {
+			log.Printf("gateway: files upload rejected by memory gate after reading: bytes=%d", len(raw))
+			writeBodyParseBusy(c)
+			return nil, nil, false
+		}
+		*release = rel
+	}
+	return raw, nil, true
 }
+
+// maxUploadBody 是上传体上限（测试可注入，见 maxFilesUploadBody 的说明）。
+func maxUploadBody() int64 { return maxFilesUploadBody }
 
 // uploadExpiryFields 是官方口径的过期字段名（OpenAI SDK 的 multipart 扁平化写法）。
 const (
@@ -302,6 +336,16 @@ func (a *API) rewriteUploadExpiry(c *gin.Context, raw []byte) ([]byte, string) {
 	_, params, err := mime.ParseMediaType(origCT)
 	boundary := params["boundary"]
 	if err != nil || boundary == "" || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(origCT)), "multipart/") {
+		// 非 multipart：原样转发（不新增失败面），但**照样**按 1× 占内存额度 ——
+		// 否则这条路径成了闸门的后门（审计 2026-09-22 R6 P1-G：闸门占满时非 multipart
+		// 上传仍 200 且上游收到 8MiB）。
+		rel, ok := globalBodyParseGate.acquire(gatewayLimitsFor(a.DB).budgetBytes, int64(len(raw)))
+		if !ok {
+			log.Printf("gateway: files upload (non-multipart) rejected by memory gate: bytes=%d", len(raw))
+			writeBodyParseBusy(c)
+			return nil, ""
+		}
+		defer rel()
 		log.Printf("gateway: files upload: not multipart (content-type=%q); forwarded unchanged", origCT)
 		return raw, origCT
 	}
@@ -321,7 +365,8 @@ func (a *API) rewriteUploadExpiry(c *gin.Context, raw []byte) ([]byte, string) {
 	var buf bytes.Buffer
 	buf.Grow(len(raw) + 256)
 	mw := multipart.NewWriter(&buf)
-	seenExpiry := false
+	seenExpiry := false // 见过任何过期字段（anchor / seconds / JSON 对象）
+	seenAnchor := false
 	inserted := false
 	for {
 		part, err := mr.NextPart()
@@ -334,8 +379,12 @@ func (a *API) rewriteUploadExpiry(c *gin.Context, raw []byte) ([]byte, string) {
 			return raw, origCT
 		}
 		name := part.FormName()
-		// 没有过期字段时，在**第一个非过期字段之前**补上（元数据在前更符合常规）。
-		if !seenExpiry && !inserted && name != expirySecondsField && name != expiryAnchorField && name != expiryJSONField {
+		// 插入时机：**读到文件部分之前**（那时元数据都已出现过）。旧实现在第一个非过期
+		// 字段（通常是 `purpose`）前就插入，于是真实客户端随后自带的 anchor/seconds
+		// 又各写一份 ⇒ `expires_after[anchor]×2 + [seconds]×2`（审计 2026-09-22 R6 P1-E；
+		// 官方客户端形态见 llm-deepseek/common/files-api.ts:225-228）。上游对重复字段的
+		// 取法未定义，必须避免。
+		if !inserted && part.FileName() != "" && !seenExpiry {
 			writeExpiryFields(mw, capSeconds)
 			inserted = true
 		}
@@ -348,13 +397,21 @@ func (a *API) rewriteUploadExpiry(c *gin.Context, raw []byte) ([]byte, string) {
 			}
 		case expiryAnchorField:
 			seenExpiry = true
+			seenAnchor = true
 			if err := writePart(mw, name, part.FileName(), []byte("created_at")); err != nil {
 				log.Printf("gateway: files upload: rewrite anchor failed (%v); forwarded unchanged", err)
 				return raw, origCT
 			}
 		case expiryJSONField:
 			seenExpiry = true
-			val, _ := io.ReadAll(io.LimitReader(part, 4096))
+			// 读满上限再多读 1 字节：超过 maxExpiryJSONBytes 时**放弃重写、整段原样转发**，
+			// 绝不用截断后的值去改写（旧实现 LimitReader(4096) 会把超长值截断后发上游，
+			// 与"解析失败即原样返回"的注释承诺相反 —— 审计 2026-09-22 R6 P2）。
+			val, rerr := io.ReadAll(io.LimitReader(part, maxExpiryJSONBytes+1))
+			if rerr != nil || len(val) > maxExpiryJSONBytes {
+				log.Printf("gateway: files upload: expires_after JSON too large or unreadable (%v); forwarded unchanged", rerr)
+				return raw, origCT
+			}
 			if err := writePart(mw, name, part.FileName(), rewriteExpiryJSON(val, capSeconds)); err != nil {
 				log.Printf("gateway: files upload: rewrite expiry json failed (%v); forwarded unchanged", err)
 				return raw, origCT
@@ -368,6 +425,12 @@ func (a *API) rewriteUploadExpiry(c *gin.Context, raw []byte) ([]byte, string) {
 	}
 	if !seenExpiry && !inserted {
 		writeExpiryFields(mw, capSeconds)
+	} else if seenExpiry && !seenAnchor {
+		// 只给了 seconds、没给 anchor：补一个（官方形状要求 anchor=created_at）。
+		if err := writePart(mw, expiryAnchorField, "", []byte("created_at")); err != nil {
+			log.Printf("gateway: files upload: append anchor failed (%v); forwarded unchanged", err)
+			return raw, origCT
+		}
 	}
 	if err := mw.Close(); err != nil {
 		log.Printf("gateway: files upload: finalize multipart failed (%v); forwarded unchanged", err)
@@ -382,7 +445,7 @@ func writeExpiryFields(mw *multipart.Writer, capSeconds int64) {
 	_ = writePart(mw, expirySecondsField, "", []byte(strconv.FormatInt(capSeconds, 10)))
 }
 
-// writePart 写一个普通（非文件）字段；文件部分走 copyPart 以保留文件名。
+// writePart 写一个普通（非文件）字段；文件部分走 copyPart 以保留文件名与头。
 func writePart(mw *multipart.Writer, name, filename string, value []byte) error {
 	var w io.Writer
 	var err error
@@ -398,16 +461,21 @@ func writePart(mw *multipart.Writer, name, filename string, value []byte) error 
 	return err
 }
 
-// copyPart 原样搬运一个部分（含文件名与内容）。
+// copyPart 原样搬运一个部分：**保留原始 part 头**（Content-Type、以及客户端可能带的
+// 其它头），只搬运内容。
+//
+// 不能用 `CreateFormFile`：它会把 Content-Type 强制成 `application/octet-stream` 并把
+// 客户端原有的 `image/webp` 等头一律丢掉（审计 2026-09-22 R6 P1-F 实测）——
+// 上游据此判媒体类型，丢掉就可能把图片当二进制拒绝。
 func copyPart(mw *multipart.Writer, part *multipart.Part) error {
-	filename := part.FileName()
-	var w io.Writer
-	var err error
-	if filename != "" {
-		w, err = mw.CreateFormFile(part.FormName(), filename)
-	} else {
-		w, err = mw.CreateFormField(part.FormName())
+	header := textproto.MIMEHeader{}
+	for k, vs := range part.Header {
+		// Content-Disposition 由 multipart.Writer 依据 header 里的 filename 重建，原样带上。
+		cp := make([]string, len(vs))
+		copy(cp, vs)
+		header[k] = cp
 	}
+	w, err := mw.CreatePart(header)
 	if err != nil {
 		return err
 	}
@@ -426,6 +494,9 @@ func clampExpirySeconds(part *multipart.Part, capSeconds int64) int64 {
 	return n
 }
 
+// maxExpiryJSONBytes 是 `expires_after` 整对象写法的体积上限（正常只有几十字节）。
+const maxExpiryJSONBytes = 4096
+
 // rewriteExpiryJSON 处理"整个 expires_after 对象塞在一个字段里"的写法：
 // 解析成对象后收敛 seconds、锚点固定 created_at；解析失败则原样返回（交给上游）。
 func rewriteExpiryJSON(val []byte, capSeconds int64) []byte {
@@ -434,7 +505,9 @@ func rewriteExpiryJSON(val []byte, capSeconds int64) []byte {
 		return val
 	}
 	obj["anchor"] = "created_at"
-	if n, ok := obj["seconds"].(float64); !ok || n <= 0 || int64(n) > capSeconds {
+	// 用 float64 比较：`int64(1e300)` 在 Go 里是溢出/未定义值，旧写法会让超大 seconds
+	// **绕过上限**（审计 2026-09-22 R6 P2 实测 1e300 未被收敛）。
+	if n, ok := obj["seconds"].(float64); !ok || n <= 0 || n > float64(capSeconds) {
 		obj["seconds"] = capSeconds
 	}
 	out, err := json.Marshal(obj)

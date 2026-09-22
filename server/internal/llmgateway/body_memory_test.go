@@ -966,3 +966,443 @@ func TestNonMultipartUploadPassesThrough(t *testing.T) {
 		t.Fatalf("Content-Type 被改动: %q", ct)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 第 6 轮审计（R6）P1/P2 的判据
+// ---------------------------------------------------------------------------
+
+// TestReaperDoesNotDeleteRenewedFile（R6 P1-A）：并发续期（同一 file_id 被重新登记
+// 为未来过期）时，回收器**不得**删掉上游对象。
+//
+// 两段判据：①认领前已续期 ⇒ claim 直接失败（行与对象都不动）；
+// ②认领与上游删除之间被重新登记（用测试注入点确定性复现）⇒ 跳过上游删除。
+func TestReaperDoesNotDeleteRenewedFile(t *testing.T) {
+	resetBodyParseGate(t)
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	api := &API{DB: gw.db, client: &http.Client{}}
+
+	// ① 认领前已续期。
+	past := time.Now().Add(-time.Minute)
+	future := time.Now().Add(time.Hour)
+	if err := serverstore.RecordGatewayFile(gw.db, "file-renewed", gw.uidA, &past); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.RecordGatewayFile(gw.db, "file-renewed", gw.uidA, &future); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, _ := api.ReapExpiredGatewayFiles(0); deleted != 0 {
+		t.Fatalf("已续期的行被回收（deleted=%d）", deleted)
+	}
+	var rows int
+	if err := gw.db.QueryRow(`SELECT count(*) FROM gateway_files WHERE file_id = 'file-renewed'`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("已续期的行被删掉了（rows=%d）", rows)
+	}
+
+	// ② 认领与上游删除之间被重新登记。
+	if err := serverstore.RecordGatewayFile(gw.db, "file-race", gw.uidA, &past); err != nil {
+		t.Fatal(err)
+	}
+	reapRecheckHook = func(id string) {
+		if id != "file-race" {
+			return
+		}
+		reapRecheckHook = nil
+		// 模拟并发上传：同一个 id 被重新登记为未来过期。
+		if err := serverstore.RecordGatewayFile(gw.db, id, gw.uidB, &future); err != nil {
+			t.Errorf("re-register: %v", err)
+		}
+	}
+	t.Cleanup(func() { reapRecheckHook = nil })
+	before := up.deletes.Load()
+	if deleted, _ := api.ReapExpiredGatewayFiles(0); deleted != 0 {
+		t.Fatalf("被重新登记的文件不该计入回收（deleted=%d）", deleted)
+	}
+	if up.deletes.Load() != before {
+		t.Fatalf("被重新登记的文件的上游对象被删了（deletes %d → %d）", before, up.deletes.Load())
+	}
+	if exists, err := serverstore.GatewayFileRowExists(gw.db, "file-race"); err != nil || !exists {
+		t.Fatalf("重新登记的行必须保留: exists=%v err=%v", exists, err)
+	}
+}
+
+// TestReaperRestoresRowOnUpstreamFailure（R6 测试盲区 M6）：上游删除失败时必须把台账行
+// **写回**（行是"还有清理责任"的唯一凭据），下一轮才能重试。
+func TestReaperRestoresRowOnUpstreamFailure(t *testing.T) {
+	resetBodyParseGate(t)
+	up := newFakeFilesUpstream(t)
+	up.respond = func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"file-x"}`))
+	}
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	api := &API{DB: gw.db, client: &http.Client{}}
+
+	past := time.Now().Add(-time.Minute)
+	if err := serverstore.RecordGatewayFile(gw.db, "file-fails", gw.uidA, &past); err != nil {
+		t.Fatal(err)
+	}
+	deleted, failed := api.ReapExpiredGatewayFiles(0)
+	if deleted != 0 || failed != 1 {
+		t.Fatalf("reap = %d/%d, want 0/1", deleted, failed)
+	}
+	if exists, err := serverstore.GatewayFileRowExists(gw.db, "file-fails"); err != nil || !exists {
+		t.Fatalf("上游删除失败后必须写回台账行: exists=%v err=%v", exists, err)
+	}
+	// 上游恢复后下一轮能清掉（幂等重试）。
+	up.respond = nil
+	if deleted, failed := api.ReapExpiredGatewayFiles(0); deleted != 1 || failed != 0 {
+		t.Fatalf("第二轮 = %d/%d, want 1/0", deleted, failed)
+	}
+}
+
+// TestReaperNormalizesLegacyPermanentRows（R6 P2）：改造前"永久"（expires_at IS NULL）
+// 的存量行必须被补上上限，否则它们永远不会被回收。
+func TestReaperNormalizesLegacyPermanentRows(t *testing.T) {
+	resetBodyParseGate(t)
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	api := &API{DB: gw.db, client: &http.Client{}}
+
+	if err := serverstore.RecordGatewayFile(gw.db, "file-legacy-perm", gw.uidA, nil); err != nil {
+		t.Fatal(err)
+	}
+	// 把 created_at 推到 30 天前 ⇒ 补上限（7 天）后立刻过期。
+	if _, err := gw.db.Exec(`UPDATE gateway_files SET created_at = now() - interval '30 days' WHERE file_id = 'file-legacy-perm'`); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, _ := api.ReapExpiredGatewayFiles(0); deleted != 1 {
+		t.Fatalf("存量永久行未被补齐并回收（deleted=%d）", deleted)
+	}
+}
+
+// TestAdminUserFilterIsUsernameOnly（R6 P1-B）：`user=` 只按用户名解，`user_id=` 才是 ID；
+// 用户名恰好是数字时不得过滤到 id 相同的另一个人。
+func TestAdminUserFilterIsUsernameOnly(t *testing.T) {
+	resetBodyParseGate(t)
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	// 删除/清理要真的往上游发 DELETE ⇒ 需要一个可用的 files 上游（deepseek 系）。
+	up := newFakeFilesUpstream(t)
+	if _, err := db.Exec(
+		`INSERT INTO gateway_providers (name, base_url, api_key_enc, models) VALUES (?, ?, ?, '["deepseek-chat"]')`,
+		"deepseek-official", up.srv.URL, upstreamKey,
+	); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateUpstreams()
+	numeric, err := serverstore.CreateUser(db, &serverstore.User{Username: "2", DisplayName: "数字用户名", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := serverstore.CreateUser(db, &serverstore.User{Username: "other", DisplayName: "另一个人", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := serverstore.RecordGatewayFile(db, "file-num", numeric, &future); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.RecordGatewayFile(db, "file-other", other, &future); err != nil {
+		t.Fatal(err)
+	}
+
+	_, out := adminReq(t, r, "GET", "/api/server/admin/gateway/files?user=2", "", hdr)
+	rows, _ := out["rows"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("user=2 应只命中用户名 2 的那一行，实得 %d 行", len(rows))
+	}
+	if id, _ := rows[0].(map[string]any)["file_id"].(string); id != "file-num" {
+		t.Fatalf("user=2 命中了错误的人: %v", rows[0])
+	}
+	_, out = adminReq(t, r, "GET", "/api/server/admin/gateway/files?user_id="+strconv.FormatInt(other, 10), "", hdr)
+	rows, _ = out["rows"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("user_id=%d 应命中 1 行，实得 %d", other, len(rows))
+	}
+	// purge 用数字用户名也不得删错人。
+	w, out := adminReq(t, r, "POST", "/api/server/admin/gateway/files/purge", `{"user":"2","state":"active"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("purge 数字用户名: %d %s", w.Code, w.Body.String())
+	}
+	if n, _ := out["deleted"].(float64); int(n) != 1 {
+		t.Fatalf("purge deleted = %v, want 1", out["deleted"])
+	}
+	if exists, _ := serverstore.GatewayFileRowExists(db, "file-other"); !exists {
+		t.Fatal("purge 删错了人（other 的行被删）")
+	}
+}
+
+// TestAdminSummarySortsByRequestedKey（R6 P1-C）：三档排序都必须按请求的键生效
+// （旧实现位置下标全部错位一列）。
+func TestAdminSummarySortsByRequestedKey(t *testing.T) {
+	resetBodyParseGate(t)
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	alice, _ := serverstore.CreateUser(db, &serverstore.User{Username: "sum-alice", Source: "local", Status: 1})
+	bob, _ := serverstore.CreateUser(db, &serverstore.User{Username: "sum-bob", Source: "local", Status: 1})
+	future := time.Now().Add(time.Hour)
+	// bob：1 个大文件；alice：3 个小文件（bytes 与 files 的排序结果相反）。
+	if err := serverstore.RecordGatewayFileSize(db, "sum-b1", bob, &future, 10<<20); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := serverstore.RecordGatewayFileSize(db, "sum-a"+strconv.Itoa(i), alice, &future, 1024); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := func(q string) string {
+		t.Helper()
+		_, out := adminReq(t, r, "GET", "/api/server/admin/gateway/files/summary?"+q, "", hdr)
+		rows, _ := out["rows"].([]any)
+		if len(rows) != 2 {
+			t.Fatalf("%s: rows=%d", q, len(rows))
+		}
+		m, _ := rows[0].(map[string]any)
+		name, _ := m["username"].(string)
+		return name
+	}
+	if got := first("sort=bytes&order=desc"); got != "sum-bob" {
+		t.Fatalf("按占用降序首行 = %s, want sum-bob（排序错位）", got)
+	}
+	if got := first("sort=files&order=desc"); got != "sum-alice" {
+		t.Fatalf("按文件数降序首行 = %s, want sum-alice", got)
+	}
+	if got := first("sort=username&order=asc"); got != "sum-alice" {
+		t.Fatalf("按用户名升序首行 = %s, want sum-alice", got)
+	}
+}
+
+// TestAdminPurgeActiveRequiresUser（R6 P1-D）：删**有效**文件的批量清理必须指名员工，
+// 否则一个请求就能清掉全组织的有效文件；未知 state 必须 400（不能静默扩大范围）。
+func TestAdminPurgeActiveRequiresUser(t *testing.T) {
+	resetBodyParseGate(t)
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	// 删除/清理要真的往上游发 DELETE ⇒ 需要一个可用的 files 上游（deepseek 系）。
+	up := newFakeFilesUpstream(t)
+	if _, err := db.Exec(
+		`INSERT INTO gateway_providers (name, base_url, api_key_enc, models) VALUES (?, ?, ?, '["deepseek-chat"]')`,
+		"deepseek-official", up.srv.URL, upstreamKey,
+	); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateUpstreams()
+	alice, _ := serverstore.CreateUser(db, &serverstore.User{Username: "purge-alice", Source: "local", Status: 1})
+	bob, _ := serverstore.CreateUser(db, &serverstore.User{Username: "purge-bob", Source: "local", Status: 1})
+	future := time.Now().Add(time.Hour)
+	for _, seed := range []struct {
+		id  string
+		uid int64
+	}{{"pa", alice}, {"pb", alice}, {"pc", bob}} {
+		if err := serverstore.RecordGatewayFile(db, seed.id, seed.uid, &future); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w, _ := adminReq(t, r, "POST", "/api/server/admin/gateway/files/purge", `{"state":"active"}`, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("无条件删有效文件应 400，实得 %d (%s)", w.Code, w.Body.String())
+	}
+	var left int
+	if err := db.QueryRow(`SELECT count(*) FROM gateway_files`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 3 {
+		t.Fatalf("被拒的请求删了文件（left=%d）", left)
+	}
+	for _, bad := range []string{`{"state":"weird"}`, `{"state":"expired","user":"no-such-user"}`} {
+		if w, _ := adminReq(t, r, "POST", "/api/server/admin/gateway/files/purge", bad, hdr); w.Code != http.StatusBadRequest {
+			t.Fatalf("%s 应 400，实得 %d", bad, w.Code)
+		}
+	}
+	// 指名员工后允许删他的有效文件（只删他的）。
+	w, out := adminReq(t, r, "POST", "/api/server/admin/gateway/files/purge", `{"state":"active","user":"purge-alice"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("指定员工的有效文件清理应 200，实得 %d (%s)", w.Code, w.Body.String())
+	}
+	if n, _ := out["deleted"].(float64); int(n) != 2 {
+		t.Fatalf("deleted = %v, want 2", out["deleted"])
+	}
+	if exists, _ := serverstore.GatewayFileRowExists(db, "pc"); !exists {
+		t.Fatal("删到了别的员工的文件")
+	}
+}
+
+// TestAdminDeleteExpiredFileByID（R6 P2）：过期行也允许管理员按 id 删除（列表里那一行
+// 同样有删除按钮），不再因"过期 = 不存在"而 404。
+func TestAdminDeleteExpiredFileByID(t *testing.T) {
+	resetBodyParseGate(t)
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	up := newFakeFilesUpstream(t)
+	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models) VALUES (?, ?, ?, '["deepseek-chat"]')`,
+		"deepseek-official", up.srv.URL, upstreamKey); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateUpstreams()
+	past := time.Now().Add(-time.Minute)
+	if err := serverstore.RecordGatewayFile(db, "file-expired-del", 1, &past); err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := adminReq(t, r, "DELETE", "/api/server/admin/gateway/files/file-expired-del", "", hdr); w.Code != http.StatusOK {
+		t.Fatalf("删过期行应 200，实得 %d (%s)", w.Code, w.Body.String())
+	}
+	if exists, _ := serverstore.GatewayFileRowExists(db, "file-expired-del"); exists {
+		t.Fatal("过期行没被删掉")
+	}
+}
+
+// TestUploadRewriteKeepsPartHeadersAndAvoidsDuplicates（R6 P1-E/P1-F）：真实客户端形态
+// （purpose→anchor→seconds→file）下必须**恰好一份** anchor/seconds，且 file part 的
+// Content-Type 原样保留（旧实现强制 octet-stream）。
+func TestUploadRewriteKeepsPartHeadersAndAvoidsDuplicates(t *testing.T) {
+	resetBodyParseGate(t)
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("purpose", "user_data")
+	_ = mw.WriteField("expires_after[anchor]", "created_at")
+	_ = mw.WriteField("expires_after[seconds]", "2592000") // 30 天 ⇒ 收敛
+	fw, err := mw.CreatePart(map[string][]string{
+		"Content-Disposition": {`form-data; name="file"; filename="image.webp"`},
+		"Content-Type":        {"image/webp"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = fw.Write([]byte("WEBP-BYTES"))
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if w := doFilesReq(t, gw.r, http.MethodPost, "/v1/files", bytes.NewReader(buf.Bytes()), gw.tokenA, mw.FormDataContentType()); w.Code != http.StatusOK {
+		t.Fatalf("上传失败: %d %s", w.Code, w.Body.String())
+	}
+
+	raw, _ := up.body.Load().(string)
+	ct, _ := up.ctype.Load().(string)
+	_, params, _ := mime.ParseMediaType(ct)
+	mr := multipart.NewReader(strings.NewReader(raw), params["boundary"])
+	counts := map[string]int{}
+	fileCT := ""
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("上游收到非法 multipart: %v", err)
+		}
+		b, _ := io.ReadAll(part)
+		if part.FileName() != "" {
+			fileCT = part.Header.Get("Content-Type")
+			if string(b) != "WEBP-BYTES" {
+				t.Fatalf("文件字节被破坏: %q", b)
+			}
+			continue
+		}
+		counts[part.FormName()]++
+		_ = b
+	}
+	if counts["expires_after[anchor]"] != 1 || counts["expires_after[seconds]"] != 1 {
+		t.Fatalf("过期字段重复或缺失: %v（真实客户端形态必须各恰好一份）", counts)
+	}
+	if fileCT != "image/webp" {
+		t.Fatalf("file part 的 Content-Type 丢失/被覆写: %q", fileCT)
+	}
+}
+
+// TestUploadExpiryJSONEdges（R6 P2）：整对象写法的两个边界 —— 超大 seconds 必须收敛
+// （float 比较，避免 int64 溢出）；超过体积上限时**整段原样转发**而不是截断改写。
+func TestUploadExpiryJSONEdges(t *testing.T) {
+	resetBodyParseGate(t)
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	capSeconds := int64(DefaultFileExpiryDays) * 24 * 3600
+
+	upload := func(expiryJSON string) (map[string]string, string) {
+		t.Helper()
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		_ = mw.WriteField("expires_after", expiryJSON)
+		fw, _ := mw.CreateFormFile("file", "f.bin")
+		_, _ = fw.Write([]byte("z"))
+		_ = mw.Close()
+		if w := doFilesReq(t, gw.r, http.MethodPost, "/v1/files", bytes.NewReader(buf.Bytes()), gw.tokenA, mw.FormDataContentType()); w.Code != http.StatusOK {
+			t.Fatalf("上传失败: %d %s", w.Code, w.Body.String())
+		}
+		raw, _ := up.body.Load().(string)
+		ct, _ := up.ctype.Load().(string)
+		fields, _ := parseUploadedForm(t, up)
+		return fields, raw + ct
+	}
+
+	fields, _ := upload(`{"anchor":"created_at","seconds":1e300}`)
+	if fields["expires_after"] == "" {
+		t.Fatalf("expires_after 字段丢失: %v", fields)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(fields["expires_after"]), &obj); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := obj["seconds"].(float64); int64(n) != capSeconds {
+		t.Fatalf("1e300 未被收敛到上限: %v", obj["seconds"])
+	}
+	// 超长 JSON：原样转发（不截断改写）——把整段体与原文对拍。
+	big := `{"anchor":"created_at","seconds":2592000,"pad":"` + strings.Repeat("x", maxExpiryJSONBytes+10) + `"}`
+	fields, _ = upload(big)
+	if fields["expires_after"] != big {
+		t.Fatalf("超长 expires_after 未原样转发（被截断改写）: len=%d want=%d", len(fields["expires_after"]), len(big))
+	}
+	// 只给 seconds、不给 anchor ⇒ 必须补 anchor。
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("expires_after[seconds]", "2592000")
+	fw, _ := mw.CreateFormFile("file", "g.bin")
+	_, _ = fw.Write([]byte("w"))
+	_ = mw.Close()
+	if w := doFilesReq(t, gw.r, http.MethodPost, "/v1/files", bytes.NewReader(buf.Bytes()), gw.tokenA, mw.FormDataContentType()); w.Code != http.StatusOK {
+		t.Fatalf("上传失败: %d %s", w.Code, w.Body.String())
+	}
+	fields, _ = parseUploadedForm(t, up)
+	if fields["expires_after[anchor]"] != "created_at" {
+		t.Fatalf("只给 seconds 时必须补 anchor: %v", fields)
+	}
+	if fields["expires_after[seconds]"] != strconv.FormatInt(capSeconds, 10) {
+		t.Fatalf("seconds 未收敛: %v", fields)
+	}
+}
+
+// TestNonMultipartUploadAlsoUsesGate（R6 P1-G）：非 multipart 的原样转发路径也必须占
+// 内存额度，否则它成了闸门的后门。
+func TestNonMultipartUploadAlsoUsesGate(t *testing.T) {
+	resetBodyParseGate(t)
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	if err := serverstore.SetSetting(gw.db, SettingBodyParseBudgetMB, "64"); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateGatewayLimits()
+	budget := int64(MinBodyParseBudgetMB) << 20
+	rel, ok := globalBodyParseGate.acquire(budget, budget)
+	if !ok {
+		t.Fatal("占满闸门失败（夹具问题）")
+	}
+	defer rel()
+
+	w := doFilesReq(t, gw.r, http.MethodPost, "/v1/files", strings.NewReader(`{"a":1}`), gw.tokenA, "application/json")
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("闸门占满时非 multipart 上传也应 503，实得 %d (%s)", w.Code, w.Body.String())
+	}
+	if up.hits.Load() != 0 {
+		t.Fatalf("被闸门拒绝的上传不应触达上游（%d 次）", up.hits.Load())
+	}
+}

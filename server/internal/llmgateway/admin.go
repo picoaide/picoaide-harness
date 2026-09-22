@@ -1337,18 +1337,22 @@ func validateUpstreamBaseURL(raw string) error {
 // gateway:write（路由申报见 internal/router/router.go），全部动作写审计。
 
 // adminFileQuery 从查询参数解析过滤/排序/分页条件（非法值一律回落缺省，不报错）。
+//
+// `user=` 一律按**用户名**解，数字 ID 走 `user_id=`（审计 2026-09-22 R6 P1-B：
+// 旧实现"先按 ID 解"⇒ 用户名恰好是数字时 `user=2` 会过滤到 id=2 的**另一个员工**、
+// purge 更会删错人）。用户名查不到 ⇒ 空集（不退化成"不过滤"）。
 func adminFileQuery(c *gin.Context, db *sql.DB) serverstore.GatewayFileQuery {
 	q := serverstore.GatewayFileQuery{}
-	if v := strings.TrimSpace(c.Query("user")); v != "" {
-		// 员工过滤支持用户名（唯一）或 id（数字）；用户名查不到时用 0 = 不过滤，
-		// 但**显式给了却查不到**必须返回空集，否则管理员会以为"这个人没有文件"是
-		// 过滤生效了（实际是全量）。
+	if v := strings.TrimSpace(c.Query("user_id")); v != "" {
 		if id, err := strconv.ParseInt(v, 10, 64); err == nil && id > 0 {
 			q.UserID = id
-		} else if uid, err := serverstore.GetUserByUsername(db, v); err == nil && uid != nil {
+		} else {
+			q.UserID = -1
+		}
+	} else if v := strings.TrimSpace(c.Query("user")); v != "" {
+		if uid, err := serverstore.GetUserByUsername(db, v); err == nil && uid != nil {
 			q.UserID = uid.ID
 		} else {
-			// 显式给了用户名却查不到 ⇒ 返回空集（不能退化成"不过滤"）。
 			q.UserID = -1
 		}
 	}
@@ -1361,15 +1365,18 @@ func adminFileQuery(c *gin.Context, db *sql.DB) serverstore.GatewayFileQuery {
 	}
 	q.Sort = strings.TrimSpace(c.Query("sort"))
 	q.Desc = c.Query("order") != "asc"
-	if n, err := strconv.Atoi(c.Query("page")); err == nil && n > 1 {
-		q.Offset = (n - 1) * 50
-	}
+	size := 0
 	if n, err := strconv.Atoi(c.Query("size")); err == nil && n > 0 {
-		if q.Offset > 0 {
-			q.Offset = (q.Offset / 50) * min(n, 200)
-		}
-		q.Limit = n
+		size = min(n, 200)
 	}
+	page := 1
+	if n, err := strconv.Atoi(c.Query("page")); err == nil && n > 1 {
+		page = n
+	}
+	if size > 0 {
+		q.Limit = size
+	}
+	q.Offset = (page - 1) * q.Limit // 与生效的 size 同源（旧实现固定按 50 算，size>200 时跳段）
 	return q
 }
 
@@ -1423,10 +1430,12 @@ func deleteGatewayFileAdmin(c *gin.Context, api *API, db *sql.DB) {
 		writeFileNotFound(c, fileID)
 		return
 	}
-	if _, ok, err := serverstore.GatewayFileOwner(db, fileID); err != nil {
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取文件归属失败")
+	// 管理端按 id 删除**不看过期**（列表里的过期行同样有删除按钮；审计 2026-09-22
+	// R6 P2 实测旧实现走 GatewayFileOwner ⇒ 过期行 404，管理员只能等回收器）。
+	if exists, err := serverstore.GatewayFileRowExists(db, fileID); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取文件台账失败")
 		return
-	} else if !ok {
+	} else if !exists {
 		writeFileNotFound(c, fileID)
 		return
 	}
@@ -1456,6 +1465,7 @@ func deleteGatewayFileAdmin(c *gin.Context, api *API, db *sql.DB) {
 func purgeGatewayFilesAdmin(c *gin.Context, api *API, db *sql.DB) {
 	var req struct {
 		User        *string `json:"user"`
+		UserID      *int64  `json:"user_id"`
 		State       *string `json:"state"`
 		ExpiredOnly *bool   `json:"expired_only"`
 		Limit       *int    `json:"limit"`
@@ -1466,14 +1476,16 @@ func purgeGatewayFilesAdmin(c *gin.Context, api *API, db *sql.DB) {
 	}
 	q := serverstore.GatewayFileQuery{}
 	target := "all"
-	if req.User != nil && strings.TrimSpace(*req.User) != "" {
+	if req.UserID != nil && *req.UserID > 0 {
+		q.UserID = *req.UserID
+		target = "user_id=" + strconv.FormatInt(*req.UserID, 10)
+	} else if req.User != nil && strings.TrimSpace(*req.User) != "" {
+		// `user` 一律用户名（数字用户名不会被当成 ID —— 删错人的根因，见 adminFileQuery）。
 		v := strings.TrimSpace(*req.User)
-		if id, err := strconv.ParseInt(v, 10, 64); err == nil && id > 0 {
-			q.UserID = id
-		} else if uid, err := serverstore.GetUserByUsername(db, v); err == nil && uid != nil {
+		if uid, err := serverstore.GetUserByUsername(db, v); err == nil && uid != nil {
 			q.UserID = uid.ID
 		} else {
-			c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": 0, "failed": 0, "matched": 0})
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "user 必须是存在的用户名（数字 ID 请用 user_id）")
 			return
 		}
 		target = "user=" + v
@@ -1499,9 +1511,30 @@ func purgeGatewayFilesAdmin(c *gin.Context, api *API, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "必须指定 user 或 state（避免误清全量台账）")
 		return
 	}
+	// 删**有效**文件必须指名员工（审计 2026-09-22 R6 P1-D 实测：`{"state":"active"}`
+	// 一个请求删掉全组织 6 个有效文件 + 上游对象）。用户 2026-09-22 确认"批量清理可以
+	// 删有效文件"，但**范围必须收敛到某个人**；全组织范围只允许清"已过期"。
+	if q.OnlyActive && q.UserID == 0 {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+			"清理仍然有效的文件必须指定员工（user 或 user_id）；全组织范围只允许清理已过期文件")
+		return
+	}
+	// 未知 state 必须显式拒绝，不能静默忽略（静默忽略 = 过滤条件消失、范围扩大）。
+	if req.State != nil {
+		switch strings.TrimSpace(*req.State) {
+		case "", "expired", "active", "all":
+		default:
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "state 只支持 expired|active|all")
+			return
+		}
+	}
 	limit := 0
 	if req.Limit != nil {
 		limit = *req.Limit
+	}
+	// 单次上限 500（文档口径）：更大请重复调用，避免一次请求在上游侧打太久。
+	if limit <= 0 || limit > 500 {
+		limit = 500
 	}
 	ids, err := serverstore.ListGatewayFilesForPurge(db, q, limit)
 	if err != nil {

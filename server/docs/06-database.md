@@ -107,7 +107,7 @@ idx_usage_user_cost`。写路径 `RecordUsage*` 先 ensure 当月分区。
 网关 `/v1/files`(`/files` 同)是官方 Files API 的直通面(上传/列出/下载/删除),而上游按 **API key** 隔离文件——公司内所有员工共用同一把 key,所以「谁能读哪个 file_id」这件事上游不知道。此表是平台侧的归属账本:上传成功即 `RecordGatewayFile` 记 `(file_id, user_id, expires_at)`,**首次写入者胜**(`ON CONFLICT DO UPDATE … WHERE gateway_files.user_id = EXCLUDED.user_id`,不覆盖他人归属)。
 
 - 聊天体里出现 `file_id` 引用时,批量 `GatewayFilesOwnedBy` 一次问清:非本人(含行已过期)一律 404 `file_id not found or expired`(不泄露存在性),防止员工 A 拿着员工 B 上传后的 id 直接把对方文件读进自己的对话。
-- `expires_at` 取上游返回的过期时间(官方上限 30 天);过期行视为**不存在**——既不再授权读取,也**允许他人重新占用同名 id**(`RecordGatewayFile` 的 `ON CONFLICT … WHERE user_id = EXCLUDED.user_id OR expires_at <= now()`:存活行不转手防"重传抢归属",过期行可转手防"上游按内容去重时第二个上传者引用自己的文件 404";永久文件永不转手)。
+- `expires_at` = min(上游返回的过期时间, 上传时刻 + `gateway.file_expiry_days`);上游那侧也由网关**重写上传体**收敛到同一上限(见 03-api-reference §5);过期行视为**不存在**——既不再授权读取,也**允许他人重新占用同名 id**(`RecordGatewayFile` 的 `ON CONFLICT … WHERE user_id = EXCLUDED.user_id OR expires_at <= now()`:存活行不转手防"重传抢归属",过期行可转手防"上游按内容去重时第二个上传者引用自己的文件 404";永久文件永不转手)。
 - 容量与回收:官方限制是**每 key 25 GiB / 10000 个文件**(公司级共享,非按人),`PurgeExpiredGatewayFiles`(同一事务内 `SELECT … FOR UPDATE SKIP LOCKED` → `DELETE`)清理过期行;`ListGatewayFileIDs` 供管理/诊断用途(上限 20000 行)。
 
 ### model_concurrency_stats(0049,按模型并发峰值)

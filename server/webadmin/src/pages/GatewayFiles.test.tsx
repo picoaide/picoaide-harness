@@ -151,14 +151,25 @@ describe('网关文件台账页', () => {
     expect(calls.filter((c) => c.method === 'DELETE').length).toBe(0)
   })
 
-  it('批量清理：无条件时拒绝并发提示，不发请求', async () => {
+  it('批量清理：状态为「全部」时拒绝；选「有效」但没填员工也拒绝（都不发请求）', async () => {
     const calls = installMock()
     const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('确认')
     render(<GatewayFiles />)
     await waitFor(() => expect(screen.getByText('file-api-aaa')).toBeTruthy())
 
+    // 默认状态 = 全部 ⇒ 必须先选状态（避免"全部状态"这种无边界范围）。
     fireEvent.click(screen.getByText('按条件清理'))
-    await waitFor(() => expect(screen.getByText(/必须指定员工或状态/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/必须指定状态/)).toBeTruthy())
+
+    // 选「有效」但不填员工 ⇒ 与服务端同口径拒绝。
+    fireEvent.click(screen.getByLabelText('状态'))
+    fireEvent.click(await screen.findByRole('option', { name: '有效' }))
+    await waitFor(() => {
+      const last = [...calls].reverse().find((c) => c.path.startsWith('/api/server/admin/gateway/files?'))!
+      expect(last.path).toContain('state=active')
+    })
+    fireEvent.click(screen.getByText('按条件清理'))
+    await waitFor(() => expect(screen.getByText(/必须指定员工/)).toBeTruthy())
     expect(calls.filter((c) => c.path.includes('/purge')).length).toBe(0)
     expect(promptSpy).not.toHaveBeenCalled()
   })
