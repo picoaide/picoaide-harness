@@ -15,6 +15,9 @@ export default defineConfig([
       'desktop-home': 'src/desktop-home.ts',
       'host-locale': 'src/host-locale.ts',
       'desktop-channel': 'src/desktop-channel.ts',
+      // 出口策略（2026-09-22）：main.ts 用它接线，`scripts/proxy-policy-probe.mjs` 用
+      // **构建产物**跑真机判据（同一个真源，探针里不另抄开关名）。
+      'network-policy': 'src/network-policy.ts',
       profile: 'src/profile.ts',
       'desktop-plugins': 'src/desktop-plugins.ts',
       diagnostics: 'src/diagnostics.ts',

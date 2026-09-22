@@ -17,6 +17,11 @@
  *      取值链与服务端 `channel.go` 的 `applyDefaults` **同序**，避免"登录页
  *      一个名、登录后另一个名"。
  *
+ * 另有一个**部署级**开关也随包而非随服务端：`desktop.allow_system_proxy`
+ * （默认 false = 客户端禁止使用任何代理，见 `network-policy.ts` 与
+ * `docs/decisions/2026-09-22-client-system-proxy-ban.md`）。它必须随包——"经代理才能
+ * 出网"的部署里，客户端连不上服务端时恰恰需要它生效。
+ *
  * 文件缺失（本地开发、未渠道化的构建）时返回 undefined，调用方沿用原有
  * 行为 —— 渠道化是增量，不是新的必填项。
  *
@@ -248,6 +253,17 @@ export interface DesktopChannelProfile {
   /** 深链在操作系统里的注册名（Protocols 显示名）；未配置时为 undefined。 */
   readonly deepLinkName: string | undefined
   /**
+   * 是否允许客户端使用宿主机代理（渠道包 `desktop.allow_system_proxy`）。
+   *
+   * **默认 false**：客户端一律直连，系统代理 / 代理环境变量 / PAC / `--proxy-server`
+   * 全部忽略（`network-policy.ts` 的 `no-proxy-server`）。置 true 只给"服务器在
+   * DMZ、只有经代理才能出网"这类部署留退路 —— 代价是内置浏览器也会跟随系统代理。
+   *
+   * 只认严格布尔 `true`：渠道包是不可信输入，字符串 "true"/"1" 一律按缺省（禁止）
+   * 处理 —— 这个方向的误读只会更严，不会更松。
+   */
+  readonly allowSystemProxy: boolean
+  /**
    * 随包分发的品牌文案（登录页/客户端界面用）。
    *
    * 登录页在**认证之前**就渲染品牌区，那一刻还没有服务端可问（服务端地址可能
@@ -358,6 +374,9 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
   })
   const rawAppId = nonEmptyString(desktopRecord.app_id)
   const appId = rawAppId !== undefined && APP_ID_PATTERN.test(rawAppId) ? rawAppId : undefined
+  // 出口策略（2026-09-22）：只认严格布尔 true。渠道包写 "true"/"1" 一律按**禁止代理**
+  // 处理（误读只会更严）；缺省即禁止，官方构建与渠道化改造前行为一致。
+  const allowSystemProxy = desktopRecord.allow_system_proxy === true
 
   // 品牌文案的取值链必须与服务端 channel.go 的 applyDefaults **同序**：
   // 同一个渠道包在客户端自带兜底与服务端下发之间不能给出不同名字，否则
@@ -404,6 +423,7 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
     deepLinkScheme,
     appOriginScheme,
     deepLinkName,
+    allowSystemProxy,
     brand,
   }
 }
