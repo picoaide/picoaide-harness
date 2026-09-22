@@ -19,21 +19,33 @@ import (
 	"time"
 )
 
-// RecordGatewayFile 记录一次成功的上传归属（同一 file_id 重复上传时覆盖归属，
-// 上游对相同内容可能返回既有 id，此时以最后一次成功上传者为准）。
+// RecordGatewayFile 记录一次成功的上传归属。
+//
+// **归属不转手**（首次上传者恒为归属人）：同一 file_id 再次上传（上游若对相同内容
+// 返回既有 id —— 官方文档未承诺，但要有防线）只刷新 `expires_at`，不改 `user_id`。
+// 反过来的"最后上传者胜"是可被利用的：知道目标图片字节的人重传一次就能把归属抢走，
+// 让原主的聊天引用整体 404；而首次胜的失败面是第二个上传者退回 base64 内联（安全、
+// 自动恢复），代价仅限请求体变大。
 func RecordGatewayFile(db *sql.DB, fileID string, userID int64, expiresAt *time.Time) error {
 	_, err := db.Exec(
 		`INSERT INTO gateway_files (file_id, user_id, expires_at) VALUES (?, ?, ?)
-		 ON CONFLICT (file_id) DO UPDATE SET user_id = EXCLUDED.user_id, expires_at = EXCLUDED.expires_at`,
+		 ON CONFLICT (file_id) DO UPDATE SET expires_at = EXCLUDED.expires_at
+		 WHERE gateway_files.user_id = EXCLUDED.user_id`,
 		fileID, userID, expiresAt,
 	)
 	return err
 }
 
-// GatewayFileOwner 返回 file_id 的归属用户；ok=false 表示台账里没有这个文件
-// （未登记 / 已被删除 / 已过期清理）。
+// GatewayFileOwner 返回 file_id 的归属用户；ok=false 表示台账里没有这个**有效**文件
+// （未登记 / 已被删除 / 已过期）。
+//
+// 过期行按"不存在"处理：上游对过期文件同样返回 404，若本地还认它是"自己的"，
+// 只会让调用方拿到一个上游 404 而不是干净的"文件不存在"（口径与列表过滤一致 ——
+// 审计 2026-09-22 G-6 指出两处口径曾相反）。
 func GatewayFileOwner(db *sql.DB, fileID string) (userID int64, ok bool, err error) {
-	row := db.QueryRow(`SELECT user_id FROM gateway_files WHERE file_id = ?`, fileID)
+	row := db.QueryRow(
+		`SELECT user_id FROM gateway_files
+		 WHERE file_id = ? AND (expires_at IS NULL OR expires_at > now())`, fileID)
 	switch err := row.Scan(&userID); {
 	case errors.Is(err, sql.ErrNoRows):
 		return 0, false, nil
@@ -52,18 +64,58 @@ func GatewayFileOwnedBy(db *sql.DB, fileID string, userID int64) (bool, error) {
 	return ok && owner == userID, nil
 }
 
+// GatewayFilesOwnedBy 批量判定：返回 ids 中**确实属于该用户**且未过期的那些 id。
+//
+// 单次往返（`IN (...)` 展开）：审计 2026-09-22 F 路 P2-3 实测逐个 `GatewayFileOwnedBy`
+// 在 100 个引用时约 49ms、1000 个约 113ms，全是串行 DB 往返；而请求体上限 64MiB 足够
+// 塞进远多于 1000 个 `file_id`，等于把"闸门前的排队时间"交给调用方控制。调用方据此
+// 把引用数压在上限内（见 maxFileRefsPerRequest），本函数只负责一次问清。
+func GatewayFilesOwnedBy(db *sql.DB, ids []string, userID int64) (map[string]struct{}, error) {
+	owned := make(map[string]struct{}, len(ids))
+	if len(ids) == 0 {
+		return owned, nil
+	}
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, userID)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := db.Query(
+		`SELECT file_id FROM gateway_files
+		 WHERE user_id = ? AND (expires_at IS NULL OR expires_at > now())
+		   AND file_id IN (`+qmarks(len(ids))+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		owned[id] = struct{}{}
+	}
+	return owned, rows.Err()
+}
+
 // DeleteGatewayFileRow 删除归属行（上游删除成功、或已确认上游 404 时调用）。
 func DeleteGatewayFileRow(db *sql.DB, fileID string) error {
 	_, err := db.Exec(`DELETE FROM gateway_files WHERE file_id = ?`, fileID)
 	return err
 }
 
+// GatewayFile 台账的单次查询上限：官方 Files API 每账号最多 10000 个文件，
+// 单个员工自己的文件只会更少；这里加 LIMIT 只是防"异常数据把整表读进内存"。
+const gatewayFilesListLimit = 20000
+
 // ListGatewayFileIDs 返回该用户登记的**未过期** file_id 集合（列表过滤用）。
 func ListGatewayFileIDs(db *sql.DB, userID int64) (map[string]struct{}, error) {
 	rows, err := db.Query(
 		`SELECT file_id FROM gateway_files
-		 WHERE user_id = ? AND (expires_at IS NULL OR expires_at > now())`,
-		userID,
+		 WHERE user_id = ? AND (expires_at IS NULL OR expires_at > now())
+		 ORDER BY created_at DESC
+		 LIMIT ?`,
+		userID, gatewayFilesListLimit,
 	)
 	if err != nil {
 		return nil, err
@@ -82,18 +134,62 @@ func ListGatewayFileIDs(db *sql.DB, userID int64) (map[string]struct{}, error) {
 
 // PurgeExpiredGatewayFiles 清掉已过期的归属行（上游对此类文件返回 404，
 // 行留着只会让"归属判定"变成永不收敛的垃圾）。limit<=0 时取默认批量。
+//
+// 为什么是**两步同事务**而不是一条 `DELETE ... IN (SELECT ...)`：单语句在子查询
+// 快照与删除之间留窗口 —— 并发续期（`RecordGatewayFile` 把 `expires_at` 推到未来
+// 并先提交）的行会被按旧快照删掉（2026-09-22 审计确定性复现：受害者随后的聊天
+// 引用该 file_id 会整体 404）。先 `SELECT ... FOR UPDATE SKIP LOCKED` 锁住候选
+// （被并发事务持有行锁的直接跳过，下轮再处理），再按 id 删；同事务内持锁 ⇒
+// 不可能删到刚被续期的活行。三种单语句修法（外层重述谓词 / ctid / 子查询
+// `FOR UPDATE SKIP LOCKED`）经审计实测均无效，别再往那个方向改。
 func PurgeExpiredGatewayFiles(db *sql.DB, limit int) (int64, error) {
 	if limit <= 0 {
 		limit = 500
 	}
-	res, err := db.Exec(
-		`DELETE FROM gateway_files WHERE file_id IN (
-		     SELECT file_id FROM gateway_files WHERE expires_at IS NOT NULL AND expires_at <= now() LIMIT ?
-		 )`, limit,
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	// 提交成功后 Rollback 返回 ErrTxDone，忽略即可。
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query(
+		`SELECT file_id FROM gateway_files
+		 WHERE expires_at IS NOT NULL AND expires_at <= now()
+		 ORDER BY expires_at
+		 LIMIT ? FOR UPDATE SKIP LOCKED`, limit,
 	)
 	if err != nil {
 		return 0, err
 	}
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return 0, tx.Commit()
+	}
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	res, err := tx.Exec(`DELETE FROM gateway_files WHERE file_id IN (`+qmarks(len(ids))+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
 	n, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
 	return n, nil
 }

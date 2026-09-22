@@ -129,25 +129,60 @@ func TestStripUpstreamExtensionsPassesThroughNonObjects(t *testing.T) {
 	}
 }
 
-// sanitizeOutboundBody 是转发入口用的包装：失败只降级为原样转发，不 panic、不改体。
-func TestSanitizeOutboundBodyDegradesToRawOnParseFailure(t *testing.T) {
+// sanitizeOutboundBody 是转发入口用的包装：**解析失败必须 fail-closed**（ok=false），
+// 不能"降级为原样转发"。旧行为（原样转发）是审计 2026-09-22 F 路 P0-1 的一半根因：
+// 任何一个 fail-open 的闸门都会成为整条校验链的绕过入口。
+func TestSanitizeOutboundBodyFailsClosedOnParseFailure(t *testing.T) {
 	raw := []byte(`{"dsh_session_log":`)
-	if out := sanitizeOutboundBody(raw); !bytes.Equal(out, raw) {
-		t.Fatalf("sanitizeOutboundBody changed a malformed body: %q", string(out))
+	out, ok := sanitizeOutboundBody(raw)
+	if ok {
+		t.Fatalf("sanitizeOutboundBody 对解析失败的体返回 ok=true（fail-open）：%q", string(out))
+	}
+	// 带前缀但解析不了：同样 fail-closed（这正是 P0-1 的形态）。
+	for _, bad := range []string{`{"dsh_session_log":[1,2]`, `{"dsh_a":1,"dsh_b":`, `[{"dsh_a":1}]`} {
+		if _, ok := sanitizeOutboundBody([]byte(bad)); ok {
+			t.Fatalf("sanitizeOutboundBody 对带前缀的坏体 %s 返回 ok=true", bad)
+		}
+	}
+	// 不带前缀的体**不解析**（零重编码快路径）——合法性由更早的 prepareOutboundBody
+	// 负责，本函数不是唯一的闸门。
+	if out, ok := sanitizeOutboundBody([]byte(`[1,2]`)); !ok || string(out) != `[1,2]` {
+		t.Fatalf("无前缀的体应逐字节透传: ok=%v out=%q", ok, string(out))
+	}
+	// 合法对象且无前缀：逐字节不变（零重编码）。
+	same := []byte(`{"model":"m","messages":[]}`)
+	out, ok = sanitizeOutboundBody(same)
+	if !ok || !bytes.Equal(out, same) {
+		t.Fatalf("无前缀的合法体被改动或拒绝：ok=%v out=%q", ok, string(out))
 	}
 }
 
-// 防漏判据（本次 P0 的教训）：任何把客户端体发给上游的地方都必须先过净化。
-// 四个契约路径由三个转发入口覆盖，`bytes.NewReader(raw)` 是它们的共同指纹 ——
-// 将来新增协议若忘了接净化，这条用例会红。
+// 防漏判据（本次 P0 的教训）：任何**构造上游请求**的函数都必须先过净化。
+//
+// 2026-09-22 审计 F 路把旧版判据打穿了两处（M7/M7b）：
+//   - 旧指纹是"变量名恰为 raw + bytes.NewReader"，换个变量名/构造器就看不见；
+//     新判据锚在 `http.NewRequest`（构造出站请求这个**动作**）本身；
+//   - 旧版还靠 `stripLineComments` 剥注释，而它的 `://` 保护写错，含 URL 字面量的
+//     一行会被整行截断 ⇒ 同一行的指纹消失（M7b 实测守卫仍绿）。现已改成带字符串
+//     状态的扫描器（见下），并用 `stripLineCommentsIsStringAware` 自证。
+//
+// 允许清单：构造请求但**不做**客户端体净化的函数（每条都要写清为什么）。
+// 清单本身也受判据约束：条目必须真的被扫到（禁止留死条目）。
+var outboundRequestAllowlist = map[string]string{
+	"balance.go:fetchDeepSeekBalance":                          "余额探针：服务端自建 GET，无客户端体",
+	"embedding.go:Embed":                                       "集成路径：出站体由服务端按解析后的 input 自建",
+	"errorreporting_test_event.go:sendErrorReportingTestEvent": "错误上报测试探针：体是服务端自建事件",
+	"files.go:handleFilesUpload":                               "Files API 直通：客户端体**就是文件字节**，无 JSON 字段面",
+	"files.go:doFilesMeta":                                     "Files 元数据 GET/DELETE：无请求体",
+}
+
 func TestEveryForwardHelperSanitizesOutboundBody(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 只看**代码行**：注释里也会出现同样的字符串（本文件与 sanitize.go 的注释就有），
-	// 不剥注释会让判据在"注释提到它"时假红。`://` 之后的 `//` 属于字符串，保护一下。
-	reader := regexp.MustCompile(`bytes\.NewReader\(raw\)`)
+	requestCtor := regexp.MustCompile(`http\.NewRequest`)
+	hitAllowlist := map[string]bool{}
 	found := 0
 	for _, entry := range entries {
 		name := entry.Name()
@@ -159,38 +194,106 @@ func TestEveryForwardHelperSanitizesOutboundBody(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := stripLineComments(string(source))
-		if !reader.MatchString(text) {
-			continue
-		}
-		// 以函数为粒度切分，找出真正使用 raw 的那个函数体。
 		for _, chunk := range splitGoFuncs(text) {
-			if !reader.MatchString(chunk) {
+			if !requestCtor.MatchString(chunk) {
 				continue
 			}
 			found++
-			if !strings.Contains(chunk, "sanitizeOutboundBody(raw)") {
-				t.Fatalf("%s: 一个把 raw 直接发给上游的函数没有调用 sanitizeOutboundBody —— "+
-					"新增协议路径必须接服务端净化闸门（P0-4）", name)
+			fn := goFuncName(chunk)
+			if reason, ok := outboundRequestAllowlist[name+":"+fn]; ok {
+				hitAllowlist[name+":"+fn] = true
+				_ = reason
+				continue
+			}
+			if !strings.Contains(chunk, "sanitizeOutboundBody(") {
+				t.Fatalf("%s: %s 构造了上游请求但没有调用 sanitizeOutboundBody —— "+
+					"新增转发路径必须接服务端净化闸门（P0-4），确属无客户端体请登记 outboundRequestAllowlist 并写明理由",
+					name, fn)
 			}
 		}
 	}
 	if found == 0 {
-		t.Fatal("没有扫到任何 bytes.NewReader(raw) 调用点，判据会空转")
+		t.Fatal("没有扫到任何 http.NewRequest 调用点，判据会空转")
 	}
 	if found < 3 {
-		t.Fatalf("只扫到 %d 个转发入口，预期 3 个（forward/forwardEndpoint/forwardAnthropic）—— 判据面疑似漂移", found)
+		t.Fatalf("只扫到 %d 个上游请求构造点，预期至少 3 个 —— 判据面疑似漂移", found)
+	}
+	for key := range outboundRequestAllowlist {
+		if !hitAllowlist[key] {
+			t.Fatalf("outboundRequestAllowlist 有条目 %q 从未被扫到（死条目/函数改名未同步）", key)
+		}
 	}
 }
 
-// stripLineComments 去掉行注释，保留 `://`（URL 字面量）里的双斜杠。
+// TestStripLineCommentsIsStringAware：剥注释器自身的判据（M7b 的根因）。
+// 含 URL 字面量、含转义引号、含行内 `//` 字符串的行必须**保住代码部分**。
+func TestStripLineCommentsIsStringAware(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{`req, _ := http.NewRequestWithContext(ctx, "POST", "http://up.example/v1/x", bytes.NewReader(raw)) // 发上游`,
+			`req, _ := http.NewRequestWithContext(ctx, "POST", "http://up.example/v1/x", bytes.NewReader(raw)) `},
+		{`x := "a//b" // 注释`, `x := "a//b" `},
+		{`y := ` + "`raw // string`" + ` // tail`, `y := ` + "`raw // string`" + ` `},
+		{`// 整行注释`, ``},
+		{`z := "esc\"// not-comment"`, `z := "esc\"// not-comment"`},
+	}
+	for _, tc := range cases {
+		if got := stripLineComments(tc.in); got != tc.want {
+			t.Fatalf("stripLineComments(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// goFuncName 取粗切函数块的方法名（`func (a *API) foo(` → "foo"，`func bar(` → "bar"）。
+func goFuncName(chunk string) string {
+	first := chunk
+	if i := strings.IndexByte(chunk, '\n'); i >= 0 {
+		first = chunk[:i]
+	}
+	first = strings.TrimPrefix(strings.TrimSpace(first), "func ")
+	if strings.HasPrefix(first, "(") {
+		i := strings.Index(first, ")")
+		if i < 0 {
+			return first
+		}
+		first = strings.TrimSpace(first[i+1:])
+	}
+	if i := strings.IndexByte(first, '('); i >= 0 {
+		first = first[:i]
+	}
+	return strings.TrimSpace(first)
+}
+
+// stripLineComments 去掉行注释，保留字符串字面量里的 `//`。
+//
+// 不要退回"看 `://` 在不在"的写法：`line[:i]` 恰好不含 `http://` 里紧跟 `:` 的那个
+// `/`，保护永远不生效（审计 F 路 M7b 实测）。
 func stripLineComments(source string) string {
 	lines := strings.Split(source, "\n")
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
-		if i := strings.Index(line, "//"); i >= 0 && !strings.Contains(line[:i], ":/") {
-			line = line[:i]
+		cut := len(line)
+		var quote byte // 0=不在字符串里；'"' 或 '`'
+		for i := 0; i < len(line); i++ {
+			ch := line[i]
+			switch {
+			case quote != 0:
+				if quote == '"' && ch == '\\' {
+					i++ // 跳过被转义的字符
+					continue
+				}
+				if ch == quote {
+					quote = 0
+				}
+			case ch == '"' || ch == '`':
+				quote = ch
+			case ch == '/' && i+1 < len(line) && line[i+1] == '/':
+				cut = i
+				i = len(line)
+			}
 		}
-		out = append(out, line)
+		out = append(out, line[:cut])
 	}
 	return strings.Join(out, "\n")
 }

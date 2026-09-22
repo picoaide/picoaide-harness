@@ -181,11 +181,11 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 	if !ok {
 		return
 	}
-	// 出站体加工(2026-09-22):embeddings 无图片引用面,这里只做 file_id 归属校验
-	// (identityNone ⇒ 不注入官方未文档化的 user_id)。
-	if raw, ok = prepareOutboundBody(c, a.DB, user.ID, raw, identityNone); !ok {
-		return
-	}
+	// 不做出站体加工（2026-09-22 审计 F 路 P2-4 修正）：embeddings 的客户端体
+	// **从不转发** —— 出站体由 Embedder 自建 `{model,input}`，所以 file_id 归属校验
+	// 在这里既没有保护对象，又平白多出一次全量 parse+marshal 与一个纯误伤的 404 面
+	// （`{"model":…,"input":[…],"file_id":"x"}` 会被拒，而本无任何东西出境）。
+	// raw 只用于解析字段与计量。
 	var req struct {
 		Model string          `json:"model"`
 		Input json.RawMessage `json:"input"`

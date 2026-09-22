@@ -27,7 +27,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 		conc: newConcurrencyMeter(),
 	}
 	// OpenAI/Anthropic 兼容形态(/v1/*)。
-	v1 := r.Group("/v1", serverauth.BearerAuth(db))
+	v1 := r.Group("/v1", serverauth.BearerAuth(db), InFlightGuard())
 	v1.POST("/chat/completions", a.handleChatCompletions)
 	v1.POST("/embeddings", a.handleEmbeddings)
 	v1.POST("/messages", a.handleMessages)
@@ -40,7 +40,7 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 	v1.GET("/files/:file_id", a.handleFilesRetrieve)
 	v1.DELETE("/files/:file_id", a.handleFilesDelete)
 	// 官方原生形态(无 /v1 前缀)。
-	gw := r.Group("", serverauth.BearerAuth(db))
+	gw := r.Group("", serverauth.BearerAuth(db), InFlightGuard())
 	gw.POST("/chat/completions", a.handleChatCompletions)
 	gw.POST("/embeddings", a.handleEmbeddings)
 	gw.POST("/completions", a.handleCompletions)

@@ -3,6 +3,7 @@ package llmgateway
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -114,6 +115,10 @@ func (a *API) handleCompletions(c *gin.Context) {
 			}
 		}
 		resp, err = a.forwardEndpoint(c, &ups[i], body, req.Stream, "/completions")
+		if errors.Is(err, errOutboundBodyNotJSON) {
+			a.rejectBadOutboundBody(c, usageID)
+			return
+		}
 		if err == nil {
 			respSecrets = []string{ups[i].APIKey}
 			chosenProviderID = ups[i].ID
@@ -145,15 +150,19 @@ func (a *API) handleCompletions(c *gin.Context) {
 // forwardEndpoint forwards raw body to an upstream OpenAI-style endpoint
 // (/chat/completions, /completions, /responses). It is forward() with a
 // selectable endpoint suffix.
-func (a *API) forwardEndpoint(c *gin.Context, up *Upstream, raw []byte, stream bool, endpoint string) (*http.Response, error) {
+func (a *API) forwardEndpoint(c *gin.Context, up *Upstream, body outboundBody, stream bool, endpoint string) (*http.Response, error) {
 	// P0-4 服务端侧第二道闸门：出站请求体剔除上游 DSH 私有扩展字段（见 sanitize.go）。
-	raw = sanitizeOutboundBody(raw)
+	// 净化无法确认是 JSON 对象时 fail-closed（见 errOutboundBodyNotJSON）。
+	clean, ok := sanitizeOutboundBody([]byte(body))
+	if !ok {
+		return nil, errOutboundBodyNotJSON
+	}
 	url := upstreamURLFor(up.BaseURL, endpoint)
 	client := a.client
 	if stream {
 		client = a.sse
 	}
-	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, url, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, url, bytes.NewReader(clean))
 	if err != nil {
 		return nil, err
 	}

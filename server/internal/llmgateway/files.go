@@ -72,9 +72,17 @@ func fileUpstream(db *sql.DB) (Upstream, bool) {
 		return Upstream{}, false
 	}
 	for i := range ups {
-		if balanceSupports(ups[i].BaseURL, ups[i].Name) {
-			return ups[i], true
+		if !balanceSupports(ups[i].BaseURL, ups[i].Name) {
+			continue
 		}
+		// Files 面是 OpenAI 形状：anthropic-only 的 provider 要走 /anthropic/v1/files，
+		// 我们没实现那条路径 —— 选中它会让 filesURL 拼出 <base>/anthropic/... 永久 404
+		// 并静默回落 base64（审计 2026-09-22 G-5 实测）。这里显式跳过。
+		if ups[i].Protocol != "openai" && ups[i].Protocol != "both" {
+			log.Printf("gateway: files: skip provider %s (protocol=%s, Files API 只支持 openai 形状)", ups[i].Name, ups[i].Protocol)
+			continue
+		}
+		return ups[i], true
 	}
 	return Upstream{}, false
 }
@@ -142,10 +150,26 @@ func (a *API) filesHTTPClient() *http.Client {
 	}
 }
 
+// fileNotFoundMessage 是"文件不存在 / 不属于你"的统一文案。
+//
+// **必须含 ASCII 的 `file` + `not found|expired`，且带上 file id**：官方客户端
+// （llm-deepseek/request-files.ts 的 `providerRejectedFileId` + `staleMappings`）用
+// 这两个正则判定"这个 file_id 不能用了"，据此失效本地映射并在同一次请求内回落 base64。
+// 用纯中文文案（旧版「文件不存在」）它判不出来 ⇒ 该图片让整条会话**每一轮都 404**
+// （审计 2026-09-22 F3 用真实正则实测）。文案对所有失败原因同形（不泄露存在性/归属），
+// 回显的 id 本来就是调用方自己发来的。
+func fileNotFoundMessage(fileID string) string {
+	const base = "file_id not found or expired（文件不存在或已过期，请重新上传）"
+	if fileID == "" {
+		return base
+	}
+	return base + ": " + fileID
+}
+
 // writeFileNotFound 统一的"文件不存在"响应：未登记 / 不属于调用者 / 形状非法
 // 一律同形（不泄露存在性）。
-func writeFileNotFound(c *gin.Context) {
-	serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文件不存在")
+func writeFileNotFound(c *gin.Context, fileID string) {
+	serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", fileNotFoundMessage(fileID))
 }
 
 // filesBodyTracker 记录客户端请求体的读取错误。
@@ -217,6 +241,13 @@ func (a *API) handleFilesUpload(c *gin.Context) {
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		a.recordUploadedFile(userID, body)
+		// 过期行清理也在上传路径做一次：官方客户端的正常路径**从不 list**（只在配额
+		// 不足时才 list 回收），只靠 list 兜底会让过期行一直堆积（审计 2026-09-22 F8）。
+		if n, err := serverstore.PurgeExpiredGatewayFiles(a.DB, 200); err != nil {
+			log.Printf("gateway: files: purge expired ownership rows: %v", err)
+		} else if n > 0 {
+			log.Printf("gateway: files: purged %d expired ownership row(s)", n)
+		}
 	}
 	relayFilesBody(c, resp, up.APIKey, body)
 }
@@ -260,7 +291,7 @@ func (a *API) handleFilesRetrieve(c *gin.Context) {
 		return
 	}
 	if !validGatewayFileID(fileID) {
-		writeFileNotFound(c)
+		writeFileNotFound(c, fileID)
 		return
 	}
 	owned, err := serverstore.GatewayFileOwnedBy(a.DB, fileID, userID)
@@ -269,12 +300,19 @@ func (a *API) handleFilesRetrieve(c *gin.Context) {
 		return
 	}
 	if !owned {
-		writeFileNotFound(c)
+		writeFileNotFound(c, fileID)
 		return
 	}
 	resp, body, ok := a.doFilesMeta(c, up, http.MethodGet, target)
 	if !ok {
 		return
+	}
+	// 上游说这个 id 已经不存在（过期/被上游清掉）⇒ 顺手收敛台账，别让悬垂行
+	// 一直占着"归属"（否则该 id 会永远被判为自己的、却每次都在上游 404）。
+	if resp.StatusCode == http.StatusNotFound {
+		if err := serverstore.DeleteGatewayFileRow(a.DB, fileID); err != nil {
+			log.Printf("gateway: files: drop stale ownership row %s failed: %v", fileID, err)
+		}
 	}
 	relayFilesBody(c, resp, up.APIKey, body)
 }
@@ -287,7 +325,7 @@ func (a *API) handleFilesDelete(c *gin.Context) {
 		return
 	}
 	if !validGatewayFileID(fileID) {
-		writeFileNotFound(c)
+		writeFileNotFound(c, fileID)
 		return
 	}
 	owned, err := serverstore.GatewayFileOwnedBy(a.DB, fileID, userID)
@@ -296,7 +334,7 @@ func (a *API) handleFilesDelete(c *gin.Context) {
 		return
 	}
 	if !owned {
-		writeFileNotFound(c)
+		writeFileNotFound(c, fileID)
 		return
 	}
 	resp, body, ok := a.doFilesMeta(c, up, http.MethodDelete, target)
@@ -356,6 +394,9 @@ func readFilesResponseBody(c *gin.Context, resp *http.Response) ([]byte, bool) {
 // "请求体过大/读超时"；readErr == nil 表示失败发生在上游侧（拨号/TLS/响应头超时等），
 // 一律 502 —— 否则上游超时会被误报成"客户端上传过慢"，把排查方向带偏。
 func writeFilesTransportError(c *gin.Context, readErr error) {
+	// 这些分支同样发生在"上传体已经吃掉全局 WriteTimeout"之后（审计 2026-09-22 F6：
+	// 不续期时慢上传的失败信封写不出去，客户端只看到 EOF）。写错误响应前先续期。
+	renewWriteDeadline(c)
 	var maxErr *http.MaxBytesError
 	switch {
 	case readErr == nil:
@@ -459,6 +500,30 @@ func filterFileList(body []byte, owned map[string]struct{}) []byte {
 		kept = append(kept, obj)
 	}
 	envelope["data"] = kept
+	// first_id/last_id 是上游真实字段（客户端会读），**必须按过滤后的结果重算** ——
+	// 原样透传会把别人的 file_id 直接送给调用方（`?limit=1` 即可拿到，再配合
+	// `after=` 就能全量枚举；审计 2026-09-22 F1 实测）。
+	if len(kept) == 0 {
+		delete(envelope, "first_id")
+		delete(envelope, "last_id")
+		// 本页没有自己的文件：不让客户端继续翻页（继续翻只会拿更多空页，且我们
+		// 无法在"不泄露游标"的前提下给出跨页游标）。客户端的配额回收会因此得到
+		// deleted=0 ⇒ 回落 base64，功能不受影响。
+		envelope["has_more"] = false
+	} else {
+		first, _ := kept[0].(map[string]any)["id"].(string)
+		last, _ := kept[len(kept)-1].(map[string]any)["id"].(string)
+		if first != "" {
+			envelope["first_id"] = first
+		} else {
+			delete(envelope, "first_id")
+		}
+		if last != "" {
+			envelope["last_id"] = last
+		} else {
+			delete(envelope, "last_id")
+		}
+	}
 	out, err := json.Marshal(envelope)
 	if err != nil {
 		return empty
@@ -477,6 +542,16 @@ func relayFilesBody(c *gin.Context, resp *http.Response, apiKey string, body []b
 	}
 	secrets := []string{apiKey}
 	body = redactSecrets(body, secrets)
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		// Files API 不会合法地返回 3xx；而上游重定向正是"把 provider key 带去另一个
+		// 主机"的经典路径（Go 只在跨域时剥 Authorization，同域子域仍会转发）。
+		// 我们既不跟随、也不把 3xx 透传给客户端（那会让客户端去追一个它没有凭据的
+		// 地址），统一按上游失败处理。
+		log.Printf("gateway: files upstream returned %d (redirect not allowed): %s",
+			resp.StatusCode, c.Request.URL.Path)
+		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游请求失败")
+		return
+	}
 	if resp.StatusCode >= 400 {
 		c.Header("Content-Type", "application/json; charset=utf-8")
 		c.Status(resp.StatusCode)

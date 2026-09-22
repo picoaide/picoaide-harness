@@ -83,9 +83,12 @@ func TestGatewayFileExpiredRowsAreInvisibleAndPurged(t *testing.T) {
 	}
 }
 
-// TestGatewayFileUpsertKeepsSingleRow：同一 file_id 重复登记（上游对相同内容可能
-// 返回既有 id）只保留一行，归属取最后一次。
-func TestGatewayFileUpsertKeepsSingleRow(t *testing.T) {
+// TestGatewayFileOwnershipNeverTransfers：同一 file_id 重复登记只保留一行，且
+// **归属不转手**（首次上传者恒为归属人）。
+//
+// 为什么不是"最后上传者胜"：那等于"知道目标图片字节的人重传一次就能把归属抢走"，
+// 原主的聊天引用会整体 404；首次胜的失败面只是第二个上传者退回 base64 内联。
+func TestGatewayFileOwnershipNeverTransfers(t *testing.T) {
 	db, cleanup := NewTestDB(t)
 	t.Cleanup(cleanup)
 	alice := mustUser(t, db, "gw-files-alice")
@@ -104,9 +107,157 @@ func TestGatewayFileUpsertKeepsSingleRow(t *testing.T) {
 	if rows != 1 {
 		t.Fatalf("rows = %d, want 1", rows)
 	}
-	if owner, ok, err := GatewayFileOwner(db, "file-api-x"); err != nil || !ok || owner != bob {
-		t.Fatalf("owner = %d/%v/%v, want %d（最后一次上传者）", owner, ok, err, bob)
+	if owner, ok, err := GatewayFileOwner(db, "file-api-x"); err != nil || !ok || owner != alice {
+		t.Fatalf("owner = %d/%v/%v, want %d（首次上传者，归属不转手）", owner, ok, err, alice)
+	}
+	// 同一归属重复登记仍应刷新过期时间（续期的正常路径）。
+	later := time.Now().Add(48 * time.Hour)
+	if err := RecordGatewayFile(db, "file-api-x", alice, &later); err != nil {
+		t.Fatal(err)
+	}
+	var expires *time.Time
+	if err := db.QueryRow(`SELECT expires_at FROM gateway_files WHERE file_id = 'file-api-x'`).Scan(&expires); err != nil {
+		t.Fatal(err)
+	}
+	if expires == nil || expires.Before(time.Now().Add(47*time.Hour)) {
+		t.Fatalf("同一归属的续期未生效: %v", expires)
 	}
 }
 
 // mustUser 复用 migration_0062_test.go 里的同名助手（插 0061 列集，够本文件用）。
+
+// TestGatewayFileExpiredRowIsNotOwned：过期行按"不存在"处理（与列表过滤口径一致）。
+// 上游对过期文件同样 404；若本地还认它是"自己的"，调用方拿到的会是上游 404 而不是
+// 干净的"文件不存在"（审计 2026-09-22 G-6 指出两处口径曾相反）。
+func TestGatewayFileExpiredRowIsNotOwned(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	t.Cleanup(cleanup)
+	alice := mustUser(t, db, "gw-files-alice")
+
+	past := time.Now().Add(-time.Minute)
+	if err := RecordGatewayFile(db, "file-api-old", alice, &past); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := GatewayFileOwner(db, "file-api-old"); err != nil || ok {
+		t.Fatalf("过期行不应算作有效归属: ok=%v err=%v", ok, err)
+	}
+	if owned, err := GatewayFileOwnedBy(db, "file-api-old", alice); err != nil || owned {
+		t.Fatalf("过期行不应判为归属自己: owned=%v err=%v", owned, err)
+	}
+	// 行本身仍在（由 purge 负责回收），确认上面的 false 来自 expires_at 判定
+	var rows int
+	if err := db.QueryRow(`SELECT count(*) FROM gateway_files WHERE file_id = 'file-api-old'`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("行应还在（等 purge 回收），rows=%d", rows)
+	}
+}
+
+// TestPurgeExpiredSkipsRowsLockedByAnotherTx（审计 2026-09-22 P2-1）：purge 走
+// 同事务两步（SELECT ... FOR UPDATE SKIP LOCKED → DELETE），被并发事务持锁的过期行
+// 必须**跳过**而不是按旧快照删掉 —— 否则并发续期（把 expires_at 推到未来）的活行会被
+// 误删，受害者随后的聊天引用该 file_id 会整体 404。
+func TestPurgeExpiredSkipsRowsLockedByAnotherTx(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	t.Cleanup(cleanup)
+	alice := mustUser(t, db, "gw-files-alice")
+
+	past := time.Now().Add(-time.Minute)
+	if err := RecordGatewayFile(db, "file-api-locked", alice, &past); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordGatewayFile(db, "file-api-free", alice, &past); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	// 模拟"并发续期事务"：持有该行行锁（真实场景里它随后会把 expires_at 推到未来）
+	if _, err := tx.Exec(`SELECT file_id FROM gateway_files WHERE file_id = 'file-api-locked' FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := PurgeExpiredGatewayFiles(db, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("purged = %d, want 1（被锁行必须跳过）", n)
+	}
+	var lockedRows int
+	if err := db.QueryRow(`SELECT count(*) FROM gateway_files WHERE file_id = 'file-api-locked'`).Scan(&lockedRows); err != nil {
+		t.Fatal(err)
+	}
+	if lockedRows != 1 {
+		t.Fatalf("被并发持锁的行被误删了（lockedRows=%d）", lockedRows)
+	}
+	var freeRows int
+	if err := db.QueryRow(`SELECT count(*) FROM gateway_files WHERE file_id = 'file-api-free'`).Scan(&freeRows); err != nil {
+		t.Fatal(err)
+	}
+	if freeRows != 0 {
+		t.Fatalf("未被锁的过期行应被清掉（freeRows=%d）", freeRows)
+	}
+}
+
+// TestGatewayFilesOwnedByBatch：批量归属判定（审计 2026-09-22 F 路 P2-3）——
+// 网关的聊天引用校验从"每个引用一次串行查询"改成一次 `IN (...)`，语义必须与逐个判定
+// 完全一致：只返回**本人的、未过期的**那些 id；他人的、未登记的、已过期的都不在结果里。
+func TestGatewayFilesOwnedByBatch(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	t.Cleanup(cleanup)
+
+	alice := mustUser(t, db, "gw-batch-alice")
+	bob := mustUser(t, db, "gw-batch-bob")
+	future := time.Now().Add(time.Hour)
+	past := time.Now().Add(-time.Minute)
+
+	for _, id := range []string{"b-own-1", "b-own-2", "b-own-3"} {
+		if err := RecordGatewayFile(db, id, alice, &future); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := RecordGatewayFile(db, "b-bob", bob, &future); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordGatewayFile(db, "b-expired", alice, &past); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordGatewayFile(db, "b-permanent", alice, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	ids := []string{"b-own-1", "b-own-2", "b-own-3", "b-bob", "b-expired", "b-permanent", "b-unregistered"}
+	owned, err := GatewayFilesOwnedBy(db, ids, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"b-own-1": true, "b-own-2": true, "b-own-3": true, "b-permanent": true}
+	if len(owned) != len(want) {
+		t.Fatalf("owned = %v, want %v", owned, want)
+	}
+	for id := range want {
+		if _, ok := owned[id]; !ok {
+			t.Fatalf("缺少本人未过期的 %s: %v", id, owned)
+		}
+	}
+	// 与逐个判定逐条对拍（批量实现不得放宽/收紧语义）。
+	for _, id := range ids {
+		one, err := GatewayFileOwnedBy(db, id, alice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, batch := owned[id]
+		if one != batch {
+			t.Fatalf("%s: 批量=%v 逐个=%v", id, batch, one)
+		}
+	}
+	// 空输入不发查询、返回空集。
+	if got, err := GatewayFilesOwnedBy(db, nil, alice); err != nil || len(got) != 0 {
+		t.Fatalf("空输入: %v/%v", got, err)
+	}
+}

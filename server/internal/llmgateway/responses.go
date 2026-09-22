@@ -2,6 +2,7 @@ package llmgateway
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 
@@ -31,9 +32,11 @@ func (a *API) handleResponses(c *gin.Context) {
 	if !ok {
 		return
 	}
-	// 出站体加工(2026-09-22):校验 file_id 引用归属 + 按端点注入平台 user_id。
+	// 出站体加工(2026-09-22):校验 file_id 引用归属 + 注入官方 `user`
+	// (create-response 的顶层字段,2026-09-22 审计 F 路 P1-1 修正:此前误按
+	// "官方无该字段"处理,实际只查了 `user_id` 这个名字)。
 	// raw 保持**客户端原始字节**(计量侧按它估算 prompt),转发用 outbound。
-	outbound, ok := prepareOutboundBody(c, a.DB, user.ID, raw, identityNone)
+	outbound, ok := prepareOutboundBody(c, a.DB, user.ID, raw, identityResponses)
 	if !ok {
 		return
 	}
@@ -108,6 +111,10 @@ func (a *API) handleResponses(c *gin.Context) {
 			}
 		}
 		resp, err = a.forwardEndpoint(c, &ups[i], body, req.Stream, "/responses")
+		if errors.Is(err, errOutboundBodyNotJSON) {
+			a.rejectBadOutboundBody(c, usageID)
+			return
+		}
 		if err == nil {
 			respSecrets = []string{ups[i].APIKey}
 			chosenProviderID = ups[i].ID

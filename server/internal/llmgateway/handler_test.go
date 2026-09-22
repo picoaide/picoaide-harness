@@ -242,17 +242,35 @@ func TestApplyStreamUsageRequest(t *testing.T) {
 // 也不允许客户端自带值透传）。
 func forwardedBodyEqual(t *testing.T, got, want, wantUserID string) {
 	t.Helper()
-	var g, w map[string]any
-	if err := json.Unmarshal([]byte(got), &g); err != nil {
-		t.Fatalf("forwarded body not JSON: %q", got)
+	// UseNumber：两侧都不做 float64 化，否则 >2^53 的整数漂移（重编码唯一的语义失真面）
+	// 会被这条判据自己掩盖（审计 2026-09-22 G-9）。
+	decode := func(s string) map[string]any {
+		dec := json.NewDecoder(strings.NewReader(s))
+		dec.UseNumber()
+		var m map[string]any
+		if err := dec.Decode(&m); err != nil {
+			t.Fatalf("body not JSON: %q", s)
+		}
+		return m
 	}
-	if err := json.Unmarshal([]byte(want), &w); err != nil {
-		t.Fatalf("expected body not JSON: %q", want)
+	g, w := decode(got), decode(want)
+	// 平台身份注入有两种形态：chat/FIM 走顶层 `user_id`，Responses 走官方
+	// create-response 的顶层 `user`（审计 2026-09-22 F 路 P1-1 修正：此前误按
+	// "官方无该字段"处理，实际字段名是 `user`）。两种任取其一，但必须**恰好**命中
+	// 平台注入值 —— 只在命中时才从比对里抹掉，避免掩盖客户端自带的同名字段。
+	gotID, _ := g["user_id"].(string)
+	gotUser, _ := g["user"].(string)
+	switch {
+	case wantUserID == "" && gotID == "":
+		delete(g, "user_id")
+	case wantUserID != "" && gotID == wantUserID:
+		delete(g, "user_id")
+	case wantUserID != "" && gotUser == wantUserID:
+		delete(g, "user")
+	default:
+		t.Fatalf("forwarded identity = user_id:%q user:%q, want %q（平台侧注入并覆盖客户端值）",
+			gotID, gotUser, wantUserID)
 	}
-	if id, _ := g["user_id"].(string); id != wantUserID {
-		t.Fatalf("forwarded user_id = %q, want %q（平台侧注入并覆盖客户端值）", id, wantUserID)
-	}
-	delete(g, "user_id")
 	if !reflect.DeepEqual(g, w) {
 		t.Fatalf("forwarded body differs from client body:\n got=%v\nwant=%v", g, w)
 	}

@@ -127,7 +127,9 @@ func TestZeroOrNegativeReadBudgetFallsBackToGlobalTimeout(t *testing.T) {
 	for _, budget := range []time.Duration{0, -time.Second} {
 		setBodyReadBudget(t, budget)
 		ts := newReadBudgetServer(t, 5*time.Second, 1<<20)
-		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/read", strings.NewReader("hello"))
+		// 256KiB > bufio 缓冲：小体（如 7 字节）会整段落进缓冲，护栏失效时也测不出来
+		// （审计 2026-09-22 指出作者原用例正是 7 字节体 ⇒ 变异全绿）。
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/read", strings.NewReader(strings.Repeat("h", 256<<10)))
 		resp, err := ts.Client().Do(req)
 		if err != nil {
 			t.Fatalf("budget=%v 请求失败: %v", budget, err)

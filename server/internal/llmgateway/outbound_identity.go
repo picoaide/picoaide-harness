@@ -1,6 +1,7 @@
 package llmgateway
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"log"
@@ -48,90 +49,246 @@ func platformUserID(userID int64) string {
 	return "u" + strconv.FormatInt(userID, 10)
 }
 
+// ---------------------------------------------------------------------------
+// 角色化 body 类型：把"客户端原始字节"与"出站字节"变成编译期不可互换
+// ---------------------------------------------------------------------------
+//
+// 两条不变量靠**类型**而不是靠评审纪律保证（审计 2026-09-22 F 路 M1/M3/M4/M5/M12
+// 变异全部只被源码字符串守卫挡着，新增路径/改名即静默失效）：
+//
+//	clientBody   —— readRequestBody 的产物，只允许用于 ①解析字段 ②计量估算
+//	outboundBody —— prepareOutboundBody 的产物，只允许用于发给上游
+//
+// 于是"把 raw 转发出去"或"拿 outbound 计费"都变成编译错误；字面量与
+// `[]byte("…")` 这类无名类型临时值仍可直接传参（测试与内置体不受影响）。
+type clientBody []byte
+
+type outboundBody []byte
+
 // outboundIdentity 决定要不要、以什么形状注入平台侧 user_id。
 //
-// 只对**官方文档明确支持** user_id 的两个端点上注入：
+// 只对**官方文档明确支持**该字段的端点注入：
 //   - OpenAI 兼容 Chat Completions（官方 rate_limit 页给出顶层 `user_id` 示例）；
+//   - OpenAI 兼容 Responses（官方 create-response 文档的顶层 `user`，字符集
+//     `[a-zA-Z0-9\-_]`、≤512，用途同样是内容安全/KVCache/调度隔离），
+//     **审计 2026-09-22 F 路 P1-1 修正**：此前按"官方没有该字段"处理是错的，
+//     当时只查了 `user_id` 这个名字；
 //   - Anthropic 兼容 Messages（官方示例用 `metadata.user_id`）。
 //
-// `/completions`(FIM) 与 `/responses` 的文档没有这个字段，注入未文档化字段属
-// 未经证实的行为改变 —— 这两条路径设为 identityNone（**仍然做 file_id 归属校验**，
-// 归属校验只拒不放，不改变正常请求的语义）。
+// `/completions`(FIM) 的官方文档没有用户标识字段（只有 prompt/echo/…），注入未文档化
+// 字段属未经证实的行为改变 ⇒ identityNone（**仍然做 file_id 归属校验**，归属校验
+// 只拒不放，不改变正常请求的语义）。
 type outboundIdentity int
 
 const (
 	identityNone outboundIdentity = iota
 	identityOpenAI
+	identityResponses
 	identityAnthropic
 )
+
+// topLevelUserKey 返回该模式注入的**顶层**键名；空串表示不写顶层键
+// （identityNone 不注入、identityAnthropic 写 metadata 子对象）。
+func topLevelUserKey(mode outboundIdentity) string {
+	switch mode {
+	case identityOpenAI:
+		return "user_id"
+	case identityResponses:
+		return "user"
+	}
+	return ""
+}
+
+// maxFileRefsPerRequest 单个请求允许引用的 file_id 数量上限。
+//
+// 归属校验的 DB 往返已经批量成一次，这条上限挡的是另外两件事：①`IN (...)` 的
+// 参数个数（PG 上限 65535，64MiB 体足够塞进十万个 id，撞上去就是 500 而非干净的
+// 拒绝）；②上游对"一条消息引用几百个文件"也没有实际用法。真实会话是个位数量级。
+const maxFileRefsPerRequest = 256
 
 // prepareOutboundBody 是聊天类入口共用的出站体加工：
 // ① 校验所有 file_id 引用归属调用者（不通过 ⇒ 已写 404，返回 ok=false）；
 // ② 按 mode 注入/覆盖平台侧 user_id。
 //
-// 请求体不是合法 JSON 对象时**原样返回**（与 sanitize.go 同口径：净化/加工动作
-// 绝不能让一个原本合法的请求变成失败，非法请求交给下游按它自己的规则拒）。
-func prepareOutboundBody(c *gin.Context, db *sql.DB, userID int64, raw []byte, mode outboundIdentity) ([]byte, bool) {
+// 失败语义（2026-09-22 审计 G-1 修正）：请求体**不是合法 JSON 对象时直接 400**，
+// 不再"解析失败就原样放行"。原口径（照抄 sanitize.go 的"净化不改转发语义"）留下了
+// 一个实测可用的绕过：`{"junk":1e999, …他人 file_id…}` 让 map 解析失败、而结构体解析
+// （skip() 容忍未知字段）成功 ⇒ 闸门被整体跳过、他人 file_id 与伪造 user_id 一起出境。
+// 聊天类端点的契约本就要求 JSON 对象，本地 400 与上游的拒绝等价，且 fail-closed。
+//
+// 内存（审计 G-2）：大请求体的解析/重编码放大明显（map[string]any 约 4×，HTML 转义
+// 还会让输出膨胀 ~1.9×），所以有**零重编码快路径**：见 fastPathUserID。
+func prepareOutboundBody(c *gin.Context, db *sql.DB, userID int64, raw clientBody, mode outboundIdentity) (outboundBody, bool) {
 	if c == nil {
-		return raw, true
+		return outboundBody(raw), true
 	}
+	// 快路径：大体积、无需校验引用、也没有客户端自带的 user_id 要覆盖时，
+	// 只在末尾追加平台 user_id（不改动原有字节）。
+	if out, ok := fastPathUserID(raw, userID, mode); ok {
+		return out, true
+	}
+	if !json.Valid(raw) {
+		writeInvalidBody(c, "请求体不是合法 JSON")
+		return nil, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber() // 保全大整数精度（float64 会让 >2^53 的整数在重编码时漂移）
 	var body map[string]any
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return raw, true
+	if err := dec.Decode(&body); err != nil || body == nil {
+		writeInvalidBody(c, "请求体必须是 JSON 对象")
+		return nil, false
 	}
 	if !fileReferencesOwned(c, db, userID, body) {
 		return nil, false
 	}
-	if mode != identityNone {
-		setPlatformUserID(body, userID, mode == identityAnthropic)
+	if mode == identityNone {
+		// 没有任何改动 ⇒ 原字节返回（避免无谓的重编码）。
+		return outboundBody(raw), true
 	}
-	out, err := json.Marshal(body)
-	if err != nil {
-		return raw, true
+	if !setPlatformUserID(c, body, userID, mode) {
+		return nil, false
 	}
+	var buf bytes.Buffer
+	buf.Grow(len(raw) + 32)
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // 正文里的 < > & 不再被转成 \u003c（输出膨胀 ~1.9× 的来源）
+	if err := enc.Encode(body); err != nil {
+		return outboundBody(raw), true
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), true
+}
+
+// writeInvalidBody 统一的"请求体不合法"响应（fail-closed 的本地拒绝）。
+func writeInvalidBody(c *gin.Context, msg string) {
+	serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", msg)
+}
+
+// fastPathUserID 是零重编码快路径：把平台 user_id 追加到 JSON 对象末尾
+// （JSON 允许重复键，取后者 ⇒ 覆盖客户端自带值；且原有字节逐字保留，前缀缓存最友好）。
+//
+// 只在**完全可判定**的前提下走：写顶层键的模式、体积够大（小体解析很便宜，不值得特判）、
+// 语法合法、是对象、且正文里没有任何 `file_id` 字样、也没有 `"<键名>":` 出现（客户端
+// 自带该键时留给定式覆盖路径处理，避免把"重复键"这种非常规形态交给上游），也没有
+// `\u` 转义（`"file\u005fid"` 这种键名要靠解析才能认出，见到 `\u` 一律走慢路径）。
+func fastPathUserID(raw []byte, userID int64, mode outboundIdentity) (outboundBody, bool) {
+	key := topLevelUserKey(mode)
+	if key == "" || len(raw) < fastPathMinBytes {
+		return nil, false
+	}
+	if bytes.Contains(raw, []byte("file_id")) {
+		return nil, false
+	}
+	// 键名 + 冒号：Responses 的 `user` 与正文里的 `"role":"user"` 必须区分开，
+	// 所以比对 `"user":` 而不是裸 `user`（后者在每条消息里都有，快路径会永不命中）。
+	if bytes.Contains(raw, []byte(`"`+key+`":`)) {
+		return nil, false
+	}
+	if bytes.Contains(raw, []byte(`\u`)) {
+		return nil, false
+	}
+	if !json.Valid(raw) {
+		return nil, false
+	}
+	end := len(raw)
+	for end > 0 {
+		switch raw[end-1] {
+		case ' ', '\t', '\n', '\r':
+			end--
+			continue
+		}
+		break
+	}
+	if end == 0 || raw[end-1] != '}' {
+		return nil, false
+	}
+	start := 0
+	for start < end && (raw[start] == ' ' || raw[start] == '\t' || raw[start] == '\n' || raw[start] == '\r') {
+		start++
+	}
+	if start >= end || raw[start] != '{' || raw[start+1] == '}' {
+		return nil, false
+	}
+	out := make([]byte, 0, end+32)
+	out = append(out, raw[:end-1]...)
+	out = append(out, ',', '"')
+	out = append(out, key...)
+	out = append(out, '"', ':', '"')
+	out = append(out, platformUserID(userID)...)
+	out = append(out, '"', '}')
+	out = append(out, raw[end:]...)
 	return out, true
 }
 
-// setPlatformUserID 写入平台侧员工标识：OpenAI 形态用顶层 `user_id`，
-// Anthropic 形态用 `metadata.user_id`（两者都覆盖客户端自带值）。
-func setPlatformUserID(body map[string]any, userID int64, anthropic bool) {
+// fastPathMinBytes 是启用快路径的体量门槛：低于它的请求解析成本可忽略，
+// 走统一慢路径以免特判分支过多。
+const fastPathMinBytes = 64 << 10
+
+// setPlatformUserID 写入平台侧员工标识并**覆盖**客户端自带值：
+// OpenAI Chat 形态用顶层 `user_id`，Responses 形态用顶层 `user`，
+// Anthropic 形态用 `metadata.user_id`。
+//
+// 返回 false 表示已写出错响应（fail-closed，不再继续转发）。当前唯一的失败面是
+// Anthropic 的 `metadata` 存在但不是 JSON 对象：旧实现会把它整个替换成新对象、
+// **静默丢弃客户端原值**（审计 2026-09-22 F 路 P2-7）；官方口径里 metadata 就是对象，
+// 本地 400 与上游的拒绝等价，比悄悄改写正文更可信。
+func setPlatformUserID(c *gin.Context, body map[string]any, userID int64, mode outboundIdentity) bool {
 	id := platformUserID(userID)
-	if !anthropic {
-		body["user_id"] = id
-		return
+	if key := topLevelUserKey(mode); key != "" {
+		body[key] = id
+		return true
 	}
-	meta, ok := body["metadata"].(map[string]any)
+	if mode != identityAnthropic {
+		return true
+	}
+	meta, exists := body["metadata"]
+	if !exists || meta == nil {
+		body["metadata"] = map[string]any{"user_id": id}
+		return true
+	}
+	obj, ok := meta.(map[string]any)
 	if !ok {
-		meta = map[string]any{}
-		body["metadata"] = meta
+		writeInvalidBody(c, "metadata 必须是 JSON 对象")
+		return false
 	}
-	meta["user_id"] = id
+	obj["user_id"] = id
+	return true
 }
 
 // fileReferencesOwned 校验请求体里出现的每个 `file_id` 引用都属于调用者。
 // 未登记 / 他人的 id ⇒ 写 404 并返回 false；形状非法同样按"不存在"处理。
+// 归属判定一次问清（批量 IN），并把引用数压在上限内。
 func fileReferencesOwned(c *gin.Context, db *sql.DB, userID int64, node any) bool {
 	refs := map[string]struct{}{}
 	collectFileRefs(node, refs)
 	if len(refs) == 0 {
 		return true
 	}
+	if len(refs) > maxFileRefsPerRequest {
+		log.Printf("gateway: reject request with too many file references (user=%d refs=%d)", userID, len(refs))
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+			"单次请求引用的文件过多（上限 256 个）")
+		return false
+	}
+	ids := make([]string, 0, len(refs))
 	for id := range refs {
 		if !validGatewayFileID(id) {
 			log.Printf("gateway: reject request referencing a malformed file id (user=%d)", userID)
-			writeFileNotFound(c)
+			writeFileNotFound(c, id)
 			return false
 		}
-		owned, err := serverstore.GatewayFileOwnedBy(db, id, userID)
-		if err != nil {
-			log.Printf("gateway: check file ownership failed (user=%d): %v", userID, err)
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取文件归属失败")
-			return false
-		}
-		if !owned {
+		ids = append(ids, id)
+	}
+	owned, err := serverstore.GatewayFilesOwnedBy(db, ids, userID)
+	if err != nil {
+		log.Printf("gateway: check file ownership failed (user=%d): %v", userID, err)
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取文件归属失败")
+		return false
+	}
+	for _, id := range ids {
+		if _, ok := owned[id]; !ok {
 			// 与 /files 的"不存在"同形：不泄露该 id 是否存在、属于谁。
 			log.Printf("gateway: reject request referencing a file id not owned by the caller (user=%d)", userID)
-			writeFileNotFound(c)
+			writeFileNotFound(c, id)
 			return false
 		}
 	}

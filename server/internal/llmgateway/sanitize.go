@@ -3,8 +3,19 @@ package llmgateway
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log"
 )
+
+// errOutboundBodyNotJSON：最后一道闸门发现出站体**不是 JSON 对象**（解析失败/是数组
+// 或标量）。调用方必须 fail-closed（400），绝不"解析不了就原样放行"。
+//
+// 审计 2026-09-22 F 路 P0-1 的教训：整条链上任何一个 fail-open 的闸门都会变成绕过
+// 全部校验的入口 —— `{"junk":1e999, …他人 file_id…}` 让 map 解析失败，而结构体解析
+// 容忍未知字段，于是 file_id 归属、user_id 覆盖、`dsh_` 剔除三处同时被跳过。聊天类
+// 端点在更早处（prepareOutboundBody）已经做过同样的合法性判定，这里返回该错误意味着
+// **上游闸门与本地判定不一致**（编程错误或中间重编码 bug），属不可达但必须显式处理。
+var errOutboundBodyNotJSON = errors.New("outbound body is not a JSON object")
 
 // upstreamExtensionPrefix 是上游 DSH 私有请求体扩展字段的前缀。
 //
@@ -46,8 +57,8 @@ const upstreamExtensionPrefix = "dsh_"
 //     "不改变语义"的最小动作；2026-09-22 起聊天类端点在**本函数之前**已按
 //     prepareOutboundBody 统一重编码一次，键序不再是原始形态，但同一输入每轮
 //     产出同样的字节，前缀缓存（KVCache）不受影响）；
-//   - 非 JSON 对象 / 解析失败时原样返回并报错，由调用方决定怎么记日志 ——
-//     绝不因为净化动作让一个合法请求失败。
+//   - 非 JSON 对象 / 解析失败时原样返回并报错，由调用方决定怎么处置 —— 本函数
+//     只如实报告，是否 fail-closed 由 sanitizeOutboundBody 与转发入口决定。
 //
 // 返回 (可能被净化的体, 是否发生剔除, 错误)。
 func stripUpstreamExtensions(raw []byte) ([]byte, bool, error) {
@@ -79,23 +90,26 @@ func stripUpstreamExtensions(raw []byte) ([]byte, bool, error) {
 }
 
 // sanitizeOutboundBody 是三个转发入口（forward / forwardEndpoint /
-// forwardAnthropic）共用的净化包装：剔除失败只记日志、不改转发语义。
+// forwardAnthropic）共用的净化包装。
 //
 // 三个入口都必须调用它 —— 覆盖 `/v1/chat/completions`、`/v1/completions`、
-// `/v1/responses`、`/v1/messages` 四条出站路径（`/v1/embeddings` 的请求体是
-// 服务端自己拼的 `{model,input}`，没有客户端透传面，故不经过这里）。
+// `/v1/responses`、`/v1/messages` 四条出站路径（`/v1/embeddings` 的客户端体
+// **从不转发**：出站体由服务端按解析后的 input 自建）。
 // 防漏判据在 `sanitize_test.go` 的 `TestEveryForwardHelperSanitizesOutboundBody`
-// （扫描源码：任何 `bytes.NewReader(raw)` 所在函数都必须调用本函数）。
-func sanitizeOutboundBody(raw []byte) []byte {
+// （扫描源码：任何构造上游请求的函数都必须调用本函数，或登记在带理由的允许清单里）。
+//
+// ok=false 表示"无法确认这是 JSON 对象" ⇒ 调用方必须 400 收口（见
+// errOutboundBodyNotJSON）。2026-09-22 审计 F 路 P0-1 之前这里是"解析失败即原样
+// 转发"，那是一个 fail-open 闸门。
+func sanitizeOutboundBody(raw []byte) ([]byte, bool) {
 	out, stripped, err := stripUpstreamExtensions(raw)
 	if err != nil {
-		// 解析失败 = 这段体不是 JSON 对象（真·非法请求会在下游被供应商拒绝）。
-		// 这里只留痕，不改变既有语义。
-		log.Printf("gateway: outbound body left unsanitized (not a JSON object): %v", err)
-		return raw
+		// 解析失败 = 这段体不是 JSON 对象。**不再原样放行**：留痕并 fail-closed。
+		log.Printf("gateway: outbound body rejected (not a JSON object): %v", err)
+		return nil, false
 	}
 	if !stripped {
-		return raw
+		return raw, true
 	}
-	return out
+	return out, true
 }

@@ -111,7 +111,7 @@ func bodyReadTimeout(err error) bool {
 // 判据护栏：read_budget_test.go 的 TestReadRequestBodyClassifiesFailures
 // （三类各一例）与 TestEveryGatewayBodyReadUsesHelper（源码扫描：除本文件外
 // 不得再有 io.ReadAll(c.Request.Body)）。
-func readRequestBody(c *gin.Context, limit int64) ([]byte, bool) {
+func readRequestBody(c *gin.Context, limit int64) (clientBody, bool) {
 	extendBodyReadDeadline(c)
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
 	started := time.Now()

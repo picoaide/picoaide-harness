@@ -56,8 +56,9 @@ func TestResponsesRecordsUsage(t *testing.T) {
 	if pt != 8 || ct != 3 {
 		t.Fatalf("usage pt=%d ct=%d", pt, ct)
 	}
-	// 语义等价；/responses 官方未文档化 user_id ⇒ 不注入
-	forwardedBodyEqual(t, f.gotBody.Load().(string), body, "")
+	// 语义等价 + 官方 create-response 的顶层 user 注入（审计 F 路 P1-1 修正：
+	// 此前误按"官方无该字段"处理，实际字段名是 user 而不是 user_id）。
+	forwardedBodyEqual(t, f.gotBody.Load().(string), body, platformUserID(aliceTestUserID(t, db)))
 }
 
 // TestVisionImageTokenBilling 验证图片请求(官方 Vision: 图片折算 token,

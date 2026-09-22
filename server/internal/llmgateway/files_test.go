@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -409,6 +410,7 @@ func TestFilesUpstreamErrorRelayedAndKeyRedacted(t *testing.T) {
 	up.respond = func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "7")
+		w.Header().Set("X-Request-Id", "req-abc-123")
 		w.WriteHeader(http.StatusTooManyRequests)
 		fmt.Fprintf(w, `{"error":{"message":"file rejected by %s","type":"invalid_request_error","code":"invalid_request_error"}}`, upstreamKey)
 	}
@@ -429,6 +431,9 @@ func TestFilesUpstreamErrorRelayedAndKeyRedacted(t *testing.T) {
 	}
 	if got := w.Header().Get("Retry-After"); got != "7" {
 		t.Fatalf("Retry-After 应透传，实得 %q", got)
+	}
+	if got := w.Header().Get("X-Request-Id"); got != "req-abc-123" {
+		t.Fatalf("X-Request-Id 应透传（排障要用），实得 %q", got)
 	}
 }
 
@@ -673,5 +678,255 @@ func TestFilesEnvelopeIsJSON(t *testing.T) {
 	}
 	if envelope.Error.Code == "" || envelope.Error.Message == "" {
 		t.Fatalf("信封字段不全: %s", w.Body.String())
+	}
+}
+
+// TestFilesMalformedRecordedIDStillRejected：**先登记**一个形状非法的 id
+// （归属闸门会放行），此时唯一能拦住它的就是 `validGatewayFileID` 白名单 ——
+// 否则 `a/../b`、`%2e%2e` 这类点段会被拼进上游 URL。
+//
+// 变异验证：把 validGatewayFileID 改成恒 true ⇒ 本用例变红（而"未登记畸形 id"
+// 用例不会红，因为归属闸门先返回 404）。
+func TestFilesMalformedRecordedIDStillRejected(t *testing.T) {
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	if err := serverstore.RecordGatewayFile(gw.db, "bad.id", gw.uidA, nil); err != nil {
+		t.Fatal(err)
+	}
+	w := doFilesReq(t, gw.r, http.MethodGet, "/v1/files/bad.id", nil, gw.tokenA, "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("已登记但形状非法的 id status = %d (%s), want 404", w.Code, w.Body.String())
+	}
+	if up.hits.Load() != 0 {
+		t.Fatalf("形状非法的 id 不得进上游 URL（%d 次）", up.hits.Load())
+	}
+}
+
+// TestFilesUpstreamRedirectIsNotFollowed：上游 3xx 既不被我们跟随（会把 provider
+// key 带去另一个主机），也不透传给客户端（客户端会去追一个它没有凭据的地址）——
+// 统一按上游失败 502。
+//
+// 变异验证：删掉 filesHTTPClient 的 CheckRedirect 与 relayFilesBody 的 3xx 分支
+// ⇒ 重定向目标会真的收到请求（本用例变红）。
+func TestFilesUpstreamRedirectIsNotFollowed(t *testing.T) {
+	var targetHits atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"leaked"}`))
+	}))
+	t.Cleanup(target.Close)
+
+	up := newFakeFilesUpstream(t)
+	up.respond = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", target.URL+r.URL.Path)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	if err := serverstore.RecordGatewayFile(gw.db, "file-abc", gw.uidA, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	w := doFilesReq(t, gw.r, http.MethodGet, "/v1/files/file-abc", nil, gw.tokenA, "")
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("上游 3xx 应被收敛成 502，实得 %d (%s)", w.Code, w.Body.String())
+	}
+	if targetHits.Load() != 0 {
+		t.Fatalf("重定向目标收到了 %d 次请求 —— 网关跟随了上游 3xx（provider key 会外泄）", targetHits.Load())
+	}
+}
+
+// TestFilesSlowUploadSurvivesShortWriteTimeout：Go 的 WriteTimeout 在**读完请求头**
+// 时就定死；一次 1.6s 的上传配 500ms 的 WriteTimeout，若不续写截止时间，客户端会
+// 在服务端"已成功"的情况下拿到 EOF。
+//
+// 变异验证：删掉 handleFilesUpload 里 `Do` 成功后的 renewWriteDeadline ⇒ 本用例变红
+// （审计指出：作者原先的 /files 用例只设了 ReadTimeout，对这条改动没有判别力）。
+func TestFilesSlowUploadSurvivesShortWriteTimeout(t *testing.T) {
+	setBodyReadBudget(t, 15*time.Second)
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+
+	ts := httptest.NewUnstartedServer(gw.r)
+	ts.Config.ReadTimeout = 400 * time.Millisecond
+	ts.Config.WriteTimeout = 500 * time.Millisecond
+	ts.Start()
+	t.Cleanup(ts.Close)
+
+	body, ct := multipartBytes(t, strings.Repeat("w", 4*1024))
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/files",
+		throttleReader(body, 1024, 200*time.Millisecond)) // 约 1.6s
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("Authorization", "Bearer "+gw.tokenA)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("慢上传写响应失败（客户端 EOF 而服务端当成功）: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d (%s)，写截止时间未续期", resp.StatusCode, raw)
+	}
+	if up.hits.Load() != 1 {
+		t.Fatalf("上游应收到 1 次请求，实得 %d", up.hits.Load())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 审计 2026-09-22（第 2/3 轮）后的补充判据
+// ---------------------------------------------------------------------------
+
+// 官方客户端（llm-deepseek/request-files.ts 的 providerRejectedFileId）判定
+// "这个 file_id 不能用了"靠两个正则；判不出来它就不会失效本地映射、也不回落 base64
+// ⇒ 该图片让整条会话每一轮都 404。这里把两个正则抄成判据，钉住"文案必须能被它认出"。
+var (
+	clientFileWord = regexp.MustCompile(`(?i)\bfile(?:[_ -]?(?:id|api|not[_ -]?found|deleted|expired))?`)
+	clientMissing  = regexp.MustCompile(`(?i)(?:expired|not[_ -]?found|deleted|do(?:es)? not exist|not created under (?:this|your) account)`)
+)
+
+// TestFileNotFoundMessageIsClientRecoverable（审计 F3）：拒绝文案必须让官方客户端能自愈，
+// 且**对"他人的 id"与"不存在的 id"完全同形**（不泄露存在性/归属）。
+func TestFileNotFoundMessageIsClientRecoverable(t *testing.T) {
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	if err := serverstore.RecordGatewayFile(gw.db, "file-owned-by-a", gw.uidA, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	foreign := doFilesReq(t, gw.r, http.MethodGet, "/v1/files/file-owned-by-a", nil, gw.tokenB, "")
+	unknown := doFilesReq(t, gw.r, http.MethodGet, "/v1/files/file-never-existed", nil, gw.tokenB, "")
+	if foreign.Code != http.StatusNotFound || unknown.Code != http.StatusNotFound {
+		t.Fatalf("status = %d/%d, want 404/404", foreign.Code, unknown.Code)
+	}
+	detail := foreign.Body.String()
+	if !clientFileWord.MatchString(detail) || !clientMissing.MatchString(detail) {
+		t.Fatalf("文案过不了客户端的 providerRejectedFileId 正则（该图会让会话每轮 404）: %s", detail)
+	}
+	if !strings.Contains(detail, "file-owned-by-a") {
+		t.Fatalf("文案应回显被拒的 file id（客户端 staleMappings 靠它精确定位失效对象）: %s", detail)
+	}
+	// 同形性：把 id 抹掉后两种拒绝必须一模一样
+	strippedForeign := strings.ReplaceAll(detail, "file-owned-by-a", "ID")
+	strippedUnknown := strings.ReplaceAll(unknown.Body.String(), "file-never-existed", "ID")
+	if strippedForeign != strippedUnknown {
+		t.Fatalf("他人 id 与不存在 id 的拒绝形态不同（泄露存在性）:\n%s\n%s", strippedForeign, strippedUnknown)
+	}
+}
+
+// TestFilesListDoesNotLeakForeignCursor（审计 F1）：first_id/last_id 是上游真实字段，
+// 必须按过滤后的结果重算 —— 否则 `?limit=1` 就能把别人的 file_id 直接送给调用方，
+// 配合 after= 可全量枚举。
+func TestFilesListDoesNotLeakForeignCursor(t *testing.T) {
+	up := newFakeFilesUpstream(t)
+	up.respond = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"object":"list","data":[{"id":"file-mine"},{"id":"file-someone-else"}],"first_id":"file-mine","last_id":"file-someone-else","has_more":true}`)
+	}
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+	if err := serverstore.RecordGatewayFile(gw.db, "file-mine", gw.uidA, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	w := doFilesReq(t, gw.r, http.MethodGet, "/v1/files?limit=1", nil, gw.tokenA, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "file-someone-else") {
+		t.Fatalf("列表响应里出现了他人的 file_id（游标未按过滤结果重算）: %s", w.Body.String())
+	}
+	var out struct {
+		FirstID string `json:"first_id"`
+		LastID  string `json:"last_id"`
+		Data    []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Data) != 1 || out.Data[0].ID != "file-mine" {
+		t.Fatalf("过滤结果不对: %s", w.Body.String())
+	}
+	if out.FirstID != "file-mine" || out.LastID != "file-mine" {
+		t.Fatalf("游标未按过滤结果重算: first=%q last=%q", out.FirstID, out.LastID)
+	}
+}
+
+// TestFilesSlowUploadErrorStillDeliversEnvelope（审计 F6）：慢上传后的**失败**信封
+// 也必须能写出去（写错误响应前同样要续写截止时间），否则客户端只看到 EOF。
+func TestFilesSlowUploadErrorStillDeliversEnvelope(t *testing.T) {
+	setBodyReadBudget(t, 300*time.Millisecond) // 上传要 1.6s ⇒ 必然读超时
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+
+	ts := httptest.NewUnstartedServer(gw.r)
+	ts.Config.ReadTimeout = 5 * time.Second
+	ts.Config.WriteTimeout = 500 * time.Millisecond
+	ts.Start()
+	t.Cleanup(ts.Close)
+
+	body, ct := multipartBytes(t, strings.Repeat("e", 4*1024))
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/files",
+		throttleReader(body, 1024, 200*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("Authorization", "Bearer "+gw.tokenA)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("失败信封没写出去（客户端 EOF）: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d (%s), want 503（读超时）", resp.StatusCode, raw)
+	}
+	if !strings.Contains(string(raw), "SERVER") {
+		t.Fatalf("503 信封不完整: %s", raw)
+	}
+}
+
+// TestFilesUploadPurgesExpiredLedgerRows（审计 F8）：官方客户端正常路径从不 list，
+// 只靠 list 兜底会让过期行一直堆积 ⇒ 上传成功后也要顺手清理。
+func TestFilesUploadPurgesExpiredLedgerRows(t *testing.T) {
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+
+	past := time.Now().Add(-time.Minute)
+	if err := serverstore.RecordGatewayFile(gw.db, "file-api-stale", gw.uidA, &past); err != nil {
+		t.Fatal(err)
+	}
+	body, ct := multipartBytes(t, "x")
+	if w := doFilesReq(t, gw.r, http.MethodPost, "/v1/files", bytes.NewReader(body), gw.tokenA, ct); w.Code != http.StatusOK {
+		t.Fatalf("upload status = %d (%s)", w.Code, w.Body.String())
+	}
+	var rows int
+	if err := gw.db.QueryRow(`SELECT count(*) FROM gateway_files WHERE file_id = 'file-api-stale'`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("过期的台账行应在上传路径被清掉（rows=%d）", rows)
+	}
+}
+
+// TestLargeIntegerSurvivesOutboundRewrite（审计 F10/G-9）：重编码不得让 >2^53 的整数
+// 漂移（UseNumber 的意义）。快路径逐字保留、慢路径用 json.Number，两条都必须保真。
+func TestLargeIntegerSurvivesOutboundRewrite(t *testing.T) {
+	const big = "9007199254740993" // 2^53+1：float64 往返会变成 ...992
+	up := newFakeFilesUpstream(t)
+	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+
+	// 慢路径（带自带 user_id 触发重编码）
+	reqBody := `{"model":"deepseek-chat","user_id":"spoofed","max_tokens":` + big + `,"messages":[{"role":"user","content":"hi"}]}`
+	if w := doPost(t, gw.r, "/v1/chat/completions", reqBody, gw.tokenA, nil); w.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
+	}
+	got, _ := up.body.Load().(string)
+	if !strings.Contains(got, big) {
+		t.Fatalf("大整数在重编码中漂移: %s", got)
 	}
 }

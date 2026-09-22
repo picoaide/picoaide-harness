@@ -173,6 +173,10 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 			}
 		}
 		resp, err = a.forward(c, &ups[i], body, req.Stream)
+		if errors.Is(err, errOutboundBodyNotJSON) {
+			a.rejectBadOutboundBody(c, usageID)
+			return
+		}
 		if err == nil {
 			respSecrets = []string{ups[i].APIKey}
 			chosenProviderID = ups[i].ID
@@ -204,6 +208,22 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		return
 	}
 	a.serveJSON(c, resp, user.ID, chosenProviderID, req.Model, respSecrets, billingKindChat, raw)
+}
+
+// rejectBadOutboundBody 处理"最后一道闸门判定出站体不是 JSON 对象"这一情形：
+// 清掉本轮已建的 pending usage 行（否则留下永不回填的悬挂行），并写 400。
+//
+// 正常情况下不可达 —— 聊天类端点在更早处已经用 prepareOutboundBody 统一校验过，
+// 走到这里说明上游闸门与本地判定不一致（编程错误/中间重编码 bug）；显式收口是为了
+// 让"任何一道闸门都 fail-closed"这条不变量成立（审计 2026-09-22 F 路 P0-1）。
+func (a *API) rejectBadOutboundBody(c *gin.Context, usageID int64) {
+	if usageID > 0 {
+		if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
+			log.Printf("gateway: delete pending usage: %v", err)
+		}
+	}
+	log.Printf("gateway: outbound body rejected before forwarding (not a JSON object)")
+	serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体不是合法 JSON")
 }
 
 // maxOutputFromDefaultParams 从模型 default_params JSON 读取 max_output。
@@ -326,9 +346,13 @@ func upstreamURLFor(base, endpoint string) string {
 // provider (re-sending to the same one could double-bill). 4xx responses are
 // returned as-is (client error, no failover); connection errors, 5xx and
 // header timeouts return an error, which the caller treats as failover-eligible.
-func (a *API) forward(c *gin.Context, up *Upstream, raw []byte, stream bool) (*http.Response, error) {
+func (a *API) forward(c *gin.Context, up *Upstream, body outboundBody, stream bool) (*http.Response, error) {
 	// P0-4 服务端侧第二道闸门：出站请求体剔除上游 DSH 私有扩展字段（见 sanitize.go）。
-	raw = sanitizeOutboundBody(raw)
+	// 净化无法确认是 JSON 对象时 fail-closed（见 errOutboundBodyNotJSON）。
+	clean, ok := sanitizeOutboundBody([]byte(body))
+	if !ok {
+		return nil, errOutboundBodyNotJSON
+	}
 	url := upstreamURL(up.BaseURL)
 	client := a.client
 	if stream {
@@ -341,7 +365,7 @@ func (a *API) forward(c *gin.Context, up *Upstream, raw []byte, stream bool) (*h
 	if stream {
 		reqCtx = context.WithoutCancel(reqCtx)
 	}
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(clean))
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +436,7 @@ func redactHeaderValue(value string, secrets []string) string {
 // secrets: 本次请求使用的上游官方 key——上游若在响应中回显,透传前脱敏。
 // kind: 端点标识(计费 kind,见 billingKind*),不再硬编码 "chat"。
 // requestBytes: 实际发往上游的请求体字节数(P0-1:prompt 侧兜底估算用)。
-func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID, providerID int64, model string, secrets []string, kind string, requestBody []byte) {
+func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID, providerID int64, model string, secrets []string, kind string, requestBody clientBody) {
 	defer resp.Body.Close()
 	type readResult struct {
 		body []byte
@@ -559,7 +583,7 @@ func sanitizeUpstreamError(body []byte, secrets []string) []byte {
 // 在拿到真实 usage chunk 与不过度占用上游资源之间折中。
 const streamDrainTimeout = 2 * time.Minute
 
-func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, secrets []string, requestBody []byte, promptTokenCap int64) {
+func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, secrets []string, requestBody clientBody, promptTokenCap int64) {
 	defer resp.Body.Close()
 	// upstream 4xx: no SSE to stream, the pending row is dropped
 	if resp.StatusCode >= 400 {
