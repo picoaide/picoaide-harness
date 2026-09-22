@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, posix } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { extractFile, listPackage } from '@electron/asar'
 import AdmZip from 'adm-zip'
@@ -66,6 +66,12 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   // 这一条同时是 2026-09-20 那条教训的落地:「声明了的入口就必须构建,
   // 且 afterPack 清单必须覆盖真实 import」。
   'lib/startup-rows.js',
+  // 同一条教训的补齐(2026-09-22 审计 R1/R2):这两个也由 `lib/main.js` 静态 import,
+  // 且都是独立 tsdown 入口(出口策略探针 / profile 冒烟按文件名 import 构建产物)。
+  // 名称一旦漂移,坏的是 import 期;`package.json` 的 `files: lib/**/*.js` 只是声明,
+  // 这里才是**产物证据**。
+  'lib/network-policy.js',
+  'lib/document-lock-recovery.js',
   'build/app-icon.png',
   'build/app-icon-mac.png',
   'build/tray-iconTemplate.png',
@@ -701,9 +707,9 @@ export function resolvePackagedUnpackedRoot(context: PackagedRuntimeContext): st
 
 /**
  * Resolve the physical application root emitted when Electron Builder packs
- * with `asar: false` (the desktop layout: profile-relative resolution and
- * preset discovery disk checks need real files, so the runtime is a physical
- * tree rather than an archive).
+ * with `asar: false` (a fallback layout kept for an `asar: false` build; every
+ * current packaging path emits `app.asar`, so the archive checks are the ones
+ * that run in practice).
  * @param context - completed application directory and target platform.
  * @returns absolute path to the unpacked application root.
  */
@@ -768,8 +774,59 @@ function verifyWebBrandAssets(read: (entry: string) => string, where: string): v
   }
 }
 
+/**
+ * 归档里**每个** `lib/**\/*.js` 的相对 `./x.js` import 都必须在包里。
+ *
+ * `REQUIRED_PACKAGED_RUNTIME_ENTRIES` 是人维护的清单，**会漏**（2026-09-22：
+ * `lib/network-policy.js` 与 `lib/document-lock-recovery.js` 都静态 import 自
+ * `lib/main.js`，清单里都没有）。这一条不看清单、直接对拍真实产物：import 期
+ * `ERR_MODULE_NOT_FOUND` 会让窗口根本起不来（比 afterPack 里任何一条断言都更致命）。
+ *
+ * 覆盖面（2026-09-22 第 3 轮审计后收紧）：归档里**每个** `lib/**\/*.js` 的相对 `./x.js`
+ * import 都要求目标条目存在（含内容哈希命名的 chunk，rolldown 已把 specifier 写成真实
+ * 文件名）。已知边界：`../` 形式与非 `.js` 扩展名（`.cjs`/`.mjs`）不在判据内 —— 真实产物
+ * 里 `../build/channel.json` 这类路径**存在但不属于 lib**，收进来会变假红；`require(`
+ * 形式同样不入判据（本仓产物是纯 ESM）。覆盖面只到**桌面自身的 `lib/**`**：`@picoaide/*`
+ * 插件包**包内**的内容哈希 chunk 不在本判据内（这里只登记它们的具名入口）。那一层的网是
+ * `scripts/verify-profile-boot.mjs`（`yarn check` 内、真组合树 boot，缺 chunk 会抛）与
+ * `e2e:client`（只在 Linux CI 跑）——**不要**把 `verify:closure` 当兜底：它只走 package.json
+ * 的依赖/peer 图，实测对包内 chunk 零覆盖（第 6 轮审计）。物理布局分支（`asar: false`，桌面壳不使用）不做这条：那一分支用注入的
+ * `exists` 探针驱动，不遍历目录。
+ * @param present - 归档内全部条目（已归一化）。
+ * @param readEntry - 按归档内路径读取条目文本。
+ * @param where - 位置前缀（错误消息用）。
+ */
+function assertRelativeImportsPresent(
+  present: ReadonlySet<string>,
+  readEntry: (entry: string) => string,
+  where: string,
+): void {
+  // 至少有一条可扫：`REQUIRED_PACKAGED_RUNTIME_ENTRIES` 里就有 `lib/main.js`（调用点先判它）。
+  // 这里不再单独写"空集就抛"——那条前置断言结构上不可达（第 4 轮审计：变异成静默 return 后
+  // 用例仍全绿），死判据不如没有。
+  const libEntries = [...present].filter(entry => entry.startsWith('lib/') && entry.endsWith('.js'))
+  for (const entry of libEntries) {
+    const source = readEntry(entry)
+    const base = posix.dirname(entry)
+    const missing = new Set<string>()
+    for (const match of source.matchAll(/(?:from|import)\s*\(?\s*["']\.\/([^"']+\.js)["']/gu)) {
+      const target = posix.normalize(posix.join(base, match[1]!))
+      if (!present.has(target)) missing.add(target)
+    }
+    if (missing.size > 0) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged runtime at ${where} is missing modules imported by ${entry}: ${[...missing].join(', ')}`,
+      )
+    }
+  }
+}
+
 /** Try to list one archive; an absent archive is the physical-layout signal. */
-function tryListArchive(archivePath: string, list: ArchiveLister): ReadonlySet<string> | undefined {
+function tryListArchive(
+  archivePath: string,
+  list: ArchiveLister,
+  readEntry: PackageEntryReader,
+): ReadonlySet<string> | undefined {
   let entries: readonly string[]
   try {
     entries = list(archivePath, { isPack: false })
@@ -788,6 +845,8 @@ function tryListArchive(archivePath: string, list: ArchiveLister): ReadonlySet<s
   // 写错（例如「仅根级」那种单星号写法）都会在这一步把坏包拦下来，而不是发到客户机上。
   assertNoPackagedSourceLeaks(present, archivePath)
   assertRuntimeAssetFamiliesSurvive(present, archivePath)
+  // 归档里每个 lib/**/*.js 的相对 import 都在包里（清单会漏，产物不会说谎）。
+  assertRelativeImportsPresent(present, entry => readEntry(archivePath, entry), archivePath)
   // 自有插件包的 profile 锚点（package.json + cordis.patch.yml）：缺任何一个，
   // `prepareDesktopProfile()` 里的 createRequire().resolve 就会抛错、应用起不来。
   assertProfilePatchAnchors(entry => present.has(entry), archivePath)
@@ -935,11 +994,12 @@ function verifyUnpackedPackageResolution(
  *
  * Two layouts are accepted: the packaged archive (`asar` true —
  * `resources/app.asar` with `app.asar.unpacked` holding native binaries) and
- * the physical tree (`asar: false` — `resources/app/`, the layout the desktop
- * ships since the DSH 0.1.2 preset discovery reads package presence with raw
- * disk checks that cannot traverse a symlink into an archive). The archive
- * checks run only when the archive exists; the physical layout checks every
- * required entry and export against the real files.
+ * the physical tree (`asar: false` — `resources/app/`). **Every current
+ * packaging path produces `app.asar`**, so the archive checks are the ones
+ * that run in practice; the physical branch stays as a fallback for an
+ * `asar: false` build. The archive checks run only when the archive exists;
+ * the physical layout checks every required entry and export against the real
+ * files.
  * @param context - Electron Builder's afterPack context.
  * @param list - ASAR listing implementation.
  * @param exists - physical-file probe for the unpacked CLI dependency tree.
@@ -953,11 +1013,10 @@ export function verifyPackagedRuntime(
   readEntry: PackageEntryReader = readPackagedEntry,
 ): void {
   const asarPath = resolvePackagedAsarPath(context)
-  const asarEntries = tryListArchive(asarPath, list)
+  const asarEntries = tryListArchive(asarPath, list, readEntry)
   if (asarEntries === undefined) {
-    // Physical layout (asar: false): the runtime is a real file tree (the
-    // layout the desktop ships so profile-relative resolution and preset
-    // discovery disk checks see real files).
+    // Physical layout (`asar: false`, a fallback the desktop does not ship —
+    // see the JSDoc above): the runtime is a real file tree.
     verifyPhysicalRuntime(resolvePackagedAppRoot(context), exists, readEntry)
     return
   }

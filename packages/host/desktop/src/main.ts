@@ -59,6 +59,7 @@ import { FileExporter } from './file-exporter.ts'
 import { DESKTOP_SETTINGS_NAMESPACE, type DesktopSettings } from './index.ts'
 import { LogFileSink } from './log-files.ts'
 import { maskSecrets } from './mask-secrets.ts'
+import { reclaimOrphanedDocumentLocks, documentLockRecoveryLogLines } from './document-lock-recovery.ts'
 import { resolveDesktopShellEnvironment } from './shell-environment.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
 import { installAsarSpawnRewrite } from './asar-spawn.ts'
@@ -348,6 +349,20 @@ async function start(): Promise<void> {
   // exits 1) instead of silently writing user data there. This is the same
   // `isSafeDshHome` check the enterprise installers enforce.
   const homeDir = applyInstallDshHome({ productDir: CHANNEL_PROFILE?.homeDir })
+  // 孤儿写锁回收：上游的文档写锁只在 `finally` 里自删，任何一次"建锁后崩溃"都会留下
+  // 永久孤儿锁，此后该文档的写入静默失败（现场事故：settings 写不进 protocol ⇒ 每个
+  // 模型请求 401「缺少认证令牌」）。**必须在这里**——`prepareDesktopProfile`/`boot`
+  // 之后本进程就是写入者，那时删任何锁都会撞上真实写入。
+  // 注意单实例锁**不足**以保证"同一数据根只有一个实例"：渠道包可以共用数据根（beta
+  // 就共用官方目录），而单实例锁在按渠道分流的 userData 里。所以每条删除判据都自带
+  // 证据（本进程 PID / ESRCH / 年龄门槛），完整口径见模块头注释。
+  try {
+    const recovery = reclaimOrphanedDocumentLocks({ home: homeDir })
+    for (const line of documentLockRecoveryLogLines(recovery)) electronLogger.error(`${BIN_NAME}: ${line}`)
+  } catch (cause) {
+    // 回收是启动卫生，不是启动前提：任何意外都只上报，绝不阻断启动。
+    electronLogger.error(`${BIN_NAME}: document lock recovery failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+  }
   const windowsVolumeConcerns = diagnoseWindowsVolumes(process.platform, [
     { label: 'application install', path: process.execPath },
     { label: 'desktop user data', path: app.getPath('userData') },

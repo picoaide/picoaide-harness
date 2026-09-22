@@ -18,6 +18,10 @@ export default defineConfig([
       // 出口策略（2026-09-22）：main.ts 用它接线，`scripts/proxy-policy-probe.mjs` 用
       // **构建产物**跑真机判据（同一个真源，探针里不另抄开关名）。
       'network-policy': 'src/network-policy.ts',
+      // 孤儿写锁回收（2026-09-22）：main.ts 接线；`scripts/verify-profile-boot.mjs`
+      // 用**构建产物**在真组合树上跑能力判据（孤儿锁在 ⇒ settings 写缝超时失败；
+      // 回收后 ⇒ 同一写缝成功）—— 与探针共用一个真源。
+      'document-lock-recovery': 'src/document-lock-recovery.ts',
       profile: 'src/profile.ts',
       'desktop-plugins': 'src/desktop-plugins.ts',
       diagnostics: 'src/diagnostics.ts',
