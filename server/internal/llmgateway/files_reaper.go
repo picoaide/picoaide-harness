@@ -60,6 +60,9 @@ func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 	if len(ids) == 0 {
 		return 0, 0
 	}
+	if reapAfterListHook != nil {
+		reapAfterListHook(ids) // 测试注入点：模拟"列表与认领之间"发生的并发续期
+	}
 	up, ok := fileUpstream(a.DB)
 	if !ok {
 		log.Printf("gateway: file reaper: no usable files upstream; %d expired file(s) left for the next round", len(ids))
@@ -105,6 +108,10 @@ func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 	}
 	return deleted, failed
 }
+
+// reapAfterListHook 只在测试里设置：在"列出候选"与"逐行认领"之间插一步，
+// 用来确定性地复现"列表之后被续期"（认领时的过期复检就是为这个窗口存在的）。
+var reapAfterListHook func(ids []string)
 
 // reapRecheckHook 只在测试里设置：在"认领成功"与"复检是否被重新登记"之间插一步，
 // 用来确定性地复现并发上传（生产恒为 nil）。

@@ -1002,6 +1002,32 @@ func TestReaperDoesNotDeleteRenewedFile(t *testing.T) {
 		t.Fatalf("已续期的行被删掉了（rows=%d）", rows)
 	}
 
+	// ③ 列表与认领之间被续期（认领的"复检仍过期"就是为这个窗口存在的）。
+	if err := serverstore.RecordGatewayFile(gw.db, "file-listed", gw.uidA, &past); err != nil {
+		t.Fatal(err)
+	}
+	reapAfterListHook = func(ids []string) {
+		for _, id := range ids {
+			if id == "file-listed" {
+				reapAfterListHook = nil
+				if err := serverstore.RecordGatewayFile(gw.db, id, gw.uidA, &future); err != nil {
+					t.Errorf("renew after list: %v", err)
+				}
+			}
+		}
+	}
+	t.Cleanup(func() { reapAfterListHook = nil })
+	beforeDeletes := up.deletes.Load()
+	if deleted, _ := api.ReapExpiredGatewayFiles(0); deleted != 0 {
+		t.Fatalf("列表后已续期的行不该被回收（deleted=%d）", deleted)
+	}
+	if up.deletes.Load() != beforeDeletes {
+		t.Fatalf("列表后已续期的文件，其上游对象被删了")
+	}
+	if exists, err := serverstore.GatewayFileRowExists(gw.db, "file-listed"); err != nil || !exists {
+		t.Fatalf("续期后的行必须保留: exists=%v err=%v", exists, err)
+	}
+
 	// ② 认领与上游删除之间被重新登记。
 	if err := serverstore.RecordGatewayFile(gw.db, "file-race", gw.uidA, &past); err != nil {
 		t.Fatal(err)
@@ -1084,7 +1110,10 @@ func TestReaperNormalizesLegacyPermanentRows(t *testing.T) {
 }
 
 // TestAdminUserFilterIsUsernameOnly（R6 P1-B）：`user=` 只按用户名解，`user_id=` 才是 ID；
-// 用户名恰好是数字时不得过滤到 id 相同的另一个人。
+// 用户名恰好是数字时不得过滤到 id 相同的另一个人（旧实现"先按 ID 解"会看错人、purge 删错人）。
+//
+// 夹具刻意让"数字用户名"的 id **不等于**那个数字：先建一个占位用户（id=2），
+// 数字用户名 "2" 因此拿到 id=3 —— 这样 ID 优先的实现会命中占位用户 ⇒ 判据才承重。
 func TestAdminUserFilterIsUsernameOnly(t *testing.T) {
 	resetBodyParseGate(t)
 	r, db, hdr := adminTestSetup(t)
@@ -1098,15 +1127,26 @@ func TestAdminUserFilterIsUsernameOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	InvalidateUpstreams()
+	filler, err := serverstore.CreateUser(db, &serverstore.User{Username: "filler", DisplayName: "占位", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
 	numeric, err := serverstore.CreateUser(db, &serverstore.User{Username: "2", DisplayName: "数字用户名", Source: "local", Status: 1})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if numeric == 2 {
+		t.Fatalf("夹具失效：数字用户名拿到了 id=2（需要一个占位用户把它顶开）")
 	}
 	other, err := serverstore.CreateUser(db, &serverstore.User{Username: "other", DisplayName: "另一个人", Source: "local", Status: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	future := time.Now().Add(time.Hour)
+	// 占位用户（id=2）也有一个文件：ID 优先的实现会把 user=2 解到它身上。
+	if err := serverstore.RecordGatewayFile(db, "file-filler", filler, &future); err != nil {
+		t.Fatal(err)
+	}
 	if err := serverstore.RecordGatewayFile(db, "file-num", numeric, &future); err != nil {
 		t.Fatal(err)
 	}
@@ -1127,7 +1167,7 @@ func TestAdminUserFilterIsUsernameOnly(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("user_id=%d 应命中 1 行，实得 %d", other, len(rows))
 	}
-	// purge 用数字用户名也不得删错人。
+	// purge 用数字用户名也只删他的文件（不得动占位用户/其他人）。
 	w, out := adminReq(t, r, "POST", "/api/server/admin/gateway/files/purge", `{"user":"2","state":"active"}`, hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("purge 数字用户名: %d %s", w.Code, w.Body.String())
@@ -1135,8 +1175,10 @@ func TestAdminUserFilterIsUsernameOnly(t *testing.T) {
 	if n, _ := out["deleted"].(float64); int(n) != 1 {
 		t.Fatalf("purge deleted = %v, want 1", out["deleted"])
 	}
-	if exists, _ := serverstore.GatewayFileRowExists(db, "file-other"); !exists {
-		t.Fatal("purge 删错了人（other 的行被删）")
+	for _, id := range []string{"file-filler", "file-other"} {
+		if exists, _ := serverstore.GatewayFileRowExists(db, id); !exists {
+			t.Fatalf("purge 删错了人（%s 的行被删）", id)
+		}
 	}
 }
 
@@ -1381,28 +1423,98 @@ func TestUploadExpiryJSONEdges(t *testing.T) {
 	}
 }
 
-// TestNonMultipartUploadAlsoUsesGate（R6 P1-G）：非 multipart 的原样转发路径也必须占
-// 内存额度，否则它成了闸门的后门。
-func TestNonMultipartUploadAlsoUsesGate(t *testing.T) {
-	resetBodyParseGate(t)
-	up := newFakeFilesUpstream(t)
-	gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
-	if err := serverstore.SetSetting(gw.db, SettingBodyParseBudgetMB, "64"); err != nil {
-		t.Fatal(err)
+// TestUploadsAlwaysUseMemoryGate（R6 P1-G）：**所有**上传统统在内存闸门之内 ——
+// multipart / 非 multipart、Content-Length 已知 / chunked 四种组合，闸门占满时都必须
+// 503 SERVER 且零字节触达上游（旧实现：读发生在闸门之前、非 multipart 完全不过闸门）。
+func TestUploadsAlwaysUseMemoryGate(t *testing.T) {
+	cases := []struct {
+		name         string
+		contentType  string
+		chunked      bool
+		expectNoRead bool // 已知长度 ⇒ 读前就拒绝，body 一个字节都不该被读
+		body         func(t *testing.T) []byte
+	}{
+		{name: "multipart-已知长度", expectNoRead: true, body: func(t *testing.T) []byte { b, _ := multipartBytes(t, "x"); return b }},
+		{name: "multipart-chunked", chunked: true, body: func(t *testing.T) []byte { b, _ := multipartBytes(t, "x"); return b }},
+		{name: "非multipart-已知长度", contentType: "application/json", expectNoRead: true, body: func(t *testing.T) []byte { return []byte(`{"a":1}`) }},
+		{name: "非multipart-chunked", contentType: "application/json", chunked: true, body: func(t *testing.T) []byte { return []byte(`{"a":1}`) }},
 	}
-	InvalidateGatewayLimits()
-	budget := int64(MinBodyParseBudgetMB) << 20
-	rel, ok := globalBodyParseGate.acquire(budget, budget)
-	if !ok {
-		t.Fatal("占满闸门失败（夹具问题）")
-	}
-	defer rel()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetBodyParseGate(t)
+			up := newFakeFilesUpstream(t)
+			gw := newFilesGateway(t, up.srv.URL, "deepseek-official")
+			if err := serverstore.SetSetting(gw.db, SettingBodyParseBudgetMB, "64"); err != nil {
+				t.Fatal(err)
+			}
+			InvalidateGatewayLimits()
+			budget := int64(MinBodyParseBudgetMB) << 20
+			rel, ok := globalBodyParseGate.acquire(budget, budget)
+			if !ok {
+				t.Fatal("占满闸门失败（夹具问题）")
+			}
+			defer rel()
 
-	w := doFilesReq(t, gw.r, http.MethodPost, "/v1/files", strings.NewReader(`{"a":1}`), gw.tokenA, "application/json")
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("闸门占满时非 multipart 上传也应 503，实得 %d (%s)", w.Code, w.Body.String())
+			body := tc.body(t)
+			ct := tc.contentType
+			if ct == "" {
+				var err error
+				_, ct, err = "", "", error(nil)
+				_ = err
+				ct = multipartContentType(t, body)
+			}
+			// 计数 reader：读前拒绝的实现必须一次都不读（内存没被占用）。
+			counter := &countingReader{inner: bytes.NewReader(body)}
+			req := httptest.NewRequest(http.MethodPost, "/v1/files", counter)
+			if tc.chunked {
+				req.ContentLength = -1 // 模拟 chunked：读前无法预知体量
+			} else {
+				req.ContentLength = int64(len(body))
+			}
+			req.Header.Set("Content-Type", ct)
+			req.Header.Set("Authorization", "Bearer "+gw.tokenA)
+			w := httptest.NewRecorder()
+			gw.r.ServeHTTP(w, req)
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("闸门占满时上传应 503，实得 %d (%s)", w.Code, w.Body.String())
+			}
+			if up.hits.Load() != 0 {
+				t.Fatalf("被闸门拒绝的上传不应触达上游（%d 次）", up.hits.Load())
+			}
+			if tc.expectNoRead && counter.reads > 0 {
+				t.Fatalf("闸门占满时仍读走了 %d 字节（读体必须发生在申请额度之后）", counter.reads)
+			}
+		})
 	}
-	if up.hits.Load() != 0 {
-		t.Fatalf("被闸门拒绝的上传不应触达上游（%d 次）", up.hits.Load())
+}
+
+// countingReader 统计被读走的字节数（用于"读前拒绝"的判据）。
+type countingReader struct {
+	inner io.Reader
+	reads int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.inner.Read(p)
+	r.reads += n
+	return n, err
+}
+
+// multipartContentType 从（测试自己造的）multipart 体反推 Content-Type：
+// 直接用 multipart.Writer 的 FormDataContentType 即可，这里只为上面的表驱动用例服务。
+func multipartContentType(t *testing.T, body []byte) string {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.Close()
+	ct := mw.FormDataContentType()
+	// 复用同一个 boundary 生成方式：直接从体里取 boundary 更稳妥。
+	if i := bytes.Index(body, []byte("boundary=")); i >= 0 {
+		rest := body[i+len("boundary="):]
+		if j := bytes.IndexAny(rest, "\r\n"); j >= 0 {
+			rest = rest[:j]
+		}
+		return "multipart/form-data; boundary=" + string(bytes.TrimSpace(rest))
 	}
+	return ct
 }

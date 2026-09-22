@@ -336,16 +336,9 @@ func (a *API) rewriteUploadExpiry(c *gin.Context, raw []byte) ([]byte, string) {
 	_, params, err := mime.ParseMediaType(origCT)
 	boundary := params["boundary"]
 	if err != nil || boundary == "" || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(origCT)), "multipart/") {
-		// 非 multipart：原样转发（不新增失败面），但**照样**按 1× 占内存额度 ——
-		// 否则这条路径成了闸门的后门（审计 2026-09-22 R6 P1-G：闸门占满时非 multipart
-		// 上传仍 200 且上游收到 8MiB）。
-		rel, ok := globalBodyParseGate.acquire(gatewayLimitsFor(a.DB).budgetBytes, int64(len(raw)))
-		if !ok {
-			log.Printf("gateway: files upload (non-multipart) rejected by memory gate: bytes=%d", len(raw))
-			writeBodyParseBusy(c)
-			return nil, ""
-		}
-		defer rel()
+		// 非 multipart：原样转发（不新增失败面）。**额度已由读体路径计过**
+		// （Content-Length 已知时读前申请 2×；chunked 时读后补记 2×）—— 这里不再重复
+		// 申请，避免同一份体被计两次而让闸门提前打满。
 		log.Printf("gateway: files upload: not multipart (content-type=%q); forwarded unchanged", origCT)
 		return raw, origCT
 	}
