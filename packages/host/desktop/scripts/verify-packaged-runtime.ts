@@ -1592,6 +1592,279 @@ export function smokePackagedErrorReporting(
   }
 }
 
+/** Timeout for the packaged ASAR bigint smoke (a hung Electron must not hang afterPack). */
+export const PACKAGED_ASAR_BIGINT_SMOKE_TIMEOUT_MS = 20_000
+
+/** Success marker the embedded ASAR bigint script prints; a silent exit 0 is a failure. */
+const ASAR_BIGINT_SMOKE_OK = 'ASAR-BIGINT-SMOKE-OK'
+
+/**
+ * The `cordis` preset's bundled skill directory inside the package.
+ *
+ * `presets/cordis/agent.cordis.yml` is the pinned upstream's only
+ * `customSkillDirs` consumer, and it hands exactly this directory to the
+ * filesystem skill provider. `@deepseek-ai/dsh-agent-presets` is **not** in
+ * `asarUnpack`, so every `stat`/`readdir` on it goes through Electron's ASAR fs
+ * shim — which is what issue #130 was about.
+ */
+export const PACKAGED_CORDIS_SKILL_DIR =
+  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills'
+
+/**
+ * Preset skill names the package must ship, **derived from**
+ * {@link REQUIRED_PACKAGED_RUNTIME_ENTRIES} rather than repeated by hand: the
+ * symptom-level anchor ("the preset's own authoring guides are gone") must not
+ * be able to drift away from the entry table that guarantees they are packaged.
+ */
+export const REQUIRED_CORDIS_PRESET_SKILLS: readonly string[] = REQUIRED_PACKAGED_RUNTIME_ENTRIES
+  .filter(entry => entry.startsWith(`${PACKAGED_CORDIS_SKILL_DIR}/`) && entry.endsWith('/SKILL.md'))
+  .map(entry => entry.slice(PACKAGED_CORDIS_SKILL_DIR.length + 1, -'/SKILL.md'.length))
+  .sort()
+
+/** What the artifact itself says the preset skill directory contains. */
+export interface CordisSkillExpectation {
+  /** Every direct child name (files included). */
+  readonly children: readonly string[]
+  /** Direct children that carry a `SKILL.md`: the discoverable skills. */
+  readonly skills: readonly string[]
+}
+
+/**
+ * Derive the expected listing **from the artifact**, deliberately out of band
+ * from the code path under test: the archive branch reads the ASAR header
+ * through `@electron/asar` (which never touches Electron's fs shim), the
+ * physical branch reads the real directory. That is what lets the smoke assert
+ * **set equality** instead of "contains the two names we remember" —
+ * a truncated or empty listing from a degraded engine cannot pass, and a new
+ * upstream preset skill does not need this file edited to stay covered.
+ * @param context - Electron Builder's afterPack context.
+ * @param list - ASAR listing implementation.
+ * @param exists - physical-file probe (also the archive/physical layout switch).
+ * @returns direct children and SKILL.md-bearing children of the preset skills directory.
+ */
+export function expectedCordisSkillListing(
+  context: PackagedRuntimeContext,
+  list: ArchiveLister = listPackage,
+  exists: FileProbe = existsSync,
+): CordisSkillExpectation {
+  const prefix = `${PACKAGED_CORDIS_SKILL_DIR}/`
+  const asarPath = resolvePackagedAsarPath(context)
+  if (exists(asarPath)) {
+    const present = new Set(list(asarPath, { isPack: false }).map(normalizeArchiveEntry))
+    const children = new Set<string>()
+    for (const entry of present) {
+      if (!entry.startsWith(prefix)) continue
+      const name = entry.slice(prefix.length).split('/')[0]
+      if (name !== undefined && name !== '') children.add(name)
+    }
+    const sorted = [...children].sort()
+    return {
+      children: sorted,
+      skills: sorted.filter(name => present.has(`${prefix}${name}/SKILL.md`)),
+    }
+  }
+  const dir = join(resolvePackagedAppRoot(context), PACKAGED_CORDIS_SKILL_DIR)
+  const children = safeReaddir(dir).sort()
+  return { children, skills: children.filter(name => exists(join(dir, name, 'SKILL.md'))) }
+}
+
+/**
+ * Embedded ASAR bigint smoke script (issue #130).
+ *
+ * Runs inside the **packaged** launcher with `ELECTRON_RUN_AS_NODE=1`: only
+ * Electron's own fs patch can read `app.asar`. It asserts, on the sealed
+ * archive, the two halves of the defect that shipped in v2.8.0:
+ *
+ * 1. **Engine semantics** — `stat(<app.asar path>, { bigint: true })` must yield
+ *    `typeof mode === 'bigint'`, and the runtime's permission-mask expression
+ *    (`fsio.ts` `Number(info.mode & 0o777n)`) must evaluate. Electron 43.4.0's
+ *    ASAR shim dropped the `bigint` option and synthesized a Number `Stats`, so
+ *    that expression threw
+ *    `TypeError: Cannot mix BigInt and other types, use explicit conversions`.
+ * 2. **Capability** — the real provider path must list the directory:
+ *    `@deepseek-ai/dsh-fs-local` `LocalFileSystem.listDir()` is exactly what
+ *    `@deepseek-ai/dsh-skill-filesystem` calls for every skill root, and its
+ *    `listDirectory()` probes the target with `stat(..., { bigint: true })`
+ *    before it ever calls `readdir` — so a plain `readdir` would have passed on
+ *    Electron 43 and proven nothing.
+ *
+ * The names it gets back must equal, exactly, the JSON expectation the caller
+ * derived from the artifact itself ({@link expectedCordisSkillListing}); a
+ * listing that silently loses entries is therefore a failure, not a footnote.
+ */
+const ASAR_BIGINT_SMOKE_SCRIPT = `import { createRequire } from 'node:module'
+import { join } from 'node:path'
+import { stat } from 'node:fs/promises'
+import { pathToFileURL } from 'node:url'
+
+const appRoot = process.argv[2]
+const expected = JSON.parse(process.argv[3])
+const skillsDir = join(appRoot, 'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills')
+
+// (1) Engine semantics on an app.asar path: the packaged Electron must honour { bigint: true }.
+const info = await stat(skillsDir, { bigint: true })
+if (typeof info.mode !== 'bigint') {
+  throw new Error('stat(path, { bigint: true }) on an app.asar path returned ' + info.constructor.name
+    + ' with typeof mode=' + typeof info.mode
+    + ' — this Electron does not honour the bigint option, so the runtime permission mask throws')
+}
+let mask
+try {
+  mask = Number(info.mode & 0o777n)
+} catch (error) {
+  throw new Error('the runtime permission-mask expression threw on an app.asar path: ' + error.message)
+}
+if (!Number.isInteger(mask)) throw new Error('the permission mask produced ' + String(mask))
+
+// (2) + (3) The provider path, checked against the artifact-derived expectation.
+const appRequire = createRequire(join(appRoot, 'package.json'))
+const { LocalFileSystem } = await import(pathToFileURL(appRequire.resolve('@deepseek-ai/dsh-fs-local')).href)
+const { Context } = await import(pathToFileURL(appRequire.resolve('@deepseek-ai/cordis')).href)
+const localFs = new LocalFileSystem(new Context(), { cwd: process.cwd(), diffBasisMaxBytes: 1024 * 1024 })
+const listed = await localFs.listDir(await localFs.resolve(skillsDir))
+const names = listed.map(entry => entry.name).sort()
+const skills = listed.filter(entry => entry.type === 'directory').map(entry => entry.name).sort()
+if (JSON.stringify(names) !== JSON.stringify(expected.children)) {
+  throw new Error('skill directory listing is not exactly the packaged set: listed ' + JSON.stringify(names)
+    + ' but the artifact holds ' + JSON.stringify(expected.children))
+}
+if (JSON.stringify(skills) !== JSON.stringify(expected.skills)) {
+  throw new Error('discoverable skills are not exactly the packaged ones: listed ' + JSON.stringify(skills)
+    + ' but the artifact carries SKILL.md for ' + JSON.stringify(expected.skills))
+}
+process.stdout.write('${ASAR_BIGINT_SMOKE_OK}\\n')
+`
+
+/** Result shape of one ASAR bigint smoke launcher invocation (injectable in tests). */
+export interface AsarBigintSmokeProcessResult {
+  readonly status: number | null
+  readonly stdout: string
+  readonly stderr: string
+  readonly error?: { readonly code?: string | undefined, readonly message?: string | undefined }
+}
+
+/** Injectable ASAR bigint smoke launcher (tests). */
+export type AsarBigintSmokeLauncher = (
+  executable: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+) => AsarBigintSmokeProcessResult
+
+/** Default launcher: the packaged Electron in Node mode, hard timeout. */
+function runAsarBigintSmokeProcess(
+  executable: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): AsarBigintSmokeProcessResult {
+  const result = spawnSync(executable, [...args], {
+    env,
+    encoding: 'utf8',
+    timeout: PACKAGED_ASAR_BIGINT_SMOKE_TIMEOUT_MS,
+  })
+  return {
+    status: result.status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+    ...(result.error === undefined
+      ? {}
+      : { error: { code: (result.error as NodeJS.ErrnoException).code, message: result.error.message } }),
+  }
+}
+
+/**
+ * Smoke the packaged ASAR `{ bigint: true }` semantics and the filesystem skill
+ * listing it gates (issue #130).
+ *
+ * v2.8.0 shipped Electron 43.4.0, whose ASAR fs shim ignored `{ bigint: true }`
+ * and synthesized a Number `Stats`. `@deepseek-ai/dsh-fs-local`'s
+ * `listDirectory()` asserts the requested BigInt shape with
+ * `Number(info.mode & 0o777n)`, so **every** `stat`/`list` on an `app.asar` path
+ * threw, `FsError('cannot list "<asar path>": Cannot mix BigInt and other
+ * types…')` bubbled out of the skill provider's root loop, and cordis sessions
+ * lost **all** filesystem skills — the preset's own authoring guides, the
+ * project `.dsh/skills`, `$DSH_HOME/skills` and `~/.agents/skills` alike (the
+ * `web-app` bundle disables the host `skill-filesystem` row, so nothing else
+ * re-discovers them).
+ *
+ * The static entry checks only prove those `SKILL.md` files are *inside* the
+ * archive; they say nothing about whether the packaged engine can read them, and
+ * the upgrade that fixed this (PR #127, Electron 44.4.3) did so incidentally.
+ * This is the executable half: ship an engine whose ASAR shim honours the
+ * documented `fs` contract, or fail the package.
+ * @param context - Electron Builder's afterPack context.
+ * @param launch - process launcher (tests inject a stub).
+ * @param list - ASAR listing implementation used to derive the expectation.
+ * @param exists - physical-file probe used to derive the expectation.
+ * @returns Nothing; failure rejects with the captured process output.
+ */
+export function smokePackagedAsarBigintSemantics(
+  context: PackagedRuntimeContext,
+  launch: AsarBigintSmokeLauncher = runAsarBigintSmokeProcess,
+  list: ArchiveLister = listPackage,
+  exists: FileProbe = existsSync,
+): void {
+  const asarPath = resolvePackagedAsarPath(context)
+  // Archive layout: the app root IS app.asar (only the Electron fs patch can read
+  // it). Physical layout (asar: false): the real application directory.
+  const appRoot = exists(asarPath) ? asarPath : resolvePackagedAppRoot(context)
+  const expectation = expectedCordisSkillListing(context, list, exists)
+  // 反空转前置断言:期望集合为空时,下面的集合相等就退化成"列出 0 个也对",
+  // 门禁会在包根本没带 preset 技能(或清单被误删成空)时静默通过。这里直接拒跑。
+  if (expectation.skills.length === 0) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged ASAR bigint smoke found no cordis preset skill in ${appRoot} `
+      + `(looked under ${PACKAGED_CORDIS_SKILL_DIR}) — refusing to compare against an empty expectation`,
+    )
+  }
+  const candidates = resolvePackagedLauncherCandidates(context)
+  const executable = candidates.find(candidate => exists(candidate))
+  if (executable === undefined) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged ASAR bigint smoke cannot find the packaged launcher (tried ${candidates.join(', ')}); `
+      + 'the afterPack context must carry packager.executableName / appInfo.productFilename',
+    )
+  }
+  const root = mkdtempSync(join(tmpdir(), 'dsh-asar-bigint-smoke-'))
+  try {
+    const scriptPath = join(root, 'asar-bigint-smoke.mjs')
+    writeFileSync(scriptPath, ASAR_BIGINT_SMOKE_SCRIPT)
+    const result = launch(executable, [scriptPath, appRoot, JSON.stringify(expectation)], {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1',
+    })
+    if (result.error !== undefined) {
+      const code = result.error.code ?? ''
+      if (code === 'ETIMEDOUT' || code === 'ESRCH') {
+        throw new Error(
+          `dsh-plugin-desktop: packaged ASAR bigint smoke timed out after ${String(PACKAGED_ASAR_BIGINT_SMOKE_TIMEOUT_MS)}ms `
+          + `(${executable}) — the packaged launcher did not finish reading the archive`,
+        )
+      }
+      throw new Error(
+        `dsh-plugin-desktop: packaged ASAR bigint smoke could not start ${executable} (${code}: ${String(result.error.message)})`,
+      )
+    }
+    if (result.status !== 0) {
+      throw new Error(
+        `dsh-plugin-desktop: packaged ASAR bigint smoke failed (exit ${String(result.status)}) — this Electron's `
+        + 'app.asar fs shim does not honour { bigint: true }, so the filesystem skill provider would be skipped '
+        + 'and cordis sessions would lose every filesystem skill (preset, project, $DSH_HOME and ~/.agents roots alike).\n'
+        + '  Ship an Electron whose ASAR shim returns BigIntStats (>= 44; verified with 44.4.3).\n'
+        + `  launcher: ${executable}\n  app root: ${appRoot}\n`
+        + `${result.stdout.trimEnd()}\n${result.stderr.trimEnd()}`,
+      )
+    }
+    if (!result.stdout.includes(ASAR_BIGINT_SMOKE_OK)) {
+      throw new Error(
+        'dsh-plugin-desktop: packaged ASAR bigint smoke exited 0 without reporting '
+        + `${ASAR_BIGINT_SMOKE_OK} — the smoke script did not run to completion`,
+      )
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
 /**
  * Run the static packaged-runtime check as Electron Builder's afterPack hook.
  * @param context - Electron Builder's afterPack context.
@@ -1599,6 +1872,7 @@ export function smokePackagedErrorReporting(
  * @param smoke - packaged diagnostic worker smoke (tests).
  * @param flockSmoke - packaged flock smoke (tests).
  * @param errorReportingSmoke - packaged error-reporting smoke (tests).
+ * @param asarBigintSmoke - packaged ASAR bigint/skill-listing smoke (tests).
  * @returns A promise that rejects before signing when the runtime is incomplete.
  */
 export async function afterPack(
@@ -1607,6 +1881,7 @@ export async function afterPack(
   smoke: PackagedDiagnosticWorkerSmoke = smokePackagedDiagnosticWorker,
   flockSmoke: (context: PackagedRuntimeContext) => void = smokePackagedFlockLock,
   errorReportingSmoke: (context: PackagedRuntimeContext) => void = smokePackagedErrorReporting,
+  asarBigintSmoke: (context: PackagedRuntimeContext) => void = smokePackagedAsarBigintSemantics,
 ): Promise<void> {
   verify(context)
   const asarPath = resolvePackagedAsarPath(context)
@@ -1618,4 +1893,5 @@ export async function afterPack(
   await smoke(sourceRoot, undefined, asarPath)
   flockSmoke(context)
   errorReportingSmoke(context)
+  asarBigintSmoke(context)
 }
