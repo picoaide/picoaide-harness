@@ -142,6 +142,7 @@
     "dist:win": "node scripts/package-win.ts",
     "dist:win-portable": "node scripts/package-win-portable.ts",
     "prepack": "yarn run check",
+    "probe:proxy": "node scripts/proxy-policy-probe.mjs",
     "e2e:client": "node scripts/e2e-client.mjs",
     "e2e:real": "node scripts/real-env-verify.mjs",
     "e2e:real-cron-audit": "node scripts/real-env-cron-audit.mjs",
@@ -310,6 +311,7 @@
     "node-addon-require-builtin": "^0.1.6",
     "react": "18.3.1",
     "react-dom": "18.3.1",
+    "undici": "^8.10.0",
     "yaml": "^2.9.0"
   },
   "peerDependencies": {

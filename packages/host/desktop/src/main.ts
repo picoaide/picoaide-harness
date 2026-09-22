@@ -17,6 +17,15 @@ import {
   OFFICIAL_PRODUCT_NAME,
   readDesktopChannelProfile,
 } from './desktop-channel.ts'
+// 网络出口策略（2026-09-22）：客户端**默认禁止使用任何代理**。Chromium 的开关必须在
+// `app.whenReady()` 之前 append，所以在模块作用域接线（与 APP_ORIGIN_SCHEME 同理）。
+import {
+  applySystemProxyPolicy,
+  enforceDirectNodeTransport,
+  lateAllowSystemProxyWarning,
+  resolveSystemProxyPolicy,
+  stripProxyEnvironment,
+} from './network-policy.ts'
 // 客户端专属 WASM 应用 origin：协议特权注册（whenReady 之前）+ 交给插件的
 // Electron 适配器。子路径 `electron-adapter` 是唯一静态 import electron 的模块，
 // 插件主体（`@picoaide/dsh-wasm-apps-host`）保持纯 Node 可加载。
@@ -111,6 +120,21 @@ const DEEP_LINK_SCHEME = CHANNEL_PROFILE?.deepLinkScheme ?? DEFAULT_DEEP_LINK_SC
  */
 const APP_ORIGIN_SCHEME = CHANNEL_PROFILE?.appOriginScheme ?? DEFAULT_APP_ORIGIN_SCHEME
 
+/**
+ * 出口策略（2026-09-22 定案，见 `network-policy.ts` 与
+ * `docs/decisions/2026-09-22-client-system-proxy-ban.md`）：**默认禁止使用任何代理**。
+ *
+ * **必须在模块作用域**：`app.commandLine.appendSwitch('no-proxy-server')` 只能在
+ * `app.whenReady()` 之前生效，晚一行就静默无效（Chromium 已经读过代理配置）。
+ * 覆盖面是**全部** session：默认 session（gatewayFetch / net.fetch / 渲染进程）、
+ * 内置浏览器分区、WASM 应用窗口 —— 逐 session `setProxy` 会漏掉后建分区（实测）。
+ *
+ * 取值来源：`PICOAI_ALLOW_SYSTEM_PROXY`（真实进程环境，排障）> 渠道包
+ * `desktop.allow_system_proxy`（部署）> 默认禁止。
+ */
+const SYSTEM_PROXY_POLICY = resolveSystemProxyPolicy(process.env, CHANNEL_PROFILE)
+applySystemProxyPolicy(app.commandLine, SYSTEM_PROXY_POLICY)
+
 /** Report optional user UI plugins skipped to keep startup recoverable. */
 function notifySkippedOptionalEntries(
   runtime: ElectronDesktopRuntime,
@@ -181,7 +205,7 @@ async function start(): Promise<void> {
     })
     logSink.enforceDirectoryCap()
     logSink.purgeOlderThan(7)
-    logSink.writeHeader(`--- ${BIN_NAME} ${PRODUCT_NAME} ${desktopProductVersion()} ${process.platform} node ${process.version} run ${Date.now()} ---`)
+    logSink.writeHeader(`--- ${BIN_NAME} ${PRODUCT_NAME} ${desktopProductVersion()} ${process.platform} node ${process.version} proxy ${SYSTEM_PROXY_POLICY.allow ? 'system' : 'direct'}/${SYSTEM_PROXY_POLICY.source} run ${Date.now()} ---`)
   } catch (cause) {
     const detail = cause instanceof Error ? cause.message : String(cause)
     process.stderr.write(`${BIN_NAME}: file logging unavailable: ${maskSecrets(detail)}\n`)
@@ -343,6 +367,29 @@ async function start(): Promise<void> {
 
   try {
     const environment = loadLayeredEnv(BIN_NAME, process.cwd())
+    // 出口策略的第二刀（第一刀是模块作用域的 no-proxy-server，只管 Chromium）：
+    //  · Node 栈：宿主机若显式设了 NODE_USE_ENV_PROXY，Node 在**启动时**就装好了
+    //    走代理的全局 dispatcher —— 事后删环境变量无效，只能换成直连 Agent；
+    //  · 子进程：agent 的 curl/git/MCP stdio 由 scrubbedParentEnv() 从 process.env
+    //    派生，删掉代理名它们才真正直连。放在 loadLayeredEnv 之后，连 home `.env`
+    //    注入的代理名一起清掉。
+    // 判定用**删除前**的环境（NODE_USE_ENV_PROXY 本身马上就要被删掉）。
+    if (!SYSTEM_PROXY_POLICY.allow) {
+      const transport = await enforceDirectNodeTransport(process.env)
+      if (transport === 'swapped') {
+        electronLogger.error(`${BIN_NAME}: replaced the environment proxy dispatcher with a direct one (NODE_USE_ENV_PROXY was set)`)
+      } else if (transport === 'unavailable') {
+        electronLogger.error(`${BIN_NAME}: NODE_USE_ENV_PROXY is set but undici is unavailable; Node-side requests may still use the environment proxy`)
+      }
+      const late = lateAllowSystemProxyWarning(process.env, SYSTEM_PROXY_POLICY)
+      if (late !== undefined) electronLogger.error(`${BIN_NAME}: ${late}`)
+      const cleared = stripProxyEnvironment(process.env)
+      if (cleared.length > 0) {
+        electronLogger.error(`${BIN_NAME}: cleared proxy environment for this run (${cleared.join(', ')})`)
+      }
+    } else {
+      electronLogger.error(`${BIN_NAME}: system proxy use is enabled by ${SYSTEM_PROXY_POLICY.source}; host proxy settings apply to every request`)
+    }
     const pluginManagementStatePath = join(app.getPath('userData'), 'plugin-management', 'state.json')
     const activeProfileName = DESKTOP_PROFILE_NAME
     const prepared = await prepareDesktopProfile(
