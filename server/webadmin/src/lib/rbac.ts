@@ -32,6 +32,8 @@ export const PERM_DEPT_READ = 'dept:read'
 export const PERM_DEPT_WRITE = 'dept:write'
 export const PERM_AUTH_READ = 'auth:read'
 export const PERM_GATEWAY_READ = 'gateway:read'
+/** 网关写面(上游/模型/配置,以及「网关文件」页的删除与批量清理)。 */
+export const PERM_GATEWAY_WRITE = 'gateway:write'
 export const PERM_USAGE_READ = 'usage:read'
 export const PERM_MARKET_READ = 'market:read'
 export const PERM_CAP_READ = 'capability:read'

@@ -9,12 +9,22 @@ import { Skeleton } from '../components/ui/skeleton'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { PageHeader } from '../components/page-header'
+import { PERM_GATEWAY_WRITE, hasPermission } from '../lib/rbac'
 
-const SIZE = 20
+const DEFAULT_SIZE = 20
+/** 每页条数候选（服务端 `size` 上限 200，缺省 50；这里只给常用档）。 */
+const PAGE_SIZES = [10, 20, 50, 100]
 
-/** 字节数渲染（二进制单位，保留一位小数）。 */
-function fmtBytes(n: number): string {
-  if (!n || n <= 0) return '0 B'
+/**
+ * 字节数渲染（二进制单位，保留一位小数）。
+ *
+ * 边界：0 / 负数 / NaN / ±Infinity 一律「0 B」。服务端不会下发这些值，但渲染层
+ * 不能因为一个坏值把整张表打成 `Infinity TiB`（本页三处都直接吃服务端数字）。
+ * 单位表到 TiB 为止：再大就以 TiB 计数（本页配额是全组织 25 GiB 量级，够用且
+ * 不会因为自造 PiB 档位在别处产生第二套口径）。
+ */
+export function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
   let v = n
   let i = 0
@@ -23,6 +33,29 @@ function fmtBytes(n: number): string {
     i++
   }
   return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`
+}
+
+/** 时间戳公共实现：空值给 null（由调用方决定占位符），不可解析时原样回显。 */
+function fmtStamp(v: string | null | undefined): string | null {
+  if (!v) return null
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return v
+  return d.toLocaleString('zh-CN', { hour12: false })
+}
+
+/** 过期时间渲染：「无过期时间」= 永久（不是缺失值）。 */
+export function fmtTime(v: string | null | undefined): string {
+  return fmtStamp(v) ?? '永久'
+}
+
+/**
+ * 上传/创建时间渲染：空值给「—」。
+ *
+ * 创建时间没有「永久」这种语义 —— 共用 fmtTime 会让一条 created_at 缺失的行
+ * 显示成「永久」，管理员据此判断"这条不会过期"，正好读反。
+ */
+export function fmtDateTime(v: string | null | undefined): string {
+  return fmtStamp(v) ?? '—'
 }
 
 interface FileRow {
@@ -52,14 +85,6 @@ interface Totals {
   expired: number
 }
 
-/** 时间戳渲染:空值给「永久」（无过期时间的文件）。 */
-function fmtTime(v: string | null): string {
-  if (!v) return '永久'
-  const d = new Date(v)
-  if (Number.isNaN(d.getTime())) return v
-  return d.toLocaleString('zh-CN', { hour12: false })
-}
-
 /**
  * 网关文件台账（2026-09-22）。
  *
@@ -67,11 +92,14 @@ function fmtTime(v: string | null): string {
  * 由平台收敛（`gateway.file_expiry_days`，缺省 7 天）。本页给管理员一个"按员工看占用、
  * 搜索、排序、按条件清理"的工具；服务端另有 5 分钟一轮的自动回收。
  *
- * 两个刻意的产品约束：
- *   1. 批量清理**必须带条件**（员工或状态）——空条件等于"清空全公司台账"，
+ * 三个刻意的产品约束：
+ *   1. 批量清理**必须带条件**（员工或状态）—— 空条件等于"清空全公司台账"，
  *      服务端会 400，前端也不给这个按钮的可用状态；
- *   2. "清理仍然有效的文件"是危险动作：只在显式选择「全部状态」时才允许，
- *      并要求二次确认里输入确认词，避免误点。
+ *   2. "清理仍然有效的文件"是危险动作：全组织范围只允许清「已过期」，
+ *      指名员工后才允许清「有效」或「全部」状态，并要求二次确认里输入确认词；
+ *   3. 过滤/排序/分页条件**全部进查询串**（`user`/`user_id`/`q`/`state`/`sort`/
+ *      `order`/`page`/`size`），页面不做任何本地过滤 —— 本地过滤会让管理员
+ *      把"当前这一页里没匹配"误读成"全公司没匹配"。
  */
 export default function GatewayFiles() {
   const [rows, setRows] = useState<FileRow[]>([])
@@ -79,7 +107,13 @@ export default function GatewayFiles() {
   const [totals, setTotals] = useState<Totals | null>(null)
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
+  const [size, setSize] = useState(DEFAULT_SIZE)
   const [user, setUser] = useState('')
+  // 服务端 `user=` 一律按**用户名**解，数字 ID 必须走 `user_id=`（审计 2026-09-22
+  // R6 P1-B：`user=2` 曾被当成 id=2 —— 清理会删到另一个员工）。两个输入框互斥
+  // （见 onChange 与「只看此人」），保证下发的永远是其中一个，不会出现
+  // "填了 ID 又填了用户名、服务端按 ID 过滤而页面显示的是用户名"的静默错配。
+  const [userId, setUserId] = useState('')
   const [q, setQ] = useState('')
   const [state, setState] = useState('all')
   const [sort, setSort] = useState('created_at')
@@ -89,6 +123,9 @@ export default function GatewayFiles() {
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
   const [busy, setBusy] = useState('')
+  // 请求序号守卫：快速改条件时会有多个请求在飞，只有**最后发出**的那个能落状态。
+  // 没有它时，"先发的慢响应后到"会把表格改回上一个条件的结果（用户看到的过滤
+  // 条件与数据不一致）。
   const loadSeq = useRef(0)
 
   const load = useCallback(async (p: number) => {
@@ -96,29 +133,50 @@ export default function GatewayFiles() {
     setLoading(true)
     setError('')
     try {
-      const qs = new URLSearchParams({ page: String(p), size: String(SIZE), sort, order })
-      if (user.trim()) qs.set('user', user.trim())
+      const qs = new URLSearchParams({ page: String(p), size: String(size), sort, order })
+      // 与服务端 adminFileQuery 同优先级：user_id 先于 user（两个输入框互斥，
+      // 实际只会下发一个）。
+      if (userId.trim()) qs.set('user_id', userId.trim())
+      else if (user.trim()) qs.set('user', user.trim())
       if (q.trim()) qs.set('q', q.trim())
       if (state !== 'all') qs.set('state', state)
       const d = await request<{ rows: FileRow[]; total: number; totals: Totals }>(`${ADMIN_API}/gateway/files?${qs}`)
       const s = await request<{ rows: SummaryRow[]; totals: Totals }>(
         `${ADMIN_API}/gateway/files/summary?sort=${summarySort}&order=desc`)
       if (current !== loadSeq.current) return
+      const totalRows = d.total ?? 0
+      const lastPage = Math.max(1, Math.ceil(totalRows / size))
+      if (p > lastPage) {
+        // 末页被删空（或过滤后总数变小）导致当前页越界：回到最后一页，
+        // 而不是显示「第 2/1 页」再给一张空表（管理员会以为"没数据了"）。
+        setPage(lastPage)
+        void load(lastPage)
+        return
+      }
       setRows(d.rows ?? [])
-      setTotal(d.total ?? 0)
+      setTotal(totalRows)
       setTotals(d.totals ?? s.totals ?? null)
       setSummary(s.rows ?? [])
     } catch (e: any) {
       if (current !== loadSeq.current) return
+      // 失败时**清掉上一次成功的数据**：否则换了过滤条件后请求失败，屏幕上留着
+      // 的仍是旧条件的行，管理员会把它当成新条件的结果（本仓记录过的假绿形态）。
+      setRows([])
+      setSummary([])
+      setTotal(0)
       setError(e.message || '查询失败')
     } finally {
       if (current === loadSeq.current) setLoading(false)
     }
-  }, [user, q, state, sort, order, summarySort])
+  }, [user, userId, q, state, sort, order, summarySort, size])
 
-  // 首次挂载后：过滤/排序条件变化即重新查询（文本输入 300ms 防抖）。
+  // 首次挂载后：过滤/排序/分页条件变化即重新查询（文本输入 300ms 防抖）。
   // 没有这段的话，输入框只是改了 state、表格纹丝不动 —— 看起来"筛选生效了"，
   // 实际查的还是全量（本仓已记录过的假绿形态）。
+  //
+  // 这里**一律回到第 1 页**：条件变了以后第 N 页已经不是同一个东西了。因此所有
+  // 条件变更都必须同步 `setPage(1)`（toggleSort / 每页条数 / 状态 / 输入框）——
+  // 只 reload 不重置页码，界面上会出现"第 3/5 页"配第 1 页数据。
   const mounted = useRef(false)
   useEffect(() => {
     if (!mounted.current) {
@@ -130,7 +188,11 @@ export default function GatewayFiles() {
     return () => clearTimeout(t)
   }, [load])
 
-  const pages = Math.max(1, Math.ceil(total / SIZE))
+  const pages = Math.max(1, Math.ceil(total / size))
+  // 删除/清理走服务端 `gateway:write`（router.go 的路由申报）。这里做体验层收敛：
+  // 读权限（`gateway:read`，nav 条目的权限点）只给"看"，写按钮不该出现 —— 否则
+  // 只读管理员点下去只会拿到 403。权限集未下发时 hasPermission 放行（旧版本/测试）。
+  const canWrite = hasPermission(PERM_GATEWAY_WRITE)
 
   async function removeOne(fileID: string) {
     if (busy) return
@@ -151,37 +213,49 @@ export default function GatewayFiles() {
 
   async function purge() {
     if (busy) return
-    // 服务端要求：至少一个条件；且**删有效文件必须指名员工**（全组织范围只允许清已过期）。
-    // 这里保持同口径，避免用户点了才发现 400。
-    if (state === 'all') {
-      setError('批量清理必须指定状态（全部状态请先指定员工）')
+    const name = user.trim()
+    // 服务端 purgeGatewayFilesAdmin 的三条硬口径（这里保持同口径，避免用户点了
+    // 才发现 400）：
+    //   ① `user`/`user_id`/`state` 至少一个 —— 空条件 = 清空全公司台账；
+    //   ② 删「仍然有效」的文件必须指名员工（全组织范围只允许清已过期）；
+    //   ③ `state` 原样下发：`all` 就是"员工名下全部文件"，**不能**悄悄收敛成
+    //      `expired`（确认框说的是全部、请求却只删过期 = 范围与承诺不一致）。
+    if (!name && userId.trim()) {
+      // 清理请求体按契约只带 `user`（用户名）；只填了员工 ID 时不能猜。
+      // 更不能退化成本次筛选之外的范围：管理员看着"员工 ID = 5"的过滤条件点清理，
+      // 若下发 `{state:'expired'}` 就成了**全组织**清理，范围与屏幕上的条件不一致。
+      setError('按员工清理请在「员工（用户名）」里填用户名（员工 ID 只用于筛选列表）')
       return
     }
-    if (state === 'active' && !user.trim()) {
+    if (state === 'all' && !name) {
+      setError('批量清理必须指定条件：选择「有效 / 已过期」，或先填「员工（用户名）」（填了员工才可按「全部」状态清理）')
+      return
+    }
+    if (state === 'active' && !name) {
       setError('清理仍然有效的文件必须指定员工（全组织范围只允许清理已过期文件）')
       return
     }
-    const scope = state === 'expired'
-      ? `已过期文件${user.trim() ? `（员工「${user.trim()}」）` : ''}`
-      : `员工「${user.trim()}」仍然有效的文件`
-    const needTyped = state !== 'expired'
+    const dangerous = state !== 'expired'
+    const scope = name ? `员工「${name}」` : '全部员工'
+    const what = state === 'expired' ? '已过期文件'
+      : state === 'active' ? '仍然有效的文件' : '全部文件（含仍然有效的）'
     const answer = window.prompt(
-      needTyped
-        ? `将删除 ${scope}。这是危险操作（会同时删掉上游文件），请输入「确认」继续：`
-        : `将删除 ${scope}（上游 + 台账，单次最多 500 条）。输入「确认」继续：`)
+      dangerous
+        ? `将删除 ${scope}的${what}。这是危险操作（会同时删掉上游文件），请输入「确认」继续：`
+        : `将删除 ${scope}的${what}（上游 + 台账，单次最多 500 条）。输入「确认」继续：`)
     if (answer !== '确认') return
     setBusy('purge')
     setError('')
     setOkMsg('')
     try {
-      // `all` 在服务端等价于"全部状态"，但删有效文件必须带 user ⇒ 这里按用户收敛。
-      const body: Record<string, unknown> = { state: state === 'all' ? 'expired' : state }
-      if (user.trim()) body.user = user.trim()
+      // 逐字对齐服务端契约：`{state, user?}`。
+      const body: Record<string, unknown> = { state }
+      if (name) body.user = name
       const d = await request<{ deleted: number; failed: number; matched: number }>(
         `${ADMIN_API}/gateway/files/purge`, { method: 'POST', body: JSON.stringify(body) })
       setOkMsg(`清理完成：命中 ${d.matched}，删除 ${d.deleted}，失败 ${d.failed}`)
-      await load(1)
       setPage(1)
+      await load(1)
     } catch (e: any) {
       setError(e.message || '清理失败')
     } finally {
@@ -196,6 +270,8 @@ export default function GatewayFiles() {
       setSort(key)
       setOrder('desc')
     }
+    // 换了排序键/方向，页 N 的内容已经不是原来的东西 ⇒ 回第 1 页。
+    setPage(1)
   }
 
   const sortMark = (key: string) => (sort === key ? (order === 'desc' ? ' ↓' : ' ↑') : '')
@@ -226,7 +302,7 @@ export default function GatewayFiles() {
         <CardContent>
           <div className="mb-2 flex items-center gap-2">
             <Label className="text-xs text-muted-foreground">排序</Label>
-            <Select value={summarySort} onValueChange={setSummarySort}>
+            <Select value={summarySort} onValueChange={(v) => { setSummarySort(v); setPage(1) }}>
               <SelectTrigger className="w-[160px]" aria-label="员工占用排序"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="bytes">按占用字节</SelectItem>
@@ -258,12 +334,12 @@ export default function GatewayFiles() {
                   <TableCell>{s.expired_files || '—'}</TableCell>
                   <TableCell>{fmtTime(s.earliest_expires_at)}</TableCell>
                   <TableCell>
-                    <Button variant="outline" size="sm"
-                      onClick={() => { setUser(s.username); setPage(1) }}>只看此人</Button>
+                    <Button variant="outline" size="sm" aria-label={`只看 ${s.username}`}
+                      onClick={() => { setUser(s.username); setUserId(''); setPage(1) }}>只看此人</Button>
                   </TableCell>
                 </TableRow>
               ))}
-              {summary.length === 0 && !loading && (
+              {summary.length === 0 && !loading && !error && (
                 <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground">暂无文件</TableCell></TableRow>
               )}
             </TableBody>
@@ -274,11 +350,16 @@ export default function GatewayFiles() {
       <Card>
         <CardHeader><CardTitle className="text-base">文件明细</CardTitle></CardHeader>
         <CardContent className="space-y-3">
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
             <div className="space-y-1">
-              <Label htmlFor="file-user">员工（用户名或 ID）</Label>
+              <Label htmlFor="file-user">员工（用户名）</Label>
               <Input id="file-user" value={user} placeholder="全部员工"
-                onChange={(e) => { setUser(e.target.value); setPage(1) }} />
+                onChange={(e) => { setUser(e.target.value); setUserId(''); setPage(1) }} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="file-user-id">员工 ID</Label>
+              <Input id="file-user-id" type="number" min={1} value={userId} placeholder="全部员工"
+                onChange={(e) => { setUserId(e.target.value); setUser(''); setPage(1) }} />
             </div>
             <div className="space-y-1">
               <Label htmlFor="file-q">搜索 file_id</Label>
@@ -296,11 +377,24 @@ export default function GatewayFiles() {
                 </SelectContent>
               </Select>
             </div>
+            <div className="space-y-1">
+              <Label htmlFor="file-size">每页条数</Label>
+              <Select value={String(size)} onValueChange={(v) => { setSize(Number(v)); setPage(1) }}>
+                <SelectTrigger id="file-size" aria-label="每页条数"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {PAGE_SIZES.map((n) => (
+                    <SelectItem key={n} value={String(n)}>{n} 条/页</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <div className="flex items-end gap-2">
               <Button variant="outline" onClick={() => void load(page)} disabled={loading}>刷新</Button>
-              <Button variant="destructive" onClick={() => void purge()} disabled={busy === 'purge'}>
-                {busy === 'purge' ? '清理中…' : '按条件清理'}
-              </Button>
+              {canWrite && (
+                <Button variant="destructive" onClick={() => void purge()} disabled={busy === 'purge'}>
+                  {busy === 'purge' ? '清理中…' : '按条件清理'}
+                </Button>
+              )}
             </div>
           </div>
 
@@ -329,20 +423,22 @@ export default function GatewayFiles() {
                       <TableCell className="font-mono text-xs">{r.file_id}</TableCell>
                       <TableCell>{r.display_name || r.username}<span className="ml-2 text-xs text-muted-foreground">{r.username}</span></TableCell>
                       <TableCell>{fmtBytes(r.size_bytes)}</TableCell>
-                      <TableCell>{fmtTime(r.created_at)}</TableCell>
+                      <TableCell>{fmtDateTime(r.created_at)}</TableCell>
                       <TableCell>{fmtTime(r.expires_at)}</TableCell>
                       <TableCell>
                         {r.expired ? <Badge variant="destructive">已过期</Badge> : <Badge variant="secondary">有效</Badge>}
                       </TableCell>
                       <TableCell>
-                        <Button variant="outline" size="sm" disabled={busy === r.file_id}
-                          onClick={() => void removeOne(r.file_id)}>
-                          {busy === r.file_id ? '删除中…' : '删除'}
-                        </Button>
+                        {canWrite ? (
+                          <Button variant="outline" size="sm" disabled={busy === r.file_id}
+                            onClick={() => void removeOne(r.file_id)}>
+                            {busy === r.file_id ? '删除中…' : '删除'}
+                          </Button>
+                        ) : <span className="text-xs text-muted-foreground">—</span>}
                       </TableCell>
                     </TableRow>
                   ))}
-                  {rows.length === 0 && (
+                  {rows.length === 0 && !error && (
                     <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">没有匹配的文件</TableCell></TableRow>
                   )}
                 </TableBody>
