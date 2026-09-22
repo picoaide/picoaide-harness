@@ -14,6 +14,19 @@ body[data-dsh-desktop-mode="advanced"] { margin: 0; background: transparent !imp
 .dshDesktopFrame { position: relative; display: grid; grid-template-rows: 100%; width: 100%; height: 100%; overflow: hidden; background: transparent; }
 .dshDesktopSidebarSurface { --dsw-specific-sidebar-fill: transparent; position: relative; grid-column: 1; grid-row: 1; min-width: 0; overflow: hidden; background: transparent; border-right: 1px solid var(--dsw-alias-border-l1); }
 .dshDesktopUpstreamSidebar { box-sizing: border-box; width: 100%; height: 100%; }
+/* 模态打开期间左栏交回不透明底（issue #128：左侧毛玻璃像被扫描了）。
+   整视口蒙版是 rgba(0,0,0,.24) + backdrop-filter: blur(2px)，而 backdrop-filter 只能
+   采样页面自身的绘制结果；左栏平时刻意透明（上行 background: transparent，为的是透出
+   macOS vibrancy / Windows mica 原生材质），于是蒙版在左栏根本没有可模糊的底：
+   左侧 = 0.24 黑直接压在未模糊的原生材质上，右侧 = 0.24 黑 + 模糊后的页面，分界线正好
+   落在 border-right 上（半糊重影就是用户说的扫描感）。
+   这里在模态存在时把两个真源一起换掉 —— 表面自身的 background（darwin 上真正被绘制的
+   那一层）与 --dsw-specific-sidebar-fill（上游 SidebarRoot.module.css 的 .root 底色来源）
+   —— 都取对话列同款 bg-base，蒙版两侧的底就一致了；模态关闭立刻回到透明，原生材质照旧透出。
+   选择器只用 html:has() 加我们自己的稳定类名，绝不写上游 CSS-module 的哈希类名；
+   role=dialog 与 aria-modal 同时要求，与 @picoaide/dsh-panel-surface 的模态判据同形，
+   面板内的内联 alertdialog 确认块不带整视口蒙版，因此不会误触发。 */
+html:has([role="dialog"][aria-modal="true"]) .dshDesktopSidebarSurface { --dsw-specific-sidebar-fill: var(--dsw-alias-bg-base); background: var(--dsw-alias-bg-base); }
 .dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopUpstreamSidebar { padding-top: ${MACOS_TITLEBAR_HEIGHT}px; -webkit-app-region: no-drag; }
 .dshDesktopFrame[data-desktop-platform="darwin"][data-sidebar-collapsed] .dshDesktopUpstreamSidebar { width: ${SIDEBAR_COLLAPSED}px; margin: 0 auto; }
 .dshDesktopFrame[data-desktop-platform="darwin"] { grid-template-rows: ${MACOS_TITLEBAR_HEIGHT}px minmax(0, 1fr); }
