@@ -39,7 +39,7 @@ jobs:
   # 也按 true 处理(fail-safe,宁可多跑)。
   changes:
     name: Detect docs-only change
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       code: ${{ steps.scope.outputs.code }}
@@ -91,7 +91,7 @@ jobs:
     needs: changes
     # changes 失败(而非成功判定为 docs-only)时照跑:宁可多跑,不可漏测
     if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -167,7 +167,7 @@ jobs:
     name: Go server
     needs: changes
     if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 45 min 的依据(2026-09-19,R2-SK-7):happy path ≈ 26 min 测试 + PG 启动/
     # npm ci/gofmt/go vet/npm test/make build-server ≈ 5 min ⇒ 留 ~1.4× 余量;
     # 且覆盖"单包挂满 15m + 其余 ~21m ≈ 36 min"的最坏路径,使 -timeout 的
@@ -299,7 +299,7 @@ jobs:
     name: Desktop (Linux)
     needs: [changes, gate]
     if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -768,7 +768,7 @@ jobs:
     # 渠道由 tag 形态决定,与 resolve 步骤同源。
     if: startsWith(github.ref, 'refs/tags/v') && (contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || !contains(github.ref_name, '-'))
     needs: [server, desktop-linux, desktop-windows, desktop-macos]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: write
@@ -924,13 +924,13 @@ jobs:
     name: PR build artifacts summary
     if: always() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
     needs: [changes, desktop-linux, desktop-windows, desktop-macos, server]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v8
         with:
           script: |
             const marker = '<!-- picoaide-ci-artifacts -->'
