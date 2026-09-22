@@ -1336,12 +1336,29 @@ func validateUpstreamBaseURL(raw string) error {
 // 能搜索、能排序、能清理"的工具。只读聚合与列表走 gateway:read，删除/清理走
 // gateway:write（路由申报见 internal/router/router.go），全部动作写审计。
 
-// adminFileQuery 从查询参数解析过滤/排序/分页条件（非法值一律回落缺省，不报错）。
+// 列表分页的三个数值：与 serverstore.normalizeGatewayFileQuery 的缺省/上限**同源**
+// （那边把 Limit<=0 或 >200 都归一到 50；这里必须在**算出 offset 之前**用同一份
+// 生效值，否则 size 缺省时 offset 恒为 0、分页静默失效）。
+const (
+	defaultGatewayFilePageSize = 50
+	maxGatewayFilePageSize     = 200
+	// maxGatewayFilePage 是页号上限。存在的唯一理由是防溢出：page 取 MaxInt64 时
+	// (page-1)*size 会回绕成**负数**，被 DAO 的 `Offset < 0 ⇒ 0` 兜底成"第一页"
+	// —— 越界页本该返回空集，却把第一页数据当成"最后一页"交给管理员。
+	// 2^20 页 × 200 条 = 2 亿行，远超任何真实台账规模。
+	maxGatewayFilePage = 1 << 20
+)
+
+// adminFileQuery 从查询参数解析过滤/排序/分页条件（数值/排序的非法值一律回落缺省）。
 //
 // `user=` 一律按**用户名**解，数字 ID 走 `user_id=`（审计 2026-09-22 R6 P1-B：
 // 旧实现"先按 ID 解"⇒ 用户名恰好是数字时 `user=2` 会过滤到 id=2 的**另一个员工**、
 // purge 更会删错人）。用户名查不到 ⇒ 空集（不退化成"不过滤"）。
-func adminFileQuery(c *gin.Context, db *sql.DB) serverstore.GatewayFileQuery {
+//
+// 唯一的例外是 `state`：**未知取值必须拒绝**（返回 ok=false），不能静默忽略 ——
+// 静默忽略 = 过滤条件消失，管理员看着"已过期"的筛选结果实际是全量（与 purge
+// 侧同一口径，见 purgeGatewayFilesAdmin 的注释）。
+func adminFileQuery(c *gin.Context, db *sql.DB) (serverstore.GatewayFileQuery, bool) {
 	q := serverstore.GatewayFileQuery{}
 	if v := strings.TrimSpace(c.Query("user_id")); v != "" {
 		if id, err := strconv.ParseInt(v, 10, 64); err == nil && id > 0 {
@@ -1357,31 +1374,36 @@ func adminFileQuery(c *gin.Context, db *sql.DB) serverstore.GatewayFileQuery {
 		}
 	}
 	q.Search = strings.TrimSpace(c.Query("q"))
-	switch c.Query("state") {
+	switch strings.TrimSpace(c.Query("state")) {
+	case "", "all":
 	case "expired":
 		q.OnlyExpired = true
 	case "active":
 		q.OnlyActive = true
+	default:
+		return q, false
 	}
 	q.Sort = strings.TrimSpace(c.Query("sort"))
 	q.Desc = c.Query("order") != "asc"
-	size := 0
-	if n, err := strconv.Atoi(c.Query("size")); err == nil && n > 0 {
-		size = min(n, 200)
+	size := defaultGatewayFilePageSize
+	if n, err := strconv.Atoi(strings.TrimSpace(c.Query("size"))); err == nil && n > 0 {
+		size = min(n, maxGatewayFilePageSize)
 	}
+	q.Limit = size
 	page := 1
-	if n, err := strconv.Atoi(c.Query("page")); err == nil && n > 1 {
-		page = n
+	if n, err := strconv.Atoi(strings.TrimSpace(c.Query("page"))); err == nil && n > 1 {
+		page = min(n, maxGatewayFilePage)
 	}
-	if size > 0 {
-		q.Limit = size
-	}
-	q.Offset = (page - 1) * q.Limit // 与生效的 size 同源（旧实现固定按 50 算，size>200 时跳段）
-	return q
+	q.Offset = (page - 1) * q.Limit // 与生效的 size 同源（缺省 size 时旧实现算出 0）
+	return q, true
 }
 
 func listGatewayFilesAdmin(c *gin.Context, db *sql.DB) {
-	q := adminFileQuery(c, db)
+	q, ok := adminFileQuery(c, db)
+	if !ok {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "state 只支持 active|expired|all")
+		return
+	}
 	rows, total, err := serverstore.ListGatewayFiles(db, q)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取文件台账失败")
@@ -1476,7 +1498,16 @@ func purgeGatewayFilesAdmin(c *gin.Context, api *API, db *sql.DB) {
 	}
 	q := serverstore.GatewayFileQuery{}
 	target := "all"
-	if req.UserID != nil && *req.UserID > 0 {
+	if req.UserID != nil {
+		// 显式给了 user_id 就必须是**正整数**：旧实现把 `<=0` 静默忽略 ⇒ 过滤条件
+		// 消失、范围从"某个人"变成"全组织"（`{"user_id":0,"state":"expired"}` 会清掉
+		// 全公司已过期文件）。列表侧同一口径（`?user_id=0` 落空集，fail-closed），
+		// 这里选显式 400 —— 一个自己都不成立的 user_id 只可能是调用方写错了。
+		if *req.UserID <= 0 {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+				"user_id 必须是正整数（用户名请用 user）")
+			return
+		}
 		q.UserID = *req.UserID
 		target = "user_id=" + strconv.FormatInt(*req.UserID, 10)
 	} else if req.User != nil && strings.TrimSpace(*req.User) != "" {
@@ -1490,22 +1521,35 @@ func purgeGatewayFilesAdmin(c *gin.Context, api *API, db *sql.DB) {
 		}
 		target = "user=" + v
 	}
+	// 状态过滤先归一到**一个**取值，再据此设过滤条件与审计范围。
+	//
+	// 为什么不能各写各的：`state` 与 `expired_only` 是同一件事的两种写法
+	// （`{"state":"active","expired_only":true}` 完全可能出现），逐块追加会让审计
+	// detail 写出"state=active state=expired"这种自相矛盾的范围 —— 事后无法据审计
+	// 判断管理员到底清了什么。同时未知 state 必须显式拒绝（静默忽略 = 过滤条件
+	// 消失、范围扩大），所以白名单校验必须排在最前。
+	state := ""
 	if req.State != nil {
-		switch strings.TrimSpace(*req.State) {
-		case "expired":
-			q.OnlyExpired = true
-			target += " state=expired"
-		case "active":
-			q.OnlyActive = true
-			target += " state=active"
-		}
+		state = strings.TrimSpace(*req.State)
 	}
-	// `expired_only` 是 `state=expired` 的等价写法（老前端/脚本用）；`state=active`
-	// 才是"清理仍然有效的文件"这条危险路径，必须显式给出。
+	switch state {
+	case "", "all", "expired", "active":
+	default:
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "state 只支持 active|expired|all")
+		return
+	}
+	// `expired_only=true` 是 `state=expired` 的等价写法（老前端/脚本用），优先级更高；
+	// `state=active` 才是"清理仍然有效的文件"这条危险路径，必须显式给出。
 	if req.ExpiredOnly != nil && *req.ExpiredOnly {
+		state = "expired"
+	}
+	switch state {
+	case "expired":
 		q.OnlyExpired = true
-		q.OnlyActive = false
 		target += " state=expired"
+	case "active":
+		q.OnlyActive = true
+		target += " state=active"
 	}
 	if q.UserID == 0 && !q.OnlyExpired && !q.OnlyActive {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "必须指定 user 或 state（避免误清全量台账）")
@@ -1518,15 +1562,6 @@ func purgeGatewayFilesAdmin(c *gin.Context, api *API, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
 			"清理仍然有效的文件必须指定员工（user 或 user_id）；全组织范围只允许清理已过期文件")
 		return
-	}
-	// 未知 state 必须显式拒绝，不能静默忽略（静默忽略 = 过滤条件消失、范围扩大）。
-	if req.State != nil {
-		switch strings.TrimSpace(*req.State) {
-		case "", "expired", "active", "all":
-		default:
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "state 只支持 expired|active|all")
-			return
-		}
 	}
 	limit := 0
 	if req.Limit != nil {
