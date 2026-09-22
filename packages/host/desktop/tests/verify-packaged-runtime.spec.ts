@@ -6,6 +6,8 @@ import { describe, expect, it, vi } from 'vitest'
 import AdmZip from 'adm-zip'
 import {
   afterPack,
+  assertNoPackagedSourceLeaks,
+  assertRuntimeAssetFamiliesSurvive,
   assertBrandAssetSvg,
   PACKAGED_FLOCK_SMOKE_TIMEOUT_MS,
   PACKAGED_SENTRY_SMOKE_TIMEOUT_MS,
@@ -13,6 +15,8 @@ import {
   PACKAGED_WEB_BRAND_FAVICON,
   PACKAGED_WEB_BRAND_OFFICIAL,
   REQUIRED_PACKAGED_RUNTIME_ENTRIES,
+  REQUIRED_PROFILE_PATCH_ANCHORS,
+  assertProfilePatchAnchors,
   REQUIRED_ASAR_EXPORTS,
   REQUIRED_UNPACKED_RUNTIME_ENTRIES,
   REQUIRED_MACOS_UNIVERSAL_ENTRIES,
@@ -83,8 +87,13 @@ const REQUIRED_ASAR_EXPORT_PATHS = [
 ]
 
 function completeArchiveEntries(separator = '/'): string[] {
-  return [...REQUIRED_PACKAGED_RUNTIME_ENTRIES, ...REQUIRED_ASAR_EXPORT_PATHS]
-    .map(entry => `${separator}${entry.replaceAll('/', separator)}`)
+  return [
+    ...REQUIRED_PACKAGED_RUNTIME_ENTRIES,
+    ...REQUIRED_ASAR_EXPORT_PATHS,
+    // profile 锚点（自有插件的 package.json + cordis.patch.yml）：真实产物里
+    // 它们必然在（否则应用起不来），夹具也必须带上，否则「正例」用例被误判成红的。
+    ...REQUIRED_PROFILE_PATCH_ANCHORS,
+  ].map(entry => `${separator}${entry.replaceAll('/', separator)}`)
 }
 
 /** 递归列出目录下所有普通文件(相对路径,'/'-分隔);目录不存在 = 空列表。 */
@@ -558,12 +567,11 @@ describe('packaged desktop runtime verification', () => {
 
   it('fails loud when a required package export is absent from app.asar', () => {
     const runtimeContext = context('/build', 'win32')
-    // 完整 asar 由 REQUIRED_PACKAGED_RUNTIME_ENTRIES 构造；specifiers 各自映射的
-    // archive 路径若缺失，会拒绝。这里模拟缺少 enterprise session-service。
-    const joined = ([...REQUIRED_PACKAGED_RUNTIME_ENTRIES] as string[]).filter(
-      entry => entry !== 'node_modules/@picoaide/dsh-enterprise/lib/session-service.js',
-    )
-    const entries = joined.map(entry => `/${entry}`)
+    // 完整 asar 由必需条目 + 导出面 + profile 锚点共同构成。这里模拟缺少
+    // enterprise session-service —— 必须用**完整夹具**：只喂必需条目的旧写法
+    // 会让 profile 锚点判据先失败，把这条用例想验的导出判据挤掉。
+    const entries = completeArchiveEntries()
+      .filter(entry => entry !== '/node_modules/@picoaide/dsh-enterprise/lib/session-service.js')
     expect(() => verifyWithBrandStub(
       runtimeContext,
       () => entries,
@@ -599,6 +607,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       return rel === appRoot
         || REQUIRED_PACKAGED_RUNTIME_ENTRIES.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
         || REQUIRED_ASAR_EXPORT_PATHS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+        || REQUIRED_PROFILE_PATCH_ANCHORS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
     })
     expect(() => verifyWithBrandStub(runtimeContext, noArchive, existsComplete)).not.toThrow()
 
@@ -1060,5 +1069,202 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         .toThrow(/cannot find the packaged launcher/u)
       expect(launch).not.toHaveBeenCalled()
     })
+  })
+})
+
+  it('profile 锚点表与 src/profile.ts 的实际解析点逐条对拍（防新增插件漏登记）', () => {
+    // 判据来源：`src/profile.ts` 里每一处 `resolve('<pkg>/package.json')` 都会在
+    // **组装期**读该包目录下的东西。其中**带 `cordis.patch.yml` 的**是我们自己的
+    // 插件包（profile 拿它拼桌面组合）—— 这些必须在锚点表里。
+    //
+    // 上游两个包（`@deepseek-ai/dsh` 的 config/agent-presets、`dsh-agent-presets`
+    // 的 presets）解析的是 presets 目录、没有 patch，已由
+    // `REQUIRED_PACKAGED_RUNTIME_ENTRIES` 逐条钉住，因此按"是否有 patch 文件"
+    // 分流，而不是按包名白名单。
+    const source = readFileSync(new URL('../src/profile.ts', import.meta.url), 'utf8')
+    const resolved = new Set<string>()
+    for (const m of source.matchAll(/resolve\('([^']+)\/package\.json'\)/gu)) {
+      const pkg = m[1]
+      if (pkg !== undefined) resolved.add(pkg)
+    }
+    // 前置断言：判据不能空转。
+    expect(resolved.size).toBeGreaterThan(5)
+
+    const patchBearing = [...resolved]
+      .filter(pkg => existsSync(fileURLToPath(new URL(`../node_modules/${pkg}/cordis.patch.yml`, import.meta.url))))
+    // 前置断言：确实分流出了自有插件包。
+    expect(patchBearing.length).toBeGreaterThan(5)
+
+    const expected = patchBearing.flatMap(pkg => [
+      `node_modules/${pkg}/package.json`,
+      `node_modules/${pkg}/cordis.patch.yml`,
+    ]).sort()
+    const actual = [...REQUIRED_PROFILE_PATCH_ANCHORS].sort()
+    expect(actual).toEqual(expected)
+  })
+
+  it('profile 锚点判据在两套布局里都必须真的被调用（接线守卫）', () => {
+    // 变异验证暴露的缺口：把任一处 `assertProfilePatchAnchors(...)` 删掉，
+    // 其余用例**全绿**（它们只测函数本身，不测"被调用"）。这里读真源钉住两处：
+    // asar 走 `present.has`（真实归档清单），物理布局走 `exists(join(...))`。
+    const source = readFileSync(
+      new URL('../scripts/verify-packaged-runtime.ts', import.meta.url),
+      'utf8',
+    )
+    expect(source).toMatch(/assertProfilePatchAnchors\(entry => present\.has\(entry\), archivePath\)/u)
+    expect(source).toMatch(/assertProfilePatchAnchors\(entry => exists\(join\(appRoot, entry\)\), appRoot\)/u)
+  })
+
+  it('profile 锚点缺失即拒包（逐条可判）', () => {
+    const full = new Set([...REQUIRED_PROFILE_PATCH_ANCHORS])
+    expect(() => assertProfilePatchAnchors(entry => full.has(entry), '/x/app.asar')).not.toThrow()
+    for (const dropped of REQUIRED_PROFILE_PATCH_ANCHORS) {
+      const without = new Set([...REQUIRED_PROFILE_PATCH_ANCHORS].filter(e => e !== dropped))
+      expect(
+        () => assertProfilePatchAnchors(entry => without.has(entry), '/x/app.asar'),
+        `缺少 ${dropped} 时必须拒包`,
+      ).toThrow(/missing profile patch anchors/u)
+    }
+  })
+
+describe('发布包不得夹带自有源码 / sourcemap / 开发期产物（2026-09-22 泄漏修复）', () => {
+  // 背景（实测）：`build.files` 里曾写「仅根级 TypeScript」的单星号排除（`*` 不跨 `/`），
+  // 加上 `lib/**` 把 lib 内容平铺到 asar 根 ⇒ 11 个已发布的正式/预发包都带着
+  // 桌面包自身的 src/tests/scripts、各 `@picoaide/dsh-*` 的 src（工作区依赖是
+  // symlink，electron-builder 忽略子包 `files` 整体收编）、以及 33 个内嵌
+  // `sourcesContent` 的 sourcemap；而 DevTools 从没被覆写（默认可用）。
+  // 这张表是 afterPack 的**证据侧**判据：排除规则写错时坏包产不出来。
+
+  it('反例：逐条形态都必须被拒（每条独立可判，不靠"至少命中一条"）', () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['desktop src', 'src/main.ts'],
+      ['desktop tests', 'tests/package.spec.ts'],
+      ['desktop scripts', 'scripts/notarize-mac.ts'],
+      ['desktop root tsconfig', 'tsdown.config.ts'],
+      ['workspace src', 'node_modules/@picoaide/dsh-browser/src/runtime.ts'],
+      ['workspace spec', 'node_modules/@picoaide/dsh-account-card/src/client/AccountCard.spec.tsx'],
+      ['workspace tests dir', 'node_modules/@picoaide/dsh-cron/tests/jobs.spec.ts'],
+      ['sourcemap at archive root', 'main.js.map'],
+      ['sourcemap in a subdirectory', 'lib/preload/renderer-error.cjs.map'],
+      ['e2e artifacts', '.e2e-terminal/Default/Cache/x'],
+      ['real-env artifacts', '.real-env-shots/shot.png'],
+      ['build temp directory', 'temp/squash-gzip.squashfs'],
+      ['previous build output', 'dist-leakbase/linux-unpacked/x'],
+    ]
+    for (const [label, entry] of cases) {
+      // 每条单独喂：任何一条规则被删掉，对应 case 就会红。
+      expect(() => assertNoPackagedSourceLeaks([entry], '/x/app.asar'), label).toThrow(/leaks/u)
+    }
+  })
+
+  it('正例：正常产物条目一条都不能误伤', () => {
+    const legitimate = [
+      'lib/main.js',
+      'lib/types/index.d.ts',
+      'lib/types/client/AdvancedFrame.d.ts',
+      'lib/preload/renderer-error.cjs',
+      'package.json',
+      'cordis.patch.yml',
+      'build/tray-icon-blue.png',
+      'build/web-brand/favicon.svg',
+      'node_modules/@deepseek-ai/dsh/lib/bin.js',
+      // 上游包自带的 .d.ts / README 是公开发行物，不在「自有源码」范围里。
+      'node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.d.ts',
+      'node_modules/@picoaide/dsh-browser/lib/index.js',
+      'node_modules/@picoaide/dsh-browser/lib/types/index.d.ts',
+      // 第三方包把运行期代码放在 src/ 下（bowser / debug / fontkit 实测如此）——
+      // 所以排除规则只能点名 @picoaide，不能是 `**/src/**`。
+      'node_modules/bowser/src/bowser.js',
+      'node_modules/debug/src/index.js',
+      // 含 skills 的运行期内容必须留着（曾经被一条过宽的 *.md 排除误删）。
+      'node_modules/dsh-memory-evolve/skills/memory-consolidate/SKILL.md',
+      'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/cordis-plugin-development/SKILL.md',
+    ]
+    expect(() => assertNoPackagedSourceLeaks(legitimate, '/x/app.asar')).not.toThrow()
+  })
+
+  it('不把 `**/src/**` 当成通用规则（第三方 src 是运行期代码）', () => {
+    // 判据反向自证：若有人把规则从 `@picoaide` 放宽成任意 src，这条会红。
+    const thirdPartySources = [
+      'node_modules/bowser/src/bowser.js',
+      'node_modules/debug/src/index.js',
+      'node_modules/fontkit/src/TTFFont.js',
+    ]
+    expect(() => assertNoPackagedSourceLeaks(thirdPartySources, '/x/app.asar')).not.toThrow()
+    // 同名前缀自有包则必须命中。
+    expect(() => assertNoPackagedSourceLeaks(
+      ['node_modules/@picoaide/dsh-browser/src/runtime.ts'],
+      '/x/app.asar',
+    )).toThrow(/workspace package sources/u)
+  })
+
+  it('正例侧：内容级运行期资产被整类排除即拒（防"一刀切"排除造成假绿）', () => {
+    // 本轮**真实踩到**：一条「排除全部 .md」的过宽规则把随包技能一起排掉
+    //（COI 技能同步会全部 missing），而反例门禁全绿。这条就是那一侧的证据。
+    const withSkills = [
+      'lib/main.js',
+      'node_modules/dsh-memory-evolve/skills/memory-consolidate/SKILL.md',
+      'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/cordis-plugin-development/SKILL.md',
+    ]
+    expect(() => assertRuntimeAssetFamiliesSurvive(withSkills, '/x/app.asar')).not.toThrow()
+    expect(() => assertNoPackagedSourceLeaks(withSkills, '/x/app.asar')).not.toThrow()
+
+    // 只有运行期 JS、没有技能内容 ⇒ 反例侧放行，正例侧必须报"整类被抹掉"。
+    const withoutSkills = ['lib/main.js', 'lib/index.js', 'package.json']
+    expect(() => assertNoPackagedSourceLeaks(withoutSkills, '/x/app.asar')).not.toThrow()
+    expect(() => assertRuntimeAssetFamiliesSurvive(withoutSkills, '/x/app.asar'))
+      .toThrow(/no surviving entries for runtime asset families/u)
+
+    // 只缺其中一类也要报（不能"至少有一类在"就放行）。
+    expect(() => assertRuntimeAssetFamiliesSurvive(
+      ['node_modules/dsh-memory-evolve/skills/memory-consolidate/SKILL.md'],
+      '/x/app.asar',
+    )).toThrow(/dsh-agent-presets/u)
+  })
+
+  it('两个方向的判据都必须真的接进 afterPack 主流程（接线守卫）', () => {
+    // 变异验证暴露的缺口：把正例那一行从 `tryListArchive` 里删掉，其余用例
+    // **全绿** —— 因为它们只测辅助函数本身，不测"被调用"。这里读真源把接线钉住
+    //（与 network-policy / wasm-app-open-route 同款的源码级接线守卫）。
+    const source = readFileSync(
+      new URL('../scripts/verify-packaged-runtime.ts', import.meta.url),
+      'utf8',
+    )
+    expect(source).toMatch(/assertNoPackagedSourceLeaks\(present, archivePath\)/u)
+    expect(source).toMatch(/assertRuntimeAssetFamiliesSurvive\(present, archivePath\)/u)
+  })
+
+  it('桌面自身的 lib/types/** 不随包（现状事实，不得被当成"必须保留"）', () => {
+    // 实测（2026-09-22）：改动**前**的产物里 `lib/types/**` 就是 0 条 ——
+    // tsdown/tsc 会生成它（61 个文件），但它是**开发期类型面**，不进发布包。
+    // 运行期用到 `dsh-plugin-desktop/*` 类型的是 browser / connectors 等 workspace
+    // 包，它们经 node_modules 符号链接解析到**工作区源目录**，不吃 asar。
+    // 所以：既不能把它当"正例锚"（会把正确产物判红），也不得写进必需条目。
+    const verifierSource = readFileSync(
+      new URL('../scripts/verify-packaged-runtime.ts', import.meta.url),
+      'utf8',
+    )
+    expect(verifierSource).not.toContain("'lib/types/index.d.ts',")
+    expect([...REQUIRED_PACKAGED_RUNTIME_ENTRIES]).not.toContain('lib/types/index.d.ts')
+  })
+
+  it('files 排除规则本身不得退化成"仅根级"写法', () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as { build?: { files?: string[] } }
+    const files = manifest.build?.files ?? []
+    // 单星号不跨 `/`：`!*.ts` 只挡根级，子目录必须写 `!**/*.ts`。
+    expect(files).toContain('!**/*.ts')
+    expect(files).toContain('!**/*.tsx')
+    // sourcemap 同理：`!**/*.map` 之外还要显式挡根级的 `!*.map`
+    //（`lib/**` 平铺后 map 落在 asar 根，实测 33 个）。
+    expect(files).toContain('!**/*.map')
+    expect(files).toContain('!*.map')
+    // 开发期目录（temp 曾经装着 275 MiB 的 squashfs 试验件）。
+    expect(files).toContain('!temp/**')
+    expect(files).toContain('!dist/**')
+    // 自有包源码点名排除，且**不能**放宽成任意 src。
+    expect(files).toContain('!**/node_modules/@picoaide/*/src/**')
+    expect(files.some(pattern => pattern === '!**/src/**')).toBe(false)
   })
 })

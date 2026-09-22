@@ -41,6 +41,8 @@ describe('advanced BrowserWindow options', () => {
         nodeIntegration: false,
         sandbox: true,
         webSecurity: true,
+        // 开发态（缺省 packaged=false）：DevTools 保持可用。
+        devTools: true,
         // P0-6/D8:窗口必须挂上承载渲染进程错误转发的沙箱 preload。
         preload: expect.stringContaining('preload/renderer-error.cjs'),
       },
@@ -52,6 +54,24 @@ describe('advanced BrowserWindow options', () => {
       visualEffectState: 'followWindow',
     }))
     expect(desktopWindowOptions(spec, {} as NativeImage, 'darwin')).toEqual(options)
+  })
+
+  it('只在打包态关闭 DevTools，开发态保持可用', () => {
+    // 打包态（app.isPackaged === true）：发布产物里 DevTools 必须不可用。
+    const packaged = advancedWindowOptions(spec, {} as NativeImage, 'linux', true)
+    expect(packaged.webPreferences?.devTools).toBe(false)
+    expect(desktopWindowOptions(spec, {} as NativeImage, 'linux', true).webPreferences?.devTools)
+      .toBe(false)
+
+    // 开发态（缺省 false）：`yarn dev` 与真机排查仍要能开 DevTools。
+    const development = advancedWindowOptions(spec, {} as NativeImage, 'linux')
+    expect(development.webPreferences?.devTools).toBe(true)
+
+    // 三个平台同一条策略（不能只在 Linux 上生效）。
+    for (const platform of ['darwin', 'win32', 'linux'] as const) {
+      expect(advancedWindowOptions(spec, {} as NativeImage, platform, true).webPreferences?.devTools)
+        .toBe(false)
+    }
   })
 
   it('uses native Windows controls, Mica, shadow, and rounded corners', () => {
@@ -86,6 +106,8 @@ describe('advanced BrowserWindow options', () => {
         nodeIntegration: false,
         sandbox: true,
         webSecurity: true,
+        // 开发态（缺省 packaged=false）：DevTools 保持可用。
+        devTools: true,
         // P0-6/D8:窗口必须挂上承载渲染进程错误转发的沙箱 preload。
         preload: expect.stringContaining('preload/renderer-error.cjs'),
       },

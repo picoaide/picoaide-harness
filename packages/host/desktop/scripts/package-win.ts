@@ -5,6 +5,7 @@ import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
+import { withStagedPackAppRoot } from './pack-app-root.mjs'
 import { prepareChannelPackaging } from './channel-prepare.ts'
 
 const WINDOWS_SIGNING_KEYS = [
@@ -45,6 +46,15 @@ export interface WindowsPackageOptions {
   readonly channelConfigArgs: readonly string[]
   /** 本次构建的渠道 id（日志与验证脚本用）。 */
   readonly channelId: string
+  /**
+   * 打包输入暂存（见 pack-app-root.mjs）：把应用根复制成**只含运行期条目**的副本，
+   * 让 electron-builder 以它为 `directories.app`。
+   *
+   * 测试注入替身：真实实现要求在真实的包根上执行（会复制 lib/build/node_modules），
+   * 而这些用例用假路径（`/repo/...`、`C:\repo\...`）驱动命令边界，因此必须可注入。
+   * 生产调用一律用缺省值（真实现），afterPack 门禁兜住真实产物。
+   */
+  readonly stagePackAppRoot?: typeof withStagedPackAppRoot
   /** Execute one packaging command. */
   readonly run: (
     command: string,
@@ -161,25 +171,35 @@ export function packageWindowsArtifact(
       cleanEnvironment,
     )
   }
-  options.run(
-    options.nodeExecutable,
-    [
-      options.builderCli,
-      '--win',
-      target,
-      '--x64',
-      '--publish',
-      'never',
-      '--config.win.signExecutable=false',
-      '--config.npmRebuild=false',
-      ...options.channelConfigArgs,
-    ],
-    options.desktopRoot,
-    {
-      ...cleanEnvironment,
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false',
-    },
-  )
+  // 打包输入走暂存白名单副本（见 pack-app-root.mjs）：electron-builder 26 不把
+  // `build.files` 用在应用根目录内容上，直接打包会把 src/tests/scripts/temp/
+  // .e2e-* 与根级 sourcemap 一起收进 app.asar。
+  const staged = (options.stagePackAppRoot ?? withStagedPackAppRoot)(options.desktopRoot, 'dist')
+  try {
+    options.run(
+      options.nodeExecutable,
+      [
+        options.builderCli,
+        '--win',
+        target,
+        '--x64',
+        '--publish',
+        'never',
+        '--config.win.signExecutable=false',
+        '--config.npmRebuild=false',
+        ...options.channelConfigArgs,
+        ...staged.args,
+      ],
+      options.desktopRoot,
+      {
+        ...cleanEnvironment,
+        CSC_IDENTITY_AUTO_DISCOVERY: 'false',
+      },
+    )
+  } finally {
+    // 暂存目录必须就地清掉：留在 dist/ 里会被下一次打包当输入收编。
+    staged.cleanup()
+  }
   options.run(
     options.nodeExecutable,
     [options.verifier],

@@ -45,6 +45,12 @@ function options(calls: CommandCall[], logs: string[] = []): MacSmokePackageOpti
       calls.push({ command, args: [...args], cwd, env: { ...env } })
     },
     log: message => logs.push(message),
+    // 打包输入暂存：真实实现要求真实包根，本用例用假路径驱动命令边界，故注入替身。
+    stagePackAppRoot: () => ({
+      stageRoot: '/repo/packages/host/desktop/dist/.pack-root',
+      args: ['--config.directories.app=/repo/packages/host/desktop/dist/.pack-root'],
+      cleanup: () => undefined,
+    }),
   }
 }
 
@@ -74,6 +80,7 @@ describe('macOS DMG smoke packaging', () => {
         '--config.mac.notarize=false',
         '--config.npmRebuild=false',
         '--config.directories.output=/repo/packages/host/desktop/dist/mac-smoke',
+        '--config.directories.app=/repo/packages/host/desktop/dist/.pack-root',
       ],
       cwd: '/repo/packages/host/desktop',
       env: {

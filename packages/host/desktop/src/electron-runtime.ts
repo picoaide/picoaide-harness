@@ -789,7 +789,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (this.disposeRendererErrorCapture === undefined) {
       this.disposeRendererErrorCapture = installRendererErrorCapture(ipcMain)
     }
-    const window = new BrowserWindow(desktopWindowOptions(spec, icon, this.platform))
+    // 发布版关掉 DevTools（`app.isPackaged` 为准，开发态保持可用）——
+    // e2e/探针走 `--remote-debugging-port` 的 Chromium CDP，不依赖它。
+    const window = new BrowserWindow(desktopWindowOptions(spec, icon, this.platform, app.isPackaged))
     // P1-4: deny every renderer permission request by default. Electron
     // auto-grants camera/mic/geolocation etc. when no handler is set, which
     // an untrusted web surface must never receive. The embedded browser

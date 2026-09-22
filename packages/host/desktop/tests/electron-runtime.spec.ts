@@ -365,6 +365,9 @@ describe('Electron compatibility runtime', () => {
         nodeIntegration: false,
         sandbox: true,
         webSecurity: true,
+        // 该用例的 electron 替身 isPackaged=false（开发态）⇒ DevTools 保持可用；
+        // 发布态关闭由 tests/window-options.spec.ts 的专作用例钉住。
+        devTools: true,
         // P0-6/D8:沙箱 preload 承载渲染进程错误转发;缺了它渲染采集静默失效。
         preload: expect.stringContaining('preload/renderer-error.cjs'),
       },

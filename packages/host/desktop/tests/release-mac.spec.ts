@@ -44,6 +44,14 @@ function baseOptions(
     notarize: async () => undefined,
     log: message => logs.push(message),
     prepareRuntime: () => undefined,
+    // 打包输入暂存：真实实现要求真实包根（会复制 lib/build/node_modules），
+    // 本用例用假路径驱动命令边界，故注入替身；真实接线由 pack-app-root.spec.ts
+    // 的接线守卫 + afterPack 门禁负责。
+    stagePackAppRoot: () => ({
+      stageRoot: '/repo/packages/host/desktop/dist/.pack-root',
+      args: ['--config.directories.app=/repo/packages/host/desktop/dist/.pack-root'],
+      cleanup: () => undefined,
+    }),
   }
 }
 
@@ -88,6 +96,7 @@ describe('macOS release command boundary', () => {
         '--config.forceCodeSigning=true', '--config.mac.notarize=false',
         '--config.npmRebuild=false',
         '--config.directories.output=/repo/packages/host/desktop/dist/mac-release',
+        '--config.directories.app=/repo/packages/host/desktop/dist/.pack-root',
       ],
       cwd: '/repo/packages/host/desktop',
       env: {

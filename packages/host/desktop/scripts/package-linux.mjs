@@ -11,6 +11,7 @@ import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { prepareChannelBuilderOverrides } from './channel-build.ts'
 import { prepareChannelPackaging } from './channel-prepare.ts'
+import { withStagedPackAppRoot } from './pack-app-root.mjs'
 
 const require = createRequire(import.meta.url)
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -28,24 +29,33 @@ const channel = await prepareChannelPackaging()
 console.log(`package-linux: 渠道 ${channel.channelId}`)
 
 const builderCli = require.resolve('electron-builder/cli.js')
-const result = spawnSync(process.execPath, [
-  builderCli,
-  '--linux',
-  'AppImage',
-  'deb',
-  '--x64',
-  '--publish',
-  'never',
-  '--config.npmRebuild=false',
-  ...prepareChannelBuilderOverrides(channel),
-], {
-  cwd: packageRoot,
-  env: {
-    ...process.env,
-    CSC_IDENTITY_AUTO_DISCOVERY: 'false',
-  },
-  stdio: 'inherit',
-})
+// 打包输入走暂存白名单副本（见 pack-app-root.mjs）：否则 src/tests/scripts/temp
+// 与根级 sourcemap 会随包出厂。
+const staged = withStagedPackAppRoot(packageRoot, 'dist')
+let result
+try {
+  result = spawnSync(process.execPath, [
+    builderCli,
+    '--linux',
+    'AppImage',
+    'deb',
+    '--x64',
+    '--publish',
+    'never',
+    '--config.npmRebuild=false',
+    ...prepareChannelBuilderOverrides(channel),
+    ...staged.args,
+  ], {
+    cwd: packageRoot,
+    env: {
+      ...process.env,
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false',
+    },
+    stdio: 'inherit',
+  })
+} finally {
+  staged.cleanup()
+}
 
 if (result.error !== undefined) throw result.error
 if (result.status !== 0) {

@@ -164,7 +164,6 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@picoaide/dsh-cron/lib/client.js',
   'node_modules/@picoaide/dsh-cron/lib/invariant.js',
   'node_modules/@picoaide/dsh-cron/package.json',
-  'node_modules/@picoaide/dsh-cron/cordis.patch.yml',
   // 侧边栏底部「更多」行（2026-09-21 并道改造）：五个面板插件的底部条目都登记进它
   // 提供的 `picoFootMenu` 服务，`lib/client.js` 就是那个注册了**唯一**底部座位占用者
   // 的客户端 bundle。它**没有** `lib/invariant.js`（本包没有伴生不变量行），所以这里
@@ -257,6 +256,118 @@ export const PACKAGED_WEB_BRAND_ASSETS = [
   PACKAGED_WEB_BRAND_FAVICON,
   PACKAGED_WEB_BRAND_OFFICIAL,
 ] as const
+
+/**
+ * 包里**绝不允许出现**的条目形态（2026-09-22 泄漏修复的 afterPack 反向断言）。
+ *
+ * 背景：`build.files` 里曾经写着「仅根级 TypeScript」的两条排除（单星号写法），
+ * 而 minimatch 的 `*` **不跨 `/`** —— 只匹配根级。加上 `lib/**` 把 `lib/` 内容
+ * 平铺到 asar 根，于是 `lib/` 下的 sourcemap 与各包的源码目录一起进了发布包；
+ * 那条 map 排除同理只匹配「某个目录的直属文件」，根级的 map 全部漏过。
+ * 实测 11 个已发布的正式/预发包都带着：
+ *   - 桌面包自身源码目录（76 个文件）+ 测试目录 + 构建脚本目录，其中含发布/公证脚本
+ *   - 各 `@picoaide/dsh-*` 的源码目录（工作区依赖是 symlink，electron-builder 会
+ *     **忽略子包自己的 `files` 字段**整体收编，`.spec.tsx` 也在内）
+ *   - 33 个 sourcemap，`sourcesContent` 里内嵌**原始 TypeScript 源码**
+ * 而 `webPreferences.devTools` 从没被覆写（Electron 默认可用）⇒ 客户开一次 DevTools
+ * 就能把源码读出来。
+ *
+ * 这张表就是「下次别再犯」的判据：排除规则是**声明**，这里是**证据**。
+ * 断言放在 afterPack ⇒ 坏包根本产不出来（不是靠人 review `files`）。
+ */
+export const FORBIDDEN_PACKAGED_ARCHIVE_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
+  // 桌面包自身源码（asar 根）。`lib/**` 平铺只搬 lib 的内容，src/tests 到不了这里。
+  ['desktop sources (src/**)', /^src\//u],
+  ['desktop tests (tests/**)', /^tests\//u],
+  ['desktop build scripts (scripts/**)', /^scripts\//u],
+  ['desktop root TypeScript config/sources', /^[^/]+\.(ts|tsx|mts|cts)$/u],
+  // 工作区包源码：electron-builder 不遵守子包 `files`，必须在这里兜底。
+  ['workspace package sources (@picoaide/*/src/**)', /^node_modules\/@picoaide\/[^/]+\/src\//u],
+  ['workspace package tests (@picoaide/*/tests/**)', /^node_modules\/@picoaide\/[^/]+\/tests\//u],
+  ['workspace package docs (@picoaide/*/docs/**)', /^node_modules\/@picoaide\/[^/]+\/docs\//u],
+  // sourcemap 是**独立**泄漏面（`sourcesContent` = 原始 TS 源码），与上面的 .ts 分开判。
+  ['sourcemaps', /\.map$/u],
+  // 开发期产物。`.e2e-*` 是 E2E 的截图/缓存目录，实测每个 12~16 MiB。
+  ['E2E artifacts (.e2e-*/**)', /^\.e2e-/u],
+  ['real-env artifacts (.real-env-*/**)', /^\.real-env-/u],
+  // 打包脚本的临时目录（曾经装着 156 MiB + 119 MiB 的 squashfs 试验件）。
+  ['build temp directory (temp/**)', /^temp\//u],
+  ['previous build output (dist*/**)', /^dist[^/]*\//u],
+]
+
+/**
+ * Fail the build when the packaged archive carries first-party sources, sourcemaps
+ * or development artifacts.
+ *
+ * 只做**反例**判定（`entries` 是完整包内容）。正例方向由
+ * {@link assertRuntimeAssetFamiliesSurvive} 单独负责 —— 两个方向拆开，
+ * 单测才能在只喂一份精简条目集的情况下分别验证，而不会因为「缺正例」把反例
+ * 用例也一起染红。
+ * @param entries - normalized entry paths (forward slashes, no leading slash).
+ * @param where - archive/root path for the error message.
+ */
+export function assertNoPackagedSourceLeaks(
+  entries: Iterable<string>,
+  where: string,
+): void {
+  const present = [...entries]
+  const violations: string[] = []
+  for (const [label, pattern] of FORBIDDEN_PACKAGED_ARCHIVE_PATTERNS) {
+    const hits = present.filter(entry => pattern.test(entry))
+    if (hits.length === 0) continue
+    const sample = hits.slice(0, 5).join(', ')
+    violations.push(`${label}: ${String(hits.length)} (e.g. ${sample})`)
+  }
+  if (violations.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged archive at ${where} leaks first-party sources or dev artifacts: `
+      + violations.join('; '),
+    )
+  }
+}
+
+/**
+ * 与 Electron / Node 版本无关的**稳定**路径锚。
+ *
+ * 只用固定前缀，不用"最新那个技能名"之类会随上游漂移的字面量 —— 漂移的锚会让
+ * 门禁变成"改上游就要改断言"，而那正是它被绕过的方式（参考本项目已有的教训：
+ * 判据要能被打坏，但锚点必须稳定）。
+ */
+export const RUNTIME_ASSET_FAMILIES: ReadonlyArray<RegExp> = [
+  /^node_modules\/dsh-memory-evolve\/skills\/[^/]+\/SKILL\.md$/u,
+  /^node_modules\/@deepseek-ai\/dsh-agent-presets\/presets\/cordis\/skills\/[^/]+\/SKILL\.md$/u,
+]
+
+/**
+ * 正例侧：**内容级**运行期资产不得被排除规则整体抹掉。
+ *
+ * 为什么需要这一半：只钉「不得有源码 / sourcemap」的话，一条过宽的排除规则
+ * （例如「排除全部 `.md`」）会把随包运行期内容一起删掉，而产物"没有任何泄漏"、
+ * 反例门禁全绿 —— 这正是本项目已登记过的"假绿"形态（只钉一侧）。
+ * 本轮**实测踩到**：一条「排除全部 .md」的过宽规则把随包技能 SKILL.md 一起排掉
+ * （`dsh-memory-evolve/skills/<技能>/SKILL.md` 与 agent-presets 的 presets 技能树），
+ * COI 技能同步会全部 `missing`。
+ *
+ * 与 `REQUIRED_PACKAGED_RUNTIME_ENTRIES` 的分工：那张表钉**具体文件存在**；
+ * 这里钉**某个内容家族整体还在** —— 上游新增技能时前者要靠人补条目（已有
+ * "清单必须覆盖源目录"用例驱动），后者当场就能发现"整类被排除规则干掉"。
+ * @param entries - normalized entry paths (forward slashes, no leading slash).
+ * @param where - archive/root path for the error message.
+ */
+export function assertRuntimeAssetFamiliesSurvive(
+  entries: Iterable<string>,
+  where: string,
+): void {
+  const present = [...entries]
+  const missing = RUNTIME_ASSET_FAMILIES.filter(family => !present.some(entry => family.test(entry)))
+  if (missing.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged archive at ${where} has no surviving entries for runtime asset `
+      + `families: ${missing.map(String).join(', ')} `
+      + '(an over-broad exclusion rule removed content the runtime reads)',
+    )
+  }
+}
 
 /**
  * Upstream-only markers the packaged brand asset must never carry.
@@ -672,6 +783,14 @@ function tryListArchive(archivePath: string, list: ArchiveLister): ReadonlySet<s
       `dsh-plugin-desktop: packaged runtime at ${archivePath} is missing required ASAR entries: ${missing.join(', ')}`,
     )
   }
+  // 反向断言（2026-09-22）：包里不得出现自有源码 / sourcemap / 开发期产物。
+  // 放在这里而不是 `files` 里 —— `files` 是声明，这里是**证据**：任何一条排除规则
+  // 写错（例如「仅根级」那种单星号写法）都会在这一步把坏包拦下来，而不是发到客户机上。
+  assertNoPackagedSourceLeaks(present, archivePath)
+  assertRuntimeAssetFamiliesSurvive(present, archivePath)
+  // 自有插件包的 profile 锚点（package.json + cordis.patch.yml）：缺任何一个，
+  // `prepareDesktopProfile()` 里的 createRequire().resolve 就会抛错、应用起不来。
+  assertProfilePatchAnchors(entry => present.has(entry), archivePath)
   return present
 }
 
@@ -729,6 +848,67 @@ export const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   { specifier: '@picoaide/dsh-connectors/client', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/client.js' },
   { specifier: '@picoaide/dsh-connectors/package.json', archivePath: 'node_modules/@picoaide/dsh-connectors/package.json' },
 ]
+
+/**
+ * `src/profile.ts` 在**组装期**用 `createRequire(...).resolve('<包>/package.json')`
+ * 定位每个自有插件包的 `cordis.patch.yml`（`patchPaths` 那一组常量）。这些解析
+ * 发生在**包内**（asar 走 Electron 的 fs 补丁），因此这两类文件必须随包：
+ *
+ *  - `<包>/package.json`：`require.resolve` 的落点；
+ *  - `<包>/cordis.patch.yml`：`dirname(...)` + 拼接后的实际读取路径。
+ *
+ * **为什么必须逐条钉住**：解析失败是 `createRequire().resolve()` 抛错 ⇒
+ * `prepareDesktopProfile()` 直接失败 ⇒ **应用根本起不来**；而当时 `REQUIRED_ASAR_EXPORTS`
+ * 只覆盖了 enterprise 与 connectors 的一部分（`dsh-cron`、`dsh-account-card`、
+ * `dsh-foot-menu`、`dsh-wasm-apps`、`dsh-browser`、`dsh-wasm-apps-host`、
+ * `dsh-memory-evolve` 一个都没覆盖）。2026-09-22 引入打包输入暂存层后这条尤其重要：
+ * 暂存白名单一旦漏掉某个包，afterPack 必须当场拒包，而不是让客户端开不起来。
+ *
+ * 桌面自身的补丁不在表里：它由 `DESKTOP_PATCH_PATH` 指向 `lib/../cordis.patch.yml`
+ * （已由 `REQUIRED_PACKAGED_RUNTIME_ENTRIES` 的 `cordis.patch.yml` 钉住）。
+ */
+export const REQUIRED_PROFILE_PATCH_ANCHORS: readonly string[] = [
+  'node_modules/@picoaide/dsh-enterprise/package.json',
+  'node_modules/@picoaide/dsh-enterprise/cordis.patch.yml',
+  'node_modules/@picoaide/dsh-account-card/package.json',
+  'node_modules/@picoaide/dsh-account-card/cordis.patch.yml',
+  'node_modules/@picoaide/dsh-wasm-apps/package.json',
+  'node_modules/@picoaide/dsh-wasm-apps/cordis.patch.yml',
+  'node_modules/@picoaide/dsh-foot-menu/package.json',
+  'node_modules/@picoaide/dsh-foot-menu/cordis.patch.yml',
+  'node_modules/@picoaide/dsh-connectors/package.json',
+  'node_modules/@picoaide/dsh-connectors/cordis.patch.yml',
+  'node_modules/@picoaide/dsh-browser/package.json',
+  'node_modules/@picoaide/dsh-browser/cordis.patch.yml',
+  'node_modules/@picoaide/dsh-wasm-apps-host/package.json',
+  'node_modules/@picoaide/dsh-wasm-apps-host/cordis.patch.yml',
+  'node_modules/@picoaide/dsh-cron/package.json',
+  'node_modules/@picoaide/dsh-cron/cordis.patch.yml',
+  'node_modules/dsh-memory-evolve/package.json',
+  'node_modules/dsh-memory-evolve/cordis.patch.yml',
+]
+
+/**
+ * 逐条断言 profile 锚点在包内（asar 与物理两种布局共用同一张表）。
+ *
+ * 抽成函数是为了让两套布局用**同一份判据**：任一侧单独维护必然漂移，而漂移的
+ * 那一侧就是"坏包放行"的那一侧（本项目已登记过的假绿形态）。
+ * @param present - 包内是否存在该相对路径。
+ * @param where - 归档/目录路径，用于报错定位。
+ */
+export function assertProfilePatchAnchors(
+  present: (entry: string) => boolean,
+  where: string,
+): void {
+  const missing = REQUIRED_PROFILE_PATCH_ANCHORS.filter(entry => !present(entry))
+  if (missing.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged runtime at ${where} is missing profile patch anchors: `
+      + `${missing.join(', ')} (the desktop profile resolves these at boot; a missing one makes `
+      + 'the application fail to start)',
+    )
+  }
+}
 
 /**
  * Verify package exports resolve inside app.asar (Electron's fs patch reads
@@ -940,6 +1120,12 @@ function verifyPhysicalRuntime(
       `dsh-plugin-desktop: packaged runtime at ${appRoot} is missing required package exports: ${missingExports.map(entry => entry.archivePath).join(', ')}`,
     )
   }
+  // 注意：**物理布局不做** `assertNoPackagedSourceLeaks`。那条判据需要遍历真实目录，
+  // 而这一分支的既有测试是用注入的 `exists` 探针 + 假路径（`/build/resources/app`）
+  // 驱动的 —— 真去 readdir 会读不存在的目录、把「正例」用例染红。物理布局是桌面壳
+  // 不使用的兜底形态（`asar: false` 才走到），真实泄漏面（asar）在 `tryListArchive`
+  // 里逐条判。profile 锚点则两种布局都判（它们只需要 `exists`）。
+  assertProfilePatchAnchors(entry => exists(join(appRoot, entry)), appRoot)
   verifyWebBrandAssets(entry => readEntry(appRoot, entry), appRoot)
 }
 

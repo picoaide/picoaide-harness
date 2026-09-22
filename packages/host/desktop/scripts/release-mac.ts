@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
 import { prepareChannelPackaging } from './channel-prepare.ts'
+import { withStagedPackAppRoot } from './pack-app-root.mjs'
 import {
   adaptMacReleaseEnvironment,
   assertMacReleaseReady,
@@ -36,6 +37,15 @@ export interface MacReleaseOptions {
   readonly resetOutput: () => void
   /** Read code-signing identities with a credential-free environment. */
   readonly listCodeSigningIdentities: (env: NodeJS.ProcessEnv) => string
+  /**
+   * 打包输入暂存（见 pack-app-root.mjs）：把应用根复制成**只含运行期条目**的副本，
+   * 让 electron-builder 以它为 `directories.app`。
+   *
+   * 测试注入替身：真实实现要求在真实的包根上执行（会复制 lib/build/node_modules），
+   * 而这些用例用假路径（`/repo/...`、`C:\repo\...`）驱动命令边界，因此必须可注入。
+   * 生产调用一律用缺省值（真实现），afterPack 门禁兜住真实产物。
+   */
+  readonly stagePackAppRoot?: typeof withStagedPackAppRoot
   /** Execute one release command. */
   readonly run: (
     command: string,
@@ -185,14 +195,25 @@ export async function packMacApp(
   // GH_TOKEN 打挂 tag 运行)——发布由 CI Release job 统一负责。注意必须是
   // 顶层 --publish 选项:`--config.publish=never` 会被当成发布插件名
   // "never" 加载失败(2026-09-05 rc.3 公证成功后死于 DMG 步骤的元凶)。
-  options.run('yarn', [
-    'exec', 'electron-builder', '--mac', 'dir', '--arm64',
-    '--publish', 'never',
-    '--config.forceCodeSigning=true', '--config.mac.notarize=false',
-    '--config.npmRebuild=false',
-    ...options.channelConfigArgs,
-    `--config.directories.output=${options.outputDir}`,
-  ], options.desktopRoot, releaseEnvironment)
+  // 打包输入走暂存白名单副本（见 pack-app-root.mjs）：electron-builder 26 不把
+  // `build.files` 用在应用根目录内容上，直接打包会把 src/tests/scripts/temp/
+  // .e2e-* 与根级 sourcemap 一起收进 app.asar。后面两个 `--prepackaged` 调用
+  // 不再复制应用目录，所以只需在这一步接。
+  const staged = (options.stagePackAppRoot ?? withStagedPackAppRoot)(options.desktopRoot, 'dist')
+  try {
+    options.run('yarn', [
+      'exec', 'electron-builder', '--mac', 'dir', '--arm64',
+      '--publish', 'never',
+      '--config.forceCodeSigning=true', '--config.mac.notarize=false',
+      '--config.npmRebuild=false',
+      ...options.channelConfigArgs,
+      `--config.directories.output=${options.outputDir}`,
+      ...staged.args,
+    ], options.desktopRoot, releaseEnvironment)
+  } finally {
+    // 暂存目录必须就地清掉：留在 dist/ 里会被下一次打包当输入收编。
+    staged.cleanup()
+  }
   // A fresh build invalidates any previous submission: the notarization state
   // file (if present) belongs to an older app bundle and must not be resumed.
   try {
