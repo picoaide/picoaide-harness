@@ -22,10 +22,25 @@ body[data-dsh-desktop-mode="advanced"] { margin: 0; background: transparent !imp
    落在 border-right 上（半糊重影就是用户说的扫描感）。
    这里在模态存在时把两个真源一起换掉 —— 表面自身的 background（darwin 上真正被绘制的
    那一层）与 --dsw-specific-sidebar-fill（上游 SidebarRoot.module.css 的 .root 底色来源）
-   —— 都取对话列同款 bg-base，蒙版两侧的底就一致了；模态关闭立刻回到透明，原生材质照旧透出。
+   —— 都取对话列同款 bg-base，且必须是**同一个** var(--dsw-alias-bg-base)，不是"另一个
+   也不透明的颜色"：换成别的 token 亮色下看不出来（层 2 与 base 在亮色同为
+   neutral-bluish-00），暗色下左栏 rgb(44,44,46) 会与会话列 rgb(21,21,23) 重新出现色差。
+   模态关闭立刻回到透明，原生材质照旧透出；宿主必须**卸载**模态节点（:has() 不看可见性，
+   隐藏而不卸载会让左栏一直不透明）。
    选择器只用 html:has() 加我们自己的稳定类名，绝不写上游 CSS-module 的哈希类名；
-   role=dialog 与 aria-modal 同时要求，与 @picoaide/dsh-panel-surface 的模态判据同形，
-   面板内的内联 alertdialog 确认块不带整视口蒙版，因此不会误触发。 */
+   role=dialog 与 aria-modal 同时要求，与 @picoaide/dsh-panel-surface 的模态判据同形。
+
+   两条必须知道的耦合（2026-09-23 审计 D1/D2/D6）：
+   1) 面板内的内联确认块之所以不触发，是它的 role="alertdialog" 与本判据的 role="dialog"
+      **不同名** —— 与"有没有整视口蒙版"无关（合成场景已证：无蒙版的
+      role="dialog" aria-modal="true" 照样命中）。而 aria-modal="true" 在本仓兼作 **Esc
+      协议信号**：@picoaide/dsh-panel-surface 与 foot-menu 都只看 dialog+aria-modal 决定
+      Esc 是否让位，account-card 反过来因此故意不加它。所以后人给一个**没有蒙版**的浮层
+      写上 role="dialog" aria-modal="true"，左栏就会在没有任何蒙版时静默放弃原生材质 ——
+      新增模态时必须连带考虑本条规则。
+   2) memory-evolve 的通知详情弹窗有整视口蒙版、**没有** backdrop-filter：它不产生毛玻璃
+      接缝，却同样会让左栏放弃原生材质。方向与"模态压暗整个 app"一致（观感更整齐），
+      属有意接受；把触发器收窄成"确有毛玻璃蒙版"需要每个宿主配合，代价更大。 */
 html:has([role="dialog"][aria-modal="true"]) .dshDesktopSidebarSurface { --dsw-specific-sidebar-fill: var(--dsw-alias-bg-base); background: var(--dsw-alias-bg-base); }
 .dshDesktopFrame[data-desktop-platform="darwin"] .dshDesktopUpstreamSidebar { padding-top: ${MACOS_TITLEBAR_HEIGHT}px; -webkit-app-region: no-drag; }
 .dshDesktopFrame[data-desktop-platform="darwin"][data-sidebar-collapsed] .dshDesktopUpstreamSidebar { width: ${SIDEBAR_COLLAPSED}px; margin: 0 auto; }

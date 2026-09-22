@@ -18,7 +18,11 @@
  *   2. 无模态时：规则不命中、左栏仍是透明（原生材质照旧透出）；
  *   3. 模态存在时：规则命中、表面背景与变量都 alpha=1，且**与对话列同色**（两侧一致）；
  *   4. 上游 .root（真正读那个变量的消费者）也随之不透明；
- *   5. 内联 alertdialog（无整视口蒙版）不触发——不许无缘无故关掉原生材质。
+ *   5. 内联 alertdialog（无整视口蒙版）不触发——不许无缘无故关掉原生材质；
+ *   6. **暗色主题**下重跑 2–4：亮色下 `--dsw-alias-bg-layer-2` 与 `--dsw-alias-bg-base`
+ *      同色，"换成另一个不透明的 token"能逃逸；暗色下二者是 rgb(44,44,46) vs
+ *      rgb(21,21,23)，只有"与会话列同源"才拦得住（2026-09-23 审计 M4）；
+ *   7. 前提钉子：上游 `.mask` 仍带 `backdrop-filter: var(--dsw-mask-blur)`。
  *
  * `--mutate=<kind>` 反向验证：把修复改坏后，上面某几条必须变红（打印 DETECTED）。
  */
@@ -86,14 +90,20 @@ const MUTATIONS = {
   'drop-rule': css => mutateRule(css, () => ''),
   'background-transparent': css => mutateRule(css, rule => rule.replace(/background:[^;]+;/u, 'background: transparent;')),
   'drop-var': css => mutateRule(css, rule => rule.replace(/--dsw-specific-sidebar-fill:[^;]+;/u, '')),
+  // 审计 M4：换成同样不透明、只是不同色的 token。亮色下与会话列同色 ⇒ 只有暗色场景能抓。
+  'layer-2-token': css => mutateRule(css, rule => rule.replace(/var\(--dsw-alias-bg-base\)/gu, 'var(--dsw-alias-bg-layer-2)')),
 }
 
 const EXPECTED_MUTATION_RED = {
   // 注意 `modal-selector-matches` 是**能力判据**（Element.matches 只看 DOM，与样式表无关）：
   // 删掉规则它照样是绿的，所以它不进任何变异期望。
-  'drop-rule': ['open-opaque-surface', 'open-opaque-var', 'open-matches-conversation', 'open-root-fill'],
-  'background-transparent': ['open-opaque-surface', 'open-matches-conversation'],
-  'drop-var': ['open-opaque-var', 'open-root-fill'],
+  'drop-rule': [
+    'open-opaque-surface', 'open-opaque-var', 'open-matches-conversation', 'open-root-fill',
+    'dark-open-opaque-surface', 'dark-open-matches-conversation', 'dark-open-root-fill',
+  ],
+  'background-transparent': ['open-opaque-surface', 'open-matches-conversation', 'dark-open-opaque-surface'],
+  'drop-var': ['open-opaque-var', 'open-root-fill', 'dark-open-opaque-var', 'dark-open-root-fill'],
+  'layer-2-token': ['dark-open-matches-conversation'],
 }
 
 /** 与 spec 里同一套 alpha 判定（解析失败一律抛，不许静默通过）。 */
@@ -114,11 +124,18 @@ function readMaskDeclarations() {
   return readFile(SETTINGS_ROOT_CSS, 'utf8').then(css => upstreamDeclarations(css, '.mask'))
 }
 
-async function buildPage(styles) {
-  const [tokens, sidebarRoot, mask] = await Promise.all([
+/** 上游蒙版是否仍是"半透明底 + backdrop-filter: var(--dsw-mask-blur)"（修复赖以成立的前提）。 */
+function maskStillBlurs(mask) {
+  return /backdrop-filter\s*:\s*var\(--dsw-mask-blur\)/u.test(mask)
+}
+
+const MODAL_MARKUP = '<div role="presentation"><div id="probe-mask"></div>'
+  + '<div role="dialog" aria-modal="true">settings</div></div>'
+
+async function buildPage(styles, mask) {
+  const [tokens, sidebarRoot] = await Promise.all([
     readFile(PLATFORM_CSS, 'utf8'),
     readFile(SIDEBAR_ROOT_CSS, 'utf8'),
-    readMaskDeclarations(),
   ])
   const guard = text => text.replace(/<\/style/giu, '<\\/style')
   return `<!doctype html>
@@ -156,12 +173,21 @@ async function buildPage(styles) {
   var result = { supportsHas: CSS.supports('selector(html:has([aria-modal="true"]))') }
   result.closed = measure()
   // 上游设置弹窗的真实形状：整视口蒙版（真 .mask 声明）+ role=dialog/aria-modal 面板。
-  host.innerHTML = '<div role="presentation"><div id="probe-mask"></div>'
-    + '<div role="dialog" aria-modal="true">settings</div></div>'
+  host.innerHTML = ${JSON.stringify(MODAL_MARKUP)}
   result.open = measure()
   // 面板内的内联确认块（role=alertdialog + aria-modal，但没有整视口蒙版）。
   host.innerHTML = '<div role="alertdialog" aria-modal="true">confirm</div>'
   result.alertOnly = measure()
+  // 暗色主题：同样的场景再量一遍。亮色下 bg-base 与 bg-layer-2 同色，"换成另一个不透明的
+  // token"能逃逸；暗色下二者不同色，只有"与会话列同源"才拦得住（审计 M4）。
+  host.innerHTML = ''
+  document.body.setAttribute('data-ds-dark-theme', '')
+  result.darkClosed = measure()
+  host.innerHTML = ${JSON.stringify(MODAL_MARKUP)}
+  result.darkOpen = measure()
+  // 关闭模态后必须回到透明（暗色下再验一次"原生材质照旧透出"）。
+  host.innerHTML = ''
+  result.darkClosedAgain = measure()
   window.__PROBE__ = result
 </script>
 </body></html>`
@@ -194,7 +220,8 @@ async function main() {
   }
   const directory = await mkdtemp(join(tmpdir(), 'modal-frost-'))
   const page = join(directory, 'probe.html')
-  await writeFile(page, await buildPage(styles))
+  const mask = await readMaskDeclarations()
+  await writeFile(page, await buildPage(styles, mask))
   process.stdout.write(`probe page: ${page}\n`)
 
   const headless = process.env.DISPLAY === undefined || process.env.DISPLAY === ''
@@ -226,6 +253,23 @@ async function main() {
     'open-root-fill': alpha(measured.open.rootBackground) === 1,
     'alertdialog-ignored': measured.alertOnly.match === false
       && alpha(measured.alertOnly.surfaceBackground) === 0,
+    // 暗色场景（审计 D4/M4）。反空转：先证明暗色主题真的生效（会话列换色了），
+    // 否则下面的"相等"可能只是两套主题解析出同一个值。
+    'dark-theme-is-real': alpha(measured.darkOpen.conversationBackground) === 1
+      && measured.darkOpen.conversationBackground !== measured.open.conversationBackground,
+    'dark-closed-transparent': alpha(measured.darkClosed.surfaceBackground) === 0
+      && measured.darkClosed.surfaceFillVar === 'transparent',
+    'dark-open-opaque-surface': alpha(measured.darkOpen.surfaceBackground) === 1,
+    'dark-open-opaque-var': alpha(measured.darkOpen.surfaceFillVar) === 1,
+    // 关键一条：暗色下"同样不透明但不同色"的 token 会在这里露馅（M4）。
+    'dark-open-matches-conversation': measured.darkOpen.surfaceBackground === measured.darkOpen.conversationBackground,
+    'dark-open-root-fill': alpha(measured.darkOpen.rootBackground) === 1,
+    'dark-closed-again-transparent': alpha(measured.darkClosedAgain.surfaceBackground) === 0
+      && alpha(measured.darkClosedAgain.surfaceFillVar) === 0
+      && measured.darkClosedAgain.match === false,
+    // 前提钉子（审计 D4）：上游 .mask 必须仍是"半透明压暗 + backdrop-filter: var(--dsw-mask-blur)"。
+    // 上游哪天不再模糊蒙版，本规则修的东西就不存在了，必须有人回来重读这条判据。
+    'mask-still-blurs': maskStillBlurs(mask),
   }
   const red = Object.entries(checks).filter(([, ok]) => !ok).map(([name]) => name)
   process.stdout.write(`MEASURED ${JSON.stringify(measured)}\n`)

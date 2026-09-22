@@ -143,13 +143,13 @@ PicoAide Harness 将 UTF-8 日志写入 Electron 用户数据目录：Windows �
 
 ### packaged-runtime gate（afterPack）
 
-`scripts/verify-packaged-runtime.ts` 在三个平台都作为 Electron Builder 的 `afterPack` 钩子运行，因此一个跑不起自己运行时的包会在构建阶段失败，而不是被发出去。除了静态条目清单，它还会用 Node 模式（`ELECTRON_RUN_AS_NODE=1`）启动随包 launcher 跑四项行为冒烟：诊断 worker 的崩溃转储、POSIX 会话 `flock` 绑定、企业错误上报模块，以及 —— 2026-09-23 起 —— **`app.asar` 的 `{ bigint: true }` 语义与它所守的文件系统技能列举**（issue #130）。
+`scripts/verify-packaged-runtime.ts` 在三个平台都作为 Electron Builder 的 `afterPack` 钩子运行，因此一个跑不起自己运行时的包会在构建阶段失败，而不是被发出去。除了静态条目清单，它还会用 Node 模式（`ELECTRON_RUN_AS_NODE=1`）启动随包 launcher 跑一组行为冒烟：诊断 worker 的崩溃转储、POSIX 会话 `flock` 绑定（按设计在 win32 上跳过）、企业错误上报模块，以及 —— 2026-09-23 起 —— **`app.asar` 的 `{ bigint: true }` 语义与它所守的文件系统技能列举**（issue #130）。
 
 **判据。** 对 `app.asar` 内的路径，`stat(path, { bigint: true })` 必须返回 `BigIntStats`（`typeof mode === 'bigint'`），且运行时那条权限掩码表达式 `Number(info.mode & 0o777n)` 必须能求值。`@deepseek-ai/dsh-fs-local` 的 `listDirectory()` 在调用 `readdir` **之前**会用这种方式探测每个目标，因此只要引擎的 ASAR fs 包装器忽略 `bigint` 选项，任何指向 asar 路径的 `ctx.fs` stat/list 都会抛 `FsError('cannot list "<asar path>": Cannot mix BigInt and other types, use explicit conversions')`。冒烟因此还会走真实 provider 路径（`LocalFileSystem.listDir`）列举 `node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills`，并要求名字集合与**产物自身**报告的**完全相等** —— 期望值从 ASAR 头（或物理目录）另行读出，绝不来自第二份手写的技能名清单，这样被截断的列举无法冒充"包含期望条目"。
 
 **为什么要有它。** v2.8.0 随包的 Electron 43.4.0 在该包装器里丢掉了 `bigint` 选项，对 asar 路径合成 Number 版 `Stats`。`@deepseek-ai/dsh-skill-filesystem` 没有逐根容错，于是 cordis preset 的 `customSkillDirs` 根失败、**整个文件系统技能 provider 被跳过**：preset 自带的创作指南（`cordis-plugin-development`、`editing-cordis-compositions`）连同项目 `.dsh/skills`、`$DSH_HOME/skills` 与 `~/.agents/skills` 这些根一起从 cordis 会话里消失。`web-app` bundle 关掉了宿主 `skill-filesystem` 行，所以没有第二个 provider 兜底；`asarUnpack` 也救不了 —— 包装器无论如何都会从归档合成元数据。Electron 44.4.3 已修好（见 [Electron 44 决策](../../../docs/decisions/2026-09-22-electron-44-and-pack-source-leak-fix.md)）；只靠静态条目清单，会放过一个"带着技能文件却读不出来"的包。
 
-**升级或降级 Electron 都必须重跑该门禁** —— `node scripts/package-dir.mjs`（或 `yarn dist:linux`）会真正执行 `afterPack`。`tests/package.spec.ts` 另外把 `electron` 的 dev/peer 版本钉成 major ≥ 44 的精确版本；这条下限现在同时承载上述 ASAR 契约与 Chromium 安全回补，未重读本节之前不要放宽。若要在不动门禁的前提下对任意引擎复现该失败形态：
+**升级或降级 Electron 都必须重跑该门禁** —— `node scripts/package-dir.mjs`（或 `yarn dist:linux`）会真正执行 `afterPack`。`tests/package.spec.ts` 另外把 `electron` 的 dev/peer 版本钉成 major ≥ 44 的精确版本；这条下限现在同时承载上述 ASAR 契约与 Chromium 安全回补，未重读本节之前不要放宽。通过时会打印 `dsh-plugin-desktop: packaged ASAR bigint smoke OK in <ms> (<n> preset skills, app root <path>)`，因此 desktop job 的日志能证明该门禁真的跑过（CI 上唯一拦截点就是 `afterPack`，成功静默会与"被跳过"难以区分）。若要在不动门禁的前提下对任意引擎复现该失败形态：
 
 ```sh
 node scripts/asar-bigint-probe.mjs --app-out packages/host/desktop/dist/linux-unpacked \

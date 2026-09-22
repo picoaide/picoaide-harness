@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 import AdmZip from 'adm-zip'
 import {
   afterPack,
+  assertExactSkillListing,
   assertNoPackagedSourceLeaks,
   assertRuntimeAssetFamiliesSurvive,
   assertBrandAssetSvg,
@@ -1252,11 +1253,35 @@ describe('packaged ASAR bigint semantics smoke (issue #130)', () => {
       expect(script).toContain('@deepseek-ai/dsh-fs-local')
       expect(script).toContain('listDir')
       expect(script).toContain('ASAR-BIGINT-SMOKE-OK')
+      // 比较语义不是脚本里的第二份实现:子进程用的是父进程这个函数对象的源码
+      // (assertExactSkillListing.toString()),所以下面的单测测的就是它真正执行的东西。
+      expect(script).toContain(assertExactSkillListing.toString())
+      expect(script).toContain('assertExactSkillListing(names, expected.children')
+      expect(script).toContain('assertExactSkillListing(skills, expected.skills')
       return successResult
     })
     expect(() => smokePackagedAsarBigintSemantics(fixture.runtimeContext, launch)).not.toThrow()
     expect(launch).toHaveBeenCalledOnce()
     expect(PACKAGED_ASAR_BIGINT_SMOKE_TIMEOUT_MS).toBe(20_000)
+  })
+
+  it('rejects a truncated listing: the comparison must be element-wise equality, not containment', () => {
+    // 审计 D §4：内嵌脚本的"恰好相等"原先没有单元判据 —— 把比较弱化成
+    // `listed.every(n => expected.includes(n))`（或 `>=`）后，被截断的列举能通过门禁
+    // 且 spec 全绿。这三条把语义钉死在真函数上（子进程插值的正是同一个函数对象）。
+    expect(() => { assertExactSkillListing(['a', 'b', 'c'], ['a', 'b', 'c'], 'skill directory listing') })
+      .not.toThrow()
+    expect(() => { assertExactSkillListing(['a', 'b'], ['a', 'b', 'c'], 'skill directory listing') })
+      .toThrow(/is not exactly the packaged set[\s\S]*listed \["a","b"\][\s\S]*artifact holds \["a","b","c"\]/u)
+    // 多出一项同样不是"恰好相等"（`⊇` 方向也拦得住）。
+    expect(() => { assertExactSkillListing(['a', 'b', 'c', 'd'], ['a', 'b', 'c'], 'skill directory listing') })
+      .toThrow(/is not exactly the packaged set/u)
+    // 顺序也属于契约（两侧都先 sort，所以顺序不同就是真的不同）。
+    expect(() => { assertExactSkillListing(['b', 'a'], ['a', 'b'], 'skill directory listing') })
+      .toThrow(/is not exactly the packaged set/u)
+    // 失败信息必须能指认现场：两个集合都要出现。
+    expect(() => { assertExactSkillListing(['a'], ['a', 'b'], 'discoverable skills') })
+      .toThrow(/discoverable skills[\s\S]*\["a"\][\s\S]*\["a","b"\]/u)
   })
 
   it('fails loud when the packaged launcher is missing instead of skipping', () => {

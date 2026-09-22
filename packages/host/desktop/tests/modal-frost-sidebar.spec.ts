@@ -12,10 +12,15 @@
  * 这里不钉字面量，而是：
  *  1. 解析**我们真正注入的那张样式表**（走 `installAdvancedStyles` 的生产路径）；
  *  2. 用上游真实调色板（`design-platform.css`）解引用声明值，按 alpha 判定不透明/透明；
- *  3. 对拍上游 `SidebarRoot.module.css` 是否仍在读 `--dsw-specific-sidebar-fill`；
- *  4. 对拍上游设置面板是否仍带 `role="dialog"` + `aria-modal="true"`（触发条件）。
- * 因此：删掉规则 / 值改成 transparent / 丢掉变量覆盖 / 上游改 ARIA 或改底色来源，
- * 都会变红，而不是静默失效。
+ *  3. 断言左栏的底色与会话列**同源**（同一个 `var(--dsw-alias-bg-base)`）——"不透明"不够：
+ *     换成另一个同样不透明的 token（如 `--dsw-alias-bg-layer-2`）在亮色下与会话列同色、
+ *     暗色下却是 rgb(44,44,46) vs rgb(21,21,23)，接缝会原样回来（2026-09-23 审计 M4）；
+ *  4. 对拍上游 `SidebarRoot.module.css` 是否仍在读 `--dsw-specific-sidebar-fill`；
+ *  5. 对拍上游设置面板是否仍带 `role="dialog"` + `aria-modal="true"`（触发条件）；
+ *  6. 钉住修复赖以成立的前提：上游 `.mask` 仍是"半透明底 + `backdrop-filter:
+ *     var(--dsw-mask-blur)`"。上游哪天不再模糊蒙版，这条规则修的东西就不存在了。
+ * 因此：删掉规则 / 值改成 transparent / 丢掉变量覆盖 / 换成别的 token / 上游改 ARIA、
+ * 改底色来源或去掉蒙版模糊，都会变红，而不是静默失效。
  *
  * 真机（Chromium 计算样式）证据由同目录的 `modal-frost-computed-probe.mjs` 提供
  * （本包 vitest 是 Node 环境、故意不装 jsdom，所以计算样式只能在 Electron 里量）。
@@ -36,6 +41,9 @@ const SIDEBAR_ROOT_CSS = join(
 )
 const SETTINGS_ROOT_TSX = join(
   workspaceRoot, 'deepseek-harness', 'packages', 'client', 'ui-settings-general', 'src', 'client', 'SettingsRoot.tsx',
+)
+const SETTINGS_ROOT_CSS = join(
+  workspaceRoot, 'deepseek-harness', 'packages', 'client', 'ui-settings-general', 'src', 'client', 'SettingsRoot.module.css',
 )
 const CAPABILITY_PANEL_TSX = join(
   workspaceRoot, 'packages', 'host', 'enterprise', 'src', 'client', 'CapabilityCenterPanel.tsx',
@@ -91,6 +99,17 @@ function declaration(block: string, property: string): string {
   const match = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`, 'u').exec(block)
   if (match === null) throw new Error(`missing declaration: ${property}`)
   return match[1]!.trim()
+}
+
+/**
+ * 取"独立成条"的类规则（行首就是该类名）。
+ *
+ * 同一个类名还会出现在复合选择器里（如
+ * `.dshDesktopFrame[data-platform=…] .dshDesktopConversationSurface,`），裸类名会先命中
+ * 那里、再因选择器列表不是空白而抛 `ambiguous rule`；行首锚定只命中独立规则。
+ */
+function standaloneRule(css: string, className: string): string {
+  return declarationBlock(css, `\n${className}`)
 }
 
 /** design-platform.css 的块级 token 表；暗色表以亮色表为底再被暗色块覆盖。 */
@@ -182,6 +201,24 @@ describe('modal-open sidebar fill (issue #128 D2)', () => {
     expect(resolveValue(dark, declaration(base, 'background'))).toBe('transparent')
   })
 
+  it('paints the open column with the same token as the conversation column, not merely an opaque one', () => {
+    // 审计 C 的 M4：把取值换成 `--dsw-alias-bg-layer-2`（同样不透明）时，亮色下两个 token 都
+    // 解析成 rgb(255,255,255) ⇒ 只看 alpha 的断言会全绿；暗色下却是 rgb(44,44,46) vs
+    // rgb(21,21,23)，左栏与会话列的接缝重新出现。所以判据必须是"与会话列同源"。
+    const conversation = declaration(standaloneRule(css, '.dshDesktopConversationSurface'), 'background')
+    expect(conversation).toBe('var(--dsw-alias-bg-base)')
+    const block = declarationBlock(css, MODAL_SELECTOR)
+    // 两个真源都必须与会话列逐字相同（同一个 var()，不是"另一个也不透明的值"）。
+    expect(declaration(block, 'background')).toBe(conversation)
+    expect(declaration(block, '--dsw-specific-sidebar-fill')).toBe(conversation)
+    // 解引用后逐主题也必须相等：亮暗两套调色板下都不能出现色差。
+    for (const theme of [light, dark]) {
+      expect(resolveValue(theme, declaration(block, 'background'))).toBe(resolveValue(theme, conversation))
+    }
+    // 反假绿：会话列在两个主题下确实解析出不同的颜色（否则上面的相等是空转）。
+    expect(resolveValue(light, conversation)).not.toBe(resolveValue(dark, conversation))
+  })
+
   it('still covers the paint source upstream actually reads', () => {
     const sidebar = readFileSync(SIDEBAR_ROOT_CSS, 'utf8').replace(/\/\*[\s\S]*?\*\//gu, '')
     const root = declarationBlock(sidebar, '.root')
@@ -201,6 +238,16 @@ describe('modal-open sidebar fill (issue #128 D2)', () => {
     expect(dialog).toContain('aria-modal="true"')
     // 该模态必须自带整视口蒙版，否则它没有理由让左栏放弃原生材质。
     expect(panel).toMatch(/backdropFilter:\s*'var\(--dsw-mask-blur\)'/u)
+  })
+
+  it('pins the premise that makes the rule necessary: the upstream mask still blurs', () => {
+    // 审计 D4：两个判据都没钉"上游 .mask 仍带 backdrop-filter: var(--dsw-mask-blur)"这个前提。
+    // 上游哪天把模糊去掉，本规则照旧生效、判据照旧全绿，"修的是什么"就说不清了 ——
+    // 所以这里把前提本身也钉住：蒙版必须仍是"半透明压暗 + 模糊页面自身"。
+    const settings = readFileSync(SETTINGS_ROOT_CSS, 'utf8').replace(/\/\*[\s\S]*?\*\//gu, '')
+    const mask = declarationBlock(settings, '.mask')
+    expect(declaration(mask, 'backdrop-filter')).toBe('var(--dsw-mask-blur)')
+    expect(alpha(resolveValue(light, declaration(mask, 'background')))).toBeLessThan(1)
   })
 
   it('the extractor is not vacuous: deleting the rule throws here', () => {

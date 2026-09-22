@@ -1669,6 +1669,35 @@ export function expectedCordisSkillListing(
 }
 
 /**
+ * Element-wise equality comparator for a skill-directory listing (issue #130 judge).
+ *
+ * The smoke interpolates `assertExactSkillListing.toString()` into the child script,
+ * so this **single** implementation is what the unit tests and the packaged smoke
+ * execute. That is deliberate: the script's substring assertions (`listDir`,
+ * `0o777n`, …) cannot see a weakened comparison, so "a truncated listing must
+ * throw" has to be pinned on the real code rather than on its text. Element order
+ * is part of the contract (both callers sort first).
+ *
+ * Contextual typing is used on purpose (`const f: Signature = (a, b, c) => …`):
+ * the stringified form must stay valid standalone JavaScript for the child
+ * process, and parameters without written annotations are emitted without them
+ * under Node's type stripping.
+ * @param listed - Names the packaged runtime actually returned.
+ * @param expected - Names derived from the artifact itself.
+ * @param what - Human-readable subject for the failure message.
+ */
+export const assertExactSkillListing: (
+  listed: readonly string[],
+  expected: readonly string[],
+  what: string,
+) => void = (listed, expected, what) => {
+  if (JSON.stringify(listed) !== JSON.stringify(expected)) {
+    throw new Error(what + ' is not exactly the packaged set: listed ' + JSON.stringify(listed)
+      + ' but the artifact holds ' + JSON.stringify(expected))
+  }
+}
+
+/**
  * Embedded ASAR bigint smoke script (issue #130).
  *
  * Runs inside the **packaged** launcher with `ELECTRON_RUN_AS_NODE=1`: only
@@ -1691,11 +1720,14 @@ export function expectedCordisSkillListing(
  * The names it gets back must equal, exactly, the JSON expectation the caller
  * derived from the artifact itself ({@link expectedCordisSkillListing}); a
  * listing that silently loses entries is therefore a failure, not a footnote.
+ * The equality itself is {@link assertExactSkillListing}, interpolated below.
  */
 const ASAR_BIGINT_SMOKE_SCRIPT = `import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { stat } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
+
+const assertExactSkillListing = ${assertExactSkillListing.toString()}
 
 const appRoot = process.argv[2]
 const expected = JSON.parse(process.argv[3])
@@ -1724,14 +1756,8 @@ const localFs = new LocalFileSystem(new Context(), { cwd: process.cwd(), diffBas
 const listed = await localFs.listDir(await localFs.resolve(skillsDir))
 const names = listed.map(entry => entry.name).sort()
 const skills = listed.filter(entry => entry.type === 'directory').map(entry => entry.name).sort()
-if (JSON.stringify(names) !== JSON.stringify(expected.children)) {
-  throw new Error('skill directory listing is not exactly the packaged set: listed ' + JSON.stringify(names)
-    + ' but the artifact holds ' + JSON.stringify(expected.children))
-}
-if (JSON.stringify(skills) !== JSON.stringify(expected.skills)) {
-  throw new Error('discoverable skills are not exactly the packaged ones: listed ' + JSON.stringify(skills)
-    + ' but the artifact carries SKILL.md for ' + JSON.stringify(expected.skills))
-}
+assertExactSkillListing(names, expected.children, 'skill directory listing')
+assertExactSkillListing(skills, expected.skills, 'discoverable skills')
 process.stdout.write('${ASAR_BIGINT_SMOKE_OK}\\n')
 `
 
@@ -1825,6 +1851,7 @@ export function smokePackagedAsarBigintSemantics(
     )
   }
   const root = mkdtempSync(join(tmpdir(), 'dsh-asar-bigint-smoke-'))
+  const startedAt = Date.now()
   try {
     const scriptPath = join(root, 'asar-bigint-smoke.mjs')
     writeFileSync(scriptPath, ASAR_BIGINT_SMOKE_SCRIPT)
@@ -1860,6 +1887,13 @@ export function smokePackagedAsarBigintSemantics(
         + `${ASAR_BIGINT_SMOKE_OK} — the smoke script did not run to completion`,
       )
     }
+    // CI 可观测性:afterPack 是三个 desktop job 里唯一的拦截点(产物级用例只在 gate 之外
+    // 有 dist 时才跑),而成功的 smoke 默认静默 —— 没有这行就无法从日志正面证明新门禁
+    // 真的执行过。只报耗时与技能数,不改判据语义。
+    console.log(
+      `dsh-plugin-desktop: packaged ASAR bigint smoke OK in ${String(Date.now() - startedAt)}ms `
+      + `(${String(expectation.skills.length)} preset skills, app root ${appRoot})`,
+    )
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
