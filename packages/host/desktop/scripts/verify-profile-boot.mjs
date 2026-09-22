@@ -14,7 +14,7 @@ import {
 import { DESKTOP_SETTINGS_NAMESPACE } from '../lib/index.js'
 import { NO_OWNER_LOCK_MIN_AGE_MS, reclaimOrphanedDocumentLocks } from '../lib/document-lock-recovery.js'
 import { installProfilePackageResolver } from '../lib/module-resolution.js'
-import { prepareDesktopProfile } from '../lib/profile.js'
+import { prepareDesktopProfile, desktopProfileContext } from '../lib/profile.js'
 import { inactiveRequiredRows, FIBER_FAILED } from '../lib/startup-rows.js'
 
 // 产物清理(2026-09): 依赖包 lib/ 不再入库, fresh checkout 下 profile smoke
@@ -177,6 +177,10 @@ try {
     async (host) => {
       host.provide(DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot([]))
       host.provide('desktopRuntime', runtime)
+      // 与 src/main.ts 用**同一个函数**（`lib/profile.js` 的 desktopProfileContext）：
+      // 生产路径与门禁路径必须同源，否则冒烟测的就不是真实启动形态 —— 这正是本
+      // 冒烟此前"恰好复刻 main.ts 的缺省行为"（也不 provide）却全绿的原因。
+      host.provide('profileContext', desktopProfileContext(prepared))
       provideCmdline(host, {
         args: ['--host', '127.0.0.1', '--port', '0'],
         exit: () => {},
@@ -211,6 +215,106 @@ try {
     throw new Error(`assembled desktop profile has failed Loader rows: ${failedRows.join(', ')}`)
   }
 
+  // ── P0（issue #130「创造模式」会话全部不可用）────────────────────────────────
+  // 上游 base bundle 的 `plugin-manager` 行由 `disabled: !!js "!ctx.get('profileContext')"`
+  // 控制（deepseek-harness/packages/bundle/base/cordis.patch.yml:20-22）：宿主不
+  // provide profileContext 时该行被**静默** disable（上游对 disabled required 条目连
+  // warn 都没有）⇒ `pluginManager` 服务不存在 ⇒ cordis preset 的行
+  // `tool-plugin-manager`（inject: tools/pluginManager/sandboxPolicy）永远停在 PENDING
+  // ⇒ 该 preset 的会话挂不起来。三条判据缺一不可：服务在**且**行是 enabled**且**
+  // profileContext 真的发布了（最后一条是前两条的因）。
+  if (ctx.get('profileContext') === undefined) {
+    throw new Error(
+      'assembled desktop profile did not publish profileContext (src/main.ts 的 provide 掉了？): '
+      + 'the plugin-manager row is gated on it, so the pluginManager service never exists and every cordis-preset session fails to mount',
+    )
+  }
+  const loaderRow = id => [...ctx.loader.entries()].find(entry => entry.options?.id === id)
+  const pluginManagerRow = loaderRow('plugin-manager')
+  if (pluginManagerRow === undefined) {
+    throw new Error('assembled desktop profile has no plugin-manager row in the Loader tree')
+  }
+  if (pluginManagerRow.disabled === true) {
+    throw new Error(
+      'the plugin-manager row is disabled: this desktop generation booted without profileContext, '
+      + 'so the pluginManager service never exists and every cordis-preset session stalls on "waiting for pluginManager"',
+    )
+  }
+  if (ctx.get('pluginManager') === undefined) {
+    throw new Error(
+      'the plugin-manager row is enabled but the pluginManager service is absent: '
+      + 'cordis-preset sessions would stall on "waiting for pluginManager"',
+    )
+  }
+  // 提供 profileContext 的**代价**（反向判据）：上游 `hmr` 行共用同一个开关，它要求
+  // 存在 `appReady` 服务，而 `appReady` 只有 `@deepseek-ai/dsh-cmdline` 会 provide
+  // （deepseek-harness/packages/boot/hmr/src/index.ts:200-208）—— 桌面不走 cmdline，
+  // 激活即让**整棵 profile 树**加载失败（"Profile HMR requires application readiness"），
+  // 比原缺陷更严重。桌面因此在 cordis.patch.yml 里显式关闭它（我们的重载/写面在
+  // DesktopPluginsService）。这条断言拦的是"以后有人顺手把那行删掉或改成 disabled: false"：
+  // 真删了 boot 会先炸（冒烟红），真打开了这两条也会红。
+  const hmrRow = loaderRow('hmr')
+  if (hmrRow === undefined) {
+    throw new Error('assembled desktop profile has no hmr row: the desktop patch must disable it explicitly')
+  }
+  if (hmrRow.disabled !== true) {
+    throw new Error(
+      'the hmr row must stay disabled on the desktop host: it requires the appReady service that only the CLI provides, '
+      + 'so enabling it fails the whole profile tree with "Profile HMR requires application readiness"',
+    )
+  }
+  if (ctx.get('hmr') !== undefined) {
+    throw new Error('the hmr service is present although the desktop host provides no appReady')
+  }
+
+  // ---- 「整树被重算」回归判据（issue #130 的第二种失败形态）----------------------
+  // 上游 profile HMR 的 reconcile 会用 `readProfilePatches(profileContext)` **重算**
+  // 组合并覆盖运行中的 include；重算列表只有 bundle 层 + profile/home 补丁层 ——
+  // 我们组装期注入的 desktop/enterprise/渠道/自研业务层（以及启动器的 pin 层）都不在
+  // 其中，实测会把桌面刻意关掉的行重新打开（`session-log-deepseek` 一开就是会话正文
+  // 出境 P0）。今天 `hmr` 是关的（上面那条），所以这里再钉一条**不变量**：
+  // 运行时行集合必须覆盖完整桌面组合 `prepared.patches` 声明的每一行，且布尔型
+  // `disabled` 两侧一致（`!!js` 表达式的行不参与比较，它们由上面 (a)/(c) 逐条判）。
+  // 任何"树跑在另一份更短/不同的 patch 列表上"的形态都会在这里变红。
+  const liveRows = new Map([...ctx.loader.entries()]
+    .filter(entry => typeof entry.options?.id === 'string')
+    .map(entry => [entry.options.id, entry]))
+  const { composeEntries } = await import('@deepseek-ai/dsh-app-boot')
+  const expectedRows = composeEntries([prepared.patches]).filter(row => typeof row.id === 'string')
+  const missingRows = expectedRows.filter(row => !liveRows.has(row.id)).map(row => row.id)
+  if (missingRows.length > 0) {
+    throw new Error(
+      `the live Loader tree is missing ${String(missingRows.length)} row(s) the assembled composition declares `
+      + `(a runtime rewrite such as profile-HMR reconcile?): ${missingRows.slice(0, 20).join(', ')}`,
+    )
+  }
+  const flipRows = expectedRows
+    .filter(row => typeof row.disabled === 'boolean' && liveRows.get(row.id).disabled !== row.disabled)
+    .map(row => `${row.id}: composed=${String(row.disabled)} live=${String(liveRows.get(row.id).disabled)}`)
+  if (flipRows.length > 0) {
+    throw new Error(
+      `the live Loader tree disagrees with the assembled composition on ${String(flipRows.length)} row(s) `
+      + `(a runtime rewrite re-enabled or disabled them?): ${flipRows.slice(0, 20).join(' | ')}`,
+    )
+  }
+  // 产品决策行必须仍然关着。上一条只保证"运行时 == 组合"，抓不到"组合本身被改"
+  // （例如某天有人往 patch 里加一行把 P0 闸门重新打开）；这条把产品意图钉在这里，
+  // 每条都写清理由，改动它必须同时改这条判据。
+  const mustStayDisabled = [
+    ['fs-sandbox', 'desktop 用 asar-aware 文件系统后端替换上游 fs-sandbox'],
+    ['session-log-deepseek', '会话正文出境的 P0 闸门（0.1.6 起默认 true）'],
+    ['ui-sidebar-browser', '窗口 CSP 无 frame-src，iframe 浏览器必然白屏'],
+    ['ui-plugin-manager', 'P0-8：侧栏插件页与桌面自研面板的 DOM 接管不互通'],
+    ['office-to-pdf', 'libreoffice-kit 引擎不在四张打包清单覆盖内 + macOS 签名'],
+    ['ui-settings-plugins', '桌面隐藏「插件」设置选项卡（2026-09 产品决策）'],
+  ]
+  const reenabled = mustStayDisabled
+    .filter(([id]) => liveRows.get(id)?.disabled !== true)
+    .map(([id, why]) => `${id} (${why})`)
+  if (reenabled.length > 0) {
+    throw new Error(`product-decision rows are no longer disabled:\n${reenabled.map(line => `  - ${line}`).join('\n')}`)
+  }
+
   const agentPresets = ctx.get('agentPresets')
   if (agentPresets === undefined) {
     throw new Error('assembled Windows profile is missing the agent preset roster')
@@ -225,6 +329,26 @@ try {
   const legacyPreset = await agentPresets.resolve('minimal')
   if (legacyPreset.id !== 'minimal') {
     throw new Error(`assembled Windows profile remapped legacy preset to ${legacyPreset.id}`)
+  }
+  // **每个随包 preset 都真的 mount 一次**（issue #130 的正面判据，与上面三条互补）：
+  // `list()` 只列 roster 里的文件，能不能用取决于它的行是否都能拿到服务。行等不到
+  // 服务时 `standingKeyFor` 抛的错里逐行写着"哪个包在等哪个服务"，原样带进失败信息
+  // ——这正是 issue #130 的报错形态（`tool-plugin-manager … waiting for pluginManager`）。
+  // 遍历 roster **实际返回的集合**（Windows 上 `minimal` 被 windows-agent-presets 隐藏，
+  // 见 src/windows-agent-presets.ts），不硬编码 preset 列表。
+  const unmountablePresets = []
+  for (const id of presetIds) {
+    try {
+      await agentPresets.standingKeyFor(id)
+    } catch (error) {
+      unmountablePresets.push(`${id}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  if (unmountablePresets.length > 0) {
+    throw new Error(
+      `assembled desktop profile cannot mount ${String(unmountablePresets.length)} of ${String(presetIds.length)} shipped agent presets (${presetIds.join(', ')}):\n`
+      + unmountablePresets.map(line => `  - ${line}`).join('\n'),
+    )
   }
 
   const picker = ctx.directoryPicker.capability()
