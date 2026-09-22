@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import Departments from './Departments'
 import { MemoryRouter } from 'react-router-dom'
 import { request } from '../api'
+import { ROUTER_FUTURE } from '@/lib/router-future'
 
 const mockRequest = vi.mocked(request)
 const confirmSpy = vi.fn(() => true)
@@ -49,7 +50,7 @@ describe('Departments 部门管理页', () => {
       if (path === '/api/server/admin/departments') await gate
       return base(path, init)
     })
-    render(<MemoryRouter><Departments /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Departments /></MemoryRouter>)
     expect(screen.queryByText('暂无部门')).toBeNull()
     release()
     // 用文件里的数据等待助手：树里「研发部」会出现多次（主管列/子部门行），
@@ -59,7 +60,7 @@ describe('Departments 部门管理页', () => {
   })
 
   it('渲染部门树表格:层级/主管/成员数/已授权徽标', async () => {
-    render(<MemoryRouter><Departments /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Departments /></MemoryRouter>)
     await waitForDeptTree()
     expect(screen.getAllByText('研发部').length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText('前端组').length).toBeGreaterThanOrEqual(1)
@@ -69,7 +70,7 @@ describe('Departments 部门管理页', () => {
   })
 
   it('新建部门:提交 POST /departments', async () => {
-    render(<MemoryRouter><Departments /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Departments /></MemoryRouter>)
     await waitForDeptTree()
     fireEvent.click(screen.getByRole('button', { name: '新建部门' }))
     const dialog = within(await screen.findByRole('dialog'))
@@ -82,7 +83,7 @@ describe('Departments 部门管理页', () => {
   })
 
   it('新建部门:父级下拉可选已有部门(高1:新建时不得排除整棵树)', async () => {
-    render(<MemoryRouter><Departments /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Departments /></MemoryRouter>)
     await waitForDeptTree()
     fireEvent.click(screen.getByRole('button', { name: '新建部门' }))
     const dialog = within(await screen.findByRole('dialog'))
@@ -95,7 +96,7 @@ describe('Departments 部门管理页', () => {
   })
 
   it('编辑部门:父级下拉排除自身及其子树', async () => {
-    render(<MemoryRouter><Departments /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Departments /></MemoryRouter>)
     await waitForDeptTree()
     fireEvent.click(screen.getAllByRole('button', { name: '编辑' })[0]) // 研发部
     const dialog = within(await screen.findByRole('dialog'))
@@ -108,7 +109,7 @@ describe('Departments 部门管理页', () => {
   })
 
   it('编辑部门:主管下拉列出用户,保存调用 PUT', async () => {
-    render(<MemoryRouter><Departments /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Departments /></MemoryRouter>)
     await waitForDeptTree()
     fireEvent.click(screen.getAllByRole('button', { name: '编辑' })[0])
     const dialog = within(await screen.findByRole('dialog'))
@@ -121,7 +122,7 @@ describe('Departments 部门管理页', () => {
   })
 
   it('删除部门:确认后调用 DELETE', async () => {
-    render(<MemoryRouter><Departments /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Departments /></MemoryRouter>)
     await waitForDeptTree()
     fireEvent.click(screen.getAllByRole('button', { name: '删除' })[0])
     expect(mockRequest).toHaveBeenCalledWith(
@@ -146,7 +147,7 @@ describe('Departments 部门管理页', () => {
       return {}
     })
     const u = userEvent.setup()
-    render(<MemoryRouter><Departments /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE}><Departments /></MemoryRouter>)
     await waitForDeptTree()
     fireEvent.click(screen.getByRole('button', { name: '新建部门' }))
     const dialog = within(await screen.findByRole('dialog'))

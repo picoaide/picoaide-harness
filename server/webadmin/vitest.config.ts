@@ -1,9 +1,14 @@
 import { defineConfig } from 'vitest/config'
-import react from '@vitejs/plugin-react'
 import { fileURLToPath, URL } from 'node:url'
 
+// 这里**刻意不挂** @vitejs/plugin-react（vite.config.ts 的构建链仍然挂它）：
+// vitest 4 自带 vite 8（rolldown/oxc），而 plugin-react@4 走 babel，会给 vite 塞
+// `esbuild` 与 `optimizeDeps.esbuildOptions` —— vite 8 这两个选项都已废弃，于是每次
+// 跑测试都在开头打两行 deprecation 警告，并明说 oxc 选项生效、esbuild 选项被忽略。
+// 也就是说该插件在这里**已经是空转**：TSX 由 oxc 转换（jsx: automatic）。
+// 去掉它等于让「实际生效的转换链」与「配置里声明的」一致，同时消掉那两行警告。
+// 注意：构建链（vite 5 + plugin-react）一个字没动 —— 两者是各自的 vite 实例。
 export default defineConfig({
-  plugins: [react()],
   resolve: {
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
   },

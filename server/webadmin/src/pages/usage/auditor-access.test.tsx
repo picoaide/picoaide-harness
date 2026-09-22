@@ -5,6 +5,7 @@ import { request } from '../../api'
 import { setCurrentAdmin } from '../../lib/rbac'
 import UsageDepartments from './Departments'
 import UsageLayout from './UsageLayout'
+import { ROUTER_FUTURE } from '@/lib/router-future'
 
 // 图表懒加载(VChart)在 jsdom 无 canvas:统一 mock 为占位(与 usage-center.test.tsx 同款)。
 vi.mock('../../components/chart-lazy', () => ({
@@ -47,7 +48,7 @@ afterEach(() => setCurrentAdmin(null))
 describe('审计员访问部门用量(R7 branding-3)', () => {
   it('不请求需要 dept:read 的组织树,仍渲染按用量口径的各部门消耗与权限说明', async () => {
     setCurrentAdmin(auditor)
-    render(<MemoryRouter initialEntries={['/usage/depts']}><UsageDepartments /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE} initialEntries={['/usage/depts']}><UsageDepartments /></MemoryRouter>)
 
     // 用量行(usage:read 允许的数据)必须可见 —— 原来这里整块是空的。
     expect(await screen.findByText('研发部')).toBeInTheDocument()
@@ -70,7 +71,7 @@ describe('审计员访问部门用量(R7 branding-3)', () => {
 
   it('用量中心子导航对审计员隐藏需要 dept:read / report:read 的标签', () => {
     setCurrentAdmin(auditor)
-    render(<MemoryRouter initialEntries={['/usage']}><UsageLayout /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE} initialEntries={['/usage']}><UsageLayout /></MemoryRouter>)
     expect(screen.getByRole('link', { name: /总览/ })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /成员用量/ })).toBeInTheDocument()
     // 部门用量要 dept:read;报表订阅要 report:read(服务端刻意不给 auditor)。

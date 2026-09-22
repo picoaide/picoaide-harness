@@ -6,6 +6,7 @@ import { setCurrentAdmin } from '../../lib/rbac'
 import UsageLayout from './UsageLayout'
 import UsageModels from './Models'
 import UsageOverview from './Overview'
+import { ROUTER_FUTURE } from '@/lib/router-future'
 
 // 图表懒加载(VChart)在 jsdom 无 canvas:统一 mock 为占位(与 usage-center.test.tsx 同款)。
 vi.mock('../../components/chart-lazy', () => ({
@@ -64,7 +65,7 @@ afterEach(() => setCurrentAdmin(null))
 describe('审计员访问模型分析(R7-RV-1 residual)', () => {
   it('does not request the gateway-scoped model list and still renders the usage rows it may read', async () => {
     setCurrentAdmin(auditor)
-    render(<MemoryRouter initialEntries={['/usage/models']}><UsageModels /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE} initialEntries={['/usage/models']}><UsageModels /></MemoryRouter>)
 
     // 有权读的用量行必须可见 —— 原来这里整页只有一句 403。
     expect(await screen.findByText('gpt-4o')).toBeInTheDocument()
@@ -81,7 +82,7 @@ describe('审计员访问模型分析(R7-RV-1 residual)', () => {
 
   it('keeps the 模型分析 tab visible for an auditor (usage:read is enough for this page)', () => {
     setCurrentAdmin(auditor)
-    render(<MemoryRouter initialEntries={['/usage']}><UsageLayout /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE} initialEntries={['/usage']}><UsageLayout /></MemoryRouter>)
     expect(screen.getByRole('link', { name: /模型分析/ })).toBeInTheDocument()
   })
 })
@@ -89,7 +90,7 @@ describe('审计员访问模型分析(R7-RV-1 residual)', () => {
 describe('审计员访问用量总览的上游余额区块(R7-RV-1 residual)', () => {
   it('explains the missing permission instead of silently rendering an empty balance block', async () => {
     setCurrentAdmin(auditor)
-    render(<MemoryRouter initialEntries={['/usage']}><UsageOverview /></MemoryRouter>)
+    render(<MemoryRouter future={ROUTER_FUTURE} initialEntries={['/usage']}><UsageOverview /></MemoryRouter>)
 
     // KPI 数据(usage:read)照常渲染。
     expect(await screen.findByTestId('overview-kpis')).toBeInTheDocument()
