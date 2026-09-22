@@ -65,9 +65,12 @@ jobs:
           go-version-file: server/go.mod
           cache: false
 
+      # 输入名是复数 `languages`（v3 起从 `language` 改名）。写成单数不会报错，但 runner 会给
+      # 每个 job 打两条 "Unexpected input(s) 'language'" 的 warning 注释（init 主步骤与 post 步骤
+      # 各一条）—— 本工作流存在的意义之一就是消掉注解噪音，所以这里必须用复数。
       - uses: github/codeql-action/init@v4
         with:
-          language: ${{ matrix.language }}
+          languages: ${{ matrix.language }}
 
       - if: matrix.language == 'go'
         uses: github/codeql-action/autobuild@v4
