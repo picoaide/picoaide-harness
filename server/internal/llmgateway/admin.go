@@ -883,8 +883,9 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 		"glitchtip_organization":    settings["web.glitchtip_organization"],
 		"default_thinking_level":    settings["web.default_thinking_level"],
 		"server_base_url":           settings["server.base_url"],
-		"max_file_refs":             maxFileRefs, // 单请求 file_id 引用数上限
-		"body_parse_budget_mb":      parseBudget, // 进程级在飞请求体字节预算(MiB)
+		"max_file_refs":             maxFileRefs,    // 单请求 file_id 引用数上限
+		"body_parse_budget_mb":      parseBudget,    // 进程级在飞请求体字节预算(MiB)
+		"file_expiry_days":          fileExpiryDays, // 网关强制执行的文件保留上限(天)
 	})
 }
 

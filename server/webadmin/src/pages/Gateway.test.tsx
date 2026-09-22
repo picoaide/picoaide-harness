@@ -532,6 +532,7 @@ describe('Gateway 保存面(F-07)', () => {
       'body_parse_budget_mb',
       'default_model',
       'default_thinking_level',
+      'file_expiry_days',
       'max_file_refs',
       'peak_windows',
       'rate_limit',
@@ -652,6 +653,7 @@ describe('出站体加工的两个闸门字段', () => {
     await screen.findByText('已保存')
     expect(puts[0].max_file_refs).toBe('600')
     expect(puts[0].body_parse_budget_mb).toBe('128')
+    expect(puts[0].file_expiry_days).toBe('7')
   })
 
   it('越界值被前端拦下（引用上限 0 与内存预算 32 都不提交）', async () => {
@@ -667,5 +669,24 @@ describe('出站体加工的两个闸门字段', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await screen.findByText(/请求体加工内存预算必须是 64~8192 MiB 的整数/)
     expect(puts.length).toBe(0)
+  })
+
+  it('文件保留上限：越界值被前端拦下（0 与 31 都不提交）', async () => {
+    const puts = storeGateway({ default_model: 'deepseek-chat', rate_limit: '0', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '' })
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    expect((screen.getByLabelText('文件保留上限(天)') as HTMLInputElement).value).toBe('7')
+    fireEvent.change(screen.getByLabelText('文件保留上限(天)'), { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText(/文件保留上限必须是 1~30 天的整数/)
+    expect(puts.length).toBe(0)
+    fireEvent.change(screen.getByLabelText('文件保留上限(天)'), { target: { value: '31' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText(/文件保留上限必须是 1~30 天的整数/)
+    expect(puts.length).toBe(0)
+    fireEvent.change(screen.getByLabelText('文件保留上限(天)'), { target: { value: '7' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存')
+    expect(puts[0].file_expiry_days).toBe('7')
   })
 })

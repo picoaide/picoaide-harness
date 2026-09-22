@@ -257,6 +257,8 @@ func TestGatewayConfigRoundTripsBodyGates(t *testing.T) {
 	for _, bad := range []string{
 		`{"max_file_refs":"0"}`, `{"max_file_refs":"4097"}`, `{"max_file_refs":"abc"}`,
 		`{"body_parse_budget_mb":"32"}`, `{"body_parse_budget_mb":"8193"}`,
+		// 文件保留上限（2026-09-22）：1~30 天，0/31/非数字一律拒。
+		`{"file_expiry_days":"0"}`, `{"file_expiry_days":"31"}`, `{"file_expiry_days":"7d"}`,
 	} {
 		if w := put(bad); w.Code != http.StatusBadRequest {
 			t.Fatalf("越界值 %s 应 400，实得 %d (%s)", bad, w.Code, w.Body.String())
@@ -265,6 +267,17 @@ func TestGatewayConfigRoundTripsBodyGates(t *testing.T) {
 	if got := gatewayLimitsFor(db); got.maxFileRefs != 64 || got.budgetBytes != 512<<20 {
 		t.Fatalf("被拒的提交改了配置: %+v", got)
 	}
+	// 合法值：保存后运行期立刻按新上限收敛（缓存已预热过）。
+	if w := put(`{"file_expiry_days":"3"}`); w.Code != http.StatusOK {
+		t.Fatalf("合法保留期应 200，实得 %d (%s)", w.Code, w.Body.String())
+	}
+	if got := gatewayLimitsFor(db).fileExpiry; got != 3*24*time.Hour {
+		t.Fatalf("保留上限未生效: %v", got)
+	}
+	exp, clamped := enforceFileExpiry(db, nil)
+	if !clamped || exp == nil || time.Until(*exp) > 4*24*time.Hour {
+		t.Fatalf("改动后未按 3 天收敛: %v clamped=%v", exp, clamped)
+	}
 	// GET 必须回显生效值（管理端看到的数字 = 运行期用的数字）。
 	w, out := adminReq(t, r, "GET", "/api/server/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK {
@@ -272,6 +285,9 @@ func TestGatewayConfigRoundTripsBodyGates(t *testing.T) {
 	}
 	if out["max_file_refs"] != "64" || out["body_parse_budget_mb"] != "512" {
 		t.Fatalf("GET 回显 = %v / %v, want 64 / 512", out["max_file_refs"], out["body_parse_budget_mb"])
+	}
+	if out["file_expiry_days"] != "3" {
+		t.Fatalf("GET 回显 file_expiry_days = %v, want 3", out["file_expiry_days"])
 	}
 }
 
