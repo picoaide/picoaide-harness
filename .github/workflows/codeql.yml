@@ -1,0 +1,80 @@
+# CodeQL 高级配置（2026-09-22 从 GitHub「默认设置」迁到仓库自持的工作流）。
+#
+# 为什么从默认设置迁过来：
+#   1. 默认设置的 runner 固定是 `ubuntu-latest`，GitHub 会对每个分析 job 发
+#      「ubuntu-latest 将于 2026-10-19 迁到 Ubuntu 26」的 notice，而**这条设置不在仓库里**
+#      （只有管理员在 Settings 里能看），无法随代码评审与版本控制；
+#   2. 默认设置用的 CodeQL Action 大版本由 GitHub 决定 —— 运行期升级（如 node20 → node24）
+#      会在无任何仓库改动的情况下改变行为；
+#   3. 迁到本文件后：runner 显式钉 `ubuntu-24.04`、Action 钉 `@v4`（node24）、
+#      查询套件与触发条件都写在代码里，可评审、可回滚。
+#
+# 与默认设置等价的口径（迁移时逐项对齐，勿随意改）：
+#   - 语言：actions / go / javascript-typescript / python（= 原四个 Analyze job）；
+#   - 查询套件：默认（`queries: ` 不传即 default）；威胁模型：remote（默认）；
+#   - 触发：master 的 push、所有 PR、每周一次（原为 weekly）。
+#
+# 注意：package 分析需要 `security-events: write`；fork PR 的 token 只有只读权限，
+# 因此分析结果不上传（与 GitHub 官方模板同样的处理：给 analyze 步骤加 continue-on-error
+# 会把真实失败也吞掉，所以这里用 job 级 if 明确跳过 fork，而不是吞错）。
+name: CodeQL
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    # 每周一 03:17 UTC（避开整点的高峰；原默认设置是 weekly）
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    # fork PR：GITHUB_TOKEN 不带 security-events: write，上传必然失败 —— 明确跳过，
+    # 由合并到 master 后的 push 分析覆盖（不静默吞错）。
+    if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, go, javascript-typescript, python]
+    steps:
+      - uses: actions/checkout@v7
+
+      # 运行环境摘要：分析失败时能在日志头部直接看到 runner 与语言（CodeQL 的日志很长），
+      # 同时让 `scripts/check-workflows.mjs` 的 shell 扫描器覆盖本文件（该守卫要求每个
+      # workflow 至少有一个可静态检查的 `run` 块，否则判"扫描器可能失效"并 fail-loud）。
+      - name: 运行环境摘要
+        run: |
+          set -euo pipefail
+          echo "runner=$(uname -srm)"
+          echo "language=${{ matrix.language }}"
+
+      # Go 需要真实编译才能建库：显式用仓库固定的 Go 版本（server/go.mod），
+      # 不依赖 runner 预装版本（autobuild 会自己找工具链，但版本漂移会让告警集合变化）。
+      - if: matrix.language == 'go'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          cache: false
+
+      # 输入名是复数 `languages`（v3 起从 `language` 改名）。写成单数不会报错，但 runner 会给
+      # 每个 job 打两条 "Unexpected input(s) 'language'" 的 warning 注释（init 主步骤与 post 步骤
+      # 各一条）—— 本工作流存在的意义之一就是消掉注解噪音，所以这里必须用复数。
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+
+      - if: matrix.language == 'go'
+        uses: github/codeql-action/autobuild@v4
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: '/language:${{ matrix.language }}'
