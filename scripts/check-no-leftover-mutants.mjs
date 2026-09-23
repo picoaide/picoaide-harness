@@ -21,16 +21,29 @@
  * 命中输出 `文件:行:内容` 并给出一句处置指引：**变异验证必须在临时副本上做，或在 `trap` 里
  * 保证还原**（本仓既有双证：L4 的 M1–M6c 全部在临时副本/立即还原下做）。
  *
- * 用法：node scripts/check-no-leftover-mutants.mjs [--root <dir>] [--json]
- * 退出码：0 = 零残留；1 = 有命中（逐条打印）；2 = 用法错误。
+ * **扫描面（2026-09-23 修正）**：默认只扫**能进提交的文件**（`git ls-files --cached --others
+ * --exclude-standard` = 已跟踪 + 已暂存 + 未跟踪且未被忽略）。理由两条：
+ *   1. 被 `.gitignore` / `.git/info/exclude` 忽略的本地产物**不可能**进提交（除非显式 `git add -f`，
+ *      而那就进了索引 ⇒ 仍被 `--cached` 覆盖），扫它们只会制造误报 —— 本仓真实误报：一个
+ *      **变异驱动脚本**（`audit/**` 下，本地忽略）里的"变异后代码"字符串参数被当成残留变异体，
+ *      以致 `yarn check` 在干净提交态上恒红，反而掩盖真信号。
+ *   2. 旧的目录遍历会扫到 `node_modules`/产物等无关文件，白白放大扫描面。
+ * 显式传 `--root <dir>` 时退回目录遍历（供测试夹具与"仓库外副本"场景使用）。
+ *
+ * 用法：node scripts/check-no-leftover-mutants.mjs [--root <dir>] [--json] [--all-files]
+ *   `--all-files`：强制目录遍历（连被忽略的文件一起扫），排查时用。
+ * 退出码：0 = 零残留；1 = 有命中（逐条打印）；2 = 用法错误（含"扫描根不是仓库根"）。
  */
 
+import { execFileSync } from 'node:child_process'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 
 const args = process.argv.slice(2)
 let root = resolve(process.cwd())
 let json = false
+let explicitRoot = false
+let allFiles = false
 for (let index = 0; index < args.length; index += 1) {
   if (args[index] === '--root') {
     const value = args[index + 1]
@@ -39,8 +52,10 @@ for (let index = 0; index < args.length; index += 1) {
       process.exit(2)
     }
     root = resolve(value)
+    explicitRoot = true
     index += 1
   } else if (args[index] === '--json') json = true
+  else if (args[index] === '--all-files') allFiles = true
   else {
     console.error(`check-no-leftover-mutants: 未知参数 ${args[index]}`)
     process.exit(2)
@@ -115,9 +130,45 @@ function* walk(dir) {
   }
 }
 
+/** 该相对路径是否落在排除目录里（git 模式下也要按同一张表收敛扫描面）。 */
+function inExcludedDir(rel) {
+  return rel.split('/').some(segment => EXCLUDE_DIRS.has(segment))
+}
+
+/**
+ * 判定扫描面：默认 git（只扫能进提交的文件）；`--root` 显式指定或非 git 仓库时退回目录遍历。
+ * @returns `{ mode, files }`
+ */
+function collectFiles() {
+  if (allFiles || explicitRoot) return { mode: 'walk', files: [...walk(root)] }
+  let top
+  try {
+    top = execFileSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()
+  } catch {
+    return { mode: 'walk', files: [...walk(root)] }
+  }
+  // 扫描根必须就是仓库根：在子目录里跑会静默漏掉大部分文件（旧版没有这条断言）。
+  if (resolve(top) !== root) {
+    console.error(`check-no-leftover-mutants: 扫描根不是仓库根 —— root=${root}，仓库根=${resolve(top)}。`
+      + '请在仓库根运行，或用 --root 显式指定要遍历的目录。')
+    process.exit(2)
+  }
+  const listing = execFileSync('git', ['-C', root, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  })
+  const files = listing
+    .split('\0')
+    .filter(Boolean)
+    .filter(rel => EXTENSIONS.test(rel) && !inExcludedDir(rel))
+    .map(rel => join(root, rel))
+  return { mode: 'git', files }
+}
+
 const hits = []
 let scanned = 0
-for (const file of walk(root)) {
+const { mode, files } = collectFiles()
+for (const file of files) {
   let text
   try {
     if (statSync(file).size > 2 * 1024 * 1024) continue
@@ -136,9 +187,9 @@ for (const file of walk(root)) {
 }
 
 if (json) {
-  console.log(JSON.stringify({ root, scanned, hits }, null, 2))
+  console.log(JSON.stringify({ root, mode, scanned, hits }, null, 2))
 } else {
-  console.log(`check-no-leftover-mutants: 扫描 ${scanned} 个文件（root=${root}）`)
+  console.log(`check-no-leftover-mutants: 扫描 ${scanned} 个文件（root=${root}，mode=${mode}）`)
 }
 
 if (hits.length > 0) {
