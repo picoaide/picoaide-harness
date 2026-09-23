@@ -2,15 +2,26 @@
  * 真实 Electron + Xvfb + CDP 截图验证(v3b 集成测试, 非 CI)。
  *
  * 流程: 启动打包 app(带远程调试) → 登录页应显示两步式 Step1 →
- * 输入真实服务端地址(8091) → 下一步 → 品牌区(Acme AI) + 方式选择器 →
- * 输入本地账号(admin)登录 → 进入应用 → 截图留档。
+ * 输入真实服务端地址 → 下一步 → 品牌区(服务端渠道显示名) + 方式选择器 →
+ * 输入本地账号登录 → 进入应用 → 截图留档。
  *
- * 前置: Xvfb :99、服务端 8091(品牌已启用 Acme AI)、dist/linux-unpacked。
+ * 前置: Xvfb :99、可达的服务端(默认 127.0.0.1:8091)、dist/linux-unpacked。
  * 用法: node electron-shots.mjs [--server http://127.0.0.1:8091] [--shots <dir>] [--app <bin>]
  *
  * P2-60: 打包产物路径与截图目录改为按脚本位置推导(原来硬编码
  *   /data/picoaide-harness,换机器/换 clone 目录即失效)。
  * P3: 补断言(原来只 console.log 不判定)——任一断言失败以非零退出。
+ *
+ * 2026-09-23(第四轮审计 R4-A-17 / R4-A-18)之后的两条结构性改动:
+ *   ① **判据表外置**:本文件不再自带断言逻辑,而是按 id 求值 `assertions.mjs` 里那张表
+ *      (运行期与门禁消费同一份)。此前"把 `check(…)` 改成常量"这类掏空**零守卫覆盖** ——
+ *      `scripts/check-integration-tests.mjs` 只做字符串 needle 检查,门禁会给这个文件背书;
+ *      现在门禁跑 `assertions.mjs --self-test`(每条判据都配正例 + 负例),并断言本文件
+ *      **逐条引用**了表里的每个 id。
+ *   ② **品牌断言改为渠道驱动**:Step2 品牌区断言的是服务端 `GET /api/client/v2/channel`
+ *      的 `login.display_name`(缺失回落随包品牌 `PicoAide`),不再是已退役的旧夹具
+ *      `Acme AI` —— 后者在当前实现里**永远不可能 PASS**(登录页品牌区只渲染渠道内容,
+ *      见 `packages/host/enterprise/src/auth-gate.ts:433`/`:667`)。
  *
  * 退出码契约(2026-09-23, 与 python 用例脚本对齐 —— 见 ../README.md):
  *   0  = 真的跑过且全部断言通过;
@@ -23,8 +34,9 @@
  * 前置探测顺序: 打包产物 → X 显示 → 服务端 /healthz。三者任一缺失即 SKIP(77)。
  */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { assertionById, expectedBrandName } from './assertions.mjs'
 
 const EXIT_PASS = 0
 const EXIT_FAIL = 1
@@ -58,6 +70,7 @@ if (args.includes('--help')) {
   console.log('用法: node electron-shots.mjs [--server http://127.0.0.1:8091] [--shots <dir>] [--app <bin>] [--display :99]')
   console.log('环境变量: ELECTRON_SHOTS_APP 覆盖打包产物路径(CI 用), DISPLAY 指定 X 显示。')
   console.log('退出码: 0=PASS 1=FAIL 2=用法错误 77=SKIP(前置环境缺失,未验证任何东西)')
+  console.log('判据表: ./assertions.mjs(自检 node assertions.mjs --self-test,门禁会跑)')
   process.exit(EXIT_PASS)
 }
 
@@ -112,10 +125,16 @@ const HOME = '/tmp/dsh-shot-home'
 mkdirSync(SHOTS, { recursive: true })
 
 let failures = 0
-/** 断言(替代原来的 console.log):失败累计,结尾统一以非零退出。 */
-function check(name, cond, detail = '') {
-  console.log(`[${cond ? 'ok' : 'FAIL'}] ${name}${detail ? ` — ${detail}` : ''}`)
-  if (!cond) failures += 1
+/**
+ * 按 id 求值判据表里的断言(判据本体在 ./assertions.mjs,运行期与门禁同一份)。
+ * @param id - 判据 id。
+ * @param observation - 现场采集到的观测(字段见 assertions.mjs 的 BASE_OBSERVATION)。
+ */
+function report(id, observation) {
+  const assertion = assertionById(id)
+  const { ok, detail } = assertion.evaluate(observation)
+  console.log(`[${ok ? 'ok' : 'FAIL'}] ${assertion.name}${detail === undefined ? '' : ` — ${detail}`}`)
+  if (!ok) failures += 1
 }
 
 const app = spawn(APP, ['--no-sandbox', `--remote-debugging-port=${CDP}`], {
@@ -156,14 +175,16 @@ async function connect() {
   throw new Error('cannot connect to app')
 }
 
+/** 抓一帧并落盘;返回 `{ name, size, bytes }`(字节供"两帧是否相同"的判据用)。 */
 async function shot(send, name) {
   const { data } = await send('Page.captureScreenshot', { format: 'png' })
   const file = join(SHOTS, name)
   writeFileSync(file, Buffer.from(data, 'base64'))
-  // 截图必须真实落盘且非空(P3 断言)。
-  const size = statSync(file).size
-  check(`截图 ${name}`, size > 1000, `${size} B`)
-  return file
+  // 截图必须真实落盘且非空(P3 断言;下界判据在 assertions.mjs 的 screenshot-nonempty)。
+  const bytes = readFileSync(file)
+  const frame = { name, size: statSync(file).size, bytes }
+  report('screenshot-nonempty', { screenshot: frame })
+  return frame
 }
 
 async function evalJS(send, expr) {
@@ -171,6 +192,24 @@ async function evalJS(send, expr) {
   return r.result?.value
 }
 
+/** 页面文本(判据表多条断言都吃它)。 */
+const pageTextOf = send => evalJS(send, 'document.body.innerText')
+
+/**
+ * 读服务端渠道内容(`GET /api/client/v2/channel`)—— Step2 的品牌断言以它为准。
+ * 取不到时返回 undefined ⇒ 期望值回落随包品牌(`PicoAide`),而不是判据失效。
+ */
+async function fetchChannel() {
+  try {
+    const response = await fetch(new URL('/api/client/v2/channel', SERVER), { signal: AbortSignal.timeout(5000) })
+    if (!response.ok) return undefined
+    return await response.json()
+  } catch {
+    return undefined
+  }
+}
+
+let scriptError = null
 try {
   // Keep the socket referenced until the script exits: a dropped WS reference
   // would let GC close it mid-flight (unused-var audit 2026-08-31).
@@ -178,28 +217,34 @@ try {
   void ws
   await send('Page.enable')
   await sleep(2500)
-  await shot(send, '01-login-step1.png')
+  const step1Shot = await shot(send, '01-login-step1.png')
 
   // 检查是否两步式登录页(Step1 有 '连接服务端')
-  const step1 = await evalJS(send, `document.body.innerText.includes('连接服务端')`)
-  check('Step1 登录页(含「连接服务端」)', step1 === true)
+  const step1Text = await pageTextOf(send)
+  const step1 = typeof step1Text === 'string' && step1Text.includes('连接服务端')
+  report('step1-login-page', { pageText: step1Text })
   if (step1) {
+    report('two-step-login-page', { phaseOk: true })
     // 输入服务端地址
     await evalJS(send, `(() => {
       const i = document.getElementById('server'); if (i) { i.value = '${SERVER}'; i.dispatchEvent(new Event('input')) }
     })()`)
     await sleep(300)
     const filled = await evalJS(send, `document.getElementById('server')?.value`)
-    check('服务端地址已填入', filled === SERVER, String(filled))
+    report('server-filled', { server: SERVER, serverValue: filled })
     await shot(send, '02-step1-filled.png')
     // 点下一步
     await evalJS(send, `document.getElementById('next-btn')?.click()`)
     await sleep(2000)
-    await shot(send, '03-step2-brand.png')
-    const brand = await evalJS(send, `document.body.innerText.includes('Acme AI')`)
-    check('Step2 品牌 Acme AI', brand === true)
+    const step2Shot = await shot(send, '03-step2-brand.png')
+    // 品牌区 = 服务端渠道显示名(缺失回落随包品牌)⇒ 期望值从服务端读,不写死夹具名。
+    const channel = await fetchChannel()
+    const step2Text = await pageTextOf(send)
+    report('step2-brand', { pageText: step2Text, expectedBrand: expectedBrandName(channel) })
+    // 两张截图必须不同:随仓证据里曾出现 4/5 逐字节相同(唯一判据只有"字节数 > 1000")。
+    report('step2-shot-differs-from-step1', { baseline: step1Shot, current: step2Shot })
     const meth = await evalJS(send, `document.querySelectorAll('.method').length`)
-    check('方式选择器存在', typeof meth === 'number' && meth > 0, `count=${meth}`)
+    report('method-picker', { methodCount: meth })
     // 输入本地账号登录
     await evalJS(send, `(() => {
       const u = document.getElementById('username'); if (u) { u.value = 'admin'; u.dispatchEvent(new Event('input')) }
@@ -211,18 +256,19 @@ try {
     await sleep(3000)
     await shot(send, '05-after-login.png')
     // 登录后应离开登录页(P3 断言:原来只截图不断言)。
-    const stillLogin = await evalJS(send, `document.body.innerText.includes('连接服务端')`)
-    check('登录后离开登录页', stillLogin === false)
+    report('left-login-page', { pageText: await pageTextOf(send) })
   } else {
-    check('两步式登录页', false, '未检测到(可能已登录或页面不同)')
+    report('two-step-login-page', { phaseOk: false })
   }
 } catch (err) {
-  check('脚本执行', false, err instanceof Error ? err.message : String(err))
+  scriptError = err instanceof Error ? err.message : String(err)
 } finally {
   app.kill('SIGTERM')
   await sleep(1500)
   app.kill('SIGKILL')
 }
+// 最后一条:整段流程有没有未捕获异常(观察对象携带异常消息)。
+report('script-completed', { error: scriptError })
 
 if (failures > 0) {
   console.error(`RESULT: FAIL(${failures} 项断言失败)`)

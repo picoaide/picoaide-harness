@@ -9,7 +9,7 @@
 |---|---|
 | `dex/` | Dex SSO 集成测试（docker 起 Dex → 服务端配 OIDC → 验证登录流） |
 | `openldap/` | OpenLDAP 集成测试（docker 起 LDAP → 服务端配 LDAP → 验证登录/RBAC/渠道内容） |
-| `electron-shots/` | 真实 Electron + Xvfb + CDP 截图验证（客户端登录页/品牌/权限） |
+| `electron-shots/` | 真实 Electron + Xvfb + CDP 截图验证（客户端登录页/品牌/权限）。判据本体在 `electron-shots/assertions.mjs`（运行期与门禁消费同一张表），`--self-test` 逐条判据跑正例 + 负例 |
 | `run-all.sh` | 一键跑全部（服务端地址取 `SERVER_BASE`，默认 `http://127.0.0.1:8091`；逐项收集结果） |
 
 ## 退出码契约（2026-09-23 起）
@@ -38,7 +38,10 @@
 provider 未配置必须 SKIP 且不得报 PASS；
 ④ 断言 `electron-shots` 的**接线**（`run-all.sh` 真的调用它、脚本里保留截图/判定/退出码判据）
 与其 **SKIP 契约**（`--app <不存在>` ⇒ 77 且不打印 PASS）；
-⑤ 跑一次聚合层 `run-all.sh`（三项全 SKIP 的输入）断言 `77` + `RESULT: SKIP`。
+⑤ 跑 `electron-shots/assertions.mjs --self-test` 并把**判据表**三层钉住：判据 id 集合与登记
+值精确相等、每条判据都有正例 + 负例夹具且夹具总数不低于下限、运行期脚本逐条引用每个 id
+（此前该脚本的 8 条运行期断言**零守卫覆盖**：把它们改成常量、needle 全部保留，门禁仍 EXIT=0）；
+⑥ 跑一次聚合层 `run-all.sh`（三项全 SKIP 的输入）断言 `77` + `RESULT: SKIP`。
 它不需要 Docker/PG/显示器，秒级完成。
 
 ## 前置
@@ -61,6 +64,8 @@ cd integration-tests
 ./run-all.sh                      # 全部（退出码见上表；缺前置的项以 77 计入 SKIP）
 python3 dex/dex-sso-test.py       # 单项；`--help` 看参数
 python3 openldap/ldap-rbac-brand-test.py --self-test   # 只跑判据自检
+node electron-shots/assertions.mjs --self-test         # 只跑判据表的夹具自检（门禁跑的路径）
+node electron-shots/assertions.mjs --list              # 判据清单 + 条数
 node electron-shots/electron-shots.mjs --app packages/host/desktop/dist/linux-unpacked/dsh-plugin-desktop
 ```
 

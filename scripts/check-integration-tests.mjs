@@ -14,8 +14,15 @@
  *
  * 本守卫把**可静态执行的那部分**接进门禁（不需要 Docker / PG / 显示器）：
  *   1. 语法：`integration-tests/**\/*.py` 逐个 `ast.parse`（等价 py_compile，不落 __pycache__）；
+ *      同一层还有 `integration-tests/**\/*.mjs` 的 `node --check`；
  *   2. 判据自检：每个用例脚本的 `--self-test` 必须通过，且"判据夹具"条数达标 ——
  *      自检里每条判据都配了**负例**，负例不被拒就是判据退化（恒真）；
+ *   2b. `electron-shots` 的**判据表**（第四轮审计 R4-A-17/R4-A-18）：判据本体外置到
+ *      `integration-tests/electron-shots/assertions.mjs`，由本守卫做三层检查 ——
+ *      ① 表形态（≥8 条判据、id 唯一、每条都有正例 + 负例夹具）；② 真跑 `--self-test`
+ *      并把夹具条数与登记值对账；③ 接线（运行期脚本必须逐条引用表里的 id，且不得出现
+ *      `check(x, true)` 这类常量判据）。此前该脚本的 8 条运行期断言**零守卫覆盖**：
+ *      把它们改成常量、needle 全部保留，本守卫仍然 EXIT=0；
  *   3. **端到端存活**（假网关，本进程内起 http server，端口取 0）：
  *      · `good`：假网关按真契约应答 ⇒ 两个脚本必须 exit 0（证明"正常时应通过"）；
  *      · `skip`：provider 未配置 ⇒ 两个脚本必须 exit 77 且**不得**打印 PASS
@@ -37,7 +44,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } 
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const failures = []
@@ -64,6 +71,36 @@ const CONTRACT_TESTS = [
   { id: 'dex', path: 'integration-tests/dex/dex-sso-test.py', minCases: 15 },
   { id: 'ldap', path: 'integration-tests/openldap/ldap-rbac-brand-test.py', minCases: 15 },
 ]
+
+/**
+ * `electron-shots` 判据表的**登记值**（第四轮审计 R4-A-17/R4-A-18 的修复）。
+ *
+ * 与 `SELFTEST_EXPECTED_POLICIES` / `CHECK_*` 同一手法：声明一份清单，断言实际跑到的
+ * 就是它 —— 删掉一条判据、改名、或把表换成别的东西都会红（"表还在但判据少了"是最容易
+ * 被忽略的退化形态：判据数量掉下去没有任何函数签名会变）。
+ *
+ * ⚠️ 改判据表必须同步这里（这是有意的：登记值进 diff 才会被评审看见）。
+ */
+const ELECTRON_SHOTS_EXPECTED_ASSERTIONS = [
+  'left-login-page',
+  'method-picker',
+  'screenshot-nonempty',
+  'script-completed',
+  'server-filled',
+  'step1-login-page',
+  'step2-brand',
+  'step2-shot-differs-from-step1',
+  'two-step-login-page',
+]
+/**
+ * 夹具总数下限（当前 29 条 = 正例 + 负例）。
+ *
+ * 与 `minCases` 同一口径的棘轮：删夹具必须同时改这个常量并进 diff。
+ * **诚实边界**：单个**冗余**负例夹具被删（同一判据还有别的负例）本条拦不住 —— 那种
+ * 删除不降低判别力（剩下的负例照样会拒掉恒真判据），所以不为此加精确夹具清单
+ * （精确清单会让每次补夹具都要改两处，代价大于收益）。
+ */
+const ELECTRON_SHOTS_MIN_FIXTURES = 24
 
 /**
  * 用例脚本的绝对路径。
@@ -386,11 +423,15 @@ for (const file of mjsFiles) {
     '形态⑥: run-all.sh 必须把 77 当 SKIP 记账（聚合层退出码契约）')
 
   const source = existsSync(shotsPath) ? readFileSync(shotsPath, 'utf8') : ''
+  // 说明(2026-09-23 第四轮审计 R4-A-17):`size > 1000` 这条 **needle 已被更强的语义判据
+  // 取代** —— 截图非空的下界现在住在判据表(assertions.mjs)里,由 `--self-test` 的负例
+  // (0 B / 500 B / 尺寸不可读)证明它真的会拒。needle 只能证明"文件里有这句话",而它是
+  // 本轮审计判定"判别力止于字面量"的那一条,所以这里**升级**而不是删除(判别力变强)。
   for (const [needle, why] of [
     ['Page.captureScreenshot', '截图必须真的抓帧（而不是只 console.log）'],
-    ['size > 1000', '截图必须断言非空（P3 的产物级判据）'],
     ['RESULT: FAIL', '断言失败必须以 RESULT: FAIL 收尾'],
     ['EXIT_SKIP', '缺前置必须走显式 SKIP(77) 而不是 FAIL(1)'],
+    ['./assertions.mjs', '判据必须来自共用的判据表（运行期与门禁同一份）'],
   ]) {
     check(source.includes(needle), `形态⑤: electron-shots 必须保留「${why}」（找不到 ${JSON.stringify(needle)}）`)
   }
@@ -409,6 +450,84 @@ for (const file of mjsFiles) {
   // 端到端：未知参数 ⇒ 用法错误 2（不要让它变成"静默用默认值跑下去"）。
   const usageRun = spawnSync(process.execPath, [shotsPath, '--definitely-unknown'], { cwd: ROOT, encoding: 'utf8' })
   check(usageRun.status === 2, `形态⑤: 未知参数必须 exit 2（实际 ${usageRun.status}）`)
+}
+
+// ---------------------------------------------------------------------------
+// 1c-2. electron-shots 的**判据表**必须真的在判（第四轮审计 R4-A-17 / R4-A-18）
+//
+// 现场:`electron-shots.mjs` 的 8 条运行期断言**零守卫覆盖** —— 把
+// `check('Step2 品牌 Acme AI', brand === true)` 改成 `check('Step2 品牌 Acme AI', true)`
+// (4 个 needle 字面量全部保留)之后,本守卫仍然 **EXIT=0**;而同一处断言还钉着已退役的
+// 旧品牌夹具 `Acme AI`(当前实现渲染服务端渠道的 `login.display_name`,回落 `PicoAide`)
+// ⇒ 在今天的正确环境里**永远不可能 PASS**。
+//
+// 处置(三层,缺一不可):
+//   ① **判据本体外置**到 `integration-tests/electron-shots/assertions.mjs`,运行期脚本按 id
+//      求值同一张表 ⇒ 判据只有一份,掏空判据 = 掏空两边;
+//   ② **逐条判据配正例 + 负例夹具**,由本守卫真跑 `--self-test`(与两个 `.py` 同一套口径:
+//      夹具条数对账 + 负例不被拒即红)⇒ "把判据改成常量"在负例上当场红;
+//   ③ **接线判据**:运行期脚本必须逐条引用表里的每个 id(表里加判据但运行期不判 ⇒ 红),
+//      且不得自带常量真判据(`check(x, true)` / `report(id, { ok: true })` 这类形态)。
+// ---------------------------------------------------------------------------
+
+{
+  const tablePath = join(ROOT, 'integration-tests', 'electron-shots', 'assertions.mjs')
+  const shotsPath = join(ROOT, 'integration-tests', 'electron-shots', 'electron-shots.mjs')
+  check(existsSync(tablePath), '形态⑤: integration-tests/electron-shots/assertions.mjs（判据表）必须存在')
+  const table = existsSync(tablePath) ? await import(pathToFileURL(tablePath).href) : null
+  const assertions = Array.isArray(table?.SHOTS_ASSERTIONS) ? table.SHOTS_ASSERTIONS : []
+  const fixtures = Array.isArray(table?.SELF_TEST_FIXTURES) ? table.SELF_TEST_FIXTURES : []
+  check(assertions.length >= 8,
+    `形态⑤: 判据表必须至少 8 条判据（原运行期有 8 条 check;实际 ${assertions.length} 条 ⇒ 判据被删到没有判别力）`)
+  const ids = assertions.map(assertion => assertion?.id)
+  check(new Set(ids).size === ids.length, `形态⑤: 判据 id 必须唯一（实际 ${ids.join(', ')}）`)
+  // 登记值对账（精确集合相等）：删判据 / 改名 / 换表都会红。
+  const observedIds = [...new Set(ids)].filter(id => typeof id === 'string').sort()
+  check(observedIds.join(',') === [...ELECTRON_SHOTS_EXPECTED_ASSERTIONS].sort().join(','),
+    '形态⑤: 判据表的 id 集合与登记值不一致'
+      + `\n  实际:${observedIds.join(', ') || '(空)'}`
+      + `\n  登记:${[...ELECTRON_SHOTS_EXPECTED_ASSERTIONS].sort().join(', ')}`
+      + '\n  ⇒ 改判据表必须同步 check-integration-tests.mjs 的登记清单（登记值进 diff 才会被评审看见）')
+  for (const assertion of assertions) {
+    check(typeof assertion?.id === 'string' && assertion.id !== '' && typeof assertion?.evaluate === 'function',
+      `形态⑤: 判据 ${JSON.stringify(assertion?.id)} 必须形如 { id, name, evaluate() }`)
+    const cases = fixtures.filter(fixture => fixture?.id === assertion?.id)
+    check(cases.some(fixture => fixture.expect === true), `形态⑤: 判据 ${assertion?.id} 缺**正例**夹具`)
+    check(cases.some(fixture => fixture.expect === false),
+      `形态⑤: 判据 ${assertion?.id} 缺**负例**夹具 —— 没有负例就无法区分"还在判"和"恒真"`)
+  }
+  check(fixtures.length >= assertions.length * 2,
+    `形态⑤: 夹具条数必须 ≥ 判据数 × 2（正例 + 负例;实际 ${fixtures.length} 条 / ${assertions.length} 条判据）`)
+  check(fixtures.length >= ELECTRON_SHOTS_MIN_FIXTURES,
+    `形态⑤: 夹具只剩 ${fixtures.length} 条（下限 ${ELECTRON_SHOTS_MIN_FIXTURES}）⇒ 夹具被删到没有判别力；`
+      + '确实要下调请同时改 ELECTRON_SHOTS_MIN_FIXTURES 并写明理由')
+
+  // 端到端跑自检(与两个 .py 的 --self-test 同一套解析口径)。
+  const selfTest = spawnSync(process.execPath, [tablePath, '--self-test'], { cwd: ROOT, encoding: 'utf8' })
+  const selfTestOutput = `${selfTest.stdout ?? ''}${selfTest.stderr ?? ''}`
+  check(selfTest.status === 0,
+    `形态⑤: assertions.mjs --self-test 必须 exit 0（实际 ${selfTest.status}）：${selfTestOutput.trim().slice(-400)}`)
+  const summary = /self-test: (\d+)\/(\d+) 条判据夹具符合预期/u.exec(selfTestOutput)
+  if (summary === null) {
+    fail(`形态⑤: assertions.mjs --self-test 没有打印夹具汇总结论（判据数量不可见）：${selfTestOutput.trim().slice(-200)}`)
+  } else {
+    const [, ok, total] = summary.map(Number)
+    check(ok === total, `形态⑤: assertions.mjs --self-test: ${ok}/${total} —— 有判据夹具不符合预期（判据被改成常量?）`)
+    check(total === fixtures.length,
+      `形态⑤: --self-test 实跑 ${total} 条夹具,而判据表登记 ${fixtures.length} 条 ⇒ 有夹具没被跑（自检被掏空）`)
+    notes.push(`electron-shots 判据表: --self-test ${ok}/${total} 条夹具、${assertions.length} 条判据`)
+  }
+
+  // 接线:运行期脚本必须逐条引用表里的 id,且不得自带常量真判据。
+  const shotsSource = existsSync(shotsPath) ? readFileSync(shotsPath, 'utf8') : ''
+  for (const id of ids) {
+    check(typeof id === 'string' && shotsSource.includes(id),
+      `形态⑤: electron-shots.mjs 没有引用判据 ${JSON.stringify(id)} ⇒ 表里声明了但运行期不判(掏空的另一种写法)`)
+  }
+  const constantJudge = /(?:check|report)\(\s*(?:'[^']*'|"[^"]*"|[A-Za-z_$][\w$]*)\s*,\s*(?:true|false)\b/u.exec(shotsSource)
+  check(constantJudge === null,
+    '形态⑤: electron-shots.mjs 里出现了**常量真/假判据**'
+      + `（${JSON.stringify(constantJudge?.[0])}）—— 这正是 R4-A-17 的现场形态(断言永远成立)`)
 }
 
 // ---------------------------------------------------------------------------
@@ -543,7 +662,8 @@ process.stdout.write(
   `check-integration-tests: OK — ${pyFiles.length} 个 Python 用例语法通过、${mjsFiles.length} 个 Node 用例语法通过、`
   + `${CONTRACT_TESTS.length} 个契约脚本判据自检通过、${SCENARIOS.length} 个假网关场景`
   + '（正例必须绿 / 变异必须红 / 环境缺失必须 SKIP 且不得报 PASS）、'
-  + 'electron-shots 的接线与 SKIP(77) 契约、聚合层 run-all.sh 全 SKIP ⇒ 77 且不报 PASS 全部符合预期\n',
+  + 'electron-shots 的接线与 SKIP(77) 契约 + **判据表自检（每条判据配正例/负例夹具、'
+  + '运行期逐条引用）**、聚合层 run-all.sh 全 SKIP ⇒ 77 且不报 PASS 全部符合预期\n',
 )
 return 0
 }
