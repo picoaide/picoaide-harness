@@ -479,6 +479,15 @@ func decide(db *sql.DB, status serverstore.AgentPresetStatus, auditAction string
 		if !decideBody(c, status) {
 			return
 		}
+		// 下架冻结(第五轮审计 R5-B-1,跨泳道补齐 2026-09-23):下架(apps.enabled=0)
+		// 期间**不得**把待审版本置为 approved —— 否则会产出「已批准但任何人(含
+		// 作者)在员工面都看不见」的版本,管理员在审批队列里点一次「通过」,使用侧
+		// 毫无变化(与 sharedskills.decide 同一类缺陷的孪生)。闸门唯一实现在
+		// approveWritable,见其注释。**只挡 approve**:reject 不是分发动作,下架
+		// 期间仍应允许管理员清理队列。
+		if status == serverstore.AgentPresetApproved && !approveWritable(c, db, p.Name) {
+			return
+		}
 		// F2-N3 / N-4:拒绝已经释放了该版本的归档字节,再把它置成 approved
 		// 只会得到「员工看得见、下载 500」的坏行。这里的预检只为了让**顺序**
 		// 复现(误拒后点通过)拿到友好的 409 文案;真正的不变量由 DAO 的
@@ -529,6 +538,10 @@ func decideVersioned(db *sql.DB, status serverstore.AgentPresetStatus, auditActi
 			return
 		}
 		if !decideBody(c, status) {
+			return
+		}
+		// 下架冻结:与 decide 同闸门(唯一实现在 approveWritable)。
+		if status == serverstore.AgentPresetApproved && !approveWritable(c, db, name) {
 			return
 		}
 		// F2-N3 / N-4:与 decide 同守卫 —— 没有归档字节的版本不能置为 approved
@@ -626,6 +639,33 @@ func approveNeedsArchive(c *gin.Context, db *sql.DB, status serverstore.AgentPre
 	}
 	serverauth.WriteError(c, http.StatusConflict, "ARCHIVE_CLEARED",
 		"该版本归档已在拒绝时清理,无法再通过审核(拒绝即释放存储):请让作者上传新版本")
+	return false
+}
+
+// approveWritable 是审核面的**下架冻结闸门**(第五轮审计 R5-B-1,跨泳道补齐
+// 2026-09-23):下架(apps.enabled=0)期间不得把待审版本置为 approved。
+//
+// 判据唯一实现在 serverstore.Distribution.Writable()(见 serverstore/distribution.go
+// 的语义权威),与发布内核(appstore.Publish,三条上传路径共用)以及技能侧的
+// sharedskills.decide 共用:上传与审批在同一时刻对同一状态给出同一答案。放行只会
+// 产出「已批准但任何人(含作者)在员工面都看不见」的版本 —— 管理员点一次「通过」,
+// 使用侧毫无变化(旧缺陷)。
+//
+// 出口是管理员**显式重新上架**(PUT …/:name/enabled,带审计),不是审批时自动上架
+// —— 后者会让一位管理员静默撤销另一位管理员的下架动作。
+//
+// 返回 false 表示已写出错误响应(409 APP_DELISTED / 500 INTERNAL),调用方必须直接返回。
+func approveWritable(c *gin.Context, db *sql.DB, name string) bool {
+	dist, err := serverstore.AppDistribution(db, serverstore.AppKindAgent, name)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return false
+	}
+	if dist.Writable() {
+		return true
+	}
+	serverauth.WriteError(c, http.StatusConflict, appstore.CodeAppDelisted,
+		"该智能体已下架，无法通过审核：请先重新上架再审核")
 	return false
 }
 
@@ -1024,29 +1064,40 @@ func serveArchive(c *gin.Context, db *sql.DB, cacheDir string, p *serverstore.Ag
 	// agentshare-2:员工下载是市场智能体唯一的安装通路(CapabilityCenterPanel
 	// 的 installEndpoint),因此共享面的下载端点**两种渠道都服务**(清单/审核
 	// 等其它共享面端点则只服务 org,见 orgAgentNames)。
+	//
 	// P2-1(审计 2026-09-13):apps.enabled=0(下架)即不可下载——此前只查
-	// 审核状态与授权,管理员下架后员工仍能按名字取下归档。单个 App 一次
-	// 查询,不引入逐行 N+1。两个闸门合起来即「市场下架必须生效」。
+	// 审核状态与授权,管理员下架后员工仍能按名字取下归档。
+	// 判据唯一实现在 serverstore.Distribution.Delivered()(见
+	// serverstore/distribution.go 的语义权威);单个 App 一次查询,不引入逐行
+	// N+1(同一次查询里的 Owner 供下面的归属豁免使用)。
+	dist := serverstore.Distribution{}
 	if !admin {
-		enabled, aerr := serverstore.AppEnabled(db, serverstore.AppKindAgent, p.Name)
-		if aerr != nil {
+		var derr error
+		dist, derr = serverstore.AppDistribution(db, serverstore.AppKindAgent, p.Name)
+		if derr != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
-		if !enabled {
+		if !dist.Delivered() {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "预设不存在")
 			return
 		}
 	}
-	// 授权检查:非 admin 下载须已授权(或为作者本人);否则与不存在同 404。
+	// 授权检查:非 admin 下载须已授权(**或为归属人本人**);否则与不存在同 404。
+	//
+	// 豁免判据是 apps.owner,不是 app_releases.publisher(第五轮审计 R5-B-2 的
+	// 智能体孪生,2026-09-23 跨泳道补齐):归属转移后旧上传者已无任何权利,而新
+	// 归属人——唯一有权续传的人——若还要靠授权才能取到自己的内容,「转移出来的
+	// 发布权」就是空的。两面同源见 serverstore.AppOwnedByOwner(与技能侧
+	// sharedskills.download 逐字同形)。
 	if !admin {
 		u := serverauth.CurrentUser(c)
 		if u == nil {
 			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 			return
 		}
-		isAuthor := u.Username == p.Author
-		if !isAuthor {
+		isOwner := dist.OwnedBy(u.Username)
+		if !isOwner {
 			groups, gErr := serverstore.UserEffectiveGroups(db, u.ID)
 			if gErr != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
