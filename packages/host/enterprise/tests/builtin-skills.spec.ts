@@ -30,7 +30,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply, type Config } from '../src/auth-gate.ts'
 import { builtinAction, builtinInstallEndpoint, builtinRowState, planBuiltinCards, selectBuiltinCards, type BuiltinSkill } from '../src/client/BuiltinSkillsStrip.tsx'
 import { APP_BUILDER_SKILL, builtinSkillInstallHint, isBuiltinSkillInstalled } from '../src/builtin-skills.ts'
-import { readProvenance, resolveSkillsDir } from '../src/skill-install.ts'
+import { readProvenance, resolveSkillsDir, SKILL_LOCK_DIR } from '../src/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 const SOURCE_SKILL_DIR = join(__dirname, '..', '..', '..', '..', 'server', 'skills', 'app-builder')
@@ -261,8 +261,9 @@ describe('内置技能：清单与按需安装（服务端下发 → 本机技�
     expect(prov?.channel).toBe('builtin')
     expect(prov?.version).toBe('1.0.0')
     expect(prov?.server).toBe('https://harness.example')
-    // 落点之外不留暂存目录。
-    const leftovers = (await readdir(skillsDir)).filter(n => n.startsWith('.'))
+    // 落点之外不留暂存目录（`.skill-locks` 是 per-name 锁的私有区，见 SKILL_LOCK_DIR：
+    // 以点开头 ⇒ 发现器/清单都看不见它，与 `.skill-tmp` 同类）。
+    const leftovers = (await readdir(skillsDir)).filter(n => n.startsWith('.') && n !== SKILL_LOCK_DIR)
     expect(leftovers).toEqual([])
   })
 
@@ -392,8 +393,9 @@ describe('A6 内置技能能装也能卸（新增卸载路由）+ A2/A3 来源�
     const list = await h.call('/api/pico/skills/builtin')
     expect(list.code).toBe(200)
     expect(list.body.installed).toEqual([])
-    // 技能库根上不留安装器私有目录。
-    expect((await readdir(resolveSkillsDir())).filter(n => n.startsWith('.'))).toEqual([])
+    // 技能库根上不留安装器私有目录（`.skill-locks` 是 per-name 锁的落点，允许存在但必须空）。
+    expect((await readdir(resolveSkillsDir())).filter(n => n.startsWith('.') && n !== SKILL_LOCK_DIR)).toEqual([])
+    expect(await readdir(join(resolveSkillsDir(), SKILL_LOCK_DIR)).catch(() => []), '锁不得残留').toEqual([])
   })
 
   it('内置技能卸载也看来源：同名本机自制内容无确认 ⇒ 409 LOCAL_CONTENT 且不删', async () => {
@@ -470,7 +472,8 @@ describe('A6 内置技能能装也能卸（新增卸载路由）+ A2/A3 来源�
     const message = String(res.body.error)
     expect(message).not.toContain(home)
     expect(message).not.toContain('/tmp/')
-    expect((await readdir(resolveSkillsDir())).filter(n => n.startsWith('.'))).toEqual([])
+    expect((await readdir(resolveSkillsDir())).filter(n => n.startsWith('.') && n !== SKILL_LOCK_DIR)).toEqual([])
+    expect(await readdir(join(resolveSkillsDir(), SKILL_LOCK_DIR)).catch(() => []), '失败的安装不得留下锁').toEqual([])
   })
 
   it('A13：归档自带的 .install-version 不会留成"已装版本"（无版本头时不得伪造）', async () => {

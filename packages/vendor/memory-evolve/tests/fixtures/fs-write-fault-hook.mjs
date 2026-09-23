@@ -9,6 +9,11 @@
  * fd form therefore injects the failure exactly into the copy loop and leaves the
  * child's own setup untouched.
  *
+ * ⚠️ **per-name 锁的那次 fd 写不计入**（F3 修复之后，取锁也按 fd 写锁内容
+ * `{"pid":…,"at":…}`）：不排除的话 `FAULT_ON=1` 会打在"取锁"上，用例拿到的是
+ * `SKILL_LOCKED` 而不是它要断言的那个写失败（假红/错因）。判据是**写入内容**
+ * （锁内容是锁属主 JSON，技能正文不是），与 `fs-toctou-hook.mjs` 同一份。
+ *
  * Every other named export is forwarded from the real fs — the export list is
  * generated from the real module (same reason as tests/fixtures/fs-fault-hook.mjs:
  * a hard-coded list goes stale the moment a module under test imports one more
@@ -35,9 +40,16 @@ export async function load(url, context, next) {
       'const failOn = Number(process.env.FAULT_ON ?? 1)',
       'let fdWrites = 0',
       "const fault = () => { const e = new Error('injected ' + code); e.code = code; throw e }",
+      'const isLockWrite = (data) => {',
+      '  try {',
+      '    const text = typeof data === "string" ? data : (Buffer.isBuffer(data) ? data.toString("utf8") : String(data))',
+      '    const parsed = JSON.parse(text)',
+      '    return parsed !== null && typeof parsed === "object" && Number.isInteger(parsed.pid) && Number.isInteger(parsed.at)',
+      '  } catch { return false }',
+      '}',
       ...names.map((n) => `export const ${n} = real[${JSON.stringify(n)}]`),
       'export function writeFileSync(file, data, options) {',
-      '  if (typeof file === "number") {',
+      '  if (typeof file === "number" && !isLockWrite(data)) {',
       '    fdWrites += 1',
       '    if (fdWrites === failOn) return fault()',
       '  }',

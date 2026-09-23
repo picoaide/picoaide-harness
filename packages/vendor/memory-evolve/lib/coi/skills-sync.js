@@ -16,10 +16,22 @@
  *     与本文档的"来源闸门"段（P1-1/P1-2，2026-09-23 独立审计 W4）
  * 同步以**整目录**为单位（SKILL.md + scripts/ 等辅助文件随技能一起走）；
  * 被禁用的技能文件仍存在，只是不注入模型。
+ *
+ * **独立复审 r3（2026-09-23）补上的三条硬约束**（都写在各自函数头）：
+ *   1. **判定与写溯源不可分割**（{@link isIdenticalTree} 的写后复检）：采纳路径
+ *      写完 `channel: 'plugin'` 之后**再复检一次**同一性（把刚写的标记排除在条目
+ *      集合之外）；复检不成立就**只收回自己刚写的标记**并 `refused` —— 否则那个窗口
+ *      里落进来的用户字节会被盖上 plugin 溯源，下一次随包升版时被整树换入静默删除；
+ *   2. **标记读取有类型/体积闸门**（{@link readSmallRegularFile}）：`lstat` 必须是
+ *      普通文件 + 64KiB 上限 + `O_NONBLOCK` 按 fd 复验 —— `.picoaide/release.json`
+ *      是 FIFO 时裸 `readFileSync` 会让**开机同步永久阻塞**（复审实测 12s 不返回）；
+ *   3. **与安装器共用同一把 per-name 文件锁**（{@link SKILL_LOCK_DIR}）：拿到锁才
+ *      判定/换入，拿不到就 `refused`（`SKILL_LOCKED`）—— 并发的终态是"内容是插件版 +
+ *      溯源是市场版"，且插件此后永久 `SKILL_CHANNEL_CONFLICT` 拒收、**不会自愈**。
  */
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
-import { writeFileAtomicSafeAt, writeTargetRefusedError } from '../sync/filesets.js'
+import { isSymlinkFreeRepoTarget, openExclusiveSafe, removeCreatedFile, writeFileAtomicSafeAt, writeTargetRefusedError } from '../sync/filesets.js'
 
 /**
  * 换入过程中的两个临时目录名（都与目标同父目录，同一文件系统才能 rename）：
@@ -55,9 +67,52 @@ const INSTALLER_MARKERS = ['.picoaide', '.install-version']
  * 本插件写下的溯源目录/文件名，与 enterprise 安装器的
  * `PROVENANCE_DIR` / `release.json` **同值**：跨包 import 禁止（本插件是随包
  * vendored 副本，不依赖企业包），所以这里是本地常量而不是 import。
+ *
+ * ⚠️ 与 {@link STORE_CHANNELS} / {@link SKILL_LOCK_DIR} 一样属于**跨包契约**：
+ * 两侧同值由 enterprise 的 `tests/skill-channel-parity.spec.ts` 读源码文本对拍
+ * （找不到字面量即 throw）。
  */
 const PROVENANCE_DIR = '.picoaide'
 const PROVENANCE_FILE = 'release.json'
+
+/**
+ * 安装器标记的体积上限（独立复审 r3 F2 的修复）。
+ *
+ * 真标记只有 appId/version/channel/server/archiveChecksum/installedAt 几个短字段
+ * （几百字节）；64 KiB 是"绝不可能被合法内容触及"的量级。超过它的标记一律按
+ * **读不出可用来源**处理 —— 复审实测：512MiB 的符号链接目标会被整份读进内存。
+ */
+const MARKER_MAX_BYTES = 64 * 1024
+
+/**
+ * per-name 锁目录（独立复审 r3 F3 的修复）——**跨包协议**，与 enterprise
+ * `packages/host/enterprise/src/skill-install.ts` 的同名常量必须同值：
+ *
+ *   - 落点：`<userSkillsDir>/.skill-locks/<name>.lock`（与技能库同一文件系统，
+ *     且以点开头 ⇒ 既不是技能目录，也不会被 `listInstalledSkills` / 上游
+ *     `skill-filesystem` 的发现器看见）；释放后**空目录会留在技能库根上**，
+ *     与安装器的 `.skill-tmp` 同类（安装器/插件私有区，`readdir` 看得见但发现器
+ *     与清单都看不见），因此它是"允许存在的空私有目录"；
+ *   - 创建：`O_CREAT|O_EXCL`（`openExclusiveSafe(..., 'lock')`）—— 预置的符号链接
+ *     或文件一律 EEXIST/拒收，**绝不跟随**；
+ *   - 内容：`{"pid":<number>,"at":<ms>}`（陈旧判定的依据）；
+ *   - 陈旧：持锁 pid **确定已死**（`kill(pid,0)` 抛 ESRCH）⇒ 可抢占；没有可用 pid
+ *     （空文件/坏 JSON/旧格式）时按 mtime 超过 {@link SKILL_LOCK_STALE_MS} 判；
+ *     `EPERM`（跨 uid 不可探测）一律保守视为"仍被持有"；
+ *   - 释放：只删自己创建的那个 inode（dev/ino 比对），不误删别人的锁。
+ *
+ * 为什么同步侧**零等待**：它跑在启动路径上（`lib/index.js` 的 `apply()`），而且与
+ * 安装器在**同一个宿主进程**里 —— 同步忙等会把事件循环占住，异步的持锁者永远拿不到
+ * 推进机会（自锁）。所以拿不到锁就**如实拒收**（`SKILL_LOCKED`），下一轮启动再同步。
+ * 安装器侧相反：它可以有界等待（`await` + 让出事件循环），见企业包的同名注释。
+ */
+const SKILL_LOCK_DIR = '.skill-locks'
+
+/** 锁文件名后缀（协议常量，两端同值）。 */
+const SKILL_LOCK_SUFFIX = '.lock'
+
+/** 无可用 pid 的锁文件的陈旧阈值（协议常量，两端同值；与 `store.js` 的 `STALE_LOCK_MS` 同量级）。 */
+const SKILL_LOCK_STALE_MS = 10_000
 
 /**
  * 本插件来源的渠道取值（A9 修复）：`SkillProvenance.channel` 的取值域由
@@ -91,10 +146,15 @@ const STORE_CHANNELS = ['market', 'org', 'builtin', PLUGIN_CHANNEL]
  *   - {@link SKILL_ADOPT_FAILED}：内容同一性成立（= 已证明是本插件的副本），但
  *     **补写溯源失败** ⇒ 仍然拒绝。这一条必须 fail-loud：否则会出现"内容按 plugin
  *     更新了、溯源却还不是 plugin"的中间态。
+ *   - {@link SKILL_LOCKED}：该技能名的 per-name 锁被另一个写者持有（能力中心安装器
+ *     正在装/卸同名技能，或另一次同步在跑），或锁落点被符号链接占位 ⇒ 本轮**不碰
+ *     这个落点**。宁可少同步一轮，也不与安装器并发换入（复审 r3 F3：并发终态是
+ *     "内容是插件版 + 溯源是市场版"，且此后永久 `SKILL_CHANNEL_CONFLICT`、不会自愈）。
  */
 const SKILL_LOCAL_CONTENT = 'SKILL_LOCAL_CONTENT'
 const SKILL_CHANNEL_CONFLICT = 'SKILL_CHANNEL_CONFLICT'
 const SKILL_ADOPT_FAILED = 'SKILL_ADOPT_FAILED'
+const SKILL_LOCKED = 'SKILL_LOCKED'
 
 /**
  * 暂存/旁置目录的"陈旧"年龄上限：超过它一律按崩溃残留清扫（即便 pid 还在
@@ -171,32 +231,82 @@ function skillVersion(text) {
 }
 
 /**
- * 读目标技能目录的安装器溯源渠道（P1-1 修复，2026-09-23 独立审计 W4）。
+ * 读一个"应当是小普通文件"的状态文件 —— **先闸门、后读**（独立复审 r3 F2 的修复）。
+ *
+ * 三条闸门（缺一条就有真实后果）：
+ *   1. `lstat` 必须是**普通文件**（拒 FIFO/目录/符号链接/设备节点）；
+ *   2. `size <= maxBytes`（不把任意大的东西读进内存）；
+ *   3. 打开用 `O_NONBLOCK` + 按 **fd** 复验一次类型与体积 —— lstat 与 open 之间被
+ *      换成 FIFO 时，`open(O_RDONLY)` 会**永久阻塞**（复审实测：FIFO 标记让启动
+ *      同步 12s 不返回），`O_NONBLOCK` 让这一步立即返回、由 fd 上的类型复验拒掉。
+ *
+ * 任何一条不成立都返回 `unreadable`：调用方按"**有标记但读不出可用来源**"处理
+ * （fail-safe：绝不覆盖看不懂的标记），而不是当成"没有标记"。
+ *
+ * @param {string} file - 文件绝对路径。
+ * @param {number} maxBytes - 体积上限。
+ * @returns {{status:'ok', text:string}|{status:'absent'}|{status:'unreadable'}}
+ */
+function readSmallRegularFile(file, maxBytes) {
+  let stat
+  try {
+    stat = lstatSync(file)
+  } catch (error) {
+    return error?.code === 'ENOENT' ? { status: 'absent' } : { status: 'unreadable' }
+  }
+  if (!stat.isFile()) return { status: 'unreadable' }
+  if (stat.size > maxBytes) return { status: 'unreadable' }
+  let fd
+  try {
+    fd = openSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
+    const opened = fstatSync(fd)
+    if (!opened.isFile() || opened.size > maxBytes) return { status: 'unreadable' }
+    return { status: 'ok', text: readFileSync(fd, 'utf8') }
+  } catch {
+    return { status: 'unreadable' }
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd) } catch { /* 已关闭 */ }
+    }
+  }
+}
+
+/**
+ * 读目标技能目录的安装器溯源（P1-1 修复，2026-09-23 独立审计 W4）。
  *
  * 判据与企业包安装器的 `isStoreProvenance`（`skill-install.ts:483-485`）
  * **逐条同源**，三件事必须同时成立才算"这份内容不是用户手写的"：
- *   1. `<dir>/.picoaide/release.json` 可读且是 JSON 对象；
+ *   1. `<dir>/.picoaide/release.json` 可读且是 JSON 对象（读取本身先过
+ *      {@link readSmallRegularFile} 的类型/体积闸门）；
  *   2. `appId` 是 string 且**等于目录名**（目录被改名/被占用时不算）；
  *   3. `channel` 是已知的商店渠道取值（见 {@link STORE_CHANNELS}；未知取值按
  *      "非商店来源"处理 —— 与安装器"未知渠道不回落成 market"的历史修复同口径）。
- * 任何一条不成立都返回 `undefined` = 按用户自制内容处理（宁可多拒一次，不可
- * 静默覆盖/删除用户内容）。
+ * 任何一条不成立都返回 `channel: undefined` = 按用户自制内容处理（宁可多拒一次，
+ * 不可静默覆盖/删除用户内容）。
+ *
+ * `markerStatus` 如实回报标记的三种形态，调用方据此决定能不能走"内容同一性采纳"：
+ * **只有 `absent`（确认没有标记）才可采纳**；`unreadable`（FIFO/目录/符号链接/
+ * 设备/超体积/坏 JSON）一律不采纳。
  *
  * @param {string} destDir - 技能库内的目标技能目录。
  * @param {string} name - 期望的技能名（= 目录名）。
- * @returns {string|undefined} 渠道取值；不是商店来源时为 undefined。
+ * @returns {{channel:string|undefined, markerStatus:'ok'|'absent'|'unreadable'}}
  */
-function readStoreChannel(destDir, name) {
+function readStoreProvenance(destDir, name) {
+  const marker = readSmallRegularFile(join(destDir, PROVENANCE_DIR, PROVENANCE_FILE), MARKER_MAX_BYTES)
+  if (marker.status !== 'ok') return { channel: undefined, markerStatus: marker.status }
   let parsed
   try {
-    parsed = JSON.parse(readFileSync(join(destDir, PROVENANCE_DIR, PROVENANCE_FILE), 'utf8'))
+    parsed = JSON.parse(marker.text)
   } catch {
-    return undefined // 没有标记 / 读不出来 / JSON 坏 —— 都是"不是商店来源"
+    return { channel: undefined, markerStatus: 'ok' } // 标记可读但 JSON 坏
   }
-  if (parsed === null || typeof parsed !== 'object') return undefined
-  if (typeof parsed.appId !== 'string' || parsed.appId !== name) return undefined
-  if (typeof parsed.channel !== 'string' || !STORE_CHANNELS.includes(parsed.channel)) return undefined
-  return parsed.channel
+  if (parsed === null || typeof parsed !== 'object') return { channel: undefined, markerStatus: 'ok' }
+  if (typeof parsed.appId !== 'string' || parsed.appId !== name) return { channel: undefined, markerStatus: 'ok' }
+  if (typeof parsed.channel !== 'string' || !STORE_CHANNELS.includes(parsed.channel)) {
+    return { channel: undefined, markerStatus: 'ok' }
+  }
+  return { channel: parsed.channel, markerStatus: 'ok' }
 }
 
 /**
@@ -227,7 +337,7 @@ function readStoreChannel(destDir, name) {
  * @returns {{ok:true}|{ok:false, adoptable:boolean, code:string, message:string}} 判定结果。
  */
 function classifySyncTarget(destDir, name) {
-  const channel = readStoreChannel(destDir, name)
+  const { channel, markerStatus } = readStoreProvenance(destDir, name)
   if (channel === PLUGIN_CHANNEL) return { ok: true }
   if (channel !== undefined) {
     return {
@@ -239,15 +349,17 @@ function classifySyncTarget(destDir, name) {
         + '若要使用随包内置技能，请先在能力中心卸载该同名技能或改掉它的目录名。',
     }
   }
-  // 有没有"看不懂的标记"决定能不能走内容同一性采纳：有标记就一律不采纳
-  // （覆盖别人的来源标记比拒绝危险得多）。
-  const hasMarker = existsSync(join(destDir, PROVENANCE_DIR, PROVENANCE_FILE))
+  // 有没有"看不懂的标记"决定能不能走内容同一性采纳：**只有确认没有标记（absent）
+  // 才可采纳**。`unreadable`（FIFO/目录/符号链接/设备/超体积/读失败）与"可读但
+  // 内容不可用"（JSON 坏/appId 不符/渠道未知）都一律不采纳 —— 覆盖别人的来源标记
+  // 比拒绝危险得多。
+  const marked = markerStatus !== 'absent'
   return {
     ok: false,
-    adoptable: !hasMarker,
+    adoptable: !marked,
     code: SKILL_LOCAL_CONTENT,
-    message: hasMarker
-      ? `${destDir} 有安装器溯源标记但读不出可用来源（JSON 坏 / appId 不符 / 渠道未知）—— 不覆盖看不懂的标记；已拒绝。`
+    message: marked
+      ? `${destDir} 有安装器溯源标记但读不出可用来源（不是小普通文件 / JSON 坏 / appId 不符 / 渠道未知）—— 不覆盖看不懂的标记；已拒绝。`
       : `${destDir} 已存在，但没有安装器溯源（按"用户自制"处理）—— 整树换入会连同你自己的文件一起删掉；已拒绝。`,
   }
 }
@@ -283,11 +395,15 @@ function classifySyncTarget(destDir, name) {
  *
  * @param {string} srcDir - 插件包内技能目录。
  * @param {string} destDir - 目标技能目录。
+ * @param {{ignoreTopLevel?: string[]}} [options] - 忽略目标目录**根**上的这些条目
+ *   （只给"写后复检"用：那时 `.picoaide` / `.install-version` 是**我们自己刚写的**，
+ *   它们不属于技能内容；判定前的首次比较必须用完整条目集合）。
  * @returns {boolean} 逐字相同为 true。
  */
-function isIdenticalTree(srcDir, destDir) {
+function isIdenticalTree(srcDir, destDir, options = {}) {
+  const ignore = options.ignoreTopLevel ?? null
   const srcEntries = listEntriesRel(srcDir)
-  const destEntries = listEntriesRel(destDir)
+  const destEntries = listEntriesRel(destDir, '', ignore)
   if (srcEntries === null || destEntries === null) return false
   // 条目集合必须逐项相同（多一个 / 少一个 / 改名 / 种类不同都算不同）。
   if (srcEntries.length !== destEntries.length) return false
@@ -311,9 +427,10 @@ function isIdenticalTree(srcDir, destDir) {
  * 失败，一律返回 `null`（调用方按"无法证明相同"处理）。
  * @param {string} dir - 目录。
  * @param {string} [prefix] - 递归用前缀。
+ * @param {string[]|null} [skipTopLevel] - 只在本层（`prefix === ''`）跳过的条目名。
  * @returns {Array<{rel:string, dir:boolean}>|null} 条目列表；异常为 null。
  */
-function listEntriesRel(dir, prefix = '') {
+function listEntriesRel(dir, prefix = '', skipTopLevel = null) {
   let names
   try {
     names = readdirSync(dir)
@@ -322,6 +439,7 @@ function listEntriesRel(dir, prefix = '') {
   }
   const out = []
   for (const name of names) {
+    if (prefix === '' && skipTopLevel !== null && skipTopLevel.includes(name)) continue
     const rel = prefix === '' ? name : `${prefix}/${name}`
     const full = join(dir, name)
     let stat
@@ -333,7 +451,7 @@ function listEntriesRel(dir, prefix = '') {
     if (stat.isSymbolicLink()) return null
     if (stat.isDirectory()) {
       out.push({ rel, dir: true })
-      const nested = listEntriesRel(full, rel)
+      const nested = listEntriesRel(full, rel, skipTopLevel)
       if (nested === null) return null
       out.push(...nested)
     } else if (stat.isFile()) {
@@ -408,6 +526,106 @@ export function normalizeSkillText(raw, skillName, displayName) {
 }
 
 /**
+ * 锁文件是否陈旧（{@link SKILL_LOCK_DIR} 的协议判据之一）。
+ *
+ * 判据与 `store.js` 的 `isStaleLock` 同源（**同一个包里的第二次实现**，因为本锁的
+ * 落点/常量属于跨包契约，要与 enterprise 侧的本地实现逐条对齐；那边的对拍用例会
+ * 比对 {@link SKILL_LOCK_STALE_MS}）：
+ *   - 锁文件里有可用 pid（正整数）时**只看存活**：活着 ⇒ 有效（哪怕持锁很久）；
+ *   - `kill(pid,0)` 抛 `ESRCH`（进程确实不存在）⇒ 陈旧，可抢占；
+ *   - 抛 `EPERM`/其它（跨 uid、容器、NFS：不可判定）⇒ **保守视为有效**，绝不抢；
+ *   - 没有可用 pid（空文件/坏 JSON/旧格式）⇒ 按 mtime 超过阈值判陈旧。
+ *
+ * 先 `lstat` 要求**普通文件**：符号链接/目录/设备不是我们的锁形态，一律不按陈旧
+ * 删除（fail-safe，避免把别人预置的东西删掉）。
+ * @param {string} lockPath - 锁文件绝对路径。
+ * @returns {boolean} 可抢占为 true。
+ */
+function isSkillLockStale(lockPath) {
+  let stat
+  try {
+    stat = lstatSync(lockPath)
+  } catch {
+    return false // 不存在/不可读 ⇒ 不 stale（下一轮重试即可拿到）
+  }
+  if (!stat.isFile()) return false
+  const read = readSmallRegularFile(lockPath, MARKER_MAX_BYTES)
+  if (read.status === 'ok') {
+    let owner
+    try {
+      owner = JSON.parse(read.text)
+    } catch {
+      owner = undefined
+    }
+    if (owner !== null && typeof owner === 'object' && Number.isInteger(owner.pid) && owner.pid > 0) {
+      try {
+        process.kill(owner.pid, 0) // 信号 0 = 只探测存活
+        return false
+      } catch (error) {
+        return error?.code === 'ESRCH'
+      }
+    }
+  }
+  return Date.now() - stat.mtimeMs > SKILL_LOCK_STALE_MS
+}
+
+/**
+ * 取一个技能名的 per-name 锁（独立复审 r3 F3 的修复）—— 协议见 {@link SKILL_LOCK_DIR}。
+ *
+ * **零等待**（有意的，见协议注释）：拿不到就返回 `ok:false`，调用方如实报
+ * `SKILL_LOCKED` 并跳过该技能。整个过程有界：最多"试一次 + 抢占一次"。
+ *
+ * 返回的 `release()` 只删**自己创建的那个 inode**（`removeCreatedFile` 按 dev/ino
+ * 比对），祖先目录被换走时不会误删库外同名文件。
+ *
+ * @param {string} userSkillsDir - 技能库根。
+ * @param {string} name - 技能名。
+ * @returns {{ok:true, release:()=>void}|{ok:false, message:string}}
+ */
+function acquireSkillDirLock(userSkillsDir, name) {
+  const lockDir = join(userSkillsDir, SKILL_LOCK_DIR)
+  const lockPath = join(lockDir, `${name}${SKILL_LOCK_SUFFIX}`)
+  try {
+    mkdirSync(lockDir, { recursive: true })
+  } catch (error) {
+    return { ok: false, message: `技能库的锁目录 ${lockDir} 建不出来（${String(error?.message ?? error)}）—— 拿不到锁就不换入（避免与安装器并发写同一个落点）` }
+  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const opened = openExclusiveSafe(userSkillsDir, lockPath, 'lock')
+    if (opened.ok === true) {
+      try {
+        writeFileSync(opened.fd, JSON.stringify({ pid: process.pid, at: Date.now() })) // 按 fd 写
+      } catch (error) {
+        removeCreatedFile(lockPath, opened.stat)
+        return { ok: false, message: `写锁文件 ${lockPath} 失败（${String(error?.message ?? error)}）` }
+      } finally {
+        try { closeSync(opened.fd) } catch { /* 已关闭 */ }
+      }
+      return {
+        ok: true,
+        release() { removeCreatedFile(lockPath, opened.stat) },
+      }
+    }
+    if (opened.reason === 'unsafe') {
+      return { ok: false, message: `锁落点 ${lockPath} 是符号链接或逃出了技能库 —— 拒绝在未持锁的情况下换入（预置链接是拒收，不是静默跳过）` }
+    }
+    // 已被占用：陈旧（持锁进程已死）就抢占**一次**；抢不掉/不陈旧一律拒收。
+    if (attempt === 0 && isSkillLockStale(lockPath) && isSymlinkFreeRepoTarget(userSkillsDir, lockPath)) {
+      try {
+        rmSync(lockPath, { force: true })
+        continue
+      } catch { /* 抢不掉（目录/权限）⇒ 走下面的拒收 */ }
+    }
+    return {
+      ok: false,
+      message: `技能 ${name} 的 per-name 锁正被另一个写者持有（${lockPath}：能力中心安装器正在装/卸同名技能，或另一次同步在跑）`
+        + '—— 本轮不换入，避免并发产出"内容是插件版、溯源是市场版"这种不会自愈的中间态。',
+    }
+  }
+  return { ok: false, message: `技能 ${name} 的锁竞争未收敛（${lockPath}）` }
+}
+
+/**
  * 同步内置技能到用户技能库。
  * 覆盖策略（保护用户内容）：目标缺失 → 复制；目标存在且溯源渠道就是 `plugin`、
  * 且 x-version 更低 → 整目录覆盖（插件升级，SKILL.md 与 scripts/ 等辅助文件一起
@@ -467,89 +685,118 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
     const destDir = join(userSkillsDir, name)
     const destFile = join(destDir, 'SKILL.md')
     const srcText = readFileSync(srcFile, 'utf8')
-    let action = 'unchanged'
-    let message
-    let code
-    /** 本次是否走了"内容同一性采纳"（决定 unchanged 是否报成 adopted）。 */
-    let adopted = false
-    // 来源闸门（P1-1/P1-2）：目标目录存在时，**先**判定它是不是本插件自己的
-    // （渠道 = plugin）。用户自制内容与其它商店渠道的同名技能都拒收；这一判定
-    // 与 x-version 无关 —— 版本相同也照样如实报 refused，否则"本机是别的东西"
-    // 会被 `unchanged` 掩盖成"已经是最新"。
-    if (isPresent(destDir)) {
-      const verdict = classifySyncTarget(destDir, name)
-      if (!verdict.ok) {
-        // 兼容路径（P1-1 追加，2026-09-23）：目录**没有任何** `release.json` 时，
-        // 允许用"内容与随包技能逐字相同"来自证它确实是一份未经溯源的本插件副本
-        // （A9 写溯源的修复不在任何已发布版本里 ⇒ 现场存在这类目录）。同一性
-        // 不成立就照旧拒收；证明成立则**先补写溯源**再走正常路径。
-        if (verdict.adoptable) {
-          if (!isIdenticalTree(srcDir, destDir)) {
-            const reason = `${verdict.message} 内容同一性判据不成立：目标目录必须与随包技能逐项相同`
-              + '（多一个/少一个条目、改名、文件↔目录、任何字节差异、符号链接或读取失败都算不同）。'
-            console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（保留本机内容，${SKILL_LOCAL_CONTENT}）：${reason}`)
-            results.push({ name, action: 'refused', message: reason, code: SKILL_LOCAL_CONTENT })
+    // per-name 锁（F3 修复）：从"判定来源"到"换入完成"整段与安装器互斥。拿不到锁
+    // 就如实拒收（零等待，理由见 {@link SKILL_LOCK_DIR}）——绝不并发写同一个落点。
+    // `continue` 写在 try 里也没问题：finally 会先把锁放掉。
+    const lock = acquireSkillDirLock(userSkillsDir, name)
+    if (lock.ok !== true) {
+      console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（${SKILL_LOCKED}）：${lock.message}`)
+      results.push({ name, action: 'refused', message: lock.message, code: SKILL_LOCKED })
+      continue
+    }
+    try {
+      let action = 'unchanged'
+      let message
+      let code
+      /** 本次是否走了"内容同一性采纳"（决定 unchanged 是否报成 adopted）。 */
+      let adopted = false
+      // 来源闸门（P1-1/P1-2）：目标目录存在时，**先**判定它是不是本插件自己的
+      // （渠道 = plugin）。用户自制内容与其它商店渠道的同名技能都拒收；这一判定
+      // 与 x-version 无关 —— 版本相同也照样如实报 refused，否则"本机是别的东西"
+      // 会被 `unchanged` 掩盖成"已经是最新"。
+      if (isPresent(destDir)) {
+        const verdict = classifySyncTarget(destDir, name)
+        if (!verdict.ok) {
+          // 兼容路径（P1-1 追加，2026-09-23）：目录**没有任何** `release.json` 时，
+          // 允许用"内容与随包技能逐字相同"来自证它确实是一份未经溯源的本插件副本
+          // （A9 写溯源的修复不在任何已发布版本里 ⇒ 现场存在这类目录）。同一性
+          // 不成立就照旧拒收；证明成立则**先补写溯源**再走正常路径。
+          if (verdict.adoptable) {
+            if (!isIdenticalTree(srcDir, destDir)) {
+              const reason = `${verdict.message} 内容同一性判据不成立：目标目录必须与随包技能逐项相同`
+                + '（多一个/少一个条目、改名、文件↔目录、任何字节差异、符号链接或读取失败都算不同）。'
+              console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（保留本机内容，${SKILL_LOCAL_CONTENT}）：${reason}`)
+              results.push({ name, action: 'refused', message: reason, code: SKILL_LOCAL_CONTENT })
+              continue
+            }
+            // 同一性成立 = 已证明这是随包技能的副本，且目录里没有任何用户字节。
+            // **先写溯源再走后面**：写失败即拒（绝不出现"内容换了、溯源没写"）。
+            let written
+            try {
+              written = writePluginProvenance(destDir, name, skillVersion(srcText), userSkillsDir)
+            } catch (error) {
+              // 失败即拒（不换入、不改内容）。`writePluginProvenance` 自己已经把它
+              // 本次写下的标记收回了；这里再收一次**空** `.picoaide/`：同一性检查
+              // 刚刚证明它原本不存在，所以只删空目录（`rmdirSync` 非空即失败，绝不
+              // 递归删任何东西）—— 否则那个空目录会让下一次开机的同一性判据恒不成立，
+              // 把这一份永久挡在门外（无法自愈）。
+              discardPluginProvenance(destDir, [])
+              const reason = '内容同一性成立（确认是随包技能的逐字副本），但补写溯源（channel: plugin）失败，'
+                + `已拒绝（不换入、不改内容）：${String(error?.message ?? error)}`
+              console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（保留本机内容，${SKILL_ADOPT_FAILED}）：${reason}`)
+              results.push({ name, action: 'refused', message: reason, code: SKILL_ADOPT_FAILED })
+              continue
+            }
+            // F1（独立复审 r3）：**写后复检**——把刚写下的标记排除在条目集合之外，
+            // 再证明一次"目标仍与随包技能逐字一致"。同一性判定与写溯源之间那个窗口
+            // 里落进来的任何用户字节都会让复检失败，此时**收回自己刚写的标记**并拒收，
+            // 绝不把用户内容盖成 plugin（那会在下一次随包升版时被整树换入静默删除）。
+            if (!isIdenticalTree(srcDir, destDir, { ignoreTopLevel: INSTALLER_MARKERS })) {
+              discardPluginProvenance(destDir, written)
+              const reason = '内容同一性在**补写溯源期间**被打破（有别的写者/进程往这个技能目录里'
+                + '写了东西）—— 已收回本次写下的溯源标记并拒绝采纳（绝不把用户内容标成 plugin：'
+                + '那会让下一次随包升版把它当作本插件内容整树换掉）。'
+              console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（保留本机内容，${SKILL_LOCAL_CONTENT}）：${reason}`)
+              results.push({ name, action: 'refused', message: reason, code: SKILL_LOCAL_CONTENT })
+              continue
+            }
+            adopted = true
+            console.log(`[dsh-memory-evolve] 内置技能 ${name} 已采纳（内容与随包技能逐字一致、原缺溯源，已补写 channel: plugin）：${destDir}`)
+          } else {
+            // fail-loud：点名技能、原因与落点。整树换入会删掉目标目录里的**全部**
+            // 内容（含用户自己的文件），所以这里绝不"尽力而为"。
+            console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（保留本机内容，${verdict.code}）：${verdict.message}`)
+            results.push({ name, action: 'refused', message: verdict.message, code: verdict.code })
             continue
           }
-          // 同一性成立 = 已证明这是随包技能的副本，且目录里没有任何用户字节。
-          // **先写溯源再走后面**：写失败即拒（绝不出现"内容换了、溯源没写"）。
-          try {
-            writePluginProvenance(destDir, name, skillVersion(srcText), userSkillsDir)
-          } catch (error) {
-            // 失败即拒（不换入、不改内容）。顺手把本次可能已建出来的**空**
-            // `.picoaide/` 收掉：同一性检查刚刚证明它原本不存在，所以这里只删空目录
-            // （`rmdirSync` 非空即失败，绝不递归删任何东西）——否则那个空目录会让
-            // 下一次开机的同一性判据恒不成立，把这一份永久挡在门外（无法自愈）。
-            try { rmdirSync(join(destDir, PROVENANCE_DIR)) } catch { /* 非空/不存在/删不掉：留着，下次照旧拒收（fail-safe） */ }
-            const reason = '内容同一性成立（确认是随包技能的逐字副本），但补写溯源（channel: plugin）失败，'
-              + `已拒绝（不换入、不改内容）：${String(error?.message ?? error)}`
-            console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（保留本机内容，${SKILL_ADOPT_FAILED}）：${reason}`)
-            results.push({ name, action: 'refused', message: reason, code: SKILL_ADOPT_FAILED })
-            continue
+        }
+      }
+      const needsCopy = !existsSync(destFile)
+        || skillVersion(srcText) > skillVersion(readFileSync(destFile, 'utf8'))
+      if (needsCopy) {
+        try {
+          syncSkillDirSafe(srcDir, destDir, userSkillsDir)
+          action = 'synced'
+        } catch (error) {
+          // fail-loud 但可感知：绝不把"没写成/写到库外"报成 synced。
+          action = 'refused'
+          message = String(error?.message ?? error)
+          if (typeof error?.code === 'string') code = error.code
+          if (error?.code === 'SKILL_SWAP_RECOVERY_FAILED') {
+            // S13-3 复核（2026-09-17）：换入失败**且**回滚也失败——比普通 refused
+            // 严重一级（技能目录当前缺失，新旧两份副本还在盘上）。用 error 级别 +
+            // 点名路径，让它在启动日志里不被 warn 洪水淹没。
+            console.error(`[dsh-memory-evolve] 内置技能 ${name} 换入失败且未能回滚，需人工恢复：${message}`)
+          } else {
+            console.warn(`[dsh-memory-evolve] 内置技能 ${name} 落点被拒（跳过）：${message}`)
           }
-          adopted = true
-          console.log(`[dsh-memory-evolve] 内置技能 ${name} 已采纳（内容与随包技能逐字一致、原缺溯源，已补写 channel: plugin）：${destDir}`)
-        } else {
-          // fail-loud：点名技能、原因与落点。整树换入会删掉目标目录里的**全部**
-          // 内容（含用户自己的文件），所以这里绝不"尽力而为"。
-          console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（保留本机内容，${verdict.code}）：${verdict.message}`)
-          results.push({ name, action: 'refused', message: verdict.message, code: verdict.code })
-          continue
         }
+      } else if (adopted) {
+        // 内容既然与随包技能逐字相同，`x-version` 必然相同（同一份 SKILL.md）⇒
+        // 不需要换入。本次的唯一动作就是补写溯源，如实报 `adopted`（不是 unchanged：
+        // 调用方/日志要能看出"这份目录是被采纳的，不是本来就带溯源的"）。
+        action = 'adopted'
       }
+      results.push({
+        name,
+        action,
+        ...(message === undefined ? {} : { message }),
+        ...(code === undefined ? {} : { code }),
+      })
+    } finally {
+      // 锁必须在**所有**出口释放（含上面每条 `continue`：JS 会先跑 finally）。
+      lock.release()
     }
-    const needsCopy = !existsSync(destFile)
-      || skillVersion(srcText) > skillVersion(readFileSync(destFile, 'utf8'))
-    if (needsCopy) {
-      try {
-        syncSkillDirSafe(srcDir, destDir, userSkillsDir)
-        action = 'synced'
-      } catch (error) {
-        // fail-loud 但可感知：绝不把"没写成/写到库外"报成 synced。
-        action = 'refused'
-        message = String(error?.message ?? error)
-        if (typeof error?.code === 'string') code = error.code
-        if (error?.code === 'SKILL_SWAP_RECOVERY_FAILED') {
-          // S13-3 复核（2026-09-17）：换入失败**且**回滚也失败——比普通 refused
-          // 严重一级（技能目录当前缺失，新旧两份副本还在盘上）。用 error 级别 +
-          // 点名路径，让它在启动日志里不被 warn 洪水淹没。
-          console.error(`[dsh-memory-evolve] 内置技能 ${name} 换入失败且未能回滚，需人工恢复：${message}`)
-        } else {
-          console.warn(`[dsh-memory-evolve] 内置技能 ${name} 落点被拒（跳过）：${message}`)
-        }
-      }
-    } else if (adopted) {
-      // 内容既然与随包技能逐字相同，`x-version` 必然相同（同一份 SKILL.md）⇒
-      // 不需要换入。本次的唯一动作就是补写溯源，如实报 `adopted`（不是 unchanged：
-      // 调用方/日志要能看出"这份目录是被采纳的，不是本来就带溯源的"）。
-      action = 'adopted'
-    }
-    results.push({
-      name,
-      action,
-      ...(message === undefined ? {} : { message }),
-      ...(code === undefined ? {} : { code }),
-    })
   }
   // S13-3 三轮复核（2026-09-17）：**收尾再扫一遍**。SIGKILL 落在"改名为 .old-* 之后、
   // 暂存目录换入之前"时（dest 缺失 + .old-* 是旧内容唯一副本），开头的清扫必须留下
@@ -635,6 +882,20 @@ function syncSkillDirSafe(srcDir, destDir, anchorDir) {
     // 溯源丢了"的中间态。
     stashedMarkers = stashInstallerMarkers(destDir, stagingDir)
     writePluginProvenance(stagingDir, name, skillVersion(srcText), anchorDir)
+    // F3 纵深防御（独立复审 r3）：即将换入的这棵树**必须**带着我们自己的溯源。
+    // per-name 锁已经把安装器挡在外面；这一条挡的是"标记在锁外被换掉"的其余形态
+    // （stash 与 swap 之间落进来的别的写者）——一旦捕捉到的不是 plugin 标记（例如
+    // 市场版刚换进来、被我们连同目录一起搬走），就放弃换入，让 catch 里的
+    // `restoreInstallerMarkers` 把它原样放回。否则落点会变成"内容是插件版、溯源是
+    // 市场版"，而且插件侧此后永久拒收（不会自愈）。
+    const stagedChannel = readStoreProvenance(stagingDir, name).channel
+    if (stagedChannel !== PLUGIN_CHANNEL) {
+      const conflict = new Error(`${destDir} 换入前复检发现暂存目录里的溯源不是 plugin`
+        + `（实际：${String(stagedChannel)}）—— 放弃换入：内容与归属必须一致，`
+        + '不把别的渠道的溯源连同自己的内容一起换进去。')
+      conflict.code = SKILL_CHANNEL_CONFLICT
+      throw conflict
+    }
     // 1) 旧目录旁置（原子；不再有"rm 之后 rename 失败 ⇒ 技能消失"的窗口）
     if (hadDest) {
       asideDir = join(anchorDir, `${ASIDE_INFIX}${name}-${stamp}`)
@@ -727,19 +988,47 @@ function restoreInstallerMarkers(destDir, stagingDir, moved) {
  * @param {string} name - 技能名。
  * @param {number} xVersion - SKILL.md 的 `x-version`（缺失为 0）。
  * @param {string} anchorDir - 技能库根（落点断言的基准）。
- * @returns {void}
+ * @returns {string[]} 本次**实际写下**的文件绝对路径（写后复检失败时按它精确回收）。
+ *   写第二个文件时失败 ⇒ 已写下的第一个也在这里被收回（本函数自己保证不留半个标记）。
  */
 function writePluginProvenance(stagingDir, name, xVersion, anchorDir) {
   const version = xVersion > 0 ? String(xVersion) : ''
   const releaseFile = join(stagingDir, PROVENANCE_DIR, PROVENANCE_FILE)
-  if (!existsSync(releaseFile)) {
-    const info = { appId: name, version, channel: PLUGIN_CHANNEL, installedAt: new Date().toISOString() }
-    writeFileAtomicSafeAt(releaseFile, `${JSON.stringify(info, null, 2)}\n`, { anchorDir })
-  }
   const versionFile = join(stagingDir, '.install-version')
-  if (version !== '' && !existsSync(versionFile)) {
-    writeFileAtomicSafeAt(versionFile, version, { anchorDir })
+  const info = { appId: name, version, channel: PLUGIN_CHANNEL, installedAt: new Date().toISOString() }
+  const plan = []
+  if (!existsSync(releaseFile)) plan.push([releaseFile, `${JSON.stringify(info, null, 2)}\n`])
+  if (version !== '' && !existsSync(versionFile)) plan.push([versionFile, version])
+  const written = []
+  try {
+    for (const [file, data] of plan) {
+      writeFileAtomicSafeAt(file, data, { anchorDir })
+      written.push(file)
+    }
+  } catch (error) {
+    discardPluginProvenance(stagingDir, written)
+    throw error
   }
+  return written
+}
+
+/**
+ * 收回**自己刚写下**的溯源标记（F1 的写后复检失败路径，独立复审 r3）。
+ *
+ * 只删 `written` 里点名的文件（逐个 `unlinkSync`），并且只用**非递归** `rmdirSync`
+ * 收掉已经空掉的 `.picoaide/`：非空即失败 —— 绝不递归删任何东西，用户在那个窗口里
+ * 落进 `.picoaide/` 的字节一个都不会被删。
+ *
+ * @param {string} dir - 技能目录。
+ * @param {string[]} written - {@link writePluginProvenance} 的返回值（可为空数组：
+ *   仅尝试收掉空 `.picoaide/`，用于"写失败但可能已建出空目录"的场景）。
+ * @returns {void}
+ */
+function discardPluginProvenance(dir, written) {
+  for (const file of written) {
+    try { unlinkSync(file) } catch { /* 已经不在了 / 权限：留着由下一次同步按"看不懂的标记"拒 */ }
+  }
+  try { rmdirSync(join(dir, PROVENANCE_DIR)) } catch { /* 非空/不存在/不是目录：留着 */ }
 }
 
 /**

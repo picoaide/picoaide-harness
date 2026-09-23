@@ -16,7 +16,8 @@
  *   after the new tree is fully verified.
  */
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { lstat, mkdir, mkdtemp, open, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import AdmZip from 'adm-zip'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
@@ -151,6 +152,9 @@ export function describeArchiveFailure(cause: unknown): ArchiveFailureDescriptio
   if (typed?.code === 'NOT_INSTALLED') return { status: 404, message: raw, code: typed.code, refusal: true }
   if (typed?.code === 'LOCAL_CONTENT') return { status: 409, message: raw, code: typed.code, refusal: true }
   if (typed?.code === 'ARCHIVE_TOO_LARGE') return { status: 413, message: raw, code: typed.code, refusal: true }
+  // per-name 锁竞争（F3 修复）：**可重试**的瞬时状态，不是"请求有问题"——报 503，
+  // 面板按错误文案提示稍后重试（不要报 422 让用户以为要改请求）。
+  if (cause instanceof SkillLockedError) return { status: 503, message: raw, code: cause.code, refusal: true }
   if (typed !== undefined || REFUSAL_HINT.test(raw)) {
     return {
       status: 422,
@@ -189,11 +193,193 @@ const STALE_TEMP_MS = 24 * 60 * 60 * 1000
 const ORPHAN_PREFIX = 'orphan-'
 
 /**
+ * per-name 文件锁的**协议常量**（独立复审 r3 F3 的修复）—— 跨包契约，与
+ * `packages/vendor/memory-evolve/lib/coi/skills-sync.js` 的同名常量必须同值
+ * （vendored 包不能 import 企业包，故两端各自实现同一协议；由
+ * `tests/skill-channel-parity.spec.ts` 读源码文本对拍，找不到字面量即 throw）。
+ *
+ * 为什么必须有它：随包插件（dsh-memory-evolve）的**开机同步**与这里的安装器都会
+ * 整目录换入 `<skillsDir>/<name>`，此前两者完全不互斥（同步侧连这把锁都不取）。
+ * 复审实测的并发终态是「内容是插件版 + `.picoaide` 是市场版 + 市场内容被删」
+ * （5/5；真实体量 20 轮 15 轮），而且此后插件侧永久 `SKILL_CHANNEL_CONFLICT`
+ * 拒收该目录 ⇒ **不会自愈**。
+ *
+ * 协议（两端逐条一致）：
+ *   - 落点 `<skillsDir>/.skill-locks/<name>.lock`（与技能库同一文件系统、以点开头
+ *     ⇒ 不是技能目录，也不被 `listInstalledSkills` / 上游发现器看见；释放后**空目录
+ *     留在技能库根上**，与 `.skill-tmp` 同类 —— 现有"技能库不留私有目录"的断言按
+ *     这两者之一放行）；
+ *   - 创建 `O_CREAT|O_EXCL`（`open(..., 'wx')`）：预置的符号链接或文件一律 EEXIST，
+ *     **绝不跟随**（因此不存在"锁落点写穿库外"这条路）；
+ *   - 内容 `{"pid":<number>,"at":<ms>}`（陈旧判定的依据）；
+ *   - 陈旧 = 持锁 pid **确定已死**（`kill(pid,0)` 抛 ESRCH），或没有可用 pid 且
+ *     mtime 超过 {@link SKILL_LOCK_STALE_MS}；`EPERM`（不可判定）保守视为仍持有；
+ *   - 释放只删**自己创建的那个 inode**（dev/ino 比对），不误删别人的锁；
+ *   - **有界等待**：这里（异步路径）最多等 {@link SKILL_LOCK_WAIT_MS}，等待期间
+ *     让出事件循环（同进程里的持锁者才推进得动）；同步侧（插件启动路径）零等待，
+ *     拿不到就拒收 —— 见 vendored 侧的同名注释。
+ */
+export const SKILL_LOCK_DIR = '.skill-locks'
+
+/** 锁文件名后缀（协议常量，两端同值）。 */
+export const SKILL_LOCK_SUFFIX = '.lock'
+
+/** 无可用 pid 的锁文件的陈旧阈值（协议常量，两端同值）。 */
+export const SKILL_LOCK_STALE_MS = 10_000
+
+/** 拿不到锁时的等待上限：**有界**（绝不无界等待），超时 fail-loud 而不是无锁写入。 */
+export const SKILL_LOCK_WAIT_MS = 5_000
+
+/** 等待期的轮询间隔（让出事件循环，见 {@link SKILL_LOCK_DIR}）。 */
+const SKILL_LOCK_POLL_MS = 25
+
+/** 安装器标记（`.picoaide/release.json`）的体积上限 —— 与同步侧同值（协议常量）。 */
+const MARKER_MAX_BYTES = 64 * 1024
+
+/** 拿不到 per-name 锁时的失败（`SKILL_LOCKED`，对外 503：可重试，不是"请求有问题"）。 */
+export class SkillLockedError extends Error {
+  readonly code = 'SKILL_LOCKED'
+
+  /** @param message - 用户可读原因（点名技能/落点/持有者）。 */
+  constructor(message: string) {
+    super(message)
+    this.name = 'SkillLockedError'
+  }
+}
+
+/**
+ * 读一个小普通文件（类型 + 体积闸门，**先闸门后读**）。
+ *
+ * 与同步侧 `skills-sync.js` 的 `readSmallRegularFile` 同一份判据：`lstat` 必须是
+ * 普通文件（拒 FIFO/目录/符号链接/设备节点）+ 体积上限。这里不做 fd 复验（异步
+ * API 下 open 一个 FIFO 仍会阻塞），但**先 lstat** 已经挡掉"一开始就是 FIFO"的
+ * 形态；与同步侧那条"启动路径绝不能被 FIFO 阻塞"的硬要求相比，这里的读取都在
+ * 请求路径上，且有界（`installSkillArchive` 的调用方有超时）。
+ *
+ * @param file - 文件绝对路径。
+ * @param maxBytes - 体积上限。
+ * @returns 正文；不是小普通文件/读不出来时为 undefined。
+ */
+async function readSmallRegularFile(file: string, maxBytes: number = MARKER_MAX_BYTES): Promise<string | undefined> {
+  const stat = await lstat(file).catch(() => undefined)
+  if (stat === undefined || !stat.isFile() || stat.size > maxBytes) return undefined
+  return await readFile(file, 'utf8').catch(() => undefined)
+}
+
+/**
+ * 锁文件是否陈旧（{@link SKILL_LOCK_DIR} 的协议判据之一；与同步侧
+ * `skills-sync.js` 的 `isSkillLockStale` 逐条同源）。
+ *
+ * 先 `lstat` 要求**普通文件**：符号链接/目录/设备不是我们的锁形态 ⇒ 一律不按陈旧
+ * 删除（fail-safe：预置链接的形态到这里就变成"等不到锁 ⇒ fail-loud"，而不是
+ * "被我们删掉"或"无锁写入"）。
+ *
+ * @param lockPath - 锁文件绝对路径。
+ * @returns 可抢占为 true。
+ */
+async function isSkillLockStale(lockPath: string): Promise<boolean> {
+  const stat = await lstat(lockPath).catch(() => undefined)
+  if (stat === undefined || !stat.isFile()) return false
+  const raw = await readSmallRegularFile(lockPath)
+  if (raw !== undefined) {
+    let owner: { pid?: unknown } | undefined
+    try {
+      owner = JSON.parse(raw) as { pid?: unknown }
+    } catch {
+      owner = undefined
+    }
+    if (owner !== null && typeof owner === 'object' && Number.isInteger(owner.pid) && (owner.pid as number) > 0) {
+      try {
+        process.kill(owner.pid as number, 0) // 信号 0 = 只探测存活
+        return false
+      } catch (cause) {
+        // 只有 ESRCH（进程确实不存在）算陈旧；EPERM 等"不可判定"保守视为仍持有。
+        return (cause as NodeJS.ErrnoException).code === 'ESRCH'
+      }
+    }
+  }
+  return Date.now() - stat.mtimeMs > SKILL_LOCK_STALE_MS
+}
+
+/**
+ * 取一个技能名的 per-name 文件锁（{@link SKILL_LOCK_DIR} 的协议实现）。
+ *
+ * 有界等待：最多 `waitMs`，每轮让出事件循环；陈旧锁（持锁进程已死）立即抢占。
+ * 超时抛 {@link SkillLockedError}（fail-loud）——**绝不**在没拿到锁的情况下往下走。
+ *
+ * @param skillsDir - the skill root.
+ * @param name - the skill directory name.
+ * @param waitMs - 拿不到锁时的等待上限（缺省 {@link SKILL_LOCK_WAIT_MS}）。
+ * @returns 释放函数（只删自己创建的那个 inode）。
+ * @throws SkillLockedError 在等待超时后。
+ */
+async function acquireSkillDirLock(skillsDir: string, name: string, waitMs: number): Promise<() => Promise<void>> {
+  const lockDir = join(skillsDir, SKILL_LOCK_DIR)
+  const lockPath = join(lockDir, `${name}${SKILL_LOCK_SUFFIX}`)
+  await mkdir(lockDir, { recursive: true, mode: 0o700 })
+  const deadline = Date.now() + Math.max(0, waitMs)
+  for (;;) {
+    let handle
+    try {
+      handle = await open(lockPath, 'wx') // O_CREAT|O_EXCL：绝不跟随预置的符号链接
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause
+      handle = undefined
+    }
+    if (handle !== undefined) {
+      let stat
+      try {
+        stat = await handle.stat()
+        // 按 **handle**（fd）写：关闭前不再按路径解析（祖先被换走时不写到库外）。
+        await handle.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }))
+      } catch (cause) {
+        await handle.close().catch(() => { /* 已关闭 */ })
+        await rm(lockPath, { force: true }).catch(() => { /* 收不掉就留给陈旧判定 */ })
+        throw cause
+      }
+      await handle.close().catch(() => { /* 已关闭 */ })
+      return async () => {
+        // 只删自己创建的那个 inode：祖先被换走/已被别人抢占时不误删。
+        const now = await lstat(lockPath).catch(() => undefined)
+        if (now !== undefined && now.dev === stat.dev && now.ino === stat.ino) {
+          await rm(lockPath, { force: true }).catch(() => { /* 留给陈旧判定 */ })
+        }
+      }
+    }
+    // 被占用：陈旧（持锁进程确定已死 / 无 pid 且 mtime 超时）⇒ 抢占一次。
+    if (await isSkillLockStale(lockPath)) {
+      await rm(lockPath, { force: true }).catch(() => { /* 抢不掉 ⇒ 走下面的等待/超时 */ })
+      if (!existsSync(lockPath)) continue
+    }
+    if (Date.now() >= deadline) {
+      throw new SkillLockedError(
+        `another writer holds the "${name}" lock (${SKILL_LOCK_DIR}/${name}${SKILL_LOCK_SUFFIX}: `
+        + 'the bundled-skill sync or another install/uninstall is in flight); retry shortly — '
+        + 'refusing to write the same skill directory concurrently',
+      )
+    }
+    await sleep(SKILL_LOCK_POLL_MS)
+  }
+}
+
+/** 等待 `ms` 毫秒（等待锁时让出事件循环；同进程的持锁者才推进得动）。 */
+async function sleep(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => { setTimeout(resolve, ms) })
+}
+
+/**
  * per-name 互斥（审计 A7）：同一技能目录的 install/uninstall 必须串行。
  *
  * 面板只有一个 `inFlight` 槽，多窗口/重试/脚本都能绕过它；两个 install 交错会
  * 留下孤儿备份目录，install+uninstall 交错则可能"两边都回 200 但技能还在"。
  * 锁按 (skillsDir, name) 取，键里不含路径分隔歧义。
+ *
+ * **两层（F3 修复，2026-09-23 独立复审 r3）**：
+ *   1. 进程内 promise 链（这一层，`skillLocks`）——同进程串行，避免自己人抢文件锁；
+ *   2. **跨包/跨进程的文件锁**（{@link SKILL_LOCK_DIR}）——随包插件的开机同步与这里
+ *      是**同一个进程里的两个包**，跨包 import 禁止，所以只能靠这份文件锁协议互斥。
+ * 顺序是先内存链、再文件锁：拿到文件锁的临界区因此一定是"这个名字在本进程里唯一
+ * 的那一个"，等待也不会与自己的前一个持锁者互相等。
  */
 const skillLocks = new Map<string, Promise<void>>()
 
@@ -202,13 +388,26 @@ const skillLocks = new Map<string, Promise<void>>()
  * @param skillsDir - the skill root.
  * @param name - the skill directory name.
  * @param task - the critical section.
+ * @param options - `waitMs`：文件锁的等待上限（测试用它把"拿不到锁"钉成毫秒级）。
  * @returns whatever `task` resolves to.
  */
-export async function withSkillLock<T>(skillsDir: string, name: string, task: () => Promise<T>): Promise<T> {
+export async function withSkillLock<T>(
+  skillsDir: string,
+  name: string,
+  task: () => Promise<T>,
+  options: { waitMs?: number | undefined } = {},
+): Promise<T> {
   const key = `${skillsDir}\u0000${name}`
   const previous = skillLocks.get(key) ?? Promise.resolve()
   // 前一个持锁者失败也要放行（否则一次失败会把该名字永久锁死）。
-  const run = previous.then(() => undefined, () => undefined).then(task)
+  const run = previous.then(() => undefined, () => undefined).then(async () => {
+    const release = await acquireSkillDirLock(skillsDir, name, options.waitMs ?? SKILL_LOCK_WAIT_MS)
+    try {
+      return await task()
+    } finally {
+      await release()
+    }
+  })
   const tail = run.then(() => undefined, () => undefined)
   skillLocks.set(key, tail)
   void tail.then(() => { if (skillLocks.get(key) === tail) skillLocks.delete(key) })
@@ -252,6 +451,11 @@ export interface InstallSkillArchiveOptions {
   overwrite?: boolean | undefined
   /** staging 清扫阈值(ms)；缺省 24h。测试用它钉住"陈旧目录会被清掉"。 */
   staleTempMaxAgeMs?: number | undefined
+  /**
+   * per-name 文件锁的等待上限(ms)；缺省 {@link SKILL_LOCK_WAIT_MS}。
+   * **测试专用**：把"拿不到锁 ⇒ 有界 fail-loud"这条路钉成毫秒级，不必等满 5s。
+   */
+  lockWaitMs?: number | undefined
 }
 
 /**
@@ -264,7 +468,9 @@ export async function installSkillArchive(options: InstallSkillArchiveOptions): 
   const { name, skillsDir } = options
   // 名字先于锁校验（非法名不参与排队）。
   validateSkillName(name)
-  return await withSkillLock(skillsDir, name, () => runInstallSkillArchive(options))
+  // per-name 文件锁（跨包协议，见 SKILL_LOCK_DIR）：随包插件的开机同步取的是**同一把**，
+  // 两端因此互斥；拿不到就在 waitMs 之后 fail-loud，绝不无锁写入。
+  return await withSkillLock(skillsDir, name, () => runInstallSkillArchive(options), { waitMs: options.lockWaitMs })
 }
 
 /** {@link installSkillArchive} 的临界区（调用方必须已持有 per-name 锁）。 */
@@ -792,7 +998,13 @@ export async function writeProvenance(skillDir: string, info: SkillProvenance): 
  */
 export async function readProvenance(skillDir: string): Promise<SkillProvenance | undefined> {
   try {
-    const raw = await readFile(join(skillDir, PROVENANCE_DIR, 'release.json'), 'utf8')
+    // 类型 + 体积闸门（独立复审 r3 F2 同族）：`.picoaide/release.json` 可能是 FIFO /
+    // 目录 / 符号链接 / 超大文件 —— 直接 `readFile` 会永久阻塞（FIFO）或整份读进内存。
+    // 这里与同步侧 `skills-sync.js` 的 `readSmallRegularFile` 同一份判据：不是"小普通
+    // 文件"就按"读不出来"处理 ⇒ 该份内容按用户自制对待（fail-safe 方向：宁可多要
+    // 一次覆盖确认，也不把 FIFO 当来源标记）。
+    const raw = await readSmallRegularFile(join(skillDir, PROVENANCE_DIR, 'release.json'))
+    if (raw === undefined) return undefined
     const parsed = JSON.parse(raw) as Partial<SkillProvenance>
     if (typeof parsed.appId !== 'string' || typeof parsed.version !== 'string') return undefined
     return {

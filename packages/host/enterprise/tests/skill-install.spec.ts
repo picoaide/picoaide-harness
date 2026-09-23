@@ -19,6 +19,7 @@ import {
   readProvenance,
   resolveSkillsDir,
   sanitizeArchiveErrorText,
+  SKILL_LOCK_DIR,
   SKILL_NAME_PATTERN,
   ArchiveInstallRefusal,
   sweepStaleSkillTemps,
@@ -543,7 +544,9 @@ describe('A1 安装期"可加载性"门禁（装得上就必须加载得到）',
       // 拒绝必须 fail-loud 且**不留任何落盘**（含 staging）。
       expect(await listInstalledSkills(root), c.label).toEqual([])
     }
-    expect(await readdir(root)).toEqual([])
+    // 除 per-name 锁的私有区（`.skill-locks`）之外不留任何落盘（含 staging）。
+    expect((await readdir(root)).filter(name => name !== SKILL_LOCK_DIR)).toEqual([])
+    expect(await readdir(join(root, SKILL_LOCK_DIR)).catch(() => []), '拒绝安装不得留下锁').toEqual([])
   })
 
   it('frontmatter 完整且 name == 技能 ID ⇒ 安装成功（对照组）', async () => {
@@ -711,8 +714,10 @@ describe('A7 并发与残留目录（备份目录不再污染技能库）', () =
     expect(uninstalled).toBe(join(root, 'race-skill'))
     // 调用顺序 = 锁获取顺序 ⇒ 后到的卸载是最终态（旧实现会"两边都成功但技能还在"）。
     expect(await listInstalledSkills(root)).toEqual([])
-    // 技能库里除 .skill-tmp（安装器私有区）之外不得留下任何东西。
-    const leftovers = (await readdir(root)).filter(name => name !== '.skill-tmp')
+    // 技能库里除 .skill-tmp（安装器私有区）与 .skill-locks（per-name 锁落点）之外
+    // 不得留下任何东西；两者都必须是空的（没有 staging/备份/锁残留）。
+    expect(await readdir(join(root, SKILL_LOCK_DIR)).catch(() => []), '并发 install/uninstall 后不得留下锁').toEqual([])
+    const leftovers = (await readdir(root)).filter(name => name !== '.skill-tmp' && name !== SKILL_LOCK_DIR)
     expect(leftovers).toEqual([])
   })
 
