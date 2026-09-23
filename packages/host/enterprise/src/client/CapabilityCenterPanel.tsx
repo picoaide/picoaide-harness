@@ -101,7 +101,12 @@ interface CapabilityItem {
   isOwner?: boolean | undefined
   /**
    * 服务端行上的归属人账号（`is_owner === false` 时用来说明"转给谁了"）。
-   * 缺省 = 未下发（旧服务端）：只显示"已转交"，不编造名字。
+   *
+   * ⚠️ **当前员工面契约里没有这个字段**（2026-09-23 核对 `server/internal/capabilities`：
+   * `owner` 只在管理端的 `ApprovalRow` 上，员工面的 `CapabilityItem` 只有 `is_owner`）。
+   * 保留它是因为"已转交"的**文案**（转给了谁）需要它：服务端一旦在员工面行上补
+   * `owner`（json `owner`），客户端不需要再改（{@link isTransferredItem} 的判据仍以
+   * `is_owner === false` 为主，本字段只用于显示）。缺省 = 未下发，不编造名字。
    */
   owner?: string | undefined
   /**
@@ -114,11 +119,13 @@ interface CapabilityItem {
    */
   delisted?: boolean | undefined
   /**
-   * 服务端行上的上下架标志（`apps.enabled`）——**目前只有目录行会带**。
+   * 上架标志（`apps.enabled`）的**兼容**读取口。
    *
-   * 缺省是 `undefined` 而不是 `true`：能力中心没有"这一行默认上架"的知识，
-   * 把未下发读成"上架"就是拿未知当可用（R5-B-1 的纪律）。目录行缺席的情况
-   * （下架行被服务端整行滤掉）由 {@link isDelistedItem} 的第二种判据兜住。
+   * ⚠️ 当前能力中心的员工面契约用的是 `delisted`（服务端 2026-09-23 定的字段），
+   * **没有** `enabled`；这里保留是因为"目录行带 `apps.enabled`"是同一产品另一处
+   * （应用中心 `AppCenterItem.enabled`）的既有形态 —— 一旦哪条目录行带它，判据立即
+   * 生效，不用再改客户端。缺省是 `undefined` 而不是 `true`：能力中心没有"这一行默认
+   * 上架"的知识，把未下发读成"上架"就是拿未知当可用（R5-B-1 的纪律）。
    */
   enabled?: boolean | undefined
 }

@@ -2575,6 +2575,14 @@ export function apply(ctx: Context, config: Config): void {
                 status: match !== undefined ? (match as { status?: string }).status : undefined,
                 reason: match !== undefined ? (match as { reason?: string }).reason : undefined,
                 versions: [], isLocal: true, uploadStatus: match !== undefined ? (match as { status?: string }).status : undefined,
+                // 下架标记（第五轮审计 R5-B-1，2026-09-23 追加授权）：服务端在**作者自己的行**
+                // 上下发权威字段 `delisted`（`capabilities.CapabilityItem.Delisted`，见
+                // server/internal/capabilities/capabilities.go）。它必须与 status/reason 一起
+                // 透传到本机行 —— 否则"下架"这个状态在面板上**永远看不到**：本机自制行没有
+                // 商店溯源、服务端也不下发 `enabled`，客户端自己推不出来（这正是本条 finding
+                // 作者面的成因）。无匹配行时不写这个键（未知 ≠ 未下架；JSON 序列化会丢掉
+                // undefined，面板读到的是"服务端没说"）。
+                delisted: match !== undefined && (match as { delisted?: unknown }).delisted === true ? true : undefined,
               })
             }
             for (const l of localPresets) {
@@ -2592,6 +2600,8 @@ export function apply(ctx: Context, config: Config): void {
                 status: match !== undefined ? (match as { status?: string }).status : undefined,
                 reason: match !== undefined ? (match as { reason?: string }).reason : undefined,
                 versions: [], isLocal: true, uploadStatus: match !== undefined ? (match as { status?: string }).status : undefined,
+                // 与技能面同一条透传（R5-B-1）：智能体预设的作者行同样带服务端下发的 delisted。
+                delisted: match !== undefined && (match as { delisted?: unknown }).delisted === true ? true : undefined,
               })
             }
 
