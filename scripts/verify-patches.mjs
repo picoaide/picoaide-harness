@@ -67,6 +67,8 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { diffTrees, findCacheZips, listPatchFiles, parsePatchSections, readPatchTargets } from './patch-targets.mjs'
+// R5-D-6:核对面必须**派生**（打包白名单 + Node 解析顺序），不能是固定枚举根。
+import { copyScanNodeModulesDirs, resolutionProbes } from './patch-copy-scan.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const failures = []
@@ -142,7 +144,15 @@ function runPatchReverse(pkgDir, patchFile, dryRun) {
  */
 function listInstalledCopies(name) {
   const copies = new Set()
-  const nodeModulesRoots = [join(root, 'node_modules')]
+  // 枚举根 = **派生**出来的：仓库根 + 各 workspace + 应用根下每个随包子树（含一层子目录）。
+  // 旧实现是一份手写清单（`packages/{host,client,vendor}` + 组内一层嵌套），
+  // `packages/host/desktop/lib/node_modules/<pkg>` 这类"Node 解析优先、随包交付、
+  // 又不在清单里"的影子副本因此完全不被核对（R5-D-6）。
+  const nodeModulesRoots = copyScanNodeModulesDirs(root).map(item => item.dir)
+  for (const extra of [join(root, 'node_modules')]) {
+    if (!nodeModulesRoots.includes(extra)) nodeModulesRoots.push(extra)
+  }
+  // 组内一层嵌套（保留旧口径的兜底：`community/**` 不在 workspaces 里）。
   for (const group of ['packages/host', 'packages/client', 'packages/vendor', 'community']) {
     const groupDir = join(root, group)
     if (!existsSync(groupDir)) continue
@@ -675,7 +685,10 @@ try {
     // 版本 ≠ pin 的副本只是"本补丁不适用"(提示),不参与核对。
     const delivered = []
     const deliveredOtherVersions = []
+    /** 枚举到的**全部**副本目录（含版本 ≠ pin 的）——解析面判据的对照集合。 */
+    const enumeratedCopyDirs = []
     for (const copy of listInstalledCopies(target.name)) {
+      enumeratedCopyDirs.push(copy)
       let version
       try {
         version = JSON.parse(readFileSync(join(copy, 'package.json'), 'utf8')).version
@@ -688,6 +701,42 @@ try {
     }
     if (deliveredOtherVersions.length > 0) {
       note(`${label}: 安装树里有 ${deliveredOtherVersions.length} 份版本 ≠ ${target.version} 的副本(本补丁不适用):${deliveredOtherVersions.join(', ')}`)
+    }
+
+    // **解析面**判据（R5-D-6）：从"真正会被执行的入口目录"出发问 Node"这个包会解析到
+    // 哪一份"，解析结果必须落在核对面里 —— 落到影子副本（例如
+    // `<应用根>/lib/node_modules/<pkg>`，Node 从 `lib/**` 解析时优先看它）时**当场点名**。
+    // 这条与枚举根互补：枚举可能永远滞后于打包白名单，解析面不会。
+    {
+      const enumerated = enumeratedCopyDirs.map(item => {
+        try {
+          return realpathSync(item)
+        } catch {
+          return resolve(item)
+        }
+      })
+      const shadow = []
+      for (const probe of resolutionProbes(root, target.name)) {
+        if (probe.resolved === null) continue
+        let resolvedReal
+        try {
+          resolvedReal = realpathSync(probe.resolved)
+        } catch {
+          resolvedReal = resolve(probe.resolved)
+        }
+        // 解析结果是**包内文件**（如 `lib/index.js`）⇒ 按"落在某个已枚举副本目录之下"判定。
+        if (enumerated.some(dir => resolvedReal === dir || resolvedReal.startsWith(dir + sep))) continue
+        shadow.push(`${probe.resolvedRelative}（从 ${probe.from} 解析）`)
+      }
+      if (shadow.length > 0) {
+        fail(`${label}: Node 会解析到**没有被核对**的副本 —— 解析面与核对面不一致：\n`
+          + shadow.map(item => `    - ${item}`).join('\n')
+          + '\n  ⇒ 这就是 R5-D-6 的现场形态：一份 pristine（或任意未核对的）副本放在'
+          + '"Node 解析优先、随包交付、但不在枚举里"的位置，被枚举的那份保持补丁后状态，'
+          + '两个守卫双双 EXIT=0，而随包交付的是影子副本。\n'
+          + '  处置：把它从随包位置移除；确实需要该位置时，把它加进枚举根（'
+          + 'scripts/patch-copy-scan.mjs 的 copyScanNodeModulesDirs，按打包白名单派生）。')
+      }
     }
 
     const { pristine, patched } = findCacheZips(cacheDir, target.name, target.version)

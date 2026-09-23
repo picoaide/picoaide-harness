@@ -1249,6 +1249,88 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   }
 }
 
+// ---- 1d-2. WASM 探针证据协议的自证必须**可被打坏**(2026-09-23 第五轮审计 R4-A N2) ----
+//
+// 现场(R5-D §N2 / VERIFY.md N2):组级不变量是**计数**不变量 ⇒
+//   · 早退分支把 `skip` 写成 `pass`("跳过但打印 PASS")⇒ `group 6 pass=1` + EXIT=0;
+//   · 把探针换成 `exit 0` 桩并打印伪造的 VERDICT 行 ⇒ 4 PASS / EXIT=0。
+// 修复本体(`scripts/verify-wasm-client-only.sh`):真探针必须产出**带本次 nonce 的**
+// 结构化证据行,组级判据改成**集合**判定(发现集合 == 证据集合),并配 16 条自证样本。
+//
+// 这一组是本守卫作为**独立来源**给出的"自证网":它真跑 `--self-check`,再在
+// **副本**上把自证本身打坏,要求它变红 —— 只把自证剪掉(或把 validator 改成恒接受)
+// 在这里必然被咬住(而不是"自证自己说自己通过了")。
+{
+  const gateScript = join(root, 'scripts', 'verify-wasm-client-only.sh')
+  const source = readFileSync(gateScript, 'utf8')
+  const runSelfCheck = script => spawnSync('bash', [script, '--self-check'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 120_000,
+  })
+  const baseline = runSelfCheck(gateScript)
+  const baselineOut = `${baseline.stdout ?? ''}${baseline.stderr ?? ''}`
+  check(baseline.status === 0,
+    `WASM 门禁的 --self-check 必须 exit 0（实际 ${baseline.status}）：${baselineOut.trim().slice(-300)}`)
+  const summary = /probe-evidence self-check: samples=(\d+)\/(\d+) accepted=(\d+) rejected=(\d+)/u.exec(baselineOut)
+  if (summary === null) {
+    fail(`WASM 门禁的 --self-check 没有打印自证汇总结论（样本数与接受/拒绝计数不可见）：`
+      + `${baselineOut.trim().slice(-200)}`)
+  } else {
+    const [, observed, registered, accepted, rejected] = summary.map(Number)
+    check(observed === registered,
+      `WASM 探针证据自证只跑了 ${observed}/${registered} 条样本 ⇒ 有样本没被跑（自证被掏空）`)
+    check(registered >= 16,
+      `WASM 探针证据自证样本只剩 ${registered} 条（下限 16）—— 样本被删到没有判别力`)
+    check(accepted >= 2 && rejected >= 1,
+      `WASM 探针证据自证：接受 ${accepted} / 拒绝 ${rejected} —— 两侧都要有样本（否则判据可能恒接受或恒拒绝）`)
+    console.log(`verify-ci-scripts: WASM 探针证据自证 samples=${observed}/${registered} `
+      + `accepted=${accepted} rejected=${rejected}`)
+  }
+  // 静态接线(与动态变异互补):两种攻击形态的样本 id 与两条组级证据必须在源码里。
+  for (const needle of ['exit0-silent', 'exit0-forged-static', 'skip-with-pass-attest',
+    'early-exit-pass-no-evidence', 'group6-invariant:', 'probe-attested:']) {
+    check(source.includes(needle),
+      `WASM 门禁源码里找不到 \`${needle}\` —— 探针证据协议/自证样本被删了（R4-A N2 的两种攻击形态必须各有样本盯着）`)
+  }
+  // 变异副本:把自证打坏 ⇒ `--self-check` 必须非零。
+  const BREAK_CASES = [
+    {
+      id: 'validator-always-accept',
+      label: '证据 validator 恒接受（自证被掏空）',
+      needle: 'probe_evidence_verdict() {',
+      // 在函数体最前面插入无条件接受 ⇒ 所有 reject 样本都会被"接受"
+      replacement: "probe_evidence_verdict() {\n  printf 'accept'; return 0",
+    },
+    {
+      id: 'selftest-sample-removed',
+      label: '自证样本被删（"exit 0 桩"没有样本盯着）',
+      needle: '  "exit0-silent|reject|0|"\n',
+      replacement: '',
+    },
+    {
+      id: 'selftest-call-removed',
+      label: '自证入口被删（--self-check 不再证明任何东西）',
+      needle: 'probe_evidence_selftest() {',
+      replacement: 'probe_evidence_selftest_disabled() {',
+    },
+  ]
+  for (const breakCase of BREAK_CASES) {
+    const dir = tempDir(`wasm-selfcheck-${breakCase.id}-`)
+    const copy = join(dir, 'verify-wasm-client-only.sh')
+    if (!source.includes(breakCase.needle)) {
+      fail(`WASM 自证变异 \`${breakCase.id}\` 的注入锚点失效（锚点 ${JSON.stringify(breakCase.needle)} 不在源码里）`
+        + ' —— 请同步本守卫的锚点，不要直接删掉这段')
+      continue
+    }
+    writeFileSync(copy, source.replace(breakCase.needle, breakCase.replacement))
+    const mutated = runSelfCheck(copy)
+    check(mutated.status !== 0,
+      `WASM 自证变异「${breakCase.label}」之后 --self-check 仍然 exit 0 ⇒ 自证网是假绿（N2 的"拆掉自证 ⇒ 红"没成立）`)
+    console.log(`verify-ci-scripts: WASM 探针证据自证 变异「${breakCase.label}」⇒ --self-check 非零 ✓`)
+  }
+}
+
 // ---- 1e. CI 的 gofmt 扫描面必须与 server/Makefile 同源(2026-09-23 第三轮审计 P-4) ----
 //
 // 现场:CI 的 gofmt 步骤扫 `cmd internal`,而 `server/Makefile` 的 check / check-fast

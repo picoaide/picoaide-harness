@@ -29,6 +29,7 @@
  */
 const http = require('node:http')
 const { app, BrowserWindow, protocol, session } = require('electron')
+const { attest } = require('./probe-attest.cjs')
 
 // 收编说明（L4 / 2026-09-20）：本文件由 **L2** 产出（temp/wasm-client-only/probe-app-scheme-gate.cjs，
 // 收编时 sha256=a5e472299c245ea142fa0ef9f871fad356e6da96aacedd97f05e431bbb7070e9）。L4 只做两处**附加**标注、未改动任何判定逻辑与期望值：
@@ -270,8 +271,19 @@ async function main() {
   console.log(`[probeGate] VERDICT = ${JSON.stringify({ platform: PROBE_PLATFORM, platformCovered: PROBE_COVERED, gatePattern, gateEventCount: gateEvents.length, handlerCalls: handlerCalls.length })}`)
   if (!PROBE_COVERED && PROBE_REQUIRE_COVERED) {
     console.log(`[skip] PROBE_REQUIRE_COVERED_PLATFORM=1 且平台未覆盖（${PROBE_PLATFORM}），按显式 SKIP 退出（77）`)
+    // 显式 SKIP 也必须带证据（否则门禁无法区分"真探针如实跳过"与"根本没跑"）。
+    attest({ probe: __filename, assertions: 0, pass: 0, fail: 0, skip: required.length, platformCovered: false })
     app.exit(77)
   }
+  // 结构化证据行（R4-A N2）：required 断言逐条见上面的 checks 表。
+  attest({
+    probe: __filename,
+    assertions: required.length,
+    pass: required.length - failures.length,
+    fail: failures.length,
+    skip: 0,
+    platformCovered: PROBE_COVERED,
+  })
   app.exit(failures.length === 0 ? 0 : 1)
 }
 

@@ -16,6 +16,7 @@
  *   xvfb-run -a env HOME=/tmp/... electron --no-sandbox scripts/wasm/probes/probe-custom-scheme.cjs
  */
 const { app, BrowserWindow, protocol, net } = require('electron')
+const { attest } = require('./probe-attest.cjs')
 
 const SCHEME = 'picoaide-app'
 
@@ -182,5 +183,16 @@ app.whenReady().then(async () => {
   if (verdict.cookiesWork !== '') failed.push('cookiesWork(must be empty)')
   if (verdict.setCookieStored !== '') failed.push('setCookieStored(must be empty)')
   log('ASSERT', { failed })
+  // 结构化证据行（R4-A N2）：assertions = 8 条正向 required + 3 条 Origin/Sec-Fetch
+  // 负向期望 + 2 条 cookie 期望（见上面的 failed 组装）。
+  const totalChecks = required.length + 5
+  attest({
+    probe: __filename,
+    assertions: totalChecks,
+    pass: totalChecks - failed.length,
+    fail: failed.length,
+    skip: 0,
+    platformCovered: COVERED_PLATFORM,
+  })
   app.exit(failed.length === 0 ? 0 : 1)
 }).catch((cause) => { console.error('[probeC] fatal', cause); app.exit(1) })

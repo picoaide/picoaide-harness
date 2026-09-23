@@ -112,6 +112,216 @@ export PG_DSN_TEST
 
 mkdir -p "$LOG_DIR" "$PROBE_HOME"
 
+# ── 探针证据协议（R4-A N2 / VERIFY.md §7-N2）──────────────────────────────────
+#
+# 现场：组级不变量是**计数**不变量（"该组 PASS ≥ 1"）。两种绕过都成立：
+#   ① 早退分支把 `skip` 写成 `pass` ⇒ `group 6 pass=1 skip=0` + `全部通过 ✅` / EXIT=0；
+#   ② 把探针换成 `exit 0` 桩并打印**伪造的** VERDICT 行 ⇒ 4 PASS / EXIT=0。
+#
+# 现在的口径（**集合**判定，不是计数）：
+#   · 门禁每次运行生成随机 nonce 并经环境传给探针；真探针必须打印**恰好一行**
+#     `PROBE-ATTEST probe=<basename> assertions=… pass=… fail=… skip=… platformCovered=… nonce=…`
+#     （协议在 `scripts/wasm/probes/probe-attest.cjs`）；
+#   · 每个被发现的探针都必须**有据可查**：`probe-attested:<name>`（rc=0 且证据自洽）
+#     或 `probe-skipped:<name>`（rc=77 且证据里 platformCovered=0）；
+#   · 组级不变量 = 「被发现的探针集合 == 有证据的探针集合」（缺一具名、多一具名都红）
+#     且至少一条 `probe-attested`（全组 SKIP 仍红）；
+#   · 自证样本（`PROBE_EVIDENCE_SELFTEST_CASES` + `GROUP6_SELFTEST_CASES`）把
+#     "exit 0 桩"、"跳过却打 PASS"、"伪造 nonce"、"部分证据"四种形态逐条钉死，
+#     由 `--self-check` 独立跑（不需要 Electron/显示器），并在组 6 里**强制先跑**。
+PROBE_ATTEST_NONCE="${PROBE_ATTEST_NONCE:-$(node -e 'process.stdout.write(require("node:crypto").randomBytes(8).toString("hex"))' 2>/dev/null || printf 'fallback-%s-%s' "$$" "$RANDOM")}"
+export PROBE_ATTEST_NONCE
+
+# 探针证据的**自证样本登记表**（`id|期望|rc|证据行模板`）。模板里 `@NONCE@` 由自证替换成
+# 本次真 nonce；`@WRONG@` 替换成一个必然不等于本次 nonce 的串。
+# 期望 `reject` = 该样本**必须**被 validator 拒（否则这条判据是空的）。
+PROBE_EVIDENCE_SELFTEST_CASES=(
+  "exit0-silent|reject|0|"
+  "exit0-forged-static|reject|0|PROBE-ATTEST probe=@PROBE@ assertions=1 pass=1 fail=0 skip=0 platformCovered=1 nonce=deadbeefdeadbeef"
+  "exit0-forged-nonce-echo|reject|0|PROBE-ATTEST probe=@PROBE@ assertions=0 pass=0 fail=0 skip=0 platformCovered=1 nonce=@NONCE@"
+  "exit0-counts-inconsistent|reject|0|PROBE-ATTEST probe=@PROBE@ assertions=5 pass=1 fail=0 skip=0 platformCovered=1 nonce=@NONCE@"
+  "wrong-probe-id|reject|0|PROBE-ATTEST probe=someone-else.cjs assertions=1 pass=1 fail=0 skip=0 platformCovered=1 nonce=@NONCE@"
+  "duplicate-attest-lines|reject|0|PROBE-ATTEST probe=@PROBE@ assertions=1 pass=1 fail=0 skip=0 platformCovered=1 nonce=@NONCE@\nPROBE-ATTEST probe=@PROBE@ assertions=1 pass=1 fail=0 skip=0 platformCovered=1 nonce=@NONCE@"
+  "skip-with-pass-attest|reject|77|PROBE-ATTEST probe=@PROBE@ assertions=1 pass=1 fail=0 skip=0 platformCovered=0 nonce=@NONCE@"
+  "stub-exit0-nonzero-exit|reject|1|PROBE-ATTEST probe=@PROBE@ assertions=1 pass=1 fail=0 skip=0 platformCovered=1 nonce=@NONCE@"
+  "valid-attested|accept|0|PROBE-ATTEST probe=@PROBE@ assertions=3 pass=3 fail=0 skip=0 platformCovered=1 nonce=@NONCE@"
+  "valid-platform-skip|accept-skip|77|PROBE-ATTEST probe=@PROBE@ assertions=2 pass=0 fail=0 skip=2 platformCovered=0 nonce=@NONCE@"
+)
+# 组级不变量的自证样本（`id|期望|已发现探针|已有证据`；全部是纯数据 ⇒ 不需要真探针）。
+GROUP6_SELFTEST_CASES=(
+  "all-settled|ok|p1 p2|probe-attested:p1 probe-skipped:p2"
+  "early-exit-pass-no-evidence|reject|p1|"
+  "skip-printed-as-pass|reject|p1|"
+  "partial-evidence|reject|p1 p2|probe-attested:p1"
+  "unknown-evidence|reject|p1|probe-attested:p1 probe-attested:p9"
+  "all-skipped|reject|p1 p2|probe-skipped:p1 probe-skipped:p2"
+)
+
+# 自证样本数的**下限**（棘轮：删样本必须同时改这里并进 diff）。删掉"exit 0 桩"这类
+# 样本后，剩下的样本照样全部通过 —— 只看"跑到的 == 登记的"是抓不住缩面的。
+PROBE_EVIDENCE_MIN_SAMPLES=10
+GROUP6_MIN_SAMPLES=6
+
+# 从证据行里取字段（`key=value`，空格分隔）。
+attest_field() { # <line> <key>
+  printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -n 1
+}
+
+# 校验一条探针证据。打印 `accept` / `accept-skip` / `reject:<原因>`，退出码 0=接受、1=拒绝。
+# 参数：<探针 basename> <退出码> <日志文件>
+probe_evidence_verdict() {
+  local probe="$1" rc="$2" log="$3"
+  if [ ! -f "$log" ]; then printf 'reject:日志不存在'; return 1; fi
+  local count
+  count="$(grep -c '^PROBE-ATTEST ' "$log" 2>/dev/null || true)"
+  count="${count:-0}"
+  if [ "$rc" = "77" ]; then
+    if [ "$count" != "1" ]; then printf 'reject:显式 SKIP 但没有恰好一行证据（%s 行）' "$count"; return 1; fi
+    local line
+    line="$(grep -m1 '^PROBE-ATTEST ' "$log")"
+    if [ "$(attest_field "$line" probe)" != "$probe" ]; then printf 'reject:证据行的 probe 不是本探针'; return 1; fi
+    if [ "$(attest_field "$line" nonce)" != "$PROBE_ATTEST_NONCE" ]; then printf 'reject:证据行 nonce 不是本次运行'; return 1; fi
+    if [ "$(attest_field "$line" platformCovered)" != "0" ]; then printf 'reject:显式 SKIP 的证据行必须标 platformCovered=0'; return 1; fi
+    if [ "$(attest_field "$line" pass)" != "0" ]; then
+      printf 'reject:显式 SKIP 的证据行不得声称有通过断言（pass=%s ⇒ "跳过却打 PASS"的形态）' "$(attest_field "$line" pass)"
+      return 1
+    fi
+    printf 'accept-skip'; return 0
+  fi
+  if [ "$rc" != "0" ]; then printf 'reject:退出码 %s（只有 0 或 77 才算跑成）' "$rc"; return 1; fi
+  if [ "$count" != "1" ]; then printf 'reject:证据行应为恰好 1 行，实得 %s ⇒ exit 0 桩/协议损坏' "$count"; return 1; fi
+  local line a p f s
+  line="$(grep -m1 '^PROBE-ATTEST ' "$log")"
+  if [ "$(attest_field "$line" probe)" != "$probe" ]; then
+    printf 'reject:证据行 probe=%s 与本探针 %s 不符' "$(attest_field "$line" probe)" "$probe"; return 1
+  fi
+  if [ "$(attest_field "$line" nonce)" != "$PROBE_ATTEST_NONCE" ]; then
+    printf 'reject:nonce 不是本次运行（写死的伪造行/复制的旧日志）'; return 1
+  fi
+  a="$(attest_field "$line" assertions)"; p="$(attest_field "$line" pass)"
+  f="$(attest_field "$line" fail)"; s="$(attest_field "$line" skip)"
+  case "$a$p$f$s" in
+    *[!0-9]*|"") printf 'reject:计数不是非负整数（assertions=%s pass=%s fail=%s skip=%s）' "$a" "$p" "$f" "$s"; return 1 ;;
+  esac
+  if [ "$a" -lt 1 ]; then printf 'reject:assertions=0（零断言不得当通过）'; return 1; fi
+  if [ "$f" -ne 0 ]; then printf 'reject:fail=%s（探针自己报了失败）' "$f"; return 1; fi
+  if [ "$p" -lt 1 ]; then printf 'reject:pass=0（零通过断言不得当通过）'; return 1; fi
+  if [ "$p" -ne "$((a - s))" ]; then
+    printf 'reject:计数自洽性失败（pass=%s + skip=%s ≠ assertions=%s）' "$p" "$s" "$a"; return 1
+  fi
+  printf 'accept'; return 0
+}
+
+# 组 6 的**集合**不变量。参数：<已发现探针清单文件> <证据清单文件>。
+# 打印 `ok` 或 `reject:<原因>`；退出码 0=成立、1=不成立。
+group6_invariant() {
+  local discovered_file="$1" evidence_file="$2"
+  local missing="" extra="" attested=0 settled=""
+  while IFS= read -r probe; do
+    [ -n "$probe" ] || continue
+    if grep -qx "probe-attested:$probe" "$evidence_file"; then attested=$((attested + 1)); settled="$settled $probe"; continue; fi
+    if grep -qx "probe-skipped:$probe" "$evidence_file"; then settled="$settled $probe"; continue; fi
+    missing="$missing $probe"
+  done <"$discovered_file"
+  while IFS= read -r record; do
+    [ -n "$record" ] || continue
+    local id="${record#*:}"
+    if ! grep -qx "$id" "$discovered_file"; then extra="$extra $id"; fi
+  done <"$evidence_file"
+  if [ -n "$missing" ]; then printf 'reject:这些被发现的探针没有任何可判定的证据（既非 attested 也非 skipped）:%s' "$missing"; return 1; fi
+  if [ -n "$extra" ]; then printf 'reject:出现了不在发现集合里的证据:%s' "$extra"; return 1; fi
+  if [ "$attested" -eq 0 ]; then printf 'reject:没有任何一条 probe-attested（全组 SKIP/桩 ⇒ 零断言）'; return 1; fi
+  printf 'ok'; return 0
+}
+
+# 自证：证据 validator + 组级不变量。返回 0/1，并把结论写进 $1（可选）。
+probe_evidence_selftest() {
+  local report="${1:-}"
+  local dir="$LOG_DIR/probe-evidence-selftest"
+  rm -rf "$dir"; mkdir -p "$dir"
+  local failures=0 observed_ids="" accepted=0 rejected=0
+  local spec id expect rc template probe line verdict log
+  for spec in "${PROBE_EVIDENCE_SELFTEST_CASES[@]}"; do
+    IFS='|' read -r id expect rc template <<<"$spec"
+    probe="probe-${id}.cjs"
+    log="$dir/$id.log"
+    : >"$log"
+    if [ -n "$template" ]; then
+      printf '%b\n' "$template" \
+        | sed -e "s/@PROBE@/$probe/g" -e "s/@NONCE@/$PROBE_ATTEST_NONCE/g" >"$log"
+    fi
+    verdict="$(probe_evidence_verdict "$probe" "$rc" "$log")" || true
+    observed_ids="$observed_ids $id"
+    case "$verdict" in
+      accept) accepted=$((accepted + 1)) ;;
+      accept-skip) accepted=$((accepted + 1)) ;;
+      *) rejected=$((rejected + 1)) ;;
+    esac
+    local matched=0
+    case "$verdict" in
+      "$expect"|"$expect":*) matched=1 ;;
+    esac
+    if [ "$matched" -ne 1 ]; then
+      printf 'probe-evidence 自证: 样本 %s 期望 %s，实得 %s\n' "$id" "$expect" "$verdict" >&2
+      failures=$((failures + 1))
+    fi
+  done
+  # 组级不变量的样本（纯数据）
+  local gspec gexpect gdiscovered gevidence
+  for gspec in "${GROUP6_SELFTEST_CASES[@]}"; do
+    IFS='|' read -r id gexpect gdiscovered gevidence <<<"$gspec"
+    printf '%s\n' ${gdiscovered:-} >"$dir/$id.discovered"
+    : >"$dir/$id.evidence"
+    for record in $gevidence; do printf '%s\n' "$record" >>"$dir/$id.evidence"; done
+    verdict="$(group6_invariant "$dir/$id.discovered" "$dir/$id.evidence")" || true
+    if [ "$gexpect" = "ok" ]; then
+      if [ "$verdict" != "ok" ]; then
+        printf 'group6 不变量自证: 样本 %s 期望 ok，实得 %s\n' "$id" "$verdict" >&2
+        failures=$((failures + 1))
+      fi
+    else
+      case "$verdict" in
+        reject:*) ;;
+        *) printf 'group6 不变量自证: 样本 %s 期望 reject，实得 %s\n' "$id" "$verdict" >&2
+           failures=$((failures + 1)) ;;
+      esac
+    fi
+    observed_ids="$observed_ids group6:$id"
+  done
+  # 登记表双向对拍：跑到的样本必须恰好是登记的（少一条 = 自证被删/短路）。
+  local expected_ids="" extra_ids=""
+  for spec in "${PROBE_EVIDENCE_SELFTEST_CASES[@]}"; do expected_ids="$expected_ids ${spec%%|*}"; done
+  for gspec in "${GROUP6_SELFTEST_CASES[@]}"; do expected_ids="$expected_ids group6:${gspec%%|*}"; done
+  local required_count=0
+  for id in $expected_ids; do required_count=$((required_count + 1)); done
+  if [ "${#PROBE_EVIDENCE_SELFTEST_CASES[@]}" -lt "$PROBE_EVIDENCE_MIN_SAMPLES" ] \
+    || [ "${#GROUP6_SELFTEST_CASES[@]}" -lt "$GROUP6_MIN_SAMPLES" ]; then
+    printf 'probe-evidence 自证: 登记样本被删到没有判别力（validator %s < %s / 组级不变量 %s < %s）\n' \
+      "${#PROBE_EVIDENCE_SELFTEST_CASES[@]}" "$PROBE_EVIDENCE_MIN_SAMPLES" \
+      "${#GROUP6_SELFTEST_CASES[@]}" "$GROUP6_MIN_SAMPLES" >&2
+    failures=$((failures + 1))
+  fi
+  local observed_count=0
+  for id in $observed_ids; do observed_count=$((observed_count + 1)); done
+  if [ "$observed_count" -ne "$required_count" ]; then
+    printf 'probe-evidence 自证: 样本数不符（实跑 %s / 登记 %s）—— 自证被删/短路\n' \
+      "$observed_count" "$required_count" >&2
+    failures=$((failures + 1))
+  fi
+  if [ "$accepted" -lt 2 ] || [ "$rejected" -lt 1 ]; then
+    printf 'probe-evidence 自证: 接受 %s 条 / 拒绝 %s 条 —— 两侧都要有样本（否则判据可能恒接受或恒拒绝）\n' \
+      "$accepted" "$rejected" >&2
+    failures=$((failures + 1))
+  fi
+  # 结论行（供 `--self-check` 与 CI 独立守卫消费；**不许**静默）
+  local summary="probe-evidence self-check: samples=${observed_count}/${required_count} accepted=${accepted} rejected=${rejected} nonce=${PROBE_ATTEST_NONCE}"
+  if [ -n "$report" ]; then printf '%s\n' "$summary" >"$report"; fi
+  printf '%s\n' "$summary"
+  if [ "$failures" -ne 0 ]; then return 1; fi
+  return 0
+}
+
+
 # ---------------------------------------------------------------------------
 # 参数
 # ---------------------------------------------------------------------------
@@ -140,6 +350,7 @@ esac
 while [ $# -gt 0 ]; do
   case "$1" in
     --portable) MODE="portable"; shift ;;
+    --self-check) MODE="self-check"; shift ;;
     --require-clean) REQUIRE_CLEAN=1; shift ;;
     --groups)
       if [ $# -lt 2 ]; then
@@ -171,6 +382,15 @@ case "$MODE" in
   list)
     printf '%s\n' "${GROUP_NAMES[@]}"
     exit 0 ;;
+  self-check)
+    # 探针证据协议的自证（R4-A N2）：不需要 Electron / 显示器 / PG —— 供 CI 与
+    # `verify-ci-scripts.mjs` 独立驱动（"拆掉自证 ⇒ 红"要靠外部守卫跑它）。
+    if probe_evidence_selftest; then
+      echo "verify-wasm-client-only: 探针证据自证通过（--self-check）✅"
+      exit 0
+    fi
+    echo "verify-wasm-client-only: 探针证据自证失败（--self-check）❌" >&2
+    exit 1 ;;
   portable)
     # W5 文档判据（组 8）是纯 grep、无外部依赖 ⇒ 进便携组，`yarn check` 每次都跑（TST-15）。
     if [ "$GROUPS_EXPLICIT" -eq 0 ]; then GROUPS_SELECTED="1 2 7 8"; fi ;;
@@ -217,6 +437,13 @@ skip() {
   printf 'group-skip %s %s\n' "${GROUP_ID:-<未开始>}" "$1" >>"$GROUP_SKIP_FILE"
 }
 note() { printf '  %s\n' "$1"; }
+# 组级**证据**记录（R4-A N2）：与 pass/skip 并列的第三条通道，写进绑定文件
+# `group-evidence <组> <token>`。收尾按它复算"组 6 的集合不变量真的跑过"。
+GROUP_EVIDENCE=0
+evidence() {
+  printf 'group-evidence %s %s\n' "${GROUP_ID:-<未开始>}" "$1" >>"$BINDING"
+  GROUP_EVIDENCE=$((GROUP_EVIDENCE + 1))
+}
 step() { printf '\n== %s\n' "$1"; }
 
 # ── 组级记账（R4-A-15，2026-09-23 四轮审计）───────────────────────────────────
@@ -249,6 +476,19 @@ group_settle() {
   fi
   if [ "$GROUP_PASS" -eq 0 ]; then
     fail "组 ${group} 零断言（PASS 0 ｜ FAIL ${GROUP_FAIL} ｜ SKIP ${GROUP_SKIP}）：该组一条断言都没跑成 —— 全组 SKIP / 零 PASS 不得当通过（组级不变量，任何平台、任何分支都成立）"
+  fi
+  # 组 6 另有一条**集合**不变量（R4-A N2）：探针证据自证与"发现集合 == 证据集合"必须
+  # 真的跑过（`evidence` 会落 `group-evidence` 行）。缺了它说明有人把这两条剪掉了 ——
+  # 那时 PASS 计数仍可能 ≥1（正是"跳过却打 PASS"的形态）。
+  if [ "$group" = "6" ]; then
+    local selftest_lines=0 invariant_lines=0
+    selftest_lines="$(grep -c "^group-evidence 6 probe-evidence-selftest:" "$BINDING" || true)"
+    invariant_lines="$(grep -c "^group-evidence 6 group6-invariant:" "$BINDING" || true)"
+    selftest_lines="${selftest_lines:-0}"; invariant_lines="${invariant_lines:-0}"
+    if [ "$selftest_lines" -lt 1 ] || [ "$invariant_lines" -lt 1 ]; then
+      fail "组 6 缺少证据链（自证记录 ${selftest_lines} / 集合不变量记录 ${invariant_lines}）：" \
+        "探针证据自证与集合不变量必须**都跑过** —— 缺任一条，本组的"探针都跑过了"都不可信（R4-A N2）"
+    fi
   fi
 }
 
@@ -494,19 +734,44 @@ if want 6; then
   group_begin 6
   step "6. 协议探针（探针自判定 + 退出码；不 grep 文本；xvfb-run -a 与探针同命令）"
   PROBES=()
+  # 支持文件（协议库等，**不是**探针、不产出证据行）：逐条登记，未登记的支持文件会被
+  # 当成探针 ⇒ 因"没有证据行"当场判红（这正是我们要的 fail-loud 方向）。
+  PROBE_SUPPORT_FILES="probe-attest.cjs"
   while IFS= read -r probe; do
     # `if` 而不是 `[ … ] && …`：后者在 set -e 下，条件为假时整条列表非零 ⇒ 直接退出脚本。
-    if [ -n "$probe" ]; then PROBES+=("$probe"); fi
+    if [ -z "$probe" ]; then continue; fi
+    case " $PROBE_SUPPORT_FILES " in
+      *" $(basename "$probe") "*) continue ;;
+    esac
+    PROBES+=("$probe")
   done < <(find scripts/wasm/probes scripts/probes -maxdepth 1 -type f -name 'probe-*.cjs' 2>/dev/null | sort -u)
+
+  # 组 6 的**强制自证**（R4-A N2）：证据协议自己先被证明能咬住"exit 0 桩"与
+  # "跳过却打 PASS"两种形态。自证失败 ⇒ 本组直接红（拆掉/绕过自证都过不去）。
+  PROBE_EVIDENCE_DISCOVERED="$LOG_DIR/probe-evidence-discovered.txt"
+  PROBE_EVIDENCE_SETTLED="$LOG_DIR/probe-evidence-settled.txt"
+  : >"$PROBE_EVIDENCE_DISCOVERED"
+  : >"$PROBE_EVIDENCE_SETTLED"
+  if probe_evidence_selftest "$LOG_DIR/probe-evidence-selftest.txt"; then
+    evidence "probe-evidence-selftest:$(cat "$LOG_DIR/probe-evidence-selftest.txt")"
+    pass "探针证据自证（$(cat "$LOG_DIR/probe-evidence-selftest.txt")）"
+  else
+    evidence "probe-evidence-selftest:FAILED"
+    fail "探针证据自证失败：证据 validator / 组级不变量的自证样本没通过 ⇒ 本组的"探针都跑过了"不再可信（见 $LOG_DIR/probe-evidence-selftest.txt）"
+  fi
 
   if [ "${#PROBES[@]}" -eq 0 ]; then
     fail "scripts/wasm/probes 下没有任何 probe-*.cjs —— 探针全丢等于本组没跑（拒绝空集通过）"
   elif [ ! -x "$ELECTRON_BIN" ] && [ ! -f "$ELECTRON_BIN" ]; then
+    for probe in "${PROBES[@]}"; do printf '%s\n' "$(basename "$probe")" >>"$PROBE_EVIDENCE_DISCOVERED"; done
     fail "找不到 Electron（$ELECTRON_BIN）：先 corepack yarn install"
   elif ! command -v xvfb-run >/dev/null 2>&1; then
     if [ "$(uname -s)" = "Linux" ]; then
       fail "Linux 上缺少 xvfb-run（apt install xvfb）—— 无头环境下探针跑不起来，不得静默跳过"
     else
+      # 早退分支（非 Linux）：**先把发现集合落盘**，再如实 skip。这样组级集合不变量
+      # 依然要求"每个被发现的探针都有证据"——打印 PASS 也救不了它（R4-A N2 的形态①）。
+      for probe in "${PROBES[@]}"; do printf '%s\n' "$(basename "$probe")" >>"$PROBE_EVIDENCE_DISCOVERED"; done
       # 这里是**早退分支**（探针循环之前就返回）：它正是 R4-A-15 的躲过路径 ——
       # 旧实现把"全组 SKIP = 失败"写在 else 分支里，本分支只 skip 一次，
       # 汇总遂打出 `PASS 0 ｜ FAIL 0 ｜ SKIP 1` + `全部通过 ✅` 且 EXIT=0。
@@ -533,17 +798,24 @@ if want 6; then
             PROBE_REQUIRE_COVERED_PLATFORM="${WASM_GATE_REQUIRE_COVERED_PLATFORM:-}" \
             PROBE_OUT_DIR="$LOG_DIR" \
             timeout "$PROBE_TIMEOUT" "$ELECTRON_BIN" --no-sandbox --disable-gpu "$probe" >"$log" 2>&1 || rc=$?
-      case "$rc" in
-        0)
+      # 每个被发现的探针都必须**有据可查**（集合判定，不是数 PASS）。
+      printf '%s\n' "$name" >>"$PROBE_EVIDENCE_DISCOVERED"
+      verdict="$(probe_evidence_verdict "$name" "$rc" "$log")" || true
+      case "$verdict" in
+        accept)
           probe_pass=$((probe_pass + 1))
-          pass "$name（退出码 0 = 期望值全部满足）"
+          printf 'probe-attested:%s\n' "$name" >>"$PROBE_EVIDENCE_SETTLED"
+          evidence "probe-attested:$name"
+          pass "$name（退出码 0 + 结构化证据行自洽：$(grep -m1 '^PROBE-ATTEST ' "$log" | cut -c1-160)）"
           grep -m1 'VERDICT' "$log" | sed 's/^/      /' || true ;;
-        77)
+        accept-skip)
           probe_skip=$((probe_skip + 1))
-          skip "$name 显式 SKIP（平台未覆盖；§17 认账 1 / W6 待补）" ;;
+          printf 'probe-skipped:%s\n' "$name" >>"$PROBE_EVIDENCE_SETTLED"
+          evidence "probe-skipped:$name"
+          skip "$name 显式 SKIP（证据行 platformCovered=0；§17 认账 1 / W6 待补）" ;;
         *)
           probe_fail=$((probe_fail + 1))
-          fail "$name（退出码 $rc ≠ 0；日志 $log）"
+          fail "$name（退出码 $rc ≠ 0；证据判定：${verdict#reject:}；日志 $log）"
           grep -m1 -E 'ASSERT|SKIP|fatal' "$log" | sed 's/^/      /' || true
           # W0-D 型探针的判定表（每条 required 的 PASS/FAIL/UNKNOWN + 汇总行）——
           # 没有它，失败只剩"退出码 1"，排障要翻整份日志。
@@ -551,9 +823,20 @@ if want 6; then
           grep -m1 '\[skip-note\]' "$log" | sed 's/^/      /' || true ;;
       esac
     done
-    if [ "$probe_pass" -eq 0 ] && [ "$probe_skip" -gt 0 ]; then
-      fail "组 6 的 ${#PROBES[@]} 个探针全部 SKIP（PASS 0 / SKIP $probe_skip / FAIL $probe_fail）—— 全组 SKIP = 零断言，不得当通过"
-    fi
+  fi
+  # **集合不变量**（R4-A N2 的修复本体）：被发现的探针集合 == 有证据的探针集合，
+  # 且至少一条 probe-attested。它取代了旧的"PASS ≥ 1"计数判据 ——
+  #   · "跳过却打 PASS"⇒ 没有 probe-attested 记录 ⇒ 红；
+  #   · "exit 0 桩"⇒ validator 拒绝（无证据行/nonce 不符/计数不自洽）⇒ 红；
+  #   · 部分探针没有证据 ⇒ 具名点名缺哪一条。
+  # 它刻意放在 if/elif 链**之外**：早退（非 Linux）、缺 Electron、探针为空这些路径
+  # 同样必须过这一关 —— 否则"打印一行 PASS 就绕过"的形态会从别的分支溜走。
+  group6_verdict="$(group6_invariant "$PROBE_EVIDENCE_DISCOVERED" "$PROBE_EVIDENCE_SETTLED")" || true
+  evidence "group6-invariant:${group6_verdict%%:*}"
+  if [ "$group6_verdict" = "ok" ]; then
+    pass "组 6 集合不变量：${#PROBES[@]} 个被发现的探针全部有据可查（attested ${probe_pass:-0} / skipped ${probe_skip:-0}）"
+  else
+    fail "组 6 集合不变量不成立：${group6_verdict#reject:}（日志 $LOG_DIR；探针清单 $PROBE_EVIDENCE_DISCOVERED）"
   fi
   # 组级不变量（R4-A-15）：覆盖上面**每一条**分支 —— 早退 skip、探针全 77、探针全失败、
   # 探针一条都没找到…… 只要本组没有任何 PASS，收尾就在这里判红并点名"组 6 零断言"。

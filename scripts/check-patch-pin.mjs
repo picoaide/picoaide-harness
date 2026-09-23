@@ -67,6 +67,9 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePatchSections } from './patch-targets.mjs'
+// R5-D-6:核对面必须**派生**（打包白名单 + Node 解析顺序），不能是固定枚举根。
+import { copyScanNodeModulesDirs, resolutionProbes } from './patch-copy-scan.mjs'
+import { realpathSync } from 'node:fs'
 
 const root = resolve(import.meta.dirname, '..')
 const failures = []
@@ -246,7 +249,7 @@ function selfTest() {
     mkdirSync(join(scratch, 'scripts'))
     // 本脚本现在 import 共享解析器 `patch-targets.mjs`（锚点判据复用它的段/hunk
     // 边界解析）—— 合成树里必须一并放进去，否则副本连模块都加载不了。
-    for (const file of ['check-patch-pin.mjs', 'patch-targets.mjs']) {
+    for (const file of ['check-patch-pin.mjs', 'patch-targets.mjs', 'patch-copy-scan.mjs']) {
       writeFileSync(
         join(scratch, 'scripts', file),
         readFileSync(join(import.meta.dirname, file)),
@@ -352,17 +355,60 @@ function workspaceDirs() {
  */
 function installedCopies(roots, name) {
   const copies = []
-  for (const base of ['', ...roots]) {
-    const dir = join(root, base, 'node_modules', name)
+  const seen = new Set()
+  const consider = dir => {
     const manifestPath = join(dir, 'package.json')
-    if (!existsSync(manifestPath)) continue
+    if (!existsSync(manifestPath)) return
+    let real = dir
+    try {
+      real = realpathSync(dir)
+    } catch {
+      // 读不到 realpath 就按原路径去重（不影响判定，只是可能多一条同源条目）。
+    }
+    if (seen.has(real)) return
+    seen.add(real)
     copies.push({
       path: relative(root, manifestPath),
       dir,
       version: JSON.parse(readFileSync(manifestPath, 'utf8')).version,
     })
   }
+  for (const base of ['', ...roots]) consider(join(root, base, 'node_modules', name))
+  // **派生的枚举根**（R5-D-6）：仓库根 + 各 workspace + 应用根下每个随包子树（含一层
+  // 子目录）。旧实现只有 `['', ...roots]`，于是
+  // `packages/host/desktop/lib/node_modules/<pkg>` 这类"Node 解析优先、随包交付、
+  // 又不在清单里"的影子副本完全不被核对。
+  for (const item of copyScanNodeModulesDirs(root)) consider(join(item.dir, name))
   return copies
+}
+
+/**
+ * **解析面**判据（R5-D-6）：Node 会解析到的副本必须都在核对面里。
+ * @param name - 包名。
+ * @param copies - `installedCopies()` 的结果。
+ * @returns 影子副本（未被核对却会被解析到）的描述数组。
+ */
+function resolutionShadowCopies(name, copies) {
+  const enumerated = copies.map(item => {
+    try {
+      return realpathSync(item.dir)
+    } catch {
+      return resolve(item.dir)
+    }
+  })
+  const shadow = []
+  for (const probe of resolutionProbes(root, name)) {
+    if (probe.resolved === null) continue
+    let resolvedReal
+    try {
+      resolvedReal = realpathSync(probe.resolved)
+    } catch {
+      resolvedReal = resolve(probe.resolved)
+    }
+    if (enumerated.some(dir => resolvedReal === dir || resolvedReal.startsWith(dir + '/'))) continue
+    shadow.push(`${probe.resolvedRelative}（从 ${probe.from} 解析）`)
+  }
+  return shadow
 }
 
 /** 主流程：自检 → 判据 1/2/4 → 判据 3（含"没装依赖必须红"）→ 输出。 */
@@ -407,6 +453,16 @@ function main() {
   const copyCache = new Map()
   const copiesFor = (packageName) => {
     if (!copyCache.has(packageName)) copyCache.set(packageName, installedCopies(installRoots, packageName))
+    // 解析面（R5-D-6）：Node 会解析到的副本必须在核对面里 —— 影子副本当场点名。
+    for (const shadow of resolutionShadowCopies(packageName, copyCache.get(packageName))) {
+      failures.push(
+        `${packageName}: Node 会解析到**没有被核对**的副本 ${shadow} —— 解析面与核对面不一致。`
+        + '\n  ⇒ 一份 pristine（或任意未核对的）副本放在"Node 解析优先、随包交付、但不在枚举里"'
+        + '的位置即可让本门禁与 verify-patches 双双 EXIT=0（R5-D-6）。'
+        + '\n  处置：把它从随包位置移除；确实需要该位置时按打包白名单加进 '
+        + 'scripts/patch-copy-scan.mjs 的 copyScanNodeModulesDirs。',
+      )
+    }
     return copyCache.get(packageName)
   }
   /** 补丁目标（按 `<name>@<version>` 去重）——内容级判据 5 的核对清单。 */

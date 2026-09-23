@@ -399,7 +399,7 @@ const SELFTEST_MIN_RED_SAMPLES = 20
  * 红样本必须覆盖的策略标签(精确匹配,不能靠 `includes` —— `[SK-7]` 是 `[SK-7a]` 的
  * 前缀,子串匹配会把"某条策略没有样本盯着"放过去)。`[SK-7]` = 块级 errexit 策略。
  */
-const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
+const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
 
 /** `selfTestScanner()` 至少执行的断言条数(供 main() 对账"自检没被掏空")。 */
 const SELFTEST_SCANNER_ASSERTIONS = 5
@@ -446,8 +446,10 @@ function workflowResult(failures, { checked = 0, notes = [], allowlistHits = [],
  * @returns `{failures, checked, notes, allowlistHits, goTestTimeoutHits}`（三条 early
  *   return 与成功路径**形状相同**，见 workflowResult）。
  */
-export function checkWorkflowText(name, text) {
+export function checkWorkflowText(name, text, options = {}) {
   const failures = []
+  // SK-15 的登记表(默认 = 仓库真实登记值;自检用合成表注入,见 REGISTRY_DEFAULT)。
+  const registries = options.registries ?? REGISTRY_DEFAULT
 
   // YAML 缩进不允许 tab;这类错误会让整个文件失效,先单独拦一道。
   if (/^\t|:\s*\t|\s\t/u.test(text)) {
@@ -630,6 +632,11 @@ export function checkWorkflowText(name, text) {
   failures.push(...checkReleaseSurface(name, document, text, notes))
   // 策略 8(W-4/W-5):WASM 门禁的两处接线(用例级报告 + 协议探针)。
   failures.push(...checkWasmGateWiring(name, document, notes))
+  // 策略 10(R5-D-1 / R4-A N6):交付物/判据 job 的"不可静默跳过"(登记式,两侧都红)。
+  failures.push(...checkJobExecutability(name, document, notes, registries))
+  // 策略 11(R5-D-2 / R5-C-6 / R5-C-8):发布链步骤的可执行性 + 效果判据 + 远端写入面。
+  failures.push(...checkReleaseChainSteps(name, document, notes, registries))
+  failures.push(...checkRemoteWriteCapabilities(name, document, notes, registries))
   // 策略 9(R4-A-3):触发面(`on:`)的业务契约 —— 删掉 `push:` 就等于关掉整条发布链。
   failures.push(...checkTriggerSurface(name, document, text, notes))
   // 策略 10(R4-A-5):被钉住的判据步骤必须**可执行**(`if: false` 落在"存在性"与
@@ -1065,17 +1072,424 @@ function isConstantFalseIf(value) {
 }
 
 /**
+ * **能力级**的"能写远端对象存储"识别表(2026-09-23 第五轮审计 R5-C-6 / R5-D-2)。
  *
- * 刻意**不含** `ci-channel-transfer.sh`:它上传的是 R2 上那个 run 级临时中转前缀
- * (不可猜、由 release job 的 `if: always()` 步骤销毁),不是客户侧更新面;把它算进来
- * 会让三个 desktop 打包 job 都要求一份发布说明检查 —— 那不是这条 finding 的面。
+ * 现场:旧实现只认 4 条**登记命令**(`EXTERNAL_UPLOAD_COMMANDS`),于是
+ *   · 在说明检查**之前**插一条内联 `aws s3 cp … s3://…` 上传步骤 ⇒ 守卫 EXIT=0
+ *     (它不在那 4 条里,`isUpload` 看不见;客户侧更新面被绕过说明门);
+ *   · 发布链里别的被策略"点名"的步骤加 `if: false` / `continue-on-error` ⇒ 也 EXIT=0
+ *     (SK-11 与公证三元组策略只看"文本在不在")。
+ *
+ * 现在的口径:**能力**优先于命令名 —— 任何"真的能写远端对象存储/发布面"的步骤都必须
+ * 先过策展说明检查;识别不了归属的新形态一律**判红并要求登记**(见
+ * `REMOTE_WRITE_REGISTERED`),而不是默默放行。
+ *
+ * `surface` 取值:
+ *   · `release-surface`   —— 客户侧/公开发布面(更新服务器、GitHub Release);
+ *   · `run-scoped`        —— run 级临时中转(只有显式登记的例外,见下);
+ *   · `unregistered`      —— 未登记的新形态 ⇒ 判红(必须登记成上面两类之一)。
  */
-const EXTERNAL_UPLOAD_COMMANDS = [
-  'ci-publish-update-server.sh',
-  'gh release create',
-  'gh release edit',
-  'gh release upload',
+const REMOTE_WRITE_CAPABILITIES = [
+  {
+    id: 'publish-update-server',
+    label: '更新服务器发布脚本',
+    surface: 'release-surface',
+    re: /\bci-publish-update-server\.sh\b/u,
+  },
+  {
+    id: 'gh-release',
+    label: '`gh release create|edit|upload`',
+    surface: 'release-surface',
+    re: /(?:^|[;&|(\n]|\$\()\s*gh\s+release\s+(?:create|edit|upload)\b/u,
+  },
+  {
+    id: 'aws-s3-write',
+    label: '`aws s3 cp|sync|mv|rm` / `aws s3api put-object|delete-object`',
+    surface: 'unregistered',
+    re: /(?:^|[;&|(\n]|\$\()\s*aws\s+s3(?:api)?\s+(?:cp|sync|mv|rm|put-object|delete-object)\b/u,
+  },
+  {
+    id: 'rclone-write',
+    label: '`rclone copy|sync|move|delete|purge`',
+    surface: 'unregistered',
+    re: /(?:^|[;&|(\n]|\$\()\s*rclone\s+(?:copy|sync|move|delete|purge)\b/u,
+  },
+  {
+    id: 'gsutil-write',
+    label: '`gsutil cp|rsync|mv|rm`',
+    surface: 'unregistered',
+    re: /(?:^|[;&|(\n]|\$\()\s*gsutil\s+(?:cp|rsync|mv|rm)\b/u,
+  },
+  {
+    id: 'azure-blob-write',
+    label: '`az storage blob upload|delete|copy`',
+    surface: 'unregistered',
+    re: /(?:^|[;&|(\n]|\$\()\s*az\s+storage\s+blob\s+(?:upload|delete|copy)\b/u,
+  },
+  {
+    id: 's3-cli-alias',
+    label: '其它对象存储 CLI(`s5cmd` / `ossutil` / `coscli` / `mc`)',
+    surface: 'unregistered',
+    re: /(?:^|[;&|(\n]|\$\()\s*(?:s5cmd|ossutil|coscli|mc)\s+(?:cp|mirror|sync|mv|rm)\b/u,
+  },
+  {
+    id: 'curl-upload',
+    label: '`curl -T/--upload-file`(裸 HTTP PUT 上传)',
+    surface: 'unregistered',
+    re: /(?:^|[;&|(\n]|\$\()\s*curl\b[^\n]*\s(?:-T|--upload-file)(?:\s|=)/u,
+  },
+  {
+    id: 'channel-transfer-push',
+    label: '`ci-channel-transfer.sh push`(run 级临时中转前缀)',
+    surface: 'run-scoped',
+    re: /\bci-channel-transfer\.sh\s+push\b/u,
+  },
 ]
+/**
+ * **run 级中转**的显式登记(唯一允许"不上说明门"的对外写入面,逐条写明理由)。
+ *
+ * 刻意**不含** `ci-channel-transfer.sh pull/clean`:那两条是读/清理,不是对外写。
+ * 登记项会被对账(登记了却不再命中 ⇒ 红),避免它长成一个"谁都能塞"的豁免洞。
+ */
+const REMOTE_WRITE_REGISTERED = [
+  {
+    file: 'ci.yml',
+    job: 'desktop-linux',
+    step: 'Transfer brand-channel installers over R2 (not via public artifacts)',
+    capability: 'channel-transfer-push',
+    surface: 'run-scoped',
+    why: '上传到 R2 上由 run id + HMAC(R2 密钥)派生的**临时中转前缀**,同 run 结束前由 '
+      + 'release job 的 `if: always()` 步骤销毁;客户侧更新面在 release job(那里有说明门)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'desktop-windows',
+    step: 'Transfer brand-channel installers over R2 (not via public artifacts)',
+    capability: 'channel-transfer-push',
+    surface: 'run-scoped',
+    why: '同上:run 级临时中转前缀,不是客户侧更新面',
+  },
+  {
+    file: 'ci.yml',
+    job: 'desktop-macos',
+    step: 'Transfer brand-channel DMGs over R2 (not via public artifacts)',
+    capability: 'channel-transfer-push',
+    surface: 'run-scoped',
+    why: '同上:run 级临时中转前缀,不是客户侧更新面',
+  },
+]
+/**
+ * 交付物/判据 job 的**不可静默跳过**登记表(2026-09-23 第五轮审计 R5-D-1 / R4-A N6)。
+ *
+ * 现场:SK-14⑤ 只判"**被钉步骤所在 job**"的常量假 `if:`;而 `desktop-linux` /
+ * `desktop-windows` / `desktop-macos` / `release` / `pr-summary` 这些 job **没有任何
+ * 判据读它们的 `if:`** —— 把 `desktop-linux` 的 `if:` 换成 `false`,三个平台 job 整块
+ * 不跑(零安装包),`[SK-8]/[SK-9]/[SK-10]/[SK-12]` 只认各自点名的对象 ⇒ 全绿。
+ *
+ * 现在的口径:**每个 job 都必须登记**(登记了却不存在 / 存在却没登记,两个方向都红),
+ * 且 `if:` 必须是登记过的**逐字形态**(常量假、`… && false`、偷偷加
+ * `event_name == 'workflow_dispatch'` 这类收窄都会红)。正当的条件型 `if:` 不是被禁,
+ * 而是必须**显式登记 + 写明依据**。
+ */
+const REGISTERED_WORKFLOW_FILES = ['ci.yml', 'codeql.yml', 'notary-probe.yml']
+const REGISTERED_JOBS = [
+  {
+    file: 'ci.yml',
+    job: 'changes',
+    ifPolicy: 'never',
+    why: 'docs-only 分类器:整条门禁的输入,任何条件下都必须跑(它自己不依赖别的 job)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'gate-guards',
+    ifPolicy: 'never',
+    why: '根守卫 job:docs-only 的 PR 也必须跑(2026-09-19 第三轮审计 C-3 / 线上 PR #129 的复发路径)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'gate',
+    ifPolicy: 'exact',
+    ifValue: '!cancelled()',
+    why: '全量门禁:必须在上游 job 失败时也运行(否则"守卫失败 ⇒ 门禁红"的链路断掉)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'server',
+    ifPolicy: 'exact',
+    ifValue: "needs.changes.result != 'success' || needs.changes.outputs.code == 'true'",
+    why: 'docs-only 的 **fail-safe** 形态:分类器失败/输出为空时走完整路径(docs-only 只是一种加速)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'desktop-linux',
+    ifPolicy: 'exact',
+    ifValue: "needs.changes.result != 'success' || needs.changes.outputs.code == 'true'",
+    why: 'Linux 安装包(AppImage/deb)+ 客户端 e2e:交付物 job,必须是同一个 fail-safe 形态',
+  },
+  {
+    file: 'ci.yml',
+    job: 'desktop-windows',
+    ifPolicy: 'exact',
+    ifValue: "needs.changes.result != 'success' || needs.changes.outputs.code == 'true'",
+    why: 'Windows 安装包(NSIS):交付物 job,必须是同一个 fail-safe 形态',
+  },
+  {
+    file: 'ci.yml',
+    job: 'desktop-macos',
+    ifPolicy: 'exact',
+    ifValue: "needs.changes.result != 'success' || needs.changes.outputs.code == 'true'",
+    why: 'macOS DMG(含签名+公证):交付物 job,必须是同一个 fail-safe 形态',
+  },
+  {
+    file: 'ci.yml',
+    job: 'release',
+    ifPolicy: 'exact',
+    ifValue: "startsWith(github.ref, 'refs/tags/v')",
+    why: '发布 job:**只**允许判"是不是 v 开头的 tag"(形态→渠道集/是否发布的映射是 '
+      + 'scripts/ci-release-policy.sh 的唯一真源,由 gate 第一步执行)。'
+      + '`if: false` / `… && false` / `… && github.event_name == \'workflow_dispatch\'` '
+      + '都会让"job 在、命令文本在、但永不执行" ⇒ 必须逐字登记(R4-A N6)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'pr-summary',
+    ifPolicy: 'exact',
+    ifValue: "always() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork",
+    why: 'PR 汇总评论:只在**非 fork 的 PR** 上运行是产品约定(信息面 job,不产交付物也不跑判据)',
+  },
+  {
+    file: 'codeql.yml',
+    job: 'analyze',
+    ifPolicy: 'exact',
+    ifValue: "github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork",
+    why: 'CodeQL 分析:fork PR 没有 secrets ⇒ 只在非 fork PR / push / 定时上跑(安全扫描面)',
+  },
+  {
+    file: 'notary-probe.yml',
+    job: 'probe',
+    ifPolicy: 'never',
+    why: '公证历史查询(workflow_dispatch 触发):任何一次手动触发都必须真的跑',
+  },
+]
+/**
+ * 发布链**必须执行的步骤**登记表(2026-09-23 第五轮审计 R5-D-2)。
+ *
+ * 现场:SK-11 只判"说明检查在不在、在不在上传之前",公证三元组策略只看 `env:` 键 ——
+ * 于是给这些步骤加 `if: false` / `continue-on-error: true`(只加一行、`run` 一字不改)
+ * 就能让 R2 上传、渠道 DMG 公证、GitHub Release 全部静默,而两条根守卫都 EXIT=0。
+ *
+ * 口径:
+ *   · **每个 job `release` 里的步骤都必须登记**(新增一步必须登记);
+ *   · 任何"能写远端对象存储"的步骤(能力级识别)都必须登记;
+ *   · 任何承载发布链命令(RELEASE_LINE_ANCHORS)、公证命令(dist:mac:notarize)的步骤
+ *     都必须登记;
+ *   · 登记项的两侧都红:登记了却找不到 / 找到却没登记。
+ * `require`:该步骤的可执行文本里必须出现的子串(**效果**判据,不只是"文本在不在"的
+ * 存在性判据 —— 例如说明门必须真的从 `ci-release-policy.sh` 取 `release_kind`)。
+ */
+const REGISTERED_RELEASE_STEPS = [
+  {
+    file: 'ci.yml',
+    job: 'gate',
+    step: 'Classify the release tag (single source of truth)',
+    ifPolicy: 'never',
+    require: ['scripts/ci-release-policy.sh', 'GITHUB_OUTPUT'],
+    why: '形态→渠道集/是否发布的唯一真源:它不跑,后面的说明门与渠道集全部失去依据',
+  },
+  {
+    file: 'ci.yml',
+    job: 'gate',
+    step: 'Require curated release notes for release tags',
+    ifPolicy: 'exact',
+    ifValue: "steps.release_policy.outputs.release_kind != 'none'",
+    require: ['docs/releases/', 'test -f', 'exit 1'],
+    why: '发布 tag 的策展说明早检(1 分钟内报错,正式版与预发版一律要求);'
+      + '条件必须取自上面那一步的 outputs(而不是写死的名字形状判断)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'gate',
+    step: 'Resolve the channel packages revision (once per run)',
+    ifPolicy: 'exact',
+    ifValue: "startsWith(github.ref, 'refs/tags/v')",
+    require: ['scripts/ci-channels.sh --resolve-only', 'GITHUB_OUTPUT'],
+    why: '渠道仓 revision **一处解析、全链复用**(2026-09-23 另一泳道的修复):'
+      + '它不跑 ⇒ 下游拿不到 pin,同一 tag 的交付物不再同源/可复现',
+  },
+  {
+    file: 'ci.yml',
+    job: 'gate',
+    step: 'Release topology (previous release tag is an ancestor; tag is on the mainline)',
+    ifPolicy: 'exact',
+    ifValue: "startsWith(github.ref, 'refs/tags/v')",
+    require: ['scripts/ci-release-topology.sh'],
+    why: 'tag 必须打在主线且包含上一个 tag(旁支拓扑会静默丢掉上一版的修复);'
+      + '判据本体在 ci-release-topology.sh(R5-C-4),这一步必须仍然调用它',
+  },
+  {
+    file: 'ci.yml',
+    job: 'release',
+    step: 'Require curated release notes before any upload',
+    ifPolicy: 'never',
+    require: ['scripts/ci-release-policy.sh', 'docs/releases/', 'test -f', 'exit 1'],
+    why: '任何对外上传之前的第二道说明门,必须无条件运行(它自己在脚本里按 release_kind 分支)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'release',
+    step: 'Verify tag matches package versions',
+    ifPolicy: 'never',
+    require: ['scripts/version.mjs check'],
+    why: 'tag 与两处 package.json 版本必须逐字一致(不一致会让升级源永久对不上)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'release',
+    step: 'Fetch channel packages (private repo)',
+    ifPolicy: 'never',
+    require: ['scripts/ci-channels.sh'],
+    why: '渠道发现:发布面按渠道逐个构建,跳过后官方之外的渠道零交付',
+  },
+  {
+    file: 'ci.yml',
+    job: 'release',
+    step: 'Fetch brand-channel installers from the R2 transfer prefix',
+    ifPolicy: 'never',
+    require: ['scripts/ci-channel-transfer.sh pull'],
+    why: '取回品牌渠道客户端产物(它们要打进各渠道镜像)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'release',
+    step: 'Build one server image per channel',
+    ifPolicy: 'never',
+    require: ['scripts/ci-build-channel-images.sh'],
+    why: '逐渠道镜像构建:发布物的本体',
+  },
+  {
+    file: 'ci.yml',
+    job: 'release',
+    step: 'Upload every channel image to the update server (R2)',
+    ifPolicy: 'never',
+    require: ['scripts/ci-publish-update-server.sh'],
+    why: 'R2 是**客户侧更新面的唯一来源**;它被静默跳过 = 客户端永远停在上一版',
+  },
+  {
+    file: 'ci.yml',
+    job: 'release',
+    step: 'Create GitHub Release',
+    ifPolicy: 'never',
+    require: ['gh release', 'docs/releases/'],
+    why: '公开 Release 面(名字 = tag,说明 = 策展文件)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'release',
+    step: 'Destroy the R2 transfer prefix',
+    ifPolicy: 'exact',
+    ifValue: 'always()',
+    why: '无论前面成功失败都要销毁 run 级中转前缀(否则品牌产物长期留在 R2)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'desktop-linux',
+    step: 'Transfer brand-channel installers over R2 (not via public artifacts)',
+    ifPolicy: 'exact',
+    ifValue: "!github.event.pull_request.head.repo.fork && startsWith(github.ref, 'refs/tags/v')",
+    require: ['scripts/ci-channel-transfer.sh push'],
+    why: '品牌渠道安装包只经 R2 中转(不进公开 artifact);条件 = 非 fork PR 且是 tag',
+  },
+  {
+    file: 'ci.yml',
+    job: 'desktop-windows',
+    step: 'Transfer brand-channel installers over R2 (not via public artifacts)',
+    ifPolicy: 'exact',
+    ifValue: "!github.event.pull_request.head.repo.fork && startsWith(github.ref, 'refs/tags/v')",
+    require: ['scripts/ci-channel-transfer.sh push'],
+    why: '同上(Windows 侧)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'desktop-macos',
+    step: 'Notarize and build DMG (resumable)',
+    ifPolicy: 'exact',
+    ifValue: "startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')",
+    require: ['dist:mac:notarize'],
+    why: '正式 tag 的官方 DMG 必须签名 + 公证 + staple(只签名会被 Gatekeeper 拦)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'desktop-macos',
+    step: 'Package brand-channel DMGs (quiet, signed + notarized)',
+    ifPolicy: 'exact',
+    ifValue: "startsWith(github.ref, 'refs/tags/v')",
+    require: ['scripts/ci-package-clients.sh', 'dist:mac:notarize'],
+    why: '渠道 DMG 是客户交付物:正式 tag 上与官方同链签名+公证(2026-09-11 现场)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'desktop-macos',
+    step: 'Transfer brand-channel DMGs over R2 (not via public artifacts)',
+    ifPolicy: 'exact',
+    ifValue: "startsWith(github.ref, 'refs/tags/v')",
+    require: ['scripts/ci-channel-transfer.sh push'],
+    why: '渠道 DMG 只经 R2 中转',
+  },
+]
+/**
+ * 三个 SK-15 判据的**默认登记表**。
+ *
+ * 之所以做成一个对象(而不是各自读常量):内置自检要能在**合成样本**上验证这三条判据
+ * 本身(登记项被删/形态被改/未登记对象出现都必须红),而合成样本的 job/步骤名不可能与
+ * 真实 ci.yml 的登记项一致 —— 用 `checkWorkflowText(name, text, { registries })` 这个
+ * **测试缝**注入合成登记表(与 `--workflows-dir` 同一性质:CI 与 `yarn check` 永不传它)。
+ */
+const REGISTRY_DEFAULT = {
+  files: REGISTERED_WORKFLOW_FILES,
+  jobs: REGISTERED_JOBS,
+  steps: REGISTERED_RELEASE_STEPS,
+  remoteWrites: REMOTE_WRITE_REGISTERED,
+}
+/**
+ * **空登记表**:内置自检的合成样本默认用它 —— 否则每个合成了 `ci.yml` 形状的样本
+ * (SK-8/SK-9/SK-11/SK-12 的那些)都会被 SK-15 拿"真实 ci.yml 的登记值"去套,
+ * 得到一堆与样本意图无关的假红(SK-15 的样本改用下面那张合成登记表)。
+ */
+const REGISTRY_NONE = { files: [], jobs: [], steps: [], remoteWrites: [] }
+/**
+ * SK-15 自检用的**合成登记表**:一个 job `verify` + 一个步骤 `Gate`。
+ * 用它把"登记了却不存在 / 存在却没登记 / 常量假 if / 收窄 if / continue-on-error /
+ * 效果子串缺失 / 未登记的上传能力"七种形态逐条盯住。
+ */
+const SK15_SELFTEST_REGISTRY = {
+  files: ['selftest.yml'],
+  jobs: [
+    { file: 'selftest.yml', job: 'verify', ifPolicy: 'exact', ifValue: 'true', why: '合成样本:允许的 if 形态只有 `true`' },
+  ],
+  steps: [
+    {
+      file: 'selftest.yml',
+      job: 'verify',
+      step: 'Gate',
+      ifPolicy: 'exact',
+      ifValue: 'true',
+      require: ['scripts/ci-release-policy.sh'],
+      why: '合成样本:发布链步骤必须无条件/按登记形态运行,且必须仍然调用唯一真源脚本',
+    },
+  ],
+  remoteWrites: [],
+}
+/** `if:` 形态登记:每个 job / 步骤的 `if:` 必须逐字匹配登记值(或按策略必须缺失)。 */
+const JOB_IF_POLICIES = {
+  never: {
+    check: value => value === null,
+    describe: '不得带 `if:`(这个 job 必须无条件运行)',
+  },
+  exact: {
+    check: (value, entry) => value !== null && value === entry.ifValue,
+    describe: entry => `只允许逐字等于 \`${entry.ifValue}\``,
+  },
+}
 
 /** `gh release create|edit` 的调用点(捕获子命令与同一行的其余 argv)。 */
 const GH_RELEASE_INVOCATION = /(?:^|[;&|(\n]|\$\()\s*gh\s+release\s+(create|edit)\s+([^\n;&|]*)/gu
@@ -1101,6 +1515,304 @@ function joinContinuations(script) {
 /** step 的展示名(自检与失败信息共用)。 */
 function stepName(step, index) {
   return typeof step?.name === 'string' && step.name.trim() !== '' ? step.name : `第 ${index + 1} 步`
+}
+
+/**
+ * 归一化 `if:` 取值(判据与登记值共用一份口径)。
+ *
+ * `${{ … }}` 只看花括号里的表达式(`${{ false }}` 与 `false` 同判),连续空白折成一个
+ * 空格,便于登记值逐字比对;缺失返回 `null`(与"空串"区分:空串是常量假)。
+ * @param value - YAML 解析出来的 `if:` 取值。
+ * @returns 归一化文本或 null。
+ */
+function normalizeIf(value) {
+  if (value === undefined || value === null) return null
+  const text = typeof value === 'string' ? value.trim() : String(value)
+  const inner = /^\$\{\{([\s\S]*)\}\}$/u.exec(text)?.[1]
+  return (inner ?? text).replace(/\s+/gu, ' ').trim()
+}
+
+/**
+ * 从**可执行文本**里识别"能写远端对象存储/发布面"的能力(能力级,不是命令名白名单)。
+ * @param script - 已剥注释的 run 文本。
+ * @returns 命中的能力条目数组(可能多条)。
+ */
+function detectRemoteWrites(script) {
+  return REMOTE_WRITE_CAPABILITIES.filter(capability => capability.re.test(script))
+}
+
+/**
+ * job 级"不可静默跳过"判据(2026-09-23 第五轮审计 R5-D-1 / R4-A N6)。
+ *
+ * 两侧都红:登记的 job 必须存在、文件里的每个 job 都必须登记;`if:` 必须是登记形态
+ * (`if: false` / `… && false` / 偷偷加 `event_name == 'workflow_dispatch'` 都会红);
+ * job 级 `continue-on-error` 同样是"失败不再让检查红"。
+ * @param file - workflow 文件名。
+ * @param document - 解析后的 YAML。
+ * @param notes - 证据行收集器。
+ * @returns 失败项数组。
+ */
+function checkJobExecutability(file, document, notes, registry = REGISTRY_DEFAULT) {
+  const failures = []
+  if (!registry.files.includes(file)) return failures
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  const entries = registry.jobs.filter(entry => entry.file === file)
+  const registered = new Set(entries.map(entry => entry.job))
+  for (const entry of entries) {
+    if (!(entry.job in jobs)) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-15] 登记表里的 job \`${entry.job}\` 在这份 workflow 里**不存在**`
+          + `(${entry.why})\n  ⇒ job 被删掉/改名了:交付物或判据整块消失,而别的策略可能只认`
+          + '自己点名的对象。改结构请同步 REGISTERED_JOBS。',
+      })
+      continue
+    }
+    const job = jobs[entry.job]
+    const value = normalizeIf(job?.if)
+    if (isConstantFalseIf(job?.if)) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-15] job \`${entry.job}\` 的 \`if:\` 是**常量假**(${JSON.stringify(job.if)})`
+          + ' ⇒ 这个 job 永远不会执行(里面的步骤、交付物、判据全部消失),'
+          + '而"文本还在"的存在性判据仍会全绿(R5-D-1 的现场形态)。',
+      })
+    } else {
+      const policy = JOB_IF_POLICIES[entry.ifPolicy]
+      const describe = typeof policy.describe === 'function' ? policy.describe(entry) : policy.describe
+      if (!policy.check(value, entry)) {
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-15] job \`${entry.job}\` 的 \`if:\`(${value === null ? '缺失' : value})不在登记形态里`
+            + `\n  该 job 只允许:${describe}`
+            + `\n  登记依据:${entry.why}`
+            + "\n  ⇒ 收窄条件(`… && false` / `… && github.event_name == 'workflow_dispatch'`)"
+            + '与常量假等效:job 在、命令文本在、但永不执行。需要新形态请登记进 REGISTERED_JOBS 并写明理由。',
+        })
+      }
+    }
+    const jobContinueOnError = job?.['continue-on-error']
+    if (jobContinueOnError !== undefined && !isContinueOnErrorDisabled(jobContinueOnError)) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-15] job \`${entry.job}\` 打开了 continue-on-error(${JSON.stringify(jobContinueOnError)})`
+          + ' ⇒ 这个 job 失败不再让 workflow 红(必需的检查会变绿)。',
+      })
+    }
+  }
+  const unregistered = Object.keys(jobs).filter(jobId => !registered.has(jobId))
+  if (unregistered.length > 0) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-15] 这份 workflow 里有 ${unregistered.length} 个 job **没有登记**:${unregistered.join(', ')}`
+        + '\n  ⇒ "存在却没登记"与"登记了却不存在"是同一个洞的两面:没登记的 job 的 `if:`'
+        + '没有任何判据读它(R5-D-1)。请把它登记进 REGISTERED_JOBS 并写明"允许的 if 形态 + 依据"。',
+    })
+  }
+  if (entries.length > 0 && unregistered.length === 0) {
+    notes.push(`[SK-15] job 可执行性:${file} 的 ${entries.length} 个 job 全部登记且 \`if:\` 形态符合登记值`)
+  }
+  return failures
+}
+
+/**
+ * 发布链步骤的"不可静默跳过 + 效果"判据(2026-09-23 第五轮审计 R5-D-2 / R5-C-6/C-8)。
+ *
+ * 强制面对(必须登记):
+ *   · job `release` 里的**每一个**步骤;
+ *   · 任何命中"能写远端对象存储"能力的步骤;
+ *   · 任何承载发布链命令(RELEASE_LINE_ANCHORS)或公证命令(dist:mac:notarize)的步骤。
+ * 两侧都红 + `if:` 形态逐字登记 + 不得 continue-on-error + `require` 子串(效果判据)。
+ * @param file - workflow 文件名。
+ * @param document - 解析后的 YAML。
+ * @param notes - 证据行收集器。
+ * @returns 失败项数组。
+ */
+function checkReleaseChainSteps(file, document, notes, registry = REGISTRY_DEFAULT) {
+  const failures = []
+  const entries = registry.steps.filter(entry => entry.file === file)
+  if (entries.length === 0) return failures
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  /** 文件里**所有**带 run 的步骤(`${job}\u0000${步骤名}` → 详情):登记项在里面找。 */
+  const allSteps = new Map()
+  /** 需要登记的候选步骤(**强制面**):job release / 能写远端 / 承载发布链命令 / 调公证。 */
+  const mandatory = new Map()
+  for (const [jobId, job] of Object.entries(jobs)) {
+    const steps = Array.isArray(job?.steps) ? job.steps : []
+    steps.forEach((step, index) => {
+      if (typeof step?.run !== 'string') return
+      const script = executableScript(step.run)
+      const reasons = []
+      if (jobId === 'release') reasons.push('job release 的步骤')
+      const writes = detectRemoteWrites(script)
+      if (writes.length > 0) reasons.push(`能写远端对象存储(${writes.map(item => item.id).join(', ')})`)
+      if (RELEASE_LINE_ANCHORS.some(anchor => script.includes(anchor))) reasons.push('承载发布链命令')
+      if (script.includes('dist:mac:notarize')) reasons.push('调用公证命令')
+      const key = `${jobId}\u0000${stepName(step, index)}`
+      const item = { jobId, step, index, reasons, script }
+      allSteps.set(key, item)
+      if (reasons.length === 0) return
+      mandatory.set(key, item)
+    })
+  }
+  const matched = new Set()
+  for (const entry of entries) {
+    // 登记项在**全部**步骤里找(不只强制面):这样"把某个发布链步骤也登记上"是允许的,
+    // 而"强制面里有步骤没登记"由下面的 unregistered 单独判。
+    const hits = [...allSteps.entries()].filter(([, item]) => item.jobId === entry.job
+      && stepName(item.step, item.index) === entry.step)
+    if (hits.length === 0) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-15] 发布链登记表里的步骤「${entry.step}」在 job \`${entry.job}\` 里**找不到**`
+          + `(${entry.why})\n  ⇒ 步骤被删/改名了(发布链的一环消失)。改结构请同步 REGISTERED_RELEASE_STEPS。`,
+      })
+      continue
+    }
+    if (hits.length > 1) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-15] 发布链登记表的锚点「${entry.step}」在 job \`${entry.job}\` 里匹配到 ${hits.length} 个步骤`
+          + ' ⇒ 锚点不唯一,登记与检查的对应关系不可判定。',
+      })
+      continue
+    }
+    const [key, item] = hits[0]
+    matched.add(key)
+    const label = `job ${entry.job} 的步骤「${entry.step}」`
+    const value = normalizeIf(item.step?.if)
+    if (isConstantFalseIf(item.step?.if)) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-15] ${label} 的 \`if:\` 是**常量假**(${JSON.stringify(item.step.if)})`
+          + ' ⇒ 这一步永远不执行(run 一字未改,SK-11/公证三元组这类"文本在不在"的判据全绿)。',
+      })
+    } else {
+      const policy = JOB_IF_POLICIES[entry.ifPolicy]
+      const describe = typeof policy.describe === 'function' ? policy.describe(entry) : policy.describe
+      if (!policy.check(value, entry)) {
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-15] ${label} 的 \`if:\`(${value === null ? '缺失' : value})不在登记形态里`
+            + `\n  该步骤只允许:${describe}`
+            + `\n  登记依据:${entry.why}`,
+        })
+      }
+    }
+    const stepContinueOnError = item.step?.['continue-on-error']
+    if (stepContinueOnError !== undefined && !isContinueOnErrorDisabled(stepContinueOnError)) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-15] ${label} 打开了 continue-on-error(${JSON.stringify(stepContinueOnError)})`
+          + ' ⇒ 这一步失败不再让 job 红(R2 上传/公证/GitHub Release 会静默失败)。',
+      })
+    }
+    for (const needle of entry.require ?? []) {
+      if (!item.script.includes(needle)) {
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-15] ${label} 的可执行文本里缺少 \`${needle}\``
+            + `\n  登记依据:${entry.why}`
+            + '\n  ⇒ "步骤还在"不等于"它还在做那件事"(R5-C-8:把 release_kind 判据换成永不匹配的'
+            + '常量、或把命令换成空转,存在性判据都看不出来)。',
+        })
+      }
+    }
+  }
+  const unregistered = [...mandatory.entries()].filter(([key]) => !matched.has(key))
+  if (unregistered.length > 0) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-15] 有 ${unregistered.length} 个发布链步骤**没有登记**:\n`
+        + unregistered.map(([, item]) => `  - job ${item.jobId} 「${stepName(item.step, item.index)}」`
+          + `(${item.reasons.join('、')})`).join('\n')
+        + '\n  ⇒ 没登记的步骤,它的 `if:` / continue-on-error 没有任何判据读它(R5-D-2 的现场形态:'
+        + '给 R2 上传步加一行 `if: false`,两条根守卫都 EXIT=0)。请登记进 REGISTERED_RELEASE_STEPS。',
+    })
+  }
+  if (entries.length > 0 && unregistered.length === 0) {
+    notes.push(`[SK-15] 发布链步骤:${file} 的 ${entries.length} 个登记步骤全部命中,强制面(${mandatory.size} 个)无遗漏`)
+  }
+  return failures
+}
+
+/**
+ * "能写远端对象存储"的能力级对账(2026-09-23 第五轮审计 R5-C-6)。
+ *
+ * · 命中 `run-scoped` 能力的步骤必须在 `REMOTE_WRITE_REGISTERED` 里逐条登记(写明理由);
+ * · 命中 `release-surface` 能力的步骤由 SK-11 的说明门负责(这里只计数);
+ * · 命中 `unregistered` 能力(内联 `aws s3 cp` / `rclone` / `curl -T` …)⇒ **判红并要求登记**
+ *   —— 这正是"在说明检查之前插一条内联上传"能绕过旧判据的那个洞。
+ * @param file - workflow 文件名。
+ * @param document - 解析后的 YAML。
+ * @param notes - 证据行收集器。
+ * @returns 失败项数组。
+ */
+function checkRemoteWriteCapabilities(file, document, notes, registry = REGISTRY_DEFAULT) {
+  const failures = []
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  const registeredHits = new Set()
+  let releaseSurfaceHits = 0
+  for (const [jobId, job] of Object.entries(jobs)) {
+    const steps = Array.isArray(job?.steps) ? job.steps : []
+    steps.forEach((step, index) => {
+      if (typeof step?.run !== 'string') return
+      const script = executableScript(step.run)
+      for (const capability of detectRemoteWrites(script)) {
+        const label = `job ${jobId} 的步骤「${stepName(step, index)}」`
+        if (capability.surface === 'release-surface') {
+          releaseSurfaceHits += 1
+          continue
+        }
+        const entry = registry.remoteWrites.find(candidate => candidate.file === file
+          && candidate.job === jobId
+          && candidate.step === stepName(step, index)
+          && candidate.capability === capability.id)
+        if (capability.surface === 'run-scoped' && entry !== undefined) {
+          registeredHits.add(entry)
+          continue
+        }
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-15] ${label} 命中了**能写远端对象存储**的能力 \`${capability.id}\`(${capability.label})`
+            + ',但它没有被登记:'
+            + '\n  · 若它写的是客户侧/公开发布面 ⇒ 必须排在"策展说明检查"之后(SK-11 的半发布窗口);'
+            + '\n  · 若是 run 级临时中转 ⇒ 登记进 REMOTE_WRITE_REGISTERED 并写明为什么不上说明门;'
+            + '\n  · 若是别的形态 ⇒ 说明它到底写到哪里,再把能力条目与登记一起改。'
+            + '\n  ⇒ 旧实现只认 4 条**登记命令**(R5-C-6):内联 `aws s3 cp …` 这类等价的'
+            + '上传形态可以整条绕过说明门。',
+        })
+      }
+    })
+  }
+  const dead = registry.remoteWrites.filter(entry => entry.file === file && !registeredHits.has(entry))
+  if (dead.length > 0) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-15] REMOTE_WRITE_REGISTERED 有 ${dead.length} 条**死条目**(本次不再命中任何步骤):\n`
+        + dead.map(entry => `  - ${entry.job} 「${entry.step}」← ${entry.capability}`).join('\n')
+        + '\n  ⇒ 该步骤已被改写/删除,登记必须同步收窄(留下它就是一条可复用的豁免洞)。',
+    })
+  }
+  if (registeredHits.size > 0 || releaseSurfaceHits > 0) {
+    notes.push(`[SK-15] 远端写入面:${releaseSurfaceHits} 个发布面上传步骤(走说明门)+ `
+      + `${registeredHits.size} 个已登记的 run 级中转步骤`)
+  }
+  return failures
 }
 
 /** 归一化一条 shell 语句(连续空白 → 单个空格 + 去首尾空白):白名单签名的唯一形状。 */
@@ -2947,8 +3659,13 @@ function checkReleaseSurface(file, document, text, notes) {
       && /(?:test\s+-f|\[\s+-f)/u.test(script)
       && /exit\s+1/u.test(script)
   }
+  // 能力级(2026-09-23 第五轮审计 R5-C-6):不再是"4 条登记命令",而是
+  // "任何真的能写远端对象存储/发布面的步骤"(见 REMOTE_WRITE_CAPABILITIES)。
+  // **只算发布面**(release-surface):run 级临时中转(channel-transfer push)是已登记的
+  // 例外,它不上说明门 —— 但它同样受 SK-15 的步骤登记(if 形态 / continue-on-error)约束。
   const isUpload = step => typeof step?.run === 'string'
-    && EXTERNAL_UPLOAD_COMMANDS.some(command => executableScript(step.run).includes(command))
+    && detectRemoteWrites(executableScript(step.run))
+      .some(capability => capability.surface === 'release-surface')
   const idsOf = steps => steps.map((step, index) => (step ? index : -1)).filter(index => index >= 0)
   const position = (steps, predicate) => idsOf(steps).filter(index => predicate(steps[index]))
 
@@ -3130,7 +3847,7 @@ export function selfTestPolicies() {
   const sample = (id, expectation, steps, options = {}) => {
     const file = options.file ?? 'selftest.yml'
     const text = options.raw ?? selftestWorkflow(steps, options)
-    const result = checkWorkflowText(file, text)
+    const result = checkWorkflowText(file, text, { registries: options.registries ?? REGISTRY_NONE })
     const label = expectation === null ? `${id} [绿样本]` : `${id} [红样本 ${expectation}]`
     observed.push({ id, policy: expectation, label, failures: result.failures })
     return result
@@ -3857,6 +4574,64 @@ export function selfTestPolicies() {
   // 「与真 ci.yml 同形」,这里再钉一条"探针步不带 if: 也绿"(避免把正确形态误判)。
   gateSample('u11-pinned-steps-without-if-green', null, { file: 'ci.yml', wasmProbe: 'full', caseGateIf: null })
 
+  // ---- 策略 12([SK-15]):job / 发布链步骤的**不可静默跳过**(R5-D-1 / R5-D-2) ----
+  //
+  // 现场:SK-14⑤ 只判"被钉步骤所在 job",别的 job 的 `if:` 没有任何判据读它 ⇒ 把
+  // `desktop-linux` 的 `if:` 换成 `false`,三个平台 job 整块不跑(零安装包)而全绿;
+  // 发布链里未被 SK-14 钉住的步骤(如 R2 上传)加一行 `if: false` / `continue-on-error`
+  // 同样静默。合成登记表见 SK15_SELFTEST_REGISTRY(一个 job `verify` + 一个步骤 `Gate`)。
+  const sk15Workflow = ({
+    jobIf = 'true',
+    jobContinueOnError = false,
+    stepIf = 'true',
+    stepContinueOnError = false,
+    stepRun = 'bash scripts/ci-release-policy.sh',
+    extraJob = false,
+    dropStep = false,
+    extraSteps = [],
+  } = {}) => [
+    'name: selftest',
+    'on:',
+    '  push:',
+    '  pull_request:',
+    'jobs:',
+    '  verify:',
+    '    runs-on: ubuntu-latest',
+    ...(jobIf === null ? [] : [`    if: ${jobIf}`]),
+    ...(jobContinueOnError ? ['    continue-on-error: true'] : []),
+    '    steps:',
+    ...(dropStep ? [] : [
+      '      - name: Gate',
+      ...(stepIf === null ? [] : [`        if: ${stepIf}`]),
+      ...(stepContinueOnError ? ['        continue-on-error: true'] : []),
+      `        run: ${stepRun}`,
+    ]),
+    ...extraSteps.map(line => `      ${line}`),
+    ...(extraJob ? [
+      '  publish-extra:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - run: echo extra',
+    ] : []),
+    '',
+  ].join('\n')
+  const sk15Sample = (id, raw, expectation = '[SK-15]') => (expectation === null
+    ? expectGreen(id, [], { file: 'selftest.yml', raw, registries: SK15_SELFTEST_REGISTRY })
+    : expectRed(id, expectation, [], { file: 'selftest.yml', raw, registries: SK15_SELFTEST_REGISTRY }))
+  sk15Sample('v1-job-if-false', sk15Workflow({ jobIf: 'false' }))                      // R5-D-1 原形态
+  sk15Sample('v2-job-if-narrowed', sk15Workflow({ jobIf: "true && github.event_name == 'workflow_dispatch'" })) // R4-A N6
+  sk15Sample('v3-job-unregistered', sk15Workflow({ extraJob: true }))                   // 存在却没登记
+  sk15Sample('v4-step-if-false', sk15Workflow({ stepIf: 'false' }))                     // R5-D-2 原形态
+  sk15Sample('v5-step-if-narrowed', sk15Workflow({ stepIf: "true && github.event_name == 'workflow_dispatch'" }))
+  sk15Sample('v6-step-continue-on-error', sk15Workflow({ stepContinueOnError: true }))
+  // 登记了却不存在(留一个无关步骤,免得撞上"job 没有 steps"的通用判据而红错原因)
+  sk15Sample('v7-step-missing', sk15Workflow({ dropStep: true, extraSteps: ['- run: echo unrelated'] }))
+  sk15Sample('v8-step-effect-gone', sk15Workflow({ stepRun: 'echo noop' }))             // R5-C-8:效果判据
+  sk15Sample('v9-inline-remote-write', sk15Workflow({                                   // R5-C-6:能力级识别
+    extraSteps: ["- name: Sneaky upload", "  run: aws s3 cp bundle.zip s3://some-bucket/releases/"],
+  }))
+  sk15Sample('v10-registered-shape-green', sk15Workflow(), null)                        // 正例
+
   // ---- 策略 6([SK-10]):docs-only 分类器的规则逐条钉死 ----
   const CLASSIFIER_SHAPE = ({ cases, failsafes = 3, jobIf = '' } = {}) => [
     'name: selftest',
@@ -4479,7 +5254,9 @@ function main() {
     + 'bash -n + SK-7 策略(吞码 / go test 超时序 / 单行退出码 / 块标量退出语义)'
     + ' + SK-8/SK-8b/SK-9/SK-10/SK-11/SK-12 策略(根门禁调用形态 / 跑门禁的 job 必须完整历史 /\n'
     + '    docs-only 不得跳过根守卫 / 分类器规则钉死 / 发布面语义判据 / WASM 门禁接线)\n'
-    + '    + SK-13/SK-14 策略(触发面业务契约 / 被钉住的判据步骤必须可执行)\n')
+    + '    + SK-13/SK-14 策略(触发面业务契约 / 被钉住的判据步骤必须可执行)\n'
+    + '    + SK-15 策略(交付物 job 与发布链步骤的**登记式不可静默跳过**:两侧对拍 / if 形态逐字 / '
+    + 'continue-on-error / 效果子串 / 能力级远端写入面)\n')
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(import.meta.filename)) {
