@@ -122,24 +122,28 @@ P2/P3 还包括：审计写入 best-effort 且 94 处调用点全部丢弃错误
 
 修复按"模块边界互不重叠"切泳道，每条修复必须带**回归测试 + 变异验证**（把实现改回旧行为，对应用例必须变红）。
 
+状态列已于 2026-09-23 按**提交事实**核对（不是泳道自述）：主修复批 = `e0c95bf4e6`（6 P0 + 41 P1，177 文件），后续按缺陷追加的修复提交列在"状态"里。每条修复的变异验证与复跑输出在 `temp/audit-2026-09-23/fix-*.md` 与 `temp/round2-2026-09-23/fix-*.md`。
+
 | 泳道 | 范围 | 覆盖缺陷 | 状态 |
 |---|---|---|---|
-| **F1** | `serverstore/gateway.go`、`llmgateway/admin.go`、`webadmin Gateway.tsx` | G-01（P0）、G-02 | 进行中 |
-| **F2** | `llmgateway/{embedding,completions}.go`、`serverstore/usage.go` | G-03、G-04、G-05 | **完成**（变异全红，见 `temp/audit-2026-09-23/fix-F2-billing-aggregation.md`） |
-| **S1** | `enterprise/src/{skill-install,auth-gate,archive-util}.ts`、`client/CapabilityCenterPanel.tsx` | A1、A2、A3、A6、A7、A8、A11、A12、A13、A15 | 进行中 |
-| **S2** | `vendor/memory-evolve/lib/**` | A4、A5、A9、A10、A16、上游 #59 本地加固 | 进行中 |
-| **W1** | `webadmin/src/pages/{Users,Auth,Apps}.tsx` | WEB-1（P0）、WEB-2（P0）、WEB-3 | 进行中 |
-| **D1** | `packages/host/cron/**` | CR-1（P0）、CR-2、CR-3、CR-4、CR-6、CR-7 | 进行中 |
-| **D2** | `packages/host/connectors/**` | CN-1、CN-2、CN-3、CN-4、CN-5、CN-9 | 进行中 |
-| **D3** | `packages/host/{browser,wasm-apps-host}/**` | WS-1、BR-1、BR-2、CP-1、BR-3、WS-2、SN-1/EV-1 | 进行中 |
-| **E1** | `serverauth/ratelimit.go`（+限流调用点） | E-01 | 进行中 |
-| **J1** | `scripts/check-no-real-domains.mjs`、`desktop/scripts/verify-packaged-runtime.ts`、相关 spec、`cmd/server/routes_source_test.go` | G-9（P0）、G-1、G-2、T-01、T-02、T-03、T-04 | 进行中 |
-| **G1** | `serverstore/apps.go`、`sharedskills`、`agentshare`、`skillmanifest`、`marketplace`、`capabilities`、`webadmin Capabilities.tsx` | ID-01（P0）、G-P1、marketplace owner 无审计、待审投影污染、`appendSharedSkill` 漏拷、ID-03 | 进行中 |
-| **H1** | `wasmapp/{wasmmod,appdb,abi,api,diag}` | WASM-1、WDB-1、ABI-1 | 进行中 |
-| **B1** | `packages/host/desktop/src/**` | B-01、B-02、B-03、B-05、B-07、B-08 | 进行中 |
-| **K1** | `scripts/ci-*.sh`、`ci.yml`、README、`docs/deploy/**`、site deployment 页 | K-01、K-02、K-03、K-04、K-05、K-07 | 进行中 |
+| **F1** | `serverstore/gateway.go`、`llmgateway/admin.go`、`webadmin Gateway.tsx` | G-01（P0）、G-02 | **已修**：`e0c95bf4e6` + `4d4bbd8217`（缺失行不参与取参/缓存价）+ `28710ef460`（出站净化 allowlist 键随构造点更新） |
+| **F2** | `llmgateway/{embedding,completions}.go`、`serverstore/usage.go` | G-03、G-04、G-05 | **已修**（`e0c95bf4e6`；变异全红，见 `temp/audit-2026-09-23/fix-F2-billing-aggregation.md`） |
+| **S1** | `enterprise/src/{skill-install,auth-gate,archive-util}.ts`、`client/CapabilityCenterPanel.tsx` | A1、A2、A3、A6、A7、A8、A11、A12、A13、A15 | **已修**：`e0c95bf4e6` + `b4bee8c2e8`（收口两条 PARTIAL 与两条 P2） |
+| **S2** | `vendor/memory-evolve/lib/**` | A4、A5、A9、A10、A16、上游 #59 本地加固 | **已修**：`e0c95bf4e6` + `4f49f31237`（随包同步来源闸门 + 渠道互斥） |
+| **W1** | `webadmin/src/pages/{Users,Auth,Apps}.tsx` | WEB-1（P0）、WEB-2（P0）、WEB-3 | **已修**（`e0c95bf4e6`） |
+| **D1** | `packages/host/cron/**` | CR-1（P0）、CR-2、CR-3、CR-4、CR-6、CR-7 | **已修**（`e0c95bf4e6`） |
+| **D2** | `packages/host/connectors/**` | CN-1、CN-2、CN-3、CN-4、CN-5、CN-9 | **已修**：`e0c95bf4e6` + `ae1bccc222`（零凭据连接器不被设备码闸门误拒） |
+| **D3** | `packages/host/{browser,wasm-apps-host}/**` | WS-1、BR-1、BR-2、CP-1、BR-3、WS-2、SN-1/EV-1 | **已修**（`e0c95bf4e6`） |
+| **E1** | `serverauth/ratelimit.go`（+限流调用点） | E-01 | **已修**（`e0c95bf4e6`） |
+| **J1** | `scripts/check-no-real-domains.mjs`、`desktop/scripts/verify-packaged-runtime.ts`、相关 spec、`cmd/server/routes_source_test.go` | G-9（P0）、G-1、G-2、T-01、T-02、T-03、T-04 | **已修**：`e0c95bf4e6` + `13846fad4c`（README.i18n 哈希漏记）+ `b015d2911c`（变异体守卫只扫可提交文件 + 扫描根断言） |
+| **G1** | `serverstore/apps.go`、`sharedskills`、`agentshare`、`skillmanifest`、`marketplace`、`capabilities`、`webadmin Capabilities.tsx` | ID-01（P0）、G-P1、marketplace owner 无审计、待审投影污染、`appendSharedSkill` 漏拷、ID-03 | **已修**：`e0c95bf4e6` + `4d4bbd8217`（审核拒绝 error.code 三面同码）+ `0b50e83a54`（组织共享内容按 channel 走正确管理面命名空间） |
+| **H1** | `wasmapp/{wasmmod,appdb,abi,api,diag}` | WASM-1、WDB-1、ABI-1 | **已修**：`e0c95bf4e6` + `4d4bbd8217` |
+| **B1** | `packages/host/desktop/src/**` | B-01、B-02、B-03、B-05、B-07、B-08 | **已修**：`e0c95bf4e6` + `9bac6c24db`（增量重建判定必须校验声明产物存在） |
+| **K1** | `scripts/ci-*.sh`、`ci.yml`、README、`docs/deploy/**`、site deployment 页 | K-01、K-02、K-03、K-04、K-05、K-07 | **已修**：`e0c95bf4e6` + `b8cbc30ddd`（文档与技能内容对齐代码真值） |
 
-**待排期（下一轮）**：B-09/B-10/B-26、C-01/C-02、G-06/G-07、ID-02/ID-04/ID-13 的收敛、J 路其余 15 条 P1（e2e 恒真断言、check-workflows 绕过、许可证守卫、TZ/race 空转、gofmt 口径）、以及 P2/P3（详见各子报告）。
+**第二轮（2026-09-23 同日）新增并已修**：MIG-1（**P0**，旧库 `usage` 普通表升级 ⇒ 崩溃循环，`accce75cc5`）、MIG-2（P1，同名技能回填静默丢 release，`accce75cc5`）、以及 W2/W3/W4 三路复核的其余 P1（详见 §7）。
+
+**待排期（下一轮）**：B-09/B-10/B-26、C-01/C-02、G-06/G-07、ID-02/ID-04/ID-13 的收敛、J 路其余 P1（e2e 恒真断言、check-workflows 绕过、许可证守卫、TZ/race 空转）、以及 P2/P3（详见各子报告）。第二轮 W2/W3 的残余条目（`schema_migrations` 无校验和、站点侧上游 pin 等）见 §7 的处置列。
 
 **收敛纪律**：每批修复完成后必须做 ①目标包测试单跑绿 ②变异验证红 ③独立子代理复审（不告知原判定）④连续两轮独立审计零新增 P0/P1 才算闭环。
 
@@ -185,4 +189,112 @@ PostgreSQL 探针统一使用容器 `pg-test`（`postgres:postgres@127.0.0.1:543
 ### 6.3 复核提示
 
 - 审计期间工作区存在**并发写者**（本仓为多会话共享工作目录）：`git status` 里的 `M` 条目可能同时包含修复泳道的改动与他人改动。提交时必须用**部分提交**（`git commit -m "<msg>" -- <路径...>`），并在提交前 `git diff -- <file>` 看内容。
-- 本地 `node scripts/check-no-leftover-mutants.mjs` 当前为红，命中未跟踪且被 `.git/info/exclude` 忽略的 `audit/r8/run-mutations-r8.sh:62`（该守卫以 `cwd` 为根、无"根必须是仓库根"断言）——与提交内容无关，但会使本地 `yarn check` 变红。
+- 本地 `node scripts/check-no-leftover-mutants.mjs` 曾恒红（命中未跟踪且被 `.git/info/exclude` 忽略的 `audit/r8/run-mutations-r8.sh:62`——那是一个**变异驱动脚本**，其"变异后代码"是多行单引号字符串参数）。已修（`b015d2911c`）：默认只扫**能进提交的文件**（`git ls-files --cached --others --exclude-standard`），扫描根不是仓库根即 fail-loud，另留 `--all-files` 供排查。
+
+## 7. 第二轮与第三轮审计（增量）
+
+### 7.1 第二轮：三路复核 + 用户点名区专项（2026-09-23 同日）
+
+| 路 | 覆盖 | 新增 P0 | 新增 P1 | 报告 |
+|---|---|---|---|---|
+| W1 | 首轮修复的回归面（逐条回归首轮 6 P0 + 41 P1 的修复） | 0 | 0 | `temp/round2-2026-09-23/W1-regression.md` |
+| W2 | 首轮未覆盖面：`cmd/server` 装配面、13 个未覆盖包的包级 `go test`、`migrations-pg`（72 文件）、`llmgateway` 21 条管理路由的 75 例畸形输入矩阵 | **1** | 8 | `W2-server.md` |
+| W3 | 客户端 UI 契约与文档真值、`webadmin` 未覆盖面、死链 | 0 | 5 | `W3-client-docs.md` |
+| W4 | 用户点名区：本地技能发现与溯源（11 个探针） | 0 | 2（另 P2×5、P3×5） | `W4-skill-roots.md` |
+| **合计** | | **1** | **15** | |
+
+- **第二轮唯一的 P0 = MIG-1**：`migrations-pg/0039` 假设 `usage` 已是分区表，而 v2.4.0 旧库的 `0004` 被原地重写成分区版、`migrate.go` 只记版本号不校验和 ⇒ 升级时 `ERROR: "usage" is not partitioned` → 回滚 + 版本不落库 + `log.Fatalf` ⇒ **启动崩溃循环**。修法 `accce75cc5`：原地转换普通表 + 逐行迁移 + fail-loud 自检 + 用真实 v2.4.0 载荷做回归（变异 8/8 红）。同批修掉 MIG-2（P1）：`0054/0055` 同名技能回填静默丢组织 release 后 DROP 源表 ⇒ 改为确定性归并 + DROP 前逐行比对 fail-loud。
+- **用户现场报障的 P1 确认并修复**（`0b50e83a54`）：客户端市场页把组织共享技能合并进列表却仍打**市场命名空间**接口 ⇒ 20 次 404。该条**首轮审计未发现**（11 份子报告 + 3 份复审 + 6 份重构报告全文检索均无此条）；结构性原因是分区把"服务端市场面"与"webadmin 面"切开，且首轮 webadmin 判据里没有"每行动作的命名空间是否与 `channel` 一致"。二轮起把**跨面拼接**列为固定判据（见 §7.2）。
+- **技能库两条 P1**（`4f49f31237`）：①随包插件开机同步是唯一无闸门的写者，会静默整树覆盖用户同名技能（用户文件被删、正文被换、还被标成商店来源）；②市场 × 插件同名双向静默覆盖 + provenance 归属与实际内容不一致。修法：插件侧新增来源闸门（渠道相同按 `x-version` 更新；其它商店渠道 ⇒ `SKILL_CHANNEL_CONFLICT`；无溯源/未知 ⇒ `SKILL_LOCAL_CONTENT`），安装侧渠道互斥需显式 `?overwrite=1`。
+- **闸门带来的升级余波，用"可验证同一性"而非启发式收口**（`920c62f02a`）：A9 写溯源不在任何已发布 tag 里 ⇒ 现场存在"旧版插件同步落下、但目录没有 `.picoaide` 溯源"的历史副本，会被新闸门按用户内容拒收（当时无碍，但将来插件升 `x-version` 时不会自动更新）。判据取**逐字同一性**：条目集合逐项相同（文件与目录都算）+ 每个普通文件字节逐字相同 + 全程无符号链接/FIFO/读取失败 ⇒ 判定为随包技能的未溯源副本，**换入之前**补写 `channel:'plugin'` 溯源并报 `adopted`；写失败 ⇒ `refused` + `SKILL_ADOPT_FAILED`（只回收本次可能建出的空 `.picoaide/`，绝不递归删），不存在"内容已换、溯源没写"。渠道互斥优先于同一性（内容相同但溯源是 market/org/builtin 仍拒）。落点四态可区分：`adopted` / `synced` / `unchanged` / `refused`（均点名技能与目录）。**明确不加 mtime/大小判据**：大小是字节比较的推论，mtime 在"安装包解包 / 旧同步写入 / `cp -a`"三条真实链路上不可比，只会误拒真正的历史副本（属"看起来更严、实际更不可靠"）。
+- **对上面两个技能库提交的独立对抗性复审结论**（`temp/verify-skill-r3/VERIFY.md`；基线钉字节：`skills-sync.js` sha256 `7d604244…`、`skill-install.ts` 快照 `221c9038…`；两提交**不在 `origin/master`、不在任何 tag** ⇒ 未发布）：
+  - `4f49f31237`（来源闸门 + 安装侧渠道互斥）⇒ **成立**。24 组对抗性用例逐条实测：市场/组织/内置同名 ⇒ `refused`+`SKILL_CHANNEL_CONFLICT` 且内容与溯源逐字未变；用户手写 ⇒ `SKILL_LOCAL_CONTENT` 且用户文件保留；`appId` 不符 / 渠道未知（`PLUGIN`、`" plugin"`、西里尔同形字）/ 标记 JSON 坏 / 8–32MiB 垃圾标记 ⇒ `refused` 且不采纳；`SKILL.md` 或落点是符号链接（含悬空、指向库外）⇒ `refused` 且**库外零写入**；同渠道更新**不需**多余确认。变异：拆闸门 17/20 红、删逐字节比较 1 红、采纳失败改静默 1 红、渠道互斥恒假 4 红。
+  - `920c62f02a`（内容同一性采纳）⇒ **部分成立**：静态判据与目标状态全部相符，但"不存在中间态"的绝对表述被三个口子推翻，均已另派修复：**F1（P2）判定→写溯源之间的 TOCTOU**（复现：比较期间写入的用户文件被盖上 `channel:'plugin'`，下一轮随包升版**被静默删除**）；**F2（P3）标记读取无类型/体积闸门**（`.picoaide/release.json` 是 FIFO 时启动同步挂起 12s 不返回、指向大文件则整份读入内存）；**F3（P3）与安装器不互斥**（并发下仍能产出"内容是插件版 + 溯源是 market"这一 P1-2 归属错，**且该终态不会自愈**）。另有 F4（渠道常量两份无对拍门禁）、F5（面板按键看 409 而不看 `error.code`）。
+  - **认账代价**（须随下次发布说明披露）：一份**逐字未改动**的用户自制副本会被判定为随包技能并采纳（该目录里不存在任何用户创作的字节；改一个字节或加一个文件即不再成立）。
+
+**用户点名五问的结论**（W4，11 个探针；全文见 `temp/round2-2026-09-23/W4-skill-roots.md`）：
+
+1. **本地技能扫描根共 6 处**：项目 `.dsh/skills`(rank 100)、项目 `.agents/skills`(200)、custom(300，仅 cordis preset 自带)、`$DSH_HOME/skills`(400)、`~/.agents/skills`(500)、bundled(600，本产品不设)；层内按 (rank, providerOrder, localOrder) 先到先得，层间近者覆盖。**能力中心只覆盖 rank 400 一条** ⇒ 与发现面存在双向差集。
+2. **结构缝**：①"已安装"判据 = 目录名存在，与 provenance 不同源；②名字等值约束让历史非法名技能在面板**静默消失**（无迁移提示）；③provenance 三处不自洽。
+3. **本地 × 线上冲突**：安装/覆盖闸门有效（无 `?overwrite=1` 一律 409 `LOCAL_CONTENT` 且内容逐字保留）；**唯一无闸门的写者是随包插件开机同步**（已修，见上）。
+4. **本地写好再上传不会显示成"从线上下载的"**：上传本身不写任何本地标记（上传前后目录 sha256 逐字节相同、`installedOrigin='local'`、`originChannel=null`）。但审核通过后 `mergeItems` 的权威序（market > org > local）会让卡片翻成"其他安装"+「卸载」，**上传入口再也点不到**（P2-1，未修）。
+5. 另发现 P2×5、P3×5（`provenance.version` 不随原地换入刷新、插件技能卸载不持久且无墓碑等）。
+
+### 7.2 第三轮：三路独立审计（服务端核心 / 客户端宿主 / 门禁完整性）
+
+第三轮按"审计范围与修复泳道不重叠"切分；另外对两处高风险修复各派一名**对抗性复审**（修复方不得自证，判据必须能被打坏）。
+
+| 路 | 范围 | 新增 P0 | 新增 P1 | 报告 |
+|---|---|---|---|---|
+| **R3-A** | 服务端核心：`wasmapp/**`（全部子包）+ `marketplace/sharedskills/capabilities/agentshare/connectors/clientrelease/portal/bootstrap/telemetry/reports/balance/util/channel/appstore` | **0** | **2**（A-1/A-2） | `R3-A-server-core.md`（0/2，另 P2×8、P3×3） |
+| **R3-B** | 客户端与宿主：`desktop` / `browser` / `connectors` / `cron` / `client/*`（锚定 `7e7ac1c27d`） | **0** | **1**（B-2 cron 封笔） | `R3-B-client-host.md`（0/1，另 P2×2、P3×3）；子报告 `R3-B2-connectors.md`、`R3-B3-cron.md` |
+| **R3-C** | 门禁完整性：`yarn check` 全组成（编排器 + 14 个根守卫）、CI、打包验证脚本、`server/Makefile`（五泳道：本泳道 + CI / 打包 / 中等守卫 / WASM 门禁） | **0** | **15** | `R3-C-gate-integrity.md` + `sub/{C-ci,P-packaging,G-medium-guards,W-wasm-gate}.md` |
+| **V1** | 对抗性复审：技能库两个提交（用户点名区） | — | 判 `920c62f02a` **部分成立**（F1 TOCTOU / F3 与安装器不互斥） | `temp/verify-skill-r3/VERIFY.md` |
+| **V2** | 对抗性复审：provider PUT 原子化（`0dd74681b7`） | 待回填 | 待回填 | `temp/verify-put-r3/VERIFY.md` |
+
+**R3-C 的四条 P1（全部是"假绿门禁"，即会让其他所有结论失去支撑的那一类）**
+
+1. **C-1** 编排器遇到 `needs` 成环时**静默丢弃**这些包：摘要仍打印「27 个任务:27 通过、0 失败、0 跳过」且 **EXIT=0** —— 包从未运行（把 `needs` 打错一个字符同理，且会让包排到依赖之前）。
+2. **C-3** **只改文档的 PR 整条门禁被跳过**，而分支保护把 skipped 计为成功 ⇒ 域名守卫（铁律 0）、迁移区间守卫、布局守卫在文档改动上**一次都没跑**（审计方以线上 PR 与分支保护实况取证）。
+3. **C-4** `check-no-real-domains` 的**提交信息判据在 PR 的 CI 里恒为空跑**：gate 的 checkout 是 depth-1（无 `fetch-depth`），解析不到 base ⇒ 退化成"只看 HEAD"（PR 上就是那条 merge commit）。
+4. **C-7** CI 可把门禁换成自己的弱化形态而**无任何守卫**：`yarn check --no-guards`（丢掉全部根守卫）/ `--only <单包>` / `--changed <ref>` 三种写法在 `check-workflows.mjs` 下**全部 EXIT=0**。
+
+另有 R3-C 的 P2×4 / P3×1（含 `check-migration-range` 在"有迁移目录但无被扫文档"的合成树上仍宣称一致；`check-no-leftover-mutants` 对"同行字符串字面量里的变异标记"仍不报），以及由它交叉验证的分片报告（CI / 打包 / 中等守卫 / WASM 门禁）。
+
+**其中"C-6 假一致"已修复**（`1305dcf450`）：`check-migration-range.mjs` 在"有迁移目录、零文档可扫"的树上会打印「扫描 0 个 md」却仍宣称「文档区间与实际一致 ✅」并 **EXIT=0**（连那棵树里并不存在的 `server/AGENTS.md` 也一并宣称"迁移号都存在"）。修法：`scanned === 0 || !agentsScanned` ⇒ **fail-loud** 并给出修法。三向实测：真实仓库 0 / 合成树（只有迁移目录）1（带修法提示）/ 夹具形态（迁移+文档+`AGENTS.md` 且区间一致）0；再把该守卫自带夹具矩阵跑一遍（`node scripts/verify-check-workspaces.mjs`）⇒ **EXIT=0**。
+
+**第三轮新增的门禁面同样做了注入验证**（新守卫不能只信它自己的自述）：`scripts/check-doc-claims.mjs`（文档数字守卫，pin 与平台模块表**双向相等**、扫描器失效 fail-loud、带 `--selftest` 与 `doc-claim:allow` 豁免）——注入 pin 漂移 ⇒ 退出码 1、注入「共 9 项」→「8 项」⇒ 退出码 1、干净态 ⇒ 0、空树 `--root` ⇒ 1（`找不到 upstream.json —— 拒绝把"读不到真源"当通过`）。
+
+**R3-A（服务端核心）的两条 P1（已派修复）**：**A-1** 宿主→guest 方向只有 `assets.read` 修了"单帧预算"桥 ⇒ `db.query` 结果（平台允许 1–8 MiB）被写成超帧，应用收不到结果，官方技能骨架下表现为 10 s `RUNTIME_TIMEOUT` 且**应用已写好的响应被丢弃**；**A-2** `POST /api/client/v2/apps/wasm/validate` **无归属校验** ⇒ 任意已登录员工可用最简 config 换回**他人应用**的生效配置（`whitelist`/`purpose`/`data_sensitivity`/`owner`/`sensitive_columns`）并附 `first_release` 存在性 oracle。另 8 条 P2 中最具代表性的是 **A-6**（`abi.MaxResponseBodyBytes` 512 KiB 自称"保证可交付"被 JSON 转义证伪：`<`×512 KiB 编码后 3,145,840 B > 1 MiB 帧，而钉住它的回归用例用的是**零转义夹具** ⇒ 假绿）与 **A-10**（两个版本比较器对同一对版本给出**相反**结论：`util.CompareSemVer("1.0.0-1","1.0.0")=+1` 而 `registry.CompareVersions=-1`）。R3-A 明确结论：**新增 P0 = 0**（无进程级崩溃/静默计费错误/沙箱逃逸）。
+
+**R3-B（客户端/宿主）的其余发现与处置**：B-1（P2，设备码定义缺 `verificationUrl` 时被判 `connected` 且注册 MCP —— CN-3 缺陷类经另一扇门回归，`ae1bccc222^` 的 A/B 证明是回归）**已修**：连接期 fail-loud（`4b8d808fa9`），判据同时钉两侧（坏形状必须拒绝且零 request；"完全没有 auth 块"的形状保持既有语义），变异验证把源码回退到修复前 ⇒ 新用例红（`expected 'resolved' to match /verificationUrl/`）且对照用例仍绿；包级 41 文件 / 362 用例 EXIT=0。B-3（P2，`deadGrants` 按连接器 id 记账而事实属账号凭据世代）**已修并独立复核**：修复提交 `28e2062e38`；复核方式=用**审计方自己的探针**（`temp/round3-2026-09-23/connectors-probes/p4-deadgrant.mjs`，非修复方的测试）重跑 ⇒ 打印 `VERDICT: not reproduced`（账号 B 由 `unauthorized`+0 注册变为 `connected`+注册成功、对照账号 C 仍正常）。B-2（cron 封笔）**已修**（`eb981016cb`：`dispose()` 改为 flush → 封笔 → 放锁 的硬顺序，写路径统一走 `assertOpen()` 抛 `ledger is disposed: write refused`；8 条回归用例修复前 4 红 4 绿、6 个变异全杀、包级 22 文件/203 用例 EXIT=0、审计方原探针复跑 `DISK LOST job-2 : false`）。B-4/B-5 已另派泳道（B-4 修空白名并与 GUI 面同源；B-5 按「如实跳过 + 改注释 + 让跳过可观测」处置，不补跑）。B-4（P3，`cron_create` 接受空白名，与 `protocol.ts` 的 GUI 面判据不一致）、B-5（P3，`cron.ts` 注释声称 DST 缺口"forward 归一"而实现零触发、静默丢触发）**待随 cron 批次处置**。审计方另**撤回**上一轮 B-20（mac afterPack 原生件校验死代码：mac 目标只有 arm64，而 `verify-mac-smoke.ts` 对同一份清单逐个 exists+lipo 已补偿），并确认 SH-1（真实适配器未实现 `webContents.stop` ⇒ `stopPendingLoads()` 静默 no-op）仍未修。
+
+**R3-B3 的一条 P1（cron）**：`HostCronLedger.dispose()` **不封笔** —— dispose 之后的写入越过已释放的锁，覆写**继任世代**的 `ledger.json`（探测到机制级证据；正常退出路径窗口小，HMR / 同进程重建路径窗口大，故定 P1 而非 P0）。
+
+**V1 的结论（用户点名区）**：`4f49f31237` 判**成立**（24 组对抗性用例逐条实测，静态目标状态无一漏网）；`920c62f02a` 判**部分成立**（静态判据全对，但"不存在中间态"被三个口子推翻：F1 判定→写溯源 TOCTOU、F2 标记读取无类型/体积闸门、F3 与安装器不互斥且终态不自愈）。三条已派修复，处置与证据见 §7.1。
+
+### 7.3 处置拍板（主控决定，含"接受/推迟"的书面理由）
+
+按"能修则修；结构上不该修或代价不划算的，必须留下理由与触发条件"的口径，以下条目**不修**或**推迟**，均已在对应报告/文档留痕：
+
+| 条目 | 处置 | 理由与触发条件 |
+|---|---|---|
+| **MIG-4** `schema_migrations` 无校验和 | **接受（不改迁移框架）** | 迁移是"已应用即永不原地修改"的追加式纪律，真源 `migrate.go` 只记 `version/applied_at`；改形状一律走新迁移 + 同事务内检测/转换/搬运/`setval`/fail-loud（范例 `0039` §0）。全仓已核实**无任何文档声称迁移有校验和**（即无失真）。书面结论落 `server/docs/06-database.md`，并写明三条未来触发条件（引入外部工具改库 / 出现多写者 / 需要跨版本重放）。 |
+| **D-8/D-9 的判据目前是一次性探针**（文档导航表 ↔ `nav.ts`、端点表 ↔ `router.AdminRoute` 双向同序） | **提升为常设守卫（下一批）** | 探针实测已抓到真实漂移（导航表漏 `/gateway-files`、`/app-center`，端点表缺逐方法展开），值得固化；为避免与守卫批次同文件冲突，排在 L-F 的 C-3/C-4/C-7 落地之后，并要求**注入验证**（改一处文档即红）。 |
+| **F5** 面板按键看 409 而不看 `error.code` | **推迟** | 现状：跨渠道冲突会多一次往返后由面板确认条闭环（功能正确、无数据风险）；`auth-gate` 六处原样透出上游状态码会让任意上游 409 弹一次假确认 —— 属体验问题，改它要同时动面板判据与路由透传策略，单独排期。 |
+| **P2-1** 审核通过后 `mergeItems` 权威序让市场卡片翻成"其他安装"，上传入口不可达 | **推迟（产品决策）** | 上传本身不写本地标记（用户已确认的事实）；"我的上传被审核通过后如何再更新"属产品入口设计，需拍板后再动。 |
+| **B-2 定级（cron 封笔）** | **维持 P1** | 机制级证明（`DISK LOST job-2 : true`，磁盘 rev 5 / 内存 rev 3）+ 终态不可自愈（继任世代的任务从磁盘消失）；可达面是同进程第二代账本（用户补丁热加载/插件行重启），虽被 shipped 桌面默认关闭 hmr 缩小，但"字段只写不读"属结构性缺陷。 |
+| **B-3 定级（`deadGrants`）** | **维持 P2** | 触发需要"两个账号共享同一 `updatedAt` 凭据世代"（复制/批量供应凭据的现实场景），后果是可用凭据被判 `unauthorized` 且零注册。 |
+| **B-5 的 DST 策略** | **如实跳过 + 改注释 + 让跳过可观测**（不补跑） | `catchUpMissed=false` 是已文档化的默认语义，"补跑"会改变既有产品行为；真正的问题是注释与实现相反且丢触发**静默**。随 cron 批次一并做（与 B-4 同包，等封笔泳道释放）。 |
+| **B-4 的空白任务名** | **修（随 cron 批次）** | 工具参数自称"非空"而实现只 `trim()`，与 GUI 面判据不一致且会在磁盘留下空名任务；属同一批。 |
+| **W4 的 P2-5**（插件技能卸载不持久/无墓碑）与 `provenance.version` 不随原地换入刷新 | **推迟** | 前者需要"墓碑"数据结构（属插件技能生命周期设计）；后者是 A9"逐字保留溯源"语义的直接后果，与技能库修复同文件，随下一批一起评估。 |
+| 第三轮 C-9（`check-no-leftover-mutants` 对"同行字符串字面量里的变异标记"不报） | **接受并记录为已知边界** | 该豁免是为"检测/说明变异"的合法写法而设（守卫自己的正则常量、说明性文案）；把它收紧需要语法级判断，误报成本高于收益。**认账**：变异若把标记藏进同行字符串字面量，本守卫不报。 |
+| `deadGrants` 修复的两条认账（`28e2062e38`） | **接受** | ①标记生命周期＝每（账号, 连接器）一条、随插件实例存活**不清理**（上界极小）；若要有界只能只留当前作用域，代价是切回旧账号会再向 IdP 出示一次已吊销的 refresh token（正是 CN-5 修掉的形态）⇒ 不采用。②作用域取 `store.dir`（凭据文件身份）：显式 `storeBaseDir` 的嵌入方多账号共用目录即共用标记（那里本就是同一份凭据文件）。 |
+| `lastAnnouncedToken`（与 deadGrants 同族怀疑） | **不构成已证明缺陷，保持现状** | 其值就是 access token 本身（自带账号身份），跨账号误判要求两份凭据的令牌逐字相同＝同一份材料 ⇒ 无法构造真实越权/误判。 |
+| **C-10** 域名白名单可自注册 + 分支保护必需评审人数为 0 | **需用户在 GitHub 侧处置（本会话不可改仓库设置）** | 现状：同一个提交既能往 `ALLOWED_DOMAINS` 加白名单条目、又能让守卫放行，且无需任何人工评审 ⇒ 铁律 0 的第一道防线完全依赖"提交者自觉"。代码侧可做的缓解（每条白名单必须带 owner+理由、白名单变更与守卫变更不得同提交）无法真正阻止有写权限者；**建议**给 `scripts/check-no-real-domains.mjs`（及其白名单）配 CODEOWNERS，并把 `required_approving_review_count` 提到 ≥1。 |
+| **P-1** 打包必需清单"单条删除＝同时删断言" | **已派修复** | 要求反向 oracle（归档里每个 `@picoaide/*/lib/**` 真实 specifier 都必须被清单覆盖）+ 每包条数棘轮，使"悄悄删条目"必然红；3 组变异验证。 |
+| **W-1~W-5**（WASM 门禁：树移出扫描面/三方对拍改名退化为 PENDING/桶上限来自 env/组 3 与组 6 从不执行） | **排队**（等 `verify-wasm-client-only.sh` 从 L-B 释放） | 组 3 的 `check-go-test-json.mjs` 与组 6 的 4 个协议探针**本机 4/4 PASS、21s 却从不被 CI 执行** ⇒ 属"有能力、没接线"的假保证；接线归 CI 泳道（已并入 L-F）。 |
+| `check:wasm-channels` 是否"声明了却从不运行" | **核实为误判（无孤儿守卫）** | 它由 `verify-wasm-client-only.sh:361` 间接调用，而 `check:wasm-client-only` 在编排器 `GUARDS` 内。逐条核对 package.json 的 `check:*` ↔ 编排器后：**无孤儿守卫**。 |
+
+### 7.4 收敛判定
+
+**判定：未达成"连续两轮独立审计零新增 P0/P1"。** 第一轮 6 P0 + 66 P1、第二轮 1 P0 + 15 P1、**第三轮 0 P0 + 19 P1**（R3-A 2 / R3-B 1 / R3-B3 1 / R3-C 15）—— 第三轮不是干净轮，按口径干净的一对必须顺延到第四、五轮。
+
+**第三轮新增 P1 的归属与本轮处置**
+
+| 面 | 条数 | 处置 |
+|---|---|---|
+| R3-A 服务端核心 | 2（A-1 帧预算只修一条桥、A-2 `validate` 无归属校验） | 已派修复泳道（要求枚举全部 host→guest 返回路径；归属校验与既有 owner-only 404 同形且不泄露存在性；≥4 变异） |
+| R3-B 客户端/宿主 | 1（B-2 cron `dispose()` 不封笔） | **已修** `eb981016cb`（flush → 封笔 → 放锁 硬顺序；8 用例修复前 4 红、6 变异全杀、包级 22 文件/203 用例 EXIT=0；审计方原探针复跑 `DISK LOST job-2 : false`） |
+| R3-B3 cron | 1（同 B-2） | 同上；B-4（空白名）/B-5（DST 静默丢触发）已另派（B-5 定调"如实跳过 + 改注释 + 让跳过可观测"） |
+| R3-C 门禁完整性 | 15（C-1/C-3/C-4/C-7 + CI-C1~C3 + P-1 + G-1/G-2/G-8 + W-1~W-5） | 已派：CI 面 7 条、中等守卫 3 条、打包 P-1；**排队**：C-1/C-2 与 W-1~W-5（其所需文件被一条仍在运行的泳道持有，主控不向活写者动手） |
+
+**同轮独立复核（修复方不得自证）**：技能库两提交 ⇒ `4f49f31237` 成立、`920c62f02a` 部分成立（三个口子已派修）；provider PUT 原子化 ⇒ 独立复审进行中；connectors 死授权 ⇒ 用**审计方自己的探针**复跑得 `VERDICT: not reproduced`（修复前 REPRODUCED）。
+
+**已落地的修复（第三轮窗口内）**：`7e7ac1c27d`（建流失败不再遗留回调服务器与定时器）、`4b8d808fa9`（设备码定义缺验证地址 fail-loud）、`28e2062e38`（死授权按账号记账）、`8f8e88c7aa`（真实适配器 `stop` 透传）、`eb981016cb`（cron 封笔）、`f4a9a7774b`（市场归档端点）、`0dd74681b7`（provider PUT 事务化）、`1305dcf450`（迁移区间守卫 fail-loud）、`d6a891f1b4`/`30b5c85c82`/`ca5a7c3e56`（文档与数字真值 + 新守卫）、`920c62f02a`（内容同一性采纳）、`4f49f31237`（随包同步闸门 + 渠道互斥）。
+
+**判定口径（写给下一轮的执行者）**
+1. **"绿" = FAIL=0 且 SKIP=0** —— 编排器在某包失败时会**级联跳过**依赖它的包，跳过等于没验证。
+2. **提交态验证**只能"主树冻结 + `temp/round3-2026-09-23/freeze-snapshot.sh` 前后两份逐文件 sha256 比对"；软链式 `git worktree` 会串到主树在途产物（已实测），结论不可信。
+3. **未验证项 ≠ 通过**：整仓 `yarn check` 全量、`server/Makefile` 全量、Windows/macOS 打包与 afterPack 的反向注入、渠道真打包、R3-C 的 WASM 组 3 真 PG 路径等，均**尚未在冻结态跑过**，不得写成"已验证"。
+4. **认账项**：C-10（域名白名单可自注册 + 分支保护必需评审人数为 0）需在 GitHub 仓库设置侧处置（CODEOWNERS + `required_approving_review_count ≥ 1`），代码侧无法阻止有写权限者自放行。
