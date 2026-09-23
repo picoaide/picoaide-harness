@@ -1,0 +1,81 @@
+{
+  "schema": "wasm-gate-inventory/1",
+  "note": "WASM 客户端专属门禁的**仓库内真源**：删除面清单 / wasmapp 包清单 / 旧能力指纹登记 / 残留扫描预算。2026-09-23 第三轮审计 W-1/W-3 的修法：判据不再靠『路径在不在』与『名字像不像』，也不再让环境变量改上限 —— 一切以本文件为准，缺文件/改坏/越界一律 fail-loud。",
+  "design": {
+    "doc": "docs/planning/2026-09-19-wasm-client-only-design.md",
+    "section": "### 8.4 删除清单",
+    "why": "§8.4 是删除面的权威来源；下面每条 absent 项都带 anchor，判据会回头断言该 anchor 仍在本节里 —— 文档改了而清单没跟上时，门禁自己红，而不是继续拿旧清单当通过。"
+  },
+  "deletionSurface": {
+    "absentPaths": [
+      { "path": "server/internal/wasmapp/session", "anchor": "internal/wasmapp/session/**", "reason": "§8.4 整包：旧换票/应用会话包" },
+      { "path": "server/internal/wasmapp/anonlimit", "anchor": "internal/wasmapp/anonlimit/**", "reason": "§8.4 整包：匿名限流（新模型不存在匿名面）" },
+      { "path": "server/internal/wasmapp/aichat", "anchor": "internal/wasmapp/aichat/**", "reason": "§8.4/§21.3 整包：服务端 ai.chat（改由客户端 AI loop 提供）" },
+      { "path": "server/internal/wasmapp/edge/hostgate.go", "anchor": "HostGate", "reason": "§8.4 边界铁律：主机门控（HostGate/MatchHost/IsProbePath/CheckOrigin/SelfOrigin）整体删除" },
+      { "path": "server/internal/wasmapp/edge/subdomain.go", "anchor": "MatchHost", "reason": "§8.4 边界铁律：应用子域匹配" },
+      { "path": "server/internal/wasmapp/edge/hostgate_test.go", "anchor": "hostgate_test.go", "reason": "§8.4 边界铁律：门控测试随实现同批删除" },
+      { "path": "server/internal/wasmapp/edge/subdomain_test.go", "anchor": "subdomain_test.go", "reason": "§8.4 边界铁律：子域测试随实现同批删除" },
+      { "path": "server/internal/wasmapp/appserver/clientip.go", "anchor": "clientip.go", "reason": "§8.4 appserver 落点：匿名用的客户端 IP 判定（随匿名面删除）" }
+    ],
+    "absentGlobs": [
+      { "glob": "server/cmd/server/wasmapp_domain*.go", "anchor": "wasmapp_domain*.go", "reason": "§8.4 cmd/server 落点：应用基域配置面" }
+    ]
+  },
+  "packageInventory": {
+    "root": "server/internal/wasmapp",
+    "why": "W-1a 的修法：把整棵树移出扫描面（mv server/internal/wasmapp server/wasmapp-legacy）曾让『删除面不存在』4 条 PASS 真空成立、五桶计数同步缩水。包清单双向断言：登记了但不在 = 树被搬走/包被删；在但没登记 = 新包（含换个名字重新实现同一能力），两者都必须红。",
+    "excludeDirNames": ["testdata"],
+    "packages": [
+      "abi",
+      "api",
+      "appcfg",
+      "appdb",
+      "apperr",
+      "applimits",
+      "appproof",
+      "appseed",
+      "appserver",
+      "assets",
+      "cachetrust",
+      "capapi",
+      "compile",
+      "diag",
+      "edge",
+      "events",
+      "hostcap",
+      "limits",
+      "logbuf",
+      "memprofile",
+      "opens",
+      "queue",
+      "readyz",
+      "refapp",
+      "refapp/sockprobe",
+      "refapp/stdprobe",
+      "refapp/wasiprobe",
+      "registry",
+      "runtime",
+      "skillseed",
+      "upload",
+      "wasmmod"
+    ]
+  },
+  "capabilityAllowlist": {
+    "why": "W-1b 的修法：残留判据此前判的是 2026-09-19 那份词汇表，换个名字重新实现同一能力（按 Host 分发 + 一次性换票）完全隐形。这里登记的是『结构指纹命中但确认与旧模型无关』的文件，每条必须带理由、必须真实存在、必须仍然命中（否则是陈旧登记 ⇒ 红），且条数 ≤ budgets.capabilityAllowlist。默认空。",
+    "entries": []
+  },
+  "budgets": {
+    "schema": "wasm-residue-budgets/1",
+    "why": "W-3 的修法：上限此前直接取自环境变量（WASM_RESIDUE_CONTRACT_BUDGET=999 能把 B=36>34 的红翻成绿）。现在上限的唯一真源是本文件；环境变量只允许**收紧**（更小的正整数），取值非法或大于本文件的值一律 fail-loud。放宽上限 = 改这里的数并写理由 —— 一个必须进 diff、可被评审的有意识动作。",
+    "contract": { "value": 34, "reason": "B 桶（契约型保留）实测构成：client 13 + webadmin 7 + appcfg.go/inherit.go 14 = 34；零余量（多一条即红）" },
+    "ann": { "value": 66, "reason": "ANN 桶（带删除/废弃标注的注释）实测 65（原 64；2026-09-23 把 §8.4 明列的已删符号 `CheckOrigin` 补进残留词汇表 ⇒ 注释里的提及 +1），留 1 条余量" },
+    "whitelisted": { "value": 520, "reason": "C 桶（夹具/历史文档/不可变迁移）实测 489（479 + 原 D 桶前缀豁免的 5 处随包技能文档 + CheckOrigin 词汇 +5）。C 的**主判据是资格规则**（测试文件形态 / 文档 / 不可变迁移 / testdata 夹具），上限只拦『成批塞入文档目录』；留 ~6% 余量给记录面的正常增长，避免把别人的文档提交打成假红" },
+    "derived": { "value": 0, "reason": "D 桶（纯生成物）不再有整目录前缀豁免：只有 isGenerated 命中的产物才算，且必须逐文件登记（本文件 capabilityAllowlist 同级的 derivedAllowance）。当前实测 0 处 ⇒ 上限 0" },
+    "contractModules": { "appcfg": 14 },
+    "capabilityAllowlist": 0
+  },
+  "derivedAllowance": {
+    "why": "生成物里出现旧模型字面量时，逐文件登记 + 说明（而不是按 server/demoapps/**、server/skills/** 整目录豁免 —— 那正是 W-3a 把业务残留藏进 server/demoapps/ 就能 A=0 的原因）。",
+    "entries": []
+  }
+}

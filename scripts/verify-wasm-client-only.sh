@@ -12,7 +12,7 @@
 # 审计者与 CI 都复现不了 —— "可复跑"就成了口头承诺。本文件是唯一入口。
 #
 # 六组 + 一组：
-#   1 静态守卫（布局/清单/工作流）        2 三方对拍 + 旧模型零残留（三分法）
+#   1 静态守卫（布局/清单/工作流）        2 三方对拍 + 旧模型零残留（清单/规则驱动）
 #   3 服务端 go build/vet/定向测试（真 PG；**用例级 0 skip**）
 #   4 客户端三包 check                   5 webadmin npm test
 #   6 协议探针（scripts/wasm/probes/*，自判定 + 退出码；xvfb-run -a 与探针同命令）
@@ -25,12 +25,23 @@
 #                                                           # —— 供 `yarn check` 的 GUARDS 与本地快跑
 #   bash scripts/verify-wasm-client-only.sh --groups 2,6    # 只跑指定组（1–8）
 #   bash scripts/verify-wasm-client-only.sh --list
+#
+# 各组前置与**接线现状**（2026-09-23 第三轮审计 W-4/W-5；改 CI 前先读这段）：
+#   组 3（用例级 0 skip）需要真 PG：本地 = `PG_DSN_TEST=… bash scripts/verify-wasm-client-only.sh --groups 3`；
+#        CI 里**尚未接线**（`.github/workflows` 目前跑的是裸 `go test`，没有 -json + 判定这一步）。
+#        Go 环境缺省钉在仓内（temp/gomodcache + GOPROXY=off）；CI/宿主已有模块缓存时用
+#        `WASM_GATE_GO_ENV=host` 继承调用方的 GOCACHE/GOMODCACHE/GOPROXY。
+#   组 6（协议探针）需要显示器与 Electron：本地 = `bash scripts/verify-wasm-client-only.sh --groups 6`
+#        （Linux 上脚本自己用 xvfb-run）；CI 里同样**尚未接线**（Gate job 已装 xvfb，接线成本 = 一个 step）。
+#        非 Linux 平台：探针显式 SKIP（退出码 77）；`WASM_GATE_REQUIRE_COVERED_PLATFORM=1` 时
+#        未覆盖平台一律 77 而不是"跑完给结论"。
 # 环境变量（参数化，避免把本机路径写死 —— R2T-12）：
 #   PG_DSN_TEST      定向测试的数据库（缺省 postgres://postgres:postgres@127.0.0.1:5432/picoaide_test）
 #   PROBE_TIMEOUT    单探针超时秒数（缺省 180）
 #   ELECTRON_BIN     Electron 可执行文件（缺省 packages/host/desktop/node_modules/.bin/electron）
 #   WASM_CHANNELS_REPO  真实私有渠道仓检出（可选；给了就跑正式 tag dry-run）
 #   WASM_GATE_LOG_DIR   日志目录（缺省 temp/wasm-client-only/gate-logs）
+#   WASM_GATE_GO_ENV    repo（缺省，Go 缓存钉在仓内且离线）/ host（继承宿主 GOCACHE/GOMODCACHE/GOPROXY）
 #   WASM_GATE_REQUIRE_COVERED_PLATFORM=1  非 Linux 平台上探针按显式 SKIP（退出码 77）处理
 # 退出码：0 = 所选组全部通过；1 = 有失败项；2 = 用法/环境错误。
 
@@ -45,11 +56,21 @@ ELECTRON_BIN="${ELECTRON_BIN:-$ROOT/packages/host/desktop/node_modules/.bin/elec
 LOG_DIR="${WASM_GATE_LOG_DIR:-$ROOT/temp/wasm-client-only/gate-logs}"
 PROBE_HOME="${PROBE_HOME:-${TMPDIR:-/tmp}/wasm-gate-home}"
 
-# Go 缓存固定落在仓库内（判据要求）：不写 ~/.cache，且**离线**（GOPROXY=off）——
+# Go 缓存缺省固定落在仓库内（判据要求）：不写 ~/.cache，且**离线**（GOPROXY=off）——
 # 门禁不允许在跑的中途去下载模块，那会让"同一 HEAD 两次结论不同"。
-export GOCACHE="$ROOT/temp/go-build"
-export GOMODCACHE="$ROOT/temp/gomodcache"
-export GOPROXY=off
+#
+# WASM_GATE_GO_ENV=host（2026-09-23，W-4 接线的必要条件）：继承调用方/宿主的
+# GOCACHE/GOMODCACHE/GOPROXY —— CI 的 server job 用宿主模块缓存（镜像里已装好依赖），
+# 仓内缓存并不存在；硬钉 `GOPROXY=off` + 空仓内缓存只会得到 `go: download …: toolchain
+# not available` 这种与代码无关的假红（W 泳道在 clone 上实测过）。缺省仍是 repo。
+if [ "${WASM_GATE_GO_ENV:-repo}" = "host" ]; then
+  GO_ENV_NOTE="host：继承 GOCACHE=${GOCACHE:-<unset>} GOMODCACHE=${GOMODCACHE:-<unset>} GOPROXY=${GOPROXY:-<unset>}"
+else
+  export GOCACHE="$ROOT/temp/go-build"
+  export GOMODCACHE="$ROOT/temp/gomodcache"
+  export GOPROXY=off
+  GO_ENV_NOTE="repo：GOCACHE/GOMODCACHE 在仓内，GOPROXY=off（可用 WASM_GATE_GO_ENV=host 继承宿主）"
+fi
 export PG_DSN_TEST
 
 mkdir -p "$LOG_DIR" "$PROBE_HOME"
@@ -92,7 +113,7 @@ GROUP_NAMES=(
 
 case "$MODE" in
   help)
-    sed -n '2,35p' "${BASH_SOURCE[0]}"
+    sed -n '2,46p' "${BASH_SOURCE[0]}"
     exit 0 ;;
   list)
     printf '%s\n' "${GROUP_NAMES[@]}"
@@ -174,13 +195,15 @@ BINDING="$ROOT/temp/wasm-client-only/HEAD-binding.txt"
 echo "WASM 客户端专属验收门禁（scripts/verify-wasm-client-only.sh）"
 echo "HEAD $HEAD_START（$BRANCH_START；工作树 ${DIRTY_START} 个改动 —— 本仓并发编辑，结论按此 HEAD 归档）"
 echo "组：$GROUPS_SELECTED（模式 $MODE；共 ${GROUP_COUNT} 组，可选 1–8）｜日志目录 $LOG_DIR"
+echo "Go 环境：$GO_ENV_NOTE"
 
 if [ "$MODE" = "portable" ]; then
   echo "portable 模式：只跑与构建产物 / PG / 显示器无关的组。**显式**不在本模式内（不是静默跳过）："
-  echo "  · 组 3 服务端 go build/vet/定向测试 —— 需要真 PG，归带 PG 的 server job（§16 W6）"
+  echo "  · 组 3 服务端 go build/vet/定向测试 —— 需要真 PG；**CI 尚未接线**（server job 目前跑裸 go test，"
+  echo "    没有 -json + check-go-test-json.mjs 这一步）⇒ 本地入口见脚本头『各组前置与接线现状』"
   echo "  · 组 4 客户端三包 check —— \`yarn check\` 的包任务已覆盖同一批命令"
   echo "  · 组 5 webadmin npm test —— 归 server job"
-  echo "  · 组 6 协议探针 —— 需要 xvfb/显示器；归 W6 三平台与 tag 流水线"
+  echo "  · 组 6 协议探针 —— 需要 xvfb/显示器；**CI 尚未接线**（Gate job 已装 xvfb，缺一个 step）"
 fi
 
 # ---------------------------------------------------------------------------
@@ -199,28 +222,42 @@ fi
 
 # ---------------------------------------------------------------------------
 if want 2; then
-  step "2. 三方对拍 + 旧模型零残留（四桶：A 业务零命中 / B 契约型保留（带标识+上限） / C 夹具与文档 / D 生成物与演示内容；未跟踪文件也查）"
+  step "2. 三方对拍 + 旧模型零残留（五桶 + 删除面/包清单/旧能力指纹；未跟踪文件也查）"
   log="$LOG_DIR/route-parity.log"
   if node scripts/wasm/check-route-parity.mjs >"$log" 2>&1; then
-    pass "三方对拍：客户端 OPEN_APP_PATH == 宿主 WASM_APP_OPEN_ROUTE == 设计总纲 §5.2 冻结串"
-    grep -E '^  (PENDING|待办)' "$log" | sed 's/^/      /' || true
+    # §5.2 与 §16.1 是**两条**独立的三方对拍：两条都打印，审计者一眼能看出各腿跑没跑
+    # （旧实现只在成功路径打 §5.2，§16.1 的 ok() 行从不显示 —— 2026-09-23 W-2）。
+    pass "三方对拍：OPEN_APP_PATH（§5.2）与渠道只读路由（§16.1）均三方一致（含前缀注册）"
+    grep -E '^  PASS' "$log" | sed 's/^/      /' || true
   else
     fail "三方对拍失败（漂移即 404；命中文件与行号见 $log）"
-    grep -E '^  (客户端常量|宿主路由|文档冻结串|FAIL)' "$log" | sed 's/^/      /' || true
+    grep -E '^  (客户端常量|宿主路由|文档冻结串|§16.1|FAIL)' "$log" | sed 's/^/      /' || true
   fi
 
-  # 零残留：脚本自己判定 + 退出码；四桶计数与命中逐条打印（--all 打印全部）。
+  # 零残留：脚本自己判定 + 退出码；五桶计数与命中逐条打印（--all 打印全部）。
+  # 上限真源 = scripts/wasm/wasm-gate-inventory.json（环境变量只能收紧，非法取值 fail-loud）。
   log="$LOG_DIR/residue.log"
   if node scripts/wasm/check-old-model-residue.mjs --json "$LOG_DIR/residue.json" 2>&1 | tee "$log"; then
-    pass "旧模型零残留：A 桶（业务代码）零命中，B 桶契约型保留带标识且在上限内"
+    pass "旧模型零残留：A 桶（业务代码）零命中，B/ANN/C/D 四桶在上限内（上限真源 = 仓内 inventory）"
   else
     fail "旧模型零残留：A 桶（业务代码）仍有命中（W4 删除波次未完成；五桶计数 A/B/ANN/C/D 见上，结构化报告 $LOG_DIR/residue.json）"
   fi
 
-  for deleted in server/internal/wasmapp/session server/internal/wasmapp/anonlimit \
-                 server/internal/wasmapp/edge/hostgate.go server/internal/wasmapp/edge/subdomain.go; do
-    if [ -e "$deleted" ]; then fail "删除面仍存在：$deleted（§8.4 删除清单）"; else pass "删除面不存在：$deleted"; fi
-  done
+  # 删除面 / 包清单 / 旧能力指纹（W-1 的修法）：判据真源 = scripts/wasm/wasm-gate-inventory.json，
+  # 逐条断言"删除面不存在 **且** 设计总纲 §8.4 里仍有该条 anchor"、"wasmapp 包清单双向一致"、
+  # "旧能力结构指纹零未登记命中"。先 `node --check` 再跑：脚本解析失败时整段不执行，
+  # 报出来的却只是"判据未通过"（2026-09-20 被这一点绕过一圈）。
+  log="$LOG_DIR/deletion-surface.log"
+  if ! node --check scripts/wasm/check-deletion-surface.mjs 2>"$log"; then
+    sed 's/^/      /' "$log"
+    fail "守卫脚本本身语法错误（scripts/wasm/check-deletion-surface.mjs 解析失败）"
+  elif node scripts/wasm/check-deletion-surface.mjs >"$log" 2>&1; then
+    pass "删除面 / 包清单 / 旧能力指纹（§8.4 真源驱动；清单+规则，不看路径在不在）"
+    grep -E '^  PASS' "$log" | sed 's/^/      /' || true
+  else
+    fail "删除面判据未通过（日志 $log）"
+    grep -E '^  FAIL' "$log" | head -n 12 | sed 's/^/      /' || true
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -245,6 +282,7 @@ if want 3; then
   if pg_reachable; then
     log="$LOG_DIR/go-test.json"
     # 只取退出码会让"PG 不可达 ⇒ 全部 t.Skip"变成零断言的门禁绿（R1-TST-2）⇒ -json + 解析。
+    # 判定脚本的退出码契约（2026-09-23 W-4 补齐）：0 通过 / 1 报告不合格 / 2 前置缺失（报告不可读）。
     if (cd server && run_limited 1200 go test ./internal/wasmapp/... ./internal/router/... -count=1 -json) >"$log" 2>&1; then
       # 关键用例名单（**改上游/改名时同步这里**）：W1 把 `TestClientFrameUser_MatchesSessionProjection`
       # 改名为 `TestClientFrameUser_ProjectsUserRowAndPublisherFlag`（同一意图）。checker 会区分
@@ -253,7 +291,7 @@ if want 3; then
           --require TestClientRequest_LoginRequiredWithoutIdentityIs401,TestCheckClientOrigin,TestClientFrameUser_ProjectsUserRowAndPublisherFlag; then
         pass "go test 定向包（真 PG；用例级 0 skip；三条关键用例确实 pass）"
       else
-        fail "go test 报告不合格（用例级 skip / 关键用例缺失 / 有失败事件；报告 $log）"
+        fail "go test 报告不合格（用例级 skip / 关键用例缺失 / 有失败事件 / 报告路径没接上；报告 $log）"
       fi
     else
       fail "go test 失败（报告 $log）"
@@ -261,8 +299,11 @@ if want 3; then
       tail -n 5 "$log" | sed 's/^/      /'
     fi
   else
-    # **不静默跳过**：PG 不可达时本组是失败，不是通过（CI 里本组归 server job）。
-    fail "PG 不可达（$PG_DSN_TEST）：定向测试无法执行 —— 本组必须在带 PG 的 server job 跑（§16 W6），不得当通过"
+    # **不静默跳过**：PG 不可达时本组是失败，不是通过。
+    # 接线现状（2026-09-23 W-4）：CI 的 server job 目前跑的是**裸 `go test`**，没有
+    # `-json` + 本判定这一步；本地入口 = `PG_DSN_TEST=… bash scripts/verify-wasm-client-only.sh --groups 3`
+    # （宿主已有 Go 模块缓存时加 `WASM_GATE_GO_ENV=host`）。
+    fail "PG 不可达（$PG_DSN_TEST）：定向测试无法执行 —— 本组不得当通过；本地入口见脚本头『接线现状』"
   fi
 fi
 
@@ -314,6 +355,12 @@ if want 6; then
       skip "非 Linux（$(uname -s)）：本机不使用 xvfb-run；三平台探针属 §16 W6（§17 认账 1），请在 W6 用各平台原生方式跑"
     fi
   else
+    # 组内计数：**全组 SKIP 必须红**（2026-09-23 W-5）。否则非 Linux 平台 / 前置不满足时
+    # 只剩 `SKIP 4` 而汇总仍是"全部通过 ✅" —— 本组承载的是窗口/scheme/CSP/storage 这类
+    # 只能靠真机运行证伪的判据，零 PASS 的 SKIP 集等于零断言（与"拒绝空集通过"同一口径）。
+    probe_pass=0
+    probe_skip=0
+    probe_fail=0
     for probe in "${PROBES[@]}"; do
       name="$(basename "$probe")"
       log="$LOG_DIR/probe-$name.log"
@@ -329,11 +376,14 @@ if want 6; then
             timeout "$PROBE_TIMEOUT" "$ELECTRON_BIN" --no-sandbox --disable-gpu "$probe" >"$log" 2>&1 || rc=$?
       case "$rc" in
         0)
+          probe_pass=$((probe_pass + 1))
           pass "$name（退出码 0 = 期望值全部满足）"
           grep -m1 'VERDICT' "$log" | sed 's/^/      /' || true ;;
         77)
+          probe_skip=$((probe_skip + 1))
           skip "$name 显式 SKIP（平台未覆盖；§17 认账 1 / W6 待补）" ;;
         *)
+          probe_fail=$((probe_fail + 1))
           fail "$name（退出码 $rc ≠ 0；日志 $log）"
           grep -m1 -E 'ASSERT|SKIP|fatal' "$log" | sed 's/^/      /' || true
           # W0-D 型探针的判定表（每条 required 的 PASS/FAIL/UNKNOWN + 汇总行）——
@@ -342,6 +392,9 @@ if want 6; then
           grep -m1 '\[skip-note\]' "$log" | sed 's/^/      /' || true ;;
       esac
     done
+    if [ "$probe_pass" -eq 0 ] && [ "$probe_skip" -gt 0 ]; then
+      fail "组 6 的 ${#PROBES[@]} 个探针全部 SKIP（PASS 0 / SKIP $probe_skip / FAIL $probe_fail）—— 全组 SKIP = 零断言，不得当通过"
+    fi
   fi
 fi
 

@@ -12,7 +12,11 @@
  *      恒不匹配却"看起来在断言"（R2T-1）—— 解析事件流可以直接消除这类风险。
  *
  * 用法：node scripts/wasm/check-go-test-json.mjs <report.json> [--require A,B]
- * 退出码：0 = 无用例级 skip、无失败、关键用例全 pass；1 = 任一不满足（逐条打印）。
+ * 退出码（**三段可区分**，2026-09-23 第三轮审计 W-4 补齐）：
+ *   0 = 无用例级 skip、无失败、关键用例全 pass；
+ *   1 = 报告**存在但不合格**（用例级 skip / 失败事件 / 关键用例缺失或未 pass / 零断言）；
+ *   2 = **前置缺失或用法错误**（缺参数、报告文件不存在/不可读）—— 显式打印原因并明确
+ *       "这不是通过"。缺报告时绝不静默绿：没有报告就没有判定，只有环境/接线错误。
  */
 
 import { readFileSync } from 'node:fs'
@@ -26,6 +30,21 @@ const requireIndex = rest.indexOf('--require')
 const required = requireIndex >= 0
   ? (rest[requireIndex + 1] ?? '').split(',').map(name => name.trim()).filter(Boolean)
   : []
+
+/**
+ * 读报告：**前置缺失必须自己说清楚**（而不是让 ENOENT 以一段 fs 栈收尾）。
+ *
+ * 为什么单列成 2：调用方（门禁组 3 / CI step）只有"非零即失败"这一条路，
+ * 但排障要能一眼区分"代码/测试不合格"（1）与"go test 根本没跑起来 / 报告路径写错"（2）。
+ */
+let rawReport
+try {
+  rawReport = readFileSync(report, 'utf8')
+} catch (cause) {
+  console.error(`  FAIL 前置缺失：go test JSON 报告不可读（${report}）—— ${cause.code ?? cause.message}`)
+  console.error('  —— 这不是通过：本判据必须先有 go test -json 报告；请检查上一步是否真的产出报告（路径/工作目录/tee 是否接上）')
+  process.exit(2)
+}
 
 /**
  * 允许的"显式跳过"（**每条必须带理由**，且必须**真的仍然 skip** —— 条目不再跳过时判失败，
@@ -54,7 +73,7 @@ const testFailures = []
 let events = 0
 let malformed = 0
 
-for (const line of readFileSync(report, 'utf8').split('\n')) {
+for (const line of rawReport.split('\n')) {
   if (line.trim() === '') continue
   let event
   try {

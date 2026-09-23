@@ -13,7 +13,7 @@
  *      / docs/planning/2026-09-19-wasm-client-only-design.md §5.2 的冻结路径。
  *
  * 用法：node scripts/wasm/check-route-parity.mjs
- * 退出码：0 = 三方逐字一致；1 = 漂移或缺实现（打印文件与行号）。
+ * 退出码：0 = 三方逐字一致；1 = 漂移、缺一端或缺实现（打印文件与行号）。
  */
 
 import { readFileSync } from 'node:fs'
@@ -32,7 +32,6 @@ const CLIENT_CHANNEL_SOURCES = [
 const DESIGN_DOC = join(ROOT, 'docs/planning/2026-09-19-wasm-client-only-design.md')
 
 const failures = []
-const pending = []
 
 function lineOf(source, needle) {
   const index = source.split('\n').findIndex(line => line.includes(needle))
@@ -105,10 +104,17 @@ if (prefixRegistered) {
   bad(`宿主没有按前缀注册 WASM_APPS_LOCAL_PREFIX（${REL(HOST_SOURCE)}；应形如 kind: 'prefix', path: WASM_APPS_LOCAL_PREFIX）`)
 }
 
-// ---- §16.1 的本机只读渠道路由（W2 施工中；两端都定义后才做对拍） --------------
+// ---- §16.1 的本机只读渠道路由（W2 的接缝；两条腿都必须在场） -------------------
 // 形态：宿主 `WASM_APP_CHANNEL_ROUTE = `${WASM_APPS_LOCAL_PREFIX}/channel``（合成），
-// 客户端经 channel-seam 消费（不得自己写死路径）。缺任一端 ⇒ PENDING（W2 未完成），
-// 两端都有但不一致 ⇒ 真漂移，必须红。
+// 客户端经 channel-seam 消费（不得自己写死路径）。
+//
+// **2026-09-23 第三轮审计 W-2 的修法：缺任一端 = 失败，不再 PENDING。** 旧实现把"任一端
+// undefined"当成"W2 尚未完成"记一条 PENDING 并继续 EXIT=0 —— 于是把宿主常量**纯改名**
+// （取值一字不变，两处引用同步改）就能让这条腿永久消失，而三方对拍只跑两条腿、PASS 文案
+// 仍写着"三方一致"（W-2 实验：`WASM_APP_CHANNEL_ROUTE` → `WASM_APP_LOCAL_CHANNEL_PATH`
+// ⇒ PENDING + EXIT=0）。
+// 这里**不设逃生开关**：路由在两端都已落地，缺一端就是漂移/删除；真要处于施工期，
+// 修法是把常量补回去，而不是把判据调软。
 const channelSuffix = /export const WASM_APP_CHANNEL_ROUTE\s*=\s*`\$\{WASM_APPS_LOCAL_PREFIX\}([^`]+)`/u.exec(host.source)?.[1]
 const hostChannelRoute = channelSuffix === undefined ? undefined : `${prefixMatch?.[1] ?? ''}${channelSuffix}`
 const channelDoc = /GET (\/api\/pico\/wasm-apps\/channel)/u.exec(doc)?.[1]
@@ -128,10 +134,15 @@ for (const file of CLIENT_CHANNEL_SOURCES) {
     break
   }
 }
+console.log(`  §16.1 宿主 ${JSON.stringify(hostChannelRoute ?? null)} / 客户端 ${JSON.stringify(clientChannelRoute ?? null)}`
+  + `${clientChannelAt === '' ? '' : `  ← ${clientChannelAt}`}`)
 if (hostChannelRoute === undefined || clientChannelRoute === undefined) {
-  pending.push('§16.1 本机只读渠道路由 GET /api/pico/wasm-apps/channel 两端未齐（宿主 '
-    + `${JSON.stringify(hostChannelRoute)} / 客户端 ${JSON.stringify(clientChannelRoute)}）—— W2 完成后本脚本自动纳入对拍`)
-  console.log(`  PENDING §16.1 渠道只读路由两端未齐（宿主 ${JSON.stringify(hostChannelRoute)} / 客户端 ${JSON.stringify(clientChannelRoute)}）`)
+  const missing = [
+    hostChannelRoute === undefined ? `${REL(HOST_SOURCE)} 里没有 export const WASM_APP_CHANNEL_ROUTE（改名？）` : null,
+    clientChannelRoute === undefined ? `${CLIENT_CHANNEL_SOURCES.map(REL).join(' / ')} 里没有 '/api/pico/wasm-apps/channel' 字面量（改名？）` : null,
+  ].filter(Boolean)
+  bad(`§16.1 渠道只读路由缺一端（不得退化为不判失败的 PENDING）：${missing.join('；')}`
+    + ' —— 契约已在两端冻结，缺一端就是漂移/删除')
 } else if (clientChannelRoute === hostChannelRoute && channelDoc === hostChannelRoute) {
   ok(`§16.1 渠道只读路由三方一致（${clientChannelRoute} ← ${clientChannelAt}）`)
 } else {
@@ -146,5 +157,4 @@ if (failures.length > 0) {
   for (const message of failures) console.error(`- ${message}`)
   process.exit(1)
 }
-for (const message of pending) console.log(`待办（不计入失败）：${message}`)
 console.log('三方对拍通过 ✅')
