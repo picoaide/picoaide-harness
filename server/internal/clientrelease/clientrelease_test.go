@@ -60,7 +60,11 @@ func newRouter(version string) *gin.Engine {
 	h := NewHandlers(func() string { return version }, "official")
 	r := gin.New()
 	r.GET("/api/client/v2/updates/manifest", h.Manifest)
+	// 下载路由必须与生产**同形**：internal/router 申报的是 GET + HEAD。
+	// 只注册 GET 时 HEAD 分支从未被跑到 —— 而 A-12 的响应头判据恰恰在 HEAD 上有过
+	// "侥幸通过"的历史（R3-A 复审 F2），所以测试树补齐 HEAD。
 	r.GET("/updates/client/*file", h.File)
+	r.HEAD("/updates/client/*file", h.File)
 	return r
 }
 

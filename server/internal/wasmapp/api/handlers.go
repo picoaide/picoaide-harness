@@ -696,12 +696,17 @@ type reviewSwitchResult struct {
 //	读失败（err != nil）  ⇒ Required=true, Err!=nil   // fail-closed，绝不回落成"关"
 //	键不存在（!ok）       ⇒ Required=false, Err=nil   // R17 的缺省就是"不审"，是承诺
 //	读到 true/1/on/yes    ⇒ Required=true,  Err=nil
-//	读到其它值            ⇒ Required=false, Err=nil   // 写入端只写 true/false
+//	读到 false/0/off/no   ⇒ Required=false, Err=nil   // 写入端写的就是 "false"，**不打日志**
+//	读到其它值            ⇒ Required=false, Err=nil   // 语义同上，但**必须 fail-loud 打日志**
 //
 // 为什么"无法识别的值"仍按关：它与"读失败"不同 —— 值**读到了**，只是不是平台
 // 自己写的形态（写入端只有 true/false）。把它判成"需要审核"会让一次人工改库/未来
 // 的格式变更把全组织的新版本卡进待审队列，而本条的缺陷（读故障 fail-open）
 // 并不包含它。改动这里要单独取证。
+//
+// 为什么仍然要打日志（R3-A 复审 F4）：按关处理是**安全方向上的 fail-open**，而
+// 这条分支此前是**完全静默**的 —— 人工改库/未来格式变更会让审核被悄悄关掉而
+// 没有任何痕迹。日志三件事必须可 grep：点名键、回显**取到的原文**、给出处置指引。
 func (h *Handlers) reviewSwitch() reviewSwitchResult {
 	if h.opt.DB == nil {
 		// 未装配 DB 只出现在最小装配/单元测试里：没有 settings 表可读，
@@ -720,7 +725,18 @@ func (h *Handlers) reviewSwitch() reviewSwitchResult {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "on", "yes":
 		return reviewSwitchResult{Required: true}
+	case "0", "false", "off", "no":
+		// 明确的"关"：写入端写的正是 `strconv.FormatBool(false)`（= "false"），
+		// 所以这条路径**不能**打"取值无法识别"的日志 —— 那会把真信号淹在噪音里。
+		// 语义与 default 分支逐字相同（都回 Required=false），这里只是**多认出几种
+		// 写法**，不改判定结果。
+		return reviewSwitchResult{Required: false}
 	default:
+		// 判据（`TestReviewSwitchUnrecognizedValueIsOffAndLoud` 逐条钉住）：
+		// 语义不变（按关），但必须留下可检索的一行 —— 点名键、回显原文、给出处置。
+		log.Printf("wasmapp: 审核开关 %s 的取值无法识别（读到 %q），按「关」处理；"+
+			"请把值改成 true/false 之一（写入端只会写这两个形态，其它取值多半来自人工改库或格式变更）",
+			SettingReviewRequired, v)
 		return reviewSwitchResult{Required: false}
 	}
 }

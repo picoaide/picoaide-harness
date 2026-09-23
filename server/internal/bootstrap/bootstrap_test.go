@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -375,6 +376,23 @@ func TestBootstrapDeliversHeartbeatFlag(t *testing.T) {
 // A-13 的处置是**改承诺、不造消费方**：注释改成事实，用例改成下面这三条。
 const noClientConsumerMarker = "当前没有客户端消费方"
 
+// 扫描面下限（"判据自己也要有判据"）：真正读过内容的源码文件数、以及
+// `packages/vendor/memory-evolve/lib/` 下必须被读到的文件数。
+//
+// 数字来源（复算方式：把 skipScanDir 的规则套到 `git archive` 出来的干净树上）：
+// 全仓 910 个（工作树 919 个），其中 vendored lib 62 个；而任一顶层子树都远低于
+// 下限（packages/host 573、packages/vendor 241、packages/client 96）—— 所以
+// "把扫描面收窄到某个子树"必然触发下限红。改动扫描面（新增/删除包、改构建产物
+// 目录约定）时同步这两个数字，**不允许**只改数字来消红：数字变更要与扫描面变更
+// 出现在同一个提交里。
+const (
+	scanFloor      = 700
+	vendorLibFloor = 30
+	// vendoredLibPrefix 是**相对扫描根（packages/）**的路径 —— walk 回调里的 rel
+	// 就是相对它算的（写成 `packages/...` 会永远匹配不到，判据自己先红）。
+	vendoredLibPrefix = "vendor/memory-evolve/lib/"
+)
+
 // retractedClaim 是被撤回的那句承诺的**关键词**。
 //
 // 只禁"断言形态"、不禁"引用形态"：文档里引用被撤回的说法（并写明它不成立）
@@ -478,12 +496,19 @@ func fieldDocComment(t *testing.T, src, decl string) string {
 
 // scanClientSources 扫客户端源码里的 server_version / serverVersion 读取点。
 //
-// 扫描面 = 仓库根的 `packages/**` 源码（.ts/.tsx/.js/.mjs/.cjs），排除
-// node_modules / lib / dist / build（第三方 SDK 与构建产物里出现同名字符串
-// 不构成本产品的消费方 —— 例如 @modelcontextprotocol/sdk 内部有自己的
-// `_serverVersion`，那是 MCP 协议字段，与本字段无关）。
+// 扫描面 = 仓库根的 `packages/**` 源码（.ts/.tsx/.js/.mjs/.cjs）。
 //
-// packages/ 不存在 ⇒ 直接 t.Fatalf：扫描面缺失不得静默通过。
+// **扫描面自己也有判据**（否则"悄悄收窄扫描面"就是一种假绿——本仓已登记过这类形态）：
+//   - 扫描根不存在 ⇒ 直接 `t.Fatalf`，不静默通过；
+//   - **扫描面下限**：真正读过内容的源码文件数不得低于 {@link scanFloor}
+//     （实测：干净 `git archive` 树 910 个、本仓工作树 919 个；而任一顶层子树
+//     都远低于它 —— packages/host 573、packages/vendor 241、packages/client 96）
+//     ⇒ 把扫描面收窄到某个子树/某个包会立刻红，而不是给出"没有消费方"的结论；
+//   - **vendored 源码必须在扫描面内**：`packages/vendor/memory-evolve/lib/` 是入库
+//     源码（63 个 tracked 文件，上游把 node 侧 JS 直接写在 `lib/` 下，见
+//     `packages/vendor/memory-evolve/VENDORED.md`），里面至少有
+//     {@link vendorLibFloor} 个源码文件必须被读到 —— 复审 F3 实测的盲区正是它：
+//     旧实现按目录名 skip（`lib`），把消费方放进该目录时用例**存活**。
 func scanClientSources(t *testing.T) []string {
 	t.Helper()
 	root := filepath.Join("..", "..", "..", "packages")
@@ -491,33 +516,88 @@ func scanClientSources(t *testing.T) []string {
 	if err != nil || !info.IsDir() {
 		t.Fatalf("客户端源码根 %s 不存在（判据的扫描面缺失，拒绝宣称「没有消费方」）: %v", root, err)
 	}
-	skip := map[string]bool{"node_modules": true, "lib": true, "dist": true, "build": true, ".git": true}
 	exts := map[string]bool{".ts": true, ".tsx": true, ".js": true, ".mjs": true, ".cjs": true}
 	var hits []string
-	err = filepath.WalkDir(root, func(path string, d os.DirEntry, werr error) error {
+	scanned := 0
+	vendoredLib := 0
+	err = filepath.WalkDir(root, func(abs string, d os.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
 		}
+		rel, rerr := filepath.Rel(root, abs)
+		if rerr != nil {
+			return rerr
+		}
+		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
-			if skip[d.Name()] {
+			if rel == "." {
+				return nil
+			}
+			if skipScanDir(root, rel) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if !exts[strings.ToLower(filepath.Ext(path))] {
+		if !exts[strings.ToLower(filepath.Ext(abs))] {
 			return nil
 		}
-		raw, rerr := os.ReadFile(path)
+		raw, rerr := os.ReadFile(abs)
 		if rerr != nil {
 			return rerr
 		}
+		scanned++
+		if strings.HasPrefix(rel, vendoredLibPrefix) {
+			vendoredLib++
+		}
 		if bytes.Contains(raw, []byte("server_version")) || bytes.Contains(raw, []byte("serverVersion")) {
-			hits = append(hits, path)
+			hits = append(hits, abs)
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("扫描客户端源码失败: %v", err)
 	}
+	// 下限断言（扫描面被收窄即红，而不是静默给出"零消费方"）。
+	if scanned < scanFloor {
+		t.Fatalf("客户端源码扫描面只剩 %d 个文件（下限 %d）——扫描面被收窄了，"+
+			"此时「没有消费方」不成立；请检查 skipScanDir 的判据与 root 指向", scanned, scanFloor)
+	}
+	if vendoredLib < vendorLibFloor {
+		t.Fatalf("扫描面里只有 %d 个 `%s` 下的源码文件（下限 %d）——"+
+			"vendored 插件的 lib/ 是**入库源码**，不得按目录名跳过（复审 F3）",
+			vendoredLib, vendoredLibPrefix, vendorLibFloor)
+	}
 	return hits
+}
+
+// skipScanDir 判定 `packages/` 下的某个目录（rel = 相对 packages/ 的 POSIX 路径）
+// 是否在扫描面之外。
+//
+// 判据是**结构位置**，不是目录名（旧实现按 basename 判，是复审 F3 的盲区）：
+//   - `node_modules` / `.git`：任何深度都跳（第三方 SDK、VCS 元数据，
+//     例如 @modelcontextprotocol/sdk 内部的 `_serverVersion` 与本字段无关）；
+//   - `lib` / `dist` / `build`：**只有**当它正好是某个包根（含 package.json 的目录）
+//     的直接子目录时才算构建产物（本仓 workspace 包都是 `packages/<a>[/<b>]/lib`）；
+//     更深的 `lib/`（如 `packages/x/src/lib/`）与没有 package.json 的同名目录都是源码；
+//   - `packages/vendor/**` 一律不跳：那是随包分发的**入库源码**（memory-evolve 的
+//     node 侧 JS 就写在 `lib/` 下）。
+func skipScanDir(root, rel string) bool {
+	base := path.Base(rel)
+	if base == "node_modules" || base == ".git" {
+		return true
+	}
+	if base != "lib" && base != "dist" && base != "build" {
+		return false
+	}
+	parent := path.Dir(rel) // 相对 packages/
+	if parent == "." {
+		return false
+	}
+	if parent == "vendor" || strings.HasPrefix(parent, "vendor/") {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(parent), "package.json")); err != nil {
+		return false
+	}
+	return true
 }
