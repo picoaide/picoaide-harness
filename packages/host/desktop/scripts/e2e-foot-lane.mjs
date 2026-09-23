@@ -184,11 +184,28 @@ const mouseClick = async (expr) => {
   if (point === null) { lastHit = 'no-rect'; return false }
   return clickPoint(point.x, point.y)
 }
-const byText = (label) => `[...document.querySelectorAll('button')].find(x => (x.textContent ?? '').trim() === ${JSON.stringify(label)} && (${VISIBLE})(x))`
-const byAriaLabel = (label) => `[...document.querySelectorAll('button')].find(x => (x.getAttribute('aria-label') ?? '') === ${JSON.stringify(label)} && (${VISIBLE})(x))`
+/**
+ * `Runtime.evaluate` takes an *expression* and nothing else, so a value the page
+ * has to look at can only reach it inside that expression string. Building such a
+ * string out of another helper's output is what CodeQL's `js/bad-code-sanitization`
+ * reports — it cannot tell a UI label apart from an injected code fragment, and the
+ * old shape (`byText()` returning an expression that a second expression then
+ * interpolated) is exactly that shape. The locators are therefore compile-time
+ * constants and the label travels as *data*: `byText` / `byAriaLabel` first write
+ * it into a page slot as a JSON literal, then hand back the constant locator that
+ * reads the slot back. Reach the slot only through those two helpers, and use the
+ * returned locator immediately — it reads the slot when the page evaluates it, not
+ * when it is built.
+ */
+const NEEDLE_SLOT = '__footLaneNeedle'
+const TEXT_BUTTON = `[...document.querySelectorAll('button')].find(x => (x.textContent ?? '').trim() === globalThis.${NEEDLE_SLOT} && (${VISIBLE})(x))`
+const ARIA_BUTTON = `[...document.querySelectorAll('button')].find(x => (x.getAttribute('aria-label') ?? '') === globalThis.${NEEDLE_SLOT} && (${VISIBLE})(x))`
+const setNeedle = (label) => evaluate(`globalThis.${NEEDLE_SLOT} = ${JSON.stringify(label)}`)
+const byText = async (label) => { await setNeedle(label); return TEXT_BUTTON }
+const byAriaLabel = async (label) => { await setNeedle(label); return ARIA_BUTTON }
 const ACCOUNT_ROW = `[...document.querySelectorAll('button')].find(b => (b.textContent ?? '').includes('admin') && b.getAttribute('aria-haspopup') === 'dialog' && (${VISIBLE})(b))`
-const clickVisibleLabel = (label) => mouseClick(byText(label))
-const clickVisibleAriaLabel = (label) => mouseClick(byAriaLabel(label))
+const clickVisibleLabel = async (label) => mouseClick(await byText(label))
+const clickVisibleAriaLabel = async (label) => mouseClick(await byAriaLabel(label))
 const visibleTexts = () => evaluate(`(() => {
   const visible = ${VISIBLE}
   return [...document.querySelectorAll('button')].filter(visible).map(b => (b.textContent ?? '').trim()).filter(Boolean)
@@ -363,7 +380,7 @@ try {
 
   // 6c. 键盘路径才是"两层同时打开"的真实入口（Round-1 审计 P1）：焦点落在「更多」
   //     上按 Enter 必须把账户浮层关掉再打开菜单。
-  await evaluate(`(() => { const b = ${byText('更多')}; if (b !== null) b.focus(); return b !== null })()`)
+  await evaluate(`(() => { const b = ${await byText('更多')}; if (b !== null) b.focus(); return b !== null })()`)
   await wait(150)
   const focusBefore = await evaluate(`document.activeElement === null ? 'none' : (document.activeElement.getAttribute('class') ?? document.activeElement.tagName)`)
   const enter = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, text: '\r', unmodifiedText: '\r' }
