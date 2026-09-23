@@ -255,10 +255,34 @@ interface DownloadGuardContext {
   downloadsDir: string
 }
 
+/**
+ * One tab's registration on a shared download guard (R4-B-17).
+ *
+ * The context is per registration, and a registration is used only while it is
+ * NOT released: a download has no tab identity, so it is attributed to the most
+ * recent registration that is still alive. Before this, closing the newest tab
+ * kept attributing downloads to its `actor`/`groupKey` forever.
+ */
+interface DownloadGuardRegistration {
+  context: DownloadGuardContext
+  released: boolean
+}
+
 interface DownloadGuardEntry {
   refs: number
-  context: DownloadGuardContext
+  /** Registrations in install order; released ones stay as tombstones. */
+  registrations: DownloadGuardRegistration[]
   dispose: () => void
+}
+
+/** The context a download is attributed to: the newest live registration. */
+function liveContext(entry: DownloadGuardEntry): DownloadGuardContext {
+  for (let index = entry.registrations.length - 1; index >= 0; index -= 1) {
+    const registration = entry.registrations[index]!
+    if (!registration.released) return registration.context
+  }
+  // Unreachable while `refs > 0`; keeping the last context is the old behavior.
+  return entry.registrations[entry.registrations.length - 1]!.context
 }
 
 /**
@@ -312,12 +336,14 @@ export class BrowserGuard {
       existing.refs++
       // A download carries no tab identity (session-level event); attribute
       // it to the most recent registration rather than the first tab forever.
-      existing.context = context
-      return () => { this.releaseDownloadGuard(key) }
+      const registration: DownloadGuardRegistration = { context, released: false }
+      existing.registrations.push(registration)
+      return this.downloadGuardDisposer(key, registration)
     }
-    const entry: DownloadGuardEntry = { refs: 1, context, dispose: () => {} }
+    const registration: DownloadGuardRegistration = { context, released: false }
+    const entry: DownloadGuardEntry = { refs: 1, registrations: [registration], dispose: () => {} }
     const listener = (_event: unknown, item: NativeDownloadItem): void => {
-      const { onDownload, record, groupKey, actor, downloadsDir } = entry.context
+      const { onDownload, record, groupKey, actor, downloadsDir } = liveContext(entry)
       const filename = item.getFilename() || 'download'
       let received = 0
       let rejected = false
@@ -390,13 +416,41 @@ export class BrowserGuard {
     session.on('will-download', listener)
     entry.dispose = () => { session.removeListener('will-download', listener) }
     this.guardedSessions.set(key, entry)
-    return () => { this.releaseDownloadGuard(key) }
+    return this.downloadGuardDisposer(key, registration)
   }
 
-  /** Drop one tab's reference; the shared listener goes away at zero. */
-  private releaseDownloadGuard(key: object): void {
+  /**
+   * One-shot disposer for ONE registration (R4-B-17).
+   *
+   * Idempotent by construction: calling it twice used to decrement the shared
+   * count twice, dropping the listener while another tab was still alive — i.e.
+   * silently disabling download interception for a live tab (P0-5's failure
+   * mode, reachable this time through a double release). The registration is
+   * marked released on the first call, so any later call is a no-op.
+   */
+  private downloadGuardDisposer(key: object, registration: DownloadGuardRegistration): () => void {
+    return () => { this.releaseDownloadGuard(key, registration) }
+  }
+
+  /**
+   * Drop one registration's reference; the shared listener goes away at zero.
+   *
+   * When a registration is released while others remain, the surviving ones
+   * keep owning the attribution context ({@link liveContext}), so a download
+   * triggered by a still-open tab is no longer recorded under a closed tab's
+   * actor/group.
+   */
+  private releaseDownloadGuard(key: object, registration?: DownloadGuardRegistration): void {
     const entry = this.guardedSessions.get(key)
     if (entry === undefined) return
+    if (registration !== undefined) {
+      if (registration.released) return
+      registration.released = true
+    } else {
+      // Legacy call shape (no token): release the newest live registration.
+      const live = entry.registrations.filter(candidate => !candidate.released).at(-1)
+      if (live !== undefined) live.released = true
+    }
     entry.refs--
     if (entry.refs > 0) return
     entry.dispose()

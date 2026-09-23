@@ -1,7 +1,7 @@
 /**
  * Browser tool budgets — the ONE place where the registered tool deadline and
- * the user-gate wait budget live together, because their **order** is a
- * product invariant (2026-09-16).
+ * the internal wait budgets live together, because their **order** is a
+ * product invariant (2026-09-16, extended 2026-09-23 R4-B-15).
  *
  * 现场（客户 v2.7.4 / macOS，会话 session-88502514-b5ac-4e41-be91-765db8b96fc1）：
  * AI 在 20:30:18 用 `browser_takeover` 把控制权交给用户去登录，用户登录完只在
@@ -80,6 +80,22 @@ export const TAB_SLOT_WAIT_TIMEOUT_MS = 5_000
  * 收手：留 1s 给结果投影、op-log 记录、账本落盘与回程。
  */
 export const TOOL_DEADLINE_MARGIN_MS = 1_000
+
+/**
+ * Work time every agent operation keeps for itself when it queues behind
+ * another browser operation (ms) — R4-B-15（2026-09-23 审计）。
+ *
+ * 排队曾经**完全没有预算**：`PoolMutex.run` 只把"等前一个操作"做成可取消
+ * （P0-4），没有任何时间上限，于是 `browser_wait_for` 合法占用全局锁 40s 时，
+ * 排在它后面的 30s 预算工具会在**排队中**越过自己的 deadline，上游
+ * timeout-policy 把工具自己的诊断换成笼统的 `tool call timed out after 30000ms`
+ * —— 与 2026-09-16 客户现场同一类事故（只是这次发生在锁上而不是闸门上）。
+ *
+ * 排队预算 = `deadline − now − 这个常量`：既不早于"本次调用还可能做完一件事"的
+ * 时刻收手，也保证在上游 deadline 之前抛出可读的
+ * `timed out waiting for the running browser operation`。
+ */
+export const QUEUE_MIN_WORK_MS = 1_000
 
 /**
  * Upper bound for the page load raced INSIDE the critical section by

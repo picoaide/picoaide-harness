@@ -32,7 +32,7 @@ import { AI_CONSENT_FILE_NAME, createAiChatAuthorization } from './ai-authorizat
 import { createAppProofProvider, type InstallKeyStore } from './app-proof.ts'
 import { frozenAppHint, frozenAppTitle } from './app-window-copy.ts'
 import { WasmAppsCache, type CacheScope } from './cache.ts'
-import { createAppOpenGate } from './open-gate.ts'
+import { createAppOpenGate, type AppOpenCounts, type AppOpenOutcome } from './open-gate.ts'
 import { createDeepLinkQueue, sanitizeAppPath } from './deep-link-queue.ts'
 import { parseAppDeepLink, parseForeignAppDeepLink } from './deep-link.ts'
 import type { AppSchemeRequestHandler, WasmAppsHostAdapter, WasmAppsWindowAdapter } from './electron-adapter.ts'
@@ -496,8 +496,30 @@ export function apply(ctx: Context, config: Config = {}): void {
   // ---- 深链队列（§7.6：≤8 条 / TTL 5 min / 未登录入队，登录后按序消费） ----
   const pendingLinks = createDeepLinkQueue({ warn })
 
+  /** {@link requestOpen} 的结论（`refused` 带闸门结论供本机路由渲染错误信封）。 */
+  type OpenRequestOutcome =
+    | {
+      kind: 'opened' | 'focused'
+      url: string
+      warning?: 'version-unverified'
+      /** 平台给的当日 PV/UV（J7b：缺省即不出现，绝不补 0）。 */
+      opens?: AppOpenCounts
+    }
+    | { kind: 'queued' }
+    | { kind: 'unavailable' }
+    | { kind: 'refused'; gate: Extract<AppOpenOutcome, { kind: 'denied' } | { kind: 'unreachable' }> }
+
   /**
-   * 未登录 ⇒ 入队；已登录 ⇒ 立刻打开。
+   * 打开一个应用的**唯一入口**：本机打开路由 / 深链 / 登录后队列消费三条路径都走它。
+   *
+   * 未登录 ⇒ 入队（登录后消费时再过闸门）；已登录 ⇒ **先过 F16 打开闸门**，再建窗/聚焦。
+   *
+   * 为什么闸门必须在这一层（R4-B-16，审计 2026-09-23）：`openGate.check` 此前只有本机
+   * 路由调，深链与队列消费完全绕过它 ⇒ ① 拿不到 `changed`，不清该应用在本 session-scope
+   * 下的版本缓存，而 `handler.ts` 会把宿主的旧版本写进 `X-PicoAide-App-Version` **覆盖
+   * 平台下发的版本头**；② 不产生打开计数（PV/UV 偏低）；③ 404/410 的生命周期反应（关窗 +
+   * 清缓存）与"版本无法确认则不打开"的硬闸门都不执行。冻结设计 §5.1b 明写「每次「打开」
+   * 动作调一次；**深链打开同样调用**」，因此判据只能是"这一层调了"，不是"路由里调了"。
    *
    * 返回值带上窗口管理器的结论（`opened` = 新建，`focused` = 聚焦已有）—— §5.2 的
    * `window` 字段是客户端"已打开/已聚焦"反馈的唯一来源，**不能**在路由里按
@@ -507,37 +529,88 @@ export function apply(ctx: Context, config: Config = {}): void {
    * @param path - 已净化的相对路径。
    * @param geometry - 作者声明的窗口几何（F3）；传 `undefined` = "还没问过"，本函数会
    *   在**新建窗口**时去目录兜底取一次；传 `null` = "确定没有声明"（不再兜底）。
-   * @returns 打开结论（`unavailable` = 协议未就绪）。
+   * @param catalogWarm - 本机路由已并发发起的目录兜底查询（省一次串行 RTT）。
+   * @returns 打开结论；`refused` 带上闸门结论，供本机路由渲染错误信封。
    */
   const requestOpen = async (
     appId: string,
     path: string,
     geometry?: DeclaredWindowGeometry | null,
-  ): Promise<'opened' | 'focused' | 'queued' | 'unavailable'> => {
+    catalogWarm?: Promise<DeclaredWindowGeometry | undefined> | undefined,
+  ): Promise<OpenRequestOutcome> => {
     const session = currentSession()
     if (session === null) {
       pendingLinks.enqueue(appId, path)
-      return 'queued'
+      return { kind: 'queued' }
     }
+    const alreadyOpen = windows?.has(appId) === true
+    // F16 硬/软闸门：新窗口 = 硬（拿不到版本就不打开）；聚焦已有窗口 = 软
+    //（保留内容 + 提示，不把正常应用打成错误页）。§5.1b 冻结。
+    const gate = await openGate.check(appId, knownVersions.get(appId) ?? '')
+    if (gate.kind === 'denied') {
+      // 生命周期反应（§7.2 / §16.1「触发源 = open 端点响应」；R2-L2-2）：
+      // 平台说这个应用**没了**（404 未登记/软删/无可用版本，410 = 已下架）⇒
+      // 关掉还开着的窗口并丢掉缓存。触发点只能是这里（服务端不会主动推），
+      // 且只有"没了"才关：401/403（未登录/白名单）是**可恢复**的拒绝，关窗
+      // 会把一次登录过期变成"应用被卸载"。
+      //
+      // **冻结是例外，且必须按 `details.reason` 判**（P2-3，主控 2026-09-20）：
+      // 冻结是**只读快照**（数据保留，§19 Q3），平台为了不泄露存在性把它与
+      // 软删/未登记放在**同一个 404 + `NOT_FOUND`** 里，唯一区分凭据是
+      // `reason`。只看 status 会把"被管理员停用"做成"应用消失"：关窗 + 清
+      // 缓存 + 回一个不可辨的码，`frozenAppTitle` 的可辨文案永远不可达。
+      const frozen = gate.reason === 'app_frozen'
+      if (!frozen && (gate.status === 404 || gate.status === 410)) {
+        const scope = sessionScope()
+        if (scope !== undefined) await cache?.clearApp(scope, appId)
+        knownVersions.delete(appId)
+        knownTitles.delete(appId)
+        warn(`pico-wasm-apps-host: the platform reported ${appId} as unavailable (HTTP ${String(gate.status)} ${gate.code}); closing its window and dropping its cache`)
+        await windows?.close(appId)
+      } else if (frozen) {
+        // 窗口与缓存一律保留（只读快照仍是可看的内容）；只记一条诊断。
+        warn(`pico-wasm-apps-host: the platform reported ${appId} as frozen (HTTP ${String(gate.status)} ${gate.code}); keeping its window and cache`)
+      }
+      return { kind: 'refused', gate }
+    }
+    if (gate.kind === 'unreachable' && !alreadyOpen) {
+      // 硬闸门：连平台都问不到版本就不建窗（深链/队列同样不打开，只记一条 warn）。
+      warn(`pico-wasm-apps-host: refusing to open ${appId}: the app version could not be confirmed (${gate.detail})`)
+      return { kind: 'refused', gate }
+    }
+    if (gate.kind === 'ok') {
+      if (gate.changed) {
+        const scope = sessionScope()
+        if (scope !== undefined) await cache?.clearApp(scope, appId)
+        knownVersions.set(appId, gate.version)
+      }
+      if (gate.title !== undefined) knownTitles.set(appId, gate.title)
+    }
+    // 软闸门（`unreachable` + 窗口已开着）在这里继续：内容保留，只回一条提示。
+    const warning = gate.kind === 'unreachable' ? 'version-unverified' as const : undefined
+    const opens = gate.kind === 'ok' ? gate.opens : undefined
+    const extras = { ...(warning === undefined ? {} : { warning }), ...(opens === undefined ? {} : { opens }) }
     if (windows === undefined) {
       // 没有窗口载体（纯 Node 宿主/单测）：保留事件出口，让客户端面自行处理。
-      if (!registerDefault()) return 'unavailable'
+      if (!registerDefault()) return { kind: 'unavailable' }
       syncPartitions()
-      ctx.emit(WASM_APP_OPEN_EVENT, { app_id: appId, url: wasmAppUrl(appScheme, appId, path) })
-      return 'opened'
+      const url = wasmAppUrl(appScheme, appId, path)
+      ctx.emit(WASM_APP_OPEN_EVENT, { app_id: appId, url })
+      return { kind: 'opened', url, ...extras }
     }
     // 建窗**之前**确保当前用户的分区已注册（协议 handler + 权限守卫 + 请求闸门）：
     // 应用窗口就落在这个 session 上，注册晚于建窗会让首次加载撞
-    // `ERR_UNKNOWN_URL_SCHEME`（空白窗口）。幂等，正常路径下这里是 no-op。
+    // `ERR_UNKNOWN_SCHEME`（空白窗口）。幂等，正常路径下这里是 no-op。
     ensurePartition(currentPartition())
     // 作者声明的窗口几何（F3/§6）：**只对新建窗口**求值（聚焦已有窗口用的是记忆尺寸）。
-    // 请求体/调用方给了就用它，否则问一次目录兜底（每个会话只发一次请求）。
-    const declared = geometry !== undefined
-      ? geometry
-      : (windows.has(appId) ? null : await windowCatalog.lookup(appId) ?? null)
+    // 三态语义（与路由的 `declared` 逐字对齐）：显式几何 ⇒ 用它；`undefined`（"还没问过"）
+    // 或 `null`（"请求体没带"）⇒ 新建窗口时问一次目录兜底（每个 session 只发一次请求）。
+    const declared = geometry === undefined || geometry === null
+      ? (alreadyOpen ? null : await (catalogWarm ?? windowCatalog.lookup(appId)) ?? null)
+      : geometry
     const result = await windows.open(appId, path, declared)
     ctx.emit(WASM_APP_OPEN_EVENT, { app_id: appId, url: result.url })
-    return result.window
+    return { kind: result.window, url: result.url, ...extras }
   }
 
   /** 登录成功后按 FIFO 消费待打开队列（一条失败不阻塞后面的）。 */
@@ -677,47 +750,35 @@ export function apply(ctx: Context, config: Config = {}): void {
             }
             syncPartitions()
             const path = sanitizeAppPath(rawPath)
-            // F16 硬/软闸门：新窗口 = 硬（拿不到版本就不打开）；聚焦已有窗口 = 软
-            // （保留内容 + 提示，不把正常应用打成错误页）。§5.1b 冻结。
+            // 目录兜底与本函数内部的打开校验**并发**（两条都是同一台服务端的一次往返；
+            // 串行会让首次打开白白多等一个 RTT）。请求体已经带了 `window`、或窗口已开着
+            // ⇒ 不查。
             const alreadyOpen = windows?.has(target) === true
-            // 目录兜底与打开校验**并发**（两条都是同一台服务端的一次往返；串行会让
-            // 首次打开白白多等一个 RTT）。请求体已经带了 `window`、或窗口已开着 ⇒ 不查。
             const catalogWarm = declared === null && !alreadyOpen
               ? windowCatalog.lookup(target)
               : undefined
-            const gate = await openGate.check(target, knownVersions.get(target) ?? '')
-            if (gate.kind === 'denied') {
-              // 生命周期反应（§7.2 / §16.1「触发源 = open 端点响应」；R2-L2-2）：
-              // 平台说这个应用**没了**（404 未登记/软删/无可用版本，410 = 已下架）⇒
-              // 关掉还开着的窗口并丢掉缓存。触发点只能是这里（服务端不会主动推），
-              // 且只有"没了"才关：401/403（未登录/白名单）是**可恢复**的拒绝，关窗
-              // 会把一次登录过期变成"应用被卸载"。
-              //
-              // **冻结是例外，且必须按 `details.reason` 判**（P2-3，主控 2026-09-20）：
-              // 冻结是**只读快照**（数据保留，§19 Q3），平台为了不泄露存在性把它与
-              // 软删/未登记放在**同一个 404 + `NOT_FOUND`** 里，唯一区分凭据是
-              // `reason`。只看 status 会把"被管理员停用"做成"应用消失"：关窗 + 清
-              // 缓存 + 回一个不可辨的码，`frozenAppTitle` 的可辨文案永远不可达。
-              const frozen = gate.reason === 'app_frozen'
-              if (!frozen && (gate.status === 404 || gate.status === 410)) {
-                const scope = sessionScope()
-                if (scope !== undefined) await cache?.clearApp(scope, target)
-                knownVersions.delete(target)
-                knownTitles.delete(target)
-                warn(`pico-wasm-apps-host: the platform reported ${target} as unavailable (HTTP ${String(gate.status)} ${gate.code}); closing its window and dropping its cache`)
-                await windows?.close(target)
-              } else if (frozen) {
-                // 窗口与缓存一律保留（只读快照仍是可看的内容）；只记一条诊断。
-                warn(`pico-wasm-apps-host: the platform reported ${target} as frozen (HTTP ${String(gate.status)} ${gate.code}); keeping its window and cache`)
+            // F16 闸门、生命周期反应与版本缓存维护都在 requestOpen 里（唯一入口，R4-B-16）。
+            const outcome = await requestOpen(target, path, declared, catalogWarm)
+            if (outcome.kind === 'refused') {
+              const gate = outcome.gate
+              if (gate.kind === 'unreachable') {
+                json(reply, 502, {
+                  error: {
+                    code: 'OPEN_CHECK_FAILED',
+                    message: hostCopy(locale, '无法确认应用版本，请稍后重试。', 'The app version could not be confirmed; please retry.'),
+                    hints: hostCopy(locale, ['检查客户端与服务端的连接后重试。'], ['Check the client-to-server connection and retry.']),
+                  },
+                })
+                return
               }
+              // 平台的码一律加前缀（见 PLATFORM_REFUSAL_CODE_PREFIX 的注释）：原样透传会与
+              // **本机**证明闸的码撞名，客户端只能误归因。`reason` 是"冻结 vs 不存在"的
+              // **唯一**区分凭据（同码同状态）：缺它客户端只能显示笼统的"平台拒绝了这次打开"。
+              const frozen = gate.reason === 'app_frozen'
               json(reply, gate.status === 401 ? 401 : gate.status, {
                 error: {
-                  // 平台的码一律加前缀（见 PLATFORM_REFUSAL_CODE_PREFIX 的注释）：
-                  // 原样透传会与**本机**证明闸的码撞名，客户端只能误归因。
                   code: `${PLATFORM_REFUSAL_CODE_PREFIX}${gate.code.toUpperCase()}`,
                   platform_code: gate.code,
-                  // `reason` 是"冻结 vs 不存在"的**唯一**区分凭据（同码同状态）：
-                  // 缺它客户端只能显示笼统的"平台拒绝了这次打开"。
                   ...(gate.reason === undefined ? {} : { platform_reason: gate.reason }),
                   message: frozen
                     ? frozenAppTitle(locale)
@@ -727,51 +788,28 @@ export function apply(ctx: Context, config: Config = {}): void {
               })
               return
             }
-            if (gate.kind === 'unreachable' && !alreadyOpen) {
-              json(reply, 502, {
-                error: {
-                  code: 'OPEN_CHECK_FAILED',
-                  message: hostCopy(locale, '无法确认应用版本，请稍后重试。', 'The app version could not be confirmed; please retry.'),
-                  hints: hostCopy(locale, ['检查客户端与服务端的连接后重试。'], ['Check the client-to-server connection and retry.']),
-                },
-              })
-              return
-            }
-            let warning: string | undefined
-            if (gate.kind === 'ok') {
-              if (gate.changed) {
-                const scope = sessionScope()
-                if (scope !== undefined) await cache?.clearApp(scope, target)
-                knownVersions.set(target, gate.version)
-              }
-              if (gate.title !== undefined) knownTitles.set(target, gate.title)
-            } else if (gate.kind === 'unreachable') {
-              // 软闸门：聚焦已有窗口时保留内容，只回一条提示（客户端渲染横幅）。
-              warning = 'version-unverified'
-            }
-            const outcome = await requestOpen(target, path, declared ?? (catalogWarm === undefined ? undefined : await catalogWarm) ?? null)
-            if (outcome === 'unavailable') {
+            if (outcome.kind === 'unavailable') {
               json(reply, 503, { error: { code: 'PROTOCOL_UNAVAILABLE', message: hostCopy(locale, '应用协议未就绪', 'the app protocol is not available') } })
               return
             }
             const url = wasmAppUrl(appScheme, target, path)
-            if (outcome === 'queued') {
+            if (outcome.kind === 'queued') {
               // 未登录不会走到这里（上面已 401）；留一条兜底，防止将来改闸门时静默。
               json(reply, 200, { window: 'queued', app_id: target, url })
               return
             }
             // J7b：`opens`（当日 PV/UV，含本次）**原样透传** —— 不做字段投影、不补
             // 默认值；缺省时字段整个不出现，客户端据此**不渲染**该行（不当成 0）。
-            const opens = gate.kind === 'ok' ? gate.opens : undefined
+            // 闸门结论只在 `requestOpen` 内部可读，所以计数经返回值带出来。
             json(reply, 200, {
               // §5.2：`window` 是**窗口管理器的结论**（新建/聚焦已有），不是在路由里
               // 按"管理器里有没有这个 app"重推 —— 新建成功后它总是 true ⇒ 会说成
               // "已聚焦"（真实适配器下必现）。
-              window: outcome,
+              window: outcome.kind,
               app_id: target,
               url,
-              ...(opens === undefined ? {} : { opens }),
-              ...(warning === undefined ? {} : { warning }),
+              ...(outcome.opens === undefined ? {} : { opens: outcome.opens }),
+              ...(outcome.warning === undefined ? {} : { warning: outcome.warning }),
             })
           },
         },

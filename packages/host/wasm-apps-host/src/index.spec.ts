@@ -277,22 +277,28 @@ describe('protocol and partition registration', () => {
 })
 
 describe('deep links', () => {
-  it('opens the app for a valid channel-scheme link', () => {
+  it('opens the app for a valid channel-scheme link', async () => {
     const h = fakeContext({ session: ALICE })
     apply(h.ctx, { deepLinkScheme: 'acmeai' })
     h.fireDeepLink('acmeai://app/my-notes')
+    // R4-B-16 起深链也要先过 F16 打开闸门（一次平台 /open 往返），所以打开是**异步**的：
+    // 断言内容不变，只是必须等这次往返落地（`defaultFetch` 把它答成 200/ok）。
+    await flush()
     expect(h.emitted).toContainEqual({
       event: WASM_APP_OPEN_EVENT,
       payload: { app_id: 'my-notes', url: 'picoaide-app://my-notes/' },
     })
   })
 
-  it('drops unknown schemes/hosts without a fallback and logs it', () => {
+  it('drops unknown schemes/hosts without a fallback and logs it', async () => {
     const h = fakeContext({ session: ALICE })
     apply(h.ctx, { deepLinkScheme: 'acmeai' })
     h.fireDeepLink('acmeai://auth?token=t')
     h.fireDeepLink('picoaide://app/my-notes')
     h.fireDeepLink('acmeai://app/my-notes/extra')
+    // 等待闸门往返落地：这条断言是**否定**的，"还没开始处理"与"处理完没打开"必须区分
+    // （否则异步化之后它会恒真）。
+    await flush()
     expect(h.emitted.filter(entry => entry.event === WASM_APP_OPEN_EVENT)).toEqual([])
     // `picoaide://app/my-notes` 是**异渠道**链接（J13）⇒ 一条事件 + 一条 scheme 不符 warn；
     // 另外两条是"不是 app 深链"，各记一条。三条都**不回落**任何默认动作。
@@ -306,6 +312,81 @@ describe('deep links', () => {
     apply(h.ctx, {})
     expect(h.warnings.some(message => message.includes('no deep-link scheme'))).toBe(true)
     h.fireDeepLink('acmeai://app/my-notes')
+    expect(h.emitted.filter(entry => entry.event === WASM_APP_OPEN_EVENT)).toEqual([])
+  })
+})
+
+/**
+ * R4-B-16（审计 2026-09-23）：**所有**打开路径走同一个 F16 闸门。
+ *
+ * 修复前 `openGate.check` 只有本机打开路由调：深链（与登录后的队列消费）直接建窗
+ * ⇒ ① 拿不到 `changed`，不清版本缓存，而 `handler.ts` 会把宿主的旧版本写进
+ * `X-PicoAide-App-Version` **覆盖平台下发的版本头**；② 不产生打开计数；
+ * ③ 404/410 的生命周期反应（关窗 + 清缓存）与"版本无法确认则不打开"的硬闸门都不执行。
+ *
+ * 判据（都能咬到实现）：深链必须产生**恰好一次** `/open`；本机路由同样**恰好一次**
+ * （闸门收进 `requestOpen` 后不许变成两次）；平台说"没了"时深链不建窗。
+ */
+describe('R4-B-16 深链同样过 F16 打开闸门', () => {
+  it('深链打开产生一次 /open，并且版本变化时真的建窗', async () => {
+    const created: Array<Record<string, unknown>> = []
+    const openUrls: string[] = []
+    const h = fakeContext({
+      session: ALICE,
+      windowAdapter: {
+        createAppWindow: (options: Record<string, unknown>) => { created.push(options); return { id: created.length } },
+        focusAppWindow: () => {},
+        closeAppWindow: () => {},
+        setAspectRatio: () => {},
+        webContentsId: (handle: { id: number }) => handle.id,
+        webContents: (handle: { id: number }) => ({ wc: handle.id }),
+        workArea: () => ({ x: 0, y: 0, width: 1440, height: 900 }),
+      },
+      fetch: async (url) => {
+        if (url.endsWith('/open')) {
+          openUrls.push(url)
+          return new Response(JSON.stringify({ version: '3.0.0', changed: true, title: 'Demo', opens: { today: { pv: 5, uv: 2 } } }), { status: 200 })
+        }
+        return new Response('{}', { status: 200 })
+      },
+    })
+    apply(h.ctx, { userDataDir: mkdtempSync(join(tmpdir(), 'pico-wasm-apps-r4b16-')), appOriginScheme: 'acme-app', deepLinkScheme: 'acmeai' })
+    h.fireDeepLink('acmeai://app/demo?path=%2Fnotes')
+    // 等**事件**落地（`createAppWindow` 在 `windows.open()` 内部，早于 emit）。
+    for (let i = 0; i < 200 && !h.emitted.some(entry => entry.event === WASM_APP_OPEN_EVENT); i++) await flush()
+
+    expect(openUrls, '深链必须调平台的 open 端点（否则拿不到 changed / 不计打开次数）').toEqual([
+      `${ALICE.serverURL}/api/client/v2/apps/wasm/demo/open`,
+    ])
+    expect(created).toHaveLength(1)
+    expect(h.emitted).toContainEqual({
+      event: WASM_APP_OPEN_EVENT,
+      payload: { app_id: 'demo', url: 'acme-app://demo/notes' },
+    })
+  })
+
+  it('平台说这个应用没了时，深链不建窗（生命周期分支同样生效）', async () => {
+    const created: Array<Record<string, unknown>> = []
+    const h = fakeContext({
+      session: ALICE,
+      windowAdapter: {
+        createAppWindow: (options: Record<string, unknown>) => { created.push(options); return { id: created.length } },
+        focusAppWindow: () => {},
+        closeAppWindow: () => {},
+        setAspectRatio: () => {},
+        webContentsId: (handle: { id: number }) => handle.id,
+        webContents: (handle: { id: number }) => ({ wc: handle.id }),
+        workArea: () => ({ x: 0, y: 0, width: 1440, height: 900 }),
+      },
+      fetch: async (url) => url.endsWith('/open')
+        ? new Response(JSON.stringify({ error: { code: 'NOT_FOUND', message: 'gone', details: { reason: 'app_not_found' } } }), { status: 404 })
+        : new Response('{}', { status: 200 }),
+    })
+    apply(h.ctx, { userDataDir: mkdtempSync(join(tmpdir(), 'pico-wasm-apps-r4b16-404-')), appOriginScheme: 'acme-app', deepLinkScheme: 'acmeai' })
+    h.fireDeepLink('acmeai://app/demo')
+    for (let i = 0; i < 200 && !h.warnings.some(message => message.includes('as unavailable')); i++) await flush()
+
+    expect(created, '404（不存在/软删）必须挡住新建窗口').toHaveLength(0)
     expect(h.emitted.filter(entry => entry.event === WASM_APP_OPEN_EVENT)).toEqual([])
   })
 })
@@ -1275,6 +1356,9 @@ describe('接线缺口回归（B1 surface / B2 窗口几何 / B3 内容缓存）
       session: ALICE,
       windowAdapter: adapter,
       fetch: async (url) => {
+        // R4-B-16：深链同样过 F16 闸门 ⇒ 平台的 /open 端点必须答（拿不到版本时硬闸门
+        // 会拒绝新建窗口，这正是本组用例之外新增的行为）。
+        if (url.endsWith('/open')) return openAnswer('2.0.0')
         if (url.endsWith('/catalog')) {
           return new Response(JSON.stringify({ apps: [{ app_id: 'demo', window: { ratio: 4 / 3 } }] }), { status: 200 })
         }

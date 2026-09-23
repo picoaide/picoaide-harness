@@ -27,7 +27,7 @@ import type { CronController, CronViewSnapshot } from './controller.ts'
 import { styles } from './styles.ts'
 import { JobEditor } from './JobEditor.tsx'
 import { t } from './locales.ts'
-import { latestDstSkip } from './dst-notice.ts'
+import { latestDstSkip, latestMissedTrigger } from './dst-notice.ts'
 
 /** 执行结果的展示标签（文字 + 语义色调）。 */
 function executionLabel(result: JobRecord['executions'][number]): { text: string; tone: 'success' | 'danger' | 'neutral' | 'warn' } {
@@ -113,6 +113,11 @@ export function CronJobTab({ controller, workspaces, api, openSession, page }: {
   // letting the job look like it was forgotten. Fresh skips only; see
   // dst-notice.ts for why the record itself is history.
   const dstSkip = latestDstSkip(snapshot.scheduler, Date.now())
+  // 2026-09-23 R4-B-9: the other way an occurrence disappears — it came due
+  // while nothing was scheduling (the app was closed). Recorded by the Host in
+  // the same place as the DST gaps, announced with its own wording because the
+  // cause is different.
+  const missedTrigger = latestMissedTrigger(snapshot.scheduler, Date.now())
 
   const newButton = (
     <PanelButton variant="primary" size="md" icon={<icons.IconPlus size={14} />} onClick={() => { setCreating(true) }}>
@@ -152,6 +157,12 @@ export function CronJobTab({ controller, workspaces, api, openSession, page }: {
         <div style={{ ...styles.error, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }} data-dsh-cron-dst-skip="">
           <icons.IconClock size={14} />
           <span>{t('settings.dstSkipped', { wallClock: dstSkip.wallClock, timeZone: dstSkip.timeZone, name: dstSkip.name })}</span>
+        </div>
+      )}
+      {missedTrigger !== undefined && (
+        <div style={{ ...styles.error, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }} data-dsh-cron-missed-trigger="">
+          <icons.IconClock size={14} />
+          <span>{t('settings.missedTrigger', { wallClock: missedTrigger.wallClock, name: missedTrigger.name })}</span>
         </div>
       )}
       {snapshot.transportError !== undefined && (

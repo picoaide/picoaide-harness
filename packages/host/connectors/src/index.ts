@@ -10,7 +10,7 @@ import { ConnectorStore, sameCredential } from './store.ts'
 import { ConnectorError, connectorErrorCodeOf } from './connector-error.ts'
 import { hostLocaleOf, hostT, type HostCopyKey, type HostLocale } from './host-copy.ts'
 import { runAuth } from './auth.ts'
-import { createOAuthProvider, resolveAuthorizationServer, resolveStaticAuthorizationServer, TokenRefresher, tokenNeedsRefresh, type RefreshedTokens } from './mcp-oauth-provider.ts'
+import { createOAuthProvider, isTerminalRefreshReason, resolveAuthorizationServer, resolveStaticAuthorizationServer, TokenRefresher, tokenNeedsRefresh, type RefreshedTokens, type RefreshFailure } from './mcp-oauth-provider.ts'
 import type { OAuthTarget } from './mcp-oauth-provider.ts'
 import { REFRESH_LEAD_MS, REFRESH_SWEEP_INTERVAL_MS } from './token-lifetime.ts'
 import { userScopePath } from './user-scope.ts'
@@ -741,6 +741,37 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   /** Re-arm automatic recovery for one account's connector (fresh generation / disconnect). */
   const clearDeadGrant = (scope: string, id: string): void => {
     deadGrants.delete(deadGrantKey(scope, id))
+  }
+  /**
+   * 一次刷新失败 ⇒ 行状态 + 终态标记。**唯一实现**：恢复、后台扫掠、面板按钮三条
+   * 路径共用，它们不能对"哪些失败是终态"给出不同答案。
+   *
+   * R4-B-10（审计 2026-09-23）就是这条唯一性缺失的后果：面板「刷新」按钮遇到
+   * `invalid_grant` 时只 `setState`、不 `markDeadGrant`，于是下一次后台扫掠又把
+   * **已被消费掉**的 refresh token 出示给 IdP（探针实测 reuse 0→1→2；由扫掠检出的
+   * 对照组停在 1）。R4-B-8 的另一半同理：`invalid_scope` 一类**请求级**永久拒绝
+   * （{@link isTerminalRefreshReason} 的 `terminal`）也必须走这里，否则 60s 扫掠
+   * 永远重发同一条注定失败的请求。
+   *
+   * 5xx/网络（`transient`）语义**不变**：不是终态、不装标记，行状态留给调用点
+   * （扫掠保持原状以便下一轮继续试探，面板按钮显示错误文案）。
+   * @param scope - account scope the credential was read from (`store.dir`).
+   * @param id - connector id.
+   * @param credential - the credential generation the failing attempt used, or
+   * `null` when the attempt had none (then no marker can be keyed to a generation).
+   * @param outcome - the classified failure.
+   * @returns true when the failure was terminal (marker armed + row flipped).
+   */
+  const applyRefreshFailure = (
+    scope: string,
+    id: string,
+    credential: ConnectorCredential | null,
+    outcome: RefreshFailure,
+  ): boolean => {
+    if (!isTerminalRefreshReason(outcome.reason)) return false
+    if (credential !== null) markDeadGrant(scope, id, credential)
+    setState(id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
+    return true
   }
   /**
    * Live MCP registrations, keyed by **serverName** — the namespace upstream
@@ -1912,13 +1943,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           : await (async () => {
               const outcome = await tokenRefresher.refresh(def.id)
               if (stale()) return credential
-              if (!outcome.ok && outcome.reason === 'reauthorize') {
-                // CN-5: remember the generation so the sweep stops re-presenting
-                // a revoked refresh token (the row below is the durable signal).
-                markDeadGrant(scope, def.id, credential)
-                // The grant is gone: say so on the row instead of registering
-                // MCP servers that are guaranteed to 401.
-                setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
+              if (!outcome.ok && applyRefreshFailure(scope, def.id, credential, outcome)) {
+                // CN-5 + R4-B-8/10: the terminal state is recorded in ONE place
+                // (marker + row). The grant/request is refused, so registering
+                // MCP servers that are guaranteed to fail is skipped.
                 return null
               }
               return await target.readCredential(def.id) ?? credential
@@ -2020,30 +2048,34 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * 作用域 + 连接器**，值是**凭据代次** `updatedAt`），只要该账号盘上还是同一份
    * 凭据就不再自动重试；用户重新授权会写入新凭据（新代次）⇒ 自动恢复尝试；面板的
    * 「刷新」按钮走 `force`，一直可用。
+   *
+   * R4-B-8/10（审计 2026-09-23）：终态判定与写状态收进 {@link applyRefreshFailure}
+   * 一处（三条路径共用）；`error` 行只要还持 refresh token 也留在白名单里 —— 面板
+   * 按钮遇到 5xx 会把行设成 `error`（可重试的失败），此前那一行从此**退出主动刷新
+   * 集**，一次网络抖动就让连接器再也不会自愈。
    * @returns 扫掠完成的 Promise。
    */
   async function runRefreshSweep(): Promise<void> {
     return runLifecycle(async () => {
       for (const def of defs) {
         const state = states.get(def.id)
-        if (state?.status !== 'connected' && state?.status !== 'unauthorized') continue
+        if (state?.status !== 'connected' && state?.status !== 'unauthorized' && state?.status !== 'error') continue
         // 作用域与凭据取自同一个 store 实例（见 {@link deadGrantKey}）。
         const target = store
         const scope = target.dir
         const credential = await target.readCredential(def.id)
         if (!credential || !tokenNeedsRefresh(credential)) continue
-        // 终态：同一账号同一代凭据已经证明授权被吊销 ⇒ 停止心跳（不静默、行状态仍是
-        // 「需要重新授权」，只是不再拿死 token 去打 IdP）。
+        // 终态：同一账号同一代凭据已经证明授权被吊销/请求被永久拒绝 ⇒ 停止心跳
+        // （不静默、行状态仍是「需要重新授权」，只是不再拿死 token 去打 IdP）。
         if (isDeadGrant(scope, def.id, credential)) continue
         const outcome = await tokenRefresher.refresh(def.id, { locale: locale() })
         if (outcome.ok) {
           clearDeadGrant(scope, def.id)
           continue
         }
-        if (outcome.reason === 'reauthorize') {
-          markDeadGrant(scope, def.id, credential)
-          setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
-        }
+        // transient 在这里刻意**不改行状态**：它的语义是"稍后用同一份凭据再试"，
+        // 下一轮扫掠应当继续试探（终态的两类由唯一的 applyRefreshFailure 处理）。
+        applyRefreshFailure(scope, def.id, credential, outcome)
       }
     })
   }
@@ -2109,6 +2141,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
      * reports the new expiry; a dead grant flips the row to `unauthorized` so
      * the user is told to authorize again instead of silently staying
      * "connected" with a token that no longer works.
+     *
+     * R4-B-10 (audit 2026-09-23): this path used to flip the row WITHOUT arming
+     * the terminal marker, so when the button was the first surface to meet a
+     * revoked grant the next background sweep presented the already-consumed
+     * refresh token to the IdP one more time (probe: reuse 0→1→2, versus 1 for
+     * the sweep-detected control). It now goes through the same
+     * {@link applyRefreshFailure} the other two paths use.
      */
     const refreshTokens: JsonHandler = async (req, res) => {
       const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
@@ -2117,21 +2156,32 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const def = getDef(id)
       if (!def) return json(res, 404, { error: `unknown connector: ${id}` })
       if (oauthTargetOf(def) === null) return json(res, 400, { error: copy('flow.refreshUnsupported') })
-      const outcome = await tokenRefresher.refresh(id, { force: true, locale: locale() })
+      // The credential the failing attempt used: the terminal marker below is
+      // keyed to its generation, so it must be READ — but the forced refresh is
+      // registered FIRST. A route that awaits a read before calling `refresh()`
+      // yields its single-flight slot to a concurrent automatic refresh, and
+      // when that one takes the "token still fresh, nothing to do" fast path the
+      // user's "refresh now" is silently swallowed (pinned by
+      // `token-refresh.spec.ts > refreshes through the real route and exposes the
+      // new expiry`, which requires exactly one grant from this route). A FAILED
+      // attempt never writes a credential, so racing the read is safe.
+      const scope = store.dir
+      const pending = tokenRefresher.refresh(id, { force: true, locale: locale() })
+      const credential = await store.readCredential(id)
+      const outcome = await pending
       if (!outcome.ok) {
-        // The refresh engine reports WHY the refresh failed; a dead grant is the
-        // one outcome that means "authorize again", and that is the stable code
-        // the client maps (the message itself is translatable).
-        const errorCode = outcome.reason === 'reauthorize' ? 'auth-required' : undefined
-        if (outcome.reason === 'reauthorize') {
-          setState(id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode })
-        } else if (outcome.reason === 'transient') {
+        // The refresh engine reports WHY the refresh failed; the terminal
+        // reasons are the ones that mean "this credential will not be retried
+        // automatically", and `auth-required` is the stable code the client maps
+        // (the message itself is translatable).
+        const terminal = applyRefreshFailure(scope, id, credential, outcome)
+        if (!terminal && outcome.reason === 'transient') {
           setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: outcome.message, errorCode: undefined })
         }
         return json(res, outcome.reason === 'not-applicable' ? 400 : 409, {
           error: outcome.message,
           reason: outcome.reason,
-          ...(errorCode === undefined ? {} : { errorCode }),
+          ...(terminal ? { errorCode: 'auth-required' as const } : {}),
         })
       }
       noteCredential(id, await store.readCredential(id))

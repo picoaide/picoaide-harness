@@ -141,6 +141,12 @@ export class HostCronScheduler {
    * instant is found — a schedule whose matches fall outside the scan horizon —
    * leaving `nextRunAt` in the past would fire the job late on the next
    * ordinary tick, i.e. exactly the replay this path exists to prevent.
+   *
+   * The roll is reported as `'caught-up'` when the catch-up policy really fired
+   * the occurrence: its run is already observable through its execution row, so
+   * recording it as a missed trigger would be a second, false story about the
+   * same occurrence (2026-09-23 R4-B-9). When no matching instant was found
+   * nothing fired, and the skip is recorded like any other.
    */
   private catchUpJob(job: JobRecord, now: number): void {
     const lastMatch = this.lastMatchAt(job, now)
@@ -149,7 +155,7 @@ export class HostCronScheduler {
       if (opened !== undefined) void this.fire(opened.job, opened.execution)
     }
     // Roll forward past now so the regular path does not re-fire.
-    this.ledger.skipMissedFor(job.id, now)
+    this.ledger.skipMissedFor(job.id, now, lastMatch === undefined ? 'skipped' : 'caught-up')
   }
 
   private lastMatchAt(job: JobRecord, now: number): number | undefined {

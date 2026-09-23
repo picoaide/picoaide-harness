@@ -9,7 +9,7 @@
  * @module @picoaide/dsh-browser
  */
 
-import { NAVIGATE_LOAD_BOUND_MS, TOOL_DEADLINE_MARGIN_MS } from './budgets.ts'
+import { NAVIGATE_LOAD_BOUND_MS, QUEUE_MIN_WORK_MS, TOOL_DEADLINE_MARGIN_MS } from './budgets.ts'
 import { CdpSession } from './cdp.ts'
 import { BROWSER_PARTITION, BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, type NativeBrowserWindow, type NativeSession, type NativeView } from './electron-adapter.ts'
 import { BrowserGuard, ensureSessionGuard, isLocalHostname, looksLikeAbsoluteUrl } from './guard.ts'
@@ -38,8 +38,19 @@ import type {
 
 /** Default cooperative tool-call budget (ms). */
 const DEFAULT_TIMEOUT_MS = 30_000
+
 /** Default cap on waiting for Electron's loadURL promise (ms). */
 const DEFAULT_LOAD_TIMEOUT_MS = 20_000
+
+/**
+ * Floor for one CDP command's budget (ms) — see {@link BrowserRuntime.cdpCallBudgetMs}.
+ *
+ * Only binds when the remaining operation budget is smaller than this: a
+ * near-expired deadline must not turn an otherwise healthy command into an
+ * instant timeout, and tiny configured budgets (unit tests) keep the historical
+ * behavior.
+ */
+const CDP_MIN_CALL_BUDGET_MS = 250
 /**
  * Cap on the native `capturePage()` attempt before the renderer-side fallback
  * runs (ms). A hidden window can **hang** that call instead of rejecting it, and
@@ -484,6 +495,15 @@ export class BrowserRuntime {
   private readonly listeners = new Set<(event: BrowserStreamEvent) => void>()
   private shellOrigin: string | undefined
   private lastAgentId = ''
+  /**
+   * Absolute deadline of the agent operation currently inside the critical
+   * section (epoch ms), or undefined outside one — R4-B-15.
+   *
+   * Set by {@link withAgentAttribution} before the pool is entered and cleared
+   * when the operation ends. It is the reference both the CDP budget provider
+   * ({@link cdpCallBudgetMs}) and the pool queue budget are derived from.
+   */
+  private activeOperationDeadlineAt: number | undefined
   readonly pool: TabPool
   store: BrowserStore
 
@@ -980,7 +1000,7 @@ export class BrowserRuntime {
         this.pool.releaseReservation(reservation)
         throw error
       }
-    }, signal)
+    }, signal, { deadlineAt })
   }
 
   private async createTabReal(url: string | undefined, signal: AbortSignal | undefined, fixedId: number | undefined, actor: RecordActor, inheritSecretsFrom?: number, reservation?: TabReservation, deadlineAt?: number): Promise<BrowserTabState> {
@@ -991,7 +1011,13 @@ export class BrowserRuntime {
     const view = this.adapter.createView(this.partition)
     // Every CDP command is bounded by the tool budget: a wedged renderer
     // rejects the call instead of holding the global mutex forever (P0-4).
-    const cdp = new CdpSession(view.webContents.cdp, { timeoutMs: this.options.timeoutMs })
+    // R4-B-15: the per-command budget is a PROVIDER, not the tool budget: a CDP
+    // command issued by the current agent operation is capped at what is left of
+    // that operation's deadline, so a hung renderer is abandoned before the
+    // upstream timeout-policy replaces the runtime's own diagnosis with a
+    // generic `tool call timed out`. Outside an agent operation (prewarm,
+    // restore, user paths) nothing changes.
+    const cdp = new CdpSession(view.webContents.cdp, { timeoutMs: () => this.cdpCallBudgetMs() })
     try {
       await cdp.attach()
     } catch (cause) {
@@ -1989,8 +2015,13 @@ export class BrowserRuntime {
   }
 
   /** Run one agent operation under the global serial mutex (user gate aware). */
-  private async agentRun<T>(tool: string, body: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    return await this.withAgentAttribution(tool, body, signal)
+  private async agentRun<T>(
+    tool: string,
+    body: () => Promise<T>,
+    signal?: AbortSignal,
+    budget: { deadlineAt?: number | undefined } = {},
+  ): Promise<T> {
+    return await this.withAgentAttribution(tool, body, signal, budget)
   }
 
   /**
@@ -2013,8 +2044,33 @@ export class BrowserRuntime {
     return await this.agentRun(tool, async () => await work(), signal)
   }
 
-  private async withAgentAttribution<T>(tool: string, body: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  /**
+   * Run one agent operation under the global mutex with the user gate, and give
+   * it a BOUNDED budget for everything that happens before/inside it
+   * (R4-B-15, 2026-09-23).
+   *
+   * @param tool - tool name for busy attribution and op-logging.
+   * @param body - the operation.
+   * @param signal - caller cancellation signal.
+   * @param budget - `deadlineAt` when the tool layer already computed one
+   * (`browser_wait_for`, the navigation family); otherwise the operation
+   * deadline is derived from the registered tool budget here, so the CDP leg
+   * and the pool queue can be clamped even for tools that pass nothing.
+   */
+  private async withAgentAttribution<T>(
+    tool: string,
+    body: () => Promise<T>,
+    signal?: AbortSignal,
+    budget: { deadlineAt?: number | undefined } = {},
+  ): Promise<T> {
     const callerAgent = this.lastAgentId
+    const deadlineAt = budget.deadlineAt ?? Date.now() + this.options.timeoutMs - TOOL_DEADLINE_MARGIN_MS
+    const previousDeadline = this.activeOperationDeadlineAt
+    this.activeOperationDeadlineAt = deadlineAt
+    // The queue budget is what is left of the deadline once room is kept for the
+    // operation itself: a caller that would blow its own deadline while merely
+    // waiting now fails with a readable error instead of a generic timeout.
+    const queueBudgetMs = Math.max(0, deadlineAt - Date.now() - QUEUE_MIN_WORK_MS)
     try {
       return await this.pool.withOperation(tool, async () => {
         const previous = this.lastAgentId
@@ -2024,13 +2080,15 @@ export class BrowserRuntime {
         } finally {
           this.lastAgentId = previous
         }
-      }, signal)
+      }, signal, queueBudgetMs)
     } catch (cause) {
       // "用户拿着控制权"是一个**状态**，不是一次普通失败：记下来让 shell / 客户端
       // 能提示用户去点「交给 AI」（2026-09-16 会话 88502514 的现场，AI 被静默挡住
       // 25 分钟而界面上没有任何提示）。
       if (cause instanceof BrowserError && cause.code === 'window-controlled') this.noteControlBlock(tool)
       throw cause
+    } finally {
+      this.activeOperationDeadlineAt = previousDeadline
     }
   }
 
@@ -2060,7 +2118,7 @@ export class BrowserRuntime {
       await this.navigateInternal(tabId, url, waitUntil, user ? 'user' : 'ai', deadlineAt)
     }
     if (user) return await body()
-    return await this.agentRun('browser_navigate', body, signal)
+    return await this.agentRun('browser_navigate', body, signal, { deadlineAt })
   }
 
   /** User path: navigate the pool's active tab (open one first if none). */
@@ -2098,6 +2156,30 @@ export class BrowserRuntime {
     const byTimeout = Math.max(0, this.options.timeoutMs - (Date.now() - startedAt))
     if (deadlineAt === undefined) return byTimeout
     return Math.min(byTimeout, Math.max(0, deadlineAt - Date.now() - TOOL_DEADLINE_MARGIN_MS))
+  }
+
+  /**
+   * 本次 CDP 命令最多能等多久（ms）—— R4-B-15（2026-09-23 审计）的唯一实现。
+   *
+   * CDP 腿此前**完全不看额度**：会话缺省就是 `options.timeoutMs`（= 工具预算
+   * 30s），于是"等用户闸 1.2s + 渲染器不响应 30s"= 31.2s > 30s 预算，上游
+   * timeout-policy 在 deadline 到点时把整条结果换成笼统的
+   * `tool call timed out after 30000ms`，工具自己的
+   * `Runtime.evaluate did not respond within …` 永远送不到模型面前。
+   *
+   * 现在的上限 = `min(工具预算, 当前操作的 deadline − now)`：操作 deadline 由
+   * {@link withAgentAttribution} 在进入临界区前算出（工具层给了 `deadlineAt` 就用
+   * 它，否则按注册预算推导），所以排队/等闸花掉的时间不会被 CDP 腿重复花掉。
+   * 下限取 `min(250ms, 工具预算)`：额度只剩几毫秒时不该把一次正常的命令判死，
+   * 极小预算（测试里的 60ms）行为与改前逐字节一致。
+   */
+  private cdpCallBudgetMs(): number {
+    const toolBudget = this.options.timeoutMs
+    const deadlineAt = this.activeOperationDeadlineAt
+    if (deadlineAt === undefined) return toolBudget
+    const remaining = deadlineAt - Date.now()
+    const floor = Math.min(CDP_MIN_CALL_BUDGET_MS, toolBudget)
+    return Math.max(floor, Math.min(toolBudget, remaining))
   }
 
   private async navigateInternal(id: number, url: string, waitUntil: BrowserWaitUntil, actor: RecordActor, deadlineAt?: number): Promise<void> {
@@ -2342,7 +2424,7 @@ export class BrowserRuntime {
       this.record('browser_reload', tabId, `reload tab ${tabId}`, false, user ? 'user' : 'ai')
     }
     if (user) return await body()
-    return await this.agentRun('browser_reload', body, signal)
+    return await this.agentRun('browser_reload', body, signal, { deadlineAt })
   }
 
   async goBack(tabId: number, signal?: AbortSignal, user = false, deadlineAt?: number): Promise<void> {
@@ -2359,7 +2441,7 @@ export class BrowserRuntime {
       this.record('browser_go_back', tabId, `back to ${tab.url}`, false, user ? 'user' : 'ai')
     }
     if (user) return await body()
-    return await this.agentRun('browser_go_back', body, signal)
+    return await this.agentRun('browser_go_back', body, signal, { deadlineAt })
   }
 
   async goForward(tabId: number, signal?: AbortSignal, user = false, deadlineAt?: number): Promise<void> {
@@ -2376,7 +2458,7 @@ export class BrowserRuntime {
       this.record('browser_go_forward', tabId, `forward to ${tab.url}`, false, user ? 'user' : 'ai')
     }
     if (user) return await body()
-    return await this.agentRun('browser_go_forward', body, signal)
+    return await this.agentRun('browser_go_forward', body, signal, { deadlineAt })
   }
 
   /** Switch the pool's active tab. */
@@ -3648,6 +3730,9 @@ export class BrowserRuntime {
   /** Wait for a page condition. */
   async waitFor(tabId: number, options: WaitForOptions, signal?: AbortSignal): Promise<{ ok: boolean; reason: string }> {
     const resolved = this.resolveTab(tabId)
+    // `options.deadlineAt` is the tool's own (longer) registered deadline: pass it
+    // through so the queue budget and the CDP budget are derived from THAT
+    // deadline instead of the generic 30 s tool budget (R4-B-15).
     return await this.agentRun('browser_wait_for', async () => {
       // Compute the condition deadline INSIDE the critical section: whatever
       // time the mutex/gate took is already spent budget.
@@ -3700,7 +3785,7 @@ export class BrowserRuntime {
       // F-2: the cap runs after BOTH redaction passes.
       const reason = redactFilledSecretsText(tab, stripSensitiveText(`wait_for ${options.condition} timed out — ${urlChanged}`), { verbatim: true })
       return { ok: false, reason: reason.slice(0, WAIT_FOR_REASON_LIMIT) }
-    }, signal)
+    }, signal, { deadlineAt: options.deadlineAt })
   }
 
   /** Page-side wait predicate source. Constant by construction — the values

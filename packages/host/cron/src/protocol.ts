@@ -14,28 +14,42 @@ export const CRON_SCHEMA_VERSION = 2 as const
 export const CRON_API_PREFIX = '/api/cron'
 
 /**
- * One occurrence the scheduler rolled past without firing because its wall
- * clock does not exist in the host timezone — the spring-forward DST gap
- * (2026-09-23 R3-B3 F2 / B-5).
+ * Why an occurrence never fired.
  *
- * The skip itself is correct (a local time that does not exist cannot fire),
- * but it used to be invisible: the job simply did not run that day. This record
- * is what the panel and `GET /api/cron/state` show, so a user can tell "the
- * 02:30 run was skipped because 02:30 did not exist" from "the scheduler is
- * broken".
+ * - `dst-gap`: its local wall clock does not exist (spring-forward), so the
+ *   scheduler rolled past it and it can never fire (2026-09-23 R3-B3 F2).
+ * - `missed`: it came due while nothing was scheduling (the app was closed or
+ *   suspended, or the job was not visible to the running session) and the
+ *   recovery policy rolls such occurrences forward instead of replaying them
+ *   (2026-09-23 R4-B-9). Records written before this field existed are all DST
+ *   gaps, so an absent reason reads as `dst-gap`.
+ */
+export type SkipReason = 'dst-gap' | 'missed'
+
+/**
+ * One occurrence the scheduler rolled past without firing.
+ *
+ * The skip itself is correct — a local time that does not exist cannot fire,
+ * and a trigger missed while the app was closed is never replayed — but it used
+ * to be invisible: the job simply did not run. This record is what the panel
+ * and `GET /api/cron/state` show, so a user can tell "the 02:30 run was skipped
+ * because 02:30 did not exist" or "the 09:00 run was missed because the app was
+ * closed" from "the scheduler is broken".
  */
 export interface SkippedOccurrence {
   /** Job the occurrence belonged to. */
   jobId: string
   /** Job name when the skip was recorded (so the notice needs no join). */
   name: string
-  /** The local wall clock that does not exist, as `YYYY-MM-DD HH:MM`. */
+  /** Why it never fired; absent = a pre-`reason` DST-gap record. */
+  reason?: SkipReason
+  /** Wall clock the occurrence asked for (or the missing local time), as `YYYY-MM-DD HH:MM`. */
   wallClock: string
   /** IANA timezone the skip was computed in (the scheduler's timezone). */
   timeZone: string
-  /** The instant the platform normalized that wall clock to. */
+  /** The instant the occurrence was due at (a DST gap: the instant it normalized forward to). */
   normalizedTo: number
-  /** When the roll observed the gap (Host clock, ms epoch). */
+  /** When the roll observed the skip (Host clock, ms epoch). */
   detectedAt: number
 }
 
@@ -54,10 +68,12 @@ export interface CronSchedulerSnapshot {
    */
   readOnly?: boolean
   /**
-   * Most recent occurrences the scheduler rolled past because they do not exist
-   * in {@link timeZone} (DST spring-forward gaps), oldest first, bounded. The
-   * panel shows the latest one while it is fresh; `GET /api/cron/state` and the
-   * SSE frames carry the list itself (2026-09-23 R3-B3 F2 / B-5).
+   * Most recent occurrences the scheduler rolled past without firing — DST
+   * spring-forward gaps (the local time does not exist) and triggers missed
+   * while nothing was scheduling — oldest first, bounded. Each entry carries
+   * its {@link SkippedOccurrence.reason}. The panel shows the latest one while
+   * it is fresh; `GET /api/cron/state` and the SSE frames carry the list itself
+   * (2026-09-23 R3-B3 F2 / B-5, extended by R4-B-9).
    */
   skippedOccurrences?: SkippedOccurrence[]
 }

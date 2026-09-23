@@ -124,6 +124,18 @@ export interface RefreshedTokens {
 type RefreshFailureReason =
   /** The authorization server rejected the grant: only a new authorization helps. */
   | 'reauthorize'
+  /**
+   * The authorization server rejected the REQUEST itself (RFC 6749 §5.2 /
+   * RFC 8707 shape errors: `invalid_scope`, `invalid_request`,
+   * `unsupported_grant_type`, `invalid_target`).
+   *
+   * Re-sending the identical request cannot succeed, so this is a THIRD
+   * outcome next to `reauthorize` — it reaches the same terminal state (the
+   * connector demands attention and the automatic sweep stops re-presenting
+   * the credential) but must not promise that re-authorizing fixes it: the
+   * request shape is what the server refused.
+   */
+  | 'terminal'
   /** Network / 5xx / malformed response: retry later with the same credential. */
   | 'transient'
   /** Nothing to refresh (no refresh token, no endpoint, or a public endpoint). */
@@ -137,11 +149,41 @@ export interface RefreshFailure {
 
 export type RefreshOutcome = { ok: true; tokens: RefreshedTokens } | RefreshFailure
 
+/**
+ * Whether a failure reason is a **terminal** one: the same stored credential
+ * must not be presented again by the automatic sweep (only an interactive
+ * re-authorization, a configuration change, or the manual button may retry).
+ *
+ * One predicate so the three call sites (restore / sweep / panel button) can
+ * not disagree about which reasons arm the terminal marker — the R4-B audit
+ * found the panel path arming nothing at all.
+ * @param reason - the classified refresh failure reason.
+ * @returns true for `reauthorize` and `terminal`.
+ */
+export function isTerminalRefreshReason(reason: RefreshFailureReason): boolean {
+  return reason === 'reauthorize' || reason === 'terminal'
+}
+
 /** Thrown internally when the SDK would redirect a background refresh to a browser. */
 const REAUTHORIZE_REQUIRED = 'PICO_CONNECTOR_REAUTHORIZE_REQUIRED'
 
 /** OAuth error codes that mean "this grant is dead" (SDK `OAuthError.code` values). */
 const DEAD_GRANT_CODES = new Set(['invalid_grant', 'invalid_client', 'unauthorized_client'])
+
+/**
+ * OAuth error codes that mean "this REQUEST is permanently refused".
+ *
+ * RFC 6749 §5.2 (`invalid_request`, `invalid_scope`, `unsupported_grant_type`)
+ * and RFC 8707's `invalid_target` describe the request the client sent, not a
+ * lapsed authorization: the identical retry gets the identical answer. Treating
+ * them as `transient` made the 60 s sweep re-present a doomed request to the
+ * customer's IdP forever (R4-B-8, audit 2026-09-23), the same hammering class
+ * the CN-5 fix closed for dead grants.
+ *
+ * Deliberately an allow-list: unknown codes (including transport errno strings
+ * such as `ECONNREFUSED`) must stay retryable.
+ */
+const REQUEST_REJECTED_CODES = new Set(['invalid_scope', 'invalid_request', 'unsupported_grant_type', 'invalid_target'])
 
 /**
  * Structural read of the SDK's `OAuthError`.
@@ -694,6 +736,12 @@ export async function refreshCredentialTokens(
     }
     if (code !== undefined && DEAD_GRANT_CODES.has(code)) {
       return { ok: false, reason: 'reauthorize', message: hostT(locale, 'refresh.grantRejected', { code }) }
+    }
+    // R4-B-8: a request-level refusal is terminal too, but says so honestly —
+    // "authorize again" would be a promise this outcome cannot keep (the
+    // request shape, not the authorization, is what the server rejected).
+    if (code !== undefined && REQUEST_REJECTED_CODES.has(code)) {
+      return { ok: false, reason: 'terminal', message: hostT(locale, 'refresh.requestRejected', { code }) }
     }
     return { ok: false, reason: 'transient', message: hostT(locale, 'refresh.failed', { message }) }
   }
