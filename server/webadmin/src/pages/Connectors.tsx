@@ -478,10 +478,12 @@ export default function Connectors() {
           description: form.description.trim(),
           auth_mode: form.authMode,
           definition,
-          // P2-42: 原来恒发 enabled:true,而编辑表单没有该字段 → 保存一次就把已停用的
-          // 连接器静默重新下发。表单不含该字段,故编辑时回传原值(服务端 PUT 是整体
-          // 替换,enabled 缺省即 true,不能省略);新建仍默认启用(与开关默认一致)。
-          enabled: isNew ? true : editing.enabled,
+          // A-11（webadmin 半边，2026-09-23）：这里**刻意不回传 `enabled`**。
+          // 服务端（89026689ba）已把 PUT 改成部分更新：省略 `enabled` 即保持现值，
+          // 创建省略即启用。此前这几行是绕过补丁（编辑表单没有该字段，只好把
+          // `editing.enabled` 原样带回），它让"提交体"与"弹窗建模的字段"分叉 ——
+          // 表单里看不到的值却能被保存动作改写。判据见 Connectors.test.tsx 的
+          // 「保存载荷不含 enabled」两条用例（编辑 / 新建）。
         }),
       })
       setEditing(null)
