@@ -1226,9 +1226,18 @@ describe('工具描述与服务端实现一致（下架语义 / 旧配置字段�
   it('服务端实现：enabled=false 走 writeGone（410），下架条目**照样**列在目录里', () => {
     // 先证明"实现是 410"仍然是事实（否则下面的描述断言没有意义）。
     expect(SERVE_GO, 'serve.go 的 !app.Enabled 分支不再 writeGone：请连同工具描述一起复核').toMatch(/if\s*!app\.Enabled\s*\{[\s\S]{0,240}?writeGone\(/)
-    // 目录条件只排除冻结与无版本行 —— 下架**不在**排除项里。
-    expect(READ_GO).toMatch(/if\s*a\.FrozenAt\s*!=\s*nil\s*\|\|\s*a\.CurrentReleaseID\s*<=\s*0\s*\{\s*\n\s*continue/)
-    expect(READ_GO).toContain('"enabled":    a.Enabled')
+    // 目录条件排除「无版本行」与「**非归属人**的冻结行」—— 下架**不在**排除项里。
+    // 冻结行对归属人可见是第六轮 R6-B P2-1 的语义决策（否则"发布者本人在应用中心里
+    // 就能解冻"没有任何依附面：目录是面板唯一数据源，行一消失就没有可点的东西）。
+    // 两段分开钉：把归属例外删掉、或把冻结行改回对所有人排除，这里都要红。
+    expect(READ_GO).toMatch(/if\s*a\.CurrentReleaseID\s*<=\s*0\s*\{\s*\n\s*continue/)
+    expect(READ_GO).toMatch(/if\s*a\.FrozenAt\s*!=\s*nil\s*&&\s*!ownedByViewer\s*\{\s*\n\s*continue/)
+    expect(READ_GO, '冻结行的归属例外判据必须来自调用者身份（严格归属，不含超管兜底）')
+      .toMatch(/ownedByViewer\s*:=\s*a\.Owner\s*!=\s*""\s*&&\s*a\.Owner\s*==\s*viewer\.Username/)
+    // 目录行必须下发权威 `enabled` 值（客户端据此标「已下架」）。**不要**钉具体空格数：
+    // gofmt 会随相邻键的对齐随时改它（第六轮加 `frozen` 键时就变了），判据要的是语义。
+    expect(READ_GO, '目录行不再下发权威 enabled 值')
+      .toMatch(/"enabled":\s+a\.Enabled,/)
   })
 
   it('wasm_app_list 描述说"下架即不能访问（410）"，且不再说"域名仍然可访问/不在应用中心推荐"', () => {

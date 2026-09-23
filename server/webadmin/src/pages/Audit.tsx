@@ -139,6 +139,10 @@ export const ACTION_LABEL: Record<string, string> = {
   // 登记后可按结果筛选。
   login_success: '登录成功',
   login_fail: '登录失败',
+  // 第六轮 R6-A-4：OIDC 在途流程达上限时的**容量拒绝**单独记一条（它不算失败，
+  // 不能混进 login_fail —— 否则一个 NAT 出口会把自己的配额拒绝当成攻击证据，
+  // 二次封锁整个出口）。语义与 internal/serverauth/oidc.go 的写照点一致。
+  oidc_flow_capacity: 'OIDC 流程容量拒绝',
   password_change: '修改密码',
   admin_password_change: '修改管理员密码',
   admin_mfa_login: '管理员 MFA 登录',
