@@ -683,6 +683,53 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   }
 }
 
+// ---- 1e. CI 的 gofmt 扫描面必须与 server/Makefile 同源(2026-09-23 第三轮审计 P-4) ----
+//
+// 现场:CI 的 gofmt 步骤扫 `cmd internal`,而 `server/Makefile` 的 check / check-fast
+// 扫 `cmd internal demoapps` ⇒ `server/demoapps/**`(随镜像分发的内置演示应用 Go 源码)
+// 里的格式违规在 CI 全绿,而 `go vet ./...` 与 `go test ./...` 都不查格式。所以
+// "CI 全绿"在那条面上是假的。
+//
+// 判据不是"两边文本相等"(那是声明),而是**目录集合相等 + 目录真实存在**:
+//   * 单侧加目录(Makefile 加、CI 不加)= 两条门禁分叉 ⇒ 红;
+//   * 单侧删目录(CI 删 demoapps)= 扫描面缩水 ⇒ 红;
+//   * 目录名打错(扫一个不存在的目录)= 红;
+//   * Makefile 的 check 与 check-fast 出现两个不同的扫描面 ⇒ 红。
+// 目录集合从两侧**真源**解析(CI 的 run 块 + Makefile),不写死字面量 ——
+// 写死的话改了真源判据不会跟着动(那正是本轮 P-1/P-2 的假绿形态)。
+{
+  const workflowText = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
+  const block = extractRunBlocks(workflowText).find(entry => /gofmt\s+-l\b/u.test(entry.content))
+  check(block !== undefined, 'ci.yml 里找不到 gofmt 步骤(抽取失败或整步被删)')
+
+  /** 取出文本里所有 `gofmt -l <目录…>` 的目录列表(按出现顺序;不做去重,便于比对同面)。 */
+  const scanLists = text => [...text.matchAll(/gofmt\s+-l\s+([^\n"';|&)]+)/gu)]
+    .map(match => match[1].trim().split(/\s+/u).filter(Boolean))
+    .filter(dirs => dirs.length > 0)
+  const makefile = readFileSync(join(root, 'server', 'Makefile'), 'utf8')
+  const makefileLists = scanLists(makefile)
+  check(makefileLists.length > 0, 'server/Makefile 里找不到 `gofmt -l`(唯一真源被删?)')
+  check(
+    new Set(makefileLists.map(dirs => dirs.join(' '))).size === 1,
+    `server/Makefile 的每处 gofmt -l 必须扫同一组目录(本地快慢门禁不许分叉),实际 ${JSON.stringify(makefileLists)}`,
+  )
+  const makefileDirs = makefileLists[0] ?? []
+  const ciDirs = block === undefined ? [] : (scanLists(block.content)[0] ?? [])
+  check(ciDirs.length > 0, 'ci.yml 的 gofmt 步骤里找不到 `gofmt -l <目录…>`')
+  check(
+    ciDirs.join(' ') === makefileDirs.join(' '),
+    'CI 的 gofmt 扫描面必须与 server/Makefile 同源(唯一真源是 Makefile 的 `gofmt -l`)'
+      + `:期望 [${makefileDirs.join(' ')}],实际 [${ciDirs.join(' ')}]`
+      + ' —— 只改一侧会让 CI 与本地 make check 的门禁分叉',
+  )
+  for (const dir of ciDirs) {
+    check(
+      existsSync(join(root, 'server', dir)),
+      `gofmt 扫描目录 server/${dir} 不存在(打错的目录名等于白扫)`,
+    )
+  }
+}
+
 // ---- 2. 掩码 / 跳过不合规目录 / 不回显名字 ----
 {
   const source = fakeChannelRepo(['official', 'example-brand'], { extraDirectories: ['README', 'Bad_Name'] })
@@ -2154,6 +2201,7 @@ if (failures.length > 0) {
 }
 process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag→渠道集/是否发布 + 静态对拍)/'
   + '策展发布说明的两道检查(真跑)/WASM 门禁接线(W-4 用例级报告参数 + --scope 真过滤、W-5 探针参数)/'
+  + 'gofmt 扫描面同源(CI ↔ server/Makefile)/'
   + '渠道发现(掩码,取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/'
   + '镜像装配(无 deb + 三 tag 含渠道专属)/R2 中转/R2 发布(本次版本必留 + 上传后大小/哈希完整性校验)/'
   + '本地镜像构建入口的命名构建上下文/公开 artifact 守卫全部符合预期\n')

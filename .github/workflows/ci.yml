@@ -349,10 +349,18 @@ jobs:
         working-directory: server/webadmin
       # 2026-09-06 补上门禁缺口(审计 G1/G2):gofmt 与 webadmin 测试此前只在
       # server/Makefile check 中,CI 从未执行。
+      #
+      # W-6(2026-09-23 第三轮审计 P-4):扫描面必须与 `server/Makefile` 的
+      # `gofmt -l` **同源**(那里是 `cmd internal demoapps`)。此前这里少一个
+      # `demoapps`,而 `go vet ./...` 与 `go test ./...` 都不查格式 ⇒
+      # `server/demoapps/**`(随镜像分发的内置演示应用 Go 源码)里的格式违规
+      # 在 CI 全绿。两边的目录集合由 `scripts/verify-ci-scripts.mjs` 的
+      # 「gofmt 扫描面必须与 Makefile 同源」判据逐条对拍(任一侧增删目录都红)
+      # —— 不要只在这一侧或只在 Makefile 里加/删扫描目录。
       - name: gofmt check
         run: |
           set -euo pipefail
-          FILES="$(gofmt -l cmd internal)"
+          FILES="$(gofmt -l cmd internal demoapps)"
           if [ -n "$FILES" ]; then
             echo "::error::gofmt 未通过: $FILES"
             exit 1
