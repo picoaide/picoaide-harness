@@ -15,12 +15,12 @@ package skillmanifest
 import (
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/goccy/go-yaml"
 
+	"github.com/picoaide/picoaide/internal/util"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
@@ -377,98 +377,28 @@ func IsVersion(s string) bool { return versionRe.MatchString(s) }
 // CompareVersions orders two semver strings numerically: negative when a<b,
 // zero when equal, positive when a>b. 预发布版排在同号正式版之前
 // (1.2.0-rc.1 < 1.2.0),供「版本必须递增」校验使用。
+//
+// ⚠️ 2026-09-23 R4-D-1(P1)：本函数**委托** `util.CompareSemVer`，不再自带一份
+// 实现。审计现场：同一个版本对在服务端与客户端给出相反/不同的结论
+// （`1.0.0-rc10` vs `1.0.0-rc2`、`1.0.0-rc1` vs `1.0.0-rc.1`），根因就是"同一条规则
+// 四处各写一遍"。语义的唯一真源是共享语料
+// `internal/util/testdata/semver-corpus.json`，本包由 `semver_corpus_test.go` 逐条对拍。
+//
+// 与旧实现的两处**实质差异**（都由语料钉住，不是随手改的）：
+//   - 旧实现的核心段用 `strconv.Atoi` 且**丢弃错误**（非数字段静默当 0，`1.0.x` 与
+//     `1.0.0` 会被判成相等）；util 对不合法输入回落字节序（仍是一个全序，但不再
+//     "静默相等"）。调用方本来就先过 `IsVersion`（严格 x.y.z[‑prerelease]），
+//     所以这条差异只在直接调用本函数时才可见。
+//   - 旧实现的预发布数字标识符按「位数 + 字典序」比较（`rc.01` > `rc.1`）；util 按
+//     数值比较（`rc.01` == `rc.1`）。`versionRe` 允许带前导零的预发布段入库，
+//     所以这条不是理论形态 —— 语料里的 `tolerance-leading-zero` 就是它的判据。
 func CompareVersions(a, b string) int {
-	aCore, aPre, _ := strings.Cut(a, "-")
-	bCore, bPre, _ := strings.Cut(b, "-")
-	aParts, bParts := strings.Split(aCore, "."), strings.Split(bCore, ".")
-	for i := 0; i < 3; i++ {
-		var av, bv int
-		if i < len(aParts) {
-			av, _ = strconv.Atoi(aParts[i])
-		}
-		if i < len(bParts) {
-			bv, _ = strconv.Atoi(bParts[i])
-		}
-		if av != bv {
-			return av - bv
-		}
-	}
-	switch {
-	case aPre == "" && bPre == "":
-		return 0
-	case aPre == "": // 正式版 > 预发布版
-		return 1
-	case bPre == "":
-		return -1
-	}
-	// 预发布段按 SemVer §11 比较(逐段、数字段按数值)。此前用
-	// strings.Compare 字典序,`rc.2` > `rc.10` 会错误地让 1.2.0-rc.10
-	// 无法作为递增版本发布(2026-09-01 审计 B4)。
-	return comparePrerelease(aPre, bPre)
+	return util.CompareSemVer(a, b)
 }
 
-// comparePrerelease implements SemVer §11 prerelease precedence:
-// dot-separated identifiers compared one by one; numeric identifiers compare
-// numerically and rank below alphanumeric identifiers; a longer identifier
-// list wins when all shared identifiers are equal.
-func comparePrerelease(a, b string) int {
-	ap := strings.Split(a, ".")
-	bp := strings.Split(b, ".")
-	n := len(ap)
-	if len(bp) > n {
-		n = len(bp)
-	}
-	for i := 0; i < n; i++ {
-		if i >= len(ap) {
-			return -1 // b 还有标识符 → b 更大
-		}
-		if i >= len(bp) {
-			return 1
-		}
-		x, y := ap[i], bp[i]
-		xNum, yNum := isNumericString(x), isNumericString(y)
-		switch {
-		case xNum && yNum:
-			if c := compareNumericStrings(x, y); c != 0 {
-				return c
-			}
-		case xNum && !yNum:
-			return -1 // 数字标识符 < 字母数字标识符
-		case !xNum && yNum:
-			return 1
-		default:
-			if c := strings.Compare(x, y); c != 0 {
-				return c
-			}
-		}
-	}
-	return 0
-}
-
-// isNumericString reports whether s consists solely of ASCII digits.
-func isNumericString(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-// compareNumericStrings compares two digit strings numerically without
-// parsing (长度优先,避免超长数字溢出;纯数字无前导零语义时仍按数值大小)。
-func compareNumericStrings(a, b string) int {
-	if len(a) != len(b) {
-		if len(a) < len(b) {
-			return -1
-		}
-		return 1
-	}
-	return strings.Compare(a, b)
-}
+// comparePrerelease / isNumericString / compareNumericStrings 已随 R4-D-1 的收编删除：
+// 比较本身委托 util.CompareSemVer（全仓唯一实现），旧实现的两处实质差异见
+// CompareVersions 的注释与 semver_corpus_test.go。
 
 // Parse validates one skill package and returns its manifest.
 //

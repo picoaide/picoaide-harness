@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 // 渠道 id:官方(稳定)与 beta(我们自己内测)是保留渠道,其余为品牌渠道。
@@ -519,30 +521,42 @@ func isNumeric(s string) bool {
 // 预发布段 —— 无预发布优先级更高(= 稳定版 > 同 core 预发布),预发布标识符
 // 按 §11 逐段比较(纯数字按数值、字母数字按 ASCII、数字 < 字母、段数多者更大)。
 //
-// FIX-23-r3(审计 2026-09-13,P1):上一轮 FIX-23 只把 Check 的准入从
-// ParseCanonicalStableValid 换成 NormalizeVersion(接受预发布),比较本身仍是
-// **core-only**,于是 beta 渠道最常见的升级形态 ——
+// ⚠️ 2026-09-23 R4-D-1(P1)：本函数**不再自带一份比较算法**，委托
+// `util.CompareSemVer`（全仓唯一实现）。审计现场：同一版本对在服务端与客户端
+// 得出相反/不同的结论 —— `1.0.0-rc10` vs `1.0.0-rc2`（Go -1 / 客户端 +1 ⇒ 把降级
+// 当升级）、`1.0.0-rc1` vs `1.0.0-rc.1`（Go +1 / 客户端 0 ⇒ 漏更新）。语义只能有一份，
+// 由共享语料 `internal/util/testdata/semver-corpus.json` 与
+// `semver_corpus_test.go` 逐条钉住(本包是那五处调用点之一)。
 //
-//	CompareSemVer("2.7.2-beta.8", "2.7.2-beta.7") == 0  ⇒ 永不提示更新
+// **故意保留的差异（唯一一处，且是安全方向）**：本包的兜底是"任一侧解析不出
+// M.m.p ⇒ 0"，而 `util.CompareSemVer` 对非法输入回落**字节序**。
+// 理由：本函数的调用方是更新提示（`Check` 的 `UpdateAvailable`），
+// 语义是"能不能提示升级"——
+//   - 本地 dev 构建（`dev`）与清单里的乱码版本号不可比时，**不提示**才对
+//     （否则开发机会变成"永远可升级"，且字节序会把 `dev` 判成比 `2.8.1` 更大）；
+//   - `Check` 自身已经把两侧都过了一遍 `NormalizeVersion`（合法且无 v 前缀），
+//     所以这条兜底只在**直接调用本函数**时生效，不影响生产路径的语义一致性。
 //
-// —— 让预发布当前版本能提示跨 core 升级,却提示不了同 core 的下一次预发布。
-// 预发布段必须参与比较。
+// 判据在 `semver_corpus_test.go`：语料里每一对都必须与 util 给出同一符号
+// （合法域内没有第二种语义），另有三条"非法输入 ⇒ 0"的显式钉桩把这个差异固定下来。
 //
-// 稳定版之间的行为逐条不变:仍只由 core 决定(2.5.1 vs 2.6.0 = -1);
-// 非法输入(dev 等)仍视为相等(0)—— 版本号不可比时"不提示"是安全方向。
+// 历史：FIX-23-r3(审计 2026-09-13,P1) 让预发布段参与比较（此前 core-only ⇒
+// `CompareSemVer("2.7.2-beta.8","2.7.2-beta.7") == 0` ⇒ beta 渠道永不提示同 core 的
+// 下一次预发布）。该修正的语义现在由 util 承载，逐字不变。
 func CompareSemVer(left, right string) int {
-	lv, lok := parseVersionPrecedence(left)
-	rv, rok := parseVersionPrecedence(right)
-	if !lok || !rok {
+	// 非法输入(dev / 缺段 / 非数字 core)⇒ 0：版本号不可比时"不提示"是安全方向。
+	if _, ok := parseVersionPrecedence(left); !ok {
 		return 0
 	}
-	if c := compareCoreSegments(lv.core, rv.core); c != 0 {
-		return c
+	if _, ok := parseVersionPrecedence(right); !ok {
+		return 0
 	}
-	return comparePrerelease(lv.pre, rv.pre)
+	return util.CompareSemVer(left, right)
 }
 
-// versionPrecedence 是参与优先级比较的两个部分:core 三段 + 预发布段原文。
+// versionPrecedence 是"能否参与优先级比较"的形状检查结果:core 三段（可解析位
+// 置）+ 预发布段原文。**只用于兜底判定**（见 CompareSemVer 的"故意保留的差异"），
+// 不再参与比较本身。
 type versionPrecedence struct {
 	core [3]string
 	pre  string
@@ -573,81 +587,9 @@ func prereleaseOf(v string) string {
 	return ""
 }
 
-// compareCoreSegments 比较 M.m.p 三段:先比位数再比字典序 = 无溢出的数值比较
-// (原有语义,保持逐字节不变)。
-func compareCoreSegments(l, r [3]string) int {
-	for i := 0; i < 3; i++ {
-		a, b := l[i], r[i]
-		if len(a) != len(b) {
-			if len(a) < len(b) {
-				return -1
-			}
-			return 1
-		}
-		if a != b {
-			if a < b {
-				return -1
-			}
-			return 1
-		}
-	}
-	return 0
-}
-
-// comparePrerelease 按 SemVer 2.0.0 §11.3/§11.4 比较预发布段。空串 = 无预发布
-// (= 稳定版),优先级**高于**同 core 的任何预发布。
-func comparePrerelease(l, r string) int {
-	switch {
-	case l == "" && r == "":
-		return 0
-	case l == "":
-		return 1
-	case r == "":
-		return -1
-	}
-	lp, rp := strings.Split(l, "."), strings.Split(r, ".")
-	for i := 0; i < len(lp) && i < len(rp); i++ {
-		if c := comparePrereleaseIdentifier(lp[i], rp[i]); c != 0 {
-			return c
-		}
-	}
-	// 前缀全相等:段数多者更大(beta.1 > beta)。
-	switch {
-	case len(lp) < len(rp):
-		return -1
-	case len(lp) > len(rp):
-		return 1
-	}
-	return 0
-}
-
-// comparePrereleaseIdentifier 比较单个预发布标识符:
-//   - 纯数字按数值比较(用"位数 + 字典序"实现,避免整数溢出,beta.1000 > beta.999);
-//   - 纯数字 < 字母数字(beta.2 < beta.alpha);
-//   - 其它按 ASCII 字典序(beta < rc;alpha < beta)。
-func comparePrereleaseIdentifier(a, b string) int {
-	an, bn := isNumeric(a), isNumeric(b)
-	switch {
-	case an && bn:
-		if len(a) != len(b) {
-			if len(a) < len(b) {
-				return -1
-			}
-			return 1
-		}
-	case an:
-		return -1
-	case bn:
-		return 1
-	}
-	if a == b {
-		return 0
-	}
-	if a < b {
-		return -1
-	}
-	return 1
-}
+// compareCoreSegments / comparePrerelease / comparePrereleaseIdentifier 已随
+// R4-D-1 的收编删除：比较本身委托 util.CompareSemVer（全仓唯一实现），本包只保留
+// 「非法输入 ⇒ 0」的形状检查（parseVersionPrecedence，见上）。
 
 // parseCore 解析版本的核心 M.m.p 三段(容忍 v 前缀与预发布/build 段),
 // 返回三段的原始字符串以支持无损数值比较。

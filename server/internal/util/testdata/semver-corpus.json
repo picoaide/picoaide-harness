@@ -1,0 +1,168 @@
+{
+  "schema": "picoaide-semver-corpus/1",
+  "about": "版本先后语义的**仓内共享语料**（R4-D-1 / 2026-09-23 第四轮审计）。Go 侧（internal/util、internal/updatecheck、internal/skillmanifest、internal/wasmapp/registry）与 TS 侧（packages/host/enterprise/src/client/version-compare.ts、packages/host/desktop/src/updates.ts）**各自读这一份**并逐条断言 Math.sign / 符号相等。",
+  "domain": "只覆盖「版本号本身的先后语义」（SemVer 2.0.0 §11）。刻意**不含**各实现的容错面（`v` 前缀装饰、空串、非法字符、缺段名如 `1.0`）—— 那些是各调用方按自身安全方向定的兜底（例如 updatecheck 把非法输入判为 0 = 不提示，util 回落字节序），收录进来只会把两种不同的兜底混成一条规则。语料里的每一对，四个 Go 调用点与两个 TS 调用点都必须给出同一个符号。",
+  "cases": [
+    {
+      "id": "fork-rc10-vs-rc2",
+      "left": "1.0.0-rc10",
+      "right": "1.0.0-rc2",
+      "want": -1,
+      "note": "R4-D-1 分叉对①：字母数字标识符按 ASCII 序（'1' < '2'）⇒ rc10 < rc2。旧客户端 tokenizer 把 rc10/rc2 当数字 run 比数值给出 +1 ⇒ 把降级当升级。"
+    },
+    {
+      "id": "fork-rc1-vs-rc-dot-1",
+      "left": "1.0.0-rc1",
+      "right": "1.0.0-rc.1",
+      "want": 1,
+      "note": "R4-D-1 分叉对②：预发布按 `.` 分段，第 0 段 'rc1' vs 'rc' 是字母段比较 ⇒ 'rc1' > 'rc'；段数不等只在共享段全等时才比长度。旧客户端 tokenizer 把两者判成相等 ⇒ 漏更新。"
+    },
+    {
+      "id": "spec-chain-alpha",
+      "left": "1.0.0-alpha",
+      "right": "1.0.0-alpha.1",
+      "want": -1,
+      "note": "SemVer §11 规范样例链第 1 步（前缀相同 ⇒ 标识符多者更大）。"
+    },
+    {
+      "id": "spec-chain-alpha-1",
+      "left": "1.0.0-alpha.1",
+      "right": "1.0.0-alpha.beta",
+      "want": -1,
+      "note": "§11 链第 2 步（数字标识符 < 字母数字标识符）。"
+    },
+    {
+      "id": "spec-chain-alpha-beta",
+      "left": "1.0.0-alpha.beta",
+      "right": "1.0.0-beta",
+      "want": -1,
+      "note": "§11 链第 3 步（字母数字标识符按 ASCII）。"
+    },
+    {
+      "id": "spec-chain-beta",
+      "left": "1.0.0-beta",
+      "right": "1.0.0-beta.2",
+      "want": -1,
+      "note": "§11 链第 4 步（前缀相同 ⇒ 标识符多者更大）。"
+    },
+    {
+      "id": "spec-chain-beta-2",
+      "left": "1.0.0-beta.2",
+      "right": "1.0.0-beta.11",
+      "want": -1,
+      "note": "§11 链第 5 步（纯数字标识符按数值，不是字典序）。"
+    },
+    {
+      "id": "spec-chain-beta-11",
+      "left": "1.0.0-beta.11",
+      "right": "1.0.0-rc.1",
+      "want": -1,
+      "note": "§11 链第 6 步（字母数字标识符按 ASCII：beta < rc）。"
+    },
+    {
+      "id": "spec-chain-rc-1",
+      "left": "1.0.0-rc.1",
+      "right": "1.0.0",
+      "want": -1,
+      "note": "§11 链第 7 步（§11.3：有预发布 < 同 core 无预发布）。"
+    },
+    {
+      "id": "repo-beta-line",
+      "left": "2.7.2-beta.7",
+      "right": "2.7.2-beta.8",
+      "want": -1,
+      "note": "本仓真实升级形态（updatecheck FIX-23-r3 的现场）：同 core 的下一次预发布必须可比较 ⇒ 能提示更新。"
+    },
+    {
+      "id": "build-metadata-basic",
+      "left": "1.0.0+build.1",
+      "right": "1.0.0",
+      "want": 0,
+      "note": "SemVer §10：build metadata 不参与优先级（忽略）。修复前 util 会因 '+' 属于非接受字符而回落字节序 ⇒ 判成 +1（与规范相反）。"
+    },
+    {
+      "id": "build-metadata-with-prerelease",
+      "left": "1.0.0-rc.1+build.5",
+      "right": "1.0.0-rc.1",
+      "want": 0,
+      "note": "§10 + §9：预发布段相同、仅 build metadata 不同 ⇒ 相等。"
+    },
+    {
+      "id": "build-metadata-repo-shape",
+      "left": "2.7.2-beta.8+build.5",
+      "right": "2.7.2-beta.8",
+      "want": 0,
+      "note": "本仓 updatecheck.IsSemVer 接受的形态（`2.7.0-rc.1+build.5`）：比较时必须忽略 build。"
+    },
+    {
+      "id": "core-numeric-1-9-10",
+      "left": "1.9.0",
+      "right": "1.10.0",
+      "want": -1,
+      "note": "核心段按数值（审计 2026-08-25 D-1 的现场）—— 不是字典序。"
+    },
+    {
+      "id": "core-numeric-2-10",
+      "left": "2.0.0",
+      "right": "10.0.0",
+      "want": -1,
+      "note": "同上：位数不同时也必须按数值。"
+    },
+    {
+      "id": "prerelease-below-release",
+      "left": "1.0.0-1",
+      "right": "1.0.0",
+      "want": -1,
+      "note": "R3-A 审计 A-10 现场：`1.0.0-1` 是**预发布**，低于 `1.0.0`。旧实现把多出来的数字 run 当「更高的补丁」⇒ 判成 +1。"
+    },
+    {
+      "id": "numeric-below-alnum",
+      "left": "1.0.0-1",
+      "right": "1.0.0-alpha",
+      "want": -1,
+      "note": "§11.4.3：纯数字标识符优先级低于字母数字标识符。"
+    },
+    {
+      "id": "numeric-by-value",
+      "left": "1.0.0-2",
+      "right": "1.0.0-10",
+      "want": -1,
+      "note": "§11.4.2：纯数字标识符按数值（2 < 10）。"
+    },
+    {
+      "id": "numeric-by-value-dotted",
+      "left": "1.0.0-rc.2",
+      "right": "1.0.0-rc.10",
+      "want": -1,
+      "note": "同上，带字母前缀的常见形态（rc.2 < rc.10）—— 与 rc10/rc2 的 ASCII 规则互为对照。"
+    },
+    {
+      "id": "tolerance-leading-zero",
+      "left": "1.0.0-rc.01",
+      "right": "1.0.0-rc.1",
+      "want": 0,
+      "note": "**非规范输入**（SemVer §9 禁止数字标识符带前导零）：两侧都按数值比较 ⇒ 相等。旧 skillmanifest（按位数比长度 ⇒ +1）与旧 updatecheck（同样按位数 ⇒ +1）会在这里红；把该输入判为非法的实现同样给 0，方向一致。skillmanifest 的 versionRe 允许这种版本号入库，所以它不是纯粹的理论形态。"
+    },
+    {
+      "id": "long-numeric-prerelease",
+      "left": "1.2.0-99999999999999999999",
+      "right": "1.2.0-123456789012345678901",
+      "want": -1,
+      "note": "§11.4.2 的**任意精度**要求：数字标识符按数值比较，超长（> int64）也不能溢出成「相等」或字典序。旧 skillmanifest 用 Atoi 丢错误（两个都变 0 ⇒ 相等），旧 util 用 ParseInt 溢出后回落字典序（'9' > '1' ⇒ +1）—— 两边都错，这条是它们共同的判别对。versionRe/limits.VersionPattern 都是 `\\d+`（段长不受限），所以可达。"
+    },
+    {
+      "id": "long-numeric-core",
+      "left": "99999999999999999999.0.0",
+      "right": "123456789012345678901.0.0",
+      "want": -1,
+      "note": "同上，落在**核心段**：20 位 < 21 位。旧 util 的核心段比较用 ParseInt，两个都溢出 ⇒ 判成相等（0）；旧 skillmanifest 用 Atoi 丢错误同样相等。"
+    },
+    {
+      "id": "equal",
+      "left": "1.0.0",
+      "right": "1.0.0",
+      "want": 0,
+      "note": "自反相等。"
+    }
+  ]
+}
