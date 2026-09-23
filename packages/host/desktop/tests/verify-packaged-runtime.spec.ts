@@ -1,9 +1,12 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import AdmZip from 'adm-zip'
+import { listPackage } from '@electron/asar'
 import {
   afterPack,
   assertNoPackagedSourceLeaks,
@@ -16,6 +19,9 @@ import {
   REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR,
   PACKAGED_FLOCK_SMOKE_TIMEOUT_MS,
   PACKAGED_SENTRY_SMOKE_TIMEOUT_MS,
+  PACKAGED_ELECTRON_VERSION_MARKER,
+  declaredElectronVersion,
+  packagedRuntimeLayoutIsPhysical,
   PACKAGED_WEB_BRAND_ASSETS,
   PACKAGED_WEB_BRAND_FAVICON,
   PACKAGED_WEB_BRAND_OFFICIAL,
@@ -60,6 +66,28 @@ function context(
     packager: { appInfo: { productFilename: 'PicoAide Harness' } },
   }
 }
+
+/**
+ * 本仓安装的 Electron 可执行文件绝对路径（P-5：冒烟要跑在**真 Electron** 上）。
+ *
+ * `require('electron')` 在普通 Node 进程里返回二进制路径（同
+ * `scripts/verify-renderer-error-capture.mjs`）；缺二进制就 fail-loud ——
+ * `yarn check` 本来就要跑图形门禁，二进制是既有前置条件。
+ */
+function resolveElectronBinary(): string {
+  const require = createRequire(import.meta.url)
+  const binary = require('electron') as unknown
+  if (typeof binary !== 'string' || !existsSync(binary)) {
+    throw new Error(`electron binary not resolved (got ${JSON.stringify(binary)}); run yarn install first`)
+  }
+  return binary
+}
+
+/**
+ * 打包版 Electron 版本行（P-5）：冒烟子进程的输出里必须带它，且取值等于
+ * `devDependencies.electron`。注入的成功输出同样要带（否则宿主断言应当拒）。
+ */
+const ELECTRON_VERSION_LINE = `${PACKAGED_ELECTRON_VERSION_MARKER}${declaredElectronVersion()}\n`
 
 const REQUIRED_ASAR_EXPORT_PATHS = [
   'lib/index.js',
@@ -1141,10 +1169,137 @@ describe('packaged desktop runtime verification', () => {
   })
 })
 
+describe('打包布局判定：损坏的 app.asar 不得被当成物理布局（第三轮审计 P-6）', () => {
+  // 为什么要有它：`tryListArchive` 曾把**任何**异常都读作"没有 app.asar ⇒ 物理布局"，
+  // 于是"app.asar 存在但损坏/截断"会走物理分支，报出 `resources/app` 缺文件 —— 而
+  // asar 布局下那个目录**根本不存在**，错误信息指向不存在的路径、真实原因被吞掉
+  // （历史同类：asar entry offset 错乱 ⇒ Electron 报随机某个 json 的 Invalid package
+  // config）。现在：只有 ENOENT 能读作"归档不存在"，而且物理分支要显式开关。
+  afterEach(() => { vi.unstubAllEnvs() })
+
+  /**
+   * 造一个**真** asar：400 个小文件让头部 pickle 远大于 1 KiB，再截断成前 1 KiB
+   * （与审计的复现形态同构：真归档 + 截断，而不是"随手写个垃圾文件"）。
+   */
+  async function truncatedArchiveFixture(): Promise<{ appOutDir: string, archive: string, sourceDir: string }> {
+    const sourceDir = mkdtempSync(join(tmpdir(), 'dsh-asar-src-'))
+    mkdirSync(join(sourceDir, 'lib'), { recursive: true })
+    writeFileSync(join(sourceDir, 'package.json'), '{"name":"fixture"}\n')
+    for (let index = 0; index < 400; index += 1) {
+      writeFileSync(join(sourceDir, 'lib', `chunk-${String(index)}.js`), `export const x${String(index)} = ${String(index)}\n`)
+    }
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-asar-out-'))
+    const archive = join(appOutDir, 'resources', 'app.asar')
+    mkdirSync(dirname(archive), { recursive: true })
+    const { createPackage } = await import('@electron/asar')
+    await createPackage(sourceDir, archive)
+    const full = readFileSync(archive)
+    // 前置断言：头部确实比截断点长，否则这条用例会退化成"截断后仍能列举"的空转。
+    expect(full.length).toBeGreaterThan(64 * 1024)
+    writeFileSync(archive, full.subarray(0, 1024))
+    return { appOutDir, archive, sourceDir }
+  }
+
+  it('app.asar 存在但损坏：点名"存在但无法列举（可能已损坏）"，不报"缺条目"', async () => {
+    const { appOutDir, archive, sourceDir } = await truncatedArchiveFixture()
+    try {
+      // 前置判据：真 @electron/asar 对这个截断文件确实抛错（非 ENOENT）。
+      let thrown: unknown
+      try {
+        listPackage(archive, { isPack: false })
+      } catch (cause) {
+        thrown = cause
+      }
+      expect(thrown).toBeInstanceOf(Error)
+      expect((thrown as NodeJS.ErrnoException).code).not.toBe('ENOENT')
+
+      const failure = (() => {
+        try {
+          verifyPackagedRuntime(context(appOutDir, 'linux'))
+          return null
+        } catch (cause) {
+          return cause as Error
+        }
+      })()
+      expect(failure).toBeInstanceOf(Error)
+      expect(failure?.message).toMatch(/is present but cannot be listed/u)
+      expect(failure?.message).toMatch(/likely corrupt or truncated/u)
+      // 必须带上真实原因；且**绝不能**再是那条指向不存在目录的"缺条目"文案。
+      expect(failure?.message).toMatch(new RegExp((thrown as Error).message.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'))
+      expect(failure?.message).not.toMatch(/missing required entries/u)
+      expect(failure?.message).not.toMatch(/missing required ASAR entries/u)
+    } finally {
+      rmSync(appOutDir, { recursive: true, force: true })
+      rmSync(sourceDir, { recursive: true, force: true })
+    }
+  })
+
+  it('布局开关的取值判定（真源是 packagedRuntimeLayoutIsPhysical）', () => {
+    expect(packagedRuntimeLayoutIsPhysical({})).toBe(false)
+    expect(packagedRuntimeLayoutIsPhysical({ PACKAGED_RUNTIME_LAYOUT: '' })).toBe(false)
+    expect(packagedRuntimeLayoutIsPhysical({ PACKAGED_RUNTIME_LAYOUT: '  ' })).toBe(false)
+    expect(packagedRuntimeLayoutIsPhysical({ PACKAGED_RUNTIME_LAYOUT: ' Physical ' })).toBe(true)
+    expect(() => packagedRuntimeLayoutIsPhysical({ PACKAGED_RUNTIME_LAYOUT: 'physcial' }))
+      .toThrow(/not a known layout/u)
+  })
+
+  it('注入的列举器抛非 ENOENT 错误同样不静默兜底', () => {
+    const broken: ArchiveLister = () => { throw new RangeError('Attempt to access memory outside buffer bounds') }
+    expect(() => verifyWithBrandStub(context('/build', 'linux'), broken, () => true))
+      .toThrow(/present but cannot be listed[\s\S]*Attempt to access memory outside buffer bounds/u)
+  })
+
+  it('ENOENT（真·没有归档）默认不再退回物理布局，且错误点名显式开关', () => {
+    const missing: ArchiveLister = () => {
+      const cause: NodeJS.ErrnoException = new Error('ENOENT: no such file or directory')
+      cause.code = 'ENOENT'
+      throw cause
+    }
+    expect(() => verifyWithBrandStub(context('/build', 'linux'), missing, () => true))
+      .toThrow(/has no app\.asar at[\s\S]*PACKAGED_RUNTIME_LAYOUT=physical/u)
+  })
+
+  it('只有显式 PACKAGED_RUNTIME_LAYOUT=physical 才走物理分支', () => {
+    const missing: ArchiveLister = () => {
+      const cause: NodeJS.ErrnoException = new Error('ENOENT: no such file or directory')
+      cause.code = 'ENOENT'
+      throw cause
+    }
+    const appRoot = join('/build', 'resources', 'app')
+    const existsComplete: FileProbe = filename => {
+      const rel = filename.replaceAll('\\', '/')
+      return rel === appRoot
+        || REQUIRED_PACKAGED_RUNTIME_ENTRIES.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+        || REQUIRED_ASAR_EXPORT_PATHS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+        || REQUIRED_PROFILE_PATCH_ANCHORS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+    }
+    vi.stubEnv('PACKAGED_RUNTIME_LAYOUT', 'physical')
+    expect(() => verifyWithBrandStub(context('/build', 'linux'), missing, existsComplete)).not.toThrow()
+    // 物理分支下归档列举器根本不该被调用（开关决定布局，不由异常决定）。
+    const lister = vi.fn<ArchiveLister>(missing)
+    expect(() => verifyWithBrandStub(context('/build', 'linux'), lister, existsComplete)).not.toThrow()
+    expect(lister).not.toHaveBeenCalled()
+  })
+
+  it('开关取值非法即 fail-loud（拼错的开关不能静默退回默认）', () => {
+    const archive: ArchiveLister = () => completeArchiveEntries()
+    vi.stubEnv('PACKAGED_RUNTIME_LAYOUT', 'Physical')
+    // 大小写不敏感：'Physical' 是合法写法。
+    expect(() => verifyWithBrandStub(context('/build', 'linux'), archive, () => true)).not.toThrow()
+    vi.stubEnv('PACKAGED_RUNTIME_LAYOUT', 'physcial')
+    expect(() => verifyWithBrandStub(context('/build', 'linux'), archive, () => true))
+      .toThrow(/PACKAGED_RUNTIME_LAYOUT="physcial" is not a known layout/u)
+  })
+})
+
 describe('packaged desktop runtime verification (physical layout, asar: false)', () => {
+  afterEach(() => { vi.unstubAllEnvs() })
+
   it('accepts a complete physical tree and rejects missing entries', () => {
     const runtimeContext = context('/build', 'linux')
     const appRoot = join('/build', 'resources', 'app')
+    // 2026-09-23 P-6：物理布局现在是**显式开关**，不再由"列举抛异常"触发。
+    vi.stubEnv('PACKAGED_RUNTIME_LAYOUT', 'physical')
     const noArchive = vi.fn<ArchiveLister>(() => {
       throw new Error('no app.asar')
     })
@@ -1398,7 +1553,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       return { runtimeContext, appRoot, launcher }
     }
 
-    const successResult = { status: 0, stdout: 'FLOCK-SMOKE-OK\n', stderr: '' }
+    const successResult = { status: 0, stdout: `${ELECTRON_VERSION_LINE}FLOCK-SMOKE-OK\n`, stderr: '' }
 
     it('resolves the packaged launcher per platform', () => {
       expect(resolvePackagedLauncherCandidates({
@@ -1462,10 +1617,45 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         expect(script).toContain('@deepseek-ai/node-addon-system/flock')
         expect(script).toContain('tryLockExclusive')
         expect(script).toContain('FLOCK-SMOKE-OK')
+        // P-5:脚本必须报出它实际跑的 Electron（宿主据此断言版本）。
+        expect(script).toContain(`${PACKAGED_ELECTRON_VERSION_MARKER}' + String(process.versions.electron)`)
         return successResult
       })
       expect(() => smokePackagedFlockLock(fixture.runtimeContext, launch)).not.toThrow()
       expect(launch).toHaveBeenCalledOnce()
+    })
+
+    it('fails when the packaged runtime is not the pinned Electron (P-5)', () => {
+      // 清单里的 6 处 electron pin 是**声明**；这条判据看的是产物实际跑的版本。
+      // 变异验证：把声明值或冒烟输出改掉任一侧，本用例必红。
+      const fixture = flockFixture('linux')
+      const other: FlockSmokeLauncher = () => ({
+        status: 0,
+        stdout: `${PACKAGED_ELECTRON_VERSION_MARKER}43.4.0\nFLOCK-SMOKE-OK\n`,
+        stderr: '',
+      })
+      expect(() => smokePackagedFlockLock(fixture.runtimeContext, other))
+        .toThrow(new RegExp(`ran on Electron 43\\.4\\.0 while package\\.json pins devDependencies\\.electron ${declaredElectronVersion()}`, 'u'))
+
+      const missing: FlockSmokeLauncher = () => ({ status: 0, stdout: 'FLOCK-SMOKE-OK\n', stderr: '' })
+      expect(() => smokePackagedFlockLock(fixture.runtimeContext, missing))
+        .toThrow(/did not report ELECTRON-VERSION:<version>/u)
+    })
+
+    it('pins an exact Electron version to compare against (P-5)', () => {
+      const declared = declaredElectronVersion()
+      expect(declared).toMatch(/^\d+\.\d+\.\d+/u)
+      const manifestPath = fileURLToPath(new URL('../package.json', import.meta.url))
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+        devDependencies?: Record<string, string>
+      }
+      expect(declared).toBe(manifest.devDependencies?.electron)
+      // 真跑过的证据：安装树里那个 Electron 二进制**自己**报出的版本就是这一份
+      // （冒烟用的是同一个二进制、同一种 as-node 模式，见上面的 e2e 用例）。
+      expect(execFileSync(resolveElectronBinary(), ['-p', 'process.versions.electron'], {
+        encoding: 'utf8',
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      }).trim()).toBe(declared)
     })
 
     it('fails loud with the captured output when the launcher exits non-zero', () => {
@@ -1507,15 +1697,21 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
     it.skipIf(process.platform === 'win32')(
       'takes a real lock with the embedded script against the installed tree',
       () => {
-        // 端到端:默认 launcher + 真脚本 + 真 flock 绑定。用一个 `exec node "$@"`
-        // 的壳脚本冒充打包版 Electron(Electron 的 as-node 模式就是 node),app 根
-        // 指向装好的 desktop 依赖树,于是走的是与打包态一样的 exports 解析路径。
+        // 端到端:默认 launcher + 真脚本 + 真 flock 绑定 + **真 Electron 运行时**。
+        // 壳脚本 exec 的是本仓安装的 electron 二进制（`require('electron')` 在普通
+        // Node 里返回它的路径；冒烟本来就用 ELECTRON_RUN_AS_NODE=1 跑它），app 根
+        // 指向装好的 desktop 依赖树，于是走的是与打包态一样的 exports 解析路径。
+        //
+        // P-5 起这条用例必须跑真 Electron：冒烟脚本会打一行
+        // `ELECTRON-VERSION:<process.versions.electron>`，宿主断言它等于
+        // devDependencies.electron —— 用纯 node 冒充会让版本断言（正确地）红。
+        const electronBinary = resolveElectronBinary()
         const fixture = flockFixture('linux')
         // 把打包根的 node_modules 指向真实安装树,于是脚本里的 exports 解析路径
         // (@deepseek-ai/node-addon-system/flock → 平台包 bin/*/system.node)与
         // 打包态完全一致,只是少了 asar 这一层。
         symlinkSync(join(__dirname, '..', 'node_modules'), join(fixture.appRoot, 'node_modules'), 'dir')
-        writeFileSync(fixture.launcher, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`)
+        writeFileSync(fixture.launcher, `#!/bin/sh\nexec ${JSON.stringify(electronBinary)} "$@"\n`)
         chmodSync(fixture.launcher, 0o755)
 
         expect(() => smokePackagedFlockLock(fixture.runtimeContext)).not.toThrow()
@@ -1552,7 +1748,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       return { runtimeContext, appRoot, launcher }
     }
 
-    const successResult = { status: 0, stdout: 'SENTRY-SMOKE-OK\n', stderr: '' }
+    const successResult = { status: 0, stdout: `${ELECTRON_VERSION_LINE}SENTRY-SMOKE-OK\n`, stderr: '' }
 
     it('fails the afterPack gate when the sentry smoke reports a missing module', async () => {
       const fixture = sentryFixture('linux')
@@ -1591,11 +1787,28 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         expect(script).toContain('@sentry/node')
         expect(script).toContain('@picoaide/dsh-enterprise/error-reporting')
         expect(script).toContain('SENTRY-SMOKE-OK')
+        // P-5:这个冒烟三平台都跑 ⇒ 它是 Electron 版本断言的全平台落点。
+        expect(script).toContain(`${PACKAGED_ELECTRON_VERSION_MARKER}' + String(process.versions.electron)`)
         return successResult
       })
       expect(() => smokePackagedErrorReporting(fixture.runtimeContext, launch)).not.toThrow()
       expect(launch).toHaveBeenCalledOnce()
       expect(PACKAGED_SENTRY_SMOKE_TIMEOUT_MS).toBe(10_000)
+    })
+
+    it('fails when the packaged runtime is not the pinned Electron (P-5)', () => {
+      const fixture = sentryFixture('linux')
+      const other: SentrySmokeLauncher = () => ({
+        status: 0,
+        stdout: `${PACKAGED_ELECTRON_VERSION_MARKER}43.4.0\nSENTRY-SMOKE-OK\n`,
+        stderr: '',
+      })
+      expect(() => smokePackagedErrorReporting(fixture.runtimeContext, other))
+        .toThrow(/packaged error-reporting smoke ran on Electron 43\.4\.0 while package\.json pins/u)
+
+      const missing: SentrySmokeLauncher = () => ({ status: 0, stdout: 'SENTRY-SMOKE-OK\n', stderr: '' })
+      expect(() => smokePackagedErrorReporting(fixture.runtimeContext, missing))
+        .toThrow(/packaged error-reporting smoke did not report ELECTRON-VERSION:<version>/u)
     })
 
     it('does not skip the sentry smoke on win32', () => {

@@ -1430,7 +1430,52 @@ export function collectWorkspaceSurface(productRoot: string): WorkspaceSurfaceCe
   return { packages, required: entries, perPackage, resolvedSpecifiers: resolved.size }
 }
 
-/** Try to list one archive; an absent archive is the physical-layout signal. */
+/**
+ * 打包布局的**显式开关**（2026-09-23 第三轮审计 P-6）。
+ *
+ * 历史形态：`tryListArchive` 把**任何**异常都当成"没有 `app.asar` ⇒ 物理布局"，
+ * 于是"`app.asar` 存在但损坏/截断"会掉进 `resources/app/` 那条分支，报出
+ * "`resources/app` 缺文件"——而 asar 布局下这个目录**根本不该存在**，错误信息指向
+ * 一个不存在的路径（历史同类坑：asar entry offset 错乱 ⇒ Electron 报随机某个 json
+ * 的 `Invalid package config`）。真实原因被 `catch {}` 吞掉，排障要重走一遍弯路。
+ *
+ * 现在：归档缺失（ENOENT）只说明"这次构建**可能**用了 `asar: false`"，**不再**自动
+ * 改走物理分支 —— 必须由本开关显式声明。默认（未设）= 归档必须存在且可列举。
+ * 取值：`physical`（大小写/首尾空白不敏感）；**其它取值一律 fail-loud**（拼错的开关
+ * 不能静默退回默认，那会让"我明明开了物理布局"变成一句空话）。
+ */
+export const PACKAGED_RUNTIME_LAYOUT_ENV = 'PACKAGED_RUNTIME_LAYOUT'
+
+/**
+ * 是否显式声明了物理布局（`PACKAGED_RUNTIME_LAYOUT=physical`）。
+ * @param env - 环境变量来源（测试注入；生产是 `process.env`）。
+ * @returns true = 这次验证对象是 `asar: false` 的物理树。
+ * @throws 开关取值非法（不是 `physical` 也不是空）时 fail-loud。
+ */
+export function packagedRuntimeLayoutIsPhysical(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env[PACKAGED_RUNTIME_LAYOUT_ENV]
+  if (raw === undefined || raw.trim() === '') return false
+  const normalized = raw.trim().toLowerCase()
+  if (normalized === 'physical') return true
+  throw new Error(
+    `dsh-plugin-desktop: ${PACKAGED_RUNTIME_LAYOUT_ENV}=${JSON.stringify(raw)} is not a known layout — `
+    + `only 'physical' (an asar:false resources/app tree) is accepted; leave it unset to require app.asar`,
+  )
+}
+
+/** 归档**不存在**（ENOENT）与"归档存在但读不了"必须分开判：前者是布局信号，后者是坏产物。 */
+function isMissingArchiveError(cause: unknown): boolean {
+  return (cause as NodeJS.ErrnoException | null | undefined)?.code === 'ENOENT'
+}
+
+/**
+ * Try to list one archive.
+ * @param archivePath - absolute `app.asar` path.
+ * @param list - ASAR listing implementation.
+ * @param readEntry - archive-entry reader used by the content assertions.
+ * @returns 归档条目集；`undefined` = 归档**不存在**（唯一可读作"不是 asar 布局"的信号）。
+ * @throws 归档存在但无法列举（截断/损坏/读不了）—— 必须点名真实原因，绝不静默改走物理分支。
+ */
 function tryListArchive(
   archivePath: string,
   list: ArchiveLister,
@@ -1439,8 +1484,14 @@ function tryListArchive(
   let entries: readonly string[]
   try {
     entries = list(archivePath, { isPack: false })
-  } catch {
-    return undefined
+  } catch (cause) {
+    if (isMissingArchiveError(cause)) return undefined
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    throw new Error(
+      `dsh-plugin-desktop: packaged runtime at ${archivePath} is present but cannot be listed `
+      + `(the archive is unreadable — likely corrupt or truncated): ${detail}`,
+      { cause },
+    )
   }
   const present = new Set(entries.map(normalizeArchiveEntry))
   const missing = REQUIRED_PACKAGED_RUNTIME_ENTRIES.filter(entry => !present.has(entry))
@@ -1630,10 +1681,11 @@ function verifyUnpackedPackageResolution(
  * `resources/app.asar` with `app.asar.unpacked` holding native binaries) and
  * the physical tree (`asar: false` — `resources/app/`). **Every current
  * packaging path produces `app.asar`**, so the archive checks are the ones
- * that run in practice; the physical branch stays as a fallback for an
- * `asar: false` build. The archive checks run only when the archive exists;
- * the physical layout checks every required entry and export against the real
- * files.
+ * that run in practice; the physical branch is an explicit opt-in
+ * (`PACKAGED_RUNTIME_LAYOUT=physical`, 2026-09-23 P-6) rather than an
+ * exception-driven fallback: an archive that exists but cannot be listed is a
+ * broken artifact and must be reported as such, not mistaken for a physical
+ * tree.
  * @param context - Electron Builder's afterPack context.
  * @param list - ASAR listing implementation.
  * @param exists - physical-file probe for the unpacked CLI dependency tree.
@@ -1647,12 +1699,20 @@ export function verifyPackagedRuntime(
   readEntry: PackageEntryReader = readPackagedEntry,
 ): void {
   const asarPath = resolvePackagedAsarPath(context)
-  const asarEntries = tryListArchive(asarPath, list, readEntry)
-  if (asarEntries === undefined) {
-    // Physical layout (`asar: false`, a fallback the desktop does not ship —
-    // see the JSDoc above): the runtime is a real file tree.
+  if (packagedRuntimeLayoutIsPhysical()) {
+    // Explicit opt-in (`asar: false` build): the runtime is a real file tree.
     verifyPhysicalRuntime(resolvePackagedAppRoot(context), exists, readEntry)
     return
+  }
+  const asarEntries = tryListArchive(asarPath, list, readEntry)
+  if (asarEntries === undefined) {
+    // 归档不存在是**唯一**能读作"不是 asar 布局"的信号，而且它也不再自动改走物理
+    // 分支（2026-09-23 P-6）：要么补出 app.asar，要么显式声明物理布局。这条错误必须
+    // 给出开关名，否则"缺归档"会被误诊成"物理树缺文件"。
+    throw new Error(
+      `dsh-plugin-desktop: packaged runtime has no app.asar at ${asarPath} — every packaging path produces one; `
+      + `set ${PACKAGED_RUNTIME_LAYOUT_ENV}=physical only for an asar:false (resources/app) build`,
+    )
   }
   const unpackedRoot = resolvePackagedUnpackedRoot(context)
   const requiredPhysicalEntries = context.electronPlatformName === 'win32'
@@ -1883,6 +1943,70 @@ function listUnpackedUnsafeJs(unpackedRoot: string): string[] {
 /** Timeout for the packaged flock smoke (a hung Electron must not hang afterPack). */
 export const PACKAGED_FLOCK_SMOKE_TIMEOUT_MS = 10_000
 
+/**
+ * 打包版运行时**实际**报出的 Electron 版本行（2026-09-23 第三轮审计 P-5）。
+ *
+ * 为什么需要它：清单里 6 处（4 个包 × dev/peer）pin 的是 `electron` 的**声明**，
+ * 而构建出来的产物用哪个 Electron 只由安装树决定 —— 升级/降级 Electron 时
+ * `afterPack` 对版本本身无感，两个已记录的不变量（Electron 43.4.0 的 `app.asar`
+ * `{ bigint: true }` 语义会让 `skill-filesystem` 整类 provider 静默失效；45 起
+ * `safeStorage` 同步 API 会炸）因此都没有前置判据。
+ *
+ * 做法：两个**已在打包版二进制里跑**的冒烟（flock / error-reporting）各打一行
+ * `ELECTRON-VERSION:<process.versions.electron>`，宿主断言它等于本包
+ * `devDependencies.electron`（不等则报错并打印两侧取值）。
+ */
+export const PACKAGED_ELECTRON_VERSION_MARKER = 'ELECTRON-VERSION:'
+
+/**
+ * 本包 pin 的 Electron 版本（`packages/host/desktop/package.json` 的
+ * `devDependencies.electron`）—— 打包产物用的就是这一份。
+ * @returns 精确版本字符串（如 `44.4.3`）。
+ * @throws 声明值不是精确版本（range/别名会让"逐字比较"这条判据失效，必须 fail-loud）。
+ */
+export function declaredElectronVersion(): string {
+  const manifestPath = join(desktopProductRoot(), 'package.json')
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+    readonly devDependencies?: Readonly<Record<string, unknown>>
+  }
+  const declared = manifest.devDependencies?.electron
+  if (typeof declared !== 'string' || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(declared)) {
+    throw new Error(
+      `dsh-plugin-desktop: ${manifestPath} 的 devDependencies.electron 必须是**精确版本**`
+      + `（收到 ${JSON.stringify(declared)}）—— 打包版 Electron 版本断言需要一个可逐字比较的声明值，`
+      + 'range/别名/tag 会让它静默失效',
+    )
+  }
+  return declared
+}
+
+/**
+ * 断言某次打包后冒烟**真的跑在**本包声明的 Electron 上。
+ * @param stdout - 冒烟子进程的 stdout。
+ * @param smoke - 冒烟名（错误信息里点名是谁）。
+ * @returns 冒烟报出的 Electron 版本。
+ * @throws 缺版本行，或版本与 `devDependencies.electron` 不等（错误信息打印两侧取值）。
+ */
+export function assertPackagedElectronVersion(stdout: string, smoke: string): string {
+  const expected = declaredElectronVersion()
+  const reported = new RegExp(`${PACKAGED_ELECTRON_VERSION_MARKER}(\\S+)`, 'u').exec(stdout)?.[1]
+  if (reported === undefined) {
+    throw new Error(
+      `dsh-plugin-desktop: ${smoke} did not report ${PACKAGED_ELECTRON_VERSION_MARKER}<version> `
+      + `(expected ${expected}) — the embedded smoke script must print the Electron it actually ran on`,
+    )
+  }
+  if (reported !== expected) {
+    throw new Error(
+      `dsh-plugin-desktop: ${smoke} ran on Electron ${reported} while package.json pins `
+      + `devDependencies.electron ${expected} — the shipped runtime is not the version this build declares `
+      + '(check the installed electron dist / a stale node_modules; the asar bigint semantics and the '
+      + 'safeStorage API shape are version-dependent)',
+    )
+  }
+  return reported
+}
+
 /** Success marker the embedded flock script prints; a silent exit 0 is a failure. */
 const FLOCK_SMOKE_OK = 'FLOCK-SMOKE-OK'
 
@@ -1897,6 +2021,12 @@ const FLOCK_SMOKE_OK = 'FLOCK-SMOKE-OK'
  * proves the lock is real by failing to take it again from a second descriptor
  * (POSIX flock is per open-file-description, so contention must raise
  * EAGAIN/EWOULDBLOCK). It never touches `bin/landlock-run`.
+ *
+ * It also prints the Electron it is actually running on (`ELECTRON-VERSION:<v>`,
+ * 2026-09-23 P-5): the host asserts that equals `devDependencies.electron`, so a
+ * runtime built against an unexpected Electron fails the gate instead of being
+ * discovered later by a version-specific behaviour (asar bigint semantics,
+ * safeStorage API shape).
  */
 const FLOCK_SMOKE_SCRIPT = `import { createRequire } from 'node:module'
 import { closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs'
@@ -1905,6 +2035,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const appRoot = process.argv[2]
+process.stdout.write('${PACKAGED_ELECTRON_VERSION_MARKER}' + String(process.versions.electron) + '\\n')
 const appRequire = createRequire(join(appRoot, 'package.json'))
 const flockUrl = pathToFileURL(appRequire.resolve('@deepseek-ai/node-addon-system/flock')).href
 const { tryLockExclusive } = await import(flockUrl)
@@ -2084,6 +2215,9 @@ export function smokePackagedFlockLock(
         + `${FLOCK_SMOKE_OK} — the smoke script did not run to completion`,
       )
     }
+    // P-5(2026-09-23):版本断言必须落在**真跑过的**冒烟上 —— 清单里的 6 处 pin 是声明，
+    // 这一行才是"产物实际用的 Electron"的证据。
+    assertPackagedElectronVersion(result.stdout, 'packaged flock smoke')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -2107,12 +2241,16 @@ const SENTRY_SMOKE_OK = 'SENTRY-SMOKE-OK'
  * falls out of the package, the plugin module fails to load **with zero logs**
  * (the composition loads plugins lazily), which nothing else in the gate would
  * catch — the static entry list only proves a path exists, not that it loads.
+ *
+ * 同 flock 冒烟：它也会打一行 `ELECTRON-VERSION:<v>`（2026-09-23 P-5）。这个冒烟
+ * **三个平台都跑**，所以它是版本断言在全平台上的落点。
  */
 const SENTRY_SMOKE_SCRIPT = `import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const appRoot = process.argv[2]
+process.stdout.write('${PACKAGED_ELECTRON_VERSION_MARKER}' + String(process.versions.electron) + '\\n')
 const appRequire = createRequire(join(appRoot, 'package.json'))
 // Static import target of the enterprise error-reporting module (external in its
 // tsdown build, so this resolves at runtime, not at build time).
@@ -2234,6 +2372,8 @@ export function smokePackagedErrorReporting(
         + `${SENTRY_SMOKE_OK} — the smoke script did not run to completion`,
       )
     }
+    // P-5(2026-09-23):这个冒烟**三个平台都跑**，Electron 版本因此是全平台判据。
+    assertPackagedElectronVersion(result.stdout, 'packaged error-reporting smoke')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
