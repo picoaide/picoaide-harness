@@ -232,12 +232,37 @@ func AddGatewayProvider(db *sql.DB, p *GatewayProvider) (int64, error) {
 }
 
 // UpdateGatewayProvider updates all fields.
+//
+// 2026-09-23(P0-2):真正的写入逻辑在 UpdateGatewayProviderTx —— 管理端 PUT
+// /providers/:id 必须把「provider 行写入(含密钥轮换)」与「模型清单同步」放在
+// **同一个事务**里,否则清单同步失败会留下"密钥已轮换、管理端以为失败"的半提交。
+// 本函数保留为「自开事务 + 提交后失效缓存」的兼容入口(行为与历史逐字一致)。
 func UpdateGatewayProvider(db *sql.DB, p *GatewayProvider) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := UpdateGatewayProviderTx(tx, p); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	InvalidateModelConfig()
+	InvalidateModelsChanged()
+	return nil
+}
+
+// UpdateGatewayProviderTx 是 UpdateGatewayProvider 的**事务内**版本:只写行,
+// 不失效缓存 —— 失效必须发生在调用方 Commit **之后**,否则并发读者会在事务
+// 提交前把旧值重新灌进进程缓存,提交后缓存就一直是脏的。
+func UpdateGatewayProviderTx(tx *sql.Tx, p *GatewayProvider) error {
 	if p.Protocol == "" {
 		p.Protocol = "openai" // 空串不允许(列 CHECK),归一为默认
 	}
 	modelsJSON, _ := json.Marshal(p.Models)
-	res, err := db.Exec(`UPDATE gateway_providers SET name=?, base_url=?, api_key_enc=?, models=?, enabled=?, channel=?, protocol=?
+	res, err := tx.Exec(`UPDATE gateway_providers SET name=?, base_url=?, api_key_enc=?, models=?, enabled=?, channel=?, protocol=?
 		WHERE id=?`, p.Name, p.BaseURL, p.APIKeyEnc, string(modelsJSON), p.Enabled, p.Channel, p.Protocol, p.ID)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -249,8 +274,6 @@ func UpdateGatewayProvider(db *sql.DB, p *GatewayProvider) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	InvalidateModelConfig()
-	InvalidateModelsChanged()
 	return nil
 }
 
@@ -322,7 +345,45 @@ func DeleteGatewayProvider(db *sql.DB, id int64) error {
 // "目录缺失"走 RemoveMissingProviderModels 的标记路径,两者不要混。
 //
 // 重名模型按首次出现去重(UNIQUE(provider_id,name) 约束),避免半同步 + 500。
+//
+// 2026-09-23(P0-2):写入逻辑在 SyncProviderModelsTx —— 管理端 PUT /providers/:id
+// 要把它与 provider 行写入放进同一个事务。本函数保留为「自开事务 + 提交后失效
+// 缓存与告警」的兼容入口(行为与历史逐字一致)。
 func SyncProviderModels(db *sql.DB, providerID int64, names []string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	prunedPriced, err := SyncProviderModelsTx(tx, providerID, names)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	LogPrunedPricedModels(providerID, prunedPriced)
+	InvalidateModelConfig()
+	InvalidateModelsChanged()
+	return nil
+}
+
+// LogPrunedPricedModels 为「清单更新移除了带定价/参数的行」打一条可检索告警
+// (审计 G-01 的"零痕迹"问题:此前连审计都没有)。**必须在事务提交后调用** ——
+// 事务内打日志会在回滚时留下"删了带定价的行"的假告警。
+func LogPrunedPricedModels(providerID int64, prunedPriced []string) {
+	if len(prunedPriced) == 0 {
+		return
+	}
+	log.Printf("gateway: WARNING provider=%d 模型清单更新移除了 %d 个带定价/参数的行: %s",
+		providerID, len(prunedPriced), strings.Join(prunedPriced, ","))
+}
+
+// SyncProviderModelsTx 是 SyncProviderModels 的**事务内**版本:把 provider 的
+// 模型清单同步进 models 表,但不提交、不失效缓存、不打告警 —— 这三件事都归调用
+// 方在 Commit 之后做(事务内失效缓存会让并发读者把未提交的旧值灌回进程缓存)。
+// 返回值是被剪枝且带运营方配置(价格/参数/模态)的模型名,供调用方提交后告警。
+func SyncProviderModelsTx(tx *sql.Tx, providerID int64, names []string) ([]string, error) {
 	seen := make(map[string]bool, len(names))
 	deduped := make([]string, 0, len(names))
 	for _, name := range names {
@@ -336,11 +397,6 @@ func SyncProviderModels(db *sql.DB, providerID int64, names []string) error {
 	for _, name := range deduped {
 		keep[name] = true
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	// ① upsert:既有行只动 display_name 与目录缺失标记(写进清单即"要它可用"),
 	//    价格/参数/模态一律保留。
 	for _, name := range deduped {
@@ -348,14 +404,14 @@ func SyncProviderModels(db *sql.DB, providerID int64, names []string) error {
 			ON CONFLICT (provider_id, name) DO UPDATE
 			SET display_name = excluded.display_name, catalog_missing = FALSE`,
 			name, providerID, name); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	// ② 剪枝:只删不在清单里的行(含此前被标记 catalog_missing 的行 —— 管理员
 	//    重新给出清单就是最终口径)。
 	rows, err := providerModelRowsTx(tx, providerID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var prunedPriced []string
 	for _, r := range rows {
@@ -363,24 +419,13 @@ func SyncProviderModels(db *sql.DB, providerID int64, names []string) error {
 			continue
 		}
 		if _, err := tx.Exec("DELETE FROM models WHERE id = ?", r.ID); err != nil {
-			return err
+			return nil, err
 		}
 		if r.HasOperatorConfig {
 			prunedPriced = append(prunedPriced, r.Name)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	// 删掉带定价的行 = 真金白银的配置被移除,必须留一条可检索的告警(审计 G-01
-	// 的"零痕迹"问题:此前连审计都没有)。
-	if len(prunedPriced) > 0 {
-		log.Printf("gateway: WARNING provider=%d 模型清单更新移除了 %d 个带定价/参数的行: %s",
-			providerID, len(prunedPriced), strings.Join(prunedPriced, ","))
-	}
-	InvalidateModelConfig()
-	InvalidateModelsChanged()
-	return nil
+	return prunedPriced, nil
 }
 
 // modelRowBrief 是同步路径关心的最小行信息(剪枝与"目录缺失"判定共用)。

@@ -142,6 +142,42 @@ func AuditLog(db *sql.DB, username, action, detail string) error {
 	return auditLog(db, "", username, action, detail)
 }
 
+// AuditLogTx 在**调用方事务**内追加一条审计条目(2026-09-23,P0-2)。
+//
+// 为什么需要它:异步 worker(AuditLog/auditLog)自带事务,业务写与审计写必然
+// 分成两次提交 —— 业务写成功而审计写失败,就出现"库改了、审计零痕迹";反过来
+// 业务写回滚而审计已提交,就出现"审计说改了、其实没改"。管理端
+// PUT /api/server/admin/providers/:id 这类「改配置即改钱」的路径不允许这两种
+// 不一致,所以它的审计必须与业务写同事务。
+//
+// 链口径与 AuditLog 完全一致(v1,hash_version=1,app_id 为 NULL):同一个
+// sha256(prev|username|action|detail|created_at),同一个固定 advisory lock
+// (事务级,事务结束自动释放)串行化「读链尾 → 计算 → 插入」。detail 与
+// AuditLog 一样先过 util.EscapeControl(入口唯一,保证"落库内容 == 计算哈希
+// 的输入",否则 VerifyAuditChain 会报断链)。
+//
+// 与异步 worker 的无死锁论证:本函数在事务**末尾**取审计锁,此前只持有
+// gateway_providers/models 的行锁;worker 持有审计锁时只插 audit_logs(新行),
+// 不碰我们的行 ⇒ 不存在环。
+func AuditLogTx(tx *sql.Tx, username, action, detail string) error {
+	if _, err := tx.Exec("SELECT pg_advisory_xact_lock(?)", auditChainLockKey); err != nil {
+		return err
+	}
+	var prevHash string
+	if err := tx.QueryRow("SELECT hash FROM audit_logs ORDER BY id DESC LIMIT 1").Scan(&prevHash); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		prevHash = ""
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	detail = util.EscapeControl(detail)
+	sum := sha256.Sum256([]byte(auditHashPayload(prevHash, username, action, detail, now)))
+	_, err := tx.Exec("INSERT INTO audit_logs (username, action, detail, prev_hash, hash, created_at, app_id, hash_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		username, action, detail, prevHash, hex.EncodeToString(sum[:]), now, nil, auditHashVersionLegacy)
+	return err
+}
+
 // AuditLogApp 与 AuditLog 相同,但把条目关联到一个 **wasm 应用**(迁移 0069
 // 新增的 audit_logs.app_id,§4.9「审计的 app 维度」):发布/上下架/冻结/删除/
 // 换票签发这类操作必须答得出"谁在什么时候用了哪个应用"。

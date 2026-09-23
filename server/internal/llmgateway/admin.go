@@ -391,7 +391,29 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	// 用于把"价格被改/被清"纳入本次审计(G-01)。必须在上面的 provider 写入与
 	// 下面的清单同步**之前**取,否则拿不到被清空前的值。
 	modelConfigBefore := providerModelConfigSnapshot(db, p.ID)
-	if err := serverstore.UpdateGatewayProvider(db, p); err != nil {
+
+	// 2026-09-23(P0-2):provider 行写入(含密钥轮换)/ 模型清单同步 / 审计落在
+	// **同一个事务**里。旧实现三者在 autocommit 下顺序执行:清单同步失败时直接
+	// 500 返回,而 provider 行(含轮换后的密钥)已经落库、审计一个字都没写 ——
+	// 管理端以为保存失败(密钥其实已换),若新清单还让带定价的行被剪枝,路由会
+	// 命中"没有定价"的模型(用量按 0 元计费)。
+	//
+	// 为什么这里用事务而不是"两阶段前置校验":本路径的清单同步是**纯 SQL**
+	// (SyncProviderModelsTx),没有出网,事务在结构上完全可行;而"把校验提前"
+	// 挡不住真正的失败源(约束冲突、连接中断、PG 拒绝 0x00 这类存储层报错),
+	// 那些恰恰是旧实现半提交的触发条件。
+	//
+	// 唯一出网的动作是渠道型上游保存后的目录拉取(syncProviderNow),按既有契约
+	// **不阻塞保存**(失败只进响应体的 sync.error),因此留在 Commit 之后 ——
+	// 出网动作不可能塞进数据库事务,它的失败语义是"保存成功、同步待重试"。
+	tx, err := db.Begin()
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+		return
+	}
+	defer tx.Rollback() // 提交后为 no-op
+
+	if err := serverstore.UpdateGatewayProviderTx(tx, p); err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "上游名称已存在")
 			return
@@ -415,22 +437,23 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	// upsert + 剪枝,这里再保证"没有变化就不动库"(不重建行、不打回 display_name)。
 	clearingChannelModels := wasChannel != "" && p.Channel == ""
 	modelsUnchanged := req.Models != nil && slices.Equal(req.Models, orig.Models)
+	// prunedPriced 由 SyncProviderModelsTx 返回,提交后再打告警(事务内打日志会在
+	// 回滚时留下"删了带定价的行"的假告警)。
+	var prunedPriced []string
 	if p.Channel == "" && (clearingChannelModels || (req.Models != nil && !modelsUnchanged)) {
 		names := p.Models
 		if clearingChannelModels {
 			names = nil
 		}
-		if err := serverstore.SyncProviderModels(db, p.ID, names); err != nil {
+		var syncErr error
+		prunedPriced, syncErr = serverstore.SyncProviderModelsTx(tx, p.ID, names)
+		if syncErr != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型同步失败")
 			return
 		}
 	}
-	// 渠道型:更新后也立即同步,模型列表保持新鲜
-	var syncRes *SyncResult
-	if p.Channel != "" {
-		syncRes = syncProviderNow(db, p)
-	}
-	// 审计:字段级变更明细(密钥只记"已更换",不落明文/密文)
+	// 审计:字段级变更明细(密钥只记"已更换",不落明文/密文)。
+	// 明细口径与顺序逐字不变(webadmin 审计页按该串渲染)。
 	var ch []string
 	if p.Name != orig.Name {
 		ch = append(ch, "name:"+orig.Name+"→"+p.Name)
@@ -457,12 +480,35 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	// default_params/input_modalities 的变化必须留痕。旧实现的 changes 只覆盖
 	// name/base_url/channel/protocol/enabled/api_key/models 数量 —— 价格被清零时
 	// 一个字都不写(全部字段未变时连 len(ch)==0 都没有审计),这正是 P0 能"静默
-	// 破产"的原因。这里按 provider 下逐模型比对变更前后的快照。
-	if priceChanges := diffProviderModelConfig(modelConfigBefore, providerModelConfigSnapshot(db, p.ID)); len(priceChanges) > 0 {
+	// 破产"的原因。这里按 provider 下逐模型比对变更前后的快照(变更后快照走
+	// 事务连接,读到的是本次写入的结果)。
+	if priceChanges := diffProviderModelConfig(modelConfigBefore, providerModelConfigSnapshot(tx, p.ID)); len(priceChanges) > 0 {
 		ch = append(ch, priceChanges...)
 	}
+	// 审计与业务写同事务:审计写不进去就整体回滚(2026-09-23,P0-2)。旧实现是
+	// `_ = AuditLog(...)` —— 异步、错误被丢弃,于是"库改了但零审计"可以静默发生。
 	if len(ch) > 0 {
-		_ = serverstore.AuditLog(db, auditActor(c), "provider_update", p.Name+": "+strings.Join(ch, ", "))
+		if err := serverstore.AuditLogTx(tx, auditActor(c), "provider_update", p.Name+": "+strings.Join(ch, ", ")); err != nil {
+			log.Printf("gateway provider update: 审计写入失败,已回滚本次更新 provider=%d: %v", p.ID, err)
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+		return
+	}
+	// 提交后才失效缓存:事务内失效会让并发读者把**未提交**的旧值灌回进程缓存,
+	// 提交后那份缓存就一直是脏的(与 serverstore 侧 Tx 变体的分工一致)。
+	serverstore.InvalidateModelConfig()
+	serverstore.InvalidateModelsChanged()
+	serverstore.LogPrunedPricedModels(p.ID, prunedPriced)
+	// 渠道型:更新后也立即同步,模型列表保持新鲜。这一步**出网**,按既有契约不
+	// 阻塞保存:失败只落在响应体的 sync.error 里(HTTP 仍 200),管理员可用同步
+	// 按钮重试;它不在事务里,也不参与上面的原子单元。
+	var syncRes *SyncResult
+	if p.Channel != "" {
+		syncRes = syncProviderNow(db, p)
 	}
 	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p), "sync": syncRes})
 }
@@ -492,11 +538,18 @@ func (c providerModelConfig) hasPrice() bool {
 	return c.In != "-" || c.Out != "-" || c.Cache != "-" || c.Offpeak != "-"
 }
 
+// rowQuerier 是审计用模型配置快照需要的查询面:*sql.DB 与 *sql.Tx 都满足。
+// 变更前的快照走 *sql.DB(事务开始前),变更后的快照走 *sql.Tx —— 后者读到的是
+// 本次写入的结果,且事务回滚时不会留下"配置被改"的误报。
+type rowQuerier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
 // providerModelConfigSnapshot 读 provider 下每个模型的运营方配置(审计基线)。
 // 读失败时不阻塞更新:返回已读到的部分(审计退化为"没有可比基线"),并记日志。
-func providerModelConfigSnapshot(db *sql.DB, providerID int64) map[string]providerModelConfig {
+func providerModelConfigSnapshot(q rowQuerier, providerID int64) map[string]providerModelConfig {
 	out := map[string]providerModelConfig{}
-	rows, err := db.Query(`SELECT name, input_price_per_1m, output_price_per_1m,
+	rows, err := q.Query(`SELECT name, input_price_per_1m, output_price_per_1m,
 		cache_input_price_per_1m, offpeak_discount, COALESCE(default_params, ''),
 		COALESCE(input_modalities, '["text"]')
 		FROM models WHERE provider_id = ?`, providerID)
