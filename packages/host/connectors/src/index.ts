@@ -696,17 +696,52 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   /** Composite key of one MCP server inside ONE connector (live providers). */
   const mcpServerKey = (id: string, serverName: string): string => JSON.stringify([id, serverName])
   /**
-   * Dead-grant terminal state: connector id → the credential generation
-   * (`updatedAt`) that was rejected with `invalid_grant`/`invalid_client`.
+   * Dead-grant terminal state: **(account scope, connector id) → the credential
+   * generation (`updatedAt`) that was rejected with
+   * `invalid_grant`/`invalid_client`**.
+   *
+   * The fact belongs to ONE ACCOUNT's credential file, so the account is part of
+   * the key — not a separate cleanup path (R3-B2 audit 2026-09-23, R3B2-2).
+   * Keyed by connector id alone, account A's revocation was inherited by account
+   * B whenever B's stored credential carried the same generation, which is what
+   * a provisioned/copied credential file looks like: B was told to authorize
+   * again, with zero network round trips, although its token was usable. The
+   * scope is the resolved store directory — the same identity `TokenRefresher`
+   * snapshots as `scopeAtStart` — so two accounts can never share an entry, and
+   * another account's entry is unreachable rather than merely cleared (a user
+   * switch keeps THIS account's terminal state, exactly like the durable row
+   * state, and re-arms nothing).
    *
    * In memory on purpose: the marker is an optimization of the AUTOMATIC sweep
-   * (one probe per process is acceptable, a probe per minute forever is not),
-   * while the durable facts (row `unauthorized` + the stored credential) already
-   * survive a restart. A successful re-authorization writes a new generation, so
-   * the entry stops matching and automatic recovery is re-armed without any
-   * explicit clearing.
+   * (one probe per account and process is acceptable, a probe per minute forever
+   * is not), while the durable facts (row `unauthorized` + the stored credential)
+   * already survive a restart. A successful re-authorization writes a new
+   * generation, so the entry stops matching and automatic recovery is re-armed
+   * without any explicit clearing.
    */
   const deadGrants = new Map<string, number>()
+  /**
+   * Key of one dead-grant marker: account scope + connector id, built in ONE
+   * place so every read, write and delete agrees on it (a marker judged under a
+   * different key than it was recorded under would silently re-arm, or never
+   * arm, the automatic recovery).
+   *
+   * NUL separates the halves: no filesystem path can contain it, and connector
+   * ids are already validated to `[A-Za-z0-9._-]`, so no two scope/id pairs can
+   * collide by concatenation.
+   */
+  const deadGrantKey = (scope: string, id: string): string => `${scope}\u0000${id}`
+  /** Is the credential just read from THIS account's store the generation already proven dead? */
+  const isDeadGrant = (scope: string, id: string, credential: ConnectorCredential): boolean =>
+    deadGrants.get(deadGrantKey(scope, id)) === credential.updatedAt
+  /** Record the generation whose grant the authorization server revoked, under ITS OWN account. */
+  const markDeadGrant = (scope: string, id: string, credential: ConnectorCredential): void => {
+    deadGrants.set(deadGrantKey(scope, id), credential.updatedAt)
+  }
+  /** Re-arm automatic recovery for one account's connector (fresh generation / disconnect). */
+  const clearDeadGrant = (scope: string, id: string): void => {
+    deadGrants.delete(deadGrantKey(scope, id))
+  }
   /**
    * Live MCP registrations, keyed by **serverName** — the namespace upstream
    * `mcp-client` reserves for exactly ONE live instance.
@@ -1824,7 +1859,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // handles): the cached refresh result must not be adopted by a later
     // re-registration under a NEW authorization.
     latestRefresh.delete(id)
-    deadGrants.delete(id)
+    // The marker belongs to the account whose credential was just removed.
+    clearDeadGrant(store.dir, id)
     liveProviders.delete(id)
     // 断开必须连分类一起清（2026-09-17 S04-3 审计）：只清 error 会留下
     // `errorCode:'auth-required'`，下一次未分类失败就会被渲染成"需要重新授权"。
@@ -1851,7 +1887,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     for (const def of defs) {
       try {
         if (stale()) return
-        const credential = await store.readCredential(def.id)
+        // The account scope is captured TOGETHER with the credential (one store
+        // instance for both): the dead-grant markers below are only meaningful
+        // against the very store the credential came from.
+        const target = store
+        const scope = target.dir
+        const credential = await target.readCredential(def.id)
         if (stale()) return
         noteCredential(def.id, credential)
         if (!credential) {
@@ -1866,7 +1907,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         // Refresh OAuth tokens before restoring (official SDK refresh flow),
         // then register the MCP servers.
         const effective = credential.refreshToken === undefined
-          || deadGrants.get(def.id) === credential.updatedAt
+          || isDeadGrant(scope, def.id, credential)
           ? credential
           : await (async () => {
               const outcome = await tokenRefresher.refresh(def.id)
@@ -1874,19 +1915,19 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
               if (!outcome.ok && outcome.reason === 'reauthorize') {
                 // CN-5: remember the generation so the sweep stops re-presenting
                 // a revoked refresh token (the row below is the durable signal).
-                deadGrants.set(def.id, credential.updatedAt)
+                markDeadGrant(scope, def.id, credential)
                 // The grant is gone: say so on the row instead of registering
                 // MCP servers that are guaranteed to 401.
                 setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
                 return null
               }
-              return await store.readCredential(def.id) ?? credential
+              return await target.readCredential(def.id) ?? credential
             })()
         if (stale() || effective === null) continue
         if (stale()) return
         // A credential whose grant is known dead must not be registered (every
         // tool call would 401); the row keeps demanding a fresh authorization.
-        if (deadGrants.get(def.id) === effective.updatedAt) {
+        if (isDeadGrant(scope, def.id, effective)) {
           setState(def.id, { status: 'unauthorized', everConnected: true, errorCode: 'auth-required' })
           continue
         }
@@ -1975,9 +2016,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * CN-5（2026-09-23 审计）：死 grant 必须进**终态**。此前 `unauthorized` 也在
    * 扫掠白名单里，于是被吊销的 refresh token 每 60s 再被出示一次（审计探针实测
    * 5 次扫掠 = 40 次打到 IdP），对那些做异常登录检测的 IdP 看起来就是持续攻击。
-   * 现在：`invalid_grant`/`invalid_client` 记在 {@link deadGrants} 上（键是**凭据
-   * 代次** `updatedAt`），只要盘上还是同一份凭据就不再自动重试；用户重新授权会
-   * 写入新凭据（新代次）⇒ 自动恢复尝试；面板的「刷新」按钮走 `force`，一直可用。
+   * 现在：`invalid_grant`/`invalid_client` 记在 {@link deadGrants} 上（键是**账号
+   * 作用域 + 连接器**，值是**凭据代次** `updatedAt`），只要该账号盘上还是同一份
+   * 凭据就不再自动重试；用户重新授权会写入新凭据（新代次）⇒ 自动恢复尝试；面板的
+   * 「刷新」按钮走 `force`，一直可用。
    * @returns 扫掠完成的 Promise。
    */
   async function runRefreshSweep(): Promise<void> {
@@ -1985,18 +2027,21 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       for (const def of defs) {
         const state = states.get(def.id)
         if (state?.status !== 'connected' && state?.status !== 'unauthorized') continue
-        const credential = await store.readCredential(def.id)
+        // 作用域与凭据取自同一个 store 实例（见 {@link deadGrantKey}）。
+        const target = store
+        const scope = target.dir
+        const credential = await target.readCredential(def.id)
         if (!credential || !tokenNeedsRefresh(credential)) continue
-        // 终态：同一代凭据已经证明授权被吊销 ⇒ 停止心跳（不静默、行状态仍是
+        // 终态：同一账号同一代凭据已经证明授权被吊销 ⇒ 停止心跳（不静默、行状态仍是
         // 「需要重新授权」，只是不再拿死 token 去打 IdP）。
-        if (deadGrants.get(def.id) === credential.updatedAt) continue
+        if (isDeadGrant(scope, def.id, credential)) continue
         const outcome = await tokenRefresher.refresh(def.id, { locale: locale() })
         if (outcome.ok) {
-          deadGrants.delete(def.id)
+          clearDeadGrant(scope, def.id)
           continue
         }
         if (outcome.reason === 'reauthorize') {
-          deadGrants.set(def.id, credential.updatedAt)
+          markDeadGrant(scope, def.id, credential)
           setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
         }
       }
