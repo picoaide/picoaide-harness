@@ -14,12 +14,6 @@ import (
 // 明细无法精确回指)。
 // ---------------------------------------------------------------------------
 
-// ModelProviderName 模型名 → provider 名(首个匹配)。
-type ModelProviderName struct {
-	Model    string
-	Provider string
-}
-
 // ModelProviderMap 返回当前 模型名 → provider 名 映射(models 表)。
 func ModelProviderMap(db *sql.DB) (map[string]string, error) {
 	rows, err := db.Query(`SELECT m.name, COALESCE(p.name, '') FROM models m

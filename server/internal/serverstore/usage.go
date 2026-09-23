@@ -16,12 +16,8 @@ const pgTimeFmt = "2006-01-02 15:04:05"
 
 // 2026-09-11:员工 token 配额与员工金额配额已下线 —— 网关唯一的"钱"闸门是
 // 账户余额(见 docs/planning/2026-09-11-balance-quota-consolidation.md)。
-// 两个 settings 键仍可能存在于历史数据库(不再读写,不做破坏性清理),常量
-// 仅留给迁移/文档引用,代码不得再用它们做判定。
-const (
-	LegacyMonthlyQuotaSetting      = "usage.monthly_quota"
-	LegacyMonthlyMoneyQuotaSetting = "usage.monthly_quota_money"
-)
+// 两个 settings 键(usage.monthly_quota / usage.monthly_quota_money)仍可能
+// 存在于历史数据库(不再读写,不做破坏性清理),但代码不得再用它们做判定。
 
 // PeakWindowsSetting 高峰时段配置(settings 键,JSON 字符串):
 //
@@ -210,12 +206,6 @@ func costOfAt(now time.Time, promptTokens, completionTokens, cacheTokens int64, 
 // 金额配额与统计均读 SUM(cost),口径一致。低谷窗口按记录时刻判定。
 func RecordUsageKind(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64, kind string) (int64, error) {
 	return recordUsageKindAt(db, userID, model, promptTokens, completionTokens, kind, time.Now())
-}
-
-// RecordUsageKindEstimated 是 RecordUsageKind 的估算标记版本(embedding 输入侧
-// 估算用;无缓存命中数)。
-func RecordUsageKindEstimated(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64, kind string, estimated bool) (int64, error) {
-	return recordUsageKindAtCached(db, userID, 0, model, promptTokens, completionTokens, 0, kind, estimated, time.Now())
 }
 
 // RecordUsageKindCachedEstimatedForProvider 与 RecordUsageKindCachedEstimated
@@ -540,17 +530,11 @@ func weekFill(from, to time.Time) []string {
 
 // weekMondayDay 返回该日期所在周的周一(保留日期值形态)。from/to 已由
 // normalizeDayRange 归一为北京日期值,这里只做日期运算,与进程/PG 会话
-// 时区无关。
+// 时区无关。SQL 侧用 date(created_at,'weekday 0','-6 days') 得到同一周一,
+// 两者严格对齐,免疫 ISO/%W 的跨年边界差异(审计2026-E2)。
 func weekMondayDay(d time.Time) time.Time {
 	// 周一前推 wd-1 天;Sunday(wd=0)前推 6 天
 	return d.AddDate(0, 0, -((int(d.Weekday()) + 6) % 7))
-}
-
-// weekMonday 返回该日期所在周的周一日期(YYYY-MM-DD)。SQL 侧用
-// date(created_at,'weekday 0','-6 days') 得到同一周一,两者严格对齐,
-// 免疫 ISO/%W 的跨年边界差异(审计2026-E2)。
-func weekMonday(d time.Time) string {
-	return weekMondayDay(d).Format(dateFmt)
 }
 
 func monthFill(from, to time.Time) []string {
@@ -612,7 +596,7 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 		fill = dayFill
 	case "week":
 		// 按周一日期分桶:date(created_at,'weekday 0','-6 days') 与
-		// weekMonday 严格对齐,免疫 ISO/%W 跨年差异(审计2026-E2)
+		// weekMondayDay 严格对齐,免疫 ISO/%W 跨年差异(审计2026-E2)
 		selectExpr, groupExpr = DateWeekExpr("usage.created_at"), DateWeekExpr("usage.created_at")
 		fill = weekFill
 	case "month":

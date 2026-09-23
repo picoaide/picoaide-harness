@@ -661,16 +661,6 @@ export async function uninstallSkill(
   })
 }
 
-/** Sanity helper used by tests: does a directory contain a SKILL.md? */
-export async function hasSkillMarkdown(dir: string): Promise<boolean> {
-  try {
-    await stat(join(dir, 'SKILL.md'))
-    return true
-  } catch {
-    return false
-  }
-}
-
 /** 安装器写入的溯源目录名(服务端拒绝归档自带同名目录)。 */
 export const PROVENANCE_DIR = '.picoaide'
 
@@ -935,9 +925,4 @@ async function addDirToZip(zip: AdmZip, root: string, dir: string, relPrefix: st
       zip.addFile(rel, data, '', st.mode & 0o777)
     }
   }
-}
-
-/** List installed skills: names only (compat alias). */
-export async function listInstalledSkillNames(skillsDir: string): Promise<string[]> {
-  return await listInstalledSkills(skillsDir)
 }
