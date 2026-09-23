@@ -362,6 +362,12 @@ func errorCode(out map[string]any) string {
 //
 // 它抓的是"漏一个端点没人发现"：新增一条 /api/server/admin/agents* 路由却既没加
 // requireMarketAgent、也没在本清单登记 ⇒ 红；反过来清单里留了已删路由 ⇒ 也红。
+//
+// **注意本用例的枚举面**：`marketAdminSetup` 建的是 `RegisterAdminRoutes` 的
+// **测试镜像树**。生产真源是 `internal/router/router.go`，镜像守门对"只在生产树里
+// 加一条未登记路由"是**盲**的（复审 MG1）—— 那一面由 `internal/router` 的
+// `TestProductionAgentRoutesMatchMarketplacePolicy` 对拍生产路由表补齐，两处共用
+// 同一个 `MarketAgentRouteViolations` 实现（不各写一份判据）。
 func TestAgentAdminRoutesAreMarketOnlyOrRegistered(t *testing.T) {
 	h, db, _ := marketAdminSetup(t)
 	defer db.Close()
@@ -370,44 +376,18 @@ func TestAgentAdminRoutesAreMarketOnlyOrRegistered(t *testing.T) {
 		t.Fatalf("marketAdminSetup 返回的不是 *gin.Engine（%T），无法枚举路由", h)
 	}
 
-	got := map[string]bool{}
+	got := []string{}
 	for _, rt := range engine.Routes() {
 		if strings.HasPrefix(rt.Path, "/api/server/admin/agents") {
-			got[rt.Method+" "+rt.Path] = true
+			got = append(got, rt.Method+" "+rt.Path)
 		}
 	}
 	if len(got) == 0 {
 		t.Fatal("运行时路由表里没有任何 /api/server/admin/agents* 路由（枚举方式坏了，判据失效）")
 	}
-	for key := range got {
-		if _, ok := marketAgentRoutePolicy[key]; !ok {
-			t.Errorf("路由 %s 未登记渠道口径：新增智能体管理路由必须在 marketAgentRoutePolicy 里"+
-				"选择「加 requireMarketAgent 守卫」或「登记为跨渠道并写依据」", key)
-		}
-	}
-	for key := range marketAgentRoutePolicy {
-		if !got[key] {
-			t.Errorf("marketAgentRoutePolicy 登记了 %s，但运行时没有这条路由（陈旧条目）", key)
-		}
-	}
-	for key, rule := range marketAgentRoutePolicy {
-		if strings.TrimSpace(rule.Why) == "" {
-			t.Errorf("%s：渠道口径没有写依据", key)
-		}
-		switch rule.Policy {
-		case policyCrossChannelNameExclusion:
-			if !strings.Contains(rule.Why, "409") {
-				t.Errorf("%s：跨渠道条目必须写明它拒绝时回什么（当前依据 %q）", key, rule.Why)
-			}
-		case policyMarketOnlyByGuard:
-			if !strings.Contains(key, ":name") {
-				t.Errorf("%s：标为逐名守卫类，但路由里没有 :name（清单与实现不符）", key)
-			}
-		case policyMarketOnlyByListFilter:
-			// 清单类靠 ListApps(kind, market) 过滤，没有逐名守卫 —— 允许无 :name。
-		default:
-			t.Errorf("%s：未知渠道口径 %q", key, rule.Policy)
-		}
+	if violations := MarketAgentRouteViolations(got); len(violations) > 0 {
+		t.Fatalf("测试镜像树与渠道口径清单不一致（%d 条）：\n  %s",
+			len(violations), strings.Join(violations, "\n  "))
 	}
 	// 五条"A-8 补守卫"的路由必须在清单里体现为守卫类（防止有人把某一条悄悄改成
 	// 清单过滤或跨渠道而用例还在测 404 —— 那种改动会先在这里红）。

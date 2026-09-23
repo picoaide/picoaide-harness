@@ -3,7 +3,10 @@ package marketplace
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -151,4 +154,71 @@ var marketAgentRoutePolicy = map[string]agentRouteChannelRule{
 		Policy: policyMarketOnlyByGuard,
 		Why:    "applyAgentGrant(grant=false)：A-8 补守卫（**写**面：此前可撤销 org 行的授权）",
 	},
+}
+
+// ruleViolations 是单条清单条目的自洽判据（依据非空、口径与路由形状相符）。
+func (r agentRouteChannelRule) ruleViolations(key string) []string {
+	if strings.TrimSpace(r.Why) == "" {
+		return []string{key + "：渠道口径没有写依据"}
+	}
+	switch r.Policy {
+	case policyCrossChannelNameExclusion:
+		if !strings.Contains(r.Why, "409") {
+			return []string{fmt.Sprintf("%s：跨渠道条目必须写明它拒绝时回什么（当前依据 %q）", key, r.Why)}
+		}
+	case policyMarketOnlyByGuard:
+		if !strings.Contains(key, ":name") {
+			return []string{fmt.Sprintf("%s：标为逐名守卫类，但路由里没有 :name（清单与实现不符）", key)}
+		}
+	case policyMarketOnlyByListFilter:
+		// 清单类靠 ListApps(kind, market) 过滤，没有逐名守卫 —— 允许无 :name。
+	default:
+		return []string{fmt.Sprintf("%s：未知渠道口径 %q", key, r.Policy)}
+	}
+	return nil
+}
+
+// MarketAgentRouteViolations 把「运行时路由表 ↔ marketAgentRoutePolicy」的双向对拍
+// 收敛成**唯一实现**，`observed` 是一份 `"METHOD /path"` 路由集合的快照：
+//
+//   - 包内 `TestAgentAdminRoutesAreMarketOnlyOrRegistered` 传**测试镜像树**
+//     （`RegisterAdminRoutes`）的路由集合；
+//   - `internal/router` 的 `TestProductionAgentRoutesMatchMarketplacePolicy` 传
+//     **生产路由表**（`router.Register`）的 `/agents*` 路由集合。
+//
+// 为什么必须导出（独立复审 F1，2026-09-23）：包内守门只枚举测试镜像树，而新增路由的
+// 自然落点是生产真源 `internal/router/router.go`（server/AGENTS.md §7.0 规定"路由集中
+// 声明"）—— 只在生产树里多一条未登记路由时，包内守卫、`internal/router` 的
+// 「镜像 ⊆ 生产」子集断言、`cmd/server` 的三条装配/扫描断言**全绿**，而该路由在生产
+// 树上真实可达（复审 MG1 实测：它返回 handler 的"智能体不存在"而不是 NoRoute 的
+// "接口不存在"）。修复方声称的"两条守卫组合即等价"因此不成立；只有把生产树本身
+// 纳入对拍面才能闭合。导出面刻意只有这一个**纯函数**（不导出清单、不导出类型、无状态），
+// 判据仍只有一份实现。
+//
+// 返回空切片 = 通过；每条违规是一行可直接读的中文说明（已排序，便于失败时对拍）。
+func MarketAgentRouteViolations(observed []string) []string {
+	violations := make([]string, 0)
+	seen := make(map[string]bool, len(observed))
+	for _, key := range observed {
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		rule, ok := marketAgentRoutePolicy[key]
+		if !ok {
+			violations = append(violations, fmt.Sprintf(
+				"路由 %s 未登记渠道口径：新增智能体管理路由必须在 marketAgentRoutePolicy 里"+
+					"选择「加 requireMarketAgent 守卫」或「登记为跨渠道并写依据」", key))
+			continue
+		}
+		violations = append(violations, rule.ruleViolations(key)...)
+	}
+	for key := range marketAgentRoutePolicy {
+		if !seen[key] {
+			violations = append(violations, fmt.Sprintf(
+				"marketAgentRoutePolicy 登记了 %s，但运行时路由表里没有这条路由（陈旧条目）", key))
+		}
+	}
+	sort.Strings(violations)
+	return violations
 }
