@@ -70,11 +70,29 @@ jobs:
             # 空 diff(空提交/强制推送后的未知状态)按有改动处理
             echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          # docs-only 的判定是**正面清单**(2026-09-23 第三轮审计 R3-C C-3 / C-CI-1)。
+          #
+          # 曾经写的是 `docs/*|site/*|*.md` —— bash `case` 的 `*` **跨 `/`**,所以
+          # "任意深度的 markdown"都算文档:包括 `server/skills/**/*.md`(随包交付给
+          # 客户的技能文档,由 `TestBuiltinSkillVersionTracksContent` 的内容摘要门禁
+          # 守着,实测追加一行注释就红)与 `packages/**/*.md`。那些文件的真正判据在
+          # Go 测试 / 包 check 里 ⇒ 走 docs-only = 那些 job 全跳过 = 零门禁通过。
+          #
+          # 现在的规则(唯一实现,`check-workflows.mjs` 的 [SK-10] 逐条对拍,**改宽改窄
+          # 都红**):
+          #   docs/**、site/**            → 文档面
+          #   任何**含 `/` 的其它路径**   → 代码(含 server/skills/**/*.md 这类随包文档)
+          #   仓库根的 markdown           → 文档面(README/CONTRIBUTING/AGENTS… 没有
+          #                                 包级/Go 判据;铁律 0 等根守卫另由
+          #                                 `Gate (root guards, every change)` 兜住)
+          #   其余                        → 代码
           DOCS_ONLY=1
           while IFS= read -r f; do
             [[ -z "$f" ]] && continue
             case "$f" in
-              docs/*|site/*|*.md) ;;
+              docs/*|site/*) ;;
+              */*) DOCS_ONLY=0; break ;;
+              *.md) ;;
               *) DOCS_ONLY=0; break ;;
             esac
           done <<< "${CHANGED}"
@@ -86,20 +104,93 @@ jobs:
       - name: Report scope
         run: echo "docs-only=${{ steps.scope.outputs.code == 'false' }}（code=${{ steps.scope.outputs.code }}）"
 
+  # 2026-09-23 第三轮审计 R3-C C-3:**永远运行的小 job** —— 只跑根守卫。
+  #
+  # 为什么单独一个 job:docs-only 的 PR 会让"重活"(gate/server/desktop-*)整条跳过,
+  # 而 GitHub 分支保护把 skipped 的必需检查记成**成功**(`gh api
+  # repos/.../branches/master/protection` 的必需检查含 Gate;线上 PR #129 的 Gate 就是
+  # skipped 之后合并的)⇒ 判据落在文档上的根守卫(铁律 0 的域名、迁移区间、文档数字、
+  # 布局记录)一次都不跑。本 job **没有 `if:`、也没有 `needs:`** —— 结构上无法被跳过,
+  # 因而在**任何** PR / 推送形态下都会真的跑那批不依赖构建产物的根守卫
+  # (`scripts/check-root-guards.mjs`,清单来自 `scripts/check-workspaces.mjs` 的 GUARDS
+  # 表,≈1 分钟)。
+  #
+  # 建议把本 job 加进分支保护(它一失败就是红的,独立可读);在加之前,gate 的第一步
+  # 会检查它的结果 —— 它没成功 ⇒ 必需的 `Gate (tests + workspace build)` 一起红,
+  # 所以"守卫失败但 PR 还能合"这条路现在不存在。
+  gate-guards:
+    name: Gate (root guards, every change)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          # 根守卫里的 check-no-real-domains 要扫提交信息区间 ⇒ 必须能看见历史
+          # (2026-09-23 审计 R3-C C-4;守卫侧另有 fail-loud 兜底)。
+          fetch-depth: 0
+      # 顺序约束(2026-09-06 实测):setup-node@v7 默认 enable-corepack: false 且会重排
+      # PATH —— corepack enable 必须在 setup-node 之后执行,否则 yarn shim 被覆盖。
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: corepack enable
+      - name: Cache yarn (and electron for the linux packaging job)
+        uses: actions/cache@v6
+        with:
+          path: |
+            .yarn/cache
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+      - run: yarn install --immutable
+      # 清单与运行器:`scripts/check-root-guards.mjs` 解析编排器的 GUARDS 表(解析不到
+      # 即 fail-loud),不跑任何 workspace 包的 check(那部分属于下面的 gate)。
+      - name: Root guards (every PR shape)
+        run: node scripts/check-root-guards.mjs
+
   gate:
     name: Gate (tests + workspace build)
-    needs: changes
-    # changes 失败(而非成功判定为 docs-only)时照跑:宁可多跑,不可漏测
-    if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'
+    # gate-guards 是"永不跳过"的守卫 job;changes 只提供 docs-only 判定。
+    needs: [changes, gate-guards]
+    # 2026-09-23 第三轮审计 R3-C C-3:**本 job 永不因 docs-only 而跳过**。
+    #
+    # 此前这里是 `if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'`,
+    # 于是"只改文档"的 PR 会把整条 gate 跳过。现在:重活仍按 docs-only 跳过(那正是
+    # 这个开关的用途),但**根守卫已经不在本 job 里**了 —— 它们在 gate-guards(永不
+    # 跳过),而本 job 的第一件事就是检查那个 job 的结果。
+    #
+    # 判据 `!cancelled()`,不是 `success()`:changes 失败(而非判定 docs-only)时照跑 ——
+    # 那时输出为空,下面按"完整路径"处理(宁可多跑,不可漏测);只有整个 run 被取消
+    # (并发互斥,见文件头 concurrency)才不空烧 runner。
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
       actions: write
     steps:
+      # 必需的 `Gate (tests + workspace build)` 必须反映守卫 job 的结果:守卫失败 ⇒
+      # 本步红 ⇒ 必需检查红(静态策略 [SK-9] 钉住这条链路)。
+      - name: Root guards must have passed
+        if: needs.gate-guards.result != 'success'
+        run: |
+          set -euo pipefail
+          echo "::error::根守卫 job 未成功(result=${{ needs.gate-guards.result }})⇒ 门禁整体失败"
+          echo "::error::见 job「Gate (root guards, every change)」的输出;docs-only 的 PR 也必须让它绿。"
+          exit 1
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+          # 2026-09-23 第三轮审计 R3-C C-4:此前没有 `fetch-depth`(默认 1),而
+          # check-no-real-domains 的**提交信息判据**要先解析出区间 base —— PR 的检出
+          # ref 是 `refs/pull/N/merge`,`origin/<base>` 往往根本不存在,depth-1 下四个
+          # 候选全部解析失败,判据于是静默退化成"只看 HEAD"(= 那条 merge commit),
+          # 中间提交信息里的域名一个都看不见。实测同一份历史:完整克隆 EXIT=1、
+          # depth-1 克隆 EXIT=0 且照打"零命中 ✅"。
+          # changes job 早就付过这个成本,同一个仓不是新增量级;守卫侧另有 fail-loud
+          # 兜底(区间解析不到即 EXIT=3),这条是让它**不需要**触发的那一半。
+          fetch-depth: 0
       # ref 形态 → 渠道集 / 是否发布的**唯一真源**(2026-09-23 审计 K-04)。
       #
       # 为什么放在 gate 的第一步:这条规则曾经有两份实现(ci-channels.sh 的 bash
@@ -132,11 +223,15 @@ jobs:
       # 顺序约束(2026-09-06 实测):setup-node@v7 默认 enable-corepack: false
       # 且会重排 PATH——corepack enable 必须在 setup-node 之后执行,否则
       # Windows 上 yarn shim 被覆盖,install 落到全局 Yarn 1.22(实测报错)。
+      # docs-only ⇒ 本 job 只做上面的"守卫结果检查 + tag 形态/发布说明检查",不构建。
       - uses: actions/setup-node@v7
+        if: needs.changes.outputs.code != 'false'
         with:
           node-version: 24
-      - run: corepack enable
+      - if: needs.changes.outputs.code != 'false'
+        run: corepack enable
       - name: Cache yarn (and electron for the linux packaging job)
+        if: needs.changes.outputs.code != 'false'
         uses: actions/cache@v6
         with:
           path: |
@@ -144,12 +239,15 @@ jobs:
             ~/.cache/electron
             ~/.cache/electron-builder
           key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
-      - run: yarn install --immutable
+      - if: needs.changes.outputs.code != 'false'
+        run: yarn install --immutable
       # 渲染进程错误采集门禁(verify:renderer-capture,2026-09-16)是**图形**门禁:
       # 要真起 Electron 并在页面主世界抛错。runner 镜像通常自带 xvfb,这里仍与
       # desktop-linux job 一样做防御式安装 —— 该门禁在无 DISPLAY 且无 xvfb-run 时
       # **故意 fail-loud**(不静默跳过),所以装不上会红,而不是悄悄变绿。
+      # 只有完整路径会跑到那个图形门禁,docs-only 时不必装。
       - name: Ensure xvfb for the graphical gate
+        if: needs.changes.outputs.code != 'false'
         run: |
           set -euo pipefail
           if ! command -v xvfb-run >/dev/null 2>&1; then
@@ -157,10 +255,18 @@ jobs:
           fi
       # 根 check(2026-09-06 重排):desktop check 最前(一次构建产出桌面 lib/types,
       # 其余包 tsc 依赖),随后其余包 check,全程每包只构建一次。
-      - run: yarn check
+      # 判据用 `!= 'false'` 而不是 `== 'true'`:changes 失败/输出为空时走完整路径
+      # (fail-safe)。参数向量必须保持为空(禁止 --no-guards / --only / --changed /
+      # check:fast)—— 这条由 check-workflows.mjs 的 [SK-8] 静态策略守着。
+      # **根守卫也在 `yarn check` 里**,但那条路径只对"有代码改动"的 PR 生效;
+      # docs-only 的 PR 由永不跳过的 gate-guards job 承担(见上面的注释)。
+      - name: Full gate (packages + all root guards)
+        if: needs.changes.outputs.code != 'false'
+        run: yarn check
       # 2026-09-06 实测:upload-artifact 对多 glob path 会按各条目的根拍平目录
       # 结构(下载后 lib/ 树丢失),故先 tar 打包为单文件,目录结构自控。
       - name: Package workspace build products
+        if: needs.changes.outputs.code != 'false'
         run: |
           set -euo pipefail
           tar -czf workspace-build.tgz \
@@ -173,6 +279,7 @@ jobs:
             packages/client/wasm-apps/lib packages/client/panel-surface/lib \
             packages/client/foot-menu/lib \
       - name: Upload workspace build products (one build, three platforms)
+        if: needs.changes.outputs.code != 'false'
         uses: actions/upload-artifact@v7
         with:
           name: workspace-build
@@ -798,6 +905,30 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+      # 2026-09-23 审计 C-CI-2:策展发布说明的**第二道**检查必须在任何对外上传之前。
+      #
+      # 此前唯一会拦它的地方在 "Create GitHub Release" 步骤里,而那一排在
+      # "Upload every channel image to the update server (R2)" **之后** ⇒ 正式 tag 缺
+      # docs/releases/<tag>.md 时,客户侧更新面(latest.json + 镜像对象,且该路径是
+      # 不可变长缓存)已经先被挂上新版本,才轮到 GitHub Release 步骤红 —— 结果是
+      # "半发布":客户端能升到一个没有策展说明、也没有 GitHub Release 的版本。
+      # gate 里的早检仍在(1 分钟内报错、下游全部因 needs 跳过);这里是 release job
+      # 的第一步 —— 只要它没过去,后面一个上传步骤都不会跑。
+      # 形态判定仍走唯一真源 `scripts/ci-release-policy.sh`(未知形态它也当场红)。
+      - name: Require curated release notes before any upload
+        run: |
+          set -euo pipefail
+          bash scripts/ci-release-policy.sh > release-policy.txt
+          cat release-policy.txt
+          if grep -qx 'release_kind=stable' release-policy.txt; then
+            test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
+              echo "::error::正式版缺少策展发布说明 docs/releases/${GITHUB_REF_NAME}.md(模板见 docs/releases/TEMPLATE.md);在任何对外上传之前中止"
+              exit 1
+            }
+            echo "OK: docs/releases/${GITHUB_REF_NAME}.md"
+          else
+            echo "非正式版 ⇒ 允许缺策展说明(公开面仍优先用策展说明)"
+          fi
       # 三平台安装包仍需先构建:它们要打进镜像(客户端随镜像分发)。
       - uses: actions/download-artifact@v7
         with:
