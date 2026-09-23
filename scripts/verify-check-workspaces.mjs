@@ -54,17 +54,70 @@ const scratch = []
 /** 自检下限（实测值见下方 banner；只允许被"变多"越过，变少 = 回归网被掏空）。 */
 const SELFTEST_MIN_CHECKS = 200
 const SELFTEST_MIN_SCENARIOS = 13
+/**
+ * 自检自身的**登记表**（2026-09-23 第五轮审计 R4-A N3）。
+ *
+ * 现场:自检只有"一层" —— 把 `selfCheckFail()` 改成 no-op(甚至把整段自检删掉)之后,
+ * 本文件仍然 EXIT=0,而且 banner 照旧宣称"自检 3 条:条数下限、样本下限、失败路径可达性"
+ * (banner 是**写死的字符串**,与真实自检条数不同源)。掏空 `fail()` 会被自检③-a 抓住,
+ * 但"掏空自检通道"没有任何第二来源(`check-root-guards.mjs` 只解析编排器的 GUARDS 表)。
+ *
+ * 处置(两条,缺一不可):
+ *   ① 自检**登记表 + 双向对拍**:每条自检都有 id,跑完必须"登记的 == 跑到的"
+ *      (少了 = 自检没跑;多了 = 有人塞了未登记的自检)。banner 里的条数与清单**取自
+ *      这张表与实跑结果**,不再是写死的字符串。
+ *   ② 自检失败通道的**端到端探针**:在副本里注入一条 `selfCheckFail(...)`(?见
+ *      `SELFCHECK_PROBE_CHILD_ARG`),副本必须 EXIT=1 且把那句话打到 stderr ——
+ *      把 `selfCheckFail()` 掏成 no-op 之后副本会 EXIT=0 ⇒ 本文件必红。
+ */
+const SELF_CHECKS = [
+  { id: 'checks-floor', label: 'check() 执行条数下限' },
+  { id: 'scenarios-floor', label: '合成树场景数下限' },
+  { id: 'fail-channel', label: 'fail() 失败通道可达(记录 + stderr)' },
+  { id: 'assert-path-e2e', label: '失败路径端到端可达(注入必假断言 ⇒ 副本 EXIT=1)' },
+  { id: 'selfcheck-channel', label: '自检失败通道可达(记录 + 进退出码)' },
+  { id: 'selfcheck-path-e2e', label: '自检失败路径端到端可达(注入自检失败 ⇒ 副本 EXIT=1)' },
+  { id: 'registry-reconciled', label: '自检登记表双向对拍(跑到的 == 登记的)' },
+  { id: 'domain-root-anchor', label: '域名守卫的扫描根断言可被 --selftest 打坏(R4-A N4)' },
+  { id: 'channel-events', label: '检测通道与计票通道一致(数组长度 == 事件计数)' },
+  { id: 'exit-channel', label: '任一通道有失败事件 ⇒ 退出码必须为 1(检测 ≠ 退出)' },
+]
+/** 自检条数下限（棘轮:删登记项必须同时改这个常量并进 diff）。 */
+const SELFTEST_MIN_SELF_CHECKS = SELF_CHECKS.length
 /** 红色副本的子进程标记：副本只做"必假断言"这一件事，不再递归生成副本。 */
 const RED_PROBE_CHILD_ARG = '--selfcheck-red-probe-child'
 /** 注入给红色副本的恒假断言文本（探针按它断言"具名失败"确实到达 stderr）。 */
 const RED_PROBE_MESSAGE = 'SELFCHECK-RED-PROBE: 注入的必假断言（证明"断言失败 ⇒ exit 1"这条路径真的通）'
+/** 自检失败副本的子进程标记与注入文本（R4-A N3：自检通道自己也要能被打坏）。 */
+const SELFCHECK_PROBE_CHILD_ARG = '--selfcheck-channel-probe-child'
+const SELFCHECK_PROBE_MESSAGE = 'SELFCHECK-CHANNEL-PROBE: 注入的自检失败（证明"自检失败 ⇒ exit 1"这条路径真的通）'
 const redProbeChild = process.argv.includes(RED_PROBE_CHILD_ARG)
+const selfCheckProbeChild = process.argv.includes(SELFCHECK_PROBE_CHILD_ARG)
 
 /** 自检失败通道：**故意不经过 `fail()`** —— `fail()` 被掏空时它仍必须让本文件变红。 */
 const selfCheckFailures = []
-function selfCheckFail(message) {
+/** 跑到的自检 id → 'ok' | 'failed'（与 `SELF_CHECKS` 双向对拍,banner 也取自这里）。 */
+const selfCheckObserved = new Map()
+function selfCheckFail(id, message) {
+  // **失败优先**：先登记的 'ok' 不得把后来的失败盖掉（否则 banner 会显示 ok）。
+  selfCheckObserved.set(id, 'failed')
   selfCheckFailures.push(message)
+  // **计票通道（独立于数组本身）**：R5-D-21 的现场是"只改收尾判据的那一项" ——
+  // 数组里记着失败、stderr 也报了，退出码却仍是 0。事件计数与数组长度是两条独立来源，
+  // 收尾会对拍它们（`channel-events`）并把"有事件却没进退出码"当失败报出来。
+  failureEvents.selfCheck += 1
   process.stderr.write(`verify-check-workspaces: [self-check] ${message}\n`)
+}
+/**
+ * 两条通道的**事件计数**（数组之外的第二个来源）：
+ *   · `assertions` —— `fail()` 被调用的次数（断言的检测通道）；
+ *   · `selfCheck`  —— `selfCheckFail()` 被调用的次数（自检的检测通道）。
+ * 收尾同时看"数组非空"与"计数非零"，任一通道有事件都必须让退出码为 1。
+ */
+const failureEvents = { assertions: 0, selfCheck: 0 }
+/** 一条自检**跑完且没发现问题**时登记（缺了它就会落到"登记了却没跑到"）。 */
+function selfCheckPass(id) {
+  if (selfCheckObserved.get(id) !== 'failed') selfCheckObserved.set(id, 'ok')
 }
 
 /** 执行过的断言条数（自检①）与合成树场景数（自检②）。 */
@@ -73,6 +126,7 @@ let scenariosRun = 0
 
 function fail(message) {
   failures.push(message)
+  failureEvents.assertions += 1
   process.stderr.write(`verify-check-workspaces: ${message}\n`)
 }
 
@@ -80,6 +134,74 @@ function check(condition, message) {
   checksRun += 1
   if (!condition) fail(message)
   return condition
+}
+
+/**
+ * **退出判据的唯一实现**（R5-D-21：检测 ≠ 计票 ≠ 退出）。
+ *
+ * 为什么是一个函数、并且定义在文件这么靠前的地方：两个端到端探针（③-b / ③-d）要
+ * 在**自己的副本**里注入一条失败，然后立刻走**真实的**退出判据 —— 若退出判据留在
+ * 文件末尾，副本就得把整套回归网跑完才能得出结论（实测 >120s，spawnSync 直接 ETIMEDOUT，
+ * 探针退化成"环境超时"而不是"判据有没有咬住"）。
+ *
+ * `mode`:
+ *   · `'final'` —— 正常收尾：先做自检登记表双向对拍，再判退出；
+ *   · `'early'` —— 探针副本用：**只**做"两通道一致性 + 任一通道有事件必须红"，
+ *     不做登记表对拍（早期退出时大部分自检当然还没跑，"缺 4 条"会把探针要证的
+ *     那条链掩掉）。
+ * @param mode - `'final'`（缺省）或 `'early'`。
+ */
+function finalizeExit(mode = 'final') {
+  if (mode === 'final') {
+    // 本函数自己就是这三条自检的实现 —— 先登记，再对拍（否则它们永远"没跑到"）。
+    for (const id of ['registry-reconciled', 'channel-events', 'exit-channel']) selfCheckPass(id)
+    const registered = new Set(SELF_CHECKS.map(entry => entry.id))
+    const missing = SELF_CHECKS.filter(entry => !selfCheckObserved.has(entry.id))
+    const unknown = [...selfCheckObserved.keys()].filter(id => !registered.has(id))
+    if (SELF_CHECKS.length < SELFTEST_MIN_SELF_CHECKS) {
+      selfCheckFail('registry-reconciled',
+        `自检登记表只剩 ${SELF_CHECKS.length} 条（下限 ${SELFTEST_MIN_SELF_CHECKS}）—— 自检被删到没有判别力`)
+    } else if (missing.length > 0) {
+      selfCheckFail('registry-reconciled', `自检登记表里有 ${missing.length} 条**没跑到**：`
+        + missing.map(entry => `${entry.id}(${entry.label})`).join(', ')
+        + ' —— 自检被短路/删除，而 banner 的条数取自这张表（不同源就会撒谎）')
+    } else if (unknown.length > 0) {
+      selfCheckFail('registry-reconciled', `跑了 ${unknown.length} 条**未登记**的自检：${unknown.join(', ')}`
+        + ' —— 未登记的自检不进 banner 也不受下限约束，必须登记进 SELF_CHECKS')
+    } else {
+      selfCheckPass('registry-reconciled')
+    }
+  }
+  // 检测（数组）≠ 计票（事件计数）：只改其中一侧（`failures.push` → 无操作、
+  // 计数 `+= 0`）都会在这里对不上。
+  if (failureEvents.assertions !== failures.length) {
+    selfCheckFail('channel-events', `断言通道的计票（${failureEvents.assertions}）与检测记录`
+      + `（${failures.length} 条）不一致 —— 检测与计票被拆开了（只改一侧即可静默）`)
+  } else if (failureEvents.selfCheck !== selfCheckFailures.length) {
+    selfCheckFail('channel-events', `自检通道的计票（${failureEvents.selfCheck}）与检测记录`
+      + `（${selfCheckFailures.length} 条）不一致 —— 检测与计票被拆开了（只改一侧即可静默）`)
+  } else {
+    selfCheckPass('channel-events')
+  }
+  const decisionRed = failures.length > 0 || selfCheckFailures.length > 0
+  if ((failureEvents.assertions > 0 || failureEvents.selfCheck > 0) && !decisionRed) {
+    // 任一通道**发生过**失败事件 ⇒ 退出判据必须为红。走到这里说明退出判据漏掉了
+    // 某个通道（R5-D-21 的现场形态：stderr 已经报红，banner 仍是 OK + EXIT=0）。
+    selfCheckFail('exit-channel', '有失败事件（断言 '
+      + `${failureEvents.assertions} / 自检 ${failureEvents.selfCheck}）但退出判据给出 0 —— `
+      + '退出码漏掉了某一通道，检测到了却仍是绿的')
+  } else {
+    selfCheckPass('exit-channel')
+  }
+  if (failures.length > 0 || selfCheckFailures.length > 0) {
+    process.stderr.write(`\nverify-check-workspaces: ${failures.length} 项断言失败`
+      + `${selfCheckFailures.length > 0 ? ` / ${selfCheckFailures.length} 项自检失败` : ''}\n`)
+    process.exit(1)
+  }
+  // 探针副本用 `early`：判据**就是结论** —— 判绿也必须当场退出。否则副本会继续把
+  // 整套回归网跑完，"探针副本的退出码"就不再等于"这条判据的结论"（实测会把变异
+  // 掩盖掉：副本后来因别的原因红了，父进程误以为探针通过）。
+  if (mode === 'early') process.exit(0)
 }
 
 /** 造一个临时目录(进程退出时清理)。 */
@@ -825,7 +947,9 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
   // ④ verify-patches：依赖目标（adm-zip）解析不到时必须具名收尾。
   const patchesTree = tempDir('verify-patches-nodep-')
   mkdirSync(join(patchesTree, 'scripts'), { recursive: true })
-  copyFileSync(join(root, 'scripts', 'verify-patches.mjs'), join(patchesTree, 'scripts', 'verify-patches.mjs'))
+  for (const file of ['verify-patches.mjs', 'patch-copy-scan.mjs']) {
+    copyFileSync(join(root, 'scripts', file), join(patchesTree, 'scripts', file))
+  }
   copyFileSync(join(root, 'scripts', 'patch-targets.mjs'), join(patchesTree, 'scripts', 'patch-targets.mjs'))
   writeFileSync(join(patchesTree, 'package.json'), `${JSON.stringify({ name: 'synthetic', version: '0.0.0', resolutions: {} }, null, 2)}\n`)
   const patchesRun = spawnSync(process.execPath, [join('scripts', 'verify-patches.mjs')], { cwd: patchesTree, encoding: 'utf8' })
@@ -901,6 +1025,75 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
 }
 
 // ---------------------------------------------------------------------------
+// 独立来源：域名守卫的**扫描根断言**必须能被它自己的 `--selftest` 打坏（R4-A N4）
+//
+// 现场：根断言（默认根 = 仓库根；cwd 在子目录里 ⇒ 拒绝）是 R4-A-1 的修复本体，但
+// "这条判据只在从仓库根调用时有效"这个约定**自己不在任何自证里** —— 把默认根退回
+// `resolve(cwd)` 或把根断言弱化成"路径存在即可"，`check-no-real-domains.mjs --selftest`
+// 仍然 EXIT=0。
+//
+// 这里作为**独立来源**给这条自证上锁：真跑一次 `--selftest`（必须绿），再在副本上把
+// 根断言退回修前形态，要求副本的 `--selftest` **非零**。副本放在 `<仓库根>/temp/`
+// （脚本按自身位置上溯推 root，放别处它读不到本仓的 git 顶层）。
+// ---------------------------------------------------------------------------
+
+if (!redProbeChild && !selfCheckProbeChild) {
+  const guardPath = join(root, 'scripts', 'check-no-real-domains.mjs')
+  const guardSource = readFileSync(guardPath, 'utf8')
+  const baseline = spawnSync(process.execPath, [guardPath, '--selftest'], { cwd: root, encoding: 'utf8' })
+  const baselineOut = `${baseline.stdout ?? ''}${baseline.stderr ?? ''}`
+  check(baseline.status === 0,
+    `域名守卫 --selftest 必须 exit 0（实际 ${baseline.status}）：${baselineOut.trim().slice(-300)}`)
+  check(baselineOut.includes('扫描根断言三样本'),
+    '域名守卫 --selftest 的输出必须点明"扫描根断言"样本已经跑过（否则根断言又回到自证覆盖之外）')
+  const needle = `if (!explicitRoot) {
+  const scriptDir = dirname(fileURLToPath(import.meta.url))
+  root = gitToplevel(scriptDir) ?? resolve(scriptDir, '..')
+}`
+  const replacement = `if (!explicitRoot) {
+  root = resolve(process.cwd())
+}`
+  const cwdNeedle = `    const cwdTop = gitToplevel(process.cwd())
+    if (cwdTop !== null && resolve(process.cwd()) !== cwdTop) {
+      refuseWrongRoot(resolve(process.cwd()), cwdTop, '在仓库的子目录里运行')
+    }`
+  const cwdReplacement = `    const cwdTop = gitToplevel(process.cwd())
+    if (cwdTop === null && resolve(process.cwd()) !== root) {
+      refuseWrongRoot(resolve(process.cwd()), root, '在仓库的子目录里运行')
+    }`
+  if (!guardSource.includes(needle) || !guardSource.includes(cwdNeedle)) {
+    selfCheckFail('domain-root-anchor', '域名守卫的根断言锚点失效（默认根派生 / cwd 子目录判据的形状变了）'
+      + ' —— 这条独立自证无法开展，请同步本文件的锚点，不要直接删掉它')
+  } else {
+    const probeDir = join(root, 'temp')
+    const probeFile = join(probeDir, `check-no-real-domains-rootmut-${process.pid}-${randomUUID().slice(0, 8)}.mjs`)
+    try {
+      mkdirSync(probeDir, { recursive: true })
+      writeFileSync(probeFile, guardSource.replace(needle, replacement).replace(cwdNeedle, cwdReplacement))
+      const mutated = spawnSync(process.execPath, [probeFile, '--selftest'], { cwd: root, encoding: 'utf8' })
+      const mutatedOut = `${mutated.stdout ?? ''}${mutated.stderr ?? ''}`
+      if (mutated.status === 0) {
+        selfCheckFail('domain-root-anchor', '把根断言退回修前形态（默认根 = cwd + 弱化子目录判据）后，'
+          + '`--selftest` 仍然 EXIT=0 ⇒ 扫描根这条判据没有自证网（R4-A N4）')
+      } else if (!mutatedOut.includes('根断言负例')) {
+        selfCheckFail('domain-root-anchor', '根断言副本确实红了，但不是被根断言样本咬住的'
+          + `（输出里没有"根断言负例"，红了也不算这条判据有效）：${JSON.stringify(mutatedOut.trim().slice(-200))}`)
+      } else {
+        selfCheckPass('domain-root-anchor')
+      }
+    } catch (error) {
+      selfCheckFail('domain-root-anchor', `根断言独立自证无法开展（写/跑副本失败：${error?.message ?? String(error)}）`)
+    } finally {
+      try {
+        rmSync(probeFile, { force: true })
+      } catch {
+        // 清理失败不影响结论
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 本文件自己的自检（R4-A-6）：三条互相独立，全部**不经过 fail()**
 // ---------------------------------------------------------------------------
 
@@ -916,14 +1109,48 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
   fail(probe)
   process.stderr.write = originalWrite
   const recorded = failures.length === before + 1 && failures.at(-1) === probe
-  if (recorded) failures.pop()
+  if (recorded) {
+    failures.pop()
+    // 计票通道同步回退（探针这条不进结论；否则"数组长度 == 事件计数"会对不上）。
+    failureEvents.assertions -= 1
+  }
   if (!recorded) {
-    selfCheckFail('fail() 没有把失败记录进 failures[] —— 失败通道被掏空：'
+    selfCheckFail('fail-channel', 'fail() 没有把失败记录进 failures[] —— 失败通道被掏空：'
       + '任何断言失败都不会再影响退出码（本文件会打印完整 OK banner 并 EXIT=0）')
   }
   if (!captured.includes(probe)) {
-    selfCheckFail('fail() 没有把失败写到 stderr —— 失败不是 fail-loud（CI 日志里看不到原因）')
+    selfCheckFail('fail-channel', 'fail() 没有把失败写到 stderr —— 失败不是 fail-loud（CI 日志里看不到原因）')
   }
+  if (recorded && captured.includes(probe)) selfCheckPass('fail-channel')
+}
+
+// 自检③-c（2026-09-23 第五轮审计 R4-A N3）：**自检失败通道自己也要能被打坏**。
+// in-process 探针：调一次 `selfCheckFail(...)`，断言它真的进了 `selfCheckFailures`
+// 且真的写了 stderr；探针记在临时 id 上，跑完弹掉（它不在登记表里，留着会让
+// registry-reconciled 报"跑了未登记的自检"）。
+{
+  const probeId = `selfcheck-channel-probe-${process.pid}`
+  const originalWrite = process.stderr.write
+  let captured = ''
+  process.stderr.write = chunk => { captured += String(chunk); return true }
+  const before = selfCheckFailures.length
+  selfCheckFail(probeId, SELFCHECK_PROBE_MESSAGE)
+  process.stderr.write = originalWrite
+  const recorded = selfCheckFailures.length === before + 1 && selfCheckFailures.at(-1) === SELFCHECK_PROBE_MESSAGE
+  if (recorded) {
+    selfCheckFailures.pop()
+    // 计票通道同步回退（探针这条不进结论；否则"数组长度 == 事件计数"会对不上）。
+    failureEvents.selfCheck -= 1
+  }
+  selfCheckObserved.delete(probeId)
+  if (!recorded) {
+    selfCheckFail('selfcheck-channel', 'selfCheckFail() 没有把自检失败记录进 selfCheckFailures[] —— '
+      + '自检通道被掏空：自检发现问题也不会再影响退出码（banner 仍照旧宣称"自检 N 条"）')
+  }
+  if (!captured.includes(SELFCHECK_PROBE_MESSAGE)) {
+    selfCheckFail('selfcheck-channel', 'selfCheckFail() 没有把自检失败写到 stderr —— 自检不是 fail-loud')
+  }
+  if (recorded && captured.includes(SELFCHECK_PROBE_MESSAGE)) selfCheckPass('selfcheck-channel')
 }
 
 if (!redProbeChild) {
@@ -942,7 +1169,7 @@ if (!redProbeChild) {
     '}',
   ].join('\n')
   if (!source.includes(needle)) {
-    selfCheckFail('红色副本的注入锚点失效（check() 的形状变了）—— 失败路径自检无法开展，'
+    selfCheckFail('assert-path-e2e', '红色副本的注入锚点失效（check() 的形状变了）—— 失败路径自检无法开展，'
       + '请同步本文件里 RED_PROBE 的锚点，不要直接删掉这段自检')
   } else {
     const probeDir = join(root, 'temp')
@@ -952,7 +1179,7 @@ if (!redProbeChild) {
       writeFileSync(
         probeFile,
         source.replace(needle, `${needle}\n\nif (process.argv.includes(${JSON.stringify(RED_PROBE_CHILD_ARG)})) {\n`
-          + `  check(false, ${JSON.stringify(RED_PROBE_MESSAGE)})\n}`),
+          + `  check(false, ${JSON.stringify(RED_PROBE_MESSAGE)})\n  finalizeExit('early')\n}`),
       )
       const child = spawnSync(process.execPath, [probeFile, RED_PROBE_CHILD_ARG], {
         cwd: root,
@@ -961,13 +1188,84 @@ if (!redProbeChild) {
         timeout: 120_000,
       })
       const output = `${child.stdout ?? ''}${child.stderr ?? ''}`
-      check(child.status === 1,
+      const pathReachable = child.status === 1
+      const namedOnStderr = output.includes('SELFCHECK-RED-PROBE')
+      check(pathReachable,
         `自检③-b: 注入了必假断言的副本必须 EXIT=1（实得 ${child.status}${child.error ? `，error=${child.error.message}` : ''}）`
         + ' —— EXIT=0 = 失败路径不可达（fail() 被掏空 / 收尾判据被改）')
-      check(output.includes('SELFCHECK-RED-PROBE'),
+      check(namedOnStderr,
         `自检③-b: 副本必须把那条注入的失败具名打到 stderr（实得 ${JSON.stringify(output.slice(-300))}）`)
+      // **两条通道同时记**（R5-D-21）：这条判据证的是"断言通道真的进退出码"，
+      // 所以它也必须经**自检通道**留痕 —— 只把 `failures.length` 从退出判据里删掉时，
+      // 下面这句 selfCheckFail 仍然会让本文件红（反之亦然：自检通道的接线由
+      // ③-d 的 `check(...)` 证）。单一通道被摘掉不再等于整体静默。
+      if (!pathReachable || !namedOnStderr) {
+        selfCheckFail('assert-path-e2e', '失败路径端到端探针不成立：'
+          + `副本 EXIT=${child.status}、具名失败${namedOnStderr ? '已' : '未'}到 stderr`
+          + ' —— "断言失败 ⇒ exit 1"这条链断了（可能只改了收尾判据那一侧）')
+      } else {
+        selfCheckPass('assert-path-e2e')
+      }
     } catch (error) {
-      selfCheckFail(`自检③-b 无法开展（写/跑红色副本失败：${error?.message ?? String(error)}）`)
+      selfCheckFail('assert-path-e2e', `自检③-b 无法开展（写/跑红色副本失败：${error?.message ?? String(error)}）`)
+    } finally {
+      try {
+        rmSync(probeFile, { force: true })
+      } catch {
+        // 清理失败不影响结论
+      }
+    }
+  }
+}
+
+if (!selfCheckProbeChild) {
+  // 自检③-d（R4-A N3）：**自检失败路径端到端可达**。把一条 `selfCheckFail(...)` 注入
+  // 副本（锚点与③-b 同一个 `check()`），跑副本并要求它 EXIT=1 且把那句话打到 stderr。
+  // **把 `selfCheckFail()` 改成 no-op 的变异会在这里变红**（副本退出 0 而探针要求 1）——
+  // 这就是"自检通道自己也要能被打坏"的那条判据。
+  const source = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  const needle = [
+    'function check(condition, message) {',
+    '  checksRun += 1',
+    '  if (!condition) fail(message)',
+    '  return condition',
+    '}',
+  ].join('\n')
+  if (!source.includes(needle)) {
+    selfCheckFail('selfcheck-path-e2e', '自检失败副本的注入锚点失效（check() 的形状变了）—— '
+      + '自检通道自证无法开展，请同步本文件里 SELFCHECK_PROBE 的锚点，不要直接删掉这段自检')
+  } else {
+    const probeDir = join(root, 'temp')
+    const probeFile = join(probeDir, `verify-check-workspaces-selfcheck-${process.pid}-${randomUUID().slice(0, 8)}.mjs`)
+    try {
+      mkdirSync(probeDir, { recursive: true })
+      writeFileSync(
+        probeFile,
+        source.replace(needle, `${needle}\n\nif (process.argv.includes(${JSON.stringify(SELFCHECK_PROBE_CHILD_ARG)})) {\n`
+          + `  selfCheckFail('selfcheck-path-e2e', ${JSON.stringify(SELFCHECK_PROBE_MESSAGE)})\n  finalizeExit('early')\n}`),
+      )
+      const child = spawnSync(process.execPath, [probeFile, SELFCHECK_PROBE_CHILD_ARG], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env },
+        timeout: 120_000,
+      })
+      const output = `${child.stdout ?? ''}${child.stderr ?? ''}`
+      check(child.status === 1,
+        `自检③-d: 注入了自检失败的副本必须 EXIT=1（实得 ${child.status}${child.error ? `，error=${child.error.message}` : ''}）`
+        + ' —— EXIT=0 = 自检失败不影响退出码（selfCheckFail() 被掏成 no-op / 收尾判据漏了 selfCheckFailures）')
+      check(output.includes('SELFCHECK-CHANNEL-PROBE'),
+        `自检③-d: 副本必须把那条注入的自检失败具名打到 stderr（实得 ${JSON.stringify(output.slice(-300))}）`)
+      // 这条经**断言通道**留痕（它是"自检通道真的进退出码"的判据）；失败时由登记表对拍
+      // （registry-reconciled ⇒ 自检通道）再报一次 —— 两条通道都不静默。
+      if (child.status === 1 && output.includes('SELFCHECK-CHANNEL-PROBE')) {
+        selfCheckPass('selfcheck-path-e2e')
+      } else {
+        check(false, `自检③-d: 自检失败路径端到端探针不成立（副本 EXIT=${child.status}）—— `
+          + '"自检失败 ⇒ exit 1"这条链断了（可能只改了收尾判据里属于自检通道的那一项）')
+      }
+    } catch (error) {
+      selfCheckFail('selfcheck-path-e2e', `自检③-d 无法开展（写/跑自检副本失败：${error?.message ?? String(error)}）`)
     } finally {
       try {
         rmSync(probeFile, { force: true })
@@ -981,22 +1279,30 @@ if (!redProbeChild) {
 // 自检① / ②：条数与样本下限。**下限只允许被"变多"越过** —— 断言表被清空、
 // 场景被删掉时这两条立刻红（而它们不经过 fail()，掏空 fail() 也躲不过）。
 if (checksRun < SELFTEST_MIN_CHECKS) {
-  selfCheckFail(`只执行了 ${checksRun} 条断言（下限 ${SELFTEST_MIN_CHECKS}）—— 回归网的断言表被清空/缩水`)
+  selfCheckFail('checks-floor', `只执行了 ${checksRun} 条断言（下限 ${SELFTEST_MIN_CHECKS}）—— 回归网的断言表被清空/缩水`)
+} else {
+  selfCheckPass('checks-floor')
 }
 if (scenariosRun < SELFTEST_MIN_SCENARIOS) {
-  selfCheckFail(`只跑了 ${scenariosRun} 个合成树场景（下限 ${SELFTEST_MIN_SCENARIOS}）—— 样本数骤降`)
+  selfCheckFail('scenarios-floor', `只跑了 ${scenariosRun} 个合成树场景（下限 ${SELFTEST_MIN_SCENARIOS}）—— 样本数骤降`)
+} else {
+  selfCheckPass('scenarios-floor')
 }
 
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 
-if (failures.length > 0 || selfCheckFailures.length > 0) {
-  process.stderr.write(`\nverify-check-workspaces: ${failures.length} 项断言失败`
-    + `${selfCheckFailures.length > 0 ? ` / ${selfCheckFailures.length} 项自检失败` : ''}\n`)
-  process.exit(1)
-}
+// 退出判据的唯一实现（含登记表对拍 / 两通道一致性 / "有事件必须红"）——
+// 正常路径走到这里；两个探针副本用 `finalizeExit('early')` 提前调用同一个函数。
+finalizeExit()
+// banner 的自检条数与清单**与登记表同源**（R4-A N3：写死的 "自检 3 条" 会在自检被
+// 短路/删除时继续撒谎）。`selfCheckObserved` 是与 `SELF_CHECKS` 双向对拍过的实跑结果。
+const selfCheckBanner = SELF_CHECKS
+  .map(entry => `${entry.id}=${selfCheckObserved.get(entry.id) ?? 'missing'}`)
+  .join(' / ')
 process.stdout.write(
-  `verify-check-workspaces: OK（断言 ${checksRun} 条 / 合成树场景 ${scenariosRun} 个 / 自检 3 条：条数下限、`
-  + '样本下限、失败路径可达性——含"注入必假断言的副本必须 EXIT=1"的端到端探针） — '
+  `verify-check-workspaces: OK（断言 ${checksRun} 条 / 合成树场景 ${scenariosRun} 个 / 自检 `
+  + `${selfCheckObserved.size}/${SELF_CHECKS.length} 条【${selfCheckBanner}】`
+  + '——含"注入必假断言的副本必须 EXIT=1"与"注入自检失败的副本必须 EXIT=1"两条端到端探针） — '
   + '--changed 算不出改动=exit 2、--only 未知/空/被 flag 吃掉=exit 2、'
   + '有效 --only 真的执行该包、.glitchtip-recon/ 已被忽略、变异体残留守卫的合成正/负例、'
   + '迁移区间守卫与文档数字守卫的合成正/负例、'

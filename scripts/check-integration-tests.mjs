@@ -40,7 +40,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
@@ -528,6 +528,94 @@ for (const file of mjsFiles) {
   check(constantJudge === null,
     '形态⑤: electron-shots.mjs 里出现了**常量真/假判据**'
       + `（${JSON.stringify(constantJudge?.[0])}）—— 这正是 R4-A-17 的现场形态(断言永远成立)`)
+
+  // -------------------------------------------------------------------------
+  // 1c-3. **运行期真的按表判**（2026-09-23 第五轮审计 R5-D / R4-A N7）
+  //
+  // 现场:判据表外置之后,"运行期有没有真的按表判"仍只是 `electron-shots.mjs` 里的
+  // 一段可变代码。把 `report()` 内部改成 `const { ok, detail } = { ok: true, … }`
+  // (9 处 id 引用一字未改)⇒ 本守卫 EXIT=0、`--self-test 29/29` 照旧。
+  //
+  // 处置(两层):
+  //   ① 判定与失败计数**下沉**到 `integration-tests/electron-shots/report.mjs`;
+  //      运行期脚本只接线(`const report = (id, obs) => reporter.report(id, obs)`)。
+  //   ② **端到端夹具**:运行期脚本新增 `--self-check`,把全部夹具经**同一条 report()
+  //      路径**求值(不需要 app/X/服务端)。本守卫真跑它,并在**变异副本**上复跑:
+  //      把 `report()` 掏成恒真 ⇒ `--self-check` 必须非零。恒真的 `report` 在这里
+  //      必然产出与掏空前不同的结论 —— 这就是"运行期真的在判"的可执行判据。
+  // -------------------------------------------------------------------------
+  const reporterPath = join(ROOT, 'integration-tests', 'electron-shots', 'report.mjs')
+  check(existsSync(reporterPath), '形态⑤: integration-tests/electron-shots/report.mjs（判定通道）必须存在')
+  const runtimeSelfCheck = spawnSync(process.execPath, [shotsPath, '--self-check'], { cwd: ROOT, encoding: 'utf8' })
+  const runtimeOutput = `${runtimeSelfCheck.stdout ?? ''}${runtimeSelfCheck.stderr ?? ''}`
+  check(runtimeSelfCheck.status === 0,
+    `形态⑤: electron-shots.mjs --self-check 必须 exit 0（实际 ${runtimeSelfCheck.status}）：${runtimeOutput.trim().slice(-400)}`)
+  const runtimeSummary = /reporter self-check: (\d+)\/(\d+) 条夹具经 report\(\) 求值符合预期/u.exec(runtimeOutput)
+  if (runtimeSummary === null) {
+    fail('形态⑤: electron-shots.mjs --self-check 没有打印判定通道的汇总结论'
+      + `（"运行期判了几条"不可见）：${runtimeOutput.trim().slice(-200)}`)
+  } else {
+    const [, ok, total] = runtimeSummary.map(Number)
+    check(ok === total,
+      `形态⑤: 判定通道自检 ${ok}/${total} —— 有夹具经 report() 求值不符合预期（report() 被掏空?）`)
+    check(total === fixtures.length,
+      `形态⑤: --self-check 实跑 ${total} 条夹具,而判据表登记 ${fixtures.length} 条 ⇒ 有夹具没经运行期通道求值`)
+    notes.push(`electron-shots 判定通道: --self-check ${ok}/${total} 条夹具经 report() 求值 ✓`)
+  }
+  // 接线:运行期脚本必须用共用通道,且不得自带判定逻辑(自带 = 掏空点回到运行期脚本)。
+  check(/from\s+['"]\.\/report\.mjs['"]/u.test(shotsSource),
+    '形态⑤: electron-shots.mjs 必须从 ./report.mjs 引入判定通道（否则"运行期真的按表判"没有单一入口）')
+  check(!/\.evaluate\s*\(/u.test(shotsSource),
+    '形态⑤: electron-shots.mjs 里出现了 `.evaluate(` —— 判定逻辑必须只在 report.mjs 一处（自带判定逻辑 = 可被单点掏空）')
+  check(!/\{\s*ok:\s*(?:true|false)\b/u.test(shotsSource),
+    '形态⑤: electron-shots.mjs 里出现了写死的 `{ ok: true|false }` —— 判定结论不得在运行期脚本里被伪造')
+
+  // 变异副本:**判定通道的两种掏空形态**都必须让 `--self-check` 非零 ——
+  //   ① 恒真形态(N7 / R4-A 现场):`const { ok, detail } = { ok: true, … }`;
+  //   ② **只改计票侧**(R5-D-4 现场):`if (!ok) failures += 1` → `+= 0` ——
+  //      判据照旧求值、结论照旧打印,只有失败计数不再增长 ⇒ 运行期退出码恒 0。
+  // 判定通道对 ② 的处置是**两条独立通道**:`report()` 的返回值(结论)与 `failures()`
+  // (计票)必须互相印证,`runReporterSelfCheck()` 对每条夹具断言两者一致。
+  const BREAK_CASES = [
+    {
+      id: 'report-tautology',
+      label: 'report() 恒真（N7 原形态）',
+      needle: '  const { name, ok, detail } = judge(id, observation)',
+      replacement: "  const { name, ok, detail } = { name: 'MUTATED', ok: true, detail: 'MUTATED' }",
+      expect: /实得 ok=true/u,
+    },
+    {
+      id: 'count-side-zero',
+      label: '只改计票侧（report() 的 failures += 0，R5-D-4 原形态）',
+      needle: '      if (!ok) failures += 1',
+      replacement: '      if (!ok) failures += 0',
+      expect: /判定结论.*与失败计数.*不一致/u,
+    },
+  ]
+  for (const breakCase of BREAK_CASES) {
+    const mutantDir = tempDir(`shots-mutant-${breakCase.id}-`)
+    for (const file of ['electron-shots.mjs', 'assertions.mjs', 'report.mjs']) {
+      copyFileSync(join(ROOT, 'integration-tests', 'electron-shots', file), join(mutantDir, file))
+    }
+    const mutantReporter = join(mutantDir, 'report.mjs')
+    const reporterSource = readFileSync(mutantReporter, 'utf8')
+    if (!reporterSource.includes(breakCase.needle)) {
+      fail(`形态⑤: 变异副本 \`${breakCase.id}\` 的注入锚点失效（report.mjs 的形状变了）`
+        + ' —— 判定通道的端到端变异验证无法开展，请同步本守卫的锚点，不要直接删掉这段')
+      continue
+    }
+    writeFileSync(mutantReporter, reporterSource.replace(breakCase.needle, breakCase.replacement))
+    const mutantRun = spawnSync(process.execPath, [join(mutantDir, 'electron-shots.mjs'), '--self-check'],
+      { cwd: ROOT, encoding: 'utf8' })
+    const mutantOutput = `${mutantRun.stdout ?? ''}${mutantRun.stderr ?? ''}`
+    check(mutantRun.status !== 0,
+      `形态⑤: 变异 \`${breakCase.id}\`（${breakCase.label}）之后 \`--self-check\` 仍然 exit 0 `
+      + `⇒ 判定通道的判据是假绿：${mutantOutput.trim().slice(-200)}`)
+    check(breakCase.expect.test(mutantOutput),
+      `形态⑤: 变异 \`${breakCase.id}\` 必须被**具名**咬住（期望输出匹配 ${breakCase.expect}）`
+      + `：${mutantOutput.trim().slice(-200)}`)
+    notes.push(`electron-shots 判定通道: 变异「${breakCase.label}」⇒ --self-check 非零 ✓`)
+  }
 }
 
 // ---------------------------------------------------------------------------

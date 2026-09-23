@@ -36,7 +36,8 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { assertionById, expectedBrandName } from './assertions.mjs'
+import { expectedBrandName } from './assertions.mjs'
+import { createReporter, runReporterSelfCheck } from './report.mjs'
 
 const EXIT_PASS = 0
 const EXIT_FAIL = 1
@@ -61,17 +62,35 @@ function flagValue(name) {
 }
 
 for (const arg of args) {
-  if (arg.startsWith('--') && !['--server', '--shots', '--app', '--display', '--help'].includes(arg)) {
+  if (arg.startsWith('--') && !['--server', '--shots', '--app', '--display', '--help', '--self-check'].includes(arg)) {
     console.error(`[USAGE] 未知参数 ${arg}`)
     process.exit(EXIT_USAGE)
   }
 }
 if (args.includes('--help')) {
   console.log('用法: node electron-shots.mjs [--server http://127.0.0.1:8091] [--shots <dir>] [--app <bin>] [--display :99]')
+  console.log('       node electron-shots.mjs --self-check   # 不开应用:把全部夹具经 report() 通道求值(门禁用)')
+  console.log('  --self-check 证明运行期真的按判据表判:恒真/恒假的 report() 会让负例夹具报出不符(exit 1)')
   console.log('环境变量: ELECTRON_SHOTS_APP 覆盖打包产物路径(CI 用), DISPLAY 指定 X 显示。')
   console.log('退出码: 0=PASS 1=FAIL 2=用法错误 77=SKIP(前置环境缺失,未验证任何东西)')
   console.log('判据表: ./assertions.mjs(自检 node assertions.mjs --self-test,门禁会跑)')
   process.exit(EXIT_PASS)
+}
+
+/**
+ * 判定通道(2026-09-23 第五轮审计 N7):判定与失败计数**下沉**到 `./report.mjs`,
+ * 本文件只做接线(逐条 `report(id, observation)`)。`--self-check` 用同一条通道把
+ * 全部夹具跑一遍 —— 把 `report()` 掏成恒真,`--self-check` 必然非零
+ * (`check-integration-tests.mjs` 会跑它,并在变异副本上要求它变红)。
+ */
+const reporter = createReporter()
+const report = (id, observation) => reporter.report(id, observation)
+
+if (args.includes('--self-check')) {
+  const selfCheck = runReporterSelfCheck()
+  for (const failure of selfCheck.failures) console.error(`[FAIL] ${failure}`)
+  console.log(`reporter self-check: ${selfCheck.passed}/${selfCheck.total} 条夹具经 report() 求值符合预期`)
+  process.exit(selfCheck.failures.length === 0 ? EXIT_PASS : EXIT_FAIL)
 }
 
 const SERVER = flagValue('--server') ?? process.env.SERVER_BASE ?? 'http://127.0.0.1:8091'
@@ -123,19 +142,6 @@ if (process.platform === 'linux') {
 
 const HOME = '/tmp/dsh-shot-home'
 mkdirSync(SHOTS, { recursive: true })
-
-let failures = 0
-/**
- * 按 id 求值判据表里的断言(判据本体在 ./assertions.mjs,运行期与门禁同一份)。
- * @param id - 判据 id。
- * @param observation - 现场采集到的观测(字段见 assertions.mjs 的 BASE_OBSERVATION)。
- */
-function report(id, observation) {
-  const assertion = assertionById(id)
-  const { ok, detail } = assertion.evaluate(observation)
-  console.log(`[${ok ? 'ok' : 'FAIL'}] ${assertion.name}${detail === undefined ? '' : ` — ${detail}`}`)
-  if (!ok) failures += 1
-}
 
 const app = spawn(APP, ['--no-sandbox', `--remote-debugging-port=${CDP}`], {
   env: {
@@ -270,8 +276,9 @@ try {
 // 最后一条:整段流程有没有未捕获异常(观察对象携带异常消息)。
 report('script-completed', { error: scriptError })
 
-if (failures > 0) {
-  console.error(`RESULT: FAIL(${failures} 项断言失败)`)
+// 退出码判据来自判定通道(不在本文件里另算一份);EXIT_FAIL 必须与通道的 exitCode() 同值。
+if (reporter.exitCode() !== EXIT_PASS) {
+  console.error(`RESULT: FAIL(${reporter.failures()} 项断言失败)`)
   process.exit(EXIT_FAIL)
 }
 console.log('RESULT: PASS')

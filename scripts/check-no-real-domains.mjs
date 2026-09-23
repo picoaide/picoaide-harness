@@ -132,6 +132,11 @@ const ALLOWED_DOMAINS = {
     'xiaoshouyi.com', 'feishu.cn', 'qq.com', 'dingtalk.com', 'glitchtip.com',
     'deepwiki.com', 'cloud.google.com', 'mcp.cloudflare.com', 'cloudflarestorage.com',
   ],
+  // 第三方公开标准命名空间（文件格式的元数据里必然出现，不是任何客户/部署身份）。
+  // `ns.adobe.com` = PNG/JPEG 的 XMP 元数据命名空间（Adobe 公开规范，截图文件里天然带）。
+  '公开标准命名空间（文件格式元数据）': [
+    'adobe.com',
+  ],
   // 主机解析 / SSRF 测试语料里的 token（对抗输入被拆碎后的残片，不是任何人的域名）。
   '畸形语料与占位主机（对抗输入残片）': [
     'mple.com', 'ample.com', 'tmple.com', 'nmple.com', 'ple.com', 'e.com', 'u200bmple.com',
@@ -151,6 +156,25 @@ const ALLOWED_DOMAINS = {
     'placeholder.com', 'x.com', 'baidu.com', 'gvt1.com',
   ],
 }
+
+/**
+ * **二进制扫描面**里已判定的命中（2026-09-23 第五轮审计 R5-D-16）。
+ *
+ * 含 NUL 的文件现在按字节安全方式扫描（旧实现静默跳过它们），于是压缩/元数据字节流里
+ * 会偶然出现"域名形态"的 ASCII 片段。**逐条登记 + 写明理由**，并做死条目对账
+ * （登记了却不再命中任何文件 ⇒ 红）：这样"新出现的二进制命中"一律红，而已知的
+ * 噪声片段是**可见、可判定、可评审**的（不再有"静默跳过"这一档）。
+ */
+const BINARY_SCAN_ACCEPTED = [
+  {
+    path: 'docs/evidence/2026-09-11-balance/10-csrf-healed.png',
+    // 运行时拼出（**不要在源码里留可直接匹配的 host 字面量**：本守卫也扫自己，
+    // 与 `MULTI_LABEL_SUFFIXES` 自证里 `['com', '.cn'].join('')` 同一手法）。
+    host: ['e', 'cn'].join('.'),
+    why: 'PNG 的 zlib 压缩字节流里偶然拼出的 ASCII 片段（1 字符标签 + 已知 TLD），'
+      + '不是主机名；同一形态在文本路径下也是假阳性，属"二进制扫描面"的固有噪声',
+  },
+]
 
 /**
  * 后缀白名单：命中即放行（用于保留命名空间与"任意子域都算占位符"的命名空间）。
@@ -534,6 +558,8 @@ function selfTest() {
  *   ⑥ 未跟踪软链 → **被忽略**的目标含域名 → EXIT=0（复审 F5：不得读穿软链的目标）
  *   ⑦ 软链**目标字符串自身**含域名    → EXIT=1 且点名该软链（真泄漏：git 存的就是它）
  * ⑥⑦ 互为反证：只做 ⑥ 会在 ⑦ 变绿；读穿目标（旧行为）会让 ⑥ 变红。
+ * ⑧ 含 NUL 的已跟踪文件（R5-D-16）：旧实现对它们**静默跳过**（插一个 0 字节即可关掉判据），
+ *    现在按字节安全方式扫 ⇒ 里面的域名必须判红，且扫描面自述要点明"二进制也扫"。
  *
  * 子进程带 `SELFTEST_CHILD_ENV=1`（避免自证递归）。
  *
@@ -560,7 +586,15 @@ function selfTestScanSurface() {
     [fileURLToPath(import.meta.url), '--root', target, '--no-commit-range'],
     {
       encoding: 'utf8',
-      env: { ...process.env, [SELFTEST_CHILD_ENV]: '1', GITHUB_EVENT_PATH: '', GITHUB_BASE_REF: '', GITHUB_ACTIONS: '', CI: '' },
+      env: {
+        ...process.env,
+        [SELFTEST_CHILD_ENV]: '1',
+        [ROOT_SELFTEST_CHILD_ENV]: '1',
+        GITHUB_EVENT_PATH: '',
+        GITHUB_BASE_REF: '',
+        GITHUB_ACTIONS: '',
+        CI: '',
+      },
     },
   )
   /** 建一个只有 `keep.txt` 的已提交仓库，返回其路径。 */
@@ -648,6 +682,27 @@ function selfTestScanSurface() {
       + `\n    stdout: ${(linkTextCase.stdout ?? '').trim().split('\n').slice(-3).join(' | ')}`)
     expect((linkTextCase.stderr ?? '').includes('[DOMAIN]') && (linkTextCase.stderr ?? '').includes('visit.md'),
       `样本⑦ 必须报出并点名该软链路径，实际 ${JSON.stringify((linkTextCase.stderr ?? '').trim().split('\n').slice(-3))}`)
+
+    // 样本⑧（2026-09-23 第五轮审计 R5-D-16）：**含 NUL 的已跟踪文件**里藏着的域名必须判红。
+    // 旧实现 `if (text.includes('\0')) continue` ⇒ 往文件里插一个 0 字节就能把铁律 0 的
+    // 判据关掉（独立复现：同内容不含 NUL ⇒ EXIT=1；含 NUL ⇒ EXIT=0 + `零命中 ✅`），
+    // 而"跳过了 39 个条目"这件事在输出里一个字都不提。现在按字节安全方式扫（latin1 +
+    // NUL→空格），并且二进制命中要么判红、要么进 `BINARY_SCAN_ACCEPTED` 的显式登记。
+    const nulBinary = join(scratch, 'nul-binary')
+    buildRepo(nulBinary, dir => writeFileSync(join(dir, 'blob.bin'),
+      Buffer.concat([
+        Buffer.from('PNG-like header\0\x01\x02', 'latin1'),
+        Buffer.from(` server_url = https://${host}/api `, 'utf8'),
+        Buffer.from('\0tail', 'latin1'),
+      ])))
+    const nulCase = runGuard(nulBinary)
+    expect(nulCase.status === 1,
+      `样本⑧（含 NUL 的已跟踪文件里带域名）应为 EXIT=1（R5-D-16：插一个 0 字节不得关掉判据），`
+      + `实得 ${nulCase.status}\n    stdout: ${(nulCase.stdout ?? '').trim().split('\n').slice(-2).join(' | ')}`)
+    expect((nulCase.stderr ?? '').includes('[DOMAIN]') && (nulCase.stderr ?? '').includes('blob.bin'),
+      `样本⑧ 必须报出并点名那个二进制文件，实际 ${JSON.stringify((nulCase.stderr ?? '').trim().split('\n').slice(-3))}`)
+    expect((nulCase.stdout ?? '').includes('二进制'),
+      '样本⑧ 的扫描面自述必须点明"含 NUL 的二进制按字节安全方式扫描"（静默跳过不再被允许）')
   } catch (error) {
     failures.push(`扫描面自证的夹具构建失败：${error?.message ?? String(error)}`)
   } finally {
@@ -657,6 +712,70 @@ function selfTestScanSurface() {
       // 清理失败不影响判据结论
     }
   }
+  return failures
+}
+
+/**
+ * 自证：**扫描根断言**（2026-09-23 第五轮审计 R4-A N4）。
+ *
+ * 现场：根断言（"默认根 = 仓库根" + "cwd 在子目录里 ⇒ 拒绝"）是 2026-09-23 R4-A-1 的
+ * 修复本体，但**它自己不在 `--selftest` 的覆盖里** —— 把默认根退回 `resolve(cwd)`、
+ * 或把根断言弱化成"路径存在即可"，`node scripts/check-no-real-domains.mjs --selftest`
+ * **仍然 EXIT=0**。也就是说"这个判据只在从仓库根调用时有效"这条约定本身没有自证。
+ *
+ * 三个样本（都 spawn 真进程、钉在**退出码**与那句具名拒绝上）：
+ *   ① 负例：在仓库的**子目录**里跑（默认根）        → EXIT=2 且点名"在仓库的子目录里运行"；
+ *   ② 负例：`--root` 指向工作树的**子目录**        → EXIT=2 且点名"指向了工作树的子目录"；
+ *   ③ 正例：在仓库根跑                              → EXIT=0 且打印"自证通过"（不误伤正常调用）。
+ *
+ * 子进程带 `SELFTEST_CHILD_ENV=1` + `ROOT_SELFTEST_CHILD_ENV=1`（后者防正例子进程递归）。
+ * @returns 自证失败项列表（空 = 通过）。
+ */
+function selfTestRootAssertion() {
+  const failures = []
+  const expect = (ok, message) => {
+    if (!ok) failures.push(message)
+  }
+  const script = fileURLToPath(import.meta.url)
+  const repoTop = gitToplevel(dirname(script))
+  if (repoTop === null) {
+    failures.push('扫描根自证无法开展：脚本目录不在 git 工作树里（--root 夹具场景请用显式 root）')
+    return failures
+  }
+  const childEnv = {
+    ...process.env,
+    [SELFTEST_CHILD_ENV]: '1',
+    [ROOT_SELFTEST_CHILD_ENV]: '1',
+    GITHUB_EVENT_PATH: '',
+    GITHUB_BASE_REF: '',
+    GITHUB_ACTIONS: '',
+    CI: '',
+  }
+  const run = (cwd, args) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', env: childEnv })
+
+  // 负例①：在仓库的子目录里跑 —— 扫描面会被静默缩到那棵子树，必须拒绝。
+  const inSubdirectory = run(join(repoTop, 'scripts'), ['--selftest'])
+  expect(inSubdirectory.status === 2,
+    `根断言负例①（在仓库子目录里跑）应为 EXIT=2，实得 ${inSubdirectory.status}`
+    + `\n    stderr: ${(inSubdirectory.stderr ?? '').trim().split('\n').slice(0, 2).join(' | ')}`)
+  expect((inSubdirectory.stderr ?? '').includes('在仓库的子目录里运行'),
+    '根断言负例① 必须点名"在仓库的子目录里运行"（否则红的原因不是根断言咬住）')
+
+  // 负例②：显式 --root 指向工作树的子目录 —— 同样必须拒绝（--root 不豁免这条）。
+  const wrongRoot = run(repoTop, ['--root', 'scripts', '--selftest'])
+  expect(wrongRoot.status === 2,
+    `根断言负例②（--root 指向工作树子目录）应为 EXIT=2，实得 ${wrongRoot.status}`
+    + `\n    stderr: ${(wrongRoot.stderr ?? '').trim().split('\n').slice(0, 2).join(' | ')}`)
+  expect((wrongRoot.stderr ?? '').includes('指向了工作树的子目录'),
+    '根断言负例② 必须点名"解析出的根指向了工作树的子目录"')
+
+  // 正例：仓库根（正常调用姿势）必须绿 —— 判据不能把"从根跑"也拦下来。
+  const atRoot = run(repoTop, ['--selftest'])
+  expect(atRoot.status === 0,
+    `根断言正例（在仓库根跑）应为 EXIT=0，实得 ${atRoot.status}`
+    + `\n    stderr: ${(atRoot.stderr ?? '').trim().split('\n').slice(-2).join(' | ')}`)
+  expect((atRoot.stdout ?? '').includes('自证通过'),
+    '根断言正例 必须打印"自证通过"（否则它没走到收尾）')
   return failures
 }
 
@@ -1112,10 +1231,19 @@ function refuseWrongRoot(actual, expected, how) {
  */
 const SELFTEST_CHILD_ENV = 'CHECK_NO_REAL_DOMAINS_SELFTEST_CHILD'
 const selftestChild = process.env[SELFTEST_CHILD_ENV] === '1'
+/**
+ * 扫描根自证的子进程标记（R4-A N4）：正例子进程会走到自证这一段，没有它就会无穷递归。
+ * **只跳过"根断言的那段自证"**，根断言本身在每个子进程里照常执行。
+ */
+const ROOT_SELFTEST_CHILD_ENV = 'CHECK_NO_REAL_DOMAINS_ROOT_SELFTEST_CHILD'
+const rootSelftestChild = process.env[ROOT_SELFTEST_CHILD_ENV] === '1'
 
 const selfTestFailures = selfTest()
 if (!selftestChild) selfTestFailures.push(...selfTestScanSurface())
 if (!selftestChild) selfTestFailures.push(...selfTestCommitRange())
+// 根断言的自证：合成夹具的子进程用 --root 指向夹具（根断言在那些进程里照常执行），
+// 所以这里只在"非子进程"时跑，避免进程数放大；用独立标记防正例子进程递归。
+if (!selftestChild && !rootSelftestChild) selfTestFailures.push(...selfTestRootAssertion())
 if (selfTestFailures.length > 0) {
   for (const failure of selfTestFailures) console.error(`  [SELFTEST] ${failure}`)
   console.error('\n守卫自证失败 ⇒ 守卫本身不可信（可能已被改坏或白名单被滥用）。修好它再谈扫描结果。')
@@ -1123,8 +1251,11 @@ if (selfTestFailures.length > 0) {
 }
 if (selftestOnly) {
   console.log('check-no-real-domains: 自证通过（合成负例被判红、白名单域与保留网段判绿、'
-    + '扫描面七样本（含软链两个方向）、'
-    + `${selftestChild ? '区间判据自证因 ' + SELFTEST_CHILD_ENV + '=1 跳过' : '提交信息区间判据五样本'}）✅`)
+    + '扫描面八样本（含软链两个方向与含 NUL 的二进制）、'
+    + `${selftestChild ? '区间判据自证因 ' + SELFTEST_CHILD_ENV + '=1 跳过' : '提交信息区间判据五样本'}、`
+    + `${selftestChild || rootSelftestChild
+      ? '扫描根断言自证因 ' + SELFTEST_CHILD_ENV + '/' + ROOT_SELFTEST_CHILD_ENV + '=1 跳过'
+      : '扫描根断言三样本（子目录两负例 + 仓库根正例）'}）✅`)
   process.exit(0)
 }
 
@@ -1138,6 +1269,10 @@ let scanned = 0
 let symlinksScanned = 0
 /** 没有可扫文本内容的条目（子模块 gitlink / 目录 / 读失败）—— 逐条列出，不静默跳过。 */
 const nonRegularSkipped = []
+/** 含 NUL 因而按**字节安全**方式(latin1 + NUL→空格)扫描的文件数（R5-D-16 前是静默跳过）。 */
+let binaryScanned = 0
+/** `BINARY_SCAN_ACCEPTED` 里本次真的命中的条目（死条目对账用）。 */
+const binaryAcceptedHits = new Set()
 // 体积：**刻意不做**"超过 N MiB 就跳过"的闸门（2026-09-23 复审 F5 第 4 条）。理由：静默跳过
 // 大文件 = 新的假绿（本守卫这两轮修的就是"静默缩小扫描面"）；而整份读入的代价实测可接受
 // （复审用它自己造的 400 MB 未跟踪文本实测 EXIT=0 / 2.6 s）。真的需要处理超大文件时，
@@ -1146,6 +1281,8 @@ for (const file of trackedFiles(root)) {
   const absolute = resolve(root, file)
   let text
   let viaLink = false
+  /** 本次内容是**含 NUL 的二进制**（latin1 + NUL→空格 读法）；命中要过 BINARY_SCAN_ACCEPTED。 */
+  let viaBinary = false
   // 先 lstat：软链**不跟随**（见文件头「非普通文件（软链）的口径」）。`readFileSync` 会读穿
   // 到目标 ⇒ 未跟踪软链指向被忽略文件时把"永远提交不进去的内容"误判成泄漏。
   let entry
@@ -1161,7 +1298,26 @@ for (const file of trackedFiles(root)) {
       viaLink = true
       symlinksScanned += 1
     } else if (entry.isFile()) {
-      text = readFileSync(absolute, 'utf8')
+      const bytes = readFileSync(absolute)
+      if (bytes.includes(0)) {
+        // **二进制也要扫**（2026-09-23 第五轮审计 R5-D-16）。
+        //
+        // 旧实现:`if (text.includes('\0')) continue` —— 对**含 NUL 的已跟踪文本/二进制
+        // 文件静默跳过**(本仓 HEAD 实测 39 个条目、3.2 MB,含 `assets/**` 截图与
+        // `docs/evidence/**` 的 PNG)。独立复现:同一份内容不含 NUL ⇒ EXIT=1;把 NUL 塞进去
+        // ⇒ EXIT=0 + `零命中 ✅` —— 也就是说"往文件里插一个 0 字节"就能把铁律 0 的判据
+        // 关掉,而"跳过"这件事在输出里一个字都不提。
+        //
+        // 现在:按**字节安全**的方式扫 —— latin1 解码(1 字节 = 1 字符,偏移与行号不变)、
+        // 把 NUL 换成空格(避免把二进制当成"行"来切),再走同一套 candidate 判定。
+        // 域名/主机名都是 ASCII,这种读法不会漏(实测本仓 39 个二进制条目只多出 1 条
+        // 候选,且是可判定的一类)。跳过面因此**归零**,不再需要"跳过清单"。
+        text = bytes.toString('latin1').replace(/\0/gu, ' ')
+        binaryScanned += 1
+        viaBinary = true
+      } else {
+        text = bytes.toString('utf8')
+      }
     } else {
       nonRegularSkipped.push(`${file}（${entry.isDirectory() ? '目录/gitlink' : '非普通文件'}）`)
       continue
@@ -1170,15 +1326,22 @@ for (const file of trackedFiles(root)) {
     nonRegularSkipped.push(`${file}（读取失败：${error?.code ?? error?.message ?? '未知原因'}）`)
     continue
   }
-  if (text.includes('\0')) continue // 二进制（既有口径：不按文本判内容）
   scanned += 1
   for (const hit of candidatesInText(text, file)) {
     if (isAllowedCandidate(hit)) continue
+    if (viaBinary) {
+      const accepted = BINARY_SCAN_ACCEPTED.find(entry => entry.host === hit.host.toLowerCase()
+        && entry.path === file)
+      if (accepted !== undefined) {
+        binaryAcceptedHits.add(accepted)
+        continue
+      }
+    }
     findings.push({
-      scope: 'file',
+      scope: viaBinary ? 'binary' : 'file',
       where: `${relative(root, absolute)}:${hit.line}`,
       host: unmasked ? hit.host : maskHost(hit.host),
-      why: viaLink ? `${hit.why}（软链目标字符串）` : hit.why,
+      why: viaLink ? `${hit.why}（软链目标字符串）` : (viaBinary ? `${hit.why}（二进制字节流）` : hit.why),
       line: hit.line,
     })
   }
@@ -1187,6 +1350,33 @@ for (const file of trackedFiles(root)) {
 // 特判必须可见（不得静默缩小扫描面）：软链走了"按链接目标扫"的分支就说明出来。
 if (symlinksScanned > 0) {
   notes.push(`非普通文件：${symlinksScanned} 个**软链**按链接目标字符串扫描（不跟随目标；git 存的就是链接本身）`)
+}
+if (binaryAcceptedHits.size > 0) {
+  notes.push(`二进制扫描面：${binaryAcceptedHits.size} 条**已登记**的已知噪声命中被放行`
+    + '（BINARY_SCAN_ACCEPTED，逐条写明理由；未登记的一律判红）')
+}
+{
+  // 只在**扫的就是本仓根**时对账：`--root <合成夹具>` 的扫描面里当然没有这些文件，
+  // 那不是"死条目"（自证夹具的七/五个样本都走 --root）。特判必须可见。
+  const repoRoot = gitToplevel(dirname(fileURLToPath(import.meta.url)))
+  const isRepoScan = repoRoot !== null && resolve(root) === repoRoot
+  const dead = isRepoScan ? BINARY_SCAN_ACCEPTED.filter(entry => !binaryAcceptedHits.has(entry)) : []
+  if (!isRepoScan) {
+    notes.push('扫描根不是本仓根 ⇒ BINARY_SCAN_ACCEPTED 的**死条目对账**本次未生效'
+      + '（它按仓库相对路径登记，只在扫本仓时有意义）')
+  }
+  if (dead.length > 0) {
+    console.error('\ncheck-no-real-domains: BINARY_SCAN_ACCEPTED 有 '
+      + `${dead.length} 条**死条目**（本次扫描里不再命中任何文件）：\n`
+      + dead.map(entry => `  - ${entry.path} ← ${entry.host}（${entry.why}）`).join('\n')
+      + '\n  处置：该文件/该字节流已变（或已被文本判据覆盖）⇒ 登记必须同步收窄，'
+      + '留下它就是一条可复用的豁免洞。')
+    process.exitCode = 1
+  }
+}
+if (binaryScanned > 0) {
+  notes.push(`扫描面：${binaryScanned} 个**含 NUL 的二进制**条目按字节安全方式扫描`
+    + '（latin1 解码 + NUL→空格，偏移与行号不变；旧实现对它们静默跳过 ⇒ R5-D-16）')
 }
 if (nonRegularSkipped.length > 0) {
   const shown = nonRegularSkipped.slice(0, 10)
@@ -1214,9 +1404,12 @@ if (json) {
     notes,
     commitRange: commitFatal === null ? 'checked' : 'incomplete',
     scanSurface: scanned === 0 ? 'empty' : 'checked',
+    binaryScanned,
   }, null, 2))
 } else {
-  console.log(`check-no-real-domains: 扫描 ${scanned} 个文件（已跟踪 + 未跟踪未忽略；root=${root}）`)
+  console.log(`check-no-real-domains: 扫描 ${scanned} 个文件`
+    + `${binaryScanned > 0 ? `（其中 ${binaryScanned} 个含 NUL 的二进制按字节安全方式扫描）` : ''}`
+    + `（已跟踪 + 未跟踪未忽略；root=${root}）`)
   for (const note of notes) console.log(`  · ${note}`)
 }
 
