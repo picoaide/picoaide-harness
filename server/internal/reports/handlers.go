@@ -126,9 +126,23 @@ func update(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", msg)
 		return
 	}
+	// enabled 是 **PATCH 语义**（2026-09-23 审计 A-11，P2）：body 省略它 = 保持现值。
+	// 修复前省略即当 true —— 一次"只改名字"的更新会把**已停用**的订阅静默复活，
+	// 而月报订阅一旦启用就会在下一个整点被调度器真的推送出去。
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
+	} else {
+		cur, ok, lerr := lookupSubscription(db, id)
+		if lerr != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		if !ok {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "订阅不存在")
+			return
+		}
+		enabled = cur
 	}
 	if err := serverstore.UpdateReportSubscription(db, id, name, hookURL, enabled); err != nil {
 		if err == serverstore.ErrNotFound {
@@ -140,6 +154,24 @@ func update(c *gin.Context, db *sql.DB) {
 	}
 	_ = serverstore.AuditLog(db, actorName(c), "report_subscription_update", auditDetail(name, id))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// lookupSubscription 读一条订阅的当前启用状态（PATCH 语义的兜底，见 update）。
+//
+// 为什么用列表而不是单行 getter：`serverstore` 只暴露 `ListReportSubscriptions`
+// （订阅是管理员配置的小表，数量是十位数量级），而 `serverstore` 不在本泳道。
+// 返回 (enabled, found, err)。
+func lookupSubscription(db *sql.DB, id int64) (bool, bool, error) {
+	subs, err := serverstore.ListReportSubscriptions(db)
+	if err != nil {
+		return false, false, err
+	}
+	for _, s := range subs {
+		if s.ID == id {
+			return s.Enabled, true, nil
+		}
+	}
+	return false, false, nil
 }
 
 // validateUpdate 是更新路径的校验:name 必填;hook_url 可空(= 保持现值),
