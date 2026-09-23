@@ -480,6 +480,110 @@ describe('打包必需清单的可枚举目录 oracle（G-2，2026-09-23 补）'
   })
 })
 
+describe('打包必需清单的 build/* 条目必须在 build.files 正向清单里（2026-09-23 补）', () => {
+  // 事故（CI 必红：`Desktop (macOS)` 与 `Desktop (Windows installer)`）：
+  //   `packaged runtime at …/Resources/app.asar is missing required ASAR entries: build/assistedMessages.yml`
+  //
+  // 机制（读 `packages/host/desktop/node_modules/app-builder-lib/out/fileMatcher.js` 的
+  // `getFileMatchers` / `getMainFileMatchers`，以及 `out/util/config/config.js` 的 `normalizeFiles`
+  // 后确认；本机 `scripts/package-dir.mjs --no-prebuild --no-gates` 实打的 Linux 产物与
+  // `dist/builder-debug.yml` 复现了同一形态）：
+  //   * 应用根的匹配器来自 `getFileMatchers(config, "files", …, customBuildOptions: platformSpecificBuildOptions)`：
+  //     全局 `files` 被 `normalizeFiles` 收成**一个 file-set 条目** ⇒ 进 `fileMatchers` 数组；
+  //     平台专属 `files`（`build.linux.files`，40 条**全是** `!` 忽略项）以普通字符串加进
+  //     `defaultMatcher` ⇒ 末尾的 `fileMatchers.unshift(defaultMatcher)` 把它顶成 `matchers[0]`；
+  //   * `getMainFileMatchers` 只对 `matchers[0]` 补默认模式，且**只在**
+  //     `isEmpty() || containsOnlyIgnore()` 时才补 `**/*`。
+  //   ⇒ Linux 的有效应用根匹配器 = 那份全 `!` 的平台清单 ⇒ 补 `**/*` ⇒ 整个 `build/` 进包；
+  //     macOS / Windows（`build.mac` / `build.win` 都没有 `files` 键）⇒ 有效匹配器 = 全局
+  //     正向清单 ⇒ **清单里没列的 `build/assistedMessages.yml` 被静默丢掉**，直到 afterPack
+  //     的必需项断言才在打包末尾报错（`files` 是构建输入，报错点离病根很远）。
+  //
+  // 所以「Linux 打包绿」**掩盖**了 mac/win 的清单缺项。这条判据不看产物、不跑打包，
+  // 只对拍两张表：`REQUIRED_PACKAGED_RUNTIME_ENTRIES` 里每个 `build/` 条目，都必须被
+  // `package.json` 的 `build.files` 里至少一个**正向**（非 `!`）模式匹配。
+  const desktopRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+  /**
+   * 最小 glob→RegExp（不引依赖 —— 本仓不为一条判据新增包）。
+   *
+   * 支持 electron-builder/minimatch 在本清单里会用到的子集：`**` 跨 `/`（`a/**\/b` 也匹配
+   * `a/b`）、`*` 不跨 `/`、`?` 单字符、`{a,b}` 展开一层。**故意不实现**扩展语法
+   * （`!()`/`+()`/`@()` 等）：真出现未支持的写法时匹配会失败 ⇒ 判据变红并要求人来看，
+   * 而不是静默放行（与 `check-no-real-domains.mjs` 的"未登记即失败"同一取向）。
+   * @param pattern - `build.files` 里的一条正向模式。
+   * @returns 整串匹配（`^…$`）用的正则。
+   */
+  function globToRegExp(pattern: string): RegExp {
+    const expandBraces = (value: string): string[] => {
+      const found = /\{([^{}]*)\}/u.exec(value)
+      if (found === null) return [value]
+      const [whole, body = ''] = found
+      return body.split(',').flatMap(part => expandBraces(value.replace(whole, part)))
+    }
+    const alternatives = expandBraces(pattern).map(one => {
+      let source = ''
+      for (let index = 0; index < one.length; index += 1) {
+        const char = one.charAt(index)
+        const next = one.charAt(index + 1)
+        if (char === '*') {
+          if (next === '*' && one.charAt(index + 2) === '/') {
+            // `**/` 允许零段：`build/**/x.yml` 要能匹配 `build/x.yml`。
+            source += '(?:.*/)?'
+            index += 2
+          } else if (next === '*') {
+            source += '.*'
+            index += 1
+          } else {
+            source += '[^/]*'
+          }
+          continue
+        }
+        if (char === '?') {
+          source += '[^/]'
+          continue
+        }
+        source += char.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+      }
+      return source
+    })
+    return new RegExp(`^(?:${alternatives.join('|')})$`, 'u')
+  }
+
+  it('每个 build/ 必需项都被正向模式覆盖（缺一条 = macOS/Windows 静默丢件）', () => {
+    const manifest = JSON.parse(readFileSync(join(desktopRoot, 'package.json'), 'utf8')) as {
+      build?: { files?: string[] }
+    }
+    const patterns = manifest.build?.files ?? []
+    // 前置断言：下面任一条为假，判据都会空转（本仓规则：缺席即红，不是 skip）。
+    expect(patterns.length, 'build.files 读不出来 —— 判据会空转').toBeGreaterThan(0)
+    const positive = patterns.filter(pattern => !pattern.startsWith('!'))
+    expect(
+      positive.length,
+      'build.files 里一条正向模式都没有（应用根会落回 `**/*`，Linux 那层掩盖效应会回来）',
+    ).toBeGreaterThan(0)
+    const required = REQUIRED_PACKAGED_RUNTIME_ENTRIES.filter(entry => entry.startsWith('build/'))
+    expect(required.length, '必需清单里没有 build/ 条目 —— 判据会空转').toBeGreaterThan(0)
+
+    // 判据自证：转换器必须能**区分**。若它退化成恒真，下面"缺一条即红"就变成"怎么删都绿"
+    // —— 那正是这次事故的形态（Linux 绿、mac/win 红）。
+    expect(globToRegExp('build/tray-icon*.png').test('build/tray-icon-blue.png')).toBe(true)
+    expect(globToRegExp('build/tray-icon*.png').test('build/assistedMessages.yml')).toBe(false)
+    expect(globToRegExp('build/**').test('build/nested/deep.yml')).toBe(true)
+    expect(globToRegExp('build/*').test('build/nested/deep.yml')).toBe(false)
+
+    const unmatched = required.filter(
+      entry => !positive.some(pattern => globToRegExp(pattern).test(entry)),
+    )
+    expect(
+      unmatched,
+      '这些必需项没有被 build.files 的正向清单覆盖，macOS/Windows 打包会静默丢掉它们：\n'
+      + `  ${unmatched.join('\n  ')}\n`
+      + '（Linux 因为 build.linux.files 全是 `!` 而落回 `**/*`，从打包结果里看不出这个问题）',
+    ).toEqual([])
+  })
+})
+
 describe('反向 oracle：清单必须覆盖产物（第三轮审计 P-1，2026-09-23 补）', () => {
   // 审计实测（P-1）：`REQUIRED_PACKAGED_RUNTIME_ENTRIES` 是"必需项"判据的**唯一来源**，
   // 从清单里删掉一条 = 同时删掉那条断言 —— 16 次单条 `@picoaide/*` 删除里 9 次让

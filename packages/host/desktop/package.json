@@ -380,6 +380,7 @@
       "build/channel.json",
       "build/app-icon-mac.png",
       "build/tray-icon*.png",
+      "build/assistedMessages.yml",
       "build/web-brand/favicon.svg",
       "build/web-brand/official.svg",
       "cordis.patch.yml",
