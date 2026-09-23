@@ -435,7 +435,7 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
   const real = spawnSync(process.execPath, [subject, '--list'], { cwd: root, encoding: 'utf8' })
   check(real.status === 0, `调度表自检(正例): 真仓库的 --list 必须 exit 0(实际 ${real.status}: ${real.stderr.slice(0, 300)})`)
 
-  /** 五种注入：每条都给"必须点名的关键词"与一句人话标签。 */
+  /** 七种注入（6 类打错 + 1 类前缀歧义）：每条都给"必须点名的关键词"与一句人话标签。 */
   const defects = [
     {
       id: 'cycle',
@@ -498,6 +498,24 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
       },
     },
     {
+      id: 'owners-nested',
+      // 2026-09-23 复审 F2：`PATH_OWNERS` 匹配语义是**先声明者胜**（`find` 取数组序首个），
+      // 所以"窄前缀 + 归属另一个包"这种声明无论是死条目还是按顺序翻转归属，都必须判红。
+      // 注入形态与复审的 M8 逐字一致：在宽前缀之后**追加**一条窄的、指向另一个包的前缀。
+      label: 'PATH_OWNERS 嵌套前缀且归属不同包（先声明者胜 ⇒ 死条目 / 归属按顺序翻转）',
+      must: /前缀歧义/u,
+      mutate: source => {
+        const { owners } = readSchedulerTables(source)
+        const wide = owners[0]
+        const other = owners.find(owner => owner.name !== wide.name)
+        if (other === undefined) throw new Error('PATH_OWNERS 里找不到第二条不同包的条目')
+        const narrow = `${wide.prefix}src/`
+        const out = replaceOnce(source, `  ['${wide.prefix}', '${wide.name}'],\n`,
+          `  ['${wide.prefix}', '${wide.name}'],\n  ['${narrow}', '${other.name}'],\n`)
+        return { source: out, names: [narrow, other.name] }
+      },
+    },
+    {
       id: 'dependents-unknown',
       label: 'DEPENDENTS 键打错',
       must: /DEPENDENTS 的键/u,
@@ -527,6 +545,22 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
     }
     // 反向断言：静态表自检必须发生在**跑任何任务之前**（否则 CI 已经在跑一批无关任务了）。
     check(!result.stdout.includes('个任务'), `调度表自检(${defect.label}): 表坏了就不该继续跑任务，实际 ${result.stdout.slice(0, 120)}`)
+  }
+
+  // F2 正例（2026-09-23 复审）：归属**同一个包**的细粒度子前缀不是歧义（两条命中结果
+  // 相同）⇒ 必须放行。没有这条，"前缀不得嵌套"会退化成"不许拆细前缀"，把一种合法写法
+  // 一并禁掉（而它当前不存在于表里，只能靠合成正例证明边界没有被写宽）。
+  {
+    const { owners } = readSchedulerTables(readFileSync(subject, 'utf8'))
+    const wide = owners[0]
+    const mutated = replaceOnce(readFileSync(subject, 'utf8'),
+      `  ['${wide.prefix}', '${wide.name}'],\n`,
+      `  ['${wide.prefix}', '${wide.name}'],\n  ['${wide.prefix}src/', '${wide.name}'],\n`)
+    const { tree } = buildTree({ mutate: () => mutated })
+    const result = runSynthetic(tree, ['--list'])
+    const output = `${result.stdout}${result.stderr}`
+    check(result.status === 0,
+      `F2(正例): 同一包的细粒度子前缀必须放行（实际 exit=${result.status}）：${output.slice(0, 300)}`)
   }
 
   // C-1 的**运行时**断言：把静态表自检关掉（模拟"这道网不存在"）后，成环必须由
@@ -586,6 +620,123 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
   const cleanResult = runSynthetic(clean.tree, [])
   check(!`${cleanResult.stdout}${cleanResult.stderr}`.includes('[DEGRADED]'),
     `C-8(负例): 没有任何降级行时不得打印 [DEGRADED] 段，实际 ${JSON.stringify(cleanResult.stdout.slice(-300))}`)
+}
+
+// ---------------------------------------------------------------------------
+// F1（2026-09-23 复审）：`[DEGRADED]` 判据的**精度** —— 成功摘要不得被当成降级行
+//
+// 夹具 = 复审那次全量门禁真实收上来的 **9 行**（逐字取自原始日志
+// `temp/verify-guards-final/logs/C-full-check.log` 的 `[DEGRADED]` 段，也就是复审
+// 报告 §2-F1 数出来的那 9 行）：**5 行是守卫的成功摘要**被关键词误判，**4 行是真降级**
+// （`提示:` / `portable … 不是静默跳过` / `显式 SKIP` / `SKIP 未提供 …`）。
+//
+// 三条口径说明（免得后人把夹具当"写错的行"改掉）：
+//   1. 9 行里 3 行在日志里已被收集器的 200 字符上限截断。夹具**保留日志原样** ——
+//      复审数的就是这 9 行，而 `collectDegraded` 存的也是 `text.slice(0, 200)`，两侧一致；
+//      排除/纳入谓词只看行首与行中的形态，不依赖被截掉的尾部。
+//   2. 这是**分类器的输入快照**，不是守卫文案的对拍：守卫以后改措辞不会让这条用例变红
+//      （要钉的是"成功摘要不进摘要"，不是某一句具体的话）。
+//   3. 判据是"计数 == 4 且 4 条真阳性逐条在、5 条假阳性逐条不在" —— 只断言"不在"会让
+//      "桩没打印任何东西"也算通过（假绿），所以三条一起才有判别力。
+// ---------------------------------------------------------------------------
+{
+  /** `kept` = 必须进 `[DEGRADED]` 段（真降级）；`dropped` = 必须**不**进（成功摘要/规范性表述）。 */
+  const fixture = [
+    {
+      task: 'check:patch-resolutions',
+      verdict: 'kept',
+      line: 'verify-patch-resolutions: 提示: package.json resolutions["app-builder-lib@26.15.3"]: 只有 exact 键(已豁免:electron-builder 用精确范围 26.15.3 依赖它(yarn.lock 无 ^ 描述符));yarn.lock 里没有 "^" 请求者',
+    },
+    {
+      task: 'check:workflows',
+      verdict: 'dropped',
+      line: 'docs-only 不得跳过根守卫 / 分类器规则钉死 / 发布面语义判据 / WASM 门禁接线)',
+    },
+    {
+      task: 'check:check-workspaces',
+      verdict: 'dropped',
+      line: 'verify-check-workspaces: OK — --changed 算不出改动=exit 2、--only 未知/空/被 flag 吃掉=exit 2、有效 --only 真的执行该包、.glitchtip-recon/ 已被忽略、变异体残留守卫的合成正/负例、迁移区间守卫与文档数字守卫的合成正/负例、调度/归属表自检 6 类注入（成环 / needs 打错 / PATH_OWNERS',
+    },
+    {
+      task: 'check:integration-tests',
+      verdict: 'dropped',
+      line: 'check-integration-tests: 聚合层：三项全 SKIP ⇒ exit 77 / RESULT: SKIP ✓',
+    },
+    {
+      task: 'check:integration-tests',
+      verdict: 'dropped',
+      line: 'check-integration-tests: OK — 2 个 Python 用例语法通过、1 个 Node 用例语法通过、2 个契约脚本判据自检通过、7 个假网关场景（正例必须绿 / 变异必须红 / 环境缺失必须 SKIP 且不得报 PASS）、electron-shots 的接线与 SKIP(77) 契约、聚合层 run-all.sh 全 SKIP ⇒ 77 且不报 PASS 全部符合预期',
+    },
+    {
+      task: 'check:wasm-client-only',
+      verdict: 'kept',
+      line: 'portable 模式：只跑与构建产物 / PG / 显示器无关的组。**显式**不在本模式内（不是静默跳过）：',
+    },
+    {
+      task: 'check:wasm-client-only',
+      verdict: 'kept',
+      line: '== 6. 真实渠道仓 dry-run（可选；未给目录时显式 SKIP，不静默通过）',
+    },
+    {
+      task: 'check:wasm-client-only',
+      verdict: 'kept',
+      line: 'SKIP 未提供 --channels-repo / WASM_CHANNELS_REPO：跳过真实渠道仓 dry-run（公开仓不持有渠道仓，也不联网）',
+    },
+    {
+      task: 'check:wasm-client-only',
+      verdict: 'dropped',
+      line: 'PASS 12 ｜ FAIL 0 ｜ SKIP 0 ｜ 绑定文件 temp/wasm-client-only/HEAD-binding.txt',
+    },
+  ]
+  const kept = fixture.filter(entry => entry.verdict === 'kept')
+  const dropped = fixture.filter(entry => entry.verdict === 'dropped')
+  check(fixture.length === 9 && kept.length === 4 && dropped.length === 5,
+    `F1(接线问题): 夹具必须恰好是"9 行 = 4 真阳性 + 5 假阳性"，实际 ${fixture.length}/${kept.length}/${dropped.length}`)
+
+  // 把 9 行按任务塞进 corepack 桩（`$*` = `yarn run <task>`）。单引号包住，避免 shell 展开。
+  // 注意：`case` 只会走**第一个**命中的分支 ⇒ 同一任务的几行必须写在同一个分支里
+  // （分成多个分支时后面那些永远不打印，"假阳性被排除"就变成了没打印造成的假绿）。
+  const shellQuote = value => `'${value.replace(/'/gu, `'\\''`)}'`
+  const byTask = new Map()
+  for (const entry of fixture) {
+    if (!byTask.has(entry.task)) byTask.set(entry.task, [])
+    byTask.get(entry.task).push(entry.line)
+  }
+  const stubExtra = [
+    'case "$*" in',
+    ...[...byTask].map(([task, lines]) =>
+      `  *${task}*) ${lines.map(line => `printf '%s\\n' ${shellQuote(line)}`).join('; ')} ;;`),
+    'esac',
+    '',
+  ].join('\n')
+  const { tree } = buildTree({ stubExtra })
+
+  // 夹具自检：桩必须真的为每个任务打印出对应的行。夹具写错（关键词/任务名敲错）会让
+  // "假阳性已被排除"变成假绿 —— 这一轮把桩单独跑一遍即可证伪。
+  for (const entry of fixture) {
+    const emitted = spawnSync('sh', [join(tree, 'bin', 'corepack'), 'yarn', 'run', entry.task], { encoding: 'utf8' })
+    check((emitted.stdout ?? '').includes(entry.line),
+      `F1(夹具自检): 桩没有为 ${entry.task} 打印夹具行（夹具写错 ⇒ 负例永远通过）：${JSON.stringify(entry.line.slice(0, 60))}…`)
+  }
+
+  const result = runSynthetic(tree, [])
+  const output = `${result.stdout}${result.stderr}`
+  const section = output.split('\n').filter(line => line.startsWith('[DEGRADED] ')).join('\n')
+  check(result.status === 0, `F1: 守卫全部通过时必须 exit 0（实际 ${result.status}）：${output.slice(-200)}`)
+  check(output.includes(`[DEGRADED] ${kept.length} 条`),
+    `F1: 9 行里应恰好有 ${kept.length} 行进摘要（其余 5 行是成功摘要，必须被排除），`
+    + `实际 ${JSON.stringify(output.split('\n').filter(line => line.startsWith('[DEGRADED]')).slice(0, 3))}`)
+  for (const entry of fixture) {
+    // 与 collectDegraded 的存储口径一致（`text.slice(0, 200)`）。
+    const stored = entry.line.slice(0, 200)
+    if (entry.verdict === 'kept') {
+      check(section.includes(`[DEGRADED] ${entry.task}: ${stored}`),
+        `F1(真阳性): ${entry.task} 的降级行必须保留进摘要 —— ${JSON.stringify(stored.slice(0, 80))}…；实际 ${JSON.stringify(section.slice(-400))}`)
+    } else {
+      check(!section.includes(stored),
+        `F1(假阳性): ${entry.task} 的成功摘要行不得进摘要 —— ${JSON.stringify(stored.slice(0, 80))}…`)
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -722,9 +873,12 @@ process.stdout.write(
   'verify-check-workspaces: OK — --changed 算不出改动=exit 2、--only 未知/空/被 flag 吃掉=exit 2、'
   + '有效 --only 真的执行该包、.glitchtip-recon/ 已被忽略、变异体残留守卫的合成正/负例、'
   + '迁移区间守卫与文档数字守卫的合成正/负例、'
-  + '调度/归属表自检 6 类注入（成环 / needs 打错 / PATH_OWNERS 前缀与包名打错 / 少条目 / DEPENDENTS 打错）逐条必红、'
+  + '调度/归属表自检 7 类注入（成环 / needs 打错 / PATH_OWNERS 前缀与包名打错 / 少条目 / '
+  + '嵌套前缀且归属不同包（先声明者胜 ⇒ 死条目或归属按顺序翻转）/ DEPENDENTS 打错）逐条必红、'
+  + '同一包的细粒度子前缀必须放行、'
   + '成环时的运行时 pending 断言（列名 + 计划≠实跑 + exit 1）、'
   + 'C-8 通过的守卫的降级行必须进摘要（含"无降级行则不打 [DEGRADED]"的负例）、'
+  + 'C-8 判据的精度（复审那 9 行里 5 条成功摘要不得进摘要、4 条真降级一条不少）、'
   + '六处形态①④（verify-licenses 空依赖树 / verify-patches 依赖目标缺失）的具名判据、'
   + '本门禁与相关守卫都已接入 package.json 与 GUARDS\n',
 )

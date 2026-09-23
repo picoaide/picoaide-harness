@@ -197,7 +197,24 @@ const PACKAGES = [
   },
 ]
 
-/** 路径前缀 → 包名(用于 --changed 的改动归属判定,最长前缀优先)。 */
+/**
+ * 路径前缀 → 包名(用于 --changed 的改动归属判定)。
+ *
+ * **匹配语义 = 先声明者胜**(不是"最长前缀优先"):`selectByChanges` 用
+ * `PATH_OWNERS.find(([prefix]) => file.startsWith(prefix))` —— `Array.prototype.find`
+ * 返回**数组序第一个**命中的条目,与前缀长度无关。
+ *
+ * 由此推出两条对这张表的要求(2026-09-23 复审 F2,实测过隔离仓库里的顺序翻转):
+ *   - **同一路径写两条前缀、后者永不生效**(重复前缀已由自检单独报);
+ *   - 一条前缀若是另一条的**严格子路径**且归属不同包,归属结果就**取决于声明顺序**:
+ *     窄前缀声明在后 ⇒ 它永远不会命中(名存实亡);声明在前 ⇒ 该子树归窄前缀的包、
+ *     其余仍归宽前缀的包(同一个包按目录被劈成两个归属)。
+ *     这种歧义由 {@link scheduleTableProblems} 直接判红,**不允许靠顺序约定**。
+ *   - 归属相同包的细粒度前缀(如 `packages/host/desktop/` + `packages/host/desktop/src/`)
+ *     没有歧义:两条命中结果相同 ⇒ 允许。
+ *
+ * 改这张表前先看 {@link scheduleTableProblems}:它会把上面两类形态在跑任何任务之前判红。
+ */
 const PATH_OWNERS = [
   ['packages/host/desktop/', 'dsh-plugin-desktop'],
   ['packages/host/enterprise/', '@picoaide/dsh-enterprise'],
@@ -334,12 +351,34 @@ function scheduleTableProblems() {
     if (!byName.has(name)) {
       problems.push(`PATH_OWNERS 的 ${JSON.stringify(prefix)} 指向不存在的包 ${JSON.stringify(name)}`)
     }
-    if (prefixes.has(prefix)) problems.push(`PATH_OWNERS 里有重复前缀:${JSON.stringify(prefix)}（最长前缀优先 ⇒ 后者永不生效）`)
+    if (prefixes.has(prefix)) problems.push(`PATH_OWNERS 里有重复前缀:${JSON.stringify(prefix)}（先声明者胜 ⇒ 后者永不生效）`)
     prefixes.add(prefix)
     // 前缀必须落在某个真实包目录之下：否则它永远匹配不到文件（打错前缀的形态）。
     const inside = PACKAGES.some(pkg => prefix === `${pkg.dir}/` || prefix.startsWith(`${pkg.dir}/`))
     if (!inside) {
       problems.push(`PATH_OWNERS 的前缀 ${JSON.stringify(prefix)} 不在任何 PACKAGES 的 dir 之下（改动会归属不到包）`)
+    }
+  }
+  // 前缀歧义：一条前缀是另一条的**严格子路径**、且两条归属**不同包**（2026-09-23 复审 F2）。
+  //
+  // 为什么判红而不是"按最长的赢"：匹配语义是**先声明者胜**（`find` 取数组序首个，见
+  // PATH_OWNERS 头注释）。隔离仓库实测（复审 §2-F2 证据 B）：把
+  // `['packages/client/branding/src/', '<另一个包>']` 加在表**末尾** ⇒ 该条目永不生效
+  // （`check:fast` 仍判 `@picoaide/dsh-branding`）；加在表**最前** ⇒ 同一批改动判给
+  // 另一个包。也就是说"谁是归属方"取决于书写顺序，且两种写法都静默 —— 正是本仓
+  // 反复踩到的那类失败形态（名字打错/静默不生效）。所以**这类声明不允许存在**。
+  //
+  // 边界：归属**相同包**的细粒度前缀不算歧义（两条命中结果相同），例如
+  // `packages/host/desktop/` + `packages/host/desktop/src/` 是允许的。
+  for (const [narrow, narrowOwner] of PATH_OWNERS) {
+    for (const [wide, wideOwner] of PATH_OWNERS) {
+      if (narrow === wide || narrowOwner === wideOwner) continue
+      if (!narrow.startsWith(wide)) continue // 只查严格子路径
+      problems.push(`PATH_OWNERS 前缀歧义：${JSON.stringify(narrow)}（归属 ${JSON.stringify(narrowOwner)}）`
+        + ` 是 ${JSON.stringify(wide)}（归属 ${JSON.stringify(wideOwner)}）的严格子路径，而两条归属不同包`
+        + ' —— 匹配语义是**先声明者胜**：窄前缀声明在后 ⇒ 它永不生效；声明在前 ⇒ 按声明顺序翻转归属'
+        + '（同一棵树里的文件被劈给两个包）。处置：删掉窄前缀、或让它与宽前缀归属同一个包；'
+        + '确实要拆给不同的包，就把宽前缀也一并拆细（让两条互不包含）')
     }
   }
   for (const pkg of PACKAGES) {
@@ -450,8 +489,57 @@ const MAX_TAIL_LINES = 200
  * 说明行 —— 本仓守卫用这两个前缀承载"本次没证明什么"）。
  * 只回显这些行（**绝不放整份日志**），见 {@link collectDegraded} —— 它的汇总范围是
  * **根守卫**（GUARDS 表），包级 check 的测试运行器噪音不计入。
+ *
+ * 关键词命中之后还要过一道**成功摘要/规范性表述排除**（{@link isSuccessOrNormativeLine}，
+ * 2026-09-23 复审 F1）—— 否则守卫的通过摘要会被误判成降级行（实测 9 条里 5 条）。
  */
 const DEGRADED_LINE = /(?:跳过|未检查|未做|未验证|未覆盖|未证明|退化为|降级|不可达|软跳过|提示[:：]|注意[:：]|advisory|\bSKIP\b|\bskipped\b|not checked)/u
+/**
+ * 「成功摘要」排除谓词（2026-09-23 复审 F1）。
+ *
+ * 为什么需要：{@link DEGRADED_LINE} 是**关键词**判据，而守卫的**通过摘要**里天然会出现
+ * "跳过 / SKIP" 这些词 —— 它们表达的是「这条判据被判过了，且它断言的是'不许静默跳过'」，
+ * 与"本次没判"正好相反。复审实测：一次全量 `yarn check` 的 9 条命中里 **5 条**属于这类
+ * 假阳性（逐条夹具见 `scripts/verify-check-workspaces.mjs` 的 F1 回归块：日志
+ * `temp/verify-guards-final/logs/C-full-check.log` 的 9 行，5 假阳 / 4 真阳）。
+ * 假阳性的代价不是刷屏（有界 9 行）而是**摘要自带的话术变成假的** ——
+ * "这些行说明某条判据本次没有真的判"长期与事实不符，读者会学会忽略整段，正是 C-8 想避免的事。
+ *
+ * 三类形态（每类都只匹配"这句话不是在报告某条判据没真的判"）：
+ *   1. **成功摘要**：`PASS n ｜ FAIL m ｜ SKIP k ｜ …`（`^PASS \d+`）、计数为 0 的穷尽式
+ *      汇总（`SKIP 0` / `skipped 0`）、守卫的收尾行 `OK — …`（`^OK\s*[—–-]`，以及被
+ *      守卫名带着前缀的 `<guard>: OK — …`）。刻意**不**写 `^OK\b` —— `OK，但有 3 个
+ *      文件未覆盖` 这种句子必须继续收进来。
+ *   2. **规范性表述**：`不得跳过` / `必须 SKIP` 这类"规则该怎样"的措辞
+ *      （`docs-only 不得跳过根守卫`、`环境缺失必须 SKIP 且不得报 PASS`）。
+ *      刻意**不**收 `不静默` / `显式 SKIP`：真降级行的措辞正是
+ *      `（可选；未给目录时显式 SKIP，不静默通过）`，收进来会把真信号一起吞掉。
+ *   3. **自检注记**：守卫把"我验证过的契约"写成一行 `<期望行为> ⇒ <期望结果> ✓`
+ *      （`聚合层：三项全 SKIP ⇒ exit 77 / RESULT: SKIP ✓`）。判据 = 含 `⇒` 且以 `✓`
+ *      收尾；真降级行是**陈述事实**（`SKIP 未提供 --channels-repo …`），不写成期望式注记。
+ *
+ * 边界（认账）：这是**形态**判据，不是语义理解。某个守卫若**真的**要在 `OK —` 摘要里报告一条
+ * 降级，那行必须换一种写法（例如 C-8 夹具用的 `· 跳过：…`），否则会被这里排除掉 ——
+ * 边界写在此处，避免下一个人把它当缺陷重报。**不得**为了让某条真降级行进来而删谓词：
+ * 正确处置是改那行的写法。
+ */
+const DEGRADED_SUCCESS_SUMMARY = /(?:^PASS \d+|^OK\s*[—–-]|:\s*OK\s*[—–-]|\bSKIP 0\b|\bskipped 0\b)/u
+/** 「规范性表述」排除谓词 —— 见 {@link DEGRADED_SUCCESS_SUMMARY} 的第 2 类。 */
+const DEGRADED_NORMATIVE = /(?:不得跳过|不得静默跳过|必须\s*SKIP|禁止跳过|不允许跳过)/u
+/** 「自检注记」排除谓词 —— 见 {@link DEGRADED_SUCCESS_SUMMARY} 的第 3 类。 */
+const DEGRADED_SELFCHECK_NOTE = /⇒[^⇒]*✓\s*$/u
+
+/**
+ * 这一行是不是"成功摘要 / 规范性表述 / 自检注记"（⇒ 不是降级报告）。
+ * @param text - 已 trim 的输出行。
+ * @returns 命中任一排除谓词即 true。
+ */
+function isSuccessOrNormativeLine(text) {
+  return DEGRADED_SUCCESS_SUMMARY.test(text)
+    || DEGRADED_NORMATIVE.test(text)
+    || DEGRADED_SELFCHECK_NOTE.test(text)
+}
+
 /** 每个任务最多回显几条降级行（防某个套件刷屏）。 */
 const MAX_DEGRADED_PER_TASK = 8
 /** 全局最多回显几条降级行（CI 摘要必须短 —— 长日志会被 GitHub 截断中段）。 */
@@ -470,6 +558,10 @@ const DEGRADED_NOISE = /^(?:[✓×↓✔✗]|Test Files\b|Tests\b|Duration\b|Sna
 
 /**
  * 把一个**通过**任务（仅根守卫）的输出里的软降级行收进 `state.degraded`（有界）。
+ *
+ * 命中 {@link DEGRADED_LINE} **且**没有命中 {@link isSuccessOrNormativeLine} 才算降级行
+ * —— 后者是 2026-09-23 复审 F1 加的成功摘要/规范性表述排除（实测把 9 条命中里的 5 条
+ * 假阳性去掉，4 条真阳性一条不少）。
  * @param result - 已通过的任务结果。
  * @param state - 汇总状态。
  */
@@ -478,7 +570,7 @@ function collectDegraded(result, state) {
   let taken = 0
   for (const raw of result.output.split('\n')) {
     const text = raw.trim()
-    if (text === '' || DEGRADED_NOISE.test(text) || !DEGRADED_LINE.test(text)) continue
+    if (text === '' || DEGRADED_NOISE.test(text) || isSuccessOrNormativeLine(text) || !DEGRADED_LINE.test(text)) continue
     if (state.degraded.length >= MAX_DEGRADED_TOTAL) return
     state.degraded.push({ task: result.task.name, line: text.slice(0, 200) })
     taken += 1
