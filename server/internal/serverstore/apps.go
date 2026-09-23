@@ -318,6 +318,12 @@ func boolToInt(b bool) int {
 // EnabledAppIDs 返回某 kind 下全部**上架**(enabled=1)的 app_id 集合。
 // 读取侧一次取回后按名过滤,替代逐行查 apps 的 N+1(与 AppOfficialMap 同形):
 // 清单里漏掉一个下架行,与漏掉一个不存在的行同语义。
+//
+// **新代码不要再用它做可见性或写入判定**(第五轮审计 R5-B-1,2026-09-23 收敛):
+// 那类判定必须经 distribution.go 的 Distribution(Delivered / Writable /
+// AuthorVisible)—— 否则又会退化成"每个面各写一遍 enabled 判断",而这正是
+// 「作者面被下架过滤掉」「审批准了却没人看得见」的根因。本函数保留给"只要一个
+// 上架集合"的批量**投影**场景(以及跨泳道尚未迁移的调用点)。
 func EnabledAppIDs(db *sql.DB, kind string) (map[string]bool, error) {
 	rows, err := db.Query(`SELECT app_id FROM apps WHERE kind = ? AND enabled = 1`, kind)
 	if err != nil {

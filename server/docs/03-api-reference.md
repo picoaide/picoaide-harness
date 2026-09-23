@@ -18,6 +18,7 @@
 | `PASSWORD_CHANGE_REQUIRED` | 403 | 密码被管理员重置后强制改密:改密完成前仅放行改密/me/logout(0057) |
 | `BALANCE_EXHAUSTED` | 429 | 员工账户余额已用尽(2026-09-11 起唯一的额度闸门;admin 豁免,未开通余额账户的员工不受约束) |
 | `APPROVED_NOT_REJECTABLE` | 409 | **已通过审核的版本不能被"审核拒绝"**。三个审核面(共享技能 `/api/server/admin/shared-skills/:name/:version/reject`、组织智能体 `/api/server/admin/agent-presets/:name/:version/reject`、WASM 应用 `/api/server/admin/wasm-apps/:app_id/releases/:version/reject`)**共用同一个 code 与同一份语义**:拒绝会在同一条语句里**永久释放**该版本的归档字节(不可恢复),对生效版本等于"当场没有可交付版本",对历史版本等于"不可恢复地丢一个可回滚点"。**版本号永久占位、不能复用**,所以要停服务请用**下架**(可恢复;WASM 面还有冻结),要换内容请让作者**发布新版本**。`error.details` 带 `app_id`/`version`/`status`(WASM 面) |
+| `APP_DELISTED` | 409 | **该能力已下架(apps.enabled=0),内容冻结**。下架期间不接受新版本、也不允许把待审版本置为 approved —— 判据唯一实现在 `serverstore.Distribution.Writable()`(见 `serverstore/distribution.go` 的语义权威),发布内核(`appstore.Publish`,三条上传路径共用)与审批面(`sharedskills.decide`)共用它。放行只会产出「已批准但任何人(含作者)在员工面都看不见」的版本。唯一出口是管理员**显式重新上架**(`PUT …/:name/enabled` 或市场对应端点),该动作本身有审计 |
 | `INTERNAL` | 500 | 内部错误 |
 
 ## 2. 鉴权方式
@@ -91,7 +92,9 @@
 | GET | `/api/server/admin/audit` | 审计日志分页 `?page=&size=&action=&username=`(默认保留 180 天,settings `audit.retention_days` 可配;0048 起哈希链) |
 | GET/PUT | `/api/server/admin/auth`、`POST /auth/test` | 认证配置(脱敏读/写/连接测试;LDAP 测试连接返回目录统计 `{ok, message, users, groups, sample[5]}`;密码传 `***`/空 = 用已保存值测试) |
 
-> **LDAP 目录自动同步(2026-09)**:LDAP 配置保存后立即触发一轮全量同步,此后服务端每 1 小时自动一轮。同步语义:目录存在的用户自动创建/更新(显示名/邮箱/组,组全量替换)/重新启用;目录已消失的外部用户自动停用 + 吊销全部 token;同名本地账号绝不被外部身份接管;空目录(0 用户)拒绝执行(防误停用全部外部用户)。
+> **LDAP 目录自动同步(2026-09;启用方向 2026-09-23 收紧)**:LDAP 配置保存后立即触发一轮全量同步,此后服务端每 1 小时自动一轮。同步语义:目录存在的用户自动创建/更新(显示名/邮箱/组,组全量替换);目录已消失的外部用户自动停用 + 吊销全部 token;同名本地账号绝不被外部身份接管;空目录(0 用户)拒绝执行(防误停用全部外部用户)。
+>
+> **启用方向是单向的(第五轮审计 R5-B-8)**:目录同步只自动**停用**,**永不自动启用** —— 目录里存在但账号已停用的一律跳过(管理员为安全事件按下的「禁用」不再被下一轮同步静默撤销),启用一律由管理员显式执行(webadmin 用户管理里把状态改回启用)。两个方向都写审计:被跳过的账号记 `directory_enable_skipped`(`username=system`,每轮最多一条并点名),因目录消失被停用的记 `directory_user_disabled`(逐人一条)。**代价(认账)**:因目录抖动或离职后重新入职而「消失又出现」的账号不再自动恢复,需要管理员启用一次。
 
 ## 5. AI 网关(客户端用,Bearer;独立命名空间 `/v1/*`,另有无 `/v1` 官方原生变体)
 
@@ -213,9 +216,9 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/client/v2/shared-skills` | 可见清单:approved 且**已授权** 且**已上架**(apps.enabled=1) + 自己上传的全部状态(同样受上下架约束);返回 `{skills:[{name, display_name, version, description, author, status, reason, downloads, calls, created_at}]}` |
-| POST | `/api/client/v2/shared-skills` | 上传:body `{name, display_name?, version, description?, archive(base64 zip)}` → 201 `{skill:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `SKILL.md`、拒绝越界/链接;归档直存 DB(0040);UNIQUE(name, version) 多版本并存;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
-| GET | `/api/client/v2/shared-skills/:name/:version/archive` | 下载归档(三重闸门:approved + 已上架 + 已授权/作者本人,任一不过同 404);附 `X-Skill-Checksum` / `X-Skill-Version` |
+| GET | `/api/client/v2/shared-skills` | 可见清单(**分发面**):approved 且**已授权** 且**已上架**(apps.enabled=1) + **归属人本人**(apps.owner)已上架的行;下架行在此面一律不列(与「不存在」同语义,归属人也不例外 —— 作者的「已下架」态由能力中心「我的」分区表达,见 §8c);返回 `{skills:[{name, display_name, version, description, author, status, reason, downloads, calls, created_at}]}` |
+| POST | `/api/client/v2/shared-skills` | 上传:body `{name, display_name?, version, description?, archive(base64 zip)}` → 201 `{skill:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `SKILL.md`、拒绝越界/链接;归档直存 DB(0040);UNIQUE(name, version) 多版本并存;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429;**该技能已下架时 409 `APP_DELISTED`**(内容冻结,先重新上架) |
+| GET | `/api/client/v2/shared-skills/:name/:version/archive` | 下载归档(三重闸门:approved + 已上架 + 已授权/**归属人本人**,任一不过同 404);豁免判据是 `apps.owner`(不是上传者 `app_releases.publisher`)—— 归属转移后新归属人无需授权即可取到自己的内容;附 `X-Skill-Checksum` / `X-Skill-Version` |
 
 ### 管理端(Admin)
 
@@ -224,7 +227,7 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 | GET | `/api/server/admin/shared-skills?status=` | 全部清单(含版本) |
 | GET | `/api/server/admin/shared-skills/:name/:version/archive` | 管理员下载归档核查 |
 | GET | `/api/server/admin/shared-skills/:name/:version/preview` | 审核预览:`{files:[...], skill_md}`(顶层 SKILL.md 内容 + 全文件清单) |
-| POST | `/api/server/admin/shared-skills/:name/:version/approve` | 通过该版本(全员可见可安装);市场同名将 409(CONFLICT) |
+| POST | `/api/server/admin/shared-skills/:name/:version/approve` | 通过该版本(全员可见可安装);市场同名将 409(CONFLICT);**该技能已下架时 409 `APP_DELISTED`**(下架期间不得让新版本生效;reject 不受限,用于清理队列) |
 | POST | `/api/server/admin/shared-skills/:name/:version/reject` | 拒绝:body `{reason}`(必填);仅上传者可见可重提。**已通过审核的版本不可拒绝** ⇒ `409 APPROVED_NOT_REJECTABLE`(三面同码,语义见 §1) |
 | DELETE | `/api/server/admin/shared-skills/:name/:version` | 删除该版本记录与归档 |
 | PUT | `/api/server/admin/shared-skills/:name/:version/quality` | 质量标记(0037):body `{quality}` ∈ `""`\|`official`\|`featured`;仅 approved 行,互斥,审计 `shared_skill_qualify` |
@@ -232,7 +235,7 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 | GET | `/api/server/admin/shared-skills/:name/grants` | 授权清单(按 name,同名多版本共享) |
 | PUT | `/api/server/admin/shared-skills/:name/grants` | 整组替换部门授权(body `{groups:[...]}`) |
 | PUT/DELETE | `/api/server/admin/shared-skills/:name/grant` | 增/删单条授权(body `{username}` 或 `{group}`) |
-| PUT | `/api/server/admin/shared-skills/:name/enabled` | 组织共享技能上下架(2026-09-15):body `{enabled: true\|false}` → `{ok, enabled}`;语义同市场技能(apps.enabled),但**只作用于 org 渠道行**(市场行由 marketplace 端点管,跨渠道写 404);下架后员工目录不可见、归档下载 404,管理端仍可审核/预览/下载核查;审计 `shared_skill_enable` / `shared_skill_disable` |
+| PUT | `/api/server/admin/shared-skills/:name/enabled` | 组织共享技能上下架(2026-09-15):body `{enabled: true\|false}` → `{ok, enabled}`;语义同市场技能(apps.enabled),但**只作用于 org 渠道行**(市场行由 marketplace 端点管,跨渠道写 404);**下架语义(2026-09-23 收敛,唯一权威 `serverstore/distribution.go`)**:分发面(员工目录 / 归档下载)与「不存在」同语义,但归属人自己的「我的」仍可见并带 `delisted=true`;下架期间内容冻结(新版本上传与 approve 一律 409 `APP_DELISTED`);管理端仍可审核/预览/下载核查;审计 `shared_skill_enable` / `shared_skill_disable` |
 
 ## 8c. 能力中心(统一目录与审批队列)
 
@@ -244,7 +247,9 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 |------|------|------|
 | GET | `/api/client/v2/capabilities?source=&type=&q=` | 统一目录 `{items:[CapabilityItem]}`;`source=market`(默认)返回市场+组织合并(同名 market 优先折叠,org 版本入 versions),`source=org` 仅组织,`source=local` 仅本地(host 代理合并);`type=skill\|agent\|all`;`installed`/`hasUpdate` 由 host 代理按本地磁盘补齐 |
 
-`CapabilityItem`:`{kind: skill\|agent, source: market\|org, name, display_name, version, description, author, status, reason?, quality?, versions[]}`。可见性语义各自保留:market=enabled+授权;org=作者 own(任意状态,仅「我的」展示)OR approved+授权;admin 恒全量。
+`CapabilityItem`:`{kind: skill\|agent, source: market\|org, name, display_name, version, description, author, status, reason?, quality?, official, downloads, calls, score, is_owner, delisted, versions[]}`。可见性语义各自保留:market=enabled+授权;org 分发面=approved+授权+已上架(外加归属人自己已上架的行);「我的」(`source=own`/`local`)=**归属人本人**(`apps.owner == viewer`)的全部状态,下架行照旧返回并带 `delisted=true`(作者必须能看到「已下架」);admin 在分发面恒全量。
+
+> **归属判据同源(第五轮审计 R5-B-2/R5-B-5,2026-09-23)**:「我的」的成员判据与发布权都是 `apps.owner`(`serverstore.AppOwnedByOwner` 是唯一实现)—— 归属转移后旧上传者立刻不再出现在「我的」(他也已经不能续传),新归属人立刻出现。**空 owner**(官方内容 / 2026-09-02 之前的历史行)不属于任何人:与发布内核的既有规则同义(空 owner 一律视同占名,非管理员不得接管发布)。管理员不再是例外:他自传的内容同样出现在自己的「我的」里(此前 201 上传后任何员工面都看不到)。
 
 ### 管理端统一审批队列(Admin)
 

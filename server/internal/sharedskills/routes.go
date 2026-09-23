@@ -149,7 +149,12 @@ func listVisible(db *sql.DB) gin.HandlerFunc {
 		// 响应字段,admin 分支只按审核状态过滤,而客户端下载路由恒以
 		// admin=false 构造(routes.go:76,与调用者是否管理员无关),于是管理员
 		// 在客户端看到的下架行点一次必 404 —— 管理面清单仍全量(见 listAll)。
-		enabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindSkill)
+		//
+		// 判据唯一实现在 serverstore.Distribution(见 serverstore/distribution.go
+		// 的语义权威)。本端点是**分发面**(客户端安装通路的清单):下架行一律
+		// 不列,作者也不例外(作者态由能力中心「我的」分区表达,见
+		// capabilities 的 own 分支)。
+		dists, err := serverstore.DistributionStates(db, serverstore.AppKindSkill)
 		if err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
@@ -164,7 +169,7 @@ func listVisible(db *sql.DB) gin.HandlerFunc {
 				return
 			}
 			for _, s := range all {
-				if s.Status == serverstore.SharedSkillApproved && enabled[s.Name] {
+				if s.Status == serverstore.SharedSkillApproved && dists.Of(s.Name).Delivered() {
 					list = append(list, s)
 				}
 			}
@@ -174,18 +179,25 @@ func listVisible(db *sql.DB) gin.HandlerFunc {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
 			}
-			list, err = serverstore.ListVisibleSharedSkills(db, u.Username, granted)
+			visible, err := serverstore.ListVisibleSharedSkills(db, u.Username, granted)
 			if err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
 			}
+			// DAO 现在同时返回「归属人自己的行(任意状态)」——本面是分发面,
+			// 再按 Delivered() 过滤一次,语义与 2026-09-15 之前完全一致。
+			for _, s := range visible {
+				if dists.Of(s.Name).Delivered() {
+					list = append(list, s)
+				}
+			}
 		}
 		// enabled 字段保留(客户端不消费,审计 2026-09-15 S11-2):列出的行都已按
-		// 上面那份 map 过滤,故此处恒为 true;管理端渲染「已下架」走 listAll。
+		// 上面那份判据过滤,故此处恒为 true;管理端渲染「已下架」走 listAll。
 		out := make([]gin.H, 0, len(list))
 		for _, s := range list {
 			row := rowJSON(s)
-			row["enabled"] = enabled[s.Name]
+			row["enabled"] = dists.Of(s.Name).Enabled
 			out = append(out, row)
 		}
 		c.JSON(http.StatusOK, gin.H{"skills": out})
@@ -292,8 +304,9 @@ func listAll(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 		// 上下架状态（App 级，2026-09-15）：管理端要据此渲染「已下架」与切换按钮，
-		// 一次批量取，不逐行查 apps。
-		enabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindSkill)
+		// 一次批量取，不逐行查 apps。事实源与可见性判据同源（serverstore 的分发
+		// 状态权威，见 distribution.go）—— 管理面只是**投影**这一列，不做判定。
+		dists, err := serverstore.DistributionStates(db, serverstore.AppKindSkill)
 		if err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
@@ -301,7 +314,7 @@ func listAll(db *sql.DB) gin.HandlerFunc {
 		out := make([]gin.H, 0, len(list))
 		for _, s := range list {
 			row := rowJSON(s)
-			row["enabled"] = enabled[s.Name]
+			row["enabled"] = dists.Of(s.Name).Enabled
 			out = append(out, row)
 		}
 		c.JSON(http.StatusOK, gin.H{"skills": out})
@@ -359,6 +372,31 @@ func decide(db *sql.DB, status serverstore.SharedSkillStatus, auditAction string
 		// 拒绝,只是码不同);reject 没有冲突检测,直接由这里 404。
 		if !requireOrgSkill(c, db, name) {
 			return
+		}
+		// 下架冻结(第五轮审计 R5-B-1,2026-09-23):下架(apps.enabled=0)期间
+		// **不得把待审版本置为 approved** —— 否则会产出「已批准但任何人(含
+		// 作者)在员工面都看不见」的版本,管理员在审批队列里点一次「通过」,
+		// 使用侧毫无变化。
+		//
+		// 判据唯一实现在 serverstore.Distribution.Writable()(见
+		// serverstore/distribution.go 的语义权威),与发布内核(appstore.Publish)
+		// 共用:上传与审批在同一时刻对同一状态给出同一答案。**只挡 approve**:
+		// reject 不是分发动作(拒绝一个待审版本不会让任何内容生效),下架期间
+		// 仍应允许管理员清理队列。
+		//
+		// 出口是管理员显式重新上架(PUT …/:name/enabled,带审计),不是审批时
+		// 自动上架 —— 后者会让一位管理员静默撤销另一位管理员的下架动作。
+		if status == serverstore.SharedSkillApproved {
+			dist, derr := serverstore.AppDistribution(db, serverstore.AppKindSkill, name)
+			if derr != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			if !dist.Writable() {
+				serverauth.WriteError(c, http.StatusConflict, appstore.CodeAppDelisted,
+					"该技能已下架，无法通过审核：请先重新上架再审核")
+				return
+			}
 		}
 		// F2-N3 / N-4 / ID-01(2026-09-23):与 agentshare 侧同一条不变量 ——
 		// 审核通过意味着版本对员工可见可安装,必须有归档字节;而**审核拒绝
@@ -602,14 +640,18 @@ func setGrant(db *sql.DB, grant bool) gin.HandlerFunc {
 	}
 }
 
-// setEnabled 组织共享技能上下架（2026-09-15）。语义与市场技能的
-// marketplace /skills/:name 上下架完全一致（apps.enabled），但**只作用于
-// 组织渠道行** —— 市场渠道行由 marketplace 端点管理，那边同样拒绝跨渠道写
-// （marketplace-8），避免两个入口互相把对方的行置成下架。
+// setEnabled 组织共享技能上下架（2026-09-15；语义 2026-09-23 收敛）。
+// 语义与市场技能的 marketplace /skills/:name 上下架完全一致（apps.enabled），
+// 但**只作用于组织渠道行** —— 市场渠道行由 marketplace 端点管理，那边同样拒绝
+// 跨渠道写（marketplace-8），避免两个入口互相把对方的行置成下架。
 //
-// 效果（三处闸门都已就位）：员工目录不可见（ListVisibleSharedSkills 按
-// EnabledAppIDs 过滤）、员工下载 404（download 的第三道闸门）、管理端照旧可
-// 审核与预览。下架不删数据，重新上架即恢复。
+// 下架语义的唯一权威是 serverstore/distribution.go（第五轮审计 R5-B-1 把此前
+// 三处各写一遍的 enabled 判据收敛到那里）：
+//   - 分发面（员工目录 / 归档下载）与「不存在」同语义；
+//   - **归属人自己的「我的」仍可见**并带 delisted=true（员工面必须能表达
+//     「已下架」，否则作者只会反复重传、管理员反复批准）；
+//   - **内容冻结**：下架期间发布新版本与 approve 一律 409 APP_DELISTED；
+//   - 管理端清单照旧全量（可审核/预览/下载核查），重新上架即恢复。
 func setEnabled(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
@@ -679,28 +721,37 @@ func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 		}
 		// P2-1(2026-09-13 智能体面 / 2026-09-15 技能面):apps.enabled=0(下架)
 		// 即不可下载——此前只查审核状态与授权,下架后员工仍能按名字取下归档。
-		// 单个 App 一次查询,不引入逐行 N+1。
+		// 判据唯一实现在 serverstore.Distribution.Delivered()(见
+		// serverstore/distribution.go 的语义权威);单个 App 一次查询,不引入
+		// 逐行 N+1(同一次查询里的 Owner 供下面的归属豁免使用)。
+		dist := serverstore.Distribution{}
 		if !admin {
-			enabled, aerr := serverstore.AppEnabled(db, serverstore.AppKindSkill, name)
-			if aerr != nil {
+			var derr error
+			dist, derr = serverstore.AppDistribution(db, serverstore.AppKindSkill, name)
+			if derr != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
 			}
-			if !enabled {
+			if !dist.Delivered() {
 				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 				return
 			}
 		}
-		// 授权检查:非 admin 下载须已授权(或为作者本人)。
+		// 授权检查:非 admin 下载须已授权(**或为归属人本人**)。
+		//
+		// 豁免判据是 apps.owner,不是 app_releases.publisher(第五轮审计
+		// R5-B-2):归属转移后旧上传者已无任何权利,而新归属人——唯一有权续传
+		// 的人——若还要靠授权才能取到自己的内容,「转移出来的发布权」就是空
+		// 的。两面同源见 serverstore.AppOwnedByOwner。
 		if !admin {
 			u := serverauth.CurrentUser(c)
 			if u == nil {
 				serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 				return
 			}
-			isAuthor := u.Username == s.Author
+			isOwner := dist.OwnedBy(u.Username)
 			granted := false
-			if !isAuthor {
+			if !isOwner {
 				groups, err := serverstore.UserEffectiveGroups(db, u.ID)
 				if err != nil {
 					serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
@@ -719,7 +770,7 @@ func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 					}
 				}
 			}
-			if !isAuthor && !granted {
+			if !isOwner && !granted {
 				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 				return
 			}

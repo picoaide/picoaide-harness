@@ -167,11 +167,17 @@ func TestMergeMarketFirstSortsVersions(t *testing.T) {
 func TestListCapabilitiesVisibility(t *testing.T) {
 	r, db, _, userTokens := setupRouter(t)
 	defer db.Close()
-	// 直接插入共享技能(作者 alice,pending)与一个共享技能(bob,approved 未授权)。
-	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{Name: "tests", Version: "1.0.0", Author: "alice", Status: serverstore.SharedSkillPending, DisplayName: "test"}); err != nil {
+	// 直接插入共享技能(alice,pending)与另一个共享技能(bob,approved 未授权)。
+	//
+	// R5-B-2(2026-09-23)之后两条夹具必须是**不同的名字**:App 归属只在首次写入
+	// 落定(owner = 首个发布者,后续发布不改写),同名两行会让 alice 成为整个
+	// App 的归属人 —— 于是 bob 那一版在 alice 眼里就是「我自己的行」,组织分区
+	// 按新语义确实会返回它(该行为由 TestR5B2* 的用例正向断言)。本用例的意图
+	// 是「他人已 approved 但未授权 ⇒ 不可见」,分名即可保持意图不变。
+	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{Name: "tests-pending", Version: "1.0.0", Author: "alice", Status: serverstore.SharedSkillPending, DisplayName: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{Name: "tests", Version: "2.0.0", Author: "bob", Status: serverstore.SharedSkillApproved}); err != nil {
+	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{Name: "tests-bob", Version: "2.0.0", Author: "bob", Status: serverstore.SharedSkillApproved}); err != nil {
 		t.Fatal(err)
 	}
 	aliceHdr := map[string]string{"Authorization": "Bearer " + userTokens["alice"]}
@@ -600,6 +606,12 @@ func TestOrgSharedSkillProjectsOfficialAndCounters(t *testing.T) {
 	if err := serverstore.SetAppOfficial(db, serverstore.AppKindSkill, "org-official", true, ""); err != nil {
 		t.Fatal(err)
 	}
+	// R5-B-2(2026-09-23):归属官方会把 owner 清空 ⇒ 上传者不再是归属人,而
+	// 「我的」与分发面的可见性都按 owner 判;组织分发面另外要求「已授权」(双门
+	// 制)。本用例的意图只针对投影字段,补一条授权保持该行可见。
+	if err := serverstore.GrantApp(db, serverstore.AppKindSkill, "org-official", "alice", string(serverstore.GranteeUser)); err != nil {
+		t.Fatal(err)
+	}
 	aliceHdr := map[string]string{"Authorization": "Bearer " + userTokens["alice"]}
 	w := doGet(t, r, "/api/client/v2/capabilities?source=org", aliceHdr)
 	if w.Code != http.StatusOK {
@@ -639,12 +651,12 @@ func TestAppendSharedPathsProjectTheSameFields(t *testing.T) {
 		Name: "n", Version: "v", DisplayName: "d", Description: "desc", Author: "a",
 		Status: serverstore.SharedSkillApproved, Reason: "r", Quality: "featured",
 		Downloads: 1, Calls: 2,
-	}, versions, true, true)
+	}, versions, true, true, true)
 	appendSharedAgent(&out, serverstore.AgentPreset{
 		Name: "n", Version: "v", DisplayName: "d", Description: "desc", Author: "a",
 		Status: serverstore.AgentPresetApproved, Reason: "r", Quality: "featured",
 		Downloads: 1,
-	}, versions, true, true)
+	}, versions, true, true, true)
 	if len(out) != 2 {
 		t.Fatalf("out = %d", len(out))
 	}

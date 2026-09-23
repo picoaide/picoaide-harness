@@ -28,6 +28,10 @@ const (
 	CodeOfficialLocked       = "OFFICIAL_LOCKED"
 	CodeNameTaken            = "NAME_TAKEN"
 	CodePendingLimit         = "PENDING_LIMIT"
+	// CodeAppDelisted:该 App 已下架(apps.enabled=0),下架期间内容冻结 ——
+	// 不接收新版本、也不允许把待审版本置为 approved。管理员显式重新上架是
+	// 唯一出口(第五轮审计 R5-B-1)。
+	CodeAppDelisted = "APP_DELISTED"
 	// CodePublishBusy:同名发布排队超时(抢锁预算用尽),请调用方重试。
 	CodePublishBusy = "PUBLISH_BUSY"
 )
@@ -199,6 +203,26 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 		return nil, newErr(http.StatusConflict, CodeNameTaken,
 			"名称已被%s占用,请换个名字或联系管理员", channelLabel(existingApp.Channel))
 	}
+	// 下架冻结(第五轮审计 R5-B-1,2026-09-23):下架(apps.enabled=0)期间的
+	// 内容**冻结** —— 不再接收新版本,直到管理员显式重新上架。
+	//
+	// 判据唯一实现在 serverstore.Distribution.Writable()(见 distribution.go
+	// 的语义权威),本函数不再自己写 enabled 判断。为什么必须在这里拦:
+	// 放行上传会产出「已批准但任何人(含作者)都看不见」的版本 —— 作者反复
+	// 提交、管理员反复批准,而使用者永远看不到;而审批时自动上架又会让一位
+	// 管理员静默撤销另一位管理员的下架动作。管理员重新上架(内部端点
+	// PUT …/:name/enabled)才是唯一出口,且该动作本身有审计。
+	//
+	// 对管理员直发(AdminPublish)同样生效:规则没有角色例外,否则管理端仍能
+	// 造出不可见版本。
+	dist, derr := serverstore.AppDistributionOn(tx, req.Kind, req.AppID)
+	if derr != nil {
+		return nil, newErr(http.StatusInternalServerError, "INTERNAL", "查询失败")
+	}
+	if !dist.Writable() {
+		return nil, newErr(http.StatusConflict, CodeAppDelisted,
+			"该%s已下架，暂不能发布新版本：请先联系管理员重新上架", kindLabelOf(req.Kind))
+	}
 	// 官方内容锁定(0059): 归属官方的内容仅管理员可发布新版。
 	if appErr == nil && existingApp.Official == 1 && !req.AdminPublish {
 		return nil, newErr(http.StatusForbidden, CodeOfficialLocked,
@@ -209,7 +233,12 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 	// 非管理员接管发布。冲突语义 409 NAME_TAKEN + 明确「已被占用」提示
 	// (2026-09-02 用户拍板:明确告知占用关系——注意不泄露「是谁/什么内容」,
 	// 只告知该名称不可用;跨渠道同名互斥与归属保护同码同语义)。
-	if appErr == nil && !req.AdminPublish && existingApp.Owner != req.Publisher {
+	//
+	// 判据同源(第五轮审计 R5-B-2):归属判定的唯一实现在
+	// serverstore.AppOwnedByOwner —— 员工面「我的」分区读的是同一个函数,
+	// 归属转移后两面立即一致(旧作者不再看到、也传不了;新归属人既看得到也
+	// 传得了)。
+	if appErr == nil && !req.AdminPublish && !serverstore.AppOwnedBy(*existingApp, req.Publisher) {
 		return nil, newErr(http.StatusConflict, CodeNameTaken,
 			"名称已被占用，无法上传：请更换名称或联系管理员")
 	}
