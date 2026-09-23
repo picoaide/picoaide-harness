@@ -265,32 +265,50 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
 |---|---|
 | 不存在 | `synced`（首次安装，写 `channel: 'plugin'` 溯源，A9 行为不变） |
 | provenance `channel === 'plugin'` 且 `appId === 目录名` | 按 `x-version` 正常更新（`synced` / `unchanged`），安装器标记由 A9 保留 |
-| provenance 是**其它**商店渠道（market/org/builtin） | **`refused`** + `code: 'SKILL_CHANNEL_CONFLICT'`（渠道互斥：换渠道必须由用户显式处置） |
-| 无 provenance / `appId` 不符 / 未知渠道（含"有目录但没有 SKILL.md"） | **`refused`** + `code: 'SKILL_LOCAL_CONTENT'`（按用户自制内容处理） |
+| provenance 是**其它**商店渠道（market/org/builtin） | **`refused`** + `code: 'SKILL_CHANNEL_CONFLICT'`（渠道互斥：换渠道必须由用户显式处置；**不因内容相同而采纳**） |
+| 没有任何 `release.json`，且内容与随包技能**逐字相同** | **`adopted`**（采纳：补写 `channel: 'plugin'` 溯源，随后走正常更新路径 —— 见下面的"兼容路径"） |
+| 没有任何 `release.json`，内容不同（多/少文件、任何字节差异、符号链接、读失败） | **`refused`** + `code: 'SKILL_LOCAL_CONTENT'`（按用户自制内容处理） |
+| 有 `release.json` 但读不出可用渠道（JSON 坏 / `appId` 不符 / 未知渠道） | **`refused`** + `code: 'SKILL_LOCAL_CONTENT'`，且**不采纳**（不覆盖看不懂的标记） |
+| 内容同一性成立、但补写溯源失败 | **`refused`** + `code: 'SKILL_ADOPT_FAILED'`（fail-loud：绝不"内容已换、溯源没写"） |
 
-两条拒绝都保持既有 fail-loud 的 `action: 'refused'` 语义，并在日志里点名技能、原因与落点
-（`syncBuiltinSkills` 内 `console.warn`，`lib/index.js` 的启动日志另有一行汇总）。
+拒绝都保持既有 fail-loud 的 `action: 'refused'` 语义，并在日志里点名技能、原因与落点
+（`syncBuiltinSkills` 内 `console.warn`/`console.log`，`lib/index.js` 与 `lib/coi/index.js`
+的启动日志另有一行汇总，`adopted` 单独一行）。三种落点可区分：
+`adopted`（内容同一 ⇒ 只补溯源）/ `synced` / `unchanged`（正常更新）/ `refused`（带原因与 `code`）。
 
 **落地文件**：`lib/coi/skills-sync.js`（新增 `STORE_CHANNELS` 常量、`readStoreChannel` /
 `classifySyncTarget` / `isPresent`，闸门接在 `syncBuiltinSkills` 的 `needsCopy` 之前；
-`STORE_CHANNELS` 与 enterprise 的 `STORE_PROVENANCE_CHANNELS` **必须同值**）。
+`STORE_CHANNELS` 与 enterprise 的 `STORE_PROVENANCE_CHANNELS` **必须同值**）；
+兼容路径另加 `isIdenticalTree` / `listEntriesRel` / `readFileOrNull`。
 
-**回归**：`tests/coi-skills-sync-source-gate.test.js`（10 例；变异验证=把 `classifySyncTarget`
-改成恒 `{ok:true}` ⇒ 8/10 必红，已实跑）；既有用例按新事实收口：
-`coi-skills-sync-provenance-and-staging.test.js` 与两个 `child-skills-sync-*` 夹具的"已装副本"
-改成 `channel: 'plugin'`（否则测的就不是换入路径了）、`coi-skill-landing-unasserted-write.test.js`
-的两条落点断言用例先给目标目录补 plugin 溯源（否则会被闸门先拒掉 = 覆盖假丢失）。
+**兼容路径（内容同一性采纳，同轮追加）**：写溯源的 A9 **不在任何已发布 tag 里** ⇒ 现场存在
+"旧版插件同步落下、没有 `.picoaide`"的目录。它们只有在**可验证的内容同一性**成立时才被采纳
+（不是启发式）：①条目集合逐项相同（文件与目录都算，多一个/少一个/改名/文件↔目录都算不同）；
+②每个普通文件**字节逐字相同**（`Buffer.equals`）；③全程无符号链接/FIFO/读取失败。
+成立 ⇒ 补写 `channel: 'plugin'` 溯源（写失败即 `refused`，绝不半写）⇒ 此后按 `x-version` 正常更新。
+**用户手工复制的随包技能副本也会被采纳**（内容逐字相同即无任何用户创作可丢）；改过一个字节或
+加过一个文件就不成立 ⇒ 照旧拒收。**刻意不用 mtime** 做更严的判据：随包文件来自安装包/asar
+解包、旧同步写下的文件 mtime 是同步当时时间，两者不可比，拿它判等只会误拒。
 
-**认账的余波（升级路径，见修复报告 §遗留）**：A9（写溯源）与本修复**不在任何已发布 tag 里**
-⇒ 现场存在"插件旧版本同步落下、但没有 `.picoaide`"的目录，它们此后会被闸门按用户内容拒收
-（磁盘状态与旧行为**完全相同**，只是日志多一行；代价是**将来**插件升 `x-version` 时这些目录
-不会自动更新）。判据见修复报告；这不是可以靠启发式绕过的：没有溯源就无法区分"插件旧副本"
-与"用户手写"。
+**回归**：`tests/coi-skills-sync-source-gate.test.js`（**20 例** = 闸门 10 + 兼容路径 10，含
+`child-skills-sync-adopt-fault.mjs` 夹具驱动的"补写溯源失败"子进程用例）；
+变异验证（均实跑、trap 还原后 sha256 逐字一致）：①`classifySyncTarget` 恒 `{ok:true}` ⇒ 17/20 红；
+②降级掉逐文件字节比较 ⇒ "一个字节不同"红；③放宽"多一个条目也算不同" ⇒ "多一个用户文件（名字
+排在随包条目之后那一例）"红。既有用例按新事实收口：`coi-skills-sync-provenance-and-staging.test.js`
+与两个 `child-skills-sync-*` 夹具的"已装副本"改成 `channel: 'plugin'`（否则测的就不是换入路径）、
+`coi-skill-landing-unasserted-write.test.js` 的两条落点断言用例先给目标目录补 plugin 溯源
+（否则会被闸门先拒掉 = 覆盖假丢失）。
+
+**认账的余波**：采纳只覆盖"**逐字未改动**的历史副本"；用户改过的历史副本仍被拒收（正确：
+无法证明来源，且里面确实有用户字节）。探针 `probe11-legacy-adoption.mjs` 给出修复前后的
+逐字对照（修复前：合法副本 `unchanged`/用户内容 `synced` 且用户文件被删；修复后：合法副本
+`adopted → synced`、用户内容 `refused` 且文件与正文原样）。
 
 ## 验证
 
-- 插件自带测试：**1092 例（1091 pass / 0 fail / 1 skipped）**（2026-09-23 §I 修复批实测，
-  `HOME=<可写目录> corepack yarn test`；§I 之前为 1082 例）。**本套测试自 2026-09-16 起进了根门禁**
+- 插件自带测试：**1102 例（1101 pass / 0 fail / 1 skipped）**（2026-09-23 §I 修复批实测，
+  `HOME=<可写目录> corepack yarn test`；§I 之前为 1082 例、闸门批之后为 1092 例）。
+  **本套测试自 2026-09-16 起进了根门禁**
   （`scripts/check-workspaces.mjs` 的 `dsh-memory-evolve` 任务，`firstWave` 与 desktop
   check 并发）；此前它在 `verify-inventories.mjs` 挂着 `CHECK_CHAIN_EXEMPTIONS` 豁免，
   950 个用例（含全部本地安全加固回归）**不在任何门禁链里**。

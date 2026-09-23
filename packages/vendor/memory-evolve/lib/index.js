@@ -2218,12 +2218,20 @@ export function apply(ctx, rawConfig = {}) {
     try {
       const synced = syncBuiltinSkills(PLUGIN_SKILLS_DIR, config.skillDir)
       const changed = synced.filter((s) => s.action === 'synced')
+      // P1-1 兼容路径（2026-09-23）：`adopted` = 内容与随包技能逐字相同、原本没有
+      // 溯源（A9 之前落下的历史副本），本次只补写了 `channel: 'plugin'`。它既不是
+      // "同步了"也不是"失败"，单独一行日志，否则这类落点会静默消失（既不在 changed
+      // 也不在 failed 里）。
+      const adopted = synced.filter((s) => s.action === 'adopted')
       const failed = synced.filter((s) => s.action === 'missing' || s.action === 'refused')
       if (changed.length > 0) {
         console.log(`[dsh-memory-evolve] 内置技能已同步到 ${config.skillDir}：${changed.map((s) => s.name).join(', ')}`)
       }
+      if (adopted.length > 0) {
+        console.log(`[dsh-memory-evolve] 内置技能已采纳（内容与随包技能逐字一致、原缺溯源，已补写 channel: plugin）：${adopted.map((s) => s.name).join(', ')}`)
+      }
       if (failed.length > 0) {
-        console.warn(`[dsh-memory-evolve] 内置技能未就位（${config.skillDir}）：${failed.map((s) => `${s.name}=${s.action}`).join(', ')}`)
+        console.warn(`[dsh-memory-evolve] 内置技能未就位（${config.skillDir}）：${failed.map((s) => `${s.name}=${s.action}${s.code === undefined ? '' : `(${s.code})`}`).join(', ')}`)
       }
     } catch (error) {
       console.warn(`[dsh-memory-evolve] 内置技能同步失败（忽略）：${error.message}`)

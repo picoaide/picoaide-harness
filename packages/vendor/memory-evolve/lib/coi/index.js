@@ -212,6 +212,13 @@ export function installCoi(ctx, config, deps) {
       if (changed.length > 0) {
         console.log(`[dsh-memory-evolve] COI 内置技能已同步：${changed.map((s) => s.name).join(', ')}`)
       }
+      // P1-1 兼容路径（2026-09-23）：内容与随包技能逐字相同、原本没有溯源的目录
+      // （A9 之前落下的历史副本）本次只补写 `channel: 'plugin'` —— 如实打一行，
+      // 不并进"已同步"（本次没有换入任何内容）。
+      const adopted = synced.filter((s) => s.action === 'adopted')
+      if (adopted.length > 0) {
+        console.log(`[dsh-memory-evolve] COI 内置技能已采纳（内容与随包技能逐字一致、原缺溯源，已补写 channel: plugin）：${adopted.map((s) => s.name).join(', ')}`)
+      }
     } catch (error) {
       console.warn(`[dsh-memory-evolve] COI 内置技能同步失败（忽略）：${error.message}`)
     }

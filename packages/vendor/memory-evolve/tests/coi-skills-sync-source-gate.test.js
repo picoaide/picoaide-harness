@@ -16,16 +16,29 @@
  *   2. 渠道 === `plugin` → 允许（按 `x-version` 正常更新，安装器标记由 A9 保留）；
  *   3. 渠道是**其它**商店渠道 → 拒绝（`SKILL_CHANNEL_CONFLICT`，换渠道 = 两边每次
  *      开机互相覆盖，必须由用户显式处置）；
- *   4. 没有可用的商店溯源 → 拒绝（`SKILL_LOCAL_CONTENT`，按用户自制内容处理）。
- * 两条拒绝都保持既有 fail-loud 的 `action: 'refused'`（另带可区分的 `code`），
+ *   4. 没有任何 `release.json` → 拒绝（`SKILL_LOCAL_CONTENT`），**除非**内容与随包
+ *      技能逐字相同 ⇒ 采纳（补写 `channel: 'plugin'` 后报 `adopted`，见 §兼容路径）；
+ *   5. 有 `release.json` 但读不出可用渠道 → 同样拒绝，且**不采纳**（不覆盖看不懂的标记）。
+ * 拒绝都保持既有 fail-loud 的 `action: 'refused'`（另带可区分的 `code`），
  * 并在日志里点名技能与落点；**绝不静默删用户内容**。
  *
- * 变异性（拆掉闸门必红）：把 `classifySyncTarget` 的调用去掉（或让它恒返回
- * `{ok:true}`）⇒ 前四条用例全红（用户文件消失 / 渠道被改名 / 拒绝码丢失）。
+ * §兼容路径（P1-1 追加，同轮）：写溯源的 A9 不在任何已发布版本里 ⇒ 现场存在"旧版
+ * 插件同步落下、没有 `.picoaide`"的目录。它们只有在**内容同一性**成立时被采纳
+ * （`isIdenticalTree`：条目集合逐项相同 + 每个文件字节相同 + 无符号链接/读取异常）。
+ * 判据是"可验证的同一性"而不是启发式：多一个文件、少一个文件、任何字节差异、
+ * 符号链接、读失败 ⇒ 一律照旧 `refused`。
+ *
+ * 变异性（已实跑，见修复报告 §追加任务的变异验证）：
+ *   - 把 `classifySyncTarget` 调用去掉（或恒 `{ok:true}`）⇒ §P1-1/P1-2 的 8 例红；
+ *   - 把"逐文件字节比较"降级成只看条目集合 ⇒ §兼容路径 的"一个字节不同 / 缺一个
+ *     文件"用例红；
+ *   - 去掉"多一个条目也算不同"（`srcEntries.length !== destEntries.length`）⇒
+ *     §兼容路径 的"多一个用户文件"用例红。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -252,4 +265,239 @@ test('P1-1 首次安装（目录不存在）：照常装上并写 channel: plugi
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+/* ============================================================================
+ * §兼容路径（P1-1 追加，同轮）：内容同一性成立的"无溯源历史副本"被采纳。
+ *
+ * 现场形态：A9（写溯源）不在任何已发布版本里 ⇒ 旧版插件同步落下的目录里没有
+ * `.picoaide`。它们被来源闸门按用户内容拒收（今天磁盘状态与旧行为一致），但
+ * **将来**插件升 x-version 时不会更新。判据＝内容同一性（逐项 + 逐字节），
+ * 成立即补写 `channel: 'plugin'` 溯源（报 `adopted`），此后走正常更新路径。
+ * ========================================================================== */
+
+/** 把插件源技能**逐字复制**到技能库（= 旧版同步落下的形态：内容相同、没有溯源）。 */
+function seedUnownedCopy(pluginSkills, userSkills) {
+  cpSync(join(pluginSkills, NAME), join(userSkills, NAME), { recursive: true, preserveTimestamps: true })
+}
+
+test('兼容路径 完全同一（逐项 + 逐字节）：adopted + 补写 channel: plugin，随后能按 x-version 更新', () => {
+  const dir = tempDir()
+  try {
+    const pluginSkills = join(dir, 'plugin-skills')
+    const userSkills = join(dir, 'skills')
+    seedPluginSkill(pluginSkills)
+    seedUnownedCopy(pluginSkills, userSkills)
+    assert.equal(existsSync(join(userSkills, NAME, '.picoaide')), false, '前置条件：这一份没有溯源')
+
+    const entry = entryFor(syncBuiltinSkills(pluginSkills, userSkills))
+    assert.equal(entry.action, 'adopted', `内容逐字相同的无溯源副本必须被采纳：${JSON.stringify(entry)}`)
+    assert.equal(entry.code, undefined, '采纳不是失败，不带 code')
+    // 采纳只写来源标记：正文一字未动、`.install-version` 按 x-version 补上。
+    assert.match(readFileSync(join(userSkills, NAME, 'SKILL.md'), 'utf8'), /# BUNDLED/u)
+    const info = JSON.parse(readFileSync(join(userSkills, NAME, '.picoaide', 'release.json'), 'utf8'))
+    assert.equal(info.channel, 'plugin')
+    assert.equal(info.appId, NAME)
+    assert.equal(info.version, '2', 'version 取随包 SKILL.md 的 x-version')
+    assert.equal(readFileSync(join(userSkills, NAME, '.install-version'), 'utf8'), '2')
+    // 幂等：第二次同步（内容仍相同、渠道已是 plugin）不再报 adopted。
+    assert.equal(entryFor(syncBuiltinSkills(pluginSkills, userSkills)).action, 'unchanged')
+
+    // 采纳的**目的**：此后插件升 x-version 时这一份能正常更新。
+    writeFileSync(join(pluginSkills, NAME, 'SKILL.md'), `---\nname: ${NAME}\ndescription: bundled\nx-version: 3\n---\n# BUNDLED-V3\n`)
+    writeFileSync(join(pluginSkills, NAME, 'scripts', 'helper.mjs'), '// HELPER-V3\n')
+    const upgraded = entryFor(syncBuiltinSkills(pluginSkills, userSkills))
+    assert.equal(upgraded.action, 'synced', `采纳之后必须能按 x-version 更新：${JSON.stringify(upgraded)}`)
+    assert.match(readFileSync(join(userSkills, NAME, 'SKILL.md'), 'utf8'), /BUNDLED-V3/u)
+    assert.match(readFileSync(join(userSkills, NAME, 'scripts', 'helper.mjs'), 'utf8'), /HELPER-V3/u)
+    assert.equal(
+      JSON.parse(readFileSync(join(userSkills, NAME, '.picoaide', 'release.json'), 'utf8')).channel,
+      'plugin',
+      'A9：采纳写下的溯源在换入后仍在',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('兼容路径 真实随包技能目录（含 scripts/ 子目录）逐字复制 ⇒ adopted', () => {
+  // 用包内真技能（`skills/memory-consolidate`：SKILL.md + scripts/scan_memory.mjs）
+  // 走一遍：既覆盖多文件/子目录的条目比较，也钉住"枚举随包目录"这条路径。
+  const dir = tempDir()
+  try {
+    const userSkills = join(dir, 'skills')
+    cpSync(join(PKG, 'skills', NAME), join(userSkills, NAME), { recursive: true, preserveTimestamps: true })
+
+    const entry = entryFor(syncBuiltinSkills(join(PKG, 'skills'), userSkills))
+    assert.equal(entry.action, 'adopted', `真实随包技能的逐字副本必须被采纳：${JSON.stringify(entry)}`)
+    assert.equal(existsSync(join(userSkills, NAME, 'scripts', 'scan_memory.mjs')), true, '辅助文件保持原样')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+for (const extra of ['MY-NOTES.md', 'zz-user-notes.md']) {
+  test(`兼容路径 多一个用户文件（${extra}）⇒ refused，用户文件一字不动`, () => {
+    const dir = tempDir()
+    try {
+      const pluginSkills = join(dir, 'plugin-skills')
+      const userSkills = join(dir, 'skills')
+      seedPluginSkill(pluginSkills)
+      seedUnownedCopy(pluginSkills, userSkills)
+      writeFileSync(join(userSkills, NAME, extra), '我自己的笔记\n')
+
+      const entry = entryFor(syncBuiltinSkills(pluginSkills, userSkills))
+      assert.equal(entry.action, 'refused', `多一个文件就不算"逐字副本"：${JSON.stringify(entry)}`)
+      assert.equal(entry.code, 'SKILL_LOCAL_CONTENT')
+      assert.equal(readFileSync(join(userSkills, NAME, extra), 'utf8'), '我自己的笔记\n')
+      assert.equal(existsSync(join(userSkills, NAME, '.picoaide')), false, '拒收不得补写溯源')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}
+
+test('兼容路径 一个字节不同 ⇒ refused（正文一字不改）', () => {
+  const dir = tempDir()
+  try {
+    const pluginSkills = join(dir, 'plugin-skills')
+    const userSkills = join(dir, 'skills')
+    seedPluginSkill(pluginSkills)
+    seedUnownedCopy(pluginSkills, userSkills)
+    const original = readFileSync(join(userSkills, NAME, 'SKILL.md'), 'utf8')
+    writeFileSync(join(userSkills, NAME, 'SKILL.md'), `${original}\n我加了一行\n`)
+
+    const entry = entryFor(syncBuiltinSkills(pluginSkills, userSkills))
+    assert.equal(entry.action, 'refused', `任何字节差异都不算同一性：${JSON.stringify(entry)}`)
+    assert.equal(entry.code, 'SKILL_LOCAL_CONTENT')
+    assert.match(readFileSync(join(userSkills, NAME, 'SKILL.md'), 'utf8'), /我加了一行/u, '用户改过的正文不许被换掉')
+    assert.equal(existsSync(join(userSkills, NAME, '.picoaide')), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('兼容路径 缺一个文件 ⇒ refused', () => {
+  const dir = tempDir()
+  try {
+    const pluginSkills = join(dir, 'plugin-skills')
+    const userSkills = join(dir, 'skills')
+    seedPluginSkill(pluginSkills)
+    seedUnownedCopy(pluginSkills, userSkills)
+    rmSync(join(userSkills, NAME, 'scripts', 'helper.mjs'))
+
+    const entry = entryFor(syncBuiltinSkills(pluginSkills, userSkills))
+    assert.equal(entry.action, 'refused', `少一个文件就不算同一性：${JSON.stringify(entry)}`)
+    assert.equal(entry.code, 'SKILL_LOCAL_CONTENT')
+    assert.equal(existsSync(join(userSkills, NAME, '.picoaide')), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('兼容路径 目标内有符号链接条目 ⇒ refused（同一性无法证明）', () => {
+  const dir = tempDir()
+  try {
+    const pluginSkills = join(dir, 'plugin-skills')
+    const userSkills = join(dir, 'skills')
+    const victim = join(dir, 'victim.txt')
+    seedPluginSkill(pluginSkills)
+    seedUnownedCopy(pluginSkills, userSkills)
+    writeFileSync(victim, 'ORIGINAL\n')
+    symlinkSync(victim, join(userSkills, NAME, 'link-to-victim'))
+
+    const entry = entryFor(syncBuiltinSkills(pluginSkills, userSkills))
+    assert.equal(entry.action, 'refused', `符号链接条目必须判"不同"：${JSON.stringify(entry)}`)
+    assert.equal(entry.code, 'SKILL_LOCAL_CONTENT')
+    assert.equal(readFileSync(victim, 'utf8'), 'ORIGINAL\n', '库外 victim 不得被写穿')
+    assert.equal(existsSync(join(userSkills, NAME, '.picoaide')), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('兼容路径 有 release.json 但读不出可用渠道（appId 不符 / 未知渠道 / JSON 坏）⇒ refused 且不采纳', () => {
+  for (const [label, body] of [
+    ['appId-mismatch', JSON.stringify({ appId: 'someone-else', version: '2', channel: 'plugin', installedAt: '' })],
+    ['unknown-channel', JSON.stringify({ appId: NAME, version: '2', channel: 'weird-channel', installedAt: '' })],
+    ['broken-json', '{ not json'],
+  ]) {
+    const dir = tempDir()
+    try {
+      const pluginSkills = join(dir, 'plugin-skills')
+      const userSkills = join(dir, 'skills')
+      seedPluginSkill(pluginSkills)
+      seedUnownedCopy(pluginSkills, userSkills)
+      mkdirSync(join(userSkills, NAME, '.picoaide'), { recursive: true })
+      writeFileSync(join(userSkills, NAME, '.picoaide', 'release.json'), body)
+
+      const entry = entryFor(syncBuiltinSkills(pluginSkills, userSkills))
+      assert.equal(entry.action, 'refused', `${label}：看不懂的标记不得被采纳/覆盖：${JSON.stringify(entry)}`)
+      assert.equal(entry.code, 'SKILL_LOCAL_CONTENT')
+      assert.equal(
+        readFileSync(join(userSkills, NAME, '.picoaide', 'release.json'), 'utf8'),
+        body,
+        `${label}：原有标记必须逐字保留`,
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('兼容路径 已有 plugin 溯源的同内容目录：报 unchanged/synced 而不是 adopted（落点可区分）', () => {
+  const dir = tempDir()
+  try {
+    const pluginSkills = join(dir, 'plugin-skills')
+    const userSkills = join(dir, 'skills')
+    seedPluginSkill(pluginSkills)
+    // 先正常装一次（写 plugin 溯源），再同步：内容相同 ⇒ unchanged（不是 adopted）。
+    assert.equal(entryFor(syncBuiltinSkills(pluginSkills, userSkills)).action, 'synced')
+    const second = entryFor(syncBuiltinSkills(pluginSkills, userSkills))
+    assert.equal(second.action, 'unchanged', `带溯源的那一份走正常路径：${JSON.stringify(second)}`)
+
+    // 升版本后 ⇒ synced（同样不是 adopted）。
+    writeFileSync(join(pluginSkills, NAME, 'SKILL.md'), `---\nname: ${NAME}\ndescription: bundled\nx-version: 3\n---\n# BUNDLED-V3\n`)
+    assert.equal(entryFor(syncBuiltinSkills(pluginSkills, userSkills)).action, 'synced')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('兼容路径 采纳本身 fail-loud：补写溯源失败 ⇒ refused + SKILL_ADOPT_FAILED，内容与标记都不半写', () => {
+  // 故障注入走既有的 fd 写垫片（`writeFileAtomicSafeAt` 的正文写就是 fd 写）：
+  // 对照组无故障 ⇒ adopted；FAULT_ON=1 ⇒ 补写溯源失败 ⇒ 拒绝且不留半个标记。
+  const child = join(HERE, 'fixtures', 'child-skills-sync-adopt-fault.mjs')
+  const register = join(HERE, 'fixtures', 'register-write-fault.mjs')
+  const run = (fault) => {
+    const result = spawnSync(
+      process.execPath,
+      fault ? ['--import', register, child] : [child],
+      {
+        env: {
+          ...process.env,
+          SKILLS_SYNC_MODULE: join(PKG, 'lib', 'coi', 'skills-sync.js'),
+          ...(fault ? { FAULT_ON: '1', FAULT_CODE: 'ENOSPC' } : {}),
+        },
+        encoding: 'utf8',
+      },
+    )
+    assert.equal(result.status, 0, `child failed: ${result.stderr}`)
+    // 采纳成功时被测模块会往 stdout 打一行"已采纳…"日志（落点可区分的要求），
+    // 所以只取最后一行 JSON。
+    const json = result.stdout.trim().split('\n').filter((line) => line.trim().startsWith('{')).pop()
+    return JSON.parse(json ?? '{}')
+  }
+
+  const ok = run(false)
+  assert.equal(ok.entry.action, 'adopted', `对照组（无故障）必须采纳：${JSON.stringify(ok.entry)}`)
+  assert.equal(JSON.parse(String(ok.provenance)).channel, 'plugin')
+
+  const bad = run(true)
+  assert.equal(bad.entry.action, 'refused', `补写溯源失败必须如实拒绝：${JSON.stringify(bad.entry)}`)
+  assert.equal(bad.entry.code, 'SKILL_ADOPT_FAILED', '必须是可区分的"采纳失败"码，而不是笼统 refused')
+  assert.match(String(bad.entry.message), /channel: plugin/u, '文案要说明是"补写溯源失败"')
+  assert.match(String(bad.skill), /# BUNDLED/u, '内容一字未动')
+  assert.equal(bad.provenance, null, '失败时绝不留下半个溯源标记')
+  assert.deepEqual(bad.destEntries, ['SKILL.md', 'scripts'], '失败时目录条目与采纳前一致（没有新增标记）')
 })

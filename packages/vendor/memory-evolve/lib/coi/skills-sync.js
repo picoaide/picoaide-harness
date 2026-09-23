@@ -8,13 +8,16 @@
  *   - 目标存在且**溯源渠道就是 plugin**，x-version 更低 → 整目录覆盖
  *     （源头在插件，升级随插件更新）
  *   - 一致 → 跳过
+ *   - 目标存在、**没有**任何溯源，而内容与随包技能**逐字相同** → **采纳**
+ *     （补写 `channel:'plugin'`，见 {@link isIdenticalTree}）—— 给 A9 之前
+ *     落下的历史副本用的一次性兼容
  *   - 目标存在但是用户自制内容 / 另一条商店渠道的同名技能 → **拒绝**（fail-loud，
  *     `action: 'refused'` + `code`），绝不整树覆盖 —— 见 {@link classifySyncTarget}
  *     与本文档的"来源闸门"段（P1-1/P1-2，2026-09-23 独立审计 W4）
  * 同步以**整目录**为单位（SKILL.md + scripts/ 等辅助文件随技能一起走）；
  * 被禁用的技能文件仍存在，只是不注入模型。
  */
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { writeFileAtomicSafeAt, writeTargetRefusedError } from '../sync/filesets.js'
 
@@ -78,15 +81,20 @@ const STORE_CHANNELS = ['market', 'org', 'builtin', PLUGIN_CHANNEL]
 
 /**
  * 拒绝码（P1-1 修复）：与安装器一样，**如实报 refused 并点名原因**，绝不静默
- * 覆盖。两者都出现在 `syncBuiltinSkills` 结果的 `code` 字段上：
- *   - {@link SKILL_LOCAL_CONTENT}：目标目录没有可用的安装器溯源 ⇒ 按"用户自制"
- *     处理（判据与安装器的 `classifyInstalledSkill === 'local'` 同源）；
+ * 覆盖。三者都出现在 `syncBuiltinSkills` 结果的 `code` 字段上：
+ *   - {@link SKILL_LOCAL_CONTENT}：目标目录没有可用的安装器溯源、且**不能**用内容
+ *     同一性证明它是本插件的副本 ⇒ 按"用户自制"处理（判据与安装器的
+ *     `classifyInstalledSkill === 'local'` 同源）；
  *   - {@link SKILL_CHANNEL_CONFLICT}：目标目录是**另一条商店渠道**（market /
  *     org / builtin）装进来的 ⇒ 整树换入会把渠道从那条改成 plugin，两边会在
- *     每次开机互相覆盖（P1-2 的乒乓球）。
+ *     每次开机互相覆盖（P1-2 的乒乓球）；
+ *   - {@link SKILL_ADOPT_FAILED}：内容同一性成立（= 已证明是本插件的副本），但
+ *     **补写溯源失败** ⇒ 仍然拒绝。这一条必须 fail-loud：否则会出现"内容按 plugin
+ *     更新了、溯源却还不是 plugin"的中间态。
  */
 const SKILL_LOCAL_CONTENT = 'SKILL_LOCAL_CONTENT'
 const SKILL_CHANNEL_CONFLICT = 'SKILL_CHANNEL_CONFLICT'
+const SKILL_ADOPT_FAILED = 'SKILL_ADOPT_FAILED'
 
 /**
  * 暂存/旁置目录的"陈旧"年龄上限：超过它一律按崩溃残留清扫（即便 pid 还在
@@ -206,14 +214,17 @@ function readStoreChannel(destDir, name) {
  *   - 渠道 === `plugin` → 允许（`x-version` 正常更新；安装器标记由 A9 保留）；
  *   - 渠道是**其它**商店渠道（market/org/builtin）→ 拒绝（换渠道 = 两边每次开机
  *     互相覆盖，必须由用户显式处置，见 {@link SKILL_CHANNEL_CONFLICT}）；
- *   - 没有可用的商店溯源 → 拒绝（按用户自制内容处理，见 {@link SKILL_LOCAL_CONTENT}）。
+ *   - 没有任何 `release.json` → 拒绝，但标 `adoptable: true`：调用方再用**内容同一
+ *     性**（{@link isIdenticalTree}）决定能不能"采纳"（成立则补写溯源后报 `adopted`）；
+ *   - 有 `release.json` 但读不出可用渠道（JSON 坏 / `appId` 不符 / 未知渠道）→ 拒绝，
+ *     且 `adoptable: false` —— **不覆盖看不懂的标记**（宁可多拒一次）。
  *
  * 注意"目录存在但没有 SKILL.md"同样按**存在**处理：那可能是用户自己的目录
  * （只有若干笔记文件），整树换入会把它们删掉。首次安装请让落点不存在。
  *
  * @param {string} destDir - 技能库内的目标技能目录。
  * @param {string} name - 技能名（= 目录名）。
- * @returns {{ok:true}|{ok:false, code:string, message:string}} 判定结果。
+ * @returns {{ok:true}|{ok:false, adoptable:boolean, code:string, message:string}} 判定结果。
  */
 function classifySyncTarget(destDir, name) {
   const channel = readStoreChannel(destDir, name)
@@ -221,17 +232,129 @@ function classifySyncTarget(destDir, name) {
   if (channel !== undefined) {
     return {
       ok: false,
+      adoptable: false,
       code: SKILL_CHANNEL_CONFLICT,
       message: `${destDir} 是「${channel}」渠道装进来的同名技能 —— 整树换入会把它的来源改成 plugin`
         + '（内容与溯源归属不一致，且两条渠道会在每次开机互相覆盖）；已拒绝。'
         + '若要使用随包内置技能，请先在能力中心卸载该同名技能或改掉它的目录名。',
     }
   }
+  // 有没有"看不懂的标记"决定能不能走内容同一性采纳：有标记就一律不采纳
+  // （覆盖别人的来源标记比拒绝危险得多）。
+  const hasMarker = existsSync(join(destDir, PROVENANCE_DIR, PROVENANCE_FILE))
   return {
     ok: false,
+    adoptable: !hasMarker,
     code: SKILL_LOCAL_CONTENT,
-    message: `${destDir} 已存在，但没有可用的安装器溯源（按"用户自制"处理）—— 整树换入会连同你自己的文件一起删掉；已拒绝。`
-      + '若要使用随包内置技能，请先卸载/改名这份同名目录。',
+    message: hasMarker
+      ? `${destDir} 有安装器溯源标记但读不出可用来源（JSON 坏 / appId 不符 / 渠道未知）—— 不覆盖看不懂的标记；已拒绝。`
+      : `${destDir} 已存在，但没有安装器溯源（按"用户自制"处理）—— 整树换入会连同你自己的文件一起删掉；已拒绝。`,
+  }
+}
+
+/**
+ * 目标目录是不是随包技能目录的**逐字副本**（P1-1 兼容路径的判据，内容同一性）。
+ *
+ * **背景**：写溯源的 A9 修复不在任何已发布版本里 ⇒ 现场存在"旧版插件同步落下、
+ * 目录里没有 `.picoaide`"的技能目录。来源闸门会把它们按用户自制拒收：今天无碍
+ * （磁盘状态与旧行为相同），但**将来**插件升 `x-version` 时它们不会更新。这个判据
+ * 给它们一次自证机会（见 {@link syncBuiltinSkills} 的采纳分支）。
+ *
+ * 三条同时成立才算（**可验证的同一性，不是启发式**）：
+ *   1. 条目集合逐项相同：文件**与目录**都算，相对路径、排序位置、种类（file/dir）
+ *      全部一致 —— 多一个、少一个、改名、文件↔目录都判不同；
+ *   2. 每个普通文件字节相同（`Buffer.equals`，不做文本解码，避免编码层归一化）；
+ *   3. 全程没有任何**符号链接**、FIFO/设备等异常条目，也没有读不出来的条目
+ *      （任何一项异常都判不同 —— 宁可拒收）。
+ *
+ * **为什么可以采纳"用户手工复制的随包技能副本"**：内容既然与随包技能逐字相同，
+ * 这份目录里就不存在任何用户创作的字节；采纳只写一个来源标记（不动正文），之后
+ * 升级替换掉的也只是随包技能自己的字节。反过来，只要用户改过一个字节、加过一个
+ * 文件，判据就不成立 ⇒ 仍然 `refused`，绝不触碰。
+ *
+ * **为什么不用 mtime/大小做更严的判据**：大小是字节比较的推论，不增加信息；
+ * mtime 在真实链路里不可比（随包技能来自安装包/asar 解包，取值由打包工具决定；
+ * 旧同步写下的文件 mtime 是同步当时的时间），拿它判等只会造成误拒 —— 即"更严的
+ * 判据"实际是"更不可靠的判据"。**字节等同是此处可得的最强证据**。
+ *
+ * 目录项用 `lstat` 逐个判定（不依赖 `readdirSync(..., {withFileTypes:true})` 的
+ * Dirent 合成）：随包技能目录在打包版里位于 asar 内，`lstat` 是 Electron 必然会
+ * 补的那一层；任何一步拿不到真实类型都按"不同"处理（fail-safe，不会误采纳）。
+ *
+ * @param {string} srcDir - 插件包内技能目录。
+ * @param {string} destDir - 目标技能目录。
+ * @returns {boolean} 逐字相同为 true。
+ */
+function isIdenticalTree(srcDir, destDir) {
+  const srcEntries = listEntriesRel(srcDir)
+  const destEntries = listEntriesRel(destDir)
+  if (srcEntries === null || destEntries === null) return false
+  // 条目集合必须逐项相同（多一个 / 少一个 / 改名 / 种类不同都算不同）。
+  if (srcEntries.length !== destEntries.length) return false
+  for (let i = 0; i < srcEntries.length; i += 1) {
+    const src = srcEntries[i]
+    const dest = destEntries[i]
+    if (src.rel !== dest.rel || src.dir !== dest.dir) return false
+    if (src.dir) continue
+    const left = readFileOrNull(join(srcDir, src.rel))
+    const right = readFileOrNull(join(destDir, dest.rel))
+    if (left === null || right === null) return false
+    if (!left.equals(right)) return false
+  }
+  return true
+}
+
+/**
+ * 列出目录下的条目（相对路径 + 是目录否），按相对路径排序。
+ *
+ * 只认普通文件与目录；遇到符号链接、FIFO/设备等异常条目、或任一 `lstat`/`readdir`
+ * 失败，一律返回 `null`（调用方按"无法证明相同"处理）。
+ * @param {string} dir - 目录。
+ * @param {string} [prefix] - 递归用前缀。
+ * @returns {Array<{rel:string, dir:boolean}>|null} 条目列表；异常为 null。
+ */
+function listEntriesRel(dir, prefix = '') {
+  let names
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return null
+  }
+  const out = []
+  for (const name of names) {
+    const rel = prefix === '' ? name : `${prefix}/${name}`
+    const full = join(dir, name)
+    let stat
+    try {
+      stat = lstatSync(full)
+    } catch {
+      return null // 悬空符号链接 / 权限 / 竞态删除 —— 都判"不同"
+    }
+    if (stat.isSymbolicLink()) return null
+    if (stat.isDirectory()) {
+      out.push({ rel, dir: true })
+      const nested = listEntriesRel(full, rel)
+      if (nested === null) return null
+      out.push(...nested)
+    } else if (stat.isFile()) {
+      out.push({ rel, dir: false })
+    } else {
+      return null // FIFO / socket / 设备节点
+    }
+  }
+  return out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
+}
+
+/**
+ * 读文件字节；读不出来返回 null（调用方判"不同"）。
+ * @param {string} file - 绝对路径。
+ * @returns {Buffer|null} 内容。
+ */
+function readFileOrNull(file) {
+  try {
+    return readFileSync(file)
+  } catch {
+    return null
   }
 }
 
@@ -289,7 +412,8 @@ export function normalizeSkillText(raw, skillName, displayName) {
  * 覆盖策略（保护用户内容）：目标缺失 → 复制；目标存在且溯源渠道就是 `plugin`、
  * 且 x-version 更低 → 整目录覆盖（插件升级，SKILL.md 与 scripts/ 等辅助文件一起
  * 更新）；版本一致 → 不动；**目标是用户自制内容或另一条商店渠道的同名技能 →
- * 拒收**（`refused`，见 {@link classifySyncTarget}）。
+ * 拒收**（`refused`，见 {@link classifySyncTarget}）；目标没有任何溯源但内容与
+ * 随包技能**逐字相同** → 采纳（补写溯源后报 `adopted`）。
  *
  * 落点（NF-1，2026-09-13 审计加固；2026-09-16 与上游整目录语义合流）：
  * `<userSkillsDir>/<name>` 是本插件**自有内容**的固定落点，必须先过断言——
@@ -307,12 +431,19 @@ export function normalizeSkillText(raw, skillName, displayName) {
  * `classifyInstalledSkill` / `isStoreProvenance` 是同一份判据（本地副本，见
  * {@link STORE_CHANNELS}），不是第二套口径。
  *
+ * **兼容路径（P1-1 追加，同轮）**：目录**完全没有** `release.json`、但内容与随包技能
+ * **逐字相同**时（{@link isIdenticalTree}）⇒ 内容是随包
+ * 技能的副本这一点已被证明，于是补写 `channel: 'plugin'` 溯源并报 `adopted`，
+ * 此后走正常更新路径。这是给"旧版插件同步落下、还没写溯源"的目录的一次性兼容；
+ * 同一性不成立（多/少文件、任何字节差异、符号链接、读失败）一律照旧 `refused`。
+ *
  * @param {string} pluginSkillsDir - 插件包内 skills/ 目录的绝对路径。
  * @param {string} userSkillsDir - 用户技能库目录（`config.skillDir`，桌面端缺省 `<DSH_HOME>/skills`）。
- * @returns {Array<{name:string, action:'synced'|'unchanged'|'missing'|'refused', message?:string, code?:string}>}
+ * @returns {Array<{name:string, action:'synced'|'unchanged'|'adopted'|'missing'|'refused', message?:string, code?:string}>}
+ *   `adopted` = 内容与随包技能逐字相同、本次只补写了溯源（未换入）。
  *   `code` 只在可区分的失败上出现：换入+回滚双失败的
  *   `SKILL_SWAP_RECOVERY_FAILED`（见 {@link SkillSwapRecoveryError}），以及来源闸门
- *   的 `SKILL_LOCAL_CONTENT` / `SKILL_CHANNEL_CONFLICT`。
+ *   的 `SKILL_LOCAL_CONTENT` / `SKILL_CHANNEL_CONFLICT` / `SKILL_ADOPT_FAILED`。
  */
 export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
   const results = []
@@ -339,6 +470,8 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
     let action = 'unchanged'
     let message
     let code
+    /** 本次是否走了"内容同一性采纳"（决定 unchanged 是否报成 adopted）。 */
+    let adopted = false
     // 来源闸门（P1-1/P1-2）：目标目录存在时，**先**判定它是不是本插件自己的
     // （渠道 = plugin）。用户自制内容与其它商店渠道的同名技能都拒收；这一判定
     // 与 x-version 无关 —— 版本相同也照样如实报 refused，否则"本机是别的东西"
@@ -346,11 +479,43 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
     if (isPresent(destDir)) {
       const verdict = classifySyncTarget(destDir, name)
       if (!verdict.ok) {
-        // fail-loud：点名技能、原因与落点。整树换入会删掉目标目录里的**全部**
-        // 内容（含用户自己的文件），所以这里绝不"尽力而为"。
-        console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（保留本机内容，${verdict.code}）：${verdict.message}`)
-        results.push({ name, action: 'refused', message: verdict.message, code: verdict.code })
-        continue
+        // 兼容路径（P1-1 追加，2026-09-23）：目录**没有任何** `release.json` 时，
+        // 允许用"内容与随包技能逐字相同"来自证它确实是一份未经溯源的本插件副本
+        // （A9 写溯源的修复不在任何已发布版本里 ⇒ 现场存在这类目录）。同一性
+        // 不成立就照旧拒收；证明成立则**先补写溯源**再走正常路径。
+        if (verdict.adoptable) {
+          if (!isIdenticalTree(srcDir, destDir)) {
+            const reason = `${verdict.message} 内容同一性判据不成立：目标目录必须与随包技能逐项相同`
+              + '（多一个/少一个条目、改名、文件↔目录、任何字节差异、符号链接或读取失败都算不同）。'
+            console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（保留本机内容，${SKILL_LOCAL_CONTENT}）：${reason}`)
+            results.push({ name, action: 'refused', message: reason, code: SKILL_LOCAL_CONTENT })
+            continue
+          }
+          // 同一性成立 = 已证明这是随包技能的副本，且目录里没有任何用户字节。
+          // **先写溯源再走后面**：写失败即拒（绝不出现"内容换了、溯源没写"）。
+          try {
+            writePluginProvenance(destDir, name, skillVersion(srcText), userSkillsDir)
+          } catch (error) {
+            // 失败即拒（不换入、不改内容）。顺手把本次可能已建出来的**空**
+            // `.picoaide/` 收掉：同一性检查刚刚证明它原本不存在，所以这里只删空目录
+            // （`rmdirSync` 非空即失败，绝不递归删任何东西）——否则那个空目录会让
+            // 下一次开机的同一性判据恒不成立，把这一份永久挡在门外（无法自愈）。
+            try { rmdirSync(join(destDir, PROVENANCE_DIR)) } catch { /* 非空/不存在/删不掉：留着，下次照旧拒收（fail-safe） */ }
+            const reason = '内容同一性成立（确认是随包技能的逐字副本），但补写溯源（channel: plugin）失败，'
+              + `已拒绝（不换入、不改内容）：${String(error?.message ?? error)}`
+            console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（保留本机内容，${SKILL_ADOPT_FAILED}）：${reason}`)
+            results.push({ name, action: 'refused', message: reason, code: SKILL_ADOPT_FAILED })
+            continue
+          }
+          adopted = true
+          console.log(`[dsh-memory-evolve] 内置技能 ${name} 已采纳（内容与随包技能逐字一致、原缺溯源，已补写 channel: plugin）：${destDir}`)
+        } else {
+          // fail-loud：点名技能、原因与落点。整树换入会删掉目标目录里的**全部**
+          // 内容（含用户自己的文件），所以这里绝不"尽力而为"。
+          console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（保留本机内容，${verdict.code}）：${verdict.message}`)
+          results.push({ name, action: 'refused', message: verdict.message, code: verdict.code })
+          continue
+        }
       }
     }
     const needsCopy = !existsSync(destFile)
@@ -373,6 +538,11 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
           console.warn(`[dsh-memory-evolve] 内置技能 ${name} 落点被拒（跳过）：${message}`)
         }
       }
+    } else if (adopted) {
+      // 内容既然与随包技能逐字相同，`x-version` 必然相同（同一份 SKILL.md）⇒
+      // 不需要换入。本次的唯一动作就是补写溯源，如实报 `adopted`（不是 unchanged：
+      // 调用方/日志要能看出"这份目录是被采纳的，不是本来就带溯源的"）。
+      action = 'adopted'
     }
     results.push({
       name,
