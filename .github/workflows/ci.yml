@@ -263,6 +263,18 @@ jobs:
       - name: Full gate (packages + all root guards)
         if: needs.changes.outputs.code != 'false'
         run: yarn check
+      # W-5(2026-09-23 第三轮审计):WASM 协议的 4 个探针此前**零自动化**(`.github/`
+      # 对它 0 引用;组 6 只在本地手跑)。接在这里的原因:本 job 已装 xvfb(`yarn check`
+      # 里的图形门禁需要它)、也已 `yarn install`(探针用仓内 Electron)⇒ 接线成本 = 一个
+      # step,实测 21s(4/4 PASS)。
+      # 只接 Linux:Windows/macOS 的自定义协议行为尚未实测,探针在非 Linux 上显式
+      # SKIP(77);组内本轮新增的"**全组 SKIP = 失败**"保证 Linux 上哪天全 SKIP 也不会
+      # 装作跑过(不留"跑完给结论"的假象)。
+      - name: WASM protocol probes (group 6; Linux)
+        if: needs.changes.outputs.code != 'false'
+        env:
+          WASM_GATE_REQUIRE_COVERED_PLATFORM: '1'
+        run: bash scripts/verify-wasm-client-only.sh --groups 6
       # 2026-09-06 实测:upload-artifact 对多 glob path 会按各条目的根拍平目录
       # 结构(下载后 lib/ 树丢失),故先 tar 打包为单文件,目录结构自控。
       - name: Package workspace build products
@@ -356,7 +368,45 @@ jobs:
       # 整体取消,产物从 `panic: test timed out after Nm` + goroutine dump +
       # 用例名,退化成"gate 红、查不出原因"(第二轮审计 R2-SK-7,P2)。
       # 15m 对最慢包(299s)有 3× 余量,且保留 dump 机会。
-      - run: go test ./... -count=1 -p 1 -timeout 15m
+      #
+      # W-4(2026-09-23 第三轮审计):只取 `go test` 的退出码会让"PG 不可达 ⇒ 全部
+      # `t.Skip` ⇒ 0 断言通过"变成门禁绿 ⇒ 这里落 `-json` 报告,再交给判定脚本按
+      # 「**用例级 0 skip** + 三条关键用例确实 pass」判。该判据脚本此前只被组 3 调用,
+      # 而组 3 没有任何 job 跑(`.github/` 对它 0 引用)⇒ 判据从不执行。
+      #
+      # **范围**:`--scope internal/wasmapp,internal/router`(**不带尾斜杠** —— 带尾斜杠
+      # 会漏掉 `internal/router` 根包自己的 65 个用例事件,实测)与组 3 同面。全仓报告里
+      # 有若干**环境条件型** skip(如 `internal/serverstore` 的 DST 用例在 UTC runner
+      # 上必然 `t.Skip("本机时区无夏令时")`)—— 把"零用例级 skip"套到全仓等于每次必红的
+      # 假红,而假红的常见下场是整条判据被关掉。范围外事件不参与判定(脚本会打印计数)。
+      - name: Go tests (repo-wide) + WASM case-level report
+        run: |
+          set -euo pipefail
+          # 报告**不进 CI 日志**:上千个用例的 JSON 会把 job log 刷爆,而 GitHub 会截断
+          # 中段(本仓踩过"失败用例名被自己人挤出日志")⇒ 重定向落盘,失败时另存 artifact。
+          GO_TEST_STATUS=0
+          go test ./... -count=1 -p 1 -timeout 15m -json > go-test.json || GO_TEST_STATUS=$?
+          CHECK_STATUS=0
+          node ../scripts/wasm/check-go-test-json.mjs go-test.json \
+            --scope internal/wasmapp,internal/router \
+            --require TestClientRequest_LoginRequiredWithoutIdentityIs401,TestCheckClientOrigin,TestClientFrameUser_ProjectsUserRowAndPublisherFlag \
+            || CHECK_STATUS=$?
+          if [ "${GO_TEST_STATUS}" -ne 0 ]; then
+            echo "::error::go test 退出 ${GO_TEST_STATUS}(报告 go-test.json;上面的判定输出已列出失败/跳过的用例名)"
+          fi
+          # 两个退出码都要显式判定:`go test` 失败而判定脚本恰好判绿(例如报告被截断)
+          # 时也不许放过 —— 反过来判定脚本的 1/2 同样是红。
+          if [ "${GO_TEST_STATUS}" -ne 0 ] || [ "${CHECK_STATUS}" -ne 0 ]; then
+            exit 1
+          fi
+      - name: Upload go test JSON report (on failure)
+        # 失败时把报告带走:判定脚本只打印用例名,排障常要看完整事件流。
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: go-test-json
+          path: server/go-test.json
+          if-no-files-found: ignore
       - run: npm test
         working-directory: server/webadmin
       - run: make build-server

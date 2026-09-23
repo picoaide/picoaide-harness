@@ -11,25 +11,52 @@
  *   3. 关键用例必须**确实 pass**：`Action` 在 `Test` 之前的正则曾在审计里被写反过，
  *      恒不匹配却"看起来在断言"（R2T-1）—— 解析事件流可以直接消除这类风险。
  *
- * 用法：node scripts/wasm/check-go-test-json.mjs <report.json> [--require A,B]
+ * 用法：node scripts/wasm/check-go-test-json.mjs <report.json> [--require A,B] [--scope p1,p2]
  * 退出码（**三段可区分**，2026-09-23 第三轮审计 W-4 补齐）：
  *   0 = 无用例级 skip、无失败、关键用例全 pass；
  *   1 = 报告**存在但不合格**（用例级 skip / 失败事件 / 关键用例缺失或未 pass / 零断言）；
- *   2 = **前置缺失或用法错误**（缺参数、报告文件不存在/不可读）—— 显式打印原因并明确
- *       "这不是通过"。缺报告时绝不静默绿：没有报告就没有判定，只有环境/接线错误。
+ *   2 = **前置缺失或用法错误**（缺参数、报告文件不存在/不可读、`--scope` 没匹配到任何包）
+ *       —— 显式打印原因并明确"这不是通过"。缺报告时绝不静默绿：没有报告就没有判定，
+ *       只有环境/接线错误。
+ *
+ * ## `--scope`（2026-09-23，CI 接线 W-4 的**必要条件**）
+ *
+ * 缺省（不带 `--scope`）= 整份报告都判，组 3 的用法不变。
+ *
+ * 为什么 CI 需要它：server job 跑的是**全仓** `./...`，而"用例级 0 skip"这条判据的
+ * 设计面是 `internal/wasmapp/... internal/router/...`（组 3 的范围）。全仓报告里有若干
+ * **环境条件型** skip —— 例如 `internal/serverstore` 的 DST 用例在 UTC runner 上必然
+ * `t.Skip("本机时区无夏令时")`、`internal/portal`/`serverstore` 的对拍用例在"看不到
+ * 仓库外的客户端源码"时 skip。把零 skip 套到全仓 = 每次必红的假红，而假红的下场
+ * 通常是把整条判据关掉（本仓反复记录过这个退化路径）。所以 CI 按范围判定：
+ * `--scope internal/wasmapp,internal/router`，与组 3 同面。
+ *
+ * **前缀不要带尾斜杠**：`internal/router/` 会漏掉 `internal/router` 根包自己的用例事件
+ * （实测 65 个事件/12 个用例），而它正是路由表对拍所在。前缀按"包导入路径片段"匹配。
+ *
+ * `--scope` 在报告里**一个包都没匹配到**时按 2 退出（接线/报告与判据面不一致），
+ * 不是"范围内没问题"。
  */
 
 import { readFileSync } from 'node:fs'
 
 const [report, ...rest] = process.argv.slice(2)
 if (report === undefined) {
-  console.error('用法: node scripts/wasm/check-go-test-json.mjs <report.json> [--require Test1,Test2]')
+  console.error('用法: node scripts/wasm/check-go-test-json.mjs <report.json> [--require Test1,Test2] [--scope prefix1,prefix2]')
   process.exit(2)
 }
 const requireIndex = rest.indexOf('--require')
 const required = requireIndex >= 0
   ? (rest[requireIndex + 1] ?? '').split(',').map(name => name.trim()).filter(Boolean)
   : []
+const scopeIndex = rest.indexOf('--scope')
+const scope = scopeIndex >= 0
+  ? (rest[scopeIndex + 1] ?? '').split(',').map(prefix => prefix.trim()).filter(Boolean)
+  : []
+if (scopeIndex >= 0 && scope.length === 0) {
+  console.error('用法: --scope 需要一个非空的包导入路径片段列表（逗号分隔，例如 internal/wasmapp/,internal/router/）')
+  process.exit(2)
+}
 
 /**
  * 读报告：**前置缺失必须自己说清楚**（而不是让 ENOENT 以一段 fs 栈收尾）。
@@ -72,6 +99,9 @@ const packageSkips = new Set()
 const testFailures = []
 let events = 0
 let malformed = 0
+/** 被 `--scope` 排除掉的事件数（打印出来，避免"范围外的东西悄悄消失"）。 */
+let outOfScope = 0
+const scopedPackages = new Set()
 
 for (const line of rawReport.split('\n')) {
   if (line.trim() === '') continue
@@ -82,9 +112,15 @@ for (const line of rawReport.split('\n')) {
     malformed += 1
     continue
   }
-  events += 1
   const test = typeof event.Test === 'string' && event.Test !== '' ? event.Test : null
   const pkg = typeof event.Package === 'string' ? event.Package : ''
+  // `--scope`：只判范围内的事件（范围外的不参与计数/判定，见文件头"为什么 CI 需要它"）。
+  if (scope.length > 0 && !scope.some(prefix => pkg.includes(prefix))) {
+    outOfScope += 1
+    continue
+  }
+  if (scope.length > 0 && pkg !== '') scopedPackages.add(pkg)
+  events += 1
   if (test !== null) caseSeen.add(test)
   if (event.Action === 'pass' && test !== null) casePasses.add(test)
   if (event.Action === 'skip') {
@@ -94,6 +130,15 @@ for (const line of rawReport.split('\n')) {
   if (event.Action === 'fail') testFailures.push(`${pkg}${test === null ? '' : `::${test}`}`)
 }
 
+if (scope.length > 0 && scopedPackages.size === 0) {
+  console.error(`  FAIL 前置缺失：--scope（${scope.join(', ')}）在报告里没有匹配到任何包`
+    + `（报告 ${report}，共 ${events + outOfScope} 个事件）`)
+  console.error('  —— 这不是通过：要么前缀写错，要么这份报告根本没覆盖判据面（范围外的东西不会替它变绿）')
+  process.exit(2)
+}
+if (scope.length > 0) {
+  console.log(`  --scope ${scope.join(', ')}：命中 ${scopedPackages.size} 个包，范围外事件 ${outOfScope} 个（不参与判定）`)
+}
 console.log(`  go test -json：${events} 个事件（无法解析 ${malformed} 行）；用例级 pass ${casePasses.size} 个`)
 console.log(`  包级 skip ${packageSkips.size} 个（无测试文件的包，正常）${packageSkips.size === 0 ? '' : `：${[...packageSkips].join(' ')}`}`)
 
